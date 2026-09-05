@@ -920,7 +920,8 @@ def bbl_distributed_drag_face_column(
 # coefficient back to the velocity faces (NEMO's dynzdf 2-point average
 # of ``rCdU_bot``).
 
-BOTTOM_DRAG_SCHEMES = ("legacy", "nemo_quadratic", "nemo_loglayer")
+BOTTOM_DRAG_SCHEMES = (
+    "legacy", "nemo_linear", "nemo_quadratic", "nemo_loglayer")
 
 
 def validate_bottom_drag_scheme(scheme: str) -> str:

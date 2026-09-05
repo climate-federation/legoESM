@@ -2373,6 +2373,12 @@ class LatLonCGridOceanModel:
                 f"{sorted(VALID_VERTICAL_MOMENTUM_SCHEME)}, "
                 f"got {_vert_mom_scheme!r}",
             )
+        if ((config.momentum_advection == "off")
+                != (_vert_mom_scheme == "off")):
+            raise ValueError(
+                "momentum_advection='off' and "
+                "vertical_momentum_scheme='off' are one NEMO "
+                "ln_dynadv_OFF selection and must be selected together")
         if (_vert_mom_scheme == "nemo_up3"
                 and (config.momentum_advection != "flux_form"
                      or config.momentum_flux_scheme != "upwind3")):
@@ -2605,10 +2611,12 @@ class LatLonCGridOceanModel:
                     "matrix; there is no matrix without the implicit solve).")
             _bd_scheme = getattr(config.bottom_drag, "bottom_drag_scheme",
                                   "legacy")
-            if _bd_scheme not in ("nemo_quadratic", "nemo_loglayer"):
+            if _bd_scheme not in (
+                    "nemo_linear", "nemo_quadratic", "nemo_loglayer"):
                 raise ValueError(
                     "zdf_drag_in_matrix=True requires bottom_drag_scheme in "
-                    '{"nemo_quadratic", "nemo_loglayer"} (NEMO\'s zdfdrg '
+                    '{"nemo_linear", "nemo_quadratic", "nemo_loglayer"} '
+                    "(NEMO's zdfdrg "
                     f"rCdU_bot rate); got {_bd_scheme!r}.")
             # zdf_drag_in_matrix skips the explicit _bc_bottom_drag RHS kick
             # (single-owner guard, ocean_pe_latlon_cgrid.py) to avoid double-
@@ -3083,13 +3091,19 @@ class LatLonCGridOceanModel:
                 raise ValueError(
                     "the certified NEMO rk3_ws scheme identity requires "
                     "tracer_advection='fct2'; FCT4/PPM is not certified")
-            if (config.momentum_advection != "flux_form"
-                    or config.momentum_flux_scheme != "upwind3"
-                    or getattr(config, "vertical_momentum_scheme",
-                               "upwind_perturbation") != "nemo_up3"):
+            _rk3_momentum = (
+                config.momentum_advection,
+                config.momentum_flux_scheme,
+                getattr(config, "vertical_momentum_scheme",
+                        "upwind_perturbation"),
+            )
+            if _rk3_momentum not in {
+                    ("flux_form", "upwind3", "nemo_up3"),
+                    ("off", "upwind3", "off")}:
                 raise ValueError(
-                    "NEMO rk3_ws requires the coupled flux_form/upwind3/"
-                    "nemo_up3 momentum program")
+                    "NEMO rk3_ws requires either the coupled "
+                    "flux_form/upwind3/nemo_up3 momentum program or the "
+                    "C1D ln_dynadv_OFF program off/upwind3/off")
             if getattr(config, "outer_integrator", "forward_euler") != "forward_euler":
                 raise ValueError(
                     "NEMO rk3_ws does not compose with a second outer "
@@ -3948,7 +3962,9 @@ class LatLonCGridOceanModel:
                 state.eta.data, state.H_bathy.data, _zc)
             _sfx = (surface_stress_faces(
                         surface_forcing, du_dt.dtype, _zc, _J_fs,
-                        _grid)
+                        _grid, u_mask=state.u_mask.data,
+                        v_mask=state.v_mask.data,
+                        t_mask=state.land_mask.data)
                     if surface_forcing is not None else None)
             if _sfx is not None:
                 _tau_i_u, _tau_j_v, _, _ = _sfx
@@ -4011,6 +4027,23 @@ class LatLonCGridOceanModel:
             F_slow_v = (F_slow_v
                         - _r_v_bt.astype(F_slow_v.dtype) / H_v_pre
                         * (_v_bot - _V_bar_now)) * state.v_mask.data
+            _raw_top = (getattr(surface_forcing, "rCdU_top", None)
+                        if surface_forcing is not None else None)
+            if _raw_top is not None:
+                from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+                    nemo_top_drag_rate_faces,
+                )
+                _r_top_u, _r_top_v = nemo_top_drag_rate_faces(
+                    _raw_top, F_slow_u.dtype)
+                # dynspg_ts.F90:1650-1673 uses the top-level baroclinic
+                # residual in the same positive-rate sign translation as the
+                # bottom block above.  In one wet layer this residual is zero.
+                _u_top = _u_src[..., 0]
+                _v_top = _v_src[..., 0]
+                F_slow_u = (F_slow_u - _r_top_u / H_u_pre
+                            * (_u_top - _U_bar_now)) * state.u_mask.data
+                F_slow_v = (F_slow_v - _r_top_v / H_v_pre
+                            * (_v_top - _V_bar_now)) * state.v_mask.data
 
         # A2 — depth-mean biharmonic hyperviscosity on (U_bar, V_bar).
         # Damps the barotropic standing mode at deep cells next to steep
@@ -4564,6 +4597,8 @@ class LatLonCGridOceanModel:
                 F_slow_v=F_slow_v,
                 add_barotropic_coriolis=_add_bt_cor,
                 t_seconds=t_seconds,  # traced model time for the equilibrium tide
+                rCdU_top=(getattr(surface_forcing, "rCdU_top", None)
+                           if surface_forcing is not None else None),
                 **_baro_seed,
             )
 
@@ -7852,7 +7887,9 @@ class LatLonCGridOceanModel:
             )
             _sfx = surface_stress_faces(
                 surface_forcing, state.u.data.dtype, _zc, J_cell,
-                _grid)
+                _grid, u_mask=state.u_mask.data,
+                v_mask=state.v_mask.data,
+                t_mask=state.land_mask.data)
             if _sfx is not None:
                 _tau_i_u, _tau_j_v, _dz0u, _dz0v = _sfx
                 _r0 = jnp.asarray(_cfg_b.constants.rho_0,
@@ -8015,6 +8052,7 @@ class LatLonCGridOceanModel:
         if do_momentum and getattr(_cfg_b, "zdf_drag_in_matrix", False):
             from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
                 nemo_bottom_drag_rate_faces,
+                nemo_top_drag_rate_faces,
             )
             # TIME LEVEL of rCdU_bot (#1455 sibling).  NEMO computes the
             # coefficient ONCE per step in zdf_phy from uu(:,:,:,Kmm)
@@ -8079,6 +8117,22 @@ class LatLonCGridOceanModel:
             extra_diag_v = (
                 dt_mom * _r_eff_v[..., jnp.newaxis]
                 / jnp.maximum(dz_v_open, 1e-10) * _is_bot_v)
+            _raw_top = (getattr(surface_forcing, "rCdU_top", None)
+                        if surface_forcing is not None else None)
+            if _raw_top is not None:
+                # NEMO dynzdf.F90:303-306,480-483.  The top index is level
+                # zero in legoESM; in a one-wet-layer column the top and
+                # bottom diagonal increments intentionally accumulate.
+                _r_top_u, _r_top_v = nemo_top_drag_rate_faces(
+                    _raw_top, state.u.data.dtype)
+                _is_top_u = jnp.zeros_like(dz_u_open).at[..., 0].set(1.0)
+                _is_top_v = jnp.zeros_like(dz_v_open).at[..., 0].set(1.0)
+                _top_diag_u = (dt_mom * _r_top_u[..., jnp.newaxis]
+                               / jnp.maximum(dz_u_open, 1e-10) * _is_top_u)
+                _top_diag_v = (dt_mom * _r_top_v[..., jnp.newaxis]
+                               / jnp.maximum(dz_v_open, 1e-10) * _is_top_v)
+                extra_diag_u = extra_diag_u + _top_diag_u
+                extra_diag_v = extra_diag_v + _top_diag_v
             if _zdf_baroclinic_only:
                 # NEMO dynzdf.F90:156-159: puu(Krhs) += zDt_2*(rCdU_bot sum)
                 # * uu_b(Kaa)/e3u(iku), with rCdU_bot <= 0 in NEMO's
@@ -8096,6 +8150,9 @@ class LatLonCGridOceanModel:
                 v_solve_in = v_solve_in - (
                     dt_mom * _r_eff_v[..., jnp.newaxis]
                     / jnp.maximum(dz_v_open, 1e-10) * _is_bot_v * _v_bt_mean)
+                if _raw_top is not None:
+                    u_solve_in = u_solve_in - _top_diag_u * _u_bt_mean
+                    v_solve_in = v_solve_in - _top_diag_v * _v_bt_mean
 
         # ---- Solve dispatch: batched (opt-in diag) / T+S pair / singles ---
         # Trace-time env switches (feature-gating exception: static

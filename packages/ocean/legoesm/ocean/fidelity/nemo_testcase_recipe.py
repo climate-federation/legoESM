@@ -13,6 +13,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm.core.precision import PrecisionPolicy
 from legoesm.grids.latlon import create_beta_plane_cgrid_geometry
 from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
 from legoesm.ocean.dynamics.barotropic_common import nemo_auto_substeps
@@ -38,6 +39,21 @@ class NEMOTestcaseCard(NamedTuple):
     bbl_diffusive_option: int
     bbl_aht_m2_s: float
     bbl_gamma_s: float
+
+
+class C1DSlabOceanCard(NamedTuple):
+    """Production card for the one-column ocean half of rung 3.6.
+
+    ``meridionally_periodic`` records the existing halo convention the runner
+    must activate; the card contains no alternate solver.
+    """
+
+    recipe: NEMORecipe
+    dt_s: float
+    n_steps: int
+    ice_cadence: int
+    meridionally_periodic: bool
+    precision_policy: PrecisionPolicy
 
 
 def _model_config(
@@ -67,7 +83,7 @@ def _model_config(
         # 257-274,433-446), so legoESM exposes none either.
         # ln_dynadv_up3 dispatches to dynadv_up3 (dynadv.F90:87-89); its
         # vertical UP3 flux is dynadv_up3.F90:239-365. dynzad is dead here.
-        vertical_momentum_scheme="nemo_up3",
+        vertical_momentum_scheme="off",
         # NEMO 5.0.2 dynhpg.F90:117-123 dispatches ln_hpg_sco (the resolved
         # value on both cards) to hpg_sco, not hpg_djc.  The canonical
         # nemo_sco option transcribes its recurrence at :340-390.
@@ -288,6 +304,85 @@ def build_overflow_zps_card() -> NEMOTestcaseCard:
     return card
 
 
+def build_c1d_omip_l3_slab_ocean_card() -> C1DSlabOceanCard:
+    """Build the reviewed 10 m, one-wet-layer C1D OCE+ICE ocean card.
+
+    This composes the same shared ``key_qco + key_RK3`` dynamics used by the
+    test-case recipes.  C1D resolves ``ln_dynadv_OFF``; horizontal advection is
+    therefore structurally zero on its single doubly-periodic cell, while the
+    shared flux-form update remains the active ``dynspg_ts`` statement.
+    """
+
+    f_84n = (
+        2.0 * float(NEMO_CONSTANTS_CONFIG.Omega)
+        * math.sin(math.radians(84.0))  # const-ok: C1D rn_lat1d case geometry
+    )
+    grid = create_beta_plane_cgrid_geometry(
+        1, 1,
+        dx_m=100.0,  # const-ok: C1D usrdef_hgr.F90:88-91 case metric
+        dy_m=100.0,  # const-ok: C1D usrdef_hgr.F90:88-91 case metric
+        f0=f_84n,
+        beta=0.0,
+        cartesian_pseudo_lat=False,
+        dtype=jnp.float64,
+    )
+    wet = jnp.ones((1, 1), dtype=jnp.float64)
+    # Two allocated levels reproduce jpk=2; bottom index zero leaves exactly
+    # one wet layer.  The second thickness is never executed.
+    z_ref = create_z_star_from_thicknesses(
+        jnp.asarray((10.0, 10.0), dtype=jnp.float64),  # const-ok: Decision 6
+        t_depth_ref_m=np.asarray((5.0, 15.0), dtype=np.float64),
+    )
+    z_coord = create_full_step_coordinate(
+        z_ref, jnp.zeros((1, 1), dtype=np.int32))
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord,
+        T_water_init_C=-1.690032958984375,  # C1D init_oce_T.nc, exact fp64
+        T_deep=-1.690032958984375,
+        S_uniform=34.0,  # const-ok: C1D init_oce_S.nc case value
+        H_max=10.0,  # const-ok: user Decision 6 free construction parameter
+        land_mask_override=wet,
+        H_bathy_override=wet * 10.0,
+    )
+    eta0 = jnp.full(
+        (1, 1), -1.6666666666666667, dtype=jnp.float64)  # ice-load SSH
+    # ``rest_state`` constructs closed-wall v masks before a runner activates
+    # the existing periodic-halo context.  C1D is periodic in both horizontal
+    # directions, so its two representations of the sole meridional face are
+    # wet (NEMO usrdef_dom/cyclone domain masks); bind that case geometry in
+    # the card rather than introducing a one-column operator.
+    state = state._replace(
+        eta=state.eta.replace(data=eta0),
+        v_mask=state.v_mask.replace(data=jnp.ones_like(state.v_mask.data)),
+    )
+    cfg = _model_config(
+        barotropic_time_filter="nemo_boxcar1_ab3",
+        n_barotropic_substeps=631,
+        bbl_adv_option=0,
+        bbl_gamma_s=0.0,
+    )
+    cfg = cfg._replace(
+        momentum_advection="off",
+        bottom_drag=cfg.bottom_drag._replace(
+            bottom_drag_r=5.0e-5,  # namdrg_bot resolved linear coefficient
+            bottom_drag_bbl_thickness=0.0,
+            bottom_drag_scheme="nemo_linear",
+        ),
+        zdf_drag_in_matrix=True,
+        zdf_baroclinic_only=True,
+        barotropic_drag_substep=True,
+    )
+    recipe = NEMORecipe(cfg, cfg.physics, grid, z_coord, wet, state)
+    return C1DSlabOceanCard(
+        recipe=recipe,
+        dt_s=3600.0,  # C1D rn_Dt
+        n_steps=8760,
+        ice_cadence=4,
+        meridionally_periodic=True,
+        precision_policy=PrecisionPolicy.fp64(transcendentals="libm"),
+    )
+
+
 def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
     """Reject any card composition not exercised by its named oracle run."""
     expected = {
@@ -361,7 +456,9 @@ def build_nemo_testcase_card(case: str) -> NEMOTestcaseCard:
 
 
 __all__ = (
+    "C1DSlabOceanCard",
     "NEMOTestcaseCard",
+    "build_c1d_omip_l3_slab_ocean_card",
     "build_lock_exchange_zco_card",
     "build_overflow_zps_card",
     "build_nemo_testcase_card",

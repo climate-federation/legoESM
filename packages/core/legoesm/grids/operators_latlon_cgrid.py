@@ -383,6 +383,13 @@ def interp_cell_to_vface(f: jnp.ndarray, grid=None) -> jnp.ndarray:
     -------
     f_v : (n_lat+1, n_lon, ...) at v-faces.
     """
+    if f.shape[0] == 1 and grid is not None:
+        from legoesm.grids.halo_latlon import get_meridionally_periodic
+        if get_meridionally_periodic():
+            # One-cell periodic-y topology: both geometric faces couple the
+            # sole T row to its periodic image.  Forming an empty interior and
+            # asking jnp.pad(mode="wrap") to recover those faces is undefined.
+            return jnp.concatenate([f, f], axis=0)
     f_v_interior = 0.5 * (f[:-1] + f[1:])  # (n_lat-1, ...)
     if grid is not None:
         return pad_ns_scalar(f_v_interior, grid)
@@ -1218,7 +1225,15 @@ def curl_vertex_cgrid(
         # Meridional edge length at vertex rows: variable-dy safe.
         dy_h = grid.dy * 0.5                              # (n_lat,) cell heights
         dy_edge_interior = 0.5 * (dy_h[1:] + dy_h[:-1])    # (n_lat-1,)
-        dy_edge = jnp.pad(dy_edge_interior, (1, 1), mode='edge')  # (n_lat+1,)
+        if dy_h.shape[0] == 1:
+            # A periodic one-row column has the same sole-cell metric on its
+            # south and north vertex rows.  ``pad(..., mode='edge')`` cannot
+            # pad an empty interior array, but this is its exact geometric
+            # limiting value (and keeps the shared curl owner executable).
+            dy_edge = jnp.concatenate([dy_h, dy_h])
+        else:
+            dy_edge = jnp.pad(
+                dy_edge_interior, (1, 1), mode='edge')  # (n_lat+1,)
         bcast_lat = (slice(None),) + (jnp.newaxis,) * (v.ndim - 1)
         # Pad-then-diff: a lon halo (local wrap / 2-D ring exchange) then the
         # compact vertex difference (v[j]-v[j-1]) over padded v => n_lon+1

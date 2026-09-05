@@ -40,6 +40,7 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.core.field import Field
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.latlon import LatLonGrid
 # Donor-cell upwind face reconstructions: PROMOTED to the core substrate so
 # the sea-ice C-grid transport can share them without an ice->ocean layering
@@ -142,7 +143,7 @@ from legoesm.ocean.vertical import (
 # dispatch literals (dispatch discipline: validated at config construction;
 # unknown -> ValueError, never a silent fallthrough to vector-invariant).
 VALID_MOMENTUM_ADVECTION = frozenset(
-    {"vector_invariant", "weno5", "weno7", "weno9", "flux_form"}
+    {"off", "vector_invariant", "weno5", "weno7", "weno9", "flux_form"}
 )
 # Tracer-advection literals (config.tracer_advection).  Single source for the
 # fail-fast membership check in LatLonCGridOceanModel._validate_config; mirrors
@@ -185,7 +186,7 @@ VALID_MOMENTUM_FLUX_SCHEME = frozenset({"upwind", "centered", "upwind3"})
 # The WENO momentum paths (momentum_advection in {weno5,weno7}) own their own
 # vertical reconstruction and ignore this field.
 VALID_VERTICAL_MOMENTUM_SCHEME = frozenset(
-    {"upwind_perturbation", "centered_full", "nemo_advective", "nemo_up3"}
+    {"off", "upwind_perturbation", "centered_full", "nemo_advective", "nemo_up3"}
 )
 # Lateral (harmonic) momentum-viscosity operator form (config.lateral_viscosity_operator):
 # the default VECTOR Laplacian grad(div)−k×grad(curl), or Veros's component-wise
@@ -2776,7 +2777,13 @@ def _bc_vertical_momentum_advection(
             # the feature-gating exception, not ``jnp.where``.
             _vert_mom_scheme = getattr(
                 config, "vertical_momentum_scheme", "upwind_perturbation")
-            if _vert_mom_scheme == "centered_full":
+            if _vert_mom_scheme == "off":
+                # NEMO namdyn_adv ln_dynadv_OFF: no vertical momentum-
+                # advection routine is selected, so this stage contributes
+                # exact zeros.  This is a selector on the existing stage,
+                # not a second vertical-advection implementation.
+                pass
+            elif _vert_mom_scheme == "centered_full":
                 # Veros-faithful: 2nd-order centered, energy-conserving
                 # flux of the FULL velocity (barotropic + baroclinic).
                 # Restores the -d/dz(w*U_bar) redistribution and removes the
@@ -3542,11 +3549,9 @@ def nemo_bottom_drag_rate_faces(u, v, h_k, z_coord, config, grid):
 
     Transcribes zdfdrg.F90 zdf_drg_nonlin (rCdU_bot at t-points) + dynzdf.F90
     "zCdu = 0.5*(rCdU_bot(ji+1,jj)+rCdU_bot(ji,jj))" (t-point -> u/v face
-    2-point average).  Requires ``z_coord`` to be an
-    :class:`OceanPartialCellCoordinate` (DINO's ``masked_zco`` always is) —
-    the non-partial flat-bottom case is not needed by any drag-in-matrix
-    caller today and is intentionally NOT covered here (``_bc_bottom_drag``
-    keeps its own flat-bottom ``[..., -1]`` branch for that case).
+    2-point average).  ``nemo_linear`` transcribes the fixed ``np_lin`` rate
+    and therefore supports full-step coordinates; the speed-dependent arms
+    retain their partial-cell requirement.
 
     Returns
     -------
@@ -3556,47 +3561,58 @@ def nemo_bottom_drag_rate_faces(u, v, h_k, z_coord, config, grid):
     is_bot_u_3d, is_bot_v_3d : jax.Array, shape (..., nlev)
         1.0 at each face-column's partial-cell bottom level, 0 elsewhere.
     """
-    if not isinstance(z_coord, OceanPartialCellCoordinate):
-        raise ValueError(
-            "nemo_bottom_drag_rate_faces requires an OceanPartialCellCoordinate "
-            "(the flat-bottom case is not covered by this helper)."
-        )
     _scheme = validate_bottom_drag_scheme(
         str(getattr(config.bottom_drag, "bottom_drag_scheme", "legacy")))
     if _scheme == "legacy":
         raise ValueError(
             "nemo_bottom_drag_rate_faces requires a NEMO bottom_drag_scheme "
-            "('nemo_quadratic' or 'nemo_loglayer'), got 'legacy'."
+            "('nemo_linear', 'nemo_quadratic' or 'nemo_loglayer'), got 'legacy'."
         )
     if h_k is None:
         raise ValueError(
             "nemo_bottom_drag_rate_faces requires the cell-centre layer "
             "thickness h_k (NEMO e3t).")
-    u_c = 0.5 * (u[:, :-1, :] + u[:, 1:, :])   # (n_lat, n_lon, nlev)
-    v_c = 0.5 * (v[:-1, :, :] + v[1:, :, :])
-    _bl = jnp.maximum(z_coord.bottom_level, 0)   # -1 (land) -> 0
-    _bl_idx = _bl[..., jnp.newaxis]
-    u_bot = jnp.take_along_axis(u_c, _bl_idx, axis=-1)[..., 0]
-    v_bot = jnp.take_along_axis(v_c, _bl_idx, axis=-1)[..., 0]
-    h_bot = jnp.take_along_axis(h_k, _bl_idx, axis=-1)[..., 0]
-    r_t = nemo_effective_bottom_drag_r(
-        u_bot, v_bot, h_bot,
-        scheme=_scheme,
-        cd0=float(config.bottom_drag.bottom_drag_cd0),
-        cd_max=float(config.bottom_drag.bottom_drag_cdmax),
-        z0=float(config.bottom_drag.bottom_drag_z0),
-        ke0=float(config.bottom_drag.bottom_drag_ke0),
-        von_karman=constants.kappa_von_karman,
-    )
+    if _scheme == "nemo_linear":
+        # zdfdrg.F90 np_lin: rCdU_bot=-rn_bfri2, independent of velocity.
+        r_t = (jnp.ones_like(z_coord.bottom_level, dtype=u.dtype)
+               * jnp.asarray(config.bottom_drag.bottom_drag_r, dtype=u.dtype))
+    else:
+        if not isinstance(z_coord, OceanPartialCellCoordinate):
+            raise ValueError(
+                "speed-dependent NEMO bottom drag requires an "
+                "OceanPartialCellCoordinate")
+        u_c = 0.5 * (u[:, :-1, :] + u[:, 1:, :])
+        v_c = 0.5 * (v[:-1, :, :] + v[1:, :, :])
+        _bl = jnp.maximum(z_coord.bottom_level, 0)
+        _bl_idx = _bl[..., jnp.newaxis]
+        u_bot = jnp.take_along_axis(u_c, _bl_idx, axis=-1)[..., 0]
+        v_bot = jnp.take_along_axis(v_c, _bl_idx, axis=-1)[..., 0]
+        h_bot = jnp.take_along_axis(h_k, _bl_idx, axis=-1)[..., 0]
+        r_t = nemo_effective_bottom_drag_r(
+            u_bot, v_bot, h_bot,
+            scheme=_scheme,
+            cd0=float(config.bottom_drag.bottom_drag_cd0),
+            cd_max=float(config.bottom_drag.bottom_drag_cdmax),
+            z0=float(config.bottom_drag.bottom_drag_z0),
+            ke0=float(config.bottom_drag.bottom_drag_ke0),
+            von_karman=constants.kappa_von_karman,
+        )
     # t-point -> face 2-point averages (NEMO dynzdf:
     # zCdu = 0.5*(rCdU(ji+1,jj)+rCdU(ji,jj))).  u-faces are lon-periodic
     # (face l couples cells l-1, l; face n_lon repeats face 0, mirroring
     # the bot_lev_u construction below); v walls take the adjacent
     # interior value (v=0 there, so the coefficient is inert).
-    r_u_inner = 0.5 * (jnp.roll(r_t, 1, axis=1) + r_t)
+    r_u_inner = nemo_source_round(
+        jnp.asarray(0.5, dtype=r_t.dtype)
+        * nemo_source_round(jnp.roll(r_t, 1, axis=1) + r_t))
     r_eff_u = jnp.concatenate([r_u_inner, r_u_inner[:, 0:1]], axis=1)
-    r_v_int = 0.5 * (r_t[:-1, :] + r_t[1:, :])
-    r_eff_v = jnp.pad(r_v_int, ((1, 1), (0, 0)), mode="edge")
+    if r_t.shape[0] == 1:
+        r_eff_v = jnp.concatenate([r_t, r_t], axis=0)
+    else:
+        r_v_int = nemo_source_round(
+            jnp.asarray(0.5, dtype=r_t.dtype)
+            * nemo_source_round(r_t[:-1, :] + r_t[1:, :]))
+        r_eff_v = jnp.pad(r_v_int, ((1, 1), (0, 0)), mode="edge")
 
     # Partial-cell bottom-level indicator at u/v faces (face's bottom level
     # is the SHALLOWER of the two adjacent columns — see _bc_bottom_drag).
@@ -3606,13 +3622,44 @@ def nemo_bottom_drag_rate_faces(u, v, h_k, z_coord, config, grid):
     bot_lev_u_inner = jnp.minimum(jnp.roll(bot_lev_cell, 1, axis=1), bot_lev_cell)
     bot_lev_u = jnp.concatenate(
         [bot_lev_u_inner, bot_lev_u_inner[:, 0:1]], axis=1)
-    bot_lev_v_int = jnp.minimum(bot_lev_cell[:-1], bot_lev_cell[1:])
-    bot_lev_v = jnp.pad(bot_lev_v_int, ((1, 1), (0, 0)), constant_values=0)
+    if bot_lev_cell.shape[0] == 1:
+        bot_lev_v = jnp.concatenate([bot_lev_cell, bot_lev_cell], axis=0)
+    else:
+        bot_lev_v_int = jnp.minimum(bot_lev_cell[:-1], bot_lev_cell[1:])
+        bot_lev_v = jnp.pad(
+            bot_lev_v_int, ((1, 1), (0, 0)), constant_values=0)
     is_bot_u_3d = (level_idx[jnp.newaxis, jnp.newaxis, :]
                     == bot_lev_u[..., jnp.newaxis]).astype(u.dtype)
     is_bot_v_3d = (level_idx[jnp.newaxis, jnp.newaxis, :]
                     == bot_lev_v[..., jnp.newaxis]).astype(v.dtype)
     return r_eff_u, r_eff_v, is_bot_u_3d, is_bot_v_3d
+
+
+def nemo_top_drag_rate_faces(rCdU_top, dtype):
+    """NEMO signed T-point top drag converted once to positive face rates.
+
+    ``zdfdrg.F90:116-129`` stores ``rCdU_top <= 0`` at T points.  Its two
+    executing consumers form ``0.5 * (right + centre)`` / ``0.5 * (north +
+    centre)`` in ``dynspg_ts.F90:1607-1610`` and ``dynzdf.F90:303-306,
+    480-483``.  The source-statement guard keeps that sum-and-half association;
+    the leading minus is the single conversion to legoESM's positive damping
+    convention.  Longitude is cyclic.  Latitude boundary faces repeat their
+    adjacent T-point coefficient, where the velocity mask makes the rate
+    inert.
+    """
+    raw = jnp.asarray(rCdU_top, dtype=dtype)
+    raw_u_inner = nemo_source_round(
+        jnp.asarray(0.5, dtype=dtype)
+        * nemo_source_round(jnp.roll(raw, 1, axis=1) + raw))
+    raw_u = jnp.concatenate([raw_u_inner, raw_u_inner[:, 0:1]], axis=1)
+    if raw.shape[0] == 1:
+        raw_v = jnp.concatenate([raw, raw], axis=0)
+    else:
+        raw_v_inner = nemo_source_round(
+            jnp.asarray(0.5, dtype=dtype)
+            * nemo_source_round(raw[:-1, :] + raw[1:, :]))
+        raw_v = jnp.pad(raw_v_inner, ((1, 1), (0, 0)), mode="edge")
+    return nemo_source_round(-raw_u), nemo_source_round(-raw_v)
 
 
 def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid,
@@ -3853,7 +3900,47 @@ def _bc_physics_tendencies(du_dt, dv_dt, dT_dt, dS_dt, physics_fn, state, grid, 
     return du_dt, dv_dt, dT_dt, dS_dt, phys_K_v, phys_A_v, diag_phys_u, diag_phys_v
 
 
-def surface_stress_faces(surface_forcing, u_dtype, z_coord, J, grid):
+def nemo_stagger_surface_stress(utau, vtau, u_mask, v_mask, t_mask, dtype):
+    """Literal ``sbcmod.F90:545-548`` T-to-face stress statements."""
+    ut = jnp.asarray(utau, dtype=dtype)
+    vt = jnp.asarray(vtau, dtype=dtype)
+    um = jnp.asarray(u_mask, dtype=dtype)
+    vm = jnp.asarray(v_mask, dtype=dtype)
+    tm = jnp.asarray(t_mask, dtype=dtype)
+    ut_right = jnp.roll(ut, -1, axis=1)
+    tm_right = jnp.roll(tm, -1, axis=1)
+    u_inner = nemo_source_round(
+        nemo_source_round(
+            nemo_source_round(jnp.asarray(0.5, dtype=dtype)
+                              * nemo_source_round(ut + ut_right))
+            * nemo_source_round(jnp.asarray(2.0, dtype=dtype) - um[:, :-1]))
+        * jnp.maximum(tm, tm_right))
+    u_face = jnp.concatenate([u_inner, u_inner[:, 0:1]], axis=1)
+    if tm.shape[0] == 1:
+        vt_north = vt
+        tm_north = tm
+        v_inner = nemo_source_round(
+            nemo_source_round(
+                nemo_source_round(jnp.asarray(0.5, dtype=dtype)
+                                  * nemo_source_round(vt + vt_north))
+                * nemo_source_round(
+                    jnp.asarray(2.0, dtype=dtype) - vm[0:1, :]))
+            * jnp.maximum(tm, tm_north))
+        v_face = jnp.concatenate([v_inner, v_inner], axis=0)
+    else:
+        v_inner = nemo_source_round(
+            nemo_source_round(
+                nemo_source_round(jnp.asarray(0.5, dtype=dtype)
+                                  * nemo_source_round(vt[:-1] + vt[1:]))
+                * nemo_source_round(
+                    jnp.asarray(2.0, dtype=dtype) - vm[1:-1, :]))
+            * jnp.maximum(tm[:-1], tm[1:]))
+        v_face = jnp.pad(v_inner, ((1, 1), (0, 0)), mode="edge")
+    return u_face, v_face
+
+
+def surface_stress_faces(surface_forcing, u_dtype, z_coord, J, grid, *,
+                         u_mask=None, v_mask=None, t_mask=None):
     """Wind stress at u/v faces + the top-cell thicknesses (single owner of
     the tau sign/interp/rotation chain — used by the explicit stage-10b'
     deposition, the implicit surface-stress BC, and the F_slow barotropic
@@ -3879,15 +3966,29 @@ def surface_stress_faces(surface_forcing, u_dtype, z_coord, J, grid):
     if cos_a_u is not None and sin_a_u is not None:
         ca_u = jnp.asarray(cos_a_u, dtype=u_dtype)
         sa_u = jnp.asarray(sin_a_u, dtype=u_dtype)
-        tau_i_u = tau_e_u_face * ca_u + tau_n_u_face * sa_u
+        tau_i_u = nemo_source_round(
+            nemo_source_round(tau_e_u_face * ca_u)
+            + nemo_source_round(tau_n_u_face * sa_u))
     else:
         tau_i_u = tau_e_u_face
     if cos_a_v is not None and sin_a_v is not None:
         ca_v = jnp.asarray(cos_a_v, dtype=u_dtype)
         sa_v = jnp.asarray(sin_a_v, dtype=u_dtype)
-        tau_j_v = -tau_e_v_face * sa_v + tau_n_v_face * ca_v
+        tau_j_v = nemo_source_round(
+            nemo_source_round(-tau_e_v_face * sa_v)
+            + nemo_source_round(tau_n_v_face * ca_v))
     else:
         tau_j_v = tau_n_v_face
+    # NEMO sbcmod.F90:545-548 applies these mask factors in the SAME source
+    # statement as the two-point stress average.  Supplying the masks selects
+    # that shared NEMO identity; omission preserves the established generic
+    # grid interpolation for existing non-NEMO cards.
+    if u_mask is not None and v_mask is not None and t_mask is not None:
+        # SI3 exchange stresses are already in NEMO's local i/j directions;
+        # the card passes no geographic rotation.  Use the exact sbc statement
+        # owner, rather than composing the generic interpolation afterward.
+        tau_i_u, tau_j_v = nemo_stagger_surface_stress(
+            tau_e_T, tau_n_T, u_mask, v_mask, t_mask, u_dtype)
     dz_0_u = interp_cell_to_uface(dz_0_T)
     return tau_i_u, tau_j_v, dz_0_u, dz_0_v
 
@@ -4443,7 +4544,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     # gradient (here) + the PV flux (stage 7b). So under flux_form, drop the KE
     # gradient here to avoid double-counting; KE_PGF then carries only the
     # pressure gradient.
-    if _mom_adv == "flux_form":
+    if _mom_adv in ("flux_form", "off"):
         dKE_dx = jnp.zeros_like(dKE_dx)
         dKE_dy = jnp.zeros_like(dKE_dy)
 
@@ -4492,8 +4593,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             )
         )
     else:
+        # NEMO ln_dynadv_OFF disables the nonlinear momentum-advection
+        # operator but does not disable dyn_vor's planetary Coriolis term.
+        # The shared PV owner therefore receives the vector-invariant literal;
+        # on the one-cell C1D domain its relative-vorticity part is identically
+        # zero, leaving only f x u as in dynvor_ene.
+        _pv_mom_adv = "vector_invariant" if _mom_adv == "off" else _mom_adv
         du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v = _bc_pv_flux(
-            du_dt, dv_dt, u, v, h_u, h_v, h_k, u_mask_3d, v_mask_3d, mask, grid, _mom_adv,
+            du_dt, dv_dt, u, v, h_u, h_v, h_k, u_mask_3d, v_mask_3d, mask, grid, _pv_mom_adv,
             config.weno_smoothness,
             vertex_mask=vertex_mask,
             enstrophy_metric=config.vortcor_enstrophy_metric,

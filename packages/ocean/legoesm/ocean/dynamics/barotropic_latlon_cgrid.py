@@ -32,6 +32,7 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.latlon import LatLonGrid, ensure_geometry
 from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
 from legoesm.ocean.state import LatLonCGridOceanState, LatLonCGridOceanConfig
@@ -1102,6 +1103,43 @@ def barotropic_coriolis_een_pre_step(u_3d, v_3d, h_k, grid, mask, u_mask,
     return cor_u, cor_v
 
 
+def nemo_literal_ssh_forward(eta_now, dt_e, ssh_frc, divergence, mask):
+    """NEMO ``dynspg_ts.F90:621-622`` forward SSH statement."""
+    return nemo_source_round(
+        nemo_source_round(
+            eta_now - nemo_source_round(
+                dt_e * nemo_source_round(ssh_frc + divergence)))
+        * mask)
+
+
+def nemo_flux_form_barotropic_velocity_update(
+    velocity_now, dt_e, depth_now, depth_back, depth_mid,
+    depth_forcing, depth_after, pressure_gradient, trend, forcing, mask,
+    *, inverse_depth_after=None,
+):
+    """NEMO ``dynspg_ts.F90:729-752`` flux-form velocity statement.
+
+    The same helper owns u and v; callers supply the corresponding face
+    operands.  ``trend`` is NEMO's Coriolis-plus-drag ``zu/zv_trd`` and
+    ``forcing`` is its frozen ``zu/zv_frc``.
+    """
+    rhs = nemo_source_round(
+        nemo_source_round(
+            nemo_source_round(depth_back * pressure_gradient)
+            + nemo_source_round(depth_mid * trend))
+        + nemo_source_round(depth_forcing * forcing))
+    z1_h = (nemo_source_round(
+        jnp.asarray(1.0, dtype=jnp.asarray(depth_after).dtype) / depth_after)
+        if inverse_depth_after is None else
+        jnp.asarray(inverse_depth_after, dtype=jnp.asarray(depth_after).dtype))
+    return nemo_source_round(
+        nemo_source_round(
+            nemo_source_round(depth_now * velocity_now)
+            + nemo_source_round(dt_e * rhs))
+        * z1_h
+    ) * mask
+
+
 def _run_substep_loop(
     eta, U_bar, V_bar,
     *,
@@ -1118,6 +1156,8 @@ def _run_substep_loop(
     tide_basis=None, tide_cos=None, tide_sin=None,
     transport_sum_init=None,
     primary_transport_average=False,
+    forcing_face_depth_u=None,
+    forcing_face_depth_v=None,
 ):
     """The forward-backward substep loop (verbatim extraction).
 
@@ -1209,6 +1249,20 @@ def _run_substep_loop(
         byte-identical to the prior inline closure."""
         return _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area,
                                    _ssh_avg_prep)
+
+    # Frozen Kmm face depths used by NEMO's flux-form ``hu(Kmm)*zu_frc``
+    # operand (dynspg_ts.F90:744,752).  They are evaluated once at window
+    # entry, never from the evolving substep carry.
+    if forcing_face_depth_u is None or forcing_face_depth_v is None:
+        if _face_depth_mode == "nemo_ssh_avg":
+            _frc_u, _frc_v = _ssh_avg_face_depths(eta)
+        else:
+            _frc_total = jnp.maximum(eta + H_bathy, min_water_col) * mask
+            _frc_u, _frc_v = _face_depths(_frc_total)
+        forcing_face_depth_u = (_frc_u if forcing_face_depth_u is None
+                                else forcing_face_depth_u)
+        forcing_face_depth_v = (_frc_v if forcing_face_depth_v is None
+                                else forcing_face_depth_v)
 
     def substep_body(wts_i, carry):
         """Single barotropic substep with BEBT, slow forcing, MAXVEL, and cosine filter.
@@ -1333,7 +1387,16 @@ def _run_substep_loop(
             div_flux = divergence_cgrid(
                 flux_u, flux_v, grid, u_mask=u_mask, v_mask=v_mask,
             ).astype(dtype)
-        eta_unfloored = (eta_c - dt_s * div_flux + dt_s * F_slow_eta * mask) * mask
+        if _continuity_evaluation == "nemo_literal":
+            # dynspg_ts.F90:621-622 spells one subtract of
+            # rDt_e*(ssh_frc+zhdiv); the exchange convention passed here is
+            # F_slow_eta=-ssh_frc.  Preserve that association literally.
+            _ssh_frc = nemo_source_round(-F_slow_eta * mask)
+            eta_unfloored = nemo_literal_ssh_forward(
+                eta_c, dt_s, _ssh_frc, div_flux, mask)
+        else:
+            eta_unfloored = (
+                eta_c - dt_s * div_flux + dt_s * F_slow_eta * mask) * mask
         if local_subcycle_clamp:
             # SOTA-local (MOM6/MPAS-O): LOCAL clamp per substep — NO allreduce.
             # The global mass-conserving redistribute is deferred to ONCE per
@@ -1414,9 +1477,33 @@ def _run_substep_loop(
             _drag_u = -drag_r_u * U_bar_c / jnp.maximum(H_u, min_water_col)
         else:
             _drag_u = 0.0
-        U_bar_new = (U_bar_c + dt_s * (
-            _cor_u + _drag_u + _pgf_u + F_slow_u_i
-        )) * u_mask
+        _flux_form_update = (
+            getattr(config, "momentum_advection", "vector_invariant")
+            in ("flux_form", "off"))
+        if _flux_form_update:
+            # NEMO dynspg_ts.F90:729-749 flux-form barotropic momentum:
+            # carry-level transport + rDt_e times (back-interpolated-depth
+            # SPG + mid-depth COR/drag + frozen Kmm-depth forcing), divided by
+            # the fresh after-depth.  This is inseparable from the selected
+            # flux-form scheme; NEMO exposes no independent switch.
+            if _face_depth_mode == "nemo_ssh_avg":
+                H_u_bck, H_v_bck = _ssh_avg_face_depths(eta_pgf)
+                H_u_new, H_v_new = _ssh_avg_face_depths(eta_new)
+            else:
+                H_u_bck, H_v_bck = _face_depths(
+                    jnp.maximum(eta_pgf + H_bathy, min_water_col) * mask)
+                H_u_new, H_v_new = _face_depths(
+                    jnp.maximum(eta_new + H_bathy, min_water_col) * mask)
+            H_u_frc = forcing_face_depth_u
+            H_v_frc = forcing_face_depth_v
+            U_bar_new = nemo_flux_form_barotropic_velocity_update(
+                U_bar_c, dt_s, H_u, H_u_bck, H_u_flux, H_u_frc,
+                H_u_new, _pgf_u, nemo_source_round(_cor_u + _drag_u),
+                F_slow_u_i, u_mask)
+        else:
+            U_bar_new = (U_bar_c + dt_s * (
+                _cor_u + _drag_u + _pgf_u + F_slow_u_i
+            )) * u_mask
 
         # U averaged to v-points for the backward Coriolis half-step,
         # cell-pad-first (shared interp_u_to_vface_4pt): the partition-
@@ -1441,9 +1528,15 @@ def _run_substep_loop(
             _drag_v = -drag_r_v * V_bar_c / jnp.maximum(H_v, min_water_col)
         else:
             _drag_v = 0.0
-        V_bar_new = (V_bar_c + dt_s * (
-            _cor_v + _drag_v + _pgf_v + F_slow_v_i
-        )) * v_mask
+        if _flux_form_update:
+            V_bar_new = nemo_flux_form_barotropic_velocity_update(
+                V_bar_c, dt_s, H_v, H_v_bck, H_v_flux, H_v_frc,
+                H_v_new, _pgf_v, nemo_source_round(_cor_v + _drag_v),
+                F_slow_v_i, v_mask)
+        else:
+            V_bar_new = (V_bar_c + dt_s * (
+                _cor_v + _drag_v + _pgf_v + F_slow_v_i
+            )) * v_mask
 
         # Divergence damping: grad(div(u_bar)) (#205)
         if use_div_damp:
@@ -1777,6 +1870,7 @@ def barotropic_substeps_latlon_cgrid(
     v_now=None,
     substep_scale: int = 1,
     een_pre_override=None,
+    rCdU_top=None,
     _nemo_primary_transport_average_test_override=None,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
@@ -2063,6 +2157,15 @@ def barotropic_substeps_latlon_cgrid(
             _u_drg, _v_drg, _hk_now, z_coord, config, grid)
         _drag_r_u = _r_u_bt.astype(_dt)
         _drag_r_v = _r_v_bt.astype(_dt)
+    if rCdU_top is not None:
+        from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+            nemo_top_drag_rate_faces,
+        )
+        _top_u, _top_v = nemo_top_drag_rate_faces(rCdU_top, _dt)
+        _drag_r_u = (_top_u if _drag_r_u is None
+                     else nemo_source_round(_drag_r_u + _top_u))
+        _drag_r_v = (_top_v if _drag_r_v is None
+                     else nemo_source_round(_drag_r_v + _top_v))
 
     w_filter, w_total, w_transport, n_loop = _compute_weights(
         config, n_substeps, eta.dtype, substep_scale=substep_scale)
@@ -2131,7 +2234,7 @@ def barotropic_substeps_latlon_cgrid(
     _primary_transport_average = (
         getattr(config, "momentum_time_integrator", "euler") == "rk3_ws"
         and getattr(config, "momentum_advection", "vector_invariant")
-        == "flux_form"
+        in ("flux_form", "off")
         and _boxcar_ab3
     )
     if _nemo_primary_transport_average_test_override is not None:
@@ -2209,9 +2312,16 @@ def barotropic_substeps_latlon_cgrid(
         # Time-averaged eta and velocity (cosine / box / nemo_boxcar_centred /
         # nemo_boxcar_ab3 / nemo_boxcar1_ab3 = NEMO boxcar averaging of the
         # raw substep ssh).
-        eta_avg = eta_sum_f / w_total
-        U_bar_avg = U_sum_f / w_total
-        V_bar_avg = V_sum_f / w_total
+        if _primary_transport_average:
+            # dynspg_ts.F90:867-870: three distinct post-loop source
+            # statements.  The flux-form primary is still a transport here.
+            eta_avg = nemo_source_round(eta_sum_f / w_total)
+            U_bar_avg = nemo_source_round(U_sum_f / w_total)
+            V_bar_avg = nemo_source_round(V_sum_f / w_total)
+        else:
+            eta_avg = eta_sum_f / w_total
+            U_bar_avg = U_sum_f / w_total
+            V_bar_avg = V_sum_f / w_total
         if _primary_transport_average:
             if config.barotropic.barotropic_face_depth == "nemo_ssh_avg":
                 _H_u_primary, _H_v_primary = _nemo_ssh_avg_apply(
@@ -2223,10 +2333,12 @@ def barotropic_substeps_latlon_cgrid(
                     eta_avg + H_bathy, min_water_col) * mask
                 _H_u_primary, _H_v_primary = _min_rule_face_depths(
                     _H_primary, mask, grid, north_fold_mask(grid))
-            U_bar_avg = U_bar_avg / jnp.maximum(
-                _H_u_primary, min_water_col)
-            V_bar_avg = V_bar_avg / jnp.maximum(
-                _H_v_primary, min_water_col)
+            # dynspg_ts.F90:891-903: after the one source-statement transport
+            # normalization, divide once by the freshly averaged face depth.
+            U_bar_avg = nemo_source_round(
+                U_bar_avg / jnp.maximum(_H_u_primary, min_water_col))
+            V_bar_avg = nemo_source_round(
+                V_bar_avg / jnp.maximum(_H_v_primary, min_water_col))
 
     # SOTA-local split-explicit: the per-substep clamp was LOCAL (no allreduce);
     # restore GLOBAL mass conservation with ONE redistribute call on the
@@ -2330,6 +2442,7 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
     F_slow_v=None,
     add_barotropic_coriolis: bool = True,
     t_seconds=None,
+    rCdU_top=None,
 ) -> LatLonCGridOceanState:
     """Wide-halo twin of :func:`barotropic_substeps_latlon_cgrid`.
 
@@ -2362,6 +2475,10 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
     ``tests/ocean/unit/test_barotropic_wide_halo.py``).
     """
     from legoesm.grids.halo import local_halo_pads
+    if rCdU_top is not None:
+        raise NotImplementedError(
+            "signed NEMO top drag is wired through the canonical standard "
+            "split-explicit path only; disable barotropic_wide_halo")
     from legoesm.grids.halo_latlon import (
         widen_band_cell_fields,
         widen_band_vface_fields,
