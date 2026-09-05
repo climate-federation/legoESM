@@ -1,4 +1,4 @@
-# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–22 boundary receipt
+# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–23 boundary receipt
 
 **Verdict: HOLD.**  Round 20 made GYRE's kt1 stage-transport composition
 bit-exact, but the required cross-card trajectories proved that legoESM does
@@ -12,9 +12,13 @@ divisor as a contributor but not the complete owner; its first primitive
 operand remains unmeasured.  Round 22 makes ORCA2's supplied-input CEN2
 precursor and `zFu/zFv` stage transports bit-exact, but exposes seven
 cellwise Rule-12 debts in the OVERFLOW trajectory (maximum `17.25` row-scale
-ulp).  The source-literal fixes stay; those downstream rows and the existing
-GYRE boundaries remain the HOLD register.  No downstream result inherits a
-claim across these open boundaries.
+ulp).  Round 23 retains the literal but inert CEN2 `wmask`, publishes GYRE's
+cellwise kt1--10 register, and localizes the seven OVERFLOW rows away from a
+partial-cell-bottom owner.  Their first unconstructible source operand is the
+already-open prognostic `uu_b/vv_b(Kbb)` state, so no unauthorized rederivation
+or state field is added.  The source-literal fixes stay; those downstream rows
+and the existing GYRE boundaries remain the HOLD register.  No downstream
+result inherits a claim across these open boundaries.
 
 Updated: 2026-09-05
 
@@ -3135,3 +3139,77 @@ JSON/NPZ `c14a3541...` / `4d6c6341...`, current JSON/NPZ `3cd8332f...` /
 `459e6321...`, combined comparison `c55dcfc7...`, and the isolated stored-QCO
 comparison `aaa7b220...`.  The baseline and both intermediates are retained
 outside git under the round-23 root.
+
+### 23.4 OVERFLOW seven-row localization and source boundary
+
+The committed localization probe reconstructs the persisted active-cell order
+from the exact OVERFLOW masks and fails closed if payload cardinality changes.
+Its planted one-cell mask shift exits 1 with `active-cell map does not match
+persisted payload`; transcript SHA-256 is
+`4292123bc457c8ed5e5ca4385b144090b732f9aa415dfea03e8cb87ee3793fa1`.
+Coordinates below are legoESM-owned zero-based `(j,i,k)`; the probe also emits
+the corresponding two-halo, Fortran-one-based NEMO coordinates.  All cells are
+on the only wet interior row, `j=1`.
+
+| row | `>2` cells | max worsening, row-scale ULP | first / maximum cell | levels, zero based | bottom / non-bottom | columns `(j,i):count` |
+|---|---:|---:|---|---|---:|---|
+| kt6 u | 8 | `2.0625` | `(1,21,0)` / `(1,21,1)` | `0:7` once each | `0 / 8` | `(1,21):8` |
+| kt7 u | 2 | `2.03125` | `(1,21,1)` / `(1,21,1)` | `1,5` once each | `0 / 2` | `(1,21):2` |
+| kt9 ssh | 2 | `6.75` | `(1,20)` / `(1,22)` | surface | n/a | `(1,20):1; (1,22):1` |
+| kt9 u | 22 | `4.84375` | `(1,20,5)` / `(1,21,1)` | `0,1,5:24` once each | `1 / 21` | `(1,20):20; (1,21):2` |
+| kt10 T | 1 | `4` | `(1,25,4)` / same | `4` | `0 / 1` | `(1,25):1` |
+| kt10 ssh | 4 | `17.25` | `(1,19)` / `(1,20)` | surface | n/a | `(1,19/20/22/26):1` each |
+| kt10 u | 38 | `4.28125` | `(1,20,3)` / `(1,21,2)` | `0:2` once; `3` twice; `4:12` once; `13:24` twice | `2 / 36` | `(1,20):22; (1,21):4; (1,22):12` |
+
+Across the 71 three-dimensional violations, only 3 are at the face/column
+bottom and 68 are above it.  The levels span the surface through level 24 and
+the columns form an advancing-front cluster at `i=19:26`; this is
+**REFUTED_PARTIAL_CELL_BOTTOM_CLUSTER**, not an OVERFLOW-zps bottom-geometry
+owner.  The exact machine-readable census is
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round23/overflow_rule12/localization.json`,
+SHA-256
+`1e8a70a2b6df820a31ab6432e902334692afea36a04ce5f1953241b4c0b13422`.
+
+The ordered source walk stops at a structural input boundary before another
+literal arithmetic statement can be tested.  NEMO declares `uu_b/vv_b` as
+prognostic state (`oce.F90:39,99`), writes and reads it in restart files
+(`restart.F90:175-182,304-320`), and updates the Kaa values in
+`dynspg_ts.F90:861-895`.  The first consuming statement is
+`stprk3_stg.F90:257-274`: for GYRE/OVERFLOW's HYB arm, lines 267-268 form
+`zub=un_adv*r1_hu(Kmm)-uu_b(Kmm)` and its V analogue before lines 272-274
+form `zFu/zFv`.  In the shared model, `_nemo_stage_corrected_velocity`
+contains the literal subtraction, but the stage-1 call supplies
+`zeros_like(target_u/v)` at
+`ocean_model_latlon_cgrid.py:6002-6010` because the carried model state has no
+NEMO `uu_b/vv_b(Kbb)` member.  Re-reducing the 3-D velocity is algebraically
+equivalent, not bit-exact, and was already rejected by review.
+
+The label is therefore
+**CONFIRMED_STRUCTURAL_BOUNDARY_NUMERIC_VALUE_UNMEASURED**: the required NEMO
+operand and its persistence are source-confirmed, while no kt6--10 NEMO dump
+of that operand exists from which to assign a numeric residual to the first
+subtraction.  This is neither an owner exoneration nor permission to infer the
+value.  Per the user's standing decision, prognostic `uu_b/vv_b` remains
+**HOLD / OPEN USER DECISION**; this round adds no state, rederivation, card
+fork, or literal “fix.”  The seven Rule-12 rows stay registered behind that
+boundary.  Because there is no eligible shared change, no additional
+LOCK/GYRE/ORCA2 cross-card run is claimed for this subsection.
+
+No lane-3b dry-face NaN producer was handed over during Round 23.  It remains
+registered; no downstream mask workaround was made.
+
+### Round-23 ASKED / UNASKED register
+
+| choice or action | origin | final disposition |
+|---|---|---|
+| literal CEN2 `wmask` factor | ASKED item 1 | landed shared; inert because supplied `pW=0` on all 161733 dry W faces; ORCA2 T/S `0 / 228641` |
+| ORCA2 and cross-card reruns for `wmask` | ASKED item 1 / Rule 12 | ORCA2 exact with failing plant; LOCK/OVERFLOW stage and trajectory all 0-ULP PASS |
+| GYRE kt1--10 cellwise sweep | ASKED item 2 | complete; kt1 `0 / n`, first-over-bar kt2 unchanged; 42 moved and 39 Rule-12 rows fully enumerated |
+| OVERFLOW seven-row localization | ASKED item 3 | complete; partial-cell-bottom candidate refuted, source walk stops at absent prognostic `uu_b/vv_b(Kbb)` operand |
+| prognostic `uu_b/vv_b` carried state | open USER DECISION | HOLD; not implemented, reconstructed, waived, or hidden behind a card switch |
+| lane-3b dry-face NaN producer | conditional ASKED item 4 | no handoff received; remains registered, no mask workaround |
+| stage-3/ZDF/TKE continuation | downstream | not entered across the carried-state HOLD and existing stage-2 debt |
+| shipped NEMO edit, NEMO run, multi-MB git artifact, push, merge | forbidden | none |
+
+Round-23 measurements and labels are Codex-internal.  Independent review of
+this round remains **OUTSTANDING**.
