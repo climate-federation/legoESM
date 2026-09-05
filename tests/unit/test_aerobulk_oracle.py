@@ -12,7 +12,7 @@ tau/evap to <=7e-4) before freezing — see the PR notes.
 
 What is compared
 ----------------
-1. ``bulk_flux_omip.air_sea_fluxes(algo='ncar')`` vs aerobulk ``ncar``.
+1. ``core.bulk_flux.air_sea_fluxes(algo='ncar')`` vs aerobulk ``ncar``.
 2. ``compute_most_fluxes(scheme='large_yeager')`` vs aerobulk ``ncar``
    (same LY09 physics), at 10/10 m and the OMIP-style 2/10 m height split.
 3. ``compute_most_fluxes(scheme='coare3')`` vs aerobulk ``coare3p0``
@@ -21,7 +21,7 @@ What is compared
 
 Convention alignment (harness glue, per the fidelity doctrine this lives
 in the TEST, not the model): NEMO-style Exner potential temperature, 0.98
-saline Goff q_sat, moist air density from ``bulk_flux_omip`` helpers;
+saline Goff q_sat, moist air density from ``core.bulk_flux`` helpers;
 SST-dependent L_vap passed via ``L_latent`` so the constant-L_v convention
 does not masquerade as a MOST error; sign mapping aerobulk->legoESM
 (stress along-wind -> ocean-reaction, heat positive-down -> positive-up).
@@ -55,7 +55,7 @@ jax.config.update("jax_enable_x64", True)
 
 import jax.numpy as jnp  # noqa: E402
 from legoesm.core.bulk_flux import compute_most_fluxes  # noqa: E402
-from legoesm.ocean.bulk_flux_omip import (  # noqa: E402
+from legoesm.core.bulk_flux import (  # noqa: E402
     air_sea_fluxes,
     exner_potential_temperature,
     latent_heat_vaporization_sst,

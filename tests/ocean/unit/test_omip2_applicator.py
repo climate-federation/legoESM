@@ -378,7 +378,7 @@ def test_compute_omip2_freshwater_forcing_emp():
     assert np.allclose(E, np.asarray(evap_ref), rtol=1e-6, atol=1e-12)
     # evap and lh are mutually consistent through L_vap at the POTENTIAL
     # SST (NEMO BULK_FORMULA pTs = zsspt; ~0.1% below L_vap(SST_abs)).
-    from legoesm.ocean.bulk_flux_omip import (
+    from legoesm.core.bulk_flux import (
         exner_potential_temperature, latent_heat_vaporization_sst,
     )
     theta_sst = exner_potential_temperature(
@@ -625,7 +625,7 @@ def test_qnet_snow_fusion_and_heat_content():
     and NEMO rLfus/rcpi values)."""
     import jax.numpy as jnp
     from legoesm.ocean.coupler import compute_omip2_surface_forcing
-    from legoesm.ocean.bulk_flux_omip import potential_air_temperature_10m
+    from legoesm.core.bulk_flux import potential_air_temperature_10m
     from legoesm import constants
     state, grid, z, _ = _rest_state_latlon()
     P, S = 2.0e-4, 1.0e-4

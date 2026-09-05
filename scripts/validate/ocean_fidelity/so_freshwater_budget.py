@@ -239,7 +239,7 @@ def main() -> int:
 
     # Precip and the evaporation the bulk produced at this state.
     from legoesm.ocean.coupler.omip2_applicator import _sample_forcing_points
-    from legoesm.ocean.bulk_flux_omip import air_sea_fluxes
+    from legoesm.core.bulk_flux import air_sea_fluxes
     from legoesm import constants
     import jax.numpy as jnp
 

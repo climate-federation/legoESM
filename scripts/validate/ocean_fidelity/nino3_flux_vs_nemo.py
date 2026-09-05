@@ -81,7 +81,7 @@ def main() -> int:
     from legoesm import constants
     from legoesm.ocean.forcing.core2 import load_core2_nyf
     from legoesm.ocean.coupler.omip2_applicator import _sample_forcing_points
-    from legoesm.ocean.bulk_flux_omip import air_sea_fluxes
+    from legoesm.core.bulk_flux import air_sea_fluxes
 
     mod = _aligner()
     lo, hi = (int(x) for x in a.nemo_recs.split(":"))

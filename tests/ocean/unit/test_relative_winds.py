@@ -2,7 +2,7 @@
 
 Exercises the REAL functions end to end:
 
-* ``ocean.bulk_flux_omip.air_sea_fluxes`` -- the frame-agnostic kernel: with
+* ``core.bulk_flux.air_sea_fluxes`` -- the frame-agnostic kernel: with
   ``vfac > 0`` it subtracts ``vfac * (u_oce, v_oce)`` from the wind BEFORE the
   speed + stress bulk, and the stress uses the RELATIVE vector (not
   |rel| * wind_direction).  ``vfac = 0.0`` (default) is BYTE-IDENTICAL to the
@@ -30,7 +30,7 @@ import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
-from legoesm.ocean.bulk_flux_omip import air_sea_fluxes  # noqa: E402
+from legoesm.core.bulk_flux import air_sea_fluxes  # noqa: E402
 from scripts.run.run_omip_core2 import (  # noqa: E402
     _resolve_wind_vfac,
     _surface_currents_geographic,

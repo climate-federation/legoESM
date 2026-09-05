@@ -17,6 +17,7 @@ SPEC.loader.exec_module(gate)
 
 def test_coverage_is_complete_and_waives_only_unowned_slots() -> None:
     gate.validate_coverage()
+    assert len(gate.COVERAGE) == 20
     assert {name for name, row in gate.COVERAGE.items() if row[0] == "WAIVED"} == {"cd_du", "qlwn"}
     bad = dict(gate.COVERAGE)
     bad.pop("taum")
@@ -69,7 +70,7 @@ def test_full_o1_gate_and_row_plants() -> None:
 
 def test_ncar_selector_is_shared_and_jittable() -> None:
     from legoesm.core.bulk_flux import nemo_ncar_ocean_bulk, validate_bulk_scheme
-    from legoesm.ocean.bulk_flux_omip import air_sea_fluxes
+    from legoesm.core.bulk_flux import air_sea_fluxes
 
     assert validate_bulk_scheme("nemo_ncar") is None
     assert callable(nemo_ncar_ocean_bulk)

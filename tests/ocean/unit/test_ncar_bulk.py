@@ -1,4 +1,4 @@
-"""Unit tests for the NEMO-parity NCAR bulk algorithm (bulk_flux_omip).
+"""Unit tests for the NEMO-parity NCAR bulk algorithm (core.bulk_flux).
 
 Strategy
 --------
@@ -26,7 +26,7 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 
 from legoesm import constants  # noqa: E402
-from legoesm.ocean.bulk_flux_omip import (  # noqa: E402
+from legoesm.core.bulk_flux import (  # noqa: E402
     air_sea_fluxes,
     exner_potential_temperature,
     latent_heat_vaporization_sst,

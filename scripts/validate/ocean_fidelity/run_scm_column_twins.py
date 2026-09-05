@@ -845,7 +845,7 @@ def build_jitted_step(scm, series: dict, *, tier: str, sw_mode: str):
     import jax
     import jax.numpy as jnp
     from legoesm import constants
-    from legoesm.ocean.bulk_flux_omip import air_sea_fluxes
+    from legoesm.core.bulk_flux import air_sea_fluxes
     from legoesm.ocean.coupler.omip2_applicator import (
         compute_omip2_surface_forcing_jax,
     )

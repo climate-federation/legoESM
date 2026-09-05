@@ -6,7 +6,7 @@ import numpy as np, jax.numpy as jnp
 import sys
 sys.path.insert(0, '/burg-archive/glab/users/pg2328/fesom_jax_repo')
 from fesom_jax import forcing as ff
-from legoesm.ocean.bulk_flux_omip import air_sea_fluxes
+from legoesm.core.bulk_flux import air_sea_fluxes
 from legoesm import constants
 
 # NH-winter regime grid: SST 5..20 C, T_air = SST - dT (cold advection), wind 4..16

@@ -1,7 +1,7 @@
 """Surface-flux applicator for the OMIP-2 / Bryan-THC drivers.
 
 Wraps the Large & Yeager 2009 bulk-flux module
-(``legoesm.ocean.bulk_flux_omip``) and applies the resulting
+(``legoesm.core.bulk_flux``) and applies the resulting
 ``(tau_x, tau_y, shflx, lhflx)`` to the ocean state's top layer as a
 per-timestep forward-Euler update of u / v / T. Designed to be called
 once per model step from the long-run drivers.
@@ -26,7 +26,7 @@ All paths preserve land masking through ``state.land_mask`` /
 Sign conventions
 ----------------
 ``shflx`` and ``lhflx`` are defined as positive INTO the ocean
-(matching ``bulk_flux_omip.air_sea_fluxes``). The top-cell
+(matching ``core.bulk_flux.air_sea_fluxes``). The top-cell
 temperature tendency is
 
 .. math::
@@ -46,7 +46,7 @@ import numpy as np
 from legoesm import constants
 from legoesm.core.field import Field
 from legoesm.thermo import saturation_vapor_pressure
-from legoesm.ocean.bulk_flux_omip import air_sea_fluxes
+from legoesm.core.bulk_flux import air_sea_fluxes
 from legoesm.ocean.eos import VALID_FREEZE_SCHEMES, freezing_point
 
 # --- per-step host-transfer ledger (scaling-M2 honest-cost accounting) ------
@@ -1091,7 +1091,7 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
                if forc.get("snow") is not None else np.zeros_like(precip_np))
     # CORE-II precip = RAIN+SNOW; guard tiny negative rain from regridding.
     rain_np = np.maximum(precip_np - snow_np, 0.0)
-    from legoesm.ocean.bulk_flux_omip import potential_air_temperature_10m
+    from legoesm.core.bulk_flux import potential_air_temperature_10m
     theta_air_j, _ = potential_air_temperature_10m(
         jnp.asarray(forc["T_air"]), jnp.asarray(forc["q_air"]),
         None if slp is None else jnp.asarray(slp))
@@ -1267,7 +1267,7 @@ def compute_omip2_surface_forcing_jax(
     # ``compute_omip2_surface_forcing`` (NEMO blk_oce_2 form) -- net-LW
     # Kirchhoff eps_w, snow fusion, rain/snow heat content at theta_air,
     # evap heat content at the absolute SST.
-    from legoesm.ocean.bulk_flux_omip import potential_air_temperature_10m
+    from legoesm.core.bulk_flux import potential_air_temperature_10m
     lw_net = constants.emissivity_seawater_lw * (
         lw_down - sigma_sb * T_sfc_K ** 4)
     rain = jnp.maximum(precip - snow, 0.0)

@@ -61,7 +61,7 @@ def test_load_jra55_do_disallow_synthetic_raises_when_missing(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_large_yeager_cd_increases_with_wind_at_high_winds():
-    from legoesm.ocean.bulk_flux_omip import large_yeager_cd
+    from legoesm.core.bulk_flux import large_yeager_cd
     Cd_5 = float(large_yeager_cd(5.0))
     Cd_15 = float(large_yeager_cd(15.0))
     # High-wind branch of L&Y 2009: Cd grows linearly with u10.
@@ -71,7 +71,7 @@ def test_large_yeager_cd_increases_with_wind_at_high_winds():
 
 
 def test_large_yeager_ch_picks_stable_vs_unstable():
-    from legoesm.ocean.bulk_flux_omip import large_yeager_ch
+    from legoesm.core.bulk_flux import large_yeager_ch
     Ch_unst = float(large_yeager_ch(T_air_K=290.0, T_sfc_K=295.0))   # sea warmer
     Ch_stab = float(large_yeager_ch(T_air_K=295.0, T_sfc_K=290.0))   # sea cooler
     assert Ch_unst > Ch_stab
@@ -79,7 +79,7 @@ def test_large_yeager_ch_picks_stable_vs_unstable():
 
 def test_air_sea_fluxes_sign_conventions():
     import jax.numpy as jnp
-    from legoesm.ocean.bulk_flux_omip import air_sea_fluxes
+    from legoesm.core.bulk_flux import air_sea_fluxes
     # Wind blowing east at 10 m/s -> tau_x < 0 (drag opposes wind).
     # NCAR default algo; q_sfc / rho_air pinned explicitly so only the
     # sign conventions are under test (not the internal Goff/moist-rho).
