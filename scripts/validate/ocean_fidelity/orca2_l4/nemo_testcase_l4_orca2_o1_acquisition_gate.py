@@ -271,7 +271,12 @@ def require(condition: bool, message: str) -> None:
         raise GateError(message)
 
 
-def read_o1(path: Path, expected_sha256: str | None = None) -> dict:
+def read_o1(
+    path: Path,
+    expected_sha256: str | None = None,
+    *,
+    require_canonical_undefined: bool = False,
+) -> dict:
     """Walk both frames; payload sizes derive only from their write lists."""
     rows = []
     with path.open("rb", buffering=0) as handle:
@@ -291,12 +296,25 @@ def read_o1(path: Path, expected_sha256: str | None = None) -> dict:
             require(payload.size == count, f"frame {kind}: truncated payload")
             require(bool(np.isfinite(payload).all()),
                     f"frame {kind}: non-finite payload")
-            rows.append({
+            row = {
                 "kind": kind,
                 "fields": list(fields),
                 "header": list(header),
                 "payload_f64": int(payload.size),
-            })
+            }
+            if kind == 1:
+                undefined_nonzero = {}
+                for field in O1_UNDEFINED_FIELDS:
+                    index = fields.index(field)
+                    values = payload[index * NX * NY:(index + 1) * NX * NY]
+                    undefined_nonzero[field] = int(np.count_nonzero(values))
+                row["undefined_nonzero"] = undefined_nonzero
+                if require_canonical_undefined:
+                    require(
+                        not any(undefined_nonzero.values()),
+                        f"nonzero canonical O1 undefined field: {undefined_nonzero}",
+                    )
+            rows.append(row)
         require(handle.read(1) == b"", "trailing payload")
     digest = exchange.sha256(path)
     if expected_sha256 is not None:
@@ -304,7 +322,9 @@ def read_o1(path: Path, expected_sha256: str | None = None) -> dict:
     return {"frames": rows, "bytes": path.stat().st_size, "sha256": digest}
 
 
-def planted_controls(path: Path) -> dict[str, str]:
+def planted_controls(
+    path: Path, *, require_canonical_undefined: bool = False
+) -> dict[str, str]:
     expected_digest = exchange.sha256(path)
     results = {}
 
@@ -314,7 +334,11 @@ def planted_controls(path: Path) -> dict[str, str]:
             shutil.copyfile(path, altered)
             mutate(altered)
             try:
-                read_o1(altered, expected_digest if bind_digest else None)
+                read_o1(
+                    altered,
+                    expected_digest if bind_digest else None,
+                    require_canonical_undefined=require_canonical_undefined,
+                )
             except (GateError, OSError, UnicodeError, struct.error, ValueError):
                 results[name] = "PASS_NONZERO"
             else:
@@ -336,6 +360,17 @@ def planted_controls(path: Path) -> dict[str, str]:
             handle.write(struct.pack("=d", np.nextafter(value, np.inf)))
 
     expect("one_ulp_payload", one_ulp, bind_digest=True)
+    if require_canonical_undefined:
+        frame_bytes = 16 + struct.calcsize(HEADER_FMT) + len(INPUT_FIELDS) * NX * NY * 8
+        cd_du_offset = (
+            frame_bytes + 16 + struct.calcsize(HEADER_FMT)
+            + OUTPUT_FIELDS.index("cd_du") * NX * NY * 8
+        )
+        expect(
+            "undefined_cd_du_nonzero",
+            lambda p: patch(p, cd_du_offset, struct.pack("=d", 1.0)),
+            bind_digest=False,
+        )
     return results
 
 
@@ -473,6 +508,7 @@ def validate(
     plants: bool,
     accepted_instrumented: Path | None = None,
     defined_o1_against: Path | None = None,
+    canonical_o1_undefined: bool = False,
 ) -> dict:
     expected = exchange.phase1.expected_inventory() | {exchange.RECORD, RECORD}
     observed = {p.name for p in run_dir.glob("oracle_*.bin")}
@@ -494,7 +530,11 @@ def validate(
             None if accepted_instrumented is not None else surface_sha256,
             icebergs_off=True,
         ),
-        "o1": read_o1(run_dir / RECORD, o1_sha256),
+        "o1": read_o1(
+            run_dir / RECORD,
+            o1_sha256,
+            require_canonical_undefined=canonical_o1_undefined,
+        ),
         "identity": exchange.phase1.validate_identity(control, run_dir),
     }
     if accepted_instrumented is not None:
@@ -518,7 +558,10 @@ def validate(
             defined_o1_against / RECORD, run_dir / RECORD
         )
     if plants:
-        result["o1_planted_controls"] = planted_controls(run_dir / RECORD)
+        result["o1_planted_controls"] = planted_controls(
+            run_dir / RECORD,
+            require_canonical_undefined=canonical_o1_undefined,
+        )
         if accepted_instrumented is not None:
             result["defined_identity_planted_controls"] = (
                 defined_identity_planted_controls(run_dir, accepted_instrumented)
@@ -541,6 +584,7 @@ def main() -> int:
     parser.add_argument("--o1-sha256")
     parser.add_argument("--accepted-instrumented", type=Path)
     parser.add_argument("--defined-o1-against", type=Path)
+    parser.add_argument("--canonical-o1-undefined", action="store_true")
     parser.add_argument("--plant-controls", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -549,6 +593,7 @@ def main() -> int:
             args.run_dir, args.control, args.legacy_record_manifest,
             args.surface_sha256, args.o1_sha256, args.plant_controls,
             args.accepted_instrumented, args.defined_o1_against,
+            args.canonical_o1_undefined,
         )
     except (GateError, exchange.GateError, exchange.phase1.GateError,
             OSError, UnicodeError,
