@@ -2149,18 +2149,19 @@ class LatLonCGridOceanModel:
                 "expose_tracer_stage1_boundary must be '', "
                 "'after_advection', or 'after_sbc'")
         _config_input = config or LatLonCGridOceanConfig.from_flat()
-        _wzv_diagnostic_eos_bypass = bool(
-            self._nemo_ws_test_hooks.expose_stage1_wzv
+        _oracle_endpoint_diagnostic_eos_bypass = bool(
+            (self._nemo_ws_test_hooks.expose_stage1_wzv
+             or self._nemo_ws_test_hooks.expose_tracer_stage1_boundary)
             and self._nemo_ws_test_hooks.external_mode_result_override is not None
             and _config_input.eos == "nemo_eos80"
             and _config_input.eos_depth == "geometric"
         )
         _config_for_validation = (
             _config_input._replace(eos_depth="insitu")
-            if _wzv_diagnostic_eos_bypass else _config_input
+            if _oracle_endpoint_diagnostic_eos_bypass else _config_input
         )
         self.config = self._validate_config(_config_for_validation)
-        if _wzv_diagnostic_eos_bypass:
+        if _oracle_endpoint_diagnostic_eos_bypass:
             self.config = self.config._replace(eos_depth="geometric")
         # Convert LatLonGrid -> LatLonCGridGeometry once at construction.
         # All downstream operators see the enriched geometry with per-cell
