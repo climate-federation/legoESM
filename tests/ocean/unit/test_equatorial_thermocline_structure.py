@@ -230,3 +230,42 @@ def test_layer_means_separate_redistribution_from_net_loss():
     rows = _MOD._band_table(T, lat, lon, wet, z, lambda c, zz: 100.0, 2.0,
                             [(220.0, 240.0)], 400.0)
     assert rows[0][6:9] == pytest.approx(got, abs=1e-12)
+
+
+def test_isopycnal_T_separates_heave_from_mixing():
+    """Heave (shifting the whole T,S stack down) leaves T on density surfaces
+    unchanged; vertically mixing the top of the column changes it.  Built
+    with a known answer so a sign or interpolation error would be caught."""
+    z = np.linspace(2.0, 400.0, 200)
+    T = _tanh_column(z, z_c=80.0, width=25.0)
+    S = 35.0 + 0.002 * z                      # weakly stable haline part
+    base = _MOD._T_on_sigma(T[None, :], _MOD._sigma0(T[None, :], S[None, :]))[0]
+    assert np.isfinite(base).sum() >= 4
+    # heave: same (T,S) pairs, 30 m deeper
+    Th = np.interp(z, z + 30.0, T); Sh = np.interp(z, z + 30.0, S)
+    heaved = _MOD._T_on_sigma(Th[None, :], _MOD._sigma0(Th[None, :], Sh[None, :]))[0]
+    ok = np.isfinite(base) & np.isfinite(heaved)
+    assert ok.sum() >= 3
+    assert np.max(np.abs(heaved[ok] - base[ok])) < 0.05
+    # mixing the top 120 m changes T on the surfaces the mixed water crosses
+    k = z <= 120.0
+    Tm = T.copy(); Tm[k] = np.trapezoid(T[k], z[k]) / (z[k][-1] - z[k][0])
+    Sm = S.copy(); Sm[k] = np.trapezoid(S[k], z[k]) / (z[k][-1] - z[k][0])
+    mixed = _MOD._T_on_sigma(Tm[None, :], _MOD._sigma0(Tm[None, :], Sm[None, :]))[0]
+    ok2 = np.isfinite(base) & np.isfinite(mixed)
+    assert ok2.sum() >= 2
+    assert np.max(np.abs(mixed[ok2] - base[ok2])) > 0.3
+
+
+def test_isopycnal_depth_reports_heave_as_displacement():
+    """Shifting the stack 30 m down must read as +30 m on every surface."""
+    z = np.linspace(2.0, 400.0, 200)
+    T = _tanh_column(z, z_c=80.0, width=25.0)
+    S = 35.0 + 0.002 * z
+    sig = _MOD._sigma0(T[None, :], S[None, :])
+    z0 = _MOD._T_on_sigma(T[None, :], sig, zc=z)[0]
+    Th = np.interp(z, z + 30.0, T); Sh = np.interp(z, z + 30.0, S)
+    z1 = _MOD._T_on_sigma(Th[None, :], _MOD._sigma0(Th[None, :], Sh[None, :]), zc=z)[0]
+    ok = np.isfinite(z0) & np.isfinite(z1) & (z0 > 40.0) & (z0 < 300.0)
+    assert ok.sum() >= 3
+    assert np.allclose(z1[ok] - z0[ok], 30.0, atol=2.0)

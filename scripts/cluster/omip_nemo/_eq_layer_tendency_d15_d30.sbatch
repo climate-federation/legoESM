@@ -26,6 +26,6 @@ $PY -u scripts/validate/ocean_fidelity/equatorial_thermocline_structure.py \
   --snapshot-early $R/trp_unified180/snapshot_day0015.npz \
   --snapshot-early $R/mpas_unified_180d/snapshot_day0015.npz \
   --snapshot-early $R/fesom_nemo75v_d30/snapshot_day0015.npz \
-  --nemo-gridt $GT --nemo-rec 5 --nemo-rec-early 2 2>&1 | grep -vE "Warning|warn"
+  --nemo-gridt $GT --nemo-rec 5 --nemo-rec-early 2 --isopycnal 2>&1 | grep -vE "Warning|warn"
 echo "=== rc=$?"
 echo DONE

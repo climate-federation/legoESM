@@ -115,3 +115,22 @@ aux3d linkage and the minimum-level policy, not just counts.
   If CONFIRMED the shape is the lever on all three grids: MPAS needs the latitudinal profile plumbing
   (only an equatorial boost exists) and FESOM a Laplacian-with-profile option -> ports are the next
   arms; if REFUTED the ascent defect is not lateral friction -> instrument the 220-240E w budget.
+- 08:00 GLM CLAIM REVIEW (task kjnu33zqi): (1) CRITICAL the slab table does NOT discriminate ascent from
+  horizontal convergence or enhanced downward diffusion -> offline discriminators named; the cheapest on
+  existing snapshots = T on sigma0 surfaces (heave keeps it, diapycnal mixing changes it) -> added
+  (--isopycnal, job 9649107); (2) MPAS's near-NEMO 0-50 m cooling with the weakest EUC weakens "one
+  shared mechanism"; (3) downward mixing NOT ruled out (the closure twin used NEMO's shear, not ours);
+  (4) non-friction setters: wind-stress curl 2-5N, vertical viscosity below the ML, Yoshida spin-up;
+  "lateral friction = Ekman carrier" is dynamically loose. (c) CRITICAL the rung-1 gate was unreachable
+  for a half-strength shape (the 2x arm reached only +0.38). PRE-REGISTRATION REVISED (still before the
+  d30 lands, arm at ~day 22): LEVER REAL if 220-240E dSST(d15->d30) drops by >= 0.2 from ctl (+0.68 ->
+  <= +0.48) AND dT(50-150 m) drops by >= 0.3 (+0.94 -> <= +0.64); NULL if both move < 0.1; CLOSES only
+  if dT(50-150) <= 0. The absolute "<= +0.2" gate is withdrawn as a false-refutation risk.
+- 08:30 HEAVE CONFIRMED (isopycnal depth d15->d30, job 9649116, table in threegrid_unified_table):
+  T(sigma0) changes alike on all sides (mixing ruled out); NEMO lifts sigma0 23.5-26 by 6-12 m at
+  220-240E, ours sink the sigma0 >= 25 surfaces 5-17 m (tripole/FESOM; MPAS 4-10). Missing ascent
+  ~1.5e-5 m/s in the lower thermocline, confined to 220-240E, all three grids. codex CRITICAL-1 (slab
+  cannot separate ascent from convergence/diffusion) answered for diffusion; ascent-vs-lateral-
+  convergence is the same thing for a heave (continuity) but the SOURCE of the convergence (which
+  velocity field) is open: next = 50-150 m box budget from the STORED mass_flux_u/v/w (tripole) and
+  NEMO's uocetr/vocetr — which wall carries the anomalous convergence at 220-240E.
