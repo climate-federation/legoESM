@@ -160,3 +160,30 @@ aux3d linkage and the minimum-level policy, not just counts.
   NEMO's dS_top over 30 d against -S_bar sum(F) dt/(rho h1) on ice-free non-plume points; slope ~1 confirms
   top-cell dilution; then include ice points: slope (S-S_ice)/S vs (S+S_ice)/S exposes the double count.
   RULE-3 note: freshwater_salinity default 's_ref' is documented "legacy" => a defect-report knob.
+- 16:20 RUNG 1 DAY 15 = REFUTED as the ascent operator (table in threegrid_unified_table): 50-150 m meridional
+  -13.8 Sv (ctl -12.9), w(155 m) +11.9 (ctl +11.3), NEMO +4.6 / +36.7. Lateral friction shape is not what
+  keeps the equatorial cell shallow. Day 30 (leg 2) still decides the EUC/nino3 lever question. Remaining
+  candidates for the shallow return flow: interior vertical viscosity below the mixed layer (avm; the
+  08-23 K instrument said ~10x NEMO at 65-105 m, caveated), the vertical momentum advection / adaptive-
+  implicit scheme, the pressure-gradient scheme (smc03) — all need the K dump or a term budget; ASK before
+  any arm.
+- 16:20 DILUTION FIX (defcbe43f + reviews): GLM MAJOR + codex CRITICAL = evaporation/ice growth needs the
+  UPWIND (cell-below) donor -> fixed (donor by flux sign; surface S=0/T=T_1 both signs); codex MAJOR =
+  runoff must enter over NEMO's h_rnf (sbc_rnf_div) -> per-level entry profile (runoff_entry_profile,
+  shared weights runoff_spread_layer_fractions); GLM (6) stratified partial-column both-sign test added
+  (catches the H_below off-by-one and the donor). Falsifier (dilreg 9654288): virtual-minus-real vs
+  NEMO-minus-real slope 0.61-0.79 open ocean, 1.2-1.3 at 30-60 lat, 0.3-0.6 plumes, ice 0.98 (30 m);
+  r 0.3-0.55 => linearisation not falsified, virtual over-dilutes plumes as predicted. Open (codex
+  PLAUSIBLE, needs a source trace): ice channel (S - S_ice) vs double count; emp*sst heat-content term
+  in our bulk; AB2 / leapfrog-before / restart interaction of the post-advection correction.
+- 16:40 DILUTION FIX round 1 applied + pushed (cad1c1e92): upwind donor by flux sign; runoff over h_rnf
+  (per-level entry profile, shared level weights); per-channel entry temperature (rain/evap/restoring 0 degC
+  since q_net carries their heat content = NEMO blk_oce_2/sbcssr; runoff at SST over h_rnf = rnf_tsc; ice
+  melt + normalisation residual at local T, PLAUSIBLE). SOURCE TRACES: ice brine channel = TRUE ice salt
+  content (salt_old - salt_stored)/dt, negative on growth, positive on melt (brine.py) => real closure gives
+  (S - S_ice) x growth like NEMO sfx, NO double count (CONFIRMED); our q_net has -evap cp T_s + rain cp
+  theta_air + snow terms (omip2_applicator.py 1090-1120) => the VIRTUAL closure (production) applies that
+  heat content WITHOUT the compensating tracer dilution (NEMO ln_linssh adds emp*sst in trasbc) => spurious
+  q ~ -(E-P) cp T ~ 2 W/m2 cooling where E>P (PLAUSIBLE, sent to round-2 reviewers). TRAP: numpy allclose
+  default rtol=1e-5 on S=35 hid a 1.7e-6 PSU signal -> the step test passed on pre-fix code; rtol=0 now.
+  Round-2 reviews: codex job 9654366, GLM task k5aa9zga2.
