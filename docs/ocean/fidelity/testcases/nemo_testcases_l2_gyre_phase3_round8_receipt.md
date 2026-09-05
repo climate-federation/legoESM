@@ -1,24 +1,19 @@
-# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–23 boundary receipt
+# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–24 boundary receipt
 
-**Verdict: HOLD.**  Round 20 made GYRE's kt1 stage-transport composition
-bit-exact, but the required cross-card trajectories proved that legoESM does
-not carry NEMO's prognostic `uu_b/vv_b(Kbb)` across steps.  Adding that state is
-an open user decision and is not undertaken in Rounds 21–22.  Independently, the
-stage-2 Kaa boundary remains DEBT at `2.1986806906376666e-15` U and
-`2.2380914396075147e-15` V.  Round 21 closes the previously unscored stage
-`ww` boundary AT-BAR at all three stages and refutes the proposed stage-clock
-change.  The next EEN coefficient arm confirms the live vorticity thickness
-divisor as a contributor but not the complete owner; its first primitive
-operand remains unmeasured.  Round 22 makes ORCA2's supplied-input CEN2
-precursor and `zFu/zFv` stage transports bit-exact, but exposes seven
-cellwise Rule-12 debts in the OVERFLOW trajectory (maximum `17.25` row-scale
-ulp).  Round 23 retains the literal but inert CEN2 `wmask`, publishes GYRE's
-cellwise kt1--10 register, and localizes the seven OVERFLOW rows away from a
-partial-cell-bottom owner.  Their first unconstructible source operand is the
-already-open prognostic `uu_b/vv_b(Kbb)` state, so no unauthorized rederivation
-or state field is added.  The source-literal fixes stay; those downstream rows
-and the existing GYRE boundaries remain the HOLD register.  No downstream
-result inherits a claim across these open boundaries.
+**Verdict: HOLD.**  User Decision 8 authorizes and Round 24 implements NEMO's
+separately prognostic `uu_b/vv_b` pair on NEMO-identity cards.  The equal-input
+GYRE kt1 Kaa write is bit-identical (`0 / 580` U faces, `0 / 570` V faces),
+the live external-mode seed and S-21 transport now read the carried pair, and
+a kt5 restart followed by kt6--10 is bit-identical to the unbroken run for
+every pytree leaf.  The change is not sufficient to lift HOLD: GYRE's stage-2
+Kaa remains DEBT at `2.1986806906376666e-15` U and
+`2.2380914396075147e-15` V, and the oracle-relative GYRE, LOCK and OVERFLOW
+trajectory gates expose compensating-error debt even though no first-over-bar
+moves earlier.  Under Rule 12 the source-faithful state fix stays and those
+rows enter the ordered register.  ORCA2's cellwise production-W comparison
+passes (maximum worsening 1 row-scale ulp); the C1D kt2 PRE_SSM six-row vector
+is unchanged.  Stage-3/ZDF/TKE work is not entered across these boundaries,
+and nothing is merged into the reconciled/integration line.
 
 Updated: 2026-09-05
 
