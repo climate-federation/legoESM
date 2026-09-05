@@ -3213,3 +3213,10 @@ registered; no downstream mask workaround was made.
 
 Round-23 measurements and labels are Codex-internal.  Independent review of
 this round remains **OUTSTANDING**.
+
+The focused CPU verification is `74 passed in 8.63s`: the literal CEN2 bit
+test, `ulp_move_gate`, the GYRE phase-3 gate tests, and the one-implementation
+tripwire.  The committed Round-23 manifest is
+`scripts/validate/ocean_fidelity/testcases/manifests/nemo_testcase_l2_gyre_round23.json`,
+SHA-256
+`cdb025a95c90676b5287deae92f6081cafe2a0638e1755fcbc8f099c5743e7b8`.
