@@ -34,6 +34,7 @@ OUTPUT_FIELDS = (
     "ssq", "cd_du", "sensible", "latent", "evap", "qlwn", "qsr",
     "qns", "emp", "utau", "vtau", "taum", "wndm",
 )
+O1_UNDEFINED_FIELDS = frozenset({"cd_du", "qlwn"})
 
 HYGIENE_STREAMS = {
     "oracle_bt_advmean_operands_kt00000001.bin",
@@ -338,6 +339,65 @@ def planted_controls(path: Path) -> dict[str, str]:
     return results
 
 
+def compare_o1_defined(left: Path, right: Path) -> dict:
+    """Byte-compare every source-owned O1 field and enumerate the two exclusions."""
+    pair = _PairReader(left, right)
+    all_defined = np.ones(NX * NY, dtype=bool)
+    none_defined = np.zeros(NX * NY, dtype=bool)
+    try:
+        for kind, fields in enumerate((INPUT_FIELDS, OUTPUT_FIELDS)):
+            pair.exact_bytes(16 + struct.calcsize(HEADER_FMT), f"frame_{kind}_header")
+            for field in fields:
+                pair.field(
+                    NX * NY,
+                    f"frame{kind}.{field}",
+                    none_defined if field in O1_UNDEFINED_FIELDS else all_defined,
+                )
+        pair.close()
+    except Exception:
+        pair.left.close()
+        pair.right.close()
+        raise
+    return {
+        "status": "EXACT_DEFINED_BYTES",
+        "defined_f64": sum(row["defined_f64"] for row in pair.rows),
+        "undefined_f64": sum(row["canonical_zero_f64"] for row in pair.rows),
+        "undefined_fields": sorted(O1_UNDEFINED_FIELDS),
+        "fields": pair.rows,
+    }
+
+
+def o1_defined_identity_planted_controls(left: Path, right: Path) -> dict[str, str]:
+    """One binding one-ULP mutation through the real comparator per owned field."""
+    results: dict[str, str] = {}
+    header_bytes = 16 + struct.calcsize(HEADER_FMT)
+    frame_bytes = header_bytes + len(INPUT_FIELDS) * NX * NY * 8
+    field_offsets: list[tuple[str, int]] = []
+    for kind, fields, base in (
+        (0, INPUT_FIELDS, header_bytes),
+        (1, OUTPUT_FIELDS, frame_bytes + header_bytes),
+    ):
+        for index, field in enumerate(fields):
+            if field not in O1_UNDEFINED_FIELDS:
+                field_offsets.append((f"frame{kind}.{field}", base + index * NX * NY * 8))
+    for label, offset in field_offsets:
+        with tempfile.TemporaryDirectory(prefix="orca2-o1-defined-plant-") as td:
+            altered = Path(td) / RECORD
+            shutil.copyfile(right, altered)
+            with altered.open("r+b") as handle:
+                handle.seek(offset)
+                value = struct.unpack("=d", handle.read(8))[0]
+                handle.seek(offset)
+                handle.write(struct.pack("=d", np.nextafter(value, np.inf)))
+            try:
+                compare_o1_defined(left, altered)
+            except GateError:
+                results[label] = "PASS_NONZERO"
+            else:
+                raise GateError(f"O1 defined identity plant did not fail: {label}")
+    return results
+
+
 def compare_inherited_records(run_dir: Path, accepted: Path) -> dict:
     """Require exact bytes except the preregistered source-undefined slots."""
     expected = exchange.phase1.expected_inventory() | {exchange.RECORD}
@@ -412,6 +472,7 @@ def validate(
     o1_sha256: str | None,
     plants: bool,
     accepted_instrumented: Path | None = None,
+    defined_o1_against: Path | None = None,
 ) -> dict:
     expected = exchange.phase1.expected_inventory() | {exchange.RECORD, RECORD}
     observed = {p.name for p in run_dir.glob("oracle_*.bin")}
@@ -452,11 +513,21 @@ def validate(
                 "defined inherited-record identity failed: "
                 f"{inherited['defined_exact']} / {inherited['total']} exact"
             )
+    if defined_o1_against is not None:
+        result["o1_defined_identity"] = compare_o1_defined(
+            defined_o1_against / RECORD, run_dir / RECORD
+        )
     if plants:
         result["o1_planted_controls"] = planted_controls(run_dir / RECORD)
         if accepted_instrumented is not None:
             result["defined_identity_planted_controls"] = (
                 defined_identity_planted_controls(run_dir, accepted_instrumented)
+            )
+        if defined_o1_against is not None:
+            result["o1_defined_identity_planted_controls"] = (
+                o1_defined_identity_planted_controls(
+                    defined_o1_against / RECORD, run_dir / RECORD
+                )
             )
     return result
 
@@ -469,6 +540,7 @@ def main() -> int:
     parser.add_argument("--surface-sha256", required=True)
     parser.add_argument("--o1-sha256")
     parser.add_argument("--accepted-instrumented", type=Path)
+    parser.add_argument("--defined-o1-against", type=Path)
     parser.add_argument("--plant-controls", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
@@ -476,7 +548,7 @@ def main() -> int:
         result = validate(
             args.run_dir, args.control, args.legacy_record_manifest,
             args.surface_sha256, args.o1_sha256, args.plant_controls,
-            args.accepted_instrumented,
+            args.accepted_instrumented, args.defined_o1_against,
         )
     except (GateError, exchange.GateError, exchange.phase1.GateError,
             OSError, UnicodeError,
