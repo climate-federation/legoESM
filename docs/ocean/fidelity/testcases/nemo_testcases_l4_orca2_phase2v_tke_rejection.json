@@ -1,0 +1,78 @@
+{
+  "status": "REJECTED_NONREPRODUCIBLE_TKE_RECORD",
+  "record": "oracle_tke_walk_kt00000002.bin",
+  "record_a_sha256": "1c3efbbcffc1e4dcb1c615c65534f8d462df06839a05ed2854de5c7ce9a74444",
+  "record_b_sha256": "5971dec9ff32e24767ec1eddeb6cfe0f919453cdd2d62861c26b97a54f74c336",
+  "bytes_each": 57266632,
+  "differing_bytes": 54889,
+  "first_file_offset_0_based": 14076115,
+  "last_file_offset_0_based": 31863079,
+  "first_file_offset_1_based": 14076116,
+  "last_file_offset_1_based": 31863080,
+  "jpk": 31,
+  "jpkm1": 30,
+  "affected_fields": [
+    {
+      "field": "zdiag_pre_solve",
+      "byte_differences": 14285,
+      "element_differences": 2795,
+      "levels_1_based": [
+        31
+      ],
+      "first_file_offset_0_based": 14076115,
+      "last_file_offset_0_based": 14145959,
+      "first_file_offset_1_based": 14076116,
+      "last_file_offset_1_based": 14145960
+    },
+    {
+      "field": "zd_lw_pre_solve",
+      "byte_differences": 12520,
+      "element_differences": 1569,
+      "levels_1_based": [
+        31
+      ],
+      "first_file_offset_0_based": 17625192,
+      "last_file_offset_0_based": 17689383,
+      "first_file_offset_1_based": 17625193,
+      "last_file_offset_1_based": 17689384
+    },
+    {
+      "field": "zd_up_pre_solve",
+      "byte_differences": 1279,
+      "element_differences": 382,
+      "levels_1_based": [
+        31
+      ],
+      "first_file_offset_0_based": 21168756,
+      "last_file_offset_0_based": 21232784,
+      "first_file_offset_1_based": 21168757,
+      "last_file_offset_1_based": 21232785
+    },
+    {
+      "field": "zdiag_after_forward",
+      "byte_differences": 14285,
+      "element_differences": 2795,
+      "levels_1_based": [
+        31
+      ],
+      "first_file_offset_0_based": 28249811,
+      "last_file_offset_0_based": 28319655,
+      "first_file_offset_1_based": 28249812,
+      "last_file_offset_1_based": 28319656
+    },
+    {
+      "field": "zd_lw_after_forward",
+      "byte_differences": 12520,
+      "element_differences": 1569,
+      "levels_1_based": [
+        31
+      ],
+      "first_file_offset_0_based": 31798888,
+      "last_file_offset_0_based": 31863079,
+      "first_file_offset_1_based": 31798889,
+      "last_file_offset_1_based": 31863080
+    }
+  ],
+  "localization": "persistent l4_tke_* arrays were zeroed, but the writer copied local zdiag/zd_lw/zd_up workspace level jpk=31 over those zeros; NEMO defines these workspaces only at the surface and jk=2:jpkm1=30",
+  "physics_disposition": "UNOWNED_UNDEFINED_WORKSPACE_SLOTS_ONLY"
+}
