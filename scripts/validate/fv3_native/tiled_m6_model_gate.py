@@ -18,6 +18,42 @@ import sys
 import numpy as np
 
 
+def leaves(bundle):
+    """(path, array) for EVERY array leaf of the bundle: state, press, the
+    tracer list, omga, the NH carry -- nothing skipped silently."""
+    import jax
+    out = []
+    for path, a in jax.tree_util.tree_leaves_with_path(bundle):
+        if hasattr(a, "ndim"):
+            out.append((jax.tree_util.keystr(path), a))
+    return out
+
+
+def _report_timing(args, times, jax, label):
+    """Per-step wall time: median over the timed steps of the CROSS-RANK
+    MAX (every rank times its own step; the slowest rank owns the step),
+    printed with the rank count and node count -- a ladder row."""
+    import os
+    import numpy as np
+    timed = np.asarray(times[args.steps:])
+    if jax.process_count() > 1:
+        from jax.experimental import multihost_utils as mhu
+        import jax.numpy as jnp
+        allr = np.asarray(mhu.process_allgather(jnp.asarray(timed)))
+        per_step_max = allr.max(axis=0)
+        slowest = int(np.argmax(allr.mean(axis=1)))
+    else:
+        per_step_max, slowest = timed, 0
+    print(f"[m6] TIMING {label}: ranks={jax.process_count()} nodes="
+          f"{os.environ.get('SLURM_JOB_NUM_NODES', '?')} C{args.n} km={args.km} "
+          f"steps={len(timed)}: p50 {np.median(per_step_max):.3f} s/step "
+          f"(cross-rank max per step; p90 {np.percentile(per_step_max, 90):.3f}"
+          f", max {per_step_max.max():.3f}, min {per_step_max.min():.3f}); "
+          f"slowest rank {slowest} host "
+          f"{os.uname().nodename if slowest == jax.process_index() else '?'}; "
+          f"per-step host readback (nsplt guard) is inside every step")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--n", type=int, default=48)
@@ -41,6 +77,22 @@ def main(argv=None):
                     help="compare the window arm against these saved "
                          "outputs (from a single-process run) instead of / "
                          "in addition to the in-process reference")
+    ap.add_argument("--flat-ref", action="store_true",
+                    help="no window arm: run the FLAT model face-sharded "
+                         "P('face') on 6 devices (6 processes under "
+                         "--distributed) and --save-npz its outputs -- the "
+                         "certified reference every ladder row compares to")
+    ap.add_argument("--diag-no-pad-refresh", action="store_true",
+                    help="DIAGNOSTIC: skip the per-firing pad refresh (pads "
+                         "refreshed at substep entry only); results are "
+                         "WRONG, the bitwise gate is expected to fail and "
+                         "the timing is printed as a decomposition arm, "
+                         "never as a ladder row")
+    ap.add_argument("--timing", type=int, default=0,
+                    help="after the gated steps, run this many more steps "
+                         "and report wall time per step (max over ranks, "
+                         "exclusive nodes only) -- REFUSED unless the gated "
+                         "steps were bitwise")
     args = ap.parse_args(argv)
 
     import jax
@@ -79,8 +131,51 @@ def main(argv=None):
                        n_split=args.n_split)
 
     # reference: faces, GSPMD-sharded P('face') on 6 devices (in-process
-    # only: a multi-process job runs ONE program on all its processes)
+    # only: a multi-process job runs ONE program on all its processes),
+    # or -- --flat-ref -- the SAME flat model as the distributed reference
+    # job on 6 processes, whose outputs are saved for the ladder rows
     ref_model = ref = None
+    if args.flat_ref:
+        if jax.device_count() != 6:
+            print(f"[m6] REFUSED: --flat-ref needs exactly 6 devices, got "
+                  f"{jax.device_count()}")
+            return 2
+        mesh6 = Mesh(np.array(jax.devices()), ("face",))
+        sh6 = NamedSharding(mesh6, P("face"))
+        ref_model = FV3DuoDynamicsModel(grid, cfg, step_out_shardings=sh6,
+                                        step_face_batched=True)
+        ref = ref_model.dcmip16_initial_state(do_pert=True)
+        ref = jax.tree_util.tree_map(
+            lambda a: jax.device_put(a, sh6) if hasattr(a, "ndim")
+            and a.ndim >= 3 and a.shape[0] == 6 else a, ref)
+        to_save = {}
+
+        def host(bundle):
+            if args.distributed:
+                from jax.experimental import multihost_utils as mhu
+                bundle = jax.tree_util.tree_map(
+                    lambda a: np.asarray(mhu.process_allgather(a, tiled=True))
+                    if hasattr(a, "sharding") else a, bundle)
+            return {p: np.asarray(a) for p, a in leaves(bundle)}
+        to_save.update({f"ic:{p}": a for p, a in host(ref).items()})
+        import time
+        times = []
+        for it in range(args.steps + args.timing):
+            t0 = time.perf_counter()
+            ref = ref_model.step(ref, args.dt)
+            jax.block_until_ready(ref)
+            times.append(time.perf_counter() - t0)
+            if it < args.steps:
+                to_save.update({f"step{it + 1}:{p}": a
+                                for p, a in host(ref).items()})
+            print(f"[m6] flat-ref step {it + 1}: nsplt="
+                  f"{ref_model.last_nsplt.tolist()} wall={times[-1]:.3f}s")
+        if args.save_npz and rank0:
+            np.savez(args.save_npz, **to_save)
+            print(f"[m6] saved {len(to_save)} flat outputs -> {args.save_npz}")
+        if args.timing:
+            _report_timing(args, times, jax, "flat faces x6")
+        return 0
     if not args.distributed:
         mesh6 = Mesh(np.array(jax.devices()[:6]), ("face",))
         sh6 = NamedSharding(mesh6, P("face"))
@@ -102,17 +197,12 @@ def main(argv=None):
         print(f"[m6] REFUSED: {e}")
         return 2
     lay = win_model.window_layout
+    if args.diag_no_pad_refresh:
+        win_model._window_comm.pad_refresh_per_firing = False
+        print("[m6] DIAGNOSTIC ARM: per-firing pad refresh OFF -- timing "
+              "only, results not a ladder row")
     print(f"[m6] {lay}; barriers {win_model._window_comm.barrier_mode}")
     win = win_model.dcmip16_initial_state(do_pert=True)
-
-    def leaves(bundle):
-        """(path, array) for EVERY array leaf of the bundle: state, press,
-        the tracer list, omga, the NH carry -- nothing skipped silently."""
-        out = []
-        for path, a in jax.tree_util.tree_leaves_with_path(bundle):
-            if hasattr(a, "ndim"):
-                out.append((jax.tree_util.keystr(path), a))
-        return out
 
     def flat_leaves(bundle_w):
         """(path, host array) of the window bundle scattered to faces --
@@ -134,6 +224,12 @@ def main(argv=None):
                   if k.startswith("ic:")]
     bad = 0
     n_ic = 0
+    # completeness BOTH ways (codex 2026-09-05): a reference missing a leaf
+    # the window arm has (a truncated npz) must refuse, not pass
+    extra = sorted(set(ic_flat) - {p for p, _ in ref_ic})
+    if extra:
+        print(f"  IC: reference lacks window leaves {extra} -- REFUSED")
+        bad += 1
     for path, a in ref_ic:
         b = ic_flat.get(path)
         n_ic += 1
@@ -148,8 +244,27 @@ def main(argv=None):
     to_save = {f"ic:{p}": np.asarray(a) for p, a in ic_flat.items()}
 
     rc = 0
+    import time
+    times = []
     for it in range(args.steps):
+        t0 = time.perf_counter()
         win = win_model.step(win, args.dt)
+        jax.block_until_ready(win)
+        times.append(time.perf_counter() - t0)
+        # GLM 2026-09-05: the per-rank sub-cycle schedule must be IDENTICAL
+        # on every process (a local max would silently under-advect) --
+        # asserted with an allgather, not just printed
+        ns = np.asarray(win_model.last_nsplt)
+        if jax.process_count() > 1:
+            from jax.experimental import multihost_utils as mhu
+            import jax.numpy as jnp
+            alln = np.asarray(mhu.process_allgather(jnp.asarray(ns)))
+            if not np.all(alln == alln[0]):
+                print(f"  step {it + 1}: nsplt DIFFERS across ranks: "
+                      f"{alln.tolist()} -- REFUSED")
+                rc = 1
+        print(f"[m6] rank {jax.process_index()} step {it + 1}: nsplt="
+              f"{ns.tolist()} wall={times[-1]:.3f}s")
         if ref is not None:
             ref = ref_model.step(ref, args.dt)
             ref_leaves = leaves(ref)
@@ -167,6 +282,11 @@ def main(argv=None):
                         for p, a in wf.items()})
         n_ok = n_bad = 0
         worst = 0.0
+        extra = sorted(set(wf) - {p for p, _ in ref_leaves})
+        if extra:
+            print(f"  step {it + 1}: reference lacks window leaves {extra} "
+                  f"-- REFUSED")
+            n_bad += 1
         for path, r in ref_leaves:
             w = wf.get(path)
             r = np.asarray(r)
@@ -201,6 +321,30 @@ def main(argv=None):
     if args.save_npz and rank0:
         np.savez(args.save_npz, **to_save)
         print(f"[m6] saved {len(to_save)} flat outputs -> {args.save_npz}")
+    if args.timing:
+        if jax.process_count() > 1:
+            # every rank must take the SAME branch (codex 2026-09-05): a
+            # rank whose reference file differs would otherwise skip the
+            # timed collectives while the others enter them
+            from jax.experimental import multihost_utils as mhu
+            import jax.numpy as jnp
+            rc = int(np.asarray(mhu.process_allgather(
+                jnp.asarray(rc, dtype=jnp.int32))).max())
+        if rc != 0 and not args.diag_no_pad_refresh:
+            print("[m6] TIMING REFUSED: the gated steps were not bitwise on "
+                  "every rank -- a rank-count row on a wrong exchange is not "
+                  "reported")
+        else:
+            for it in range(args.timing):
+                t0 = time.perf_counter()
+                win = win_model.step(win, args.dt)
+                jax.block_until_ready(win)
+                times.append(time.perf_counter() - t0)
+            _report_timing(args, times, jax,
+                           f"windows kt={args.kt} pad={args.pad}"
+                           + (" DIAGNOSTIC no-per-firing-refresh (NOT a "
+                              "ladder row)" if args.diag_no_pad_refresh
+                              else ""))
     print(f"[m6] VERDICT kt={args.kt} pad={args.pad} steps={args.steps}: "
           f"{'BITWISE' if rc == 0 else 'DIFFERS'} vs "
           f"{'the saved reference ' + args.ref_npz if ref is None else 'the face-sharded model'}")

@@ -353,6 +353,10 @@ class FV3DuoDynamicsModel:
         # C5, on concrete outputs OUTSIDE jit: an nsplt above NSPLT_MAX
         # would otherwise under-advect the tracers silently.
         check_nsplt_schedule(out)
+        # the resolved per-level sub-cycle schedule of this step, kept for
+        # instruments (the rank ladder prints it per rank: under
+        # jax.distributed it must be identical on every process)
+        self.last_nsplt = np.asarray(out["nsplt"])
         if out["pt_units"] != "K":
             # unreachable while km in {5,10} (> REMAP_MIN_NPZ = 4), but a
             # future km table below 5 would hand back theta_v — fail loudly.

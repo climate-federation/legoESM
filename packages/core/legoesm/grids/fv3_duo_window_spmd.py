@@ -60,6 +60,11 @@ class DuoWindowSpmdComm:
 
     handles_barriers = True
     barrier_mode = "tiled"
+    #: DIAGNOSTIC ONLY (timing decomposition): False skips the pad refresh
+    #: after every firing (pads then refresh only at substep entry via
+    #: refresh()).  The step is then WRONG at seams that a firing wrote
+    #: into a neighbour's pad -- never a production setting, never gated.
+    pad_refresh_per_firing = True
 
     def __init__(self, lay: WindowLayout, tab, mesh):
         import jax
@@ -227,7 +232,8 @@ class DuoWindowSpmdComm:
                     new.append(jax.lax.dynamic_update_slice_in_dim(
                         a, strip, bi, 0))
                 locs = new
-            locs = self._pad_exchange(locs)
+            if body is None or self.pad_refresh_per_firing:
+                locs = self._pad_exchange(locs)
             return tuple(restore(a)[None] for a, (_, restore)
                          in zip(locs, norm))
 

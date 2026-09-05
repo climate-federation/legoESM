@@ -2,7 +2,7 @@
 #SBATCH --account=glab
 #SBATCH --job-name=m6_mpi
 #SBATCH --partition=short
-#SBATCH --time=03:00:00
+#SBATCH --time=08:00:00
 #SBATCH --cpus-per-task=4
 #SBATCH --exclusive
 #SBATCH --output=/burg-archive/glab/users/pg2328/fv3_duo_gaps/m6_mpi_gate_%j.log
@@ -28,5 +28,7 @@ echo "host: $(hostname) ranks=$SLURM_NTASKS nodes=$SLURM_JOB_NUM_NODES sha: $(gi
 echo "===== M6 MPI gate C$N km=$KM ${NHFLAG:-hydro} kt=$KT pad=$PAD ranks=$SLURM_NTASKS ref=${REF:-none} ====="
 srun --mpi=pmix --kill-on-bad-exit=0 "$PY" scripts/validate/fv3_native/tiled_m6_model_gate.py --n "$N" --km "$KM" $NHFLAG --kt "$KT" --pad "$PAD" --n-split "${NSPLIT:-3}" --steps "${STEPS:-2}" --distributed ${REF:+--ref-npz $REF} ${GATE_EXTRA:-} 2>&1 \
   | grep -vE "cuda|jax_plugins|xla_bridge|versions_helpers|for d in range|_check_cuda|plugin_module|^\s+\^$|RuntimeError: jaxlib|MPItrampoline\]|MPIwrapper|Open MPI v|Deprecat|shard_map import"
-echo "SRUN_RC=${PIPESTATUS[0]}"
+RC=${PIPESTATUS[0]}
+echo "SRUN_RC=$RC"
 echo DONE m6_mpi_gate
+exit $RC
