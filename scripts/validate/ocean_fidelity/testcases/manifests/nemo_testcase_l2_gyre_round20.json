@@ -27,7 +27,8 @@
     "stage2_kaa": "DEBT: u=2.1986806906376666e-15, v=2.2380914396075147e-15",
     "first_over_bar": "kt=2: T,S,u,v",
     "whole_step_move_vs_merge": "20 improved / 20 worsened / 10 identical",
-    "stage3_transport_zdf_tke": "UNMEASURED_UPSTREAM_STAGE2_DEBT"
+    "stage3_transport_zdf_tke": "UNMEASURED_UPSTREAM_STAGE2_DEBT",
+    "crosscard_stage_transport_eligibility": "HOLD: stage gates unchanged at 0 ulp; OVERFLOW and LOCK trajectories FAIL from kt3; persistent Kbb barotropic mean is the next operand"
   },
   "crosscard": {
     "post_coastal_change": {
@@ -37,11 +38,13 @@
       "lock_trajectory": "PASS 50 rows 0 ulp"
     },
     "post_stored_mean_change": {
-      "status": "UNMEASURED_RESOURCE_BOUND",
-      "overflow_stage": "interrupted after 20 minutes before any report row",
-      "overflow_trajectory": "interrupted after 20 minutes before any report row",
-      "lock_stage": "not run after the preceding resource-bound boundary",
-      "lock_trajectory": "not run after the preceding resource-bound boundary"
+      "status": "HOLD_RULE12_SECOND_ERROR",
+      "overflow_stage": "PASS 9 rows 0 ulp",
+      "overflow_trajectory": "FAIL 50 rows max 3563707596 ulp; first_over_bar kt2 T,u unchanged; S AT-BAR->DEBT at kt7-10",
+      "lock_stage": "PASS 9 rows 0 ulp",
+      "lock_trajectory": "FAIL 50 rows max 1549621 ulp; first_over_bar kt4 u -> kt3 T,u; 10 AT-BAR->DEBT changes",
+      "next_boundary": "PERSISTENT_KBB_BAROTROPIC_MEAN_UNMEASURED",
+      "jax_cache": "/tmp/gyre-r20-jaxcache.Ccdm2p (retained; AOT prefer-no-gather/prefer-no-scatter warnings reproduced with an empty cache)"
     }
   },
   "artifacts": {
@@ -70,7 +73,19 @@
     "post_coastal_overflow_stage_compare": "18368de8eb27432a2ae021a9f84209b535ca8c2fb452419ebada49aba6c3d053",
     "post_coastal_overflow_trajectory_compare": "d0be02f6a4320aee58e63cb129c4f76021d71d3b13f9e8d6c1276b33bdf76a5f",
     "post_coastal_lock_stage_compare": "f4a1d2e9bb2ae246c2f135645d2c22e9adf9a919a9af7c350133d252b763d961",
-    "post_coastal_lock_trajectory_compare": "2feb576ec04ed861460d78b600edaca5502146172038bbb87929d965df6814fb"
+    "post_coastal_lock_trajectory_compare": "2feb576ec04ed861460d78b600edaca5502146172038bbb87929d965df6814fb",
+    "post_stored_mean_overflow_stage": "fa477bbfc1325bff5d494b7e19461397484bd1284484bf4bef4b002ac28c4d64",
+    "post_stored_mean_overflow_stage_residuals": "04e707727634f09ec6af1e4c182f536a05d55b2dab421fefaecab7c2d454e69d",
+    "post_stored_mean_overflow_stage_compare": "21c18e46b9986501166011059243b27c7de7b126bb9ea0f4b83ac793f54601db",
+    "post_stored_mean_overflow_trajectory": "161a138c0d9c840bd30d78ad2c201220459b613097bf0afc2c14fe5597feef9a",
+    "post_stored_mean_overflow_trajectory_residuals": "9987c6b012b99c550685bb88de9faa7518f147e93c6a3dd92a80bde670ecf84f",
+    "post_stored_mean_overflow_trajectory_compare": "273ba577ddb66f7118112ed9f71a4d1cd1bc4f368571fa8a894c1b278e6e1819",
+    "post_stored_mean_lock_stage": "b8babadaec39bfa7ac602b5abce4d225b822802c1f693bf5b7a4034c390c1266",
+    "post_stored_mean_lock_stage_residuals": "cf6f72069015452d568a900bac093748f4756282cafc7ac44c4d301190fcb601",
+    "post_stored_mean_lock_stage_compare": "6a6137ea5d874f9c45bfb5b0d000d27eeaa0b06be13e0a7958e3dcacec122932",
+    "post_stored_mean_lock_trajectory": "279e6f789c203439d6260d7df557fc7b149b3a2cfe0b306c177547bd5a3e3fa8",
+    "post_stored_mean_lock_trajectory_residuals": "bc50372f08703c16e3a65109ce679a2810a82c7dcff699f5dd89cbb5f606236d",
+    "post_stored_mean_lock_trajectory_compare": "74672def65a001076de5a35a683b3c66df4a2cbf559bec08b4f80e4aef01ceab"
   },
   "verification": {
     "gate_route_tests": "13 passed in 287.60 s",

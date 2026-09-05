@@ -2259,14 +2259,107 @@ maxima are enumerated here; no status changes.
 | T | 10 | `5.636634494144276e-3` | `5.636643309707159e-3` | `1.0000015639763218` |
 | u | 10 | `5.6249869570541774e-2` | `5.6250884173481036e-2` | `1.000018037427411` |
 
-The mandatory post-S-21 cross-card rerun was attempted with the local Git
-directory exported so provenance resolved to `d6741f3b6`.  The OVERFLOW stage
-gate and then the isolated OVERFLOW trajectory gate each compiled for 20
-minutes without producing a report row and were interrupted; LOCK was not
-started after the preceding resource-bound boundary.  Therefore post-S-21
-cross-card status is **UNMEASURED_RESOURCE_BOUND**.  The four zero-ulp PASS
-lines above certify the preceding coastal-stress change only and are not reused
-as evidence for S-21.  No Rule-12 statement is made for the unmeasured rerun.
+The mandatory post-S-21 cross-card rerun completed with a retained CPU JAX
+cache after the original 20-minute attempts.  A fresh empty-cache trial emitted
+the same XLA AOT `prefer-no-gather` / `prefer-no-scatter` host-feature warnings;
+the processes completed without `SIGILL`, and the cache path
+`/tmp/gyre-r20-jaxcache.Ccdm2p` is retained as run provenance.  The verdicts are:
+
+```text
+ORACLE_RELATIVE_COMPARE PASS: rows=9 max_worsening_ulps=0 first_over_bar='<absent>'->'<absent>' plant=None
+ORACLE_RELATIVE_COMPARE FAIL: rows=50 max_worsening_ulps=3563707596 first_over_bar={'fields': ['T', 'u'], 'kt': 2}->{'kt': 2, 'fields': ['T', 'u']} plant=None
+ORACLE_RELATIVE_COMPARE PASS: rows=9 max_worsening_ulps=0 first_over_bar='<absent>'->'<absent>' plant=None
+ORACLE_RELATIVE_COMPARE FAIL: rows=50 max_worsening_ulps=1549621 first_over_bar={'fields': ['u'], 'kt': 4}->{'kt': 3, 'fields': ['T', 'u']} plant=None
+```
+
+The order is OVERFLOW stage, OVERFLOW trajectory, LOCK stage, LOCK trajectory.
+Thus S-21 is unchanged at the single-step stage boundaries on both earlier
+cards, but is not yet eligible to merge under Rule 12: after kt1 legoESM must
+reconstruct NEMO's persistent `uu_b/vv_b(Kbb)` from the committed 3-D state.
+The Round-20 implementation supplies zero for the stage-1 Kbb mean on every
+step, which is exact only for the at-rest first step.  This is the first
+unmatched operand at the new trajectory boundary and is registered as
+**PERSISTENT_KBB_BAROTROPIC_MEAN_UNMEASURED**.  The source-exact S-21 operator
+stays; it is not waived, reverted, or hidden behind a card switch.
+
+The OVERFLOW trajectory has four AT-BAR-to-DEBT status changes (`S` at kt7,
+kt8, kt9, and kt10) but its first-over-bar remains kt2 T/u.  LOCK has ten
+AT-BAR-to-DEBT changes (`T,u` at kt3; `T` at kt4-6; `ssh` at kt6-10), and its
+first-over-bar moves earlier from kt4 u to kt3 T/u.  Those are gate failures,
+not rounding disclosures.
+
+The following combined Rule-8/Rule-12 ledger enumerates every trajectory row
+whose candidate differs from the preceding post-coastal legoESM baseline.
+`move` is max |after-before| in row-scale oracle ulp; `worse` is max increase
+in |candidate-NEMO| in the same ulp; `cells` is worsened / scored and `over`
+counts cells beyond the two-ulp gate.  Stage rows are omitted because all 18
+are exactly unchanged: for each card, six momentum rows are `0 / 16900`
+(OVERFLOW) or `0 / 2540` (LOCK), the kt2 tracer row is `0 / 17000` or
+`0 / 2560`, and the two kt2 momentum rows repeat the corresponding momentum
+denominator.
+
+| card | kt | field | move ulp | worse ulp | cells | over |
+|---|---:|---|---:|---:|---:|---:|
+| OVERFLOW | 3 | S | `2` | `2` | `9 / 17000` | 0 |
+| OVERFLOW | 3 | T | `2.07127374e9` | `2.07127374e9` | `77 / 17000` | 74 |
+| OVERFLOW | 3 | u | `3.05172106e8` | `2.67508999e8` | `283 / 16900` | 223 |
+| OVERFLOW | 4 | S | `3` | `3` | `84 / 17000` | 4 |
+| OVERFLOW | 4 | T | `3.56372962e9` | `3.56370760e9` | `127 / 17000` | 76 |
+| OVERFLOW | 4 | ssh | `1.18449991e8` | `1.18430118e8` | `13 / 200` | 9 |
+| OVERFLOW | 4 | u | `7.24995883e8` | `5.14919450e8` | `385 / 16900` | 270 |
+| OVERFLOW | 5 | S | `4` | `4` | `155 / 17000` | 14 |
+| OVERFLOW | 5 | T | `3.16022534e9` | `3.15967334e9` | `176 / 17000` | 88 |
+| OVERFLOW | 5 | ssh | `5.50941930e8` | `5.50850572e8` | `19 / 200` | 13 |
+| OVERFLOW | 5 | u | `7.01726734e8` | `2.85198822e8` | `424 / 16900` | 283 |
+| OVERFLOW | 6 | S | `5` | `2` | `107 / 17000` | 0 |
+| OVERFLOW | 6 | T | `2.16441218e9` | `2.16291456e9` | `165 / 17000` | 101 |
+| OVERFLOW | 6 | ssh | `1.01200833e9` | `1.01200833e9` | `22 / 200` | 16 |
+| OVERFLOW | 6 | u | `3.64492564e8` | `1.36508168e8` | `483 / 16900` | 327 |
+| OVERFLOW | 7 | S | `6` | `4` | `178 / 17000` | 27 |
+| OVERFLOW | 7 | T | `2.13179039e9` | `2.12905125e9` | `264 / 17000` | 102 |
+| OVERFLOW | 7 | ssh | `9.37935692e8` | `9.37935692e8` | `24 / 200` | 18 |
+| OVERFLOW | 7 | u | `4.27374910e8` | `1.87725884e8` | `627 / 16900` | 409 |
+| OVERFLOW | 8 | S | `6` | `6` | `204 / 17000` | 10 |
+| OVERFLOW | 8 | T | `2.81168887e9` | `2.80769391e9` | `302 / 17000` | 111 |
+| OVERFLOW | 8 | ssh | `5.19056397e8` | `5.19056397e8` | `31 / 200` | 21 |
+| OVERFLOW | 8 | u | `9.40292522e8` | `5.58641418e8` | `857 / 16900` | 457 |
+| OVERFLOW | 9 | S | `7` | `7` | `228 / 17000` | 20 |
+| OVERFLOW | 9 | T | `3.04286165e9` | `3.03821590e9` | `318 / 17000` | 124 |
+| OVERFLOW | 9 | ssh | `4.63559930e8` | `4.63559930e8` | `37 / 200` | 23 |
+| OVERFLOW | 9 | u | `1.22600098e9` | `9.18648236e8` | `1184 / 16900` | 479 |
+| OVERFLOW | 10 | S | `8` | `5` | `221 / 17000` | 8 |
+| OVERFLOW | 10 | T | `2.62242110e9` | `2.61828096e9` | `337 / 17000` | 134 |
+| OVERFLOW | 10 | ssh | `8.66497437e8` | `8.66497437e8` | `41 / 200` | 24 |
+| OVERFLOW | 10 | u | `1.01872543e9` | `9.34932649e8` | `1572 / 16900` | 531 |
+| LOCK | 3 | T | `43668` | `43668` | `25 / 2560` | 23 |
+| LOCK | 3 | u | `66.239666` | `66.238554` | `140 / 2540` | 60 |
+| LOCK | 4 | T | `130878` | `130878` | `23 / 2560` | 21 |
+| LOCK | 4 | ssh | `0.000244141` | `6.93889e-18` | `2 / 128` | 0 |
+| LOCK | 4 | u | `276.813080` | `92.432362` | `179 / 2540` | 53 |
+| LOCK | 5 | S | `1` | `0` | `0 / 2560` | 0 |
+| LOCK | 5 | T | `261409` | `261409` | `24 / 2560` | 21 |
+| LOCK | 5 | ssh | `1.320801` | `1.320313` | `10 / 128` | 0 |
+| LOCK | 5 | u | `706.697968` | `274.002228` | `177 / 2540` | 45 |
+| LOCK | 6 | S | `1` | `1` | `32 / 2560` | 0 |
+| LOCK | 6 | T | `434936` | `434936` | `40 / 2560` | 24 |
+| LOCK | 6 | ssh | `7.540527` | `7.540527` | `12 / 128` | 3 |
+| LOCK | 6 | u | `1439.22144` | `606.521561` | `194 / 2540` | 45 |
+| LOCK | 7 | S | `2` | `2` | `29 / 2560` | 0 |
+| LOCK | 7 | T | `651176` | `651176` | `36 / 2560` | 27 |
+| LOCK | 7 | ssh | `21.926758` | `21.926758` | `13 / 128` | 3 |
+| LOCK | 7 | u | `2551` | `1130.95316` | `223 / 2540` | 54 |
+| LOCK | 8 | S | `2` | `2` | `18 / 2560` | 0 |
+| LOCK | 8 | T | `909420` | `909420` | `49 / 2560` | 28 |
+| LOCK | 8 | ssh | `49.251953` | `49.251953` | `13 / 128` | 3 |
+| LOCK | 8 | u | `4083.79208` | `1924.28589` | `216 / 2540` | 58 |
+| LOCK | 9 | S | `1` | `1` | `3 / 2560` | 0 |
+| LOCK | 9 | T | `1209134` | `1209134` | `50 / 2560` | 28 |
+| LOCK | 9 | ssh | `100.823242` | `100.770508` | `14 / 128` | 4 |
+| LOCK | 9 | u | `6130.55237` | `3006.86243` | `236 / 2540` | 61 |
+| LOCK | 10 | S | `2` | `2` | `26 / 2560` | 0 |
+| LOCK | 10 | T | `1549621` | `1549621` | `44 / 2560` | 34 |
+| LOCK | 10 | ssh | `182.201172` | `182.078125` | `13 / 128` | 4 |
+| LOCK | 10 | u | `8760.48010` | `4420.52179` | `220 / 2540` | 58 |
 
 ### Round-20 ASKED / UNASKED register
 
@@ -2277,11 +2370,12 @@ as evidence for S-21.  No Rule-12 statement is made for the unmeasured rerun.
 | explicit scalar-libm on every census probe | ASKED item 1 | complete; measured zero payload move |
 | full census term-budget rerun | ASKED item 1 | UNMEASURED after 12-minute CPU budget |
 | NEMO coastal stress factors | ASKED item 2 | source-exact shared change; dynamically inert on GYRE active faces |
-| stored `uu_b/vv_b` stage-transport operand | ASKED ordered item 3 | CONFIRMED shared S-21 owner; landed |
+| stored `uu_b/vv_b` stage-transport operand | ASKED ordered item 3 | CONFIRMED at GYRE kt1; committed but HOLD for landing pending persistent Kbb operand |
 | V2 halo-only non-finite tolerance after owned-cell transform | UNASKED measurement-integrity fix | two discarded halo values disclosed; scored interiors remain fail-closed |
 | direct-ratio / extra-rounding HPG experiments | UNASKED discriminators | refuted and reverted; no shipped change |
 | kt1–10 repin | ASKED conditional | complete; first_over_bar kt2 unchanged |
-| post-S-21 OVERFLOW/LOCK cross-card gates | ASKED process rule | attempted; UNMEASURED_RESOURCE_BOUND, no false PASS |
+| post-S-21 OVERFLOW/LOCK cross-card gates | ASKED process rule | complete; both stage gates PASS 0 ulp, both trajectory gates FAIL and second-error rows are registered |
+| persistent `uu_b/vv_b(Kbb)` across legoESM steps | UNASKED boundary exposed by Rule 12 | next owner; UNMEASURED, no persistence-field implementation attempted |
 | stage-3 transports, ZDF matrices/solutions, TKE | ASKED conditional | not entered because stage-2 Kaa remains DEBT |
 | GYRE-only arm, tuning, gate criterion change, shipped NEMO edit | forbidden | none |
 
