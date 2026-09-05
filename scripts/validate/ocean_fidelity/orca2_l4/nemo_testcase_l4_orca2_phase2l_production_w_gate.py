@@ -280,7 +280,7 @@ def validate(deck_root: Path, oracle_root: Path, *, plant: bool) -> dict[str, ob
         *map(jnp.asarray, (
             fu_c, fu_w, fv_c, fv_s, wzv["e3t"], wzv["e3t0"], wzv["tmask"],
             wzv["r1_area"], wzv["runoff"], eta_before_rank0, final_ssh))))
-    clock_row = score(full_clock_w, oracle, mask)
+    clock_row = score(full_clock_w[..., :NLEV], oracle, mask)
     if plant:
         exact_control = oracle.copy()
         index = tuple(np.argwhere(mask)[0])
