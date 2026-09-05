@@ -5,9 +5,10 @@ bit-exact, but the required cross-card trajectories proved that legoESM does
 not carry NEMO's prognostic `uu_b/vv_b(Kbb)` across steps.  Adding that state is
 an open user decision and is not undertaken in Round 21.  Independently, the
 stage-2 Kaa boundary remains DEBT at `2.1986806906376666e-15` U and
-`2.2380914396075147e-15` V.  Round 21 first closes the previously unscored
-stage `ww` coverage gap; no downstream result inherits a claim across either
-open boundary.
+`2.2380914396075147e-15` V.  Round 21 installs the fail-closed acquisition and
+scoring path for the previously unscored stage `ww` boundary; measurement is
+pending the user-executed NEMO twin, so no downstream result inherits a claim
+across either open boundary.
 
 Updated: 2026-09-05
 
@@ -2446,3 +2447,73 @@ The two pre-existing HOLD items remain explicit:
 |---|---|---|
 | prognostic `uu_b/vv_b(Kbb)` | HOLD — design decision pending | NEMO declares and restarts it (`oce.F90:39,99`; `restart.F90:181,313`), writes it in `dynspg_ts.F90:862,879,890`, and reads it at `stprk3_stg.F90:262-263`; do not rederive |
 | stage-2 Kaa | DEBT: U `2.1986806906376666e-15`, V `2.2380914396075147e-15` | resume the Krhs/update walk only after the stage-W coverage result |
+
+### 21.3 acquisition handoff and stop
+
+The V2 inventory confirms that no existing record can answer the registered
+question.  `oracle_transport_kt00000001_s{1,2,3}.bin` carries an uninitialized
+`zFw` in the vector-invariant branch, and the later
+`oracle_rkstage3_wzv_kt00000001.bin` covers stage 3 only.  The new acquisition
+therefore writes `rDt`, `ww`, and `pFw` immediately after
+`traadv.F90:220-235` for each stage with magic `NEMO_L2_STGWW_1`; it never
+reads a diagnostic value back into NEMO.
+
+The user-executed, non-overwriting recipe is
+`scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round21_oracle/run.sh`.
+It creates `GYRE_OMIP_L2_P3_SM_R21W` and
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round21_oracle_v2_stage_ww`,
+copies the reviewed V2 deck and MY_SRC byte-for-byte, applies only
+`traadv_round21.patch`, rebuilds with scalar math, refuses `_ZGV*`, and admits
+the three new files only after every old `oracle_*.bin` plus the final restart
+is byte-identical.  Codex did not run it.  Patch dry-run succeeded against the
+reviewed V2 `traadv.F90` (`4807fa59...`); the resulting retained patch-check
+copy hashes `a2ed0cf0e581a920fc9df01a56131ffa07d4c2d3c244d3d78542415068ae25df`.
+
+The focused production-JIT gate is
+`nemo_testcase_l2_gyre_stage_ww_gate.py`.  It refuses a missing record before
+building a model:
+
+```text
+FAIL: missing /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round21_oracle_v2_stage_ww/oracle_rkstage_ww_kt00000001_s1.bin
+```
+
+That fail-closed transcript hashes
+`4a142241914e29a7f3363bcac0e024b37efe7b2c1cfa402d597de3add3e98918`.
+The shared model change is diagnostic-only: production still receives the
+full step clock, while `_NEMOWSRK3TestHooks.source_stage_wzv_clock_arm`
+changes only the WZV clock and
+`expose_tracer_transport_as_ww` only changes the returned diagnostic pytree.
+No constructible card selects either hook.  S-21 in the isomorphism map records
+the arm and source references.
+
+Verification is `80 passed in 11.46 s` for the GYRE gate, time-level registry,
+and one-implementation tripwires.  The record reader's synthetic exact control
+is `0 / 21,824`; its one-cell plant is `1 / 21,824`, DEBT.  Shell syntax,
+Python compilation, and patch dry-run pass.  The science gate currently exits
+2 on the deliberately absent oracle input; this is acquisition pending, not a
+physics verdict.
+
+Round-20's independent review verdict is **FIX-THEN-SHIP the delta, HOLD the
+line**.  The review confirmed that `uu_b/vv_b` is prognostic and restartable
+NEMO state, so re-derivation cannot certify S-21 beyond kt1.  Round 21 makes no
+design choice and does not merge the Round-20 tip.  EEN is not entered out of
+order.  The lane-3b NaN producer did not arrive during this round, so its
+registered status remains UNMEASURED rather than being hidden by a mask.
+
+### Round-21 ASKED / UNASKED register
+
+| choice or action | origin | disposition |
+|---|---|---|
+| score tracer-consumed `ww` at stages 1-3 | ASKED item 1 | gate and schema complete; numerical rows UNMEASURED pending user NEMO run |
+| WRITE-only MY_SRC extension and `run.sh` | ASKED conditional | complete; non-overwriting, scalar-math, byte-identity admission |
+| private per-stage WZV-clock arm | ASKED one-variable discriminator | complete; unreachable from public cards; no production fix selected |
+| fix the shared WZV clock | conditional ASKED | NOT AUTHORIZED until GYRE production `ww` scores over bar |
+| LOCK/OVERFLOW/ORCA2 cross-card WZV gates | conditional ASKED | NOT RUN before the GYRE falsifier |
+| EEN external-mode coefficient walk | ASKED item 2 | ordered stop behind the missing GYRE stage-W oracle record |
+| OVERFLOW dry-face NaN producer | ASKED item 3 | UNMEASURED_PENDING_LANE3B_PRODUCER; no consumer mask added |
+| prognostic `uu_b/vv_b` state | open USER DECISION | not implemented or rederived |
+| lane-3b Round-17 Kmm seed | explicitly forbidden | not adopted |
+| NEMO execution, shipped-source edit, merge, push | forbidden | none |
+
+All Round-21 measurements and harness results are Codex-internal.  Independent
+Round-21 review remains outstanding; no dual-review claim is made.

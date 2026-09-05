@@ -1,0 +1,46 @@
+{
+  "format": "nemo-testcase-l2-gyre-round21-manifest-v1",
+  "session_id": "01a05cb9-7625-7f40-9e83-b3fa767b1945",
+  "date": "2026-09-05",
+  "branch": "fidelity/nemo-testcases-l2-gyre-codex2",
+  "starting_git_sha": "fa14627631d8a7babd4701b939b57cad360ca2ed",
+  "regime": "production-jit/cpu/fp64/oracle-v2/scalar-libm",
+  "status": "HOLD_ORACLE_ACQUISITION_AND_STATE_DESIGN",
+  "commits": {
+    "preregistration": "a246da0cc",
+    "stage_ww_gate_and_oracle_recipe": "abe71f910"
+  },
+  "stage_ww": {
+    "existing_oracle_coverage": "UNMEASURED: pre-tra_adv zFw uninitialized at stages 1-3; post-tra_adv record exists for stage 3 only",
+    "new_record": "NEMO_L2_STGWW_1: rDt, ww, pFw after traadv.F90:220-235",
+    "production_prediction": "stage1/2 DEBT, stage3 AT-BAR",
+    "arm_prediction": "rn_Dt/3,rn_Dt/2,rn_Dt gives 0 / n at stages 1-3",
+    "current_gate": "exit 2: first required oracle record absent",
+    "production_fix": "NOT AUTHORIZED before the GYRE falsifier"
+  },
+  "open_register": {
+    "prognostic_uu_b_vv_b": "HOLD user decision; NEMO prognostic/restart state; no rederivation",
+    "stage2_kaa": "DEBT u=2.1986806906376666e-15 v=2.2380914396075147e-15",
+    "een_external_coefficients": "NOT ENTERED behind stage-W acquisition",
+    "overflow_dry_face_nan": "UNMEASURED_PENDING_LANE3B_PRODUCER",
+    "stage3_transport_zdf_tke": "UNMEASURED_UPSTREAM_STAGE2_DEBT"
+  },
+  "artifacts": {
+    "v2_traadv_source": "4807fa59ce15237ac04ef8e84f39c77b3da4080aa9ad1effa517fb79e1a6968d",
+    "round21_instrument_patch": "af49471cd0dae365a052a3feddd461ef4c52a97cd5756eb12458459fe0341271",
+    "round21_run_recipe": "c395c0d2547ed814cfcfa3b6aae868e3472bde08ca404d02c87a6b33b9a98f38",
+    "round21_stage_ww_gate": "60985e50daf4739c225c9d75a0fcbdafa7edcb84e14834d173cb2db1508962d0",
+    "patched_traadv_check": "a2ed0cf0e581a920fc9df01a56131ffa07d4c2d3c244d3d78542415068ae25df",
+    "missing_oracle_fail_closed_log": "4a142241914e29a7f3363bcac0e024b37efe7b2c1cfa402d597de3add3e98918"
+  },
+  "verification": {
+    "focused_tests": "80 passed in 11.46 s",
+    "reader_exact_control": "0 / 21824",
+    "reader_one_cell_plant": "1 / 21824 DEBT",
+    "run_script_bash_syntax": "PASS",
+    "instrument_patch_dry_run": "PASS",
+    "python_compile": "PASS",
+    "nemo_run": "NOT RUN FROM SANDBOX",
+    "independent_review": "OUTSTANDING"
+  }
+}
