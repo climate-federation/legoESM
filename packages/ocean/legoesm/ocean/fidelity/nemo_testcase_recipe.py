@@ -83,7 +83,7 @@ def _model_config(
         # 257-274,433-446), so legoESM exposes none either.
         # ln_dynadv_up3 dispatches to dynadv_up3 (dynadv.F90:87-89); its
         # vertical UP3 flux is dynadv_up3.F90:239-365. dynzad is dead here.
-        vertical_momentum_scheme="off",
+        vertical_momentum_scheme="nemo_up3",
         # NEMO 5.0.2 dynhpg.F90:117-123 dispatches ln_hpg_sco (the resolved
         # value on both cards) to hpg_sco, not hpg_djc.  The canonical
         # nemo_sco option transcribes its recurrence at :340-390.
@@ -368,6 +368,11 @@ def build_c1d_omip_l3_slab_ocean_card() -> C1DSlabOceanCard:
         # execute, despite the one-column horizontal geometry.
         tracer_advection="off",
         momentum_advection="off",
+        # C1D resolves the complete ln_dynadv_OFF program.  NEMO dynadv.F90:
+        # 78-90 has no executable np_LIN_dyn advection case, while :128-134
+        # maps that one selector to the no-advection identity.  Override both
+        # halves explicitly after the shared LOCK/OVERFLOW flux-UP3 deck.
+        vertical_momentum_scheme="off",
         # C1D resolves NEMO's ENS Coriolis inside each WS-RK3 3-D momentum
         # tendency.  The shared ``explicit_ab2`` spelling selects that
         # tendency placement (the name predates the RK3 caller); the
