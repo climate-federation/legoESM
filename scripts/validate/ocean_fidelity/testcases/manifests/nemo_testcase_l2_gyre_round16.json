@@ -1,0 +1,112 @@
+{
+  "format": "nemo-testcase-l2-gyre-round16-manifest-v1",
+  "session_id": "01a05cb9-7625-7f40-9e83-b3fa767b1945",
+  "date": "2026-09-04",
+  "branch": "fidelity/nemo-testcases-l2-gyre-codex2",
+  "starting_git_sha": "b9311e65de2b784b4f12c1ceffc4ad4e394b4e74",
+  "implementation_git_sha": "97d40d24e",
+  "regime": "production-jit/cpu/fp64/scalar-libm",
+  "status": "DEBT",
+  "first_over_bar": {
+    "kt": 2,
+    "fields": ["T", "S", "u", "v", "ssh"]
+  },
+  "oracle": {
+    "version": "V2 scalar-math; V1 retained and flagged",
+    "root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round15_oracle_v2_scalarmath_sbc",
+    "slow_forcing_root": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round16_oracle_v2_slow_v2",
+    "discarded_nothing": true,
+    "arch_sha256": "132f7a0500c4f0e86d8d3bf7864974a82e1dea5d83166dcfdfaf409e2ca04561",
+    "executable_sha256": "5bf4bdd338ad564f95ee6fd17b3a29635fd8c1f1135857c79456542583bde365",
+    "stp2d_my_src_sha256": "e15699ede280a7985901fa9e1d80a8c213ccf6f8c05ec89af72ab53ad033a814",
+    "slow_forcing_record_sha256": "fa307856fd56f1e9c1ca3055f1443a4c0e447a59972345648396cb5fbbe8a97d",
+    "vector_math_symbols": 0
+  },
+  "artifacts": {
+    "discriminator_pre_fix": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round16/discriminator.json",
+      "sha256": "3c44294d3dd5051958931baa42a16d670bc6226723f7061522201b88bf163405"
+    },
+    "discriminator_post_fix": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round16/discriminator_postfix.json",
+      "sha256": "106a778e18d3899982c7acf1e547b98858cf954ca7c53071f0aab1f58a89ba83"
+    },
+    "eligibility": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round16/eligibility.json",
+      "sha256": "336cd2026e4d51bec48de7ada71c449bdb0ecffbc0b1bac2867f3f226e4c5978",
+      "status": "PASS"
+    },
+    "eligibility_plant": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round16/eligibility_plant.json",
+      "sha256": "d41bb554e47b13b72f23f18d48e4eceec9dc7da774bdc447068b593e8701f5f6",
+      "exit_code": 1
+    },
+    "v1_v2_attribution": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round16/oracle_v1_v2_attribution.json",
+      "sha256": "ee29acca0b381abacb68d24642590b4f9cbcfaaddd5e522aafe7776b23177cac",
+      "different_records": 41,
+      "unattributed_records": 0
+    },
+    "row_scale_crosscard_rescore": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round16/crosscard_row_scale_rescore.json",
+      "sha256": "c6157e655c0757e5715dd3966326b648f89b7437231e7562eabdf894ad8550c6"
+    },
+    "corrected_velocity": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round16/corrected_velocity_source_round.json",
+      "sha256": "dd675a15d0b7b0cd756a8f6c383c73209fb6a402707dfbf4fa5979092d080bf3",
+      "status": "DEBT"
+    },
+    "slow_forcing": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round16/slow_forcing.json",
+      "sha256": "8b418d220147a604d9ca4a32796979c033c3ad2d40352b40767ad03ecbf5b02c",
+      "owner": "CONFIRMED_UPSTREAM_KRHS"
+    },
+    "slow_forcing_plant": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round16/slow_forcing_plant.json",
+      "sha256": "1ebc5669d6eec6376173b1e615eb484fca22f65843598711ba5f9e3b89e7c9cd",
+      "exit_code": 1
+    },
+    "production_jit_sweep": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round16/production_jit_sweep_final.json",
+      "sha256": "83f411ca736e6870c6b62a3a3c8e73e6751931c7eae8f4a1ef4ee685d4c76b4c",
+      "status": "DEBT"
+    }
+  },
+  "cross_card_source_round": {
+    "overflow_stage": {
+      "status": "PASS",
+      "rows": 9,
+      "max_worsening_ulps": 0.0,
+      "report_sha256": "51199c5264da531d77686111c766474f3218994e17d300a4e125221d0366c865",
+      "residuals_sha256": "9ab8acbbe369b7f4aed48f74b581b737d99c43ffcb0cfa4ca7fe1056965c034b"
+    },
+    "lock_stage": {
+      "status": "PASS",
+      "rows": 9,
+      "max_worsening_ulps": 0.0,
+      "report_sha256": "aa8b4ffb3cf49b19a03b20ed4b41364701b8c1a8931441f929d9c3adf8477fd3",
+      "residuals_sha256": "e3417c2aa7cfe6ddc002c33f26e2404cc1d1350d6e7352e484c6e57ab2daaf6d"
+    },
+    "overflow_trajectory": {
+      "status": "PASS",
+      "rows": 50,
+      "max_worsening_ulps": 0.0,
+      "first_over_bar": {"kt": 2, "fields": ["T", "u"]},
+      "report_sha256": "48dceb381e48442bc33f0059ec83f24f442f1a8ac42d47934dbc834d0f3656c8",
+      "residuals_sha256": "18c8927ae445a167af3106f62b40db0a50bc553c5001d6c66208c047e2251806"
+    },
+    "lock_trajectory": {
+      "status": "PASS",
+      "rows": 50,
+      "max_worsening_ulps": 0.0,
+      "first_over_bar": {"kt": 4, "fields": ["u"]},
+      "report_sha256": "014368fb51137b0795760920c6c7db3635fd428390bf246d966277195c976bcd",
+      "residuals_sha256": "bc5f132111abb94bff20fd3d34d331d92dc4e9b571be1442763f43a161d6c160"
+    }
+  },
+  "verification": {
+    "focused_tests": "60 passed in 8.13 s",
+    "rk3_and_phase3_gate_tests": "42 passed in 648.56 s",
+    "independent_review": "OUTSTANDING"
+  }
+}

@@ -29,6 +29,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm import constants
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.latlon import LatLonGrid  # noqa: F401 — kept for type compat
 from legoesm.grids.operators_latlon_cgrid import (
     pad_ns_zero,
@@ -3729,6 +3730,175 @@ def compute_face_masks_3d(
     return u_mask, v_mask
 
 
+def _nemo_hpg_sco_literal_cgrid_impl(
+    rhd: jnp.ndarray,
+    e3w: jnp.ndarray,
+    gdept_z0: jnp.ndarray,
+    grid: LatLonGrid,
+    g: float,
+    *,
+    return_components: bool = False,
+    _source_round: bool = True,
+) -> tuple[jnp.ndarray, ...]:
+    """Literal NEMO ``hpg_sco`` recurrence on native east/north faces.
+
+    ``rhd`` is NEMO's dimensionless density anomaly and ``e3w`` /
+    ``gdept_z0`` are the live ``Kmm`` operands.  The operation order follows
+    NEMO 5.0.2 ``dynhpg.F90:340-390``: a surface seed, a top-down cumulative
+    along-level pressure term, and the level-local terrain correction.  The
+    returned arrays use legoESM's redundant west/south face layout.
+    """
+    rhd = jnp.asarray(rhd)
+    e3w = jnp.asarray(e3w, dtype=rhd.dtype)
+    gdept_z0 = jnp.asarray(gdept_z0, dtype=rhd.dtype)
+    sr = nemo_source_round if _source_round else lambda value: value
+
+    def add(left, right):
+        return sr(left + right)
+
+    def subtract(left, right):
+        return sr(left - right)
+
+    def multiply(left, right):
+        return sr(left * right)
+
+    one = jnp.asarray(1.0, dtype=rhd.dtype)
+    half = jnp.asarray(0.5, dtype=rhd.dtype)
+    r1_e1u = sr(one / jnp.asarray(grid.dx_u[:, 1:], dtype=rhd.dtype))
+    r1_e2v = sr(one / jnp.asarray(grid.dy_v[1:, :], dtype=rhd.dtype))
+    zcoef0 = multiply(-jnp.asarray(g, dtype=rhd.dtype), half)
+
+    rhd_i1 = jnp.roll(rhd, -1, axis=1)
+    rhd_j1 = jnp.roll(rhd, -1, axis=0)
+    e3w_i1 = jnp.roll(e3w, -1, axis=1)
+    e3w_j1 = jnp.roll(e3w, -1, axis=0)
+    dep_i1 = jnp.roll(gdept_z0, -1, axis=1)
+    dep_j1 = jnp.roll(gdept_z0, -1, axis=0)
+
+    zhpi = multiply(
+        multiply(zcoef0, r1_e1u),
+        subtract(
+            multiply(e3w_i1[..., 0], rhd_i1[..., 0]),
+            multiply(e3w[..., 0], rhd[..., 0]),
+        ),
+    )
+    zhpj = multiply(
+        multiply(zcoef0, r1_e2v),
+        subtract(
+            multiply(e3w_j1[..., 0], rhd_j1[..., 0]),
+            multiply(e3w[..., 0], rhd[..., 0]),
+        ),
+    )
+    u_levels = []
+    v_levels = []
+    u_zhpi_levels = []
+    v_zhpj_levels = []
+    u_zuap_levels = []
+    v_zvap_levels = []
+    for jk in range(rhd.shape[-1]):
+        if jk > 0:
+            zhpi = add(
+                zhpi,
+                multiply(
+                    multiply(zcoef0, r1_e1u),
+                    subtract(
+                        multiply(
+                            e3w_i1[..., jk],
+                            add(rhd_i1[..., jk], rhd_i1[..., jk - 1]),
+                        ),
+                        multiply(
+                            e3w[..., jk],
+                            add(rhd[..., jk], rhd[..., jk - 1]),
+                        ),
+                    ),
+                ),
+            )
+            zhpj = add(
+                zhpj,
+                multiply(
+                    multiply(zcoef0, r1_e2v),
+                    subtract(
+                        multiply(
+                            e3w_j1[..., jk],
+                            add(rhd_j1[..., jk], rhd_j1[..., jk - 1]),
+                        ),
+                        multiply(
+                            e3w[..., jk],
+                            add(rhd[..., jk], rhd[..., jk - 1]),
+                        ),
+                    ),
+                ),
+            )
+        zuap = multiply(
+            multiply(
+                multiply(-zcoef0, add(rhd_i1[..., jk], rhd[..., jk])),
+                subtract(dep_i1[..., jk], gdept_z0[..., jk]),
+            ),
+            r1_e1u,
+        )
+        zvap = multiply(
+            multiply(
+                multiply(-zcoef0, add(rhd_j1[..., jk], rhd[..., jk])),
+                subtract(dep_j1[..., jk], gdept_z0[..., jk]),
+            ),
+            r1_e2v,
+        )
+        u_levels.append(add(zhpi, zuap))
+        v_levels.append(add(zhpj, zvap))
+        u_zhpi_levels.append(zhpi)
+        v_zhpj_levels.append(zhpj)
+        u_zuap_levels.append(zuap)
+        v_zvap_levels.append(zvap)
+
+    native_u = jnp.stack(u_levels, axis=-1)
+    native_v = jnp.stack(v_levels, axis=-1)
+    result = (
+        jnp.concatenate([native_u[:, -1:, :], native_u], axis=1),
+        jnp.concatenate([jnp.zeros_like(native_v[:1]), native_v], axis=0),
+    )
+    if not return_components:
+        return result
+
+    def _u_redundant(levels):
+        native = jnp.stack(levels, axis=-1)
+        return jnp.concatenate([native[:, -1:, :], native], axis=1)
+
+    def _v_redundant(levels):
+        native = jnp.stack(levels, axis=-1)
+        return jnp.concatenate([jnp.zeros_like(native[:1]), native], axis=0)
+
+    return result + (
+        _u_redundant(u_zhpi_levels), _v_redundant(v_zhpj_levels),
+        _u_redundant(u_zuap_levels), _v_redundant(v_zvap_levels),
+    )
+
+
+_nemo_hpg_sco_literal_cgrid_compiled = jax.jit(
+    _nemo_hpg_sco_literal_cgrid_impl,
+    static_argnames=("return_components", "_source_round"))
+
+
+def nemo_hpg_sco_literal_cgrid(
+    rhd: jnp.ndarray,
+    e3w: jnp.ndarray,
+    gdept_z0: jnp.ndarray,
+    grid: LatLonGrid,
+    g: float,
+    *,
+    return_components: bool = False,
+    _source_round: bool = True,
+) -> tuple[jnp.ndarray, ...]:
+    """Run NEMO's SCO recurrence identically inside and outside outer JIT."""
+    if isinstance(rhd, jax.core.Tracer):
+        return _nemo_hpg_sco_literal_cgrid_impl(
+            rhd, e3w, gdept_z0, grid, g,
+            return_components=return_components, _source_round=_source_round)
+    with jax.disable_jit(False):
+        return _nemo_hpg_sco_literal_cgrid_compiled(
+            rhd, e3w, gdept_z0, grid, g,
+            return_components=return_components, _source_round=_source_round)
+
+
 def partial_cell_pgf_correction_x(
     centroid_depth: jnp.ndarray,
     rho_prime: jnp.ndarray,
@@ -4103,7 +4273,12 @@ def pv_flux_ene(
     vtx_mask: jnp.ndarray,
     f_vtx: jnp.ndarray | None = None,
     eps_h: float = 1.0e-10,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+    q_boundary: str = "neumann_fill",
+    return_operands: bool = False,
+    metric_widths: tuple | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray] | tuple[
+    jnp.ndarray, jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
+]:
     """NEMO ``vor_ene`` — Sadourny (1975) ENERGY-conserving 2-point PV flux.
 
     Transcription of NEMO ``dynvor.F90::vor_ene`` (the GYRE default
@@ -4166,11 +4341,21 @@ def pv_flux_ene(
     # Neumann-fill only the RELATIVE part's discontinuity at the coast; the
     # planetary f is smooth everywhere, so fill the whole q (idempotent at
     # interior wet vertices).
-    q = neumann_fill_vertex(q, vtx_mask)
+    if q_boundary == "neumann_fill":
+        q = neumann_fill_vertex(q, vtx_mask)
+    elif q_boundary != "nemo_live":
+        raise ValueError(
+            "pv_flux_ene: q_boundary must be 'neumann_fill' or 'nemo_live'; "
+            f"got {q_boundary!r}")
 
     # --- 2. Mass fluxes at u/v faces (h·u, h·v), closed faces → 0 ---
     F_u = h_u * u * u_mask_3d            # (n_lat, n_lon+1, nlev)
     F_v = h_v * v * v_mask_3d            # (n_lat+1, n_lon, nlev)
+    if metric_widths is not None:
+        e1u, e1v, e2u, e2v = metric_widths
+        # dynvor.F90:518-522 materializes these metric-complete operands.
+        F_u = jnp.asarray(e2u)[..., jnp.newaxis] * F_u
+        F_v = jnp.asarray(e1v)[..., jnp.newaxis] * F_v
 
 
     # --- 3. u-face flux: ¼ ( q_S·(F_v_SW+F_v_SE) + q_N·(F_v_NW+F_v_NE) ) ---
@@ -4222,6 +4407,15 @@ def pv_flux_ene(
         q_W_v * (F_u_S_W + F_u_N_W) + q_E_v * (F_u_S_E + F_u_N_E)
     )
 
+    if metric_widths is not None:
+        diag_vortcor_u = diag_vortcor_u / jnp.asarray(e1u)[..., jnp.newaxis]
+        diag_vortcor_v = diag_vortcor_v / jnp.asarray(e2v)[..., jnp.newaxis]
+
+    if return_operands:
+        # WRITE-only oracle-fidelity seam.  Return the exact intermediates
+        # consumed above rather than rebuilding their formulas in a probe;
+        # production callers retain the historical two-array return.
+        return diag_vortcor_u, diag_vortcor_v, (q, F_u, F_v)
     return diag_vortcor_u, diag_vortcor_v
 
 

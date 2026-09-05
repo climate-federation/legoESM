@@ -19,6 +19,19 @@ prefixes end at kt=1; the first evolved state, kt=2, remains DEBT.  The
 owner-exhausted continuations through kt=60 show polynomial accumulation or
 bounded oscillation, with no measured amplifying mode.
 
+Post-PR round 4 supersedes the OVERFLOW external-mode rows below.  A new
+19-frame NEMO/legoESM substep walk confirms that the executed NEMO flux-form
+face-transport update was missing.  The canonical correction removes the
+internal substep-2--4 amplification by `7.2e5--9.5e7x` and improves kt=2 SSH
+from `1.23723132e-7` to `1.04916076e-14`, but kt=2 instantaneous U regresses
+`7.42%` to `3.31108168e-6` and T remains `2.40034479e-8`.  Accordingly the
+update is **CONFIRMED** as owner of the downstream external recurrence and
+**REFUTED** as owner of the kt=2 root initiator.  That root is **UNMEASURED
+outside the exhausted external-substep register**.  The same-revision
+full-duration verdict is four `OUTSIDE`, two `WITHIN-SCHEME-SPREAD`, and zero
+`INDISTINGUISHABLE-AT-FLOOR`; see the stability receipt's round-4 section and
+machine gate `b46f7390...`.
+
 ## What is certified
 
 - Phase 1: source dossiers, resolved cpp/namelist state, CPU builds, completed

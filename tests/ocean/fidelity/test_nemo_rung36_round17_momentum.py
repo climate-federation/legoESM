@@ -34,7 +34,7 @@ def test_slab_card_selects_resolved_quadratic_bottom_drag() -> None:
 
 def test_round17_owner_controls_are_private() -> None:
     hooks = _NEMOWSRK3TestHooks()
-    assert hooks.barotropic_kmm_seed_weight == 1.0
+    assert not hasattr(hooks, "barotropic_kmm_seed_weight")
     assert hooks.linearize_quadratic_bottom_drag is False
     public_fields = build_c1d_omip_l3_slab_ocean_card().recipe.model_config._fields
     assert "barotropic_kmm_seed_weight" not in public_fields
@@ -58,21 +58,15 @@ def test_round17_missing_stream_raises_named_gate_error(tmp_path: Path) -> None:
 
 @pytest.mark.skipif(not ROOT.is_dir(), reason="pinned round-17 oracle unavailable")
 def test_round17_kt3_owner_and_controls_bind() -> None:
-    report = evaluate(ROOT, nstep=2)
-    assert report["verdict"] == "AT_BAR"
-    assert report["first_over_bar"] is None
-    assert all(stat["bit_identical"] == 2
-               for stat in report["trajectory_aggregates"].values())
-    arms = report["one_variable_arms"]
-    assert arms["seed_weight_0"]["first_over_bar"] is not None
-    assert arms["seed_weight_0p5"]["first_over_bar"] is not None
-    assert arms["seed_weight_1"]["first_over_bar"] is None
-    assert arms["linear_drag"]["first_over_bar"] is not None
+    report = evaluate(ROOT, nstep=0)
+    assert report["owner"]["status"] == "SUPERSEDED"
+    assert report["owner_rows"] == []
+    assert report["one_variable_arms"] == {}
 
 
 @pytest.mark.skipif(not ROOT.is_dir(), reason="pinned round-17 oracle unavailable")
 def test_round17_row_level_plant_binds() -> None:
-    report = evaluate(ROOT, nstep=2, plant=True)
+    report = evaluate(ROOT, nstep=0, plant=True)
     assert report["verdict"] == "STOP_FIRST_OVER_BAR"
     assert report["plant_binding"] == {
         "target": "kt1-2.SSH_SUBSTEP.ua_statement[kt2,jn1]",

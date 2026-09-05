@@ -7,9 +7,287 @@ OVERFLOW-zps card complete all 6,120 steps in both fp64 and fp32.  The prior
 failures at completed steps 2,877/2,879 were therefore caused by legoESM's
 approximate adaptive-implicit composition.  No damping, clipping, diffusion,
 limiter, or oracle-absent selector was added.  The frozen statistical scorer
-now returns a fully classified `OUTSIDE` verdict: three metrics are `OUTSIDE`,
-two are `WITHIN-SCHEME-SPREAD`, and one is
-`INDISTINGUISHABLE-AT-FLOOR`.
+now returns a fully classified `OUTSIDE` verdict.  After the round-4
+barotropic source correction and same-revision fp32 floor rerun, four metrics
+were `OUTSIDE` and two `WITHIN-SCHEME-SPREAD`; after the round-5 RK3
+stage-composition fixes (kt=2 U owner MEASURED and fixed, `3.31e-6 ->
+2.60e-7`) three metrics are `OUTSIDE` and three `WITHIN-SCHEME-SPREAD`; no
+metric is `INDISTINGUISHABLE-AT-FLOOR`.
+
+## Round 7: the WS momentum ladder is written once (S-30 / S-12 collapse)
+
+Full ledger, before/after tables, the ulp bar and its planted control in
+`nemo_testcases_l1_phase3_receipt.md` ("S-30 / S-12 collapse").
+
+The Wicker-Skamarock RK3 momentum recurrence was written TWICE inside one
+function: once before the barotropic solve, purely to build that solve's
+velocity seed, and once after it, corrected and kept.  NEMO has no ladder at
+the first site — `stp_2D` evaluates the Kbb RHS once, depth-means it
+(`stp2d.F90:177-186`) and hands `dyn_spg_ts` the BEFORE velocity
+(`stp2d.F90:280-281`) — so the first copy is deleted and the solve is seeded
+with `u0`/`v0`.  This also removes two `tendencies()` evaluations per step and
+closes the failure mode that put the stage vertical-UP3 and live-HPG fixes in
+one copy only.
+
+NOTHING in this receipt's numbers changes beyond roundoff.  The round-6 rows
+above are re-pinned at the collapse commit
+`28df515a84d572b28a7a5c6afb1ca905b31bfda4`, fp64, CPU:
+
+| round-6 row (OVERFLOW-zps, kt=2 absolute L-inf) | round 6 | after the collapse |
+|---|---|---|
+| stage-1 u | `6.501744e-15` | `6.5225603e-15` |
+| stage-2 u | `9.433404e-11` | `9.4334038e-11` |
+| stage-3 u | `2.598798e-07` | `2.5987979e-07` |
+| kt=2 u | `2.598798e-07` | `2.5987979e-07` |
+| kt=2 SSH (normalized) | `1.0491608e-14` | `1.0505485e-14` |
+
+Every one of those is a move of at most 0.094 float64 ulp of the row's own
+scale; the largest move anywhere in the kt=1..10 trajectory of either card is
+0.5 ulp (OVERFLOW kt=10 SSH).  T and S are BIT-IDENTICAL at every step of
+both cards.  `first_over_bar` is unchanged (LOCK `kt=2 {T,u}`, OVERFLOW
+`kt=2 {T,u,ssh}`).  The kt=2 velocity debt is therefore unchanged and stays
+UNOWNED — this collapse is exonerated for it.
+
+The 6120-step statistical scorer was NOT re-run, and after adversarial review
+the 3 OUTSIDE / 3 WITHIN-SCHEME-SPREAD split is recorded as **UNMEASURED**,
+not as "expected to hold".  The gate's own growth block for OVERFLOW gives tail
+exponential rates of `0.203/step` (ssh), `0.269/step` (u) and `0.083/step` (T)
+and cannot discriminate exponential from polynomial on a four-point tail, so a
+`1e-16` seed either reaches order one in a few hundred steps or never matters,
+and 10 steps do not tell us which.  Discriminator: ~300 steps on both
+revisions, `max|delta u|` per step on a semilog axis.
+
+Two further corrections from the same review, both detailed in the phase-3
+receipt: the tracer FIELDS are not bit-identical even though the tracer ROWS
+are -- OVERFLOW T departs from kt=7 at five cells, reaching `1.07e-14 K` by
+kt=11 -- and the "pure re-association" claim is certified for **f = 0 only**,
+because both L1 cards are non-rotating and the Matsuno rotation that sits
+between the deleted ladder and the barotropic seed is the identity there.  On a
+rotating rk3_ws card (GYRE) it is not, and that card has no gate here.
+
+The bar is mechanical, not a judgement: `legoesm.ocean.fidelity.ulp_move_gate`,
+reached as `--compare-to` on both phase-3 gates, with a `--compare-plant-ulps 3`
+control that must (and does) turn it red.
+
+## Round 6: qco stage face thickness and stage weighting
+
+Full ledger, source citations, reach table and controls in
+`nemo_testcases_l1_phase3_receipt.md` ("Face-thickness and stage-qco round").
+Preregistered in
+`nemo_testcases_l1_overflow_face_thickness_preregister.md` before either arm
+existed.
+
+The kt=2 TEMPERATURE residual that round 5 left as its registered next owner
+is CLOSED.  Two unbranched corrections to the WS-RK3 identity: the stage
+transport now uses NEMO's `e3u(Kmm) = e3u_0*(1 + r3u(Kmm))`
+(`domqco.F90:219-222`, `domzgr_substitute.h90:127`) instead of the min of the
+two stretched T thicknesses, and every stage velocity update now carries the
+qco weighting `(1+r3u(Kbb)) / (1+r3u(Kmm)) / (1+r3u(Kaa))`
+(`stprk3_stg.F90:373-378`).  The tracer stage already carried its analogue.
+
+kt=2, OVERFLOW-zps, absolute L-infinity on the wet mask:
+T `2.548493e-07 -> 2.238210e-13 K` (1.14e6x); u `2.598440e-07 ->
+2.598798e-07 m/s`; SSH unchanged at `1.0491608e-14` normalized.  Stage-1 u
+`3.757022e-12 -> 6.501744e-15`, stage-2 `6.908155e-11 -> 9.433404e-11`,
+stage-3 `2.598440e-07 -> 2.598798e-07`.  kt=10 T `5.55186262e-06 ->
+7.71178526e-08` normalized; kt=60 before-entry T `1.027641e-04 ->
+1.184430e-05`, u `4.193114e-04 -> 2.507515e-04`.
+
+Six of seven frozen predictions were MET, including the two that
+preregistered these hypotheses as REFUTED for the u residual.  The miss is
+P3b: the stage-2 u residual does not collapse — both corrections make it
+slightly WORSE than the pre-fix `6.908e-11` (`9.433e-11`).  Rule 8:
+disclosed, not reverted, four orders below the stage-3 residual.
+
+The 6120-step statistics keep 3 OUTSIDE / 3 WITHIN-SCHEME-SPREAD.  Every row
+improves or holds (water-mass census 5.05x -> 3.88x the NEMO scheme spread,
+instantaneous-u L-infinity 1.49x -> 1.24x) and none crosses, so the "3 -> 4
+OUTSIDE" regression of round 4 remains at 3 and the long-run statistics stay
+owned by something this round did not touch.
+
+LOCK_EXCHANGE-zco is bit-identical at every kt=1 stage and at kt=2, which the
+source predicts: its oracle `ssh` is identically zero at all three kt=1 stages
+so both face rules and both velocity updates coincide.  Its kt>=3 T improves
+1092x by kt=10; its u and SSH move a few percent in the worse direction.
+
+## Round 5: RK3 stage composition (takeover of the codex round)
+
+The round-4 HOLD is closed in commit `3a68e43338a4`: the 19 frames are
+registered to their exact `dynspg_ts.F90` assignments and time levels, the
+gate JSON stamps the legoESM git SHA and the pytest-log sha256, the planted
+entry control exits nonzero end to end, and the literal flux-form external
+update is disclosed as PRODUCTION-ACTIVE and KEPT (Rule 8).  Decision
+record: with the update, the 19 substep-1 frames are 11 AT-BAR, 7 UNMEASURED
+(no active V face) and one DEBT — `u_exit` at `1.87350135e-15`, which is
+identical in the legacy arm and equals `dt x` the `5.62917768e-16` slow-U
+input residual (ratio `0.998`), i.e. inherited from the slow forcing, not
+produced by the update; substeps 2-4 go from `2.6e-9 / 1.3e-7 / 5.6e-7` to
+`3.5e-15 / 4.9e-15 / 5.9e-15`.  The kt=2 pair
+(U `3.08238867e-06 -> 3.31108168e-06`, SSH `1.23723132e-07 ->
+1.04916076e-14`, T unchanged) stays disclosed side by side; the
+"3 -> 4 OUTSIDE" regression of round 4 is re-scored below on the same
+literal-update arm after the stage-composition fixes.
+
+The kt=2 initiator the round-4 gate left UNMEASURED ("post-external RK3
+stage composition") is now MEASURED and owned by three composition defects
+inside the WS-RK3 identity, fixed in `614bed818bb4` (full ledger in
+`nemo_testcases_l1_phase3_receipt.md`): FCT at tracer stages 1-2 where NEMO
+runs `tra_adv_cen` (`traadv.F90:281-282,361-364`); stage-2/3 `eos+dyn_hpg`
+on Kbb where NEMO uses the stage Kmm (`stprk3_stg.F90:317-320`); and the
+`dyn_adv_up3` vertical flux applied once per step where NEMO carries it in
+every stage RHS (`:315,331-334`).  kt=2 instantaneous U falls
+`3.31108168e-06 -> 2.59844026e-07`, T `2.40034479e-08 -> 1.27424627e-08`,
+SSH unchanged at `1.04916076e-14`; kt=10 U `1.40474350e-04 ->
+2.64522041e-05`, T `1.35356455e-05 -> 5.55186262e-06`, SSH unchanged.
+
+Both 6,120-step arms complete on CPU with every-step finite checks at
+commit `c8f506a69545` (fp64 states `0599482dd41d...`, fp32 states
+`c73306a060b8...`); the kt=1--60 bridge is re-pinned to
+`stage_composition/overflow_trajectory_gate_kt60.json` (`086dbd6fc7a6...`),
+replacing the round-4 bridge.  The reissued verdict on the SAME scorer,
+floor protocol and NEMO spread:
+
+| metric | before | after | fp32 floor before | fp32 floor after | NEMO spread | verdict before | verdict after |
+|---|---:|---:|---:|---:|---:|---|---|
+| final_temperature_histogram_tv | `0.0537796` | `0.0423046` | `0.0237045` | `0.0194058` | `0.044231` | OUTSIDE | WITHIN-SCHEME-SPREAD |
+| final_water_mass_census | `0.0150395` | `0.0169753` | `0.00349422` | `0.00157409` | `0.00336209` | OUTSIDE | OUTSIDE |
+| instantaneous_u_linf | `0.969889` | `0.999211` | `0.456889` | `0.402734` | `0.672694` | OUTSIDE | OUTSIDE |
+| plume_descent_m | `0.904647` | `16.9554` | `0.100003` | `0.0087228` | `1499.62` | WITHIN-SCHEME-SPREAD | WITHIN-SCHEME-SPREAD |
+| plume_front_km | `1.00947` | `4.04936` | `0.561019` | `0.0837761` | `121.931` | WITHIN-SCHEME-SPREAD | WITHIN-SCHEME-SPREAD |
+| temperature_linf | `0.394129` | `0.379492` | `0.0809865` | `0.140318` | `0.356744` | OUTSIDE | OUTSIDE |
+
+Round-5 artifacts under `/data/abyssal/dbalwada/nemo-testcases-l1/`:
+
+| artifact (under `/data/abyssal/dbalwada/nemo-testcases-l1/`) | SHA256 |
+|---|---|
+| `barotropic_walk/review_round/frame_gate_hold_round_ab6ca17b6.json` | `59c0a4e056e87d74af04937a8638dcc279840c6f7ae7e78abf4499e6c7d43e42` |
+| `barotropic_walk/review_round/pytest_barotropic_gate_hold_round.log` | `64a815b7a0608d37ab43bcd3a7377d8a559ecd7692fd45baaf9818f0ce66b62a` |
+| `stage_composition/legoesm/overflow_zps/fp32/metadata.json` | `dfaa8b66f927bd3e6a75bc9aae79771ad1390f29f00fbe91ad213c9fedc28207` |
+| `stage_composition/legoesm/overflow_zps/fp32/states.npz` | `c73306a060b8cd74bdabc56465eefa4b6414d403ea0cc1d9187bf6b2d20de3f7` |
+| `stage_composition/legoesm/overflow_zps/fp64/metadata.json` | `6470d575cca23987c94b73696bc2f811e3f65f099d9086931ace43247733150a` |
+| `stage_composition/legoesm/overflow_zps/fp64/states.npz` | `0599482dd41dba259494cc277c4ad36dabbb2c7bdd370177d5430226038ccdff` |
+| `stage_composition/lock_stage_sweep_gate_kt2.json` | `a3716cb258e33da4143d4da3fc5bd0fde2ebedc94872a4606a51c766809f5a4c` |
+| `stage_composition/lock_trajectory_gate_kt10.json` | `4332b47664820b6a67769f17ea4de5c1d2efc449db7070d8a3f3564d350788c6` |
+| `stage_composition/overflow_stage_sweep_gate_kt2.json` | `5bdcd995da66758199f3ad2db5cc44b97f42e093962476c2b86624d676c5dc9c` |
+| `stage_composition/overflow_statistics.json` | `a9aca2d78dae62e8de4da4edd61233b101160637ed769a476254841f3c05df26` |
+| `stage_composition/overflow_trajectory_gate_kt10.json` | `bcc8a68d26c918954329173fe955aec82155502db5b64743cac9ab963ab59377` |
+| `stage_composition/overflow_trajectory_gate_kt60.json` | `086dbd6fc7a61ea328ecda692d7ef3491092f9fc6127db5a661d5f81f5967712` |
+
+## Round 4: OVERFLOW 19-frame external-mode walk
+
+Commit `c5882cb8aa18` froze the comparison before reading any new frame.  A
+separate NEMO configuration, `OVERFLOW_OMIP_L1_BTWALK`, added WRITE-only
+instrumentation to the executed `nn_bt_flt=1`, `rn_bt_alpha=0`, `nn_e=3`
+branch.  The resolved `nn_e=3` produces four cold-start boxcar substeps.
+The run uses `ln_bt_fw=T`, flux-form UP3 momentum, `ln_drg_OFF=T`, and `f=0`.
+The instrumented run's kt=1 step-entry file is byte-identical to the certified
+oracle (`cf0183e5...`), so instrumentation did not perturb the overlap state.
+
+The 19-frame gate compares NEMO and legoESM at the same instantaneous native
+T/U/V staggering after NEMO's two-cell halo strip, on the common certified wet
+mask, using an elementwise L-infinity reduction with no depth or substep-time
+average.  The time-level header is `Kbb=1, Kmm=1, Kaa=3`; the full registry is
+entry T/U/V, midpoint T/U/V, U/V transport, continuity SSH, PGF SSH and U/V,
+slow U/V, drag U/V, exit U/V, and exit SSH.  The reader hard-fails on magic,
+version, dimensions, time levels, substep count, field count, truncation, or
+trailing bytes.  Independent planted entry and exit controls make the gate
+red.
+
+Substep 1 is exact through midpoint transport, continuity, and PGF.  The U
+slow-forcing row differs by `5.62917768e-16`, still AT-BAR.  Multiplication by
+the `10/3 s` external step predicts `1.87639256e-15`; the measured first strict
+DEBT is the U exit at `1.87350135e-15`, ratio `0.99846`.  Drag is exact zero in
+both dumped operands, confirming the resolved OFF arm rather than inferring it
+from geometry.  PGF, continuity, slope face depth, and partial-cell metrics are
+therefore **CONFIRMED EXONERATED through the first strict boundary**.  The
+slow arithmetic tail is the **CONFIRMED first-boundary contributor** but is
+about nine orders below the kt=2 instantaneous-U debt and is
+**REFUTED as its root owner by scaling**.
+
+Source reading exposed a separate executed mismatch.  NEMO advances face
+transport, not velocity, in `dynspg_ts.F90:731-761`:
+
+`(hu_e*un_e + dt*(zhu_bck*spg + zhup2*trd + hu(Kmm)*frc)) / hu_a`.
+
+Commit `0ff51eca2bfd` transcribes that expression as an unbranched part of the
+NEMO WS-RK3 + flux-form identity; NEMO has no switch, so legoESM gets no public
+switch.  The legacy velocity update is accessible only through a private gate
+hook.  A synthetic test changes the midpoint-depth operand and proves the
+literal test is non-vacuous.  The arm is scale-causal inside the loop:
+
+| substep | legacy U-exit error | NEMO-form error | improvement |
+|---:|---:|---:|---:|
+| 1 | `1.87350135e-15` | `1.87350135e-15` | `1.0x` |
+| 2 | `2.55383398e-9` | `3.53189700e-15` | `7.23077e5x` |
+| 3 | `1.28549120e-7` | `4.94743135e-15` | `2.59830e7x` |
+| 4 | `5.60239321e-7` | `5.87030424e-15` | `9.54362e7x` |
+
+This confirms the literal update as the **structural owner of the downstream
+external-loop recurrence debt**.  It does not own the whole-step initiator.
+The frozen criterion required kt=2 instantaneous U to fall by at least 10x
+without a greater-than-10x T/SSH regression.  Instead U moves
+`3.08238867e-6 -> 3.31108168e-6` (a plain `7.42%` regression), T is unchanged
+to six significant figures, and SSH improves
+`1.23723132e-7 -> 1.04916076e-14`.  The root-initiator ownership claim is
+therefore **REFUTED BY THE FROZEN CAUSAL PREDICATE**.  The external substep
+register is exhausted: the remaining kt=2 U/T root operand is
+**UNMEASURED outside this register**, in the post-external RK3 stage
+composition.
+
+The required kt=2--10 regression is below.  Values are normalized common-wet
+L-infinity errors; U is instantaneous C-grid U-face Nbb on both sides.
+
+| kt | T before | T after | U before | U after | SSH before | SSH after |
+|---:|---:|---:|---:|---:|---:|---:|
+| 2 | `2.40035055e-08` | `2.40034479e-08` | `3.08238867e-06` | `3.31108168e-06` | `1.23723132e-07` | `1.04916076e-14` |
+| 3 | `2.86533772e-07` | `2.86529500e-07` | `6.46235078e-06` | `9.22615336e-06` | `5.12880845e-06` | `3.66567551e-09` |
+| 4 | `9.70053135e-07` | `9.70021745e-07` | `1.16440779e-05` | `1.50603834e-05` | `2.64530059e-05` | `1.07010798e-06` |
+| 5 | `1.99089401e-06` | `1.99077587e-06` | `2.80038578e-05` | `2.93540699e-05` | `4.74630495e-05` | `1.48167577e-05` |
+| 6 | `3.25857142e-06` | `3.25827731e-06` | `5.97568478e-05` | `5.59331066e-05` | `4.72344006e-05` | `4.00067365e-05` |
+| 7 | `4.93304987e-06` | `4.93252050e-06` | `8.16437683e-05` | `7.99314090e-05` | `6.97196664e-05` | `4.55653806e-05` |
+| 8 | `7.23683063e-06` | `7.23598252e-06` | `8.92508130e-05` | `9.16463001e-05` | `8.65979411e-05` | `7.97549653e-05` |
+| 9 | `1.01541688e-05` | `1.01527667e-05` | `1.05130255e-04` | `1.07033146e-04` | `8.39242799e-05` | `7.29954633e-05` |
+| 10 | `1.35379486e-05` | `1.35356455e-05` | `1.41894266e-04` | `1.40474350e-04` | `8.66359613e-05` | `9.24576527e-05` |
+
+LOCK's kt=2 regression is neutral: T stays `1.58214182e-13` and U changes
+`1.71208684e-10 -> 1.71208363e-10`.  At kt=10 U changes
+`4.35050760e-8 -> 4.47830601e-8` while SSH improves
+`1.06780006e-10 -> 2.71415052e-13`.
+
+Both same-revision full-duration arms complete on CPU with every-step finite
+checks: fp64 in `404.5752 s`, fp32 in `268.5355 s`.  The current kt=1--60 gate
+(`197a8959...`) replaces the stale pre-arm bridge in the statistical scorer.
+The reissued verdict is:
+
+| metric | candidate | same-revision fp32 floor | NEMO scheme spread | verdict |
+|---|---:|---:|---:|---|
+| plume descent | `0.904647 m` | `0.100003 m` | `1499.623281 m` | `WITHIN-SCHEME-SPREAD` |
+| plume front | `1.009466 km` | `0.561019 km` | `121.930713 km` | `WITHIN-SCHEME-SPREAD` |
+| final T histogram TV | `0.0537796` | `0.0237045` | `0.0442310` | `OUTSIDE` |
+| final water-mass census | `0.0150395` | `0.00349422` | `0.00336209` | `OUTSIDE` |
+| instantaneous U L-inf | `0.969889` | `0.456889` | `0.672694` | `OUTSIDE` |
+| T L-inf | `0.394129` | `0.0809865` | `0.356744` | `OUTSIDE` |
+
+Round-4 artifacts under
+`/data/abyssal/dbalwada/nemo-testcases-l1/barotropic_walk/`:
+
+| artifact | SHA256 |
+|---|---|
+| NEMO WRITE-only `dynspg_ts.F90` | `f1ebfe150001de7c08e378749f3386e65374f83ca459af7fad8fa35ce43a73c0` |
+| NEMO binary | `84d2fb40eb6864921206335c4e1f2520d2120df1b2527945e23cbbe939b85284` |
+| NEMO resolved run namelist | `17cdebf82b03d9db69c32a5b6e54c7d089958e73daaff0ab60add4d3afdd6d5e` |
+| NEMO frame stream | `02b7e53362da1a69e695bdb9dab86ee6a8362b6906fef8d93f977372c26b035e` |
+| 19-frame gate | `b46f7390ef83702b0595fc267121008d170d7e36143eb7a03e2bd9638209a65b` |
+| current kt=1--60 gate | `197a8959f9c72814c6c3a29fe92452ceaf87aafca5bd900536bc479a2ae83be2` |
+| LOCK kt=1--10 regression | `2a9221853bb07a314d37de299ea82768a6a17753a5dc4c99bbe965786ba256c1` |
+| fp64 metadata / states | `ac148830e3b099e3d1a94566f0faec2a1dc1a7325fae2f147d0e00c35bd862c1` / `7ea95685241a631ebbea1b8ef554793f68ce4625fdcc4024b9c2649f2e607ea8` |
+| fp32 metadata / states | `014b21ac1aece9fcf0bf0263b900e53a9e2761b15cb375174977a242a20a2998` / `53cdc440425c03ed992abee044184014e1b2333de1fa5c6d5e7c35309595550e` |
+| statistical report | `a99ebd4007426ebd35a8dbe30e1fa4c0a17bb3e3176af66add3b0963b99eab58` |
+
+Focused CPU/fp64 validation is **56 passed**: 5 barotropic-gate controls,
+15 full-statistics controls, 9 real WS-RK3 tests, 15 testcase-card tests, and
+12 OVERFLOW stability-probe controls.  This is the collected five-file
+breakdown, not a cumulative campaign-test count.
 
 ## Round 3 resolution: source-exact adaptive-implicit package
 

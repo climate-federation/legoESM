@@ -28,6 +28,7 @@ from types import SimpleNamespace
 import jax.numpy as jnp
 import numpy as np
 
+from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import surface_stress_faces
 from legoesm.ocean.physics.surface_forcing.config import PrescribedForcingConfig
 from legoesm.ocean.physics.surface_forcing.external import (
     external_surface_forcing,
@@ -100,3 +101,42 @@ def test_prescribed_and_external_momentum_are_exactly_opposite():
         "prescribed (+tau, on-ocean) and external (-tau, atmosphere) must be "
         "EXACT opposites for the same stress; a sign change in either scheme "
         "(or an accidental unification) breaks coupled forcing")
+
+
+def test_native_ocean_stress_bypasses_lossy_geographic_round_trip():
+    """A source-native pair is the exact operand used for face interpolation."""
+    z, _, _, _, _, jac = _fields()
+    tau_i = jnp.asarray([
+        [0.0, 0.2, 0.4, 0.6, 0.8],
+        [0.1, 0.3, 0.5, 0.7, 0.9],
+        [0.2, 0.4, 0.6, 0.8, 1.0],
+        [0.3, 0.5, 0.7, 0.9, 1.1],
+    ], dtype=jnp.float64)
+    tau_j = -tau_i
+    geographic_poison = jnp.full_like(tau_i, 99.0)
+    forcing = OceanSurfaceForcing(
+        tau_x=geographic_poison,
+        tau_y=geographic_poison,
+        tau_i_native=tau_i,
+        tau_j_native=tau_j,
+    )
+    grid = SimpleNamespace(fold=None)
+    tau_u, tau_v, _, _ = surface_stress_faces(
+        forcing, jnp.float64, z, jac, grid)
+
+    padded = np.pad(np.asarray(tau_i), ((0, 0), (1, 1)), mode="wrap")
+    expected_u = 0.5 * (padded[:, :-1] + padded[:, 1:])
+    np.testing.assert_array_equal(np.asarray(tau_u), expected_u)
+    np.testing.assert_array_equal(
+        np.asarray(tau_v)[1:-1],
+        0.5 * (np.asarray(tau_j)[:-1] + np.asarray(tau_j)[1:]),
+    )
+    assert not np.any(np.asarray(tau_u) == -99.0)
+
+
+def test_native_ocean_stress_pair_is_fail_closed():
+    z, _, _, _, _, jac = _fields()
+    forcing = OceanSurfaceForcing(tau_i_native=jnp.ones((N_LAT, N_LON)))
+    with np.testing.assert_raises_regex(ValueError, "must be supplied together"):
+        surface_stress_faces(
+            forcing, jnp.float64, z, jac, SimpleNamespace(fold=None))

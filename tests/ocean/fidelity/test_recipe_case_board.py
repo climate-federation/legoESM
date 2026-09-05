@@ -29,6 +29,10 @@ _NON_CASE_COMPARE = frozenset({
     "legoesm_cube_vs_latlon",       # cross-grid self-comparison, no oracle
     "eke_kappa_veros",              # GM closure diagnostic
     "eke_len_veros",                # EKE length-scale diagnostic
+    "advection_nemo",               # DINO single-operator advection diagnostic
+    "grids_tripole_mpas",           # cross-grid geometry/operator diagnostic
+    "tendencies_nemo",              # DINO staged tendency diagnostic
+    "three_way_nemo",               # cross-grid decomposition diagnostic
 })
 
 

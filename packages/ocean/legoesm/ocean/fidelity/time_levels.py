@@ -37,8 +37,21 @@ _DUMP_TIME_LEVEL: dict[str, tuple[TimeLevel, str]] = {
     # condition at first-step entry, not a now/after state.
     "oracle_step_entry_kt00000001.bin": (
         "before",
-        "tests/*_OMIP_L1/MY_SRC/stprk3.F90:88-100 writes "
-        "ts/uu/vv/ssh(...,Nbb) before forcing, stp_2D, and RK stages",
+        "scripts/validate/ocean_fidelity/testcases/nemo502_MY_SRC/"
+        "stprk3.F90:88-100 (used byte-for-byte by testcase lanes 1 and 2) "
+        "writes ts/uu/vv/ssh(...,Nbb) before forcing, stp_2D, and RK stages",
+    ),
+    "oracle_step_entry_kt00002160.bin": (
+        "before",
+        "scripts/validate/ocean_fidelity/testcases/nemo502_MY_SRC/"
+        "stprk3.F90:88-100 writes the GYRE midpoint ts/uu/vv/ssh(...,Nbb) "
+        "before forcing, stp_2D, and RK stages",
+    ),
+    "oracle_step_entry_kt00004320.bin": (
+        "before",
+        "scripts/validate/ocean_fidelity/testcases/nemo502_MY_SRC/"
+        "stprk3.F90:88-100 writes the GYRE final ts/uu/vv/ssh(...,Nbb) "
+        "before forcing, stp_2D, and RK stages",
     ),
     # eos_rab / bn2 family: T/S at Nbb, geometry at Nnn.
     "dump_alpha_b.bin": ("before", "stpmlf.F90:184 eos_rab(ts(...,Nbb), rab_b, Nnn)"),
@@ -857,6 +870,124 @@ for _iday in range(1, 11):
         _DUMP_TIME_LEVEL[f"eiv_dump_u_day{_nn}_rank{_rr}.bin"] = ("now", _FACE10_EIV_U_SOURCE)
         _DUMP_TIME_LEVEL[f"eiv_dump_v_day{_nn}_rank{_rr}.bin"] = ("now", _FACE10_EIV_V_SOURCE)
 del _iday, _nn, _rank, _rr
+
+# NEMO testcase campaign whole-step RK3 records.  Lane 2 reuses lane 1's
+# byte-for-byte MY_SRC instrumentation, but every emitted basename is
+# registered here so gates cannot manufacture a time-level label from the
+# filename.  stprk3.F90 writes the step-entry Nbb state at :92-100; the stage
+# writer at :365-373 writes the explicit Kaa supplied after each stage.  The
+# transport writer records the Kmm operands consumed at stprk3_stg.F90:257-319.
+# The RHS and barotropic-frame writers capture their explicitly passed levels
+# at stprk3.F90:344-389.  Header checks in the testcase gate independently pin
+# the numeric Kaa/Kmm/Nrhs indices; these semantic labels select the comparison
+# role and deliberately fail closed for any new basename.
+for _kt in range(1, 11):
+    _step = f"{_kt:08d}"
+    _DUMP_TIME_LEVEL[f"oracle_step_entry_kt{_step}.bin"] = (
+        "before",
+        "scripts/validate/ocean_fidelity/testcases/nemo502_MY_SRC/"
+        "stprk3.F90:92-100 writes ts/uu/vv/ssh(...,Nbb) at whole-step entry",
+    )
+    _DUMP_TIME_LEVEL[f"oracle_bt_frames_kt{_step}.bin"] = (
+        "after",
+        "scripts/validate/ocean_fidelity/testcases/nemo502_MY_SRC/"
+        "stprk3.F90:344-352 writes uu_b/vv_b at the explicit klevel=Naa "
+        "plus composed un_adv/vn_adv after stp_2D",
+    )
+for _stage, _kaa, _kmm in ((1, 3, 1), (2, 2, 3), (3, 3, 2)):
+    _DUMP_TIME_LEVEL[f"oracle_stage_kt00000001_s{_stage}.bin"] = (
+        "after",
+        "scripts/validate/ocean_fidelity/testcases/nemo502_MY_SRC/"
+        f"stprk3.F90:365-373 writes the stage-{_stage} Kaa={_kaa} state",
+    )
+    _DUMP_TIME_LEVEL[f"oracle_transport_kt00000001_s{_stage}.bin"] = (
+        "now",
+        "scripts/validate/ocean_fidelity/testcases/nemo502_MY_SRC/"
+        f"stprk3_stg.F90:257-319 writes stage-{_stage} Kmm={_kmm} "
+        "advecting transports",
+    )
+_DUMP_TIME_LEVEL["oracle_rhs_kt00000001.bin"] = (
+    "now",
+    "scripts/validate/ocean_fidelity/testcases/nemo502_MY_SRC/"
+    "stprk3.F90:205-206,377-389 writes the explicitly passed Nrhs=3 "
+    "momentum state after stp_2D and before the three RK stages",
+)
+_DUMP_TIME_LEVEL["oracle_rkstage2_terms_kt00000001.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3/MY_SRC/stprk3_stg.F90:339-367 writes the stage-2 "
+    "Krhs accumulator before and after dyn_hpg/dyn_vor/dyn_adv",
+)
+_DUMP_TIME_LEVEL["oracle_rktracer_stage3_kt00000001.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3/MY_SRC/stprk3_stg.F90:565-713 writes the stage-3 "
+    "Krhs accumulator in source order, with explicit Kbb/Kmm/Kaa headers",
+)
+for _stage, _kmm in ((1, 1), (2, 3)):
+    _DUMP_TIME_LEVEL[f"oracle_rktracer_operands_kt00000001_s{_stage}.bin"] = (
+        "now",
+        "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+        "GYRE_OMIP_L2_P3/MY_SRC/stprk3_stg.F90:606-716 writes the "
+        f"stage-{_stage} Kmm={_kmm} tracer Krhs checkpoints and the "
+        "Kbb/Kmm/Kaa update operands",
+    )
+_DUMP_TIME_LEVEL["oracle_rkstage1_transport_operands_kt00000001.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3/MY_SRC/stprk3_stg.F90 writes the stage-1 "
+    "e2u/e3u/uu/zub/umask/zFu and e1v/e3v/vv/zvb/vmask/zFv operands "
+    "immediately after stprk3_stg.F90:265-278 materializes zFu/zFv",
+)
+_DUMP_TIME_LEVEL["oracle_bt_advmean_operands_kt00000001.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3/MY_SRC/dynspg_ts.F90:695-698,928-939 writes "
+    "the kt=1 substep transport accumulator and its normalized NOW-level "
+    "un_adv/vn_adv handoff",
+)
+_DUMP_TIME_LEVEL["oracle_bt_ordered_operands_kt00000001.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3_SM/MY_SRC/dynspg_ts.F90:599-917 writes the kt=1 "
+    "substep-1/2 NOW-level external-mode histories, continuity, face-depth, "
+    "pressure-gradient, trend, forcing, and velocity-update operands",
+)
+_DUMP_TIME_LEVEL["oracle_tracer_transport_kt00000001_s3.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3/MY_SRC/stprk3_stg.F90:550-565 writes stage-3 "
+    "zFu/zFv/zFw after tra_adv_trp and immediately before tra_adv",
+)
+_DUMP_TIME_LEVEL["oracle_rkstage2_ene_operands_kt00000001.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3/MY_SRC/dynvor.F90:448-535 writes the stage-2 "
+    "Kmm=3 post-division zwz and e3u/e3v(Kmm) transport operands inside "
+    "the executing np_CRV vor_ene call",
+)
+_DUMP_TIME_LEVEL["oracle_rkstage2_hpg_operands_kt00000001.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3/MY_SRC/stprk3_stg.F90:348-366 writes the stage-2 "
+    "Kmm=3 rhd, e3w(Kmm), and gdept_z0(Kmm) immediately after eos and "
+    "before the executing dyn_hpg call",
+)
+_DUMP_TIME_LEVEL["oracle_rkstage2_eos_operands_kt00000001.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3/MY_SRC/eosbn2.F90:260-348 writes the stage-2 "
+    "Knn=Kmm=3 pts/gdept inputs and each local EOS intermediate from the "
+    "executing eos_insitu call immediately before dyn_hpg",
+)
+_DUMP_TIME_LEVEL["oracle_rkstage3_wzv_kt00000001.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3/MY_SRC/traadv.F90 writes the stage-3 Kmm vertical "
+    "transport at the live wzv -> wAimp -> e1e2t*ww boundaries cited by "
+    "src/OCE/TRA/traadv.F90:220-226",
+)
+del _kt, _step, _stage, _kaa, _kmm
 
 
 def register_dump(basename: str, level: TimeLevel, source: str) -> None:

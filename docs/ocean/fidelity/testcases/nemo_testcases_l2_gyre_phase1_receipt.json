@@ -1,0 +1,91 @@
+{
+  "build_run": {
+    "compiled_keys": "key_qco key_vco_1d3d key_RK3",
+    "completed_step": 4320,
+    "elapsed_model_days": 720.0,
+    "executable_sha256": "3e7b30256344bdca1f9d99da9101adf94e24062e959416ae25f0852291a0b36f",
+    "restart_sha256": "8398627fd9d46ad3c771b6e57ee93b84282dbb6a95792a12fb4cebc91895dffc",
+    "stdout_sha256": "5f2c451cc81223c89813c37c9c11f33734f47482d11f761360b1d4b4e6a1a541"
+  },
+  "case": "gyre",
+  "coord": "zco",
+  "geometry": {
+    "beta_plane": "VERIFIED",
+    "dx_m": 106000.0,
+    "mesh_sha256": "3bf5d10e36dc52336b9797b13eb1efb4f02d25e0fb3a0c450ac6ce69e65471df",
+    "mi96_libm_diagnostic_pointwise_relative": 4.166623822316079e-14,
+    "nx": 32,
+    "ny": 22,
+    "nz": 31,
+    "rotation_45deg": "VERIFIED",
+    "wet_levels": 30
+  },
+  "inventory_counts": {
+    "mesh": 39,
+    "namelist": 580,
+    "restart": 28
+  },
+  "status": "VERIFIED",
+  "trajectory": {
+    "initial_condition_status": "VERIFIED",
+    "records": [
+      {
+        "Nbb": 1,
+        "bytes": 936048,
+        "salinity_max": 36.838057623560616,
+        "salinity_min": 35.12000012396704,
+        "sha256": "9def5f4986853f497a5e0507bea185fe1ec4348715e2aeca0b14507df8e24fa0",
+        "ssh_max": 0.0,
+        "ssh_min": 0.0,
+        "ssh_north_mean": 0.0,
+        "ssh_south_mean": 0.0,
+        "step": 1,
+        "temperature_max": 23.46094290628342,
+        "temperature_min": 4.000532963213731,
+        "velocity_max_abs": 0.0
+      },
+      {
+        "Nbb": 3,
+        "bytes": 936048,
+        "salinity_max": 37.014882333742996,
+        "salinity_min": 35.120000147420654,
+        "sha256": "e1e8340b95cf98ecfb2ea80b53067b0ed142c59980d0d5ec4b3d44c07666923e",
+        "ssh_max": 0.3395016836400833,
+        "ssh_min": -0.3122716477881017,
+        "ssh_north_mean": -0.25702923747762224,
+        "ssh_south_mean": 0.13523623531565493,
+        "step": 2160,
+        "temperature_max": 24.166629475561116,
+        "temperature_min": 4.000582959315543,
+        "velocity_max_abs": 0.29577285699311395
+      },
+      {
+        "Nbb": 3,
+        "bytes": 936048,
+        "salinity_max": 37.06033679772962,
+        "salinity_min": 35.11532895644943,
+        "sha256": "d07f0bd32cdde9cd2ca98982e1095eb8d4f25c9d1dc89866f09539a9ecf3b587",
+        "ssh_max": 0.4516915706194917,
+        "ssh_min": -0.3934087791258727,
+        "ssh_north_mean": -0.30041808282107646,
+        "ssh_south_mean": 0.15517519665057045,
+        "step": 4320,
+        "temperature_max": 24.190095253459955,
+        "temperature_min": 4.000630804977053,
+        "velocity_max_abs": 0.3529080118695336
+      }
+    ],
+    "seasonal_gyre_spinup_status": "VERIFIED",
+    "storage_bits": 64,
+    "time_level": "Nbb/before"
+  },
+  "unmeasured": [
+    "teos10_density",
+    "rab",
+    "bn2",
+    "adaptive_vertical_advection_partition",
+    "bbl_transport",
+    "bbl_downslope_mask_geometry",
+    "global_tracer_inventory_closure"
+  ]
+}

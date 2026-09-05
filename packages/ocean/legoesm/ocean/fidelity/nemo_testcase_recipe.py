@@ -12,15 +12,29 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 import numpy as np
-
 from legoesm.core.precision import PrecisionPolicy
 from legoesm.grids.latlon import create_beta_plane_cgrid_geometry
 from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
 from legoesm.ocean.dynamics.barotropic_common import nemo_auto_substeps
-from legoesm.ocean.fidelity.nemo_recipe import NEMORecipe
+from legoesm.ocean.fidelity.nemo_recipe import (
+    NEMOModelRecipeConfig,
+    NEMORecipe,
+    nemo_gyre_emp,
+    nemo_gyre_qsr,
+    nemo_gyre_t_star,
+    nemo_gyre_wind,
+    nemo_gyre_zero_mean_emp,
+    nemo_lat_lon_model_config,
+)
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
+from legoesm.ocean.physics.convection.config import (
+    EnhancedDiffusionConfig,
+    OceanConvectionConfig,
+)
+from legoesm.ocean.physics.shortwave_penetration import ShortwavePenetrationConfig
 from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.vertical import (
+    NemoEENBarotropicOperands,
     create_full_step_coordinate,
     create_partial_cell_coordinate,
     create_z_star_from_thicknesses,
@@ -39,14 +53,12 @@ class NEMOTestcaseCard(NamedTuple):
     bbl_diffusive_option: int
     bbl_aht_m2_s: float
     bbl_gamma_s: float
+    surface_boundary_condition: str = "none"
+    transcendentals: str = "libm"
 
 
 class C1DSlabOceanCard(NamedTuple):
-    """Production card for the one-column ocean half of rung 3.6.
-
-    ``meridionally_periodic`` records the existing halo convention the runner
-    must activate; the card contains no alternate solver.
-    """
+    """Production card for the one-column ocean half of rung 3.6."""
 
     recipe: NEMORecipe
     dt_s: float
@@ -56,11 +68,192 @@ class C1DSlabOceanCard(NamedTuple):
     precision_policy: PrecisionPolicy
 
 
+class GYRESurfaceBoundaryCondition(NamedTuple):
+    """Analytic fields emitted by GYRE ``usrdef_sbc`` on T points."""
+
+    qsr_w_m2: jnp.ndarray
+    t_star_c: jnp.ndarray
+    emp_kg_m2_s: jnp.ndarray
+    utau_pa: jnp.ndarray
+    vtau_pa: jnp.ndarray
+    taum_pa: jnp.ndarray
+    wndm_m_s: jnp.ndarray
+
+
 def _model_config(
     *, barotropic_time_filter: str, n_barotropic_substeps: int,
-    bbl_adv_option: int, bbl_gamma_s: float,
+    bbl_adv_option: int, bbl_gamma_s: float, whole_step_identity: str,
 ) -> LatLonCGridOceanConfig:
     """The selectors shared by both certified ``key_qco + key_RK3`` runs."""
+
+    if whole_step_identity not in {"lane1_flux_up3", "gyre_vector_ene_c2"}:
+        raise ValueError(
+            "unknown whole_step_identity; expected 'lane1_flux_up3' or "
+            "'gyre_vector_ene_c2'"
+        )
+
+    if whole_step_identity == "gyre_vector_ene_c2":
+        # One collapsed resolved-GYRE identity.  The numerical blocks come from
+        # the canonical NEMO/DINO card; only this testcase's OMIP TEOS-10/SCO,
+        # RK3, and resolved GYRE parameter selections are supplied here.
+        config = nemo_lat_lon_model_config(
+            NEMOModelRecipeConfig(
+                momentum_core="vector_invariant_ene",
+                eos="nemo_teos10",
+                tracer_advection="fct2",
+                pgf_scheme="nemo_sco",
+                pgf_quadrature="nemo_trapezoid",
+                barotropic_solver="explicit_substep",
+                n_barotropic_substeps=n_barotropic_substeps,
+                barotropic_time_filter=barotropic_time_filter,
+                momentum_time_integrator="rk3_ws",
+                adaptive_implicit_vertadv=False,
+                implicit_vertical_mixing=True,
+                A_h=1.0e5,
+                A_h_lat_scaling=False,
+                A_h_floor=0.0,
+                C_smag_lap=0.0,
+                B_h=0.0,
+                K_h=0.0,
+                K_bih=0.0,
+                gm_redi=True,
+                kappa_GM=0.0,
+                kappa_Redi=1000.0,
+                redi_S_max=0.01,
+                lateral_operator="nemo_iso_lap",
+                mle=False,
+                rgb_shortwave=False,
+                normalize_freshwater=False,
+                freeze_floor=False,
+                bottom_drag_scheme="nemo_quadratic",
+            )
+        )
+        tke = config.physics.vertical_mixing.tke._replace(
+            # OMIP-style TEOS-10 deviation: both zdftke and zdfevd consume
+            # eosbn2, not the S-EOS identity used by shipped GYRE.
+            n2_mode="nemo_bn2",
+            n2_eos_form="teos10",
+            buoyancy_timing="pre_mixing",
+            shear_production="pre_solve",
+            prandtl_mode="nemo_ri",
+            positivity="floor",
+            tke_surface_bc_level="nemo_z0",
+            tke_buoyancy_sink="nemo_explicit",
+            mxl_min=0.01,
+            mxl0_min_m=0.04,
+            tke_dry_wmask=True,
+            kappaM_max=float("inf"),
+            tke_preclosure_coeff_source="carried_previous_step",
+            tke_matrix_evaluation="nemo_literal",
+            tke_solver_evaluation="nemo_literal",
+            tke_etau_exponential_evaluation="jax_expression",
+            tke_htau_evaluation="jax_expression",
+            tke_mxl_raw_evaluation="factored",
+            tke_langmuir_evaluation="vectorized",
+            tke_shear_evaluation_stage="step_entry",
+            # RK3 has no leapfrog eta-before carrier; the QCO live metric is
+            # reconstructed at the current stage from the same raw ladder.
+            tke_shear_metric_source="tpoint_jacobian",
+            tke_n2_evaluation_stage="step_entry",
+            # stprk3.F90:154-181 evaluates the closure N2 at Nbb before any
+            # stage.  On RK3 the canonical nemo_before operand is the same
+            # whole-step entry tracer used by the EVD twin below.
+            tke_n2_time_level="nemo_before",
+        )
+        physics = config.physics._replace(
+            vertical_mixing=config.physics.vertical_mixing._replace(
+                tke=tke, vmix_background_mode="nemo_max_floor"
+            ),
+            convection=OceanConvectionConfig(
+                scheme="enhanced_diffusion",
+                enhanced_diffusion=EnhancedDiffusionConfig(
+                    K_conv=100.0,
+                    nu_conv=100.0,
+                    K_bg=0.0,
+                    nu_bg=0.0,
+                    smooth_transition=False,
+                    n2_mode="nemo_bn2",
+                    n2_eos_form="teos10",
+                    n2_threshold=-1.0e-12,
+                    two_level_trigger=True,
+                    # RK3 stprk3.F90:154-181 computes rn2b on Nbb, copies
+                    # rn2=rn2b, and calls zdf_phy(Nbb,Nbb) before any stage.
+                    # The canonical NEMO time-level option therefore samples
+                    # the whole-step entry tracer for both EVD trigger arms.
+                    evd_n2_time_level="nemo_now_before",
+                ),
+            ),
+            shortwave_penetration=ShortwavePenetrationConfig(
+                scheme="nemo_qsr_2bd", water_type="I", nemo_time_step_s=14400.0
+            ),
+            mle=None,
+        )
+        return config._replace(
+            physics=physics,
+            eos_depth="geometric",
+            tracer_time_integrator="rk3_ws",
+            vertical_momentum_scheme="nemo_advective",
+            zad_bottom_face_mask="nemo_faithful",
+            zad_qco_evaluation="nemo_literal",
+            wzv_call2_evaluation="nemo_literal",
+            vorticity_scheme="ene_total",
+            # key_qco e3f_vor = e3f_0vor*(1+r3f); dom_qco_r3c_RK3 builds
+            # r3f from the four-cell surface-weighted SSH average
+            # (domqco.F90:233-246), not the generic vertex minimum.
+            # Resolved nn_e3f_typ=0: e3f_0vor is the masked four-cell
+            # reference sum divided by four, with live r3f applied only at
+            # fully wet F points (dynvor.F90:918-950).
+            een_e3f_scheme="nemo_avg4",
+            # dynvor.F90:518-535 carries e2u/e1v into the transport operands
+            # and divides the final U/V terms by e1u/e2v.
+            een_metric_weighting="nemo",
+            # Resolved ln_dynvor_msk=.false.: keep coastal relative
+            # vorticity live instead of Neumann-filling the F-point q field.
+            een_q_boundary="nemo_live",
+            coriolis_scheme="explicit_ab2",
+            # GYRE's np_ENE dyn_cor_2D is subcycled live: subtract the Kmm
+            # ENE Coriolis from zu_frc, then reapply it to every AB3 mid-step
+            # velocity (dynspg_ts.F90:359,689; nn_bt_flt=3).
+            barotropic_coriolis_split="live",
+            lateral_viscosity_operator="nemo_div_curl",
+            lateral_viscosity_e3_weighting="nemo_e3",
+            surface_stress_implicit=True,
+            bbl_adv_option=bbl_adv_option,
+            bbl_gamma_s=bbl_gamma_s,
+            # NEMO's e3w(Kmm) implicit-solve divisor (trazdf.F90:219-221,
+            # dynzdf.F90:200-203) comes WITH this identity -- it is not a
+            # separate flag, because NEMO has no such switch.  Same removal as
+            # the shared _model_config above; the GYRE card runs the same
+            # routine, so it takes the same fix.
+            zdf_implicit_solver_evaluation="nemo_literal",
+            # GYRE resolves ln_non_lin=T + ln_drgimp=T together with
+            # ln_dynspg_ts=T.  NEMO owns this as one composition: frozen Kmm
+            # rCdU_bot in the explicit external-mode substeps, the baroclinic
+            # residual correction, and the bottom-cell implicit dynzdf
+            # diagonal (zdfdrg.F90:138-190; dynspg_ts.F90:699-705,1584-1643;
+            # dynzdf.F90:148-160,293-305).  These are the already-canonical
+            # DINO options, selected as a bundle rather than a GYRE-only
+            # reimplementation.
+            zdf_drag_in_matrix=True,
+            zdf_baroclinic_only=True,
+            barotropic_drag_substep=True,
+            use_conservation_fixer=False,
+            fix_eta_drift=False,
+            barotropic=config.barotropic._replace(
+                barotropic_diffusion_alpha=0.0,
+                barotropic_face_depth="nemo_ssh_avg",
+                barotropic_continuity_evaluation="nemo_literal",
+                barotropic_transport_accumulation_evaluation="nemo_literal",
+                barotropic_seed_face_depth="nemo_ssh_avg",
+                barotropic_seed_evaluation="nemo_literal",
+                barotropic_pgf_evaluation="nemo_literal",
+                barotropic_coriolis="ene_metric",
+                barotropic_een_seed="nemo_kmm",
+                barotropic_een_coefficient_evaluation="nemo_literal",
+                barotropic_reconcile_target="velocity_avg",
+                nemo_stage_mean_imposition=True,
+            ),
+        )
 
     return LatLonCGridOceanConfig.from_flat(
         constants=NEMO_CONSTANTS_CONFIG,
@@ -75,7 +268,10 @@ def _model_config(
         # stages from Kbb with dt/3, dt/2, and dt.
         tracer_time_integrator="rk3_ws",
         momentum_advection="flux_form",
-        momentum_flux_scheme="upwind3",
+        # dynadv_up3.F90:166,169-170 -- the NEMO-referenced UP3 arm (the
+        # T-point fluxes select the upwind curvature by the advected-
+        # velocity pair).  See UP3_REFERENCE_SELECTOR.
+        momentum_flux_scheme="nemo_up3",
         momentum_time_integrator="rk3_ws",
         # key_RK3 is a single scheme identity: Kmm transports + two-step FCT
         # + per-stage external-mode correction + distinct un_adv/hu transport.
@@ -112,8 +308,10 @@ def _model_config(
         bbl_gamma_s=bbl_gamma_s,
         adaptive_implicit_vertadv=True,
         implicit_vertical_mixing=True,
+        # NEMO's e3w(Kmm) implicit-solve divisor (trazdf.F90:219-221,
+        # dynzdf.F90:200-203) comes WITH this identity — it is not a
+        # separate flag, because NEMO has no such switch.
         zdf_implicit_solver_evaluation="nemo_literal",
-        implicit_vmix_e3t_now_divisor=True,
         A_h=0.0,
         B_h=0.0,
         C_smag=0.0,
@@ -162,6 +360,182 @@ def _closed_box_mask(n_lat: int, n_lon: int) -> jnp.ndarray:
     mask = jnp.ones((n_lat, n_lon), dtype=jnp.float64)
     mask = mask.at[(0, -1), :].set(0.0)
     return mask.at[:, (0, -1)].set(0.0)
+
+
+# The 31-value arrays are the fp64 records certified from the running
+# ``usrdef_zgr.F90:93-175`` MI96 construction in lane 2 phase 1.  Re-evaluating
+# LOG(COSH()) with NumPy libm misses the oracle's immutable 1e-15 pointwise bar;
+# pinning the source-produced ladder preserves the NEMO arithmetic instead of
+# weakening the bar.  The card executes the first 30 wet records; record 31 is
+# NEMO's permanently dry dummy bottom level.
+_GYRE_E3T_1D = np.asarray([
+    10.003514801805068, 10.26472604769333, 10.653529090795246,
+    11.231608712113939, 12.08969824829228, 13.360330096794087,
+    15.23507363590079, 17.986499995084273, 21.993282036775668,
+    27.762634353116596, 35.93635369855406, 47.254890225334634,
+    62.44322808843981, 81.98917271094399, 105.83539858887082,
+    133.10877001399524, 162.09543281938386, 190.599631250789,
+    216.5654109595439, 238.6192469742948, 256.2608904106037,
+    269.7067692950918, 279.5807802413228, 286.63508275979984,
+    291.5762701420572, 294.9895332266615, 297.32472884315484,
+    298.9118390394151, 299.98567369315606, 300.7100172156124,
+    301.0986264392159,
+], dtype=np.float64)
+_GYRE_E3W_1D = np.asarray([
+    9.950530581805197, 10.121161817424081, 10.43988191757876,
+    10.914048646553056, 11.61852705940396, 12.66309229154649,
+    14.207337494218677, 16.480319826389632, 19.804482396370304,
+    24.620543509582376, 31.504122360713666, 41.15480650087369,
+    54.32592726687034, 71.6584856658713, 93.40817408802695,
+    119.13338905771104, 147.5206037556743, 176.54727935722144,
+    204.00592227790025, 228.13252600238502, 247.99143632415962,
+    263.47513523883026, 275.04366416278845, 283.4138796274283,
+    289.33002250128766, 293.4427044280478, 296.26873304279707,
+    298.19518745505684, 299.50127253556275, 300.38349000569724,
+    300.97790853013066,
+], dtype=np.float64)
+_GYRE_GDEPT_1D = np.asarray([
+    4.975265290902598, 15.09642710832668, 25.53630902590544,
+    36.450357672458495, 48.068884731862454, 60.731977023408945,
+    74.93931451762762, 91.41963434401725, 111.22411674038756,
+    135.84466024996993, 167.3487826106836, 208.5035891115573,
+    262.8295163784276, 334.4880020442989, 427.8961761323259,
+    547.0295651900369, 694.5501689457112, 871.0974483029327,
+    1075.103370580833, 1303.235896583218, 1551.2273329073776,
+    1814.7024681462078, 2089.7461323089965, 2373.160011936425,
+    2662.4900344377124, 2955.9327388657603, 3252.2014719085573,
+    3550.396659363614, 3849.897931899177, 4150.281421904874,
+    4451.259330435005,
+], dtype=np.float64)
+_GYRE_GDEPW_1D = np.asarray([
+    0.0, 10.003514801805068, 20.268240849498397, 30.921769940293643,
+    42.15337865240758, 54.24307690069986, 67.60340699749395,
+    82.83848063339474, 100.82498062847901, 122.81826266525468,
+    150.58089701837127, 186.51725071692533, 233.77214094225997,
+    296.2153690306998, 378.20454174164377, 484.0399403305146,
+    617.1487103445098, 779.2441431638937, 969.8437744146827,
+    1186.4091853742266, 1425.0284323485214, 1681.289322759125,
+    1950.996092054217, 2230.57687229554, 2517.21195505534,
+    2808.788225197397, 3103.7777584240584, 3401.1024872672133,
+    3700.0143263066284, 3999.9999999997844, 4300.710017215397,
+], dtype=np.float64)
+
+
+def gyre_vertical_ladder() -> dict[str, np.ndarray]:
+    """Return copies of the source-produced 31-record GYRE MI96 ladder."""
+
+    return {
+        "e3t_1d": _GYRE_E3T_1D.copy(),
+        "e3w_1d": _GYRE_E3W_1D.copy(),
+        "gdept_1d": _GYRE_GDEPT_1D.copy(),
+        "gdepw_1d": _GYRE_GDEPW_1D.copy(),
+    }
+
+
+def gyre_horizontal_coordinates() -> dict[str, np.ndarray]:
+    """Transcribe the rotated GYRE T/U/V/F coordinates and beta-plane f."""
+
+    nx, ny = 32, 22
+    radius = float(NEMO_CONSTANTS_CONFIG.R_earth)
+    omega = float(NEMO_CONSTANTS_CONFIG.Omega)
+    rad = np.pi / 180.0
+    spacing = 106000.0
+    spacing_deg = spacing / (radius * rad)
+    sin_alpha = -math.sqrt(2.0) * 0.5
+    cos_alpha = math.sqrt(2.0) * 0.5
+    lon0 = -85.0 + cos_alpha * spacing_deg * (ny - 2)
+    lat0 = 29.0 + sin_alpha * spacing_deg * (ny - 2)
+    i_m05 = np.arange(nx, dtype=np.float64) - 0.5
+    i_m0 = np.arange(nx, dtype=np.float64)
+    j_m05 = np.arange(ny, dtype=np.float64) - 0.5
+    j_m0 = np.arange(ny, dtype=np.float64)
+
+    def stagger(i, j):
+        lon = lon0 + i[None, :] * spacing_deg * cos_alpha
+        lon = lon + j[:, None] * spacing_deg * sin_alpha
+        lat = lat0 - i[None, :] * spacing_deg * sin_alpha
+        lat = lat + j[:, None] * spacing_deg * cos_alpha
+        return lon, lat
+
+    glamt, gphit = stagger(i_m05, j_m05)
+    glamu, gphiu = stagger(i_m0, j_m05)
+    glamv, gphiv = stagger(i_m05, j_m0)
+    glamf, gphif = stagger(i_m0, j_m0)
+    beta = 2.0 * omega * math.cos(rad * 29.0) / radius
+    f0 = 2.0 * omega * math.sin(rad * 15.0)
+
+    def coriolis(lat):
+        return f0 + beta * np.abs(lat - 15.0) * rad * radius
+
+    return {
+        "glamt": glamt, "glamu": glamu, "glamv": glamv, "glamf": glamf,
+        "gphit": gphit, "gphiu": gphiu, "gphiv": gphiv, "gphif": gphif,
+        "ff_t": coriolis(gphit), "ff_f": coriolis(gphif),
+    }
+
+
+def _gyre_grid():
+    """Build the source-rotated 106-km Cartesian C-grid."""
+
+    source = gyre_horizontal_coordinates()
+    grid = create_beta_plane_cgrid_geometry(
+        22, 32, dx_m=106000.0, dy_m=106000.0, f0=0.0, beta=0.0,
+        radius=float(NEMO_CONSTANTS_CONFIG.R_earth),
+        cartesian_pseudo_lat=True, dtype=jnp.float64,
+    )
+    radians = np.pi / 180.0
+    rotation = math.sqrt(2.0) * 0.5
+    # The redundant west/south face layouts add one model face beyond the
+    # native NEMO A2D arrays.  Their interior records are the exact source
+    # staggerings; boundary extras are affine continuations and are walled.
+    f_u_native = (
+        2.0 * float(NEMO_CONSTANTS_CONFIG.Omega)
+        * np.sin(15.0 * radians)
+        + 2.0 * float(NEMO_CONSTANTS_CONFIG.Omega)
+        * math.cos(29.0 * radians)
+        / float(NEMO_CONSTANTS_CONFIG.R_earth)
+        * np.abs(source["gphiu"] - 15.0) * radians
+        * float(NEMO_CONSTANTS_CONFIG.R_earth)
+    )
+    f_u = np.concatenate([f_u_native, f_u_native[:, -1:] + (
+        f_u_native[:, -1:] - f_u_native[:, -2:-1])], axis=1)
+    f_v = np.concatenate([
+        source["ff_f"][:1] - (source["ff_f"][1:2] - source["ff_f"][:1]),
+        source["ff_f"],
+    ], axis=0)
+    return grid._replace(
+        lat_T=jnp.asarray(source["gphit"] * radians, dtype=jnp.float64),
+        lon_T=jnp.asarray(source["glamt"] * radians, dtype=jnp.float64),
+        f_T=jnp.asarray(source["ff_t"], dtype=jnp.float64),
+        f_u=jnp.asarray(f_u, dtype=jnp.float64),
+        f_v=jnp.asarray(f_v, dtype=jnp.float64),
+        cos_alpha_u=jnp.full((22, 33), rotation, dtype=jnp.float64),
+        sin_alpha_u=jnp.full((22, 33), rotation, dtype=jnp.float64),
+        cos_alpha_v=jnp.full((23, 32), rotation, dtype=jnp.float64),
+        sin_alpha_v=jnp.full((23, 32), rotation, dtype=jnp.float64),
+        native_lat_T_deg=jnp.asarray(source["gphit"], dtype=jnp.float64),
+    )
+
+
+def _gyre_initial_profiles(depth_m: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Scalar-libm transcription of ``usrdef_istate.F90:62-76``."""
+
+    def profile(d):
+        w1 = (-math.tanh((500.0 - d) / 150.0) + 1.0) / 2.0
+        w2 = (-math.tanh((d - 500.0) / 150.0) + 1.0) / 2.0
+        t = ((16.0 - 12.0 * math.tanh((d - 400.0) / 700.0)) * w1
+             + (15.0 * (1.0 - math.tanh((d - 50.0) / 1500.0))
+                - 1.4 * math.tanh((d - 100.0) / 100.0)
+                + 7.0 * (1500.0 - d) / 1500.0) * w2)
+        s = ((36.25 - 1.13 * math.tanh((d - 305.0) / 460.0)) * w1
+             + (35.55 + 1.25 * (5000.0 - d) / 5000.0
+                - 1.62 * math.tanh((d - 60.0) / 650.0)
+                + 0.2 * math.tanh((d - 35.0) / 100.0)
+                + 0.2 * math.tanh((d - 1000.0) / 5000.0)) * w2)
+        return t, s
+
+    values = np.asarray([profile(float(d)) for d in depth_m], dtype=np.float64)
+    return values[:, 0], values[:, 1]
 
 
 def _cartesian_grid(n_lon: int, spacing_m: float):
@@ -217,6 +591,9 @@ def build_lock_exchange_zco_card() -> NEMOTestcaseCard:
     z_ref = create_z_star_from_thicknesses(
         jnp.full((20,), 1.0),
         t_depth_ref_m=np.arange(20, dtype=np.float64) + 0.5,
+        # mesh_mask.nc:e3w_1d(1:20) is exactly 1 m on the shipped case.
+        nemo_e3w_0_m=np.broadcast_to(
+            np.ones(20, dtype=np.float64), (3, 130, 20)),
     )
     bottom = jnp.where(wet > 0.0, 19, -1)
     z_coord = create_full_step_coordinate(z_ref, bottom)
@@ -230,6 +607,7 @@ def build_lock_exchange_zco_card() -> NEMOTestcaseCard:
         n_barotropic_substeps=_resolved_auto_substeps(grid, bathymetry, 1.0),
         bbl_adv_option=0,
         bbl_gamma_s=0.0,
+        whole_step_identity="lane1_flux_up3",
     )
     recipe = NEMORecipe(
         model_config=model_config,
@@ -264,12 +642,43 @@ def build_overflow_zps_card() -> NEMOTestcaseCard:
     )
     depth = jnp.broadcast_to(jnp.asarray(depth_1d)[None, :], (3, 202))
     bathymetry = jnp.where(wet > 0.0, depth, 0.0)
+    _gdept_1d = 10.0 + 20.0 * np.arange(100, dtype=np.float64)
     z_ref = create_z_star_from_thicknesses(
         jnp.full((100,), 20.0),
-        t_depth_ref_m=10.0 + 20.0 * np.arange(100, dtype=np.float64),
+        t_depth_ref_m=_gdept_1d,
+        # tests/OVERFLOW/MY_SRC/usrdef_zgr.F90:157-168 leaves gdept/e3w on the
+        # uniform reference ladder under ld_zps, so mesh_mask.nc:e3w_0 is
+        # exactly 20 m in every column INCLUDING the partial-bottom ones.
+        # Carry the source operands on that 1-D ladder: both dynhpg (which
+        # must not reconstruct W spacing from the clipped T-cell thickness)
+        # and the raw-W ZDF/wAimp consumers read this one field.
+        nemo_gdept_0_m=_gdept_1d,
+        nemo_e3w_0_m=np.full((100,), 20.0, dtype=np.float64),
     )
     z_coord = create_partial_cell_coordinate(
         z_ref, bathymetry, bottom_index_rule="nemo_tpoint"
+    )
+    # Exact unmasked BBL face scale factors from this test case's source.
+    # usrdef_zgr.F90:171-186 starts every e3t at 20 m, replaces the bottom
+    # and first-below-bottom records by the partial thickness, then (the
+    # bathymetry increases monotonically in i and is identical in j) assigns
+    # e3u=e3v=e3t at the west/south source column.  trabbl.F90:529-531 later
+    # gathers these arrays at BOTH adjacent bottom indices, including a level
+    # below the shallower wet column; masked h_partial cannot reconstruct it.
+    _h_partial = np.asarray(z_coord.h_partial, dtype=np.float64)
+    _bottom = np.asarray(z_coord.bottom_level, dtype=np.int32)
+    _raw_e3t = np.broadcast_to(
+        np.asarray(z_coord.dz_ref, dtype=np.float64), _h_partial.shape
+    ).copy()
+    for _j, _i in np.argwhere(_bottom >= 0):
+        _k = int(_bottom[_j, _i])
+        _raw_e3t[_j, _i, _k] = _h_partial[_j, _i, _k]
+        if _k + 1 < _raw_e3t.shape[-1]:
+            _raw_e3t[_j, _i, _k + 1] = _h_partial[_j, _i, _k]
+    z_coord = z_coord._replace(
+        nemo_e3t_0=jnp.asarray(_raw_e3t),
+        nemo_bbl_e3u_0=jnp.asarray(_raw_e3t[:, :-1, :]),
+        nemo_bbl_e3v_0=jnp.asarray(_raw_e3t[:-1, :, :]),
     )
     # NEMO clips the analytic input depth onto its zps bottom-cell geometry;
     # the model water-column depth is therefore the sum of the executed cells.
@@ -286,6 +695,7 @@ def build_overflow_zps_card() -> NEMOTestcaseCard:
         ),
         bbl_adv_option=2,
         bbl_gamma_s=20.0,
+        whole_step_identity="lane1_flux_up3",
     )
     recipe = NEMORecipe(
         model_config=model_config,
@@ -304,130 +714,172 @@ def build_overflow_zps_card() -> NEMOTestcaseCard:
     return card
 
 
-def build_c1d_omip_l3_slab_ocean_card() -> C1DSlabOceanCard:
-    """Build the reviewed 10 m, one-wet-layer C1D OCE+ICE ocean card.
+def build_gyre_zco_card() -> NEMOTestcaseCard:
+    """Certified GYRE: rotated beta-plane, MI96 zco, OMIP RK3 identity."""
 
-    This composes the same shared ``key_qco + key_RK3`` dynamics used by the
-    test-case recipes.  C1D resolves ``ln_dynadv_OFF``; horizontal advection is
-    therefore structurally zero on its single doubly-periodic cell, while the
-    shared flux-form update remains the active ``dynspg_ts`` statement.
-    """
-
-    f_84n = (
-        2.0 * float(NEMO_CONSTANTS_CONFIG.Omega)
-        * math.sin(math.radians(84.0))  # const-ok: C1D rn_lat1d case geometry
+    grid = _gyre_grid()
+    wet = _closed_box_mask(22, 32)
+    wet_np = np.asarray(wet)
+    u_wet_native = wet_np * np.roll(wet_np, -1, axis=1)
+    v_wet_native = wet_np * np.roll(wet_np, -1, axis=0)
+    area_native = np.asarray(grid.dx_T) * np.asarray(grid.dy_T)
+    reference_depth = float(_GYRE_GDEPW_1D[30])
+    native_3d = (22, 32, 30)
+    zco_thickness = np.broadcast_to(_GYRE_E3T_1D[:30], native_3d)
+    umask_3d = np.broadcast_to(u_wet_native[..., None], native_3d)
+    vmask_3d = np.broadcast_to(v_wet_native[..., None], native_3d)
+    f_wet_native = u_wet_native * np.roll(u_wet_native, -1, axis=0)
+    f_wet_native[-1, :] = 0.0
+    fmask_3d = np.broadcast_to(f_wet_native[..., None], native_3d)
+    literal_barotropic_operands = NemoEENBarotropicOperands(
+        ff_f=np.asarray(grid.f_v)[1:],
+        e3u_0=zco_thickness,
+        e3v_0=zco_thickness,
+        e3f_0=zco_thickness,
+        umask=umask_3d,
+        vmask=vmask_3d,
+        fmask=fmask_3d,
+        hu_0=reference_depth * u_wet_native,
+        hv_0=reference_depth * v_wet_native,
+        hf_0=reference_depth * f_wet_native,
+        e1t=np.asarray(grid.dx_T),
+        e2t=np.asarray(grid.dy_T),
+        e1u=np.asarray(grid.dx_u)[:, 1:],
+        e2u=np.asarray(grid.dy_u)[:, 1:],
+        e1v=np.asarray(grid.dx_v)[1:],
+        e2v=np.asarray(grid.dy_v)[1:],
+        e1f=np.full((22, 32), 106000.0),
+        e2f=np.full((22, 32), 106000.0),
     )
-    grid = create_beta_plane_cgrid_geometry(
-        1, 1,
-        dx_m=100.0,  # const-ok: C1D usrdef_hgr.F90:88-91 case metric
-        dy_m=100.0,  # const-ok: C1D usrdef_hgr.F90:88-91 case metric
-        f0=f_84n,
-        beta=0.0,
-        cartesian_pseudo_lat=False,
-        dtype=jnp.float64,
-    )
-    wet = jnp.ones((1, 1), dtype=jnp.float64)
-    # Two allocated levels reproduce jpk=2; bottom index zero leaves exactly
-    # one wet layer.  The second thickness is never executed.
     z_ref = create_z_star_from_thicknesses(
-        jnp.asarray((10.0, 10.0), dtype=jnp.float64),  # const-ok: Decision 6
-        t_depth_ref_m=np.asarray((5.0, 15.0), dtype=np.float64),
+        _GYRE_E3T_1D[:30],
+        t_depth_ref_m=_GYRE_GDEPT_1D[:30],
+        nemo_gdept_0_m=np.broadcast_to(_GYRE_GDEPT_1D[:30], native_3d),
+        nemo_gdepw_0_m=np.broadcast_to(_GYRE_GDEPW_1D[:30], native_3d),
+        nemo_e3t_0_m=np.broadcast_to(_GYRE_E3T_1D[:30], native_3d),
+        nemo_e3w_0_m=np.broadcast_to(_GYRE_E3W_1D[:30], native_3d),
+        nemo_hu_0_m=reference_depth * u_wet_native,
+        nemo_hv_0_m=reference_depth * v_wet_native,
+        nemo_e1e2t_m=area_native,
+        nemo_e1e2u_m=area_native,
+        nemo_e1e2v_m=area_native,
+        nemo_e2u_m=np.full_like(area_native, 106000.0),
+        nemo_e1v_m=np.full_like(area_native, 106000.0),
+        nemo_een_barotropic_m=literal_barotropic_operands,
     )
-    z_coord = create_full_step_coordinate(
-        z_ref, jnp.zeros((1, 1), dtype=np.int32))
+    # The generic constructor deliberately recovers dz from a cumulative-sum
+    # interface ladder.  NEMO stores both source-produced arrays and its
+    # ``e3t_1d`` differs from that recovery by several deep-level ULPs.  Retain
+    # both certified operands exactly, as NEMO does.
+    z_ref = z_ref._replace(
+        H_max=float(_GYRE_GDEPW_1D[30]),
+        z_half_ref=jnp.asarray(-_GYRE_GDEPW_1D[:31], dtype=jnp.float64),
+        dz_ref=jnp.asarray(_GYRE_E3T_1D[:30], dtype=jnp.float64),
+    )
+    bottom = jnp.where(wet > 0.0, 29, -1)
+    z_coord = create_full_step_coordinate(z_ref, bottom)
+    bathymetry = wet * _GYRE_GDEPW_1D[30]
     state = rest_state_latlon_cgrid_ocean(
-        grid, z_coord,
-        T_water_init_C=-1.690032958984375,  # C1D init_oce_T.nc, exact fp64
-        T_deep=-1.690032958984375,
-        S_uniform=34.0,  # const-ok: C1D init_oce_S.nc case value
-        H_max=10.0,  # const-ok: user Decision 6 free construction parameter
+        grid,
+        z_coord,
+        T_water_init_C=0.0,
+        T_deep=0.0,
+        S_uniform=0.0,
+        H_max=float(_GYRE_GDEPW_1D[30]),
         land_mask_override=wet,
-        H_bathy_override=wet * 10.0,
+        H_bathy_override=bathymetry,
     )
-    eta0 = jnp.full(
-        (1, 1), -1.6666666666666667, dtype=jnp.float64)  # ice-load SSH
-    # ``rest_state`` constructs closed-wall v masks before a runner activates
-    # the existing periodic-halo context.  C1D is periodic in both horizontal
-    # directions, so its two representations of the sole meridional face are
-    # wet (NEMO usrdef_dom/cyclone domain masks); bind that case geometry in
-    # the card rather than introducing a one-column operator.
+    t_profile, s_profile = _gyre_initial_profiles(_GYRE_GDEPT_1D[:30])
+    active = np.asarray(z_coord.is_active)
+    temperature = np.where(active, t_profile[None, None, :], 0.0)
+    salinity = np.where(active, s_profile[None, None, :], 0.0)
     state = state._replace(
-        eta=state.eta.replace(data=eta0),
-        v_mask=state.v_mask.replace(data=jnp.ones_like(state.v_mask.data)),
+        T=state.T.replace(data=jnp.asarray(temperature, dtype=jnp.float64)),
+        S=state.S.replace(data=jnp.asarray(salinity, dtype=jnp.float64)),
     )
-    cfg = _model_config(
-        barotropic_time_filter="nemo_boxcar1_ab3",
-        n_barotropic_substeps=631,
+    # GYRE resolves ln_bt_auto=T to nn_e=50 with nn_bt_flt=3 and
+    # rn_bt_alpha=.07 (ocean.output:833-839).  Keep this executed value pinned;
+    # auto-resolution is separately checked from the live card geometry.
+    model_config = _model_config(
+        barotropic_time_filter="nemo_ab3am4",
+        n_barotropic_substeps=50,
         bbl_adv_option=0,
         bbl_gamma_s=0.0,
+        whole_step_identity="gyre_vector_ene_c2",
     )
-    cfg = cfg._replace(
-        # C1D's resolved namelist prints ln_traadv_OFF=T; tra_adv therefore
-        # leaves Krhs unchanged at stprk3_stg.F90:540.  Inheriting the GYRE
-        # FCT selector fed the QCO vertical transport to a branch NEMO did not
-        # execute, despite the one-column horizontal geometry.
-        tracer_advection="off",
-        momentum_advection="off",
-        # C1D resolves the complete ln_dynadv_OFF program.  NEMO dynadv.F90:
-        # 78-90 has no executable np_LIN_dyn advection case, while :128-134
-        # maps that one selector to the no-advection identity.  Override both
-        # halves explicitly after the shared LOCK/OVERFLOW flux-UP3 deck.
-        vertical_momentum_scheme="off",
-        # C1D resolves NEMO's ENS Coriolis inside each WS-RK3 3-D momentum
-        # tendency.  The shared ``explicit_ab2`` spelling selects that
-        # tendency placement (the name predates the RK3 caller); the
-        # ``matsuno_split`` alternative would move rotation after the stages
-        # and makes their Krhs identically zero in this one-layer column.
-        coriolis_scheme="explicit_ab2",
-        # With the resolved linear-dynamics switch NEMO's ENE relative term
-        # is structurally zero and only its planetary part remains.  legoESM's
-        # shared ``ene`` + explicit face-Coriolis split is the same one-column
-        # operator; ``ene_total`` would require the shared EEN live barotropic
-        # stencil, a different NEMO branch.
-        vorticity_scheme="ene",
-        barotropic_coriolis_split="live",
-        # C1D_OMIP_L3_COUPLED10M executes NEMO's implicit wind-stress
-        # deposition in dynzdf.F90:328-330 and the mandatory post-solve
-        # barotropic correction in stprk3_stg.F90:437-445.  These are the
-        # shared NEMO selectors, not slab-only numerics.
-        surface_stress_implicit=True,
-        # sbcfwb.F90:292-295 changes e3t/SSH under nn_fwb_voltype=1; salt is
-        # carried only by SI3's real ``sfx`` source in trasbc.F90:310-313.
-        # The generic virtual-salt closure would apply emp a second time after
-        # the certified RK3 source program.
-        freshwater_closure="real_freshwater",
-        bottom_drag=cfg.bottom_drag._replace(
-            # Resolved oracle: ln_non_lin=T, ln_lin=F, hence
-            # zdfdrg.F90:183-190 evaluates -rn_Cd0*sqrt(U^2+rn_ke0).
-            # The 0.05 m/s rest value happens to produce 5e-5 m/s, but that
-            # is not a linear coefficient and must evolve once U is nonzero.
-            bottom_drag_cd0=1.0e-3,  # ORCA1 namelist_cfg:264
-            bottom_drag_ke0=2.5e-3,  # ORCA1 namelist_cfg:267
-            bottom_drag_bbl_thickness=0.0,
-            bottom_drag_scheme="nemo_quadratic",
-        ),
-        zdf_drag_in_matrix=True,
-        zdf_baroclinic_only=True,
-        barotropic_drag_substep=True,
-        barotropic=cfg.barotropic._replace(
-            nemo_stage_mean_imposition=True),
+    recipe = NEMORecipe(
+        model_config=model_config,
+        physics_config=model_config.physics,
+        grid=grid,
+        z_coord=z_coord,
+        land_mask=wet,
+        initial_state=state,
     )
-    recipe = NEMORecipe(cfg, cfg.physics, grid, z_coord, wet, state)
-    return C1DSlabOceanCard(
-        recipe=recipe,
-        dt_s=3600.0,  # C1D rn_Dt
-        n_steps=8760,
-        ice_cadence=4,
-        meridionally_periodic=True,
-        precision_policy=PrecisionPolicy.fp64(transcendentals="libm"),
+    card = NEMOTestcaseCard(
+        "GYRE-zco",
+        recipe,
+        14400.0,
+        4320,
+        1,
+        0,
+        0,
+        0.0,
+        0.0,
+        surface_boundary_condition="gyre_usrdef_sbc",
+    )
+    validate_nemo_testcase_card(card)
+    return card
+
+
+def gyre_surface_boundary_condition(
+    card: NEMOTestcaseCard, t_seconds: float
+) -> GYRESurfaceBoundaryCondition:
+    """Evaluate GYRE's source-defined seasonal SBC on its rotated T grid.
+
+    ``t_seconds`` is NEMO's current ``kt * rn_Dt`` clock, matching
+    ``usrdef_sbc.F90:84-107,109-145,161-184``.  Stress is returned in NEMO's
+    grid-aligned ocean convention; no atmosphere/ocean sign conversion is
+    applied in this transcription receipt.
+    """
+
+    if card.case != "GYRE-zco":
+        raise ValueError("GYRE seasonal SBC requires the GYRE-zco card")
+    lat = jnp.asarray(card.recipe.grid.native_lat_T_deg, dtype=jnp.float64)
+    qsr = nemo_gyre_qsr(lat, t_seconds)
+    t_star = nemo_gyre_t_star(lat, t_seconds)
+    emp_raw = nemo_gyre_emp(lat, t_seconds)
+    wet = jnp.asarray(card.recipe.land_mask) > 0.5
+    # Runtime substep evidence resolves a subtle ownership point hidden by the
+    # source string: glob_2Dsum receives unmasked ``emp``, but excludes GYRE's
+    # 104 non-owned boundary-ring cells.  Those are the same cells represented
+    # by ``wet=False`` in this cropped 22x32 card.  The oracle kt=1 eta update
+    # pins the resulting 600-owned-cell numerator exactly.
+    emp = nemo_gyre_zero_mean_emp(emp_raw, wet)
+    utau, vtau = nemo_gyre_wind(lat, t_seconds)
+    taum = jnp.sqrt(utau * utau + vtau * vtau)
+    wndm = jnp.sqrt(taum / (1.22 * 1.5e-3))
+    return GYRESurfaceBoundaryCondition(
+        qsr.astype(jnp.float64),
+        t_star.astype(jnp.float64),
+        emp.astype(jnp.float64),
+        utau.astype(jnp.float64),
+        vtau.astype(jnp.float64),
+        taum.astype(jnp.float64),
+        wndm.astype(jnp.float64),
     )
 
 
 def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
     """Reject any card composition not exercised by its named oracle run."""
+    if card.transcendentals != "libm":
+        raise ValueError(
+            f"{card.case} requires scalar-libm certification transcendentals, "
+            f"got {card.transcendentals!r}"
+        )
     expected = {
         "LOCK_EXCHANGE-zco": ("nemo_ab3am4", 1, 0, 0.0),
         "OVERFLOW-zps": ("nemo_boxcar1_ab3", 3, 2, 20.0),
+        "GYRE-zco": ("nemo_ab3am4", 50, 0, 0.0),
     }
     if card.case not in expected:
         raise ValueError(f"unknown NEMO testcase card {card.case!r}")
@@ -459,34 +911,147 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
     if cfg.barotropic.barotropic_diffusion_alpha != 0.0:
         raise ValueError(
             f"{card.case} forbids unmatched live eta diffusion")
-    if (cfg.zdf_implicit_solver_evaluation != "nemo_literal"
-            or not cfg.implicit_vmix_e3t_now_divisor):
+    # All three testcase cards run NEMO's hpg_sco (dynhpg.F90:305-393) with its
+    # e3w(Kmm) trapezoid.  The MODEL-level guard can no longer carry this: the
+    # trapezoid allow-list was widened to {"nemo_sco", "adcroft"} because
+    # hpg_zco (dynhpg.F90:270-296) accumulates the same recurrence, so a card
+    # silently swapped to "adcroft" now builds.  Pin it here, on the card,
+    # which is what owns the certified identity.
+    if cfg.pgf_scheme != "nemo_sco":
         raise ValueError(
-            f"{card.case} requires the NEMO literal implicit-ZDF program")
+            f"{card.case} requires NEMO's hpg_sco pressure gradient "
+            f"(pgf_scheme='nemo_sco'), got {cfg.pgf_scheme!r}")
+    if cfg.zdf_implicit_solver_evaluation != "nemo_literal":
+        raise ValueError(
+            f"{card.case} requires the NEMO literal implicit-ZDF program "
+            "(which carries NEMO's e3w(Kmm) gradient divisor)")
     if not cfg.tracer_wall_neumann_fill:
         raise ValueError(
             f"{card.case} requires NEMO's closed-wall tracer halo fill")
     if cfg.barotropic.barotropic_reconcile_target != "velocity_avg":
         raise ValueError(
             f"{card.case} requires NEMO's prognostic uu_b(Kaa) velocity frame")
+    wet = np.asarray(card.recipe.land_mask) > 0.5
+    if card.case == "GYRE-zco":
+        if (cfg.barotropic_coriolis_split != "live"
+                or cfg.barotropic.barotropic_coriolis != "ene_metric"
+                or cfg.barotropic.barotropic_een_coefficient_evaluation
+                != "nemo_literal"):
+            raise ValueError(
+                "GYRE-zco requires the live literal-ENE barotropic composition")
+        require_rotation = (
+            np.any(np.asarray(card.recipe.grid.f_T) != 0.0)
+            and np.count_nonzero(np.any(wet, axis=1)) == 20
+            and np.all(np.asarray(card.recipe.grid.sin_alpha_u) != 0.0)
+        )
+        if not require_rotation:
+            raise ValueError("GYRE-zco requires a live rotated beta-plane")
+        if card.surface_boundary_condition != "gyre_usrdef_sbc":
+            raise ValueError("GYRE-zco requires the analytic usrdef_sbc card")
+        return
     # The namelists select ENS, while these Cartesian cases have f=0 and only
     # one wet y row.  Prove the inherited rotation operator is structurally
     # eliminated; otherwise reject rather than silently run an AL81/Matsuno
     # third model.
     f_t = np.asarray(card.recipe.grid.f_T)
-    wet = np.asarray(card.recipe.land_mask) > 0.5
     if np.any(f_t != 0.0) or np.count_nonzero(np.any(wet, axis=1)) != 1:
         raise ValueError(
             f"{card.case} legacy rotation is permitted only when f=0 and "
             "the meridional operator is structurally absent")
 
 
+def build_c1d_omip_l3_slab_ocean_card() -> C1DSlabOceanCard:
+    """Build the reviewed 10 m, one-wet-layer C1D OCE+ICE ocean card.
+
+    The card composes the integration line's shared ``key_qco + key_RK3``
+    dynamics. C1D resolves ``ln_dynadv_OFF`` and ``ln_traadv_OFF``; no
+    slab-only numerical operator is introduced here.
+    """
+
+    f_84n = (
+        2.0 * float(NEMO_CONSTANTS_CONFIG.Omega)
+        * math.sin(math.radians(84.0))  # const-ok: C1D case geometry
+    )
+    grid = create_beta_plane_cgrid_geometry(
+        1, 1,
+        dx_m=100.0,  # const-ok: C1D usrdef_hgr.F90:88-91
+        dy_m=100.0,  # const-ok: C1D usrdef_hgr.F90:88-91
+        f0=f_84n,
+        beta=0.0,
+        cartesian_pseudo_lat=False,
+        dtype=jnp.float64,
+    )
+    wet = jnp.ones((1, 1), dtype=jnp.float64)
+    z_ref = create_z_star_from_thicknesses(
+        jnp.asarray((10.0, 10.0), dtype=jnp.float64),  # Decision 6
+        t_depth_ref_m=np.asarray((5.0, 15.0), dtype=np.float64),
+    )
+    z_coord = create_full_step_coordinate(
+        z_ref, jnp.zeros((1, 1), dtype=np.int32))
+    state = rest_state_latlon_cgrid_ocean(
+        grid, z_coord,
+        T_water_init_C=-1.690032958984375,  # C1D init_oce_T.nc
+        T_deep=-1.690032958984375,
+        S_uniform=34.0,  # const-ok: C1D init_oce_S.nc
+        H_max=10.0,  # const-ok: user Decision 6 construction parameter
+        land_mask_override=wet,
+        H_bathy_override=wet * 10.0,
+    )
+    eta0 = jnp.full(
+        (1, 1), -1.6666666666666667, dtype=jnp.float64)  # ice-load SSH
+    state = state._replace(
+        eta=state.eta.replace(data=eta0),
+        v_mask=state.v_mask.replace(data=jnp.ones_like(state.v_mask.data)),
+    )
+    cfg = _model_config(
+        barotropic_time_filter="nemo_boxcar1_ab3",
+        n_barotropic_substeps=631,
+        bbl_adv_option=0,
+        bbl_gamma_s=0.0,
+        whole_step_identity="lane1_flux_up3",
+    )
+    cfg = cfg._replace(
+        tracer_advection="off",
+        momentum_advection="off",
+        vertical_momentum_scheme="off",
+        coriolis_scheme="explicit_ab2",
+        vorticity_scheme="ene",
+        barotropic_coriolis_split="live",
+        surface_stress_implicit=True,
+        freshwater_closure="real_freshwater",
+        # The shared filtered external mode requires the source-inclusive
+        # volume projection for real freshwater (model validation, #1484).
+        fix_eta_drift=True,
+        bottom_drag=cfg.bottom_drag._replace(
+            bottom_drag_cd0=1.0e-3,  # ORCA1 namelist_cfg:264
+            bottom_drag_ke0=2.5e-3,  # ORCA1 namelist_cfg:267
+            bottom_drag_bbl_thickness=0.0,
+            bottom_drag_scheme="nemo_quadratic",
+        ),
+        zdf_drag_in_matrix=True,
+        zdf_baroclinic_only=True,
+        barotropic_drag_substep=True,
+        barotropic=cfg.barotropic._replace(
+            nemo_stage_mean_imposition=True),
+    )
+    recipe = NEMORecipe(cfg, cfg.physics, grid, z_coord, wet, state)
+    return C1DSlabOceanCard(
+        recipe=recipe,
+        dt_s=3600.0,
+        n_steps=8760,
+        ice_cadence=4,
+        meridionally_periodic=True,
+        precision_policy=PrecisionPolicy.fp64(transcendentals="libm"),
+    )
+
+
 def build_nemo_testcase_card(case: str) -> NEMOTestcaseCard:
-    """Fail-closed dispatch for the two phase-2 cards."""
+    """Fail-closed dispatch for the certified phase-2 cards."""
 
     builders = {
         "LOCK_EXCHANGE-zco": build_lock_exchange_zco_card,
         "OVERFLOW-zps": build_overflow_zps_card,
+        "GYRE-zco": build_gyre_zco_card,
     }
     if case not in builders:
         raise ValueError(
@@ -498,9 +1063,14 @@ def build_nemo_testcase_card(case: str) -> NEMOTestcaseCard:
 __all__ = (
     "C1DSlabOceanCard",
     "NEMOTestcaseCard",
+    "GYRESurfaceBoundaryCondition",
     "build_c1d_omip_l3_slab_ocean_card",
+    "build_gyre_zco_card",
     "build_lock_exchange_zco_card",
     "build_overflow_zps_card",
     "build_nemo_testcase_card",
+    "gyre_horizontal_coordinates",
+    "gyre_surface_boundary_condition",
+    "gyre_vertical_ladder",
     "validate_nemo_testcase_card",
 )

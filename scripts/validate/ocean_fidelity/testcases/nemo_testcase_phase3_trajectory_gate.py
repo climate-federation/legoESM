@@ -19,6 +19,16 @@ from pathlib import Path
 
 import numpy as np
 
+
+def git_sha(*, allow_dirty: bool = False) -> str:
+    """Exact legoESM producer revision (fails closed on tracked dirt)."""
+    from legoesm.ocean.fidelity.provenance import git_sha as _stamp
+
+    try:
+        return _stamp(allow_dirty=allow_dirty)
+    except RuntimeError as error:
+        raise GateError(f"cannot stamp legoESM git SHA: {error}") from error
+
 BAR = 1.0e-15
 DEFAULT_ORACLE_ROOTS = {
     "LOCK_EXCHANGE-zco": Path(
@@ -108,6 +118,8 @@ def score(
         candidate = candidate.copy()
         candidate[tuple(np.argwhere(use)[0])] += 1.0
     require(np.all(np.isfinite(candidate[use])), f"{name}: candidate nonfinite")
+    from legoesm.ocean.fidelity.ulp_move_gate import record_residual_field
+    record_residual_field(name, oracle, candidate, use)
     exact = bool(np.array_equal(oracle[use], candidate[use]))
     scale = max(float(np.max(np.abs(oracle[use]))), 1.0)
     absolute = float(np.max(np.abs(candidate[use] - oracle[use])))
@@ -214,7 +226,10 @@ def characterize_growth(steps: list[dict]) -> dict:
 def run(
     case: str, oracle_root: Path, max_step: int, *, plant=False,
     continue_after_first=False, diagnostic_disable_bbl=False,
-    owner_controls=False,
+    owner_controls=False, allow_dirty=False, arm_literal_stage_wzv=False,
+    arm_legacy_seed_faces=False, arm_legacy_hadv_min_face_thickness=False,
+    arm_legacy_2d_stage_face_mask=False,
+    arm_legacy_live_stage_mean_weights=False,
 ) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -226,14 +241,21 @@ def run(
         build_nemo_testcase_card,
     )
 
-    set_policy(PrecisionPolicy.fp64())
-    require(get_policy() == PrecisionPolicy.fp64(), "precision policy is not fp64")
+    # Stamp FIRST so a dirty tree refuses before any compute (fail closed).
+    legoesm_git_sha = git_sha(allow_dirty=allow_dirty)
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     card = build_nemo_testcase_card(case)
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
         _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
-            disable_bbl=diagnostic_disable_bbl))
+            disable_bbl=diagnostic_disable_bbl,
+            literal_stage_wzv=arm_literal_stage_wzv,
+            legacy_seed_min_rule_faces=arm_legacy_seed_faces,
+            legacy_hadv_min_face_thickness=arm_legacy_hadv_min_face_thickness,
+            legacy_2d_stage_face_mask=arm_legacy_2d_stage_face_mask,
+            legacy_live_stage_mean_weights=arm_legacy_live_stage_mean_weights))
     state = card.recipe.initial_state
     masks = expected_masks(card)
     nlev = card.recipe.z_coord.n_levels
@@ -431,6 +453,7 @@ def run(
             }
     return {
         "format": "nemo-testcase-l1-phase3-trajectory-v1",
+        "legoesm_git_sha": legoesm_git_sha,
         "case": case,
         "status": "AT-BAR" if first_over_bar is None else "DEBT",
         "precision_policy": "fp64",
@@ -449,6 +472,10 @@ def run(
             "bbl_adv_option": cfg.bbl_adv_option,
             "bbl_gamma_s": cfg.bbl_gamma_s,
             "diagnostic_disable_bbl_test_hook": diagnostic_disable_bbl,
+            "arm_literal_stage_wzv_test_hook": arm_literal_stage_wzv,
+            "arm_legacy_seed_faces_test_hook": arm_legacy_seed_faces,
+            "arm_legacy_hadv_min_face_thickness_test_hook": arm_legacy_hadv_min_face_thickness,
+            "arm_legacy_2d_stage_face_mask_test_hook": arm_legacy_2d_stage_face_mask,
         },
         "first_over_bar": first_over_bar,
         "bbl_attribution": bbl_attribution,
@@ -477,18 +504,78 @@ def main() -> int:
     parser.add_argument("--continue-after-first", action="store_true")
     parser.add_argument("--diagnostic-disable-bbl", action="store_true")
     parser.add_argument("--owner-controls", action="store_true")
+    parser.add_argument(
+        "--arm-literal-stage-wzv", action="store_true",
+        help=("one-variable S-19 arm: route the WS-RK3 stage cross-level "
+              "velocity through nemo_qco_wzv_operands (sshwzv.F90:331-336 "
+              "as called at stprk3_stg.F90:297) instead of the generic "
+              "diagnose_w_from_flux_div. NEMO has no such switch"))
+    parser.add_argument(
+        "--arm-legacy-seed-faces", action="store_true",
+        help=("one-variable arm: restore the min-of-stretched-cells rescale "
+              "in the barotropic loop-entry seed instead of NEMO's "
+              "e3u_0*(1+r3u) (dynspg_ts.F90:487 / stprk3_stg.F90:440). "
+              "NEMO has no such switch"))
+    parser.add_argument(
+        "--arm-legacy-hadv-min-face-thickness", action="store_true",
+        help=("one-variable ablation of the stage momentum-advection face "
+              "thickness (private _NEMOWSRK3TestHooks control; NEMO has no "
+              "such switch): restore tendencies()' min-of-stretched-T rule "
+              "instead of NEMO's e3u(Kmm) = e3u_0*(1+r3u)"))
+    parser.add_argument(
+        "--arm-legacy-2d-stage-face-mask", action="store_true",
+        help=("one-variable ablation of the stage face-mask rank (private "
+              "_NEMOWSRK3TestHooks control; NEMO has no such switch): "
+              "restore the 2-D state.u_mask broadcast over levels instead of "
+              "NEMO's 3-D umask(ji,jj,jk) (stprk3_stg.F90:367,375,382,444,273)"))
+    parser.add_argument(
+        "--arm-legacy-live-stage-mean-weights", action="store_true",
+        help=("one-variable ablation of the stage depth-mean WEIGHTS (private "
+              "_NEMOWSRK3TestHooks control; NEMO has no such switch): restore "
+              "the live h_u_pre/H_u_pre weighting instead of NEMO's reference "
+              "SUM(e3u_0*uu)*r1_hu_0 (stprk3_stg.F90:440, domain.F90:145)"))
+    parser.add_argument("--allow-dirty", action="store_true",
+                        help="stamp '<sha>-dirty' instead of refusing a dirty tree")
+    from legoesm.ocean.fidelity.ulp_move_gate import (
+        add_ulp_compare_arguments, capture_residual_fields,
+        comparison_exit_code, persist_ulp_comparison, run_ulp_comparison,
+        write_residual_artifact,
+    )
+    add_ulp_compare_arguments(parser)
     args = parser.parse_args()
     require(args.max_step >= 1, "max-step must be positive")
-    report = run(
-        args.case, args.oracle_dir or DEFAULT_ORACLE_ROOTS[args.case],
-        args.max_step, plant=args.plant,
-        continue_after_first=args.continue_after_first,
-        diagnostic_disable_bbl=args.diagnostic_disable_bbl,
-        owner_controls=args.owner_controls)
+    with capture_residual_fields() as residuals:
+        report = run(
+            args.case, args.oracle_dir or DEFAULT_ORACLE_ROOTS[args.case],
+            args.max_step, plant=args.plant,
+            continue_after_first=args.continue_after_first,
+            diagnostic_disable_bbl=args.diagnostic_disable_bbl,
+            owner_controls=args.owner_controls, allow_dirty=args.allow_dirty,
+            arm_literal_stage_wzv=args.arm_literal_stage_wzv,
+            arm_legacy_seed_faces=args.arm_legacy_seed_faces,
+            arm_legacy_hadv_min_face_thickness=args.arm_legacy_hadv_min_face_thickness,
+            arm_legacy_2d_stage_face_mask=args.arm_legacy_2d_stage_face_mask,
+            arm_legacy_live_stage_mean_weights=args.arm_legacy_live_stage_mean_weights)
+    if args.output:
+        write_residual_artifact(report, args.output, residuals)
+    elif args.compare_to:
+        raise GateError("--compare-to requires --output for the residual sidecar")
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
         args.output.write_text(text)
     print(text, end="")
+    if args.compare_to:
+        # The exit status now reports the oracle-relative cellwise comparison,
+        # not this run's own AT-BAR/DEBT verdict.
+        comparison = run_ulp_comparison(args, report)
+        print(json.dumps(comparison, indent=2, sort_keys=True))
+        print(persist_ulp_comparison(args, comparison))
+        code = comparison_exit_code(comparison)
+        if code == 2:
+            print("PLANTED CONTROL DID NOT PRODUCE ITS REQUIRED VERDICT: "
+                  f"{comparison['plant']}",
+                  file=sys.stderr)
+        return code
     return 0 if report["status"] == "AT-BAR" else 1
 
 

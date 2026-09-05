@@ -221,7 +221,12 @@ class OceanSurfaceForcing(NamedTuple):
     q_net : array or None
         Net surface heat flux (positive into ocean) [W/m²].
     tau_x, tau_y : array or None
-        Surface wind stress components [Pa].
+        Geographic east/north atmospheric surface wind stress components [Pa].
+    tau_i_native, tau_j_native : array or None
+        Optional grid-native, on-ocean stress at T points [Pa].  This pair is
+        for source-defined ocean forcing that already lives in the model
+        referential (for example NEMO ``usrdef_sbc``); when present it avoids a
+        lossy native→geographic→native round trip.  Both must be supplied.
     freshwater : array or None
         Net freshwater flux into ocean (P - E + R + M) [kg/m²/s].
     salt_flux : array or None
@@ -231,7 +236,8 @@ class OceanSurfaceForcing(NamedTuple):
         ``freshwater`` (virtual-salt dilution) channel.
     chl : array or None
         Surface chlorophyll [mg/m³] for the RGB shortwave-penetration scheme
-        (``ShortwavePenetrationConfig.scheme == "rgb_chl"``).  2D horizontal
+        (``ShortwavePenetrationConfig.scheme`` is ``"rgb_chl"`` or the
+        source-named ``"nemo_qsr_rgb"``).  2D horizontal
         field; ``None`` when the two-band Jerlov scheme is in use.
     q_prescribed : array or None
         Prescribed part of the surface heat flux [W/m², positive into ocean]
@@ -321,6 +327,8 @@ class OceanSurfaceForcing(NamedTuple):
                                        # attenuation of the lc/etau wave-TKE
                                        # sources (TKEConfig.eice=1; NEMO
                                        # nn_eice).  None ⇒ no attenuation.
+    tau_i_native: object = None        # jnp.ndarray | None [Pa], on-ocean i
+    tau_j_native: object = None        # jnp.ndarray | None [Pa], on-ocean j
     rCdU_top: object = None       # jnp.ndarray | None; signed NEMO top-drag
                                   # coefficient [m/s], iceupdate.F90:387-396.
                                   # The shared implicit solver converts its
@@ -335,11 +343,10 @@ class OceanSurfaceForcing(NamedTuple):
 class NemoRK3SurfaceForcing(NamedTuple):
     """Raw source-time-level operands for NEMO's WS-RK3 tracer boundary.
 
-    The ordinary :class:`OceanSurfaceForcing` fields remain the public
-    convention-neutral exchange.  This optional companion preserves NEMO's
-    pre-conversion ``emp`` and PSS ``sfx`` values so ``trasbc.F90:282-315``
-    can execute at each stage without a multiply/divide reconstruction.
-    ``qsr`` remains separate from ``qns`` for ``traqsr.F90:172-176``.
+    This optional companion preserves NEMO's pre-conversion ``emp`` and PSS
+    ``sfx`` values so ``trasbc.F90:282-315`` can execute at each stage without
+    a multiply/divide reconstruction. ``qsr`` remains separate from ``qns``
+    for ``traqsr.F90:172-176``.
     """
 
     qsr: object
@@ -2597,28 +2604,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     is unchanged — only the gradient slot moves.  Requires
     #     ``implicit_vertical_mixing=True`` (rejected otherwise at config
     #     validation).  Default False ⇒ BIT-IDENTICAL for every existing config.
+    # NEMO's own divisor is NOT a flag: ``e3w(Kmm)`` (trazdf.F90:219-221,
+    # dynzdf.F90:200-203) is unbranched inside the NEMO identity
+    # ``zdf_implicit_solver_evaluation="nemo_literal"``, so this Veros slot
+    # is mutually exclusive with that identity (rejected at construction).
     implicit_vmix_dzw_slot: bool = False
-    # --- NEMO-faithful implicit-solve gradient divisor (#1226 W1) ---
-    # NEMO (trazdf.F90:219-220) builds the SAME gradient divisor from
-    # ``e3w(...,Kmm)`` — called from stpmlf.F90:370 as
-    # ``tra_zdf(kstp, Nbb, Nnn, Nrhs, ts, Naa)``, whose dummy arg ``Kmm`` binds
-    # to ``Nnn``, NEMO's NOW time level.  legoESM's default divisor
-    # (``implicit_vmix_dzw_slot=False``) is the midpoint of the AFTER-solve
-    # thickness (``build_dz_half(dz_cell)``, ``dz_cell`` built from the
-    # barotropic-updated ``state_corr.eta``); this option instead builds the
-    # center-to-center divisor from the NOW-level (Nnn/Kmm) thickness,
-    # threaded to ``_apply_implicit_vertical_mixing`` via its ``eta_now``
-    # kwarg by every call site that passes a post-update AFTER state
-    # (_leapfrog_step — the DINO kamm_mlf production path — plus
-    # _unsplit_ab2_step, _ab2_step, _step_impl); the momentum-only friction
-    # call passes the step-entry NOW state directly (fallback correct).
-    # Mutually exclusive with ``implicit_vmix_dzw_slot`` (both pick the same
-    # divisor SLOT — Veros dzw vs NEMO e3w(Kmm) — selecting both is a config
-    # error, not a fallback). Requires ``implicit_vertical_mixing=True`` (same
-    # guard as ``implicit_vmix_dzw_slot``). Default False ⇒ BIT-IDENTICAL for
-    # every existing config. OPT-IN measurement knob only — NOT wired into any
-    # recipe/kamm card (measurement decides).
-    implicit_vmix_e3t_now_divisor: bool = False
     # --- Meridionally-FLAT (Oceananigans `Flat`-y topology) ---
     # When True, every meridional DIFFERENCE operator returns 0 — the faithful
     # legoESM analog of an Oceananigans `topology=(…, Flat, …)` dimension

@@ -183,59 +183,6 @@ def _raw_state_after(root: Path, hooks: _NEMOWSRK3TestHooks, steps: int):
     return state
 
 
-def _owner_and_arms(root: Path, statement_records):
-    kt2_first = next(value for head, value in statement_records
-                     if head[0] == 2 and head[5] == 1)
-    # Observe the superseded operand without bypassing any operator: the
-    # private hook substitutes the pre-dynspg workspace only after the full
-    # step has executed.  NEMO seeds from puu_b/vv_b(Kmm), dynspg_ts:484-493.
-    kmm = _raw_state_after(root, _NEMOWSRK3TestHooks(), 1)
-    exchange = _exchange(root / "oracle_si3_exchange_frames.bin")
-    fwb = _fwb(root / "oracle_rung36_fwb_frames.bin")
-    qsr = _qsr(root / "oracle_rung36_qsr_frames.bin")
-    card = build_c1d_omip_l3_slab_ocean_card()
-    expose_model = _new_model(card, _NEMOWSRK3TestHooks(
-        expose_pre_barotropic_momentum=True))
-    set_meridionally_periodic(card.meridionally_periodic)
-    try:
-        freshwater, surface = _forcing(exchange, fwb, qsr, 1)
-        exposed = expose_model.step(
-            kmm, card.dt_s, freshwater=freshwater, surface_forcing=surface)
-    finally:
-        set_meridionally_periodic(False)
-    kmm_values = (float(kmm.u.data[0, 0, 0]), float(kmm.v.data[0, 0, 0]))
-    exposed_values = (
-        float(exposed.u.data[0, 0, 0]), float(exposed.v.data[0, 0, 0]))
-    owner_rows = [
-        _row("kt2.dynspg.seed_u.Kmm", kmm_values[0], kt2_first[1]),
-        _row("kt2.dynspg.seed_v.Kmm", kmm_values[1], kt2_first[2]),
-        _row("kt2.dynspg.old_workspace_u", exposed_values[0], kt2_first[1]),
-        _row("kt2.dynspg.old_workspace_v", exposed_values[1], kt2_first[2]),
-    ]
-    # Preserve signed operand evidence, since _row intentionally stores only
-    # norms.  The exposed rows compare the kt3 substituted workspace against
-    # PRE_SSM and are therefore read directly below in the report.
-    old_u = float(exposed_values[0] - kt2_first[1])
-    old_v = float(exposed_values[1] - kt2_first[2])
-    arms = {}
-    for name, hooks in (
-        ("seed_weight_0", _NEMOWSRK3TestHooks(barotropic_kmm_seed_weight=0.0)),
-        ("seed_weight_0p5", _NEMOWSRK3TestHooks(barotropic_kmm_seed_weight=0.5)),
-        ("seed_weight_1", _NEMOWSRK3TestHooks(barotropic_kmm_seed_weight=1.0)),
-        ("linear_drag", _NEMOWSRK3TestHooks(linearize_quadratic_bottom_drag=True)),
-    ):
-        rows, first = _kt3(root, hooks)
-        arms[name] = {
-            "u": rows["u"], "v": rows["v"],
-            "first_over_bar": first,
-        }
-    return owner_rows, {
-        "nemo_seed": {"u": float(kt2_first[1]), "v": float(kt2_first[2])},
-        "superseded_workspace_signed_distance": {"u": old_u, "v": old_v},
-        "source": "dynspg_ts.F90:484-493",
-    }, arms
-
-
 def _drag_association(root: Path):
     drag_records = _records(
         root / "oracle_rung36_drag_frames.bin", b"NEMO_L3DRG__001 ",
@@ -277,7 +224,6 @@ def evaluate(root: Path, *, nstep: int = 8759, plant: bool = False):
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     _require_streams(root)
     statement_rows, statements = _statement_rows(root, plant)
-    owner_rows, owner, arms = _owner_and_arms(root, statements)
     aggregates, samples, first, registry = _advance(
         root, _NEMOWSRK3TestHooks(), nstep)
     source_first = next(
@@ -290,9 +236,17 @@ def evaluate(root: Path, *, nstep: int = 8759, plant: bool = False):
         "dtype": "float64",
         "transcendentals": "libm",
         "source_statement_rows": statement_rows,
-        "owner_rows": owner_rows,
-        "owner": owner,
-        "one_variable_arms": arms,
+        "owner_rows": [],
+        "owner": {
+            "status": "SUPERSEDED",
+            "reason": (
+                "round-17 re-derived puu_b/pvv_b from 3-D Kmm velocity; "
+                "NEMO carries distinct prognostic uu_b/vv_b written by "
+                "dynspg_ts.F90:862,890 and restart.F90:181,313. "
+                "restart.F90:316 re-derives only when the restart field is "
+                "missing. The integration lane will carry that state."),
+        },
+        "one_variable_arms": {},
         "trajectory_aggregates": aggregates,
         "trajectory_samples": samples,
         "first_over_bar": first_over,

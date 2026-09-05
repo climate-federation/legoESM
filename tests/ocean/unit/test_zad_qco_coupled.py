@@ -176,6 +176,29 @@ def test_qco_zad_pair_matches_source_ordered_oracle():
     np.testing.assert_allclose(np.asarray(ww3), expected_w3, rtol=0, atol=3e-16)
     assert not np.array_equal(np.asarray(ww3), np.asarray(ww2))
 
+    # traadv.F90:220-226 hands wzv(np_transport) the already materialized
+    # pFu/pFv pair.  The override must consume those exact transports rather
+    # than rebuilding them from velocity, and it must retain the same literal
+    # bottom-up recurrence.
+    volume_u = np.concatenate([zu[:, -1:], zu], axis=1)
+    volume_v = np.concatenate([np.zeros_like(zv[:1]), zv], axis=0)
+    ww4, _, _ = nemo_qco_wzv_operands(
+        jnp.asarray(eta_now), jnp.asarray(eta_before), jnp.zeros_like(u),
+        jnp.zeros_like(v), grid, coord, jnp.asarray(um), jnp.asarray(vm),
+        jnp.asarray(tm), dt, eta_after_override=jnp.asarray(eta_override),
+        volume_transport_override=(
+            jnp.asarray(volume_u), jnp.asarray(volume_v)))
+    np.testing.assert_allclose(np.asarray(ww4), expected_w2, rtol=0, atol=2e-16)
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        nemo_qco_wzv_operands(
+            jnp.asarray(eta_now), jnp.asarray(eta_before), jnp.asarray(u),
+            jnp.asarray(v), grid, coord, jnp.asarray(um), jnp.asarray(vm),
+            jnp.asarray(tm), dt, eta_after_override=jnp.asarray(eta_override),
+            transport_after_override=(jnp.asarray(un_adv), jnp.asarray(vn_adv)),
+            volume_transport_override=(
+                jnp.asarray(volume_u), jnp.asarray(volume_v)))
+
     with pytest.raises(ValueError, match="requires eta_after_override"):
         nemo_qco_wzv_operands(
             jnp.asarray(eta_now), jnp.asarray(eta_before), jnp.asarray(u),

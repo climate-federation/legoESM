@@ -163,6 +163,25 @@ def test_register_dump_round_trips():
     assert time_level_for_dump("dump_unit_test.bin") == "now"
 
 
+def test_gyre_whole_step_rk3_dump_registry_is_complete_and_fail_closed():
+    for kt in range(1, 11):
+        step = f"{kt:08d}"
+        assert time_level_for_dump(
+            f"oracle_step_entry_kt{step}.bin") == "before"
+        assert time_level_for_dump(
+            f"oracle_bt_frames_kt{step}.bin") == "after"
+    for stage in range(1, 4):
+        assert time_level_for_dump(
+            f"oracle_stage_kt00000001_s{stage}.bin") == "after"
+        assert time_level_for_dump(
+            f"oracle_transport_kt00000001_s{stage}.bin") == "now"
+    assert time_level_for_dump("oracle_rhs_kt00000001.bin") == "now"
+    assert time_level_for_dump(
+        "oracle_bt_ordered_operands_kt00000001.bin") == "now"
+    with pytest.raises(ValueError, match="no registered NEMO time level"):
+        time_level_for_dump("oracle_stage_kt00000002_s1.bin")
+
+
 def test_cor2d_substep1_dumps_are_before_level():
     """The four dyn_cor_2D substep-1 dumps (dynspg_ts.F90:794-806) are
     BEFORE-level: with DINO's ln_bt_fw=.false. + nn_bt_flt=2 the substep loop
@@ -271,3 +290,8 @@ def test_post_tendency_stage_state_dumps_are_registered_at_the_after_level():
     # at a kt outside the two instrumented windows must still raise.
     with pytest.raises(ValueError):
         time_level_for_dump("stp_dump_08_dynzdf_kt00009999_u.bin")
+
+
+def test_gyre_stage2_eos_operand_dump_is_registered_at_live_kmm_level():
+    assert time_level_for_dump(
+        "oracle_rkstage2_eos_operands_kt00000001.bin") == "now"

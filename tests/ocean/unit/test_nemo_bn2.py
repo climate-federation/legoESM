@@ -488,10 +488,26 @@ def test_native_e3w_coordinate_validation_wrappers_and_ad():
     with pytest.raises(ValueError, match="finite values > 0"):
         create_z_star_from_thicknesses(dz, nemo_e3w_0_m=ew.at[0].set(-1)
                                        if hasattr(ew, "at") else [-1, 14, 30, 60])
-    with pytest.raises(ValueError, match="differences must exactly equal"):
+    with pytest.raises(ValueError, match="four-ULP"):
         create_z_star_from_thicknesses(
             dz, nemo_gdept_0_m=gd,
             nemo_e3w_0_m=np.array([8.0, 14.0, 30.0, 61.0]))
+
+    # GYRE's independently evaluated source arrays miss their nominal
+    # recurrence by four fp64 ULPs at one level; both raw operands must survive.
+    ew_roundoff = ew.copy()
+    ew_roundoff[3] = np.nextafter(
+        np.nextafter(np.nextafter(np.nextafter(ew[3], np.inf), np.inf), np.inf),
+        np.inf,
+    )
+    z_roundoff = create_z_star_from_thicknesses(
+        dz,
+        nemo_gdept_0_m=gd,
+        nemo_e3w_0_m=ew_roundoff,
+    )
+    assert np.allclose(
+        np.asarray(z_roundoff.nemo_e3w_0), ew_roundoff, rtol=0.0, atol=1.0e-5
+    )
 
     z = create_z_star_from_thicknesses(
         dz, t_depth_ref_m=gd, nemo_gdept_0_m=gd,

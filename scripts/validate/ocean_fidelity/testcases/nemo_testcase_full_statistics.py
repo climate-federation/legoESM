@@ -15,7 +15,6 @@ import importlib.util
 import json
 import math
 import re
-import subprocess
 import time
 from pathlib import Path
 
@@ -75,8 +74,8 @@ CASES = {
         "restart_hash": "dab392f2f058b44e8c10c600a41c9be73ba37656e2af478193a3f6f27bd67160",
         "namelist_hash": "ec1eac4a45fb8c07a0facce5e4eefb6510d8e3f1e364f5c5597e60ae83ccc53e",
         "binary_hash": "eb4acf9651b887a3da8834281112d472692caa0bbadcb0d69779e91dee92e6cb",
-        "phase3_gate": ARTIFACT_ROOT / "phase3/overflow_trajectory_gate_kt60.json",
-        "phase3_gate_hash": "98856a4fdf5301ae364aa6ced6af6656b4015cfd8581495b5ee5b5e367acb98f",
+        "phase3_gate": ARTIFACT_ROOT / "face_thickness/overflow_trajectory_gate_kt60.json",
+        "phase3_gate_hash": "0b46df0aa025c10ae3c7c7b371e2fe9c91cd4812bcaddbe4d4a9b50fc5d65582",
         "temperature_range": (10.0, 20.0),
     },
 }
@@ -117,10 +116,14 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def git_sha() -> str:
-    return subprocess.run(
-        ["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True
-    ).stdout.strip()
+def git_sha(*, allow_dirty: bool = False) -> str:
+    """Exact legoESM producer revision (fails closed on tracked dirt)."""
+    from legoesm.ocean.fidelity.provenance import git_sha as _stamp
+
+    try:
+        return _stamp(allow_dirty=allow_dirty)
+    except RuntimeError as error:
+        raise StatisticalError(f"cannot stamp legoESM git SHA: {error}") from error
 
 
 def _load_module(name: str, relative: str):
@@ -1223,11 +1226,13 @@ def main() -> int:
     run_parser.add_argument("--case", choices=tuple(CASES), required=True)
     run_parser.add_argument("--precision", choices=("fp64", "fp32"), required=True)
     run_parser.add_argument("--output-dir", type=Path, required=True)
-    run_parser.add_argument("--git-sha", default=None)
+    run_parser.add_argument("--allow-dirty", action="store_true",
+                            help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     run_parser.add_argument("--check-finite-every-step", action="store_true")
     trace_parser = subparsers.add_parser("run-fp32-temperature-trace")
     trace_parser.add_argument("--output", type=Path, required=True)
-    trace_parser.add_argument("--git-sha", default=None)
+    trace_parser.add_argument("--allow-dirty", action="store_true",
+                              help="stamp '<sha>-dirty' instead of refusing a dirty tree")
     score_parser = subparsers.add_parser("score")
     score_parser.add_argument("--case", choices=tuple(CASES), required=True)
     score_parser.add_argument("--lego-root", type=Path, default=FULL_ROOT / "legoesm")
@@ -1242,13 +1247,14 @@ def main() -> int:
             args.case,
             args.precision,
             args.output_dir,
-            args.git_sha or git_sha(),
+            git_sha(allow_dirty=args.allow_dirty),
             check_finite_every_step=args.check_finite_every_step,
         )
     elif args.command == "run-fp32-temperature-trace":
-        report = run_fp32_temperature_trace(args.output, args.git_sha or git_sha())
+        report = run_fp32_temperature_trace(
+            args.output, git_sha(allow_dirty=args.allow_dirty))
     else:
-        set_policy(PrecisionPolicy.fp64())
+        set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
         require(bool(jax.config.jax_enable_x64), "scoring requires JAX x64")
         report = score_case(
             args.case,

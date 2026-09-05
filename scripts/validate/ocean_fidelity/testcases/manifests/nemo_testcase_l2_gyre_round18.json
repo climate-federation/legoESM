@@ -1,0 +1,107 @@
+{
+  "format": "nemo-testcase-l2-gyre-round18-manifest-v1",
+  "session_id": "01a05cb9-7625-7f40-9e83-b3fa767b1945",
+  "date": "2026-09-04",
+  "branch": "fidelity/nemo-testcases-l2-gyre-codex2",
+  "starting_git_sha": "dfc6eed322cb70bf045500c0007e1a6d6b81d040",
+  "regime": "production-jit/cpu/fp64/oracle-v2/scalar-libm",
+  "status": "DEBT",
+  "commits": {
+    "round16_review_fixes": "9d8ab363b",
+    "wind_preregistration": "25cbd82ff",
+    "wind_fix": "2699ec9b2",
+    "advmean_v2_repin": "7bbdca57f",
+    "advmean_disclosure": "94633973e"
+  },
+  "confirmed_owners": [
+    "native_surface_stress_handoff",
+    "barotropic_wind_product_association"
+  ],
+  "first_non_bit_exact_boundary": {
+    "name": "external_mode.substep2.eta_exit",
+    "absolute_max": 1.3552527156068805e-20,
+    "ulp_max": 8,
+    "differing_cells": 114,
+    "owner": "UNMEASURED"
+  },
+  "wind_closure": {
+    "pre_face_stress_differing_cells_u": 414,
+    "pre_face_stress_differing_cells_v": 418,
+    "pre_face_stress_max_abs": 2.7755575615628914e-17,
+    "post_face_stress_max_abs": 0.0,
+    "intermediate_product_max_abs": 3.308722450212111e-24,
+    "post_wind_max_abs_u": 0.0,
+    "post_wind_max_abs_v": 0.0,
+    "pre_external_max_abs_u": 0.0,
+    "pre_external_max_abs_v": 0.0
+  },
+  "rule8_internal_frame_movement": {
+    "scope": "50 substeps x 16 named diagnostic frames",
+    "improved": 449,
+    "unchanged": 153,
+    "worsened": 198,
+    "before_artifact": "advmean_pre_wind",
+    "after_artifact": "advmean_final",
+    "note": "diagnostic frame maxima, not a conditional whole-step or cross-card score"
+  },
+  "artifacts": {
+    "wind_baseline": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round18/wind_baseline.json",
+      "sha256": "dbd0c0ef7bf77979d5cc4fba3b4b89d6be4766acfe830abc0e4227910639bcd9"
+    },
+    "wind_final": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round18/wind_final.json",
+      "sha256": "cd5c61c294de1524355e0710391c6934d0860cc74a9d86b163946f72d9698a92",
+      "verdict": "AT-BAR"
+    },
+    "wind_legacy_stress": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round18/wind_legacy_stress.json",
+      "sha256": "e2ab3a7dc0a0a4e1ac0783be35557d94633035d480b0cf4ba9329fa8e0cb029a",
+      "exit_code": 1
+    },
+    "wind_legacy_product": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round18/wind_legacy_product.json",
+      "sha256": "b00fbd31ac9c98c27e81ccbc43174d008122fb7b2ba56b290c024ddacaa7529b",
+      "exit_code": 1
+    },
+    "wind_plant": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round18/wind_plant.json",
+      "sha256": "aabc5b521f35f7028b2cefb1387a40e6ab630fecc392d5c1b3f6f597fdf68fa2",
+      "exit_code": 1
+    },
+    "advmean_pre_wind": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round18/advmean_pre_wind.json",
+      "sha256": "2f4f9874c1a52de88a76f38d20c62944418165e3984f5fe76754cf055d4921ba"
+    },
+    "advmean_final": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round18/advmean_final.json",
+      "sha256": "69229ad6f6b0eee2d8ce1cf28e01c126bcd05ed72db5a836ce7b43d0133401aa"
+    },
+    "advmean_plant": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round18/advmean_plant.json",
+      "sha256": "cce7101f436b949df010fb9d8bbb20341e95ffe63f79c2e4c625ab77721bd087",
+      "exit_code": 1,
+      "planted_nonzero": true
+    },
+    "discriminator_postfix": {
+      "path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round18/discriminator_postfix.json",
+      "sha256": "9febb8f3d28e7b34ae24f6eb6102eabc5fa744cf0d86439479f2678c67a33918",
+      "H1": "SUPERSEDED_BY_FIX"
+    }
+  },
+  "conditional_work": {
+    "kt1_to_10_sweep": "UNMEASURED_STAGE1_CHAIN_DEBT",
+    "overflow_lock_crosscard_gates": "UNMEASURED_STAGE1_CHAIN_DEBT",
+    "stage1_kaa": "UNMEASURED_AFTER_SUBSTEP2_ETA_EXIT",
+    "stage2_kaa": "NOT_ENTERED",
+    "stage3_transports": "NOT_ENTERED",
+    "zdf_matrix": "OUT_OF_SCOPE"
+  },
+  "verification": {
+    "focused_and_full_ws": "98 passed in 1826.42 s",
+    "rgb_removed_site_control": "FAIL 6 != 7; exit 1",
+    "wind_plant": "exit 1",
+    "advmean_nonzero_plant": "exit 1",
+    "independent_review": "OUTSTANDING"
+  }
+}

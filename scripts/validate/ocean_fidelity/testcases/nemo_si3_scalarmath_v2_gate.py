@@ -63,6 +63,17 @@ MY_SRC_FILES = (
     "icethd_zdf_bl99.F90", "sbcblk.F90", "usrdef_hgr.F90",
     "usrdef_nam.F90", "usrdef_zgr.F90",
 )
+# Round 13 changed only three WRITE-only header counts from case literals to
+# expressions derived from nlay_i/nlay_s.  The compiled V2-A binary predates
+# that source-tree hygiene edit and is bound below by its own executable hash;
+# the stream bytes prove the expressions evaluate to the same counts.  Pin the
+# current config-local source explicitly rather than falsely calling A
+# byte-verbatim with V1. V2-B remains the untouched second rebuild.
+V2_A_HEADER_FIXED_MY_SRC = {
+    "icethd.F90": "21ff1069468dc11afc02f2702881f4499d74c14beaaa1e432c1bb0377c70e217",
+    "icethd_dh.F90": "a50c457d94b61bbbbdf6805085f24b4db61fed6fd23335ca5fbbb7941ed0079d",
+    "icethd_zdf_bl99.F90": "14a7dbe8bc4e9d3c82bcd40a1f85edd70102680dc2de4c097e28f5f38346193c",
+}
 EXP_FILES = (
     "axis_def_nemo.xml", "context_nemo.xml", "domain_def_nemo.xml",
     "field_def_nemo-ice.xml", "field_def_nemo-oce.xml",
@@ -256,9 +267,12 @@ def evaluate(*, plant: str | None = None) -> dict[str, object]:
         v2_config = source / f"cfgs/{CONFIG_V2}"
         my_src = _manifest(v2_config / "MY_SRC", MY_SRC_FILES)
         expected_my_src = _manifest(v1_my_src, MY_SRC_FILES)
+        if lane == "A":
+            expected_my_src.update(V2_A_HEADER_FIXED_MY_SRC)
         if plant == "source_drift" and lane == "A":
             my_src[MY_SRC_FILES[0]] = "0" * 64
-        require(my_src == expected_my_src, f"{lane} MY_SRC is not verbatim")
+        require(my_src == expected_my_src,
+                f"{lane} MY_SRC differs from its pinned source manifest")
         exp = _manifest(v2_config / "EXP00", EXP_FILES)
         expected_exp = _manifest(V1_ROOT, EXP_FILES)
         require(exp == expected_exp, f"{lane} executed EXP deck is not verbatim")
@@ -275,6 +289,8 @@ def evaluate(*, plant: str | None = None) -> dict[str, object]:
         require(cpp.read_bytes() == cpp_v1.read_bytes(), f"{lane} cpp keys drift")
         source_rows[lane] = {
             "my_src": my_src,
+            "my_src_relation": (
+                "round13-derived-header-only" if lane == "A" else "verbatim-v1"),
             "exp00": exp,
             "run_root_exp": run_exp,
             "forcing": {
