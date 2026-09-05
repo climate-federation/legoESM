@@ -7,8 +7,10 @@ an open user decision and is not undertaken in Round 21.  Independently, the
 stage-2 Kaa boundary remains DEBT at `2.1986806906376666e-15` U and
 `2.2380914396075147e-15` V.  Round 21 closes the previously unscored stage
 `ww` boundary AT-BAR at all three stages and refutes the proposed stage-clock
-change.  No downstream result inherits a claim across the two remaining open
-boundaries.
+change.  The next EEN coefficient arm confirms the live vorticity thickness
+divisor as a contributor but not the complete owner; its first primitive
+operand remains unmeasured.  No downstream result inherits a claim across
+these open boundaries.
 
 Updated: 2026-09-05
 
@@ -2509,7 +2511,7 @@ registered status remains UNMEASURED rather than being hidden by a mask.
 | private per-stage WZV-clock arm | ASKED one-variable discriminator | DEBT at all stages; refutes isolated clock replacement |
 | fix the shared WZV clock | conditional ASKED | condition false; no fix landed |
 | LOCK/OVERFLOW/ORCA2 cross-card WZV gates | conditional ASKED | not applicable because no shared change landed; ORCA2 ablation is consistency-only |
-| EEN external-mode coefficient walk | ASKED item 2 | next ordered boundary |
+| EEN external-mode coefficient walk | ASKED item 2 | live-divisor arm improves all eight ORCA2 rows but leaves all DEBT; no change landed; HOLD at missing primitive oracle operands |
 | OVERFLOW dry-face NaN producer | ASKED item 3 | UNMEASURED_PENDING_LANE3B_PRODUCER; no consumer mask added |
 | prognostic `uu_b/vv_b` state | open USER DECISION | not implemented or rederived |
 | lane-3b Round-17 Kmm seed | explicitly forbidden | not adopted |
@@ -2609,6 +2611,59 @@ CONFIRMED only if the ORCA2 eight-field gate becomes AT-BAR while GYRE's ENE
 eight-field gate remains exact; otherwise it is refuted and no shared change
 lands.  The tripolar north-fold application is part of the same source
 operand, not a per-card physics switch.
+
+### 21.7 EEN external-mode coefficient result
+
+The preregistered complete-owner prediction is **REFUTED**.  The imported
+ORCA2 gate ran production JIT on CPU in binary64 with explicit scalar-libm at
+tip `3e425e24ded84e9bd1cbba7af492aaec43e99170`.  Its frozen coefficient record
+is `oracle_bt_ene_coeff_kt00000001.bin`, SHA-256 `e7282ddc...`; it is written
+after `dyn_cor_2D_init(Kmm)` and before the first coefficient consumer.  The
+baseline and the one-variable live-divisor arm are:
+
+| coefficient | baseline unequal / wet | baseline max abs | live-divisor unequal / wet | live-divisor max abs |
+|---|---:|---:|---:|---:|
+| `ffu_nw` | `8308 / 8568` | `8.056177274927652e-5` | `3219 / 8568` | `3.492369915092338e-5` |
+| `ffu_ne` | `8304 / 8568` | `7.727286259909532e-5` | `3199 / 8568` | `3.9504115575330624e-5` |
+| `ffu_sw` | `8331 / 8568` | `6.983696920301593e-5` | `3100 / 8568` | `1.2534393282444756e-5` |
+| `ffu_se` | `8323 / 8568` | `7.253667168386182e-5` | `3134 / 8568` | `1.2479779528873167e-5` |
+| `ffv_nw` | `8285 / 8589` | `8.320420480597231e-5` | `3113 / 8589` | `4.944551560061315e-5` |
+| `ffv_ne` | `8299 / 8589` | `7.900097225433845e-5` | `3066 / 8589` | `4.8189779586498704e-5` |
+| `ffv_sw` | `8310 / 8589` | `7.257335949618652e-5` | `3227 / 8589` | `4.0477968809950055e-5` |
+| `ffv_se` | `8320 / 8589` | `7.788661883968118e-5` | `3231 / 8589` | `3.493630122319228e-5` |
+
+Thus the raw-`e3f_0` divisor is a
+**CONFIRMED_CONTRIBUTOR_NOT_COMPLETE_OWNER**: every maximum and mismatch count
+moves toward NEMO, but no row reaches the bar.  Two further private arms—NEMO
+source-rounding/order in the four-T-cell `e3f_0vor` average and precomputed
+reciprocal multiplication in `r3f`—produce the exact same eight rows and are
+refuted as the remaining owner.  They are measurements only; none is present
+in the committed production tree.
+
+The source boundary is now sharper.  NEMO forms `e3f_0vor` from the four
+source-associated masked `e3t_0` terms at `dynvor.F90:918-941`, applies the
+F-point lateral boundary/fold exchange at `:943`, falls back to `e3f_0` only
+where zero at `:944-950`, and then `dynspg_ts.F90:1520-1569` consumes live
+`e3f_vor` in the four U/V `zpvo` triads.  The handed-over record contains only
+the eight final coefficients: it does not contain `e3f_0vor`, live `e3f_vor`,
+or the individual `q=ff_f/e3f_vor` / `zpvo` operands.  Because the remaining
+residual is widespread away from the north fold, selecting another recurrence
+without those oracle inputs would be post-hoc and underdetermined.  The next
+required acquisition is a config-local WRITE-only dump of those primitives at
+`Kmm=1`, followed by a cellwise first-divergence comparison.  That acquisition
+belongs to the ORCA2 configuration and is not fabricated from the final
+coefficient record here.
+
+GYRE's eight ENE coefficient fields remain bit-exact: its Round-21
+`oracle_bt_ene_coeff` is one of the 39 raw-identical V2 records.  Rule 8 and
+Rule 12 have zero production rows because the live-divisor arm did not meet
+its landing condition and was reverted.  The ORCA2 baseline transcript hashes
+`6f3981c13aec91269b413b0180786703370489a843bf31e576971e59079326d0`; the
+live-divisor transcript hashes
+`e881d2f7617a4d6aa017d38d39af6b89d3f179c5878c6bf0f9575a660cd5a43c`.
+The source-rounding and reciprocal arms have that same latter hash, confirming
+zero additional move.  Final focused verification is `21 passed in 5.31 s`
+for the GYRE Phase-3 fidelity test module under CPU/x64.
 
 All Round-21 measurements and harness results are Codex-internal.  Independent
 Round-21 review remains outstanding; no dual-review claim is made.
