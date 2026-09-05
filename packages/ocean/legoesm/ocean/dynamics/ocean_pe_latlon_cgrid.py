@@ -1697,7 +1697,18 @@ _nemo_qco_zad_operands = nemo_qco_wzv_operands
 
 
 def _nemo_qco_gdept_z0(t_depth, stretch, eta):
-    """NEMO ``gdept_z0 = gdept_0*(1+r3t) - ssh`` source association."""
+    """NEMO ``gdept_z0 = gdept_0*(1+r3t) - ssh`` source association.
+
+    ``domzgr_substitute.h90:139,145`` expands this as two statements, so the
+    multiply is a rounded fp64 value before the subtraction reads it.  The
+    oracle cannot fuse them: ``arch/arch-conda-scalarmath.fcm`` passes no
+    ``-march``, ``-mfma``, ``-mavx2`` or ``-ffast-math``, and the scalar-math
+    GYRE binary contains zero ``vfmadd``/``vfmsub``/``vfnmadd``/``vfnmsub``
+    instructions in its 1868261 disassembled instructions.  XLA, by contrast,
+    will contract ``a*b - c`` into one fused multiply-subtract and change the
+    low bit; ``test_nemo_qco_gdept_z0_oracle_bit_pattern`` pins the two
+    outcomes (0x404E5DBFCAF8A971 here, 0x404E5DBFCAF8A972 fused).
+    """
     return nemo_source_round(
         nemo_source_round(t_depth * stretch) - eta[..., jnp.newaxis])
 
@@ -1999,8 +2010,10 @@ def _bc_ke_and_pressure_gradients(
             # domzgr_substitute.h90:145 (key_qco): the gdept_z0 operand read
             # by dynhpg is formed as two source statements' operations,
             # ``gdept_0 * (1+r3t) - ssh``.  Materialise the multiply before
-            # the subtraction; XLA otherwise reassociates 4,579 stage-2
-            # cells even though the supplied ssh and reference ladder match.
+            # the subtraction; XLA otherwise reassociates it into a fused
+            # multiply-subtract even when the supplied ssh and reference
+            # ladder match.  The bit patterns are pinned by
+            # test_nemo_qco_gdept_z0_oracle_bit_pattern.
             gdept_z0 = _nemo_qco_gdept_z0(
                 t_depth[jnp.newaxis, jnp.newaxis, :], stretch, eta_safe)
             # NEMO's rhd is masked below the seafloor (eosbn2 tmask); wet
