@@ -3262,3 +3262,367 @@ The paired-field validation, one-cell three-ulp plant, restart missing-field
 plant, and full-state restart continuation are the preregistered controls.
 The machine-readable preregistration is
 `scripts/validate/ocean_fidelity/testcases/manifests/nemo_testcase_l2_gyre_round24_preregister.json`.
+
+## Round 24 result — Decision 8 carried barotropic state
+
+Starting tip: `498b10e5aa01ec88c77f176289a1e1da5890664c`.
+Preregistration: `e2f2246f7`.  Shared implementation: `b6a0d6e9f`.
+The reporting-only equal-input/downstream distinction is `1ee449046`; the
+generic cross-card state gate and its absent-face correction are
+`15eef39f0`, `9c4324ce5`, and `e1397b5a0`.
+
+### Source contract and implementation
+
+| NEMO contract | executed source | legoESM disposition |
+|---|---|---|
+| separately allocated prognostic pair | `oce.F90:39,99` | optional U-face/V-face `uu_b/vv_b` fields on `LatLonCGridOceanState` |
+| rest initial depth mean and Kbb-to-Kmm copy | `istate.F90:143-167` | exact zero pair on the shipped rest-start cards; explicit opt-in constructor argument |
+| external-window seed | `dynspg_ts.F90:484-500` | the standard and wide-halo split-explicit solvers read the pair directly; a partial pair raises |
+| external Kaa write | `dynspg_ts.F90:857-897` | the solver returns its prognostic `U_bar_avg/V_bar_avg` into the pair |
+| S-21 Kmm correction | `stprk3_stg.F90:257-274` | `_nemo_ws_stage_transport` reads entry Kbb at stage 1 and the live external Kaa target thereafter |
+| stage rotation/final swap | `stprk3.F90:195-213` | the returned whole-step pair is next-step Kbb; the Rule-1d entry names this swap |
+| restart write/read | `restart.F90:175-182,304-314` | the pair is in the prognostic restart inventory and round-trips bitwise |
+| old-restart compatibility | `restart.F90:315-330` | missing pair alone may invoke a logged mesh-weighted reconstruction; never used by the live identity step |
+
+The state API contains one pair only.  A NEMO identity recipe opts in; all
+other recipes retain `None/None`, so JAX sees no additional array leaves.
+Every direct constructor, `_replace`, bridge, restart pack/unpack and test
+constructor found by the repository-wide constructor census was updated.
+The generic NEMO restart reader maps `uu_n/vv_n` directly.  The bridge rejects
+a half-pair, and the legacy missing-field reconstruction requires the exact
+`e3u_0/e3v_0`, masks and `hu_0/hv_0` operands and emits a warning.  The C1D
+and ORCA2 fresh-probe cards each needed only the same constructor opt-in,
+demonstrating that the API does not assume a multi-column domain.
+
+The merged state had four existing TKE carry fields not yet classified by the
+restart policy (`tke_avm`, `tke_avt`, `tke_dissl`, `tke_avm_surface`).  The
+required exhaustive restart inventory now classifies them as prognostic.  No
+TKE arithmetic changed; this is a necessary fail-closed policy closure exposed
+by adding the new pair.
+
+### Preregistered causality correction
+
+The preregistration above predicted no ordinary kt2 movement because the
+external window enters kt1 from a zero Kbb pair.  That prediction is
+**REFUTED** as a source-order claim: `dynspg_ts` writes Kaa before the same
+whole step reaches `stprk3_stg.F90:257-274`, and S-21 immediately consumes the
+new external target.  Thus same-step stage transports may move even though the
+window seed did not.  The evidence is card-discriminating: ORCA2 production
+stage transports move materially, C1D kt2 does not move, and GYRE's ordinary
+kt2 changes are at most one row-scale ulp (T/S) or `0.03125` row-scale ulp
+(u/v).  The historical preregistration is retained rather than rewritten.
+
+### GYRE production-JIT register against oracle V2
+
+Regime for every row below: CPU production JIT, fp64/x64,
+`transcendentals="libm"`, oracle V2.  Values are normalized maximum absolute
+residuals.  The ordinary first-over-bar remains kt2 T/S/u/v.
+
+| kt | T | S | u | v | ssh | over-bar |
+|---:|---:|---:|---:|---:|---:|---|
+| 1 | 0 | 0 | 0 | 0 | 0 | none |
+| 2 | 1.3614736849003888e-12 | 2.2181101297999213e-14 | 9.4840899547758662e-7 | 8.9879925925425699e-7 | 4.3368086899420177e-19 | T, S, u, v |
+| 3 | 3.7223441372709554e-4 | 3.683246743167771e-5 | 9.3116789131405323e-3 | 4.7190775913081018e-3 | 7.0746696306789574e-7 | T, S, u, v, ssh |
+| 4 | 1.0594738051818496e-3 | 8.2257404626745841e-5 | 1.4182404011958687e-2 | 1.5947842304474213e-2 | 5.0604233765936396e-7 | T, S, u, v, ssh |
+| 5 | 3.0537424781427133e-3 | 8.6118264313010001e-5 | 2.0733890435948851e-2 | 4.3797665645095095e-2 | 6.7018510229067615e-5 | T, S, u, v, ssh |
+| 6 | 3.817675809918862e-3 | 1.287536238418589e-4 | 3.1134729732957417e-2 | 6.0219592087125712e-2 | 1.631023908310134e-4 | T, S, u, v, ssh |
+| 7 | 4.5466665539785865e-3 | 1.2244044906195795e-4 | 4.0041404718354365e-2 | 6.631577323112417e-2 | 2.0871418176652678e-4 | T, S, u, v, ssh |
+| 8 | 5.098376094806587e-3 | 1.3609844305084869e-4 | 4.7180059090506474e-2 | 2.452716186617937e-2 | 2.5108247651913873e-4 | T, S, u, v, ssh |
+| 9 | 5.4450621425559641e-3 | 1.4711821745815303e-4 | 5.2560397603943147e-2 | 1.4533612266875308e-2 | 2.1203002233072732e-4 | T, S, u, v, ssh |
+| 10 | 5.6366344941442756e-3 | 1.5483121354424481e-4 | 5.6249869570708808e-2 | 1.1173365767016698e-2 | 2.125543565721557e-4 | T, S, u, v, ssh |
+
+The new pair is a separately scored boundary.  Only kt1 has equal inputs and
+therefore supports an operator-identity label; kt2--10 are honest downstream
+consistency rows after the full prognostic states differ.
+
+| kt | uu_b unequal / wet n | max abs | vv_b unequal / wet n | max abs | label |
+|---:|---:|---:|---:|---:|---|
+| 1 | 0 / 580 | 0 | 0 / 570 | 0 | equal-input identity AT-BAR |
+| 2 | 580 / 580 | 5.0535482543209373e-8 | 570 / 570 | 4.8148447874866128e-8 | downstream DEBT |
+| 3 | 580 / 580 | 3.0619862773272746e-7 | 570 / 570 | 3.2257736902414685e-7 | downstream DEBT |
+| 4 | 580 / 580 | 4.9641838429596158e-7 | 570 / 570 | 9.8709409025884119e-7 | downstream DEBT |
+| 5 | 580 / 580 | 7.3468773024445381e-7 | 570 / 570 | 1.8549364711026219e-6 | downstream DEBT |
+| 6 | 580 / 580 | 1.2136151661190707e-6 | 570 / 570 | 2.165814754655172e-6 | downstream DEBT |
+| 7 | 580 / 580 | 1.7080553144873939e-6 | 570 / 570 | 2.314422217679986e-6 | downstream DEBT |
+| 8 | 580 / 580 | 1.0942452698521171e-6 | 570 / 570 | 1.7587407682504569e-6 | downstream DEBT |
+| 9 | 580 / 580 | 1.2129572566003363e-6 | 570 / 570 | 1.5503292519388612e-6 | downstream DEBT |
+| 10 | 580 / 580 | 1.127403774763263e-6 | 570 / 570 | 1.050722699821535e-6 | downstream DEBT |
+
+The independently compiled stage-2 gate is unchanged at
+`2.1986806906376666e-15` U and `2.2380914396075147e-15` V: Decision 8 does
+not own that existing kt1 stage-2 Kaa debt.  The dedicated three-ulp Kaa plant
+exits `1`.
+
+The complete LOCK trajectory Rule-8 movement census follows.  The seven rows
+with a nonzero “worse >2” count are the Rule-12 debt register.
+
+| row | move ULP | worse ULP | cells worse >2 ULP / n | improved / worsened |
+|---|---:|---:|---:|---:|
+| `LOCK_EXCHANGE-zco.kt2.before.u` | 0.001953125 | 2.32830644e-9 | 0 / 2540 | 59 / 34 |
+| `LOCK_EXCHANGE-zco.kt3.before.T` | 43668 | 0 | 0 / 2560 | 25 / 0 |
+| `LOCK_EXCHANGE-zco.kt3.before.ssh` | 6.10351562e-5 | 0 | 0 / 128 | 6 / 0 |
+| `LOCK_EXCHANGE-zco.kt3.before.u` | 66.2396669 | 4.16043625e-50 | 0 / 2540 | 203 / 17 |
+| `LOCK_EXCHANGE-zco.kt4.before.T` | 130878 | 0 | 0 / 2560 | 23 / 0 |
+| `LOCK_EXCHANGE-zco.kt4.before.ssh` | 0.000122070312 | 0 | 0 / 128 | 10 / 0 |
+| `LOCK_EXCHANGE-zco.kt4.before.u` | 276.81308 | 77.5860901 | 23 / 2540 | 257 / 23 |
+| `LOCK_EXCHANGE-zco.kt5.before.S` | 1 | 1 | 0 / 2560 | 0 / 28 |
+| `LOCK_EXCHANGE-zco.kt5.before.T` | 261409 | 0 | 0 / 2560 | 24 / 0 |
+| `LOCK_EXCHANGE-zco.kt5.before.ssh` | 1.3203125 | 0 | 0 / 128 | 13 / 0 |
+| `LOCK_EXCHANGE-zco.kt5.before.u` | 706.69796 | 616.49276 | 34 / 2540 | 245 / 55 |
+| `LOCK_EXCHANGE-zco.kt6.before.S` | 1 | 1 | 0 / 2560 | 32 / 20 |
+| `LOCK_EXCHANGE-zco.kt6.before.T` | 434936 | 1 | 0 / 2560 | 40 / 1 |
+| `LOCK_EXCHANGE-zco.kt6.before.ssh` | 7.54003906 | 0 | 0 / 128 | 15 / 0 |
+| `LOCK_EXCHANGE-zco.kt6.before.u` | 1439.22144 | 1439.22144 | 36 / 2540 | 294 / 86 |
+| `LOCK_EXCHANGE-zco.kt7.before.S` | 2 | 0 | 0 / 2560 | 29 / 0 |
+| `LOCK_EXCHANGE-zco.kt7.before.T` | 651176 | 1 | 0 / 2560 | 36 / 1 |
+| `LOCK_EXCHANGE-zco.kt7.before.ssh` | 21.9262695 | 1.27211933e-7 | 0 / 128 | 18 / 1 |
+| `LOCK_EXCHANGE-zco.kt7.before.u` | 2550.99997 | 2550.99997 | 37 / 2540 | 337 / 77 |
+| `LOCK_EXCHANGE-zco.kt8.before.S` | 2 | 1 | 0 / 2560 | 18 / 10 |
+| `LOCK_EXCHANGE-zco.kt8.before.T` | 909420 | 1 | 0 / 2560 | 49 / 2 |
+| `LOCK_EXCHANGE-zco.kt8.before.ssh` | 49.2519531 | 7.82905772e-7 | 0 / 128 | 18 / 3 |
+| `LOCK_EXCHANGE-zco.kt8.before.u` | 4083.79208 | 4083.79208 | 37 / 2540 | 336 / 124 |
+| `LOCK_EXCHANGE-zco.kt9.before.S` | 1 | 1 | 0 / 2560 | 3 / 14 |
+| `LOCK_EXCHANGE-zco.kt9.before.T` | 1209134 | 1 | 0 / 2560 | 50 / 1 |
+| `LOCK_EXCHANGE-zco.kt9.before.ssh` | 100.824219 | 6.98791247e-9 | 0 / 128 | 19 / 4 |
+| `LOCK_EXCHANGE-zco.kt9.before.u` | 6130.55237 | 6130.55237 | 36 / 2540 | 336 / 164 |
+| `LOCK_EXCHANGE-zco.kt10.before.S` | 2 | 2 | 0 / 2560 | 26 / 26 |
+| `LOCK_EXCHANGE-zco.kt10.before.T` | 1549621 | 0.25 | 0 / 2560 | 44 / 1 |
+| `LOCK_EXCHANGE-zco.kt10.before.ssh` | 182.203125 | 9.0120302e-6 | 0 / 128 | 18 / 8 |
+| `LOCK_EXCHANGE-zco.kt10.before.u` | 8760.48041 | 8760.48041 | 40 / 2540 | 340 / 180 |
+
+The complete OVERFLOW trajectory Rule-8 movement census follows.  The 23 rows
+with a nonzero “worse >2” count are the Rule-12 debt register.
+
+| row | move ULP | worse ULP | cells worse >2 ULP / n | improved / worsened |
+|---|---:|---:|---:|---:|
+| `OVERFLOW-zps.kt2.before.u` | 0.0625 | 0.0625 | 0 / 16900 | 102 / 98 |
+| `OVERFLOW-zps.kt3.before.S` | 2 | 1 | 0 / 17000 | 9 / 3 |
+| `OVERFLOW-zps.kt3.before.T` | 2.07127374e9 | 1 | 0 / 17000 | 77 / 2 |
+| `OVERFLOW-zps.kt3.before.ssh` | 0.00390625 | 0.000122070312 | 0 / 200 | 7 / 3 |
+| `OVERFLOW-zps.kt3.before.u` | 305172106 | 10068188.1 | 3 / 16900 | 369 / 176 |
+| `OVERFLOW-zps.kt4.before.S` | 3 | 1 | 0 / 17000 | 84 / 13 |
+| `OVERFLOW-zps.kt4.before.T` | 3.56372962e9 | 2 | 0 / 17000 | 127 / 9 |
+| `OVERFLOW-zps.kt4.before.ssh` | 118449990 | 5.25265932e-7 | 0 / 200 | 17 / 8 |
+| `OVERFLOW-zps.kt4.before.u` | 724995881 | 47893474.2 | 16 / 16900 | 569 / 210 |
+| `OVERFLOW-zps.kt5.before.S` | 4 | 2 | 0 / 17000 | 155 / 42 |
+| `OVERFLOW-zps.kt5.before.T` | 3.16022534e9 | 2 | 0 / 17000 | 176 / 58 |
+| `OVERFLOW-zps.kt5.before.ssh` | 550941929 | 31002650.2 | 1 / 200 | 26 / 10 |
+| `OVERFLOW-zps.kt5.before.u` | 701726732 | 93154917.6 | 53 / 16900 | 781 / 316 |
+| `OVERFLOW-zps.kt6.before.S` | 5 | 3 | 5 / 17000 | 100 / 164 |
+| `OVERFLOW-zps.kt6.before.T` | 2.16441218e9 | 4 | 1 / 17000 | 165 / 148 |
+| `OVERFLOW-zps.kt6.before.ssh` | 1.01200833e9 | 116223612 | 1 / 200 | 28 / 14 |
+| `OVERFLOW-zps.kt6.before.u` | 364492566 | 265447033 | 105 / 16900 | 911 / 480 |
+| `OVERFLOW-zps.kt7.before.S` | 8 | 3 | 5 / 17000 | 186 / 85 |
+| `OVERFLOW-zps.kt7.before.T` | 2.13179039e9 | 5 | 2 / 17000 | 238 / 80 |
+| `OVERFLOW-zps.kt7.before.ssh` | 937935687 | 185074563 | 2 / 200 | 29 / 18 |
+| `OVERFLOW-zps.kt7.before.u` | 427374937 | 427374937 | 77 / 16900 | 1109 / 625 |
+| `OVERFLOW-zps.kt8.before.S` | 7 | 2 | 0 / 17000 | 216 / 136 |
+| `OVERFLOW-zps.kt8.before.T` | 2.81168887e9 | 4 | 3 / 17000 | 272 / 82 |
+| `OVERFLOW-zps.kt8.before.ssh` | 519056479 | 136314453 | 1 / 200 | 36 / 15 |
+| `OVERFLOW-zps.kt8.before.u` | 940292705 | 747171909 | 83 / 16900 | 1351 / 760 |
+| `OVERFLOW-zps.kt9.before.S` | 8 | 3 | 8 / 17000 | 226 / 137 |
+| `OVERFLOW-zps.kt9.before.T` | 3.04286165e9 | 16859 | 7 / 17000 | 305 / 105 |
+| `OVERFLOW-zps.kt9.before.ssh` | 463559881 | 994147.5 | 1 / 200 | 41 / 14 |
+| `OVERFLOW-zps.kt9.before.u` | 1.22600132e9 | 982110113 | 115 / 16900 | 1612 / 891 |
+| `OVERFLOW-zps.kt10.before.S` | 7 | 3 | 9 / 17000 | 276 / 155 |
+| `OVERFLOW-zps.kt10.before.T` | 2.62242109e9 | 4 | 5 / 17000 | 354 / 133 |
+| `OVERFLOW-zps.kt10.before.ssh` | 866496525 | 360690850 | 2 / 200 | 45 / 14 |
+| `OVERFLOW-zps.kt10.before.u` | 1.01872603e9 | 1.01872603e9 | 120 / 16900 | 1984 / 916 |
+
+### Round-24 HOLD register and scope
+
+Decision 8 itself is implemented and the previous “state design pending” HOLD
+is closed.  It does not make the branch merge-ready.  The ordered open register
+is now:
+
+| boundary | result | honest owner/disposition |
+|---|---|---|
+| GYRE equal-input kt1 Kaa `uu_b/vv_b` | `0 / 580`, `0 / 570` | CONFIRMED exact state write/read contract |
+| LOCK/OVERFLOW equal-input Kaa | U `1 / 127` and `7 / 199`; absent V `0 / 390`, `0 / 606` | CONFIRMED upstream external-mode debt exposed at the new state boundary |
+| GYRE kt1 stage-2 Kaa | U `2.1986806906376666e-15`, V `2.2380914396075147e-15` | existing owner remains open; Decision 8 is near-null there |
+| GYRE kt2--10 trajectory | first-over-bar kt2 T/S/u/v; 40 Rule-12 rows | downstream external-mode/stage composition debt; walk before merge |
+| LOCK kt2--10 trajectory | first-over-bar improves kt3 T/u to kt4 u; seven Rule-12 u rows | compensating error exposed; faithful state stays |
+| OVERFLOW kt2--10 trajectory | first-over-bar remains kt2 T/u; 23 Rule-12 rows | compensating error exposed; faithful state stays |
+| ORCA2 production W | still DEBT, cellwise Decision-8 comparison PASS | existing ORCA2 stage-transport/W owner remains with lane 4 |
+| C1D kt2 PRE_SSM | six rows unchanged; u `1.1172865415493005e-7` | Decision 8 refuted as that row's owner; lane-3 boundary remains |
+| OVERFLOW dry-face NaN producer | no lane-3b handoff received | registered only; no mask workaround |
+
+Before the Round-20 HOLD on a reconciled/integration merge can lift, the GYRE
+stage-2 Kaa and newly exposed external-mode/stage-composition Rule-12 rows must
+be walked to their first primitive operands, the GYRE production trajectory
+must clear the bar, and this round must receive independent review.  Stage-3
+transport and ZDF/TKE work was not entered because those prerequisites do not
+hold.  No merge or push was performed.
+
+### Round-24 ASKED / UNASKED register
+
+| choice or action | origin | final disposition |
+|---|---|---|
+| one prognostic U/V depth-mean pair on NEMO identities | ASKED Decision 8 | implemented shared; no per-card physics fork |
+| exact NEMO time levels, seed, Kaa write, S-21 read, final swap | ASKED items 1/3 | implemented and source-cited |
+| rest initialization and legacy restart fallback | ASKED item 1 | rest zero; fallback only for missing fields, logged and tested |
+| non-NEMO no-array-leaf guarantee | ASKED item 2 | `None/None`; negative pytree test passes |
+| every constructor/restart/bridge site | ASKED item 2 | repository census updated; half-pair rejected |
+| GYRE kt1--10 and stage-2 Kaa | ASKED item 4 | measured; full tables above, prediction partly refuted |
+| LOCK and OVERFLOW stage/trajectory cross-card gates | ASKED item 4 / Rule 12 | stage PASS; trajectory FAIL without earlier first-over-bar; every moved row enumerated |
+| ORCA2 production-W and entry-stage gates | ASKED item 4 | fresh probe measured; cellwise Rule 12 PASS, production rows remain DEBT |
+| C1D kt2 PRE_SSM | ASKED item 4 | exact no-move control; first debt unchanged |
+| kt5 restart then kt6--10 | ASKED item 4 | every returned pytree leaf bit-identical to unbroken run |
+| new NEMO acquisition | conditional | not needed; existing BTFRM records contain Kaa pair |
+| rederive live state from 3-D velocity | forbidden | removed from identity path; legacy missing-restart fallback only |
+| stage-3/ZDF/TKE continuation | downstream | not entered across open stage-2 and Rule-12 boundaries |
+| shipped NEMO edit, NEMO run, multi-MB git artifact, push, merge | forbidden | none |
+
+All Round-24 labels and measurements are Codex-internal.  Independent review
+of this round remains **OUTSTANDING**.
+
+### Restart and negative-state controls
+
+The production restart test advances LOCK to kt5, saves every prognostic
+leaf, reloads, and advances kt6--10.  Every leaf, including `uu_b/vv_b`, is
+bit-identical to the unbroken run at every continuation step.  A direct
+round-trip test also pins nontrivial pair bits.  The missing-pair bridge test
+proves the legacy reconstruction is logged; the half-pair test raises.  The
+non-NEMO negative test sees exactly two fewer JAX array leaves than the
+otherwise identical opted-in state.
+
+### Rule 8 / Rule 12: GYRE
+
+The changed boundary is the same-step external Kaa target handed to S-21 and
+then the carried Kbb seed on the next step; the owner of the movement is
+Decision 8.  The operator itself is exact at the equal-input kt1 Kaa write.
+The cellwise comparison against the Round-23 report is nevertheless **FAIL**:
+
+```text
+ORACLE_RELATIVE_COMPARE FAIL: rows=50 max_worsening_ulps=19206928396.31543 first_over_bar={'fields': ['T', 'S', 'u', 'v'], 'kt': 2}->{'kt': 2, 'fields': ['T', 'S', 'u', 'v']} plant=None
+```
+
+No row changes status and first-over-bar does not move.  This is the complete
+44-row Rule-8 movement census; the 40 kt3--10 rows have cells exceeding the
+two-ulp Rule-12 allowance.  “Move” remains movement against the previous
+legoesm output; “worse” is the cellwise increase in oracle residual.  Both are
+in the row-scale oracle ulp.
+
+| row | move ULP | worse ULP | cells worse >2 ULP / n | improved / worsened |
+|---|---:|---:|---:|---:|
+| `GYRE-zco.kt2.before.S` | 1 | 1 | 0 / 18000 | 3 / 1 |
+| `GYRE-zco.kt2.before.T` | 1 | 0 | 0 / 18000 | 3 / 0 |
+| `GYRE-zco.kt2.before.u` | 0.03125 | 0.03125 | 0 / 17400 | 4037 / 5569 |
+| `GYRE-zco.kt2.before.v` | 0.03125 | 0.03125 | 0 / 17100 | 4467 / 5662 |
+| `GYRE-zco.kt3.before.S` | 74226637 | 31314675 | 4815 / 18000 | 11808 / 5150 |
+| `GYRE-zco.kt3.before.T` | 120896622 | 80711651 | 5640 / 18000 | 12163 / 5665 |
+| `GYRE-zco.kt3.before.ssh` | 30.1328125 | 30.1328125 | 2 / 600 | 281 / 318 |
+| `GYRE-zco.kt3.before.u` | 1.4869927e10 | 1.17903339e10 | 8604 / 17400 | 8796 / 8604 |
+| `GYRE-zco.kt3.before.v` | 1.08455746e10 | 9.98338518e9 | 8320 / 17100 | 8780 / 8320 |
+| `GYRE-zco.kt4.before.S` | 86172021 | 86172021 | 7904 / 18000 | 8984 / 8467 |
+| `GYRE-zco.kt4.before.T` | 198784977 | 198784977 | 8617 / 18000 | 9214 / 8699 |
+| `GYRE-zco.kt4.before.ssh` | 187527570 | 153965014 | 279 / 600 | 321 / 279 |
+| `GYRE-zco.kt4.before.u` | 1.35151818e10 | 1.35151818e10 | 8555 / 17400 | 8845 / 8555 |
+| `GYRE-zco.kt4.before.v` | 1.27469482e10 | 1.27469482e10 | 8351 / 17100 | 8749 / 8351 |
+| `GYRE-zco.kt5.before.S` | 78270650 | 49824166 | 7923 / 18000 | 9149 / 8461 |
+| `GYRE-zco.kt5.before.T` | 186633216 | 186633216 | 8583 / 18000 | 9242 / 8700 |
+| `GYRE-zco.kt5.before.ssh` | 321355221 | 321355221 | 269 / 600 | 331 / 269 |
+| `GYRE-zco.kt5.before.u` | 1.34490835e10 | 1.24238231e10 | 8199 / 17400 | 9201 / 8199 |
+| `GYRE-zco.kt5.before.v` | 1.04738843e10 | 1.04738843e10 | 8019 / 17100 | 9081 / 8019 |
+| `GYRE-zco.kt6.before.S` | 103631970 | 103631970 | 7775 / 18000 | 9465 / 8205 |
+| `GYRE-zco.kt6.before.T` | 209927188 | 209927188 | 8263 / 18000 | 9572 / 8383 |
+| `GYRE-zco.kt6.before.ssh` | 430849891 | 430849891 | 287 / 600 | 313 / 287 |
+| `GYRE-zco.kt6.before.u` | 1.92069284e10 | 1.92069284e10 | 8646 / 17400 | 8754 / 8646 |
+| `GYRE-zco.kt6.before.v` | 1.43816347e10 | 1.43816347e10 | 8745 / 17100 | 8355 / 8745 |
+| `GYRE-zco.kt7.before.S` | 84038532 | 78409574 | 7306 / 18000 | 10069 / 7705 |
+| `GYRE-zco.kt7.before.T` | 482954233 | 482954233 | 7692 / 18000 | 10208 / 7779 |
+| `GYRE-zco.kt7.before.ssh` | 402174312 | 370411895 | 320 / 600 | 280 / 320 |
+| `GYRE-zco.kt7.before.u` | 1.65534627e10 | 1.49570594e10 | 8738 / 17400 | 8662 / 8738 |
+| `GYRE-zco.kt7.before.v` | 1.64281573e10 | 1.64281573e10 | 8433 / 17100 | 8667 / 8433 |
+| `GYRE-zco.kt8.before.S` | 88623795 | 87727965 | 8086 / 18000 | 9266 / 8480 |
+| `GYRE-zco.kt8.before.T` | 346969126 | 346969126 | 8450 / 18000 | 9450 / 8543 |
+| `GYRE-zco.kt8.before.ssh` | 520126523 | 406146731 | 278 / 600 | 322 / 278 |
+| `GYRE-zco.kt8.before.u` | 1.63082063e10 | 1.63082063e10 | 8950 / 17400 | 8450 / 8950 |
+| `GYRE-zco.kt8.before.v` | 1.90039058e10 | 1.54288965e10 | 8522 / 17100 | 8578 / 8522 |
+| `GYRE-zco.kt9.before.S` | 76347236 | 76347236 | 8898 / 18000 | 8466 / 9308 |
+| `GYRE-zco.kt9.before.T` | 311833598 | 311833598 | 9302 / 18000 | 8576 / 9412 |
+| `GYRE-zco.kt9.before.ssh` | 746319096 | 746319096 | 300 / 600 | 300 / 300 |
+| `GYRE-zco.kt9.before.u` | 1.48462441e10 | 1.48335787e10 | 9073 / 17400 | 8327 / 9073 |
+| `GYRE-zco.kt9.before.v` | 1.64024528e10 | 1.33172267e10 | 8249 / 17100 | 8851 / 8249 |
+| `GYRE-zco.kt10.before.S` | 69267551 | 69267551 | 8478 / 18000 | 8887 / 8871 |
+| `GYRE-zco.kt10.before.T` | 319248770 | 319248770 | 8884 / 18000 | 9000 / 8991 |
+| `GYRE-zco.kt10.before.ssh` | 656161889 | 590236844 | 305 / 600 | 295 / 305 |
+| `GYRE-zco.kt10.before.u` | 1.37100843e10 | 1.17432804e10 | 8566 / 17400 | 8834 / 8566 |
+| `GYRE-zco.kt10.before.v` | 1.06070325e10 | 1.00824836e10 | 8612 / 17100 | 8488 / 8612 |
+
+The comparison correctly reports the 20 new Kaa rows as candidate-only and
+does not pretend that a missing Round-23 row is comparable.  Their absolute
+values are instead listed in the dedicated pair table above.
+
+### Cross-card outcomes
+
+All earlier-card rows use the same production-JIT CPU fp64/scalar-libm regime
+and the cellwise oracle-relative, row-scale-ulp criterion.  The verdict lines
+are:
+
+```text
+ORACLE_RELATIVE_COMPARE PASS: rows=9 max_worsening_ulps=0.0009765625 first_over_bar='<absent>'->'<absent>' plant=None
+ORACLE_RELATIVE_COMPARE FAIL: rows=50 max_worsening_ulps=8760.480407714844 first_over_bar={'fields': ['T', 'u'], 'kt': 3}->{'kt': 4, 'fields': ['u']} plant=None
+ORACLE_RELATIVE_COMPARE PASS: rows=9 max_worsening_ulps=0.0625 first_over_bar='<absent>'->'<absent>' plant=None
+ORACLE_RELATIVE_COMPARE FAIL: rows=50 max_worsening_ulps=1018726033.65625 first_over_bar={'fields': ['T', 'u'], 'kt': 2}->{'kt': 2, 'fields': ['T', 'u']} plant=None
+```
+
+These are LOCK stage, LOCK trajectory, OVERFLOW stage, and OVERFLOW
+trajectory, respectively.  Neither failing trajectory moves first-over-bar
+earlier and neither creates an AT-BAR-to-DEBT status change.  LOCK instead
+moves ten rows DEBT-to-AT-BAR and delays first-over-bar; OVERFLOW moves kt7--10
+S DEBT-to-AT-BAR.  Rule 12 still fails on seven LOCK-u rows and 23 OVERFLOW
+rows because individual oracle residuals worsen by more than two row-scale
+ulp.  The faithful carried state stays and the external-mode/stage-composition
+boundary is registered as the exposed second error.
+
+The complete stage-row movement census is:
+
+| row | move ULP | worse ULP | cells worse >2 ULP / n | improved / worsened |
+|---|---:|---:|---:|---:|
+| `LOCK_EXCHANGE-zco.kt1.stage1.faithful.baroclinic_u` | 0.001953125 | 0.0009765625 | 0 / 2540 | 16 / 1 |
+| `LOCK_EXCHANGE-zco.kt1.stage1.faithful.instantaneous_u` | 0.001953125 | 0 | 0 / 2540 | 19 / 0 |
+| `LOCK_EXCHANGE-zco.kt1.stage2.faithful.baroclinic_u` | 0.0009765625 | 0.0009765625 | 0 / 2540 | 9 / 25 |
+| `LOCK_EXCHANGE-zco.kt1.stage2.faithful.instantaneous_u` | 0.001953125 | 8.14907253e-10 | 0 / 2540 | 27 / 16 |
+| `LOCK_EXCHANGE-zco.kt1.stage3.faithful.baroclinic_u` | 0.0009765625 | 0.0009765625 | 0 / 2540 | 24 / 43 |
+| `LOCK_EXCHANGE-zco.kt1.stage3.faithful.instantaneous_u` | 0.001953125 | 2.32830644e-9 | 0 / 2540 | 59 / 34 |
+| `LOCK_EXCHANGE-zco.kt2.faithful.baroclinic_u` | 0.0009765625 | 0.0009765625 | 0 / 2540 | 24 / 43 |
+| `LOCK_EXCHANGE-zco.kt2.faithful.instantaneous_u` | 0.001953125 | 2.32830644e-9 | 0 / 2540 | 59 / 34 |
+| `OVERFLOW-zps.kt1.stage1.faithful.baroclinic_u` | 0.03125 | 0.03125 | 0 / 16900 | 52 / 1 |
+| `OVERFLOW-zps.kt1.stage1.faithful.instantaneous_u` | 0.03125 | 0.001953125 | 0 / 16900 | 48 / 75 |
+| `OVERFLOW-zps.kt1.stage2.faithful.baroclinic_u` | 0.0625 | 0.0625 | 0 / 16900 | 45 / 49 |
+| `OVERFLOW-zps.kt1.stage2.faithful.instantaneous_u` | 0.0625 | 0.0625 | 0 / 16900 | 80 / 90 |
+| `OVERFLOW-zps.kt1.stage3.faithful.baroclinic_u` | 0.0625 | 0.03125 | 0 / 16900 | 84 / 63 |
+| `OVERFLOW-zps.kt1.stage3.faithful.instantaneous_u` | 0.0625 | 0.0625 | 0 / 16900 | 102 / 98 |
+| `OVERFLOW-zps.kt2.faithful.baroclinic_u` | 0.0625 | 0.03125 | 0 / 16900 | 84 / 63 |
+| `OVERFLOW-zps.kt2.faithful.instantaneous_u` | 0.0625 | 0.0625 | 0 / 16900 | 102 / 98 |
+
+The dedicated equal-input Kaa gate gives GYRE `0 / 580` and `0 / 570`.
+LOCK has one U-face bit different (`1 / 127`, max
+`2.168404344971009e-19`); its V row is `0 / 390` but UNINFORMATIVE because
+the three-row tank has no active V face.  OVERFLOW has `7 / 199` U faces
+different (max `6.938893903907228e-18`); its structurally absent V row is
+`0 / 606`.  The state write is a direct copy, so these bits are labeled
+**CONFIRMED_UPSTREAM_EXTERNAL_MODE_DEBT**, not state-storage errors.
+
+The fresh ORCA2 probe is based on `b6a6189c9357`, with the Decision-8 probe at
+`845201229a4` and WRITE-only residual capture at `49026566a53`; its clean-tip
+baseline capture is `c0faa2540`.  The production gate retains exact `e2u/e1v`.
+Against the previous ORCA2 result, zFu unequal cells improve
+`102431 -> 85175 / 228641`, zFv improve `108307 -> 93486 / 228641`, and W
+improves `220589 -> 218667 / 228641`; all remain DEBT.  The W maximum absolute
+residual moves `4.6872685718684845e-19 -> 5.007089683905987e-19`.
+The independent cellwise Rule-12 replay nevertheless passes:
+
+| ORCA2 row | move ULP | worse ULP | cells worse >2 ULP / n | improved / worsened |
+|---|---:|---:|---:|---:|
+| production W | 0.00147694349 | 0.00147694349 | 0 / 228641 | 75727 / 65934 |
+| zFu | 1 | 0.5 | 0 / 228641 | 30620 / 19471 |
+| zFv | 1 | 1 | 0 / 228641 | 28933 / 19593 |
+
+The ORCA2 entry stage gate is still exact, and its one-cell production-W plant
+exits `1`.  The C1D fresh probe is based on `17693b92997`, with the same state
+API plus the one-column opt-in at `07f5a995e69`.  All six kt2 PRE_SSM rows are
+bit-for-bit unchanged from its last scalar-libm baseline; first-over-bar stays
+`CONTINUOUS.kt2_PRE_SSM.u = 1.1172865415493005e-7`.  Its trajectory plant
+exits `1`.
