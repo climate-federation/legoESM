@@ -250,3 +250,33 @@ def test_entry_builder_channel_heat_conventions():
     # normalisation residual (F_rate differs from the channel sum) enters at T_1
     Fe, He = (np.asarray(v) for v in real_freshwater_entry(fw(precip=2e-4), 0.5 * F, h, mask, rho0, T))
     assert np.allclose(Fe, [[0.5 * F, 0, 0]]) and np.allclose(He, [[-0.5 * F * 20.0, 0, 0]])
+
+
+def test_subsurface_runoff_under_net_evaporation_changes_sign_inside_the_column():
+    """GLM round 2: with runoff entering at depth under a surface that
+    evaporates, the transport is upward above the river level and downward
+    below it; the per-interface upwind donor must still conserve column
+    salt exactly and the heat budget must close on the entry heat."""
+    from legoesm.ocean.freshwater import FreshwaterForcing, real_freshwater_entry
+    h = np.array([[1.0, 3.0, 9.0, 27.0]]); S = np.array([[36.0, 35.5, 35.0, 34.8]])
+    T = np.array([[26.0, 22.0, 15.0, 8.0]]); mask = np.ones(1); rho0 = 1025.0
+    # evaporation at the surface, a larger river spread over the top 4 m:
+    # net water IN, so the transport is upward above the river level and
+    # downward below it (with net evaporation it is upward everywhere)
+    fw = FreshwaterForcing(precip=np.zeros(1), evap=np.array([1.0e-4]),
+                           runoff=np.array([3.0e-4]), ice_fw=np.zeros(1))
+    F = (-1.0e-4 + 3.0e-4) / rho0
+    Fe, He = (np.asarray(v) for v in real_freshwater_entry(fw, F, h, mask, rho0, T, runoff_spread_m=4.0))
+    assert Fe.sum() == pytest.approx(F, rel=1e-12)
+    dS, dT = (np.asarray(v) for v in real_freshwater_dilution_tendencies(
+        np.array([F]), S, T, h, mask, F_entry=Fe, entry_heat=He))
+    H = h.sum()
+    W = np.cumsum(Fe[0]) - F * np.cumsum(h[0]) / H          # interface under cell k
+    assert W[0] < 0.0 and W[1] > 0.0 and abs(W[-1]) < 1e-20, W
+    assert abs(np.sum(h * dS)) < 1e-15 * 36.0 * abs(F) * H
+    assert np.sum(h * dT) == pytest.approx(He.sum(), rel=1e-12)
+    # no new extrema from the transport alone: every layer stays within the
+    # column's [min, max] after one large step
+    dt = 1800.0
+    S1 = S[0] + dt * dS[0]
+    assert S1.min() >= S[0].min() - 1e-12 and S1.max() <= S[0].max() + 1e-12 + 36.0 * 1e-4 / rho0 * dt

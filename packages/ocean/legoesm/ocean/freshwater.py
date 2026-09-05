@@ -243,9 +243,9 @@ def real_freshwater_dilution_tendencies(
     # (W > 0, downward), the cell below for water leaving (evaporation, ice
     # growth: W < 0, upward).  Taking the cell above for both signs is
     # anti-diffusive under evaporation and sharpens the halocline (GLM
-    # review 2026-09-05).  The SURFACE interface carries S = 0 and T = T_1
-    # for both signs (pure water enters or leaves at the surface
-    # temperature).
+    # review 2026-09-05).  No transport crosses the SURFACE interface: the
+    # entering water is a per-layer SOURCE carrying S = 0 and the heat
+    # ``entry_heat`` (see the parameter docs).
     S_below_cell = jnp.concatenate([S[..., 1:], S[..., -1:]], axis=-1)
     T_below_cell = jnp.concatenate([T[..., 1:], T[..., -1:]], axis=-1)
     S_at_below = jnp.where(W_below >= 0.0, S, S_below_cell)

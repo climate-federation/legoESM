@@ -187,3 +187,13 @@ aux3d linkage and the minimum-level policy, not just counts.
   q ~ -(E-P) cp T ~ 2 W/m2 cooling where E>P (PLAUSIBLE, sent to round-2 reviewers). TRAP: numpy allclose
   default rtol=1e-5 on S=35 hid a 1.7e-6 PSU signal -> the step test passed on pre-fix code; rtol=0 now.
   Round-2 reviews: codex job 9654366, GLM task k5aa9zga2.
+- 17:00 DILUTION FIX round 2 (codex 9654366, GLM): implementation PASS on both (upwind donor, entry-profile
+  transport, MPAS shapes); codex MINOR stale comment fixed; interior sign change (river below an
+  evaporating surface) is conserving and monotone -> test added. Open PLAUSIBLE: ice-melt heat parity with
+  SI3 icesbc (GLM: SI3 subtracts no cp*T*fw, local-T entry is right). CONFIRMED by both as a PRODUCTION
+  defect: the virtual closure applies the rain/evap/restoring heat-content terms in q_net with no
+  compensating temperature term (NEMO ln_linssh: sbc_tsc(jp_tem) += emp*sst/rho0; our GYRE recipe
+  nemo_recipe.py:1079 has it, OMIP block 8 does not) => spurious surface flux -(E-P) cp SST, ~2-6 W/m2
+  cooling in the evaporative subtropics, warming under the rain belts (GLM: up to 10-15 W/m2 in trade
+  regions). USER DECISIONS ASKED: (A) add the temperature twin to the virtual closure + re-baseline;
+  (B) launch the fixed-real-closure 30-day arm.
