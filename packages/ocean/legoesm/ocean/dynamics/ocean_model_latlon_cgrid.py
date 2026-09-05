@@ -1269,7 +1269,9 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     legacy_zdf_entry_kmm_eta: bool = False
 
 
-def _nemo_ws_qco_stage_faces(eta, h_ref, u_mask_3d, v_mask_3d, grid):
+def _nemo_ws_qco_stage_faces(
+    eta, h_ref, u_mask_3d, v_mask_3d, grid, *, include_reciprocals=False,
+):
     """NEMO ``e3u/e3v(Kmm)`` and ``1 + r3u/r3v`` for one WS-RK3 stage ssh.
 
     ``dom_qco_r3c_RK3`` (domqco.F90:219-222) builds the U-face free-surface
@@ -1312,6 +1314,7 @@ def _nemo_ws_qco_stage_faces(eta, h_ref, u_mask_3d, v_mask_3d, grid):
     return nemo_qco_live_face_geometry_cgrid(
         jnp.asarray(eta, dtype=dtype), ops.e3u_0, ops.e3v_0, ops.umask3,
         ops.vmask3, ops.hu_0, ops.hv_0, ops.area_t, ops.area_u, ops.area_v,
+        include_reciprocals=include_reciprocals,
     )
 
 
@@ -1406,9 +1409,12 @@ def _nemo_ws_stage_transport(
         # such switch and the WS-RK3 identity never selects this arm.
         hu_stage = min_cell_to_uface(h_stage)
         hv_stage = min_cell_to_vface(h_stage, grid)
+        r1_hu_stage = r1_hv_stage = None
     else:
-        hu_stage, hv_stage, _, _ = _nemo_ws_qco_stage_faces(
-            eta_stage, h_ref, u_mask_3d, v_mask_3d, grid)
+        (hu_stage, hv_stage, _, _, r1_hu_stage,
+         r1_hv_stage) = _nemo_ws_qco_stage_faces(
+            eta_stage, h_ref, u_mask_3d, v_mask_3d, grid,
+            include_reciprocals=True)
     Hu_stage_depth = jnp.sum(hu_stage, axis=-1)
     Hv_stage_depth = jnp.sum(hv_stage, axis=-1)
     if barotropic_velocity is None:
@@ -1425,10 +1431,12 @@ def _nemo_ws_stage_transport(
         # prognostics.  Preserve both the reciprocal and subtract boundaries;
         # re-reducing the 3-D field is algebraically equal after :433-446 but
         # changes the last bits on GYRE's stage-3 transport.
-        r1_hu = nemo_source_round(
-            1.0 / jnp.maximum(Hu_stage_depth, 1.0e-10))
-        r1_hv = nemo_source_round(
-            1.0 / jnp.maximum(Hv_stage_depth, 1.0e-10))
+        r1_hu = (r1_hu_stage if r1_hu_stage is not None else
+                 nemo_source_round(
+                     1.0 / jnp.maximum(Hu_stage_depth, 1.0e-10)))
+        r1_hv = (r1_hv_stage if r1_hv_stage is not None else
+                 nemo_source_round(
+                     1.0 / jnp.maximum(Hv_stage_depth, 1.0e-10)))
         u_stage_corr = _nemo_stage_corrected_velocity(
             u_stage, Hu_avg, r1_hu, barotropic_velocity[0], u_mask_3d)
         v_stage_corr = _nemo_stage_corrected_velocity(

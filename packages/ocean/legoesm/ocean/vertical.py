@@ -205,7 +205,11 @@ def nemo_qco_live_face_geometry_from_operands(
     few ULPs in ``mlf_baro_corr``.
     """
     dtype = jnp.asarray(e3u_0).dtype
-    b = lax.optimization_barrier
+    # Source statements, not a scheduling hint: XLA strips
+    # ``optimization_barrier`` before optimized HLO.  The IEEE identity in
+    # ``nemo_source_round`` preserves the written domqco association used by
+    # both the live thickness and its coupled reciprocal.
+    b = nemo_source_round
     one = jnp.asarray(1.0, dtype=dtype)
     half = jnp.asarray(0.5, dtype=dtype)
     eta = jnp.asarray(eta, dtype=dtype)
@@ -474,6 +478,8 @@ def nemo_qco_live_face_geometry_cgrid(
     area_t,
     area_u,
     area_v,
+    *,
+    include_reciprocals=False,
 ):
     """NEMO ``e3u/e3v(Kmm)`` on legoESM's redundant west/south C-grid faces.
 
@@ -522,12 +528,22 @@ def nemo_qco_live_face_geometry_cgrid(
         hu_0, hv_0, area_t, area_u, area_v,
     )
     one = jnp.asarray(1.0, dtype=geom.e3u.dtype)
-    return (
+    result = (
         jnp.concatenate([geom.e3u[:, -1:, :], geom.e3u], axis=1),
         jnp.concatenate([jnp.zeros_like(geom.e3v[:1]), geom.e3v], axis=0),
         jnp.concatenate([one + geom.r3u[:, -1:], one + geom.r3u], axis=1),
         jnp.concatenate(
             [jnp.ones_like(geom.r3v[:1]), one + geom.r3v], axis=0),
+    )
+    if not include_reciprocals:
+        return result
+    # Same native-east/native-north -> redundant-west/redundant-south map as
+    # the coupled thicknesses.  stprk3_stg.F90:265-278 consumes these stored
+    # domqco reciprocals; recomputing 1/SUM(e3) is real-equivalent but not
+    # source-identical on ORCA2's non-uniform, partial-cell mesh.
+    return result + (
+        jnp.concatenate([geom.r1_hu[:, -1:], geom.r1_hu], axis=1),
+        jnp.concatenate([jnp.zeros_like(geom.r1_hv[:1]), geom.r1_hv], axis=0),
     )
 
 

@@ -28,6 +28,7 @@ copies were correct.  This module pins that, three ways:
 
 import inspect
 
+import jax
 import jax.numpy as jnp
 import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as model_module
 import numpy as np
@@ -103,6 +104,49 @@ def test_shared_builder_is_nemo_e3u0_times_one_plus_r3u_not_the_min_rule():
     assert gap == pytest.approx(0.25, rel=1e-12), gap
     with pytest.raises(AssertionError):
         np.testing.assert_allclose(reverted, expected, rtol=1e-15, atol=0.0)
+
+
+def test_shared_builder_carries_source_literal_live_face_reciprocal_bits():
+    """Pin ``r1_hu_0/(1+r3u)`` instead of re-dividing summed live e3."""
+    set_policy(PrecisionPolicy.fp64())
+    rng = np.random.default_rng(2218)
+    ny, nx, nz = 2, 5, 4
+    eta = rng.uniform(-0.3, 0.4, (ny, nx)).astype(np.float64)
+    e3u0 = rng.uniform(0.2, 250.0, (ny, nx, nz)).astype(np.float64)
+    e3v0 = rng.uniform(0.2, 250.0, (ny, nx, nz)).astype(np.float64)
+    umask = np.ones_like(e3u0)
+    vmask = np.ones_like(e3v0)
+    hu0 = np.sum(e3u0 * umask, axis=-1)
+    hv0 = np.sum(e3v0 * vmask, axis=-1)
+    area_t = rng.uniform(2.0e7, 1.1e10, (ny, nx)).astype(np.float64)
+    area_u = rng.uniform(2.0e7, 1.1e10, (ny, nx)).astype(np.float64)
+    area_v = rng.uniform(2.0e7, 1.1e10, (ny, nx)).astype(np.float64)
+
+    weighted = area_t * eta
+    numerator_u = np.float64(0.5) * (
+        weighted + np.roll(weighted, -1, axis=1))
+    r1_hu0 = np.float64(1.0) / hu0
+    r1_area_u = np.float64(1.0) / area_u
+    r3u = (numerator_u * r1_hu0) * r1_area_u
+    expected = r1_hu0 / (np.float64(1.0) + r3u)
+
+    def build(*args):
+        return nemo_qco_live_face_geometry_cgrid(
+            *args, include_reciprocals=True)[4]
+
+    actual = np.asarray(jax.jit(build)(
+        *map(jnp.asarray, (
+            eta, e3u0, e3v0, umask, vmask, hu0, hv0,
+            area_t, area_u, area_v))))[:, 1:]
+    np.testing.assert_array_equal(
+        actual.view(np.uint64), expected.view(np.uint64))
+
+    # The former stage-transport path reconstructed the same real reciprocal
+    # by summing live e3 and dividing again.  The awkward operands make that
+    # alternative observably non-bit-identical.
+    live_e3u = e3u0 * (np.float64(1.0) + r3u[..., None] * umask)
+    rederived = np.float64(1.0) / np.sum(live_e3u, axis=-1)
+    assert not np.array_equal(rederived.view(np.uint64), expected.view(np.uint64))
 
 
 def test_ws_rk3_stage_transport_reaches_the_shared_builder():
