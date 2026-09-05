@@ -265,6 +265,15 @@ def main() -> int:
         rows.append({"record": name, **result})
         if not result.get("consumed_equal", False):
             violations.append(name)
+    # --writer stamps ONE provenance string, so it is only truthful when every
+    # changed record comes from the same instrument.  Fail closed rather than
+    # publish one file:line over records written by different ones.
+    if args.writer:
+        kinds = {KINDS[row["record"]] for row in rows if row["record"] in KINDS}
+        if len(kinds) > 1:
+            violations.append(
+                f"--writer names one instrument but {sorted(kinds)} record "
+                "kinds changed; pass no --writer or split the run")
     restart = args.restart
     restart_equal = _sha(args.baseline / restart) == _sha(args.candidate / restart)
     if not restart_equal:
