@@ -10,23 +10,31 @@ was given, per checkpoint, by calling ``compute_cloud_properties`` with the
 run's RESOLVED cloud configuration (read from ``experiment_config.json``, never
 from a default), then reports per region:
 
-* low / mid / high cover (ISCCP bounds 680 and 440 hPa) and the column total,
-  each by the model's own maximum-random overlap;
+* low / mid / high cover and the column total, each by the model's own
+  maximum-random overlap.  "Low" is the cover of cloud LOCATED below 680 hPa
+  whatever lies above it (a GOCCP-style layer amount), NOT the ISCCP
+  cloud-top-pressure class; the 680 / 440 hPa bounds are ISCCP's;
 * the layer cloud fraction, RH and cloud-water profile over the lowest levels;
-* the condensate path the radiation SEES after the maximum-random subcolumn
-  sampling versus the prognostic path in the tracers.  Under ``max_random`` a
-  layer with ``cf = 0`` contributes ZERO water to every subcolumn, so
-  condensate sitting in "clear" layers is radiatively invisible.  This number
-  is that fraction.
+* the column condensate path at three stages: the tracers; the output of
+  ``compute_cloud_properties`` (radiative floor + in-cloud inhomogeneity
+  scaling); and the mean over the ``max_random`` subcolumns of the per-
+  subcolumn path the solver is handed (the solver integrates each subcolumn
+  and averages the FLUXES, so this last number is the mean solver INPUT, not
+  a flux-equivalent path).  A layer with ``cf = 0`` contributes ZERO water
+  to every subcolumn, so condensate sitting in "clear" layers is
+  radiatively invisible; ``ice_unseen`` is that fraction.
+
+Number tracers are passed as the radiation call passes them (the raw
+``N_c``/``N_i`` tracers).  When the run sets ``nc_from_aerosol`` without
+prognostic droplet number the live path replaces ``N_c`` by a CCN estimate
+from the aerosol optical depth, which this probe cannot rebuild; the LIQUID
+in-cloud optical depth (hence its inhomogeneity factor) then differs from
+the run's, and the probe says so.  The ice path is unaffected.
 
 Snapshot caveat, stated: checkpoints are instants (one time of day), not the
 monthly means the CMOR ``clt`` publishes.  The probe prints the published
 ``clt`` next to the snapshot total so the two can be compared; on the res6
 90-day run they agree to 1-5 % per region.
-
-Effective radii are NOT reconstructed (droplet/ice number conventions differ
-between the tracer store and the optics interface); fraction and water paths
-do not depend on them.
 
 Usage: cloud_layers.py <run> [--days 50,60,70,80] [--profile-levels 12]
 """
@@ -131,10 +139,16 @@ def resolved_cloud_config(exp):
             "cloud_diagnostic_condensate_scheme", "cloud_p_xr", "cloud_alpha_xr",
             "cloud_conv_cloud_max", "cloud_conv_cloud_condensate",
             "cloud_adiabatic_lwc_rate", "cloud_optics_inhomogeneity",
-            "cloud_fsd", "cloud_partial_coverage_optics"]
+            "cloud_inhomogeneity_factor", "cloud_fsd",
+            "cloud_partial_coverage_optics", "cloud_clubb_cf_override_strength",
+            "cloud_clubb_cf_override_floor", "use_clubb_cloud_fraction"]
     missing = [k for k in need if k not in exp]
     if missing:
         raise SystemExit(f"FATAL: experiment_config.json lacks {missing}")
+    if exp["use_clubb_cloud_fraction"]:
+        raise SystemExit("FATAL: run routes CLUBB's cloud fraction into the "
+                         "optics; that override is not in the checkpoint and "
+                         "cannot be rebuilt here")
     return build_cloud_config(
         exp["cloud_scheme"], convective_cloud=bool(exp["convective_cloud"]),
         rh_crit=exp["cloud_rh_crit"], q_c_diagnostic=exp["cloud_q_c_diagnostic"],
@@ -147,31 +161,64 @@ def resolved_cloud_config(exp):
         conv_cloud_condensate=exp["cloud_conv_cloud_condensate"],
         adiabatic_lwc_rate=exp["cloud_adiabatic_lwc_rate"],
         cloud_optics_inhomogeneity=exp["cloud_optics_inhomogeneity"],
+        cloud_inhomogeneity_factor=exp["cloud_inhomogeneity_factor"],
         cloud_fsd=exp["cloud_fsd"],
-        cloud_partial_coverage_optics=exp["cloud_partial_coverage_optics"])
+        cloud_partial_coverage_optics=exp["cloud_partial_coverage_optics"],
+        clubb_cf_override_strength=exp["cloud_clubb_cf_override_strength"],
+        clubb_cf_override_floor=exp["cloud_clubb_cf_override_floor"])
 
 
-def analyse_checkpoint(path, cloud_cfg):
+def cell_order(z, ncell):
+    """Permutation that puts the checkpoint's columns into global mesh order.
+
+    Checkpoints carry ``physstate_col_index``, the global cell id of every
+    stored column.  It must be a permutation of ``range(ncell)``; anything
+    else (a rank-local slab, a different mesh) is refused rather than
+    averaged into a regional mean on the wrong cells."""
+    if "physstate_col_index" not in z.files:
+        raise SystemExit("FATAL: checkpoint has no physstate_col_index; "
+                         "cannot prove its cell order matches the mesh")
+    idx = np.asarray(z["physstate_col_index"]).astype(np.int64)
+    if idx.shape != (ncell,) or not np.array_equal(np.sort(idx), np.arange(ncell)):
+        raise SystemExit("FATAL: checkpoint columns are not a permutation of "
+                         f"the mesh's {ncell} cells")
+    order = np.empty(ncell, dtype=np.int64)
+    order[idx] = np.arange(ncell)
+    return order
+
+
+def analyse_checkpoint(path, cloud_cfg, ncell):
     """Per-cell cover, radiation-visible vs prognostic paths, and the layer
-    fields needed for profiles, from one checkpoint."""
+    fields needed for profiles, from one checkpoint (in global mesh order)."""
     from legoesm.atmosphere.physics.clouds.cloud_fraction import compute_cloud_properties
     from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
     from legoesm import constants
 
     z = np.load(path)
-    vg = z["meta_vgrid"]                       # (2, nlev+1): A_half [Pa], B_half
-    ps = z["p_s"]
-    p_half = vg[0][None, :] + vg[1][None, :] * ps[:, None]
+    order = cell_order(z, ncell)
+
+    def col(name):
+        return np.asarray(z[name])[order] if name in z.files else None
+
+    # (2, nlev+1) = (A_half, B_half); p_half = A p_ref + B p_s.  A is
+    # DIMENSIONLESS (model_driver stores it so; p_ref is the constants value
+    # the hybrid constructor defaults to).  Pure sigma is the A = 0 member.
+    vg = z["meta_vgrid"]
+    ps = col("p_s")
+    p_half = vg[0][None, :] * constants.p_ref + vg[1][None, :] * ps[:, None]
     p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
     dp = np.diff(p_half, axis=1)
     if not np.all(dp > 0):
         raise SystemExit("FATAL: non-monotone vertical grid in checkpoint")
-    T, q_v = z["T"], z["trc_q_v"]
-    q_c = z["trc_q_c"] if "trc_q_c" in z.files else np.zeros_like(T)
-    q_i = z["trc_q_i"] if "trc_q_i" in z.files else np.zeros_like(T)
-    conv = z["physstate_conv_precip"] if cloud_cfg.convective_cloud else None
+    T, q_v = col("T"), col("trc_q_v")
+    q_c = col("trc_q_c"); q_i = col("trc_q_i")
+    q_c = np.zeros_like(T) if q_c is None else q_c
+    q_i = np.zeros_like(T) if q_i is None else q_i
+    conv = col("physstate_conv_precip") if cloud_cfg.convective_cloud else None
     props = compute_cloud_properties(T, p_full, q_v, dp, cloud_cfg,
-                                     q_cloud=q_c, q_ice=q_i, conv_precip=conv)
+                                     q_cloud=q_c, q_ice=q_i,
+                                     n_cloud=col("trc_N_c"), n_ice=col("trc_N_i"),
+                                     conv_precip=conv)
     cf = np.asarray(props.cloud_fraction)
     lwp_rad, iwp_rad = radiation_paths(props, cloud_cfg)
     g = constants.g
@@ -247,15 +294,20 @@ def main(argv=None):
     if not cks:
         raise SystemExit("FATAL: no checkpoints selected")
     lat, lon, area = mesh_coords(exp)
+    if exp.get("nc_from_aerosol"):
+        print("  WARNING: run sets nc_from_aerosol -- the live path replaced N_c "
+              "by CCN from the aerosol optical depth; the LIQUID in-cloud tau and "
+              "its inhomogeneity factor here use the raw N_c tracer instead.  Ice "
+              "is unaffected.")
 
     acc = {}
     for c in cks:
-        r = analyse_checkpoint(c, cloud_cfg)
-        if r["cf"].shape[0] != lat.shape[0]:
-            raise SystemExit("FATAL: checkpoint cell count != mesh cell count")
+        r = analyse_checkpoint(c, cloud_cfg, lat.shape[0])
+        # secondary sanity on top of the col_index permutation: a polar cell
+        # must be cold at the lowest level
         corr = np.corrcoef(np.abs(lat), r["T_lowest"])[0, 1]
         if corr > -0.5:
-            raise SystemExit(f"FATAL: mesh/checkpoint cell order mismatch "
+            raise SystemExit(f"FATAL: mesh/checkpoint geometry mismatch "
                              f"(corr(|lat|, T_lowest) = {corr:+.2f})")
         for k, v in r.items():
             acc.setdefault(k, []).append(v)
@@ -281,8 +333,8 @@ def main(argv=None):
 
     print(f"\n=== {args.run}: column condensate path [g/m2] at the three stages ===")
     print("  prog = tracers; opt = after the radiative floor and in-cloud "
-          "inhomogeneity scaling (compute_cloud_properties); rad = after the "
-          "vertical-overlap subcolumn sampling, i.e. what the solver integrates.")
+          "inhomogeneity scaling (compute_cloud_properties); rad = mean over "
+          "the overlap subcolumns of the per-subcolumn path handed to the solver.")
     keys = ("iwp_prog", "iwp_opt", "iwp_rad", "lwp_prog", "lwp_opt", "lwp_rad")
     print(f"{'region':18s}" + "".join(f"{k:>9s}" for k in keys))
     for name, box in rb.REGIONS.items():

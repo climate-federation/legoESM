@@ -102,15 +102,57 @@ def test_resolved_cloud_config_refuses_missing_key(cl):
         cl.resolved_cloud_config({"cloud_scheme": "sundqvist"})
 
 
+_EXP = {"cloud_scheme": "sundqvist", "convective_cloud": False,
+        "cloud_rh_crit": 0.91, "cloud_q_c_diagnostic": 7e-5,
+        "cloud_saturation_scheme": "mixed_phase",
+        "cloud_vertical_overlap_optics": "max_random", "cloud_n_subcolumns": 4,
+        "cloud_diagnostic_condensate_scheme": "constant", "cloud_p_xr": None,
+        "cloud_alpha_xr": None, "cloud_conv_cloud_max": None,
+        "cloud_conv_cloud_condensate": None, "cloud_adiabatic_lwc_rate": None,
+        "cloud_optics_inhomogeneity": "constant", "cloud_inhomogeneity_factor": 0.7,
+        "cloud_fsd": 0.5, "cloud_partial_coverage_optics": "none",
+        "cloud_clubb_cf_override_strength": None, "cloud_clubb_cf_override_floor": None,
+        "use_clubb_cloud_fraction": False}
+
+
 def test_resolved_cloud_config_reads_every_key_not_defaults(cl):
-    exp = {"cloud_scheme": "sundqvist", "convective_cloud": False,
-           "cloud_rh_crit": 0.91, "cloud_q_c_diagnostic": 7e-5,
-           "cloud_saturation_scheme": "mixed_phase",
-           "cloud_vertical_overlap_optics": "max_random", "cloud_n_subcolumns": 4,
-           "cloud_diagnostic_condensate_scheme": "constant", "cloud_p_xr": None,
-           "cloud_alpha_xr": None, "cloud_conv_cloud_max": None,
-           "cloud_conv_cloud_condensate": None, "cloud_adiabatic_lwc_rate": None,
-           "cloud_optics_inhomogeneity": "two_region", "cloud_fsd": 0.5,
-           "cloud_partial_coverage_optics": "none"}
-    cfg = cl.resolved_cloud_config(exp)
+    from legoesm.atmosphere.physics.clouds.config import CloudConfig
+    cfg = cl.resolved_cloud_config(_EXP)
     assert (cfg.rh_crit, cfg.saturation_scheme, cfg.cloud_n_subcolumns, cfg.cloud_fsd) == (0.91, "mixed_phase", 4, 0.5)
+    # the constant-chi factor must come from the run, not the CloudConfig default
+    assert cfg.cloud_inhomogeneity_factor == 0.7 != CloudConfig().cloud_inhomogeneity_factor
+
+
+def test_resolved_cloud_config_covers_every_cloud_key_the_run_records(cl):
+    """Every ExperimentConfig field that build_cloud_config can consume must
+    be read from the run; a new cloud knob added to one side and not the other
+    goes red here instead of silently taking its default in the probe."""
+    import inspect
+    from legoesm.atmosphere.physics.clouds.config import build_cloud_config
+    params = set(inspect.signature(build_cloud_config).parameters) - {"scheme"}
+    src = inspect.getsource(cl.resolved_cloud_config)
+    missing = [k for k in params if f"{k}=" not in src]
+    assert not missing, missing
+
+
+def test_resolved_cloud_config_refuses_clubb_override_runs(cl):
+    with pytest.raises(SystemExit, match="CLUBB"):
+        cl.resolved_cloud_config({**_EXP, "use_clubb_cloud_fraction": True})
+
+
+class _Npz(dict):
+    @property
+    def files(self):
+        return list(self)
+
+
+def test_cell_order_restores_global_order_and_refuses_partial(cl):
+    rng = np.random.default_rng(0)
+    perm = rng.permutation(6)
+    order = cl.cell_order(_Npz(physstate_col_index=perm), 6)
+    stored = np.arange(6)[perm]          # column j of the file is global cell perm[j]
+    assert np.array_equal(stored[order], np.arange(6))
+    with pytest.raises(SystemExit, match="permutation"):
+        cl.cell_order(_Npz(physstate_col_index=np.arange(4)), 6)
+    with pytest.raises(SystemExit, match="col_index"):
+        cl.cell_order(_Npz(), 6)
