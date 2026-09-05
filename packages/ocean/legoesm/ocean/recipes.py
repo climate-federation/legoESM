@@ -101,16 +101,22 @@ LATLON_RECIPES = {
         "lateral_viscosity_operator": "flux_divergence",
         "vertical_momentum_scheme": "centered_full",
     },
-    # The FAITHFUL NEMO dycore (#487/#496) — the scheme identity of
-    # fidelity/nemo_recipe.py's nemo_lat_lon_model_config: EEN-style
-    # vector-invariant momentum + Hollingsworth KE-gradient, PPM/FCT tracers,
-    # TEOS-10-like veros_gsw EOS, smc03 PGF, RK3 momentum, adaptive-implicit
-    # vertical advection, cosine free-surface filter. NB this catalog entry is the
-    # DYCORE SCHEMES only — the full NEMO card ALSO supplies NEMO constants + the
-    # prognostic TKE physics + GM/Redi/MLE; use nemo_recipe.build_nemo_recipe for
-    # full fidelity. Distinct from nemo_dino_v1 (the cruder Wright/KPP approx).
+    # NEMO-STYLE dycore (#487/#496; RENAMED from "nemo_v1" 2026-09-02 — that
+    # name overclaimed fidelity: this entry's barotropic solver is legoESM's
+    # own generic split-explicit arm, NOT NEMO's dyn_spg_ts, since it never
+    # sets any of the 5 barotropic_*_evaluation selectors — see
+    # docs/ocean/fidelity/nemo_branch_isomorphism_map.md S-16) — the scheme
+    # identity of fidelity/nemo_recipe.py's nemo_lat_lon_model_config:
+    # EEN-style vector-invariant momentum + Hollingsworth KE-gradient,
+    # PPM/FCT tracers, TEOS-10-like veros_gsw EOS, smc03 PGF, RK3 momentum,
+    # adaptive-implicit vertical advection, cosine free-surface filter (all
+    # genuinely NEMO-referenced) riding on the generic (non-NEMO) barotropic
+    # substep loop. NB this catalog entry is the DYCORE SCHEMES only — the
+    # full NEMO card ALSO supplies NEMO constants + the prognostic TKE
+    # physics + GM/Redi/MLE; use nemo_recipe.build_nemo_recipe for full
+    # fidelity. Distinct from nemo_dino_v1 (the cruder Wright/KPP approx).
     # Drift-guarded against the card by tests/ocean/unit/test_recipes.py.
-    "nemo_v1": {
+    "legoesm_nemo_like_v1": {
         "eos": "veros_gsw",
         "momentum_advection": "vector_invariant",
         "ke_gradient_scheme": "hollingsworth",
@@ -144,9 +150,10 @@ LATLON_RECIPES = {
     # Matches NEMO ORCA1 CLIMATE: SST RMSE 1.15, corr 0.99
     # (docs/dev-notes/ocean_faithfulness_nemo.md) — a climate-match stack
     # (KPP vertical mixing + Laplacian Smagorinsky), NOT a numerics-faithful card
-    # like nemo_v1. ke_gradient/outer/tracer integrators are config defaults the
-    # tripole branch intentionally leaves unset (the Hollingsworth KE stencil is
-    # not yet north-fold-aware — see the _create_setup tripole note).
+    # like legoesm_nemo_like_v1. ke_gradient/outer/tracer integrators are config
+    # defaults the tripole branch intentionally leaves unset (the Hollingsworth
+    # KE stencil is not yet north-fold-aware — see the _create_setup tripole
+    # note).
     "omip_nemo_match_tripole_v1": {
         "eos": "wright",
         "momentum_advection": "vector_invariant",
@@ -244,8 +251,9 @@ MPAS_RECIPES = {
     # Matches NEMO ORCA1 CLIMATE: SST RMSE 0.84 (the best grid)
     # (docs/dev-notes/ocean_faithfulness_nemo.md) — a climate-match stack
     # (KPP vertical mixing + Laplacian Smagorinsky), NOT a numerics-faithful card
-    # like nemo_v1. eos/pv_scheme are the config defaults the mpas branch leaves
-    # unset; tracer_advection/pgf/barotropic/implicit are set explicitly.
+    # like legoesm_nemo_like_v1. eos/pv_scheme are the config defaults the mpas
+    # branch leaves unset; tracer_advection/pgf/barotropic/implicit are set
+    # explicitly.
     "omip_nemo_match_mpas_v1": {
         "eos": "wright",
         "tracer_advection": "tvd",

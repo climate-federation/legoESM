@@ -582,13 +582,15 @@ class TestBarotropicSeedFaceDepth:
         seed_before = _depth_average_to_faces(
             u3, v3, h_before, *common,
             seed_face_depth="nemo_ssh_avg", seed_evaluation="nemo_literal",
-            eta_dyn=eta_before, H_bathy=state.H_bathy.data, area=area)
+            eta_dyn=eta_before, H_bathy=state.H_bathy.data, area=area,
+            z_coord=z)
         h_now = compute_layer_thickness(
             eta_now, state.H_bathy.data, z, min_water_column_m=0.0)
         seed_now = _depth_average_to_faces(
             u3, v3, h_now, *common,
             seed_face_depth="nemo_ssh_avg", seed_evaluation="nemo_literal",
-            eta_dyn=eta_now, H_bathy=state.H_bathy.data, area=area)
+            eta_dyn=eta_now, H_bathy=state.H_bathy.data, area=area,
+            z_coord=z)
 
         assert np.any(np.asarray(seed_before[0]) != np.asarray(seed_now[0]))
         assert np.any(np.asarray(seed_before[1]) != np.asarray(seed_now[1]))
@@ -667,13 +669,16 @@ class TestBarotropicSeedFaceDepth:
         np.testing.assert_array_equal(np.asarray(got_u), expected_u)
         np.testing.assert_array_equal(np.asarray(got_v), expected_v)
 
-        fallback_u, fallback_v = _depth_average_to_faces(
-            *args, seed_face_depth="nemo_ssh_avg",
-            seed_evaluation="nemo_literal", eta_dyn=jnp.asarray(eta),
-            H_bathy=jnp.full_like(jnp.asarray(eta), 8.75),
-            area=jnp.asarray(area_t), z_coord=None)
-        assert np.any(np.asarray(fallback_u) != expected_u)
-        assert np.any(np.asarray(fallback_v) != expected_v)
+        # Without the carried mesh the literal seed needs the card's own
+        # reference ladder (e3u_0 = min-rule of e3t_0, domain.F90:145); a
+        # caller with neither gets a refusal, never a silently different
+        # number.
+        with pytest.raises(ValueError, match="reference ladder"):
+            _depth_average_to_faces(
+                *args, seed_face_depth="nemo_ssh_avg",
+                seed_evaluation="nemo_literal", eta_dyn=jnp.asarray(eta),
+                H_bathy=jnp.full_like(jnp.asarray(eta), 8.75),
+                area=jnp.asarray(area_t), z_coord=None)
 
     def test_default_min_rule_byte_identical_to_pre_change(self):
         """Default is "min_rule" — the new kwarg is purely additive; a run

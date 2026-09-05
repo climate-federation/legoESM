@@ -1559,17 +1559,13 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
 
     mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
     if os.environ.get("DINO_NEMO_KMM_DIVISOR") is not None:
-        # #1226 W1: NEMO-faithful implicit-solve gradient divisor (trazdf.F90:
-        # 219-220 e3w(...,Kmm), NOW/pre-solve thickness) vs legoESM's default
-        # AFTER-solve midpoint divisor. LatLonCGridOceanConfig field, set on
-        # mc post-construction (same pattern as dino_year_screen_fullframe.py).
-        _v = os.environ["DINO_NEMO_KMM_DIVISOR"]
-        if _v not in ("0", "1"):
-            raise SystemExit(
-                f"Unknown DINO_NEMO_KMM_DIVISOR={_v!r}: expected '0' or '1'")
-        # mc is a NamedTuple (LatLonCGridOceanConfig), not a dataclass -> _replace.
-        mc = mc._replace(implicit_vmix_e3t_now_divisor=(_v == "1"))
-        print(f"ABLATION: implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
+        raise SystemExit(
+            "DINO_NEMO_KMM_DIVISOR is GONE. NEMO's e3w(Kmm) implicit-solve "
+            "divisor (trazdf.F90:219-221, dynzdf.F90:200-203) is no longer a "
+            "flag: it is unbranched inside the NEMO identity "
+            'zdf_implicit_solver_evaluation="nemo_literal", which this card '
+            "already selects. Compare across commits, not across this knob "
+            "(docs/ocean/fidelity/dino_zdf_divisor_arm_receipt.md).")
     # #1492 P2: NEMO-faithful step-composition A/B (docs/ocean/fidelity/
     # nemo_mlf_step_transcription_spec.md resolved decision 2). Default "" =
     # legacy (outer_integrator="leapfrog", unchanged); "nemo_mlf" routes to
@@ -1582,16 +1578,17 @@ def _build_twin_state(recipe: str, run_traj: str, run_stepdump: str, *,
             raise SystemExit(
                 f"Unknown DINO_OUTER_INTEGRATOR={_OI!r}: expected "
                 "'leapfrog' or 'nemo_mlf'")
-        # nemo_mlf HARD-REQUIRES the NEMO e3w(Kmm) divisor at construction
-        # (spec resolved decision 4) -- auto-force it so the env knob alone
-        # is sufficient without also setting DINO_NEMO_KMM_DIVISOR.
+        # nemo_mlf HARD-REQUIRES the NEMO implicit-ZDF identity at
+        # construction (spec resolved decision 4; it carries NEMO's e3w(Kmm)
+        # divisor) -- auto-force it so the env knob alone is sufficient.
         mc = mc._replace(
             outer_integrator=_OI,
-            implicit_vmix_e3t_now_divisor=(
-                True if _OI == "nemo_mlf"
-                else mc.implicit_vmix_e3t_now_divisor))
+            zdf_implicit_solver_evaluation=(
+                "nemo_literal" if _OI == "nemo_mlf"
+                else mc.zdf_implicit_solver_evaluation))
         print(f"ABLATION: outer_integrator={mc.outer_integrator} "
-              f"implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
+              "zdf_implicit_solver_evaluation="
+              f"{mc.zdf_implicit_solver_evaluation}")
     print(f"barotropic_diffusion_alpha={mc.barotropic.barotropic_diffusion_alpha} "
           f"barotropic_face_depth={mc.barotropic.barotropic_face_depth} "
           f"zdf_drag_in_matrix={mc.zdf_drag_in_matrix} "

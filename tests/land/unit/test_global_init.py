@@ -462,12 +462,18 @@ def test_geometry_round_trips_through_archetypes_npz(tmp_path):
     qc = {k: np.zeros(n_arch)
           for k in ("gpp", "npp", "som_kgC", "biomass_kgC", "drift_frac_per_yr")}
     path = tmp_path / "archetypes.npz"
+    physics = {"stomatal_model": "medlyn", "nsc_gated_respiration": True,
+               "cold_deciduous_dormancy": False, "leaf_c_resorption_frac": 0.5}
+    assert set(physics) == set(drv.PHYSICS_PROVENANCE_KEYS)
     drv._write_archetypes_npz(
         path, table, eq, qc, ["bare_soil"], n_layers=7, soil_depth=2.5,
-        dt=1800.0, res_deg=2.0)
+        dt=1800.0, res_deg=2.0, physics=physics)
     with np.load(path, allow_pickle=False) as d:
         assert int(d["n_layers"]) == 7
         assert float(d["soil_depth"]) == 2.5
+        # physics provenance round-trips with its types (the drift validator
+        # rebuilds the model from these; a str "False" would be truthy)
+        assert {k: d[k].item() for k in physics} == physics
         assert float(d["dt"]) == 1800.0
         assert float(d["resolution_deg"]) == 2.0
         # Table + equilibria still round-trip alongside the geometry.
@@ -811,3 +817,100 @@ def test_point_ic_misaligned_selection_array_raises(tmp_path):
     _np.savez(p2, **d)
     with pytest.raises(ValueError, match="different cells"):
         load_finidat_carbon_ic_at_point(p2, 0.0, 0.0)
+
+
+def _one_archetype_table():
+    return ArchetypeTable(
+        pft_id=np.array([4]),
+        mat_k=np.array([298.0]),
+        map_yr=np.array([2000.0]),
+        t_seasonal_amp_k=np.array([2.0]),
+        aridity=np.array([1.0]),
+        sw_mean_w=np.array([220.0]),
+        soil_class=np.array(["loam"], dtype=object),
+    )
+
+
+def test_iter_archetype_batches_canopy_switch_reaches_config():
+    """The stomatal model must land on BOTH the two-leaf surface scheme and the
+    mirrored big-leaf StomataConfig, and the surface scheme must be the
+    two-leaf canopy, not SimpleSEB."""
+    from legoesm.land.carbon.global_init import iter_archetype_batches
+    from legoesm.land.surface_scheme import TwoLeafCanopyConfig
+    (b,) = iter_archetype_batches(
+        _one_archetype_table(), n_layers=6, soil_depth=2.0, dt=7200.0,
+        stomatal_model="medlyn")
+    cc = b.config.surface_scheme
+    assert isinstance(cc, TwoLeafCanopyConfig)
+    assert cc.stomatal_model == "medlyn"
+    st = b.config.stomata
+    assert st.enabled is True
+    assert st.stomata_model == "medlyn"
+    (a,) = iter_archetype_batches(
+        _one_archetype_table(), n_layers=6, soil_depth=2.0, dt=7200.0)
+    assert a.config.surface_scheme.stomatal_model == "ball_berry"
+
+
+@pytest.mark.parametrize("bad", [
+    dict(stomatal_model="jarvis"),
+    dict(stomatal_model="leuning"),
+])
+def test_iter_archetype_batches_rejects_unknown_switches(bad):
+    from legoesm.land.carbon.global_init import iter_archetype_batches
+    with pytest.raises(ValueError):
+        iter_archetype_batches(
+            _one_archetype_table(), n_layers=6, soil_depth=2.0, dt=7200.0,
+            **bad)
+
+
+def test_archetype_step_diagnostics_use_the_canopy_gpp():
+    """The per-step carbon diagnostics the semi-analytic reset reads must carry
+    the SAME GPP the coupled step fed to the carbon update -- the two-leaf
+    canopy's own ``SurfaceFluxOutput.gpp`` -- not a big-leaf re-derivation.
+    ``diag.gpp`` is a daily rate [gC/m2/day]; the canopy GPP is [gC/m2/s]."""
+    from legoesm.land.carbon.carbon_cycle import init_carbon_state
+    from legoesm.land.carbon.global_init import (
+        _U_MIN, iter_archetype_batches, make_archetype_step_fn)
+    from legoesm.land.multilayer_land import (
+        init_multilayer_land_state, step_multilayer_land_with_diagnostics)
+    dt = 7200.0
+    (b,) = iter_archetype_batches(
+        _one_archetype_table(), n_layers=6, soil_depth=2.0, dt=dt,
+        stomatal_model="medlyn")
+    step_fn = make_archetype_step_fn(
+        b.config, b.land_params, dt=dt,
+        soil_frozen_fraction=b.soil_frozen_fraction)
+    state0 = init_multilayer_land_state(1, b.config, T_init=b.t_init)
+    carbon0 = init_carbon_state((1,), b.config.carbon)
+    forcing = b.forcing_fn(180.0, 12.0)          # a summer noon: GPP > 0
+    _st, _cb, diag = step_fn(state0, carbon0, forcing, 180.0)
+    _s2, _r, _c2, surface_out = step_multilayer_land_with_diagnostics(
+        state0, forcing, b.config, _U_MIN, dt,
+        lat=jnp.zeros(1), carbon_state=carbon0, doy=180.0,
+        land_params=b.land_params,
+        soil_frozen_fraction=b.soil_frozen_fraction)
+    gpp_canopy_day = np.asarray(surface_out.gpp) * 86400.0
+    assert float(gpp_canopy_day[0]) > 0.0
+    npt.assert_allclose(np.asarray(diag.gpp), gpp_canopy_day, rtol=1e-6)
+    # ...and the coupled step's OWN carbon update used that same GPP: rebuild
+    # it from the step's end-of-step state with the canopy GPP and require the
+    # carbon state step_fn returned.  A coupled step that re-derived big-leaf
+    # GPP would pass the diagnostics check above and fail here.
+    from legoesm.land.carbon.carbon_cycle import step_carbon
+    from legoesm.land.multilayer_land import root_zone_beta_soil
+    from legoesm.land.soil_grid import make_soil_grid
+    grid = make_soil_grid(b.config.soil_grid)
+    root_frac = jnp.exp(-grid.z_node[None, :] / b.land_params.root_depth[:, None])
+    root_frac = root_frac / jnp.sum(root_frac, axis=-1, keepdims=True)
+    beta_soil_new, _ = root_zone_beta_soil(
+        _st.theta_soil, root_frac, b.land_params.theta_wp,
+        b.land_params.theta_fc, b.config.beta_min, spatial=True)
+    carbon_expected, _flux = step_carbon(
+        carbon0, forcing.sw_down, _st.T_soil[:, 0], forcing.co2_ppmv,
+        beta_soil_new, jnp.zeros(1), 180.0, forcing.precip_total,
+        b.config.carbon, dt, gpp_override=surface_out.gpp,
+        soil_frozen_fraction=b.soil_frozen_fraction)
+    for f in carbon_expected._fields:
+        npt.assert_allclose(np.asarray(getattr(_cb, f)),
+                            np.asarray(getattr(carbon_expected, f)),
+                            rtol=1e-10, err_msg=f)

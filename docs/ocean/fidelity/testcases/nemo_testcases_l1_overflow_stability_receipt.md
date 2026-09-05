@@ -14,6 +14,61 @@ stage-composition fixes (kt=2 U owner MEASURED and fixed, `3.31e-6 ->
 2.60e-7`) three metrics are `OUTSIDE` and three `WITHIN-SCHEME-SPREAD`; no
 metric is `INDISTINGUISHABLE-AT-FLOOR`.
 
+## Round 7: the WS momentum ladder is written once (S-30 / S-12 collapse)
+
+Full ledger, before/after tables, the ulp bar and its planted control in
+`nemo_testcases_l1_phase3_receipt.md` ("S-30 / S-12 collapse").
+
+The Wicker-Skamarock RK3 momentum recurrence was written TWICE inside one
+function: once before the barotropic solve, purely to build that solve's
+velocity seed, and once after it, corrected and kept.  NEMO has no ladder at
+the first site — `stp_2D` evaluates the Kbb RHS once, depth-means it
+(`stp2d.F90:177-186`) and hands `dyn_spg_ts` the BEFORE velocity
+(`stp2d.F90:280-281`) — so the first copy is deleted and the solve is seeded
+with `u0`/`v0`.  This also removes two `tendencies()` evaluations per step and
+closes the failure mode that put the stage vertical-UP3 and live-HPG fixes in
+one copy only.
+
+NOTHING in this receipt's numbers changes beyond roundoff.  The round-6 rows
+above are re-pinned at the collapse commit
+`28df515a84d572b28a7a5c6afb1ca905b31bfda4`, fp64, CPU:
+
+| round-6 row (OVERFLOW-zps, kt=2 absolute L-inf) | round 6 | after the collapse |
+|---|---|---|
+| stage-1 u | `6.501744e-15` | `6.5225603e-15` |
+| stage-2 u | `9.433404e-11` | `9.4334038e-11` |
+| stage-3 u | `2.598798e-07` | `2.5987979e-07` |
+| kt=2 u | `2.598798e-07` | `2.5987979e-07` |
+| kt=2 SSH (normalized) | `1.0491608e-14` | `1.0505485e-14` |
+
+Every one of those is a move of at most 0.094 float64 ulp of the row's own
+scale; the largest move anywhere in the kt=1..10 trajectory of either card is
+0.5 ulp (OVERFLOW kt=10 SSH).  T and S are BIT-IDENTICAL at every step of
+both cards.  `first_over_bar` is unchanged (LOCK `kt=2 {T,u}`, OVERFLOW
+`kt=2 {T,u,ssh}`).  The kt=2 velocity debt is therefore unchanged and stays
+UNOWNED — this collapse is exonerated for it.
+
+The 6120-step statistical scorer was NOT re-run, and after adversarial review
+the 3 OUTSIDE / 3 WITHIN-SCHEME-SPREAD split is recorded as **UNMEASURED**,
+not as "expected to hold".  The gate's own growth block for OVERFLOW gives tail
+exponential rates of `0.203/step` (ssh), `0.269/step` (u) and `0.083/step` (T)
+and cannot discriminate exponential from polynomial on a four-point tail, so a
+`1e-16` seed either reaches order one in a few hundred steps or never matters,
+and 10 steps do not tell us which.  Discriminator: ~300 steps on both
+revisions, `max|delta u|` per step on a semilog axis.
+
+Two further corrections from the same review, both detailed in the phase-3
+receipt: the tracer FIELDS are not bit-identical even though the tracer ROWS
+are -- OVERFLOW T departs from kt=7 at five cells, reaching `1.07e-14 K` by
+kt=11 -- and the "pure re-association" claim is certified for **f = 0 only**,
+because both L1 cards are non-rotating and the Matsuno rotation that sits
+between the deleted ladder and the barotropic seed is the identity there.  On a
+rotating rk3_ws card (GYRE) it is not, and that card has no gate here.
+
+The bar is mechanical, not a judgement: `legoesm.ocean.fidelity.ulp_move_gate`,
+reached as `--compare-to` on both phase-3 gates, with a `--compare-plant-ulps 3`
+control that must (and does) turn it red.
+
 ## Round 6: qco stage face thickness and stage weighting
 
 Full ledger, source citations, reach table and controls in

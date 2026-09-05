@@ -12,6 +12,31 @@ stencils, eliminating the 2*dx checkerboard null space of the A-grid.
 
 Parallels barotropic_latlon.py (A-grid) but with staggered variables.
 
+Reference for the generic (default) arm
+----------------------------------------
+Every ``barotropic_*_evaluation`` selector in this module (continuity,
+transport accumulation, PGF, seed, EEN-Coriolis) defaults to ``"generic"``;
+the alternative ``"nemo_literal"``/``"nemo_ssh_avg"`` values are a literal
+transcription of NEMO's ``dyn_spg_ts`` (see the ``nemo_literal_*`` helpers
+below and ``docs/ocean/fidelity/nemo_branch_isomorphism_map.md`` S-16). The
+``"generic"`` arm is **not** a NEMO port and is not a transcription of any
+single paper's equations either: it is legoESM's own in-house
+forward-backward split-explicit C-grid solver, introduced with no external
+citation by commit ``adbb49f83`` (2026-04-08, "Add C-grid lat-lon ocean
+model to fix checkerboard instability", #87). Its later closure choices were
+explicitly modeled on the standard MOM6/ROMS split-explicit family, per
+those commits' own messages: the substep time-averaging "follow[s] the
+standard approach in MOM6, MPAS-Ocean, and ROMS (Hallberg 1997, Shchepetkin
+& McWilliams 2005)" (commit ``06f4de939``, 2026-04-11, "Add barotropic
+time-averaging for split-explicit stability") and the BEBT semi-implicit
+pressure-gradient blend "match[es] MOM6 default" ``bebt=0.2`` (commit
+``3d0170d04``, 2026-04-20, #205). USER DECISION 2026-09-02: this arm is kept
+as a legitimate non-NEMO fork — it is the dycore of 19 idealized ocean
+test-matrix experiments via the ``default_wright_v1``/``legoesm_linear_v1``
+catalog recipes, plus ``legoesm_nemo_like_v1`` (renamed from ``nemo_v1``,
+which falsely implied this arm was NEMO's ``dyn_spg_ts``; see
+``legoesm.ocean.recipes``) — rather than collapsed onto the NEMO-literal arm.
+
 Wide-halo mode (opt-in, ``BarotropicConfig.barotropic_wide_halo``)
 ------------------------------------------------------------------
 The standard substep loop re-dispatches ~4 latitude halo pads per substep
@@ -33,7 +58,13 @@ import jax
 import jax.numpy as jnp
 
 from legoesm.grids.latlon import LatLonGrid, ensure_geometry
-from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
+from legoesm.ocean.vertical import (
+    OceanPartialCellCoordinate,
+    OceanZStarCoordinate,
+    compute_layer_thickness,
+    nemo_qco_card_mesh_operands,
+    nemo_qco_live_face_geometry_from_operands,
+)
 from legoesm.ocean.state import LatLonCGridOceanState, LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     fold_is_local,
@@ -236,6 +267,74 @@ def _nemo_literal_barotropic_pressure_gradient(eta_pgf, grid, g, u_mask, v_mask)
     return pgf_u * u_mask, pgf_v * v_mask
 
 
+def _nemo_literal_seed_from_card_mesh(
+    u_3d, v_3d, eta_dyn, H_bathy, min_water_col, u_mask, v_mask, grid, z_coord,
+):
+    """NEMO ``puu_b(Kmm)`` loop-entry seed for a card WITHOUT NEMO's mesh.
+
+    ``dynspg_ts.F90:487`` seeds the external loop with ``puu_b(Kmm)``, which
+    ``stprk3_stg.F90:439-446`` has imposed on ``uu`` at every stage with the
+    ``e3u_0/hu_0`` weights; the live face thickness is
+    ``e3u(Kmm) = e3u_0*(1 + r3u(Kmm))`` (``domzgr_substitute.h90``) with
+    ``r3u`` the ``e1e2t``-weighted ssh mean over ``hu_0``
+    (``domqco.F90:219-222``).  Those operands come from the ONE shared kernel
+    every NEMO consumer in legoESM already uses (``vertical.py``:
+    ``nemo_qco_card_mesh_operands`` -> ``e3u_0`` = min-rule of the REFERENCE
+    ladder, ``hu_0 = SUM(e3u_0*umask)`` (``domain.F90:145``);
+    ``nemo_qco_live_face_geometry_from_operands`` -> ``e3u``, ``r1_hu``), and
+    the sum is the same source-ordered ``istate.F90:149-155`` recurrence the
+    reference-mesh seed uses.
+
+    NOT the per-level min of the two STRETCHED T-cell thicknesses rescaled by
+    a column-depth ratio (the previous card path): on a face whose two
+    columns have different reference depths the per-level min follows the
+    less-stretched column while the column min follows the shallower one, so
+    the weights summed to ``hu_0*(1+r3t_e)*(1+r3u)/(1+r3t_w)`` and a uniform
+    velocity came back scaled by ``(1+r3t_e)/(1+r3t_w)`` -- measured
+    ``1.05e-9 -> 3.1e-7 -> 4.3e-6 m/s`` at the OVERFLOW-zps shelf break at
+    kt=2..4, the re-injected owner of the kt>=3 SSH walk (receipt
+    ``nemo_testcases_l1_ssh_walk_preregister.md``).
+    """
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks_3d
+
+    if z_coord is None:
+        raise ValueError(
+            "barotropic_seed_evaluation='nemo_literal' needs the card's "
+            "z-coordinate: NEMO's e3u_0 is the min-rule of the reference "
+            "ladder (domain.F90:145), which cannot be recovered from a live "
+            "thickness alone; pass z_coord (both production call sites do).")
+    dtype = jnp.asarray(eta_dyn).dtype
+    eta_dyn = jnp.asarray(eta_dyn, dtype=dtype)
+    # e3t_0: the reference (eta = 0) ladder, exactly as the WS-RK3 stage
+    # transport builds it (ocean_model_latlon_cgrid ``_h_ref_ws``).
+    h_ref = compute_layer_thickness(
+        jnp.zeros_like(eta_dyn), H_bathy, z_coord,
+        min_water_column_m=min_water_col).astype(dtype)
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        u_mask3, v_mask3 = compute_face_masks_3d(z_coord.is_active, grid)
+        u_mask3 = u_mask3.astype(dtype)
+        v_mask3 = v_mask3.astype(dtype)
+    else:
+        u_mask3 = jnp.asarray(u_mask, dtype=dtype)[..., None]
+        v_mask3 = jnp.asarray(v_mask, dtype=dtype)[..., None]
+    ops = nemo_qco_card_mesh_operands(h_ref, u_mask3, v_mask3, grid, dtype)
+    geom = nemo_qco_live_face_geometry_from_operands(
+        eta_dyn, ops.e3u_0, ops.e3v_0, ops.umask3, ops.vmask3,
+        ops.hu_0, ops.hv_0, ops.area_t, ops.area_u, ops.area_v,
+    )
+    wet2_u = (ops.hu_0 > 0.0).astype(dtype)
+    wet2_v = (ops.hv_0 > 0.0).astype(dtype)
+    un_native = _nemo_literal_seed_depth_mean(
+        jnp.asarray(u_3d, dtype=dtype)[:, 1:, :], geom.e3u * ops.umask3,
+        wet2_u, geom.r1_hu)
+    vn_native = _nemo_literal_seed_depth_mean(
+        jnp.asarray(v_3d, dtype=dtype)[1:, :, :], geom.e3v * ops.vmask3,
+        wet2_v, geom.r1_hv)
+    un = jnp.concatenate([un_native[:, -1:], un_native], axis=1)
+    vn = jnp.concatenate([jnp.zeros_like(vn_native[:1]), vn_native], axis=0)
+    return un, vn
+
+
 def _depth_average_to_faces(
     u_3d: jnp.ndarray,
     v_3d: jnp.ndarray,
@@ -252,6 +351,7 @@ def _depth_average_to_faces(
     H_bathy: jnp.ndarray | None = None,
     area: jnp.ndarray | None = None,
     z_coord=None,
+    legacy_seed_min_rule_faces: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Compute depth-averaged velocities at C-grid face points.
 
@@ -325,6 +425,14 @@ def _depth_average_to_faces(
             u_3d, v_3d, h_k, eta_dyn, u_mask, v_mask, z_coord)
         if mesh_seed is not None:
             return mesh_seed
+        if not legacy_seed_min_rule_faces:
+            # Card without NEMO's mesh: the same NEMO e3u(Kmm) as every
+            # other qco consumer.  ``legacy_seed_min_rule_faces`` is the
+            # harness-only one-variable control (min-of-stretched-cells
+            # rescale below); NEMO has no such switch.
+            return _nemo_literal_seed_from_card_mesh(
+                u_3d, v_3d, eta_dyn, H_bathy, min_water_col, u_mask, v_mask,
+                grid, z_coord)
 
     # h at u/v-faces — min-rule (MOM6/MITgcm hFacW convention).
     # Must match the PE tendency and slow-forcing depth-average which
@@ -1892,6 +2000,7 @@ def barotropic_substeps_latlon_cgrid(
     _nemo_primary_transport_average_test_override=None,
     _nemo_substep_trace_test_hook=False,
     _nemo_flux_form_update_test_override=None,
+    _nemo_legacy_seed_faces_test_override=None,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
 
@@ -2053,6 +2162,8 @@ def barotropic_substeps_latlon_cgrid(
         u, v, h_k, min_water_col, mask, u_mask, v_mask, grid,
         seed_face_depth=_seed_fd, seed_evaluation=_seed_eval,
         eta_dyn=eta, H_bathy=H_bathy, area=_area, z_coord=z_coord,
+        legacy_seed_min_rule_faces=bool(
+            _nemo_legacy_seed_faces_test_override or False),
     )
     # 3-D depth-mean REPLACEMENT reference (u' = u − ū_corr): the NOW-level
     # barotropic mean over the NOW eta.  With the MLF before-level seed the

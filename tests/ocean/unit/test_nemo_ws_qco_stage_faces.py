@@ -122,3 +122,24 @@ def test_ws_stage_velocity_carries_the_qco_factor():
     moved = float(np.abs(u_f - u_o)[wet].max())
     assert moved > 0.0, "the qco stage factor is inert: fix reverted?"
     assert float(np.abs((u_f - u_o) - predicted)[wet].max()) < 0.02 * moved
+
+
+def test_ws_program_selects_the_up3_branch_by_the_advected_velocity_pair():
+    """The WS-RK3 stage program passes NEMO's UP3 selector
+    (dynadv_up3.F90:166-170) to every stage RHS; the private
+    ``legacy_up3_transport_sign_selector`` hook restores the transport sign.
+    On the tilted LOCK entry the barotropic ``zub`` flips the pair sign at
+    the front, so the two must differ -- a hook that no longer reaches the
+    executing path (or a program that stopped passing the rule) makes them
+    bit-identical and fails this test.
+    """
+    card, entry, h_ref, u_mask3, v_mask3 = _tilted_geometry()
+    hooks = model_module._NEMOWSRK3TestHooks
+    faithful = _lock_model().step(entry, dt=card.dt_s)
+    legacy = _lock_model(hooks(legacy_up3_transport_sign_selector=True)).step(
+        entry, dt=card.dt_s)
+    wet = np.asarray(u_mask3)[:, 1:, :] > 0.5
+    u_f = np.asarray(faithful.u.data)[:, 1:, :]
+    u_l = np.asarray(legacy.u.data)[:, 1:, :]
+    assert float(np.abs(u_f - u_l)[wet].max()) > 0.0, (
+        "the UP3 selector is inert in the WS-RK3 program: fix reverted?")

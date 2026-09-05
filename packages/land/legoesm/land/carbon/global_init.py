@@ -28,6 +28,7 @@ forward map; ``docs/land/stageB_carbon_calibration_plan.md``).
 
 from __future__ import annotations
 
+import time
 from typing import NamedTuple
 
 import numpy as np
@@ -299,11 +300,15 @@ class ArchetypeBatch(NamedTuple):
     soil_frozen_fraction: object  # (ncol_g,) annual frozen fraction [-] (perennial-frost index)
 
 
+_CANOPY_STOMATAL_MODELS = ("ball_berry", "medlyn")
+
+
 def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt,
                            carbon_overrides=None,
                            nsc_gated_respiration=False,
                            cold_deciduous_dormancy=False,
-                           leaf_c_resorption_frac=0.0):
+                           leaf_c_resorption_frac=0.0,
+                           stomatal_model="ball_berry"):
     """Build the per-``(is_woody, is_evergreen, soil_class)`` GROUP construction
     shared by the archetype equilibration (:func:`equilibrate_archetypes`) and
     the drift validator (``scripts/validate/global_carbon_ic_map.py``).
@@ -366,7 +371,17 @@ def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt,
     from legoesm.land.carbon.carbon_cycle import annual_frozen_fraction
     from legoesm.land.carbon.config import CarbonConfig
     from legoesm.land.stomata import StomataConfig
+    from legoesm.land.surface_scheme import TwoLeafCanopyConfig
     from legoesm.land.climate_forcing import make_climatological_forcing
+
+    # Canopy switch: the surface scheme is the two-leaf canopy (the land
+    # default), and the big-leaf StomataConfig MIRRORS the same stomatal model
+    # so any big-leaf re-derivation agrees with the canopy -- no hidden choice.
+    if stomatal_model not in _CANOPY_STOMATAL_MODELS:
+        raise ValueError(f"unknown stomatal_model {stomatal_model!r}; "
+                         f"expected one of {_CANOPY_STOMATAL_MODELS}")
+    surface_scheme = TwoLeafCanopyConfig(stomatal_model=stomatal_model).validate()
+    stomata_cfg = StomataConfig(enabled=True, stomata_model=stomatal_model)
 
     pft_id = np.asarray(table.pft_id, int)
     # Bare ground is inert (no carbon) and must never be equilibrated; a bare
@@ -448,7 +463,8 @@ def iter_archetype_batches(table: ArchetypeTable, *, n_layers, soil_depth, dt,
             thermal=SoilThermalConfig(),
             richards=RichardsConfig(),
             carbon=carbon_cfg,
-            stomata=StomataConfig(enabled=True, stomata_model="ball_berry"),
+            stomata=stomata_cfg,
+            surface_scheme=surface_scheme,
         )
         # Per-archetype PFT physiology -> per-column LandSurfaceParams.  The
         # CLM5 table rows are column-for-column PARAM_NAMES, so array_to_params
@@ -502,7 +518,7 @@ def make_archetype_step_fn(config, land_params, *, dt, soil_frozen_fraction=None
 
     from legoesm.land.soil_grid import make_soil_grid
     from legoesm.land.carbon_diagnostics import reconstruct_carbon_diagnostics
-    from legoesm.land.multilayer_land import step_multilayer_land
+    from legoesm.land.multilayer_land import step_multilayer_land_with_diagnostics
 
     ncol_g = land_params.root_depth.shape[0]
     # Archetypes carry no hemisphere; run NH-phased (lat=0) consistently with
@@ -520,13 +536,17 @@ def make_archetype_step_fn(config, land_params, *, dt, soil_frozen_fraction=None
     beta_min = config.beta_min
 
     def step_fn(state, carbon, forcing, doy):
-        new_state, _response, carbon_new = step_multilayer_land(
-            state, forcing, config, _U_MIN, dt,
-            lat=lat_g, carbon_state=carbon, doy=doy, land_params=land_params,
-            soil_frozen_fraction=soil_frozen_fraction)
-        # Reconstruct the flux breakdown consistently with the model: pass
-        # land_params so the GPP override uses the SAME per-archetype
-        # Vc_max25/g1/LCMA the coupled step used, AND the SAME per-column
+        new_state, _response, carbon_new, surface_out = (
+            step_multilayer_land_with_diagnostics(
+                state, forcing, config, _U_MIN, dt,
+                lat=lat_g, carbon_state=carbon, doy=doy,
+                land_params=land_params,
+                soil_frozen_fraction=soil_frozen_fraction))
+        # Reconstruct the flux breakdown consistently with the model: the GPP
+        # is the surface scheme's own output -- the SAME array the coupled
+        # step handed to step_carbon (two-leaf canopy, incl. any P-model
+        # capacity; a big-leaf re-derivation here would silently disagree
+        # with the step under any canopy scheme) -- AND the SAME per-column
         # soil_frozen_fraction so the reconstructed SOM decomposition losses
         # carry the SAME perennial-frost protection -- the analytic slow-pool
         # reset reads these losses to infer k_X, so they MUST be protected too
@@ -535,7 +555,8 @@ def make_archetype_step_fn(config, land_params, *, dt, soil_frozen_fraction=None
             new_state, forcing, carbon, config, root_frac_g,
             theta_wp_g, theta_fc_g, beta_min, lat_g, doy, dt,
             spatial=True, land_params=land_params,
-            soil_frozen_fraction=soil_frozen_fraction)
+            soil_frozen_fraction=soil_frozen_fraction,
+            gpp_override=surface_out.gpp)
         return new_state, carbon_new, diag
 
     return step_fn
@@ -606,8 +627,17 @@ def equilibrate_archetypes(
     nsc_gated_respiration: bool = False,
     cold_deciduous_dormancy: bool = False,
     leaf_c_resorption_frac: float = 0.0,
+    stomatal_model: str = "ball_berry",
+    spinup_batch_fn=None,
+    only_groups=None,
 ):
     """Spin every climate archetype to a verified soil-carbon equilibrium.
+
+    ``spinup_batch_fn`` (same signature as :func:`_spinup_batch`) lets the
+    driver wrap the per-group spin-up in a disk memo; this function itself
+    stays pure.  ``only_groups`` (indices into the batch order) spins that
+    subset and leaves the other archetypes at zero -- for running the groups
+    as parallel jobs that each fill the driver's per-group cache.
 
     Runs the shared semi-analytic spin-up
     (:func:`legoesm.land.carbon.spinup.run_semi_analytic_spinup`) once per
@@ -668,17 +698,24 @@ def equilibrate_archetypes(
         table, n_layers=n_layers, soil_depth=soil_depth, dt=dt,
         nsc_gated_respiration=nsc_gated_respiration,
         cold_deciduous_dormancy=cold_deciduous_dormancy,
-        leaf_c_resorption_frac=leaf_c_resorption_frac)
+        leaf_c_resorption_frac=leaf_c_resorption_frac,
+        stomatal_model=stomatal_model)
 
     # Archetype-ordered output accumulators (scattered per group via g_idx).
     pools_out = {p: np.zeros(n_arch) for p in pool_fields}
     qc = {k: np.zeros(n_arch)
           for k in ("gpp", "npp", "som_kgC", "biomass_kgC", "drift_frac_per_yr")}
 
-    for batch in batches:
+    spinup = _spinup_batch if spinup_batch_fn is None else spinup_batch_fn
+    for i_batch, batch in enumerate(batches):
+        if only_groups is not None and i_batch not in only_groups:
+            continue
         g_idx = batch.g_idx
-        final_carbon, annual = _spinup_batch(
+        t0 = time.time()
+        final_carbon, annual = spinup(
             batch, n_spinup=n_spinup, n_verify=n_verify, dt=dt)
+        print(f"[global_carbon_ic] group {i_batch} ({g_idx.shape[0]} archetypes) "
+              f"equilibrated in {time.time() - t0:.0f} s", flush=True)
 
         # Scatter the verified equilibrium pools back to archetype order.
         for p in pool_fields:

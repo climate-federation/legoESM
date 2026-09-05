@@ -166,6 +166,101 @@ def bbl_static_geometry(h_ref: jnp.ndarray, land_mask: jnp.ndarray
     )
 
 
+def nemo_bbl_static_geometry(
+    h_ref: jnp.ndarray,
+    land_mask: jnp.ndarray,
+    gdept_0: jnp.ndarray,
+    e3u_0: jnp.ndarray,
+    e3v_0: jnp.ndarray,
+) -> BBLGeometry:
+    """NEMO ``tra_bbl_init`` geometry from its reference mesh operands.
+
+    ``trabbl.F90:507-533`` does *not* infer slope from the continuous water
+    column or the partial-cell centroid.  It gathers ``gdept_0`` at each
+    column's ``mbkt`` and signs that reference-depth difference; its BBL
+    thickness is the minimum of the supplied U/V-face ``e3*_0`` evaluated at
+    the two adjacent bottom indices.  Those face fields remain defined below
+    the shallower column's wet mask and therefore cannot be reconstructed from
+    masked ``h_ref`` with a cell-to-face minimum.
+
+    This is an operand builder, not a second Campin--Goosse implementation:
+    :func:`bbl_transports` and :func:`apply_bbl_adv_tendency` remain the only
+    transport and three-leg exchange arithmetic.  ``gdept_0`` may be a 1-D
+    reference ladder or a T-cell field; ``e3u_0`` and ``e3v_0`` are the exact
+    interior-face reference arrays, shaped ``(ny,nx-1,nlev)`` and
+    ``(ny-1,nx,nlev)``.
+    """
+    h = jnp.asarray(h_ref)
+    mask = jnp.asarray(land_mask, dtype=h.dtype)
+    if h.ndim != 3 or mask.shape != h.shape[:2]:
+        raise ValueError("h_ref must be (ny,nx,nlev) and land_mask (ny,nx)")
+    ny, nx, nlev = h.shape
+    gu = jnp.asarray(e3u_0, dtype=h.dtype)
+    gv = jnp.asarray(e3v_0, dtype=h.dtype)
+    if gu.shape != (ny, nx - 1, nlev):
+        raise ValueError(
+            f"e3u_0 must be {(ny, nx - 1, nlev)}, got {gu.shape}")
+    if gv.shape != (ny - 1, nx, nlev):
+        raise ValueError(
+            f"e3v_0 must be {(ny - 1, nx, nlev)}, got {gv.shape}")
+    depth = jnp.asarray(gdept_0, dtype=h.dtype)
+    if depth.ndim == 1:
+        if depth.shape != (nlev,):
+            raise ValueError(f"1-D gdept_0 must have {nlev} levels")
+        depth = jnp.broadcast_to(depth, h.shape)
+    elif depth.shape != h.shape:
+        raise ValueError(f"gdept_0 must be {(nlev,)} or {h.shape}, got {depth.shape}")
+
+    wet3 = h > jnp.asarray(1.0e-3, dtype=h.dtype)
+    n_active = jnp.sum(wet3.astype(jnp.int32), axis=-1)
+    bot_k = jnp.maximum(n_active - 1, 0)
+    dep_bot = jnp.take_along_axis(depth, bot_k[..., None], axis=-1)[..., 0]
+
+    bot_l, bot_r = bot_k[:, :-1], bot_k[:, 1:]
+    dep_l, dep_r = dep_bot[:, :-1], dep_bot[:, 1:]
+    mgrhu = jnp.sign(dep_r - dep_l)
+    ku_s = jnp.where(mgrhu >= 0, bot_l, bot_r)
+    ku_d = jnp.maximum(bot_l, bot_r)
+    e3u_l = jnp.take_along_axis(gu, bot_l[..., None], axis=-1)[..., 0]
+    e3u_r = jnp.take_along_axis(gu, bot_r[..., None], axis=-1)[..., 0]
+    e3u_bbl = jnp.minimum(e3u_l, e3u_r)
+    u_active = (
+        (mask[:, :-1] > 0.5)
+        & (mask[:, 1:] > 0.5)
+        & (mgrhu != 0)
+    ).astype(h.dtype)
+
+    bot_s, bot_n = bot_k[:-1, :], bot_k[1:, :]
+    dep_s, dep_n = dep_bot[:-1, :], dep_bot[1:, :]
+    mgrhv = jnp.sign(dep_n - dep_s)
+    kv_s = jnp.where(mgrhv >= 0, bot_s, bot_n)
+    kv_d = jnp.maximum(bot_s, bot_n)
+    e3v_s = jnp.take_along_axis(gv, bot_s[..., None], axis=-1)[..., 0]
+    e3v_n = jnp.take_along_axis(gv, bot_n[..., None], axis=-1)[..., 0]
+    e3v_bbl = jnp.minimum(e3v_s, e3v_n)
+    v_active = (
+        (mask[:-1, :] > 0.5)
+        & (mask[1:, :] > 0.5)
+        & (mgrhv != 0)
+    ).astype(h.dtype)
+
+    return BBLGeometry(
+        mgrhu=mgrhu,
+        mgrhv=mgrhv,
+        ku_s=ku_s.astype(jnp.int32),
+        ku_d=ku_d.astype(jnp.int32),
+        kv_s=kv_s.astype(jnp.int32),
+        kv_d=kv_d.astype(jnp.int32),
+        e3u_bbl=e3u_bbl,
+        e3v_bbl=e3v_bbl,
+        dep_bot=dep_bot,
+        u_active=u_active,
+        v_active=v_active,
+        bot_k=bot_k.astype(jnp.int32),
+        h_ref=h,
+    )
+
+
 def _bottom_ts(T, S, bot_k):
     """Gather bottom-cell T, S per column."""
     Tb = jnp.take_along_axis(T, bot_k[..., None], axis=-1)[..., 0]
@@ -305,6 +400,7 @@ __all__ = [
     "apply_bbl_adv_step",
     "apply_bbl_adv_tendency",
     "bbl_static_geometry",
+    "nemo_bbl_static_geometry",
     "bbl_transports",
 ]
 
@@ -317,11 +413,40 @@ def apply_bbl_adv_step(state, geom: BBLGeometry, dt: float, *,
     transports from the CURRENT bottom T/S and integrate one forward-Euler
     exchange step ``pt += dt * d(pt)/dt``.
 
-    Operator-split with the dynamics exactly like NEMO applies trabbl within
-    its sequential tracer trends.  Stability: the exchange is a bounded
-    relaxation between cells; with NEMO's gamma=20 s and 1-deg cells the
-    per-step exchange fraction ``|tr|*dt/V`` is << 1 at any ocean dt (see the
-    unit test's magnitude check).
+    COMPOSITION, stated honestly (branch-isomorphism audit S-42): this is NOT
+    NEMO's composition.  NEMO adds ``tra_bbl``'s exchange into the tracer
+    right-hand side of the step itself (``stprk3_stg.F90:468,498,588`` on the
+    RK3 lane, ``stpmlf.F90`` on the MLF lane), reading the BEFORE-level
+    tracers; this wrapper applies the SAME operator as a separate forward-
+    Euler update after the step, on the updated tracers and the reference
+    thicknesses.  The arithmetic is shared: ``bbl_transports`` and
+    ``apply_bbl_adv_tendency`` below are the single transcription of
+    ``trabbl.F90:243-284``, and this function adds no arithmetic of its own
+    beyond one forward-Euler update.  It does feed them DIFFERENT operands
+    though: the reference ladder ``geom.h_ref`` / ``geom.dep_bot``, where the
+    in-model site passes the live stage thickness and a recomputed live bottom
+    depth (``ocean_model_latlon_cgrid.py:1290-1298``) -- an O(eta/H) ~ 3e-4
+    difference.  So the placement is a host operator split with no NEMO arm,
+    and its operands are the reference ones.  It exists
+    because the only in-model BBL site lives in the WS-RK3 tracer lane
+    (``ocean_model_latlon_cgrid.py``, ``tracer_time_integrator="rk3_ws"``)
+    and the OMIP driver runs the forward-Euler tracer lane, which itself has
+    no NEMO arm.  Collapsing the two onto one site is an OPEN item.
+
+    Stability -- the criterion, not one example.  ``e3_bbl`` cancels between
+    transport and volume (``tr`` ~ ``width*e3_bbl``, ``V`` ~ ``area*e3_bot``,
+    and ``e3_bbl`` is the min of the two bottom thicknesses), so the per-step
+    exchange fraction reduces to
+
+        |tr|*dt/V  =  g * gamma_s * (drho/rho_0) * dt / e1t
+
+    which is thickness-INDEPENDENT.  The deleted ``0.25`` cap could therefore
+    bind only for ``drho/rho_0 > e1t / (4*g*gamma_s*dt)``.  MEASURED on ORCA1's
+    own metrics at 60N, dt=3600 s, with a Denmark-Strait-exceeding contrast
+    (dT=13.5 degC, dS=2.5 PSU): max fraction 0.048, transports up to 4.1 Sv; at
+    an absurd drho/rho_0 = 1e-2 with dt=5400 s it is 0.19.  The cap never bound
+    in any production configuration.  NEMO clamps neither ``utr_bbl`` nor
+    ``vtr_bbl`` (``trabbl.F90:243-284``), so neither does this.
 
     Parameters
     ----------
@@ -343,18 +468,11 @@ def apply_bbl_adv_step(state, geom: BBLGeometry, dt: float, *,
     utr, vtr = bbl_transports(
         T, S, geom, dy_u_faces, dx_v_faces,
         gamma_s=gamma_s, rho_0=rho_0)
-    # Face-local exchange cap (codex MED): the host-split Euler exchange
-    # fraction |tr|*dt/V must stay << 1 for every touched cell.  Cap |tr|
-    # at 0.25*V_min/dt with V_min = min bottom-cell volume of the two
-    # columns — inactive at ORCA1 scales (fraction ~1e-2), engages only on
-    # pathological tiny-area/extreme-drho faces. Sign/zero pattern kept.
-    area = jnp.asarray(area_2d, dtype=jnp.float64)
-    e3_bot = jnp.take_along_axis(h_k, geom.bot_k[..., None], axis=-1)[..., 0]
-    V_bot = area * jnp.maximum(e3_bot, 1.0e-3)  # coeff-ok: bottom-cell thickness floor [m]
-    cap_u = 0.25 * jnp.minimum(V_bot[:, :-1], V_bot[:, 1:]) / dt
-    cap_v = 0.25 * jnp.minimum(V_bot[:-1, :], V_bot[1:, :]) / dt
-    utr = jnp.sign(utr) * jnp.minimum(jnp.abs(utr), cap_u)
-    vtr = jnp.sign(vtr) * jnp.minimum(jnp.abs(vtr), cap_v)
+    # No transport cap.  NEMO's tra_bbl_adv (trabbl.F90:243-284) clamps
+    # neither utr_bbl nor vtr_bbl, and no non-NEMO recipe selects a capped
+    # arm (recipes.py never mentions BBL), so a cap here would be a
+    # stabilizer the oracle lacks — removed 2026-09-02 under the
+    # branch-isomorphism audit (S-42).
     zero = jnp.zeros_like(T)
     dT, dS = apply_bbl_adv_tendency(
         zero, jnp.zeros_like(S), T, S, h_k, jnp.asarray(area_2d), geom,
