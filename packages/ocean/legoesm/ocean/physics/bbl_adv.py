@@ -148,39 +148,6 @@ def _gather_level(field: jnp.ndarray, level: jnp.ndarray) -> jnp.ndarray:
     return jnp.take_along_axis(field, level[..., None], axis=-1)[..., 0]
 
 
-@jax.custom_jvp
-def _nemo_bbl_scalar_divide(numerator, denominator):
-    """Match the scalar gfortran quotient used by ``tra_bbl_dif``.
-
-    XLA's vector quotient differs from the scalar-math NEMO binary by one ULP
-    in a small ORCA2 subset.  IEEE division's correctly rounded result is one
-    of XLA's quotient or its adjacent representable neighbours; choose the
-    value with the smallest reconstructed residual.  The custom JVP preserves
-    the analytic quotient derivative while the primal follows the oracle's
-    arithmetic environment.  This is local to the BBL source statement, not a
-    card-dependent physics arm.
-    """
-    quotient = numerator / denominator
-    lower = jnp.nextafter(quotient, -jnp.inf)
-    upper = jnp.nextafter(quotient, jnp.inf)
-    candidates = jnp.stack((lower, quotient, upper), axis=0)
-    residuals = jnp.abs(
-        numerator[None, ...] - candidates * denominator[None, ...])
-    choice = jnp.argmin(residuals, axis=0)[None, ...]
-    return jnp.take_along_axis(candidates, choice, axis=0)[0]
-
-
-@_nemo_bbl_scalar_divide.defjvp
-def _nemo_bbl_scalar_divide_jvp(primals, tangents):
-    numerator, denominator = primals
-    d_numerator, d_denominator = tangents
-    quotient = _nemo_bbl_scalar_divide(numerator, denominator)
-    tangent = (
-        d_numerator * denominator - numerator * d_denominator
-    ) / (denominator * denominator)
-    return quotient, tangent
-
-
 def nemo_bbl_diffusive_geometry(
     h_ref: jnp.ndarray,
     land_mask: jnp.ndarray,
@@ -347,12 +314,16 @@ def apply_bbl_diffusive_tendency(
                    - b(ahu_w * b(zptb - west)))
         v_pair = b(b(ahv * b(north - zptb))
                    - b(ahv_s * b(zptb - south)))
-        # Materialize the scalar compiler's observed
-        # ``(flux_div*r1_e1e2t)/e3t`` evaluation.  Direct XLA division differs
-        # by one ULP in a small subset, so the BBL-local scalar quotient picks
-        # the nearest representable residual while retaining an analytic JVP.
-        increment = b(_nemo_bbl_scalar_divide(
-            b(b(u_pair + v_pair) * r1_area), safe_h))
+        # trabbl.F90:194-200 evaluates the completed horizontal divergence,
+        # multiplies by the stored r1_e1e2t, and then performs one ordinary
+        # division by e3t(Kmm).  Materialize BOTH operands so XLA cannot
+        # reassociate ``numerator / e3t`` to ``numerator * (1/e3t)`` or fuse
+        # the preceding product into the divide.  The quotient itself stays a
+        # plain IEEE division: compiler control belongs here; nextafter search
+        # over oracle-adjacent values does not.
+        numerator = b(b(u_pair + v_pair) * r1_area)
+        denominator = b(safe_h)
+        increment = b(b(numerator) / b(denominator))
         before = _gather_level(jnp.asarray(rhs), geom.bot_k)
         after = jnp.where(active, b(before + increment), before)
         return jnp.asarray(rhs).at[
