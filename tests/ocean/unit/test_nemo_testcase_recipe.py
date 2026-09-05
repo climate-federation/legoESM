@@ -55,6 +55,12 @@ def test_orca2_structural_guard_rejects_iceberg_option_drift():
     # Reach the ORCA2 option check without constructing the external
     # deck-backed state in this small unit test.
     good = build_gyre_zco_card()
+    tke = good.recipe.model_config.physics.vertical_mixing.tke._replace(
+        tke_shear_production="nemo_face_native_now2",
+        tke_shear_avm_weighting="nemo_face",
+        tke_shear_evaluation_stage="step_entry",
+        tke_shear_metric_source="nemo_qco_live_face",
+    )
     card = good._replace(
         case="ORCA2-zps",
         surface_boundary_condition="ncar_core_sbcblk",
@@ -69,6 +75,10 @@ def test_orca2_structural_guard_rejects_iceberg_option_drift():
                 barotropic=good.recipe.model_config.barotropic._replace(
                     barotropic_coriolis="een_metric",
                     n_barotropic_substeps=65,
+                ),
+                physics=good.recipe.model_config.physics._replace(
+                    vertical_mixing=(good.recipe.model_config.physics
+                                     .vertical_mixing._replace(tke=tke))
                 ),
                 bbl_diffusive_option=1,
                 bbl_aht_m2_s=1000.0,
