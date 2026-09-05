@@ -53,6 +53,10 @@ _RHG_STRENGTH_PARAMETER_PA = 2.0e4
 _RHG_STRENGTH_DECAY = 20.0
 _RHG_DRAG_IO = 5.0e-3
 _RHG_RN_ISHLAT = 2.0  # output.namelist.ice:225; repair at icedyn_rhg_evp.F90:215-224
+_RHG_LF_DEPFRA = 0.125  # ORCA1 namelist_ice_ref:59; inactive on this card
+_RHG_LF_BFR_N_M3 = 15.0  # ORCA1 namelist_ice_ref:61; inactive on this card
+_RHG_LF_RELAX_S_INV = 1.0e-5  # ORCA1 namelist_ice_ref:62; inactive on this card
+_RHG_LF_TENSILE = 0.05  # ORCA1 namelist_ice_ref:63; inactive on this card
 _RHG_STRESS_DIVERGENCE_WEIGHT = 0.5  # icedyn_rhg_evp.F90:497,505
 _RHG_AIR_STRESS_U = 1.3  # ICE_ADV2D/MY_SRC/usrdef_sbc.F90:83-96
 _RHG_AIR_STRESS_V = 0.0  # ICE_ADV2D/MY_SRC/usrdef_sbc.F90:83-96
@@ -198,6 +202,12 @@ def build_ice_adv2d_rhg_card(
         # icedyn.F90:113-118 reads this file field independently of landfast;
         # the gate verifies that the pinned NOT-USED field resolves to zero.
         fast_tmask=zero,
+        depth_t=zero,
+        depth_u=zero,
+        depth_v=zero,
+        iceberg_tmask=zero,
+        iceberg_umask=zero,
+        iceberg_vmask=zero,
     )
     initial = ICEAdv2DRHGState(
         contents=entry_intensives,
@@ -224,6 +234,10 @@ def build_ice_adv2d_rhg_card(
         halo_width=base.halo_width,
         category_count=base.jpl,
         landfast=False,
+        landfast_depth_fraction=_RHG_LF_DEPFRA,
+        landfast_basal_friction_n_m3=_RHG_LF_BFR_N_M3,
+        landfast_relaxation_s_inv=_RHG_LF_RELAX_S_INV,
+        landfast_tensile_fraction=_RHG_LF_TENSILE,
         convergence_check=0,
     )
     card = ICEAdv2DRHGCard(

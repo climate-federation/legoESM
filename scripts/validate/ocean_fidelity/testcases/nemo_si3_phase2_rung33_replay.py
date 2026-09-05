@@ -152,6 +152,12 @@ def _oracle_forcing(card, frame: dict[str, np.ndarray]):
         umask_u=np.asarray(template.umask_u),
         vmask_v=np.asarray(template.vmask_v),
         fast_tmask=np.asarray(template.fast_tmask),
+        depth_t=np.asarray(template.depth_t),
+        depth_u=np.asarray(template.depth_u),
+        depth_v=np.asarray(template.depth_v),
+        iceberg_tmask=np.asarray(template.iceberg_tmask),
+        iceberg_umask=np.asarray(template.iceberg_umask),
+        iceberg_vmask=np.asarray(template.iceberg_vmask),
     )
 
 

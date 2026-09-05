@@ -82,6 +82,10 @@ _ICE_RHEO_STRENGTH_PA = 2.0e4
 _ICE_RHEO_STRENGTH_DECAY = 20.0
 _ICE_RHEO_DRAG_IO = 5.0e-3
 _ICE_RHEO_RN_ISHLAT = 2.0
+_ICE_RHEO_LF_DEPFRA = 0.125  # ORCA1 namelist_ice_ref:59; inactive on this card
+_ICE_RHEO_LF_BFR_N_M3 = 15.0  # ORCA1 namelist_ice_ref:61; inactive on this card
+_ICE_RHEO_LF_RELAX_S_INV = 1.0e-5  # ORCA1 namelist_ice_ref:62; inactive here
+_ICE_RHEO_LF_TENSILE = 0.05  # ORCA1 namelist_ice_ref:63; inactive on this card
 _ICE_RHEO_MINIMUM_THICKNESS_M = 0.1
 _ICE_RHEO_MAXIMUM_CONCENTRATION = 0.997
 _ICE_RHEO_MINIMUM_SALINITY_G_KG = 0.1
@@ -253,6 +257,12 @@ def build_ice_rheo_card(
         # icedyn.F90:115-117 reads this independently; the oracle contract
         # verifies its file-provided field is zero on this landfast-off card.
         fast_tmask=zero,
+        depth_t=zero,
+        depth_u=zero,
+        depth_v=zero,
+        iceberg_tmask=zero,
+        iceberg_umask=zero,
+        iceberg_vmask=zero,
     )
     config = SI3CGridAEVPConfig(
         scheme=_ICE_RHEO_DYNAMICS,
@@ -272,6 +282,10 @@ def build_ice_rheo_card(
         halo_width=_ICE_RHEO_HALO_WIDTH,
         category_count=_ICE_RHEO_JPL,
         landfast=False,
+        landfast_depth_fraction=_ICE_RHEO_LF_DEPFRA,
+        landfast_basal_friction_n_m3=_ICE_RHEO_LF_BFR_N_M3,
+        landfast_relaxation_s_inv=_ICE_RHEO_LF_RELAX_S_INV,
+        landfast_tensile_fraction=_ICE_RHEO_LF_TENSILE,
         convergence_check=0,
     )
     dynamics = SI3CGridAEVPState(

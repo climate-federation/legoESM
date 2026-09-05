@@ -41,6 +41,7 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 import numpy as np
+from legoesm.core import transcendentals
 from legoesm.core.field import Field
 from legoesm.core.operators import gradient_x, gradient_y
 from legoesm.core.source_rounding import nemo_source_round
@@ -100,6 +101,29 @@ _SI3_FAST_MASK_REDUCTION = 0.99
 _SI3_REQUIRED_HALO = 2
 _SI3_REQUIRED_CATEGORY_COUNT = 1
 _SI3_REQUIRED_RN_ISHLAT = 2.0
+_SI3_LANDFAST_SPEED_FLOOR_M_S = 5.0e-5  # icedyn_rhg_evp.F90:541,592,647,699
+_SI3_ORCA1_LF_DEPFRA = 0.125  # ORCA1 namelist_ice_ref:59
+_SI3_ORCA1_LF_BFR_N_M3 = 15.0  # ORCA1 namelist_ice_ref:61
+_SI3_ORCA1_LF_RELAX_S_INV = 1.0e-5  # ORCA1 namelist_ice_ref:62
+_SI3_ORCA1_LF_TENSILE = 0.05  # ORCA1 namelist_ice_ref:63
+
+# Future ORCA2-variant oracle contract for the ORCA1 landfast selector.  These
+# are distinct carried/file operands, not values inferred from other dumps.
+SI3_LANDFAST_L16_ORACLE_OPERANDS = (
+    "concentration_t",  # at_i; icedyn_rhg_evp.F90:279-280,358
+    "ice_volume_t",  # vt_i; icedyn_rhg_evp.F90:338-339,359
+    "depth_t",  # ht(:,:,Kmm); icedyn_rhg_evp.F90:358
+    "depth_u",  # hu(:,:,Kmm); icedyn_rhg_evp.F90:342
+    "depth_v",  # hv(:,:,Kmm); icedyn_rhg_evp.F90:349
+    "iceberg_tmask",  # icb_tmask; icedyn_rhg_evp.F90:357-362
+    "iceberg_umask",  # icb_umask; icedyn_rhg_evp.F90:341-346
+    "iceberg_vmask",  # icb_vmask; icedyn_rhg_evp.F90:348-353
+    "fast_tmask",  # separate file-provided fast mask; icedyn.F90:113-118
+    "landfast_depth_fraction",  # rn_lf_depfra; ORCA1 namelist_ice_ref:59
+    "landfast_basal_friction_n_m3",  # rn_lf_bfr; ORCA1 ref:61
+    "landfast_relaxation_s_inv",  # rn_lf_relax; ORCA1 ref:62
+    "landfast_tensile_fraction",  # rn_lf_tensile; ORCA1 ref:63
+)
 
 
 def _si3_add(left, right):
@@ -168,6 +192,10 @@ class SI3CGridAEVPConfig(NamedTuple):
     halo_width: int
     category_count: int
     landfast: bool
+    landfast_depth_fraction: float
+    landfast_basal_friction_n_m3: float
+    landfast_relaxation_s_inv: float
+    landfast_tensile_fraction: float
     convergence_check: int
 
 
@@ -200,6 +228,12 @@ class SI3CGridAEVPForcing(NamedTuple):
     umask_u: jnp.ndarray
     vmask_v: jnp.ndarray
     fast_tmask: jnp.ndarray
+    depth_t: jnp.ndarray
+    depth_u: jnp.ndarray
+    depth_v: jnp.ndarray
+    iceberg_tmask: jnp.ndarray
+    iceberg_umask: jnp.ndarray
+    iceberg_vmask: jnp.ndarray
 
 
 @jax.custom_jvp
@@ -953,7 +987,6 @@ def _validate_si3_cgrid_aevp_static(config: SI3CGridAEVPConfig) -> None:
         _SI3_REQUIRED_HALO,
         _SI3_REQUIRED_CATEGORY_COUNT,
         _SI3_REQUIRED_RN_ISHLAT,
-        False,
         0,
     )
     actual = (
@@ -962,7 +995,6 @@ def _validate_si3_cgrid_aevp_static(config: SI3CGridAEVPConfig) -> None:
         config.halo_width,
         config.category_count,
         config.rn_ishlat,
-        config.landfast,
         config.convergence_check,
     )
     if actual != expected:
@@ -972,6 +1004,114 @@ def _validate_si3_cgrid_aevp_static(config: SI3CGridAEVPConfig) -> None:
         )
     if config.n_subcycles < 1:
         raise ValueError("SI3 C-grid aEVP requires at least one subcycle")
+    if config.landfast:
+        landfast_actual = (
+            config.landfast_depth_fraction,
+            config.landfast_basal_friction_n_m3,
+            config.landfast_relaxation_s_inv,
+            config.landfast_tensile_fraction,
+        )
+        landfast_expected = (
+            _SI3_ORCA1_LF_DEPFRA,
+            _SI3_ORCA1_LF_BFR_N_M3,
+            _SI3_ORCA1_LF_RELAX_S_INV,
+            _SI3_ORCA1_LF_TENSILE,
+        )
+        if landfast_actual != landfast_expected:
+            raise ValueError(
+                "SI3 landfast L16 coefficients do not match ORCA1 resolved namelist: "
+                f"{landfast_actual!r} != {landfast_expected!r}"
+            )
+
+
+def si3_cgrid_landfast_l16_basal_stress(
+    forcing: SI3CGridAEVPForcing,
+    metrics: SI3CGridMetrics,
+    config: SI3CGridAEVPConfig,
+    area_fraction_u: jnp.ndarray,
+    area_fraction_v: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Return Lemieux-2016 U/V basal coefficients and T diagnostic.
+
+    This is the single source-ordered implementation of
+    ``icedyn_rhg_evp.F90:333-363``.  Negative coefficients multiply velocity
+    through ``zTauB`` later in the momentum solve; ``tau_icebfr`` at T points
+    is returned for coverage.
+    """
+
+    if not config.landfast:
+        zero = jnp.zeros_like(forcing.concentration_t)
+        return zero, zero, zero
+
+    volume_east = jnp.roll(forcing.ice_volume_t, -1, axis=0)
+    volume_north = jnp.roll(forcing.ice_volume_t, -1, axis=1)
+    area_east = jnp.roll(metrics.area_t, -1, axis=0)
+    area_north = jnp.roll(metrics.area_t, -1, axis=1)
+    volume_u = _si3_mul(
+        _si3_mul(
+            _si3_mul(
+                _SI3_HALF,
+                _si3_add(
+                    _si3_mul(forcing.ice_volume_t, metrics.area_t),
+                    _si3_mul(volume_east, area_east),
+                ),
+            ),
+            _si3_div(_SI3_ONE, metrics.area_u),
+        ),
+        forcing.umask_u,
+    )
+    volume_v = _si3_mul(
+        _si3_mul(
+            _si3_mul(
+                _SI3_HALF,
+                _si3_add(
+                    _si3_mul(forcing.ice_volume_t, metrics.area_t),
+                    _si3_mul(volume_north, area_north),
+                ),
+            ),
+            _si3_div(_SI3_ONE, metrics.area_v),
+        ),
+        forcing.vmask_v,
+    )
+
+    def depth_limited_base(volume, area_fraction, depth, iceberg_mask):
+        critical = _si3_mul(area_fraction, config.landfast_depth_fraction)
+        critical = _si3_mul(critical, depth)
+        excess = jnp.maximum(_SI3_ZERO, _si3_sub(volume, critical))
+        exponent = _si3_mul(
+            -config.strength_decay,
+            _si3_sub(_SI3_ONE, area_fraction),
+        )
+        attenuation = nemo_source_round(transcendentals.exp(exponent))
+        basal = _si3_mul(-config.landfast_basal_friction_n_m3, excess)
+        basal = _si3_mul(basal, attenuation)
+        iceberg_basal = _si3_mul(
+            -config.landfast_basal_friction_n_m3,
+            iceberg_mask,
+        )
+        return nemo_source_round(
+            jnp.where(iceberg_mask == _SI3_ZERO, basal, iceberg_basal)
+        )
+
+    base_u = depth_limited_base(
+        volume_u,
+        area_fraction_u,
+        forcing.depth_u,
+        forcing.iceberg_umask,
+    )
+    base_v = depth_limited_base(
+        volume_v,
+        area_fraction_v,
+        forcing.depth_v,
+        forcing.iceberg_vmask,
+    )
+    base_t = depth_limited_base(
+        forcing.ice_volume_t,
+        forcing.concentration_t,
+        forcing.depth_t,
+        forcing.iceberg_tmask,
+    )
+    return base_u, base_v, base_t
 
 
 def _si3_cgrid_fmask(
@@ -1059,8 +1199,9 @@ def si3_cgrid_aevp_solver(
     """Run NEMO/SI3's C-grid adaptive-EVP momentum solver.
 
     This selectable arm is a line-ordered transcription of
-    ``icedyn_rhg_evp.F90:187-843`` for the preregistered one-category,
-    landfast-off composition.  It intentionally keeps NEMO's common
+    ``icedyn_rhg_evp.F90:187-843`` for the preregistered one-category
+    composition, including the selectable Lemieux-2016 landfast branch.  It
+    intentionally keeps NEMO's common
     same-index T/U/V/F storage and its asymmetric loop extents.  Existing
     A-grid ``evp_solver`` and ``mevp_solver`` are not called or modified.
     ``stress_divergence_outer_weight`` is an instrumentation seam for a scored
@@ -1107,6 +1248,9 @@ def si3_cgrid_aevp_solver(
         source_exact=True,
     )
     strength_t = nemo_source_round(jnp.where(at_i > _SI3_ICE_PRESENCE, strength_formula, _SI3_ZERO))
+    tensile_fraction = (
+        config.landfast_tensile_fraction if config.landfast else _SI3_ZERO
+    )
 
     area_t_east = jnp.roll(metrics.area_t, -1, axis=0)
     area_t_north = jnp.roll(metrics.area_t, -1, axis=1)
@@ -1275,6 +1419,13 @@ def si3_cgrid_aevp_solver(
     active_v = active_v.astype(state.v_ice_v.dtype)
     fast_u = jnp.maximum(forcing.fast_tmask, jnp.roll(forcing.fast_tmask, -1, axis=0))
     fast_v = jnp.maximum(forcing.fast_tmask, jnp.roll(forcing.fast_tmask, -1, axis=1))
+    basal_u, basal_v, _basal_t = si3_cgrid_landfast_l16_basal_stress(
+        forcing,
+        metrics,
+        config,
+        za_u,
+        za_v,
+    )
 
     halo_one = slice(1, -1)
     interior = slice(2, -2)
@@ -1315,8 +1466,8 @@ def si3_cgrid_aevp_solver(
         )
         inverse_alpha_t = _si3_div(_SI3_ONE, _si3_add(alpha_t, _SI3_ONE))
         stress1_target = _si3_sub(
-            _si3_mul(divergence, _si3_add(_SI3_ONE, _SI3_ZERO)),
-            _si3_mul(delta_t, _si3_sub(_SI3_ONE, _SI3_ZERO)),
+            _si3_mul(divergence, _si3_add(_SI3_ONE, tensile_fraction)),
+            _si3_mul(delta_t, _si3_sub(_SI3_ONE, tensile_fraction)),
         )
         stress1_target = _si3_mul(p_over_delta_t, stress1_target)
         stress1_value = _si3_add(_si3_mul(stress1, alpha_t), stress1_target)
@@ -1324,7 +1475,7 @@ def si3_cgrid_aevp_solver(
         stress1_value = _si3_mul(stress1_value, zmsk)
         stress2_target = _si3_mul(
             _si3_mul(tension, inverse_eccentricity_square),
-            _si3_add(_SI3_ONE, _SI3_ZERO),
+            _si3_add(_SI3_ONE, tensile_fraction),
         )
         stress2_target = _si3_mul(p_over_delta_t, stress2_target)
         stress2_value = _si3_add(_si3_mul(stress2, alpha_t), stress2_target)
@@ -1361,7 +1512,7 @@ def si3_cgrid_aevp_solver(
         )
         stress12_target = _si3_mul(
             _si3_mul(shear, inverse_eccentricity_square),
-            _si3_add(_SI3_ONE, _SI3_ZERO),
+            _si3_add(_SI3_ONE, tensile_fraction),
         )
         stress12_target = _si3_mul(p_over_delta_f, stress12_target)
         stress12_target = _si3_mul(stress12_target, _SI3_SHEAR_STRESS_WEIGHT)
@@ -1448,10 +1599,50 @@ def si3_cgrid_aevp_solver(
                 _si3_mul(mass_over_dt_u, _si3_add(beta_u, _SI3_ONE)),
                 drag_magnitude,
             )
-            value = _si3_div(
-                numerator,
-                jnp.maximum(_SI3_DENOMINATOR_FLOOR, denominator),
-            )
+            if config.landfast:
+                basal_speed = _si3_add(
+                    _SI3_LANDFAST_SPEED_FLOOR_M_S,
+                    nemo_source_round(
+                        _si3_sqrt(
+                            _si3_add(
+                                _si3_mul(cross_v_u, cross_v_u),
+                                _si3_mul(current_u, current_u),
+                            )
+                        )
+                    ),
+                )
+                basal_ratio = _si3_div(basal_u, basal_speed)
+                denominator = _si3_sub(denominator, basal_ratio)
+                dynamic_value = _si3_div(
+                    numerator,
+                    jnp.maximum(_SI3_DENOMINATOR_FLOOR, denominator),
+                )
+                static_decay = jnp.maximum(
+                    _SI3_ZERO,
+                    _si3_sub(
+                        beta_u,
+                        _si3_mul(config.dt_s, config.landfast_relaxation_s_inv),
+                    ),
+                )
+                static_numerator = _si3_add(
+                    state.u_ice_u,
+                    _si3_mul(current_u, static_decay),
+                )
+                static_value = _si3_div(
+                    static_numerator,
+                    _si3_add(beta_u, _SI3_ONE),
+                )
+                static_friction = (_si3_add(rhs, basal_u) < _SI3_ZERO) & (
+                    rhs >= _SI3_ZERO
+                )
+                value = nemo_source_round(
+                    jnp.where(static_friction, static_value, dynamic_value)
+                )
+            else:
+                value = _si3_div(
+                    numerator,
+                    jnp.maximum(_SI3_DENOMINATOR_FLOOR, denominator),
+                )
             value = _si3_add(
                 _si3_mul(value, active_u),
                 _si3_mul(
@@ -1511,10 +1702,50 @@ def si3_cgrid_aevp_solver(
                 _si3_mul(mass_over_dt_v, _si3_add(beta_v, _SI3_ONE)),
                 drag_magnitude,
             )
-            value = _si3_div(
-                numerator,
-                jnp.maximum(_SI3_DENOMINATOR_FLOOR, denominator),
-            )
+            if config.landfast:
+                basal_speed = _si3_add(
+                    _SI3_LANDFAST_SPEED_FLOOR_M_S,
+                    nemo_source_round(
+                        _si3_sqrt(
+                            _si3_add(
+                                _si3_mul(current_v, current_v),
+                                _si3_mul(cross_u_v, cross_u_v),
+                            )
+                        )
+                    ),
+                )
+                basal_ratio = _si3_div(basal_v, basal_speed)
+                denominator = _si3_sub(denominator, basal_ratio)
+                dynamic_value = _si3_div(
+                    numerator,
+                    jnp.maximum(_SI3_DENOMINATOR_FLOOR, denominator),
+                )
+                static_decay = jnp.maximum(
+                    _SI3_ZERO,
+                    _si3_sub(
+                        beta_v,
+                        _si3_mul(config.dt_s, config.landfast_relaxation_s_inv),
+                    ),
+                )
+                static_numerator = _si3_add(
+                    state.v_ice_v,
+                    _si3_mul(current_v, static_decay),
+                )
+                static_value = _si3_div(
+                    static_numerator,
+                    _si3_add(beta_v, _SI3_ONE),
+                )
+                static_friction = (_si3_add(rhs, basal_v) < _SI3_ZERO) & (
+                    rhs >= _SI3_ZERO
+                )
+                value = nemo_source_round(
+                    jnp.where(static_friction, static_value, dynamic_value)
+                )
+            else:
+                value = _si3_div(
+                    numerator,
+                    jnp.maximum(_SI3_DENOMINATOR_FLOOR, denominator),
+                )
             value = _si3_add(
                 _si3_mul(value, active_v),
                 _si3_mul(
