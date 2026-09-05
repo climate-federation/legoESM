@@ -188,11 +188,13 @@ def validate(deck_root: Path, oracle_root: Path, *, plant: bool) -> dict[str, ob
     # fold support row are excluded below because rank zero did not dump their
     # remote operands.
     eta_after = np.asarray(card.recipe.initial_state.eta.data).copy()
-    hu_avg = np.zeros(eta_after.shape, dtype=np.float64)
-    hv_avg = np.zeros(eta_after.shape, dtype=np.float64)
+    hu_avg = np.zeros(card.recipe.initial_state.u.data.shape[:2], dtype=np.float64)
+    hv_avg = np.zeros(card.recipe.initial_state.v.data.shape[:2], dtype=np.float64)
     eta_after[:, :OWNED_NX] = final_ssh
-    hu_avg[:, :OWNED_NX] = un_adv
-    hv_avg[:, :OWNED_NX] = vn_adv
+    # legoESM retains redundant west/south faces; NEMO's native east/north
+    # faces map to indices 1: in those layouts.
+    hu_avg[:, 1:OWNED_NX + 1] = un_adv
+    hv_avg[1:OWNED_NY + 1, :OWNED_NX] = vn_adv
     zeros = np.zeros(eta_after.shape, dtype=np.float64)
     runoff = zeros.copy()
     runoff[:, :OWNED_NX] = wzv["runoff"]
@@ -216,7 +218,7 @@ def validate(deck_root: Path, oracle_root: Path, *, plant: bool) -> dict[str, ob
     oracle = wzv["ww"][..., :NLEV]
     live = wzv["tmask"][..., :NLEV] != 0.0
     support = np.zeros((OWNED_NY, OWNED_NX), dtype=bool)
-    support[:-1, :-1] = True
+    support[:-1, 1:-1] = True
     mask = live & support[..., None]
     if plant:
         candidate = candidate.copy()
