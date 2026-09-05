@@ -1,20 +1,23 @@
 # NEMO testcase lane 2 GYRE — Phase 3 rounds 8–25 boundary receipt
 
-**Verdict: HOLD.**  User Decision 8 authorizes and Round 24 implements NEMO's
-separately prognostic `uu_b/vv_b` pair on NEMO-identity cards.  The equal-input
-GYRE kt1 Kaa write is bit-identical (`0 / 580` U faces, `0 / 570` V faces),
-the live external-mode seed and S-21 transport now read the carried pair, and
-a kt5 restart followed by kt6--10 is bit-identical to the unbroken run for
-every pytree leaf.  The change is not sufficient to lift HOLD: GYRE's stage-2
-Kaa remains DEBT at `2.1986806906376666e-15` U and
-`2.2380914396075147e-15` V, and the oracle-relative GYRE, LOCK and OVERFLOW
-trajectory gates expose compensating-error debt even though no first-over-bar
-moves earlier.  Under Rule 12 the source-faithful state fix stays and those
-rows enter the ordered register.  ORCA2's cellwise production-W comparison
-passes (maximum worsening 1 row-scale ulp).  The reported C1D kt2 control is
-retracted below because that probe never enabled the identity field and thus
-perturbed nothing.  Stage-3/ZDF/TKE work is not entered across these boundaries,
-and nothing is merged into the reconciled/integration line.
+**Verdict: HOLD.**  Round 25 retracts the ill-posed stage-2/kt1 carried-Kbb
+owner claim, makes every NEMO-identity recipe carry the approved prognostic
+`uu_b/vv_b` pair, and lands the four required negative guards.  The ordered
+stage-2 walk then reaches NEMO's hydrostatic-pressure-gradient insertion into
+the momentum RHS and finds two source-association defects there: the live QCO
+depth `gdept_z0` and a lossy acceleration-to-pressure round trip at the Krhs
+boundary.  With the shared fix the HPG operator is bit-identical given NEMO's
+own inputs (`0 / 17400` U, `0 / 17100` V) and GYRE's completed stage-2 Kaa moves
+from DEBT `2.1986806906376666e-15` U / `2.2380914396075147e-15` V to AT-BAR
+`1.0842021724855044e-19` on both components.  Every figure in this round was
+re-run independently at the landed tip and reproduces at zero row-scale ulp.
+HOLD stands: GYRE's trajectory Rule-12 comparison exposes compensating debt on
+56 rows, OVERFLOW's first external departure is localized to a statement but has
+no surviving one-variable owner, and LOCK needs the supplied WRITE-only substep
+twin — which only the user can run — before its one U bit can be localized at
+all.  The C1D result remains struck; lane 3b must remeasure with its identity
+card opted in.  Stage-3/ZDF/TKE work is not entered, and nothing is merged into
+the reconciled/integration line.
 
 Updated: 2026-09-05
 
@@ -3625,3 +3628,399 @@ opt-in never existed on this branch, so the six-row no-move output was a
 control that perturbed nothing.  No C1D numerical result is claimed here;
 lane 3b must remeasure after opting its NEMO-identity card into the shared
 state field.
+
+## Round 25 — retraction, negative guards, stage-2 composition, independent re-measurement
+
+Round 25 starts from `e80dd94b8276` and runs in the production-JIT CPU fp64/x64,
+oracle-V2 scalar-libm regime.  The preregistration
+(`manifests/nemo_testcase_l2_gyre_round25_preregister.json`) is committed before
+the measurements.  `/tmp/codex-c1d-r24` and `/tmp/codex-orca2-r24` remain
+flagged; neither was read.  No NEMO executable was run from the sandbox.
+
+Every GYRE number below is scored against the **V2 scalar-math oracle root**
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19_oracle_v2_external`,
+passed explicitly to `--oracle-root`, `--stage2-oracle-root` and
+`--stage3-oracle-root`.  This is recorded because it is a live trap: the gate's
+compiled-in `ROOT`/`STAGE2_ROOT`/`STAGE3_ROOT` defaults still point at
+`gyre_kt1_10` and `gyre_kt1_10_stage2_terms`, which hold the superseded
+**V1 vector-math** oracle (`oracle_stage_kt00000001_s1.bin` =
+`35e6892b799aeaf8d06d4affcd71b5ba0c71dc41bc0e8970c033459c46cd1402`, against the
+registered V2 digest
+`ce25b004e7e8289b6e803263f895576981ce22516ccddfbd85d7be5ce5bcaedc`).  Running
+the gate on its defaults aborts fail-closed on the digest check rather than
+scoring silently, which is the correct behaviour, but no round-25 figure may be
+reproduced without naming the V2 root.
+
+### Rule-11 records
+
+Three round-25 claims died.  Each is written here next to what killed it.
+
+1. **Round-23 owner claim: REFUTED AND ILL-POSED.**  The statement that carried
+   `uu_b/vv_b(Kbb)` was the first unavailable operand for the stage-2 and kt1
+   rows cannot be posed.  `stprk3.F90:186` calls
+   `stp_2D( kstp, Nbb, Nbb, Naa, Nrhs )`, which writes `ssh`, `(uu_b,vv_b)` at
+   **Naa** and `(un_adv,vn_adv)` *before* any stage; `stprk3.F90:195` runs stage
+   1 with `Kmm=Nbb`; `:197` swaps `Nnn <==> Naa`; `:200` and `:207` run stages 2
+   and 3 with `Kmm=Nnn`.  Stage 2 therefore consumes same-step
+   `uu_b/vv_b(Nnn)`, an operand that was never unavailable.  The carried Kbb
+   pair reaches only a later step's external-mode seed
+   (`stp2d.F90:281` -> `dynspg_ts.F90:487`, `un_e(:,:) = puu_b(:,:,Kmm)` under
+   `ln_bt_fw`) and the stage-1 S-21 operand (`stprk3_stg.F90:262,267`,
+   `zub = un_adv*r1_hu(Kmm) - uu_b(Kmm)`, read at `Kmm` and hence last-step at
+   stage 1 only).  Landed as `0dbb4bc574b3`.
+2. **"Linear surface update owner": REFUTED.**  A one-variable arm routing the
+   non-selected `lk_linssh` external-mode formula moved neither the OVERFLOW
+   `u_exit` frame nor the `7 / 199` Kaa row.  Landed then reverted
+   (`15aa818f4e6c` -> `8d104f61c450`).
+3. **"NEMO call-order / source-round accumulation" arm: REFUTED.**  It changed
+   only unequal-cell counts, did not reduce the `9.926167350636332e-24`
+   cumulative-vorticity maximum, and made the corrected V maximum
+   `1.3552527156068805e-19` instead of `1.0842021724855044e-19`.  Reverted; no
+   owner is assigned to the AT-BAR tail.
+
+The C1D kt2 row remains struck: that probe never enabled the identity field, so
+it perturbed nothing.  Lane 3b must remeasure with its card opted in.
+
+### Acceptance guards, and the break that proves each can fail
+
+The identity is now uniform: generic rest, Eady, GYRE, lane-1 tanks and every
+other recipe selecting the NEMO WS-RK3 identity initialize the optional
+`uu_b/vv_b` pair (`oce.F90:39,99`; the zero value follows
+`DOM/istate.F90:149-155`, the depth-weighted mean of `uu(Kbb)`); ordinary
+recipes retain `None` and gain no array pytree leaves.  Each guard below was
+shown non-vacuous by breaking the code it guards, running the test, and
+restoring the file (`git checkout --` plus `git status --porcelain` empty).
+
+| guard | test | planted break | observed failure |
+|---|---|---|---|
+| stage-1 reads last-step Kbb; stages 2-3 read this-step Nnn | `test_stage_time_levels_keep_kbb_out_of_same_step_nnn` | stage-1 branch returns `nnn_velocity` | `ACTUAL array([[101.]]) DESIRED array([[1.]])`, 1 failed |
+| external mode is the only live dynamics writer | `test_identity_path_has_one_external_mode_writer_for_carried_pair` | added a second `dict(uu_b=..., vv_b=...)` call in `ocean_pe_latlon_cgrid.py` | inventory mismatch, 1 failed |
+| non-NEMO recipes keep `None` leaves | `test_non_nemo_state_has_no_depth_mean_array_leaves`, `test_generic_nemo_recipes_all_carry_pair_without_changing_base_eady` | `rest_state_latlon_cgrid_ocean` builds the pair unconditionally | 2 failed |
+| restart re-derives only on an ABSENT pair, never on a parse failure | `test_restart_malformed_depth_mean_does_not_use_missing_field_fallback` | `read_nemo_restart` swallows `TypeError/ValueError` and returns `None` | `DID NOT RAISE`, 1 failed |
+
+### Stage-2 ordered walk
+
+NEMO stage 2 accumulates the momentum RHS in written source order:
+`dyn_hpg` at `stprk3_stg.F90:324`, `dyn_vor` at `:327`, `dyn_adv` at `:331`
+(vector form) or `:333` (flux form).  GYRE runs the vector-invariant arm, so the
+stage update is `uu(Kaa) = ( uu(Kbb) + rDt * uu(Krhs) ) * umask` at
+`stprk3_stg.F90:367-368`; the `key_qco` thickness-weighted alternative sits at
+`:373-378` and is not selected here.  The all-stage barotropic replacement is
+`stprk3_stg.F90:437-446`.
+
+Injecting NEMO's own Krhs made the raw update exact (`0 / 17400` U,
+`0 / 17100` V, probe mode `oracle_rhs_raw`), which refutes the update and the
+barotropic replacement as the first owner and puts the boundary inside the
+accumulation.
+
+The landed shared fix has two parts, both source-association, no card arm:
+
+- **QCO live depth.**  `domzgr_substitute.h90:145` defines
+  `gdept_z0(i,j,k,t) = (gdept(i,j,k,t) - ssh(i,j,t))` with `gdept` expanded at
+  `:139`, i.e. two statements' operations.  `_nemo_qco_gdept_z0` now
+  materialises the multiply before the subtraction instead of leaving the chain
+  for XLA to reassociate.
+- **HPG interface.**  `dyn_hpg_sco` produces an acceleration and writes
+  `zhpi + zuap` straight into the momentum RHS (`dynhpg.F90:359` for `k=1`,
+  `:383` for `k>1`, the "RK3 case: dyn_hpg always called first" branch).  The
+  shared model previously multiplied that by `-rho0` to fit a
+  pressure-gradient interface and divided it back at the consumer;
+  `_nemo_hpg_tendency_from_pressure_or_direct` now carries `nemo_sco`'s native
+  acceleration through.  Other PGF schemes keep their pressure-gradient route.
+
+All rows below are `nemo_testcase_l2_gyre_round11_composition.py` against the V2
+root, re-measured at `4b6c421df5d0` on a clean tree.  Values are the wet-face
+absolute maximum; parentheses are `unequal / n`.
+
+| stage-2 boundary | U max / unequal | V max / unequal | verdict |
+|---|---:|---:|---|
+| round-24 completed Kaa (before the fix) | `2.1986806906376666e-15`, `17400 / 17400` | `2.2380914396075147e-15`, `17100 / 17100` | DEBT |
+| HPG given NEMO inputs (`oracle_input_hpg`) | `0.0`, `0 / 17400` | `0.0`, `0 / 17100` | bit-exact |
+| cumulative through vorticity | `9.926167350636332e-24`, `8699 / 17400` | `9.926167350636332e-24`, `8360 / 17100` | AT-BAR |
+| cumulative through advection | `0.0`, `0 / 17400` | `0.0`, `0 / 17100` | bit-exact |
+| oracle Krhs into the raw update | `0.0`, `0 / 17400` | `0.0`, `0 / 17100` | bit-exact |
+| landed full Krhs (`rhs`) | `9.926167350636332e-24`, `10765 / 17400` | `9.926167350636332e-24`, `10626 / 17100` | AT-BAR |
+| landed raw Kaa (`raw`) | `8.131516293641283e-20`, `10054 / 17400` | `8.131516293641283e-20`, `9888 / 17100` | AT-BAR |
+| landed corrected Kaa (`corrected`) | `1.0842021724855044e-19`, `7306 / 17400` | `1.0842021724855044e-19`, `7405 / 17100` | AT-BAR |
+
+The preregistered stage-2 prediction is **CONFIRMED**: the HPG insertion into
+Krhs was the first non-bit statement, and every stage-2 operand ahead of it is
+bit-exact.  The completed stage-2 Kaa moves from round-24's DEBT
+`2.1986806906376666e-15` U / `2.2380914396075147e-15` V to AT-BAR
+`1.0842021724855044e-19` on both components.  The first residual after exact
+HPG is the vorticity accumulation, nine orders below the bar; it is left
+unlabelled.  The planted Krhs control changes one U cell by `1.0` and exits `1`.
+
+Each half of the shared fix was ablated on its own, one variable at a time, and
+the file restored afterwards (`git status --porcelain` empty each time):
+
+| arm | HPG given NEMO inputs, U / V | completed stage-2 Kaa, U / V | verdict |
+|---|---|---|---|
+| landed | `0.0` (`0 / 17400`) / `0.0` (`0 / 17100`) | `1.0842021724855044e-19` (`7306 / 17400`) / `1.0842021724855044e-19` (`7405 / 17100`) | AT-BAR |
+| A: fused QCO `gdept_z0` | `2.8730908583045487e-19` (`7205 / 17400`) / `2.8730908663824844e-19` (`7028 / 17100`) | `2.1986806906376666e-15` (`17400 / 17400`) / `2.2380914396075147e-15` (`17077 / 17100`) | DEBT |
+| B: pressure-gradient round trip | `1.6155871338926322e-27` (`6248 / 17400`) / `3.2311742677852644e-27` (`6242 / 17100`) | `1.0842021724855044e-19` (`7307 / 17400`) / `1.0842021724855044e-19` (`7473 / 17100`) | AT-BAR |
+
+Arm A alone restores round 24's DEBT row to the digit on both components — its
+report file hashes to
+`72b949660ed979635158987f601de6fe152eff23b73ae2dcdb71d8900653f0cf`, which is
+byte-for-byte the round-24 manifest's `gyre_stage2` artifact — so the QCO
+`gdept_z0` source association is the **CONFIRMED owner** of the stage-2 Kaa
+DEBT.  Arm B moves the HPG frame off exact zero but leaves the completed Kaa
+maximum unchanged, so the acceleration-to-pressure round trip is the
+**CONFIRMED owner of the HPG frame's residual only** — it is required for the
+bit-exact HPG operand the preregistered prediction is checked against, and it is
+not what cleared the Kaa row.  Both halves are source-faithful and both stay;
+the joint attribution stated in the ending session's draft is corrected here.
+
+### Production GYRE trajectory and the Rule-12 compensating-error register
+
+The production sweep is exact at kt1 on every field.  `first_over_bar` stays at
+kt2 `T/S/u/v`.  Values are the normalized wet-cell maximum, parentheses
+`unequal / n`; exact rows print `0 / n`.
+
+| kt | T | S | u | v | ssh |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 0 / 18000 | 0 / 18000 | 0 / 17400 | 0 / 17100 | 0 / 600 |
+| 2 | 1.36147368e-12 (11840 / 18000) | 2.21811013e-14 (11229 / 18000) | 9.48408994e-7 (17400 / 17400) | 8.98799261e-7 (17100 / 17100) | 4.33680869e-19 (600 / 600) |
+| 3 | 3.72234414e-4 (18000 / 18000) | 3.68324674e-5 (17901 / 18000) | 9.31167891e-3 (17400 / 17400) | 4.71907759e-3 (17100 / 17100) | 7.07466963e-7 (600 / 600) |
+| 4 | 1.05947381e-3 (18000 / 18000) | 8.22574046e-5 (17995 / 18000) | 1.41824040e-2 (17400 / 17400) | 1.59478423e-2 (17100 / 17100) | 5.06042337e-7 (600 / 600) |
+| 5 | 3.05374248e-3 (18000 / 18000) | 8.61182643e-5 (18000 / 18000) | 2.07338904e-2 (17400 / 17400) | 4.37976656e-2 (17100 / 17100) | 6.70185102e-5 (600 / 600) |
+| 6 | 3.81767581e-3 (18000 / 18000) | 1.28753624e-4 (18000 / 18000) | 3.11347297e-2 (17400 / 17400) | 6.02195921e-2 (17100 / 17100) | 1.63102390e-4 (600 / 600) |
+| 7 | 4.54666655e-3 (18000 / 18000) | 1.22440449e-4 (18000 / 18000) | 4.00414047e-2 (17400 / 17400) | 6.63157732e-2 (17100 / 17100) | 2.08714182e-4 (600 / 600) |
+| 8 | 5.09837609e-3 (18000 / 18000) | 1.36098443e-4 (18000 / 18000) | 4.71800591e-2 (17400 / 17400) | 2.45271619e-2 (17100 / 17100) | 2.51082477e-4 (600 / 600) |
+| 9 | 5.44506214e-3 (18000 / 18000) | 1.47118217e-4 (18000 / 18000) | 5.25603976e-2 (17400 / 17400) | 1.45336123e-2 (17100 / 17100) | 2.12030022e-4 (600 / 600) |
+| 10 | 5.63663449e-3 (18000 / 18000) | 1.54831214e-4 (18000 / 18000) | 5.62498696e-2 (17400 / 17400) | 1.11733658e-2 (17100 / 17100) | 2.12554356e-4 (600 / 600) |
+
+Against round 24 the cellwise oracle-relative gate reports:
+
+```text
+ORACLE_RELATIVE_COMPARE FAIL: rows=70 max_worsening_ulps=185097.1640625 first_over_bar={'fields': ['T', 'S', 'u', 'v'], 'kt': 2}->{'kt': 2, 'fields': ['T', 'S', 'u', 'v']} plant=None
+```
+
+62 of the 70 certified rows moved and 56 exceed the two-row-scale-ulp
+threshold.  The changed HPG operator is bit-exact given NEMO's own inputs, so
+Rule 12 applies: the fix stays, `first_over_bar` did not come earlier, and the
+56 rows enter the register as named debt.  Every moved row is disclosed below.
+| row | move ULP | worse ULP | cells >2 ULP / n | improved / worsened |
+|---|---:|---:|---:|---:|
+| `GYRE-zco.kt10.after.uu_b` | 51.05078125 | 51.05078125 | 305 / 580 | 227 / 353 |
+| `GYRE-zco.kt10.after.vv_b` | 51.37939453125 | 51.37939453125 | 274 / 570 | 272 / 298 |
+| `GYRE-zco.kt10.before.S` | 32631.0 | 25813.0 | 4164 / 18000 | 7424 / 7410 |
+| `GYRE-zco.kt10.before.T` | 42227.0 | 42227.0 | 7242 / 18000 | 8493 / 8739 |
+| `GYRE-zco.kt10.before.ssh` | 15503.8515625 | 15503.8515625 | 292 / 600 | 308 / 292 |
+| `GYRE-zco.kt10.before.u` | 67625.8046875 | 67625.8046875 | 8688 / 17400 | 8697 / 8703 |
+| `GYRE-zco.kt10.before.v` | 185097.1640625 | 185097.1640625 | 8738 / 17100 | 8345 / 8755 |
+| `GYRE-zco.kt2.after.uu_b` | 0.16461181640625 | 0.16461181640625 | 0 / 580 | 280 / 299 |
+| `GYRE-zco.kt2.after.vv_b` | 0.111083984375 | 0.08937835693359375 | 0 / 570 | 330 / 238 |
+| `GYRE-zco.kt2.before.S` | 1.0 | 1.0 | 0 / 18000 | 20 / 10 |
+| `GYRE-zco.kt2.before.T` | 2.0 | 2.0 | 0 / 18000 | 756 / 451 |
+| `GYRE-zco.kt2.before.u` | 24.48193359375 | 24.48193359375 | 1955 / 17400 | 8263 / 9124 |
+| `GYRE-zco.kt2.before.v` | 26.783203125 | 26.783203125 | 1911 / 17100 | 8592 / 8496 |
+| `GYRE-zco.kt3.after.uu_b` | 1.295166015625 | 1.295166015625 | 0 / 580 | 279 / 299 |
+| `GYRE-zco.kt3.after.vv_b` | 1.1357421875 | 1.04052734375 | 0 / 570 | 298 / 272 |
+| `GYRE-zco.kt3.before.S` | 7.0 | 6.0 | 20 / 18000 | 319 / 321 |
+| `GYRE-zco.kt3.before.T` | 102.0 | 99.5 | 533 / 18000 | 2260 / 2197 |
+| `GYRE-zco.kt3.before.ssh` | 163.916015625 | 59.4765625 | 41 / 600 | 320 / 280 |
+| `GYRE-zco.kt3.before.u` | 946.771484375 | 564.234375 | 3687 / 17400 | 8737 / 8654 |
+| `GYRE-zco.kt3.before.v` | 551.77880859375 | 532.5 | 3827 / 17100 | 8567 / 8517 |
+| `GYRE-zco.kt4.after.uu_b` | 4.36058235168457 | 4.36058235168457 | 30 / 580 | 255 / 325 |
+| `GYRE-zco.kt4.after.vv_b` | 2.5517578125 | 2.5517578125 | 5 / 570 | 314 / 256 |
+| `GYRE-zco.kt4.before.S` | 6085.0 | 5820.0 | 199 / 18000 | 1228 / 1138 |
+| `GYRE-zco.kt4.before.T` | 7622.0 | 7291.0 | 1796 / 18000 | 4505 / 4251 |
+| `GYRE-zco.kt4.before.ssh` | 771.0390625 | 771.0390625 | 197 / 600 | 363 / 237 |
+| `GYRE-zco.kt4.before.u` | 1109.068359375 | 1106.62451171875 | 6493 / 17400 | 8572 / 8828 |
+| `GYRE-zco.kt4.before.v` | 1090.8865966796875 | 1090.8865966796875 | 6401 / 17100 | 8548 / 8547 |
+| `GYRE-zco.kt5.after.uu_b` | 7.9461669921875 | 7.9461669921875 | 151 / 580 | 306 / 274 |
+| `GYRE-zco.kt5.after.vv_b` | 7.80419921875 | 7.80419921875 | 151 / 570 | 271 / 299 |
+| `GYRE-zco.kt5.before.S` | 8493.0 | 5947.0 | 806 / 18000 | 2742 / 2688 |
+| `GYRE-zco.kt5.before.T` | 18347.0 | 14829.0 | 4124 / 18000 | 6588 / 6384 |
+| `GYRE-zco.kt5.before.ssh` | 3065.5703125 | 3065.5703125 | 289 / 600 | 295 / 305 |
+| `GYRE-zco.kt5.before.u` | 1993.7607421875 | 1993.7607421875 | 8351 / 17400 | 8547 / 8853 |
+| `GYRE-zco.kt5.before.v` | 2090.6571044921875 | 2066.5078125 | 8002 / 17100 | 8600 / 8500 |
+| `GYRE-zco.kt6.after.uu_b` | 14.0263671875 | 12.884765625 | 169 / 580 | 333 / 247 |
+| `GYRE-zco.kt6.after.vv_b` | 15.8095703125 | 15.8095703125 | 246 / 570 | 270 / 300 |
+| `GYRE-zco.kt6.before.S` | 11738.0 | 11738.0 | 1683 / 18000 | 4356 / 4537 |
+| `GYRE-zco.kt6.before.T` | 19816.0 | 14635.0 | 5948 / 18000 | 7486 / 7797 |
+| `GYRE-zco.kt6.before.ssh` | 4380.75 | 4380.75 | 293 / 600 | 305 / 295 |
+| `GYRE-zco.kt6.before.u` | 3004.1015625 | 2823.2806396484375 | 8476 / 17400 | 8876 / 8524 |
+| `GYRE-zco.kt6.before.v` | 3072.5 | 2834.6484375 | 8309 / 17100 | 8726 / 8374 |
+| `GYRE-zco.kt7.after.uu_b` | 22.859375 | 22.859375 | 198 / 580 | 316 / 264 |
+| `GYRE-zco.kt7.after.vv_b` | 22.35986328125 | 18.99090576171875 | 268 / 570 | 255 / 315 |
+| `GYRE-zco.kt7.before.S` | 20364.0 | 20364.0 | 2529 / 18000 | 5746 / 5709 |
+| `GYRE-zco.kt7.before.T` | 25207.0 | 25207.0 | 6491 / 18000 | 8158 / 8133 |
+| `GYRE-zco.kt7.before.ssh` | 6386.53125 | 5995.265625 | 305 / 600 | 294 / 306 |
+| `GYRE-zco.kt7.before.u` | 6209.64453125 | 4957.15234375 | 8745 / 17400 | 8625 / 8775 |
+| `GYRE-zco.kt7.before.v` | 10752.484375 | 9629.609375 | 8556 / 17100 | 8516 / 8584 |
+| `GYRE-zco.kt8.after.uu_b` | 34.525390625 | 34.525390625 | 208 / 580 | 310 / 270 |
+| `GYRE-zco.kt8.after.vv_b` | 31.423828125 | 31.423828125 | 181 / 570 | 336 / 234 |
+| `GYRE-zco.kt8.before.S` | 28922.0 | 22662.0 | 3160 / 18000 | 6546 / 6524 |
+| `GYRE-zco.kt8.before.T` | 34704.0 | 34704.0 | 6890 / 18000 | 8435 / 8423 |
+| `GYRE-zco.kt8.before.ssh` | 11221.5458984375 | 9706.609375 | 295 / 600 | 304 / 296 |
+| `GYRE-zco.kt8.before.u` | 22170.09375 | 22170.09375 | 8694 / 17400 | 8681 / 8719 |
+| `GYRE-zco.kt8.before.v` | 71113.0625 | 71113.0625 | 8683 / 17100 | 8399 / 8701 |
+| `GYRE-zco.kt9.after.uu_b` | 30.4052734375 | 30.4052734375 | 297 / 580 | 243 / 337 |
+| `GYRE-zco.kt9.after.vv_b` | 30.94140625 | 30.94140625 | 298 / 570 | 234 / 336 |
+| `GYRE-zco.kt9.before.S` | 28565.0 | 28565.0 | 3801 / 18000 | 7126 / 7115 |
+| `GYRE-zco.kt9.before.T` | 38204.0 | 38204.0 | 7115 / 18000 | 8464 / 8654 |
+| `GYRE-zco.kt9.before.ssh` | 15552.1689453125 | 10692.7578125 | 293 / 600 | 307 / 293 |
+| `GYRE-zco.kt9.before.u` | 16985.4296875 | 12630.5 | 8824 / 17400 | 8559 / 8841 |
+| `GYRE-zco.kt9.before.v` | 97644.15625 | 97644.15625 | 8671 / 17100 | 8401 / 8699 |
+
+### External-mode bits reached by the carried field
+
+Equal-input kt1 Kaa, re-measured at `4b6c421df5d0`:
+
+| card | U | V |
+|---|---|---|
+| GYRE-zco | `0 / 580` bit-identical | `0 / 570` bit-identical |
+| LOCK_EXCHANGE-zco | `1 / 127`, max `2.168404344971009e-19` DEBT | `0 / 390` UNINFORMATIVE |
+| OVERFLOW-zps | `7 / 199`, max `6.938893903907228e-18` DEBT | `0 / 606` UNINFORMATIVE |
+
+The V rows are structurally uninformative on both lane-1 tanks, and both U rows
+are upstream external-mode debt, not state-storage error.  The GYRE planted
+control exits `1`.
+
+For OVERFLOW the 19-frame substep-1 record is exact through entry, midpoint,
+transport, continuity, PGF, slow forcing and drag.  The first unequal frame is
+`u_exit` at `3.469446951953614e-18` (AT-BAR), produced by the flux-form external
+update `dynspg_ts.F90:735-761` (the `ua_e`/`va_e` statement is `:752-761`); the
+later weighted accumulation and division sit at `:825-847` and the Kaa velocity
+conversion at `:870-895`.  The preregistered "only the final Kaa differs"
+prediction is therefore **REFUTED**; the statement boundary is **CONFIRMED** and
+its arithmetic owner remains **UNMEASURED_AFTER_REFUTED_ARMS** (source-rounding
+the flux update and routing the non-selected `lk_linssh` formula were separate
+one-variable arms; neither moved `u_exit` nor the `7 / 199` row, and both were
+reverted).  This record was re-run at `4b6c421df5d0` on a clean tree; the
+round-24-era copy carried an `-dirty` stamp and is superseded.  Its planted
+exit control exits `1`.
+
+LOCK has no 19-frame substep oracle, so assigning OVERFLOW's statement to LOCK's
+one U bit would be self-agreement.  The committed user-run acquisition
+`scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round25_lock_external_oracle/run.sh`
+builds a distinct scalar-math LOCK configuration, refuses unless LOCK and
+OVERFLOW compile the same shipped `dynspg_ts.F90` body, refuses a pre-existing
+target, requires every pre-existing identity record and the final restart to
+stay byte-for-byte, rejects a binary carrying vector-math symbols, and emits the
+existing 19-frame format.  **It must be executed by the user**: it runs
+`makenemo` and `mpirun`, which are outside the agent sandbox.  Until it is run,
+LOCK's first producing statement is honestly **UNMEASURED**.
+
+### Independent re-measurement of every round-25 figure
+
+Round 25's measurements were taken by a session that ended mid-round.  Every
+figure above was re-run from scratch at `4b6c421df5d0` on a clean tree and
+compared cell by cell against that session's own reports through the shared
+oracle-relative move gate.  Nothing moved.
+
+| gate | rows | max worsening (row-scale ulp) | first_over_bar |
+|---|---:|---:|---|
+| GYRE trajectory kt1-10 | 70 | 0 | unchanged, kt2 `T/S/u/v` |
+| LOCK stage sweep (`--faithful-only`) | 9 | 0 | absent |
+| LOCK trajectory (`--continue-after-first`) | 50 | 0 | unchanged, kt4 `u` |
+| OVERFLOW stage sweep (`--faithful-only`) | 9 | 0 | absent |
+| OVERFLOW trajectory (`--continue-after-first`) | 50 | 0 | unchanged, kt2 `T/u` |
+
+All eight stage-2 composition modes reproduce their reported values bit for
+bit, as do the three equal-input Kaa rows and the OVERFLOW 19-frame record.  The
+cross-card Rule-12 verdicts against round 24 are:
+
+```text
+ORACLE_RELATIVE_COMPARE PASS: rows=9  max_worsening_ulps=0         first_over_bar='<absent>'->'<absent>'                                  plant=None
+ORACLE_RELATIVE_COMPARE PASS: rows=50 max_worsening_ulps=0.0234375 first_over_bar={'fields': ['u'], 'kt': 4}->{'kt': 4, 'fields': ['u']}   plant=None
+ORACLE_RELATIVE_COMPARE PASS: rows=9  max_worsening_ulps=0.125     first_over_bar='<absent>'->'<absent>'                                  plant=None
+ORACLE_RELATIVE_COMPARE PASS: rows=50 max_worsening_ulps=2         first_over_bar={'fields': ['T', 'u'], 'kt': 2}->{'kt': 2, 'fields': ['T', 'u']} plant=None
+```
+
+in the order LOCK stage, LOCK trajectory, OVERFLOW stage, OVERFLOW trajectory.
+No first-over-bar comes earlier on any card.
+
+Two claims from the ending session are **struck for want of a committed probe**
+(a throwaway probe's number is unmeasured): the "4,579 differing `gdept_z0`
+cells, maximum `9.094947017729282e-13` m, first live example
+`(i,j,k)=(1,1,5)`" census, and the `0x404e5dbfcaf8a971` / `...972` bit-pattern
+pair.  Neither is reproducible from anything in the tree.  What replaces them
+is the ablation table above plus the committed `oracle_input_hpg` row, which is
+exactly `0.0` on both components.
+
+### Focused tests, and a PRE-EXISTING failure set that is not round 25's
+
+```text
+6 failed, 110 passed in 3158.98s (0:52:38)
+```
+
+(`tests/ocean/fidelity/test_nemo_testcase_l2_gyre_phase3_gate.py`,
+`tests/ocean/fidelity/test_nemo_prognostic_barotropic_state_gate.py`,
+`tests/ocean/unit/test_nemo_prognostic_barotropic_state.py`,
+`tests/ocean/unit/test_nemo_ws_*.py`, `tests/ocean/unit/test_nemo_io.py`,
+`tests/ocean/unit/test_nemo_recipe.py`.)
+
+The six failures are **NOT round-25 regressions.**  Reverting the five files
+round 25 touched to their `e80dd94b8276` content and rerunning the two affected
+modules gives the identical set:
+
+```text
+6 failed, 19 passed in 504.98s (0:08:24)
+```
+
+Five of them are `tests/ocean/unit/test_nemo_recipe.py::test_nemo_gyre_*` plus
+`test_surface_stress_implicit_wiring`, all raising
+
+```text
+ValueError: NEMO rk3_ws is one coupled momentum/tracer stage program; select rk3_ws for both integrators or for neither
+```
+
+from `LatLonCGridOceanModel._validate_config`; that guard landed in
+`36d4a2f72ffe` (2026-08-31), an ancestor of the round-24 tip, and the GYRE
+native card still selects `rk3_ws` for one integrator only.  The sixth,
+`test_nemo_ws_tracer_rk3.py::test_overflow_bbl_is_live_inside_real_rk3_stage3`,
+asserts `movement > 1.0e-12` and measures exactly `0.0`.
+
+Deciding which integrator that card selects, or whether the BBL expectation or
+the code is wrong, is a configuration choice and is **NOT made here**.  It is
+raised as an open question.  No round-25 gate consumes these two cards.
+
+### What is still open
+
+- **LOCK's first producing external-mode statement — UNMEASURED.** Blocked on
+  the user running the committed acquisition script; no substitute claim is
+  made from OVERFLOW.
+- **OVERFLOW's `u_exit` arithmetic owner — UNMEASURED after two refuted arms.**
+  The statement boundary is confirmed; the owner is not.
+- **The AT-BAR vorticity tail (`9.926167350636332e-24`) — deliberately
+  unlabelled.** Nine orders below the bar; one arm was tried and refuted.
+- **GYRE kt2 `T/S/u/v` — DEBT, unchanged owner.** The stage-2 fix did not move
+  `first_over_bar`.
+- **56 GYRE trajectory rows carry Rule-12 compensating-error debt.**
+- **Six PRE-EXISTING focused-test failures on this branch.**  Five GYRE
+  native-card tests and one OVERFLOW BBL liveness test fail at the round-24
+  tip as well.  They need a configuration decision that is not made here.
+- **C1D — struck, delegated to lane 3b.**
+- **Stage-3 transport and the ZDF/TKE matrix walk — NOT ENTERED** across the
+  open register.
+- **Independent adversarial review of round 25 — OUTSTANDING.**
+
+Verdict stays **HOLD**.  Nothing is merged into the reconciled/integration line.
+
+### Asked / unasked disposition
+
+| choice | disposition |
+|---|---|
+| Rule-11 correction of the stage-2/kt1 Kbb owner | ASKED; retracted as REFUTED AND ILL-POSED |
+| enable the carried pair on every NEMO identity recipe | ASKED; implemented; non-NEMO leaves stay `None` |
+| four negative acceptance guards | ASKED; implemented, each shown to fail under a planted break |
+| stage-2 ordered walk | ASKED; HPG exact, completed Kaa AT-BAR, vorticity tail not over-labelled |
+| LOCK/OVERFLOW external-bit walk | ASKED; OVERFLOW localized with two refuted arms; LOCK acquisition supplied, not run |
+| re-measure every round-25 figure at the landed tip | ASKED (finish the round honestly); all reproduce at 0 ulp |
+| correct wrong NEMO line citations in the round-25 text | not a scientific choice; corrected against the shipped source |
+| strike two throwaway-probe numbers | not a scientific choice; no committed probe stands behind them |
+| C1D numerical claim | FORBIDDEN here; struck and delegated |
+| per-card HPG or external switch | UNASKED/FORBIDDEN; none added |
+| stage-3/ZDF/TKE walk | UNASKED across this boundary; not entered |
+| merge or push | FORBIDDEN; neither performed |
+
+UNASKED list: empty.
+
+Every artifact hash, oracle root, commit and test line quoted in this section
+is pinned in `manifests/nemo_testcase_l2_gyre_round25.json`; the reports
+themselves live under
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round25/verify/`.
