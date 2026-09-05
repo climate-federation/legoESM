@@ -217,13 +217,13 @@ withdrawn or reassigned here.
 The compensating-error rule therefore keeps the canonical shared fixes while
 registering their exposed debts; no card-specific numerical switch was added.
 
-## Portability hazard
+## Scalar-library policy (Round-21 supersession)
 
-The NCAR `0 / 158,292` result executes LOG/LOG10/POW through native XLA.  It is
-pinned to Python 3.13.0 / JAX 0.10.0 / NumPy 2.4.4 on this machine and is **not
-a portable bit-identity claim** until the shared precision policy covers those
-functions.  User decision on extending that policy remains pending; this lane
-does not implement it.
+User Decision 9 closed this hazard in Round 21: the one shared scalar-libm
+policy now covers LOG/LOG10/POW, every live certified NCAR site selects it,
+and the gate was remeasured at 0 / 158,292.  See
+`nemo_testcases_l3thd_round21_receipt.md`.  The former native-XLA qualification
+is retracted rather than left as current debt.
 
 ## FLAGGED FOR FUTURE DELETION
 
@@ -243,7 +243,7 @@ Delete nothing.  Retain and flag `/tmp/codex-si3thd-r18-*`, the eight
 | drop stale V1 GYRE default after provenance failure | UNASKED | not changed; accepted command names V2 roots explicitly |
 | create detached c83 verification worktree | UNASKED construction aid | retained and flagged; used only for Rule 8/12 discriminator |
 | delete `bulk_flux_omip.py` facade and update callers | ASKED | deleted; every caller routes directly to `core.bulk_flux` |
-| extend scalar-libm to LOG/LOG10/POW | UNASKED / decision pending | not implemented; hazard recorded |
+| extend scalar-libm to LOG/LOG10/POW | ASKED later, User Decision 9 | implemented and remeasured in Round 21 |
 | modify shipped NEMO tree | UNASKED and forbidden | not done |
 | delete retained run roots | UNASKED and forbidden this round | flagged only |
 

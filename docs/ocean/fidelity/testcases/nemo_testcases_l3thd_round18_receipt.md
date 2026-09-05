@@ -193,11 +193,12 @@ textbook reconstruction:
 - `sbc_phy.F90:883-925,1004-1027`: turbulent and longwave assembly.
 
 Every source statement is rounded once through the one shared
-`nemo_source_round`.  NEMO's EXP calls use the shared scalar-libm precision
-policy.  The shared policy does not provide LOG/LOG10; the machine-specific
-O1 measurement confirms native JAX LOG/LOG10/POW bits at every executed wet
-cell, so no private transcendental was invented.  Constants and algorithm
-coefficients live in `legoesm.constants`, not inline in the formulas.
+`nemo_source_round`.  NEMO's transcendental calls use the shared scalar-libm
+precision policy.  Round 21, implementing User Decision 9, extended that
+policy to LOG/LOG10/POW and remeasured this result at 0 / 158,292; see
+`nemo_testcases_l3thd_round21_receipt.md`.  The earlier native-XLA portability
+qualification is superseded.  Constants and algorithm coefficients live in
+`legoesm.constants`, not inline in the formulas.
 
 The ranked walk found three concrete expression owners: removing an
 unfaithful q/qsat clipping branch cleared the 117 large `theta_air` rows;

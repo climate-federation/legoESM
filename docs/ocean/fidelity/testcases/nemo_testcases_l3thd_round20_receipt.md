@@ -197,8 +197,9 @@ prognostic `uu_b/vv_b` construction was used.
 | combined drag association | kt5 PRE_DYN_SPG_TS U | 1 / 1 bit-identical | literal statement retained; GYRE shared owner-of-record |
 | ORCA2 exact-input rung | selector admission before `ice_thd` | six unsupported selectors; zero scored rows | scope/identity decision required, no numerical owner assigned |
 
-The native LOG/LOG10/POW portability hazard from Round 19 remains unchanged.
-No policy extension was made.
+This was true at the Round-20 boundary but is superseded by User Decision 9
+and the Round-21 scalar-libm extension; see
+`nemo_testcases_l3thd_round21_receipt.md`.
 
 ## 7. ASKED / UNASKED
 
@@ -212,7 +213,8 @@ No policy extension was made.
 | extend SI3 to ORCA2's five-category 10+5/salinity-4/pond program | UNASKED and outside binding ORCA1 scope | not implemented; decision required |
 | add a fail-closed selector admission gate | UNASKED implementation aid within requested rung | landed; no physics added |
 | change shipped NEMO/config-local ORCA2 writer or delete evidence | UNASKED / forbidden | not done |
-| implement prognostic `uu_b/vv_b` or scalar-libm LOG/LOG10/POW | user decision pending | not implemented |
+| implement prognostic `uu_b/vv_b` | GYRE-owned User Decision 8 | not implemented here |
+| extend scalar-libm LOG/LOG10/POW | ASKED later, User Decision 9 | implemented in Round 21 |
 
 ## 8. FLAGGED FOR FUTURE DELETION
 
