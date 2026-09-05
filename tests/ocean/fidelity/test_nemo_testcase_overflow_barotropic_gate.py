@@ -89,7 +89,6 @@ def test_production_predicate_is_the_card_resolution():
 
     cfg = build_nemo_testcase_card(gate.CASE).recipe.model_config
     assert nemo_flux_form_update_active(cfg) is True
-    assert nemo_flux_form_update_active(cfg, linear_free_surface=True) is False
     assert nemo_flux_form_update_active(cfg._replace(momentum_advection="vector_invariant")) is False
     assert nemo_flux_form_update_active(cfg._replace(momentum_time_integrator="rk3")) is False
 

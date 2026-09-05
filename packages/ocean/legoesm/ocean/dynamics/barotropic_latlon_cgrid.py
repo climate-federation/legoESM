@@ -1483,8 +1483,7 @@ def _run_substep_loop(
         return _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area,
                                    _ssh_avg_prep)
 
-    _nemo_flux_form_update = nemo_flux_form_update_active(
-        config, linear_free_surface=linear_free_surface)
+    _nemo_flux_form_update = nemo_flux_form_update_active(config)
     # Harness-only causal arm.  This is deliberately absent from public
     # configuration: NEMO exposes no switch inside its WS-RK3 flux-form
     # identity.  Production always follows the source-attested branch above.
@@ -2296,19 +2295,20 @@ def _reconcile_targets(config, *, U_bar_avg, V_bar_avg, Hu_avg, Hv_avg,
     return (Hu_avg / _H_u_now).astype(dtype), (Hv_avg / _H_v_now).astype(dtype)
 
 
-def nemo_flux_form_update_active(config, *, linear_free_surface=False) -> bool:
-    """Select NEMO's flux-form external update, including ``lk_linssh``.
+def nemo_flux_form_update_active(config) -> bool:
+    """NEMO key_RK3 + flux-form momentum is one unbranched scheme identity.
 
-    ``dynspg_ts.F90:813`` takes the velocity form when
-    ``ln_dynadv_vec .OR. lk_linssh``; only nonlinear-free-surface flux-form
-    momentum reaches :828-855.  This is an identity predicate, not a public
-    physics switch.
+    dynspg_ts.F90:731-761 advances FACE TRANSPORT, with the outer Kmm depth
+    frozen across the external window; NEMO exposes no velocity-form arm.
+    Other integrators/advection families retain the legacy velocity update.
+    This is THE production predicate (no public switch); the OVERFLOW
+    19-frame gate calls it to measure, not assume, that its production arm
+    resolves to the literal update.
     """
     return (
         getattr(config, "momentum_time_integrator", "euler") == "rk3_ws"
         and getattr(config, "momentum_advection", "vector_invariant")
         == "flux_form"
-        and not linear_free_surface
     )
 
 
