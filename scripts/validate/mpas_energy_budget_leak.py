@@ -95,7 +95,8 @@ _NEEDED = ("energy_toa_net", "energy_dE_dt", "energy_residual",
            "sw_net_sfc", "lw_net_sfc", "hfss", "hfls")
 # Present on the MPAS lightweight series; used for the thermal/latent split and
 # the water budget. Absent -> those columns are simply not printed.
-_OPTIONAL = ("CWV", "moisture_residual", "T_atm", "days")
+_OPTIONAL = ("CWV", "moisture_residual", "T_atm", "days",
+             "energy_flux_interval_mean")
 
 
 def load(path: pathlib.Path) -> dict[str, np.ndarray]:
@@ -131,6 +132,40 @@ def load(path: pathlib.Path) -> dict[str, np.ndarray]:
     return out
 
 
+def assert_interval_means(t, *, allow_snapshots: bool = False) -> str:
+    """Refuse a leak computed from end-of-interval SNAPSHOTS.
+
+    The driver stamps ``energy_flux_interval_mean`` = 1 when the seven energy
+    channels are diagnostic-interval means and 0 when they are snapshots.
+    Snapshots alias the diurnal cycle of the land-dominated turbulent fluxes:
+    measured, the sampled sensible heat flux was 8.0 W/m^2 against an
+    accumulated 20.5, and the apparent leak was +34.7 W/m^2 where accumulated
+    channels gave ~11.  That is a plausible wrong answer, so it is REFUSED
+    rather than annotated -- an annotation gets dropped when the number is
+    quoted onward.
+
+    Returns a one-line provenance string for the report header.
+    """
+    flag = t.get("energy_flux_interval_mean")
+    if flag is None:
+        msg = ("this series predates the interval-mean flag, so its flux "
+               "timing is UNKNOWN (almost certainly snapshots)")
+    elif float(np.min(flag)) >= 1.0:
+        return "flux timing: diagnostic-INTERVAL MEANS on every sample"
+    else:
+        n_snap = int((np.asarray(flag) < 1.0).sum())
+        msg = (f"{n_snap} of {flag.size} samples are end-of-interval "
+               "SNAPSHOTS, not interval means")
+    if allow_snapshots:
+        return f"flux timing: CONTAMINATED -- {msg} (--allow-snapshots)"
+    raise SystemExit(
+        f"REFUSING to report a leak: {msg}. Snapshots alias the diurnal cycle "
+        "of the land-dominated turbulent fluxes and produce a plausible wrong "
+        "answer (#1354/#1353). Re-run with the CMOR feed on so the flux "
+        "accumulator runs, or pass --allow-snapshots to see the contaminated "
+        "number knowing that is what it is.")
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("timeseries", type=pathlib.Path,
@@ -141,9 +176,15 @@ def main(argv=None) -> int:
                         "sets its dE_dt (and hence residual) to zero there by "
                         "construction, so its 'leak' is just "
                         "sfc_rad - hfss - hfls and is meaningless.")
+    p.add_argument("--allow-snapshots", action="store_true",
+                   help="report even when the channels are snapshots rather "
+                        "than interval means; the number is then contaminated "
+                        "by diurnal aliasing and is labelled as such.")
     args = p.parse_args(argv)
 
     t = load(args.timeseries)
+    provenance = assert_interval_means(
+        t, allow_snapshots=args.allow_snapshots)
     days = t.get("days", np.arange(len(t["hfss"]), dtype=float))
     # STRICTLY greater, and index 0 dropped unconditionally: the tracker's
     # first sample has dE_dt == 0 by construction (energy_budget.py: there is
@@ -161,6 +202,7 @@ def main(argv=None) -> int:
     sfc_rad = t["sw_net_sfc"] + t["lw_net_sfc"]
     leak = sfc_rad - t["hfss"] - t["hfls"] - t["energy_residual"]
 
+    print(provenance)
     print(f"{args.timeseries}  ({int(keep.sum())} samples after day "
           f"{args.skip_days:g} of {len(days)}; first sample always dropped, "
           f"dE_dt is zero there by construction)")

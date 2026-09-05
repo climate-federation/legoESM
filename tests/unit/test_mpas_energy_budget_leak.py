@@ -71,7 +71,10 @@ def _series(tmp_path, *, leak, n=6, dt_days=1.0):
     path = tmp_path / "timeseries.npz"
     np.savez(path, days=np.arange(n, dtype=float) * dt_days,
              energy_toa_net=toa, energy_dE_dt=dedt, energy_residual=residual,
-             sw_net_sfc=sw, lw_net_sfc=lw, hfss=sh, hfls=lh)
+             sw_net_sfc=sw, lw_net_sfc=lw, hfss=sh, hfls=lh,
+             # Interval means unless a test says otherwise: the probe refuses
+             # snapshot-sourced series outright.
+             energy_flux_interval_mean=np.ones(n))
     return path
 
 
@@ -173,6 +176,41 @@ def test_ragged_channels_are_refused_not_reported(tmp_path):
     np.savez(path, **d)
     with pytest.raises(SystemExit, match="SHIFTED|lengths disagree"):
         mod.load(path)
+
+
+def test_snapshot_sourced_series_is_refused(tmp_path):
+    """A leak from snapshots must RAISE, not be reported with a caveat.
+
+    The contaminated number is plausible (+34.7 W/m^2 measured against a ~20
+    hypothesis), so a caveat would be dropped the moment it is quoted onward.
+    """
+    mod = _load()
+    path = _series(tmp_path, leak=20.0, n=6)
+    d = dict(np.load(path))
+    d["energy_flux_interval_mean"] = np.zeros(6)
+    np.savez(path, **d)
+    with pytest.raises(SystemExit, match="REFUSING"):
+        mod.assert_interval_means(mod.load(path))
+    # ...and the escape hatch still labels it rather than hiding it.
+    msg = mod.assert_interval_means(mod.load(path), allow_snapshots=True)
+    assert "CONTAMINATED" in msg
+
+
+def test_a_series_predating_the_flag_is_also_refused(tmp_path):
+    """Unknown timing is refused too — absence of the flag is not consent."""
+    mod = _load()
+    path = _series(tmp_path, leak=20.0, n=6)
+    d = dict(np.load(path))
+    del d["energy_flux_interval_mean"]
+    np.savez(path, **d)
+    with pytest.raises(SystemExit, match="REFUSING"):
+        mod.assert_interval_means(mod.load(path))
+
+
+def test_interval_mean_series_passes_and_says_so(tmp_path):
+    mod = _load()
+    msg = mod.assert_interval_means(mod.load(_series(tmp_path, leak=0.0)))
+    assert "INTERVAL MEANS" in msg
 
 
 def test_runs_end_to_end(tmp_path):

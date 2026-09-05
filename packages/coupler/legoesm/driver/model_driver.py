@@ -435,7 +435,16 @@ class _MPASSfcFluxAccum:
     reporting precision, documented rather than engineered around.
     """
 
-    SLOTS = (2, 3, 4, 5, 6, 7, 10, 11)
+    # Slots 0 and 1 (sw_net_sfc, lw_net_sfc, both +into surface) were added
+    # 2026-09-05 for the #1354 energy budget.  They are NOT part of the CMOR
+    # feed -- there is no surface-radiation table entry -- but they are the
+    # LARGEST term in the column energy budget (~77 W/m^2 against a ~20 W/m^2
+    # signal), and the energy tracker was reading them as fixed-clock-time
+    # snapshots.  Measured on job 9632045: sampled sensible heat 8.0 W/m^2
+    # against an accumulated 20.5, and an apparent leak of +34.7 W/m^2 where
+    # accumulated channels gave ~11.  Accumulating costs one device-side add
+    # per step per slot and is what makes the budget answerable at all.
+    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 10, 11)
 
     def __init__(self, expected_steps: int = 0, window_start_day: float = 0.0,
                  dt_s: float = 0.0):
@@ -9998,6 +10007,10 @@ class ModelDriver:
             # EnergyBudgetTracker per diag step from self.model._sfc_diag.
             "energy_toa_net": [], "energy_dE_dt": [], "energy_residual": [],
             "sw_net_sfc": [], "lw_net_sfc": [], "hfss": [], "hfls": [],
+            # 1.0 = the seven energy channels above are diagnostic-INTERVAL
+            # MEANS; 0.0 = end-of-interval snapshots, which alias the diurnal
+            # cycle of the land-dominated turbulent fluxes (#1354/#1353).
+            "energy_flux_interval_mean": [],
         }
 
         t_start = time.time()
@@ -10927,15 +10940,26 @@ class ModelDriver:
                 # toa_net = rsdt - rsut - rlut; the tracker's residual =
                 # toa_net - dE/dt.  hfss/hfls are recorded for the closure
                 # probe (LEAK = sfc_net_rad - hfss - hfls - residual).
-                # FLUX TIMING: these are the last radiation step's INSTANTANEOUS
-                # fluxes (a daily snapshot), not the diagnostic-interval mean.
-                # GLM review: for the GLOBAL mean this is adequate to catch the
-                # ~20 W/m^2 leak we hunt -- a fixed-time global snapshot
-                # integrates over all longitudes == all local times, so rsdt is
-                # S_0/4 exactly and rsut/rlut carry only ~1-5 W/m^2 of day-to-day
-                # noise (SNR ~10 sigma/day).  A REGIONAL/map budget would need
-                # the interval-mean (self._mpas_sfc_accum, CMOR-gated) instead
-                # (codex review); global localisation is deferred.
+                # FLUX TIMING: INTERVAL MEANS when the accumulator is running,
+                # snapshots otherwise, and the series records WHICH.
+                #
+                # This comment used to argue the snapshot was adequate: a
+                # fixed-time global sample spans all longitudes hence all local
+                # times, so rsdt is S_0/4 and TOA carries only ~1-5 W/m^2 of
+                # noise.  MEASURED 2026-09-04 (job 9632045) that argument holds
+                # for solar geometry and FAILS for the turbulent fluxes: the
+                # sampled sensible heat flux was 8.0 W/m^2 against the
+                # accumulated 20.5 -- 2.5x -- because sensible heat is dominated
+                # by LAND, which occupies limited longitudes with a sharply
+                # asymmetric diurnal cycle that one local time per longitude
+                # does not average.  The apparent leak came out +34.7 W/m^2
+                # against a ~20 W/m^2 hypothesis; substituting accumulated
+                # channels gave ~11.  A plausible wrong answer, the dangerous
+                # kind.  So prefer self._mpas_sfc_accum (#1353's interval means,
+                # widened to slots 0/1 above).  It is CMOR-gated, so with the
+                # feed off the tracker falls back to snapshots and stamps
+                # energy_flux_interval_mean = 0; the closure probe then REFUSES
+                # to report a leak rather than quoting a contaminated one.
                 # MPI-partitioned MPAS is skipped: the tracker uses local area
                 # weights + local state with no owned-cell mask or allreduce
                 # (halo double-count), exactly as the moisture tracker is
@@ -10943,6 +10967,11 @@ class ModelDriver:
                 # only, which is the #1354 L5 lane.
                 _ebd = getattr(self.diagnostics, "energy_tracker", None)
                 _sd = getattr(self.model, "_sfc_diag", None)
+                # `has_samples()` is the gate: an accumulator that never saw a
+                # step has nothing to offer and must not shadow the snapshot.
+                _facc_e = getattr(self, "_mpas_sfc_accum", None)
+                _use_accum = bool(
+                    _facc_e is not None and _facc_e.has_samples())
                 _qv_e = (self.state.tracers["q_v"].data
                          if (self.state.tracers is not None
                              and "q_v" in self.state.tracers) else None)
@@ -10958,6 +10987,12 @@ class ModelDriver:
                             _qfrz_e = _fd if _qfrz_e is None else _qfrz_e + _fd
 
                 def _slot(i):
+                    # Interval mean first (the APPLIED quantity); the
+                    # end-of-interval snapshot only when no accumulator ran.
+                    if _use_accum:
+                        _m = _facc_e.mean(i)
+                        if _m is not None:
+                            return jnp.asarray(_m)
                     return (_sd[i].data if (_sd is not None and len(_sd) > i
                                             and _sd[i] is not None) else None)
                 _sw_dn, _sw_up, _lw_up = _slot(5), _slot(4), _slot(3)
@@ -10992,6 +11027,12 @@ class ModelDriver:
                     _ts["energy_residual"].append(float(_eb.residual))
                     _ts["sw_net_sfc"].append(float(_eb.sfc_sw_net))
                     _ts["lw_net_sfc"].append(float(_eb.sfc_lw_net))
+                    # Which flux timing produced this sample.  The closure
+                    # probe refuses to report a leak from snapshots, because a
+                    # contaminated leak is plausible rather than obviously
+                    # broken (#1354).
+                    _ts["energy_flux_interval_mean"].append(
+                        1.0 if _use_accum else 0.0)
                     _ts["hfss"].append(float(_awm(_shf, _awt))
                                        if _shf is not None else float("nan"))
                     _ts["hfls"].append(float(_awm(_lhf, _awt))
