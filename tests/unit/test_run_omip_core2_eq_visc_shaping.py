@@ -56,7 +56,7 @@ def test_tke_lc_etau_reach_the_card():
         orca1_zdftke_config(etau_mode="surface")
 
 
-def test_shear_now2_variant_accepted_and_reaches_card():
+def test_shear_nbb2_variant_accepted_and_reaches_card():
     """nemo_face_native_nbb2 (the key_RK3 Nbb-entry spatial variant) must parse,
     validate, and land in TKEConfig; junk still raises."""
     import pytest

@@ -241,6 +241,7 @@ def validate(deck: Path, root: Path, mesh: Path, plant: bool) -> dict:
             plants["selector_tuple"] = "PASS_NONZERO"
         else:
             raise GateError("selector tuple plant did not fire")
+        raise GateError("SH2 one-bit/selector plants rejected through production gate")
 
     first_debt = rows["production_restored_tuple_record_complete_stencil"]
     if not first_debt["unequal"]:
