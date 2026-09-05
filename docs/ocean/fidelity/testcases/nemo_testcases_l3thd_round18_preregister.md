@@ -122,3 +122,23 @@ record identity and schema; and the location of the existing shared bulk
 machinery.  **PLAUSIBLE / UNMEASURED:** every predicted cross-card movement,
 every ranked NCAR arithmetic owner, and the 0/n target.  No round-18 numerical
 result is claimed here.
+
+## Addendum A1 — prerequisite dry-face discriminator
+
+The first post-preregistration construction run did not reach a numerical
+comparison: both restored flux-UP3 cards produced non-finite stage values.
+This is a newly observed prerequisite failure, not one of the three Rule-12
+movements and not a NEMO result.  The first capable propagation path is now
+frozen before changing code.  The stage-1 velocity has non-finite values only
+in closed faces; stage 2 then passes `u_in * u_mask_3d` to the horizontal UP3
+stencil.  IEEE `NaN * 0` remains NaN, so the closed-face value enters a live
+neighbour stencil.  NEMO's stage statements multiply finite work arrays by
+the 3-D `umask` (`stprk3_stg.F90:367,375,382,444`); its dry operand is exact
+zero.  The ranked discriminator is: (1) materialize exact zero with `where` at
+the existing shared stage-mask boundary; (2) if a live row remains non-finite,
+repeat at the preceding post-tendency mask; (3) otherwise stop.  The one
+variable arm changes only the representation of closed values, which are
+outside the score mask, and must make the first live stage-2 operand finite.
+It is confirmed only if all live rows become finite without moving any earlier
+finite live stage-1 value.  A NaN plant in one closed face must reproduce the
+pre-fix failure; a one-ULP live-cell plant must still make the score red.
