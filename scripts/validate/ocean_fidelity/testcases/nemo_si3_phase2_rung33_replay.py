@@ -330,14 +330,19 @@ def _subcycle(state: ReplayState, initial: ReplayState, q: dict, iteration: int)
     )
     shear = _write(np.zeros_like(stress12), slice(0, -1), shear_value)
     divergence, tension, shear_square = _deformation(u, v, shear, q)
+    first_divergence = divergence
+    first_tension = tension
+    divergence_square = divergence * divergence
+    tension_square = tension * tension
     delta_value = (
         np.sqrt(
-            divergence * divergence
-            + (tension * tension + shear_square) * q["inverse_eccentricity_square"]
+            divergence_square
+            + (tension_square + shear_square) * q["inverse_eccentricity_square"]
         )
         * q["zmsk"]
     )
-    p_over_delta_value = q["strength_t"] / (delta_value + 2.0e-9) * q["zmsk"]
+    delta_floor = delta_value + 2.0e-9
+    p_over_delta_value = q["strength_t"] / delta_floor * q["zmsk"]
     delta = _periodic(_write(np.zeros_like(delta_value), slice(2, -2), delta_value))
     p_over_delta = _periodic(_write(np.zeros_like(delta_value), slice(2, -2), p_over_delta_value))
     divergence, tension, _ = _deformation(u, v, shear, q)
@@ -432,11 +437,16 @@ def _subcycle(state: ReplayState, initial: ReplayState, q: dict, iteration: int)
         * q["vmask_v"]
     )
 
-    def update_u(current_u: np.ndarray, current_v: np.ndarray, region: slice) -> np.ndarray:
-        drag = q["drag_u"] * np.sqrt(
+    def update_u(current_u: np.ndarray, current_v: np.ndarray, region: slice):
+        speed = np.sqrt(
             (current_u - q["ocean_u_u"]) * (current_u - q["ocean_u_u"])
             + (cross_v_u - q["ocean_v_u"]) * (cross_v_u - q["ocean_v_u"])
         )
+        drag = q["drag_u"] * speed
+        ocean_stress = drag * (q["ocean_u_u"] - current_u)
+        bottom_speed = 5.0e-5 + np.sqrt(cross_v_u * cross_v_u + current_u * current_u)
+        bottom_drag = q.get("base_u", np.zeros_like(current_u)) / bottom_speed
+        bottom_stress = bottom_drag * current_u
         coriolis = (
             0.25
             * (1.0 / q["e1u"])
@@ -450,23 +460,46 @@ def _subcycle(state: ReplayState, initial: ReplayState, q: dict, iteration: int)
                 )
             )
         )
-        ocean_stress = drag * (q["ocean_u_u"] - current_u)
         rhs = force_u + q["tau_air_u"] + coriolis + q["slope_u"] + ocean_stress
         beta_u = np.maximum(beta, _roll(beta, -1, 0))
-        value = (
+        denominator = np.maximum(
+            1.0e-20,
+            q["mass_over_dt_u"] * (beta_u + 1.0) + drag - bottom_drag,
+        )
+        raw = (
             q["mass_over_dt_u"] * (beta_u * current_u + initial.u) + rhs + drag * current_u
-        ) / np.maximum(1.0e-20, q["mass_over_dt_u"] * (beta_u + 1.0) + drag)
-        value = (value * q["active_u"] + q["ocean_u_u"] * 0.01 * (1.0 - q["active_u"])) * q[
+        ) / denominator
+        thin = (raw * q["active_u"] + q["ocean_u_u"] * 0.01 * (1.0 - q["active_u"])) * q[
             "mass_mask_u"
         ]
-        value = value * (1.0 - 0.99 * q["fast_u"])
-        return _write(current_u, region, value)
+        value = thin * (1.0 - 0.99 * q["fast_u"])
+        zero = np.zeros_like(current_u)
+        trace = {
+            "tauo_u": _write(zero, region, drag),
+            "ocean_stress_u": _write(zero, region, ocean_stress),
+            "speed_u": _write(zero, region, bottom_speed),
+            "taub_u": _write(zero, region, bottom_drag),
+            "bottom_stress_u": _write(zero, region, bottom_stress),
+            "coriolis_u": _write(zero, region, coriolis),
+            "rhs_u": _write(zero, region, rhs),
+            "beta_u": _write(zero, region, beta_u),
+            "denominator_u": _write(zero, region, denominator),
+            "raw_u": _write(zero, region, raw),
+            "thin_u": _write(zero, region, thin),
+            "prehalo_u": _write(zero, region, value),
+        }
+        return _write(current_u, region, value), trace
 
-    def update_v(current_u: np.ndarray, current_v: np.ndarray, region: slice) -> np.ndarray:
-        drag = q["drag_v"] * np.sqrt(
+    def update_v(current_u: np.ndarray, current_v: np.ndarray, region: slice):
+        speed = np.sqrt(
             (current_v - q["ocean_v_v"]) * (current_v - q["ocean_v_v"])
             + (cross_u_v - q["ocean_u_v"]) * (cross_u_v - q["ocean_u_v"])
         )
+        drag = q["drag_v"] * speed
+        ocean_stress = drag * (q["ocean_v_v"] - current_v)
+        bottom_speed = 5.0e-5 + np.sqrt(current_v * current_v + cross_u_v * cross_u_v)
+        bottom_drag = q.get("base_v", np.zeros_like(current_v)) / bottom_speed
+        bottom_stress = bottom_drag * current_v
         coriolis = (
             -0.25
             * (1.0 / q["e2v"])
@@ -480,36 +513,68 @@ def _subcycle(state: ReplayState, initial: ReplayState, q: dict, iteration: int)
                 )
             )
         )
-        ocean_stress = drag * (q["ocean_v_v"] - current_v)
         rhs = force_v + q["tau_air_v"] + coriolis + q["slope_v"] + ocean_stress
         beta_v = np.maximum(beta, _roll(beta, -1, 1))
-        value = (
+        denominator = np.maximum(
+            1.0e-20,
+            q["mass_over_dt_v"] * (beta_v + 1.0) + drag - bottom_drag,
+        )
+        raw = (
             q["mass_over_dt_v"] * (beta_v * current_v + initial.v) + rhs + drag * current_v
-        ) / np.maximum(1.0e-20, q["mass_over_dt_v"] * (beta_v + 1.0) + drag)
-        value = (value * q["active_v"] + q["ocean_v_v"] * 0.01 * (1.0 - q["active_v"])) * q[
+        ) / denominator
+        thin = (raw * q["active_v"] + q["ocean_v_v"] * 0.01 * (1.0 - q["active_v"])) * q[
             "mass_mask_v"
         ]
-        value = value * (1.0 - 0.99 * q["fast_v"])
-        return _write(current_v, region, value)
+        value = thin * (1.0 - 0.99 * q["fast_v"])
+        zero = np.zeros_like(current_v)
+        trace = {
+            "tauo_v": _write(zero, region, drag),
+            "ocean_stress_v": _write(zero, region, ocean_stress),
+            "speed_v": _write(zero, region, bottom_speed),
+            "taub_v": _write(zero, region, bottom_drag),
+            "bottom_stress_v": _write(zero, region, bottom_stress),
+            "coriolis_v": _write(zero, region, coriolis),
+            "rhs_v": _write(zero, region, rhs),
+            "beta_v": _write(zero, region, beta_v),
+            "denominator_v": _write(zero, region, denominator),
+            "raw_v": _write(zero, region, raw),
+            "thin_v": _write(zero, region, thin),
+            "prehalo_v": _write(zero, region, value),
+        }
+        return _write(current_v, region, value), trace
 
     if (iteration + 1) % 2 == 0:
-        v = update_v(u, v, slice(1, -1))
-        u = update_u(u, v, slice(2, -2))
+        v, trace_v = update_v(u, v, slice(1, -1))
+        u, trace_u = update_u(u, v, slice(2, -2))
     else:
-        u = update_u(u, v, slice(1, -1))
-        v = update_v(u, v, slice(2, -2))
+        u, trace_u = update_u(u, v, slice(1, -1))
+        v, trace_v = update_v(u, v, slice(2, -2))
     result = ReplayState(_periodic(u), _periodic(v), stress1, stress2, stress12)
     checkpoints = {
         "shear": shear,
+        "shear2": shear_square,
+        "divergence": first_divergence,
+        "divergence2": divergence_square,
+        "tension": first_tension,
+        "tension2": tension_square,
         "delta": delta,
+        "delta_floor": delta_floor,
         "p_over_delta": p_over_delta,
         "alpha_t": alpha_t,
+        "inverse_alpha_t": inverse_alpha_t,
         "beta_t": beta,
+        "alpha_f": alpha_f,
+        "inverse_alpha_f": inverse_alpha_f,
+        "p_over_delta_f": p_over_delta_f,
         "stress1": stress1,
         "stress2": stress2,
         "stress12": stress12,
         "force_u": force_u,
         "force_v": force_v,
+        "cross_v_u": cross_v_u,
+        "cross_u_v": cross_u_v,
+        **trace_u,
+        **trace_v,
         "u": result.u,
         "v": result.v,
     }
