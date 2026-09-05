@@ -38,7 +38,7 @@ sha256sum "$NEMO_ROOT/arch/arch-conda-scalarmath.fcm" \
   >"$work_manifest/toolchain_and_instrument.sha256"
 
 cd "$NEMO_ROOT"
-./makenemo -a LOCK_EXCHANGE -n "$TARGET_CFG" -m conda-scalarmath
+./makenemo -a LOCK_EXCHANGE -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
 cp -a "$source_cfg/EXP00/." "$target_cfg/EXP00/"
 cp -a "$source_cfg/MY_SRC/." "$target_cfg/MY_SRC/"
 cp "$instrument" "$target_cfg/MY_SRC/dynspg_ts.F90"
