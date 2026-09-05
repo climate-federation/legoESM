@@ -295,3 +295,10 @@ def test_post_tendency_stage_state_dumps_are_registered_at_the_after_level():
 def test_gyre_stage2_eos_operand_dump_is_registered_at_live_kmm_level():
     assert time_level_for_dump(
         "oracle_rkstage2_eos_operands_kt00000001.bin") == "now"
+
+
+def test_orca2_stage1_wzv_operand_dump_is_registered_at_live_kmm_level():
+    name = "oracle_stage1_wzv_operands_kt00000001.bin"
+    assert time_level_for_dump(name) == "now"
+    source = _DUMP_TIME_LEVEL[name][1]
+    assert "Kbb=1,Kmm=1,Kaa=3" in source
