@@ -217,6 +217,55 @@ def test_geometric_eos_depth_accepts_nemo_eos80():
     assert model.config.eos_depth == "geometric"
 
 
+def test_orca2_card_selects_resolved_rk3_sh2():
+    """ORCA2 pins NEMO's face-native NOW-squared ``zdf_sh2`` tuple.
+
+    The external deck path is supplied by the campaign environment.  Skip
+    only when that immutable input is absent from a generic unit-test host.
+    """
+    from pathlib import Path
+
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_orca2_zps_card,
+        validate_nemo_testcase_card,
+    )
+
+    deck = Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l4/inputs/ORCA2_ICE_v5.0.0")
+    if not deck.exists():
+        pytest.skip("ORCA2 immutable input deck is not installed")
+    card = build_orca2_zps_card(deck)
+    tke = card.recipe.model_config.physics.vertical_mixing.tke
+    assert (
+        tke.tke_shear_production,
+        tke.tke_shear_avm_weighting,
+        tke.tke_shear_evaluation_stage,
+        tke.tke_shear_metric_source,
+    ) == (
+        "nemo_face_native_now2", "nemo_face", "step_entry",
+        "nemo_qco_live_face",
+    )
+    validate_nemo_testcase_card(card)
+
+    # Binding selector plant: the former tuple must be rejected by the real
+    # card validator rather than compared by hand.
+    old_tke = tke._replace(
+        tke_shear_production="squared_centered",
+        tke_shear_avm_weighting="tpoint",
+        tke_shear_metric_source="tpoint_jacobian",
+    )
+    planted_cfg = card.recipe.model_config._replace(
+        physics=card.recipe.model_config.physics._replace(
+            vertical_mixing=(
+                card.recipe.model_config.physics.vertical_mixing._replace(
+                    tke=old_tke))))
+    planted = card._replace(
+        recipe=card.recipe._replace(
+            model_config=planted_cfg, physics_config=planted_cfg.physics))
+    with pytest.raises(ValueError, match="NOW\\*NOW face-native selector"):
+        validate_nemo_testcase_card(planted)
+
+
 # ---------------------------------------------------------------------------
 # Guards RELAXED by the lane-1/lane-2 merge (c9526e585).  Each was an
 # iso-side/merge-base guard that the GYRE lane deleted or narrowed; each is

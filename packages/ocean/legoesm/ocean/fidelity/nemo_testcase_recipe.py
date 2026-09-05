@@ -114,7 +114,17 @@ def _model_config(
             bbl_aht_m2_s=bbl_aht_m2_s,
             whole_step_identity="gyre_vector_ene_c2",
         )
-        tke = base.physics.vertical_mixing.tke._replace(n2_eos_form="eos80")
+        # ORCA2 namelist_cfg:389 selects TKE, so zdfphy.F90:220-223 sets
+        # l_zdfsh2=.TRUE. and :264-286 calls zdf_sh2 before zdf_tke.  Under
+        # key_RK3, stprk3.F90:164-165 passes Kbb=Nbb and Kmm=Nbb: the executed
+        # zdfsh2.F90:78-100 arm is face-native NOW*NOW, with avm summed on the
+        # faces and the same live-QCO face metric in both divisor factors.
+        tke = base.physics.vertical_mixing.tke._replace(
+            n2_eos_form="eos80",
+            tke_shear_production="nemo_face_native_now2",
+            tke_shear_avm_weighting="nemo_face",
+            tke_shear_metric_source="nemo_qco_live_face",
+        )
         convection = base.physics.convection._replace(
             enhanced_diffusion=base.physics.convection.enhanced_diffusion._replace(
                 n2_eos_form="eos80"
@@ -1359,6 +1369,21 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
         else:
             if cfg.eos != "nemo_eos80" or cfg.vorticity_scheme != "een_total":
                 raise ValueError("ORCA2-zps requires EOS-80 and EEN vorticity")
+            tke = cfg.physics.vertical_mixing.tke
+            sh2_tuple = (
+                tke.tke_shear_production,
+                tke.tke_shear_avm_weighting,
+                tke.tke_shear_evaluation_stage,
+                tke.tke_shear_metric_source,
+            )
+            expected_sh2 = (
+                "nemo_face_native_now2", "nemo_face", "step_entry",
+                "nemo_qco_live_face",
+            )
+            if sh2_tuple != expected_sh2:
+                raise ValueError(
+                    "ORCA2-zps requires the RK3 zdf_sh2 NOW*NOW face-native "
+                    f"selector tuple {expected_sh2!r}, got {sh2_tuple!r}")
             if card.surface_boundary_condition != "ncar_core_sbcblk":
                 raise ValueError("ORCA2-zps requires the NCAR/CORE sbcblk card")
             if card.surface_input_operator != "nemo_fld_read":
