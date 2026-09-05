@@ -5,10 +5,10 @@ bit-exact, but the required cross-card trajectories proved that legoESM does
 not carry NEMO's prognostic `uu_b/vv_b(Kbb)` across steps.  Adding that state is
 an open user decision and is not undertaken in Round 21.  Independently, the
 stage-2 Kaa boundary remains DEBT at `2.1986806906376666e-15` U and
-`2.2380914396075147e-15` V.  Round 21 installs the fail-closed acquisition and
-scoring path for the previously unscored stage `ww` boundary; measurement is
-pending the user-executed NEMO twin, so no downstream result inherits a claim
-across either open boundary.
+`2.2380914396075147e-15` V.  Round 21 closes the previously unscored stage
+`ww` boundary AT-BAR at all three stages and refutes the proposed stage-clock
+change.  No downstream result inherits a claim across the two remaining open
+boundaries.
 
 Updated: 2026-09-05
 
@@ -2504,12 +2504,12 @@ registered status remains UNMEASURED rather than being hidden by a mask.
 
 | choice or action | origin | disposition |
 |---|---|---|
-| score tracer-consumed `ww` at stages 1-3 | ASKED item 1 | gate and schema complete; numerical rows UNMEASURED pending user NEMO run |
-| WRITE-only MY_SRC extension and `run.sh` | ASKED conditional | complete; non-overwriting, scalar-math, byte-identity admission |
-| private per-stage WZV-clock arm | ASKED one-variable discriminator | complete; unreachable from public cards; no production fix selected |
-| fix the shared WZV clock | conditional ASKED | NOT AUTHORIZED until GYRE production `ww` scores over bar |
-| LOCK/OVERFLOW/ORCA2 cross-card WZV gates | conditional ASKED | NOT RUN before the GYRE falsifier |
-| EEN external-mode coefficient walk | ASKED item 2 | ordered stop behind the missing GYRE stage-W oracle record |
+| score tracer-consumed `ww` at stages 1-3 | ASKED item 1 | complete; production AT-BAR at all three stages |
+| WRITE-only MY_SRC extension and `run.sh` | ASKED conditional | complete; non-overwriting, scalar-math, consumed-field admission PASS |
+| private per-stage WZV-clock arm | ASKED one-variable discriminator | DEBT at all stages; refutes isolated clock replacement |
+| fix the shared WZV clock | conditional ASKED | condition false; no fix landed |
+| LOCK/OVERFLOW/ORCA2 cross-card WZV gates | conditional ASKED | not applicable because no shared change landed; ORCA2 ablation is consistency-only |
+| EEN external-mode coefficient walk | ASKED item 2 | next ordered boundary |
 | OVERFLOW dry-face NaN producer | ASKED item 3 | UNMEASURED_PENDING_LANE3B_PRODUCER; no consumer mask added |
 | prognostic `uu_b/vv_b` state | open USER DECISION | not implemented or rederived |
 | lane-3b Round-17 Kmm seed | explicitly forbidden | not adopted |
@@ -2565,6 +2565,31 @@ independent binaries, exact consumed projections, and the exact final restart.
 The acquisition is **ADMITTED_WRITE_ONLY** under Rules 1 and 8.  `run.sh` now
 invokes the classifier; its original `EXP00` correction at `9019dc8e5ab` is
 preserved unchanged.
+
+### 21.5 production-JIT stage-W result
+
+The preregistered defect is **REFUTED**.  Against the admitted V2 records,
+production is AT-BAR at every stage:
+
+| stage | production max abs | unequal / wet | private stage-clock arm max abs | arm status |
+|---:|---:|---:|---:|---|
+| 1 | `1.6543612251060553e-23` | `10548 / 18000` | `3.9555664454351783e-7` | DEBT, `18000 / 18000` |
+| 2 | `6.107901643091556e-21` | `17267 / 18000` | `1.9777832227175958e-7` | DEBT, `18000 / 18000` |
+| 3 | `2.68242819152769e-17` | `18000 / 18000` | `3.1361945593164585e-8` | DEBT, `18000 / 18000` |
+
+All figures are production JIT, CPU, binary64, scalar-libm.  The apparent
+stage-1 tracer contradiction is resolved: legoESM's literal WZV call receives
+the full-step `eta_after-eta_before` pair at
+`ocean_model_latlon_cgrid.py:5740-5760`, so its full-step thickness delta and
+full `dt` yield the same stretching rate as NEMO's stage-local delta and
+stage-local `rDt` (`stprk3_stg.F90:123-124,177-178,221-222`;
+`sshwzv.F90:334-335`).  The private arm changes only the denominator while
+retaining the full-step delta, so it fails.  Its stage-3 row also inherits the
+altered stage-1/2 tracer path because the arm is selected for the whole step.
+The ORCA2 production-clock ablation therefore paired different operands and is
+a **CONSISTENCY_PROBE**, not evidence for a shared production change.  No WZV
+clock fix lands and no cross-card physics gate is required for this refuted
+arm.
 
 All Round-21 measurements and harness results are Codex-internal.  Independent
 Round-21 review remains outstanding; no dual-review claim is made.
