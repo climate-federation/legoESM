@@ -226,3 +226,42 @@ def test_nemo_identity_kt5_restart_matches_unbroken_kt6_to_10(tmp_path):
                 np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
     finally:
         set_policy(old_policy)
+
+
+def test_every_stage_barotropic_operand_routes_through_the_time_level_selector():
+    """The three RK3 stage call sites must go through the fail-closed selector.
+
+    The selector's own unit test above pins stprk3.F90:186,195,197,200,207.  It
+    cannot see a call site that bypasses the selector and hands stage 1 the
+    same-step external-mode target directly, which is exactly the defect the
+    round-24 review asked to be guarded.  This walks the AST of the routine
+    that RUNS -- ``LatLonCGridOceanModel._nemo_ws_rk3_step`` and its nested
+    helpers -- and requires every ``barotropic_velocity=`` keyword on the
+    identity path to be a ``_nemo_ws_stage_barotropic_velocity`` call whose
+    first argument is the literal stage number, with 1, 2 and 3 each present
+    exactly once.
+    """
+    import inspect
+    from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as module
+
+    source = Path(inspect.getsourcefile(module)).read_text()
+    tree = ast.parse(source)
+    stages = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != "barotropic_velocity":
+                continue
+            # Unwrap the `None if <legacy arm> else <selector>` guard.
+            value = keyword.value
+            if isinstance(value, ast.IfExp):
+                value = value.orelse
+            assert isinstance(value, ast.Call), ast.dump(keyword.value)
+            assert isinstance(value.func, ast.Name)
+            assert value.func.id == "_nemo_ws_stage_barotropic_velocity", (
+                f"stage operand bypasses the selector: {ast.dump(value.func)}")
+            first = value.args[0]
+            assert isinstance(first, ast.Constant), ast.dump(first)
+            stages.append(first.value)
+    assert sorted(stages) == [1, 2, 3], stages
