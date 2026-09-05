@@ -31,3 +31,25 @@ def test_planted_bad_header_fails_at_row(tmp_path):
         assert "claimed 43, derived 18" in str(exc)
     else:
         raise AssertionError("planted invalid payload count did not bind")
+
+
+def test_round16_counted_headers_are_registered_and_fail_closed(tmp_path):
+    tracer = tmp_path / "oracle_rung36_tracer_owner_frames.bin"
+    with tracer.open("wb") as out:
+        out.write(b"NEMO_L3TR16_001 ")
+        out.write(struct.pack("=9i", 1, 1, 1, 2, 3, 3, 1, 18, 64))
+        out.write(struct.pack("=18d", *range(18)))
+    result = gate.READERS[tracer.name](tracer)
+    assert result["records"] == 1
+
+    trazdf = tmp_path / "oracle_rung36_trazdf_owner_frames.bin"
+    with trazdf.open("wb") as out:
+        out.write(b"NEMO_L3TZ16_001 ")
+        out.write(struct.pack("=9i", 1, 1, 1, 2, 3, 3, 3, 15, 64))
+        out.write(struct.pack("=14d", *range(14)))
+    try:
+        gate.READERS[trazdf.name](trazdf)
+    except gate.HeaderError as exc:
+        assert "wanted 120 bytes, got 112" in str(exc)
+    else:
+        raise AssertionError("round-16 false payload count did not bind")

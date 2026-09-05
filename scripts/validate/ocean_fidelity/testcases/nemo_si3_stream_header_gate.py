@@ -154,6 +154,10 @@ READERS = {
         p, b"NEMO_L3TSB__001 ", 8, 6, 7),
     "oracle_rung36_qsr_frames.bin": lambda p: _counted(
         p, b"NEMO_L3QSR__001 ", 6, 4, 5),
+    "oracle_rung36_tracer_owner_frames.bin": lambda p: _counted(
+        p, b"NEMO_L3TR16_001 ", 9, 7, 8),
+    "oracle_rung36_trazdf_owner_frames.bin": lambda p: _counted(
+        p, b"NEMO_L3TZ16_001 ", 9, 7, 8),
 }
 
 RUNG36_REQUIRED = {
