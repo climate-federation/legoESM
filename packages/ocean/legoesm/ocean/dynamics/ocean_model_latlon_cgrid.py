@@ -1311,7 +1311,7 @@ def _nemo_ws_stage_transport(
     legacy_min_face_thickness=False, eta_before=None, eta_after=None,
     literal_wzv=False, barotropic_velocity=None,
     legacy_wzv_rederived_transport=False,
-    legacy_aimp_midpoint_w_metric=False,
+    legacy_aimp_midpoint_w_metric=False, runoff_mass_flux=None,
 ):
     """NEMO ``stprk3_stg.F90:257-304`` Kmm stage transport triplet.
 
@@ -1401,7 +1401,8 @@ def _nemo_ws_stage_transport(
                 None if legacy_wzv_rederived_transport else (
                     zfu_stage,
                     zfv_stage,
-                )))
+                )),
+            runoff_mass_flux=runoff_mass_flux)
     else:
         w_stage = diagnose_w_from_flux_div(
             stage_div, z_coord, thickness_weighted=True)
@@ -5717,6 +5718,11 @@ class LatLonCGridOceanModel:
                 u_mask_3d=_u_live_mask,
                 v_mask_3d=_v_live_mask, grid=_grid, z_coord=_zc,
                 config=_cfg_b, dt=dt,
+                # RK3 div_hor applies the instantaneous river mass flux to
+                # hdiv independently of the same runoff's external-mode SSH
+                # forcing (sbcrnf.F90:253-260).  Preserve that distinct input.
+                runoff_mass_flux=(
+                    None if freshwater is None else freshwater.runoff),
                 legacy_min_face_thickness=_legacy_min_faces,
                 # wzv's Kbb/Kaa ssh operands (sshwzv.F90:334): the step-entry
                 # level and the barotropic after-level, the same pair NEMO

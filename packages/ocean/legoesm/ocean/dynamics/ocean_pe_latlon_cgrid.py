@@ -1532,11 +1532,64 @@ def nemo_qco_kmm_velocity_cycle(
             u_layout(restored_u_native), v_layout(restored_v_native))
 
 
+def nemo_transport_wzv_divergence_level(
+    flux_u, flux_u_west, flux_v, flux_v_south, r1_area_t, live_e3t,
+    tmask, *, runoff_mass_flux=None, r1_rho0=None,
+):
+    """NEMO ``div_hor(np_transport)`` for one tracer level.
+
+    This is the shared, source-associated block executed at
+    ``divhor.F90:116-126,140-141``.  ``runoff_mass_flux`` is NEMO ``rnf`` in
+    kg m-2 s-1 and is supplied only for the surface level, matching the
+    resolved ``ln_rnf_depth=F`` arm at ``sbcrnf.F90:253-260``.  Explicit
+    neighbor operands make the same implementation usable both on the global
+    card and on a rank-subdomain oracle stencil without inventing a boundary
+    condition in the comparison.
+    """
+    zonal = jax.lax.optimization_barrier(flux_u - flux_u_west)
+    meridional = jax.lax.optimization_barrier(flux_v - flux_v_south)
+    numerator = jax.lax.optimization_barrier(zonal + meridional)
+    transport_div = jax.lax.optimization_barrier(
+        numerator * r1_area_t) * tmask
+    safe_e3t = jnp.where(tmask > 0.5, live_e3t, 1.0)
+    hdiv = jax.lax.optimization_barrier(transport_div / safe_e3t)
+    if runoff_mass_flux is not None:
+        if r1_rho0 is None:
+            r1_rho0 = jax.lax.optimization_barrier(
+                jnp.asarray(1.0, dtype=live_e3t.dtype)
+                / jnp.asarray(constants.rho_ocean_nemo, dtype=live_e3t.dtype))
+        runoff_div = jax.lax.optimization_barrier(
+            jax.lax.optimization_barrier(runoff_mass_flux * r1_rho0)
+            / safe_e3t)
+        hdiv = jax.lax.optimization_barrier(hdiv - runoff_div)
+    return jax.lax.optimization_barrier(live_e3t * hdiv) * tmask
+
+
+def nemo_qco_wzv_recurrence(
+    flux_div, e3t0, r3_before, r3_after, tmask, dt,
+):
+    """NEMO QCO bottom-up W recurrence (``sshwzv.F90:330-336``)."""
+    r3_delta = jax.lax.optimization_barrier(r3_after - r3_before)
+    r1_dt = jax.lax.optimization_barrier(
+        jnp.asarray(1.0, dtype=flux_div.dtype) / dt)
+    stretch_rate = jax.lax.optimization_barrier(
+        (r1_dt * e3t0) * r3_delta[..., None])
+    carry = jnp.zeros_like(r3_before)
+    levels = [None] * flux_div.shape[-1]
+    for jk in range(flux_div.shape[-1] - 1, -1, -1):
+        bracket = jax.lax.optimization_barrier(
+            flux_div[..., jk] + stretch_rate[..., jk])
+        carry = jax.lax.optimization_barrier(
+            carry - bracket * tmask[..., jk])
+        levels[jk] = carry
+    return jnp.stack(levels + [jnp.zeros_like(carry)], axis=-1)
+
+
 def nemo_qco_wzv_operands(
     eta_now, eta_before, u, v, grid, z_coord, u_mask_3d, v_mask_3d,
     mask_3d, dt, freshwater_eta_tendency=None, eta_after_override=None,
     transport_after_override=None, barotropic_velocity_override=None,
-    volume_transport_override=None,
+    volume_transport_override=None, runoff_mass_flux=None,
 ):
     """Coupled QCO ``ww`` + live Kmm face thickness for either WZV call.
 
@@ -1628,19 +1681,11 @@ def nemo_qco_wzv_operands(
         west = jnp.roll(flux_u, 1, axis=1)
         south = jnp.concatenate(
             [jnp.zeros_like(flux_v[:1]), flux_v[:-1]], axis=0)
-        zonal = jax.lax.optimization_barrier(flux_u - west)
-        meridional = jax.lax.optimization_barrier(flux_v - south)
-        numerator = jax.lax.optimization_barrier(zonal + meridional)
-        transport_div = jax.lax.optimization_barrier(
-            numerator * r1_area_t) * tmask[..., jk]
-        # divhor.F90:180-184 divides the transport divergence by live e3t;
-        # ssh_nxt/wzv then multiply by that same e3t.  Preserve the executed
-        # divide/multiply instead of algebraically cancelling it -- row 4 is
-        # sensitive to those last bits through the vertical recurrence.
-        safe_e3t = jnp.where(tmask[..., jk] > 0.5, live_t[..., jk], 1.0)
-        hdiv = jax.lax.optimization_barrier(transport_div / safe_e3t)
-        level = jax.lax.optimization_barrier(
-            live_t[..., jk] * hdiv) * tmask[..., jk]
+        level = nemo_transport_wzv_divergence_level(
+            flux_u, west, flux_v, south, r1_area_t, live_t[..., jk],
+            tmask[..., jk],
+            runoff_mass_flux=(runoff_mass_flux if jk == 0 else None),
+        )
         flux_levels.append(level)
         barotropic_div = jax.lax.optimization_barrier(barotropic_div + level)
     flux_div = jnp.stack(flux_levels, axis=-1)
@@ -1657,23 +1702,8 @@ def nemo_qco_wzv_operands(
             jnp.asarray(eta_after_override, dtype=eta_now.dtype)) * tmask[..., 0]
     r3_after = jax.lax.optimization_barrier(eta_after * r1_h0)
     r3_before = jax.lax.optimization_barrier(eta_before * r1_h0)
-    r3_delta = jax.lax.optimization_barrier(r3_after - r3_before)
-    r1_dt = jax.lax.optimization_barrier(
-        jnp.asarray(1.0, dtype=eta_now.dtype) / dt)
-    stretch_rate = jax.lax.optimization_barrier(
-        (r1_dt * e3t0) * r3_delta[..., None])
-
-    # sshwzv.F90 bottom-up left recurrence.  A static Python loop preserves
-    # source ordering under JIT and remains differentiable.
-    carry = jnp.zeros_like(eta_now)
-    levels = [None] * nlev
-    for jk in range(nlev - 1, -1, -1):
-        bracket = jax.lax.optimization_barrier(
-            flux_div[..., jk] + stretch_rate[..., jk])
-        carry = jax.lax.optimization_barrier(
-            carry - bracket * tmask[..., jk])
-        levels[jk] = carry
-    ww = jnp.stack(levels + [jnp.zeros_like(carry)], axis=-1)
+    ww = nemo_qco_wzv_recurrence(
+        flux_div, e3t0, r3_before, r3_after, tmask, dt)
     return ww, live_u, live_v
 
 
