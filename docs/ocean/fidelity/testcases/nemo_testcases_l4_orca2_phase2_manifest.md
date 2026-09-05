@@ -258,3 +258,30 @@ explicit decision about source-undefined slots.
 The acquisition gate and final receipt are hashed by the handoff commit.  This
 manifest deliberately excludes its own digest; the bundle digest closes the
 review artifact set.
+
+## Phase-2f O1 validation and canonical-writer handoff
+
+Decision 8 treats the seven differing inherited streams as instrument hygiene.
+The schema-fixed run passes O1 and ordinary-output validation.  Its inherited
+records are 84 / 91 raw exact and 91 / 91 exact over source-defined bytes; seven
+one-ULP defined-slot plants and both O1 plants return `PASS_NONZERO`.  The
+994,665-byte JSON and stdout under `phase2f/` each have SHA-256
+`c778b59ac130fbcaf21e184246e2b99fb03d025bf3a13feaacc928f4bbc85d89`.
+
+The config-local writers now emit zero-first canonical views over the owned wet
+rank-0 region.  No model field is assigned and no frozen schema count changes.
+One scalar-math executable is shared by two prepared 10-step runs.
+
+| artifact | bytes | digest |
+|---|---:|---|
+| `build/nemo_ORCA2_OMIP_L4_phase2f_canonical.exe` | 55,129,776 | `5befe21268dc7e2487525aadf4dec4fb1660451eb70bc33c2ffa8e6ceda196c5` |
+| `build/build_ORCA2_OMIP_L4_phase2f_canonical.log` | 7,388 | `eb4e03322be645cab982501843ae51bd632617f28ad876908520d07248fc2cc5` |
+| `build/phase2f_canonical_MY_SRC.sha256` | 2,270 | `5a9bbfdaed3e7d4da05b6fb389fdd7cb058255b9bbcb33a29809220fe1d563a9` |
+| `build/phase2f_canonical_ZGV.txt` | 0 | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| arm-A prepared 63-item manifest | 11,517 | `cc6b165c962fc638df48490f4375d8ddbc6a9a287de1fca52e2b2f6fb7ff2589` |
+| arm-B prepared 63-item manifest | 11,517 | `9ca72ba32c2a539b93ac1b7ad09c9f2a56e14b7e0bf1c863f6f99b56eae1b160` |
+| committed arm-A launcher | 2,276 | `c1bf68b6a71e31813bb00ac46355c8bd39d1576bdfd6362d99ea1a91b2ab84da` |
+| committed arm-B launcher | 2,276 | `2abd81f23c9c4fbbeee81cb9df5c3be659788c169a2d2764a1ff5b2fb8ecc62d` |
+
+The handoff receipt and this self-excluding manifest are closed by the handoff
+commit and bundle digest.  The numerical ladder is not entered in this turn.
