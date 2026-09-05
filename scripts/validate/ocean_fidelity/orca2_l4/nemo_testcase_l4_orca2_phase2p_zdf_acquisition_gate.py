@@ -226,8 +226,11 @@ def read_si3_zdf(path: Path) -> dict[str, object]:
             require(np.isfinite(values).all(), f"{path.name}: non-finite payload")
             frames.append({"kt": kt, "kl": kl, "npti": npti,
                            "derived_payload_f64": count})
-    require(frames, f"{path.name}: no frames")
-    require(last_kt == 10, f"{path.name}: final kt {last_kt} != 10")
+    require(len(frames) == 25, f"{path.name}: frame count {len(frames)} != 25")
+    expected_kt_kl = [(kt, kl) for kt in (1, 3, 5, 7, 9)
+                      for kl in (1, 2, 3, 4, 5)]
+    require([(row["kt"], row["kl"]) for row in frames] == expected_kt_kl,
+            f"{path.name}: frame cadence is not nn_fsbc=2 x five categories")
     return {"path": str(path), "sha256": sha256(path),
             "bytes": path.stat().st_size, "magic": "NEMO_L3ZIN_002",
             "frames": len(frames), "first": frames[0], "last": frames[-1],
@@ -247,7 +250,7 @@ def _artifact_rows(root: Path) -> list[dict[str, object]]:
 
 
 def validate(a: Path, b: Path, inherited: Path, mesh: Path,
-             control: Path) -> dict[str, object]:
+             control: Path, rejected: Path | None = None) -> dict[str, object]:
     from scripts.validate.ocean_fidelity.testcases import (
         nemo_testcase_l4_orca2_phase1_gate as phase1,
     )
@@ -273,6 +276,24 @@ def validate(a: Path, b: Path, inherited: Path, mesh: Path,
                 f"inherited record differs: {name}")
         inherited_rows.append({"file": name, "sha256": sha256(a / name),
                                "status": "EXACT_BYTES"})
+    rejected_row = None
+    if rejected is not None:
+        rejected_inventory = {p.name for p in rejected.glob("oracle_*.bin")}
+        require(rejected_inventory == ia,
+                "rejected Phase-2p inventory differs from replacement")
+        unchanged = rejected_inventory - {NAME}
+        for name in sorted(unchanged):
+            require((a / name).read_bytes() == (rejected / name).read_bytes(),
+                    f"replacement changed non-ZDF record: {name}")
+        require((a / NAME).read_bytes() != (rejected / NAME).read_bytes(),
+                "replacement ZDF record did not change its rejected header")
+        rejected_row = {
+            "status": "SUPERSEDED_REJECTED_MALFORMED_ZDF_HEADER",
+            "raw_exact_excluding_zdf": len(unchanged),
+            "total_excluding_zdf": len(unchanged),
+            "zdf_old_sha256": sha256(rejected / NAME),
+            "zdf_new_sha256": sha256(a / NAME),
+        }
     return {
         "status": "PASS",
         "schemas": {
@@ -291,6 +312,7 @@ def validate(a: Path, b: Path, inherited: Path, mesh: Path,
             "files": sorted(EEN_FILES),
             "disposition": "remain pinned on Phase-2m twin A",
         },
+        "rejected_phase2p_comparison": rejected_row,
     }
 
 
@@ -316,6 +338,11 @@ def _patch(path: Path, offset: int, value: bytes) -> None:
 
 def planted_controls(a: Path, b: Path, inherited: Path, mesh: Path,
                      control: Path) -> dict[str, str]:
+    from netCDF4 import Dataset
+    from scripts.validate.ocean_fidelity.testcases import (
+        nemo_testcase_l4_orca2_phase1_gate as phase1,
+    )
+
     results: dict[str, str] = {}
 
     def expect_schema(label: str, name: str, offset: int, value: bytes,
@@ -365,6 +392,42 @@ def planted_controls(a: Path, b: Path, inherited: Path, mesh: Path,
             raise GateError("owned ZDF payload plant passed")
     finally:
         shutil.rmtree(overlay)
+
+    overlay = _overlay(a)
+    try:
+        restart = next(path.name for path in a.glob("*_restart_0000.nc"))
+        changed = _materialize(overlay, a, restart)
+        _patch(changed, changed.stat().st_size - 1, b"X")
+        try:
+            phase1.validate_identity(control, overlay)
+        except (phase1.GateError, OSError, ValueError):
+            results["restart_identity"] = "PASS_NONZERO"
+        else:
+            raise GateError("restart identity plant passed")
+    finally:
+        shutil.rmtree(overlay)
+
+    overlay = _overlay(a)
+    try:
+        history = phase1.HISTORY[0]
+        changed = _materialize(overlay, a, history)
+        with Dataset(changed, "r+") as dataset:
+            variable = next(v for v in dataset.variables.values()
+                            if v.size and np.issubdtype(v.dtype, np.floating))
+            variable.set_auto_maskandscale(False)
+            index = (0,) * variable.ndim
+            dtype = np.dtype(variable.dtype)
+            value = np.asarray(variable[index], dtype=dtype)
+            variable[index] = np.nextafter(
+                value, np.asarray(np.inf, dtype=dtype), dtype=dtype)
+        try:
+            phase1.validate_identity(control, overlay)
+        except (phase1.GateError, OSError, ValueError):
+            results["history_payload"] = "PASS_NONZERO"
+        else:
+            raise GateError("history payload plant passed")
+    finally:
+        shutil.rmtree(overlay)
     return results
 
 
@@ -374,6 +437,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-b", type=Path, required=True)
     parser.add_argument("--inherited", type=Path, required=True)
     parser.add_argument("--identity-control", type=Path, required=True)
+    parser.add_argument("--rejected-phase2p", type=Path)
     parser.add_argument("--mesh", type=Path, required=True,
                         help="rank-zero mesh_mask_0000.nc from either twin")
     parser.add_argument("--json-out", type=Path)
@@ -385,7 +449,7 @@ def main() -> int:
     args = parse_args()
     try:
         result = validate(args.run_a, args.run_b, args.inherited, args.mesh,
-                          args.identity_control)
+                          args.identity_control, args.rejected_phase2p)
         if args.plants:
             result["plants"] = planted_controls(
                 args.run_a, args.run_b, args.inherited, args.mesh,
