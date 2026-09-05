@@ -62,3 +62,31 @@ tests and passed all 28.
 The manifest deliberately does not hash itself. Git object IDs and the final
 bundle digest are reported in the handoff, providing the immutable review
 closure for all committed files.
+
+## Phase-2b post-`sbc` exchange handoff
+
+This continuation stopped before legoESM arithmetic because the inherited SI3
+record precedes iceberg, runoff, FWB, final halos and U/V interpolation.  Large
+artifacts remain under the same Lane-4 data root.
+
+| artifact | bytes | digest |
+|---|---:|---|
+| `build/nemo_ORCA2_OMIP_L4_phase2b_exchange_schema.exe` | 54,904,016 | `27f02c52b9509201319136deecdf36321ce31324c260796fe646f3bad73a91ec` |
+| `build/build_ORCA2_OMIP_L4_phase2b_exchange_schema.log` | 4,711 | `2262044d9422a8c5553a09a3fd3f147918ef74b5dfeeef0ee734aa614f3d7dc3` |
+| `build/phase2b_exchange_schema_MY_SRC.sha256` | 2,100 | `5dd1f5079839e1bccb91efbd7ff694ed384bffce2bff941c27aab941ec4df337` |
+| `build/phase2b_exchange_schema_ZGV.txt` | 0 | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| `manifests/instrumented_phase2b_exchange_schema_10step_np2_prepared_all_files.sha256` | 11,265 | `b3d61cd6833e22286d522e7b68daa9ea66022a006a2f07b4b8e2c72362b266f9` |
+| retracted flat-schema current census | 10,824 | `6bb61199452c58ca4661b6552e1fa3f2cee71128a5f47a91291d2ec45f284a9a` |
+
+| committed/prepared file | digest before handoff-receipt commit |
+|---|---|
+| `cfgs/ORCA2_OMIP_L4/MY_SRC/stprk3.F90` in NEMO data tree | `1d8d6ef62550d757859c282865e14d7f24fb28a51069799cf27271cad1b59bf7` |
+| `scripts/validate/ocean_fidelity/orca2_l4/nemo_testcase_l4_orca2_phase2b_exchange_gate.py` | `007be5c29655000705c8d515527b393bf2393b96dbb0ce08323dac9f641c3bed` |
+| accepted schema-correct launcher | `56dc3104e2f7c56d35d16c87a5687d4d3f7fc0fc3b55e4a492abda43fba72351` |
+| retracted launcher, exits 69 | `7edbff8a2f9930148407d6eecc257c1aeb89487cbf9ac85491d0c4a28898e5c6` |
+| Phase-2b preregistration | `e269ba82d2c36285c010f1169eae308d667f7e8589758aab6c069b2bf5d98b02` |
+
+The Phase-2b preregistration commits are `109152161` and `383dcefdc`; the
+instrument/gate/launcher preparation commit is `9a816aaaa`.  The handoff
+receipt is intentionally hashed by the final Git commit rather than by this
+self-excluding manifest.
