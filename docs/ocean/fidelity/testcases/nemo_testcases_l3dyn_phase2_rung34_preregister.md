@@ -638,3 +638,92 @@ named DEBT.  No pond or thermodynamic scheme is added.
 | Classify all-exact subcycles as amplification and report the measured exponent | ASKED, conditional | Required only if the defect prediction is refuted |
 | Descend the rung-3.3 `a_ip` one-ULP pond residual after the primary discriminator | ASKED | Secondary dispatch item |
 | Modify canonical core files, shipped NEMO files/tests, model defaults, precision/bar, or add large binary artifacts to git | UNASKED | Outside authorized scope |
+
+## Round-14 step-9 carried-seed producer (registered before measurement)
+
+### Oracle clock and complete input census
+
+The producer search starts from the accepted ICE_RHEO entry frame at `kt=8`
+plus the step-7 restart-carried Prather moments, advances exactly one completed
+outer step, and compares the resulting legoESM entry state with the oracle
+`kt=9` entry frame plus step-8 restart moments.  The source clock is explicit:
+`icestp.F90:151` stores the entry velocities before `ice_sbc_tau` computes the
+ice-relative surface stress at `:158-159`; `icedyn.F90:130-135` then executes
+`rhg -> adv -> rdgrft -> cor`; and `icestp.F90:182-184` reconstructs aggregate
+fields before the next entry.  `icevar.F90:126-132` defines `at_i`, `at_ip`,
+and `ato_i = 1-at_i`, so the card's open-water reconstruction is registered as
+a source-required aggregate, not presumed to be a separately stored NEMO
+prognostic.
+
+The fail-closed entry registry contains:
+
+| family | time level / source | disposition rule |
+|---|---|---|
+| `u_ice`, `v_ice` | stored before forcing, `icestp.F90:151`; consumed as `u_ice_b`, `v_ice_b` by `icedyn_rhg_evp.F90:610-612,665-667,716-718` | score both grids, `0 / n` if exact |
+| `stress1_i`, `stress2_i`, `stress12_i` | restart-carried, `icedyn_rhg.F90:79,92-94`; initialized at `icedyn_rhg_evp.F90:249-252` | score all three, never infer from velocity |
+| `a_i`, `v_i`, `v_s`, `v_ip`, `v_il` | current category state; mass/area operands at `icedyn_rhg_evp.F90:270-288` | score every array and the derived mass/active masks |
+| `oa_i`, `a_ip`, all `e_s`, `e_i`, `szv_i`, `sv_i`, `t_su` | current/restart state in the Appendix-A/frame registry | score or label oracle-zero UNINFORMATIVE |
+| all 160 Prather moments | restart-carried; `icedyn_adv_pra.F90:258-350` | score against the step-8 restart, with no re-derivation |
+| air stress | `icestp.F90:158-159`; `usrdef_sbc.F90:124-140` | source-written replay plus scored downstream oracle arm |
+| ocean current/drag, SSH, Coriolis, masks | `icedyn_rhg_evp.F90:265-329` | score the setup operands against the existing WRITE-only setup record where available |
+| `snwice_mass`, `snwice_mass_b` | `ice_var_sshdyn` input at `icedyn_rhg_evp.F90:265-268` | verify recorded zeros or fail; no implicit waiver |
+| landfast/basal fields | file read at `icedyn.F90:113-125`; branch at `icedyn_rhg_evp.F90:333-374` | this certified card has landfast off; require zero setup rows and label the ORCA1-on arm uncovered |
+
+There is no distinct aEVP "previous velocity" in the solver interface: NEMO's
+`u_ice_b`/`v_ice_b` are the values saved by `store_fields`, while legoESM's
+initial `SI3CGridAEVPState.u_ice_u/v_ice_v` supplies the same carry.  Any
+nonexactness there is therefore a carried-state value difference, not a
+missing second state slot.
+
+### Chronological producer arms and binary predictions
+
+The probe records the first non-bit-exact entry field both in the complete
+registry and in source-production order.  It then evaluates these one-variable
+arms, always against the shipped oracle's `kt=9` frame/restart:
+
+1. **Surface-stress association arm.**  NEMO evaluates wind, relative U/V,
+   magnitude, and stress as separate statements at
+   `usrdef_sbc.F90:124-140`.  The current card groups the normalization and
+   does not materialize every one of those statements
+   (`nemo_rheo_testcase_recipe.py:407-443`).  The preregistered prediction is
+   that this is the first step-8 producer.  CONFIRM requires a non-bit-exact
+   source-stress row, followed by a source-written one-variable arm that moves
+   at least one scored `u_ice`/`v_ice`/stress row toward the oracle.  REFUTE is
+   bit-exact stress or no downstream move.
+2. **Exact dynamics-output arm.**  Replace only the completed step-8 U/V and
+   three stresses with the oracle `kt=9` values before Prather.  If all
+   downstream means and moments then close, rheology/forcing owns them; if not,
+   the first surviving transport or redistribution row becomes owner.
+3. **Oracle-U/V Prather arm.**  Replay `icedyn_adv_pra.F90:218-421` in its
+   written sweep/correction order with oracle step-8 transport velocities and
+   restart-carried moments.  This must reproduce the existing 160/160 exact
+   discriminator; a disagreement is a contradiction that stops attribution.
+4. **Ridging/correction arm.**  Feed the exact Prather output to the jpl=1
+   `icedyn_rdgrft.F90` path, then the literal `ice_cor` order.  The first
+   surviving mean-state row owns the seed.  No moment may be rescaled or
+   regenerated between Prather calls.
+
+The main prediction is therefore **surface-stress producer**; the exact-
+dynamics arm is the discriminator, not an attribution shortcut.  If every
+registered step-9 input is bit-exact while the completed step-9 `v_i` row is
+still nonexact, the result is a **CONTRADICTION** with Round 13 and both claims
+are stopped.  If the input census is nonexact but none of the four arms names a
+statement, the result remains **UNMEASURED** rather than "roundoff".
+
+A planted perturbation must move a named clean step-9 entry row from `0 / n`
+to DEBT, assert that row transition, and exit nonzero independently of the
+ordinary gate's already-red status.  Every measurement is CPU, fp64,
+production JIT, and scalar libm.  No new NEMO execution is permitted in this
+sandbox; if an unrecorded internal is indispensable, a copy-run `run.sh` is
+the stopping deliverable.
+
+### Round-14 ASKED / UNASKED choices
+
+| choice | disposition | reason |
+|---|---|---|
+| Census every step-9 rheology, transport, redistribution, forcing, mask, and carry input and name its step-8 producer | ASKED | Primary dispatch attribution |
+| Use source-ordered, one-variable stage arms and a row-binding plant | ASKED | Ownership and non-vacuity requirements |
+| Stop and report a contradiction if exact entry inputs coexist with the recorded nonexact completed-step row | ASKED, conditional | Round-13 result and Round-14 premise cannot both hold in that case |
+| Repair the immutable-JAX-array replay control and close the `a_ip` pond-operand disposition | ASKED | Queued Round-12 review items |
+| Produce an ORCA1-versus-certified-selector coverage table without implementing new arms | ASKED | Pending user scope decision |
+| Run NEMO from the sandbox, implement landfast/multi-category/thermodynamic arms, change canonical core/defaults/bar, edit shipped files, delete artifacts, use GPU/MPI, or push | UNASKED | Outside authorized scope |
