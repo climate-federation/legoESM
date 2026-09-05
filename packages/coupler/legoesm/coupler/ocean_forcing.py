@@ -51,7 +51,7 @@ from legoesm.core.source_rounding import nemo_source_round
 from legoesm.core.coupling_fields import TileResponse
 from legoesm.coupler.tile_fractions import TileFractions
 from legoesm.ocean.freshwater import FreshwaterForcing
-from legoesm.ocean.state import OceanSurfaceForcing
+from legoesm.ocean.state import NemoRK3SurfaceForcing, OceanSurfaceForcing
 
 # --- under-ice shortwave transmittance (Grenfell & Maykut 1977 / NEMO
 #     fr_sw-under-ice order of magnitude; same default as
@@ -170,6 +170,12 @@ def nemo_si3_exchange_forcing(
         chl=jnp.asarray(chl),
         rCdU_top=jnp.asarray(rCdU_ice),
         snwice_fmass=jnp.asarray(snwice_fmass),
+        # Preserve the literal NEMO operands for the shared key_RK3 stage
+        # placement (trasbc.F90:282-315; traqsr.F90:172-176).  In particular,
+        # do not recover PSS ``sfx`` by undoing the public kg/kg conversion.
+        nemo_rk3_surface=NemoRK3SurfaceForcing(
+            qsr=qsr, qns=jnp.asarray(qns), emp=jnp.asarray(emp),
+            sfx_pss=jnp.asarray(sfx)),
     )
     return freshwater, surface
 
@@ -218,25 +224,15 @@ def nemo_si3_tra_sbc_rk3(
     salt flux.  Penetrative solar radiation is a later, separate boundary.
     """
     validate_nemo_si3_exchange_config(config)
-    sr = nemo_source_round
-    scale = sr(jnp.asarray(inverse_density) / jnp.asarray(layer_thickness))
-    early = jnp.asarray(stage) != 3
-    t_early = sr(
-        jnp.asarray(tendency_t)
-        - sr(sr(jnp.asarray(emp) * jnp.asarray(temperature)) * scale)
+    from legoesm.ocean.physics.surface_forcing.external import (
+        nemo_tra_sbc_rk3_source,
     )
-    s_early = sr(
-        jnp.asarray(tendency_s)
-        - sr(sr(jnp.asarray(emp) * jnp.asarray(salinity)) * scale)
-    )
-    t_late = sr(
-        jnp.asarray(tendency_t)
-        + sr(sr(jnp.asarray(inverse_heat_capacity) * jnp.asarray(qns)) * scale)
-    )
-    s_late = sr(
-        jnp.asarray(tendency_s) + sr(jnp.asarray(salt_flux_pss) * scale)
-    )
-    return jnp.where(early, t_early, t_late), jnp.where(early, s_early, s_late)
+    return nemo_tra_sbc_rk3_source(
+        tendency_t=tendency_t, tendency_s=tendency_s, emp=emp, qns=qns,
+        salt_flux_pss=salt_flux_pss, layer_thickness=layer_thickness,
+        inverse_density=inverse_density,
+        inverse_heat_capacity=inverse_heat_capacity,
+        temperature=temperature, salinity=salinity, stage=stage)
 
 
 def ice_ocean_forcing_from_ice_response(

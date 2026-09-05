@@ -362,6 +362,11 @@ def build_c1d_omip_l3_slab_ocean_card() -> C1DSlabOceanCard:
         bbl_gamma_s=0.0,
     )
     cfg = cfg._replace(
+        # C1D's resolved namelist prints ln_traadv_OFF=T; tra_adv therefore
+        # leaves Krhs unchanged at stprk3_stg.F90:540.  Inheriting the GYRE
+        # FCT selector fed the QCO vertical transport to a branch NEMO did not
+        # execute, despite the one-column horizontal geometry.
+        tracer_advection="off",
         momentum_advection="off",
         # C1D resolves NEMO's ENS Coriolis inside each WS-RK3 3-D momentum
         # tendency.  The shared ``explicit_ab2`` spelling selects that
@@ -381,6 +386,11 @@ def build_c1d_omip_l3_slab_ocean_card() -> C1DSlabOceanCard:
         # barotropic correction in stprk3_stg.F90:437-445.  These are the
         # shared NEMO selectors, not slab-only numerics.
         surface_stress_implicit=True,
+        # sbcfwb.F90:292-295 changes e3t/SSH under nn_fwb_voltype=1; salt is
+        # carried only by SI3's real ``sfx`` source in trasbc.F90:310-313.
+        # The generic virtual-salt closure would apply emp a second time after
+        # the certified RK3 source program.
+        freshwater_closure="real_freshwater",
         bottom_drag=cfg.bottom_drag._replace(
             bottom_drag_r=5.0e-5,  # namdrg_bot resolved linear coefficient
             bottom_drag_bbl_thickness=0.0,

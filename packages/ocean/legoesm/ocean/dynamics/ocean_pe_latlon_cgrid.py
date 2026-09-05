@@ -150,7 +150,7 @@ VALID_MOMENTUM_ADVECTION = frozenset(
 # the flux-form tendency dispatch (its else-raise) plus the SOM special case
 # handled in step().  Keep in sync if a tracer scheme is added.
 VALID_TRACER_ADVECTION = frozenset(
-    {"upwind", "centered", "tvd", "superbee", "ppm", "ppm_fct", "fct2",
+    {"off", "upwind", "centered", "tvd", "superbee", "ppm", "ppm_fct", "fct2",
      "dst3", "dst3_multidim", "weno5", "weno7", "som"}
 )
 # WENO vector-invariant momentum-advection literals (Silvestri et al. 2024).
@@ -3537,7 +3537,9 @@ def _bc_horizontal_viscosity(
             diag_Cl_leith_v, kdiss_h_cell)
 
 
-def nemo_bottom_drag_rate_faces(u, v, h_k, z_coord, config, grid):
+def nemo_bottom_drag_rate_faces(
+    u, v, h_k, z_coord, config, grid, *, rCdU_top=None,
+):
     """NEMO zdfdrg non-linear/log-layer bottom-drag rate at u/v faces,
     PLUS the partial-cell bottom-level indicator mask at those faces.
 
@@ -3602,16 +3604,46 @@ def nemo_bottom_drag_rate_faces(u, v, h_k, z_coord, config, grid):
     # (face l couples cells l-1, l; face n_lon repeats face 0, mirroring
     # the bot_lev_u construction below); v walls take the adjacent
     # interior value (v=0 there, so the coefficient is inert).
-    r_u_inner = nemo_source_round(
-        jnp.asarray(0.5, dtype=r_t.dtype)
-        * nemo_source_round(jnp.roll(r_t, 1, axis=1) + r_t))
+    if rCdU_top is None:
+        r_u_inner = nemo_source_round(
+            jnp.asarray(0.5, dtype=r_t.dtype)
+            * nemo_source_round(jnp.roll(r_t, 1, axis=1) + r_t))
+    else:
+        # dynspg_ts.F90:1611-1612: pCdU is one source statement,
+        # r1_2*((bot_east+bot)+(top_east+top)).  NEMO bottom and top values
+        # are signed non-positive; r_t is legoESM's positive bottom rate.
+        raw_top = jnp.asarray(rCdU_top, dtype=r_t.dtype)
+        signed_bottom = nemo_source_round(-r_t)
+        signed_sum_u = nemo_source_round(
+            nemo_source_round(
+                jnp.roll(signed_bottom, 1, axis=1) + signed_bottom)
+            + nemo_source_round(jnp.roll(raw_top, 1, axis=1) + raw_top))
+        r_u_inner = nemo_source_round(-nemo_source_round(
+            jnp.asarray(0.5, dtype=r_t.dtype) * signed_sum_u))
     r_eff_u = jnp.concatenate([r_u_inner, r_u_inner[:, 0:1]], axis=1)
     if r_t.shape[0] == 1:
-        r_eff_v = jnp.concatenate([r_t, r_t], axis=0)
+        if rCdU_top is None:
+            r_eff_v = jnp.concatenate([r_t, r_t], axis=0)
+        else:
+            signed_bottom = nemo_source_round(-r_t)
+            signed_sum_v = nemo_source_round(
+                nemo_source_round(signed_bottom + signed_bottom)
+                + nemo_source_round(raw_top + raw_top))
+            r_v_inner = nemo_source_round(-nemo_source_round(
+                jnp.asarray(0.5, dtype=r_t.dtype) * signed_sum_v))
+            r_eff_v = jnp.concatenate([r_v_inner, r_v_inner], axis=0)
     else:
-        r_v_int = nemo_source_round(
-            jnp.asarray(0.5, dtype=r_t.dtype)
-            * nemo_source_round(r_t[:-1, :] + r_t[1:, :]))
+        if rCdU_top is None:
+            r_v_int = nemo_source_round(
+                jnp.asarray(0.5, dtype=r_t.dtype)
+                * nemo_source_round(r_t[:-1, :] + r_t[1:, :]))
+        else:
+            signed_sum_v = nemo_source_round(
+                nemo_source_round(
+                    signed_bottom[:-1, :] + signed_bottom[1:, :])
+                + nemo_source_round(raw_top[:-1, :] + raw_top[1:, :]))
+            r_v_int = nemo_source_round(-nemo_source_round(
+                jnp.asarray(0.5, dtype=r_t.dtype) * signed_sum_v))
         r_eff_v = jnp.pad(r_v_int, ((1, 1), (0, 0)), mode="edge")
 
     # Partial-cell bottom-level indicator at u/v faces (face's bottom level
@@ -3635,6 +3667,22 @@ def nemo_bottom_drag_rate_faces(u, v, h_k, z_coord, config, grid):
     return r_eff_u, r_eff_v, is_bot_u_3d, is_bot_v_3d
 
 
+def nemo_top_drag_rate_face_sums(rCdU_top, dtype):
+    """Positive ``-(top_neighbour + top)`` sums before NEMO's half."""
+    raw = jnp.asarray(rCdU_top, dtype=dtype)
+    sum_u_inner = nemo_source_round(
+        -(nemo_source_round(jnp.roll(raw, 1, axis=1) + raw)))
+    sum_u = jnp.concatenate([sum_u_inner, sum_u_inner[:, 0:1]], axis=1)
+    if raw.shape[0] == 1:
+        sum_v_inner = nemo_source_round(-(nemo_source_round(raw + raw)))
+        sum_v = jnp.concatenate([sum_v_inner, sum_v_inner], axis=0)
+    else:
+        sum_v_inner = nemo_source_round(
+            -(nemo_source_round(raw[:-1, :] + raw[1:, :])))
+        sum_v = jnp.pad(sum_v_inner, ((1, 1), (0, 0)), mode="edge")
+    return sum_u, sum_v
+
+
 def nemo_top_drag_rate_faces(rCdU_top, dtype):
     """NEMO signed T-point top drag converted once to positive face rates.
 
@@ -3649,19 +3697,10 @@ def nemo_top_drag_rate_faces(rCdU_top, dtype):
     adjacent T-point coefficient, where the velocity mask makes the rate
     inert.
     """
-    raw = jnp.asarray(rCdU_top, dtype=dtype)
-    raw_u_inner = nemo_source_round(
-        jnp.asarray(0.5, dtype=dtype)
-        * nemo_source_round(jnp.roll(raw, 1, axis=1) + raw))
-    raw_u = jnp.concatenate([raw_u_inner, raw_u_inner[:, 0:1]], axis=1)
-    if raw.shape[0] == 1:
-        raw_v = jnp.concatenate([raw, raw], axis=0)
-    else:
-        raw_v_inner = nemo_source_round(
-            jnp.asarray(0.5, dtype=dtype)
-            * nemo_source_round(raw[:-1, :] + raw[1:, :]))
-        raw_v = jnp.pad(raw_v_inner, ((1, 1), (0, 0)), mode="edge")
-    return nemo_source_round(-raw_u), nemo_source_round(-raw_v)
+    sum_u, sum_v = nemo_top_drag_rate_face_sums(rCdU_top, dtype)
+    half = jnp.asarray(0.5, dtype=dtype)
+    return (nemo_source_round(half * sum_u),
+            nemo_source_round(half * sum_v))
 
 
 def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid,
@@ -4900,10 +4939,22 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             )
     _sf_implicit = bool(getattr(config, "surface_forcing_implicit", False))
     _stress_implicit = bool(getattr(config, "surface_stress_implicit", False))
+    # NEMO key_RK3 applies these four raw tracer fluxes inside every WS stage
+    # (trasbc.F90:282-315, then traqsr.F90:172-176 at stage 3).  The optional
+    # raw operand bundle is produced only by the indivisible NEMO-SI3 exchange
+    # mapper.  Withhold its convention-neutral duplicates here; the shared
+    # RK3 program consumes the raw values later.  Stress stays on this path.
+    _nemo_rk3_surface = (
+        getattr(surface_forcing, "nemo_rk3_surface", None)
+        if surface_forcing is not None else None)
+    _external_surface_forcing = surface_forcing
+    if _nemo_rk3_surface is not None:
+        _external_surface_forcing = surface_forcing._replace(
+            q_net=None, sw_down=None, freshwater=None, salt_flux=None)
     (du_dt, dv_dt, dT_dt, dS_dt, dT_surf_heat,
      diag_surface_stress_u, diag_surface_stress_v) = (
         _bc_external_surface_forcing(
-            du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S,
+            du_dt, dv_dt, dT_dt, dS_dt, _external_surface_forcing, u, v, T, S,
             h_k, z_coord, J, grid, rho_0, mask, mask_3d,
             route_heat_to_implicit=_sf_implicit,
             withhold_stress=_stress_implicit,

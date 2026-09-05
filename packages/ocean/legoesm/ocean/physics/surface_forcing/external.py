@@ -59,6 +59,40 @@ from legoesm.ocean.physics.surface_forcing._shared import (
 )
 from legoesm.ocean.physics.surface_forcing.output import SurfaceForcingOutput
 
+
+def nemo_tra_sbc_rk3_source(
+    *, tendency_t, tendency_s, emp, qns, salt_flux_pss, layer_thickness,
+    inverse_density, inverse_heat_capacity, temperature, salinity, stage,
+):
+    """NEMO ``trasbc.F90:282-315`` surface RHS in statement order.
+
+    Stages one and two carry the Kbb tracer with ``emp``; stage three adds
+    non-solar heat and real PSS salt.  Solar remains the following
+    ``tra_qsr`` operator.  This is the single ocean-side implementation used
+    by the SI3 mapper's compatibility wrapper and the WS-RK3 step.
+    """
+    from legoesm.core.source_rounding import nemo_source_round as sr
+
+    scale = sr(jnp.asarray(inverse_density) / jnp.asarray(layer_thickness))
+    early = jnp.asarray(stage) != 3
+    t_early = sr(
+        jnp.asarray(tendency_t)
+        - sr(sr(jnp.asarray(emp) * jnp.asarray(temperature)) * scale)
+    )
+    s_early = sr(
+        jnp.asarray(tendency_s)
+        - sr(sr(jnp.asarray(emp) * jnp.asarray(salinity)) * scale)
+    )
+    t_late = sr(
+        jnp.asarray(tendency_t)
+        + sr(sr(jnp.asarray(inverse_heat_capacity) * jnp.asarray(qns)) * scale)
+    )
+    s_late = sr(
+        jnp.asarray(tendency_s) + sr(jnp.asarray(salt_flux_pss) * scale)
+    )
+    return jnp.where(early, t_early, t_late), jnp.where(
+        early, s_early, s_late)
+
 __physics_contract__ = {
     "summary": (
         "External (coupler-provided) surface forcing: apply an "

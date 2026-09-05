@@ -2284,10 +2284,11 @@ def barotropic_substeps_latlon_cgrid(
         _u_drg = u_corr if u_now is None else u_now.astype(_dt)
         _v_drg = v_corr if v_now is None else v_now.astype(_dt)
         _r_u_bt, _r_v_bt, _, _ = nemo_bottom_drag_rate_faces(
-            _u_drg, _v_drg, _hk_now, z_coord, config, grid)
+            _u_drg, _v_drg, _hk_now, z_coord, config, grid,
+            rCdU_top=rCdU_top)
         _drag_r_u = _r_u_bt.astype(_dt)
         _drag_r_v = _r_v_bt.astype(_dt)
-    if rCdU_top is not None:
+    if rCdU_top is not None and _drag_r_u is None:
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
             nemo_top_drag_rate_faces,
         )

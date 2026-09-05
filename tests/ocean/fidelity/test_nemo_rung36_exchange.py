@@ -173,6 +173,8 @@ def test_c1d_slab_ocean_card_reuses_shared_rk3_stack() -> None:
     assert np.all(np.asarray(card.recipe.initial_state.v_mask.data) == 1.0)
     assert cfg.momentum_time_integrator == "rk3_ws"
     assert cfg.tracer_time_integrator == "rk3_ws"
+    assert cfg.tracer_advection == "off"
+    assert cfg.freshwater_closure == "real_freshwater"
     assert cfg.barotropic.barotropic_time_filter == "nemo_boxcar1_ab3"
     assert cfg.barotropic.n_barotropic_substeps == 631
     assert cfg.barotropic_drag_substep is True

@@ -327,6 +327,25 @@ class OceanSurfaceForcing(NamedTuple):
                                   # negative raw sign exactly once.
     snwice_fmass: object = None   # jnp.ndarray | None; ice+snow mass change
                                   # [kg/m2/s], budget input to NEMO sbcfwb.
+    nemo_rk3_surface: object = None  # NemoRK3SurfaceForcing | None.  Raw
+                                     # NEMO tra_sbc_RK3/tra_qsr operands;
+                                     # consumed only by the shared RK3 identity.
+
+
+class NemoRK3SurfaceForcing(NamedTuple):
+    """Raw source-time-level operands for NEMO's WS-RK3 tracer boundary.
+
+    The ordinary :class:`OceanSurfaceForcing` fields remain the public
+    convention-neutral exchange.  This optional companion preserves NEMO's
+    pre-conversion ``emp`` and PSS ``sfx`` values so ``trasbc.F90:282-315``
+    can execute at each stage without a multiply/divide reconstruction.
+    ``qsr`` remains separate from ``qns`` for ``traqsr.F90:172-176``.
+    """
+
+    qsr: object
+    qns: object
+    emp: object
+    sfx_pss: object
 
 
 class OceanConfig(NamedTuple):
