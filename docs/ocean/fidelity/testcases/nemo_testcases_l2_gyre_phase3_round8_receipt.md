@@ -4537,6 +4537,21 @@ against it.
 in 49.39s`.  The five remaining need the configuration decision in open
 question 2 and are NOT round-26 regressions.
 
+The whole module the BBL fix touches was then re-run at the round-26 tip on a
+clean tree, so the fix is confirmed against its 30 neighbours and not only
+against itself:
+
+```text
+tests/ocean/unit/test_nemo_ws_tracer_rk3.py
+======================= 31 passed in 1468.36s (0:24:28) ========================
+```
+
+That module also carries `test_nemo_qco_gdept_z0_oracle_bit_pattern`, so the
+restored bit-pattern pair is green in the same run.  The new eligibility gate's
+reader guards are `7 passed in 0.06s`, and they were shown non-vacuous by
+deleting the reader's time-level guard, which turned two of them red with
+`DID NOT RAISE` before the file was restored.
+
 ### OVERFLOW's seven Rule-12 rows, against the same boundary
 
 The LOCK result generalizes what OVERFLOW's own gate had already recorded and

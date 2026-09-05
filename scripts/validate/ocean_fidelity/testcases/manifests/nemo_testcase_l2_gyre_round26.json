@@ -70,7 +70,8 @@
     "1cf9af39e52b docs(ocean): record the round-26 review, its four retractions and one refutation",
     "ee02b609bcbf docs(ocean): refresh the round-26 manifest for the renamed rows and their plants",
     "28c3152a2ccb test(ocean): close the stage-operand guard's second hole, on the operands",
-    "aefdc9ef945e fix(ocean): make the admission --writer flag fail closed on mixed record kinds"
+    "aefdc9ef945e fix(ocean): make the admission --writer flag fail closed on mixed record kinds",
+    "73e482eb092d docs(ocean): both reviewer NITs were real holes; record the fixes"
   ],
   "corrections": {
     "footgun": "pgf_scheme='nemo_sco' returns dp_dx/dp_dy as literal zeros (ocean_pe_latlon_cgrid.py:2045-2046); the acceleration is in direct_hpg_u/v",
@@ -228,5 +229,11 @@
     "prediction": "CONFIRMED on LOCK and OVERFLOW",
     "retraction": "The round-26 'dumped frame is dyn_hpg alone' claim and its citation of stprk3_stg.F90:309-334 (the CASE(2,3) block, never run at stage 1) are REFUTED by two independent reviews and re-measured. The row value is unchanged; its isolation claim is withdrawn."
   },
-  "starting_tip": "991f9f95047d"
+  "starting_tip": "991f9f95047d",
+  "tests": {
+    "six_preexisting_failures": "one FIXED (overflow BBL liveness), five remain and need a configuration decision",
+    "tests/ocean/fidelity/test_nemo_testcase_rule12_hpg_eligibility.py": "7 passed in 0.06s; non-vacuity shown by deleting the reader time-level guard (2 red, DID NOT RAISE)",
+    "tests/ocean/unit/test_nemo_recipe.py": "5 failed, 19 passed in 49.39s (the five are open question 2)",
+    "tests/ocean/unit/test_nemo_ws_tracer_rk3.py": "31 passed in 1468.36s"
+  }
 }
