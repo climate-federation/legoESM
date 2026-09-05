@@ -1,13 +1,15 @@
-# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–17 boundary receipt
+# NEMO testcase lane 2 GYRE — Phase 3 rounds 8–21 boundary receipt
 
-**Verdict: DEBT.  Round 17 converged per-statement rounding to one core owner
-and made stage-1 HPG/Krhs, the depth reduction, and post-drag slow forcing
-bit-exact against Oracle V2 under production JIT/CPU/fp64/scalar-libm.  The
-first remaining boundary is the surface-wind assembly (`6.62e-24`, 3 ULP U / 4
-ULP V), so the conditional trajectory, cross-card, stage-2, and stage-3 work
-was not entered.**
+**Verdict: HOLD.**  Round 20 made GYRE's kt1 stage-transport composition
+bit-exact, but the required cross-card trajectories proved that legoESM does
+not carry NEMO's prognostic `uu_b/vv_b(Kbb)` across steps.  Adding that state is
+an open user decision and is not undertaken in Round 21.  Independently, the
+stage-2 Kaa boundary remains DEBT at `2.1986806906376666e-15` U and
+`2.2380914396075147e-15` V.  Round 21 first closes the previously unscored
+stage `ww` coverage gap; no downstream result inherits a claim across either
+open boundary.
 
-Date: 2026-09-04
+Updated: 2026-09-05
 
 Round-12 implementation commit: `afd6a2082047bbafcddf9ede4acf1ae44d0ec028`
 
@@ -2383,3 +2385,64 @@ The machine-readable artifact ledger is
 `scripts/validate/ocean_fidelity/testcases/manifests/nemo_testcase_l2_gyre_round20.json`.
 All Round-20 review remains **independent review outstanding**; these are
 Codex-internal measurements and no dual-review claim is made.
+
+## Round 21 — vertical-velocity coverage preregistration
+
+Starting tip: `fa14627631d8a7babd4701b939b57cad360ca2ed` (Round 20, imported
+only to `fidelity/nemo-testcases-l2-gyre-codex2`; integration remains at
+`03c6e8d96ff7`).  Regime remains production JIT, CPU, binary64, Oracle V2,
+and explicit scalar-libm.  No Round-17 Kmm seed from lane 3b is adopted.
+
+### 21.1 preregistered stage-W clock discriminator
+
+Source coverage found a real blind spot.  GYRE's existing
+`oracle_transport_kt00000001_s{1,2,3}.bin` is emitted at
+`stprk3_stg.F90:257-304`, before vector-invariant tracer advection calls
+`tra_adv_trp`.  In the executed vector-invariant arm `zFw` is filled only by
+`traadv.F90:220-235`, after its `wzv(...,np_transport)` call.  Therefore the
+existing stage-1 `zFw` row is explicitly UNINFORMATIVE and no existing V2
+record can score the tracer-consumed `ww` for all three stages.
+
+NEMO sets the stage-local clock before those calls: `rn_Dt/3` at
+`stprk3_stg.F90:118-124`, `rn_Dt/2` for stage 2, and `rn_Dt` for stage 3;
+`sshwzv.F90:334-335` consumes its reciprocal in the QCO thickness-change
+term.  legoESM builds one `_stage_transport_kw` with the full `dt` and reuses
+it for all three `_nemo_ws_stage_transport` calls.  The preregistered rows are
+the actual post-`tra_adv_trp` `ww` at stages 1, 2, and 3, over every wet
+T/W-owned cell, printed as differing / scored.
+
+Prediction: full-step production `dt` is DEBT at stages 1 and 2 and AT-BAR at
+stage 3.  A private one-variable arm supplying `(rn_Dt/3,rn_Dt/2,rn_Dt)` must
+make every over-bar stage row `0 / n`; a one-ulp wet-cell plant must exit 1.
+The prediction is REFUTED if production is already AT-BAR in all three rows,
+in which case the ORCA2 finding belongs to its gate/operand pairing and no
+production fix lands.  The apparent contradiction with bit-exact stage-1 T/S
+is not explained in advance: after `ww` is measured, the tracer tendency at
+the affected cells must either be identically insensitive or the prior T/S
+row must be retracted.
+
+Because the required GYRE record is absent, this round first adds a
+config-local WRITE-only `traadv.F90` extension and a non-overwriting `run.sh`.
+The ordinary stage/restart files must hash identically to the pinned V2 record
+before the new record is admitted.  Per the dispatch, Codex does not execute
+NEMO from the sandbox.  No WZV clock change is authorized until the returned
+record scores production over bar.
+
+### 21.2 ordered stops
+
+The ORCA2 phase-2i/2j handoff was searched at imported source tip
+`3e425e24ded84e9bd1cbba7af492aaec43e99170`.  It identifies the first EEN
+external-mode operand at `dynspg_ts.F90:1514-1570` and its consumer at
+`:1685-1694`; all eight coefficient arrays are DEBT there.  This walk remains
+ordered after the stage-W discriminator and is not entered while the GYRE
+oracle acquisition is outstanding.  Likewise, lane 3b has not yet handed off
+a dry-face NaN producer statement; the OVERFLOW NaN remains registered as
+**UNMEASURED_PENDING_LANE3B_PRODUCER** and will never be masked at the
+consumer.
+
+The two pre-existing HOLD items remain explicit:
+
+| boundary | status | required decision / next measurement |
+|---|---|---|
+| prognostic `uu_b/vv_b(Kbb)` | HOLD — design decision pending | NEMO declares and restarts it (`oce.F90:39,99`; `restart.F90:181,313`), writes it in `dynspg_ts.F90:862,879,890`, and reads it at `stprk3_stg.F90:262-263`; do not rederive |
+| stage-2 Kaa | DEBT: U `2.1986806906376666e-15`, V `2.2380914396075147e-15` | resume the Krhs/update walk only after the stage-W coverage result |
