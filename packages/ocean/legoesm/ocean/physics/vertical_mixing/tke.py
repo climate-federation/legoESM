@@ -2759,15 +2759,15 @@ def tke_vertical_mixing(
     _shear_disc = getattr(cfg, "tke_shear_production", "squared_centered")
     if _shear_disc not in (
             "squared_centered", "nemo_burchard", "nemo_face_native",
-            "nemo_face_native_now2"):
+            "nemo_face_native_nbb2"):
         raise ValueError(
             "Unknown TKEConfig.tke_shear_production shear-discretization: "
             "must be one of ('squared_centered', 'nemo_burchard', "
-            "'nemo_face_native', 'nemo_face_native_now2'), "
+            "'nemo_face_native', 'nemo_face_native_nbb2'), "
             f"got {_shear_disc!r}.")
     _face_native_inputs = (u_face_now, v_face_now, u_face_before,
                           v_face_before, face_masks_3d)
-    if _shear_disc in ("nemo_face_native", "nemo_face_native_now2"):
+    if _shear_disc in ("nemo_face_native", "nemo_face_native_nbb2"):
         if (_shear_stage == "implicit_solve_state"
                 and _shear_disc == "nemo_face_native" and (
                     u_before_cell is None or v_before_cell is None)):
@@ -3119,11 +3119,11 @@ def _validate_post_mixing_cfg(cfg: TKEConfig) -> None:
         )
     _tke_shear = getattr(cfg, "tke_shear_production", "squared_centered")
     if _tke_shear not in ("squared_centered", "nemo_burchard",
-                          "nemo_face_native", "nemo_face_native_now2"):
+                          "nemo_face_native", "nemo_face_native_nbb2"):
         raise ValueError(
             "Unknown TKEConfig.tke_shear_production shear-discretization: "
             "must be one of ('squared_centered', 'nemo_burchard', "
-            "'nemo_face_native', 'nemo_face_native_now2'), "
+            "'nemo_face_native', 'nemo_face_native_nbb2'), "
             f"got {_tke_shear!r}.")
     _avm_w = getattr(cfg, "tke_shear_avm_weighting", "tpoint")
     if _avm_w not in ("tpoint", "nemo_face"):
@@ -3137,7 +3137,7 @@ def _validate_post_mixing_cfg(cfg: TKEConfig) -> None:
             "never assembles the face-weighted p_sh2 and would silently keep "
             "the tpoint weighting. Use the standard pre_mixing path.")
     if timing == "post_mixing_veros" and _tke_shear in (
-            "nemo_burchard", "nemo_face_native", "nemo_face_native_now2"):
+            "nemo_burchard", "nemo_face_native", "nemo_face_native_nbb2"):
         raise ValueError(
             f"TKEConfig.tke_shear_production={_tke_shear!r} is not "
             "supported with buoyancy_timing='post_mixing_veros' — "

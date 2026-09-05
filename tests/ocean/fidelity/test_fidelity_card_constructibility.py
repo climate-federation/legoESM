@@ -242,7 +242,7 @@ def test_orca2_card_selects_resolved_rk3_sh2():
         tke.tke_shear_evaluation_stage,
         tke.tke_shear_metric_source,
     ) == (
-        "nemo_face_native_now2", "nemo_face", "step_entry",
+        "nemo_face_native_nbb2", "nemo_face", "step_entry",
         "nemo_qco_live_face",
     )
     assert tke.bottom_tke_bc is True
@@ -263,7 +263,7 @@ def test_orca2_card_selects_resolved_rk3_sh2():
     planted = card._replace(
         recipe=card.recipe._replace(
             model_config=planted_cfg, physics_config=planted_cfg.physics))
-    with pytest.raises(ValueError, match="NOW\\*NOW face-native selector"):
+    with pytest.raises(ValueError, match="Nbb\\*Nbb face-native selector"):
         validate_nemo_testcase_card(planted)
 
     bottom_off = tke._replace(bottom_tke_bc=False)

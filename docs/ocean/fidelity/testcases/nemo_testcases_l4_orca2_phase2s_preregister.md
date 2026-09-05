@@ -22,7 +22,7 @@ The single ORCA2 card changes only this explicit selector tuple:
 
 | field | current | corrected NEMO identity |
 |---|---|---|
-| `tke_shear_production` | `squared_centered` | `nemo_face_native_now2` |
+| `tke_shear_production` | `squared_centered` | `nemo_face_native_nbb2` (renamed in Phase 2u; same preregistered arm) |
 | `tke_shear_avm_weighting` | `tpoint` | `nemo_face` |
 | `tke_shear_metric_source` | `tpoint_jacobian` | `nemo_qco_live_face` |
 | `tke_shear_evaluation_stage` | `step_entry` | `step_entry` (unchanged) |
@@ -109,4 +109,3 @@ an ORCA2 forcing operand (`taum`, `fr_i`, `rCdU_bot`) remains Lane 4.
 | extend scalar libm here | Decision 9 assigns ice-thermo | not done in Lane 4 |
 | change shared SH2/TKE arithmetic | forbidden in Lane 4 | none planned |
 | sandbox MPI/NEMO, shipped edit, deletion, push | forbidden | none planned |
-

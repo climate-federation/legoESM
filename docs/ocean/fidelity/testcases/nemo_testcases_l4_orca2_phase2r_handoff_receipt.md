@@ -131,11 +131,11 @@ cannot create missing physical shear.
 **CONFIRMED / FIRST BOUNDARY:** after the entry-state repair, the first
 departure is the ORCA2 card selector tuple.  It remains
 `squared_centered/tpoint/tpoint_jacobian`, while the resolved RK3 oracle calls
-the source arm as face-native NOW×NOW, face-summed `avm_k`, and live QCO face
+the source arm as face-native Nbb×Nbb at step entry, face-summed `avm_k`, and live QCO face
 metrics.  Owner: `LANE4_ORCA2_CARD_SELECTOR`.  Selecting the faithful tuple
-also exposes a shared dispatch requirement: the `nemo_face_native_now2`
-metric path must use NOW as both Kmm and Kbb instead of requiring a leapfrog
-`eta_before`.  Because this phase is forbidden to alter shared SH2/TKE code,
+also exposes a shared dispatch requirement: the `nemo_face_native_nbb2`
+metric path must use Nbb as both Kmm and Kbb instead of requiring the MLF Nnn
+slot.  Because this phase is forbidden to alter shared SH2/TKE code,
 the selector is registered and the walk stops before `tke_tke`.
 
 The reproducer handed to `GYRE_OWNER_SHARED_TKE` is:
@@ -261,10 +261,10 @@ No multi-megabyte artifact is added to git.
 Phase 2r stops at `LANE4_ORCA2_CARD_SELECTOR` before `tke_tke`.  The next
 round must:
 
-1. make the shared `nemo_face_native_now2` SH2 entry dispatch consume NOW for
+1. make the shared `nemo_face_native_nbb2` SH2 entry dispatch consume Nbb for
    both QCO metric factors under RK3, owned and reviewed by the GYRE/shared-TKE
    lane;
-2. set the ORCA2 card to the exact face-native NOW² / `nemo_face` /
+2. set the ORCA2 card to the exact face-native Nbb² / `nemo_face` /
    `nemo_qco_live_face` tuple, with a nonzero-shear discriminator rather than
    relying on the vacuous cold start; and
 3. only after that selector boundary closes, walk the first executed

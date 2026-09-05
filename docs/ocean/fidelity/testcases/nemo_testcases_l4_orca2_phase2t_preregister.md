@@ -41,15 +41,15 @@ velocity difference by a Kbb velocity difference, and divides by the matching
 Kmm and Kbb face thicknesses.  The executed RK3 caller, however, invokes
 `zdf_phy(kstp,Nbb,Nbb,Nrhs)` at `stprk3.F90:163-165`; `zdfphy.F90:264-269`
 passes those aliased values to `zdf_sh2`.  Therefore this ORCA2 executable
-uses Nbb×Nbb (NOW×NOW), not distinct NOW×BEFORE values.  The apparent conflict
-is preregistered as formal-argument semantics versus the executed call-site
-alias, and the receipt will preserve both citations.
+uses Nbb×Nbb at whole-step entry, not distinct Kmm/Kbb values.  The apparent
+conflict is preregistered as formal-argument semantics versus the executed
+call-site alias, and the receipt will preserve both citations.
 
 The admitted kt=2 frame must be non-vacuous.  Under production JIT, CPU,
 binary64, and scalar-libm policy, the gate will score on owned wet rank-zero
 cells:
 
-1. the ORCA2 production card's restored face-native NOW×NOW selector; and
+1. the ORCA2 production card's restored face-native Nbb×Nbb selector; and
 2. the shared source-literal face-native routine called directly with the
    record's Nbb operands.
 
@@ -111,7 +111,7 @@ round.  This is a second execution record, not a new implementation.
 | action | classification | disposition |
 |---|---|---|
 | admit and pin Phase-2s twins | ASKED | gated as P2T-1; no pin before PASS |
-| re-verify SH2 NOW×NOW vs NOW×BEFORE | ASKED | source expression plus actual call alias both cited |
+| re-verify SH2 Kmm/Kbb levels | ASKED | source expression plus actual Nbb/Nbb call alias both cited |
 | restore `bottom_tke_bc` if false is wrong | ASKED identity restoration | preregistered `False -> True`, conditional on production wiring audit |
 | walk TKE to first non-bit | ASKED | ordered, fail-closed, no proxy targets |
 | repeat three BBL gates/plants | ASKED | independent executions |

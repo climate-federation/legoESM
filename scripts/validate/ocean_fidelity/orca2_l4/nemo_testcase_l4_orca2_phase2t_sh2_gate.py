@@ -161,7 +161,7 @@ def validate(deck: Path, root: Path, mesh: Path, plant: bool) -> dict:
         cfg.tke_shear_evaluation_stage, cfg.tke_shear_metric_source,
     )
     tuple_expected = (
-        "nemo_face_native_now2", "nemo_face", "step_entry",
+        "nemo_face_native_nbb2", "nemo_face", "step_entry",
         "nemo_qco_live_face",
     )
     require(tuple_got == tuple_expected,

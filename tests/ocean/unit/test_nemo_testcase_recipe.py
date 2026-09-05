@@ -56,10 +56,11 @@ def test_orca2_structural_guard_rejects_iceberg_option_drift():
     # deck-backed state in this small unit test.
     good = build_gyre_zco_card()
     tke = good.recipe.model_config.physics.vertical_mixing.tke._replace(
-        tke_shear_production="nemo_face_native_now2",
+        tke_shear_production="nemo_face_native_nbb2",
         tke_shear_avm_weighting="nemo_face",
         tke_shear_evaluation_stage="step_entry",
         tke_shear_metric_source="nemo_qco_live_face",
+        bottom_tke_bc=True,
     )
     card = good._replace(
         case="ORCA2-zps",

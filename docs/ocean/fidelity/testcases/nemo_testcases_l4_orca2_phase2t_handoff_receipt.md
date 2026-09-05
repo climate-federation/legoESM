@@ -45,8 +45,9 @@ The new, non-vacuous kt=2 record is
 `oracle_zdf_sh2_operands_kt00000002.bin`, SHA-256
 `9642aa7a674d240fba64251bc27318b8207aaeabd50fb492c229fef644df6c27`.
 Each ZDF header carries every field extent, an allocation-table hash, a
-derived payload count, and the time-level indices; the validator needs no
-side knowledge and consumes each file to exact EOF.
+derived payload count, and the time-level indices; the decoder needs no side
+knowledge and consumes each file to exact EOF.  The allocation table is used
+for validation only, never to decode the record.
 
 Twin A is now the single pinned `VARIANT_ORACLE_V2` root.  Twin B is the raw
 identity witness.  The Phase-2m, 2n, 2p, and 2q roots remain retained and are
@@ -69,19 +70,20 @@ Evidence:
 ## 2. Executed SH2 arm and non-vacuous score
 
 **CONFIRMED:** NEMO's source expression is formally Kmm times Kbb, but the
-executed ORCA2 RK3 arm is NOW times NOW:
+executed ORCA2 RK3 arm uses the Nbb whole-step-entry slot twice:
 
 1. `namelist_cfg:387-396` selects TKE/EVD/DDM/IWM rather than CST/OSM/RIC.
    `zdfphy.F90:56,221-222` therefore derives `l_zdfsh2=.TRUE.`; it is not an
    independently selectable namelist switch.
 2. `zdfsh2.F90:80-89` formally multiplies Kmm and Kbb face-native shear and
    divides by Kmm and Kbb face thickness.
-3. `stprk3.F90:163-165` calls `zdf_phy(kstp,Nbb,Nbb,Nrhs)`.
+3. `stprk3.F90:163-165` comments out the MLF-form
+   `zdf_phy(kstp,Nbb,Nnn,Nrhs)` and calls `zdf_phy(kstp,Nbb,Nbb,Nrhs)`.
 4. `zdfphy.F90:264-269` passes those two actual arguments to `zdf_sh2`.
 
 Thus both formals alias Nbb in the running executable.  The reviewer's
-NOW-times-BEFORE reading describes the formal expression under distinct
-arguments, not this call site.
+cross-level reading describes the formal expression under distinct MLF
+arguments (`stpmlf.F90:190`), not this RK3 call site.
 
 **CONFIRMED:** the kt=2 header reports `Kbb=3`, `Kmm=3`, `Krhs=1`; its U and V
 Kbb/Kmm arrays are byte-identical and have 217,668 and 218,048 nonzero
@@ -230,7 +232,7 @@ record.  No downstream TKE result is inferred from that expectation.
 |---|---|---|
 | admit and pin Phase-2s twins | ASKED | complete; A primary, B raw witness |
 | restore all EEN streams into the one root | ASKED | complete; 4/4 match Phase-2m |
-| resolve SH2 NOW/NOW versus NOW/BEFORE | ASKED | complete; formal Kmm/Kbb, executed Nbb/Nbb |
+| resolve SH2 Kmm/Kbb levels | ASKED | complete; formal Kmm/Kbb, executed Nbb/Nbb at step entry |
 | restore `bottom_tke_bc` | ASKED identity restoration | complete, `False -> True`; general default unchanged |
 | add the new/existing config-field row in the same commit | standing requirement | recorded above; no new field introduced |
 | keep BBL defaults `0 / 0.0` | ASKED Decision 10 | resolved and unchanged; no silent on |

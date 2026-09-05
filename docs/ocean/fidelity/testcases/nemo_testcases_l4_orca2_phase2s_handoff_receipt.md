@@ -17,18 +17,19 @@ changed.
 `cfgs/ORCA2_ICE_PISCES/EXPREF/namelist_cfg:387-402`.  NEMO consequently
 selects `np_TKE` and sets `l_zdfsh2=.TRUE.` at `zdfphy.F90:207-223`, then
 executes `zdf_sh2` before `zdf_tke` at `zdfphy.F90:264-286`.  The no-Stokes
-arm is the face-native formula at `zdfsh2.F90:78-100`: NOW and BEFORE face
+arm is the face-native formula at `zdfsh2.F90:78-100`: formal Kmm and Kbb face
 differences, face `avm_k` sums, the corresponding `e3uw/e3vw` factors, face
-masks and coast weights.  Under the resolved RK3 entry call, Kbb and Kmm are
-both Nbb, so this card requires NOW×NOW and the same live-QCO face metric for
-both factors.
+masks and coast weights.  Under the resolved RK3 call at
+`stprk3.F90:164-165`, the commented MLF-form call uses Nbb/Nnn while the live
+call passes Nbb/Nbb.  Thus this card requires the Nbb whole-step-entry slot in
+both factors and the same live-QCO face metric in both factors.
 
 **CONFIRMED / NEMO-identity restoration, not a choice:** only the ORCA2
 specialization in `nemo_testcase_recipe.py` changes:
 
 | selector | prior | corrected |
 |---|---|---|
-| `tke_shear_production` | `squared_centered` | `nemo_face_native_now2` |
+| `tke_shear_production` | `squared_centered` | `nemo_face_native_nbb2` |
 | `tke_shear_avm_weighting` | `tpoint` | `nemo_face` |
 | `tke_shear_evaluation_stage` | `step_entry` | `step_entry` |
 | `tke_shear_metric_source` | `tpoint_jacobian` | `nemo_qco_live_face` |
@@ -95,12 +96,14 @@ will become a witness after admission; until then its pin remains authoritative.
 
 **CONFIRMED:** both ZDF frames carry this exact frozen inventory.  The actual
 Kbb/Kmm/Krhs integers and extents will be accepted only from the real header.
+The reader decodes the record from that header alone; the separately written
+allocation table is used only to validate the header's allocation claims.
 
 | arrays | allocation/grid | registered level at the pre-closure boundary |
 |---|---|---|
 | `sh2` | A2D W | output of `zdf_sh2(Kbb,Kmm)` |
 | `avm_k_pre`, `avt_k_pre`, `en_pre` | full/reduced W | carried pre-`zdf_tke` closure state |
-| `rn2`, `rn2b` | reduced W | step-entry NOW and BEFORE buoyancy operands |
+| `rn2`, `rn2b` | reduced W | RK3 Nbb/Nbb buoyancy operands at step entry |
 | `u_Kbb`, `u_Kmm` | full U | explicit header Kbb and Kmm |
 | `v_Kbb`, `v_Kmm` | full V | explicit header Kbb and Kmm |
 | `e3uw_Kbb`, `e3uw_Kmm` | full WU | explicit header Kbb and Kmm live-QCO metrics |

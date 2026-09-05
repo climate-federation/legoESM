@@ -125,7 +125,7 @@ def validate(deck: Path, *, plant: bool) -> dict[str, object]:
         tke.tke_shear_production, tke.tke_shear_avm_weighting,
         tke.tke_shear_evaluation_stage, tke.tke_shear_metric_source,
     )
-    expected = ("nemo_face_native_now2", "nemo_face", "step_entry",
+    expected = ("nemo_face_native_nbb2", "nemo_face", "step_entry",
                 "nemo_qco_live_face")
     require(observed == expected, f"ORCA2 SH2 tuple {observed!r}")
     require(tke.bottom_tke_bc is True,

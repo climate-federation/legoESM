@@ -117,11 +117,12 @@ def _model_config(
         # ORCA2 namelist_cfg:389 selects TKE, so zdfphy.F90:220-223 sets
         # l_zdfsh2=.TRUE. and :264-286 calls zdf_sh2 before zdf_tke.  Under
         # key_RK3, stprk3.F90:164-165 passes Kbb=Nbb and Kmm=Nbb: the executed
-        # zdfsh2.F90:78-100 arm is face-native NOW*NOW, with avm summed on the
-        # faces and the same live-QCO face metric in both divisor factors.
+        # zdfsh2.F90:78-100 arm is face-native Nbb*Nbb (whole-step entry), with
+        # avm summed on the faces and the same live-QCO face metric in both
+        # divisor factors.  Never call Nbb "now" (time-level Rule 1d).
         tke = base.physics.vertical_mixing.tke._replace(
             n2_eos_form="eos80",
-            tke_shear_production="nemo_face_native_now2",
+            tke_shear_production="nemo_face_native_nbb2",
             tke_shear_avm_weighting="nemo_face",
             tke_shear_metric_source="nemo_qco_live_face",
         )
@@ -1382,12 +1383,12 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
                 tke.tke_shear_metric_source,
             )
             expected_sh2 = (
-                "nemo_face_native_now2", "nemo_face", "step_entry",
+                "nemo_face_native_nbb2", "nemo_face", "step_entry",
                 "nemo_qco_live_face",
             )
             if sh2_tuple != expected_sh2:
                 raise ValueError(
-                    "ORCA2-zps requires the RK3 zdf_sh2 NOW*NOW face-native "
+                    "ORCA2-zps requires the RK3 zdf_sh2 Nbb*Nbb face-native "
                     f"selector tuple {expected_sh2!r}, got {sh2_tuple!r}")
             if not tke.bottom_tke_bc:
                 raise ValueError(

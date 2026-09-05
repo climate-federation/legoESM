@@ -3535,10 +3535,10 @@ class LatLonCGridOceanModel:
                     f"outer_integrator={_outer_int!r}.")
             _tke_shear_ctor = getattr(_tke_cfg_ctor, "tke_shear_production",
                                      "squared_centered")
-            # "nemo_face_native_now2" = the face-native SPATIAL geometry at
-            # NOW^2 time levels — the RK3-oracle-compatible variant (ORCA1 is
-            # compiled key_RK3, so no Nbb velocity exists to be faithful TO);
-            # it needs no before-state and runs under any integrator.
+            # "nemo_face_native_nbb2" = face-native SPATIAL geometry with both
+            # operands at the Nbb whole-step-entry slot.  key_RK3's live call
+            # is zdf_phy(kstp,Nbb,Nbb,Nrhs), stprk3.F90:164-165; the commented
+            # Nbb,Nnn form is MLF semantics, not this arm.
             if (_tke_shear_ctor in ("nemo_burchard", "nemo_face_native")
                     and _outer_int not in _leapfrog_family):
                 raise ValueError(
@@ -8483,11 +8483,11 @@ class LatLonCGridOceanModel:
             return state.tke_avm.data * vertical_shear_squared(
                 u_cell, v_cell, dz_half)
 
-        if shear_disc not in ("nemo_face_native", "nemo_face_native_now2"):
+        if shear_disc not in ("nemo_face_native", "nemo_face_native_nbb2"):
             raise ValueError(
                 "tke_shear_evaluation_stage='step_entry' supports "
                 "'squared_centered', 'nemo_face_native', or "
-                f"'nemo_face_native_now2'; got {shear_disc!r}.")
+                f"'nemo_face_native_nbb2'; got {shear_disc!r}.")
         if avm_weighting != "nemo_face":
             raise ValueError(
                 "step-entry face-native shear requires "
@@ -9318,7 +9318,7 @@ class LatLonCGridOceanModel:
                 and _vmix_cfg_here.scheme == "tke"
                 and getattr(_vmix_cfg_here.tke, "tke_shear_production",
                            "squared_centered") in ("nemo_face_native",
-                                                   "nemo_face_native_now2")
+                                                   "nemo_face_native_nbb2")
             )
             if _keep_raw_faces:
                 cc_state = state

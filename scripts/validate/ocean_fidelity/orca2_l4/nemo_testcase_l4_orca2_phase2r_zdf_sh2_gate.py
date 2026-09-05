@@ -274,7 +274,7 @@ def validate(deck: Path, root: Path, *, plants: bool) -> dict[str, object]:
             "production_tke_shear_production": tke_cfg.tke_shear_production,
             "production_tke_shear_avm_weighting": tke_cfg.tke_shear_avm_weighting,
             "production_tke_shear_metric_source": tke_cfg.tke_shear_metric_source,
-            "nemo_resolved": "face-native NOW*NOW, avm face sum, live QCO faces",
+            "nemo_resolved": "face-native Nbb*Nbb at step entry, avm face sum, live QCO faces",
             "status": "ORCA2_CARD_SELECTOR_DEBT",
         },
         "source_rows": source_rows,
@@ -294,7 +294,7 @@ def validate(deck: Path, root: Path, *, plants: bool) -> dict[str, object]:
                 "the three preclosure inputs are exact after the Lane-4 card "
                 "initialization repair, but the card still selects "
                 "squared_centered/tpoint/tpoint_jacobian instead of NEMO's "
-                "face-native NOW*NOW/avm-face/live-QCO combination"),
+                "face-native Nbb*Nbb-at-step-entry/avm-face/live-QCO combination"),
         },
         "shared_operator_handoff": {
             "owner": "GYRE_OWNER_SHARED_TKE",
