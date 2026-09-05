@@ -4547,7 +4547,22 @@ tests/ocean/unit/test_nemo_ws_tracer_rk3.py
 ```
 
 That module also carries `test_nemo_qco_gdept_z0_oracle_bit_pattern`, so the
-restored bit-pattern pair is green in the same run.  The new eligibility gate's
+restored bit-pattern pair is green in the same run.
+
+The wide focused suite was also run, and it reproduces round 25's failure set
+exactly:
+
+```text
+6 failed, 111 passed in 2963.24s (0:49:23)
+```
+
+Its BBL row is still red, and that is a STALE-COLLECTION artifact, not a
+contradiction: that session was launched before the BBL fix was written and
+pytest imports every selected module at collection, so it ran the pre-fix
+module for its whole 49 minutes.  It is therefore the BEFORE snapshot.  The
+AFTER result is the dedicated module run above, taken at the round-26 tip on
+a clean tree, where the same test passes inside `31 passed`.  The five
+`test_nemo_recipe` rows are red in both and need open question 2.  The new eligibility gate's
 reader guards are `7 passed in 0.06s`, and they were shown non-vacuous by
 deleting the reader's time-level guard, which turned two of them red with
 `DID NOT RAISE` before the file was restored.
