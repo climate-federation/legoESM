@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import struct
 import sys
@@ -50,6 +51,10 @@ FIELDS = (
     ("icb_stored_heat", "full"),
     ("rnf_tsc", "reduced3d"), ("rnf_tsc_b", "reduced3d"),
 )
+INACTIVE_ICEBERG_FIELDS = {
+    "utau_icb", "vtau_icb", "icb_calving", "icb_calving_hflx",
+    "icb_floating_melt", "icb_stored_heat",
+}
 
 
 class GateError(RuntimeError):
@@ -87,7 +92,12 @@ def payload_count(header: tuple[int, ...]) -> int:
     return nfull * nx * ny + (nreduced2d + nreduced3d * ntr) * reduced + nhalo1 * halo1
 
 
-def validate_surface(path: Path, expected_sha256: str | None = None) -> dict:
+def validate_surface(
+    path: Path,
+    expected_sha256: str | None = None,
+    *,
+    icebergs_off: bool = False,
+) -> dict:
     with path.open("rb", buffering=0) as handle:
         raw_magic = handle.read(16)
         require(len(raw_magic) == 16, "truncated magic")
@@ -122,6 +132,10 @@ def validate_surface(path: Path, expected_sha256: str | None = None) -> dict:
                "finite": int(np.isfinite(values).sum())}
         if allocation == "reduced3d":
             row["levels"] = NTR
+        if icebergs_off and name in INACTIVE_ICEBERG_FIELDS:
+            nonzero = int(np.count_nonzero(values))
+            row["nonzero"] = nonzero
+            require(nonzero == 0, f"inactive iceberg field is nonzero: {name}")
         fields.append(row)
         cursor += size
     require(cursor == count, f"schema walk consumed {cursor}/{count}")
@@ -138,17 +152,21 @@ def validate_legacy_records(run_dir: Path) -> dict:
         return phase1.validate_records(view)
 
 
-def planted_controls(path: Path) -> dict[str, str]:
+def planted_controls(path: Path, *, icebergs_off: bool = False) -> dict[str, str]:
     expected_digest = sha256(path)
     results: dict[str, str] = {}
 
-    def expect(name: str, mutate) -> None:
+    def expect(name: str, mutate, *, bind_digest: bool = True) -> None:
         with tempfile.TemporaryDirectory(prefix=f"orca2-l4-phase2b-{name}-") as td:
             altered = Path(td) / RECORD
             shutil.copyfile(path, altered)
             mutate(altered)
             try:
-                validate_surface(altered, expected_digest)
+                validate_surface(
+                    altered,
+                    expected_digest if bind_digest else None,
+                    icebergs_off=icebergs_off,
+                )
             except (GateError, OSError, UnicodeError, struct.error, ValueError):
                 results[name] = "PASS_NONZERO"
             else:
@@ -163,7 +181,10 @@ def planted_controls(path: Path) -> dict[str, str]:
     expect("bad_derived_count", lambda target: patch(target, 16 + 8 * 4, struct.pack("=i", 19)))
     expect("truncated_payload", lambda target: target.write_bytes(target.read_bytes()[:-8]))
     payload_offset = 16 + struct.calcsize(HEADER_FMT)
-    expect("nan_payload", lambda target: patch(target, payload_offset, struct.pack("=d", float("nan"))))
+    expect(
+        "nan_payload",
+        lambda target: patch(target, payload_offset, struct.pack("=d", float("nan"))),
+    )
 
     def one_ulp(target: Path) -> None:
         # First owned payload value; integrity pin binds an otherwise schema-valid mutation.
@@ -174,7 +195,40 @@ def planted_controls(path: Path) -> dict[str, str]:
             handle.write(struct.pack("=d", np.nextafter(value, np.inf)))
 
     expect("one_ulp_active_field", one_ulp)
+    if icebergs_off:
+        class_sizes = {
+            "full": NX * NY,
+            "reduced": (NX - 2 * HALO) * (NY - 2 * HALO),
+            "halo1": (NX - 2 * (HALO - 1)) * (NY - 2 * (HALO - 1)),
+            "reduced3d": NTR * (NX - 2 * HALO) * (NY - 2 * HALO),
+        }
+        cursor = 0
+        for field, allocation in FIELDS:
+            if field == "utau_icb":
+                break
+            cursor += class_sizes[allocation]
+        inactive_offset = payload_offset + cursor * 8
+        expect(
+            "inactive_iceberg_nonzero",
+            lambda target: patch(
+                target, inactive_offset, struct.pack("=d", 1.0)
+            ),
+            bind_digest=False,
+        )
     return results
+
+
+def validate_variant_namelist(path: Path) -> None:
+    values = []
+    for line in path.read_text().splitlines():
+        code = line.split("!", 1)[0]
+        match = re.match(
+            r"\s*ln_icebergs\s*=\s*(\.true\.|\.false\.)", code,
+            flags=re.IGNORECASE,
+        )
+        if match:
+            values.append(match.group(1).lower())
+    require(values == [".false."], f"variant ln_icebergs values {values}")
 
 
 def main() -> int:
@@ -183,18 +237,30 @@ def main() -> int:
     parser.add_argument("--control", type=Path)
     parser.add_argument("--expected-record-sha256")
     parser.add_argument("--plant-controls", action="store_true")
+    parser.add_argument("--variant-icebergs-off", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     try:
         record = args.run_dir / RECORD
+        if args.variant_icebergs_off:
+            validate_variant_namelist(args.run_dir / "namelist_cfg")
         result = {
-            "surface_input": validate_surface(record, args.expected_record_sha256),
+            "oracle_label": (
+                "VARIANT" if args.variant_icebergs_off else "SHIPPED_DECK_RECORD"
+            ),
+            "surface_input": validate_surface(
+                record,
+                args.expected_record_sha256,
+                icebergs_off=args.variant_icebergs_off,
+            ),
             "legacy_records": validate_legacy_records(args.run_dir),
         }
         if args.control is not None:
             result["identity"] = phase1.validate_identity(args.control, args.run_dir)
         if args.plant_controls:
-            result["planted_controls"] = planted_controls(record)
+            result["planted_controls"] = planted_controls(
+                record, icebergs_off=args.variant_icebergs_off
+            )
         result["status"] = "PASS"
     except (GateError, phase1.GateError, OSError, UnicodeError, struct.error, ValueError) as exc:
         result = {"status": "FAIL", "error": str(exc)}

@@ -272,7 +272,18 @@ def main() -> int:
     parser.add_argument("--json-out", type=Path)
     parser.add_argument(
         "--plant",
-        choices=("grid", "coriolis_swap", "fold", "dummy", "interp", "T", "S", "zero", "halo", "coverage"),
+        choices=(
+            "grid",
+            "coriolis_swap",
+            "fold",
+            "dummy",
+            "interp",
+            "T",
+            "S",
+            "zero",
+            "halo",
+            "coverage",
+        ),
     )
     args = parser.parse_args()
     try:
