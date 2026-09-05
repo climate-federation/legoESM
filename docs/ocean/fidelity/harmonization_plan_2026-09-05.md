@@ -95,3 +95,12 @@ aux3d linkage and the minimum-level policy, not just counts.
   (job 9648801, _trp_visc_r1_d30.sbatch, pin 152927318): ORCA1 file SHAPE at unchanged 1e4
   mid-latitude background (~500 at 0N), Smag ramp/dt untouched, 30 d, pre-registered in the
   card header (EUC 200E >= 0.40 confirm / < 0.32 refute; nino3 <= +1.05 vs ctl +1.30).
+- 06:50 THREE-GRID UNDERCURRENT (threegrid_unified_table_2026-09-04.md, EUC section): FESOM-75 = NEMO's
+  undercurrent (1.14/1.00/1.18 of NEMO at 200/220/240E) yet nino3 +1.39 (tripole 0.58/0.34/0.77, nino3
+  +1.30) => the shared day-30 equatorial warm transient is NOT undercurrent-limited; rung 1's nino3
+  pre-registration (<= +1.05) is now EXPECTED TO FAIL and the arm is judged on the EUC alone (a
+  circulation-faithfulness lever for the tripole, not a cold-tongue lever). Candidate for the shared
+  transient: the common column (TKE Prandtl at the 10 ceiling vs NEMO 1.2; ORCA1 nn_mxl=2 vs our 3) --
+  see omip_gateway_reference_2026-08-22.md "STILL OPEN" 2-3; unmeasured on the unified card.
+  INSTRUMENT FIX: equatorial_thermocline.py U block now REQUIRES --nemo-w-recs (it silently averaged all
+  18 records when the flag was dropped with the w block: FESOM read as 0.78 of NEMO at 220E, matched = 1.00).

@@ -359,6 +359,12 @@ def _euc_merid_block(a, L, zc):
                 print(f"{lat0:6d} {o:8.3f} {n:8.3f}")
 
     if a.nemo_ufile:
+        if a.nemo_w_recs is None:
+            # Without a record window the U block silently averaged all 18
+            # GATEWAY records (days 1-90) against a single-day snapshot --
+            # an unmatched comparison that read as "FESOM EUC 78% of NEMO".
+            raise SystemExit("--nemo-ufile needs --nemo-w-recs (matched window); "
+                             "refusing to average every record.")
         if lat_o.ndim == 1:
             # Unstructured grids (MPAS cells / FESOM nodes): the snapshot
             # carries the GEOGRAPHIC cell-centred zonal velocity written by
@@ -409,7 +415,8 @@ def _euc_merid_block(a, L, zc):
                 n = box_mean(un[kc_n], lat_n, lon_n, lat0, lon0, 0.5, 1.0)
                 print(f"{lat0:6d} {o:8.3f} {n:8.3f}")
 
-        print("\nEUC: equatorial zonal velocity, |lat|<=1 box mean, m/s.")
+        print(f"\nEUC: equatorial zonal velocity, |lat|<=1 box mean, m/s "
+              f"(NEMO records {a.nemo_w_recs}).")
         print("max over 0-400 m (core speed) and its depth; + = eastward.")
         print(f"{'lon':>6} {'ours_max':>9} {'@m':>5} {'nemo_max':>9} {'@m':>5} "
               f"{'ours_10m':>9} {'nemo_10m':>9}")
