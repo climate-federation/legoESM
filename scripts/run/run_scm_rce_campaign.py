@@ -3062,7 +3062,8 @@ def tune_focused_params(
     best_cfg = base_cfg
     best_run = default_run
     best_values = dict(defaults)
-    best_score = objective_value(default_run, objective)
+    default_score = objective_value(default_run, objective)
+    best_score = default_score
 
     for i, values in enumerate(
             _candidate_values(defaults, constraints, tune_evals, seed)):

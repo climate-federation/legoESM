@@ -404,7 +404,8 @@ class _MPASSfcFluxAccum:
     the "monthly mean" of a day/night field like rsut kept the full
     instantaneous diurnal pattern while labeled ``time: mean``).
 
-    Covers slots 2..7 of the ``_sfc_diag`` contract (2 precip, 3 rlut,
+    Covers slots 0..7 of the ``_sfc_diag`` contract (0 sw_net_sfc and
+    1 lw_net_sfc, read only by the energy tracker; 2 precip, 3 rlut,
     4 rsut, 5 rsdt, 6 hfss, 7 hfls) — the strongly diurnal flux fields —
     plus the clear-sky TOA pair (10 rsutcs, 11 rlutcs; #843 lean-lane
     port), which is only ever non-None when ``--clear-sky-diag`` is on
@@ -445,6 +446,12 @@ class _MPASSfcFluxAccum:
     # accumulated channels gave ~11.  Accumulating costs one device-side add
     # per step per slot and is what makes the budget answerable at all.
     SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 10, 11)
+    #: The slots the column energy budget reads (sw/lw net sfc, lw_up, sw_up,
+    #: sw_dn, hfss, hfls).  After the first radiation call every one of them
+    #: is non-None on EVERY step (the MPAS model holds the last radiation
+    #: value across held-radiation sub-steps, primitive_eq_mpas.step), which
+    #: is what lets ``window_ready`` demand equal per-slot counts.
+    ENERGY_SLOTS = (0, 1, 3, 4, 5, 6, 7)
 
     def __init__(self, expected_steps: int = 0, window_start_day: float = 0.0,
                  dt_s: float = 0.0):
@@ -499,6 +506,16 @@ class _MPASSfcFluxAccum:
     def has_samples(self) -> bool:
         """True if any slot accumulated at least one sample this interval."""
         return bool(self._n)
+
+    def window_ready(self, slots) -> bool:
+        """True iff the window is complete AND every slot in *slots* was
+        accumulated over the SAME number of samples.  A checkpoint written
+        before a slot existed restores the others with a full count while
+        the new slot only sees the post-restart remainder; ``is_complete()``
+        passes (it counts steps, not per-slot samples) and the short slot
+        would be published as a full interval mean (codex, #1354)."""
+        counts = {self._n.get(i, 0) for i in slots}
+        return self.is_complete() and len(counts) == 1 and counts != {0}
 
     def is_complete(self) -> bool:
         """True iff this interval saw EXACTLY the step count a complete
@@ -10977,13 +10994,13 @@ class ModelDriver:
                 # replaced because it looks trustworthy. Require a COMPLETE
                 # window AND every slot the energy budget reads.
                 _facc_e = getattr(self, "_mpas_sfc_accum", None)
-                _ENERGY_SLOTS = (0, 1, 3, 4, 5, 6, 7)
-                _use_accum = bool(
-                    _facc_e is not None
-                    and _facc_e.has_samples()
-                    and _facc_e.is_complete()
-                    and all(_facc_e.mean(_i) is not None
-                            for _i in _ENERGY_SLOTS))
+                _use_accum = (_facc_e is not None
+                              and _facc_e.window_ready(_facc_e.ENERGY_SLOTS))
+                if (_facc_e is not None and _facc_e.is_complete()
+                        and not _use_accum):
+                    print("  energy tracker: complete window but energy "
+                          "slots have unequal sample counts -- this sample "
+                          "falls back to SNAPSHOT fluxes (stamped 0)")
                 _qv_e = (self.state.tracers["q_v"].data
                          if (self.state.tracers is not None
                              and "q_v" in self.state.tracers) else None)
@@ -11007,10 +11024,8 @@ class ModelDriver:
                     # not per model step, so it is not on the hot path
                     # (codex review, accepted rather than restructured --
                     # `mean()` is shared with the CMOR feed).
-                    if _use_accum:
-                        _m = _facc_e.mean(i)
-                        if _m is not None:
-                            return jnp.asarray(_m)
+                    if _use_accum:   # window_ready() => every slot has a mean
+                        return jnp.asarray(_facc_e.mean(i))
                     return (_sd[i].data if (_sd is not None and len(_sd) > i
                                             and _sd[i] is not None) else None)
                 _sw_dn, _sw_up, _lw_up = _slot(5), _slot(4), _slot(3)
