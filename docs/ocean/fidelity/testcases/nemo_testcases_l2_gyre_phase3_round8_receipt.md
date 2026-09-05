@@ -2515,5 +2515,27 @@ registered status remains UNMEASURED rather than being hidden by a mask.
 | lane-3b Round-17 Kmm seed | explicitly forbidden | not adopted |
 | NEMO execution, shipped-source edit, merge, push | forbidden | none |
 
+### 21.4 returned-record admission preregistration
+
+The user-executed acquisition completed at
+`round21_oracle_v2_stage_ww`, but the bytewise admission stopped on ten of the
+49 inherited records.  Before inspecting payload values, the source/schema
+prediction is: `BTORD_1 -> BTORD_2` is an intentional append-only instrument
+schema change, while every same-tag difference is confined to a whole-array
+halo or workspace slot which NEMO does not initialize before that particular
+WRITE and which no gate scores.  The known example is `zFw` in the three
+momentum-side transport records, written at `stprk3_stg.F90:343-348` before the
+vector-invariant arm initializes it in `traadv.F90:220-235`.
+
+The committed admission classifier will name every changed field and cell,
+the config-local writer statement, and every repo parser that consumes it.
+The prediction is CONFIRMED only if all common, parser-scored consumed fields
+and the final restart are bit-identical.  One changed value in such a field
+REFUTES WRITE-only admission and stops the round before the W-clock score.
+If confirmed, the raw files stay unchanged and `run.sh` will compare the
+schema-aware consumed fields rather than zero-filling NEMO workspaces; this is
+the smaller authorized alternative and retains the evidence.  A planted
+change to one consumed value must make the admission command exit nonzero.
+
 All Round-21 measurements and harness results are Codex-internal.  Independent
 Round-21 review remains outstanding; no dual-review claim is made.
