@@ -188,6 +188,35 @@ def test_geometric_eos_depth_guard_still_bites_on_uncertified_eos():
         LatLonCGridOceanModel(grid, z_coord, model_config)
 
 
+def test_geometric_eos_depth_accepts_nemo_eos80():
+    """The ORCA2 EOS-80/QCO depth pair is an admitted NEMO source arm.
+
+    ``eosbn2.F90:260`` supplies live ``gdept`` to both ``np_teos10`` and
+    ``np_eos80``.  This focused tripwire stops the allow-list from making the
+    source-certified ORCA2 card unconstructible again without needing the
+    external ORCA2 deck in the unit-test environment.
+    """
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.experiments.dino import (
+        create_dino_z_star,
+        dino_config_for_recipe,
+        dino_lat_lon_grid,
+        dino_lat_lon_model_config,
+    )
+
+    cfg = dataclasses.replace(
+        dino_config_for_recipe("legoesm_default"), eos_depth="geometric")
+    grid = dino_lat_lon_grid(cfg, n_lon=12)
+    z_coord = create_dino_z_star(cfg)
+    model_config, _physics = dino_lat_lon_model_config(grid, cfg)
+    model_config = model_config._replace(eos="nemo_eos80")
+    model = LatLonCGridOceanModel(grid, z_coord, model_config)
+    assert model.config.eos == "nemo_eos80"
+    assert model.config.eos_depth == "geometric"
+
+
 # ---------------------------------------------------------------------------
 # Guards RELAXED by the lane-1/lane-2 merge (c9526e585).  Each was an
 # iso-side/merge-base guard that the GYRE lane deleted or narrowed; each is

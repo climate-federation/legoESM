@@ -3658,7 +3658,9 @@ class LatLonCGridOceanModel:
         # nemo_paper/nemo_dino_kamm/_mlf; "required for the S-EOS thermobaric
         # depth term", max|drho'| 1.5e-5).  Adding an EOS here requires the same:
         # the oracle line showing it takes gdept, and a receipt measuring it.
-        _geometric_certified_eos = {"nemo_teos10", "nemo_seos"}
+        _geometric_certified_eos = {
+            "nemo_eos80", "nemo_teos10", "nemo_seos",
+        }
         if (_eos_depth == "geometric"
                 and _eos_name not in _geometric_certified_eos):
             raise ValueError(
