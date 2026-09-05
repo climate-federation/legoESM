@@ -10,8 +10,11 @@ Preregister commit: `a68f5d57941`
 
 Physics and gate commit: `3d5ebfedebc8b8958dfe8e6851fd8902b4430a0c`
 
-Status: **KT3 CONFIRMED BIT-IDENTICAL; FULL YEAR AT THE FIXED BAR; NO LATER
-OVER-BAR BOUNDARY**
+Status at Round 17: **SUPERSEDED BY ROUND 19**.  The former Kmm-seed arm
+re-derived NEMO's prognostic `uu_b/vv_b` state and is not a valid source
+identity.  After the required removal, Round 19 measures the first debt at
+kt2 PRE_SSM.u (`1.1172865415493005e-7`).  The historical measurements below
+are retained as an arm record, not as a current fidelity claim.
 
 ## Outcome
 

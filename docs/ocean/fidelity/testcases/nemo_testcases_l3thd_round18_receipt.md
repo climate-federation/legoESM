@@ -149,10 +149,11 @@ The search found one existing shared home in
 `packages/core/legoesm/core/bulk_flux.py`: `validate_bulk_scheme`, the
 Large--Yeager neutral helper, q-saturation and MOST utilities, and the
 previously certified `nemo_si3_constant` arm.  The coupler already dispatches
-through this core machinery.  The older
-`packages/ocean/legoesm/ocean/bulk_flux_omip.py` contained a second partial
-NCAR implementation; it is now only a compatibility facade.  There is one
-production NCAR implementation, selected as `nemo_ncar`.
+through this core machinery.  At this round the older
+`packages/ocean/legoesm/ocean/bulk_flux_omip.py` was reduced to a compatibility
+facade over that shared implementation.  Round 19 removes that facade and
+routes every caller directly to the one production implementation, selected
+as `nemo_ncar`.
 
 The oracle is the ORCA2 lane's canonical O1 twins:
 
@@ -228,7 +229,9 @@ both **CONFIRMED AT_BAR** and **CONFIRMED bit-identical** on the registered
 stack.  The gate also reports row-scale ULP and nonzero-oracle relative error;
 all maxima are zero.
 
-All 18 independent in-process one-ULP row plants are required to produce a
+The coverage register contains **20 fields**: 18 VERIFIED/scored fields and
+two source-backed WAIVED fields (`cd_du`, `qlwn`).  All 18 independent
+in-process one-ULP plants for the VERIFIED rows are required to produce a
 non-bit row and are stamped `PASS_NONZERO`, exit code 1.  The separate qns CLI
 plant also exits 1 and changes exactly `1 / 8,794` qns rows.  A missing stream
 raises named `GateError`, and a malformed header does likewise.
@@ -291,7 +294,7 @@ Roots are `/data/abyssal/dbalwada/nemo-testcases-l3/round18_{cross_cards,ncar_bu
 | run LOCK/OVERFLOW stage and kt1..10 gates | ASKED | run; direct results are DEBT/error as listed, never promoted |
 | run GYRE production-JIT kt1..10 and Rule 8/12 | ASKED | current-branch API block recorded; canonical integration discriminator completed |
 | expected kt2 GYRE movement toward NEMO | ASKED prediction | REFUTED; kt1-2 unchanged and later movement mixed |
-| certify ORCA2 O1 NCAR bulk in the shared machinery | ASKED | 0 / 158,292 source-owned rows, 18 plants bind |
+| certify ORCA2 O1 NCAR bulk in the shared machinery | ASKED | 20 registered fields (18 VERIFIED plants bind; two WAIVED); 0 / 158,292 source-owned rows |
 | import the newer GYRE numerical stack into lane 3b | UNASKED | not done; would be a large cross-lane merge |
 | certify O1 mapping, `cd_du`, `qlwn`, RGB, SI3, or downstream ocean fields | UNASKED | outside this boundary / explicitly waived |
 | delete retained roots or diagnostics | UNASKED | none deleted; flagged only |
