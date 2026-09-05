@@ -2312,6 +2312,20 @@ def nemo_flux_form_update_active(config) -> bool:
     )
 
 
+def _carried_nemo_depth_mean(state, dtype):
+    """Return the paired NEMO Kbb external-mode state, or ``None``.
+
+    NEMO declares this independently of 3-D velocity at ``oce.F90:39,99``;
+    ``dynspg_ts.F90:484-500`` reads it directly at the window seed.  A partial
+    pair is structurally invalid and must not silently fall back to a reduction.
+    """
+    if (state.uu_b is None) != (state.vv_b is None):
+        raise ValueError("NEMO prognostic depth mean requires both uu_b and vv_b")
+    if state.uu_b is None:
+        return None
+    return state.uu_b.data.astype(dtype), state.vv_b.data.astype(dtype)
+
+
 def barotropic_substeps_latlon_cgrid(
     state: LatLonCGridOceanState,
     dt_s: float,
@@ -2493,20 +2507,27 @@ def barotropic_substeps_latlon_cgrid(
     # fn entry via _depth_average_to_faces's own dispatch-hardening raise.
     _seed_fd = config.barotropic.barotropic_seed_face_depth
     _seed_eval = config.barotropic.barotropic_seed_evaluation
-    U_bar, V_bar = _depth_average_to_faces(
-        u, v, h_k, min_water_col, mask, u_mask, v_mask, grid,
-        seed_face_depth=_seed_fd, seed_evaluation=_seed_eval,
-        eta_dyn=eta, H_bathy=H_bathy, area=_area, z_coord=z_coord,
-        legacy_seed_min_rule_faces=bool(
-            _nemo_legacy_seed_faces_test_override or False),
-    )
+    _carried_baro = _carried_nemo_depth_mean(state, _dt)
+    if _carried_baro is None:
+        U_bar, V_bar = _depth_average_to_faces(
+            u, v, h_k, min_water_col, mask, u_mask, v_mask, grid,
+            seed_face_depth=_seed_fd, seed_evaluation=_seed_eval,
+            eta_dyn=eta, H_bathy=H_bathy, area=_area, z_coord=z_coord,
+            legacy_seed_min_rule_faces=bool(
+                _nemo_legacy_seed_faces_test_override or False),
+        )
+    else:
+        # dynspg_ts.F90:484-500: the live identity reads puu_b/pvv_b(Kmm or
+        # Kbb) directly.  Re-reducing the 3-D velocity is reserved for the
+        # explicit legacy-restart fallback in nemo_state_bridge.
+        U_bar, V_bar = _carried_baro
     # 3-D depth-mean REPLACEMENT reference (u' = u − ū_corr): the NOW-level
     # barotropic mean over the NOW eta.  With the MLF before-level seed the
     # integration's ū (from u/eta_init) is the BEFORE transport, but the 3-D
     # velocity being corrected is the NOW state, so its old depth-mean must use
     # the NOW velocity + NOW eta (matches the `_split` in `_leapfrog_step`).
     # No override ⇒ identical to (U_bar, V_bar) ⇒ byte-identical.
-    if _seed_override:
+    if _seed_override or _carried_baro is not None:
         _eta_corr = jnp.maximum(state.eta.data.astype(_dt), eta_floor) * mask
         _h_eta_corr = (jnp.zeros_like(_eta_corr)
                        if getattr(z_coord, 'linear_free_surface', False)
@@ -2839,6 +2860,14 @@ def barotropic_substeps_latlon_cgrid(
         u=state.u.replace(data=u_new),
         v=state.v.replace(data=v_new),
     )
+    if _carried_baro is not None:
+        # dynspg_ts.F90:857-897 commits the external solution into Kaa.  The
+        # outer stprk3.F90:213 slot swap makes this returned pair next-step
+        # Kbb; no live 3-D re-reduction is involved.
+        state_new = state_new._replace(
+            uu_b=state.uu_b.replace(data=U_bar_avg),
+            vv_b=state.vv_b.replace(data=V_bar_avg),
+        )
     if _ab3 and not _boxcar_ab3 and hasattr(state, "bt_hist"):
         # NEMO nn_bt_flt=3 only (nn_bt_flt=2 re-inits the sub-state each step ⇒
         # no cross-window carry).
@@ -3032,12 +3061,16 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
     _seed_fd = config.barotropic.barotropic_seed_face_depth
     _seed_eval = config.barotropic.barotropic_seed_evaluation
     _area_seed = grid.area.astype(_dt)
-    U_bar, V_bar = _depth_average_to_faces(
-        u, v, h_k, min_water_col, mask, u_mask, v_mask, grid,
-        seed_face_depth=_seed_fd, seed_evaluation=_seed_eval,
-        eta_dyn=eta, H_bathy=H_bathy,
-        area=_area_seed, z_coord=z_coord,
-    )
+    _carried_baro = _carried_nemo_depth_mean(state, _dt)
+    if _carried_baro is None:
+        U_bar, V_bar = _depth_average_to_faces(
+            u, v, h_k, min_water_col, mask, u_mask, v_mask, grid,
+            seed_face_depth=_seed_fd, seed_evaluation=_seed_eval,
+            eta_dyn=eta, H_bathy=H_bathy,
+            area=_area_seed, z_coord=z_coord,
+        )
+    else:
+        U_bar, V_bar = _carried_baro
 
     w_filter, w_total, w_transport, n_loop = _compute_weights(
         config, n_substeps, eta.dtype)
@@ -3266,6 +3299,11 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
         u=state.u.replace(data=u_new),
         v=state.v.replace(data=v_new),
     )
+    if _carried_baro is not None:
+        state_new = state_new._replace(
+            uu_b=state.uu_b.replace(data=U_bar_avg),
+            vv_b=state.vv_b.replace(data=V_bar_avg),
+        )
     return state_new, (Hu_avg, Hv_avg)
 
 

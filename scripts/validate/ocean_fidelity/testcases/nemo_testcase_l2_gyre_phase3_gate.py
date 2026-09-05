@@ -330,7 +330,16 @@ def read_bt(path: Path, expected_kt: int) -> dict:
         f"{path}: bad header",
     )
     require(values.size == 4 * nx * ny, f"{path}: bad payload")
-    return {"kt": kt, "Kaa": kaa, "registry_level": level}
+    count = nx * ny
+    return {
+        "kt": kt,
+        "Kaa": kaa,
+        "registry_level": level,
+        "uu_b": _xy(values[:count], nx, ny),
+        "vv_b": _xy(values[count : 2 * count], nx, ny),
+        "un_adv": _xy(values[2 * count : 3 * count], nx, ny),
+        "vn_adv": _xy(values[3 * count :], nx, ny),
+    }
 
 
 def _xy(values: np.ndarray, nx: int, ny: int) -> np.ndarray:
@@ -797,6 +806,7 @@ def run(
     plant_drag=False,
     plant_stage2_thermodynamics=False,
     plant_stage2_term=False,
+    plant_barotropic_state=False,
     stage2_term_limit="hpg",
     stage2_term_only=None,
     measure_stage2_update_arm=False,
@@ -1044,6 +1054,8 @@ def run(
 
     state = card.recipe.initial_state
     steps = []
+    barotropic_state_steps = []
+    barotropic_state_first_over_bar = None
     first_over_bar = None
     exact_prefix = True
     faithful_kt2 = None
@@ -1082,11 +1094,58 @@ def run(
         exact_prefix = exact_prefix and exact_here
         if over and first_over_bar is None:
             first_over_bar = {"kt": kt, "fields": over}
+        # Score the independently prognostic Kaa pair written by stp_2D.  The
+        # existing oracle_bt_frames writer records exactly this pair; after
+        # stprk3.F90:213 swaps Naa into Nbb it seeds the next step.  Advance
+        # once even at max_step so every available Kaa frame is covered.
+        freshwater, surface = _surface_forcings(card, state, kt)
+        next_state = model.step(
+            state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface)
+        require(next_state.uu_b is not None and next_state.vv_b is not None,
+                "NEMO identity step returned no prognostic uu_b/vv_b pair")
+        baro_candidate = {
+            "uu_b": np.asarray(next_state.uu_b.data)[:, 1:],
+            "vv_b": np.asarray(next_state.vv_b.data)[1:, :],
+        }
+        baro_rows = []
+        for component, mask_name in (("uu_b", "u"), ("vv_b", "v")):
+            candidate_b = baro_candidate[component]
+            if plant_barotropic_state and kt == 1 and component == "uu_b":
+                candidate_b = candidate_b.copy()
+                active_b = masks[mask_name][..., 0]
+                first = tuple(np.argwhere(active_b)[0])
+                row_scale = max(float(np.max(np.abs(bt[kt][component][active_b]))), 1.0)
+                candidate_b[first] += 3.0 * np.spacing(row_scale)
+            baro_row = score(
+                f"{CASE}.kt{kt}.after.{component}",
+                bt[kt][component], candidate_b, masks[mask_name][..., 0])
+            # Decision 8 makes this an identity boundary, not merely another
+            # normalized state row: the changed operator must reproduce NEMO's
+            # own Kaa bits.  This also makes the preregistered three-ULP plant
+            # non-vacuous even though three spacing(1) is below the 1e-15
+            # whole-field normalized bar.
+            if not baro_row["exact"]:
+                baro_row["status"] = "DEBT"
+                baro_row["reason"] = (
+                    "prognostic uu_b/vv_b identity boundary requires bit equality")
+            baro_rows.append(baro_row)
+        barotropic_state_steps.append({"kt": kt, "rows": baro_rows})
+        debt_components = [
+            row["name"].rsplit(".", 1)[-1]
+            for row in baro_rows if row["status"] == "DEBT"
+        ]
+        if debt_components and barotropic_state_first_over_bar is None:
+            barotropic_state_first_over_bar = {
+                "kt": kt, "fields": debt_components,
+            }
+        if plant_barotropic_state and kt == 1:
+            require(baro_rows[0]["status"] == "DEBT",
+                    "planted three-ulp uu_b violation did not fire")
+        if kt == 1:
+            faithful_kt2 = next_state
         if kt < max_step:
-            freshwater, surface = _surface_forcings(card, state, kt)
-            state = model.step(state, dt=card.dt_s, freshwater=freshwater, surface_forcing=surface)
-            if kt == 1:
-                faithful_kt2 = state
+            state = next_state
 
     require(faithful_kt2 is not None or max_step == 1, "kt2 candidate was not produced")
 
@@ -1097,14 +1156,18 @@ def run(
     # those hooks are intentionally run as separate boundary probes.
     if trajectory_only:
         return {
-            "format": "nemo-testcase-l2-gyre-phase3-trajectory-only-v1",
+            "format": "nemo-testcase-l2-gyre-phase3-trajectory-only-v2",
             "case": CASE,
-            "status": "AT-BAR" if first_over_bar is None else "DEBT",
+            "status": (
+                "AT-BAR" if first_over_bar is None
+                and barotropic_state_first_over_bar is None else "DEBT"),
             "execution_regime": "production-jit-cpu-fp64-x64-libm",
             "oracle_root": str(root),
             "max_step": max_step,
             "first_over_bar": first_over_bar,
+            "barotropic_state_first_over_bar": barotropic_state_first_over_bar,
             "steps": steps,
+            "barotropic_state_steps": barotropic_state_steps,
             "artifacts": artifacts,
             "low_memory_route": {
                 "same_production_step": True,
@@ -2426,7 +2489,9 @@ def run(
         if row["status"] == "DEBT"
     ]
     require(not failed_controls, f"planted/control failure: {failed_controls}")
-    status = "AT-BAR" if first_over_bar is None else "DEBT"
+    status = (
+        "AT-BAR" if first_over_bar is None
+        and barotropic_state_first_over_bar is None else "DEBT")
     return {
         "format": "nemo-testcase-l2-gyre-phase3-v2",
         "case": CASE,
@@ -2439,6 +2504,7 @@ def run(
         "max_step": max_step,
         "continue_after_first": True,
         "first_over_bar": first_over_bar,
+        "barotropic_state_first_over_bar": barotropic_state_first_over_bar,
         "selectors": {
             "eos": cfg.eos,
             "eos_depth": cfg.eos_depth,
@@ -2468,7 +2534,13 @@ def run(
                 for stage in (1, 2, 3)
             },
             "rhs": rhs,
-            "barotropic_frames": bt,
+            "barotropic_frames": {
+                str(kt): {
+                    "kt": frame["kt"], "Kaa": frame["Kaa"],
+                    "registry_level": frame["registry_level"],
+                }
+                for kt, frame in bt.items()
+            },
             "momentum_rows": stage_rows,
             "tracer_stage_numerics": (
                 "STAGES1_2_MEASURED; STAGE3_IS_WHOLE_STEP"
@@ -2539,6 +2611,7 @@ def run(
         ),
         "growth_characterization": _trajectory_growth(steps),
         "steps": steps,
+        "barotropic_state_steps": barotropic_state_steps,
         "artifacts": artifacts,
         "unmeasured": ([] if ene_available else [
             "ENE-coefficient arm (coefficients, products, term "
@@ -2572,6 +2645,7 @@ def main(argv=None) -> int:
     parser.add_argument("--plant-drag", action="store_true")
     parser.add_argument("--plant-stage2-thermodynamics", action="store_true")
     parser.add_argument("--plant-stage2-term", action="store_true")
+    parser.add_argument("--plant-barotropic-state", action="store_true")
     parser.add_argument(
         "--stage2-term-limit",
         choices=("hpg", "vorticity", "advection"),
@@ -2625,6 +2699,7 @@ def main(argv=None) -> int:
                 plant_drag=args.plant_drag,
                 plant_stage2_thermodynamics=args.plant_stage2_thermodynamics,
                 plant_stage2_term=args.plant_stage2_term,
+                plant_barotropic_state=args.plant_barotropic_state,
                 stage2_term_limit=args.stage2_term_limit,
                 stage2_term_only=args.stage2_term_only,
                 measure_stage2_update_arm=args.measure_stage2_update_arm,

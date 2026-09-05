@@ -105,10 +105,13 @@ _SLOT_KIND = {
     "T_som": "field", "S_som": "field",
     "T_flux_div_prev": "field", "S_flux_div_prev": "field",
     "eke": "field", "tke": "field", "dtke": "field", "eke_diss": "field",
+    "tke_avm": "field", "tke_avt": "field", "tke_dissl": "field",
+    "tke_avm_surface": "field",
     "T_incr_prev": "field", "S_incr_prev": "field",
     "u_incr_prev": "field", "v_incr_prev": "field",
     "u_before": "field", "v_before": "field", "T_before": "field",
     "S_before": "field", "eta_before": "field",
+    "uu_b": "field", "vv_b": "field",
     "F_slow_u_prev": "field", "F_slow_v_prev": "field",
     # NOT Fields: raw arrays / tuple-of-arrays that save_restart drops silently.
     # The centred-forcing trio mirrors OceanSurfaceForcing.tau_x/tau_y and the

@@ -270,12 +270,18 @@ _SLOT_POLICY: dict[str, str] = {
     # --- ocean prognostics -------------------------------------------------
     "u": _SLOT_PROGNOSTIC, "v": _SLOT_PROGNOSTIC,
     "T": _SLOT_PROGNOSTIC, "S": _SLOT_PROGNOSTIC, "eta": _SLOT_PROGNOSTIC,
+    # NEMO key_RK3's separately prognostic depth-mean velocity (restart.F90:
+    # 175-182 writes Kbb uu_n/vv_n; :304-314 reads it).  This is live input to
+    # the next external-mode window and S-21 transport, never diagnostic.
+    "uu_b": _SLOT_PROGNOSTIC, "vv_b": _SLOT_PROGNOSTIC,
     # SOM (Prather) advection moments — carried by the scheme.
     "T_som": _SLOT_PROGNOSTIC, "S_som": _SLOT_PROGNOSTIC,
     # AB2 tracer-advection history.
     "T_flux_div_prev": _SLOT_PROGNOSTIC, "S_flux_div_prev": _SLOT_PROGNOSTIC,
     # Prognostic eddy / turbulent kinetic energy + their histories.
     "eke": _SLOT_PROGNOSTIC, "tke": _SLOT_PROGNOSTIC,
+    "tke_avm": _SLOT_PROGNOSTIC, "tke_avt": _SLOT_PROGNOSTIC,
+    "tke_dissl": _SLOT_PROGNOSTIC, "tke_avm_surface": _SLOT_PROGNOSTIC,
     "dtke": _SLOT_PROGNOSTIC, "eke_diss": _SLOT_PROGNOSTIC,
     # AB2 outer-integrator increments.
     "T_incr_prev": _SLOT_PROGNOSTIC, "S_incr_prev": _SLOT_PROGNOSTIC,

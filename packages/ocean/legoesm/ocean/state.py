@@ -528,6 +528,11 @@ class LatLonCGridOceanState(NamedTuple):
         Ocean mask at v-points (lat interfaces). Shape (n_lat+1, n_lon).
     w : Field
         Vertical velocity [m/s]. Shape (n_lat, n_lon, nlev). Diagnostic field computed from flux divergence.
+    uu_b, vv_b : Field or None
+        NEMO's prognostic depth-mean velocity at U/V faces [m/s].  These are
+        the current whole-step ``Kbb`` values and are populated only by cards
+        selecting the NEMO WS-RK3 identity.  ``None`` on every other recipe
+        means the pair contributes no array leaves to its pytree.
     T_som : Field or None
         SOM (Prather 1986) moments for temperature. Shape (n_lat, n_lon, nlev, 9).
         Order: [sx, sy, sz, sxx, syy, szz, sxy, sxz, syz].
@@ -546,6 +551,14 @@ class LatLonCGridOceanState(NamedTuple):
     u_mask: Field
     v_mask: Field
     w: Field
+    # NEMO key_RK3 carries the external mode as prognostic state, independently
+    # of the 3-D velocity: oce.F90:39,99 declares uu_b/vv_b; dynspg_ts.F90:
+    # 484-500 reads Kmm/Kbb to seed the window and :857-897 writes Kaa; the
+    # final stprk3.F90:213 Naa/Nbb swap promotes that pair to the next step.
+    # Both members are present or absent together.  None is deliberately the
+    # default so non-NEMO recipes gain no array pytree leaf.
+    uu_b: object = None
+    vv_b: object = None
     T_som: object = None
     S_som: object = None
     T_flux_div_prev: object = None  # Previous advection flux divergence for T (AB2 only)

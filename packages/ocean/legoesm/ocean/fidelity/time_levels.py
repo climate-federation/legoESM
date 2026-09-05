@@ -892,7 +892,8 @@ for _kt in range(1, 11):
         "after",
         "scripts/validate/ocean_fidelity/testcases/nemo502_MY_SRC/"
         "stprk3.F90:344-352 writes uu_b/vv_b at the explicit klevel=Naa "
-        "plus composed un_adv/vn_adv after stp_2D",
+        "plus composed un_adv/vn_adv after stp_2D; NEMO stprk3.F90:213 "
+        "swaps Naa into Nbb, making this pair the next-step seed",
     )
 for _stage, _kaa, _kmm in ((1, 3, 1), (2, 2, 3), (3, 3, 2)):
     _DUMP_TIME_LEVEL[f"oracle_stage_kt00000001_s{_stage}.bin"] = (

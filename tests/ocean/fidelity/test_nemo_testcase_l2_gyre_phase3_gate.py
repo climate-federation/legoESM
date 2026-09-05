@@ -72,6 +72,20 @@ def test_score_exact_and_planted_violation():
     assert gate.score("plant", values, values.copy(), mask, plant=True)["status"] == "DEBT"
 
 
+def test_bt_reader_exposes_all_four_prognostic_and_transport_fields(tmp_path):
+    nx, ny = gate.DIMS[:2]
+    count = nx * ny
+    path = tmp_path / "oracle_bt_frames_kt00000001.bin"
+    header = b"NEMO_L1_BTFRM_1 " + struct.pack("=6i", 1, 1, 3, nx, ny, 64)
+    values = np.arange(4 * count, dtype=np.float64)
+    path.write_bytes(header + values.tobytes())
+    record = gate.read_bt(path, 1)
+    assert set(record) == {
+        "kt", "Kaa", "registry_level", "uu_b", "vv_b", "un_adv", "vn_adv"}
+    assert record["uu_b"].shape == (ny - 4, nx - 4)
+    assert record["vn_adv"].shape == (ny - 4, nx - 4)
+
+
 def test_kt1_at_rest_controls_are_uninformative_but_debt_stays_red():
     for field in ("u", "v", "ssh"):
         row = gate._mark_kt1_uninformative({"status": "AT-BAR"}, field, 1)

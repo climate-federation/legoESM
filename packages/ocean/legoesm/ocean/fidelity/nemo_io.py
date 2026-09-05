@@ -113,7 +113,9 @@ class NemoState(NamedTuple):
     u: np.ndarray            # zonal velocity at NEMO U-points (east face)
     v: np.ndarray            # meridional velocity at NEMO V-points (north face)
     ssh: np.ndarray          # sea-surface height [m]
-    rhd: np.ndarray | None   # in-situ density anomaly (rho-rho0)/rho0, if dumped
+    rhd: np.ndarray | None = None  # in-situ density anomaly, if dumped
+    uu_b: np.ndarray | None = None  # restart uu_n = depth-mean U at Kbb
+    vv_b: np.ndarray | None = None  # restart vv_n = depth-mean V at Kbb
 
 
 def _check_hls(nn_hls: int) -> None:
@@ -233,10 +235,20 @@ def read_nemo_restart(path: str, *, nn_hls: int = 1) -> NemoState:
     def m3(name: str) -> np.ndarray:
         return _to_latlon_lev(np.asarray(r[name].values).squeeze(), nn_hls)
 
+    has_uu_b = "uu_n" in r
+    has_vv_b = "vv_n" in r
+    if has_uu_b != has_vv_b:
+        raise ValueError(
+            "NEMO restart must carry both uu_n and vv_n or neither; found "
+            f"uu_n={has_uu_b}, vv_n={has_vv_b} in {path}")
     return NemoState(
         T=m3("tn"), S=m3("sn"), u=m3("un"), v=m3("vn"),
         ssh=_strip_halo_2d(np.asarray(r["sshn"].values).squeeze(), nn_hls),
         rhd=(m3("rhd") if "rhd" in r else None),
+        uu_b=(_strip_halo_2d(np.asarray(r["uu_n"].values).squeeze(), nn_hls)
+              if has_uu_b else None),
+        vv_b=(_strip_halo_2d(np.asarray(r["vv_n"].values).squeeze(), nn_hls)
+              if has_vv_b else None),
     )
 
 

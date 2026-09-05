@@ -5698,14 +5698,23 @@ class LatLonCGridOceanModel:
                     * _ws_stage_v_mask,
                 )
 
-            # The TARGET is the same operator M applied to the post-solve
-            # velocity -- legoESM's stand-in for NEMO's ``uu_b(Kaa)`` -- so it
-            # carries the same weights.  Mixing the two weightings would leave
-            # the installed mean satisfying neither.
-            target_u = (jnp.sum(state_new.u.data * _mean_h_u, axis=-1)
-                        / _mean_H_u * state.u_mask.data)
-            target_v = (jnp.sum(state_new.v.data * _mean_h_v, axis=-1)
-                        / _mean_H_v * state.v_mask.data)
+            # NEMO's TARGET is not reconstructed from the 3-D velocity.  The
+            # external mode writes its separately prognostic uu_b/vv_b(Kaa)
+            # at dynspg_ts.F90:857-897 and every HYB stage reads that value
+            # (stprk3_stg.F90:115-228,433-446).  Keep the old reduction only
+            # for isolated non-card unit paths whose state has no NEMO pair;
+            # all validated NEMO-identity cards carry it.
+            if state_new.uu_b is not None and state_new.vv_b is not None:
+                target_u = state_new.uu_b.data
+                target_v = state_new.vv_b.data
+            elif state_new.uu_b is None and state_new.vv_b is None:
+                target_u = (jnp.sum(state_new.u.data * _mean_h_u, axis=-1)
+                            / _mean_H_u * state.u_mask.data)
+                target_v = (jnp.sum(state_new.v.data * _mean_h_v, axis=-1)
+                            / _mean_H_v * state.v_mask.data)
+            else:
+                raise ValueError(
+                    "NEMO prognostic depth mean requires both uu_b and vv_b")
             transport_target_u = (
                 Hu_avg / H_u_pre * state.u_mask.data)
             transport_target_v = (
@@ -6006,7 +6015,10 @@ class LatLonCGridOceanModel:
                     else dt),
                 barotropic_velocity=(None
                     if _legacy_reduced_transport_mean_arm else (
-                        jnp.zeros_like(target_u), jnp.zeros_like(target_v))),
+                        (state.uu_b.data, state.vv_b.data)
+                        if state.uu_b is not None and state.vv_b is not None
+                        else (jnp.zeros_like(target_u),
+                              jnp.zeros_like(target_v)))),
                 **_stage_transport_kw)
             _operand_name = (
                 self._nemo_ws_test_hooks.expose_stage1_transport_operand)

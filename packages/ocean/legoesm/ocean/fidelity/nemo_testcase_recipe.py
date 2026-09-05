@@ -555,6 +555,7 @@ def _native_initial_state(
         H_max=float(z_coord.H_max),
         land_mask_override=surface_wet,
         H_bathy_override=bathymetry,
+        nemo_prognostic_barotropic_velocity=True,
     )
     active = jnp.asarray(z_coord.is_active) & surface_wet[..., None]
     temperature = jnp.where(x_km[..., None] <= front_km, cold, warm)
@@ -776,6 +777,7 @@ def build_gyre_zco_card() -> NEMOTestcaseCard:
         H_max=float(_GYRE_GDEPW_1D[30]),
         land_mask_override=wet,
         H_bathy_override=bathymetry,
+        nemo_prognostic_barotropic_velocity=True,
     )
     t_profile, s_profile = _gyre_initial_profiles(_GYRE_GDEPT_1D[:30])
     active = np.asarray(z_coord.is_active)
@@ -872,6 +874,10 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
     if card.case not in expected:
         raise ValueError(f"unknown NEMO testcase card {card.case!r}")
     cfg = card.recipe.model_config
+    if (card.recipe.initial_state.uu_b is None
+            or card.recipe.initial_state.vv_b is None):
+        raise ValueError(
+            f"{card.case} requires NEMO's prognostic uu_b/vv_b state pair")
     filt, count, bbl_option, gamma = expected[card.case]
     actual = (
         cfg.barotropic.barotropic_time_filter,

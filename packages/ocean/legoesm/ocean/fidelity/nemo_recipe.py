@@ -471,6 +471,7 @@ def build_nemo_rest_recipe(
         z_coord,
         H_max=H_max,
         land_lat_threshold=90.0,
+        nemo_prognostic_barotropic_velocity=True,
     )
     return NEMORecipe(
         model_config=model_config,
@@ -977,6 +978,7 @@ def build_nemo_gyre_recipe(
         grid, z_coord,
         H_max=z_coord.H_max,
         land_mask_override=land_mask,
+        nemo_prognostic_barotropic_velocity=True,
     )
     state = state._replace(
         T=Field(data=T, name="T", dims=state.T.dims, units=state.T.units),

@@ -3026,6 +3026,7 @@ def dino_lat_lon_state(
         H_max=cfg.H_deep,
         land_mask_override=land_mask,
         H_bathy_override=H_bathy,
+        nemo_prognostic_barotropic_velocity=True,
     )
     # Replace T, S with our lat-z structured ICs
     state = state._replace(
