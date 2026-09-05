@@ -52,9 +52,20 @@ DEFAULT_CERTIFIED_ENTRY = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10/"
     "oracle_step_entry_kt00000001.bin"
 )
-DEFAULT_TRAJECTORY = Path(
-    "/data/abyssal/dbalwada/nemo-testcases-l1/barotropic_walk/overflow_kt1_10_flux_gate.json"
-)
+# The trajectory report is a PER-CARD artifact.  A single OVERFLOW default
+# meant a LOCK run on gate defaults would stamp OVERFLOW's file as LOCK's
+# ``trajectory_gate`` provenance -- a false record even though the block it
+# feeds is withheld for non-OVERFLOW cards.  Defaults are per card now, and
+# ``_trajectory_kt2`` refuses a report belonging to another card.
+CASE_TRAJECTORY = {
+    "OVERFLOW-zps": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l1/barotropic_walk/"
+        "overflow_kt1_10_flux_gate.json"),
+    "LOCK_EXCHANGE-zco": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/"
+        "lock_trajectory_gate_kt10.json"),
+}
+DEFAULT_TRAJECTORY = CASE_TRAJECTORY["OVERFLOW-zps"]
 
 FIELDS = (
     "eta_entry",
@@ -456,6 +467,9 @@ def score_frame(name: str, oracle, candidate, mask, *, plant=False) -> dict:
 
 def _trajectory_kt2(path: Path) -> dict:
     report = json.loads(path.read_text())
+    require(report.get("case") == CASE,
+            f"{path} is a {report.get('case')!r} trajectory report, but this "
+            f"run is {CASE!r}; stamping it would be a false provenance record")
     step = next(item for item in report["steps"] if item["kt"] == 2)
     result = {}
     for field in ("T", "u", "ssh"):
@@ -592,7 +606,12 @@ def run(
         if row["name"].endswith(".u_exit")
     )
     slow_dt_prediction = first_slow["absolute_max"] * (10.0 / 3.0)
-    slow_ratio = first_exit["absolute_max"] / max(slow_dt_prediction, np.finfo(float).tiny)
+    # A zero denominator has no ratio.  Dividing by np.finfo(float).tiny
+    # printed 1.559250241824e+290 on OVERFLOW, which reads as a measurement
+    # and is not one: substep 1's slow_u error is exactly 0.0 there, so pure
+    # inheritance predicts nothing at all and the comparison is undefined.
+    slow_ratio = (first_exit["absolute_max"] / slow_dt_prediction
+                  if slow_dt_prediction > 0.0 else None)
 
     # Planted controls must land as the FIRST DEBT of BOTH arms at substep 1
     # with the +1.0 plant visible; otherwise the gate is broken (exit 2).
@@ -663,6 +682,10 @@ def run(
             "substep1_slow_u_error_times_dt": slow_dt_prediction,
             "substep1_u_exit_error": first_exit["absolute_max"],
             "exit_over_slow_dt_prediction": slow_ratio,
+            "exit_over_slow_dt_prediction_undefined_reason": (
+                None if slow_ratio is not None else
+                "substep-1 slow_u error is exactly 0.0, so the inheritance "
+                "prediction is 0 and the ratio does not exist"),
         },
         "whole_step_kt2_causal_arm": {
             "frozen_confirm_predicate": ("u error falls >=10x and neither T nor SSH worsens >10x"),
@@ -898,7 +921,9 @@ def main(argv=None) -> int:
     parser.add_argument("--oracle", type=Path, default=DEFAULT_ORACLE)
     parser.add_argument("--new-entry", type=Path, default=DEFAULT_NEW_ENTRY)
     parser.add_argument("--certified-entry", type=Path, default=DEFAULT_CERTIFIED_ENTRY)
-    parser.add_argument("--trajectory", type=Path, default=DEFAULT_TRAJECTORY)
+    parser.add_argument("--trajectory", type=Path,
+                        help="per-card trajectory report; defaults to the "
+                             "card's own (never another card's)")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant-entry", action="store_true")
     parser.add_argument("--plant-exit", action="store_true")
@@ -917,6 +942,8 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     CASE = args.case
     EXPECTED = tuple(args.expected) if args.expected else CASE_EXPECTED[CASE]
+    if args.trajectory is None:
+        args.trajectory = CASE_TRAJECTORY[CASE]
     # Exit codes: 0 AT-BAR, 1 DEBT (measured), 2 gate failure (a planted
     # control that did not land, a dirty tree, a bad oracle record).
     try:

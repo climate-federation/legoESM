@@ -235,3 +235,32 @@ def test_kt_walk_masked_stagger_rows_are_inventory_not_first_divergence():
     assert rows["u_exit"]["alignment_row"] is True
     assert first == {"substep": 1, "frame": "u_exit",
                      "normalized_max_abs": 1.0e-9, "absolute_max": 1.0e-9}
+
+
+def test_trajectory_report_from_another_card_is_refused(tmp_path):
+    """A per-card artifact stamped for another card is a false record.
+
+    The default was a single OVERFLOW path for every case, so a LOCK run on
+    gate defaults would have published OVERFLOW's trajectory as its own
+    provenance.  Defaults are per card now, and the reader refuses a mismatch
+    even when one is passed explicitly.
+    """
+    assert set(gate.CASE_TRAJECTORY) == set(gate.CASE_EXPECTED)
+    foreign = tmp_path / "foreign.json"
+    foreign.write_text(json.dumps({
+        "case": "LOCK_EXCHANGE-zco",
+        "steps": [{"kt": 2, "rows": [
+            {"name": "x.T", "normalized_max_abs": 1.0},
+            {"name": "x.u", "normalized_max_abs": 1.0},
+            {"name": "x.ssh", "normalized_max_abs": 1.0}]}],
+    }))
+    assert gate.CASE == "OVERFLOW-zps"
+    with pytest.raises(gate.GateError, match="false provenance"):
+        gate._trajectory_kt2(foreign)
+    # ... and the same file is accepted for the card it belongs to.
+    original = gate.CASE
+    try:
+        gate.CASE = "LOCK_EXCHANGE-zco"
+        assert gate._trajectory_kt2(foreign)["T"] == 1.0
+    finally:
+        gate.CASE = original
