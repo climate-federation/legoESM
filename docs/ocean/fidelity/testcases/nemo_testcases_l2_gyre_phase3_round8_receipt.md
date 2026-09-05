@@ -3016,3 +3016,28 @@ if it is the pending carried-state design, it remains HOLD and is not built.
 
 No lane-3b dry-face producer has been handed over at preregistration time; the
 NaN remains registered and no mask workaround is authorized.
+
+### 23.2 literal `wmask` result — inert but retained
+
+The shared CEN2 vertical-flux statement now carries NEMO's explicit
+`wmask(k+1)` factor.  This is a source-completeness correction, not a new
+option: the same `_nemo_cen2_tracer_rhs` remains the sole stage-1/2 owner.
+The direct JIT bit test includes a dry lower T cell and fails if the factor is
+removed.
+
+The clean ORCA2 probe at `b6a6189c9357`, plus the already landed round-22
+shared commits and this one-variable factor, counts `161733` dry inner W
+faces.  Oracle `pW` is bit-zero on all `161733`, so the factor is
+**CONFIRMED_INERT_ON_OWNED_CELLS**.  The supplied-input gate remains T
+`0 / 228641` and S `0 / 228641`; its ordinary planted tracer cell exits 1 at
+`1 / 228641`.  The report hash is `4fa0bfc6...` and the plant transcript hash
+is `3b06f0d4...`.
+
+Cross-card production-JIT comparisons against the round-22 tip are all exact
+zero-move: LOCK stage `9 / 9` and trajectory `50 / 50` PASS, OVERFLOW stage
+`9 / 9` and trajectory `50 / 50` PASS, with `0` row-scale ulp worsening,
+`0` prior-legoESM movement, no status changes, and unchanged first-over-bar
+(LOCK kt3 T/u; OVERFLOW kt2 T/u).  Their comparison hashes are respectively
+`5992b7db...`, `524858b8...`, `c19b273f...`, and `ef076ec9...`; the residual
+NPZ hashes are unchanged from round 22, which independently proves bit
+identity.  Rules 8 and 12 therefore contain zero moved rows for this factor.

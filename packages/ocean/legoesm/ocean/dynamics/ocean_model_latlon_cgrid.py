@@ -1325,13 +1325,17 @@ def _nemo_metric_stage_transport(metric, face_thickness, corrected_velocity):
         * corrected_velocity)
 
 
-def _nemo_cen2_tracer_rhs(tracer, p_u, p_v, p_w, e3t_kmm, grid):
+def _nemo_cen2_tracer_rhs(
+    tracer, p_u, p_v, p_w, e3t_kmm, tmask_kmm, grid,
+):
     """Literal RK3 stage-1/2 CEN2 tracer accumulator.
 
     The FCT card dispatches stages 1-2 to ``traadv_cen.F90:137-149,191-216``
     (``traadv.F90:280-283,355-365``).  Preserve its written face products,
-    parenthesised U/V differences, precomputed ``r1_e1e2t`` and live
-    ``e3t(Kmm)`` division.  Stage 3 continues through the single FCT
+    parenthesised U/V differences, precomputed ``r1_e1e2t``, live
+    ``e3t(Kmm)`` division, and the explicit ``wmask(k+1)`` factor on the
+    vertical flux (``traadv_cen.F90:201-210``;
+    ``dommsk.F90:176,180``).  Stage 3 continues through the single FCT
     implementation and does not call this helper.
     """
     sr = nemo_source_round
@@ -1348,7 +1352,10 @@ def _nemo_cen2_tracer_rhs(tracer, p_u, p_v, p_w, e3t_kmm, grid):
     rhs = sr(-sr(horizontal_scaled / e3t_kmm))
 
     tracer_w_sum = sr(tracer[..., :-1] + tracer[..., 1:])
-    flux_w_inner = sr(sr(0.5 * p_w[..., 1:-1]) * tracer_w_sum)
+    tmask_kmm = jnp.broadcast_to(jnp.asarray(tmask_kmm), tracer.shape)
+    wmask_inner = sr(tmask_kmm[..., 1:] * tmask_kmm[..., :-1])
+    flux_w_inner = sr(
+        sr(sr(0.5 * p_w[..., 1:-1]) * tracer_w_sum) * wmask_inner)
     flux_w = jnp.pad(
         flux_w_inner,
         ((0, 0),) * (flux_w_inner.ndim - 1) + ((1, 1),),
@@ -1637,7 +1644,7 @@ def _nemo_ws_rk3_tracer_pair_step(
 
             def _cen2_content_div(tracer):
                 rhs = _nemo_cen2_tracer_rhs(
-                    tracer, p_u, p_v, p_w, h_stage, grid)
+                    tracer, p_u, p_v, p_w, h_stage, active_3d, grid)
                 return nemo_source_round(
                     -nemo_source_round(h_stage * rhs)), rhs
 

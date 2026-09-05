@@ -110,6 +110,8 @@ def test_nemo_cen2_tracer_rhs_matches_literal_source_bits():
     p_w[..., 0] = 0.0
     p_w[..., -1] = 0.0
     e3t = rng.uniform(0.2, 250.0, (ny, nx, nz)).astype(np.float64)
+    tmask = np.ones((ny, nx, nz), dtype=np.float64)
+    tmask[0, 0, 1] = 0.0
 
     sum_u_core = np.roll(tracer, 1, axis=1) + tracer
     sum_u = np.concatenate([sum_u_core, sum_u_core[:, :1]], axis=1)
@@ -122,16 +124,18 @@ def test_nemo_cen2_tracer_rhs_matches_literal_source_bits():
     r1_area = np.float64(1.0) / area[..., None]
     expected = -(((delta_u + delta_v) * r1_area) / e3t)
     sum_w = tracer[..., :-1] + tracer[..., 1:]
+    wmask_inner = tmask[..., 1:] * tmask[..., :-1]
     flux_w = np.zeros((ny, nx, nz + 1), dtype=np.float64)
-    flux_w[..., 1:-1] = (np.float64(0.5) * p_w[..., 1:-1]) * sum_w
+    flux_w[..., 1:-1] = (
+        (np.float64(0.5) * p_w[..., 1:-1]) * sum_w) * wmask_inner
     expected = expected - (
         (flux_w[..., :-1] - flux_w[..., 1:]) * r1_area) / e3t
 
     actual = np.asarray(jax.jit(
-        lambda tr, pu, pv, pw, h: model_module._nemo_cen2_tracer_rhs(
-            tr, pu, pv, pw, h, grid))(
+        lambda tr, pu, pv, pw, h, tm: model_module._nemo_cen2_tracer_rhs(
+            tr, pu, pv, pw, h, tm, grid))(
         jnp.asarray(tracer), jnp.asarray(p_u), jnp.asarray(p_v),
-        jnp.asarray(p_w), jnp.asarray(e3t)))
+        jnp.asarray(p_w), jnp.asarray(e3t), jnp.asarray(tmask)))
     np.testing.assert_array_equal(actual.view(np.uint64), expected.view(np.uint64))
 
     # Non-vacuity: the old path materialised averages, cancelled them with 2,
@@ -147,8 +151,13 @@ def test_nemo_cen2_tracer_rhs_matches_literal_source_bits():
         ((legacy_fu[:, 1:] - legacy_fu[:, :-1])
          + (legacy_fv[1:] - legacy_fv[:-1])) * r1_area
     ) * (np.float64(1.0) / e3t)
+    unmasked_flux_w = np.pad(
+        (np.float64(0.5) * p_w[..., 1:-1]) * sum_w,
+        ((0, 0), (0, 0), (1, 1)),
+    )
     legacy = legacy - (
-        (flux_w[..., :-1] - flux_w[..., 1:]) * r1_area
+        (unmasked_flux_w[..., :-1] - unmasked_flux_w[..., 1:])
+        * r1_area
     ) * (np.float64(1.0) / e3t)
     assert not np.array_equal(legacy.view(np.uint64), expected.view(np.uint64))
 
