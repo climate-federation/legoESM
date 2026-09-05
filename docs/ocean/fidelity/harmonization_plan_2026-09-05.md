@@ -55,3 +55,18 @@ std1deg_dailysnap,windsonly,modfrc,iceab20}_d30). Kept: everything referenced by
 Three 48 GB glab1 GPUs hold the real-freshwater pair + twin (verdict in hand: closure defective
 for SSS, twin divergence 1e-3 C). The level-8 chain (K_zeta_bih=0) is queued behind them.
 P1 needs 3 short arms; P3 one; P2 is CPU. Proposal: cancel the real-FW trio to free the GPUs.
+
+## Review dispositions (2026-09-05 02:00)
+GLM: day-30 cannot rank viscosity (EUC/WBC need 100+ d) -> ladder runs to 90 d; (b) as written
+changes 3 things (profile, base 1e4->2e4, Smag off) -> hold the ramp/Smag/dt, vary the background
+only; P2 metric = MLD evolution through a forced sequence, run P2 AFTER P3 on the 76-interface
+column; P3: a 1 m top cell at dt 1800 is a vertical-advective-CFL risk (w~1e-3 -> 1.8 m/step) ->
+CFL census from baseline w before any arm; reproducing node counts validates the counter, not the
+depth rule -> also check reconstructed bottom depths.
+codex: --A-h-profile-file is a surface zonal-median, depth-invariant, latitude-only proxy applied
+as a multiplier after the operator (run_omip_core2.py:942, ocean_pe_latlon_cgrid.py:3247) -> NOT
+NEMO's 3-D coefficient in flux form; faithful option needs a prescribed 2-D/3-D field inside the
+Laplacian flux. Ladder: profile-only atop the unchanged schedule -> Smag off -> 2e4 endpoint;
+drop the biharmonic arm. P2 harness frozen_column_tke_twin.py has only control|nemo modes and no
+MLD -> needs a CVMix adapter + matched prognostic column trajectories. P3: verify elvls/nlvls/
+aux3d linkage and the minimum-level policy, not just counts.
