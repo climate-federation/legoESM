@@ -27,6 +27,10 @@ ORACLE_ENTRY_KT = 17
 ULP_LIMIT = 2
 TARGET_TRACER = "szv_i_l01"
 PLANT_RELATIVE = 1.0e-6  # instrument control only; intentionally above fp64 roundoff
+_SHA256_CHUNK_BYTES = 1024 * 1024  # streaming-I/O implementation choice
+_H_BIG_MAXIMUM_CONCENTRATION = 0.15  # icedyn_adv_pra.F90:992,1000,1007
+_ICE_MAXIMUM_THICKNESS_M = 99.0  # ICE_ADV2D namelist_ice_ref:46 rn_himax
+_UINT64_SIGN_BIT_INDEX = 63  # IEEE-754 binary64 sign-bit position
 
 
 class ReplayError(RuntimeError):
@@ -52,7 +56,7 @@ gate = _load("nemo_si3_phase2_adv2d_gate_replay", GATE_PATH)
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
+        for block in iter(lambda: stream.read(_SHA256_CHUNK_BYTES), b""):
             digest.update(block)
     return digest.hexdigest()
 
@@ -151,9 +155,13 @@ def _hbig_and_halo_numpy(card, entry: np.ndarray, contents: np.ndarray, moments)
         & (volume > 0.0)
         & (concentration > 0.0)
         & (thickness > h_max)
-        & (concentration < 0.15)
+        & (concentration < _H_BIG_MAXIMUM_CONCENTRATION)
     )
-    concentration = np.where(correct, volume / np.minimum(h_max, 99.0), concentration)
+    concentration = np.where(
+        correct,
+        volume / np.minimum(h_max, _ICE_MAXIMUM_THICKNESS_M),
+        concentration,
+    )
     contents = np.asarray(contents).copy()
     contents[..., a_index] = concentration * area
     return _periodic_numpy(contents, halo), tuple(
@@ -234,7 +242,7 @@ def _ulp_distance(left: np.ndarray, right: np.ndarray) -> np.ndarray:
     )
     left_bits: np.ndarray = left.view(np.uint64)
     right_bits: np.ndarray = right.view(np.uint64)
-    sign = np.uint64(1 << 63)
+    sign = np.uint64(1 << _UINT64_SIGN_BIT_INDEX)
     left_ordered = np.where(left_bits & sign, ~left_bits, left_bits | sign)
     right_ordered = np.where(right_bits & sign, ~right_bits, right_bits | sign)
     return cast(
