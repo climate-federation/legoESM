@@ -73,3 +73,34 @@ handed to the GYRE owner.
 | add a WRITE-only discriminator if existing records are ambiguous | ASKED process | minimum schema only; user executes MPI |
 | execute MPI | UNASKED and prohibited | no MPI in this measurement |
 | delete superseded roots | UNASKED and forbidden | all retained |
+
+## WZV acquisition addendum (before build or measurement)
+
+The retained canonical streams do not preserve the one-cell `pFu/pFv`
+stencil outside A2D(0), so they cannot independently reproduce `div_hor` on
+the outer owned cells.  The next run adds one rank-zero, kt=1, stage-1 stream
+in configuration-copy `MY_SRC/traadv.F90`, immediately around the executing
+`wzv(...,np_transport)` call.  Its frozen schema is:
+
+- magic `NEMO_L4_WZVS1_1`, version 1; explicit
+  `kt,kstg,Kbb,Kmm,Kaa,jpi,jpj,jpk`, stencil bounds and binary precision;
+- raw `pFu,pFv(2:jpi-2,2:jpj-2,1:jpk)`, the exact one-cell support needed by
+  every rank-zero owned T cell;
+- zero-first canonical owned `e3t(Kmm)`, `e3t_0`, `tmask`, `r3t(Kbb)`,
+  `r3t(Kaa)`, `r1_e1e2t`, and `rnf`; and
+- zero-first canonical owned `ww` immediately after `wzv`, followed by `pFw`
+  immediately after `pFw=e1e2t*ww`.
+
+The dump performs no model assignment and is never read by NEMO.  It permits
+separate 0 / n tests of the source-associated horizontal transport divergence,
+the resolved surface-only runoff decrement (`sbcrnf.F90:253-260`), the QCO
+bottom-up W recurrence (`sshwzv.F90:330-336`), and the final area product
+(`traadv.F90:241-243`).  Each boundary gets its own one-ULP plant.  Any shared
+divergence/WZV debt is `GYRE_OWNER`; runoff input/arithmetic debt is
+`ORCA2_OWNER`.  This stream still precedes FCT's north-fold exchange, which
+remains the following boundary.
+
+Rebuild with `conda-scalarmath`, require zero dynamic `_ZGV*`, and prepare one
+two-rank `jpni=2,jpnj=1` ten-step directory with the exact V2 deck and a
+hash-guarded launcher.  The new binary must remain ordinary-output identical
+to the accepted uninstrumented variant control.  MPI remains user-shell only.
