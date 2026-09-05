@@ -12,44 +12,52 @@ exact-input row on EVERY card that executes it, and
 of them.  This gate supplies the row for ``LOCK_EXCHANGE-zco`` and
 ``OVERFLOW-zps``.
 
-WHAT THE SCORED FRAME ACTUALLY IS -- read from the instrument, not assumed.
+WHAT THE SCORED FRAME IS -- read from the PREPROCESSED source each card
+COMPILES (``<config>/BLD/ppsrc/nemo/``), not from the shipped ``.F90``.
 ``oracle_rhs_kt00000001.bin`` is written by ``l1_dump_rhs`` at
-``MY_SRC/stprk3.F90:206``, immediately after ``stp_2D`` at :204 and BEFORE
-stage 1 at :215.  It is therefore NOT a stage-1 frame and NOT the hydrostatic
-pressure gradient in isolation.  Its content, in ``stp2d.F90`` order:
+``MY_SRC/stprk3.F90:206``, immediately after ``stp_2D`` at :204 and before
+stage 1 at :215.  In ``stp2d.F90`` order the calls that can touch
+``uu(:,:,:,Krhs)`` are ``:128`` ``dyn_hpg``, ``:131`` ``dyn_ldf``, ``:146``
+``dyn_vor``, ``:172`` ``dyn_adv_up3``, ``:196`` ``dyn_drg_init`` and ``:281``
+``dyn_spg_ts``; ``stp2d.F90`` itself contains zero direct ``uu``/``vv``
+assignments.  At a rest start the frame is ``dyn_hpg`` ALONE, and every step
+of that is asserted mechanically by :func:`assert_ppsrc_isolation` rather than
+argued in prose:
 
-* ``:126`` ``dyn_hpg(kt, Kbb, uu, vv, Krhs)`` -- the changed operator, which
-  ASSIGNS over its loop range (the RHS is not pre-zeroed);
-* ``:129`` ``dyn_ldf`` -- called UNCONDITIONALLY, and inert here only because
-  both cards set ``ln_dynldf_OFF = .true.`` in their namelist, not because the
-  card is at rest.  The gate asserts the legoESM equivalent rather than
-  relying on that coincidence;
-* ``:190`` ``dyn_vor`` -- bilinear in the velocity, hence exactly zero at a
-  rest start;
-* 3-D momentum advection is NOT in this frame: both cards are flux form
-  (``ln_dynadv_up3 = .true.``), so ``stp2d.F90:172`` writes only the 2-D
-  ``pUe/pVe`` and the 3-D advection lands at ``stprk3_stg.F90:315``, after the
-  dump;
-* then ``dyn_spg_ts`` (``stp2d.F90:279``) REMOVES the vertical mean from
-  ``puu(:,:,:,Krhs)`` at ``dynspg_ts.F90:344-345`` and ADDS the barotropic
-  acceleration back at ``:938-975``.  Neither is zero at a rest start: the
-  dumped ``uu_b(Kaa)`` maxima are 1.135e-3 (LOCK) and 4.503e-2 (OVERFLOW).
+* ``dyn_hpg`` ASSIGNS.  ``hpg_sco`` writes ``puu(ji,jj,jk,Krhs) = zhpi + zuap``
+  (ppsrc ``dynhpg.f90``, "RK3 case: dyn_hpg always called first"), so whatever
+  the RHS held before ``:128`` is overwritten and cannot reach the dump.
+* ``dyn_ldf`` (``:131``) is called unconditionally and is inert only because
+  both cards set ``ln_dynldf_OFF = .true.``  That is a NAMELIST fact; the gate
+  asserts the legoESM equivalent instead of relying on it.
+* ``dyn_vor`` (``:146``) accumulates ``pu_rhs + zuav*(zwz+zwz)`` where ``zuav``
+  is built from ``zwx``/``zwy``, each a product with the entry velocity.  The
+  gate asserts NEMO's dumped entry velocity is identically zero, so the added
+  term is exactly ``0.0``.
+* ``dyn_adv_up3`` (``:172``) is called WITH ``pUe``/``pVe``.  In the ppsrc every
+  ``puu``/``pvv(...,Krhs)`` write sits in the ELSE of ``IF( PRESENT( pUe ) )``,
+  so on a flux-form card the 3-D advection is not in this frame at all.
+* ``dyn_drg_init`` (``:196``) declares ``puu, pvv`` ``INTENT(in)``.
+* ``dyn_spg_ts`` (``:281``) writes NOTHING to ``puu``/``pvv``.  Both cards
+  compile ``key_RK3``, and the ppsrc ``dynspg_ts.f90`` contains ZERO
+  assignments to ``puu``/``pvv``: the depth-mean removal (shipped
+  ``dynspg_ts.F90:344-345``) lives in the ``#else`` at ``:303`` and the
+  barotropic add-back (shipped ``:938-975``) in the ``#else`` at ``:910`` --
+  both the MLF arm, neither compiled here.
 
-So the row is a COMPOSITE: baroclinic HPG with its depth mean removed, plus
-the barotropic acceleration.  It discharges Rule 12 in the sense that the
-changed operator is inside a frame that is bit-exact given NEMO's own inputs
--- which is a STRONGER statement about how much of NEMO's step is reproduced
-bitwise, and a WEAKER isolation, since a bit-level compensating error between
-the pressure gradient and the mode split is not excluded by this row alone.
-The earlier "the dumped frame is dyn_hpg alone" claim, and its citation of
-``stprk3_stg.F90:309-334`` (which is the ``CASE(2,3)`` block and never runs at
-stage 1), are RETRACTED.
+Round 26 read the SHIPPED ``dynspg_ts.F90`` and concluded the frame was a
+composite of the pressure gradient and the mode split.  That is RETRACTED:
+under ``key_RK3`` neither statement exists in the object code.  Its other
+correction stands -- the frame is a ``stp_2D`` frame, not a stage-1 frame, and
+the citation of ``stprk3_stg.F90:309-334`` was wrong -- so the row keeps the
+name ``kt1.stp2d.momentum_rhs`` while the ISOLATION is full.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import struct
 from pathlib import Path
 
@@ -67,6 +75,128 @@ from nemo_testcase_phase3_stage_sweep_gate import (
     score,
     sha256,
 )
+
+
+# The NEMO build tree.  Each card's PREPROCESSED source -- the code the card
+# actually compiles -- lives under ``<config>/BLD/ppsrc/nemo/``; the shipped
+# ``src/OCE/**.F90`` still carries the branches the cpp keys removed.
+NEMO_ROOT = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2")
+PPSRC_CONFIG = {
+    "LOCK_EXCHANGE-zco": "tests/LOCK_EXCHANGE_OMIP_L1_P3",
+    "OVERFLOW-zps": "tests/OVERFLOW_OMIP_L1_P3",
+}
+_RHS_WRITE = re.compile(r"^\s*(?:puu|pvv)\s*\(")
+
+
+def _routine(lines: list[str], name: str) -> tuple[int, int]:
+    """Half-open [start, stop) line span of ``SUBROUTINE <name>``."""
+    start = stop = None
+    for index, line in enumerate(lines):
+        if re.match(rf"^\s*SUBROUTINE\s+{name}\s*\(", line):
+            start = index
+        elif start is not None and re.match(
+                rf"^\s*END\s+SUBROUTINE\s+{name}\s*$", line.rstrip()):
+            stop = index
+            break
+    require(start is not None and stop is not None,
+            f"SUBROUTINE {name} not found in the preprocessed source")
+    return start, stop
+
+
+def assert_ppsrc_isolation(case: str, nemo_root: Path = NEMO_ROOT,
+                           config: str | None = None) -> dict:
+    """Prove, from the code the card COMPILES, that the dumped kt=1 frame is
+    ``dyn_hpg`` alone once the rest-state and ``ln_dynldf_OFF`` preconditions
+    hold.  Every fact below is a grep over ``BLD/ppsrc/nemo/``; none is prose.
+
+    All five facts are evaluated and reported together rather than
+    short-circuiting on the first, so the planted control (``--plant-ppsrc
+    cfgs/DINO``, an MLF build) exercises every one of them at once.
+    """
+    # ``config`` overrides the card's own build ONLY for the planted control.
+    config = nemo_root / (config or PPSRC_CONFIG[case])
+    ppsrc = config / "BLD/ppsrc/nemo"
+    require(ppsrc.is_dir(), f"{case}: missing preprocessed source {ppsrc}")
+    violations: list[str] = []
+
+    keys = next(config.glob("cpp_*.fcm")).read_text().split()
+    if "key_RK3" not in keys:
+        violations.append(
+            f"does not compile key_RK3 ({keys}); the MLF arm of dynspg_ts "
+            "would then write puu/pvv and the frame is a composite")
+
+    # dyn_spg_ts: zero writes to the 3-D momentum RHS under key_RK3.
+    spg = (ppsrc / "dynspg_ts.f90").read_text().splitlines()
+    spg_writes = [index + 1 for index, line in enumerate(spg)
+                  if _RHS_WRITE.match(line)]
+    if spg_writes:
+        violations.append(
+            f"ppsrc dynspg_ts.f90 assigns puu/pvv at {spg_writes}; the "
+            "depth-mean removal or the barotropic add-back compiled after all")
+
+    # dyn_drg_init reads the 3-D velocity, never writes it.
+    drg_start, drg_stop = _routine(spg, "dyn_drg_init")
+    drg_intent = [line.strip() for line in spg[drg_start:drg_stop]
+                  if "INTENT(in" in line
+                  and ("puu, pvv" in line or "puu   , pvv" in line)]
+    if not drg_intent:
+        violations.append("dyn_drg_init does not declare puu/pvv INTENT(in)")
+
+    # dyn_hpg (hpg_sco) ASSIGNS -- the RHS is overwritten, not accumulated.
+    hpg = (ppsrc / "dynhpg.f90").read_text().splitlines()
+    hpg_start, hpg_stop = _routine(hpg, "hpg_sco")
+    hpg_writes = [line.strip() for line in hpg[hpg_start:hpg_stop]
+                  if _RHS_WRITE.match(line)]
+    if not hpg_writes or not all(
+            re.match(r"^p[uv][uv]\([^)]*Krhs\)\s*=\s*zhp[ij]", line)
+            for line in hpg_writes):
+        violations.append(
+            f"hpg_sco does not ASSIGN the momentum RHS: {hpg_writes}; a "
+            "read-modify-write there would carry whatever preceded dyn_hpg")
+
+    # dyn_adv_up3 with pUe present writes only the 2-D RHS: every 3-D write
+    # sits in the ELSE of an IF( PRESENT( pUe ) ).  Fortran block-IF nesting
+    # means a stack, not a flag.
+    up3 = (ppsrc / "dynadv_up3.f90").read_text().splitlines()
+    up3_start, up3_stop = _routine(up3, "dyn_adv_up3")
+    guarded: list[int] = []
+    unguarded: list[int] = []
+    stack: list[list] = []
+    for index in range(up3_start, up3_stop):
+        line = up3[index]
+        if line.lstrip().startswith("!"):        # commented-out code
+            continue
+        if _RHS_WRITE.match(line):
+            in_pue_else = any(is_pue and in_else for is_pue, in_else in stack)
+            (guarded if in_pue_else else unguarded).append(index + 1)
+        if re.search(r"\bIF\s*\(.*\)\s*THEN\b", line):
+            stack.append([
+                bool(re.match(
+                    r"^\s*IF\(\s*PRESENT\(\s*pUe\s*\)\s*\)\s*THEN", line)),
+                False])
+        elif re.match(r"^\s*ELSE\b", line) and stack:
+            stack[-1][1] = True
+        elif re.match(r"^\s*END\s*IF\b", line) and stack:
+            stack.pop()
+    require(not stack, f"{case}: unbalanced IF/ENDIF in dyn_adv_up3")
+    if not guarded or unguarded:
+        violations.append(
+            f"dyn_adv_up3 writes the 3-D momentum RHS outside the "
+            f"PRESENT(pUe) ELSE at lines {unguarded}; the dumped frame would "
+            "then carry momentum advection")
+
+    require(not violations,
+            f"{case}: the dumped frame is NOT dyn_hpg alone -- "
+            + "; ".join(violations))
+    return {
+        "ppsrc": str(ppsrc),
+        "cpp_keys": keys,
+        "dynspg_ts_rhs_writes": spg_writes,
+        "dyn_drg_init_intent": drg_intent,
+        "hpg_sco_rhs_assignments": hpg_writes,
+        "dyn_adv_up3_rhs_writes_in_present_pue_else": guarded,
+        "dyn_adv_up3_rhs_writes_unguarded": unguarded,
+    }
 
 
 def read_rhs(path: Path, case: str) -> dict:
@@ -133,6 +263,11 @@ def run(case: str, root: Path, *, plant: bool = False,
     require(cfg.pgf_scheme == "nemo_sco",
             f"{case} does not execute the changed operator: "
             f"pgf_scheme={cfg.pgf_scheme!r}")
+
+    # Precondition Z: the frame's ISOLATION, proved against the code the card
+    # compiles rather than the shipped source (round 26 read the latter and
+    # mislabelled the frame a composite).
+    isolation = assert_ppsrc_isolation(case)
     masks = expected_masks(card)
     nlev = card.recipe.z_coord.n_levels
     initial = card.recipe.initial_state
@@ -231,11 +366,12 @@ def run(case: str, root: Path, *, plant: bool = False,
         # false claim about what is being compared.
         row["frame"] = "instantaneous_post_stp2d_momentum_rhs"
         row["staggering_and_reduction"] = (
-            "NEMO puu(:,:,:,Nrhs) after the stage-1 accumulation and "
-            "legoESM's momentum tendency are both instantaneous 3-D C-grid "
-            "face accelerations in m/s^2 at the same wet faces; elementwise "
-            "L-infinity, no vertical, substep or time reduction. At rest the "
-            "frame is dyn_hpg alone")
+            "NEMO puu(:,:,:,Nrhs) after stp_2D (MY_SRC/stprk3.F90:206, before "
+            "stage 1) and legoESM's momentum tendency are both instantaneous "
+            "3-D C-grid face accelerations in m/s^2 at the same wet faces; "
+            "elementwise L-infinity, no vertical, substep or time reduction. "
+            "At this rest start the frame is dyn_hpg ALONE: see "
+            "precondition_ppsrc_isolation")
         return row
 
     rows = [_relabel(score(f"{case}.kt1.stp2d.momentum_rhs.u",
@@ -282,17 +418,23 @@ def run(case: str, root: Path, *, plant: bool = False,
         "v_wet_faces": v_wet,
         "nemo_source": [
             "MY_SRC/stprk3.F90:204,206 (dump is AFTER stp_2D, BEFORE stage 1)",
-            "stp2d.F90:126 dyn_hpg, :129 dyn_ldf (ln_dynldf_OFF), :190 dyn_vor",
-            "stp2d.F90:279 dyn_spg_ts -> dynspg_ts.F90:344-345 depth-mean "
-            "removal and :938-975 barotropic add-back",
+            "stp2d.F90:128 dyn_hpg, :131 dyn_ldf (ln_dynldf_OFF), :146 "
+            "dyn_vor, :172 dyn_adv_up3 (pUe present), :196 dyn_drg_init, "
+            ":281 dyn_spg_ts",
+            "dynspg_ts.F90:344-345 depth-mean removal is inside the #else at "
+            ":303 and :938-975 barotropic add-back inside the #else at :910; "
+            "both are the MLF arm and neither compiles under key_RK3",
             "dynhpg.F90:359,383 (nemo_sco acceleration into the RHS)",
             "domzgr_substitute.h90:139,145 (key_qco gdept_z0)",
         ],
+        "precondition_ppsrc_isolation": isolation,
         "frame_composition": (
-            "COMPOSITE, not dyn_hpg alone: baroclinic HPG with its vertical "
-            "mean removed, plus the barotropic acceleration. dyn_ldf is inert "
-            "by namelist (ln_dynldf_OFF), dyn_vor is zero at rest, and the "
-            "3-D advection is not in this frame on a flux-form card."
+            "dyn_hpg ALONE. hpg_sco ASSIGNS the momentum RHS, so nothing "
+            "before stp2d.F90:128 survives; dyn_ldf is inert by namelist "
+            "(ln_dynldf_OFF); dyn_vor adds a product with an entry velocity "
+            "that is exactly 0.0; dyn_adv_up3 with pUe writes only the 2-D "
+            "RHS; dyn_drg_init takes puu/pvv INTENT(in); and the ppsrc "
+            "dynspg_ts.f90 this card compiles has ZERO puu/pvv assignments."
         ),
         "rows": rows,
         "planted_control": plant,
@@ -309,9 +451,25 @@ def main(argv=None) -> int:
     parser.add_argument("--oracle-root", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant", action="store_true")
+    parser.add_argument(
+        "--plant-ppsrc", metavar="CONFIG",
+        help="run ONLY the ppsrc isolation assertion against another NEMO "
+             "configuration (e.g. cfgs/DINO, which compiles the MLF arm); it "
+             "MUST fail, which is what proves the assertion is not vacuous")
     parser.add_argument("--allow-dirty", action="store_true",
                         help="stamp a dirty tree (never for a recorded row)")
     args = parser.parse_args(argv)
+    if args.plant_ppsrc:
+        try:
+            report = assert_ppsrc_isolation(args.case, config=args.plant_ppsrc)
+        except GateError as error:
+            print(json.dumps({"status": "PLANT-FIRED", "config":
+                              args.plant_ppsrc, "error": str(error)}, indent=2))
+            return 1
+        print(json.dumps({"status": "PLANT-DID-NOT-FIRE",
+                          "config": args.plant_ppsrc, "report": report},
+                         indent=2, sort_keys=True))
+        return 2
     root = args.oracle_root or ROOTS[args.case]
     try:
         report = run(args.case, root, plant=args.plant,
