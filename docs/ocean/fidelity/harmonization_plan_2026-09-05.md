@@ -70,3 +70,15 @@ Laplacian flux. Ladder: profile-only atop the unchanged schedule -> Smag off -> 
 drop the biharmonic arm. P2 harness frozen_column_tke_twin.py has only control|nemo modes and no
 MLD -> needs a CVMix adapter + matched prognostic column trajectories. P3: verify elvls/nlvls/
 aux3d linkage and the minimum-level policy, not just counts.
+
+## Status 2026-09-05 04:10
+- P3: FESOM2 find_levels ported from fvom_init.F90 and verified EXACT (0/244659 elements,
+  0/126858 nodes on the shipped 47-level files); NEMO 75-level bundle at data/fesom2_core2/
+  mesh_nemo75 (nl=76). CFL census on the tripole baseline: |w_1| max 2.5e-5 m/s => top-cell CFL
+  0.044 at dt 1800 (GLM's 1.8 m/step worry refuted) -> dt kept. Arm fesom_nemo75_d30 running
+  (one variable vs fesom_b5_d90). OPEN: min-column policy (FESOM's 5-level floor = 4.5 m on this
+  ladder vs 30 m on its own; 30 m = NEMO level 14) -> user.
+- P2 CORRECTION: the FESOM lane already runs OUR TKE (--fesom-vmix legoesm_tke, Dirichlet surface
+  BC, mxl 3, prognostic) -- the earlier "CVMix-TKE" row was wrong. Vertical closure is unified;
+  a CVMix comparison is optional, not a harmonization gap.
+- P1: waits for the GPU decision (real-FW trio) and the ladder go.
