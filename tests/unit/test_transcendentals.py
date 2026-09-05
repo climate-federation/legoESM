@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
-from legoesm.core.transcendentals import cos, exp, sin, tanh
+from legoesm.core.transcendentals import cos, exp, log, log10, sin, tanh
 
 
 def _libm_reference(name: str, values: np.ndarray) -> np.ndarray:
@@ -64,16 +64,26 @@ def test_libm_policy_is_scalar_library_bit_exact_and_native_is_not(name, functio
         assert native_mismatches == 0
 
 
-@pytest.mark.parametrize("function", [exp, tanh, sin, cos])
+@pytest.mark.parametrize("name,function", [("log", log), ("log10", log10)])
+def test_libm_log_policy_is_scalar_library_bit_exact(name, function):
+    values = np.geomspace(2.0**-40, 2.0**40, 100_000, dtype=np.float64)
+    values += np.arange(values.size, dtype=np.float64) * np.float64(2.0**-60)
+    reference = _libm_reference(name, values)
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    observed = np.asarray(jax.jit(function)(jnp.asarray(values)))
+    assert np.array_equal(observed.view(np.uint64), reference.view(np.uint64))
+
+
+@pytest.mark.parametrize("function", [exp, log, log10, tanh, sin, cos])
 def test_libm_policy_jit_and_eager_are_bit_exact(function):
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
-    values = jnp.asarray([-3.125, -0.25, 0.0, 0.75, 4.5], dtype=jnp.float64)
+    values = jnp.asarray([0.125, 0.25, 0.5, 0.75, 4.5], dtype=jnp.float64)
     eager = np.asarray(function(values))
     compiled = np.asarray(jax.jit(function)(values))
     assert np.array_equal(eager.view(np.uint64), compiled.view(np.uint64))
 
 
-@pytest.mark.parametrize("function", [exp, tanh, sin, cos])
+@pytest.mark.parametrize("function", [exp, log, log10, tanh, sin, cos])
 def test_libm_policy_custom_jvp_matches_finite_difference(function):
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     point = jnp.asarray(0.375, dtype=jnp.float64)

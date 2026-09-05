@@ -245,7 +245,8 @@ def test_rgb_routes_every_exponential_through_precision_policy(monkeypatch):
 
     monkeypatch.setattr(shortwave_module, "precision_exp", _planted_exp)
     cfg = ShortwavePenetrationConfig(
-        scheme="nemo_qsr_rgb", rgb_chl_profile="morel_berthon"
+        scheme="nemo_qsr_rgb", rgb_chl_profile="morel_berthon",
+        nemo_time_step_s=10800.0,
     )
     result = shortwave_module.shortwave_penetration_rgb_tendency(
         jnp.asarray([120.0], dtype=jnp.float64),
@@ -253,11 +254,14 @@ def test_rgb_routes_every_exponential_through_precision_policy(monkeypatch):
         jnp.asarray([[5.0, 10.0]], dtype=jnp.float64),
         jnp.ones((1, 2), dtype=jnp.float64),
         cfg,
+        gdepw_bottom_live=jnp.asarray([[5.0, 15.0]], dtype=jnp.float64),
+        gdepw_ref=jnp.asarray([0.0, 5.0, 15.0], dtype=jnp.float64),
+        e3t_ref=jnp.asarray([5.0, 10.0], dtype=jnp.float64),
     )
 
     assert len(calls) == 7
     assert calls[:3] == [(1,), (1,), (1, 2)]
-    assert calls[3:] == [(1, 3)] * 4
+    assert calls[3:] == [(1,)] * 4
     assert np.all(np.isfinite(np.asarray(result)))
 
 

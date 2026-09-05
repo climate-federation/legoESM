@@ -4065,7 +4065,8 @@ def _shortwave_surface_composition(sw_down, scheme, dtype):
 def _bc_external_surface_forcing(
     du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S, h_k,
     z_coord, J, grid, rho_0, mask, mask_3d, *, route_heat_to_implicit=False,
-    withhold_stress=False, shortwave_scheme=None, c_sw=None,
+    withhold_stress=False, shortwave_scheme=None,
+    shortwave_time_step_s=None, c_sw=None,
 ):
     """Stage 10b': external surface forcing (wind stress tau_x/tau_y, net heat
     q_net, penetrating shortwave) from a coupled / OMIP OceanSurfaceForcing,
@@ -4170,11 +4171,19 @@ def _bc_external_surface_forcing(
                 sw_tend = apply_shortwave_penetration(
                     ShortwavePenetrationConfig(
                         scheme=("nemo_qsr_rgb" if shortwave_scheme
-                                == "nemo_qsr_rgb" else "rgb_chl")),
+                                == "nemo_qsr_rgb" else "rgb_chl"),
+                        nemo_time_step_s=shortwave_time_step_s,
+                    ),
                     sw_T,
                     chl=jnp.asarray(_sf_chl, dtype=T.dtype),
                     dz_live=h_k,
                     wet_cell=wet_cell,
+                    gdepw_bottom_live=(
+                        -jnp.asarray(z_coord.z_half_ref[1:], dtype=T.dtype)
+                        * J[..., jnp.newaxis]
+                    ),
+                    gdepw_ref=-jnp.asarray(z_coord.z_half_ref, dtype=T.dtype),
+                    e3t_ref=jnp.asarray(z_coord.dz_ref, dtype=T.dtype),
                     rho_0=float(rho_0),
                 )
                 dT_target = dT_target + sw_tend * mask_3d
@@ -5103,6 +5112,10 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
                 getattr(getattr(config, "physics", None),
                         "shortwave_penetration", None),
                 "scheme", None),
+            shortwave_time_step_s=getattr(
+                getattr(getattr(config, "physics", None),
+                        "shortwave_penetration", None),
+                "nemo_time_step_s", None),
             c_sw=getattr(
                 getattr(getattr(config, "physics", None), "constants", None),
                 "c_sw", None),

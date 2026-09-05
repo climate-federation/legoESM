@@ -20,6 +20,7 @@ for package in (REPO_ROOT / "packages/core", REPO_ROOT / "packages/ocean"):
         sys.path.insert(0, str(package))
 
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy  # noqa: E402
+from legoesm.core.source_rounding import nemo_source_round  # noqa: E402
 from legoesm.ocean.physics.shortwave_penetration import (  # noqa: E402
     ShortwavePenetrationConfig,
     shortwave_penetration_rgb_tendency,
@@ -66,13 +67,20 @@ def read_rgb(path: Path) -> dict[str, np.ndarray | int]:
     require(magic == "NEMO_L4_CHL_001", "RGB record magic")
     require(header == (1, 1, 2, NX, NY, NZ, 1, 64), f"RGB header {header}")
     n2, ni = NX * NY, OWN_X * OWN_Y
-    require(values.size == 2 * n2 + NZ + ni, "RGB payload size")
+    # sf_chl%fnow and r3t are full jpi*jpj storage; qsr is T2D(0), the
+    # 90*148 owned slice.  The old parser accidentally swapped the latter two
+    # shape classes; their summed size is identical, so only a field-by-field
+    # schema walk can catch the error.
+    require(values.size == 2 * n2 + ni + NZ, "RGB payload size")
+    qsr_begin = n2
+    gdep_begin = qsr_begin + ni
+    r3t_begin = gdep_begin + NZ
     return {
         "chl": _full_xy(values[:n2])[2:-2, 2:-2],
-        "qsr_full_storage": values[n2:2 * n2],
-        "qsr": _full_xy(values[n2:2 * n2])[2:-2, 2:-2],
-        "gdepw_1d": values[2 * n2:2 * n2 + NZ],
-        "r3t": _owned_xy(values[2 * n2 + NZ:]),
+        "qsr_storage": values[qsr_begin:gdep_begin],
+        "qsr": _owned_xy(values[qsr_begin:gdep_begin]),
+        "gdepw_1d": values[gdep_begin:r3t_begin],
+        "r3t": _full_xy(values[r3t_begin:])[2:-2, 2:-2],
     }
 
 
@@ -112,6 +120,23 @@ def read_o1_qsr(path: Path) -> np.ndarray:
     return _owned_xy(values[begin:begin + OWN_X * OWN_Y])
 
 
+def read_stage3_before_qsr(path: Path) -> np.ndarray:
+    """Temperature RHS immediately after ``tra_sbc_RK3`` and before QSR."""
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        header = struct.unpack("=11i", handle.read(44))
+        values = np.fromfile(handle, np.float64)
+    require(magic == "NEMO_L2_RKTR3_1", "stage-3 tracer magic")
+    require(
+        header == (1, 1, 3, 1, 2, 3, 3, NX, NY, NZ, 64),
+        f"stage-3 tracer header {header}",
+    )
+    n2, n3 = NX * NY, NX * NY * NZ
+    require(values.size == 16 * n3 + 3 * n2, "stage-3 tracer payload size")
+    # field 4 (zero based): T after tra_sbc_RK3, immediately before tra_qsr.
+    return _full_xyz(values[4 * n3:5 * n3])[2:-2, 2:-2, :ACTIVE_Z]
+
+
 def score(candidate: np.ndarray, oracle: np.ndarray, mask: np.ndarray) -> dict:
     require(candidate.shape == oracle.shape == mask.shape, "score shape")
     actual = np.asarray(candidate, np.float64)[mask]
@@ -137,29 +162,53 @@ def validate(root: Path, *, plant: bool) -> dict:
 
     rgb = read_rgb(root / "oracle_rgb_chl_kt00000001.bin")
     qsr = read_qsr(root / "oracle_qsr_stage3_kt00000001.bin")
+    before_qsr = read_stage3_before_qsr(
+        root / "oracle_rktracer_stage3_kt00000001.bin"
+    )
     read_o1_qsr(root / "oracle_sbcblk_o1_kt00000001.bin")
     with Dataset(root / "mesh_mask_0000.nc") as dataset:
         wet = np.asarray(dataset["tmask"][0, :ACTIVE_Z].data, dtype=bool)
+        e3t_0 = np.asarray(dataset["e3t_0"][0, :ACTIVE_Z].data, dtype=np.float64)
+        e3t_ref = np.asarray(dataset["e3t_1d"][0, :ACTIVE_Z].data, dtype=np.float64)
     wet = wet.transpose(1, 2, 0)
+    e3t_0 = e3t_0.transpose(1, 2, 0)
     require(np.array_equal(
-        np.asarray(rgb["qsr_full_storage"])[:OWN_X * OWN_Y],
+        np.asarray(rgb["qsr_storage"]),
         qsr["qsr_storage_prefix"],
     ), "RGB/QSR qsr storage echo mismatch")
-    dz_ref = np.diff(np.asarray(rgb["gdepw_1d"], np.float64))
     stretch = 1.0 + np.asarray(rgb["r3t"])[..., None]
-    dz_live = dz_ref * stretch
+    # key_qco substitutions consumed by qsr_RGBc:
+    # e3t=e3t_0*(1+r3t*tmask), gdepw=gdepw_1d*(1+r3t).
+    dz_live = e3t_0 * (1.0 + np.asarray(rgb["r3t"])[..., None] * wet)
+    gdepw_ref = np.asarray(rgb["gdepw_1d"], np.float64)
+    gdepw_bottom_live = gdepw_ref[1:] * stretch
     config = ShortwavePenetrationConfig(
         scheme="nemo_qsr_rgb",
         rgb_ir_fraction=0.58,
         rgb_ir_extinction_m=0.35,
         rgb_chl_profile="morel_berthon",
+        nemo_time_step_s=10800.0,
     )
     operator = jax.jit(
-        lambda sw, chl, dz, mask: shortwave_penetration_rgb_tendency(
-            sw, chl, dz, mask, config
+        lambda sw, chl, dz, mask, gdep_live, gdep_ref, e3_ref, before: nemo_source_round(
+            nemo_source_round(
+                before
+                + shortwave_penetration_rgb_tendency(
+                    sw, chl, dz, mask, config,
+                    rho_0=1026.0,
+                    c_sw=3991.86795711963,
+                    gdepw_bottom_live=gdep_live,
+                    gdepw_ref=gdep_ref,
+                    e3t_ref=e3_ref,
+                )
+            )
+            - before
         )
     )
-    candidate = np.asarray(operator(rgb["qsr"], rgb["chl"], dz_live, wet)).copy()
+    candidate = np.asarray(operator(
+        rgb["qsr"], rgb["chl"], dz_live, wet,
+        gdepw_bottom_live, gdepw_ref, e3t_ref, before_qsr,
+    )).copy()
     if plant:
         candidate = np.asarray(qsr["increment"]).copy()
         index = tuple(np.argwhere(wet)[0])
@@ -185,6 +234,7 @@ def validate(root: Path, *, plant: bool) -> dict:
                 "oracle_sbcblk_o1_kt00000001.bin",
                 "oracle_rgb_chl_kt00000001.bin",
                 "oracle_qsr_stage3_kt00000001.bin",
+                "oracle_rktracer_stage3_kt00000001.bin",
             )
         },
         "execution": {
@@ -193,6 +243,15 @@ def validate(root: Path, *, plant: bool) -> dict:
             "dtype": "float64",
             "transcendentals": get_policy().transcendentals,
             "comparison_domain": "rank0 owned wet T cells, 90x148x30",
+            "key_qco_operands": (
+                "e3t_0*(1+r3t*tmask); gdepw_1d*(1+r3t)"
+            ),
+            "extinction_levels_from_resolved_ocean_output": {
+                "infrared": 2, "red": 8, "green": 19, "blue": 22,
+            },
+            "record_semantics": (
+                "(RHS_before + source_literal_increment) - RHS_before, matching writer"
+            ),
         },
         "downstream": "NOT_ENTERED_AFTER_FIRST_DEBT",
         "si3": "UNMEASURED_PENDING_ICE_MERGE_ORACLE_SUPPLIED_EXCHANGE",
