@@ -134,3 +134,11 @@ aux3d linkage and the minimum-level policy, not just counts.
   convergence is the same thing for a heave (continuity) but the SOURCE of the convergence (which
   velocity field) is open: next = 50-150 m box budget from the STORED mass_flux_u/v/w (tripole) and
   NEMO's uocetr/vocetr — which wall carries the anomalous convergence at 220-240E.
+- 08:45 WALL ATTRIBUTION (box budget, job 9649505, table in threegrid_unified_table): same Ekman divergence as
+  NEMO (33 vs 37 Sv, 0-50 m, day 15) but our compensating inflow is MERIDIONAL in 50-150 m (-12.9 Sv; NEMO +4.6)
+  while NEMO's sits below 300 m (w 37 Sv uniform to 286 m). Zonal convergence matches per layer. => shallow
+  tropical cell = the heave. RUNG-1 DAY-15 PRE-REGISTRATION (mechanism test, hours before d30): friction shape
+  CONFIRMED as the operator if the day-15 50-150 m meridional term moves from -12.9 to >= -6 Sv AND w(155 m)
+  from +11 to >= +18 Sv; REFUTED if both within 3 Sv of control. If refuted the next lever is the interior
+  vertical viscosity below the mixed layer (avm 65-300 m vs NEMO's avm in grid_W recs 2:3) — needs the K dump
+  (--kprofile-snapshots) on the unified card: a config choice -> ASK.

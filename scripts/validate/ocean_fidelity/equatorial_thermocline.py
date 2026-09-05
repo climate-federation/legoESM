@@ -106,6 +106,14 @@ def main() -> int:
                          "needs --mesh-mask for the area divide). `wo` is a "
                          "VELOCITY [m/s] (the 5-day grid_W files) and is "
                          "compared directly.")
+    ap.add_argument("--box-budget", default=None,
+                    help="'lo,hi' longitude window: volume budget of the box "
+                         "|lat|<=--budget-lat-halfwidth, --budget-layer, ours "
+                         "(stored mass fluxes) vs NEMO (uocetr_eff/vocetr_eff/"
+                         "wo; needs --nemo-ufile/--nemo-vfile/--nemo-wfile/"
+                         "--mesh-mask/--nemo-w-recs)")
+    ap.add_argument("--budget-layer", default="50,150")
+    ap.add_argument("--budget-lat-halfwidth", default="2")
     ap.add_argument("--nemo-w-recs", default=None,
                     help="record selection in the wfile, `K` or `A:B` "
                          "(python slice, stop-exclusive). Default: all "
@@ -263,7 +271,147 @@ def main() -> int:
                          regrid_curv_to_latlon)
     if a.meridional_lon or a.nemo_ufile:
         _euc_merid_block(a, L, zc)
+    if a.box_budget:
+        _box_budget_block(a, L, zc)
     return 0
+
+
+def _box_budget_block(a, L, zc):
+    """Volume budget of a lon/lat/depth box, ours vs NEMO, split by wall
+    direction: which velocity component carries the convergence that heaves
+    the lower thermocline (isopycnal probe, 2026-09-05).
+
+    OURS: the STORED tracer-advecting fluxes -- mass_flux_u/v [m^2/s] x face
+    length (dy_u/dx_v) = m^3/s, mass_flux_w [m/s] x cell_area.  NEMO:
+    uocetr_eff/vocetr_eff [m^3/s] (the effective tracer transport, same
+    quantity class as ours) and wo [m/s] x e1t*e2t.  Both sides are summed as
+    CELL divergences over the box (east face minus west face per T cell), so
+    the zonal / meridional split is exact on each side's own C-grid and no
+    wall has to be located on a curvilinear mesh.
+
+    CONTROL: the horizontal net outflow of the layer must be balanced by the
+    vertical net outflow (w_top - w_bot)*area, up to the slow z-star thickness
+    change; the residual is PRINTED on both sides and the vertical sign is
+    the one that closes it (stated, not assumed).  A residual comparable to
+    the terms means the instrument, not the ocean, is being read.
+    """
+    import netCDF4 as nc
+    lo, hi = (float(x) for x in a.box_budget.split(","))
+    z0, z1 = (float(x) for x in a.budget_layer.split(","))
+    half = float(a.budget_lat_halfwidth)
+    snap = np.load(a.legoesm_snapshot)
+    need = ("mass_flux_u", "mass_flux_v", "mass_flux_w", "dy_u", "dx_v",
+            "cell_area")
+    miss = [k for k in need if k not in snap.files]
+    if miss:
+        raise SystemExit(f"--box-budget needs {miss} in the snapshot")
+    lat = np.asarray(L["lat"], dtype=np.float64)
+    lon = np.asarray(L["lon"], dtype=np.float64) % 360.0
+    box = (np.abs(lat) <= half) & (lon >= lo) & (lon < hi) & (
+        np.asarray(snap["land_mask"]) > 0.5)
+    kl = (zc >= z0) & (zc < z1)
+    z_if = np.concatenate([[0.0], 0.5 * (zc[:-1] + zc[1:]), [2.0 * zc[-1] - zc[-2]]])
+    kt = int(np.argmin(np.abs(z_if - z0)))
+    kb = int(np.argmin(np.abs(z_if - z1)))
+    mfu = np.asarray(snap["mass_flux_u"], dtype=np.float64) * np.asarray(snap["dy_u"])[..., None]
+    mfv = np.asarray(snap["mass_flux_v"], dtype=np.float64) * np.asarray(snap["dx_v"])[..., None]
+    mfw = np.asarray(snap["mass_flux_w"], dtype=np.float64) * np.asarray(snap["cell_area"])[..., None]
+    mfu = np.where(np.isfinite(mfu), mfu, 0.0)
+    mfv = np.where(np.isfinite(mfv), mfv, 0.0)
+    mfw = np.where(np.isfinite(mfw), mfw, 0.0)
+    ny, nx = lat.shape
+    # C-grid faces: u at (ny, nx+1), v at (ny+1, nx); east face of cell i is u[i+1]
+    div_x = (mfu[:, 1:, :] - mfu[:, :-1, :])[..., kl].sum(-1)
+    div_y = (mfv[1:, :, :] - mfv[:-1, :, :])[..., kl].sum(-1)
+    w_top = mfw[..., kt]
+    w_bot = mfw[..., kb]
+    ox = float(div_x[box].sum()) / 1e6
+    oy = float(div_y[box].sum()) / 1e6
+    wt = float(w_top[box].sum()) / 1e6
+    wb = float(w_bot[box].sum()) / 1e6
+    # vertical sign: the convention that closes continuity is reported
+    res_up = ox + oy + (wt - wb)        # w positive UP: outflow through top = +w_top
+    res_dn = ox + oy - (wt - wb)
+    sign = "up" if abs(res_up) <= abs(res_dn) else "down"
+    res = res_up if sign == "up" else res_dn
+    wt_up = wt if sign == "up" else -wt
+    wb_up = wb if sign == "up" else -wb
+    print(f"\n=== BOX VOLUME BUDGET {lo:.0f}-{hi:.0f}E |lat|<={half:g}, "
+          f"{z0:.0f}-{z1:.0f} m (levels {kl.sum()}), Sv (1e6 m3/s); + = OUT of the box ===")
+    print(f"ours ({a.legoesm_snapshot}): zonal out {ox:+.3f}  meridional out {oy:+.3f}  "
+          f"horizontal net out {ox+oy:+.3f} | w_top(up) {wt_up:+.3f} at {z_if[kt]:.0f} m, "
+          f"w_bot(up) {wb_up:+.3f} at {z_if[kb]:.0f} m => vertical net out {wt_up-wb_up:+.3f} | "
+          f"residual {res:+.3f} (w sign '{sign}' closes it; {int(box.sum())} cells)")
+    # NEMO
+    def _load(fn, var):
+        ds = nc.Dataset(fn)
+        try:
+            x = np.ma.filled(np.ma.masked_invalid(ds.variables[var][:]), np.nan).astype(np.float64)
+            la = np.asarray(ds.variables["nav_lat"][:]); lo_ = np.asarray(ds.variables["nav_lon"][:]) % 360.0
+            zz = np.asarray(ds.variables[[v for v in ds.variables if v.startswith("depth")][0]][:])
+        finally:
+            ds.close()
+        return np.nanmean(_select_recs(x, a.nemo_w_recs), axis=0), la, lo_, zz
+    ue, lat_u, lon_u, zu = _load(a.nemo_ufile, "uocetr_eff")
+    ve, lat_v, lon_v, zv = _load(a.nemo_vfile, "vocetr_eff")
+    wo, lat_w, lon_w, zw = _load(a.nemo_wfile, "wo")
+    dsm = nc.Dataset(a.mesh_mask)
+    try:
+        e1t = np.squeeze(np.asarray(dsm.variables["e1t"][:], dtype=np.float64))
+        e2t = np.squeeze(np.asarray(dsm.variables["e2t"][:], dtype=np.float64))
+        lat_t = np.squeeze(np.asarray(dsm.variables["gphit"][:], dtype=np.float64))
+        lon_t = np.squeeze(np.asarray(dsm.variables["glamt"][:], dtype=np.float64)) % 360.0
+    finally:
+        dsm.close()
+    ue = np.where(np.isfinite(ue), ue, 0.0); ve = np.where(np.isfinite(ve), ve, 0.0)
+    wo = np.where(np.isfinite(wo), wo, 0.0)
+    nzn, nyn, nxn = ue.shape
+    # NEMO output frames (331,360) vs mesh_mask (332,362): the file drops the
+    # cyclic columns and the fold row.  The offset is CHECKED against grid_T's
+    # own nav_lat/nav_lon, not assumed.
+    dst = nc.Dataset(a.nemo_gridt)
+    try:
+        lat_f = np.asarray(dst.variables["nav_lat"][:]); lon_f = np.asarray(dst.variables["nav_lon"][:]) % 360.0
+        tvar = next(v for v in ("to", "thetao", "votemper") if v in dst.variables)
+        wet_f = np.isfinite(np.ma.filled(np.ma.masked_invalid(dst.variables[tvar][0, 0]), np.nan))
+    finally:
+        dst.close()
+    best = None
+    for r0 in (0, 1):
+        for c0 in (0, 1, 2):
+            sl_lat = lat_t[r0:r0 + nyn, c0:c0 + nxn]
+            if sl_lat.shape != lat_f.shape:
+                continue
+            # land cells carry fill/zero coordinates in the output files:
+            # compare on wet cells only
+            d = float(np.nanmax(np.abs(sl_lat - lat_f)[wet_f]))
+            if best is None or d < best[0]:
+                best = (d, r0, c0)
+    d, r0, c0 = best
+    if d > 1e-3:
+        raise SystemExit(f"NEMO frame offset not found (best |dlat| {d:.3e}); refusing")
+    lat_t = lat_f; lon_t = lon_f
+    e1t = e1t[r0:r0 + nyn, c0:c0 + nxn]; e2t = e2t[r0:r0 + nyn, c0:c0 + nxn]
+    print(f"[frame] NEMO file = mesh_mask[{r0}:{r0+nyn}, {c0}:{c0+nxn}] (|dlat| max {d:.1e})")
+    kln = (zu >= z0) & (zu < z1)
+    z_ifn = np.concatenate([[0.0], 0.5 * (zu[:-1] + zu[1:])])
+    ktn = int(np.argmin(np.abs(zw - z0))); kbn = int(np.argmin(np.abs(zw - z1)))
+    # U(i) is the east face of T(i): div_x = U(i) - U(i-1); V(j) north face of T(j)
+    dxn = ue[kln].sum(0); dxn = dxn - np.roll(dxn, 1, axis=1)
+    dyn = ve[kln].sum(0); dyn = dyn - np.roll(dyn, 1, axis=0)
+    boxn = (np.abs(lat_t) <= half) & (lon_t >= lo) & (lon_t < hi) & wet_f
+    nx_ = float(dxn[boxn].sum()) / 1e6; ny_ = float(dyn[boxn].sum()) / 1e6
+    area = e1t * e2t
+    nwt = float((wo[ktn] * area)[boxn].sum()) / 1e6
+    nwb = float((wo[kbn] * area)[boxn].sum()) / 1e6
+    resn = nx_ + ny_ + (nwt - nwb)
+    print(f"NEMO (uocetr_eff/vocetr_eff/wo, records {a.nemo_w_recs}): zonal out {nx_:+.3f}  "
+          f"meridional out {ny_:+.3f}  horizontal net out {nx_+ny_:+.3f} | w_top(up) {nwt:+.3f} at "
+          f"{zw[ktn]:.0f} m, w_bot(up) {nwb:+.3f} at {zw[kbn]:.0f} m => vertical net out {nwt-nwb:+.3f} | "
+          f"residual {resn:+.3f} (wo positive up; {int(boxn.sum())} cells)")
+    print("READ: a layer that is being HEAVED DOWN has horizontal CONVERGENCE (net out < 0) "
+          "balanced by descent below it; compare the zonal and meridional columns to see which "
+          "component differs from NEMO.  Ours is one snapshot; NEMO a 5-day mean.")
 
 
 def _select_recs(x, spec):
