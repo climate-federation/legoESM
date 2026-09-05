@@ -1070,7 +1070,7 @@ def build_nemo_gyre_recipe(
         # NEMO's actual RK3 (Wicker-Skamarock stage structure + the per-stage
         # RHS asymmetry) — sweep item #6.  NEMO's key_RK3 `stp_RK3_stg`
         # advances momentum AND tracers inside ONE stage routine
-        # (stprk3_stg.F90:324-378 momentum, :168-243 tracers), so the tracer
+        # (stprk3_stg.F90:324-378 momentum, :453-601 tracers), so the tracer
         # integrator is not free: it is the same program.  User decision 15A
         # (2026-09-05) selects rk3_ws for both.
         momentum_time_integrator="rk3_ws",

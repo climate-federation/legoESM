@@ -4155,7 +4155,7 @@ divergence, not a numerical one.
 | direction | blocker |
 |---|---|
 | ORCA2 gates against the round-25 model | `ImportError` on `build_orca2_zps_card`, `validate_nemo_testcase_card_for_execution`, `nemo_qco_wzv_recurrence`, `nemo_transport_wzv_divergence_level` — none exist at `991f9f95047d` |
-| ORCA2 gates on their own branch | that tip still carries the PRE-fix fused `gdept_z0` (`ocean_pe_latlon_cgrid.py:2005-2006` there), i.e. byte-for-byte round-25 ablation arm A; `d5a7f8169507` is not its ancestor |
+| ORCA2 gates on their own branch | that tip still carries the PRE-fix fused `gdept_z0` (its `_bc_ke_and_pressure_gradients` builds it as one expression, with no `_nemo_qco_gdept_z0`; line numbers on another branch are not citable here), i.e. byte-for-byte round-25 ablation arm A; `d5a7f8169507` is not its ancestor |
 
 The two branches diverged at `03c6e8d96ff7` with 49 commits on this side and
 170 on the ORCA2 side, 263 changed lines in `ocean_pe_latlon_cgrid.py` and 550
@@ -4299,7 +4299,7 @@ enter the register.
 
 **Named footgun on the `nemo_sco` arm.**  `_bc_ke_and_pressure_gradients`
 returns `dp_dx`/`dp_dy` as literal ZEROS when `pgf_scheme="nemo_sco"`
-(`ocean_pe_latlon_cgrid.py:2045-2046`); the acceleration is carried in
+(the `pgf_scheme="nemo_sco"` arm assigns `dp_dx_sco = jnp.zeros_like(hpg_u)`); the acceleration is carried in
 `direct_hpg_u/v` instead, because `dynhpg.F90:359,383` writes acceleration
 straight into `Krhs` and leaving a synthetic `-rho0*hpg` in the graph lets XLA
 rediscover the algebraic pressure interface and lose the source bit.  Any
@@ -4424,10 +4424,11 @@ rejected.
 not a stage-1 frame at all.  `l1_dump_rhs` runs at `MY_SRC/stprk3.F90:206`,
 immediately after `stp_2D` at `:204` and BEFORE stage 1 at `:215`.  The cited
 `stprk3_stg.F90:309-334` is the `CASE(2,3)` block; `CASE(1)` calls only
-`dyn_adv`.  What the frame holds, in `stp2d.F90` order: `dyn_hpg` at `:126`
+`dyn_adv`.  What the frame holds, in `stp2d.F90` order: `dyn_hpg` at `:128`
 (which ASSIGNS over its loop range — "a zeroed Krhs" was also wrong),
-`dyn_ldf` at `:129` called UNCONDITIONALLY, `dyn_vor` at `:190`, then
-`dyn_spg_ts` at `:279`, which REMOVES the vertical mean at
+`dyn_ldf` at `:131` called UNCONDITIONALLY, `dyn_vor` at `:146`, then
+`dyn_spg_ts` at `:281`, which -- in the SHIPPED source, but NOT in the code
+these cards compile -- REMOVES the vertical mean at
 `dynspg_ts.F90:344-345` and ADDS the barotropic acceleration back at
 `:938-975`.  Measured, so this is not a hypothetical: the dumped `uu_b(Kaa)`
 maximum is `1.135367194865404e-3` on LOCK and `4.5029698607113644e-2` on
