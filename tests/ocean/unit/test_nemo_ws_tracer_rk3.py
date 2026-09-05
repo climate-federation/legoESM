@@ -691,26 +691,33 @@ def test_nemo_ws_real_fct_flux_changes_on_wrong_transport_time_level():
 def test_overflow_bbl_is_live_inside_real_rk3_stage3():
     """A planted dense shelf must activate BBL in the full RK3 solver."""
     set_policy(PrecisionPolicy.fp64())
+    from legoesm.ocean.physics.bbl_adv import nemo_bbl_static_geometry
     card = build_overflow_zps_card()
-    from legoesm.ocean.physics.bbl_adv import bbl_static_geometry
-    geom = bbl_static_geometry(
-        card.recipe.z_coord.h_partial,
-        card.recipe.initial_state.land_mask.data)
-    # The face must carry a real bathymetric STEP.  bbl_static_geometry also
-    # marks faces where ku_s == ku_d, and there the three-leg exchange
-    # degenerates to zero even though the two planted cells are in DIFFERENT
-    # columns.  (An earlier version of this comment said the two .set() calls
-    # hit the same cell; that is false -- shelf_i and deep_i differ -- and it
-    # is corrected here.)  Measured on this card: the median active face
-    # (1, 94) has ku_s = ku_d = 99 and moves exactly 0.0, while stepped faces
-    # (1, 40) with (59, 64) and (1, 22) with (24, 25) move 0.173 and 0.320.
-    # OPEN: on a zps card ku_s == ku_d is a partial-cell face, so why it is
-    # marked BBL-active at all is a model question this test does not settle.
-    ku_s = np.asarray(geom.ku_s)
-    ku_d = np.asarray(geom.ku_d)
-    stepped = np.asarray(geom.u_active) > 0.5
-    stepped &= ku_s != ku_d
-    active_faces = np.argwhere(stepped)
+    # Use the geometry the MODEL runs.  ocean_model_latlon_cgrid selects
+    # nemo_bbl_static_geometry unless the legacy_bbl_partial_geometry test
+    # hook is set, and the two disagree about which faces are BBL-active:
+    # trabbl.F90:519-527 signs gdept_0(...,mbkt) differences and leaves
+    # mgrhu = 0 when they are equal, so a ku_s == ku_d face is NEVER active
+    # under NEMO's rule.  Measured on this card: nemo_bbl_static_geometry
+    # gives 29 active U faces and 0 of them degenerate, while the legacy
+    # partial-cell builder gives 141 active of which 112 are degenerate.  An
+    # earlier version of this test called the legacy builder, drew a
+    # degenerate face, measured 0.0 movement, and recorded "why is a
+    # ku_s == ku_d face BBL-active at all" as an open model question.  It is
+    # not a model question: the model never marks one.  Retracted, and the
+    # ku_s != ku_d filter it motivated is removed -- a filter would hide the
+    # disagreement instead of testing the geometry the model uses.
+    zc = card.recipe.z_coord
+    h_ref = jnp.asarray(zc.h_partial)
+    if h_ref.ndim == 1:
+        h_ref = jnp.broadcast_to(
+            h_ref, card.recipe.initial_state.T.data.shape)
+    geom = nemo_bbl_static_geometry(
+        h_ref, card.recipe.initial_state.land_mask.data,
+        zc.nemo_gdept_0, zc.nemo_bbl_e3u_0, zc.nemo_bbl_e3v_0)
+    active = np.asarray(geom.u_active) > 0.5
+    assert not (active & (np.asarray(geom.ku_s) == np.asarray(geom.ku_d))).any()
+    active_faces = np.argwhere(active)
     assert active_faces.size
     j, i = active_faces[len(active_faces) // 2]
     slope = int(np.asarray(geom.mgrhu)[j, i])
