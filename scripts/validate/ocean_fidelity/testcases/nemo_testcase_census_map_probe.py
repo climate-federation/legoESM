@@ -498,6 +498,7 @@ def command_aimp_scaling(args) -> None:
         common = dict(
             eta_stage=eta, h_ref=h_ref, Hu_avg=Hu, Hv_avg=Hv,
             u_mask_3d=u_mask, v_mask_3d=v_mask, grid=grid, z_coord=z,
+            H_bathy=card.recipe.initial_state.H_bathy.data,
             config=card.recipe.model_config, dt=card.dt_s)
         legacy = _nemo_ws_stage_transport(
             (u, v), h, 2, legacy_aimp_midpoint_w_metric=True, **common)

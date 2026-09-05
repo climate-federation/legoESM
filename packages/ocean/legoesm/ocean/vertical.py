@@ -23,6 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.core.precision import get_policy
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.timestepping.tridiagonal import thomas_solve
 
 # Shchepetkin (2015) adaptive-implicit vertical-advection Courant
@@ -37,6 +38,50 @@ _AIMP_CU_MAX = 0.30
 # Layer-thickness floor [m] for advective-tendency / Courant denominators
 # (matches ``flux_form_vertical_momentum_advection``).
 _H_FLOOR = 1.0e-10
+
+
+def nemo_qco_live_t_thickness(
+    eta: jnp.ndarray,
+    H_bathy: jnp.ndarray,
+    z_coord,
+    dtype,
+    *,
+    e3t_0: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """NEMO ``e3t(Kmm)`` from the literal QCO T-point statements.
+
+    ``domain.F90:158`` materialises ``r1_ht_0`` as
+    ``ssmask / (ht_0 + 1 - ssmask)``; ``domqco.F90:159-161`` then forms
+    ``r3t = ssh*r1_ht_0``.  Finally ``domzgr_substitute.h90:45-51,126``
+    expands ``e3t`` as ``e3t_0*(1+r3t*tmask)``.  These stored-expression
+    boundaries matter on partial-cell, non-uniform meshes and are shared by
+    every NEMO WS-RK3 card.
+
+    This is deliberately fail-closed: a NEMO-identity caller must supply or
+    carry the oracle's reference ``e3t_0`` and active-cell mask.  It never
+    reconstructs a midpoint ladder.
+    """
+    if e3t_0 is None:
+        e3t_0 = getattr(z_coord, "nemo_e3t_0", None)
+    active = getattr(z_coord, "is_active", None)
+    if e3t_0 is None or active is None:
+        raise ValueError(
+            "literal NEMO QCO e3t requires explicit/reference nemo_e3t_0 "
+            "and is_active")
+    sr = nemo_source_round
+    eta = jnp.asarray(eta, dtype=dtype)
+    H = jnp.asarray(H_bathy, dtype=dtype)
+    e3t_0 = jnp.asarray(e3t_0, dtype=dtype)
+    tmask = jnp.asarray(active, dtype=dtype)
+    if getattr(z_coord, "linear_free_surface", False):
+        return e3t_0
+    one = jnp.asarray(1.0, dtype=dtype)
+    ssmask = tmask[..., 0]
+    denominator = sr(sr(H + one) - ssmask)
+    r1_ht_0 = sr(ssmask / denominator)
+    r3t = sr(eta * r1_ht_0)
+    factor = sr(one + sr(r3t[..., None] * tmask))
+    return sr(e3t_0 * factor)
 
 
 class NemoAdaptiveImplicitPartition(NamedTuple):

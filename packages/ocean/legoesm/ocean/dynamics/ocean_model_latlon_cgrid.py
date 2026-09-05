@@ -49,6 +49,7 @@ from legoesm.ocean.vertical import (
     flux_form_vertical_tracer_advection_centered,
     nemo_qco_live_face_geometry_cgrid,
     nemo_qco_live_face_geometry_from_operands,
+    nemo_qco_live_t_thickness,
     nemo_qco_card_mesh_operands,
     nemo_qco_mesh_operands,
     nemo_up3_vertical_momentum_advection,
@@ -1321,6 +1322,39 @@ def _nemo_metric_stage_transport(metric, face_thickness, corrected_velocity):
         * corrected_velocity)
 
 
+def _nemo_cen2_tracer_rhs(tracer, p_u, p_v, p_w, e3t_kmm, grid):
+    """Literal RK3 stage-1/2 CEN2 tracer accumulator.
+
+    The FCT card dispatches stages 1-2 to ``traadv_cen.F90:137-149,191-216``
+    (``traadv.F90:280-283,355-365``).  Preserve its written face products,
+    parenthesised U/V differences, precomputed ``r1_e1e2t`` and live
+    ``e3t(Kmm)`` division.  Stage 3 continues through the single FCT
+    implementation and does not call this helper.
+    """
+    sr = nemo_source_round
+    tracer = jnp.asarray(tracer)
+    tr_u_sum = centered_cell_to_uface(tracer, nemo_source_sum=True)
+    tr_v_sum = interp_to_v_points(tracer, grid, nemo_source_sum=True)
+    flux_u = sr(sr(0.5 * p_u) * tr_u_sum)
+    flux_v = sr(sr(0.5 * p_v) * tr_v_sum)
+    delta_u = sr(flux_u[:, 1:, :] - flux_u[:, :-1, :])
+    delta_v = sr(flux_v[1:, :, :] - flux_v[:-1, :, :])
+    horizontal_sum = sr(delta_u + delta_v)
+    r1_e1e2t = sr(1.0 / jnp.asarray(grid.area_T)[..., None])
+    horizontal_scaled = sr(horizontal_sum * r1_e1e2t)
+    rhs = sr(-sr(horizontal_scaled / e3t_kmm))
+
+    tracer_w_sum = sr(tracer[..., :-1] + tracer[..., 1:])
+    flux_w_inner = sr(sr(0.5 * p_w[..., 1:-1]) * tracer_w_sum)
+    flux_w = jnp.pad(
+        flux_w_inner,
+        ((0, 0),) * (flux_w_inner.ndim - 1) + ((1, 1),),
+    )
+    vertical_difference = sr(flux_w[..., :-1] - flux_w[..., 1:])
+    vertical_scaled = sr(vertical_difference * r1_e1e2t)
+    return sr(rhs - sr(vertical_scaled / e3t_kmm))
+
+
 def _nemo_stage_corrected_velocity(
     velocity, transport_average, inverse_depth, barotropic_velocity, face_mask,
 ):
@@ -1338,7 +1372,7 @@ def _nemo_stage_corrected_velocity(
 
 def _nemo_ws_stage_transport(
     stage_velocity, h_stage, stage_index, *, eta_stage, h_ref, Hu_avg, Hv_avg,
-    u_mask_3d, v_mask_3d, grid, z_coord, config, dt,
+    u_mask_3d, v_mask_3d, grid, z_coord, H_bathy, config, dt,
     legacy_min_face_thickness=False, eta_before=None, eta_after=None,
     literal_wzv=False, barotropic_velocity=None,
     legacy_wzv_rederived_transport=False,
@@ -1364,6 +1398,9 @@ def _nemo_ws_stage_transport(
     bitwise equivalent on the rotated GYRE grid.
     """
     u_stage, v_stage = stage_velocity
+    h_stage = nemo_qco_live_t_thickness(
+        eta_stage, H_bathy, z_coord, jnp.asarray(h_stage).dtype,
+        e3t_0=h_ref)
     if legacy_min_face_thickness:
         # Private ablation control ONLY (_NEMOWSRK3TestHooks); NEMO has no
         # such switch and the WS-RK3 identity never selects this arm.
@@ -1589,27 +1626,12 @@ def _nemo_ws_rk3_tracer_pair_step(
                 zfv_stage if zfv_stage is not None
                 else mf_v * jnp.asarray(grid.dx_v)[..., None])
             p_w = w_stage * jnp.asarray(grid.area_T)[..., None]
-            inv_area = 1.0 / jnp.asarray(grid.area_T)[..., None]
-            inv_h = 1.0 / jnp.maximum(h_stage, 1.0e-10)
 
             def _cen2_content_div(tracer):
-                tr_u_sum = 2.0 * centered_cell_to_uface(tracer)
-                tr_v_sum = 2.0 * interp_to_v_points(tracer, grid)
-                flux_u = (0.5 * p_u) * tr_u_sum
-                flux_v = (0.5 * p_v) * tr_v_sum
-                h_num = (
-                    (flux_u[:, 1:, :] - flux_u[:, :-1, :])
-                    + (flux_v[1:, :, :] - flux_v[:-1, :, :]))
-                rhs = -(h_num * inv_area) * inv_h
-                tr_w_sum = tracer[..., :-1] + tracer[..., 1:]
-                flux_w_inner = (0.5 * p_w[..., 1:-1]) * tr_w_sum
-                flux_w = jnp.pad(
-                    flux_w_inner,
-                    ((0, 0),) * (flux_w_inner.ndim - 1) + ((1, 1),),
-                )
-                v_num = flux_w[..., :-1] - flux_w[..., 1:]
-                rhs = rhs - (v_num * inv_area) * inv_h
-                return -h_stage * rhs, rhs
+                rhs = _nemo_cen2_tracer_rhs(
+                    tracer, p_u, p_v, p_w, h_stage, grid)
+                return nemo_source_round(
+                    -nemo_source_round(h_stage * rhs)), rhs
 
             (fd_a, rhs_a), (fd_b, rhs_b) = (
                 _cen2_content_div(a_val), _cen2_content_div(b_val))
@@ -5741,7 +5763,7 @@ class LatLonCGridOceanModel:
                 h_ref=_h_ref_ws, Hu_avg=Hu_avg, Hv_avg=Hv_avg,
                 u_mask_3d=_u_live_mask,
                 v_mask_3d=_v_live_mask, grid=_grid, z_coord=_zc,
-                config=_cfg_b,
+                H_bathy=state.H_bathy.data, config=_cfg_b,
                 legacy_min_face_thickness=_legacy_min_faces,
                 # wzv's Kbb/Kaa ssh operands (sshwzv.F90:334): the step-entry
                 # level and the barotropic after-level, the same pair NEMO
@@ -6552,7 +6574,8 @@ class LatLonCGridOceanModel:
                         Hu_avg=Hu_avg, Hv_avg=Hv_avg,
                         u_mask_3d=u_mask_3d_tracer,
                         v_mask_3d=v_mask_3d_tracer, grid=_grid,
-                        z_coord=_zc, config=_cfg_b, dt=dt,
+                        z_coord=_zc, H_bathy=state.H_bathy.data,
+                        config=_cfg_b, dt=dt,
                         legacy_min_face_thickness=(
                             self._nemo_ws_test_hooks
                             .legacy_stage_min_face_thickness),

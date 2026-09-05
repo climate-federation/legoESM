@@ -867,7 +867,8 @@ def candidates(*, out_dir: Path, allow_dirty: bool) -> dict:
     geom2 = _nemo_ws_stage_transport(
         (u2n_lego, v_zero), h_k_stage, 2, eta_stage=eta2_lego, h_ref=h_ref,
         Hu_avg=jnp.asarray(np.pad(un_adv[None], ((1, lat - 2), (1, 0)))), Hv_avg=jnp.zeros_like(init.v.data[..., 0]),
-        u_mask_3d=u_mask3, v_mask_3d=v_mask3, grid=grid, z_coord=z, config=cfg, dt=dt,
+        u_mask_3d=u_mask3, v_mask_3d=v_mask3, grid=grid, z_coord=z,
+        H_bathy=init.H_bathy.data, config=cfg, dt=dt,
         eta_before=init.eta.data, eta_after=etaa_lego)
     mf_u = pad(np.asarray(geom2[0])[1, 1:, :])
     w_stage = np.asarray(geom2[2])[1]

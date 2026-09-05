@@ -279,7 +279,9 @@ VALID_CORIOLIS_SCHEME = frozenset({"matsuno_split", "explicit_ab2"})
 VALID_AB2_SCOPE = frozenset({"total", "advective"})
 
 
-def interp_to_v_points(f: jnp.ndarray, grid=None) -> jnp.ndarray:
+def interp_to_v_points(
+    f: jnp.ndarray, grid=None, *, nemo_source_sum: bool = False,
+) -> jnp.ndarray:
     """Interpolate cell-center field to v-points (lat interfaces).
 
     Parameters
@@ -295,17 +297,22 @@ def interp_to_v_points(f: jnp.ndarray, grid=None) -> jnp.ndarray:
     f_v : array, shape (n_lat+1, n_lon, ...) at v-points.
     """
     f_padded = pad_ns_zero(f)
-    return _finish_interp_to_v(f, f_padded, grid)
+    return _finish_interp_to_v(
+        f, f_padded, grid,
+        source_round=nemo_source_sum, return_sum=nemo_source_sum,
+    )
 
 
 def _finish_interp_to_v(
     f: jnp.ndarray, f_padded: jnp.ndarray, grid, *, source_round=False,
+    return_sum=False,
 ) -> jnp.ndarray:
     """Midpoint + pole/fold post-processing shared by the single and
     batched ``interp_to_v_points`` variants (one numeric source)."""
     if source_round:
         neighbour_sum = nemo_source_round(f_padded[:-1] + f_padded[1:])
-        f_v = nemo_source_round(0.5 * neighbour_sum)
+        f_v = (neighbour_sum if return_sum
+               else nemo_source_round(0.5 * neighbour_sum))
     else:
         f_v = 0.5 * (f_padded[:-1] + f_padded[1:])
     from legoesm.grids.halo_latlon import zero_polar_lat_ends
@@ -315,7 +322,10 @@ def _finish_interp_to_v(
     if fold_is_local(grid) or nmask is not None:
         n_cols = f_v.shape[1]
         n_lon = fold.perm_T.shape[0]
-        last_interior_vface = 0.5 * (f[-2:-1] + f[-1:])
+        if return_sum:
+            last_interior_vface = nemo_source_round(f[-2:-1] + f[-1:])
+        else:
+            last_interior_vface = 0.5 * (f[-2:-1] + f[-1:])
         if n_cols == n_lon:
             north = last_interior_vface[:, fold.perm_T]
         else:
@@ -1030,10 +1040,14 @@ def _split_velocity_divergence(
     return net_zonal / area, net_merid / area
 
 
-def centered_cell_to_uface(phi: jnp.ndarray) -> jnp.ndarray:
+def centered_cell_to_uface(
+    phi: jnp.ndarray, *, nemo_source_sum: bool = False,
+) -> jnp.ndarray:
     """Centered cell→u-face interpolation, periodic in longitude."""
     phi_west = jnp.roll(phi, 1, axis=1)
-    phi_at_uface_core = 0.5 * (phi_west + phi)
+    phi_sum = (nemo_source_round(phi_west + phi) if nemo_source_sum
+               else phi_west + phi)
+    phi_at_uface_core = (phi_sum if nemo_source_sum else 0.5 * phi_sum)
     return jnp.concatenate([phi_at_uface_core, phi_at_uface_core[:, 0:1, :]], axis=1)
 
 

@@ -52,6 +52,107 @@ def test_nemo_ws_stage_transport_preserves_fortran_product_association():
     assert not np.array_equal(reassociated, expected)
 
 
+def test_nemo_qco_live_t_thickness_matches_literal_source_bits():
+    """Pin domain/domqco/e3t macro association on awkward partial cells."""
+    set_policy(PrecisionPolicy.fp64())
+    e3t0 = np.asarray([
+        [[1.234567890123, 3.456789012345],
+         [7.654321098765, 0.456789012345]],
+        [[2.345678901234, 6.789012345678],
+         [9.876543210987, 0.123456789012]],
+    ], dtype=np.float64)
+    active = np.asarray([
+        [[1, 1], [1, 0]],
+        [[1, 1], [1, 1]],
+    ], dtype=bool)
+    eta = np.asarray([
+        [0.1234567890123, -0.0123456789012],
+        [0.2345678901234, -0.0234567890123],
+    ], dtype=np.float64)
+    H = np.asarray([
+        [123.4567890123, 45.6789012345],
+        [234.5678901234, 67.8901234567],
+    ], dtype=np.float64)
+    z_coord = SimpleNamespace(
+        nemo_e3t_0=jnp.asarray(e3t0), is_active=jnp.asarray(active),
+        linear_free_surface=False,
+    )
+
+    ssmask = active[..., 0].astype(np.float64)
+    denominator = (H + np.float64(1.0)) - ssmask
+    r1_ht0 = ssmask / denominator
+    r3t = eta * r1_ht0
+    expected = e3t0 * (
+        np.float64(1.0) + r3t[..., None] * active.astype(np.float64))
+    actual = np.asarray(jax.jit(
+        lambda ssh, depth: vertical_module.nemo_qco_live_t_thickness(
+            ssh, depth, z_coord, jnp.float64))(jnp.asarray(eta), jnp.asarray(H)))
+    np.testing.assert_array_equal(actual.view(np.uint64), expected.view(np.uint64))
+
+    # Non-vacuity: the old generic Jacobian divides the live water column by
+    # depth and multiplies afterward; it is real-equivalent but not bitwise.
+    legacy = e3t0 * ((eta + H) / H)[..., None]
+    assert not np.array_equal(legacy.view(np.uint64), expected.view(np.uint64))
+
+
+def test_nemo_cen2_tracer_rhs_matches_literal_source_bits():
+    """Pin traadv_cen CEN2 face, metric and live-e3 association."""
+    set_policy(PrecisionPolicy.fp64())
+    rng = np.random.default_rng(2201)
+    ny, nx, nz = 3, 4, 2
+    base = create_latlon_grid(ny, nx, dtype=jnp.float64)
+    area = rng.uniform(1.0e5, 9.0e6, (ny, nx)).astype(np.float64)
+    grid = SimpleNamespace(**base._asdict(), area_T=jnp.asarray(area))
+    tracer = rng.uniform(-3.0, 37.0, (ny, nx, nz)).astype(np.float64)
+    p_u = rng.uniform(-8.0e5, 8.0e5, (ny, nx + 1, nz)).astype(np.float64)
+    p_v = rng.uniform(-8.0e5, 8.0e5, (ny + 1, nx, nz)).astype(np.float64)
+    p_w = rng.uniform(-2.0e3, 2.0e3, (ny, nx, nz + 1)).astype(np.float64)
+    p_w[..., 0] = 0.0
+    p_w[..., -1] = 0.0
+    e3t = rng.uniform(0.2, 250.0, (ny, nx, nz)).astype(np.float64)
+
+    sum_u_core = np.roll(tracer, 1, axis=1) + tracer
+    sum_u = np.concatenate([sum_u_core, sum_u_core[:, :1]], axis=1)
+    sum_v = np.zeros((ny + 1, nx, nz), dtype=np.float64)
+    sum_v[1:-1] = tracer[:-1] + tracer[1:]
+    flux_u = (np.float64(0.5) * p_u) * sum_u
+    flux_v = (np.float64(0.5) * p_v) * sum_v
+    delta_u = flux_u[:, 1:] - flux_u[:, :-1]
+    delta_v = flux_v[1:] - flux_v[:-1]
+    r1_area = np.float64(1.0) / area[..., None]
+    expected = -(((delta_u + delta_v) * r1_area) / e3t)
+    sum_w = tracer[..., :-1] + tracer[..., 1:]
+    flux_w = np.zeros((ny, nx, nz + 1), dtype=np.float64)
+    flux_w[..., 1:-1] = (np.float64(0.5) * p_w[..., 1:-1]) * sum_w
+    expected = expected - (
+        (flux_w[..., :-1] - flux_w[..., 1:]) * r1_area) / e3t
+
+    actual = np.asarray(jax.jit(
+        lambda tr, pu, pv, pw, h: model_module._nemo_cen2_tracer_rhs(
+            tr, pu, pv, pw, h, grid))(
+        jnp.asarray(tracer), jnp.asarray(p_u), jnp.asarray(p_v),
+        jnp.asarray(p_w), jnp.asarray(e3t)))
+    np.testing.assert_array_equal(actual.view(np.uint64), expected.view(np.uint64))
+
+    # Non-vacuity: the old path materialised averages, cancelled them with 2,
+    # and multiplied a precomputed inverse thickness.
+    avg_u_core = np.float64(0.5) * (
+        np.roll(tracer, 1, axis=1) + tracer)
+    avg_u = np.concatenate([avg_u_core, avg_u_core[:, :1]], axis=1)
+    avg_v = np.zeros_like(sum_v)
+    avg_v[1:-1] = np.float64(0.5) * (tracer[:-1] + tracer[1:])
+    legacy_fu = (np.float64(0.5) * p_u) * (np.float64(2.0) * avg_u)
+    legacy_fv = (np.float64(0.5) * p_v) * (np.float64(2.0) * avg_v)
+    legacy = -(
+        ((legacy_fu[:, 1:] - legacy_fu[:, :-1])
+         + (legacy_fv[1:] - legacy_fv[:-1])) * r1_area
+    ) * (np.float64(1.0) / e3t)
+    legacy = legacy - (
+        (flux_w[..., :-1] - flux_w[..., 1:]) * r1_area
+    ) * (np.float64(1.0) / e3t)
+    assert not np.array_equal(legacy.view(np.uint64), expected.view(np.uint64))
+
+
 def test_nemo_ws_stage_corrected_velocity_matches_oracle_bits():
     """Pin GYRE V2 ``stprk3_stg`` zub/zvb source operands under JIT."""
     set_policy(PrecisionPolicy.fp64())
