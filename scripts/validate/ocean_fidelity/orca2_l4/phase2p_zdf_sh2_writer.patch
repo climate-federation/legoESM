@@ -56,7 +56,17 @@
 +            l4_zdf_magic = 'NEMO_L4_ZSH2_1'
 +            l4_zdf_n3 = 21
 +            l4_zdf_n2 = 4
-+            l4_zdf_payload = l4_zdf_n3*jpi*jpj*jpk + l4_zdf_n2*jpi*jpj
++            ! Derive the record count from the exact expressions written
++            ! below.  sh2/avt_k/en and taum use A2D(0), while the remaining
++            ! arrays are full-domain; a jpi*jpj-only header is malformed.
++            l4_zdf_payload = SIZE(sh2) + SIZE(avm_k) + SIZE(avt_k) + SIZE(en) + &
++               & SIZE(rn2) + SIZE(rn2b) + SIZE(uu(:,:,:,Kbb)) + SIZE(uu(:,:,:,Kmm)) + &
++               & SIZE(vv(:,:,:,Kbb)) + SIZE(vv(:,:,:,Kmm)) + &
++               & SIZE(l4_zdf_e3uw_bb) + SIZE(l4_zdf_e3uw_mm) + &
++               & SIZE(l4_zdf_e3vw_bb) + SIZE(l4_zdf_e3vw_mm) + &
++               & SIZE(umask) + SIZE(vmask) + SIZE(wumask) + SIZE(wvmask) + &
++               & SIZE(l4_zdf_gdepw_mm) + SIZE(l4_zdf_e3t_mm) + SIZE(l4_zdf_e3w_mm) + &
++               & SIZE(taum) + SIZE(fr_i) + SIZE(rCdU_bot) + SIZE(mbkt)
 +            WRITE(l4_zdf_unit) l4_zdf_magic, 1, kt, Kbb, Kmm, Krhs, jpi, jpj, jpk, &
 +               & STORAGE_SIZE(1._wp), l4_zdf_n3, l4_zdf_n2, l4_zdf_payload, MERGE(1,0,l_zdfsh2)
 +            WRITE(l4_zdf_unit) l4_zdf_canon_3d(sh2,'W'), &
