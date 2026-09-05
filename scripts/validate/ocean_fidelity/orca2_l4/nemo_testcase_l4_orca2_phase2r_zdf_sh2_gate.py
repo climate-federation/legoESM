@@ -228,8 +228,8 @@ def validate(deck: Path, root: Path, *, plants: bool) -> dict[str, object]:
     target_en = owned3(arrays, allocations, "en_pre")[:, :, 1:ACTIVE_Z]
     candidate_avm = np.asarray(state.tke_avm.data)[:, :OWN_X]
     candidate_avt = np.asarray(state.tke_avt.data)[:, :OWN_X]
-    en0 = np.float64(tke_cfg.tke_background)
-    candidate_en = np.where(wet_w, en0, 0.0)
+    require(state.tke is not None, "ORCA2 card did not seed cold-start en")
+    candidate_en = np.asarray(state.tke.data)[:, :OWN_X]
     entry_rows = {
         "avm_k_pre": score(candidate_avm, target_avm, wet_w,
                            active=active, e3t0=e3t0, e3t1d=e3t1d),
@@ -263,7 +263,7 @@ def validate(deck: Path, root: Path, *, plants: bool) -> dict[str, object]:
     require(all(value == 0 for value in zero_operands.values()),
             f"cold-start velocity operand unexpectedly nonzero: {zero_operands}")
     return {
-        "status": "STOP_AT_PRE_SH2_ENTRY_DEBT",
+        "status": "STOP_AT_ORCA2_SH2_SELECTOR_DEBT",
         "execution": {"backend": jax.default_backend(), "jit": "production",
                       "dtype": "float64",
                       "transcendentals": get_policy().transcendentals},
@@ -285,15 +285,16 @@ def validate(deck: Path, root: Path, *, plants: bool) -> dict[str, object]:
         "zero_velocity_nonzero_counts": zero_operands,
         "preclosure_entry_rows": entry_rows,
         "first_departure": {
-            "boundary": "zdf_phy_init before zdf_sh2",
-            "owner": "LANE4_ORCA2_CARD_AND_IWM_INITIALIZATION",
+            "boundary": "ORCA2 card zdf_sh2 selector dispatch",
+            "owner": "LANE4_ORCA2_CARD_SELECTOR",
             "source": (
-                "zdfphy.F90:146-173; zdftke.F90:839-846,914-923; "
-                "zdfphy.F90:211,228,268"),
+                "zdfphy.F90:268; zdfsh2.F90:80-100; "
+                "stprk3_stg.F90:146,290,297"),
             "detail": (
-                "avm_k is exact; ORCA2 nn_havtb=1 latitude shaping is absent "
-                "from the card's avt seed, and ln_zdfiwm forces rn_emin=1e-10 "
-                "while the card seeds en from tke_background=1e-6"),
+                "the three preclosure inputs are exact after the Lane-4 card "
+                "initialization repair, but the card still selects "
+                "squared_centered/tpoint/tpoint_jacobian instead of NEMO's "
+                "face-native NOW*NOW/avm-face/live-QCO combination"),
         },
         "shared_operator_handoff": {
             "owner": "GYRE_OWNER_SHARED_TKE",

@@ -13,6 +13,7 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 import numpy as np
+from legoesm.core.field import Field
 from legoesm.grids.latlon import create_beta_plane_cgrid_geometry
 from legoesm.grids.tripole import create_tripole_grid
 from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
@@ -1029,7 +1030,7 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
             name: np.asarray(ds.variables[name][:], dtype=np.float64)
             for name in (
                 "e1t", "e2t", "e1u", "e2u", "e1v", "e2v", "e1f", "e2f",
-                "ff_f",
+                "ff_f", "gphit",
             )
         }
 
@@ -1181,6 +1182,46 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         bbl_aht_m2_s=1000.0,
         whole_step_identity="orca2_vector_een_c2",
     )
+    # zdfphy.F90:146-173 initializes the pre-closure coefficient memory
+    # before zdf_tke_init.  This deck resolves nn_avb=0, nn_havtb=1, so avm_k
+    # is constant rn_avm0=1.2e-4 while avt_k is rn_avt0=1.2e-5 times the
+    # three literal latitude-band WHERE statements (:160-168).  Then
+    # zdftke.F90:839-846 sees ln_zdfiwm=T and forces rn_emin=1e-10 before
+    # tke_rst initializes en (:914-923).  Seed those carried card inputs here;
+    # the shared step consumes the same state fields.
+    lat_t = metric["gphit"]
+    avtb_2d = np.ones(lat_t.shape, dtype=np.float64)
+    select = (-15.0 <= lat_t) & (lat_t < -5.0)
+    avtb_2d[select] = 1.0 - 0.09 * (lat_t[select] + 15.0)
+    select = (-5.0 <= lat_t) & (lat_t < 5.0)
+    avtb_2d[select] = 0.1
+    select = (5.0 <= lat_t) & (lat_t < 15.0)
+    avtb_2d[select] = 0.1 + 0.09 * (lat_t[select] - 5.0)
+    wet_w = tmask[..., 1:30]
+    avm_pre = np.float64(1.2e-4) * wet_w
+    avt_pre = (avtb_2d[..., None] * np.float64(1.2e-5)) * wet_w
+    en_pre = np.float64(1.0e-10) * wet_w
+    dissl_pre = np.float64(1.0e-12) * wet_w
+    state = state._replace(
+        tke=Field(data=jnp.asarray(en_pre), name="tke",
+                  dims=("lat", "lon", "level"), units="m^2/s^2"),
+        tke_avm=Field(data=jnp.asarray(avm_pre), name="tke_avm",
+                      dims=("lat", "lon", "level"), units="m^2/s"),
+        tke_avt=Field(data=jnp.asarray(avt_pre), name="tke_avt",
+                      dims=("lat", "lon", "level"), units="m^2/s"),
+        tke_avm_surface=Field(
+            data=jnp.asarray(np.float64(1.2e-4) * tmask[..., 0]),
+            name="tke_avm_surface", dims=("lat", "lon"), units="m^2/s"),
+        tke_dissl=Field(data=jnp.asarray(dissl_pre), name="tke_dissl",
+                        dims=("lat", "lon", "level"), units="s^-1"),
+    )
+    tke_config = model_config.physics.vertical_mixing.tke._replace(
+        tke_background=1.0e-10,
+    )
+    model_config = model_config._replace(
+        physics=model_config.physics._replace(
+            vertical_mixing=model_config.physics.vertical_mixing._replace(
+                tke=tke_config)))
     recipe = NEMORecipe(
         model_config=model_config,
         physics_config=model_config.physics,
