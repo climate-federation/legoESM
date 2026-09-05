@@ -83,6 +83,28 @@ executable SHA-256 is
 `78d0a06c2f21cd174579d60d65083e050fa396ec321ad33a6a69a8cbae89357a`.
 No new large artifact is committed.
 
+## Phase-2k reproducible WZV extension and shared-clock handoff
+
+The two Phase-2j WZV acquisitions produced 93 / 93 raw-byte-identical
+records.  Twin A extends `VARIANT_ORACLE_V2`; twin B is the retained witness.
+The 93-entry record manifest has SHA-256
+`ea400055d19bb31be0242a397872df5441a9893d8bd94b2419ae029f96c3449d`.
+The appended 24,899,672-byte WZV record has SHA-256
+`245be2ea348002b93358e5dd723f0b84198af47c3d38f0bc0bb1acb0fc3100fe`.
+Four restart shards and eight history payloads remain exact against the
+uninstrumented variant control; all legacy, surface, O1, reproducibility and
+WZV plants exit nonzero.
+
+At the resolved stage-1 clock, transport divergence, surface runoff, QCO WZV
+and `pFw` are each exact at 0 / 233,341.  The production full-step clock arm
+is over bar at 233,341 / 233,341, maximum absolute error
+`7.329623319094706e-05 m s-1`.  This is
+`GYRE_OWNER_SHARED_WZV_STAGE_CLOCK`; Lane 4 stops without changing that shared
+wiring.  The complete data-artifact inventory is
+`phase2k/nemo_testcases_l4_orca2_phase2k_artifacts.sha256`, SHA-256
+`7f8525dd42568c69a81266a6b120fc61dce1676205e58a88cc69634a9617edad`.
+No large artifact is added to Git.
+
 ## Phase-2b post-`sbc` exchange handoff
 
 This continuation stopped before legoESM arithmetic because the inherited SI3
