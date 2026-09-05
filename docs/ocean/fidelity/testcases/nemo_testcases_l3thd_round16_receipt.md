@@ -107,7 +107,13 @@ old, RHS, and after time levels (`stprk3_stg.F90:540-559`).
 
 Two source-identity defects owned the carried row:
 
-1. the shared stage helper multiplied the RHS by Kaa thickness; NEMO uses
+The first pre-fix non-bit operand in NEMO order was the stage-1 Kbb layer
+thickness: NEMO's `e3t0*(1+r3t)` produced
+`8.333333333333332` (`0x4020aaaaaaaaaaaa`), while generic `H+ssh` produced
+`8.333333333333334` (`0x4020aaaaaaaaaaab`).  This is the scaling-before-owner
+discriminator: the split exists before any tracer source is accumulated.
+
+1. the shared stage helper also multiplied the RHS by Kaa thickness; NEMO uses
    Kmm for that product and Kaa only as the final divisor;
 2. its Kbb/Kaa thicknesses came from generic `H+ssh`.  The executing QCO
    source instead constructs `r3t=ssh*r1_ht_0` (`domqco.F90:159-160`) and
