@@ -24,10 +24,27 @@ Every artifact written around the interrupted window was re-read.  No receipt,
 preregistration, gate, launcher, or MY_SRC source was truncated.  The first
 build-environment attempt selected the system Perl and stopped before NEMO
 compilation because `Text::Balanced` was unavailable; it produced no retained
-measurement or build log.  The scalar-math rebuild was restarted with the
-`nemo-build` environment first on `PATH`; after recovery its retained log was
-followed through `Compilation successful` and a zero exit.  No partial build or
-gate result is admitted as evidence.
+measurement or build log.  The in-flight scalar-math build subsequently
+reached `Compilation successful`, but was not admitted alone: the identical
+command was rerun incrementally and then a second, fresh 17-MiB source/config
+copy was compiled completely in an independent BLD tree.  The fresh build also
+ended successfully.  No partial build or gate result is admitted as evidence.
+
+One recovery-process deviation is explicit.  The first incremental rerun used
+the original full-build log pathname, replacing that log before it was copied.
+The initial full-build text is therefore not retained (its then-measured hash
+was `481404ed...`).  The incremental rerun log and the independent 134-second
+full rebuild log are both retained and hash-pinned below.  No source, binary,
+run directory, record, or user result was removed or overwritten.
+
+Two fail-before-compile rebuild-staging attempts are also flagged.  An
+alternate `-t` BLD request was rejected because `makenemo` treated it as a new
+configuration; its log pathname was then inadvertently reused.  The retained
+failed `build_ORCA2_OMIP_L4_phase2m_een_rebuild.log` is the next attempt, which
+correctly refused a fresh mini-tree missing `cfgs/ref_cfgs.txt` and
+`cfgs/work_cfgs.txt`.  After those index files were copied, `rebuild2.log`
+records the complete successful build.  Neither failed attempt compiled or
+ran NEMO, and neither is measurement evidence.
 
 ## 2. Why these are the requested external-EEN operands
 
@@ -118,12 +135,23 @@ PATH=/home/dbalwada/miniconda3/envs/nemo-build/bin:/usr/bin:/bin \
 ./makenemo -n ORCA2_OMIP_L4 -m conda-scalarmath -j 8
 ```
 
-The retained log ends with `Compilation successful` and records a 130-second
-total.  The compiler lines contain `-fno-tree-vectorize`.  The staged binary is
+The initial build ended with `Compilation successful` and recorded a
+130-second total.  Its mandatory post-crash incremental rerun also ended
+successfully.  A clean-room copy at
+`/data/abyssal/dbalwada/nemo-testcases-l4/build/nemo_5.0.2_phase2m_een_rebuild`
+then compiled all 474 dependency-scanned files from the same source hash in
+134 seconds; its log is
+`build_ORCA2_OMIP_L4_phase2m_een_rebuild2.log`, SHA-256
+`aae8b7cc599d9ce1f6278fe6cb3037b0fecef6150f56e1fefe62dac9dec15a01`.
+The compiler lines contain `-fno-tree-vectorize`, and both completed binaries
+have zero `_ZGV*` dynamic symbols.  Their overall ELF hashes differ because
+the independent build embeds its distinct absolute build root; no
+cross-directory binary-reproducibility claim is made or required.  The staged
+binary, retained unchanged throughout and used by both twin launchers, is
 `/data/abyssal/dbalwada/nemo-testcases-l4/build/nemo_ORCA2_OMIP_L4_phase2m_een.exe`,
 SHA-256 `309fdc81d667789e3bc94206ea14e0f2e07ec92234566af7d90953b7dbc3c4b0`.
-`nm -D` reports **0 `_ZGV*` dynamic symbols**.  The complete build log hashes
-`481404ed3b808d1c7dd929ed12143031c3f0a4031d49f8158511df013a2b3ed2`.
+`nm -D` reports **0 `_ZGV*` dynamic symbols**.  The incremental verification
+log hashes `b64dec1516055527b83b25550b7bda4ac0076a4f83ea3d733d0167fed3dd1abb`.
 
 ## 6. Prepared twins
 
@@ -190,6 +218,7 @@ record.
 | read or clean `/tmp/codex-orca2-r21` | explicitly forbidden | flagged only; untouched |
 | delete prior artifacts | forbidden | nothing deleted |
 | shipped NEMO edits | forbidden | none; isolated build-only copy used |
+| overwrite initial build log during recovery rerun | UNASKED deviation | disclosed above; recovered with a retained independent full rebuild |
 
 ## Stop receipt
 
