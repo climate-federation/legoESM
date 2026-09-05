@@ -1068,8 +1068,13 @@ def build_nemo_gyre_recipe(
         vorticity_scheme="ene_total",
         barotropic_coriolis_split="frozen",
         # NEMO's actual RK3 (Wicker-Skamarock stage structure + the per-stage
-        # RHS asymmetry) — sweep item #6.
+        # RHS asymmetry) — sweep item #6.  NEMO's key_RK3 `stp_RK3_stg`
+        # advances momentum AND tracers inside ONE stage routine
+        # (stprk3_stg.F90:324-378 momentum, :168-243 tracers), so the tracer
+        # integrator is not free: it is the same program.  User decision 15A
+        # (2026-09-05) selects rk3_ws for both.
         momentum_time_integrator="rk3_ws",
+        tracer_time_integrator="rk3_ws",
         # NEMO has NO spatial barotropic eta-diffusion (nn_bt_flt=3 dissipation
         # is purely temporal); with the nemo_ab3am4 filter the smoother is off.
         barotropic=model_config.barotropic._replace(
