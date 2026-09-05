@@ -20,6 +20,11 @@ No shipped NEMO file, shipped configuration, ORCA input, or retained run was
 modified or deleted.  All executions were CPU/fp64.  Numerical outputs and
 multi-megabyte sidecars are retained under `/data`, not git.
 
+Round-18 commit ledger: preregistration `9aa377a1319`; complete UP3 card
+selection `c9967f54d9d`; masked-stage zero materialization `a200b4bd4a6`;
+shared NCAR implementation and gate `5378383d822`; initial receipt
+`7f3d7bdd40c`.
+
 ## 1. Cross-card selector resolution
 
 NEMO does not define a legitimate split program consisting of horizontal
