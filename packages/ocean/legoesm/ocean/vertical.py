@@ -217,6 +217,21 @@ def _nemo_t_fold_f_owned(field, grid):
     return field
 
 
+def nemo_fe3mask_from_tmask(tmask, *, grid=None):
+    """Return NEMO's frozen QCO thickness mask at native F points.
+
+    ``dommsk.F90:146-198`` forms the product of the four surrounding T masks,
+    applies the F-point lateral boundary condition, and copies that result to
+    ``fe3mask``.  Later slip and strait edits change ``fmask`` only.
+    """
+    active = jnp.asarray(tmask)
+    east = jnp.roll(active, -1, axis=1)
+    north = jnp.concatenate([active[1:], jnp.zeros_like(active[:1])], axis=0)
+    northeast = jnp.roll(north, -1, axis=1)
+    fe3mask = active * east * north * northeast
+    return _nemo_t_fold_f_owned(fe3mask, grid)
+
+
 def nemo_qco_live_vorticity_e3f_cgrid(
     eta, z_coord, dtype, nn_e3f_typ=0, *, grid=None,
 ):
@@ -277,8 +292,16 @@ def nemo_qco_live_vorticity_e3f_cgrid(
     area_f = b(jnp.asarray(raw.e1f, dtype=dtype)
                * jnp.asarray(raw.e2f, dtype=dtype))
     r3f = b(b(quarter * quad) * r1_hf0 / area_f)
+    # dom_qco_zgr applies the F-point lateral boundary condition to r3f
+    # (domqco.F90:124-135) before domzgr_substitute.h90:130 consumes it.
+    # On ORCA's T fold this is the same F-origin permutation as e3f_0vor.
+    r3f = _nemo_t_fold_f_owned(r3f, grid)
+    # dommsk.F90:146-198 freezes fe3mask from the four-T-cell free-slip
+    # mask.  The later lateral-slip/strait changes at :207-243 affect fmask
+    # only.  domzgr_substitute.h90:48,130 therefore consumes fe3mask here;
+    # using the vorticity fmask silently stretches partial-cell bottom faces.
     e3f_native = b(e3f0vor * b(
-        one + r3f[..., None] * jnp.asarray(raw.fmask, dtype=dtype)))
+        one + r3f[..., None] * jnp.asarray(raw.fe3mask, dtype=dtype)))
 
     # NEMO native F(i,j) maps to legoESM vertex [j+1,i+1].  The added
     # south/west rows are inert walls for this closed-box identity.
@@ -547,6 +570,7 @@ class NemoEENBarotropicOperands(NamedTuple):
     umask: jnp.ndarray
     vmask: jnp.ndarray
     fmask: jnp.ndarray
+    fe3mask: jnp.ndarray
     hu_0: jnp.ndarray
     hv_0: jnp.ndarray
     hf_0: jnp.ndarray
@@ -869,7 +893,7 @@ def create_z_star_from_thicknesses(
             raise ValueError(
                 "NEMO EEN 2-D operands must have one common native A2D shape")
         three_d = (raw.e3u_0, raw.e3v_0, raw.e3f_0,
-                   raw.umask, raw.vmask, raw.fmask)
+                   raw.umask, raw.vmask, raw.fmask, raw.fe3mask)
         if any(np.asarray(x).shape != shape2 + (n_levels,) for x in three_d):
             raise ValueError(
                 "NEMO EEN 3-D operands must have native A2D+n_levels shape")

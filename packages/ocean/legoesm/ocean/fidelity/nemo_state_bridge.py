@@ -48,6 +48,7 @@ from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.state import LatLonCGridOceanState
 from legoesm.ocean.vertical import (
     NemoEENBarotropicOperands,
+    nemo_fe3mask_from_tmask,
     create_full_step_coordinate,
     create_z_star_from_thicknesses,
 )
@@ -75,8 +76,13 @@ def _nemo_een_barotropic_operands(grid: NemoGrid):
     if any(value is None for value in required):
         return None
     hf_0 = (np.asarray(grid.e3f_0) * np.asarray(grid.fmask)).sum(axis=-1)
+    # dommsk.F90:146-198 freezes fe3mask before lateral-slip fmask changes.
+    tmask = np.asarray(grid.tmask, dtype=bool)
+    fe3mask = np.asarray(
+        nemo_fe3mask_from_tmask(tmask.astype(np.float64)), dtype=np.float64
+    )
     values = (grid.ff_f, grid.e3u_0, grid.e3v_0, grid.e3f_0,
-              grid.umask, grid.vmask, grid.fmask,
+              grid.umask, grid.vmask, grid.fmask, fe3mask,
               grid.hu_0, grid.hv_0, hf_0,
               grid.e1t, grid.e2t, grid.e1u, grid.e2u,
               grid.e1v, grid.e2v, grid.e1f, grid.e2f)

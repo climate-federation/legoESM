@@ -24,6 +24,7 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     validate_nemo_testcase_card,
     validate_nemo_testcase_card_for_execution,
 )
+from legoesm.ocean.vertical import nemo_fe3mask_from_tmask
 
 
 @pytest.fixture(autouse=True)
@@ -281,6 +282,20 @@ def test_orca2_mask_builder_applies_t_fold_and_strait_override():
     np.testing.assert_array_equal(vmask[-1], vmask[-2, [0, 3, 2, 1]])
     np.testing.assert_array_equal(fmask[-1], fmask[-2, [3, 2, 1, 0]])
     np.testing.assert_array_equal(fmask[1, 1], [0.5, 0.5])
+
+
+def test_nemo_fe3mask_precedes_lateral_slip_changes():
+    bottom = np.array(
+        [[2, 2, 1, 1], [2, 1, 2, 1], [1, 2, 2, 1]], dtype=np.int32
+    )
+    strait = np.full((3, 4), -1.0)
+    strait[1, 1] = 0.5
+    tmask, _, _, fmask = _orca2_masks(bottom, strait)
+    fe3mask = np.asarray(nemo_fe3mask_from_tmask(tmask.astype(np.float64)))
+    assert fmask[1, 1, 0] == 0.5
+    assert fe3mask[1, 1, 0] == 1.0
+    assert fe3mask[1, 1, 0] != fmask[1, 1, 0]
+    assert set(np.unique(fe3mask)).issubset({0.0, 1.0})
 
 
 def test_testcase_cards_select_their_resolved_barotropic_filters():

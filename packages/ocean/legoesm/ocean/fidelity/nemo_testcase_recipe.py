@@ -36,6 +36,7 @@ from legoesm.ocean.physics.shortwave_penetration import ShortwavePenetrationConf
 from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.vertical import (
     NemoEENBarotropicOperands,
+    nemo_fe3mask_from_tmask,
     create_full_step_coordinate,
     create_partial_cell_coordinate,
     create_z_star_from_thicknesses,
@@ -795,6 +796,7 @@ def build_gyre_zco_card() -> NEMOTestcaseCard:
         umask=umask_3d,
         vmask=vmask_3d,
         fmask=fmask_3d,
+        fe3mask=fmask_3d,
         hu_0=reference_depth * u_wet_native,
         hv_0=reference_depth * v_wet_native,
         hf_0=reference_depth * f_wet_native,
@@ -1040,6 +1042,12 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         fold_convention="(n_lon-i)%n_lon",
     )
     tmask, umask, vmask, fmask = _orca2_masks(bottom, strait)
+    # dommsk.F90:146-198 copies the four-T-cell free-slip mask into
+    # fe3mask before rn_shlat and strait_shlat alter the vorticity fmask.
+    fe3mask = np.asarray(
+        nemo_fe3mask_from_tmask(tmask.astype(np.float64), grid=grid),
+        dtype=np.float64,
+    )
     gdept, gdepw = _orca2_depth_ladder(e3t_1d, e3w_1d)
     h_partial = raw_e3["e3t_0"] * tmask
     bathymetry = np.sum(h_partial, axis=-1)
@@ -1058,6 +1066,7 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         umask=umask.astype(np.float64),
         vmask=vmask.astype(np.float64),
         fmask=fmask,
+        fe3mask=fe3mask,
         hu_0=hu,
         hv_0=hv,
         hf_0=hf,

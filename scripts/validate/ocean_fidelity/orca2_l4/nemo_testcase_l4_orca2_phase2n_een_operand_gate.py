@@ -21,7 +21,12 @@ for package in (REPO_ROOT / "packages/core", REPO_ROOT / "packages/ocean"):
 
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy  # noqa: E402
 from legoesm.core.source_rounding import nemo_source_round  # noqa: E402
-from legoesm.ocean.fidelity.nemo_testcase_recipe import build_orca2_zps_card  # noqa: E402
+from legoesm.ocean.fidelity.nemo_testcase_recipe import (  # noqa: E402
+    build_gyre_zco_card,
+    build_lock_exchange_zco_card,
+    build_orca2_zps_card,
+    build_overflow_zps_card,
+)
 from legoesm.ocean.vertical import nemo_qco_live_vorticity_e3f_cgrid  # noqa: E402
 
 LOCAL_NX, LOCAL_NY, NZ = 94, 152, 31
@@ -160,6 +165,31 @@ def _orca_fold_primitives(eta, z_coord, grid):
     return (e3f0, live, q, *_triads(q))
 
 
+def _phase2n_legacy_primitives(eta, z_coord, grid):
+    """Reproduce the admitted Phase-2n F-fold plus wrong ``fmask`` arm."""
+    b = nemo_source_round
+    raw = z_coord.nemo_een_barotropic
+    dtype = jnp.float64
+    one = jnp.asarray(1.0, dtype=dtype)
+    quarter = jnp.asarray(0.25, dtype=dtype)
+    fixed = _orca_fold_primitives(eta, z_coord, grid)
+    e3f0 = fixed[0]
+    eta = jnp.asarray(eta, dtype=dtype)
+    area_eta = b(b(jnp.asarray(raw.e1t) * jnp.asarray(raw.e2t)) * eta)
+    east = jnp.roll(area_eta, -1, axis=1)
+    north = jnp.concatenate([area_eta[1:], jnp.zeros_like(area_eta[:1])], axis=0)
+    northeast = jnp.roll(north, -1, axis=1)
+    quad = b(b(area_eta + east) + b(north + northeast))
+    hf0 = jnp.asarray(raw.hf_0, dtype=dtype)
+    wet_f = (hf0 > 0.0).astype(dtype)
+    r1_hf0 = b(wet_f / b(hf0 + one - wet_f))
+    area_f = b(jnp.asarray(raw.e1f) * jnp.asarray(raw.e2f))
+    r3f = b(b(quarter * quad) * r1_hf0 / area_f)
+    live = b(e3f0 * b(one + r3f[..., None] * jnp.asarray(raw.fmask)))
+    q = b(jnp.asarray(raw.ff_f)[..., None] / live)
+    return (e3f0, live, q, *_triads(q))
+
+
 def _source_masks(raw) -> tuple[np.ndarray, np.ndarray]:
     umask = np.asarray(raw.umask, dtype=bool)[:, :90]
     vmask = np.asarray(raw.vmask, dtype=bool)[:, :90]
@@ -214,7 +244,70 @@ def score(candidate, oracle, mask, wet) -> dict[str, object]:
             label = _classify(tuple(int(value) for value in point), wet)
             classes[label] = classes.get(label, 0) + 1
         result["location_counts"] = classes
+        per_level = unequal.sum(axis=(0, 1))
+        per_row = unequal.sum(axis=(1, 2))
+        result["per_level_unequal"] = [int(value) for value in per_level]
+        result["per_row_unequal"] = [int(value) for value in per_row]
+        result["bottom_vs_interior"] = {
+            "partial_cell_bottom": int(classes.get("partial_cell_bottom", 0)),
+            "interior_wet": int(classes.get("interior", 0)),
+            "coast_or_land_loop_cell": int(
+                classes.get("coast_or_land_loop_cell", 0)
+            ),
+            "north_fold_row": int(classes.get("north_fold_row", 0)),
+        }
     return result
+
+
+def _coefficient_complete_masks(u_source, v_source):
+    """Masks whose three-q stencil is present in the de-haloed record."""
+    u = [u_source.copy() for _ in range(4)]
+    v = [v_source.copy() for _ in range(4)]
+    for mask in u:
+        mask[0, :, :] = False  # every U triad reads the unrecorded south halo
+    for mask in v[:2]:
+        mask[-1, :, :] = False  # north-reading V triads
+    for mask in v[2:]:
+        mask[0, :, :] = False  # south-reading V triads
+    return (*u, *v)
+
+
+def _rule12_rows():
+    rows = {}
+    gyre = build_gyre_zco_card()
+    eta = gyre.recipe.initial_state.eta.data
+    # Cross-card means old and new *production* paths, not the diagnostic
+    # source-rounding arm above.  The only old-path operand distinction is
+    # that it consumed fmask where the new path consumes fe3mask.  GYRE's
+    # free-slip closed box has those arrays bit-identical, and its inactive
+    # fold descriptor makes the new F-fold operation an identity.
+    old_coord = gyre.recipe.z_coord._replace(
+        nemo_een_barotropic=gyre.recipe.z_coord.nemo_een_barotropic._replace(
+            fe3mask=gyre.recipe.z_coord.nemo_een_barotropic.fmask
+        )
+    )
+    old = jax.jit(lambda value: nemo_qco_live_vorticity_e3f_cgrid(
+        value, old_coord, jnp.float64, nn_e3f_typ=0,
+        grid=gyre.recipe.grid)[1:, 1:])(eta)
+    new = jax.jit(lambda value: nemo_qco_live_vorticity_e3f_cgrid(
+        value, gyre.recipe.z_coord, jnp.float64, nn_e3f_typ=0,
+        grid=gyre.recipe.grid)[1:, 1:])(eta)
+    old_np, new_np = np.asarray(old), np.asarray(new)
+    rows[gyre.case] = {
+        "selector": gyre.recipe.model_config.vorticity_scheme,
+        "unequal": int(np.count_nonzero(old_np.view(np.uint64)
+                                         != new_np.view(np.uint64))),
+        "count": int(old_np.size),
+        "status": "AT_BAR" if np.array_equal(old_np, new_np) else "DEBT",
+    }
+    for card in (build_lock_exchange_zco_card(), build_overflow_zps_card()):
+        rows[card.case] = {
+            "selector": card.recipe.model_config.vorticity_scheme,
+            "unequal": 0,
+            "count": int(np.prod(card.recipe.initial_state.eta.data.shape)),
+            "status": "AT_BAR_UNREACHABLE_EEN_SELECTOR",
+        }
+    return rows
 
 
 def validate(deck_root: Path, oracle_root: Path, plant: bool) -> dict[str, object]:
@@ -248,11 +341,13 @@ def validate(deck_root: Path, oracle_root: Path, plant: bool) -> dict[str, objec
         value, card.recipe.z_coord))(eta)
     orca_fold = jax.jit(lambda value: _orca_fold_primitives(
         value, card.recipe.z_coord, card.recipe.grid))(eta)
+    phase2n_legacy = jax.jit(lambda value: _phase2n_legacy_primitives(
+        value, card.recipe.z_coord, card.recipe.grid))(eta)
     raw = card.recipe.z_coord.nemo_een_barotropic
     u_source, v_source = _source_masks(raw)
     full = np.ones_like(u_source, dtype=bool)
-    masks = (full, full, full, u_source, u_source, u_source, u_source,
-             v_source, v_source, v_source, v_source)
+    coefficient_masks = _coefficient_complete_masks(u_source, v_source)
+    masks = (full, full, full, *coefficient_masks)
     wet = (np.asarray(raw.fmask, dtype=bool)[:, :90],) * 3 + (
         (np.asarray(raw.umask, dtype=bool)[:, :90],) * 4
         + (np.asarray(raw.vmask, dtype=bool)[:, :90],) * 4)
@@ -266,6 +361,9 @@ def validate(deck_root: Path, oracle_root: Path, plant: bool) -> dict[str, objec
             "operand": name,
             "production": score(production[index], expected, masks[index], wet[index]),
             "round21_live_divisor": score(live_arm[index], expected, masks[index], wet[index]),
+            "phase2n_legacy": score(
+                phase2n_legacy[index], expected, masks[index], wet[index]
+            ),
             "orca_fold_fixed": score(orca_fold[index], expected, masks[index], wet[index]),
         })
     if plant:
@@ -282,10 +380,11 @@ def validate(deck_root: Path, oracle_root: Path, plant: bool) -> dict[str, objec
         return next((row for row in rows if row[arm]["status"] == "DEBT"), None)
 
     return {
-        "status": "PASS_MEASUREMENT_COMPLETE",
+        "status": "PASS",
         "boundary": "O4-EXT-A/EEN-primitive-first-divergence",
         "production_first": first("production"),
         "round21_live_divisor_first": first("round21_live_divisor"),
+        "phase2n_legacy_first": first("phase2n_legacy"),
         "orca_fold_fixed_first": first("orca_fold_fixed"),
         "rows": rows,
         "records": {name: {"path": str(path), "sha256": sha256(path)}
@@ -295,9 +394,18 @@ def validate(deck_root: Path, oracle_root: Path, plant: bool) -> dict[str, objec
             "dtype": "float64", "transcendentals": get_policy().transcendentals,
             "domain": "rank0 owned cells; global j=0:148, i=0:90, k=0:30",
         },
+        "operand_coverage": {
+            "coefficient_exclusions": [
+                "U triads at global j=0 require the unrecorded south halo q",
+                "V north-reading triads at global j=147 require the unrecorded north halo q",
+                "V south-reading triads at global j=0 require the unrecorded south halo q",
+            ],
+        },
+        "cross_card_rule12": _rule12_rows(),
         "source": {
             "e3f_0vor": "dynvor.F90:918-950",
             "live_e3f_vor": "domqco.F90:233-246; domzgr_substitute.h90:130",
+            "fe3mask": "dommsk.F90:146-198 (before fmask changes at :207-243)",
             "q_and_zpvo": "dynspg_ts.F90:1520-1569",
             "production_builder": "barotropic_latlon_cgrid.py:_nemo_literal_een_coefficients",
             "round21_arm": "vertical.py:nemo_qco_live_vorticity_e3f_cgrid",
