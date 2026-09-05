@@ -253,9 +253,17 @@ def test_every_stage_barotropic_operand_routes_through_the_time_level_selector()
         for keyword in node.keywords:
             if keyword.arg != "barotropic_velocity":
                 continue
-            # Unwrap the `None if <legacy arm> else <selector>` guard.
+            # Unwrap the `None if <legacy arm> else <selector>` guard.  The
+            # BODY branch is walked too: a bypass placed there -- e.g.
+            # `(target_u, target_v) if <hook> else _nemo_ws_stage_...(...)` --
+            # is live whenever that hook is set, and unwrapping only `.orelse`
+            # would never see it.
             value = keyword.value
             if isinstance(value, ast.IfExp):
+                assert (isinstance(value.body, ast.Constant)
+                        and value.body.value is None), (
+                    "the guarded arm must disable the operand, not supply a "
+                    f"second one: {ast.dump(value.body)}")
                 value = value.orelse
             assert isinstance(value, ast.Call), ast.dump(keyword.value)
             assert isinstance(value.func, ast.Name)
