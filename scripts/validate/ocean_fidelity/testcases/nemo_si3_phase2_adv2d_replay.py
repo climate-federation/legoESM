@@ -154,7 +154,7 @@ def _hbig_and_halo_numpy(card, entry: np.ndarray, contents: np.ndarray, moments)
         & (concentration < 0.15)
     )
     concentration = np.where(correct, volume / np.minimum(h_max, 99.0), concentration)
-    contents = contents.copy()
+    contents = np.asarray(contents).copy()
     contents[..., a_index] = concentration * area
     return _periodic_numpy(contents, halo), tuple(
         _periodic_numpy(value, halo) for value in moments

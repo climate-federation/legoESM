@@ -30,7 +30,10 @@ def test_written_order_replay_classifies_and_plant_changes_output():
         "INHERITED_STEP_ENTRY_DEBT",
         "IMPLEMENTATION_OR_UNMEASURED_MOMENT_INPUT_DEBT",
     }
-    assert report["target"]["production_normalized_max_abs"] > replay.POINTWISE_BAR
+    # The source-exact Prather arm moved this historical row below the gate
+    # bar, but its 24-ULP residual remains the replay's nonzero owner.
+    assert report["target"]["production_normalized_max_abs"] > 0.0
+    assert report["target"]["production_max_ulp"] > replay.ULP_LIMIT
     assert len(report["tracer_rows"]) == 16
     assert len(report["input_tracer_rows"]) == 16
     assert len(report["target_input_history"]) == replay.ORACLE_INPUT_KT
