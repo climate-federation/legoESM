@@ -17,6 +17,7 @@ import struct
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import jaxlib
 import numpy as np
 import xarray as xr
@@ -181,19 +182,36 @@ def validate_coverage(coverage: dict[str, tuple[str, str]] = COVERAGE) -> None:
         require(status in {"VERIFIED", "WAIVED"} and bool(reason), f"bad coverage row {name}")
 
 
-def _predict(inputs: dict[str, np.ndarray], oracle: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    from legoesm.core.bulk_flux import nemo_ncar_ocean_bulk
+def _predict(
+    inputs: dict[str, np.ndarray], oracle: dict[str, np.ndarray],
+    *, plant_libm_log: bool = False,
+) -> dict[str, np.ndarray]:
+    import legoesm.core.bulk_flux as bulk_flux
     from legoesm.core.precision import PrecisionPolicy, set_policy
 
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(jax.default_backend() == "cpu", f"CPU-only gate selected {jax.default_backend()}")
-    compiled = jax.jit(nemo_ncar_ocean_bulk, static_argnames=("iterations",))
-    result = compiled(
-        inputs["wndi"], inputs["wndj"], inputs["tair"], inputs["humi"],
-        oracle["sst"], inputs["slp"], inputs["qsr_down"], inputs["qlw_down"],
-        inputs["precip_raw"], inputs["snow_raw"],
-    )
-    return {name: np.asarray(value) for name, value in result.items()}
+    original_log = bulk_flux.policy_log
+    if plant_libm_log:
+        def poisoned_log(value):
+            result = original_log(value)
+            return result + jnp.asarray(float.fromhex("0x1p-30"), dtype=result.dtype)
+        bulk_flux.policy_log = poisoned_log
+        jax.clear_caches()
+    try:
+        compiled = jax.jit(
+            bulk_flux.nemo_ncar_ocean_bulk, static_argnames=("iterations",))
+        result = compiled(
+            inputs["wndi"], inputs["wndj"], inputs["tair"], inputs["humi"],
+            oracle["sst"], inputs["slp"], inputs["qsr_down"], inputs["qlw_down"],
+            inputs["precip_raw"], inputs["snow_raw"],
+        )
+        result = {name: np.asarray(value) for name, value in result.items()}
+    finally:
+        bulk_flux.policy_log = original_log
+        if plant_libm_log:
+            jax.clear_caches()
+    return result
 
 
 def evaluate(
@@ -201,6 +219,7 @@ def evaluate(
     *,
     twin_root: Path = DEFAULT_TWIN,
     plant_field: str | None = None,
+    plant_libm_log: bool = False,
     require_bit_identity: bool = True,
 ) -> dict[str, object]:
     runtime = validate_runtime(require_bit_identity=require_bit_identity)
@@ -210,7 +229,7 @@ def evaluate(
     require(sha256(twin) == EXPECTED_SHA256, "O1 canonical twin hash differs")
     inputs, oracle = read_record(record)
     wet = read_wet_mask(root / "mesh_mask_0000.nc")
-    predicted = _predict(inputs, oracle)
+    predicted = _predict(inputs, oracle, plant_libm_log=plant_libm_log)
     verified = [name for name, (status, _) in COVERAGE.items() if status == "VERIFIED"]
     require(set(verified) <= set(predicted), "implementation omitted a verified O1 output")
 
@@ -246,6 +265,7 @@ def evaluate(
         "coverage": {name: {"status": status, "reason": reason} for name, (status, reason) in COVERAGE.items()},
         "plants": plants,
         "plant_field": plant_field,
+        "plant_libm_log": plant_libm_log,
         "numeric_runtime": runtime,
         "execution": {"backend": jax.default_backend(), "dtype": "float64", "jit": True, "transcendentals": "libm"},
         "oracle": {
@@ -273,11 +293,13 @@ def main() -> int:
     parser.add_argument("--twin-root", type=Path, default=DEFAULT_TWIN)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant-field", choices=tuple(COVERAGE))
+    parser.add_argument("--plant-libm-log", action="store_true")
     parser.add_argument("--allow-unregistered-runtime", action="store_true")
     args = parser.parse_args()
     try:
         result = evaluate(
             args.root, twin_root=args.twin_root, plant_field=args.plant_field,
+            plant_libm_log=args.plant_libm_log,
             require_bit_identity=not args.allow_unregistered_runtime,
         )
     except GateError as exc:
@@ -287,7 +309,11 @@ def main() -> int:
     if args.output:
         args.output.write_text(payload + "\n")
     print(payload)
-    return 0 if result["bit_status"] == "BIT_IDENTICAL" and args.plant_field is None else 1
+    return 0 if (
+        result["bit_status"] == "BIT_IDENTICAL"
+        and args.plant_field is None
+        and not args.plant_libm_log
+    ) else 1
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 """Precision-policy transcendental functions.
 
 ``native`` delegates to JAX/XLA.  ``libm`` calls the scalar ``exp`` and
-``tanh``, ``sin``, and ``cos`` entry points from ``libm.so.6`` through
+``tanh``, ``sin``, ``cos``, ``log``, ``log10``, and ``pow`` entry points from ``libm.so.6`` through
 :func:`jax.pure_callback`.
 That is the soname linked by the NEMO certification executables on the
 campaign host (glibc 2.34).  The callback deliberately invokes the scalar C
@@ -10,7 +10,9 @@ and are not an equivalent oracle.
 
 The libm arm is CPU-only by construction.  Custom JVP rules preserve forward
 and reverse autodiff using d(exp)=exp and d(tanh)=1-tanh**2, with the primal
-transcendental evaluated through the same scalar library call.  The policy is
+transcendental evaluated through the same scalar library call.  ``pow`` uses
+both real partial derivatives without clipping or replacing libm domain
+results.  The policy is
 read while JAX traces the caller, so certification harnesses must set it
 before creating/jitting the production step.
 """
@@ -44,6 +46,34 @@ def _scalar_libm(name: str, values: np.ndarray) -> np.ndarray:
     return result
 
 
+def _scalar_libm_binary(
+    name: str, left: np.ndarray, right: np.ndarray,
+) -> np.ndarray:
+    left_source = np.asarray(left)
+    right_source = np.asarray(right)
+    if left_source.dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
+        raise TypeError(
+            f"libm {name} requires float32/float64, got {left_source.dtype}"
+        )
+    if right_source.dtype != left_source.dtype:
+        raise TypeError(
+            f"libm {name} operands require one dtype, got "
+            f"{left_source.dtype}/{right_source.dtype}"
+        )
+    function = getattr(_LIBM, name)
+    function.argtypes = (ctypes.c_double, ctypes.c_double)
+    function.restype = ctypes.c_double
+    result = np.empty_like(left_source)
+    left_flat = left_source.reshape(-1)
+    right_flat = right_source.reshape(-1)
+    result_flat = result.reshape(-1)
+    for index in range(left_flat.size):
+        result_flat[index] = function(
+            float(left_flat[index]), float(right_flat[index])
+        )
+    return result
+
+
 def _callback(name: str, value: jax.Array) -> jax.Array:
     if jax.default_backend() != "cpu":
         raise RuntimeError(
@@ -53,6 +83,22 @@ def _callback(name: str, value: jax.Array) -> jax.Array:
     result = jax.ShapeDtypeStruct(value.shape, value.dtype)
     return jax.pure_callback(
         partial(_scalar_libm, name), result, value,
+        vmap_method="broadcast_all",
+    )
+
+
+def _binary_callback(
+    name: str, left: jax.Array, right: jax.Array,
+) -> jax.Array:
+    if jax.default_backend() != "cpu":
+        raise RuntimeError(
+            f"PrecisionPolicy.transcendentals='libm' is CPU-only; got "
+            f"{jax.default_backend()!r}"
+        )
+    left, right = jnp.broadcast_arrays(left, right)
+    result = jax.ShapeDtypeStruct(left.shape, left.dtype)
+    return jax.pure_callback(
+        partial(_scalar_libm_binary, name), result, left, right,
         vmap_method="broadcast_all",
     )
 
@@ -105,6 +151,46 @@ def _libm_cos_jvp(primals, tangents):
     return result, -_libm_sin(value) * value_dot
 
 
+@jax.custom_jvp
+def _libm_log(value: jax.Array) -> jax.Array:
+    return _callback("log", value)
+
+
+@_libm_log.defjvp
+def _libm_log_jvp(primals, tangents):
+    (value,), (value_dot,) = primals, tangents
+    result = _libm_log(value)
+    return result, value_dot / value
+
+
+@jax.custom_jvp
+def _libm_log10(value: jax.Array) -> jax.Array:
+    return _callback("log10", value)
+
+
+@_libm_log10.defjvp
+def _libm_log10_jvp(primals, tangents):
+    (value,), (value_dot,) = primals, tangents
+    result = _libm_log10(value)
+    ln10 = _libm_log(jnp.asarray(10.0, dtype=value.dtype))
+    return result, value_dot / (value * ln10)
+
+
+@jax.custom_jvp
+def _libm_pow(base: jax.Array, exponent: jax.Array) -> jax.Array:
+    return _binary_callback("pow", base, exponent)
+
+
+@_libm_pow.defjvp
+def _libm_pow_jvp(primals, tangents):
+    base, exponent = primals
+    base_dot, exponent_dot = tangents
+    result = _libm_pow(base, exponent)
+    by_base = base_dot * exponent * _libm_pow(base, exponent - 1)
+    by_exponent = exponent_dot * result * _libm_log(base)
+    return result, by_base + by_exponent
+
+
 def exp(value) -> jax.Array:
     """Evaluate exponential under the active precision policy."""
     array = jnp.asarray(value)
@@ -137,4 +223,30 @@ def cos(value) -> jax.Array:
     return _libm_cos(array)
 
 
-__all__ = ("cos", "exp", "sin", "tanh")
+def log(value) -> jax.Array:
+    """Evaluate natural logarithm under the active precision policy."""
+    array = jnp.asarray(value)
+    if get_policy().transcendentals == "native":
+        return jnp.log(array)
+    return _libm_log(array)
+
+
+def log10(value) -> jax.Array:
+    """Evaluate base-10 logarithm under the active precision policy."""
+    array = jnp.asarray(value)
+    if get_policy().transcendentals == "native":
+        return jnp.log10(array)
+    return _libm_log10(array)
+
+
+def pow(base, exponent) -> jax.Array:
+    """Evaluate real binary power under the active precision policy."""
+    base_array, exponent_array = jnp.broadcast_arrays(
+        jnp.asarray(base), jnp.asarray(exponent)
+    )
+    if get_policy().transcendentals == "native":
+        return jnp.power(base_array, exponent_array)
+    return _libm_pow(base_array, exponent_array)
+
+
+__all__ = ("cos", "exp", "log", "log10", "pow", "sin", "tanh")

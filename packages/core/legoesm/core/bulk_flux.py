@@ -60,6 +60,12 @@ import jax.numpy as jnp
 
 from legoesm import constants
 from legoesm.core.source_rounding import nemo_source_round
+from legoesm.core.transcendentals import (
+    exp as policy_exp,
+    log as policy_log,
+    log10 as policy_log10,
+    pow as policy_pow,
+)
 
 # Physical constants
 KAPPA = constants.kappa_vk  # von Kármán constant (0.4)
@@ -1625,13 +1631,13 @@ def _nemo_goff_water_saturation_pressure(temperature):
     # Lines 649-651 are one continued assignment.  The nested guards preserve
     # the scalar evaluation tree of that written expression; in particular the
     # array-valued ``freeze`` above prevents XLA's divide-to-reciprocal rewrite.
-    log_ratio = nemo_source_round(jnp.log10(nemo_source_round(t_air / freeze)))
+    log_ratio = nemo_source_round(policy_log10(nemo_source_round(t_air / freeze)))
     ratio_minus_one = nemo_source_round(
         nemo_source_round(t_air / freeze) - 1.0)
-    power_c = nemo_source_round(10.0 ** nemo_source_round(
-        -c.goff_water_d_nemo * ratio_minus_one))
-    power_d = nemo_source_round(10.0 ** nemo_source_round(
-        c.goff_water_f_nemo * nemo_source_round(1.0 - ratio)))
+    power_c = nemo_source_round(policy_pow(10.0, nemo_source_round(
+        -c.goff_water_d_nemo * ratio_minus_one)))
+    power_d = nemo_source_round(policy_pow(10.0, nemo_source_round(
+        c.goff_water_f_nemo * nemo_source_round(1.0 - ratio))))
     term_a = nemo_source_round(c.goff_water_a_nemo * nemo_source_round(1.0 - ratio))
     term_b = nemo_source_round(c.goff_water_b_nemo * log_ratio)
     term_c = nemo_source_round(
@@ -1641,7 +1647,7 @@ def _nemo_goff_water_saturation_pressure(temperature):
     exponent = nemo_source_round(
         nemo_source_round(nemo_source_round(term_a - term_b) + term_c)
         + term_d + c.goff_water_g_nemo)
-    return nemo_source_round(100.0 * nemo_source_round(10.0 ** exponent))
+    return nemo_source_round(100.0 * nemo_source_round(policy_pow(10.0, exponent)))
 
 
 def _nemo_ncar_q_sat(temperature, pressure):
@@ -1679,10 +1685,10 @@ def nemo_ncar_pressure_at_height(
         theta = jnp.asarray(potential_temperature, dtype=jnp.float64)
         absolute = jnp.zeros_like(slp)
     for _ in range(3):  # sbc_phy.F90:256,272-277
-        power = nemo_source_round(
-            nemo_source_round(
-                p / _nemo_constant_like(p, constants.p_ref))
-            ** constants.poisson_dry_air_nemo)
+        power = nemo_source_round(policy_pow(
+            nemo_source_round(p / _nemo_constant_like(p, constants.p_ref)),
+            constants.poisson_dry_air_nemo,
+        ))
         absolute = nemo_source_round(
             nemo_source_round(theta * power) * mask
             + nemo_source_round((1.0 - mask) * absolute))
@@ -1697,7 +1703,6 @@ def nemo_ncar_pressure_at_height(
                 nemo_source_round(-constants.g_nemo * molar_mass) * height))
         denominator = nemo_source_round(constants.R_gas_molar * absolute)
         exponent = nemo_source_round(numerator / denominator)
-        from legoesm.core.transcendentals import exp as policy_exp
         p = nemo_source_round(slp * policy_exp(exponent))
     return p, absolute
 
@@ -1706,7 +1711,8 @@ def nemo_ncar_theta_exner(absolute_temperature, pressure):
     """NEMO Exner statement (``sbc_phy.F90:321-337``)."""
     ratio = nemo_source_round(
         _nemo_constant_like(pressure, constants.p_ref) / pressure)
-    power = nemo_source_round(ratio ** constants.poisson_dry_air_nemo)
+    power = nemo_source_round(policy_pow(
+        ratio, constants.poisson_dry_air_nemo))
     return nemo_source_round(absolute_temperature * power)
 
 
@@ -1788,9 +1794,9 @@ def _nemo_ncar_psi_m(zeta):
         1.0 - nemo_source_round(c.ncar_psi_unstable_nemo * zeta)))))
     x2 = nemo_source_round(jnp.maximum(x2, 1.0))
     x = nemo_source_round(jnp.sqrt(x2))
-    log_x = nemo_source_round(jnp.log(nemo_source_round(
+    log_x = nemo_source_round(policy_log(nemo_source_round(
         nemo_source_round(1.0 + x) * 0.5)))
-    log_x2 = nemo_source_round(jnp.log(nemo_source_round(
+    log_x2 = nemo_source_round(policy_log(nemo_source_round(
         nemo_source_round(1.0 + x2) * 0.5)))
     unstable = nemo_source_round(
         nemo_source_round(nemo_source_round(2.0 * log_x) + log_x2)
@@ -1809,7 +1815,7 @@ def _nemo_ncar_psi_h(zeta):
     x2 = nemo_source_round(jnp.sqrt(jnp.abs(nemo_source_round(
         1.0 - nemo_source_round(c.ncar_psi_unstable_nemo * zeta)))))
     x2 = nemo_source_round(jnp.maximum(x2, 1.0))
-    unstable = nemo_source_round(2.0 * jnp.log(nemo_source_round(
+    unstable = nemo_source_round(2.0 * policy_log(nemo_source_round(
         0.5 * nemo_source_round(1.0 + x2))))
     stable_value = nemo_source_round(-c.ncar_psi_stable_nemo * zeta)
     stable = nemo_source_round(0.5 + jnp.copysign(0.5, zeta))
@@ -1841,7 +1847,6 @@ def _nemo_ncar_one_on_l(theta, humidity, u_star, theta_star, q_star):
 
 def _nemo_ncar_un10(height, bulk_wind, cd, psi):
     """Literal ``z0_from_Cd`` then ``UN10_from_CD`` path (:1057-1063,1196)."""
-    from legoesm.core.transcendentals import exp as policy_exp
     sqrt_cd = nemo_source_round(jnp.sqrt(cd))
     kappa = _nemo_constant_like(sqrt_cd, constants.kappa_von_karman)
     exponent = nemo_source_round(-nemo_source_round(
@@ -1849,7 +1854,7 @@ def _nemo_ncar_un10(height, bulk_wind, cd, psi):
     z0 = nemo_source_round(height * policy_exp(exponent))
     leading = nemo_source_round(
         nemo_source_round(sqrt_cd * bulk_wind) / kappa)
-    logarithm = nemo_source_round(jnp.log(nemo_source_round(10.0 / z0)))
+    logarithm = nemo_source_round(policy_log(nemo_source_round(10.0 / z0)))
     return nemo_source_round(leading * logarithm)
 
 
@@ -1897,7 +1902,7 @@ def nemo_ncar_transfer_coefficients(
                 c.ncar_measurement_height_nemo, bulk_wind, cd, psi_m_value)))
         cd_n = _nemo_ncar_cd_n10(neutral_wind)
         sqrt_cd_n = nemo_source_round(jnp.sqrt(cd_n))
-        log_height = nemo_source_round(jnp.log(
+        log_height = nemo_source_round(policy_log(
             c.ncar_measurement_height_nemo / 10.0))
         kappa = _nemo_constant_like(sqrt_cd_n, c.kappa_von_karman)
         denominator = nemo_source_round(

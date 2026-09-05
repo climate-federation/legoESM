@@ -66,6 +66,9 @@ def test_full_o1_gate_and_row_plants() -> None:
     planted = gate.evaluate(plant_field="qns")
     assert planted["bit_status"] == "NON_BIT_IDENTICAL"
     assert next(row for row in planted["rows"] if row["field"] == "qns")["non_bit_identical_count"] == 1
+    poisoned = gate.evaluate(plant_libm_log=True)
+    assert poisoned["bit_status"] == "NON_BIT_IDENTICAL"
+    assert any(row["non_bit_identical_count"] for row in poisoned["rows"])
 
 
 def test_ncar_selector_is_shared_and_jittable() -> None:
