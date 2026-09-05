@@ -147,7 +147,8 @@ def _band_table(T, lat, lon, wet, zc, z20_fn, halfwidth, bins, depth_max,
     for lo, hi in bins:
         m = sel & (lon >= lo) & (lon < hi)
         if not m.any():
-            rows.append((lo, hi, np.nan, np.nan, np.nan, 0))
+            rows.append((lo, hi, np.nan, np.nan, np.nan, 0,
+                         *(np.nan for _ in _LAYERS)))
             continue
         Tm = T[m]
         w = np.asarray(w_all)[m]
@@ -160,8 +161,28 @@ def _band_table(T, lat, lon, wet, zc, z20_fn, halfwidth, bins, depth_max,
                 else float("nan")
 
         rows.append((lo, hi, wmean(Tm[:, 0]), wmean(z20), wmean(sharp),
-                     int(m.sum())))
+                     int(m.sum()),
+                     *(wmean(_layer_mean_T(Tm, zc, z0, z1))
+                       for z0, z1 in _LAYERS)))
     return rows
+
+
+# Layer-mean temperature [C] over fixed depth slabs: the change of each slab is
+# the heat-content tendency per unit area up to rho*c_p*thickness, so a cold
+# tongue that cools at the surface while the slab below WARMS is vertical
+# redistribution (mixing/upwelling onto the surface), while every slab cooling
+# together is net heat loss or lateral export.  This is the discriminator the
+# undercurrent result left open: FESOM carries NEMO's undercurrent and still
+# warms like the others (2026-09-05).
+_LAYERS = ((0.0, 50.0), (50.0, 150.0), (150.0, 300.0))
+
+
+def _layer_mean_T(T: np.ndarray, zc: np.ndarray, z0: float, z1: float) -> np.ndarray:
+    dz = np.gradient(zc)
+    k = (zc >= z0) & (zc < z1)
+    w = dz[k][None, :] * np.isfinite(T[:, k])
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.nansum(T[:, k] * dz[k][None, :], axis=1) / w.sum(axis=1)
 
 
 def main() -> int:
@@ -226,7 +247,9 @@ def main() -> int:
 
     order = [*a.label, "NEMO"]
     for field, idx, unit in (("SST", 2, "C"), ("Z20", 3, "m"),
-                             ("sharpness", 4, "K/m")):
+                             ("sharpness", 4, "K/m"),
+                             ("T 0-50m", 6, "C"), ("T 50-150m", 7, "C"),
+                             ("T 150-300m", 8, "C")):
         print(f"--- {field} [{unit}] ---")
         print(f"{'lon':>12}" + "".join(f"{o:>14}" for o in order))
         for j, (lo, hi) in enumerate(bins):
@@ -253,7 +276,9 @@ def main() -> int:
         print("The cold tongue is where a still-growing bias lives, so this "
               "table -- not the day-30 value -- is what an arm is judged on.\n")
         for field, idx, unit in (("dSST", 2, "C"), ("dZ20", 3, "m"),
-                                 ("dsharpness", 4, "K/m")):
+                                 ("dsharpness", 4, "K/m"),
+                                 ("dT 0-50m", 6, "C"), ("dT 50-150m", 7, "C"),
+                                 ("dT 150-300m", 8, "C")):
             print(f"--- {field} [{unit}] ---")
             print(f"{'lon':>12}" + "".join(f"{o:>14}" for o in order))
             for j, (lo, hi) in enumerate(bins):

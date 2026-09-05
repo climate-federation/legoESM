@@ -201,3 +201,32 @@ def test_an_equator_only_snapshot_is_not_mistaken_for_radians(tmp_path):
     assert np.allclose(sorted(set(np.round(lon, 6))), [150.0, 170.0, 210.0,
                                                        230.0])
     assert np.allclose(lat, 0.0)
+
+
+def test_layer_means_separate_redistribution_from_net_loss():
+    """The slab discriminator: vertical mixing moves heat between slabs and
+    keeps their sum; uniform cooling drops every slab.  Built with a known
+    answer (uniform slabs) so a sign or weighting error in the layer mean
+    would be caught, not averaged away."""
+    z = np.linspace(1.0, 400.0, 400)
+    col = np.where(z < 50.0, 28.0, np.where(z < 150.0, 20.0, 12.0))
+    T = col[None, :]
+    got = [_MOD._layer_mean_T(T, z, z0, z1)[0] for z0, z1 in _MOD._LAYERS]
+    assert got == pytest.approx([28.0, 20.0, 12.0], abs=0.15)
+    # mixing the top two slabs: 0-50 cools, 50-150 warms, 150-300 untouched,
+    # thickness-weighted sum conserved
+    mixed = np.where(z < 150.0, (28.0 * 50 + 20.0 * 100) / 150.0, col)[None, :]
+    d = [_MOD._layer_mean_T(mixed, z, z0, z1)[0] - g
+         for (z0, z1), g in zip(_MOD._LAYERS, got)]
+    assert d[0] < -4.0 and d[1] > 2.0 and abs(d[2]) < 0.15
+    assert d[0] * 50 + d[1] * 100 == pytest.approx(0.0, abs=30 * 0.15)
+    # uniform cooling drops every slab by the same amount
+    cooled = (col - 1.0)[None, :]
+    dc = [_MOD._layer_mean_T(cooled, z, z0, z1)[0] - g
+         for (z0, z1), g in zip(_MOD._LAYERS, got)]
+    assert dc == pytest.approx([-1.0, -1.0, -1.0], abs=1e-9)
+    # the band table carries the three slab means in columns 6..8
+    lat = np.zeros(1); lon = np.array([230.0]); wet = np.array([True])
+    rows = _MOD._band_table(T, lat, lon, wet, z, lambda c, zz: 100.0, 2.0,
+                            [(220.0, 240.0)], 400.0)
+    assert rows[0][6:9] == pytest.approx(got, abs=1e-12)

@@ -104,3 +104,14 @@ aux3d linkage and the minimum-level policy, not just counts.
   see omip_gateway_reference_2026-08-22.md "STILL OPEN" 2-3; unmeasured on the unified card.
   INSTRUMENT FIX: equatorial_thermocline.py U block now REQUIRES --nemo-w-recs (it silently averaged all
   18 records when the flag was dropped with the w block: FESOM read as 0.78 of NEMO at 220E, matched = 1.00).
+- 07:40 SHARED TRANSIENT LOCALISED (slab tendency d15->d30, all three grids, table in
+  threegrid_unified_table_2026-09-04.md): at 220-240E NEMO cools 0-150 m and lifts Z20 9 m; ours warm
+  50-150 m (+0.6..+1.0) with Z20 flat/deeper => missing equatorial ASCENT at 220-240E, common to all
+  three grids (FESOM included, despite its NEMO-strength undercurrent). Consistent with the 08-18/08-23
+  finding that the ORCA1 viscosity SHAPE (off-equator ramp) restored the 240E upwelling and Ekman v(lat).
+  RUNG 1 PRE-REGISTRATION EXTENDED (before its d30 lands; resolved config verified: eq 500, midlat 1e4,
+  Smag ramp unchanged): CONFIRM if 220-240E dT(50-150 m) d15->d30 <= 0 (ctl +0.94, NEMO -0.51) AND
+  dSST <= +0.2 (ctl +0.68); REFUTE if dT(50-150) >= +0.6. The EUC threshold (>=0.40 at 200E) stands.
+  If CONFIRMED the shape is the lever on all three grids: MPAS needs the latitudinal profile plumbing
+  (only an equatorial boost exists) and FESOM a Laplacian-with-profile option -> ports are the next
+  arms; if REFUTED the ascent defect is not lateral friction -> instrument the 220-240E w budget.
