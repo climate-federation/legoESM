@@ -480,7 +480,6 @@ def run_gate(root: Path = ROOT) -> tuple[dict[str, object], int]:
             assert next_frame is not None
             previous_frame = next_frame
 
-    require(first_divergence is not None, "known rung-3.3 DEBT disappeared")
     require(stress_velocity_arithmetic is not None, "stress arithmetic was not measured")
     restart_path = oracle_gate.run_files(root)["restart"]
     moment_rows: list[dict[str, object]] = []

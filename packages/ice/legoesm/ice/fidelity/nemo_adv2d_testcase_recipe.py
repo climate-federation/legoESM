@@ -345,8 +345,15 @@ def apply_ice_adv2d_zapsmall(
     state: ICEAdv2DState,
     contents: jnp.ndarray,
     moments: SI3PratherMoments,
+    *,
+    contents_are_intensive: bool = False,
 ) -> ICEAdv2DState:
-    area = card.dx_m * card.dy_m
+    # NEMO restores the intensive fields at icedyn_adv_pra.F90:355-381 before
+    # calling Hbig/Hsnow/zapneg at :405-421.  The rung-3.2 card retains its
+    # historical extensive outer-state contract; the dynamics cards use the
+    # literal intensive call order and therefore must not cross the area
+    # bridge a second time here.
+    area = 1.0 if contents_are_intensive else card.dx_m * card.dy_m
     v_i = contents[..., ICE_ADV2D_TRACERS.index("v_i")] / area
     a_i = contents[..., ICE_ADV2D_TRACERS.index("a_i")] / area
     has_ice = a_i > _ICE_ADV2D_SMALL
@@ -390,6 +397,8 @@ def apply_si3_prather_source_corrections(
     nlay_s: int,
     cell_area_m2: float,
     halo_width: int,
+    entry_intensive_contents: jnp.ndarray | None = None,
+    contents_are_intensive: bool = False,
 ) -> jnp.ndarray:
     """Apply SI3's active Hbig/Hsnow/zapneg Prather corrections.
 
@@ -400,7 +409,11 @@ def apply_si3_prather_source_corrections(
     flux ledgers are deliberately outside the uncoupled fidelity cards.
     """
 
-    area = cell_area_m2
+    # Hbig_pra receives the already-restored intensive pv_i/pv_s/pa_i/... at
+    # icedyn_adv_pra.F90:405-408.  Keep the extensive mode for the rung-3.2
+    # card's established state contract, but let dynamics cards reproduce the
+    # literal NEMO ordering without an extensive->intensive->extensive detour.
+    area = 1.0 if contents_are_intensive else cell_area_m2
     index = tracer_names.index
     snow_layers = tuple(f"e_s_l{level:02d}" for level in range(1, nlay_s + 1))
     ice_layers = tuple(f"e_i_l{level:02d}" for level in range(1, nlay_i + 1))
@@ -409,15 +422,26 @@ def apply_si3_prather_source_corrections(
     def intensive(contents: jnp.ndarray, name: str) -> jnp.ndarray:
         return contents[..., index(name)] / area
 
+    def entry_intensive(name: str) -> jnp.ndarray:
+        if entry_intensive_contents is None:
+            return intensive(entry_contents, name)
+        if entry_intensive_contents.shape != entry_contents.shape:
+            raise ValueError("Prather entry intensive/extensive shapes differ")
+        # NEMO recovers the transported fields at icedyn_adv_pra.F90:355-381,
+        # but its pre-advection maxima were formed directly from the carried
+        # intensive fields at :156-180.  Cards whose outer state is intensive
+        # pass that exact carry here instead of re-deriving it through area.
+        return entry_intensive_contents[..., index(name)]
+
     def ratio(numerator: jnp.ndarray, denominator: jnp.ndarray, valid: jnp.ndarray) -> jnp.ndarray:
         safe_denominator = jnp.where(valid, denominator, 1.0)
         return jnp.where(valid, numerator / safe_denominator, 0.0)
 
-    entry_v_i = intensive(entry_contents, "v_i")
-    entry_v_s = intensive(entry_contents, "v_s")
-    entry_a_i = intensive(entry_contents, "a_i")
-    entry_a_ip = intensive(entry_contents, "a_ip")
-    entry_v_ip = intensive(entry_contents, "v_ip")
+    entry_v_i = entry_intensive("v_i")
+    entry_v_s = entry_intensive("v_s")
+    entry_a_i = entry_intensive("a_i")
+    entry_a_ip = entry_intensive("a_ip")
+    entry_v_ip = entry_intensive("v_ip")
     entry_h_s = ratio(entry_v_s, entry_a_i, entry_a_i > _ICE_ADV2D_SMALL)
     entry_h_ip = ratio(
         entry_v_ip,
@@ -593,6 +617,9 @@ def apply_ice_adv2d_source_corrections(
     card: ICEAdv2DCard,
     entry_contents: jnp.ndarray,
     transported_contents: jnp.ndarray,
+    *,
+    entry_intensive_contents: jnp.ndarray | None = None,
+    contents_are_intensive: bool = False,
 ) -> jnp.ndarray:
     """Rung-3.2 wrapper over the shared SI3 Prather correction ledger."""
 
@@ -604,6 +631,8 @@ def apply_ice_adv2d_source_corrections(
         nlay_s=card.nlay_s,
         cell_area_m2=card.dx_m * card.dy_m,
         halo_width=card.halo_width,
+        entry_intensive_contents=entry_intensive_contents,
+        contents_are_intensive=contents_are_intensive,
     )
 
 

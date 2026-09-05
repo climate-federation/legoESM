@@ -304,15 +304,15 @@ def test_unaccounted_mesh_array_control_goes_red():
         gate.candidate_frame_contract(plant_unaccounted=True)
 
 
-def test_real_gate_reports_core_at_bar_and_loud_restart_moment_debt():
+def test_real_gate_reports_complete_trajectory_at_bar_and_restart_moment_debt():
     report, code = gate.run_gate(gate.ROOT)
     assert code == 1
     core = [row for row in report["rows"] if row["name"].startswith("trajectory.")]
     assert core and all(row["status"] == "AT-BAR" for row in core)
-    first = report["trajectory"]["first_divergence"]
-    assert first is not None
-    assert first["name"].startswith("restart_moment.")
-    assert first["normalized_max_abs"] > gate.POINTWISE_BAR
+    assert report["trajectory"]["first_divergence"] is None
+    moment_rows = report["restart"]["moment_rows"]
+    assert sum(row["status"] == "DEBT" for row in moment_rows) == 33
+    assert sum(row["status"] == "AT-BAR" for row in moment_rows) == 47
     assert set(report["candidate_frame_contract"]) == {
         item[0] for item in gate.oracle_gate.FRAME_REGISTRY
     }

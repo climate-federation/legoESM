@@ -628,16 +628,18 @@ def _step_ice_rheo_card_impl(
         subcycles=card.subcycles,
     )
     del ignored_subcycles
+    contents = si3_prather_unpack_intensives(contents, cell_area, wet)
     contents = apply_si3_prather_source_corrections(
-        entry_contents,
+        state.contents,
         contents,
         tracer_names=ICE_RHEO_TRACERS,
         nlay_i=card.nlay_i,
         nlay_s=card.nlay_s,
         cell_area_m2=_ICE_RHEO_CELL_AREA_M2,
         halo_width=card.halo_width,
+        entry_intensive_contents=state.contents,
+        contents_are_intensive=True,
     )
-    contents = si3_prather_unpack_intensives(contents, cell_area, wet)
 
     entry_area = _intensive(state.contents, "a_i")
     transported_area = _intensive(contents, "a_i")

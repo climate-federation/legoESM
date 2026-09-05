@@ -115,6 +115,44 @@ def test_full_walk_records_each_fields_first_debt_only() -> None:
     assert register["u_ice"]["completed_step"] == 10
 
 
+def test_full_walk_records_first_bit_departure_independently_of_bar() -> None:
+    register = {}
+    gate._update_first_non_bit_exact(
+        register,
+        9,
+        [
+            {
+                "name": "step9.u_ice",
+                "status": "AT-BAR",
+                "bitwise_nonzero_over_n": "1 / 1000000",
+            },
+            {
+                "name": "step9.stress1_i",
+                "status": "AT-BAR",
+                "bitwise_nonzero_over_n": "0 / 1000000",
+            },
+        ],
+    )
+    gate._update_first_non_bit_exact(
+        register,
+        10,
+        [
+            {
+                "name": "step10.u_ice",
+                "status": "DEBT",
+                "bitwise_nonzero_over_n": "2 / 1000000",
+            },
+            {
+                "name": "step10.stress1_i",
+                "status": "AT-BAR",
+                "bitwise_nonzero_over_n": "3 / 1000000",
+            },
+        ],
+    )
+    assert register["u_ice"]["completed_step"] == 9
+    assert register["stress1_i"]["completed_step"] == 10
+
+
 def test_full_walk_reports_jit_eager_state_leaf_difference() -> None:
     state = (jnp.asarray([1.0], dtype=jnp.float64),)
     clean = gate._jit_eager_rows(state, state)

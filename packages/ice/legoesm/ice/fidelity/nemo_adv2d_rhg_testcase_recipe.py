@@ -339,10 +339,13 @@ def step_ice_adv2d_rhg_card(
         subcycles=card.base.subcycles,
     )
     del ignored
-    contents = apply_ice_adv2d_source_corrections(
+    intensives = si3_prather_unpack_intensives(contents, cell_area, wet)
+    intensives = apply_ice_adv2d_source_corrections(
         card.base,
-        entry_contents,
-        contents,
+        state.contents,
+        intensives,
+        entry_intensive_contents=state.contents,
+        contents_are_intensive=True,
     )
     base_state = card.base.initial_state._replace(
         contents=entry_contents,
@@ -352,14 +355,15 @@ def step_ice_adv2d_rhg_card(
         v_ice=state.dynamics.v_ice_v,
         t_surface=state.t_surface,
     )
-    corrected = apply_ice_adv2d_zapsmall(card.base, base_state, contents, moments)
-    intensives = si3_prather_unpack_intensives(
-        corrected.contents,
-        cell_area,
-        wet,
+    corrected = apply_ice_adv2d_zapsmall(
+        card.base,
+        base_state,
+        intensives,
+        moments,
+        contents_are_intensive=True,
     )
     return ICEAdv2DRHGState(
-        contents=intensives,
+        contents=corrected.contents,
         bulk_salt_diagnostic=corrected.bulk_salt_diagnostic,
         moments=corrected.moments,
         dynamics=dynamics,

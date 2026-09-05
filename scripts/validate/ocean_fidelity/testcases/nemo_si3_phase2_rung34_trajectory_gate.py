@@ -354,6 +354,20 @@ def _update_first_over_bar(
             register[field] = {"completed_step": completed_step, "row": row}
 
 
+def _update_first_non_bit_exact(
+    register: dict[str, dict[str, object]],
+    completed_step: int,
+    rows: list[dict[str, object]],
+) -> None:
+    """Record each field's first non-bit-exact row without bar inference."""
+
+    for row in rows:
+        field = str(row["name"]).rsplit(".", 1)[-1]
+        nonzero = int(str(row["bitwise_nonzero_over_n"]).partition("/")[0])
+        if nonzero > 0 and field not in register:
+            register[field] = {"completed_step": completed_step, "row": row}
+
+
 def _ordinary_rows_from_frame(
     card,
     state,
@@ -450,6 +464,7 @@ def run_full_walk(
     )
 
     first_over_bar: dict[str, dict[str, object]] = {}
+    first_non_bit_exact: dict[str, dict[str, object]] = {}
     growth: list[dict[str, object]] = []
     last_rows: list[dict[str, object]] = []
     jit_eager_rows: list[dict[str, object]] = []
@@ -471,6 +486,7 @@ def run_full_walk(
         require(header["kt"] == frame_number, "full-walk frame clock mismatch")
         last_rows = _ordinary_rows_from_frame(card, state, oracle, completed_step)
         _update_first_over_bar(first_over_bar, completed_step, last_rows)
+        _update_first_non_bit_exact(first_non_bit_exact, completed_step, last_rows)
         if completed_step in _FULL_WALK_GROWTH_STEPS:
             growth.append({"completed_step": completed_step, "rows": last_rows})
             print(f"full-walk completed step {completed_step}", file=sys.stderr, flush=True)
@@ -498,6 +514,7 @@ def run_full_walk(
                     )
                 )
     _update_first_over_bar(first_over_bar, _FULL_WALK_LAST_STEP, last_rows)
+    _update_first_non_bit_exact(first_non_bit_exact, _FULL_WALK_LAST_STEP, last_rows)
     growth.append({"completed_step": _FULL_WALK_LAST_STEP, "rows": last_rows})
     print("full-walk completed step 720", file=sys.stderr, flush=True)
     final_debts = [row for row in last_rows + moment_rows if row["status"] == "DEBT"]
@@ -519,6 +536,15 @@ def run_full_walk(
         ),
         "walk_completed_steps": [_FULL_WALK_FIRST_STEP, _FULL_WALK_LAST_STEP],
         "first_over_bar_by_field": first_over_bar,
+        "first_non_bit_exact_by_field": first_non_bit_exact,
+        "first_non_bit_exact_any_field": (
+            min(
+                first_non_bit_exact.values(),
+                key=lambda value: int(value["completed_step"]),
+            )
+            if first_non_bit_exact
+            else None
+        ),
         "growth": growth,
         "final_ordinary_rows": last_rows,
         "final_moment_rows": moment_rows,
@@ -797,6 +823,7 @@ def main() -> int:
     parser.add_argument("--full-walk", action="store_true")
     parser.add_argument("--plant-field", action="store_true")
     parser.add_argument("--restart-root", type=Path, default=_ACTIVE_RESTART_ROOT)
+    parser.add_argument("--artifact", type=Path)
     args = parser.parse_args()
     require(
         sum(
@@ -822,7 +849,10 @@ def main() -> int:
         )
     else:
         report = run_sweep(args.root, last_frame=args.last_frame)
-    print(json.dumps(report, indent=2, sort_keys=True))
+    payload = json.dumps(report, indent=2, sort_keys=True)
+    if args.artifact is not None:
+        args.artifact.write_text(payload + "\n")
+    print(payload)
     return int(report["exit_code"])
 
 
