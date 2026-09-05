@@ -31,6 +31,7 @@ from legoesm.ocean.fidelity.time_levels import time_level_for_dump  # noqa: E402
 RECORD = "oracle_stage1_wzv_operands_kt00000001.bin"
 MAGIC = "NEMO_L4_WZVS1_1"
 NX, NY, NZ = 94, 152, 31
+NLEV = NZ - 1
 SX, SY = 91, 149
 OX, OY = NX - 4, NY - 4
 DT = 10800.0
@@ -170,7 +171,7 @@ def validate(oracle_root: Path, *, plant: str | None) -> dict[str, object]:
 
     def program(fu_, fuw_, fv_, fvs_, r1a_, e3_, e30_, mb_, ma_, mask_, rnf_):
         base, adjusted = [], []
-        for jk in range(NZ):
+        for jk in range(NLEV):
             b = nemo_transport_wzv_divergence_level(
                 fu_[..., jk], fuw_[..., jk], fv_[..., jk], fvs_[..., jk],
                 r1a_, e3_[..., jk], mask_[..., jk])
@@ -183,7 +184,8 @@ def validate(oracle_root: Path, *, plant: str | None) -> dict[str, object]:
         base3 = jnp.stack(base, axis=-1)
         adjusted3 = jnp.stack(adjusted, axis=-1)
         ww = nemo_qco_wzv_recurrence(
-            adjusted3, e30_, mb_, ma_, mask_, jnp.asarray(DT, e3_.dtype))
+            adjusted3, e30_[..., :NLEV], mb_, ma_, mask_[..., :NLEV],
+            jnp.asarray(DT, e3_.dtype))
         return base3, adjusted3, ww
 
     base, adjusted, ww = (
@@ -193,7 +195,7 @@ def validate(oracle_root: Path, *, plant: str | None) -> dict[str, object]:
     )
     base_ref = np.empty_like(base)
     adjusted_ref = np.empty_like(adjusted)
-    for jk in range(NZ):
+    for jk in range(NLEV):
         args = (fu_c[..., jk], fu_w[..., jk], fv_c[..., jk], fv_s[..., jk],
                 r1_area, e3t[..., jk], tmask[..., jk])
         base_ref[..., jk] = _np_divergence(*args, None)
@@ -220,7 +222,7 @@ def validate(oracle_root: Path, *, plant: str | None) -> dict[str, object]:
         "wzv": ww_oracle, "pfw": pfw_oracle,
     }
     masks = {
-        "divergence": live, "runoff": live,
+        "divergence": live[..., :NLEV], "runoff": live[..., :NLEV],
         "wzv": live, "pfw": live,
     }
     if plant is not None:
@@ -238,8 +240,8 @@ def validate(oracle_root: Path, *, plant: str | None) -> dict[str, object]:
             f"({rows[plant]['unequal']}/{rows[plant]['count']})")
 
     no_runoff_ww = np.asarray(jax.jit(nemo_qco_wzv_recurrence)(
-        jnp.asarray(base), jnp.asarray(e3t0), jnp.asarray(r3bb),
-        jnp.asarray(r3aa), jnp.asarray(tmask), jnp.asarray(DT)))
+        jnp.asarray(base), jnp.asarray(e3t0[..., :NLEV]), jnp.asarray(r3bb),
+        jnp.asarray(r3aa), jnp.asarray(tmask[..., :NLEV]), jnp.asarray(DT)))
     no_runoff_ablation = score(no_runoff_ww, ww_oracle, live)
     first = next((name for name, row in rows.items()
                   if row["status"] != "AT_BAR"), None)
