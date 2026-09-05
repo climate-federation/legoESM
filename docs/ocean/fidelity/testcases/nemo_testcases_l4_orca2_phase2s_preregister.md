@@ -16,7 +16,8 @@ The resolved ORCA2 deck selects `ln_zdftke=.true.` and no CST/OSM/RIC closure
 `l_zdfsh2=.TRUE.` (`zdfphy.F90:207-223`), calls `zdf_sh2` before `zdf_tke`
 (`zdfphy.F90:264-286`), and evaluates the no-Stokes face-native statements
 (`zdfsh2.F90:78-100`).  Under this RK3 executable, `stprk3.F90:164-165`
-passes `Kbb=Nbb, Kmm=Nbb`; both velocity and QCO face-metric factors are NOW.
+passes `Kbb=Nbb, Kmm=Nbb`; both velocity and QCO face-metric factors use the
+Nbb whole-step-entry slot.
 
 The single ORCA2 card changes only this explicit selector tuple:
 
