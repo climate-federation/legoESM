@@ -3764,11 +3764,25 @@ class LatLonCGridOceanModel:
                             "upwind_perturbation") == "nemo_advective"
                 and not getattr(config, "adaptive_implicit_vertadv", False)
             )
-            if not (_ws_flux_up3 or _ws_vector_ene_c2):
+            # Same shared WS-RK3 vector program, with dynvor's EEN selector.
+            # ORCA2 resolves ln_dynvor_een=T, nn_dynkeg=0 and ln_zad_Aimp=F
+            # (dynvor.F90:1326-1332; stprk3_stg.F90:283-299).  All EEN
+            # arithmetic already lives in the canonical vector-invariant
+            # operator; this arm only admits the source-valid composition.
+            _ws_vector_een_c2 = (
+                config.momentum_advection == "vector_invariant"
+                and getattr(config, "vorticity_scheme", "al81") == "een_total"
+                and getattr(config, "ke_gradient_scheme", "centered") == "c2"
+                and getattr(config, "vertical_momentum_scheme",
+                            "upwind_perturbation") == "nemo_advective"
+                and not getattr(config, "adaptive_implicit_vertadv", False)
+            )
+            if not (_ws_flux_up3 or _ws_vector_ene_c2 or _ws_vector_een_c2):
                 raise ValueError(
                     "NEMO rk3_ws requires one complete momentum program: "
                     "flux_form/nemo_up3/nemo_up3 or "
-                    "vector_invariant/ene_total/c2/nemo_advective")
+                    "vector_invariant/(ene_total|een_total)/c2/"
+                    "nemo_advective")
             if getattr(config, "outer_integrator", "forward_euler") != "forward_euler":
                 raise ValueError(
                     "NEMO rk3_ws does not compose with a second outer "

@@ -37,7 +37,6 @@ from legoesm.grids.latlon import (
     create_latlon_geometry,
 )
 
-
 # =========================================================================
 # NEMO mesh_mask reader
 # =========================================================================
@@ -76,6 +75,11 @@ def _read_nemo_mesh_mask(path: str | Path) -> dict:
         "glamt", "gphit", "glamu", "gphiu", "glamv", "gphiv",
         "glamf", "gphif",
         "e1t", "e2t", "e1u", "e2u", "e1v", "e2v", "e1f", "e2f",
+        # NEMO domhgr.F90 reads these when they are present in domain_cfg.
+        # They are source fields, not values to recover from latitude: ORCA's
+        # curvilinear grid generation and stored constants can make that
+        # reconstruction differ in the last bits.
+        "ff_t", "ff_f",
     ]
     wanted_masks = ["tmask", "umask", "vmask", "fmask"]
 
@@ -437,16 +441,25 @@ def create_tripole_grid(
         # Estimate from T-point areas
         area_q = jnp.pad(area_T, ((0, 1), (0, 1)), mode="edge")
 
-    # Coriolis
-    f_T = (2.0 * omega * jnp.sin(lat_T)).astype(dtype)
+    # Coriolis.  NEMO domhgr.F90:202-226 reads ff_t/ff_f directly when the
+    # domain file supplies them.  Preserve those source values rather than
+    # silently regenerating ff_t from latitude with a different libm/order.
+    f_T = raw.get("ff_t", 2.0 * omega * jnp.sin(lat_T)).astype(dtype)
 
     # f at u-points
     f_u_inner = 0.5 * (jnp.roll(f_T, 1, axis=1) + f_T)
     f_u = jnp.concatenate([f_u_inner, f_u_inner[:, 0:1]], axis=1)
 
     # f at v-points
-    f_v_inner = 0.5 * (f_T[:-1] + f_T[1:])
-    f_v = jnp.concatenate([f_T[0:1], f_v_inner, f_T[-1:]], axis=0)
+    if "ff_f" in raw:
+        # The native NEMO F array is the EEN/barotropic vorticity operand.
+        # legoESM's redundant v-face layout prepends its south boundary row,
+        # matching the native mapping already used by the certified GYRE card
+        # (grid.f_v[1:] is the native A2D field).
+        f_v = jnp.concatenate([raw["ff_f"][0:1], raw["ff_f"]], axis=0).astype(dtype)
+    else:
+        f_v_inner = 0.5 * (f_T[:-1] + f_T[1:])
+        f_v = jnp.concatenate([f_T[0:1], f_v_inner, f_T[-1:]], axis=0)
 
     # Fold descriptor. ``_detect_fold`` raises on a genuinely ambiguous
     # (near-constant) fold row under "auto" because BOTH seam origins fit, and a

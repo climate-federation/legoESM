@@ -1,13 +1,19 @@
+from types import SimpleNamespace
+
 import jax.numpy as jnp
 import legoesm.ocean.fidelity.nemo_testcase_recipe as testcase_recipe
 import numpy as np
 import pytest
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+from legoesm.ocean.eos import nemo_potential_temperature_from_conservative
 from legoesm.ocean.fidelity.nemo_recipe import (
     nemo_gyre_emp,
     nemo_gyre_seasonal_cosines,
 )
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+    _orca2_depth_ladder,
+    _orca2_masks,
     build_gyre_zco_card,
     build_lock_exchange_zco_card,
     build_nemo_testcase_card,
@@ -16,9 +22,8 @@ from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     gyre_surface_boundary_condition,
     gyre_vertical_ladder,
     validate_nemo_testcase_card,
+    validate_nemo_testcase_card_for_execution,
 )
-from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
-from legoesm.ocean.eos import nemo_potential_temperature_from_conservative
 
 
 @pytest.fixture(autouse=True)
@@ -26,6 +31,21 @@ def _restore_precision():
     old = get_policy()
     yield
     set_policy(old)
+
+
+def test_orca2_execution_guard_rejects_registered_unmeasured_arms():
+    card = SimpleNamespace(
+        case="ORCA2-zps",
+        unmeasured_features=("si3_jpl5_layered_prather_state",),
+    )
+    # Isolate the execution guard from the structural validator: the complete
+    # deck-backed card is exercised in the phase-2 gate, not this unit test.
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            testcase_recipe, "validate_nemo_testcase_card", lambda _: None
+        )
+        with pytest.raises(ValueError, match="not execution-ready"):
+            validate_nemo_testcase_card_for_execution(card)
 
 
 @pytest.mark.parametrize(
@@ -185,6 +205,50 @@ def test_gyre_whole_step_identity_rejects_hybrid_and_staged_gm():
                 gm_redi=recipe.model_config.gm_redi._replace(kappa_GM=1.0)
             ),
         )
+
+
+def test_orca2_shared_ws_program_admits_een_without_admitting_a_hybrid():
+    """ORCA2 changes dynvor ENE -> EEN, not the surrounding WS program."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    set_policy(PrecisionPolicy.fp64())
+    recipe = build_gyre_zco_card().recipe
+    cfg = recipe.model_config._replace(
+        vorticity_scheme="een_total",
+        barotropic=recipe.model_config.barotropic._replace(
+            barotropic_coriolis="een_metric"
+        ),
+    )
+    LatLonCGridOceanModel(recipe.grid, recipe.z_coord, cfg)
+    with pytest.raises(ValueError, match="incompatible with adaptive_implicit"):
+        LatLonCGridOceanModel(
+            recipe.grid,
+            recipe.z_coord,
+            cfg._replace(adaptive_implicit_vertadv=True),
+        )
+
+
+def test_orca2_depth_ladder_keeps_source_scalar_recurrence():
+    e3t = np.array([1.0, 2.0, 4.0], dtype=np.float64)
+    e3w = np.array([0.5, 1.5, 3.0], dtype=np.float64)
+    gdept, gdepw = _orca2_depth_ladder(e3t, e3w)
+    np.testing.assert_array_equal(gdepw, [0.0, 1.0, 3.0])
+    np.testing.assert_array_equal(gdept, [0.25, 1.75, 4.75])
+
+
+def test_orca2_mask_builder_applies_t_fold_and_strait_override():
+    bottom = np.array(
+        [[2, 2, 1, 1], [2, 1, 2, 1], [1, 2, 2, 1]], dtype=np.int32
+    )
+    strait = np.full((3, 4), -1.0)
+    strait[1, 1] = 0.5
+    tmask, umask, vmask, fmask = _orca2_masks(bottom, strait)
+    assert tmask.shape == umask.shape == vmask.shape == fmask.shape == (3, 4, 2)
+    np.testing.assert_array_equal(vmask[-1], vmask[-2, [0, 3, 2, 1]])
+    np.testing.assert_array_equal(fmask[-1], fmask[-2, [3, 2, 1, 0]])
+    np.testing.assert_array_equal(fmask[1, 1], [0.5, 0.5])
 
 
 def test_testcase_cards_select_their_resolved_barotropic_filters():
