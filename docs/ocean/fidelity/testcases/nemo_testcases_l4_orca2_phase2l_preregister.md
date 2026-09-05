@@ -29,6 +29,14 @@ actual `_g0[2]` array that the production tracer stage receives after the
 ordinary compiled step completes.  The hook may not change a public card or
 any arithmetic between the external endpoint and `tra_adv`.
 
+The ordinary ORCA2 card is presently stopped by the shared geometric-depth
+EOS allow-list even though the existing EOS-80 operand gate is exact.  This
+round will not widen that shared operator guard.  The same private WZV hook may
+therefore bypass only this constructor guard: EOS still executes, but its
+result cannot reach the scored value after the external endpoint substitution.
+The public card remains fail-closed and the guard is registered to its shared
+owner.
+
 The discriminator is frozen:
 
 - **AT_BAR, 0 / n:** retract `GYRE_OWNER_SHARED_WZV_STAGE_CLOCK` under Rule

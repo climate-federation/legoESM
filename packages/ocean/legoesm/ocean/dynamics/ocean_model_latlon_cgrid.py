@@ -3625,8 +3625,18 @@ class LatLonCGridOceanModel:
         # depth term", max|drho'| 1.5e-5).  Adding an EOS here requires the same:
         # the oracle line showing it takes gdept, and a receipt measuring it.
         _geometric_certified_eos = {"nemo_teos10", "nemo_seos"}
+        # Lane-4's private production-W diagnostic substitutes the already
+        # registered external result and exposes WZV after the completed step;
+        # its scored value never consumes EOS.  Do not widen the public shared
+        # EOS allow-list in the ORCA2-owned lane merely to reach that WRITE-only
+        # seam.  Ordinary ORCA2 execution remains fail-closed here.
+        _wzv_diagnostic_eos_bypass = bool(
+            self._nemo_ws_test_hooks.expose_stage1_wzv
+            and self._nemo_ws_test_hooks.external_mode_result_override is not None
+        )
         if (_eos_depth == "geometric"
-                and _eos_name not in _geometric_certified_eos):
+                and _eos_name not in _geometric_certified_eos
+                and not _wzv_diagnostic_eos_bypass):
             raise ValueError(
                 'eos_depth="geometric" is certified only with eos in '
                 f'{sorted(_geometric_certified_eos)} (NEMO eos_insitu passes '
