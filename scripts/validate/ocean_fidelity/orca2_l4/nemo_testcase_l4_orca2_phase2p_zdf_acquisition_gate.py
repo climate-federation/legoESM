@@ -50,38 +50,39 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _rank0_masks(domain: Path) -> dict[str, np.ndarray]:
+def _rank0_masks(mesh: Path) -> dict[str, np.ndarray]:
     from netCDF4 import Dataset
 
-    with Dataset(domain) as dataset:
-        bottom = np.asarray(dataset["bottom_level"][:], dtype=np.int32)
-    level = np.arange(NZ)[None, None, :]
-    t_global = level < bottom[..., None]
-    u_global = t_global * np.roll(t_global, -1, axis=1)
-    v_global = np.zeros_like(t_global)
-    v_global[:-1] = t_global[:-1] * t_global[1:]
-    w_global = np.zeros_like(t_global)
-    w_global[..., 0] = t_global[..., 0]
-    w_global[..., 1:] = t_global[..., 1:] * t_global[..., :-1]
-    wu_global = np.zeros_like(t_global)
-    wv_global = np.zeros_like(t_global)
-    wu_global[..., 0] = u_global[..., 0]
-    wv_global[..., 0] = v_global[..., 0]
-    wu_global[..., 1:] = u_global[..., 1:] * u_global[..., :-1]
-    wv_global[..., 1:] = v_global[..., 1:] * v_global[..., :-1]
+    # The retained rank-zero mesh contains NEMO's post-lbc T/U/V masks,
+    # including its T-pivot fold row; deriving from bottom_level alone would
+    # silently miss those owned fold values.
+    with Dataset(mesh) as dataset:
+        native = {
+            grid: np.asarray(dataset[name][0], dtype=bool).transpose(2, 1, 0)
+            for grid, name in {"T": "tmask", "U": "umask", "V": "vmask"}.items()
+        }
+    require(all(value.shape == (NX - 2 * HALO, NY - 2 * HALO, NZ)
+                for value in native.values()), "unexpected rank-zero mesh mask shape")
+    w_native = np.zeros_like(native["T"])
+    wu_native = np.zeros_like(native["U"])
+    wv_native = np.zeros_like(native["V"])
+    w_native[..., 0] = native["T"][..., 0]
+    wu_native[..., 0] = native["U"][..., 0]
+    wv_native[..., 0] = native["V"][..., 0]
+    w_native[..., 1:] = native["T"][..., 1:] * native["T"][..., :-1]
+    wu_native[..., 1:] = native["U"][..., 1:] * native["U"][..., :-1]
+    wv_native[..., 1:] = native["V"][..., 1:] * native["V"][..., :-1]
+    native.update({"W": w_native, "X": wu_native, "Y": wv_native})
 
     masks: dict[str, np.ndarray] = {}
-    for grid, source in {
-        "T": t_global, "U": u_global, "V": v_global,
-        "W": w_global, "X": wu_global, "Y": wv_global,
-    }.items():
+    for grid, source in native.items():
         local = np.zeros((NX, NY, NZ), dtype=bool)
-        local[HALO:-HALO, HALO:-HALO] = source[:, : NX - 2 * HALO].transpose(1, 0, 2)
+        local[HALO:-HALO, HALO:-HALO] = source
         masks[grid] = local
     return masks
 
 
-def read_zdf(path: Path, domain: Path) -> dict[str, object]:
+def read_zdf(path: Path, mesh: Path) -> dict[str, object]:
     n2, n3 = NX * NY, NX * NY * NZ
     payload = len(FIELDS_3D) * n3 + len(FIELDS_2D) * n2
     with path.open("rb") as handle:
@@ -97,7 +98,7 @@ def read_zdf(path: Path, domain: Path) -> dict[str, object]:
             "derived EOF size mismatch")
     require(np.isfinite(values).all(), "non-finite payload")
 
-    masks = _rank0_masks(domain)
+    masks = _rank0_masks(mesh)
     cursor = 0
     arrays: dict[str, np.ndarray] = {}
     canonical: dict[str, str] = {}
@@ -124,7 +125,7 @@ def read_zdf(path: Path, domain: Path) -> dict[str, object]:
     }
 
 
-def validate(a: Path, b: Path, inherited: Path, domain: Path) -> dict[str, object]:
+def validate(a: Path, b: Path, inherited: Path, mesh: Path) -> dict[str, object]:
     ia = {p.name for p in a.glob("oracle_*.bin")}
     ib = {p.name for p in b.glob("oracle_*.bin")}
     old = {p.name for p in inherited.glob("oracle_*.bin")}
@@ -143,7 +144,7 @@ def validate(a: Path, b: Path, inherited: Path, domain: Path) -> dict[str, objec
         inherited_rows.append({"file": name, "sha256": sha256(a / name),
                                "status": "EXACT_BYTES"})
     return {
-        "status": "PASS", "schema": read_zdf(a / NAME, domain),
+        "status": "PASS", "schema": read_zdf(a / NAME, mesh),
         "twin_raw_exact": len(twin_rows), "twin_total": len(twin_rows),
         "inherited_raw_exact": len(inherited_rows),
         "inherited_total": len(inherited_rows), "records": twin_rows,
@@ -155,7 +156,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-a", type=Path, required=True)
     parser.add_argument("--run-b", type=Path, required=True)
     parser.add_argument("--inherited", type=Path, required=True)
-    parser.add_argument("--domain", type=Path, required=True)
+    parser.add_argument("--mesh", type=Path, required=True,
+                        help="rank-zero mesh_mask_0000.nc from either twin")
     parser.add_argument("--json-out", type=Path)
     parser.add_argument("--plant", action="store_true")
     return parser.parse_args()
@@ -178,7 +180,7 @@ def main() -> int:
             handle.write(struct.pack("=d", 1.0))  # first halo payload slot
         run_a = planted
     try:
-        result = validate(run_a, args.run_b, args.inherited, args.domain)
+        result = validate(run_a, args.run_b, args.inherited, args.mesh)
     except GateError as error:
         print(f"FAIL: {error}")
         return 1
