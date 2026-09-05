@@ -185,6 +185,15 @@ CITATION_MAP = {
         "pff_t(:,:) = 0._wp"],
     "trabbl.F90:519-527": ["DO_2D( 1, 0, 1, 0 )", "END_2D"],
     "domain.F90:159": "r1_hu_0(:,:) = ssumask(:,:) / ( hu_0(:,:) + 1._wp",
+    # round-27 review: the writers and arms the first draft's prose omitted
+    "domzgr_substitute.h90:143": "gdept_z0(i,j,k,t) gdept(i,j,k,t)",
+    "stp2d.F90:163": "CALL dyn_keg( kt, nn_dynkeg, Kbb, uu, vv, Krhs )",
+    "stp2d.F90:165": "CALL dyn_zad( kt, Kbb, uu, vv, Krhs )",
+    "stp2d.F90:169": "CALL dyn_adv_cen2( kt     , Kbb, uu, vv, Krhs, pUe=Ue_rhs",
+    "stp2d.F90:180": "Ue_rhs(ji,jj) = SUM( e3u_0(ji,jj,1:jpkm1)",
+    "stp2d.F90:207": "grav * (  ssh_ib (ji+1,jj  ) - ssh_ib (ji,jj) )",
+    "stp2d.F90:223": "( zpice(ji+1,jj) - zpice(ji,jj) ) * r1_e1u(ji,jj)",
+    "stp2d.F90:235": "( bhd_wave(ji+1,jj) - bhd_wave(ji,jj) ) * r1_e1u(ji,jj)",
     "namelist_cfg:85": "ln_dynadv_up3 = .true.",
     "namelist_cfg:105-106": [
         "nn_bt_flt     = 3", "rn_bt_alpha   = 0.07"],

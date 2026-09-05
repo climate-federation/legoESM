@@ -35,7 +35,7 @@ argued in prose:
   gate asserts NEMO's dumped entry velocity is identically zero, so the added
   term is exactly ``0.0``.
 * ``stp2d.F90``'s ``SELECT CASE( n_dynadv )`` has three arms.  ``dyn_keg``
-  (``:161``) plus ``dyn_zad`` (``:163``) and ``dyn_adv_cen2`` (``:167``) DO
+  (``:163``) plus ``dyn_zad`` (``:165``) and ``dyn_adv_cen2`` (``:169``) DO
   write the 3-D RHS; ``ln_dynadv_up3 = .true.`` is what selects neither, and
   the gate now asserts that selection instead of leaving it unsaid.
 * ``dyn_adv_up3`` (``:172``) is called WITH ``pUe``/``pVe``.  In the ppsrc every
@@ -130,7 +130,7 @@ def assert_ppsrc_isolation(case: str, nemo_root: Path = NEMO_ROOT,
     # WHICH routines run is a namelist selection, and asserting the ppsrc
     # without it left "hpg_sco ASSIGNS" and "dyn_adv_up3 writes only 2-D"
     # resting on unstated facts.  stp2d.F90's SELECT CASE( n_dynadv ) also
-    # offers dyn_keg (:161) + dyn_zad (:163) and dyn_adv_cen2 (:167), both of
+    # offers dyn_keg (:163) + dyn_zad (:165) and dyn_adv_cen2 (:169), both of
     # which WOULD write the 3-D RHS; ln_dynadv_up3 is what excludes them.
     namelist = (config / "EXP00/namelist_cfg").read_text()
     selections = {

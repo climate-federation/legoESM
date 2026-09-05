@@ -4944,6 +4944,64 @@ Controlled: both cards were re-run and their reports are identical to round
 26's, field by field, apart from the git sha and the two ratio keys.  Both LOCK
 plants still exit `1`.
 
+### Round-27 independent review — two reviewers, two blockers, six retractions
+
+Two independent reviewers ran on this round: one on the MECHANISM and the
+claims, one on the DIFF.  Every finding was re-measured before being accepted,
+and both reviewers were right on every count that survived measurement.
+
+**BLOCKER 1 — the citation gate could not catch the defect it exists for.**
+It joined every cited line into one string and asked `symbol in text`, so a
+RANGE passed whenever any line inside it held the symbol.  Measured over the
+whole map: **36 of 78** citations still passed with a WRONG line number within
+±6, several at every shift tried.  "Hand-checking is replaced" was false as
+shipped.
+
+Both endpoints are pinned now — the first and last cited line each carry their
+own symbol — and `audit_shift_sensitivity()` runs on every invocation and
+fails the gate for any entry that survives a ±1 or ±2 shift.  That is
+self-enforcing: a symbol too generic to identify its line cannot remain in the
+map.  The audit drove the count 36 → 1 → 0.  The last holdout was
+`domzgr_substitute.h90:145`, whose text also appears at `:143`, the
+`key_linssh` variant.
+
+**BLOCKER 2 — the ORCA2 probe re-derived the model's arm rather than running
+its shape.**  It called the operator with `return_components=True` where the
+model does not, and skipped the model's `astype` cast.  The scored pair now
+comes from the production call shape; the components call is a diagnostic
+whose first two elements must equal the production pair BIT for bit, which is
+the calibration the LOCK walk had and this one lacked.  And the ablation is
+now REQUIRED, not merely reported — a round trip that changed nothing would
+have left an AT-BAR row standing as evidence for a change that is inert.
+
+**Four claim-strength retractions**, in addition to the two already recorded
+above:
+
+| claim as written | what measurement said |
+|---|---|
+| "the isolation is proved mechanically, none is prose" | it omitted `stp2d.F90`'s other advection arms — `dyn_keg` `:163` + `dyn_zad` `:165` and `dyn_adv_cen2` `:169` DO write the 3-D RHS. `ln_dynadv_up3` and `ln_hpg_sco` are now asserted from the card's namelist |
+| the DINO plant "fires on every fact at once" | it fires on THREE of five; `dyn_drg_init`'s INTENT and the `dyn_adv_up3` guard pass on that build and have no plant |
+| "four unconditional `Ue_rhs` writers" | there are SIX assignments; `:207`/`:223`/`:235` are guarded by `ln_apr_dyn` / `ln_ice_embd` / `ln_bern_srfc` and `:180` is the unselected vector-form arm. All are now asserted off from the run's own `ocean.output` and namelists |
+| the +1.0 plant is the LOCK walk's control | it proves the probe READS its operand, not that it resolves the `2.168e-19` effect — one ULP moves the mean by `~2e-20`, below its resolution. The ARM SEPARATION is what demonstrates that, and is reported as such |
+
+**Two reviewer findings not adopted, with the reason.**  The `hpg_sco` ASSIGNS
+regex inspects only the first right-hand-side token, and the `IF`/`ELSE`
+tracker models neither `ELSEIF` nor a one-line `IF` carrying a write.  Both
+are real gaps; neither construct occurs in the routines walked (`grep -E
+"ELSE ?IF" dynadv_up3.f90` is empty).  Recorded as known blind spots rather
+than fixed on a hypothetical.
+
+Two defects this round found in its OWN work while acting on the review.  A
+new test enabled float64 only if the caller had exported `JAX_ENABLE_X64`, so
+it passed standalone and failed inside a combined run — Rule 1c's exact
+failure mode; it sets x64 itself now.  And the strengthened citation gate
+immediately caught a wrong citation introduced by this very edit: the review
+quoted `dyn_keg`/`dyn_zad`/`dyn_adv_cen2` at LOCK's PREPROCESSED line numbers,
+which are offset by two from the shipped source, and those numbers went
+straight into the receipt.  The gate refused them on the first run.  That is
+the fourth wrong-citation event in three rounds and the first one caught by a
+machine instead of a person.
+
 ### Tests, and the ratchets
 
 The focused suite over the two modules this round touches plus its three new
@@ -4975,9 +5033,9 @@ Nothing in round 27 blocks that fast-forward.  What is stated honestly next to
 it: this round landed no model numerics at all — the only change under
 `packages/` is a one-line comment, verified by `git diff` — and the
 pre-existing focused-test failures are unchanged in kind.  Independent
-adversarial review of round 27 HAS now run and its findings are folded in
-above, including two retractions of this round's own claims; review of rounds
-25 and 26 remains **OUTSTANDING**.  The merge decision itself is not made
+adversarial review of round 27 HAS now run — two reviewers, two blockers and
+six retractions, all folded in above and all re-measured before acceptance;
+review of rounds 25 and 26 remains **OUTSTANDING**.  The merge decision itself is not made
 here.
 
 ### Open questions
