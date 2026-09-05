@@ -9,8 +9,10 @@ factor-three production WZV clock error is retracted under Rule 11.  A compiled
 production step proves that legoESM pairs the full external SSH endpoint with
 the full 10,800 s denominator; the old arm instead paired NEMO's materialized
 stage-1 HYB SSH with that denominator, a state/clock combination executed by
-neither model.  The first actual production debt after the oracle-supplied
-external endpoint is shared stage-transport composition.  With the exact NEMO
+neither model.  A card-owned one-column error in the tripolar U-face metric
+layout was corrected and pinned without changing V metrics or `f_v`.  The
+first remaining production debt after the oracle-supplied external endpoint
+is shared stage-transport source association.  With the exact NEMO
 `zFu/zFv/zFw` substituted, the next boundary is shared stage-1 centered tracer
 advection, also over bar.  Both debts are handed to GYRE ownership without a
 Lane-4 arithmetic change.  BBL and TKE/EVD/IWM were not entered.
@@ -84,13 +86,15 @@ whose remote operands rank zero did not dump.
 
 | compiled boundary | unequal / n | maximum absolute difference | result |
 |---|---:|---:|---|
-| production `zFu` | 126,372 / 228,641 | 15,818.687142398441 | DEBT |
+| card `e2u` after U-face layout repair | 0 / 8,568 | 0 | AT BAR |
+| card `e1v` control | 0 / 8,589 | 0 | AT BAR |
+| production `zFu` | 102,431 / 228,641 | 4.656612873077393e-10 | DEBT |
 | production `zFv` | 108,307 / 228,641 | 9.313225746154785e-10 | DEBT |
-| production tracer `ww` | 222,617 / 228,641 | 3.2904495715732645e-06 m/s | DEBT |
+| production tracer `ww` | 220,589 / 228,641 | 4.6872685718684845e-19 m/s | DEBT |
 | valid full-endpoint/full-step clock replay | 189,969 / 228,641 | 3.48342299558331e-20 m/s | DEBT |
 
 The first production over-bar boundary is therefore
-**`GYRE_OWNER_SHARED_STAGE_TRANSPORT_COMPOSITION`**, not a WZV clock.  NEMO
+**`GYRE_OWNER_SHARED_STAGE_TRANSPORT_SOURCE_ASSOCIATION`**, not a WZV clock.  NEMO
 forms `zub/zvb` at `stprk3_stg.F90:259-270`, then materializes
 `metric*e3(Kmm)*(velocity+barotropic correction)` at `:272-275`.  legoESM's
 single shared helper is `_nemo_ws_stage_transport` at
@@ -102,8 +106,20 @@ The V2 record is
 its `pFu/pFv` frames are the already-materialized stage-1 transport operands,
 while `ww/pFw` are the post-`wzv` products at `(Kbb,Kmm,Kaa)=(1,1,3)`.
 
-This debt is shared and is registered for the GYRE lane.  Lane 4 does not
-change `_nemo_ws_stage_transport`.
+The remaining transport error is at most four ULP after exact card metrics;
+it is shared and is registered for the GYRE lane.  Lane 4 does not change
+`_nemo_ws_stage_transport`.
+
+Before that shared boundary, the probe found `grid.dy_u[:,1:]` differed from
+NEMO `e2u` in 1,961 / 8,568 wet faces, while the unshifted native array was
+0 / 8,568.  `create_tripole_grid` had appended a duplicate after NEMO's native
+east-face array even though legoESM U index 0 denotes the west periodic face.
+The `ORCA2_OWNER_TRIPOLAR_U_FACE_LAYOUT` repair now prepends the native last U
+face and places native `e1u/e2u` and U rotations at indices `1:`.  A synthetic
+test pins that map, both redundant endpoints, unchanged V metrics, unchanged
+generic `f_v`, and U rotations.  The ORCA2 entry gate remains exact for T, S,
+u, v, and SSH; its JSON SHA-256 is
+`893f38dfa12c0ee7054e4ebfb2a23f23b16fbfe1f96c42f17137112210228d12`.
 
 ## 4. Rule-11 clock retraction
 
@@ -128,7 +144,7 @@ marked superseded in place.  There is no
 The valid clock-only replay is over bar only at source-association scale
 (maximum 3.48e-20 m/s).  It is registered as
 `GYRE_OWNER_SHARED_WZV_STAGE_SSH_ASSOCIATION`, downstream of the earlier
-stage-transport-composition debt.  GYRE is **UNMEASURED on W**, not
+stage-transport source-association debt.  GYRE is **UNMEASURED on W**, not
 insensitive: its prior gate scores no vertical-velocity row, and vector form
 explicitly skips stage-1 momentum `ww` at `stprk3_stg.F90:286-294`.  Its
 bit-exact stage-1 T/S can coexist with a tiny W association difference because
@@ -216,7 +232,8 @@ exactly 1 / 228,641 while S remains exact.
 | RGB, EOS80, SCO HPG | previously VERIFIED exact against V2 |
 | frozen EEN external coefficients | CONFIRMED DEBT; `GYRE_OWNER_SHARED_EXTERNAL_MODE` |
 | external endpoint | `ORACLE_SUPPLIED_EXTERNAL_MODE` |
-| production stage `zFu/zFv` | CONFIRMED DEBT; `GYRE_OWNER_SHARED_STAGE_TRANSPORT_COMPOSITION` |
+| tripolar U-face native layout | VERIFIED; `ORCA2_OWNER_TRIPOLAR_U_FACE_LAYOUT` |
+| production stage `zFu/zFv` | CONFIRMED DEBT; `GYRE_OWNER_SHARED_STAGE_TRANSPORT_SOURCE_ASSOCIATION` |
 | divhor + runoff + literal WZV source program on NEMO operands | VERIFIED exact |
 | factor-three stage clock | RETRACTED under Rule 11 |
 | WZV full-endpoint association | CONFIRMED DEBT; `GYRE_OWNER_SHARED_WZV_STAGE_SSH_ASSOCIATION` |
