@@ -57,6 +57,7 @@ class NEMOTestcaseCard(NamedTuple):
     bbl_aht_m2_s: float
     bbl_gamma_s: float
     surface_boundary_condition: str = "none"
+    surface_input_operator: str = "none"
     transcendentals: str = "libm"
     precision_policy: str = "fp64"
     # Selected oracle mechanisms that are not yet in the shared execution
@@ -1174,8 +1175,8 @@ def build_orca2_zps_card(deck_root: str | Path) -> NEMOTestcaseCard:
         1000.0,
         0.0,
         surface_boundary_condition="ncar_core_sbcblk",
+        surface_input_operator="nemo_fld_read",
         unmeasured_features=(
-            "nemo_fld_read_forcing",
             "staged_gm_eiv",
             "linear_implicit_bottom_drag",
             "internal_wave_mixing",
@@ -1280,6 +1281,8 @@ def validate_nemo_testcase_card(card: NEMOTestcaseCard) -> None:
                 raise ValueError("ORCA2-zps requires EOS-80 and EEN vorticity")
             if card.surface_boundary_condition != "ncar_core_sbcblk":
                 raise ValueError("ORCA2-zps requires the NCAR/CORE sbcblk card")
+            if card.surface_input_operator != "nemo_fld_read":
+                raise ValueError("ORCA2-zps requires the shared NEMO fld_read map")
             if card.icebergs_enabled is not False or card.iceberg_inputs != ():
                 raise ValueError(
                     "ORCA2-zps comparison card requires ln_icebergs=F and no "

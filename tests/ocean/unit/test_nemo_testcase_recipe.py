@@ -57,6 +57,7 @@ def test_orca2_structural_guard_rejects_iceberg_option_drift():
     card = good._replace(
         case="ORCA2-zps",
         surface_boundary_condition="ncar_core_sbcblk",
+        surface_input_operator="nemo_fld_read",
         icebergs_enabled=True,
         iceberg_inputs=("icebergs_restart.nc",),
         unmeasured_features=("si3_jpl5_layered_prather_state",),

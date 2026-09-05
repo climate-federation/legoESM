@@ -20,7 +20,6 @@ EXPECTED_INPUT_SHA256 = {
         "ad648d972f0631bde7e1b598d98470a979b7f2649271fc9cf5ccfca158e31d0c",
 }
 EXPECTED_UNMEASURED = {
-    "nemo_fld_read_forcing",
     "staged_gm_eiv",
     "linear_implicit_bottom_drag",
     "internal_wave_mixing",
@@ -129,6 +128,8 @@ def run_gate(
             "barotropic substep count")
     require(card.icebergs_enabled is False, "card must resolve ln_icebergs=F")
     require(card.iceberg_inputs == (), "icebergs-off card must have no inputs")
+    require(card.surface_input_operator == "nemo_fld_read",
+            "card must select the shared fld_read map")
 
     unresolved = set(card.unmeasured_features)
     if plant == "coverage":
