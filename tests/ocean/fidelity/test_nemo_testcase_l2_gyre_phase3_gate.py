@@ -11,6 +11,7 @@ import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as model_module
 import legoesm.ocean.dynamics.ocean_pe_latlon_cgrid as pe_module
 import numpy as np
 from legoesm.grids.latlon import create_beta_plane_cgrid_geometry
+from legoesm.ocean.fidelity.ulp_move_gate import capture_residual_fields
 from legoesm.ocean.physics.shortwave_penetration import (
     ShortwavePenetrationConfig,
     shortwave_penetration_tendency,
@@ -31,6 +32,16 @@ def test_score_exact_and_planted_violation():
     mask = np.ones(2, dtype=bool)
     assert gate.score("exact", values, values.copy(), mask)["status"] == "AT-BAR"
     assert gate.score("plant", values, values.copy(), mask, plant=True)["status"] == "DEBT"
+
+
+def test_score_registers_cellwise_oracle_residuals():
+    oracle = np.array([1.0, 2.0], dtype=np.float64)
+    candidate = np.array([1.0, np.nextafter(2.0, np.inf)], dtype=np.float64)
+    mask = np.ones(2, dtype=bool)
+    with capture_residual_fields() as residuals:
+        gate.score("captured", oracle, candidate, mask)
+    np.testing.assert_array_equal(residuals.rows["captured"]["oracle"], oracle)
+    np.testing.assert_array_equal(residuals.rows["captured"]["candidate"], candidate)
 
 
 def test_kt1_at_rest_controls_are_uninformative_but_debt_stays_red():
