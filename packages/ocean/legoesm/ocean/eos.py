@@ -38,6 +38,7 @@ from jax import lax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.core.precision import resolve_dtype
 
 # ==============================================================================
@@ -876,8 +877,9 @@ def nemo_r3t_stretch(
     if evaluation == "nemo_reciprocal":
         # domain.F90:158 stores r1_ht_0 before domqco.F90:160 multiplies it
         # by ssh.  The barrier preserves that fp64 boundary under JIT.
-        r1_H = lax.optimization_barrier(1.0 / safe_H)
-        r3t = jnp.where(wet_H, jnp.asarray(eta) * r1_H, 0.0)
+        r1_H = nemo_source_round(1.0 / safe_H)
+        r3t = jnp.where(
+            wet_H, nemo_source_round(jnp.asarray(eta) * r1_H), 0.0)
     else:
         r3t = jnp.where(wet_H, jnp.asarray(eta) / safe_H, 0.0)
     # Safety floor on the stretch, NOT on r3t: a column driven to
@@ -886,7 +888,9 @@ def nemo_r3t_stretch(
     # of downstream terms.  Callers that already clamp eta (the PGF passes
     # eta_safe) never reach this; it exists so an unclamped caller degrades
     # loudly-wrong rather than silently-plausible.
-    return jnp.maximum(1.0 + r3t, 1.0e-6)
+    stretch = (nemo_source_round(1.0 + r3t)
+               if evaluation == "nemo_reciprocal" else 1.0 + r3t)
+    return jnp.maximum(stretch, 1.0e-6)
 
 
 def nemo_bn2_live_ladders(

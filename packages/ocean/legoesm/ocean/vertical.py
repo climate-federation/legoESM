@@ -23,6 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from legoesm.core.precision import get_policy
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.timestepping.tridiagonal import thomas_solve
 
 # Shchepetkin (2015) adaptive-implicit vertical-advection Courant
@@ -37,6 +38,34 @@ _AIMP_CU_MAX = 0.30
 # Layer-thickness floor [m] for advective-tendency / Courant denominators
 # (matches ``flux_form_vertical_momentum_advection``).
 _H_FLOOR = 1.0e-10
+
+
+def compute_nemo_qco_layer_thickness(
+    eta: jnp.ndarray,
+    H_bathy: jnp.ndarray,
+    z_coord,
+) -> jnp.ndarray:
+    """NEMO ``e3t_0 * (1 + ssh * r1_ht_0)`` source identity.
+
+    ``domqco.F90:160`` forms ``r3t`` from the stored reciprocal depth and
+    ``domzgr_substitute.h90:139`` then multiplies the reference thickness by
+    ``1+r3t``.  This is algebraically equivalent to legoESM's generic z-star
+    Jacobian, but not bit-equivalent (the 10 m C1D construction differs by two
+    ULP at its initial ice-loaded SSH).  It is a shared NEMO-QCO operator;
+    callers select it only with their existing ``nemo_literal`` evaluation.
+    """
+    # Local import avoids the vertical<->EOS module import cycle.
+    from legoesm.ocean.eos import nemo_r3t_stretch
+
+    stretch = nemo_r3t_stretch(
+        z_coord, eta, H_bathy, evaluation="nemo_reciprocal")
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        reference = z_coord.h_partial
+    else:
+        reference = z_coord.dz_ref
+    return nemo_source_round(
+        jnp.asarray(reference, dtype=stretch.dtype)
+        * stretch[..., jnp.newaxis])
 
 
 class NemoAdaptiveImplicitPartition(NamedTuple):

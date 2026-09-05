@@ -363,6 +363,24 @@ def build_c1d_omip_l3_slab_ocean_card() -> C1DSlabOceanCard:
     )
     cfg = cfg._replace(
         momentum_advection="off",
+        # C1D resolves NEMO's ENS Coriolis inside each WS-RK3 3-D momentum
+        # tendency.  The shared ``explicit_ab2`` spelling selects that
+        # tendency placement (the name predates the RK3 caller); the
+        # ``matsuno_split`` alternative would move rotation after the stages
+        # and makes their Krhs identically zero in this one-layer column.
+        coriolis_scheme="explicit_ab2",
+        # With the resolved linear-dynamics switch NEMO's ENE relative term
+        # is structurally zero and only its planetary part remains.  legoESM's
+        # shared ``ene`` + explicit face-Coriolis split is the same one-column
+        # operator; ``ene_total`` would require the shared EEN live barotropic
+        # stencil, a different NEMO branch.
+        vorticity_scheme="ene",
+        barotropic_coriolis_split="live",
+        # C1D_OMIP_L3_COUPLED10M executes NEMO's implicit wind-stress
+        # deposition in dynzdf.F90:328-330 and the mandatory post-solve
+        # barotropic correction in stprk3_stg.F90:437-445.  These are the
+        # shared NEMO selectors, not slab-only numerics.
+        surface_stress_implicit=True,
         bottom_drag=cfg.bottom_drag._replace(
             bottom_drag_r=5.0e-5,  # namdrg_bot resolved linear coefficient
             bottom_drag_bbl_thickness=0.0,
@@ -371,6 +389,8 @@ def build_c1d_omip_l3_slab_ocean_card() -> C1DSlabOceanCard:
         zdf_drag_in_matrix=True,
         zdf_baroclinic_only=True,
         barotropic_drag_substep=True,
+        barotropic=cfg.barotropic._replace(
+            nemo_stage_mean_imposition=True),
     )
     recipe = NEMORecipe(cfg, cfg.physics, grid, z_coord, wet, state)
     return C1DSlabOceanCard(

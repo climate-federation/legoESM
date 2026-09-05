@@ -28,6 +28,7 @@ import numpy as np
 
 from legoesm.core.field import Field
 from legoesm.core.precision import cast_pytree
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.latlon import (
     LatLonGrid,
     compute_v_face_coords,
@@ -42,6 +43,7 @@ from legoesm.ocean.vertical import (
     OceanZStarCoordinate,
     OceanPartialCellCoordinate,
     compute_layer_thickness,
+    compute_nemo_qco_layer_thickness,
     compute_ocean_jacobian,
     diagnose_w_from_flux_div,
     flux_form_vertical_tracer_advection,
@@ -92,7 +94,11 @@ from legoesm.ocean.dynamics.ocean_tendency_common import (
     depth_average_to_faces,
     depth_mean,
 )
-from legoesm.ocean.freshwater import freshwater_eta_tendency, virtual_salt_flux
+from legoesm.ocean.freshwater import (
+    freshwater_eta_tendency,
+    nemo_freshwater_eta_tendency,
+    virtual_salt_flux,
+)
 from legoesm.ocean.physics.combined import make_ocean_physics
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_eke_step_kappa,
@@ -1024,6 +1030,14 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # slots after the full step has run.  Private fidelity instrumentation only;
     # zero leaves the returned state untouched.
     expose_momentum_stage: int = 0
+    # Return the post-implicit-ZDF, pre-mean-imposition velocity.  This is a
+    # private oracle-fidelity seam for stprk3_stg.F90:430-445; production
+    # configurations cannot select it.
+    expose_post_implicit_momentum: bool = False
+    # Scale stprk3_stg.F90:433-445 after dyn_zdf.  NEMO has no switch for
+    # this RK3 correction; values other than 1 are solely the round-15
+    # one-variable causal arm and are never represented in public config.
+    post_zdf_mean_scale: float = 1.0
 
 
 def _nemo_ws_rk3_tracer_pair_step(
@@ -3925,10 +3939,15 @@ class LatLonCGridOceanModel:
         # ``sum_k(h_u * u_corrected) == Hu_avg`` to hold to machine
         # precision.  For full cells this reduces to the cell value
         # (bit-exact backwards-compat).
-        h_k_pre = compute_layer_thickness(
-            state.eta.data, state.H_bathy.data, _zc,
-            min_water_column_m=_cfg_b.min_water_column_m,
-        )
+        if (_cfg_b.barotropic.barotropic_seed_evaluation
+                == "nemo_literal"):
+            h_k_pre = compute_nemo_qco_layer_thickness(
+                state.eta.data, state.H_bathy.data, _zc)
+        else:
+            h_k_pre = compute_layer_thickness(
+                state.eta.data, state.H_bathy.data, _zc,
+                min_water_column_m=_cfg_b.min_water_column_m,
+            )
         # h at u-faces — min-rule (MOM6/MITgcm hFacW convention).
         # Must match the PE tendency which uses min_cell_to_uface, so
         # that F_slow = depth_avg(du_dt, h_u) is consistent with the
@@ -3970,9 +3989,23 @@ class LatLonCGridOceanModel:
                 _tau_i_u, _tau_j_v, _, _ = _sfx
                 _r0 = jnp.asarray(_cfg_b.constants.rho_0,
                                   dtype=du_dt.dtype)
-                F_slow_u = F_slow_u + _tau_i_u / (_r0 * H_u_pre) \
+                # NEMO stp2d.F90:200-201 source association:
+                #   Ue_rhs = Ue_rhs + r1_rho0 * utauU * r1_hu(Kbb)
+                # Keep its two multiply statements and final addition
+                # materialised.  The formerly equivalent tau/(rho*H)
+                # differs by one bit for the C1D meridional stress and that
+                # bit is amplified by the 946 split-explicit substeps.
+                _one = jnp.asarray(1.0, dtype=du_dt.dtype)
+                _r1_r0 = nemo_source_round(_one / _r0)
+                _r1_hu = nemo_source_round(_one / H_u_pre)
+                _r1_hv = nemo_source_round(_one / H_v_pre)
+                _wind_u = nemo_source_round(
+                    nemo_source_round(_r1_r0 * _tau_i_u) * _r1_hu)
+                _wind_v = nemo_source_round(
+                    nemo_source_round(_r1_r0 * _tau_j_v) * _r1_hv)
+                F_slow_u = nemo_source_round(F_slow_u + _wind_u) \
                     * state.u_mask.data
-                F_slow_v = F_slow_v + _tau_j_v / (_r0 * H_v_pre) \
+                F_slow_v = nemo_source_round(F_slow_v + _wind_v) \
                     * state.v_mask.data
 
         # Perturbation tendency (depth-mean removed) → applied to 3D.
@@ -4136,6 +4169,7 @@ class LatLonCGridOceanModel:
         # dt_mom == dt ⇒ bit-identical for all existing configs.
         _nemo_ws_velocity_stages = None
         _nemo_ws_exposed_momentum_stage = None
+        _nemo_ws_zdf_input = None
         if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3":
             u0 = state.u.data
             v0 = state.v.data
@@ -4187,6 +4221,8 @@ class LatLonCGridOceanModel:
             # sqrt(3)) carries over.
             u0 = state.u.data
             v0 = state.v.data
+            _nemo_unseparated_stage = bool(getattr(
+                _cfg_b.barotropic, "nemo_stage_mean_imposition", False))
 
             def _mom_pert_ws(
                 u_in, v_in, skip_ldf, transport_mean=None,
@@ -4220,13 +4256,23 @@ class LatLonCGridOceanModel:
                                          transport_velocity))
                 _du = td.du_dt.data
                 _dv = td.dv_dt.data
+                if _nemo_unseparated_stage:
+                    # stprk3_stg.F90:250-445 keeps the full 3-D Krhs in
+                    # puu/pvv through each WS stage.  dyn_spg_ts advances the
+                    # separate uu_b/vv_b state; dynzdf.F90:148-171 removes
+                    # that barotropic component only immediately before the
+                    # implicit solve.  Prematurely subtracting the tendency
+                    # mean here erased every Krhs term in a one-layer column.
+                    return _du, _dv
                 _Fu = jnp.sum(_du * h_u_pre, axis=-1) / H_u_pre * state.u_mask.data
                 _Fv = jnp.sum(_dv * h_v_pre, axis=-1) / H_v_pre * state.v_mask.data
                 return _du - _Fu[..., jnp.newaxis], _dv - _Fv[..., jnp.newaxis]
 
             # stage 1 (dt/3), RHS = the stage-1 full tendency (incl. LDF)
-            u1 = u0 + (dt_mom / 3.0) * du_dt_pert
-            v1 = v0 + (dt_mom / 3.0) * dv_dt_pert
+            _stage1_du = du_dt if _nemo_unseparated_stage else du_dt_pert
+            _stage1_dv = dv_dt if _nemo_unseparated_stage else dv_dt_pert
+            u1 = u0 + (dt_mom / 3.0) * _stage1_du
+            v1 = v0 + (dt_mom / 3.0) * _stage1_dv
             # stage 2 (dt/2), RHS(u1) WITHOUT lateral viscosity
             p1u, p1v = _mom_pert_ws(u1, v1, True)
             u2 = u0 + (dt_mom / 2.0) * p1u
@@ -4295,7 +4341,14 @@ class LatLonCGridOceanModel:
         # Freshwater mass flux for barotropic continuity equation
         F_slow_eta = None
         if freshwater is not None and _cfg_b.freshwater_closure != "none":
-            F_slow_eta = freshwater_eta_tendency(
+            _nemo_continuity = (
+                getattr(_cfg_b.barotropic,
+                        "barotropic_continuity_evaluation", "generic")
+                == "nemo_literal")
+            _eta_tendency = (nemo_freshwater_eta_tendency
+                             if _nemo_continuity
+                             else freshwater_eta_tendency)
+            F_slow_eta = _eta_tendency(
                 freshwater, _cfg_b.rho_0,
             ) * state.land_mask.data
             if (_cfg_b.freshwater_closure == "real_freshwater"
@@ -4633,8 +4686,10 @@ class LatLonCGridOceanModel:
                 Hu_avg / H_u_pre * state.u_mask.data)
             transport_target_v = (
                 Hv_avg / H_v_pre * state.v_mask.data)
-            u1_raw = u0 + (dt_mom / 3.0) * du_dt_pert
-            v1_raw = v0 + (dt_mom / 3.0) * dv_dt_pert
+            _stage1_du = (du_dt if _nemo_unseparated_stage else du_dt_pert)
+            _stage1_dv = (dv_dt if _nemo_unseparated_stage else dv_dt_pert)
+            u1_raw = u0 + (dt_mom / 3.0) * _stage1_du
+            v1_raw = v0 + (dt_mom / 3.0) * _stage1_dv
             u1_corr, v1_corr = _replace_stage_mean(
                 u1_raw, v1_raw, target_u, target_v)
             _use_transport_reconcile = (
@@ -4652,6 +4707,11 @@ class LatLonCGridOceanModel:
                 u2_corr, v2_corr, False, _transport_target)
             u3_raw = u0 + dt_mom * p2u_corr
             v3_raw = v0 + dt_mom * p2v_corr
+            # NEMO keeps the stage-3 3-D RHS in puu/pvv(Kaa) while
+            # dyn_spg_ts advances only uu_b/vv_b.  dyn_zdf therefore consumes
+            # this un-reconciled stage value at dynzdf.F90:119-140 and does
+            # not see the barotropic replacement until stprk3_stg.F90:433-445.
+            _nemo_ws_zdf_input = (u3_raw, v3_raw)
             u3_corr, v3_corr = _replace_stage_mean(
                 u3_raw, v3_raw, target_u, target_v)
             u3_corr = u3_corr.at[:, -1].set(u3_corr[:, 0])
@@ -6069,6 +6129,7 @@ class LatLonCGridOceanModel:
         _impose_mean = (
             getattr(_cfg_b.barotropic, "nemo_stage_mean_imposition", False)
             and _apply_implicit_vmix)
+        _post_implicit_momentum = None
         if _impose_mean:
             _u_mean_baro, _v_mean_baro = self._fixed_depth_means(state_new, z_coord=z_coord, config=config, grid=grid)
 
@@ -6093,8 +6154,14 @@ class LatLonCGridOceanModel:
                 # ``state_new`` is the working copy). None ⇒ BIT-IDENTICAL.
                 _n2_tracers = self._n2_before_advection_tracers(state, z_coord=z_coord, config=config)
                 _n2_tracers_before = self._n2_nemo_before_tracers(state, z_coord=z_coord, config=config)
+                _vmix_state = state_new
+                if _impose_mean and _nemo_ws_zdf_input is not None:
+                    _zdf_u, _zdf_v = _nemo_ws_zdf_input
+                    _vmix_state = state_new._replace(
+                        u=state_new.u.replace(data=_zdf_u),
+                        v=state_new.v.replace(data=_zdf_v))
                 state_new, tke_new = self._apply_implicit_vertical_mixing(
-                    state_new, dt, surface_forcing,
+                    _vmix_state, dt, surface_forcing,
                     K_v_phys=tend.K_v, A_v_phys=tend.A_v,
                     K33_iso=k33_implicit, dt_mom=dt_mom,
                     surface_tracer_forcing=tend.surface_tracer_forcing,
@@ -6111,12 +6178,22 @@ class LatLonCGridOceanModel:
                     nemo_aimp_tracer_w=_nemo_ws_aimp_tracer_w,
                     nemo_aimp_momentum_w_u=_nemo_ws_aimp_momentum_w_u,
                     nemo_aimp_momentum_w_v=_nemo_ws_aimp_momentum_w_v,
+                    nemo_zdf_barotropic_u=(
+                        _u_mean_baro if _impose_mean else None),
+                    nemo_zdf_barotropic_v=(
+                        _v_mean_baro if _impose_mean else None),
                 z_coord=z_coord, config=config, iwm_fields=iwm_fields)
             else:
                 _n2_tracers = self._n2_before_advection_tracers(state, z_coord=z_coord, config=config)
                 _n2_tracers_before = self._n2_nemo_before_tracers(state, z_coord=z_coord, config=config)
+                _vmix_state = state_new
+                if _impose_mean and _nemo_ws_zdf_input is not None:
+                    _zdf_u, _zdf_v = _nemo_ws_zdf_input
+                    _vmix_state = state_new._replace(
+                        u=state_new.u.replace(data=_zdf_u),
+                        v=state_new.v.replace(data=_zdf_v))
                 state_new = self._apply_implicit_vertical_mixing(
-                    state_new, dt, surface_forcing,
+                    _vmix_state, dt, surface_forcing,
                     K_v_phys=tend.K_v, A_v_phys=tend.A_v,
                     K33_iso=k33_implicit, dt_mom=dt_mom,
                     surface_tracer_forcing=tend.surface_tracer_forcing,
@@ -6130,6 +6207,10 @@ class LatLonCGridOceanModel:
                     nemo_aimp_tracer_w=_nemo_ws_aimp_tracer_w,
                     nemo_aimp_momentum_w_u=_nemo_ws_aimp_momentum_w_u,
                     nemo_aimp_momentum_w_v=_nemo_ws_aimp_momentum_w_v,
+                    nemo_zdf_barotropic_u=(
+                        _u_mean_baro if _impose_mean else None),
+                    nemo_zdf_barotropic_v=(
+                        _v_mean_baro if _impose_mean else None),
                 z_coord=z_coord, config=config, iwm_fields=iwm_fields)
         if tke_new is not None:
             # Veros order (integrate_tke): the implicit solve writes
@@ -6153,14 +6234,55 @@ class LatLonCGridOceanModel:
             # the column. Sign convention: an ADDITIVE column-uniform shift,
             # so the baroclinic deviation u′ is untouched (budget: the
             # depth-integral becomes exactly the barotropic transport).
-            _u_mean_now, _v_mean_now = self._fixed_depth_means(state_new, z_coord=z_coord, config=config, grid=grid)
-            _du = (_u_mean_baro - _u_mean_now)[..., jnp.newaxis]
-            _dv = (_v_mean_baro - _v_mean_now)[..., jnp.newaxis]
+            _post_implicit_momentum = (state_new.u.data, state_new.v.data)
             _um = state.u_mask.data[..., jnp.newaxis]
             _vm = state.v_mask.data[..., jnp.newaxis]
+            if (getattr(_cfg_b, "zdf_implicit_solver_evaluation",
+                        "shared_thomas") == "nemo_literal"):
+                # Reuse the shared source-literal NEMO mean-replacement
+                # kernel.  With eta=0 these are e3u_0/e3v_0 and r1_hu_0/
+                # r1_hv_0, so this is exactly stprk3_stg.F90:437-445;
+                # no second stage-specific implementation is introduced.
+                _h_ref = compute_layer_thickness(
+                    jnp.zeros_like(state_new.eta.data),
+                    state_new.H_bathy.data, _zc,
+                    min_water_column_m=_cfg_b.min_water_column_m)
+                _hu_ref = min_cell_to_uface(_h_ref)
+                _hv_ref = min_cell_to_vface(_h_ref, _grid)
+                _one = jnp.asarray(1.0, dtype=state_new.u.data.dtype)
+                _r1_hu_ref = nemo_source_round(
+                    _one / jnp.sum(_hu_ref * _um, axis=-1))
+                _r1_hv_ref = nemo_source_round(
+                    _one / jnp.sum(_hv_ref * _vm, axis=-1))
+                _um3 = jnp.broadcast_to(_um, state_new.u.data.shape)
+                _vm3 = jnp.broadcast_to(_vm, state_new.v.data.shape)
+                _u_after = nemo_literal_after_level_reconcile(
+                    state_new.u.data, _hu_ref, _r1_hu_ref,
+                    _u_mean_baro[..., jnp.newaxis], _um3)
+                _v_after = nemo_literal_after_level_reconcile(
+                    state_new.v.data, _hv_ref, _r1_hv_ref,
+                    _v_mean_baro[..., jnp.newaxis], _vm3)
+            else:
+                _u_mean_now, _v_mean_now = self._fixed_depth_means(
+                    state_new, z_coord=z_coord, config=config, grid=grid)
+                _du = (_u_mean_baro - _u_mean_now)[..., jnp.newaxis]
+                _dv = (_v_mean_baro - _v_mean_now)[..., jnp.newaxis]
+                _u_after = state_new.u.data + _du * _um
+                _v_after = state_new.v.data + _dv * _vm
+            _mean_scale = self._nemo_ws_test_hooks.post_zdf_mean_scale
+            if _mean_scale != 1.0:
+                # Private causal scaling only.  The production value 1.0
+                # bypasses this branch, so NEMO's source-literal correction
+                # above is not wrapped in an extra arithmetic operation.
+                _scale = jnp.asarray(
+                    _mean_scale, dtype=state_new.u.data.dtype)
+                _u_after = state_new.u.data + _scale * (
+                    _u_after - state_new.u.data)
+                _v_after = state_new.v.data + _scale * (
+                    _v_after - state_new.v.data)
             state_new = state_new._replace(
-                u=state_new.u.replace(data=state_new.u.data + _du * _um),
-                v=state_new.v.replace(data=state_new.v.data + _dv * _vm),
+                u=state_new.u.replace(data=_u_after),
+                v=state_new.v.replace(data=_v_after),
             )
 
         # 9. Conservation fixers
@@ -6194,6 +6316,13 @@ class LatLonCGridOceanModel:
             state_new = state_new._replace(
                 u=state_new.u.replace(data=_stage_u),
                 v=state_new.v.replace(data=_stage_v),
+            )
+        if (self._nemo_ws_test_hooks.expose_post_implicit_momentum
+                and _post_implicit_momentum is not None):
+            _post_u, _post_v = _post_implicit_momentum
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=_post_u),
+                v=state_new.v.replace(data=_post_v),
             )
 
         state_new = cast_pytree(state_new, None, "storage", allow_downcast=True)
@@ -7393,6 +7522,8 @@ class LatLonCGridOceanModel:
         nemo_aimp_tracer_w=None,
         nemo_aimp_momentum_w_u=None,
         nemo_aimp_momentum_w_v=None,
+        nemo_zdf_barotropic_u=None,
+        nemo_zdf_barotropic_v=None,
         z_coord=None, config=None, iwm_fields=None,
     ) -> LatLonCGridOceanState:
         """Backward-Euler vertical diffusion for ``u, v, T, S``.
@@ -7713,6 +7844,9 @@ class LatLonCGridOceanModel:
         # dz at cell centers (jacobian-corrected so the eta-stretched
         # column heights match the partial-cell / z* layer thicknesses
         # used by every other operator in this step).
+        _zdf_literal_geometry = (
+            getattr(_cfg_b, "zdf_implicit_solver_evaluation", "shared_thomas")
+            == "nemo_literal")
         J_cell = compute_ocean_jacobian(
             state.eta.data, state.H_bathy.data, _zc,
         )
@@ -7728,7 +7862,10 @@ class LatLonCGridOceanModel:
         # maximum(dz,_EPS)) and the _wet_if_vmix / face-activity guards zero every
         # flux that would couple them, so they stay inert.  Pure z-star keeps
         # dz_ref·J → BIT-IDENTICAL (else branch == the original line).
-        if isinstance(_zc, OceanPartialCellCoordinate):
+        if _zdf_literal_geometry:
+            dz_cell = compute_nemo_qco_layer_thickness(
+                state.eta.data, state.H_bathy.data, _zc)
+        elif isinstance(_zc, OceanPartialCellCoordinate):
             dz_cell = _zc.h_partial * J_cell[..., jnp.newaxis]
         else:
             dz_cell = _zc.dz_ref * J_cell[..., jnp.newaxis]
@@ -7874,6 +8011,7 @@ class LatLonCGridOceanModel:
         # with at least two wet levels.
         u_new, v_new = state.u.data, state.v.data
         u_solve_in, v_solve_in = state.u.data, state.v.data
+        _implicit_stress_u = _implicit_stress_v = None
         if do_momentum and getattr(_cfg_b, "surface_stress_implicit",
                                    False) and surface_forcing is not None:
             # NEMO dynzdf surface BC: deposit the wind stress in the TOP cell
@@ -7894,10 +8032,15 @@ class LatLonCGridOceanModel:
                 _tau_i_u, _tau_j_v, _dz0u, _dz0v = _sfx
                 _r0 = jnp.asarray(_cfg_b.constants.rho_0,
                                   dtype=state.u.data.dtype)
-                u_solve_in = state.u.data.at[..., 0].add(
-                    dt_mom * _tau_i_u / (_r0 * jnp.maximum(_dz0u, 1e-10)))
-                v_solve_in = state.v.data.at[..., 0].add(
-                    dt_mom * _tau_j_v / (_r0 * jnp.maximum(_dz0v, 1e-10)))
+                # Defer the addition until after dynzdf's barotropic strip and
+                # drag corrections.  The executing RK3 statements are
+                # dynzdf.F90:328-330,503-504, immediately before the solve.
+                _implicit_stress_u = nemo_source_round(
+                    nemo_source_round(dt_mom * _tau_i_u)
+                    / nemo_source_round(_dz0u * _r0))
+                _implicit_stress_v = nemo_source_round(
+                    nemo_source_round(dt_mom * _tau_j_v)
+                    / nemo_source_round(_dz0v * _r0))
         if do_momentum:
             A_v_cell = A_v_cell.astype(state.u.data.dtype)
             if _wet_if_vmix is not None:
@@ -8004,14 +8147,20 @@ class LatLonCGridOceanModel:
         _zdf_baroclinic_only = (
             do_momentum and getattr(_cfg_b, "zdf_baroclinic_only", False))
         if _zdf_baroclinic_only:
-            _u_bt_mean = depth_mean(
-                u_solve_in, dz_u, _cfg_b.min_water_column_m,
-                keepdims=True)
-            _v_bt_mean = depth_mean(
-                v_solve_in, dz_v, _cfg_b.min_water_column_m,
-                keepdims=True)
-            u_solve_in = u_solve_in - _u_bt_mean
-            v_solve_in = v_solve_in - _v_bt_mean
+            _u_bt_mean = (
+                nemo_zdf_barotropic_u[..., jnp.newaxis]
+                if nemo_zdf_barotropic_u is not None
+                else depth_mean(
+                    u_solve_in, dz_u, _cfg_b.min_water_column_m,
+                    keepdims=True))
+            _v_bt_mean = (
+                nemo_zdf_barotropic_v[..., jnp.newaxis]
+                if nemo_zdf_barotropic_v is not None
+                else depth_mean(
+                    v_solve_in, dz_v, _cfg_b.min_water_column_m,
+                    keepdims=True))
+            u_solve_in = nemo_source_round(u_solve_in - _u_bt_mean)
+            v_solve_in = nemo_source_round(v_solve_in - _v_bt_mean)
 
         # zdf_drag_in_matrix: NEMO's semi-implicit bottom friction goes INTO
         # the tridiagonal diagonal at each face-column's deepest wet cell
@@ -8154,6 +8303,10 @@ class LatLonCGridOceanModel:
                     u_solve_in = u_solve_in - _top_diag_u * _u_bt_mean
                     v_solve_in = v_solve_in - _top_diag_v * _v_bt_mean
 
+        if _implicit_stress_u is not None:
+            u_solve_in = u_solve_in.at[..., 0].add(_implicit_stress_u)
+            v_solve_in = v_solve_in.at[..., 0].add(_implicit_stress_v)
+
         # ---- Solve dispatch: batched (opt-in diag) / T+S pair / singles ---
         # Trace-time env switches (feature-gating exception: static
         # Python `if`, baked into the compiled graph — flip BEFORE the
@@ -8290,12 +8443,19 @@ class LatLonCGridOceanModel:
             S_new = jnp.where(_tracer_apply_mask, S_new, state.S.data)
         if do_momentum:
             if _zdf_baroclinic_only:
-                # Re-add the SAME depth mean that was subtracted before the
-                # solve (dynzdf.F90's barotropic component re-enters via
-                # mlf_baro_corr AFTER dyn_zdf) — exactly conservative at
-                # A_v=0 (test 3: strip + re-add round-trips to the input).
-                u_new = u_new + _u_bt_mean
-                v_new = v_new + _v_bt_mean
+                if not getattr(
+                        _cfg_b.barotropic,
+                        "nemo_stage_mean_imposition", False):
+                    # Generic split composition retains its historical
+                    # round-trip: re-add the same mean that was stripped.
+                    u_new = u_new + _u_bt_mean
+                    v_new = v_new + _v_bt_mean
+                # NEMO composition deliberately does NOT re-add here.
+                # dynzdf.F90:148-171 strips the barotropic component and
+                # returns the solved residual; stprk3_stg.F90:433-445 is the
+                # one later owner that replaces the column mean with uu_b/
+                # vv_b(Kaa).  Re-adding here before that registered operation
+                # changed its cancellation bits in the one-layer slab.
             _u_apply_mask = _uwet if _zdf_literal else u_mask_3d > 0.5
             _v_apply_mask = _vwet if _zdf_literal else v_mask_3d > 0.5
             u_new = jnp.where(_u_apply_mask, u_new, state.u.data)

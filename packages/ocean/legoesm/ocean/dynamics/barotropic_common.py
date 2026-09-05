@@ -239,6 +239,63 @@ def compute_nemo_boxcar_raw_transport_weights(
     )
 
 
+def compute_nemo_boxcar_raw_primary_weights(
+    n_substeps: int,
+    dtype: jnp.dtype,
+    substep_scale: int = 1,
+):
+    """Return NEMO's unnormalised ``wgtbtp1`` and ``r1_wgt1s``.
+
+    ``dynspg_ts.F90:823-835`` accumulates the raw 0/1 primary boxcar and
+    divides once at :867-870.  This is the same centred window used by
+    :func:`compute_nemo_boxcar_centred_weights`; it is kept raw to preserve
+    NEMO's source association rather than adding values pre-scaled by the
+    reciprocal window width at every substep.
+    """
+    import numpy as _np
+    if n_substeps < 2:
+        raise ValueError(
+            f"nemo_boxcar_centred needs n_substeps >= 2, got {n_substeps!r}")
+    if substep_scale < 1 or n_substeps % substep_scale != 0:
+        raise ValueError(
+            f"substep_scale={substep_scale!r} must be >=1 and divide "
+            f"n_substeps={n_substeps!r} (n_substeps = nn_e * substep_scale).")
+    half_width = n_substeps // substep_scale
+    jn = _np.arange(1, 3 * n_substeps + 1, dtype=_np.float64)
+    primary = (
+        _np.abs(jn - n_substeps) / half_width < 1.0
+    ).astype(_np.float64)
+    n_loop = int(_np.max(_np.where(primary > 0.0)[0]) + 1)
+    primary = primary[:n_loop]
+    divisor = primary.sum(dtype=_np.float64)
+    return (jnp.asarray(primary, dtype=dtype),
+            jnp.asarray(divisor, dtype=dtype), n_loop)
+
+
+def compute_nemo_forward_raw_primary_weights(
+    n_substeps: int, dtype: jnp.dtype,
+):
+    """Return forward ``nn_bt_flt=1`` raw ``wgtbtp1/r1_wgt1s``.
+
+    This is ``ts_wgt`` CASE(1) at ``dynspg_ts.F90:1058-1080``: the primary
+    window is one ``nn_e`` wide and is accumulated before the single
+    ``dynspg_ts.F90:867-870`` normalization.
+    """
+    import numpy as _np
+    if n_substeps < 2:
+        raise ValueError(
+            f"nemo_boxcar_forward needs n_substeps >= 2, got {n_substeps!r}")
+    jn = _np.arange(1, 3 * n_substeps + 1, dtype=_np.float64)
+    primary = (
+        _np.abs(jn - n_substeps) / n_substeps < 0.5
+    ).astype(_np.float64)
+    n_loop = int(_np.max(_np.where(primary > 0.0)[0]) + 1)
+    primary = primary[:n_loop]
+    divisor = primary.sum(dtype=_np.float64)
+    return (jnp.asarray(primary, dtype=dtype),
+            jnp.asarray(divisor, dtype=dtype), n_loop)
+
+
 def compute_nemo_forward_raw_transport_weights(
     n_substeps: int, dtype: jnp.dtype,
 ):

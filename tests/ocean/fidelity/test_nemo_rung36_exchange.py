@@ -19,6 +19,10 @@ from legoesm.ice.c1d_omip_l3 import build_c1d_omip_l3_coupled_card
 from legoesm.ice.constants_config import NEMO_SI3_CONSTANTS_CONFIG
 from legoesm.ice.sea_ice import _nemo_si3_ice_update_tau
 from legoesm.ocean.eos import nemo_eos_fzp
+from legoesm.ocean.freshwater import (
+    FreshwaterForcing,
+    nemo_freshwater_eta_tendency,
+)
 from legoesm.ocean.fidelity.nemo_testcase_recipe import (
     build_c1d_omip_l3_slab_ocean_card,
 )
@@ -60,6 +64,23 @@ def test_coupled_card_binds_decision_six_and_libm() -> None:
     assert card.ice_cadence == 4
     assert card.exchange == NemoSI3ExchangeConfig()
     assert card.ice.precision_policy.transcendentals == "libm"
+    ocean = build_c1d_omip_l3_slab_ocean_card()
+    assert ocean.recipe.model_config.surface_stress_implicit is True
+    assert (
+        ocean.recipe.model_config.barotropic.nemo_stage_mean_imposition
+        is True
+    )
+
+
+def test_rung36_freshwater_ssh_uses_stp2d_statement_order() -> None:
+    """NEMO stp2d.F90:248-251 stores r1_rho0 before multiplying emp."""
+    zero = jnp.asarray([[0.0]], dtype=jnp.float64)
+    # The ocean card receives -emp as ice_fw (positive means ice melt).
+    ice_fw = jnp.asarray([[-5.1736057719122322e-5]], dtype=jnp.float64)
+    forcing = FreshwaterForcing(zero, zero, zero, ice_fw, zero)
+    got = nemo_freshwater_eta_tendency(forcing, 1026.0)
+    expected = np.float64(1.0 / 1026.0) * np.asarray(ice_fw)
+    np.testing.assert_array_equal(np.asarray(got), expected)
 
 
 def test_ssm_first_step_has_three_seeded_copies() -> None:

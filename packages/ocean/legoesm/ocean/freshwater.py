@@ -23,6 +23,8 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 
+from legoesm.core.source_rounding import nemo_source_round
+
 
 class FreshwaterForcing(NamedTuple):
     """Freshwater fluxes applied to the ocean surface.
@@ -118,6 +120,23 @@ def freshwater_eta_tendency(fw: FreshwaterForcing, rho_0: float) -> jnp.ndarray:
         Free-surface tendency [m/s].
     """
     return net_freshwater_flux(fw) / rho_0
+
+
+def nemo_freshwater_eta_tendency(
+    fw: FreshwaterForcing, rho_0: float,
+) -> jnp.ndarray:
+    """NEMO ``stp2d.F90:248-251`` freshwater/SSH source statements.
+
+    The active no-runoff/no-ice-shelf arm first materialises ``emp`` and then
+    multiplies it by the stored reciprocal density.  This intentionally does
+    not contract to ``emp / rho_0``: the C1D scalar-math oracle differs by one
+    bit at that statement, which its split-explicit substeps can amplify.
+    """
+    flux = nemo_source_round(net_freshwater_flux(fw))
+    one = jnp.asarray(1.0, dtype=flux.dtype)
+    inverse_density = nemo_source_round(
+        one / jnp.asarray(rho_0, dtype=flux.dtype))
+    return nemo_source_round(inverse_density * flux)
 
 
 def virtual_salt_flux(

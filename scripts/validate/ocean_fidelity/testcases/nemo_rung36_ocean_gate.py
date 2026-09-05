@@ -293,7 +293,12 @@ def evaluate(
     }
 
 
-def evaluate_continuous(root: Path, plant: str | None = None):
+def evaluate_continuous(
+    root: Path,
+    plant: str | None = None,
+    *,
+    post_zdf_mean_scale: float = 1.0,
+):
     """Advance the shared slab once and compare the next registered entry.
 
     The ordered exact-entry gate ends immediately before ``dyn_zdf`` solves.
@@ -308,6 +313,7 @@ def evaluate_continuous(root: Path, plant: str | None = None):
     from legoesm.grids.halo_latlon import set_meridionally_periodic
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
     )
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_c1d_omip_l3_slab_ocean_card,
@@ -349,7 +355,9 @@ def evaluate_continuous(root: Path, plant: str | None = None):
     set_meridionally_periodic(card.meridionally_periodic)
     try:
         model = LatLonCGridOceanModel(
-            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                post_zdf_mean_scale=post_zdf_mean_scale))
         state = model.step(
             card.recipe.initial_state, card.dt_s,
             freshwater=freshwater, surface_forcing=surface)
@@ -379,12 +387,15 @@ def evaluate_continuous(root: Path, plant: str | None = None):
         "rows": rows,
         "first_over_bar": first,
         "owner_interval": (
-            "after kt=1 PRE_DYN_ZDF_SOLVE and before kt=2 PRE_SSM; "
-            "the shared implicit-ZDF solve / RK3 momentum reconciliation is "
-            "the first unregistered owner interval"),
+            "after the bit-exact kt=1 momentum/SSH chain and before kt=2 "
+            "PRE_SSM; when temperature is first red this is the coupled "
+            "tracer RK3 / implicit-ZDF interval, not momentum"),
         "error_growth": "withheld after the ordered first-over-bar stop",
         "ssm_registry": registry,
         "plant": plant,
+        "private_arm": (
+            f"post_zdf_mean_scale={post_zdf_mean_scale:g}"
+            if post_zdf_mean_scale != 1.0 else None),
         "plant_binding": None if plant is None else {
             "target": "CONTINUOUS.kt2_PRE_SSM.u",
             "red": rows[0]["status"] == "DEBT",
@@ -397,6 +408,9 @@ def main() -> int:
     parser.add_argument("root", type=Path)
     parser.add_argument("--statement-root", type=Path)
     parser.add_argument("--trajectory", action="store_true")
+    parser.add_argument(
+        "--post-zdf-mean-scale", type=float, default=1.0,
+        help="private scaling arm for stprk3_stg.F90:433-445")
     parser.add_argument("--top-drag-scale", type=float, default=1.0)
     parser.add_argument("--plant", choices=("stagger", "drag", "pre_spg", "substep", "post_stp2d", "dynzdf", "trajectory"))
     parser.add_argument("--output", type=Path)
@@ -404,7 +418,9 @@ def main() -> int:
     if args.trajectory:
         if args.plant not in (None, "trajectory"):
             parser.error("--trajectory only accepts --plant trajectory")
-        report = evaluate_continuous(args.root, args.plant)
+        report = evaluate_continuous(
+            args.root, args.plant,
+            post_zdf_mean_scale=args.post_zdf_mean_scale)
     else:
         if args.plant == "trajectory":
             parser.error("--plant trajectory requires --trajectory")

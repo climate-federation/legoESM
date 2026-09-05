@@ -34,7 +34,11 @@ import jax.numpy as jnp
 
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.grids.latlon import LatLonGrid, ensure_geometry
-from legoesm.ocean.vertical import OceanZStarCoordinate, compute_layer_thickness
+from legoesm.ocean.vertical import (
+    OceanZStarCoordinate,
+    compute_layer_thickness,
+    compute_nemo_qco_layer_thickness,
+)
 from legoesm.ocean.state import LatLonCGridOceanState, LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     fold_is_local,
@@ -60,6 +64,8 @@ from legoesm.ocean.dynamics.barotropic_common import (
     compute_filter_weights,
     compute_nemo_boxcar_centred_weights,
     compute_nemo_boxcar_forward_weights,
+    compute_nemo_boxcar_raw_primary_weights,
+    compute_nemo_forward_raw_primary_weights,
     compute_nemo_forward_raw_transport_weights,
     compute_nemo_boxcar_raw_transport_weights,
     compute_power_law_filter_weights,
@@ -81,6 +87,23 @@ _NEMO_AB3_ZA = (1.781105, -1.06221, 0.281105)   # 3/2+bet, -(1/2+2bet), bet
 #     (dynspg_ts.F90:1698-1701, nn_bt_flt=2 branch): NO Demange formula — NEMO
 #     hard-codes these rounded literals (bet=0.281105, eps=0.013, gam=0.088).
 _NEMO_TS_BCK_FLT2 = (0.614, 0.285, 0.088, 0.013)   # za0..za3 (sum == 1)
+
+
+def nemo_literal_temporal_combination(coefficients, levels):
+    """Evaluate one NEMO temporal interpolation statement source-literally.
+
+    ``dynspg_ts.F90:552,562,677-678`` spell their AB3/AM4 expressions as
+    separately rounded products accumulated from left to right.  XLA may
+    otherwise contract or reassociate the mathematically identical expression.
+    ``coefficients`` and ``levels`` must have the same static length.
+    """
+    if len(coefficients) != len(levels):
+        raise ValueError("coefficients and levels must have the same length")
+    result = nemo_source_round(coefficients[0] * levels[0])
+    for coefficient, level in zip(coefficients[1:], levels[1:]):
+        result = nemo_source_round(
+            result + nemo_source_round(coefficient * level))
+    return result
 
 
 def nemo_ab3am4_coeff_arrays(n_loop: int, alpha: float = _NEMO_BT_ALPHA,
@@ -349,7 +372,8 @@ def _depth_average_to_faces(
         _prep = _nemo_ssh_avg_prep(H_bathy, mask, grid, dtype)
         H_u_nemo, H_v_nemo, _literal_r1_u, _literal_r1_v = _nemo_ssh_avg_apply(
             eta_dyn, u_mask, v_mask, grid, area, _prep,
-            return_literal_inverse=True)
+            return_literal_inverse=True,
+            source_literal=(seed_evaluation == "nemo_literal"))
         # `_eps` is a bare numerical divide-by-zero guard for THIS ratio's
         # own denominator (`H_u_minrule`) — deliberately NOT
         # `min_water_col`/`config.min_water_column_m` (the caller's
@@ -407,7 +431,9 @@ def _nemo_ssh_avg_prep(H_bathy, mask, grid, dtype, _nfold_mask=None):
 
 
 def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
-                        return_literal_inverse=False):
+                        return_literal_inverse=False,
+                        source_literal=False,
+                        spg_source_literal=False):
     """Apply the NEMO ssh-average face-depth formula at one ``eta`` snapshot,
     given the loop-invariant ``prep = _nemo_ssh_avg_prep(...)`` tuple.  See
     :func:`nemo_ssh_avg_face_depth` for the full formula docstring."""
@@ -415,9 +441,41 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
 
     area_w = jnp.roll(area, 1, axis=1)
     eta_w = jnp.roll(eta_dyn, 1, axis=1)
-    ssh_avg_u = 0.5 * _r1_e1e2u[:, :-1] * (area_w * eta_w + area * eta_dyn)
+    _half = jnp.asarray(0.5, dtype=eta_dyn.dtype)
+    _one = jnp.asarray(1.0, dtype=eta_dyn.dtype)
+    _hu_safe = jnp.where(u_mask > 0.5, H_u_ref, _one)
+    _hv_safe = jnp.where(v_mask > 0.5, H_v_ref, _one)
+    if spg_source_literal:
+        # dynspg_ts.F90:658-666,751-758,884-891: the two metric-weighted
+        # SSH operands are materialised before their sum, as is the leading
+        # 1/2*r1_e1e2 face coefficient.  Keeping those source-statement
+        # boundaries is load-bearing for v-face Kmm depth in the one-column
+        # slab (one ULP before this shared transcription).
+        _sum_u = nemo_source_round(
+            nemo_source_round(area_w * eta_w)
+            + nemo_source_round(area * eta_dyn))
+        _coef_u = nemo_source_round(_half * _r1_e1e2u[:, :-1])
+        ssh_avg_u = nemo_source_round(_coef_u * _sum_u)
+    else:
+        _sum_u = area_w * eta_w + area * eta_dyn
+        ssh_avg_u = _half * _r1_e1e2u[:, :-1] * _sum_u
     ssh_avg_u = jnp.concatenate([ssh_avg_u, ssh_avg_u[:, 0:1]], axis=1)
-    H_u = (H_u_ref + ssh_avg_u) * u_mask
+    if source_literal:
+        # domqco.F90:166-169 materialises the dimensionless face ratio,
+        # then domzgr_substitute.h90:139 multiplies by the reference depth.
+        # Do not collapse this to H_ref + ssh_avg: C1D differs by two ULP.
+        _r3_u_native = nemo_source_round(
+            nemo_source_round(
+                nemo_source_round(_half * nemo_source_round(_sum_u))
+                * nemo_source_round(_one / _hu_safe[:, :-1]))
+            * _r1_e1e2u[:, :-1])
+        _r3_u = jnp.concatenate(
+            [_r3_u_native, _r3_u_native[:, 0:1]], axis=1)
+        H_u = nemo_source_round(H_u_ref * nemo_source_round(_one + _r3_u)) \
+            * u_mask
+    else:
+        H_u = (nemo_source_round(H_u_ref + ssh_avg_u)
+               if spg_source_literal else H_u_ref + ssh_avg_u) * u_mask
     # ``where(mask, 1/H, 0)`` still evaluates 1/H on masked zero-depth faces
     # under JAX and can poison reverse-mode derivatives with inf/NaN.  Replace
     # the dry denominator before division, then zero the result.
@@ -428,9 +486,15 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
 
     area_pad = pad_ns_zero(area)
     eta_pad = pad_ns_zero(eta_dyn)
-    ssh_avg_v = 0.5 * _r1_e1e2v * (
-        area_pad[:-1] * eta_pad[:-1] + area_pad[1:] * eta_pad[1:]
-    )
+    if spg_source_literal:
+        _sum_v = nemo_source_round(
+            nemo_source_round(area_pad[:-1] * eta_pad[:-1])
+            + nemo_source_round(area_pad[1:] * eta_pad[1:]))
+        _coef_v = nemo_source_round(_half * _r1_e1e2v)
+        ssh_avg_v = nemo_source_round(_coef_v * _sum_v)
+    else:
+        _sum_v = area_pad[:-1] * eta_pad[:-1] + area_pad[1:] * eta_pad[1:]
+        ssh_avg_v = _half * _r1_e1e2v * _sum_v
     ssh_avg_v = _zero_polar_lat_ends(ssh_avg_v)
     if fold_is_local(grid) or _nfold_mask is not None:
         area_fold = fold_vface_row(area, grid)
@@ -439,7 +503,22 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
             area[-1:] * eta_dyn[-1:] + area_fold * eta_fold)
         ssh_avg_v = apply_north_fold(
             ssh_avg_v, ssh_avg_north, grid, north_mask=_nfold_mask)
-    H_v = (H_v_ref + ssh_avg_v) * v_mask
+    if source_literal:
+        _r3_v = nemo_source_round(
+            nemo_source_round(
+                nemo_source_round(_half * nemo_source_round(_sum_v))
+                * nemo_source_round(_one / _hv_safe))
+            * _r1_e1e2v)
+        _r3_v = _zero_polar_lat_ends(_r3_v)
+        if fold_is_local(grid) or _nfold_mask is not None:
+            _r3_v = apply_north_fold(
+                _r3_v, ssh_avg_north * nemo_source_round(
+                    _one / _hv_safe[-1:]), grid, north_mask=_nfold_mask)
+        H_v = nemo_source_round(H_v_ref * nemo_source_round(_one + _r3_v)) \
+            * v_mask
+    else:
+        H_v = (nemo_source_round(H_v_ref + ssh_avg_v)
+               if spg_source_literal else H_v_ref + ssh_avg_v) * v_mask
     H_v_ref_safe = jnp.where(v_mask > 0.5, H_v_ref, 1.0)
     r1_v_ref = jnp.where(v_mask > 0.5, 1.0 / H_v_ref_safe, 0.0)
     r3_v = ssh_avg_v * r1_v_ref
@@ -1247,8 +1326,13 @@ def _run_substep_loop(
         ``_nemo_ssh_avg_apply`` against the hoisted ``_ssh_avg_prep``,
         reused verbatim — see ``nemo_ssh_avg_face_depth``'s docstring);
         byte-identical to the prior inline closure."""
-        return _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area,
-                                   _ssh_avg_prep)
+        # dynspg_ts.F90:658-666,771-778 updates the external-mode face depth
+        # as ``hu_0 + zsshu_a``.  This is deliberately distinct from
+        # domqco.F90:166-169's ``e3u_0 * (1+r3u)`` construction of the 3-D
+        # Kbb/Kmm layer thickness used to seed the barotropic solve.
+        return _nemo_ssh_avg_apply(
+            eta_dyn, u_mask, v_mask, grid, area, _ssh_avg_prep,
+            spg_source_literal=(_continuity_evaluation == "nemo_literal"))
 
     # Frozen Kmm face depths used by NEMO's flux-form ``hu(Kmm)*zu_frc``
     # operand (dynspg_ts.F90:744,752).  They are evaluated once at window
@@ -1330,8 +1414,16 @@ def _run_substep_loop(
         if ab3_za is not None:
             # NEMO AB3 mid-step velocity extrapolation (dynspg_ts.F90:549-554)
             # u^{m+1/2} = za1*u^m + za2*u^{m-1} + za3*u^{m-2}
-            U_mid = za_i[0] * U_bar_c + za_i[1] * Ub_c + za_i[2] * Ubb_c
-            V_mid = za_i[0] * V_bar_c + za_i[1] * Vb_c + za_i[2] * Vbb_c
+            if _continuity_evaluation == "nemo_literal":
+                U_mid = nemo_literal_temporal_combination(
+                    za_i, (U_bar_c, Ub_c, Ubb_c))
+                V_mid = nemo_literal_temporal_combination(
+                    za_i, (V_bar_c, Vb_c, Vbb_c))
+            else:
+                U_mid = (za_i[0] * U_bar_c + za_i[1] * Ub_c
+                         + za_i[2] * Ubb_c)
+                V_mid = (za_i[0] * V_bar_c + za_i[1] * Vb_c
+                         + za_i[2] * Vbb_c)
         else:
             U_mid, V_mid = U_bar_c, V_bar_c
         if ab3_za is not None and not linear_free_surface:
@@ -1351,7 +1443,12 @@ def _run_substep_loop(
             # extrapolation, hence the `not linear_free_surface` gate.  The
             # ll_init ramp rows have za=(1,0,0) ⇒ eta_mid == eta_c on the
             # first two substeps (NEMO-exact, :535-538).
-            eta_mid = za_i[0] * eta_c + za_i[1] * etab_c + za_i[2] * etabb_c
+            if _continuity_evaluation == "nemo_literal":
+                eta_mid = nemo_literal_temporal_combination(
+                    za_i, (eta_c, etab_c, etabb_c))
+            else:
+                eta_mid = (za_i[0] * eta_c + za_i[1] * etab_c
+                           + za_i[2] * etabb_c)
             if _face_depth_mode == "nemo_ssh_avg":
                 H_u_flux, H_v_flux = _ssh_avg_face_depths(eta_mid)
             else:
@@ -1413,8 +1510,12 @@ def _run_substep_loop(
             # NEMO ts_bck_interp: ssh' = zb0*ssh^{m+1} + zb1*ssh^m
             #                          + zb2*ssh^{m-1} + zb3*ssh^{m-2}
             # (the Demange temporal dissipation; replaces the bebt blend).
-            eta_pgf = (zb_i[0] * eta_new + zb_i[1] * eta_c
-                       + zb_i[2] * etab_c + zb_i[3] * etabb_c)
+            if _continuity_evaluation == "nemo_literal":
+                eta_pgf = nemo_literal_temporal_combination(
+                    zb_i, (eta_new, eta_c, etab_c, etabb_c))
+            else:
+                eta_pgf = (zb_i[0] * eta_new + zb_i[1] * eta_c
+                           + zb_i[2] * etab_c + zb_i[3] * etabb_c)
         else:
             eta_pgf = bebt_blend(eta_new, eta_c, bebt)
         _pgf_eval = config.barotropic.barotropic_pgf_evaluation
@@ -1595,7 +1696,19 @@ def _run_substep_loop(
         # wgtbtp1*ua_e*hu_e, and :956-979 divides the completed mean by the
         # face depth assembled from the averaged Kaa SSH.  The vector/linssh
         # branch retains the pre-existing velocity average.
-        eta_sum_new = eta_sum_c + w_i * eta_new
+        _literal_primary = (
+            primary_transport_average
+            and config.barotropic.barotropic_continuity_evaluation
+            == "nemo_literal")
+        if _literal_primary:
+            # NEMO dynspg_ts.F90:827-835: each product and the running
+            # accumulator assignment is a source statement.  This primary
+            # boxcar is distinct from the secondary un_adv/vn_adv transport
+            # accumulator above and needs the same reassociation guard.
+            eta_sum_new = nemo_source_round(
+                eta_sum_c + nemo_source_round(w_i * eta_new))
+        else:
+            eta_sum_new = eta_sum_c + w_i * eta_new
         if primary_transport_average:
             if _face_depth_mode == "nemo_ssh_avg":
                 H_u_primary, H_v_primary = _ssh_avg_face_depths(eta_new)
@@ -1603,19 +1716,31 @@ def _run_substep_loop(
                 H_primary = jnp.maximum(
                     eta_new + H_bathy, min_water_col) * mask
                 H_u_primary, H_v_primary = _face_depths(H_primary)
-            U_sum_new = U_sum_c + w_i * U_bar_new * H_u_primary
-            V_sum_new = V_sum_c + w_i * V_bar_new * H_v_primary
+            if _literal_primary:
+                U_sum_new = nemo_source_round(
+                    U_sum_c + nemo_source_round(
+                        nemo_source_round(w_i * U_bar_new) * H_u_primary))
+                V_sum_new = nemo_source_round(
+                    V_sum_c + nemo_source_round(
+                        nemo_source_round(w_i * V_bar_new) * H_v_primary))
+            else:
+                U_sum_new = U_sum_c + w_i * U_bar_new * H_u_primary
+                V_sum_new = V_sum_c + w_i * V_bar_new * H_v_primary
         else:
             U_sum_new = U_sum_c + w_i * U_bar_new
             V_sum_new = V_sum_c + w_i * V_bar_new
 
         if ab3_za is not None:
             # rotate the AB3/AM4 histories (dynspg_ts:805-815)
-            return (eta_new, U_bar_new, V_bar_new,
-                    Hu_sum_new, Hv_sum_new, eta_sum_new, U_sum_new, V_sum_new,
-                    U_bar_c, Ub_c, V_bar_c, Vb_c, eta_c, etab_c)
-        return (eta_new, U_bar_new, V_bar_new,
-                Hu_sum_new, Hv_sum_new, eta_sum_new, U_sum_new, V_sum_new)
+            result = (eta_new, U_bar_new, V_bar_new,
+                      Hu_sum_new, Hv_sum_new, eta_sum_new,
+                      U_sum_new, V_sum_new,
+                      U_bar_c, Ub_c, V_bar_c, Vb_c, eta_c, etab_c)
+        else:
+            result = (eta_new, U_bar_new, V_bar_new,
+                      Hu_sum_new, Hv_sum_new, eta_sum_new,
+                      U_sum_new, V_sum_new)
+        return result
 
     if ab3_za is not None:
         if ab3_hist is not None:
@@ -2021,9 +2146,14 @@ def barotropic_substeps_latlon_cgrid(
     # (pre-existing inconsistency, vertical.py:685-692).
     _h_eta = (jnp.zeros_like(eta)
               if getattr(z_coord, 'linear_free_surface', False) else eta)
-    h_k = compute_layer_thickness(
-        _h_eta, H_bathy, z_coord, min_water_column_m=config.min_water_column_m,
-    ).astype(_dt)
+    if config.barotropic.barotropic_seed_evaluation == "nemo_literal":
+        h_k = compute_nemo_qco_layer_thickness(
+            _h_eta, H_bathy, z_coord).astype(_dt)
+    else:
+        h_k = compute_layer_thickness(
+            _h_eta, H_bathy, z_coord,
+            min_water_column_m=config.min_water_column_m,
+        ).astype(_dt)
     # Loop-ENTRY seed face-depth convention (#1226 round 2 item 1; see
     # BarotropicConfig.barotropic_seed_face_depth docstring).  Validated at
     # fn entry via _depth_average_to_faces's own dispatch-hardening raise.
@@ -2240,6 +2370,27 @@ def barotropic_substeps_latlon_cgrid(
     if _nemo_primary_transport_average_test_override is not None:
         _primary_transport_average = bool(
             _nemo_primary_transport_average_test_override)
+    if (_primary_transport_average
+            and config.barotropic.barotropic_continuity_evaluation
+            == "nemo_literal"):
+        # dynspg_ts.F90:823-835 adds raw 0/1 wgtbtp1 terms and performs its
+        # sole normalization at :867-870.  The generic helper intentionally
+        # returns pre-normalised filter weights, which is mathematically
+        # equivalent but changes the last bits of this long accumulation.
+        if _filter == "nemo_boxcar1_ab3":
+            _raw_primary, _primary_divisor, _primary_n_loop = (
+                compute_nemo_forward_raw_primary_weights(
+                    n_substeps, eta.dtype))
+        else:
+            _raw_primary, _primary_divisor, _primary_n_loop = (
+                compute_nemo_boxcar_raw_primary_weights(
+                    n_substeps, eta.dtype,
+                    substep_scale=substep_scale))
+        if _primary_n_loop != n_loop:
+            raise AssertionError(
+                "NEMO raw and normalized primary windows disagree: "
+                f"{_primary_n_loop} != {n_loop}.")
+        w_filter, w_total = _raw_primary, _primary_divisor
     if _boxcar_ab3:
         # NEMO nn_bt_flt=1/2: the barotropic sub-state is re-initialised EVERY
         # baroclinic step (ll_init=ll_bt_av=T, dynspg_ts.F90:202/469-476) ⇒ the
@@ -2315,9 +2466,18 @@ def barotropic_substeps_latlon_cgrid(
         if _primary_transport_average:
             # dynspg_ts.F90:867-870: three distinct post-loop source
             # statements.  The flux-form primary is still a transport here.
-            eta_avg = nemo_source_round(eta_sum_f / w_total)
-            U_bar_avg = nemo_source_round(U_sum_f / w_total)
-            V_bar_avg = nemo_source_round(V_sum_f / w_total)
+            # dynspg_ts.F90:845-847 are three separate divisions following a
+            # long loop-carried reduction.  Guard the operands as well as the
+            # statement result: without the input guards XLA can sink the
+            # reciprocal into the scan and changes the C1D quotient by one
+            # ULP even though the registered numerator is bit-identical.
+            _wgt1s = nemo_source_round(w_total)
+            eta_avg = nemo_source_round(
+                nemo_source_round(eta_sum_f) / _wgt1s)
+            U_bar_avg = nemo_source_round(
+                nemo_source_round(U_sum_f) / _wgt1s)
+            V_bar_avg = nemo_source_round(
+                nemo_source_round(V_sum_f) / _wgt1s)
         else:
             eta_avg = eta_sum_f / w_total
             U_bar_avg = U_sum_f / w_total
@@ -2327,7 +2487,10 @@ def barotropic_substeps_latlon_cgrid(
                 _H_u_primary, _H_v_primary = _nemo_ssh_avg_apply(
                     eta_avg, u_mask, v_mask, grid, _area,
                     _nemo_ssh_avg_prep(H_bathy, mask, grid, _dt,
-                                       north_fold_mask(grid)))
+                                       north_fold_mask(grid)),
+                    spg_source_literal=(
+                        config.barotropic.barotropic_continuity_evaluation
+                        == "nemo_literal"))
             else:
                 _H_primary = jnp.maximum(
                     eta_avg + H_bathy, min_water_col) * mask
@@ -2336,9 +2499,13 @@ def barotropic_substeps_latlon_cgrid(
             # dynspg_ts.F90:891-903: after the one source-statement transport
             # normalization, divide once by the freshly averaged face depth.
             U_bar_avg = nemo_source_round(
-                U_bar_avg / jnp.maximum(_H_u_primary, min_water_col))
+                nemo_source_round(U_bar_avg)
+                / nemo_source_round(
+                    jnp.maximum(_H_u_primary, min_water_col)))
             V_bar_avg = nemo_source_round(
-                V_bar_avg / jnp.maximum(_H_v_primary, min_water_col))
+                nemo_source_round(V_bar_avg)
+                / nemo_source_round(
+                    jnp.maximum(_H_v_primary, min_water_col)))
 
     # SOTA-local split-explicit: the per-substep clamp was LOCAL (no allreduce);
     # restore GLOBAL mass conservation with ONE redistribute call on the
