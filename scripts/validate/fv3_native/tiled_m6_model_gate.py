@@ -248,6 +248,10 @@ def main(argv=None):
         print(f"[m6] REFUSED: {e}")
         return 2
     lay = win_model.window_layout
+    if args.refresh_band is not None and args.pack_pad_refresh:
+        print("[m6] REFUSED: --refresh-band and --pack-pad-refresh are "
+              "separate arms (the band path bypasses packing)")
+        return 2
     if args.refresh_band is not None:
         win_model._window_comm.refresh_band = args.refresh_band
         print(f"[m6] M8-C arm: band-restricted refresh, depth "

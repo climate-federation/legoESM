@@ -58,25 +58,28 @@ def _bytes_equal(a, b):
         a.view(np.uint8), b.view(np.uint8))
 
 
+def _block_mask(lay, w, extents):
+    """cells inside window ``w``'s BLOCK (owned + the shared node row a
+    neighbour also stores) -- everything else is pad"""
+    M = N + 2 * NG
+    m = np.zeros(tuple(lay.W + (e - M) if e >= M else
+                       lay.n_w + (e - N) for e in extents), bool)
+    sl = []
+    for ax, t in ((0, (w % (lay.kt ** 2)) // lay.kt), (1, w % lay.kt)):
+        e_f = extents[ax]
+        shift = (lay.m_a - e_f + 1) // 2
+        e = e_f - (M if e_f >= M else N)
+        lo = lay.block_start(t) - shift - lay.origins[w][1 + ax]
+        sl.append(slice(max(lo, 0), min(lo + lay.nl + e, m.shape[ax])))
+    m[sl[0], sl[1]] = True
+    return m
+
+
 def _refresh_check(lay, comm, packed):
     from legoesm.grids.fv3_duo_windows import gather_windows
     comm.pack_pad_refresh = packed
     M = N + 2 * NG
-
-    def block_mask(w, extents):
-        """cells inside the tile's BLOCK (owned + the shared node row a
-        neighbour also stores) -- everything else is pad"""
-        m = np.zeros(tuple(lay.W + (e - M) if e >= M else
-                           lay.n_w + (e - N) for e in extents), bool)
-        sl = []
-        for ax, t in ((0, (w % (lay.kt ** 2)) // lay.kt), (1, w % lay.kt)):
-            e_f = extents[ax]
-            shift = (lay.m_a - e_f + 1) // 2
-            e = e_f - (M if e_f >= M else N)
-            lo = lay.block_start(t) - shift - lay.origins[w][1 + ax]
-            sl.append(slice(max(lo, 0), min(lo + lay.nl + e, m.shape[ax])))
-        m[sl[0], sl[1]] = True
-        return m
+    block_mask = lambda w, extents: _block_mask(lay, w, extents)
 
     try:
         for extents in [(M, M), (M + 1, M), (M, M + 1), (N, N), (N + 1, N)]:
@@ -195,7 +198,7 @@ def test_sabotaged_arms_fail(setup):
     poisoned = xw.copy()
     poisoned[:, 0, :, :] = np.nan            # a pad row of every window
     orig = comm._pad_exchange
-    comm._pad_exchange = lambda arrs: arrs
+    comm._pad_exchange = lambda arrs, full=True: arrs
     try:
         out = np.asarray(jax.jit(lambda a: comm.refresh({"x": a})["x"])(
             jax.device_put(jnp.asarray(poisoned), comm.sharding)))
@@ -285,3 +288,65 @@ def test_sabotaged_barrier_fails(setup):
         comm._bodies["avg_b"] = body
     ra = np.asarray(gather_windows(lay, ra))
     assert (np.asarray(oa) != ra).any(), "identity barrier still matched"
+
+
+def test_band_refresh_touches_only_the_face_edge_bands(setup):
+    """M8-C contract (codex 2026-09-06): with ``refresh_band = bw`` a
+    firing's refresh rewrites ONLY the seam pads inside the four
+    face-edge bands of depth ``bw`` (from the neighbours, byte for byte
+    as the full refresh would) and leaves every other pad cell exactly
+    as it was; the substep-entry refresh (body None) stays full."""
+    from legoesm.grids.fv3_duo_windows import gather_windows
+    ctx, lay, comm = setup
+    M = N + 2 * NG
+    x6 = _rand((6, M, M, KM), 31)
+    xw = np.asarray(gather_windows(lay, x6))
+    poisoned = xw.copy()
+    for w in range(lay.nb):
+        poisoned[w][~_block_mask(lay, w, (M, M))] = -7.0   # every pad cell
+    win = jax.device_put(jnp.asarray(poisoned), comm.sharding)
+    # substep-entry refresh: full, in both modes
+    comm.refresh_band = 4
+    try:
+        full = np.asarray(jax.jit(lambda a: comm.refresh({"x": a})["x"])(win))
+        assert _bytes_equal(full, xw)
+        # a FIRING's band refresh: drive _pad_exchange(full=False) through
+        # the identity body so only the refresh acts
+        band = np.asarray(jax.jit(lambda a: comm._firing(
+            "probe", "A", [a], body=lambda blk: blk))(win))
+    finally:
+        comm.refresh_band = None
+    bw = 4
+    W = lay.W
+    bandcol = np.zeros((W, W), bool)
+    bandcol[:, :bw] = bandcol[:, -bw:] = True   # west/east column bands
+    bandrow = np.zeros((W, W), bool)
+    bandrow[:bw, :] = bandrow[-bw:, :] = True   # north/south row bands
+    kt = lay.kt
+    must = np.zeros(band.shape, bool)      # pads that MUST come back right
+    anyb = np.zeros(band.shape, bool)      # cells a band round may touch
+    for w in range(lay.nb):
+        ti, tj = (w % (kt * kt)) // kt, w % kt
+        blk = _block_mask(lay, w, (M, M))
+        padrow = ~blk.any(axis=1)[:, None] & np.ones((1, W), bool)
+        padcol = ~blk.any(axis=0)[None, :] & np.ones((W, 1), bool)
+        # a band is a FACE-EDGE band only where this window is flush with
+        # that face edge; elsewhere it is pad-on-pad (whatever the
+        # neighbour's pad held), never consumed
+        flushcol = np.zeros((W, W), bool)
+        if tj == 0:
+            flushcol[:, :bw] = True
+        if tj == kt - 1:
+            flushcol[:, -bw:] = True
+        flushrow = np.zeros((W, W), bool)
+        if ti == 0:
+            flushrow[:bw, :] = True
+        if ti == kt - 1:
+            flushrow[-bw:, :] = True
+        # round 1 rewrites the seam (pad) ROWS inside the column bands,
+        # round 2 the seam (pad) COLUMNS inside the row bands
+        must[w] = ((padrow & flushcol) | (padcol & flushrow))[:, :, None]
+        anyb[w] = ((padrow & bandcol) | (padcol & bandrow))[:, :, None]
+    assert _bytes_equal(band[must], xw[must])          # face-edge bands right
+    assert _bytes_equal(band[~anyb], poisoned[~anyb])  # the rest untouched
+    assert (band != full).any(), "band refresh is not narrower than full"
