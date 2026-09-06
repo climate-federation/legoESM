@@ -279,16 +279,18 @@ def _synthetic_root(tmp_path: Path, card: str, *, perturb_target=False) -> Path:
     wet2d = (scored["umask"] > 0).any(axis=-1).astype(np.float64)
     stage = SWEEP.read_stage(spec["twin"] / GATE.STAGE3_RECORD, case, 3)
     field = np.asarray(stage["u"], dtype=np.float64)
-    # jnp.sum, not np.sum: the operator reduces with JAX and the two do not
-    # associate identically, so a numpy target would leave a nonzero shift and
-    # the fixture would test the reduction instead of the plumbing.  ROUND 36:
-    # and it MULTIPLIES by NEMO's own r1_hu_0 (stprk3_stg.f90:522) rather than
-    # dividing by hu_0, so the inverted target has to do the same -- with the
-    # divide here the OVERFLOW arm went red on 5 of its 606 columns, which is
-    # the reduction difference, not the plumbing this fixture exists to test.
+    # The OPERATOR'S OWN reduction, imported rather than re-typed: the fixture
+    # inverts what the operator computes, so any reduction of its own would
+    # test the reduction instead of the plumbing.  ROUND 36: it MULTIPLIES by
+    # NEMO's own r1_hu_0 (stprk3_stg.f90:522) rather than dividing by hu_0, so
+    # the inverted target does the same -- with the divide here the OVERFLOW
+    # arm went red on 5 of its 606 columns.  ROUND 37: and it accumulates in
+    # ascending k rather than letting XLA pick a tree, which moved those same
+    # 5 columns; a jnp.sum here would now reintroduce exactly that difference.
     import jax.numpy as jnp
+    from legoesm.ocean.dynamics.barotropic_common import _ascending_level_sum
     own_mean = np.asarray(
-        jnp.sum(field * h_face, axis=-1) * scored["r1_hu_0"])
+        _ascending_level_sum(jnp.asarray(field * h_face)) * scored["r1_hu_0"])
     if perturb_target:
         own_mean = own_mean + 1.0e-9
     field_f = np.zeros((nx, ny, nz), dtype=np.float64)

@@ -162,7 +162,16 @@ def test_gate_is_green_on_a_self_consistent_record(tmp_path):
     _self_consistent_record(path)
     report = gate.run(path)
     assert report["status"] == "AT-BAR"
-    assert len(report["calibration_rows"]) == 8
+    # ROUND 37: eight rows became ten.  The three rebuilt-matrix rows and the
+    # NumPy calibration solve per face are joined by zdf_solve_lego, which
+    # drives legoESM's OWN ordered sweep on the same dumped operands -- the
+    # momentum half of the Rule-12 discharge for the shared solve, and the
+    # only such measurement the two tank cards have.
+    assert len(report["calibration_rows"]) == 10
+    assert {r["name"].rsplit(".", 2)[-2] + "." + r["name"].rsplit(".", 1)[-1]
+            for r in report["calibration_rows"]
+            if "solve_lego" in r["name"]} == {
+                "zdf_solve_lego.u", "zdf_solve_lego.v"}
     assert all(r["bit_unequal"] == 0 for r in report["calibration_rows"])
     assert report["legoesm_comparison"]["status"] == "UNMEASURED"
 
