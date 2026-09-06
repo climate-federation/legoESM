@@ -6156,13 +6156,20 @@ six fail-closed arms — wrong magic, a future version, the stage-2 frame, a
 registry.  `tests/ocean/unit/test_nemo_recipe.py` is `20 passed, 4 failed`,
 the same four round 29 recorded and for the same reason.
 
-Whole directory: `549 passed, 5 skipped, 1 failed` before `-x` stopped it.  The
-one failure is
-`test_nemo_testcase_phase3_stage_sweep_gate::test_planted_stage_control_exits_nonzero_end_to_end`,
-which round 28 already reproduced failing at ITS starting tip and recorded as
-PRE-EXISTING; it is a LOCK arm, and this round's change is identically zero on
-LOCK (the coefficient table above).  A full no-`-x` run is the honest next
-check and is not reported here.
+Whole directory, run without `-x` so nothing hides behind the first failure:
+
+```text
+4 failed, 783 passed, 7 skipped, 18 deselected in 2294.60s (0:38:14)
+```
+
+Every one of the four is dispositioned, and **round 30's own count is zero**:
+
+| failure | disposition |
+|---|---|
+| `test_nemo_testcase_phase3_stage_sweep_gate::test_planted_stage_control_exits_nonzero_end_to_end` | **PRE-EXISTING**; round 28 reproduced it failing at ITS starting tip in a disposable worktree.  It is a LOCK arm, and this round's change is identically zero on LOCK |
+| `test_recipe_case_board::test_every_oracle_comparison_has_a_row` | **PRE-EXISTING**; round 28 recorded the same four missing board rows, `advection_nemo`, `grids_tripole_mpas`, `tendencies_nemo`, `three_way_nemo`.  This round adds no comparison driver |
+| `test_nemo_testcase_phase3_stage_sweep_gate::test_prediction_plant_is_fail_closed` | **NOT A FAILURE — a duration artifact**, and this was measured rather than assumed.  The traceback is `Timeout (>900.0s) from pytest-timeout` inside JAX lowering, not an assertion.  Re-run alone at `--timeout=3000` it is `1 passed in 996.95s`, so the test needs about 997 s and the suite's 900 s per-test cap cut it |
+| `test_nemo_testcase_receipt_citation_gate::test_the_gate_runs_clean_on_the_real_receipt` | **AN ARTIFACT OF THIS ROUND'S OWN EDITING**, not of its code.  That 38-minute run read the receipt while this section was being appended, before the round-30 citations were in the map.  It passes now, twice, `16 passed` |
 
 ### Merge readiness
 
