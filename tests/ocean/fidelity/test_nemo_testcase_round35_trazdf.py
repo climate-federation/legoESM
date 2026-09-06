@@ -246,11 +246,18 @@ def test_the_reader_parses_the_twin_and_the_arms_read_what_they_should(
 
     by_name = {r["name"].rsplit(".trazdf.", 1)[1]: r
                for r in report["given_inputs_rows"]}
-    for name in ("assembly.zwd", "sweep.T", "sweep.S"):
+    # ROUND-37.  The two off-diagonals used to be AT-BAR-SIGNED-ZERO here,
+    # 704 cells each: NEMO's zwi at the surface row and zws at the bottom are
+    # -0.0 (trazdf.f90:419 sets zwt(:,1) = 0; :443-444 divide it) and legoESM
+    # wrote +0.0.  It now writes the negative zeros, so both rows are exactly
+    # AT-BAR.  The equivalence class itself is NOT deleted -- it is still
+    # reachable, and the test below drives it directly on a constructed pair,
+    # so a future +0.0 regression would still be classified rather than
+    # silently folded into AT-BAR.
+    for name in ("assembly.zwd", "sweep.T", "sweep.S",
+                 "assembly.zwi", "assembly.zws"):
         assert by_name[name]["status"] == "AT-BAR", by_name[name]
-    for name in ("assembly.zwi", "assembly.zws"):
-        assert by_name[name]["status"] == "AT-BAR-SIGNED-ZERO", by_name[name]
-        assert by_name[name]["absolute_max"] == 0.0
+        assert by_name[name]["bit_unequal"] == 0, by_name[name]
     # ROUND-36 RETRACTION.  Round 35 recorded this row as VALUE-AT-BAR with
     # 1/125 cells unequal at 5.2e-17 and read that as a property of
     # ``thickness_weighted_tracer_content``.  It was not: the ARM formed
