@@ -587,72 +587,80 @@ def _tracer_2d_1l_sixface_batched(ctx, q6, dp1_6, mfx6, mfy6, cx6, cy6, *,
     vtp = jax.vmap(_face_tp, in_axes=(0,) * 16)
     rarea_win = gs["rarea"][:, ng:ng + n, ng:ng + n]
 
-    # ---- the k loop (:284-388), one lax.scan of NSPLT_MAX per level --
+    # ---- the sub-cycle loop (:284-388): ONE lax.scan of NSPLT_MAX for
+    # ALL levels (M8-B, 2026-09-06).  The loop path scans per level; on
+    # the window arm every scan iteration of every level fired its own
+    # cross-face barrier + halo exchange (km * NSPLT_MAX * (nq + 1)
+    # firings per step, most on masked-out iterations), and the exchange
+    # ROUNDS were the measured overhead.  Every expression below is the
+    # per-level one with k as a trailing axis: the frac rescale is the
+    # same product per element, fv_tp_2d is vmapped over k on top of the
+    # face vmap, the barrier/exchange take the trailing axis, and the
+    # run/last masks are per level.
     dp1 = dp1_6
-    for k in range(km):
-        f_k = frac[k]
-        # :262-291 frac rescale, verbatim (already face-stacked).
-        cx6 = cx6.at[:, :, :, k].multiply(f_k)
-        cy6 = cy6.at[:, :, :, k].multiply(f_k)
-        mfx6 = mfx6.at[:, :, 0:n, k].multiply(f_k)
-        mfy6 = mfy6.at[:, 0:n, :, k].multiply(f_k)
-        # The loop path's per-face lists, as face-stacked slices -- no
-        # traced [t] reads.
-        xf6 = xfx6[:, :, :, k] * f_k
-        yf6 = yfx6[:, :, :, k] * f_k
-        cxk6 = cx6[:, :, :, k]
-        cyk6 = cy6[:, :, :, k]
-        mxk6 = mfx6[:, :, 0:n, k]   # (6, n+1, n) dummy
-        myk6 = mfy6[:, 0:n, :, k]   # (6, n, n+1) dummy
-        # :286-296 / :302-306: elementwise per face, so the stacked
-        # expressions are value-identical to the loop path's per-face
-        # ones.
-        ra_x6 = (gs["area"][:, ng:ng + n, :]
-                 + xf6[:, 0:n, :] - xf6[:, 1:n + 1, :])
-        ra_y6 = (gs["area"][:, :, ng:ng + n]
-                 + yf6[:, :, 0:n] - yf6[:, :, 1:n + 1])
-        div6 = ((mxk6[:, 0:n, :] - mxk6[:, 1:n + 1, :]
-                 + myk6[:, :, 0:n] - myk6[:, :, 1:n + 1])
-                * rarea_win)
-        nsp = nsplt_f[k]
-        qn20 = q[:, :, :, :, k]
-        dp10 = dp1[:, ng:ng + n, ng:ng + n, k]
+    fk = frac[None, None, None, :]                     # (1, 1, 1, km)
+    cx6 = cx6 * fk
+    cy6 = cy6 * fk
+    mfx6 = mfx6.at[:, :, 0:n, :].multiply(fk)
+    mfy6 = mfy6.at[:, 0:n, :, :].multiply(fk)
+    xf6 = xfx6 * fk
+    yf6 = yfx6 * fk
+    mxk6 = mfx6[:, :, 0:n, :]   # (6, n+1, n, km) dummy
+    myk6 = mfy6[:, 0:n, :, :]   # (6, n, n+1, km) dummy
+    ra_x6 = (gs["area"][:, ng:ng + n, :, None]
+             + xf6[:, 0:n, :, :] - xf6[:, 1:n + 1, :, :])
+    ra_y6 = (gs["area"][:, :, ng:ng + n, None]
+             + yf6[:, :, 0:n, :] - yf6[:, :, 1:n + 1, :])
+    div6 = ((mxk6[:, 0:n, :, :] - mxk6[:, 1:n + 1, :, :]
+             + myk6[:, :, 0:n, :] - myk6[:, :, 1:n + 1, :])
+            * rarea_win[..., None])
+    qn20 = q                                            # (6, nq, m, m, km)
+    dp10 = dp1[:, ng:ng + n, ng:ng + n, :]              # (6, n, n, km)
+    # level axis LAST on the level-varying operands, metrics shared
+    vtpk = jax.vmap(vtp, in_axes=(-1, -1, -1, -1, -1, None, None, None,
+                                  None, None, None, None, -1, -1, -1, -1),
+                    out_axes=-1)
+    run_q = lambda m: m[None, None, None, None, :]
+    run_d = lambda m: m[None, None, None, :]
 
-        def body(carry, it):
-            qn2, dp1i, qfin = carry
-            run = (it + 1) < nsp
-            last = (it + 1) == nsp
-            dp2 = dp1i + div6
-            base = jnp.zeros_like(qn2)
-            for iq in range(nq):
-                qm6, fx6, fy6 = vtp(qn2[:, iq], cxk6, cyk6, xf6, yf6,
-                                    gs["dxa"], gs["dya"], gs["area"],
-                                    gs["del6_v"], gs["del6_u"],
-                                    gs["rarea"], da6, ra_x6, ra_y6,
-                                    mxk6, myk6)
-                # flux_adj (:310-312): cross-face blend, verbatim; the
-                # vmap output is already the (6, ...) stack it takes.
-                fx6, fy6 = average_shared_edge_cgrid(fx6, fy6, tab)
-                d6 = ((fx6[:, 0:n, :] - fx6[:, 1:n + 1, :]
-                       + fy6[:, :, 0:n] - fy6[:, :, 1:n + 1])
-                      * rarea_win)
-                u6 = ((qn2[:, iq, ng:ng + n, ng:ng + n] * dp1i + d6)
-                      / dp2)
-                base = base.at[:, iq].set(
-                    qm6.at[:, ng:ng + n, ng:ng + n].set(u6))
-            # :361-379 qn2 halo refresh, verbatim cross-face exchange.
-            exch = jnp.moveaxis(
-                ext_scalar_sixface_allk(
-                    jnp.moveaxis(base, 1, -1), tab, "A"),
-                -1, 1)
-            return (jnp.where(run, exch, qn2),
-                    jnp.where(run, dp2, dp1i),
-                    jnp.where(last, base, qfin)), None
+    def body(carry, it):
+        qn2, dp1i, qfin = carry
+        run = (it + 1) < nsplt_f                        # (km,)
+        last = (it + 1) == nsplt_f
+        dp2 = dp1i + div6
+        base = jnp.zeros_like(qn2)
+        for iq in range(nq):
+            qm6, fx6, fy6 = vtpk(qn2[:, iq], cx6, cy6, xf6, yf6,
+                                 gs["dxa"], gs["dya"], gs["area"],
+                                 gs["del6_v"], gs["del6_u"],
+                                 gs["rarea"], da6, ra_x6, ra_y6,
+                                 mxk6, myk6)
+            # flux_adj (:310-312): cross-face blend, verbatim, all
+            # levels in one barrier (trailing axis).
+            fx6, fy6 = average_shared_edge_cgrid(fx6, fy6, tab)
+            d6 = ((fx6[:, 0:n, :, :] - fx6[:, 1:n + 1, :, :]
+                   + fy6[:, :, 0:n, :] - fy6[:, :, 1:n + 1, :])
+                  * rarea_win[..., None])
+            u6 = ((qn2[:, iq, ng:ng + n, ng:ng + n, :] * dp1i + d6)
+                  / dp2)
+            base = base.at[:, iq].set(
+                qm6.at[:, ng:ng + n, ng:ng + n, :].set(u6))
+        # :361-379 qn2 halo refresh, verbatim cross-face exchange, all
+        # levels and tracers in one call.
+        nb_ = base.shape[0]
+        exch = jnp.moveaxis(
+            ext_scalar_sixface_allk(
+                jnp.moveaxis(base, 1, -1).reshape(nb_, m_a, m_a, km * nq),
+                tab, "A").reshape(nb_, m_a, m_a, km, nq),
+            -1, 1)
+        return (jnp.where(run_q(run), exch, qn2),
+                jnp.where(run_d(run), dp2, dp1i),
+                jnp.where(run_q(last), base, qfin)), None
 
-        (_, dp1k_f, qk_f), _ = jax.lax.scan(
-            body, (qn20, dp10, qn20), jnp.arange(NSPLT_MAX))
-        q = q.at[:, :, :, :, k].set(qk_f)
-        dp1 = dp1.at[:, ng:ng + n, ng:ng + n, k].set(dp1k_f)
+    (_, dp1k_f, qk_f), _ = jax.lax.scan(
+        body, (qn20, dp10, qn20), jnp.arange(NSPLT_MAX))
+    q = qk_f
+    dp1 = dp1.at[:, ng:ng + n, ng:ng + n, :].set(dp1k_f)
 
     return {"q": q, "dp1": dp1, "mfx": mfx6, "mfy": mfy6,
             "cx": cx6, "cy": cy6,

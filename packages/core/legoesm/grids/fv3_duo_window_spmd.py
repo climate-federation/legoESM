@@ -70,6 +70,18 @@ class DuoWindowSpmdComm:
     #: dtype) instead of one per array -- a pure re-packing of the same
     #: bytes.  Off until the go/no-go and A/B rows are measured.
     pack_pad_refresh = False
+    #: M8-C (2026-09-06): per-firing refresh restricted to the face-edge
+    #: BANDS.  Pads are computed redundantly by every tile (the certified
+    #: pad >= reach argument), so after a firing only the body's
+    #: cross-face WRITE-SET -- the face's halo ring, ``ng`` deep, plus the
+    #: edge node -- has to reach the neighbours' pads; the full 2*pad-row
+    #: refresh moved ~100 MB/rank/step of redundant bytes.  ``None`` =
+    #: full refresh; an int = band depth in cells (ng + 1 is the
+    #: certified value; ng - 1 is the sabotage that must fail).
+    refresh_band = None
+    #: set to a list to record every firing at trace time as
+    #: (name, kind, shapes) -- the M8 firing census
+    firing_log = None
 
     def __init__(self, lay: WindowLayout, tab, mesh):
         import jax
@@ -120,7 +132,60 @@ class DuoWindowSpmdComm:
         origin = jnp.clip(start - lay.pad, 0, lay.m_a - lay.W)
         return start - origin
 
-    def _pad_exchange(self, arrs):
+    def _place_slabs(self, a, ax, t, from_east, from_west):
+        """Write the neighbours' ``2*pad``-row slabs into the pad rows of
+        ``a`` along ``ax`` with ONE unconditional dynamic_update_slice per
+        side (no padded copy of the window, no conditional -- both made
+        XLA copy the whole window per array per round; the M8 go/no-go
+        2026-09-06 measured the refresh's cost to be those copies).
+
+        A slab's target rows ``[start, start + 2*pad)`` can run past the
+        window (an interior tile keeps only ``pad`` of them, an edge
+        tile none on its flush side).  dynamic_update_slice CLAMPS the
+        start instead of clipping, so the slab written is composed
+        first: at the clamped position, the rows that belong to the
+        block keep their current values and the rest take the received
+        rows, shifted by the overrun.  Bytes and cells identical to the
+        former padded-copy placement."""
+        import jax
+        import jax.numpy as jnp
+        lay = self.lay
+        P2 = 2 * lay.pad
+        if lay.kt == 1:
+            return a
+        ext = a.shape[ax]
+        e = ext - lay.W
+        b0 = self._b0(t)
+        blk = lay.nl + e
+        r = jnp.arange(P2)
+        rshape = [1] * a.ndim
+        rshape[ax] = P2
+        r = r.reshape(rshape)
+        zeros = jnp.zeros_like(from_east)
+
+        # east side: target [b0 + blk, b0 + blk + P2), overrun past the
+        # window = over; clamped start = b0 + blk - over
+        over = jnp.maximum(b0 + blk + P2 - ext, 0)
+        st = b0 + blk - over
+        cur = jax.lax.dynamic_slice_in_dim(a, st, P2, axis=ax)
+        shifted = jax.lax.dynamic_slice_in_dim(
+            jnp.concatenate([zeros, from_east], axis=ax), P2 - over, P2,
+            axis=ax)                                   # [0]*over + fe[:P2-over]
+        slab = jnp.where(r < over, cur, shifted)
+        a = jax.lax.dynamic_update_slice_in_dim(a, slab, st, axis=ax)
+
+        # west side: target [b0 - P2, b0), underrun below row 0 = under;
+        # clamped start = 0 when under > 0
+        under = jnp.maximum(P2 - b0, 0)
+        st = b0 - P2 + under
+        cur = jax.lax.dynamic_slice_in_dim(a, st, P2, axis=ax)
+        shifted = jax.lax.dynamic_slice_in_dim(
+            jnp.concatenate([from_west, zeros], axis=ax), under, P2,
+            axis=ax)                                   # fw[under:] + [0]*under
+        slab = jnp.where(r < P2 - under, shifted, cur)
+        return jax.lax.dynamic_update_slice_in_dim(a, slab, st, axis=ax)
+
+    def _pad_exchange(self, arrs, full=True):
         """Two ppermute rounds refreshing every seam pad of every array in
         ``arrs`` (local PADDED-extent windows ``(W+e0, W+e1, ...)``) from
         the neighbours' blocks: round 1 along tile_i (rows), round 2
@@ -137,6 +202,8 @@ class DuoWindowSpmdComm:
         lay = self.lay
         P2 = 2 * lay.pad
         kt = lay.kt
+        if self.refresh_band is not None and not full:
+            return self._pad_exchange_bands(arrs)
         if self.pack_pad_refresh:
             return self._pad_exchange_packed(arrs)
         out = []
@@ -155,16 +222,44 @@ class DuoWindowSpmdComm:
                 to_east = [(s, s + 1) for s in range(kt - 1)]
                 from_east = jax.lax.ppermute(lo, axis_name, to_west)
                 from_west = jax.lax.ppermute(hi, axis_name, to_east)
-                widths = [(0, 0)] * a.ndim
-                widths[ax] = (P2, P2)
-                ext = jnp.pad(a, widths)
-                # the east neighbour's block starts at my b0 + blk; the
-                # west neighbour's last 2*pad rows end at my b0
-                ext = jax.lax.dynamic_update_slice_in_dim(
-                    ext, from_east, P2 + b0 + blk, axis=ax)
-                ext = jax.lax.dynamic_update_slice_in_dim(
-                    ext, from_west, b0, axis=ax)
-                a = jax.lax.slice_in_dim(ext, P2, P2 + a.shape[ax], axis=ax)
+                a = self._place_slabs(a, ax, t, from_east, from_west)
+            out.append(a)
+        return out
+
+    def _pad_exchange_bands(self, arrs):
+        """``_pad_exchange`` restricted to the face-edge bands: round 1
+        (tile_i) exchanges the ``2*pad`` seam rows of the WEST and EAST
+        face-edge column bands only, round 2 (tile_j) the ``2*pad`` seam
+        columns of the NORTH and SOUTH row bands.  The rest of the pad is
+        the tile's own redundant computation, left untouched.  Every
+        tile sends both bands (static shapes); a band that is not at a
+        face edge for this tile is pad-on-pad and harmless."""
+        import jax
+        lay = self.lay
+        P2 = 2 * lay.pad
+        kt = lay.kt
+        bw = int(self.refresh_band)
+        out = []
+        for a in arrs:
+            for axis_name, ax in (("tile_i", 0), ("tile_j", 1)):
+                other = 1 - ax
+                t = jax.lax.axis_index(axis_name)
+                e = a.shape[ax] - lay.W
+                b0 = self._b0(t)
+                blk = lay.nl + e
+                to_west = [(s, s - 1) for s in range(1, kt)]
+                to_east = [(s, s + 1) for s in range(kt - 1)]
+                ext_o = a.shape[other]
+                for cs in (0, ext_o - bw):
+                    sub = jax.lax.slice_in_dim(a, cs, cs + bw, axis=other)
+                    lo = jax.lax.dynamic_slice_in_dim(sub, b0 + e, P2, axis=ax)
+                    hi = jax.lax.dynamic_slice_in_dim(
+                        sub, b0 + blk - e - P2, P2, axis=ax)
+                    fe = jax.lax.ppermute(lo, axis_name, to_west)
+                    fw = jax.lax.ppermute(hi, axis_name, to_east)
+                    sub = self._place_slabs(sub, ax, t, fe, fw)
+                    a = jax.lax.dynamic_update_slice_in_dim(a, sub, cs,
+                                                            axis=other)
             out.append(a)
         return out
 
@@ -216,18 +311,7 @@ class DuoWindowSpmdComm:
                     fe = from_east[off:off + n].reshape(shp)
                     fw = from_west[off:off + n].reshape(shp)
                     off += n
-                    a = arrs[i]
-                    e = a.shape[ax] - lay.W
-                    blk = lay.nl + e
-                    widths = [(0, 0)] * a.ndim
-                    widths[ax] = (P2, P2)
-                    ext = jnp.pad(a, widths)
-                    ext = jax.lax.dynamic_update_slice_in_dim(
-                        ext, fe, P2 + b0 + blk, axis=ax)
-                    ext = jax.lax.dynamic_update_slice_in_dim(
-                        ext, fw, b0, axis=ax)
-                    arrs[i] = jax.lax.slice_in_dim(ext, P2, P2 + a.shape[ax],
-                                                   axis=ax)
+                    arrs[i] = self._place_slabs(arrs[i], ax, t, fe, fw)
         return arrs
 
     def _normalize(self, a, axes=None):
@@ -275,6 +359,9 @@ class DuoWindowSpmdComm:
         from jax.experimental.shard_map import shard_map
         lay = self.lay
         spec = self.sharding.spec
+        if self.firing_log is not None:          # trace-time census (M8)
+            self.firing_log.append(
+                (name, kind, tuple(tuple(a.shape) for a in arrays)))
 
         def _run(*locs):
             locs = [l[0] for l in locs]                     # (W0, W1, ...)
@@ -302,7 +389,9 @@ class DuoWindowSpmdComm:
                         a, strip, bi, 0))
                 locs = new
             if body is None or self.pad_refresh_per_firing:
-                locs = self._pad_exchange(locs)
+                # body None = the substep-entry refresh: always FULL; a
+                # firing's refresh may be band-restricted (M8-C)
+                locs = self._pad_exchange(locs, full=body is None)
             return tuple(restore(a)[None] for a, (_, restore)
                          in zip(locs, norm))
 

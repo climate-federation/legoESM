@@ -21,6 +21,7 @@ m = FV3DuoDynamicsModel(grid, FV3DuoConfig(km=10, hydrostatic=True, n_split=3), 
 if len(sys.argv) > 3 and sys.argv[3] == "pack":
     m._window_comm.pack_pad_refresh = True
     print("M8-A packed pad refresh ON")
+m._window_comm.firing_log = []
 st = m.dcmip16_initial_state()
 lay_W = m.window_layout.W
 fn = m._step_fn
@@ -212,3 +213,16 @@ for shp, n in sorted(consts.items(), key=lambda kv: -nbytes(kv[0]) * kv[1])[:15]
 import resource
 print(f"rss after compile: {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024:.0f} MB")
 print("DONE census")
+
+# firing census (M8-B scoping): firings per step by (name, kind, per-level?)
+from collections import Counter
+log = m._window_comm.firing_log
+per = Counter()
+for name, kind, shapes in log:
+    lvl = "per-level" if all(len(sh) == 2 or (len(sh) == 3 and sh[2] <= 1) for sh in shapes) else "k-stacked"
+    per[(name, kind, lvl, len(shapes), shapes[0])] += 1
+print(f"\n== firings traced: {len(log)} (includes IC-time firings, if any) ==")
+for (name, kind, lvl, n, shp), c in sorted(per.items(), key=lambda kv: -kv[1]):
+    print(f"  {c:5d}  {name:10s} {str(kind):6s} {lvl:9s} arrays={n} first={shp}")
+print("per-level firings:", sum(c for (nm, k, l, n, sh), c in per.items() if l == "per-level"),
+      " k-stacked:", sum(c for (nm, k, l, n, sh), c in per.items() if l == "k-stacked"))

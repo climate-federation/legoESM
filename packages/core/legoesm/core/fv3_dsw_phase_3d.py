@@ -699,15 +699,10 @@ def dsw_transport_phase_3d(ctx, states: dict, csw_outs: dict, dt, km, *,
     _require_barrier_layout("dsw_transport_phase_3d", ctx, afx_pre,
                             afy_pre, km)
 
-    afx_lv, afy_lv = [], []
-    for k in range(km):
-        ax, ay = average_allflux_shared_edges(afx_pre[:, :, :, k, :],
-                                              afy_pre[:, :, :, k, :],
-                                              ctx.tab)
-        afx_lv.append(ax)
-        afy_lv.append(ay)
-    afx6 = jnp.stack(afx_lv, axis=3)
-    afy6 = jnp.stack(afy_lv, axis=3)
+    # all levels in ONE barrier call (M8-B, 2026-09-06): the level axis
+    # (3) rides through -- the flat path vmaps the certified per-level
+    # blend over it, the window arm fires one exchange instead of km
+    afx6, afy6 = average_allflux_shared_edges(afx_pre, afy_pre, ctx.tab)
 
     # --- d_sw2 at every level, on the AVERAGED fluxes (:914 / :950) ---
     names = ("delp", "pt") + (() if hydrostatic else ("w", "dw"))

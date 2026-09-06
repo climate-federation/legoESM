@@ -1687,6 +1687,12 @@ def average_shared_edge_cgrid(fx6, fy6, tab: DuoHaloTables):
     barrier when one owns them (see ``_barrier_comm``)."""
     comm = _barrier_comm(tab)
     if comm is None:
+        if jnp.ndim(fx6) == 4:
+            # trailing level axis (M8-B): the certified 2-D blend per
+            # level, vmapped -- the blend at a cell reads only that level
+            return jax.vmap(
+                lambda a, b: average_shared_edge_cgrid_impl(a, b, tab),
+                in_axes=-1, out_axes=-1)(fx6, fy6)
         return average_shared_edge_cgrid_impl(fx6, fy6, tab)
     return comm.average_shared_edge_cgrid(fx6, fy6)
 
@@ -1711,6 +1717,12 @@ def average_allflux_shared_edges(afx6, afy6, tab: DuoHaloTables):
     barrier when one owns them (see ``_barrier_comm``)."""
     comm = _barrier_comm(tab)
     if comm is None:
+        if jnp.ndim(afx6) == 5:
+            # (6, npx, n, km, slot): the certified per-level blend
+            # vmapped over the level axis (M8-B)
+            return jax.vmap(
+                lambda a, b: average_allflux_shared_edges_impl(a, b, tab),
+                in_axes=3, out_axes=3)(afx6, afy6)
         return average_allflux_shared_edges_impl(afx6, afy6, tab)
     return comm.average_allflux_shared_edges(afx6, afy6)
 
@@ -1755,6 +1767,10 @@ def average_shared_edge_bgrid(xb6, yb6, tab: DuoHaloTables):
     barrier when one owns them (see ``_barrier_comm``)."""
     comm = _barrier_comm(tab)
     if comm is None:
+        if jnp.ndim(xb6) == 4:
+            return jax.vmap(
+                lambda a, b: average_shared_edge_bgrid_impl(a, b, tab),
+                in_axes=-1, out_axes=-1)(xb6, yb6)
         return average_shared_edge_bgrid_impl(xb6, yb6, tab)
     return comm.average_shared_edge_bgrid(xb6, yb6)
 

@@ -98,6 +98,10 @@ def main(argv=None):
                     help="M8-A arm: one ppermute per direction per refresh "
                          "round for all the arrays of a firing (a pure "
                          "re-packing; bitwise-gated like any row)")
+    ap.add_argument("--refresh-band", type=int, default=None,
+                    help="M8-C arm: per-firing pad refresh restricted to "
+                         "the face-edge bands of this depth (ng+1 is the "
+                         "certified value; ng-1 must FAIL the gate)")
     ap.add_argument("--timing", type=int, default=0,
                     help="after the gated steps, run this many more steps "
                          "and report wall time per step (max over ranks, "
@@ -244,6 +248,10 @@ def main(argv=None):
         print(f"[m6] REFUSED: {e}")
         return 2
     lay = win_model.window_layout
+    if args.refresh_band is not None:
+        win_model._window_comm.refresh_band = args.refresh_band
+        print(f"[m6] M8-C arm: band-restricted refresh, depth "
+              f"{args.refresh_band}")
     if args.pack_pad_refresh:
         win_model._window_comm.pack_pad_refresh = True
         print("[m6] M8-A arm: packed pad refresh")

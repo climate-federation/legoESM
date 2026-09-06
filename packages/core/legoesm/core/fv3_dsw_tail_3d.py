@@ -418,15 +418,19 @@ def _dsw_tail_phase_3d_batched(ctx, state, csw_outs, dsw_outs, dt, km,
               csw_outs["uc"][..., k], csw_outs["vc"][..., k],
               bview["gs"], da6, dac6) for k in range(km)]
 
-    # --- BARRIER 2, verbatim: one level at a time, all six faces ------
+    # --- BARRIER 2, verbatim blend, ALL LEVELS IN ONE CALL (M8-B) -----
     # (dyn_core.F90:984, BGRID_NE; extent owned by
-    # average_shared_edge_bgrid.)
-    ubb_bld, vbbtemp_bld = [], []
-    for k in range(km):
-        xb6, yb6 = average_shared_edge_bgrid(s3[k]["ubb"],
-                                             s3[k]["vbbtemp"], ctx.tab)
-        ubb_bld.append(xb6)
-        vbbtemp_bld.append(yb6)
+    # average_shared_edge_bgrid.)  The blend at a cell reads only that
+    # level, so the levels ride as a trailing axis: the flat path vmaps
+    # the certified 2-D blend over it and the window arm fires ONE
+    # exchange instead of km (the exchange rounds were the measured
+    # overhead, 2026-09-06).
+    xb6, yb6 = average_shared_edge_bgrid(
+        jnp.stack([s3[k]["ubb"] for k in range(km)], axis=-1),
+        jnp.stack([s3[k]["vbbtemp"] for k in range(km)], axis=-1),
+        ctx.tab)
+    ubb_bld = [xb6[..., k] for k in range(km)]
+    vbbtemp_bld = [yb6[..., k] for k in range(km)]
 
     # --- KE assembly + d_sw4/5/6, faces vmapped -----------------------
     def one_face_tail(u_k, v_k, ut_k, vt_k, delp_k, uc_k, vc_k, ua_k,
