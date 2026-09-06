@@ -253,6 +253,11 @@ def run_pre_solve(oracle_root: Path, *, plant: bool = False) -> dict:
                 oracle[..., :candidate.shape[-1]], candidate, masks[face],
                 plant=plant and face == "u" and label == "A_explicit_update")
             row["nemo_statement"] = cite
+            # The candidate's own scale, next to the oracle's: a residual the
+            # size of the field means the two sides are different quantities,
+            # and that is a different finding from a diverging statement.
+            row["candidate_max_abs"] = float(
+                np.max(np.abs(candidate[masks[face]])))
             rows.append(row)
     best = min(rows, key=lambda r: r["absolute_max"])
     status = "AT-BAR" if all(
