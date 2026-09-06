@@ -2232,6 +2232,24 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "expose_tracer_stage1_boundary must be '', "
                 "'after_advection', or 'after_sbc'")
+        # Dispatch hardening at CONSTRUCTION, not at the substitution site:
+        # the returned u/v carry ONE exposed frame, and the substitutions run
+        # in a fixed order, so two momentum-RHS exposures at once would hand
+        # the caller the later one under the earlier one's name.  A gate that
+        # silently scores the wrong frame is worse than one that refuses.
+        _stage3_rhs_hook = self._nemo_ws_test_hooks.expose_stage3_momentum_rhs
+        if _stage3_rhs_hook not in ("", "pre_ldf", "post_ldf"):
+            raise ValueError(
+                "expose_stage3_momentum_rhs must be '', 'pre_ldf', or "
+                f"'post_ldf'; got {_stage3_rhs_hook!r}")
+        if _stage3_rhs_hook and (
+                self._nemo_ws_test_hooks.expose_stage2_momentum_rhs
+                or self._nemo_ws_test_hooks.expose_stage2_raw_momentum
+                or self._nemo_ws_test_hooks.expose_momentum_stage
+                or self._nemo_ws_test_hooks.expose_momentum_operator):
+            raise ValueError(
+                "expose_stage3_momentum_rhs cannot be combined with another "
+                "momentum exposure: they share the returned u/v slots")
         self.config = self._validate_config(
             config or LatLonCGridOceanConfig.from_flat())
         # Convert LatLonGrid -> LatLonCGridGeometry once at construction.

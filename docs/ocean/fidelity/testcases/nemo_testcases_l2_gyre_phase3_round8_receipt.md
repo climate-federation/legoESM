@@ -6067,6 +6067,74 @@ deck.
 **No retraction of a landed number.**  Every figure round 28 and 29 recorded
 for the stage boundaries is reproduced here at the same protocol.
 
+### Round-30 independent review — two reviewers, one converging finding
+
+Codex is unavailable on this account, so the mandatory DUAL adversarial review
+ran as two fresh independent agents, one on the DIFF and one on the CLAIM, each
+briefed separately and neither shown the other's answer.  They converged on the
+same defect from opposite directions, which is the strongest signal this
+process produces.
+
+**FINDING (both reviewers, independently): the fix is HALF of NEMO's operand,
+and the other half is invisible at kt=1.**  NEMO's scheme reads THREE distinct
+thicknesses — `e3t`/`e3u`/`e3v` at `Kbb` inside the divergence
+(`dynldf_lev_rot_scheme.h90:28-29`), `e3f` carrying no time index at all
+(`dynldf_lev_rot_scheme.h90:24-25`), and `e3u`/`e3v` at `Kmm` in the final
+division.  legoESM's lateral operator receives ONE thickness: a single `h_k`
+argument at `ocean_pe_latlon_cgrid.py:5041`, built from the stage's own live
+`eta`, which at stage 3 is the `Kmm` sea level.  So after this round the
+velocity operand is NEMO's and the thickness operand is not.  **CONFIRMED by
+reading, UNMEASURED in size**: at kt=1 the whole term is exactly zero, so no
+existing record can size it, and the discriminating measurement is a kt=2
+pre-`dyn_ldf` / post-`dyn_ldf` frame pair, which does not exist yet.  It is
+registered here as the next candidate owner rather than asserted to be one.
+
+**The reviewer also sharpened WHY the kt=1 term is zero, and my reason was the
+weaker one.**  Both `zcur` and `zdiv` are purely multiplicative in velocity —
+coefficient times a velocity difference, with no additive term — so zero
+velocity gives exactly zero whatever time level any thickness carries.  The
+`Kbb` read is not what makes it zero; it is what makes it zero at kt=1 for
+NEMO and NOT zero for legoESM, which is a different statement and the one that
+belongs above.  With `nn_ahm_ijk_t = 0` the coefficient is the constant
+`0.5 * rn_Uv * rn_Lv = 1.0e5`, masked, and no operand can make the term
+nonzero.
+
+**The arithmetic gap in item 4 is CLOSED, and it is not a contradiction.**
+`14400 * 8.256e-10 = 1.19e-05` is twelve times LARGER than the `9.48e-07` the
+fix did not remove, which looked wrong.  It is not: after `dyn_zdf` the stage
+resets the reference-weighted depth mean of `uu(Kaa)` to `uu_b(Kaa)`, which the
+barotropic solver produced without ever seeing `dyn_ldf`, so only the
+BAROCLINIC part of a stage-3 RHS error survives.  Measured from the round-29
+dump: stage-2 velocity max `4.255e-04` m/s against a baroclinic deviation of
+`1.04e-07`, a ratio of `2.4e-04`, because GYRE's initial T/S are horizontally
+uniform.  Predicted surviving error `1.19e-05 * 2.4e-04` is about `3e-09`;
+the observed kt2 move is `1.7e-10`.  Consistent, and it independently supports
+the exoneration in item 4 rather than resting it on one before/after pair.
+
+**Provenance, noted not changed.**  The round-29 acquisition executed
+`cfgs/GYRE_OMIP_L2_P3_SM_R29ZDF/MY_SRC/stprk3_stg.F90`, whose `dyn_ldf` sits at
+its own line 509, not the shipped `src/OCE` line.  Round 29 settled the
+convention for exactly this case — a basename that can mean either file is how
+a `MY_SRC` override passes as shipped source, so the citation gate resolves the
+SHIPPED file only — and the reviewer's diff of the two confirms the copy is
+instrument-only.  The citations above are therefore the shipped ones, and this
+paragraph is the record that the executed file is a copy of them.
+
+**Two diff defects, both fixed in this round.**  Setting two momentum exposures
+at once used to hand the caller the later frame under the earlier one's name,
+because they share the returned `u`/`v` slots; that is now refused at
+construction, with three tests plus a companion asserting the production
+default still constructs.  And the six fail-closed reader cases asserted only
+the exception TYPE, so all six could have been firing on one shared guard;
+each now names the message it must produce.  13 tests pass.
+
+**Two latent items registered, neither this round's to fix.**  The stage face
+mask handed to the lateral operator is the 2-D `u_mask` broadcast over levels
+where NEMO's `umask` is 3-D — inert on GYRE, which has one constant depth and
+therefore a flat bottom, and live on any topography card.  And legoESM builds
+its face thickness by a min-rule where NEMO uses `e3u_0 * (1 + r3u)`; the same
+class as the finding above and equally invisible at kt=1.
+
 ### A concurrent session wrote to this branch again
 
 Two commits landed on `fidelity/nemo-testcases-l2-gyre-codex2` between round
@@ -6115,6 +6183,10 @@ round:
 
 ### Open questions
 
+0. **The lateral operator's THICKNESS operand**, named by both reviewers and
+   unmeasurable from any existing record because the term is zero at kt=1.  A
+   kt=2 pre-`dyn_ldf` / post-`dyn_ldf` frame pair discriminates it, and that is
+   a cheaper acquisition than instrumenting `dyn_zdf`'s internals.
 1. **Where inside `dyn_zdf` GYRE's kt2 divergence enters.**  The oracle side is
    instrumented and bit-verified; the model side exposes no pre-solve vector,
    no matrix and no solved column, so the next round's first job is that
@@ -6135,6 +6207,8 @@ round:
 | route the WS-RK3 stage lateral viscosity to the step-entry velocity | ASKED by the oracle: `dynldf_lev_rot_scheme.h90:24-25` and `dynldf_lev_rot_scheme.h90:28-29` read `Kbb`, and NEMO's kt=1 contribution is measured to be exactly zero. One shared implementation, no card switch, no knob |
 | land decision 16's unconditional vorticity call | NOT DONE — premise REFUTED, measurement returned to the user |
 | change the demo card's vertical coordinate | NOT DONE — decision 17 pending |
+| refuse two simultaneous momentum exposures at construction | not a scientific choice; a reviewer finding, and a gate that scores the wrong frame under the right name is the defeat these gates exist to stop |
+| do NOT act on the thickness-operand finding this round | ASKED by the evidence: it is CONFIRMED structurally and UNMEASURED in size, and this campaign does not land a fix whose size no record can show |
 | add four citation-map entries for `dynldf.F90`, `dynldf_lev_rot_scheme.h90` and the shared `ldf_state` seam | not a scientific choice; without them the gate is fail-closed on this round's citations |
 | shipped NEMO edit, `makenemo`, `mpirun`, push, merge, deletion | forbidden; none performed |
 

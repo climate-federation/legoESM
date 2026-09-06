@@ -60,17 +60,19 @@ def test_reader_returns_the_campaign_interior_layout(tmp_path):
     assert frame["v"][2, 0, 4] == values[NX * NY * NZ + flat]
 
 
-@pytest.mark.parametrize("kwargs", [
-    {"magic": "NEMO_L2_ZDFMX_1"},                       # another campaign record
-    {"header": (2,) + HEADER[1:]},                      # a future writer version
-    {"header": HEADER[:2] + (2,) + HEADER[3:]},         # the stage-2 frame
-    {"header": HEADER[:-1] + (32,)},                    # not 64-bit
-    {"payload": np.zeros(2 * NX * NY * NZ - 1)},        # short by one value
-    {"payload": np.full(2 * NX * NY * NZ, np.nan)},     # non-finite
+# Each case names the message it must produce, so six cases cannot all be
+# firing on ONE shared guard while five of the six checks are dead.
+@pytest.mark.parametrize("kwargs, message", [
+    ({"magic": "NEMO_L2_ZDFMX_1"}, "bad magic"),        # another campaign record
+    ({"header": (2,) + HEADER[1:]}, "bad header"),      # a future writer version
+    ({"header": HEADER[:2] + (2,) + HEADER[3:]}, "bad header"),   # stage-2 frame
+    ({"header": HEADER[:-1] + (32,)}, "bad header"),    # not 64-bit
+    ({"payload": np.zeros(2 * NX * NY * NZ - 1)}, "bad payload"),  # short by one
+    ({"payload": np.full(2 * NX * NY * NZ, np.nan)}, "non-finite payload"),
 ])
-def test_reader_fails_closed(tmp_path, kwargs):
+def test_reader_fails_closed(tmp_path, kwargs, message):
     """A malformed record must get a VERDICT, never a plausible frame."""
-    with pytest.raises(gate.require.__globals__["GateError"]):
+    with pytest.raises(gate.require.__globals__["GateError"], match=message):
         gate.read_pre_ldf(_write(tmp_path, **kwargs))
 
 
@@ -87,3 +89,42 @@ def test_both_round29_dumps_are_registered():
 
     assert time_level_for_dump(gate.PRE_LDF_RECORD) == "now"
     assert time_level_for_dump(gate.ZDF_MATRIX_RECORD) == "now"
+
+
+@pytest.mark.parametrize("hooks, message", [
+    ({"expose_stage3_momentum_rhs": "pre_zdf"}, "must be ''"),
+    ({"expose_stage3_momentum_rhs": "post_ldf",
+      "expose_stage2_momentum_rhs": True}, "cannot be combined"),
+    ({"expose_stage3_momentum_rhs": "pre_ldf",
+      "expose_momentum_stage": 2}, "cannot be combined"),
+])
+def test_stage3_rhs_hook_refuses_a_frame_it_cannot_deliver(hooks, message):
+    """Two momentum exposures share the returned u/v, so both is REFUSED.
+
+    Without this the later substitution wins silently and a gate scores the
+    wrong frame under the right name -- the exact shape of defeat this
+    campaign's gates exist to make impossible.
+    """
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
+    )
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
+
+    card = build_nemo_testcase_card("GYRE-zco")
+    with pytest.raises(ValueError, match=message):
+        LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(**hooks))
+
+
+def test_the_production_default_still_constructs():
+    """Synthetic-violation companion: the guard must not refuse the default."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
+
+    card = build_nemo_testcase_card("GYRE-zco")
+    assert LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
