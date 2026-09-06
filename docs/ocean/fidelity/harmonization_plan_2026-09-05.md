@@ -223,3 +223,7 @@ aux3d linkage and the minimum-level policy, not just counts.
   (decision 9). (8) fesom rule: no findings. (11) src-first: no module overlap (comm). Cards: fwfix = 3
   closure flags only; base2 is a NEW BASELINE (4 changes, header says so); codex MAJOR fesom card had no
   pipefail -> fixed.
+- 05:20 LAUNCHED from frozen _base2_wt @2c3258cc8 (short partition): trp_base2 9657917->9657918 (two
+  legs, --kprofile-snapshots), trp_fwfix 9657919->9657920 (fixed real closure, one variable vs base2),
+  mpas_base2 9657921 (one leg, K_zeta 0 + twin), fesom_base2 9657922 (mesh_nemo75_30m). Pre-registrations
+  in the card headers. Outputs results/omip_nemo/{trp_base2,trp_fwfix,mpas_base2,fesom_base2}_d30.
