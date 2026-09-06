@@ -9082,3 +9082,163 @@ The ASKED record stands with the user's words, "I would go with the NEMO
 form", and what the model does is already the NEMO form.  What is owed instead
 is the row that says so per card, and the disposition of a config field that
 these cards do not read.
+
+### What two independent reviews broke
+
+codex is unavailable on this account, so both reviews are fresh Claude agents
+with no shared context: one attacked the CLAIMS, one attacked the DIFF and was
+told to make the sweep discharge pass on a wrong solve and the flip land
+without its per-card rows.  Between them they landed five defects that are
+fixed here and three that are registered.  **Both reviews independently
+reproduced the dry-diagonal defect, with the same counts, one of them before
+the revert was pushed and with a two-sided control the round did not run:
+removing the substitution gives 2800 NaN of 60600 on OVERFLOW step 1,
+restoring it gives 0.**
+
+**FIXED, because they undermined this round's own numbers.**
+
+1. **THE SWEEP DISCHARGE WAS DEFEATED.**  `AT-BAR-SIGNED-ZERO` was a PASSING
+   status.  The reviewer made the solve return `out*3 + 12345` in every column
+   whose off-diagonals are all zero; the gate printed `sweep.T 5/21120 max 0`,
+   classified it as a signed-zero row, and **exited 0 with STATUS AT-BAR**.
+   The exemption existed because legoESM wrote `+0.0` where NEMO writes
+   `-0.0`, and that transcription landed this round, so no row needs it.  It
+   is no longer a passing status; the classification stays, so a `+0.0`
+   regression is still named rather than folded into AT-BAR.
+2. **AND THE SWEEP ARM HAS A BLIND SPOT IT CANNOT CLOSE**, now named in its
+   docstring: NEMO's back substitution masks at every level, so both sides are
+   zero at all 3120 dry cells of the scored box and a solve arbitrarily wrong
+   there scores as equal.  What covers them is the round-29 momentum arm,
+   whose oracle is NEMO's UNMASKED `uu(Kaa)` -- the same corruption moved 3720
+   of its 21120 cells by 12345.
+3. **THE NEW MOMENTUM ARM HAD NO NON-VACUITY CONTROL.**  The round-29 plant
+   moved `avm`, which the rebuilt matrix reads and the solve arms do not: with
+   `--plant` every `zdf_matrix` row moved and both `zdf_solve_lego` rows
+   stayed at `0/21120`.  The plant now also moves the dumped diagonal.
+   Measured after the fix: unplanted `0`/`0`, planted **1748 / 1758**.
+4. **THE ANTI-FUSION HELPER'S DOCSTRING PROMISED MORE THAN IT DELIVERS.**
+   Under `jit`, `x + copysign(0.0, x)` FLUSHES a subnormal to a signed zero
+   (5e-324, 1e-308, 1.5e-310 all become 0.0) where `x + 0.0` and `x * 1.0`
+   preserve them.  Inert in this solve on these cards -- the products are of
+   order 1e-4 to 1e4, and XLA's CPU scan already flushes a computed subnormal
+   product either way -- but the sentence was false and is now the measured
+   statement.
+5. **A TANK FIXTURE RE-IMPLEMENTED THE REDUCTION IT EXISTS TO HOLD FIXED.**
+   It built its inverted target with `jnp.sum`; after item 4 that would have
+   reintroduced exactly the 5-column OVERFLOW difference the change removed.
+   It imports the operator's own accumulation instead.
+
+**REGISTERED, with owners, not fixed here.**
+
+6. **`tracer_combine` IS INERT ON ALL THREE CARDS**, measured by the diff
+   review rather than read: each card built twice, one step, every float leaf
+   compared -- **0 of 198956 (GYRE), 0 of 47262 (LOCK), 0 of 328152
+   (OVERFLOW)** bits differ.  The field is read only by `_leapfrog_step` and
+   `_nemo_mlf_step`; the NEMO cards run the WS-RK3 ladder, which never reads
+   it.  That is the measurement behind this round's retraction, and it makes
+   the pending flip a decision with no effect to decide.  A lever nothing
+   selects is a defect; its disposition is a question for the coordinator, not
+   this round's to take.
+7. **The round-29 gate is RED on both tank records for a pre-existing reason**
+   -- `zwi_u`/`zwi_v` are VALUE-AT-BAR signed zeros, 4997/7800 and
+   43293/60600 at max 0, reproduced at the round's parent commit.  The
+   `zdf_solve_lego` rows quoted above are real measurements taken from that
+   run; the run's own exit code is 1 and that is said here rather than left
+   for a reader to discover.
+8. **The instrument's write-only guard inspects `trazdf.F90` only.**  It is
+   not defeatable as written -- `diff` emits `^<` for a changed line too -- but
+   the card's `stprk3_stg.F90` removes one shipped line (a single-line
+   `IF( ln_traqsr ) CALL tra_qsr` rewritten as a block), and that is the file
+   item 4 cites.  The guard's scope is the round-37 delta; widening it to
+   every `MY_SRC` file is owed.
+9. **The claim review weakened one framing**: "0 cells unequal both ways"
+   identifies the ARITHMETIC legoESM performed, not the compiler mechanism.
+   "XLA contracts" is read off the code; what is MEASURED is that legoESM
+   computed a single-rounded product in exactly those two spots.  It also
+   corrected the reason the first recurrence is immune: not "it ends in a
+   division" but that the subtrahend is a QUOTIENT, which an FMA cannot
+   absorb.  And it noted the new unit test would pass vacuously on a target
+   where XLA does not contract -- its control proves the reference pair
+   differ, not that the compiler would fuse.
+10. **The claim review settled item 2's arithmetic independently.**  The
+    matrix's row sums are exactly `e3t`, so `||M^-1||_inf` over every wet
+    column is `0.09996`; a `6.821e-13` K.m right-hand-side difference can move
+    the output by at most **6.82e-14 K, 469x short of `3.196e-11` K**.  The
+    residual demands a RELATIVE MATRIX difference of about `1.4e-12`, i.e.
+    roughly `1e-13` m2/s of `avt`.  That is the next round's arm.
+
+### kt = 1..10, before and after
+
+Same gates, same oracle roots, same `--max-step 10` on both sides.  BEFORE was
+taken at `e49063768799` in a detached probe worktree (flagged), so the two
+arms differ only in the model.
+
+| card | first over bar BEFORE | first over bar AFTER |
+|---|---|---|
+| GYRE-zco | kt=2, T S u v | kt=2, T S u v |
+| LOCK_EXCHANGE-zco | kt=4, u | kt=4, u |
+| OVERFLOW-zps | kt=2, T u | kt=2, T u |
+
+BEFORE is stamped `e49063768799`; GYRE's AFTER is stamped `ba0752aec5b1` and
+the two tanks' `1fdd853a19b7`.  The commits between them are tests and this
+receipt; no model numbers moved in them.
+
+**No card's first-over-bar step moves**, which is what a change of this size
+should do: it removes a handful of ULPs from operators whose kt=2 divergence
+is owned by something else -- measured directly this round, since the stage-3
+tracer residual is `3.1956659540810506e-11` K before AND after, to every
+digit.  Reporting any of it as an improvement would be a confound.  OVERFLOW's
+AFTER is FINITE, which is the trajectory-level confirmation of the revert.
+
+### ASKED / UNASKED
+
+| choice | status |
+|---|---|
+| `tracer_combine` stays `concentration` on every card | ASKED — decision 20 answered "the NEMO form", precondition (b) is not met, and the flip is measured INERT on all three cards (0 of 198956 / 47262 / 328152 bits).  Not made |
+| the ordered solve stops being fused into an FMA | ASKED-by-directive — the user's standing "do as NEMO does"; it makes legoESM round NEMO's written statement the way gfortran rounds it |
+| the two boundary slots become NEGATIVE zeros | same directive; inert by construction, and it removes a bit difference a gate at the exact bar can see |
+| the barotropic column sum accumulates in ascending k | ASKED-by-directive, same standing instruction |
+| the dry-diagonal substitution was removed and PUT BACK | the removal was the directive's transcription; putting it back is not a preference but a refusal to ship non-finite state on a card the change cannot be measured on.  Registered as a deviation with its owner |
+| `AT-BAR-SIGNED-ZERO` stops being a passing status | a previously-tolerated condition becomes a hard error — taken because the tolerated condition was a measured green-on-wrong-solve defeat, and named here rather than left silent |
+| the instrument stages `avt`/`avs` into a full-domain temporary rather than declaring their true interior extents | a serialisation choice, not a scientific one: it leaves the record uniform so no reader needs a special case, which is what closes round 36's admission blocker at the source |
+| the admission baseline stays round 29 rather than round 35 | a harness choice, and the reason is round 36's open item 8: the admission cannot parse the round-35 record |
+| detached probe worktrees | ASKED; the same disposition rounds 32-36 recorded.  Flagged: `/tmp/codex-gyre-r37-start`, `/tmp/codex-gyre-r37-before`, `/tmp/codex-gyre-r37-presum`, `/tmp/codex-gyre-r37-fma`, `/tmp/codex-gyre-r37-suite` |
+| shipped NEMO edit, `makenemo`, `mpirun`, push, merge, deletion | forbidden; none performed by the agent.  The operator ran the acquisition |
+
+UNASKED list: **empty**.
+
+### Merge readiness
+
+`03c6e8d96ff7` remains an ancestor, so the integration is still a
+fast-forward.  **HOLD.**
+
+1. **GYRE's `kt2` `T`/`S`/`u`/`v` rows still fail**, unchanged, and this round
+   measured that the tracer solve does not own them.
+2. **`tra_zdf` is bit-exact given NEMO's inputs on every arm except the dry
+   diagonal**, which is registered with a named owner and a named cure.
+3. **The owner of the stage-3 residual is inside the matrix legoESM builds, or
+   downstream of the solve.**  Its arm does not exist yet and the frame spec
+   is written above.
+4. OVERFLOW's barotropic-correction row is DISCHARGED; its mask-placement row
+   and round 30's `dyn_ldf` row are unchanged.
+5. ORCA2 has no card on this branch, unchanged.
+6. Rounds 1-24 of this receipt remain UNAUDITED by the citation gate.
+
+### What is open
+
+1. `assembly.zwd` — 3120 dry cells at 299.71.  Owner: legoESM's layer
+   thickness is exactly `0.0` below the seafloor where NEMO's `e3t_3d` is the
+   positive reference thickness.  Cure: give legoESM NEMO's reference
+   thickness there; that is a geometry change.
+2. **The model's own matrix operands are UNMEASURED** against the record.
+   Frame spec above; the claim review's `||M^-1||` bound says the residual
+   needs about `1e-13` m2/s of `avt`, so that is where to look first.
+3. `tracer_combine` is a field these cards do not read.  Disposition owed.
+4. The instrument's write-only guard covers one file of eleven.
+5. The round-29 gate is red on both tank records for a pre-existing
+   signed-zero reason.
+6. The causal injection arm at the stage-3 boundary, the tanks' operator-level
+   Rule-12 for decision 19, round 30's `dyn_ldf` row, the moved trajectory
+   rows from rounds 32-34, the slow forcing's depth average: unchanged.
+7. The rounds-33/34 bookkeeping list is untouched except where it blocked;
+   nothing on it was needed this round.
