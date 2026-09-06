@@ -29,25 +29,34 @@ oracle V2 record set holds ``oracle_bt_substeps_kt00000001.bin`` and
 Two measurements are therefore reported and labelled differently:
 
 * **kt=1, ORACLE-SCORED** -- the production ``slow_u``/``slow_v`` frame with
-  a BIT census, the production 3-D momentum RHS, and the whole kt=1
-  external-mode trace (16 frames x 50 substeps = 800 rows) scored in NEMO's
-  own recurrence order, so the first frame over bar is NAMED by measurement
-  rather than guessed.
-* **kt=2 and kt=1, ARM-TO-ARM, NOT oracle-scored** -- the depth-mean
-  SUB-STATEMENT under three weightings: the model's divide, the model's
-  reciprocal, and a ``reference`` arm built from NEMO's OWN ``mesh_mask``
-  ``e3u_0``/``e3v_0``/``umask``/``vmask`` with ``hu_0``/``hv_0`` accumulated
-  exactly as ``domain.F90:142`` does and ``r1_hu_0`` formed exactly as
-  ``domain.F90:159`` does.
+  a BIT census, and every barotropic frame the record carries that the model
+  exposes and that is a COMPARABLE quantity: 18 frames x 50 substeps.  The
+  two ``transport_metric_*`` frames are excluded, carrying the phase-3 gate's
+  existing UNMEASURED waiver, because NEMO's frame is an ``e2u``/``e1v``
+  metric transport and legoESM's is not the same quantity; a draft of this
+  probe scored them anyway and reported one as the first frame over bar at
+  2639.4, which is a Rule-2 cross-quantity comparison and not a defect.  Both
+  the normalized-bar first-over-bar AND the first BIT-unequal frame are
+  published, because ``score``'s bar is ``1e-15`` on a NORMALIZED residual and
+  is not the bit bar.
+* **kt=2, ARM-TO-ARM, NOT oracle-scored** -- the depth-mean SUB-STATEMENT
+  under three weightings: the model's divide, the model's reciprocal, and a
+  ``reference`` arm.  The reference arm is CALIBRATED against NEMO's own
+  dumped operands (``oracle_slow_forcing_kt00000001.bin`` carries ``e3u``,
+  ``umask`` and ``r1_hu0``) rather than only against a reconstruction.
 
-  These arms are NOT scored against NEMO's frame, and a first draft of this
-  probe wrongly did score them: legoESM's ``F_slow`` is the depth mean PLUS
-  wind, drag and biharmonic increments, so an arm holding only the depth mean
-  compares an INCOMPLETE statement against a COMPLETE frame.  That is Rule 2's
-  second blind spot -- two things of the same name are not the same quantity
-  -- and it made every arm read 580/580 unequal at ONE shared magnitude, which
-  is the missing wind term and not the weighting.  What the arms measure is
-  the difference between two WEIGHTINGS of one shared operand.
+  These arms are NOT scored against NEMO's frame, and a draft of this probe
+  wrongly did score them: legoESM's ``F_slow`` is the depth mean PLUS wind,
+  drag and biharmonic increments, so an arm holding only the depth mean
+  compares an INCOMPLETE statement against a COMPLETE frame.  They also run at
+  kt=2 ONLY: NEMO's dumped kt=1 3-D momentum RHS is exactly ``0.0`` on every
+  wet face, so a kt=1 arm comparison is ``0 == 0`` and perturbs a zero.
+* **kt=2, the OTHER thickness convention** -- NEMO's live face stretch is an
+  AREA-WEIGHTED MEAN of the two neighbouring ``ssh`` (``domqco.F90:166-169``)
+  and ``stp2d.F90:200`` divides the wind stress by that mean-rule depth;
+  legoESM uses a MIN rule.  MIN is not MEAN and the difference is FIRST ORDER
+  in ``eta/H``.  That question is separate from reference-versus-live and is
+  sized here.
 
 The mechanism the sizing tests: under z-star the live face thickness is
 ``h_u(k) = e3u_0(k) * s_u`` with ``s_u`` a SINGLE per-column scalar --
@@ -58,6 +67,13 @@ holds, the reference-versus-live residual is ROUNDOFF and not ``O(eta/H)``.
 
 Scope limits, written down rather than discovered later:
 
+* the cancellation argument above is written for the ``dz_ref * (1 + eta/H)``
+  form.  GYRE's card resolves an ``OceanPartialCellCoordinate``, whose
+  ``compute_layer_thickness`` takes a partial-cell branch; the factorisation
+  survives there only while the min-rule's argmin does not SWITCH with depth.
+  On GYRE it does not -- measured ``h_u(k)/e3u_0(k)`` is constant to 1 ulp --
+  but on stepped bathymetry (ORCA2 is zps) it can, and this probe does not
+  measure that card.
 * the reference arm accumulates ``hu_0`` sequentially over ``jk = 1..jpkm1``
   as ``domain.F90:142`` does, but the inner ``SUM(...)`` intrinsic of
   ``stp2d.F90:180`` has an unspecified association order and legoESM's
@@ -71,31 +87,28 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 from pathlib import Path
 
 import numpy as np
+from nemo_testcase_l2_gyre_round16_slow_forcing import read_slow_forcing
+from nemo_testcase_lock_slow_forcing_owner import depth_mean_statement
 from nemo_testcase_overflow_barotropic_gate import state_from_oracle_entry
 from nemo_testcase_phase3_stage_sweep_gate import GateError, git_sha, require, sha256
 from nemo_testcase_l2_gyre_phase3_gate import (
+    BT_PRE_MERGE_ORDER,
+    BT_TRACE_KEY,
     DIMS,
+    ORACLE_BT_SUBSTEP_NAMES,
     _trace_native,
     _xyz,
     expected_masks,
     read_bt_substeps,
     read_entry,
+    read_rhs,
     score,
 )
 
 CASE = "GYRE-zco"
-# NEMO's own recurrence order inside one barotropic substep, as the oracle
-# record writes it; scoring in this order is what makes "first over bar" a
-# statement about NEMO's execution rather than about a dict's iteration.
-BT_TRACE_ORDER = (
-    "eta_entry", "u_entry", "v_entry", "eta_mid", "u_mid", "v_mid",
-    "slow_u", "slow_v", "eta_exit", "eta_pgf",
-    "pgf_u", "pgf_v", "trd_u", "trd_v", "u_exit", "v_exit",
-)
 ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19_oracle_v2_external")
 
@@ -108,6 +121,13 @@ def read_rhs_payload(path: Path) -> dict:
     rather than duplicating the validation.
     """
     import struct
+
+    # The gate's own reader validates the header AND stamps the time-level
+    # registry (it raises on an unregistered dump); call it so this probe
+    # cannot bypass that check, then read the payload it discards.
+    registry = read_rhs(path)
+    require(registry["registry_level"] == "now",
+            f"{path}: unexpected registry level {registry['registry_level']!r}")
 
     with path.open("rb") as handle:
         magic = handle.read(16).decode("ascii").rstrip()
@@ -160,40 +180,6 @@ def nemo_reference_weights(mesh: Path, nlev: int) -> dict:
     return out
 
 
-def live_depth_mean(du_dt, eta, h_bathy, z_coord, config, grid, face_mask,
-                    *, tag: str, association: str = "model"):
-    """legoESM's own depth-mean statement, through the model's own helpers.
-
-    Identical in shape to the LOCK walk's ``depth_mean_statement``; the ``v``
-    face is added here because GYRE has wet V faces and LOCK does not.  The
-    arm-equality check against the captured production frame is what proves
-    nothing is re-derived.
-    """
-    import jax.numpy as jnp
-    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-        min_cell_to_uface,
-        min_cell_to_vface,
-        nemo_source_round,
-    )
-    from legoesm.ocean.vertical import compute_layer_thickness
-
-    if association not in ("model", "nemo_reciprocal"):
-        raise ValueError(f"unknown association {association!r}")
-    if tag not in ("u", "v"):
-        raise ValueError(f"unknown face {tag!r}")
-
-    h_k = compute_layer_thickness(eta, h_bathy, z_coord,
-                                  min_water_column_m=config.min_water_column_m)
-    h_f = min_cell_to_uface(h_k) if tag == "u" else min_cell_to_vface(h_k, grid)
-    pair = jnp.sum(jnp.stack([h_f, jnp.asarray(du_dt) * h_f], axis=-1), axis=-2)
-    depth = jnp.maximum(pair[..., 0], 1e-10)
-    if association == "model":
-        mean = pair[..., 1] / depth
-    else:
-        mean = pair[..., 1] * nemo_source_round(1.0 / depth)
-    return np.asarray(mean * face_mask)
-
-
 def reference_depth_mean(du_dt, weights, tag: str):
     """``stp2d.F90:180`` literally: reference thickness, reference reciprocal.
 
@@ -237,7 +223,9 @@ def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
     entry1_path = ROOT / "oracle_step_entry_kt00000001.bin"
     entry2_path = ROOT / "oracle_step_entry_kt00000002.bin"
     mesh_path = ROOT / "mesh_mask.nc"
-    for path in (substeps_path, rhs_path, entry1_path, entry2_path, mesh_path):
+    slow_path = ROOT / "oracle_slow_forcing_kt00000001.bin"
+    for path in (substeps_path, rhs_path, entry1_path, entry2_path, mesh_path,
+                 slow_path):
         require(path.is_file(), f"missing {path}")
 
     # The record set bounds the claim; assert it rather than assume it.
@@ -257,7 +245,26 @@ def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
 
     oracle = read_bt_substeps(substeps_path)
     rhs = read_rhs_payload(rhs_path)
+    slow = read_slow_forcing(slow_path)
     weights = nemo_reference_weights(mesh_path, nlev)
+    # Score every frame the record actually carries.  The GYRE record is
+    # format 2 (20 fields); a first draft copied the phase-3 gate's 16-name
+    # trace_order and silently left cor_u/cor_v -- the separated barotropic
+    # Coriolis -- and transport_metric_u/v unscored, then called the result
+    # "the whole external-mode trace".
+    recorded = [n for n in (ORACLE_BT_SUBSTEP_NAMES if "cor_u" in oracle
+                            else BT_PRE_MERGE_ORDER)]
+    # transport_metric_u/v are NOT scorable: the phase-3 gate already carries
+    # them as UNMEASURED because "oracle stores e2u/e1v metric transport; no
+    # independent metric operand was dumped" -- NEMO's frame and legoESM's are
+    # different quantities.  A first draft of this probe scored them anyway
+    # and reported transport_metric_u as the first frame over bar at 2639.4,
+    # which is a Rule-2 cross-quantity comparison, not a fidelity defect.  The
+    # gate's existing waiver is carried forward rather than re-judged.
+    WAIVED_TRACE = {"transport_metric_u", "transport_metric_v"}
+    waived_trace_reason = ("oracle stores e2u/e1v metric transport; no "
+                           "independent metric operand was dumped "
+                           "(phase-3 gate's existing UNMEASURED disposition)")
 
     entry1 = read_entry(entry1_path)
     entry2 = read_entry(entry2_path)
@@ -279,8 +286,15 @@ def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
                              surface_forcing=surface1)
     require(isinstance(trace.substeps, dict),
             "compiled step did not expose keyed barotropic substeps")
-    trace_frames = {name: _trace_native(np.asarray(trace.substeps[name]), name)
-                    for name in BT_TRACE_ORDER}
+    scored_trace_names = [n for n in recorded
+                          if BT_TRACE_KEY.get(n, n) in trace.substeps
+                          and n not in WAIVED_TRACE]
+    unexposed_trace_names = [n for n in recorded
+                             if n not in scored_trace_names]
+    trace_frames = {
+        name: _trace_native(
+            np.asarray(trace.substeps[BT_TRACE_KEY.get(name, name)]), name)
+        for name in scored_trace_names}
     captured = {name: trace_frames[name][0] for name in ("slow_u", "slow_v")}
     del trace_model
     jax.clear_caches()
@@ -294,41 +308,47 @@ def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
     nemo_dv = np.zeros_like(model_dv)
     nemo_du[:, 1:, :] = rhs["u"][..., :nlev]
     nemo_dv[1:, :, :] = rhs["v"][..., :nlev]
-    # PRECONDITION, measured, not assumed.  GYRE enters kt=1 at rest, so
-    # dyn_keg / dyn_zad / dyn_vor are products with a zero entry velocity and
-    # the dumped 3-D RHS is dyn_hpg alone -- but it is NOT zero: GYRE's
-    # usrdef_istate temperature varies with latitude, so the pressure gradient
-    # has something to act on.  A first draft of this probe asserted the frame
-    # was identically zero (it had targeted the DEEPEST wet face, whose RHS is
-    # zero, and read that as the whole array).  The measured value is
-    # published here so the claim cannot drift again.
-    nemo_rhs_abs_max = {"u": float(np.max(np.abs(nemo_du))),
-                        "v": float(np.max(np.abs(nemo_dv)))}
-    kt1_arms_informative = max(nemo_rhs_abs_max.values()) > 0.0
+    # PRECONDITION, measured ON THE WET FACES, which is where the first
+    # draft of this probe went wrong.  GYRE enters kt=1 at rest, so
+    # dyn_keg / dyn_zad / dyn_vor are products with a zero entry velocity, and
+    # the initial density field has no horizontal gradient, so dyn_hpg is zero
+    # as well: NEMO's dumped kt=1 uu(:,:,:,Krhs) is EXACTLY 0.0 on all 17400
+    # wet U faces and all 17100 wet V faces.  Its unmasked maximum is
+    # 5.256e-04, which lives entirely on LAND -- 1200 nonzero cells, none of
+    # them wet.  This probe first published that unmasked number and used it
+    # to "retract" the correct statement that the wet frame is zero; the
+    # retraction was the error and is itself retracted.  The consequence is
+    # structural: every kt=1 arm of the depth-mean statement is 0 == 0, so a
+    # kt=1 arm comparison PERTURBS A ZERO and cannot separate two weightings.
+    # The arms therefore run at kt=2 only, and the kt=1 block that reported
+    # "0 of 580 bit-unequal" as a control is deleted rather than relabelled.
+    nemo_rhs_abs_max = {
+        "u_wet": float(np.max(np.abs(nemo_du[:, 1:, :][masks["u"]]))),
+        "v_wet": float(np.max(np.abs(nemo_dv[1:, :, :][masks["v"]]))),
+        "u_including_land": float(np.max(np.abs(nemo_du))),
+        "v_including_land": float(np.max(np.abs(nemo_dv))),
+        "nonzero_cells_on_land_u": int(np.count_nonzero(nemo_du)),
+    }
+    kt1_arms_informative = max(nemo_rhs_abs_max["u_wet"],
+                               nemo_rhs_abs_max["v_wet"]) > 0.0
 
-    # kt=1 ARM-TO-ARM, not oracle-scored.  NEMO's kt=1 entry ssh is exactly
-    # 0.0, so the live and reference weightings should coincide BITWISE here;
-    # that is the control which shows the kt=2 separation below is eta, not a
-    # difference of code paths.
-    def _live1(du, tag, association):
-        arr = live_depth_mean(
-            du, seeded1.eta.data, seeded1.H_bathy.data, card.recipe.z_coord,
-            cfg, card.recipe.grid,
-            np.asarray(getattr(seeded1, f"{tag}_mask").data),
-            tag=tag, association=association)
-        return arr[:, 1:] if tag == "u" else arr[1:, :]
-
-    kt1_arms = {}
-    for tag, du, mask, trim in (("u", nemo_du, u_mask2d, lambda a: a[:, 1:, :]),
-                                ("v", nemo_dv, v_mask2d, lambda a: a[1:, :, :])):
-        ref = reference_depth_mean(trim(du), weights, tag) * mask
-        kt1_arms[tag] = {
-            "arm_abs_max": float(np.max(np.abs(ref[mask]))),
-            "reference_vs_live_divide_bit_unequal":
-                _bits(ref, _live1(du, tag, "model"), mask),
-            "reference_vs_live_reciprocal_bit_unequal":
-                _bits(ref, _live1(du, tag, "nemo_reciprocal"), mask),
-            "n": int(mask.sum()),
+    # ---- The reference arm is CALIBRATED against NEMO's own dumped
+    # operands, not only against a reconstruction.  NEMO dumps e3u, umask and
+    # r1_hu0 in oracle_slow_forcing_kt00000001.bin, so the mesh_mask
+    # reconstruction is checkable rather than trusted: the two must agree
+    # BITWISE on every wet face, and at kt=1 (ssh exactly 0.0) NEMO's LIVE e3u
+    # must equal its own reference e3u_0 bitwise too.
+    operand_calibration = {}
+    for tag, mask in (("u", u_mask2d), ("v", v_mask2d)):
+        e3_dump = slow[f"e3{tag}"]
+        mask_dump = slow[f"{tag}mask"]
+        r1_dump = slow[f"r1_h{tag}0"]
+        m3 = masks[tag]
+        operand_calibration[tag] = {
+            "live_e3_vs_reference_e3_0_bit_unequal":
+                _bits(e3_dump, weights[f"e3{tag}_0"], m3),
+            "mask_bit_unequal": _bits(mask_dump, weights[f"{tag}mask"], m3),
+            "r1_h0_bit_unequal": _bits(r1_dump, weights[f"r1_h{tag}_0"], mask),
         }
 
     # ---- ORACLE-SCORED rows.  The production slow-forcing frame is the one
@@ -336,14 +356,21 @@ def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
     rows = []
     bit_census = {}
     for tag, mask in (("u", u_mask2d), ("v", v_mask2d)):
+        candidate = captured[f"slow_{tag}"]
+        if plant:
+            # score() plants into its OWN copy, so a census taken on the
+            # unplanted array would report 0 bit-unequal while the row reads
+            # DEBT -- the census would then be outside the control.  Plant
+            # here instead, with the same convention, so both see it.
+            candidate = np.array(candidate, copy=True)
+            wet = np.argwhere(mask)[0]
+            candidate[tuple(wet)] += 1.0
         rows.append(score(f"{CASE}.kt1.substep1.slow_{tag}.model_captured",
-                          oracle[f"slow_{tag}"][0], captured[f"slow_{tag}"],
-                          mask, plant=plant))
+                          oracle[f"slow_{tag}"][0], candidate, mask))
         # score() uses np.array_equal, which is VALUE equality (-0.0 == 0.0).
         # The bar is BITS, so publish both (round-27 Rule-11 record).
         bit_census[f"slow_{tag}"] = {
-            "bit_unequal": _bits(oracle[f"slow_{tag}"][0],
-                                 captured[f"slow_{tag}"], mask),
+            "bit_unequal": _bits(oracle[f"slow_{tag}"][0], candidate, mask),
             "n": int(mask.sum())}
 
     # The kt=1 3-D momentum RHS NEMO dumps after stp_2D.  GYRE enters kt=1 at
@@ -361,20 +388,38 @@ def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
     trace_masks = {"eta": masks["ssh"], "u": u_mask2d, "v": v_mask2d}
     bt_rows = []
     bt_first_over_bar = None
+    bt_first_bit_unequal = None
+    bt_uninformative = []
     for jn in range(oracle["ncycle"]):
-        for name in BT_TRACE_ORDER:
+        for name in scored_trace_names:
             stagger = ("u" if name.startswith("u_") or name.endswith("_u")
                        else "v" if name.startswith("v_") or name.endswith("_v")
-                       else "eta")
+                       else "eta" if name.startswith("eta") else None)
+            require(stagger is not None,
+                    f"cannot infer the staggering of trace frame {name!r}; "
+                    "a silent default would score it on the wrong mask")
+            mask = trace_masks[stagger]
             row = score(f"{CASE}.kt1.bt.jn{jn + 1:02d}.{name}",
-                        oracle[name][jn], trace_frames[name][jn],
-                        trace_masks[stagger])
+                        oracle[name][jn], trace_frames[name][jn], mask)
             row["substep"], row["boundary"] = jn + 1, name
+            # score()'s bar is 1e-15 on a NORMALIZED residual, which on this
+            # frame is an effective RELATIVE tolerance of about 5e-08 -- it is
+            # not the bit bar.  So publish the first BIT-unequal frame too;
+            # otherwise "800 rows at bar" reads stronger than it is.
+            unequal_bits = _bits(oracle[name][jn], trace_frames[name][jn], mask)
+            row["bit_unequal"] = unequal_bits
+            if not np.any(oracle[name][jn][mask]):
+                bt_uninformative.append(row["name"])
             bt_rows.append(row)
             if row["status"] != "AT-BAR" and bt_first_over_bar is None:
                 bt_first_over_bar = {"substep": jn + 1, "boundary": name,
                                      "absolute_max": row["absolute_max"],
                                      "n_unequal": row["n_unequal"]}
+            if unequal_bits and bt_first_bit_unequal is None:
+                bt_first_bit_unequal = {"substep": jn + 1, "boundary": name,
+                                        "bit_unequal": unequal_bits,
+                                        "n": int(mask.sum()),
+                                        "absolute_max": row["absolute_max"]}
 
     # ---- kt=2 sizing.  NOT an oracle comparison: there is no dumped GYRE
     # slow-forcing frame at kt=2.  This is the reference-minus-live difference
@@ -385,7 +430,7 @@ def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
             ("u", np.asarray(tend2.du_dt.data), u_mask2d, lambda a: a[:, 1:]),
             ("v", np.asarray(tend2.dv_dt.data), v_mask2d, lambda a: a[1:, :])):
         def live_arm(association, _du=du, _tag=tag, _trim=trim):
-            return _trim(live_depth_mean(
+            return _trim(depth_mean_statement(
                 _du, seeded2.eta.data, seeded2.H_bathy.data,
                 card.recipe.z_coord, cfg, card.recipe.grid,
                 np.asarray(getattr(seeded2, f"{_tag}_mask").data),
@@ -439,6 +484,51 @@ def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
                     "a one-ULP change to NEMO's e3u_0 did not move the "
                     "reference arm; the arm is not reading e3u_0")
             kt2["reference_arm_reads_e3u_0_cells_moved"] = moved
+    # ---- The OTHER thickness convention, which the reference-versus-live
+    # question does not cover and which is NOT roundoff.  NEMO's live face
+    # stretch is an AREA-WEIGHTED MEAN of the two neighbouring ssh
+    # (domqco.F90:166-169), so its live column depth is hu_0*(1+r3u); legoESM
+    # builds the face thickness with a MIN rule and sums it.  stp2d.F90:200
+    # divides the wind stress by NEMO's r1_hu(Kbb), i.e. by that mean-rule
+    # depth.  MIN is not MEAN, and the difference is first order in eta/H.
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import min_cell_to_uface
+    from legoesm.ocean.vertical import compute_layer_thickness
+    import netCDF4
+
+    with netCDF4.Dataset(mesh_path) as data:
+        e1t = np.asarray(data.variables["e1t"][0], dtype=np.float64)
+        e2t = np.asarray(data.variables["e2t"][0], dtype=np.float64)
+        e1u = np.asarray(data.variables["e1u"][0], dtype=np.float64)
+        e2u = np.asarray(data.variables["e2u"][0], dtype=np.float64)
+    e1e2t, e1e2u = e1t * e2t, e1u * e2u
+    min_vs_mean = {}
+    for tag, ssh_state, label in (("kt1", entry1["ssh"], "eta == 0"),
+                                  ("kt2", entry2["ssh"], "eta != 0")):
+        seeded = seeded1 if tag == "kt1" else seeded2
+        h_k = compute_layer_thickness(
+            seeded.eta.data, seeded.H_bathy.data, card.recipe.z_coord,
+            min_water_column_m=cfg.min_water_column_m)
+        h_min = np.sum(np.asarray(min_cell_to_uface(h_k))[:, 1:, :], axis=-1)
+        ssh_e = np.roll(ssh_state, -1, axis=1)
+        area_e = np.roll(e1e2t, -1, axis=1)
+        r3u = (0.5 * (e1e2t * ssh_state + area_e * ssh_e)
+               * weights["r1_hu_0"] / e1e2u)
+        h_mean = weights["hu_0"] * (1.0 + r3u)
+        m = u_mask2d.copy()
+        m[:, -1] = False           # the rolled east neighbour is off-domain
+        rel = float(np.max(np.abs((h_min[m] - h_mean[m]) / h_mean[m])))
+        min_vs_mean[tag] = {
+            "regime": label,
+            "max_relative_min_minus_mean": rel,
+            "n": int(m.sum()),
+            "bit_unequal": _bits(h_min, h_mean, m),
+        }
+    min_vs_mean["nemo_source"] = (
+        "domqco.F90:166-169 r3u = 0.5*(e1e2t(i)*ssh(i) + e1e2t(i+1)*ssh(i+1))"
+        " * r1_hu_0 * r1_e1e2u; stp2d.F90:200 divides the wind stress by"
+        " r1_hu(Kbb)")
+    min_vs_mean["comparison"] = "ARM-TO-ARM, NOT ORACLE-SCORED"
+
     h_col = np.asarray(seeded2.H_bathy.data)
     eta2 = np.asarray(entry2["ssh"])
     wet = masks["ssh"]
@@ -464,6 +554,10 @@ def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
                                     masks[field]))
 
     over = [row["name"] for row in rows if row["status"] != "AT-BAR"]
+    over += [f"{name}.bits" for name, census in bit_census.items()
+             if census["bit_unequal"]]
+    if bt_first_over_bar is not None:
+        over.append("kt1.bt." + bt_first_over_bar["boundary"])
     at_rest = {"kt1_entry_abs_max_u": float(np.max(np.abs(entry1["u"]))),
                "kt1_entry_abs_max_v": float(np.max(np.abs(entry1["v"])))}
     report = {
@@ -496,7 +590,14 @@ def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
         "kt1_rows_over_bar": over,
         "kt1_barotropic_trace_rows_scored": len(bt_rows),
         "kt1_barotropic_first_over_bar": bt_first_over_bar,
-        "kt1_arm_to_arm_bit_separation": kt1_arms,
+        "kt1_barotropic_first_bit_unequal": bt_first_bit_unequal,
+        "kt1_barotropic_frames_scored": scored_trace_names,
+        "kt1_barotropic_frames_recorded_but_not_exposed": unexposed_trace_names,
+        "kt1_barotropic_frames_waived": {"frames": sorted(WAIVED_TRACE),
+                                         "reason": waived_trace_reason},
+        "kt1_barotropic_rows_with_an_all_zero_oracle_frame":
+            len(bt_uninformative),
+        "reference_arm_operand_calibration_vs_nemo_dump": operand_calibration,
         "kt2_entry_rows_after_one_step": kt2_entry_rows,
         "arm_to_arm_note": (
             "the four depth-mean arms are NOT scored against NEMO's frame: "
@@ -506,13 +607,18 @@ def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
             "shared operand, at kt=2, because NEMO's kt=1 3-D momentum RHS "
             "is identically zero on this card."),
         "kt2_reference_vs_live_sizing": kt2,
+        "min_rule_versus_nemo_area_weighted_mean_depth": min_vs_mean,
         "planted_control": plant,
     }
     if plant:
-        planted = [row for row in rows if row["name"].endswith(
-            "slow_u.model_captured")]
-        require(planted and not planted[0]["exact"],
-                "the planted slow_u violation did not fire")
+        planted = [row for row in rows
+                   if row["name"].endswith("model_captured")]
+        require(len(planted) == 2 and not any(row["exact"] for row in planted),
+                "a planted slow-forcing violation did not fire on both faces")
+        require(all(c["bit_unequal"] for c in bit_census.values()),
+                "the planted violation is invisible to the BIT census")
+        require(bool(over), "the planted violation did not reach the "
+                            "gate's exit status")
     return report
 
 

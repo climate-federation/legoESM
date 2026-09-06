@@ -99,33 +99,42 @@ EXTERNAL_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round25_lock_external_oracle")
 
 
-def depth_mean_statement(du_dt, eta, h_bathy, z_coord, config, u_mask,
+def depth_mean_statement(du_dt, eta, h_bathy, z_coord, config, grid,
+                         face_mask, *, tag: str = "u",
                          association: str = "model"):
     """The model's own statement, called through the model's own helpers.
 
     ``ocean_model_latlon_cgrid`` builds the barotropic slow forcing as
-    ``compute_layer_thickness`` -> ``min_cell_to_uface`` -> a fused
-    ``sum(h_u)``/``sum(du_dt*h_u)`` pair -> divide -> mask.  Nothing here is
-    re-derived; the arm-equality check against the captured production frame
-    is what proves that.
+    ``compute_layer_thickness`` -> ``min_cell_to_uface``/``min_cell_to_vface``
+    -> a fused ``sum(h_f)``/``sum(du_dt*h_f)`` pair -> divide -> mask.  Nothing
+    here is re-derived; the arm-equality check against the captured production
+    frame is what proves that.
+
+    This is the ONE implementation: the GYRE weighting probe imports it rather
+    than carrying a second copy (round 28; duplicated numerics are forbidden
+    in this repo).  ``tag`` selects the face and ``grid`` is required by
+    ``min_cell_to_vface``.
     """
     import jax.numpy as jnp
     from legoesm.ocean.dynamics.latlon_cgrid_operators import (
         min_cell_to_uface,
+        min_cell_to_vface,
         nemo_source_round,
     )
     from legoesm.ocean.vertical import compute_layer_thickness
 
     # Fail early on the static selection, before any work: an unknown
-    # association must never fall through to a default arm.
+    # association or face must never fall through to a default arm.
     if association not in ("model", "nemo_reciprocal"):
         raise ValueError(f"unknown association {association!r}")
+    if tag not in ("u", "v"):
+        raise ValueError(f"unknown face {tag!r}")
 
     h_k = compute_layer_thickness(
         eta, h_bathy, z_coord,
         min_water_column_m=config.min_water_column_m)
-    h_u = min_cell_to_uface(h_k)
-    pair = jnp.sum(jnp.stack([h_u, jnp.asarray(du_dt) * h_u], axis=-1), axis=-2)
+    h_f = min_cell_to_uface(h_k) if tag == "u" else min_cell_to_vface(h_k, grid)
+    pair = jnp.sum(jnp.stack([h_f, jnp.asarray(du_dt) * h_f], axis=-1), axis=-2)
     depth = jnp.maximum(pair[..., 0], 1e-10)
     if association == "model":
         mean = pair[..., 1] / depth
@@ -133,7 +142,7 @@ def depth_mean_statement(du_dt, eta, h_bathy, z_coord, config, u_mask,
         # stp2d.F90:185 multiplies by the PRECOMPUTED reciprocal r1_hu_0, it
         # does not divide.  x*(1/H) and x/H differ by up to one ULP.
         mean = pair[..., 1] * nemo_source_round(1.0 / depth)
-    return np.asarray(mean * u_mask)
+    return np.asarray(mean * face_mask)
 
 
 def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
@@ -261,7 +270,8 @@ def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
             ("statement_nemo_rhs_reciprocal", nemo_du_dt, "nemo_reciprocal")):
         arms[name] = depth_mean_statement(
             du_dt, state.eta.data, state.H_bathy.data,
-            card.recipe.z_coord, cfg, u_mask_full, association=association)[:, 1:]
+            card.recipe.z_coord, cfg, card.recipe.grid, u_mask_full,
+            tag="u", association=association)[:, 1:]
 
     rows = [score_frame(f"{CASE}.kt1.substep1.slow_u.model_captured",
                         oracle_slow_u, candidate_captured, mask)]

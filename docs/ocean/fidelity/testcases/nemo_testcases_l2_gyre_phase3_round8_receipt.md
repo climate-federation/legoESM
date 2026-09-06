@@ -5023,7 +5023,7 @@ fails none extra.
 
 ### Merge readiness
 
-`fidelity/nemo-testcases-l2-gyre-codex2` is **74 commits ahead of
+`fidelity/nemo-testcases-l2-gyre-codex2` is **78 commits ahead of
 `03c6e8d96ff7`**, which is the tip of BOTH `origin/fidelity/nemo-gyre-integration-merge`
 and `origin/fidelity/nemo-testcases-l2-gyre-reconciled`, and is an ancestor of
 this branch — so the integration is a FAST-FORWARD with zero conflicts by
@@ -5034,9 +5034,14 @@ it: this round landed no model numerics at all — the only change under
 `packages/` is a one-line comment, verified by `git diff` — and the
 pre-existing focused-test failures are unchanged in kind.  Independent
 adversarial review of round 27 HAS now run — two reviewers, two blockers and
-six retractions, all folded in above and all re-measured before acceptance;
-review of rounds 25 and 26 remains **OUTSTANDING**.  The merge decision itself is not made
-here.
+six retractions, all folded in above and all re-measured before acceptance.
+
+*(Corrected in round 28: the two sentences that stood here said rounds 25 and
+26 were unreviewed.  They were not.  Round 25 was independently reviewed and
+round 26 acted on that review; round 26 was reviewed in turn — its own section
+records two reviewers and four retractions — and so was round 27.  The commit
+count "74" above was also wrong; measured at this tip it is 78.)*  The merge
+decision itself is not made here.
 
 ### Open questions
 
@@ -5060,8 +5065,9 @@ here.
    from a disposable worktree, so round 26's open question 1 is no longer
    blocking a measurement — but the two branches are still divergent and that
    is a decision, not a finding.
-5. **Independent adversarial review of rounds 25 and 26** — OUTSTANDING;
-   round 27's has run and is folded in above.
+5. ~~**Independent adversarial review of rounds 25 and 26** — OUTSTANDING~~
+   — RETIRED in round 28: rounds 25, 26 and 27 have each been independently
+   reviewed, and each review is recorded in its own section.
 
 ### ASKED / UNASKED
 
@@ -5088,6 +5094,329 @@ Two probe worktrees are FLAGGED, not deleted: `/tmp/codex-orca2-r27-probe`
 Every figure above is pinned in `manifests/nemo_testcase_l2_gyre_round27.json`;
 the reports live under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round27/` with SHA-256 in
+`artifacts.sha256`.
+
+Verdict stays **HOLD** on merging.  Nothing was merged or pushed.
+
+## Round 28 — the GYRE merge blocker is REFUTED, and the gates learn to fail
+
+Round 28 starts from `359c33c40ecc` on a clean tree, same regime: CPU
+production JIT, fp64/x64, `transcendentals="libm"`, oracle V2.  The
+preregistration is
+`manifests/nemo_testcase_l2_gyre_round28_preregister.json`, committed at
+`2f292b24e110` before any measurement below.  No NEMO executable was run and
+no configuration choice was made.  Oracle roots are the round-27 ones,
+unchanged.
+
+### Rule 0 first — GYRE does not execute the statement round 27 named
+
+`stp2d.F90:177` opens a `SELECT CASE( n_dynadv )` with two arms.  `:178` is
+`CASE( np_VEC_c2, np_LIN_dyn )` and its body `:180` ASSIGNS the depth mean;
+`:183` is `CASE ( np_FLX_c2, np_FLX_up3 )` and its body `:185` CUMULATES it
+onto the 2-D advective RHS.  GYRE's `namelist_cfg` sets
+`ln_dynadv_vec = .true.`, so GYRE executes `stp2d.F90:180`; LOCK and OVERFLOW
+set `ln_dynadv_up3 = .true.` and execute `stp2d.F90:185`.  Round 27's open question named
+`:185` for GYRE.  Both arms weight with the reference `e3u_0` and multiply by
+the reference `r1_hu_0` (`domain.F90:159`), so the question survives the
+correction and only the line moves.
+
+Two more readings bound what this round can claim, and both were taken before
+the manifest was written.  `stprk3.F90:186` calls `stp_2D` exactly ONCE per
+timestep, from the `Nbb` entry, so the state entering kt=2 is produced by a
+step whose slow forcing used the kt=1 entry state.  And the GYRE oracle V2
+record set holds `oracle_bt_substeps_kt00000001.bin` only, with a reader that
+requires `kt == 1` — there is no dumped GYRE slow-forcing frame at kt=2, so a
+kt=2 arm cannot be SCORED against the oracle.  What is measurable at kt=2 is
+an arm-to-arm difference, and it is labelled as one everywhere below.
+
+### The blocker, measured
+
+| what | measured |
+|---|---|
+| GYRE kt=1 entry `ssh` / `u` / `v` | `0.0` / `0.0` / `0.0` — at rest |
+| GYRE kt=1 `slow_u` vs NEMO | `0 / 580` unequal, **`0` BIT-unequal** |
+| GYRE kt=1 `slow_v` vs NEMO | `0 / 570` unequal, **`0` BIT-unequal** |
+| GYRE kt=1 external mode, 18 frames x 50 substeps | `900` rows, first-over-bar **NONE** |
+| first BIT-unequal frame of those 900 | substep 7 `trd_u`, `1 / 580` cells, `5.048709793414476e-29` |
+| kt=2 reference minus live, relative | `8.307570867102084e-16` (U), `5.993770496385322e-16` (V) |
+| kt=2 max \|eta\| / H | `6.622180591839445e-07` |
+
+So the reference-versus-live weighting is **roundoff — about 4 ulp — and NOT
+`O(eta/H)`**.  Round 27 asserted the `O(eta/H)` sizing without measuring it;
+that assertion is RETRACTED and replaced by the two numbers above, which sit
+nine decades apart.
+
+It cannot own GYRE's kt2 rows for a second, independent reason that needs no
+sizing argument at all: `stp_2D` runs once per step from the kt=1 entry, where
+`ssh` is exactly `0.0`, so during the step that PRODUCES the kt=2 state the
+live and reference thicknesses are the same numbers.  The difference is
+identically zero there.
+
+**The GYRE merge blocker as round 27 posed it is REFUTED.**  Nothing is
+landed: the reference weighting is bitwise identical to the live one on every
+frame the GYRE records can score, so there is no measured basis for a model
+change.
+
+The reference arm is not merely a reconstruction.  NEMO dumps its own
+operands in `oracle_slow_forcing_kt00000001.bin`, and this probe's mesh-built
+`e3u_0`, `umask` and `r1_hu_0` are **`0` bit-unequal** against them on both
+faces — which is also the check that NEMO's LIVE `e3u` equals its own
+reference `e3u_0` bitwise at this zero-`ssh` entry.
+
+### The next operand, named and sized — MIN is not MEAN
+
+The reference-versus-live question is not the only thickness question, and the
+other one is NOT roundoff.  NEMO's live face stretch is an AREA-WEIGHTED MEAN
+of the two neighbouring `ssh` (`domqco.F90:166-169`), and `stp2d.F90:200`
+divides the wind stress by that mean-rule depth; legoESM builds the face
+thickness with a MIN rule and sums it.
+
+| where | max relative \| MIN − NEMO's MEAN \| | bit-unequal |
+|---|---|---|
+| kt=1, `eta == 0` | `0.0` | `0 / 580` |
+| kt=2, `eta != 0` | `3.058607589676341e-08` | `580 / 580` |
+
+That is `0.046 x (eta/H)` — first order, and eight decades above the
+reference-versus-live residual.  It is also exactly zero during step 1, so it
+does not own GYRE's kt2 rows either; it enters from kt=3.  It is registered as
+DEBT with its measured size and its source line, and it recurs inside the RK3
+stages, where NEMO recomputes `r3u` per stage.
+
+### Where GYRE's kt2 divergence is, and where it is not
+
+One step from NEMO's own kt=1 entry reproduces the round-23 register rather
+than a private number — two instruments converging:
+
+| field | this round | round-23 register (normalized) |
+|---|---|---|
+| u | `17400/17400` at `9.484089938411461e-07` | `9.48409e-07` |
+| v | `17100/17100` at `8.987992610401277e-07` | `8.98799e-07` |
+| T | `11840/18000` at `3.1956659540810506e-11` | `1.36147e-12` |
+| S | `11229/18000` at `8.171241461241152e-13` | `2.21811e-14` |
+| ssh | `0/600` at `0.0` — bit-exact | `4.33681e-19` |
+
+`score` normalizes by `max(|oracle|, 1.0)`, so the T and S columns agree once
+divided by their own scales (`23.47` and `36.84`); u and v need no
+normalization and match to ten figures.  The ssh row differs because the two
+paths seed differently — this round seeds NEMO's kt=1 entry, the register
+steps the card's own trajectory — and both are at the bar.  The u residual is
+`1.586e-05` RELATIVE to that frame's own `max|u| = 5.98e-02`.
+
+Everything NEMO computes before the RK3 stages is at the bar on GYRE, ssh
+after one step is bit-exact, and yet every U and V cell is wrong at ~1e-5
+relative.  The divergence is produced AFTER the external mode, inside
+`stp_RK3_stg`.  Recorded honestly, because a reviewer raised it: "inside the
+stages" and "a thickness convention" are NOT alternatives, since NEMO
+recomputes `r3u` per stage — the MIN-versus-MEAN row above is a live candidate
+INSIDE the stages, not a competitor to them.
+
+### Rule-11 records
+
+**Dead claim 1 (round 27).** "Reference-versus-live is a SEPARATE and much
+larger difference at kt >= 2, `O(eta/H)`."  Measured: `8.31e-16` relative
+against `eta/H = 6.62e-07`.  It is roundoff.
+
+**Dead claim 2 (this round's own, retracted twice).**  A draft published
+`5.256e-4` as NEMO's kt=1 momentum-RHS maximum and used it to retract the
+statement that the frame is zero.  That number is UNMASKED: measured on the
+wet faces the frame is exactly `0.0` on all 17400 U and all 17100 V faces, and
+its 1200 nonzero cells are all on LAND.  So the original statement was right,
+the retraction was the error, and the retraction is retracted.  The
+consequence is structural: every kt=1 arm of the depth-mean statement is
+`0 == 0`, so the kt=1 "0 of 580 bit-unequal" that a draft reported as a
+control was PERTURBING A ZERO.  That block is deleted, not relabelled, and the
+arms run at kt=2 only.
+
+**Dead claim 3 (this round's own).** "The whole kt=1 external-mode trace, 800
+rows, none over bar."  The record is format 2 and carries 20 frames; the draft
+copied the phase-3 gate's 16-name list and silently omitted `cor_u`/`cor_v` —
+the separated barotropic Coriolis — and `transport_metric_u`/`_v`.  Scored
+now: `cor_u`/`cor_v` are IN and at the bar, which is a real gain; the two
+`transport_metric` frames are OUT, carrying the phase-3 gate's existing
+UNMEASURED waiver ("oracle stores e2u/e1v metric transport; no independent
+metric operand was dumped").  A draft scored them anyway and reported
+`transport_metric_u` as the first frame over bar at `2639.4` — a Rule-2
+cross-quantity comparison, not a defect.  The corrected figure is 900 rows
+over 18 comparable frames, first-over-bar NONE.
+
+**Dead claim 4 (this round's own).** The docstring claimed an arm-equality
+check against the captured production frame, copied from the LOCK probe.  No
+such check exists here and none can: legoESM's `F_slow` is the depth mean PLUS
+wind, drag and biharmonic increments, so the sub-statement is not that frame.
+The preregistered `statement_model_rhs` calibration arm is therefore DROPPED,
+with that reason, rather than reported.
+
+**Scope correction, not a retraction.** The cancellation mechanism is written
+for the `dz_ref * (1 + eta/H)` form.  GYRE's card resolves an
+`OceanPartialCellCoordinate`, whose thickness builder takes a partial-cell
+branch; the factorisation survives only while the min-rule's argmin does not
+switch with depth.  On GYRE it does not — `h_u(k)/e3u_0(k)` is constant to one
+ulp — but on stepped bathymetry it can, and ORCA2 is zps.  UNMEASURED there.
+
+### Both gates learn to fail
+
+**The citation gate was still defeatable, and the defeats were re-run first.**
+Round 27 pinned both endpoints of a range but audited them by shifting every
+line TOGETHER, so a changed range EXTENT was never tested; terminal tokens
+recur so densely that both ends of a widened range still matched.  Measured on
+the shipped gate: `stprk3_stg.F90:309-334` still passed with its end moved to
+line 533, because line 334 and line 533 are both `ENDIF`.  And a range written
+backwards, 309 down to 300, returned an empty list, after which `check` raised
+`IndexError` — a malformed citation had no verdict at all.
+
+Three guards replace one.  An endpoint anchor must now IDENTIFY its line — a
+symbol unique in the file, or `(symbol, nth)` naming which occurrence is meant
+— so no line-number error of any size passes; every multi-line citation states
+its LENGTH a second time; and a reversed or empty range raises cleanly.  31 of
+the 86 map entries were anchored on a symbol occurring 2 to 59 times and are
+now pinned by occurrence.
+
+| defeat re-tried | verdict |
+|---|---|
+| `stprk3_stg.F90:309-334` widened to end at line 533 | EXTENT-MISMATCH |
+| same, with the pinned extent widened to match | SYMBOL-NOT-AT-LINE |
+| the same citation reversed, 309 down to 300 | BAD-CITATION |
+| five terminal-token ranges widened | EXTENT-MISMATCH, all five |
+| uniform `+2` shift, and each endpoint shifted alone | SYMBOL-NOT-AT-LINE |
+| a bare `ENDIF` as an anchor | AMBIGUOUS-ANCHOR |
+| an unmapped citation appended to a copy of the receipt | FAIL, exit `1` |
+
+The shift audit is RETIRED rather than kept: once an anchor resolves to one
+line, no shift can pass, so a shift sweep could never report anything and
+would have been decoration.  What replaces it is an audit over the WHOLE map —
+entries this round's prose did not cite are checked too — plus a self-test
+that plants five defects (bare terminal anchor, widened extent with the extent
+widened to match, reversed range, and each endpoint shifted on its OWN) and
+fails the gate unless every one fires AND the unplanted baseline still passes.
+
+CI now runs it.  Round 27 shipped the gate but nothing in the suite called
+`run` on the receipt, so a bad citation only failed if somebody remembered to
+run the script.  Two tests do it now — one asserts the real receipt is clean,
+one plants a shifted citation and asserts the same call turns red.  Coverage
+is stated instead of implied: **rounds 25 onward are audited; rounds 1-24 are
+NOT**, and the gate's own report carries that in a field.  16 tests pass.
+
+**The bit bar is in an exit code.**  `nemo_testcase_rule12_hpg_eligibility.py`
+published `bit_exact_given_nemo_inputs: false` while exiting `0`, so a caller
+that checked only the exit status read a bit-DEBT row as at the bar.  The
+value-exact-but-bit-unequal case now has its own status, and only bit equality
+exits `0`.
+
+| card | status | bit-unequal | exit |
+|---|---|---:|---:|
+| LOCK_EXCHANGE-zco | VALUE-AT-BAR | `1260 / 2540` | `1` |
+| OVERFLOW-zps | VALUE-AT-BAR | `16400 / 16900` | `1` |
+| LOCK, planted | DEBT | — | `1` |
+
+The receipt sentence, restated: the round-25 HPG change is **value-exact on
+LOCK and OVERFLOW, bit-exact on ORCA2, and on GYRE its eligibility frame is
+UNINFORMATIVE** — NEMO's kt=1 momentum RHS is exactly zero on every wet face
+there, so that row compares zeros with zeros and cannot discriminate.  The
+signed-zero population itself is untouched: landing it is user decision 16.
+
+### One shared implementation, and a controlled re-run
+
+The GYRE probe first carried its own copy of the depth-mean statement.  That
+is duplicated numerics, which this repo forbids, so the LOCK probe's
+`depth_mean_statement` became the one implementation — extended with a face
+selector and the grid the V-face helper needs — and GYRE imports it.  LOCK was
+re-run afterwards and every row is unchanged: `1 / 127` at
+`2.168404344971009e-19` on three arms, `0 / 127` at `0.0` on the reciprocal
+arm, instrument-reproduces-model `true`.
+
+### Card debt registered, card NOT changed
+
+The LOCK and OVERFLOW cards resolve `vorticity_scheme = "al81"` from a module
+default.  NEMO's LOCK card resolves `ln_dynvor_ens = .true.`
+(`namelist_cfg:91`, printed at `lock_kt1_10/ocean.output:715`) — the
+enstrophy-conserving scheme, which is not the same operator.  Measured inert
+at the kt=1 rest start: the vorticity term adds exactly `0.0` there, and the
+eligibility gate asserts it.  Whether it is inert at kt >= 2 is **UNMEASURED**,
+and LOCK's first-over-bar is kt4 `u`, so it is a live candidate there.  The
+card is NOT changed — that is a user decision, and it is open question 3.
+
+### Merge readiness
+
+`fidelity/nemo-testcases-l2-gyre-codex2` is **81 commits ahead of**
+`03c6e8d96ff7`, which is the tip of BOTH
+`origin/fidelity/nemo-gyre-integration-merge` and
+`origin/fidelity/nemo-testcases-l2-gyre-reconciled`, and is an ANCESTOR of
+this branch (`git merge-base --is-ancestor` returns true).  The integration is
+therefore a FAST-FORWARD with zero conflicts by construction.
+
+What blocks that fast-forward after this round: **nothing mechanical**.  Round
+28 landed no model numerics — the only changes are under
+`scripts/validate/`, `tests/` and `docs/` — and it removed one merge blocker
+by measurement rather than by decision.  Two gates that previously exited `0`
+on a defect now exit non-zero, which is a strictly tighter tree, and the
+pre-existing focused-test failures are unchanged in kind.
+
+What is honestly still open next to it, with numbers:
+
+| card | first-over-bar at HEAD | detail |
+|---|---|---|
+| GYRE-zco | kt2 T/S/u/v | u `17400/17400` at `9.484e-07` (`1.586e-05` relative); v `17100/17100` at `8.988e-07`; T `1.361e-12` and S `2.218e-14` normalized; ssh AT-BAR |
+| LOCK_EXCHANGE-zco | kt4 `u` | later than lane 1's certified kt2; seven Rule-12 rows registered in round 24 |
+| OVERFLOW-zps | seven Rule-12 rows | localized in round 23 |
+| ORCA2 | AT-BAR on all six HPG components | round 27, from a disposable probe worktree |
+
+Both remaining thickness conventions are now measured and neither owns GYRE's
+kt2 rows.  The merge decision itself is not made here.
+
+### Open questions
+
+1. **The MIN-versus-MEAN face-thickness rule.**  `3.06e-08` relative at kt=2,
+   first order in `eta/H`, source-cited, exactly zero during step 1 so it does
+   not own the kt2 rows but does enter from kt=3 and recurs per RK3 stage.
+   Land the MEAN rule source-literally, or leave it as named debt?
+2. **The signed-zero population in the kt=1 momentum-RHS frame** — unchanged
+   from round 27: `1260 / 2540` on LOCK, `16400 / 16900` on OVERFLOW, DEBT
+   with a CONFIRMED owner.  User decision 16, still pending; not landed.
+3. **The LOCK/OVERFLOW cards' `vorticity_scheme`** — `al81` by module default
+   against NEMO's `ln_dynvor_ens`.  Inert at the rest start, UNMEASURED at
+   kt >= 2, and LOCK's first-over-bar is kt4 `u`.  Measure it, or change the
+   card?  Card untouched this round.
+4. **The native demo GYRE card's momentum program** — unchanged per the
+   standing decision (15C); the five `test_nemo_recipe` failures stay
+   attributed to it.
+5. **The partial-cell scope limit** — the depth-mean cancellation is measured
+   on GYRE (flat-bottom, argmin constant to one ulp) and UNMEASURED on a
+   stepped-bathymetry card.  Re-run the kt=2 sizing on ORCA2?
+6. **Rounds 1-24 of this receipt are UNAUDITED by the citation gate.**  Extend
+   the map backwards, or leave the statement standing?
+
+### ASKED / UNASKED
+
+| choice | disposition |
+|---|---|
+| correct GYRE's executed statement from `stp2d.F90:185` to `:180` | not a scientific choice; corrected against the shipped source and gated |
+| measure the reference-versus-live weighting instead of asserting its size | ASKED; REFUTED as `O(eta/H)`, measured at `8.31e-16` |
+| **land** the reference weighting | NOT DONE — bitwise identical to the live arm on every scorable GYRE frame, so there is no measured basis |
+| score the barotropic Coriolis frames that were being skipped | ASKED; landed; both are at the bar |
+| carry the phase-3 gate's `transport_metric` waiver rather than re-judge it | ASKED; the draft's `2639.4` "first over bar" is retracted as a cross-quantity comparison |
+| make `depth_mean_statement` one shared implementation | ASKED; landed; LOCK re-run, every row unchanged |
+| give the eligibility gate a status the exit code reflects | ASKED; landed; both cards now exit `1` |
+| re-anchor 31 citation-map entries by occurrence and pin every range length | not a scientific choice; every named defeat re-tried and closed |
+| state rounds 1-24 as unaudited rather than extend the map | ASKED; stated in the gate's report and in this section |
+| land the signed-zero `dyn_vor` accumulation | FORBIDDEN this round; untouched |
+| change the demo card's `vertical_momentum_scheme` / `adaptive_implicit_vertadv` | FORBIDDEN this round; untouched |
+| change the LOCK card's `vorticity_scheme` | FORBIDDEN; registered as debt instead |
+| shipped NEMO edit, `makenemo`, `mpirun`, push, merge, deletion | forbidden; none performed |
+
+UNASKED list: empty.
+
+Independent adversarial review of round 28 ran on the mechanism and on the
+diff, two reviewers.  Both found real defects, every one was re-measured
+before acceptance, and the four Rule-11 records above are theirs: the unmasked
+precondition, the zero-perturbing kt=1 control, the 16-of-20 trace, and the
+docstring's phantom calibration check.  Three further findings are folded in
+as scope limits (partial cells, the normalized-versus-bit bar, and stage-wise
+`r3u`), and one — that NEMO had DUMPED the operands this probe was
+reconstructing — became the calibration that now backs the reference arm.
+
+Every figure above is pinned in `manifests/nemo_testcase_l2_gyre_round28.json`;
+the reports live under
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round28/` with SHA-256 in
 `artifacts.sha256`.
 
 Verdict stays **HOLD** on merging.  Nothing was merged or pushed.
