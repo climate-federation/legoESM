@@ -217,12 +217,14 @@ def nemo_matrix(rec: dict, face: str) -> tuple[np.ndarray, np.ndarray, np.ndarra
     return zwi, zwd, zws
 
 
-def nemo_solve(rec: dict, face: str) -> np.ndarray:
-    """The three recurrences of ``dynzdf.F90:307-346``, on NEMO's own inputs.
+def dumped_matrix_and_rhs(rec: dict, face: str):
+    """NEMO's own dumped matrix and the pre-solve column ``dyn_zdf`` sweeps.
 
-    Uses the DUMPED matrix, not the rebuilt one, so a matrix defect and a
-    solve defect stay separable.  Interior box only, for the reason given in
-    ``nemo_matrix``.
+    Split out of :func:`nemo_solve` so that legoESM's own sweep can be driven
+    on exactly the same operands, with no second copy of the surface-stress
+    statement (``dynzdf.F90:328-330``) to drift.  Interior box only, for the
+    reason given in ``nemo_matrix``.  Returns the three diagonals sliced to
+    ``jpkm1`` rows, the right-hand side, and ``jpkm1``.
     """
     require(face in ("u", "v"), f"unknown face {face!r}")
     a = rec["arrays"]
@@ -239,13 +241,46 @@ def nemo_solve(rec: dict, face: str) -> np.ndarray:
                          a["zws_v"][isl, jsl, :].copy())
         pre, e3 = a["vv_Kaa_pre"][isl, jsl, :], a["e3v_Kaa"][isl, jsl, :]
         tau, mask = a["vtauV"][isl, jsl], a["vmask"][isl, jsl, :]
-
-    for k in range(1, jpkm1):                       # first recurrence
-        zwd[:, :, k] = zwd[:, :, k] - zwi[:, :, k] * zws[:, :, k - 1] / zwd[:, :, k - 1]
-
     x = pre[:, :, :jpkm1].copy()
     # key_RK3 arm: utau only, never the utau/utau_b average (dynzdf.F90:328-330)
     x[:, :, 0] = x[:, :, 0] + a["rDt"] * tau / (e3[:, :, 0] * a["rho0"]) * mask[:, :, 0]
+    return zwi[:, :, :jpkm1], zwd[:, :, :jpkm1], zws[:, :, :jpkm1], x, jpkm1
+
+
+def lego_solve(rec: dict, face: str) -> np.ndarray:
+    """legoESM's OWN ordered sweep, on NEMO's dumped matrix and dumped RHS.
+
+    :func:`nemo_solve` is a NumPy transcription and therefore calibrates the
+    RECORD; this one drives ``nemo_ordered_tridiagonal_solve`` -- the function
+    object BOTH the momentum and the tracer literal solves call -- so a
+    difference here is inside legoESM and nowhere else.  It is the momentum
+    half of the Rule-12 discharge for any change to that shared sweep, and it
+    is the only such measurement the two tank cards have.
+
+    NEMO's momentum back substitution carries no ``tmask`` factor
+    (``dynzdf.F90:344-345``), so neither does this; the comparison is against
+    the dumped ``uu``/``vv(Kaa)``.
+    """
+    import jax.numpy as jnp
+    from legoesm.ocean.physics.vertical_mixing import (
+        nemo_ordered_tridiagonal_solve)
+    zwi, zwd, zws, x, _ = dumped_matrix_and_rhs(rec, face)
+    return np.asarray(nemo_ordered_tridiagonal_solve(
+        jnp.asarray(zwi), jnp.asarray(zwd), jnp.asarray(zws), jnp.asarray(x)))
+
+
+def nemo_solve(rec: dict, face: str) -> np.ndarray:
+    """The three recurrences of ``dynzdf.F90:307-346``, on NEMO's own inputs.
+
+    Uses the DUMPED matrix, not the rebuilt one, so a matrix defect and a
+    solve defect stay separable.
+    """
+    zwi, zwd, zws, x, jpkm1 = dumped_matrix_and_rhs(rec, face)
+    zwd = zwd.copy()
+    for k in range(1, jpkm1):                       # first recurrence
+        zwd[:, :, k] = zwd[:, :, k] - zwi[:, :, k] * zws[:, :, k - 1] / zwd[:, :, k - 1]
+
+    x = x.copy()
     for k in range(1, jpkm1):                       # second recurrence
         x[:, :, k] = x[:, :, k] - zwi[:, :, k] / zwd[:, :, k - 1] * x[:, :, k - 1]
 
@@ -295,10 +330,14 @@ def run(record: Path, *, plant: bool = False) -> dict:
             rows.append(bit_row(
                 f"{CASE}.kt1.stage3.zdf_matrix.{tag}_{face}",
                 a[f"{tag}_{face}"][isl, jsl, :], rebuilt))
+        out = a[f"{'uu' if face == 'u' else 'vv'}_Kaa_out"][isl, jsl, :h["jpkm1"]]
         rows.append(bit_row(
-            f"{CASE}.kt1.stage3.zdf_solve.{face}",
-            a[f"{'uu' if face == 'u' else 'vv'}_Kaa_out"][isl, jsl, :h["jpkm1"]],
-            nemo_solve(rec, face)))
+            f"{CASE}.kt1.stage3.zdf_solve.{face}", out, nemo_solve(rec, face)))
+        # legoESM's OWN sweep on the same operands -- the momentum half of the
+        # Rule-12 discharge for any change to the shared ordered solve.
+        rows.append(bit_row(
+            f"{CASE}.kt1.stage3.zdf_solve_lego.{face}", out,
+            lego_solve(rec, face)))
 
     at_bar = all(row["status"] == "AT-BAR" for row in rows)
     return {

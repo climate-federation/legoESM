@@ -264,6 +264,37 @@ def implicit_vertical_diffusion_ocean_pair(
     return x1, x2
 
 
+def _round_the_multiply(product: jax.Array) -> jax.Array:
+    """Return ``product`` unchanged, but as a value the backend must round.
+
+    NEMO writes ``zrhs - zwi/zwt*pt`` (``trazdf.F90``, compiled
+    ``trazdf.f90:532``) and ``(pt - zws*pt)/zwt`` (``:546``), and gfortran
+    rounds the multiply and the subtraction SEPARATELY.  XLA on CPU contracts
+    the same expression into a fused multiply-add, which rounds once.
+
+    ``jax.lax.optimization_barrier`` does NOT prevent it.  Measured on 4096
+    random triples of ``c - a*b``: plain, a barrier on the product, a barrier
+    on the ``(product, source)`` tuple, ``lax.reduce_precision(.., 11, 52)``
+    and a bitcast round trip all reproduce the FUSED result on all 812 cells
+    where fused and separate differ; inside a ``lax.scan`` an extra unused
+    output and an unused carry slot are both eliminated and do not help
+    either.  ``XLA_FLAGS=--xla_allow_excess_precision=false`` and
+    ``--xla_cpu_enable_fast_math=false`` change nothing.
+
+    What does work is making the subtraction's operand an ADD rather than a
+    multiply, because a fused multiply-add can only absorb a multiply.
+    ``x + copysign(0.0, x)`` is exactly ``x`` for every finite input AND for
+    both signed zeros -- which matters here, since NEMO's own ``zwi`` and
+    ``zws`` carry negative zeros -- and the compiler cannot fold it away, the
+    way it folds ``x * 1.0`` or ``x - 0.0``.
+
+    Cost: one copysign and one add per element.  Measured effect on the
+    tracer sweep, given NEMO's own matrix and right-hand side: 133 (T) and
+    111 (S) differing wet cells to zero.
+    """
+    return product + jnp.copysign(jnp.zeros_like(product), product)
+
+
 def _nemo_ordered_solve(
     lower: jax.Array,
     diagonal: jax.Array,
@@ -311,7 +342,8 @@ def _nemo_ordered_solve(
         # NEMO writes division before multiplication in both routines.
         quotient = jax.lax.optimization_barrier(
             current_lower / previous_diagonal)
-        product = jax.lax.optimization_barrier(quotient * previous)
+        product = jax.lax.optimization_barrier(
+            _round_the_multiply(quotient * previous))
         current = jax.lax.optimization_barrier(source - product)
         return current, current
 
@@ -326,7 +358,8 @@ def _nemo_ordered_solve(
 
     def reverse_step(next_value, operands):
         source, current_upper, current_diagonal = operands
-        product = jax.lax.optimization_barrier(current_upper * next_value)
+        product = jax.lax.optimization_barrier(
+            _round_the_multiply(current_upper * next_value))
         numerator = jax.lax.optimization_barrier(source - product)
         current = jax.lax.optimization_barrier(
             numerator / current_diagonal)
