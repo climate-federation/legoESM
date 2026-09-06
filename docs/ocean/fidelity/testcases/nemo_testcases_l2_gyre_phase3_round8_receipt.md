@@ -5559,3 +5559,248 @@ the reports live under
 `artifacts.sha256`.
 
 Verdict stays **HOLD** on merging.  Nothing was merged or pushed.
+
+## Round 29 — the stage-3 owner, an instrument for it, and a corrected premise
+
+Round 29 starts from `509aed683857` on a clean tree, same regime: CPU
+production JIT, fp64/x64, `transcendentals="libm"`, oracle V2.  The
+preregistration is
+`manifests/nemo_testcase_l2_gyre_round29_preregister.json`, committed at
+`7d7cbfb97319` before any measurement below.  No NEMO executable was run.
+
+### Rule 0 first — the premise this round was handed is wrong
+
+Round 29 was asked on the premise that `dyn_zdf` is the only stage-3-only
+momentum operator touching every wet U face.  It is not.  The stage-3 arm of
+the stage `SELECT CASE` calls `dyn_ldf` first
+(`stprk3_stg.F90:400`, compiled
+`GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stprk3_stg.f90:485`) and `dyn_zdf` after
+(`stprk3_stg.F90:430`, compiled
+`GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stprk3_stg.f90:498`), and neither runs at
+stage 1 or 2.
+GYRE resolves an iso-level laplacian viscosity for the first of them —
+`ln_dynldf_lap` and `ln_dynldf_lev` are both true
+(`GYRE_OMIP_L2_P3_SM/EXP00/namelist_cfg:187-188`) with a constant
+coefficient built from `nn_ahm_ijk_t = 0`
+(`GYRE_OMIP_L2_P3_SM/EXP00/namelist_cfg:189-191`), printed as
+`iso-level laplacian operator` at
+`round19_oracle_v2_external/ocean.output:706`.  So the correction changes
+what the instrument has to dump: a matrix record alone could never separate
+the two, and a frame at the boundary between them can.
+
+Four more readings, all from the oracle's own printed output rather than
+inferred, bound what `dyn_zdf` even does on this deck:
+
+| contribution | resolved | consequence |
+|---|---|---|
+| `ln_zad_Aimp` | `F` (`round19_oracle_v2_external/ocean.output:553`) | the Courant-dependent implicit vertical advection never enters the matrix |
+| lateral operator | iso-level, not iso-neutral (`:706`) | the rotated lateral-mixing term never enters the matrix |
+| `ln_isfcav` | `F` (`:338`) | every top-friction block is dead |
+| `ln_drgice_imp` | `F` (`:630`) | so is the ice one |
+| `ln_drgimp` | `T` (`:629`) | implicit BOTTOM friction is live, in both of its places |
+
+With those four dead, what `dyn_zdf` runs on GYRE is small enough to score
+term by term: a velocity-form explicit update (`dynzdf.F90:121-122`, taken
+because `ln_dynadv_vec = .true.`,
+`GYRE_OMIP_L2_P3_SM/EXP00/namelist_cfg:161`), a barotropic removal and a
+bottom-stress boundary addition (`dynzdf.F90:156-159`), the ZDF matrix
+(`:182-195`), one implicit-drag diagonal term (`:296`), the wind entering
+mid-solve through the `key_RK3` arm (`:329-330`), and three recurrences.
+
+### How far the existing records localise the stage-3 owner: not far
+
+The per-stage localisation the campaign already owns, recorded here because
+round 28 did not carry it (**F4**):
+
+| stage | `u` at the stage's own `Kaa` | status |
+|---|---|---|
+| 1 | `2.710505431213761e-19` | AT-BAR |
+| 2 | `4.740083109008864e-13` | DEBT |
+| 3 | `9.481924730527598e-07` | DEBT |
+
+Stage 3 produces essentially all of it.  Two things INSIDE stage 3 are
+already exonerated, and they are the only two: the vertical velocity the
+stage consumes is at the bar at all three stages (round 21), and the mixing
+coefficients the matrix reads are at the bar at the ZDF entry — `avm`
+`3.469446951953614e-17` and `avt` `3.469446951953614e-18`, both AT-BAR.
+
+Everything else is unmeasured, and a census says why.  All 51 `oracle_*.bin`
+records in the V2 set were read for their magic: 21 distinct instrument
+tags, and every momentum-operand tag among them — the stage-2 term record,
+the HPG operands, the HPG literal, the EOS operands, the ENE operands, the
+pre-update frame and the stage-2 operand frame — is written under
+`kstg == 2`.  The only stage-3 records are tracer and vertical-velocity
+ones, and the three `oracle_stage_kt00000001_s*.bin` files hold stage
+OUTPUTS only, five fields each, no RHS and no matrix.
+
+So the honest answer to "does a pre-`dyn_zdf` frame exist, and is it exact"
+is **neither**.  There is no stage-3 momentum frame of any kind.  Six
+operators run between the last scored frame and the first divergent one —
+`eos` + `dyn_hpg`, `dyn_vor`, `dyn_adv`, `dyn_ldf`, `dyn_zdf`, and the
+barotropic correction — with zero records among them.  Closing that is what
+the instrument is for, and no localisation claim is made here.
+
+### The instrument
+
+Two WRITE-only records, at
+`scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round29_zdf/`.
+The user-executed recipe is `run.sh` in that directory; it is not run here.
+
+The first is one frame: the momentum RHS entering `dyn_ldf` at stage 3.  It
+exists only to answer the question the corrected premise raised, and one
+bit-unequal cell in it moves the owner from `dyn_zdf` to `dyn_ldf` or
+earlier.
+
+The second is `dyn_zdf`'s own record: the RHS as received, the pre-solve
+column vector after the explicit update and the two boundary corrections,
+the matrix as built before the LU recurrence overwrites the diagonal, the
+operands as consumed, and the solved velocity.  It is self-describing — a
+magic, sixteen header integers including the writer's own tile bounds, then
+one named group per array until EOF — so the reader parses to EOF without
+knowing the list, and a short record is a hard failure rather than a quietly
+smaller arm.  `e3u` and `e3uw` are preprocessor macros under `key_qco`, not
+arrays, so each is materialised elementwise into a buffer already emitted.
+`zwi`/`zwd`/`zws` are a single i-k slice reused inside the j loop, so they
+are copied per slice into global buffers, which is also why the writer
+refuses domain tiling rather than dumping one tile and labelling it the
+field.
+
+### The reader was calibrated against the writer, not against a mock
+
+The gate scores two things on the record alone, and both are the reader's
+calibration in the Rule-1e sense: no number from this record may be quoted
+until they are at the bar.  `matrix` rebuilds `zwi`/`zwd`/`zws` for both
+faces from the record's own operands by `dynzdf.F90:182-195` and `:296`.
+`solve` replays NEMO's three recurrences on the dumped matrix and the dumped
+pre-solve vector, with the wind term at `dynzdf.F90:329-330`.
+
+Because the record does not exist yet, that calibration was taken against
+the actual Fortran writer instead of postponed.  The inserted code was
+preprocessed with the deck's own keys, compiled with gfortran, and run on a
+small domain, with NEMO's own matrix-build and solve statements lifted
+verbatim from the preprocessed source so the fixture is what its operands
+imply rather than what the gate says they imply.  The python transcription
+reproduces gfortran's evaluation of the same statements **bit for bit**:
+
+| arm | bit-unequal | max abs |
+|---|---:|---:|
+| `zwi_u` / `zwd_u` / `zws_u` | `0 / 8` each | `0` |
+| `zwi_v` / `zwd_v` / `zws_v` | `0 / 8` each | `0` |
+| `zdf_solve.u` | `0 / 8` | `0` |
+| `zdf_solve.v` | `0 / 8` | `0` |
+
+Two independent evaluators agreeing is the strongest evidence available
+before the record exists; it is not a claim about NEMO's real GYRE numbers,
+which is what `run.sh` acquires.  Moving one operand by a single ulp turns
+six of the eight rows red and the gate exits non-zero, so the green arm is
+not vacuous.  The record, the compiled fixture generator and both gate
+reports are under
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round29/` with SHA-256 in
+`artifacts.sha256`; the record hashes
+`d88b74e2a34c071697b712ce6ae01f0cfa7ef88384b266b65de02158a4b17e59`.
+
+Writing the tests found a defect in the reader: a corrupt array name raised a
+decoder traceback instead of returning a verdict.  A malformed record with no
+verdict is exactly how a defeat hides — the same shape as round 28's reversed
+range — so it fails closed now.  Nine tests pass.
+
+### Decision 15C — the demo card takes NEMO's vertical momentum advection
+
+The native demo GYRE card selected an upwind perturbation for vertical
+momentum advection and ran the adaptive-implicit vertical advection.  NEMO's
+GYRE does neither: it resolves the vector form, whose printed program is
+`keg + zad + vor` (`dynadv.F90:144`), and `ln_zad_Aimp` is `.false.` by
+reference default (`namelist_ref:1177`) and prints `F` on this deck
+(`round19_oracle_v2_external/ocean.output:553`).  The two move together
+because the adaptive-implicit path replaces the explicit vertical advection
+entirely; the model already refuses the mixed pair.
+
+That was the last field of the WS-RK3 vector-invariant momentum program the
+card was missing, so it had been rejecting itself at construction and five
+tests could not reach a model at all.
+
+**What it was masking.**  With the card constructible, three of those tests
+step, and all three stop in the same place: NEMO's literal QCO thickness
+statement refuses the card because the demo card's z-star coordinate carries
+no active-cell mask at all — `OceanZStarCoordinate` has no such attribute,
+and the reference thickness is supplied by the caller, so the mask is the
+missing operand.  Every oracle-bridge card gets one from NEMO's mesh; the
+native demo card never did, and nothing on it had reached a statement that
+asks.  Deciding what that mask IS on a card with no mesh file is a geometry
+choice, so it is registered, not guessed.
+
+The fourth test was asserting a guard this card is exempt from — its
+split-explicit solver is named in the guard's own exemption clause, so the
+assertion could never have fired.  It now runs against the solver the guard
+covers, with the card's exemption asserted next to it.
+
+Five failures with two causes become four with one, and the one is named.
+`20 passed, 4 failed`.
+
+### Bit debt registered (F5)
+
+The reference-versus-live weighting round 28 refuted as an OWNER is still
+not bitwise equal, and that is registered here rather than left implied:
+
+| face | relative difference | bit-unequal | arm scale |
+|---|---|---:|---|
+| `u` | `8.307570867102084e-16` | `488 / 580` | `2.3896678125115675e-08` |
+| `v` | `5.993770496385322e-16` | `488 / 570` | `3.0361478617076356e-08` |
+
+About four ulp on roughly five sixths of the wet faces.  It is DEBT at the
+campaign's exact bar, it is an arm-to-arm difference and not an oracle score,
+and it owns nothing measured so far.
+
+### Rule-11 records
+
+**Corrected, not retracted.** The line number this round was handed for
+`dyn_zdf` (`stprk3_stg.F90:430`) is the SHIPPED source's and is right.  A
+draft of the preregistration cited line 523 instead, which is where the same
+statement sits in the instrumented per-config copy of that file — a copy the
+citation gate deliberately does not resolve, because a basename that can mean
+either file is how a MY_SRC override passes as shipped source.  Both files
+exist; only the shipped one is citable.
+
+**Wrong premise, corrected before measuring.** `dyn_zdf` is not the only
+stage-3-only momentum operator; `dyn_ldf` is one too, and it is active on
+GYRE.  Recorded before any number was taken, which is why the instrument
+dumps two boundaries instead of one.
+
+**A gate defect found by using it.** A filename in backticks anywhere in the
+prose rebinds every following bare `:N` citation to that file, and the
+round-28 correction written this round did exactly that twelve lines later.
+Caught by the gate.
+
+### Open questions
+
+1. **The `dyn_zdf` walk itself is UNMEASURED** until `run.sh` is executed.
+   The prediction, its falsifier and the alternative owner are preregistered.
+2. **The demo card's vertical coordinate has no active-cell mask.**  Four
+   tests stop there.  What should that mask be on a card with no mesh file?
+3. **The slow forcing's depth average** still uses the min rule where NEMO
+   uses the area-weighted mean (`domqco.F90:166-169`, `:219-222`, transcribed
+   in `vertical.py:470`).  `3.06e-08` at kt=2.  Land it, or leave it as debt?
+4. **Decision 16 is preregistered and NOT landed** — the unconditional
+   vorticity call in the pre-stage 2-D momentum RHS.  Its predictions are in
+   the round-29 manifest; landing it needs cross-card runs this round did not
+   have room for.
+5. **Rounds 1-24 of this receipt remain UNAUDITED** by the citation gate.
+
+### ASKED / UNASKED
+
+| choice | disposition |
+|---|---|
+| correct the round-29 premise from one stage-3-only momentum operator to two | not a scientific choice; corrected against the shipped source before measuring, and gated |
+| dump the pre-`dyn_ldf` momentum RHS as well as `dyn_zdf`'s operands | ASKED by the correction; it is the only frame that separates the two |
+| `vertical_momentum_scheme` `upwind_perturbation` -> `nemo_advective`, `adaptive_implicit_vertadv` `True` -> `False` on the demo GYRE card | ASKED; user decision 15C; landed |
+| give the demo card's z-coordinate an active-cell mask | NOT DONE — a geometry choice on a card with no mesh file; registered |
+| require an anchor per cited endpoint in the citation gate | not a scientific choice; the interior of a comma citation was unvalidated and the plant now fires |
+| add GYRE's deck, run log and compiled branch as separate citation keys | not a scientific choice; a GYRE premise was auditing LOCK's namelist |
+| strike round 28's MIN-versus-MEAN disposition in place | ASKED; both halves were wrong and the debt is restated where it belongs |
+| land decision 16's unconditional vorticity call | NOT DONE this round; preregistered only |
+| shipped NEMO edit, `makenemo`, `mpirun`, push, merge, deletion | forbidden; none performed |
+
+UNASKED list: empty.
+
+Every figure above is pinned in
+`manifests/nemo_testcase_l2_gyre_round29.json`.
