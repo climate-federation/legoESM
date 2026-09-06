@@ -10219,3 +10219,16 @@ had to be RE-ANCHORED**, because this round's before-state block added 57 lines
 to `ocean_model_latlon_cgrid.py` and five keys were line numbers below it; the
 statements are unchanged and the numbers were not, which is exactly what that
 gate exists to catch.  The stamp-scope ratchet is 18 passed.
+
+The full ocean-fidelity suite at the round's FINAL tip, `365c15b9013f`, on a
+detached worktree (`/tmp/codex-gyre-r39-suite2`):
+**`997 passed, 7 skipped, 18 deselected in 2461.27s (0:41:01)`**, exit 0, zero
+failures.  An earlier run at `ba3e5f1ff271` — the last CODE commit, before the
+citation map was re-anchored — had **3 failures, all three in the citation
+gate's own test file and all three this round's stale line numbers**; they are
+fixed at the source in the receipt commit and that file is 16 passed at the
+final tip.  Nothing else changed between the two runs.
+
+Evidence under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round39/`,
+`round39_evidence.sha256` over its 30 files, itself
+`c99c874c7451abee9a83efdec2d1cfbbf3d197ca278a8f6f197f85abb503498b`.
