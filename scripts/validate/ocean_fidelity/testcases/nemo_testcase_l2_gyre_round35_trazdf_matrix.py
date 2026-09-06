@@ -432,7 +432,16 @@ def bit_row(name: str, oracle, candidate, *, note: str | None = None) -> dict:
     return row
 
 
-PASSING = ("AT-BAR", "AT-BAR-SIGNED-ZERO")
+# ROUND 37: AT-BAR-SIGNED-ZERO IS NO LONGER A PASSING STATUS.  It existed
+# because legoESM wrote +0.0 into the two boundary slots where NEMO writes
+# -0.0; that transcription landed, no row needs the exemption any more, and an
+# independent diff review DEFEATED the sweep discharge through it -- a solve
+# corrupted in the fully-dry columns was absorbed as a 5-cell signed-zero row
+# and the gate exited 0 with STATUS AT-BAR.  A status that can swallow a wrong
+# answer is not a pass.  The CLASSIFICATION stays, so a +0.0 regression is
+# still named rather than folded into AT-BAR or over-claimed as DEBT; it just
+# no longer passes.
+PASSING = ("AT-BAR",)
 
 
 # --------------------------------------------------------------------------
@@ -548,7 +557,14 @@ def lego_sweep(rec: dict) -> dict[str, np.ndarray]:
     Multiplied by ``tmask`` because that is what
     ``implicit_vertical_diffusion_nemo_tracer_pair`` does with the result;
     the comparison is against NEMO's PRE-clamp column.
-    """
+
+    BLIND SPOT, named because a diff review walked through it: NEMO's own back
+    substitution masks at every level (``trazdf.f90:543``, ``:546-547``), so
+    BOTH sides of this comparison are zero at every dry cell and a solve that
+    is arbitrarily wrong there scores as equal.  3120 of the 21120 scored
+    cells are dry.  What covers those cells is the round-29 momentum arm,
+    whose oracle is NEMO's UNMASKED ``uu(Kaa)``: the reviewer's corruption,
+    invisible here, moved 3720 of its 21120 cells by 12345.
     import jax.numpy as jnp
     from legoesm.ocean.physics.vertical_mixing import (
         nemo_ordered_tridiagonal_solve)

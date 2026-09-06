@@ -283,10 +283,19 @@ def _round_the_multiply(product: jax.Array) -> jax.Array:
 
     What does work is making the subtraction's operand an ADD rather than a
     multiply, because a fused multiply-add can only absorb a multiply.
-    ``x + copysign(0.0, x)`` is exactly ``x`` for every finite input AND for
-    both signed zeros -- which matters here, since NEMO's own ``zwi`` and
-    ``zws`` carry negative zeros -- and the compiler cannot fold it away, the
-    way it folds ``x * 1.0`` or ``x - 0.0``.
+    ``x + copysign(0.0, x)`` returns ``x`` for every normal input AND for both
+    signed zeros -- which matters here, since NEMO's own ``zwi`` and ``zws``
+    carry negative zeros -- and the compiler cannot fold it away, the way it
+    folds ``x * 1.0`` or ``x - 0.0``.
+
+    IT IS NOT THE IDENTITY ON SUBNORMALS: an independent claim review measured
+    that under ``jit`` this construction FLUSHES a subnormal to a signed zero
+    (5e-324, 1e-308 and 1.5e-310 all become 0.0), where ``x + 0.0`` and
+    ``x * 1.0`` preserve them because they are simplified away.  That is inert
+    in this solve on these cards -- the products it forms are of order 1e-4 to
+    1e4, and XLA's CPU scan already flushes a computed subnormal product with
+    or without this helper -- but it is a real restriction on the docstring's
+    promise, so it is written here rather than discovered by the next caller.
 
     Cost: one copysign and one add per element.  Measured effect on the
     tracer sweep, given NEMO's own matrix and right-hand side: 133 (T) and

@@ -317,11 +317,18 @@ def run(record: Path, *, plant: bool = False) -> dict:
     isl, jsl = _interior(h)
 
     if plant:
-        # Non-vacuity: move ONE operand by one ulp.  Every arm below reads the
-        # matrix through this operand, so a gate that cannot see this cannot
-        # see anything.
+        # Non-vacuity, TWO operands, because the two families of arm read
+        # DIFFERENT ones.  ``avm`` is what the rebuilt matrix is built from,
+        # so it moves every ``zdf_matrix`` row -- but the two solve arms read
+        # the DUMPED diagonal and never touch ``avm``, so a plant that moved
+        # only ``avm`` left them at 0/21120 and proved nothing about them.
+        # That hole was found by an independent diff review of round 37 and is
+        # closed here by planting the dumped diagonal as well.
         a["avm"] = a["avm"].copy()
         a["avm"][isl, jsl, 1] = np.nextafter(a["avm"][isl, jsl, 1], np.inf)
+        for name in ("zwd_u", "zwd_v"):
+            a[name] = a[name].copy()
+            a[name][isl, jsl, 1] = np.nextafter(a[name][isl, jsl, 1], np.inf)
 
     rows = []
     for face in ("u", "v"):
