@@ -197,7 +197,8 @@ def nemo_matrix(rec: dict, face: str) -> tuple[np.ndarray, np.ndarray, np.ndarra
     k = slice(1, jpkm1)
     kp = slice(2, jpkm1 + 1)
     zzwi = -zdt2 * (avm_far[:, :, k] + avm[:, :, k]) / (e3[:, :, k] * e3w[:, :, k]) * wmask[:, :, k]
-    zzws = -zdt2 * (avm_far[:, :, kp] + avm[:, :, kp]) / (e3[:, :, k] * e3w[:, :, kp]) * wmask[:, :, kp]
+    zzws = (-zdt2 * (avm_far[:, :, kp] + avm[:, :, kp])
+            / (e3[:, :, k] * e3w[:, :, kp]) * wmask[:, :, kp])
     zwi[:, :, k] = zzwi
     zws[:, :, k] = zzws
     zwd[:, :, k] = 1.0 - zzwi - zzws
