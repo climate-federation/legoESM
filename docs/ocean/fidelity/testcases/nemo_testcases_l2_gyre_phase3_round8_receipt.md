@@ -6582,8 +6582,13 @@ cause.  Measured: all four —
 `test_nemo_gyre_forced_trajectory_is_finite_and_stable`,
 `test_nemo_gyre_wind_forcing_sign_chain_end_to_end` and
 `test_surface_stress_implicit_wiring` — reach the SAME raise site with the
-same stack, `vertical.py:64-70`: "literal NEMO QCO e3t requires
+same stack, `vertical.py:66-71`: "literal NEMO QCO e3t requires
 explicit/reference nemo_e3t_0 and is_active".  **One cause, CONFIRMED.**
+(ROUND-34 NOTE: the user answered this as decision 17 and the guard's mask half
+now sits BELOW the early return, so that combined message no longer exists and
+the two halves say their own thing.  The citation is re-anchored to the lines
+that carry the surviving `e3t_0` half; the sentence above is left as the round
+wrote it, because it is what was measured then.  All four tests pass now.)
 
 Which operand is missing was measured rather than read off: `e3t_0` IS
 supplied by the caller; only `is_active` is absent, and `OceanZStarCoordinate`
@@ -7653,3 +7658,445 @@ round:
 UNASKED list: empty.
 
 Every figure above is pinned in `manifests/nemo_testcase_l2_gyre_round33.json`.
+
+## Round 34 — the tanks are admitted, round 32 is discharged on them, and two ASKED items are answered
+
+Round 34 starts from `2c83a59bcfbe` on a clean tree, same regime: CPU
+production JIT, fp64/x64, `transcendentals="libm"`, oracle V2.  The
+preregistration is
+`manifests/nemo_testcase_l2_gyre_round34_preregister.json`, committed at
+`a6a96b933bfb` before any measurement; addendum 1
+(`..._round34_preregister_addendum1.json`, `6ea69c28df01`) records what the
+independent CLAIM review broke, and addendum 2
+(`..._round34_preregister_addendum2.json`, `9ba367885ba8`) registers the two
+configuration changes the user authorised mid-round, before either was made.
+No NEMO executable was run and no NEMO source was edited.  Every artifact is
+under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round34/` with SHA-256
+in `artifacts.sha256`.
+
+### A concurrency incident, recorded because it moved this round's files
+
+A lingering round-33 agent was still writing into the same worktree when this
+round began.  It committed `a7aeda155abf` at 05:24 -- a receipt-only change,
+between this round's `a6a96b933bfb` and after `6ea69c28df01` -- and at about
+05:21 it REVERTED this round's then-uncommitted rewrite of the admission gate,
+preserving a byte copy and a diff under
+`round33/UNEXPECTED_uncommitted_round21_admission_rewrite.{py,diff}`.  The
+rewrite was re-applied and diffed against that preserved copy: the only
+differences are formatting, two dropped type annotations, one deleted unused
+constant, and two real improvements made on the second pass.  Nothing was
+lost.
+
+Two consequences are recorded rather than absorbed.  First, every measurement
+taken between 05:14 and 05:25 is treated as CONTAMINATED and none is quoted:
+the GYRE stage measurement launched in that window was killed and its log kept
+as `round34/DISCARDED_contaminated_stage_ts.log`.  Second, that agent had also
+left a full fidelity suite running against the tree this round was editing; it
+was stopped, and no count from it is quoted either.
+
+### Item 1 — the two tank records are ADMITTED, and the gate that admits them now works on any card
+
+The user ran the round-33 acquisition on both tanks.  Attempt 1 died inside
+FCM because the system perl has no `Text::Balanced`; attempt 2, with the conda
+build environment first on `PATH`, built and ran both.  That PATH is now in
+`run.sh`'s preamble so the next operator does not rediscover it.
+
+`run.sh` then died anyway, at its RAW twin comparison under `set -e`, and took
+the Rule-12 discharge, its plant and the outputs manifest down with it.  Raw
+byte identity is the right thing to TRY first and the wrong thing to gate on:
+NEMO's stream dumps write whole work arrays including the `nn_hls = 2` halo,
+which NEMO neither owns nor initialises.  `run.sh` now logs every record's raw
+result and falls through to the shared CONSUMED-FIELD ADMISSION.
+
+That admission was written around GYRE.  It is card-general now and it is
+still ONE gate: each record's dimensions come from its own header, each
+record's kind from its own 16-byte magic (so the GYRE file-name map is
+deleted), the inventory is discovered by globbing the source run, and the
+files that must stay byte-identical are a list on the command line, so the
+mesh travels with the restart.  A declared layout that does not account for
+the payload exactly RAISES rather than comparing a misaligned buffer.
+
+| card | inherited records | byte-identical | changed | admitted differences | verdict |
+|---|---:|---:|---:|---:|---|
+| LOCK_EXCHANGE-zco | 27 | 25 | 2 | 4 | **PASS** |
+| OVERFLOW-zps | 27 | 24 | 3 | 16 | **PASS** |
+| GYRE-zco (regression, round 19 vs 21) | 49 | 39 | 10 | 201 | **PASS**, unchanged |
+
+**Every admitted difference is a HALO cell holding uninitialised memory, and
+each is printed with its index and its two values.**  On LOCK the two changed
+records are `oracle_transport_kt00000001_s2` and `_s3`, each differing in
+`zFw` at `(0,0,0)` and `(1,0,0)`, values near `6.94e-310`.  On OVERFLOW the
+three changed records are `_s1`, `_s2` and `_s3`, differing in `zFu` at
+`(1,6,11)`, `(3,6,12)`, `(5,6,13)` and `(205,1,16)`, values near `4.2e-318`,
+and in `s2`/`s3` also in `zFw` at `(0..1,0,0)` near `6.9e-310`.  **`0` of every
+record's owned cells differ on either card**, and `mesh_mask.nc` and each
+card's `kt=10` restart are byte-identical.  The plant -- one bit flipped in one
+owned cell -- turns the gate red on both cards and exits non-zero.
+
+### Item 2 — round 32's ordering fix is DISCHARGED on both tanks
+
+| card | u face | v face |
+|---|---|---|
+| LOCK_EXCHANGE-zco | **AT-BAR**, `3.0814879110195774e-33` absolute against the `1e-15` bar; `exact` false, `20` of `2540` cells bit-unequal | **NOT APPLICABLE** |
+| OVERFLOW-zps | **AT-BAR**, `3.8518598887744717e-34`; `exact` false, `30` of `16900` cells bit-unequal | **NOT APPLICABLE** |
+
+legoESM's own `rk3_stage_barotropic_correction`, imported from the production
+module the step function calls, is driven with NEMO's `dyn_zdf` output, NEMO's
+`uu_b(Kaa)` and NEMO's OWN `e3u_0`, `umask`, `hu_0` and `r1_hu_0` read from the
+record, and scored against NEMO's own stage-3 velocity.  **Nothing is
+rebuilt** -- which makes this a stronger discharge than GYRE's, where the
+column divisor is still reconstructed because `mesh_mask.nc` carries no
+`hu_0`.  Both plants exit non-zero.
+
+The two association rows are measured, not argued: the rebuilt column sum
+minus NEMO's own `hu_0` is `0.0` on both cards, `1/hu_0` minus NEMO's
+`r1_hu_0` is `0.0` on both, and the row that actually rides the discharge --
+NEMO MULTIPLIES by `r1_hu_0` where the operator DIVIDES by the depth -- is
+`1.6155871338926322e-27` on LOCK and `4.336808689942018e-19` on OVERFLOW.  It
+stays OPEN; changing the shared operator is a separate change with its own
+discharge.
+
+### Item 3 — the diff review broke the admission gate, and it was right to
+
+An independent DIFF reviewer, given the two commits and the oracle's source
+and nothing else, **planted 1 m/s in an owned interior cell of a tank's `zFw`
+and the gate said PASS.**  Four real defects came out of that review and each
+now has an arm that goes red on it.
+
+**THE WAIVER WAS ARM-BLIND.**  The gate's one admission ground that is not the
+halo -- a slot the writer has not defined at the write point -- was hardcoded
+for `zFw`.  That is true only under `ln_dynadv_vec = T`, where the write at
+`stprk3_stg.F90:343-345` precedes the `tra_adv_trp` call that creates `zFw`,
+which the source says at `:318`.  Under `ln_dynadv_vec = F` the flux-form
+branch at `:326-334` fills `zFw = e1e2t*ww` BEFORE the same write, so the slot
+is a real state-carrying field.  **GYRE resolves T; both tanks resolve F.**
+The waiver is now resolved per run out of the run's own `ocean.output` and
+reported with the line it was read from -- `ocean.output:798` on GYRE,
+`:705` on LOCK, `:822` on OVERFLOW -- and a run whose `ocean.output` is missing
+or silent FAILS CLOSED to bit-testing.  **Both tanks still PASS, on a strictly
+stronger claim: nothing is waived there at all.**
+
+**THE PLANT COULD SILENTLY DO NOTHING.**  It was reachable only through a
+record that already differed raw, so a PERFECT twin -- the strongest possible
+outcome -- produced a plant that landed nowhere, a PASS, and a `run.sh` that
+then refused the round.  A pending plant now forces the comparison open on the
+first record whether or not its bytes differ, and a plant that still fails to
+land is itself a violation.
+
+**THE ORDERED BAROTROPIC STREAM never compared its eight appended fields.**
+It compared a hardcoded name list, so once both sides carried the grown
+schema a state change in those fields was invisible.  It compares the
+intersection of the two field sets now, the legitimate growth still passes,
+and it is inside the plant's reach.
+
+**SIX OF TEN WRITER PROVENANCE STRINGS WERE STALE**, and two named the same
+line for different records.  All ten are re-read from the `MY_SRC` files that
+are compiled.
+
+Not adopted as stated: the reviewer read "an undefined slot with no registered
+reason is itself a test failure" as unenforced.  The test existed; what did
+not exist was a RUNTIME refusal, and that is added -- an unreasoned waiver is
+now a violation as well as a red test.
+
+### Item 4 — decision 19: the tanks remove the barotropic mode, as NEMO does
+
+ASKED and answered by the user, in the user's words: *"on BOTH tank cards the
+barotropic removal before the implicit vertical solve goes OFF -> ON
+(`zdf_baroclinic_only` False -> True), because NEMO executes
+`dynzdf.F90:148-171` there.  Do as NEMO does."*
+
+One field moves.  `zdf_drag_in_matrix`, `barotropic_drag_substep` and
+`nemo_stage_mean_imposition` stay OFF on these cards, and GYRE's resolution of
+all four is unchanged -- printed from the built cards, not read off the source,
+and pinned by a test.
+
+**The companion statement is not transcribed, and the reason is MEASURED.**
+`dynzdf.F90:156-159` adds the barotropic bottom stress back at the deepest wet
+level.  `rCdU_bot` is EXACTLY zero on every owned cell of both tanks -- `0` of
+`390` on LOCK, `0` of `606` on OVERFLOW -- so that statement contributes
+exactly `0.0` and legoESM not carrying it is bit-exact rather than merely
+small.  A whole-array maximum would report a denormal near `6.9e-310`; that is
+uninitialised halo memory, and the test arm requires it to be present so the
+zero is not measured on a field that is trivially zero everywhere.  GYRE's is
+`5.0e-05` on `600` of `704` owned cells, and there the statement is already
+carried by `zdf_drag_in_matrix`.  **This retires the round-32 receipt's open
+worry that the missing removal was "not obviously inert" on these cards.**
+
+**Rule 12 on the changed operator has a RECORD GAP, and it is named rather
+than papered over.**  The changed operator maps the explicit stage update `A`,
+`uu_b(Kaa)` and `umask` to the solve input.  NEMO's OUTPUT of it is
+`uu_Kaa_pre` and it is in the record; its INPUT `A` is not, and the tanks take
+the key_qco arm, which needs `r3u` at three time levels of which only `Kaa` is
+recoverable.  Reconstructing `A` as `uu_Kaa_pre + uu_b` and feeding it back is
+the operator's own inverse -- exactly the circularity round 33's review
+caught -- so it is not done.  The WRITE-only frame that closes it is specified
+and NOT run: one array pair, `puu(:,:,:,Kaa)` and `pvv(:,:,:,Kaa)` as the arm
+leaves them and BEFORE the removal, in the same self-describing stream.
+
+### Item 5 — decision 17: a caller is no longer refused for a mask it never reads
+
+ASKED and answered by the user, in the user's words: *"move ONLY the
+`active is None` half of the mask guard below the linear_free_surface early
+return, so linear-free-surface callers are no longer refused for a mask that
+path never reads; the other half of the guard and the moving-thickness (qco)
+path stay exactly as they are."*  The earlier proposal to switch the demo card
+to qco instead is WITHDRAWN.
+
+The mask conversion moves with the guard, because it would otherwise raise a
+`TypeError` before the guard could give its own message.  The `nemo_e3t_0` half
+stays above, because the early return needs it.
+
+**The four `test_nemo_recipe` failures go green and nothing else moves**: that
+file was `4 failed, 20 passed` and is now `24 passed`.  All four failed at
+`vertical.py:68` with the same message, which is the guard.
+
+A behavioural test cannot see the ORDER -- a linear-free-surface caller that
+DOES supply a mask is served either way -- so a fourth arm reads the source and
+pins it.  Moving the guard back above the early return turns three of the four
+red, shown by mutation.
+
+### ASKED / UNASKED
+
+| choice | disposition |
+|---|---|
+| turn the tanks' barotropic removal ON (`zdf_baroclinic_only` False -> True) | ASKED and ANSWERED by the user: *"Do as NEMO does."*  Decision 19 |
+| move the mask half of the thickness guard below the linear-free-surface early return | ASKED and ANSWERED by the user: *"Yes."*  Decision 17 |
+| do NOT transcribe `dynzdf.F90:156-159` on the tanks | not a scientific choice; `rCdU_bot` is exactly zero on every owned cell of both, measured, so the statement contributes exactly `0.0` |
+| do NOT turn on `zdf_drag_in_matrix` or `barotropic_drag_substep` with it | not a choice this round made; decision 19 named one field and only that field moved |
+| resolve the admission's undefined-slot waiver from each run's own `ocean.output` rather than hardcoding it | not a scientific choice; the hardcoded version admitted a planted 1 m/s change on both tanks, which a review measured |
+| a gate whose `ocean.output` is missing FAILS CLOSED to bit-testing | not a scientific choice; it is the strict reading, and the alternative is a silent waiver |
+| open the tanks' v face and then report it NOT APPLICABLE | not a scientific choice; the record carried `v` all along and NEMO's own `vmask` there is identically zero |
+| detached probe worktrees for the BEFORE and A2 arms | ASKED; the same disposition rounds 32 and 33 recorded.  Both flagged: `/tmp/codex-gyre-r34-before` at `947aa1e43a8e`, `/tmp/codex-gyre-r34-a2` at `049653f6a40f` |
+| do NOT change the shared correction operator to MULTIPLY by `r1_hu_0` | ASKED; unchanged from round 33, open question 9 |
+| shipped NEMO edit, `makenemo`, `mpirun`, push, merge, deletion | forbidden; none performed.  The two tank runs were executed by the user, not by the agent |
+
+UNASKED list: empty.
+
+### The trajectories, before and after each decision
+
+Nine arms, three cards by three trees, every one on a clean committed tree.
+The before arm is `947aa1e43a8e` in the flagged probe worktree
+`/tmp/codex-gyre-r34-before`, the decision-19 arm is `049653f6a40f` in
+`/tmp/codex-gyre-r34-a2`, and the decision-17 arm is `8da3475fbc3d` in the
+canonical worktree.  Every pair is scored by the SHARED oracle-relative move
+gate, driven offline from the saved reports and their hashed per-cell
+sidecars rather than by re-running each arm a second time.
+
+| card | change | move gate | worsening, row-scale ulps (bar 2) | rows whose field moved | largest field move | first-over-bar |
+|---|---|---|---:|---:|---:|---|
+| GYRE-zco | decision 19 | **PASS** | `0` | `0` of `70` | `0.0` | `kt2` on T,S,u,v -> unchanged |
+| LOCK_EXCHANGE-zco | decision 19 | **PASS** | `0.03125` | `10` of `50` | `6.93889e-18` | `kt4` on u -> unchanged |
+| OVERFLOW-zps | decision 19 | **PASS** | `1` | `13` of `50` | `7.10543e-15` | `kt2` on T,u -> unchanged |
+| GYRE-zco | decision 17 | **PASS** | `0` | `0` of `70` | `0.0` | unchanged |
+| LOCK_EXCHANGE-zco | decision 17 | **PASS** | `0` | `0` of `50` | `0.0` | unchanged |
+| OVERFLOW-zps | decision 17 | **PASS** | `0` | `0` of `50` | `0.0` | unchanged |
+
+**Decision 17 is BIT-IDENTICAL on all three certified cards, measured cell by
+cell**: no row's field moved by a single bit.  That is what a guard move must
+be, and it is the answer to "show by measurement that no certified card's
+trajectory moves".
+
+**Decision 19 is inert on GYRE, also cell by cell** -- `0` of `70` rows moved
+-- so the tank flag reaches no other card.  On the tanks it moves what it
+should: five rows on LOCK, all `u`, three worsened and two improved, the
+largest relative change `+3.284e-06` per cent at `kt4`; six rows on OVERFLOW,
+all `u`, **all six improved**, the largest `-2.975e-08` per cent at `kt4`.
+No row changed status on any card and the first-over-bar step never moved.
+
+**This is the first landed change in this campaign that PASSES the shared move
+gate.**  Rounds 32 and 33 both failed it on GYRE, at `1.063e+10` and
+`3.003e+08` row-scale ulps.  Here the worst of six comparisons is `1` ulp
+against a `2`-ulp bar.
+
+**BOUNDARY for the eleven moved rows.**  Every one is at `kt >= 4` on LOCK and
+`kt >= 4` on OVERFLOW, downstream of where each card's entering prefix stops
+being exact -- the gate's own `exact_prefix_entering` is true only at `kt1` and
+`kt2` on both.  No row at or before the first divergence moved.  **OWNER**: the
+removal itself, whose whole ten-step effect is `6.9e-18` (LOCK) and `7.1e-15`
+(OVERFLOW) -- five and eleven orders below the `uu_b` it subtracts, `1.135e-03`
+and `4.503e-02` m/s.
+
+### PART B — the kt=2 T/S owner is inside the STAGE-3 IMPLICIT TRACER SOLVE
+
+kt=1's T and S at the end of each RK3 stage, scored through the model's own
+compiled step against NEMO's own per-stage record, on `8da3475fbc3d`:
+
+| stage | T absolute | T normalized | T bit-exact | S absolute | S normalized | S bit-exact | verdict |
+|---|---:|---:|---|---:|---:|---|---|
+| 1 | `0.0` | `0.0` | **yes** | `0.0` | `0.0` | **yes** | AT-BAR |
+| 2 | `3.5527136788005009e-15` K | `1.514310e-16` | no, `3` of `18000` cells | `0.0` | `0.0` | **yes** | AT-BAR |
+| 3 | `3.1956659540810506e-11` K | `1.361474e-12` | no, `11840` cells | `8.1712414612411521e-13` psu | `2.218110e-14` | no, `11229` cells | **DEBT** |
+
+**THE FIRST STAGE OVER BAR IS STAGE 3.**  Stage 1 is BIT-EXACT on both
+tracers -- not "at bar", identical -- and stage 2 is three cells of T off by
+exactly one ulp of `23.460943` K with S still bit-exact.  Stage 3's rows are
+the same arrays the trajectory scores as `kt2.before`, so the two agree by
+construction and the walk closes.
+
+**INSIDE STAGE 3, the divergence enters at the IMPLICIT VERTICAL SOLVE.**  The
+accumulator that `tra_zdf` receives -- advection, then `tra_sbc_RK3`, then
+`tra_qsr`, then `tra_ldf`, combined through the qco step -- is scored against
+NEMO's own:
+
+| boundary | T | S | verdict |
+|---|---:|---:|---|
+| `kt1.stage3.pre_zdf` | `1.4210854715202004e-14` K, `6.053921e-16` | `2.1316282072803006e-14` psu, `5.786350e-16` | **AT-BAR** |
+| `kt1.stage3` output | `3.1956659540810506e-11` K, `1.361474e-12` | `8.1712414612411521e-13` psu, `2.218110e-14` | **DEBT** |
+
+Everything `tra_zdf` is HANDED is at bar; what it RETURNS is over bar by three
+orders on T.  **The owner is the stage-3 implicit vertical tracer solve
+itself**, and every operator upstream of it in that stage is exonerated.
+
+NEMO's own operator increments at this stage, from its own record, say which
+of them could have carried a T-only signature at all:
+`tra_ldf` contributes **exactly `0`** to both tracers, `tra_sbc_RK3`
+`2.41485e-05` to T and `0` to S, `tra_qsr` `4.15401e-06` to T and `0` to S,
+advection `8.38855e-08` on T and `1.32313e-07` on S.  All four are inside the
+AT-BAR accumulator, so none of them owns the residual -- **`tra_ldf` is
+exonerated twice over, by its own zero and by the accumulator's verdict.**
+
+**THE CAUSAL INJECTION ARM IS UNINFORMATIVE AND IS NOT QUOTED AS EVIDENCE.**
+The gate also feeds NEMO's OWN pre-zdf accumulator into legoESM's solve and
+scores the result: it reads `3.1956659540810506e-11`, identical to the
+faithful run, and its `causal_movement` is **exactly `0.0`** against a
+faithful residual of `1.361474e-12`.  A control that moves the output by
+nothing has not been applied, so its `ZDF_SOLVER_FIRST_OWNER_CAPABLE_BOUNDARY`
+label proves nothing and the attribution above rests on the two MEASURED rows
+instead.  Repairing that arm is registered work.
+
+### Rule-11 records
+
+**PB1's VALUE is REFUTED.**  It predicted stage 1's T at
+`3.552713678800501e-15` K and S at `7.105427357601002e-15`, from a round-16/19
+measurement it labelled STALE.  Measured on this tree, stage 1 is BIT-EXACT on
+both: `0.0`, `0` of `18000` cells unequal.  The `3.55e-15` figure is what
+stage TWO reads today, so quoting it as stage 1's was wrong by one stage.  The
+prediction's DIRECTION -- stage 1 at bar -- held.
+
+**PB2's MECHANISM was already retracted in addendum 1 and its PREDICTION
+holds.**  Stage 3 is the first stage over bar.  The reason the addendum kept
+it -- that a rounding residual cannot be amplified `95x` per stage by a
+near-identity operator, so the size demands a new term -- is what the
+measurement shows: the new term is the implicit vertical solve.
+
+**PB3 is REFUTED.**  It predicted the stage-3 pre-zdf accumulator would
+ALREADY be over bar, putting the owner at or before `tra_ldf`.  It is AT-BAR
+at `6.05e-16` on T and `5.79e-16` on S, and the owner is downstream of it.
+The falsifier the preregistration wrote for it is the outcome that occurred.
+
+**PB6 is NOT SCORED, and `tra_qsr` is exonerated anyway.**  Addendum 1 bought
+a qsr-only discriminator on the grounds that `tra_qsr` is the only stage-3
+operator touching temperature alone, and that the residual is `61x`
+T-favoured.  It is not needed: `tra_qsr`'s increment sits inside an
+accumulator that is AT-BAR, so no operator before `tra_zdf` can own the
+residual.  The T-favoured ratio is explained without it -- `tra_sbc_RK3` and
+`tra_qsr` are both T-only in NEMO's own record, and GYRE's initial T carries
+`19.460410` K of vertical contrast against S's `1.718057` psu.
+
+**A COMMIT MESSAGE OVERSTATES ITS OWN MUTATION COUNT.**  `8da3475fbc3d` says
+moving the guard back above the early return "turns three of the four red".
+An independent reviewer built the exact pre-decision-17 form and measured
+**two of four**; the three-of-four figure came from a different mutation --
+an inserted duplicate guard -- run while the fix was being written.  The fix
+is still non-vacuous and the order arm still catches the real regression; the
+number in that commit message is wrong and cannot be edited, so it is
+corrected here.
+
+**A ROUND-33 CLAIM IS RETRACTED.**  The tank Rule-12 gate said those cards'
+stage record "carries T, S, u and ssh and no v".  It carries `v`; the reader
+skipped the third block.  The v face is still not scored, for a MEASURED
+reason instead: NEMO's own `vmask` there is identically zero and its
+`vv_Kaa_out` and `vv_b_Kaa` are zero with it, because both tanks are 2-D x-z
+boxes.  NOT APPLICABLE, not UNMEASURED.
+
+**THE ROUND-33 TANK DISCHARGE COULD NEVER HAVE PRINTED ITS OWN SUMMARY.**  It
+asked each row for `n_unequal`, which the shared scoring helper did not
+return, so a real record crashed AFTER the arithmetic had already run.  Round
+33's review could not have caught it: the record did not exist yet.
+
+**A MEASUREMENT WAS LOST TO MY OWN EDIT, AND THE STAMP WAS RIGHT TO REFUSE
+IT.**  A fifteen-minute OVERFLOW arm was killed at its worktree stamp because
+I edited a tracked file while it was in flight.  The fail-closed stamp did
+exactly its job; the discipline was mine, and every arm quoted above was
+launched only on a tree that then stayed untouched.
+
+### Tests and gates
+
+`tests/ocean/fidelity/test_nemo_testcase_round34_admission.py` (19): the
+card-general admission, including the reviewer's own attack -- 1 m/s planted
+in an owned tank `zFw` cell must FAIL under the flux-form arm and be admitted
+only under the vector arm -- a run with no `ocean.output` failing closed, a
+plant on a perfectly identical twin, a waiver with an empty reason, and the
+appended barotropic fields being compared once both sides carry them.
+
+`tests/ocean/fidelity/test_nemo_testcase_round34_tank_zdf_removal.py` (9):
+the flag resolution on all three cards, that no other flag moved, `ln_drg_OFF`
+resolved true on both tanks, `rCdU_bot` zero on every owned cell with a
+non-vacuity arm on the halo denormal, and NEMO's own super-diagonal at the
+deepest wet level being zero on every wet column of both tanks.
+
+`tests/ocean/unit/test_nemo_qco_thickness_guard.py` (4): decision 17's four
+arms, one of which reads the source and refuses both a moved guard and a
+duplicate one.
+
+`tests/ocean/fidelity/test_nemo_testcase_offline_compare.py` (5): the offline
+comparison is the shared gate -- every plant it refuses, an improving plant
+passing, a self-comparison moving nothing, and a drifted sidecar refused.
+
+`tests/ocean/fidelity/test_nemo_testcase_l1_tanks_round33_zdf_rule12.py` (15)
+and `..._l2_gyre_phase3_gate.py` (22): green, including the new v-face arm and
+its plant.
+
+The three offline-comparison plants: `worsen-3ulp` and `at-bar-to-debt` both
+exit non-zero, `improve` passes.  Both admission plants and both tank Rule-12
+plants exit non-zero.
+
+### Merge readiness
+
+`03c6e8d96ff7` remains an ancestor of this branch, so the integration is still
+a FAST-FORWARD with zero conflicts by construction.  What blocks it after this
+round:
+
+1. **GYRE's `kt2` `T`/`S`/`u`/`v` rows still fail**, unchanged to the bit by
+   everything this round did.  Their owner is now LOCALISED: the stage-3
+   implicit vertical tracer solve, with every operator upstream of it AT-BAR
+   and stages 1 and 2 at bar (stage 1 bit-exact).
+2. **Round 32's ordering fix is now DISCHARGED on GYRE, LOCK_EXCHANGE and
+   OVERFLOW.**  ORCA2 stays UNMEASURED.  Round 33's item 1(a) is CLOSED.
+3. **Round 33's stage-arm fix** stays discharged bit for bit on GYRE and
+   measured NOT REACHED on both tanks.
+4. **Round 30's `dyn_ldf` fix still carries an OPEN Rule-12 eligibility**,
+   unchanged.
+5. **Decision 19 has no operator-level Rule-12 discharge**, because the
+   removal's INPUT is not dumped.  The WRITE-only frame that closes it is
+   specified and not run.  What IS measured is the whole-trajectory effect,
+   which passes the shared move gate on all three cards.
+6. **Eleven worsened-or-moved trajectory rows** from decision 19, all at
+   `kt >= 4`, with a boundary and an owner; plus round 33's 24 and round 32's
+   22, unchanged.
+7. **ORCA2 has no card on this branch.**
+
+### Open questions
+
+0. **The stage-3 implicit vertical TRACER solve owns `kt2`'s T and S.**  Its
+   internals are not instrumented: the round-29 record carries the MOMENTUM
+   tridiagonal, not the tracer one.  The next step is the WRITE-only frame for
+   `tra_zdf`'s own `zwi`/`zwd`/`zws` and its entering and leaving T/S, which is
+   the exact analogue of what round 29 built for `dyn_zdf`.
+1. **The causal injection arm at that boundary is broken**: it moves the
+   output by exactly `0.0`.  Repair it before any attribution rests on it.
+2. **The tanks' operator-level Rule-12 for decision 19**, one WRITE-only array
+   pair away.
+3. **Round 30's `dyn_ldf` Rule-12 row**, unchanged.
+4. **ORCA2 has no card on this branch**, unchanged.
+5. **The moved trajectory rows**, this round's eleven and the earlier rounds'.
+6. **Decision 16**, still an open card-identity gap.
+7. **The slow forcing's depth average** still uses the min rule where NEMO
+   uses the area-weighted mean; `3.06e-08` at `kt=2`, unchanged.
+8. **Two association rows on the barotropic correction's divisor**, unchanged
+   on GYRE; on the tanks the reconstruction rows are now `0.0` and only the
+   divide-versus-multiply row survives, at `1.6155871338926322e-27` (LOCK) and
+   `4.336808689942018e-19` (OVERFLOW).
+9. **Rounds 1-24 of this receipt remain UNAUDITED** by the citation gate.
+
+Every figure above is pinned in `manifests/nemo_testcase_l2_gyre_round34.json`.

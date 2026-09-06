@@ -388,14 +388,33 @@ CITATION_MAP = {
         ('if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):', 1),
         ('"with a scalar dlon (got dlon<=0; tripolar unsupported)."', 1),
         4],
-    'vertical.py:64-70': [
+    # DECISION 17 moved the mask half of this guard below the early return,
+    # so the round-31 anchors for it are re-anchored here rather than left to
+    # resolve against lines that no longer say what the prose says.
+    'vertical.py:66-71': [
         ('if e3t_0 is None:', 1),
-        ('"and is_active")', 1),
-        7],
+        ('"literal NEMO QCO e3t requires explicit/reference nemo_e3t_0")', 1),
+        6],
     'vertical.py:76-77': [
         ('if getattr(z_coord, "linear_free_surface", False):', 1),
         ('return e3t_0', 1),
         2],
+    'vertical.py:85-89': [
+        ('if active is None:', 1),
+        ('tmask = jnp.asarray(active, dtype=dtype)', 1),
+        5],
+    # round 34
+    'lock_kt1_10/ocean.output:556': 'ln_drg_OFF  =  T',
+    'overflow_kt1_10/ocean.output:668': 'ln_drg_OFF  =  T',
+    'stprk3_stg.F90:287':
+        'zFw used in tracers only and computed in tra_adv_trp',
+    'stprk3_stg.F90:295-301': [
+        ('ELSE                                     !* Flux Form', 1),
+        ('zFw(ji,jj,jk) = e1e2t(ji,jj) * ww(ji,jj,jk)', 1),
+        7],
+    'stprk3_stg.F90:463':
+        'CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )',
+    'nemo_testcase_recipe.py:311': 'zdf_baroclinic_only=True,',
     'provenance.py:38': 'def git_sha(*, allow_dirty: bool = False, repo: str | Path | None = None) -> str:',
     'cpp_GYRE_BARE.fcm:1': 'key_linssh key_vco_1d  key_RK3',
     'cpp_GYRE_OMIP_L2_P3_SM.fcm:1': 'key_qco key_vco_1d3d key_RK3',
