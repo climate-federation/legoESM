@@ -72,6 +72,7 @@ FILES = {
     "trabbl.F90": _OCE / "TRA/trabbl.F90",
     "MY_SRC/stprk3.F90": LOCK / "MY_SRC/stprk3.F90",
     "domain.F90": _OCE / "DOM/domain.F90",
+    "usrdef_zgr.F90": _OCE / "USR/usrdef_zgr.F90",
     "domqco.F90": _OCE / "DOM/domqco.F90",
     "usrdef_hgr.F90": LOCK / "MY_SRC/usrdef_hgr.F90",
     "namelist_cfg": LOCK / "EXP00/namelist_cfg",
@@ -299,6 +300,21 @@ CITATION_MAP = {
         ('puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kaa) - uu_b(ji,jj,Kaa) ) * umask(ji,jj,jk)', 1),
         2],
     'dynzdf.F90:153': ('DO_1Di( 0, 0 )      ! Add bottom/top stress due to barotropic component only', 1),
+    'stprk3_stg.F90:435': ('#if ! defined key_PSYCLONE_2p5p0', 5),
+    'stprk3_stg.F90:440': 'zub(ji,jj) = uu_b(ji,jj,Kaa) - SUM( e3u_0(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)',
+    'stprk3_stg.F90:446': ('END_3D', 6),
+    'stp2d.F90:144-145': [
+        ('!                             !*  COR + MET  *!   Flux Form        : Coriolis + Metric Term', 1),
+        ('!                             !*     VOR     *!   Vector Inv. Form : Coriolis + relative Vorticity', 1),
+        2],
+    'usrdef_zgr.F90:133-137': [
+        'zsur = -2033.194295283385_wp',
+        'zacr =     5.0_wp',
+        5],
+    'ocean_model_latlon_cgrid.py:6300-6321': [
+        ('u3_corr, v3_corr = _replace_stage_mean(', 1),
+        ('v=state_new.v.replace(data=v3_corr),', 1),
+        22],
     'stprk3_stg.F90:433': ('!                 !==  All stages: correct the barotropic component ==!   at Kaa = N+1/3, N+1/2 or N+1', 1),
     'stprk3_stg.F90:440-441': [
         'zub(ji,jj) = uu_b(ji,jj,Kaa) - SUM( e3u_0(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)',

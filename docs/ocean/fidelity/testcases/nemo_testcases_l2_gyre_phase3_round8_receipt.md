@@ -6236,3 +6236,528 @@ round:
 | shipped NEMO edit, `makenemo`, `mpirun`, push, merge, deletion | forbidden; none performed |
 
 UNASKED list: empty.
+
+## Round 31 — the kt2 owner is the ORDER of the barotropic correction
+
+Round 31 starts from `ce38f20c89a0` on a clean re-attached tree, same regime:
+CPU production JIT, fp64/x64, `transcendentals="libm"`, oracle V2.  The
+preregistration is
+`manifests/nemo_testcase_l2_gyre_round31_preregister.json`, committed at
+`3a36c07fc335` before any measurement, with three addenda each committed
+before the run it governs.  No NEMO executable was run.  Every artifact is
+under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round31/` with SHA-256
+in `artifacts.sha256`.
+
+### Rule 0 first — the task's own citation is off by one at both ends
+
+The round-31 task names the barotropic correction after `dyn_zdf` as lines
+434 to 445 of `stprk3_stg.F90`.  Read against the shipped source that is wrong
+at both ends: line 434 is a bare comment, the block opens at the PSYCLONE guard
+on `stprk3_stg.F90:435` and its last statement is `END_3D` on
+`stprk3_stg.F90:446`.  The two
+statements that add the column shift are `stprk3_stg.F90:444-445`.  The
+citation gate already carried the correct range, `stprk3_stg.F90:437-446`,
+anchored on `#endif` and `END_3D`.  Corrected before anything was scored.
+
+Round 30's receipt cited `stprk3_stg.F90:430` for the same block, which is the
+`CALL dyn_zdf` itself.  That is struck in place, above.
+
+### Item 1 — the round-30 receipt, corrected in place
+
+The merge artifact is the receipt, so all six corrections land in the round-30
+text as well as here.
+
+**EIGHT rows moved the wrong way, not four.**  The threshold, stated because
+round 30 stated none: a row is WORSENED when the trajectory gate's
+`normalized_max_abs` is larger after than before, and it is ABOVE ROUNDOFF
+when that increase exceeds `1e-6` relative.  Seven of the eight are above it.
+
+| row | before | after | relative |
+|---|---:|---:|---:|
+| `kt8.before.v` | `2.4527161866164299e-02` | `6.2034193135222182e-02` | `+152.92 %` |
+| `kt4.before.ssh` | `5.0604233711813020e-07` | `5.2949464552374050e-07` | `+4.6345 %` |
+| `kt5.before.v` | `4.3797665645157385e-02` | `4.5721416735565040e-02` | `+4.3924 %` |
+| `kt6.before.v` | `6.0219592086987961e-02` | `6.2092404213714036e-02` | `+3.1100 %` |
+| `kt4.before.T` | `1.0594738051818496e-03` | `1.0662127787936730e-03` | `+0.6361 %` |
+| `kt5.before.T` | `3.0537424781428640e-03` | `3.0599261436702885e-03` | `+0.2025 %` |
+| `kt4.before.S` | `8.2257404626745840e-05` | `8.2383027017548940e-05` | `+0.1527 %` |
+| `kt3.before.T` | `3.7223441372709554e-04` | `3.7223442048188220e-04` | `+1.8e-06 %` |
+
+Round 30 listed rows one, three, four and five.  It omitted `kt4.ssh`, which
+is LARGER than two of the four it listed.  34 rows improved and 8 were
+unchanged, out of 50.
+
+**BOUNDARY and OWNER, stated once for all eight.**  The boundary is the
+stage-3 momentum RHS: the only model change between the arms is the velocity
+level the lateral viscosity reads.  The owner is UNKNOWN and nothing here or
+in round 30 attributes it.  What round 31 adds is that the owner is not the
+stage-3 velocity error itself, because that error is now attributed (item 4)
+to a term the lateral-viscosity change does not touch.
+
+**WITHDRAWN: "the AFTER arm on the committed clean tree".**  The AFTER report
+was written at 22:13:10 and the BEFORE one at 22:16:54; the fix commit
+`7521513a54c3` is timestamped 22:20:56, seven minutes after the later of the
+two.  Both arms ran on the same uncommitted tree — the AFTER one carrying the
+fix as a working-tree edit, the BEFORE one carrying a one-line revert of it.
+That is still a controlled pair, but not the provenance the sentence claimed,
+and no artifact could have shown it: none of the five round-30 JSONs carries a
+revision stamp of any kind.  Item 2 closes that.
+
+**RESTORATION HASH.**  The file the temporary revert touched is
+`packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py` — not the
+`ocean_pe_latlon_cgrid.py` the round-30 text cites for the shared seam, which
+the fix does not modify.  Its SHA-256 at `7521513a54c3`, the state the revert
+was restored to, is
+`1878abd84548f115b31cf9972c644351bea65af67bbdb995819d3fad904f0c89`.  The same
+file at this round's tip hashes differently, because four later commits touch
+it; that is expected and is why the hash is pinned to the commit.
+
+**RULE-12 ELIGIBILITY FOR THE `dyn_ldf` CHANGE IS DISCHARGED ON NO CARD.**
+Stated plainly because round 30 did not.  Rule 12 requires the changed
+operator to be bit-exact given NEMO's own inputs on every card that executes
+it.  On GYRE the operator ran on zero non-zero-input cells: the run starts
+from rest, `uu_Kbb_in` and `vv_Kbb_in` are identically zero in the round-29
+record, and both `zcur` and `zdiv` are purely multiplicative in velocity, so
+the term is exactly `0.0`.  Both tanks resolve `ln_dynldf_OFF`.  ORCA2 is
+covered in item 5 and cannot discharge it either.  So the fix is landed on a
+reading of `dynldf_lev_rot_scheme.h90:24-25` and `:28-29` plus a measured zero,
+and its eligibility is OPEN.
+
+**COMMIT MESSAGE versus RECEIPT.**  The round-30 commit message says the
+worsened rows are "a second error exposed"; the receipt says their owner is
+UNKNOWN.  Both are as intended and they are not the same claim.  Rule 12's
+phrase "a second error exposed" names the CATEGORY a worsened row enters when
+a faithful fix removes a compensating error — it does not name the error.  The
+receipt's "owner UNKNOWN" is the attribution, and there is none.  This note is
+the reconciliation; no wording changes.
+
+**THE ROUND-29 INSTRUMENT REFORMATTED ONE PHYSICS LINE.**  Diffing
+`cfgs/GYRE_OMIP_L2_P3_SM_R29ZDF/MY_SRC/stprk3_stg.F90` against the shipped
+`src/OCE/stprk3_stg.F90`, every added line is instrument except one, where the
+single-line `IF( ln_traqsr ) CALL tra_qsr( kstp, Kmm, ts, Krhs )` became a
+block `IF( ln_traqsr ) THEN ... CALL tra_qsr( kstp, Kmm, ts, Krhs ) ... ENDIF`
+so the instrument could bracket the call.  The call and its four arguments are
+identical; only interior whitespace changed.  `dynzdf.F90`'s instrumented copy
+removes no physics line at all.  Recorded because a reformatted physics line
+in an oracle-acquisition copy is exactly the kind of thing that should never
+be found later.
+
+### Item 2 — a gate report that cannot name its own tree is not evidence
+
+Round 30's worktree was left DETACHED by an earlier session and every gate run
+in it for most of a day emitted numbers under a `HEAD` that named different
+source.  Measured, not assumed: `legoesm_git_sha` is absent from all five of
+`round30_gyre_trajectory_{before,after}.json`, `round30_pre_ldf.json`,
+`round30_post_ldf_after.json` and `round30_zdf_calibration.json`.
+
+The repo already had the right helper and it was reused rather than rebuilt:
+`provenance.py:38`'s `git_sha` fails closed on tracked dirt for exactly this
+reason.  What it could not answer is whether `HEAD` was describing this code at
+all.  `worktree_stamp` adds the branch (or `DETACHED`), whether the tree is
+clean, and, when it is not, the SHA-256 of the full `git diff HEAD`.  Detached
+is RECORDED, never refused — the cross-card probe lanes are deliberately
+detached worktrees — and dirt refuses, with one named escape that suppresses
+nothing.
+
+Wired into all 62 report dicts across all 36 report-emitting gates,
+mechanically by AST so none was missed, and held by a grow-only ratchet.  It
+fired for real three times during this round: each time an edit landed while an
+arm was running, that arm refused at report time rather than stamping a commit
+that no longer described its code.  That cost three runs and is the whole
+point.
+
+**The round-30 trajectory arm, re-run at this tip with the stamp.**  All ten
+steps, same protocol, all three oracle roots pinned to the V2 root,
+`--trajectory-only`, on a clean tree on the branch: **all 50 rows reproduce
+EXACTLY**, zero differing, first-over-bar `kt2` on `T`/`S`/`u`/`v`, `u` at
+`9.48236979236058e-07` and `v` at `8.94866292055948e-07`.  So round 30's AFTER
+numbers ARE the committed tree's numbers — which is what the withdrawn sentence
+claimed and could not show.  It is shown now, with a stamp naming
+`da93c090cf73` on branch `fidelity/nemo-testcases-l2-gyre-codex2`, clean.  The
+BEFORE arm is not re-run: reproducing it needs the fix temporarily reverted,
+and its numbers are already recorded.
+
+### Item 3 — the depth profile, and what it does and does not settle
+
+GYRE's kt=1 stage-3 velocity error, binned by model level over the 580 wet u
+columns and 570 wet v columns.  All 580 columns are 30 levels deep — GYRE has
+a flat bottom — so level 30 is the deepest wet level everywhere.
+
+| level | `max abs` (u) | signed mean (u) |
+|---|---:|---:|
+| 1 | `7.131145e-08` | `-1.019240e-09` |
+| 15 | `7.131128e-08` | `-1.019234e-09` |
+| 29 | `7.097569e-08` | `-1.014435e-09` |
+| **30** | **`9.482370e-07`** | **`+1.355289e-08`** |
+
+Levels 1 to 29 sit on top of each other to five digits; level 30 is 13.3 times
+larger and of the opposite sign.  Zero of 580 u columns and zero of 570 v
+columns are column-uniform to 1 per cent, and the median per-column span over
+peak is `1.0752`.
+
+**P3a is CONFIRMED and P3b REFUTED**, so an error in `zub` ITSELF —
+the barotropic correction's own operand — is out.  That is what this
+measurement settles, and the independent CLAIM review is right that it is less
+than round 31 first claimed: it does not separate the two statements that act
+at the deepest level only, and it never could.
+
+**The review's reading, adopted, and it is sharper than mine.**  NEMO's
+correction is not an additive constant.  `stprk3_stg.F90:440` builds
+`zub = uu_b(Kaa) − SUM(e3u_0·uu(:,Kaa))·r1_hu_0` from the SOLVE OUTPUT, so it
+is a rank-1 operator: a single-level error `d` at the deepest level appears as
+`(1−f)·d` there and `−f·d` at every level above, with `f = e3(deepest)/hu_0`.
+GYRE's ladder gives `f = 0.069921016765114`, and three observed statistics
+match that one constant:
+
+| statistic | predicted from `f` | observed |
+|---|---:|---:|
+| levels 1-29 max over level 30 | `0.075178` | `0.075206` |
+| signed-mean ratio, opposite sign | `-0.075178` | `-0.075201` |
+| median span over peak | `1.075177` | `1.075204` |
+
+So the measured field is **one bad number per column, at the deepest wet
+level**, and every level above it is that number's barotropic image.  The flat
+1-29 rows were the tell and round 31 first read them as unremarkable.
+
+### Item 4 — the pre-solve vector, and the owner
+
+**The transcription is calibrated (Rule 1e).**  Walking the round-29 record
+forward through `dynzdf.F90:121-122`, then `dynzdf.F90:149-150`, then
+`dynzdf.F90:156-159` reproduces the record's own `uu_Kaa_pre`/`vv_Kaa_pre` with **0 of 17400** and
+**0 of 17100** cells unequal, max difference exactly `0`.  Labelled as the
+review insisted: this certifies the gate's TRANSCRIPTION of those statements
+and nothing downstream.  It is entirely internal to the oracle — legoESM never
+appears in it — so it does not establish index or halo alignment with the
+model, and it touches none of the solve's own inputs (`avm`, `e3uw(Kmm)`,
+`e3u(Kaa)`, `rCdU_bot`, `utauU`, `rDt`).  The one-ulp plant turns it red.
+
+**Round 30 was wrong that legoESM exposes no pre-solve vector.**
+`expose_pre_implicit_state` publishes `state_new` immediately before the
+implicit solver (`ocean_model_latlon_cgrid.py:7731-7733`) and it carries u and
+v.  **P4b is REFUTED**: that vector is not NEMO's explicit stage update, and
+not by a little — `4.269765124169735e-04` on u, which is the size of the
+FIELD, not of a residual.
+
+**P4f is CONFIRMED: it is none of `dyn_zdf`'s three entry boundaries.**
+
+| boundary | NEMO statement | u max abs |
+|---|---|---:|
+| A, the explicit stage update | `dynzdf.F90:121-122` | `4.269765e-04` |
+| B, A minus the barotropic velocity | `dynzdf.F90:149-150` | `8.524937e-04` |
+| C, B plus the barotropic bottom stress | `dynzdf.F90:156-159` | `8.535126e-04` |
+
+The model's own field peaks at `4.255609e-04` where the oracle's `uu_b_Kaa`
+peaks at `4.2551722767418954e-04` on the same mask.  The model's pre-implicit
+vector IS the barotropic velocity plus a deviation of about `4e-07`; NEMO's
+has that velocity REMOVED.  Removing it a second time (arm B) doubles the
+residual, which is the check.
+
+**THE OWNER: the ORDER of the barotropic correction relative to the solve.**
+Read on both sides before it was measured.  legoESM applies NEMO's correction
+to the stage-3 velocity BEFORE the implicit solve
+(`ocean_model_latlon_cgrid.py:6300-6321`, through `_replace_stage_mean` whose
+target is the prognostic `uu_b`) and again after it, under
+`nemo_stage_mean_imposition`, which GYRE resolves `True`.  NEMO applies it
+ONCE, after (`stprk3_stg.F90:437-446`); before the solve it instead SUBTRACTS
+`uu_b` (`dynzdf.F90:149-150`).  So the two solves receive vectors differing by
+the column constant `mean(A) − uu_b`, and a constant does not pass a solve
+whose deepest diagonal carries the drag (`dynzdf.F90:296`).
+
+**P4g CONFIRMED, and then P4i CONFIRMED column by column.**  The constant
+peaks at `4.2697651206621503e-04`; the drag factor
+`zDt_2·|rCdU_bot(i+1,j)+rCdU_bot(i,j)|/e3u(iku,Kaa)` peaks at
+`2.3943348583166887e-03`; their product is `1.022324152002595e-06` against a
+back-derived single-cell error of `1.0195230688237005e-06` — 0.3 per cent.
+Regressing the two on every column, not at the maxima:
+
+| face | columns | slope through origin | R-squared |
+|---|---:|---:|---:|
+| u | `580` | `0.99726006226993791` | `0.999999999999996` |
+| v | `570` | `0.99726003050683432` | `0.99999999999996492` |
+
+One slope, two independent fields, and a residual of four parts in `1e15`.
+The `f` used to invert the rank-1 correction is read from the model's own
+geometry and printed: `0.069921016765114`, matching what the reviewer read off
+NEMO's ladder parameters (`usrdef_zgr.F90:133-137`).
+
+That is a mechanism with a scaling test, on every column, and it names GYRE's
+kt2 blocker.  **NOTHING LANDS ON IT THIS ROUND (P4k, preregistered).**  A
+regression is not an ablation, and the change it points at is an ordering
+change in the shared WS-RK3 momentum program that needs its own Rule-12
+discharge on every card that runs it.  The 0.27 per cent the slope sits from
+1.0 is itself structured and unexplained, and it is the first thing round 32
+should look at.
+
+**The first non-bit statement in `dynzdf.F90` is: NONE OF THEM.**  That was
+the question this item was handed, and the answer is that `dyn_zdf`'s
+statements are never reached with NEMO's inputs, because legoESM enters the
+routine with a different vector.  Naming a statement inside it would have been
+the failure this campaign's rules exist to stop.
+
+### Item 5 — ORCA2 cannot discharge round 30's Rule-12 row, and here is what would
+
+Worked in a disposable detached worktree of the round-27 ORCA2 probe under
+`/tmp` (`/tmp/r31-orca2-scratch` at `c6f3e33f063b`, nothing committed there,
+flagged for removal).  Round 30's fix commit applies cleanly there —
+`git apply --check` exits 0 — and it was NOT applied, because the answer makes
+it moot.
+
+**legoESM cannot evaluate the changed operator on ORCA2 at all.**  The card
+selects `nemo_div_curl` with `A_h = 1e5`, and that branch refuses a tripolar
+grid: `ocean_pe_latlon_cgrid.py:3262-3265` raises unless the grid carries a
+positive scalar `dlon`, and ORCA2's is `0.0`.  That is why the existing ORCA2
+phase-2 gate zeroes `A_h` in its discarded tendency.  A second gap sits behind
+it: ORCA2 resolves `nn_ahm_ijk_t = -30`, i.e. `ahmt_3d`/`ahmf_3d` read from
+`eddy_viscosity_3D.nc`, where legoESM synthesises a 1-D profile.
+
+**And no ORCA2 record could score it even if it ran.**  All 101 `oracle_*`
+streams in the phase-2 root were enumerated.  Every momentum-`Krhs` record is
+stage-2-gated or pre-stage: `oracle_rhs_kt00000001.bin` is written before the
+three stage calls, the `rkstage2_*` family is inside `IF( kstg == 2 )`, and
+`oracle_stage_kt*_s3.bin` is the post-`dyn_zdf`, post-correction Kaa STATE, an
+endpoint rather than an operand.  ORCA2's `MY_SRC` has no `dynzdf.F90`, so
+there is no twin of GYRE's round-29 pair.
+
+So the row is **UNMEASURED**, and the review's suggestion — discharge it on
+GYRE at kt>=2, where the velocity is nonzero and the operator does run — does
+not work either: it needs an oracle value to compare against, and the only
+pre-/post-`dyn_ldf` frames that exist are at kt=1, where the term is zero.
+That is round 30's open question 0, unchanged.
+
+**What would discharge it**, in order: tripolar support in `nemo_div_curl`; a
+file-read `ahmt_3d`/`ahmf_3d`; and one new WRITE-only frame.  The frame's
+specification, from the scratch lane: insert immediately BEFORE `CALL dyn_ldf`
+in `cfgs/ORCA2_OMIP_L4/MY_SRC/stprk3_stg.F90`, guarded
+`IF( lwp .AND. kstp == nit000 )`, writing `oracle_rkstage3_preldf_*.bin` with
+magic `NEMO_L2_RKPLD_1` and header `(1, kstp, kstg, Kbb, Kmm, Krhs, Kaa, jpi,
+jpj, jpk, STORAGE_SIZE(1._wp))`, payload `uu/vv(:,:,:,Krhs)` through this
+lane's canonicalising wrapper rather than raw, because its halo and tripolar
+conventions differ from GYRE's.  A second frame after `dyn_ldf` must also
+carry the operands: `uu/vv(:,:,:,Kbb)`, `e3t/e3u/e3v(:,:,:,Kbb)`,
+`e3f(:,:,:)` and `e3u/e3v(:,:,:,Kmm)` — the three distinct thicknesses
+`dynldf_lev_rot_scheme.h90:24-25` and
+`dynldf_lev_rot_scheme.h90:28-29` read plus the `/e3u(...,Kmm)` divisor.
+Under `key_qco` those are macros, so each must be materialised into a buffer
+before the `WRITE`.
+
+**The three-level thickness operand (round 30's open question 0) is
+measurable on ORCA2 and NOT on GYRE**, and that is now quantified rather than
+asserted: ORCA2's horizontal `e3` spread within a level is nonzero on 27 of 30
+levels, from about 1.3 m partial cells up to the full 500 m reference; GYRE's
+is nonzero on 0 of 30.  So legoESM's single-thickness argument is invisible on
+GYRE by construction, exactly as both round-30 reviewers said.
+
+### Item 6 — decision 16, re-filed as an open card-identity gap
+
+CLOSED as "re-file", with round 30's wording struck.  NEMO calls `dyn_vor`
+UNCONDITIONALLY on the tanks — `stp2d.F90:146` has no `IF`, and the banner
+above it at `:144-145` names the two things the one call serves, `COR + MET`
+in flux form and `VOR` in vector-invariant form.  On LOCK and OVERFLOW the
+call adds nothing because `f = 0` and the grid is uniform, so the metric term
+vanishes too; that is a property of those decks, not "by construction", and
+round 30's "premise REFUTED" overstated it.
+
+legoESM's flux-form cards apply Coriolis as a Matsuno-split velocity rotation
+outside the RHS, with no metric term at all.  No target card runs flux form
+WITH rotation — GYRE is vector-invariant, and so are ORCA2 and the ORCA1 deck
+— so nothing is landed and nothing needs to be.  Registered as an open
+card-identity gap with its boundary named: **legoESM's flux-form momentum
+program has no metric term and applies Coriolis outside the RHS; it is
+value-inert on every card the campaign scores today, and it would be wrong on
+the first flux-form card with rotation.**
+
+### Item 7 — decision 17 is CONFIRMED, and it is a guard-ordering defect
+
+The claim was that the four remaining `test_nemo_recipe` failures have one
+cause.  Measured: all four —
+`test_nemo_gyre_coordinate_is_consistent_clean_w_bc`,
+`test_nemo_gyre_forced_trajectory_is_finite_and_stable`,
+`test_nemo_gyre_wind_forcing_sign_chain_end_to_end` and
+`test_surface_stress_implicit_wiring` — reach the SAME raise site with the
+same stack, `vertical.py:64-70`: "literal NEMO QCO e3t requires
+explicit/reference nemo_e3t_0 and is_active".  **One cause, CONFIRMED.**
+
+Which operand is missing was measured rather than read off: `e3t_0` IS
+supplied by the caller; only `is_active` is absent, and `OceanZStarCoordinate`
+carries no such field where `OceanPartialCellCoordinate` does.
+
+**But the cause is not the geometry choice round 29 registered.**  The guard
+sits ABOVE the function's own linear-free-surface early return
+(`vertical.py:76-77`), which returns `e3t_0` and never reads the mask.  The
+demo card resolves `linear_free_surface=True`, so it is refused for an operand
+its own arm does not consume.  And that resolution is the FAITHFUL one: the
+demo card reproduces NEMO's `GYRE_BARE`, whose compile keys are
+`key_linssh key_vco_1d key_RK3` (`cpp_GYRE_BARE.fcm:1`) — no `key_qco`, so
+NEMO's own `GYRE_BARE` never executes `dom_qco_r3c` either.  The oracle deck
+is the other one, `key_qco key_vco_1d3d key_RK3`
+(`cpp_GYRE_OMIP_L2_P3_SM.fcm:1`).  `ln_linssh` is not a live namelist variable
+in NEMO 5.0.2 at all; every occurrence in the source is commented out.
+
+**The demo card was NOT changed, and neither was the guard.**  Moving a guard
+below an early return changes which cards a shared physics path accepts, which
+is on the stop-and-ask list.  The one-line change is named here and is round
+32's to ask about.
+
+### Rule-11 records
+
+**P4b is REFUTED by its own first measurement.**  It predicted the model's
+pre-implicit vector would match NEMO's explicit stage update to `5e-12`.  It is
+off by `4.269765124169735e-04`.  The prediction was written from an alignment
+read that was wrong, and the size of the miss — the size of the FIELD, not of a
+residual — is what said so.
+
+**P3a's REASONING is retracted; its conclusion is not.**  Round 31 argued that
+the barotropic correction adds a column-uniform shift, so a non-uniform error
+exonerates it.  The correction is rank-1, not additive: `stprk3_stg.F90:440`
+builds `zub` from the solve output, so it MAPS a single-level error into a
+column-uniform one.  The measurement still rules out an error in `zub` itself,
+which is what the conclusion needs, but the stated mechanism was wrong and the
+test cannot separate the two deepest-level statements.  Found by the
+independent CLAIM review, not by me.
+
+**Round 30's "legoESM exposes no pre-solve vector" is RETRACTED.**  It does;
+`expose_pre_implicit_state` carries u and v.  What is true is that the vector
+it exposes is not any of `dyn_zdf`'s entry boundaries, which is a different
+and more useful statement.
+
+**Round 30's "the AFTER arm on the committed clean tree" is WITHDRAWN**, and
+its four-row worsened register is CORRECTED to eight.  Both struck in place
+above.
+
+**The 17x prediction gap is relabelled a second time.**  Round 31 first called
+it "bounds, does not confirm"; the review is right that even that is too
+strong, because the prediction was a point estimate and not an upper bound by
+construction.  It is a REFUTATION PENDING EXPLANATION, and a `1.7e-10` move
+against a `9.5e-07` error confirms nothing in either direction.
+
+### Round-31 independent review — two reviewers, both productive
+
+Codex is unavailable on this account, so the mandatory DUAL adversarial review
+ran as two fresh independent agents, one on the DIFF and one on the CLAIM,
+briefed separately and neither shown the other's answer.  Both found real
+defects and neither found the other's.
+
+**The CLAIM reviewer refuted item 3's mechanism** and replaced it with the
+rank-1 reading above, matching three observed statistics to four significant
+figures on one geometric constant read off NEMO's own ladder.  It also
+relabelled the calibration ("this certifies a transcription, not an
+alignment") and the 17x gap, and both relabellings are adopted verbatim.  It
+proposed discharging Rule 12 for the `dyn_ldf` fix on GYRE at kt>=2; that is
+answered in item 5 — there is no oracle frame at kt>=2 to compare against.
+
+**The DIFF reviewer found three wrong-number defects in the new gate**, each
+fixed with the control that catches it: a column whose error is exactly zero
+was counted COLUMN-UNIFORM, so on a nearly exact field every already-correct
+column voted for the barotropic owner; a NaN column read as uniform too while
+`nanmax` hid it, so a blow-up would have become evidence; and the
+`depth_profile` plant perturbed one face while the verdict ANDs over two, so
+the control's own assertion depended on the hypothesis under test.  It also
+found that the stamp named the tree owning `provenance.py` rather than the
+tree the CALLER's source came from — the round-30 failure wearing a stamp —
+and that wiring the stamp in had silently killed the `--allow-dirty` flag on
+eight gates that emit their report AFTER a model run.  Two of the new tests
+were source-text greps that stayed green when the verdict ladder was inverted;
+the ladder is a function now and the test exercises it.  It independently
+verified the reconstruction arithmetic against the real record statement by
+statement, including that dropping `dynzdf.F90:149-150` leaves 17400 of 17400
+cells unequal and dropping `dynzdf.F90:156-159` leaves exactly 580 — the deepest wet cells.
+
+Two latent assumptions it verified safe and this round then GUARDED rather
+than relied on: the explicit update writes all `jpk` levels where NEMO writes
+`1..jpkm1`, and `np.roll` wraps where NEMO reads a real neighbour.  Both now
+refuse a record that would make them bite.
+
+### Tests
+
+`tests/ocean/fidelity/test_nemo_testcase_worktree_stamp.py` (10) and
+`tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round31_zdf_walk.py` (20):
+**30 passed**.  Fifteen of the thirty are synthetic-violation arms — a report
+dict with the stamp deleted, a dirty tree, the escape, a detached tree, a
+directory git cannot describe, a caller outside the stamped tree, a mask wet
+above `jpkm1`, a tile reaching the array edge, each of the three walked
+statements zeroed in turn, a bottom stress moved off `mbku`, a zero-error
+column, a NaN column, and both ends of the verdict ladder.
+
+Every mode's plant control fires and exits non-zero: `calibrate` on a one-ulp
+move (`1/17400` unequal), `depth_profile` on a column-uniform plant applied to
+BOTH faces (the verdict flips to `BAROTROPIC-CORRECTION CANDIDATE`, which is
+the proof that the discriminator can say the other thing), and
+`ordering_regression` on a zeroed slope (`NO OWNER NAMED`).
+
+The citation gate is `PASS` over 131 citations with 0 failures and 0 map
+entries failing audit.  Seven of this round's own new map entries were wrong
+when first written — three off by one to four lines, one anchored on a symbol
+occurring seven times, one pointing at a `MY_SRC` copy that does not exist, and
+two whose extent disagreed with the range — and the map audit caught every
+one before the receipt was written.  It also caught the round-29 rebinding
+defect twice more: a bare `:N` after a different backticked filename bound to
+that filename, so a `dynzdf` statement was auditing `provenance.py`.
+
+Focused run across the stamp, this round's walk, the citation gate and the
+round-29 and round-30 gates: **68 passed**.
+`tests/ocean/unit/test_nemo_recipe.py` is `4 failed, 20 passed`, the same four
+round 29 recorded and for the same reason, now measured (item 7).
+
+### Merge readiness
+
+`03c6e8d96ff7` remains an ancestor of this branch, so the integration is still
+a FAST-FORWARD with zero conflicts by construction.  What blocks it after this
+round:
+
+1. **GYRE's kt2 `T`/`S`/`u`/`v` rows still fail**, unchanged — `u` at
+   `9.482e-07` on `17400 / 17400` faces, `v` at `8.949e-07`.  Round 31 lands
+   NO model numerics, so nothing about the blocker moved.  What changed is that
+   the blocker now has a named, sized, column-wise-confirmed owner.
+2. **Round 30's `dyn_ldf` fix carries an OPEN Rule-12 eligibility.**  It is
+   discharged on no card and cannot be discharged on any card that exists
+   today (item 5).  It stays, per Rule 12 — the fix is not reverted for a gap
+   in its evidence — but the gap is now stated in the register instead of
+   implied.
+3. **Eight worsened trajectory rows** from round 30, seven above roundoff, with
+   a boundary and no owner.
+
+### Open questions
+
+0. **The 0.27 per cent the ordering regression's slope sits from 1.0.**  It is
+   the same to nine digits on both faces, so it is structure, not scatter.
+   Cheapest first look: whether it is the `e3u(Kaa)` versus `e3u_0` difference
+   in the weighting, or a second-order term of the tridiagonal.
+1. **The ordering fix itself.**  Move legoESM's stage-3 barotropic correction
+   from before the implicit solve to after it, and subtract `uu_b` before it as
+   `dynzdf.F90:149-150` does.  It is one place in the shared WS-RK3 program and
+   it needs its own Rule-12 discharge on GYRE, both tanks and ORCA2 — the tanks
+   resolve the flags `False`, so the change must be shown inert there.
+2. **Round 30's `dyn_ldf` Rule-12 row**, and the three pieces of work item 5
+   names as its price.
+3. **The lateral operator's THICKNESS operand**, still unmeasurable on GYRE and
+   now quantified as measurable on ORCA2 (27 of 30 levels have horizontal `e3`
+   spread there, 0 of 30 on GYRE).
+4. **The eight worsened trajectory rows.**
+5. **Decision 16**, re-filed above as an open card-identity gap.
+6. **Decision 17's guard**, which refuses a card for an operand its own arm
+   never consumes.  One line; asks first.
+7. **The slow forcing's depth average** still uses the min rule where NEMO uses
+   the area-weighted mean; `3.06e-08` at kt=2, unchanged.
+8. **Rounds 1-24 of this receipt remain UNAUDITED** by the citation gate.
+
+### ASKED / UNASKED
+
+| choice | disposition |
+|---|---|
+| correct the task's line range 434-445 to `stprk3_stg.F90:437-446` | not a scientific choice; corrected against the shipped source before measuring, and the citation gate already carried the right range |
+| stamp every gate report with its worktree, fail-closed on dirt | not a scientific choice; it reuses the existing `git_sha` rather than adding a second stamp, and its one escape records rather than suppresses |
+| record DETACHED without refusing it | ASKED by the lanes: the cross-card probe worktrees are deliberately detached, and a clean detached tree hides no `HEAD`/code disagreement |
+| refuse a stamp whose caller is outside the stamped tree | not a scientific choice; a reviewer finding, and it is the round-30 failure wearing a stamp |
+| bridge eight gates' own `--allow-dirty` flag to the shared stamp | not a scientific choice; wiring the stamp in had silently killed the flag |
+| withdraw round 30's arm-provenance sentence rather than restate it | ASKED by the timestamps; the pair is still controlled and that is said |
+| do NOT land the ordering fix this round | ASKED, and preregistered as P4k before the number that would have tempted it: a regression is not an ablation |
+| do NOT change the demo card or its guard (decision 17) | ASKED; moving a guard below an early return changes which cards a shared physics path accepts |
+| do NOT land decision 16 | ASKED; no target card runs flux form with rotation, so there is nothing to land |
+| apply round 30's fix in the ORCA2 scratch lane | NOT DONE — `git apply --check` passes, but legoESM cannot evaluate the operator on a tripolar grid at all, so applying it would have measured nothing |
+| shipped NEMO edit, `makenemo`, `mpirun`, push, merge, deletion | forbidden; none performed |
+
+UNASKED list: empty.
+
+Every figure above is pinned in
+`manifests/nemo_testcase_l2_gyre_round31.json`.
+
