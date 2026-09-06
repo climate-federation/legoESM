@@ -435,7 +435,6 @@
   "after_trajectory.json": "de23a39a530834923649e5ae35eeb122d394d1b5622726d593498cec8e67c9ce",
   "after_trajectory.log": "59e26f6aa019875e8d682b6b642e83d4f8a1508cf58de2757952423296f0653a",
   "after_trajectory.residuals.npz": "cc11c54ae13e55015065a426a586b38bed21c17a7582cfad233e1a5130b00918",
-  "artifacts.sha256": "b497c17d58162a2f344653f1581df86e3a1634135038ab0f5d1a971ecc710088",
   "before_depth_profile.json": "c5fc25f35fa7bc058535cd3b44ec71bedc5ea94f6afea6c120053c7b50b7cf89",
   "before_depth_profile.log": "08e3c689ff5b7c63078da4e5839e6c70879bd96725e542772820f248ea9d8080",
   "before_pre_solve.json": "1eb6acbc894d41525f5560cb6389b247f6a4a2e5a014b4333ba1cd29f93acaf6",
@@ -443,6 +442,7 @@
   "before_trajectory.json": "77e1a1847ba1c259fc0fd2deac30c797116f5203ee80f7e1694b114b777cea48",
   "before_trajectory.log": "28ce79f7456f53efc64945fd4dc70fce867ce8abffa8e161f91d937043fd6147",
   "before_trajectory.residuals.npz": "96d2b3e845e08af4fa75b52b5c6644a8c51b32b5e0e5a133f017b3d10da2930b",
+  "citation_gate.json": "f8cb8591b2397658fa0665aeed77d340910df19b8032a5cb688b9fe7119eb0d4",
   "compare_trajectory.json": "18e9fbf22fbdab397c84882866e4998df1487649b61f92d5a70c796213d70706",
   "final_compare_trajectory.json": "7a6dd82724c48ebd34ad58d57bb5f84c292ca95dd90e50e362daeb18e0c60f72",
   "final_depth_profile.json": "b384a56b4c8fdaee1440d03f5d4d499ec4e8f0192798272b8a73cc34a67fc45d",
@@ -476,5 +476,7 @@
   "tests/ocean/unit/test_nemo_recipe.py, four tests, decision 17's guard",
   "tests/ocean/fidelity/test_recipe_case_board.py::test_every_oracle_comparison_has_a_row",
   "tests/ocean/fidelity/test_nemo_testcase_phase3_stage_sweep_gate.py::test_planted_stage_control_exits_nonzero_end_to_end"
- ]
+ ],
+ "artifacts_sha256_file": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round32/artifacts.sha256",
+ "receipt_sha256_before_this_refresh": "12ca9d52e8da1df7f30f83e94738d60e9de1ea08d0e524c26c782c8839f19110"
 }
