@@ -58,6 +58,8 @@ FILES = {
     "dynhpg.F90": _DYN / "dynhpg.F90",
     "dynadv.F90": _DYN / "dynadv.F90",
     "dynzdf.F90": _DYN / "dynzdf.F90",
+    "dynldf.F90": _DYN / "dynldf.F90",
+    "dynldf_lev_rot_scheme.h90": _DYN / "dynldf_lev_rot_scheme.h90",
     "vertical.py": REPO / "packages/ocean/legoesm/ocean/vertical.py",
     # GYRE's own run log and its own compiled branch, so a GYRE resolved value
     # cannot bind to OVERFLOW's ocean.output or to LOCK's ppsrc.
@@ -265,6 +267,15 @@ CITATION_MAP = {
     'dynzdf.F90:121-122': ['puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kbb) + rDt * puu(ji,jj,jk,Krhs) ) * umask(ji,jj,jk)', 'pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kbb) + rDt * pvv(ji,jj,jk,Krhs) ) * vmask(ji,jj,jk)', 2],
     'dynzdf.F90:156-159': ['puu(ji,jj,iku,Kaa) = puu(ji,jj,iku,Kaa) + zDt_2 * ( rCdU_bot(ji+1,jj)+rCdU_bot(ji,jj) ) * uu_b(ji,jj,Kaa)   &', ('&                                            / e3v(ji,jj,ikv,Kaa)', 1), 4],
     'dynzdf.F90:182-195': ['zzwi = - zDt_2 * ( avm(ji+1,jj,jk  )     +  avm(ji,jj,jk  )     ) &', ('zwd(ji,1) = 1._wp - zzws', 1), 14],
+    'dynldf.F90:70': 'CALL dynldf_lev_lap( kt, Kbb, Kmm, puu, pvv, Krhs )',
+    'dynldf_lev_rot_scheme.h90:24-25': [
+        'e2v(ji  ,jj-1) * pv_in(ji  ,jj-1,jk,Kbb)',
+        'e1u(ji-1,jj  ) * pu_in(ji-1,jj  ,jk,Kbb)',
+        2],
+    'dynldf_lev_rot_scheme.h90:28-29': [
+        'e2u(ji,jj)*e3u(ji,jj,jk,Kbb) * pu_in(ji,jj,jk,Kbb)',
+        'e1v(ji,jj)*e3v(ji,jj,jk,Kbb) * pv_in(ji,jj,jk,Kbb)',
+        2],
     'dynzdf.F90:296': 'zwd(ji,iku) = zwd(ji,iku) - zDt_2 *( rCdU_bot(ji+1,jj)+rCdU_bot(ji,jj) ) / e3u(ji,jj,iku,Kaa)',
     'dynzdf.F90:329-330': ['puu(ji,jj,1,Kaa) = puu(ji,jj,1,Kaa) + rDt * utauU(ji,jj)   &', '&                                    / ( e3u(ji,jj,1,Kaa) * rho0 ) * umask(ji,jj,1)', 2],
     'domqco.F90:166-169': [('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)  &', 1), ('&                    + e1e2t(ji,jj+1) * pssh(ji,jj+1)  ) * r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 1), 4],
@@ -288,6 +299,10 @@ CITATION_MAP = {
     'ocean.output:875': 'Barotropic time filter => nn_bt_flt',
     'lock_kt1_10/ocean.output:615': 'no explicit diffusion                ln_dynldf_OFF',
     'overflow_kt1_10/ocean.output:727': 'no explicit diffusion                ln_dynldf_OFF',
+    'ocean_pe_latlon_cgrid.py:5034-5035': [
+        '_u_ldf_local = u if ldf_state is None else ldf_state[2]',
+        '_v_ldf_local = v if ldf_state is None else ldf_state[3]',
+        2],
     'ocean_pe_latlon_cgrid.py:2005-2006': [('z_coord,', 26), ('eta_safe,', 7), 2],
     'ocean_pe_latlon_cgrid.py:2045-2046': ['requires the raw NEMO',
          'nemo_e3w_0 mesh field; midpoint reconstruction on',

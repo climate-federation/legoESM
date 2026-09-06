@@ -5804,3 +5804,306 @@ UNASKED list: empty.
 
 Every figure above is pinned in
 `manifests/nemo_testcase_l2_gyre_round29.json`.
+
+## Round 30 — the stage-3 owner is `dyn_ldf`, and it is not the kt2 blocker
+
+Round 30 starts from `ce34ae0f16c6` on a clean tree, same regime: CPU
+production JIT, fp64/x64, `transcendentals="libm"`, oracle V2.  The
+preregistration is
+`manifests/nemo_testcase_l2_gyre_round30_preregister.json`, committed at
+`d84262b0a0d4` before the pre-`dyn_ldf` and pre-`dyn_zdf` scores below.  No
+NEMO executable was run.  Every artifact is under
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round30/` with SHA-256 in
+`artifacts.sha256`.
+
+### Rule 0 first — two corrections, both before any measurement
+
+**The record this round was handed does not have the name it was given.**  The
+task named the new pre-`dyn_zdf` frame `oracle_rhs_kt00000001.bin`.  That
+basename is a PRE-EXISTING round-19 record (magic `NEMO_L1_RHS___1`) and is
+byte-identical between the two roots.  The round-29 frame is
+`oracle_rkstage3_preldf_kt00000001.bin` (magic `NEMO_L2_RKPLD_1`), and its
+patch inserts it BEFORE the `dyn_ldf` call, not after it — so it is the
+pre-`dyn_ldf` boundary, and the post-`dyn_ldf` one is `uu_Krhs_in` inside the
+matrix record.
+
+**Exactly ONE momentum call sits inside the stage-3 `CASE` block on this
+deck.**  `stprk3_stg.F90:400` is `dyn_ldf`; the other three calls in that block
+are gated on `ln_zdfosm`, `ln_bdy` and `ln_dyndmp .AND. ln_c1d`, all resolved
+false on GYRE.  `dyn_zdf` is NOT in the block at all: it is called under
+`IF( kstg == 3 )` at `stprk3_stg.F90:430`, after the block closes.  So the two
+frames bracket exactly one operator, which is what makes the walk a one-number
+question.
+
+### Item 1 — the round-29 root is ADMITTED
+
+`nemo_testcase_l2_gyre_round21_admission.py` against
+`round19_oracle_v2_external`: **39 of 49** pre-existing `oracle_*.bin` records
+byte-identical, the final restart **byte-identical**, verdict `PASS`, zero
+violations.  The 10 that differ are the same 10 round 21 classified, and every
+one has `consumed_equal: true`:
+
+| record | changed fields | disposition |
+|---|---|---|
+| `oracle_bt_ordered_operands` | 8 appended `ff*` fields | schema `NEMO_L2_BTORD_1 -> _2`, instrument version |
+| `oracle_rkstage1_transport_operands` | `zub`, `zvb` | unconsumed slot |
+| `oracle_rkstage3_wzv` | `ww_pre_aimp`, `ww_post_aimp`, `pFw` | unconsumed slot |
+| `oracle_rktracer_operands` s1, s2 | `zFw` | unconsumed slot |
+| `oracle_slow_forcing` | `utau`, `vtau` | unconsumed slot |
+| `oracle_tracer_transport` s3 | `zFw` | unconsumed slot |
+| `oracle_transport` s1, s2, s3 | `zFw` | unconsumed slot |
+
+Both new records parse to EOF from their own headers.  The pre-`dyn_ldf` frame
+is `464316` bytes: magic, eleven integers
+`(1, 1, 3, 1, 2, 3, 3, 36, 26, 31, 64)` — version, `kt`, `kstg`, `Kbb`, `Kmm`,
+`Krhs`, `Kaa`, `jpi`, `jpj`, `jpk`, bits — then exactly `2 * 36 * 26 * 31`
+doubles.  The matrix record's header carries `jpkm1 = 30` and the writer's own
+tile bounds `ntsi..ntei = 3..34`, `ntsj..ntej = 3..24`, and its 32 named arrays
+are all present.
+
+### Item 2 — the reader's calibration, now on the REAL record
+
+Round 29 could only calibrate against a compiled Fortran fixture.  Re-run on
+NEMO's own GYRE record, every row is at the bit bar:
+
+| arm | bit-unequal | max abs |
+|---|---:|---:|
+| `zwi_u` / `zwd_u` / `zws_u` | `0 / 21120` each | `0` |
+| `zwi_v` / `zwd_v` / `zws_v` | `0 / 21120` each | `0` |
+| `zdf_solve.u` | `0 / 21120` | `0` |
+| `zdf_solve.v` | `0 / 21120` | `0` |
+
+`STATUS AT-BAR`, exit `0`; the one-ulp plant on `avm` turns six rows red and
+exits `1`.  So NEMO's `dyn_zdf` matrix (`dynzdf.F90:182-195` plus the implicit
+bottom-drag diagonal at `dynzdf.F90:296`) and its three recurrences with the
+`key_RK3` wind term (`dynzdf.F90:329-330`) are reproducible bit for bit from
+the record's own operands, and any number quoted from this record is admissible
+(Rule 1e).
+
+### Item 3 — the pre-`dyn_zdf` boundary, and the owner
+
+Scored through the model's own path — production JIT, fp64, the phase-3 gate's
+masks and scorer — by
+`scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round30_stage3_owner.py`.
+The model side is a WRITE-only exposure of the stage-3 momentum RHS; the
+ordinary step completes before the arrays are substituted.
+
+| boundary | u bit-unequal | u max abs | u relative | v bit-unequal | v max abs |
+|---|---:|---:|---:|---:|---:|
+| pre-`dyn_ldf` (`stprk3_stg.F90:400`) | `17382 / 17400` | `2.0614443633579772e-16` | `7.83e-09` | `17096 / 17100` | `2.4827278704178648e-16` |
+| pre-`dyn_zdf` (`stprk3_stg.F90:430`), before | `17400 / 17400` | `8.256225965606334e-10` | `3.14e-02` | `17100 / 17100` | `8.290054935129283e-10` |
+
+**P1 of the round-30 preregistration is REFUTED, and P2's alternative is
+CONFIRMED.**  The frame entering `dyn_zdf` is not bit-exact, so the owner is at
+or before `dyn_ldf`; and the pre-`dyn_ldf` frame is four million times closer
+than the post-`dyn_ldf` one, so the owner is `dyn_ldf` itself.  (The pre-`ldf`
+row is AT-BAR on the campaign's normalized scorer only because that scorer
+divides by `max(|oracle|, 1)` and this field's maximum is `2.63e-08`; the
+relative figure is quoted next to it for that reason.  It is not bit-exact and
+it is not claimed to be.)
+
+**What `dyn_ldf` does at kt=1: exactly nothing.**  `dynldf.F90:70` dispatches
+the resolved `np_lap` operator to `dynldf_lev_lap`, whose vorticity-divergence
+scheme builds its curl from `pv_in(...,Kbb)` and `pu_in(...,Kbb)`
+(`dynldf_lev_rot_scheme.h90:24-25`) and its divergence from the same BEFORE
+velocity (`dynldf_lev_rot_scheme.h90:28-29`).  GYRE starts kt=1 from rest, and
+the matrix record proves it rather than assuming it: `uu_Kbb_in` and
+`vv_Kbb_in` are identically zero, `0` nonzero elements each.  So NEMO's
+`dyn_ldf` adds a term that is exactly `0.0`, and the two oracle frames confirm
+it directly — `max |pre - post|` is `0.0` on BOTH faces, with `0` bit-unequal
+cells on `u` and `2220` signed-zero flips on `v` (IEEE `-0.0 + 0.0 = +0.0`).
+
+legoESM was adding `8.256e-10` there because it evaluated the same operator on
+the STAGE velocity.  The shared seam for the BEFORE-level operand already
+existed and the leap-frog path already used it
+(`ocean_pe_latlon_cgrid.py:5034-5035`); the WS-RK3 stage RHS simply did not
+pass it.  Landed at `7521513a54c3` in that one shared place, no card switch,
+no new knob.  Stage 1 hands the helper the step-entry velocity already, so only
+the stage-3 call moves, and stage 2 never calls the operator.
+
+| boundary | u bit-unequal | u max abs | v bit-unequal | v max abs |
+|---|---:|---:|---:|---:|
+| pre-`dyn_zdf`, after the fix | `17382 / 17400` | `2.0614443633579772e-16` | `17098 / 17100` | `2.4827278704178648e-16` |
+
+That is the pre-`dyn_ldf` residual, unchanged, which is the correct answer: the
+operator now contributes what NEMO's contributes.  The pre-`dyn_ldf` arm's
+report file is BYTE-IDENTICAL before and after
+(`61a98efccdcf7db62b6e8e40392b15d018a44f6cad9a75ade606c74aacd7f850`), which is
+the one-variable control — the fix could not have reached the arm it was not
+supposed to touch.
+
+### Item 4 — the fix is NOT the kt2 blocker, and the walk must continue
+
+Both trajectory arms were run at the same protocol, all three oracle roots
+pinned to the V2 root, `--trajectory-only`, the AFTER arm on the committed
+clean tree and the BEFORE arm on a one-line temporary revert whose restoration
+was verified by file SHA-256.
+
+| row | before | after |
+|---|---:|---:|
+| `kt2.before.T` | `1.3614736849003888e-12` | `1.3614736849003888e-12` |
+| `kt2.before.S` | `2.2181101297999213e-14` | `2.2181101297999213e-14` |
+| `kt2.before.u` | `9.4840899384114608e-07` | `9.48236979236058e-07` |
+| `kt2.before.v` | `8.987992610401277e-07` | `8.9486629205594802e-07` |
+| `kt2.before.ssh` | `4.3368086899420177e-19` | `4.3368086899420177e-19` |
+| `kt3.before.u` | `9.3116789131403085e-03` | `7.1930784111826074e-04` |
+| `kt3.before.v` | `4.7190775913077548e-03` | `8.6064784770509273e-04` |
+| `kt4.before.u` | `1.4182404011957986e-02` | `7.078541518550233e-03` |
+| `kt5.before.u` | `2.0733890435921859e-02` | `9.2090289296850921e-03` |
+| `kt5.before.ssh` | `6.7018510230519579e-05` | `9.3606152350264767e-07` |
+| `kt6.before.ssh` | `1.6310239045095183e-04` | `3.2278369542912064e-06` |
+| `kt7.before.ssh` | `2.0871418234338955e-04` | `6.646098587755056e-06` |
+| `kt8.before.ssh` | `2.5108247679344643e-04` | `1.1722279529014011e-05` |
+| `kt9.before.ssh` | `2.1203002219557815e-04` | `2.167864546419253e-05` |
+| `kt10.before.u` | `5.6249869570505276e-02` | `5.1403631510096456e-02` |
+| `kt10.before.ssh` | `2.1255435580060100e-04` | `3.3284883532392094e-05` |
+
+Four rows move the wrong way and are registered as debt rather than hidden
+(Rule 12, a second error exposed by a faithful fix): `kt4.before.T`
+`1.0594738051818496e-03 -> 1.066212778793673e-03`, `kt5.before.v`
+`4.3797665645157385e-02 -> 4.572141673556504e-02`, `kt6.before.v`
+`6.0219592086987961e-02 -> 6.2092404213714036e-02`, and `kt8.before.v`
+`2.4527161866164299e-02 -> 6.2034193135222182e-02`.  Their boundary is the
+stage-3 momentum RHS and their owner is UNKNOWN; nothing here attributes them.
+
+**The merge blocker does NOT clear.**  First-over-bar stays `kt2` on
+`T`/`S`/`u`/`v`, and the u row moves by 0.02 per cent.  So the stage-3 momentum
+RHS is EXONERATED as the owner of GYRE's kt2 divergence: with it at the bit bar
+the blocker is essentially unchanged.  What remains between an (almost) exact
+RHS and a `9.48e-07` stage-3 velocity is `dyn_zdf` itself — its explicit
+update, its barotropic removal and bottom-stress addition, its matrix, its
+solve — and the barotropic correction that follows it at
+`stprk3_stg.F90:430`.  That is the next boundary, and this round does not name
+a statement inside it: legoESM exposes none of those internals, and inventing
+a number for them would be exactly the failure this campaign's rules exist to
+stop.  The oracle side of that walk is now fully instrumented and bit-verified
+(item 2), so the remaining work is entirely on the model side.
+
+### Item 5 — cross-card, Rule 12
+
+The changed operator's coefficients, instantiated and printed rather than read
+off a comment:
+
+| card | `A_h` | `B_h` | `C_smag` | `C_leith` | operator |
+|---|---:|---:|---:|---:|---|
+| GYRE-zco | `100000.0` | `0.0` | `0.0` | `0.0` | `nemo_div_curl` |
+| LOCK_EXCHANGE-zco | `0.0` | `0.0` | `0.0` | `0.0` | `vector_laplacian` |
+| OVERFLOW-zps | `0.0` | `0.0` | `0.0` | `0.0` | `vector_laplacian` |
+
+GYRE's `1.0e5` is `0.5 * rn_Uv * rn_Lv` from
+`GYRE_OMIP_L2_P3_SM/EXP00/namelist_cfg:189-191` with the operator selected at
+`GYRE_OMIP_L2_P3_SM/EXP00/namelist_cfg:187-188` and printed as `iso-level
+laplacian operator` at `round19_oracle_v2_external/ocean.output:706`.  The two
+tanks resolve `ln_dynldf_OFF` (`lock_kt1_10/ocean.output:615`,
+`overflow_kt1_10/ocean.output:727`), and legoESM's cards carry zero
+coefficients to match, so the operator is identically zero there whichever
+velocity it reads.
+
+| card | first-over-bar before | first-over-bar after | source of the before |
+|---|---|---|---|
+| LOCK_EXCHANGE-zco | kt4 `u` | kt4 `u` | round 28's merge-readiness table |
+| OVERFLOW-zps | kt2 `T`/`u` | kt2 `T`/`u` | round 23's trajectory row |
+| GYRE-zco | kt2 `T`/`S`/`u`/`v` | kt2 `T`/`S`/`u`/`v` | measured both arms, table above |
+
+ORCA2 is **UNMEASURED** and the reason is not that it was skipped: the card
+does not exist in this worktree's registry, which offers exactly
+`GYRE-zco`, `LOCK_EXCHANGE-zco` and `OVERFLOW-zps`.  Round 27's ORCA2 rows came
+from a disposable probe worktree, and reproducing them needs that lane.
+
+### Item 6 — decision 16 is NOT landed, because its premise is REFUTED
+
+The preregistered decision was to make the pre-stage 2-D vorticity call
+unconditional, as `stp2d.F90:146` (`dyn_vor` after `dyn_hpg` at
+`stp2d.F90:128` and `dyn_ldf` at `stp2d.F90:131`), on the stated ground that
+"on LOCK and OVERFLOW f = 0, so it adds `+0.0` through `vor_ens`".  The
+measured baseline is reproduced exactly — LOCK `1260 / 2540` bit-unequal, all
+of them signed-zero-only, `0` remaining after adding NEMO's zero; OVERFLOW
+`16400 / 16900`, likewise all signed-zero and all healed.
+
+But the wiring is not a skipped call.  The three cards' resolved momentum
+programs, instantiated and printed:
+
+| card | momentum advection | flux scheme | vorticity | Coriolis |
+|---|---|---|---|---|
+| GYRE-zco | `vector_invariant` | `upwind` | `ene_total` | `explicit_ab2` |
+| LOCK_EXCHANGE-zco | `flux_form` | `nemo_up3` | `al81` | `matsuno_split` |
+| OVERFLOW-zps | `flux_form` | `nemo_up3` | `al81` | `matsuno_split` |
+
+On GYRE the planetary term is INSIDE the vorticity flux in the momentum RHS,
+i.e. at NEMO's own position.  On the two tanks the flux-form branch does not
+call the vorticity operator at all, and Coriolis is applied as a separate
+velocity rotation OUTSIDE the RHS — a different operator splitting, not a
+conditional that can be made unconditional.  Adding an unconditional vorticity
+accumulation to the flux-form RHS would therefore DOUBLE-COUNT Coriolis on
+every `f != 0` flux-form card, which is the default legoESM ocean
+configuration, and it is value-inert on LOCK and OVERFLOW only because `f = 0`
+there.
+
+So the honest statement of the residual is: it is an operator-splitting
+difference whose only observable is the sign of a zero, and closing it means
+moving Coriolis out of the Matsuno rotation into the RHS for the flux-form
+path — a scheme selection this round is forbidden to make.  Adding a literal
+`+ 0.0` to normalise the signed zeros would pass the gate and transcribe
+nothing, so it was not done.  Decision 16 is returned to the user with this
+measurement attached.
+
+### Rule-11 records
+
+**Round 30's own P1 is REFUTED by its own first measurement.**  The
+preregistration predicted the pre-`dyn_ldf` frame would be bit-exact.  It is
+not: `17382 / 17400` cells differ, at `2.06e-16`.  The prediction was written
+from the stage-2 row's size and was wrong about the residual the stage-3 RHS
+inherits.
+
+**The round-29 task premise, corrected for the second round running.**  Round
+29 corrected "`dyn_zdf` is the only stage-3-only momentum operator" to "there
+are two".  Round 30 narrows it again: `dyn_zdf` is not even inside the stage-3
+`CASE` block, and `dyn_ldf` is the only momentum call in it that runs on this
+deck.
+
+**No retraction of a landed number.**  Every figure round 28 and 29 recorded
+for the stage boundaries is reproduced here at the same protocol.
+
+### Merge readiness
+
+`03c6e8d96ff7` remains an ancestor of this branch, so the integration is still
+a FAST-FORWARD with zero conflicts by construction.  What blocks it after this
+round:
+
+1. **GYRE's kt2 `T`/`S`/`u`/`v` rows still fail.**  `u` at `9.482e-07` on
+   `17400 / 17400` faces, `v` at `8.949e-07`, `T` at `1.361e-12`, `S` at
+   `2.218e-14`; `ssh` is AT-BAR.  This is the same blocker round 28 named,
+   and this round removed one candidate owner for it rather than the blocker.
+2. **Round 30 DOES land model numerics**, unlike round 28.  One shared
+   change, in one function, measured on all three cards this tree can build.
+   A reader integrating this branch inherits a stage-3 momentum RHS that is at
+   the bit bar where it was `3.1` per cent off, four worsened rows registered
+   as debt above, and no card switch.
+3. **ORCA2 is unmeasured against this change** and needs its lane's worktree.
+
+### Open questions
+
+1. **Where inside `dyn_zdf` GYRE's kt2 divergence enters.**  The oracle side is
+   instrumented and bit-verified; the model side exposes no pre-solve vector,
+   no matrix and no solved column, so the next round's first job is that
+   exposure, not another oracle run.
+2. **The four worsened trajectory rows** (`kt4` T, `kt5`/`kt6`/`kt8` v) have a
+   boundary but no owner.
+3. **Decision 16**, returned to the user above with its measurement.
+4. **Decision 17**, the demo card's vertical coordinate, untouched here.
+5. **The slow forcing's depth average** still uses the min rule where NEMO uses
+   the area-weighted mean; `3.06e-08` at kt=2, unchanged.
+6. **Rounds 1-24 of this receipt remain UNAUDITED** by the citation gate.
+
+### ASKED / UNASKED
+
+| choice | disposition |
+|---|---|
+| correct the round-30 record name and the stage-3 `CASE` block's contents | not a scientific choice; corrected against the shipped source before measuring, and gated |
+| route the WS-RK3 stage lateral viscosity to the step-entry velocity | ASKED by the oracle: `dynldf_lev_rot_scheme.h90:24-25` and `dynldf_lev_rot_scheme.h90:28-29` read `Kbb`, and NEMO's kt=1 contribution is measured to be exactly zero. One shared implementation, no card switch, no knob |
+| land decision 16's unconditional vorticity call | NOT DONE — premise REFUTED, measurement returned to the user |
+| change the demo card's vertical coordinate | NOT DONE — decision 17 pending |
+| add four citation-map entries for `dynldf.F90`, `dynldf_lev_rot_scheme.h90` and the shared `ldf_state` seam | not a scientific choice; without them the gate is fail-closed on this round's citations |
+| shipped NEMO edit, `makenemo`, `mpirun`, push, merge, deletion | forbidden; none performed |
+
+UNASKED list: empty.
