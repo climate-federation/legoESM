@@ -620,6 +620,26 @@ def nemo_reference_depth_reciprocal(
     return face_mask / (depth_ref + one - face_mask)
 
 
+def _ascending_level_sum(values: jnp.ndarray) -> jnp.ndarray:
+    """Fortran's ``SUM`` over the level axis, accumulated in ascending ``k``.
+
+    ``jnp.sum`` lets XLA choose the reduction shape, and on CPU it picks a
+    tree; gfortran emits an ascending-``k`` accumulation for ``SUM`` over a
+    rank-1 section.  The two agree for short columns and diverge for long
+    ones: measured in round 36, they differ on 5 of OVERFLOW's 606 columns
+    (101 levels) by 4.441e-16, on none of LOCK_EXCHANGE's 390 (21 levels),
+    and on none of GYRE's.
+
+    The scan makes the order explicit rather than left to the backend.  Cost
+    is one add per level, the same arithmetic a tree does, in a fixed order.
+    """
+    total, _ = jax.lax.scan(
+        lambda running, level: (running + level, None),
+        jnp.zeros(values.shape[:-1], dtype=values.dtype),
+        jnp.moveaxis(values, -1, 0))
+    return total
+
+
 def rk3_stage_barotropic_correction(
     field: jnp.ndarray,
     target_mean: jnp.ndarray,
@@ -711,7 +731,7 @@ def rk3_stage_barotropic_correction(
         raise ValueError(
             f"stage_mask {stage_mask.shape} must match field {field.shape} "
             f"or be its level-broadcast form {field.shape[:-1] + (1,)}")
-    own_mean = jnp.sum(field * h_face_ref, axis=-1) * r1_depth_ref
+    own_mean = _ascending_level_sum(field * h_face_ref) * r1_depth_ref
     return (field + (target_mean - own_mean)[..., jnp.newaxis]) * stage_mask
 
 
