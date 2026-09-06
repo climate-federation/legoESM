@@ -594,7 +594,14 @@ def nemo_reference_depth_reciprocal(
     On a dry column ``ssumask`` is zero, so the reciprocal is EXACTLY zero
     and carries the dry-column zero that NEMO's ``SUM`` has no mask for.
 
-    ``face_mask`` is NEMO's surface mask ``ssumask``/``ssvmask``: 2-D, 0 or 1.
+    ``face_mask`` is NEMO's surface mask ``ssumask``/``ssvmask``: 2-D, 0 or 1,
+    and the SAME shape as ``depth_ref``.  That equality is checked, because it
+    used to be checked one level up: ``rk3_stage_barotropic_correction``
+    refused a ``face_mask`` whose shape was not the column shape, and round 36
+    removed that argument.  Without the check here a shorter mask BROADCASTS,
+    the operator accepts the result, and the correction leaks onto land --
+    measured at 15 of 15 dry cells wrong by 0.227 on a deliberately mis-shaped
+    mask.
 
     Two other sites materialise this same expression with their own rounding
     barriers -- ``vertical.py:243-244`` (live QCO face geometry) and
@@ -602,7 +609,14 @@ def nemo_reference_depth_reciprocal(
     separately).  They are NOT routed here: their associations differ from
     this one and from each other, and this campaign's bar is the last ULP.
     """
-    one = jnp.asarray(1.0, dtype=jnp.asarray(depth_ref).dtype)
+    depth_ref = jnp.asarray(depth_ref)
+    face_mask = jnp.asarray(face_mask)
+    if face_mask.shape != depth_ref.shape:
+        raise ValueError(
+            f"face_mask {face_mask.shape} must match depth_ref "
+            f"{depth_ref.shape}; a broadcastable but shorter mask silently "
+            "lets the column correction reach dry columns")
+    one = jnp.asarray(1.0, dtype=depth_ref.dtype)
     return face_mask / (depth_ref + one - face_mask)
 
 
@@ -621,12 +635,16 @@ def rk3_stage_barotropic_correction(
 
     ROUND 36: this MULTIPLIES by NEMO's stored ``r1_hu_0``.  It used to
     DIVIDE by ``hu_0`` and then multiply by a separate wet-column mask, which
-    is algebraically the same and is NOT the same rounding -- the independent
-    review of rounds 33-34 measured that the divide leaves both tank
-    discharges off by a handful of ULPs and the multiply makes them exactly
-    bit-identical.  The dry-column zero now lives where NEMO keeps it, inside
-    the reciprocal (``domain.f90:213``), which is why there is no longer a
-    separate ``face_mask`` argument: NEMO has no mask inside the ``SUM``.
+    is algebraically the same and is NOT the same rounding.  MEASURED, per
+    card, rather than claimed for all of them: GYRE's u and v faces and
+    LOCK_EXCHANGE's u face go from ``exact=False`` to bit-identical
+    (0 cells, 0.0); OVERFLOW does NOT -- its row is byte-identical before and
+    after, because its residual is owned by the reduction of a 101-level
+    column sum and not by this divisor.  That row is registered OPEN in the
+    tanks gate with its boundary.  The dry-column zero now lives where NEMO
+    keeps it, inside the reciprocal (``domain.f90:213``), which is why there
+    is no longer a separate ``face_mask`` argument: NEMO has no mask inside
+    the ``SUM``.
     Build the reciprocal with :func:`nemo_reference_depth_reciprocal`, or
     pass NEMO's own array when a record carries it.
 

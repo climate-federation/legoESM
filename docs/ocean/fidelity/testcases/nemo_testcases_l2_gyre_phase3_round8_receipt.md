@@ -8477,3 +8477,353 @@ ancestor, so the integration is still a fast-forward.
 8. **The barotropic correction's divisor**: GYRE's discharge still rebuilds it,
    and after this acquisition it will not have to.
 9. **Rounds 1-24 of this receipt remain UNAUDITED** by the citation gate.
+
+## Round 36 — the record was mislabelled, the RHS residual was ours, and the divisor becomes a multiply
+
+Round 36 starts from `dcc4b23787cd` on a clean tree, same regime: CPU
+production JIT, fp64/x64, `transcendentals="libm"`, oracle V2.  **No NEMO
+executable was run, no `makenemo` or `mpirun` was invoked, and no NEMO source
+was edited.**  No detached probe worktree was created.
+
+The round-35 acquisition had already been executed by the operator (log
+`round35/gyre_trazdf_run.log`); this round finishes it and then walks two
+items off it.
+
+### Item 1 — the acquisition finished, and why it had not
+
+The run built, ran ten steps, wrote the record and decided the twin admission
+`PASS` — and then died in the loop that PRINTS the admitted differences:
+
+```
+TypeError: list indices must be integers or slices, not str
+```
+
+Under `set -e` that took down everything after it: the round-29 regression,
+the round-35 gate, its seven plants and the outputs manifest never ran.
+
+The cause was ONE list with TWO shapes.  `compare_record` appends a dict per
+admitted difference; `_compare_self_describing` appended a five-element list
+with no `record` key.  `run` concatenates both and `main` formats every entry
+through the dict format string, so any run in which a self-describing record
+differs in a halo cell — which the round-33 reference-geometry growth
+guarantees — crashes at the very end.  Fixed in the shared shape, not at the
+print site, with a test that drives `main` end to end and is red on the parent
+commit with the exact `TypeError`.
+
+Re-run on the real record: **admission PASS**, 43 of 51 records byte-identical,
+8 changed, **49 admitted differences** — 44 halo cells across six records plus
+5 undefined-slot cells in `oracle_transport_kt00000001_s1.bin:zFw`, every one
+printed with its index and both values.  The restart and `mesh_mask.nc` are
+byte-identical, so the twin is real.  The `--plant-consumed` control turns it
+red.  The round-29 regression on the GROWN momentum record is `AT-BAR` on all
+eight rows, 0/21120 each.  `round35_outputs.sha256` written over 57 files.
+
+### Item 2 — the record did not decode, and NEMO's own ALLOCATE says why
+
+The gate refused the new record: *array name at 4621256 is not ASCII*.  The
+refusal was right and the diagnosis was missing.
+
+`zdf_oce.f90:85-86` of this round's own compiled ppsrc allocates
+
+```fortran
+ALLOCATE( avm (jpi,jpj,jpk), ..., avs(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0),jpk) ,
+   &      avt (Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0),jpk) , ...
+```
+
+`avm`, on the same statement, IS full-domain; `avt` and `avs` are the INTERIOR
+box.  The round-35 instrument writes `WRITE(il2_unit) avt` (`trazdf.f90:247`,
+`:249`) after a header declaring `jpi, jpj, jpk`, so each of those payloads is
+`32*22*31` values where its header claims `36*26*31` — 57536 bytes short
+each — and every array after `avs` lands at the wrong offset.
+
+**The instrument needs fixing and that is an acquisition.**  The two lines
+become the same staging every neighbouring array already uses:
+
+```fortran
+zl2_tmp(:,:,:) = 0._wp
+zl2_tmp(ntsi:ntei,ntsj:ntej,:) = avt(:,:,:)
+WRITE(il2_unit) 'avt             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
+WRITE(il2_unit) zl2_tmp
+```
+
+Meanwhile the payloads are COMPLETE over the interior and the interior is
+exactly the box this gate scores, so the record is mislabelled rather than
+short.  The reader recovers those two arrays — but only where the STREAM
+proves it: the declared extent is used unless it fails to leave a recognised
+array name behind and the interior extent succeeds, EOF counts as an ending
+for the declared extent and NOT for the shorter one, and the duplicate-name
+and shape refusals every other array gets run first.
+
+Both gaps in that guard were found by an independent claim review and closed
+before this was recorded.
+
+### The `tra_zdf` discharge, given NEMO's inputs
+
+Commit `e6ef14d5d4f0`, record
+`round35_oracle_trazdf_matrix/oracle_trazdf_matrix_kt00000001.bin`, 21120
+scored cells (i 3–34, j 3–24, halo 2, 30 levels) on the 36×26×31 domain.
+
+| arm | row | cells unequal | max abs |
+|---|---|---|---|
+| calibration | all 13 rows | **0 / 21120** | **0** |
+| assembly | `zwi` | 704 (signed zero only) | 0 |
+| assembly | `zwd` | **3120 / 21120** | **299.71** |
+| assembly | `zws` | 704 (signed zero only) | 0 |
+| sweep | T | 133 / 21120 | 7.105e-15 |
+| sweep | S | 111 / 21120 | 7.105e-15 |
+| rhs_content | T | **0 / 21120** | **0** |
+| rhs_content | S | **0 / 21120** | **0** |
+| clamp | T, S | 0 / 21824 | 0 |
+
+The calibration arm is 0 cells unequal on every row.  That is the reader's
+licence to quote anything else, and it is also the interior-extent recovery's
+second, independent check: it rebuilds `zwt_mix`, `zwi`, `zwd`, `zws`, the LU
+diagonal, both right-hand sides, both forward sweeps and both solved columns
+FROM the embedded `avt`, and a misaligned embedding cannot reproduce them.
+An independent review measured that directly: C-order 12743 cells unequal,
+origin ±1 in i 2663 or 2099, origin (0,0) 5033, correct 0.
+
+**The first non-bit statement — CORRECTED after review.**  The independent
+claim review BROKE the first version of this claim, and it was right.  In
+NEMO's own execution order:
+
+* `trazdf.f90:443-444` is the first, and it is a SIGN OF ZERO.  NEMO's
+  `zwi(ji,1) = -p2dt*zwt(ji,1)/e3w` with `zwt(:,1)=0` is `-0.0`, where
+  legoESM writes `+0.0`; 704 cells on each of `zwi` and `zws`, and **600 of
+  the 704 are WET**.  Every arithmetic result downstream is identical, which
+  is why the gate gives it its own status and its own count instead of
+  folding it into AT-BAR.  Calling it "at bar" and then claiming :445 is
+  "first" would have been a tolerance smuggled into an ordering claim.
+* `trazdf.f90:445` is the first with a NON-ZERO value difference:
+
+```fortran
+zwd(ji,jk) = (e3t_3d(ji,jj,jk)*(1._wp+r3t(ji,jj,Kaa)*tmask(ji,jj,jk))) - ( zwi(ji,jk) + zws(ji,jk) )
+```
+
+  NEMO writes it unconditionally; `nemo_tracer_tridiagonal` ends with
+  `diagonal = jnp.where(wet > 0, diagonal, 1.0)`.  The 3120 differing cells
+  are EXACTLY the 3120 dry cells of the scored box — zero wet cells differ —
+  and GYRE has no dry cell above a wet one, so the dry diagonal cannot reach
+  a wet answer through the LU recurrence on this card.
+
+**Which arm carries the 1.36e-12: NEITHER — the round-35 preregistration is
+REFUTED at the value level.**  It predicted the RHS.  Measured, the RHS arm
+is bit-exact and the largest WET residual in any arm is 7.11e-15 in the
+sweep, on NEMO's own dumped matrix and NEMO's own dumped right-hand side.
+The 1.36e-12 was measured on the model's own trajectory, where the RHS is
+NOT the content form — that is the gate's declared blind spot, and no arm
+here can reach it.
+
+**RETRACTION — the content-RHS residual was the harness's.**  Round 35
+recorded `rhs_content.T` as VALUE-AT-BAR, 1/125 cells at 5.2e-17, and read it
+as a property of `thickness_weighted_tracer_content`.  NEMO writes, left to
+right (`trazdf.f90:528-529`),
+
+```fortran
+zrhs =       (e3t_3d*(1._wp+r3t(Kbb)*tmask)) * pt(Kbb)   &
+   & + p2dt * (e3t_3d*(1._wp+r3t(Kmm)*tmask)) * pt(Krhs)
+```
+
+i.e. `(p2dt*e3t_Kmm)*T_Krhs`.  The arm fed the builder a PRE-MULTIPLIED
+`t_expl = p2dt*T_Krhs`, forming `e3t_Kmm*(p2dt*T_Krhs)` — an association NEMO
+never writes.  Under NEMO's own grouping the builder is bit-exact: 0/21120 on
+both tracers here, 0/125 on the twin.  The old grouping is kept as a
+REPORTED, never scored, association-sensitivity row (17/21120, 2.84e-14 on T;
+0 on S) so the retraction keeps its evidence and a harness choice cannot
+decide the verdict.
+
+Confirmed directly rather than argued: `e3t_Kbb*T_Kbb + (p2dt*e3t_Kmm)*T_Krhs`
+reproduces NEMO's dumped `rhs_T`/`rhs_S` at 0 cells unequal, max 0.
+
+### Item 3 — decision 20 is NOT executed this round, and the reason is measured
+
+The user answered decision 20 "I would go with the NEMO form": NEMO-identity
+cards switch `tracer_combine` from `concentration` to the two-term CONTENT
+form.  The order set for it was (a) make the content builder bit-exact given
+NEMO's operands, (b) prove the whole `tra_zdf` program bit-exact given NEMO's
+inputs on GYRE, (c) only then flip the switch — and, explicitly, do not flip
+if (a) or (b) cannot be reached.
+
+* **(a) REACHED.**  0/21120 on both tracers, above.
+* **(b) NOT REACHED.**  `tra_zdf` is not bit-exact given NEMO's inputs:
+  `assembly.zwd` differs on 3120 dry cells (absmax 299.71) and the sweep
+  differs on 133 (T) and 111 (S) WET cells at 7.105e-15, on NEMO's own dumped
+  matrix and right-hand side.  Both are inside legoESM, not the harness.
+* **(c) THEREFORE NOT DONE.**  `tracer_combine` stays `concentration` on
+  every card.  Rule 10, printed by the gate rather than assumed:
+
+| card | tracer_combine | zdf_implicit_solver_evaluation |
+|---|---|---|
+| GYRE-zco | concentration | nemo_literal |
+| LOCK_EXCHANGE-zco | concentration | nemo_literal |
+| OVERFLOW-zps | concentration | nemo_literal |
+
+No before/after per card and no Rule-12 table are owed, because no switch
+moved.  The ASKED record stands with the user's words; the flip is round 37's,
+behind the two rows above.
+
+### Item 4 — the divisor becomes NEMO's multiply
+
+ASKED-by-directive under the user's standing "do as NEMO does" instruction.
+Preregistered at `e6ef14d5d4f0` before any measurement
+(`round36/round36_item4_preregistration.md`).
+
+`stprk3_stg.f90:522-523` writes
+
+```fortran
+zub(ji,jj) = uu_b(ji,jj,Kaa) - SUM( e3u_3d(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)
+```
+
+a MULTIPLY by the reciprocal `domain.f90:213` builds ONCE as
+`ssumask/(hu_0 + 1 - ssumask)`, with the dry-column zero INSIDE the reciprocal
+and NO mask inside the `SUM`.  `rk3_stage_barotropic_correction` divided by
+`hu_0` and multiplied by a separate wet mask.  It now multiplies by a supplied
+reciprocal; the `face_mask` argument is gone, because NEMO has no mask there.
+One shared implementation, both production call sites and all three gates.
+
+| card | row | before | after |
+|---|---|---|---|
+| GYRE-zco | rule12_correction.u | exact=False, 2.168e-19 | **exact=True, 0.0** (17400 cells) |
+| GYRE-zco | rule12_correction.v | exact=False, 6.939e-18 | **exact=True, 0.0** (17100 cells) |
+| LOCK_EXCHANGE-zco | rule12_correction.u | exact=False, 3.081e-33 | **exact=True, 0.0** (2540 cells) |
+| OVERFLOW-zps | rule12_correction.u | exact=False, 3.8519e-34 | exact=False, **3.8519e-34** (16900) |
+
+GYRE is discharged on both faces with NEMO's OWN `r1_hu_0`/`r1_hv_0` read from
+this round's record — nothing rebuilt, no floor.  It is also bit-exact with the
+reciprocal REBUILT from `SUM(e3u_0*umask)`, which is the stronger statement of
+the two and is reported per face in `reciprocal_provenance`.
+
+**OVERFLOW: PREDICTION REFUTED.**  Predicted 0/16900 at absmax 0.0; measured
+BYTE-IDENTICAL to before.  The reciprocal is therefore proven NOT to be its
+owner, and the owner is named rather than guessed: OVERFLOW's column has 101
+levels and **XLA's reduction of that sum differs from NumPy's — and from
+NEMO's ascending-k `SUM` — on 5 of 606 columns by 4.441e-16**, which is
+8.882e-19 through the reciprocal and 3.852e-34 in the corrected velocity.
+LOCK_EXCHANGE's 21-level column is 0 of 390.  With the same arithmetic in
+NumPy the candidate is bit-identical to NEMO on all 61206 cells, which
+reconciles the earlier review's "0/16900": it did not go through XLA.
+Registered OPEN, not reverted (Rule 12).
+
+**Second Rule-12 row, raised by the claim review and MEASURED.**  NEMO writes
+`uu(jk) + zub*umask(jk)` (`stprk3_stg.f90:526-527`); the operator writes
+`(uu + zub)*stage_mask`.  On both tanks 0 of 8190 and 0 of 61206 bits differ,
+because every dry face already carries `+0.0`.  On GYRE it is 349 (u) and 212
+(v) cells — **ALL of them signed zero, max abs difference exactly 0.0**.
+Registered OPEN with its boundary; transcribing NEMO's per-level add is not
+round 36's ask.
+
+**ORCA2 is UNMEASURED**, with a spec: no ORCA2 record carries `r1_hu_0` and
+no ORCA2 kt=1..10 oracle is in this campaign's data tree.  Closing it needs an
+acquisition that appends `r1_hu_0`/`r1_hv_0` to an ORCA2 `dyn_zdf` record,
+then the same three rows.
+
+### What two independent reviews broke
+
+codex is unavailable on this account, so both reviews are fresh Claude agents
+with no shared context.  The claim review ran on items 2–4's claims; the gate
+review attacked the gates directly.  Between them they landed five defects
+that are fixed here and three that are registered.
+
+**FIXED, because they undermined this round's own numbers.**
+
+1. **A cropped domain scored 30 cells and read green.**  The box guard
+   constrained the halo to be symmetric and never constrained the DOMAIN, and
+   `jpi`/`jpj`/`jpk` come from the record's own header.  A record cropped to
+   5×5×31 with NEMO's halo of 2 returned exit 0 and `STATUS AT-BAR` out of ONE
+   scored column — 704× fewer cells — and **all seven plants still reported
+   `landed=True`**, so no control could tell.  The gate now pins the card's
+   domain (36×26×31, from the run's own resolved namelist output) and refuses
+   any other.  Reproduced against the fix: refused.
+2. **The salvage skipped two refusals** every other array gets — the
+   duplicate-name check and the rank/extent check.  Both now run first.
+3. **EOF counted as proof for the SHORTER extent**, so a final array truncated
+   at the tile boundary would have "proven" a salvage that was data loss.  EOF
+   now ends the declared extent only.
+4. **The "first non-bit statement" was wrong**, above.
+5. Two synthetic fixtures inverted the OLD divide and went red on OVERFLOW's
+   5 reduction-split columns; they now invert the multiply, so they test the
+   plumbing they exist to test.
+
+**REGISTERED, with owners, not fixed here.**
+
+6. **The calibration arm cannot see two slices it never reads.**  Measured,
+   not reasoned: setting `avt`'s whole surface plane to 999.0, or the whole
+   `jk=jpk` level of nine arrays (11232 values) to 12345.0, leaves all 13
+   calibration rows at 0 cells unequal.  Both follow from NEMO's structure
+   (`zwt(:,1)=0` at `trazdf.f90:419`; the matrix has `jpkm1` rows), so
+   "calibration = 0" certifies the slices the SOLVE reads and nothing else.
+   Now declared in the report as `slices_no_arm_reads`.
+7. **The admission gate resolves the `zFw` waiver from the BASELINE's
+   `ocean.output` only.**  A candidate run with `ln_dynadv_vec = F`, where
+   `zFw` IS defined, had an owned-cell change admitted.  The run.sh's
+   byte-identical namelist check stands between that and a real acquisition,
+   but the gate should not depend on it.
+8. **The admission gate cannot read the round-35 record at all** — it has no
+   interior-extent recovery, and confirmed here it raises
+   `AdmissionError: array '...' rank 1896932436`.  Harmless this round (the
+   admission only parses records the BASELINE carries, and this one is new),
+   and a HARD BLOCKER the moment a later round inherits round 35 as its
+   baseline.  Fixing the instrument removes it at the source, which is why the
+   corrected `WRITE` is quoted above.
+
+### ASKED / UNASKED
+
+| choice | status |
+|---|---|
+| `tracer_combine` stays `concentration` on every card | ASKED — decision 20 answered "the NEMO form", and its own stated precondition (b) is not met, so the flip is not made |
+| the divisor becomes NEMO's `* r1_hu_0` | ASKED-by-directive — the user's standing "do as NEMO does" |
+| `face_mask` removed from the correction's signature | follows from the above: NEMO has no mask inside the `SUM` |
+| the gate pins GYRE's domain and refuses another | a previously-tolerated condition becomes a hard error — taken because the tolerated condition was a measured green-on-wrong-record defeat, and named here rather than left silent |
+| the reader recovers `avt`/`avs` at the interior extent | a decoding correction, proven by the stream and by the calibration arm; the instrument fix is still owed |
+
+UNASKED list: **empty**.
+
+### kt = 1..10, before and after item 4
+
+Same gate, same oracle roots, same `--max-step 10` on both sides.  BEFORE was
+taken at `e6ef14d5d4f0` in a detached probe worktree
+(`/tmp/codex-gyre-r36-before`, flagged), so the two arms differ only in the
+operator.
+
+| card | first over bar BEFORE | first over bar AFTER |
+|---|---|---|
+| GYRE-zco | kt=2, T S u v | recorded in the follow-up commit |
+| LOCK_EXCHANGE-zco | kt=4, u | kt=4, u |
+| OVERFLOW-zps | kt=2, T u | recorded in the follow-up commit |
+
+Those two AFTER runs measure the commit this section is PART of, so they are
+recorded in the follow-up commit rather than predicted here: the stamp
+ratchet refuses to stamp a dirty tree, which is why they could not be taken
+before it.
+
+The first-over-bar step does not move on the card already measured, which is
+what a change of this size should do: it removes a handful of ULPs from ONE stage-3 statement
+on a trajectory whose kt=2 divergence is owned by `tra_zdf`, measured above.
+Reporting it as an improvement would have been a confound.
+
+### Evidence
+
+Under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round36/`, with
+`round36_evidence.sha256` over every file; and
+`round35_oracle_trazdf_matrix/round35_outputs.sha256` over the acquisition's
+57 files, written as `run.sh` would have.
+
+### What is open
+
+1. `assembly.zwd` — 3120 dry cells, 299.71.  legoESM replaces the dry
+   diagonal by 1.0 where `trazdf.f90:445` leaves `e3t`.  Owner: legoESM.
+2. `sweep.T`/`sweep.S` — 133 and 111 WET cells at 7.105e-15, on NEMO's own
+   dumped matrix and right-hand side, so the difference is inside legoESM's
+   three recurrences and nowhere else.
+3. `trazdf.f90:443-444` — 704 signed zeros per diagonal, 600 of them wet.
+4. The model's OWN right-hand side is still UNMEASURED: the production solve
+   takes the RHS as an argument and this card resolves
+   `tracer_combine="concentration"`, so no arm here drives it.  Closing it
+   needs the `pre_implicit_tracer_content_override` hook on a run.
+5. OVERFLOW's column-sum reduction, and the correction's mask placement —
+   both registered in that gate with boundary and owner.
+6. The round-35 INSTRUMENT still writes `avt`/`avs` short.  The admission
+   gate cannot read that record and fails closed; harmless this round, a hard
+   blocker the moment a later round inherits round 35 as its baseline.
+7. The rounds-33/34 bookkeeping list is untouched except where it blocked:
+   nothing on it was needed this round.

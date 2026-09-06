@@ -448,3 +448,25 @@ def test_slope_verdict_boundaries_are_where_the_preregistration_put_them():
     assert gate.slope_verdict([gate.CONFIRM_FRACTION]) == (
         "SOLVE RESPONSE CONFIRMED")
     assert gate.slope_verdict([gate.REFUTE_FRACTION]) == "NO VERDICT"
+
+
+def test_the_reciprocal_refuses_a_broadcastable_but_shorter_mask():
+    """The guard that left with ``face_mask``, put back where it belongs.
+
+    Round 36 removed ``rk3_stage_barotropic_correction``'s ``face_mask``
+    argument -- NEMO has no mask inside its SUM -- and with it went the check
+    that the mask was the column shape.  An independent diff review then
+    showed a shorter mask BROADCASTS through the reciprocal, the operator
+    accepts the result, and the correction reaches dry columns: 15 of 15 dry
+    cells wrong by 0.227.  The check now lives on the reciprocal.
+    """
+    field, target, h, r1_depth, wet2d, mask3 = _column_case()
+    with pytest.raises(ValueError, match="face_mask"):
+        nemo_reference_depth_reciprocal(
+            np.maximum((h * mask3).sum(axis=-1), 1e-10), wet2d[0])
+    # and the correctly shaped call still works, and is zero on land
+    good = np.asarray(nemo_reference_depth_reciprocal(
+        np.maximum((h * mask3).sum(axis=-1), 1e-10), wet2d))
+    assert good.shape == field.shape[:-1]
+    assert np.all(good[wet2d == 0.0] == 0.0)
+    assert np.all(good[wet2d > 0.0] > 0.0)

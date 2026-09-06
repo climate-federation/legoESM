@@ -320,7 +320,11 @@ def run(card: str, *, plant: bool = False) -> dict:
     # candidate is bit-identical to NEMO on all 61206 cells, which is why an
     # earlier review measured 0/16900 here: it did not go through XLA.
     # LOCK_EXCHANGE's 21-level column shows 0 of 390.
-    open_rows = [{
+    # ...and it is stamped on the card it was MEASURED on.  LOCK_EXCHANGE's
+    # 21-level column shows 0 of 390 columns split by the reduction, so
+    # printing an OPEN reduction row on it would report a defect that card
+    # does not have.
+    open_rows = [] if card != "OVERFLOW" else [{
         "row": f"{case}.kt1.stage3.rule12_correction.u.column_sum_reduction",
         "owner": ("jnp.sum's reduction order over the level axis, against "
                   "NEMO's SUM at stprk3_stg.f90:522"),
@@ -330,7 +334,8 @@ def run(card: str, *, plant: bool = False) -> dict:
         "closed_by": ("an ordered accumulation in the operator, which is a "
                       "separate change from round 36's reciprocal and is not "
                       "made here"),
-    }, {
+    }]
+    open_rows.append({
         "row": f"{case}.kt1.stage3.rule12_correction.u.mask_placement",
         "owner": ("NEMO writes uu(jk) + zub*umask(jk) "
                   "(stprk3_stg.f90:526-527); the operator writes "
@@ -341,7 +346,7 @@ def run(card: str, *, plant: bool = False) -> dict:
                      "signed zero, max|diff| exactly 0.0"),
         "status": "OPEN",
         "closed_by": "transcribing NEMO's per-level add; not round 36's ask",
-    }]
+    })
     status = "AT-BAR" if all(r["status"] == "AT-BAR" for r in rows) else "DEBT"
     if plant:
         require(status == "DEBT", "a planted unit offset still read AT-BAR")
