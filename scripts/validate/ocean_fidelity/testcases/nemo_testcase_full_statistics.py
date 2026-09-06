@@ -29,6 +29,7 @@ from legoesm.ocean.rpe import pack_sorted_rpe
 from legoesm.ocean.vertical import compute_layer_thickness
 from legoesm.ocean.fidelity.provenance import (
     allow_dirty_stamps,
+    scoped_allow_dirty,
     worktree_stamp,
 )
 
@@ -1226,6 +1227,7 @@ def score_case(
     }
 
 
+@scoped_allow_dirty
 def main() -> int:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)

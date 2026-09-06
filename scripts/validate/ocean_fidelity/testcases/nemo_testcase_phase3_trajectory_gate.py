@@ -20,6 +20,7 @@ from pathlib import Path
 import numpy as np
 from legoesm.ocean.fidelity.provenance import (
     allow_dirty_stamps,
+    scoped_allow_dirty,
     worktree_stamp,
 )
 
@@ -494,6 +495,7 @@ def run(
     }
 
 
+@scoped_allow_dirty
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", choices=tuple(DEFAULT_ORACLE_ROOTS), required=True)

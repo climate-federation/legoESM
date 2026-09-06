@@ -133,7 +133,8 @@ def test_planted_stage_control_exits_nonzero_end_to_end(tmp_path):
     assert row["status"] == "DEBT" and row["absolute_max"] >= 0.5
     assert name in report["failed_rows"]
     assert report["controls"] == {
-        "plant_stage": True, "plant_operand": False, "plant_prediction": False}
+        "plant_stage": True, "plant_operand": False,
+        "plant_prediction": False, "faithful_only": False}
     assert report["status"] == ("DEBT" if report["failed_rows"] else "AT-BAR")
 
 

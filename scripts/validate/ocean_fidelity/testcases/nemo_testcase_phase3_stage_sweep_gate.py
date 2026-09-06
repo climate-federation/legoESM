@@ -20,6 +20,7 @@ from pathlib import Path
 import numpy as np
 from legoesm.ocean.fidelity.provenance import (
     allow_dirty_stamps,
+    scoped_allow_dirty,
     worktree_stamp,
 )
 
@@ -1343,6 +1344,7 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
     }
 
 
+@scoped_allow_dirty
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("case", choices=tuple(ROOTS))

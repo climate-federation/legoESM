@@ -29,6 +29,17 @@ _NON_CASE_COMPARE = frozenset({
     "legoesm_cube_vs_latlon",       # cross-grid self-comparison, no oracle
     "eke_kappa_veros",              # GM closure diagnostic
     "eke_len_veros",                # EKE length-scale diagnostic
+    # Four drivers landed 2026-07-27..2026-08-12 without a disposition, which
+    # is the omission this ratchet exists to force.  Each reason below is
+    # quoted from the driver's OWN docstring, not inferred.
+    "tendencies_nemo",              # "per process, at a matched state -- no
+                                    # time integration"; the oceananigans_tendency class
+    "advection_nemo",               # one operator vs NEMO's ttrd_totad, no
+                                    # time integration; same class
+    "grids_tripole_mpas",           # "It is NOT a NEMO-fidelity statement";
+                                    # the legoesm_cube_vs_latlon class
+    "three_way_nemo",               # re-scores the SAME global_omip arms on
+                                    # one common grid; adds no case
 })
 
 

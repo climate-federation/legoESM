@@ -50,6 +50,7 @@ from pathlib import Path
 import numpy as np
 from legoesm.ocean.fidelity.provenance import (
     allow_dirty_stamps,
+    scoped_allow_dirty,
     worktree_stamp,
 )
 
@@ -492,6 +493,7 @@ def scaling(*, kts, out_dir: Path, allow_dirty: bool) -> dict:
     return report
 
 
+@scoped_allow_dirty
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("census", "scaling"))

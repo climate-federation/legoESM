@@ -19,6 +19,7 @@ from pathlib import Path
 import numpy as np
 from legoesm.ocean.fidelity.provenance import (
     allow_dirty_stamps,
+    scoped_allow_dirty,
     worktree_stamp,
 )
 
@@ -910,6 +911,7 @@ def run_kt_walk(kt: int, oracle_root: Path, entry_root: Path, *,
     }
 
 
+@scoped_allow_dirty
 def main(argv=None) -> int:
     global CASE, EXPECTED
     parser = argparse.ArgumentParser()

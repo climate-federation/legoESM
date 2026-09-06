@@ -46,6 +46,7 @@ from pathlib import Path
 import numpy as np
 from legoesm.ocean.fidelity.provenance import (
     allow_dirty_stamps,
+    scoped_allow_dirty,
     worktree_stamp,
 )
 
@@ -1031,6 +1032,7 @@ def slow(*, out_dir: Path, allow_dirty: bool, kts=(2, 3, 4)) -> dict:
     return report
 
 
+@scoped_allow_dirty
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("mode", choices=("growth", "candidates", "slow"))

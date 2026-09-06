@@ -94,6 +94,7 @@ from nemo_testcase_overflow_barotropic_gate import (
 from nemo_testcase_rule12_hpg_eligibility import read_entry_full, read_rhs
 from legoesm.ocean.fidelity.provenance import (
     allow_dirty_stamps,
+    scoped_allow_dirty,
     worktree_stamp,
 )
 
@@ -378,6 +379,7 @@ def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
     return report
 
 
+@scoped_allow_dirty
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
