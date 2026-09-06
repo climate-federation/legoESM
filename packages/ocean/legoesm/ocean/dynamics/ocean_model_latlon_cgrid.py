@@ -7286,9 +7286,17 @@ class LatLonCGridOceanModel:
                 native_slope_eta=state.eta.data,
                 # ldf_eiv_trp precedes dynamics and consumes the same-stage
                 # ldf_slp slopes, while the later tra_ldf tensor consumes Kmm
-                # geometry. Keep the through-FCT bolus on the historical Naa
-                # slope geometry as the Redi tensor alone receives Kmm eta.
-                native_bolus_slope_eta=state_new.eta.data,
+                # geometry -- that is the stpMLF reading, and on the leapfrog
+                # lanes ``_eta_gm_in`` is ``state_new.eta.data``, so it is
+                # unchanged there.  On the WS-RK3 lane there is exactly ONE
+                # ldf_slp call per step and it is on Nbb (stprk3.F90:174), so
+                # the bolus and the Redi tensor read the SAME before-state
+                # slope field; an independent diff review found this operand
+                # left on Naa while the comment above claimed the whole slope
+                # operand set had moved.  MEASURED inert on GYRE: the card
+                # resolves kappa_GM = 0.0 and gm_bolus_advection = "centred",
+                # so the bolus is not even requested there.
+                native_bolus_slope_eta=_eta_gm_in,
                 # tra_ldf runs after dynamics but e3u/e3v are indexed Kmm:
                 # carry the step-entry Nnn SSH rather than recomputing from
                 # state_new.eta (Naa). stpmlf.F90:528,548 + scheme.h90:73-74.

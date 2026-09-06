@@ -289,6 +289,13 @@ if python "$ADMISSION" --baseline "$SOURCE_RUN" --candidate "$TARGET_RUN" \
   printf 'REFUSE: the source-admission plant did not turn the gate red\n' >&2
   exit 72
 fi
+# AND IT MUST HAVE LANDED.  The gate also exits non-zero when the plant was
+# never applied ("the requested plant was never applied"), so "exited non-zero"
+# alone is satisfied by a control that proved nothing -- the same defeat round
+# 38 removed from the operand gate's own plant, found here by an independent
+# diff review.
+grep -q '"plant_applied": true' "$TARGET_RUN/round38_source_admission_plant.json" \
+  || { printf 'REFUSE: the source-admission plant never landed\n' >&2; exit 72; }
 # And the whole point of the acquisition: the SECOND record must exist and
 # must NOT be a copy of the first.
 [[ -s "$TARGET_RUN/$NEW_RECORD" ]] \
@@ -348,6 +355,13 @@ if python "$ADMISSION" --baseline "$ADMISSION_BASE" --candidate "$TARGET_RUN" \
   printf 'REFUSE: the admission plant did not turn the gate red\n' >&2
   exit 72
 fi
+# AND IT MUST HAVE LANDED.  The gate also exits non-zero when the plant was
+# never applied ("the requested plant was never applied"), so "exited non-zero"
+# alone is satisfied by a control that proved nothing -- the same defeat round
+# 38 removed from the operand gate's own plant, found here by an independent
+# diff review.
+grep -q '"plant_applied": true' "$TARGET_RUN/round38_admission_plant.json" \
+  || { printf 'REFUSE: the admission plant never landed\n' >&2; exit 72; }
 test -s "$TARGET_RUN/$NEW_RECORD"
 
 # The round-29 gate on the momentum record: unchanged from round 35, so every

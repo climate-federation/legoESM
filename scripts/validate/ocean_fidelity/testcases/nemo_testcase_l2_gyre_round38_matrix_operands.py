@@ -303,6 +303,20 @@ KT2_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
                   "oracle_trazdf_matrix_kt00000002.bin")
 
 
+def _fold_removed(live: dict) -> np.ndarray:
+    """legoESM's matrix diffusivity with legoESM's own fold subtracted out.
+
+    The model builds ``K_v_cell = (K_v + K33) * interface_mask``
+    (``ocean_model_latlon_cgrid.py``), so a plain ``K - K33`` is ``-K33`` at
+    every MASKED interface -- a NEGATIVE diffusivity fed into the substitution
+    solve.  An independent diff review found that; the masked interfaces keep
+    the value the model gave them.
+    """
+    wet = np.asarray(live["wet"]) > 0.0
+    face = wet[..., 1:] & wet[..., :-1]
+    return np.where(face, live["K"] - live["K33"], live["K"])
+
+
 def run_kt2_given_inputs(record: Path = KT2_RECORD) -> dict:
     """legoESM's isoneutral fold, GIVEN NEMO'S OWN BEFORE STATE, at kt = 2.
 
@@ -337,8 +351,9 @@ def run_kt2_given_inputs(record: Path = KT2_RECORD) -> dict:
     rec = read_trazdf_matrix(record, expect_kt=2)
     oracle = _oracle(rec)
     t = lambda a: np.ascontiguousarray(a.transpose(1, 0, 2))
-    T_bb = t(_box(rec, "T_Kbb_in", rec["header"]["jpk"]))
-    S_bb = t(_box(rec, "S_Kbb_in", rec["header"]["jpk"]))
+    jpkm1 = rec["header"]["jpkm1"]
+    T_bb = t(_box(rec, "T_Kbb_in", jpkm1))
+    S_bb = t(_box(rec, "S_Kbb_in", jpkm1))
     r3t_bb = np.ascontiguousarray(_box(rec, "r3t_Kbb").transpose(1, 0))
 
     card = build_nemo_testcase_card(CASE)
@@ -365,7 +380,11 @@ def run_kt2_given_inputs(record: Path = KT2_RECORD) -> dict:
         v_mask=jnp.asarray(init.v_mask.data), dt=card.dt_s,
         eos_depth=getattr(cfg, "eos_depth", "insitu")), dtype=np.float64)
 
-    wet_face = (oracle["wet"] > 0.0)[:, :, 1:]
+    wet_cell = oracle["wet"] > 0.0
+    # THE GATE'S OWN FACE MASK, not a lookalike: a face is wet only when the
+    # cells on BOTH sides are.  The two agree on GYRE (0 of 17400 differ) and
+    # diverge over topography, and this arm is meant to run on other cards.
+    wet_face = wet_cell[..., 1:] & wet_cell[..., :-1]
     require(wet_face.shape == K33.shape,
             f"the wet-face mask {wet_face.shape} is not the fold's "
             f"{K33.shape}")
@@ -382,9 +401,9 @@ def run_kt2_given_inputs(record: Path = KT2_RECORD) -> dict:
         "nemo_ah_wslp2_absmax": nemo_max,
         "lego_K33_absmax": float(np.abs(K33)[wet_face].max()),
         "before_state_wet_per_level_ptp_max": float(max(
-            float(np.ptp(T_bb[..., k][(oracle["wet"] > 0.0)[..., k]]))
-            if (oracle["wet"] > 0.0)[..., k].any() else 0.0
-            for k in range(oracle["wet"].shape[-1]))),
+            float(np.ptp(T_bb[..., k][wet_cell[..., k]]))
+            if wet_cell[..., k].any() else 0.0
+            for k in range(wet_cell.shape[-1]))),
         "row": row,
         "scored_wet_faces": int(wet_face.sum()),
         "owner_if_debt": ("the isoneutral SLOPE TRANSCRIPTION, not round 39's "
@@ -469,7 +488,7 @@ def run_substitution(record: Path, *, oracle_root: Path, npz: Path) -> dict:
         # 1.16e-14 K on its own.  This arm is legoESM's OWN ``K`` with
         # legoESM's OWN fold subtracted back out, which is exactly what the
         # model produces once the slopes are built on the before state.
-        "lego_avt_no_fold": live["K"] - live["K33"],
+        "lego_avt_no_fold": _fold_removed(live),
     }
     residual = {name: _stage3_residual(k, oracle_root=oracle_root, npz=npz)
                 for name, k in arms.items()}
