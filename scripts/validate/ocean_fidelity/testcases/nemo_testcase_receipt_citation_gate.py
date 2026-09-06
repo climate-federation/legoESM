@@ -95,6 +95,15 @@ FILES = {
     "BLD/ppsrc/nemo/dynvor.f90": LOCK / "BLD/ppsrc/nemo/dynvor.f90",
     "ocean_pe_latlon_cgrid.py":
         REPO / "packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py",
+    "ocean_model_latlon_cgrid.py":
+        REPO / "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py",
+    "provenance.py": REPO / "packages/ocean/legoesm/ocean/fidelity/provenance.py",
+    # The two GYRE decks' compile keys.  GYRE_BARE is what the native demo
+    # card reproduces and it is key_linssh; the oracle deck is key_qco, and a
+    # bare "cpp" token could otherwise bind to either.
+    "cpp_GYRE_BARE.fcm": NEMO / "cfgs/GYRE_BARE/cpp_GYRE_BARE.fcm",
+    "cpp_GYRE_OMIP_L2_P3_SM.fcm":
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM/cpp_GYRE_OMIP_L2_P3_SM.fcm",
     "nemo_testcase_recipe.py":
         REPO / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py",
 }
@@ -282,6 +291,44 @@ CITATION_MAP = {
     'domqco.F90:166-169': [('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)  &', 1), ('&                    + e1e2t(ji,jj+1) * pssh(ji,jj+1)  ) * r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 1), 4],
     'domqco.F90:219-222': [('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)  &', 2), ('&                    + e1e2t(ji,jj+1) * pssh(ji,jj+1)  ) * r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 2), 4],
     'vertical.py:470': 'def nemo_qco_live_face_geometry_cgrid(',
+    # --- round 31: the walk into dyn_zdf, and the stamp ---
+    'dynzdf.F90:97': 'zDt_2 = rDt * 0.5_wp',
+    'dynzdf.F90:148': 'IF( ln_drgimp .AND. ln_dynspg_ts ) THEN',
+    'dynzdf.F90:149-150': [
+        ('DO_2Dik( 0, 0,     1, jpkm1, 1 )      ! remove barotropic velocities', 1),
+        ('puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kaa) - uu_b(ji,jj,Kaa) ) * umask(ji,jj,jk)', 1),
+        2],
+    'dynzdf.F90:153': ('DO_1Di( 0, 0 )      ! Add bottom/top stress due to barotropic component only', 1),
+    'stprk3_stg.F90:433': ('!                 !==  All stages: correct the barotropic component ==!   at Kaa = N+1/3, N+1/2 or N+1', 1),
+    'stprk3_stg.F90:440-441': [
+        'zub(ji,jj) = uu_b(ji,jj,Kaa) - SUM( e3u_0(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)',
+        'zvb(ji,jj) = vv_b(ji,jj,Kaa) - SUM( e3v_0(ji,jj,:)*vv(ji,jj,:,Kaa) ) * r1_hv_0(ji,jj)',
+        2],
+    'stprk3_stg.F90:444-445': [
+        'uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)',
+        'vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)',
+        2],
+    'ocean_model_latlon_cgrid.py:7731-7733': [
+        '_nemo_ws_pre_implicit_state = (',
+        'if self._nemo_ws_test_hooks.expose_pre_implicit_state else None)',
+        3],
+    'ocean_model_latlon_cgrid.py:9874': ('u_solve_in = u_solve_in - _u_bt_mean', 1),
+    'ocean_model_latlon_cgrid.py:9991': ('u_solve_in = u_solve_in - (', 1),
+    'ocean_pe_latlon_cgrid.py:3262-3265': [
+        ('if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):', 1),
+        ('"with a scalar dlon (got dlon<=0; tripolar unsupported)."', 1),
+        4],
+    'vertical.py:64-70': [
+        ('if e3t_0 is None:', 1),
+        ('"and is_active")', 1),
+        7],
+    'vertical.py:76-77': [
+        ('if getattr(z_coord, "linear_free_surface", False):', 1),
+        ('return e3t_0', 1),
+        2],
+    'provenance.py:28': 'def git_sha(*, allow_dirty: bool = False, repo: str | Path | None = None) -> str:',
+    'cpp_GYRE_BARE.fcm:1': 'key_linssh key_vco_1d  key_RK3',
+    'cpp_GYRE_OMIP_L2_P3_SM.fcm:1': 'key_qco key_vco_1d3d key_RK3',
     'round19_oracle_v2_external/ocean.output:338': 'ice shelf cavities             ln_isfcav =  F',
     'round19_oracle_v2_external/ocean.output:553': 'Courant number targeted application   ln_zad_Aimp =  F',
     'round19_oracle_v2_external/ocean.output:629': 'implicit friction                         ln_drgimp   =  T',

@@ -5938,9 +5938,16 @@ supposed to touch.
 ### Item 4 — the fix is NOT the kt2 blocker, and the walk must continue
 
 Both trajectory arms were run at the same protocol, all three oracle roots
-pinned to the V2 root, `--trajectory-only`, the AFTER arm on the committed
-clean tree and the BEFORE arm on a one-line temporary revert whose restoration
-was verified by file SHA-256.
+pinned to the V2 root, `--trajectory-only`.
+**WITHDRAWN by round 31 — the AFTER arm was NOT on a committed clean tree.**
+Its report was written at 22:13:10 and the BEFORE arm's at 22:16:54; the fix
+commit is timestamped 22:20:56, seven minutes after the later of the two.  So
+both arms ran on the SAME uncommitted tree, the AFTER one carrying the fix as
+a working-tree edit and the BEFORE one carrying a one-line temporary revert of
+it.  That is still a controlled pair — one line differs — but the sentence
+claimed a provenance the timestamps refute, and neither artifact carries a
+revision stamp that could have shown it (round 31, item 2).  The restoration
+was verified by file SHA-256 at the time; the hash is recorded in round 31.
 
 | row | before | after |
 |---|---:|---:|
@@ -5961,13 +5968,15 @@ was verified by file SHA-256.
 | `kt10.before.u` | `5.6249869570505276e-02` | `5.1403631510096456e-02` |
 | `kt10.before.ssh` | `2.1255435580060100e-04` | `3.3284883532392094e-05` |
 
-Four rows move the wrong way and are registered as debt rather than hidden
-(Rule 12, a second error exposed by a faithful fix): `kt4.before.T`
-`1.0594738051818496e-03 -> 1.066212778793673e-03`, `kt5.before.v`
-`4.3797665645157385e-02 -> 4.572141673556504e-02`, `kt6.before.v`
-`6.0219592086987961e-02 -> 6.2092404213714036e-02`, and `kt8.before.v`
-`2.4527161866164299e-02 -> 6.2034193135222182e-02`.  Their boundary is the
-stage-3 momentum RHS and their owner is UNKNOWN; nothing here attributes them.
+**CORRECTED by round 31 — there are EIGHT worsened rows, not four**, and this
+paragraph listed half of them with no threshold stated.  The four named here
+were `kt4.before.T`, `kt5.before.v`, `kt6.before.v` and `kt8.before.v`; the
+four omitted were `kt4.before.ssh` (+4.63 per cent, LARGER than two of the
+four that were listed), `kt5.before.T` (+0.20 per cent), `kt4.before.S`
+(+0.15 per cent) and `kt3.before.T` (+1.8e-06 per cent).  The complete
+register, with the threshold that separates them and the boundary and owner
+stated once for all eight, is in round 31, item 1.  Their boundary is the
+stage-3 momentum RHS; nothing in round 30 attributes them.
 
 **The merge blocker does NOT clear.**  First-over-bar stays `kt2` on
 `T`/`S`/`u`/`v`, and the u row moves by 0.02 per cent.  So the stage-3 momentum
@@ -5976,7 +5985,8 @@ the blocker is essentially unchanged.  What remains between an (almost) exact
 RHS and a `9.48e-07` stage-3 velocity is `dyn_zdf` itself — its explicit
 update, its barotropic removal and bottom-stress addition, its matrix, its
 solve — and the barotropic correction that follows it at
-`stprk3_stg.F90:430`.  That is the next boundary, and this round does not name
+`stprk3_stg.F90:437-446` (corrected by round 31; `stprk3_stg.F90:430` is the
+`CALL dyn_zdf` itself, not the correction).  That is the next boundary, and this round does not name
 a statement inside it: legoESM exposes none of those internals, and inventing
 a number for them would be exactly the failure this campaign's rules exist to
 stop.  The oracle side of that walk is now fully instrumented and bit-verified
@@ -6108,8 +6118,14 @@ BAROCLINIC part of a stage-3 RHS error survives.  Measured from the round-29
 dump: stage-2 velocity max `4.255e-04` m/s against a baroclinic deviation of
 `1.04e-07`, a ratio of `2.4e-04`, because GYRE's initial T/S are horizontally
 uniform.  Predicted surviving error `1.19e-05 * 2.4e-04` is about `3e-09`;
-the observed kt2 move is `1.7e-10`.  Consistent, and it independently supports
-the exoneration in item 4 rather than resting it on one before/after pair.
+the observed kt2 move is `1.7e-10`.  **RELABELLED by round 31: this BOUNDS the
+move, it does not confirm it.**  The prediction is 17 times larger than what
+was observed, and a bound satisfied by a factor of 17 discriminates against
+almost nothing — a mechanism that produced ten times less would satisfy it
+too.  What it does do is rule out the arithmetic reading that first looked
+wrong, that `14400 * 8.256e-10 = 1.19e-05` should have shown up whole.  It
+supports the exoneration in item 4 as a consistency check, and the exoneration
+still rests on the before/after pair.
 
 **Provenance, noted not changed.**  The round-29 acquisition executed
 `cfgs/GYRE_OMIP_L2_P3_SM_R29ZDF/MY_SRC/stprk3_stg.F90`, whose `dyn_ldf` sits at
