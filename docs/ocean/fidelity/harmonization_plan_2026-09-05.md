@@ -227,3 +227,11 @@ aux3d linkage and the minimum-level policy, not just counts.
   legs, --kprofile-snapshots), trp_fwfix 9657919->9657920 (fixed real closure, one variable vs base2),
   mpas_base2 9657921 (one leg, K_zeta 0 + twin), fesom_base2 9657922 (mesh_nemo75_30m). Pre-registrations
   in the card headers. Outputs results/omip_nemo/{trp_base2,trp_fwfix,mpas_base2,fesom_base2}_d30.
+- 12:25 fesom_base2 done: SST 0.62 (was 0.65), SSS 0.88, nino3 +1.39 -> pre-reg met. Tripole legs 1 done
+  (day 15, snapshot_day0015 stamped 15.0; fwfix SSS 34.223 vs base2 34.214). Mixing profile vs NEMO at
+  day 15 (job 9663450, card _eq_diffusivity_base2): surface avm x0.54 (cold tongue) / x0.39 (warm pool),
+  entrainment avt x0.32 / x0.33, entrainment Pr 11.5 vs 2.6; fwfix == base2. Closure code is faithful
+  on NEMO's state (08-27) and the now2 shear arm was refuted for the cell (08-18), so this is a state
+  difference (higher Ri), not the shallow-cell operator. Full table in
+  results/omip_nemo/threegrid_unified_table_2026-09-04.md. Open faithfulness ASK: card
+  `--tke-mxl-choice 3` vs ORCA1 nn_mxl=2 (= choice 4).
