@@ -432,7 +432,53 @@ class MPASOceanModel:
                 f"(currently {n_sub}).",
                 stacklevel=2,
             )
+        self.check_vorticity_filter_stability(dt)
         return cfl
+
+    def vorticity_filter_stability_number(self, dt: float) -> float:
+        """``K_zeta_bih * dt * lambda_max**2`` for the EXPLICIT biharmonic
+        vorticity filter (``ocean_pe_mpas`` visc term, forward-Euler in the
+        momentum update).
+
+        ``lambda_max ~ 8 / dv_min**2`` is the vertex-Laplacian spectral limit
+        of a regular degree-3 dual mesh (codex review 2026-09-04 of the
+        level-8 blowup), evaluated at the mesh's MINIMUM dvEdge; the number
+        is 1.4 on the level-7 mesh (min dv 28.9 km, dt 150 s, K 1e14 -- ran
+        180 days) and 11 on level 8 (min dv 14.4 km, dt 75 s, same K -- blew
+        up in 10 steps with a per-step growth of ~5).  The classic explicit
+        limit is 2.
+        """
+        K = float(self.config.K_zeta_bih)
+        if K <= 0.0:
+            return 0.0
+        dv_min = float(jnp.min(jnp.where(self.mesh.dvEdge > 0.0,
+                                         self.mesh.dvEdge, jnp.inf)))
+        lam = 8.0 / (dv_min * dv_min)
+        return K * dt * lam * lam
+
+    def check_vorticity_filter_stability(self, dt: float) -> float:
+        """Refuse an explicit vorticity filter beyond its stability limit.
+
+        The level-8 blowup (2026-09-04) was exactly this: the NEMO-match
+        recipe's fixed ``K_zeta_bih = 1e14`` crossed the explicit limit on
+        the finer dual mesh and nothing checked it.  Raise at >= 2 (the
+        forward-Euler limit), warn at >= 1 (level 7 sits at 1.4).
+        """
+        import warnings
+        n = self.vorticity_filter_stability_number(dt)
+        if n >= 2.0:
+            raise ValueError(
+                f"explicit biharmonic vorticity filter is unstable: "
+                f"K_zeta_bih*dt*lambda_max^2 = {n:.2f} >= 2 (K_zeta_bih="
+                f"{float(self.config.K_zeta_bih):.3g} m^4/s, dt={dt:g} s, "
+                f"min dvEdge={float(jnp.min(jnp.where(self.mesh.dvEdge > 0.0, self.mesh.dvEdge, jnp.inf))):.0f} m). "
+                f"Lower K_zeta_bih (scale ~dv^3 with the mesh) or set it to 0.")
+        if n >= 1.0:
+            warnings.warn(
+                f"explicit biharmonic vorticity filter is marginal: "
+                f"K_zeta_bih*dt*lambda_max^2 = {n:.2f} (limit 2).",
+                stacklevel=2)
+        return n
 
     def tendencies(
         self,

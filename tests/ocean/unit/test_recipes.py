@@ -142,7 +142,7 @@ _FROZEN_MPAS_DYCORE = {
     "A_v": 1.0e-4,
     "K_v": 1.0e-5,
     "C_smag_lap": 0.33,
-    "K_zeta_bih": 1.0e14,
+    "K_zeta_bih": 0.0,   # 2026-09-06: explicit vorticity filter off (level-8 blowup; gated when nonzero)
     "barotropic_solver": "implicit_cn",
     "barotropic_implicit_pcg_tol": 1.0e-10,
     "barotropic_implicit_pcg_maxiter": 300,

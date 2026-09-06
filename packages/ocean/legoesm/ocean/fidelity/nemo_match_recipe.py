@@ -118,7 +118,13 @@ class NEMOMatchMPASRecipeConfig:
     # lateral viscosity / dissipation
     A_h: float = 1.0e5
     C_smag_lap: float = 0.33
-    K_zeta_bih: float = 1.0e14
+    # Explicit biharmonic filter on relative vorticity.  Was 1e14 fixed
+    # (not mesh-scaled): stability number K dt lambda_max^2 = 1.4 on the
+    # level-7 mesh (marginal) and 11 on level 8 (blew up in 10 steps,
+    # 2026-09-04).  Off by default (user decision 2026-09-06); a nonzero
+    # value is gated at the first step (MPASOceanModel
+    # check_vorticity_filter_stability).
+    K_zeta_bih: float = 0.0
 
     # vertical mixing (explicit-block coefficients; implicit solve uses them)
     A_v: float = 1.0e-4
