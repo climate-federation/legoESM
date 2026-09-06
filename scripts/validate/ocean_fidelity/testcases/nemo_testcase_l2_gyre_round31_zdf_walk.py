@@ -302,6 +302,115 @@ def run_pre_solve(oracle_root: Path, *, plant: bool = False) -> dict:
     }
 
 
+def run_rule12_stage_update(oracle_root: Path, *, plant: bool = False) -> dict:
+    """Rule 12 for round 33's operator: NEMO's own inputs, legoESM's expression.
+
+    The changed operator is the RK3 momentum stage update's VECTOR arm,
+    ``dynzdf.F90:121-122``, which GYRE's compiled deck takes because it
+    resolves ``ln_dynadv_vec = T`` with ``lk_linssh = .FALSE.``.  This drives
+    legoESM's own ``rk3_stage_velocity_update`` -- imported from the
+    production module the step function calls, not a copy -- with the record's
+    ``uu_Kbb_in``, ``uu_Krhs_in``, ``rDt`` and ``umask``, and requires the
+    result to equal :func:`nemo_explicit_update` BIT FOR BIT.  Not at the
+    1e-15 bar: one multiply, one add and one multiply on identical operands in
+    identical association order leaves no room for anything else.
+
+    WHAT THIS CANNOT SEE, written down because the round-33 claim review
+    measured it: the record's ``uu_Kbb_in`` is identically 0.0 -- GYRE is at
+    rest at kt=1 -- so this arm exercises only ``(0 + rDt*rhs)*umask``.  A
+    wrong ``velocity_before`` operand would pass it.  The non-vacuity arm for
+    that half lives in
+    ``tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round33_stage_arm.py``,
+    which drives the same function with a NON-ZERO before-velocity against an
+    independent transcription and plants two mutations on it.
+
+    The report also carries the OPEN mask row (round-33 addendum 6): NEMO's
+    ``umask`` from the record against the mask every GYRE gate scores on.
+    """
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        rk3_stage_velocity_update,
+    )
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card,
+    )
+
+    record = oracle_root / ZDF_MATRIX_RECORD
+    rec = read_zdf_matrix(record)
+    require(tuple(rec["header"][k] for k in ("jpi", "jpj", "jpk")) == DIMS,
+            f"{record}: record dimensions are not GYRE's")
+    h = rec["header"]
+    rdt = float(rec["arrays"]["rDt"])
+    interior = np.zeros(DIMS, dtype=bool)
+    interior[h["ntsi"] - 1:h["ntei"], h["ntsj"] - 1:h["ntej"], :] = True
+    nx, ny, nz = DIMS
+    masks = expected_masks(build_nemo_testcase_card(CASE))
+    rows, mask_rows = [], []
+    for face in ("u", "v"):
+        p_ = "uu" if face == "u" else "vv"
+        mask = _fortran(rec, "umask" if face == "u" else "vmask")
+        before = _fortran(rec, f"{p_}_Kbb_in")
+        rhs = _fortran(rec, f"{p_}_Krhs_in")
+        candidate = np.asarray(rk3_stage_velocity_update(
+            before, rhs, rdt, mask, vector_form=True), dtype=np.float64)
+        if plant and face == "u":
+            candidate = candidate.copy()
+            candidate[h["ntsi"], h["ntsj"], 0] = np.nextafter(
+                candidate[h["ntsi"], h["ntsj"], 0], np.inf)
+        row = _bit_rows(
+            f"{CASE}.kt1.stage3.rule12_stage_update.{face}",
+            nemo_explicit_update(rec, face), candidate,
+            (mask > 0.5) & interior)
+        row["nemo_statement"] = "dynzdf.F90:121-122"
+        row["before_velocity_max_abs"] = float(np.max(np.abs(before)))
+        rows.append(row)
+        # OPEN row, addendum 6: is NEMO's umask the mask the gates score on?
+        oracle_mask = _xyz(mask.ravel(order="F"), nx, ny, nz) > 0.5
+        model_mask = masks[face]
+        trimmed = oracle_mask[..., :model_mask.shape[-1]]
+        mask_rows.append({
+            "face": face,
+            "nemo_wet_cells_in_scored_layout": int(trimmed.sum()),
+            "legoesm_wet_cells": int(model_mask.sum()),
+            "cells_where_they_disagree": int(
+                np.count_nonzero(trimmed != model_mask)),
+            "nemo_wet_above_the_models_deepest_level": int(
+                oracle_mask[..., model_mask.shape[-1]:].sum()),
+        })
+    status = "AT-BAR" if all(r["exact"] for r in rows) else "DEBT"
+    if plant:
+        require(status == "DEBT", "the planted one-ulp move did not fire")
+    return {
+        "worktree": worktree_stamp(),
+        "format": "nemo-testcase-l2-gyre-round31-zdf-walk-v1",
+        "case": CASE,
+        "mode": "rule12_stage_update",
+        "claim": ("legoESM's own rk3_stage_velocity_update, given NEMO's "
+                  "uu(Kbb), NEMO's uu(Krhs), NEMO's rDt and NEMO's umask, "
+                  "reproduces NEMO's own dynzdf.F90:121-122 explicit stage "
+                  "update BIT FOR BIT"),
+        "operator": ("legoesm.ocean.dynamics.ocean_model_latlon_cgrid."
+                     "rk3_stage_velocity_update, imported from the production "
+                     "module the step function calls"),
+        "inputs_are_nemo": [
+            f"{ZDF_MATRIX_RECORD}:uu_Kbb_in / vv_Kbb_in",
+            f"{ZDF_MATRIX_RECORD}:uu_Krhs_in / vv_Krhs_in",
+            f"{ZDF_MATRIX_RECORD}:rDt",
+            f"{ZDF_MATRIX_RECORD}:umask / vmask",
+        ],
+        "blind_spot": ("uu_Kbb_in is identically zero on this card, so this "
+                       "arm drives only (0 + rDt*rhs)*umask; the non-zero "
+                       "before-velocity arm is in the round-33 unit tests"),
+        "open_mask_row": mask_rows,
+        "record": str(record),
+        "record_sha256": sha256(record),
+        "rDt": rdt,
+        "tile_bounds": {k: h[k] for k in ("ntsi", "ntei", "ntsj", "ntej")},
+        "status": status,
+        "rows": rows,
+        "planted_control": plant,
+    }
+
+
 def _column_uniformity(err: np.ndarray, mask: np.ndarray) -> dict:
     """Is the signed error a column-uniform shift, or is it depth-structured?
 
@@ -629,7 +738,8 @@ def run_ordering_regression(oracle_root: Path, *, plant: bool = False) -> dict:
 
 MODES = {"calibrate": run_calibrate, "pre_solve": run_pre_solve,
          "depth_profile": run_depth_profile, "ordering_size": run_ordering_size,
-         "ordering_regression": run_ordering_regression}
+         "ordering_regression": run_ordering_regression,
+         "rule12_stage_update": run_rule12_stage_update}
 
 
 def main(argv=None) -> int:

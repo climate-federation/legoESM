@@ -1280,6 +1280,84 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     legacy_zdf_entry_kmm_eta: bool = False
 
 
+def rk3_stage_velocity_update(
+    velocity_before,
+    rhs,
+    dt_stage,
+    face_mask,
+    *,
+    vector_form: bool,
+    qco_before=None,
+    qco_now=None,
+    qco_after=None,
+):
+    """NEMO's RK3 momentum stage time step, both arms, one implementation.
+
+    NEMO selects the arm with the SAME predicate at every stage::
+
+        IF( ln_dynadv_vec .OR. lk_linssh ) THEN   ! applied on velocity
+           uu(ji,jj,jk,Kaa) = ( uu(ji,jj,jk,Kbb) + rDt * uu(ji,jj,jk,Krhs) ) * umask(ji,jj,jk)
+        ELSE                                      ! thickness weighted
+           uu(ji,jj,jk,Kaa) = ( ( 1 + r3u(ji,jj,Kbb) ) * uu(ji,jj,jk,Kbb )
+              &               + rDt * ( 1 + r3u(ji,jj,Kmm) ) * uu(ji,jj,jk,Krhs) )
+              &             / ( 1 + r3u(ji,jj,Kaa) ) * umask(ji,jj,jk)
+
+    at ``stprk3_stg.F90:365-388`` for stages 1 and 2, and -- this is the part
+    legoESM used to miss -- at ``dynzdf.F90:119-142`` for stage 3, because the
+    stage-3 time step lives inside ``dyn_zdf``: ``stprk3_stg.F90:395`` CASE(3)
+    only adds the leftover RHS terms and does no time stepping at all.
+
+    Module-level rather than a closure so a fidelity gate can drive it with
+    NEMO's OWN record arrays and score the result against NEMO's own output; a
+    closure cannot be handed a record.  Same reason as
+    ``rk3_stage_barotropic_correction``.
+
+    Parameters
+    ----------
+    velocity_before
+        NEMO ``uu(:,:,:,Kbb)``, the BEFORE level, unchanged across the stages.
+    rhs
+        NEMO ``uu(:,:,:,Krhs)`` for this stage.
+    dt_stage
+        NEMO ``rDt`` for this stage: ``dt/3``, ``dt/2``, ``dt``.
+    face_mask
+        NEMO ``umask(ji,jj,jk)``, used by the VECTOR arm only.  The qco arm
+        takes no mask here on purpose -- legoESM masks after the barotropic
+        correction instead, which is bit-identical because that correction's
+        own ``stage_mask`` zeroes a dry face and its ``e3u_0``-weighted column
+        mean gives a dry level no weight either way.
+    qco_before, qco_now, qco_after
+        ``1 + r3u`` at Kbb, Kmm and Kaa.  Required by the qco arm; a missing
+        one raises rather than silently degrading to the vector arm.
+
+    Sign/geometry convention: a time step on a horizontal velocity component.
+    No vertical axis direction and no flux sign enters it; the thickness
+    ratios are positive and dimensionless.
+    """
+    if not vector_form and (qco_before is None or qco_now is None
+                            or qco_after is None):
+        raise ValueError(
+            "the thickness-weighted arm needs all three (1 + r3u) ratios; got "
+            f"before={qco_before is None}, now={qco_now is None}, "
+            f"after={qco_after is None} missing")
+    if rhs.shape != velocity_before.shape:
+        raise ValueError(
+            f"rhs {rhs.shape} must match velocity_before "
+            f"{velocity_before.shape}")
+    if vector_form:
+        # dynzdf.F90:121-122 and stprk3_stg.F90:367-368, in NEMO's own
+        # association order: add, then mask.
+        if face_mask.shape not in (velocity_before.shape,
+                                   velocity_before.shape[:-1] + (1,)):
+            raise ValueError(
+                f"face_mask {face_mask.shape} must match velocity_before "
+                f"{velocity_before.shape} or be its level-broadcast form")
+        return (velocity_before + dt_stage * rhs) * face_mask
+    # dynzdf.F90:127-132 and stprk3_stg.F90:373-378, key_qco form.
+    return (qco_before * velocity_before
+            + dt_stage * qco_now * rhs) / qco_after
+
+
 def _nemo_ws_qco_stage_faces(
     eta, h_ref, u_mask_3d, v_mask_3d, grid, *, include_reciprocals=False,
 ):
@@ -5880,11 +5958,17 @@ class LatLonCGridOceanModel:
                     .legacy_wzv_rederived_transport),
                 legacy_aimp_midpoint_w_metric=(
                     self._nemo_ws_test_hooks.legacy_aimp_midpoint_w_metric))
-            # stprk3_stg.F90:365-386 has two live scheme arms.  The resolved
+            # stprk3_stg.F90:365-388 has two live scheme arms.  The resolved
             # vector-invariant GYRE program advances stages 1/2 directly on
-            # velocity (:365-369); only the flux-form arm uses the key_qco
-            # (1+r3u) factors (:370-386).  Stage 3 still enters dyn_zdf's
-            # key_qco solve in either momentum program.
+            # velocity (:366-369); only the flux-form arm uses the key_qco
+            # (1+r3u) factors (:373-378).  STAGE 3 SELECTS THE SAME WAY: its
+            # time step is inside dyn_zdf, and dynzdf.F90:119 carries the
+            # identical IF( ln_dynadv_vec .OR. lk_linssh ), vector arm at
+            # :121-122 and key_qco arm at :127-132.  (The sentence that used
+            # to stand here said stage 3 enters the key_qco solve "in either
+            # momentum program"; that was the transcription defect round 33
+            # fixed, and all three stages now route through
+            # rk3_stage_velocity_update.)
             def _qco_ratios(eta_stage):
                 if self._nemo_ws_test_hooks.omit_stage_qco_factor:
                     return (
@@ -6154,12 +6238,14 @@ class LatLonCGridOceanModel:
             # Stage 1: Kmm = Kbb, so the RHS carries (1 + r3u(Kbb)).
             _u1_rhs = _du1_rhs if _vert0 is None else _du1_rhs + _vert0[0]
             _v1_rhs = _dv1_rhs if _vert0 is None else _dv1_rhs + _vert0[1]
-            if _vector_velocity_stage_update:
-                u1_raw = (u0 + (dt_mom / 3.0) * _u1_rhs) * _ws_stage_u_mask
-                v1_raw = (v0 + (dt_mom / 3.0) * _v1_rhs) * _ws_stage_v_mask
-            else:
-                u1_raw = (_qu_b * u0 + (dt_mom / 3.0) * _qu_b * _u1_rhs) / _qu_13
-                v1_raw = (_qv_b * v0 + (dt_mom / 3.0) * _qv_b * _v1_rhs) / _qv_13
+            u1_raw = rk3_stage_velocity_update(
+                u0, _u1_rhs, dt_mom / 3.0, _ws_stage_u_mask,
+                vector_form=_vector_velocity_stage_update,
+                qco_before=_qu_b, qco_now=_qu_b, qco_after=_qu_13)
+            v1_raw = rk3_stage_velocity_update(
+                v0, _v1_rhs, dt_mom / 3.0, _ws_stage_v_mask,
+                vector_form=_vector_velocity_stage_update,
+                qco_before=_qv_b, qco_now=_qv_b, qco_after=_qv_13)
             u1_corr, v1_corr = _replace_stage_mean(
                 u1_raw, v1_raw, target_u, target_v)
             _g0_tracer = _g0
@@ -6227,12 +6313,14 @@ class LatLonCGridOceanModel:
                     self._nemo_ws_test_hooks.stage2_momentum_rhs_override)
             if self._nemo_ws_test_hooks.expose_stage2_momentum_rhs:
                 _nemo_ws_exposed_stage2_rhs = _stage2_rhs_production
-            if _vector_velocity_stage_update:
-                u2_raw = (u0 + (dt_mom / 2.0) * p1u_corr) * _ws_stage_u_mask
-                v2_raw = (v0 + (dt_mom / 2.0) * p1v_corr) * _ws_stage_v_mask
-            else:
-                u2_raw = (_qu_b * u0 + (dt_mom / 2.0) * _qu_13 * p1u_corr) / _qu_12
-                v2_raw = (_qv_b * v0 + (dt_mom / 2.0) * _qv_13 * p1v_corr) / _qv_12
+            u2_raw = rk3_stage_velocity_update(
+                u0, p1u_corr, dt_mom / 2.0, _ws_stage_u_mask,
+                vector_form=_vector_velocity_stage_update,
+                qco_before=_qu_b, qco_now=_qu_13, qco_after=_qu_12)
+            v2_raw = rk3_stage_velocity_update(
+                v0, p1v_corr, dt_mom / 2.0, _ws_stage_v_mask,
+                vector_form=_vector_velocity_stage_update,
+                qco_before=_qv_b, qco_now=_qv_13, qco_after=_qv_12)
             if self._nemo_ws_test_hooks.expose_stage2_raw_momentum:
                 _nemo_ws_exposed_stage2_raw = (u2_raw, v2_raw)
             u2_corr, v2_corr = _replace_stage_mean(
@@ -6301,8 +6389,19 @@ class LatLonCGridOceanModel:
                 raise ValueError(
                     "expose_stage3_momentum_rhs must be empty, 'pre_ldf', or "
                     f"'post_ldf'; got {_expose_stage3_rhs!r}")
-            u3_raw = (_qu_b * u0 + dt_mom * _qu_12 * p2u_corr) / _qu_aa
-            v3_raw = (_qv_b * v0 + dt_mom * _qv_12 * p2v_corr) / _qv_aa
+            # ARM.  The stage-3 time step is dyn_zdf's, and dynzdf.F90:119
+            # selects on the SAME ln_dynadv_vec .OR. lk_linssh predicate that
+            # stprk3_stg.F90:365 uses at stages 1 and 2 -- vector arm at
+            # dynzdf.F90:121-122, key_qco arm at :127-132.  Same helper, same
+            # selector, so stage 3 cannot drift from stages 1 and 2 again.
+            u3_raw = rk3_stage_velocity_update(
+                u0, p2u_corr, dt_mom, _ws_stage_u_mask,
+                vector_form=_vector_velocity_stage_update,
+                qco_before=_qu_b, qco_now=_qu_12, qco_after=_qu_aa)
+            v3_raw = rk3_stage_velocity_update(
+                v0, p2v_corr, dt_mom, _ws_stage_v_mask,
+                vector_form=_vector_velocity_stage_update,
+                qco_before=_qv_b, qco_now=_qv_12, qco_after=_qv_aa)
             # ORDER.  The barotropic correction (stprk3_stg.F90:437-446) sits
             # BELOW the CALL dyn_zdf at stprk3_stg.F90:430, so at stage 3 it
             # runs AFTER the implicit vertical solve, never before it.  Stage
