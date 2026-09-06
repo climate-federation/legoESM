@@ -189,12 +189,56 @@ def stage_arm_defects(source: str) -> list[str]:
     tree = ast.parse(source)
     defects = []
     seen = {}
+    selector_bindings = 0
+    helper_rebindings = 0
+    entry_bindings = []
     for node in ast.walk(tree):
+        # AugAssign too.  The round-33 DIFF review defeated the first version
+        # of this checker with ``u3_raw *= _qu_b / _qu_aa`` on the line AFTER
+        # the call, which is an ast.AugAssign and was invisible here.
+        if isinstance(node, ast.AugAssign):
+            if isinstance(node.target, ast.Name) and node.target.id in STAGE_CALLS:
+                defects.append(
+                    f"{node.target.id} is modified in place after it is built")
+            continue
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name == "rk3_stage_velocity_update":
+                helper_rebindings += 1
+            continue
         if not isinstance(node, ast.Assign):
             continue
         for target in node.targets:
-            if isinstance(target, ast.Name) and target.id in STAGE_CALLS:
-                seen.setdefault(target.id, []).append(node.value)
+            names = ([target] if isinstance(target, ast.Name)
+                     else [e for e in getattr(target, "elts", [])
+                           if isinstance(e, ast.Name)])
+            for name in names:
+                if name.id in STAGE_CALLS:
+                    seen.setdefault(name.id, []).append(node.value)
+                if name.id == "_vector_velocity_stage_update":
+                    selector_bindings += 1
+                if name.id == "rk3_stage_velocity_update":
+                    helper_rebindings += 1
+                if name.id in ("u0", "v0"):
+                    entry_bindings.append((name.id, ast.unparse(node.value)))
+    # The selector must be computed ONCE.  One extra line,
+    # ``_vector_velocity_stage_update = False``, replants the exact defect
+    # round 33 fixed and left the first version of this checker clean.
+    if selector_bindings != 1:
+        defects.append(
+            f"_vector_velocity_stage_update is bound {selector_bindings} "
+            "times; it must be computed exactly once")
+    # ... and the helper must be the module-level one, never shadowed.
+    if helper_rebindings != 1:
+        defects.append(
+            f"rk3_stage_velocity_update is bound {helper_rebindings} times; "
+            "a local shadow would make every call below meaningless")
+    # ... and the BEFORE-level operands must be the state's own fields, so a
+    # ``u0, v0 = v0, u0`` line cannot swap the faces under the calls.
+    for name, value in entry_bindings:
+        want = "state.u.data" if name == "u0" else "state.v.data"
+        if value != want:
+            defects.append(
+                f"{name} is bound to {value!r}, not the state's own {want}")
     for name, want in STAGE_CALLS.items():
         values = seen.get(name)
         if not values:
@@ -223,6 +267,26 @@ def stage_arm_defects(source: str) -> list[str]:
         if ratios != STAGE_RATIOS[name]:
             defects.append(
                 f"{name} passes ratios {ratios!r}, not {STAGE_RATIOS[name]!r}")
+    # Finally, the corrected stage-3 pair must DERIVE from the raw pair a call
+    # just built.  Without this the call can stay in place and be dead -- the
+    # review's "keep the call but build u3_corr from the old inline form".
+    corrected = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id in ("u3_corr",
+                                                              "v3_corr"):
+                corrected.setdefault(target.id, []).append(node.value)
+    for name in ("u3_corr", "v3_corr"):
+        values = corrected.get(name)
+        raw = "u3_raw" if name == "u3_corr" else "v3_raw"
+        if not values:
+            defects.append(f"{name} is never built")
+        elif raw not in ast.unparse(values[0]):
+            defects.append(
+                f"{name} is built from {ast.unparse(values[0])!r}, which does "
+                f"not consume {raw}, so the stage call is dead")
     return defects
 
 
@@ -282,13 +346,62 @@ def test_the_check_rejects_a_stage_taking_the_wrong_rhs():
     assert any("is called with" in d for d in stage_arm_defects(mutated))
 
 
+def test_the_check_rejects_the_selector_rebound_to_a_constant():
+    """DIFF review M3: one inserted line replants the whole defect."""
+    mutated = _mutate(
+        "            # ARM.  The stage-3 time step is dyn_zdf's",
+        "            _vector_velocity_stage_update = False\n"
+        "            # ARM.  The stage-3 time step is dyn_zdf's")
+    assert any("bound 2 times" in d for d in stage_arm_defects(mutated))
+
+
+def test_the_check_rejects_an_in_place_reweighting_after_the_call():
+    """DIFF review M1: an AugAssign is not an Assign."""
+    mutated = _mutate(
+        "            u3_corr = u3_raw * _ws_stage_u_mask",
+        "            u3_raw *= _qu_b / _qu_aa\n"
+        "            u3_corr = u3_raw * _ws_stage_u_mask")
+    assert any("modified in place" in d for d in stage_arm_defects(mutated))
+
+
+def test_the_check_rejects_a_local_shadow_of_the_helper():
+    """DIFF review M2: rebinding the name makes every call below a no-op."""
+    mutated = _mutate(
+        "            # ARM.  The stage-3 time step is dyn_zdf's",
+        "            def rk3_stage_velocity_update(*a, **k):\n"
+        "                return a[0]\n"
+        "            # ARM.  The stage-3 time step is dyn_zdf's")
+    assert any("bound 2 times" in d for d in stage_arm_defects(mutated))
+
+
+def test_the_check_rejects_a_dead_stage3_call():
+    """DIFF review M6: keep the call, build the answer the old way."""
+    mutated = _mutate(
+        "            u3_corr = u3_raw * _ws_stage_u_mask",
+        "            u3_corr = ((_qu_b * u0 + dt_mom * _qu_12 * p2u_corr)\n"
+        "                       / _qu_aa) * _ws_stage_u_mask")
+    assert any("does not consume u3_raw" in d
+               for d in stage_arm_defects(mutated))
+
+
+def test_the_check_rejects_swapped_entry_velocities():
+    """DIFF review M5: swap u0 and v0 above the calls and every arm passes."""
+    mutated = _mutate(
+        "            u0 = state.u.data",
+        "            u0 = state.v.data")
+    assert any("not the state's own state.u.data" in d
+               for d in stage_arm_defects(mutated))
+
+
 def test_the_stale_belief_is_gone_from_the_source():
     """The comment that produced the defect is a claim, and it was false.
 
     ``dynzdf.F90:119`` selects exactly as ``stprk3_stg.F90:365`` does, so
     "stage 3 still enters dyn_zdf's key_qco solve in either momentum program"
-    was wrong.  A comment cannot be unit-tested for truth, but it can be
-    tested for absence once it has been corrected.
+    was wrong.  WHAT THIS DOES NOT TEST, said out loud because a DIFF review
+    pointed it out: it would still pass with the CODE fully reverted, as long
+    as the comment stayed corrected.  The code is pinned by
+    :func:`stage_arm_defects`; this only stops the false sentence coming back.
     """
     source = STEP_MODULE.read_text()
     assert "key_qco solve in either momentum program" not in source
@@ -320,4 +433,3 @@ def test_each_card_resolves_the_arm_nemos_deck_resolves(case, scheme, vector):
     )
     config = build_nemo_testcase_card(case).recipe.model_config
     assert config.momentum_advection == scheme
-    assert (config.momentum_advection == "vector_invariant") is vector

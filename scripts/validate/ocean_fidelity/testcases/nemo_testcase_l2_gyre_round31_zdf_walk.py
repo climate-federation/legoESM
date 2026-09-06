@@ -103,7 +103,7 @@ def nemo_explicit_update(rec: dict, face: str) -> np.ndarray:
     return (_fortran(rec, f"{p}_Kbb_in") + rdt * _fortran(rec, f"{p}_Krhs_in")) * mask
 
 
-def nemo_barotropic_removed(rec: dict, face: str) -> np.ndarray:
+def nemo_barotropic_removed(rec: dict, face: str, start=None) -> np.ndarray:
     """The explicit update after ``dynzdf.F90:149-150`` only.
 
     ``puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kaa) - uu_b(ji,jj,Kaa) ) *
@@ -117,12 +117,13 @@ def nemo_barotropic_removed(rec: dict, face: str) -> np.ndarray:
     mask = _fortran(rec, "umask" if face == "u" else "vmask")
     ub = np.asarray(rec["arrays"][f"{p}_b_Kaa"], dtype=np.float64)
     jpkm1 = int(rec["header"]["jpkm1"])
-    out = nemo_explicit_update(rec, face).copy()
+    out = (nemo_explicit_update(rec, face) if start is None
+           else np.asarray(start, dtype=np.float64)).copy()
     out[..., :jpkm1] = (out[..., :jpkm1] - ub[..., None]) * mask[..., :jpkm1]
     return out
 
 
-def nemo_pre_solve_vector(rec: dict, face: str) -> np.ndarray:
+def nemo_pre_solve_vector(rec: dict, face: str, start=None) -> np.ndarray:
     """The explicit update plus ``dynzdf.F90:149-150`` and ``:156-159``.
 
     Both corrections run because ``ln_drgimp`` and ``ln_dynspg_ts`` are both
@@ -137,7 +138,7 @@ def nemo_pre_solve_vector(rec: dict, face: str) -> np.ndarray:
     cd = np.asarray(rec["arrays"]["rCdU_bot"], dtype=np.float64)
     zdt_2 = float(rec["arrays"]["rDt"]) * 0.5            # dynzdf.F90:97
 
-    out = nemo_barotropic_removed(rec, face)          # :121-122 then :149-150
+    out = nemo_barotropic_removed(rec, face, start)   # :121-122 then :149-150
     # :153-159 -- add the bottom stress due to the barotropic component only.
     # rCdU_bot(ji+1,jj) for u; rCdU_bot(ji,jj+1) for v (dynzdf.F90:157,159).
     # np.roll WRAPS; NEMO reads a real neighbour, so the writer's tile must
@@ -356,13 +357,40 @@ def run_rule12_stage_update(oracle_root: Path, *, plant: bool = False) -> dict:
             candidate = candidate.copy()
             candidate[h["ntsi"], h["ntsj"], 0] = np.nextafter(
                 candidate[h["ntsi"], h["ntsj"], 0], np.inf)
+        scored = (mask > 0.5) & interior
+        # ROW A is NOT a discharge and is labelled as such.  Both sides
+        # evaluate the same expression on the same record operands, so it can
+        # only fail if legoESM's helper is not the transcription this gate
+        # carries.  Useful as a tripwire on the helper; worthless as evidence
+        # against NEMO, because nothing on the "oracle" side is a NEMO OUTPUT.
+        # The round-33 DIFF review found this before it reached a receipt.
         row = _bit_rows(
-            f"{CASE}.kt1.stage3.rule12_stage_update.{face}",
-            nemo_explicit_update(rec, face), candidate,
-            (mask > 0.5) & interior)
+            f"{CASE}.kt1.stage3.stage_update_transcription_identity.{face}",
+            nemo_explicit_update(rec, face), candidate, scored)
         row["nemo_statement"] = "dynzdf.F90:121-122"
+        row["is_a_discharge"] = False
+        row["why_not"] = ("both sides are the same expression on the same "
+                          "record operands; no NEMO output array enters it")
         row["before_velocity_max_abs"] = float(np.max(np.abs(before)))
         rows.append(row)
+        # ROW B IS the discharge.  It carries legoESM's helper output forward
+        # through NEMO's own next two statements -- the barotropic removal at
+        # dynzdf.F90:149-150 and the barotropic bottom stress at :156-159 --
+        # and scores the result against uu_Kaa_pre, which IS a NEMO OUTPUT
+        # ARRAY.  That composition is legitimate because ``--mode calibrate``
+        # proves, on NEMO's own operands, that those two statements as
+        # transcribed here reproduce uu_Kaa_pre bit for bit; the calibration
+        # is re-run below and the gate RAISES rather than reporting if it
+        # fails, so the composition can never be quoted uncalibrated.
+        composed = nemo_pre_solve_vector(rec, face, start=candidate)
+        row_b = _bit_rows(
+            f"{CASE}.kt1.stage3.rule12_stage_update_composed.{face}",
+            _fortran(rec, "uu_Kaa_pre" if face == "u" else "vv_Kaa_pre"),
+            composed, scored)
+        row_b["nemo_statement"] = ("dynzdf.F90:121-122 then :149-150 then "
+                                   ":156-159, scored against uu_Kaa_pre")
+        row_b["is_a_discharge"] = True
+        rows.append(row_b)
         # OPEN row, addendum 6: is NEMO's umask the mask the gates score on?
         oracle_mask = _xyz(mask.ravel(order="F"), nx, ny, nz) > 0.5
         model_mask = masks[face]
@@ -376,6 +404,12 @@ def run_rule12_stage_update(oracle_root: Path, *, plant: bool = False) -> dict:
             "nemo_wet_above_the_models_deepest_level": int(
                 oracle_mask[..., model_mask.shape[-1]:].sum()),
         })
+    # Rule 1e: the composition may not be quoted unless it is calibrated on
+    # NEMO's own operands FIRST.  This raises rather than reporting.
+    calibration = run_calibrate(oracle_root)
+    require(calibration["status"] == "AT-BAR",
+            "the two follow-on statements do not reproduce NEMO's own "
+            "uu_Kaa_pre bit for bit, so no composed number may be used")
     status = "AT-BAR" if all(r["exact"] for r in rows) else "DEBT"
     if plant:
         require(status == "DEBT", "the planted one-ulp move did not fire")
@@ -384,10 +418,14 @@ def run_rule12_stage_update(oracle_root: Path, *, plant: bool = False) -> dict:
         "format": "nemo-testcase-l2-gyre-round31-zdf-walk-v1",
         "case": CASE,
         "mode": "rule12_stage_update",
+        "calibration": {k: calibration[k] for k in ("status", "claim", "rows")},
         "claim": ("legoESM's own rk3_stage_velocity_update, given NEMO's "
                   "uu(Kbb), NEMO's uu(Krhs), NEMO's rDt and NEMO's umask, "
-                  "reproduces NEMO's own dynzdf.F90:121-122 explicit stage "
-                  "update BIT FOR BIT"),
+                  "carried forward through NEMO's own dynzdf.F90:149-150 and "
+                  ":156-159, reproduces NEMO's OUTPUT ARRAY uu_Kaa_pre BIT "
+                  "FOR BIT.  The bare :121-122 row beside it is a "
+                  "transcription identity, NOT a discharge: no NEMO output "
+                  "enters it"),
         "operator": ("legoesm.ocean.dynamics.ocean_model_latlon_cgrid."
                      "rk3_stage_velocity_update, imported from the production "
                      "module the step function calls"),
@@ -397,9 +435,13 @@ def run_rule12_stage_update(oracle_root: Path, *, plant: bool = False) -> dict:
             f"{ZDF_MATRIX_RECORD}:rDt",
             f"{ZDF_MATRIX_RECORD}:umask / vmask",
         ],
-        "blind_spot": ("uu_Kbb_in is identically zero on this card, so this "
-                       "arm drives only (0 + rDt*rhs)*umask; the non-zero "
-                       "before-velocity arm is in the round-33 unit tests"),
+        "blind_spot": ("uu_Kbb_in is identically zero on this card, so BOTH "
+                       "rows drive only (0 + rDt*rhs)*umask and a wrong "
+                       "velocity_before operand would pass either; the "
+                       "non-zero before-velocity arm is in the round-33 unit "
+                       "tests, with two plants on it.  NEMO holds no array at "
+                       "the bare :121-122 boundary, which is why the "
+                       "discharge is the COMPOSED row"),
         "open_mask_row": mask_rows,
         "record": str(record),
         "record_sha256": sha256(record),
