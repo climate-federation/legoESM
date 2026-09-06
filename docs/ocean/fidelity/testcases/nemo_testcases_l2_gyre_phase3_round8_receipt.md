@@ -9556,7 +9556,13 @@ the trajectory at this round's tip, against round 37's.
 |---|---|---|---|
 | GYRE-zco | kt=2, T S u v | kt=2, T S u v | kt=2, T S u v |
 | LOCK_EXCHANGE-zco | kt=4, u | kt=4, u | kt=4, u |
-| OVERFLOW-zps | kt=2, T u | kt=2, T u | (pending) |
+| OVERFLOW-zps | kt=2, T u | kt=2, T u | kt=2, T u |
+
+**No card's first-over-bar step moves under the flag either.**  Turning the
+contraction off globally, with the per-site rounding still in place, changes no
+card's trajectory verdict over ten steps — which is the honest reading of a
+flag whose one measurable effect on this campaign's rows is already delivered
+by a two-operation helper.
 
 ### ASKED / UNASKED
 
