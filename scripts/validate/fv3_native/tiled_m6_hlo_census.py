@@ -18,6 +18,9 @@ kt = int(sys.argv[2]) if len(sys.argv) > 2 else 2
 grid = create_fv3_duo_grid(N)
 mesh = Mesh(np.array(jax.devices()[:6 * kt * kt]).reshape(6, kt, kt), ("face", "tile_i", "tile_j"))
 m = FV3DuoDynamicsModel(grid, FV3DuoConfig(km=10, hydrostatic=True, n_split=3), step_spmd_mesh=mesh, step_windows=(kt, 11))
+if len(sys.argv) > 3 and sys.argv[3] == "pack":
+    m._window_comm.pack_pad_refresh = True
+    print("M8-A packed pad refresh ON")
 st = m.dcmip16_initial_state()
 lay_W = m.window_layout.W
 fn = m._step_fn

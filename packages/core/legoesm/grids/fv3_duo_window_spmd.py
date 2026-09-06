@@ -65,6 +65,11 @@ class DuoWindowSpmdComm:
     #: refresh()).  The step is then WRONG at seams that a firing wrote
     #: into a neighbour's pad -- never a production setting, never gated.
     pad_refresh_per_firing = True
+    #: M8-A (2026-09-06): one ppermute per direction per round for ALL the
+    #: arrays of a firing (slabs flattened and concatenated, grouped by
+    #: dtype) instead of one per array -- a pure re-packing of the same
+    #: bytes.  Off until the go/no-go and A/B rows are measured.
+    pack_pad_refresh = False
 
     def __init__(self, lay: WindowLayout, tab, mesh):
         import jax
@@ -132,6 +137,8 @@ class DuoWindowSpmdComm:
         lay = self.lay
         P2 = 2 * lay.pad
         kt = lay.kt
+        if self.pack_pad_refresh:
+            return self._pad_exchange_packed(arrs)
         out = []
         for a in arrs:
             for axis_name, ax in (("tile_i", 0), ("tile_j", 1)):
@@ -160,6 +167,68 @@ class DuoWindowSpmdComm:
                 a = jax.lax.slice_in_dim(ext, P2, P2 + a.shape[ax], axis=ax)
             out.append(a)
         return out
+
+    def _pad_exchange_packed(self, arrs):
+        """``_pad_exchange`` with the arrays' slabs PACKED: per round and
+        per dtype, every array's ``2*pad``-row slab is flattened and
+        concatenated, sent with ONE ppermute per direction, and split
+        back -- the same bytes to the same cells (an edge tile's missing
+        source is ppermute's zeros for the whole packed vector, i.e.
+        zeros for every slab, as before).  Round 2 (tile_j) reads the
+        round-1 (tile_i) results of every array, so corners still come
+        along."""
+        import jax
+        import jax.numpy as jnp
+        lay = self.lay
+        P2 = 2 * lay.pad
+        kt = lay.kt
+        arrs = list(arrs)
+        for axis_name, ax in (("tile_i", 0), ("tile_j", 1)):
+            t = jax.lax.axis_index(axis_name)
+            b0 = self._b0(t)
+            to_west = [(s, s - 1) for s in range(1, kt)]
+            to_east = [(s, s + 1) for s in range(kt - 1)]
+            groups = {}
+            for i, a in enumerate(arrs):
+                groups.setdefault(jnp.dtype(a.dtype), []).append(i)
+            for dt, idx in groups.items():
+                los, his, shapes = [], [], []
+                for i in idx:
+                    a = arrs[i]
+                    e = a.shape[ax] - lay.W
+                    blk = lay.nl + e
+                    lo = jax.lax.dynamic_slice_in_dim(a, b0 + e, P2, axis=ax)
+                    hi = jax.lax.dynamic_slice_in_dim(
+                        a, b0 + blk - e - P2, P2, axis=ax)
+                    los.append(lo.reshape(-1))
+                    his.append(hi.reshape(-1))
+                    shapes.append(lo.shape)
+                # a singleton group is sent as-is (concat of one = a copy
+                # for nothing, GLM 2026-09-06)
+                cat = (lambda v: v[0]) if len(idx) == 1 else jnp.concatenate
+                from_east = jax.lax.ppermute(cat(los), axis_name, to_west)
+                from_west = jax.lax.ppermute(cat(his), axis_name, to_east)
+                off = 0
+                for i, shp in zip(idx, shapes):
+                    n = 1
+                    for d in shp:
+                        n *= d
+                    fe = from_east[off:off + n].reshape(shp)
+                    fw = from_west[off:off + n].reshape(shp)
+                    off += n
+                    a = arrs[i]
+                    e = a.shape[ax] - lay.W
+                    blk = lay.nl + e
+                    widths = [(0, 0)] * a.ndim
+                    widths[ax] = (P2, P2)
+                    ext = jnp.pad(a, widths)
+                    ext = jax.lax.dynamic_update_slice_in_dim(
+                        ext, fe, P2 + b0 + blk, axis=ax)
+                    ext = jax.lax.dynamic_update_slice_in_dim(
+                        ext, fw, b0, axis=ax)
+                    arrs[i] = jax.lax.slice_in_dim(ext, P2, P2 + a.shape[ax],
+                                                   axis=ax)
+        return arrs
 
     def _normalize(self, a, axes=None):
         """Window array -> ``(padded-extent (W+e0, W+e1, ...) form,

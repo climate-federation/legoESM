@@ -52,12 +52,15 @@ def _windows(lay, comm, x6):
     return jax.device_put(gather_windows(lay, x6), comm.sharding)
 
 
-def test_refresh_fills_every_pad_from_the_neighbours(setup):
-    """Pads poisoned with NaN; after the 2-round refresh every window
-    equals the flat array's window slab bitwise (blocks untouched, pads
-    = neighbours' blocks, corners included, edge windows' wider pads)."""
+def _bytes_equal(a, b):
+    """strictly bitwise: np.array_equal treats +0.0 == -0.0 (codex)"""
+    return a.shape == b.shape and a.dtype == b.dtype and np.array_equal(
+        a.view(np.uint8), b.view(np.uint8))
+
+
+def _refresh_check(lay, comm, packed):
     from legoesm.grids.fv3_duo_windows import gather_windows
-    ctx, lay, comm = setup
+    comm.pack_pad_refresh = packed
     M = N + 2 * NG
 
     def block_mask(w, extents):
@@ -75,16 +78,66 @@ def test_refresh_fills_every_pad_from_the_neighbours(setup):
         m[sl[0], sl[1]] = True
         return m
 
-    for extents in [(M, M), (M + 1, M), (M, M + 1), (N, N), (N + 1, N)]:
-        x6 = _rand((6,) + extents + (KM,), 1)
-        xw = np.asarray(gather_windows(lay, x6))
-        poisoned = xw.copy()
-        for w in range(lay.nb):
-            poisoned[w][~block_mask(w, extents)] = np.nan   # every pad cell
-        out = jax.jit(lambda a: comm.refresh({"x": a})["x"])(
-            jax.device_put(jnp.asarray(poisoned), comm.sharding))
-        out = np.asarray(out)
-        assert np.array_equal(out, xw), (extents, np.isnan(out).sum())
+    try:
+        for extents in [(M, M), (M + 1, M), (M, M + 1), (N, N), (N + 1, N)]:
+            bundle, want = {}, {}
+            # two f64 arrays with DISTINCT values and, for "x2", the OTHER
+            # node-axis extent: an equal-shape segment swap inside the f64
+            # group or an offset slip between unequal slabs (GLM/codex
+            # 2026-09-06) delivers the wrong array's slab and is caught
+            ext2 = (extents[0] + (1 if extents[0] in (M, N) else -1),
+                    extents[1])
+            for name, dt, seed, ext in (("x", np.float64, 1, extents),
+                                        ("x2", np.float64, 4, ext2),
+                                        ("y", np.float32, 2, extents),
+                                        ("z", np.int32, 3, extents)):
+                x6 = _rand((6,) + ext + (KM,), seed)
+                x6 = (x6 * 1000).astype(dt) if dt == np.int32 else x6.astype(dt)
+                xw = np.asarray(gather_windows(lay, x6))
+                poisoned = xw.copy()
+                fill = np.nan if dt != np.int32 else -999999
+                for w in range(lay.nb):
+                    poisoned[w][~block_mask(w, ext)] = fill  # every pad
+                bundle[name] = jax.device_put(jnp.asarray(poisoned),
+                                              comm.sharding)
+                want[name] = xw
+            out = jax.jit(lambda b: comm.refresh(b))(bundle)
+            for name, xw in want.items():
+                o = np.asarray(out[name])
+                assert _bytes_equal(o, xw), (packed, name, extents,
+                                             (o != xw).sum())
+    finally:
+        comm.pack_pad_refresh = False
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_refresh_fills_every_pad_from_the_neighbours(setup, packed):
+    """Pads poisoned with NaN; after the 2-round refresh every window
+    equals the flat array's window slab BYTE for byte (blocks untouched,
+    pads = neighbours' blocks, corners included, edge windows' wider
+    pads).  ``packed``: the M8-A one-message-per-direction refresh, which
+    must deliver the same bytes to the same cells -- here on a bundle of
+    two f64 arrays with distinct values and different node-axis extents
+    (unequal slabs in ONE dtype group) plus f32 and int32."""
+    ctx, lay, comm = setup
+    _refresh_check(lay, comm, packed)
+
+
+def test_packed_refresh_segment_rotation_is_caught(setup, monkeypatch):
+    """Non-vacuity for the packed arm (codex 2026-09-06): rotating the
+    packed vector by a third of its length before it is split (every
+    segment then lands in the wrong array/offset) must FAIL the check
+    above.  The unpacked arm's 3-D slabs are left alone."""
+    import jax
+    ctx, lay, comm = setup
+    real = jax.lax.ppermute
+
+    def rotated(x, axis_name, perm):
+        y = real(x, axis_name, perm)
+        return jnp.roll(y, y.shape[0] // 3) if y.ndim == 1 else y
+    monkeypatch.setattr(jax.lax, "ppermute", rotated)
+    with pytest.raises(AssertionError):
+        _refresh_check(lay, comm, True)
 
 
 @pytest.mark.parametrize("stag", ["A", "B"])
