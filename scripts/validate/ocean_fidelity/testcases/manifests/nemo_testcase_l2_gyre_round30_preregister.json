@@ -1,0 +1,52 @@
+{
+    "format": "nemo-testcase-l2-gyre-round30-preregister-v1",
+    "date": "2026-09-05",
+    "starting_tip": "ce34ae0f16c6",
+    "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+    "oracle_roots": {
+        "GYRE-zco": [
+            "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19_oracle_v2_external",
+            "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round21_oracle_v2_stage_ww",
+            "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round29_oracle_v2_zdf_matrix"
+        ],
+        "LOCK_EXCHANGE-zco": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10",
+        "OVERFLOW-zps": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10",
+        "ORCA2-zps": "/tmp/codex-orca2-r27-probe"
+    },
+    "already_covered_by_the_round29_preregistration": {
+        "note": "Two measurements were taken before this manifest and are NOT new claims: the round-21 WRITE-only admission of the round-29 root, and the round-29 reader calibration run on the real record. Both were preregistered in nemo_testcase_l2_gyre_round29_preregister.json (item2_instrument.admission and item1_stage3_owner P3) and both are reported with their outputs.",
+        "correction": "The round-30 task statement names the new pre-dyn_zdf frame 'oracle_rhs_kt00000001.bin'. That basename is a PRE-EXISTING round-19 record (magic NEMO_L1_RHS___1) and is byte-identical between the two roots. The round-29 frame is 'oracle_rkstage3_preldf_kt00000001.bin' (magic NEMO_L2_RKPLD_1), and it is written BEFORE dyn_ldf, not after it -- stprk3_stg_round29.patch inserts it above the CALL dyn_ldf line. Corrected here before any measurement."
+    },
+    "read_before_this_preregistration_no_prediction_carried": {
+        "r0_1": "src/OCE/stprk3_stg.F90's CASE ( 3 ) block contains exactly ONE momentum call that runs on this deck: dyn_ldf at :400. The other three, dyn_osm :402, bdy_dyn3d_dmp :404 and dyn_dmp :406, are gated on ln_zdfosm, ln_bdy and ln_dyndmp .AND. ln_c1d, all resolved false on GYRE.",
+        "r0_2": "dyn_zdf is NOT inside the SELECT CASE: src/OCE/stprk3_stg.F90:430 calls it under IF( kstg == 3 ), after the CASE block closes at :408, and the barotropic correction at :437-440 follows it.",
+        "r0_3": "The stage-3 Krhs entering dyn_ldf is assembled at src/OCE/stprk3_stg.F90:318-334, the CASE ( 2 , 3 ) arm: eos :324, dyn_hpg :325, dyn_vor :328, then dyn_adv :331 (the vector-form branch, ln_dynadv_vec = .true.). Nothing else contributes on this deck.",
+        "r0_4": "legoESM's stage-3 momentum RHS is the return of _mom_pert_ws(..., skip_ldf=False, stage_index=3) in ocean_model_latlon_cgrid.py; the same call with skip_ldf=True withholds the lateral term at ocean_pe_latlon_cgrid.py:5018. Those two are the model-side counterparts of the two oracle frames."
+    },
+    "item1_stage3_boundary_walk": {
+        "claim_under_test": "GYRE's kt=1 stage-3 momentum divergence (u 9.481924730527598e-07, against stage 2's 4.740083109008864e-13) enters inside dyn_zdf rather than at dyn_ldf or upstream of it.",
+        "instrument": "scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round30_stage3_owner.py, modes pre_ldf and post_ldf, production JIT, fp64, scored on the phase-3 gate's own masks and score().",
+        "predictions": [
+            "P1 pre_ldf is bit-exact: legoESM's stage-3 RHS with the lateral term withheld equals uu/vv(:,:,:,Krhs) at stprk3_stg.F90:400 on every wet U and V face, 0 bit-unequal. REFUTE: any bit-unequal cell -- the owner is then UPSTREAM of both stage-3-only operators (eos/dyn_hpg/dyn_vor/dyn_adv at :324-333) and both P2 and P3 are dead as localisations.",
+            "P2 post_ldf is bit-exact: legoESM's full stage-3 RHS equals uu_Krhs_in/vv_Krhs_in inside oracle_zdf_matrix_kt00000001.bin, 0 bit-unequal. CONFIRM with P1 confirmed: the owner is INSIDE dyn_zdf. REFUTE with P1 confirmed: dyn_ldf owns it.",
+            "P3 the gate is non-vacuous: --plant on the u row exits non-zero with absolute_max >= 0.9."
+        ],
+        "falsifier_summary": "one bit-unequal cell in pre_ldf refutes the whole dyn_zdf hypothesis in one number.",
+        "landing_rule": "a fix lands only as a source-literal edit to the ONE shared implementation, per statement, with the changed operator shown bit-exact given NEMO's own inputs on every card it touches (Rule 12), and re-scored on GYRE kt=1..10 plus LOCK/OVERFLOW/ORCA2."
+    },
+    "item2_decision_16": {
+        "decision": "user decision 16 -- make the pre-stage 2-D vorticity call unconditional, as NEMO's stp2d.F90:146 (dyn_vor after dyn_hpg :128 and dyn_ldf :131), one shared implementation, source order, no card switch",
+        "predictions_carried_verbatim_from_round29": [
+            "P1 LOCK's 1260/2540 and OVERFLOW's 16400/16900 signed-zero cells go to 0 bit-unequal with VALUES unchanged. REFUTE: any value moves, or the count does not go to 0.",
+            "P2 GYRE and ORCA2, where the term is nonzero and already executed, must NOT move: every Rule-12 eligibility row unchanged. REFUTE: any row moves -- that is a FINDING (the card was calling the operator at a different point in the RHS order than NEMO), to report, not to paper over.",
+            "P3 cross-card LOCK/OVERFLOW/GYRE kt=1..10 first-over-bar, before and after."
+        ],
+        "asked_row": "vorticity call: skipped when f=0 -> unconditional (NEMO stp2d.F90:146), user decision 16"
+    },
+    "forbidden_this_round": [
+        "changing the demo card's vertical coordinate (decision 17 pending)",
+        "any edit under /home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src",
+        "makenemo, mpirun, push, merge, deletion, git stash / reset --hard",
+        "any configuration choice"
+    ]
+}
