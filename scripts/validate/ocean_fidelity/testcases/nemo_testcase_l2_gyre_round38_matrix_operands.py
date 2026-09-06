@@ -220,7 +220,8 @@ def _model_step(*, capture: bool, k_override=None, operand_override=None,
             card.recipe.grid, card.recipe.z_coord, cfg,
         ).step(card.recipe.initial_state, dt=card.dt_s,
                freshwater=freshwater, surface_forcing=surface)
-        out = (np.asarray(state.T.data), np.asarray(state.S.data))
+        out = (np.asarray(state.T.data), np.asarray(state.S.data),
+               np.asarray(state.eta.data), np.asarray(state.H_bathy.data))
     finally:
         vmix.implicit_vertical_diffusion_ocean_tracer_pair_dispatch = (
             real_dispatch)
@@ -341,7 +342,7 @@ def run_kt2_given_inputs(record: Path = KT2_RECORD) -> dict:
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        compute_isoneutral_K33_latlon)
+        compute_isoneutral_K33_latlon, static_kappa_redi_override)
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_nemo_testcase_card)
 
@@ -369,6 +370,11 @@ def run_kt2_given_inputs(record: Path = KT2_RECORD) -> dict:
             f"{H.shape}")
     eta_bb = r3t_bb * H
 
+    # THE MODEL'S OWN kappa OVERRIDES, not omitted and not assumed: the arm
+    # must call the function the way ocean_model_latlon_cgrid.py:7323 calls
+    # it.  Rule 10 -- what they RESOLVE to on this card is reported, not read
+    # off the flag.
+    kappa_t, kappa_v = static_kappa_redi_override(cfg.gm_redi, card.recipe.grid)
     K33 = np.asarray(compute_isoneutral_K33_latlon(
         jnp.asarray(T_bb), jnp.asarray(S_bb), jnp.asarray(eta_bb),
         jnp.asarray(H), card.recipe.grid, card.recipe.z_coord, cfg.gm_redi,
@@ -376,6 +382,7 @@ def run_kt2_given_inputs(record: Path = KT2_RECORD) -> dict:
         mask=jnp.asarray(init.land_mask.data),
         rho_0=cfg.constants.rho_0, g=cfg.constants.g,
         native_slope_eta=jnp.asarray(eta_bb),
+        kappa_redi_override=kappa_t, kappa_redi_v_override=kappa_v,
         u_mask=jnp.asarray(init.u_mask.data),
         v_mask=jnp.asarray(init.v_mask.data), dt=card.dt_s,
         eos_depth=getattr(cfg, "eos_depth", "insitu")), dtype=np.float64)
@@ -406,9 +413,116 @@ def run_kt2_given_inputs(record: Path = KT2_RECORD) -> dict:
             for k in range(wet_cell.shape[-1]))),
         "row": row,
         "scored_wet_faces": int(wet_face.sum()),
+        "kappa_redi_override_resolved": (
+            "None" if kappa_t is None else str(np.asarray(kappa_t).shape)),
+        "kappa_redi_v_override_resolved": (
+            "None" if kappa_v is None else str(np.asarray(kappa_v).shape)),
         "owner_if_debt": ("the isoneutral SLOPE TRANSCRIPTION, not round 39's "
                           "placement: this arm feeds NEMO's own before state "
                           "to both sides, so any residual is the formula's"),
+    }
+
+
+def run_dz_owner(record: Path = RECORD) -> dict:
+    """WHO OWNS the ``dz_after`` residual: the reference thickness, or the ssh?
+
+    ``e3t(i,j,k,Kaa) = e3t_0(i,j,k) * (1 + r3t(i,j,Kaa))``
+    (``domzgr_substitute.h90:139``) and ``r3t = ssh/ht_0``
+    (``domqco.F90:160``, ``dom_qco_r3c``).  So a difference in ``dz_after`` is
+    owned by exactly one of two things, and this arm says which:
+
+    * the REFERENCE thickness ``e3t_0``, which is static geometry; or
+    * the STRETCH, i.e. legoESM's own ``ssh(Kaa)`` out of the stage-3 update.
+
+    The record's own consistency is checked first rather than assumed: NEMO's
+    ``e3t_Kaa`` must equal ``e3t_0 * (1 + r3t_Kaa)`` on every level this
+    campaign scores.
+    """
+    rec = read_trazdf_matrix(record)
+    jpkm1 = rec["header"]["jpkm1"]
+    t = lambda a: np.ascontiguousarray(a.transpose(1, 0, 2))
+    e3t0 = t(_box(rec, "e3t_0", jpkm1))
+    e3t_aa = t(_box(rec, "e3t_Kaa", jpkm1))
+    r3t_aa = np.ascontiguousarray(_box(rec, "r3t_Kaa").transpose(1, 0))
+    wet = t(_box(rec, "tmask", jpkm1)) > 0.0
+
+    rebuilt = e3t0 * (1.0 + r3t_aa[..., None])
+    record_consistent = int(np.count_nonzero(
+        rebuilt.view(np.uint64) != e3t_aa.view(np.uint64)))
+
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+    (_, _, eta_aa, H), live = _model_step(capture=True)
+    card = build_nemo_testcase_card(CASE)
+    zc = card.recipe.z_coord
+    ref = np.asarray(getattr(zc, "nemo_e3t_0"), dtype=np.float64)
+    rows = [_wet_row("dz_owner.reference_thickness", e3t0, ref, wet)]
+    # legoESM's own stretch, from the ssh its stage-3 update produced.
+    with np.errstate(invalid="ignore", divide="ignore"):
+        r3t_lego = np.where(H > 0.0, eta_aa / H, 0.0)
+    rows.append(_wet_row("dz_owner.r3t", r3t_aa, r3t_lego, wet[..., 0]))
+    rows.append(_wet_row("dz_owner.dz_after", e3t_aa,
+                         np.asarray(live["dz"]), wet))
+    return {
+        "worktree": worktree_stamp(),
+        "record": str(record),
+        "record_self_consistent_cells_unequal": record_consistent,
+        "rows": rows,
+        "owner": ("the reference thickness is bit-shared, so the residual is "
+                  "owned by the STRETCH -- legoESM's own ssh(Kaa) out of the "
+                  "stage-3 update -- unless the reference row says otherwise"),
+    }
+
+
+def run_knob_redundancy() -> dict:
+    """Is ``slope_prd_geometry_stage='before_step'`` redundant with the fix?
+
+    An independent claim review named this knob a BLOCKER: it already routes
+    the slope density's tracers and Jacobian to the step-entry state on a
+    forward-Euler card, so landing the placement fix could leave two
+    mechanisms for one move.  The claim that they are REDUNDANT rather than
+    competing is decided here by measurement, not by reading.
+    """
+    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as M
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+
+    def one(stage):
+        card = build_nemo_testcase_card(CASE)
+        cfg = card.recipe.model_config._replace(
+            freshwater_closure="real_freshwater", fix_eta_drift=True)
+        if stage is not None:
+            cfg = cfg._replace(
+                gm_redi=cfg.gm_redi._replace(slope_prd_geometry_stage=stage))
+        freshwater, surface = _surface_forcings(
+            card, card.recipe.initial_state, 1)
+        state = M.LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, cfg,
+        ).step(card.recipe.initial_state, dt=card.dt_s,
+               freshwater=freshwater, surface_forcing=surface)
+        return (np.asarray(state.T.data), np.asarray(state.S.data),
+                cfg.gm_redi.slope_prd_geometry_stage)
+
+    base_T, base_S, base_stage = one(None)
+    knob_T, knob_S, knob_stage = one("before_step")
+    require(base_stage != knob_stage,
+            "the two arms resolved the same knob value, so this measures "
+            "nothing")
+    moved = {
+        "T": int(np.count_nonzero(
+            base_T.view(np.uint64) != knob_T.view(np.uint64))),
+        "S": int(np.count_nonzero(
+            base_S.view(np.uint64) != knob_S.view(np.uint64))),
+    }
+    return {
+        "worktree": worktree_stamp(),
+        "default_stage": base_stage, "arm_stage": knob_stage,
+        "cells": int(base_T.size),
+        "bits_moved": moved,
+        "redundant": moved["T"] == 0 and moved["S"] == 0,
     }
 
 
@@ -759,6 +873,10 @@ def main(argv=None) -> int:
                         help="run the CAUSAL arm instead of the operand table")
     parser.add_argument("--time-level", action="store_true",
                         help="discriminate the call site from the arithmetic")
+    parser.add_argument("--dz-owner", action="store_true",
+                        help="who owns the dz_after residual")
+    parser.add_argument("--knob-redundancy", action="store_true",
+                        help="is slope_prd_geometry_stage redundant here")
     parser.add_argument("--kt2-given-inputs", action="store_true",
                         help="score the fold against NEMO's kt=2 ah_wslp2, "
                              "given NEMO's own before state")
@@ -770,6 +888,29 @@ def main(argv=None) -> int:
                         default=Path("/tmp/round38_substitution.npz"))
     parser.add_argument("--json", type=Path)
     args = parser.parse_args(argv)
+    if args.dz_owner:
+        report = run_dz_owner(args.record)
+        text = json.dumps(report, indent=1, sort_keys=True, default=str)
+        if args.json:
+            args.json.write_text(text + "\n")
+        print(text)
+        print("RECORD-SELF-CONSISTENT cells unequal "
+              f"{report['record_self_consistent_cells_unequal']}")
+        for row in report["rows"]:
+            print(f"{row['status']:<13}{row['name']:<34} "
+                  f"unequal {row['bit_unequal']}/{row['n']} "
+                  f"max {row['absolute_max']:.6g}")
+        return 0 if all(r["status"] == "AT-BAR" for r in report["rows"]) else 1
+    if args.knob_redundancy:
+        report = run_knob_redundancy()
+        text = json.dumps(report, indent=1, sort_keys=True, default=str)
+        if args.json:
+            args.json.write_text(text + "\n")
+        print(text)
+        print(f"KNOB {report['default_stage']} vs {report['arm_stage']}: "
+              f"bits moved {report['bits_moved']} of {report['cells']}; "
+              f"REDUNDANT {report['redundant']}")
+        return 0 if report["redundant"] else 1
     if args.kt2_given_inputs:
         report = run_kt2_given_inputs()
         text = json.dumps(report, indent=1, sort_keys=True, default=str)
