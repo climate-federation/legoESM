@@ -129,6 +129,31 @@ FILES = {
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
     # --- round 32: the stage-3 ordering fix ---
+    # --- round 33: the stage arm, and the tanks' reference geometry ---
+    # NEMO's ONE selector, used at every stage, and both of its arms.
+    'stprk3_stg.F90:365': 'IF( ln_dynadv_vec .OR. lk_linssh ) THEN   !* applied on velocity',
+    'stprk3_stg.F90:366-369': [
+        ('DO_3D( 0, 0, 0, 0, 1, jpkm1 )', 2), ('END_3D', 4), 4],
+    'stprk3_stg.F90:370-388': [
+        'ELSE                                      !* applied on thickness weighted velocity',
+        ('ENDIF', 11), 19],
+    'stprk3_stg.F90:395': ('CASE ( 3 )        !==  Stage 3  ==!   add left over RHS terms + time stepping', 1),
+    'stprk3_stg.F90:440,444-445': [
+        'zub(ji,jj) = uu_b(ji,jj,Kaa) - SUM( e3u_0(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)',
+        'uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)',
+        'vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)',
+        3],
+    'dynzdf.F90:127-132': [
+        'puu(ji,jj,jk,Kaa) = (        ( 1._wp + r3u(ji,jj,Kbb) ) * puu(ji,jj,jk,Kbb )  &',
+        '&              /          ( 1._wp + r3v(ji,jj,Kaa) ) * vmask(ji,jj,jk)',
+        6],
+    # e3u_0 is a MACRO, and which arm a card compiles is the whole point.
+    'domzgr_substitute.h90:89': '#     define  e3u_0(i,j,k)    e3t_1d(k)',
+    'domzgr_substitute.h90:98': ('#     define  e3u_0(i,j,k)    e3u_3d(i,j,k)', 1),
+    # each tank's OWN resolved momentum-advection arm.
+    'lock_kt1_10/ocean.output:705': 'ln_dynadv_vec  =  F',
+    'overflow_kt1_10/ocean.output:822': 'ln_dynadv_vec  =  F',
+    'ocean_model_latlon_cgrid.py:6006': '_vector_velocity_stage_update = (',
     'dynzdf.F90:119': 'IF( ln_dynadv_vec .OR. lk_linssh )',
     'dynzdf.F90:150-151': ['puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kaa) - uu_b',
                            'pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kaa) - vv_b', 2],
@@ -336,11 +361,11 @@ CITATION_MAP = {
         5],
     # ROUND 32 moved this site: stage 3 no longer corrects before the solve,
     # it defers the closure (stprk3_stg.F90:437-446 runs after :430).
-    'ocean_model_latlon_cgrid.py:6315-6318': [
+    'ocean_model_latlon_cgrid.py:6414-6417': [
         ('u3_corr = u3_raw * _ws_stage_u_mask', 1),
         ('_replace_stage_mean, target_u, target_v)', 1),
         4],
-    'ocean_model_latlon_cgrid.py:7896-7922': [
+    'ocean_model_latlon_cgrid.py:7995-8021': [
         ('if _ws_stage3_correction is not None:', 1),
         ('v=state_new.v.replace(data=_v_after),', 1),
         27],
@@ -353,12 +378,12 @@ CITATION_MAP = {
         'uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)',
         'vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)',
         2],
-    'ocean_model_latlon_cgrid.py:7748-7750': [
+    'ocean_model_latlon_cgrid.py:7847-7849': [
         '_nemo_ws_pre_implicit_state = (',
         'if self._nemo_ws_test_hooks.expose_pre_implicit_state else None)',
         3],
-    'ocean_model_latlon_cgrid.py:9943': ('u_solve_in = u_solve_in - _u_bt_mean', 1),
-    'ocean_model_latlon_cgrid.py:10060': ('u_solve_in = u_solve_in - (', 1),
+    'ocean_model_latlon_cgrid.py:10042': ('u_solve_in = u_solve_in - _u_bt_mean', 1),
+    'ocean_model_latlon_cgrid.py:10159': ('u_solve_in = u_solve_in - (', 1),
     'ocean_pe_latlon_cgrid.py:3262-3265': [
         ('if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):', 1),
         ('"with a scalar dlon (got dlon<=0; tripolar unsupported)."', 1),

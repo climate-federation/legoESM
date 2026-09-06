@@ -6438,7 +6438,7 @@ model, and it touches none of the solve's own inputs (`avm`, `e3uw(Kmm)`,
 
 **Round 30 was wrong that legoESM exposes no pre-solve vector.**
 `expose_pre_implicit_state` publishes `state_new` immediately before the
-implicit solver (`ocean_model_latlon_cgrid.py:7748-7750`, struck in place from lines 7731 to
+implicit solver (`ocean_model_latlon_cgrid.py:7847-7849`, struck in place from lines 7731 to
 7733, which round 32 moved) and it carries u and v.  **P4b is REFUTED**: that vector is not NEMO's explicit stage update, and
 not by a little — `4.269765124169735e-04` on u, which is the size of the
 FIELD, not of a residual.
@@ -6460,7 +6460,7 @@ residual, which is the check.
 **THE OWNER: the ORDER of the barotropic correction relative to the solve.**
 Read on both sides before it was measured.  legoESM applies NEMO's correction
 to the stage-3 velocity BEFORE the implicit solve
-(`ocean_model_latlon_cgrid.py:6315-6318` — the line numbers ROUND 32 MOVED,
+(`ocean_model_latlon_cgrid.py:6414-6417` — the line numbers ROUND 32 MOVED,
 struck in place from the range round 31 cited, lines 6300 to 6321, which is
 rendered without backticks here because a struck citation is not a claim about
 current code and the gate is right to refuse it as one; the code at the new
@@ -7231,7 +7231,7 @@ is the key_qco form, and the deck resolves `ln_dynadv_vec = T`
 (`round19_oracle_v2_external/ocean.output:798`) with `lk_linssh` `.FALSE.` in
 that build's own `dom_oce.f90`.  NEMO takes the VECTOR arm at all three stages
 on GYRE.  legoESM honoured that at stages 1 and 2
-(`ocean_model_latlon_cgrid.py:5922` and its two branch sites) and hardcoded the
+(`ocean_model_latlon_cgrid.py:6006` and its two branch sites) and hardcoded the
 key_qco ratios at stage 3.  A transcription defect, and it had a comment
 asserting the opposite.
 
@@ -7403,3 +7403,205 @@ the command that creates the record, and it refuses a round-29-only record
 rather than quietly rebuilding the divisor.  It states what it cannot see: the
 tanks' stage record carries `T`, `S`, `u` and `ssh` and no `v`, so only the u
 face is dischargeable there.
+
+**The exact commands, to be run by the user.**  The agent wrote them and
+stopped; no `makenemo`, no `mpirun`, no NEMO executable was run this round.
+
+```
+scripts/validate/ocean_fidelity/testcases/nemo_testcase_l1_tanks_round33_zdf/run.sh LOCK_EXCHANGE
+scripts/validate/ocean_fidelity/testcases/nemo_testcase_l1_tanks_round33_zdf/run.sh OVERFLOW
+```
+
+Each builds `tests/<CARD>_OMIP_L1_P3_R33ZDF`, runs it into
+`round33_<card>_zdf_matrix`, checks the twin byte-identity, and then runs the
+discharge and its plant itself.  Afterwards the discharge alone is one command
+per card:
+
+```
+python scripts/validate/ocean_fidelity/testcases/nemo_testcase_l1_tanks_round33_zdf_rule12.py --card LOCK_EXCHANGE
+python scripts/validate/ocean_fidelity/testcases/nemo_testcase_l1_tanks_round33_zdf_rule12.py --card OVERFLOW
+```
+
+### Independent review — two fresh agents, both productive, neither shown the other
+
+Codex is unavailable on this account, so the mandatory DUAL adversarial review
+ran as two fresh independent agents: one on the CLAIM, before a line of model
+code moved, and one on the DIFF, after.
+
+**The CLAIM reviewer verified every citation line for line** -- the selector
+at `stprk3_stg.F90:365`, CASE(3) at `:395` doing no stepping, the same
+selector at `dynzdf.F90:119`, and `lk_linssh = .FALSE.` in all three builds'
+own `dom_oce.f90` -- and it verified there is no omitted operator between the
+RHS boundary and the stage update on GYRE (`zdf_drg_exp` is skipped under
+`ln_drgimp = T`, `ln_zdfosm` and `ln_bdy` are both false).  Then it broke
+three things.  It REFUTED P2a's mechanism by measuring that today's stage-3
+peak is already `0.9406` of `rDt` times the RHS residual on u and `0.9476` on
+v -- one mechanism explains both, and the registered "6.1 per cent baroclinic
+fraction" is a back-fit that gives `6.07` per cent on u and `2.70` on v.  It
+showed P2a could then not fail, which bought the P2e companion.  It showed
+P4a was half vacuous because `uu_Kbb_in` is identically zero.  And it withdrew
+P1's `+/-50` per cent window as unjustified, which is why the confirmation
+above is quoted at `2.4e-11` relative instead of "within the window".
+
+**The DIFF reviewer found two things that would have shipped.**  It measured
+that the Rule-12 discharge was CIRCULAR -- both sides the same expression on
+the same operands -- and that is why the discharge is now the composition
+against `uu_Kaa_pre`.  And it defeated the structural checker with five
+mutations, one of which (`_vector_velocity_stage_update = False`, one inserted
+line) replants the entire defect this round fixed.  All five are tests now and
+all five go red.  It also confirmed, by measurement, that all five refactored
+arms are bitwise identical to the old inline expressions and that association
+genuinely matters here (`((dt*q)*r)` differs from `(dt*(q*r))` by `5.55e-17`),
+that no private hook regresses on the new shape validation, and that the
+Fortran patch's six new labels are all exactly sixteen characters -- a short
+one desynchronises the self-describing stream.
+
+Its four smaller findings, adopted: one tautological assertion dropped; the
+stale-comment test now says out loud that it would pass with the code fully
+reverted; and two `run.sh` weaknesses are recorded rather than silently kept
+-- a `sha256sum -c` that cannot fail because it checks a manifest generated
+from the same files one line earlier, and an add-only check whose `^-[^-]`
+pattern misses the deletion of a BLANK line.  Both are fixed.
+
+NOT adopted, and why: it argued the tank reader's byte layout is only READ
+against a Python re-implementation of the patch and never measured.  True, and
+it cannot be measured until the acquisition runs -- that is exactly why the
+reader fails closed and why the sixteen-character check exists.  Recorded as a
+limitation of item 3, not as a defect in it.
+
+### Rule-11 records
+
+**P2a's registered mechanism is RETRACTED**, and it was retracted in an
+addendum committed BEFORE the AFTER arm ran, not afterwards.  The surviving
+kt=1 stage-3 velocity error is not "the qco term's baroclinic remainder"; it
+is the `dt`-times-RHS roundoff, and the qco term contributes essentially
+nothing to the OUTPUT because `r3u` carries no level index and
+`stprk3_stg.F90:440,444-445` removes its column mean.  The prediction that
+followed from it -- that the output would barely move -- was right for the
+corrected reason.
+
+**P1's `+/-50` per cent window is WITHDRAWN as unjustified.**  With
+`uu_Kbb` identically zero the residual is cell-by-cell and there is no sum
+anywhere, so the max is `rDt` times the RHS max to a few ulp.  Measured at
+`2.4e-11` relative on u.
+
+**The first Rule-12 discharge was CIRCULAR and is RETRACTED**, replaced by the
+composition against `uu_Kaa_pre`.  Its remaining hole, stated: the composed
+row can be defeated only by compensating errors ACROSS the three transcribed
+statements, because the calibration pins the chain rather than each statement
+on its own.
+
+**A test claim retracted mid-writing**: that NEMO's `r1_hu_0` must differ from
+`1/hu_0`.  On both tanks it is exactly equal.
+
+**Round 32's `kt2` table mixed absolute and normalized quantities**, and its
+sentence comparing `T` to the velocity rows is withdrawn.
+
+### Tests
+
+`tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round33_stage_arm.py` (22):
+14 are synthetic-violation arms -- stage 3 reverted to the qco form, a stage
+pinned to one arm, a swapped stage time level, a wrong timestep, a wrong RHS,
+the selector rebound to a constant, an in-place reweighting after the call, a
+local shadow of the helper, a dead stage-3 call, swapped entry velocities, a
+one-ulp bump and a dropped before-velocity on the operator, a collapsed
+selector, and a swapped Kmm/Kaa ratio pair.
+
+`tests/ocean/fidelity/test_nemo_testcase_l1_tanks_round33_zdf_rule12.py` (14):
+the tank reader driven END TO END on a synthetic record in the instrument's
+exact binary layout, built by INVERTING the operator so the answer must come
+back equal to its input; a planted unit offset and a planted 1 nm/s barotropic
+target that both turn it red; the round-29-only refusal; the fail-closed path;
+the geometry round trip against an independent construction; and a check that
+both Fortran patches only ADD, stack cleanly, and label every array with
+exactly sixteen characters, plus a non-vacuity arm proving the add-only
+pattern can fire on a deleted BLANK line, which is the case the pattern the
+review defeated could not see.
+
+These tests stub the worktree stamp.  The stamper REFUSES a dirty tree, which
+is right for a gate producing an artifact and wrong for a unit test -- it made
+every arithmetic assertion fail for a reason that has nothing to do with the
+arithmetic, which is the same accident that cost round 32 four gate results.
+The stamp is exercised when the gate really runs; here only its presence in
+the report is asserted.
+
+`tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round32_ordering.py` (21):
+one new arm for the mask shape validation item 1(h) added.
+
+### Merge readiness
+
+`03c6e8d96ff7` remains an ancestor of this branch, so the integration is still
+a FAST-FORWARD with zero conflicts by construction.  What blocks it after this
+round:
+
+1. **GYRE's `kt2` `T`/`S`/`u`/`v` rows still fail.**  The velocity rows improved
+   by `1.6` and `2.4` per cent and the first-over-bar did not move.  `T` and
+   `S` did not move by a single bit, measured cell by cell, and they are now
+   the LARGEST `kt2` rows in absolute terms -- `3.20e-11` K against `2.75e-12`
+   m/s -- which round 32's mixed-units table had hidden.
+2. **Round 30's `dyn_ldf` fix still carries an OPEN Rule-12 eligibility**,
+   unchanged: discharged on no card and not dischargeable on any card that
+   exists today.
+3. **Round 32's ordering fix is discharged on GYRE ONLY**, and the acquisition
+   that would discharge it on the two tanks is written and NOT run.  Two
+   commands, above.
+4. **This round's fix is discharged BIT FOR BIT on GYRE, the only card that
+   executes it**, and measured NOT REACHED on both tanks by a bit-identical
+   10-step trajectory.  ORCA2 stays UNMEASURED.
+5. **24 worsened trajectory rows**, 5 of them above the `1e-6` relative
+   threshold, all at `kt >= 3`, with a boundary and a named owner; plus round
+   32's 22, of which 14 worsened further and 8 improved.
+6. **The shared oracle-relative move gate still FAILS on GYRE** on its cell
+   criterion, at `3.003e+08` row-scale ulps against a 2-ulp bar -- `35x` less
+   than round 32's `1.063e+10`, which is a direction and not a pass.
+
+### Open questions
+
+0. **`kt2`'s `T` residual, `3.1956659540810506e-11` K absolute, and `S`'s
+   `8.1712414612411521e-13` psu**, both bit-for-bit unchanged by this round AND
+   by round 32, and now the largest `kt2` rows.  Their owner is not the
+   velocity: measured, a `9.5e-07` change in `kt=1`'s final `u` moved neither
+   by a single cell.  The discriminating measurement is registered: score
+   `kt=1`'s `T` and `S` at stages 1, 2 and 3 and report the FIRST stage over
+   bar.
+1. **The `dyn_zdf` entry residual is now `rDt` times the stage-3 RHS
+   residual**, `2.9684798833066247e-12` on u.  Closing it means closing the
+   RHS residual itself, which is AT-BAR at `2.06e-16` -- i.e. there is no
+   entry-side work left at this boundary.
+2. **The tanks' Rule-12 discharge for round 32's operator**, one command each
+   once the acquisition has run.
+3. **Round 30's `dyn_ldf` Rule-12 row** and the three pieces of work round 31
+   priced for it.
+4. **ORCA2 has no card on this branch.**  The two-frame specification is
+   recorded in the round-32 manifest and unchanged.
+5. **The worsened trajectory rows**, this round's 24 and round 32's 22.
+6. **Decision 16**, still an open card-identity gap.
+7. **Decision 17's guard**, untouched by instruction.
+8. **The slow forcing's depth average** still uses the min rule where NEMO
+   uses the area-weighted mean; `3.06e-08` at `kt=2`, unchanged.
+9. **Two association rows on the barotropic correction's divisor**: the
+   operator DIVIDES by a column depth where NEMO MULTIPLIES by the precomputed
+   `r1_hu_0` (`domain.F90:159`), and on GYRE that depth is REBUILT because
+   `mesh_mask.nc` carries no `hu_0`.  The tank records will carry NEMO's own
+   `hu_0` and `r1_hu_0`, so the tank discharge reconstructs nothing; GYRE's
+   still does.  Changing the shared operator to multiply is a separate change
+   with its own discharge and is not taken here.
+10. **Rounds 1-24 of this receipt remain UNAUDITED** by the citation gate.
+
+### ASKED / UNASKED
+
+| choice | disposition |
+|---|---|
+| route the stage-3 momentum update through the same `ln_dynadv_vec .OR. lk_linssh` selector stages 1 and 2 already use | not a scientific choice; it is what `dynzdf.F90:119` says, and it is the round's assignment |
+| extract one module-level helper carrying both arms rather than a second inline branch | not a scientific choice; Rule 12 cannot be discharged on a closure, and the sibling `rk3_stage_barotropic_correction` set the pattern |
+| do NOT add `umask` to the key_qco arm although NEMO's has one | ASKED; legoESM masks after the barotropic correction instead and that is bit-identical, so adding it would be a second change in one commit.  Named, not taken |
+| replace the circular Rule-12 discharge with the composition against `uu_Kaa_pre` | not a scientific choice; the first version could not fail, which a review measured |
+| dump NEMO's own `e3u_0`/`hu_0`/`r1_hu_0` in the tank instrument rather than rebuild them | not a scientific choice; LOCK's `mesh_mask.nc` carries no `e3*_0` at all, so the rebuild is impossible there |
+| do NOT change the shared operator to MULTIPLY by `r1_hu_0` | ASKED; it is a change to a shared operator on all four cards with its own discharge, and it would move GYRE's numbers.  Open question 9 |
+| do NOT touch the decision-17 guard, the demo card, or the tanks' `zdf_baroclinic_only` flag | ASKED; instructed, and unchanged |
+| a detached BEFORE probe worktree for the OVERFLOW arm instead of a temporary revert | ASKED; the same disposition round 32 recorded |
+| shipped NEMO edit, `makenemo`, `mpirun`, push, merge, deletion | forbidden; none performed |
+
+UNASKED list: empty.
+
+Every figure above is pinned in `manifests/nemo_testcase_l2_gyre_round33.json`.

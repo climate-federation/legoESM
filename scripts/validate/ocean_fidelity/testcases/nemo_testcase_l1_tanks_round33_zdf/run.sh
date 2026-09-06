@@ -112,7 +112,9 @@ if ! patch -s "$dry/dynzdf.F90" <"$ZDF_PATCH" >/dev/null 2>&1 \
 fi
 rm -rf "$dry"
 for patch_file in "$ZDF_PATCH" "$REFGEOM_PATCH"; do
-  if [[ $(grep -c '^-[^-]' "$patch_file") -ne 0 ]]; then
+  # '^-[^-]' would MISS a deleted BLANK line, which a unified diff emits as a
+  # bare '-'.  Match every removal line and exclude only the '---' file header.
+  if [[ $(grep -c '^-' "$patch_file") -ne $(grep -c '^---' "$patch_file") ]]; then
     printf 'REFUSE: %s deletes or changes a shipped line; it must only ADD\n' \
       "$patch_file" >&2
     exit 67
@@ -195,7 +197,13 @@ cp "$work_manifest"/*.sha256 "$TARGET_RUN/"
   cd "$TARGET_RUN"
   sha256sum namelist_cfg namelist_ref context_nemo.xml file_def_nemo-oce.xml \
     iodef.xml >prepared_files.sha256
-  sha256sum -c prepared_files.sha256
+  # Verifying that manifest against the files it was just generated from could
+  # never fail.  Compare the COPIES against the source run's originals, which
+  # is the thing that can actually be wrong.
+  for name in namelist_cfg namelist_ref context_nemo.xml \
+    file_def_nemo-oce.xml iodef.xml; do
+    cmp "$SOURCE_RUN/$name" "$name"
+  done
   export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
   export PATH=/home/dbalwada/miniconda3/envs/nemo-build/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
   printf 'RUN_STARTED_UTC=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >run.user.time.log

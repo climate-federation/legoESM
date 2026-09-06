@@ -242,6 +242,21 @@ def _write_synthetic_record(path: Path, case: str, field_f, target_f,
                 np.asarray(values, dtype="<f8").ravel(order="F")).tobytes())
 
 
+@pytest.fixture(autouse=True)
+def _stamp_does_not_depend_on_the_working_tree(monkeypatch):
+    """Let these tests run on a tree that is mid-edit.
+
+    ``run`` stamps the worktree and the stamper REFUSES a dirty tree, which is
+    right for a gate producing an artifact and wrong for a unit test: it made
+    every arithmetic test below fail for a reason that has nothing to do with
+    the arithmetic.  Round 32 lost four gate results to exactly that.  The
+    stamp itself is exercised when the gate really runs, on a clean tree; here
+    it is stubbed and only its PRESENCE in the report is asserted.
+    """
+    monkeypatch.setattr(GATE, "worktree_stamp",
+                        lambda *a, **k: {"stubbed_by_the_unit_test": True})
+
+
 def _synthetic_root(tmp_path: Path, card: str, *, perturb_target=False) -> Path:
     """A record whose operator output IS the tank's own stage-3 velocity.
 
@@ -290,6 +305,7 @@ def test_the_gate_runs_end_to_end_on_a_synthetic_record(tmp_path, card,
     assert report["status"] == "AT-BAR"
     assert report["rows"][0]["exact"] is True
     assert report["card"] == card
+    assert "worktree" in report
     # the report must SAY what it could not measure, not omit it
     assert any("v face" in line for line in report["unmeasured"])
     # nothing is reconstructed any more: the geometry comes from the record
@@ -325,6 +341,36 @@ def test_the_gate_fails_closed_before_the_acquisition_has_run(tmp_path,
     message = str(excinfo.value)
     assert "UNMEASURED" in message
     assert "nemo_testcase_l1_tanks_round33_zdf/run.sh OVERFLOW" in message
+
+
+def test_the_add_only_check_can_fire_on_a_deleted_blank_line():
+    """The DIFF review's finding: ``^-[^-]`` misses a bare ``-``.
+
+    A unified diff emits a deleted BLANK line as a single ``-``, so the old
+    pattern classified it as "adds only".  This drives the SAME shell
+    expression run.sh uses, on a patch that deletes one blank line, and it
+    must count as a deletion.
+    """
+    import subprocess
+
+    patch_text = ("--- a\n+++ b\n@@ -1,3 +1,3 @@\n line one\n-\n+added\n"
+                  " line three\n")
+    scratch = tmp = Path(__file__).parent / "_r33_addonly_probe.patch"
+    try:
+        scratch.write_text(patch_text)
+        minus = subprocess.run(["grep", "-c", "^-", str(scratch)],
+                               capture_output=True, text=True).stdout.strip()
+        header = subprocess.run(["grep", "-c", "^---", str(scratch)],
+                                capture_output=True, text=True).stdout.strip()
+        assert int(minus) != int(header), (
+            "a deleted blank line must be counted as a deletion")
+        # and the pattern the review defeated does NOT see it
+        old_pattern = subprocess.run(["grep", "-c", "^-[^-]", str(scratch)],
+                                     capture_output=True, text=True)
+        assert old_pattern.stdout.strip() == "0"
+    finally:
+        if scratch.exists():
+            scratch.unlink()
 
 
 def test_the_acquisition_script_refuses_without_a_card():
