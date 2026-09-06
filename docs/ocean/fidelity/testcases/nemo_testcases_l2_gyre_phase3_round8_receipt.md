@@ -5337,8 +5337,11 @@ card is NOT changed — that is a user decision, and it is open question 3.
 
 ### Merge readiness
 
-`fidelity/nemo-testcases-l2-gyre-codex2` is **82 commits ahead of**
-`03c6e8d96ff7`, which is the tip of BOTH
+`fidelity/nemo-testcases-l2-gyre-codex2` was **78 commits ahead of**
+`03c6e8d96ff7` at round 28's starting tip `359c33c40ecc`, and round 28 adds
+its own commits on top of that — stated this way because a count "at HEAD"
+changes the moment the sentence recording it is committed, which is how round
+27's "74" went stale.  `03c6e8d96ff7` is the tip of BOTH
 `origin/fidelity/nemo-gyre-integration-merge` and
 `origin/fidelity/nemo-testcases-l2-gyre-reconciled`, and is an ANCESTOR of
 this branch (`git merge-base --is-ancestor` returns true).  The integration is
