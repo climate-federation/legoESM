@@ -8787,26 +8787,40 @@ operator.
 
 | card | first over bar BEFORE | first over bar AFTER |
 |---|---|---|
-| GYRE-zco | kt=2, T S u v | recorded in the follow-up commit |
+| GYRE-zco | kt=2, T S u v | kt=2, T S u v |
 | LOCK_EXCHANGE-zco | kt=4, u | kt=4, u |
-| OVERFLOW-zps | kt=2, T u | recorded in the follow-up commit |
+| OVERFLOW-zps | kt=2, T u | kt=2, T u |
 
-Those two AFTER runs measure the commit this section is PART of, so they are
-recorded in the follow-up commit rather than predicted here: the stamp
-ratchet refuses to stamp a dirty tree, which is why they could not be taken
-before it.
+BEFORE is stamped `e6ef14d5d4f0`, AFTER `95ebc9a91b67` (LOCK) and
+`89630cb22155` (GYRE, OVERFLOW).  The commits between those and the operator
+change are the citation map and this receipt; no numerics moved in them.
+The stamp ratchet refused every AFTER run taken on a dirty tree, which is why
+they are stamped at the commit and not before it.
 
-The first-over-bar step does not move on the card already measured, which is
-what a change of this size should do: it removes a handful of ULPs from ONE stage-3 statement
+The first-over-bar step does not move on any card, which is what a change of
+this size should do: it removes a handful of ULPs from ONE stage-3 statement
 on a trajectory whose kt=2 divergence is owned by `tra_zdf`, measured above.
 Reporting it as an improvement would have been a confound.
 
 ### Evidence
 
-Under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round36/`, with
-`round36_evidence.sha256` over every file; and
+Under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round36/`,
+`round36_evidence.sha256` over its 20 files, itself
+`60e3b5f65b3046c6c6e8e2b86a2def9320b138939734fbf5b21d0248e7d025fd`; and
 `round35_oracle_trazdf_matrix/round35_outputs.sha256` over the acquisition's
 57 files, written as `run.sh` would have.
+
+The full ocean fidelity suite is 972 passed, 7 skipped, 0 failed
+(`tests/ocean/fidelity/` plus `tests/ocean/unit/test_zdf_implicit_literal.py`).
+Six of those went red mid-round for one reason, and it is worth recording
+because it looked like six defects: the stamp ratchet refuses to stamp a
+dirty tree, so every gate that stamps fails while an edit is uncommitted.
+Four of them were the citation gate, whose real complaint arrived only after
+the commit.
+
+One detached probe worktree is flagged: `/tmp/codex-gyre-r36-before` at
+`e6ef14d5d4f0`, used to take the BEFORE trajectories against the pre-change
+operator.
 
 ### What is open
 
