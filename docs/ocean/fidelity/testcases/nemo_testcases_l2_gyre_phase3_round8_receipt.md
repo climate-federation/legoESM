@@ -7968,7 +7968,7 @@ exonerated twice over, by its own zero and by the accumulator's verdict.**
 **THE CAUSAL INJECTION ARM IS UNINFORMATIVE AND IS NOT QUOTED AS EVIDENCE.**
 The gate also feeds a pre-ZDF seed RECONSTRUCTED from NEMO's dumped `Kbb`
 tracers, its post-`tra_ldf` tracers and its three `r3t` stretches
-(`nemo_testcase_l2_gyre_stage3_completion_gate.py:147-157`,
+(`nemo_testcase_l2_gyre_stage3_completion_gate.py:147-156`,
 `((1+r3t_Kbb)*T_Kbb + dt*(1+r3t_Kmm)*T_after_ldf)/(1+r3t_Kaa)`) into legoESM's
 solve and scores the result -- **it is not a dumped array of NEMO's, and round
 38 renamed it**; calling it "NEMO's own accumulator" credited a

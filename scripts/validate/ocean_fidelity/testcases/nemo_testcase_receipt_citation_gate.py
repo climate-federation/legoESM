@@ -177,10 +177,12 @@ CITATION_MAP = {
     # recipe -- the retraction of round 37's "a lever nothing selects".
     'dino.py:1677': ('"tracer_combine": "thickness_weighted",', 1),
     'dino.py:3605': ('tracer_combine=cfg.tracer_combine,', 1),
-    'nemo_testcase_l2_gyre_stage3_completion_gate.py:147-157': [
+    # A bare '}' is the eighth-most-common line in that file, so the endpoint
+    # is the last SUBSTANTIVE line of the reconstruction rather than its brace.
+    'nemo_testcase_l2_gyre_stage3_completion_gate.py:147-156': [
         ('def _oracle_pre_zdf(record: dict, nlev: int, dt: float) -> dict[str, np.ndarray]:', 1),
-        ('}', 1),
-        11],
+        ('for name in ("T", "S")', 1),
+        10],
     # --- round 35 citations: the implicit vertical TRACER solve ---
     # The build guard that makes salinity reuse temperature's matrix.
     'trazdf.F90:159-160': [
