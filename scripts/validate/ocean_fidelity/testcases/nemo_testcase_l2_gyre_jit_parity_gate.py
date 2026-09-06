@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 from nemo_testcase_l2_gyre_phase3_gate import CASE, _surface_forcings
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 MODES = (
     "eos_prd", "hpg", "vorticity", "advection", "stage2_kaa",
@@ -158,6 +159,7 @@ def run(mode: str, output: Path, plant: bool = False) -> dict:
         rows[0] = _score(rows[0]["name"], eager[rows[0]["name"]], planted)
     passed = all(row["max_ulp_delta"] <= 2 for row in rows)
     report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l2-gyre-jit-parity-v1",
         "case": CASE,
         "mode": mode,

@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 
 def git_sha(*, allow_dirty: bool = False) -> str:
@@ -446,6 +447,7 @@ def run(
                 "one_variable_controls": controls,
             }
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-phase3-trajectory-v1",
         "legoesm_git_sha": legoesm_git_sha,
         "case": case,

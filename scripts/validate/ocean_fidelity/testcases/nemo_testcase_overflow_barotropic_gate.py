@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 BAR = 1.0e-15
 # Defaults are the OVERFLOW card this gate was written for.  Both are
@@ -654,6 +655,7 @@ def run(
         artifacts["pytest_log"] = {"path": str(pytest_log), "sha256": sha256(pytest_log)}
 
     report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-overflow-barotropic-gate-v1",
         "case": CASE,
         "status": status,
@@ -883,6 +885,7 @@ def run_kt_walk(kt: int, oracle_root: Path, entry_root: Path, *,
             "normalized_max_abs": row["normalized_max_abs"]}
 
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-overflow-barotropic-kt-walk-v1",
         "case": CASE,
         "kt": kt,

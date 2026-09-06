@@ -18,6 +18,7 @@ from pathlib import Path
 
 import jax
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 HERE = Path(__file__).resolve().parent
 PHASE3_PATH = HERE / "nemo_testcase_l2_gyre_phase3_gate.py"
@@ -124,6 +125,7 @@ def run(root: Path, *, plant: bool = False) -> dict:
         )
     failed = [row["name"] for row in rows if row["status"] != "AT-BAR"]
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l2-gyre-stage-ww-v1",
         "case": phase3.CASE,
         "status": "AT-BAR" if not failed else "DEBT",

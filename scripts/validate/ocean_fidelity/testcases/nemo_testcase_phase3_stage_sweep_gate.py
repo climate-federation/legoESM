@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 
 BAR = 1.0e-15
@@ -1271,6 +1272,7 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
         require(case == "OVERFLOW-zps",
                 "--plant-prediction needs the OVERFLOW prediction rows")
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-phase3-stage-sweep-v1",
         "case": case,
         "status": "AT-BAR" if not failed else "DEBT",

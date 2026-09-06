@@ -22,6 +22,7 @@ from nemo_testcase_l2_gyre_phase3_gate import (
     sha256,
 )
 from nemo_testcase_state_ulp_probe import ulp_distance
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 
 ORACLE_ROOT = Path(
@@ -212,6 +213,7 @@ def run_transport_operands(oracle_root: Path, *, plant: bool = False) -> dict:
         row["jax_jit_fortran_association_vs_oracle"]["bit_exact"]
         for row in rows.values())
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l2-gyre-round13-transport-operands-v1",
         "status": "AT-BAR" if exact else "DEBT",
         "regime": "production-jit-cpu-fp64-x64",
@@ -334,6 +336,7 @@ def run_transport_candidate(oracle_root: Path, *, plant: bool = False) -> dict:
         }
     exact = all(row["zF"]["bit_exact"] for row in rows.values())
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l2-gyre-round13-transport-candidate-v1",
         "status": "AT-BAR" if exact else "DEBT",
         "regime": "production-jit-cpu-fp64-x64",
@@ -630,6 +633,7 @@ def run(oracle_root: Path, control_root: Path, *, plant: bool = False) -> dict:
         for cell in cells for values in cell["fields"].values()
     })
     report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l2-gyre-round13-tracer-v1",
         "status": "AT-BAR" if not differing else "DEBT",
         "regime": "production-jit-cpu-fp64-x64",

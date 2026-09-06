@@ -19,6 +19,7 @@ from nemo_testcase_l2_gyre_phase3_gate import (
     require,
     score,
 )
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 
 def run(*, plant: bool = False, only: str | None = None) -> dict:
@@ -156,6 +157,7 @@ def run(*, plant: bool = False, only: str | None = None) -> dict:
         }
 
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l2-gyre-round9-selector-arms-v1",
         "case": CASE,
         "execution_regime": "production_jit",

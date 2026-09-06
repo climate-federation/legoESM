@@ -48,6 +48,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 CASE = "OVERFLOW-zps"
 LOCK = "LOCK_EXCHANGE-zco"
@@ -230,6 +231,7 @@ def census(*, max_kt: int, out_dir: Path, allow_dirty: bool) -> dict:
     artifacts = {}
 
     report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-phantom-census-v1", "case": CASE,
         "legoesm_git_sha": legoesm_git_sha, "backend": jax.default_backend(),
         "dtypes": dtypes, "dt_s": card.dt_s, "artifacts": artifacts,
@@ -407,6 +409,7 @@ def scaling(*, kts, out_dir: Path, allow_dirty: bool) -> dict:
                 "argmax": [int(v) for v in idx], "faces": faces}
 
     report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-phantom-scaling-v1", "case": CASE,
         "legoesm_git_sha": legoesm_git_sha, "backend": jax.default_backend(),
         "dtypes": dtypes, "dt_s": card.dt_s, "artifacts": artifacts,

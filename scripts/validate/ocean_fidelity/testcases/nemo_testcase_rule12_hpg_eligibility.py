@@ -79,6 +79,7 @@ from nemo_testcase_phase3_stage_sweep_gate import (
     score,
     sha256,
 )
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 
 # The NEMO build tree.  Each card's PREPROCESSED source -- the code the card
@@ -467,6 +468,7 @@ def run(case: str, root: Path, *, plant: bool = False,
     else:
         status = "VALUE-AT-BAR"
     report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-rule12-hpg-eligibility-v1",
         "case": case,
         "status": status,

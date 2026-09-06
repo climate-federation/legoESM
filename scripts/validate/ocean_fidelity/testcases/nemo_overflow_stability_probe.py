@@ -28,6 +28,7 @@ from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
 )
 from legoesm.ocean.fidelity.nemo_testcase_recipe import build_overflow_zps_card
 from legoesm.ocean.vertical import compute_layer_thickness
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -332,6 +333,7 @@ def overflow_resolved_coverage(
         })
     unmeasured = [row["key"] for row in rows if row["status"] == "UNMEASURED"]
     report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-overflow-resolved-coverage-v1",
         "git_sha": git_sha(),
         "case": "OVERFLOW-zps",
@@ -487,6 +489,7 @@ def run_legoesm(output: Path, arm: str, end_step: int, capture_start: int) -> di
         state = model.step(state, dt=card.dt_s)
 
     artifact = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-overflow-stability-run-v1",
         "git_sha": git_sha(),
         "case": "OVERFLOW-zps",
@@ -598,6 +601,7 @@ def paired_step_scale(
         )
         rows.append(row)
     report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-overflow-stability-paired-scale-v1",
         "git_sha": git_sha(),
         "case": "OVERFLOW-zps",
@@ -656,6 +660,7 @@ def summarize_run(root: Path) -> dict:
             "last_twelve": raw[-12:],
         }
     report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-overflow-stability-run-summary-v1",
         "git_sha": git_sha(),
         "case": run["case"],
@@ -668,6 +673,7 @@ def summarize_run(root: Path) -> dict:
     output = root / "run_summary.json"
     output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print(json.dumps({
+        "worktree": worktree_stamp(),
         "format": report["format"],
         "arm": report["arm"],
         "first_nonfinite_completed_step": report["first_nonfinite_completed_step"],
@@ -691,6 +697,7 @@ def compare_arms(baseline_root: Path, arm_root: Path, output: Path) -> dict:
     refutes_primary = 2870 <= arm_fail <= 2884 and abs(movement) < 0.1 * base_fail
     verdict = "CONFIRMED" if supports else "REFUTED_PRIMARY" if refutes_primary else "PLAUSIBLE"
     report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-overflow-stability-arm-comparison-v1",
         "git_sha": git_sha(),
         "case": "OVERFLOW-zps",
@@ -748,6 +755,7 @@ def compare_primary_arm(baseline_root: Path, arm_root: Path, output: Path) -> di
     )
     verdict = "CONFIRMED" if supports else "REFUTED_PRIMARY" if refutes_primary else "PLAUSIBLE"
     report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-overflow-stability-primary-arm-v1",
         "git_sha": git_sha(),
         "case": "OVERFLOW-zps",
@@ -868,6 +876,7 @@ def classify_coverage_round(
             "BBL passed the scale gate; a full arm is required before closure")
 
     report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-overflow-coverage-round-verdict-v1",
         "git_sha": git_sha(),
         "case": "OVERFLOW-zps",
@@ -1102,6 +1111,7 @@ def score(
         })
         previous_errors = current_errors
     report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-overflow-stability-score-v1",
         "git_sha": git_sha(),
         "case": "OVERFLOW-zps",

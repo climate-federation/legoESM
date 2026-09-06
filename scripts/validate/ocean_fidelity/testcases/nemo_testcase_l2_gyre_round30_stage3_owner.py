@@ -48,6 +48,7 @@ from nemo_testcase_l2_gyre_phase3_gate import (
     sha256,
 )
 from nemo_testcase_l2_gyre_round29_zdf_matrix import read_zdf_matrix
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 ORACLE_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
@@ -155,6 +156,7 @@ def run(mode: str, oracle_root: Path, *, plant: bool = False) -> dict:
     status = "AT-BAR" if all(r["status"] == "AT-BAR" for r in rows) else "DEBT"
     exact = all(r["exact"] for r in rows)
     report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l2-gyre-round30-stage3-owner-v1",
         "case": CASE,
         "mode": mode,

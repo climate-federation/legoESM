@@ -37,6 +37,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 NEMO = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2")
 REPO = Path(__file__).resolve().parents[4]
@@ -627,6 +628,7 @@ def run(receipt: Path, heading: str, *, plant: str | None = None) -> dict:
     controls = self_test()
     control_failures = [row for row in controls if not row["fired"]]
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-receipt-citation-gate-v2",
         "receipt": str(receipt),
         "from_heading": heading,

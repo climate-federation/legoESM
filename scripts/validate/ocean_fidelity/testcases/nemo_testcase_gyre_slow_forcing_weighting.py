@@ -107,6 +107,7 @@ from nemo_testcase_l2_gyre_phase3_gate import (
     read_rhs,
     score,
 )
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 CASE = "GYRE-zco"
 ROOT = Path(
@@ -576,6 +577,7 @@ def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
     at_rest = {"kt1_entry_abs_max_u": float(np.max(np.abs(entry1["u"]))),
                "kt1_entry_abs_max_v": float(np.max(np.abs(entry1["v"])))}
     report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-gyre-slow-forcing-weighting-v1",
         "case": CASE,
         "legoesm_git_sha": legoesm_git_sha,

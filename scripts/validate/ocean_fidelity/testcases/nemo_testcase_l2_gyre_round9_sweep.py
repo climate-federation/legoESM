@@ -20,6 +20,7 @@ from nemo_testcase_l2_gyre_phase3_gate import (
     require,
     score,
 )
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 
 def run(*, support_gate: Path | None = None) -> dict:
@@ -78,6 +79,7 @@ def run(*, support_gate: Path | None = None) -> dict:
         lambda leaf: np.asarray(leaf) if isinstance(leaf, jax.Array) else leaf,
         state)
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l2-gyre-round9-jit-sweep-v1",
         "case": CASE,
         "execution_regime": "production_jit",

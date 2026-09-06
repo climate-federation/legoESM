@@ -18,6 +18,7 @@ from pathlib import Path
 
 import netCDF4
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 VALID = {"VERIFIED", "WAIVED", "UNMEASURED"}
 GROSS_TRACER_EXCESS_RELATIVE = 1.0e-6
@@ -200,6 +201,7 @@ def disposition_template(root: Path, case: str | None = None) -> dict:
                 )
             entries[namespace][name] = {"status": status, "reason": reason}
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-coverage-v1",
         "files": {
             "mesh": sha256(find_one(root, "mesh_mask*.nc")),

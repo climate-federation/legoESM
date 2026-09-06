@@ -25,6 +25,7 @@ import numpy as np
 import xarray as xr
 from nemo_testcase_l2_gyre_phase3_gate import read_qsr_stage3, read_tracer_stage3
 from nemo_testcase_l2_gyre_round15_eligibility import _candidate, _read_sbc
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 F64 = np.float64
 U64 = np.uint64
@@ -500,6 +501,7 @@ def run(oracle_root: Path, mesh_path: Path) -> dict[str, object]:
     h2_exp = not routing["exp_route_pass"]
     h2_sin_cos = not routing["sin_cos_route_pass"]
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l2-gyre-round16-discriminator-v1",
         "base_git_sha": "b9311e65de2b784b4f12c1ceffc4ad4e394b4e74",
         "regime": "production-jit/cpu/fp64/scalar-libm",

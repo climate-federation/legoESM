@@ -92,6 +92,7 @@ from nemo_testcase_overflow_barotropic_gate import (
     state_from_oracle_entry,
 )
 from nemo_testcase_rule12_hpg_eligibility import read_entry_full, read_rhs
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 CASE = "LOCK_EXCHANGE-zco"
 RHS_ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10")
@@ -317,6 +318,7 @@ def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
                       f"{reciprocal['absolute_max']!r})")
 
     report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-lock-slow-forcing-owner-v1",
         "case": CASE,
         "legoesm_git_sha": legoesm_git_sha,

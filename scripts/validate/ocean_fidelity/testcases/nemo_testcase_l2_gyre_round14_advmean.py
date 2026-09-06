@@ -36,6 +36,7 @@ from nemo_testcase_l2_gyre_phase3_gate import (
     sha256,
 )
 from nemo_testcase_state_ulp_probe import ulp_distance
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 
 ORACLE_ROOT = Path(
@@ -611,6 +612,7 @@ def run(
         raise AssertionError(
             "ordered one-ulp metric plant did not become first mismatch")
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l2-gyre-round14-advmean-v1",
         "status": "AT-BAR" if all_exact else "DEBT",
         "regime": "production-jit-cpu-fp64-x64",

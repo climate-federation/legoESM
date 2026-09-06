@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 BAR = 1.0e-15
 CASE = "GYRE-zco"
@@ -1160,6 +1161,7 @@ def run(
     # those hooks are intentionally run as separate boundary probes.
     if trajectory_only:
         return {
+            "worktree": worktree_stamp(),
             "format": "nemo-testcase-l2-gyre-phase3-trajectory-only-v2",
             "case": CASE,
             "status": (
@@ -2497,6 +2499,7 @@ def run(
         "AT-BAR" if first_over_bar is None
         and barotropic_state_first_over_bar is None else "DEBT")
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l2-gyre-phase3-v2",
         "case": CASE,
         "status": status,

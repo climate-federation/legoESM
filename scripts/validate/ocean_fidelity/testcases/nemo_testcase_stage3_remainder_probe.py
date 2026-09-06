@@ -44,6 +44,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 CASE = "OVERFLOW-zps"
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10")
@@ -415,7 +416,7 @@ def growth(*, max_kt: int, out_dir: Path, allow_dirty: bool, frames: bool) -> di
     def step(state):
         return model.step(state, dt=card.dt_s)
 
-    report = {"format": "nemo-testcase-l1-stage3-remainder-growth-v1", "case": CASE,
+    report = {"worktree": worktree_stamp(), "format": "nemo-testcase-l1-stage3-remainder-growth-v1", "case": CASE,
               "legoesm_git_sha": legoesm_git_sha, "backend": jax.default_backend(),
               "dtypes": dtypes, "dt_s": card.dt_s, "nlev": nlev, "max_kt": max_kt,
               "oracle_root": str(ROOT), "artifacts": artifacts, "arms": {}}
@@ -919,7 +920,7 @@ def candidates(*, out_dir: Path, allow_dirty: bool) -> dict:
                           "faces": {int(i): float(np.abs(resid_after_X1[i]).max()) for i in (18, 19, 20, 21, 22)}}
     print(f"[R - E(X1)] max {rows['R_minus_X1']['max_abs']:.3e}  faces {rows['R_minus_X1']['faces']}")
 
-    report = {"format": "nemo-testcase-l1-stage3-remainder-candidates-v1", "case": CASE,
+    report = {"worktree": worktree_stamp(), "format": "nemo-testcase-l1-stage3-remainder-candidates-v1", "case": CASE,
               "legoesm_git_sha": legoesm_git_sha, "backend": jax.default_backend(), "dtypes": dtypes,
               "dt_s": dt, "nlev": nlev, "oracle_root": str(ROOT), "artifacts": artifacts,
               "target_R": target, "controls": controls, "remainder_D_l": remainder, "candidates": rows,
@@ -1010,7 +1011,7 @@ def slow(*, out_dir: Path, allow_dirty: bool, kts=(2, 3, 4)) -> dict:
               f"faces {E[19]:+.2e}/{E[20]:+.2e}/{E[21]:+.2e}; corr {fit['corr']:+.5f} slope {fit['slope']:+.4f} "
               f"max|res-E| {rows[kt]['max_abs_residual_minus_E']:.3e}", flush=True)
         jax.clear_caches()
-    report = {"format": "nemo-testcase-l1-stage3-remainder-slow-v1", "case": CASE,
+    report = {"worktree": worktree_stamp(), "format": "nemo-testcase-l1-stage3-remainder-slow-v1", "case": CASE,
               "legoesm_git_sha": legoesm_git_sha, "backend": jax.default_backend(), "dtypes": dtypes,
               "artifacts": artifacts, "rows": rows,
               "prediction_convention": "E = h_u_pre-weighted depth mean of adv_lego(h_min(Kbb)) - adv_lego(e3u(Kbb)) on the exact NEMO entry"}

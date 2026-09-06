@@ -29,6 +29,7 @@ from nemo_testcase_l2_gyre_phase3_gate import (
     sha256,
 )
 from nemo_testcase_state_ulp_probe import ulp_distance
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 DEFAULT_ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round16_oracle_v2_slow_v2")
 
@@ -419,6 +420,7 @@ def run(
         raise AssertionError("planted e3 operand did not become the first mismatch")
 
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l2-gyre-round16-slow-forcing-v1",
         "status": "AT-BAR" if all_exact else "DEBT",
         "regime": "production-jit/cpu/fp64/libm",

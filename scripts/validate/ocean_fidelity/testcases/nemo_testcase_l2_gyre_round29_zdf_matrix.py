@@ -53,6 +53,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 MAGIC = "NEMO_L2_ZDFMX_1"
 BAR = 1.0e-15
@@ -301,6 +302,7 @@ def run(record: Path, *, plant: bool = False) -> dict:
 
     at_bar = all(row["status"] == "AT-BAR" for row in rows)
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l2-gyre-round29-zdf-matrix-v1",
         "case": CASE,
         "bar": BAR,

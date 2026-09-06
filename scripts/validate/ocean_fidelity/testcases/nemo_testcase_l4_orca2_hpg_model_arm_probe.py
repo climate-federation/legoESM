@@ -59,6 +59,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 COMPONENTS = ("sum_u", "sum_v", "zhpi_u", "zhpi_v", "zuap_u", "zuap_v")
 # nemo_hpg_sco_literal_cgrid(return_components=True) returns this order.
@@ -310,6 +311,7 @@ def run(oracle_root: Path, model_root: Path, *, plant: bool = False) -> dict:
     first = next((row["field"] for row in rows if row["status"] != "AT-BAR"),
                  None)
     report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l4-orca2-hpg-model-arm-probe-v1",
         "case": "ORCA2",
         "constants": {"g": gravity, "rho_0": rho_0_nominal,

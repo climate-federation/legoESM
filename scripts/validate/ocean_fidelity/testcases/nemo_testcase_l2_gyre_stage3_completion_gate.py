@@ -34,6 +34,7 @@ from nemo_testcase_l2_gyre_phase3_gate import (
     score,
     sha256,
 )
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 POST_TRA_ADV_TRP_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
@@ -622,6 +623,7 @@ def run(mode: str, output_npz: Path, faithful_npz: Path | None,
     arrays.update({f"oracle_pre_{name}": oracle_pre[name] for name in ("T", "S")})
     np.savez(output_npz, **arrays)
     report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l2-gyre-stage3-completion-v1",
         "case": CASE,
         "mode": mode,

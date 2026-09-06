@@ -11,6 +11,7 @@ from legoesm.ocean.fidelity.ulp_move_gate import (
     compare_gate_reports,
     load_residual_artifact,
 )
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 GATES = (
     "overflow_stage",
@@ -46,6 +47,7 @@ def run(root: Path) -> dict:
         ]
         results[name] = result
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-round16-crosscard-row-scale-rescore-v1",
         "criterion": "cellwise oracle-relative, row-scale float64 ulp",
         "row_scale_ulp_definition": (

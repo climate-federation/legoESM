@@ -19,6 +19,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from nemo_testcase_l2_gyre_phase3_gate import read_qsr_stage3, read_tracer_stage3
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 
 def _read_sbc(path: Path) -> dict[str, np.ndarray]:
@@ -285,6 +286,7 @@ def run(
 
     eligible = all(row["status"] == "BIT-EXACT" for row in rows["libm"])
     result = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l2-gyre-round16-eligibility-v2",
         "execution_regime": "production-jit/cpu/fp64",
         "oracle_root": str(oracle_root),

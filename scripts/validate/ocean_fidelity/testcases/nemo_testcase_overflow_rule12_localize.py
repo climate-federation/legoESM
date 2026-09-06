@@ -30,6 +30,7 @@ from legoesm.ocean.fidelity.ulp_move_gate import (
     compare_gate_reports,
     load_residual_artifact,
 )
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 
 class ProbeError(RuntimeError):
@@ -176,6 +177,7 @@ def localize(before_path: Path, after_path: Path, *, plant: bool) -> dict:
         "the seven rows no longer lie on OVERFLOW's sole wet interior row",
     )
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-overflow-rule12-localization-v1",
         "regime": "CPU production JIT, fp64, scalar-libm",
         "reference_report": {"path": str(before_path), "sha256": sha256(before_path)},

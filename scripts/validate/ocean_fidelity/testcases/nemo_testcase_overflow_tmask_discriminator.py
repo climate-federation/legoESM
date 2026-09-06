@@ -9,6 +9,7 @@ from pathlib import Path
 
 import netCDF4
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 DEFAULT_MESH = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/"
@@ -38,6 +39,7 @@ def run(mesh: Path, output: Path, plant: bool = False) -> dict:
     differing = np.argwhere(applied != oracle)
     wet_zeroed = oracle & ~applied
     report = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-overflow-tmask-discriminator-v1",
         "mesh_mask": str(mesh),
         "shape_jik": list(applied.shape),

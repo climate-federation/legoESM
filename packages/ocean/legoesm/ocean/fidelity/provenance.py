@@ -15,10 +15,14 @@ Harness glue, not model code (same home as ``precision_gate``).
 """
 from __future__ import annotations
 
+import hashlib
+import os
 import subprocess
 from pathlib import Path
 
-__all__ = ["git_sha"]
+ALLOW_DIRTY_ENV = "LEGOESM_GATE_ALLOW_DIRTY"
+
+__all__ = ["git_sha", "worktree_stamp"]
 
 
 def git_sha(*, allow_dirty: bool = False, repo: str | Path | None = None) -> str:
@@ -52,3 +56,58 @@ def git_sha(*, allow_dirty: bool = False, repo: str | Path | None = None) -> str
         f"({', '.join(line[3:] for line in dirty[:5])}); commit first or pass "
         "allow_dirty=True to stamp '<sha>-dirty'"
     )
+
+
+def worktree_stamp(*, repo: str | Path | None = None) -> dict:
+    """The full identity of the tree a gate report was produced from.
+
+    ``git_sha`` above answers "which revision", and it fails closed on tracked
+    dirt for exactly the right reason.  It does not answer "was ``HEAD`` even
+    describing this code" --- a worktree left DETACHED by another session
+    reports a perfectly valid SHA that names different source, and every gate
+    run in it emits a report that silently disagrees with its own stamp.  That
+    happened for most of a day during round 30.
+
+    So this returns the SHA plus the three things that distinguish the two
+    situations: the branch (or ``DETACHED``), whether the tree is clean, and,
+    when it is not, the SHA-256 of the full ``git diff HEAD`` so the exact
+    content that produced the numbers is pinned rather than described.
+    Detached is RECORDED, never refused --- the cross-card probe lanes are
+    deliberately detached worktrees, and a detached tree whose status is clean
+    has no ``HEAD``/code disagreement to hide.
+
+    Dirt refuses, through ``git_sha``'s own guard, unless
+    ``LEGOESM_GATE_ALLOW_DIRTY=1`` names the escape in the environment; the
+    escape suppresses nothing, it records ``clean: false`` and the diff hash.
+    """
+    tree = Path(repo) if repo is not None else Path(__file__).resolve().parent
+    allow_dirty = os.environ.get(ALLOW_DIRTY_ENV) == "1"
+    sha = git_sha(allow_dirty=allow_dirty, repo=tree)
+    clean = not sha.endswith("-dirty")
+    commit = sha[:-len("-dirty")] if not clean else sha
+
+    def _git(*args: str) -> str:
+        return subprocess.check_output(
+            ["git", "-C", str(tree), *args], text=True,
+            stderr=subprocess.DEVNULL)
+
+    branch = _git("rev-parse", "--abbrev-ref", "HEAD").strip()
+    dirty = sorted(
+        line[3:] for line in
+        _git("status", "--porcelain", "--untracked-files=no").splitlines()
+        if line.strip())
+    untracked = [line for line in
+                 _git("ls-files", "--others", "--exclude-standard").splitlines()
+                 if line.strip()]
+    return {
+        "root": str(tree),
+        "commit": commit,
+        "branch": "DETACHED" if branch == "HEAD" else branch,
+        "detached": branch == "HEAD",
+        "clean": clean,
+        "dirty_paths": dirty,
+        "diff_sha256": (None if clean else
+                        hashlib.sha256(_git("diff", "HEAD").encode()).hexdigest()),
+        "untracked_count": len(untracked),
+        "allow_dirty_escape_used": (not clean) and allow_dirty,
+    }

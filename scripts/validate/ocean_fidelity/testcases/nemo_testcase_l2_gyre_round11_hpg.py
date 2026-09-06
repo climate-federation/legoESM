@@ -26,6 +26,7 @@ from nemo_testcase_phase3_eos_gate import (
     parse_teos10_density_coefficients,
 )
 from nemo_testcase_state_ulp_probe import ulp_distance
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 ORACLE_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
@@ -290,6 +291,7 @@ def run_eos(oracle_root: Path, operand_npz: Path, plant: bool = False) -> dict:
         require(planted["status"] == "DEBT" and planted["absolute_max"] >= 1.0,
                 "planted EOS operand violation did not fire")
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l2-gyre-round12-eos-v1",
         "case": CASE,
         "status": (
@@ -420,6 +422,7 @@ def run(oracle_root: Path, operand_npz: Path, plant: bool = False) -> dict:
                 "planted HPG literal violation did not fire")
 
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l2-gyre-round11-hpg-v1",
         "case": CASE,
         "status": "DEBT",

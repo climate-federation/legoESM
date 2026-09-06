@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 BAR = 1.0e-15
 NEMO_EOS = Path(
@@ -201,6 +202,7 @@ def run(case: str, *, plant: bool = False) -> dict:
         )
     all_rows = rows + canonical_rows
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-phase3-eos-v1",
         "case": case,
         "status": "AT-BAR" if all(r["status"] == "AT-BAR" for r in rows) else "DEBT",

@@ -39,6 +39,7 @@ from pathlib import Path
 
 import jax.numpy as jnp
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 CASE = "OVERFLOW-zps"
@@ -530,6 +531,7 @@ def command_aimp_scaling(args) -> None:
             "implicit_w_changed_points": int(np.count_nonzero(new_wi != old_wi)),
         })
     payload = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-census-aimp-scaling-v1",
         "case": CASE,
         "git_sha": git_sha(),
@@ -617,6 +619,7 @@ def command_zdf_scaling(args) -> None:
             "ssh_after_difference_linf_m": float(np.max(np.abs(delta["ssh"]))),
         })
     payload = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-census-zdf-scaling-v1",
         "case": CASE,
         "git_sha": git_sha(),
@@ -762,6 +765,7 @@ def command_budget(args) -> None:
             rows.append(row)
         state = next_state
     payload = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-census-budget-v1",
         "case": CASE,
         "git_sha": git_sha(),
@@ -867,6 +871,7 @@ def command_run_arm(args) -> None:
     require(set(geometry_dtypes.values()) == {expected_dtype},
             f"geometry dtypes {geometry_dtypes}")
     metadata = {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-full-state-v1",
         "preregistration_commit": (
             OWNER_PREREG_COMMIT if args.arm == "bbl-reference"

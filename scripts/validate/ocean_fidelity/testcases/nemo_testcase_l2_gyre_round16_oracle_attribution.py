@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 PREFORCING_CONTROLS = {
     "oracle_bt_ene_coeff_kt00000001.bin",
@@ -149,6 +150,7 @@ def run(census: dict[str, object], *, plant: bool) -> dict[str, object]:
     }:
         raise AssertionError(f"unexpected attribution census counts: {counts}")
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l2-gyre-round16-v1-v2-attribution-v1",
         "plant": plant,
         "counts": counts,

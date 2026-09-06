@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 
 BAR = 1.0e-15
@@ -588,6 +589,7 @@ def run(
     stage_baro_u_error = stage_baro_u_row["normalized_max_abs"]
     full_u_error = full_u_row["normalized_max_abs"]
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-testcase-l1-phase3-first-divergence-v2",
         "case": card.case,
         "status": "AT-BAR" if not failed else "DEBT",

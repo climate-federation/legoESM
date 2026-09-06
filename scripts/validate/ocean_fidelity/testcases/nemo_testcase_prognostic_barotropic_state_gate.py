@@ -19,6 +19,7 @@ import struct
 from pathlib import Path
 
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 
 DEFAULT_ORACLE_ROOTS = {
@@ -173,6 +174,7 @@ def run(case: str, oracle_root: Path, *, plant: bool = False) -> dict:
             f"planted carried-state violation rejected ({rows[0]['unequal']} / "
             f"{rows[0]['n']})")
     return {
+        "worktree": worktree_stamp(),
         "format": "nemo-prognostic-barotropic-state-gate-v1",
         "status": "AT-BAR" if all(
             row["status"] in ("AT-BAR", "UNINFORMATIVE") for row in rows)
