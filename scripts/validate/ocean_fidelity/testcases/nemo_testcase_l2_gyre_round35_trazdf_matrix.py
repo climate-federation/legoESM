@@ -722,6 +722,14 @@ def _row_signature(report: dict) -> dict[str, tuple]:
     # made that plant read as landing nowhere.
     signature.update({row["name"]: (row["status"], row["max_abs"], 0)
                       for row in report["condition_rows"]})
+    # The ASSOCIATION rows are scored on the same 21120 cells as every other
+    # row -- they are REPORTED rather than gated, which is not the same thing
+    # as unscored.  Leaving them out made a plant that moves only an
+    # association row read as landing nowhere, exactly as the condition rows
+    # did before the line above.
+    signature.update({row["name"]: (row["status"], row["absolute_max"],
+                                    row["bit_unequal"])
+                      for row in report["rhs_association_sensitivity"]})
     return signature
 
 

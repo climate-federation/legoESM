@@ -333,7 +333,14 @@ bug is not a failure — but only if the five are written down.
 ## Rule 12 — A faithful fix may expose a compensating error; keep walking
 
 A change is eligible to land only if the changed operator is shown bit-exact
-given NEMO's own inputs on every card it touches. If such a change makes a card
+given NEMO's own inputs on every card it touches.
+
+**"DISCHARGED" IS RESERVED FOR BIT-EXACT — 0 cells unequal, not "inside the
+tolerance".** A row that is AT-BAR by a `1e-15` comparison while its own
+`exact` field is false is AT-BAR-NOT-EXACT, and saying DISCHARGED of it
+smuggles a tolerance into a bit-exactness claim. Two such rows survived three
+rounds in one campaign's receipt with their own tables contradicting the word
+beside them. If such a change makes a card
 worse against NEMO, that is a second error exposed: the fix stays, the worsened
 row enters that card's register as debt naming the boundary, and the next round
 walks it. Never reverted, never waived silently, never a per-card switch.

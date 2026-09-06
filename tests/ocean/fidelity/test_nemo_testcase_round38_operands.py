@@ -170,3 +170,75 @@ def test_the_fma_probe_carries_a_baseline_arm():
 @pytest.mark.parametrize("name", ["K", "K33", "dz", "e3w", "wet"])
 def test_every_plantable_operand_is_captured(name):
     assert name in M.PLANT_OPERANDS
+
+
+# --------------------------------------------------------------------------
+# The rounds-33/34 bookkeeping, each pinned so it cannot silently return
+# --------------------------------------------------------------------------
+import nemo_testcase_l2_gyre_round21_admission as A  # noqa: E402
+import nemo_testcase_l2_gyre_round35_trazdf_matrix as R35  # noqa: E402
+
+
+def test_every_source_citation_names_the_card_it_was_read_from():
+    """A bare ``MY_SRC/x.F90:123`` is not portable between cards.
+
+    Red before round 38: every value was an unqualified path, and the comment
+    above them claimed the writers sit at the same lines on every card.
+    """
+    unqualified = [magic for magic, where in A.SOURCES.items()
+                   if "OMIP" not in where]
+    assert unqualified == [], (
+        f"these citations name no card: {unqualified}")
+
+
+def test_the_zFw_waiver_does_not_publish_one_cards_line_numbers():
+    reason = A.UNDEFINED_SLOTS[("NEMO_L1_TRANSP_1", "zFw")]["reason"]
+    assert "Line numbers differ per card" in reason
+    # the tank numbers must no longer stand alone as THE citation
+    assert "on the L1 tank cards" in reason and "on the GYRE card" in reason
+
+
+def test_both_self_describing_magics_have_a_writer_and_a_parser():
+    for magic in A.SELF_DESCRIBING:
+        assert magic in A.SOURCES, f"{magic} names no writer"
+        assert magic in A.PARSERS, f"{magic} names no parser"
+
+
+def test_a_pending_plant_survives_a_record_it_cannot_parse(tmp_path):
+    """SYNTHETIC VIOLATION, from the other side.
+
+    A byte-identical record whose SELF_DESCRIBING body this reader cannot
+    decode used to raise BEFORE the plant landed, and run.sh would have read
+    the crash as 'the plant turned the gate red'.  It must now be skipped
+    loudly and the plant must go on to land somewhere.
+    """
+    baseline, candidate = tmp_path / "base", tmp_path / "cand"
+    for directory in (baseline, candidate):
+        directory.mkdir()
+    magic = sorted(A.SELF_DESCRIBING)[0]
+    # a header this reader accepts, followed by a body it cannot decode
+    body = magic.ljust(16).encode("ascii") + b"\x00" * 4 * A.SELF_DESCRIBING[magic]
+    body += b"\xff" * 64
+    for directory in (baseline, candidate):
+        (directory / "oracle_aaa_unreadable.bin").write_bytes(body)
+    report = A.run(baseline, candidate, identical=(), plant_consumed=True)
+    notes = [row for row in report["classified_changed_records"]
+             if "plant_forced_open_but_unreadable" in row]
+    assert notes, "the unreadable record was not reported"
+    # A plant that lands NOWHERE is still a violation, and that is the point:
+    # the run reports it instead of crashing.
+    assert any("plant was never applied" in v for v in report["violations"])
+
+
+def test_the_association_rows_are_inside_the_plant_signature():
+    """Red before round 38: a plant that moves only an association row read
+    as landing nowhere, exactly as the condition rows did before them."""
+    report = {
+        "calibration_rows": [], "given_inputs_rows": [], "clamp_rows": [],
+        "condition_rows": [],
+        "rhs_association_sensitivity": [
+            {"name": "assoc.T", "status": "VALUE-AT-BAR",
+             "absolute_max": 2.8e-14, "bit_unequal": 17}],
+    }
+    signature = R35._row_signature(report)
+    assert signature["assoc.T"] == ("VALUE-AT-BAR", 2.8e-14, 17)

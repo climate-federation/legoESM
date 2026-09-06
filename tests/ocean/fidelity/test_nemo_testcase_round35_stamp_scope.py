@@ -29,8 +29,14 @@ from legoesm.ocean.fidelity.provenance import (
 )
 
 REPO = Path(__file__).resolve().parents[3]
+# The ratchet's scope is the DRIVERS *and* the shared module they all call.
+# It saw only the scripts directory, so the six comparison reports written by
+# ``ulp_move_gate`` -- the module every one of those drivers routes through --
+# were outside it and went unstamped.
 DRIVERS = sorted(
     (REPO / "scripts/validate/ocean_fidelity/testcases").glob("*.py"))
+SHARED_FIDELITY = sorted(
+    (REPO / "packages/ocean/legoesm/ocean/fidelity").glob("*_gate.py"))
 
 
 @pytest.fixture(autouse=True)
@@ -117,7 +123,7 @@ def test_every_driver_that_arms_the_escape_scopes_it():
     ``@scoped_allow_dirty`` on its ``main``.
     """
     offenders = []
-    for path in DRIVERS:
+    for path in [*DRIVERS, *SHARED_FIDELITY]:
         text = path.read_text()
         if "allow_dirty_stamps" not in text:
             continue
@@ -127,6 +133,29 @@ def test_every_driver_that_arms_the_escape_scopes_it():
     assert offenders == [], (
         "these drivers arm the process-global allow-dirty escape without "
         f"scoping it to their main: {offenders}")
+
+
+def test_the_shared_module_is_inside_the_ratchet():
+    """The scope, pinned: ulp_move_gate is the module every driver calls."""
+    assert any(path.name == "ulp_move_gate.py" for path in SHARED_FIDELITY), (
+        "the comparison module the drivers share is outside the audit's "
+        "scope; six comparison reports went unstamped inside it")
+
+
+def test_a_comparison_report_carries_its_provenance():
+    """A comparison is a MEASUREMENT and is stamped like the reports it reads.
+
+    Red on the parent commit: ``run_ulp_comparison`` returned a dict with no
+    ``worktree`` key at all.
+    """
+    import inspect
+
+    from legoesm.ocean.fidelity import ulp_move_gate
+
+    source = inspect.getsource(ulp_move_gate.run_ulp_comparison)
+    assert 'result["worktree"] = worktree_stamp()' in source, (
+        "run_ulp_comparison does not stamp its result; a comparison taken on "
+        "a dirty tree would be indistinguishable from one taken at a commit")
 
 
 def test_the_ratchet_can_fail(tmp_path):

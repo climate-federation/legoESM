@@ -38,6 +38,8 @@ from pathlib import Path
 
 import numpy as np
 
+from legoesm.ocean.fidelity.provenance import worktree_stamp
+
 __all__ = [
     "MAX_ULP_MOVE",
     "ResidualFieldRecorder",
@@ -483,6 +485,11 @@ def run_ulp_comparison(args, report: dict) -> dict:
     result["candidate"] = str(candidate_path)
     result["plant"] = plant
     result["row_filter_substring"] = substring
+    # A comparison report is a MEASUREMENT and carries its provenance, exactly
+    # as the gate reports it compares do.  Six of these were written unstamped:
+    # a comparison taken on a dirty tree could not be told from one taken at a
+    # commit, which is the whole point of the stamp ratchet.
+    result["worktree"] = worktree_stamp()
     return result
 
 

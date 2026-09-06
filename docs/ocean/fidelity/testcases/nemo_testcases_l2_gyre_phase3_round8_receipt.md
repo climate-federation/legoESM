@@ -7733,7 +7733,13 @@ record's owned cells differ on either card**, and `mesh_mask.nc` and each
 card's `kt=10` restart are byte-identical.  The plant -- one bit flipped in one
 owned cell -- turns the gate red on both cards and exits non-zero.
 
-### Item 2 — round 32's ordering fix is DISCHARGED on both tanks
+### Item 2 — round 32's ordering fix is AT-BAR-NOT-EXACT on both tanks
+
+**RELABELLED IN ROUND 38.**  This section said DISCHARGED, and its own table
+below says `exact` FALSE on both cards -- 20 of 2540 cells on LOCK and 30 of
+16900 on OVERFLOW are bit-unequal, AT-BAR by the `1e-15` tolerance and not by
+the bar Rule 12 sets, which is bit exactness given NEMO's own inputs.  The
+word DISCHARGED is now reserved for a bit-exact row.
 
 | card | u face | v face |
 |---|---|---|
@@ -7960,8 +7966,13 @@ AT-BAR accumulator, so none of them owns the residual -- **`tra_ldf` is
 exonerated twice over, by its own zero and by the accumulator's verdict.**
 
 **THE CAUSAL INJECTION ARM IS UNINFORMATIVE AND IS NOT QUOTED AS EVIDENCE.**
-The gate also feeds NEMO's OWN pre-zdf accumulator into legoESM's solve and
-scores the result: it reads `3.1956659540810506e-11`, identical to the
+The gate also feeds a pre-ZDF seed RECONSTRUCTED from NEMO's dumped `Kbb`
+tracers, its post-`tra_ldf` tracers and its three `r3t` stretches
+(`nemo_testcase_l2_gyre_stage3_completion_gate.py:147-157`,
+`((1+r3t_Kbb)*T_Kbb + dt*(1+r3t_Kmm)*T_after_ldf)/(1+r3t_Kaa)`) into legoESM's
+solve and scores the result -- **it is not a dumped array of NEMO's, and round
+38 renamed it**; calling it "NEMO's own accumulator" credited a
+reconstruction with the standing of an oracle dump.  It reads: it reads `3.1956659540810506e-11`, identical to the
 faithful run, and its `causal_movement` is **exactly `0.0`** against a
 faithful residual of `1.361474e-12`.  A control that moves the output by
 nothing has not been applied, so its `ZDF_SOLVER_FIRST_OWNER_CAPABLE_BOUNDARY`
@@ -8065,8 +8076,11 @@ round:
    everything this round did.  Their owner is now LOCALISED: the stage-3
    implicit vertical tracer solve, with every operator upstream of it AT-BAR
    and stages 1 and 2 at bar (stage 1 bit-exact).
-2. **Round 32's ordering fix is now DISCHARGED on GYRE, LOCK_EXCHANGE and
-   OVERFLOW.**  ORCA2 stays UNMEASURED.  Round 33's item 1(a) is CLOSED.
+2. **Round 32's ordering fix is AT-BAR-NOT-EXACT on LOCK_EXCHANGE and
+   OVERFLOW and DISCHARGED bit for bit on GYRE** (relabelled in round 38: the
+   two tank rows carry `exact` false, 20 of 2540 and 30 of 16900 cells
+   bit-unequal, which is inside the `1e-15` tolerance and outside Rule 12's
+   bar).  ORCA2 stays UNMEASURED.  Round 33's item 1(a) is CLOSED.
 3. **Round 33's stage-arm fix** stays discharged bit for bit on GYRE and
    measured NOT REACHED on both tanks.
 4. **Round 30's `dyn_ldf` fix still carries an OPEN Rule-12 eligibility**,

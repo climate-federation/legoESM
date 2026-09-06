@@ -192,13 +192,23 @@ UNDEFINED_SLOTS = {
     ("NEMO_L1_TRANSP_1", "zFw"): {
         "switch": "ln_dynadv_vec",
         "undefined_when": "T",
+        # RE-ANCHORED IN ROUND 38.  This string used to carry BARE LINE
+        # NUMBERS -- stprk3_stg.F90:343-345, :592, :623, :318, :326-334 --
+        # which are the L1 tank card's.  The GYRE card's own MY_SRC puts the
+        # same statements at :463, :295-301 and :287 (the round-34 receipt
+        # cites those), so one number set was published as the provenance of a
+        # waiver resolved on THREE different cards.  A line number is not
+        # portable between cards; the STATEMENT is, so the citation is the
+        # statement and the per-card numbers are labelled as such.
         "reason": (
-            "under ln_dynadv_vec = T the write at stprk3_stg.F90:343-345 "
-            "precedes tra_adv_trp (:592, :623), which is what computes zFw "
-            "(:318); the slot is uninitialised memory there.  Under "
-            "ln_dynadv_vec = F the flux-form branch at :326-334 fills "
-            "zFw = e1e2t*ww before the same write, so the slot IS defined "
-            "and is bit-tested"),
+            "under ln_dynadv_vec = T the record's WRITE in stprk3_stg.F90 "
+            "precedes the CALL tra_adv_trp that computes zFw, so the slot is "
+            "uninitialised memory there.  Under ln_dynadv_vec = F the "
+            "flux-form branch that sets zFw = e1e2t*ww runs BEFORE the same "
+            "WRITE, so the slot IS defined and is bit-tested.  Line numbers "
+            "differ per card: on the L1 tank cards the three statements are "
+            "stprk3_stg.F90:343-345, :318 and :326-334; on the GYRE card they "
+            "are :463, :287 and :295-301"),
     },
 }
 
@@ -243,20 +253,32 @@ def _undefined_slots(run: Path) -> tuple[dict, list]:
 # WHERE EACH RECORD IS WRITTEN.  Verified line by line against the MY_SRC
 # files that are actually compiled, not carried over from an older round:
 #   grep -n "<magic>" <card>/MY_SRC/<file>.F90
-# LOCK_EXCHANGE_OMIP_L1_P3/MY_SRC/stprk3.F90 and
-# GYRE_OMIP_L2_P3_SM_R29ZDF/MY_SRC/{stprk3_stg,stp2d,traadv}.F90 carry the
-# same writers on every card in this campaign.
+#
+# ROUND 38: THE LINE NUMBERS ARE ONE CARD'S, AND THE CARD IS NAMED.  This
+# comment used to say these writers sit at "the same" lines on every card in
+# this campaign.  They do not -- the L1 tank cards and the GYRE L2 cards put
+# the same statements at different lines, which is the defect re-anchored in
+# UNDEFINED_SLOTS above -- so every value below is qualified with the card it
+# was read from, and a reader can tell a citation from a guess.
+_L2_CARD = "GYRE_OMIP_L2_P3_SM_R29ZDF"
+_L1_CARD = "LOCK_EXCHANGE_OMIP_L1_P3"
 SOURCES = {
-    "NEMO_L2_TRPOP_2": "MY_SRC/stprk3_stg.F90:297",
-    "NEMO_L2_WZVOP_1": "MY_SRC/traadv.F90:225",
-    "NEMO_L2_RKTRA_1": "MY_SRC/stprk3_stg.F90:673",
-    "NEMO_L2_SLOW_2": "MY_SRC/stp2d.F90:187",
-    "NEMO_L2_TRTRP_1": "MY_SRC/stprk3_stg.F90:638",
-    "NEMO_L1_TRANSP_1": "MY_SRC/stprk3_stg.F90:343",
-    "NEMO_L1_STAGE_1": "MY_SRC/stprk3.F90:369",
-    "NEMO_L1_ENTRY_1": "MY_SRC/stprk3.F90:96",
-    "NEMO_L1_RHS___1": "MY_SRC/stprk3.F90:385",
-    "NEMO_L1_BTFRM_1": "MY_SRC/stprk3.F90:348",
+    "NEMO_L2_TRPOP_2": f"{_L2_CARD}/MY_SRC/stprk3_stg.F90:297",
+    "NEMO_L2_WZVOP_1": f"{_L2_CARD}/MY_SRC/traadv.F90:225",
+    "NEMO_L2_RKTRA_1": f"{_L2_CARD}/MY_SRC/stprk3_stg.F90:673",
+    "NEMO_L2_SLOW_2": f"{_L2_CARD}/MY_SRC/stp2d.F90:187",
+    "NEMO_L2_TRTRP_1": f"{_L2_CARD}/MY_SRC/stprk3_stg.F90:638",
+    "NEMO_L1_TRANSP_1": f"{_L1_CARD}/MY_SRC/stprk3_stg.F90:343",
+    "NEMO_L1_STAGE_1": f"{_L1_CARD}/MY_SRC/stprk3.F90:369",
+    "NEMO_L1_ENTRY_1": f"{_L1_CARD}/MY_SRC/stprk3.F90:96",
+    "NEMO_L1_RHS___1": f"{_L1_CARD}/MY_SRC/stprk3.F90:385",
+    "NEMO_L1_BTFRM_1": f"{_L1_CARD}/MY_SRC/stprk3.F90:348",
+    # Round 38: the two SELF_DESCRIBING magics had no provenance row at all,
+    # so a record this gate admits could name neither its writer nor a parser.
+    "NEMO_L2_ZDFMX_1": f"{_L2_CARD}/MY_SRC/dynzdf.F90 (round-29 instrument)",
+    "NEMO_L2_TRAZD_1": ("GYRE_OMIP_L2_P3_SM_R35TRAZDF/MY_SRC/trazdf.F90 "
+                        "(round-35 instrument; the avt/avs staging is round "
+                        "37's, on the R37TRAZDF card)"),
 }
 PARSERS = {
     "NEMO_L2_TRPOP_2": "nemo_testcase_l2_gyre_round13_tracer.py:93-140",
@@ -269,6 +291,8 @@ PARSERS = {
     "NEMO_L1_ENTRY_1": "nemo_testcase_phase3_first_divergence_gate.py:135-158",
     "NEMO_L1_RHS___1": "nemo_testcase_phase3_first_divergence_gate.py:115-133",
     "NEMO_L1_BTFRM_1": "nemo_testcase_phase3_first_divergence_gate.py:160-185",
+    "NEMO_L2_ZDFMX_1": "nemo_testcase_l2_gyre_round29_zdf_matrix.py",
+    "NEMO_L2_TRAZD_1": "nemo_testcase_l2_gyre_round35_trazdf_matrix.py",
 }
 
 
@@ -671,6 +695,7 @@ def run(baseline: Path, candidate: Path, *, twin=None,
         raise AdmissionError(f"{baseline}: no oracle_*.bin records to inherit")
     allowed_new = set() if allowed_new is None else set(allowed_new)
     violations, rows, exact = [], [], 0
+    unparseable: list[dict] = []
     unexpected = set(candidate_names) - set(baseline_names) - allowed_new
     if unexpected:
         violations.append(f"unexpected candidate records: {sorted(unexpected)}")
@@ -707,12 +732,30 @@ def run(baseline: Path, candidate: Path, *, twin=None,
         if raw_equal and (plant[0] or not comparable):
             exact += 1
             continue
-        if name.startswith("oracle_bt_ordered_operands"):
-            result = _compare_bt(a, b, plant)
-        elif magic in SELF_DESCRIBING:
-            result = _compare_self_describing(a, b, plant)
-        else:
-            result = compare_record(a, b, plant, waived=waived)
+        try:
+            if name.startswith("oracle_bt_ordered_operands"):
+                result = _compare_bt(a, b, plant)
+            elif magic in SELF_DESCRIBING:
+                result = _compare_self_describing(a, b, plant)
+            else:
+                result = compare_record(a, b, plant, waived=waived)
+        except AdmissionError as error:
+            # ROUND 38.  A PENDING PLANT FORCES THE FIRST COMPARABLE RECORD
+            # OPEN, and this reader has no interior-extent recovery -- so a
+            # byte-identical record it cannot parse (the round-35-shaped
+            # trazdf record is exactly that) raised HERE, before the plant had
+            # landed anywhere, and run.sh would have read the crash as "the
+            # plant turned the gate red".  A record that was going to be
+            # SKIPPED as byte-identical is skipped, LOUDLY, and the plant goes
+            # on to the next candidate; a plant that then lands nowhere is
+            # still a violation below.  A record that genuinely DIFFERS still
+            # raises: an unreadable changed record is a refusal, not a note.
+            if not raw_equal:
+                raise
+            exact += 1
+            unparseable.append({"record": name, "magic": magic,
+                                "refusal": str(error)})
+            continue
         if raw_equal:
             result["raw_identical_before_plant"] = True
         if twin is not None and twin.is_dir() and (twin / name).is_file():
@@ -742,6 +785,11 @@ def run(baseline: Path, candidate: Path, *, twin=None,
             violations.append(
                 f"--writer names one instrument but {sorted(magics)} record "
                 "kinds changed; pass no --writer or split the run")
+    for row in unparseable:
+        rows.append({"record": row["record"], "magic": row["magic"],
+                     "consumed_equal": True,
+                     "raw_identical_before_plant": True,
+                     "plant_forced_open_but_unreadable": row["refusal"]})
     identity_rows, artifacts = [], {}
     for name in identical:
         a, b = baseline / name, candidate / name
