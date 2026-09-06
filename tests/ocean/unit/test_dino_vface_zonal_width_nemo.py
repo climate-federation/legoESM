@@ -43,6 +43,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
+from legoesm import constants
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.grids import create_latlon_geometry
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
@@ -207,7 +208,7 @@ class TestConstructionMatchesNemo:
         #     e1v   = ra*rad*COS(rad*gphiv)*rn_e1_deg           (:113)
         # DINO's equator sits on a T-point, so for a grid of n_lat = 2K+1 rows
         # legoESM's v-face j carries NEMO's half-integer index j - K - 0.5.
-        ra, rad, rn_e1_deg = 6371229.0, np.pi / 180.0, 1.0
+        ra, rad, rn_e1_deg = constants.R_earth, np.pi / 180.0, 1.0
         K = (g.n_lat - 1) // 2
         zvj = np.arange(g.n_lat + 1, dtype=np.float64) - K - 0.5
         gphiv_rad = np.arcsin(np.tanh(rn_e1_deg * rad * zvj))
