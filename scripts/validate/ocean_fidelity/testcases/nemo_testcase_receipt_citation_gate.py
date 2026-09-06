@@ -103,6 +103,18 @@ FILES = {
     "ocean_model_latlon_cgrid.py":
         REPO / "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py",
     "provenance.py": REPO / "packages/ocean/legoesm/ocean/fidelity/provenance.py",
+    # --- round 35 paths: the implicit vertical TRACER solve ---
+    # GYRE's OWN run log for this round, so a GYRE resolved value cannot bind
+    # to OVERFLOW's ocean.output through the bare key above.
+    "round29_oracle_v2_zdf_matrix/ocean.output": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3"
+        "/round29_oracle_v2_zdf_matrix/ocean.output"),
+    "trazdf.F90": _OCE / "TRA/trazdf.F90",
+    "ldftra.F90": _OCE / "LDF/ldftra.F90",
+    # The PREPROCESSED body GYRE compiles: which branch runs, and how the
+    # thickness macros expanded, are only visible here.
+    "ppsrc/nemo/trazdf.f90":
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R29ZDF/BLD/ppsrc/nemo/trazdf.f90",
     # The two GYRE decks' compile keys.  GYRE_BARE is what the native demo
     # card reproduces and it is key_linssh; the oracle deck is key_qco, and a
     # bare "cpp" token could otherwise bind to either.
@@ -128,6 +140,42 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 35 citations: the implicit vertical TRACER solve ---
+    # The build guard that makes salinity reuse temperature's matrix.
+    'trazdf.F90:159-160': [
+        "IF(  ( cdtype == 'TRA' .AND. ( jn == jp_tem .OR. ( jn == jp_sal .AND. ln_zdfddm ) ) ) .OR.   &",
+        "& ( cdtype == 'TRC' .AND. jn == 1 )  )  THEN",
+        2],
+    # The ah_wslp2 arm.  DO_2Dik/END_2D repeat throughout the routine, so both
+    # endpoints are pinned by occurrence.
+    'trazdf.F90:172-174': [
+        ('DO_2Dik( 0, 0,   2, jpk, 1 )', 2), ('END_2D', 2), 3],
+    'trazdf.F90:204': 'zwt(:,1) = 0._wp',
+    'trazdf.F90:219-220': [
+        'zwi(ji,jk) = - p2dt * zwt(ji,jk  ) / e3w(ji,jj,jk,Kmm)',
+        'zws(ji,jk) = - p2dt * zwt(ji,jk+1) / e3w(ji,jj,jk+1,Kmm)',
+        2],
+    # The DRAKKAR negative-salinity clamp, guard to ENDIF.
+    'trazdf.F90:89-91': [
+        'IF ( .NOT.(ln_SEOS.AND.(rn_b0==0._wp)) ) THEN', ('ENDIF', 4), 3],
+    'ldftra.F90:249': ('l_ldfslp = .TRUE.', 1),
+    # The two thickness macros.  Each also appears once COMMENTED OUT further
+    # down the header, which is why both are pinned to the first occurrence.
+    'domzgr_substitute.h90:126': (
+        '# define  e3t(i,j,k,t)      (E3t_0(i,j,k) Tmsk(r3t,tmask,i,j,k,t))', 1),
+    'domzgr_substitute.h90:131': (
+        '# define  e3w(i,j,k,t)      (E3w_0(i,j,k) Time(r3t,i,j,t))', 1),
+    # The same two, as GYRE's build EXPANDED them: e3w loses its mask and its
+    # third dimension, e3t keeps both.
+    'ppsrc/nemo/trazdf.f90:231-233': [
+        'zwi(ji,jk) = - p2dt * zwt(ji,jk  ) / (e3w_1d(jk) *(1._wp+r3t(ji,jj,Kmm)))',
+        'zwd(ji,jk) = (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kaa)*tmask(ji,jj,jk))) - ( zwi(ji,jk) + zws(ji,jk) )',
+        3],
+    'round29_oracle_v2_zdf_matrix/ocean.output:568': 'ln_zdfddm =  F',
+    'round29_oracle_v2_zdf_matrix/ocean.output:667': (
+        '==>>>   Rotated laplacian operator (standard)', 1),
+    'round29_oracle_v2_zdf_matrix/ocean.output:657': 'ln_traldf_msc   =  F',
+    'round29_oracle_v2_zdf_matrix/ocean.output:158': 'ln_SEOS   =  F',
     # --- round 32: the stage-3 ordering fix ---
     # --- round 33: the stage arm, and the tanks' reference geometry ---
     # NEMO's ONE selector, used at every stage, and both of its arms.
@@ -421,7 +469,7 @@ CITATION_MAP = {
     # the field is named twice: GYRE's bundle at 226, the tanks' at 311
     'nemo_testcase_recipe.py:311': [
         ('zdf_baroclinic_only=True,', 2), ('zdf_baroclinic_only=True,', 2), 1],
-    'provenance.py:38': 'def git_sha(*, allow_dirty: bool = False, repo: str | Path | None = None) -> str:',
+    'provenance.py:96': 'def git_sha(*, allow_dirty: bool = False, repo: str | Path | None = None) -> str:',
     'cpp_GYRE_BARE.fcm:1': 'key_linssh key_vco_1d  key_RK3',
     'cpp_GYRE_OMIP_L2_P3_SM.fcm:1': 'key_qco key_vco_1d3d key_RK3',
     'round19_oracle_v2_external/ocean.output:338': 'ice shelf cavities             ln_isfcav =  F',

@@ -6355,7 +6355,7 @@ source.  Measured, not assumed: `legoesm_git_sha` is absent from all five of
 `round30_post_ldf_after.json` and `round30_zdf_calibration.json`.
 
 The repo already had the right helper and it was reused rather than rebuilt:
-`provenance.py:38`'s `git_sha` fails closed on tracked dirt for exactly this
+`provenance.py:96`'s `git_sha` fails closed on tracked dirt for exactly this
 reason.  What it could not answer is whether `HEAD` was describing this code at
 all.  `worktree_stamp` adds the branch (or `DETACHED`), whether the tree is
 clean, and, when it is not, the SHA-256 of the full `git diff HEAD`.  Detached
@@ -8104,3 +8104,282 @@ round:
 9. **Rounds 1-24 of this receipt remain UNAUDITED** by the citation gate.
 
 Every figure above is pinned in `manifests/nemo_testcase_l2_gyre_round34.json`.
+
+## Round 35 — the tracer solve gets an instrument, and its first suspect changes before the record exists
+
+Round 35 starts from `23c46232ea60` on a clean tree, same regime: CPU
+production JIT, fp64/x64, `transcendentals="libm"`, oracle V2.  The
+preregistration is
+`manifests/nemo_testcase_l2_gyre_round35_preregister.json`, committed at
+`0e78666589ae` before any measurement; addendum 1
+(`..._round35_preregister_addendum1.json`, `033dbf9c4d1e`) records what the
+independent CLAIM review broke.  **No NEMO executable was run, no `makenemo`
+or `mpirun` was invoked, and no NEMO source was edited.**  The acquisition is
+written and handed over; the record does not exist yet.
+
+One detached probe worktree is flagged: `/tmp/codex-gyre-r35-suite` at
+`0e78666589ae`, used for the suite diagnosis so that a long test run could not
+collide with edits in the canonical tree.
+
+### What was read before anything was measured
+
+The subject is the boundary round 34 named: at kt=1 stage 3 the accumulator
+handed to `tra_zdf` is AT-BAR on both tracers while `tra_zdf`'s output is
+`1.36e-12` on T.  Four readings of the oracle shaped the instrument, and each
+of them changes what a reader has to transcribe.
+
+**The matrix is built ONCE and salinity is solved with temperature's.**  The
+build is guarded by `trazdf.F90:159-160`, and `ln_zdfddm` is `F`
+(`round29_oracle_v2_zdf_matrix/ocean.output:568`), so `avs` never enters.
+
+**The matrix diffusivity is `avt` PLUS the isoneutral a33 fold `ah_wslp2`**
+(`trazdf.F90:172-174`).  `l_ldfslp` is true because `ldftra.F90:249` sets it
+for the rotated laplacian, which this run resolves (`round29_oracle_v2_zdf_matrix/ocean.output:667`), and
+`ln_traldf_msc` is `F` (`round29_oracle_v2_zdf_matrix/ocean.output:657`), so it is the `ah_wslp2` arm and not the `akz`
+one.  **Round 34's exoneration of `tra_ldf` does not cover this**: that fold
+enters the ZDF matrix and never touches `ts(Krhs)`, so "`tra_ldf` contributes
+exactly `0`" says nothing about it.
+
+**The thickness macros resolve differently at T and W points.**
+`domzgr_substitute.h90:126` gives `e3t` a `tmask` factor;
+`domzgr_substitute.h90:131` gives `e3w` none, a one-dimensional reference
+ladder, and `r3t` at the T point rather than any `r3w`.  Both are verbatim in
+the compiled `ppsrc/nemo/trazdf.f90:231-233`.
+
+**NEMO's negative-salinity clamp RUNS on this card.**  `trazdf.F90:89-91` is
+guarded by `.NOT.(ln_SEOS .AND. rn_b0==0)` and `ln_SEOS` is `F`
+(`round29_oracle_v2_zdf_matrix/ocean.output:158`), so the existing stage-3 record holds a POST-clamp
+column and any pre-clamp comparison needed a new dump.
+
+### Item 1 — the instrument, and the exact commands
+
+`scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round35_trazdf/`
+holds `trazdf_round35.patch` and `run.sh`.  The patch adds **258 lines and
+removes none** to a config copy of the shipped `trazdf.F90`; `run.sh` refuses
+if the removal count ever exceeds the diff header, refuses a source card that
+overrides `trazdf.F90` or lacks the round-29 `dynzdf` instrument, refuses a
+build whose compiled `ppsrc` does not carry each writer, refuses a
+vector-math symbol in the binary, and refuses a mount under two gigabytes
+free.
+
+The record, one file, `oracle_trazdf_matrix_kt00000001.bin`, magic
+`NEMO_L2_TRAZD_1`, written once at `kt = nit000` from `tra_zdf` AFTER the
+clamp so both columns are in it:
+
+| group | arrays |
+|---|---|
+| the arm, as payload | `ln_zdfddm`, `ln_zad_Aimp`, `ln_zdfmfc`, `ln_traldf_msc`, `l_ldfslp`, `ln_SEOS`, `a33_allocated`, `rDt`, `rn_b0`, `jp_tem`, `jp_sal` |
+| as `tra_zdf` RECEIVED them | `T_Kbb_in`, `S_Kbb_in`, `T_Kmm_in`, `S_Kmm_in`, `T_Krhs_in`, `S_Krhs_in` |
+| the matrix as built | `zwt_mix` (= `avt` + `ah_wslp2`), `zwi`, `zwd`, `zws`, `zwt_lu` |
+| the solve | `rhs_T`, `rhs_S`, `fwd_T`, `fwd_S`, `sol_T_pre_clamp`, `sol_S_pre_clamp`, `sol_T_post_clamp`, `sol_S_post_clamp` |
+| the operands | `avt`, `avs`, `ah_wslp2`, `akz`, `tmask`, `e3t_Kbb`, `e3t_Kmm`, `e3t_Kaa`, `e3w_Kmm`, `e3t_0`, `e3w_0`, `r3t_Kbb`, `r3t_Kmm`, `r3t_Kaa` |
+
+The right-hand side is NEMO's own `zrhs` captured in the loop that computes
+it, not a rebuild; the solved column is an independent Fortran copy taken
+after the third recurrence and therefore before the clamp, so the clamp arm
+is not circular.
+
+`run.sh` also stacks the round-33 reference-geometry writer — the same file
+the two tanks were acquired with, not a copy — so the one run also gives GYRE
+the `r1_hu_0` that `stprk3_stg.F90:440,444-445` multiplies by and that GYRE's
+barotropic discharge currently has to rebuild.  **That transcription change is
+NOT made here.**
+
+**THE COMMANDS, to be run by the operator, not the agent:**
+
+```
+PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:$PATH \
+  /tmp/codex-gyre/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round35_trazdf/run.sh
+```
+
+One command.  It builds `GYRE_OMIP_L2_P3_SM_R35TRAZDF` from
+`GYRE_OMIP_L2_P3_SM_R29ZDF`, runs it into
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round35_oracle_trazdf_matrix`,
+tries raw twin identity first and logs every record's result, falls through to
+the shared consumed-field admission, re-runs the round-29 gate on the grown
+momentum record, then runs the round-35 gate and its seven plants.  It prints
+`ROUND35_GYRE_TRAZDF_MATRIX_ORACLE_READY` on success.
+
+### Item 2 — the reader and the gate, proven on a synthetic record
+
+`nemo_testcase_l2_gyre_round35_trazdf_matrix.py` was written before the record
+exists and is exercised against a **synthetic record written by a Python twin
+of the Fortran writer** — same magic, same sixteen header integers, same
+groups, same column-major payload.  The twin's payload is built by a plain
+per-column triple loop written straight off the source; the reader's rebuild
+is a vectorised one.  They are different code on purpose, and a test asserts
+it: perturbing an operand moves the rebuild and not the dump.
+
+| arm | what it decides |
+|---|---|
+| `calibration` | NEMO rebuilt from NEMO's own operands; zero cells unequal or no number may be quoted |
+| `assembly` | legoESM's own tracer diagonals, given NEMO's operands, scored per diagonal |
+| `sweep` | legoESM's own ordered solve, given NEMO's matrix and NEMO's RHS |
+| `rhs_content` | legoESM's own content-RHS builder, given NEMO's operands |
+
+The sweep arm drives the function object the trajectory runs, not a copy:
+`nemo_ordered_tridiagonal_solve` IS the private solve, and a test asserts the
+identity by name.  The assembly arm drives `nemo_tracer_tridiagonal`,
+extracted this round from the pair solve that still calls it, so the assembly
+can be scored separately from the sweep; before the extraction it had no name
+and could only be observed through a solved column, which conflates the two.
+
+Seven plants, one per arm, each turning the gate red and exiting non-zero,
+end to end through the CLI.  Fourteen malformed records each get a VERDICT
+rather than a traceback: bad magic, bad version, 32-bit payload, a duplicated
+array, an extent past EOF, a tail shorter than one group header, a non-finite
+payload, a record short of an expected array, `rDt` of zero, `jp_tem` equal to
+`jp_sal`, and five flag settings naming an arm this reader does not
+transcribe.  **42 tests pass.**
+
+**The gate names what it cannot see.**  Four deviations are reported with the
+measured condition that makes each inert here, rather than passed over: two
+maskings legoESM does that NEMO does not, a bottom row that agrees only
+because the diffusivity at `jk = jpk` is zero, and the signed-zero one below.
+A synthetic record with a dry bottom flips two of them LIVE and turns the
+assembly rows red, so the report is not decoration.
+
+**A REAL TRANSCRIPTION DIFFERENCE FELL OUT OF RUNNING THE GATE ON THE TWIN.**
+NEMO's `zwi` at the surface row and its `zws` at the bottom row are NEGATIVE
+zeros — `-p2dt*0.0/e3w` with `zwt(:,1) = 0` at `trazdf.F90:204` and
+`trazdf.F90:219-220` — where legoESM writes POSITIVE zeros into both slots.
+The bits differ; no arithmetic result does, because `-0.0 + x == x` exactly
+and neither slot is ever divided by.  It gets its own status,
+`AT-BAR-SIGNED-ZERO`, with its own count.  Folding it into AT-BAR would hide a
+real difference and calling it DEBT would claim a numerical one that is not
+there.
+
+**The shared admission gate learns self-describing records.**  It used to
+raise on any magic outside its fixed schema table, and the GYRE baseline
+carries eighteen such magics; this round grows one of them on purpose.  The
+comparison is now over the intersection of the two field sets, so the
+legitimate growth passes while a state change in a shared field does not, and
+its plant targets an OWNED cell — at flat index zero it landed in the halo and
+was admitted, the same defect round 34 removed from the record-level plant.
+
+### The preregistered prediction, and the part of it already REFUTED
+
+PR1 through PR7 are in the preregistration.  The headline, PR4, predicted that
+legoESM's assembly and sweep would both reproduce NEMO given NEMO's own
+inputs, putting the owner in an OPERAND — ranked `avt` first, the right-hand
+side second.
+
+**PR4's RANKING IS REFUTED, before the record exists, by measurement rather
+than argument.**  An independent claim review found that neither arm can see
+the right-hand side at all: the production solve takes it as an argument.
+Building the three NEMO cards then printed the reason it matters —
+
+| card | `tracer_combine` | `zdf_implicit_solver_evaluation` |
+|---|---|---|
+| GYRE-zco | `concentration` | `nemo_literal` |
+| LOCK_EXCHANGE-zco | `concentration` | `nemo_literal` |
+| OVERFLOW-zps | `concentration` | `nemo_literal` |
+
+— so `_nemo_tracer_content_rhs` stays `None` and the literal `trazdf` matrix
+is fed `T_solve_in * dz_cell`, which is `e3t(Kaa)*T_expl`, where NEMO writes
+`e3t(Kbb)*T(Kbb) + p2dt*e3t(Kmm)*T(Krhs)`.  **The builder whose own docstring
+says it exists so the literal matrix can consume NEMO's content RHS is
+selected on no NEMO card.**  The first suspect is therefore the right-hand
+side, and not as "the same expression with a different association" — on this
+card it is a different expression.  PR4's claim SHAPE stands: the two arms
+still decide whether the owner is inside the transcription.  Its ranking does
+not, and the new arm PR8 measures whether flipping the switch would even be
+bit-exact, so that round 36 does not decide it on evidence nobody has.
+
+PR5's threshold survived the review and its MECHANISM did not: GYRE's initial
+density is not horizontally uniform, because `usrdef_istate.F90` multiplies
+both tracers by `ptmask`, so land columns carry `T = 0`.  `ah_wslp2` is still
+predicted exactly zero, for the masked-difference reason instead, and that
+reason does not transfer to a card with interior topography.
+
+### Item 3 — the three suite failures
+
+| failure | verdict | status |
+|---|---|---|
+| `test_every_oracle_comparison_has_a_row` | the ratchet's DATA is stale; neither the test nor the model is wrong | FIXED |
+| `test_planted_stage_control_exits_nonzero_end_to_end` | the TEST EXPECTATION is stale | FIXED |
+| `test_a_dirty_tree_refuses` | the CODE is wrong: a real hole in the provenance gate | FIXED at the source |
+
+**The first** refuses four `compare_*` drivers that landed between 2026-07-27
+and 2026-08-12 with no disposition, which is exactly the omission the ratchet
+exists to force.  The decisive line: `oracle comparison drivers missing from
+the case board ... ['advection_nemo', 'grids_tripole_mpas', 'tendencies_nemo',
+'three_way_nemo']`.  Each is classified as a diagnostic with the reason quoted
+from its own docstring: two are per-process matches at a fixed state with no
+time integration, one says in as many words that it "is NOT a NEMO-fidelity
+statement", and the fourth re-scores arms an existing board row already
+covers.  `9 passed`.
+
+**The second** froze three control keys where the gate emits four; the fourth,
+`faithful_only`, was already present before this branch, which is why it also
+failed on the pre-fix tree.  The decisive line: `Left contains 1 more item:
+{'faithful_only': False}`.
+
+**The third is not a test quirk and it was fixed at the source.**
+`allow_dirty_stamps` set a PROCESS-GLOBAL latch and nothing reset it, so once
+any driver's `main` armed it every later `worktree_stamp` in that process
+accepted a dirty tree SILENTLY — a harness running two gates back to back
+would stamp the second clean while it was not.  The polluter is
+`test_planted_entry_control_exits_nonzero_end_to_end`, which calls a gate's
+`main` in-process with `--allow-dirty`; four other tests leak identically.
+
+The fix is three pieces and none of them is a conftest fixture, because the
+hole is in real callers too: `worktree_stamp` takes an explicit `allow_dirty`;
+`allow_dirty_stamps` still arms immediately but returns a context manager that
+restores; and every driver `main` that arms it wears `@scoped_allow_dirty`.
+Per Rule 2, the enforcement is a GATE and not the prose: a test audits every
+driver in the directory and goes red on one that arms the escape without
+scoping its `main`, with a synthetic undecorated driver proving the audit can
+fail.
+
+Red then green, measured: the pair that reproduced it — the overflow
+barotropic gate followed by the stamp tests — was `1 failed, 23 passed` and is
+now `24 passed in 250.67s`.  A test reproduces the pre-fix shape in-process
+and asserts the latch leaks, so the fix cannot become vacuous.
+
+### ASKED / UNASKED
+
+| choice | disposition |
+|---|---|
+| flip `tracer_combine` from `concentration` to `thickness_weighted` on the NEMO cards | **ASKED, NOT ANSWERED, NOT CHANGED.**  It is a scientific choice about what the model computes and it is not this round's to make.  The new `rhs_content` arm measures whether it would be bit-exact |
+| land the `r1_hu_0` multiply-form transcription | ASKED; explicitly deferred to round 36 by the coordinator.  Only the RECORD was made to carry it |
+| extract `nemo_tracer_tridiagonal` from the pair solve and publish the ordered sweep under a name | not a scientific choice; a behaviour-preserving extraction with the dtype threaded so it is byte-exact, plus a test that the composition reproduces the pair solve bit for bit |
+| give `-0.0` versus `+0.0` its own status rather than AT-BAR or DEBT | not a scientific choice; it is the only classification that neither hides a bit difference nor claims a numerical one.  No bar constant moved |
+| classify the four unclassified comparison drivers as diagnostics | not a scientific choice; each reason is quoted from the driver's own docstring, and none of them adds a case the board lacks |
+| scope the allow-dirty escape rather than reset it in a conftest | not a scientific choice; the conftest form fixes pytest only, and the defect is in real callers |
+| source card `GYRE_OMIP_L2_P3_SM_R29ZDF` rather than the base GYRE card | not a scientific choice; it is the card the round-29 and round-34 GYRE records were written by, so the twin identity check compares against a run of the SAME `MY_SRC` set |
+| detached probe worktree for the suite diagnosis | ASKED; the same disposition rounds 32-34 recorded.  Flagged: `/tmp/codex-gyre-r35-suite` at `0e78666589ae` |
+| shipped NEMO edit, `makenemo`, `mpirun`, push, merge, deletion | forbidden; none performed |
+
+UNASKED list: empty.
+
+### Merge readiness
+
+Unchanged from round 34 except where noted.  `03c6e8d96ff7` remains an
+ancestor, so the integration is still a fast-forward.
+
+1. **GYRE's `kt2` `T`/`S`/`u`/`v` rows still fail.**  Nothing this round
+   changed a model number: the only production edits are a behaviour-preserving
+   extraction and a provenance scope.
+2. **The tracer solve now has an instrument and a gate**, both unmeasured
+   until the operator runs the acquisition.
+3. **A first suspect that was not on round 34's list**: the right-hand side,
+   because no NEMO card selects the content form.
+4. Rounds 30, 32, 33 and 34's open rows are unchanged.
+
+### Open questions
+
+0. **Run the acquisition.**  Every number in this round's gate is UNMEASURED
+   until it exists.
+1. **`tracer_combine` on the three NEMO cards.**  Asked above; a decision is
+   needed before round 36 can act.
+2. **The causal injection arm at the stage-3 boundary is still broken** — it
+   moves the output by exactly `0.0`.  Unchanged from round 34.
+3. **The tanks' operator-level Rule-12 for decision 19**, unchanged.
+4. **Round 30's `dyn_ldf` Rule-12 row**, unchanged.
+5. **ORCA2 has no card on this branch**, unchanged.
+6. **The moved trajectory rows** from rounds 32, 33 and 34, unchanged.
+7. **The slow forcing's depth average**, unchanged.
+8. **The barotropic correction's divisor**: GYRE's discharge still rebuilds it,
+   and after this acquisition it will not have to.
+9. **Rounds 1-24 of this receipt remain UNAUDITED** by the citation gate.
