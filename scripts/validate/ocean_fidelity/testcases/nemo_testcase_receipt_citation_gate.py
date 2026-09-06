@@ -228,6 +228,40 @@ CITATION_MAP = {
         'uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)',
         'vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)',
         2],
+    # --- round 37 citations: the three recurrences, literally ---
+    # ln_tile is F, which is what makes ntsi:ntei equal Nis0:Nie0 in the
+    # round-37 instrument's staging of avt and avs.
+    'round35_oracle_trazdf_matrix/ocean.output:247':
+        'Tiling (T) or not (F)                ln_tile    =  F',
+    # 1st recurrence: multiply, THEN divide, THEN subtract.  It ends in a
+    # division, so a fused multiply-add cannot absorb it, which is why its
+    # row was never over the bar.
+    'trazdf.f90:493': 'zwt(ji,1) = zwd(ji,1)',
+    'trazdf.f90:496':
+        'zwt(ji,jk) = zwd(ji,jk) - zwi(ji,jk) * zws(ji,jk-1) / zwt(ji,jk-1)',
+    # 2nd recurrence.  The surface row has no zrhs temporary.
+    'trazdf.f90:515-516': [
+        'pt(ji,jj,1,jn,Kaa) =       (e3t_3d(ji,jj,1) *(1._wp+r3t(ji,jj,Kbb)*tmask(ji,jj,1))) * pt(ji,jj,1,jn,Kbb )    &',
+        '&               + p2dt * (e3t_3d(ji,jj,1) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,1))) * pt(ji,jj,1,jn,Krhs)',
+        2],
+    # Divide, THEN multiply, THEN subtract -- the first of the two statements
+    # XLA was contracting into a fused multiply-add.
+    'trazdf.f90:532':
+        'pt(ji,jj,jk,jn,Kaa) = zrhs - zwi(ji,jk) / zwt(ji,jk-1) * pt(ji,jj,jk-1,jn,Kaa)',
+    # 3rd recurrence, and the tmask NEMO applies at EVERY level.
+    'trazdf.f90:543':
+        'pt(ji,jj,jpkm1,jn,Kaa) = pt(ji,jj,jpkm1,jn,Kaa) / zwt(ji,jpkm1) * tmask(ji,jj,jpkm1)',
+    'trazdf.f90:546-547': [
+        'pt(ji,jj,jk,jn,Kaa) = ( pt(ji,jj,jk,jn,Kaa) - zws(ji,jk) * pt(ji,jj,jk+1,jn,Kaa) )   &',
+        '&             / zwt(ji,jk) * tmask(ji,jj,jk)',
+        2],
+    # The DO jk loop that APPLIES zub.  It is cited to say what it is NOT:
+    # there is no DO jk loop that FORMS the column sum, only the SUM
+    # intrinsic at :522-523, so the accumulation order is the compiler's.
+    'stprk3_stg.f90:540-543': [
+        'DO jk =  1,  jpkm1  ; DO jj = ntsj-(  0), ntej+(   0) ; DO ji = ntsi-( 0), ntei+(   0)   ! corrected horizontal velocity',
+        'END DO   ;   END DO   ;   END DO',
+        4],
     # --- round 32: the stage-3 ordering fix ---
     # --- round 33: the stage arm, and the tanks' reference geometry ---
     # NEMO's ONE selector, used at every stage, and both of its arms.
