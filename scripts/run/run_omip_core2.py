@@ -973,6 +973,83 @@ def ah_profile_from_file(grid, path, A_h_base: float):
     return tuple(float(x) for x in prof)
 
 
+_EVD_TRIGGER_DESTS = ("convection_n2_mode", "convection_n2_eos",
+                      "convection_trigger", "convection_n2_threshold",
+                      "convection_two_level")
+# NEMO rn_evd / 2: the occupancy threshold when no convection scheme runs
+# (the control measurement "can the closure alone reach the EVD range?").
+_EVD_OCC_K_THRESHOLD_CONTROL = 50.0
+
+
+def _flag_set(v):
+    """argparse dests: None (unset float/str) or False (unset store_true).
+    Explicit, because ``0.0 == False`` would let a zero threshold slip."""
+    return v is not None and v is not False
+
+
+def build_enhanced_diffusion_config(args):
+    """``EnhancedDiffusionConfig`` from the CLI, or ``None`` under
+    ``--convection none``.
+
+    A trigger flag given while convection is off is a hard error: it would
+    otherwise be accepted and silently ignored, which is how an arm ends up
+    labelled with physics it never ran.
+    """
+    from legoesm.ocean.physics.convection.config import EnhancedDiffusionConfig
+    on = args.convection == "enhanced_diffusion"
+    set_flags = [d for d in _EVD_TRIGGER_DESTS
+                 if _flag_set(getattr(args, d, None))]
+    if not on:
+        if set_flags:
+            raise SystemExit(
+                "--" + ", --".join(d.replace("_", "-") for d in set_flags)
+                + " require --convection enhanced_diffusion")
+        return None
+    fields = {"K_conv": args.convection_K_conv, "K_bg": args.convection_K_bg}
+    if args.convection_n2_mode is not None:
+        fields["n2_mode"] = args.convection_n2_mode
+    if args.convection_n2_eos is not None:
+        fields["n2_eos_form"] = args.convection_n2_eos
+    if args.convection_trigger is not None:
+        fields["smooth_transition"] = args.convection_trigger == "smooth"
+    if args.convection_n2_threshold is not None:
+        fields["n2_threshold"] = args.convection_n2_threshold
+    if args.convection_two_level:
+        # NEMO's MIN(rn2, rn2b) needs the BEFORE tracers, which only the
+        # leap-frog-family outer integrators carry; this driver builds the
+        # forward-Euler / rk3 outer step, so the second arm would be silently
+        # skipped (before_tracers is None in k_profiles).  Refuse.
+        raise SystemExit(
+            "--convection-two-level needs a leap-frog-family outer integrator "
+            "(state.T_before/S_before); run_omip_core2 has none, so the "
+            "trigger is now-only here (as NEMO's own key_RK3 build).")
+    return EnhancedDiffusionConfig(**fields)
+
+
+def evd_top_interface_occupancy(K_H, land_mask, lat2d, lon2d, K_conv,
+                                lon_lo=220.0, lon_hi=240.0, lat_halfwidth=2.0,
+                                n_top=3):
+    """Fraction of wet columns whose FIRST interior interface carries the
+    convective diffusivity (``K_H >= K_conv/2``): ``(box, global, box-any-of-
+    top-n_top)``.
+
+    ``K_H`` is the interior-interface profile ``(..., nlev-1)`` from
+    ``diagnose_vertical_K``; the box is the cold tongue where the lens lives.
+    """
+    K = np.asarray(K_H)
+    wet = np.asarray(land_mask) > 0.5      # land_mask: 1 = wet (as _diag reads it)
+    thr = 0.5 * K_conv
+    fired_top = (K[..., 0] >= thr) & wet
+    # any of the top ``n_top`` interfaces: EVD eroding a lens from below its
+    # cap fires deeper first and would read as a no-op on index 0 alone.
+    fired_any = (K[..., :n_top] >= thr).any(axis=-1) & wet
+    lat = np.asarray(lat2d)
+    lon = np.asarray(lon2d) % 360.0
+    box = wet & (np.abs(lat) <= lat_halfwidth) & (lon >= lon_lo) & (lon < lon_hi)
+    _m = lambda f, sel: float(f[sel].mean()) if sel.any() else float("nan")
+    return _m(fired_top, box), _m(fired_top, wet), _m(fired_any, box)
+
+
 def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                               tke_surface_bc=None, tke_mxl_choice=None,
                               tke_n2_mode=None, tke_n2_eos_form=None,
@@ -1063,6 +1140,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   min_levels=1, div_damp_2=None, div_damp_4=None,
                   smag_cfl_safety=None, convection="none",
                   convection_K_conv=1.0, convection_K_bg=1e-5,
+                  convection_cfg=None,
                   freeze_floor=None, freezing=None, ew_cyclic_overlap=None,
                   runoff_depth_spread_m=None, tracer_advection=None,
                   mle=None, dz_ref_override=None,
@@ -1263,11 +1341,15 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         # config-level A_h/B_h/K_h, bottom_drag_r and the external CORE-II
         # forcing are untouched; the pipeline contributes ONLY the convective K
         # and/or the MLE bolus tracer tendency.
+        # ``convection_cfg`` (build_enhanced_diffusion_config) carries the
+        # NEMO zdfevd trigger fields; the bare K_conv/K_bg pair is the legacy
+        # in-situ smooth trigger.
         _conv_cfg = OceanConvectionConfig(
             scheme=convection,
-            enhanced_diffusion=EnhancedDiffusionConfig(
-                K_conv=convection_K_conv, K_bg=convection_K_bg,
-            ),
+            enhanced_diffusion=(
+                convection_cfg if convection_cfg is not None
+                else EnhancedDiffusionConfig(
+                    K_conv=convection_K_conv, K_bg=convection_K_bg)),
         ) if _use_convection else OceanConvectionConfig(scheme="none")
         # --tripole-vmix: NEMO's vertical-mixing CLOSURE on the tripole (the
         # last audited namelist gap — NEMO ORCA1 runs zdftke).  "none"
@@ -1350,7 +1432,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         print(f"[setup] tripole physics ENABLED: "
               f"vmix={tripole_vmix} "
               f"convection={convection if _use_convection else 'none'} "
-              f"(K_conv={convection_K_conv} K_bg={convection_K_bg}) "
+              f"({_conv_cfg.enhanced_diffusion if _use_convection else ''}) "
               f"MLE={'ce=%g' % mle.ce if mle is not None else 'off'} "
               f"IWM={'on' if _use_iwm else 'off'} "
               f"DDM={'on' if _use_ddm else 'off'}")
@@ -5960,6 +6042,38 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "--convection enhanced_diffusion (default 1.0).")
     p.add_argument("--convection-K-bg", type=float, default=1e-5,
                    help="Background diffusivity K_bg [m^2/s] for convection.")
+    # The NEMO zdfevd trigger fields of EnhancedDiffusionConfig (they existed
+    # in the config; only K_conv/K_bg were reachable from here, so every EVD
+    # arm ran the in-situ smooth default). None = the config default.
+    p.add_argument("--convection-n2-mode", type=str, default=None,
+                   choices=["insitu", "insitu_signed", "adiabatic", "nemo_bn2"],
+                   help="Static-stability N^2 the EVD trigger evaluates "
+                        "(NEMO: 'nemo_bn2', the eosbn2 rn2). Requires "
+                        "--convection enhanced_diffusion.")
+    p.add_argument("--convection-n2-eos", type=str, default=None,
+                   choices=["seos", "teos10"],
+                   help="alpha/beta for --convection-n2-mode nemo_bn2 "
+                        "(ORCA1: teos10).")
+    p.add_argument("--convection-trigger", type=str, default=None,
+                   choices=["smooth", "hard"],
+                   help="'hard' = NEMO's N^2 <= threshold switch; 'smooth' = "
+                        "the sigmoid default.")
+    p.add_argument("--convection-n2-threshold", type=float, default=None,
+                   help="N^2 threshold [1/s^2] for the hard trigger "
+                        "(NEMO zdfevd: -1e-12).")
+    p.add_argument("--convection-two-level", action="store_true",
+                   help="NEMO MIN(rn2, rn2b): also fire on the BEFORE "
+                        "tracers. Refused here: this driver has no "
+                        "leap-frog-family outer integrator (now-only, as "
+                        "NEMO under key_RK3).")
+    p.add_argument("--evd-occupancy-every-hours", type=float, default=None,
+                   help="Sample, every H hours, the fraction of wet columns "
+                        "whose first interior interface carries the "
+                        "convective K (|lat|<=2, 220-240E box and global); "
+                        "the mean since the previous row is written to "
+                        "diag_timeseries.csv. Threshold K_conv/2 under "
+                        "--convection enhanced_diffusion, else 50 m2/s "
+                        "(NEMO rn_evd/2) as the control measurement.")
     p.add_argument("--kpp-ri-crit", type=float, default=None,
                    help="Override the KPP critical bulk Richardson number "
                         "(default 0.3 = LMD94/MOM6). RAISING it deepens the "
@@ -6295,6 +6409,24 @@ def main() -> int:
     # preserving for existing callers.
     p = _build_arg_parser()
     args = p.parse_args()
+
+    # EVD trigger flags: validated once here (raise under --convection none)
+    # and consumed by build_tripole only -- on any other grid they would be
+    # accepted and dropped, so refuse them there.
+    if (build_enhanced_diffusion_config(args) is not None
+            and args.grid != "tripole"
+            and any(_flag_set(getattr(args, d, None))
+                    for d in _EVD_TRIGGER_DESTS)):
+        raise SystemExit(
+            "--convection-n2-mode/--convection-n2-eos/--convection-trigger/"
+            "--convection-n2-threshold/--convection-two-level are wired for "
+            f"--grid tripole only, not {args.grid!r}")
+    if args.evd_occupancy_every_hours is not None:
+        if args.grid != "tripole":
+            raise SystemExit("--evd-occupancy-every-hours is wired for "
+                             f"--grid tripole only, not {args.grid!r}")
+        if args.evd_occupancy_every_hours <= 0.0:
+            raise SystemExit("--evd-occupancy-every-hours must be > 0")
 
     # KPP MLD-deepening sensitivity flags are mpas/latlon-only (fail loud).
     _validate_kpp_grid(args.grid, args.kpp_ri_crit, args.kpp_cv, args.kpp_eice,
@@ -6773,6 +6905,7 @@ def main() -> int:
             convection=args.convection,
             convection_K_conv=args.convection_K_conv,
             convection_K_bg=args.convection_K_bg,
+            convection_cfg=build_enhanced_diffusion_config(args),
             ew_cyclic_overlap=(True if args.ew_cyclic_overlap else None),
             tracer_advection=args.tracer_advection,
             mle=mle_cfg, dz_ref_override=_nemo_dz,
@@ -8050,6 +8183,26 @@ def main() -> int:
 
     _csv_cols = ["step", "day", "mean_sst_C", "mean_sss", "max_abs_u",
                  "max_abs_v", "umax_lat", "umax_lon", "umax_lev", "steps_per_s"]
+    # --evd-occupancy-every-hours: the convective K at the first interior
+    # interface, sampled every H hours through diagnose_vertical_K, averaged
+    # since the previous row (a 00Z-only sample would sit at the diurnal
+    # maximum of stratification and read zero by construction).  Added ONLY
+    # when the flag is on so other runs keep the legacy header.
+    _evd_occ_every = None
+    _evd_occ_acc = None
+    if args.evd_occupancy_every_hours is not None:
+        _evd_occ_every = max(1, int(round(
+            args.evd_occupancy_every_hours * 3600.0 / dt)))
+        _evd_occ_acc = [0.0, 0.0, 0.0, 0]     # sums: box, global, box-top3; n
+        # Threshold: K_conv/2 when EVD runs; NEMO's rn_evd/2 on a control
+        # (measures whether the closure alone ever reaches the EVD range).
+        _evd_occ_K = (args.convection_K_conv
+                      if args.convection == "enhanced_diffusion"
+                      else 2.0 * _EVD_OCC_K_THRESHOLD_CONTROL)
+        print(f"[setup] EVD occupancy: every {_evd_occ_every} steps, "
+              f"K >= {0.5 * _evd_occ_K:g} m2/s, cold-tongue box + global; "
+              "each csv row = mean since the previous row (a restarted leg "
+              "starts a fresh window)", flush=True)
     # Prognostic-ice columns (audited output gap: ice growth was invisible in
     # the run record): global ice area [m2], mean concentration over the
     # ice-covered wet cells, max thickness [m] — the _ice_global_stats trio
@@ -8058,6 +8211,10 @@ def main() -> int:
     if ice_config is not None:
         _csv_cols += ["ice_area_m2", "ice_mean_conc", "ice_max_thick_m"]
         _lm_csv = np.asarray(state.land_mask.data)
+    # AFTER the ice columns: the row writer appends ice first, then the EVD
+    # occupancy (codex: header/row order must match or both misalign).
+    if _evd_occ_acc is not None:
+        _csv_cols += ["evd_top_occ_eq", "evd_top_occ_glob", "evd_top3_occ_eq"]
     # Process-0-only CSV under --distributed: every process runs the same host
     # loop on the all-gathered replicated state, so a single writer suffices and
     # avoids N processes clobbering the same file.  On non-IO ranks _csv is None
@@ -8098,6 +8255,12 @@ def main() -> int:
                 row += f",{_ia:.6e},{_ic:.4f},{_ih:.4f}"
             else:  # defensive: header promised the columns — never misalign
                 row += ",nan,nan,nan"
+        if _evd_occ_acc is not None:
+            _n = _evd_occ_acc[3]
+            row += (f",{_evd_occ_acc[0] / _n:.4f},{_evd_occ_acc[1] / _n:.4f}"
+                    f",{_evd_occ_acc[2] / _n:.4f}"
+                    if _n else ",nan,nan,nan")
+            _evd_occ_acc[:] = [0.0, 0.0, 0.0, 0]
         _csv.write(row + "\n")
         _csv.flush()
 
@@ -8395,6 +8558,10 @@ def main() -> int:
             "--kprofile-snapshots is not wired into the --scan-block lane; "
             "drop --scan-block (the standard per-step loop dumps the "
             "diffusivities) or drop --kprofile-snapshots.")
+    if _evd_occ_every is not None and use_scan:
+        raise SystemExit(
+            "--evd-occupancy-every-hours samples diagnose_vertical_K inside "
+            "the per-step loop; drop --scan-block.")
     if int(args.scan_block) > 0 and not use_scan:
         why = ("AB2 tracer time integrator (None->Field carry breaks "
                "lax.scan)" if _tti == "ab2"
@@ -8698,6 +8865,10 @@ def main() -> int:
     # 8-step target applied the forcing for steps 1..8 to that state, advanced
     # twelve physical steps, and then labelled the result step 8. The scan
     # lane already continued the counter; this one did not.
+    if _evd_occ_every is not None and not hasattr(model, "diagnose_vertical_K"):
+        raise SystemExit(
+            "--evd-occupancy-every-hours needs a model with diagnose_vertical_K "
+            "(the lat-lon C-grid / tripole model); this one has none.")
     for step in range(start_step + 1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
         _t_sec = jnp.asarray((step - 1) * dt) if _tide_on else None
@@ -9429,6 +9600,19 @@ def main() -> int:
             # honest accounting; device-side drag is scaling-M2 increment 2).
             _pers_res.count_leaf_full(gathers=len(_upd), uploads=len(_upd))
             state = state._replace(**_upd)
+        if _evd_occ_every is not None and step % _evd_occ_every == 0:
+            _kp = _kprofiles(model, state, sf, dt, z_coord)
+            if "K_H_diag" not in _kp:
+                raise SystemExit(
+                    "--evd-occupancy-every-hours: diagnose_vertical_K returned "
+                    "no K_H_diag (see the [kprofile] line above)")
+            _fb, _fg, _f3 = evd_top_interface_occupancy(
+                _kp["K_H_diag"], state.land_mask.data, lat2d, lon2d,
+                _evd_occ_K)
+            _evd_occ_acc[0] += _fb
+            _evd_occ_acc[1] += _fg
+            _evd_occ_acc[2] += _f3
+            _evd_occ_acc[3] += 1
         if step % diag_every == 0 or step == n_steps:
             state = jax.block_until_ready(state)
             # _diag pulls the 2-D T,S surface slices + the 2-D land mask and

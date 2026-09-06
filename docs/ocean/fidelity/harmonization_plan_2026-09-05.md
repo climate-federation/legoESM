@@ -274,3 +274,11 @@ aux3d linkage and the minimum-level policy, not just counts.
   only +0.12 -> +0.09; the compressibility offset (+4e-5) cannot explain a no-op at N2 -6.6e-4, so the runtime
   firing-fraction diagnostic both reviewers asked for is the discriminator, not a rerun of that arm. Fourway
   figure (9666909) sent. Decisions queued for the user.
+- 19:10 Item 2 (pure addition) done and dual-reviewed: run_omip_core2 flags --convection-n2-mode/-n2-eos/
+  -trigger/-n2-threshold (build_enhanced_diffusion_config; two-level REFUSED: no leap-frog outer integrator
+  here, now-only as NEMO key_RK3) and --evd-occupancy-every-hours (hourly K read through
+  diagnose_vertical_K = the solve's own additive uncapped K; columns evd_top_occ_eq/glob + evd_top3_occ_eq,
+  allowed on a control at 50 m2/s). Fixed from review: csv column order with ice (codex CRITICAL), silent
+  no-op on a missing K key, 0.0==False flag trap, resolved-manifest gate in the arm card (occupancy alone
+  cannot tell the hard bn2 trigger from the legacy smooth one). Tests 21 passed. Arm card _trp_evd_d30
+  drafted with pre-registration; NOT launched (user decision 1 pending).
