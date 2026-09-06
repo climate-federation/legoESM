@@ -110,23 +110,31 @@ def test_l2_gyre_testcase_card_constructs():
     assert model.config.pgf_quadrature == "nemo_trapezoid"
 
 
-def test_legacy_native_gyre_recipe_pgf_pair_no_longer_the_blocker():
-    """OPEN FINDING, NARROWED: the legacy native GYRE recipe still fails.
+def test_legacy_native_gyre_recipe_now_constructs():
+    """CLOSED FINDING.  This test used to assert that the card RAISES.
 
-    The pgf half is fixed (asserted here: the trapezoid pairing is no longer
-    what stops it).  What remains is a SEPARATE, pre-existing tightening from
-    commit 36d4a2f72 on the lane merge-base, which made `rk3_ws` one coupled
-    momentum+tracer stage identity.  `build_nemo_gyre_recipe` sets
-    `momentum_time_integrator="rk3_ws"` (nemo_recipe.py) while leaving
-    `tracer_time_integrator="euler"`, and it also selects
-    `vertical_momentum_scheme="upwind_perturbation"` /
-    `momentum_flux_scheme="upwind"`, neither of which is part of either
-    complete WS-RK3 momentum program.
+    It pinned two separate blockers in turn.  The pgf half was fixed first,
+    and what remained was that ``rk3_ws`` is one coupled momentum+tracer stage
+    identity: the card selected a vertical momentum scheme and a momentum flux
+    scheme that belong to NEITHER complete WS-RK3 momentum program, so the
+    model refused itself at construction.  The old docstring called
+    reconciling that "a SCIENTIFIC CHOICE ... deliberately NOT made here".
 
-    Reconciling that is a SCIENTIFIC CHOICE about what this legacy card should
-    simulate (couple the tracer to rk3_ws, or move momentum off rk3_ws) and is
-    deliberately NOT made here.  This test pins the remaining cause so the
-    finding cannot be mistaken for the pgf one again.
+    User decision 15C made it.  NEMO's GYRE resolves the vector form, whose
+    printed program is "keg + zad + vor" (``dynadv.F90:144``), and
+    ``ln_zad_Aimp`` is ``.false.``, so the card takes NEMO's own vertical
+    momentum advection and drops the adaptive-implicit path.  That was the
+    last missing field, and the card constructs.
+
+    The two fields are asserted BY NAME rather than only through a successful
+    build, so reverting either turns this red with the reason visible instead
+    of a bare construction error.  The pgf guard's own non-vacuity lives in
+    the next test, which still requires the uncertified pairing to raise.
+
+    Constructing is not stepping: the card still cannot take a step, because
+    its z-star coordinate carries no active-cell mask.  That is a separate,
+    newly surfaced finding tracked in the round-29 receipt, and it is why the
+    assertion here stops at construction.
     """
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         LatLonCGridOceanModel,
@@ -134,13 +142,25 @@ def test_legacy_native_gyre_recipe_pgf_pair_no_longer_the_blocker():
     from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
 
     recipe = build_nemo_gyre_recipe()
-    with pytest.raises(ValueError) as excinfo:
-        LatLonCGridOceanModel(
-            recipe.grid, recipe.z_coord, recipe.model_config)
-    message = str(excinfo.value)
-    assert "pgf_quadrature" not in message, (
-        "the pgf allow-list widening did not land: " + message)
-    assert "rk3_ws" in message
+    assert recipe.model_config.vertical_momentum_scheme == "nemo_advective"
+    assert recipe.model_config.adaptive_implicit_vertadv is False
+    LatLonCGridOceanModel(recipe.grid, recipe.z_coord, recipe.model_config)
+
+
+def test_the_ws_rk3_momentum_program_guard_still_bites():
+    """Non-vacuity for the test above: it passes because the card is complete,
+    not because the guard was deleted.  Putting either field back the way it
+    was must refuse the card again."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
+
+    recipe = build_nemo_gyre_recipe()
+    reverted = recipe.model_config._replace(
+        vertical_momentum_scheme="upwind_perturbation")
+    with pytest.raises(ValueError, match="rk3_ws"):
+        LatLonCGridOceanModel(recipe.grid, recipe.z_coord, reverted)
 
 
 def test_trapezoid_quadrature_guard_still_bites_on_uncertified_pgf():
