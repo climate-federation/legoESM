@@ -289,7 +289,17 @@ def _stage3_residual(k_override, *, oracle_root: Path, npz: Path) -> dict:
 
 
 def _wet_row(name, oracle, candidate, wet) -> dict:
-    """One operand row, on WET cells only, at the campaign's exact bar."""
+    """One operand row, on WET cells only, at the campaign's exact bar.
+
+    ``max_relative`` divides by the ORACLE's own magnitude where that is
+    non-zero and by 1.0 where it is not, so on a row whose oracle is
+    identically zero -- ``ah_wslp2`` is exactly that -- the reported number is
+    an ABSOLUTE difference wearing a relative name.  Said here rather than
+    left for a reader to infer from a suspiciously round figure.
+
+    ``largest_difference_cell`` is the argmax of the masked difference, NOT
+    the first differing cell in any order; it is named for what it is.
+    """
     mask = np.asarray(wet, dtype=bool)
     row = bit_row(name, np.asarray(oracle)[mask], np.asarray(candidate)[mask])
     diff = np.abs(np.asarray(oracle) - np.asarray(candidate))
@@ -298,11 +308,13 @@ def _wet_row(name, oracle, candidate, wet) -> dict:
     row["max_relative"] = float(rel.max())
     if row["bit_unequal"]:
         flat = np.argmax(np.where(mask, diff, -1.0))
-        row["first_differing_cell"] = [int(i) for i in
-                                       np.unravel_index(flat, diff.shape)]
-        row["first_differing_pair"] = [
-            float(np.asarray(oracle).ravel()[flat]),
-            float(np.asarray(candidate).ravel()[flat])]
+        # argmax, unravel_index and ravel are all C order, so the index and
+        # the pair below name the SAME cell.
+        row["largest_difference_cell"] = [int(i) for i in
+                                          np.unravel_index(flat, diff.shape)]
+        row["largest_difference_pair"] = [
+            float(np.ascontiguousarray(oracle).ravel()[flat]),
+            float(np.ascontiguousarray(candidate).ravel()[flat])]
     row["dry_cells_unequal"] = int(np.count_nonzero(
         (np.asarray(oracle).view(np.uint64)
          != np.asarray(candidate).view(np.uint64)) & ~mask))
@@ -609,13 +621,13 @@ def main(argv=None) -> int:
         args.json.write_text(text + "\n")
     print(text)
     for row in report["rows"]:
-        cell = row.get("first_differing_cell")
+        cell = row.get("largest_difference_cell")
         print(f"{row['status']:<12} {row['name']:<34} "
               f"wet_unequal {row['bit_unequal']}/{row['n']} "
               f"max {row['absolute_max']:.6g} "
               f"rel {row['max_relative']:.6g} "
               f"dry_unequal {row['dry_cells_unequal']}"
-              + (f" first {cell}" if cell else ""))
+              + (f" argmax {cell}" if cell else ""))
     a = report["k_attribution"]
     print(f"K-ATTRIBUTION difference {a['max_abs_K_difference']:.6g}; "
           f"with the fold removed "

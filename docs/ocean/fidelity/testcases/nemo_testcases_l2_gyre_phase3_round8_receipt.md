@@ -9310,7 +9310,7 @@ and scored them, and then asked the causal question directly.
 bar.  The face rows are the 17400 wet interior faces, the cell rows the 18000
 wet cells of the same 21120-cell box.
 
-| operand | oracle | wet cells unequal | max abs | max relative | first differing cell |
+| operand | oracle | wet cells unequal | max abs | max relative | argmax cell |
 |---|---|---:|---:|---:|---|
 | `K` (the matrix diffusivity) | `zwt_mix` | **17383 / 17400** | **9.66209e-13** | 8.05174e-08 | `[19, 29, 1]` |
 | `K33` (the isoneutral fold) | `ah_wslp2` | **17400 / 17400** | **9.66209e-13** | — | `[19, 29, 1]` |

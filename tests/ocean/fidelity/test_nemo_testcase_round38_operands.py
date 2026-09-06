@@ -99,7 +99,7 @@ def test_wet_row_goes_red_on_one_wet_ulp():
     candidate[1, 2, 0] = np.nextafter(2.0, np.inf)
     row = M._wet_row("t", oracle, candidate, np.ones_like(oracle, dtype=bool))
     assert row["bit_unequal"] == 1 and row["status"] != "AT-BAR"
-    assert row["first_differing_cell"] == [1, 2, 0]
+    assert row["largest_difference_cell"] == [1, 2, 0]
 
 
 # --------------------------------------------------------------------------
