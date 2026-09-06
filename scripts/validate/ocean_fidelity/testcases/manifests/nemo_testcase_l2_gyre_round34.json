@@ -7,13 +7,17 @@
   "commits": {
     "049653f6a40f": "DECISION 19 -- the tanks' barotropic removal",
     "24973be2e71b": "the second diff review's findings; the offline comparison",
+    "34fa34cb5237": "the admission gate stamps its tree; the ratchet floor moves 66 -> 67",
     "6ea69c28df01": "addendum 1 -- the claim review broke PB2's mechanism",
+    "8cf0721aeb3b": "the round-34 receipt",
     "8da3475fbc3d": "DECISION 17 -- the mask guard moves below the early return",
     "947aa1e43a8e": "the first diff review's four defects",
     "9ba367885ba8": "addendum 2 -- decisions 19 and 17 registered before either moved",
     "a6a96b933bfb": "the round-34 preregistration",
     "d9e77072fee5": "the admission gate learns every card; run.sh falls through",
-    "e83f1076747c": "the tanks' v face retraction; n_unequal on the shared score"
+    "e83f1076747c": "the tanks' v face retraction; n_unequal on the shared score",
+    "f3d1c8761099": "two map anchors this round's line shifts moved, two ambiguous ones pinned",
+    "ff1d23baed27": "eight of this round's own citations re-anchored"
   },
   "concurrency_incident": {
     "discarded": "round34/DISCARDED_contaminated_stage_ts.log -- every measurement between 05:14 and 05:25 is treated as contaminated",
@@ -23,6 +27,15 @@
   },
   "date": "2026-09-06",
   "format": "nemo-testcase-l2-gyre-round34-v1",
+  "gates": {
+    "admission_plants": "both exit non-zero",
+    "focused_tests": "109 passed in 302 s across the eight files this round touched, including test_nemo_recipe at 24 passed",
+    "full_ocean_fidelity_suite": "UNMEASURED this round, and said so rather than implied: the machine was carrying nine model arms and a leftover suite from another agent",
+    "offline_compare_plants": "worsen-3ulp and at-bar-to-debt exit non-zero; improve passes",
+    "receipt_citation_gate": "PASS, 159 citations, 0 unmapped, 0 failing; every planted shift fires",
+    "tank_rule12_plants": "both exit non-zero",
+    "worktree_stamp_ratchet": "10 passed; grow-only floor 66 -> 67"
+  },
   "no_nemo_executable_was_run_by_the_agent": true,
   "no_nemo_source_was_edited": true,
   "part_a2_a3_trajectories": {
@@ -699,6 +712,7 @@
     "/tmp/codex-gyre-r34-before at 947aa1e43a8e (the BEFORE arm)",
     "/tmp/codex-gyre-r34-a2 at 049653f6a40f (the decision-19 arm)"
   ],
+  "receipt_sha256_at_8cf0721aeb3b_plus_reanchors": "e0e11c21de44d432bfcb480c3a6dc3be62bd5fe67bfc709399d60c3a7abb0509",
   "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
   "reviews": {
     "claim": "one fresh independent agent, before any Part-B code: refuted PB2's mechanism, collapsed a self-contradicting threshold, registered the pre-zdf reconstruction gap, and named a discriminator the preregistration had missed",
