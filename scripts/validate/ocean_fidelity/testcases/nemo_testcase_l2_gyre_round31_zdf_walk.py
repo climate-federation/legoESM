@@ -96,6 +96,25 @@ def nemo_explicit_update(rec: dict, face: str) -> np.ndarray:
     return (_fortran(rec, f"{p}_Kbb_in") + rdt * _fortran(rec, f"{p}_Krhs_in")) * mask
 
 
+def nemo_barotropic_removed(rec: dict, face: str) -> np.ndarray:
+    """The explicit update after ``dynzdf.F90:149-150`` only.
+
+    ``puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kaa) - uu_b(ji,jj,Kaa) ) *
+    umask(ji,jj,jk)`` on levels ``1..jpkm1``, under
+    ``IF( ln_drgimp .AND. ln_dynspg_ts )``, both true on this deck.  It is a
+    separate boundary from :func:`nemo_pre_solve_vector` because legoESM adds
+    the bottom stress inside its own solver even if it removes the barotropic
+    mode earlier.
+    """
+    p = "uu" if face == "u" else "vv"
+    mask = _fortran(rec, "umask" if face == "u" else "vmask")
+    ub = np.asarray(rec["arrays"][f"{p}_b_Kaa"], dtype=np.float64)
+    jpkm1 = int(rec["header"]["jpkm1"])
+    out = nemo_explicit_update(rec, face).copy()
+    out[..., :jpkm1] = (out[..., :jpkm1] - ub[..., None]) * mask[..., :jpkm1]
+    return out
+
+
 def nemo_pre_solve_vector(rec: dict, face: str) -> np.ndarray:
     """The explicit update plus ``dynzdf.F90:149-150`` and ``:156-159``.
 
@@ -104,19 +123,14 @@ def nemo_pre_solve_vector(rec: dict, face: str) -> np.ndarray:
     split-explicit banner).  The barotropic removal is applied on levels
     ``1..jpkm1``; the bottom stress lands on ``mbku``/``mbkv`` only.
     """
-    p, b = ("uu", "uu_b_Kaa") if face == "u" else ("vv", "vv_b_Kaa")
-    mask = _fortran(rec, "umask" if face == "u" else "vmask")
+    b = "uu_b_Kaa" if face == "u" else "vv_b_Kaa"
     e3 = _fortran(rec, "e3u_Kaa" if face == "u" else "e3v_Kaa")
     mbk = np.asarray(rec["arrays"]["mbku" if face == "u" else "mbkv"])
     ub = np.asarray(rec["arrays"][b], dtype=np.float64)
     cd = np.asarray(rec["arrays"]["rCdU_bot"], dtype=np.float64)
-    rdt = float(rec["arrays"]["rDt"])
-    zdt_2 = rdt * 0.5                                    # dynzdf.F90:97
-    jpkm1 = int(rec["header"]["jpkm1"])
+    zdt_2 = float(rec["arrays"]["rDt"]) * 0.5            # dynzdf.F90:97
 
-    out = nemo_explicit_update(rec, face).copy()
-    # :149-150 -- remove the barotropic velocity, levels 1..jpkm1 only.
-    out[..., :jpkm1] = (out[..., :jpkm1] - ub[..., None]) * mask[..., :jpkm1]
+    out = nemo_barotropic_removed(rec, face)          # :121-122 then :149-150
     # :153-159 -- add the bottom stress due to the barotropic component only.
     # rCdU_bot(ji+1,jj) for u; rCdU_bot(ji,jj+1) for v (dynzdf.F90:157,159).
     shifted = np.roll(cd, -1, axis=0 if face == "u" else 1)
@@ -222,15 +236,28 @@ def run_pre_solve(oracle_root: Path, *, plant: bool = False) -> dict:
     rec = read_zdf_matrix(record)
     card, masks, fields, backend = _model_kt1("pre_solve")
     nx, ny, nz = DIMS
+    # The three boundaries dyn_zdf passes through before its matrix is built.
+    # Which one the model's pre-implicit exposure IS is measured, not assumed.
+    boundaries = {
+        "A_explicit_update": (nemo_explicit_update, "dynzdf.F90:121-122"),
+        "B_barotropic_removed": (nemo_barotropic_removed, "dynzdf.F90:149-150"),
+        "C_pre_solve_vector": (nemo_pre_solve_vector, "dynzdf.F90:156-159"),
+    }
     rows = []
-    for face in ("u", "v"):
-        oracle = _xyz(nemo_explicit_update(rec, face).ravel(order="F"), nx, ny, nz)
-        candidate = fields[face]
-        rows.append(score(
-            f"{CASE}.kt1.stage3.zdf_explicit_update.{face}",
-            oracle[..., :candidate.shape[-1]], candidate, masks[face],
-            plant=plant and face == "u"))
-    status = "AT-BAR" if all(r["status"] == "AT-BAR" for r in rows) else "DEBT"
+    for label, (build, cite) in boundaries.items():
+        for face in ("u", "v"):
+            oracle = _xyz(build(rec, face).ravel(order="F"), nx, ny, nz)
+            candidate = fields[face]
+            row = score(
+                f"{CASE}.kt1.stage3.zdf_entry_{label}.{face}",
+                oracle[..., :candidate.shape[-1]], candidate, masks[face],
+                plant=plant and face == "u" and label == "A_explicit_update")
+            row["nemo_statement"] = cite
+            rows.append(row)
+    best = min(rows, key=lambda r: r["absolute_max"])
+    status = "AT-BAR" if all(
+        r["status"] == "AT-BAR" for r in rows
+        if r["name"].split(".")[-2] == best["name"].split(".")[-2]) else "DEBT"
     if plant:
         require(status == "DEBT" and rows[0]["absolute_max"] >= 0.9,
                 "planted pre-solve violation did not fire")
@@ -239,10 +266,13 @@ def run_pre_solve(oracle_root: Path, *, plant: bool = False) -> dict:
         "format": "nemo-testcase-l2-gyre-round31-zdf-walk-v1",
         "case": CASE,
         "mode": "pre_solve",
-        "boundary": ("dynzdf.F90:121-122, the explicit stage update, taken "
-                     "BEFORE the barotropic removal at :149-150 and the "
-                     "bottom-stress addition at :156-159, which legoESM "
-                     "performs inside its implicit solver"),
+        "boundary": ("all three of dyn_zdf's entry boundaries, scored in one "
+                     "run: A the explicit stage update (dynzdf.F90:121-122), "
+                     "B A after the barotropic removal (:149-150), C B after "
+                     "the barotropic bottom-stress addition (:156-159), which "
+                     "is the record's own uu_Kaa_pre"),
+        "closest_boundary": best["name"],
+        "closest_absolute_max": best["absolute_max"],
         "execution_regime": "production_jit",
         "precision_policy": "fp64",
         "jax_backend": backend,
@@ -271,11 +301,23 @@ def _column_uniformity(err: np.ndarray, mask: np.ndarray) -> dict:
         mean = np.nanmean(e, axis=-1)
     ratio = np.where(peak > 0, span / np.where(peak > 0, peak, 1.0), 0.0)
     uniform = live & (ratio <= UNIFORM_TOL)
+    # A field with no multi-level column cannot discriminate anything, and a
+    # reduction over an empty selection raises rather than saying so -- report
+    # the census and refuse to name a fraction.
+    if not live.any():
+        return {
+            "columns_with_two_or_more_wet_levels": 0,
+            "columns_column_uniform_to_1e-2": 0,
+            "fraction_column_uniform": None,
+            "median_spread_over_peak": None,
+            "max_abs_column_mean": None,
+            "max_abs_error": (float(np.nanmax(np.abs(e[mask])))
+                              if mask.any() else None),
+        }
     return {
         "columns_with_two_or_more_wet_levels": int(live.sum()),
         "columns_column_uniform_to_1e-2": int(uniform.sum()),
-        "fraction_column_uniform": (float(uniform.sum() / live.sum())
-                                    if live.any() else None),
+        "fraction_column_uniform": float(uniform.sum() / live.sum()),
         "median_spread_over_peak": float(np.median(ratio[live])),
         "max_abs_column_mean": float(np.nanmax(np.abs(mean[live]))),
         "max_abs_error": float(np.nanmax(np.abs(e[mask]))),
@@ -315,11 +357,14 @@ def run_depth_profile(oracle_root: Path, *, plant: bool = False) -> dict:
             })
         profiles[face] = per_level
         uniformity[face] = _column_uniformity(err, mask)
+    fractions = [u["fraction_column_uniform"] for u in uniformity.values()]
     verdict = (
-        "BAROTROPIC-CORRECTION CANDIDATE"
-        if all(u["fraction_column_uniform"] >= 0.9 for u in uniformity.values())
+        "NO OWNER NAMED"
+        if any(f is None for f in fractions)
+        else "BAROTROPIC-CORRECTION CANDIDATE"
+        if all(f >= 0.9 for f in fractions)
         else "IMPLICIT-SOLVE CANDIDATE"
-        if all(u["fraction_column_uniform"] < 0.10 for u in uniformity.values())
+        if all(f < 0.10 for f in fractions)
         else "NO OWNER NAMED")
     if plant:
         require(verdict == "BAROTROPIC-CORRECTION CANDIDATE",
