@@ -326,7 +326,7 @@ CITATION_MAP = {
         ('if getattr(z_coord, "linear_free_surface", False):', 1),
         ('return e3t_0', 1),
         2],
-    'provenance.py:28': 'def git_sha(*, allow_dirty: bool = False, repo: str | Path | None = None) -> str:',
+    'provenance.py:38': 'def git_sha(*, allow_dirty: bool = False, repo: str | Path | None = None) -> str:',
     'cpp_GYRE_BARE.fcm:1': 'key_linssh key_vco_1d  key_RK3',
     'cpp_GYRE_OMIP_L2_P3_SM.fcm:1': 'key_qco key_vco_1d3d key_RK3',
     'round19_oracle_v2_external/ocean.output:338': 'ice shelf cavities             ln_isfcav =  F',
