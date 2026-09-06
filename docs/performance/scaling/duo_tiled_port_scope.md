@@ -630,3 +630,27 @@ Round-cutting levers (claim sent to codex + GLM): R1 one-round refresh with
 diagonal corner sends (3 -> 2 rounds), R2 batch per-level firings across k
 (fewer firings), R3 fold the refresh into the body's exchange round (1
 round; soundness at face seams to be reviewed).
+
+## M8-B/C results (2026-09-06), C96 kt=3, 54 ranks, healthy fabric, all bitwise
+
+| change | s/step |
+|---|---|
+| baseline (per-level tracer scans, full 2·pad refresh with padded copies) | 0.256 |
+| + tracer sub-cycle batched over levels (runtime firings 244 -> ~100) | 0.253 |
+| + D-grid barriers batched over levels, in-place slab placement | 0.237 |
+| + per-firing refresh restricted to face-edge bands (depth ng+1, flag) | 0.226 |
+| diagnostic floor: no per-firing refresh at all (incorrect) | 0.189 |
+
+Neither collective count (packing: 0.261) nor firing count (tracer
+batching: -3 ms) nor bytes alone (bands: -11 ms for -85 % bytes) explains
+the refresh's cost; the padded-copy placement did (-19 ms).  GLM and
+codex both read the residual as XLA:CPU per-thunk dispatch of the many
+small slice/update/ppermute ops per array per round; the discriminating
+measurement (op-count sweep at fixed bytes, or the profiler's thunk gaps)
+and the structural fix (stack the firing's arrays so the refresh is one
+chain of ops per firing, and pack the two bands per direction: 8 -> 4
+ppermutes per array) are next.  Reviews: codex PASS on the semantics of
+all four changes (independent enumeration of the placement over 2464
+geometries; ng+1 tight because the barriers write the edge node), HOLD
+items fixed in fbc519e36; GLM: corners delivered by round composition,
+ng+1 minimal (depth 3 differs).
