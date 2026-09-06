@@ -269,3 +269,24 @@ def test_isopycnal_depth_reports_heave_as_displacement():
     ok = np.isfinite(z0) & np.isfinite(z1) & (z0 > 40.0) & (z0 < 300.0)
     assert ok.sum() >= 3
     assert np.allclose(z1[ok] - z0[ok], 30.0, atol=2.0)
+
+
+def test_surface_profile_sees_a_lens_the_layer_mean_hides():
+    # One well-mixed column and one with a warm 3 K lens in the top 10 m over
+    # colder water: the surface profile must separate them by T(0.5)-T(20).
+    zc = np.array([0.5, 1.6, 2.7, 3.9, 5.1, 6.5, 8.1, 9.8, 11.8, 14.0, 16.5,
+                   19.4, 22.8, 26.7, 31.1, 36.1, 41.8, 48.2, 55.4])
+    mixed = np.full(zc.size, 23.0)
+    lens = np.where(zc < 10.0, 26.0, 22.0)
+    T = np.stack([mixed, lens])
+    lat = np.array([0.0, 0.0]); lon = np.array([225.0, 235.0])
+    wet = np.array([True, True])
+    p_mixed = _MOD._surface_profile(T[:1], lat[:1], lon[:1], wet[:1], zc, None,
+                                   2.0, 220.0, 240.0)
+    p_lens = _MOD._surface_profile(T[1:], lat[1:], lon[1:], wet[1:], zc, None,
+                                  2.0, 220.0, 240.0)
+    assert p_mixed[0] - p_mixed[5] == pytest.approx(0.0)
+    assert p_lens[0] - p_lens[5] > 2.5
+    # a box with no column returns NaN rather than a number
+    assert np.isnan(_MOD._surface_profile(T, lat, lon, wet, zc, None,
+                                         2.0, 100.0, 120.0)).all()

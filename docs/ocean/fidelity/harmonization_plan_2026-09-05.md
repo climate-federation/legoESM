@@ -239,3 +239,18 @@ aux3d linkage and the minimum-level policy, not just counts.
   previous MPAS baseline rescored with the same command (card _score_mpas_unified_d30, job 9664889):
   0.50 / 0.54 / +1.08 -> pre-reg met, small improvement on all three, no regression. (The table's
   earlier 0.34 SSS for MPAS d30 was a different scoring.) Maps sent.
+- 17:20 trp_base2 done (9657918; maps sent): SST 0.500/+0.06, SSS 0.427, nino3 +1.12, nino34 +1.00,
+  Antarctic SST +0.22, Arctic -0.07, NH-mid -0.33; EUC 200/220/240E 0.347/0.204/0.226 (= rung 1).
+  Control trp_unified180 rescored like-for-like (card _score_prev_d30 ARM=..., job 9665611): SST
+  0.511, SSS 0.426, nino3 +1.30, polar SST identical -> pre-reg met except nino3 by 0.02 (ceiling
+  +1.10). Box budget on base2 (9665616): day-15 50-150 m meridional -14.0 Sv (control -12.9, NEMO
+  +4.6) -> the shallow cell is unchanged by the re-baseline, as expected. max|v| 2.57 m/s near
+  (-0.7, 260E) at d30 (control 2.03, rung 1 2.59): east-Pacific equatorial spike grows with the
+  equatorial A_h 500; PLAUSIBLE grid-scale, not opened.
+- 17:30 NEW READING of the slab table (job 9665615): at 220-240E our SST is 25.9 vs NEMO 23.2 while
+  our 0-50 m mean is 22.0 vs NEMO 22.3 (colder). Direct profile: ours falls 25.9 -> 22.2 over the
+  top 19 m, NEMO 23.2 -> 22.5. The cold-tongue warm bias is a thin surface LENS over water that is
+  already as cold as NEMO's; a top-50 m mixed like NEMO's would give ~22.9, i.e. slightly COLD.
+  Both cards run --dm2dc and --sw-rgb-chl (RGB branch confirmed live in ocean_pe_latlon_cgrid).
+  Probe extended (--surface-profile, card _surface_lens.sbatch, job 9666071: three grids, d15/d30,
+  four boxes) to see whether the lens is shared and when it forms.

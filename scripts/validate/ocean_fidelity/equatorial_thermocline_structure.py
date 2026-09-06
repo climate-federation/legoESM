@@ -263,6 +263,30 @@ def _band_table(T, lat, lon, wet, zc, z20_fn, halfwidth, bins, depth_max,
 # warms like the others (2026-09-05).
 _LAYERS = ((0.0, 50.0), (50.0, 150.0), (150.0, 300.0))
 
+# Near-surface lens probe (2026-09-06): the day-30 slab table showed a box
+# whose SST was 2.7 C warmer than NEMO while its 0-50 m mean was colder --
+# a thin warm lens over cold water, which the layer means cannot see.  The
+# box-mean T is interpolated from each model's own levels to common depths.
+_SURFACE_DEPTHS = np.array([0.5, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0])
+
+
+def _surface_profile(T, lat, lon, wet, zc, area, halfwidth, lo, hi,
+                     depths=_SURFACE_DEPTHS) -> np.ndarray:
+    """Area-weighted box-mean T at ``depths`` (linear in z; first level is
+    held constant above its own centre).  NaN where a depth is below the
+    box's shallowest column."""
+    box = wet & (np.abs(lat) <= halfwidth) & (lon >= lo) & (lon < hi)
+    if not box.any():
+        return np.full(depths.size, np.nan)
+    w = (area if area is not None else np.cos(np.radians(lat)))[box]
+    Tb = T[box]
+    out = np.empty(depths.size)
+    for k, d in enumerate(depths):
+        col = np.array([np.interp(d, zc, row) for row in Tb])
+        ok = np.isfinite(col) & (d <= np.nanmax(zc))
+        out[k] = np.sum(w[ok] * col[ok]) / np.sum(w[ok]) if ok.any() else np.nan
+    return out
+
 
 def _layer_mean_T(T: np.ndarray, zc: np.ndarray, z0: float, z1: float) -> np.ndarray:
     dz = np.gradient(zc)
@@ -301,6 +325,11 @@ def main() -> int:
                          "diapycnal-mixing discriminator)")
     ap.add_argument("--isopycnal-lon-lo", type=float, default=200.0)
     ap.add_argument("--isopycnal-lon-hi", type=float, default=260.0)
+    ap.add_argument("--surface-profile", action="store_true",
+                    help="box-mean T at common depths over the top 50 m "
+                         "(the warm-lens probe), late and early states")
+    ap.add_argument("--surface-lon-lo", type=float, default=220.0)
+    ap.add_argument("--surface-lon-hi", type=float, default=240.0)
     a = ap.parse_args()
     if len(a.snapshot) != len(a.label):
         raise SystemExit("--snapshot and --label must be given in pairs")
@@ -378,6 +407,34 @@ def main() -> int:
                     f"{tables[o][j][idx] - early[o][j][idx]:>14.4g}"
                     for o in order)
                 print(f"{f'{lo:.0f}-{hi:.0f}E':>12}{cells}")
+            print()
+
+    if a.surface_profile:
+        lo, hi = a.surface_lon_lo, a.surface_lon_hi
+        print(f"=== Near-surface T profile [C], |lat| <= {a.lat_halfwidth}, "
+              f"{lo:.0f}-{hi:.0f}E, box mean at common depths (each model's "
+              f"own levels, linear in z; NEMO 5-day mean) ===")
+        print("SST above the 0-50 m mean by more than NEMO = a warm lens the "
+              "mixing does not erode.\n")
+        stages = [("late", a.snapshot, a.nemo_rec)]
+        if a.snapshot_early:
+            stages.append(("early", a.snapshot_early, a.nemo_rec_early))
+        for stage, snaps, rec in stages:
+            prof = {}
+            for snap, lab in zip(snaps, a.label):
+                T, lat, lon, wet, zc, area = _flatten(snap)
+                prof[lab] = _surface_profile(T, lat, lon, wet, zc, area,
+                                             a.lat_halfwidth, lo, hi)
+            T, lat, lon, wet, zc, area = _nemo_columns(a.nemo_gridt, rec)
+            prof["NEMO"] = _surface_profile(T, lat, lon, wet, zc, area,
+                                            a.lat_halfwidth, lo, hi)
+            print(f"--- {stage} (NEMO record {rec}) ---")
+            print(f"{'depth m':>10}" + "".join(f"{o:>12}" for o in order))
+            for k, d in enumerate(_SURFACE_DEPTHS):
+                print(f"{d:>10.1f}" + "".join(
+                    f"{prof[o][k]:>12.2f}" for o in order))
+            print(f"{'T(0.5)-T(20)':>10}" + "".join(
+                f"{prof[o][0] - prof[o][5]:>12.2f}" for o in order))
             print()
 
     if a.isopycnal:
