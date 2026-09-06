@@ -9705,8 +9705,14 @@ which is exactly the number this round added.  Three of them named the COMPILED
 ppsrc's line numbers as though they were the shipped source's and one anchored
 on a brace; the gate refused all four before this was written.
 
-The full ocean-fidelity suite at the final tip, on a detached worktree:
+The full ocean-fidelity suite on a detached worktree
+(`/tmp/codex-gyre-r38-suite`), stamped at `b82d01c4e26b`:
 **`999 passed, 7 skipped, 18 deselected in 2489.84s`**, exit 0, zero failures.
+ONE code commit lands after that stamp — the plant's per-row checksum,
+`af1a46e9202c`, in this round's own gate — and it is covered instead by that
+gate's own test file (17 passed at the final tip) and by the three plant runs,
+which are themselves stamped at the tip.  Everything else after it is this
+receipt.  The citation gate above was re-run at the final tip and exits 0.
 
 **A RETRACTION ABOUT THAT RUN.**  Mid-round it was reported as anomalously
 slow — apparently stalled at 63 per cent for over an hour of CPU while a
