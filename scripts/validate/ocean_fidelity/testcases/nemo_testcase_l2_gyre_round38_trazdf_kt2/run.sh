@@ -234,11 +234,23 @@ cp "$work_manifest"/*.sha256 "$TARGET_RUN/"
     >>run.user.time.log
 )
 
-# TWIN IDENTITY.  RAW byte identity against the ROUND-37 run is the CRITERION
-# here, not a preferred-but-optional claim: this delta widens an arm from one
-# step to two and must not move step one by a single bit.  (Round 37's own
-# comment here said the opposite, because THAT delta legitimately lengthened
-# one record; it is round-37 text and does not describe this run.)
+# TWIN IDENTITY.  RAW byte identity against the ROUND-37 run is REPORTED for
+# every record and REQUIRED for one -- the kt = nit000 trazdf record this arm
+# reads.  Everything else is decided by the CONSUMED-FIELD admission below.
+#
+# ROUND 39: THE BLANKET RAW RULE WAS WRONG AND IT REFUSED A GOOD RUN.  NEMO's
+# stream dumps write whole work arrays INCLUDING the nn_hls halo, which NEMO
+# neither owns nor initialises, and one record carries a zFw slot the executed
+# branch has not defined at the write point.  Those bytes are uninitialised
+# memory: they differ between two runs of the SAME executable, so raw identity
+# is not attainable and a rule that demands it refuses runs that changed no
+# model state.  That is precisely why this campaign has a consumed-field
+# admission gate, and this script already ran it four lines further down --
+# the log line printed here even said "falls through to the consumed-field
+# admission" while the next block refused on it.  Measured on this
+# acquisition: 8 of 52 records differ by 4-52 bytes, EVERY differing element
+# is halo or the registered undefined zFw slot, every value is subnormal
+# garbage of order 1e-310, and the restart and mesh_mask are byte-identical.
 : >"$TARGET_RUN/round38_raw_twin_cmp.log"
 for source_record in "$SOURCE_RUN"/oracle_*.bin; do
   record=${source_record##*/}
@@ -253,13 +265,29 @@ for source_record in "$SOURCE_RUN"/oracle_*.bin; do
       "$record"
   fi
 done | tee -a "$TARGET_RUN/round38_raw_twin_cmp.log"
-# EVERY record of round 37 must come back byte-identical, the kt = nit000
-# trazdf record INCLUDED.  Widening the arm from one step to two must not move
-# step one by a single bit; if it does, the delta is not WRITE-only.
-if grep -q '^RAW_DIFFERS' "$TARGET_RUN/round38_raw_twin_cmp.log"; then
-  printf 'REFUSE: widening the arm moved a round-37 record:\n' >&2
-  grep '^RAW_DIFFERS' "$TARGET_RUN/round38_raw_twin_cmp.log" >&2
+# THE ONE RECORD THAT MUST BE RAW-IDENTICAL is the kt = nit000 trazdf record:
+# it is the record every round-35/37/38 arm scores against, so a single moved
+# bit in it would invalidate them, and it carries no undefined slot.
+if ! grep -q "^RAW_IDENTICAL $KT1_RECORD\$" \
+     "$TARGET_RUN/round38_raw_twin_cmp.log"; then
+  printf 'REFUSE: widening the arm moved the kt=1 trazdf record\n' >&2
   exit 71
+fi
+# EVERY OTHER round-37 record must come back with identical CONSUMED FIELDS --
+# same instrument, same bar as the round-29 admission below, but against the
+# run this delta was derived from.  An owned cell of a defined field that
+# moved is a refusal; a halo or undefined-slot byte is admitted and PRINTED.
+python "$ADMISSION" --baseline "$SOURCE_RUN" --candidate "$TARGET_RUN" \
+  --twin /nonexistent --identical "$FINAL_RESTART" mesh_mask.nc \
+  --allowed-new "$NEW_RECORD" \
+  --output "$TARGET_RUN/round38_source_admission.json" \
+  || { printf 'REFUSE: a round-37 consumed field moved\n' >&2; exit 71; }
+if python "$ADMISSION" --baseline "$SOURCE_RUN" --candidate "$TARGET_RUN" \
+     --twin /nonexistent --identical "$FINAL_RESTART" mesh_mask.nc \
+     --allowed-new "$NEW_RECORD" --plant-consumed \
+     >"$TARGET_RUN/round38_source_admission_plant.json" 2>&1; then
+  printf 'REFUSE: the source-admission plant did not turn the gate red\n' >&2
+  exit 72
 fi
 # And the whole point of the acquisition: the SECOND record must exist and
 # must NOT be a copy of the first.
