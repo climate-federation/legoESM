@@ -514,20 +514,29 @@ def nemo_tracer_tridiagonal(
     ``lower[..., 0]`` and ``upper[..., -1]`` are exact zeros, matching NEMO's
     ``zwt(:,1) = 0`` (``trazdf.F90:204``) and its unwritten bottom face.
 
-    TWO DEVIATIONS FROM NEMO ARE DELIBERATE AND VISIBLE HERE, rather than
-    buried: each face coefficient is multiplied by ``interface_wet`` and each
-    dry diagonal is replaced by ``1.0``, where NEMO relies on ``avt`` being
-    masked and leaves its dry diagonal at ``e3t`` (``trazdf.F90:219-221``).
-    On a card with no dry cell inside the scored box the two agree; on one
-    with interior topography they need not, and a gate that scores this
-    function on such a card is the way to find out.
+    ONE DEVIATION FROM NEMO REMAINS AND IS VISIBLE HERE, rather than buried:
+    each face coefficient is multiplied by ``interface_wet``, where NEMO
+    relies on ``avt`` being masked at a dry face.  Given NEMO's own masked
+    ``avt`` the two agree bit for bit; given a caller whose ``K`` is NOT
+    masked they need not, and no gate can see the difference until a card
+    supplies such a ``K``.  The dry-diagonal substitution that used to sit
+    beside it is gone -- see the comment at the return.
     """
     # ``dtype`` is threaded rather than taken from ``e3t_after`` so the
     # extraction is byte-exact for the pair solve, whose working dtype is the
     # RHS's; the two agree in every production call and the parameter exists
     # only so that "agree" is not an assumption.
     dtype = e3t_after.dtype if dtype is None else dtype
-    zero = jnp.zeros(e3t_after.shape[:-1] + (1,), dtype=dtype)
+    # NEMO's two boundary slots are NEGATIVE zeros, not absent.  It sets
+    # zwt(:,1) = 0 (trazdf.f90:419) and then writes zwi(ji,1) =
+    # -p2dt*zwt(ji,1)/e3w (:443), which is -0.0 for any positive e3w; the
+    # bottom zws(ji,jpkm1) = -p2dt*zwt(ji,jpk)/e3w (:444) is -0.0 whenever the
+    # matrix diffusivity vanishes at jk = jpk, which the round-35 gate reports
+    # as a measured condition rather than assuming.  Neither slot is ever read
+    # by the recurrences -- they use lower[1:] and upper[:-1] -- so this
+    # changes no arithmetic; it stops the assembly from differing from NEMO's
+    # in bits that a gate at the exact bar can see.
+    zero = jnp.full(e3t_after.shape[:-1] + (1,), -0.0, dtype=dtype)
     wet_f = jnp.asarray(wet, dtype=dtype)
     interface_wet = wet_f[..., 1:] * wet_f[..., :-1]
     product = jax.lax.optimization_barrier(
@@ -553,8 +562,15 @@ def nemo_tracer_tridiagonal(
         upper = upper - dt_a * jnp.maximum(w_bottom, 0.0)
         diagonal = diagonal + dt_a * (
             jnp.maximum(w_top, 0.0) - jnp.minimum(w_bottom, 0.0))
-    diagonal = jnp.where(wet_f > 0.0, diagonal,
-                         jnp.asarray(1.0, dtype=dtype))
+    # NEMO writes trazdf.f90:445 UNCONDITIONALLY, wet or dry, and relies on
+    # avt being masked so that a dry row reduces to its own e3t.  legoESM used
+    # to substitute 1.0 on every dry row, which differed from NEMO on all 3120
+    # dry cells of GYRE's scored box by up to 299.71.  The substitution is
+    # gone; what makes that safe is the same thing that makes it safe in NEMO,
+    # namely that the layer thickness is strictly positive below the seafloor
+    # as well as above it.  That is a PRECONDITION ON THE CALLER, and it is
+    # discharged by measurement -- the kt=1..10 trajectories of all three NEMO
+    # cards -- not by an assertion this function cannot make under jit.
     return lower, diagonal, upper
 
 
