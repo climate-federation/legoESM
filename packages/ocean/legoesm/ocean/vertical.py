@@ -64,17 +64,27 @@ def nemo_qco_live_t_thickness(
     if e3t_0 is None:
         e3t_0 = getattr(z_coord, "nemo_e3t_0", None)
     active = getattr(z_coord, "is_active", None)
-    if e3t_0 is None or active is None:
+    if e3t_0 is None:
         raise ValueError(
-            "literal NEMO QCO e3t requires explicit/reference nemo_e3t_0 "
-            "and is_active")
+            "literal NEMO QCO e3t requires explicit/reference nemo_e3t_0")
     sr = nemo_source_round
     eta = jnp.asarray(eta, dtype=dtype)
     H = jnp.asarray(H_bathy, dtype=dtype)
     e3t_0 = jnp.asarray(e3t_0, dtype=dtype)
-    tmask = jnp.asarray(active, dtype=dtype)
     if getattr(z_coord, "linear_free_surface", False):
         return e3t_0
+    # DECISION 17, asked and answered by the user ("Yes"): the MASK half of
+    # the guard sits BELOW the linear-free-surface early return, because that
+    # path returns e3t_0 untouched and never reads a mask -- refusing a caller
+    # for an operand its own arm never consumes is a defect, not a check.  The
+    # e3t_0 half stays ABOVE, because the early return needs it.  The
+    # moving-thickness path below is unchanged and still refuses a missing
+    # mask, which is the whole point of the guard.
+    if active is None:
+        raise ValueError(
+            "literal NEMO QCO e3t requires is_active on the moving-thickness "
+            "path")
+    tmask = jnp.asarray(active, dtype=dtype)
     one = jnp.asarray(1.0, dtype=dtype)
     ssmask = tmask[..., 0]
     denominator = sr(sr(H + one) - ssmask)
