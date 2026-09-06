@@ -7765,14 +7765,17 @@ now has an arm that goes red on it.
 
 **THE WAIVER WAS ARM-BLIND.**  The gate's one admission ground that is not the
 halo -- a slot the writer has not defined at the write point -- was hardcoded
-for `zFw`.  That is true only under `ln_dynadv_vec = T`, where the write at
-`stprk3_stg.F90:343-345` precedes the `tra_adv_trp` call that creates `zFw`,
-which the source says at `:318`.  Under `ln_dynadv_vec = F` the flux-form
-branch at `:326-334` fills `zFw = e1e2t*ww` BEFORE the same write, so the slot
-is a real state-carrying field.  **GYRE resolves T; both tanks resolve F.**
+for `zFw`.  That is true only under `ln_dynadv_vec = T`, where the record is written before
+the `tra_adv_trp` call that creates `zFw` (`stprk3_stg.F90:463`), which the
+source says in as many words at `stprk3_stg.F90:287`.  Under
+`ln_dynadv_vec = F` the flux-form branch at `stprk3_stg.F90:295-301` fills
+`zFw = e1e2t*ww` BEFORE that same point, so the slot is a real
+state-carrying field.  **GYRE resolves T; both tanks resolve F.**
 The waiver is now resolved per run out of the run's own `ocean.output` and
-reported with the line it was read from -- `ocean.output:798` on GYRE,
-`:705` on LOCK, `:822` on OVERFLOW -- and a run whose `ocean.output` is missing
+reported with the line it was read from --
+`round19_oracle_v2_external/ocean.output:798` on GYRE,
+`lock_kt1_10/ocean.output:705` on LOCK,
+`overflow_kt1_10/ocean.output:822` on OVERFLOW -- and a run whose log is missing
 or silent FAILS CLOSED to bit-testing.  **Both tanks still PASS, on a strictly
 stronger claim: nothing is waived there at all.**
 
@@ -7803,7 +7806,7 @@ now a violation as well as a red test.
 ASKED and answered by the user, in the user's words: *"on BOTH tank cards the
 barotropic removal before the implicit vertical solve goes OFF -> ON
 (`zdf_baroclinic_only` False -> True), because NEMO executes
-`dynzdf.F90:148-171` there.  Do as NEMO does."*
+`dynzdf.F90:148` and the block below it there.  Do as NEMO does."*
 
 One field moves.  `zdf_drag_in_matrix`, `barotropic_drag_substep` and
 `nemo_stage_mean_imposition` stay OFF on these cards, and GYRE's resolution of
@@ -7847,8 +7850,9 @@ The mask conversion moves with the guard, because it would otherwise raise a
 stays above, because the early return needs it.
 
 **The four `test_nemo_recipe` failures go green and nothing else moves**: that
-file was `4 failed, 20 passed` and is now `24 passed`.  All four failed at
-`vertical.py:68` with the same message, which is the guard.
+file was `4 failed, 20 passed` and is now `24 passed`.  All four failed in the same
+guard, whose surviving `e3t_0` half is now `vertical.py:66-71` and whose mask
+half is `vertical.py:85-89`.
 
 A behavioural test cannot see the ORDER -- a linear-free-surface caller that
 DOES supply a mask is served either way -- so a fourth arm reads the source and
