@@ -292,6 +292,23 @@ def _model_config(
         # NEMO's similarly named time-filter alpha.  The oracle has no such
         # stabilizer, so Rule 9 requires an exact zero on certified cards.
         barotropic_diffusion_alpha=0.0,
+        # DECISION 19, asked and answered by the user ("Do as NEMO does"):
+        # both tanks resolve ln_drgimp = T (lock_kt1_10/ocean.output:560,
+        # overflow_kt1_10/ocean.output:672) and ln_dynspg_ts = T (:752, :869),
+        # so NEMO takes the branch that removes the barotropic velocity from
+        # the implicit vertical solve on every level -- their own compiled arm
+        # at tests/<CARD>_OMIP_L1_P3_R33ZDF/BLD/ppsrc/nemo/dynzdf.f90:186-191.
+        # legoESM did not, and that was a transcription gap, not a choice.
+        #
+        # The companion statement at :192-200, which adds the barotropic
+        # bottom stress back at the deepest wet level, is EXACTLY ZERO on
+        # these two cards and is therefore not transcribed here: rCdU_bot in
+        # each card's own round-33 record is 0.0 on every owned cell (0 of 390
+        # on LOCK, 0 of 606 on OVERFLOW).  GYRE's is 5.0e-05 on 600 of 704, so
+        # it is live there -- and there it is already carried, by
+        # zdf_drag_in_matrix, which stays OFF here because nothing on these
+        # cards needs it.
+        zdf_baroclinic_only=True,
         bbl_adv_option=bbl_adv_option,
         bbl_gamma_s=bbl_gamma_s,
         adaptive_implicit_vertadv=True,
