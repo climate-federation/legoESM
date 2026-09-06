@@ -9319,6 +9319,10 @@ wet cells of the same 21120-cell box.
 | `wet` | `tmask` | **0 / 18000** | **0** | 0 | — |
 | `dt` | `rDt` | **0 / 1** | **0** | 0 | — |
 
+Every row above was REPRODUCED at the round's final tip, from the unplanted
+rows of the plant runs: the same counts, the same maxima and the same
+attribution figures as the report stamped at `e222ee969a3d`.
+
 The first differing operand in NEMO's own statement order is `K`.  Its entire
 difference is the FOLD, and that is arithmetic, not a story: the largest wet
 difference between legoESM's `K` and NEMO's `zwt_mix` is `9.66209e-13`, and
