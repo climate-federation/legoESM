@@ -5289,6 +5289,17 @@ that plants five defects (bare terminal anchor, widened extent with the extent
 widened to match, reversed range, and each endpoint shifted on its OWN) and
 fails the gate unless every one fires AND the unplanted baseline still passes.
 
+**A hole this round's own gate still has, measured not guessed.**  A citation
+written as a comma list pins only its OUTER two members, so every INTERIOR one
+is unchecked.  Measured against the shipped map entry for
+`BLD/ppsrc/nemo/dynadv_up3.f90:211,317,355`: moving the middle member to 320
+returns `OK`, and so does moving it to 999.  That is exactly the defect class
+this gate exists to catch, one level down from the range-extent case it now
+closes.  It is NOT fixed here — a concurrent session is editing this file to
+group and pin every endpoint, and colliding with an in-flight edit would be
+worse than the hole.  Recorded so the next round inherits the measurement
+rather than the surprise.
+
 CI now runs it.  Round 27 shipped the gate but nothing in the suite called
 `run` on the receipt, so a bad citation only failed if somebody remembered to
 run the script.  Two tests do it now — one asserts the real receipt is clean,
