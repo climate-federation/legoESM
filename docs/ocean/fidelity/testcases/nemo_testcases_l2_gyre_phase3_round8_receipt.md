@@ -8866,7 +8866,7 @@ a header declaring `jpi, jpj, jpk`, so each payload was 57536 bytes short of
 its own header and every array after `avs` landed at the wrong offset.  The
 two `WRITE`s become the staging idiom four lines below them already uses for
 `ah_wslp2` and `akz`; `ln_tile` is `F` on this card
-(`round35_oracle_trazdf_matrix/ocean.output:247`), so `ntsi:ntei,ntsj:ntej` IS
+(`round29_oracle_v2_zdf_matrix/ocean.output:247`), so `ntsi:ntei,ntsj:ntej` IS
 `Nis0:Nie0,Njs0:Nje0` and the copy conforms exactly.
 
 **The staged-temporary form was chosen over declaring the true interior

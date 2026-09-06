@@ -231,7 +231,7 @@ CITATION_MAP = {
     # --- round 37 citations: the three recurrences, literally ---
     # ln_tile is F, which is what makes ntsi:ntei equal Nis0:Nie0 in the
     # round-37 instrument's staging of avt and avs.
-    'round35_oracle_trazdf_matrix/ocean.output:247':
+    'round29_oracle_v2_zdf_matrix/ocean.output:247':
         'Tiling (T) or not (F)                ln_tile    =  F',
     # 1st recurrence: multiply, THEN divide, THEN subtract.  It ends in a
     # division, so a fused multiply-add cannot absorb it, which is why its
@@ -260,7 +260,7 @@ CITATION_MAP = {
     # intrinsic at :522-523, so the accumulation order is the compiler's.
     'stprk3_stg.f90:540-543': [
         'DO jk =  1,  jpkm1  ; DO jj = ntsj-(  0), ntej+(   0) ; DO ji = ntsi-( 0), ntei+(   0)   ! corrected horizontal velocity',
-        'END DO   ;   END DO   ;   END DO',
+        ('END DO   ;   END DO   ;   END DO', 7),
         4],
     # --- round 32: the stage-3 ordering fix ---
     # --- round 33: the stage arm, and the tanks' reference geometry ---
