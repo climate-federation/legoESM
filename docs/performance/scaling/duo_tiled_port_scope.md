@@ -609,3 +609,24 @@ C192 timings (6-rank 3.752 s/step, 216-rank) are timings of NaN arithmetic.
 The gate now REFUSES any non-finite value in either arm and any nsplt < 1 on
 either side.  The C192 (and larger) rows need a dt scaled with resolution --
 a deck decision, asked, not taken.
+
+## M8 go/no-go (2026-09-06, job 9664237): ROUNDS, not ops
+
+One allocation (g[257-263]), healthy fabric (bare 93-150 us), C96 kt=3
+pad=11, 54 ranks, p50 of 20 steps:
+
+| arm | s/step | gate |
+|---|---|---|
+| baseline | 0.256 | bitwise |
+| M8-A packed pad refresh (1305 -> 926 ops) | 0.261 | bitwise |
+| diagnostic: no pad refresh | 0.189 | differs (expected) |
+
+Pre-registered count-bound prediction for the diagnostic arm was 0.167;
+packing (-29 % ops, same rounds, same bytes) saved nothing.  Corrected
+reading: the overhead is proportional to the number of SEQUENTIAL exchange
+rounds (~3 per firing x ~199 firings; removing the two refresh rounds saved
+67 ms = 199 x 2 x ~0.17 ms), not to op count or bytes.  M8-A stays off.
+Round-cutting levers (claim sent to codex + GLM): R1 one-round refresh with
+diagonal corner sends (3 -> 2 rounds), R2 batch per-level firings across k
+(fewer firings), R3 fold the refresh into the body's exchange round (1
+round; soundness at face seams to be reviewed).
