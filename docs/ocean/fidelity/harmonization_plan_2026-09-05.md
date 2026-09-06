@@ -197,3 +197,14 @@ aux3d linkage and the minimum-level policy, not just counts.
   cooling in the evaporative subtropics, warming under the rain belts (GLM: up to 10-15 W/m2 in trade
   regions). USER DECISIONS ASKED: (A) add the temperature twin to the virtual closure + re-baseline;
   (B) launch the fixed-real-closure 30-day arm.
+- 22:10 RUNG 1 DAY 30 (table in threegrid_unified_table): surface lever only (EUC 0.29 -> 0.35, nino3
+  +1.30 -> +1.10, SST rmse 0.51 -> 0.50, 240-260E surface warming halved); heave criterion FAILED
+  (50-150 m warming +0.94 -> +1.05, sigma0 >= 25 sinking slightly larger). P1 CONCLUSION: the lateral
+  viscosity strategy is not what separates our equatorial cell from NEMO's; rungs 2 (Smag off, ran away
+  before) and 3 (2e4 endpoint) would answer a different question and are NOT recommended. Whether to
+  ADOPT rung 1's shape (NEMO-faithful background, small gain) is a production config choice -> user.
+  NEXT OPERATOR SEARCH for the shallow return flow: vertical viscosity/diffusivity below the mixed layer
+  (K dump = --kprofile-snapshots on the unified card, one arm) and the vertical momentum advection /
+  pressure-gradient scheme (term budget on the day-15 state) -> both need a run or a config flag -> ASK.
+  TRAP: a 15-day leg writes its final state only as snapshot_final.npz; a symlink is overwritten by the
+  next leg -> copy it (day 15 of rung 1 rebuilt from restart_leg1.npz, no mass fluxes).
