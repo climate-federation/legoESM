@@ -1,0 +1,61 @@
+{
+  "format": "nemo-testcase-l2-gyre-round33-preregister-addendum-v1",
+  "addendum": 1,
+  "date": "2026-09-06",
+  "amends": "nemo_testcase_l2_gyre_round33_preregister.json",
+  "registered_at_tip": "956dffbefa9e",
+  "why": "the independent CLAIM review ran before any model code moved, as registered, and it refuted one mechanism, showed two predictions could not fail, showed one discharge is half vacuous, and closed one loose thread. Every change below is registered BEFORE the AFTER arm is measured.",
+
+  "ADD1_P2a_mechanism_RETRACTED": {
+    "what_was_registered": "the surviving kt=1 stage-3 velocity error is c times the BAROCLINIC part of the explicit update, 6.1 per cent of the entry error, and the fix leaves a comparable dt-times-RHS-roundoff term behind.",
+    "what_killed_it": "the reviewer MEASURED the ratio of today's stage-3 peak to rDt times today's stage-3 RHS residual: 0.9406 on u and 0.9476 on v. ONE mechanism -- the output error IS the dt-times-RHS roundoff, passing through the solve and the correction nearly unfiltered -- explains both components to 5 per cent. The registered '6.1 per cent baroclinic fraction' is a BACK-FIT: the same construction gives 6.07 per cent on u and 2.70 per cent on v, a factor 2.25 disagreement, and the two claimed contributions would sum to 5.76e-12 against a measured 2.79e-12.",
+    "replacement": "the key_qco term already contributes ESSENTIALLY NOTHING to the stage-3 OUTPUT, because the correction at stprk3_stg.F90:440,444-445 removes its column-uniform part and the solve damps what is left. The output error is the RHS roundoff. The fix is therefore predicted to leave the OUTPUT essentially unchanged while removing 94 per cent of the ENTRY residual.",
+    "label": "RETRACTED mechanism, recorded per Rule 11."
+  },
+
+  "ADD2_P2e_the_missing_falsifier": {
+    "problem": "with ADD1's replacement mechanism, P2a's window [3.0e-13, 4.5e-12] CONTAINS today's unchanged value, so a fix that does nothing at all would score CONFIRM. P2a as registered cannot fail in the benign case.",
+    "P2e_new": "the model's own kt=1 stage-3 velocity field MUST MOVE between the two trees. Measured as max |u_after - u_before| over the scored mask, on the model side only, no oracle involved.",
+    "P2e_CONFIRM": "the move is STRICTLY NONZERO and at most 4.6e-11 on u. Upper bound reasoned before measuring: the entry vector changes by the qco term, 4.30e-11 = 4.597e-11 minus the 2.97e-12 that is not qco, and everything downstream is non-expanding in the max norm -- the implicit matrix is diagonally dominant with positive diagonal and non-positive off-diagonals, and the correction only subtracts a column mean.",
+    "P2e_REFUTE": "the move is EXACTLY ZERO. Then the change is a no-op on this card and every CONFIRM in P2 is vacuous.",
+    "P2e_ALSO_REFUTE": "the move exceeds 4.6e-11, which would mean something downstream amplifies, contradicting the bound above."
+  },
+
+  "ADD3_P1_window_tightened": {
+    "problem": "the +/-50 per cent window was justified by 'a max of a sum is not the sum of maxes'. That justification is WRONG here: with uu_Kbb identically zero the residual is cell-by-cell rDt*rhs_lego - rDt*rhs_nemo, with no sum anywhere, so the maximum is rDt times the RHS maximum to within a few ulp.",
+    "P1a_CONFIRM_new": "|measured / predicted - 1| <= 1.0e-6 on BOTH faces, with predicted = 14400 * (the stage-3 RHS residual re-measured on the SAME tree). Point estimates from the BEFORE arm already taken at 956dffbefa9e: 14400 * 2.0614443633579772e-16 = 2.9684798832354876e-12 on u and 14400 * 2.4827278704178648e-16 = 3.5751281334017253e-12 on v.",
+    "P1a_PREMISE_INCOMPLETE": "|measured / predicted - 1| > 0.05. Then a term sits between the RHS boundary and the stage update that the premise omits, and it is the finding.",
+    "P1b_REFUTE_unchanged": "above 1.0e-11 on u: the key_qco ratios are not the owner.",
+    "P1f_INDEX_SET_CHECK": "the two gates must score the SAME cells. Round 30's post_ldf scored n = 17400 (u) and 17100 (v). The pre_solve gate's n is reported next to the ratio; if they differ, the two maxima are over different sets, the ratio is not like-for-like, and NO VERDICT is recorded (Rule 1e).",
+    "P1g_u0_CHECK": "legoESM's own kt=1 entry velocity must be identically zero for the premise to hold, the way NEMO's uu_Kbb_in is. Printed, not assumed."
+  },
+
+  "ADD4_P4a_is_half_vacuous_and_gains_a_second_arm": {
+    "problem": "uu_Kbb_in is identically 0.0 in the record, so driving the operator with the record tests only (0 + rDt*rhs)*mask. A WRONG velocity_before operand -- wrong time index, u0 versus u2_corr -- would pass bit-exact. Half the expression is untested by the discharge.",
+    "kept": "the record arm stays: it is the Rule-12 given-NEMO-inputs discharge and it must be bit exact, exact = true and n_unequal = 0.",
+    "added": "a NON-VACUITY arm in the unit tests, not in the gate: drive rk3_stage_velocity_update with a synthetic NON-ZERO velocity_before and compare against an independent transcription of dynzdf.F90:121-122 written in the test; plus a plant that perturbs velocity_before by one ulp and must go red; plus a plant that drops the velocity_before term entirely and must go red. Both arms of the selector get the same treatment."
+  },
+
+  "ADD5_P3b_loose_thread_CLOSED_with_data_already_in_hand": {
+    "question_raised": "if round 32 really moved kt=1's FINAL u by 9.5e-07, kt=2's T and S should have moved. Either they are insensitive to u, or u did not move.",
+    "measured": "round 32's own ulp-comparison artifact, round32/final_compare_trajectory.json, records max_previous_legoesm_field_move = 0.0 over all 18000 cells for GYRE-zco.kt2.before.T and .S, while GYRE-zco.kt2.before.u records 9.482369518886303e-07 over 17400 cells and .v records 8.948666946909589e-07 over 17100. Cell by cell, not a summary statistic.",
+    "conclusion": "kt=2's T and S carry NO path from kt=1's FINAL velocity at these sizes, which is exactly what P3d reads off the code: the stage-3 tracer step consumes the STAGE-2 transport _g2, built from (u2_corr, v2_corr). P3b stands and is expected to be uninformative; P3d is the prediction that carries information.",
+    "consequence": "P3b is reported but claims nothing. It is NOT counted as a confirmation."
+  },
+
+  "ADD6_the_mask_identity_is_an_OPEN_row": {
+    "row": "legoESM's stage face mask versus NEMO's umask from the record. The Rule-12 discharge inherits any difference between them, and no gate has compared them for this operator.",
+    "action": "the discharge reports the wet-cell count of each and the count on which they disagree, inside the writer's tile. It does not claim they are the same until that number is zero."
+  },
+
+  "ADD7_operators_between_the_update_and_the_output": {
+    "named": ["the implicit tridiagonal solve, dynzdf.F90:338-345 and the recurrences", "the surface wind stress added post-matrix, dynzdf.F90:329-330", "the ln_drgimp .AND. ln_dynspg_ts block, dynzdf.F90:148-171, which DOES execute on GYRE"],
+    "why_it_matters": "all three are difference-neutral for a column-uniform perturbation -- the solve is linear, the other two are additive constants in the perturbation -- so ADD1's conclusion survives. But the surviving fraction is set by solve-then-correction, not by stprk3_stg.F90:440 alone, and the round-32 receipt's phrasing implied otherwise."
+  },
+
+  "ADD8_a_receipt_defect_found_while_pinning_the_BEFORE_numbers": {
+    "what": "round 32's kt=2 table mixes two different quantities in one column. The trajectory gate's normalized_max_abs is absolute / max(reference, 1.0), so for u, v and ssh (reference below 1) it IS the absolute residual, and for T and S (reference 23.47 K and 36.84 psu) it is the RELATIVE one.",
+    "consequence": "the receipt's 'T at 1.36e-12 ... now within a factor of 2.5 of the velocity's' compares a dimensionless number with a number in m/s. The ABSOLUTE kt=2 residuals are T 3.1956659540810506e-11 K and S 8.1712414612411521e-13 psu, so T is an order of magnitude LARGER than the velocity rows, not smaller.",
+    "action": "corrected in the round-33 receipt section with both quantities named."
+  }
+}
