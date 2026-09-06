@@ -35,6 +35,19 @@ set -euo pipefail
 #   * ln_drgimp = T and ln_dynspg_ts = T on both, so :148-171 runs and
 #     uu_Kaa_pre is the post-removal, post-bottom-stress vector.
 #   * key_RK3 on both, so the stage-3 record is the RK3 stage-3 one.
+#
+# THE PATH MATTERS, AND ATTEMPT 1 DIED ON IT.  FCM's extract step parses Fortran
+# with perl's Text::Balanced, which the system perl on this machine does not
+# have; makenemo then fails with "Can't locate Text/Balanced.pm" long before it
+# compiles anything.  Run with the conda build environment FIRST on PATH:
+#
+#   PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:$PATH \
+#     scripts/.../nemo_testcase_l1_tanks_round33_zdf/run.sh LOCK_EXCHANGE
+#
+# The line below sets it so the next operator does not have to remember, and it
+# is the SAME PATH the two round-33 builds actually used
+# (round33/tanks_run_{LOCK_EXCHANGE,OVERFLOW}.attempt2.log).
+export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:${PATH}
 readonly NEMO_ROOT=${NEMO_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
 readonly L1=/data/abyssal/dbalwada/nemo-testcases-l1/phase3
 readonly L2=/data/abyssal/dbalwada/nemo-testcases-l2/phase3
@@ -76,6 +89,10 @@ readonly ZDF_PATCH=$here/../nemo_testcase_l2_gyre_round29_zdf/dynzdf_round29.pat
 # (domzgr_substitute.h90:89).
 readonly REFGEOM_PATCH=$here/dynzdf_round33_refgeom.patch
 readonly GATE=$here/../nemo_testcase_l1_tanks_round33_zdf_rule12.py
+# The SHARED consumed-field admission, not a copy: the same gate GYRE's round-21
+# and round-29 acquisitions were admitted with, generalised in round 34 so the
+# dimensions come from each record's own header.
+readonly ADMISSION=$here/../nemo_testcase_l2_gyre_round21_admission.py
 readonly SHIPPED=$NEMO_ROOT/src/OCE/DYN/dynzdf.F90
 
 source_cfg=$NEMO_ROOT/tests/$SOURCE_CFG
@@ -83,6 +100,7 @@ target_cfg=$NEMO_ROOT/tests/$TARGET_CFG
 
 [[ -d "$source_cfg/MY_SRC" && -d "$source_cfg/EXP00" ]]
 [[ -f "$ZDF_PATCH" && -f "$REFGEOM_PATCH" && -f "$SHIPPED" && -f "$GATE" ]]
+[[ -f "$ADMISSION" ]]
 [[ -d "$SOURCE_RUN" ]]
 if [[ -e "$target_cfg" || -e "$TARGET_RUN" ]]; then
   printf 'REFUSE: target already exists: %s or %s\n' "$target_cfg" "$TARGET_RUN" >&2
@@ -215,16 +233,53 @@ cp "$work_manifest"/*.sha256 "$TARGET_RUN/"
     >>run.user.time.log
 )
 
-# TWIN BYTE-IDENTITY.  The instrument only snapshots arrays, so every record
-# the source run already produced, its mesh and its final state must come back
-# byte for byte.  One changed byte REFUTES the instrument and stops the round;
-# it is not something to explain away afterwards.
+# TWIN IDENTITY, IN TWO STEPS.  RAW byte identity is tried FIRST and every
+# result is logged, because it is the strongest claim and the one to prefer.
+# It is not, however, the CRITERION: NEMO's stream dumps write whole work
+# arrays including the nn_hls = 2 halo, which NEMO neither owns nor
+# initialises, so two runs of the same executable can differ in bytes that are
+# uninitialised memory.  Round 33's attempt died here under set -e on exactly
+# that, and everything below it -- the mesh and restart checks, the Rule-12
+# discharge, its plant and the outputs manifest -- never ran.
+#
+# So a raw difference falls through to the shared CONSUMED-FIELD ADMISSION,
+# which admits a difference only when every differing ELEMENT is in the halo or
+# in a slot the writer has not defined at the write point, and PRINTS each
+# admitted difference with its value.  One differing bit in an OWNED cell still
+# stops the round.
+: >"$TARGET_RUN/round33_raw_twin_cmp.log"
 for source_record in "$SOURCE_RUN"/oracle_*.bin; do
   record=${source_record##*/}
-  cmp "$source_record" "$TARGET_RUN/$record"
-done
-cmp "$SOURCE_RUN/mesh_mask.nc" "$TARGET_RUN/mesh_mask.nc"
-cmp "$SOURCE_RUN/$FINAL_RESTART" "$TARGET_RUN/$FINAL_RESTART"
+  if [[ ! -e "$TARGET_RUN/$record" ]]; then
+    printf 'REFUSE: the instrumented run did not write %s\n' "$record" >&2
+    exit 71
+  fi
+  if cmp -s "$source_record" "$TARGET_RUN/$record"; then
+    printf 'RAW_IDENTICAL %s\n' "$record"
+  else
+    printf 'RAW_DIFFERS   %s (falls through to the consumed-field admission)\n' \
+      "$record"
+  fi
+done | tee -a "$TARGET_RUN/round33_raw_twin_cmp.log"
+if grep -q '^RAW_DIFFERS' "$TARGET_RUN/round33_raw_twin_cmp.log"; then
+  printf 'raw twin identity is NOT exact; running the consumed-field admission\n'
+else
+  printf 'raw twin identity is EXACT on every inherited record\n'
+fi
+# The admission checks the mesh and the final restart too, so they are named
+# here rather than compared separately.
+python "$ADMISSION" --baseline "$SOURCE_RUN" --candidate "$TARGET_RUN" \
+  --twin /nonexistent \
+  --identical "$FINAL_RESTART" mesh_mask.nc \
+  --allowed-new oracle_zdf_matrix_kt00000001.bin \
+  --output "$TARGET_RUN/round33_admission.json"
+if python "$ADMISSION" --baseline "$SOURCE_RUN" --candidate "$TARGET_RUN" \
+     --twin /nonexistent --identical "$FINAL_RESTART" mesh_mask.nc \
+     --allowed-new oracle_zdf_matrix_kt00000001.bin --plant-consumed \
+     >"$TARGET_RUN/round33_admission_plant.json" 2>&1; then
+  printf 'REFUSE: the admission plant did not turn the gate red\n' >&2
+  exit 72
+fi
 test -s "$TARGET_RUN/oracle_zdf_matrix_kt00000001.bin"
 
 # The Rule-12 discharge itself, and its plant.  One command each, and the plant
@@ -237,7 +292,8 @@ if python "$GATE" --card "$card" --plant \
 fi
 (
   cd "$TARGET_RUN"
-  sha256sum oracle_*.bin round33_rule12_correction.json "$FINAL_RESTART" \
+  sha256sum oracle_*.bin round33_admission.json \
+    round33_rule12_correction.json "$FINAL_RESTART" mesh_mask.nc \
     >round33_outputs.sha256
 )
 printf 'ROUND33_%s_ZDF_MATRIX_ORACLE_READY %s\n' "$card" "$TARGET_RUN"

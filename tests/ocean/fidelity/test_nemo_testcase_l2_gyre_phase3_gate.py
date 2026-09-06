@@ -33,32 +33,41 @@ admission = importlib.util.module_from_spec(ADMISSION_SPEC)
 ADMISSION_SPEC.loader.exec_module(admission)
 
 
-def test_round21_admission_ignores_only_preconsumer_zfw(tmp_path):
-    header = b"NEMO_L1_TRANSP_1" + struct.pack(
-        "=8i", 1, 1, 1, 1, admission.NX, admission.NY, admission.NZ, 64)
-    values = np.zeros(3 * admission.N3, dtype=np.float64)
+GNX, GNY, GNZ = gate.DIMS
+GN3 = GNX * GNY * GNZ
+
+
+def _transport_record(values: np.ndarray) -> bytes:
+    return b"NEMO_L1_TRANSP_1" + struct.pack(
+        "=8i", 1, 1, 1, 1, GNX, GNY, GNZ, 64) + values.tobytes()
+
+
+def test_admission_admits_only_the_undefined_zfw_slot(tmp_path):
+    """zFw is undefined at this record's write point; zFu is not."""
+    values = np.zeros(3 * GN3, dtype=np.float64)
     baseline = tmp_path / "baseline.bin"
     candidate = tmp_path / "candidate.bin"
-    baseline.write_bytes(header + values.tobytes())
+    baseline.write_bytes(_transport_record(values))
     changed = values.copy()
-    changed[2 * admission.N3 + 100] = 1.0
-    candidate.write_bytes(header + changed.tobytes())
-    assert admission._compare_layout(
-        baseline, candidate, "transport", [True])["consumed_equal"]
-    changed[100] = 1.0
-    candidate.write_bytes(header + changed.tobytes())
-    assert not admission._compare_layout(
-        baseline, candidate, "transport", [True])["consumed_equal"]
+    # An OWNED cell of the undefined zFw slot: admitted.
+    changed[2 * GN3 + (2 + GNX * 2)] = 1.0
+    candidate.write_bytes(_transport_record(changed))
+    assert admission.compare_record(baseline, candidate, [True])["consumed_equal"]
+    # The same OWNED cell of the DEFINED zFu slot: a violation.
+    changed[2 + GNX * 2] = 1.0
+    candidate.write_bytes(_transport_record(changed))
+    assert not admission.compare_record(
+        baseline, candidate, [True])["consumed_equal"]
 
 
 def test_stage_ww_reader_discards_unowned_nonfinite_halo(tmp_path):
     path = tmp_path / "oracle_rkstage_ww_kt00000001_s1.bin"
     header = b"NEMO_L2_STGWW_1 " + struct.pack(
         "=10i", 1, 1, 1, 1, 1, 3, gate.DIMS[0], gate.DIMS[1], gate.DIMS[2], 64)
-    values = np.zeros(1 + 2 * admission.N3, dtype=np.float64)
+    values = np.zeros(1 + 2 * GN3, dtype=np.float64)
     values[0] = 4800.0
     values[1] = np.nan
-    values[1 + admission.N3] = np.nan
+    values[1 + GN3] = np.nan
     path.write_bytes(header + values.tobytes())
     record = gate.read_stage_ww(path, 1)
     assert np.all(np.isfinite(record["ww"]))

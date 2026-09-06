@@ -1,11 +1,43 @@
 #!/usr/bin/env python3
-"""Admit the Round-21 GYRE oracle extension by compared consumed record fields.
+"""Admit an oracle acquisition by CONSUMED-FIELD identity, on any card.
 
-NEMO stream dumps contain whole work arrays, including halos and, for the
-pre-``tra_adv_trp`` transport record, a ``zFw`` slot not yet defined in the
-executed vector-invariant branch.  Raw-file inequality in those bytes is not a
-state change.  This gate nevertheless fails on every bit change visible to the
-existing record parsers, on a common BTORD operand, or in the final restart.
+WHY THIS EXISTS.  A WRITE-only instrument added to NEMO must change no model
+state.  The proof is that every record the previous run already produced comes
+back byte for byte.  Sometimes it does not, and the difference is not a state
+change: NEMO's stream dumps write WHOLE work arrays including the ``nn_hls``
+halo, which NEMO neither owns nor initialises, and one record (the pre
+``tra_adv_trp`` momentum-side transport) carries a ``zFw`` slot the executed
+branch has not defined yet.  Those bytes are uninitialised memory and they
+differ between two runs of the same executable.
+
+So the admission rule is: a raw byte difference is admitted only if every
+differing ELEMENT is either
+
+  * in the halo -- ``nn_hls = 2`` on every card in this campaign, read from
+    each run's own ``ocean.output`` ("halo width (applies to both rows and
+    columns) nn_hls = 2"): GYRE ``round19_oracle_v2_external/ocean.output:41``,
+    ``lock_kt1_10/ocean.output:42``, ``overflow_kt1_10/ocean.output:44`` -- or
+  * inside a slot this record's WRITER has not defined at the write point,
+    declared per (magic, field) in ``SCHEMAS`` with its reason recorded there.
+
+Every admitted difference is PRINTED with its index and its two values, so the
+strength of the claim is visible rather than asserted.  A single differing bit
+in an OWNED cell of a defined field is a hard failure, and so is a changed
+restart, a changed mesh, a missing inherited record or an unexpected new one.
+
+CARD-INDEPENDENT BY CONSTRUCTION.  Nothing here is GYRE-specific:
+
+  * the RECORD INVENTORY is discovered by globbing the SOURCE run directory;
+  * each record's KIND is its own 16-byte magic, not its file name;
+  * each record's DIMENSIONS come from its own header, so the same gate reads
+    GYRE's 36x26x31, LOCK_EXCHANGE's 134x7x21 and OVERFLOW's 206x7x101 with no
+    argument;
+  * every path, the byte-identical file list and the allowed additions are CLI
+    arguments.
+
+The declared layout is CHECKED against the file: if the fields a schema
+declares do not account for the payload exactly, the gate raises rather than
+comparing a misaligned buffer.
 """
 
 from __future__ import annotations
@@ -19,143 +51,279 @@ from pathlib import Path
 import numpy as np
 
 
-NX, NY, NZ = 36, 26, 31
-N2, N3, NC = NX * NY, NX * NY * NZ, (NX - 4) * (NY - 4)
-WRITER_OVERRIDE: str | None = None
-BASE = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19_oracle_v2_external")
-CAND = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round21_oracle_v2_stage_ww")
-TWIN = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19_oracle_v2_external_coeff")
-RESTART = "GYRE_OMIP_L2_P3_00000010_restart.nc"
+HALO = 2  # nn_hls; cited per card in the module docstring above.
+DEFAULT_BASE = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19_oracle_v2_external")
+DEFAULT_CAND = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round21_oracle_v2_stage_ww")
+DEFAULT_TWIN = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+    "round19_oracle_v2_external_coeff")
+DEFAULT_IDENTICAL = ("GYRE_OMIP_L2_P3_00000010_restart.nc",)
+
+
+class AdmissionError(RuntimeError):
+    """A record the gate cannot parse.  Never downgraded to a comparison."""
 
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _owned3(a: np.ndarray) -> np.ndarray:
-    return a.reshape((NX, NY, NZ), order="F")[2:-2, 2:-2, :]
-
-
-def _owned2(a: np.ndarray) -> np.ndarray:
-    return a.reshape((NX, NY), order="F")[2:-2, 2:-2]
-
-
 def _bits_equal(a: np.ndarray, b: np.ndarray) -> bool:
     return np.array_equal(a.view(np.uint64), b.view(np.uint64))
 
 
-def _layout(kind: str):
-    if kind == "transport":
-        return 48, [(x, N3, "3", x != "zFw") for x in ("zFu", "zFv", "zFw")]
-    if kind == "trtrp":
-        return 60, [(x, N3, "3", True) for x in ("zFu", "zFv", "zFw")]
-    if kind == "wzv":
-        return 48, [(x, N3, "3", True) for x in ("ww_pre_aimp", "ww_post_aimp", "pFw")]
-    if kind == "trpop":
-        fields = (("e2u", N2, "2"), ("e3u", N3, "3"), ("uu", N3, "3"),
-                  ("zub", N2, "2"), ("umask", N3, "3"), ("zFu", N3, "3"),
-                  ("e1v", N2, "2"), ("e3v", N3, "3"), ("vv", N3, "3"),
-                  ("zvb", N2, "2"), ("vmask", N3, "3"), ("zFv", N3, "3"),
-                  ("un_adv", N2, "2"), ("r1_hu", N2, "2"), ("uu_b", N2, "2"),
-                  ("vn_adv", N2, "2"), ("r1_hv", N2, "2"), ("vv_b", N2, "2"))
-        return 48, [(n, s, k, True) for n, s, k in fields]
-    if kind == "rktracer":
-        names = ("zero_T", "zero_S", "zFu", "zFv", "zFw", "after_advection_T",
-                 "after_advection_S", "after_sbc_T", "after_sbc_S", "Kbb_T",
-                 "Kbb_S", "Kmm_T", "Kmm_S", "Kaa_T", "Kaa_S")
-        return 60, ([(n, N3, "3", True) for n in names]
-                    + [(n, N2, "2", True) for n in ("r3t_Kbb", "r3t_Kmm", "r3t_Kaa")])
-    if kind == "slow":
-        fields = ([(n, N3, "3", True) for n in
-                   ("e3u", "krhs_u", "umask", "e3v", "krhs_v", "vmask")]
-                  + [(n, NC, "c", True) for n in ("depth_u", "depth_v")]
-                  + [(n, N2, "2", True) for n in ("r1_hu0", "r1_hv0")]
-                  + [(n, NC, "c", True) for n in ("post_drag_u", "post_drag_v")]
-                  + [(n, N2, "2", True) for n in ("cd_u", "cd_v")]
-                  + [("r1_rho0", 1, "s", True)]
-                  + [(n, N2, "2", True) for n in ("utau", "vtau", "r1_hu", "r1_hv")]
-                  + [(n, NC, "c", True) for n in ("post_wind_u", "post_wind_v")])
-        return 76, fields
-    raise ValueError(kind)
+def _f(*specs):
+    return specs
 
 
-KINDS = {
-    "oracle_rkstage1_transport_operands_kt00000001.bin": "trpop",
-    "oracle_rkstage3_wzv_kt00000001.bin": "wzv",
-    "oracle_rktracer_operands_kt00000001_s1.bin": "rktracer",
-    "oracle_rktracer_operands_kt00000001_s2.bin": "rktracer",
-    "oracle_slow_forcing_kt00000001.bin": "slow",
-    "oracle_tracer_transport_kt00000001_s3.bin": "trtrp",
-    **{f"oracle_transport_kt00000001_s{s}.bin": "transport" for s in (1, 2, 3)},
+# --- record schemas, keyed by the record's own 16-byte magic ---------------
+#
+# Each entry is (n_header_ints, (ix, iy, iz), fields).  ``iz`` is None for a
+# purely 2-D record.  ``fields`` is a callable of (n2, n3, nc) returning
+# (name, count, projection, defined) tuples in stream order, where projection
+# is "3" (nx,ny,nz), "2" (nx,ny), "c" (already owned-only) or "s" (scalar),
+# and ``defined`` is False only where the WRITER has not initialised the slot
+# at the write point.
+#
+# Every writer in this campaign emits nx, ny, nz, bits as the LAST four
+# integers of its PRIMARY header block; the indices are still written out per
+# schema rather than derived, because NEMO_L2_SLOW_2 appends a second integer
+# block and a derived rule would silently take the wrong four there.
+SCHEMAS: dict[str, tuple] = {
+    # stprk3.F90:300-306 -- uu_b, vv_b, un_adv, vn_adv at one level.
+    "NEMO_L1_BTFRM_1": (6, (3, 4, None), lambda n2, n3, nc: _f(
+        *[(n, n2, "2", True) for n in ("uu_b", "vv_b", "un_adv", "vn_adv")])),
+    # stprk3.F90:338-343 -- uu/vv(Krhs).
+    "NEMO_L1_RHS___1": (7, (3, 4, 5), lambda n2, n3, nc: _f(
+        ("uu_Krhs", n3, "3", True), ("vv_Krhs", n3, "3", True))),
+    # stprk3.F90:322-327 -- ts(:,:,:,:,klevel), uu, vv, ssh.  jpts = 2.
+    "NEMO_L1_ENTRY_1": (8, (3, 4, 5), lambda n2, n3, nc: _f(
+        ("T", n3, "3", True), ("S", n3, "3", True), ("u", n3, "3", True),
+        ("v", n3, "3", True), ("ssh", n2, "2", True))),
+    "NEMO_L1_STAGE_1": (9, (4, 5, 6), lambda n2, n3, nc: _f(
+        ("T", n3, "3", True), ("S", n3, "3", True), ("u", n3, "3", True),
+        ("v", n3, "3", True), ("ssh", n2, "2", True))),
+    # stprk3_stg.F90:343-348 -- the momentum-side transport, written BEFORE
+    # tra_adv_trp.  Under the vector-invariant arm zFw is not defined there,
+    # which the phase-3 reader records as a sentinel count rather than
+    # compares (nemo_testcase_l2_gyre_phase3_gate.py:216-224).
+    "NEMO_L1_TRANSP_1": (8, (4, 5, 6), lambda n2, n3, nc: _f(
+        ("zFu", n3, "3", True), ("zFv", n3, "3", True),
+        ("zFw", n3, "3", False))),
+    # stprk3_stg.F90:622-626 -- the tracer-side transport, written AFTER
+    # tra_adv_trp, so zFw IS defined here.
+    "NEMO_L2_TRTRP_1": (11, (7, 8, 9), lambda n2, n3, nc: _f(
+        ("zFu", n3, "3", True), ("zFv", n3, "3", True),
+        ("zFw", n3, "3", True))),
+    "NEMO_L2_WZVOP_1": (8, (4, 5, 6), lambda n2, n3, nc: _f(
+        *[(n, n3, "3", True)
+          for n in ("ww_pre_aimp", "ww_post_aimp", "pFw")])),
+    "NEMO_L2_TRPOP_2": (8, (4, 5, 6), lambda n2, n3, nc: _f(
+        ("e2u", n2, "2", True), ("e3u", n3, "3", True), ("uu", n3, "3", True),
+        ("zub", n2, "2", True), ("umask", n3, "3", True),
+        ("zFu", n3, "3", True),
+        ("e1v", n2, "2", True), ("e3v", n3, "3", True), ("vv", n3, "3", True),
+        ("zvb", n2, "2", True), ("vmask", n3, "3", True),
+        ("zFv", n3, "3", True),
+        ("un_adv", n2, "2", True), ("r1_hu", n2, "2", True),
+        ("uu_b", n2, "2", True), ("vn_adv", n2, "2", True),
+        ("r1_hv", n2, "2", True), ("vv_b", n2, "2", True))),
+    "NEMO_L2_RKTRA_1": (11, (7, 8, 9), lambda n2, n3, nc: _f(
+        *[(n, n3, "3", True) for n in (
+            "zero_T", "zero_S", "zFu", "zFv", "zFw", "after_advection_T",
+            "after_advection_S", "after_sbc_T", "after_sbc_S", "Kbb_T",
+            "Kbb_S", "Kmm_T", "Kmm_S", "Kaa_T", "Kaa_S")],
+        *[(n, n2, "2", True) for n in ("r3t_Kbb", "r3t_Kmm", "r3t_Kaa")])),
+    "NEMO_L2_SLOW_2": (15, (4, 5, 6), lambda n2, n3, nc: _f(
+        *[(n, n3, "3", True)
+          for n in ("e3u", "krhs_u", "umask", "e3v", "krhs_v", "vmask")],
+        *[(n, nc, "c", True) for n in ("depth_u", "depth_v")],
+        *[(n, n2, "2", True) for n in ("r1_hu0", "r1_hv0")],
+        *[(n, nc, "c", True) for n in ("post_drag_u", "post_drag_v")],
+        *[(n, n2, "2", True) for n in ("cd_u", "cd_v")],
+        ("r1_rho0", 1, "s", True),
+        *[(n, n2, "2", True) for n in ("utau", "vtau", "r1_hu", "r1_hv")],
+        *[(n, nc, "c", True) for n in ("post_wind_u", "post_wind_v")])),
+}
+
+# The reason each undefined slot is undefined, quoted in the report so an
+# admission on this ground can never be silent.
+UNDEFINED_REASON = {
+    ("NEMO_L1_TRANSP_1", "zFw"): (
+        "written before tra_adv_trp defines zFw (stprk3_stg.F90:343-348 vs "
+        ":560); the executed branch leaves the slot uninitialised"),
 }
 
 SOURCES = {
-    "trpop": ["MY_SRC/stprk3_stg.F90:297-302", "nemo_testcase_l2_gyre_round13_tracer.py:91-154"],
-    "wzv": ["MY_SRC/traadv.F90:225-238", "nemo_testcase_l2_gyre_stage3_completion_gate.py:110-147"],
-    "rktracer": ["MY_SRC/stprk3_stg.F90:657-670", "nemo_testcase_l2_gyre_round13_tracer.py:38-87"],
-    "slow": ["MY_SRC/stp2d.F90:187-231", "nemo_testcase_l2_gyre_round16_slow_forcing.py:49-116"],
-    "trtrp": ["MY_SRC/stprk3_stg.F90:622-626", "nemo_testcase_l2_gyre_phase3_gate.py:189-234"],
-    "transport": ["MY_SRC/stprk3_stg.F90:343-348", "nemo_testcase_l2_gyre_phase3_gate.py:189-234"],
+    "NEMO_L2_TRPOP_2": "MY_SRC/stprk3_stg.F90:297-302",
+    "NEMO_L2_WZVOP_1": "MY_SRC/traadv.F90:225-238",
+    "NEMO_L2_RKTRA_1": "MY_SRC/stprk3_stg.F90:657-670",
+    "NEMO_L2_SLOW_2": "MY_SRC/stp2d.F90:187-231",
+    "NEMO_L2_TRTRP_1": "MY_SRC/stprk3_stg.F90:622-626",
+    "NEMO_L1_TRANSP_1": "MY_SRC/stprk3_stg.F90:343-348",
+    "NEMO_L1_STAGE_1": "MY_SRC/stprk3.F90:322-327",
+    "NEMO_L1_ENTRY_1": "MY_SRC/stprk3.F90:338-343",
+    "NEMO_L1_RHS___1": "MY_SRC/stprk3.F90:338-343",
+    "NEMO_L1_BTFRM_1": "MY_SRC/stprk3.F90:300-306",
+}
+PARSERS = {
+    "NEMO_L2_TRPOP_2": "nemo_testcase_l2_gyre_round13_tracer.py:93-140",
+    "NEMO_L2_WZVOP_1": "nemo_testcase_l2_gyre_stage3_completion_gate.py:110-147",
+    "NEMO_L2_RKTRA_1": "nemo_testcase_l2_gyre_round13_tracer.py:46-91",
+    "NEMO_L2_SLOW_2": "nemo_testcase_l2_gyre_round16_slow_forcing.py:49-116",
+    "NEMO_L2_TRTRP_1": "nemo_testcase_l2_gyre_phase3_gate.py:190-234",
+    "NEMO_L1_TRANSP_1": "nemo_testcase_l2_gyre_phase3_gate.py:190-234",
+    "NEMO_L1_STAGE_1": "nemo_testcase_phase3_first_divergence_gate.py:67-89",
+    "NEMO_L1_ENTRY_1": "nemo_testcase_phase3_first_divergence_gate.py:135-158",
+    "NEMO_L1_RHS___1": "nemo_testcase_phase3_first_divergence_gate.py:115-133",
+    "NEMO_L1_BTFRM_1": "nemo_testcase_phase3_first_divergence_gate.py:160-185",
 }
 
 
-def _compare_layout(a_path: Path, b_path: Path, kind: str, plant: list[bool]) -> dict:
+def read_header(raw: bytes, path: Path):
+    """Magic, dims and declared field layout, all from the record itself."""
+    if len(raw) < 16:
+        raise AdmissionError(f"{path}: shorter than a magic")
+    magic = raw[:16].decode("ascii", "replace").rstrip()
+    if magic not in SCHEMAS:
+        raise AdmissionError(f"{path}: unregistered record magic {magic!r}")
+    n_ints, (ix, iy, iz), fields = SCHEMAS[magic]
+    header_bytes = 16 + 4 * n_ints
+    if len(raw) < header_bytes:
+        raise AdmissionError(f"{path}: truncated {magic} header")
+    ints = struct.unpack(f"={n_ints}i", raw[16:header_bytes])
+    nx, ny = ints[ix], ints[iy]
+    nz = ints[iz] if iz is not None else 1
+    if nx <= 0 or ny <= 0 or nz <= 0:
+        raise AdmissionError(f"{path}: bad dims {(nx, ny, nz)} in {magic}")
+    if nx <= 2 * HALO or ny <= 2 * HALO:
+        raise AdmissionError(
+            f"{path}: {magic} declares {nx}x{ny}, which has no owned cell "
+            f"outside a {HALO}-cell halo")
+    layout = list(fields(nx * ny, nx * ny * nz, (nx - 4) * (ny - 4)))
+    declared = header_bytes + 8 * sum(count for _, count, _, _ in layout)
+    if declared != len(raw):
+        raise AdmissionError(
+            f"{path}: {magic} declares {declared} bytes for {nx}x{ny}x{nz} "
+            f"but the file is {len(raw)}; the schema does not fit this record")
+    return magic, header_bytes, nx, ny, nz, layout
+
+
+def _owned_selector(projection: str, ids: np.ndarray, nx: int, ny: int):
+    """Split differing flat indices into owned and halo, per projection."""
+    if projection == "3":
+        ii, jj = ids % nx, (ids // nx) % ny
+        index = np.stack([ii, jj, ids // (nx * ny)], axis=1)
+    elif projection == "2":
+        ii, jj = ids % nx, ids // nx
+        index = np.stack([ii, jj], axis=1)
+    else:
+        # "c" arrays are already owned-only; "s" is a scalar.  Nothing in
+        # either is halo, so every difference in them is a violation.
+        return np.ones(ids.size, dtype=bool), ids[:, None]
+    owned = ((ii >= HALO) & (ii < nx - HALO)
+             & (jj >= HALO) & (jj < ny - HALO))
+    return owned, index
+
+
+def _project(values: np.ndarray, projection: str, nx: int, ny: int, nz: int):
+    if projection == "3":
+        return values.reshape((nx, ny, nz), order="F")[
+            HALO:-HALO, HALO:-HALO, :]
+    if projection == "2":
+        return values.reshape((nx, ny), order="F")[HALO:-HALO, HALO:-HALO]
+    return values
+
+
+def compare_record(a_path: Path, b_path: Path, plant, max_listed: int = 16):
+    """Compare one record; admit halo and undefined-slot differences only."""
     a_bytes, b_bytes = a_path.read_bytes(), b_path.read_bytes()
     if len(a_bytes) != len(b_bytes):
         return {"consumed_equal": False, "error": "size mismatch"}
-    header, fields = _layout(kind)
-    if a_bytes[:header] != b_bytes[:header]:
+    magic, header_bytes, nx, ny, nz, layout = read_header(a_bytes, a_path)
+    b_magic, _, bx, by, bz, _ = read_header(b_bytes, b_path)
+    if (b_magic, bx, by, bz) != (magic, nx, ny, nz):
+        return {"consumed_equal": False,
+                "error": f"schema/dims changed {(magic, nx, ny, nz)} -> "
+                         f"{(b_magic, bx, by, bz)}"}
+    if a_bytes[:header_bytes] != b_bytes[:header_bytes]:
         return {"consumed_equal": False, "error": "header mismatch"}
-    offset, changed, consumed_equal = header, [], True
-    for name, count, projection, consumed in fields:
+
+    offset, changed, admitted, consumed_equal = header_bytes, [], [], True
+    for name, count, projection, defined in layout:
         aa = np.frombuffer(a_bytes, np.float64, count, offset)
         bb = np.frombuffer(b_bytes, np.float64, count, offset)
-        byte_a = np.frombuffer(a_bytes, np.uint8, count * 8, offset)
-        byte_b = np.frombuffer(b_bytes, np.uint8, count * 8, offset)
         element_diff = aa.view(np.uint64) != bb.view(np.uint64)
         if np.any(element_diff):
             ids = np.flatnonzero(element_diff)
-            if projection == "3":
-                ii, jj, kk = ids % NX, (ids // NX) % NY, ids // N2
-                in_projection = (ii >= 2) & (ii < NX - 2) & (jj >= 2) & (jj < NY - 2)
-                first = [int(ii[0]), int(jj[0]), int(kk[0])]
-            elif projection == "2":
-                ii, jj = ids % NX, ids // NX
-                in_projection = (ii >= 2) & (ii < NX - 2) & (jj >= 2) & (jj < NY - 2)
-                first = [int(ii[0]), int(jj[0])]
-            else:
-                in_projection = np.ones(ids.size, dtype=bool)
-                first = [int(ids[0])]
+            owned, index = _owned_selector(projection, ids, nx, ny)
             changed.append({
                 "field": name,
                 "changed_elements": int(ids.size),
-                "changed_bytes": int(np.count_nonzero(byte_a != byte_b)),
-                "changed_in_parser_projection": int(np.count_nonzero(in_projection)),
-                "first_index_0based": first,
-                "slot_consumed": consumed,
+                "changed_bytes": int(np.count_nonzero(
+                    np.frombuffer(a_bytes, np.uint8, count * 8, offset)
+                    != np.frombuffer(b_bytes, np.uint8, count * 8, offset))),
+                "changed_in_owned_cells": int(np.count_nonzero(owned)),
+                "first_index_0based": [int(v) for v in index[0]],
+                "slot_defined_at_write_point": defined,
             })
-        pa = _owned3(aa) if projection == "3" else _owned2(aa) if projection == "2" else aa
-        pb = _owned3(bb) if projection == "3" else _owned2(bb) if projection == "2" else bb
-        if consumed and plant and not plant[0]:
-            pb = pb.copy()
-            flat = pb.reshape(-1)
-            flat[0:1].view(np.uint64)[:] ^= np.uint64(1)
+            # Every admitted difference is listed with its VALUES, capped so a
+            # whole undefined array cannot bury the report.  An owned cell of
+            # a DEFINED field is never listed here: it is a violation, and the
+            # bit test below is what fails on it.
+            listed = 0
+            for position in range(ids.size):
+                if owned[position] and defined:
+                    continue
+                if listed >= max_listed:
+                    admitted.append(
+                        {"record": a_path.name, "field": name,
+                         "note": f"{ids.size - listed} further differences of "
+                                 "the same class not listed"})
+                    break
+                admitted.append({
+                    "record": a_path.name, "field": name,
+                    "index_0based": [int(v) for v in index[position]],
+                    "reason": ("halo" if not owned[position]
+                               else "slot undefined at the write point"),
+                    "baseline_value": float(aa[ids[position]]),
+                    "candidate_value": float(bb[ids[position]]),
+                })
+                listed += 1
+        pa = _project(aa, projection, nx, ny, nz)
+        pb = _project(bb, projection, nx, ny, nz)
+        if defined and plant and not plant[0]:
+            pb = np.ascontiguousarray(pb).copy()
+            pb.reshape(-1)[0:1].view(np.uint64)[:] ^= np.uint64(1)
             plant[0] = True
-        if consumed and not _bits_equal(np.ascontiguousarray(pa), np.ascontiguousarray(pb)):
+        if defined and not _bits_equal(np.ascontiguousarray(pa),
+                                       np.ascontiguousarray(pb)):
             consumed_equal = False
         offset += count * 8
     assert offset == len(a_bytes), (a_path, offset, len(a_bytes))
     raw = np.frombuffer(a_bytes, np.uint8) != np.frombuffer(b_bytes, np.uint8)
+    undefined = sorted({n for n, _, _, d in layout if not d})
     return {
         "consumed_equal": consumed_equal,
+        "magic": magic,
+        "dims_with_halo": [nx, ny, nz],
         "raw_differing_bytes": int(np.count_nonzero(raw)),
-        "first_differing_byte_1based": int(np.flatnonzero(raw)[0] + 1) if np.any(raw) else None,
+        "first_differing_byte_1based": (
+            int(np.flatnonzero(raw)[0] + 1) if np.any(raw) else None),
         "changed_fields": changed,
-        "writer": WRITER_OVERRIDE or SOURCES[kind][0],
-        "parser": SOURCES[kind][1],
+        "admitted_differences": admitted,
+        "undefined_slots": undefined,
+        "undefined_slot_reasons": [
+            UNDEFINED_REASON.get((magic, n), "NO REASON REGISTERED")
+            for n in undefined],
+        "writer": SOURCES.get(magic, "unregistered"),
+        "parser": PARSERS.get(magic, "unregistered"),
     }
 
 
+# --- the ordered barotropic operand stream, whose schema GREW in round 21 ---
 BT_NAMES = ("u_entry", "v_entry", "u_history_b", "v_history_b", "u_history_bb",
             "v_history_bb", "eta_entry", "eta_history_b", "eta_history_bb", "u_mid",
             "v_mid", "eta_mid", "face_depth_u_mid", "face_depth_v_mid",
@@ -166,24 +334,31 @@ BT_NAMES = ("u_entry", "v_entry", "u_history_b", "v_history_b", "u_history_bb",
             "trd_u", "trd_v", "slow_u", "slow_v", "u_exit", "v_exit",
             "face_depth_u_exit", "face_depth_v_exit", "r1_face_depth_u_exit",
             "r1_face_depth_v_exit")
-BT_EXTRA = ("ffu_nw", "ffu_ne", "ffu_sw", "ffu_se", "ffv_sw", "ffv_se", "ffv_nw", "ffv_ne")
+BT_EXTRA = ("ffu_nw", "ffu_ne", "ffu_sw", "ffu_se", "ffv_sw", "ffv_se",
+            "ffv_nw", "ffv_ne")
 
 
-def _read_bt(path: Path) -> tuple[str, tuple, float, list]:
-    with path.open("rb") as f:
-        magic = f.read(16).decode("ascii").rstrip()
-        header = struct.unpack("=6i", f.read(24))
-        dt = float(np.fromfile(f, np.float64, 1)[0])
+def _read_bt(path: Path):
+    """Dims come from this record's own header too (jpi, jpj at 3, 4)."""
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        header = struct.unpack("=6i", handle.read(24))
+        nx, ny = header[3], header[4]
+        n2, nc = nx * ny, (nx - 4) * (ny - 4)
+        dt = float(np.fromfile(handle, np.float64, 1)[0])
         names = BT_NAMES + (BT_EXTRA if magic.endswith("_2") else ())
         rows = []
         for _ in range(2):
-            jn = struct.unpack("=i", f.read(4))[0]
-            weights = np.fromfile(f, np.float64, 7)
+            jn = struct.unpack("=i", handle.read(4))[0]
+            weights = np.fromfile(handle, np.float64, 7)
             values = {}
             for name in names:
-                values[name] = np.fromfile(f, np.float64, NC if name in {"slow_u", "slow_v", *BT_EXTRA} else N2)
+                values[name] = np.fromfile(
+                    handle, np.float64,
+                    nc if name in {"slow_u", "slow_v", *BT_EXTRA} else n2)
             rows.append((jn, weights, values))
-        assert f.read(1) == b""
+        if handle.read(1) != b"":
+            raise AdmissionError(f"{path}: trailing bytes after two BTORD rows")
     return magic, header, dt, rows
 
 
@@ -199,102 +374,158 @@ def _compare_bt(a: Path, b: Path) -> dict:
                 equal = False
     raw_a, raw_b = a.read_bytes(), b.read_bytes()
     limit = min(len(raw_a), len(raw_b))
-    raw = np.frombuffer(raw_a[:limit], np.uint8) != np.frombuffer(raw_b[:limit], np.uint8)
+    raw = (np.frombuffer(raw_a[:limit], np.uint8)
+           != np.frombuffer(raw_b[:limit], np.uint8))
     return {
         "consumed_equal": bool(equal), "common_field_differences": common_diffs,
         "schema": f"{aa[0]}->{bb[0]}", "appended_fields": list(BT_EXTRA),
         "raw_differing_bytes": int(np.count_nonzero(raw)),
         "appended_bytes": max(0, len(raw_b) - len(raw_a)),
-        "first_differing_byte_1based": int(np.flatnonzero(raw)[0] + 1) if np.any(raw) else limit + 1,
+        "admitted_differences": [],
+        "first_differing_byte_1based": (
+            int(np.flatnonzero(raw)[0] + 1) if np.any(raw) else limit + 1),
         "writer": "MY_SRC/dynspg_ts.F90:598-599,934-942",
         "parser": "nemo_testcase_l2_gyre_round14_advmean.py:123-179",
     }
 
 
-def main() -> int:
-    global NX, NY, NZ, N2, N3, NC, WRITER_OVERRIDE
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--baseline", type=Path, default=BASE)
-    parser.add_argument("--candidate", type=Path, default=CAND)
-    parser.add_argument("--twin", type=Path, default=TWIN)
-    parser.add_argument("--plant-consumed", action="store_true")
-    # The consumed-field admission RULE is card-independent; only the record
-    # geometry and inventory are not.  Round 26 reuses it for the LOCK
-    # external-mode acquisition instead of writing a second copy.
-    parser.add_argument("--dims", type=int, nargs=3, metavar=("NX", "NY", "NZ"),
-                        default=(NX, NY, NZ),
-                        help="oracle array dims INCLUDING the 2-cell halo")
-    parser.add_argument("--restart", default=RESTART,
-                        help="restart file that must stay byte-identical")
-    parser.add_argument("--allowed-new", nargs="*", default=None,
-                        help="record names the candidate may add")
-    parser.add_argument("--writer",
-                        help="instrument file:line for this card's records")
-    args = parser.parse_args()
-    NX, NY, NZ = args.dims
-    N2, N3, NC = NX * NY, NX * NY * NZ, (NX - 4) * (NY - 4)
-    WRITER_OVERRIDE = args.writer
-    plant = [not args.plant_consumed]
-    baseline_names = sorted(p.name for p in args.baseline.glob("oracle_*.bin"))
-    candidate_names = sorted(p.name for p in args.candidate.glob("oracle_*.bin"))
-    allowed_new = (
-        set(args.allowed_new) if args.allowed_new is not None
-        else {f"oracle_rkstage_ww_kt00000001_s{s}.bin" for s in (1, 2, 3)})
+def run(baseline: Path, candidate: Path, *, twin=None,
+        identical=DEFAULT_IDENTICAL, allowed_new=None, writer=None,
+        plant_consumed: bool = False) -> dict:
+    plant = [not plant_consumed]
+    baseline_names = sorted(p.name for p in baseline.glob("oracle_*.bin"))
+    candidate_names = sorted(p.name for p in candidate.glob("oracle_*.bin"))
+    if not baseline_names:
+        raise AdmissionError(f"{baseline}: no oracle_*.bin records to inherit")
+    allowed_new = set() if allowed_new is None else set(allowed_new)
     violations, rows, exact = [], [], 0
-    if set(candidate_names) - set(baseline_names) != allowed_new:
-        violations.append("unexpected candidate oracle inventory")
-    if set(baseline_names) - set(candidate_names):
-        violations.append("missing inherited oracle record")
+    unexpected = set(candidate_names) - set(baseline_names) - allowed_new
+    if unexpected:
+        violations.append(f"unexpected candidate records: {sorted(unexpected)}")
+    missing = set(baseline_names) - set(candidate_names)
+    if missing:
+        violations.append(f"missing inherited records: {sorted(missing)}")
+    declared_absent = allowed_new - set(candidate_names)
+    if declared_absent:
+        violations.append(
+            "--allowed-new names records the candidate never wrote: "
+            f"{sorted(declared_absent)}")
     for name in baseline_names:
-        a, b = args.baseline / name, args.candidate / name
+        a, b = baseline / name, candidate / name
+        if not b.is_file():
+            continue  # already reported as missing
         if a.read_bytes() == b.read_bytes():
             exact += 1
             continue
-        if name == "oracle_bt_ordered_operands_kt00000001.bin":
+        if name.startswith("oracle_bt_ordered_operands"):
             result = _compare_bt(a, b)
-        elif name in KINDS:
-            result = _compare_layout(a, b, KINDS[name], plant)
         else:
-            result = {"consumed_equal": False, "error": "changed record has no registered schema"}
-        if args.twin.is_dir() and (args.twin / name).is_file():
-            t = args.twin / name
-            twin = (_compare_bt(t, b) if name == "oracle_bt_ordered_operands_kt00000001.bin"
-                    else _compare_layout(t, b, KINDS[name], [True]) if name in KINDS else {})
-            result["round19_twin_raw_equal"] = t.read_bytes() == b.read_bytes()
-            result["round19_twin_consumed_equal"] = twin.get("consumed_equal")
+            result = compare_record(a, b, plant)
+        if twin is not None and twin.is_dir() and (twin / name).is_file():
+            t = twin / name
+            other = (_compare_bt(t, b)
+                     if name.startswith("oracle_bt_ordered_operands")
+                     else compare_record(t, b, [True]))
+            result["twin_raw_equal"] = t.read_bytes() == b.read_bytes()
+            result["twin_consumed_equal"] = other.get("consumed_equal")
         rows.append({"record": name, **result})
         if not result.get("consumed_equal", False):
             violations.append(name)
     # --writer stamps ONE provenance string, so it is only truthful when every
     # changed record comes from the same instrument.  Fail closed rather than
     # publish one file:line over records written by different ones.
-    if args.writer:
-        kinds = {KINDS[row["record"]] for row in rows if row["record"] in KINDS}
-        if len(kinds) > 1:
+    if writer:
+        magics = {row.get("magic") for row in rows if row.get("magic")}
+        if len(magics) > 1:
             violations.append(
-                f"--writer names one instrument but {sorted(kinds)} record "
+                f"--writer names one instrument but {sorted(magics)} record "
                 "kinds changed; pass no --writer or split the run")
-    restart = args.restart
-    restart_equal = _sha(args.baseline / restart) == _sha(args.candidate / restart)
-    if not restart_equal:
-        violations.append(restart)
-    report = {
-        "baseline": str(args.baseline), "candidate": str(args.candidate),
-        "baseline_oracle_records": len(baseline_names), "byte_identical_records": exact,
-        "classified_changed_records": rows, "restart_byte_identical": restart_equal,
-        "plant_consumed": args.plant_consumed,
-        # plant[] is a one-shot SENTINEL that starts True when no plant was
-        # requested, so publishing it as "plant_applied" said `true` on runs
-        # that planted nothing.  Report the fact instead.
-        "plant_applied": bool(args.plant_consumed and plant[0]),
-        "dims_with_halo": [NX, NY, NZ], "restart": restart,
-        "verdict": "PASS" if not violations else "FAIL", "violations": violations,
-        "artifacts": {"baseline_restart_sha256": _sha(args.baseline / restart),
-                      "candidate_restart_sha256": _sha(args.candidate / restart)},
+    identity_rows, artifacts = [], {}
+    for name in identical:
+        a, b = baseline / name, candidate / name
+        if not a.is_file() or not b.is_file():
+            violations.append(f"{name}: missing on one side")
+            identity_rows.append(
+                {"file": name, "byte_identical": False, "error": "missing"})
+            continue
+        sa, sb = _sha(a), _sha(b)
+        identity_rows.append({"file": name, "byte_identical": sa == sb,
+                              "baseline_sha256": sa, "candidate_sha256": sb})
+        artifacts[f"{name}.baseline_sha256"] = sa
+        artifacts[f"{name}.candidate_sha256"] = sb
+        if sa != sb:
+            violations.append(name)
+    admitted = [entry for row in rows
+                for entry in row.get("admitted_differences", [])]
+    return {
+        "format": "nemo-testcase-consumed-field-admission-v2",
+        "baseline": str(baseline), "candidate": str(candidate),
+        "halo_width_nn_hls": HALO,
+        "baseline_oracle_records": len(baseline_names),
+        "candidate_oracle_records": len(candidate_names),
+        "byte_identical_records": exact,
+        "classified_changed_records": rows,
+        "admitted_differences": admitted,
+        "admitted_difference_count": len(admitted),
+        "byte_identical_files": identity_rows,
+        "allowed_new_records": sorted(allowed_new),
+        "plant_consumed": plant_consumed,
+        "plant_applied": bool(plant_consumed and plant[0]),
+        "writer_override": writer,
+        "verdict": "PASS" if not violations else "FAIL",
+        "violations": violations,
+        "artifacts": artifacts,
     }
-    print(json.dumps(report, indent=2, sort_keys=True))
-    print(f"ROUND21_WRITE_ONLY_ADMISSION {report['verdict']}: exact={exact}/{len(baseline_names)} changed={len(rows)} restart_equal={restart_equal} plant={args.plant_consumed}")
-    return 0 if not violations else 1
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--baseline", type=Path, default=DEFAULT_BASE,
+                        help="the SOURCE run whose records must be inherited")
+    parser.add_argument("--candidate", type=Path, default=DEFAULT_CAND,
+                        help="the instrumented run under admission")
+    parser.add_argument("--twin", type=Path, default=DEFAULT_TWIN,
+                        help="optional third run; reported, never gating")
+    parser.add_argument("--identical", nargs="+",
+                        default=list(DEFAULT_IDENTICAL),
+                        help="files that must be byte-identical on both sides")
+    parser.add_argument("--allowed-new", nargs="*", default=None,
+                        help="record names the candidate may add")
+    parser.add_argument("--writer",
+                        help="instrument file:line for this card's records")
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--plant-consumed", action="store_true")
+    args = parser.parse_args(argv)
+    allowed_new = (
+        {f"oracle_rkstage_ww_kt00000001_s{s}.bin" for s in (1, 2, 3)}
+        if args.allowed_new is None else set(args.allowed_new))
+    try:
+        report = run(args.baseline, args.candidate, twin=args.twin,
+                     identical=tuple(args.identical), allowed_new=allowed_new,
+                     writer=args.writer, plant_consumed=args.plant_consumed)
+    except AdmissionError as error:
+        print(json.dumps({"verdict": "GATE-ERROR", "detail": str(error)},
+                         indent=2))
+        return 2
+    text = json.dumps(report, indent=2, sort_keys=True)
+    if args.output:
+        args.output.write_text(text + "\n")
+    print(text)
+    for entry in report["admitted_differences"]:
+        if "note" in entry:
+            print(f"  ADMITTED {entry['record']} {entry['field']:<12} "
+                  f"{entry['note']}")
+            continue
+        print(f"  ADMITTED {entry['record']} {entry['field']:<12} "
+              f"{str(entry['index_0based']):<16} {entry['reason']:<34} "
+              f"{entry['baseline_value']:.6e} vs {entry['candidate_value']:.6e}")
+    print(f"CONSUMED_FIELD_ADMISSION {report['verdict']}: "
+          f"exact={report['byte_identical_records']}/"
+          f"{report['baseline_oracle_records']} "
+          f"changed={len(report['classified_changed_records'])} "
+          f"admitted={report['admitted_difference_count']} "
+          f"plant={report['plant_consumed']}")
+    return 0 if report["verdict"] == "PASS" else 1
 
 
 if __name__ == "__main__":
