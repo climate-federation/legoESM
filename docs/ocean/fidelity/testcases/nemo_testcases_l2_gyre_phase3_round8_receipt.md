@@ -9439,6 +9439,19 @@ and emits `jax.debug.callback` before delegating.
 captured and a non-`None` value is a HARD FAILURE, not a row: GYRE's record
 pins `ln_zad_Aimp = F`.
 
+**THE PLANT CONTROL WAS DEFEATED TWICE, AND THE SECOND TIME IT DEFEATED
+ITSELF.**  Its first form asked only whether the gate exited non-zero — which
+three DEBT rows already guarantee, so a plant that did nothing would have read
+as passing; the diff review demonstrated that by neutering the plant.  Its
+second form asked whether the planted operand's OWN ROW moved, scored both
+ways, and then reported `False` on `--plant K`: one ulp on the largest `|K|`
+cell is `1.7e-18` against a row whose absolute maximum is `9.66e-13` and whose
+17383 of 17400 cells already differ, so the row's count, maximum and status
+are all untouched.  A control that cannot see its own plant proves nothing,
+and it said so and exited 3.  Each row now carries a SHA-256 of its scored
+candidate bytes.  Measured at the round's tip: `--plant K`, `--plant e3w` and
+`--plant wet` each report `moved_its_own_row True` and exit 1.
+
 **THE RECORD GAP, with its frame spec and `run.sh`.**  A record whose
 isoneutral term is identically zero cannot discriminate ANY transcription of
 it — it can only say whether the candidate's fold is also exactly zero.  So
