@@ -616,3 +616,60 @@ def test_signed_zero_status_cannot_swallow_a_real_difference():
     assert tiny["status"] != "AT-BAR-SIGNED-ZERO"
     big = R.bit_row("b", np.array([0.0, 1.0]), np.array([1.0, 1.0]))
     assert big["status"] == "DEBT"
+
+
+# --------------------------------------------------------------------------
+# ROUND 36 -- the admission gate's own PRINT path
+# --------------------------------------------------------------------------
+def test_both_comparators_admit_the_same_shape_so_the_report_can_be_printed(
+        tmp_path, capsys):
+    """The end of an acquisition must not be where the gate learns its shape.
+
+    ``run`` concatenates ``admitted_differences`` across every record and
+    ``main`` prints them through ONE format string.  The self-describing
+    comparator used to emit a 5-element LIST while ``compare_record`` emitted
+    a dict, so round 35's real run decided ``verdict PASS``, wrote its JSON,
+    and then died with ``TypeError: list indices must be integers`` -- taking
+    the round-35 gate, its seven plants and the outputs manifest down with it
+    under ``set -e``.
+
+    This drives the SAME path: two runs whose only difference is a HALO cell
+    of a self-describing record, which is admitted and therefore printed.
+    """
+    A = _admission()
+    base_dir, cand_dir = tmp_path / "base", tmp_path / "cand"
+    base_dir.mkdir()
+    cand_dir.mkdir()
+    name = "oracle_trazdf_matrix_kt00000001.bin"
+    base = synthetic_record(base_dir / name)
+    raw = bytearray(base.read_bytes())
+    _, _, fields, _ = A._read_self_describing(base)
+    rank, off, _ = fields["avt"]
+    assert rank == 3
+    halo_flat = 0                      # i = j = 0, inside the nn_hls halo
+    assert A._first_owned_index(rank, JPI * JPJ * JPK, JPI, JPJ) != halo_flat
+    at = off + 8 * halo_flat
+    raw[at:at + 8] = struct.pack("<d", 12345.0)
+    (cand_dir / name).write_bytes(bytes(raw))
+    for folder in (base_dir, cand_dir):
+        (folder / "mesh_mask.nc").write_bytes(b"identical")
+
+    code = A.main(["--baseline", str(base_dir), "--candidate", str(cand_dir),
+                   "--twin", "/nonexistent", "--identical", "mesh_mask.nc",
+                   "--allowed-new"])
+    printed = capsys.readouterr().out
+    assert code == 0, printed
+    assert "CONSUMED_FIELD_ADMISSION PASS" in printed
+    # the crash was in the line that PRINTS an admitted difference, so the
+    # difference must have been admitted AND rendered
+    assert f"ADMITTED {name} avt" in printed
+
+    # and the shape contract that printer depends on, stated directly
+    report = A.run(base_dir, cand_dir, twin=None, identical=("mesh_mask.nc",))
+    assert report["admitted_difference_count"] >= 1
+    for entry in report["admitted_differences"]:
+        assert isinstance(entry, dict), entry
+        assert {"record", "field"} <= set(entry)
+        assert "note" in entry or {
+            "index_0based", "reason", "baseline_value", "candidate_value",
+        } <= set(entry), entry

@@ -631,9 +631,22 @@ def _compare_self_describing(a: Path, b: Path, plant, *,
                                   ids[owned][:max_listed]):
             changed.append([name, position.tolist() if hasattr(position, "tolist")
                             else position, float(aa[flat]), float(bb[flat])])
-        for flat in ids[~owned][:max_listed]:
-            admitted.append([name, int(flat), float(aa[flat]), float(bb[flat]),
-                             "halo"])
+        # ONE SHAPE FOR BOTH COMPARATORS.  ``run`` concatenates the admitted
+        # lists of every record and ``main`` prints them through one format
+        # string, so a second shape here is not a style difference -- it is a
+        # TypeError at the end of an acquisition, after the record is written
+        # and the verdict is decided, which is exactly how round 35's run.sh
+        # stopped before its gate.  These rows carry the same keys
+        # ``compare_record`` writes.
+        for row_index, flat in zip(index[~owned][:max_listed],
+                                   ids[~owned][:max_listed]):
+            admitted.append({
+                "record": a.name, "field": name,
+                "index_0based": [int(v) for v in np.atleast_1d(row_index)],
+                "reason": "halo",
+                "baseline_value": float(aa[flat]),
+                "candidate_value": float(bb[flat]),
+            })
         if np.any(owned):
             consumed_equal = False
     return {
