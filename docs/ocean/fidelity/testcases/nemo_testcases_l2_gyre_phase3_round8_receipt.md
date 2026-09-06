@@ -9700,10 +9700,10 @@ its own output rather than counted as evidence.
 The FMA-flag probe: 8 of 8 arms ran, none rejected, three disablers.
 
 The receipt citation gate is `PASS` over **198 citations**, none unmapped, no
-failures, no map entry failing its own audit.  Eleven citations were added this
-round; three of them named the COMPILED ppsrc's line numbers as though they
-were the shipped source's and one anchored on a brace, and the gate refused all
-four before this was written.
+failures, no map entry failing its own audit — EIGHT more than round 37's 190,
+which is exactly the number this round added.  Three of them named the COMPILED
+ppsrc's line numbers as though they were the shipped source's and one anchored
+on a brace; the gate refused all four before this was written.
 
 The full ocean-fidelity suite at the final tip, on a detached worktree:
 **`999 passed, 7 skipped, 18 deselected in 2489.84s`**, exit 0, zero failures.
