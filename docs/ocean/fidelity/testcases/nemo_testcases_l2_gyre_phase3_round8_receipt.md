@@ -5113,10 +5113,15 @@ unchanged.
 `stp2d.F90:177` opens a `SELECT CASE( n_dynadv )` with two arms.  `:178` is
 `CASE( np_VEC_c2, np_LIN_dyn )` and its body `:180` ASSIGNS the depth mean;
 `:183` is `CASE ( np_FLX_c2, np_FLX_up3 )` and its body `:185` CUMULATES it
-onto the 2-D advective RHS.  GYRE's `namelist_cfg` sets
-`ln_dynadv_vec = .true.`, so GYRE executes `stp2d.F90:180`; LOCK and OVERFLOW
-set `ln_dynadv_up3 = .true.` and execute `stp2d.F90:185`.  Round 27's open question named
-`:185` for GYRE.  Both arms weight with the reference `e3u_0` and multiply by
+onto the 2-D advective RHS.  GYRE's own deck sets `ln_dynadv_vec = .true.`
+(`GYRE_OMIP_L2_P3_SM/EXP00/namelist_cfg:161`), so GYRE executes
+`stp2d.F90:180`; LOCK and OVERFLOW set `ln_dynadv_up3 = .true.` and execute
+`stp2d.F90:185`.  **Corrected in round 29:** this sentence originally named
+GYRE's deck by an unqualified basename, which the citation gate resolves to
+LOCK's namelist -- where that switch is `.false.`, the opposite of the claim.
+The premise was right and the citation was not auditable; GYRE's deck is now
+a separate key in the gate's file map.  Round 27's open question named
+`stp2d.F90:185` for GYRE.  Both arms weight with the reference `e3u_0` and multiply by
 the reference `r1_hu_0` (`domain.F90:159`), so the question survives the
 correction and only the line moves.
 
@@ -5177,10 +5182,22 @@ thickness with a MIN rule and sums it.
 | kt=2, `eta != 0` | `3.058607589676341e-08` | `580 / 580` |
 
 That is `0.046 x (eta/H)` — first order, and eight decades above the
-reference-versus-live residual.  It is also exactly zero during step 1, so it
-does not own GYRE's kt2 rows either; it enters from kt=3.  It is registered as
-DEBT with its measured size and its source line, and it recurs inside the RK3
-stages, where NEMO recomputes `r3u` per stage.
+reference-versus-live residual.
+
+~~It is also exactly zero during step 1, so it does not own GYRE's kt2 rows
+either; it enters from kt=3.~~ **STRUCK IN ROUND 29, and struck in place
+rather than edited away.**  Two things are wrong with it.  The stage face
+ratio is NOT zero during step 1: `r3u(:,:,Kaa)` is assigned at STAGE 1 from
+`ssha` (`stprk3_stg.F90:156`, the assignment at `:163`), so a stage-3
+thickness already carries a nonzero free-surface ratio inside the step that
+produces the kt=2 state.  And the MIN rule is not what the production stage
+builder uses: `nemo_qco_live_face_geometry_cgrid` (`vertical.py:470`)
+transcribes NEMO's area-weighted MEAN (`domqco.F90:166-169` for the MLF
+entry, `:219-222` for the RK3 one) and both time-stepping lanes call it, so
+MIN survives only as an ablation arm.  What the measured `3.06e-08` actually
+sizes is the SLOW-FORCING depth average, where `min_cell_to_uface` is still
+the rule.  That is the debt, it is registered with this size and this source
+line, and it is not a statement about the RK3 stages.
 
 ### Where GYRE's kt2 divergence is, and where it is not
 
@@ -5442,9 +5459,24 @@ this branch (`git merge-base --is-ancestor` returns true).  The integration is
 therefore a FAST-FORWARD with zero conflicts by construction.
 
 What blocks that fast-forward after this round: **nothing mechanical**.  Round
-28 landed no model numerics — the only changes are under
-`scripts/validate/`, `tests/` and `docs/` — and it removed one merge blocker
-by measurement rather than by decision.  Two gates that previously exited `0`
+28's OWN eleven commits landed no model numerics — verified by listing the
+files every one of them touches, nine in total, all under `scripts/validate/`,
+`tests/` and `docs/`, zero under `packages/` or `src/` — and the round removed
+one merge blocker by measurement rather than by decision.
+
+**The branch range is no longer round 28's alone, and the earlier wording of
+this paragraph was wrong about it.**  A concurrent session committed three
+further changes onto this same branch while round 28 was running:
+`7d7cbfb97319` (a round-29 preregistration), `1a019b2fe85e`, which sets the
+demo GYRE card's `vertical_momentum_scheme` and `adaptive_implicit_vertadv`
+and cites "User decision 15C (2026-09-05)" for doing so, and `8091542726b3`
+(round-29 `dyn_zdf` instrumentation).  So `359c33c40ecc..HEAD` now DOES touch
+`packages/ocean/legoesm/ocean/fidelity/nemo_recipe.py`.  Round 28 neither made
+nor verified that decision — it was FORBIDDEN for this round and is untouched
+by its commits — and it is flagged here rather than reverted, because
+reverting another session's committed work on a cited user decision is not
+round 28's call.  A reader diffing this branch should attribute those three
+commits to round 29, not to this section.  Two gates that previously exited `0`
 on a defect now exit non-zero, which is a strictly tighter tree, and the
 pre-existing focused-test failures are unchanged in kind.
 
@@ -5462,10 +5494,11 @@ kt2 rows.  The merge decision itself is not made here.
 
 ### Open questions
 
-1. **The MIN-versus-MEAN face-thickness rule.**  `3.06e-08` relative at kt=2,
-   first order in `eta/H`, source-cited, exactly zero during step 1 so it does
-   not own the kt2 rows but does enter from kt=3 and recurs per RK3 stage.
-   Land the MEAN rule source-literally, or leave it as named debt?
+1. **The MIN-versus-MEAN face-thickness rule, restated in round 29.**
+   `3.06e-08` relative at kt=2, first order in `eta/H`, source-cited.  The
+   question is narrower than round 28 posed it: the RK3 stage builder ALREADY
+   uses NEMO's mean rule, so what is left is the barotropic slow forcing's
+   depth average.  Land the mean rule there too, or leave it as named debt?
 2. **The signed-zero population in the kt=1 momentum-RHS frame** — unchanged
    from round 27: `1260 / 2540` on LOCK, `16400 / 16900` on OVERFLOW, DEBT
    with a CONFIRMED owner.  User decision 16, still pending; not landed.

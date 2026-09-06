@@ -57,12 +57,26 @@ FILES = {
     "dynspg_ts.F90": _DYN / "dynspg_ts.F90",
     "dynhpg.F90": _DYN / "dynhpg.F90",
     "dynadv.F90": _DYN / "dynadv.F90",
+    "dynzdf.F90": _DYN / "dynzdf.F90",
+    "vertical.py": REPO / "packages/ocean/legoesm/ocean/vertical.py",
+    # GYRE's own run log and its own compiled branch, so a GYRE resolved value
+    # cannot bind to OVERFLOW's ocean.output or to LOCK's ppsrc.
+    "round19_oracle_v2_external/ocean.output": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3"
+        "/round19_oracle_v2_external/ocean.output"),
+    "GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stprk3_stg.f90":
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stprk3_stg.f90",
     "trabbl.F90": _OCE / "TRA/trabbl.F90",
     "MY_SRC/stprk3.F90": LOCK / "MY_SRC/stprk3.F90",
     "domain.F90": _OCE / "DOM/domain.F90",
     "domqco.F90": _OCE / "DOM/domqco.F90",
     "usrdef_hgr.F90": LOCK / "MY_SRC/usrdef_hgr.F90",
     "namelist_cfg": LOCK / "EXP00/namelist_cfg",
+    # GYRE's own deck.  Without this key a GYRE premise written as a
+    # bare "namelist_cfg" token binds to LOCK's namelist, where
+    # ln_dynadv_vec is .false. -- the opposite of what it claims.
+    "GYRE_OMIP_L2_P3_SM/EXP00/namelist_cfg":
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM/EXP00/namelist_cfg",
     "namelist_ref": NEMO / "cfgs/SHARED/namelist_ref",
     "ocean.output": OVERFLOW_RUN / "ocean.output",
     "overflow_kt1_10/ocean.output": OVERFLOW_RUN / "ocean.output",
@@ -242,6 +256,35 @@ CITATION_MAP = {
     'namelist_cfg:105-106': ['nn_bt_flt     = 3', 'rn_bt_alpha   = 0.07', 2],
     'namelist_ref:1092': 'nn_bt_flt     = 1          ! Add dissipation',
     'namelist_ref:1177': 'ln_zad_Aimp = .false.',
+    # --- round 29: the stage-3 momentum chain and dyn_zdf's matrix ---
+    'stprk3_stg.F90:400': 'CALL dyn_ldf( kstp, Kbb, Kmm, uu, vv, Krhs )     ! lateral mixing',
+    'stprk3_stg.F90:430': 'IF( kstg == 3 )   CALL dyn_zdf( kstp, Kbb, Kmm, Krhs, uu, vv, Kaa  )  ! vertical diffusion and time integration',
+    'stprk3_stg.F90:156': 'CALL dom_qco_r3c_RK3( ssha, r3ta, r3ua, r3va, r3fa )',
+    'stprk3_stg.F90:163': ('r3u(:,:,Kaa) = r3ua(:,:)', 1),
+    'dynadv.F90:144': "CASE( np_VEC_c2  )   ;   WRITE(numout,*) '   ==>>>   vector form : keg + zad + vor is used'",
+    'dynzdf.F90:121-122': ['puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kbb) + rDt * puu(ji,jj,jk,Krhs) ) * umask(ji,jj,jk)', 'pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kbb) + rDt * pvv(ji,jj,jk,Krhs) ) * vmask(ji,jj,jk)', 2],
+    'dynzdf.F90:156-159': ['puu(ji,jj,iku,Kaa) = puu(ji,jj,iku,Kaa) + zDt_2 * ( rCdU_bot(ji+1,jj)+rCdU_bot(ji,jj) ) * uu_b(ji,jj,Kaa)   &', ('&                                            / e3v(ji,jj,ikv,Kaa)', 1), 4],
+    'dynzdf.F90:182-195': ['zzwi = - zDt_2 * ( avm(ji+1,jj,jk  )     +  avm(ji,jj,jk  )     ) &', ('zwd(ji,1) = 1._wp - zzws', 1), 14],
+    'dynzdf.F90:296': 'zwd(ji,iku) = zwd(ji,iku) - zDt_2 *( rCdU_bot(ji+1,jj)+rCdU_bot(ji,jj) ) / e3u(ji,jj,iku,Kaa)',
+    'dynzdf.F90:329-330': ['puu(ji,jj,1,Kaa) = puu(ji,jj,1,Kaa) + rDt * utauU(ji,jj)   &', '&                                    / ( e3u(ji,jj,1,Kaa) * rho0 ) * umask(ji,jj,1)', 2],
+    'domqco.F90:166-169': [('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)  &', 1), ('&                    + e1e2t(ji,jj+1) * pssh(ji,jj+1)  ) * r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 1), 4],
+    'domqco.F90:219-222': [('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)  &', 2), ('&                    + e1e2t(ji,jj+1) * pssh(ji,jj+1)  ) * r1_hv_0(ji,jj) * r1_e1e2v(ji,jj)', 2), 4],
+    'vertical.py:470': 'def nemo_qco_live_face_geometry_cgrid(',
+    'round19_oracle_v2_external/ocean.output:338': 'ice shelf cavities             ln_isfcav =  F',
+    'round19_oracle_v2_external/ocean.output:553': 'Courant number targeted application   ln_zad_Aimp =  F',
+    'round19_oracle_v2_external/ocean.output:629': 'implicit friction                         ln_drgimp   =  T',
+    'round19_oracle_v2_external/ocean.output:630': 'implicit ice-ocean drag                   ln_drgice_imp  = F',
+    'round19_oracle_v2_external/ocean.output:706': ('==>>>   iso-level laplacian operator', 1),
+    'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stprk3_stg.f90:485': 'CALL dyn_ldf( kstp, Kbb, Kmm, uu, vv, Krhs )     ! lateral mixing',
+    'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stprk3_stg.f90:498': 'IF( kstg == 3 )   CALL dyn_zdf( kstp, Kbb, Kmm, Krhs, uu, vv, Kaa  )  ! vertical diffusion and time integration',
+    # GYRE's own deck (round 29).  The round-28 premise was written as a bare
+    # "namelist_cfg" token, which binds to LOCK's namelist -- where
+    # ln_dynadv_vec is .false., the opposite of what the sentence claimed.
+    'GYRE_OMIP_L2_P3_SM/EXP00/namelist_cfg:161': 'ln_dynadv_vec = .true.',
+    'GYRE_OMIP_L2_P3_SM/EXP00/namelist_cfg:187-188':
+        ['ln_dynldf_lap =  .true.', 'ln_dynldf_lev =  .true.', 2],
+    'GYRE_OMIP_L2_P3_SM/EXP00/namelist_cfg:189-191':
+        ['nn_ahm_ijk_t  = 0', 'rn_Lv      = 100.e+3', 3],
     'ocean.output:875': 'Barotropic time filter => nn_bt_flt',
     'lock_kt1_10/ocean.output:615': 'no explicit diffusion                ln_dynldf_OFF',
     'overflow_kt1_10/ocean.output:727': 'no explicit diffusion                ln_dynldf_OFF',
@@ -249,9 +292,7 @@ CITATION_MAP = {
     'ocean_pe_latlon_cgrid.py:2045-2046': ['requires the raw NEMO',
          'nemo_e3w_0 mesh field; midpoint reconstruction on',
          2],
-    'nemo_testcase_recipe.py:92,274,914': [('pgf_scheme="nemo_sco",', 1),
-         'if cfg.pgf_scheme != "nemo_sco":',
-         3],
+    'nemo_testcase_recipe.py:92,274,914': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
     'BLD/ppsrc/nemo/dynspg_ts.f90:1224': 'REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv',
     'BLD/ppsrc/nemo/dynhpg.f90:378,397': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  '
           '0)              ! Surface value',
@@ -265,13 +306,8 @@ CITATION_MAP = {
          'to zero',
          ('END DO   ;   END DO', 1),
          4],
-    'BLD/ppsrc/nemo/dynadv_up3.f90:211,317,355': [('ELSE                           !-  added the 3D RHS  -!', 1),
-         'ELSE                                !-  added the 3D RHS  -!',
-         3],
-    'BLD/ppsrc/nemo/dynadv_up3.f90:213,336,357': ['puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs) - 0.25_wp',
-         'puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs) - zFu_t(ji,jj) * '
-         'r1_e1e2u(ji,jj)',
-         3],
+    'BLD/ppsrc/nemo/dynadv_up3.f90:211,317,355': [('ELSE                           !-  added the 3D RHS  -!', 1), ('ELSE                           !-  added the 3D RHS  -!', 2), 'ELSE                                !-  added the 3D RHS  -!', 3],
+    'BLD/ppsrc/nemo/dynadv_up3.f90:213,336,357': ['puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs) - 0.25_wp', 'puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs) - ( zFu_t(ji,jj) - zzFu_kp1 )', 'puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs) - zFu_t(ji,jj) * r1_e1e2u(ji,jj)', 3],
     'BLD/ppsrc/nemo/dynvor.f90:655-656': [('zwx(ji,jj) = e2u(ji,jj) * (e3t_1d(jk)', 2),
          ('zwy(ji,jj) = e1v(ji,jj) * (e3t_1d(jk)', 2),
          2],
@@ -387,20 +423,47 @@ def resolve_anchor(body: list[str], anchor) -> tuple[int | None, str]:
     return hits[0], ""
 
 
-def parse_entry(value) -> tuple[object, object, int | None]:
-    """``"sym"`` | ``[first, last]`` | ``[first, last, extent]``."""
-    if isinstance(value, str):
-        return value, value, None
-    parts = list(value)
-    extent = None
-    if parts and isinstance(parts[-1], int):
-        extent = parts.pop()
-    if len(parts) == 1:
-        parts = parts * 2
-    if len(parts) != 2:
-        raise ValueError("expected a symbol, or [first, last], "
-                         "optionally followed by an extent")
-    return parts[0], parts[1], extent
+def group_endpoints(spec: str) -> list[int]:
+    """One entry per cited ENDPOINT: a single line gives one, a range two.
+
+    ``"211,317,355"`` gives ``[211, 317, 355]`` and ``"156,161-168"`` gives
+    ``[156, 161, 168]``.  Pinning only the OUTER two endpoints left every
+    interior comma group unvalidated: ``dynadv_up3.f90:211,317,355`` passed
+    with its middle line changed to any number between 211 and 355, because
+    the outer anchors and the length were both untouched.
+    """
+    endpoints: list[int] = []
+    for part in spec.split(","):
+        if "-" in part:
+            first, last = part.split("-")
+            endpoints.extend((int(first), int(last)))
+        else:
+            endpoints.append(int(part))
+    return endpoints
+
+
+def parse_entry(value, n_endpoints: int = 2) -> tuple[list, int | None]:
+    """``"sym"`` | ``[a, b, ...]`` | ``[a, b, ..., extent]``.
+
+    Returns one anchor PER ENDPOINT.  A citation with more endpoints than the
+    map pins is refused rather than partly checked.
+    """
+    if isinstance(value, (str, tuple)):
+        # a bare string, or a (symbol, nth) TUPLE, is ONE anchor
+        anchors, extent = [value], None
+    else:
+        anchors = list(value)
+        extent = anchors.pop() if anchors and isinstance(anchors[-1], int) else None
+    if len(anchors) == 1 and n_endpoints > 1:
+        anchors = anchors * n_endpoints
+    if n_endpoints == 1 and len(anchors) == 2:
+        # legacy single-line form [first, last]: both anchors must identify
+        # that one line, which is strictly stronger than pinning it once
+        return anchors, extent
+    if len(anchors) != n_endpoints:
+        raise ValueError(
+            f"cites {n_endpoints} endpoints, map pins {len(anchors)} anchors")
+    return anchors, extent
 
 
 def check(citation: str, value, shift: int = 0, shift_last_only: bool = False,
@@ -422,7 +485,8 @@ def check(citation: str, value, shift: int = 0, shift_last_only: bool = False,
                 "detail": f"no readable file for {path_key!r}"}
     try:
         numbers = line_numbers(spec)
-        first_symbol, last_symbol, extent = parse_entry(value)
+        endpoints = group_endpoints(spec)
+        anchors, extent = parse_entry(value, len(endpoints))
     except ValueError as error:
         return {"citation": citation, "status": "BAD-CITATION",
                 "detail": str(error)}
@@ -436,13 +500,19 @@ def check(citation: str, value, shift: int = 0, shift_last_only: bool = False,
         return {"citation": citation, "status": "EXTENT-MISMATCH",
                 "detail": f"cites {len(numbers)} lines, map pins {extent}"}
 
-    first = numbers[0] + (shift if not shift_last_only else 0)
-    last = numbers[-1] + (shift if not shift_first_only else 0)
-    if any(n < 1 or n > len(body) for n in (first, last)):
+    shifted = list(endpoints)
+    if not shift_last_only:
+        shifted[0] = endpoints[0] + shift
+    if not shift_first_only:
+        shifted[-1] = endpoints[-1] + shift
+    if any(n < 1 or n > len(body) for n in shifted):
         return {"citation": citation, "status": "OUT-OF-RANGE",
                 "detail": f"{path} has {len(body)} lines"}
-    for anchor, line, end in ((first_symbol, first, "first"),
-                              (last_symbol, last, "last")):
+    if len(anchors) == 2 and len(shifted) == 1:      # legacy single-line form
+        shifted = shifted * 2
+    names = (["first"] + ["interior"] * (len(shifted) - 2) + ["last"]
+             if len(shifted) > 1 else ["first"])
+    for anchor, line, end in zip(anchors, shifted, names):
         resolved, why = resolve_anchor(body, anchor)
         if resolved is None:
             return {"citation": citation, "status": "AMBIGUOUS-ANCHOR",
@@ -492,14 +562,33 @@ def self_test() -> list[dict]:
          check("stprk3_stg.F90:309-334", good, shift=2, shift_last_only=True)),
         ("first endpoint shifted alone",
          check("stprk3_stg.F90:309-334", good, shift=2, shift_first_only=True)),
+        # a comma citation's INTERIOR group moved, with both outer endpoints
+        # and the pinned length untouched.  Round 28 pinned only the outer two
+        # endpoints, so this passed: the middle line of
+        # dynadv_up3.f90:211,317,355 could be any number between 211 and 355.
+        ("comma interior moved",
+         check("BLD/ppsrc/nemo/dynadv_up3.f90:211,318,355",
+               CITATION_MAP["BLD/ppsrc/nemo/dynadv_up3.f90:211,317,355"])),
+        # and a comma citation whose interior is not pinned at all
+        ("comma interior not pinned",
+         check("BLD/ppsrc/nemo/dynadv_up3.f90:211,317,355",
+               [CITATION_MAP["BLD/ppsrc/nemo/dynadv_up3.f90:211,317,355"][0],
+                CITATION_MAP["BLD/ppsrc/nemo/dynadv_up3.f90:211,317,355"][-2],
+                3])),
     ]
     # and the unplanted entry must still PASS, or the controls prove nothing
     baseline = check("stprk3_stg.F90:309-334", good)
+    comma_baseline = check(
+        "BLD/ppsrc/nemo/dynadv_up3.f90:211,317,355",
+        CITATION_MAP["BLD/ppsrc/nemo/dynadv_up3.f90:211,317,355"])
     rows = [{"planted": name, "status": row["status"],
              "fired": row["status"] != "OK"} for name, row in planted]
     rows.append({"planted": "unplanted baseline must pass",
                  "status": baseline["status"],
                  "fired": baseline["status"] == "OK"})
+    rows.append({"planted": "unplanted comma baseline must pass",
+                 "status": comma_baseline["status"],
+                 "fired": comma_baseline["status"] == "OK"})
     return rows
 
 
