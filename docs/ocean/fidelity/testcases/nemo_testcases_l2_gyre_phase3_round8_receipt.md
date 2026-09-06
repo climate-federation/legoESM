@@ -6246,7 +6246,11 @@ preregistration is
 `3a36c07fc335` before any measurement, with three addenda each committed
 before the run it governs.  No NEMO executable was run.  Every artifact is
 under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round31/` with SHA-256
-in `artifacts.sha256`.
+in `artifacts.sha256`, and — for the first round in this campaign — every one
+of them names the tree that produced it: the five walk arms are stamped
+`835e536808ae`, clean, on this branch, and the trajectory re-run
+`da93c090cf73`, clean, on this branch.  The two commits between them touch
+only the citation map and a docstring.
 
 ### Rule 0 first — the task's own citation is off by one at both ends
 
