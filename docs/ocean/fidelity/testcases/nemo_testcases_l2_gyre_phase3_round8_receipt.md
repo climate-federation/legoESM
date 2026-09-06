@@ -8980,14 +8980,38 @@ never read -- `zwi` at the surface row, `zws` at the bottom -- are NEGATIVE
 zeros in NEMO (`:419` sets `zwt(:,1) = 0`, `:443-444` divide it), where
 legoESM wrote positive zeros into both, 704 cells each, 600 of them wet.
 
-**GIVEN NEMO'S INPUTS, EVERY ARM OF `tra_zdf` IS NOW BIT-EXACT**, on the
-round-37 record, 21120 scored cells:
+**THE DRY-DIAGONAL HALF WAS LANDED AND THEN TAKEN BACK OUT, AND THAT IS THIS
+ROUND'S MOST IMPORTANT FINDING.**  With the substitution removed, OVERFLOW's
+`kt=2` tracers went **NON-FINITE**.  The mechanism, measured on all three
+cards rather than reasoned: NEMO's `e3t_3d` is the positive REFERENCE
+thickness below the seafloor as well as above it, so a dry row of its matrix
+reduces to a nonzero `e3t`; legoESM's `h_partial` is **EXACTLY `0.0` at every
+dry cell** -- 3120 of GYRE's 21120, 5240 of LOCK_EXCHANGE's 7800, 43600 of
+OVERFLOW's 60600.  Without the `1.0` the diagonal is zero, the solve divides
+by it, and the resulting infinity multiplies the `-0.0` off-diagonal above it
+into a NaN.
+
+**THE BLIND SPOT IS WORTH WRITING DOWN.**  The arm that certified the change
+used NEMO'S OWN `e3t_Kaa`, which satisfies the precondition.  "Bit-exact given
+NEMO's inputs" is structurally incapable of seeing a defect whose entire
+content is that legoESM's inputs are not NEMO's.  Rule 12's discharge is
+necessary and, for a change that reads geometry, not sufficient; the tanks'
+trajectories are what caught it, which is why the round's own instruction
+required them.
+
+So the substitution is back, REGISTERED as a deviation rather than presented
+as a transcription, with the measurement in the code beside it.  Closing it
+means giving legoESM NEMO's reference thickness below the seafloor -- a
+geometry change, not this function's to make.
+
+Given NEMO's inputs, on the round-37 record, 21120 scored cells, at the
+round's final tip:
 
 | arm | row | before | after |
 |---|---|---|---|
 | calibration | all 13 rows | 0 / 21120 | 0 / 21120 |
 | assembly | `zwi` | 704 signed zeros | **0 / 21120** |
-| assembly | `zwd` | 3120 at 299.71 | **0 / 21120** |
+| assembly | `zwd` | 3120 at 299.71 | 3120 at 299.71 — **REGISTERED**, owner: legoESM's zero dry-cell thickness |
 | assembly | `zws` | 704 signed zeros | **0 / 21120** |
 | sweep | T | 133 at 7.105e-15 | **0 / 21120** |
 | sweep | S | 111 at 7.105e-15 | **0 / 21120** |
@@ -9008,11 +9032,13 @@ out of `nemo_solve` so the new arm shares it rather than growing a copy.
 | LOCK_EXCHANGE-zco | `zdf_solve_lego.u`, `.v` | 0 / 7800 | 0 / 7800 |
 | OVERFLOW-zps | `zdf_solve_lego.u`, `.v` | 0 / 60600 | 0 / 60600 |
 
-The dry-diagonal change reaches only the tracer pair solve.  GYRE is measured
-above.  **The tanks have NO tracer-matrix record**, so their discharge is by
-trajectory, below, and the frame spec for closing it properly is a `trazdf`
+The dry-diagonal change reaches only the tracer pair solve, and **the tanks
+have NO tracer-matrix record** — which is exactly why the round's instruction
+required their trajectories before landing on them, and exactly what refused
+the change.  The frame spec for closing that gap properly is a `trazdf`
 instrument on each tank card writing `zwi`/`zwd`/`zws`/`rhs`/`sol` at
-`kt = nit000`, exactly as round 35 did for GYRE.
+`kt = nit000`, as round 35 did for GYRE; but it would not have caught this
+one either, for the reason above.
 
 The new test builds a matrix on which the fused and unfused answers differ in
 2709 of 12288 cells and asserts the solve matches the unfused one.  It fails
@@ -9043,9 +9069,9 @@ GYRE's never did, and neither moved.
 
 The order set for decision 20 was (a) make the content builder bit-exact given
 NEMO's operands, (b) prove the whole `tra_zdf` program bit-exact given NEMO's
-inputs, (c) only then flip `tracer_combine`.  (a) was reached in round 36 and
-(b) is reached above.  **(c) is still not done, and the reason is no longer
-(b): it is that the premise of the flip is refuted.**  On the WS-RK3 path
+inputs, (c) only then flip `tracer_combine`.  (a) was reached in round 36.
+**(b) is NOT reached** -- the dry-diagonal row above is still 3120 cells --
+and, independently, **the premise of the flip is refuted.**  On the WS-RK3 path
 these three cards run, the literal matrix already consumes a CONTENT
 right-hand side, built by the tracer stage program and not by
 `tracer_combine`; the flip would change a field the stage ladder does not
