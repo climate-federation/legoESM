@@ -9558,11 +9558,14 @@ the trajectory at this round's tip, against round 37's.
 | LOCK_EXCHANGE-zco | kt=4, u | kt=4, u | kt=4, u |
 | OVERFLOW-zps | kt=2, T u | kt=2, T u | kt=2, T u |
 
-**No card's first-over-bar step moves under the flag either.**  Turning the
-contraction off globally, with the per-site rounding still in place, changes no
-card's trajectory verdict over ten steps — which is the honest reading of a
-flag whose one measurable effect on this campaign's rows is already delivered
-by a two-operation helper.
+**No card's first-over-bar step moves under the flag — but the flag is NOT
+inert, and that is the reason not to take it silently.**  With the per-site
+rounding still in place, `--xla_backend_optimization_level=0` moves **60 of
+GYRE's 70 scored trajectory rows**, the largest by `4.68248e-12` on
+`GYRE-zco.kt7.before.S`, while leaving both tanks bit-identical on every scored
+row they carry (0 of 20 on LOCK, 0 of 10 on OVERFLOW).  A setting that changes
+the model's answers at `1e-12` over ten steps, on top of disabling backend
+optimisation everywhere, is a user decision and not a harness one.
 
 ### ASKED / UNASKED
 
