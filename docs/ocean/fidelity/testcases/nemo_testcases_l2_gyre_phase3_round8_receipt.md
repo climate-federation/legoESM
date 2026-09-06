@@ -9596,6 +9596,54 @@ these three cards execute.  Nothing is deleted, nothing is wired, and decision
    12's bar.  Both are relabelled AT-BAR-NOT-EXACT, and the reservation is
    written into Rule 12 of the skill, where it did not appear at all.
 
+### What two independent reviews broke
+
+codex is unavailable on this account, so both reviews are fresh Claude agents
+with no shared context: one attacked the round's PREREGISTRATION before a line
+of the arm existed, one attacked the DIFF afterwards.  Between them they landed
+nine defects that are fixed here and four that are registered.
+
+**THE CLAIM REVIEW, before the code.**  It broke six of the six predictions.
+The capture's jit cache hazard (the step's key is the model INSTANCE) became a
+call-count control.  The inertness control — "T and S bit-identical with and
+without the capture" — was shown structurally blind to a capture that reads a
+differently-lowered copy, and became the in-graph identity check.  A
+decomposition claim was read off the wrong lines and withdrawn.  PR1's
+falsifier required a row that a permanent DEBT entry makes unreachable, so
+every row became wet-cells-only.  `implicit_w` was named as a matrix operand
+that was off the list.  And PR3's bracket was shown to be on the wrong
+quantity: perturbing EVERY wet `avt` by one ulp moves T by at most `1.16e-14`
+K, `2760x` short of the residual, so the prediction became output-side.  It
+also independently confirmed the index mapping and the `||M^-1||` bound.
+
+**THE DIFF REVIEW, after the code.  It found the flag a name search cannot
+find**, above, and it broke four more things that would have shipped.
+
+1. **The `--plant` control could not fail.**  The reviewer neutered the plant
+   and ran `--plant K`: exit 1, no failure line, rows byte-identical to the
+   unplanted run.  The gate's own baseline is DEBT, so "exited non-zero" was
+   satisfied by a plant that did nothing.  The verdict is now the planted ROW,
+   scored both ways, and the plant map is one dict so a renamed row cannot
+   leave a plant pointing at nothing.
+2. **`run.sh` could not run**: `SOURCE_RUN` named a directory that does not
+   exist, and under `set -e` it would have died at a bare test with no message.
+3. **`run.sh` carried round-37 prose** saying the twin may legitimately differ
+   by 115072 bytes, immediately above a gate that REFUSES any difference.
+4. **One test asserted a tuple against itself** and passed on any code.
+
+**REGISTERED, with owners.**
+
+5. **The fold's MAGNITUDE is unattributed**, above, and it is this round's
+   strongest remaining doubt.
+6. **The time-level discriminator is a different invocation**: it omits ten
+   arguments the model's call passes.  Two are measured inert and the zero is
+   measured non-degenerate; it is labelled a property of the function.
+7. **The substitution noise floor is a max-abs number** and cannot see the
+   4174 bits the same substitution moves.
+8. **A second operand differs and is never substituted separately**:
+   `dz_after`, 5207 wet cells at `1.13687e-13`, bounded by the K arm's
+   `1.42e-14`.
+
 ### kt = 1..10, before and after
 
 **No model numerics changed this round.**  Every arm is READ-ONLY: it
