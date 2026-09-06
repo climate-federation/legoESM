@@ -67,6 +67,26 @@ class AdmissionError(RuntimeError):
     """A record the gate cannot parse.  Never downgraded to a comparison."""
 
 
+def _worktree_stamp() -> dict:
+    """Which tree produced this report -- BEST EFFORT, and it says which.
+
+    This gate runs at ACQUISITION time, from ``run.sh``, in a shell whose
+    ``PYTHONPATH`` does not carry legoESM: it is deliberately dependency-free
+    apart from numpy so it can admit a record on the machine that just wrote
+    one.  So the stamp is attempted and its absence is REPORTED rather than
+    faked -- an artifact that cannot say which tree produced it must say that,
+    not omit the question.
+    """
+    try:
+        from legoesm.ocean.fidelity.provenance import worktree_stamp
+    except Exception as error:                    # pragma: no cover - env only
+        return {"unavailable": f"legoesm is not importable here: {error}"}
+    try:
+        return worktree_stamp()
+    except Exception as error:
+        return {"unavailable": str(error)}
+
+
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -575,6 +595,7 @@ def run(baseline: Path, candidate: Path, *, twin=None,
                     f"{row['record']}: a slot is waived from the bit test "
                     "with no registered reason")
     return {
+        "worktree": _worktree_stamp(),
         "format": "nemo-testcase-consumed-field-admission-v2",
         "baseline": str(baseline), "candidate": str(candidate),
         "halo_width_nn_hls": HALO,
