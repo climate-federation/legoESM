@@ -5337,7 +5337,7 @@ card is NOT changed — that is a user decision, and it is open question 3.
 
 ### Merge readiness
 
-`fidelity/nemo-testcases-l2-gyre-codex2` is **81 commits ahead of**
+`fidelity/nemo-testcases-l2-gyre-codex2` is **82 commits ahead of**
 `03c6e8d96ff7`, which is the tip of BOTH
 `origin/fidelity/nemo-gyre-integration-merge` and
 `origin/fidelity/nemo-testcases-l2-gyre-reconciled`, and is an ANCESTOR of
@@ -5384,6 +5384,14 @@ kt2 rows.  The merge decision itself is not made here.
    stepped-bathymetry card.  Re-run the kt=2 sizing on ORCA2?
 6. **Rounds 1-24 of this receipt are UNAUDITED by the citation gate.**  Extend
    the map backwards, or leave the statement standing?
+7. **A defect found in round 16's probe, reported and NOT fixed here.**  Its
+   "literal left-to-right transcription of the scalar-math Fortran SUM" loops
+   `range(1, product.shape[-1] - 1)` over an array the reader has already
+   trimmed to `jpkm1` levels, so it accumulates levels 1..28 of 30 and DROPS
+   the deepest one.  NEMO's `stp2d.F90:180` sums `1:jpkm1`, all 30.  Any
+   round-16 figure that rests on that helper is suspect.  Fixing it means
+   re-running and re-pinning round-16's recorded numbers, which is a decision,
+   not a patch — so it is registered here and left alone.
 
 ### ASKED / UNASKED
 

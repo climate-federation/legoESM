@@ -147,7 +147,7 @@ def read_rhs_payload(path: Path) -> dict:
 def nemo_reference_weights(mesh: Path, nlev: int) -> dict:
     """``e3u_0``/``umask`` and NEMO's own ``r1_hu_0``, read from the oracle mesh.
 
-    ``domain.F90:140-146`` accumulates ``hu_0 = hu_0 + e3u_0(jk)*umask(jk)``
+    ``domain.F90:142`` accumulates ``hu_0 = hu_0 + e3u_0(jk)*umask(jk)``
     sequentially over ``jk = 1..jpkm1``; ``domain.F90:159`` then forms
     ``r1_hu_0 = ssumask / ( hu_0 + 1 - ssumask )``, which is NOT ``1/hu_0`` on
     a face where that shift rounds.  Both are reproduced literally.
@@ -195,8 +195,23 @@ def reference_depth_mean(du_dt, weights, tag: str):
 
 
 def _bits(a, b, mask):
-    a = np.asarray(a, dtype=np.float64)[mask]
-    b = np.asarray(b, dtype=np.float64)[mask]
+    """Bit-pattern inequality count on the masked set.
+
+    ``score`` reports VALUE equality, under which ``-0.0 == 0.0``; the bar is
+    bits, so this is the companion.  It carries ``score``'s guards rather than
+    trusting its callers: a shape mismatch or a non-finite operand would make
+    the count meaningless, and a boolean mask selection is a copy, so the
+    ``view`` is always on contiguous float64.
+    """
+    a = np.ascontiguousarray(np.asarray(a, dtype=np.float64))
+    b = np.ascontiguousarray(np.asarray(b, dtype=np.float64))
+    mask = np.asarray(mask, dtype=bool)
+    require(a.shape == b.shape == mask.shape,
+            f"_bits shape mismatch {a.shape} {b.shape} {mask.shape}")
+    require(bool(mask.any()), "_bits called with an empty mask")
+    a, b = a[mask], b[mask]
+    require(bool(np.all(np.isfinite(a)) and np.all(np.isfinite(b))),
+            "_bits called with a non-finite operand")
     return int(np.count_nonzero(a.view(np.int64) != b.view(np.int64)))
 
 
@@ -405,7 +420,7 @@ def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
             # score()'s bar is 1e-15 on a NORMALIZED residual, which on this
             # frame is an effective RELATIVE tolerance of about 5e-08 -- it is
             # not the bit bar.  So publish the first BIT-unequal frame too;
-            # otherwise "800 rows at bar" reads stronger than it is.
+            # otherwise "every row at bar" reads stronger than it is.
             unequal_bits = _bits(oracle[name][jn], trace_frames[name][jn], mask)
             row["bit_unequal"] = unequal_bits
             if not np.any(oracle[name][jn][mask]):
