@@ -6438,7 +6438,7 @@ model, and it touches none of the solve's own inputs (`avm`, `e3uw(Kmm)`,
 
 **Round 30 was wrong that legoESM exposes no pre-solve vector.**
 `expose_pre_implicit_state` publishes `state_new` immediately before the
-implicit solver (`ocean_model_latlon_cgrid.py:7858-7860`, struck in place from lines 7731 to
+implicit solver (`ocean_model_latlon_cgrid.py:7915-7917`, struck in place from lines 7731 to
 7733, which round 32 moved) and it carries u and v.  **P4b is REFUTED**: that vector is not NEMO's explicit stage update, and
 not by a little — `4.269765124169735e-04` on u, which is the size of the
 FIELD, not of a residual.
@@ -9365,7 +9365,7 @@ transcription of the isoneutral formula — it is the CALL SITE.
   `trazdf.F90:173` reads `zwt = avt + ah_wslp2` at every stage.
 * legoESM recomputes its `K33` INSIDE each stage from that stage's own
   tracers: `ocean_model_latlon_cgrid.py:6969` sets `_T_gm_in = T_mid` on this
-  path — `_ldf_state` is `None` outside `_nemo_mlf_step` — and `:7277` hands it
+  path — `_ldf_state` is `None` outside `_nemo_mlf_step` — and `ocean_model_latlon_cgrid.py:7334` hands it
   to `compute_isoneutral_K33_latlon`.
 
 At `kt = nit000` GYRE has `ln_rstart = F` and its analytic initial T and S are
@@ -9382,7 +9382,7 @@ all 20416 faces**.  So legoESM's slope arithmetic leaves no rounding residue on
 a horizontally uniform field, and the difference is the STATE the function is
 handed, not the function.  This arm calls the function directly rather than
 through the model and is a property of that function, not of the model's call:
-it omits ten arguments `ocean_model_latlon_cgrid.py:7277` passes.  Two of them
+it omits ten arguments `ocean_model_latlon_cgrid.py:7334` passes.  Two of them
 were measured inert by the diff review (`u_mask`/`v_mask` threaded: 0 bits
 changed), and the zero is not degenerate (a `1e-12` tracer bump gives
 `4.69e-31`).
@@ -9777,3 +9777,445 @@ fast-forward.  **HOLD.**
 4. OVERFLOW's mask-placement row, round 30's `dyn_ldf` row, the moved
    trajectory rows from rounds 32-34, the slow forcing's depth average, the
    causal injection arm at the stage-3 boundary: unchanged.
+
+## Round 39 — the slopes move to the before state, and GYRE's kt=2 tracers clear
+
+Round 39 starts from `3dceb7b8231b` on a clean tree, same regime: CPU
+production JIT, fp64/x64, `transcendentals="libm"`, oracle V2.  The
+preregistration is
+`manifests/nemo_testcase_l2_gyre_round39_preregister.json` at `24014cacfc11`,
+committed BEFORE the arm existed; its AMENDMENT, written after an independent
+claim review returned VERDICT NO on two blockers and before the post-change
+numbers were taken, is
+`manifests/nemo_testcase_l2_gyre_round39_preregister_amendment.json`.  **No
+NEMO executable was run by the agent, no `makenemo` or `mpirun` was invoked,
+and no NEMO source was edited.**  The operator ran the round's one
+acquisition.  Four detached probe worktrees are flagged:
+`/tmp/codex-gyre-r39-before` at `24014cacfc11`, `/tmp/codex-gyre-r39-fma` at
+`194b4094b5b7` with the round-37 per-site rounding removed,
+`/tmp/codex-gyre-r39-defeat` at `367c0930c18b` for one attack, and
+`/tmp/codex-gyre-r39-suite`.
+
+### Item 0 — the kt=2 acquisition was refused by a rule that should not exist
+
+The operator's acquisition ran and `run.sh` exited 71 at "REFUSE: widening the
+arm moved a round-37 record".  **It was a good run.**
+
+The rule demanded RAW byte identity of every round-37 record.  NEMO's stream
+dumps write whole work arrays INCLUDING the `nn_hls` halo, which NEMO neither
+owns nor initialises, and the momentum-side transport record carries a `zFw`
+slot the vector-invariant branch has not defined at the write point.  Those
+bytes are uninitialised memory: they differ between two runs of the SAME
+executable, so raw identity is not attainable and a rule that demands it
+refuses runs that changed no model state.  That is the entire reason this
+campaign has a consumed-field admission gate — and `run.sh` already ran it four
+lines below, while the log line it printed said the differing record "falls
+through to the consumed-field admission".  The prose and the code disagreed.
+
+**The generalised admission, base round 37 vs candidate round 38, verdict
+PASS, 0 violations.**  All 8 differing record kinds were PARSED, none skipped:
+
+| record | kind | raw bytes differing | changed elements | in OWNED cells |
+|---|---|---:|---:|---:|
+| `oracle_rkstage3_wzv_kt00000001.bin` | `NEMO_L2_WZVOP_1` | 52 | 16 | 0 |
+| `oracle_rktracer_operands_kt00000001_s2.bin` | `NEMO_L2_RKTRA_1` | 4 | 2 | 0 |
+| `oracle_slow_forcing_kt00000001.bin` | `NEMO_L2_SLOW_2` | 24 | 8 | 0 |
+| `oracle_tracer_transport_kt00000001_s3.bin` | `NEMO_L2_TRTRP_1` | 4 | 2 | 0 |
+| `oracle_transport_kt00000001_s1.bin` | `NEMO_L1_TRANSP_1` | 6 | 2 | 2, `zFw`, WAIVED |
+| `oracle_transport_kt00000001_s2.bin` | `NEMO_L1_TRANSP_1` | 4 | 2 | 0 |
+| `oracle_transport_kt00000001_s3.bin` | `NEMO_L1_TRANSP_1` | 4 | 2 | 0 |
+| `oracle_zdf_matrix_kt00000001.bin` | `NEMO_L2_ZDFMX_1` | — | 8 | 0 |
+
+44 of 52 records raw identical, 46 admitted differences each printed with its
+index and both values, **every one halo or the registered undefined `zFw` slot
+and every value subnormal garbage of order `1e-310`** (for example
+`6.927945e-310` vs `6.944252e-310`).  The `zFw` waiver resolved against the
+run's own `round38_oracle_trazdf_kt2/ocean.output:798`, `ln_dynadv_vec = T`.  The kt=1 trazdf record, the
+final restart and `mesh_mask.nc` are byte-identical.  With `--plant-consumed`
+the same call is FAIL with `plant_applied` true, so the admission is not
+vacuous here.
+
+So the raw comparison stays a REPORT; the refusal becomes raw identity of the
+ONE record every round-35/37/38 arm scores against, plus a consumed-field
+admission against the round-37 run itself with its own plant.  Four tests
+EXECUTE the shipped guard rather than matching its text; on the old rule the
+halo-only case exits 71, on this one 0.
+
+### Item 1 — THE SLOPES ARE BUILT ON THE BEFORE STATE, AND THE RESIDUAL FALLS 1799x
+
+NEMO's WS-RK3 program computes the neutral slopes ONCE PER STEP, on the BEFORE
+state, OUTSIDE the stage loop: `stprk3.F90:173` `CALL eos ( ts, Nbb, rhd )`
+then `:174` `CALL ldf_slp( kstp, rhd, rn2b, Nbb, Nbb )`, compiled at
+`GYRE_OMIP_L2_P3_SM_R38TRAZDFKT2/BLD/ppsrc/nemo/stprk3.f90:178`; the three
+`CALL stp_RK3_stg` are at `stprk3.F90:195`, `stprk3.F90:200` and
+`stprk3.F90:207`.  `Kbb = Kmm = Nbb` inside
+`ldf_slp`, so every geometry it reads -- `gdept`, `gdepw`, `e3u`, `e3v`, `e3w` and
+the ssh behind them -- is at the before level too (`LDF/ldfslp.F90:80` is the
+routine, and both its time-level arguments are `Nbb` at the call site).  `traldf_iso.F90:135` squares those
+once-per-step slopes into `ah_wslp2` (`:296-297`) at each stage and
+`trazdf.F90:173` adds it to `avt`.  **Nothing in `ah_wslp2` carries a stage
+time level**: `ahtu`/`ahtv` have no time index (`traldf_iso.F90:291-294`) and
+the only `Kmm` in that routine is `akz`'s `e3w`, which `ln_traldf_msc = F`
+does not reach.  The claim review corrected an earlier
+sentence here that said otherwise, and it independently established that
+`grep` for `ldf_slp`, `zdf_mxl` and `zdf_phy` in `stprk3_stg.F90` returns ZERO
+hits, so nothing recomputes the slopes between stages.
+
+legoESM built them from `T_mid`/`S_mid` — the forward-Euler PREDICTOR of the
+whole baroclinic tendency (`ocean_model_latlon_cgrid.py:4893`) — and from the
+after-ssh.
+
+**THE STAGE-STATE COMPONENT TABLE, which closes round 38's strongest remaining
+doubt.**  Round 38 could account for only `1e-4` of the fold: injecting NEMO's
+own stage-minus-before tracer anomaly, absolute maximum `7.25e-6` K, gave
+`7.84e-17` against a live `9.66e-13`.  The reason is that legoESM's operand is
+not a stage tracer at all.  Measured through the model's own call, then
+re-called outside the graph with one component swapped to step entry:
+
+| arm | K33 absolute maximum (m²/s) | share of live |
+|---|---:|---:|
+| live, as the model calls it | `9.6620886711883531e-13` | 1.000000 |
+| CONTROL: same operands, re-called outside the graph | `9.6620886715999986e-13` | 1.000000 |
+| tracers := step-entry (Kbb) T, S | `1.3071545538245700e-14` | 0.013529 |
+| ssh := step-entry (Kbb) | `9.6625031189531020e-13` | 1.000043 |
+| BOTH := step-entry (Kbb) | **`0.0`** | 0.000000 |
+
+The state the call was handed differs from step entry by
+**`0.3372313792464041` K on 10199 of 21120 cells**, `0.0` on S, and
+`0.002848007840713329` m of ssh on 600 of 704.  **That 0.337 K is the four
+orders of magnitude round 38 could not find.**  Reading, stated as the skill's
+Rule 5 requires rather than as two independent shares: the TRACER time level
+removes 98.65 per cent, and the remaining 1.35 per cent vanishes only when the
+ssh moves too — ssh ALONE moves the fold by +0.004 per cent, so the two are
+not separable and neither owns that remainder.  The control reproduces the
+live value to a relative `4.3e-10`, not bit for bit, so "BOTH gives exactly
+0.0" is exactly 0.0 ON THIS INSTRUMENT; the in-graph operand gate below
+measures it bit-exactly.
+
+**THE BLAST RADIUS, measured before the change was made.**  On this lane the
+GM/Redi TENDENCY is causally dead: zeroing `gm_redi_tracer_tendency_latlon`'s
+whole output moves GYRE's kt=1 T by **0 of 21120 bits**, while zeroing K33
+moves it by `3.196021e-11` K on 7045 cells.  The diff review confirmed the
+mechanism independently — `dT_gm` reaches only `T_mid`, the AB2 branch is
+unreachable on a forward-Euler card, the rk3_ws tracer base is `state.T.data`,
+and `T_mid` has no consumer afterwards — and closed the one escape by
+instantiating the card: `gm_bolus_advection = "centred"`, so the through-FCT
+bolus is not requested.
+
+So on the WS-RK3 tracer lane the slope operand set — the tracers and the ssh
+handed to the shared density/Jacobian, the GM/Redi tendency and K33 — is the
+step-entry state.  **No knob, and no default that preserves the old
+behaviour.**  `_ldf_state` still wins where the modified-leapfrog lane supplies
+it; every other integrator has no stage loop for this statement to be about.
+
+**Prediction against measurement:**
+
+| row | before | predicted | after |
+|---|---:|---:|---:|
+| kt=1 stage-3 T residual (K) | `3.1956659540810506e-11` | `<= 2.6e-14`, and the `lego_avt_no_fold` arm's value | **`1.7763568394002505e-14`** |
+| the `lego_avt_no_fold` arm, on the PRE-change model | — | — | `1.7763568394002505e-14` |
+| kt=1 stage-3 S residual (psu) | `8.1712414612411521e-13` | the same arm's value | **`3.5527136788005009e-14`** |
+| the arm's S, on the PRE-change model | — | — | `3.5527136788005009e-14` |
+| `operand.K33_fold`, wet faces unequal | 17400 / 17400 at `9.66209e-13` | 0, EXACT | **0 / 17400 at `0`, AT-BAR** |
+| `operand.K`, wet faces unequal | 17383 / 17400 at `9.66209e-13` | `<= 1.8e-18` | 4905 / 17400 at **`1.73472e-18`** |
+
+**PR1, PR2, PR3 and PR4 are CONFIRMED, and PR1/PR4 to every digit.**  The
+`lego_avt_no_fold` arm — added because the claim review measured that round
+38's substitution ceiling was the wrong bound for a change that removes only
+the fold — predicted the post-change residual exactly, on both tracers, from
+the pre-change model.
+
+### Item 1, Rule 12 per card
+
+| card | does the changed statement execute? | how established | result |
+|---|---|---|---|
+| GYRE-zco | YES | `gm_redi` is not None, `tracer_time_integrator = "rk3_ws"`, `implicit_K33 = True`, printed from `_cfg_b.gm_redi` | given NEMO's inputs at kt=1: `K33` vs `ah_wslp2` **0 / 17400 unequal, absolute maximum 0, EXACT** — both are identically zero because GYRE's before state is horizontally uniform, measured on both sides |
+| GYRE-zco, kt=2 | YES | the round-38 record, `ah_wslp2` absolute maximum `3.3898494597440722e-08` | given NEMO's OWN before state: **DEBT**, 17400 / 17400 wet faces, max `3.3884e-08`, max relative `2.63`; legoESM's fold reaches `1.1728064666279615e-10`, 289x smaller.  Owner: the isoneutral SLOPE TRANSCRIPTION, which this round did not touch |
+| LOCK_EXCHANGE-zco | NO | legoESM resolves `gm_redi = None`; NEMO resolves `ln_traldf_OFF = T`, `ln_traldf_iso = F` (`lock_kt1_10/ocean.output:578`, `lock_kt1_10/ocean.output:584`), so `l_ldfslp = F` and `ldf_slp` is never called | kt=1..10 **BIT-IDENTICAL** before and after: the residual artifact's SHA-256 is the same on both arms, all 20 scored rows unmoved |
+| OVERFLOW-zps | NO | same, `overflow_kt1_10/ocean.output:690`, `overflow_kt1_10/ocean.output:696` | kt=1..10 **BIT-IDENTICAL**, same residual SHA-256, all 10 scored rows unmoved |
+| `build_nemo_gyre_recipe` (`fidelity/nemo_recipe.py:926`) | YES | the diff review's scope sweep: `gm_redi` on with `kappa_GM = 600`, `rk3_ws` on both integrators | **UNMEASURED WITH SPEC** — it has no trajectory gate.  Spec: the same operand gate driven off a record this configuration does not have.  Its committed tests are in the suite below |
+| ORCA2 | UNKNOWN | no card on this branch | **UNMEASURED WITH SPEC**, unchanged |
+| DINO / every other integrator | NO | `_ldf_state` wins, and no other lane sets `tracer_time_integrator = "rk3_ws"` | untouched by construction; a test asserts the guard keeps both conditions |
+
+**"DISCHARGED" is not used of GYRE's kt=1 row here even though it is bit-exact
+given NEMO's inputs, because the CARD is not: its kt=2 given-inputs row is
+DEBT and its trajectory still fails at kt=2 on `u` and `v`.**
+
+### Item 1, kt = 1..10 before and after
+
+BEFORE was taken at `24014cacfc11` in a detached probe worktree, same gates,
+same oracle roots, same `--max-step 10`, so the two arms differ only in the
+model.
+
+| card | first over bar BEFORE | first over bar AFTER |
+|---|---|---|
+| GYRE-zco | kt=2, **T S u v** | kt=2, **u v** |
+| LOCK_EXCHANGE-zco | kt=4, u | kt=4, u |
+| OVERFLOW-zps | kt=2, T u | kt=2, T u |
+
+**No card's first-over-bar step moves earlier, and GYRE loses two of its four
+failing fields.**  At kt=2:
+
+| row | before | after |
+|---|---:|---:|
+| `GYRE-zco.kt2.before.T` | `1.3614736849003888e-12` DEBT | **`7.567947108951577e-16` AT-BAR** |
+| `GYRE-zco.kt2.before.S` | `2.2181101297999213e-14` DEBT | **`9.643957086086614e-16` AT-BAR** |
+| `GYRE-zco.kt2.before.u` | `2.7478406377547115e-12` DEBT | unchanged |
+| `GYRE-zco.kt2.before.v` | `3.305560306813421e-12` DEBT | unchanged |
+| `GYRE-zco.kt2.before.ssh` | `4.336808689942018e-19` AT-BAR | unchanged |
+
+Both cleared rows are **AT-BAR-NOT-EXACT**: their own `exact` field is false,
+so the word DISCHARGED does not apply to them.
+
+**Every moved row is registered.**  42 of GYRE's 50 scored rows moved.  Two are
+the improvements above.  **39 moved only in their last digits — the largest
+relative movement over all of them is `-1.69e-07`, on `kt10.before.ssh` — and
+every one of them is still DEBT**; they are downstream of the kt=2 `u`/`v`
+divergence this change does not touch.  One row is LARGER, `kt7.before.ssh` by
+`+1.18e-07` relative, inside that same band and still DEBT.  Eight rows did not
+move.  Both tanks: 0 rows moved.
+
+### Item 1 — the instrument, and one control that DEGRADED
+
+The operand gate's three controls after the change: each capture point fires
+exactly once; the in-graph identity check is **0 bits unequal on every
+operand**; and the capture-inertness control **went from 0 to 1 moved T cell**.
+
+That is reported, not hidden.  Its magnitude is now printed beside its count,
+because a bit count without one is not a reportable number: the move is
+`3.55271e-15` at cell `[3, 21, 2]`, **exactly 1 ulp**.  A debug callback gives
+an operand a second consumer, which is precisely what stops XLA contracting a
+product into a multiply-add (round 37), so one ulp is the expected size; the
+gate's status is `PERTURBED` and it exits 1.  The operand rows above are
+unaffected — the in-graph check proves the captured arrays ARE the arrays that
+run's solve consumed — but the model the capture run integrates differs from
+the production one by that ulp, and that is now a printed row rather than a
+silent zero.
+
+`--plant K`, `--plant e3w` and `--plant wet` each report
+`moved_its_own_row True` and exit non-zero.
+
+### Item 2 — what remains, and who owns it
+
+At kt=1 stage 3, and at kt=2:
+
+| quantity | before | after | disposition |
+|---|---:|---:|---|
+| kt=1 stage-3 T (K) | `3.1956659540810506e-11` | `1.7763568394002505e-14` | the closure's own `avt`, `3.55271e-15` of it measured by the gate's CLOSURE-ONLY arm |
+| kt=1 stage-3 S (psu) | `8.1712414612411521e-13` | `3.5527136788005009e-14` | same |
+| kt=2 whole-step `u` | `2.7478406377547115e-12` | unchanged | round 30's `dyn_ldf` row, unchanged |
+| kt=2 whole-step `v` | `3.305560306813421e-12` | unchanged | same |
+| `operand.dz_after` | 5207 / 18000 at `1.13687e-13` | unchanged | named below |
+
+**THE `dz_after` OWNER, with the given-inputs discipline.**
+`e3t(i,j,k,Kaa) = e3t_0(i,j,k)·(1 + r3t(i,j,Kaa))`
+(`domzgr_substitute.h90:139`) and `r3t = ssh/ht_0` (`domqco.F90:160`,
+`dom_qco_r3c`), so the residual is owned by the reference thickness or by the
+stretch and by nothing else.  **The record's own consistency was checked
+first, not assumed**: NEMO's `e3t_Kaa` equals `e3t_0·(1+r3t_Kaa)` at **0 cells
+unequal** on every level this campaign scores (it differs only at `jk = jpk`,
+which is outside the scored box).  The record that carries NEMO's stage-3
+stretch is `r3t_Kaa` in the trazdf record.  Measured:
+
+| row | wet cells unequal | max abs | status |
+|---|---:|---:|---|
+| `dz_owner.reference_thickness` (legoESM vs NEMO `e3t_0`) | **0 / 18000** | **0** | AT-BAR |
+| `dz_owner.r3t` (legoESM's `ssh(Kaa)/H` vs NEMO's `r3t_Kaa`) | 566 / 600 | `2.11758e-22` | VALUE-AT-BAR |
+| `dz_owner.dz_after` | 5207 / 18000 | `1.13687e-13` | VALUE-AT-BAR |
+
+**The reference thickness is bit-shared, so the owner is legoESM's own
+`ssh(Kaa)` out of the stage-3 update, and the FIRST NON-BIT STATEMENT is `r3t`
+itself** — 566 of 600 wet columns, `2.11758e-22`, which is `3.2e-16` relative
+on an `r3t` whose own maximum is `6.62e-07`.  `h_partial` remains the
+registered dry-cell convention gap: it differs from `e3t_0` only at the 3120
+DRY cells, by up to `300.71` m.
+
+### Item 3 — the FMA flag, measured for decision 22.  THE DEFAULT IS NOT CHANGED
+
+Two settings were compared: the current tip (round 37's per-site rounding in
+place, no flag) and a scratch worktree with that rounding REMOVED under
+`XLA_FLAGS=--xla_cpu_max_isa=AVX`.
+
+| measurement | tip, no flag | ISA cap + per-site rounding removed |
+|---|---|---|
+| per-operator `trazdf` gate, rows moved by the flag | **0 of 24** | 2: `sweep.T` 133→0, `sweep.S` 111→0 |
+| per-operator `zdf` gate, rows moved by the flag | **0 of 10** | 2: `zdf_solve_lego.u` 582→0, `zdf_solve_lego.v` 623→0 |
+| distinct FMA SITES silenced | — | **2** — the second and third Thomas recurrences of the ONE shared ordered solve, reached by 2 operators |
+| GYRE first over bar | kt=2, u v | kt=2, u v — **42 of 50 rows moved**, largest `-7.33816e-13` on `kt4.before.v`, NO status change |
+| LOCK_EXCHANGE first over bar | kt=4, u | kt=4, u — **1 of 20 rows moved, by `-8.47033e-22`** |
+| OVERFLOW first over bar | kt=2, T u | kt=2, T u — **0 of 10 rows moved** |
+| wall time, one 10-step LOCK trajectory, n=1 each | 48.41 s | 47.12 s |
+
+**RECOMMENDATION: do NOT take the flag.**  It silences exactly the two sites
+round 37's per-site rounding already covers — no operator's given-inputs result
+changes that the rounding does not already fix — while capping the instruction
+set for every operator in the model on every machine it runs on; and round 38
+measured that a global disabler moves 60 of GYRE's 70 scored trajectory rows by
+up to `4.68e-12`, so other FMA sites exist that neither approach has
+identified.  Cost is not the argument: one trajectory took 48.41 s without the
+flag and 47.12 s with it, a single run each, i.e. no measurable cost.  The
+argument is that it is a global change of code generation bought for two sites
+that are already fixed locally.
+
+### What two independent reviews broke
+
+codex is unavailable on this account, so both reviews are fresh Claude agents
+with no shared context: one attacked the PREREGISTRATION before a line of the
+arm existed, one attacked the DIFF afterwards.  Both returned NO.
+
+**THE CLAIM REVIEW, before the code.**  Two blockers and ten findings, all
+dispositioned in the amendment.  It measured that round 38's substitution
+ceiling was the WRONG BOUND for a change that removes only the fold — one ulp
+on every wet `avt` is worth up to `1.16e-14` K on its own — so PR1's falsifier
+would have fired on a change that is exactly correct; the `lego_avt_no_fold`
+arm exists because of that finding and it predicted the answer to every digit.
+It found the `slope_prd_geometry_stage` knob the preregistration never
+mentioned, which is now MEASURED redundant (below) rather than argued.  It
+corrected a wrong sentence about `ahtu`/`ahtv` carrying a stage time level, it
+showed PR3's falsifier band was unfalsifiable, and it verified PR5 on both
+sides independently.
+
+**THE DIFF REVIEW, after the code.  Its blocker made the round's central claim
+untested**, and it is the most important thing either review did.  The two
+model tests wrapped only the K33 routine, so restoring the predictor state at
+the OTHER TWO call sites — the shared density/Jacobian and the GM/Redi tendency
+— left every test green.  Reproduced in a detached worktree with exactly that
+edit: **2 of 8 tests now fail**, at `jac.T` 10199 of 21120 cells and at a fold
+of `9.6931758357204761e-13` m²/s.  That reverted state is the disagreement this
+file's own comment calls a CONFIRMED P1 defect.
+
+It also found **one operand still on the after-ssh**: `native_bolus_slope_eta`,
+while the comment above it claimed the whole slope operand set had moved.  It
+is moved, and measured inert on GYRE.  It found the new source-admission plant
+**could not fail** — the gate exits non-zero when a plant NEVER LANDS, so
+"exited non-zero" was satisfied by a control that proved nothing; both plants
+in that script now require `"plant_applied": true`.  And it found the
+substitution arm injected a **negative diffusivity** at masked interfaces,
+because the model builds `K_v_cell = (K_v + K33)·mask` and a plain `K - K33` is
+`-K33` there.
+
+**REGISTERED, with owners.**
+
+1. **`run.sh`'s new block has never executed.**  The round-38 records come from
+   the run the old rule refused; the only evidence the new rule works is this
+   round's own read-only re-runs of the same gate.
+2. **`round38_source_admission.json` is not in that script's final `sha256sum`
+   manifest**, and its plant JSON is written with `2>&1`, so it is not
+   parseable JSON.  Pre-existing pattern.
+3. **`build_nemo_gyre_recipe` is a fourth configuration whose numbers move**,
+   with no trajectory gate.  Its committed tests are in the suite below.
+4. **The GM/Redi TENDENCY leg of this change is unmeasurable on all three
+   cards**, because its output is discarded on this lane.  Boundary: it becomes
+   measurable on the first card that pairs `rk3_ws` with `through_fct`.
+5. **The capture-inertness control degraded to 1 ulp**, above.
+
+### Item 1's other answered question — the knob is REDUNDANT, measured
+
+With the fix in place, the card built with
+`slope_prd_geometry_stage="before_step"` and the card built with the default
+`"current_step"` give **BIT-IDENTICAL T and S, 0 of 21120 on each**.  PR9
+CONFIRMED: the two mechanisms are redundant on this lane, not competing.  The
+knob keeps its meaning on the lanes the fix does not touch, and it is NOT the
+ship vehicle — a knob whose default preserves the old behaviour is exactly what
+this campaign forbids.
+
+### Rule-11 records
+
+* **Round 38's caveat is CLOSED, and its framing was too weak.**  It said the
+  stage TRACER anomaly explained only `1e-4` of the fold and left the
+  responsible component UNMEASURED.  The component is the tracer time level
+  after all; what round 38 lacked was that legoESM's operand is not a stage
+  tracer but a forward-Euler PREDICTOR `0.337` K from step entry, where NEMO's
+  own stage anomaly is `7.25e-6` K.
+* **The kt=1 record's inability to discriminate is now demonstrated, not
+  argued.**  legoESM's fold at kt=1 is exactly 0 and so is NEMO's; at kt=2,
+  given NEMO's own before state, they differ by 289x.  A round that had only
+  the kt=1 record could have called the transcription matched.
+* **An earlier sentence in the model's own comment claimed `ahtu`/`ahtv` carry
+  the stage's `Kmm`.**  They carry no time index at all; corrected in the code
+  and here.
+* **The capture-inertness control is no longer 0.**  Reported with its
+  magnitude, 1 ulp, rather than left as a bare count.
+
+### ASKED / UNASKED
+
+| choice | status |
+|---|---|
+| the isoneutral slopes / K33 are built ONCE PER STEP on the BEFORE state on the WS-RK3 lane | ASKED-BY-DIRECTIVE — the user's standing "do as NEMO does".  It makes legoESM read the state `stprk3.F90:174` reads.  No knob, and no default that preserves the old behaviour |
+| `native_bolus_slope_eta` moves with the rest of the slope operand set | same directive: NEMO's ONE `ldf_slp` call per step feeds the bolus and the Redi tensor the same before-state slopes.  Measured inert on GYRE |
+| `slope_prd_geometry_stage` keeps its default and its meaning | ASKED — it is MEASURED redundant with the fix on this lane (0 of 21120 bits), and it is not the ship vehicle |
+| the acquisition's admission becomes consumed-field identity plus raw identity of ONE record | a previously-tolerated condition changes, in the loosening direction — taken because the tolerated condition REFUSED A GOOD RUN, and because the instrument that replaces it is strictly stronger per element.  Named here rather than left silent |
+| both plants in that script now require `"plant_applied": true` | a previously-tolerated condition becomes a hard error — taken because the diff review demonstrated the old form passes a control that proved nothing |
+| the XLA ISA cap is NOT taken | ASKED — decision 22, measured above, default unchanged, recommendation given |
+| the dry-cell thickness convention is unchanged | ASKED — registered open card-identity gap, unchanged from round 38 |
+| `tracer_combine` is neither deleted nor wired | ASKED — unchanged from round 38 |
+| detached probe worktrees | ASKED; the same disposition rounds 32-38 recorded.  Flagged: `/tmp/codex-gyre-r39-before`, `/tmp/codex-gyre-r39-fma`, `/tmp/codex-gyre-r39-defeat`, `/tmp/codex-gyre-r39-suite` |
+| shipped NEMO edit, `makenemo`, `mpirun`, push, merge, deletion | forbidden; none performed by the agent.  The operator ran the acquisition |
+
+UNASKED list: **empty**.
+
+### Merge readiness
+
+`03c6e8d96ff7` remains an ancestor, so the integration is still a
+fast-forward.  **HOLD.**
+
+1. **GYRE's kt=2 `u` and `v` still fail**, unchanged and untouched by this
+   round; `T` and `S` are now AT-BAR-NOT-EXACT.
+2. **The kt=2 isoneutral fold, given NEMO's own inputs, is DEBT at 289x.**  Its
+   owner is the slope transcription, and it is the first thing the next round
+   should walk.
+3. `tra_zdf`'s matrix diffusivity is now bit-exact given NEMO's inputs at kt=1;
+   `operand.K` is `1.73e-18` and belongs to the closure.
+4. The `dz_after` owner is named — legoESM's own `ssh(Kaa)` — and its first
+   non-bit statement is `r3t`.
+5. ORCA2 has no card on this branch, unchanged; `build_nemo_gyre_recipe` joins
+   it as UNMEASURED-WITH-SPEC.
+6. Rounds 1-24 of this receipt remain UNAUDITED by the citation gate.
+
+### What is open
+
+1. **The isoneutral SLOPE TRANSCRIPTION.**  Given NEMO's own before state at
+   kt=2, legoESM's fold is `1.17e-10` where NEMO's `ah_wslp2` is `3.39e-08`.
+   The argmax sits at the first interior face, which is where NEMO's
+   mixed-layer slope ramp acts, so the MLD/ramp and the `N²` denominator are
+   the first two suspects — neither is measured.
+2. **The `dz_after` residual**, owned by the stage-3 `ssh(Kaa)` update, first
+   non-bit at `r3t`, 566 of 600 wet columns at `2.11758e-22`.
+3. **The GM/Redi tendency leg is unmeasurable on all three cards** and becomes
+   measurable on the first `rk3_ws` + `through_fct` card.
+4. The dry-cell thickness convention, `tracer_combine`, OVERFLOW's
+   mask-placement row, round 30's `dyn_ldf` row, the moved trajectory rows from
+   rounds 32-34, the slow forcing's depth average, the causal injection arm at
+   the stage-3 boundary: unchanged.
+5. `run.sh`'s new admission block has never executed on a real acquisition.
+
+### Gates and evidence
+
+The round-38 matrix-operand gate on the round-37 record, at the round's final
+tip: `operand.K33_fold`, `operand.e3w_now`, `operand.wet` and `operand.dt`
+AT-BAR at 0 bits; `operand.K` VALUE-AT-BAR at `1.73472e-18`;
+`operand.dz_after` VALUE-AT-BAR at `1.13687e-13`.  Its controls: each capture
+point fires exactly once, the in-graph identity check is 0 bits unequal on
+every operand, and the capture-inertness control is 1 T cell at `3.55271e-15`,
+1 ulp — so the gate's status is `PERTURBED` and it exits 1, and that is stated
+here rather than left for a reader to discover.  `--plant K`, `--plant e3w`
+and `--plant wet` each report `moved_its_own_row True` and exit non-zero.
+
+The `dz_owner` arm: the record is self-consistent at 0 cells,
+`reference_thickness` AT-BAR at 0 of 18000, `r3t` VALUE-AT-BAR at
+`2.11758e-22`.  The `knob-redundancy` arm: `REDUNDANT True`, 0 of 21120 bits
+on each tracer.  The `kt2-given-inputs` arm: record discriminating,
+`KT2-GIVEN-INPUTS DEBT unequal 17400/17400 max 3.3884e-08 rel 2.62947`, and it
+exits 1.
+
+The consumed-field admission on (round 37, round 38): `PASS`, 0 violations, 44
+of 52 raw identical, 46 admitted differences all halo or the registered
+undefined slot; with `--plant-consumed` it is `FAIL` with `plant_applied` true.
+
+The receipt citation gate is `PASS` over **211 citations**, 0 failures, 0
+unmapped, 0 map entries failing their own audit, and all 9 of its self-test
+plants fired.  Thirteen citations were added this round.  **Five map entries
+had to be RE-ANCHORED**, because this round's before-state block added 57 lines
+to `ocean_model_latlon_cgrid.py` and five keys were line numbers below it; the
+statements are unchanged and the numbers were not, which is exactly what that
+gate exists to catch.  The stamp-scope ratchet is 18 passed.
