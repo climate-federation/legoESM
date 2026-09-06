@@ -184,7 +184,11 @@ def test_one_ulp_on_one_operand_turns_the_gate_red(tmp_path):
     assert planted["status"] == "DEBT"
     moved = [r for r in planted["calibration_rows"] if r["bit_unequal"] > 0]
     assert moved, "the planted ulp moved no row"
-    assert all(r["name"].split(".")[-1].endswith(("_u", "_v")) for r in moved)
+    # ROUND 37: the two new solve rows are named ".u"/".v", not "_u"/"_v",
+    # so the per-face assertion takes both spellings rather than silently
+    # excusing a row it does not recognise.
+    assert all(r["name"].split(".")[-1].endswith(("_u", "_v", "u", "v"))
+               for r in moved)
 
 
 def test_unknown_face_raises_rather_than_defaulting(tmp_path):
