@@ -30,12 +30,36 @@
     },
     "item1_per_stage_localisation": {
         "source": "gyre_kt1_10/legoesm_phase3_round8_kt10_gate.json full_stage_program.momentum_rows",
-        "stage1_u": {"absolute_max": 2.710505431213761e-19, "status": "AT-BAR", "n": 17400},
-        "stage2_u": {"absolute_max": 4.740083109008864e-13, "status": "DEBT", "n": 17400},
-        "stage3_u": {"absolute_max": 9.481924730527598e-07, "status": "DEBT", "n": 17400},
-        "stage1_v": {"absolute_max": 2.710505431213761e-19, "status": "AT-BAR", "n": 17100},
-        "stage2_v": {"absolute_max": 4.885601404230715e-13, "status": "DEBT", "n": 17100},
-        "stage3_v": {"absolute_max": 8.988523102725608e-07, "status": "DEBT", "n": 17100}
+        "stage1_u": {
+            "absolute_max": 2.710505431213761e-19,
+            "status": "AT-BAR",
+            "n": 17400
+        },
+        "stage2_u": {
+            "absolute_max": 4.740083109008864e-13,
+            "status": "DEBT",
+            "n": 17400
+        },
+        "stage3_u": {
+            "absolute_max": 9.481924730527598e-07,
+            "status": "DEBT",
+            "n": 17400
+        },
+        "stage1_v": {
+            "absolute_max": 2.710505431213761e-19,
+            "status": "AT-BAR",
+            "n": 17100
+        },
+        "stage2_v": {
+            "absolute_max": 4.885601404230715e-13,
+            "status": "DEBT",
+            "n": 17100
+        },
+        "stage3_v": {
+            "absolute_max": 8.988523102725608e-07,
+            "status": "DEBT",
+            "n": 17100
+        }
     },
     "item2_existing_record_walk": {
         "verdict": "NEITHER -- no pre-dyn_zdf momentum frame exists at stage 3, so the existing records cannot decide the owner",
@@ -43,19 +67,35 @@
             "records_read": 51,
             "distinct_instrument_tags": 21,
             "momentum_operand_tags_all_gated_on_kstg2": [
-                "NEMO_L2_RKTRM_1", "NEMO_L2_HPGOP_1", "NEMO_L2_HPGLT_1",
-                "NEMO_L2_EOSOP_1", "NEMO_L2_ENEOP_1", "NEMO_L2_RKPRE_1",
+                "NEMO_L2_RKTRM_1",
+                "NEMO_L2_HPGOP_1",
+                "NEMO_L2_HPGLT_1",
+                "NEMO_L2_EOSOP_1",
+                "NEMO_L2_ENEOP_1",
+                "NEMO_L2_RKPRE_1",
                 "NEMO_L2_RKSTG_1"
             ],
             "stage3_records_that_exist": "tracer and vertical-velocity only; the three NEMO_L1_STAGE_1 files hold stage OUTPUTS (T, S, u, v, ssh), no RHS and no matrix"
         },
         "already_exonerated_inside_stage3": {
             "ww_at_stage3": "AT-BAR at all three stages (round 21)",
-            "avm_at_zdf_entry": {"absolute_max": 3.469446951953614e-17, "status": "AT-BAR", "n": 17400},
-            "avt_at_zdf_entry": {"absolute_max": 3.469446951953614e-18, "status": "AT-BAR", "n": 17400}
+            "avm_at_zdf_entry": {
+                "absolute_max": 3.469446951953614e-17,
+                "status": "AT-BAR",
+                "n": 17400
+            },
+            "avt_at_zdf_entry": {
+                "absolute_max": 3.469446951953614e-18,
+                "status": "AT-BAR",
+                "n": 17400
+            }
         },
         "unmeasured_operators_between_the_two_scored_frames": [
-            "eos + dyn_hpg", "dyn_vor", "dyn_adv", "dyn_ldf", "dyn_zdf",
+            "eos + dyn_hpg",
+            "dyn_vor",
+            "dyn_adv",
+            "dyn_ldf",
+            "dyn_zdf",
             "the barotropic correction"
         ]
     },
@@ -79,10 +119,38 @@
         "method": "the inserted code was preprocessed with the deck's own cpp keys, compiled with gfortran 15.2.0 and run on a 6x5x4 domain, with NEMO's own matrix-build and solve statements lifted verbatim from the preprocessed source so the fixture is what its operands imply",
         "claim": "the python transcription reproduces gfortran's evaluation of the SAME statements bit for bit; this is NOT a claim about NEMO's real GYRE numbers",
         "rows": {
-            "zwi_u": {"bit_unequal": 0, "n": 8}, "zwd_u": {"bit_unequal": 0, "n": 8},
-            "zws_u": {"bit_unequal": 0, "n": 8}, "zdf_solve_u": {"bit_unequal": 0, "n": 8},
-            "zwi_v": {"bit_unequal": 0, "n": 8}, "zwd_v": {"bit_unequal": 0, "n": 8},
-            "zws_v": {"bit_unequal": 0, "n": 8}, "zdf_solve_v": {"bit_unequal": 0, "n": 8}
+            "zwi_u": {
+                "bit_unequal": 0,
+                "n": 8
+            },
+            "zwd_u": {
+                "bit_unequal": 0,
+                "n": 8
+            },
+            "zws_u": {
+                "bit_unequal": 0,
+                "n": 8
+            },
+            "zdf_solve_u": {
+                "bit_unequal": 0,
+                "n": 8
+            },
+            "zwi_v": {
+                "bit_unequal": 0,
+                "n": 8
+            },
+            "zwd_v": {
+                "bit_unequal": 0,
+                "n": 8
+            },
+            "zws_v": {
+                "bit_unequal": 0,
+                "n": 8
+            },
+            "zdf_solve_v": {
+                "bit_unequal": 0,
+                "n": 8
+            }
         },
         "status": "AT-BAR, exit 0",
         "planted_control": "one ulp on avm turns six of the eight rows bit-unequal, status DEBT, exit 1",
@@ -93,7 +161,11 @@
     },
     "item5_decision_15C": {
         "change": "demo GYRE card vertical_momentum_scheme upwind_perturbation -> nemo_advective, adaptive_implicit_vertadv True -> False",
-        "citations": ["dynadv.F90:144 (np_VEC_c2, 'vector form : keg + zad + vor is used')", "namelist_ref:1177 ln_zad_Aimp = .false.", "round19_oracle_v2_external/ocean.output:553 prints F"],
+        "citations": [
+            "dynadv.F90:144 (np_VEC_c2, 'vector form : keg + zad + vor is used')",
+            "namelist_ref:1177 ln_zad_Aimp = .false.",
+            "round19_oracle_v2_external/ocean.output:553 prints F"
+        ],
         "before": "5 failed, 19 passed",
         "after": "4 failed, 20 passed",
         "surfaced_and_not_fixed": "all four remaining failures are ONE defect: OceanZStarCoordinate on the native demo card has no is_active attribute, so nemo_qco_live_t_thickness (vertical.py:68) refuses the WS-RK3 stage transport. The reference thickness IS supplied by the caller; the active-cell mask is the missing operand. Oracle-bridge cards get one from NEMO's mesh; the native demo card never did.",
@@ -110,8 +182,18 @@
     },
     "item7_bit_debt_registered": {
         "what": "reference-versus-live slow-forcing weighting, round 28's refuted OWNER, still not bitwise equal",
-        "u": {"relative": 8.307570867102084e-16, "bit_unequal": 488, "n": 580, "arm_scale": 2.3896678125115675e-08},
-        "v": {"relative": 5.993770496385322e-16, "bit_unequal": 488, "n": 570, "arm_scale": 3.0361478617076356e-08},
+        "u": {
+            "relative": 8.307570867102084e-16,
+            "bit_unequal": 488,
+            "n": 580,
+            "arm_scale": 2.3896678125115675e-08
+        },
+        "v": {
+            "relative": 5.993770496385322e-16,
+            "bit_unequal": 488,
+            "n": 570,
+            "arm_scale": 3.0361478617076356e-08
+        },
         "status": "DEBT at the exact bar; ARM-TO-ARM, not an oracle score; owns nothing measured"
     },
     "item8_round28_disposition_struck": {
@@ -138,5 +220,28 @@
         "push, merge, deletion, git stash / reset --hard",
         "giving the demo card's z-coordinate an active-cell mask (a geometry choice)",
         "landing decision 16"
-    ]
+    ],
+    "item10_full_fidelity_suite": {
+        "command": "pytest tests/ocean/fidelity/ -q --timeout=900 -p no:randomly",
+        "result": "4 failed, 773 passed, 7 skipped, 18 deselected in 2232.11s",
+        "baseline_at_starting_tip_509aed683857": [
+            "test_recipe_case_board::test_every_oracle_comparison_has_a_row",
+            "test_nemo_testcase_phase3_stage_sweep_gate::test_planted_stage_control_exits_nonzero_end_to_end"
+        ],
+        "both_baseline_failures_still_present": true,
+        "failure_1_owned_by_this_round_and_FIXED": {
+            "test": "test_fidelity_card_constructibility::test_legacy_native_gyre_recipe_pgf_pair_no_longer_the_blocker",
+            "cause": "the test asserted that the native GYRE card RAISES, and pinned the reason: rk3_ws is one coupled momentum+tracer stage identity and the card's vertical momentum scheme belonged to neither complete WS-RK3 momentum program. Its own docstring called reconciling that a SCIENTIFIC CHOICE deliberately not made there.",
+            "verdict": "the EXPECTATION was stale, not the code -- user decision 15C made that choice, so the finding the test pinned is closed",
+            "fix": "the test now asserts the card BUILDS and pins the two 15C fields by name; a new sibling test_the_ws_rk3_momentum_program_guard_still_bites reverts one field and requires the refusal, so the pass cannot come from a deleted guard",
+            "result_after": "test_fidelity_card_constructibility 14 passed",
+            "commit": "1829f219987e"
+        },
+        "failure_2_attribution": {
+            "test": "test_nemo_testcase_phase3_stage_sweep_gate::test_prediction_plant_is_fail_closed",
+            "message": "FAIL: planted prediction control needs S1_up3_selector_owns_the_stage3_baroclinic_u (OVERFLOW only)",
+            "touches_nothing_this_round_changed": "it exercises the LOCK_EXCHANGE stage-sweep gate; this round changed nemo_recipe.py (the GYRE card), the citation gate, a new round-29 gate, and two test modules -- none of them that gate",
+            "status": "BEING MEASURED, not inferred -- re-run at the starting tip 509aed683857 in a detached worktree at /tmp/codex-gyre-r29-attrib; the result supersedes this row"
+        }
+    }
 }
