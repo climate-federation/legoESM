@@ -4124,7 +4124,7 @@ Round 25 landed two source associations inside NEMO's hydrostatic pressure
 gradient and showed the changed operator bit-exact given NEMO's inputs on GYRE
 only.  Rule 12 asks for that row on every card that executes it, and the
 testcase recipe pins `pgf_scheme="nemo_sco"` on all of them
-(`nemo_testcase_recipe.py:92,274,914`).
+(`nemo_testcase_recipe.py:92,274,931`).
 
 The lane-1 tanks have no HPG-literal dump and do not need one.  NEMO
 accumulates `dyn_hpg`, `dyn_vor` and `dyn_adv` into a zeroed `puu(Krhs)`
@@ -5191,7 +5191,7 @@ ratio is NOT zero during step 1: `r3u(:,:,Kaa)` is assigned at STAGE 1 from
 `ssha` (`stprk3_stg.F90:156`, the assignment at `:163`), so a stage-3
 thickness already carries a nonzero free-surface ratio inside the step that
 produces the kt=2 state.  And the MIN rule is not what the production stage
-builder uses: `nemo_qco_live_face_geometry_cgrid` (`vertical.py:470`)
+builder uses: `nemo_qco_live_face_geometry_cgrid` (`vertical.py:482`)
 transcribes NEMO's area-weighted MEAN (`domqco.F90:166-169` for the MLF
 entry, `:219-222` for the RK3 one) and both time-stepping lanes call it, so
 MIN survives only as an ablation arm.  What the measured `3.06e-08` actually
@@ -5779,7 +5779,7 @@ Caught by the gate.
    tests stop there.  What should that mask be on a card with no mesh file?
 3. **The slow forcing's depth average** still uses the min rule where NEMO
    uses the area-weighted mean (`domqco.F90:166-169`, `:219-222`, transcribed
-   in `vertical.py:470`).  `3.06e-08` at kt=2.  Land it, or leave it as debt?
+   in `vertical.py:482`).  `3.06e-08` at kt=2.  Land it, or leave it as debt?
 4. **Decision 16 is preregistered and NOT landed** — the unconditional
    vorticity call in the pre-stage 2-D momentum RHS.  Its predictions are in
    the round-29 manifest; landing it needs cross-card runs this round did not
