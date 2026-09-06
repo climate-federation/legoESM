@@ -44,7 +44,10 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from legoesm.ocean.fidelity.provenance import worktree_stamp
+from legoesm.ocean.fidelity.provenance import (
+    allow_dirty_stamps,
+    worktree_stamp,
+)
 
 CASE = "OVERFLOW-zps"
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10")
@@ -371,6 +374,8 @@ def growth(*, max_kt: int, out_dir: Path, allow_dirty: bool, frames: bool) -> di
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
     import jax
 
+    allow_dirty_stamps(allow_dirty)
+
     legoesm_git_sha = git_sha(allow_dirty)
     set_fp64()
     card = build_nemo_testcase_card(CASE)
@@ -568,6 +573,8 @@ def candidates(*, out_dir: Path, allow_dirty: bool) -> dict:
         compute_layer_thickness, nemo_up3_vertical_momentum_advection)
     from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
         implicit_vertical_diffusion_nemo_momentum)
+
+    allow_dirty_stamps(allow_dirty)
 
     legoesm_git_sha = git_sha(allow_dirty)
     set_fp64()
@@ -951,6 +958,8 @@ def slow(*, out_dir: Path, allow_dirty: bool, kts=(2, 3, 4)) -> dict:
     from legoesm.ocean.dynamics.latlon_cgrid_operators import (
         compute_face_masks_3d, min_cell_to_uface, min_cell_to_vface)
     from legoesm.ocean.vertical import compute_layer_thickness
+
+    allow_dirty_stamps(allow_dirty)
 
     legoesm_git_sha = git_sha(allow_dirty)
     set_fp64()

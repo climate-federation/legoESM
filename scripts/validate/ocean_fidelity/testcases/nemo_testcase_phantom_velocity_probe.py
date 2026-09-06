@@ -48,7 +48,10 @@ import json
 from pathlib import Path
 
 import numpy as np
-from legoesm.ocean.fidelity.provenance import worktree_stamp
+from legoesm.ocean.fidelity.provenance import (
+    allow_dirty_stamps,
+    worktree_stamp,
+)
 
 CASE = "OVERFLOW-zps"
 LOCK = "LOCK_EXCHANGE-zco"
@@ -223,6 +226,7 @@ def census(*, max_kt: int, out_dir: Path, allow_dirty: bool) -> dict:
 
     TRAJ = _load("nemo_testcase_phase3_trajectory_gate")
     BARO = _load("nemo_testcase_overflow_barotropic_gate")
+    allow_dirty_stamps(allow_dirty)
     legoesm_git_sha = git_sha(allow_dirty)
     set_fp64()
     card, model, live_u, flat_u = build(CASE)
@@ -351,6 +355,7 @@ def scaling(*, kts, out_dir: Path, allow_dirty: bool) -> dict:
 
     TRAJ = _load("nemo_testcase_phase3_trajectory_gate")
     BARO = _load("nemo_testcase_overflow_barotropic_gate")
+    allow_dirty_stamps(allow_dirty)
     legoesm_git_sha = git_sha(allow_dirty)
     set_fp64()
     card, model, live_u, _ = build(CASE)

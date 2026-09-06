@@ -18,7 +18,11 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from legoesm.ocean.fidelity.provenance import ALLOW_DIRTY_ENV, worktree_stamp
+from legoesm.ocean.fidelity.provenance import (
+    ALLOW_DIRTY_ENV,
+    allow_dirty_stamps,
+    worktree_stamp,
+)
 
 GATES = (Path(__file__).resolve().parents[3]
          / "scripts/validate/ocean_fidelity/testcases")
@@ -50,7 +54,9 @@ def test_every_report_emitter_stamps_the_worktree():
         bad = _unstamped(source)
         if bad:
             offenders[path.name] = bad
-    assert total >= 57, f"the scan found only {total} report dicts; it broke"
+    # GROW-ONLY.  Raise this when emitters are added; lowering it lets a
+    # report dict be deleted unnoticed, which is how the scan stops scanning.
+    assert total >= 62, f"the scan found only {total} report dicts; it broke"
     assert offenders == {}, (
         "these gates emit a report that cannot say which tree produced it: "
         f"{offenders}")
@@ -130,3 +136,46 @@ def test_untracked_files_are_counted_not_refused(tmp_path):
     stamp = worktree_stamp(repo=repo)
     assert stamp["clean"] is True
     assert stamp["untracked_count"] == 1
+
+
+def test_a_gate_flag_can_reach_the_stamp(tmp_path, monkeypatch):
+    """Wiring the stamp in must not kill a gate's own --allow-dirty flag.
+
+    Seven gates compute a dirty-tolerant sha up front and only emit their
+    report after the model run; without this bridge they would raise at the
+    end of a four-minute run for a condition they had already accepted.
+    """
+    repo = _repo(tmp_path)
+    (repo / "f.txt").write_text("two\n")
+    monkeypatch.delenv(ALLOW_DIRTY_ENV, raising=False)
+    try:
+        allow_dirty_stamps(True)
+        stamp = worktree_stamp(repo=repo)
+        assert stamp["clean"] is False and stamp["allow_dirty_escape_used"]
+        allow_dirty_stamps(False)
+        with pytest.raises(RuntimeError, match="refusing to stamp"):
+            worktree_stamp(repo=repo)
+    finally:
+        allow_dirty_stamps(False)
+
+
+def test_the_stamp_refuses_to_name_a_tree_its_caller_is_not_in(tmp_path):
+    """The round-30 failure wearing a stamp.
+
+    Run a gate by absolute path without PYTHONPATH and the INSTALLED package
+    answers, so the report names a checkout the gate's own source never came
+    from.  Calling worktree_stamp() with no repo from a file outside this
+    module's worktree must fail closed rather than describe the wrong tree.
+    """
+    other = _repo(tmp_path)
+    caller = other / "caller.py"
+    caller.write_text(
+        "from legoesm.ocean.fidelity.provenance import worktree_stamp\n"
+        "def go():\n"
+        "    return worktree_stamp()\n")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("r31_caller", caller)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with pytest.raises(RuntimeError, match="did not come from"):
+        module.go()

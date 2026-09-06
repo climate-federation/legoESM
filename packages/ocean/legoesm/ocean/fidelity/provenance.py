@@ -16,11 +16,21 @@ Harness glue, not model code (same home as ``precision_gate``).
 from __future__ import annotations
 
 import hashlib
+import inspect
 import os
 import subprocess
 from pathlib import Path
 
 ALLOW_DIRTY_ENV = "LEGOESM_GATE_ALLOW_DIRTY"
+# A gate that already owns an --allow-dirty flag must be able to reach the
+# shared stamp with it; otherwise wiring the stamp in silently kills the flag
+# and the gate raises AFTER its model run.
+_ALLOW_DIRTY = [False]
+
+
+def allow_dirty_stamps(enable: bool = True) -> None:
+    """Let a caller's own ``--allow-dirty`` flag reach ``worktree_stamp``."""
+    _ALLOW_DIRTY[0] = bool(enable)
 
 __all__ = ["git_sha", "worktree_stamp"]
 
@@ -81,16 +91,43 @@ def worktree_stamp(*, repo: str | Path | None = None) -> dict:
     escape suppresses nothing, it records ``clean: false`` and the diff hash.
     """
     tree = Path(repo) if repo is not None else Path(__file__).resolve().parent
-    allow_dirty = os.environ.get(ALLOW_DIRTY_ENV) == "1"
-    sha = git_sha(allow_dirty=allow_dirty, repo=tree)
-    clean = not sha.endswith("-dirty")
-    commit = sha[:-len("-dirty")] if not clean else sha
 
     def _git(*args: str) -> str:
         return subprocess.check_output(
             ["git", "-C", str(tree), *args], text=True,
             stderr=subprocess.DEVNULL)
 
+    try:
+        top = _git("rev-parse", "--show-toplevel").strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise RuntimeError(
+            f"cannot stamp a worktree from {tree}: {error}") from error
+    # FIRST, before anything is measured or refused for another reason: a stamp
+    # that names a DIFFERENT tree than the caller's source is the round-30
+    # failure wearing a stamp.  Run a gate by absolute path without PYTHONPATH
+    # and the INSTALLED package answers for a checkout the gate never came
+    # from, and every number in the report is then attributed to source that
+    # did not produce it.  Refuse rather than describe the wrong tree.
+    if repo is None:
+        caller_file = Path(inspect.stack()[1].filename).resolve()
+        if caller_file.exists():
+            try:
+                caller_top = subprocess.check_output(
+                    ["git", "-C", str(caller_file.parent), "rev-parse",
+                     "--show-toplevel"],
+                    text=True, stderr=subprocess.DEVNULL).strip()
+            except (OSError, subprocess.CalledProcessError):
+                caller_top = None
+            if caller_top is not None and Path(caller_top) != Path(top):
+                raise RuntimeError(
+                    f"worktree_stamp: this module is in {top} but its caller "
+                    f"{caller_file} is in {caller_top}, so the report would "
+                    "name a tree the gate's own source did not come from -- "
+                    "set PYTHONPATH to the checkout you mean to measure.")
+    allow_dirty = (os.environ.get(ALLOW_DIRTY_ENV) == "1") or _ALLOW_DIRTY[0]
+    sha = git_sha(allow_dirty=allow_dirty, repo=tree)
+    clean = not sha.endswith("-dirty")
+    commit = sha[:-len("-dirty")] if not clean else sha
     branch = _git("rev-parse", "--abbrev-ref", "HEAD").strip()
     dirty = sorted(
         line[3:] for line in
@@ -98,7 +135,6 @@ def worktree_stamp(*, repo: str | Path | None = None) -> dict:
         if line.strip())
     # ls-files is path-limited to its cwd where status is not, so ask from
     # the worktree root or the count silently describes one subdirectory.
-    top = _git("rev-parse", "--show-toplevel").strip()
     untracked = [line for line in subprocess.check_output(
         ["git", "-C", top, "ls-files", "--others", "--exclude-standard"],
         text=True, stderr=subprocess.DEVNULL).splitlines() if line.strip()]

@@ -79,7 +79,10 @@ from nemo_testcase_phase3_stage_sweep_gate import (
     score,
     sha256,
 )
-from legoesm.ocean.fidelity.provenance import worktree_stamp
+from legoesm.ocean.fidelity.provenance import (
+    allow_dirty_stamps,
+    worktree_stamp,
+)
 
 
 # The NEMO build tree.  Each card's PREPROCESSED source -- the code the card
@@ -310,6 +313,8 @@ def run(case: str, root: Path, *, plant: bool = False,
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_nemo_testcase_card,
     )
+
+    allow_dirty_stamps(allow_dirty)
 
     legoesm_git_sha = git_sha(allow_dirty=allow_dirty)
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))

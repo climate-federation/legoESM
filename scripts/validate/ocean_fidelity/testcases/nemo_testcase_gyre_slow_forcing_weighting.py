@@ -107,7 +107,10 @@ from nemo_testcase_l2_gyre_phase3_gate import (
     read_rhs,
     score,
 )
-from legoesm.ocean.fidelity.provenance import worktree_stamp
+from legoesm.ocean.fidelity.provenance import (
+    allow_dirty_stamps,
+    worktree_stamp,
+)
 
 CASE = "GYRE-zco"
 ROOT = Path(
@@ -219,6 +222,8 @@ def _bits(a, b, mask):
 def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+
+    allow_dirty_stamps(allow_dirty)
 
     legoesm_git_sha = git_sha(allow_dirty=allow_dirty)
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))

@@ -92,7 +92,10 @@ from nemo_testcase_overflow_barotropic_gate import (
     state_from_oracle_entry,
 )
 from nemo_testcase_rule12_hpg_eligibility import read_entry_full, read_rhs
-from legoesm.ocean.fidelity.provenance import worktree_stamp
+from legoesm.ocean.fidelity.provenance import (
+    allow_dirty_stamps,
+    worktree_stamp,
+)
 
 CASE = "LOCK_EXCHANGE-zco"
 RHS_ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10")
@@ -156,6 +159,8 @@ def run(*, plant: bool = False, allow_dirty: bool = False) -> dict:
         build_nemo_testcase_card,
     )
     from nemo_testcase_phase3_trajectory_gate import expected_masks, read_entry
+
+    allow_dirty_stamps(allow_dirty)
 
     legoesm_git_sha = git_sha(allow_dirty=allow_dirty)
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))

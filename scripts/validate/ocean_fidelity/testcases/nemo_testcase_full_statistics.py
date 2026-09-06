@@ -27,7 +27,10 @@ from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanMode
 from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
 from legoesm.ocean.rpe import pack_sorted_rpe
 from legoesm.ocean.vertical import compute_layer_thickness
-from legoesm.ocean.fidelity.provenance import worktree_stamp
+from legoesm.ocean.fidelity.provenance import (
+    allow_dirty_stamps,
+    worktree_stamp,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 ARTIFACT_ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l1")
@@ -1246,6 +1249,9 @@ def main() -> int:
     score_parser.add_argument("--plant-unregistered", action="store_true")
     args = parser.parse_args()
 
+    # This gate owns an --allow-dirty flag; bridge it to the shared stamp or
+    # wiring the stamp in would kill the flag and raise after the model run.
+    allow_dirty_stamps(args.allow_dirty)
     if args.command == "run-legoesm":
         report = run_legoesm(
             args.case,

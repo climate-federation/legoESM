@@ -18,7 +18,10 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from legoesm.ocean.fidelity.provenance import worktree_stamp
+from legoesm.ocean.fidelity.provenance import (
+    allow_dirty_stamps,
+    worktree_stamp,
+)
 
 
 BAR = 1.0e-15
@@ -625,6 +628,7 @@ def run(case: str, root: Path, *, plant_stage=False, plant_operand=False,
     )
 
     # Stamp FIRST so a dirty tree refuses before any compute (fail closed).
+    allow_dirty_stamps(allow_dirty)
     legoesm_git_sha = git_sha(allow_dirty=allow_dirty)
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"), "precision policy is not fp64")

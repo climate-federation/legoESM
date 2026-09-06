@@ -17,7 +17,10 @@ import sys
 from pathlib import Path
 
 import numpy as np
-from legoesm.ocean.fidelity.provenance import worktree_stamp
+from legoesm.ocean.fidelity.provenance import (
+    allow_dirty_stamps,
+    worktree_stamp,
+)
 
 BAR = 1.0e-15
 # Defaults are the OVERFLOW card this gate was written for.  Both are
@@ -491,6 +494,7 @@ def run(
     allow_dirty: bool = False,
 ) -> dict:
     # Stamp FIRST so a dirty tree refuses before any compute (fail closed).
+    allow_dirty_stamps(allow_dirty)
     legoesm_git_sha = git_sha(allow_dirty=allow_dirty)
     validate_frame_registry()
     require(
@@ -821,6 +825,7 @@ def run_kt_walk(kt: int, oracle_root: Path, entry_root: Path, *,
     step by an operand the barotropic solve consumes or a memory NEMO carries
     that the prognostic state does not.
     """
+    allow_dirty_stamps(allow_dirty)
     legoesm_git_sha = git_sha(allow_dirty=allow_dirty)
     validate_frame_registry()
     require(kt >= 2, "run_kt_walk is the kt>=2 walk; kt=1 is run()")

@@ -93,6 +93,12 @@ def nemo_explicit_update(rec: dict, face: str) -> np.ndarray:
     p = "uu" if face == "u" else "vv"
     mask = _fortran(rec, "umask" if face == "u" else "vmask")
     rdt = float(rec["arrays"]["rDt"])
+    # NEMO writes levels 1..jpkm1 (DO_2Dik(0,0, 1,jpkm1,1)); this writes all
+    # jpk, which agrees only where the mask is already zero above jpkm1.
+    jpkm1 = int(rec["header"]["jpkm1"])
+    require(not np.any(mask[..., jpkm1:] != 0.0),
+            "the face mask is nonzero above jpkm1, where NEMO's explicit "
+            "update does not run; the whole-array form would invent a value")
     return (_fortran(rec, f"{p}_Kbb_in") + rdt * _fortran(rec, f"{p}_Krhs_in")) * mask
 
 
@@ -133,6 +139,12 @@ def nemo_pre_solve_vector(rec: dict, face: str) -> np.ndarray:
     out = nemo_barotropic_removed(rec, face)          # :121-122 then :149-150
     # :153-159 -- add the bottom stress due to the barotropic component only.
     # rCdU_bot(ji+1,jj) for u; rCdU_bot(ji,jj+1) for v (dynzdf.F90:157,159).
+    # np.roll WRAPS; NEMO reads a real neighbour, so the writer's tile must
+    # end before the array does or the last column would take column 1's rate.
+    h = rec["header"]
+    require(h["ntei"] < h["jpi"] and h["ntej"] < h["jpj"],
+            "the writer's tile reaches the array edge, where the +1 neighbour "
+            "shift wraps instead of reading a real neighbour")
     shifted = np.roll(cd, -1, axis=0 if face == "u" else 1)
     nx, ny, _ = out.shape
     ii, jj = np.meshgrid(np.arange(nx), np.arange(ny), indexing="ij")
@@ -293,40 +305,73 @@ def _column_uniformity(err: np.ndarray, mask: np.ndarray) -> dict:
     """Is the signed error a column-uniform shift, or is it depth-structured?
 
     ``stprk3_stg.F90:444-445`` adds ``zub(ji,jj)*umask(ji,jj,jk)`` -- the SAME
-    number at every level of a column.  So an error owned by that statement is
-    column-uniform.  The measure needs no weights (Rule 6): per column, the
-    signed error's peak-to-peak spread against its own largest magnitude.
+    number at every level of a column.  So an error owned by an error in
+    ``zub`` ITSELF is column-uniform.  The measure needs no weights (Rule 6):
+    per column, the signed error's peak-to-peak SPAN against its own largest
+    magnitude.
+
+    Two ways this could have voted for the wrong owner, both closed here
+    because a reviewer found them by running it.  A column whose error is
+    exactly ZERO has span 0 and peak 0; counting it as "uniform" makes every
+    already-correct column vote for the barotropic owner, which on a nearly
+    exact field is every column.  Zero-error columns are reported as their own
+    bucket and vote for nothing.  And a NaN column has ``peak > 0`` false, so
+    it too used to read as uniform while ``nanmax`` hid it -- a blow-up would
+    have become evidence.  NaN is fatal now.
     """
     counts = mask.sum(axis=-1)
     live = counts >= 2
+    require(bool(np.all(np.isfinite(err[mask]))),
+            "non-finite error in the depth profile; a NaN column reads as "
+            "uniform and would vote for the barotropic owner")
     e = np.where(mask, err, np.nan)
     with np.errstate(invalid="ignore"):
         span = np.nanmax(e, axis=-1) - np.nanmin(e, axis=-1)
         peak = np.nanmax(np.abs(e), axis=-1)
         mean = np.nanmean(e, axis=-1)
-    ratio = np.where(peak > 0, span / np.where(peak > 0, peak, 1.0), 0.0)
-    uniform = live & (ratio <= UNIFORM_TOL)
-    # A field with no multi-level column cannot discriminate anything, and a
-    # reduction over an empty selection raises rather than saying so -- report
-    # the census and refuse to name a fraction.
-    if not live.any():
+    exact = live & (peak == 0.0)
+    scored = live & (peak > 0.0)
+    ratio = np.where(scored, span / np.where(scored, peak, 1.0), 0.0)
+    uniform = scored & (ratio <= UNIFORM_TOL)
+    if not scored.any():
         return {
-            "columns_with_two_or_more_wet_levels": 0,
+            "columns_with_two_or_more_wet_levels": int(live.sum()),
+            "columns_scored": 0,
+            "columns_exact": int(exact.sum()),
             "columns_column_uniform_to_1e-2": 0,
             "fraction_column_uniform": None,
             "median_spread_over_peak": None,
             "max_abs_column_mean": None,
-            "max_abs_error": (float(np.nanmax(np.abs(e[mask])))
-                              if mask.any() else None),
+            "max_abs_error": 0.0 if mask.any() else None,
         }
     return {
         "columns_with_two_or_more_wet_levels": int(live.sum()),
+        "columns_scored": int(scored.sum()),
+        "columns_exact": int(exact.sum()),
         "columns_column_uniform_to_1e-2": int(uniform.sum()),
-        "fraction_column_uniform": float(uniform.sum() / live.sum()),
-        "median_spread_over_peak": float(np.median(ratio[live])),
-        "max_abs_column_mean": float(np.nanmax(np.abs(mean[live]))),
-        "max_abs_error": float(np.nanmax(np.abs(e[mask]))),
+        "fraction_column_uniform": float(uniform.sum() / scored.sum()),
+        "median_spread_over_peak": float(np.median(ratio[scored])),
+        "max_abs_column_mean": float(np.max(np.abs(mean[scored]))),
+        "max_abs_error": float(np.max(np.abs(e[mask]))),
     }
+
+
+def verdict_for(fractions) -> str:
+    """The preregistered verdict ladder, as one testable function.
+
+    P3a: below 10 per cent column-uniform on BOTH faces exonerates the
+    barotropic correction and leaves the implicit solve; P3b: 90 per cent or
+    more names the correction; anything between, or a face that could not be
+    scored at all, names nothing.
+    """
+    fractions = list(fractions)
+    if not fractions or any(f is None for f in fractions):
+        return "NO OWNER NAMED"
+    if all(f >= 0.9 for f in fractions):
+        return "BAROTROPIC-CORRECTION CANDIDATE"
+    if all(f < 0.10 for f in fractions):
+        return "IMPLICIT-SOLVE CANDIDATE"
+    return "NO OWNER NAMED"
 
 
 def run_depth_profile(oracle_root: Path, *, plant: bool = False) -> dict:
@@ -337,9 +382,12 @@ def run_depth_profile(oracle_root: Path, *, plant: bool = False) -> dict:
     rows, profiles, uniformity = [], {}, {}
     for face in ("u", "v"):
         candidate = fields[face]
-        if plant and face == "u":
-            candidate = candidate.copy()
-            # a column-uniform plant: what the barotropic correction WOULD do.
+        if plant:
+            # A column-uniform plant on BOTH faces: what an error in zub would
+            # look like.  Planting one face only would leave the verdict's AND
+            # depending on the other face's REAL structure, i.e. on the
+            # hypothesis under test -- the control would fail for the right
+            # reason and blame itself.
             candidate = candidate + 1.0 * masks[face]
         mask = masks[face]
         rows.append(score(f"{CASE}.kt1.stage3.state.{face}",
@@ -362,15 +410,8 @@ def run_depth_profile(oracle_root: Path, *, plant: bool = False) -> dict:
             })
         profiles[face] = per_level
         uniformity[face] = _column_uniformity(err, mask)
-    fractions = [u["fraction_column_uniform"] for u in uniformity.values()]
-    verdict = (
-        "NO OWNER NAMED"
-        if any(f is None for f in fractions)
-        else "BAROTROPIC-CORRECTION CANDIDATE"
-        if all(f >= 0.9 for f in fractions)
-        else "IMPLICIT-SOLVE CANDIDATE"
-        if all(f < 0.10 for f in fractions)
-        else "NO OWNER NAMED")
+    verdict = verdict_for(
+        u["fraction_column_uniform"] for u in uniformity.values())
     if plant:
         require(verdict == "BAROTROPIC-CORRECTION CANDIDATE",
                 "the column-uniform plant did not read as column-uniform")
@@ -402,8 +443,192 @@ def run_depth_profile(oracle_root: Path, *, plant: bool = False) -> dict:
     }
 
 
+def ordering_constant(rec: dict, face: str, interior: np.ndarray):
+    """The column constant the two orderings differ by, and the drag factor.
+
+    ``delta = mean(A) - uu_b(Kaa)``, the reference-weighted depth mean of
+    NEMO's explicit update minus the barotropic velocity legoESM's stage
+    correction substitutes for it, and ``drag`` is the factor
+    ``dynzdf.F90:296`` puts on the deepest wet diagonal,
+    ``zDt_2*|rCdU_bot(i+1,j)+rCdU_bot(i,j)|/e3u(iku,Kaa)``.  Returned
+    separately from any verdict so both can be tested on operands with a known
+    answer.
+    """
+    p_ = "uu" if face == "u" else "vv"
+    jpkm1 = int(rec["header"]["jpkm1"])
+    nz = int(rec["header"]["jpk"])
+    A = nemo_explicit_update(rec, face)
+    e3 = _fortran(rec, "e3u_Kaa" if face == "u" else "e3v_Kaa")
+    mask = _fortran(rec, "umask" if face == "u" else "vmask")
+    ub = np.asarray(rec["arrays"][f"{p_}_b_Kaa"], dtype=np.float64)
+    cd = np.asarray(rec["arrays"]["rCdU_bot"], dtype=np.float64)
+    mbk = np.asarray(rec["arrays"]["mbku" if face == "u" else "mbkv"]).astype(int)
+    w = (e3 * mask)[..., :jpkm1]
+    column = w.sum(axis=-1)
+    wet = interior & (column > 0)
+    mean_A = np.zeros_like(column)
+    mean_A[wet] = (A[..., :jpkm1] * w).sum(axis=-1)[wet] / column[wet]
+    delta = np.where(wet, mean_A - ub, 0.0)
+    shifted = np.roll(cd, -1, axis=0 if face == "u" else 1)
+    nx, ny = column.shape
+    ii, jj = np.meshgrid(np.arange(nx), np.arange(ny), indexing="ij")
+    kk = np.clip(mbk - 1, 0, nz - 1)
+    drag = np.where(
+        wet,
+        float(rec["arrays"]["rDt"]) * 0.5 * np.abs(shifted + cd) / e3[ii, jj, kk],
+        0.0)
+    return delta, drag, wet
+
+
+def run_ordering_size(oracle_root: Path, *, plant: bool = False) -> dict:
+    """P4g: size the column constant the two orderings differ by.
+
+    legoESM applies NEMO's barotropic correction to the stage-3 velocity
+    BEFORE the implicit solve and again after it; NEMO applies it once, AFTER
+    (``stprk3_stg.F90:437-446``), and before the solve it instead subtracts
+    ``uu_b`` (``dynzdf.F90:149-150``).  So the two solves receive vectors that
+    differ by a column constant, and a constant is not invariant under this
+    solve because the deepest wet diagonal carries the drag
+    (``dynzdf.F90:296``).
+
+    Record-only: no model runs here, so the number is the ORACLE's own
+    arithmetic and it sizes an operand.  Sizing an operand is not an ablation
+    and nothing lands on it (P4h).
+    """
+    record = oracle_root / ZDF_MATRIX_RECORD
+    rec = read_zdf_matrix(record)
+    h = rec["header"]
+    interior = np.zeros(DIMS[:2], dtype=bool)
+    interior[h["ntsi"] - 1:h["ntei"], h["ntsj"] - 1:h["ntej"]] = True
+    rows = []
+    for face in ("u", "v"):
+        delta, drag, wet = ordering_constant(rec, face, interior)
+        rows.append({
+            "name": f"{CASE}.kt1.stage3.ordering_constant.{face}",
+            "max_abs_delta": float(np.max(np.abs(delta[wet]))),
+            "median_abs_delta": float(np.median(np.abs(delta[wet]))),
+            "max_bottom_drag_factor": float(np.max(drag[wet])),
+            "predicted_bottom_error": float(np.max(np.abs(delta[wet]) * drag[wet])),
+            "n_columns": int(wet.sum()),
+        })
+    return {
+        "worktree": worktree_stamp(),
+        "format": "nemo-testcase-l2-gyre-round31-zdf-walk-v1",
+        "case": CASE,
+        "mode": "ordering_size",
+        "claim": ("the column constant legoESM's solve carries and NEMO's does "
+                  "not, times the bottom-cell drag factor dyn_zdf puts on the "
+                  "deepest diagonal (dynzdf.F90:296)"),
+        "record": str(record),
+        "record_sha256": sha256(record),
+        "status": "MEASURED",
+        "rows": rows,
+        "planted_control": plant,
+    }
+
+
+def run_ordering_regression(oracle_root: Path, *, plant: bool = False) -> dict:
+    """P4i: is the ordering term the owner COLUMN BY COLUMN, not at one peak?
+
+    The independent review's reading, adopted here: NEMO's barotropic
+    correction is NOT an additive constant.  ``stprk3_stg.F90:440`` builds
+    ``zub = uu_b(Kaa) - SUM(e3u_0*uu(:,Kaa))*r1_hu_0`` from the SOLVE OUTPUT,
+    so it is rank-1 -- a single-level error ``d`` at the deepest wet level
+    leaves ``(1-f)*d`` there and ``-f*d`` at every level above, with
+    ``f = e3(deepest)/column depth``.  Inverting that gives the pre-correction
+    single-cell error from the measured post-correction one.
+
+    Regressing it on the ordering term ``(mean(A) - uu_b) * drag`` -- the
+    column constant legoESM's solve carries and NEMO's does not, times the
+    drag factor ``dynzdf.F90:296`` puts on the deepest diagonal -- tests the
+    mechanism on every column instead of at the maxima.
+    """
+    record = oracle_root / ZDF_MATRIX_RECORD
+    rec = read_zdf_matrix(record)
+    h = rec["header"]
+    interior2d = np.zeros(DIMS[:2], dtype=bool)
+    interior2d[h["ntsi"] - 1:h["ntei"], h["ntsj"] - 1:h["ntej"]] = True
+    stage = oracle_root / STAGE3_RECORD
+    oracle = read_stage(stage, 3)
+    card, masks, fields, backend = _model_kt1("depth_profile")
+    nx, ny, nz = DIMS
+    rows = []
+    for face in ("u", "v"):
+        candidate = fields[face]
+        mask = masks[face]
+        err = candidate - oracle[face][..., :candidate.shape[-1]]
+        # f from the MODEL's own geometry, printed rather than assumed.
+        e3 = _xyz(_fortran(rec, "e3u_Kaa" if face == "u" else "e3v_Kaa")
+                  .ravel(order="F"), nx, ny, nz)[..., :candidate.shape[-1]]
+        thick = np.where(mask, e3, 0.0)
+        depth = thick.sum(axis=-1)
+        deepest = np.where(mask.any(axis=-1),
+                           mask.shape[-1] - 1 - np.argmax(mask[..., ::-1], axis=-1),
+                           0)
+        i2, j2 = np.meshgrid(np.arange(err.shape[0]), np.arange(err.shape[1]),
+                             indexing="ij")
+        live = mask.any(axis=-1) & (depth > 0)
+        f = np.zeros_like(depth)
+        f[live] = thick[i2, j2, deepest][live] / depth[live]
+        e_bottom = err[i2, j2, deepest]
+        d_single = np.where(live, e_bottom / np.maximum(1.0 - f, 1e-30), 0.0)
+        delta, drag, wet = ordering_constant(rec, face, interior2d)
+        # both sides onto the scored interior layout
+        term3 = _xyz(np.ascontiguousarray(
+            np.broadcast_to((delta * drag)[..., None], DIMS)).ravel(order="F"),
+            nx, ny, nz)
+        term = term3[..., 0]
+        sel = live & (term != 0.0)
+        x, y = term[sel], d_single[sel]
+        slope = float(np.dot(x, y) / np.dot(x, x))
+        resid = y - slope * x
+        ss_tot = float(np.sum((y - y.mean()) ** 2))
+        r2 = float(1.0 - np.sum(resid ** 2) / ss_tot) if ss_tot > 0 else None
+        if plant and face == "u":
+            slope = 0.0
+        rows.append({
+            "name": f"{CASE}.kt1.stage3.ordering_regression.{face}",
+            "n_columns": int(sel.sum()),
+            "slope_through_origin": slope,
+            "r_squared": r2,
+            "f_deepest_over_depth_min": float(f[live].min()),
+            "f_deepest_over_depth_max": float(f[live].max()),
+            "max_abs_post_correction_error": float(np.max(np.abs(err[mask]))),
+            "max_abs_single_cell_error": float(np.max(np.abs(d_single[live]))),
+            "max_abs_ordering_term": float(np.max(np.abs(term[sel]))),
+            "at_bar": bool(abs(slope - 1.0) <= 0.02 and (r2 or 0.0) >= 0.99),
+        })
+    verdict = ("ORDERING TERM CONFIRMED COLUMN-WISE"
+               if all(r["at_bar"] for r in rows)
+               else "NO OWNER NAMED")
+    if plant:
+        require(verdict == "NO OWNER NAMED",
+                "a zeroed slope still read as confirmed")
+    return {
+        "worktree": worktree_stamp(),
+        "format": "nemo-testcase-l2-gyre-round31-zdf-walk-v1",
+        "case": CASE,
+        "mode": "ordering_regression",
+        "claim": ("the single-cell error at the deepest wet level, recovered "
+                  "from the measured post-correction error by inverting the "
+                  "rank-1 barotropic correction (stprk3_stg.F90:440,444-445), "
+                  "against the ordering term legoESM's solve carries"),
+        "execution_regime": "production_jit",
+        "precision_policy": "fp64",
+        "jax_backend": backend,
+        "record": str(record),
+        "record_sha256": sha256(record),
+        "stage_record_sha256": sha256(stage),
+        "status": "MEASURED",
+        "verdict": verdict,
+        "rows": rows,
+        "planted_control": plant,
+    }
+
+
 MODES = {"calibrate": run_calibrate, "pre_solve": run_pre_solve,
-         "depth_profile": run_depth_profile}
+         "depth_profile": run_depth_profile, "ordering_size": run_ordering_size,
+         "ordering_regression": run_ordering_regression}
 
 
 def main(argv=None) -> int:
@@ -423,6 +648,11 @@ def main(argv=None) -> int:
         args.output.write_text(text + "\n")
     print(text)
     for row in report["rows"]:
+        if "n_unequal" not in row:
+            print(f"{'SIZE':<8} {row['name']:<52} " + "  ".join(
+                f"{k} {v:.17g}" for k, v in row.items()
+                if isinstance(v, float)))
+            continue
         print(f"{row.get('status', 'BIT'):<8} {row['name']:<52} "
               f"unequal {row['n_unequal']}/{row['n']} "
               f"max {row.get('absolute_max', row.get('max_abs')):.17g}")
@@ -430,7 +660,7 @@ def main(argv=None) -> int:
           + (f"  VERDICT {report['verdict']}" if "verdict" in report else ""))
     if args.plant:
         return 1
-    return 0 if report["status"] == "AT-BAR" else 1
+    return 0 if report["status"] in ("AT-BAR", "MEASURED") else 1
 
 
 if __name__ == "__main__":
