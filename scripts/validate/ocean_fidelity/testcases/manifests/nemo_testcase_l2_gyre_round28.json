@@ -178,6 +178,7 @@
   },
   "preregistration": "manifests/nemo_testcase_l2_gyre_round28_preregister.json @ 2f292b24e110",
   "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+  "round16_probe_defect_reported_not_fixed": "_source_sum loops range(1, shape[-1]-1) over an array already trimmed to jpkm1; measured on a ones-array of 30 levels it returns 29.0, so it drops the deepest level where stp2d.F90:180 sums all of 1:jpkm1",
   "shared_implementation": {
     "change": "depth_mean_statement is now one implementation in nemo_testcase_lock_slow_forcing_owner.py; the GYRE probe imports it",
     "lock_rerun_unchanged": {
@@ -186,5 +187,16 @@
       "statement_nemo_rhs_reciprocal": "0/127 at 0.0"
     }
   },
-  "starting_tip": "359c33c40ecc"
+  "starting_tip": "359c33c40ecc",
+  "tests": {
+    "baseline_in_flight_not_claimed": [
+      "test_nemo_testcase_phase3_stage_sweep_gate::test_planted_stage_control_exits_nonzero_end_to_end"
+    ],
+    "failure_owned_by_this_round": "test_nemo_testcase_lock_slow_forcing_owner::test_unknown_association_raises_rather_than_defaulting -- the shared-helper signature change made the guard test's positional call raise TypeError before reaching the guard's ValueError; fixed, and the new face guard has its own plant-verified test",
+    "focused_two_touched_gate_modules": "23 passed",
+    "pre_existing_reproduced_at_starting_tip": [
+      "test_recipe_case_board::test_every_oracle_comparison_has_a_row"
+    ],
+    "whole_tests_ocean_fidelity": "3 failed, 764 passed, 7 skipped, 18 deselected in 2417.17s"
+  }
 }

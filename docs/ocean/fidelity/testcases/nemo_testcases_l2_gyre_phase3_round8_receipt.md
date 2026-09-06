@@ -5324,6 +5324,39 @@ re-run afterwards and every row is unchanged: `1 / 127` at
 `2.168404344971009e-19` on three arms, `0 / 127` at `0.0` on the reciprocal
 arm, instrument-reproduces-model `true`.
 
+### Tests, and which failure was actually this round's
+
+The focused suite over the two gate modules this round touches: **23 passed**.
+The whole `tests/ocean/fidelity/` directory was then run, because a signature
+change to a SHARED helper is a change to every caller:
+
+```text
+3 failed, 764 passed, 7 skipped, 18 deselected in 2417.17s (0:40:17)
+```
+
+One of the three was this round's, and it is the interesting one.  Making
+`depth_mean_statement` the single shared implementation added a `grid`
+argument between the config and the face mask, and the LOCK probe's
+dispatch-guard test called it POSITIONALLY.  The unknown-association
+`ValueError` it asserts was therefore never reached — the call died earlier
+with a `TypeError`, so a dispatch-hardening test had silently stopped testing
+dispatch hardening while still being counted as one.  The call goes through a
+named helper now, so the next signature change fails loudly in one place; and
+the face selector this round introduced gets the same guard and its own test,
+because a silent fall-through there would score a V face with the U operator,
+which is a wrong ANSWER rather than an error.  Plant-verified: replacing the
+face guard with `pass` turns the new test red, and `git checkout --` restores
+it with `git status --porcelain` empty.
+
+The other two are NOT claimed as pre-existing on inspection — they were
+re-run at round 28's starting tip `359c33c40ecc` in a disposable worktree,
+which is the rule this campaign uses for any new-looking failure:
+
+| failure | disposition |
+|---|---|
+| `test_recipe_case_board::test_every_oracle_comparison_has_a_row` | **PRE-EXISTING**, reproduced FAILING at the starting tip.  It wants board rows for `advection_nemo`, `grids_tripole_mpas`, `tendencies_nemo` and `three_way_nemo`; this round adds no `compare_*.py` driver at all |
+| `test_nemo_testcase_phase3_stage_sweep_gate::test_planted_stage_control_exits_nonzero_end_to_end` | baseline re-run **IN FLIGHT** at the starting tip and not finished when this was written.  What IS measured: this round modifies eight files and that gate is not one of them — the probes only import `GateError`/`git_sha`/`require`/`sha256` from it.  So it is PLAUSIBLY pre-existing and is deliberately NOT recorded as such until the baseline lands |
+
 ### Card debt registered, card NOT changed
 
 The LOCK and OVERFLOW cards resolve `vorticity_scheme = "al81"` from a module
@@ -5390,8 +5423,9 @@ kt2 rows.  The merge decision itself is not made here.
 7. **A defect found in round 16's probe, reported and NOT fixed here.**  Its
    "literal left-to-right transcription of the scalar-math Fortran SUM" loops
    `range(1, product.shape[-1] - 1)` over an array the reader has already
-   trimmed to `jpkm1` levels, so it accumulates levels 1..28 of 30 and DROPS
-   the deepest one.  NEMO's `stp2d.F90:180` sums `1:jpkm1`, all 30.  Any
+   trimmed to `jpkm1` levels.  Measured by calling it on a ones-array of 30
+   levels: it returns `29.0`, so it accumulates 29 of the 30 and DROPS the
+   deepest one.  NEMO's `stp2d.F90:180` sums `1:jpkm1`, all 30.  Any
    round-16 figure that rests on that helper is suspect.  Fixing it means
    re-running and re-pinning round-16's recorded numbers, which is a decision,
    not a patch — so it is registered here and left alone.
