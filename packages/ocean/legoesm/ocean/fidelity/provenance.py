@@ -96,9 +96,12 @@ def worktree_stamp(*, repo: str | Path | None = None) -> dict:
         line[3:] for line in
         _git("status", "--porcelain", "--untracked-files=no").splitlines()
         if line.strip())
-    untracked = [line for line in
-                 _git("ls-files", "--others", "--exclude-standard").splitlines()
-                 if line.strip()]
+    # ls-files is path-limited to its cwd where status is not, so ask from
+    # the worktree root or the count silently describes one subdirectory.
+    top = _git("rev-parse", "--show-toplevel").strip()
+    untracked = [line for line in subprocess.check_output(
+        ["git", "-C", top, "ls-files", "--others", "--exclude-standard"],
+        text=True, stderr=subprocess.DEVNULL).splitlines() if line.strip()]
     return {
         "root": str(tree),
         "commit": commit,
