@@ -171,6 +171,20 @@
   },
   "merge_readiness": {
     "commits_ahead_of_03c6e8d96ff7": 81,
+    "correction_the_branch_range_is_no_longer_round_28s_alone": {
+      "cause": "a concurrent session committed three changes onto this same branch while round 28 was running",
+      "no_longer_true_of": "the commit range 359c33c40ecc..HEAD, which now touches packages/ocean/legoesm/ocean/fidelity/nemo_recipe.py",
+      "reader_guidance": "attribute those three commits to round 29, not to the round-28 section",
+      "round_28_disposition": "15C was FORBIDDEN for this round and is untouched by its commits; round 28 neither made nor verified that decision, and does not revert another session's committed work on a cited user decision",
+      "still_true_of": "round 28's OWN eleven commits -- verified by listing every file they touch: nine files, zero under packages/ or src/",
+      "their_commits": [
+        "7d7cbfb97319 round-29 preregistration",
+        "1a019b2fe85e sets the demo GYRE card's vertical_momentum_scheme and adaptive_implicit_vertadv, citing 'User decision 15C (2026-09-05)'",
+        "8091542726b3 round-29 dyn_zdf instrumentation"
+      ],
+      "what_the_committed_receipt_says": "round 28 landed no model numerics; the only changes are under scripts/validate/, tests/ and docs/",
+      "why_this_is_recorded_here_and_not_in_the_receipt": "the receipt is being edited concurrently -- an unfinished round-29 draft is in the working tree alongside this correction -- so committing that file would land another agent's draft under this round's authorship and with a failing citation gate. The correction text is left in the working tree for whoever lands round 29"
+    },
     "first_over_bar": {
       "GYRE-zco": "kt2 T/S/u/v",
       "LOCK_EXCHANGE-zco": "kt4 u",
