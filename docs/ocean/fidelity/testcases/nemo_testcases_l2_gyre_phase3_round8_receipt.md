@@ -7250,6 +7250,7 @@ asserting the opposite.
 | P3b `kt2` `T` and `S` do not move by a bit | — | field move exactly `0.0` over all `18000` cells, both | **CONFIRMED, uninformative by construction** |
 | P4a the operator is BIT FOR BIT given NEMO's inputs | `exact`, `n_unequal = 0` | see the Rule-12 table; the discharge was REBUILT after the DIFF review found the first version circular | **CONFIRMED, on the rebuilt discharge** |
 | P4b LOCK's 10-step trajectory is bit-identical | every cell | `PASS`, every one of 20 rows' field move exactly `0.0` | **CONFIRMED** |
+| P4b OVERFLOW's 10-step trajectory is bit-identical | every cell | `PASS`, every one of 10 rows' field move exactly `0.0` | **CONFIRMED** |
 
 `kt=1` stage-3 velocity against NEMO's own stage record, by model level, over
 the 580 wet u columns:
@@ -7277,7 +7278,7 @@ after, so the two arms of the comparison differ in one variable.
 |---|---|---|
 | GYRE-zco | YES, at stage 3 (`ln_dynadv_vec = T`, `lk_linssh` false) | **BIT FOR BIT against a NEMO OUTPUT ARRAY** -- see "the discharge was circular" below.  legoESM's own `rk3_stage_velocity_update`, given NEMO's `uu(Kbb)`, `uu(Krhs)`, `rDt` and `umask` from the round-29 record, carried forward through NEMO's own `dynzdf.F90:149-150` and `:156-159`, reproduces NEMO's `uu_Kaa_pre` with `exact` true and `0` of `17400` u and `0` of `17100` v cells unequal.  The composition is calibrated inside the gate, which RAISES rather than reporting if the calibration fails |
 | LOCK_EXCHANGE-zco | NO.  `ln_dynadv_vec = F` (`lock_kt1_10/ocean.output:705`), `lk_linssh` false in its own build, and legoESM resolves `momentum_advection = flux_form` | **NOT REACHED, and measured**: the `kt=1..10` trajectory is bit-identical, every cell of every one of 20 rows moving exactly `0.0` |
-| OVERFLOW-zps | NO, same two reasons (`overflow_kt1_10/ocean.output:822`) | see the OVERFLOW row below |
+| OVERFLOW-zps | NO, same two reasons (`overflow_kt1_10/ocean.output:822`) | **NOT REACHED, and measured**: the `kt=1..10` trajectory is bit-identical, every cell of every one of 10 rows moving exactly `0.0`, and the move gate PASSES at `0` ulps |
 | ORCA2-zps | unknown; no ORCA2 card exists on this branch | **UNMEASURED**, frame spec unchanged |
 | DINO | not a campaign card; its deck resolves the vector arm, so it would execute the changed statement | **OPEN**, not claimed; no DINO gate ran |
 
