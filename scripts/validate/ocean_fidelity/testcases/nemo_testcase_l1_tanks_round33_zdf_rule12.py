@@ -239,19 +239,39 @@ def run(card: str, *, plant: bool = False) -> dict:
         # -- and it is not UNMEASURED either.  It is NOT APPLICABLE, and a
         # measurement decides it.
         nemo_mask = rec["arrays"].get(f"{face}mask")
-        nemo_wet = (int(np.count_nonzero(np.asarray(nemo_mask)))
-                    if nemo_mask is not None else None)
-        if nemo_wet == 0 or not masks[face].any():
+        require(nemo_mask is not None,
+                f"the record carries no {face}mask, so NEMO's own answer to "
+                "whether this face exists cannot be read")
+        nemo_wet = int(np.count_nonzero(np.asarray(nemo_mask)))
+        card_wet = int(masks[face].sum())
+        # NEMO'S MASK ALONE decides.  An `or` here would let OUR recipe's mask
+        # declare a face inapplicable on a card NEMO actually wets, and the
+        # report would then print a nonzero NEMO wet count next to the words
+        # "no wet face at all".  A DISAGREEMENT between the two is a hard
+        # error, not a quiet skip -- it is a real finding about the card.
+        require(bool(nemo_wet == 0) == bool(card_wet == 0),
+                f"NEMO wets {nemo_wet} {face} cells and this card's own wet "
+                f"{face}-face mask has {card_wet}: the two disagree about "
+                "whether the face exists, which is a card-identity defect and "
+                "not something this gate may skip")
+        if nemo_wet == 0:
+            velocity = _absmax(rec, f"{face}{face}_Kaa_out")
+            target = _absmax(rec, f"{face}{face}_b_Kaa")
+            # A dry face must also carry a dry velocity.  Requiring it, rather
+            # than merely reporting it, is what makes NOT APPLICABLE a
+            # measurement instead of an assertion.
+            require(velocity == 0.0 and target == 0.0,
+                    f"NEMO's {face}mask is empty but its {face}{face}_Kaa_out "
+                    f"peaks at {velocity} and {face}{face}_b_Kaa at {target}; "
+                    "a face with no wet cell cannot carry a velocity")
             not_applicable.append({
                 "face": face,
                 "reason": (f"NEMO's own {face}mask in this record has "
                            f"{nemo_wet} wet cells and the card's own wet "
-                           f"{face}-face mask has {int(masks[face].sum())}; "
-                           "these tanks are 2-D x-z boxes with no wet "
-                           f"{face} face at all"),
-                "nemo_velocity_max_abs": _absmax(rec, f"{face}{face}_Kaa_out"),
-                "nemo_barotropic_target_max_abs": _absmax(
-                    rec, f"{face}{face}_b_Kaa"),
+                           f"{face}-face mask has {card_wet}; these tanks are "
+                           f"2-D x-z boxes with no wet {face} face at all"),
+                "nemo_velocity_max_abs": velocity,
+                "nemo_barotropic_target_max_abs": target,
             })
             continue
         geom = record_geometry(rec, case, face)

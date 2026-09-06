@@ -45,6 +45,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import struct
 from pathlib import Path
 
@@ -105,13 +106,12 @@ SCHEMAS: dict[str, tuple] = {
     "NEMO_L1_STAGE_1": (9, (4, 5, 6), lambda n2, n3, nc: _f(
         ("T", n3, "3", True), ("S", n3, "3", True), ("u", n3, "3", True),
         ("v", n3, "3", True), ("ssh", n2, "2", True))),
-    # stprk3_stg.F90:343-348 -- the momentum-side transport, written BEFORE
-    # tra_adv_trp.  Under the vector-invariant arm zFw is not defined there,
-    # which the phase-3 reader records as a sentinel count rather than
-    # compares (nemo_testcase_l2_gyre_phase3_gate.py:216-224).
+    # stprk3_stg.F90:343-345 -- the momentum-side transport, written BEFORE
+    # tra_adv_trp.  zFw's disposition depends on the ARM the run resolves and
+    # is decided per run by ``_undefined_slots`` below, never hardcoded.
     "NEMO_L1_TRANSP_1": (8, (4, 5, 6), lambda n2, n3, nc: _f(
         ("zFu", n3, "3", True), ("zFv", n3, "3", True),
-        ("zFw", n3, "3", False))),
+        ("zFw", n3, "3", True))),
     # stprk3_stg.F90:622-626 -- the tracer-side transport, written AFTER
     # tra_adv_trp, so zFw IS defined here.
     "NEMO_L2_TRTRP_1": (11, (7, 8, 9), lambda n2, n3, nc: _f(
@@ -148,25 +148,95 @@ SCHEMAS: dict[str, tuple] = {
         *[(n, nc, "c", True) for n in ("post_wind_u", "post_wind_v")])),
 }
 
-# The reason each undefined slot is undefined, quoted in the report so an
-# admission on this ground can never be silent.
-UNDEFINED_REASON = {
-    ("NEMO_L1_TRANSP_1", "zFw"): (
-        "written before tra_adv_trp defines zFw (stprk3_stg.F90:343-348 vs "
-        ":560); the executed branch leaves the slot uninitialised"),
+# --- the ONLY admission ground that is not the halo -----------------------
+#
+# A slot may be waived from the bit test only where the WRITER has not defined
+# it at the write point, and whether it has is a property of the ARM THE RUN
+# RESOLVES, not of the record kind.  So each entry names the namelist switch
+# that decides it and the value under which the slot is undefined, and the
+# gate reads that switch out of the run's OWN ocean.output.
+#
+# THE CASE THIS EXISTS FOR.  ``zFw`` in the momentum-side transport record:
+# under the VECTOR-INVARIANT arm the write at stprk3_stg.F90:343-345 precedes
+# tra_adv_trp (:592/:623), which is what creates zFw -- the source says so at
+# :318, "zFw used in tracers only and computed in tra_adv_trp" -- so the slot
+# is uninitialised memory there.  Under the FLUX-FORM arm the ELSE branch at
+# :326-334 fills zFw = e1e2t*ww BEFORE that same write, so the slot is a real
+# state-carrying field and waiving it would switch off the bit test on it.
+# GYRE resolves ln_dynadv_vec = T; both tanks resolve F.
+#
+# FAIL CLOSED: if the run's ocean.output is missing or does not print the
+# switch, the slot is treated as DEFINED -- the strict reading -- and the
+# report says why.
+UNDEFINED_SLOTS = {
+    ("NEMO_L1_TRANSP_1", "zFw"): {
+        "switch": "ln_dynadv_vec",
+        "undefined_when": "T",
+        "reason": (
+            "under ln_dynadv_vec = T the write at stprk3_stg.F90:343-345 "
+            "precedes tra_adv_trp (:592, :623), which is what computes zFw "
+            "(:318); the slot is uninitialised memory there.  Under "
+            "ln_dynadv_vec = F the flux-form branch at :326-334 fills "
+            "zFw = e1e2t*ww before the same write, so the slot IS defined "
+            "and is bit-tested"),
+    },
 }
 
+
+def _resolved_switch(run: Path, switch: str) -> tuple[str | None, str]:
+    """Read one resolved namelist switch out of a run's own ocean.output."""
+    log = run / "ocean.output"
+    if not log.is_file():
+        return None, f"{log} does not exist"
+    pattern = re.compile(rf"\b{re.escape(switch)}\s*=\s*([TF])\b")
+    try:
+        text = log.read_text(errors="replace")
+    except OSError as error:                      # pragma: no cover - IO only
+        return None, f"{log} unreadable: {error}"
+    for number, line in enumerate(text.splitlines(), 1):
+        found = pattern.search(line)
+        if found:
+            return found.group(1), f"{log.name}:{number}"
+    return None, f"{log} does not print {switch}"
+
+
+def _undefined_slots(run: Path) -> tuple[dict, list]:
+    """Resolve every waiver against THIS run, and record how it resolved."""
+    waived, rows = {}, []
+    for (magic, field), spec in UNDEFINED_SLOTS.items():
+        value, where = _resolved_switch(run, spec["switch"])
+        undefined = value == spec["undefined_when"]
+        if undefined:
+            waived[(magic, field)] = spec["reason"]
+        rows.append({
+            "magic": magic, "field": field, "switch": spec["switch"],
+            "resolved_value": value, "resolved_at": where,
+            "undefined_when": spec["undefined_when"],
+            "waived": undefined,
+            "reason": spec["reason"] if undefined else (
+                "NOT waived on this run: the switch does not resolve to the "
+                "value that leaves the slot undefined, so the slot is "
+                "bit-tested like any other"),
+        })
+    return waived, rows
+
+# WHERE EACH RECORD IS WRITTEN.  Verified line by line against the MY_SRC
+# files that are actually compiled, not carried over from an older round:
+#   grep -n "<magic>" <card>/MY_SRC/<file>.F90
+# LOCK_EXCHANGE_OMIP_L1_P3/MY_SRC/stprk3.F90 and
+# GYRE_OMIP_L2_P3_SM_R29ZDF/MY_SRC/{stprk3_stg,stp2d,traadv}.F90 carry the
+# same writers on every card in this campaign.
 SOURCES = {
-    "NEMO_L2_TRPOP_2": "MY_SRC/stprk3_stg.F90:297-302",
-    "NEMO_L2_WZVOP_1": "MY_SRC/traadv.F90:225-238",
-    "NEMO_L2_RKTRA_1": "MY_SRC/stprk3_stg.F90:657-670",
-    "NEMO_L2_SLOW_2": "MY_SRC/stp2d.F90:187-231",
-    "NEMO_L2_TRTRP_1": "MY_SRC/stprk3_stg.F90:622-626",
-    "NEMO_L1_TRANSP_1": "MY_SRC/stprk3_stg.F90:343-348",
-    "NEMO_L1_STAGE_1": "MY_SRC/stprk3.F90:322-327",
-    "NEMO_L1_ENTRY_1": "MY_SRC/stprk3.F90:338-343",
-    "NEMO_L1_RHS___1": "MY_SRC/stprk3.F90:338-343",
-    "NEMO_L1_BTFRM_1": "MY_SRC/stprk3.F90:300-306",
+    "NEMO_L2_TRPOP_2": "MY_SRC/stprk3_stg.F90:297",
+    "NEMO_L2_WZVOP_1": "MY_SRC/traadv.F90:225",
+    "NEMO_L2_RKTRA_1": "MY_SRC/stprk3_stg.F90:673",
+    "NEMO_L2_SLOW_2": "MY_SRC/stp2d.F90:187",
+    "NEMO_L2_TRTRP_1": "MY_SRC/stprk3_stg.F90:638",
+    "NEMO_L1_TRANSP_1": "MY_SRC/stprk3_stg.F90:343",
+    "NEMO_L1_STAGE_1": "MY_SRC/stprk3.F90:369",
+    "NEMO_L1_ENTRY_1": "MY_SRC/stprk3.F90:96",
+    "NEMO_L1_RHS___1": "MY_SRC/stprk3.F90:385",
+    "NEMO_L1_BTFRM_1": "MY_SRC/stprk3.F90:348",
 }
 PARSERS = {
     "NEMO_L2_TRPOP_2": "nemo_testcase_l2_gyre_round13_tracer.py:93-140",
@@ -237,8 +307,16 @@ def _project(values: np.ndarray, projection: str, nx: int, ny: int, nz: int):
     return values
 
 
-def compare_record(a_path: Path, b_path: Path, plant, max_listed: int = 16):
-    """Compare one record; admit halo and undefined-slot differences only."""
+def compare_record(a_path: Path, b_path: Path, plant, *, waived=None,
+                   max_listed: int = 16):
+    """Compare one record; admit halo and undefined-slot differences only.
+
+    ``waived`` is the RESOLVED waiver map for this run -- ``{(magic, field):
+    reason}`` -- built by ``_undefined_slots`` from the run's own
+    ``ocean.output``.  An empty map means every field is bit-tested, which is
+    the strict reading and the default.
+    """
+    waived = {} if waived is None else waived
     a_bytes, b_bytes = a_path.read_bytes(), b_path.read_bytes()
     if len(a_bytes) != len(b_bytes):
         return {"consumed_equal": False, "error": "size mismatch"}
@@ -252,7 +330,8 @@ def compare_record(a_path: Path, b_path: Path, plant, max_listed: int = 16):
         return {"consumed_equal": False, "error": "header mismatch"}
 
     offset, changed, admitted, consumed_equal = header_bytes, [], [], True
-    for name, count, projection, defined in layout:
+    for name, count, projection, _ in layout:
+        defined = (magic, name) not in waived
         aa = np.frombuffer(a_bytes, np.float64, count, offset)
         bb = np.frombuffer(b_bytes, np.float64, count, offset)
         element_diff = aa.view(np.uint64) != bb.view(np.uint64)
@@ -304,7 +383,8 @@ def compare_record(a_path: Path, b_path: Path, plant, max_listed: int = 16):
         offset += count * 8
     assert offset == len(a_bytes), (a_path, offset, len(a_bytes))
     raw = np.frombuffer(a_bytes, np.uint8) != np.frombuffer(b_bytes, np.uint8)
-    undefined = sorted({n for n, _, _, d in layout if not d})
+    undefined = sorted({n for n, _, _, _ in layout
+                        if (magic, n) in waived})
     return {
         "consumed_equal": consumed_equal,
         "magic": magic,
@@ -315,9 +395,7 @@ def compare_record(a_path: Path, b_path: Path, plant, max_listed: int = 16):
         "changed_fields": changed,
         "admitted_differences": admitted,
         "undefined_slots": undefined,
-        "undefined_slot_reasons": [
-            UNDEFINED_REASON.get((magic, n), "NO REASON REGISTERED")
-            for n in undefined],
+        "undefined_slot_reasons": [waived[(magic, n)] for n in undefined],
         "writer": SOURCES.get(magic, "unregistered"),
         "parser": PARSERS.get(magic, "unregistered"),
     }
@@ -362,14 +440,30 @@ def _read_bt(path: Path):
     return magic, header, dt, rows
 
 
-def _compare_bt(a: Path, b: Path) -> dict:
+def _compare_bt(a: Path, b: Path, plant=None) -> dict:
+    """Compare the ordered barotropic stream on EVERY field both sides carry.
+
+    This record's schema GREW in round 21 (the ``_2`` magic appends eight
+    ``ff*`` fields), which is the one legitimate reason the two files differ
+    in length.  The comparison is therefore over the INTERSECTION of the two
+    field sets, not over a hardcoded list: with the old hardcoded ``BT_NAMES``
+    loop the eight appended fields were read and never compared, so a state
+    change in them was invisible once both sides carried them.
+    """
     aa, bb = _read_bt(a), _read_bt(b)
     equal = aa[2] == bb[2]
+    common = [name for name in BT_NAMES + BT_EXTRA
+              if name in aa[3][0][2] and name in bb[3][0][2]]
     common_diffs = []
     for ar, br in zip(aa[3], bb[3]):
         equal &= ar[0] == br[0] and _bits_equal(ar[1], br[1])
-        for name in BT_NAMES:
-            if not _bits_equal(ar[2][name], br[2][name]):
+        for name in common:
+            left, right = ar[2][name], br[2][name]
+            if plant is not None and plant and not plant[0]:
+                right = right.copy()
+                right[0:1].view(np.uint64)[:] ^= np.uint64(1)
+                plant[0] = True
+            if not _bits_equal(left, right):
                 common_diffs.append([ar[0], name])
                 equal = False
     raw_a, raw_b = a.read_bytes(), b.read_bytes()
@@ -378,7 +472,9 @@ def _compare_bt(a: Path, b: Path) -> dict:
            != np.frombuffer(raw_b[:limit], np.uint8))
     return {
         "consumed_equal": bool(equal), "common_field_differences": common_diffs,
-        "schema": f"{aa[0]}->{bb[0]}", "appended_fields": list(BT_EXTRA),
+        "schema": f"{aa[0]}->{bb[0]}", "compared_fields": common,
+        "fields_only_on_one_side": sorted(
+            set(aa[3][0][2]) ^ set(bb[3][0][2])),
         "raw_differing_bytes": int(np.count_nonzero(raw)),
         "appended_bytes": max(0, len(raw_b) - len(raw_a)),
         "admitted_differences": [],
@@ -410,22 +506,32 @@ def run(baseline: Path, candidate: Path, *, twin=None,
         violations.append(
             "--allowed-new names records the candidate never wrote: "
             f"{sorted(declared_absent)}")
+    waived, waiver_rows = _undefined_slots(baseline)
     for name in baseline_names:
         a, b = baseline / name, candidate / name
         if not b.is_file():
             continue  # already reported as missing
-        if a.read_bytes() == b.read_bytes():
+        raw_equal = a.read_bytes() == b.read_bytes()
+        # THE PLANT MUST ALWAYS LAND.  It used to be reachable only through
+        # compare_record, which only runs on records that already differ raw
+        # -- so a PERFECT twin, the strongest possible outcome, produced a
+        # plant that silently did nothing and a run.sh that then refused the
+        # round.  A pending plant now forces the comparison open on the first
+        # record whether or not its bytes differ.
+        if raw_equal and plant[0]:
             exact += 1
             continue
         if name.startswith("oracle_bt_ordered_operands"):
-            result = _compare_bt(a, b)
+            result = _compare_bt(a, b, plant)
         else:
-            result = compare_record(a, b, plant)
+            result = compare_record(a, b, plant, waived=waived)
+        if raw_equal:
+            result["raw_identical_before_plant"] = True
         if twin is not None and twin.is_dir() and (twin / name).is_file():
             t = twin / name
-            other = (_compare_bt(t, b)
+            other = (_compare_bt(t, b, [True])
                      if name.startswith("oracle_bt_ordered_operands")
-                     else compare_record(t, b, [True]))
+                     else compare_record(t, b, [True], waived=waived))
             result["twin_raw_equal"] = t.read_bytes() == b.read_bytes()
             result["twin_consumed_equal"] = other.get("consumed_equal")
         rows.append({"record": name, **result})
@@ -434,6 +540,10 @@ def run(baseline: Path, candidate: Path, *, twin=None,
     # --writer stamps ONE provenance string, so it is only truthful when every
     # changed record comes from the same instrument.  Fail closed rather than
     # publish one file:line over records written by different ones.
+    if plant_consumed and not plant[0]:
+        violations.append(
+            "the requested plant was never applied: no record reached the "
+            "field comparison, so this run proves nothing")
     if writer:
         magics = {row.get("magic") for row in rows if row.get("magic")}
         if len(magics) > 1:
@@ -457,10 +567,18 @@ def run(baseline: Path, candidate: Path, *, twin=None,
             violations.append(name)
     admitted = [entry for row in rows
                 for entry in row.get("admitted_differences", [])]
+    # An admission ground with no registered reason would be a silent waiver.
+    for row in rows:
+        for reason in row.get("undefined_slot_reasons", []):
+            if not reason or reason == "NO REASON REGISTERED":
+                violations.append(
+                    f"{row['record']}: a slot is waived from the bit test "
+                    "with no registered reason")
     return {
         "format": "nemo-testcase-consumed-field-admission-v2",
         "baseline": str(baseline), "candidate": str(candidate),
         "halo_width_nn_hls": HALO,
+        "undefined_slot_resolution": waiver_rows,
         "baseline_oracle_records": len(baseline_names),
         "candidate_oracle_records": len(candidate_names),
         "byte_identical_records": exact,

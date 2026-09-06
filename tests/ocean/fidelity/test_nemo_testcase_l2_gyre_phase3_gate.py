@@ -42,22 +42,34 @@ def _transport_record(values: np.ndarray) -> bytes:
         "=8i", 1, 1, 1, 1, GNX, GNY, GNZ, 64) + values.tobytes()
 
 
+ZFW_WAIVED = {("NEMO_L1_TRANSP_1", "zFw"): "GYRE resolves ln_dynadv_vec = T"}
+
+
 def test_admission_admits_only_the_undefined_zfw_slot(tmp_path):
-    """zFw is undefined at this record's write point; zFu is not."""
+    """On GYRE's arm zFw is undefined at this record's write point; zFu is not.
+
+    The waiver is passed in explicitly, because it is a property of the RUN
+    (ln_dynadv_vec) and not of the record kind -- on the flux-form tanks the
+    same slot is filled before the same write and IS bit-tested.
+    """
     values = np.zeros(3 * GN3, dtype=np.float64)
     baseline = tmp_path / "baseline.bin"
     candidate = tmp_path / "candidate.bin"
     baseline.write_bytes(_transport_record(values))
     changed = values.copy()
-    # An OWNED cell of the undefined zFw slot: admitted.
+    # An OWNED cell of the undefined zFw slot: admitted on GYRE's arm.
     changed[2 * GN3 + (2 + GNX * 2)] = 1.0
     candidate.write_bytes(_transport_record(changed))
-    assert admission.compare_record(baseline, candidate, [True])["consumed_equal"]
-    # The same OWNED cell of the DEFINED zFu slot: a violation.
+    assert admission.compare_record(
+        baseline, candidate, [True], waived=ZFW_WAIVED)["consumed_equal"]
+    # ... and NOT admitted with no waiver, which is the tanks' case.
+    assert not admission.compare_record(
+        baseline, candidate, [True])["consumed_equal"]
+    # The same OWNED cell of the DEFINED zFu slot: a violation either way.
     changed[2 + GNX * 2] = 1.0
     candidate.write_bytes(_transport_record(changed))
     assert not admission.compare_record(
-        baseline, candidate, [True])["consumed_equal"]
+        baseline, candidate, [True], waived=ZFW_WAIVED)["consumed_equal"]
 
 
 def test_stage_ww_reader_discards_unowned_nonfinite_halo(tmp_path):

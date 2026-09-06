@@ -224,7 +224,11 @@ def test_the_plant_flips_one_owned_bit_and_turns_the_gate_red(tmp_path):
                         plant=True)
     assert planted["plant_applied"] is True
     assert planted["verdict"] == "FAIL"
-    assert planted["violations"] == ["oracle_transport_kt00000001_s1.bin"]
+    # The plant lands on the FIRST record in the inventory, whether or not
+    # that record's bytes already differ.  It used to be reachable only
+    # through a record that already differed raw, so a PERFECT twin produced
+    # a plant that did nothing at all.
+    assert planted["violations"] == ["oracle_bt_frames_kt00000001.bin"]
 
 
 def test_a_missing_inherited_record_is_a_violation(tmp_path):
@@ -246,3 +250,138 @@ def test_allowed_new_that_never_appeared_is_a_violation(tmp_path):
                            allowed_new={"oracle_zdf_matrix_kt00000001.bin"})
     assert report["verdict"] == "FAIL"
     assert any("never wrote" in v for v in report["violations"])
+
+
+# --------------------------------------------------------------------------
+# Round-34 DIFF-review findings.  Each of these arms was written because an
+# independent reviewer defeated the gate on that exact point.
+# --------------------------------------------------------------------------
+
+def _ocean_output(run, ln_dynadv_vec: str) -> None:
+    run.joinpath("ocean.output").write_text(
+        "      namdyn_adv : Choice of the momentum advection scheme\n"
+        "      Vector form: 2nd order centered scheme           "
+        f"ln_dynadv_vec  =  {ln_dynadv_vec}\n")
+
+
+def _zfw_run(root, dims, *, arm: str | None, owned_zfw: float):
+    """A two-directory acquisition whose only difference is one zFw cell."""
+    nx, ny, nz = dims
+    n3 = nx * ny * nz
+    base, cand = root / "source", root / "instrumented"
+    base.mkdir(parents=True)
+    cand.mkdir(parents=True)
+    values = np.zeros(3 * n3, dtype=np.float64)
+    name = "oracle_transport_kt00000001_s1.bin"
+    (base / name).write_bytes(_transport(dims, values))
+    changed = values.copy()
+    changed[2 * n3 + _flat(dims, nx // 2, 3, 5)] = owned_zfw   # OWNED cell
+    (cand / name).write_bytes(_transport(dims, changed))
+    for run in (base, cand):
+        run.joinpath("restart.nc").write_bytes(b"r")
+        if arm is not None:
+            _ocean_output(run, arm)
+    return admission.run(base, cand, twin=None, identical=("restart.nc",),
+                         allowed_new=set())
+
+
+def test_zfw_is_bit_tested_when_the_run_resolves_the_FLUX_FORM_arm(tmp_path):
+    """The finding that shipped a wrong verdict.
+
+    ``zFw`` used to be waived unconditionally.  It is undefined at the write
+    point only under ln_dynadv_vec = T, where tra_adv_trp has not run yet.
+    Under ln_dynadv_vec = F -- which is what BOTH tanks resolve -- the
+    flux-form branch fills zFw before the same write, so waiving it switches
+    off the bit test on a real state-carrying field.  An independent reviewer
+    planted 1 m/s in an owned tank zFw cell and the gate said PASS.
+    """
+    vector = _zfw_run(tmp_path / "vec", LOCK, arm="T", owned_zfw=1.0)
+    assert vector["verdict"] == "PASS"
+    assert vector["undefined_slot_resolution"][0]["waived"] is True
+    assert vector["undefined_slot_resolution"][0]["resolved_value"] == "T"
+
+    flux = _zfw_run(tmp_path / "flux", LOCK, arm="F", owned_zfw=1.0)
+    assert flux["verdict"] == "FAIL"
+    assert flux["undefined_slot_resolution"][0]["waived"] is False
+    assert flux["violations"] == ["oracle_transport_kt00000001_s1.bin"]
+
+
+def test_a_run_with_no_ocean_output_fails_CLOSED_to_bit_testing(tmp_path):
+    """No resolved arm means no waiver, which is the strict reading."""
+    report = _zfw_run(tmp_path, LOCK, arm=None, owned_zfw=1.0)
+    assert report["verdict"] == "FAIL"
+    row = report["undefined_slot_resolution"][0]
+    assert row["waived"] is False and row["resolved_value"] is None
+    assert "does not exist" in row["resolved_at"]
+
+
+def test_the_plant_lands_even_on_a_PERFECTLY_identical_twin(tmp_path):
+    """A perfect twin is the strongest outcome; it must not disarm the plant.
+
+    The plant used to be reachable only through a record that already
+    differed raw, so on an all-identical acquisition it silently did nothing,
+    the gate said PASS, and run.sh then refused the round for a plant that had
+    never been applied.
+    """
+    clean = _tank_run(tmp_path / "clean", LOCK)
+    assert clean["verdict"] == "PASS"
+    assert clean["byte_identical_records"] == 3
+
+    planted = _tank_run(tmp_path / "planted", LOCK, plant=True)
+    assert planted["plant_applied"] is True
+    assert planted["verdict"] == "FAIL"
+    assert planted["classified_changed_records"][0][
+        "raw_identical_before_plant"] is True
+
+
+def test_a_waiver_with_an_empty_reason_is_a_violation(monkeypatch, tmp_path):
+    """A silent waiver is the thing this ground must never become."""
+    monkeypatch.setitem(
+        admission.UNDEFINED_SLOTS, ("NEMO_L1_TRANSP_1", "zFw"),
+        {"switch": "ln_dynadv_vec", "undefined_when": "T", "reason": ""})
+    report = _zfw_run(tmp_path, LOCK, arm="T", owned_zfw=1.0)
+    assert report["verdict"] == "FAIL"
+    assert any("no registered reason" in v for v in report["violations"])
+
+
+def _btord(dims, magic: str, extra: bool, bump: float = 0.0) -> bytes:
+    nx, ny, _ = dims
+    n2, nc = nx * ny, (nx - 4) * (ny - 4)
+    names = admission.BT_NAMES + (admission.BT_EXTRA if extra else ())
+    out = [magic.ljust(16).encode("ascii"),
+           struct.pack("=6i", 1, 1, 3, nx, ny, 64),
+           np.asarray([60.0]).tobytes()]
+    for row in (2, 3):
+        out.append(struct.pack("=i", row))
+        out.append(np.zeros(7).tobytes())
+        for name in names:
+            size = nc if name in {"slow_u", "slow_v",
+                                  *admission.BT_EXTRA} else n2
+            values = np.zeros(size)
+            if bump and name == "ffu_nw":
+                values[size // 2] = bump
+            out.append(values.tobytes())
+    return b"".join(out)
+
+
+def test_the_appended_barotropic_fields_are_compared_when_both_sides_carry_them():
+    """They were read and never compared, so a change in them was invisible."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        a, b = root / "a.bin", root / "b.bin"
+        a.write_bytes(_btord(LOCK, "NEMO_L2_BTORD_2", True))
+        b.write_bytes(_btord(LOCK, "NEMO_L2_BTORD_2", True, bump=1.0))
+        report = admission._compare_bt(a, b)
+        assert report["consumed_equal"] is False
+        assert ["ffu_nw"] == sorted({n for _, n in
+                                     report["common_field_differences"]})
+        assert "ffu_nw" in report["compared_fields"]
+        # ... and the legitimate SCHEMA GROWTH still passes: the appended
+        # fields exist on one side only, so they are not comparable.
+        c = root / "c.bin"
+        c.write_bytes(_btord(LOCK, "NEMO_L2_BTORD_1", False))
+        grown = admission._compare_bt(c, b)
+        assert grown["consumed_equal"] is True
+        assert set(grown["fields_only_on_one_side"]) == set(admission.BT_EXTRA)
