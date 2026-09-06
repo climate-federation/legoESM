@@ -598,3 +598,14 @@ the gate now prints per-stage RSS to name it.
 * Profile on a healthy fabric (54 ranks C96): compute ~0.12 s/step (= flat/9,
   ideal), ppermute thunks 2702/step at ~24 us + gaps ~0.12 s -> count-bound.
   M8 (fewer messages) claim sent to codex + GLM before code.
+
+**RETRACTION (2026-09-06): every C192 number above ran an UNSTABLE deck.**
+The ladder reused the C48 timestep (dt = 900 s, n_split = 3) at C192; the
+6-rank flat reference reports nsplt = 0 at step 2 (floor(1 + cmax) < 1 only
+for a NaN Courant), so the state is NaN from step 2 on.  The gate compared
+NaN to NaN as "bitwise", so the C192 kt=6 "tracer mismatch" was the window
+arm's finite-but-huge Courant (nsplt 7) against the reference's NaN, and the
+C192 timings (6-rank 3.752 s/step, 216-rank) are timings of NaN arithmetic.
+The gate now REFUSES any non-finite value in either arm and any nsplt < 1 on
+either side.  The C192 (and larger) rows need a dt scaled with resolution --
+a deck decision, asked, not taken.

@@ -208,6 +208,11 @@ def main(argv=None):
                                 for p, a in host(ref).items()})
             print(f"[m6] flat-ref step {it + 1}: nsplt="
                   f"{ref_model.last_nsplt.tolist()} wall={times[-1]:.3f}s")
+            if (np.asarray(ref_model.last_nsplt) < 1).any():
+                print(f"[m6] REFUSED: flat reference nsplt < 1 at step "
+                      f"{it + 1} = NaN Courant; the deck is not stable at "
+                      f"dt={args.dt} on C{args.n} (no reference saved)")
+                return 2
         if args.save_npz and rank0:
             np.savez(args.save_npz, **to_save)
             print(f"[m6] saved {len(to_save)} flat outputs -> {args.save_npz}")
@@ -296,6 +301,10 @@ def main(argv=None):
         # on every process (a local max would silently under-advect) --
         # asserted with an allgather, not just printed
         ns = np.asarray(win_model.last_nsplt)
+        if (ns < 1).any():
+            print(f"  step {it + 1}: nsplt {ns.tolist()} < 1 = NaN Courant "
+                  f"(floor(1 + cmax) is >= 1 for any finite cmax) -- REFUSED")
+            rc = 1
         if jax.process_count() > 1:
             from jax.experimental import multihost_utils as mhu
             import jax.numpy as jnp
@@ -340,7 +349,18 @@ def main(argv=None):
                 print(f"  step {it + 1} {path}: SHAPE {w.shape} vs {r.shape}")
                 n_bad += 1
                 continue
-            d = ((r != w) & ~(np.isnan(r) & np.isnan(w))).sum()
+            # a NaN state compares "bitwise" to another NaN state, so a
+            # blown-up deck would certify vacuously (C192 at the C48 dt of
+            # 900 s: reference nsplt 0 at step 2, i.e. NaN Courant; 2026-09-06)
+            nonfinite = int((~np.isfinite(r)).sum() + (~np.isfinite(w)).sum())
+            if nonfinite and r.dtype.kind == "f":
+                print(f"  step {it + 1} {path}: {nonfinite} non-finite values "
+                      f"(reference {int((~np.isfinite(r)).sum())}, window "
+                      f"{int((~np.isfinite(w)).sum())}) -- REFUSED, the deck "
+                      f"is not stable at this dt")
+                n_bad += 1
+                continue
+            d = (r != w).sum()
             if d:
                 n_bad += 1
                 fin = np.isfinite(r - w)
