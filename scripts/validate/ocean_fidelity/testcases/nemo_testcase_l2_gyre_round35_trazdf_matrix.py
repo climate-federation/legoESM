@@ -125,6 +125,35 @@ REQUIRED_ARM = {
 }
 PLANT_ARMS = ("operand", "matrix", "sweep", "assembly", "rhs", "a33", "clamp")
 
+# THE TWO ARRAYS WHOSE DECLARED EXTENT IS NOT THEIR WRITTEN EXTENT.
+#
+# ``zdf_oce.f90:85-86`` (this round's own compiled ppsrc under
+# ``cfgs/GYRE_OMIP_L2_P3_SM_R35TRAZDF/BLD/ppsrc/nemo``) allocates
+#
+#     avs(Nis0-(0):Nie0+(0), Njs0-(0):Nje0+(0), jpk)
+#     avt(Nis0-(0):Nie0+(0), Njs0-(0):Nje0+(0), jpk)
+#
+# -- the INTERIOR box, not ``(jpi,jpj,jpk)``.  ``avm`` on the same line IS
+# full-domain, which is what makes the mistake easy: the round-35 instrument
+# writes ``WRITE(il2_unit) avt`` after a header declaring ``jpi, jpj, jpk``
+# (``trazdf.f90:246-249``), so each of those two payloads is
+# ``(ntei-ntsi+1)*(ntej-ntsj+1)*jpk`` values while its header claims
+# ``jpi*jpj*jpk``.  Reading on the header alone lands the next array header
+# 57536 bytes early and the record decodes as garbage from ``avs`` onward.
+#
+# The payload itself is COMPLETE over the interior, and the interior is
+# exactly the box this gate scores, so the record is mislabelled rather than
+# short.  The salvage below is therefore permitted -- but it is PROVEN, never
+# assumed: the declared extent is used unless it fails to leave a known array
+# name at the next header, and the tile extent is accepted only when it DOES.
+# Its arithmetic is checked a second time by the calibration arm, which
+# rebuilds NEMO's own ``zwt_mix`` from the embedded ``avt``; a misaligned
+# embedding cannot reproduce it.
+TILE_SHAPED = {
+    "avt": "zdf_oce.f90:86 allocates avt over Nis0:Nie0 x Njs0:Nje0 x jpk",
+    "avs": "zdf_oce.f90:85 allocates avs over the same interior box",
+}
+
 
 class RecordError(Exception):
     """A record this reader refuses; always reported as a VERDICT."""
@@ -133,6 +162,23 @@ class RecordError(Exception):
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise RecordError(message)
+
+
+_KNOWN_NAMES = frozenset(n.ljust(16).encode("ascii") for n in EXPECTED_ARRAYS)
+
+
+def _starts_a_known_array(raw: bytes, off: int) -> bool:
+    """Do the 16 bytes at ``off`` begin an array this record may carry?
+
+    EOF counts: the last array is followed by nothing.  This is what turns
+    the tile-extent salvage into a PROOF rather than a guess -- the stream
+    itself says where the payload ended.
+    """
+    if off == len(raw):
+        return True
+    if off + 32 > len(raw):
+        return False
+    return raw[off:off + 16] in _KNOWN_NAMES
 
 
 def read_trazdf_matrix(path: Path) -> dict:
@@ -188,6 +234,7 @@ def read_trazdf_matrix(path: Path) -> dict:
 
     arrays: dict[str, np.ndarray | float] = {}
     order: list[str] = []
+    salvaged: dict[str, dict] = {}
     off = 80
     while off < len(raw):
         require(off + 32 <= len(raw), f"{path}: truncated array header at {off}")
@@ -202,10 +249,37 @@ def read_trazdf_matrix(path: Path) -> dict:
         require(rank in (0, 2, 3), f"{path}: array {name!r} has rank {rank}")
         require(min(n1, n2, n3) >= 1, f"{path}: array {name!r} has extent <= 0")
         count = n1 * n2 * n3
+        tile = None
+        if name in TILE_SHAPED and rank == 3:
+            declared_ok = _starts_a_known_array(raw, off + 8 * count)
+            ni = header["ntei"] - header["ntsi"] + 1
+            nj = header["ntej"] - header["ntsj"] + 1
+            tile_count = ni * nj * n3
+            tile_ok = (tile_count < count
+                       and _starts_a_known_array(raw, off + 8 * tile_count))
+            require(declared_ok or tile_ok,
+                    f"{path}: array {name!r} is followed by neither a known "
+                    f"array header at its declared extent {(n1, n2, n3)} nor "
+                    f"one at NEMO's interior extent {(ni, nj, n3)}")
+            if not declared_ok:
+                tile, count = (ni, nj, n3), tile_count
         end = off + 8 * count
         require(end <= len(raw), f"{path}: array {name!r} runs past EOF")
         values = np.frombuffer(raw, dtype="<f8", count=count, offset=off)
         off = end
+        if tile is not None:
+            # embed the interior payload where NEMO's indices put it, so every
+            # arm downstream sees ONE shape.  The halo ring is the READER's
+            # zero -- no arm reads it, and _box() never reaches it.
+            block = np.zeros((header["jpi"], header["jpj"], n3))
+            block[header["ntsi"] - 1:header["ntei"],
+                  header["ntsj"] - 1:header["ntej"], :] = \
+                values.reshape(tile, order="F")
+            arrays[name] = block
+            order.append(name)
+            salvaged[name] = {"declared": [n1, n2, n3], "written": list(tile),
+                              "reason": TILE_SHAPED[name]}
+            continue
         require(name not in arrays, f"{path}: array {name!r} written twice")
         expected = ARRAY_SHAPE.get(name)
         require(expected is None
@@ -257,7 +331,7 @@ def read_trazdf_matrix(path: Path) -> dict:
         require(bool(np.isfinite(block).all()),
                 f"{path}: {name!r} carries a non-finite value")
     return {"header": header, "arrays": arrays, "order": order,
-            "path": str(path)}
+            "path": str(path), "tile_shaped_salvage": salvaged}
 
 
 def _interior(header: dict) -> tuple[slice, slice]:
@@ -462,13 +536,25 @@ def lego_rhs_content(rec: dict) -> dict[str, np.ndarray]:
 
     ``thickness_weighted_tracer_content`` groups the update as
     ``h_bef*T_bb + (h_aft*T_expl - h_now*T_now) + h_now*d_diss`` where NEMO
-    writes ``e3t(Kbb)*T(Kbb) + p2dt*e3t(Kmm)*T(Krhs)`` (``trazdf.F90:272``,
-    ``:276-277``).  Feeding NEMO's own operands into the equivalent slots --
-    ``t_now`` and ``d_diss`` zero, ``t_expl`` the pre-multiplied
-    ``p2dt*T(Krhs)`` -- leaves exactly ONE difference between the two, the
-    ASSOCIATION of the triple product.  So this arm answers a question round
-    36 needs answered before it can flip ``tracer_combine``: would the content
-    form reproduce NEMO's right-hand side bit for bit given NEMO's inputs.
+    writes, LEFT TO RIGHT,
+
+        zrhs = (e3t(Kbb)) * pt(Kbb) + p2dt * (e3t(Kmm)) * pt(Krhs)
+
+    (``trazdf.f90:528-529`` of this round's compiled ppsrc), i.e.
+    ``(p2dt*e3t_Kmm) * T_Krhs``.  TWO mappings of NEMO's operands onto the
+    builder's slots are scored, because round 35 quoted only the second and
+    read its residual as a property of the builder:
+
+    ``faithful``  -- ``h_after = p2dt*e3t_Kmm``, ``t_expl = T_Krhs``, which
+        reproduces NEMO's own association exactly.
+    ``premultiplied`` -- ``h_after = e3t_Kmm``, ``t_expl = p2dt*T_Krhs``,
+        round 35's mapping, which forms ``e3t_Kmm*(p2dt*T_Krhs)`` -- an
+        association NEMO never writes.  Kept, labelled, as the ASSOCIATION
+        SENSITIVITY of this product; it is not a claim about the builder.
+
+    In both, ``t_now`` and ``d_diss`` are zero.  Neither mapping reaches the
+    production path, which forms ``h_naa*T_expl - h_now*T_now`` instead: that
+    is the blind spot this gate declares, and it is unchanged by either row.
     """
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
         thickness_weighted_tracer_content)
@@ -480,10 +566,15 @@ def lego_rhs_content(rec: dict) -> dict[str, np.ndarray]:
     zero = np.zeros_like(e3t_kbb)
     out = {}
     for tag in ("T", "S"):
-        out[tag] = np.asarray(thickness_weighted_tracer_content(
-            t_before=_box(rec, f"{tag}_Kbb_in", jpkm1),
-            t_now=zero, t_expl=p2dt * _box(rec, f"{tag}_Krhs_in", jpkm1),
-            d_diss=zero, h_before=e3t_kbb, h_now=e3t_kmm, h_after=e3t_kmm))
+        t_rhs = _box(rec, f"{tag}_Krhs_in", jpkm1)
+        common = dict(t_before=_box(rec, f"{tag}_Kbb_in", jpkm1),
+                      t_now=zero, d_diss=zero,
+                      h_before=e3t_kbb, h_now=e3t_kmm)
+        out[f"faithful_{tag}"] = np.asarray(thickness_weighted_tracer_content(
+            t_expl=t_rhs, h_after=p2dt * e3t_kmm, **common))
+        out[f"premultiplied_{tag}"] = np.asarray(
+            thickness_weighted_tracer_content(
+                t_expl=p2dt * t_rhs, h_after=e3t_kmm, **common))
     return out
 
 
@@ -651,9 +742,19 @@ def run(record: Path, *, plant: str | None = None,
     for tag in ("T", "S"):
         lego_rows.append(bit_row(
             f"{step}.rhs_content.{tag}",
-            _box(rec, f"rhs_{tag}", jpkm1), content[tag],
-            note="the content form given NEMO's operands; the ONLY residual "
-                 "it can carry is the association of the triple product"))
+            _box(rec, f"rhs_{tag}", jpkm1), content[f"faithful_{tag}"],
+            note="the content builder given NEMO's operands under NEMO's own "
+                 "association (p2dt*e3t_Kmm)*T_Krhs, trazdf.f90:528-529"))
+    association_rows = []
+    for tag in ("T", "S"):
+        association_rows.append(bit_row(
+            f"{step}.rhs_content_premultiplied.{tag}",
+            _box(rec, f"rhs_{tag}", jpkm1), content[f"premultiplied_{tag}"],
+            note="ASSOCIATION SENSITIVITY, not a claim about the builder: "
+                 "round 35's mapping forms e3t_Kmm*(p2dt*T_Krhs), which NEMO "
+                 "never writes.  A residual here is this product's "
+                 "sensitivity to grouping, and it is REPORTED, not scored -- "
+                 "see rhs_association_sensitivity"))
 
     a33_max = float(np.abs(_box(rec, "ah_wslp2")).max())
     clamp_rows = []
@@ -686,10 +787,16 @@ def run(record: Path, *, plant: str | None = None,
         "record": str(record),
         "header": h,
         "arrays_read": rec["order"],
+        "tile_shaped_salvage": rec["tile_shaped_salvage"],
         "planted": plant,
         "calibration_rows": calibration,
         "given_inputs_rows": lego_rows,
         "clamp_rows": clamp_rows,
+        # REPORTED, NOT SCORED.  These rows measure how much this product's
+        # value depends on how it is GROUPED; they do not measure legoESM
+        # against NEMO, because the grouping they use is not NEMO's.  Letting
+        # them gate would make the verdict turn on a harness choice.
+        "rhs_association_sensitivity": association_rows,
         "condition_rows": condition_rows,
         "named_deviations": deviations,
         "status": status,
@@ -756,17 +863,25 @@ def main(argv=None) -> int:
     if args.json:
         args.json.write_text(text + "\n")
     print(text)
-    for group in ("calibration_rows", "given_inputs_rows", "clamp_rows"):
+    for group in ("calibration_rows", "given_inputs_rows", "clamp_rows",
+                  "rhs_association_sensitivity"):
         for row in report[group]:
-            print(f"{row['status']:<12} {row['name']:<58} "
+            label = ("REPORTED" if group == "rhs_association_sensitivity"
+                     else row["status"])
+            print(f"{label:<12} {row['name']:<58} "
                   f"bit_unequal {row['bit_unequal']}/{row['n']} "
-                  f"max {row['absolute_max']:.17g}")
+                  f"max {row['absolute_max']:.17g}"
+                  + (f"  [status {row['status']}]"
+                     if group == "rhs_association_sensitivity" else ""))
     for row in report["condition_rows"]:
         print(f"{row['status']:<12} {row['name']:<58} "
               f"max {row['max_abs']:.17g}")
     for row in report["named_deviations"]:
         print(f"{'INERT' if row['inert_here'] else 'LIVE':<12} "
               f"{row['deviation'][:100]}")
+    for name, row in report["tile_shaped_salvage"].items():
+        print(f"{'SALVAGED':<12} {name:<10} header said {row['declared']}, "
+              f"NEMO wrote {row['written']} -- {row['reason']}")
     box = report["scored_box"]
     print(f"SCORED {box['cells']} cells, i {box['i']} j {box['j']} "
           f"halo {box['halo']}, on a {box['domain']} domain")

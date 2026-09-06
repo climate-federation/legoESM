@@ -229,12 +229,28 @@ def test_the_reader_parses_the_twin_and_the_arms_read_what_they_should(
     for name in ("assembly.zwi", "assembly.zws"):
         assert by_name[name]["status"] == "AT-BAR-SIGNED-ZERO", by_name[name]
         assert by_name[name]["absolute_max"] == 0.0
+    # ROUND-36 RETRACTION.  Round 35 recorded this row as VALUE-AT-BAR with
+    # 1/125 cells unequal at 5.2e-17 and read that as a property of
+    # ``thickness_weighted_tracer_content``.  It was not: the ARM formed
+    # ``e3t_Kmm*(p2dt*T_Krhs)``, an association NEMO never writes.  Under
+    # NEMO's own grouping ``(p2dt*e3t_Kmm)*T_Krhs`` (trazdf.f90:528-529) the
+    # builder is BIT-EXACT, here and on the real GYRE record (0/21120).
     rhs = by_name["rhs_content.T"]
-    assert rhs["status"] == "VALUE-AT-BAR", rhs
-    assert 0 < rhs["bit_unequal"] < rhs["n"]
-    assert rhs["normalized_max_abs"] < R.BAR
-    # and the gate does NOT call that AT-BAR: the campaign's bar is exact
-    assert report["status"] == "DEBT"
+    assert rhs["status"] == "AT-BAR", rhs
+    assert rhs["bit_unequal"] == 0 and rhs["absolute_max"] == 0.0
+    # the old grouping is kept as a REPORTED sensitivity, never scored, and
+    # it must still carry its residual or the retraction has no evidence
+    sensitivity = {r["name"].rsplit(".trazdf.", 1)[1]: r
+                   for r in report["rhs_association_sensitivity"]}
+    premultiplied = sensitivity["rhs_content_premultiplied.T"]
+    assert 0 < premultiplied["bit_unequal"] < premultiplied["n"]
+    assert premultiplied["normalized_max_abs"] < R.BAR
+    # and a REPORTED row cannot decide the verdict
+    assert all(r["status"] in R.PASSING
+               for group in ("calibration_rows", "given_inputs_rows",
+                             "clamp_rows", "condition_rows")
+               for r in report[group]), report["status"]
+    assert report["status"] == "AT-BAR"
 
 
 def test_the_calibration_is_not_tautological(clean_record):
@@ -673,3 +689,99 @@ def test_both_comparators_admit_the_same_shape_so_the_report_can_be_printed(
         assert "note" in entry or {
             "index_0based", "reason", "baseline_value", "candidate_value",
         } <= set(entry), entry
+
+
+# --------------------------------------------------------------------------
+# ROUND 36 -- avt and avs are NOT full-domain arrays in NEMO
+# --------------------------------------------------------------------------
+def _shorten_to_tile(source: Path, target: Path, names, *,
+                     ni=NTEI - NTSI + 1, nj=NTEJ - NTSJ + 1) -> Path:
+    """Rewrite ``names``' payloads to the interior box, headers untouched.
+
+    This reproduces the real round-35 defect byte for byte: ``zdf_oce.f90:85-86``
+    allocates ``avt``/``avs`` over ``Nis0:Nie0 x Njs0:Nje0 x jpk``, so
+    ``WRITE(unit) avt`` after a header declaring ``jpi, jpj, jpk`` emits
+    ``(ntei-ntsi+1)*(ntej-ntsj+1)*jpk`` values -- 57536 bytes short per array
+    on GYRE -- and every array after ``avs`` decodes as garbage.
+    """
+    raw = source.read_bytes()
+    out = bytearray(raw[:80])
+    off = 80
+    while off < len(raw):
+        name = raw[off:off + 16].decode("ascii").rstrip()
+        rank, n1, n2, n3 = struct.unpack("=4i", raw[off + 16:off + 32])
+        count = n1 * n2 * n3
+        payload = raw[off + 32:off + 32 + 8 * count]
+        if name in names:
+            block = np.frombuffer(payload, "<f8").reshape((n1, n2, n3),
+                                                          order="F")
+            payload = block[NTSI - 1:NTSI - 1 + ni,
+                            NTSJ - 1:NTSJ - 1 + nj, :].tobytes(order="F")
+            assert len(payload) == 8 * ni * nj * n3
+        out += raw[off:off + 32] + payload
+        off += 32 + 8 * count
+    target.write_bytes(bytes(out))
+    return target
+
+
+def test_the_reader_recovers_avt_and_avs_written_over_the_interior(
+        tmp_path, clean_record):
+    """A short avt/avs must decode to the SAME gate report, not to garbage.
+
+    ``avm`` on ``zdf_oce.f90:85`` is ``(jpi,jpj,jpk)`` and ``avt``/``avs`` on
+    the same statement are not, which is what the round-35 instrument missed.
+    The recovery is accepted only because the stream PROVES it -- the tile
+    extent is taken only when the declared one fails to leave a known array
+    header behind and the tile one does -- and because the calibration arm,
+    which rebuilds NEMO's own zwt_mix/zwi/zwd/zws from the embedded avt,
+    stays bit-exact.  A misaligned embedding cannot do that.
+    """
+    short = _shorten_to_tile(clean_record, tmp_path / "short.bin",
+                             {"avt", "avs"})
+    assert short.stat().st_size < clean_record.stat().st_size
+
+    full_rec = R.read_trazdf_matrix(clean_record)
+    short_rec = R.read_trazdf_matrix(short)
+    assert set(short_rec["tile_shaped_salvage"]) == {"avt", "avs"}
+    assert not full_rec["tile_shaped_salvage"], (
+        "a full-length record must NOT be salvaged; the salvage would then "
+        "be unconditional and could hide a real truncation")
+    for name in ("avt", "avs"):
+        assert np.array_equal(R._box(short_rec, name).view(np.uint64),
+                              R._box(full_rec, name).view(np.uint64))
+    for name in ("tmask", "e3t_Kbb", "e3w_Kmm", "r3t_Kaa", "rhs_T", "zwd"):
+        assert np.array_equal(
+            np.asarray(short_rec["arrays"][name]).view(np.uint64),
+            np.asarray(full_rec["arrays"][name]).view(np.uint64)), name
+
+    full, salvaged = _run(clean_record), _run(short)
+    for group in ("calibration_rows", "given_inputs_rows", "clamp_rows"):
+        assert ([(r["name"], r["status"], r["absolute_max"])
+                 for r in salvaged[group]]
+                == [(r["name"], r["status"], r["absolute_max"])
+                    for r in full[group]]), group
+    assert salvaged["calibrated"] is True
+
+
+def test_a_payload_matching_neither_extent_is_refused(tmp_path, clean_record):
+    """Non-vacuity: the salvage must not swallow a genuinely broken record."""
+    wrong = _shorten_to_tile(clean_record, tmp_path / "wrong.bin", {"avt"},
+                             ni=NTEI - NTSI, nj=NTEJ - NTSJ)
+    with pytest.raises(R.RecordError, match="neither a known array header"):
+        R.read_trazdf_matrix(wrong)
+
+
+def test_the_real_round35_record_needed_the_salvage():
+    """Rule 10: say it about the record that exists, not only a fixture."""
+    record = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                  "round35_oracle_trazdf_matrix/"
+                  "oracle_trazdf_matrix_kt00000001.bin")
+    if not record.exists():
+        pytest.skip("round-35 record absent")
+    rec = R.read_trazdf_matrix(record)
+    h = rec["header"]
+    assert set(rec["tile_shaped_salvage"]) == {"avt", "avs"}
+    for name, row in rec["tile_shaped_salvage"].items():
+        assert row["declared"] == [h["jpi"], h["jpj"], h["jpk"]]
+        assert row["written"] == [h["ntei"] - h["ntsi"] + 1,
+                                  h["ntej"] - h["ntsj"] + 1, h["jpk"]]
