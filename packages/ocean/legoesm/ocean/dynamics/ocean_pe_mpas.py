@@ -1067,6 +1067,13 @@ def mpas_ocean_baroclinic_tendencies(
                 area=mesh.areaCell,
                 normalize=bool(getattr(config, "normalize_freshwater", False)),
             )
+        # Temperature twin (2026-09-05; shared helper, see the lat-lon core):
+        # the surface heat flux carries the rain/evap/restoring heat content,
+        # so the same water must dilute temperature (NEMO trasbc emp*sst).
+        from legoesm.ocean.freshwater import virtual_closure_temperature_twin
+        _dT_twin = virtual_closure_temperature_twin(
+            freshwater, T_3d[:, 0], h_k[:, 0], config.rho_0, mask)
+        dT_dt_3d = dT_dt_3d.at[:, 0].add(_dT_twin.astype(dT_dt_3d.dtype))
 
     # ---- Real salt-mass flux (e.g. sea-ice brine rejection) ----
     # A top-layer salinity SOURCE distinct from the freshwater virtual-salt

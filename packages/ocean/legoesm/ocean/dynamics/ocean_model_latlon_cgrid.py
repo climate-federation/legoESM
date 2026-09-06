@@ -6673,8 +6673,16 @@ class LatLonCGridOceanModel:
                 S_fw = state_new.S.data.at[..., 0].add(
                     (dt * dS_fw * mask).astype(_S_dtype),
                 )
+            # Temperature twin (2026-09-05): the surface heat flux already
+            # carries the rain/evap/restoring heat content, so dilute T by
+            # the same water (NEMO linear-free-surface trasbc emp*sst term).
+            from legoesm.ocean.freshwater import virtual_closure_temperature_twin
+            _dT_twin = virtual_closure_temperature_twin(
+                freshwater, state_new.T.data[..., 0], dz_0, _cfg_b.rho_0, mask)
             state_new = state_new._replace(
                 S=state_new.S.replace(data=S_fw),
+                T=state_new.T.replace(data=state_new.T.data.at[..., 0].add(
+                    (dt * _dT_twin).astype(state_new.T.data.dtype))),
             )
         elif (freshwater is not None
                 and _cfg_b.freshwater_closure == "real_freshwater"

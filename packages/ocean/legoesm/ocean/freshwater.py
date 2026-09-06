@@ -152,6 +152,34 @@ def virtual_salt_flux(
         net_freshwater_flux(fw), S_ref, dz_0, rho_0)
 
 
+def virtual_closure_temperature_twin(fw, T_top, dz_0, rho_0: float, mask=None):
+    """Top-cell temperature tendency [K/s] that the virtual-salt closure owes
+    for the water whose HEAT CONTENT the surface heat flux already carries.
+
+    Our OMIP heat flux is NEMO ``blk_oce_2``: ``-evap*cp*SST + rain*cp*theta_air``
+    (+ snow terms), and the SSS-restoring channel adds ``F*cp*SST``
+    (``sbcssr``).  Under a non-linear free surface that heat pairs with the
+    dilution of temperature by the entering/leaving water; the virtual
+    closure never dilutes temperature (the volume goes to eta only), so NEMO's
+    linear-free-surface branch adds the counterpart back in ``trasbc``
+    (``sbc_tsc(jp_tem) += emp*sst/rho0``).  Without it the virtual closure
+    carries a spurious surface heat flux ``-(E-P) cp SST`` (~2-6 W/m2,
+    cooling where evaporation exceeds rain; codex + GLM 2026-09-05).
+
+    Only the channels whose heat is in the heat flux enter: precip, evap,
+    restoring.  Runoff and ice melt water carry no heat-flux term in this
+    coupling (they arrive at the local temperature) and are excluded.
+
+        dT/dt|top = -(P - E + R_restore)/rho_0 * T_top / dz_0
+    """
+    F = jnp.asarray(fw.precip) - jnp.asarray(fw.evap)
+    rest = getattr(fw, "restoring", None)
+    if rest is not None:
+        F = F + jnp.asarray(rest)
+    dT = -(F / rho_0) * T_top / jnp.maximum(dz_0, 1.0e-3)
+    return dT if mask is None else dT * mask
+
+
 def real_freshwater_dilution_tendencies(
     F_rate: jnp.ndarray,
     S: jnp.ndarray,
