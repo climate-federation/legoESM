@@ -72,6 +72,14 @@
         "P4e C differs from B on the deepest wet level and nowhere else. That is a check on the walk, not on the model.",
         "P4f REFUTE both: none of A, B, C is below 5e-12 => the model's pre-implicit state is not any of dyn_zdf's three entry boundaries and the exposure cannot carry this walk at all."
       ]
+    },
+    "second_addendum_written_before_the_run": {
+      "what_the_three_boundaries_showed": "P4f is CONFIRMED: none of A, B, C is small. A is 4.269765124169735e-04 on u, B 8.524937400852e-04, C 8.535125698e-04, against a model field whose own peak is 4.255609e-04 -- and the oracle's uu_b_Kaa peaks at 4.2551722767418954e-04 on the same mask. The model's pre-implicit vector IS the barotropic velocity plus a small deviation; NEMO's pre-solve vector has the barotropic velocity REMOVED.",
+      "read_from_both_sources_before_predicting": "legoESM applies NEMO's barotropic correction to the stage-3 velocity BEFORE the implicit solve (ocean_model_latlon_cgrid.py:6300-6322, _replace_stage_mean at :5754 with target uu_b at :5776) and again after it (:7940-:7952 under nemo_stage_mean_imposition, which GYRE resolves True). NEMO applies it ONCE, after (stprk3_stg.F90:437-446), and before the solve it instead SUBTRACTS uu_b at dynzdf.F90:149-150. So legoESM's implicit solve receives a vector differing from NEMO's by the column constant mean(A) - uu_b(Kaa).",
+      "predictions": [
+        "P4g SIZE: the column constant d = (reference-weighted depth mean of NEMO's explicit update A) - uu_b(Kaa), computed from the round-29 record's own operands, has a peak of order 1e-4 m/s. A constant is not invariant under the solve because the bottom-drag diagonal is not: dynzdf.F90:296 subtracts zDt_2*(rCdU_bot(i+1,j)+rCdU_bot(i,j))/e3u(iku,Kaa) from the deepest wet diagonal, a factor f. PREDICT f * max|d| is within a factor of 3 of the observed bottom-level error 9.482369792360580e-07. CONFIRM => the ordering difference is the leading candidate for GYRE's kt2 blocker and it is sized. REFUTE (outside a factor of 3) => the ordering difference is registered as a structural difference of UNKNOWN size and no owner is named from it.",
+        "P4h the ordering difference is CONFIRMED BY READING on both sides and UNMEASURED as an owner whatever P4g says: sizing an operand is not an ablation, and no fix lands this round on it."
+      ]
     }
   },
   "item5_decision_16": {
