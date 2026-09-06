@@ -560,6 +560,22 @@ def resolved_rhs_arm() -> dict:
     return rows
 
 
+def _row_signature(report: dict) -> dict[str, tuple]:
+    """Every scored row's status and value, for comparing two runs."""
+    signature = {row["name"]: (row["status"], row["absolute_max"],
+                               row["bit_unequal"])
+                 for group in ("calibration_rows", "given_inputs_rows",
+                               "clamp_rows")
+                 for row in report[group]}
+    # The condition rows are scored too, and the a33 plant lands ONLY there --
+    # nextafter(0) is a denormal that vanishes when added to avt, so it moves
+    # the fold-inert row and no matrix row.  Leaving them out of the signature
+    # made that plant read as landing nowhere.
+    signature.update({row["name"]: (row["status"], row["max_abs"], 0)
+                      for row in report["condition_rows"]})
+    return signature
+
+
 def run(record: Path, *, plant: str | None = None,
         with_card: bool = True) -> dict:
     require(record.exists(), f"missing {record}")
@@ -704,6 +720,19 @@ def run(record: Path, *, plant: str | None = None,
     }
     if with_card:
         report["resolved_rhs_arm"] = resolved_rhs_arm()
+    if plant is not None:
+        # A PLANT THAT LANDS NOWHERE IS NOT A CONTROL.  This gate's baseline
+        # already carries a DEBT row -- the RHS association -- so a planted
+        # run exiting non-zero proves nothing on its own: it would exit
+        # non-zero with the plant deleted.  Compare the planted rows against
+        # the unplanted ones and name what actually moved; a plant that moved
+        # nothing is itself a violation.
+        baseline = run(record, plant=None, with_card=False)
+        before, after = _row_signature(baseline), _row_signature(report)
+        moved = sorted(n for n in after if before.get(n) != after[n])
+        report["plant_moved_rows"] = moved
+        report["plant_landed"] = bool(moved)
+        report["baseline_status"] = baseline["status"]
     return report
 
 
@@ -746,7 +775,19 @@ def main(argv=None) -> int:
     # model's own right-hand side was never compared.
     print(f"BLIND-SPOT {report['rhs_blind_spot']['status']} "
           f"{', '.join(report['rhs_blind_spot']['rows'])}")
+    if args.plant:
+        print(f"PLANT {args.plant} landed={report['plant_landed']} "
+              f"moved={report['plant_moved_rows']} "
+              f"baseline_status={report['baseline_status']}")
     print(f"STATUS {report['status']}")
+    if args.plant:
+        # exit 1 = the plant landed AND the gate is red, which is the control
+        # passing; exit 3 = the plant moved nothing, which is a violation of
+        # the control itself and must never read as success.
+        if not report["plant_landed"]:
+            print("FAIL: the plant moved no row; this control proves nothing")
+            return 3
+        return 1 if report["status"] not in PASSING else 3
     return 0 if report["status"] in PASSING else 1
 
 

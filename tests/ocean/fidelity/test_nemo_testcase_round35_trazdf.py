@@ -251,9 +251,38 @@ def test_the_calibration_is_not_tautological(clean_record):
 
 
 @pytest.mark.parametrize("plant", R.PLANT_ARMS)
-def test_every_plant_turns_the_gate_red(clean_record, plant):
+def test_every_plant_turns_the_gate_red_and_MOVES_a_row(clean_record, plant):
+    """A red verdict is not enough when the baseline is already red.
+
+    This gate's unplanted run carries one DEBT row -- the RHS association --
+    so "the planted run exited non-zero" would be true with the plant
+    deleted.  Each plant must be shown to MOVE a row.
+    """
     report = _run(clean_record, plant=plant)
     assert report["status"] == "DEBT", plant
+    assert report["plant_landed"] is True, plant
+    assert report["plant_moved_rows"], plant
+    # and the moved row must belong to the arm the plant names
+    arm_rows = {"operand": "calibration", "matrix": "calibration",
+                "sweep": "sweep", "assembly": "assembly",
+                "rhs": "calibration", "a33": "a33_fold_inert",
+                "clamp": "clamp"}[plant]
+    assert any(arm_rows in name for name in report["plant_moved_rows"]), (
+        plant, report["plant_moved_rows"])
+
+
+def test_an_inert_plant_would_be_refused(clean_record, monkeypatch):
+    """Non-vacuity of the landing check itself: a plant that perturbs
+    nothing must be reported as landing nowhere, not as a red gate."""
+    import nemo_testcase_l2_gyre_round35_trazdf_matrix as gate
+    original = gate.np.nextafter
+    monkeypatch.setattr(gate.np, "nextafter", lambda a, b: a)
+    try:
+        report = _run(clean_record, plant="operand")
+    finally:
+        monkeypatch.setattr(gate.np, "nextafter", original)
+    assert report["plant_landed"] is False
+    assert report["plant_moved_rows"] == []
 
 
 @pytest.mark.parametrize("plant", R.PLANT_ARMS)

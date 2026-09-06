@@ -312,10 +312,17 @@ for arm in $arms; do
     printf 'REFUSE: the %s plant did not turn the gate red\n' "$arm" >&2
     exit 70
   fi
-  # A non-zero exit is NOT enough: a plant that CRASHED the reader would also
-  # exit non-zero and would prove nothing.  Require the gate's own verdict.
+  # A non-zero exit is NOT enough, twice over.  A plant that CRASHED the
+  # reader exits non-zero and proves nothing; and this gate's BASELINE may
+  # already be red, so a plant that moved nothing would exit non-zero too.
+  # Require the gate's own verdict AND its own statement that the plant
+  # landed on at least one row.
   if ! grep -q '^STATUS DEBT' "$out"; then
     printf 'REFUSE: the %s plant exited non-zero without a DEBT verdict; it crashed rather than landing\n' "$arm" >&2
+    exit 70
+  fi
+  if ! grep -q "^PLANT $arm landed=True" "$out"; then
+    printf 'REFUSE: the %s plant moved no row; that control proves nothing\n' "$arm" >&2
     exit 70
   fi
 done
