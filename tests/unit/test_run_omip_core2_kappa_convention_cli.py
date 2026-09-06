@@ -128,6 +128,30 @@ def test_surface_bc_level_flag_roundtrip(value):
             "kpp", iwm=None, tke_surface_bc_level=value)
 
 
+def test_surface_bc_level_reaches_both_production_build_sites():
+    """codex MEDIUM: the round-trip above bypasses main(), so a build call
+    that DROPPED the kwarg would stay green. Pin, at the source level, that
+    every build_tripole_vmix_config call passing tke_surface_bc (the
+    production sites) also passes tke_surface_bc_level — the #1311
+    silently-inert failure mode, blocked structurally."""
+    import ast, inspect
+    core2 = _core2()
+    tree = ast.parse(inspect.getsource(core2))
+    sites = 0
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and getattr(node.func, "id", getattr(
+                    node.func, "attr", "")) == "build_tripole_vmix_config"):
+            kws = {k.arg for k in node.keywords}
+            if "tke_surface_bc" in kws:
+                sites += 1
+                assert "tke_surface_bc_level" in kws, (
+                    f"build_tripole_vmix_config at line {node.lineno} passes "
+                    "tke_surface_bc but not tke_surface_bc_level — the flag "
+                    "would be silently inert on that path")
+    assert sites >= 2, f"expected both production build sites, found {sites}"
+
+
 def test_surface_bc_level_unknown_raises():
     """Dispatch hardening: a typo must not silently pick a placement."""
     with pytest.raises(ValueError, match="surface_bc_level"):
