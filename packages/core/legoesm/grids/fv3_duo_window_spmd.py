@@ -233,35 +233,61 @@ class DuoWindowSpmdComm:
         columns of the NORTH and SOUTH row bands.  The rest of the pad is
         the tile's own redundant computation, left untouched.  Every
         tile sends both bands (static shapes); a band that is not at a
-        face edge for this tile is pad-on-pad and harmless."""
+        face edge for this tile is pad-on-pad and harmless.
+
+        PACKED (codex 2026-09-06): per round and per exact dtype, both
+        bands of every array are flattened into ONE payload per
+        direction -- 2 ppermutes per dtype group per round instead of
+        4 per array -- and split back by the recorded slab shapes."""
         import jax
+        import jax.numpy as jnp
         lay = self.lay
         P2 = 2 * lay.pad
         kt = lay.kt
         bw = int(self.refresh_band)
-        out = []
-        for a in arrs:
-            for axis_name, ax in (("tile_i", 0), ("tile_j", 1)):
-                other = 1 - ax
-                t = jax.lax.axis_index(axis_name)
-                e = a.shape[ax] - lay.W
-                b0 = self._b0(t)
-                blk = lay.nl + e
-                to_west = [(s, s - 1) for s in range(1, kt)]
-                to_east = [(s, s + 1) for s in range(kt - 1)]
-                ext_o = a.shape[other]
-                for cs in (0, ext_o - bw):
+        arrs = list(arrs)
+        for axis_name, ax in (("tile_i", 0), ("tile_j", 1)):
+            other = 1 - ax
+            t = jax.lax.axis_index(axis_name)
+            b0 = self._b0(t)
+            to_west = [(s, s - 1) for s in range(1, kt)]
+            to_east = [(s, s + 1) for s in range(kt - 1)]
+            groups = {}
+            for i, a in enumerate(arrs):
+                groups.setdefault(jnp.dtype(a.dtype), []).append(i)
+            for dt, idx in groups.items():
+                los, his, segs = [], [], []
+                for i in idx:
+                    a = arrs[i]
+                    e = a.shape[ax] - lay.W
+                    blk = lay.nl + e
+                    ext_o = a.shape[other]
+                    for cs in (0, ext_o - bw):
+                        sub = jax.lax.slice_in_dim(a, cs, cs + bw, axis=other)
+                        lo = jax.lax.dynamic_slice_in_dim(sub, b0 + e, P2,
+                                                          axis=ax)
+                        hi = jax.lax.dynamic_slice_in_dim(
+                            sub, b0 + blk - e - P2, P2, axis=ax)
+                        los.append(lo.reshape(-1))
+                        his.append(hi.reshape(-1))
+                        segs.append((i, cs, lo.shape))
+                cat = (lambda v: v[0]) if len(los) == 1 else jnp.concatenate
+                fe_all = jax.lax.ppermute(cat(los), axis_name, to_west)
+                fw_all = jax.lax.ppermute(cat(his), axis_name, to_east)
+                off = 0
+                for i, cs, shp in segs:
+                    n = 1
+                    for d in shp:
+                        n *= d
+                    fe = fe_all[off:off + n].reshape(shp)
+                    fw = fw_all[off:off + n].reshape(shp)
+                    off += n
+                    a = arrs[i]
                     sub = jax.lax.slice_in_dim(a, cs, cs + bw, axis=other)
-                    lo = jax.lax.dynamic_slice_in_dim(sub, b0 + e, P2, axis=ax)
-                    hi = jax.lax.dynamic_slice_in_dim(
-                        sub, b0 + blk - e - P2, P2, axis=ax)
-                    fe = jax.lax.ppermute(lo, axis_name, to_west)
-                    fw = jax.lax.ppermute(hi, axis_name, to_east)
                     sub = self._place_slabs(sub, ax, t, fe, fw)
-                    a = jax.lax.dynamic_update_slice_in_dim(a, sub, cs,
-                                                            axis=other)
-            out.append(a)
-        return out
+                    arrs[i] = jax.lax.dynamic_update_slice_in_dim(
+                        a, sub, cs, axis=other)
+        return arrs
 
     def _pad_exchange_packed(self, arrs):
         """``_pad_exchange`` with the arrays' slabs PACKED: per round and
