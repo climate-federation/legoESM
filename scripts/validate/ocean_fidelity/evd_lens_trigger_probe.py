@@ -7,12 +7,14 @@ snapshot (00Z = mid-afternoon in the cold tongue) the top cell is warmest; a
 night of net cooling on the top cell alone makes it colder than the cell below
 and the trigger fires -- IF the N2 used is NEMO's ``bn2`` (compressibility-free).
 This probe evaluates NEMO's bn2 (Roquet TEOS-10 alpha/beta at the reference
-depth ladder) and the legacy in-situ trigger side by side, for the snapshot as
-written and after imposing the night cooling, and prints the fraction of box
-columns whose FIRST interior interface (cells 1-2) is unstable.
+depth ladder) for the snapshot as written and after imposing the night
+cooling, and prints the fraction of box columns whose FIRST interior interface
+(cells 1-2) is unstable.  (The model's legacy in-situ trigger is not
+re-derived here: a lookalike is not the quantity; the runtime firing
+diagnostic in the arm measures the real one.)
 
-A firing fraction near 1 after cooling with bn2, and ~0 for the same columns
-with the in-situ N2, is the prediction; the reverse refutes the mechanism.
+A firing fraction near 1 after cooling is the prediction; ~0 refutes the
+mechanism.
 """
 from __future__ import annotations
 
@@ -43,16 +45,6 @@ def _n2_top_interfaces(T, S, gdept, gdepw_int, n_if=3):
         T, S, gdept[:n_if + 1], gdepw_int[:n_if], eos_form="teos10",
         e3w_source="depth_difference")
     return np.asarray(n2)
-
-
-def _n2_insitu_top(T, S, gdept, n_if=3):
-    """The legacy trigger: in-situ density differenced across the interface."""
-    from legoesm.ocean.eos import nemo_roquet_eos
-    p_pa = (_RHO_0 * constants.g * gdept)[None, :n_if + 1]      # eos takes Pa
-    rho = np.asarray(nemo_roquet_eos(T[:, :n_if + 1], S[:, :n_if + 1],
-                                     np.broadcast_to(p_pa, T[:, :n_if + 1].shape)))
-    dz = np.diff(gdept[:n_if + 1])
-    return -constants.g / _RHO_0 * (rho[:, :-1] - rho[:, 1:]) / dz[None, :]
 
 
 def main() -> int:
@@ -94,8 +86,7 @@ def main() -> int:
     print(f"{'state':>14}{'trigger':>10}{'if 1-2':>10}{'if 2-3':>10}"
           f"{'if 3-4':>10}   median N2(if 1-2)")
     for tag, TT in (("as written", T), ("after night", Tn)):
-        for name, n2 in (("nemo_bn2", _n2_top_interfaces(TT, S, gdept, gdepw_int)),
-                         ("insitu", _n2_insitu_top(TT, S, gdept))):
+        for name, n2 in (("nemo_bn2", _n2_top_interfaces(TT, S, gdept, gdepw_int)),):
             fire = (n2 <= a.threshold).mean(axis=0)
             print(f"{tag:>14}{name:>10}" + "".join(f"{f:>10.3f}" for f in fire)
                   + f"   {np.median(n2[:, 0]):.3e}")

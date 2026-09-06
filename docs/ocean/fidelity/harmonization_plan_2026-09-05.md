@@ -267,3 +267,10 @@ aux3d linkage and the minimum-level policy, not just counts.
   is unexplained by the compressibility offset alone), and a sampling-safe primary endpoint. Offline firing test =
   card _evd_lens_trigger (job 9666892). Decisions for the user queued (EVD arm config, driver flags, endpoint, mxl
   choice, fwfix adoption).
+- 18:30 Offline firing test (9666892): in the 220-240E and 240-260E boxes the day-30 lens is stable as written
+  (NEMO bn2 N2 +2.6e-4 at the first interface, firing fraction 0.000); after 4 h of 100 W/m2 cooling on the
+  top cell alone, fraction 1.000 at the first interface, 0 below (N2 -6.6e-4). The trigger WOULD fire nightly
+  on our own state. The 2026-08-01 EVD arm (nemolev_trp_evd100, run dir deleted) moved the tropics SST bias
+  only +0.12 -> +0.09; the compressibility offset (+4e-5) cannot explain a no-op at N2 -6.6e-4, so the runtime
+  firing-fraction diagnostic both reviewers asked for is the discriminator, not a rerun of that arm. Fourway
+  figure (9666909) sent. Decisions queued for the user.

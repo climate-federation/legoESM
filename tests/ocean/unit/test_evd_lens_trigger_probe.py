@@ -30,12 +30,3 @@ def test_lens_is_stable_and_cooled_top_cell_fires_only_at_interface_1():
     Tn = T.copy(); Tn[0, 0] = 25.4          # colder than the 1.6 m cell
     n2 = _MOD._n2_top_interfaces(Tn, S, gdept, gdepw)
     assert n2[0, 0] <= -1e-12 and (n2[0, 1:] > 0).all()
-
-
-def test_insitu_trigger_is_biased_stable_relative_to_bn2():
-    T, S, gdept, gdepw = _column(25.9)
-    Tn = T.copy(); Tn[0, 0] = 25.69          # marginal: 0.01 K inversion
-    bn2 = _MOD._n2_top_interfaces(Tn, S, gdept, gdepw)[0, 0]
-    ins = _MOD._n2_insitu_top(Tn, S, gdept)[0, 0]
-    assert bn2 < 0
-    assert ins > bn2                          # compressibility pushes it stable
