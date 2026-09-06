@@ -8257,6 +8257,93 @@ legitimate growth passes while a state change in a shared field does not, and
 its plant targets an OWNED cell — at flat index zero it landed in the halo and
 was admitted, the same defect round 34 removed from the record-level plant.
 
+### The diff review broke the gate seven times, and the seventh produced a result
+
+An independent DIFF reviewer, given the commits and the oracle and told to
+make the reader accept a wrong record and the gate pass on a wrong solve,
+succeeded seven times.  Each defect now has an arm that goes red on it.
+
+**THE VACUOUS PASS, and the one change the reviewer insisted on.**  The reader
+took the scored box as a header claim: any sub-box parsed, five per cent of
+the cells were scored, the verdict was the same green, and **every plant
+stayed red**, so the controls could not catch it.  The box is now CHECKED — it
+must be the whole computed domain minus one symmetric halo — and the cell
+count is printed next to the verdict.  A record from any step but the first is
+refused rather than scored under a label naming one.
+
+**A MANUFACTURED ZERO.**  The writer emits zeros for `ah_wslp2` when the array
+is unallocated, so a record claiming the isoneutral slopes are on while saying
+the array is absent would have made "the fold is exactly zero" true by
+construction.  The record's flags must now agree with each other.  The same
+check refuses a record whose salinity clamp never ran, whose pre/post rows
+would otherwise compare a column with itself.
+
+**A TRACEBACK INSTEAD OF A VERDICT.**  A rank-3 array with a plausible but
+wrong third extent passed structural validation and died in a broadcast three
+functions later — exactly what the reader's own docstring forbids.  Every
+array now has an expected rank and depth.  And `run.sh` no longer reads a
+non-zero exit as proof a plant landed: a crash exits non-zero too, so it
+requires the gate's own `STATUS DEBT`, and it takes the arm list from the gate
+rather than a copy that could fall behind.
+
+**THE ADMISSION GATE** admitted a candidate that DROPPED a field — only growth
+is legitimate — and its plant landed in a rank-0 scalar, which has no halo, so
+it never exercised the owned/halo selector it exists to control.  It also
+CRASHED on this baseline: a pending plant forced open the first record
+whatever its magic, and eighteen of GYRE's magics are unregistered, so the
+plant run ended in `GATE-ERROR` **at exit 0**, which `run.sh` would have read
+as "the plant turned it red".  Measured before and after on the round-29
+records: `GATE-ERROR` exit 0, now `FAIL exact=50/51 changed=1` exit 1, with
+the unplanted run `PASS exact=51/51 changed=0 admitted=0` exit 0.
+
+**AND THE PRINTED VERDICT** now carries the blind spot, so a human reading
+`STATUS` cannot miss that the model's own right-hand side was never compared.
+
+**THE SEVENTH FIX PRODUCED THE ROUND'S SECOND MEASURED RESULT.**  The assembly
+arm was taking its working dtype from the thickness where its production
+caller takes it from the right-hand side — assuming exactly what the new
+parameter exists to stop assuming.  With that corrected, the `rhs_content` arm
+reads **VALUE-AT-BAR, not exact**, on the synthetic twin: `1` cell of `125`,
+`2.842170943040401e-14` absolute, `5.17e-17` normalized.
+
+| arm, on the synthetic twin | status |
+|---|---|
+| `calibration` (all thirteen rows) | **AT-BAR**, exact |
+| `assembly.zwd`, `sweep.T`, `sweep.S` | **AT-BAR**, exact |
+| `assembly.zwi`, `assembly.zws` | **AT-BAR-SIGNED-ZERO**, `25` of `125` cells, absolute `0.0` |
+| `rhs_content.T` | **VALUE-AT-BAR**, `1` of `125` cells, normalized `5.17e-17` |
+
+That is the association PR8 predicted, and it is the answer round 36 needs
+before it can act on the `tracer_combine` question: legoESM's content builder
+groups the update as `h*(p2dt*T)` where NEMO writes `p2dt*h*T`, so **flipping
+the switch alone would not be bit-exact** — the association has to move with
+it.  The number is from the SYNTHETIC twin and is labelled so; what transfers
+is the statement that the two groupings are different floating-point
+expressions, not the cell count.  The gate calls the row DEBT, because the bar
+is exact.
+
+**Three attacks FAILED, and are recorded because a survived attack is a
+result.**  The signed-zero status could not be made to swallow a real
+difference.  The `implicit_solver` extraction was verified bit-identical
+against `23c46232ea60` across dry masks, the implicit-`w` arm and `nlev = 1`.
+And `nemo_rebuild` is provably not the code it checks — NumPy against JAX
+against the test's scalar loops — with the face index mapping matching
+`trazdf.F90:219-220` exactly.
+
+**AND THE FINDING BROKE THIS ROUND'S OWN CONTROLS, which is recorded rather
+than quietly repaired.**  Once the RHS association turned the unplanted
+verdict to DEBT, every plant check — in `run.sh` and in the tests — was
+asking a question that answers itself: with a baseline already red, "the
+planted run exited non-zero" is true with the plant DELETED.  Seven controls
+that proved nothing, and the same defect round 34 removed from the admission
+gate's plant, reintroduced here by a finding that arrived after the controls
+were written.  A planted run now scores the record twice and names the rows
+that MOVED; a plant that moved nothing exits `3` and says so.  The `a33` plant
+lands only in the condition row, because `nextafter(0)` is a denormal that
+vanishes when added to `avt` — which is why the condition rows had to join the
+comparison, and why that plant read as landing nowhere while still exiting
+non-zero.
+
 ### The preregistered prediction, and the part of it already REFUTED
 
 PR1 through PR7 are in the preregistration.  The headline, PR4, predicted that
