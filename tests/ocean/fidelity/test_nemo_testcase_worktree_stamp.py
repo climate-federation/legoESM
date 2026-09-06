@@ -56,7 +56,7 @@ def test_every_report_emitter_stamps_the_worktree():
             offenders[path.name] = bad
     # GROW-ONLY.  Raise this when emitters are added; lowering it lets a
     # report dict be deleted unnoticed, which is how the scan stops scanning.
-    assert total >= 62, f"the scan found only {total} report dicts; it broke"
+    assert total >= 64, f"the scan found only {total} report dicts; it broke"
     assert offenders == {}, (
         "these gates emit a report that cannot say which tree produced it: "
         f"{offenders}")
