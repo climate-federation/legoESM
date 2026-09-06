@@ -298,6 +298,101 @@ def _stage3_residual(k_override, *, oracle_root: Path, npz: Path) -> dict:
     return out
 
 
+KT2_RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                  "round38_oracle_trazdf_kt2/"
+                  "oracle_trazdf_matrix_kt00000002.bin")
+
+
+def run_kt2_given_inputs(record: Path = KT2_RECORD) -> dict:
+    """legoESM's isoneutral fold, GIVEN NEMO'S OWN BEFORE STATE, at kt = 2.
+
+    ROUND 39, and it is the arm the round-38 acquisition exists for.  At
+    ``kt = nit000`` NEMO's ``ah_wslp2`` is IDENTICALLY 0.0, so that record can
+    only ask whether a candidate's fold is also exactly zero -- it cannot
+    discriminate any TRANSCRIPTION of the slope formula.  The kt = 2 record
+    can: its ``ah_wslp2`` is non-zero because step 1 created the horizontal
+    structure its before state carries.
+
+    WHAT THIS SCORES, and what it does NOT.  Round 39 moved WHICH STATE the
+    slopes are built from; it did not touch the slope FORMULA.  So a residual
+    here belongs to the slope transcription -- a DIFFERENT owner -- and is
+    reported as such.  No value was predicted for this row before it was
+    measured, deliberately (preregistration PR7).
+
+    The before state is NEMO's own: ``T_Kbb_in``/``S_Kbb_in`` and the ssh
+    implied by ``r3t_Kbb``, since ``r3t = ssh/ht_0`` (``domqco.F90:160``,
+    ``dom_qco_r3c``) so ``ssh = r3t * H``.  Everything else -- grid, vertical
+    coordinate, masks, GM/Redi configuration, timestep -- is the card's.
+    """
+    import jax.numpy as jnp
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        compute_isoneutral_K33_latlon)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+            "precision policy is not fp64")
+    rec = read_trazdf_matrix(record, expect_kt=2)
+    oracle = _oracle(rec)
+    t = lambda a: np.ascontiguousarray(a.transpose(1, 0, 2))
+    T_bb = t(_box(rec, "T_Kbb_in", rec["header"]["jpk"]))
+    S_bb = t(_box(rec, "S_Kbb_in", rec["header"]["jpk"]))
+    r3t_bb = np.ascontiguousarray(_box(rec, "r3t_Kbb").transpose(1, 0))
+
+    card = build_nemo_testcase_card(CASE)
+    cfg = card.recipe.model_config._replace(
+        freshwater_closure="real_freshwater", fix_eta_drift=True)
+    init = card.recipe.initial_state
+    H = np.asarray(init.H_bathy.data, dtype=np.float64)
+    require(T_bb.shape == np.asarray(init.T.data).shape,
+            f"the record's Kbb tracer box {T_bb.shape} is not the model's "
+            f"{np.asarray(init.T.data).shape}")
+    require(r3t_bb.shape == H.shape,
+            f"the record's r3t box {r3t_bb.shape} is not the model's "
+            f"{H.shape}")
+    eta_bb = r3t_bb * H
+
+    K33 = np.asarray(compute_isoneutral_K33_latlon(
+        jnp.asarray(T_bb), jnp.asarray(S_bb), jnp.asarray(eta_bb),
+        jnp.asarray(H), card.recipe.grid, card.recipe.z_coord, cfg.gm_redi,
+        eos=cfg.eos, eos_linear=cfg.eos_linear,
+        mask=jnp.asarray(init.land_mask.data),
+        rho_0=cfg.constants.rho_0, g=cfg.constants.g,
+        native_slope_eta=jnp.asarray(eta_bb),
+        u_mask=jnp.asarray(init.u_mask.data),
+        v_mask=jnp.asarray(init.v_mask.data), dt=card.dt_s,
+        eos_depth=getattr(cfg, "eos_depth", "insitu")), dtype=np.float64)
+
+    wet_face = (oracle["wet"] > 0.0)[:, :, 1:]
+    require(wet_face.shape == K33.shape,
+            f"the wet-face mask {wet_face.shape} is not the fold's "
+            f"{K33.shape}")
+    row = _wet_row("kt2_given_inputs.K33_fold", oracle["K33"], K33, wet_face)
+    # THE RECORD'S OWN PRECONDITION.  A kt=2 record whose ah_wslp2 is still
+    # identically zero cannot discriminate anything, and a row scored against
+    # it would read AT-BAR for a transcription that is arbitrarily wrong.
+    nemo_max = float(np.abs(oracle["K33"]).max())
+    return {
+        "worktree": worktree_stamp(),
+        "record": str(record),
+        "kt": int(rec["header"]["kt"]),
+        "discriminating": nemo_max > 0.0,
+        "nemo_ah_wslp2_absmax": nemo_max,
+        "lego_K33_absmax": float(np.abs(K33)[wet_face].max()),
+        "before_state_wet_per_level_ptp_max": float(max(
+            float(np.ptp(T_bb[..., k][(oracle["wet"] > 0.0)[..., k]]))
+            if (oracle["wet"] > 0.0)[..., k].any() else 0.0
+            for k in range(oracle["wet"].shape[-1]))),
+        "row": row,
+        "scored_wet_faces": int(wet_face.sum()),
+        "owner_if_debt": ("the isoneutral SLOPE TRANSCRIPTION, not round 39's "
+                          "placement: this arm feeds NEMO's own before state "
+                          "to both sides, so any residual is the formula's"),
+    }
+
+
 def _wet_row(name, oracle, candidate, wet) -> dict:
     """One operand row, on WET cells only, at the campaign's exact bar.
 
@@ -645,6 +740,9 @@ def main(argv=None) -> int:
                         help="run the CAUSAL arm instead of the operand table")
     parser.add_argument("--time-level", action="store_true",
                         help="discriminate the call site from the arithmetic")
+    parser.add_argument("--kt2-given-inputs", action="store_true",
+                        help="score the fold against NEMO's kt=2 ah_wslp2, "
+                             "given NEMO's own before state")
     parser.add_argument(
         "--oracle-root", type=Path,
         default=Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
@@ -653,6 +751,22 @@ def main(argv=None) -> int:
                         default=Path("/tmp/round38_substitution.npz"))
     parser.add_argument("--json", type=Path)
     args = parser.parse_args(argv)
+    if args.kt2_given_inputs:
+        report = run_kt2_given_inputs()
+        text = json.dumps(report, indent=1, sort_keys=True, default=str)
+        if args.json:
+            args.json.write_text(text + "\n")
+        print(text)
+        row = report["row"]
+        print(f"KT2-RECORD-DISCRIMINATING {report['discriminating']} "
+              f"NEMO ah_wslp2 absmax {report['nemo_ah_wslp2_absmax']:.17g}")
+        print(f"KT2-GIVEN-INPUTS {row['status']} "
+              f"unequal {row['bit_unequal']}/{report['scored_wet_faces']} "
+              f"max {row['absolute_max']:.6g} rel {row['max_relative']:.6g}")
+        if not report["discriminating"]:
+            print("FINDING the kt=2 record cannot discriminate either")
+            return 3
+        return 0 if row["status"] == "AT-BAR" else 1
     if args.time_level:
         report = run_time_level_discriminator()
         text = json.dumps(report, indent=1, sort_keys=True, default=str)
