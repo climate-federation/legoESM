@@ -83,6 +83,10 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM/EXP00/namelist_cfg",
     "namelist_ref": NEMO / "cfgs/SHARED/namelist_ref",
     "ocean.output": OVERFLOW_RUN / "ocean.output",
+    # ORCA2 phase-2 run, cited for the deck's resolved dynzdf guard.
+    "variant_icebergs_off_phase2v_tke_a_10step_np2/ocean.output": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l4/runs"
+        "/variant_icebergs_off_phase2v_tke_a_10step_np2/ocean.output"),
     "overflow_kt1_10/ocean.output": OVERFLOW_RUN / "ocean.output",
     "lock_kt1_10/ocean.output": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10"
@@ -124,6 +128,15 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 32: the stage-3 ordering fix ---
+    'dynzdf.F90:119': 'IF( ln_dynadv_vec .OR. lk_linssh )',
+    'dynzdf.F90:150-151': ['puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kaa) - uu_b',
+                           'pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kaa) - vv_b', 2],
+    'round19_oracle_v2_external/ocean.output:798': 'ln_dynadv_vec  =  T',
+    'variant_icebergs_off_phase2v_tke_a_10step_np2/ocean.output:1097':
+        'ln_drgimp   =  T',
+    'variant_icebergs_off_phase2v_tke_a_10step_np2/ocean.output:1363':
+        'ln_dynspg_ts  =  T',
     'stprk3.F90:186': 'CALL stp_2D( kstp, Nbb, Nbb, Naa, Nrhs )',
     'stprk3.F90:195': 'stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )',
     'stprk3.F90:197': [('Nrhs = Nnn   ;   Nnn  = Naa   ;   Naa  = Nrhs', 1),
@@ -311,10 +324,16 @@ CITATION_MAP = {
         'zsur = -2033.194295283385_wp',
         'zacr =     5.0_wp',
         5],
-    'ocean_model_latlon_cgrid.py:6300-6321': [
-        ('u3_corr, v3_corr = _replace_stage_mean(', 1),
-        ('v=state_new.v.replace(data=v3_corr),', 1),
-        22],
+    # ROUND 32 moved this site: stage 3 no longer corrects before the solve,
+    # it defers the closure (stprk3_stg.F90:437-446 runs after :430).
+    'ocean_model_latlon_cgrid.py:6315-6318': [
+        ('u3_corr = u3_raw * _ws_stage_u_mask', 1),
+        ('_replace_stage_mean, target_u, target_v)', 1),
+        4],
+    'ocean_model_latlon_cgrid.py:7896-7922': [
+        ('if _ws_stage3_correction is not None:', 1),
+        ('v=state_new.v.replace(data=_v_after),', 1),
+        27],
     'stprk3_stg.F90:433': ('!                 !==  All stages: correct the barotropic component ==!   at Kaa = N+1/3, N+1/2 or N+1', 1),
     'stprk3_stg.F90:440-441': [
         'zub(ji,jj) = uu_b(ji,jj,Kaa) - SUM( e3u_0(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)',
@@ -324,12 +343,12 @@ CITATION_MAP = {
         'uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)',
         'vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)',
         2],
-    'ocean_model_latlon_cgrid.py:7731-7733': [
+    'ocean_model_latlon_cgrid.py:7748-7750': [
         '_nemo_ws_pre_implicit_state = (',
         'if self._nemo_ws_test_hooks.expose_pre_implicit_state else None)',
         3],
-    'ocean_model_latlon_cgrid.py:9874': ('u_solve_in = u_solve_in - _u_bt_mean', 1),
-    'ocean_model_latlon_cgrid.py:9991': ('u_solve_in = u_solve_in - (', 1),
+    'ocean_model_latlon_cgrid.py:9943': ('u_solve_in = u_solve_in - _u_bt_mean', 1),
+    'ocean_model_latlon_cgrid.py:10060': ('u_solve_in = u_solve_in - (', 1),
     'ocean_pe_latlon_cgrid.py:3262-3265': [
         ('if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):', 1),
         ('"with a scalar dlon (got dlon<=0; tripolar unsupported)."', 1),
