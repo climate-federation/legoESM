@@ -102,7 +102,7 @@
   },
   "item2_commit_stamp": {
     "report_dicts_stamped": 62,
-    "gates_wired": 36,
+    "gates_wired": 37,
     "gates_whose_own_allow_dirty_flag_was_bridged": 8,
     "ratchet_floor": 62,
     "tests": 10

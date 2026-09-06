@@ -6363,7 +6363,8 @@ is RECORDED, never refused — the cross-card probe lanes are deliberately
 detached worktrees — and dirt refuses, with one named escape that suppresses
 nothing.
 
-Wired into all 62 report dicts across all 36 report-emitting gates,
+Wired into all 62 report dicts across all 37 report-emitting gates in that
+directory (36 by the AST pass, plus this round's own gate),
 mechanically by AST so none was missed, and held by a grow-only ratchet.  It
 fired for real three times during this round: each time an edit landed while an
 arm was running, that arm refused at report time rather than stamping a commit
