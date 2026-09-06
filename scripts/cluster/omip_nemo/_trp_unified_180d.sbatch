@@ -41,7 +41,7 @@ ROOT=/burg-archive/glab/users/pg2328/legoESM; cd $ROOT || exit 1
 HEAD=$(git rev-parse HEAD)
 [ "$HEAD" = "$PIN" ] || { echo "FATAL: HEAD $HEAD != pinned $PIN"; exit 1; }
 echo "HEAD: $(git log --oneline -1)"
-export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 NEMOIN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS
 OUT=$ROOT/results/omip_nemo/trp_unified180
@@ -53,6 +53,7 @@ rc=$?; [ $rc -eq 0 ] || { echo "FATAL: gate rc=$rc"; exit 1; }
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --mesh data/grids/eORCA1.2_mesh_mask.nc --dt 150 --min-levels 2 \
   --C-smag-lap 3.0 --smag-cfl-safety 0.125 \
+  --A-h 2e4 --A-h-profile-file $NEMOIN/orca1_inputs/data_repository/input_fields/eddy_viscosity_3D.nc \
   --visc-schedule '0:1e4:3.0,8:1e4:1.5,16:1e4:0.5' \
   --ew-cyclic-overlap --nemo-vertical --partial-cell --pgf-scheme smc03 \
   --adaptive-implicit-vertadv --momentum-rk3 --geothermal --runoff \

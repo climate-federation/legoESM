@@ -23,7 +23,7 @@ ROOT=/burg-archive/glab/users/pg2328/legoESM; cd $ROOT || exit 1
 HEAD=$(git rev-parse HEAD)
 [ "$HEAD" = "$PIN" ] || { echo "FATAL: HEAD $HEAD != pinned $PIN"; exit 1; }
 echo "HEAD: $(git log --oneline -1)"
-export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:/burg-archive/glab/users/pg2328/fesom_jax_repo"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:/burg-archive/glab/users/pg2328/fesom_jax_repo"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 MI=$ROOT/data/fesom2_core2/mesh_ic/core2_mesh_ic
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid fesom \

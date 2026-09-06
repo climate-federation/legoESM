@@ -33,7 +33,7 @@ echo "ARM $LABEL at $(git log --oneline -1)"
 # confirm the floor this arm will use
 grep -nE "rn_emin, rmxl_min = 1.0e-1?0" scripts/run/run_omip_core2.py | head -2
 
-export PYTHONPATH="$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT:$WT/scripts/validate:$WT/scripts/run"
+export PYTHONPATH="$WT/src:$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT:$WT/scripts/validate:$WT/scripts/run"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 NEMOIN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS
 OUT=$ROOT/results/omip_nemo/ab_emin_$LABEL

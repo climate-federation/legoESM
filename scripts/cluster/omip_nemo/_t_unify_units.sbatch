@@ -8,7 +8,7 @@
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/t_unify_%j.out
 set -u
 ROOT=/burg-archive/glab/users/pg2328/legoESM; cd $ROOT || exit 1
-export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 $PY -m pytest -q \
   tests/ocean/unit/test_isf_prescribed_melt.py \

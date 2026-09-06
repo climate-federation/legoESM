@@ -13,7 +13,7 @@
 set -uo pipefail
 ROOT=/burg-archive/glab/users/pg2328/_omip_wt; cd $ROOT || exit 1
 echo "HEAD: $(git log --oneline -1)"
-export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 R=$ROOT/results/omip_nemo

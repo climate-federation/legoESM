@@ -45,7 +45,7 @@ for f in "$FESOM_SSS_PATH" "$FESOM_RUNOFF_PATH" "$FESOM_CHL_PATH"; do
   [ -r "$f" ] || { echo "FATAL: missing $f"; exit 1; }
 done
 
-export PYTHONPATH="$FJX:$(ls -d $REPO/packages/*/ | sed 's:/$::' | tr '\n' ':')$REPO"
+export PYTHONPATH="$FJX:$REPO/src:$(ls -d $REPO/packages/*/ | sed 's:/$::' | tr '\n' ':')$REPO"
 export JAX_ENABLE_X64=0     # fesom-jax published hindcast runs f32; keep ITS convention
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 nvidia-smi --query-gpu=index,memory.total --format=csv,noheader || true

@@ -10,7 +10,7 @@
 # Localise the cells (level 7 as control) before touching code.
 set -uo pipefail
 REPO=/burg-archive/glab/users/pg2328/_omip_wt; cd $REPO || exit 1
-export PYTHONPATH="$(ls -d $REPO/packages/*/ | sed 's:/$::' | tr '\n' ':')$REPO"
+export PYTHONPATH="$REPO/src:$(ls -d $REPO/packages/*/ | sed 's:/$::' | tr '\n' ':')$REPO"
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 for L in 8; do
