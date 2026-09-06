@@ -111,6 +111,12 @@ FILES = {
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3"
         "/round29_oracle_v2_zdf_matrix/ocean.output"),
     "trazdf.F90": _OCE / "TRA/trazdf.F90",
+    # --- round 38 paths: the isoneutral fold's producers ---
+    "traldf_iso.F90": _OCE / "TRA/traldf_iso.F90",
+    "dino.py": REPO / "packages/ocean/legoesm/ocean/experiments/dino.py",
+    "nemo_testcase_l2_gyre_stage3_completion_gate.py":
+        REPO / "scripts/validate/ocean_fidelity/testcases"
+             / "nemo_testcase_l2_gyre_stage3_completion_gate.py",
     "ldftra.F90": _OCE / "LDF/ldftra.F90",
     # The PREPROCESSED body GYRE compiles: which branch runs, and how the
     # thickness macros expanded, are only visible here.
@@ -151,6 +157,30 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ROUND 38: the isoneutral fold, and where each side computes it ---
+    # NEMO computes the slopes ONCE PER STEP, on the BEFORE state, outside the
+    # RK3 stage loop; legoESM recomputes its K33 inside each stage.  These four
+    # are the statements that difference rests on.
+    'stprk3.F90:174': (
+        'CALL ldf_slp( kstp, rhd, rn2b, Nbb, Nbb )   ! before slope for standard operator', 1),
+    # traldf_iso_a33 is called from BOTH the laplacian and the bilaplacian
+    # routine; GYRE resolves ln_traldf_lap = T and its log says
+    # "traldf_iso_lap", so the FIRST occurrence is the one that runs.
+    'traldf_iso.F90:135': (
+        'CALL traldf_iso_a33( Kmm, ah_wslp2, akz )   ! calculate  a33 element   (ah_wslp2 and akz)', 1),
+    'trazdf.F90:173': ('zwt(ji,jk) = avt(ji,jj,jk) + ah_wslp2(ji,jj,jk)', 1),
+    'ocean_model_latlon_cgrid.py:6969': (
+        '_T_gm_in = T_mid if _ldf_state is None else _ldf_state[0]', 1),
+    'ocean_model_latlon_cgrid.py:7277': (
+        'k33_implicit = compute_isoneutral_K33_latlon(', 1),
+    # tracer_combine is READ by two step functions and SELECTED by a DINO
+    # recipe -- the retraction of round 37's "a lever nothing selects".
+    'dino.py:1677': ('"tracer_combine": "thickness_weighted",', 1),
+    'dino.py:3605': ('tracer_combine=cfg.tracer_combine,', 1),
+    'nemo_testcase_l2_gyre_stage3_completion_gate.py:147-157': [
+        ('def _oracle_pre_zdf(record: dict, nlev: int, dt: float) -> dict[str, np.ndarray]:', 1),
+        ('}', 1),
+        11],
     # --- round 35 citations: the implicit vertical TRACER solve ---
     # The build guard that makes salinity reuse temperature's matrix.
     'trazdf.F90:159-160': [

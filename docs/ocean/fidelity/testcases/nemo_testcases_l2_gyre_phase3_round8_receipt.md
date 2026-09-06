@@ -9348,12 +9348,12 @@ floor that makes those two readable, and it is `0` on both tracers.
 transcription of the isoneutral formula — it is the CALL SITE.
 
 * NEMO computes the neutral slopes ONCE PER STEP, on the BEFORE state, OUTSIDE
-  the RK3 stage loop: `stprk3.F90:178` `CALL ldf_slp( kstp, rhd, rn2b, Nbb, Nbb )`.
-  `traldf_iso.F90:154` then fills `ah_wslp2` from those slopes, and
-  `trazdf.F90:410` reads `zwt = avt + ah_wslp2` at every stage.
+  the RK3 stage loop: `stprk3.F90:174` `CALL ldf_slp( kstp, rhd, rn2b, Nbb, Nbb )`.
+  `traldf_iso.F90:135` then fills `ah_wslp2` from those slopes, and
+  `trazdf.F90:173` reads `zwt = avt + ah_wslp2` at every stage.
 * legoESM recomputes its `K33` INSIDE each stage from that stage's own
   tracers: `ocean_model_latlon_cgrid.py:6969` sets `_T_gm_in = T_mid` on this
-  path — `_ldf_state` is `None` outside `_nemo_mlf_step` — and `:7278` hands it
+  path — `_ldf_state` is `None` outside `_nemo_mlf_step` — and `:7277` hands it
   to `compute_isoneutral_K33_latlon`.
 
 At `kt = nit000` GYRE has `ln_rstart = F` and its analytic initial T and S are
