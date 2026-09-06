@@ -100,6 +100,40 @@ def test_shear_production_flag_roundtrip(value):
             "kpp", iwm=None, tke_shear_production=value)
 
 
+@pytest.mark.parametrize("value", ["interior_pinned", "nemo_z0"])
+def test_surface_bc_level_flag_roundtrip(value):
+    """--tke-surface-bc-level reaches the closure, and is guarded off-tke.
+
+    #1690's second half: the nemo_z0 placement was reverted on this card while
+    its face metric was the top-cell midpoint (half e3t(1), doubling the
+    surface coupling). The metric is fixed on main, so the mode is now
+    selectable for the acceptance A/B -- via a flag, with the CARD DEFAULT
+    unchanged (interior_pinned): moving the default is the configuration
+    decision the A/B exists to inform, not this diff's to take.
+    """
+    core2 = _core2()
+    p = core2._build_arg_parser()
+    a = p.parse_args(["--grid", "tripole", "--tripole-vmix", "tke",
+                      "--tke-surface-bc-level", value])
+    assert a.tke_surface_bc_level == value
+    vm = core2.build_tripole_vmix_config(
+        "tke", iwm=None, tke_surface_bc_level=a.tke_surface_bc_level)
+    assert vm.tke.tke_surface_bc_level == value
+    # Silent-discard guard, same contract as the other card knobs.
+    with pytest.raises(SystemExit, match="tke-surface-bc-level"):
+        core2._validate_tke_card_grid(
+            "mpas", tripole_vmix="tke", tke_surface_bc_level=value)
+    with pytest.raises(ValueError, match="tke-surface-bc-level"):
+        core2.build_tripole_vmix_config(
+            "kpp", iwm=None, tke_surface_bc_level=value)
+
+
+def test_surface_bc_level_unknown_raises():
+    """Dispatch hardening: a typo must not silently pick a placement."""
+    with pytest.raises(ValueError, match="surface_bc_level"):
+        _core2().orca1_zdftke_config(surface_bc_level="nemo_zzero")
+
+
 def test_shear_production_unknown_raises():
     """Dispatch hardening: a typo must not silently pick a discretisation."""
     with pytest.raises(ValueError, match="shear_production"):

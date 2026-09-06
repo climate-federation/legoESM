@@ -503,6 +503,7 @@ TKE_MXL_CHOICES = (2, 3, 4)   # 2=Veros BL, 3=NEMO nn_mxl=3, 4=NEMO nn_mxl=2
 
 
 def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None,
+                        surface_bc_level: str | None = None,
                         mxl_choice: int | None = None,
                         n2_mode: str | None = None,
                         n2_eos_form: str | None = None,
@@ -828,6 +829,20 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                 f"orca1_zdftke_config surface_bc {surface_bc!r} invalid; "
                 "expected 'veros_flux' or 'nemo_dirichlet' (NEMO nn_bc_surf).")
         _cfg = _cfg._replace(surface_bc=surface_bc)
+    # Surface-Dirichlet PLACEMENT (``--tke-surface-bc-level``).  DEFAULT keeps
+    # the card default (``interior_pinned``).  ``nemo_z0`` prepends the virtual
+    # z=0 row and solves from NEMO's jk=2 — the mode this card REVERTED when
+    # its face metric was the top-cell midpoint (half e3t(1), doubling the
+    # coupling); that defect is fixed on main (#1690, e3t(1) derived in the
+    # orchestrator), so the mode is now selectable for the acceptance A/B.
+    # The DEFAULT does not move here: that is the configuration decision the
+    # A/B exists to inform (owner's call, 2026-09-04).
+    if surface_bc_level is not None:
+        if surface_bc_level not in ("interior_pinned", "nemo_z0"):
+            raise ValueError(
+                f"orca1_zdftke_config surface_bc_level {surface_bc_level!r} "
+                "invalid; expected 'interior_pinned' or 'nemo_z0'.")
+        _cfg = _cfg._replace(tke_surface_bc_level=surface_bc_level)
     # Langmuir + surface-TKE penetration overrides (``--tke-lc``/``--tke-etau``).
     # DEFAULT keeps the ORCA1 card (ln_lc=T, nn_etau=1).  The OFF settings
     # exist to build a "fesom-mimic" card: fesom-jax's CVMix TKE has no
@@ -971,7 +986,8 @@ def ah_profile_from_file(grid, path, A_h_base: float):
 
 
 def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
-                              tke_surface_bc=None, tke_mxl_choice=None,
+                              tke_surface_bc=None, tke_surface_bc_level=None,
+                              tke_mxl_choice=None,
                               tke_n2_mode=None, tke_n2_eos_form=None,
                               tke_prognostic=None, tke_kappa_convention=None,
                               tke_shear_production=None, tke_lc=None,
@@ -1003,6 +1019,7 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
         KPPConfig, VerticalMixingConfig,
     )
     for _fl, _v in (("--tke-surface-bc", tke_surface_bc),
+                    ("--tke-surface-bc-level", tke_surface_bc_level),
                     ("--tke-mxl-choice", tke_mxl_choice),
                     ("--tke-lc", tke_lc),
                     ("--tke-etau", tke_etau),
@@ -1020,6 +1037,7 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
         vm = VerticalMixingConfig(scheme="none")
     elif tripole_vmix == "tke":
         _tke = orca1_zdftke_config(iwm_enabled=_iwm_on, surface_bc=tke_surface_bc,
+                                   surface_bc_level=tke_surface_bc_level,
                                    mxl_choice=tke_mxl_choice,
                                    n2_mode=tke_n2_mode,
                                    n2_eos_form=tke_n2_eos_form,
@@ -1068,6 +1086,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
                   ddm=None, prescribed_flow=None, no_gm_redi=False,
                   tripole_vmix="none", tke_eice=None, tke_surface_bc=None,
+                  tke_surface_bc_level=None,
                   tke_mxl_choice=None, tke_prognostic=None,
                   tke_n2_mode=None, tke_n2_eos_form=None,
                   tke_kappa_convention=None, tke_shear_production=None,
@@ -1278,6 +1297,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         _vm_cfg = build_tripole_vmix_config(
             tripole_vmix, iwm=iwm if _use_iwm else None,
             tke_eice=tke_eice, tke_surface_bc=tke_surface_bc,
+            tke_surface_bc_level=tke_surface_bc_level,
             tke_mxl_choice=tke_mxl_choice, tke_prognostic=tke_prognostic,
             tke_n2_mode=tke_n2_mode, tke_n2_eos_form=tke_n2_eos_form,
             tke_kappa_convention=tke_kappa_convention,
@@ -2374,7 +2394,8 @@ def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None, kpp_eice=None,
 
 
 def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
-                            tke_surface_bc=None, tke_mxl_choice=None,
+                            tke_surface_bc=None, tke_surface_bc_level=None,
+                            tke_mxl_choice=None,
                             tke_prognostic=None, tke_kappa_convention=None,
                             tke_shear_production=None,
                             tke_n2_mode=None, tke_n2_eos_form=None,
@@ -2410,6 +2431,7 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
     """
     for _flag, _val in (("--tke-eice", tke_eice),
                         ("--tke-surface-bc", tke_surface_bc),
+                        ("--tke-surface-bc-level", tke_surface_bc_level),
                         ("--tke-mxl-choice", tke_mxl_choice),
                         ("--tke-lc", tke_lc),
                         ("--tke-etau", tke_etau),
@@ -5219,6 +5241,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "'veros_flux' selects the Veros flux form "
                         "(|tau|/rho0)^{3/2} (the pre-#1326 behaviour, for "
                         "A/B). Requires --tripole-vmix tke (else raises).")
+    p.add_argument("--tke-surface-bc-level", type=str, default=None,
+                   choices=["interior_pinned", "nemo_z0"],
+                   help="WHERE the surface-Dirichlet TKE value is held, for "
+                        "--tripole-vmix tke with --tke-surface-bc "
+                        "nemo_dirichlet. None (default) keeps the card "
+                        "default (interior_pinned — the first interior "
+                        "interface pinned, the #1690 defect state). "
+                        "'nemo_z0' holds en(1) at a virtual z=0 row and "
+                        "SOLVES the first interior interface (NEMO jk=2); "
+                        "selectable now that the e3t(1) face metric is fixed "
+                        "(#1690). Requires --tripole-vmix tke (else raises).")
     p.add_argument("--tke-lc", type=str, default=None, choices=("on", "off"),
                    help="Langmuir cell parameterisation in the tripole TKE "
                         "card (NEMO ln_lc). None keeps the ORCA1 card (on). "
@@ -5757,7 +5790,8 @@ def main() -> int:
         raise SystemExit("--A-h-profile-file is tripole-only (the profile is "
                          "built on the eORCA nominal latitude rows).")
     _validate_tke_card_grid(args.grid, args.tripole_vmix, args.tke_eice,
-                            args.tke_surface_bc, args.tke_mxl_choice,
+                            args.tke_surface_bc, args.tke_surface_bc_level,
+                            args.tke_mxl_choice,
                             args.tke_prognostic, args.tke_kappa_convention,
                             args.tke_shear_production,
                             tke_n2_mode=args.tke_n2_mode,
@@ -5969,6 +6003,7 @@ def main() -> int:
             tripole_vmix=args.tripole_vmix,
             tke_eice=args.tke_eice,
             tke_surface_bc=args.tke_surface_bc,
+            tke_surface_bc_level=args.tke_surface_bc_level,
             tke_mxl_choice=args.tke_mxl_choice,
             tke_n2_mode=args.tke_n2_mode,
             tke_n2_eos_form=args.tke_n2_eos_form,
@@ -6057,6 +6092,7 @@ def main() -> int:
                     "tke", iwm=None,
                     tke_eice=args.tke_eice,
                     tke_surface_bc=args.tke_surface_bc,
+                    tke_surface_bc_level=args.tke_surface_bc_level,
                     tke_mxl_choice=args.tke_mxl_choice,
                     tke_prognostic=args.tke_prognostic,
                     tke_n2_mode=args.tke_n2_mode,
