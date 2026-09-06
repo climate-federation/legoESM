@@ -84,6 +84,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
 )
 from legoesm.ocean.dynamics.barotropic_common import (
     nemo_literal_after_level_reconcile,
+    nemo_reference_depth_reciprocal,
     rk3_stage_barotropic_correction,
     validate_after_reconcile,
 )
@@ -5841,13 +5842,23 @@ class LatLonCGridOceanModel:
                 # stprk3_stg.F90:440,444-445, in the shared barotropic home so
                 # a fidelity gate can drive the SAME expression with NEMO's own
                 # operands (a closure cannot be handed a record).
+                # ROUND 36: NEMO MULTIPLIES by the reciprocal it stored once
+                # (domain.f90:213), it does not divide by the depth, and its
+                # SUM carries no mask -- the dry-column zero is inside the
+                # reciprocal.  Built here from the same operands rather than
+                # inside the operator so a fidelity gate can hand the operator
+                # NEMO's OWN r1_hu_0 read from a record.
                 return (
                     rk3_stage_barotropic_correction(
-                        u_in, target_u, _mean_h_u, _mean_H_u,
-                        state.u_mask.data, _ws_stage_u_mask),
+                        u_in, target_u, _mean_h_u,
+                        nemo_reference_depth_reciprocal(
+                            _mean_H_u, state.u_mask.data),
+                        _ws_stage_u_mask),
                     rk3_stage_barotropic_correction(
-                        v_in, target_v, _mean_h_v, _mean_H_v,
-                        state.v_mask.data, _ws_stage_v_mask),
+                        v_in, target_v, _mean_h_v,
+                        nemo_reference_depth_reciprocal(
+                            _mean_H_v, state.v_mask.data),
+                        _ws_stage_v_mask),
                 )
 
             # NEMO's TARGET is not reconstructed from the 3-D velocity.  The

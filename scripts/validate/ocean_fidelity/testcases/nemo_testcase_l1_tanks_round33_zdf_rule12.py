@@ -176,6 +176,7 @@ def record_geometry(rec: dict, case: str, face: str = "u") -> dict:
         "h_face": h_face,
         "umask": umask,
         "depth": hu_0,
+        "r1_depth": r1_hu_0,
         "wet2d": wet2d.astype(np.float64),
         "face": face,
         "open_association_rows": {
@@ -183,13 +184,14 @@ def record_geometry(rec: dict, case: str, face: str = "u") -> dict:
             "rebuilt_sum_minus_nemo_depth_max_abs": rebuilt_gap,
             "one_over_depth_minus_nemo_reciprocal_max_abs": reciprocal_gap,
             "column_mean_divided_minus_multiplied_max_abs": divide_vs_multiply,
-            "note": ("the operator DIVIDES by depth_ref; NEMO MULTIPLIES by "
-                     "r1_hu_0 (stprk3_stg.F90:440, domain.F90:159).  The third "
-                     "number is the one that matters -- it is the difference "
-                     "the discharge inherits -- and it is measured on NEMO's "
-                     "own column transport.  Changing the shared operator to "
-                     "multiply is not this round's business, so this stays "
-                     "OPEN with its size measured."),
+            "note": ("ROUND 36 CLOSED THIS ROW.  The operator now MULTIPLIES "
+                     "by NEMO's stored r1_hu_0 (stprk3_stg.f90:522, "
+                     "domain.f90:213) instead of dividing by hu_0, so the "
+                     "third number below is the difference the discharge used "
+                     "to inherit and no longer does.  The first two stay "
+                     "measured: they say how far a REBUILT divisor sits from "
+                     "NEMO's, which is what a card WITHOUT the "
+                     "reference-geometry instrument would have to use."),
         },
     }
 
@@ -287,9 +289,11 @@ def run(card: str, *, plant: bool = False) -> dict:
                                 dtype=np.float64).ravel(order="F"), nx, ny, nz)
         target = _xy(np.asarray(rec["arrays"][f"{face}{face}_b_Kaa"],
                                 dtype=np.float64).ravel(order="F"), nx, ny)
+        # ROUND 36: NEMO's OWN r1_hu_0/r1_hv_0 out of the record -- not
+        # 1/hu_0, not a floored depth, nothing rebuilt.  The operator now
+        # multiplies by it, as stprk3_stg.f90:522-523 writes.
         candidate = np.asarray(rk3_stage_barotropic_correction(
-            field, target, geom["h_face"], np.maximum(geom["depth"], 1e-10),
-            geom["wet2d"], mask3))
+            field, target, geom["h_face"], geom["r1_depth"], mask3))
         if plant:
             candidate = candidate + 1.0
         row = score(f"{case}.kt1.stage3.rule12_correction.{face}",
@@ -306,6 +310,38 @@ def run(card: str, *, plant: bool = False) -> dict:
             f"r1_h{face}_0",
             f"{STAGE3_RECORD}:{face} (the oracle side)",
         ]
+    # ROUND-36 REGISTER.  The multiply form made LOCK_EXCHANGE bit-exact and
+    # left OVERFLOW's row BYTE-IDENTICAL to what it was, which refutes the
+    # prediction that it would close both.  The owner is named, not guessed:
+    # OVERFLOW's column has 101 levels and XLA's reduction of that sum differs
+    # from NumPy's -- and from NEMO's ascending-k SUM -- on 5 of 606 columns
+    # by 4.44e-16, which is 8.88e-19 through the reciprocal and 3.85e-34 in
+    # the corrected velocity.  With the same arithmetic done in NumPy the
+    # candidate is bit-identical to NEMO on all 61206 cells, which is why an
+    # earlier review measured 0/16900 here: it did not go through XLA.
+    # LOCK_EXCHANGE's 21-level column shows 0 of 390.
+    open_rows = [{
+        "row": f"{case}.kt1.stage3.rule12_correction.u.column_sum_reduction",
+        "owner": ("jnp.sum's reduction order over the level axis, against "
+                  "NEMO's SUM at stprk3_stg.f90:522"),
+        "boundary": ("only columns deep enough for XLA to split the "
+                     "reduction: 5/606 at 101 levels, 0/390 at 21"),
+        "status": "OPEN",
+        "closed_by": ("an ordered accumulation in the operator, which is a "
+                      "separate change from round 36's reciprocal and is not "
+                      "made here"),
+    }, {
+        "row": f"{case}.kt1.stage3.rule12_correction.u.mask_placement",
+        "owner": ("NEMO writes uu(jk) + zub*umask(jk) "
+                  "(stprk3_stg.f90:526-527); the operator writes "
+                  "(uu + zub)*stage_mask"),
+        "boundary": ("MEASURED on both tanks: 0 of 8190 and 0 of 61206 bits "
+                     "differ, because every dry face already carries +0.0.  "
+                     "On GYRE it is 349 (u) and 212 (v) cells, ALL of them "
+                     "signed zero, max|diff| exactly 0.0"),
+        "status": "OPEN",
+        "closed_by": "transcribing NEMO's per-level add; not round 36's ask",
+    }]
     status = "AT-BAR" if all(r["status"] == "AT-BAR" for r in rows) else "DEBT"
     if plant:
         require(status == "DEBT", "a planted unit offset still read AT-BAR")
@@ -330,6 +366,7 @@ def run(card: str, *, plant: bool = False) -> dict:
         "inputs_are_nemo": inputs,
         "inputs_reconstructed_not_nemo": [],
         "open_association_rows": association,
+        "round36_open_rows": open_rows,
         "unmeasured": [],
         "not_applicable_faces": not_applicable,
         "retracted": [

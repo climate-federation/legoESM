@@ -281,11 +281,14 @@ def _synthetic_root(tmp_path: Path, card: str, *, perturb_target=False) -> Path:
     field = np.asarray(stage["u"], dtype=np.float64)
     # jnp.sum, not np.sum: the operator reduces with JAX and the two do not
     # associate identically, so a numpy target would leave a nonzero shift and
-    # the fixture would test the reduction instead of the plumbing.
+    # the fixture would test the reduction instead of the plumbing.  ROUND 36:
+    # and it MULTIPLIES by NEMO's own r1_hu_0 (stprk3_stg.f90:522) rather than
+    # dividing by hu_0, so the inverted target has to do the same -- with the
+    # divide here the OVERFLOW arm went red on 5 of its 606 columns, which is
+    # the reduction difference, not the plumbing this fixture exists to test.
     import jax.numpy as jnp
     own_mean = np.asarray(
-        jnp.sum(field * h_face, axis=-1)
-        / np.maximum(scored["hu_0"], 1e-10) * wet2d)
+        jnp.sum(field * h_face, axis=-1) * scored["r1_hu_0"])
     if perturb_target:
         own_mean = own_mean + 1.0e-9
     field_f = np.zeros((nx, ny, nz), dtype=np.float64)
@@ -424,9 +427,9 @@ def test_the_v_face_is_scored_when_nemo_wets_it(tmp_path, monkeypatch):
     stage = SWEEP.read_stage(spec["twin"] / GATE.STAGE3_RECORD, case, 3)
     field = np.asarray(stage["u"], dtype=np.float64)
     import jax.numpy as jnp
+    # ROUND 36: invert the operator's MULTIPLY, as the fixture above does.
     own_mean = np.asarray(
-        jnp.sum(field * h_face, axis=-1)
-        / np.maximum(scored["hu_0"], 1e-10) * wet2d)
+        jnp.sum(field * h_face, axis=-1) * scored["r1_hu_0"])
     field_f = np.zeros((nx, ny, nz), dtype=np.float64)
     field_f[2:-2, 2:-2, :] = field.transpose(1, 0, 2)
     target_f = np.zeros((nx, ny), dtype=np.float64)

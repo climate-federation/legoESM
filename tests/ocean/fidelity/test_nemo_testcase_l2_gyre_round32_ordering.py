@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 from legoesm.ocean.dynamics.barotropic_common import (
+    nemo_reference_depth_reciprocal,
     rk3_stage_barotropic_correction,
 )
 
@@ -58,44 +59,47 @@ def _column_case(seed: int = 3):
     h = h * mask3
     depth = np.maximum(h.sum(axis=-1), 1e-10)
     wet2d = (mask3 > 0).any(axis=-1).astype(float)
+    # ROUND 36: NEMO's own reciprocal, domain.f90:213, which carries the
+    # dry-column zero the operator no longer takes as a separate mask.
+    r1_depth = np.asarray(nemo_reference_depth_reciprocal(depth, wet2d))
     target = rng.normal(size=(4, 5)) * wet2d
-    return field, target, h, depth, wet2d, mask3
+    return field, target, h, r1_depth, wet2d, mask3
 
 
 def test_correction_installs_the_target_mean():
     """Weighting-free invariant: the corrected column mean IS the target."""
-    field, target, h, depth, wet2d, mask3 = _column_case()
+    field, target, h, r1_depth, wet2d, mask3 = _column_case()
     out = np.asarray(rk3_stage_barotropic_correction(
-        field, target, h, depth, wet2d, mask3))
-    got = (out * h).sum(axis=-1) / depth
+        field, target, h, r1_depth, mask3))
+    got = (out * h).sum(axis=-1) * r1_depth
     wet = wet2d > 0
     assert np.allclose(got[wet], target[wet], rtol=0, atol=1e-14)
 
 
 def test_correction_would_fail_without_removing_the_old_mean():
     """Non-vacuity: the same assertion rejects an add-only 'correction'."""
-    field, target, h, depth, wet2d, mask3 = _column_case()
+    field, target, h, r1_depth, wet2d, mask3 = _column_case()
     bad = (field + target[..., None]) * mask3
-    got = (bad * h).sum(axis=-1) / depth
+    got = (bad * h).sum(axis=-1) * r1_depth
     wet = wet2d > 0
     assert not np.allclose(got[wet], target[wet], rtol=0, atol=1e-14)
 
 
 def test_correction_masks_land_and_is_idempotent():
-    field, target, h, depth, wet2d, mask3 = _column_case()
+    field, target, h, r1_depth, wet2d, mask3 = _column_case()
     out = np.asarray(rk3_stage_barotropic_correction(
-        field, target, h, depth, wet2d, mask3))
+        field, target, h, r1_depth, mask3))
     assert np.all(out[mask3 == 0.0] == 0.0)
     twice = np.asarray(rk3_stage_barotropic_correction(
-        out, target, h, depth, wet2d, mask3))
+        out, target, h, r1_depth, mask3))
     assert np.allclose(twice, out, rtol=0, atol=1e-14)
 
 
 def test_correction_is_the_identity_when_the_mean_already_matches():
-    field, _target, h, depth, wet2d, mask3 = _column_case()
-    own = (field * h).sum(axis=-1) / depth * wet2d
+    field, _target, h, r1_depth, wet2d, mask3 = _column_case()
+    own = (field * h).sum(axis=-1) * r1_depth
     out = np.asarray(rk3_stage_barotropic_correction(
-        field, own, h, depth, wet2d, mask3))
+        field, own, h, r1_depth, mask3))
     assert np.allclose(out, field * mask3, rtol=0, atol=1e-14)
 
 
@@ -322,20 +326,23 @@ def test_the_compensated_pair_passes_the_solve_untouched():
 
 
 def test_correction_refuses_a_broadcastable_but_wrong_target():
-    field, target, h, depth, wet2d, mask3 = _column_case()
+    field, target, h, r1_depth, wet2d, mask3 = _column_case()
     with pytest.raises(ValueError):
         rk3_stage_barotropic_correction(
-            field, target[..., None], h, depth, wet2d, mask3)
+            field, target[..., None], h, r1_depth, mask3)
     with pytest.raises(ValueError):
         rk3_stage_barotropic_correction(
-            field, target, h[..., :-1], depth, wet2d, mask3)
+            field, target, h[..., :-1], r1_depth, mask3)
 
 
 def test_correction_refuses_a_wrong_shaped_mask():
     """Round-33 correction: the two MASKS were exempt from the shape check.
 
     Round 32 closed the shape hole for ``target_mean``, ``h_face_ref`` and
-    ``depth_ref`` and left ``face_mask`` and ``stage_mask`` open.  What the
+    the depth and left ``face_mask`` and ``stage_mask`` open.  Round 36
+    REMOVED ``face_mask`` -- NEMO's ``SUM`` carries no mask and the
+    dry-column zero lives inside ``r1_hu_0`` -- so that arm now pins the
+    reciprocal's own shape refusal instead.  What the
     new check buys was MEASURED before it was written, and it is smaller than
     "a silent hole": a level axis on ``face_mask`` already raised a
     ``ValueError`` from JAX's broadcasting, and a short ``stage_mask`` raised
@@ -344,20 +351,20 @@ def test_correction_refuses_a_wrong_shaped_mask():
     with oracle arrays.
 
     The ``stage_mask`` arm is the one that goes red without the check (it
-    raised ``TypeError``, not ``ValueError``); the ``face_mask`` arm passes
+    raised ``TypeError``, not ``ValueError``); the reciprocal arm passes
     either way and is kept only to pin the message's operand.
     """
-    field, target, h, depth, wet2d, mask3 = _column_case()
-    with pytest.raises(ValueError, match="face_mask"):
+    field, target, h, r1_depth, wet2d, mask3 = _column_case()
+    with pytest.raises(ValueError, match="r1_depth_ref"):
         rk3_stage_barotropic_correction(
-            field, target, h, depth, wet2d[..., None], mask3)
+            field, target, h, r1_depth[..., None], mask3)
     with pytest.raises(ValueError, match="stage_mask"):
         rk3_stage_barotropic_correction(
-            field, target, h, depth, wet2d, mask3[..., :-1])
+            field, target, h, r1_depth, mask3[..., :-1])
     # ... and the level-BROADCAST stage mask the model's own
     # ``legacy_2d_stage_face_mask`` arm passes is still accepted.
     out = np.asarray(rk3_stage_barotropic_correction(
-        field, target, h, depth, wet2d, wet2d[..., None]))
+        field, target, h, r1_depth, wet2d[..., None]))
     assert np.all(np.isfinite(out))
 
 

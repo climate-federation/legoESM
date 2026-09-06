@@ -289,12 +289,14 @@ def run_rule12_correction(oracle_root: Path, *,
                           plant: bool = False) -> dict:
     """Rule 12 for the moved operator: NEMO's inputs, legoESM's expression."""
     from legoesm.ocean.dynamics.barotropic_common import (
+        nemo_reference_depth_reciprocal,
         rk3_stage_barotropic_correction,
     )
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_nemo_testcase_card,
     )
 
+    reciprocal_provenance: dict[str, str] = {}
     record = oracle_root / ZDF_MATRIX_RECORD
     rec = read_zdf_matrix(record)
     stage = oracle_root / STAGE3_RECORD
@@ -328,6 +330,24 @@ def run_rule12_correction(oracle_root: Path, *,
         # this DIVIDES.
         depth = h_face.sum(axis=-1)
         wet2d = (mask3 > 0).any(axis=-1).astype(np.float64)
+        # ROUND 36.  If the record carries NEMO's OWN reference geometry --
+        # the round-33 instrument appends hu_0/hv_0 and r1_hu_0/r1_hv_0, and
+        # the round-35 GYRE acquisition is the first GYRE run that has it --
+        # the reciprocal is READ, with no floor and nothing rebuilt.
+        # Otherwise it is built here exactly as domain.f90:213 builds it,
+        # from the rebuilt depth, and the report says which was used.
+        reciprocal_name = f"r1_h{face}_0"
+        if reciprocal_name in rec["arrays"]:
+            r1_depth = _to_scored_2d(np.asarray(
+                rec["arrays"][reciprocal_name], dtype=np.float64))
+            reciprocal_provenance[face] = (
+                f"{ZDF_MATRIX_RECORD}:{reciprocal_name}, NEMO's own")
+        else:
+            r1_depth = np.asarray(nemo_reference_depth_reciprocal(
+                np.maximum(depth, 1e-10), wet2d), dtype=np.float64)
+            reciprocal_provenance[face] = (
+                "REBUILT domain.f90:213 from SUM(e3u_0*umask); this record "
+                "carries no r1_h_0")
         field = _xyz(
             np.asarray(rec["arrays"][f"{p_}_Kaa_out"],
                        dtype=np.float64).ravel(order="F"), nx, ny, nz)
@@ -339,7 +359,7 @@ def run_rule12_correction(oracle_root: Path, *,
                 "the reference face mask is wet above jpkm1, where "
                 "stprk3_stg.F90:443 does not write")
         candidate = np.asarray(rk3_stage_barotropic_correction(
-            field, target, h_face, np.maximum(depth, 1e-10), wet2d, mask3))
+            field, target, h_face, r1_depth, mask3))
         if plant and face == "u":
             candidate = candidate + 1.0
         # The column mean is formed over every level NEMO's SUM covers; the
@@ -367,11 +387,15 @@ def run_rule12_correction(oracle_root: Path, *,
                   "with the column depth RECONSTRUCTED from it, reproduces "
                   "NEMO's own stage-3 velocity AT the 1e-15 bar -- not bit "
                   "for bit; the rows carry exact=false"),
+        "reciprocal_provenance": reciprocal_provenance,
         "divisor_provenance": (
-            "mesh_mask.nc carries no hu_0 and no r1_hu_0; depth_ref is "
-            "SUM(e3u_0*umask) rebuilt here (domain.F90:140-147) and the "
-            "operator DIVIDES by it where NEMO MULTIPLIES by the precomputed "
-            "r1_hu_0 (domain.F90:159).  Both are OPEN association rows."),
+            "mesh_mask.nc carries no hu_0 and no r1_hu_0, so the face "
+            "thicknesses come from it and the RECIPROCAL comes from the "
+            "record when the record has it -- reciprocal_provenance names "
+            "the source per face.  ROUND 36: the operator now MULTIPLIES by "
+            "that reciprocal (stprk3_stg.f90:522, domain.f90:213) where it "
+            "used to divide by a rebuilt, floored depth.  The "
+            "rebuilt-sum-versus-NEMO-hu_0 row stays OPEN."),
         "operator": ("legoesm.ocean.dynamics.barotropic_common."
                      "rk3_stage_barotropic_correction, imported from the "
                      "production module the step function calls"),

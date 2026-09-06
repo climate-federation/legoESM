@@ -575,19 +575,60 @@ def nemo_literal_after_level_reconcile(
     return b(corrected * face_mask3)
 
 
+def nemo_reference_depth_reciprocal(
+    depth_ref: jnp.ndarray,
+    face_mask: jnp.ndarray,
+) -> jnp.ndarray:
+    """NEMO's ``r1_hu_0``/``r1_hv_0``, built the one way NEMO builds them::
+
+        r1_hu_0(:,:) = ssumask(:,:) / ( hu_0(:,:) + 1._wp - ssumask(:,:) )
+
+    (``domain.f90:213-214`` of the round-35 GYRE build's compiled ppsrc.)
+
+    This is NOT ``1/hu_0``: NEMO adds one and subtracts the mask before
+    dividing, so on a wet column it computes ``1 / ((hu_0 + 1) - 1)`` and the
+    two roundings of that round trip do not cancel.  Every consumer must use
+    the SAME reciprocal NEMO stored, because ``x * r1_hu_0`` and ``x / hu_0``
+    differ even when ``r1_hu_0`` is the correctly rounded reciprocal.
+
+    On a dry column ``ssumask`` is zero, so the reciprocal is EXACTLY zero
+    and carries the dry-column zero that NEMO's ``SUM`` has no mask for.
+
+    ``face_mask`` is NEMO's surface mask ``ssumask``/``ssvmask``: 2-D, 0 or 1.
+
+    Two other sites materialise this same expression with their own rounding
+    barriers -- ``vertical.py:243-244`` (live QCO face geometry) and
+    ``vertical.py:308`` (the f-point form, which brackets the denominator
+    separately).  They are NOT routed here: their associations differ from
+    this one and from each other, and this campaign's bar is the last ULP.
+    """
+    one = jnp.asarray(1.0, dtype=jnp.asarray(depth_ref).dtype)
+    return face_mask / (depth_ref + one - face_mask)
+
+
 def rk3_stage_barotropic_correction(
     field: jnp.ndarray,
     target_mean: jnp.ndarray,
     h_face_ref: jnp.ndarray,
-    depth_ref: jnp.ndarray,
-    face_mask: jnp.ndarray,
+    r1_depth_ref: jnp.ndarray,
     stage_mask: jnp.ndarray,
 ) -> jnp.ndarray:
-    """NEMO ``stprk3_stg.F90:440,444-445``, the RK3 stage correction::
+    """NEMO ``stprk3_stg.f90:522-523,526-527``, the RK3 stage correction::
 
         zub(ji,jj) = uu_b(ji,jj,Kaa)
-           &       - SUM( e3u_0(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)
+           &       - SUM( e3u_3d(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)
         uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)
+
+    ROUND 36: this MULTIPLIES by NEMO's stored ``r1_hu_0``.  It used to
+    DIVIDE by ``hu_0`` and then multiply by a separate wet-column mask, which
+    is algebraically the same and is NOT the same rounding -- the independent
+    review of rounds 33-34 measured that the divide leaves both tank
+    discharges off by a handful of ULPs and the multiply makes them exactly
+    bit-identical.  The dry-column zero now lives where NEMO keeps it, inside
+    the reciprocal (``domain.f90:213``), which is why there is no longer a
+    separate ``face_mask`` argument: NEMO has no mask inside the ``SUM``.
+    Build the reciprocal with :func:`nemo_reference_depth_reciprocal`, or
+    pass NEMO's own array when a record carries it.
 
     WHY THIS IS A THIRD SIBLING and not a call to
     :func:`after_level_column_mean_reconcile`.  The three functions compute the
@@ -611,17 +652,11 @@ def rk3_stage_barotropic_correction(
         2-D depth-uniform mean to install: NEMO ``uu_b(:,:,Kaa)``.
     h_face_ref
         REFERENCE face thicknesses, NEMO ``e3u_0``, already face-masked.
-    depth_ref
-        2-D column depth divisor, NEMO ``hu_0`` (the caller applies its own
-        land guard; a wet column always exceeds it).
-    face_mask
-        2-D wet-face factor multiplying the column mean.  NEMO has NO ``umask``
-        inside the ``SUM`` at ``stprk3_stg.F90:440`` -- read the statement: it
-        is ``SUM( e3u_0(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)``.  What
-        this factor reproduces is ``r1_hu_0`` being IDENTICALLY ZERO on a dry
-        column, which ``domain.F90:159`` arranges as
-        ``ssumask/(hu_0 + 1 - ssumask)``; ``depth_ref`` carries the wet
-        columns' ``hu_0`` and this mask carries the dry columns' zero.
+    r1_depth_ref
+        2-D reciprocal reference depth, NEMO ``r1_hu_0``/``r1_hv_0``, EXACTLY
+        zero on a dry column.  NEMO has no ``umask`` inside the ``SUM`` at
+        ``stprk3_stg.f90:522`` -- read the statement -- so the dry-column zero
+        has to be here and nowhere else.
     stage_mask
         Mask applied to the corrected field, NEMO's ``umask(ji,jj,jk)``.
 
@@ -639,11 +674,11 @@ def rk3_stage_barotropic_correction(
     if h_face_ref.shape != field.shape:
         raise ValueError(
             f"h_face_ref {h_face_ref.shape} must match field {field.shape}")
-    if depth_ref.shape != field.shape[:-1]:
+    if r1_depth_ref.shape != field.shape[:-1]:
         raise ValueError(
-            f"depth_ref {depth_ref.shape} must be the column shape "
+            f"r1_depth_ref {r1_depth_ref.shape} must be the column shape "
             f"{field.shape[:-1]}")
-    # The two masks were exempt from this check until round 33.  Measured,
+    # The stage mask was exempt from this check until round 33.  Measured,
     # not assumed, before the check was written: a level axis on ``face_mask``
     # already raised, and a short ``stage_mask`` raised a TypeError from
     # inside ``lax.mul`` naming neither operand.  So what this buys is a
@@ -654,15 +689,11 @@ def rk3_stage_barotropic_correction(
     # mutation is caught by the tests' transposed-layout arm, not by this.
     # The level-BROADCAST stage mask is ALLOWED and named, because the model's
     # own ``legacy_2d_stage_face_mask`` arm passes exactly that.
-    if face_mask.shape != field.shape[:-1]:
-        raise ValueError(
-            f"face_mask {face_mask.shape} must be the column shape "
-            f"{field.shape[:-1]} of field {field.shape}")
     if stage_mask.shape not in (field.shape, field.shape[:-1] + (1,)):
         raise ValueError(
             f"stage_mask {stage_mask.shape} must match field {field.shape} "
             f"or be its level-broadcast form {field.shape[:-1] + (1,)}")
-    own_mean = jnp.sum(field * h_face_ref, axis=-1) / depth_ref * face_mask
+    own_mean = jnp.sum(field * h_face_ref, axis=-1) * r1_depth_ref
     return (field + (target_mean - own_mean)[..., jnp.newaxis]) * stage_mask
 
 

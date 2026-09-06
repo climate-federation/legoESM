@@ -124,6 +124,18 @@ REQUIRED_ARM = {
     "l_ldfslp": 1.0,         # :166 -- the a33 fold IS in the matrix
 }
 PLANT_ARMS = ("operand", "matrix", "sweep", "assembly", "rhs", "a33", "clamp")
+# THE DOMAIN THIS GATE SCORES, PINNED.  An independent attack on round 36
+# cropped the record to a 5x5x31 domain, kept the halo symmetric at 2, and
+# got exit 0 / STATUS AT-BAR out of a run that scored THIRTY cells instead of
+# 21120 -- with all seven plants still reporting landed=True, because a plant
+# lands inside whatever box the header declares.  The symmetric-halo check
+# below cannot see that: it constrains the halo, never the domain, and jpi /
+# jpj / jpk all come from the record's own header.  So the domain is pinned
+# to the one this card runs, from the run's own resolved namelist output
+# (round35_oracle_trazdf_matrix/ocean.output:36 jpkglo=31, :63 jpiglo=36,
+# :64 jpjglo=26), and a record from any other geometry is REFUSED rather
+# than scored on a fraction of its cells.
+EXPECTED_DOMAIN = (36, 26, 31)
 
 # THE TWO ARRAYS WHOSE DECLARED EXTENT IS NOT THEIR WRITTEN EXTENT.
 #
@@ -167,15 +179,21 @@ def require(condition: bool, message: str) -> None:
 _KNOWN_NAMES = frozenset(n.ljust(16).encode("ascii") for n in EXPECTED_ARRAYS)
 
 
-def _starts_a_known_array(raw: bytes, off: int) -> bool:
+def _starts_a_known_array(raw: bytes, off: int, *, eof_counts: bool) -> bool:
     """Do the 16 bytes at ``off`` begin an array this record may carry?
 
-    EOF counts: the last array is followed by nothing.  This is what turns
-    the tile-extent salvage into a PROOF rather than a guess -- the stream
-    itself says where the payload ended.
+    This is what turns the tile-extent salvage into a PROOF rather than a
+    guess -- the stream itself says where the payload ended.
+
+    ``eof_counts`` is the asymmetry that keeps it a proof.  For the array's
+    OWN declared extent, running exactly to EOF is a valid ending: the last
+    array is followed by nothing.  For the SHORTER tile extent it is not,
+    because a record whose final array was truncated at the tile boundary
+    would then "prove" a salvage that is really data loss.  So a tile extent
+    is accepted only when a real array header follows it.
     """
     if off == len(raw):
-        return True
+        return eof_counts
     if off + 32 > len(raw):
         return False
     return raw[off:off + 16] in _KNOWN_NAMES
@@ -225,6 +243,12 @@ def read_trazdf_matrix(path: Path) -> dict:
             f"{header['jpi']}x{header['jpj']} domain is not the whole domain "
             f"minus one symmetric halo; a sub-box would score a fraction of "
             f"the cells and report the same verdict")
+    require((header["jpi"], header["jpj"], header["jpk"]) == EXPECTED_DOMAIN,
+            f"{path}: domain "
+            f"{(header['jpi'], header['jpj'], header['jpk'])} is not "
+            f"{CASE}'s {EXPECTED_DOMAIN}; a smaller domain passes the "
+            "symmetric-halo check above and then scores a handful of cells "
+            "while reporting the same verdict")
     header["halo"] = halo_i
     # The campaign's claim is kt=1 stage 3; a record from any other step
     # cannot be scored against it, whatever its rows are named.
@@ -251,12 +275,23 @@ def read_trazdf_matrix(path: Path) -> dict:
         count = n1 * n2 * n3
         tile = None
         if name in TILE_SHAPED and rank == 3:
-            declared_ok = _starts_a_known_array(raw, off + 8 * count)
+            # The salvage is inside the SAME refusals every other array gets:
+            # the duplicate-name check and the ARRAY_SHAPE rank/depth check
+            # below both run first, so a salvaged array cannot skip them.
+            require(name not in arrays, f"{path}: array {name!r} written twice")
+            require((n1, n2, n3) == (header["jpi"], header["jpj"],
+                                     header["jpk"]),
+                    f"{path}: {name!r} declares {(n1, n2, n3)}, not the "
+                    f"header's full-domain shape; the interior-extent "
+                    "recovery is defined against that declaration alone")
+            declared_ok = _starts_a_known_array(raw, off + 8 * count,
+                                                eof_counts=True)
             ni = header["ntei"] - header["ntsi"] + 1
             nj = header["ntej"] - header["ntsj"] + 1
             tile_count = ni * nj * n3
             tile_ok = (tile_count < count
-                       and _starts_a_known_array(raw, off + 8 * tile_count))
+                       and _starts_a_known_array(raw, off + 8 * tile_count,
+                                                 eof_counts=False))
             require(declared_ok or tile_ok,
                     f"{path}: array {name!r} is followed by neither a known "
                     f"array header at its declared extent {(n1, n2, n3)} nor "
@@ -625,7 +660,13 @@ def named_deviations(rec: dict) -> list[dict]:
          "inert_when": "always, arithmetically: -0.0 + x == x exactly, and "
                        "neither slot is ever divided by",
          "measured": {"reported_as": "AT-BAR-SIGNED-ZERO rows, with their "
-                                     "own signed_zero_only count"},
+                                     "own signed_zero_only count",
+                      "note": "THIS, not the dry diagonal, is the FIRST "
+                              "statement of tra_zdf whose bits legoESM does "
+                              "not reproduce: trazdf.f90:443-444 runs before "
+                              ":445.  It is scored as its own status rather "
+                              "than as AT-BAR precisely so the ordering "
+                              "claim cannot be made without it."},
          "inert_here": True},
     ]
 
@@ -809,6 +850,22 @@ def run(record: Path, *, plant: str | None = None,
             "domain": [h["jpi"], h["jpj"], h["jpk"]],
         },
         "arrays_present_but_consumed_by_no_arm": UNCONSUMED,
+        # AND THE SLICES NO ARM READS, inside arrays that ARE consumed.
+        # MEASURED by an independent attack on round 36, not reasoned: setting
+        # the WHOLE surface plane of avt to 999.0 leaves all thirteen
+        # calibration rows at 0 cells unequal, and so does setting the whole
+        # jk=jpk level of rhs_T/S, fwd_T/S, e3t_Kbb/Kmm, T/S_Kbb_in and
+        # T/S_Krhs_in -- 11232 values -- to 12345.0.  Both follow from NEMO's
+        # own structure (zwt(:,1)=0 at trazdf.f90:419 discards avt at jk=1,
+        # and the matrix has jpkm1 rows), so "the calibration is 0 cells
+        # unequal" certifies the slices the SOLVE reads and nothing else.
+        "slices_no_arm_reads": {
+            "avt/avs at jk=1": "trazdf.f90:419 sets zwt(:,1) = 0 after the "
+                               "assembly, so the surface value is discarded",
+            "every k-array at jk=jpk": "the tridiagonal has jpkm1 rows; the "
+                                       "clamp rows are the only ones that "
+                                       "score the full jpk ladder",
+        },
         "rhs_blind_spot": {
             "status": "UNMEASURED",
             "reason": (

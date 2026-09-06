@@ -31,6 +31,28 @@ from legoesm.ocean.fidelity.provenance import allow_dirty_stamps  # noqa: E402
 import nemo_testcase_l2_gyre_round35_trazdf_matrix as R  # noqa: E402
 
 JPI, JPJ, JPK = 9, 9, 6
+# The domain the gate PINS for the real card, captured before any fixture
+# substitutes the synthetic one.  Round 36 pinned it because an independent
+# attack cropped the record's domain, kept the halo symmetric, and got a
+# green verdict out of a run that scored 30 cells instead of 21120.
+PINNED_DOMAIN = R.EXPECTED_DOMAIN
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_domain(monkeypatch):
+    """Every synthetic record here is 9x9x6, not GYRE's 36x26x31.
+
+    The gate refuses a domain that is not the card's, so the tests that build
+    their own geometry say so EXPLICITLY rather than the gate accepting any
+    geometry.  Tests that read the REAL record ask for ``real_domain``.
+    """
+    monkeypatch.setattr(R, "EXPECTED_DOMAIN", (JPI, JPJ, JPK))
+
+
+@pytest.fixture
+def real_domain(monkeypatch):
+    monkeypatch.setattr(R, "EXPECTED_DOMAIN", PINNED_DOMAIN)
+    return PINNED_DOMAIN
 NTSI, NTEI, NTSJ, NTEJ = 3, 7, 3, 7          # a 2-cell halo on every side
 JPKM1 = JPK - 1
 RDT = 1234.5
@@ -301,16 +323,37 @@ def test_an_inert_plant_would_be_refused(clean_record, monkeypatch):
     assert report["plant_moved_rows"] == []
 
 
-@pytest.mark.parametrize("plant", R.PLANT_ARMS)
-def test_every_plant_exits_non_zero_end_to_end(clean_record, plant, tmp_path):
+# ONE arm end to end, not seven.  The CLI's exit-code contract does not
+# depend on which arm was planted -- ``main`` maps (plant landed, status) to
+# an exit code the same way for all of them, and every arm's LANDING is
+# already scored in-process above.  Seven subprocesses against the real
+# record cost fourteen JAX compilations and took the fidelity suite from 100
+# seconds to over twenty minutes: a slower suite, not more coverage.  run.sh
+# still drives all seven arms on every acquisition.
+@pytest.mark.parametrize("plant", ["assembly"])
+def test_every_plant_exits_non_zero_end_to_end(plant, real_domain):
+    """End to end through the CLI, on the record that exists.
+
+    ROUND 36: this used to drive a 9x9x6 SYNTHETIC record.  The gate now pins
+    the card's domain -- because an attack cropped a record's domain, kept the
+    halo symmetric, and got a green verdict out of 30 scored cells -- and a
+    subprocess cannot be monkeypatched, so relaxing the pin for this test
+    would have meant an env var that relaxes the very guard it protects.
+    Driving NEMO's own record instead is strictly better evidence anyway; the
+    synthetic-record plant behaviour is covered in-process above.
+    """
+    record = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                  "round35_oracle_trazdf_matrix/"
+                  "oracle_trazdf_matrix_kt00000001.bin")
+    if not record.exists():
+        pytest.skip("round-35 record absent")
     env = {"PYTHONPATH": ":".join(
         str(REPO / f"packages/{p}") for p in
         ("core", "ocean", "atmosphere", "coupler", "ice", "land", "ml",
          "tools")) + f":{REPO / 'src'}",
         "JAX_PLATFORMS": "cpu", "JAX_ENABLE_X64": "1",
         "LEGOESM_GATE_ALLOW_DIRTY": "1", "PATH": "/usr/bin:/bin"}
-    base = [sys.executable, str(GATE), "--record", str(clean_record),
-            "--no-card"]
+    base = [sys.executable, str(GATE), "--record", str(record), "--no-card"]
     clean = subprocess.run(base, env=env, capture_output=True, text=True)
     assert "SCORED " in clean.stdout and "BLIND-SPOT " in clean.stdout
     planted = subprocess.run(base + ["--plant", plant], env=env,
@@ -319,6 +362,10 @@ def test_every_plant_exits_non_zero_end_to_end(clean_record, plant, tmp_path):
     # gate's own verdict -- the same rule run.sh applies.
     assert planted.returncode != 0, planted.stdout[-3000:]
     assert "STATUS DEBT" in planted.stdout
+    # A non-zero exit and a DEBT verdict are BOTH available with the plant
+    # deleted, because this record's baseline is already red.  The plant must
+    # also say it moved something.
+    assert f"PLANT {plant} landed=True" in planted.stdout
 
 
 def test_a_dry_bottom_makes_the_named_deviations_LIVE(tmp_path):
@@ -771,7 +818,7 @@ def test_a_payload_matching_neither_extent_is_refused(tmp_path, clean_record):
         R.read_trazdf_matrix(wrong)
 
 
-def test_the_real_round35_record_needed_the_salvage():
+def test_the_real_round35_record_needed_the_salvage(real_domain):
     """Rule 10: say it about the record that exists, not only a fixture."""
     record = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
                   "round35_oracle_trazdf_matrix/"
@@ -785,3 +832,34 @@ def test_the_real_round35_record_needed_the_salvage():
         assert row["declared"] == [h["jpi"], h["jpj"], h["jpk"]]
         assert row["written"] == [h["ntei"] - h["ntsi"] + 1,
                                   h["ntej"] - h["ntsj"] + 1, h["jpk"]]
+
+
+def test_a_cropped_domain_is_refused_before_it_can_score_thirty_cells(
+        clean_record, real_domain):
+    """The defeat an independent attack on round 36 actually landed.
+
+    Cropping the record to a 5x5 domain with a SYMMETRIC halo of 2 satisfied
+    every check the reader had -- the halo guard constrains the halo, not the
+    domain, and jpi/jpj/jpk come from the record's own header -- so the gate
+    scored ONE column, 30 cells instead of 21120, and printed exit 0 with
+    STATUS AT-BAR while the real record is DEBT.  Every plant still reported
+    ``landed=True``, so no control could tell the difference.
+
+    The fixture domain is deliberately NOT GYRE's, which is the point: this
+    gate scores one card's geometry and must refuse any other.
+    """
+    with pytest.raises(R.RecordError, match="is not GYRE-zco's"):
+        R.read_trazdf_matrix(clean_record)
+    assert (JPI, JPJ, JPK) != real_domain
+
+
+def test_the_real_record_is_the_pinned_domain(real_domain):
+    record = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                  "round35_oracle_trazdf_matrix/"
+                  "oracle_trazdf_matrix_kt00000001.bin")
+    if not record.exists():
+        pytest.skip("round-35 record absent")
+    h = R.read_trazdf_matrix(record)["header"]
+    assert (h["jpi"], h["jpj"], h["jpk"]) == real_domain
+    assert (h["ntei"] - h["ntsi"] + 1) * (h["ntej"] - h["ntsj"] + 1) \
+        * h["jpkm1"] == 21120
