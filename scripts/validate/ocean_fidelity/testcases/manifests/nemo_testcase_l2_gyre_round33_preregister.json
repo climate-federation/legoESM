@@ -1,0 +1,110 @@
+{
+  "format": "nemo-testcase-l2-gyre-round33-preregister-v1",
+  "date": "2026-09-06",
+  "starting_tip": "1fb6b57f3f47",
+  "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
+  "oracle_roots": {
+    "GYRE-zco": [
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round19_oracle_v2_external",
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round21_oracle_v2_stage_ww",
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round29_oracle_v2_zdf_matrix"
+    ],
+    "LOCK_EXCHANGE-zco": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/lock_kt1_10",
+    "OVERFLOW-zps": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10",
+    "ORCA2-zps": "no card on this branch; UNMEASURED, frame spec below"
+  },
+
+  "read_before_this_preregistration_no_prediction_carried": {
+    "r0_1": "stprk3_stg.F90:365 opens the stage-1/2 arm selector, IF( ln_dynadv_vec .OR. lk_linssh ). Its TRUE arm at :366-369 advances the velocity directly, ( uu(Kbb) + rDt*uu(Krhs) ) * umask, with no thickness ratios at all. Its ELSE arm at :370-388 is the thickness-weighted one, and under key_qco that is :373-378, the (1+r3u(Kbb))/(1+r3u(Kmm))/(1+r3u(Kaa)) form.",
+    "r0_2": "STAGE 3 IS NOT IN THAT SELECT. stprk3_stg.F90:395 CASE(3) adds the leftover RHS terms and does no time stepping; the stage-3 time integration is inside dyn_zdf, and dynzdf.F90:119 carries THE SAME selector IF( ln_dynadv_vec .OR. lk_linssh ), whose TRUE arm at :121-122 is again ( puu(Kbb) + rDt*puu(Krhs) ) * umask with no ratios, and whose ELSE arm at :124-142 is the thickness-weighted one (:127-132 under key_qco).",
+    "r0_3": "COMPILED, not inferred. GYRE compiles key_qco key_vco_1d3d key_RK3 (cpp_GYRE_OMIP_L2_P3_SM.fcm) so the ELSE arm is the key_qco form, and lk_linssh is .FALSE. in that build's own dom_oce.f90. Its deck resolves ln_dynadv_vec = T (round19_oracle_v2_external/ocean.output:798). So on GYRE, NEMO takes the VECTOR arm at all three stages: stprk3_stg.F90:366-369 at stages 1-2 and dynzdf.F90:121-122 at stage 3, in the compiled ppsrc at GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/dynzdf.f90:138-142.",
+    "r0_4": "THE TANKS TAKE THE OTHER ARM. LOCK resolves ln_dynadv_vec = F (lock_kt1_10/ocean.output:705) and OVERFLOW ln_dynadv_vec = F (overflow_kt1_10/ocean.output:822); both compile key_qco and neither compiles key_linssh, so lk_linssh is .FALSE. in each build's own dom_oce.f90 and both take the key_qco ELSE arm at every stage.",
+    "r0_5": "legoESM ALREADY honours r0_1 at stages 1 and 2. ocean_model_latlon_cgrid.py:5922 sets _vector_velocity_stage_update from momentum_advection == 'vector_invariant', and :6157 and :6230 branch on it. The STAGE-3 update at :6304-6305 does not: it carries (1+r3u) ratios unconditionally.",
+    "r0_6": "THE DEFECT HAS A COMMENT. ocean_model_latlon_cgrid.py:5883-5887 says '... Stage 3 still enters dyn_zdf's key_qco solve in either momentum program.' Read against dynzdf.F90:119 that is FALSE: dyn_zdf selects the same way stprk3_stg.F90:365 does. This is a transcription defect and the comment is the wrong belief that produced it.",
+    "r0_7": "GYRE AT kt=1 IS AT REST. The round-29 record's uu_Kbb_in and vv_Kbb_in are identically 0.0 (max |uu_Kbb_in| = 0.0). So at kt=1 both arms reduce to a pure product and their DIFFERENCE is exactly dt*rhs*((1+r3u(Kmm))/(1+r3u(Kaa)) - 1). r3u carries no level index, so that factor is COLUMN-UNIFORM.",
+    "r0_8": "rDt = 14400.0 in the round-29 record; card.dt_s = 14400.0 for GYRE-zco. Round 30 measured legoESM's stage-3 momentum RHS entering dyn_zdf AT-BAR against NEMO's own Krhs: absolute max 2.0614443633579772e-16 on u and 2.482728e-16 on v (round30/round30_post_ldf_after.json)."
+  },
+
+  "the_change": {
+    "claim_under_test": "GYRE's remaining dyn_zdf entry residual, 4.5974974126122489e-11 on u and 1.2570099171618776e-10 on v, is owned by legoESM's stage-3 explicit update taking the key_qco thickness-ratio arm where NEMO's compiled deck takes the vector arm at dynzdf.F90:121-122.",
+    "landing_rule": "ONE shared program, no knob, no card-specific branch, no second implementation. The SAME selector legoESM already honours at stages 1 and 2 is routed through ONE helper that all three stages call, so stage 3 cannot drift from stages 1-2 again.",
+    "statements_changed": [
+      "a module-level public rk3_stage_velocity_update is added to ocean_model_latlon_cgrid.py carrying BOTH arms verbatim -- the vector arm (velocity_before + dt_stage*rhs)*face_mask and the key_qco arm (q_bb*velocity_before + dt_stage*q_mm*rhs)/q_aa -- module-level rather than a closure so a Rule-12 gate can drive it with NEMO's own record arrays.",
+      "stages 1, 2 and 3 all call it. Stages 1 and 2 keep byte-identical expressions on both arms; only stage 3 gains the vector arm it was missing.",
+      "the false comment at ocean_model_latlon_cgrid.py:5883-5887 is corrected to what dynzdf.F90:119 says."
+    ],
+    "not_changed_and_why": [
+      "the key_qco arm gains NO umask, although NEMO's ELSE arm carries one. legoESM masks after the barotropic correction instead, and that is bit-identical: on a dry face the correction's stage_mask zeroes the value, and the correction's own column mean weights with e3u_0*mask so a dry level contributes nothing either way. Adding the mask would be a second change.",
+      "the decision-17 guard in ocean/vertical.py, and the tanks' zdf_baroclinic_only flag: both untouched by instruction."
+    ]
+  },
+
+  "predictions": {
+    "P1_the_dyn_zdf_entry_residual": {
+      "instrument": "the round-31 walk gate, --mode pre_solve, boundary A_explicit_update, on the round-29 oracle root; BEFORE and AFTER on clean committed trees.",
+      "before_pinned_now": {"u": 4.5974974126122489e-11, "v": 1.2570099171618776e-10, "field_scale_u": 3.7899e-04},
+      "point_estimate_after": {"u": 2.968480e-12, "v": 3.575128e-12},
+      "how_the_point_estimate_was_built": "rDt times round 30's measured stage-3 RHS residual (14400 * 2.0614443633579772e-16 and 14400 * 2.482728e-16). Because GYRE is at rest at kt=1 (r0_7), the whole update is a product with dt, so once the ratios are gone the only surviving term is dt times the RHS residual.",
+      "P1a_CONFIRM": "u in [2.0e-12, 4.5e-12] AND v in [2.4e-12, 5.4e-12] -- the point estimates with a +/-50 per cent window, because a max of a sum is not the sum of maxes and the RHS residual is re-measured this round.",
+      "P1b_REFUTE": "u above 1.0e-11. Then the key_qco ratios are NOT the owner of the entry residual and the fix's premise is wrong.",
+      "P1c_NO_VERDICT": "u between 4.5e-12 and 1.0e-11, or below 2.0e-12.",
+      "P1d_CONSISTENCY_ARM": "the round-30 gate --mode post_ldf is re-run on the SAME tree; rDt times its measured RHS residual must reproduce the measured boundary A to within a factor of 2. If it does not, the stage-3 RHS moved and the attribution is not clean -- that disagreement is the finding, and neither number is recorded (Rule 1e).",
+      "P1e_ARITHMETIC_NOT_A_MEASUREMENT": "4.5974974126122489e-11 / 3.7899e-04 = 1.213e-07 is the implied max |(1+r3u(Kmm))/(1+r3u(Kaa)) - 1| on this card. Labelled arithmetic."
+    },
+    "P2_the_kt1_stage3_velocity": {
+      "instrument": "the round-31 walk gate, --mode depth_profile, same root, BEFORE and AFTER.",
+      "before_pinned_now": {"u_peak": 2.7922718390943624e-12, "v_peak": 3.3877006018132039e-12, "u_level_1": 1.764547e-12, "u_level_15": 1.866456e-13, "u_level_29": 2.266544e-13, "u_level_30": 2.249741e-13},
+      "P2a_CONFIRM_and_it_is_the_counter_intuitive_one": "the peak does NOT fall by an order of magnitude: u stays in [3.0e-13, 4.5e-12] and v in [3.0e-13, 5.5e-12]. WHY, written before measuring: the qco arm difference is c(i,j) times the explicit update ITSELF (r0_7 -- the factor is column-uniform), and stprk3_stg.F90:440,444-445 removes that column's e3u_0-weighted mean, so only c times the BAROCLINIC part of the update survives -- 2.79e-12 out of an entry error of 4.60e-11, i.e. 6.1 per cent. Removing the qco term entirely leaves the dt-times-RHS-roundoff term, about 3e-12 at entry and NOT column-uniform, so the correction removes little of it. The two are the same size; the output need not improve.",
+      "P2b_REFUTES_P2a": "the u peak falls below 3.0e-13. Then the surviving error was not dominated by the RHS roundoff and round 30's RHS number needs re-examining.",
+      "P2c_ALSO_REFUTES": "the u peak rises above 4.5e-12, i.e. the fix makes the stage-3 velocity worse. Under Rule 12 that is a worsened row with a boundary and an owner, not a revert.",
+      "P2d_the_surface_level": "the level-1 error stays within a factor 3 of 1.764547e-12, i.e. in [5.9e-13, 5.3e-12]."
+    },
+    "P3_the_kt1_to_kt10_trajectory": {
+      "instrument": "nemo_testcase_phase3_trajectory_gate --trajectory-only --max-step 10 on GYRE, all three oracle roots pinned to the V2 root; BEFORE and AFTER on clean committed trees.",
+      "before_pinned_now": {"first_over_bar": {"kt": 2, "fields": ["T", "S", "u", "v"]}, "kt2_u": 2.792271839094362e-12, "kt2_v": 3.387700601813204e-12, "kt2_T": 1.3614736849003888e-12, "kt2_S": 2.2181101297999213e-14, "kt2_ssh": 4.336808689942018e-19},
+      "P3a": "the first-over-bar step does NOT move: still kt=2, still on T, S, u and v.",
+      "P3b": "kt2.before.T and kt2.before.S do NOT move by a single bit. Round 32 moved kt=1's stage-3 velocity by 9.5e-07 and neither moved; this round moves it by at most about 3e-12, five orders smaller.",
+      "P3c_REFUTES_P3b": "either T or S moves. That is the finding, and it also means round 32's 'did not move by a single bit' has to be re-read.",
+      "P3d_the_named_next_candidate_for_T_and_S": "if T and S again do not move, their owner is not the stage-3 velocity at all. READ OFF THE CODE, not measured: legoESM's stage-3 tracer step consumes the STAGE-2 transport _g2, built from (u2_corr, v2_corr) at ocean_model_latlon_cgrid.py:6247-6248, so no change to the stage-3 velocity can reach kt=1's tracers; kt=2's T and S can only inherit through kt=1's FINAL u/v and eta. THE DISCRIMINATING MEASUREMENT, registered here so the next round does not re-derive it: score kt=1's T and S at stages 1, 2 and 3 against the round-29 root's oracle_rktracer_stage3_kt00000001.bin and the round-21 stage records, and report the FIRST stage over bar. A stage-1 or stage-2 failure exonerates everything downstream of it.",
+      "P3e_worsened_rows": "a row is WORSENED when normalized_max_abs is larger after than before; ABOVE ROUNDOFF when the relative increase exceeds 1e-6. Every worsened row is registered with its boundary and its owner, UNKNOWN allowed and written as such. Rule 12: never a revert."
+    },
+    "P4_rule12_per_card": {
+      "GYRE-zco": {
+        "executes": "the changed arm, at stage 3 (r0_3)",
+        "discharge": "a new rule12_stage_update mode on the round-31 walk gate -- which already owns nemo_explicit_update, the exact oracle side of this operator, and read_zdf_matrix -- drives legoESM's own rk3_stage_velocity_update with the record's uu_Kbb_in, uu_Krhs_in, rDt and umask.",
+        "P4a_CONFIRM": "BIT FOR BIT, exact = true and n_unequal = 0, not merely at the 1e-15 bar. The expression is one multiply, one add and one multiply on identical operands in identical association order, so anything less is a transcription defect.",
+        "P4a_REFUTE": "any unequal cell inside the writer's tile on the wet mask."
+      },
+      "LOCK_EXCHANGE-zco_and_OVERFLOW-zps": {
+        "executes": "NOT the changed arm. NEMO takes the key_qco ELSE arm on both (r0_4) and legoESM resolves momentum_advection = flux_form on both, so _vector_velocity_stage_update is False and the changed statement is not reached.",
+        "P4b_CONFIRM": "the kt=1..10 trajectory on each tank is BIT-IDENTICAL before and after: every one of the 50 rows unchanged and the residual arrays bit-equal.",
+        "P4b_REFUTE": "any bit moves. Then the refactor is not the no-op it claims to be on the qco arm, and that is a defect in the extraction rather than in the physics."
+      },
+      "ORCA2-zps": {
+        "executes": "unknown until its deck's ln_dynadv_vec is read; there is no ORCA2 card on this branch, so nothing can be driven.",
+        "disposition": "UNMEASURED. FRAME SPEC, unchanged from round 32's: one WRITE-only kt=1 stage-3 frame carrying uu(Kbb), uu(Krhs), rDt and umask at dynzdf.F90:119's entry, plus the deck's resolved ln_dynadv_vec, on the ORCA2 lane; that is the same acquisition the dyn_ldf question needs."
+      },
+      "DINO": {
+        "executes": "not a campaign card and no DINO gate runs this round.",
+        "disposition": "OPEN, not claimed. DINO's deck resolves ln_dynadv_vec = .TRUE. per its own recipe notes, so it would take the vector arm; unmeasured here."
+      }
+    }
+  },
+
+  "instrument_search_rule4": "searched scripts/validate/ocean_fidelity/testcases for an existing stage-update discharge and packages/ for an existing stage-update helper: grep 'def .*stage.*velocity|def .*stage_update|def rk3_stage' over packages/ and src/ returns rk3_stage_barotropic_correction, _nemo_metric_stage_transport, _nemo_stage_corrected_velocity and _nemo_ws_stage_barotropic_velocity -- none of them is the time-stepping update. grep 'omit_stage_qco_factor' returns an existing HARNESS ABLATION that zeroes the ratios; it is not the vector arm (it drops the mask too) and it is a hook, not a program. No new script is created: the new discharge is a MODE on the round-31 walk gate, and every other measurement reuses an existing gate.",
+
+  "review": {
+    "codex": "unavailable on this account",
+    "claim_review": "one fresh independent agent reviews THIS preregistration -- the mechanism, the point estimates and the falsifiers -- BEFORE a line of model code moves",
+    "diff_review": "a second fresh independent agent reviews the diff after it exists",
+    "neither_is_shown_the_other": true
+  },
+
+  "forbidden_this_round": [
+    "editing NEMO src/",
+    "makenemo, mpirun, any NEMO executable",
+    "git push, merge, stash, reset --hard, checkout of another commit in /tmp/codex-gyre",
+    "touching the decision-17 guard, the demo card, or the tanks' zdf_baroclinic_only flag",
+    "any configuration choice: an unavoidable one goes in the ASKED/UNASKED table and stops there"
+  ]
+}
