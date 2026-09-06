@@ -5348,14 +5348,25 @@ which is a wrong ANSWER rather than an error.  Plant-verified: replacing the
 face guard with `pass` turns the new test red, and `git checkout --` restores
 it with `git status --porcelain` empty.
 
-The other two are NOT claimed as pre-existing on inspection — they were
-re-run at round 28's starting tip `359c33c40ecc` in a disposable worktree,
-which is the rule this campaign uses for any new-looking failure:
+The other two are NOT called pre-existing on inspection — they were re-run at
+round 28's starting tip `359c33c40ecc` in a disposable worktree, which is what
+this campaign requires of any new-looking failure.  Both reproduce there:
+
+```text
+2 failed in 507.03s (0:08:27)      # at 359c33c40ecc, this round's changes absent
+FAILED tests/ocean/fidelity/test_recipe_case_board.py::test_every_oracle_comparison_has_a_row
+FAILED tests/ocean/fidelity/test_nemo_testcase_phase3_stage_sweep_gate.py::test_planted_stage_control_exits_nonzero_end_to_end
+```
 
 | failure | disposition |
 |---|---|
-| `test_recipe_case_board::test_every_oracle_comparison_has_a_row` | **PRE-EXISTING**, reproduced FAILING at the starting tip.  It wants board rows for `advection_nemo`, `grids_tripole_mpas`, `tendencies_nemo` and `three_way_nemo`; this round adds no `compare_*.py` driver at all |
-| `test_nemo_testcase_phase3_stage_sweep_gate::test_planted_stage_control_exits_nonzero_end_to_end` | baseline re-run **IN FLIGHT** at the starting tip and not finished when this was written.  What IS measured: this round modifies eight files and that gate is not one of them — the probes only import `GateError`/`git_sha`/`require`/`sha256` from it.  So it is PLAUSIBLY pre-existing and is deliberately NOT recorded as such until the baseline lands |
+| `test_recipe_case_board::test_every_oracle_comparison_has_a_row` | **PRE-EXISTING**, reproduced failing at the starting tip.  It wants board rows for `advection_nemo`, `grids_tripole_mpas`, `tendencies_nemo` and `three_way_nemo`; this round adds no `compare_*.py` driver at all |
+| `test_nemo_testcase_phase3_stage_sweep_gate::test_planted_stage_control_exits_nonzero_end_to_end` | **PRE-EXISTING**, reproduced failing at the starting tip.  Corroborating and independent: this round modifies eight files and that gate is not one of them — the probes only import `GateError`/`git_sha`/`require`/`sha256` from it |
+
+So round 28's own count is **one failure, found and fixed**, and the tree ends
+the round failing exactly the tests it started it failing.  The disposable
+worktree `/tmp/codex-gyre-r28-basecheck` (detached at `359c33c40ecc`) is
+FLAGGED, not deleted.
 
 ### Card debt registered, card NOT changed
 

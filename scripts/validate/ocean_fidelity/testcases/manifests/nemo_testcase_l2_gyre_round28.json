@@ -189,14 +189,14 @@
   },
   "starting_tip": "359c33c40ecc",
   "tests": {
-    "baseline_in_flight_not_claimed": [
-      "test_nemo_testcase_phase3_stage_sweep_gate::test_planted_stage_control_exits_nonzero_end_to_end"
-    ],
+    "baseline_at_starting_tip": "2 failed in 507.03s at 359c33c40ecc, both of them",
     "failure_owned_by_this_round": "test_nemo_testcase_lock_slow_forcing_owner::test_unknown_association_raises_rather_than_defaulting -- the shared-helper signature change made the guard test's positional call raise TypeError before reaching the guard's ValueError; fixed, and the new face guard has its own plant-verified test",
     "focused_two_touched_gate_modules": "23 passed",
     "pre_existing_reproduced_at_starting_tip": [
-      "test_recipe_case_board::test_every_oracle_comparison_has_a_row"
+      "test_recipe_case_board::test_every_oracle_comparison_has_a_row",
+      "test_nemo_testcase_phase3_stage_sweep_gate::test_planted_stage_control_exits_nonzero_end_to_end"
     ],
+    "round28_own_failure_count": 1,
     "whole_tests_ocean_fidelity": "3 failed, 764 passed, 7 skipped, 18 deselected in 2417.17s"
   }
 }
