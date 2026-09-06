@@ -7531,6 +7531,13 @@ one new arm for the mask shape validation item 1(h) added.
 
 The three round-32/33 files together: **57 passed** on a clean tree.
 
+**The full `tests/ocean/fidelity/` suite is UNMEASURED this round**, and that
+is said rather than implied: it was launched on the clean tree and was still
+running at 68 per cent when the round closed, so no pass/fail count from it is
+quoted.  Its log is `round33/round33_fidelity_suite.log`.  What IS measured is
+the 57 above plus the stamp ratchet's 10 and the citation gate, each run
+directly on the clean tree.
+
 **Gates, each with the line that decided it.**  The receipt citation gate
 PASSES on 155 citations with 0 unmapped and 0 failing, and its planted
 two-line shift exits non-zero.  The worktree-stamp ratchet floor moves `64` ->
