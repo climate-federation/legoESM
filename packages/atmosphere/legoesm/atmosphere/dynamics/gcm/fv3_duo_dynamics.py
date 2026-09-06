@@ -439,8 +439,21 @@ class FV3DuoDynamicsModel:
         def conv(a):
             if (hasattr(a, "ndim")
                     and horizontal_axes(lay, a.shape, 6) is not None):
-                w = gather_windows(lay, a)
-                return jax.device_put(w, sh) if sh is not None else w
+                # host-side gather: on device every one of the nb window
+                # slices is its own eagerly compiled XLA program per leaf
+                # (nb*leaves executables cached per process -- ~1.9 GB at
+                # C96 kt=3, growing with kt^2; 216-rank C192 OOM 2026-09-05)
+                w = gather_windows(lay, np.asarray(a), np)
+                if sh is None:
+                    return jnp.asarray(w)
+                # NOT device_put: for a multi-process sharding device_put
+                # first asserts the host array is identical on every process
+                # by gathering the WHOLE array across all ranks, per leaf
+                # (jax dispatch._device_put_sharding_impl) -- 27 GB/rank and
+                # 5 h for the 216-rank C192 IC (job 9654155).  The callback
+                # form transfers only this process's shards.
+                return jax.make_array_from_callback(
+                    w.shape, sh, lambda idx, w=w: w[idx])
             return a
         return jax.tree_util.tree_map(conv, bundle)
 

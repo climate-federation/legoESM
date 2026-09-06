@@ -565,3 +565,36 @@ trace (batched=False) is untouched by the fix.  Memory: per-rank RSS is
 C96/54, 24.6 GB at C192/216 (OOM at 8 ranks/node, job 9648703); compiled
 constants are only 55/162 MiB at C48/C96, so the growth is not literals —
 the gate now prints per-stage RSS to name it.
+
+## 2026-09-05/06 ladder incidents: fabric, initial state, thread pool
+
+* **Cluster fabric, not code.** Three 54-rank rows ran 150x slow (36-46 s/step,
+  compile 3000 s).  The bare neighbour-ppermute bench on the same nodes
+  measured 38-51 ms (gloo AND mpi; 0.11 ms on a healthy set), and later
+  allocations on unrelated nodes measured 48-73 ms — time-varying and
+  cluster-wide, coincident with the 99 %-full Lustre (same InfiniBand
+  fabric) stalling directory listings.  The MPI launcher now runs a bare
+  ppermute PREFLIGHT per allocation and refuses the timing row above
+  1 ms (`PREFLIGHT_MAX_US`), printing the slowest host.
+* **CPU binding.** task/cgroup binds nothing here (every rank saw all 32
+  cores, so XLA:CPU's Eigen pool was 32 threads per rank); the launcher
+  pins each rank to its `--cpus-per-task` cores (`bind_rank.sh`).  A/B in one
+  allocation on a healthy fabric: bound 0.256 s/step, unbound 0.258 — neutral
+  for the step, kept as the correct configuration (BIND=0 to revert).
+* **Initial state on many ranks.** `to_windows` built the windows with eager
+  per-window device slices (nb x leaves compiled programs) and
+  `jax.device_put(numpy, multi-host sharding)`, whose dispatch path asserts the
+  host array equal across ALL processes by gathering the whole array per leaf:
+  216 ranks C192 = 27 GB and 5 h per rank (job 9654155) vs 3 GB / 6 min in one
+  process (tiled_m6_ic_memory_probe.py).  Now: host numpy gather +
+  `make_array_from_callback` (addressable shards only).  Pending: a multi-rank
+  re-measurement once the fabric is healthy.
+* **kt=6 (C192, 216 ranks) tracer mismatch.** Step 1 bitwise on all 12
+  leaves; step 2 bitwise on 11, the tracer `q` differs on 94 % of cells (rel
+  4.3).  In-process C192 kt=6 gate (216 virtual devices) queued to separate an
+  exchange defect from the multi-process run on a degraded fabric.
+* Persistent compile cache (`~/.cache/legoesm/jit_cache` on Lustre) is now
+  disabled in the MPI launcher (`LEGOESM_JIT_CACHE_DIR=""`).
+* Profile on a healthy fabric (54 ranks C96): compute ~0.12 s/step (= flat/9,
+  ideal), ppermute thunks 2702/step at ~24 us + gaps ~0.12 s -> count-bound.
+  M8 (fewer messages) claim sent to codex + GLM before code.

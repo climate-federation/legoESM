@@ -101,9 +101,17 @@ def main(argv=None):
                          "steps were bitwise")
     args = ap.parse_args(argv)
 
+    import faulthandler
+    import signal
+    faulthandler.register(signal.SIGUSR1, all_threads=True)   # stack dump on demand
     import jax
+    import jax.numpy as jnp
     if args.distributed:
-        jax.distributed.initialize(initialization_timeout=900)
+        import os as _os
+        ids = _os.environ.get("JAX_LOCAL_DEVICE_IDS")   # GPU: "0" = one GPU per task
+        jax.distributed.initialize(
+            initialization_timeout=900,
+            local_device_ids=[int(i) for i in ids.split(",")] if ids else None)
     jax.config.update("jax_enable_x64", True)
     from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
     rank0 = jax.process_index() == 0
@@ -114,7 +122,20 @@ def main(argv=None):
         which stage's cost scales with the GLOBAL grid on every rank"""
         import resource
         mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
-        if rank0:
+        import time as _t
+        stage = f"{stage} @{_t.strftime('%H:%M:%S')}"
+        if args.distributed:
+            # every rank's peak: job 9648882 (216 ranks) showed ONE rank at
+            # 27.9 GB while the mean was 5 GB -- the growth is not uniform
+            from jax.experimental import multihost_utils as mhu
+            allr = np.asarray(mhu.process_allgather(jnp.asarray(mb)))
+            if rank0:
+                print(f"[m6] rss {stage}: rank0 {mb:.0f} MB; over ranks "
+                      f"mean {allr.mean():.0f} max {allr.max():.0f} "
+                      f"(rank {int(allr.argmax())}) min {allr.min():.0f} MB; "
+                      f"ranks >2x mean: "
+                      f"{np.flatnonzero(allr > 2 * allr.mean()).tolist()}")
+        elif rank0:
             print(f"[m6] rss {stage}: {mb:.0f} MB (rank 0 peak so far)")
 
     from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
