@@ -70,3 +70,15 @@ def test_first_checked_step_runs_the_gate(mesh):
     lam = 8.0 / dv_min ** 2
     with pytest.raises(ValueError, match="vorticity filter"):
         m.check_barotropic_cfl(11.0 / (lam * lam))
+
+
+def test_production_step_runs_the_gate_too(mesh):
+    """codex 2026-09-06: the OMIP runner calls step(), not step_checked()."""
+    from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+    z = create_ocean_z_star(3, H_max=300.0)
+    m = _model(mesh, 1.0)
+    dv_min = float(np.min(np.where(np.asarray(mesh.dvEdge) > 0, np.asarray(mesh.dvEdge), np.inf)))
+    lam = 8.0 / dv_min ** 2
+    state = rest_state_mpas_ocean(mesh, z)
+    with pytest.raises(ValueError, match="vorticity filter"):
+        m.step(state, 11.0 / (lam * lam))

@@ -208,3 +208,18 @@ aux3d linkage and the minimum-level policy, not just counts.
   pressure-gradient scheme (term budget on the day-15 state) -> both need a run or a config flag -> ASK.
   TRAP: a 15-day leg writes its final state only as snapshot_final.npz; a symlink is overwritten by the
   next leg -> copy it (day 15 of rung 1 rebuilt from restart_leg1.npz, no mass fluxes).
+
+## 2026-09-06 — all 11 decisions approved by the user; dual review of the batch
+- (5) real-FW trio cancelled; (6) 82 GB / 68 dirs deleted (4.1 TB free).
+- (3) temperature twin for the virtual closure (4eb1ac429): GLM CRITICAL "double count" REFUTED by the
+  NEMO 5 source: trasbc.F90:141 adds emp*T1/rho0 under lk_linssh with no compensating removal from qns
+  (none in sbcmod); sbcssr.F90:138 and sbcfwb.F90:294 put the restoring/correction water's heat in qns =
+  our sss_restoring heat_flux; our normalisation water enters eta with no heat = NEMO's net. codex: signs,
+  masks, MPAS single application, real-branch exclusion correct; restoring twin active only with the
+  water-flux channel (fw.restoring None otherwise) = consistent with where the heat goes.
+- (9)(10) vorticity filter (e74d8b7cd + follow-up): codex MAJOR the gate was only in step_checked ->
+  step() is now a host wrapper (gate once, traced dt skipped) over the jitted _step_jit; bound 8/dv_min^2
+  is heuristic (power iteration = future); ~20 MPAS cards now run filter-off by the recipe default
+  (decision 9). (8) fesom rule: no findings. (11) src-first: no module overlap (comm). Cards: fwfix = 3
+  closure flags only; base2 is a NEW BASELINE (4 changes, header says so); codex MAJOR fesom card had no
+  pipefail -> fixed.

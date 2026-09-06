@@ -160,6 +160,7 @@ class MPASOceanModel:
         self.z_coord = z_coord
         self.config = config or MPASOceanConfig()
         self._cfl_checked = False
+        self._vf_checked = False
         # Internal wave-driven mixing (zdfiwm) static forcing maps
         # (IWMForcing of de Lavergne power/decay fields on THIS mesh's
         # (nCells,) cell centres), captured as closure constants by the
@@ -1328,8 +1329,31 @@ class MPASOceanModel:
             tke=Field(data=tke0, name="tke", dims=("nCells", "level"),
                       units="m^2/s^2"))
 
-    @partial(jax.jit, static_argnums=(0,), static_argnames=("halo_refresh",))
     def step(
+        self,
+        state: MPASOceanState,
+        dt: float,
+        freshwater: FreshwaterForcing | None = None,
+        surface_forcing=None,
+        sponge=None,
+        halo_refresh=None,
+    ) -> MPASOceanState:
+        """Host-side entry: the vorticity-filter stability gate runs once
+        (the OMIP runner calls step(), not step_checked(); codex 2026-09-06),
+        then the JIT-compiled :meth:`_step_jit`.  ``dt`` must be a Python
+        float on the first call for the gate; later calls pass through.
+        """
+        if not self._vf_checked and not isinstance(dt, jax.core.Tracer):
+            # (a traced dt -- step() called under an outer jit/grad -- cannot
+            # be gated here; the checked entry and the runner pass floats)
+            self.check_vorticity_filter_stability(float(dt))
+            self._vf_checked = True
+        return self._step_jit(state, dt, freshwater=freshwater,
+                              surface_forcing=surface_forcing, sponge=sponge,
+                              halo_refresh=halo_refresh)
+
+    @partial(jax.jit, static_argnums=(0,), static_argnames=("halo_refresh",))
+    def _step_jit(
         self,
         state: MPASOceanState,
         dt: float,

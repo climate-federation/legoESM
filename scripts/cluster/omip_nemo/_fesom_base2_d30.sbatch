@@ -15,6 +15,7 @@
 # PRE-REGISTERED (day 30 vs GATEWAY rec 5, vs fesom_nemo75v_d30): SST rmse
 #   within 0.05 of 0.65; nino3 within 0.2 of +1.39; SSS rmse within 0.05 of
 #   0.88; no blow-up (the 4.5 m columns were the CFL worry).
+set -uo pipefail
 PIN=${1:?usage: sbatch _fesom_base2_d30.sbatch <pinned-sha>}
 ROOT=/burg-archive/glab/users/pg2328/_omip_wt; cd $ROOT || exit 1
 HEAD=$(git rev-parse HEAD)
@@ -46,6 +47,9 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid fesom \
   --forcing-ramp-days 5 \
   --dt 1800 --years 0.0822 --snapshot-every-days 15 \
   --output $ROOT/results/omip_nemo/fesom_base2_d30 2>&1 | tail -14
+run_rc=${PIPESTATUS[0]}
+echo "=== run rc=$run_rc"
+[ "$run_rc" -eq 0 ] || { echo "FATAL: run failed rc=$run_rc"; exit 1; }
 echo "=== run rc=$? ==="
 export JAX_PLATFORMS=cpu
 GW_T=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY/ORCA1_5d_20000101_20000331_grid_T.nc
