@@ -1,0 +1,328 @@
+--- trazdf.F90.shipped
++++ trazdf.F90
+@@ -42,6 +42,19 @@
+    !! * Substitutions
+ #  include "do_loop_substitute.h90"
+ #  include "domzgr_substitute.h90"
++
++   !                    !--- round-35 L2 GYRE WRITE-only tra_zdf operand instrument ---!
++   !     Module-level because the capture points straddle two routines: the
++   !     matrix and the three recurrences are inside tra_zdf_imp, which knows
++   !     neither kt nor nit000, while the record is written from tra_zdf,
++   !     which does.  No value written below is ever read back into a
++   !     prognostic, a work array or a closure coefficient.
++   LOGICAL , SAVE ::   ll_l2_tra = .FALSE.              ! instrument armed
++   REAL(wp), SAVE, ALLOCATABLE, DIMENSION(:,:,:)   ::   zl2_trh, zl2_srh   ! Krhs AS RECEIVED
++   REAL(wp), SAVE, ALLOCATABLE, DIMENSION(:,:,:)   ::   zl2_wmx, zl2_wlu   ! avt+ah_wslp2 ; LU diagonal
++   REAL(wp), SAVE, ALLOCATABLE, DIMENSION(:,:,:)   ::   zl2_wi , zl2_wd , zl2_ws
++   REAL(wp), SAVE, ALLOCATABLE, DIMENSION(:,:,:,:) ::   zl2_rhs, zl2_fwd, zl2_sol
++   REAL(wp), SAVE, ALLOCATABLE, DIMENSION(:,:,:)   ::   zl2_tmp            ! macro scratch
+    !!----------------------------------------------------------------------
+    !! NEMO/OCE 5.0, NEMO Consortium (2024)
+    !! Software governed by the CeCILL license (see ./LICENSE)
+@@ -60,6 +73,10 @@
+       !
+       INTEGER  ::   ji, jj, jk   ! Dummy loop indices
+       REAL(wp), DIMENSION(:,:,:), ALLOCATABLE ::   ztrdt, ztrds   ! 3D workspace
++
++      !                    !--- round-35 instrument locals ---!
++      INTEGER  ::   il2_unit, il2_ios
++      CHARACTER(LEN=16) ::   cl_l2_magic
+       !!---------------------------------------------------------------------
+       !
+       IF( ln_timing )   CALL timing_start('tra_zdf')
+@@ -79,6 +96,29 @@
+       ENDIF
+       !
+       !                                      !* compute lateral mixing trend and add it to the general trend
++
++      !                    !--- round-35 instrument set-up ---!
++      !     Fail closed on domain tiling: the buffers are global, so a tiled
++      !     call would dump one tile and label it the whole field.  Fail
++      !     closed on a tracer count other than the active pair and on a
++      !     build whose wp is not 64-bit, because the reader assumes both.
++      ll_l2_tra = ( lwp .AND. kt == nit000 )
++      IF( ll_l2_tra ) THEN
++         IF( l_istiled )                     CALL ctl_stop( 'tra_zdf: L2 instrument does not support domain tiling' )
++         IF( STORAGE_SIZE( 1._wp ) /= 64 )   CALL ctl_stop( 'tra_zdf: L2 instrument requires 64-bit wp' )
++         IF( jpts /= 2 )                     CALL ctl_stop( 'tra_zdf: L2 instrument assumes the active T/S pair' )
++         ALLOCATE( zl2_trh(jpi,jpj,jpk  ), zl2_srh(jpi,jpj,jpk  ),                        &
++            &      zl2_wmx(jpi,jpj,jpk  ), zl2_wlu(jpi,jpj,jpk  ),                        &
++            &      zl2_wi (jpi,jpj,jpkm1), zl2_wd (jpi,jpj,jpkm1), zl2_ws(jpi,jpj,jpkm1), &
++            &      zl2_rhs(jpi,jpj,jpk,jpts), zl2_fwd(jpi,jpj,jpk,jpts),                  &
++            &      zl2_sol(jpi,jpj,jpk,jpts), zl2_tmp(jpi,jpj,jpk) )
++         zl2_wmx(:,:,:) = 0._wp   ;   zl2_wlu(:,:,:) = 0._wp   ;   zl2_tmp(:,:,:) = 0._wp
++         zl2_wi (:,:,:) = 0._wp   ;   zl2_wd (:,:,:) = 0._wp   ;   zl2_ws (:,:,:) = 0._wp
++         zl2_rhs(:,:,:,:) = 0._wp ;   zl2_fwd(:,:,:,:) = 0._wp ;   zl2_sol(:,:,:,:) = 0._wp
++         zl2_trh(:,:,:) = pts(:,:,:,jp_tem,Krhs)   ! the accumulator AS RECEIVED
++         zl2_srh(:,:,:) = pts(:,:,:,jp_sal,Krhs)
++      ENDIF
++      !
+       CALL tra_zdf_imp( 'TRA', rDt, Kbb, Kmm, Krhs, pts, Kaa, jpts )
+ 
+ !!gm WHY here !   and I don't like that !
+@@ -89,6 +129,169 @@
+       IF ( .NOT.(ln_SEOS.AND.(rn_b0==0._wp)) ) THEN
+          WHERE( pts(T2D(0),:,jp_sal,Kaa) < 0._wp )   pts(T2D(0),:,jp_sal,Kaa) = 0.1_wp
+       ENDIF
++
++      !                    !--- round-35 instrument: the record ---!
++      !     Self-describing, on the round-29 pattern: a 16-character magic,
++      !     sixteen header integers, then one (name, rank, n1, n2, n3,
++      !     payload) group per array until EOF, so a reader never has to know
++      !     the list in advance.  Written HERE, after the DRAKKAR clamp at
++      !     :89-91, so the record carries the solved column on both sides of
++      !     it.  kstg is the literal 3 because under key_RK3 tra_zdf is called
++      !     from exactly one place -- the stage-3 arm of stprk3_stg.F90 -- and
++      !     the routine has no kstg argument to read it from.
++      IF( ll_l2_tra ) THEN
++         OPEN( NEWUNIT=il2_unit, FILE='oracle_trazdf_matrix_kt00000001.bin', ACCESS='STREAM',   &
++            &  FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE', IOSTAT=il2_ios )
++         IF( il2_ios /= 0 )   CALL ctl_stop( 'tra_zdf: cannot open L2 trazdf dump' )
++         cl_l2_magic = 'NEMO_L2_TRAZD_1'
++         WRITE(il2_unit) cl_l2_magic
++         WRITE(il2_unit) 1, kt, 3, Kbb, Kmm, Krhs, Kaa, jpi, jpj, jpk, jpkm1,   &
++            &                ntsi, ntei, ntsj, ntej, STORAGE_SIZE(1._wp)
++         !
++         !              !-- the ARM this record was written by, as payload --!
++         !     The reader REFUSES a record whose branch it cannot score, so
++         !     these are numbers in the stream rather than prose in a comment.
++         !     1 is true, 0 is false.
++         zl2_tmp(1,1,1) = 0._wp   ;   IF( ln_zdfddm     )   zl2_tmp(1,1,1) = 1._wp
++         WRITE(il2_unit) 'ln_zdfddm       '   ;   WRITE(il2_unit) 0, 1, 1, 1
++         WRITE(il2_unit) zl2_tmp(1,1,1)
++         zl2_tmp(1,1,1) = 0._wp   ;   IF( ln_zad_Aimp   )   zl2_tmp(1,1,1) = 1._wp
++         WRITE(il2_unit) 'ln_zad_Aimp     '   ;   WRITE(il2_unit) 0, 1, 1, 1
++         WRITE(il2_unit) zl2_tmp(1,1,1)
++         zl2_tmp(1,1,1) = 0._wp   ;   IF( ln_zdfmfc     )   zl2_tmp(1,1,1) = 1._wp
++         WRITE(il2_unit) 'ln_zdfmfc       '   ;   WRITE(il2_unit) 0, 1, 1, 1
++         WRITE(il2_unit) zl2_tmp(1,1,1)
++         zl2_tmp(1,1,1) = 0._wp   ;   IF( ln_traldf_msc )   zl2_tmp(1,1,1) = 1._wp
++         WRITE(il2_unit) 'ln_traldf_msc   '   ;   WRITE(il2_unit) 0, 1, 1, 1
++         WRITE(il2_unit) zl2_tmp(1,1,1)
++         zl2_tmp(1,1,1) = 0._wp   ;   IF( l_ldfslp      )   zl2_tmp(1,1,1) = 1._wp
++         WRITE(il2_unit) 'l_ldfslp        '   ;   WRITE(il2_unit) 0, 1, 1, 1
++         WRITE(il2_unit) zl2_tmp(1,1,1)
++         zl2_tmp(1,1,1) = 0._wp   ;   IF( ln_SEOS       )   zl2_tmp(1,1,1) = 1._wp
++         WRITE(il2_unit) 'ln_SEOS         '   ;   WRITE(il2_unit) 0, 1, 1, 1
++         WRITE(il2_unit) zl2_tmp(1,1,1)
++         zl2_tmp(1,1,1) = 0._wp   ;   IF( ALLOCATED( ah_wslp2 ) )   zl2_tmp(1,1,1) = 1._wp
++         WRITE(il2_unit) 'a33_allocated   '   ;   WRITE(il2_unit) 0, 1, 1, 1
++         WRITE(il2_unit) zl2_tmp(1,1,1)
++         WRITE(il2_unit) 'rDt             '   ;   WRITE(il2_unit) 0, 1, 1, 1
++         WRITE(il2_unit) rDt
++         WRITE(il2_unit) 'rn_b0           '   ;   WRITE(il2_unit) 0, 1, 1, 1
++         WRITE(il2_unit) rn_b0
++         WRITE(il2_unit) 'jp_tem          '   ;   WRITE(il2_unit) 0, 1, 1, 1
++         WRITE(il2_unit) REAL( jp_tem, wp )
++         WRITE(il2_unit) 'jp_sal          '   ;   WRITE(il2_unit) 0, 1, 1, 1
++         WRITE(il2_unit) REAL( jp_sal, wp )
++         !
++         !              !-- the tracer fields as tra_zdf RECEIVED them --!
++         WRITE(il2_unit) 'T_Kbb_in        '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) pts(:,:,:,jp_tem,Kbb)
++         WRITE(il2_unit) 'S_Kbb_in        '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) pts(:,:,:,jp_sal,Kbb)
++         WRITE(il2_unit) 'T_Kmm_in        '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) pts(:,:,:,jp_tem,Kmm)
++         WRITE(il2_unit) 'S_Kmm_in        '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) pts(:,:,:,jp_sal,Kmm)
++         WRITE(il2_unit) 'T_Krhs_in       '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_trh
++         WRITE(il2_unit) 'S_Krhs_in       '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_srh
++         !
++         !              !-- the matrix, as tra_zdf_imp built it --!
++         WRITE(il2_unit) 'zwt_mix         '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_wmx
++         WRITE(il2_unit) 'zwi             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpkm1
++         WRITE(il2_unit) zl2_wi
++         WRITE(il2_unit) 'zwd             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpkm1
++         WRITE(il2_unit) zl2_wd
++         WRITE(il2_unit) 'zws             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpkm1
++         WRITE(il2_unit) zl2_ws
++         WRITE(il2_unit) 'zwt_lu          '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_wlu
++         !
++         !              !-- the right-hand side, the forward sweep, the solve --!
++         WRITE(il2_unit) 'rhs_T           '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_rhs(:,:,:,jp_tem)
++         WRITE(il2_unit) 'rhs_S           '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_rhs(:,:,:,jp_sal)
++         WRITE(il2_unit) 'fwd_T           '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_fwd(:,:,:,jp_tem)
++         WRITE(il2_unit) 'fwd_S           '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_fwd(:,:,:,jp_sal)
++         WRITE(il2_unit) 'sol_T_pre_clamp '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_sol(:,:,:,jp_tem)
++         WRITE(il2_unit) 'sol_S_pre_clamp '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_sol(:,:,:,jp_sal)
++         WRITE(il2_unit) 'sol_T_post_clamp'   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) pts(:,:,:,jp_tem,Kaa)
++         WRITE(il2_unit) 'sol_S_post_clamp'   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) pts(:,:,:,jp_sal,Kaa)
++         !
++         !              !-- the operands the solve reads --!
++         WRITE(il2_unit) 'avt             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) avt
++         WRITE(il2_unit) 'avs             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) avs
++         zl2_tmp(:,:,:) = 0._wp
++         IF( ALLOCATED( ah_wslp2 ) )   zl2_tmp(:,:,:) = ah_wslp2(:,:,:)
++         WRITE(il2_unit) 'ah_wslp2        '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_tmp
++         zl2_tmp(:,:,:) = 0._wp
++         IF( ALLOCATED( akz      ) )   zl2_tmp(:,:,:) = akz(:,:,:)
++         WRITE(il2_unit) 'akz             '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_tmp
++         WRITE(il2_unit) 'tmask           '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) tmask
++         !
++         !     e3t and e3w are PREPROCESSOR MACROS under key_qco
++         !     (domzgr_substitute.h90:126, :131), not arrays, so each is
++         !     materialised elementwise.  E3t_0 and E3w_0 are macros too, and
++         !     they are recorded so the reader can check the SUBSTITUTION
++         !     itself and not only its result.
++         DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++            zl2_tmp(ji,jj,jk) = e3t(ji,jj,jk,Kbb)
++         END DO            ;   END DO            ;   END DO
++         WRITE(il2_unit) 'e3t_Kbb         '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_tmp
++         DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++            zl2_tmp(ji,jj,jk) = e3t(ji,jj,jk,Kmm)
++         END DO            ;   END DO            ;   END DO
++         WRITE(il2_unit) 'e3t_Kmm         '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_tmp
++         DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++            zl2_tmp(ji,jj,jk) = e3t(ji,jj,jk,Kaa)
++         END DO            ;   END DO            ;   END DO
++         WRITE(il2_unit) 'e3t_Kaa         '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_tmp
++         DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++            zl2_tmp(ji,jj,jk) = e3w(ji,jj,jk,Kmm)
++         END DO            ;   END DO            ;   END DO
++         WRITE(il2_unit) 'e3w_Kmm         '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_tmp
++         DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++            zl2_tmp(ji,jj,jk) = E3t_0(ji,jj,jk)
++         END DO            ;   END DO            ;   END DO
++         WRITE(il2_unit) 'e3t_0           '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_tmp
++         DO jk = 1, jpk    ;   DO jj = 1, jpj    ;   DO ji = 1, jpi
++            zl2_tmp(ji,jj,jk) = E3w_0(ji,jj,jk)
++         END DO            ;   END DO            ;   END DO
++         WRITE(il2_unit) 'e3w_0           '   ;   WRITE(il2_unit) 3, jpi, jpj, jpk
++         WRITE(il2_unit) zl2_tmp
++         !
++         WRITE(il2_unit) 'r3t_Kbb         '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) r3t(:,:,Kbb)
++         WRITE(il2_unit) 'r3t_Kmm         '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) r3t(:,:,Kmm)
++         WRITE(il2_unit) 'r3t_Kaa         '   ;   WRITE(il2_unit) 2, jpi, jpj, 1
++         WRITE(il2_unit) r3t(:,:,Kaa)
++         !
++         CLOSE(il2_unit)
++         DEALLOCATE( zl2_trh, zl2_srh, zl2_wmx, zl2_wlu, zl2_wi, zl2_wd,   &
++            &        zl2_ws, zl2_rhs, zl2_fwd, zl2_sol, zl2_tmp )
++         ll_l2_tra = .FALSE.
++         WRITE(numout,*) 'L2_TRAZDF_MATRIX_DUMP ', kt, Kbb, Kmm, Krhs, Kaa
++      ENDIF
++      !
+ !!gm
+ 
+       IF( l_trdtra )   THEN                      ! save the vertical diffusive trends for further diagnostics
+@@ -202,6 +405,15 @@
+                   ENDIF
+                ENDIF
+                zwt(:,1) = 0._wp
++
++               !                 !--- round-35 instrument: the mixing coefficient AS ASSEMBLED ---!
++               !     zwt holds avt (+ ah_wslp2 or akz) here and is OVERWRITTEN
++               !     by the first recurrence below, so it has to be taken now.
++               IF( ll_l2_tra .AND. cdtype == 'TRA' ) THEN
++                  DO_2Dik( 0, 0,   1, jpk, 1 )
++                     zl2_wmx(ji,jj,jk) = zwt(ji,jk)
++                  END_2D
++               ENDIF
+                !
+                ! Diagonal, lower (i), upper (s)  (including the bottom boundary condition since avt is masked)
+                IF( ln_zad_Aimp ) THEN         ! Adaptive implicit vertical advection
+@@ -233,6 +445,18 @@
+                      zwd(ji,jk) = zwd(ji,jk) - e3t(ji,jj,jk,Kaa) * p2dt * edmfm(ji,jj,jk  ) / e3w(ji,jj,jk+1,Kmm)
+                   END_2D
+                ENDIF
++
++               !                 !--- round-35 instrument: the matrix AS BUILT ---!
++               !     After every contribution -- the ln_zad_Aimp arm above and
++               !     the ln_zdfmfc block -- and before the LU recurrence, which
++               !     writes zwt and not zwd, so zwd is still the built diagonal.
++               IF( ll_l2_tra .AND. cdtype == 'TRA' ) THEN
++                  DO_2Dik( 0, 0,   1, jpkm1, 1 )
++                     zl2_wi(ji,jj,jk) = zwi(ji,jk)
++                     zl2_wd(ji,jj,jk) = zwd(ji,jk)
++                     zl2_ws(ji,jj,jk) = zws(ji,jk)
++                  END_2D
++               ENDIF
+                !
+                !! Matrix inversion from the first level
+                !!----------------------------------------------------------------------
+@@ -259,6 +483,13 @@
+                DO_2Dik( 0, 0,   2, jpkm1, 1 )
+                   zwt(ji,jk) = zwd(ji,jk) - zwi(ji,jk) * zws(ji,jk-1) / zwt(ji,jk-1)
+                END_2D
++
++               !                 !--- round-35 instrument: the LU diagonal ---!
++               IF( ll_l2_tra .AND. cdtype == 'TRA' ) THEN
++                  DO_2Dik( 0, 0,   1, jpk, 1 )
++                     zl2_wlu(ji,jj,jk) = zwt(ji,jk)
++                  END_2D
++               ENDIF
+                !
+             ENDIF
+             !
+@@ -272,11 +503,29 @@
+                pt(ji,jj,1,jn,Kaa) =       e3t(ji,jj,1,Kbb) * pt(ji,jj,1,jn,Kbb )    &
+                   &               + p2dt * e3t(ji,jj,1,Kmm) * pt(ji,jj,1,jn,Krhs)
+             END_1D
++
++            !                    !--- round-35 instrument: the surface right-hand side ---!
++            !     Level 1 has no zrhs temporary: NEMO writes the same
++            !     expression straight into pt(Kaa), so it is read back here.
++            IF( ll_l2_tra .AND. cdtype == 'TRA' ) THEN
++               DO_1Di( 0, 0 )
++                  zl2_rhs(ji,jj,1,jn) = pt(ji,jj,1,jn,Kaa)
++               END_1D
++            ENDIF
+             DO_2Dik( 0, 0,   2, jpkm1, 1 )
+                zrhs =       e3t(ji,jj,jk,Kbb) * pt(ji,jj,jk,jn,Kbb )   &
+                   & + p2dt * e3t(ji,jj,jk,Kmm) * pt(ji,jj,jk,jn,Krhs)   ! zrhs=right hand side
++
++               IF( ll_l2_tra .AND. cdtype == 'TRA' )   zl2_rhs(ji,jj,jk,jn) = zrhs
+                pt(ji,jj,jk,jn,Kaa) = zrhs - zwi(ji,jk) / zwt(ji,jk-1) * pt(ji,jj,jk-1,jn,Kaa)
+             END_2D
++
++            !                    !--- round-35 instrument: the forward sweep ---!
++            IF( ll_l2_tra .AND. cdtype == 'TRA' ) THEN
++               DO_2Dik( 0, 0,   1, jpk, 1 )
++                  zl2_fwd(ji,jj,jk,jn) = pt(ji,jj,jk,jn,Kaa)
++               END_2D
++            ENDIF
+             !
+             DO_1Di( 0, 0 )             !* 3d recurrence:    Xk = (Zk - Sk Xk+1 ) / Tk   (result is the after tracer)
+                pt(ji,jj,jpkm1,jn,Kaa) = pt(ji,jj,jpkm1,jn,Kaa) / zwt(ji,jpkm1) * tmask(ji,jj,jpkm1)
+@@ -285,6 +534,15 @@
+                pt(ji,jj,jk,jn,Kaa) = ( pt(ji,jj,jk,jn,Kaa) - zws(ji,jk) * pt(ji,jj,jk+1,jn,Kaa) )   &
+                   &             / zwt(ji,jk) * tmask(ji,jj,jk)
+             END_2D
++
++            !                    !--- round-35 instrument: the solved column ---!
++            !     Taken inside tra_zdf_imp, so it is the PRE-CLAMP column: the
++            !     DRAKKAR negative-salinity clamp at :89-91 has not run yet.
++            IF( ll_l2_tra .AND. cdtype == 'TRA' ) THEN
++               DO_2Dik( 0, 0,   1, jpk, 1 )
++                  zl2_sol(ji,jj,jk,jn) = pt(ji,jj,jk,jn,Kaa)
++               END_2D
++            ENDIF
+             !                                         ! ================= !
+          END DO                                       !    tracer loop    !
+          !                                            ! ================= !
