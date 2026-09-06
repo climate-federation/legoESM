@@ -7531,12 +7531,33 @@ one new arm for the mask shape validation item 1(h) added.
 
 The three round-32/33 files together: **57 passed** on a clean tree.
 
-**The full `tests/ocean/fidelity/` suite is UNMEASURED this round**, and that
-is said rather than implied: it was launched on the clean tree and was still
-running at 68 per cent when the round closed, so no pass/fail count from it is
-quoted.  Its log is `round33/round33_fidelity_suite.log`.  What IS measured is
-the 57 above plus the stamp ratchet's 10 and the citation gate, each run
-directly on the clean tree.
+**The full `tests/ocean/fidelity/` suite: 910 passed, 3 failed, 7 skipped in
+39 min 16 s** -- and the run is CONTAMINATED, which is the more important fact.
+Every one of the three was run again in isolation to decide whether it is this
+round's:
+
+* `test_recipe_case_board.py::test_every_oracle_comparison_has_a_row` --
+  PRE-EXISTING.  Round 32 recorded it; it reproduces on the clean tree, and the
+  four drivers it names have nothing to do with this round.
+* `test_nemo_testcase_phase3_stage_sweep_gate.py::test_planted_stage_control_exits_nonzero_end_to_end`
+  -- PRE-EXISTING.  Round 32 recorded it, reproduced on its own BEFORE probe
+  worktree.
+* `test_nemo_testcase_worktree_stamp.py::test_a_dirty_tree_refuses` -- NOT a
+  failure of this round's code.  It PASSES on the clean tree, twice.
+
+**WHY THE RUN IS CONTAMINATED, recorded because the round-32 receipt logged the
+same accident and it happened again.**  A 39-minute suite spanned a moment when
+a tracked file in this worktree -- `nemo_testcase_l2_gyre_round21_admission.py`
+-- was rewritten by SOMETHING OTHER THAN THIS ROUND, 391 lines added and 169
+removed, at 05:20.  A worktree this round's provenance sentences call
+single-writer is not one.  The stamper refuses a dirty tree, which is why two
+stamp tests read as failures; both pass on the restored tree.  Nothing else
+this round measured is affected: every other artifact was produced before
+05:20, and the round's headline numbers were taken between 03:56 and 04:47.
+A re-run on the clean tree is logged as `round33_fidelity_suite_rerun.log`.
+
+What is measured beyond that: the 57 above, the stamp ratchet's 10, and the
+citation gate, each run directly on a clean tree.
 
 **Gates, each with the line that decided it.**  The receipt citation gate
 PASSES on 155 citations with 0 unmapped and 0 failing, and its planted
