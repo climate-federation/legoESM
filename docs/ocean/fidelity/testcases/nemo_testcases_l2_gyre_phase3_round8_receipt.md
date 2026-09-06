@@ -8841,3 +8841,218 @@ operator.
    blocker the moment a later round inherits round 35 as its baseline.
 7. The rounds-33/34 bookkeeping list is untouched except where it blocked:
    nothing on it was needed this round.
+
+## Round 37 — the solve was fused, the dry diagonal was substituted, and the owner is neither
+
+Round 37 starts from `e49063768799` on a clean tree, same regime: CPU
+production JIT, fp64/x64, `transcendentals="libm"`, oracle V2.  The
+preregistration is
+`manifests/nemo_testcase_l2_gyre_round37_preregister.json`, committed at
+`4569156f07a6`, and it records as MEASUREMENTS -- not as predictions -- the
+three localisation results that were taken before it was written.  **No NEMO
+executable was run by the agent, no `makenemo` or `mpirun` was invoked, and no
+NEMO source was edited.**  The operator ran the round's one acquisition.
+
+Three detached probe worktrees are flagged: `/tmp/codex-gyre-r37-start` at
+`e49063768799`, `/tmp/codex-gyre-r37-before` at `4569156f07a6` and
+`/tmp/codex-gyre-r37-presum` at `4ba1ffd6b428`, each used to take a BEFORE
+against the pre-change model with the same gate source.
+
+### Item 1 — the instrument says what it writes, and the record proves it
+
+`zdf_oce.f90:85-86` allocates `avt` and `avs` over the INTERIOR box while
+`avm`, on the same `ALLOCATE`, is full-domain.  Round 35 wrote both raw under
+a header declaring `jpi, jpj, jpk`, so each payload was 57536 bytes short of
+its own header and every array after `avs` landed at the wrong offset.  The
+two `WRITE`s become the staging idiom four lines below them already uses for
+`ah_wslp2` and `akz`; `ln_tile` is `F` on this card
+(`round35_oracle_trazdf_matrix/ocean.output:247`), so `ntsi:ntei,ntsj:ntej` IS
+`Nis0:Nie0,Njs0:Nje0` and the copy conforms exactly.
+
+**The staged-temporary form was chosen over declaring the true interior
+extents in the header**, because it leaves the record uniform: no reader needs
+a special case, and that is what closes round 36's open item 8 at the source
+-- the shared admission gate has no interior-extent recovery and raises on the
+round-35 record.
+
+The delta patches the ROUND-35 CARD's own `MY_SRC`, so round 35's "the patch
+may only add lines" guard no longer states the invariant it stood for.
+`run.sh` checks the stronger form on the BUILT file: `MY_SRC/trazdf.F90` must
+differ from NEMO's shipped `trazdf.F90` by additions only.  Measured before
+the commit and re-checked by `run.sh` before building: **0 removed lines**.
+
+The acquisition ran.  The new record is 6965416 bytes, exactly 115072 = 2 x
+57536 longer than round 35's.  **The field-by-field twin, through the gate's
+own reader -- the only one that can decode both -- is PASS: all 44 arrays bit
+for bit what round 35 wrote, `avt` and `avs` included, 0 failures; round 35's
+record still needs the salvage and round 37's does not** (`tile_shaped_salvage`
+is `{}`).  The admission is PASS with an empty owned-field difference list,
+its plant turns it red, the round-29 momentum regression is AT-BAR, and
+`round37_outputs.sha256` is written.
+
+### Item 2 — THE OWNER IS NEITHER THE SOLVE NOR ITS RIGHT-HAND SIDE
+
+Round 34 attributed GYRE's kt=1 stage-3 tracer residual,
+`3.1956659540810506e-11` K on T, to "the stage-3 implicit vertical tracer
+solve itself".  Three measurements this round, in NEMO's execution order:
+
+| input to the tracer implicit solve | scored against | result |
+|---|---|---|
+| the whole matrix + RHS, given NEMO's own | NEMO's dumped solved column | **0 / 21120**, both tracers, after this round's two fixes |
+| the model's OWN content right-hand side, captured LIVE through `expose_pre_implicit_content` in the model's own stage-3 path | NEMO's own `e3t(Kbb)T(Kbb) + p2dt e3t(Kmm)T(Krhs)` | **6.821210263296962e-13** K.m on T, **3.637978807091713e-12** psu.m on S, 18000 cells |
+| NEMO's own content RHS SUBSTITUTED into the model | the model's own faithful run | the output moves by **5.786374251651969e-16** K |
+
+**The stage-3 output residual is UNCHANGED by both of this round's solve
+fixes**: `3.1956659540810506e-11` K before and after, to every digit.  And
+substituting NEMO's own right-hand side moves the output by `5.79e-16`, which
+is `4.3e-4` of the residual.  So the right-hand side differs, and it is
+CAUSALLY INERT at this size: it cannot own the residual either.
+
+**PR3 IS REFUTED, twice, and by two independent routes.**  It predicted the
+right-hand-side FORM would reproduce the residual to within a factor of a few.
+The first route: built from NEMO's own operands, legoESM's supposed
+concentration form `e3t(Kaa)*(T(Kbb) + rDt*T(Krhs))` through NEMO's own matrix
+gives `1.5458154965841686e-05` K -- **484000x too large**, which by itself
+proves the model does not evaluate that expression.  The second route is the
+substitution arm above.  The falsifier the preregistration wrote (a residual
+three orders under the trajectory's) is what occurred.
+
+**A ROUND-35/36 CLAIM IS RETRACTED.**  Both rounds recorded that the NEMO
+cards resolve `tracer_combine="concentration"`, therefore
+`_nemo_tracer_content_rhs` stays `None`, therefore the literal `trazdf` matrix
+is fed `T_solve_in * dz_cell`.  The first clause is true and the conclusion is
+false for the path these cards run.  The WS-RK3 stage ladder sets its own
+`_nemo_ws_tracer_content_rhs` from the tracer stage program's
+`return_final_content`, independently of `tracer_combine`, and that is what
+the solve consumes.  Measured, not read: the `expose_pre_implicit_content`
+hook RAISES when that value is `None`, and the content-mode gate ran and
+produced two rows -- so it is not `None` on GYRE.  **The model has been
+feeding the literal matrix a CONTENT right-hand side all along.**
+
+**So the owner is inside the MATRIX legoESM builds, or downstream of the
+solve, and this round did not close it.**  The frame spec for the next round
+is the one arm nothing has: the model's own `K_v_cell`, `dz_cell`,
+`dz_half_cell` and wet mask at the moment the literal solve is called, scored
+against the record's `zwt_mix`, `e3t_Kaa`, `e3w_Kmm` and `tmask`.  There is no
+hook for them; `expose_pre_implicit_state` publishes the tracers only.  On
+GYRE the matrix diffusivity is a LIVE TKE closure output, which is the one
+operand two independent codes are least likely to agree on to the last bit.
+
+### Item 3 — the sweep, and why it looked like the back substitution
+
+Given NEMO's own dumped matrix and right-hand side, legoESM's ordered solve
+differed on 133 (T) and 111 (S) WET cells at `7.105e-15`.  **Every one of
+those cells sits in a column with NO dry cell**, so neither the dry diagonal
+nor the `tmask` placement could have owned them.
+
+The cause, identified two-sidedly rather than argued: a plain NumPy sequential
+transcription of `trazdf.f90:493`/`:496`, `:515-516`/`:528-529`/`:532` and
+`:543`/`:546-547` reproduces NEMO's dumped LU diagonal, forward sweep and
+solved column at **0 of 21120**; the SAME transcription with `math.fma` in the
+second AND third recurrences reproduces legoESM's JAX answer at **0 of
+21120**, both tracers; with the fusion in only one of the two it reproduces
+neither (63 and 80 cells left over on T).  **XLA on CPU contracts `a - b*c`
+into a fused multiply-add and gfortran does not.**  The first recurrence ends
+in a division and cannot be contracted, which is why its row was never over
+the bar and the residual looked like it lived in the back substitution.
+
+`jax.lax.optimization_barrier` does NOT stop it.  On 4096 random triples:
+plain, a barrier on the product, a barrier on the `(product, source)` tuple,
+`lax.reduce_precision(.., 11, 52)` and a bitcast round trip all reproduce the
+FUSED answer on all 812 cells where fused and separate differ.  Inside a
+`lax.scan`, an extra unused output and an unused carry slot are both
+eliminated, so the usual "give the multiply a second use" trick does not
+survive.  `XLA_FLAGS=--xla_allow_excess_precision=false` and
+`--xla_cpu_enable_fast_math=false` change nothing.
+
+What works is making the subtraction's operand an ADD, since a fused
+multiply-add can only absorb a multiply: `x + copysign(0.0, x)` is exactly `x`
+for every finite input and for BOTH signed zeros -- which matters, because
+NEMO's own `zwi` and `zws` carry negative zeros -- and unlike `x*1.0` or
+`x-0.0` the compiler cannot fold it away.
+
+The dry diagonal is the second half.  `trazdf.f90:445` is written
+unconditionally, so a dry row reduces to its own `e3t`; legoESM substituted
+`1.0`.  The substitution is gone, with the precondition it rests on stated at
+the return: the layer thickness is strictly positive below the seafloor as
+well as above it, exactly as it is in NEMO.  And the two slots the recurrences
+never read -- `zwi` at the surface row, `zws` at the bottom -- are NEGATIVE
+zeros in NEMO (`:419` sets `zwt(:,1) = 0`, `:443-444` divide it), where
+legoESM wrote positive zeros into both, 704 cells each, 600 of them wet.
+
+**GIVEN NEMO'S INPUTS, EVERY ARM OF `tra_zdf` IS NOW BIT-EXACT**, on the
+round-37 record, 21120 scored cells:
+
+| arm | row | before | after |
+|---|---|---|---|
+| calibration | all 13 rows | 0 / 21120 | 0 / 21120 |
+| assembly | `zwi` | 704 signed zeros | **0 / 21120** |
+| assembly | `zwd` | 3120 at 299.71 | **0 / 21120** |
+| assembly | `zws` | 704 signed zeros | **0 / 21120** |
+| sweep | T | 133 at 7.105e-15 | **0 / 21120** |
+| sweep | S | 111 at 7.105e-15 | **0 / 21120** |
+| rhs_content | T, S | 0 / 21120 | 0 / 21120 |
+| clamp | T, S | 0 / 21824 | 0 / 21824 |
+
+**RULE 12, discharged on every card that executes the changed sweep.**  The
+same `_nemo_ordered_solve` is called by the MOMENTUM solve, so the round-29
+gate grows an arm that drives it on NEMO's own dumped momentum matrix and
+right-hand side -- the same arm the two tanks' round-33 records can be scored
+with, so no card is left UNMEASURED.  The surface-stress statement is factored
+out of `nemo_solve` so the new arm shares it rather than growing a copy.
+
+| card | row | before | after |
+|---|---|---|---|
+| GYRE-zco | `zdf_solve_lego.u` | 582 / 21120 at 2.082e-17 | **0 / 21120** |
+| GYRE-zco | `zdf_solve_lego.v` | 623 / 21120 at 1.388e-17 | **0 / 21120** |
+| LOCK_EXCHANGE-zco | `zdf_solve_lego.u`, `.v` | 0 / 7800 | 0 / 7800 |
+| OVERFLOW-zps | `zdf_solve_lego.u`, `.v` | 0 / 60600 | 0 / 60600 |
+
+The dry-diagonal change reaches only the tracer pair solve.  GYRE is measured
+above.  **The tanks have NO tracer-matrix record**, so their discharge is by
+trajectory, below, and the frame spec for closing it properly is a `trazdf`
+instrument on each tank card writing `zwi`/`zwd`/`zws`/`rhs`/`sol` at
+`kt = nit000`, exactly as round 35 did for GYRE.
+
+The new test builds a matrix on which the fused and unfused answers differ in
+2709 of 12288 cells and asserts the solve matches the unfused one.  It fails
+with exactly that count on the parent commit.
+
+### Item 4 — the column sum accumulates the way Fortran's SUM does
+
+`stprk3_stg.f90:522-523` writes `SUM( e3u_3d(ji,jj,:)*uu(ji,jj,:,Kaa) )`.
+**There is no `DO jk` loop for this sum in NEMO** -- the correction's `DO jk`
+loop at `:540-543` applies `zub`, it does not form it -- so what is
+transcribed is the intrinsic's emitted order, and the standard does not fix
+it.  The evidence for the order is the measurement, not the citation.
+ASKED-by-directive under the user's standing "do as NEMO does".
+
+| card | row | before | after |
+|---|---|---|---|
+| GYRE-zco | `rule12_correction.u` | exact=True, 0.0 (17400) | exact=True, 0.0 |
+| GYRE-zco | `rule12_correction.v` | exact=True, 0.0 (17100) | exact=True, 0.0 |
+| LOCK_EXCHANGE-zco | `rule12_correction.u` | exact=True, 0.0 (2540) | exact=True, 0.0 |
+| OVERFLOW-zps | `rule12_correction.u` | exact=False, **3.8519e-34** (16900) | **exact=True, 0.0** |
+
+**PR5 IS CONFIRMED and round 36's registered OPEN row is DISCHARGED.**
+OVERFLOW's 101-level column was the only one long enough for XLA's tree to
+disagree with an ascending accumulation; LOCK_EXCHANGE's 21-level column and
+GYRE's never did, and neither moved.
+
+### Item 3's last question — decision 20 is NOT executed, and the reason changed
+
+The order set for decision 20 was (a) make the content builder bit-exact given
+NEMO's operands, (b) prove the whole `tra_zdf` program bit-exact given NEMO's
+inputs, (c) only then flip `tracer_combine`.  (a) was reached in round 36 and
+(b) is reached above.  **(c) is still not done, and the reason is no longer
+(b): it is that the premise of the flip is refuted.**  On the WS-RK3 path
+these three cards run, the literal matrix already consumes a CONTENT
+right-hand side, built by the tracer stage program and not by
+`tracer_combine`; the flip would change a field the stage ladder does not
+read.  Flipping it would be an unasked change of behaviour on paths nobody in
+this campaign measures, in exchange for nothing on the paths that matter.
+
+The ASKED record stands with the user's words, "I would go with the NEMO
+form", and what the model does is already the NEMO form.  What is owed instead
+is the row that says so per card, and the disposition of a config field that
+these cards do not read.
