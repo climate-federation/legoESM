@@ -575,6 +575,59 @@ def nemo_literal_after_level_reconcile(
     return b(corrected * face_mask3)
 
 
+def rk3_stage_barotropic_correction(
+    field: jnp.ndarray,
+    target_mean: jnp.ndarray,
+    h_face_ref: jnp.ndarray,
+    depth_ref: jnp.ndarray,
+    face_mask: jnp.ndarray,
+    stage_mask: jnp.ndarray,
+) -> jnp.ndarray:
+    """NEMO ``stprk3_stg.F90:440,444-445``, the RK3 stage correction::
+
+        zub(ji,jj) = uu_b(ji,jj,Kaa)
+           &       - SUM( e3u_0(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)
+        uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)
+
+    WHY THIS IS A THIRD SIBLING and not a call to
+    :func:`after_level_column_mean_reconcile`.  The three functions compute the
+    same weighted-mean replacement and differ ONLY in floating-point
+    association, which is the whole point of having more than one: NEMO forms
+    the DIFFERENCE ``zub`` first and adds it, where ``mlf_baro_corr`` subtracts
+    and adds in two separate statements.  Those are not the same rounding, and
+    this campaign's bar is 1e-15.  The file already carries that distinction
+    once (``nemo_literal_after_level_reconcile`` beside the generic kernel) and
+    this is the RK3 member of the same family.
+
+    It is module-level rather than a closure so the fidelity gates can drive it
+    with NEMO's OWN operands and score the result against NEMO's own output --
+    a closure cannot be handed a record.
+
+    Parameters
+    ----------
+    field
+        3-D face velocity at the after level, ``(..., nlev)``.
+    target_mean
+        2-D depth-uniform mean to install: NEMO ``uu_b(:,:,Kaa)``.
+    h_face_ref
+        REFERENCE face thicknesses, NEMO ``e3u_0``, already face-masked.
+    depth_ref
+        2-D column depth divisor, NEMO ``hu_0`` (the caller applies its own
+        land guard; a wet column always exceeds it).
+    face_mask
+        2-D wet-face mask multiplying the column mean, NEMO's ``umask`` factor
+        inside ``SUM``.
+    stage_mask
+        Mask applied to the corrected field, NEMO's ``umask(ji,jj,jk)``.
+
+    Sign/geometry convention: ``h_face_ref > 0``, thicknesses sum downward, and
+    no term changes sign with the z-axis direction -- a weighted-mean
+    replacement, not a flux.
+    """
+    own_mean = jnp.sum(field * h_face_ref, axis=-1) / depth_ref * face_mask
+    return (field + (target_mean - own_mean)[..., jnp.newaxis]) * stage_mask
+
+
 def bebt_blend(
     eta_new: jnp.ndarray,
     eta_old: jnp.ndarray,

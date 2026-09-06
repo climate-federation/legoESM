@@ -84,6 +84,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
 )
 from legoesm.ocean.dynamics.barotropic_common import (
     nemo_literal_after_level_reconcile,
+    rk3_stage_barotropic_correction,
     validate_after_reconcile,
 )
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
@@ -5759,15 +5760,16 @@ class LatLonCGridOceanModel:
                 if not self._nemo_ws_test_hooks.stage_barotropic_correction:
                     # Private causal arm: keep the stage's own depth mean.
                     return u_in * _ws_stage_u_mask, v_in * _ws_stage_v_mask
-                mean_u = (jnp.sum(u_in * _mean_h_u, axis=-1) / _mean_H_u
-                          * state.u_mask.data)
-                mean_v = (jnp.sum(v_in * _mean_h_v, axis=-1) / _mean_H_v
-                          * state.v_mask.data)
+                # stprk3_stg.F90:440,444-445, in the shared barotropic home so
+                # a fidelity gate can drive the SAME expression with NEMO's own
+                # operands (a closure cannot be handed a record).
                 return (
-                    (u_in + (target_u - mean_u)[..., jnp.newaxis])
-                    * _ws_stage_u_mask,
-                    (v_in + (target_v - mean_v)[..., jnp.newaxis])
-                    * _ws_stage_v_mask,
+                    rk3_stage_barotropic_correction(
+                        u_in, target_u, _mean_h_u, _mean_H_u,
+                        state.u_mask.data, _ws_stage_u_mask),
+                    rk3_stage_barotropic_correction(
+                        v_in, target_v, _mean_h_v, _mean_H_v,
+                        state.v_mask.data, _ws_stage_v_mask),
                 )
 
             # NEMO's TARGET is not reconstructed from the 3-D velocity.  The
