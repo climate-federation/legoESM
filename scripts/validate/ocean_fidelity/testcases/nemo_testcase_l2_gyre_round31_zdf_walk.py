@@ -16,7 +16,8 @@ owned the error the error would be column-uniform; the implicit solve is
 depth-structured, because the wind stress enters only the top cell
 (``dynzdf.F90:328-330``) and the drag only the deepest wet one
 (``dynzdf.F90:296``).  The metric is weighting-free: per column, the signed
-error's spread about its own mean, against its own mean.
+error's peak-to-peak SPAN against its own largest magnitude, and a column
+whose error is exactly zero is not scored at all.
 
 ``pre_solve`` scores the model's EXISTING pre-implicit exposure against
 NEMO's explicit stage update.  Round 30 recorded that legoESM exposes no
