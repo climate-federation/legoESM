@@ -1,0 +1,49 @@
+{
+ "format": "nemo-testcase-l2-gyre-round40-preregister-v1",
+ "date": "2026-09-06",
+ "parent_commit": "c37c05ee8951",
+ "regime": "CPU production JIT, fp64/x64, transcendentals=libm, oracle V2",
+ "scope": "ITEM 1 the stage-3 momentum RHS operator walk (measurement + a record spec, no model numerics change); ITEM 2 the ldf_slp transcription walk (measurement + a record spec, no landing); ITEM 3 the stage-3 r3t / quasi-Eulerian stretch, WHICH DOES CHANGE ONE SHARED STATEMENT.",
+
+ "what_nemo_does": {
+  "item1_stage3_momentum_rhs": "stprk3_stg.F90 CASE(2,3) in call order, ln_dynadv_vec=T and nn_dynkeg=0 (round38_oracle_trazdf_kt2/ocean.output:798-799), ln_dynvor_ene=T with nn_e3f_typ=0 (:810,:813), ln_hpg_sco=T (:834), ln_dynspg_ts=T (:846) but dyn_spg is NOT in the stage loop -- the only dyn_spg_ts call is stp2d.F90:281. Order: zub/zvb (stprk3_stg.F90:266-268, np_HYB), zFu/zFv (:273-274), wzv at np_velocity (:290), eos(ts,Kmm,rhd,rhop) (:322), dyn_hpg (:324, hpg_sco, and under key_RK3 it OVERWRITES Krhs at dynhpg.F90:359-363,383-387), dyn_vor (:327, vor_ene), dyn_adv (:331, VIF = dyn_keg + dyn_zad), then dyn_ldf (:400) and dyn_zdf (:430). key_qco IS defined (cfgs/GYRE_OMIP_L2_P3_SM_R38TRAZDFKT2/cpp_GYRE_OMIP_L2_P3_SM_R38TRAZDFKT2.fcm), so vor_ene's potential vorticity divides by e3f_0vor*(1+r3f*fe3mask) -- BLD/ppsrc/nemo/dynvor.f90:556 -- and the nn_e3f_typ SELECT at dynvor.F90:493-516 is DEAD CODE on this build.",
+  "item3_r3t": "domqco.F90:209 dom_qco_r3c_RK3 computes r3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj); domain.F90:158 sets r1_ht_0 = ssmask/(ht_0 + 1 - ssmask), i.e. exactly 1/ht_0 on a wet column. domzgr_substitute.h90:139 then forms e3t(i,j,k,t) = e3t_0(i,j,k)*(1+r3t(i,j,t)). Stage 3 recovers the stage-1 value: stprk3_stg.F90:156 CALL dom_qco_r3c_RK3(ssha,r3ta,...) and :231 r3t(:,:,Kaa) = r3ta(:,:). So NEMO forms the RATIO ssh/ht_0 FIRST and adds ONE; it never forms (ssh+ht_0)/ht_0."
+ },
+
+ "what_legoesm_does_today": "vertical.py compute_ocean_jacobian returns, on an OceanPartialCellCoordinate, J = (eta + H_bathy)/max(H_bathy,1e-10) -- the sum is rounded BEFORE the divide, so the low bits of the small ratio are lost to cancellation. Every live thickness on the NEMO cards is dz_ref * J.",
+
+ "measured_before_this_preregistration_was_written": {
+  "note": "Taken at c37c05ee8951 on host arrays only (no model run) from NEMO's own round-37 trazdf record and mesh_mask, and by reproducing round 30's gate at this tip. Recorded as MEASUREMENTS, never as predictions.",
+  "M1": "NEMO's dumped r3t_Kaa equals ssha * r1_ht_0 at 0/600 wet columns, absolute maximum 0.0, and NEMO's dumped e3t_Kaa equals e3t_0*(1+r3t_Kaa) at 0/18000 wet cells, absolute maximum 0.0. This VALIDATES the reconstruction as NEMO's own statement before any claim is built on it.",
+  "M2": "The same ssha through legoESM's form, (ssha+ht_0)/ht_0, differs from NEMO's 1+r3t on 221/600 columns at 2.220446e-16, and e3t_0 times it differs from NEMO's e3t_Kaa on 5207/18000 cells at 1.136868e-13 -- REPRODUCING round 38/39's operand.dz_after row (5207/18000 at 1.13687e-13) exactly, from host arrays and NEMO's own ssh.",
+  "M3": "A pure divide, ssha/ht_0, differs from NEMO's r3t on 168/600 at 1.058791e-22; ht_0 is uniform at 4300.710017215397 m on every wet GYRE column.",
+  "M4": "Round 30's stage-3 pre-dyn_ldf gate re-run at this tip: u 17383/17400 at 2.0614443638749651e-16, v 17097/17100 at 2.4827278704178648e-16 (round 30 recorded 17382 and 2.0614443633579772e-16; the last digits moved with rounds 32/39, the boundary did not).",
+  "M5": "Round 39's own trajectory artifact already carries the stage rows: GYRE-zco.kt1.stage1.u 7620/17400 at 5.421010862427522e-20 AT-BAR, kt1.stage2.u 7453/17400 at 1.0842021724855044e-19 AT-BAR, kt1.stage2.v 7287/17100 at 1.0842021724855044e-19 AT-BAR, kt1.stage3.u 17400/17400 at 2.7478406377547115e-12 DEBT."
+ },
+
+ "predictions": {
+  "PR1": {"claim": "ITEM 3. Writing the stretch as NEMO writes it -- J = 1 + eta*(1/ht_0) in the ONE shared helper -- takes operand.dz_after from 5207/18000 at 1.136868e-13 to 0/18000 EXACT and dz_owner.r3t from 566/600 at 2.11758e-22 to 0/600 EXACT, GIVEN NEMO's own ssh.", "falsifier": "any wet cell or column unequal."},
+  "PR2": {"claim": "ITEM 3, Rule 12. LOCK_EXCHANGE-zco and OVERFLOW-zps DO execute the changed statement (both are key_qco cards), so neither is bit-identical before and after; every moved row is registered and no card's first-over-bar step moves EARLIER.", "falsifier": "any card's first-over-bar moves earlier, or a tank is claimed bit-identical without being measured."},
+  "PR3": {"claim": "ITEM 1. The stage-3 momentum RHS residual is NOT inherited from the stage-3 input state. Re-measured at this tip, GYRE-zco.kt1.stage2.u and .v -- the operand stage 3 reads as uu(Kmm) -- stay AT-BAR at or below 2e-19 while the pre-dyn_ldf RHS is 2.06e-16 on 17383/17400, so the owner is inside the stage-3 operator arithmetic or its DERIVED geometry, not the state legoESM hands it.", "falsifier": "either stage-2 velocity row exceeds the 1e-15 bar."},
+  "PR4": {"claim": "ITEM 1, the instrument's own control. legoESM's WRITE-only per-operator split at stage 3 (hpg, vorticity, advection) SUMS to the exposed pre-dyn_ldf total bit-exactly, 0 cells unequal on each face.", "falsifier": "any cell unequal -- then the exposure is not the production accumulation and no number from it is admissible."},
+  "PR5": {"claim": "ITEM 1. NO OPERATOR IS PREDICTED TO OWN the 2.06e-16. The NEMO record that would score the stage-3 split does not exist -- oracle_rkstage2_terms is header-locked to kstg=2 (phase3_gate.py:286) and stage 3 has only the TOTAL pre-dyn_ldf frame. This round writes that record's frame spec and run.sh and does not run NEMO. The legoESM buckets are reported as SCALES that rank the relative error each operator would need to carry, labelled as such; naming an owner from them is forbidden."},
+  "PR6": {"claim": "ITEM 2. The ranked owner of the kt=2 isoneutral fold (legoESM 1.17e-10 vs NEMO 3.39e-08, 289x, 17400/17400) is the mixed-layer index. NEMO's nmln/hmlp come from zdf_mxl's N2-INTEGRAL criterion (zdfmxl.F90:95-104, rho_c=0.01) run on the before state at stprk3.F90:165, and the GYRE card resolves legoESM's mld_criterion='rho_c', a potential-density-difference test referenced to a CELL CENTRE. ARM, one variable: rebuild the card with mld_criterion='n2_integral' and re-run round 39's kt2-given-inputs fold row. The arm moves that row's max relative (2.62947) by MORE than 10 per cent.", "falsifier": "it moves by less than 10 per cent -- the ranking is then REFUTED and the N2 operand or the limiter takes its place.", "note": "no landing this round: selecting the NEMO arm of an existing scheme knob on this card is an ASKED item and Rule 12 cannot discharge it without an ldf_slp record."},
+  "PR7": {"claim": "ITEM 2. The round-38 kt=2 record cannot score any STATEMENT of ldf_slp, only the product ah_wslp2: it carries none of prd/rhd(Nbb), rn2b, nmln, hmlp, uslp, vslp, wslpi, wslpj, ahtu, ahtv, e3u_3d, e3v_3d, umask, vmask, wmask or ssmask.", "falsifier": "any of those is in the record's field list."}
+ },
+
+ "controls": {
+  "C1": "kt=1..10 before/after on all three cards, same gates, same oracle roots, same --max-step, BEFORE taken in a detached probe worktree at the parent commit so the two arms differ only in the model.",
+  "C2": "the r3t/e3t reconstruction is validated by reproducing NEMO's OWN dumped r3t_Kaa and e3t_Kaa bit-exactly before any claim rests on it (M1), and a one-ulp plant on ssh must turn the row red.",
+  "C3": "a direct test that FAILS on the parent commit: the NEMO-card stretch equals 1 + eta/ht_0 by identity, and the historical (eta+H)/H form is shown to differ.",
+  "C4": "the stage-3 operator split's closure control (PR4), plus the existing capture controls -- each exposure fires exactly once and the ordinary step completes before any substitution.",
+  "C5": "the full ocean-fidelity suite on a detached worktree at the final tip; the receipt citation gate; the stamp-scope ratchet."
+ },
+
+ "forbidden_this_round": [
+  "changing the XLA ISA/FMA default (decision 22 stays open, recommendation on file is not to take it)",
+  "selecting a different scheme/criterion default on any card -- item 2's mld_criterion arm is MEASUREMENT ONLY and goes in the ASKED table",
+  "running makenemo, mpirun or any NEMO executable; editing NEMO src/",
+  "relaxing any bar, or calling a row DISCHARGED that is not bit-exact",
+  "naming a stage-3 momentum operator as the owner without the record that scores it"
+ ]
+}
