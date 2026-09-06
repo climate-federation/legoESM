@@ -565,6 +565,7 @@ def lego_sweep(rec: dict) -> dict[str, np.ndarray]:
     cells are dry.  What covers those cells is the round-29 momentum arm,
     whose oracle is NEMO's UNMASKED ``uu(Kaa)``: the reviewer's corruption,
     invisible here, moved 3720 of its 21120 cells by 12345.
+    """
     import jax.numpy as jnp
     from legoesm.ocean.physics.vertical_mixing import (
         nemo_ordered_tridiagonal_solve)
