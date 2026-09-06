@@ -1189,6 +1189,16 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # only after the ordinary step has completed.
     stage2_momentum_rhs_override: object = None
     expose_stage2_momentum_rhs: bool = False
+    # WRITE-only stage-3 momentum-RHS gauge.  ``"post_ldf"`` publishes the
+    # complete stage-3 Krhs that enters the implicit vertical solve, the
+    # operand NEMO hands ``dyn_zdf`` (``stprk3_stg.F90:430``); ``"pre_ldf"``
+    # publishes the same RHS with the lateral-mixing term withheld, the
+    # operand NEMO hands ``dyn_ldf`` (``stprk3_stg.F90:400``, the ONLY
+    # stage-3-only momentum call inside ``CASE ( 3 )`` on this deck).  Those
+    # two frames are what separate ``dyn_ldf`` from ``dyn_zdf`` as the owner
+    # of the stage-3 divergence.  The ordinary step still completes before
+    # either array is substituted into the returned diagnostic state.
+    expose_stage3_momentum_rhs: str = ""
     # One-variable diagnostic arm for the WS-RK3 vector-source association.
     # It forces explicit compiler boundaries between dyn_hpg -> dyn_vor ->
     # dyn_keg -> dyn_zad; production remains on the existing shared tendency
@@ -5055,6 +5065,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_exposed_stage1_transport_operand = None
         _nemo_ws_exposed_momentum_operator = None
         _nemo_ws_exposed_stage2_rhs = None
+        _nemo_ws_exposed_stage3_rhs = None
         _nemo_ws_stage_tracers = None
         _nemo_ws_tracer_content_rhs = None
         _nemo_ws_advection_content_rhs = None
@@ -5159,6 +5170,24 @@ class LatLonCGridOceanModel:
                                      precomputed_geom_density=stage_geom_density,
                                      grid=_grid, vertex_mask=_vmask,
                                      skip_lateral_viscosity=skip_ldf,
+                                     # dynldf_lev_rot_scheme.h90:24-25 and
+                                     # :28-29 read pu_in(ji,jj,jk,Kbb) /
+                                     # pv_in(ji,jj,jk,Kbb): the lateral
+                                     # Laplacian is evaluated on the BEFORE
+                                     # velocity, not on the stage velocity the
+                                     # rest of the RHS uses.  Kbb is the
+                                     # step-entry level at every WS-RK3 stage
+                                     # (stprk3_stg.F90:118,174,218), and
+                                     # dynldf.F90:70 hands the operator the
+                                     # whole array with that index.  Stage 1
+                                     # passes u_in = u0 already, so only the
+                                     # stage-3 call moves.  The tracer pair is
+                                     # the stage's own, because this call is
+                                     # momentum_only and tra_ldf is a separate
+                                     # NEMO routine (stprk3_stg.F90:586).
+                                     ldf_state=(
+                                         st.T.data, st.S.data,
+                                         u0 * u_mask_3d, v0 * v_mask_3d),
                                      z_coord=z_coord, config=config,
                                      momentum_flux_transport_velocity=(
                                          transport_velocity),
@@ -6219,12 +6248,35 @@ class LatLonCGridOceanModel:
                     _g2[3], _g2[4], _g2[5], jnp.zeros_like(_g2[6]),
                     _zfu_faces, _zfv_faces, _g2[9], _g2[10],
                 )
+            _stage3_hpg_operands = _stage_hpg_operands(
+                _T_stage2, _S_stage2, _eta_live_one_half)
+            _stage3_vertical_up3 = _stage_vertical_up3(u2_corr, v2_corr, _g2)
+            _stage3_face_thickness = _stage_face_thickness(_eta_live_one_half)
             p2u_corr, p2v_corr = _mom_pert_ws(
                 u2_corr, v2_corr, False, _transport_target,
-                _stage_hpg_operands(_T_stage2, _S_stage2, _eta_live_one_half),
-                _stage_vertical_up3(u2_corr, v2_corr, _g2),
-                stage_face_thickness=_stage_face_thickness(_eta_live_one_half),
+                _stage3_hpg_operands,
+                _stage3_vertical_up3,
+                stage_face_thickness=_stage3_face_thickness,
                 stage_index=3)
+            _expose_stage3_rhs = (
+                self._nemo_ws_test_hooks.expose_stage3_momentum_rhs)
+            if _expose_stage3_rhs == "post_ldf":
+                # stprk3_stg.F90:430 -- the operand dyn_zdf receives.
+                _nemo_ws_exposed_stage3_rhs = (p2u_corr, p2v_corr)
+            elif _expose_stage3_rhs == "pre_ldf":
+                # stprk3_stg.F90:400 -- the operand dyn_ldf receives.  A second
+                # WRITE-only evaluation of the SAME stage with the lateral
+                # term withheld; the production RHS above is untouched.
+                _nemo_ws_exposed_stage3_rhs = _mom_pert_ws(
+                    u2_corr, v2_corr, True, _transport_target,
+                    _stage3_hpg_operands,
+                    _stage3_vertical_up3,
+                    stage_face_thickness=_stage3_face_thickness,
+                    stage_index=3)
+            elif _expose_stage3_rhs:
+                raise ValueError(
+                    "expose_stage3_momentum_rhs must be empty, 'pre_ldf', or "
+                    f"'post_ldf'; got {_expose_stage3_rhs!r}")
             u3_raw = (_qu_b * u0 + dt_mom * _qu_12 * p2u_corr) / _qu_aa
             v3_raw = (_qv_b * v0 + dt_mom * _qv_12 * p2v_corr) / _qv_aa
             u3_corr, v3_corr = _replace_stage_mean(
@@ -7895,6 +7947,12 @@ class LatLonCGridOceanModel:
             )
         if _nemo_ws_exposed_stage2_rhs is not None:
             _rhs_u, _rhs_v = _nemo_ws_exposed_stage2_rhs
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=_rhs_u),
+                v=state_new.v.replace(data=_rhs_v),
+            )
+        if _nemo_ws_exposed_stage3_rhs is not None:
+            _rhs_u, _rhs_v = _nemo_ws_exposed_stage3_rhs
             state_new = state_new._replace(
                 u=state_new.u.replace(data=_rhs_u),
                 v=state_new.v.replace(data=_rhs_v),

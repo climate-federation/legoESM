@@ -995,6 +995,23 @@ _DUMP_TIME_LEVEL["oracle_rkstage3_wzv_kt00000001.bin"] = (
     "transport at the live wzv -> wAimp -> e1e2t*ww boundaries cited by "
     "src/OCE/TRA/traadv.F90:220-226",
 )
+_DUMP_TIME_LEVEL["oracle_rkstage3_preldf_kt00000001.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/OCE/stprk3_stg.F90:400 "
+    "calls dyn_ldf( kstp, Kbb, Kmm, uu, vv, Krhs ) inside CASE ( 3 ); the "
+    "round-29 instrument writes uu/vv(:,:,:,Krhs) immediately before that "
+    "line, and stprk3_stg.F90:218 fixes stage 3 as Kbb = N, Kmm = N+1/2, so "
+    "the momentum operands accumulated into that Krhs are the stage's LIVE "
+    "Kmm ones (eos/dyn_hpg/dyn_vor/dyn_adv at :324-333, all on Kmm)",
+)
+_DUMP_TIME_LEVEL["oracle_zdf_matrix_kt00000001.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/OCE/stprk3_stg.F90:430 "
+    "calls dyn_zdf( kstp, Kbb, Kmm, Krhs, uu, vv, Kaa ) at kstg == 3; the "
+    "round-29 instrument writes that call's operands from inside "
+    "src/OCE/DYN/dynzdf.F90, whose avm/e3uw(Kmm) operands are the stage's "
+    "LIVE Kmm ones (dynzdf.F90:182-195)",
+)
 del _kt, _step, _stage, _kaa, _kmm
 
 
