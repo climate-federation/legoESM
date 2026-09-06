@@ -9683,6 +9683,43 @@ row they carry (0 of 20 on LOCK, 0 of 10 on OVERFLOW).  A setting that changes
 the model's answers at `1e-12` over ten steps, on top of disabling backend
 optimisation everywhere, is a user decision and not a harness one.
 
+### Gates and evidence
+
+The round-38 matrix-operand gate on the round-37 record, at the round's final
+tip: `operand.e3w_now`, `operand.wet` and `operand.dt` AT-BAR at 0 bits,
+`operand.dz_after` VALUE-AT-BAR, and `operand.K`/`operand.K33_fold` DEBT — the
+finding, not a defect in the gate.  Its three controls: each capture point
+fires exactly once, the capture is inert (0 of 21120 on each tracer), and the
+in-graph identity check is 0 bits unequal on every operand.  `--plant K`,
+`--plant e3w` and `--plant wet` each report `moved_its_own_row True` and exit
+non-zero.
+
+The dry-slot plant: `AT-BAR`, with GYRE and LOCK_EXCHANGE declared VACUOUS in
+its own output rather than counted as evidence.
+
+The FMA-flag probe: 8 of 8 arms ran, none rejected, three disablers.
+
+The receipt citation gate is `PASS` over **198 citations**, none unmapped, no
+failures, no map entry failing its own audit.  Eleven citations were added this
+round; three of them named the COMPILED ppsrc's line numbers as though they
+were the shipped source's and one anchored on a brace, and the gate refused all
+four before this was written.
+
+The full ocean-fidelity suite at the final tip, on a detached worktree:
+**`999 passed, 7 skipped, 18 deselected in 2489.84s`**, exit 0, zero failures.
+
+**A RETRACTION ABOUT THAT RUN.**  Mid-round it was reported as anomalously
+slow — apparently stalled at 63 per cent for over an hour of CPU while a
+diagnosis was written about which test might be hanging.  It was not stalled:
+pytest's progress output is BLOCK-BUFFERED when redirected to a file, so the
+percentage a reader sees is arbitrarily stale.  The run took 41 min 29 s, in
+line with round 37's 42 min 47 s.  Nothing was wrong, and the instrument being
+misread was the log.
+
+Evidence under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round38/`,
+`round38_evidence.sha256` over its 19 files, itself
+`a83c67531d7bff6a20945719a84bf663c4ee91e8b13feaaf0152415065547a78`.
+
 ### ASKED / UNASKED
 
 | choice | status |
