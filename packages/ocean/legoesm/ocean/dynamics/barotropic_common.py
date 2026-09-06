@@ -615,8 +615,13 @@ def rk3_stage_barotropic_correction(
         2-D column depth divisor, NEMO ``hu_0`` (the caller applies its own
         land guard; a wet column always exceeds it).
     face_mask
-        2-D wet-face mask multiplying the column mean, NEMO's ``umask`` factor
-        inside ``SUM``.
+        2-D wet-face factor multiplying the column mean.  NEMO has NO ``umask``
+        inside the ``SUM`` at ``stprk3_stg.F90:440`` -- read the statement: it
+        is ``SUM( e3u_0(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)``.  What
+        this factor reproduces is ``r1_hu_0`` being IDENTICALLY ZERO on a dry
+        column, which ``domain.F90:159`` arranges as
+        ``ssumask/(hu_0 + 1 - ssumask)``; ``depth_ref`` carries the wet
+        columns' ``hu_0`` and this mask carries the dry columns' zero.
     stage_mask
         Mask applied to the corrected field, NEMO's ``umask(ji,jj,jk)``.
 
@@ -638,6 +643,25 @@ def rk3_stage_barotropic_correction(
         raise ValueError(
             f"depth_ref {depth_ref.shape} must be the column shape "
             f"{field.shape[:-1]}")
+    # The two masks were exempt from this check until round 33.  Measured,
+    # not assumed, before the check was written: a level axis on ``face_mask``
+    # already raised, and a short ``stage_mask`` raised a TypeError from
+    # inside ``lax.mul`` naming neither operand.  So what this buys is a
+    # NAMED refusal at the boundary of a function that gates drive with oracle
+    # arrays, not the closing of a silent hole.  BLIND SPOT, stated because a
+    # shape check cannot see it: on a square tile a TRANSPOSED mask has the
+    # right shape, passes here, and silently changes the answer -- that
+    # mutation is caught by the tests' transposed-layout arm, not by this.
+    # The level-BROADCAST stage mask is ALLOWED and named, because the model's
+    # own ``legacy_2d_stage_face_mask`` arm passes exactly that.
+    if face_mask.shape != field.shape[:-1]:
+        raise ValueError(
+            f"face_mask {face_mask.shape} must be the column shape "
+            f"{field.shape[:-1]} of field {field.shape}")
+    if stage_mask.shape not in (field.shape, field.shape[:-1] + (1,)):
+        raise ValueError(
+            f"stage_mask {stage_mask.shape} must match field {field.shape} "
+            f"or be its level-broadcast form {field.shape[:-1] + (1,)}")
     own_mean = jnp.sum(field * h_face_ref, axis=-1) / depth_ref * face_mask
     return (field + (target_mean - own_mean)[..., jnp.newaxis]) * stage_mask
 

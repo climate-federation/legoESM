@@ -331,6 +331,36 @@ def test_correction_refuses_a_broadcastable_but_wrong_target():
             field, target, h[..., :-1], depth, wet2d, mask3)
 
 
+def test_correction_refuses_a_wrong_shaped_mask():
+    """Round-33 correction: the two MASKS were exempt from the shape check.
+
+    Round 32 closed the shape hole for ``target_mean``, ``h_face_ref`` and
+    ``depth_ref`` and left ``face_mask`` and ``stage_mask`` open.  What the
+    new check buys was MEASURED before it was written, and it is smaller than
+    "a silent hole": a level axis on ``face_mask`` already raised a
+    ``ValueError`` from JAX's broadcasting, and a short ``stage_mask`` raised
+    a ``TypeError`` from inside ``lax.mul`` naming neither operand.  The gain
+    is a NAMED refusal at the boundary of a function the Rule-12 gates drive
+    with oracle arrays.
+
+    The ``stage_mask`` arm is the one that goes red without the check (it
+    raised ``TypeError``, not ``ValueError``); the ``face_mask`` arm passes
+    either way and is kept only to pin the message's operand.
+    """
+    field, target, h, depth, wet2d, mask3 = _column_case()
+    with pytest.raises(ValueError, match="face_mask"):
+        rk3_stage_barotropic_correction(
+            field, target, h, depth, wet2d[..., None], mask3)
+    with pytest.raises(ValueError, match="stage_mask"):
+        rk3_stage_barotropic_correction(
+            field, target, h, depth, wet2d, mask3[..., :-1])
+    # ... and the level-BROADCAST stage mask the model's own
+    # ``legacy_2d_stage_face_mask`` arm passes is still accepted.
+    out = np.asarray(rk3_stage_barotropic_correction(
+        field, target, h, depth, wet2d, wet2d[..., None]))
+    assert np.all(np.isfinite(out))
+
+
 # --------------------------------------------------------------------------
 # the gate's own arithmetic
 # --------------------------------------------------------------------------

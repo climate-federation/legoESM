@@ -190,6 +190,16 @@ CITATION_MAP = {
          '/           ( 1._wp + r3v(ji,jj,Kaa) ) * vmask(ji,jj,jk)',
          6],
     'stprk3_stg.F90:437-446': [('#endif', 6), ('END_3D', 6), 10],
+    'stprk3_stg.F90:439-446': [
+        ('DO_2D( 0, 0, 0, 0 )             ! barotropic velocity correction', 1),
+        ('END_3D', 6), 8],
+    # round 33: the two tanks' own resolved dynzdf guard, so the claim
+    # that they EXECUTE the moved operator binds to their own run logs
+    # and not to GYRE's or to each other's.
+    'lock_kt1_10/ocean.output:560': 'ln_drgimp   =  T',
+    'lock_kt1_10/ocean.output:752': 'ln_dynspg_ts  =  T',
+    'overflow_kt1_10/ocean.output:672': 'ln_drgimp   =  T',
+    'overflow_kt1_10/ocean.output:869': 'ln_dynspg_ts  =  T',
     'stprk3_stg.F90:453-598': ['Tracers : RHS computation + time-stepping',
          'CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )',
          146],

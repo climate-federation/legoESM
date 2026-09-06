@@ -316,6 +316,16 @@ def run_rule12_correction(oracle_root: Path, *,
         require(e3_0.shape == (ny - 4, nx - 4, nz),
                 f"mesh_mask e3_0 is {e3_0.shape}, expected the scored layout")
         h_face = e3_0 * mask3
+        # NOT NEMO's hu_0.  ROUND-33 CORRECTION: mesh_mask.nc carries no
+        # hu_0/hv_0 and no r1_hu_0 -- only e3u_0/e3v_0 and the masks (39
+        # variables, checked) -- so the divisor here is RECONSTRUCTED as
+        # domain.F90:140-147 builds it, SUM(e3u_0*umask) over jk=1..jpkm1,
+        # and NEMO's own reciprocal r1_hu_0 = ssumask/(hu_0 + 1 - ssumask)
+        # (domain.F90:159) is never used.  Two association questions ride on
+        # that and are OPEN rows at the 1e-15 bar, not closed ones: NEMO
+        # accumulates hu_0 in an ascending jk loop where this uses pairwise
+        # summation, and NEMO MULTIPLIES by a precomputed reciprocal where
+        # this DIVIDES.
         depth = h_face.sum(axis=-1)
         wet2d = (mask3 > 0).any(axis=-1).astype(np.float64)
         field = _xyz(
@@ -353,8 +363,15 @@ def run_rule12_correction(oracle_root: Path, *,
         "case": CASE,
         "mode": "rule12_correction",
         "claim": ("legoESM's own rk3_stage_barotropic_correction, given "
-                  "NEMO's dyn_zdf output, NEMO's uu_b(Kaa) and NEMO's "
-                  "e3u_0/hu_0, reproduces NEMO's own stage-3 velocity"),
+                  "NEMO's dyn_zdf output, NEMO's uu_b(Kaa) and NEMO's e3u_0 "
+                  "with the column depth RECONSTRUCTED from it, reproduces "
+                  "NEMO's own stage-3 velocity AT the 1e-15 bar -- not bit "
+                  "for bit; the rows carry exact=false"),
+        "divisor_provenance": (
+            "mesh_mask.nc carries no hu_0 and no r1_hu_0; depth_ref is "
+            "SUM(e3u_0*umask) rebuilt here (domain.F90:140-147) and the "
+            "operator DIVIDES by it where NEMO MULTIPLIES by the precomputed "
+            "r1_hu_0 (domain.F90:159).  Both are OPEN association rows."),
         "operator": ("legoesm.ocean.dynamics.barotropic_common."
                      "rk3_stage_barotropic_correction, imported from the "
                      "production module the step function calls"),
@@ -362,6 +379,10 @@ def run_rule12_correction(oracle_root: Path, *,
             f"{ZDF_MATRIX_RECORD}:uu_Kaa_out / vv_Kaa_out",
             f"{ZDF_MATRIX_RECORD}:uu_b_Kaa / vv_b_Kaa",
             "mesh_mask.nc:e3u_0 / e3v_0 / umask / vmask",
+        ],
+        "inputs_reconstructed_not_nemo": [
+            "depth_ref = SUM(e3u_0*umask), rebuilt; NEMO's hu_0 / r1_hu_0 "
+            "are not in mesh_mask.nc and are not read",
         ],
         "record": str(record),
         "record_sha256": sha256(record),

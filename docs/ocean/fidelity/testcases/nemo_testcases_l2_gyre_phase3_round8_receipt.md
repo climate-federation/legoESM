@@ -6788,7 +6788,12 @@ reverted one.
 
 NEMO's RK3 stage-3 momentum program is `dyn_zdf` and THEN the barotropic
 correction: the call sits at `stprk3_stg.F90:430` and the correction block at
-`stprk3_stg.F90:437-446`, below it.  Inside `dyn_zdf` the barotropic mode is
+`stprk3_stg.F90:437-446`, below it.  ROUND-33 CORRECTION to that range: line 437 is
+the `#endif` of the PSYCLONE allocate guard, not a statement.  The block's
+STATEMENTS are `stprk3_stg.F90:439-446` and the two that do the work are
+`:440-441` and `:444-445`; the citation map's anchor stays `:437-446` because it
+anchors on `#endif` and `END_3D`, which is a different thing from a claim about
+which lines execute.  Inside `dyn_zdf` the barotropic mode is
 removed first (`dynzdf.F90:150-151`, under the guard at `dynzdf.F90:148`) and
 its bottom stress added back explicitly at the deepest wet level
 (`dynzdf.F90:156-159`), so the implicit friction acts on the baroclinic
@@ -6895,9 +6900,9 @@ inside the recurrence agrees to `5.551115123125783e-17` absolute,
 
 | card | executes what | discharge |
 |---|---|---|
-| GYRE-zco | all three statements | **AT-BAR.**  legoESM's own `rk3_stage_barotropic_correction`, given NEMO's `uu_Kaa_out`, NEMO's `uu_b(Kaa)` and NEMO's `e3u_0`/`hu_0` from `mesh_mask.nc`, reproduces NEMO's own stage-3 velocity to `2.168404344971009e-19` (u) and `6.938893903907228e-18` (v) against the `1e-15` bar |
-| LOCK_EXCHANGE-zco | the PLACEMENT only | **PASS** on the shared oracle-relative move gate: largest worsening `0.046875` of a 2-ulp bar, first-over-bar unchanged at `kt4`/`u`, 7 of 50 rows differ and all at `1e-19`..`1e-11` |
-| OVERFLOW-zps | the PLACEMENT only | **MEASURED, mixed.**  11 of 50 rows improved, 2 worsened and neither by more than `3e-08` per cent, 37 unchanged; the first-over-bar did not move (`kt2` on `T` and `u`).  The move gate FAILS on its CELL criterion: 9 cells worsen, the largest by `4.443181933488916e-13` absolute, which is `2001` row-scale ulps of a 2-ulp bar |
+| GYRE-zco | all three statements | **AT-BAR, and NOT bit for bit** (round-33 correction, below).  legoESM's own `rk3_stage_barotropic_correction`, given NEMO's `uu_Kaa_out`, NEMO's `uu_b(Kaa)` and NEMO's `e3u_0` from `mesh_mask.nc` with the column depth REBUILT from it, reproduces NEMO's own stage-3 velocity to `2.168404344971009e-19` (u) and `6.938893903907228e-18` (v) against the `1e-15` bar.  `exact` is **false** on both rows: `1730` of `17400` u cells and `3586` of `17100` v cells are bit-unequal |
+| LOCK_EXCHANGE-zco | executes the moved operator (`ln_drgimp = T` at `lock_kt1_10/ocean.output:560`, `ln_dynspg_ts = T` at `:752`) | **UNDISCHARGED** (round-33 correction).  What ran was the TRAJECTORY MOVE gate, not a given-NEMO-inputs discharge: PASS, largest worsening `0.046875` of a 2-ulp bar, first-over-bar unchanged at `kt4`/`u`, 7 of 50 rows differ and all at `1e-19`..`1e-11`.  A passing move gate is not a Rule-12 discharge |
+| OVERFLOW-zps | executes the moved operator (`ln_drgimp = T` at `overflow_kt1_10/ocean.output:672`, `ln_dynspg_ts = T` at `:869`) | **UNDISCHARGED, and the move gate FAILS** (round-33 correction).  What ran was the TRAJECTORY MOVE gate: 11 of 50 rows improved, 2 worsened, 37 unchanged, and it FAILS on its CELL criterion -- 9 cells worsen, the largest by `4.443181933488916e-13` absolute at `kt10`/`u`/cell `550`, which is `2001` row-scale ulps of a 2-ulp bar.  At `kt2` on `u`, `133` cells worsened and `81` improved.  A first-over-bar that did not move is NOT a Rule-12 argument -- Rule 12 does not mention it |
 | ORCA2-zps | NEMO executes the pair (`ln_drgimp = T` at `variant_icebergs_off_phase2v_tke_a_10step_np2/ocean.output:1097`, `ln_dynspg_ts = T` at `:1363`) | **UNMEASURED**, and it cannot be measured today: this branch has no ORCA2 card at all, and the probe lineage where ORCA2 lives predates the prognostic `uu_b` there is nothing to swap to |
 | DINO — not a campaign card, but it executes the operand swap | `zdf_baroclinic_only` with the prognostic pair | **INERT, measured**: an operand change of `1.249e-01` m/s at DINO scale moves the solve's output by `3.331e-16` m/s, `2.8e-16` of the field, against a control of `3.505e-02` when the compensation is removed |
 
@@ -7106,36 +7111,25 @@ round:
 2. **Round 30's `dyn_ldf` fix still carries an OPEN Rule-12 eligibility**,
    unchanged: discharged on no card and not dischargeable on any card that
    exists today.
-3. **This round's fix is discharged on GYRE, LOCK and DINO and UNMEASURED on
-   ORCA2** — where legoESM has no card on this branch at all.  Per Rule 12 the
-   fix stays and the gap is stated rather than implied.
-4. ****22 of the 50 rows worsened, 17 of them above the 1e-6 relative threshold round 31 fixed; 20 improved and 8 are unchanged.**
-
-| row | before | after | relative |
-|---|---:|---:|---:|
-| `kt7.before.ssh` | `6.646099e-06` | `6.749100e-06` | `+1.55 %` |
-| `kt5.before.ssh` | `9.360615e-07` | `9.475137e-07` | `+1.223 %` |
-| `kt6.before.ssh` | `3.227837e-06` | `3.265152e-06` | `+1.156 %` |
-| `kt8.before.ssh` | `1.172228e-05` | `1.181515e-05` | `+0.7922 %` |
-| `kt4.before.ssh` | `5.294946e-07` | `5.299464e-07` | `+0.08532 %` |
-| `kt10.before.ssh` | `3.328488e-05` | `3.330666e-05` | `+0.06541 %` |
-| `kt4.before.u` | `7.078542e-03` | `7.078770e-03` | `+0.003235 %` |
-| `kt10.before.v` | `8.868411e-03` | `8.868672e-03` | `+0.002946 %` |
-| `kt3.before.u` | `7.193078e-04` | `7.193256e-04` | `+0.002463 %` |
-| `kt3.before.v` | `8.606478e-04` | `8.606654e-04` | `+0.00204 %` |
-| `kt6.before.u` | `2.776558e-02` | `2.776573e-02` | `+0.0005441 %` |
-| `kt7.before.u` | `3.604430e-02` | `3.604447e-02` | `+0.0004901 %` |
-| `kt6.before.v` | `6.209240e-02` | `6.209267e-02` | `+0.0004236 %` |
-| `kt5.before.u` | `9.209029e-03` | `9.209065e-03` | `+0.0003946 %` |
-| `kt5.before.v` | `4.572142e-02` | `4.572158e-02` | `+0.0003645 %` |
-| `kt8.before.u` | `4.300540e-02` | `4.300556e-02` | `+0.0003621 %` |
-| `kt9.before.u` | `4.806947e-02` | `4.806954e-02` | `+0.0001359 %` |
-| `kt7.before.v` | `6.143942e-02` | `6.143945e-02` | `+6.044e-05 %` |
-| `kt4.before.T` | `1.066213e-03` | `1.066213e-03` | `+1.648e-05 %` |
-| `kt4.before.S` | `8.238303e-05` | `8.238303e-05` | `+5.065e-06 %` |
-| `kt3.before.T` | `3.722344e-04` | `3.722344e-04` | `+9.336e-07 %` |
-| `kt5.before.T` | `3.059926e-03` | `3.059926e-03` | `+7.775e-07 %` |_COUNT worsened trajectory rows**, all at `kt >= 3`, with a boundary and
-   a named owner, plus round 30's eight.
+3. **ROUND-33 CORRECTION — this round's fix is discharged on GYRE only.**
+   The sentence that stood here said "discharged on GYRE, LOCK and DINO"; that
+   is withdrawn.  What ran on the two tanks was the oracle-relative TRAJECTORY
+   MOVE gate, which is not a given-NEMO-inputs discharge, and it FAILED on
+   OVERFLOW (9 cells worsen, largest `4.443181933488916e-13` at `kt10`/`u`/cell
+   `550`, `2001` row-scale ulps of a 2-ulp bar).  Both tanks EXECUTE the moved
+   operator — `ln_drgimp` and `ln_dynspg_ts` are both true on each — so both
+   are Rule-12 relevant and both are UNDISCHARGED.  DINO is not a campaign card
+   and its measurement is an inertness measurement, not a discharge.  ORCA2
+   stays UNMEASURED.  Under Rule 12 the fix stays; the gap is now stated at its
+   real size.  Round 33 writes the acquisition that closes it (item 3 below).
+4. **22 worsened trajectory rows**, all at `kt >= 3`, with a boundary and
+   a named owner, plus round 30's eight.  The 22 are tabulated above, under
+   "The trajectory, and the worsened rows"; 17 of them are above the `1e-6`
+   relative threshold round 31 fixed, 20 rows improved and 8 are unchanged.
+   (ROUND-33 CORRECTION: this item was a broken template — a whole table had
+   been substituted into the middle of the sentence and a literal `_COUNT` left
+   in the text.  No number changed; the same 22 rows are meant, and they are
+   listed once, above, instead of twice.)
 
 ### Open questions
 
