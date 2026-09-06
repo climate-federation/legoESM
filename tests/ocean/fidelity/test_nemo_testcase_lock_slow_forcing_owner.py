@@ -72,9 +72,31 @@ def test_divide_and_reciprocal_associations_differ_by_a_bit():
     assert divide.view(np.uint64) != reciprocal.view(np.uint64)
 
 
+def _guard_call(**kwargs):
+    """The shared statement, called with everything valid but one field.
+
+    Round 28 made this the ONE depth-mean implementation and gave it a face
+    selector, so it grew a ``grid`` argument between the config and the mask.
+    The call is spelled out here rather than positionally so the next
+    signature change fails loudly in one place instead of turning a dispatch
+    guard's ValueError into a TypeError, which is how this test broke.
+    """
+    return probe.depth_mean_statement(
+        np.zeros((1, 1, 1)), np.zeros((1, 1)), np.ones((1, 1)),
+        _FlatZCoord(np.ones((1, 1, 1))), object(), None, np.ones((1, 1)),
+        **kwargs)
+
+
 def test_unknown_association_raises_rather_than_defaulting():
     with pytest.raises(ValueError, match="unknown association"):
-        probe.depth_mean_statement(
-            np.zeros((1, 1, 1)), np.zeros((1, 1)), np.ones((1, 1)),
-            _FlatZCoord(np.ones((1, 1, 1))), object(), np.ones((1, 1)),
-            association="not_a_real_association")
+        _guard_call(association="not_a_real_association")
+
+
+def test_unknown_face_raises_rather_than_defaulting():
+    """Same dispatch-hardening rule for the face selector round 28 added.
+
+    A silent fall-through here would score a V face with the U operator, which
+    is a wrong ANSWER rather than an error.
+    """
+    with pytest.raises(ValueError, match="unknown face"):
+        _guard_call(tag="w")
