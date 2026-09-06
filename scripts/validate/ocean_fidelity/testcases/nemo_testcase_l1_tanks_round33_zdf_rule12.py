@@ -338,7 +338,7 @@ def run(card: str, *, plant: bool = False) -> dict:
     open_rows.append({
         "row": f"{case}.kt1.stage3.rule12_correction.u.mask_placement",
         "owner": ("NEMO writes uu(jk) + zub*umask(jk) "
-                  "(stprk3_stg.f90:526-527); the operator writes "
+                  "(stprk3_stg.f90:541-542); the operator writes "
                   "(uu + zub)*stage_mask"),
         "boundary": ("MEASURED on both tanks: 0 of 8190 and 0 of 61206 bits "
                      "differ, because every dry face already carries +0.0.  "

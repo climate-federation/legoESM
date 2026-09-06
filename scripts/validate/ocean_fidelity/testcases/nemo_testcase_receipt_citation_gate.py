@@ -48,6 +48,7 @@ OVERFLOW_RUN = Path(
 # path anchors, so one basename cannot silently resolve to a MY_SRC override
 _OCE = NEMO / "src/OCE"
 _DYN = _OCE / "DYN"
+_R35 = NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R35TRAZDF/BLD/ppsrc/nemo"
 FILES = {
     "stprk3.F90": _OCE / "stprk3.F90",
     "stprk3_stg.F90": _OCE / "stprk3_stg.F90",
@@ -123,6 +124,16 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM/cpp_GYRE_OMIP_L2_P3_SM.fcm",
     "nemo_testcase_recipe.py":
         REPO / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py",
+    # --- round 36 paths: THIS ROUND'S OWN BUILD ---
+    # The R35TRAZDF card is the one that produced the round-35 record, and it
+    # is the only build whose trazdf.f90 carries the instrument, so its line
+    # numbers are not R29ZDF's.  Bare lowercase keys, distinct from the
+    # shipped .F90 keys above: FILES is an EXACT-key lookup, so nothing here
+    # can capture a citation that already resolves elsewhere.
+    "trazdf.f90": _R35 / "trazdf.f90",
+    "zdf_oce.f90": _R35 / "zdf_oce.f90",
+    "stprk3_stg.f90": _R35 / "stprk3_stg.f90",
+    "domain.f90": _R35 / "domain.f90",
 }
 
 # citation -> the anchors that IDENTIFY its first and last line, plus the
@@ -176,6 +187,47 @@ CITATION_MAP = {
         '==>>>   Rotated laplacian operator (standard)', 1),
     'round29_oracle_v2_zdf_matrix/ocean.output:657': 'ln_traldf_msc   =  F',
     'round29_oracle_v2_zdf_matrix/ocean.output:158': 'ln_SEOS   =  F',
+    # --- round 36: the mislabelled record, and NEMO's own reciprocal ---
+    # avt and avs are allocated over the INTERIOR box; avm, on the same
+    # statement, is not.  That asymmetry is the whole finding, so both lines
+    # are pinned.
+    'zdf_oce.f90:85-86': [
+        'ALLOCATE( avm (jpi,jpj,jpk), avm_k(jpi,jpj,jpk), avs(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0),jpk) ,   &',
+        '&      avt (Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0),jpk) , avt_k(Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0),jpk) , en (Nis0-(0):Nie0+(0),Njs0-(0):Nje0+(0),jpk) ,   &',
+        2],
+    # The two short WRITEs, which is where the record's headers stopped
+    # describing its payload.
+    'trazdf.f90:247': 'WRITE(il2_unit) avt',
+    'trazdf.f90:249': 'WRITE(il2_unit) avs',
+    # zwt(:,1) = 0 is why avt's surface plane is a slice no arm reads.
+    'trazdf.f90:419': 'zwt(:,1) = 0._wp',
+    # The first non-bit statements, in NEMO's own execution order: the two
+    # face coefficients whose zeros are NEGATIVE, then the diagonal.
+    'trazdf.f90:443-444': [
+        'zwi(ji,jk) = - p2dt * zwt(ji,jk  ) / (e3w_1d(jk) *(1._wp+r3t(ji,jj,Kmm)))',
+        'zws(ji,jk) = - p2dt * zwt(ji,jk+1) / (e3w_1d(jk+1) *(1._wp+r3t(ji,jj,Kmm)))',
+        2],
+    'trazdf.f90:445':
+        'zwd(ji,jk) = (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kaa)*tmask(ji,jj,jk))) - ( zwi(ji,jk) + zws(ji,jk) )',
+    # The right-hand side, LEFT TO RIGHT: (p2dt*e3t_Kmm)*T_Krhs.
+    'trazdf.f90:528-529': [
+        'zrhs =       (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kbb)*tmask(ji,jj,jk))) * pt(ji,jj,jk,jn,Kbb )   &',
+        '& + p2dt * (e3t_3d(ji,jj,jk) *(1._wp+r3t(ji,jj,Kmm)*tmask(ji,jj,jk))) * pt(ji,jj,jk,jn,Krhs)   ! zrhs=right hand side',
+        2],
+    # The MULTIPLY by a stored reciprocal, and where that reciprocal is made.
+    'stprk3_stg.f90:522-523': [
+        'zub(ji,jj) = uu_b(ji,jj,Kaa) - SUM( e3u_3d(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)',
+        'zvb(ji,jj) = vv_b(ji,jj,Kaa) - SUM( e3v_3d(ji,jj,:)*vv(ji,jj,:,Kaa) ) * r1_hv_0(ji,jj)',
+        2],
+    'domain.f90:213':
+        'r1_hu_0(:,:) = ssumask(:,:) / ( hu_0(:,:) + 1._wp -  ssumask(:,:) )',
+    # NEMO adds the correction PER LEVEL, masked; it never masks uu itself.
+    # This round first cited :526-527, which in THIS build is a comment --
+    # the instrument shifts the line numbers, and the map caught it.
+    'stprk3_stg.f90:541-542': [
+        'uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)',
+        'vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)',
+        2],
     # --- round 32: the stage-3 ordering fix ---
     # --- round 33: the stage arm, and the tanks' reference geometry ---
     # NEMO's ONE selector, used at every stage, and both of its arms.
@@ -201,7 +253,7 @@ CITATION_MAP = {
     # each tank's OWN resolved momentum-advection arm.
     'lock_kt1_10/ocean.output:705': 'ln_dynadv_vec  =  F',
     'overflow_kt1_10/ocean.output:822': 'ln_dynadv_vec  =  F',
-    'ocean_model_latlon_cgrid.py:6006': '_vector_velocity_stage_update = (',
+    'ocean_model_latlon_cgrid.py:6017': '_vector_velocity_stage_update = (',
     'dynzdf.F90:119': 'IF( ln_dynadv_vec .OR. lk_linssh )',
     'dynzdf.F90:150-151': ['puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kaa) - uu_b',
                            'pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kaa) - vv_b', 2],
@@ -410,11 +462,11 @@ CITATION_MAP = {
         5],
     # ROUND 32 moved this site: stage 3 no longer corrects before the solve,
     # it defers the closure (stprk3_stg.F90:437-446 runs after :430).
-    'ocean_model_latlon_cgrid.py:6414-6417': [
+    'ocean_model_latlon_cgrid.py:6425-6428': [
         ('u3_corr = u3_raw * _ws_stage_u_mask', 1),
         ('_replace_stage_mean, target_u, target_v)', 1),
         4],
-    'ocean_model_latlon_cgrid.py:7995-8021': [
+    'ocean_model_latlon_cgrid.py:8006-8032': [
         ('if _ws_stage3_correction is not None:', 1),
         ('v=state_new.v.replace(data=_v_after),', 1),
         27],
@@ -427,12 +479,12 @@ CITATION_MAP = {
         'uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)',
         'vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)',
         2],
-    'ocean_model_latlon_cgrid.py:7847-7849': [
+    'ocean_model_latlon_cgrid.py:7858-7860': [
         '_nemo_ws_pre_implicit_state = (',
         'if self._nemo_ws_test_hooks.expose_pre_implicit_state else None)',
         3],
-    'ocean_model_latlon_cgrid.py:10042': ('u_solve_in = u_solve_in - _u_bt_mean', 1),
-    'ocean_model_latlon_cgrid.py:10159': ('u_solve_in = u_solve_in - (', 1),
+    'ocean_model_latlon_cgrid.py:10053': ('u_solve_in = u_solve_in - _u_bt_mean', 1),
+    'ocean_model_latlon_cgrid.py:10170': ('u_solve_in = u_solve_in - (', 1),
     'ocean_pe_latlon_cgrid.py:3262-3265': [
         ('if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):', 1),
         ('"with a scalar dlon (got dlon<=0; tripolar unsupported)."', 1),

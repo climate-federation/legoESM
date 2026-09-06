@@ -39,7 +39,7 @@ THE ARMS, and what each can decide.
   imply it checked.
 
 THE BLIND SPOT, NAMED.  ``tracer_combine`` resolves to ``"concentration"`` on
-this card, so ``ocean_model_latlon_cgrid.py:11943-11988`` leaves
+this card, so ``ocean_model_latlon_cgrid.py:11954-11999`` leaves
 ``_nemo_tracer_content_rhs`` at ``None`` and the literal solve is fed
 ``T_solve_in * dz_cell`` at ``:10220-10221`` instead of NEMO's two-term
 content RHS.  NO arm here drives that path -- it needs the model's own
@@ -873,7 +873,7 @@ def run(record: Path, *, plant: str | None = None,
                 "builds it: the production solve takes the RHS as an argument "
                 "(implicit_solver.py:417-424) and this card resolves "
                 "tracer_combine='concentration', so "
-                "ocean_model_latlon_cgrid.py:11943-11988 leaves the content "
+                "ocean_model_latlon_cgrid.py:11954-11999 leaves the content "
                 "RHS at None and :10220-10221 feeds the literal matrix "
                 "T_solve_in*dz_cell instead of NEMO's two-term content form.  "
                 "Closing it needs the model's own intermediates, i.e. the "

@@ -6438,7 +6438,7 @@ model, and it touches none of the solve's own inputs (`avm`, `e3uw(Kmm)`,
 
 **Round 30 was wrong that legoESM exposes no pre-solve vector.**
 `expose_pre_implicit_state` publishes `state_new` immediately before the
-implicit solver (`ocean_model_latlon_cgrid.py:7847-7849`, struck in place from lines 7731 to
+implicit solver (`ocean_model_latlon_cgrid.py:7858-7860`, struck in place from lines 7731 to
 7733, which round 32 moved) and it carries u and v.  **P4b is REFUTED**: that vector is not NEMO's explicit stage update, and
 not by a little — `4.269765124169735e-04` on u, which is the size of the
 FIELD, not of a residual.
@@ -6460,7 +6460,7 @@ residual, which is the check.
 **THE OWNER: the ORDER of the barotropic correction relative to the solve.**
 Read on both sides before it was measured.  legoESM applies NEMO's correction
 to the stage-3 velocity BEFORE the implicit solve
-(`ocean_model_latlon_cgrid.py:6414-6417` — the line numbers ROUND 32 MOVED,
+(`ocean_model_latlon_cgrid.py:6425-6428` — the line numbers ROUND 32 MOVED,
 struck in place from the range round 31 cited, lines 6300 to 6321, which is
 rendered without backticks here because a struck citation is not a claim about
 current code and the gate is right to refuse it as one; the code at the new
@@ -7236,7 +7236,7 @@ is the key_qco form, and the deck resolves `ln_dynadv_vec = T`
 (`round19_oracle_v2_external/ocean.output:798`) with `lk_linssh` `.FALSE.` in
 that build's own `dom_oce.f90`.  NEMO takes the VECTOR arm at all three stages
 on GYRE.  legoESM honoured that at stages 1 and 2
-(`ocean_model_latlon_cgrid.py:6006` and its two branch sites) and hardcoded the
+(`ocean_model_latlon_cgrid.py:6017` and its two branch sites) and hardcoded the
 key_qco ratios at stage 3.  A transcription defect, and it had a comment
 asserting the opposite.
 
@@ -8705,7 +8705,7 @@ reconciles the earlier review's "0/16900": it did not go through XLA.
 Registered OPEN, not reverted (Rule 12).
 
 **Second Rule-12 row, raised by the claim review and MEASURED.**  NEMO writes
-`uu(jk) + zub*umask(jk)` (`stprk3_stg.f90:526-527`); the operator writes
+`uu(jk) + zub*umask(jk)` (`stprk3_stg.f90:541-542`); the operator writes
 `(uu + zub)*stage_mask`.  On both tanks 0 of 8190 and 0 of 61206 bits differ,
 because every dry face already carries `+0.0`.  On GYRE it is 349 (u) and 212
 (v) cells — **ALL of them signed zero, max abs difference exactly 0.0**.

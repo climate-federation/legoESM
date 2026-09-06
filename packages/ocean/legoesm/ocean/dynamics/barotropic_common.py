@@ -627,7 +627,7 @@ def rk3_stage_barotropic_correction(
     r1_depth_ref: jnp.ndarray,
     stage_mask: jnp.ndarray,
 ) -> jnp.ndarray:
-    """NEMO ``stprk3_stg.f90:522-523,526-527``, the RK3 stage correction::
+    """NEMO ``stprk3_stg.f90:522-523,541-542``, the RK3 stage correction::
 
         zub(ji,jj) = uu_b(ji,jj,Kaa)
            &       - SUM( e3u_3d(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)
