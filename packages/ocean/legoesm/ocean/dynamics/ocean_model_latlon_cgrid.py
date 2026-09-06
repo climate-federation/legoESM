@@ -6968,6 +6968,55 @@ class LatLonCGridOceanModel:
         # (every other caller) ⇒ bit-identical.
         _T_gm_in = T_mid if _ldf_state is None else _ldf_state[0]
         _S_gm_in = S_mid if _ldf_state is None else _ldf_state[1]
+        # The positional ``eta`` these three GM/Redi calls receive.  Naa (the
+        # step's own after-ssh) on every historical lane.
+        _eta_gm_in = state_new.eta.data
+
+        # NEMO's WS-RK3 STAGE PROGRAM COMPUTES THE NEUTRAL SLOPES ONCE PER
+        # STEP, ON THE BEFORE STATE, OUTSIDE THE STAGE LOOP:
+        #
+        #     CALL eos ( ts, Nbb, rhd )                   stprk3.F90:173
+        #     CALL ldf_slp( kstp, rhd, rn2b, Nbb, Nbb )   stprk3.F90:174
+        #     ...
+        #     CALL stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )   :195
+        #     CALL stp_RK3_stg( 2, ... )  :200      CALL stp_RK3_stg( 3, ... )  :207
+        #
+        # ``rhd`` is the density of the BEFORE tracers, ``rn2b`` the BEFORE
+        # Brunt-Vaisala frequency, and ``Kbb = Kmm = Nbb`` inside ``ldf_slp``
+        # so every geometry it reads -- gdept, gdepw, e3u, e3v, e3w and the ssh
+        # behind them -- is at the before level too (ldfslp.F90:143,161,
+        # 212-215,226-231,290).  ``traldf_iso_a33`` then squares those
+        # once-per-step slopes into ``ah_wslp2`` at each stage
+        # (traldf_iso.F90:135,296-297) and ``trazdf.F90:173`` adds it to
+        # ``avt``.  NOTHING in ``ah_wslp2`` carries a stage time level at all:
+        # ``ahtu``/``ahtv`` have no time index (traldf_iso.F90:291-294) and the
+        # only ``Kmm`` in that routine is ``akz``'s ``e3w`` (:325,:330), which
+        # this card does not reach (``ln_traldf_msc = F``).  An earlier draft
+        # of this comment said the ahtu average carried the stage's Kmm; an
+        # independent claim review corrected it.
+        #
+        # legoESM built them from ``T_mid``/``S_mid`` -- the forward-Euler
+        # PREDICTOR of the whole baroclinic tendency, built above -- and from
+        # the after-ssh.  MEASURED on GYRE's kt=1 step: that predictor is
+        # 0.3372313792464041 K away from step entry on 10199 of 21120 cells,
+        # where NEMO's own stage-minus-before tracer anomaly is 7.25e-6 K, and
+        # the resulting K33 reaches 9.6620886711883531e-13 m2/s where NEMO's
+        # ah_wslp2 on the same step is IDENTICALLY 0.0.  Substituting one
+        # component at a time into the model's own call: tracers := step entry
+        # gives 1.3071545538245700e-14, eta := step entry gives
+        # 9.6625031189531020e-13, BOTH give EXACTLY 0.0 on all 20416 faces.
+        #
+        # So on the WS-RK3 tracer lane the slope operand set IS the step-entry
+        # (Kbb) state.  ``_ldf_state`` is the same statement for the
+        # modified-leapfrog lane and takes precedence where it is supplied;
+        # every other integrator has no stage loop for this statement to be
+        # about and is untouched, bit for bit.
+        if (_ldf_state is None
+                and getattr(_cfg_b, "tracer_time_integrator", "euler")
+                == "rk3_ws"):
+            _T_gm_in = state.T.data
+            _S_gm_in = state.S.data
+            _eta_gm_in = state.eta.data
 
         # GM/Redi isopycnal mixing (if configured)
         k33_implicit = None  # vertical isoneutral diffusivity K_33 for the
@@ -7193,7 +7242,7 @@ class LatLonCGridOceanModel:
                 # K33 and the isoneutral flux it augments would disagree on
                 # which time level they came from.
                 _gm_dens_jac = gm_redi_density_and_jacobian(
-                    _T_gm_in, _S_gm_in, state_new.eta.data,
+                    _T_gm_in, _S_gm_in, _eta_gm_in,
                     state_new.H_bathy.data,
                     _grid, _zc,
                     eos=_cfg_b.eos, eos_linear=_cfg_b.eos_linear,
@@ -7211,7 +7260,7 @@ class LatLonCGridOceanModel:
                 and getattr(gm_cfg, "slope_scheme", "") == "nemo_iso_lap"
             )
             _gm_out = gm_redi_tracer_tendency_latlon(
-                _T_gm_in, _S_gm_in, state_new.eta.data, state_new.H_bathy.data,
+                _T_gm_in, _S_gm_in, _eta_gm_in, state_new.H_bathy.data,
                 _grid, _zc, gm_cfg,
                 eos=_cfg_b.eos, eos_linear=_cfg_b.eos_linear,
                 mask=state.land_mask.data,
@@ -7275,7 +7324,7 @@ class LatLonCGridOceanModel:
                 # isoneutral flux they augment (adversarial-review CONFIRMED
                 # finding, P1).
                 k33_implicit = compute_isoneutral_K33_latlon(
-                    _T_gm_in, _S_gm_in, state_new.eta.data,
+                    _T_gm_in, _S_gm_in, _eta_gm_in,
                     state_new.H_bathy.data,
                     _grid, _zc, gm_cfg,
                     eos=_cfg_b.eos, eos_linear=_cfg_b.eos_linear,

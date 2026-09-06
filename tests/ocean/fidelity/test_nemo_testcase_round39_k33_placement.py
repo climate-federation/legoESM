@@ -88,3 +88,170 @@ def test_run_sh_delegates_the_other_records_to_the_admission_gate():
         "would then be checked by nothing")
     assert "--plant-consumed" in head, "the source admission has no plant"
     assert head.count("exit 7") >= 2, "the admission or its plant cannot refuse"
+
+
+# --------------------------------------------------------------------------
+# The change itself: on the WS-RK3 lane the GM/Redi slope operand set is the
+# step-entry (Kbb) state, and the fold it builds on GYRE's horizontally
+# uniform initial condition is EXACTLY zero -- which is NEMO's ah_wslp2 there.
+# --------------------------------------------------------------------------
+@pytest.fixture(scope="module")
+def _gyre_k33_call():
+    """One kt=1 GYRE step, capturing the arguments of the model's K33 call.
+
+    This runs the production step, so it costs one JAX compilation.  It is the
+    only way to make the claim non-vacuously: the operands are chosen inside a
+    1500-line function and the assertion has to be about what that function
+    HANDED the slope routine, not about what a reader thinks it passes.
+    """
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    import jax
+    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as M
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+    from nemo_testcase_l2_gyre_phase3_gate import CASE, _surface_forcings
+
+    card = build_nemo_testcase_card(CASE)
+    cfg = card.recipe.model_config._replace(
+        freshwater_closure="real_freshwater", fix_eta_drift=True)
+    init = card.recipe.initial_state
+    seen: dict[str, list] = {}
+
+    def sink(name):
+        return lambda v: seen.setdefault(name, []).append(
+            np.array(v, dtype=np.float64))
+
+    real = M.compute_isoneutral_K33_latlon
+
+    def wrapped(T, S, eta, H_bathy, *a, **kw):
+        for label, value in (("T", T), ("S", S), ("eta", eta)):
+            jax.debug.callback(sink(label), value)
+        out = real(T, S, eta, H_bathy, *a, **kw)
+        jax.debug.callback(sink("K33"), out)
+        return out
+
+    M.compute_isoneutral_K33_latlon = wrapped
+    try:
+        freshwater, surface = _surface_forcings(card, init, 1)
+        M.LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, cfg,
+        ).step(init, dt=card.dt_s, freshwater=freshwater,
+               surface_forcing=surface)
+    finally:
+        M.compute_isoneutral_K33_latlon = real
+    assert cfg.tracer_time_integrator == "rk3_ws"
+    return seen, init
+
+
+def test_the_slope_operands_are_the_step_entry_state(_gyre_k33_call):
+    """NEMO's ldf_slp is called on Nbb, once, outside the stage loop.
+
+    FAILS ON THE PARENT COMMIT: the tracers it received were the forward-Euler
+    predictor, 0.337 K away from step entry on 10199 of 21120 cells, and the
+    ssh was the after-ssh, 2.8e-3 m away on 600 of 704.
+    """
+    seen, init = _gyre_k33_call
+    assert [len(seen[n]) for n in ("T", "S", "eta")] == [1, 1, 1], (
+        "the slope routine must be called exactly once per step")
+    for label, entry in (("T", init.T.data), ("S", init.S.data),
+                         ("eta", init.eta.data)):
+        got = seen[label][0]
+        want = np.asarray(entry, dtype=np.float64)
+        unequal = int((got.view(np.uint64) != want.view(np.uint64)).sum())
+        assert unequal == 0, (
+            f"{label}: {unequal} of {want.size} cells are not the step-entry "
+            f"value, max |diff| {np.abs(got - want).max():.17g}")
+
+
+def test_the_fold_is_exactly_zero_on_a_horizontally_uniform_state(
+        _gyre_k33_call):
+    """GYRE's analytic initial T and S are horizontally uniform on wet cells.
+
+    So NEMO's before-state slopes are exactly zero and its ah_wslp2 is
+    identically 0.0 -- measured on the round-37 record, absolute maximum 0.
+    legoESM's fold must be too, at the exact bar and not inside a tolerance.
+
+    FAILS ON THE PARENT COMMIT at 9.6620886711883531e-13 m2/s.
+    """
+    seen, _ = _gyre_k33_call
+    k33 = seen["K33"][0]
+    nonzero = int(np.count_nonzero(k33))
+    assert nonzero == 0, (
+        f"{nonzero} of {k33.size} faces carry a fold NEMO does not; "
+        f"absolute maximum {np.abs(k33).max():.17g} m2/s")
+
+
+def test_the_zero_is_not_degenerate(_gyre_k33_call):
+    """A routine that returns zero for everything would pass the test above.
+
+    Perturbing one wet cell of the captured step-entry state by 1e-6 K must
+    give a fold that is not zero, so the exact zero above is a property of the
+    STATE and not of the routine.
+    """
+    import jax.numpy as jnp
+    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as M
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+    from nemo_testcase_l2_gyre_phase3_gate import CASE
+
+    seen, init = _gyre_k33_call
+    card = build_nemo_testcase_card(CASE)
+    cfg = card.recipe.model_config._replace(
+        freshwater_closure="real_freshwater", fix_eta_drift=True)
+    T = jnp.asarray(seen["T"][0]).at[10, 16, 3].add(1e-6)
+    bumped = M.compute_isoneutral_K33_latlon(
+        T, jnp.asarray(seen["S"][0]), jnp.asarray(seen["eta"][0]),
+        jnp.asarray(init.H_bathy.data), card.recipe.grid, card.recipe.z_coord,
+        cfg.gm_redi, eos=cfg.eos, eos_linear=cfg.eos_linear,
+        mask=jnp.asarray(init.land_mask.data), rho_0=cfg.constants.rho_0,
+        g=cfg.constants.g, native_slope_eta=jnp.asarray(seen["eta"][0]),
+        u_mask=jnp.asarray(init.u_mask.data),
+        v_mask=jnp.asarray(init.v_mask.data), dt=card.dt_s,
+        eos_depth=getattr(cfg, "eos_depth", "insitu"))
+    assert float(np.abs(np.asarray(bumped)).max()) > 0.0, (
+        "a 1e-6 K bump left the fold at exactly zero, so the zero above is "
+        "the routine's and proves nothing about the state")
+
+
+def _ws_guard(text: str) -> str:
+    """The WS-RK3 before-state assignment, lifted from the running module."""
+    head = "        _T_gm_in = T_mid if _ldf_state is None else _ldf_state[0]"
+    start = text.index(head)
+    end = text.index("            _eta_gm_in = state.eta.data", start)
+    block = text[start:end]
+    return block[block.index("if ("):]
+
+
+def _guard_is_scoped(text: str) -> bool:
+    guard = _ws_guard(text)
+    return "_ldf_state is None" in guard and '== "rk3_ws"' in guard
+
+
+def test_the_modified_leapfrog_lane_still_wins():
+    """``_ldf_state`` takes precedence over the WS-RK3 statement.
+
+    The rk3_ws branch is guarded on ``_ldf_state is None``, so the
+    modified-leapfrog lane -- which supplies its own Nbb operands and is the
+    lane DINO runs -- must be untouched.  An independent claim review pointed
+    out that the two tests above are blind to it.
+
+    This inspects the source of the module that RUNS, and it proves it can
+    fail: the same predicate is applied to two mutated copies, one with the
+    ``_ldf_state`` guard deleted and one with the lane scope deleted, and both
+    must be rejected.
+    """
+    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as M
+    text = Path(M.__file__).read_text()
+    assert _guard_is_scoped(text)
+    assert not _guard_is_scoped(
+        text.replace("if (_ldf_state is None\n"
+                     "                and getattr(_cfg_b, "
+                     '"tracer_time_integrator", "euler")\n'
+                     '                == "rk3_ws"):',
+                     "if (getattr(_cfg_b, \"tracer_time_integrator\", "
+                     '"euler")\n                == "rk3_ws"):')), (
+        "deleting the _ldf_state guard did not make this check fail, so it "
+        "would not catch that regression either")
+    assert not _guard_is_scoped(text.replace('== "rk3_ws"', '== "euler"')), (
+        "changing the lane scope did not make this check fail")

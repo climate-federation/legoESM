@@ -199,14 +199,24 @@ def _starts_a_known_array(raw: bytes, off: int, *, eof_counts: bool) -> bool:
     return raw[off:off + 16] in _KNOWN_NAMES
 
 
-def read_trazdf_matrix(path: Path) -> dict:
+def read_trazdf_matrix(path: Path, *, expect_kt: int = 1) -> dict:
     """Parse the self-describing record to EOF, refusing anything malformed.
 
     Nothing here knows the array list in advance; the list is only used
     AFTERWARDS, to refuse a short record.  Every refusal is a ``RecordError``
     and therefore a printed verdict -- a decoder traceback would leave a
     malformed record with no status at all, which is how a defeat hides.
+
+    ``expect_kt`` is the step this caller intends to score, and the record's
+    own ``kt`` must equal it.  It defaults to 1 so every existing caller keeps
+    the round-35 refusal unchanged; the round-38 acquisition writes a SECOND
+    record at ``kt = nit000 + 1``, and reading it needs the step named at the
+    call site rather than the guard removed.  A caller that passes the wrong
+    ``expect_kt`` is refused exactly as a wrong record is: the guard moves, it
+    does not weaken.
     """
+    if expect_kt < 1:
+        raise RecordError(f"expect_kt must be a positive step, got {expect_kt}")
     raw = path.read_bytes()
     require(len(raw) >= 16 + 64, f"{path}: shorter than one header")
     try:
@@ -250,11 +260,11 @@ def read_trazdf_matrix(path: Path) -> dict:
             "symmetric-halo check above and then scores a handful of cells "
             "while reporting the same verdict")
     header["halo"] = halo_i
-    # The campaign's claim is kt=1 stage 3; a record from any other step
-    # cannot be scored against it, whatever its rows are named.
-    require(header["kt"] == 1,
-            f"{path}: kt is {header['kt']}, not 1; this gate scores the first "
-            "step only")
+    # A record from a step other than the one the CALLER named cannot be
+    # scored against that caller's claim, whatever its rows are named.
+    require(header["kt"] == expect_kt,
+            f"{path}: kt is {header['kt']}, not {expect_kt}; this reader was "
+            f"asked for step {expect_kt}")
 
     arrays: dict[str, np.ndarray | float] = {}
     order: list[str] = []

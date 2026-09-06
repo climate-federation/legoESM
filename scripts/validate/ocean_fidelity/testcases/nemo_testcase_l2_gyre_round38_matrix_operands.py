@@ -365,6 +365,16 @@ def run_substitution(record: Path, *, oracle_root: Path, npz: Path) -> dict:
         "null_substitution": live["K"],
         "nemo_K": oracle["K"],
         "nemo_avt_lego_fold": oracle["avt"] + live["K33"],
+        # ROUND 39, and it is the arm that PREDICTS the placement fix.
+        # ``nemo_K`` removes the fold AND the legoESM-vs-NEMO ``avt``
+        # difference, so its residual is a ceiling for a change that removes
+        # only the fold -- an independent claim review measured that using it
+        # as the prediction would fire the falsifier on a change that is
+        # exactly right, because one ulp on every wet ``avt`` is worth up to
+        # 1.16e-14 K on its own.  This arm is legoESM's OWN ``K`` with
+        # legoESM's OWN fold subtracted back out, which is exactly what the
+        # model produces once the slopes are built on the before state.
+        "lego_avt_no_fold": live["K"] - live["K33"],
     }
     residual = {name: _stage3_residual(k, oracle_root=oracle_root, npz=npz)
                 for name, k in arms.items()}
