@@ -81,6 +81,39 @@ EXPECTED_ARRAYS = (
     "e3t_Kbb", "e3t_Kmm", "e3t_Kaa", "e3w_Kmm", "e3t_0", "e3w_0",
     "r3t_Kbb", "r3t_Kmm", "r3t_Kaa",
 )
+# The expected RANK and DEPTH of every array, so a record whose extents are
+# structurally plausible but WRONG gets a verdict instead of a broadcast
+# traceback three functions later.  "k" is the full jpk ladder, "km1" the
+# jpkm1 matrix rows, "2d" a horizontal field, "s" a scalar.
+ARRAY_SHAPE = {
+    **{n: "s" for n in ("ln_zdfddm", "ln_zad_Aimp", "ln_zdfmfc",
+                        "ln_traldf_msc", "l_ldfslp", "ln_SEOS",
+                        "a33_allocated", "rDt", "rn_b0", "jp_tem", "jp_sal")},
+    **{n: "k" for n in (
+        "T_Kbb_in", "S_Kbb_in", "T_Kmm_in", "S_Kmm_in", "T_Krhs_in",
+        "S_Krhs_in", "zwt_mix", "zwt_lu", "rhs_T", "rhs_S", "fwd_T", "fwd_S",
+        "sol_T_pre_clamp", "sol_S_pre_clamp", "sol_T_post_clamp",
+        "sol_S_post_clamp", "avt", "avs", "ah_wslp2", "akz", "tmask",
+        "e3t_Kbb", "e3t_Kmm", "e3t_Kaa", "e3w_Kmm", "e3t_0", "e3w_0")},
+    **{n: "km1" for n in ("zwi", "zwd", "zws")},
+    **{n: "2d" for n in ("r3t_Kbb", "r3t_Kmm", "r3t_Kaa")},
+}
+# Arrays the record carries that NO arm consumes.  Declared rather than
+# silent: Rule 1 says coverage is driven by what the oracle provides, so an
+# unused array is a disposition, not an omission.
+UNCONSUMED = {
+    "avs": "ln_zdfddm is F, so the matrix is built from avt alone; avs is "
+           "carried to PROVE it never enters",
+    "akz": "ln_traldf_msc is F, so the akz arm at trazdf.F90:167-170 does not "
+           "run; carried for the same reason",
+    "T_Kmm_in": "the RHS reads Kbb and Krhs; Kmm enters only through e3t_Kmm",
+    "S_Kmm_in": "as T_Kmm_in",
+    "e3t_0": "consumed by the substitution row, not by the matrix",
+    "e3w_0": "as e3t_0",
+    "r3t_Kbb": "the Kbb substitution is not rebuilt; e3t_Kbb is dumped whole",
+    "rn_b0": "read by the clamp-ran consistency check, not by an arm",
+}
+
 # The branch this reader transcribes.  A record written by any other arm is
 # REFUSED rather than scored against statements that did not run.
 REQUIRED_ARM = {
@@ -121,7 +154,6 @@ def read_trazdf_matrix(path: Path) -> dict:
     require(header["version"] == 1, f"{path}: bad version {header['version']}")
     require(header["bits"] == 64, f"{path}: payload is not 64-bit")
     require(header["kstg"] == 3, f"{path}: not a stage-3 record")
-    require(header["kt"] >= 1, f"{path}: bad kt {header['kt']}")
     for name in ("jpi", "jpj", "jpk", "jpkm1"):
         require(header[name] >= 1, f"{path}: bad {name} {header[name]}")
     require(header["jpkm1"] == header["jpk"] - 1,
@@ -130,6 +162,29 @@ def read_trazdf_matrix(path: Path) -> dict:
             f"{path}: ntsi/ntei {header['ntsi']}/{header['ntei']} outside jpi")
     require(1 <= header["ntsj"] <= header["ntej"] <= header["jpj"],
             f"{path}: ntsj/ntej {header['ntsj']}/{header['ntej']} outside jpj")
+    # THE SCORED BOX IS A CHECKED QUANTITY, NOT A HEADER CLAIM.  A shrunken
+    # box scores a handful of cells and reports the same green verdict, with
+    # every plant still red -- so the controls cannot catch it and every n in
+    # the report becomes un-auditable.  NEMO's own loop bounds are the whole
+    # computed domain minus a SYMMETRIC halo, so require exactly that, and
+    # report the width and the cell count next to the verdict.
+    halo_i = header["ntsi"] - 1
+    halo_j = header["ntsj"] - 1
+    require(halo_i == header["jpi"] - header["ntei"]
+            and halo_j == header["jpj"] - header["ntej"]
+            and halo_i == halo_j and halo_i >= 1,
+            f"{path}: the scored box "
+            f"[{header['ntsi']},{header['ntei']}]x"
+            f"[{header['ntsj']},{header['ntej']}] on a "
+            f"{header['jpi']}x{header['jpj']} domain is not the whole domain "
+            f"minus one symmetric halo; a sub-box would score a fraction of "
+            f"the cells and report the same verdict")
+    header["halo"] = halo_i
+    # The campaign's claim is kt=1 stage 3; a record from any other step
+    # cannot be scored against it, whatever its rows are named.
+    require(header["kt"] == 1,
+            f"{path}: kt is {header['kt']}, not 1; this gate scores the first "
+            "step only")
 
     arrays: dict[str, np.ndarray | float] = {}
     order: list[str] = []
@@ -152,6 +207,11 @@ def read_trazdf_matrix(path: Path) -> dict:
         values = np.frombuffer(raw, dtype="<f8", count=count, offset=off)
         off = end
         require(name not in arrays, f"{path}: array {name!r} written twice")
+        expected = ARRAY_SHAPE.get(name)
+        require(expected is None
+                or rank == {"s": 0, "2d": 2, "k": 3, "km1": 3}[expected],
+                f"{path}: {name!r} has rank {rank}, expected the "
+                f"{expected!r} shape")
         if rank == 0:
             arrays[name] = float(values[0])
         elif rank == 2:
@@ -160,11 +220,12 @@ def read_trazdf_matrix(path: Path) -> dict:
                     f"{header['jpi']}x{header['jpj']}")
             arrays[name] = values.reshape((n1, n2), order="F")
         else:
+            want = {"k": header["jpk"], "km1": header["jpkm1"]}.get(
+                ARRAY_SHAPE.get(name), None)
             require((n1, n2) == (header["jpi"], header["jpj"])
-                    and n3 in (header["jpk"], header["jpkm1"]),
+                    and (want is None or n3 == want),
                     f"{path}: rank-3 {name!r} is {n1}x{n2}x{n3}, not the "
-                    f"header's {header['jpi']}x{header['jpj']}x"
-                    f"{header['jpk']} or ...x{header['jpkm1']}")
+                    f"header's {header['jpi']}x{header['jpj']}x{want}")
             arrays[name] = values.reshape((n1, n2, n3), order="F")
         order.append(name)
     require(off == len(raw), f"{path}: {len(raw) - off} trailing bytes")
@@ -175,6 +236,20 @@ def read_trazdf_matrix(path: Path) -> dict:
                 f"{path}: written by an arm this reader does not transcribe: "
                 f"{name} is {arrays[name]}, expected {want}")
     require(arrays["rDt"] > 0.0, f"{path}: rDt is {arrays['rDt']}")
+    # THE FLAGS MUST AGREE WITH EACH OTHER, or a zero can be manufactured.
+    # The writer emits zeros for ah_wslp2 when the array is UNALLOCATED, so a
+    # record claiming l_ldfslp with a33_allocated false would let the
+    # "the fold is exactly zero" row pass by construction rather than by
+    # physics.  ldfslp.F90:571 allocates it whenever the slopes are required.
+    require(not (arrays["l_ldfslp"] == 1.0 and arrays["a33_allocated"] != 1.0),
+            f"{path}: claims l_ldfslp but says ah_wslp2 is unallocated, so "
+            "its a33 field is the writer's zero rather than NEMO's")
+    # Likewise the clamp rows are only a measurement if the clamp RAN.  Its
+    # guard is .NOT.(ln_SEOS .AND. rn_b0 == 0) at trazdf.F90:89.
+    require(not (arrays["ln_SEOS"] == 1.0 and arrays["rn_b0"] == 0.0),
+            f"{path}: the DRAKKAR clamp did not run on this record "
+            "(ln_SEOS with rn_b0 = 0), so its pre/post rows compare a column "
+            "with itself")
     require(int(arrays["jp_tem"]) != int(arrays["jp_sal"]),
             f"{path}: jp_tem and jp_sal are the same index")
     for name in EXPECTED_ARRAYS:
@@ -349,10 +424,11 @@ def lego_assembly(rec: dict) -> dict[str, np.ndarray]:
     import jax.numpy as jnp
     from legoesm.ocean.physics.vertical_mixing import nemo_tracer_tridiagonal
     op = _lego_operands(rec)
+    content = jnp.asarray(op["e3t_after"])   # the production caller's RHS dtype
     lower, diagonal, upper = nemo_tracer_tridiagonal(
         jnp.asarray(op["K"]), jnp.asarray(op["e3t_after"]),
         jnp.asarray(op["e3w_now"]), float(op["dt"]),
-        jnp.asarray(op["wet"]) > 0.0)
+        jnp.asarray(op["wet"]) > 0.0, dtype=content.dtype)
     return {"zwi": np.asarray(lower), "zwd": np.asarray(diagonal),
             "zws": np.asarray(upper)}
 
@@ -602,6 +678,14 @@ def run(record: Path, *, plant: str | None = None,
         "named_deviations": deviations,
         "status": status,
         "calibrated": calibrated,
+        "scored_box": {
+            "i": [h["ntsi"], h["ntei"]], "j": [h["ntsj"], h["ntej"]],
+            "halo": h["halo"], "levels": jpkm1,
+            "cells": (h["ntei"] - h["ntsi"] + 1)
+                     * (h["ntej"] - h["ntsj"] + 1) * jpkm1,
+            "domain": [h["jpi"], h["jpj"], h["jpk"]],
+        },
+        "arrays_present_but_consumed_by_no_arm": UNCONSUMED,
         "rhs_blind_spot": {
             "status": "UNMEASURED",
             "reason": (
@@ -654,8 +738,16 @@ def main(argv=None) -> int:
     for row in report["named_deviations"]:
         print(f"{'INERT' if row['inert_here'] else 'LIVE':<12} "
               f"{row['deviation'][:100]}")
+    box = report["scored_box"]
+    print(f"SCORED {box['cells']} cells, i {box['i']} j {box['j']} "
+          f"halo {box['halo']}, on a {box['domain']} domain")
+    # The blind spot goes in the PRINTED verdict, not only in the JSON: a
+    # human reading "STATUS AT-BAR" would otherwise never learn that the
+    # model's own right-hand side was never compared.
+    print(f"BLIND-SPOT {report['rhs_blind_spot']['status']} "
+          f"{', '.join(report['rhs_blind_spot']['rows'])}")
     print(f"STATUS {report['status']}")
-    return 0 if report["status"] == "AT-BAR" else 1
+    return 0 if report["status"] in PASSING else 1
 
 
 if __name__ == "__main__":

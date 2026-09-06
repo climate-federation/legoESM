@@ -30,8 +30,8 @@ sys.path.insert(0, str(GATE.parent))
 from legoesm.ocean.fidelity.provenance import allow_dirty_stamps  # noqa: E402
 import nemo_testcase_l2_gyre_round35_trazdf_matrix as R  # noqa: E402
 
-JPI, JPJ, JPK = 9, 8, 6
-NTSI, NTEI, NTSJ, NTEJ = 3, 7, 3, 6          # a 2-cell halo on every side
+JPI, JPJ, JPK = 9, 9, 6
+NTSI, NTEI, NTSJ, NTEJ = 3, 7, 3, 7          # a 2-cell halo on every side
 JPKM1 = JPK - 1
 RDT = 1234.5
 
@@ -206,13 +206,35 @@ def _run(record: Path, **kw) -> dict:
         return R.run(record, with_card=False, **kw)
 
 
-def test_the_reader_parses_the_twin_and_every_arm_is_at_bar(clean_record):
+def test_the_reader_parses_the_twin_and_the_arms_read_what_they_should(
+        clean_record):
+    """Calibration exact; assembly and sweep at bar; the RHS form is NOT.
+
+    The last one is a RESULT, not a fixture artifact: legoESM's content
+    builder groups the update as ``h*(p2dt*T)`` where NEMO writes
+    ``p2dt*h*T`` (``trazdf.F90:219-220`` for the matrix, the same style at
+    :276-277 for the RHS), and the two are not the same floating-point
+    expression.  It matters because round 36 cannot flip ``tracer_combine``
+    to the content form and expect bit equality from that alone.
+    """
     report = _run(clean_record)
     assert report["calibrated"] is True, [
-        r for r in report["calibration_rows"] if r["status"] != "AT-BAR"]
-    assert report["status"] == "AT-BAR", [
-        r for r in report["given_inputs_rows"] if r["status"] != "AT-BAR"]
+        r for r in report["calibration_rows"] if r["status"] not in R.PASSING]
     assert set(report["arrays_read"]) == set(R.EXPECTED_ARRAYS)
+
+    by_name = {r["name"].rsplit(".trazdf.", 1)[1]: r
+               for r in report["given_inputs_rows"]}
+    for name in ("assembly.zwd", "sweep.T", "sweep.S"):
+        assert by_name[name]["status"] == "AT-BAR", by_name[name]
+    for name in ("assembly.zwi", "assembly.zws"):
+        assert by_name[name]["status"] == "AT-BAR-SIGNED-ZERO", by_name[name]
+        assert by_name[name]["absolute_max"] == 0.0
+    rhs = by_name["rhs_content.T"]
+    assert rhs["status"] == "VALUE-AT-BAR", rhs
+    assert 0 < rhs["bit_unequal"] < rhs["n"]
+    assert rhs["normalized_max_abs"] < R.BAR
+    # and the gate does NOT call that AT-BAR: the campaign's bar is exact
+    assert report["status"] == "DEBT"
 
 
 def test_the_calibration_is_not_tautological(clean_record):
@@ -245,9 +267,11 @@ def test_every_plant_exits_non_zero_end_to_end(clean_record, plant, tmp_path):
     base = [sys.executable, str(GATE), "--record", str(clean_record),
             "--no-card"]
     clean = subprocess.run(base, env=env, capture_output=True, text=True)
-    assert clean.returncode == 0, clean.stdout[-3000:] + clean.stderr[-3000:]
+    assert "SCORED " in clean.stdout and "BLIND-SPOT " in clean.stdout
     planted = subprocess.run(base + ["--plant", plant], env=env,
                              capture_output=True, text=True)
+    # A non-zero exit alone would also be produced by a CRASH, so require the
+    # gate's own verdict -- the same rule run.sh applies.
     assert planted.returncode != 0, planted.stdout[-3000:]
     assert "STATUS DEBT" in planted.stdout
 
@@ -480,19 +504,71 @@ def test_the_branch_reads_the_real_round29_record():
         R29_RECORD, R29_RECORD, [False])["consumed_equal"] is False
 
 
-def test_the_row_label_comes_from_the_record_not_a_constant(tmp_path):
-    """A label naming a step the record is not from is a lie in the receipt."""
-    good = synthetic_record(tmp_path / "kt1.bin")
-    raw = bytearray(good.read_bytes())
+def test_a_record_from_another_step_is_refused(tmp_path, clean_record):
+    """The campaign's claim is kt=1 stage 3; anything else is not scorable.
+
+    The row prefix is also built from the record's own header rather than a
+    constant, so a label can never name a step the record is not from -- the
+    two cannot disagree even if this refusal were ever relaxed.
+    """
+    raw = bytearray(clean_record.read_bytes())
     raw[16 + 4:16 + 8] = struct.pack("=i", 7)      # kt = 7
     (tmp_path / "kt7.bin").write_bytes(bytes(raw))
-    report = _run(tmp_path / "kt7.bin")
-    assert report["header"]["kt"] == 7
-    assert all(".kt7.stage3." in row["name"]
-               for row in report["calibration_rows"]), (
-        [r["name"] for r in report["calibration_rows"][:2]])
-    assert not any(".kt1." in row["name"]
-                   for row in report["given_inputs_rows"])
+    with pytest.raises(R.RecordError) as caught:
+        R.read_trazdf_matrix(tmp_path / "kt7.bin")
+    assert "kt is 7, not 1" in str(caught.value)
+    report = _run(clean_record)
+    assert all(".kt1.stage3." in row["name"]
+               for row in report["calibration_rows"])
+
+
+def test_a_shrunken_scored_box_is_refused(tmp_path, clean_record):
+    """The vacuous pass: a sub-box scores a handful of cells, same verdict."""
+    raw = bytearray(clean_record.read_bytes())
+    for slot, value in ((11, 4), (12, 4), (13, 4), (14, 4)):   # ntsi..ntej
+        raw[16 + 4 * slot:16 + 4 * slot + 4] = struct.pack("=i", value)
+    (tmp_path / "small.bin").write_bytes(bytes(raw))
+    with pytest.raises(R.RecordError) as caught:
+        R.read_trazdf_matrix(tmp_path / "small.bin")
+    assert "not the whole domain" in str(caught.value)
+    assert _run(clean_record)["scored_box"]["cells"] == (
+        (NTEI - NTSI + 1) * (NTEJ - NTSJ + 1) * (JPK - 1))
+
+
+def test_a_manufactured_zero_fold_is_refused(tmp_path):
+    """The writer emits zeros for an UNALLOCATED ah_wslp2, so a record that
+    claims the slopes are on while saying the array is absent would let the
+    fold-inert row pass by construction."""
+    record = synthetic_record(tmp_path / "fake.bin", arm={"a33_allocated": 0.0})
+    with pytest.raises(R.RecordError) as caught:
+        R.read_trazdf_matrix(record)
+    assert "unallocated" in str(caught.value)
+
+
+def test_a_clamp_that_never_ran_is_refused(tmp_path):
+    record = synthetic_record(tmp_path / "noclamp.bin",
+                              arm={"ln_SEOS": 1.0, "rn_b0": 0.0})
+    with pytest.raises(R.RecordError) as caught:
+        R.read_trazdf_matrix(record)
+    assert "clamp did not run" in str(caught.value)
+
+
+def test_a_wrong_third_extent_gets_a_verdict_not_a_broadcast_error(tmp_path,
+                                                                   clean_record):
+    """A short rank-3 array used to pass structural validation and die three
+    functions later inside the rebuild."""
+    raw = clean_record.read_bytes()
+    at = raw.index(b"avt             ")
+    head = struct.unpack("=4i", raw[at + 16:at + 32])
+    assert head == (3, JPI, JPJ, JPK)
+    short = (bytearray(raw[:at + 16])
+             + struct.pack("=4i", 3, JPI, JPJ, JPK - 1)
+             + bytearray(raw[at + 32:at + 32 + 8 * JPI * JPJ * (JPK - 1)])
+             + bytearray(raw[at + 32 + 8 * JPI * JPJ * JPK:]))
+    (tmp_path / "short3.bin").write_bytes(bytes(short))
+    with pytest.raises(R.RecordError) as caught:
+        R.read_trazdf_matrix(tmp_path / "short3.bin")
+    assert "'avt'" in str(caught.value)
 
 
 def test_a_comparison_over_zero_cells_is_refused(clean_record):

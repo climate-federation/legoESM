@@ -282,12 +282,40 @@ python "$R29_GATE" --record "$TARGET_RUN/oracle_zdf_matrix_kt00000001.bin" \
 
 # The round-35 gate itself, and one plant per arm.  Each plant MUST exit
 # non-zero or the arm it belongs to proves nothing.
+# THE GATE'S VERDICT IS THE MEASUREMENT, NOT AN ACQUISITION CHECK.  It exits
+# non-zero on any row over the exact bar, which is correct and must never be
+# relaxed -- but a DEBT row is this round's FINDING, not a reason to abandon
+# the run before its plants have proved the gate can see anything.  So the
+# exit code is captured and reported at the end rather than tripping set -e.
+set +e
 python "$GATE" --record "$TARGET_RUN/$NEW_RECORD" \
   --json "$TARGET_RUN/round35_trazdf_gate.json"
-for arm in operand matrix sweep assembly rhs a33 clamp; do
-  if python "$GATE" --record "$TARGET_RUN/$NEW_RECORD" --plant "$arm" \
-       >"$TARGET_RUN/round35_trazdf_plant_$arm.json" 2>&1; then
+gate_status=$?
+set -e
+grep -q '"format": "nemo-testcase-l2-gyre-round35-trazdf-matrix-v1"' \
+  "$TARGET_RUN/round35_trazdf_gate.json" \
+  || { printf 'REFUSE: the gate produced no report; it crashed rather than judging\n' >&2; exit 73; }
+# The arm list comes from the GATE, never a copy here: a hardcoded list would
+# silently stop testing an arm the gate later grows.
+arms=$(python - "$GATE" <<'PYARMS'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("r35gate", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(" ".join(module.PLANT_ARMS))
+PYARMS
+)
+[[ -n "$arms" ]]
+for arm in $arms; do
+  out=$TARGET_RUN/round35_trazdf_plant_$arm.json
+  if python "$GATE" --record "$TARGET_RUN/$NEW_RECORD" --plant "$arm" >"$out" 2>&1; then
     printf 'REFUSE: the %s plant did not turn the gate red\n' "$arm" >&2
+    exit 70
+  fi
+  # A non-zero exit is NOT enough: a plant that CRASHED the reader would also
+  # exit non-zero and would prove nothing.  Require the gate's own verdict.
+  if ! grep -q '^STATUS DEBT' "$out"; then
+    printf 'REFUSE: the %s plant exited non-zero without a DEBT verdict; it crashed rather than landing\n' "$arm" >&2
     exit 70
   fi
 done
@@ -297,4 +325,5 @@ done
     round35_r29_regression.json "$FINAL_RESTART" mesh_mask.nc \
     >round35_outputs.sha256
 )
+printf 'ROUND35_GATE_VERDICT exit=%s (0 = every row at bar; 1 = at least one row is DEBT, which is a finding)\n' "$gate_status"
 printf 'ROUND35_GYRE_TRAZDF_MATRIX_ORACLE_READY %s\n' "$TARGET_RUN"

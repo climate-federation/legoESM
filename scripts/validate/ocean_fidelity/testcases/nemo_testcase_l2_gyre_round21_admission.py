@@ -589,7 +589,22 @@ def _compare_self_describing(a: Path, b: Path, plant, *,
                 "error": f"schema/dims changed {(a_magic, nx, ny)} -> "
                          f"{(b_magic, bx, by)}"}
     common = [n for n in a_order if n in b_fields]
+    # A pending plant goes into a rank-3 field when the record has one: a
+    # rank-0 scalar has no halo, so planting there would never exercise the
+    # owned/halo selector the plant exists to control.
+    if plant is not None and plant and not plant[0]:
+        ranked = [n for n in common if a_fields[n][0] == 3]
+        if ranked:
+            common = ranked + [n for n in common if n not in ranked]
     changed, admitted, consumed_equal = [], [], True
+    # ONLY GROWTH IS LEGITIMATE.  Comparing the intersection lets an appended
+    # array pass, which is the point; it must not also let a REMOVED one pass,
+    # and with a plain intersection a candidate that dropped a field scored
+    # consumed_equal True.
+    dropped = [n for n in a_order if n not in b_fields]
+    if dropped:
+        consumed_equal = False
+        changed.append(["<dropped>", dropped])
     for name in common:
         (rank, _, aa), (b_rank, _, bb) = a_fields[name], b_fields[name]
         if rank != b_rank or aa.shape != bb.shape:
@@ -668,13 +683,20 @@ def run(baseline: Path, candidate: Path, *, twin=None,
         # plant that silently did nothing and a run.sh that then refused the
         # round.  A pending plant now forces the comparison open on the first
         # record whether or not its bytes differ.
-        if raw_equal and plant[0]:
+        magic = a.read_bytes()[:16].decode("ascii", "replace").rstrip()
+        comparable = (name.startswith("oracle_bt_ordered_operands")
+                      or magic in SELF_DESCRIBING or magic in SCHEMAS)
+        # A pending plant forces the FIRST record open -- but only one this
+        # gate can parse.  Forcing open a byte-identical record whose magic is
+        # unregistered raises, and run.sh would read that crash as "the plant
+        # turned it red", which is a control that proves nothing.  A plant
+        # that never lands is already a violation below.
+        if raw_equal and (plant[0] or not comparable):
             exact += 1
             continue
         if name.startswith("oracle_bt_ordered_operands"):
             result = _compare_bt(a, b, plant)
-        elif a.read_bytes()[:16].decode("ascii", "replace").rstrip() \
-                in SELF_DESCRIBING:
+        elif magic in SELF_DESCRIBING:
             result = _compare_self_describing(a, b, plant)
         else:
             result = compare_record(a, b, plant, waived=waived)
