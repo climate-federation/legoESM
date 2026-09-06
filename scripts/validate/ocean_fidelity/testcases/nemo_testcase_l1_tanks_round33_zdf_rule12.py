@@ -33,9 +33,14 @@ measure.
 
 WHAT IT CANNOT SEE, per Rule 2:
 
-* the tanks' stage record carries ``T``, ``S``, ``u`` and ``ssh`` and NO ``v``,
-  so only the u face is discharged here.  The v face stays UNMEASURED on the
-  tanks and is named as such in the report rather than omitted.
+* ROUND-34 RETRACTION: the sentence that stood here said the tanks' stage
+  record carries ``T``, ``S``, ``u`` and ``ssh`` and NO ``v``, so only the u
+  face could be discharged.  That was FALSE.  ``stprk3.F90:326-327`` writes
+  ``ts``, ``uu``, ``vv`` and ``ssh``, and the reader's own payload check is
+  ``4*count + nx*ny`` for exactly that reason -- it simply skipped the third
+  block.  The record carried ``v`` all along, and so does the zdf-matrix
+  record's whole v side (``vv_Kaa_out``, ``vv_b_Kaa``, ``vmask``, ``e3v_0``,
+  ``hv_0``, ``r1_hv_0``).  BOTH faces are discharged here now.
 * the operator DIVIDES by ``hu_0`` where ``stprk3_stg.F90:440`` MULTIPLIES by
   the precomputed ``r1_hu_0``, and ``domain.F90:159`` builds that reciprocal as
   ``ssumask/(hu_0 + 1 - ssumask)`` -- which is not ``1/hu_0`` bit for bit.  The
@@ -49,6 +54,11 @@ WHAT IT CANNOT SEE, per Rule 2:
   rather than read from the mesh file.
 * a transposed mask would have the right shape on a square tile and pass; the
   tanks are not square, so a transposed mask raises here.
+* the divisor is measured, not argued: the report carries how far NEMO's own
+  ``hu_0``/``hv_0`` sits from the column sum of ``e3u_0*umask``, how far
+  ``1/h`` sits from NEMO's precomputed reciprocal, and -- the row that
+  matters -- how far the operator's DIVIDE sits from NEMO's MULTIPLY on
+  NEMO's own column transport.
 """
 
 from __future__ import annotations
@@ -98,7 +108,13 @@ CARDS = {
 }
 
 
-def record_geometry(rec: dict, case: str) -> dict:
+def _absmax(rec: dict, name: str):
+    array = rec["arrays"].get(name)
+    return (None if array is None
+            else float(np.max(np.abs(np.asarray(array, dtype=np.float64)))))
+
+
+def record_geometry(rec: dict, case: str, face: str = "u") -> dict:
     """NEMO's own reference geometry, from the record, in the scored layout.
 
     Read rather than rebuilt.  ``e3u_0`` is a PREPROCESSOR MACRO -- ``e3t_1d(k)``
@@ -112,7 +128,13 @@ def record_geometry(rec: dict, case: str) -> dict:
     NEMO's own ``hu_0``, and how far ``1/hu_0`` sits from NEMO's ``r1_hu_0``.
     """
     nx, ny, nz = DIMS[case]
-    missing = [n for n in ("e3u_0", "umask", "hu_0", "r1_hu_0")
+    thickness = f"e3{face}_0"
+    mask_name = f"{face}mask"
+    depth_name = f"h{face}_0"
+    reciprocal = f"r1_h{face}_0"
+    velocity = f"{face}{face}_Kaa_out"
+    missing = [n for n in (thickness, mask_name, depth_name, reciprocal,
+                           velocity)
                if n not in rec["arrays"]]
     require(not missing,
             f"the record is short of {missing}: it was written WITHOUT the "
@@ -129,8 +151,8 @@ def record_geometry(rec: dict, case: str) -> dict:
         return _xy(np.asarray(rec["arrays"][name], dtype=np.float64)
                    .ravel(order="F"), nx, ny)
 
-    e3u_0, umask = _3d("e3u_0"), _3d("umask")
-    hu_0, r1_hu_0 = _2d("hu_0"), _2d("r1_hu_0")
+    e3u_0, umask = _3d(thickness), _3d(mask_name)
+    hu_0, r1_hu_0 = _2d(depth_name), _2d(reciprocal)
     h_face = e3u_0 * umask
     wet2d = (umask > 0).any(axis=-1)
     rebuilt = h_face.sum(axis=-1)
@@ -141,7 +163,7 @@ def record_geometry(rec: dict, case: str) -> dict:
     # r1_hu_0 would be the WRONG test -- x/h and x*(1/h) differ even when
     # 1/h is the correctly rounded reciprocal -- so the column transport is
     # the operand here.
-    transport = np.sum(_3d("uu_Kaa_out") * h_face, axis=-1)
+    transport = np.sum(_3d(velocity) * h_face, axis=-1)
     if wet.any():
         divided = transport[wet] / hu_0[wet]
         multiplied = transport[wet] * r1_hu_0[wet]
@@ -155,9 +177,11 @@ def record_geometry(rec: dict, case: str) -> dict:
         "umask": umask,
         "depth": hu_0,
         "wet2d": wet2d.astype(np.float64),
+        "face": face,
         "open_association_rows": {
-            "rebuilt_sum_minus_nemo_hu_0_max_abs": rebuilt_gap,
-            "one_over_hu_0_minus_nemo_r1_hu_0_max_abs": reciprocal_gap,
+            "face": face,
+            "rebuilt_sum_minus_nemo_depth_max_abs": rebuilt_gap,
+            "one_over_depth_minus_nemo_reciprocal_max_abs": reciprocal_gap,
             "column_mean_divided_minus_multiplied_max_abs": divide_vs_multiply,
             "note": ("the operator DIVIDES by depth_ref; NEMO MULTIPLIES by "
                      "r1_hu_0 (stprk3_stg.F90:440, domain.F90:159).  The third "
@@ -201,46 +225,81 @@ def run(card: str, *, plant: bool = False) -> dict:
             f"{record}: not the kt=1 stage-3 record")
     jpkm1 = int(rec["header"]["jpkm1"])
 
-    geom = record_geometry(rec, case)
     oracle_stage = read_stage(stage, case, 3)
     masks = expected_masks(build_nemo_testcase_card(case))
-    nlev = masks["u"].shape[-1]
 
-    mask3 = geom["umask"]
-    require(not np.any(mask3[..., jpkm1:] != 0.0),
-            "the reference face mask is wet above jpkm1, where "
-            "stprk3_stg.F90:443 does not write")
-    require(not np.any(mask3[..., nlev:] != 0.0),
-            "the reference face mask is wet above the model's deepest level, "
-            "so trimming would drop a scored cell")
-
-    field = _xyz(np.asarray(rec["arrays"]["uu_Kaa_out"],
-                            dtype=np.float64).ravel(order="F"), nx, ny, nz)
-    target = _xy(np.asarray(rec["arrays"]["uu_b_Kaa"],
-                            dtype=np.float64).ravel(order="F"), nx, ny)
-    candidate = np.asarray(rk3_stage_barotropic_correction(
-        field, target, geom["h_face"], np.maximum(geom["depth"], 1e-10),
-        geom["wet2d"], mask3))
-    if plant:
-        candidate = candidate + 1.0
-    row = score(f"{case}.kt1.stage3.rule12_correction.u",
-                oracle_stage["u"][..., :nlev], candidate[..., :nlev],
-                masks["u"])
-    row["nemo_statement"] = "stprk3_stg.F90:440,444-445"
-    rows = [row]
+    rows, association, inputs, not_applicable = [], {}, [], []
+    for face in ("u", "v"):
+        # NEMO'S OWN MASK decides whether this face exists on this card -- not
+        # our reader, not our recipe -- and it is checked BEFORE the geometry
+        # is demanded, because a face NEMO never wets needs no geometry.  Both
+        # tanks are 2-D x-z boxes: NEMO's vmask is identically zero and its
+        # vv/vv_b are identically zero with it, so there is no v face to
+        # discharge.  That is NOT the claim "the record has no v" -- it does
+        # -- and it is not UNMEASURED either.  It is NOT APPLICABLE, and a
+        # measurement decides it.
+        nemo_mask = rec["arrays"].get(f"{face}mask")
+        nemo_wet = (int(np.count_nonzero(np.asarray(nemo_mask)))
+                    if nemo_mask is not None else None)
+        if nemo_wet == 0 or not masks[face].any():
+            not_applicable.append({
+                "face": face,
+                "reason": (f"NEMO's own {face}mask in this record has "
+                           f"{nemo_wet} wet cells and the card's own wet "
+                           f"{face}-face mask has {int(masks[face].sum())}; "
+                           "these tanks are 2-D x-z boxes with no wet "
+                           f"{face} face at all"),
+                "nemo_velocity_max_abs": _absmax(rec, f"{face}{face}_Kaa_out"),
+                "nemo_barotropic_target_max_abs": _absmax(
+                    rec, f"{face}{face}_b_Kaa"),
+            })
+            continue
+        geom = record_geometry(rec, case, face)
+        nlev = masks[face].shape[-1]
+        mask3 = geom["umask"]
+        require(not np.any(mask3[..., jpkm1:] != 0.0),
+                f"the reference {face} face mask is wet above jpkm1, where "
+                "stprk3_stg.F90:443 does not write")
+        require(not np.any(mask3[..., nlev:] != 0.0),
+                f"the reference {face} face mask is wet above the model's "
+                "deepest level, so trimming would drop a scored cell")
+        field = _xyz(np.asarray(rec["arrays"][f"{face}{face}_Kaa_out"],
+                                dtype=np.float64).ravel(order="F"), nx, ny, nz)
+        target = _xy(np.asarray(rec["arrays"][f"{face}{face}_b_Kaa"],
+                                dtype=np.float64).ravel(order="F"), nx, ny)
+        candidate = np.asarray(rk3_stage_barotropic_correction(
+            field, target, geom["h_face"], np.maximum(geom["depth"], 1e-10),
+            geom["wet2d"], mask3))
+        if plant:
+            candidate = candidate + 1.0
+        row = score(f"{case}.kt1.stage3.rule12_correction.{face}",
+                    oracle_stage[face][..., :nlev], candidate[..., :nlev],
+                    masks[face])
+        row["nemo_statement"] = ("stprk3_stg.F90:440,444" if face == "u"
+                                 else "stprk3_stg.F90:441,445")
+        rows.append(row)
+        association[face] = geom["open_association_rows"]
+        inputs += [
+            f"{ZDF_MATRIX_RECORD}:{face}{face}_Kaa_out",
+            f"{ZDF_MATRIX_RECORD}:{face}{face}_b_Kaa",
+            f"{ZDF_MATRIX_RECORD}:e3{face}_0 / {face}mask / h{face}_0 / "
+            f"r1_h{face}_0",
+            f"{STAGE3_RECORD}:{face} (the oracle side)",
+        ]
     status = "AT-BAR" if all(r["status"] == "AT-BAR" for r in rows) else "DEBT"
     if plant:
         require(status == "DEBT", "a planted unit offset still read AT-BAR")
     return {
         "worktree": worktree_stamp(),
-        "format": "nemo-testcase-l1-tanks-round33-zdf-rule12-v1",
+        "format": "nemo-testcase-l1-tanks-round33-zdf-rule12-v2",
         "card": card,
         "case": case,
         "mode": "rule12_correction",
         "claim": ("legoESM's own rk3_stage_barotropic_correction, given "
-                  "NEMO's dyn_zdf output, NEMO's uu_b(Kaa) and NEMO's e3u_0 "
-                  "with the column depth REBUILT from it, reproduces NEMO's "
-                  "own stage-3 velocity on this tank"),
+                  "NEMO's dyn_zdf output, NEMO's uu_b/vv_b(Kaa) and NEMO's own "
+                  "e3u_0/e3v_0, hu_0/hv_0 and r1_hu_0/r1_hv_0 read from the "
+                  "record rather than rebuilt, reproduces NEMO's own stage-3 "
+                  "velocity on BOTH faces of this tank"),
         "operator": ("legoesm.ocean.dynamics.barotropic_common."
                      "rk3_stage_barotropic_correction, imported from the "
                      "production module the step function calls"),
@@ -248,17 +307,21 @@ def run(card: str, *, plant: bool = False) -> dict:
             f"NEMO runs dynzdf.F90:150-151 and the correction here: "
             f"ln_drgimp = T at {spec['drgimp_citation']} and ln_dynspg_ts = T "
             f"at {spec['dynspg_ts_citation']}"),
-        "inputs_are_nemo": [
-            f"{ZDF_MATRIX_RECORD}:uu_Kaa_out",
-            f"{ZDF_MATRIX_RECORD}:uu_b_Kaa",
-            f"{ZDF_MATRIX_RECORD}:e3u_0 / umask / hu_0 / r1_hu_0",
-            f"{STAGE3_RECORD}:u (the oracle side)",
-        ],
+        "inputs_are_nemo": inputs,
         "inputs_reconstructed_not_nemo": [],
-        "open_association_rows": geom["open_association_rows"],
-        "unmeasured": [
-            "the v face: this card's stage record carries T, S, u and ssh and "
-            "no v, so no v discharge is possible from it"],
+        "open_association_rows": association,
+        "unmeasured": [],
+        "not_applicable_faces": not_applicable,
+        "retracted": [
+            "ROUND 34: the v face was reported UNMEASURED here on the claim "
+            "that this card's stage record carries no v.  It does -- "
+            "stprk3.F90:326-327 writes ts, uu, vv and ssh, and the reader's "
+            "own payload check is 4*count + nx*ny.  The reader skipped the "
+            "third block; the oracle had provided it.  The reason the v "
+            "face is not scored is different and it is MEASURED: NEMO's own "
+            "vmask in this record is identically zero and its vv_Kaa_out and "
+            "vv_b_Kaa are identically zero with it, because both tanks are "
+            "2-D x-z boxes.  NOT APPLICABLE, not UNMEASURED."],
         "record": str(record),
         "record_sha256": sha256(record),
         "stage_record": str(stage),
@@ -285,7 +348,8 @@ def main(argv=None) -> int:
         args.output.write_text(text + "\n")
     print(text)
     for row in report["rows"]:
-        print(f"{row['status']:<8} {row['name']:<48} "
+        print(f"{row['status']:<8} {row['name']:<52} "
+              f"exact {str(row['exact']):<5} "
               f"unequal {row['n_unequal']}/{row['n']} "
               f"max {row['absolute_max']:.17g}")
     print(f"STATUS {report['status']}")

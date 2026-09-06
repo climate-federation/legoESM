@@ -107,6 +107,13 @@ def read_stage(path: Path, case: str, expected_stage: int) -> dict:
         "T": _xyz(values[:count], nx, ny, nz),
         "S": _xyz(values[count : 2 * count], nx, ny, nz),
         "u": _xyz(values[2 * count : 3 * count], nx, ny, nz),
+        # The record DOES carry v: stprk3.F90:326-327 writes ts, uu, vv, ssh
+        # and the payload check above is 4*count + nx*ny for exactly that
+        # reason.  This reader used to skip the third block, which made a
+        # Rule-12 discharge on these cards report the v face UNMEASURED when
+        # the oracle had provided it all along (Rule 1: coverage is driven by
+        # what the oracle provides, not by what the reader asks for).
+        "v": _xyz(values[3 * count : 4 * count], nx, ny, nz),
         "ssh": _xy(values[4 * count :], nx, ny),
     }
 
@@ -321,10 +328,18 @@ def score(name: str, oracle, candidate, mask, *, plant=False, quantity="u") -> d
     absolute = float(np.max(np.abs(candidate[active] - oracle[active])))
     reference = float(np.max(np.abs(oracle[active])))
     normalized = absolute / max(reference, 1.0)
+    # AT-BAR is a RELATIVE verdict, so it can be true of a row that is not bit
+    # for bit.  Report the bit-unequal COUNT next to it, the way the lane-2
+    # GYRE gate already does (nemo_testcase_l2_gyre_phase3_gate.py:607-616),
+    # so a Rule-12 row can never quote AT-BAR without saying how far from
+    # exact it is.
+    n_unequal = int(np.count_nonzero(
+        candidate[active].view(np.uint64) != oracle[active].view(np.uint64)))
     return {
         "name": name,
         "status": "AT-BAR" if normalized <= BAR else "DEBT",
         "exact": bool(np.array_equal(candidate[active], oracle[active])),
+        "n_unequal": n_unequal,
         "normalized_max_abs": normalized,
         "absolute_max": absolute,
         "reference_max_abs": reference,
@@ -370,7 +385,15 @@ def expected_masks(card) -> dict:
     active = np.asarray(card.recipe.z_coord.is_active) & wet[..., None]
     u = active & np.roll(active, -1, axis=1)
     u[:, -1] = False
-    return {"T": active, "u": u}
+    # S, v and ssh are built by the SAME rule the lane-2 GYRE gate uses
+    # (nemo_testcase_l2_gyre_phase3_gate.py:573-581), so one convention serves
+    # every card.  They were absent here, not because these cards lack those
+    # faces, but because nothing had asked for them yet -- which is how a
+    # Rule-12 discharge came to report the v face UNMEASURED on a record that
+    # carries it.
+    v = active & np.roll(active, -1, axis=0)
+    v[-1] = False
+    return {"T": active, "S": active, "u": u, "v": v, "ssh": wet}
 
 
 def classify_arm(

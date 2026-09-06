@@ -149,8 +149,9 @@ def test_the_two_open_association_rows_are_measured_not_argued(tmp_path, card,
     rec = R29.read_zdf_matrix(root / GATE.ZDF_MATRIX_RECORD)
     rows = GATE.record_geometry(
         rec, GATE.CARDS[card]["case"])["open_association_rows"]
-    assert rows["rebuilt_sum_minus_nemo_hu_0_max_abs"] == 0.0
-    assert rows["one_over_hu_0_minus_nemo_r1_hu_0_max_abs"] == 0.0
+    assert rows["face"] == "u"
+    assert rows["rebuilt_sum_minus_nemo_depth_max_abs"] == 0.0
+    assert rows["one_over_depth_minus_nemo_reciprocal_max_abs"] == 0.0
     assert "column_mean_divided_minus_multiplied_max_abs" in rows
     assert rows["column_mean_divided_minus_multiplied_max_abs"] >= 0.0
 
@@ -209,6 +210,9 @@ def _write_synthetic_record(path: Path, case: str, field_f, target_f,
     header = (1, 1, 3, 1, 2, 3, 3, nx, ny, nz, nz - 1, 3, nx - 2, 3, ny - 2, 64)
     payloads = {}
     names = list(R29.EXPECTED_ARRAYS) + ["e3u_0", "hu_0", "r1_hu_0"]
+    # Anything else the caller supplied travels too, so a fixture can add the
+    # v-side reference geometry the real round-33 patch also dumps.
+    names += [name for name in geometry if name not in names]
     for name in names:
         if name in geometry:
             values = geometry[name]
@@ -306,11 +310,20 @@ def test_the_gate_runs_end_to_end_on_a_synthetic_record(tmp_path, card,
     assert report["rows"][0]["exact"] is True
     assert report["card"] == card
     assert "worktree" in report
-    # the report must SAY what it could not measure, not omit it
-    assert any("v face" in line for line in report["unmeasured"])
+    # ROUND-34 RETRACTION.  This used to assert the report named the v face
+    # as UNMEASURED, on the claim that the stage record carries no v.  It
+    # does carry v; the reader skipped it.  The v face is NOT APPLICABLE for
+    # a MEASURED reason -- NEMO's own vmask on these 2-D x-z tanks is
+    # identically zero -- and the report must say that instead.
+    assert report["unmeasured"] == []
+    assert [row["face"] for row in report["not_applicable_faces"]] == ["v"]
+    assert report["not_applicable_faces"][0]["nemo_velocity_max_abs"] == 0.0
+    assert "vmask" in report["not_applicable_faces"][0]["reason"]
+    assert [row["name"].rsplit(".", 1)[-1] for row in report["rows"]] == ["u"]
     # nothing is reconstructed any more: the geometry comes from the record
     assert report["inputs_reconstructed_not_nemo"] == []
-    assert report["open_association_rows"]["rebuilt_sum_minus_nemo_hu_0_max_abs"] == 0.0
+    assert report["open_association_rows"]["u"][
+        "rebuilt_sum_minus_nemo_depth_max_abs"] == 0.0
 
 
 @pytest.mark.parametrize("card", ["LOCK_EXCHANGE", "OVERFLOW"])
@@ -385,3 +398,75 @@ def test_the_acquisition_script_refuses_without_a_card():
     # and it must be syntactically valid, so a typo cannot sit here unnoticed
     check = subprocess.run(["bash", "-n", str(script)], capture_output=True)
     assert check.returncode == 0
+
+
+def test_the_v_face_is_scored_when_nemo_wets_it(tmp_path, monkeypatch):
+    """The v arm must not be dead code.
+
+    Round 34 opened the v face after finding the record had carried ``v`` all
+    along.  On the two real tanks NEMO's own ``vmask`` is identically zero, so
+    the v row is reported NOT APPLICABLE and the arm never executes -- which
+    is exactly the shape of a branch that could be broken and never noticed.
+    This drives the SAME gate on a record whose ``vmask`` IS wet, built by
+    copying the card's own u-face geometry onto the v side, and asserts the v
+    row appears and scores.  The paired arm perturbs NEMO's own ``vv_Kaa_out``
+    by 1 m/s and requires the same row to go red, so a v branch that silently
+    scored nothing could not pass both.
+    """
+    card = "LOCK_EXCHANGE"
+    spec = GATE.CARDS[card]
+    case = spec["case"]
+    nx, ny, nz = SWEEP.DIMS[case]
+    nemo = _nemo_reference_geometry(card)
+    scored = nemo["scored"]
+    h_face = scored["e3u_0"] * scored["umask"]
+    wet2d = (scored["umask"] > 0).any(axis=-1).astype(np.float64)
+    stage = SWEEP.read_stage(spec["twin"] / GATE.STAGE3_RECORD, case, 3)
+    field = np.asarray(stage["u"], dtype=np.float64)
+    import jax.numpy as jnp
+    own_mean = np.asarray(
+        jnp.sum(field * h_face, axis=-1)
+        / np.maximum(scored["hu_0"], 1e-10) * wet2d)
+    field_f = np.zeros((nx, ny, nz), dtype=np.float64)
+    field_f[2:-2, 2:-2, :] = field.transpose(1, 0, 2)
+    target_f = np.zeros((nx, ny), dtype=np.float64)
+    target_f[2:-2, 2:-2] = own_mean.T
+
+    # NEMO's own stage-3 v on this tank is identically zero, so the v side of
+    # the record is zero too and the correction must return zero.  The u side
+    # keeps the inverted-operator pair.
+    real_masks = SWEEP.expected_masks
+    monkeypatch.setattr(
+        GATE, "expected_masks",
+        lambda c: {**real_masks(c), "v": real_masks(c)["u"]})
+
+    def _run(v_field):
+        geometry = {k: nemo[k] for k in ("e3u_0", "umask", "hu_0", "r1_hu_0")}
+        geometry.update({
+            "e3v_0": nemo["e3u_0"], "vmask": nemo["umask"],
+            "hv_0": nemo["hu_0"], "r1_hv_0": nemo["r1_hu_0"],
+            "vv_Kaa_out": v_field,
+            "vv_b_Kaa": np.zeros((nx, ny), dtype=np.float64),
+        })
+        root = tmp_path / f"wet_v_{'planted' if v_field.any() else 'clean'}"
+        root.mkdir()
+        _write_synthetic_record(root / GATE.ZDF_MATRIX_RECORD, case,
+                                field_f, target_f, geometry)
+        monkeypatch.setitem(GATE.CARDS[card], "root", root)
+        return GATE.run(card)
+
+    report = _run(np.zeros((nx, ny, nz), dtype=np.float64))
+    faces = [row["name"].rsplit(".", 1)[-1] for row in report["rows"]]
+    assert faces == ["u", "v"], faces
+    assert report["not_applicable_faces"] == []
+    assert all(row["exact"] for row in report["rows"])
+    assert report["status"] == "AT-BAR"
+    assert report["open_association_rows"]["v"]["face"] == "v"
+    assert report["rows"][1]["nemo_statement"] == "stprk3_stg.F90:441,445"
+    assert report["rows"][1]["n"] == report["rows"][0]["n"]
+
+    planted = np.zeros((nx, ny, nz), dtype=np.float64)
+    planted[nx // 2, ny // 2, 0] = 1.0
+    report = _run(planted)
+    assert report["rows"][1]["status"] == "DEBT"
+    assert report["status"] == "DEBT"
