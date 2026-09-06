@@ -50,19 +50,21 @@ def elem_neighbors(n_elem, edge_tri):
     return nb
 
 
-def find_levels(zbar, depth, elem, nb):
+def find_levels(zbar, depth, elem, nb, thers=THERS_ZBAR_LEV):
+    """``thers`` = FESOM's ``thers_zbar_lev`` (1-based interface index): no
+    column shallower than ``zbar[thers-1]`` and at least ``thers`` levels."""
     zbar = -np.abs(zbar); nl = zbar.size
     x = -np.abs(depth)
-    x = np.minimum(x, zbar[THERS_ZBAR_LEV - 1])          # step 1 (zbar negative: x > zbar(5) -> clamp)
+    x = np.minimum(x, zbar[thers - 1])                    # step 1 (zbar negative: x > zbar(thers) -> clamp)
     Z = 0.5 * (zbar[:-1] + zbar[1:])                       # (nl-1,)
     dmean = x[elem].sum(axis=1) / 3.0                      # step 2
     below = Z[None, :] < dmean[:, None]                    # step 3: first nz with Z(nz) < dmean
     nlev = np.where(below.any(axis=1), below.argmax(axis=1) + 1, nl)
-    nlev = np.where(dmean >= 0, THERS_ZBAR_LEV, nlev)
-    nlev = np.maximum(nlev, THERS_ZBAR_LEV)
+    nlev = np.where(dmean >= 0, thers, nlev)
+    nlev = np.maximum(nlev, thers)
     # step 4: isolated-cell elimination, per level, iterate (vectorised sweep
     # == one Fortran pass; repeated until no change, like the do-while)
-    for nz in range(THERS_ZBAR_LEV + 1, nl + 1):
+    for nz in range(thers + 1, nl + 1):
         for _ in range(1000):
             active = nlev >= nz
             nb_open = np.zeros(nlev.size, dtype=np.int64)
@@ -72,7 +74,7 @@ def find_levels(zbar, depth, elem, nb):
             iso = active & (nb_open < 2)
             if not iso.any():
                 break
-            if nz - 1 < THERS_ZBAR_LEV:
+            if nz - 1 < thers:
                 for j in range(3):
                     nbj = nb[iso, j]; nbj = nbj[nbj >= 0]
                     nlev[nbj] = np.maximum(nlev[nbj], nz)
@@ -89,6 +91,11 @@ def main():
     p.add_argument("--raw", required=True)
     p.add_argument("--nemo-domain-cfg", default=None)
     p.add_argument("--out", default=None)
+    p.add_argument("--min-depth-m", type=float, default=None,
+                   help="NEMO ladder only: minimum column depth [m] (the "
+                        "interface nearest this depth becomes FESOM's "
+                        "thers_zbar_lev); default = FESOM's own 5th interface "
+                        "(4.5 m on the NEMO ladder, 30 m on FESOM's).")
     a = p.parse_args()
     raw = Path(a.raw)
     nl, zbar, depth, elem, nlvls, elvls, edge_tri = read_raw(raw)
@@ -108,7 +115,12 @@ def main():
         with netCDF4.Dataset(a.nemo_domain_cfg) as ds:
             e3t = np.squeeze(np.asarray(ds["e3t_1d"][:], dtype=np.float64))
         zb_nemo = -np.concatenate([[0.0], np.cumsum(e3t)])
-        elv2, nlv2 = find_levels(zb_nemo, depth, elem, nb)
+        thers = THERS_ZBAR_LEV
+        if a.min_depth_m is not None:
+            thers = int(np.argmin(np.abs(np.abs(zb_nemo) - a.min_depth_m))) + 1
+            print(f"min column depth {a.min_depth_m} m -> thers_zbar_lev {thers} "
+                  f"(interface at {abs(zb_nemo[thers - 1]):.2f} m)")
+        elv2, nlv2 = find_levels(zb_nemo, depth, elem, nb, thers=thers)
         out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
         with open(out / "aux3d.out", "w") as f:
             f.write(f"{zb_nemo.size}\n")
@@ -121,7 +133,7 @@ def main():
             if (raw / fn).exists():
                 (out / fn).write_bytes((raw / fn).read_bytes())
         print(f"NEMO ladder: nl={zb_nemo.size} (bottom {zb_nemo[-1]:.1f} m); elvls {elv2.min()}..{elv2.max()}, "
-              f"nlvls {nlv2.min()}..{nlv2.max()}; min column depth clamp = zbar[4] = {zb_nemo[4]:.2f} m; written to {out}")
+              f"nlvls {nlv2.min()}..{nlv2.max()}; min column depth clamp = zbar[{thers - 1}] = {zb_nemo[thers - 1]:.2f} m; written to {out}")
 
 
 if __name__ == "__main__":
