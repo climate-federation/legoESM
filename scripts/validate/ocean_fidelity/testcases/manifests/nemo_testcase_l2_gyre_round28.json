@@ -1,4 +1,14 @@
 {
+  "concurrent_session_in_this_worktree": {
+    "committed_onto_this_branch": "7d7cbfb97319 round-29 preregistration, between two round-28 commits",
+    "consequence": "the worktree is no longer clean, and 'no model numerics landed' is a claim about the commit range 359c33c40ecc..HEAD, not about the working tree",
+    "handling": "not touched, not staged; every round-28 commit used explicit pathspecs",
+    "uncommitted_when_this_was_written": [
+      "packages/ocean/legoesm/ocean/fidelity/nemo_recipe.py",
+      "tests/ocean/unit/test_nemo_recipe.py",
+      "scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round29_zdf_matrix.py (untracked)"
+    ]
+  },
   "date": "2026-09-05",
   "forbidden_and_not_done": [
     "signed-zero dyn_vor accumulation (user decision 16)",
@@ -177,6 +187,13 @@
     "OVERFLOW-zps": "/data/abyssal/dbalwada/nemo-testcases-l1/phase3/overflow_kt1_10"
   },
   "preregistration": "manifests/nemo_testcase_l2_gyre_round28_preregister.json @ 2f292b24e110",
+  "provenance": {
+    "citable_copies": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round28/clean_sha_rerun/",
+    "clean_stamp": "aab15e1fb7c5",
+    "problem": "every figure was first produced with --allow-dirty, so each report stamped <sha>-dirty and no number was tied to a committed tree",
+    "repair": "all four gates re-run from a clean detached checkout of aab15e1fb7c5 with the flag removed, so git_sha had to stamp a clean revision",
+    "result": "every report byte-identical to its dirty-run predecessor apart from the stamp; exit codes unchanged (1, 1, 0, 0)"
+  },
   "regime": "CPU production JIT, fp64/x64, oracle V2, transcendentals=libm",
   "round16_probe_defect_reported_not_fixed": "_source_sum loops range(1, shape[-1]-1) over an array already trimmed to jpkm1; measured on a ones-array of 30 levels it returns 29.0, so it drops the deepest level where stp2d.F90:180 sums all of 1:jpkm1",
   "shared_implementation": {

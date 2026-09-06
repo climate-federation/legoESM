@@ -5368,6 +5368,45 @@ the round failing exactly the tests it started it failing.  The disposable
 worktree `/tmp/codex-gyre-r28-basecheck` (detached at `359c33c40ecc`) is
 FLAGGED, not deleted.
 
+### Provenance repair, and a concurrent session in this worktree
+
+Every round-28 figure was first produced with `--allow-dirty`, because the
+probes were being iterated while they ran.  `git_sha` fails closed on tracked
+dirt for exactly this reason, and passing that flag defeats it — so each
+report stamped `<sha>-dirty` and none of the numbers was tied to a committed
+tree.  That is a provenance hole whatever the numbers turn out to be.
+
+All four gates were therefore re-run from a clean detached checkout of
+`aab15e1fb7c5` with the flag REMOVED, so `git_sha` had to stamp a clean
+revision.  Every report is byte-identical to its dirty-run predecessor apart
+from the stamp:
+
+| report | clean stamp | identical modulo the sha |
+|---|---|---|
+| `rule12_eligibility_LOCK_EXCHANGE_zco` | `aab15e1fb7c5` | yes |
+| `rule12_eligibility_OVERFLOW_zps` | `aab15e1fb7c5` | yes |
+| `lock_slow_forcing_owner_reshared` | `aab15e1fb7c5` | yes |
+| `gyre_slow_forcing_weighting` | `aab15e1fb7c5` | yes |
+
+The clean copies live under `round28/clean_sha_rerun/` and are the citable
+ones; the dirty originals are kept beside them rather than deleted, so the
+comparison stays checkable.  Exit codes on the clean run are unchanged too —
+`1`, `1` for the two eligibility cards and `0`, `0` for the two probes.
+
+**A concurrent session is working in this same worktree and on this same
+branch**, and that is recorded here because it bounds what a later reader may
+assume.  It committed `7d7cbfb97319` (a round-29 preregistration) between two
+round-28 commits, and it has UNCOMMITTED edits to
+`packages/ocean/legoesm/ocean/fidelity/nemo_recipe.py` and
+`tests/ocean/unit/test_nemo_recipe.py` plus an untracked round-29 script.
+None of those is round 28's and none was touched or staged — every commit here
+used explicit pathspecs.  Two consequences: `/tmp/codex-gyre` is no longer a
+clean tree, so any gate re-run there will stamp dirty or refuse; and the
+statement that this round landed no model numerics is a statement about the
+COMMIT RANGE (`git diff --name-only 359c33c40ecc..HEAD` names zero files under
+`packages/` or `src/`, verified), not about the working tree as a later reader
+may find it.
+
 ### Card debt registered, card NOT changed
 
 The LOCK and OVERFLOW cards resolve `vorticity_scheme = "al81"` from a module
