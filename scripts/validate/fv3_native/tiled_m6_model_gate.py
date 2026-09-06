@@ -249,8 +249,10 @@ def main(argv=None):
         return 2
     lay = win_model.window_layout
     if args.refresh_band is not None and args.pack_pad_refresh:
-        print("[m6] REFUSED: --refresh-band and --pack-pad-refresh are "
-              "separate arms (the band path bypasses packing)")
+        print("[m6] REFUSED: --refresh-band with --pack-pad-refresh (packing "
+              "the substep-entry FULL refresh aborts under XLA:CPU mpi "
+              "collectives with MPI_ERR_TRUNCATE, jobs 9665696/9665757, "
+              "while passing in one process; open)")
         return 2
     if args.refresh_band is not None:
         win_model._window_comm.refresh_band = args.refresh_band

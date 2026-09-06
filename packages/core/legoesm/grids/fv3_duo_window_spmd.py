@@ -203,9 +203,9 @@ class DuoWindowSpmdComm:
         P2 = 2 * lay.pad
         kt = lay.kt
         if self.refresh_band is not None and not full:
-            return self._pad_exchange_bands(arrs)
+            return self._pad_exchange_bands(arrs)      # a firing's refresh
         if self.pack_pad_refresh:
-            return self._pad_exchange_packed(arrs)
+            return self._pad_exchange_packed(arrs)     # incl. the FULL one
         out = []
         for a in arrs:
             for axis_name, ax in (("tile_i", 0), ("tile_j", 1)):
