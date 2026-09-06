@@ -72,7 +72,9 @@
    "citation gate, round-35 section": "PASS, 14 citations",
    "citation gate, rounds 25 and later": "PASS, 172 citations; plant exits 1",
    "nemo_testcase_l2_gyre_round21_admission.py on the round-29 records": "unplanted PASS exact=51/51 changed=0 admitted=0 exit 0; planted FAIL exact=50/51 changed=1 exit 1 (before this round it was GATE-ERROR at exit 0, which run.sh would have read as success)",
-   "nemo_testcase_l2_gyre_round29_zdf_matrix.py": "AT-BAR, 0/21120 on all eight rows, unchanged by this round"
+   "nemo_testcase_l2_gyre_round29_zdf_matrix.py": "AT-BAR, 0/21120 on all eight rows, unchanged by this round",
+   "tests/ocean/fidelity, full suite in collection order": "969 passed, 7 skipped, 18 deselected in 2360.12s on 1109cf028e8a; the independently measured baseline was 3 failed, 910 passed, 7 skipped, 18 deselected",
+   "repo-wide ratchets": "9 failed on this tree AND the identical 9 on 23c46232ea60, in files this round did not touch; pre-existing, not this round's"
   },
   "rhs_association": {
    "claim": "legoESM's content-RHS builder groups the update as h*(p2dt*T) where NEMO writes p2dt*h*T (trazdf.F90:219-220 for the matrix, the same style for the RHS), so the two are not the same floating-point expression",

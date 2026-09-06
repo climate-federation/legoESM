@@ -8402,6 +8402,13 @@ covers.  `9 passed`.
 failed on the pre-fix tree.  The decisive line: `Left contains 1 more item:
 {'faithful_only': False}`.
 
+**THE WHOLE SUITE IS GREEN, in collection order, on the final tree**:
+`969 passed, 7 skipped, 18 deselected in 2360.12s`, against a baseline of
+`3 failed, 910 passed, 7 skipped, 18 deselected` measured independently on a
+clean tree.  Three failures fixed, fifty-nine tests added, nothing else moved.
+Nine repo-wide ratchet failures remain and are NOT this round's: the identical
+nine appear on `23c46232ea60`, in files this round did not touch.
+
 **The third is not a test quirk and it was fixed at the source.**
 `allow_dirty_stamps` set a PROCESS-GLOBAL latch and nothing reset it, so once
 any driver's `main` armed it every later `worktree_stamp` in that process
