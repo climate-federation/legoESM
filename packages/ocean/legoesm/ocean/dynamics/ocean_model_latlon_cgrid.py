@@ -5722,6 +5722,10 @@ class LatLonCGridOceanModel:
         # ``stage_barotropic_correction`` hook ablates that external-mode
         # REPLACEMENT (below) for causal tests; it no longer selects between two
         # recurrences, because there is only one.  Public rk3_ws has no arm.
+        # The stage-3 barotropic correction, deferred to its post-solve site
+        # (stprk3_stg.F90:437-446 is BELOW the CALL dyn_zdf at :430).  None on
+        # every path that does not run the WS stage ladder.
+        _ws_stage3_correction = None
         if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws":
             # WEIGHTS of the stage depth-mean operator.  NEMO's is REFERENCE
             # weighted and fixed for the whole run:
@@ -6297,8 +6301,19 @@ class LatLonCGridOceanModel:
                     f"'post_ldf'; got {_expose_stage3_rhs!r}")
             u3_raw = (_qu_b * u0 + dt_mom * _qu_12 * p2u_corr) / _qu_aa
             v3_raw = (_qv_b * v0 + dt_mom * _qv_12 * p2v_corr) / _qv_aa
-            u3_corr, v3_corr = _replace_stage_mean(
-                u3_raw, v3_raw, target_u, target_v)
+            # ORDER.  The barotropic correction (stprk3_stg.F90:437-446) sits
+            # BELOW the CALL dyn_zdf at stprk3_stg.F90:430, so at stage 3 it
+            # runs AFTER the implicit vertical solve, never before it.  Stage
+            # 3 therefore hands the solve the masked explicit update -- the
+            # vector dyn_zdf builds for itself at dynzdf.F90:121-122 -- and
+            # ``_ws_stage3_correction`` below applies the correction ONCE, at
+            # the post-solve site.  Stages 1 and 2 keep their inline call:
+            # NEMO's banner at stprk3_stg.F90:433 says "All stages", and no
+            # solve runs between a stage update and its correction there.
+            u3_corr = u3_raw * _ws_stage_u_mask
+            v3_corr = v3_raw * _ws_stage_v_mask
+            _ws_stage3_correction = (
+                _replace_stage_mean, target_u, target_v)
             _nemo_ws_live_stage_geometry = (_g0, _g1, _g2)
             if self._nemo_ws_test_hooks.expose_tracer_transport_stage:
                 _stage_index = (
@@ -7780,13 +7795,16 @@ class LatLonCGridOceanModel:
         # and bottom and is split-stepped (Lie splitting, 1st-order)
         # after tracer advection, GM/Redi, and the freshwater virtual
         # salt flux — matching MOM6's diabatic-process ordering.
-        # NEMO stprk3_stg:440 zub correction (nemo_stage_mean_imposition):
-        # capture the post-barotropic-solve depth mean so it can be re-imposed
-        # after the implicit vertical solve (which otherwise shifts it).
+        # NEMO stprk3_stg:440 zub correction (nemo_stage_mean_imposition).
+        # The WS stage ladder hands its own correction closure down here
+        # (``_ws_stage3_correction``) and it needs no capture: its target is
+        # the prognostic uu_b(Kaa) NEMO reads, not a mean measured before the
+        # solve.  Every other path still captures the pre-solve depth mean so
+        # it can be re-imposed after a solve that would otherwise shift it.
         _impose_mean = (
             getattr(_cfg_b.barotropic, "nemo_stage_mean_imposition", False)
             and _apply_implicit_vmix)
-        if _impose_mean:
+        if _impose_mean and _ws_stage3_correction is None:
             _u_mean_baro, _v_mean_baro = self._fixed_depth_means(state_new, z_coord=z_coord, config=config, grid=grid)
 
         tke_new = None
@@ -7873,7 +7891,30 @@ class LatLonCGridOceanModel:
                           dims=("lat", "lon", "level"), units="m^2/s^2"),
             )
 
-        if _impose_mean:
+        if _ws_stage3_correction is not None:
+            # NEMO stprk3_stg.F90:440,444-445, applied HERE because :437-446
+            # runs after the CALL dyn_zdf at :430.  Same closure stages 1 and
+            # 2 call, same target uu_b(Kaa), same e3u_0/hu_0 weights — one
+            # correction per stage, exactly as NEMO writes it.  Sign
+            # convention: an ADDITIVE column-uniform shift, so the baroclinic
+            # deviation u′ is untouched and the depth integral becomes exactly
+            # the barotropic transport.
+            #
+            # UNCONDITIONAL, and deliberately so: NEMO's banner at
+            # stprk3_stg.F90:433 corrects every stage on every card, and this
+            # is the stage-3 correction the ladder deferred, not the separate
+            # ``nemo_stage_mean_imposition`` re-imposition below.  Gating it on
+            # that flag would DELETE the correction on the two tank cards,
+            # which resolve it False — measured at 8.4e-03 on OVERFLOW's u,
+            # 8.7 per cent of the field.
+            _stage3_corr, _stage3_tu, _stage3_tv = _ws_stage3_correction
+            _u_after, _v_after = _stage3_corr(
+                state_new.u.data, state_new.v.data, _stage3_tu, _stage3_tv)
+            state_new = state_new._replace(
+                u=state_new.u.replace(data=_u_after),
+                v=state_new.v.replace(data=_v_after),
+            )
+        elif _impose_mean:
             # NEMO stprk3_stg.F90:440: uu += (uu_b(Kaa) − Σ e3u_0·uu·r1_hu_0)
             # ·umask — the 3D velocity's depth mean is REPLACED by the
             # barotropic solution after the implicit solve, uniformly over
@@ -9865,12 +9906,33 @@ class LatLonCGridOceanModel:
         _zdf_baroclinic_only = (
             do_momentum and getattr(_cfg_b, "zdf_baroclinic_only", False))
         if _zdf_baroclinic_only:
-            _u_bt_mean = depth_mean(
-                u_solve_in, dz_u, _cfg_b.min_water_column_m,
-                keepdims=True)
-            _v_bt_mean = depth_mean(
-                v_solve_in, dz_v, _cfg_b.min_water_column_m,
-                keepdims=True)
+            # OPERAND.  dynzdf.F90:150-151 subtracts the PROGNOSTIC
+            # ``uu_b(ji,jj,Kaa)`` / ``vv_b(ji,jj,Kaa)`` -- the same array
+            # stprk3_stg.F90:440 reads back to build zub -- not a depth mean
+            # rebuilt from the solve input.  dynzdf.F90:156-159 writes the
+            # bottom stress on that same uu_b(Kaa).  So take the prognostic
+            # pair whenever the state carries one; a state with no barotropic
+            # pair at all keeps the reconstruction, which is the only thing it
+            # can do.  Same "prognostic when the state has one" rule the stage
+            # correction already follows for its target.
+            _uu_b_zdf = getattr(state, "uu_b", None)
+            _vv_b_zdf = getattr(state, "vv_b", None)
+            if _uu_b_zdf is not None and _vv_b_zdf is not None:
+                _u_bt_mean = _uu_b_zdf.data[..., jnp.newaxis].astype(
+                    u_solve_in.dtype)
+                _v_bt_mean = _vv_b_zdf.data[..., jnp.newaxis].astype(
+                    v_solve_in.dtype)
+            elif _uu_b_zdf is None and _vv_b_zdf is None:
+                _u_bt_mean = depth_mean(
+                    u_solve_in, dz_u, _cfg_b.min_water_column_m,
+                    keepdims=True)
+                _v_bt_mean = depth_mean(
+                    v_solve_in, dz_v, _cfg_b.min_water_column_m,
+                    keepdims=True)
+            else:
+                raise ValueError(
+                    "NEMO barotropic removal (dynzdf.F90:150-151) requires "
+                    "both uu_b and vv_b, or neither")
             u_solve_in = u_solve_in - _u_bt_mean
             v_solve_in = v_solve_in - _v_bt_mean
 
