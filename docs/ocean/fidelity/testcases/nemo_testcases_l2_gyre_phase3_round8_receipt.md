@@ -7175,3 +7175,231 @@ round:
 UNASKED list: empty.
 
 Every figure above is pinned in `manifests/nemo_testcase_l2_gyre_round32.json`.
+
+## Round 33 — the stage-3 arm, and what round 32 claimed too strongly
+
+Round 33 starts from `bb6fece7e21a` on a clean tree, same regime: CPU
+production JIT, fp64/x64, `transcendentals="libm"`, oracle V2.  The
+preregistration is
+`manifests/nemo_testcase_l2_gyre_round33_preregister.json`, committed at
+`956dffbefa9e` before any measurement and before a line of model code moved;
+its addendum is `..._round33_preregister_addendum1.json` at `33e3fd02db7b`,
+committed after the independent CLAIM review and before the AFTER arm ran.  No
+NEMO executable was run and no NEMO source was edited.  Every artifact is under
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round33/` with SHA-256 in
+`artifacts.sha256`, and every one names the tree that produced it.  One
+detached probe worktree was used and is flagged: `/tmp/codex-gyre-r33-before`
+at `33e3fd02db7b`, which carries the OVERFLOW BEFORE arm on a clean committed
+tree rather than on a temporarily reverted one.
+
+### Item 1 — eight corrections the independent review found, and two more
+
+All eight are in `1fb6b57f3f47` and land in the round-32 text above, in place.
+The two that came out of this round's own measurements:
+
+**A RECEIPT DEFECT: round 32's `kt2` table mixes two quantities in one
+column.**  The trajectory gate's `normalized_max_abs` is
+`absolute / max(reference, 1.0)`, so for `u`, `v` and `ssh` -- whose reference
+scale is below 1 -- it IS the absolute residual, and for `T` and `S` -- whose
+reference scale is `23.47` K and `36.84` psu -- it is the RELATIVE one.  Round
+32 therefore compared a dimensionless number with one in m/s when it wrote
+that `T` is "within a factor of 2.5 of the velocity's".  The ABSOLUTE `kt2`
+residuals are `T` `3.1956659540810506e-11` K and `S`
+`8.1712414612411521e-13` psu, so `T` is an order of magnitude LARGER than the
+velocity rows, not smaller.  Both quantities are named in this round's tables.
+
+**The round-32 Rule-12 gate re-runs identical with its claim corrected**:
+`2.168404344971009e-19` (u) and `6.938893903907228e-18` (v), `exact` false,
+`1730` of `17400` and `3586` of `17100` cells bit-unequal, AT-BAR at the
+`1e-15` bar.  Its report now carries `divisor_provenance` and an
+`inputs_reconstructed_not_nemo` list, because the divisor is rebuilt.
+
+### Item 2 — Rule 0 first: NEMO selects the stage update ONCE, for all three stages
+
+`stprk3_stg.F90:365` opens `IF( ln_dynadv_vec .OR. lk_linssh )`.  Its TRUE arm
+at `:366-369` advances the velocity directly, with no thickness ratios; the
+ELSE arm at `:370-388` is the thickness-weighted one, `:373-378` under
+key_qco.  **Stage 3 is not in that SELECT at all**: `stprk3_stg.F90:395`
+CASE(3) adds the leftover RHS terms and does no time stepping, because the
+stage-3 time step lives inside `dyn_zdf` -- where `dynzdf.F90:119` carries the
+IDENTICAL predicate, vector arm at `dynzdf.F90:121-122` and key_qco arm at
+`dynzdf.F90:127-132`.
+
+Which arm GYRE compiles, read from the build rather than argued: its keys are
+`key_qco key_vco_1d3d key_RK3` (`cpp_GYRE_OMIP_L2_P3_SM.fcm`), so the ELSE arm
+is the key_qco form, and the deck resolves `ln_dynadv_vec = T`
+(`round19_oracle_v2_external/ocean.output:798`) with `lk_linssh` `.FALSE.` in
+that build's own `dom_oce.f90`.  NEMO takes the VECTOR arm at all three stages
+on GYRE.  legoESM honoured that at stages 1 and 2
+(`ocean_model_latlon_cgrid.py:5922` and its two branch sites) and hardcoded the
+key_qco ratios at stage 3.  A transcription defect, and it had a comment
+asserting the opposite.
+
+### The measured result
+
+| prediction | registered window | measured | verdict |
+|---|---|---:|---|
+| P1a `zdf_entry_A` u | within `1e-6` of `rDt` x the RHS residual | `2.9684798833066247e-12`, `2.396e-11` relative | **CONFIRMED** |
+| P1a `zdf_entry_A` v | same | `3.5751281340072215e-12`, `1.694e-10` relative | **CONFIRMED** |
+| P1f index sets agree | `n = 17400` / `17100` on both gates | identical | **CONFIRMED** |
+| P1g legoESM's kt=1 entry `u0` is identically zero | — | `0.0` on u and v | **CONFIRMED** |
+| P2a the stage-3 velocity does NOT fall an order of magnitude | u in `[3.0e-13, 4.5e-12]` | `2.7478405293344943e-12` | **CONFIRMED** |
+| P2d the level-1 error stays within `3x` of `1.764547e-12` | `[5.9e-13, 5.3e-12]` | `1.709431e-12` | **CONFIRMED** |
+| P2e the model's own field DID move | nonzero and at most `4.6e-11` | `1.013143e-13` on u, `3.001220e-13` on v | **CONFIRMED** |
+| P3a the first-over-bar does not move | — | still `kt=2` on `T`, `S`, `u`, `v` | **CONFIRMED** |
+| P3b `kt2` `T` and `S` do not move by a bit | — | field move exactly `0.0` over all `18000` cells, both | **CONFIRMED, uninformative by construction** |
+| P4a the operator is BIT FOR BIT given NEMO's inputs | `exact`, `n_unequal = 0` | see the Rule-12 table; the discharge was REBUILT after the DIFF review found the first version circular | **CONFIRMED, on the rebuilt discharge** |
+| P4b LOCK's 10-step trajectory is bit-identical | every cell | `PASS`, every one of 20 rows' field move exactly `0.0` | **CONFIRMED** |
+
+`kt=1` stage-3 velocity against NEMO's own stage record, by model level, over
+the 580 wet u columns:
+
+| level | before | after |
+|---|---:|---:|
+| 1 | `1.764547e-12` | `1.709431e-12` |
+| 15 | `1.866456e-13` | `1.682309e-13` |
+| 29 | `2.266544e-13` | `2.199583e-13` |
+| 30 | `2.249741e-13` | `2.199770e-13` |
+
+**The entry residual falls by `15.5x` on u and `35.2x` on v and the stage-3
+OUTPUT barely moves.**  That was the round's counter-intuitive prediction and
+it is the interesting number: `4.5974974126122489e-11` to
+`2.9684798833066247e-12` at the entry, `2.7922718390943624e-12` to
+`2.7478405293344943e-12` at the exit.  What is left at the entry is now
+EXACTLY `rDt` times the stage-3 RHS residual -- `14400` x
+`2.0614443633579772e-16` = `2.9684798832354876e-12`, measured
+`2.9684798833066247e-12` -- and that RHS residual is bit-identical before and
+after, so the two arms of the comparison differ in one variable.
+
+### Rule-12 discharge, per card
+
+| card | executes the changed arm | discharge |
+|---|---|---|
+| GYRE-zco | YES, at stage 3 (`ln_dynadv_vec = T`, `lk_linssh` false) | **BIT FOR BIT against a NEMO OUTPUT ARRAY** -- see "the discharge was circular" below.  legoESM's own `rk3_stage_velocity_update`, given NEMO's `uu(Kbb)`, `uu(Krhs)`, `rDt` and `umask` from the round-29 record, carried forward through NEMO's own `dynzdf.F90:149-150` and `:156-159`, reproduces NEMO's `uu_Kaa_pre` with `exact` true and `0` of `17400` u and `0` of `17100` v cells unequal.  The composition is calibrated inside the gate, which RAISES rather than reporting if the calibration fails |
+| LOCK_EXCHANGE-zco | NO.  `ln_dynadv_vec = F` (`lock_kt1_10/ocean.output:705`), `lk_linssh` false in its own build, and legoESM resolves `momentum_advection = flux_form` | **NOT REACHED, and measured**: the `kt=1..10` trajectory is bit-identical, every cell of every one of 20 rows moving exactly `0.0` |
+| OVERFLOW-zps | NO, same two reasons (`overflow_kt1_10/ocean.output:822`) | see the OVERFLOW row below |
+| ORCA2-zps | unknown; no ORCA2 card exists on this branch | **UNMEASURED**, frame spec unchanged |
+| DINO | not a campaign card; its deck resolves the vector arm, so it would execute the changed statement | **OPEN**, not claimed; no DINO gate ran |
+
+**THE FIRST VERSION OF THIS DISCHARGE WAS CIRCULAR, and the independent DIFF
+review caught it before a receipt quoted it.**  The gate built NEMO's side as
+`(uu_Kbb_in + rDt*uu_Krhs_in)*umask` from the record and the candidate as
+legoESM's helper evaluating that same expression on the same operands in the
+same association order.  Nothing on the "oracle" side was a NEMO OUTPUT ARRAY,
+so `exact` was guaranteed by construction and only the artificial plant could
+turn it red.  NEMO holds no array at that boundary at all.  The discharge is
+now the COMPOSITION: legoESM's helper output carried forward through NEMO's
+own `dynzdf.F90:149-150` and `:156-159` and scored against `uu_Kaa_pre`, which
+IS a NEMO output.  The gate re-runs `--mode calibrate` inside itself and
+RAISES rather than reporting if those two follow-on statements do not
+reproduce `uu_Kaa_pre` bit for bit on NEMO's own operands, so the composition
+can never be quoted uncalibrated.  The bare row stays, relabelled a
+TRANSCRIPTION IDENTITY with `is_a_discharge: false` and a `why_not` string.
+
+**Its remaining blind spot, stated in the report rather than discovered
+later**: the record's `uu_Kbb_in` is identically `0.0` -- GYRE is at rest at
+kt=1 -- so BOTH rows drive only `(0 + rDt*rhs)*umask`, and a wrong
+`velocity_before` operand would pass either.  The independent CLAIM review
+found that before the gate was written.  The non-zero before-velocity arm is a
+unit test with two plants on it.  The mask row the addendum opened is CLOSED
+by the same report: NEMO's `umask` in the scored layout and the mask every
+GYRE gate scores on agree on `17400` and `17100` cells with `0`
+disagreements.
+
+### The trajectory, and the worsened rows
+
+GYRE `kt=1..10`, all three oracle roots pinned to the V2 root,
+`--trajectory-only`, both arms on clean committed trees on this branch.
+**`kt2` does NOT clear the bar and the first-over-bar does not move**; it is
+still `kt=2` on `T`, `S`, `u` and `v`.
+
+| row | before (abs) | after (abs) | before (norm) | after (norm) |
+|---|---:|---:|---:|---:|
+| `kt2.before.T` | `3.1956659540810506e-11` | unchanged, bit for bit | `1.361474e-12` | unchanged |
+| `kt2.before.S` | `8.1712414612411521e-13` | unchanged, bit for bit | `2.218110e-14` | unchanged |
+| `kt2.before.u` | `2.7922718390943624e-12` | `2.7478405293344943e-12` | same | same |
+| `kt2.before.v` | `3.3877006018132039e-12` | `3.3055602526033123e-12` | same | same |
+| `kt2.before.ssh` | `4.336808689942018e-19` | unchanged, bit for bit | same | same |
+
+**`T` and `S` did not move by a single bit and that is now measured cell by
+cell, not inferred**: the shared oracle-relative comparison records a
+`max_previous_legoesm_field_move` of exactly `0.0` over all `18000` cells on
+each.  Round 32 moved `kt=1`'s FINAL `u` by `9.482369518886303e-07` and left
+the same two rows at exactly `0.0` as well.  So **`kt=2`'s `T` and `S` carry no
+path from `kt=1`'s final velocity at these sizes**, which is what the code
+says: the stage-3 tracer step consumes the STAGE-2 transport `_g2`, built from
+`(u2_corr, v2_corr)`.  Their next candidate, registered before this round
+measured anything: score `kt=1`'s `T` and `S` at stages 1, 2 and 3 against the
+round-29 root's `oracle_rktracer_stage3_kt00000001.bin` and the round-21 stage
+records and report the FIRST stage over bar.  A stage-1 or stage-2 failure
+exonerates everything downstream of it.  Nothing this round or round 32 touched
+can reach them.
+
+**The shared oracle-relative move gate FAILS on GYRE**, and that is said here
+rather than left in the artifact: `FAIL`, 70 certified rows compared, largest
+cell worsening `6.667640e-08` absolute at `kt10`/`u` = `3.003e+08` row-scale
+float64 ulps against a 2-ulp bar; no row changed status and the first-over-bar
+did not move.  Round 32's figure was `1.063192104e+10` ulps, so the same
+criterion is `35x` less badly violated, which is a direction and not a pass.
+Under Rule 12 the fix stays -- it is discharged BIT FOR BIT on the only card
+that executes it -- and the worsened rows enter the register as debt.
+
+**24 of the 50 rows worsened, 5 of them above the `1e-6` relative threshold;
+17 improved and 9 are unchanged.**  Round 32's counts were 22, 17 and 20/8.
+
+| row | before | after | relative |
+|---|---:|---:|---:|
+| `kt3.before.v` | `8.606654e-04` | `8.606873e-04` | `+0.002545 %` |
+| `kt3.before.u` | `7.193256e-04` | `7.193412e-04` | `+0.00218 %` |
+| `kt9.before.ssh` | `2.167026e-05` | `2.167050e-05` | `+0.001123 %` |
+| `kt8.before.ssh` | `1.181515e-05` | `1.181524e-05` | `+0.0007811 %` |
+| `kt10.before.ssh` | `3.330666e-05` | `3.330685e-05` | `+0.0005915 %` |
+
+The other 19 worsened rows are all below `1e-4` per cent and are listed in
+`round33/after_trajectory.json` against `before_trajectory.json`.
+
+**BOUNDARY, stated once for all of them.**  Every worsened row is at
+`kt >= 3`, downstream of the first divergence, where neither arm has an exact
+entering prefix -- the gate's own `exact_prefix_entering` is true only at `kt1`
+and `kt2`.  No row at or before the first divergence worsened; `kt2`'s two
+velocity rows IMPROVED and its three others did not move.  **OWNER**: the
+`kt2` residual itself, which is now `2.75e-12` on `u` against a `T` residual of
+`3.20e-11` -- so the tracer rows are an order of magnitude larger than the
+velocity rows in absolute terms and are untouched by this round.
+
+**Round 32's 22 worsened rows.**  This round moved all 22: 14 worsened further
+and 8 improved, none unchanged.
+
+### Item 3 — the tanks' acquisition, written and NOT run
+
+Round 32's ordering fix is UNDISCHARGED on both tanks (item 1(a)).  The
+discharge needs `puu(:,:,:,Kaa)` as `dyn_zdf` leaves it and `uu_b(:,:,Kaa)`,
+which NEMO holds only inside `dyn_zdf` and never writes.  `run.sh` builds a
+config COPY carrying GYRE's round-29 instrument -- the SAME patch file, because
+both tanks compile the same shipped `dynzdf.F90` body, checked rather than
+assumed -- plus ONE round-33 addition that dumps NEMO's own `e3u_0`, `hu_0` and
+`r1_hu_0`.
+
+That addition is not tidiness.  GYRE's discharge REBUILDS the column divisor
+because `mesh_mask.nc` has no `hu_0`; on LOCK it could not even rebuild it,
+because LOCK's `mesh_mask.nc` carries no `e3*_0` at all -- under `key_vco_1d`
+the vertical coordinate IS the 1-D ladder, and `domzgr_substitute.h90:89`
+DEFINES `e3u_0(i,j,k)` to be `e3t_1d(k)` (`:98` defines it as `e3u_3d(i,j,k)`
+under `key_vco_3d`).  So the tank discharge reconstructs nothing, which makes
+it a stronger discharge than GYRE's is today.
+
+**A retraction while writing its test.**  The first version asserted NEMO's
+`r1_hu_0` must differ from `1/hu_0`, because `domain.F90:159` builds it as
+`ssumask/(hu_0 + 1 - ssumask)`.  Measured on both tanks that difference is
+EXACTLY zero -- their column depths are small exactly-representable values.
+The row that survives is the one that matters and it is measured on the right
+quantity: NEMO forms `SUM(e3u_0*uu(Kaa)) * r1_hu_0` where the operator forms
+the same sum DIVIDED by `hu_0`, and `x/h` is not `x*(1/h)` even when `1/h` is
+correctly rounded.  On the synthetic LOCK fixture that difference is
+`3.42e-49`.  It stays OPEN.
+
+The reader FAILS CLOSED: until the acquisition has run it exits non-zero naming
+the command that creates the record, and it refuses a round-29-only record
+rather than quietly rebuilding the divisor.  It states what it cannot see: the
+tanks' stage record carries `T`, `S`, `u` and `ssh` and no `v`, so only the u
+face is dischargeable there.
