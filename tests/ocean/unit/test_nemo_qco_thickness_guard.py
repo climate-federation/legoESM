@@ -83,3 +83,15 @@ def test_the_mask_guard_is_below_the_early_return_in_the_source():
     assert tmask > early_return, (
         "the mask conversion moved back above the early return, which would "
         "raise a TypeError before the guard could give its own message")
+    # A duplicate guard spelled differently would restore the refusal while
+    # leaving the one this test looks for in place, so no line above the
+    # early return may test the mask at all.
+    above = [line for line in lines[:early_return]
+             if "is_active" in line and "raise" not in line
+             and "getattr" not in line]
+    assert above == [], (
+        f"a mask test reappeared above the linear-free-surface early return: "
+        f"{above}")
+    guards = [line for line in lines if "is_active" in line and "None" in line]
+    assert len(guards) == 1, (
+        f"there must be exactly one mask guard; found {guards}")

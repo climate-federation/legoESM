@@ -58,8 +58,10 @@ def nemo_qco_live_t_thickness(
     every NEMO WS-RK3 card.
 
     This is deliberately fail-closed: a NEMO-identity caller must supply or
-    carry the oracle's reference ``e3t_0`` and active-cell mask.  It never
-    reconstructs a midpoint ladder.
+    carry the oracle's reference ``e3t_0``, and -- on the MOVING-THICKNESS
+    path only -- the active-cell mask.  The linear-free-surface arm returns
+    ``e3t_0`` untouched and reads no mask, so it does not require one
+    (decision 17).  It never reconstructs a midpoint ladder.
     """
     if e3t_0 is None:
         e3t_0 = getattr(z_coord, "nemo_e3t_0", None)
