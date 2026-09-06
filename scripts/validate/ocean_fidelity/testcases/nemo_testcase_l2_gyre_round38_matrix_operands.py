@@ -54,6 +54,7 @@ census is reported beside it.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -327,6 +328,14 @@ def _wet_row(name, oracle, candidate, wet) -> dict:
     row["dry_cells_unequal"] = int(np.count_nonzero(
         (np.asarray(oracle).view(np.uint64)
          != np.asarray(candidate).view(np.uint64)) & ~mask))
+    # THE CANDIDATE'S OWN BYTES, so a plant can be SEEN on a row that is
+    # already saturated.  Measured: a one-ulp plant on the largest |K| cell
+    # leaves (bit_unequal, absolute_max, status) untouched, because 17383 of
+    # 17400 cells already differ and the perturbation is 1.7e-18 against an
+    # absmax of 9.66e-13.  A control that cannot see its own plant proves
+    # nothing, and the count-and-max signature could not see it.
+    row["candidate_sha256"] = hashlib.sha256(
+        np.ascontiguousarray(candidate)[mask].tobytes()).hexdigest()
     return row
 
 
@@ -550,8 +559,10 @@ def run(record: Path, *, plant: str | None = None) -> dict:
         before = _wet_row(label, oracle[oracle_key], unplanted[plant], mask)
         after = next(r for r in rows if r["name"] == label)
         plant_moved_its_row = bool(
-            (before["bit_unequal"], before["absolute_max"], before["status"])
-            != (after["bit_unequal"], after["absolute_max"], after["status"]))
+            (before["bit_unequal"], before["absolute_max"],
+             before["status"], before["candidate_sha256"])
+            != (after["bit_unequal"], after["absolute_max"],
+                after["status"], after["candidate_sha256"]))
 
     status = "AT-BAR" if all(r["status"] == "AT-BAR" for r in rows) else "DEBT"
     if any(inert.values()) or any(round_trip.values()):
