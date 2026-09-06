@@ -7529,6 +7529,25 @@ the report is asserted.
 `tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round32_ordering.py` (21):
 one new arm for the mask shape validation item 1(h) added.
 
+The three round-32/33 files together: **57 passed** on a clean tree.
+
+**Gates, each with the line that decided it.**  The receipt citation gate
+PASSES on 155 citations with 0 unmapped and 0 failing, and its planted
+two-line shift exits non-zero.  The worktree-stamp ratchet floor moves `64` ->
+`66` for this round's two new report dicts, and its 10 tests pass including the
+non-vacuity arm.  The round-33 Rule-12 discharge exits 0 and its plant exits
+non-zero.  The round-32 Rule-12 gate re-runs unchanged with its corrected
+claim string.
+
+**The citation gate caught this round's own line shifts**, which is what it is
+for: inserting `rk3_stage_velocity_update` moved five anchors in
+`ocean_model_latlon_cgrid.py` by exactly 99 lines each.  Re-anchored in the map
+and repointed in the prose that names them, because the SITE did not move, only
+its line number did.  Eleven new entries were added and two of them were WRONG
+when first written -- `DO_3D( 0, 0, 0, 0, 1, jpkm1 )` occurs five times in
+`stprk3_stg.F90` and a bare `ENDIF` twelve, and both first-guess occurrence
+indices resolved to the wrong line.  Caught before the receipt was committed.
+
 ### Merge readiness
 
 `03c6e8d96ff7` remains an ancestor of this branch, so the integration is still
