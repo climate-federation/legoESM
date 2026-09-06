@@ -245,3 +245,65 @@ def test_production_literal_route_uses_full_step_active_masks():
     np.testing.assert_array_equal(
         np.asarray(out.v.data)[~np.asarray(active_v, dtype=bool)],
         np.asarray(state.v.data)[~np.asarray(active_v, dtype=bool)])
+
+
+def test_the_ordered_sweep_rounds_its_multiply_separately():
+    """NEMO's recurrences round the multiply and the subtraction separately.
+
+    XLA on CPU contracts ``c - a*b`` into a fused multiply-add, which rounds
+    once.  gfortran does not, so the fused form is a real, measurable
+    deviation from ``trazdf.F90``'s and ``dynzdf.F90``'s written statements:
+    on GYRE's own dumped tracer matrix it moved 133 (T) and 111 (S) wet cells
+    by up to 7.105e-15, and 582 (u) and 623 (v) cells of the momentum solve.
+
+    This asserts the solve reproduces a per-level Python reference built with
+    ``-`` and ``*``, on a matrix chosen so that the fused and unfused answers
+    DIFFER -- the assertion below fails if ``_round_the_multiply`` is removed
+    or stops working, which is the only reason it is here.
+    """
+    import math
+
+    import numpy as np
+
+    from legoesm.ocean.physics.vertical_mixing import (
+        nemo_ordered_tridiagonal_solve)
+
+    rng = np.random.default_rng(20260906)
+    ncol, nlev = 512, 24
+    lower = np.zeros((ncol, nlev))
+    upper = np.zeros((ncol, nlev))
+    lower[:, 1:] = -rng.random((ncol, nlev - 1))
+    upper[:, :-1] = -rng.random((ncol, nlev - 1))
+    diagonal = 1.0 + rng.random((ncol, nlev)) - lower - upper
+    rhs = rng.random((ncol, nlev)) * 2.0 - 1.0
+
+    def reference(fused: bool) -> np.ndarray:
+        out = np.empty_like(rhs)
+        for c in range(ncol):
+            lo, di, up, rh = lower[c], diagonal[c], upper[c], rhs[c]
+            lu = [di[0]] + [0.0] * (nlev - 1)
+            for k in range(1, nlev):
+                lu[k] = di[k] - lo[k] * up[k - 1] / lu[k - 1]
+            work = [rh[0]] + [0.0] * (nlev - 1)
+            for k in range(1, nlev):
+                q = lo[k] / lu[k - 1]
+                work[k] = (math.fma(-q, work[k - 1], rh[k]) if fused
+                           else rh[k] - q * work[k - 1])
+            sol = [0.0] * nlev
+            sol[nlev - 1] = work[nlev - 1] / lu[nlev - 1]
+            for k in range(nlev - 2, -1, -1):
+                num = (math.fma(-up[k], sol[k + 1], work[k]) if fused
+                       else work[k] - up[k] * sol[k + 1])
+                sol[k] = num / lu[k]
+            out[c] = sol
+        return out
+
+    separate, fused = reference(False), reference(True)
+    # The control: without a matrix where the two DIFFER, the assertion below
+    # would pass on a fused solve and prove nothing.
+    assert (separate != fused).sum() > 100
+
+    solved = np.asarray(nemo_ordered_tridiagonal_solve(
+        jnp.asarray(lower), jnp.asarray(diagonal),
+        jnp.asarray(upper), jnp.asarray(rhs)))
+    assert (solved != separate).sum() == 0
