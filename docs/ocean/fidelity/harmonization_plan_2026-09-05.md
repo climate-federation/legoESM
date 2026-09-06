@@ -235,3 +235,7 @@ aux3d linkage and the minimum-level policy, not just counts.
   difference (higher Ri), not the shallow-cell operator. Full table in
   results/omip_nemo/threegrid_unified_table_2026-09-04.md. Open faithfulness ASK: card
   `--tke-mxl-choice 3` vs ORCA1 nn_mxl=2 (= choice 4).
+- 15:30 mpas_base2 done (9657921): SST 0.49/-0.01, SSS 0.52/+0.02, nino3 +1.00, MLD 23.8/+5.1. The
+  previous MPAS baseline rescored with the same command (card _score_mpas_unified_d30, job 9664889):
+  0.50 / 0.54 / +1.08 -> pre-reg met, small improvement on all three, no regression. (The table's
+  earlier 0.34 SSS for MPAS d30 was a different scoring.) Maps sent.
