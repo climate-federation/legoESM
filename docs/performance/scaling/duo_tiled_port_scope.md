@@ -654,3 +654,13 @@ all four changes (independent enumeration of the placement over 2464
 geometries; ng+1 tight because the barriers write the edge node), HOLD
 items fixed in fbc519e36; GLM: corners delivered by round composition,
 ng+1 minimal (depth 3 differs).
+
+Addendum (2026-09-06): packing both face-edge bands of every array into one
+message per direction: 0.226 -> **0.211 s/step** (bitwise; e1b89da24).
+Packing the substep-entry FULL refresh as well aborts: MPI_ERR_TRUNCATE on
+54 ranks and, in one process, XLA:CPU's collective-permute rendezvous
+"id can't be larger than the number of participating threads" -- two
+concurrent collective-permutes sharing a rendezvous key.  Open item; the
+gate refuses that combination.  Cumulative this session at C96/54 ranks:
+0.98 (loop-arm C-pressure) -> 0.256 -> 0.211 s/step, 6-rank flat 1.124
+(5.3x on 9x ranks); compute floor 0.12.
