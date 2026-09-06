@@ -64,7 +64,7 @@ readonly TARGET_CFG=GYRE_OMIP_L2_P3_SM_R38TRAZDFKT2
 readonly L2=/data/abyssal/dbalwada/nemo-testcases-l2/phase3
 # The round-35 run: the namelists come from it and its record is the twin the
 # new one is compared against, field by field, through the gate's own reader.
-readonly SOURCE_RUN=$L2/round38_oracle_trazdf_matrix
+readonly SOURCE_RUN=$L2/round37_oracle_trazdf_matrix
 # The ADMISSION baseline is round 29, exactly as round 35 used it, and NOT the
 # round-35 run -- the admission cannot parse the round-35 trazdf record, which
 # is the defect this acquisition removes.  Using round 29 keeps the admission
@@ -234,12 +234,11 @@ cp "$work_manifest"/*.sha256 "$TARGET_RUN/"
     >>run.user.time.log
 )
 
-# TWIN IDENTITY, IN TWO STEPS.  RAW byte identity is tried FIRST against the
-# ROUND-35 run and every result is LOGGED, because it is the strongest claim
-# and the one to prefer.  It is not the CRITERION: NEMO's stream dumps write
-# whole work arrays including the nn_hls halo, which NEMO neither owns nor
-# initialises, and THIS run legitimately changes one record -- the two staged
-# arrays make oracle_trazdf_matrix_kt00000001.bin 115072 bytes LONGER.
+# TWIN IDENTITY.  RAW byte identity against the ROUND-37 run is the CRITERION
+# here, not a preferred-but-optional claim: this delta widens an arm from one
+# step to two and must not move step one by a single bit.  (Round 37's own
+# comment here said the opposite, because THAT delta legitimately lengthened
+# one record; it is round-37 text and does not describe this run.)
 : >"$TARGET_RUN/round38_raw_twin_cmp.log"
 for source_record in "$SOURCE_RUN"/oracle_*.bin; do
   record=${source_record##*/}

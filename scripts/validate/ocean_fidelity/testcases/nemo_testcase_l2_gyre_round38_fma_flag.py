@@ -43,21 +43,28 @@ from pathlib import Path
 # Each candidate is (label, XLA_FLAGS value).  The empty string is the
 # BASELINE arm and must be present: a probe with no baseline cannot tell a
 # flag that works from a toolchain that never fused in the first place.
+# FIVE CANDIDATES THIS BUILD REFUSES OUTRIGHT are NOT listed, because an arm
+# that cannot execute is not a measurement:
+# --xla_backend_extra_options=--fp-contract=off / =on (LLVM's -fp-contract is
+# not a registered cl::opt here: "Unknown command line argument"),
+# --xla_cpu_disable_platform_dependent_math,
+# --xla_cpu_disable_new_fusion_emitters (both "Unknown flag in XLA_FLAGS"),
+# and the two combined.  Their refusals are recorded in the round-38 receipt.
 CANDIDATES = (
     ("baseline", ""),
     ("allow_excess_precision_false", "--xla_allow_excess_precision=false"),
     ("cpu_fast_math_false", "--xla_cpu_enable_fast_math=false"),
-    ("backend_extra_fp_contract_off",
-     "--xla_backend_extra_options=--fp-contract=off"),
-    ("backend_extra_fp_contract_on",
-     "--xla_backend_extra_options=--fp-contract=on"),
-    ("cpu_disable_platform_dependent_math",
-     "--xla_cpu_disable_platform_dependent_math=true"),
-    ("no_fusion_emitters", "--xla_cpu_disable_new_fusion_emitters=true"),
     ("opt_level_zero", "--xla_backend_optimization_level=0"),
-    ("fp_contract_off_and_no_excess",
-     "--xla_backend_extra_options=--fp-contract=off "
-     "--xla_allow_excess_precision=false"),
+    # THE ARM A FLAG-NAME SEARCH MISSES.  A fused multiply-add is an
+    # AVX2/FMA3 instruction, so CAPPING THE ISA below AVX2 removes it while
+    # leaving optimisation at full strength.  Nothing in the flag's NAME says
+    # "fma", which is exactly why the first version of this probe -- which
+    # searched 404 flag names for fma / contraction / fp-contract -- reported
+    # that no such flag exists.  An independent diff review found it.
+    ("max_isa_avx", "--xla_cpu_max_isa=AVX"),
+    ("max_isa_sse4_2", "--xla_cpu_max_isa=SSE4_2"),
+    ("max_isa_avx2", "--xla_cpu_max_isa=AVX2"),
+    ("max_isa_avx512", "--xla_cpu_max_isa=AVX512"),
 )
 N = 4096
 SEED = 20260906
@@ -114,8 +121,10 @@ def _child() -> int:
 SWEEP_ARMS = (
     ("rounding_on__flag_off", True, ""),
     ("rounding_off_flag_off", False, ""),
-    ("rounding_on__flag_on", True, "--xla_backend_optimization_level=0"),
-    ("rounding_off_flag_on", False, "--xla_backend_optimization_level=0"),
+    ("rounding_on__opt0", True, "--xla_backend_optimization_level=0"),
+    ("rounding_off_opt0", False, "--xla_backend_optimization_level=0"),
+    ("rounding_on__isa_avx", True, "--xla_cpu_max_isa=AVX"),
+    ("rounding_off_isa_avx", False, "--xla_cpu_max_isa=AVX"),
 )
 
 
@@ -225,10 +234,20 @@ def main(argv=None) -> int:
     if baseline.get("exit") == 3:
         print("FAIL: the two reference answers agree; this probe is vacuous")
         return 3
+    # AN ARM THAT DID NOT RUN IS NOT AN ARM THAT FOUND NOTHING.  Five of the
+    # first version's nine candidates aborted with "Unknown command line
+    # argument" and the summary still printed a one-line verdict as though the
+    # survey had been nine flags deep.  A rejected flag is now reported as
+    # REJECTED and the probe exits non-zero, so a survey cannot silently
+    # shrink.
+    rejected = [r["label"] for r in rows if not r.get("accepted")]
     fuses = baseline.get("matches_fused") == N
     disablers = [r["label"] for r in rows
                  if r.get("matches_separate") == N and r["label"] != "baseline"]
     report = {"baseline_fuses": fuses, "n": N,
+              "rejected_arms": rejected,
+              "arms_attempted": len(rows),
+              "arms_that_ran": len(rows) - len(rejected),
               "reference_pair_differ": baseline.get("reference_pair_differ"),
               "flag_that_disables_contraction": disablers, "rows": rows}
     text = json.dumps(report, indent=1, sort_keys=True)
@@ -241,6 +260,12 @@ def main(argv=None) -> int:
               f"fused {row.get('matches_fused')}/{N}")
     print(f"BASELINE-FUSES {fuses}")
     print(f"DISABLERS {disablers or 'none'}")
+    print(f"ARMS {len(rows) - len(rejected)}/{len(rows)} ran; "
+          f"REJECTED {rejected or 'none'}")
+    if rejected:
+        print("FAIL: this survey is shallower than it looks; the rejected "
+              "arms above never executed")
+        return 4
     return 0
 
 

@@ -167,9 +167,36 @@ def test_the_fma_probe_carries_a_baseline_arm():
                for label, flags in F.CANDIDATES)
 
 
-@pytest.mark.parametrize("name", ["K", "K33", "dz", "e3w", "wet"])
-def test_every_plantable_operand_is_captured(name):
-    assert name in M.PLANT_OPERANDS
+def test_every_plantable_operand_names_the_row_its_plant_must_move():
+    """The first version of this asserted PLANT_OPERANDS against itself.
+
+    It passed on any code at all.  The invariant that matters is that every
+    plantable operand names a row the gate actually emits -- a plant pointing
+    at a row that was renamed lands nowhere and reads as a pass.
+    """
+    import inspect
+    assert M.PLANT_ROW == {
+        "K": "operand.K", "K33": "operand.K33_fold",
+        "dz": "operand.dz_after", "e3w": "operand.e3w_now",
+        "wet": "operand.wet"}
+    assert tuple(M.PLANT_ROW) == M.PLANT_OPERANDS
+    emitted = inspect.getsource(M.run)
+    for operand, row in M.PLANT_ROW.items():
+        assert f'"{row}"' in emitted, (
+            f"the plant for {operand!r} names row {row!r}, which this gate "
+            "does not emit")
+
+
+def test_the_plant_verdict_is_the_row_not_the_exit_status():
+    """The gate's baseline is DEBT, so 'exited non-zero' proves nothing."""
+    import inspect
+    main = inspect.getsource(M.main)
+    start = main.index("if args.plant:")
+    # the branch ends where the NON-plant return begins; without that bound
+    # the slice swallows it and this test reads the wrong statement
+    plant_branch = main[start:main.index("return 0 if report", start)]
+    assert 'report["plant_moved_its_own_row"]' in plant_branch
+    assert 'report["status"] == "AT-BAR"' not in plant_branch
 
 
 # --------------------------------------------------------------------------

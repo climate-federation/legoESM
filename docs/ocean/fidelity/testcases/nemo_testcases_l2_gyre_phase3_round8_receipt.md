@@ -9337,12 +9337,20 @@ solve call site and re-running the stage-3 completion gate:
 | `K` := NEMO's own `zwt_mix` | **`1.4210854715202004e-14`** | **`2.8421709430404007e-14`** |
 | `K` := NEMO's `avt` + legoESM's own fold | `3.1956659540810506e-11` | `8.2422957348171622e-13` |
 
-The matrix diffusivity owns **99.96 per cent** of the T residual, and
-`1.4210854715202004e-14` K is EXACTLY the residual `tra_zdf` was HANDED —
-round 34's `kt1.stage3.pre_zdf` row, to every digit — so with NEMO's own
-diffusivity stage 3 adds nothing.  The CLOSURE owns exactly `0` on T; the FOLD
-owns `3.19424e-11` of the `3.19567e-11`.  The null substitution is the noise
-floor that makes those two readable, and it is `0` on both tracers.
+The matrix diffusivity owns **99.96 per cent** of the T residual — strictly,
+it owns it TO WITHIN `1.4210854715202004e-14` K, and that bound covers the
+second operand that also differs: `dz_after`'s 5207 wet cells at `1.13687e-13`
+are inside it and are never substituted separately.  That `1.42e-14` is the
+same figure round 34 recorded for `kt1.stage3.pre_zdf`, the residual `tra_zdf`
+is HANDED, to every digit — a CROSS-ROUND comparison, not an arm this round
+ran.  The CLOSURE owns exactly `0` on T and `7.105427357601002e-15` on S; the
+FOLD owns `3.19424e-11` of the `3.19567e-11`.
+
+The null substitution is the noise floor that makes those two readable, and it
+is `0` on both tracers — **in the max-abs metric, which is the one thing it can
+say**.  The same substitution moves 4174 T bits inside the step, and a max-abs
+residual cannot see that; what the floor establishes is that constant lowering
+does not move the number this table reports, not that it moves nothing.
 
 **THE UPSTREAM MODULE, AND THE FIRST NON-BIT STATEMENT.**  It is not a
 transcription of the isoneutral formula — it is the CALL SITE.
@@ -9367,9 +9375,27 @@ of step 1.
 they must not be collapsed.**  legoESM's own `compute_isoneutral_K33_latlon`,
 asked for its value on that same step-entry state, returns **EXACTLY 0.0 on
 all 20416 faces**.  So legoESM's slope arithmetic leaves no rounding residue on
-a uniform field: the owner is the CALL SITE, not the arithmetic.  This arm
-calls the function directly rather than through the model, and is labelled a
-property of that function rather than a re-derivation of the model's number.
+a horizontally uniform field, and the difference is the STATE the function is
+handed, not the function.  This arm calls the function directly rather than
+through the model and is a property of that function, not of the model's call:
+it omits ten arguments `ocean_model_latlon_cgrid.py:7277` passes.  Two of them
+were measured inert by the diff review (`u_mask`/`v_mask` threaded: 0 bits
+changed), and the zero is not degenerate (a `1e-12` tracer bump gives
+`4.69e-31`).
+
+**WHICH INPUT OF THAT CALL DOMINATES IS UNMEASURED, AND THE FIRST VERSION OF
+THIS SECTION OVERCLAIMED IT.**  It read "the owner is the CALL SITE" as
+"the owner is the tracer TIME LEVEL".  The diff review ran the scaling test
+nobody had: injecting NEMO's own stage (`Kmm`) per-level tracer anomaly, whose
+absolute maximum is `7.25e-6` K, into the step-entry state gives a K33 of
+`7.84e-17` — **1e-4 of the live `9.66e-13`** — and it scales as the square of
+that anomaly (`x0.5` -> `1.96e-17`, `x2` -> `3.13e-16`), which is the right
+direction and the wrong magnitude.  A separate `eta` perturbation of `1e-3` m
+gives `8.09e-16`, so the thickness/`eta` time level is UNEXCLUDED.  What is
+MEASURED is that the call reads the STAGE state where NEMO's reads the BEFORE
+state, and that the before state produces exactly zero; which component of the
+stage state carries the remaining four orders of magnitude is the next round's
+question, not this one's answer.
 
 **THE PREREGISTRATION'S FIRST PR2 IS REFUTED.**  It named the TKE closure and
 the Prandtl/avt derivation as the culprit, on the reasoning that a live
@@ -9424,30 +9450,55 @@ removes none of NEMO's own lines (measured: `0`), and the acquisition REFUSES
 the run unless the `kt = nit000` record comes back BYTE-IDENTICAL to round
 37's.  The agent did not run it.
 
-### Item 2 — THE FMA POLICY: a global flag exists, and it is a sledgehammer
+### Item 2 — THE FMA POLICY: a global flag exists, and a NAME SEARCH MISSED IT
 
-Round 37 fixed XLA's fused multiply-add contraction PER SITE.  The installed
-`jaxlib 0.10.0` advertises **404** `xla_*` flags and NONE of them names `fma`,
-`contraction` or `fp-contract`.  LLVM's `--fp-contract` is not a registered
-option in this build: `--xla_backend_extra_options=--fp-contract=off` is
-refused with *Unknown command line argument*.
+Round 37 fixed XLA's fused multiply-add contraction PER SITE.  The first
+version of this round's answer was that no global flag exists: the installed
+`jaxlib 0.10.0` advertises **404** `xla_*` flags and none of them NAMES `fma`,
+`contraction` or `fp-contract`, and LLVM's `--fp-contract` is not a registered
+option in this build (`--xla_backend_extra_options=--fp-contract=off` is
+refused with *Unknown command line argument*).
 
-The ONE setting that disables the contraction is
-`--xla_backend_optimization_level=0`, and it does so by disabling backend
-optimisation entirely.  Measured on 4096 triples drawn so the two roundings
-differ on all of them, and on the round-37 gate's sweep rows:
+**THAT ANSWER WAS WRONG, AND AN INDEPENDENT DIFF REVIEW FOUND THE FLAG.**  A
+fused multiply-add is an AVX2/FMA3 instruction, so CAPPING THE ISA below AVX2
+removes it — at full optimisation.  Nothing in the flag's name says `fma`,
+which is exactly how a search over flag NAMES missed it.  Measured, 4096
+triples drawn so the two roundings differ on all of them:
+
+| setting | reproduces the SEPARATELY rounded answer | reproduces the FUSED answer |
+|---|---:|---:|
+| baseline (no flag) | 0 / 4096 | 4096 / 4096 |
+| `--xla_allow_excess_precision=false` | 0 / 4096 | 4096 / 4096 |
+| `--xla_cpu_enable_fast_math=false` | 0 / 4096 | 4096 / 4096 |
+| `--xla_backend_optimization_level=0` | **4096 / 4096** | 0 / 4096 |
+| `--xla_cpu_max_isa=AVX` | **4096 / 4096** | 0 / 4096 |
+| `--xla_cpu_max_isa=SSE4_2` | **4096 / 4096** | 0 / 4096 |
+| `--xla_cpu_max_isa=AVX2` | 0 / 4096 | 4096 / 4096 |
+| `--xla_cpu_max_isa=AVX512` | 0 / 4096 | 4096 / 4096 |
+
+**AND THE SURVEY WAS SHALLOWER THAN IT LOOKED.**  Five of the first version's
+nine candidates never executed — `--fp-contract=off`, `--fp-contract=on`,
+`--xla_cpu_disable_platform_dependent_math`,
+`--xla_cpu_disable_new_fusion_emitters` and the two combined all abort with
+*Unknown flag* — and the summary still printed a one-line verdict as though
+nine flags had been tried.  A rejected arm is now REPORTED and the probe exits
+non-zero, and the four flags this build refuses are named in its source rather
+than left in a candidate list they cannot occupy.
+
+On the round-37 gate's sweep rows, given NEMO's own matrix and right-hand side:
 
 | arm | sweep `T` | sweep `S` |
 |---|---:|---:|
 | per-site rounding ON, no flag | 0 / 21120 | 0 / 21120 |
 | per-site rounding REMOVED, no flag | 133 / 21120 | 111 / 21120 |
-| per-site rounding ON, flag ON | 0 / 21120 | 0 / 21120 |
-| per-site rounding REMOVED, flag ON | **0 / 21120** | **0 / 21120** |
+| per-site rounding REMOVED, `--xla_backend_optimization_level=0` | **0 / 21120** | **0 / 21120** |
+| per-site rounding REMOVED, `--xla_cpu_max_isa=AVX` | **0 / 21120** | **0 / 21120** |
 
-So the flag alone is an equivalent cure for that row.  **The default is NOT
-changed**: turning off backend optimisation is a change to every operator in
-the model and to its cost, and that is the user's call.  It is in the ASKED
-table with its measured effect.
+So EITHER flag is an equivalent cure for that row, and the ISA cap is the
+better of the two — it leaves optimisation at full strength and removes only
+the instruction.  **The default is NOT changed.**  Capping the ISA is a
+change to every operator's code generation and to the model's cost on every
+machine it runs on; it is in the ASKED table with its measured effect.
 
 ### Item 3 — the dry diagonal is an UNCONSUMED SLOT, for FINITE values only
 

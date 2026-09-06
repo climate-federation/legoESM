@@ -74,7 +74,16 @@ from nemo_testcase_l2_gyre_round35_trazdf_matrix import (  # noqa: E402
 RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
               "round37_oracle_trazdf_matrix/"
               "oracle_trazdf_matrix_kt00000001.bin")
-PLANT_OPERANDS = ("K", "K33", "dz", "e3w", "wet")
+# Every plantable operand, and the ROW its plant must move.  One map rather
+# than two lists, so a renamed row cannot leave a plant pointing at nothing.
+PLANT_ROW = {
+    "K": "operand.K",
+    "K33": "operand.K33_fold",
+    "dz": "operand.dz_after",
+    "e3w": "operand.e3w_now",
+    "wet": "operand.wet",
+}
+PLANT_OPERANDS = tuple(PLANT_ROW)
 
 
 def _oracle(rec: dict) -> dict[str, np.ndarray]:
@@ -481,8 +490,15 @@ def run(record: Path, *, plant: str | None = None) -> dict:
         name: int(np.count_nonzero(a.view(np.uint64) != b.view(np.uint64)))
         for name, a, b in (("T", baseline[0], substituted_out[0]),
                            ("S", baseline[1], substituted_out[1]))}
+    unplanted = None
     if plant:
-        # CONTROL 3 -- one ulp on ONE captured operand must turn a row red.
+        # CONTROL 4 -- one ulp on ONE captured operand must MOVE ITS OWN ROW.
+        #
+        # "the gate exits non-zero" is NOT this control: three of the operand
+        # rows are DEBT unplanted, so a plant that moved nothing would exit
+        # non-zero too and read as passing.  The planted operand's row is
+        # therefore scored BOTH ways and the two must differ.
+        unplanted = dict(live)
         live = dict(live)
         target = live[plant].copy()
         idx = np.unravel_index(int(np.argmax(np.abs(target))), target.shape)
@@ -526,6 +542,17 @@ def run(record: Path, *, plant: str | None = None) -> dict:
         attribution["max_abs_K_difference_with_fold_removed"]
         < 0.5 * attribution["max_abs_K_difference"])
 
+    plant_moved_its_row = None
+    if plant:
+        label = PLANT_ROW[plant]
+        oracle_key = plant
+        mask = wet_cell if plant in ("dz", "wet") else wet_face
+        before = _wet_row(label, oracle[oracle_key], unplanted[plant], mask)
+        after = next(r for r in rows if r["name"] == label)
+        plant_moved_its_row = bool(
+            (before["bit_unequal"], before["absolute_max"], before["status"])
+            != (after["bit_unequal"], after["absolute_max"], after["status"]))
+
     status = "AT-BAR" if all(r["status"] == "AT-BAR" for r in rows) else "DEBT"
     if any(inert.values()) or any(round_trip.values()):
         status = "PERTURBED"
@@ -561,6 +588,7 @@ def run(record: Path, *, plant: str | None = None) -> dict:
         "k_attribution": attribution,
         "rows": rows,
         "planted_operand": plant,
+        "plant_moved_its_own_row": plant_moved_its_row,
         "status": status,
     }
 
@@ -641,9 +669,14 @@ def main(argv=None) -> int:
           f"not scored) {report['output_substitution_bits_moved_CONFOUNDED']}")
     print(f"STATUS {report['status']}")
     if args.plant:
-        if report["status"] == "AT-BAR":
-            print("FAIL: the planted ulp moved no row; this control proves "
-                  "nothing")
+        print(f"PLANT {args.plant} moved_its_own_row "
+              f"{report['plant_moved_its_own_row']}")
+        # THE VERDICT IS THE ROW, NOT THE EXIT STATUS.  Three operand rows are
+        # DEBT unplanted, so "the gate exited non-zero" is satisfied by a
+        # plant that did nothing at all.
+        if not report["plant_moved_its_own_row"]:
+            print("FAIL: the planted ulp did not move its own row; this "
+                  "control proves nothing")
             return 3
         return 1
     return 0 if report["status"] == "AT-BAR" else 1
