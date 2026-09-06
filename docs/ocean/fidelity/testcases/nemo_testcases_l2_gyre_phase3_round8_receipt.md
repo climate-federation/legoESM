@@ -6064,6 +6064,35 @@ deck.
 **No retraction of a landed number.**  Every figure round 28 and 29 recorded
 for the stage boundaries is reproduced here at the same protocol.
 
+### A concurrent session wrote to this branch again
+
+Two commits landed on `fidelity/nemo-testcases-l2-gyre-codex2` between round
+30's preregistration and its fix: `1829f219987e`, which stops a
+card-constructibility test asserting that the legacy native GYRE card raises,
+and `74306d92e05a`, which extends the round-29 manifest.  Neither touches
+`packages/` or `src/` — verified by listing every file in
+`ce34ae0f16c6..74306d92e05a` — so no number in this section is affected, and
+the before/after trajectory pair straddles them with identical model code.
+They are round 29's, not round 30's, and they are flagged rather than reverted.
+
+### Tests
+
+Focused: the citation gate, the round-29 matrix gate, the round-30 boundary
+gate and the LOCK slow-forcing probe together, **37 passed**.  The nine
+round-30 tests cover the reader's interior layout against a known element and
+six fail-closed arms — wrong magic, a future version, the stage-2 frame, a
+32-bit payload, a short payload and a non-finite one — plus the fail-closed
+registry.  `tests/ocean/unit/test_nemo_recipe.py` is `20 passed, 4 failed`,
+the same four round 29 recorded and for the same reason.
+
+Whole directory: `549 passed, 5 skipped, 1 failed` before `-x` stopped it.  The
+one failure is
+`test_nemo_testcase_phase3_stage_sweep_gate::test_planted_stage_control_exits_nonzero_end_to_end`,
+which round 28 already reproduced failing at ITS starting tip and recorded as
+PRE-EXISTING; it is a LOCK arm, and this round's change is identically zero on
+LOCK (the coefficient table above).  A full no-`-x` run is the honest next
+check and is not reported here.
+
 ### Merge readiness
 
 `03c6e8d96ff7` remains an ancestor of this branch, so the integration is still
