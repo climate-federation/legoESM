@@ -9190,6 +9190,33 @@ tracer residual is `3.1956659540810506e-11` K before AND after, to every
 digit.  Reporting any of it as an improvement would be a confound.  OVERFLOW's
 AFTER is FINITE, which is the trajectory-level confirmation of the revert.
 
+### Gates and evidence
+
+The round-35 gate on the round-37 record, on a CLEAN tree at the round's final
+tip: every row AT-BAR with 0 bits unequal except `assembly.zwd`, which is the
+registered 3120-dry-cell deviation and is DEBT by design.  `SCORED 21120
+cells, i [3, 34] j [3, 24] halo 2, on a [36, 26, 31] domain`, and no array
+needed the interior-extent salvage.
+
+The receipt citation gate is `PASS` over **190 citations**, none unmapped, no
+failures.  Eight citations were added this round and each is pinned to its
+source text; two were caught by the gate before this was written -- one named
+a run whose `ocean.output` the gate cannot resolve, and one anchored on an
+`END DO` that occurs eight times in the file.
+
+The full ocean-fidelity suite at the final tip, on a detached worktree:
+**`980 passed, 7 skipped, 18 deselected in 2566.82s`**, zero failures.  An
+earlier run mid-round had three failures and all three were this round's own
+stale expectations -- the round-29 row count, the tank fixture's reduction,
+and the citation map -- each fixed at the source rather than by relaxing the
+assertion.
+
+Evidence under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round37/`,
+`round37_evidence.sha256` over its 15 files, itself
+`a0fd35bb84a9ce1adeacba3085962a7454efa3426f2d1b494d279aa12aa3573b`; and
+`round37_oracle_trazdf_matrix/round37_outputs.sha256` over the acquisition's
+own outputs, written by `run.sh`.
+
 ### ASKED / UNASKED
 
 | choice | status |
