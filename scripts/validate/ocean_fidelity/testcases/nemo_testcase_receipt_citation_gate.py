@@ -285,6 +285,12 @@ CITATION_MAP = {
     'round19_oracle_v2_external/ocean.output:553': 'Courant number targeted application   ln_zad_Aimp =  F',
     'round19_oracle_v2_external/ocean.output:629': 'implicit friction                         ln_drgimp   =  T',
     'round19_oracle_v2_external/ocean.output:630': 'implicit ice-ocean drag                   ln_drgice_imp  = F',
+    'round19_oracle_v2_external/ocean.output:214':
+        'single column domain (1x1pt)            ln_c1d      =  F',
+    'round19_oracle_v2_external/ocean.output:546':
+        'bdy_init : open boundaries not used (ln_bdy = F)',
+    'round19_oracle_v2_external/ocean.output:559':
+        'OSMOSIS-OBL closure (OSM)               ln_zdfosm =  F',
     'round19_oracle_v2_external/ocean.output:706': ('==>>>   iso-level laplacian operator', 1),
     'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stprk3_stg.f90:485': 'CALL dyn_ldf( kstp, Kbb, Kmm, uu, vv, Krhs )     ! lateral mixing',
     'GYRE_OMIP_L2_P3_SM/BLD/ppsrc/nemo/stprk3_stg.f90:498': 'IF( kstg == 3 )   CALL dyn_zdf( kstp, Kbb, Kmm, Krhs, uu, vv, Kaa  )  ! vertical diffusion and time integration',

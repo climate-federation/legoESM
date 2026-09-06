@@ -5829,8 +5829,11 @@ matrix record.
 
 **Exactly ONE momentum call sits inside the stage-3 `CASE` block on this
 deck.**  `stprk3_stg.F90:400` is `dyn_ldf`; the other three calls in that block
-are gated on `ln_zdfosm`, `ln_bdy` and `ln_dyndmp .AND. ln_c1d`, all resolved
-false on GYRE.  `dyn_zdf` is NOT in the block at all: it is called under
+are gated on `ln_zdfosm`, `ln_bdy` and `ln_dyndmp .AND. ln_c1d`, and the run's
+own printed output resolves all three false —
+`round19_oracle_v2_external/ocean.output:559`,
+`round19_oracle_v2_external/ocean.output:546` and
+`round19_oracle_v2_external/ocean.output:214` respectively.  `dyn_zdf` is NOT in the block at all: it is called under
 `IF( kstg == 3 )` at `stprk3_stg.F90:430`, after the block closes.  So the two
 frames bracket exactly one operator, which is what makes the walk a one-number
 question.
