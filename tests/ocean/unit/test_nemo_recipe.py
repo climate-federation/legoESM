@@ -501,11 +501,22 @@ def test_surface_stress_implicit_wiring():
     assert r.model_config.surface_stress_implicit is True
     assert r.model_config.barotropic.nemo_stage_mean_imposition is True
 
+    # (a) the guard binds where NEMO's own ordering does not already carry the
+    # wind into the substeps.  The card's split-explicit solver is EXEMPT by
+    # the guard's own explicit_substep clause, so asserting the raise on the
+    # card unchanged asserted nothing; it is exercised on the solver the guard
+    # actually covers, and the card's exemption is asserted separately so the
+    # pair still cannot pass vacuously.
     with pytest.raises(ValueError, match="nemo_stage_mean_imposition"):
         LatLonCGridOceanModel(
             r.grid, r.z_coord,
-            r.model_config._replace(barotropic=r.model_config.barotropic
-                                    ._replace(nemo_stage_mean_imposition=False)))
+            r.model_config._replace(barotropic=r.model_config.barotropic._replace(
+                nemo_stage_mean_imposition=False,
+                barotropic_solver="implicit_cn")))
+    LatLonCGridOceanModel(
+        r.grid, r.z_coord,
+        r.model_config._replace(barotropic=r.model_config.barotropic
+                                ._replace(nemo_stage_mean_imposition=False)))
 
     st = r.initial_state
     n_lat, n_lon = st.T.data.shape[0], st.T.data.shape[1]

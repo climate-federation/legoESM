@@ -1075,6 +1075,16 @@ def build_nemo_gyre_recipe(
         # (2026-09-05) selects rk3_ws for both.
         momentum_time_integrator="rk3_ws",
         tracer_time_integrator="rk3_ws",
+        # NEMO's own vertical momentum advection.  GYRE resolves the vector
+        # form, whose printed program is "keg + zad + vor"
+        # (``dynadv.F90:144``, the ``np_VEC_c2`` arm), so the vertical piece
+        # is ``dyn_zad`` -- not an upwind perturbation.  ``ln_zad_Aimp`` is
+        # ``.false.`` by reference default (``SHARED/namelist_ref:1177``) and
+        # resolves ``F`` on this deck, and the adaptive-implicit path REPLACES
+        # the explicit vertical advection entirely, so the two move together
+        # or the model refuses the pair.  User decision 15C (2026-09-05).
+        vertical_momentum_scheme="nemo_advective",
+        adaptive_implicit_vertadv=False,
         # NEMO has NO spatial barotropic eta-diffusion (nn_bt_flt=3 dissipation
         # is purely temporal); with the nemo_ab3am4 filter the smoother is off.
         barotropic=model_config.barotropic._replace(
