@@ -16,13 +16,13 @@ GT=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GA
 for ML in 30 10 1.5; do
   echo "##### ML depth $ML m, days 15->30 (recs 2->5)"
   $PY scripts/validate/ocean_fidelity/surface_dilution_regression.py \
-    --virtual-early $R/trp_unified180/snapshot_day0015.npz --virtual-late $R/trp_unified180/snapshot_day0030.npz \
-    --real-early $R/trp_fwnemo_180d/snapshot_day0015.npz --real-late $R/trp_fwnemo_180d/snapshot_day0030.npz \
+    --virtual-early $R/${VIRT:-trp_unified180}/snapshot_day0015.npz --virtual-late $R/${VIRT:-trp_unified180}/snapshot_day0030.npz \
+    --real-early $R/${REAL:-trp_fwnemo_180d}/snapshot_day0015.npz --real-late $R/${REAL:-trp_fwnemo_180d}/snapshot_day0030.npz \
     --nemo-gridt $GT --nemo-rec-early 2 --nemo-rec-late 5 --ml-depth $ML 2>&1 | grep -v Warning
 done
 echo "##### ML 30 m, days 30->90 (recs 5->17)"
 $PY scripts/validate/ocean_fidelity/surface_dilution_regression.py \
-  --virtual-early $R/trp_unified180/snapshot_day0030.npz --virtual-late $R/trp_unified180/snapshot_day0090.npz \
-  --real-early $R/trp_fwnemo_180d/snapshot_day0030.npz --real-late $R/trp_fwnemo_180d/snapshot_day0090.npz \
+  --virtual-early $R/${VIRT:-trp_unified180}/snapshot_day0030.npz --virtual-late $R/${VIRT:-trp_unified180}/snapshot_day0090.npz \
+  --real-early $R/${REAL:-trp_fwnemo_180d}/snapshot_day0030.npz --real-late $R/${REAL:-trp_fwnemo_180d}/snapshot_day0090.npz \
   --nemo-gridt $GT --nemo-rec-early 5 --nemo-rec-late 17 --ml-depth 30 2>&1 | grep -v Warning
 echo DONE

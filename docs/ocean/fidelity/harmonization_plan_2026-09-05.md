@@ -254,3 +254,16 @@ aux3d linkage and the minimum-level policy, not just counts.
   Both cards run --dm2dc and --sw-rgb-chl (RGB branch confirmed live in ocean_pe_latlon_cgrid).
   Probe extended (--surface-profile, card _surface_lens.sbatch, job 9666071: three grids, d15/d30,
   four boxes) to see whether the lens is shared and when it forms.
+- 18:00 trp_fwfix done (9657920; maps sent): SST 0.497, SSS 0.385 (base2 0.427; tropics 0.155 vs 0.377), Arctic
+  SSS -0.016, Antarctic +0.085, nino3 +1.10, no clamp -> every pre-registration met; the real-freshwater closure
+  with the dilution fix now beats virtual salt. Falsifier rerun (9666730): open-ocean virtual-real dilution
+  difference 0.0005 PSU (closures agree; regression degenerate); NEMO freshens river plumes 0.21 more than both.
+- 18:05 LENS confirmed on all three grids (9666071; table). d30 5-65 m avm in the cold tongue x0.003 of NEMO
+  (9666727) -> the lens has strangled the TKE closure. Mechanism: ORCA1 ln_zdfevd (100 m2/s tracers, rn2<=-1e-12,
+  MIN(now,before), jk=1..jpkm1) fires nightly; our production convection.scheme='none' on all grids. Claim sent to
+  codex (9666664) and GLM BEFORE code (docs/ocean/fidelity/lens_claim_2026-09-06.txt): both accept EVD as the primary
+  analogue and the cells-1-2 interface; both demand the exact trigger wiring (threshold, two-level, now-geometry), a
+  runtime firing-fraction/K-at-top-interface diagnostic, an imposed-inversion firing test (GLM: the 2026-08-01 no-op
+  is unexplained by the compressibility offset alone), and a sampling-safe primary endpoint. Offline firing test =
+  card _evd_lens_trigger (job 9666892). Decisions for the user queued (EVD arm config, driver flags, endpoint, mxl
+  choice, fwfix adoption).
