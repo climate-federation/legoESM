@@ -209,6 +209,9 @@ def bit_row(name: str, oracle, candidate, *, note: str | None = None) -> dict:
     o = np.asarray(oracle, dtype=np.float64).ravel()
     c = np.asarray(candidate, dtype=np.float64).ravel()
     require(o.shape == c.shape, f"{name}: shape {o.shape} vs {c.shape}")
+    # A comparison over zero cells would report absolute_max 0.0 and AT-BAR,
+    # which is a vacuous pass rather than a measurement.
+    require(o.size > 0, f"{name}: nothing to compare")
     require(bool(np.isfinite(o).all()), f"{name}: oracle side is not finite")
     require(bool(np.isfinite(c).all()), f"{name}: candidate side is not finite")
     diff = np.abs(o - c)
@@ -514,22 +517,27 @@ def run(record: Path, *, plant: str | None = None,
         block[isl, jsl, 0] = np.nextafter(block[isl, jsl, 0], np.inf)
         a["sol_S_post_clamp"] = block
 
+    # The row prefix comes from the RECORD's own kt, never a hardcoded "kt1":
+    # a label that names a step the record is not from is a lie the reader
+    # would carry into the receipt.
+    step = f"{CASE}.kt{h['kt']}.stage{h['kstg']}.trazdf"
+
     rows: list[dict] = []
     rebuilt = nemo_rebuild(rec)
     for name in ("zwt_mix", "zwi", "zwd", "zws", "zwt_lu"):
         kmax = jpkm1 if name in ("zwi", "zwd", "zws") else None
-        rows.append(bit_row(f"{CASE}.kt1.stage3.trazdf.calibration.{name}",
+        rows.append(bit_row(f"{step}.calibration.{name}",
                             _box(rec, name, kmax), rebuilt[name]))
     for tag in ("T", "S"):
         for stem, dumped in (("rhs", f"rhs_{tag}"), ("fwd", f"fwd_{tag}"),
                              ("sol", f"sol_{tag}_pre_clamp")):
             rows.append(bit_row(
-                f"{CASE}.kt1.stage3.trazdf.calibration.{stem}_{tag}",
+                f"{step}.calibration.{stem}_{tag}",
                 _box(rec, dumped, jpkm1), rebuilt[f"{stem}_{tag}"][:, :, :jpkm1]))
-    rows.append(bit_row(f"{CASE}.kt1.stage3.trazdf.calibration.e3t_Kaa_sub",
+    rows.append(bit_row(f"{step}.calibration.e3t_Kaa_sub",
                         _box(rec, "e3t_Kaa"), rebuilt["e3t_Kaa_sub"],
                         note="domzgr_substitute.h90:126 -- WITH tmask"))
-    rows.append(bit_row(f"{CASE}.kt1.stage3.trazdf.calibration.e3w_Kmm_sub",
+    rows.append(bit_row(f"{step}.calibration.e3w_Kmm_sub",
                         _box(rec, "e3w_Kmm"), rebuilt["e3w_Kmm_sub"],
                         note="domzgr_substitute.h90:131 -- NO tmask, r3t at "
                              "the T point, e3w_1d reference ladder"))
@@ -540,17 +548,17 @@ def run(record: Path, *, plant: str | None = None,
     assembled = lego_assembly(rec)
     for name in ("zwi", "zwd", "zws"):
         lego_rows.append(bit_row(
-            f"{CASE}.kt1.stage3.trazdf.assembly.{name}",
+            f"{step}.assembly.{name}",
             _box(rec, name), assembled[name]))
     swept = lego_sweep(rec)
     for tag in ("T", "S"):
         lego_rows.append(bit_row(
-            f"{CASE}.kt1.stage3.trazdf.sweep.{tag}",
+            f"{step}.sweep.{tag}",
             _box(rec, f"sol_{tag}_pre_clamp", jpkm1), swept[tag]))
     content = lego_rhs_content(rec)
     for tag in ("T", "S"):
         lego_rows.append(bit_row(
-            f"{CASE}.kt1.stage3.trazdf.rhs_content.{tag}",
+            f"{step}.rhs_content.{tag}",
             _box(rec, f"rhs_{tag}", jpkm1), content[tag],
             note="the content form given NEMO's operands; the ONLY residual "
                  "it can carry is the association of the triple product"))
@@ -559,14 +567,14 @@ def run(record: Path, *, plant: str | None = None,
     clamp_rows = []
     for tag in ("T", "S"):
         clamp_rows.append(bit_row(
-            f"{CASE}.kt1.stage3.trazdf.clamp.{tag}",
+            f"{step}.clamp.{tag}",
             _box(rec, f"sol_{tag}_pre_clamp"),
             _box(rec, f"sol_{tag}_post_clamp"),
             note="trazdf.F90:89-91 runs over ALL jk including jpk, which "
                  "tra_zdf_imp never assigns, so the whole column is scored"))
 
     condition_rows = [
-        {"name": f"{CASE}.kt1.stage3.trazdf.a33_fold_inert",
+        {"name": f"{step}.a33_fold_inert",
          "claim": "ah_wslp2 is exactly zero on every cell of the scored box",
          "max_abs": a33_max, "status": "AT-BAR" if a33_max == 0.0 else "DEBT"},
     ]
@@ -606,7 +614,7 @@ def run(record: Path, *, plant: str | None = None,
                 "T_solve_in*dz_cell instead of NEMO's two-term content form.  "
                 "Closing it needs the model's own intermediates, i.e. the "
                 "pre_implicit_tracer_content_override hook, on a run."),
-            "rows": [f"{CASE}.kt1.stage3.trazdf.model_rhs.{f}"
+            "rows": [f"{step}.model_rhs.{f}"
                      for f in ("T", "S")],
         },
     }

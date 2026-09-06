@@ -478,3 +478,36 @@ def test_the_branch_reads_the_real_round29_record():
         R29_RECORD, R29_RECORD, None)["consumed_equal"] is True
     assert A._compare_self_describing(
         R29_RECORD, R29_RECORD, [False])["consumed_equal"] is False
+
+
+def test_the_row_label_comes_from_the_record_not_a_constant(tmp_path):
+    """A label naming a step the record is not from is a lie in the receipt."""
+    good = synthetic_record(tmp_path / "kt1.bin")
+    raw = bytearray(good.read_bytes())
+    raw[16 + 4:16 + 8] = struct.pack("=i", 7)      # kt = 7
+    (tmp_path / "kt7.bin").write_bytes(bytes(raw))
+    report = _run(tmp_path / "kt7.bin")
+    assert report["header"]["kt"] == 7
+    assert all(".kt7.stage3." in row["name"]
+               for row in report["calibration_rows"]), (
+        [r["name"] for r in report["calibration_rows"][:2]])
+    assert not any(".kt1." in row["name"]
+                   for row in report["given_inputs_rows"])
+
+
+def test_a_comparison_over_zero_cells_is_refused(clean_record):
+    """Non-vacuity of the bar itself: an empty row must not read AT-BAR."""
+    with pytest.raises(R.RecordError) as caught:
+        R.bit_row("empty", np.array([]), np.array([]))
+    assert "nothing to compare" in str(caught.value)
+
+
+def test_signed_zero_status_cannot_swallow_a_real_difference():
+    """AT-BAR-SIGNED-ZERO is an equivalence class, not a tolerance."""
+    both_zero = R.bit_row("z", np.array([0.0, 1.0]), np.array([-0.0, 1.0]))
+    assert both_zero["status"] == "AT-BAR-SIGNED-ZERO"
+    assert both_zero["signed_zero_only"] == 1
+    tiny = R.bit_row("t", np.array([0.0, 1.0]), np.array([5e-324, 1.0]))
+    assert tiny["status"] != "AT-BAR-SIGNED-ZERO"
+    big = R.bit_row("b", np.array([0.0, 1.0]), np.array([1.0, 1.0]))
+    assert big["status"] == "DEBT"
