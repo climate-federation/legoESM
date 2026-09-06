@@ -505,6 +505,134 @@ def _compare_bt(a: Path, b: Path, plant=None) -> dict:
     }
 
 
+# --- self-describing records ----------------------------------------------
+#
+# Two writers in this campaign emit a stream that carries its OWN field list:
+# a 16-byte magic, N header integers, then one
+# ``(name[16], rank, n1, n2, n3, payload)`` group per array until EOF.  They
+# are registered here by header-integer count ONLY -- everything else, the
+# names, the ranks and the extents, comes out of the record.
+#
+# WHY THEY NEED A BRANCH.  ``read_header`` refuses an unregistered magic, and
+# a fixed SCHEMAS entry could not describe them anyway: the round-33
+# reference-geometry addition APPENDS six arrays to ``NEMO_L2_ZDFMX_1``, so a
+# candidate written with it and a baseline written without it differ in LENGTH
+# for a legitimate reason.  The comparison is therefore over the INTERSECTION
+# of the two field sets, exactly as ``_compare_bt`` does for the ordered
+# barotropic stream, and the fields only one side carries are LISTED.
+SELF_DESCRIBING = {
+    "NEMO_L2_ZDFMX_1": 16,     # MY_SRC/dynzdf.F90, round-29 instrument
+    "NEMO_L2_TRAZD_1": 16,     # MY_SRC/trazdf.F90, round-35 instrument
+}
+
+
+def _read_self_describing(path: Path):
+    """Magic, dims and every named array, all from the record itself."""
+    raw = path.read_bytes()
+    if len(raw) < 16:
+        raise AdmissionError(f"{path}: shorter than a magic")
+    magic = raw[:16].decode("ascii", "replace").rstrip()
+    n_ints = SELF_DESCRIBING[magic]
+    header_bytes = 16 + 4 * n_ints
+    if len(raw) < header_bytes:
+        raise AdmissionError(f"{path}: truncated {magic} header")
+    fields: dict[str, tuple[int, int, np.ndarray]] = {}
+    order: list[str] = []
+    nx = ny = nz = 0
+    off = header_bytes
+    while off < len(raw):
+        if off + 32 > len(raw):
+            raise AdmissionError(f"{path}: truncated array header at {off}")
+        name = raw[off:off + 16].decode("ascii", "replace").rstrip()
+        rank, n1, n2, n3 = struct.unpack("=4i", raw[off + 16:off + 32])
+        off += 32
+        if rank not in (0, 2, 3) or min(n1, n2, n3) < 1:
+            raise AdmissionError(f"{path}: array {name!r} rank {rank} "
+                                 f"extents {(n1, n2, n3)}")
+        count = n1 * n2 * n3
+        end = off + 8 * count
+        if end > len(raw):
+            raise AdmissionError(f"{path}: array {name!r} runs past EOF")
+        if name in fields:
+            raise AdmissionError(f"{path}: array {name!r} written twice")
+        if rank == 3 and nx == 0:
+            nx, ny, nz = n1, n2, n3     # the FIRST rank-3 array fixes the dims
+        fields[name] = (rank, off, np.frombuffer(raw, np.float64, count, off))
+        order.append(name)
+        off = end
+    if nx == 0:
+        raise AdmissionError(f"{path}: {magic} carries no rank-3 array, so "
+                             "its horizontal dimensions are unknown")
+    if nx <= 2 * HALO or ny <= 2 * HALO:
+        raise AdmissionError(
+            f"{path}: {magic} declares {nx}x{ny}, which has no owned cell "
+            f"outside a {HALO}-cell halo")
+    return magic, (nx, ny, nz), fields, order
+
+
+
+def _first_owned_index(rank: int, size: int, nx: int, ny: int) -> int | None:
+    """The flat index of the first cell ``_owned_selector`` calls owned."""
+    ids = np.arange(size)
+    owned, _ = _owned_selector({0: "s", 2: "2", 3: "3"}[rank], ids, nx, ny)
+    hits = np.flatnonzero(owned)
+    return int(hits[0]) if hits.size else None
+
+
+def _compare_self_describing(a: Path, b: Path, plant, *,
+                             max_listed: int = 16) -> dict:
+    """Compare every field BOTH sides carry, admitting halo cells only."""
+    a_magic, (nx, ny, _), a_fields, a_order = _read_self_describing(a)
+    b_magic, (bx, by, _), b_fields, _ = _read_self_describing(b)
+    if (a_magic, nx, ny) != (b_magic, bx, by):
+        return {"consumed_equal": False, "magic": a_magic,
+                "error": f"schema/dims changed {(a_magic, nx, ny)} -> "
+                         f"{(b_magic, bx, by)}"}
+    common = [n for n in a_order if n in b_fields]
+    changed, admitted, consumed_equal = [], [], True
+    for name in common:
+        (rank, _, aa), (b_rank, _, bb) = a_fields[name], b_fields[name]
+        if rank != b_rank or aa.shape != bb.shape:
+            consumed_equal = False
+            changed.append([name, "rank or extent changed"])
+            continue
+        if plant is not None and plant and not plant[0]:
+            # THE PLANT MUST LAND IN AN OWNED CELL.  Flipping element 0 puts
+            # it at (0,0,0), which is inside the halo on every card here, so
+            # the gate would ADMIT it and the control would prove nothing --
+            # the same defect round 34 removed from the record-level plant.
+            target = _first_owned_index(rank, aa.size, nx, ny)
+            if target is not None:
+                bb = bb.copy()
+                bb[target:target + 1].view(np.uint64)[:] ^= np.uint64(1)
+                plant[0] = True
+        element_diff = aa.view(np.uint64) != bb.view(np.uint64)
+        if not np.any(element_diff):
+            continue
+        ids = np.flatnonzero(element_diff)
+        projection = {0: "s", 2: "2", 3: "3"}[rank]
+        owned, index = _owned_selector(projection, ids, nx, ny)
+        for position, flat in zip(index[owned][:max_listed],
+                                  ids[owned][:max_listed]):
+            changed.append([name, position.tolist() if hasattr(position, "tolist")
+                            else position, float(aa[flat]), float(bb[flat])])
+        for flat in ids[~owned][:max_listed]:
+            admitted.append([name, int(flat), float(aa[flat]), float(bb[flat]),
+                             "halo"])
+        if np.any(owned):
+            consumed_equal = False
+    return {
+        "consumed_equal": bool(consumed_equal), "magic": a_magic,
+        "compared_fields": common,
+        "fields_only_on_one_side": sorted(set(a_fields) ^ set(b_fields)),
+        "owned_field_differences": changed,
+        "admitted_differences": admitted,
+        "appended_bytes": max(0, b.stat().st_size - a.stat().st_size),
+        "parser": "nemo_testcase_l2_gyre_round21_admission.py"
+                  "::_compare_self_describing",
+    }
+
+
 def run(baseline: Path, candidate: Path, *, twin=None,
         identical=DEFAULT_IDENTICAL, allowed_new=None, writer=None,
         plant_consumed: bool = False) -> dict:
@@ -532,6 +660,8 @@ def run(baseline: Path, candidate: Path, *, twin=None,
         if not b.is_file():
             continue  # already reported as missing
         raw_equal = a.read_bytes() == b.read_bytes()
+        # A record whose schema GREW legitimately is never raw-equal, so a
+        # pending plant must not be able to "land" by skipping it.
         # THE PLANT MUST ALWAYS LAND.  It used to be reachable only through
         # compare_record, which only runs on records that already differ raw
         # -- so a PERFECT twin, the strongest possible outcome, produced a
@@ -543,15 +673,22 @@ def run(baseline: Path, candidate: Path, *, twin=None,
             continue
         if name.startswith("oracle_bt_ordered_operands"):
             result = _compare_bt(a, b, plant)
+        elif a.read_bytes()[:16].decode("ascii", "replace").rstrip() \
+                in SELF_DESCRIBING:
+            result = _compare_self_describing(a, b, plant)
         else:
             result = compare_record(a, b, plant, waived=waived)
         if raw_equal:
             result["raw_identical_before_plant"] = True
         if twin is not None and twin.is_dir() and (twin / name).is_file():
             t = twin / name
-            other = (_compare_bt(t, b, [True])
-                     if name.startswith("oracle_bt_ordered_operands")
-                     else compare_record(t, b, [True], waived=waived))
+            if name.startswith("oracle_bt_ordered_operands"):
+                other = _compare_bt(t, b, [True])
+            elif t.read_bytes()[:16].decode("ascii", "replace").rstrip() \
+                    in SELF_DESCRIBING:
+                other = _compare_self_describing(t, b, [True])
+            else:
+                other = compare_record(t, b, [True], waived=waived)
             result["twin_raw_equal"] = t.read_bytes() == b.read_bytes()
             result["twin_consumed_equal"] = other.get("consumed_equal")
         rows.append({"record": name, **result})

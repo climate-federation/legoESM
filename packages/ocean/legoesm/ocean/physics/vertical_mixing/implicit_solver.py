@@ -339,6 +339,14 @@ def _nemo_ordered_solve(
          terminal[..., None]], axis=-1)
 
 
+# The three recurrences under a name other modules may import.  It IS
+# ``_nemo_ordered_solve`` -- the same function object the momentum and tracer
+# solves call -- so an oracle gate driving it is driving the trajectory's own
+# sweep and not a copy of it.  ``tests/ocean/unit/test_zdf_implicit_literal.py``
+# pins the identity.
+nemo_ordered_tridiagonal_solve = _nemo_ordered_solve
+
+
 def implicit_vertical_diffusion_nemo_momentum(
     field: jax.Array,
     avm_face: jax.Array,
@@ -439,8 +447,54 @@ def implicit_vertical_diffusion_nemo_tracer_pair(
         return (content_rhs_1 / divisor * wet_f,
                 content_rhs_2 / divisor * wet_f)
 
-    dtype = content_rhs_1.dtype
-    zero = jnp.zeros_like(content_rhs_1[..., :1])
+    wet_f = jnp.asarray(wet, dtype=content_rhs_1.dtype)
+    lower, diagonal, upper = nemo_tracer_tridiagonal(
+        K, e3t_after, e3w_now, dt, wet, implicit_w=implicit_w,
+        dtype=content_rhs_1.dtype)
+    out_1 = nemo_ordered_tridiagonal_solve(
+        lower, diagonal, upper, content_rhs_1) * wet_f
+    out_2 = nemo_ordered_tridiagonal_solve(
+        lower, diagonal, upper, content_rhs_2) * wet_f
+    return out_1, out_2
+
+
+def nemo_tracer_tridiagonal(
+    K: jax.Array,
+    e3t_after: jax.Array,
+    e3w_now: jax.Array,
+    dt: float,
+    wet: jax.Array,
+    *,
+    implicit_w: jax.Array | None = None,
+    dtype=None,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+    """NEMO ``trazdf``'s three tracer diagonals, exactly as the solve uses them.
+
+    Extracted from :func:`implicit_vertical_diffusion_nemo_tracer_pair` --
+    which now calls it -- with no statement reordered, so that an oracle gate
+    can score legoESM's ASSEMBLY against NEMO's dumped ``zwi``/``zwd``/``zws``
+    given NEMO's own operands, separately from the ordered sweep.  Before the
+    extraction the assembly had no name and could only be observed through a
+    solved column, which conflates the two.
+
+    Returns ``(lower, diagonal, upper)``, each shaped like ``e3t_after``.
+    ``lower[..., 0]`` and ``upper[..., -1]`` are exact zeros, matching NEMO's
+    ``zwt(:,1) = 0`` (``trazdf.F90:204``) and its unwritten bottom face.
+
+    TWO DEVIATIONS FROM NEMO ARE DELIBERATE AND VISIBLE HERE, rather than
+    buried: each face coefficient is multiplied by ``interface_wet`` and each
+    dry diagonal is replaced by ``1.0``, where NEMO relies on ``avt`` being
+    masked and leaves its dry diagonal at ``e3t`` (``trazdf.F90:219-221``).
+    On a card with no dry cell inside the scored box the two agree; on one
+    with interior topography they need not, and a gate that scores this
+    function on such a card is the way to find out.
+    """
+    # ``dtype`` is threaded rather than taken from ``e3t_after`` so the
+    # extraction is byte-exact for the pair solve, whose working dtype is the
+    # RHS's; the two agree in every production call and the parameter exists
+    # only so that "agree" is not an assumption.
+    dtype = e3t_after.dtype if dtype is None else dtype
+    zero = jnp.zeros(e3t_after.shape[:-1] + (1,), dtype=dtype)
     wet_f = jnp.asarray(wet, dtype=dtype)
     interface_wet = wet_f[..., 1:] * wet_f[..., :-1]
     product = jax.lax.optimization_barrier(
@@ -454,8 +508,8 @@ def implicit_vertical_diffusion_nemo_tracer_pair(
     coefficient_sum = jax.lax.optimization_barrier(lower + upper)
     diagonal = jax.lax.optimization_barrier(e3t_after - coefficient_sum)
     if implicit_w is not None:
-        if implicit_w.shape != content_rhs_1.shape[:-1] + (
-                content_rhs_1.shape[-1] + 1,):
+        if implicit_w.shape != e3t_after.shape[:-1] + (
+                e3t_after.shape[-1] + 1,):
             raise ValueError("implicit_w must contain nlev+1 interfaces")
         # NEMO trazdf.F90:207-216: the adaptive upwind transport is fused
         # into the same thickness-form matrix as vertical diffusion.
@@ -468,11 +522,7 @@ def implicit_vertical_diffusion_nemo_tracer_pair(
             jnp.maximum(w_top, 0.0) - jnp.minimum(w_bottom, 0.0))
     diagonal = jnp.where(wet_f > 0.0, diagonal,
                          jnp.asarray(1.0, dtype=dtype))
-    out_1 = _nemo_ordered_solve(
-        lower, diagonal, upper, content_rhs_1) * wet_f
-    out_2 = _nemo_ordered_solve(
-        lower, diagonal, upper, content_rhs_2) * wet_f
-    return out_1, out_2
+    return lower, diagonal, upper
 
 
 def implicit_vertical_diffusion_ocean_momentum_dispatch(

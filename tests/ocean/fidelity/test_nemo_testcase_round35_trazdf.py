@@ -1,0 +1,480 @@
+"""The round-35 ``tra_zdf`` reader and gate, proven BEFORE the record exists.
+
+The NEMO acquisition is user-executed and has not been run.  So the reader is
+exercised against a SYNTHETIC record written by a Python twin of the Fortran
+writer -- same magic, same sixteen header integers, same
+``(name[16], rank, n1, n2, n3, payload)`` groups, same column-major payload.
+
+THE PAYLOAD IS NOT BUILT BY THE READER'S OWN TRANSCRIPTION.  ``_nemo_columns``
+below is a plain per-column triple loop written straight off ``trazdf.F90``;
+the reader's ``nemo_rebuild`` is a vectorised one.  If the two agreed because
+one called the other, the calibration arm would be tautological on this
+record, which is exactly the failure mode a synthetic fixture invites.
+"""
+from __future__ import annotations
+
+import json
+import struct
+import subprocess
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+REPO = Path(__file__).resolve().parents[3]
+GATE = (REPO / "scripts/validate/ocean_fidelity/testcases"
+        / "nemo_testcase_l2_gyre_round35_trazdf_matrix.py")
+sys.path.insert(0, str(GATE.parent))
+
+from legoesm.ocean.fidelity.provenance import allow_dirty_stamps  # noqa: E402
+import nemo_testcase_l2_gyre_round35_trazdf_matrix as R  # noqa: E402
+
+JPI, JPJ, JPK = 9, 8, 6
+NTSI, NTEI, NTSJ, NTEJ = 3, 7, 3, 6          # a 2-cell halo on every side
+JPKM1 = JPK - 1
+RDT = 1234.5
+
+
+def _f(name: str) -> bytes:
+    assert len(name) <= 16
+    return name.ljust(16).encode("ascii")
+
+
+def _nemo_columns(avt, a33, e3w, e3t_kaa, e3t_kbb, e3t_kmm, tmask,
+                  t_bb, t_rhs, p2dt):
+    """``trazdf.F90`` for ONE column, written as the Fortran loops are.
+
+    Independent of the reader on purpose: plain scalar recurrences, 1-based
+    NEMO indices translated by hand, so that agreement between this and the
+    reader's array form is evidence rather than a tautology.
+    """
+    nk = len(avt)
+    jpkm1 = nk - 1
+    zwt = [0.0] * nk
+    for jk in range(2, nk + 1):                       # :172-174
+        zwt[jk - 1] = avt[jk - 1] + a33[jk - 1]
+    zwt[0] = 0.0                                      # :204
+    zwi = [0.0] * jpkm1
+    zws = [0.0] * jpkm1
+    zwd = [0.0] * jpkm1
+    for jk in range(1, jpkm1 + 1):                    # :218-222
+        zwi[jk - 1] = -p2dt * zwt[jk - 1] / e3w[jk - 1]
+        zws[jk - 1] = -p2dt * zwt[jk] / e3w[jk]
+        zwd[jk - 1] = e3t_kaa[jk - 1] - (zwi[jk - 1] + zws[jk - 1])
+    lu = list(zwt)
+    lu[0] = zwd[0]                                    # :257
+    for jk in range(2, jpkm1 + 1):                    # :260
+        lu[jk - 1] = zwd[jk - 1] - zwi[jk - 1] * zws[jk - 2] / lu[jk - 2]
+    rhs = [0.0] * nk
+    rhs[0] = e3t_kbb[0] * t_bb[0] + p2dt * e3t_kmm[0] * t_rhs[0]   # :272-273
+    for jk in range(2, jpkm1 + 1):                    # :276-277
+        rhs[jk - 1] = (e3t_kbb[jk - 1] * t_bb[jk - 1]
+                       + p2dt * e3t_kmm[jk - 1] * t_rhs[jk - 1])
+    fwd = list(rhs)
+    for jk in range(2, jpkm1 + 1):                    # :278
+        fwd[jk - 1] = rhs[jk - 1] - zwi[jk - 1] / lu[jk - 2] * fwd[jk - 2]
+    sol = list(fwd)
+    sol[jpkm1 - 1] = fwd[jpkm1 - 1] / lu[jpkm1 - 1] * tmask[jpkm1 - 1]  # :282
+    for jk in range(jpkm1 - 1, 0, -1):                # :285-286
+        sol[jk - 1] = ((fwd[jk - 1] - zws[jk - 1] * sol[jk])
+                       / lu[jk - 1] * tmask[jk - 1])
+    return zwt, zwi, zwd, zws, lu, rhs, sol
+
+
+def synthetic_record(path: Path, *, dry_bottom: bool = False,
+                     a33_live: bool = False, clamp_fires: bool = False,
+                     arm: dict | None = None,
+                     magic: str = "NEMO_L2_TRAZD_1",
+                     version: int = 1, bits: int = 64,
+                     duplicate: bool = False, truncate: int = 0,
+                     trailing: int = 0, nonfinite: bool = False) -> Path:
+    """A Python twin of the Fortran writer, byte layout included."""
+    rng = np.random.default_rng(20260906)
+    shape = (JPI, JPJ, JPK)
+    tmask = np.ones(shape)
+    if dry_bottom:
+        tmask[:, :, JPK - 2:] = 0.0
+    avt = 1e-5 + 1e-4 * rng.random(shape)
+    avt[:, :, 0] = 0.0
+    avt[:, :, JPK - 1] = 0.0                 # NEMO masks avt at jpk
+    a33 = (1e-6 * rng.random(shape)) if a33_live else np.zeros(shape)
+    if a33_live:
+        a33[:, :, 0] = 0.0
+    e3t_0 = np.broadcast_to(
+        np.linspace(10.0, 60.0, JPK), shape).copy()
+    e3w_0 = np.broadcast_to(
+        np.linspace(5.0, 55.0, JPK), shape).copy()
+    r3 = {k: 1e-3 * rng.random((JPI, JPJ)) for k in ("Kbb", "Kmm", "Kaa")}
+    e3t = {k: e3t_0 * (1.0 + r3[k][:, :, None] * tmask) for k in r3}
+    e3w_kmm = e3w_0 * (1.0 + r3["Kmm"][:, :, None])
+    fields = {"T": (10.0 + rng.random(shape), 1e-4 * rng.random(shape)),
+              "S": (35.0 + rng.random(shape), 1e-5 * rng.random(shape))}
+    if clamp_fires:
+        fields["S"] = (-40.0 + rng.random(shape), 1e-5 * rng.random(shape))
+
+    out = {n: np.zeros(shape) for n in
+           ("zwt_mix", "zwt_lu", "rhs_T", "rhs_S", "fwd_T", "fwd_S",
+            "sol_T_pre_clamp", "sol_S_pre_clamp")}
+    for n in ("zwi", "zwd", "zws"):
+        out[n] = np.zeros((JPI, JPJ, JPKM1))
+    for i in range(NTSI - 1, NTEI):
+        for j in range(NTSJ - 1, NTEJ):
+            for tag in ("T", "S"):
+                zwt, zwi, zwd, zws, lu, rhs, sol = _nemo_columns(
+                    avt[i, j], a33[i, j], e3w_kmm[i, j], e3t["Kaa"][i, j],
+                    e3t["Kbb"][i, j], e3t["Kmm"][i, j], tmask[i, j],
+                    fields[tag][0][i, j], fields[tag][1][i, j], RDT)
+                fwd = list(rhs)
+                for jk in range(2, JPKM1 + 1):
+                    fwd[jk - 1] = (rhs[jk - 1]
+                                   - zwi[jk - 1] / lu[jk - 2] * fwd[jk - 2])
+                out["zwt_mix"][i, j] = zwt
+                out["zwt_lu"][i, j] = lu
+                out["zwi"][i, j] = zwi
+                out["zwd"][i, j] = zwd
+                out["zws"][i, j] = zws
+                out[f"rhs_{tag}"][i, j] = rhs
+                out[f"fwd_{tag}"][i, j] = fwd
+                out[f"sol_{tag}_pre_clamp"][i, j] = sol
+    post = {t: out[f"sol_{t}_pre_clamp"].copy() for t in ("T", "S")}
+    post["S"][post["S"] < 0.0] = 0.1                     # trazdf.F90:89-91
+
+    flags = {"ln_zdfddm": 0.0, "ln_zad_Aimp": 0.0, "ln_zdfmfc": 0.0,
+             "ln_traldf_msc": 0.0, "l_ldfslp": 1.0, "ln_SEOS": 0.0,
+             "a33_allocated": 1.0, "rDt": RDT, "rn_b0": 0.0,
+             "jp_tem": 1.0, "jp_sal": 2.0}
+    flags.update(arm or {})
+    payload = {
+        **flags,
+        "T_Kbb_in": fields["T"][0], "S_Kbb_in": fields["S"][0],
+        "T_Kmm_in": fields["T"][0], "S_Kmm_in": fields["S"][0],
+        "T_Krhs_in": fields["T"][1], "S_Krhs_in": fields["S"][1],
+        "zwt_mix": out["zwt_mix"], "zwi": out["zwi"], "zwd": out["zwd"],
+        "zws": out["zws"], "zwt_lu": out["zwt_lu"],
+        "rhs_T": out["rhs_T"], "rhs_S": out["rhs_S"],
+        "fwd_T": out["fwd_T"], "fwd_S": out["fwd_S"],
+        "sol_T_pre_clamp": out["sol_T_pre_clamp"],
+        "sol_S_pre_clamp": out["sol_S_pre_clamp"],
+        "sol_T_post_clamp": post["T"], "sol_S_post_clamp": post["S"],
+        "avt": avt, "avs": avt, "ah_wslp2": a33, "akz": np.zeros(shape),
+        "tmask": tmask,
+        "e3t_Kbb": e3t["Kbb"], "e3t_Kmm": e3t["Kmm"], "e3t_Kaa": e3t["Kaa"],
+        "e3w_Kmm": e3w_kmm, "e3t_0": e3t_0, "e3w_0": e3w_0,
+        "r3t_Kbb": r3["Kbb"], "r3t_Kmm": r3["Kmm"], "r3t_Kaa": r3["Kaa"],
+    }
+    if nonfinite:
+        payload["avt"] = payload["avt"].copy()
+        payload["avt"][NTSI, NTSJ, 2] = np.nan
+
+    blob = bytearray()
+    blob += _f(magic)
+    blob += struct.pack("=16i", version, 1, 3, 1, 2, 3, 4, JPI, JPJ, JPK,
+                        JPKM1, NTSI, NTEI, NTSJ, NTEJ, bits)
+    names = list(R.EXPECTED_ARRAYS)
+    if duplicate:
+        names.append("avt")
+    for name in names:
+        value = payload[name]
+        blob += _f(name)
+        if np.isscalar(value):
+            blob += struct.pack("=4i", 0, 1, 1, 1)
+            blob += struct.pack("<d", float(value))
+        elif np.asarray(value).ndim == 2:
+            blob += struct.pack("=4i", 2, JPI, JPJ, 1)
+            blob += np.asarray(value, "<f8").tobytes(order="F")
+        else:
+            arr = np.asarray(value, "<f8")
+            blob += struct.pack("=4i", 3, JPI, JPJ, arr.shape[2])
+            blob += arr.tobytes(order="F")
+    if truncate:
+        blob = blob[:-truncate]
+    if trailing:
+        blob += b"\x00" * trailing
+    path.write_bytes(bytes(blob))
+    return path
+
+
+@pytest.fixture(scope="module")
+def clean_record(tmp_path_factory) -> Path:
+    return synthetic_record(
+        tmp_path_factory.mktemp("r35") / "oracle_trazdf_matrix_kt00000001.bin")
+
+
+def _run(record: Path, **kw) -> dict:
+    with allow_dirty_stamps(True):
+        return R.run(record, with_card=False, **kw)
+
+
+def test_the_reader_parses_the_twin_and_every_arm_is_at_bar(clean_record):
+    report = _run(clean_record)
+    assert report["calibrated"] is True, [
+        r for r in report["calibration_rows"] if r["status"] != "AT-BAR"]
+    assert report["status"] == "AT-BAR", [
+        r for r in report["given_inputs_rows"] if r["status"] != "AT-BAR"]
+    assert set(report["arrays_read"]) == set(R.EXPECTED_ARRAYS)
+
+
+def test_the_calibration_is_not_tautological(clean_record):
+    """The payload came from the scalar loops, the rebuild from array form."""
+    rec = R.read_trazdf_matrix(clean_record)
+    rebuilt = R.nemo_rebuild(rec)
+    dumped = R._box(rec, "zwd")
+    assert np.array_equal(dumped.view(np.uint64),
+                          rebuilt["zwd"].view(np.uint64))
+    # and the two really are different code: perturbing an operand moves the
+    # rebuild and not the dump
+    rec["arrays"]["avt"] = rec["arrays"]["avt"] * 1.5
+    assert not np.array_equal(R.nemo_rebuild(rec)["zwd"], dumped)
+
+
+@pytest.mark.parametrize("plant", R.PLANT_ARMS)
+def test_every_plant_turns_the_gate_red(clean_record, plant):
+    report = _run(clean_record, plant=plant)
+    assert report["status"] == "DEBT", plant
+
+
+@pytest.mark.parametrize("plant", R.PLANT_ARMS)
+def test_every_plant_exits_non_zero_end_to_end(clean_record, plant, tmp_path):
+    env = {"PYTHONPATH": ":".join(
+        str(REPO / f"packages/{p}") for p in
+        ("core", "ocean", "atmosphere", "coupler", "ice", "land", "ml",
+         "tools")) + f":{REPO / 'src'}",
+        "JAX_PLATFORMS": "cpu", "JAX_ENABLE_X64": "1",
+        "LEGOESM_GATE_ALLOW_DIRTY": "1", "PATH": "/usr/bin:/bin"}
+    base = [sys.executable, str(GATE), "--record", str(clean_record),
+            "--no-card"]
+    clean = subprocess.run(base, env=env, capture_output=True, text=True)
+    assert clean.returncode == 0, clean.stdout[-3000:] + clean.stderr[-3000:]
+    planted = subprocess.run(base + ["--plant", plant], env=env,
+                             capture_output=True, text=True)
+    assert planted.returncode != 0, planted.stdout[-3000:]
+    assert "STATUS DEBT" in planted.stdout
+
+
+def test_a_dry_bottom_makes_the_named_deviations_LIVE(tmp_path):
+    """Non-vacuity for the deviation report itself.
+
+    On GYRE the scored box has no dry cell, so all three deviations are inert
+    and the gate says so.  A record that DOES have one must flip them, or the
+    report would be a decoration that always reads the same.
+    """
+    record = synthetic_record(tmp_path / "dry.bin", dry_bottom=True)
+    report = _run(record)
+    live = [d for d in report["named_deviations"] if not d["inert_here"]]
+    assert len(live) == 2, report["named_deviations"]
+    assert all("dry" in d["inert_when"] for d in live)
+    # and the masking difference is REAL, not merely declared: legoESM's
+    # assembly and NEMO's disagree on this record
+    assert any(r["status"] != "AT-BAR"
+               for r in report["given_inputs_rows"]
+               if ".assembly." in r["name"])
+
+
+def test_a_live_a33_fold_turns_the_condition_row_red(tmp_path):
+    record = synthetic_record(tmp_path / "a33.bin", a33_live=True)
+    report = _run(record)
+    row = [r for r in report["condition_rows"] if "a33_fold_inert" in r["name"]]
+    assert row and row[0]["status"] == "DEBT"
+    assert row[0]["max_abs"] > 0.0
+    # the fold is still INSIDE the matrix, so the calibration must survive it
+    assert report["calibrated"] is True
+
+
+def test_a_firing_clamp_turns_the_clamp_rows_red(tmp_path):
+    record = synthetic_record(tmp_path / "clamp.bin", clamp_fires=True)
+    report = _run(record)
+    assert any(r["status"] == "DEBT" for r in report["clamp_rows"])
+
+
+@pytest.mark.parametrize("kwargs,fragment", [
+    ({"magic": "NEMO_L2_WRONG_9"}, "bad magic"),
+    ({"version": 7}, "bad version"),
+    ({"bits": 32}, "not 64-bit"),
+    ({"duplicate": True}, "written twice"),
+    ({"truncate": 8}, "runs past EOF"),
+    ({"trailing": 16}, "truncated array header"),
+    ({"nonfinite": True}, "non-finite"),
+    ({"arm": {"ln_zad_Aimp": 1.0}}, "arm this reader does not transcribe"),
+    ({"arm": {"ln_zdfddm": 1.0}}, "arm this reader does not transcribe"),
+    ({"arm": {"ln_zdfmfc": 1.0}}, "arm this reader does not transcribe"),
+    ({"arm": {"ln_traldf_msc": 1.0}}, "arm this reader does not transcribe"),
+    ({"arm": {"l_ldfslp": 0.0}}, "arm this reader does not transcribe"),
+    ({"arm": {"rDt": 0.0}}, "rDt is"),
+    ({"arm": {"jp_sal": 1.0}}, "same index"),
+])
+def test_a_wrong_record_gets_a_verdict_not_a_traceback(tmp_path, kwargs,
+                                                       fragment):
+    record = synthetic_record(tmp_path / "bad.bin", **kwargs)
+    with pytest.raises(R.RecordError) as caught:
+        R.read_trazdf_matrix(record)
+    assert fragment in str(caught.value)
+
+
+def test_a_short_record_names_what_is_missing(tmp_path):
+    good = synthetic_record(tmp_path / "good.bin")
+    raw = good.read_bytes()
+    cut = raw.index(b"r3t_Kbb")
+    (tmp_path / "short.bin").write_bytes(raw[:cut])
+    with pytest.raises(R.RecordError) as caught:
+        R.read_trazdf_matrix(tmp_path / "short.bin")
+    assert "short of" in str(caught.value)
+    assert "r3t_Kbb" in str(caught.value)
+
+
+def test_the_cli_refuses_a_malformed_record_with_a_status(tmp_path):
+    bad = synthetic_record(tmp_path / "bad.bin", magic="NEMO_L2_WRONG_9")
+    env = {"PYTHONPATH": ":".join(
+        str(REPO / f"packages/{p}") for p in
+        ("core", "ocean", "atmosphere", "coupler", "ice", "land", "ml",
+         "tools")) + f":{REPO / 'src'}",
+        "JAX_PLATFORMS": "cpu", "JAX_ENABLE_X64": "1",
+        "LEGOESM_GATE_ALLOW_DIRTY": "1", "PATH": "/usr/bin:/bin"}
+    done = subprocess.run(
+        [sys.executable, str(GATE), "--record", str(bad), "--no-card"],
+        env=env, capture_output=True, text=True)
+    assert done.returncode == 2
+    assert done.stdout.startswith("FAIL:")
+
+
+def test_the_report_carries_a_commit_stamp_and_the_blind_spot(clean_record):
+    report = _run(clean_record)
+    assert set(report["worktree"]) >= {"commit", "branch", "clean"}
+    assert report["rhs_blind_spot"]["status"] == "UNMEASURED"
+    assert "tracer_combine" in report["rhs_blind_spot"]["reason"]
+
+
+def test_the_gate_prints_which_rhs_arm_each_card_resolves():
+    """Rule 10: the resolution is measured from the built card, not declared."""
+    rows = R.resolved_rhs_arm()
+    assert set(rows) == {"GYRE-zco", "LOCK_EXCHANGE-zco", "OVERFLOW-zps"}
+    for case, row in rows.items():
+        assert row["zdf_implicit_solver_evaluation"] == "nemo_literal", case
+        assert row["tracer_combine"] in ("concentration", "thickness_weighted")
+
+
+def test_the_solve_arm_drives_the_trajectorys_own_function():
+    """Rule 10: the same object, not a copy of the statements."""
+    from legoesm.ocean.physics.vertical_mixing import (
+        implicit_vertical_diffusion_nemo_tracer_pair,
+        nemo_ordered_tridiagonal_solve,
+        nemo_tracer_tridiagonal,
+    )
+    assert nemo_ordered_tridiagonal_solve.__name__ == "_nemo_ordered_solve"
+    import jax.numpy as jnp
+    rng = np.random.default_rng(7)
+    shape = (4, 5)
+    K = jnp.asarray(1e-4 * rng.random(shape[:-1] + (shape[-1] - 1,)))
+    e3t = jnp.asarray(10.0 + rng.random(shape))
+    e3w = jnp.asarray(8.0 + rng.random(shape[:-1] + (shape[-1] - 1,)))
+    wet = jnp.ones(shape, bool)
+    rhs1 = jnp.asarray(rng.random(shape))
+    rhs2 = jnp.asarray(rng.random(shape))
+    lower, diag, upper = nemo_tracer_tridiagonal(K, e3t, e3w, 900.0, wet)
+    composed = (np.asarray(nemo_ordered_tridiagonal_solve(
+        lower, diag, upper, rhs1)),
+        np.asarray(nemo_ordered_tridiagonal_solve(lower, diag, upper, rhs2)))
+    paired = implicit_vertical_diffusion_nemo_tracer_pair(
+        rhs1, rhs2, K, e3t, e3w, 900.0, wet)
+    for got, want in zip(composed, paired):
+        assert np.array_equal(np.asarray(got).view(np.uint64),
+                              np.asarray(want).view(np.uint64))
+
+
+# --------------------------------------------------------------------------
+# The shared admission gate learns self-describing records
+# --------------------------------------------------------------------------
+def _admission():
+    import nemo_testcase_l2_gyre_round21_admission as A
+    return A
+
+
+R29_RECORD = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+    "round29_oracle_v2_zdf_matrix/oracle_zdf_matrix_kt00000001.bin")
+
+
+def test_the_admission_gate_reads_a_self_describing_record(clean_record):
+    """The round-35 record's own magic must be registered, not unknown.
+
+    Before this round the gate RAISED on any magic outside its fixed schema
+    table, and both this record and round 29's momentum one are outside it.
+    """
+    A = _admission()
+    assert "NEMO_L2_TRAZD_1" in A.SELF_DESCRIBING
+    assert "NEMO_L2_ZDFMX_1" in A.SELF_DESCRIBING
+    magic, dims, fields, order = A._read_self_describing(clean_record)
+    assert magic == "NEMO_L2_TRAZD_1"
+    assert dims == (JPI, JPJ, JPK)
+    assert set(order) == set(R.EXPECTED_ARRAYS)
+
+
+def test_a_grown_record_passes_and_a_changed_shared_field_does_not(tmp_path):
+    """The one legitimate reason two records differ in LENGTH, and its limit.
+
+    Round 33's reference-geometry addition APPENDS arrays to an existing
+    record, so a candidate written with it is longer than its baseline.  That
+    must pass; a state change in a field BOTH sides carry must not.
+    """
+    A = _admission()
+    base = synthetic_record(tmp_path / "base.bin")
+    raw = bytearray(base.read_bytes())
+    grown = tmp_path / "grown.bin"
+    extra = np.arange(JPI * JPJ, dtype="<f8")
+    grown.write_bytes(bytes(raw) + b"appended_field  "
+                      + struct.pack("=4i", 2, JPI, JPJ, 1)
+                      + extra.tobytes(order="F"))
+    result = A._compare_self_describing(base, grown, None)
+    assert result["consumed_equal"] is True
+    assert result["fields_only_on_one_side"] == ["appended_field"]
+    assert result["appended_bytes"] > 0
+
+    # now change one OWNED cell of a field both sides carry
+    A2 = _admission()
+    changed = bytearray(grown.read_bytes())
+    magic, dims, fields, order = A2._read_self_describing(grown)
+    rank, off, _ = fields["avt"]
+    target = A2._first_owned_index(rank, JPI * JPJ * JPK, JPI, JPJ)
+    at = off + 8 * target
+    changed[at:at + 8] = struct.pack("<d", 12345.0)
+    (tmp_path / "changed.bin").write_bytes(bytes(changed))
+    bad = A2._compare_self_describing(base, tmp_path / "changed.bin", None)
+    assert bad["consumed_equal"] is False
+    assert any(row[0] == "avt" for row in bad["owned_field_differences"])
+
+
+def test_the_admission_plant_lands_in_an_owned_cell(clean_record):
+    """Non-vacuity: a plant at flat index 0 would sit in the halo and be
+    ADMITTED, which is the defect round 34 removed from the record-level
+    plant and which this branch must not reintroduce."""
+    A = _admission()
+    assert A._compare_self_describing(
+        clean_record, clean_record, None)["consumed_equal"] is True
+    planted = A._compare_self_describing(clean_record, clean_record, [False])
+    assert planted["consumed_equal"] is False
+    assert planted["owned_field_differences"], "the plant landed nowhere"
+    # and the targeting itself: for the two projections that HAVE a halo, the
+    # chosen cell must be outside it.  (A rank-0 scalar has no halo, so every
+    # difference in one is a violation by construction.)
+    for rank, size in ((3, JPI * JPJ * JPK), (2, JPI * JPJ)):
+        target = A._first_owned_index(rank, size, JPI, JPJ)
+        assert target is not None
+        i, j = target % JPI, (target // JPI) % JPJ
+        assert i >= A.HALO and j >= A.HALO, (rank, target, i, j)
+        assert i < JPI - A.HALO and j < JPJ - A.HALO, (rank, target, i, j)
+
+
+@pytest.mark.skipif(not R29_RECORD.exists(), reason="round-29 record absent")
+def test_the_branch_reads_the_real_round29_record():
+    """Rule 10: run it against the record that exists, not only a fixture."""
+    A = _admission()
+    magic, dims, fields, order = A._read_self_describing(R29_RECORD)
+    assert magic == "NEMO_L2_ZDFMX_1"
+    assert dims[0] > 2 * A.HALO and dims[1] > 2 * A.HALO
+    assert "r1_hu_0" not in fields, (
+        "the round-29 baseline must NOT already carry the reference geometry; "
+        "if it does, the round-35 acquisition adds nothing")
+    assert A._compare_self_describing(
+        R29_RECORD, R29_RECORD, None)["consumed_equal"] is True
+    assert A._compare_self_describing(
+        R29_RECORD, R29_RECORD, [False])["consumed_equal"] is False
