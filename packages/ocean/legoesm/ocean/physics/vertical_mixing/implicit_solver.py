@@ -514,13 +514,12 @@ def nemo_tracer_tridiagonal(
     ``lower[..., 0]`` and ``upper[..., -1]`` are exact zeros, matching NEMO's
     ``zwt(:,1) = 0`` (``trazdf.F90:204``) and its unwritten bottom face.
 
-    ONE DEVIATION FROM NEMO REMAINS AND IS VISIBLE HERE, rather than buried:
-    each face coefficient is multiplied by ``interface_wet``, where NEMO
-    relies on ``avt`` being masked at a dry face.  Given NEMO's own masked
-    ``avt`` the two agree bit for bit; given a caller whose ``K`` is NOT
-    masked they need not, and no gate can see the difference until a card
-    supplies such a ``K``.  The dry-diagonal substitution that used to sit
-    beside it is gone -- see the comment at the return.
+    TWO DEVIATIONS FROM NEMO ARE DELIBERATE AND VISIBLE HERE, rather than
+    buried: each face coefficient is multiplied by ``interface_wet``, and each
+    dry diagonal is replaced by ``1.0``.  The first is inert given NEMO's own
+    masked ``avt``; the second is NOT inert and is registered at the return,
+    where the measurement that forced it is written down.  The two boundary
+    slots the recurrences never read are NEGATIVE zeros, as NEMO's are.
     """
     # ``dtype`` is threaded rather than taken from ``e3t_after`` so the
     # extraction is byte-exact for the pair solve, whose working dtype is the
@@ -563,14 +562,26 @@ def nemo_tracer_tridiagonal(
         diagonal = diagonal + dt_a * (
             jnp.maximum(w_top, 0.0) - jnp.minimum(w_bottom, 0.0))
     # NEMO writes trazdf.f90:445 UNCONDITIONALLY, wet or dry, and relies on
-    # avt being masked so that a dry row reduces to its own e3t.  legoESM used
-    # to substitute 1.0 on every dry row, which differed from NEMO on all 3120
-    # dry cells of GYRE's scored box by up to 299.71.  The substitution is
-    # gone; what makes that safe is the same thing that makes it safe in NEMO,
-    # namely that the layer thickness is strictly positive below the seafloor
-    # as well as above it.  That is a PRECONDITION ON THE CALLER, and it is
-    # discharged by measurement -- the kt=1..10 trajectories of all three NEMO
-    # cards -- not by an assertion this function cannot make under jit.
+    # avt being masked so that a dry row reduces to its own e3t.  This does
+    # NOT, and the reason is measured rather than asserted: NEMO's e3t_3d is
+    # the positive REFERENCE thickness below the seafloor as well as above it,
+    # while legoESM's h_partial is EXACTLY 0.0 at every dry cell on all three
+    # NEMO cards -- 3120 of GYRE's 21120, 5240 of LOCK_EXCHANGE's 7800, 43600
+    # of OVERFLOW's 60600.  Dropping the substitution therefore divides by a
+    # zero diagonal in production; OVERFLOW's kt=2 tracers went NON-FINITE,
+    # which is how this was found, and the given-inputs discharge could not
+    # see it because NEMO's own e3t_Kaa satisfies the precondition and
+    # legoESM's thickness does not.
+    #
+    # So this substitution is a DEVIATION FROM NEMO that is registered, not a
+    # transcription: it is the only difference left in the assembled tracer
+    # matrix, it accounts for exactly the 3120 dry cells of GYRE's scored box
+    # at up to 299.71, and it cannot reach a wet answer on a card with no dry
+    # cell above a wet one.  Closing it means giving legoESM NEMO's reference
+    # thickness below the seafloor, which is a geometry change and not this
+    # function's to make.
+    diagonal = jnp.where(wet_f > 0.0, diagonal,
+                         jnp.asarray(1.0, dtype=dtype))
     return lower, diagonal, upper
 
 
