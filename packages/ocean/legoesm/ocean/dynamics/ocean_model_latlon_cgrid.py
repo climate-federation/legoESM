@@ -7912,6 +7912,11 @@ class LatLonCGridOceanModel:
             _stage3_corr, _stage3_tu, _stage3_tv = _ws_stage3_correction
             _u_after, _v_after = _stage3_corr(
                 state_new.u.data, state_new.v.data, _stage3_tu, _stage3_tv)
+            # The cyclic wrap column travelled WITH the correction before it
+            # was deferred; re-apply it here so a periodic card keeps the
+            # invariant the stage used to leave behind.  Inert on all four
+            # closed-basin cards, where both columns are masked to zero.
+            _u_after = _u_after.at[:, -1].set(_u_after[:, 0])
             state_new = state_new._replace(
                 u=state_new.u.replace(data=_u_after),
                 v=state_new.v.replace(data=_v_after),

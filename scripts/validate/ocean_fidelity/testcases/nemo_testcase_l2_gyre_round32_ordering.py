@@ -39,6 +39,12 @@ reproduce NEMO's own ``uu_Kaa_out`` from NEMO's own ``uu_Kaa_pre`` plus the
 surface stress ``dynzdf.F90:329-330`` adds inside the recurrence.  A solver
 that cannot reproduce the oracle's own solve cannot be used to model it.
 
+Exit codes follow the campaign's shared convention (``ulp_move_gate``):
+0 the gate passed, 1 the gate found debt OR a plant fired as it must, 2 a
+control is BROKEN -- a plant that failed to fire, or a calibration that did
+not hold.  A caller testing only ``!= 0`` cannot tell 1 from 2, so a plant run
+is checked for exactly 1.
+
 Blind spots, per Rule 2.  ``rule12_correction`` sees the correction's
 arithmetic given exact inputs; it is blind to WHERE the production step calls
 it, which is what actually changed -- that is the trajectory gate's job.

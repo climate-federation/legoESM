@@ -624,6 +624,20 @@ def rk3_stage_barotropic_correction(
     no term changes sign with the z-axis direction -- a weighted-mean
     replacement, not a flux.
     """
+    # Both siblings above refuse a shape mismatch and so does this one: it is
+    # exported for gates to drive with oracle arrays, and a ``(..., 1)``
+    # target would broadcast into a spurious extra axis instead of failing.
+    if target_mean.shape != field.shape[:-1]:
+        raise ValueError(
+            f"target_mean {target_mean.shape} must be the column shape "
+            f"{field.shape[:-1]} of field {field.shape}")
+    if h_face_ref.shape != field.shape:
+        raise ValueError(
+            f"h_face_ref {h_face_ref.shape} must match field {field.shape}")
+    if depth_ref.shape != field.shape[:-1]:
+        raise ValueError(
+            f"depth_ref {depth_ref.shape} must be the column shape "
+            f"{field.shape[:-1]}")
     own_mean = jnp.sum(field * h_face_ref, axis=-1) / depth_ref * face_mask
     return (field + (target_mean - own_mean)[..., jnp.newaxis]) * stage_mask
 

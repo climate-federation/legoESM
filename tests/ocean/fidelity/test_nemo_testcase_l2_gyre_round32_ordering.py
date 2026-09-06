@@ -103,84 +103,232 @@ def test_correction_is_the_identity_when_the_mean_already_matches():
 # WHERE the production step calls it
 # --------------------------------------------------------------------------
 
+APPLY_ARGS = ("state_new.u.data", "state_new.v.data", "_stage3_tu",
+              "_stage3_tv")
+
+
 def stage3_placement_defects(source: str) -> list[str]:
     """Structural check that the stage-3 correction is DEFERRED past the solve.
 
     The change round 32 landed is an ORDER, and an order has no numerical
     signature a unit test can assert without running the whole step.  So this
-    reads the real module and requires three things at once, each of which a
-    revert would break:
+    reads the real module and requires five things at once.
 
-    * no call passing ``u3_raw`` to ``_replace_stage_mean`` (that call site is
-      exactly the pre-solve application this round removed);
-    * ``_ws_stage3_correction`` is bound to a tuple naming
-      ``_replace_stage_mean``;
-    * that name is later unpacked and CALLED, so binding it without using it
-      does not pass.
+    An earlier revision of this checker looked only for the deleted call
+    STRING, and an independent review broke it in four different ways that all
+    passed.  Each of those four is now a test below, so the checker is pinned
+    to what it must catch rather than to what it happened to catch.
     """
     tree = ast.parse(source)
     defects = []
+    built = {}
     for node in ast.walk(tree):
-        if (isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "_replace_stage_mean"
-                and any(isinstance(a, ast.Name) and a.id in {"u3_raw", "v3_raw"}
-                        for a in node.args)):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            names = []
+            if isinstance(target, ast.Name):
+                names = [target.id]
+            elif isinstance(target, ast.Tuple):
+                names = [e.id for e in target.elts if isinstance(e, ast.Name)]
+            for name in names:
+                if name in {"u3_corr", "v3_corr"}:
+                    built.setdefault(name, []).append(node.value)
+    # 1. the stage-3 pair IS the masked explicit update, nothing else
+    for name in ("u3_corr", "v3_corr"):
+        values = built.get(name)
+        if not values:
+            defects.append(f"{name} is never built")
+            continue
+        raw = "u3_raw" if name == "u3_corr" else "v3_raw"
+        mask = "_ws_stage_u_mask" if name == "u3_corr" else "_ws_stage_v_mask"
+        first = ast.unparse(values[0])
+        if first != f"{raw} * {mask}":
             defects.append(
-                "the stage-3 explicit update is corrected BEFORE the solve")
-    bound = False
+                f"{name} is built as {first!r}, not the masked explicit "
+                f"update {raw} * {mask}")
+    # 2. no correction call may take the stage-3 vectors, under any spelling
     for node in ast.walk(tree):
-        if (isinstance(node, ast.Assign)
-                and any(isinstance(t, ast.Name)
-                        and t.id == "_ws_stage3_correction" for t in node.targets)
-                and isinstance(node.value, ast.Tuple)
-                and any(isinstance(e, ast.Name) and e.id == "_replace_stage_mean"
-                        for e in node.value.elts)):
-            bound = True
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "_replace_stage_mean"
+                and {ast.unparse(a) for a in node.args}
+                & {"u3_raw", "v3_raw", "u3_corr", "v3_corr"}):
+            defects.append(
+                "the stage-3 velocity is corrected before the solve")
+    # 3. the deferred binding carries the closure and NEMO's uu_b targets
+    bound = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Assign)
+             and any(isinstance(t, ast.Name)
+                     and t.id == "_ws_stage3_correction" for t in n.targets)
+             and isinstance(n.value, ast.Tuple)]
     if not bound:
+        defects.append("_ws_stage3_correction is never bound to the closure")
+    else:
+        elts = [ast.unparse(e) for e in bound[0].value.elts]
+        if elts != ["_replace_stage_mean", "target_u", "target_v"]:
+            defects.append(
+                f"_ws_stage3_correction binds {elts!r}, not the closure with "
+                "its uu_b/vv_b targets")
+    # 4. the apply site is guarded on the binding ALONE.  Any extra condition
+    #    can delete the correction on a card that resolves it False, which is
+    #    exactly the hole a review caught before this round measured anything.
+    applied = None
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        if ast.unparse(node.test) != "_ws_stage3_correction is not None":
+            continue
+        calls = [n for n in ast.walk(node)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                 and n.func.id == "_stage3_corr"]
+        if calls:
+            applied = calls[0]
+    if applied is None:
         defects.append(
-            "_ws_stage3_correction is never bound to the correction closure")
-    called = any(
-        isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-        and node.func.id == "_stage3_corr" for node in ast.walk(tree))
-    if not called:
-        defects.append("the deferred correction is never applied")
+            "the deferred correction is not applied under a guard testing "
+            "_ws_stage3_correction alone")
+    else:
+        args = tuple(ast.unparse(a) for a in applied.args)
+        if args != APPLY_ARGS:
+            defects.append(
+                f"the deferred correction is applied as {args!r}, not "
+                f"{APPLY_ARGS!r}")
+    # 5. the barotropic removal reads the PROGNOSTIC uu_b (dynzdf.F90:150-151)
+    prefers = any(
+        isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "_u_bt_mean"
+                for t in n.targets)
+        and "_uu_b_zdf" in ast.unparse(n.value)
+        for n in ast.walk(tree))
+    if not prefers:
+        defects.append(
+            "the barotropic removal does not read the prognostic uu_b")
     return defects
+
+
+def _mutate(old: str, new: str) -> str:
+    source = STEP_MODULE.read_text()
+    assert old in source, "the mutation anchor moved; the test is stale"
+    mutated = source.replace(old, new, 1)
+    assert mutated != source
+    return mutated
 
 
 def test_the_production_step_defers_the_stage3_correction():
     assert stage3_placement_defects(STEP_MODULE.read_text()) == []
 
 
-def test_the_placement_check_rejects_the_pre_solve_ordering():
-    """Non-vacuity: restore the removed call site and the check must bite."""
-    reverted = (
-        "u3_corr, v3_corr = _replace_stage_mean(u3_raw, v3_raw, tu, tv)\n"
-        "_ws_stage3_correction = (_replace_stage_mean, tu, tv)\n"
-        "a, b = _stage3_corr(x, y, tu, tv)\n")
-    defects = stage3_placement_defects(reverted)
-    assert any("BEFORE the solve" in d for d in defects)
+def test_the_check_rejects_re_gating_the_apply_site():
+    """The exact hole a review caught: an extra condition deletes it."""
+    mutated = _mutate(
+        "if _ws_stage3_correction is not None:",
+        "if _ws_stage3_correction is not None and _impose_mean:")
+    assert any("guard testing" in d
+               for d in stage3_placement_defects(mutated))
 
 
-def test_the_placement_check_rejects_a_bound_but_unused_correction():
-    unused = "_ws_stage3_correction = (_replace_stage_mean, tu, tv)\n"
-    assert stage3_placement_defects(unused) == [
-        "the deferred correction is never applied"]
+def test_the_check_rejects_a_renamed_pre_solve_restore():
+    mutated = _mutate(
+        "            u3_corr = u3_raw * _ws_stage_u_mask\n"
+        "            v3_corr = v3_raw * _ws_stage_v_mask\n",
+        "            u3_corr, v3_corr = _replace_stage_mean(\n"
+        "                u3_raw, v3_raw, target_u, target_v)\n")
+    defects = stage3_placement_defects(mutated)
+    assert any("before the solve" in d for d in defects)
+    assert any("not the masked explicit update" in d for d in defects)
+
+
+def test_the_check_rejects_swapped_correction_targets():
+    mutated = _mutate(
+        "state_new.u.data, state_new.v.data, _stage3_tu, _stage3_tv",
+        "state_new.u.data, state_new.v.data, _stage3_tv, _stage3_tu")
+    assert any("is applied as" in d for d in stage3_placement_defects(mutated))
+
+
+def test_the_check_rejects_reverting_the_uu_b_operand():
+    mutated = _mutate(
+        "_u_bt_mean = _uu_b_zdf.data[..., jnp.newaxis].astype(",
+        "_u_bt_mean_dead = _uu_b_zdf.data[..., jnp.newaxis].astype(")
+    assert stage3_placement_defects(mutated) == [
+        "the barotropic removal does not read the prognostic uu_b"]
+
+
+def test_the_check_rejects_a_bound_but_unused_correction():
+    unused = "_ws_stage3_correction = (_replace_stage_mean, target_u, target_v)\n"
+    assert "guard testing" in " ".join(stage3_placement_defects(unused))
 
 
 def test_the_production_step_calls_the_shared_operator():
     """The closure must delegate, or the gate would score a stale copy."""
     source = STEP_MODULE.read_text()
-    assert "rk3_stage_barotropic_correction" in source
     tree = ast.parse(source)
-    inside = [
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef)
-        and node.name == "_replace_stage_mean"]
+    inside = [node for node in ast.walk(tree)
+              if isinstance(node, ast.FunctionDef)
+              and node.name == "_replace_stage_mean"]
     assert len(inside) == 1
     calls = {n.func.id for n in ast.walk(inside[0])
              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
     assert "rk3_stage_barotropic_correction" in calls
+
+
+def test_the_delegation_check_rejects_an_inlined_copy():
+    inlined = ("def _replace_stage_mean(u_in, v_in, tu, tv):\n"
+               "    return u_in + tu, v_in + tv\n")
+    tree = ast.parse(inlined)
+    inside = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]
+    calls = {n.func.id for n in ast.walk(inside[0])
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "rk3_stage_barotropic_correction" not in calls
+
+
+def test_the_compensated_pair_passes_the_solve_untouched():
+    """Why the operand swap is safe, as an invariant rather than an argument.
+
+    NEMO removes a column constant AND subtracts the matching bottom-stress
+    term built from the SAME coefficient the diagonal carries
+    (dynzdf.F90:150-151 with :156-159, against :296).  Because ``M.1 = 1 +
+    c.e_bot`` exactly under zero-flux boundaries, that pair passes the solve as
+    the constant itself -- so WHICH constant is removed cannot change the
+    baroclinic answer, only the barotropic one the correction then resets.
+    """
+    from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
+        implicit_vertical_diffusion_nemo_momentum,
+    )
+
+    rng = np.random.default_rng(19)
+    nlev = 8
+    field = rng.normal(size=(2, 3, nlev))
+    dz = np.full((2, 3, nlev), 50.0)
+    e3w = np.full((2, 3, nlev - 1), 50.0)
+    avm = np.abs(rng.normal(size=(2, 3, nlev - 1))) * 1e-3
+    wet = np.ones((2, 3, nlev))
+    drag = np.zeros((2, 3, nlev))
+    drag[..., -1] = 2.4e-3
+    kw = dict(extra_diag=drag)
+    dt = 2400.0
+    kappa = rng.normal(size=(2, 3, 1))
+    base = np.asarray(implicit_vertical_diffusion_nemo_momentum(
+        field, avm, dz, e3w, dt, wet, **kw))
+    # the production sign: SUBTRACT the constant, and subtract the matching
+    # bottom term built from the same coefficient the diagonal carries.
+    shifted_in = field - kappa - drag * kappa
+    shifted = np.asarray(implicit_vertical_diffusion_nemo_momentum(
+        shifted_in, avm, dz, e3w, dt, wet, **kw))
+    assert np.allclose(shifted + kappa, base, rtol=0, atol=1e-13)
+    # non-vacuity: drop the bottom term and the constant no longer passes
+    broken = np.asarray(implicit_vertical_diffusion_nemo_momentum(
+        field - kappa, avm, dz, e3w, dt, wet, **kw))
+    assert not np.allclose(broken + kappa, base, rtol=0, atol=1e-13)
+
+
+def test_correction_refuses_a_broadcastable_but_wrong_target():
+    field, target, h, depth, wet2d, mask3 = _column_case()
+    with pytest.raises(ValueError):
+        rk3_stage_barotropic_correction(
+            field, target[..., None], h, depth, wet2d, mask3)
+    with pytest.raises(ValueError):
+        rk3_stage_barotropic_correction(
+            field, target, h[..., :-1], depth, wet2d, mask3)
 
 
 # --------------------------------------------------------------------------
