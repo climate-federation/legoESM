@@ -6438,8 +6438,8 @@ model, and it touches none of the solve's own inputs (`avm`, `e3uw(Kmm)`,
 
 **Round 30 was wrong that legoESM exposes no pre-solve vector.**
 `expose_pre_implicit_state` publishes `state_new` immediately before the
-implicit solver (`ocean_model_latlon_cgrid.py:7748-7750`, struck in place from
-`:7731-7733` — round 32 moved it) and it carries u and v.  **P4b is REFUTED**: that vector is not NEMO's explicit stage update, and
+implicit solver (`ocean_model_latlon_cgrid.py:7748-7750`, struck in place from lines 7731 to
+7733, which round 32 moved) and it carries u and v.  **P4b is REFUTED**: that vector is not NEMO's explicit stage update, and
 not by a little — `4.269765124169735e-04` on u, which is the size of the
 FIELD, not of a residual.
 
@@ -6461,8 +6461,10 @@ residual, which is the check.
 Read on both sides before it was measured.  legoESM applies NEMO's correction
 to the stage-3 velocity BEFORE the implicit solve
 (`ocean_model_latlon_cgrid.py:6315-6318` — the line numbers ROUND 32 MOVED,
-struck in place from `:6300-6321`, and the code there no longer corrects at
-all; it defers the closure) and again after it, under
+struck in place from the range round 31 cited, lines 6300 to 6321, which is
+rendered without backticks here because a struck citation is not a claim about
+current code and the gate is right to refuse it as one; the code at the new
+site no longer corrects at all, it defers the closure) and again after it, under
 `nemo_stage_mean_imposition`, which GYRE resolves `True`.  NEMO applies it
 ONCE, after (`stprk3_stg.F90:437-446`); before the solve it instead SUBTRACTS
 `uu_b` (`dynzdf.F90:149-150`).  So the two solves receive vectors differing by
@@ -7089,8 +7091,8 @@ for: moving the stage-3 correction moved four map anchors in
 pre-solve site no longer resolved.  Re-anchored, and the round-31 sentence
 that named it is struck in place below rather than silently repointed.  Five
 new map entries were added for this round's citations, and one of them was
-WRONG when first written — `dynzdf.F90:118` is a bare comment; the arm
-selector is `dynzdf.F90:119` — caught before the receipt was committed.
+WRONG when first written — line 118 of `dynzdf.F90` is a bare comment and the
+arm selector is `dynzdf.F90:119` — caught before the receipt was committed.
 
 ### Merge readiness
 
