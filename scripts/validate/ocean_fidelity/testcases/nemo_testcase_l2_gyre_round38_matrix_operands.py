@@ -488,6 +488,28 @@ def run(record: Path, *, plant: str | None = None) -> dict:
         name: int(np.count_nonzero(a.view(np.uint64) != b.view(np.uint64)))
         for name, a, b in (("T", baseline[0], captured_out[0]),
                            ("S", baseline[1], captured_out[1]))}
+    # ROUND 39: A BIT COUNT WITHOUT A MAGNITUDE IS NOT A REPORTABLE NUMBER.
+    # This control went from 0 to 1 moved T cell when the isoneutral fold
+    # stopped being added, and "one bit moved" says nothing about whether the
+    # capture perturbed the model by an ulp or by a metre.  A debug callback
+    # gives an operand a second consumer, which is exactly what stops XLA
+    # contracting a product into a multiply-add (round 37), so a change of one
+    # or two ulp is the EXPECTED size and anything larger is a different
+    # defect.  Both are now printed and neither is a passing status.
+    inert_size = {}
+    for name, a, b in (("T", baseline[0], captured_out[0]),
+                       ("S", baseline[1], captured_out[1])):
+        diff = np.abs(np.asarray(a, dtype=np.float64)
+                      - np.asarray(b, dtype=np.float64))
+        flat = int(np.argmax(diff))
+        inert_size[name] = {
+            "max_abs": float(diff.max()),
+            "cell": [int(v) for v in np.unravel_index(flat, diff.shape)],
+            "ulps_at_that_cell": (
+                float(diff.max() / np.spacing(abs(float(
+                    np.asarray(a).ravel()[flat]))))
+                if diff.max() > 0.0 else 0.0),
+        }
     # CONTROL 3 -- THE ROUND TRIP.  Inertness alone cannot see a capture that
     # reads a differently-lowered COPY of an operand while the solve keeps the
     # original; feeding the captured HOST arrays back in and getting bit
@@ -588,6 +610,7 @@ def run(record: Path, *, plant: str | None = None) -> dict:
                        "cells_face": int(wet_face.sum()),
                        "domain": list(EXPECTED_DOMAIN)},
         "capture_inert_bits_moved": inert,
+        "capture_inert_magnitude": inert_size,
         "in_graph_identity_bits_unequal": round_trip,
         "output_substitution_bits_moved_CONFOUNDED": output_substitution,
         "bottom_face_zero": oracle["bottom_face_zero"],
@@ -686,6 +709,9 @@ def main(argv=None) -> int:
           f"fold_dominates {a['fold_dominates']}")
     print(f"CAPTURE-INERT {report['capture_inert_bits_moved']}  "
           f"IN-GRAPH-IDENTITY {report['in_graph_identity_bits_unequal']}")
+    for tracer, size in report["capture_inert_magnitude"].items():
+        print(f"CAPTURE-INERT-SIZE {tracer} max_abs {size['max_abs']:.6g} "
+              f"at {size['cell']} = {size['ulps_at_that_cell']:.3g} ulp")
     print("OUTPUT-SUBSTITUTION (confounded by constant lowering, reported "
           f"not scored) {report['output_substitution_bits_moved_CONFOUNDED']}")
     print(f"STATUS {report['status']}")
