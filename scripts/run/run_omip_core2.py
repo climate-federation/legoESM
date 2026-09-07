@@ -8916,10 +8916,14 @@ def main() -> int:
     # 8-step target applied the forcing for steps 1..8 to that state, advanced
     # twelve physical steps, and then labelled the result step 8. The scan
     # lane already continued the counter; this one did not.
-    if _evd_occ_every is not None and getattr(z_coord, "z_half_ref", None) is None:
-        raise SystemExit(
-            "--evd-occupancy-every-hours needs a z_coord carrying z_half_ref "
-            "(the interface ladder the bn2 trigger is evaluated on).")
+    _evd_gdept = _evd_gdepw = None
+    if _evd_occ_every is not None:
+        # The SAME reference ladders NEMO's bn2 uses (t-point gdept_1d and the
+        # interior gdepw), from the shared helper rather than a second
+        # reconstruction here.
+        from legoesm.ocean.eos import nemo_bn2_depth_ladders
+        _evd_gdept, _evd_gdepw = (np.asarray(x)
+                                  for x in nemo_bn2_depth_ladders(z_coord))
     for step in range(start_step + 1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
         _t_sec = jnp.asarray((step - 1) * dt) if _tide_on else None
@@ -9664,8 +9668,7 @@ def main() -> int:
             _fb, _fg, _f3 = evd_trigger_occupancy(
                 np.asarray(state.T.data[..., :_kt]),
                 np.asarray(state.S.data[..., :_kt]),
-                np.abs(np.asarray(z_coord.z_center_ref)),
-                np.abs(np.asarray(z_coord.z_half_ref)[1:-1]),
+                _evd_gdept, _evd_gdepw,
                 state.land_mask.data, lat2d, lon2d,
                 threshold=_evd_occ_thr, n_top=_EVD_OCC_N_TOP)
             _evd_occ_acc[0] += _fb

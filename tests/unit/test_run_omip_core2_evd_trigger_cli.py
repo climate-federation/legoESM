@@ -121,3 +121,27 @@ def test_trigger_occupancy_counts_unstable_top_interfaces():
     land[0, 0] = 0.0                            # dry: the firing column leaves
     assert core2.evd_trigger_occupancy(
         T, S, gdept, gdepw, land, lat, lon)[0] == pytest.approx(0.0)
+
+
+def test_trigger_ladders_come_from_the_shared_helper_on_a_partial_cell_coord():
+    """The production tripole grid is a partial-cell coordinate, which carries
+    no ``z_center_ref``; the ladders must come from the same helper the EVD
+    trigger itself uses, or the sampler dies on its first call (it did)."""
+    import jax.numpy as jnp
+    from legoesm.ocean.eos import nemo_bn2_depth_ladders
+    from legoesm.ocean.vertical import (
+        create_ocean_z_star, create_partial_cell_coordinate,
+    )
+    zs = create_ocean_z_star(n_levels=5, H_max=100.0)
+    zc = create_partial_cell_coordinate(zs, jnp.full((2, 3), 80.0))
+    assert not hasattr(zc, "z_center_ref")
+    gdept, gdepw = (np.asarray(x) for x in nemo_bn2_depth_ladders(zc))
+    assert gdept.shape == (5,) and gdepw.shape == (4,)
+    assert np.all(np.diff(gdept) > 0) and np.all(gdept > 0)
+    # and they are directly usable by the sampler
+    T = np.tile(np.array([22.0, 25.9, 25.6, 25.3]), (2, 3, 1))
+    S = np.full_like(T, 35.0)
+    lat = np.zeros((2, 3)); lon = np.full((2, 3), 230.0)
+    f_box, _, _ = _core2().evd_trigger_occupancy(
+        T, S, gdept, gdepw, np.ones((2, 3)), lat, lon)
+    assert f_box == pytest.approx(1.0)     # every column is inverted on top
