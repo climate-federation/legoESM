@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
-#SBATCH --time=1:30:00
+#SBATCH --time=2:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/evdpre_%j.out
 #
 # PREFLIGHT for _trp_evd_d30.sbatch (Claude review 2026-09-07): the resolved
@@ -35,7 +35,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 \
   --sss-ice-gate-nemo --prognostic-sea-ice --prognostic-ice-dynamics free_drift \
   --ice-lead-freeze-source nemo_qlead \
-  --years 0.0003 --snapshot-every-days 1 --diag-every-days 1 \
+  --years ${YEARS:-0.0013} --snapshot-every-days 1 --diag-every-days ${DIAGD:-0.05} \
    \
   --tracer-advection superbee --runoff-depth-nemo-ini --river-mouth-restoring-gate \
   --bottom-drag-scheme nemo_quadratic \
@@ -54,7 +54,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --convection enhanced_diffusion --convection-K-conv 100 --convection-K-bg 0 \
   --convection-n2-mode nemo_bn2 --convection-n2-eos teos10 \
   --convection-trigger hard --convection-n2-threshold=-1e-12 \
-  --evd-occupancy-every-hours 0.0417 \
+  --evd-occupancy-every-hours ${OCCH:-1} \
   --output $PRE 2>&1 | tail -25
 run_rc=$?
 echo "=== preflight run rc=$run_rc"
@@ -90,7 +90,28 @@ if n == 0:
 PY2
 [ $? -eq 0 ] || exit 1
 
-echo "=== 3. throughput with the hourly sampler ON (the arm's walltime rests on this) ==="
-tail -3 $PRE/diag_timeseries.csv
-echo "steps/s is the last column but one; the arm needs >= 0.35 for 15 days in 13 h"
+echo "=== 3. STEADY-STATE throughput with the sampler ON (the arm's walltime rests on this) ==="
+echo "    The csv rate is CUMULATIVE and so is swamped by the one-time compile;"
+echo "    the incremental rate between two late rows is the number that matters."
+$PY - $PRE/diag_timeseries.csv <<'PY2'
+import sys, numpy as np
+d = np.genfromtxt(sys.argv[1], delimiter=",", names=True)
+st, r = np.atleast_1d(d["step"]), np.atleast_1d(d["steps_per_s"])
+ok = (st > 0) & (r > 0)
+st, r = st[ok], r[ok]
+if st.size < 2:
+    raise SystemExit("FATAL: need >= 2 diagnostic rows to separate compile from stepping")
+t = st / r                                    # wall seconds since the leg start
+inc = np.diff(st) / np.diff(t)                # rate between consecutive rows
+print("cumulative rate (compile included):", np.round(r, 3))
+print("incremental rate per interval      :", np.round(inc, 3))
+steady = float(np.median(inc[len(inc) // 2:])) # the late half, after compile
+print(f"STEADY steps/s = {steady:.3f}  -> 15-day leg = {8640 / steady / 3600:.1f} h "
+      f"(limit 13 h); control without the sampler ran 0.42-0.44")
+if steady < 0.35:
+    raise SystemExit(f"FATAL: steady {steady:.3f} < 0.35 steps/s -- raise "
+                     "--evd-occupancy-every-hours before launching the arm")
+print("throughput OK")
+PY2
+[ $? -eq 0 ] || exit 1
 echo DONE
