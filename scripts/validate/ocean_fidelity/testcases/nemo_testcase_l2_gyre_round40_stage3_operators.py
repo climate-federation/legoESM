@@ -53,7 +53,10 @@ import numpy as np
 from legoesm.ocean.fidelity.provenance import worktree_stamp
 from nemo_testcase_l2_gyre_phase3_gate import (
     CASE,
+    DIMS,
     _surface_forcings,
+    _xy,
+    _xyz,
     expected_masks,
     lego_fields,
     read_stage,
@@ -72,6 +75,54 @@ from nemo_testcase_l2_gyre_round30_stage3_owner import (
 # e29972359b9f), so it is not interchangeable here.
 STAGE2_RECORD = "oracle_stage_kt00000001_s2.bin"
 OPERATORS = ("hpg", "vorticity", "advection")
+# The round-40 acquisition the OPERATOR ran on this agent's request.  Its own
+# admission and its source admission both report PASS with zero violations.
+TERMS_ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                  "round40_oracle_stage3_terms")
+TERMS_RECORD = "oracle_rkstage3_terms_kt00000001.bin"
+
+
+def read_stage3_terms(path: Path) -> dict:
+    """Read ``NEMO_L2_RKTS3_1``: the stage-3 per-operator momentum frames.
+
+    Self-describing: a 16-char name and ``rank, n1, n2, n3`` precede every
+    payload, so the reader never assumes the write order and a renamed or
+    reordered array is a KeyError rather than a silently mislabelled frame.
+    """
+    import struct
+
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        header = struct.unpack("=16i", handle.read(64))
+        require(magic == "NEMO_L2_RKTS3_1", f"{path}: bad magic {magic!r}")
+        (version, kt, kstg, kbb, kmm, krhs, kaa,
+         nx, ny, nz, jpkm1, ntsi, ntei, ntsj, ntej, bits) = header
+        require(
+            (version, kt, kstg, kbb, kmm, krhs, kaa, nx, ny, nz, bits)
+            == (1, 1, 3, 1, 2, 3, 3, *DIMS, 64),
+            f"{path}: bad header {header}")
+        arrays = {}
+        while True:
+            name_raw = handle.read(16)
+            if not name_raw:
+                break
+            require(len(name_raw) == 16, f"{path}: truncated array name")
+            name = name_raw.decode("ascii").rstrip()
+            rank, n1, n2, n3 = struct.unpack("=4i", handle.read(16))
+            count = 1 if rank == 0 else (n1 * n2 if rank == 2 else n1 * n2 * n3)
+            payload = np.frombuffer(handle.read(8 * count), dtype=np.float64)
+            require(payload.size == count, f"{path}: truncated array {name!r}")
+            require(np.all(np.isfinite(payload)),
+                    f"{path}: non-finite payload in {name!r}")
+            if rank == 0:
+                arrays[name] = float(payload[0])
+            elif rank == 2:
+                arrays[name] = _xy(payload, n1, n2)
+            else:
+                arrays[name] = _xyz(payload, n1, n2, n3)
+    require("after_adv_u" in arrays and "after_hpg_u" in arrays,
+            f"{path}: the operator frames are missing")
+    return {"header": header, "arrays": arrays}
 
 
 def _card_and_forcing():
@@ -237,21 +288,155 @@ def run_split(oracle_root: Path, *, plant: bool = False) -> dict:
     }
 
 
+def run_terms(oracle_root: Path, *, plant: bool = False) -> dict:
+    """THE STAGE-3 OPERATOR SPLIT, scored against NEMO's own frames.
+
+    ``dyn_hpg`` OVERWRITES ``Krhs`` under ``key_RK3`` (``dynhpg.F90:359-363``,
+    ``dynhpg.F90:383-387``), so its contribution IS ``after_hpg``; the other
+    two are differences of consecutive frames.  Each is scored against the
+    legoESM bucket the model's own stage-3 call produced.
+    """
+    backend = _precision_preflight()
+    record = TERMS_ROOT / TERMS_RECORD
+    rec = read_stage3_terms(record)
+    arrays = rec["arrays"]
+    card, cfg, freshwater, surface = _card_and_forcing()
+    masks = expected_masks(card)
+
+    # THE RECORD'S OWN CLOSURE, checked before anything is read off it: its
+    # last frame must reproduce the pre-dyn_ldf record every round-30..40 arm
+    # already scores, bit for bit.  Two instruments, one quantity.
+    pre_ldf = read_pre_ldf(oracle_root / PRE_LDF_RECORD)
+    closure = {}
+    for face in ("u", "v"):
+        a = arrays[f"after_adv_{face}"]
+        b = pre_ldf[face]
+        closure[face] = {
+            "cells_unequal": int(np.count_nonzero(a != b)),
+            "max_abs": float(np.max(np.abs(a - b))),
+        }
+    record_consistent = all(v["cells_unequal"] == 0 for v in closure.values())
+
+    buckets = {
+        name: _run_hooks(card, cfg, freshwater, surface,
+                         expose_momentum_operator=name,
+                         expose_momentum_operator_stage=3)
+        for name in OPERATORS
+    }
+    if plant:
+        bumped = np.array(buckets["vorticity"]["u"], copy=True)
+        bumped[..., 0] = bumped[..., 0] + 1.0
+        buckets["vorticity"] = dict(buckets["vorticity"], u=bumped)
+
+    rows = []
+    for face in ("u", "v"):
+        nlev = buckets["hpg"][face].shape[-1]
+        hpg = arrays[f"after_hpg_{face}"][..., :nlev]
+        vor = arrays[f"after_vor_{face}"][..., :nlev] - hpg
+        adv = arrays[f"after_adv_{face}"][..., :nlev] - \
+            arrays[f"after_vor_{face}"][..., :nlev]
+        for name, reference in (("hpg", hpg), ("vorticity", vor),
+                                ("advection", adv)):
+            row = score(f"{CASE}.kt1.stage3.operator.{name}.{face}",
+                        reference, buckets[name][face], masks[face])
+            row["nemo_frame"] = {
+                "hpg": "after_hpg (dyn_hpg OVERWRITES Krhs)",
+                "vorticity": "after_vor - after_hpg",
+                "advection": "after_adv - after_vor"}[name]
+            rows.append(row)
+
+    # The vorticity divisor, given NEMO's own ssh: legoESM's shared literal
+    # e3f_vor against NEMO's own dumped one.  vor_ene divides by it at
+    # BLD/ppsrc/nemo/dynvor.f90:556 under key_qco.
+    import jax.numpy as jnp
+
+    from legoesm.ocean.vertical import nemo_qco_live_vorticity_e3f_cgrid
+    stage2 = read_stage(oracle_root / STAGE2_RECORD, 2)
+    nemo_eta_kmm = np.asarray(stage2["ssh"], dtype=np.float64)
+    lego_e3f = np.asarray(nemo_qco_live_vorticity_e3f_cgrid(
+        jnp.asarray(nemo_eta_kmm), card.recipe.z_coord, jnp.float64,
+        nn_e3f_typ=0), dtype=np.float64)
+    nemo_e3f = arrays["e3f_vor_Kmm"]
+    nlev = min(lego_e3f.shape[-1], nemo_e3f.shape[-1])
+    fmask = arrays["fmask"][..., :nlev] > 0.0
+    # legoESM stores NEMO's F(i,j) at vertex [j+1,i+1]; strip the added
+    # south/west walls so the two are the same points.
+    lego_native = lego_e3f[1:, 1:, :nlev]
+    geom_rows = [{
+        "name": f"{CASE}.kt1.stage3.operand.e3f_vor",
+        "n": int(fmask.sum()),
+        "cells_unequal": int(np.count_nonzero(
+            (lego_native != nemo_e3f[..., :nlev])[fmask])),
+        "max_abs": float(np.max(
+            np.abs(lego_native - nemo_e3f[..., :nlev])[fmask])),
+        "nemo_absolute_max": float(np.max(np.abs(nemo_e3f[..., :nlev])[fmask])),
+        "statement": ("e3f_0vor*(1+r3f*fe3mask), "
+                      "BLD/ppsrc/nemo/dynvor.f90:556"),
+    }]
+
+    over = [r for r in rows if r["status"] != "AT-BAR"]
+    first = None
+    for name in OPERATORS:
+        if any(r["status"] != "AT-BAR" and f".{name}." in r["name"]
+               for r in rows):
+            first = name
+            break
+    status = "AT-BAR" if not over else "DEBT"
+    if plant:
+        require(status == "DEBT" and first == "vorticity",
+                "the planted bucket violation did not surface as the "
+                "vorticity operator")
+    return {
+        "worktree": worktree_stamp(),
+        "format": "nemo-testcase-l2-gyre-round40-stage3-operators-v1",
+        "mode": "terms",
+        "case": CASE,
+        "record": str(record),
+        "record_sha256": sha256(record),
+        "record_closure_against_pre_ldf": closure,
+        "record_self_consistent": record_consistent,
+        "execution_regime": "production_jit",
+        "precision_policy": "fp64",
+        "jax_backend": backend,
+        "status": status,
+        "first_operator_over_bar": first,
+        "rows": rows,
+        "operand_rows": geom_rows,
+        "planted_control": plant,
+    }
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", required=True, choices=("inputs", "split"))
+    parser.add_argument("--mode", required=True,
+                        choices=("inputs", "split", "terms"))
     parser.add_argument("--oracle-root", type=Path, default=ORACLE_ROOT)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant", action="store_true")
     args = parser.parse_args(argv)
-    report = (run_inputs(args.oracle_root, plant=args.plant)
-              if args.mode == "inputs"
-              else run_split(args.oracle_root, plant=args.plant))
+    runner = {"inputs": run_inputs, "split": run_split,
+              "terms": run_terms}[args.mode]
+    report = runner(args.oracle_root, plant=args.plant)
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.output:
         args.output.write_text(text + "\n")
     print(text)
-    if report["mode"] == "inputs":
+    if report["mode"] == "terms":
+        for face, entry in report["record_closure_against_pre_ldf"].items():
+            print(f"RECORD-CLOSURE {face} cells_unequal "
+                  f"{entry['cells_unequal']} max {entry['max_abs']:.17g}")
+        for row in report["rows"]:
+            print(f"{row['status']:<8} {row['name']:<46} "
+                  f"bit_unequal {row['n_unequal']}/{row['n']} "
+                  f"max {row['absolute_max']:.6g} "
+                  f"rel {row['max_relative']:.6g}")
+        for row in report["operand_rows"]:
+            print(f"OPERAND  {row['name']:<46} "
+                  f"unequal {row['cells_unequal']}/{row['n']} "
+                  f"max {row['max_abs']:.6g} "
+                  f"nemo_absmax {row['nemo_absolute_max']:.6g}")
+        print(f"FIRST-OPERATOR-OVER-BAR {report['first_operator_over_bar']}")
+    elif report["mode"] == "inputs":
         for row in report["rows"]:
             print(f"{row['status']:<8} {row['name']:<40} "
                   f"bit_unequal {row['n_unequal']}/{row['n']} "
