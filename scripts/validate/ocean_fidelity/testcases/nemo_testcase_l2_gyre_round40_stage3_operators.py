@@ -514,7 +514,7 @@ def main(argv=None) -> int:
             print(f"{row['status']:<8} {row['name']:<46} "
                   f"bit_unequal {row['n_unequal']}/{row['n']} "
                   f"max {row['absolute_max']:.6g} "
-                  f"rel {row['max_relative']:.6g}")
+                  f"rel {row['relative_max_abs']:.6g}")
         for row in report["operand_rows"]:
             print(f"OPERAND  {row['name']:<46} "
                   f"unequal {row['cells_unequal']}/{row['n']} "
