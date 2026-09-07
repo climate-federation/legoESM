@@ -218,9 +218,14 @@ class TestArraySlotGridCoupling:
         assert float(jnp.max(backend_spy["n_ice"])) == pytest.approx(_NI_VAL)
         # N_c is scaled by air density: not the raw slot, but within a
         # physical density band and exactly linear in the carry.
-        single = float(jnp.max(backend_spy["n_cloud"]))
+        captured = backend_spy["n_cloud"]
+        single = float(jnp.max(captured))
         assert 0.05 * _NC_VAL < single < 2.0 * _NC_VAL, model_type
         assert abs(single - _NC_VAL) > 0.01 * _NC_VAL, model_type
+        # The scale must VARY with height: a uniform carry times a real air
+        # density is not uniform, so a constant fudge factor cannot pass here
+        # (codex review).  Air thins by well over 10 % across these columns.
+        assert float(jnp.max(captured)) / float(jnp.min(captured)) > 1.1, model_type
         state2, grid2, hc2, tm2 = _ARRAY_SLOT_GRIDS[model_type](9)
         state2 = state2._replace(tracers=state2.tracers.replace(
             data=state2.tracers.data.at[..., 6].set(2.0 * _NC_VAL)))
