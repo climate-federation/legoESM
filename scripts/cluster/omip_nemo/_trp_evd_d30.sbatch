@@ -5,7 +5,10 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
-#SBATCH --time=13:00:00
+#SBATCH --time=11:55:00
+# 11:55, not more: the short partition's own ceiling is 12 h, and a job asking
+# for more sits in PartitionTimeLimit forever.  The measured steady rate with
+# the sampler on is 0.47 steps/s, so a 15-day leg is ~5.1 h.
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/trpevd_%j.out
 # EVD ARM (one variable vs trp_base2): NEMO's enhanced vertical diffusion,
 # ORCA1 &namzdf ln_zdfevd=T rn_evd=100 nn_evdm=0 -> --convection

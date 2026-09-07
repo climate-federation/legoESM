@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
-#SBATCH --time=2:00:00
+#SBATCH --time=1:55:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/evdpre_%j.out
 #
 # PREFLIGHT for _trp_evd_d30.sbatch (Claude review 2026-09-07): the resolved
