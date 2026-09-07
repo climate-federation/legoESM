@@ -864,15 +864,13 @@ def _dsw_transport_phase_3d_batched(ctx, states, uc6, vc6, divgd6, dt,
     _require_barrier_nq(fname, ctx, int(afx_pre.shape[-1]))
     _require_barrier_layout(fname, ctx, afx_pre, afy_pre, km)
 
-    afx_lv, afy_lv = [], []
-    for k in range(km):
-        ax, ay = average_allflux_shared_edges(afx_pre[:, :, :, k, :],
-                                              afy_pre[:, :, :, k, :],
-                                              ctx.tab)
-        afx_lv.append(ax)
-        afy_lv.append(ay)
-    afx6 = jnp.stack(afx_lv, axis=3)
-    afy6 = jnp.stack(afy_lv, axis=3)
+    # all levels in ONE barrier call (M8-B, 2026-09-07): the level axis
+    # (3) rides through -- the flat dispatcher vmaps the certified
+    # per-level blend over it, the window arm fires once instead of km.
+    # The 2026-09-06 change reached only the LOOP arm of this phase; the
+    # window step runs THIS arm, where the census still showed 30 of the
+    # 59 firings per step.
+    afx6, afy6 = average_allflux_shared_edges(afx_pre, afy_pre, ctx.tab)
 
     # --- d_sw2 at every level, faces vmapped (:914 / :950) ------------
     names2 = ("delp", "pt") + (() if hydrostatic else ("w", "dw"))
