@@ -984,6 +984,11 @@ _EVD_OCC_K_THRESHOLD_CONTROL = 50.0
 _EVD_OCC_BOX_LON_C = 230.0
 # How many top interfaces the "any of" column spans.
 _EVD_OCC_N_TOP = 3
+# Depths [m] of the box-mean temperature written alongside each occupancy
+# sample.  A 00Z-only snapshot cannot answer a NIGHT-TIME question, and the
+# convection arm's afternoon null turned out to be uninformative for exactly
+# that reason, so the profile is recorded at the sampling cadence too.
+_EVD_PROFILE_DEPTHS = (0.5, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 50.0)
 
 
 def _flag_set(v):
@@ -8262,8 +8267,9 @@ def main() -> int:
                                     and (out_dir / "evd_occupancy.csv").exists())
                             else "w")
         if _evd_occ_csv.tell() == 0:
-            _evd_occ_csv.write("step,day,utc_hour,local_hour_box,occ_eq,"
-                               "occ_glob,occ3_eq\n")
+            _evd_occ_csv.write(
+                "step,day,utc_hour,local_hour_box,occ_eq,occ_glob,occ3_eq,"
+                + ",".join(f"T{d:g}m" for d in _EVD_PROFILE_DEPTHS) + "\n")
     # Process-0-only CSV under --distributed: every process runs the same host
     # loop on the all-gathered replicated state, so a single writer suffices and
     # avoids N processes clobbering the same file.  On non-IO ranks _csv is None
@@ -8924,6 +8930,12 @@ def main() -> int:
         from legoesm.ocean.eos import nemo_bn2_depth_ladders
         _evd_gdept, _evd_gdepw = (np.asarray(x)
                                   for x in nemo_bn2_depth_ladders(z_coord))
+        # The occupancy box, resolved once: the profile record averages over it.
+        _evd_lat = np.asarray(lat2d)
+        _evd_lon = np.asarray(lon2d) % 360.0
+        _evd_box = ((np.asarray(state.land_mask.data) > 0.5)
+                    & (np.abs(_evd_lat) <= 2.0)
+                    & (_evd_lon >= 220.0) & (_evd_lon < 240.0))
     for step in range(start_step + 1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
         _t_sec = jnp.asarray((step - 1) * dt) if _tide_on else None
@@ -9678,9 +9690,17 @@ def main() -> int:
             if _evd_occ_csv is not None:
                 _utc_h = (step * dt / 3600.0) % 24.0
                 _loc_h = (_utc_h + _EVD_OCC_BOX_LON_C / 15.0) % 24.0
+                # Box-mean T at fixed depths, from the same slice-and-pull the
+                # occupancy uses: this is what makes a night-time answer
+                # possible without saving whole 3-D states every hour.
+                _Tb = np.asarray(state.T.data)[_evd_box]
+                _prof = [float(np.nanmean(
+                    [np.interp(_d, _evd_gdept, _col) for _col in _Tb]))
+                    for _d in _EVD_PROFILE_DEPTHS]
                 _evd_occ_csv.write(
                     f"{step},{step * dt / _SEC_PER_DAY:.4f},{_utc_h:.2f},"
-                    f"{_loc_h:.2f},{_fb:.4f},{_fg:.4f},{_f3:.4f}\n")
+                    f"{_loc_h:.2f},{_fb:.4f},{_fg:.4f},{_f3:.4f},"
+                    + ",".join(f"{v:.4f}" for v in _prof) + "\n")
                 _evd_occ_csv.flush()
         if step % diag_every == 0 or step == n_steps:
             state = jax.block_until_ready(state)
