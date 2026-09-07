@@ -979,6 +979,10 @@ _EVD_TRIGGER_DESTS = ("convection_n2_mode", "convection_n2_eos",
 # NEMO rn_evd / 2: the occupancy threshold when no convection scheme runs
 # (the control measurement "can the closure alone reach the EVD range?").
 _EVD_OCC_K_THRESHOLD_CONTROL = 50.0
+# Longitude the per-sample local solar hour is referenced to (the centre of
+# the cold-tongue occupancy box, 220-240E).
+_EVD_OCC_BOX_LON_C = 230.0
+_evd_K_jit: dict = {}
 
 
 def _flag_set(v):
@@ -8215,6 +8219,18 @@ def main() -> int:
     # occupancy (codex: header/row order must match or both misalign).
     if _evd_occ_acc is not None:
         _csv_cols += ["evd_top_occ_eq", "evd_top_occ_glob", "evd_top3_occ_eq"]
+    # Per-SAMPLE record (the 5-day row mean cannot separate "fires every
+    # night" from "fires weakly all day", which is the mechanism claim):
+    # one line per hourly sample with the box's local solar hour.
+    _evd_occ_csv = None
+    if _evd_occ_acc is not None and _is_io_proc():
+        _evd_occ_csv = open(out_dir / "evd_occupancy.csv",
+                            "a" if (args.restart_from
+                                    and (out_dir / "evd_occupancy.csv").exists())
+                            else "w")
+        if _evd_occ_csv.tell() == 0:
+            _evd_occ_csv.write("step,day,utc_hour,local_hour_box,occ_eq,"
+                               "occ_glob,occ3_eq\n")
     # Process-0-only CSV under --distributed: every process runs the same host
     # loop on the all-gathered replicated state, so a single writer suffices and
     # avoids N processes clobbering the same file.  On non-IO ranks _csv is None
@@ -8267,6 +8283,8 @@ def main() -> int:
     def _close_csv():
         if _csv is not None:
             _csv.close()
+        if _evd_occ_csv is not None:
+            _evd_occ_csv.close()
 
     # Seed the series with the initial state — UNLESS we are appending to a
     # parent leg's CSV, which already logged this exact step as its final row.
@@ -9601,18 +9619,32 @@ def main() -> int:
             _pers_res.count_leaf_full(gathers=len(_upd), uploads=len(_upd))
             state = state._replace(**_upd)
         if _evd_occ_every is not None and step % _evd_occ_every == 0:
-            _kp = _kprofiles(model, state, sf, dt, z_coord)
-            if "K_H_diag" not in _kp:
-                raise SystemExit(
-                    "--evd-occupancy-every-hours: diagnose_vertical_K returned "
-                    "no K_H_diag (see the [kprofile] line above)")
+            # COMPILED: diagnose_vertical_K itself carries no jit (only
+            # ``_step_jitted`` does), and an eager eORCA1 step is 5-20x a
+            # compiled one -- an hourly eager sample would cost more than the
+            # run.  One compile per model object (the viscosity schedule
+            # rebuilds it a few times a leg).
+            _fn = _evd_K_jit.get(id(model))
+            if _fn is None:
+                _evd_K_jit.clear()
+                _fn = jax.jit(
+                    lambda _st, _sf, _m=model: _m.diagnose_vertical_K(
+                        _st, dt, surface_forcing=_sf)[0])
+                _evd_K_jit[id(model)] = _fn
+            _K_H = np.asarray(_fn(state, sf))
             _fb, _fg, _f3 = evd_top_interface_occupancy(
-                _kp["K_H_diag"], state.land_mask.data, lat2d, lon2d,
-                _evd_occ_K)
+                _K_H, state.land_mask.data, lat2d, lon2d, _evd_occ_K)
             _evd_occ_acc[0] += _fb
             _evd_occ_acc[1] += _fg
             _evd_occ_acc[2] += _f3
             _evd_occ_acc[3] += 1
+            if _evd_occ_csv is not None:
+                _utc_h = (step * dt / 3600.0) % 24.0
+                _loc_h = (_utc_h + _EVD_OCC_BOX_LON_C / 15.0) % 24.0
+                _evd_occ_csv.write(
+                    f"{step},{step * dt / _SEC_PER_DAY:.4f},{_utc_h:.2f},"
+                    f"{_loc_h:.2f},{_fb:.4f},{_fg:.4f},{_f3:.4f}\n")
+                _evd_occ_csv.flush()
         if step % diag_every == 0 or step == n_steps:
             state = jax.block_until_ready(state)
             # _diag pulls the 2-D T,S surface slices + the 2-D land mask and
