@@ -507,27 +507,46 @@ class DuoWindowComm:
         return self._via_flat("ext_vector_cgrid_allk", fn, [ucwk, vcwk])
 
     # -- barriers -------------------------------------------------------------
+    #  LEVEL AXIS (codex 2026-09-07): the callers now hand the barriers the
+    #  WHOLE level stack in one call (M8-B).  The certified impls are
+    #  per-level -- they flatten every cell axis into one index and blend
+    #  through tables built for that layout -- so a level axis reaching the
+    #  impl unmapped would land INSIDE the flattening and alias levels.
+    #  The flat dispatchers vmap it; this single-device window bundle
+    #  bypasses those dispatchers (it calls the impls directly), so it
+    #  vmaps here.  ``k_axis`` is where the level axis sits per barrier:
+    #  the bgrid/cgrid arrays carry it LAST, the allflux stacks carry it at
+    #  axis 3 with the slot axis last (the oracle's allflux_x(i,j,k,iq)).
+    def _barrier_via_flat(self, name, impl, arrays, k_axis, ndim_2d):
+        import jax
+        fn = impl
+        if arrays[0].ndim > ndim_2d:
+            fn = jax.vmap(impl, in_axes=k_axis, out_axes=k_axis)
+        return self._via_flat(name, fn, arrays)
+
     def average_shared_edge_bgrid(self, xbw, ybw):
         from legoesm.grids.fv3_duo_halos import average_shared_edge_bgrid_impl
-        return self._via_flat(
+        return self._barrier_via_flat(
             "avg_bgrid",
             lambda x, y: average_shared_edge_bgrid_impl(x, y, self.tab),
-            [xbw, ybw])
+            [xbw, ybw], k_axis=-1, ndim_2d=3)
 
     def average_shared_edge_cgrid(self, fxw, fyw):
         from legoesm.grids.fv3_duo_halos import average_shared_edge_cgrid_impl
-        return self._via_flat(
+        return self._barrier_via_flat(
             "avg_cgrid",
             lambda x, y: average_shared_edge_cgrid_impl(x, y, self.tab),
-            [fxw, fyw])
+            [fxw, fyw], k_axis=-1, ndim_2d=3)
 
     def average_allflux_shared_edges(self, afxw, afyw):
         from legoesm.grids.fv3_duo_halos import (
             average_allflux_shared_edges_impl)
-        return self._via_flat(
+        # (nb, i, j, slot) is the per-level stack; (nb, i, j, km, slot) adds
+        # the level axis at 3
+        return self._barrier_via_flat(
             "avg_allflux",
             lambda x, y: average_allflux_shared_edges_impl(x, y, self.tab),
-            [afxw, afyw])
+            [afxw, afyw], k_axis=3, ndim_2d=4)
 
     # -- the once-per-substep seam refresh --------------------------------------
     def refresh(self, bundle: dict) -> dict:

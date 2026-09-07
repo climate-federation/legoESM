@@ -112,3 +112,59 @@ def test_padded_partition_blocks_match_the_blocked_layout():
         assert np.array_equal(xw[w, li:li + lay.nl + 1, lj:lj + lay.nl], blk)
     with pytest.raises(ValueError, match="not divisible"):
         build_window_layout(N, NG, 4, 4, "padded")   # 30 % 4
+
+
+@pytest.mark.parametrize("kind", ["bgrid", "cgrid", "allflux"])
+def test_window_barriers_with_a_level_axis_match_the_per_level_impl(kind):
+    """K>1 parity for the single-device window bundle (codex 2026-09-07):
+    the callers hand the barriers the WHOLE level stack in one call, and
+    the certified impls are per-level (they flatten every cell axis into
+    one index), so the bundle must map the level axis -- an unmapped one
+    lands inside the flattening and aliases levels."""
+    from legoesm.grids.fv3_duo_halos import (
+        average_shared_edge_bgrid_impl, average_shared_edge_cgrid_impl,
+        average_allflux_shared_edges_impl, build_jax_duo_halo_tables)
+    from legoesm.grids.factory import create_fv3_duo_grid
+    from legoesm.grids.fv3_duo_windows import attach_window_comm
+    from legoesm.core.fv3_duo_stepper import build_jax_duo_stepper_context
+
+    km = 3
+    grid = create_fv3_duo_grid(N)
+    ctx = build_jax_duo_stepper_context(grid.ctx_np)
+    wctx, comm = attach_window_comm(ctx, 2, 5, "padded")
+    npx, n = N + 1, N
+    rng = np.random.default_rng(5)
+    if kind == "allflux":
+        ns = 4 + int(ctx.tab.nq)
+        a6 = jnp.asarray(rng.standard_normal((6, npx, n, km, ns)))
+        b6 = jnp.asarray(rng.standard_normal((6, n, npx, km, ns)))
+        impl, fn, kax = (average_allflux_shared_edges_impl,
+                         comm.average_allflux_shared_edges, 3)
+    else:
+        i0, j0 = ((npx, npx) if kind == "bgrid" else (npx, n))
+        i1, j1 = ((npx, npx) if kind == "bgrid" else (n, npx))
+        a6 = jnp.asarray(rng.standard_normal((6, i0, j0, km)))
+        b6 = jnp.asarray(rng.standard_normal((6, i1, j1, km)))
+        impl = (average_shared_edge_bgrid_impl if kind == "bgrid"
+                else average_shared_edge_cgrid_impl)
+        fn = (comm.average_shared_edge_bgrid if kind == "bgrid"
+              else comm.average_shared_edge_cgrid)
+        kax = -1
+    # reference: the certified impl, ONE LEVEL AT A TIME
+    ra, rb = [], []
+    for k in range(km):
+        sa = (slice(None),) * 3 + (k,) if kax == 3 else (Ellipsis, k)
+        x, y = impl(a6[sa], b6[sa], ctx.tab)
+        ra.append(x)
+        rb.append(y)
+    ra = jnp.stack(ra, axis=kax if kax > 0 else -1)
+    rb = jnp.stack(rb, axis=kax if kax > 0 else -1)
+    from legoesm.grids.fv3_duo_windows import gather_windows, scatter_owned
+    aw = gather_windows(comm.lay, a6)
+    bw = gather_windows(comm.lay, b6)
+    oa, ob = fn(aw, bw)
+    for o, r, nm in ((oa, ra, "x"), (ob, rb, "y")):
+        got = np.asarray(scatter_owned(comm.lay, np.asarray(o), np))
+        want = np.asarray(r)
+        bad = (got != want) & ~(np.isnan(got) & np.isnan(want))
+        assert not bad.any(), f"{kind} {nm}: {bad.sum()} cells differ"
