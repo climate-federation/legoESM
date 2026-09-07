@@ -322,7 +322,8 @@ def _fold_removed(live: dict) -> np.ndarray:
     return np.where(face, live["K"] - live["K33"], live["K"])
 
 
-def run_kt2_given_inputs(record: Path = KT2_RECORD) -> dict:
+def run_kt2_given_inputs(record: Path = KT2_RECORD,
+                         *, mld_criterion: str | None = None) -> dict:
     """legoESM's isoneutral fold, GIVEN NEMO'S OWN BEFORE STATE, at kt = 2.
 
     ROUND 39, and it is the arm the round-38 acquisition exists for.  At
@@ -379,9 +380,19 @@ def run_kt2_given_inputs(record: Path = KT2_RECORD) -> dict:
     # it.  Rule 10 -- what they RESOLVE to on this card is reported, not read
     # off the flag.
     kappa_t, kappa_v = static_kappa_redi_override(cfg.gm_redi, card.recipe.grid)
+    # ROUND 40, item 2, ONE VARIABLE.  NEMO's nmln/hmlp come from zdf_mxl's
+    # N2-INTEGRAL criterion (zdfmxl.F90:95-104), run on the before state at
+    # stprk3.F90:165; this card resolves legoESM's 'rho_c', a
+    # potential-density-difference test referenced to a CELL CENTRE.  The
+    # exact NEMO criterion already exists behind mld_criterion='n2_integral'.
+    # Nothing is selected here -- the arm reports what the swap does and the
+    # card's default is untouched.
+    gm_redi = cfg.gm_redi
+    if mld_criterion is not None:
+        gm_redi = gm_redi._replace(mld_criterion=mld_criterion)
     K33 = np.asarray(compute_isoneutral_K33_latlon(
         jnp.asarray(T_bb), jnp.asarray(S_bb), jnp.asarray(eta_bb),
-        jnp.asarray(H), card.recipe.grid, card.recipe.z_coord, cfg.gm_redi,
+        jnp.asarray(H), card.recipe.grid, card.recipe.z_coord, gm_redi,
         eos=cfg.eos, eos_linear=cfg.eos_linear,
         mask=jnp.asarray(init.land_mask.data),
         rho_0=cfg.constants.rho_0, g=cfg.constants.g,
@@ -408,6 +419,8 @@ def run_kt2_given_inputs(record: Path = KT2_RECORD) -> dict:
         "worktree": worktree_stamp(),
         "record": str(record),
         "kt": int(rec["header"]["kt"]),
+        "mld_criterion_resolved": gm_redi.mld_criterion,
+        "mld_criterion_is_the_card_default": mld_criterion is None,
         "discriminating": nemo_max > 0.0,
         "nemo_ah_wslp2_absmax": nemo_max,
         "lego_K33_absmax": float(np.abs(K33)[wet_face].max()),
@@ -907,6 +920,11 @@ def main(argv=None) -> int:
                         help="who owns the dz_after residual")
     parser.add_argument("--knob-redundancy", action="store_true",
                         help="is slope_prd_geometry_stage redundant here")
+    parser.add_argument("--kt2-mld-arm", action="store_true",
+                        help=("ONE-VARIABLE arm on the kt=2 fold: rerun it "
+                              "with NEMO's own zdf_mxl N2-integral "
+                              "mixed-layer criterion.  Measurement only; no "
+                              "card default is changed."))
     parser.add_argument("--kt2-given-inputs", action="store_true",
                         help="score the fold against NEMO's kt=2 ah_wslp2, "
                              "given NEMO's own before state")
@@ -941,6 +959,37 @@ def main(argv=None) -> int:
               f"bits moved {report['bits_moved']} of {report['cells']}; "
               f"REDUNDANT {report['redundant']}")
         return 0 if report["redundant"] else 1
+    if args.kt2_mld_arm:
+        base = run_kt2_given_inputs()
+        arm = run_kt2_given_inputs(mld_criterion="n2_integral")
+        base_rel = base["row"]["max_relative"]
+        arm_rel = arm["row"]["max_relative"]
+        moved = (abs(arm_rel - base_rel) / base_rel) if base_rel else None
+        report = {
+            "worktree": worktree_stamp(),
+            "arm": "kt2 isoneutral fold, one variable: the mixed-layer "
+                   "criterion.  NEMO's nmln/hmlp come from zdf_mxl's "
+                   "N2-integral test (zdfmxl.F90:95-104); this card resolves "
+                   "legoESM's 'rho_c'.  MEASUREMENT ONLY -- no card default "
+                   "is changed by this arm.",
+            "default": base, "n2_integral": arm,
+            "relative_moved_fraction": moved,
+        }
+        text = json.dumps(report, indent=1, sort_keys=True, default=str)
+        if args.json:
+            args.json.write_text(text + "\n")
+        print(text)
+        for label, rep in (("rho_c (card default)", base),
+                           ("n2_integral (NEMO)  ", arm)):
+            row = rep["row"]
+            print(f"MLD-ARM {label} {row['status']:<12} "
+                  f"unequal {row['bit_unequal']}/{rep['scored_wet_faces']} "
+                  f"max {row['absolute_max']:.6g} rel {row['max_relative']:.6g} "
+                  f"lego_absmax {rep['lego_K33_absmax']:.6g}")
+        print(f"MLD-ARM relative moved by "
+              f"{'n/a' if moved is None else f'{moved:.4g}'} "
+              f"(NEMO ah_wslp2 absmax {base['nemo_ah_wslp2_absmax']:.6g})")
+        return 0
     if args.kt2_given_inputs:
         report = run_kt2_given_inputs()
         text = json.dumps(report, indent=1, sort_keys=True, default=str)
