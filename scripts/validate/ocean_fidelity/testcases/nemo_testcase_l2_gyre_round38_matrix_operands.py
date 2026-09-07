@@ -66,7 +66,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
 from nemo_testcase_l2_gyre_phase3_gate import (  # noqa: E402
-    CASE, _surface_forcings, require, sha256,
+    CASE, _surface_forcings, read_stage, require, sha256,
 )
 from nemo_testcase_l2_gyre_round35_trazdf_matrix import (  # noqa: E402
     BAR, EXPECTED_DOMAIN, RecordError, _box, bit_row, read_trazdf_matrix,
@@ -75,6 +75,10 @@ from nemo_testcase_l2_gyre_round35_trazdf_matrix import (  # noqa: E402
 RECORD = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
               "round37_oracle_trazdf_matrix/"
               "oracle_trazdf_matrix_kt00000001.bin")
+# NEMO's own ssha, i.e. ssh(Kaa) at stage 3 (stprk3_stg.F90:224 recovers the
+# stage-1 barotropic value).  Byte-identical in the round-29 and round-37
+# roots, so the dz_owner arm reads it beside its own record.
+STAGE3_RECORD = "oracle_stage_kt00000001_s3.bin"
 # Every plantable operand, and the ROW its plant must move.  One map rather
 # than two lists, so a renamed row cannot leave a plant pointing at nothing.
 PLANT_ROW = {
@@ -457,20 +461,46 @@ def run_dz_owner(record: Path = RECORD) -> dict:
     zc = card.recipe.z_coord
     ref = np.asarray(getattr(zc, "nemo_e3t_0"), dtype=np.float64)
     rows = [_wet_row("dz_owner.reference_thickness", e3t0, ref, wet)]
-    # legoESM's own stretch, from the ssh its stage-3 update produced.
-    with np.errstate(invalid="ignore", divide="ignore"):
-        r3t_lego = np.where(H > 0.0, eta_aa / H, 0.0)
-    rows.append(_wet_row("dz_owner.r3t", r3t_aa, r3t_lego, wet[..., 0]))
+    # ROUND 40, Rule 10.  The row that used to sit here computed
+    # ``eta/H`` IN THE GATE -- a division the model does not perform -- and
+    # compared it against NEMO's ``r3t``, so it scored the gate's own
+    # arithmetic on top of legoESM's ssh.  Both statements are scored
+    # separately now, and each says what it owns.
+    import jax.numpy as jnp
+
+    from legoesm.ocean.vertical import compute_ocean_jacobian
+    stage3 = read_stage(record.parent / STAGE3_RECORD, 3)
+    nemo_ssha = np.asarray(stage3["ssh"], dtype=np.float64)
+    one_plus_r3t = 1.0 + r3t_aa
+    # (a) THE STATEMENT, given NEMO's own ssh: legoESM's shared stretch helper
+    #     fed NEMO's ssh(Kaa) must reproduce NEMO's own 1 + r3t(Kaa), which is
+    #     ``pssh * r1_ht_0`` (domqco.F90:209) with r1_ht_0 = 1/ht_0 on a wet
+    #     column (domain.F90:158).
+    lego_given = np.asarray(compute_ocean_jacobian(
+        jnp.asarray(nemo_ssha), jnp.asarray(H), card.recipe.z_coord),
+        dtype=np.float64)
+    rows.append(_wet_row("dz_owner.stretch_given_nemo_ssh",
+                         one_plus_r3t, lego_given, wet[..., 0]))
+    # (b) THE SAME STATEMENT on the model's own path, which additionally
+    #     carries legoESM's own ssh(Kaa) out of the stage-3 update.
+    lego_path = np.asarray(compute_ocean_jacobian(
+        jnp.asarray(eta_aa), jnp.asarray(H), card.recipe.z_coord),
+        dtype=np.float64)
+    rows.append(_wet_row("dz_owner.stretch_model_path",
+                         one_plus_r3t, lego_path, wet[..., 0]))
     rows.append(_wet_row("dz_owner.dz_after", e3t_aa,
                          np.asarray(live["dz"]), wet))
     return {
         "worktree": worktree_stamp(),
         "record": str(record),
+        "stage3_record": str(record.parent / STAGE3_RECORD),
+        "stage3_record_sha256": sha256(record.parent / STAGE3_RECORD),
         "record_self_consistent_cells_unequal": record_consistent,
         "rows": rows,
-        "owner": ("the reference thickness is bit-shared, so the residual is "
-                  "owned by the STRETCH -- legoESM's own ssh(Kaa) out of the "
-                  "stage-3 update -- unless the reference row says otherwise"),
+        "owner": ("the reference thickness is bit-shared and the stretch "
+                  "statement is bit-exact given NEMO's own ssh, so whatever "
+                  "remains on the model path is owned by legoESM's own "
+                  "ssh(Kaa) out of the stage-3 update"),
     }
 
 
