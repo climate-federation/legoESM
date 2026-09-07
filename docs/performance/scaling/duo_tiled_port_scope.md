@@ -688,3 +688,20 @@ single-device window bundle called the per-level barrier impls with the
 whole level stack, aliasing levels inside their flattening -- found by
 codex, fixed with a vmap and a K>1 parity test in dcfa867da (the model
 gates could not see it: they run the SPMD arm).
+
+### Band lever, attributed (job 9676161, one allocation, interleaved)
+
+| arm | s/step |
+|---|---|
+| full refresh | 0.236 |
+| band refresh | 0.217 |
+| band refresh (repeat) | 0.229 |
+| full refresh (repeat) | 0.239 |
+
+Both band arms sit below both full arms; full clusters at 0.236-0.239
+(and 0.237 in the earlier in-place row), band at 0.217-0.229 (and
+0.218-0.220 in the three-repeat job).  So the band-restricted per-firing
+refresh is worth about **14 ms/step (~6 %)**, CONFIRMED in-allocation and
+bitwise in every arm.  Note the within-allocation spread here was 12 ms
+between the two band arms, larger than the 1 ms of job 9675236 -- treat
+~10 ms as the resolution of a single row either way.
