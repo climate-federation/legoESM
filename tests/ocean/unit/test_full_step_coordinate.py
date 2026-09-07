@@ -127,3 +127,54 @@ def test_t_depth_ref_propagated(zref):
     z_noref = create_z_star_from_thicknesses(np.asarray(zref.dz_ref))
     c2 = create_full_step_coordinate(z_noref, jnp.asarray([4], dtype=jnp.int32))
     assert c2.t_depth_ref is None
+
+
+def test_jacobian_forms_nemos_ratio_before_adding_one(zref):
+    """The quasi-Eulerian stretch is NEMO's ``1 + ssh/ht_0``, not ``(ssh+H)/H``.
+
+    ``dom_qco_r3c_RK3`` writes ``r3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)``
+    (``domqco.F90:209``) with ``r1_ht_0 = ssmask/(ht_0 + 1 - ssmask)``
+    (``domain.F90:158``), i.e. exactly ``1/ht_0`` on a wet column, and the
+    thickness macro is ``e3t = e3t_0*(1 + r3t)``
+    (``domzgr_substitute.h90:139``).  NEMO never rounds the SUM
+    ``ssh + ht_0`` first.
+
+    The operands below are GYRE's own uniform ``ht_0`` and four of its kt=1
+    stage-3 ``ssh`` values; on every one of them the two forms disagree in the
+    last bit, so this test FAILS on the pre-round-40 ``(eta + H)/H``.
+    """
+    ht_0 = 4300.710017215397
+    ssh = np.array([-0.0013969278195402545, -0.0014360062781082884,
+                    -0.0014051606031964237, -0.0013718170244874474])
+    coord = create_full_step_coordinate(
+        zref, jnp.full(ssh.shape, len(np.asarray(zref.dz_ref)),
+                       dtype=jnp.int32))
+    bathy = np.full(ssh.shape, ht_0)
+
+    nemo = 1.0 + ssh * (1.0 / ht_0)
+    sum_first = (ssh + ht_0) / ht_0
+    # Non-vacuity: the two forms really do differ on these operands, so the
+    # equality below cannot be satisfied by both.
+    assert not np.any(nemo == sum_first)
+
+    got = np.asarray(compute_ocean_jacobian(
+        jnp.asarray(ssh), jnp.asarray(bathy), coord))
+    np.testing.assert_array_equal(got, nemo)
+
+
+def test_jacobian_min_column_clip_is_unchanged_by_the_ratio_form(zref):
+    """legoESM's own ``min_water_column_m`` floor keeps its pre-round-40 value.
+
+    NEMO has no such floor; expressing it on the Jacobian rather than on the
+    water column leaves every clipped cell at exactly ``min_col/H`` and every
+    unclipped cell bit-identical to the unclipped call.
+    """
+    coord = create_full_step_coordinate(
+        zref, jnp.full((3,), len(np.asarray(zref.dz_ref)), dtype=jnp.int32))
+    bathy = jnp.asarray([1.0, 1.0, 4300.710017215397])
+    eta = jnp.asarray([-0.9, -0.2, -0.0013969278195402545])   # first is clipped
+    clipped = np.asarray(compute_ocean_jacobian(
+        eta, bathy, coord, min_water_column_m=0.5))
+    plain = np.asarray(compute_ocean_jacobian(eta, bathy, coord))
+    assert clipped[0] == 0.5 / 1.0
+    np.testing.assert_array_equal(clipped[1:], plain[1:])

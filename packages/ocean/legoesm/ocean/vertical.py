@@ -1598,7 +1598,8 @@ def compute_ocean_jacobian(
     -------
     array : Jacobian, shape (...).
     """
-    if getattr(z_coord, "linear_free_surface", False):
+    linssh = bool(getattr(z_coord, "linear_free_surface", False))
+    if linssh:
         # NEMO key_linssh: the column NEVER stretches — J is the eta=0
         # reference (H_bathy/H_max; ==1 on a flat bottom where H_bathy==H_max).
         # No min-column clip: the fixed column is positive by construction.
@@ -1617,7 +1618,27 @@ def compute_ocean_jacobian(
         # column are masked, so the value is physically inert; wet columns
         # (H_bathy > 0) are bit-identical.
         H_safe = jnp.maximum(H_bathy, 1.0e-10)
-        return jnp.where(H_bathy > 0.0, water_col / H_safe, 1.0)
+        # NEMO forms the RATIO first and adds ONE.  It never forms
+        # (ssh + ht_0)/ht_0:
+        #   r3t(i,j)  = ssh(i,j) * r1_ht_0(i,j)              domqco.F90:209
+        #   r1_ht_0   = ssmask / (ht_0 + 1 - ssmask), i.e. exactly 1/ht_0 on
+        #               a wet column                          domain.F90:158
+        #   e3t(i,j,k,t) = e3t_0(i,j,k) * (1 + r3t(i,j,t))
+        #                                        domzgr_substitute.h90:139
+        # Rounding the SUM first loses the low bits of the small ratio to
+        # cancellation.  Measured on GYRE's kt=1 stage-3 ssh against NEMO's
+        # own dumped arrays: (eta+H)/H differs from NEMO's 1+r3t_Kaa on 221
+        # of 600 wet columns at 2.220446e-16 and its e3t on 5207 of 18000
+        # cells at 1.136868e-13, while 1 + eta*(1/ht_0) reproduces both at
+        # 0 cells unequal.  The clip below is legoESM's own and NEMO has
+        # none; expressing it on J rather than on the column keeps every
+        # clipped cell bit-identical to the pre-round-40 value.
+        stretch = (jnp.zeros_like(jnp.asarray(eta) * H_safe) if linssh
+                   else jnp.asarray(eta) / H_safe)
+        jac = 1.0 + stretch
+        if min_water_column_m is not None and not linssh:
+            jac = jnp.maximum(jac, min_col / H_safe)
+        return jnp.where(H_bathy > 0.0, jac, 1.0)
     return water_col / z_coord.H_max
 
 
