@@ -1230,6 +1230,13 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # returned u/v slots after the full step.  This is a diagnostic seam, not
     # a constructible scheme selector.
     expose_momentum_operator: str = ""
+    # Which WS-RK3 stage the exposure above reads.  Stage 2 is where the
+    # source-order walk started and stays the default; stage 3 reads the
+    # PRODUCTION stage-3 call.  The construction guard above already refuses
+    # this hook together with ``expose_stage3_momentum_rhs`` -- they share the
+    # returned u/v slots -- so the stage-3 buckets and the stage-3 total are
+    # necessarily two runs, and a gate that adds them must say so.
+    expose_momentum_operator_stage: int = 2
     # One-variable ablation of NEMO's stage update association.  Public
     # WS-RK3 integrates the full Krhs and only then applies the reference-depth
     # barotropic replacement (stprk3_stg.F90:396-446).  This hook restores the
@@ -2307,6 +2314,11 @@ class LatLonCGridOceanModel:
         if self._nemo_ws_test_hooks.expose_momentum_stage not in (0, 1, 2, 3):
             raise ValueError(
                 "expose_momentum_stage must be one of 0, 1, 2, or 3")
+        if self._nemo_ws_test_hooks.expose_momentum_operator_stage not in (
+                2, 3):
+            raise ValueError(
+                "expose_momentum_operator_stage must be 2 or 3; stages 1 and "
+                "3-with-lateral-mixing are served by other hooks")
         if self._nemo_ws_test_hooks.expose_tracer_stage1_boundary not in (
                 "", "after_advection", "after_sbc"):
             raise ValueError(
@@ -5259,8 +5271,10 @@ class LatLonCGridOceanModel:
                         (v_in + (transport_v_mean - current_v_mean)[..., None])
                         * _ws_stage_v_mask,
                     )
+                _operator_stage = (
+                    self._nemo_ws_test_hooks.expose_momentum_operator_stage)
                 _expose_operator = (
-                    stage_index == 2
+                    stage_index == _operator_stage
                     and bool(self._nemo_ws_test_hooks.expose_momentum_operator))
                 td_result = self.tendencies(
                                      st, surface_forcing, sponge=sponge, dt=dt,

@@ -128,3 +128,43 @@ def test_the_production_default_still_constructs():
     card = build_nemo_testcase_card("GYRE-zco")
     assert LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+
+
+@pytest.mark.parametrize("stage", [0, 1, 4, -1])
+def test_operator_exposure_stage_is_dispatch_hardened(stage):
+    """An unknown operator-exposure stage RAISES; it never silently does nothing.
+
+    Stages 1 and 3-with-lateral-mixing are served by other hooks, so a gate
+    that asks for one of them here would otherwise get an empty exposure and
+    score the ordinary prognostic velocity under an operator's name.
+    """
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
+    )
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
+
+    card = build_nemo_testcase_card("GYRE-zco")
+    with pytest.raises(ValueError, match="expose_momentum_operator_stage"):
+        LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                expose_momentum_operator="hpg",
+                expose_momentum_operator_stage=stage))
+
+
+@pytest.mark.parametrize("stage", [2, 3])
+def test_operator_exposure_accepts_the_two_walked_stages(stage):
+    """Synthetic-violation companion: 2 and 3 must both construct."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
+    )
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
+
+    card = build_nemo_testcase_card("GYRE-zco")
+    assert LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_momentum_operator="vorticity",
+            expose_momentum_operator_stage=stage))
