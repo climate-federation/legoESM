@@ -54,6 +54,7 @@ from pathlib import Path
 import numpy as np
 from legoesm.ocean.fidelity.provenance import worktree_stamp
 from nemo_testcase_l2_gyre_phase3_gate import (
+    BAR,
     CASE,
     DIMS,
     _surface_forcings,
@@ -421,6 +422,18 @@ def run_terms(oracle_root: Path, *, plant: bool = False) -> dict:
                 "hpg": "after_hpg (dyn_hpg OVERWRITES Krhs)",
                 "vorticity": "after_vor - after_hpg",
                 "advection": "after_adv - after_vor"}[name]
+            # THE BAR, IN THE GATE.  The campaign's shared scorer normalises
+            # by max(|reference|, 1), so for a field whose own maximum is
+            # 1.8e-13 an AT-BAR verdict is VACUOUS -- it would pass an
+            # operator carrying a per-cent relative error.  A per-operator row
+            # is AT-BAR only if it also clears the bar RELATIVE to the
+            # operator's own magnitude, which is the quantity a transcription
+            # defect lives in.
+            row["relative_bar"] = BAR
+            if row["n_unequal"] and row["relative_max_abs"] > BAR:
+                row["status"] = "DEBT"
+                row["debt_reason"] = (
+                    "relative to the operator's own maximum, not to 1.0")
             rows.append(row)
 
     # The vorticity divisor, given NEMO's own ssh: legoESM's shared literal
