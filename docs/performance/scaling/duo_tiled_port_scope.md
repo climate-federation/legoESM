@@ -664,3 +664,27 @@ concurrent collective-permutes sharing a rendezvous key.  Open item; the
 gate refuses that combination.  Cumulative this session at C96/54 ranks:
 0.98 (loop-arm C-pressure) -> 0.256 -> 0.211 s/step, 6-rank flat 1.124
 (5.3x on 9x ranks); compute floor 0.12.
+
+## 2026-09-07 — NOISE FLOOR, and a correction to the M8 ladder
+
+The same configuration, timed three times inside ONE allocation (job
+9675236, C96 kt=3, 54 ranks): 0.218 / 0.220 / 0.219 s/step -- repeatable
+to about 1 ms.  But the SAME code measured 0.211 on one node set and
+0.222 on another, so the between-allocation spread is ~10 ms.  **Every
+rung of the M8 ladder above was measured in a different allocation and
+each was 11-19 ms, i.e. at that spread**: the cumulative 0.256 -> ~0.219
+is real, the individual rungs are NOT attributable.  The band lever is
+the only flag-selectable one, so it is now measured as an interleaved
+full/band/band/full A/B inside one allocation
+(`tiled_m6_band_ab.sbatch`); the level-batching and placement changes
+would need their own runtime switch to be attributed the same way, and
+they are kept for their other merits (fewer ops, no whole-window copies,
+bitwise) rather than for a claimed time.
+
+Also this session: the flux barrier's level batching had landed on the
+LOOP arm only, so the window step still fired it per level (59 -> 32
+firings, 748 -> 451 collectives when fixed, dd1662f1f); and the
+single-device window bundle called the per-level barrier impls with the
+whole level stack, aliasing levels inside their flattening -- found by
+codex, fixed with a vmap and a K>1 parity test in dcfa867da (the model
+gates could not see it: they run the SPMD arm).
