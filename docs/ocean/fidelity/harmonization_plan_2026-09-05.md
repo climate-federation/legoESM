@@ -282,3 +282,26 @@ aux3d linkage and the minimum-level policy, not just counts.
   no-op on a missing K key, 0.0==False flag trap, resolved-manifest gate in the arm card (occupancy alone
   cannot tell the hard bn2 trigger from the legacy smooth one). Tests 21 passed. Arm card _trp_evd_d30
   drafted with pre-registration; NOT launched (user decision 1 pending).
+- 2026-09-07 12:45 EVD ARM LAUNCHED (jobs 9676756 -> 9676757, frozen tree _evd_wt @500483876, outputs
+  results/omip_nemo/trp_evd_d30, ~5 h/leg). One variable vs trp_base2: ORCA1's ln_zdfevd (rn_evd 100 on
+  tracers, nn_evdm 0) with NEMO's own bn2/TEOS-10 hard trigger at -1e-12.
+  THREE-WAY REVIEW BEFORE ANY CODE: GLM approve-after-registry-edits, and it settled the coefficient
+  question -- NEMO's published mean avt is rn_evd x duty cycle, so K_conv=100 is the namelist value, not
+  a fit; codex all MINOR (backward Euler stable at 100 m2/s, K_bg=0 removes only the EVD stable branch,
+  nu_conv=0 leaves momentum alone, csv append and manifest path fine); Claude CRITICAL that
+  diagnose_vertical_K carries no jit of its own, so the hourly sampler was an eager eORCA1 step.
+  THE PREFLIGHT THEN CAUGHT THREE MORE, each in minutes rather than hours into a 14 GPU-hour arm:
+  (1) even compiled the K sampler cost 42 s/call (~17 steps) -> instrument swapped to the TRIGGER
+  (NEMO bn2 at the top 3 interfaces from a 4-level T/S slice; under a hard trigger that IS the firing
+  fraction, and a control can be measured too, at rn_evd/2);
+  (2) that sampler read z_center_ref, which OceanPartialCellCoordinate does not carry -> ladders now
+  come from the shared nemo_bn2_depth_ladders, the same helper the trigger itself uses, with a
+  partial-cell regression test;
+  (3) the run's reported rate is CUMULATIVE and so was swamped by the compile (0.066 steps/s on 63
+  steps) -> the preflight now derives the incremental rate between diagnostic rows and refuses to pass
+  a leg that would not fit its wall clock. Measured steady rate WITH the sampler: 0.471 steps/s
+  (control 0.42-0.44), i.e. the instrument is free; and 13 h exceeded the short partition's 12 h
+  ceiling, which parks a job in PartitionTimeLimit forever -> 11:55.
+  Preflight also confirmed the resolved config is exactly the NEMO trigger and that the instrument
+  discriminates: over a full diurnal cycle on the spin-up state, cold-tongue firing 0.61 mean / 0.77
+  max at the first interface, 0.81 over the top three, global 0.31.
