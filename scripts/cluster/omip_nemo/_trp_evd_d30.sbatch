@@ -51,8 +51,12 @@
 #     5-30 -> the trigger never fired; fix the wiring, do not draw physics.
 #   Hourly sampling under-resolves sub-hourly firing, so the occupancy is a
 #   LOWER bound -- which is the safe direction for both the 0.3 and 0.02 bars.
-#   Consistency identity to report (GLM): box time-mean K should be about
-#   100 x (hourly >=50 m2/s fraction) + the stable-branch background.
+#   The occupancy columns measure the TRIGGER (NEMO bn2 <= -1e-12 at the top
+#   interfaces), which under the hard trigger IS the firing fraction and costs
+#   a top-levels slice; measuring the delivered K hourly is not affordable
+#   (diagnose_vertical_K has no jit of its own: 42 s per call, ~17 steps).
+#   GLM's consistency identity therefore reads the SNAPSHOT K dumps
+#   (--kprofile-snapshots) against the trigger duty cycle, not an hourly K.
 set -uo pipefail
 PIN=${1:?usage: sbatch _trp_evd_d30.sbatch <pinned-sha> [leg: 1|2]}
 LEG=${2:-1}

@@ -96,3 +96,28 @@ def test_occupancy_counts_the_first_interface_in_the_box_and_globally():
     # a half-strength K does not count as the convective branch
     K_H[0, 0, 0] = 40.0
     assert core2.evd_top_interface_occupancy(K_H, land, lat, lon, 100.0)[0] == 0.0
+
+
+def test_trigger_occupancy_counts_unstable_top_interfaces():
+    """The occupancy instrument measures NEMO's own trigger: a column with an
+    inversion in the top cell fires at interface 1, a stratified one never
+    does, and a dry column is never counted."""
+    core2 = _core2()
+    gdept = np.array([0.51, 1.56, 2.68, 3.87])
+    gdepw = np.array([1.08, 2.10, 3.22])
+    #            box column, inverted   box column, stable   outside the box
+    T = np.array([[[22.0, 25.9, 25.6, 25.3],
+                   [25.9, 25.7, 25.5, 25.2],
+                   [22.0, 25.9, 25.6, 25.3]]])
+    S = np.full_like(T, 35.0)
+    lat = np.array([[0.0, 1.0, 20.0]])
+    lon = np.array([[230.0, 235.0, 230.0]])
+    land = np.ones_like(lat)
+    f_box, f_glob, f_box3 = core2.evd_trigger_occupancy(
+        T, S, gdept, gdepw, land, lat, lon)
+    assert f_box == pytest.approx(0.5)          # one of the two box columns
+    assert f_glob == pytest.approx(2.0 / 3.0)   # the off-box column fires too
+    assert f_box3 == pytest.approx(0.5)         # nothing fires deeper
+    land[0, 0] = 0.0                            # dry: the firing column leaves
+    assert core2.evd_trigger_occupancy(
+        T, S, gdept, gdepw, land, lat, lon)[0] == pytest.approx(0.0)

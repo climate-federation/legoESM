@@ -982,7 +982,8 @@ _EVD_OCC_K_THRESHOLD_CONTROL = 50.0
 # Longitude the per-sample local solar hour is referenced to (the centre of
 # the cold-tongue occupancy box, 220-240E).
 _EVD_OCC_BOX_LON_C = 230.0
-_evd_K_jit: dict = {}
+# How many top interfaces the "any of" column spans.
+_EVD_OCC_N_TOP = 3
 
 
 def _flag_set(v):
@@ -1028,6 +1029,37 @@ def build_enhanced_diffusion_config(args):
             "(state.T_before/S_before); run_omip_core2 has none, so the "
             "trigger is now-only here (as NEMO's own key_RK3 build).")
     return EnhancedDiffusionConfig(**fields)
+
+
+def evd_trigger_occupancy(T_top, S_top, gdept, gdepw_int, land_mask,
+                          lat2d, lon2d, threshold=-1e-12,
+                          lon_lo=220.0, lon_hi=240.0, lat_halfwidth=2.0,
+                          n_top=3):
+    """Fraction of wet columns whose top interfaces are statically UNSTABLE by
+    NEMO's own bn2: ``(box first interface, global first, box any-of-n_top)``.
+
+    This is the quantity ``zdf_evd`` tests (``MIN(rn2, rn2b) <= rn_evd``'s
+    threshold), so under the hard trigger it IS the firing fraction -- and it
+    costs a slice of the top ``n_top + 1`` levels instead of a full
+    re-evaluation of the mixing (``diagnose_vertical_K`` carries no jit of its
+    own and measured 42 s per call on eORCA1, about 17 model steps, which no
+    hourly cadence can afford).  On a control it answers the companion
+    question: how often WOULD NEMO's scheme have fired.
+    """
+    from legoesm.ocean.eos import compute_buoyancy_frequency_nemo_bn2
+    k = n_top + 1
+    N2 = np.asarray(compute_buoyancy_frequency_nemo_bn2(
+        np.asarray(T_top)[..., :k], np.asarray(S_top)[..., :k],
+        np.asarray(gdept)[:k], np.asarray(gdepw_int)[:n_top],
+        eos_form="teos10", e3w_source="depth_difference"))
+    wet = np.asarray(land_mask) > 0.5
+    fired_top = (N2[..., 0] <= threshold) & wet
+    fired_any = (N2[..., :n_top] <= threshold).any(axis=-1) & wet
+    lat = np.asarray(lat2d)
+    lon = np.asarray(lon2d) % 360.0
+    box = wet & (np.abs(lat) <= lat_halfwidth) & (lon >= lon_lo) & (lon < lon_hi)
+    _m = lambda f, sel: float(f[sel].mean()) if sel.any() else float("nan")
+    return _m(fired_top, box), _m(fired_top, wet), _m(fired_any, box)
 
 
 def evd_top_interface_occupancy(K_H, land_mask, lat2d, lon2d, K_conv,
@@ -8187,26 +8219,27 @@ def main() -> int:
 
     _csv_cols = ["step", "day", "mean_sst_C", "mean_sss", "max_abs_u",
                  "max_abs_v", "umax_lat", "umax_lon", "umax_lev", "steps_per_s"]
-    # --evd-occupancy-every-hours: the convective K at the first interior
-    # interface, sampled every H hours through diagnose_vertical_K, averaged
-    # since the previous row (a 00Z-only sample would sit at the diurnal
-    # maximum of stratification and read zero by construction).  Added ONLY
-    # when the flag is on so other runs keep the legacy header.
+    # --evd-occupancy-every-hours: how often the EVD trigger is satisfied at
+    # the top interfaces, sampled every H hours and averaged since the
+    # previous row (a 00Z-only sample would sit at the diurnal maximum of
+    # stratification and read zero by construction).  Added ONLY when the flag
+    # is on so other runs keep the legacy header.
     _evd_occ_every = None
     _evd_occ_acc = None
     if args.evd_occupancy_every_hours is not None:
         _evd_occ_every = max(1, int(round(
             args.evd_occupancy_every_hours * 3600.0 / dt)))
         _evd_occ_acc = [0.0, 0.0, 0.0, 0]     # sums: box, global, box-top3; n
-        # Threshold: K_conv/2 when EVD runs; NEMO's rn_evd/2 on a control
-        # (measures whether the closure alone ever reaches the EVD range).
-        _evd_occ_K = (args.convection_K_conv
-                      if args.convection == "enhanced_diffusion"
-                      else 2.0 * _EVD_OCC_K_THRESHOLD_CONTROL)
-        print(f"[setup] EVD occupancy: every {_evd_occ_every} steps, "
-              f"K >= {0.5 * _evd_occ_K:g} m2/s, cold-tongue box + global; "
-              "each csv row = mean since the previous row (a restarted leg "
-              "starts a fresh window)", flush=True)
+        # The static-stability threshold the trigger fires at: the run's own
+        # when EVD is on, NEMO's zdfevd value on a control (so a control
+        # answers "how often WOULD it have fired").
+        _evd_occ_thr = (args.convection_n2_threshold
+                        if args.convection_n2_threshold is not None else -1e-12)
+        print(f"[setup] EVD trigger occupancy: every {_evd_occ_every} steps, "
+              f"N2 <= {_evd_occ_thr:g} 1/s2 at the top {_EVD_OCC_N_TOP} "
+              "interfaces, cold-tongue box + global; each csv row = mean "
+              "since the previous row (a restarted leg starts a fresh window)",
+              flush=True)
     # Prognostic-ice columns (audited output gap: ice growth was invisible in
     # the run record): global ice area [m2], mean concentration over the
     # ice-covered wet cells, max thickness [m] — the _ice_global_stats trio
@@ -8578,8 +8611,8 @@ def main() -> int:
             "diffusivities) or drop --kprofile-snapshots.")
     if _evd_occ_every is not None and use_scan:
         raise SystemExit(
-            "--evd-occupancy-every-hours samples diagnose_vertical_K inside "
-            "the per-step loop; drop --scan-block.")
+            "--evd-occupancy-every-hours samples inside the per-step loop; "
+            "drop --scan-block.")
     if int(args.scan_block) > 0 and not use_scan:
         why = ("AB2 tracer time integrator (None->Field carry breaks "
                "lax.scan)" if _tti == "ab2"
@@ -8883,10 +8916,10 @@ def main() -> int:
     # 8-step target applied the forcing for steps 1..8 to that state, advanced
     # twelve physical steps, and then labelled the result step 8. The scan
     # lane already continued the counter; this one did not.
-    if _evd_occ_every is not None and not hasattr(model, "diagnose_vertical_K"):
+    if _evd_occ_every is not None and getattr(z_coord, "z_half_ref", None) is None:
         raise SystemExit(
-            "--evd-occupancy-every-hours needs a model with diagnose_vertical_K "
-            "(the lat-lon C-grid / tripole model); this one has none.")
+            "--evd-occupancy-every-hours needs a z_coord carrying z_half_ref "
+            "(the interface ladder the bn2 trigger is evaluated on).")
     for step in range(start_step + 1, n_steps + 1):
         it = _idx_t(step, dt, n_rec)
         _t_sec = jnp.asarray((step - 1) * dt) if _tide_on else None
@@ -9619,21 +9652,22 @@ def main() -> int:
             _pers_res.count_leaf_full(gathers=len(_upd), uploads=len(_upd))
             state = state._replace(**_upd)
         if _evd_occ_every is not None and step % _evd_occ_every == 0:
-            # COMPILED: diagnose_vertical_K itself carries no jit (only
-            # ``_step_jitted`` does), and an eager eORCA1 step is 5-20x a
-            # compiled one -- an hourly eager sample would cost more than the
-            # run.  One compile per model object (the viscosity schedule
-            # rebuilds it a few times a leg).
-            _fn = _evd_K_jit.get(id(model))
-            if _fn is None:
-                _evd_K_jit.clear()
-                _fn = jax.jit(
-                    lambda _st, _sf, _m=model: _m.diagnose_vertical_K(
-                        _st, dt, surface_forcing=_sf)[0])
-                _evd_K_jit[id(model)] = _fn
-            _K_H = np.asarray(_fn(state, sf))
-            _fb, _fg, _f3 = evd_top_interface_occupancy(
-                _K_H, state.land_mask.data, lat2d, lon2d, _evd_occ_K)
+            # The TRIGGER, from a slice of the top levels: NEMO's bn2 there is
+            # exactly what zdf_evd tests, so under the hard trigger this IS
+            # the firing fraction, and it costs a small host transfer.
+            # (Measuring the delivered K instead needs diagnose_vertical_K,
+            # which carries no jit of its own and measured 42 s per call on
+            # eORCA1 -- ~17 model steps, more than the run it instruments.
+            # The K itself is still dumped at snapshot cadence by
+            # --kprofile-snapshots.)
+            _kt = _EVD_OCC_N_TOP + 1
+            _fb, _fg, _f3 = evd_trigger_occupancy(
+                np.asarray(state.T.data[..., :_kt]),
+                np.asarray(state.S.data[..., :_kt]),
+                np.abs(np.asarray(z_coord.z_center_ref)),
+                np.abs(np.asarray(z_coord.z_half_ref)[1:-1]),
+                state.land_mask.data, lat2d, lon2d,
+                threshold=_evd_occ_thr, n_top=_EVD_OCC_N_TOP)
             _evd_occ_acc[0] += _fb
             _evd_occ_acc[1] += _fg
             _evd_occ_acc[2] += _f3
