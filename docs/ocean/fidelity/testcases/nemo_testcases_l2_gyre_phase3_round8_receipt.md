@@ -10749,6 +10749,31 @@ register as debt naming its boundary, which is the stretch's last bit and not
 a physics change.  LOCK_EXCHANGE's largest move is
 `kt10.before.u` `1.137147e-11` -> `1.137243e-11`, still DEBT on both sides.
 
+### kt = 1..10, before and after
+
+BEFORE was taken at `c37c05ee8951` in a detached probe worktree, same gates,
+same oracle roots, same `--max-step 10`, so the two arms differ only in the
+model.
+
+| card | first over bar BEFORE | first over bar AFTER | rows moved | status changes |
+|---|---|---|---:|---:|
+| GYRE-zco | kt=2, **u v** | kt=2, **u v** | 39 / 50 | 0 |
+| LOCK_EXCHANGE-zco | kt=4, u | kt=4, u | 21 / 50 | 0 |
+| OVERFLOW-zps | kt=2, T u | kt=2, T u | 20 / 50 | **1** |
+
+**No card's first-over-bar step moves earlier and no card's failing fields
+change.**  GYRE's kt=2 `T` and `S` stay AT-BAR-NOT-EXACT and both IMPROVE —
+`T` from `7.567947e-16` to `6.054358e-16` and `S` from `9.643957e-16` to
+`5.786374e-16` — while `u` and `v` stay DEBT at `2.747840e-12` and
+`3.305560e-12`.  This round did not touch the operator that owns those two; it
+NAMED it.
+
+Every moved row is registered.  GYRE's 39 are last-digit movement on rows that
+are already DEBT downstream of the kt=2 `u`/`v` divergence, the largest
+relative being `-1.28e-07` on `kt3.before.ssh`.  LOCK_EXCHANGE's largest is
+`kt10.before.u`, `1.137147e-11` to `1.137243e-11`, DEBT on both sides.
+OVERFLOW's one status change is the worsened row named above.
+
 ### What two independent reviews broke
 
 codex is unavailable on this account, so both reviews are fresh Claude agents
@@ -10867,4 +10892,37 @@ fast-forward.  **HOLD.**
    30's `dyn_ldf` row, the moved trajectory rows from rounds 32-34 and this
    one, the slow forcing's depth average: unchanged.
 4. ORCA2, and every partial-cell card without a trajectory gate.
+
+### Gates and evidence
+
+The stage-3 operator gate at this round's tip: the record's own closure
+against the pre-dyn_ldf frame is 0 cells unequal on both faces; dyn_hpg is
+EXACT at 0 of 17400 and 0 of 17100; dyn_vor is AT-BAR at 9.926167350636332e-24
+on both; dyn_adv is DEBT at 2.0614443630503727e-16 and 2.4827278704178648e-16,
+relative 1.15e-03 and 9.88e-04, and the gate exits non-zero naming advection as
+the first operator over the bar.  The e3f_vor operand row is 0 of 16530 at
+absolute maximum 0.  The stage-3 input arm is AT-BAR on all five operands.
+
+The slope arm: NEMO's nmln is reproduced at 0 of 600 under the n2_integral
+criterion and missed on 290 of 600 under the card's rho_c default; hmlp is
+1.3422e-05 m and 10.2647 m respectively.  The arm refuses a record whose own
+uslp is identically zero.  The mixed-layer fold arm exits non-zero on its own
+refutation and did not fire: the measured move is 98.0 per cent against a
+10 per cent falsifier.
+
+The dz_owner arm: reference_thickness 0 of 18000, stretch_given_nemo_ssh 0 of
+600, stretch_model_path 0 of 600, dz_after 0 of 18000, every one at absolute
+maximum 0, and its verdict sentence is derived from those rows rather than
+asserted beside them.
+
+The ldf_slp acquisition's own gates, re-run from a clean tree at this tip
+because the operator's run hit the fail-closed stamp on a dirty worktree: the
+round-29 matrix regression is AT-BAR at 0 of 21120 on every row, its plant
+turns the solve rows red and exits non-zero, and round40_outputs.sha256 is
+written over 65 files.  The stage3_terms acquisition's own admission and
+source admission both report PASS with zero violations, and its header verdict
+is PASS.
+
+The receipt citation gate is PASS over 251 citations, 0 unmapped, 0 failures,
+0 map entries failing their own audit, and all 9 self-test plants fired.
 
