@@ -55,22 +55,23 @@ from legoesm import constants
 from legoesm.timestepping.tridiagonal import thomas_solve_batched
 
 __physics_contract__ = {
-    "scheme": "gm_bvp",
-    "description": (
+    "summary": (
         "Ferrari et al. (2010) boundary-value problem for the Gent-McWilliams "
         "eddy streamfunction: c^2 Gamma_zz - N^2 Gamma = (g/rho_0) grad_h(rho) "
         "kappa with Gamma = 0 at both vertical boundaries, replacing the "
         "diagnostic Gamma = kappa*S."
     ),
-    "units": {
-        "Gamma": "m^2/s (eddy streamfunction, per horizontal direction)",
+    "inputs": {
         "sigma_h": "kg/m^4 (horizontal gradient of potential density)",
         "N2": "1/s^2",
-        "kappa_gm": "m^2/s",
+        "cfg.kappa_gm": "m^2/s",
         "c_wave": "m/s",
+    },
+    "outputs": {
+        "Gamma": "m^2/s (eddy streamfunction, per horizontal direction)",
         "u_bolus": "m/s",
     },
-    "signs": (
+    "sign_convention": (
         "z is POSITIVE UP; layer thicknesses are positive. Gamma is the "
         "streamfunction whose vertical derivative is the bolus velocity, "
         "u* = d(Gamma_x)/dz, so a positive d(Gamma)/dz is an eastward bolus "
@@ -78,18 +79,16 @@ __physics_contract__ = {
         "a density surface sloping up to the north gives a northward eddy "
         "transport that flattens it -- the GM sign convention."
     ),
-    "conserves": (
-        "Tracer variance is not created: the transport is the curl of a "
-        "streamfunction that VANISHES at both boundaries, so the bolus "
-        "velocity is non-divergent in the vertical integral and moves no net "
-        "volume through the column. The zero boundary condition is what makes "
-        "that exact here, where the diagnostic form relies on tapering."
-    ),
-    "differentiable": (
-        "Yes. The tridiagonal solve is thomas_solve_batched (custom VJP, "
-        "cuSPARSE on GPU); dry columns get identity rows rather than a "
-        "data-dependent branch, so shapes are static and gradients finite."
-    ),
+    # Tracer variance is not created: the transport is the curl of a
+    # streamfunction that VANISHES at both boundaries, so the bolus velocity is
+    # non-divergent in the vertical integral and moves no net volume through the
+    # column. The zero boundary condition is what makes that exact here, where
+    # the diagnostic form relies on tapering.
+    "conserves": ["tracer", "volume"],
+    # The tridiagonal solve is thomas_solve_batched (custom VJP, cuSPARSE on
+    # GPU); dry columns get identity rows rather than a data-dependent branch,
+    # so shapes are static and gradients finite.
+    "differentiable": True,
     "reference": "Ferrari, Griffies, Nurser & Vallis (2010), Ocean Modelling 32, 143-156",
     "idealized_test": (
         "tests/ocean/unit/test_gm_bvp.py: the strong-stratification limit "

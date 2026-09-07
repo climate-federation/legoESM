@@ -19,6 +19,8 @@ import sys
 
 import pytest
 
+from legoesm import constants
+
 jax = pytest.importorskip("jax")
 jax.config.update("jax_enable_x64", True)
 
@@ -36,10 +38,10 @@ def _load():
 
 
 def _fluxes(mod, *, frac_land, T_land, beta=1.0):
-    col = mod._column(T_air=273.15, q_air=2.0e-3, wind=8.0,
+    col = mod._column(T_air=constants.T_freeze, q_air=2.0e-3, wind=8.0,
                       p_sfc=1.0e5, rho=1.25)
     return mod._pair(frac_land=frac_land, frac_ice=0.0,
-                     T_ocean=278.15, T_ice=273.15, T_land=T_land,
+                     T_ocean=278.15, T_ice=constants.T_freeze, T_land=T_land,
                      beta=beta, col=col, p_sfc=1.0e5)
 
 
