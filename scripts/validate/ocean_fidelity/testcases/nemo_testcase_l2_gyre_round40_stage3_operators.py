@@ -82,6 +82,12 @@ OPERATORS = ("hpg", "vorticity", "advection")
 TERMS_ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
                   "round40_oracle_stage3_terms")
 TERMS_RECORD = "oracle_rkstage3_terms_kt00000001.bin"
+# The round-40 ldf_slp acquisition, kt = nit000 + 1 -- the first step whose
+# BEFORE state carries the horizontal structure step 1 created, and therefore
+# the first record in which NEMO's own slopes are not identically zero.
+SLOPES_ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+                   "round40_oracle_ldfslp")
+SLOPES_RECORD = "oracle_ldfslp_kt00000002.bin"
 
 
 def read_stage3_terms(path: Path) -> dict:
@@ -125,6 +131,152 @@ def read_stage3_terms(path: Path) -> dict:
     require("after_adv_u" in arrays and "after_hpg_u" in arrays,
             f"{path}: the operator frames are missing")
     return {"header": header, "arrays": arrays}
+
+
+def read_ldfslp(path: Path) -> dict:
+    """Read ``NEMO_L2_LDFSL_1``: every statement of ``ldf_slp``.
+
+    Self-describing, same discipline as the terms reader: a renamed or
+    reordered array is a KeyError, never a mislabelled frame.
+    """
+    import struct
+
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        header = struct.unpack("=14i", handle.read(56))
+        require(magic == "NEMO_L2_LDFSL_1", f"{path}: bad magic {magic!r}")
+        version, kt, kbb, kmm, nx, ny, nz = header[:7]
+        require((version, nx, ny, nz, header[-1]) == (1, *DIMS, 64),
+                f"{path}: bad header {header}")
+        arrays = {}
+        while True:
+            name_raw = handle.read(16)
+            if not name_raw:
+                break
+            require(len(name_raw) == 16, f"{path}: truncated array name")
+            name = name_raw.decode("ascii").rstrip()
+            rank, n1, n2, n3 = struct.unpack("=4i", handle.read(16))
+            count = {0: 1, 1: n1, 2: n1 * n2}.get(rank, n1 * n2 * n3)
+            payload = np.frombuffer(handle.read(8 * count), dtype=np.float64)
+            require(payload.size == count, f"{path}: truncated array {name!r}")
+            require(np.all(np.isfinite(payload)),
+                    f"{path}: non-finite payload in {name!r}")
+            if rank == 0:
+                arrays[name] = float(payload[0])
+            elif rank == 1:
+                arrays[name] = payload.copy()
+            elif rank == 2:
+                arrays[name] = _xy(payload, n1, n2)
+            else:
+                arrays[name] = _xyz(payload, n1, n2, n3)
+    for required in ("nmln", "hmlp", "uslp", "wslpi", "prd", "pn2"):
+        require(required in arrays, f"{path}: missing {required!r}")
+    return {"header": header, "kt": kt, "arrays": arrays}
+
+
+def run_slopes(oracle_root: Path, *, plant: bool = False) -> dict:
+    """THE MIXED-LAYER INDEX, scored against NEMO's own nmln and hmlp.
+
+    ``ldf_slp`` reads ``nmln`` twice -- ``zhmlpt = gdept(nmln-1,Kmm)*ssmask``
+    (``LDF/ldfslp.F90:143``) and ``r1_hmlw`` off ``hmlp``
+    (``LDF/ldfslp.F90:161``) -- and both come from ``zdf_mxl``'s N-SQUARED
+    INTEGRAL criterion (``ZDF/zdfmxl.F90:95-104``).  This arm scores legoESM's
+    own mixed-layer helper against NEMO's dumped pair, under BOTH criteria,
+    on NEMO's OWN before state.  It is a statement-level score, not a
+    downstream one: the fold arm can only say the product moved.
+    """
+    import jax.numpy as jnp
+
+    backend = _precision_preflight()
+    record = SLOPES_ROOT / SLOPES_RECORD
+    rec = read_ldfslp(record)
+    arrays = rec["arrays"]
+    require(rec["kt"] == 2, f"{record}: the discriminating record is kt = 2")
+    nemo_nmln = np.asarray(arrays["nmln"], dtype=np.float64)
+    nemo_hmlp = np.asarray(arrays["hmlp"], dtype=np.float64)
+    ssmask = np.asarray(arrays["ssmask"], dtype=np.float64) > 0.0
+    require(float(np.abs(np.asarray(arrays["uslp"])).max()) > 0.0,
+            f"{record}: NEMO's own uslp is identically zero, so this record "
+            "cannot discriminate any transcription")
+
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        _nemo_mld)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+    card = build_nemo_testcase_card(CASE)
+    cfg = card.recipe.model_config._replace(
+        freshwater_closure="real_freshwater", fix_eta_drift=True)
+    init = card.recipe.initial_state
+    # NEMO's OWN before state, from this record: prd and pn2 are dumped, but
+    # the mixed-layer helper takes T/S, so the tracers come from the kt=2
+    # trazdf record's Kbb frames, the same source round 39's fold arm used.
+    from nemo_testcase_l2_gyre_round35_trazdf_matrix import (
+        _box, read_trazdf_matrix)
+    kt2 = read_trazdf_matrix(
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+             "round38_oracle_trazdf_kt2/oracle_trazdf_matrix_kt00000002.bin"),
+        expect_kt=2)
+    jpkm1 = kt2["header"]["jpkm1"]
+    tr = lambda a: np.ascontiguousarray(a.transpose(1, 0, 2))
+    T_bb = tr(_box(kt2, "T_Kbb_in", jpkm1))
+    S_bb = tr(_box(kt2, "S_Kbb_in", jpkm1))
+    from legoesm.ocean.eos import make_eos_fn
+    eos_fn = make_eos_fn(cfg.eos, cfg.eos_linear)
+
+    rows = []
+    for criterion in ("rho_c", "n2_integral"):
+        hml, m_base = _nemo_mld(
+            criterion, jnp.asarray(T_bb), jnp.asarray(S_bb),
+            jnp.asarray(init.land_mask.data), card.recipe.z_coord, eos_fn,
+            cfg.gm_redi.mld_rho_c, g=cfg.constants.g,
+            rho_0=cfg.constants.rho_0,
+            active_3d=jnp.asarray(card.recipe.z_coord.is_active))
+        # legoESM's 0-based first stratified cell is NEMO's 1-based nmln - 1.
+        lego_nmln = np.asarray(m_base, dtype=np.float64) + 2.0
+        lego_hml = np.asarray(hml, dtype=np.float64)
+        if plant and criterion == "n2_integral":
+            lego_nmln = lego_nmln + 1.0
+        nz = int(ssmask.sum())
+        rows.append({
+            "name": f"{CASE}.kt2.ldfslp.nmln.{criterion}",
+            "n": nz,
+            "cells_unequal": int(np.count_nonzero(
+                (lego_nmln != nemo_nmln)[ssmask])),
+            "max_abs": float(np.max(np.abs(lego_nmln - nemo_nmln)[ssmask])),
+            "statement": "ZDF/zdfmxl.F90:99 nmln = MIN(jk,ikt)+1",
+        })
+        rows.append({
+            "name": f"{CASE}.kt2.ldfslp.hmlp.{criterion}",
+            "n": nz,
+            "cells_unequal": int(np.count_nonzero(
+                (lego_hml != nemo_hmlp)[ssmask])),
+            "max_abs": float(np.max(np.abs(lego_hml - nemo_hmlp)[ssmask])),
+            "nemo_absolute_max": float(np.max(np.abs(nemo_hmlp)[ssmask])),
+            "statement": "ZDF/zdfmxl.F90:104 hmlp = gdepw(nmln,Kmm)*ssmask",
+        })
+    default_row = next(r for r in rows
+                       if r["name"].endswith("nmln.rho_c"))
+    nemo_row = next(r for r in rows
+                    if r["name"].endswith("nmln.n2_integral"))
+    if plant:
+        require(nemo_row["cells_unequal"] > 0,
+                "the planted mixed-layer index did not move its own row")
+    return {
+        "worktree": worktree_stamp(),
+        "format": "nemo-testcase-l2-gyre-round40-stage3-operators-v1",
+        "mode": "slopes",
+        "case": CASE,
+        "record": str(record),
+        "record_sha256": sha256(record),
+        "execution_regime": "production_jit",
+        "precision_policy": "fp64",
+        "jax_backend": backend,
+        "rows": rows,
+        "card_default_criterion": cfg.gm_redi.mld_criterion,
+        "status": ("AT-BAR" if nemo_row["cells_unequal"] == 0 else "DEBT"),
+        "columns_the_card_default_gets_wrong": default_row["cells_unequal"],
+        "planted_control": plant,
+    }
 
 
 def _card_and_forcing():
@@ -334,18 +486,27 @@ def run_terms(oracle_root: Path, *, plant: bool = False) -> dict:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", required=True, choices=("inputs", "terms"))
+    parser.add_argument("--mode", required=True,
+                        choices=("inputs", "terms", "slopes"))
     parser.add_argument("--oracle-root", type=Path, default=ORACLE_ROOT)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant", action="store_true")
     args = parser.parse_args(argv)
-    runner = {"inputs": run_inputs, "terms": run_terms}[args.mode]
+    runner = {"inputs": run_inputs, "terms": run_terms,
+              "slopes": run_slopes}[args.mode]
     report = runner(args.oracle_root, plant=args.plant)
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.output:
         args.output.write_text(text + "\n")
     print(text)
-    if report["mode"] == "terms":
+    if report["mode"] == "slopes":
+        for row in report["rows"]:
+            print(f"SLOPE-OPERAND {row['name']:<44} "
+                  f"unequal {row['cells_unequal']}/{row['n']} "
+                  f"max {row['max_abs']:.6g}")
+        print(f"CARD-DEFAULT {report['card_default_criterion']} gets "
+              f"{report['columns_the_card_default_gets_wrong']} columns wrong")
+    elif report["mode"] == "terms":
         for face, entry in report["record_closure_against_pre_ldf"].items():
             print(f"RECORD-CLOSURE {face} cells_unequal "
                   f"{entry['cells_unequal']} max {entry['max_abs']:.17g}")
