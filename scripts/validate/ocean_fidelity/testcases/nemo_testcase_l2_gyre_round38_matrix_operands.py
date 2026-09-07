@@ -440,6 +440,38 @@ def run_kt2_given_inputs(record: Path = KT2_RECORD,
     }
 
 
+def _dz_owner_verdict(rows: list[dict]) -> str:
+    """The verdict is READ OFF the rows, never asserted beside them.
+
+    A hardcoded "bit-exact" sentence survives a row going red, which is
+    exactly the failure mode this campaign's gates exist to prevent.
+    """
+    by_name = {row["name"]: row for row in rows}
+
+    def clean(name: str) -> bool:
+        row = by_name.get(name)
+        return bool(row) and row.get("bit_unequal") == 0
+
+    ref = clean("dz_owner.reference_thickness")
+    given = clean("dz_owner.stretch_given_nemo_ssh")
+    path = clean("dz_owner.stretch_model_path")
+    after = clean("dz_owner.dz_after")
+    if not ref:
+        return ("the REFERENCE thickness itself differs; nothing downstream "
+                "of it can be attributed until that row is clean")
+    if not given:
+        return ("the stretch STATEMENT differs given NEMO's own ssh, so the "
+                "owner is the statement and not the ssh")
+    if not path:
+        return ("the statement is bit-exact given NEMO's own ssh, so what "
+                "remains on the model path is owned by legoESM's own "
+                "ssh(Kaa) out of the stage-3 update")
+    return ("reference thickness, stretch statement and the model path are "
+            "all bit-exact"
+            + ("; dz_after is too" if after else
+               "; dz_after is NOT, so its owner is downstream of the stretch"))
+
+
 def run_dz_owner(record: Path = RECORD) -> dict:
     """WHO OWNS the ``dz_after`` residual: the reference thickness, or the ssh?
 
@@ -510,10 +542,7 @@ def run_dz_owner(record: Path = RECORD) -> dict:
         "stage3_record_sha256": sha256(record.parent / STAGE3_RECORD),
         "record_self_consistent_cells_unequal": record_consistent,
         "rows": rows,
-        "owner": ("the reference thickness is bit-shared and the stretch "
-                  "statement is bit-exact given NEMO's own ssh, so whatever "
-                  "remains on the model path is owned by legoESM's own "
-                  "ssh(Kaa) out of the stage-3 update"),
+        "owner": _dz_owner_verdict(rows),
     }
 
 
@@ -989,6 +1018,19 @@ def main(argv=None) -> int:
         print(f"MLD-ARM relative moved by "
               f"{'n/a' if moved is None else f'{moved:.4g}'} "
               f"(NEMO ah_wslp2 absmax {base['nemo_ah_wslp2_absmax']:.6g})")
+        # The preregistered falsifier: a move under 10 per cent REFUTES the
+        # mixed-layer index as the ranked owner.  An arm that returns 0
+        # whatever it measures cannot report its own refutation.
+        report["falsifier"] = "relative moved by less than 0.10"
+        report["falsified"] = (moved is None or moved < 0.10)
+        if args.json:
+            args.json.write_text(
+                json.dumps(report, indent=1, sort_keys=True, default=str)
+                + "\n")
+        if report["falsified"]:
+            print("MLD-ARM REFUTED: the mixed-layer criterion is not the "
+                  "ranked owner")
+            return 1
         return 0
     if args.kt2_given_inputs:
         report = run_kt2_given_inputs()

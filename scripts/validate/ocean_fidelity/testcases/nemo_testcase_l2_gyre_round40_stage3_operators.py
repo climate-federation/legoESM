@@ -33,14 +33,16 @@ eos/dyn_hpg reads -- against NEMO's own ``oracle_stage_kt00000001_s2.bin``.
 That separates "the operators inherited a wrong operand" from "the operators
 generated it".
 
-``--mode split`` exposes legoESM's OWN hpg / vorticity / advection buckets at
-stage 3 and reports their MAGNITUDES.  NEMO's stage-3 split does not exist as
-a record -- ``oracle_rkstage2_terms`` is header-locked to kstg = 2
-(``nemo_testcase_l2_gyre_phase3_gate.py:286``) -- so these are SCALES, never
-scores: what they buy is the relative error each operator would have to carry
-to produce the measured residual, which RANKS the suspects and nothing more.
-The frame spec and run.sh for the record that would score them are committed
-in ``nemo_testcase_l2_gyre_round40_stage3_terms/``.
+``--mode terms`` scores each stage-3 operator's OWN contribution against
+NEMO's own frames, out of the round-40 acquisition
+``oracle_rkstage3_terms_kt00000001.bin``.
+
+A ``split`` mode existed briefly in this file and is DELETED.  It added three
+host-array buckets and compared them to a total from a fourth run, so its
+"closure" could never be bit-exact -- the model accumulates inside one fused
+graph -- and its plant could not fail against a baseline that was already
+red.  The record supersedes it entirely: there is no reason to rank suspects
+by a proxy once NEMO's own per-operator frames are on disk.
 """
 
 from __future__ import annotations
@@ -212,82 +214,6 @@ def run_inputs(oracle_root: Path, *, plant: bool = False) -> dict:
     }
 
 
-def run_split(oracle_root: Path, *, plant: bool = False) -> dict:
-    """legoESM's OWN stage-3 operator buckets, as SCALES, plus the closure."""
-    backend = _precision_preflight()
-    record = oracle_root / PRE_LDF_RECORD
-    oracle = read_pre_ldf(record)
-    card, cfg, freshwater, surface = _card_and_forcing()
-    masks = expected_masks(card)
-
-    total = _run_hooks(card, cfg, freshwater, surface,
-                       expose_stage3_momentum_rhs="pre_ldf")
-    buckets = {
-        name: _run_hooks(card, cfg, freshwater, surface,
-                         expose_momentum_operator=name,
-                         expose_momentum_operator_stage=3)
-        for name in OPERATORS
-    }
-    if plant:
-        buckets["hpg"] = dict(buckets["hpg"])
-        bumped = np.array(buckets["hpg"]["u"], copy=True)
-        bumped[..., 0] = bumped[..., 0] + 1.0
-        buckets["hpg"]["u"] = bumped
-
-    rows, closure = [], []
-    for face in ("u", "v"):
-        mask = masks[face]
-        reference = oracle[face][..., :total[face].shape[-1]]
-        residual = np.abs(reference - total[face])[mask > 0]
-        summed = sum(buckets[name][face] for name in OPERATORS)
-        unequal = int(np.count_nonzero(
-            (summed != total[face])[mask > 0]))
-        closure.append({
-            "face": face,
-            "n": int(np.count_nonzero(mask > 0)),
-            "cells_unequal": unequal,
-            "max_abs": float(np.max(np.abs(summed - total[face])[mask > 0])),
-            "exact": unequal == 0,
-        })
-        for name in OPERATORS:
-            magnitude = float(np.max(np.abs(buckets[name][face])[mask > 0]))
-            rows.append({
-                "name": f"{CASE}.kt1.stage3.bucket.{name}.{face}",
-                "kind": "SCALE-NOT-A-SCORE",
-                "legoesm_absolute_max": magnitude,
-                "residual_absolute_max": float(np.max(residual)),
-                "required_relative_error": (
-                    float(np.max(residual) / magnitude) if magnitude > 0.0
-                    else None),
-                "nemo_reference": ("NONE -- oracle_rkstage2_terms is locked to "
-                                   "kstg=2; the stage-3 record's frame spec is "
-                                   "in nemo_testcase_l2_gyre_round40_stage3_"
-                                   "terms/"),
-            })
-    exact = all(entry["exact"] for entry in closure)
-    if plant:
-        require(not exact, "planted bucket violation did not break the closure")
-    return {
-        "worktree": worktree_stamp(),
-        "format": "nemo-testcase-l2-gyre-round40-stage3-operators-v1",
-        "mode": "split",
-        "case": CASE,
-        "boundary": "stprk3_stg.F90:400 -- the Krhs dyn_ldf receives",
-        "record": str(record),
-        "record_sha256": sha256(record),
-        "execution_regime": "production_jit",
-        "precision_policy": "fp64",
-        "jax_backend": backend,
-        "closure": closure,
-        "closure_exact": exact,
-        "status": "CLOSED" if exact else "OPEN",
-        "rows": rows,
-        "planted_control": plant,
-        "note": ("every bucket row is a SCALE.  No operator is scored, and "
-                 "none may be named the owner from this arm."),
-    }
-
-
 def run_terms(oracle_root: Path, *, plant: bool = False) -> dict:
     """THE STAGE-3 OPERATOR SPLIT, scored against NEMO's own frames.
 
@@ -408,14 +334,12 @@ def run_terms(oracle_root: Path, *, plant: bool = False) -> dict:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", required=True,
-                        choices=("inputs", "split", "terms"))
+    parser.add_argument("--mode", required=True, choices=("inputs", "terms"))
     parser.add_argument("--oracle-root", type=Path, default=ORACLE_ROOT)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant", action="store_true")
     args = parser.parse_args(argv)
-    runner = {"inputs": run_inputs, "split": run_split,
-              "terms": run_terms}[args.mode]
+    runner = {"inputs": run_inputs, "terms": run_terms}[args.mode]
     report = runner(args.oracle_root, plant=args.plant)
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.output:
@@ -436,20 +360,11 @@ def main(argv=None) -> int:
                   f"max {row['max_abs']:.6g} "
                   f"nemo_absmax {row['nemo_absolute_max']:.6g}")
         print(f"FIRST-OPERATOR-OVER-BAR {report['first_operator_over_bar']}")
-    elif report["mode"] == "inputs":
+    else:
         for row in report["rows"]:
             print(f"{row['status']:<8} {row['name']:<40} "
                   f"bit_unequal {row['n_unequal']}/{row['n']} "
                   f"max {row['absolute_max']:.17g}")
-    else:
-        for entry in report["closure"]:
-            print(f"CLOSURE {entry['face']} cells_unequal "
-                  f"{entry['cells_unequal']}/{entry['n']} "
-                  f"max {entry['max_abs']:.17g}")
-        for row in report["rows"]:
-            print(f"SCALE    {row['name']:<44} "
-                  f"max {row['legoesm_absolute_max']:.6e}  "
-                  f"required_rel {row['required_relative_error']}")
     print(f"STATUS {report['status']}")
     if args.plant:
         return 1

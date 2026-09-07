@@ -1547,18 +1547,18 @@ def compute_layer_thickness(
     -------
     array : Layer thickness [m], shape (..., nlev). Positive.
     """
-    if isinstance(z_coord, OceanPartialCellCoordinate):
-        wc = eta + H_bathy
-        if min_water_column_m is not None:
-            wc = jnp.maximum(wc, min_water_column_m)
-        # Avoid division-by-zero in dry columns; h_partial is already
-        # zero there, so the result is zero regardless of the divisor.
-        H_safe = jnp.maximum(H_bathy, 1.0e-10)
-        return z_coord.h_partial * (wc / H_safe)[..., jnp.newaxis]
-    # Pure z\\* path (legacy, unchanged).
     J = compute_ocean_jacobian(
         eta, H_bathy, z_coord, min_water_column_m=min_water_column_m,
     )
+    if isinstance(z_coord, OceanPartialCellCoordinate):
+        # ONE implementation of NEMO's stretch, not two.  This branch used to
+        # form ``(eta + H_bathy)/H_bathy`` inline, so after the round-40 fix
+        # to compute_ocean_jacobian the model carried TWO different roundings
+        # of the SAME NEMO statement -- and this one feeds the momentum RHS
+        # through _bc_geometry_and_density.  Dry columns are unchanged: the
+        # helper returns J = 1 there and h_partial is already 0.
+        return z_coord.h_partial * J[..., jnp.newaxis]
+    # Pure z\\* path (legacy, unchanged).
     return z_coord.dz_ref * J[..., jnp.newaxis]
 
 
@@ -1633,10 +1633,30 @@ def compute_ocean_jacobian(
         # 0 cells unequal.  The clip below is legoESM's own and NEMO has
         # none; expressing it on J rather than on the column keeps every
         # clipped cell bit-identical to the pre-round-40 value.
-        stretch = (jnp.zeros_like(jnp.asarray(eta) * H_safe) if linssh
-                   else jnp.asarray(eta) / H_safe)
-        jac = 1.0 + stretch
-        if min_water_column_m is not None and not linssh:
+        # ``r1_ht_0 = ssmask/(ht_0 + 1 - ssmask)`` (domain.F90:158) is built
+        # ONCE and MULTIPLIED at domqco.F90:209; NEMO never divides by ht_0
+        # there, and ``a/b`` and ``a*(1/b)`` are not the same double.
+        #
+        # RULE 1c.  The reciprocal is taken in the PROMOTED dtype of the two
+        # operands, not in the bathymetry's storage dtype.  NEMO is fp64
+        # throughout so the question does not arise there; here a f32 ladder
+        # under a f64 ssh would round 1/ht_0 to single and cost seven digits
+        # of the stretch -- caught by test_jacobian_column_sums_to_water_column
+        # at a relative 3.0e-10, which is 0.7/H times f32 eps and not roundoff.
+        # ``OceanPartialCellCoordinate`` carries no ``linear_free_surface``
+        # field, so ``linssh`` is False on every path that reaches here; the
+        # fixed-column arm belongs to the z* branch below and is not
+        # duplicated as an unreachable one.
+        _dt = jnp.promote_types(jnp.asarray(eta).dtype,
+                                jnp.asarray(H_safe).dtype)
+        r1_h = jnp.where(H_bathy > 0.0,
+                         jnp.asarray(1.0, _dt) / jnp.asarray(H_safe, _dt),
+                         jnp.asarray(0.0, _dt))
+        jac = 1.0 + jnp.asarray(eta, _dt) * r1_h
+        if min_water_column_m is not None:
+            # legoESM's own floor; NEMO has none, so there is no faithful form
+            # to match and this keeps every clipped cell at its pre-round-40
+            # value.
             jac = jnp.maximum(jac, min_col / H_safe)
         return jnp.where(H_bathy > 0.0, jac, 1.0)
     return water_col / z_coord.H_max

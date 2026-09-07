@@ -2319,6 +2319,15 @@ class LatLonCGridOceanModel:
             raise ValueError(
                 "expose_momentum_operator_stage must be 2 or 3; stages 1 and "
                 "3-with-lateral-mixing are served by other hooks")
+        # At CONSTRUCTION, not at trace time.  The inner guard raises only
+        # once the stage is reached, so a gate asking for a bucket that does
+        # not exist would compile and score whatever the returned slots held.
+        if self._nemo_ws_test_hooks.expose_momentum_operator not in (
+                "", "hpg", "vorticity", "advection"):
+            raise ValueError(
+                "expose_momentum_operator must be empty, hpg, vorticity, or "
+                f"advection; got "
+                f"{self._nemo_ws_test_hooks.expose_momentum_operator!r}")
         if self._nemo_ws_test_hooks.expose_tracer_stage1_boundary not in (
                 "", "after_advection", "after_sbc"):
             raise ValueError(

@@ -25,6 +25,7 @@ import pytest
 
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
+    compute_layer_thickness,
     compute_ocean_jacobian,
     create_full_step_coordinate,
     create_partial_cell_coordinate,
@@ -178,3 +179,52 @@ def test_jacobian_min_column_clip_is_unchanged_by_the_ratio_form(zref):
     plain = np.asarray(compute_ocean_jacobian(eta, bathy, coord))
     assert clipped[0] == 0.5 / 1.0
     np.testing.assert_array_equal(clipped[1:], plain[1:])
+
+
+def test_jacobian_multiplies_the_stored_reciprocal(zref):
+    """NEMO MULTIPLIES ``r1_ht_0``; it does not divide by ``ht_0``.
+
+    ``domain.F90:158`` builds ``r1_ht_0 = ssmask/(ht_0 + 1 - ssmask)`` once and
+    ``domqco.F90:209`` multiplies by it.  ``a/b`` and ``a*(1/b)`` are not the
+    same double, and on GYRE's own magnitudes the difference is absorbed by the
+    ``1 +``, so it cannot be caught there.  These operands are chosen so it is
+    NOT absorbed.
+    """
+    ht_0 = np.array([16.75804935889166, 27.469830318264258,
+                     11.822863395492591, 7.497700412938896])
+    ssh = np.array([-1.8590317289517415, -1.7274640401377739,
+                    -1.549283275814433, 1.9251583919946986])
+    coord = create_full_step_coordinate(
+        zref, jnp.full(ssh.shape, len(np.asarray(zref.dz_ref)),
+                       dtype=jnp.int32))
+
+    nemo = 1.0 + ssh * (1.0 / ht_0)
+    divided = 1.0 + ssh / ht_0
+    assert not np.any(nemo == divided)     # non-vacuity
+
+    got = np.asarray(compute_ocean_jacobian(
+        jnp.asarray(ssh), jnp.asarray(ht_0), coord))
+    np.testing.assert_array_equal(got, nemo)
+
+
+def test_layer_thickness_uses_the_one_shared_stretch(zref):
+    """``compute_layer_thickness`` must not carry a second rounding of it.
+
+    Its partial-cell branch used to form ``(eta+H)/H`` inline, so the model
+    would have carried two different roundings of one NEMO statement, and the
+    inline one feeds the momentum right-hand side.
+    """
+    coord = create_full_step_coordinate(
+        zref, jnp.full((4,), len(np.asarray(zref.dz_ref)), dtype=jnp.int32))
+    ht_0 = jnp.asarray([16.75804935889166, 27.469830318264258,
+                        11.822863395492591, 7.497700412938896])
+    ssh = jnp.asarray([-1.8590317289517415, -1.7274640401377739,
+                       -1.549283275814433, 1.9251583919946986])
+    got = np.asarray(compute_layer_thickness(ssh, ht_0, coord))
+    want = np.asarray(coord.h_partial) * np.asarray(
+        compute_ocean_jacobian(ssh, ht_0, coord))[..., None]
+    np.testing.assert_array_equal(got, want)
+    # non-vacuity: the retired inline form really does differ here
+    stale = np.asarray(coord.h_partial) * (
+        (np.asarray(ssh) + np.asarray(ht_0)) / np.asarray(ht_0))[..., None]
+    assert np.any(stale != got)

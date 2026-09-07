@@ -67,6 +67,22 @@ FILES = {
     # cannot bind to OVERFLOW's ocean.output or to LOCK's ppsrc.
     "LDF/ldfslp.F90": _OCE / "LDF/ldfslp.F90",
     "domqco.F90": _OCE / "DOM/domqco.F90",
+    # --- round 40 paths: the stage-3 momentum operators and zdf_mxl ---
+    "dynvor.F90": _DYN / "dynvor.F90",
+    "dynkeg.F90": _DYN / "dynkeg.F90",
+    "dynzad.F90": _DYN / "dynzad.F90",
+    "ZDF/zdfmxl.F90": _OCE / "ZDF/zdfmxl.F90",
+    # The configuration's OWN keys and its OWN compiled vorticity branch, so a
+    # key_qco claim cannot bind to LOCK's ppsrc through the bare key above.
+    "cpp_GYRE_OMIP_L2_P3_SM_R38TRAZDFKT2.fcm": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R38TRAZDFKT2"
+        "/cpp_GYRE_OMIP_L2_P3_SM_R38TRAZDFKT2.fcm"),
+    "GYRE_OMIP_L2_P3_SM_R38TRAZDFKT2/BLD/ppsrc/nemo/dynvor.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R38TRAZDFKT2/BLD/ppsrc/nemo"
+        "/dynvor.f90"),
+    "nemo_testcase_l2_gyre_phase3_gate.py": (
+        REPO / "scripts/validate/ocean_fidelity/testcases"
+             / "nemo_testcase_l2_gyre_phase3_gate.py"),
     "fidelity/nemo_recipe.py": (
         REPO / "packages/ocean/legoesm/ocean/fidelity/nemo_recipe.py"),
     "GYRE_OMIP_L2_P3_SM_R38TRAZDFKT2/BLD/ppsrc/nemo/stprk3.f90": (
@@ -167,6 +183,81 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- ROUND 40: the stage-3 momentum operator table, ldf_slp, and r3t ---
+    'stprk3_stg.F90:44': ('n_baro_upd =  np_HYB', 1),
+    'stprk3_stg.F90:266-268': (
+        'zub(ji,jj) = un_adv(ji,jj)*r1_hu(ji,jj,Kmm) - uu_b(ji,jj,Kmm)', 3),
+    'stprk3_stg.F90:273-274': (
+        'zFu(ji,jj,jk) = e2u(ji,jj)*e3u(ji,jj,jk,Kmm)', 2),
+    'stprk3_stg.F90:290': (
+        'CALL wzv( kstp, Kbb, Kmm, Kaa, uu(:,:,:,Kmm), vv(:,:,:,Kmm), ww, np_velocity )', 1),
+    'stprk3_stg.F90:322': ('CALL    eos    (        ts, Kmm, rhd, rhop )', 1),
+    'stprk3_stg.F90:202': (
+        'r3f(:,:)     = r2_3 * r3fb(:,:) + r1_3 * r3fa(:,:)', 1),
+    'stprk3_stg.F90:234': (
+        'r3f(:,:    ) = r1_2 * ( r3fb(:,:) + r3fa(:,:) )', 1),
+    'stprk3_stg.F90:231': ('r3t(:,:,Kaa) = r3ta(:,:)', 1),
+    'dynhpg.F90:359-363': (
+        'puu(ji,jj,1,Krhs) = zhpi(ji,jj) + zuap', 5),
+    'dynhpg.F90:383-387': (
+        'puu(ji,jj,jk,Krhs) = zhpi(ji,jj) + zuap', 5),
+    'dynhpg.F90:368-375': ('zhpi(ji,jj) = zhpi(ji,jj) + zcoef0 * r1_e1u(ji,jj)', 8),
+    'dynkeg.F90:120-121': [
+        'puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs) - ( zhke(ji+1,jj  ) - zhke(ji,jj) ) * r1_e1u(ji,jj)',
+        'pvv(ji,jj,jk,Krhs) = pvv(ji,jj,jk,Krhs) - ( zhke(ji  ,jj+1) - zhke(ji,jj) ) * r1_e2v(ji,jj)', 2],
+    'dynzad.F90:104-107': (
+        'puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs) - 0.25_wp * r1_e1e2u(ji,jj) / e3u(ji,jj,jk,Kmm)', 4),
+    'dynzad.F90:89-96': ('zWf  = e1e2t(ji  ,jj  ) *   ww(ji  ,jj  ,jk+1)', 8),
+    'dynvor.F90:493-516': ('SELECT CASE( nn_e3f_typ  )', 24),
+    'GYRE_OMIP_L2_P3_SM_R38TRAZDFKT2/BLD/ppsrc/nemo/dynvor.f90:556': (
+        'zwz(ji,jj) = zwz(ji,jj) / (e3f_0vor(ji,jj,jk) *(1._wp+r3f(ji,jj)*fe3mask(ji,jj,jk)))', 1),
+    'cpp_GYRE_OMIP_L2_P3_SM_R38TRAZDFKT2.fcm:1': (
+        'bld::tool::fppkeys key_qco key_vco_1d3d key_RK3', 1),
+    # The statement is textually IDENTICAL at :160 (dom_qco_r3c) and :209
+    # (dom_qco_r3c_RK3, the one the RK3 stage program calls), so the citation
+    # spans the routine header that disambiguates it.
+    'domqco.F90:189-209': [
+        'SUBROUTINE dom_qco_r3c_RK3( pssh, pr3t, pr3u, pr3v, pr3f )',
+        'pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)', 21],
+    'domain.F90:158': (
+        'r1_ht_0(:,:) = ssmask (:,:) / ( ht_0(:,:) + 1._wp -  ssmask (:,:) )', 1),
+    'ZDF/zdfmxl.F90:34': ('rho_c = 0.01_wp', 1),
+    'ZDF/zdfmxl.F90:95': ('zN2_c = grav * rho_c * r1_rho0', 1),
+    'ZDF/zdfmxl.F90:98': (
+        'hmlp(ji,jj) =  hmlp(ji,jj) + MAX( rn2b(ji,jj,jk) , 0._wp ) * e3w(ji,jj,jk,Kmm)', 1),
+    'ZDF/zdfmxl.F90:99': (
+        'IF( hmlp(ji,jj) < zN2_c )   nmln(ji,jj) = MIN( jk , ikt ) + 1', 1),
+    'ZDF/zdfmxl.F90:104': (
+        'hmlp(ji,jj) = gdepw(ji,jj,iik  ,Kmm) * ssmask(ji,jj)', 1),
+    'LDF/ldfslp.F90:143': (
+        'zhmlpt(ji,jj) = gdept(ji,jj,nmln(ji,jj)-1,Kmm) * ssmask(ji,jj)', 1),
+    'LDF/ldfslp.F90:161': (
+        'r1_hmlw(ji,jj) = 1._wp / MAX( hmlp(ji,jj) - gdepw(ji,jj,mikt(ji,jj),Kmm), 10._wp )', 1),
+    'LDF/ldfslp.F90:206': ('zau = zgru(ji,jj,iik) * r1_e1u(ji,jj)', 1),
+    'LDF/ldfslp.F90:212-213': (
+        'zbu = MIN(  zbu, - z1_slpmax * ABS( zau ) , -7.e+3_wp/e3u(ji,jj,jk,Kmm)* ABS( zau )  )', 2),
+    'LDF/ldfslp.F90:281-282': (
+        'zbi = MIN( zbw ,- 100._wp* ABS( zai ) , -7.e+3_wp/e3w(ji,jj,jk,Kmm)* ABS( zai )  )', 2),
+    'vertical.py:1565': ('def compute_ocean_jacobian(', 1),
+    'ocean_model_latlon_cgrid.py:5268-5275': (
+        'transport_velocity = (', 8),
+    'ocean_model_latlon_cgrid.py:6360': ('_g2 = _nemo_ws_stage_transport(', 1),
+    'ocean_model_latlon_cgrid.py:6388': (
+        '_stage3_hpg_operands = _stage_hpg_operands(', 1),
+    'nemo_testcase_l2_gyre_phase3_gate.py:284': (
+        'require(magic == "NEMO_L2_RKTRM_1", f"{path}: bad magic")', 1),
+    'round38_oracle_trazdf_kt2/ocean.output:799': (
+        'with Hollingsworth scheme (=1) or not (=0)       nn_dynkeg   =', 1),
+    'round38_oracle_trazdf_kt2/ocean.output:810': (
+        'f-point energy conserving scheme               ln_dynvor_ene =  T', 1),
+    'round38_oracle_trazdf_kt2/ocean.output:813': (
+        'e3f = averaging /4 (=0) or /sum(tmask) (=1)    nn_e3f_typ =', 1),
+    'round38_oracle_trazdf_kt2/ocean.output:834': (
+        's-coord. (standard jacobian formulation)          ln_hpg_sco    =  T', 1),
+    'round38_oracle_trazdf_kt2/ocean.output:846': (
+        'Free surface with time splitting       ln_dynspg_ts  =  T', 1),
+    'round38_oracle_trazdf_kt2/ocean.output:658': (
+        'maximum isoppycnal slope             rn_slpmax', 1),
     # --- ROUND 39: the slopes are built ONCE PER STEP on the BEFORE state ---
     'stprk3.F90:173': ('CALL eos ( ts, Nbb, rhd )                   ! before in situ density', 1),
     'stprk3.F90:195': ('CALL stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )', 1),
@@ -184,7 +275,7 @@ CITATION_MAP = {
     'domqco.F90:160': (
         'pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)   !==  ratio at t-point  ==!', 1),
     'fidelity/nemo_recipe.py:926': ('def build_nemo_gyre_recipe(', 1),
-    'ocean_model_latlon_cgrid.py:4893': (
+    'ocean_model_latlon_cgrid.py:4905': (
         'T_new = state.T.data + dt * tend.dT_dt.data', 1),
     'round38_oracle_trazdf_kt2/ocean.output:798': (
         'Vector form: 2nd order centered scheme           ln_dynadv_vec  =  T', 1),
@@ -208,12 +299,12 @@ CITATION_MAP = {
     'traldf_iso.F90:135': (
         'CALL traldf_iso_a33( Kmm, ah_wslp2, akz )   ! calculate  a33 element   (ah_wslp2 and akz)', 1),
     'trazdf.F90:173': ('zwt(ji,jk) = avt(ji,jj,jk) + ah_wslp2(ji,jj,jk)', 1),
-    'ocean_model_latlon_cgrid.py:6969': (
+    'ocean_model_latlon_cgrid.py:6983': (
         '_T_gm_in = T_mid if _ldf_state is None else _ldf_state[0]', 1),
     # ROUND 39 moved these two: the before-state slope block added lines
     # above them, so the STATEMENT is unchanged and its line number is not.
     # Re-anchored rather than left to rot, which is what the gate exists for.
-    'ocean_model_latlon_cgrid.py:7334': (
+    'ocean_model_latlon_cgrid.py:7348': (
         'k33_implicit = compute_isoneutral_K33_latlon(', 1),
     # tracer_combine is READ by two step functions and SELECTED by a DINO
     # recipe -- the retraction of round 37's "a lever nothing selects".
@@ -361,7 +452,7 @@ CITATION_MAP = {
     # each tank's OWN resolved momentum-advection arm.
     'lock_kt1_10/ocean.output:705': 'ln_dynadv_vec  =  F',
     'overflow_kt1_10/ocean.output:822': 'ln_dynadv_vec  =  F',
-    'ocean_model_latlon_cgrid.py:6017': '_vector_velocity_stage_update = (',
+    'ocean_model_latlon_cgrid.py:6031': '_vector_velocity_stage_update = (',
     'dynzdf.F90:119': 'IF( ln_dynadv_vec .OR. lk_linssh )',
     'dynzdf.F90:150-151': ['puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kaa) - uu_b',
                            'pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kaa) - vv_b', 2],
@@ -570,11 +661,11 @@ CITATION_MAP = {
         5],
     # ROUND 32 moved this site: stage 3 no longer corrects before the solve,
     # it defers the closure (stprk3_stg.F90:437-446 runs after :430).
-    'ocean_model_latlon_cgrid.py:6425-6428': [
+    'ocean_model_latlon_cgrid.py:6439-6442': [
         ('u3_corr = u3_raw * _ws_stage_u_mask', 1),
         ('_replace_stage_mean, target_u, target_v)', 1),
         4],
-    'ocean_model_latlon_cgrid.py:8063-8089': [
+    'ocean_model_latlon_cgrid.py:8077-8103': [
         ('if _ws_stage3_correction is not None:', 1),
         ('v=state_new.v.replace(data=_v_after),', 1),
         27],
@@ -587,12 +678,12 @@ CITATION_MAP = {
         'uu(ji,jj,jk,Kaa) = uu(ji,jj,jk,Kaa) + zub(ji,jj)*umask(ji,jj,jk)',
         'vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)',
         2],
-    'ocean_model_latlon_cgrid.py:7915-7917': [
+    'ocean_model_latlon_cgrid.py:7929-7931': [
         '_nemo_ws_pre_implicit_state = (',
         'if self._nemo_ws_test_hooks.expose_pre_implicit_state else None)',
         3],
-    'ocean_model_latlon_cgrid.py:10110': ('u_solve_in = u_solve_in - _u_bt_mean', 1),
-    'ocean_model_latlon_cgrid.py:10227': ('u_solve_in = u_solve_in - (', 1),
+    'ocean_model_latlon_cgrid.py:10124': ('u_solve_in = u_solve_in - _u_bt_mean', 1),
+    'ocean_model_latlon_cgrid.py:10241': ('u_solve_in = u_solve_in - (', 1),
     'ocean_pe_latlon_cgrid.py:3262-3265': [
         ('if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):', 1),
         ('"with a scalar dlon (got dlon<=0; tripolar unsupported)."', 1),
