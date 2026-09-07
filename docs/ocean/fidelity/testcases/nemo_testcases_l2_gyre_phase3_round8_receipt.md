@@ -10926,3 +10926,18 @@ is PASS.
 The receipt citation gate is PASS over 251 citations, 0 unmapped, 0 failures,
 0 map entries failing their own audit, and all 9 self-test plants fired.
 
+The full ocean-fidelity suite at the round's FINAL tip, on a detached
+worktree (/tmp/codex-gyre-r40-suite), same selection as round 39's:
+**1011 passed, 7 skipped, 18 deselected in 2504.45s (0:41:44)**, exit 0, zero
+failures.  Round 39's was 997 passed; the 14 added are this round's own tests.
+Nothing lands after that stamp.
+
+A first attempt ran the WHOLE of tests/ocean (7674 selected) rather than round
+39's selection and was stopped and re-run at the matching protocol -- a
+protocol change is a confound even when it is a widening, and the four test
+files this round touches were run directly besides (15 passed on the
+coordinate pair, 27 on the two gate files).
+
+Evidence under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round40/`,
+`round40_evidence.sha256` over its files, plus the two acquisitions' own
+manifests under `round40_oracle_stage3_terms/` and `round40_oracle_ldfslp/`.
