@@ -504,6 +504,37 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
     n_cells, n_edges = layout.n_cells, layout.n_edges
     _local_cache: dict[int, Any] = {}
 
+    def _entity_kind(x):
+        if not hasattr(x, "shape") or x.ndim == 0:
+            return "rep"
+        if int(x.shape[0]) == n_cells:
+            return "cell"
+        if int(x.shape[0]) == n_edges:
+            return "edge"
+        return "rep"
+
+    def _localize_by_index(x, idx):
+        loc = np.asarray(x)[idx]                              # (n_dev, max_l*, ...)
+        return multiprocess_safe_device_put(jnp.asarray(loc), layout.cell_sharding)
+
+    # The vertical coordinate may carry PER-CELL statics (partial cells:
+    # h_partial, bottom_level, is_active, t_depth_ref; NEMO EEN operands).
+    # Localise them per device once; replicated leaves stay closure constants.
+    # (First MPAS SPMD smoke, job 27326448: the global (nCells, nlev) h_partial
+    # met the local (max_lc, 1) water column in compute_layer_thickness.)
+    z_leaves, z_tree = jax.tree.flatten(model.z_coord)
+    z_kinds = [_entity_kind(x) for x in z_leaves]
+    z_static = tuple(
+        _localize_by_index(x, layout.gather_cells if k == "cell" else layout.gather_edges)
+        for x, k in zip(z_leaves, z_kinds) if k != "rep")
+    # A per-cell / per-edge array inside the CONFIG would reach the local step
+    # at global size too; none is localised here, so refuse loudly.
+    for x in jax.tree.leaves(model.config):
+        if _entity_kind(x) != "rep":
+            raise NotImplementedError(
+                "MPAS ocean SPMD: model.config carries a per-cell/per-edge array "
+                f"leaf of shape {tuple(x.shape)} that is not localised per device")
+
     def _fill_cells_edges(cell_owned, edge_owned, halo_sl):
         """Owned buffers -> (owned+halo) local buffers via the coloured rounds.
         Zero-width dummies stand in for an absent entity class."""
@@ -585,7 +616,7 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
         _local_cache[key] = (x, loc)
         return loc
 
-    def _local_step(u_o, cpack_o, rho_ref, rep_leaves, static_cells, dt,
+    def _local_step(u_o, cpack_o, rho_ref, rep_leaves, static_cells, z_sl, dt,
                     cmeta, ckinds, forcing_tree, n_state_cells,
                     mesh_sl, halo_sl, vhalo_sl, upup_sl):
         """INSIDE shard_map: fill halos, step on the local mesh, return owned."""
@@ -600,9 +631,22 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
         my_mesh = jax.tree.map(lambda x: x[0], mesh_sl)._replace(**statics)
         model_l = copy.copy(model)
         model_l.mesh = my_mesh
+        it_z = iter(z_sl)
+        model_l.z_coord = jax.tree.unflatten(
+            z_tree, [next(it_z)[0] if k != "rep" else x
+                     for x, k in zip(z_leaves, z_kinds)])
         if upup_sl is not None:
             model_l._upup_pos = upup_sl[0][0]
             model_l._upup_neg = upup_sl[1][0]
+        # Loud gate: no array of GLOBAL cell/edge size may reach the local step
+        # (a closure constant the localisation missed would broadcast wrongly).
+        if n_cells != max_lc or n_edges != max_le:
+            for name, tree in (("mesh", model_l.mesh), ("z_coord", model_l.z_coord)):
+                for leaf in jax.tree.leaves(tree):
+                    if hasattr(leaf, "shape") and leaf.ndim and int(leaf.shape[0]) in (n_cells, n_edges):
+                        raise RuntimeError(
+                            f"MPAS ocean SPMD: global-sized array {tuple(leaf.shape)} in "
+                            f"model.{name} reached the local step (not localised)")
         mk = model_state_template
         local_state = MPASOceanState(
             u=mk.u.replace(data=uloc),
@@ -669,12 +713,14 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
         if fn is None:
             n_rep = len(rep_leaves)
             n_stat = len(static_cells)
+            n_z = len(z_static)
 
             def _body(u_o, cpack_o, rho_ref, *rest):
                 rep = rest[:n_rep]
                 stat = rest[n_rep:n_rep + n_stat]
-                mesh_sl, halo_sl, vhalo_sl, upup_sl = rest[n_rep + n_stat:]
-                return _local_step(u_o, cpack_o, rho_ref, rep, stat, dt,
+                z_sl = rest[n_rep + n_stat:n_rep + n_stat + n_z]
+                mesh_sl, halo_sl, vhalo_sl, upup_sl = rest[n_rep + n_stat + n_z:]
+                return _local_step(u_o, cpack_o, rho_ref, rep, stat, z_sl, dt,
                                    cmeta, kinds, forcing_tree, n_state_cells,
                                    mesh_sl, halo_sl, vhalo_sl,
                                    None if len(upup_sl) == 0 else upup_sl)
@@ -684,6 +730,7 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
                 _body, mesh=jax_mesh,
                 in_specs=(P(SPMD_AXIS), P(SPMD_AXIS), P(),
                           *([P()] * n_rep), *([P(SPMD_AXIS)] * n_stat),
+                          *([P(SPMD_AXIS)] * n_z),
                           jax.tree.map(lambda _: P(SPMD_AXIS), layout.stacked_meshes),
                           jax.tree.map(lambda _: P(SPMD_AXIS), layout.halo_args),
                           jax.tree.map(lambda _: P(SPMD_AXIS), layout.vhalo_args),
@@ -695,7 +742,7 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
             # runs ONE compiled program per step, not op-by-op dispatch.
             fn = jax.jit(fn)
             _cache[key] = fn
-        out = fn(state.u.data, cpack, rho, *rep_leaves, *static_cells,
+        out = fn(state.u.data, cpack, rho, *rep_leaves, *static_cells, *z_static,
                  layout.stacked_meshes, layout.halo_args, layout.vhalo_args,
                  layout.upup or ())
         u_n, T_n, S_n, eta_n, w_n = out[:5]

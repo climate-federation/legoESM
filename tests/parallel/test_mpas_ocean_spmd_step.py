@@ -34,7 +34,7 @@ def _need_devices(n):
         pytest.skip(f"need {n} devices (XLA_FLAGS=--xla_force_host_platform_device_count={n})")
 
 
-def _build(config_kwargs, *, nlev=4, n_dev=N_DEV, level=2):
+def _build(config_kwargs, *, nlev=4, n_dev=N_DEV, level=2, partial_cells=False):
     from legoesm.grids.voronoi import create_voronoi_mesh
     from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
     from legoesm.ocean.freshwater import FreshwaterForcing
@@ -51,11 +51,18 @@ def _build(config_kwargs, *, nlev=4, n_dev=N_DEV, level=2):
     mesh = reorder_voronoi_for_sharding(mesh0, n_dev)
     z = create_ocean_z_star(n_levels=nlev, H_max=4000.0)
     config = MPASOceanConfig(**config_kwargs)
-    model = MPASOceanModel(mesh, z, config)
     state = rest_state_mpas_ocean(mesh, z, H_max=4000.0)
     state = mask_padded_cells(state, n_real)
     rng = np.random.default_rng(7)
     m = np.asarray(state.land_mask.data)
+    if partial_cells:
+        # variable bathymetry -> the coordinate carries PER-CELL statics
+        # (h_partial, bottom_level, is_active): the case job 27326448 hit
+        from legoesm.ocean.vertical import create_partial_cell_coordinate
+        H = np.asarray(state.H_bathy.data) * (0.4 + 0.6 * rng.random(mesh.nCells)) * m
+        state = state._replace(H_bathy=state.H_bathy.replace(data=jnp.asarray(H)))
+        z = create_partial_cell_coordinate(z, jnp.asarray(H))
+    model = MPASOceanModel(mesh, z, config)
     em = m[np.asarray(mesh.cellsOnEdge[0])] * m[np.asarray(mesh.cellsOnEdge[1])]
     state = state._replace(
         u=state.u.replace(data=jnp.asarray(
@@ -164,6 +171,8 @@ _ATOL = {"T": 2e-9, "S": 5e-9, "eta": 1e-10, "w": 1e-10, "u": 1e-10}
 _CASES = {
     "explicit_fixer": dict(use_conservation_fixer=True, n_barotropic_substeps=10,
                            normalize_freshwater=True),
+    "partial_cells_fixer": dict(use_conservation_fixer=True, n_barotropic_substeps=10,
+                                _partial_cells=True),
     "implicit_superbee_del4": dict(
         barotropic_solver="implicit_cn", tracer_advection="superbee",
         K_zeta_bih=1.0e13, n_barotropic_substeps=10),
@@ -174,8 +183,9 @@ _CASES = {
 def test_spmd_matches_serial(case):
     _need_devices(N_DEV)
     from legoesm.grids.halo import set_halo_backend, set_spmd_mesh
-    kw = _CASES[case]
-    mesh, n_real, model, state, forcing = _build(kw)
+    kw = dict(_CASES[case])
+    partial = bool(kw.pop("_partial_cells", False))
+    mesh, n_real, model, state, forcing = _build(kw, partial_cells=partial)
     dt = 300.0
     ref = _run_serial(model, state, forcing, dt, 3)
     try:
