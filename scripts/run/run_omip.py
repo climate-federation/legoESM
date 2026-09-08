@@ -56,7 +56,12 @@ def _preparse_multicontroller(argv):
     (abbreviations and ``--coordinator=host:port`` included), so the early
     federation sees exactly what ``parse_args`` will see later."""
     import argparse as _ap
-    pre = _ap.ArgumentParser(add_help=False)
+    # allow_abbrev=False: the full parser also has --max-wallclock-seconds /
+    # --min-passage-width, so an abbreviation such as ``--m`` would federate
+    # here and then be rejected as ambiguous by parse_args.  Only the exact
+    # flags federate early; an abbreviation reaches main(), which refuses
+    # with the actionable message below instead of failing inside jax.
+    pre = _ap.ArgumentParser(add_help=False, allow_abbrev=False)
     pre.add_argument("--multicontroller", action="store_true", default=False)
     pre.add_argument("--coordinator", type=str, default=None)
     known, _ = pre.parse_known_args(argv)
@@ -5605,13 +5610,21 @@ def main():
     # calls that initialise the XLA backend".  No-op unless --multicontroller.
     if getattr(args, "multicontroller", False):
         if not _EARLY_FEDERATED:
-            # multicontroller selected by a --config file (or any path the argv
-            # pre-parse cannot see): the legoESM imports above have already
-            # initialised the XLA backend, so jax.distributed would refuse.
+            # multicontroller selected by a --config file, an abbreviated flag,
+            # or any path the argv pre-parse cannot see: the legoESM imports
+            # above have already initialised the XLA backend, so
+            # jax.distributed would refuse.
             raise SystemExit(
-                "--multicontroller must be given ON THE COMMAND LINE (it is "
-                "acted on before the legoESM imports; a config-file "
-                "`multicontroller: true` is seen too late to federate).")
+                "--multicontroller must be given ON THE COMMAND LINE, spelled "
+                "out in full (it is acted on before the legoESM imports; a "
+                "config-file `multicontroller: true` or an abbreviation is "
+                "seen too late to federate).")
+        if (getattr(args, "coordinator", None) or None) != (_pre_coord or None):
+            raise SystemExit(
+                f"--coordinator resolved to {args.coordinator!r} after parsing "
+                f"but the early federation used {_pre_coord!r}: pass "
+                "--coordinator on the command line (a config-file value is "
+                "seen too late).")
         from legoesm.parallel.early_init import init_multicontroller_distributed
         init_multicontroller_distributed(getattr(args, "coordinator", None))
 

@@ -58,15 +58,22 @@ def test_multicontroller_flag_federates_before_legoesm_imports():
 
 
 @pytest.mark.timeout(700)
-def test_multicontroller_abbreviation_and_eq_coordinator_form_federate():
+def test_eq_coordinator_form_federates_and_abbreviation_does_not():
+    """``--coordinator=host:port`` is honoured; an ABBREVIATED
+    ``--multicontrol`` is deliberately not (the full parser would call ``--m``
+    ambiguous), so it must not federate at import -- main() then refuses."""
     port = _free_port()
     r = _import_in_subprocess(
-        ["--grid", "tripole", "--enable-latlon-spmd", "--multicontrol",
+        ["--grid", "tripole", "--enable-latlon-spmd", "--multicontroller",
          f"--coordinator=127.0.0.1:{port}"],
         {"OMPI_COMM_WORLD_SIZE": "1", "OMPI_COMM_WORLD_RANK": "0"})
-    assert "must be called before any JAX calls" not in r.stderr, r.stderr[-3000:]
     assert r.returncode == 0, r.stdout[-2000:] + "\n" + r.stderr[-4000:]
     assert "FEDERATED True" in r.stdout, r.stdout[-2000:]
+    r = _import_in_subprocess(
+        ["--grid", "tripole", "--enable-latlon-spmd", "--multicontrol"],
+        {"OMPI_COMM_WORLD_SIZE": "1", "OMPI_COMM_WORLD_RANK": "0"})
+    assert r.returncode == 0, r.stderr[-4000:]
+    assert "FEDERATED False" in r.stdout, r.stdout[-2000:]
 
 
 @pytest.mark.timeout(700)

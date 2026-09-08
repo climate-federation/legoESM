@@ -230,3 +230,18 @@ def test_read_mesh_mask_bathy_land_depth_is_zero_with_fillvalue_zero(tmp_path, s
     assert np.all(np.isfinite(hb))
     assert np.all(hb[lm < 0.5] == 0.0)
     np.testing.assert_allclose(hb[lm > 0.5], (e3t[0] * tmask[0]).sum(axis=0)[lm > 0.5])
+
+
+def test_create_tripole_grid_refuses_mostly_unset_fold_row(tmp_path):
+    """The placeholder rule must not turn an all-unset (0,0) fold row into a
+    vacuous pass: more than a halo's worth of placeholders is refused."""
+    from legoesm.grids.tripole import create_tripole_grid
+    n_lat, n_lon = 12, 16
+    p = tmp_path / "mesh_mask.nc"
+    _write_tripole_like_mesh(p, n_lat, n_lon, dead_north_row=False)
+    ds = netCDF4.Dataset(p, "r+")
+    for v in ("glamt", "gphit"):
+        ds[v][0, -1, :] = 0.0
+    ds.close()
+    with pytest.raises(ValueError, match="unset"):
+        create_tripole_grid(str(p), fold_convention="(n_lon-i)%n_lon")

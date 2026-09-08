@@ -225,6 +225,11 @@ def _detect_fold(
     unset = (lat_fold == 0.0) & (lon_fold == 0.0)
     n_unset = int(jnp.sum(unset))
     if n_unset:
+        if n_unset > n_lon // 4:
+            raise ValueError(
+                f"Fold row j={fold_j}: {n_unset} of {n_lon} columns are unset "
+                "(0,0) placeholders -- more than a cyclic halo; this is not a "
+                "usable fold row (wrong strip_north_rows or a broken mesh).")
         print(f"  tripole fold check: ignoring {n_unset} unset (0,0) placeholder "
               f"column(s) on the fold row j={fold_j}")
 
