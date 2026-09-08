@@ -54,13 +54,11 @@ rc=${PIPESTATUS[0]}
 kill $MON 2>/dev/null
 echo "run_rc=$rc wall_s=$(( $(date +%s) - t0 ))"
 echo "peak GPU mem MiB (node 0, per GPU):"; python3 - "$OUT/gpumem_node0.txt" <<'EOF'
-import sys, collections
+import sys, collections, re
 peak = collections.defaultdict(int)
 for line in open(sys.argv[1]):
-    for tok in line.strip().split(' '):
-        i, _, m = tok.partition(',')
-        if i.strip().isdigit() and m.strip().isdigit():
-            peak[int(i)] = max(peak[int(i)], int(m))
+    for i, m in re.findall(r"(\d+),\s*(\d+)", line):   # nvidia-smi CSV: "0, 123"
+        peak[int(i)] = max(peak[int(i)], int(m))
 print(dict(sorted(peak.items())))
 EOF
 echo "=== DONE $(date) ==="; exit $rc

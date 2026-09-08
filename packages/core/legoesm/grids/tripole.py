@@ -216,10 +216,24 @@ def _detect_fold(
             f"fold_convention must be 'auto' or one of {list(perm_candidates)}, "
             f"got {fold_convention!r}."
         )
-    asym_by_perm = {
-        name: float(jnp.max(jnp.abs(lat_fold - lat_fold[p])))
-        for name, p in perm_candidates.items()
-    }
+    # Unfilled cyclic-halo columns: NOC ORCA0083 mesh_hgr stores (lat, lon) =
+    # (0, 0) in the last two columns of its fold rows (NEMO never filled them).
+    # No Arctic fold row passes through (0 N, 0 E), so such a column is a
+    # placeholder, not geometry; it is excluded from the symmetry check (for
+    # itself and as a partner) and reported.  Real asymmetries still fail.
+    lon_fold = glamt[fold_j]
+    unset = (lat_fold == 0.0) & (lon_fold == 0.0)
+    n_unset = int(jnp.sum(unset))
+    if n_unset:
+        print(f"  tripole fold check: ignoring {n_unset} unset (0,0) placeholder "
+              f"column(s) on the fold row j={fold_j}")
+
+    def _asym(p):
+        keep = ~(unset | unset[p])
+        d = jnp.abs(lat_fold - lat_fold[p])
+        return float(jnp.max(jnp.where(keep, d, 0.0)))
+
+    asym_by_perm = {name: _asym(p) for name, p in perm_candidates.items()}
     if fold_convention == "auto":
         # Symmetry-based auto-detect. A near-tie means BOTH conventions fit the
         # fold-row latitude equally well (e.g. a near-constant fold-row

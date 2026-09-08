@@ -50,7 +50,11 @@ def read_mesh_mask_bathy(mesh_path, *, strip_north_rows: int = 0):
     """
     import xarray as xr
     from legoesm.grids.tripole import mesh_file_list
-    dss = [xr.open_dataset(p) for p in mesh_file_list(mesh_path)]
+    # mask_and_scale=False: NEMO writes e3t_0 with _FillValue = 0.0, so xarray's
+    # default decoding turns every LAND scale factor (exactly 0) into NaN and
+    # the masked column sum below becomes NaN on land.  Read the raw values.
+    dss = [xr.open_dataset(p, mask_and_scale=False)
+           for p in mesh_file_list(mesh_path)]
 
     def _var(*names):
         for ds in dss:
@@ -70,7 +74,12 @@ def read_mesh_mask_bathy(mesh_path, *, strip_north_rows: int = 0):
     while tmask.ndim > 3:
         tmask = tmask[0]
     H_bathy = (e3t * tmask).sum(axis=0).astype(np.float64)   # (y, x)
-    # Guard: dry columns get 0 depth (they are land via land_mask anyway).
+    # Dry columns get exactly 0 depth; a non-finite depth on a WET column is a
+    # broken mesh, never something to carry into the dynamics.
+    H_bathy = np.where(land_mask > 0.5, H_bathy, 0.0)
+    if not np.all(np.isfinite(H_bathy[land_mask > 0.5])):
+        raise ValueError(
+            f"non-finite wet-column depth in mesh {mesh_file_list(mesh_path)}")
     if strip_north_rows < 0:
         raise ValueError(f"strip_north_rows must be >= 0, got {strip_north_rows}")
     if strip_north_rows >= land_mask.shape[0]:

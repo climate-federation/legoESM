@@ -103,7 +103,11 @@ def test_read_mesh_mask_bathy_split_equals_merged_and_strips(split_and_merged):
     np.testing.assert_array_equal(lm_a, lm_b)
     np.testing.assert_array_equal(hb_a, hb_b)
     np.testing.assert_array_equal(lm_a, tmask[0, 0].astype(np.float64))
-    np.testing.assert_allclose(hb_a, (e3t[0] * tmask[0]).sum(axis=0))
+    # depth is the masked column sum on surface-wet columns and exactly 0 on
+    # surface-land columns (the random fixture has wet cells under a dry
+    # surface; a real NEMO mask never does, so this only pins the land rule)
+    expect = np.where(tmask[0, 0] > 0, (e3t[0] * tmask[0]).sum(axis=0), 0.0)
+    np.testing.assert_allclose(hb_a, expect)
     lm_s, hb_s = read_mesh_mask_bathy(files, strip_north_rows=1)
     assert lm_s.shape == (NLAT - 1, NLON) and hb_s.shape == (NLAT - 1, NLON)
     np.testing.assert_array_equal(lm_s, lm_a[:-1])
@@ -115,7 +119,8 @@ def test_read_mesh_mask_bathy_accepts_nemo3_e3t_name(tmp_path, split_and_merged)
     zgr_old = tmp_path / "mesh_zgr_old.nc"
     _write(zgr_old, {"e3t": (("t", "z", "y", "x"), e3t)})
     lm, hb = read_mesh_mask_bathy([files[0], str(zgr_old), files[2]])
-    np.testing.assert_allclose(hb, (e3t[0] * tmask[0]).sum(axis=0))
+    expect = np.where(tmask[0, 0] > 0, (e3t[0] * tmask[0]).sum(axis=0), 0.0)
+    np.testing.assert_allclose(hb, expect)
     with pytest.raises(KeyError):
         read_mesh_mask_bathy([files[0], files[2]])       # no vertical file
 
@@ -183,3 +188,45 @@ def test_create_tripole_grid_strip_north_rows_makes_pivot_row_last(tmp_path):
     lm, hb = read_mesh_mask_bathy(str(p), strip_north_rows=1)
     assert lm.shape == (n_lat, n_lon) and lm[-1].min() == 1.0   # pivot row wet
     np.testing.assert_allclose(hb, 10.0 * NLEV)
+
+
+def test_create_tripole_grid_ignores_unset_halo_columns_on_fold_row(tmp_path):
+    """NOC ORCA0083 mesh_hgr stores (lat, lon) = (0, 0) in the two cyclic halo
+    columns of its fold rows (never filled).  Those placeholders must not
+    trip the fold-row self-symmetry check (they are land and no Arctic fold
+    row can pass through (0 N, 0 E)); a genuinely asymmetric fold row must
+    still be refused."""
+    from legoesm.grids.tripole import create_tripole_grid
+    n_lat, n_lon = 12, 16
+    p = tmp_path / "mesh_mask.nc"
+    _write_tripole_like_mesh(p, n_lat, n_lon, dead_north_row=False)
+    ds = netCDF4.Dataset(p, "r+")
+    for v in ("glamt", "gphit"):
+        ds[v][0, -1, -2:] = 0.0                     # unset halo columns
+    ds.close()
+    geom = create_tripole_grid(str(p), fold_convention="(n_lon-i)%n_lon")
+    assert int(geom.n_lat) == n_lat and bool(geom.fold.is_active)
+    # control: a real asymmetry (not a (0,0) placeholder) is still refused
+    ds = netCDF4.Dataset(p, "r+")
+    ds["gphit"][0, -1, 3] = 20.0
+    ds.close()
+    with pytest.raises(ValueError, match="Fold symmetry check failed"):
+        create_tripole_grid(str(p), fold_convention="(n_lon-i)%n_lon")
+
+
+def test_read_mesh_mask_bathy_land_depth_is_zero_with_fillvalue_zero(tmp_path, split_and_merged):
+    """NEMO writes e3t_0 with _FillValue = 0.0: xarray's default decoding
+    turns land scale factors into NaN and the masked column sum into NaN on
+    land.  The reader must return finite depths everywhere (0 on land)."""
+    files, _, tmask, e3t = split_and_merged
+    zgr_fill = tmp_path / "mesh_zgr_fill.nc"
+    ds = netCDF4.Dataset(zgr_fill, "w")
+    ds.createDimension("t", 1); ds.createDimension("z", NLEV)
+    ds.createDimension("y", NLAT); ds.createDimension("x", NLON)
+    v = ds.createVariable("e3t_0", "f8", ("t", "z", "y", "x"), fill_value=0.0)
+    v[:] = e3t * tmask                        # land scale factors are exactly 0
+    ds.close()
+    lm, hb = read_mesh_mask_bathy([files[0], str(zgr_fill), files[2]])
+    assert np.all(np.isfinite(hb))
+    assert np.all(hb[lm < 0.5] == 0.0)
+    np.testing.assert_allclose(hb[lm > 0.5], (e3t[0] * tmask[0]).sum(axis=0)[lm > 0.5])

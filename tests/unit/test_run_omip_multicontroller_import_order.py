@@ -31,9 +31,8 @@ def _free_port() -> int:
 
 
 def _import_in_subprocess(argv_extra, env_extra):
-    env = dict(os.environ)
-    env.pop("SLURM_PROCID", None)
-    env.pop("SLURM_NTASKS", None)
+    env = {k: v for k, v in os.environ.items()
+           if not (k.startswith("SLURM_") or k.startswith("PMI") or k.startswith("OMPI_"))}
     env.update({"JAX_PLATFORMS": "cpu", "JAX_ENABLE_X64": "1"})
     env.update(env_extra)
     code = (
@@ -52,6 +51,18 @@ def test_multicontroller_flag_federates_before_legoesm_imports():
     r = _import_in_subprocess(
         ["--grid", "tripole", "--enable-latlon-spmd", "--multicontroller",
          "--coordinator", f"127.0.0.1:{port}"],
+        {"OMPI_COMM_WORLD_SIZE": "1", "OMPI_COMM_WORLD_RANK": "0"})
+    assert "must be called before any JAX calls" not in r.stderr, r.stderr[-3000:]
+    assert r.returncode == 0, r.stdout[-2000:] + "\n" + r.stderr[-4000:]
+    assert "FEDERATED True" in r.stdout, r.stdout[-2000:]
+
+
+@pytest.mark.timeout(700)
+def test_multicontroller_abbreviation_and_eq_coordinator_form_federate():
+    port = _free_port()
+    r = _import_in_subprocess(
+        ["--grid", "tripole", "--enable-latlon-spmd", "--multicontrol",
+         f"--coordinator=127.0.0.1:{port}"],
         {"OMPI_COMM_WORLD_SIZE": "1", "OMPI_COMM_WORLD_RANK": "0"})
     assert "must be called before any JAX calls" not in r.stderr, r.stderr[-3000:]
     assert r.returncode == 0, r.stdout[-2000:] + "\n" + r.stderr[-4000:]

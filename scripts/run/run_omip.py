@@ -51,18 +51,25 @@ jax.config.update("jax_enable_x64", True)
 # before them, not in main() (that later call is an idempotent no-op).  Same
 # argv-sniff pattern as run_omip_core2's ``--fp32``.  First ORCA12 route-B
 # smoke (16 GPUs) died on exactly this ordering.
-if "--multicontroller" in sys.argv[1:]:
+def _preparse_multicontroller(argv):
+    """argparse-consistent pre-parse of ONLY --multicontroller / --coordinator
+    (abbreviations and ``--coordinator=host:port`` included), so the early
+    federation sees exactly what ``parse_args`` will see later."""
+    import argparse as _ap
+    pre = _ap.ArgumentParser(add_help=False)
+    pre.add_argument("--multicontroller", action="store_true", default=False)
+    pre.add_argument("--coordinator", type=str, default=None)
+    known, _ = pre.parse_known_args(argv)
+    return bool(known.multicontroller), known.coordinator
+
+
+_EARLY_FEDERATED = False
+_pre_multi, _pre_coord = _preparse_multicontroller(sys.argv[1:])
+if _pre_multi:
     from legoesm.parallel.early_init import init_multicontroller_distributed
 
-    def _argv_coordinator():
-        for i, a in enumerate(sys.argv[1:], start=1):
-            if a == "--coordinator" and i + 1 < len(sys.argv):
-                return sys.argv[i + 1]
-            if a.startswith("--coordinator="):
-                return a.split("=", 1)[1]
-        return None
-
-    init_multicontroller_distributed(_argv_coordinator())
+    init_multicontroller_distributed(_pre_coord)
+    _EARLY_FEDERATED = True
 
 import jax.numpy as jnp
 import numpy as np
@@ -5597,6 +5604,14 @@ def main():
     # jax.distributed.initialize() would raise "must be called before any JAX
     # calls that initialise the XLA backend".  No-op unless --multicontroller.
     if getattr(args, "multicontroller", False):
+        if not _EARLY_FEDERATED:
+            # multicontroller selected by a --config file (or any path the argv
+            # pre-parse cannot see): the legoESM imports above have already
+            # initialised the XLA backend, so jax.distributed would refuse.
+            raise SystemExit(
+                "--multicontroller must be given ON THE COMMAND LINE (it is "
+                "acted on before the legoESM imports; a config-file "
+                "`multicontroller: true` is seen too late to federate).")
         from legoesm.parallel.early_init import init_multicontroller_distributed
         init_multicontroller_distributed(getattr(args, "coordinator", None))
 
