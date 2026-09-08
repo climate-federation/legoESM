@@ -189,10 +189,16 @@ def test_host_numpy_regrid_matches_device_regrid():
     rw = compute_latlon_to_voronoi_weights(src_lat, src_lon, tgt_lat.ravel(),
                                            tgt_lon.ravel())
     rw = rw._replace(target_shape=tgt_lat.shape)
+    _day23 = _load_harness()
+    run_omip = _day23.run_omip
     recs = np.random.default_rng(1).standard_normal((3, 18, 36))
     ref = np.stack([np.asarray(regrid_scalar(jnp.asarray(r), rw)) for r in recs])
-    flat = recs.reshape(3, -1)
-    out = (flat[:, np.asarray(rw.src_indices)]
-           * np.asarray(rw.weights, dtype=np.float64)[None]).sum(axis=-1)
-    out = out.reshape((3,) + tuple(rw.target_shape))
+    out = np.asarray(run_omip._regrid_records_host(recs, rw))
+    assert out.shape == ref.shape
     np.testing.assert_allclose(out, ref, rtol=1e-12)
+    # trailing (level) dim is preserved like regrid_scalar
+    recs3 = np.random.default_rng(2).standard_normal((2, 18, 36, 3))
+    ref3 = np.stack([np.asarray(regrid_scalar(jnp.asarray(r), rw)) for r in recs3])
+    out3 = np.asarray(run_omip._regrid_records_host(recs3, rw))
+    assert out3.shape == ref3.shape == (2,) + tuple(rw.target_shape) + (3,)
+    np.testing.assert_allclose(out3, ref3, rtol=1e-12)

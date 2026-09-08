@@ -2505,6 +2505,37 @@ def _preload_jra55_forcing_block(start_step_idx, n_steps, dt, jra55_state):
     return atm_stack, runoff_stack
 
 
+def _regrid_records_host(recs, rw):
+    """Deterministic HOST (NumPy) k-neighbour regrid of stacked records.
+
+    Route-B multicontroller: every process builds the forcing stack itself and
+    ``shard_forcing_stack_latlon`` requires the bytes to agree across processes.
+    In the 16-GPU ORCA12 smoke (job 27324638) the GPU ``regrid_scalar`` results
+    differed across processes (all leaves) while an identical standalone build
+    agreed across CPU processes, GPUs and nodes; the divergence is not located,
+    so under multi-process the regrid is done here in NumPy -- byte-identical
+    by construction.  One record at a time (a (n_target, k) intermediate, not
+    (n_rec, n_target, k)); trailing dims after the source (lat, lon) are kept,
+    matching ``regrid_scalar``'s contract.  ``recs``: (n_rec, n_lat, n_lon[, ...]).
+    """
+    idx = np.asarray(rw.src_indices)
+    w = np.asarray(rw.weights, dtype=np.float64)
+    recs = np.asarray(recs, dtype=np.float64)
+    n_rec = int(recs.shape[0])
+    spatial = int(rw.src_flat_size)
+    n_extra = int(recs[0].size // spatial)
+    if n_extra * spatial != recs[0].size:
+        raise ValueError(
+            f"record size {recs[0].size} is not a multiple of the source grid "
+            f"size {spatial}")
+    trailing = tuple(recs.shape[3:]) if n_extra > 1 else ()
+    out = np.empty((n_rec, idx.shape[0], n_extra), dtype=np.float64)
+    for r in range(n_rec):
+        flat = recs[r].reshape(spatial, n_extra)
+        out[r] = (flat[idx] * w[..., None]).sum(axis=1)
+    return jnp.asarray(out.reshape((n_rec,) + tuple(rw.target_shape) + trailing))
+
+
 def _preload_jra55_full_cache(jra55_state):
     """Pre-load and regrid the entire JRA55 cache into RAM.
 
@@ -2542,10 +2573,15 @@ def _preload_jra55_full_cache(jra55_state):
         rw = jra55_state["regrid_weights"]
         for var in all_records:
             arr = all_records[var]  # (n_records, n_lat, n_lon)
-            all_records[var] = jnp.stack([
-                regrid_scalar(arr[i], rw)
-                for i in range(arr.shape[0])
-            ])
+            if jax.process_count() > 1:
+                # same byte-identical host path as _preload_jra55_raw_records
+                all_records[var] = _regrid_records_host(arr, rw).astype(
+                    arr.dtype)
+            else:
+                all_records[var] = jnp.stack([
+                    regrid_scalar(arr[i], rw)
+                    for i in range(arr.shape[0])
+                ])
 
     record_days = jnp.asarray(
         np.arange(n_cache_records, dtype=np.float64) / RECORDS_PER_DAY,
@@ -2749,14 +2785,8 @@ def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
         # the host (deterministic by construction, no device transfers); the
         # single-process path keeps the GPU regrid byte-unchanged.
         if jax.process_count() > 1:
-            _idx = np.asarray(rw.src_indices)
-            _w = np.asarray(rw.weights, dtype=np.float64)
             for var in raw_stack:
-                recs = np.asarray(raw_stack[var], dtype=np.float64)
-                flat = recs.reshape(recs.shape[0], -1)
-                out = (flat[:, _idx] * _w[None]).sum(axis=-1)
-                raw_stack[var] = jnp.asarray(
-                    out.reshape((recs.shape[0],) + tuple(rw.target_shape)))
+                raw_stack[var] = _regrid_records_host(raw_stack[var], rw)
         else:
             for var in raw_stack:
                 raw_stack[var] = jnp.stack([
@@ -3988,6 +4018,15 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 # the in-scan interpolation / bulk fluxes stay shard-local
                 # (an unsharded stack commits to device 0 and serializes
                 # every forcing op there).
+                if jax.process_count() > 1 and block_start == start_step:
+                    # first block: name the forcing leaf bytes per rank so a
+                    # gate failure below is attributable (see SPMD build digests)
+                    from legoesm.parallel.geometry_consistency import leaf_digest48
+                    _lead = raw_stack if use_gpu_interp else atm_stack
+                    _k = next(iter(_lead))
+                    print(f"  [rank {jax.process_index()}] forcing leaf "
+                          f"{_k!r} digest={int(leaf_digest48(_lead[_k]))}",
+                          flush=True)
                 if use_gpu_interp:
                     raw_stack = spmd_shard_stack(raw_stack)
                     runoff_records = spmd_shard_stack(runoff_records)
