@@ -601,8 +601,15 @@ class TestDINORecipes:
 
 
 class TestNemoFaithfulGrid:
-    """Opt-in NEMO-exact DINO grid (nemo_faithful_grid). Mesh-verified against
-    our NEMO 5.0.2 DINO build: 48×195, equator on a T-point, faces [1,49]."""
+    """Opt-in NEMO-exact DINO grid (nemo_faithful_grid).
+
+    NEMO 5.0.2's DINO domain is 52 columns x 199 rows with the equator on a
+    T-point and U-faces [0, 51] (usrdef_nam.F90:141-155).  These assertions
+    read 48x195 / faces [1,49] until 2026-09-08 -- the halo-strip-era frame,
+    which no certified twin ever ran on.  The full bit-exactness check against
+    NEMO's mesh_mask lives in the gate
+    (scripts/validate/ocean_fidelity/dino_1226/nemo_dino_mesh_gate.py, which
+    needs the oracle file); these are the file-free wiring checks."""
 
     def test_default_grid_unchanged(self):
         # Opt-in: a bare config keeps the legoESM [-50,0]/198×50 grid.
@@ -613,22 +620,36 @@ class TestNemoFaithfulGrid:
         assert np.asarray(grid.lon).shape == (50,)
 
     def test_nemo_faithful_matches_nemo_mesh(self):
-        # NEMO DINO R1: 48 zonal cells (T-centres [1.5,48.5]), 195 rows with the
-        # equator ON a T-point (j=97 = 0.0°) at ±69.151°. The projection is
-        # identical; only the half-cell equator staggering + count differ.
+        # NEMO DINO R1: 52 zonal cells (T-centres [-0.5, 50.5], U-faces
+        # [0, 51]), 199 rows with the equator ON a T-point (index 99) and the
+        # outermost T-centres at ±69.85173502°.
         import numpy as np
         cfg = nemo_faithful_dino_config()
         assert cfg.nemo_faithful_grid is True
-        assert (cfg.lon_west_deg, cfg.lon_east_deg) == (1.0, 49.0)
-        assert cfg.sill_lon_m_deg == 1.0        # sill anchor co-set to west wall
+        assert (cfg.lon_west_deg, cfg.lon_east_deg) == (0.0, 51.0)
+        assert cfg.sill_lon_m_deg == 0.0        # sill anchor co-set to west face
+        assert cfg.vertical_coordinate == "masked_zco"   # NEMO ln_zco full step
         grid = dino_lat_lon_grid(cfg)
-        lat = np.degrees(np.asarray(grid.lat))
-        lon = np.degrees(np.asarray(grid.lon))
-        assert lat.shape == (195,) and lon.shape == (48,)
-        assert lon[0] == pytest.approx(1.5, abs=1e-4)
-        assert lon[-1] == pytest.approx(48.5, abs=1e-4)
-        assert lat[97] == pytest.approx(0.0, abs=1e-5)     # equator on T-point
-        assert abs(lat[0]) == pytest.approx(69.1514, abs=1e-3)
+        lat = np.degrees(np.asarray(grid.lat, dtype=np.float64))
+        lon = np.degrees(np.asarray(grid.lon, dtype=np.float64))
+        assert lat.shape == (199,) and lon.shape == (52,)
+        # Tolerances are float32-sized on purpose: the geometry is stored at
+        # the active precision policy, which DEFAULTS to float32 even under
+        # JAX_ENABLE_X64.  The bit-exact claim is made at fp64 by the gate
+        # (nemo_dino_mesh_gate.py); this test checks the wiring, not the ulps.
+        assert lon[0] == pytest.approx(-0.5, abs=1e-5)
+        assert lon[-1] == pytest.approx(50.5, abs=1e-5)
+        assert lat[99] == pytest.approx(0.0, abs=1e-5)     # equator on T-point
+        assert abs(lat[0]) == pytest.approx(69.85173502, abs=1e-5)
+        # v-face latitudes must be the mesh's own, not lat +/- 0.5*scalar dlat
+        # (0.326° wrong on this stretched grid, and the ACC/MOC latitude axis).
+        lat_v = np.degrees(np.asarray(grid.lat_v, dtype=np.float64))
+        assert lat_v.shape == (200,)
+        # The equator T-row's two faces sit at NEMO's gphiv(±0.5) =
+        # asin(tanh(rad/2))/rad = ±0.49999365°, NOT at ±0.5*dlat_scalar
+        # (±0.17°) that the no-lat_v fallback would give.
+        assert lat_v[99] == pytest.approx(-0.49999365, abs=1e-4)
+        assert lat_v[100] == pytest.approx(0.49999365, abs=1e-4)
 
     def test_nemo_faithful_bathymetry_domain_is_wet(self):
         # The co-set lon frame keeps the bathymetry valid (not an all-land
@@ -649,7 +670,7 @@ class TestNemoFaithfulGrid:
         cfg = nemo_faithful_dino_config(base=base)
         assert cfg.nemo_faithful_grid is True
         assert (cfg.lon_west_deg, cfg.lon_east_deg, cfg.sill_lon_m_deg) == (
-            1.0, 49.0, 1.0)
+            0.0, 51.0, 0.0)
         # recipe fields survive (eos, convection fidelity, barotropic solver)
         assert cfg.eos == "nemo_seos"
         assert cfg.convection_smooth_transition is False
@@ -659,7 +680,7 @@ class TestNemoFaithfulGrid:
         # Flipping the flag alone (legoESM [-50,0] frame) would put every grid
         # lon outside the basin -> all land; the builder fails loudly instead.
         import dataclasses
-        with pytest.raises(ValueError, match="NEMO .1,49. longitude frame"):
+        with pytest.raises(ValueError, match="NEMO .0,51. longitude frame"):
             dino_lat_lon_grid(
                 dataclasses.replace(DINOConfig(), nemo_faithful_grid=True))
 

@@ -103,7 +103,9 @@ def main() -> int:
     lego_lat_deg = np.degrees(np.asarray(grid.lat))
     row_col = gphiu[:, jpi // 2]
     jrow_start = None
-    for j0 in range(jpj - n_lat):
+    # +1 so a HALOLESS dump (jpj == n_lat, which NEMO 5 writes) still has
+    # one candidate offset; range(0) would have failed to align it.
+    for j0 in range(jpj - n_lat + 1):
         if np.max(np.abs(row_col[j0:j0 + n_lat] - lego_lat_deg)) < 1e-4:
             jrow_start = j0
             break

@@ -114,11 +114,19 @@ the comparison is cell-by-cell, not grid-robust interpolation) vs NEMO's
 - **T corr 0.99** cell-by-cell; salinity within ~0.1 PSU (interior).
 - **Native NEMO grid** (opt-in, `DINOConfig.nemo_faithful_grid` /
   `nemo_faithful_dino_config` / `run_dino.py --nemo-faithful-grid`): a standalone
-  DINO run now builds NEMO's exact DINO R1 mesh — 48×195, equator on a T-point,
-  faces [1°, 49°] — reproducing `glamt`/`gphit` to **3e-6°** with **100%
-  wet/dry-domain agreement** (bathymetry depth corr 0.92; residual is legoESM's
-  analytic bowl vs NEMO's full-step `ln_zps` levels). Default OFF (the 48° vs
-  legoESM's 50° basin is not comparable to prior DINO runs). PR #1137.
+  DINO run builds NEMO's exact DINO R1 mesh, transcribed from NEMO's own
+  namelist with no NEMO file read at run time. **SUPERSEDED 2026-09-08**: this
+  entry described a **48×195 / faces [1°, 49°]** grid reproducing `glamt`/`gphit`
+  to 3e-6°. That was the halo-strip-era frame. NEMO's DINO domain is **52×199,
+  U-faces [0°, 51°]** (`usrdef_nam.F90:141-155`; the haloless `mesh_mask.nc` is
+  52×199), which is what every certified twin has run on and what this path now
+  builds — **bit-exactly**: 44 of the 45 mesh_mask variables have **0 cells
+  unequal**, the exception being `ff_t`/`ff_f` at ≤3 ulp because the NEMO binary
+  vectorised its own `SIN` (14 `_ZGVbN2v_sin` calls in `usr_def_hgr`), a value
+  legoESM never reads. Gated, with a `--plant` non-vacuity check, by
+  `scripts/validate/ocean_fidelity/dino_1226/nemo_dino_mesh_gate.py`. Default
+  OFF (legoESM's own 50°-basin analytic bowl is not comparable). PR #1137, frame
+  corrected 2026-09-08.
 - **Basin-mean T(z)** now tracks within ~0.1 °C through the thermocline:
   **T@262 m = 9.55 vs NEMO 9.50**, **SST 14.13 vs 14.07** (see the cold-bias
   resolution below).

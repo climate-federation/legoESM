@@ -147,11 +147,17 @@ def _parse_args():
     p.add_argument(
         "--nemo-faithful-grid", action="store_true",
         help="Build the lat-lon grid on NEMO's EXACT DINO R1 mesh "
-             "(DINOConfig.nemo_faithful_grid): 48×195 with the equator on a "
-             "T-point and faces [1,49] (matches our NEMO 5.0.2 build cell-for-"
-             "cell to 3e-6°; 100%% wet/dry-domain agreement), instead of the "
-             "legoESM [-50,0]/198×50 default. Co-sets the bathymetry lon frame "
-             "+ sill anchor via nemo_faithful_dino_config. Lat-lon only.",
+             "(DINOConfig.nemo_faithful_grid): 52 columns x 199 rows, equator "
+             "on a T-point, U-faces [0,51], instead of the legoESM "
+             "[-50,0]/198x50 default. The mesh is transcribed from NEMO's own "
+             "namelist -- no NEMO file is read -- and is BIT-EXACT against "
+             "NEMO 5.0.2's mesh_mask on every field except the two Coriolis "
+             "arrays, which differ by <=3 ulp because the NEMO binary "
+             "vectorised its own sine (gated by scripts/validate/"
+             "ocean_fidelity/dino_1226/nemo_dino_mesh_gate.py). Co-sets the "
+             "bathymetry lon frame, sill anchor, vertical coordinate, omega "
+             "and metric convention via nemo_faithful_dino_config, and returns "
+             "the same domain the certified NEMO twin runs on. Lat-lon only.",
     )
     p.add_argument(
         "--tke-momentum-visc-bg", type=float, default=None,
