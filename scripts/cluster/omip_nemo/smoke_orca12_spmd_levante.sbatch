@@ -4,6 +4,7 @@
 #SBATCH --partition=gpu
 #SBATCH --constraint=a100_80
 #SBATCH --gpus-per-node=4
+#SBATCH --ntasks-per-node=2
 #SBATCH --exclusive
 #SBATCH --mem=0
 #SBATCH --time=01:30:00
@@ -13,7 +14,7 @@
 # (one process per GPU), JRA55-do 1958 forcing, slab sea ice, fp64.
 # SIZING ONLY: reports peak GPU memory, s/step and finiteness. NOT a production
 # year -- the T-pivot fold seam of this mesh is only approximated (see PR).
-# Submit with --nodes=4 (16 GPUs) or --nodes=8 (32 GPUs); DT/STEPS via --export.
+# Submit with --nodes=8 (16 GPUs at TPN=2) or --nodes=16 (32 GPUs); DT/STEPS/TPN via --export.
 set -uo pipefail
 WT=${LEGOESM_REPO:-/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/.claude/worktrees/agent-ac78430029eb34e21}
 PY=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/.venv/bin/python
@@ -21,7 +22,11 @@ R=/work/bd1083/b309178/diffESM/legoesm_pg/ocean_hires_runs
 M=$R/meshes/ORCA0083-N06
 DT=${DT:-150}
 STEPS=${STEPS:-200}
-NGPU=$(( SLURM_JOB_NUM_NODES * 4 ))
+# Tasks per node: each process builds the GLOBAL setup in HOST RAM (#1370) --
+# ~130 GB RSS per process at ORCA12 (job 27326645: 4/node = OUT_OF_MEMORY on a
+# 512 GB node). 2 per node fits; the other two GPUs of the node stay idle.
+TPN=${TPN:-2}
+NGPU=$(( SLURM_JOB_NUM_NODES * TPN ))
 DAYS=$(awk -v s="$STEPS" -v d="$DT" 'BEGIN {printf "%.10f", s*d/86400.0}')
 # H_max must equal the dz-file total to 1e-6 relative (run_omip's dz-ref gate).
 # awk, not python: the batch node's system python has no numpy.
@@ -41,7 +46,7 @@ MON=$!
 t0=$(date +%s)
 # per-rank stderr files: the failing rank's real XLA error (OOM etc.) survives
 # the coordination-service teardown noise in the aggregated log.
-srun --ntasks=$NGPU --ntasks-per-node=4 --gpus-per-node=4 --gpu-bind=none --kill-on-bad-exit=1 \
+srun --ntasks=$NGPU --ntasks-per-node=$TPN --gpus-per-node=$TPN --gpu-bind=none --kill-on-bad-exit=1 \
   --error="$OUT/rank_%t.err" \
   "$PY" scripts/run/run_omip.py --grid tripole \
     --tripole-mesh "$M/mesh_hgr.nc:$M/mesh_zgr.nc:$M/mask.nc" --tripole-strip-north-rows 1 \
