@@ -1278,6 +1278,21 @@ def _validate_dz_ref_against_setup(dz, nlev: int, H_max: float) -> None:
         )
 
 
+_ACTIVE_BUILD_CTX = None
+
+
+def _exit_build_ctx() -> None:
+    """Leave the #1370 host-side build context if one is active.  Called at the
+    normal end of the setup section AND from main()'s per-grid exception
+    handler, so a caught setup error cannot leave the CPU as the default
+    device for the next grid case."""
+    global _ACTIVE_BUILD_CTX
+    ctx = _ACTIVE_BUILD_CTX
+    _ACTIVE_BUILD_CTX = None
+    if ctx is not None:
+        ctx.__exit__(None, None, None)
+
+
 def _spmd_device_count(run_config) -> int:
     """Device count the lat-band SPMD lane will shard over (1 = off).
 
@@ -2883,7 +2898,12 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
 
     if enable_freeze:
         sponge_gamma = jra55_state.get("sponge_gamma_2d", None)
-        if sponge_gamma is not None and np.any(np.asarray(sponge_gamma) > 0):
+        # under route-B the gamma is lat-band sharded (non-addressable
+        # shards), so the host "any positive" check is precomputed at wiring
+        _any_pos = jra55_state.get("_sponge_gamma_any_positive")
+        if _any_pos is None and sponge_gamma is not None:
+            _any_pos = bool(np.any(np.asarray(sponge_gamma) > 0))
+        if sponge_gamma is not None and _any_pos:
             freeze_mask_static = sponge_gamma > 0.0
         else:
             # No sponge: cap globally over all ocean cells.
@@ -3093,7 +3113,12 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
 
     if enable_freeze:
         sponge_gamma = jra55_state.get("sponge_gamma_2d", None)
-        if sponge_gamma is not None and np.any(np.asarray(sponge_gamma) > 0):
+        # under route-B the gamma is lat-band sharded (non-addressable
+        # shards), so the host "any positive" check is precomputed at wiring
+        _any_pos = jra55_state.get("_sponge_gamma_any_positive")
+        if _any_pos is None and sponge_gamma is not None:
+            _any_pos = bool(np.any(np.asarray(sponge_gamma) > 0))
+        if sponge_gamma is not None and _any_pos:
             freeze_mask_static = sponge_gamma > 0.0
         else:
             freeze_mask_static = jra55_state.get("_ocean_mask_2d", None)
@@ -4625,6 +4650,29 @@ def run_omip_single(grid_type: str, args) -> dict:
     # for cross-grid consistency; physics pipeline disabled).
     _dz_ref = load_dz_ref_file(args.dz_ref_file)
     _validate_dz_ref_against_setup(_dz_ref, args.nlev, args.H_max)
+    # #1370 host-side build (the lat-lon SPMD bench's mechanism, reused): under
+    # lat-band SPMD every process builds the GLOBAL grid/model/state/WOA/
+    # forcing setup itself and only its own band shards may reach the GPU.
+    # Built on the default GPU device, ORCA12 (13.3M x 75) put every GPU at
+    # 66-75 GB before the first step (job 27325458) and OOMed at the forcing
+    # shard. So the whole setup below runs with the CPU backend as jax's
+    # default device (host RAM); shard_state_latlon / shard_cell_pytree_latlon
+    # / checked_shard_put then hand each device exactly its band slabs
+    # (make_array_from_callback, no global device copy). Exited right after
+    # the sharding block so the jitted block scan runs on the GPUs.
+    import contextlib
+    _build_ctx = contextlib.nullcontext()
+    if _spmd_device_count(run_config) > 1:
+        try:
+            _build_ctx = jax.default_device(
+                jax.local_devices(backend="cpu")[0])
+        except RuntimeError:
+            print("[#1370] WARNING: no cpu backend — the global setup will "
+                  "materialise on the accelerator (set JAX_PLATFORMS=cuda,cpu "
+                  "to enable the host-side build)", flush=True)
+    _build_ctx.__enter__()
+    global _ACTIVE_BUILD_CTX
+    _ACTIVE_BUILD_CTX = _build_ctx
     grid, z_coord, config, model, coord_kind = _create_setup(
         grid_type, resolution, args.nlev, args.H_max,
         args.physics, args.water_type,
@@ -5497,6 +5545,40 @@ def run_omip_single(grid_type: str, args) -> dict:
                     jra55_state["ice_state_init"], _dev.mesh)
                 spmd_gather_ice = partial(
                     gather_cell_pytree_latlon, mesh=_dev.mesh)
+            if jra55_state is not None:
+                # The block scan closes over these GLOBAL reference fields
+                # (sponge gamma/T_ref/S_ref, SSS target); left as plain arrays
+                # they reach every GPU whole (ORCA12: two 8 GB 3-D refs per
+                # GPU). Lay them out on the same lat bands as the state.
+                from legoesm.ocean.dynamics.sharded_ocean_step import (
+                    shard_forcing_latlon,
+                )
+                if jra55_state.get("sponge_gamma_2d") is not None:
+                    jra55_state["_sponge_gamma_any_positive"] = bool(
+                        np.any(np.asarray(jra55_state["sponge_gamma_2d"]) > 0))
+                for _key in ("sponge_gamma_2d", "sponge_T_ref_3d",
+                             "sponge_S_ref_3d", "sss_target_2d"):
+                    if jra55_state.get(_key) is not None:
+                        jra55_state[_key] = shard_forcing_latlon(
+                            jnp.asarray(jra55_state[_key]), _dev.mesh)
+            # Restoring-lane targets and WOA nudging fields are combined with
+            # the sharded state every step: lay them out on the bands too.
+            if restoring_targets is not None:
+                from legoesm.ocean.dynamics.sharded_ocean_step import (
+                    shard_forcing_latlon,
+                )
+                restoring_targets = tuple(
+                    shard_forcing_latlon(jnp.asarray(t), _dev.mesh)
+                    for t in restoring_targets)
+            if args.nudge_woa_tau > 0 and T_woa is not None:
+                from legoesm.ocean.dynamics.sharded_ocean_step import (
+                    shard_forcing_latlon,
+                )
+                _lm3 = state.land_mask.data[..., jnp.newaxis]
+                T_woa = shard_forcing_latlon(
+                    jnp.asarray(T_woa) * _lm3, _dev.mesh)
+                S_woa = shard_forcing_latlon(
+                    jnp.asarray(S_woa) * _lm3, _dev.mesh)
             # Lay per-block forcing stacks out lat-band-sharded so the
             # in-scan interpolation / bulk fluxes stay shard-local (shared
             # layout helper — see shard_forcing_stack_latlon).
@@ -5525,6 +5607,7 @@ def run_omip_single(grid_type: str, args) -> dict:
                       f"({jax.default_backend()}).")
         elif jax.process_index() == 0:
             print("  SPMD: single device visible — flag is a no-op.")
+    _exit_build_ctx()                          # end of the #1370 host-side build
 
     # Run time loop
     state, diag, wall_time, ok, blowup_info = _run_omip_loop(
@@ -5725,6 +5808,7 @@ def main():
         try:
             run_omip_single(grid_type, args)
         except Exception:
+            _exit_build_ctx()      # never leave the CPU as default for the next grid
             print(f"\n  !! ERROR running {grid_type}:")
             traceback.print_exc()
             ALL_RESULTS.append({
