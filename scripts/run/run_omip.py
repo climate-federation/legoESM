@@ -748,6 +748,14 @@ def parse_args(argv: list[str] | None = None):
                        "device count. Unsupported: --jra55-sea-ice, the "
                        "JRA55 single-step fallback."
                    ))
+    p.add_argument("--mpas-lloyd", type=int, default=50,
+                   help=(
+                       "Lloyd (SCVT centroidal relaxation) iterations for the "
+                       "--grid mpas mesh (default 50 = the production SCVT, "
+                       "unchanged). The value is part of the mesh-cache key, "
+                       "so 0 selects the scaling campaign's cached lloyd=0 "
+                       "icosahedral meshes (cell quality slightly lower)."
+                   ))
     p.add_argument("--enable-mpas-spmd", action="store_true", default=False,
                    help=(
                        "Run the MPAS lane multi-device SPMD "
@@ -1268,7 +1276,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   forcing_mode: str = "restoring",
                   use_conservation_fixer: bool = True,
                   dz_ref_override=None,
-                  spmd_n_devices: int = 0):
+                  spmd_n_devices: int = 0,
+                  mpas_lloyd: int = 50):
     """Create grid, z_coord, config, model for any grid type.
 
     ``spmd_n_devices > 1`` (MPAS only, ``--enable-mpas-spmd``) reorders + pads
@@ -1545,7 +1554,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             LateralMixingConfig,
         )
 
-        mesh = create_voronoi_mesh(params["level"])
+        mesh = create_voronoi_mesh(params["level"], lloyd_iterations=mpas_lloyd)
         if spmd_n_devices > 1:
             from legoesm.parallel.voronoi_partition import (
                 reorder_voronoi_for_sharding,
@@ -4541,6 +4550,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         grid_type, resolution, args.nlev, args.H_max,
         args.physics, args.water_type,
         spmd_n_devices=_mpas_spmd_nd,
+        mpas_lloyd=int(getattr(args, "mpas_lloyd", 50)),
         use_bathymetry=(args.bathymetry is not None),
         A_h_override=args.A_h,
         B_h_override=args.B_h,

@@ -87,6 +87,12 @@ def test_enable_mpas_spmd_flags_round_trip():
     assert cfg.spmd_n_devices == 8
 
 
+def test_mpas_lloyd_flag_round_trip():
+    """--mpas-lloyd defaults to the production SCVT (50) and parses."""
+    assert parse_args(["--grid", "mpas"]).mpas_lloyd == 50
+    assert parse_args(["--grid", "mpas", "--mpas-lloyd", "0"]).mpas_lloyd == 0
+
+
 def test_multicontroller_flags_round_trip():
     """--multicontroller / --coordinator parse and reach OMIPRunConfig
     (the route-B cross-process lane, part 2c of the ocean-SPMD promotion)."""
