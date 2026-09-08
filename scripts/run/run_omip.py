@@ -2898,12 +2898,7 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
 
     if enable_freeze:
         sponge_gamma = jra55_state.get("sponge_gamma_2d", None)
-        # under route-B the gamma is lat-band sharded (non-addressable
-        # shards), so the host "any positive" check is precomputed at wiring
-        _any_pos = jra55_state.get("_sponge_gamma_any_positive")
-        if _any_pos is None and sponge_gamma is not None:
-            _any_pos = bool(np.any(np.asarray(sponge_gamma) > 0))
-        if sponge_gamma is not None and _any_pos:
+        if sponge_gamma is not None and np.any(np.asarray(sponge_gamma) > 0):
             freeze_mask_static = sponge_gamma > 0.0
         else:
             # No sponge: cap globally over all ocean cells.
@@ -3113,12 +3108,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
 
     if enable_freeze:
         sponge_gamma = jra55_state.get("sponge_gamma_2d", None)
-        # under route-B the gamma is lat-band sharded (non-addressable
-        # shards), so the host "any positive" check is precomputed at wiring
-        _any_pos = jra55_state.get("_sponge_gamma_any_positive")
-        if _any_pos is None and sponge_gamma is not None:
-            _any_pos = bool(np.any(np.asarray(sponge_gamma) > 0))
-        if sponge_gamma is not None and _any_pos:
+        if sponge_gamma is not None and np.any(np.asarray(sponge_gamma) > 0):
             freeze_mask_static = sponge_gamma > 0.0
         else:
             freeze_mask_static = jra55_state.get("_ocean_mask_2d", None)
@@ -5545,40 +5535,13 @@ def run_omip_single(grid_type: str, args) -> dict:
                     jra55_state["ice_state_init"], _dev.mesh)
                 spmd_gather_ice = partial(
                     gather_cell_pytree_latlon, mesh=_dev.mesh)
-            if jra55_state is not None:
-                # The block scan closes over these GLOBAL reference fields
-                # (sponge gamma/T_ref/S_ref, SSS target); left as plain arrays
-                # they reach every GPU whole (ORCA12: two 8 GB 3-D refs per
-                # GPU). Lay them out on the same lat bands as the state.
-                from legoesm.ocean.dynamics.sharded_ocean_step import (
-                    shard_forcing_latlon,
-                )
-                if jra55_state.get("sponge_gamma_2d") is not None:
-                    jra55_state["_sponge_gamma_any_positive"] = bool(
-                        np.any(np.asarray(jra55_state["sponge_gamma_2d"]) > 0))
-                for _key in ("sponge_gamma_2d", "sponge_T_ref_3d",
-                             "sponge_S_ref_3d", "sss_target_2d"):
-                    if jra55_state.get(_key) is not None:
-                        jra55_state[_key] = shard_forcing_latlon(
-                            jnp.asarray(jra55_state[_key]), _dev.mesh)
-            # Restoring-lane targets and WOA nudging fields are combined with
-            # the sharded state every step: lay them out on the bands too.
-            if restoring_targets is not None:
-                from legoesm.ocean.dynamics.sharded_ocean_step import (
-                    shard_forcing_latlon,
-                )
-                restoring_targets = tuple(
-                    shard_forcing_latlon(jnp.asarray(t), _dev.mesh)
-                    for t in restoring_targets)
-            if args.nudge_woa_tau > 0 and T_woa is not None:
-                from legoesm.ocean.dynamics.sharded_ocean_step import (
-                    shard_forcing_latlon,
-                )
-                _lm3 = state.land_mask.data[..., jnp.newaxis]
-                T_woa = shard_forcing_latlon(
-                    jnp.asarray(T_woa) * _lm3, _dev.mesh)
-                S_woa = shard_forcing_latlon(
-                    jnp.asarray(S_woa) * _lm3, _dev.mesh)
+            # NOTE (codex r8): the block scan closes over the sponge / SSS /
+            # nudging reference fields as jit constants. They must stay
+            # process-local replicated arrays -- a lat-band-sharded (non-
+            # addressable) closure constant cannot be materialised at trace
+            # time under route-B. At ORCA12 this is ~16 GB of 3-D references
+            # per GPU; sharding them requires passing them as scan ARGUMENTS
+            # (block-fn signature change), not done here.
             # Lay per-block forcing stacks out lat-band-sharded so the
             # in-scan interpolation / bulk fluxes stay shard-local (shared
             # layout helper — see shard_forcing_stack_latlon).
