@@ -244,7 +244,7 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
     if _conv_cloud and allow_convective_cloud:
         logger.info(
             "convective_cloud=True ACTIVE on the MPAS standalone path: "
-            "Slingo cumulus fraction driven by the one-step-lagged "
+            "Slingo-1987-inspired surrogate cumulus fraction driven by the one-step-lagged "
             "PhysicsState.conv_precip carry (the convection module's "
             "column-integrated in-updraft rain production). Schemes with "
             "no rain split publish zero — their cumulus fraction is zero."
@@ -256,7 +256,7 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
         logger.warning(
             "convective_cloud=True is FORCED OFF on the spectral "
             "standalone radiation path: its lean loop carries no "
-            "PhysicsState, so there is no conv_precip for the Slingo "
+            "PhysicsState, so there is no conv_precip for the Slingo-1987-inspired surrogate "
             "fraction. The FV pipeline and the MPAS lane honour the "
             "setting."
         )
@@ -10199,7 +10199,7 @@ class ModelDriver:
             # carry and must fail loudly (issue #405/#413).
             _NEW_OPTIONAL_PS_FIELDS = frozenset({
                 "aerosol_number",
-                # conv_precip (2026-07-24): the Slingo lag carry; zero-seed
+                # conv_precip (2026-07-24): the Slingo-1987-inspired surrogate lag carry; zero-seed
                 # is the correct pre-feature state (no convective cloud was
                 # diagnosed before it existed).
                 "conv_precip",

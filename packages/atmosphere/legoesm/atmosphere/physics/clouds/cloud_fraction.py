@@ -372,7 +372,7 @@ def convective_cloud_fraction(
     stratiform schemes diagnose ~0 cloud in the convecting tropics — the
     surface then radiates LW straight to space (the measured ~4.5 K coupled
     cold bias: tropical ``LW_net_sfc`` ~−137 W/m², precip ~1 mm/day).
-    Following Slingo (1987), tie a *bounded* cumulus cloud cover to the
+    Inspired by Slingo-1987-inspired surrogate (own constants, not Slingo-1987-inspired surrogate's), tie a *bounded* cumulus cloud cover to the
     convective precipitation rate:
 
         ``cf_conv = clip(conv_cloud_coeff · ln(1 + P_conv/P0), 0, conv_cloud_max)``
@@ -943,7 +943,7 @@ def compute_cloud_properties(
     # The stratiform RH/condensate fractions above miss convective cloud when an
     # adjustment scheme (sbm) holds the column subsaturated, so the convecting
     # tropics get cf≈0 and leak surface LW.  When enabled, add a bounded
-    # Slingo(1987) cumulus cover tied to the convective precip rate; the
+    # Slingo-1987-inspired surrogate cumulus cover tied to the convective precip rate; the
     # condensate floor below makes it radiatively active.  Default-off /
     # ``conv_precip=None`` ⇒ ``cf`` unchanged.  ``cf_strat`` is the stratiform
     # fraction BEFORE the convective overlap; the convective EXCESS

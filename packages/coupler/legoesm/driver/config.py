@@ -557,7 +557,7 @@ class ExperimentConfig(NamedTuple):
     # ``RadiationConfig.use_clubb_cloud_fraction``; requires diagnostic CLUBB
     # turbulence (turbulence='clubb').  False (default) is byte-identical.
     use_clubb_cloud_fraction: bool = False
-    # Opt-in convective (cumulus) cloud-fraction source (Slingo 1987).  The
+    # Opt-in convective (cumulus) cloud-fraction source (Slingo-1987-inspired surrogate).  The
     # RH-based stratiform cloud schemes give ~0 cloud where an adjustment
     # convection scheme (sbm) holds the column subsaturated, so the convecting
     # tropics radiate surface LW to space (~4.5 K coupled cold bias).  When
@@ -575,7 +575,7 @@ class ExperimentConfig(NamedTuple):
     #                          optically THINNER cloud (lower albedo, still
     #                          LW-active).  Bounds (1e-6, 1e-3) — the lower end
     #                          was widened from 5e-5; see validate_strict.
-    #   cloud_conv_cloud_max — convective (Slingo) cover cap.  Bounds (0.1, 1.0).
+    #   cloud_conv_cloud_max — convective (Slingo-1987-inspired surrogate) cover cap.  Bounds (0.1, 1.0).
     #   cloud_conv_cloud_condensate — convective anvil in-cloud condensate
     #                          [kg/kg]; LOWER => optically THINNER / more realistic
     #                          anvil (lower albedo, still LW-active).  Bounds

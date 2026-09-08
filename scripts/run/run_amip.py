@@ -1548,7 +1548,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # --subgrid-autoconv already ship from run_coupled-mirrored #647 + #613).
     parser.add_argument("--cloud-conv-cloud-max", type=float, default=None,
                         dest="conv_cloud_max",
-                        help="Cap on convective (Slingo 1987) cloud cover "
+                        help="Cap on convective (Slingo-1987-inspired surrogate) cloud cover "
                              "(CloudConfig.conv_cloud_max). Limits anvil "
                              "over-reflection. Bounds (0.1, 1.0).")
     parser.add_argument("--conv-cloud-condensate", type=float, default=None,

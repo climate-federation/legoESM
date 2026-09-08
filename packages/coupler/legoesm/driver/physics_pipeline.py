@@ -2464,7 +2464,11 @@ class PhysicsPipeline:
             if N_c is None:
                 n_cloud_col = None
             else:
-                _rho_nc = p_full_col / (constants.R_d * T_col)
+                from legoesm.atmosphere.physics._shared import compute_rho
+                # MOIST density: the PSD un-does this conversion with the same
+                # compute_rho, so a dry rho here would bias N_c by ~0.6 q_v.
+                _rho_nc = compute_rho(jnp.maximum(T_col, 1.0), p_full_col,
+                                      ad.flatten_3d(q_v))
                 n_cloud_col = jnp.maximum(ad.flatten_3d(N_c) * _rho_nc, 0.0)
             n_ice_col = None if N_i is None else ad.flatten_3d(N_i)
             # Aerosol-CCN droplet number for the radiation PSD: under

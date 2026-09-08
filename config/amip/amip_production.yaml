@@ -179,7 +179,7 @@ convective_precip_efficiency: 0.8  # detrained-condensate -> convective-rain spl
                             # 0.03 (=obs), rlut 175->179->187, rsut 231->223->219.
                             # 0.0 = bit-exact legacy no-split (kept for A/Bs).
                             # History: #899 intended 0.5; #932 blocked it pre-#929.
-# convective_cloud (Slingo-1987 cumulus cloud fraction): OFF here.  The canonical
+# convective_cloud (precip-based cumulus-cover surrogate, Slingo-1987-inspired): OFF here.  The canonical
 # tuned-physics base (config/cmip/cmip_tuned_physics.yaml) ships it true for the
 # COUPLED run, but under prescribed SST it is a pure radiative cost (see the A/B
 # below), so this AMIP config and the validated tropical-rain campaign both turn
