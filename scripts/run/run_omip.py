@@ -2819,7 +2819,9 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
     # 3D velocity clip — caps ALL velocity components (barotropic +
     # baroclinic) after each step.  The barotropic-only MAXVEL inside
     # the split-explicit solver doesn't prevent baroclinic blowup.
-    _maxvel_3d = model.config.barotropic.maxvel_barotropic
+    # lat-lon nests the barotropic knobs (config.barotropic.*); MPASOceanConfig
+    # carries them flat — read whichever the model has.
+    _maxvel_3d = getattr(model.config, "barotropic", model.config).maxvel_barotropic
     enable_maxvel = _maxvel_3d > 0.0
 
     # Lat-band SPMD (--enable-latlon-spmd): the scan body's dynamics step
@@ -2956,12 +2958,12 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
 
             # 3D velocity clip (MOM6 MAXVEL analog for full field).
             if enable_maxvel:
+                # MPAS carries the full velocity as edge-normal u (no v field).
                 u_clipped = jnp.clip(new_state.u.data, -_maxvel_3d, _maxvel_3d)
-                v_clipped = jnp.clip(new_state.v.data, -_maxvel_3d, _maxvel_3d)
-                new_state = new_state._replace(
-                    u=new_state.u.replace(data=u_clipped),
-                    v=new_state.v.replace(data=v_clipped),
-                )
+                new_state = new_state._replace(u=new_state.u.replace(data=u_clipped))
+                if getattr(new_state, "v", None) is not None:
+                    v_clipped = jnp.clip(new_state.v.data, -_maxvel_3d, _maxvel_3d)
+                    new_state = new_state._replace(v=new_state.v.replace(data=v_clipped))
 
             if enable_sea_ice:
                 return (new_state, new_ice), None
@@ -3036,7 +3038,9 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
     # rates need grid metrics, the slab path does not.
     ice_grid = jra55_state.get("ice_grid")
 
-    _maxvel_3d = model.config.barotropic.maxvel_barotropic
+    # lat-lon nests the barotropic knobs (config.barotropic.*); MPASOceanConfig
+    # carries them flat — read whichever the model has.
+    _maxvel_3d = getattr(model.config, "barotropic", model.config).maxvel_barotropic
     enable_maxvel = _maxvel_3d > 0.0
 
     # Lat-band SPMD: see _build_jra55_block_fn.
@@ -3228,10 +3232,12 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
                     new_state = new_state._replace(
                         u=new_state.u.replace(
                             data=jnp.clip(new_state.u.data,
-                                          -_maxvel_3d, _maxvel_3d)),
-                        v=new_state.v.replace(
-                            data=jnp.clip(new_state.v.data,
                                           -_maxvel_3d, _maxvel_3d)))
+                    if getattr(new_state, "v", None) is not None:  # MPAS: no v
+                        new_state = new_state._replace(
+                            v=new_state.v.replace(
+                                data=jnp.clip(new_state.v.data,
+                                              -_maxvel_3d, _maxvel_3d)))
 
                 if enable_sea_ice:
                     return (new_state, new_ice), None
