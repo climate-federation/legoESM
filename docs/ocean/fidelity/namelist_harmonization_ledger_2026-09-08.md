@@ -16,6 +16,18 @@ plus what `orca1_zdftke_config` / `NEMOMatchTripoleRecipeConfig` construct.
 | tracer advection | `ln_traadv_fct=T`, `nn_fct_h=2`, `nn_fct_v=2` (FCT2) | card passes `superbee` | our driver's own help calls `ppm_fct` "closest to NEMO's FCT2"; an earlier note records ppm_fct destabilising the Gulf Stream, so this row has a REASON, not just a gap |
 | kinetic-energy gradient | `nn_dynkeg=1` (Hollingsworth) | `centered` | our recipe documents why: the Hollingsworth form is not fold-aware on the tripole seam. A real constraint, not an oversight |
 
+### What `--gm-treguier` does and does not close (checked 2026-09-08)
+
+The flag makes ONLY the eddy-induced coefficient flow-dependent. Our
+implementation's own constant is `gm_aei0 = 900`, derived in the code as
+half of the oracle's `rn_Ue * rn_Le` with the namelist provenance written next
+to it, so row 1 above is exactly what the flag closes -- including the value.
+
+There is NO equivalent path for the Redi/lateral-tracer coefficient: the module
+exposes a Treguier kappa for GM only, and `kappa_Redi` stays the constant 600.
+So row 2 survives the flag and would need its own work. Do not expect one arm
+to close both.
+
 ## Rows that AGREE (checked, so they are not re-opened)
 
 | what | value on both sides |
