@@ -2894,6 +2894,13 @@ def dino_lat_lon_initial_state_arrays(
     T : array (n_lat, n_lon, n_levels) [°C]
     S : array (n_lat, n_lon, n_levels) [g/kg]
     H_bathy : array (n_lat, n_lon) [m]
+        The CONTINUOUS analytic bowl.  On a full-step (masked-zco / NEMO)
+        coordinate this is NOT what the model carries: ``dino_lat_lon_state``
+        replaces it with ``sum(h_partial)``, the level-snapped column depth,
+        so that geometry and state agree at eta=0.  The two differ by up to
+        432 m on the NEMO grid -- which is the quantisation of a continuous
+        bowl onto 35 levels whose deepest is ~475 m thick, not an error.  The
+        snapped value equals NEMO's own ``sum(tmask*e3t_1d)`` exactly.
     land_mask : array (n_lat, n_lon) (1=ocean, 0=land)
     """
     if cfg is None:

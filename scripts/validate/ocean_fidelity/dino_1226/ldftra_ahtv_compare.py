@@ -111,8 +111,18 @@ def main() -> int:
             break
     if jrow_start is None:
         raise RuntimeError("could not align NEMO dump rows to legoESM grid.lat")
-    ahtu_row = ahtu[jrow_start, :]
+    # Take the column reference from MID-DOMAIN, not from the first aligned
+    # row.  On the true 199-row frame the alignment lands on NEMO's closed
+    # southern row (domzgr.F90:308-314), where ahtu is identically zero, so
+    # nz_cols is empty and nz_cols[1] raised IndexError.  Any interior row
+    # carries the same column layout -- ahtu has no longitude dependence on
+    # this grid, which is the assumption the row search above already makes.
+    ahtu_row = ahtu[jrow_start + n_lat // 2, :]
     nz_cols = np.nonzero(ahtu_row)[0]
+    if nz_cols.size < 2:
+        raise RuntimeError(
+            f"reference row {jrow_start + n_lat // 2} of the NEMO ahtu dump has "
+            f"{nz_cols.size} nonzero columns; cannot locate the interior block.")
     icol_start = int(nz_cols[1])  # skip the first (periodic-wrap halo) column
 
     ahtu_int = ahtu[jrow_start:jrow_start + n_lat, icol_start:icol_start + n_lon]
