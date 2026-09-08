@@ -789,12 +789,12 @@ def parse_args(argv: list[str] | None = None):
                        "ppermute rounds, running MPASOceanModel._step_impl on "
                        "each device's local mesh with in-step halo refreshes "
                        "and psum reductions. Requires --grid mpas. Supports "
-                       "the restoring lane and the JRA55 block-scan lane with "
-                       "--no-gpu-interp; --jra55-sea-ice only with "
+                       "the restoring lane and both JRA55 block-scan lanes "
+                       "(host regrid and GPU-interp); --jra55-sea-ice only with "
                        "--ice-dynamics none and --ice-categories 1 (the "
                        "thermodynamic tile is pointwise). normalize_freshwater "
                        "is supported (owned-masked psum means). Refused: "
-                       "GPU-side forcing interpolation, ice rheology, "
+                       "ice rheology, "
                        "use_baroclinic_rho_ref, runoff_depth_spread_map. "
                        "Restarts carry the device count and are refused "
                        "across a different one (cell order differs)."
@@ -2431,6 +2431,7 @@ def _preload_jra55_forcing_block(start_step_idx, n_steps, dt, jra55_state):
     from legoesm.forcing.jra55_do import (
         jra55_to_atm_surface,
         load_jra55_block,
+        regrid_jra55_slice,
     )
 
     cache_path = jra55_state["cache_path"]
@@ -2439,6 +2440,12 @@ def _preload_jra55_forcing_block(start_step_idx, n_steps, dt, jra55_state):
     lat_2d = jra55_state["lat_2d"]
     lon_2d = jra55_state["lon_2d"]
     co2_ppmv = jra55_state["co2_ppmv"]
+    # MPAS / tripole: the cache is lat-lon, the model is not -- regrid each
+    # slice with the SAME helper the single-step lane uses (the GPU-interp
+    # lane regrids its raw records the same way).  Without this the lat-lon
+    # slice met the per-cell lat/lon in jra55_to_atm_surface (first MPAS SPMD
+    # smoke, job 27326306: broadcast [655364] vs [180,360]).
+    regrid_weights = jra55_state.get("regrid_weights")
 
     # Bulk-read all N steps in one Zarr open + contiguous slab read.
     start_day = start_step_idx * dt / 86400.0
@@ -2458,6 +2465,8 @@ def _preload_jra55_forcing_block(start_step_idx, n_steps, dt, jra55_state):
 
     for k, slc in enumerate(slices):
         day = (start_step_idx + k) * dt / 86400.0
+        if regrid_weights is not None:
+            slc = regrid_jra55_slice(slc, regrid_weights)
         atm = jra55_to_atm_surface(
             slc, lat_2d, lon_2d, day,
             ref_year=ref_year, co2_ppmv=co2_ppmv,
@@ -5447,11 +5456,6 @@ def run_omip_single(grid_type: str, args) -> dict:
                 raise SystemExit(
                     "--enable-mpas-spmd requires the JRA55 block-scan path "
                     "(this run selected the single-step fallback).")
-            if jra55_state.get("_gpu_interp", False):
-                raise SystemExit(
-                    "--enable-mpas-spmd does not support GPU-side forcing "
-                    "interpolation yet (the regrid weights are not sliced per "
-                    "device); pass --no-gpu-interp.")
             if jra55_state.get("enable_sea_ice", False):
                 jra55_state["spmd_ice_ok"] = True   # gated above: thermo-only tile
         if _nd > 1:
