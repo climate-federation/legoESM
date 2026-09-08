@@ -22,8 +22,22 @@
 # varies it the same way (nn_aht_ijk_t=21). One arm cannot close both rows --
 # see docs/ocean/fidelity/namelist_harmonization_ledger_2026-09-08.md.
 #
+# ★ WHY THIS IS NOT A HIGH-LATITUDE-ONLY ARM (found 2026-09-08 by reading the
+# oracle's formula): the Treguier coefficient carries a TROPICAL TAPER,
+# min(1, |f/f_20|) with f_20 = 2*Omega*sin(20 deg), so the ORACLE'S eddy
+# coefficient goes to ZERO at the equator.  Our card uses a CONSTANT 600 at
+# every latitude.  We are therefore applying ~600 m2/s of eddy transport inside
+# the equatorial waveguide where the oracle applies none -- which flattens the
+# equatorial thermocline, weakens the zonal density gradient, weakens the
+# undercurrent, and removes the shear that feeds the turbulence we measure as
+# missing at 20-60 m.  The arm REMOVES a spurious equatorial term; it does not
+# add a useful one.
+#
 # PRE-REGISTERED, day 30 vs GATEWAY rec 5, written BEFORE the run:
-#   PRIMARY   the Pacific cold-tongue SST bias falls from its baseline value,
+#   PRIMARY   the equatorial thermocline sharpens and the undercurrent core at
+#             220E rises from 0.20 m/s toward the oracle's 0.55.  No movement in
+#             either = the equatorial eddy coefficient is not the operator.
+#   ALSO      the Pacific cold-tongue SST bias falls from its baseline value,
 #             and the equatorial thermocline sharpens toward the oracle.
 #             No movement in either = the eddy coefficient is not the operator.
 #   SECONDARY Southern Ocean SST/MLD and the polar salinity bias must not

@@ -16,6 +16,33 @@ plus what `orca1_zdftke_config` / `NEMOMatchTripoleRecipeConfig` construct.
 | tracer advection | `ln_traadv_fct=T`, `nn_fct_h=2`, `nn_fct_v=2` (FCT2) | card passes `superbee` | our driver's own help calls `ppm_fct` "closest to NEMO's FCT2"; an earlier note records ppm_fct destabilising the Gulf Stream, so this row has a REASON, not just a gap |
 | kinetic-energy gradient | `nn_dynkeg=1` (Hollingsworth) | `centered` | our recipe documents why: the Hollingsworth form is not fold-aware on the tripole seam. A real constraint, not an oversight |
 
+### ★ The eddy row has the WRONG SIGN at the equator, and that matters here
+
+Read off the oracle's own formula (`compute_treguier_kappa_gm`, transcribed
+from `ldf_eiv`): the Treguier coefficient carries an explicit TROPICAL TAPER,
+`min(1, |f/f_20|)` with `f_20 = 2*Omega*sin(20 deg)`. At the equator the
+Coriolis parameter goes to zero, so the ORACLE'S EDDY COEFFICIENT GOES TO ZERO
+THERE. Our production card uses a CONSTANT 600 m2/s at every latitude, and the
+same is true of our Redi coefficient while the oracle tapers that one too.
+
+So in the equatorial waveguide we are applying roughly 600 m2/s of eddy
+transport and isopycnal mixing where the oracle applies essentially none. The
+sign is the one that matters for every bias this campaign is chasing: spurious
+eddy flattening of the equatorial thermocline weakens the zonal density
+gradient, which weakens the undercurrent, which removes the shear that feeds
+turbulence, which is the 20-60 m mixing collapse and the too-high Prandtl
+number. Each link is individually plausible and the first two are measured.
+
+This REVERSES the reason for running the eddy arm. It is not that we are
+missing a flow-dependent coefficient somewhere useful; it is that we are
+applying a large constant one exactly where the oracle applies none. Status:
+the taper and our constant are CONFIRMED by reading both codes; the chain from
+there to the biases is PLAUSIBLE and is what the arm tests.
+
+(An independent reviewer ranked this row as irrelevant at the equator on the
+grounds that eddy closures taper off in the waveguide. That is right about the
+ORACLE and wrong about US, which is the whole point.)
+
 ### What `--gm-treguier` does and does not close (checked 2026-09-08)
 
 The flag makes ONLY the eddy-induced coefficient flow-dependent. Our
