@@ -113,6 +113,20 @@ def main() -> int:
                          "wo; needs --nemo-ufile/--nemo-vfile/--nemo-wfile/"
                          "--mesh-mask/--nemo-w-recs)")
     ap.add_argument("--budget-layer", default="50,150")
+    ap.add_argument("--heat-budget", action="store_true",
+                    help="with --box-budget: also split the layer's HEAT "
+                         "budget into horizontal advection, vertical "
+                         "advection and vertical diffusion on both sides, in "
+                         "K/month, using each side's own upwind temperature "
+                         "on its own faces. Codex+GLM discriminator "
+                         "(2026-09-08) for whether the cold 20 m is advective."
+                         " Needs `to` in --nemo-gridt and `avt` in "
+                         "--nemo-wfile.")
+    ap.add_argument("--heat-budget-prev", default=None,
+                    help="earlier legoESM snapshot: gives the OBSERVED dT/dt "
+                         "the three terms are checked against (the control -- "
+                         "a residual comparable to the terms means the "
+                         "instrument is being read, not the ocean).")
     ap.add_argument("--budget-lat-halfwidth", default="2")
     ap.add_argument("--nemo-w-recs", default=None,
                     help="record selection in the wfile, `K` or `A:B` "
@@ -276,6 +290,54 @@ def main() -> int:
     return 0
 
 
+_SEC_PER_MONTH = 30.0 * 86400.0
+
+
+def _upwind(flux, lo_side, hi_side):
+    """Temperature carried by ``flux`` on a face: the LO-side cell when the
+    flux is positive (flowing lo -> hi), the HI-side cell otherwise."""
+    return np.where(flux > 0.0, lo_side, hi_side)
+
+
+def _heat_terms(Fw, Fs, Fup, T, K, area, zc, z_if, kl, kt, kb, box):
+    """Layer heat budget, one side, in K/month.
+
+    Sign convention, stated once and used everywhere: z is UP, every returned
+    term is a TENDENCY of the layer mean temperature (positive = warming).
+      Fw   (ny, nx+1, nz)  volume flux [m3/s] through the WEST face of each
+                           cell, positive EASTWARD
+      Fs   (ny+1, nx, nz)  through the SOUTH face, positive NORTHWARD
+      Fup  (ny, nx, nz+1)  through each interface, positive UPWARD
+      K    (ny, nx, nz-1)  tracer diffusivity on the INTERIOR interfaces
+                           (interface index k maps to K[..., k-1])
+    Returns (horizontal advection, vertical advection, vertical diffusion).
+    """
+    Tl = np.concatenate([T[:, :1], T], axis=1)      # cell west of each face
+    Tr = np.concatenate([T, T[:, -1:]], axis=1)     # cell east of each face
+    Hx = Fw * _upwind(Fw, Tl, Tr)
+    Td = np.concatenate([T[:1], T], axis=0)         # cell south of each face
+    Tu = np.concatenate([T, T[-1:]], axis=0)        # cell north of each face
+    Hy = Fs * _upwind(Fs, Td, Tu)
+    Ta = np.concatenate([T[..., :1], T], axis=-1)   # cell ABOVE each interface
+    Tb = np.concatenate([T, T[..., -1:]], axis=-1)  # cell BELOW each interface
+    Hz = Fup * _upwind(Fup, Tb, Ta)                 # upward flux carries from below
+
+    dz = np.diff(z_if)
+    vol = float((area[..., None] * dz[None, None, :])[..., kl][box].sum())
+    # heat leaving the box through the east/north faces minus that entering
+    out_x = float((Hx[:, 1:, :] - Hx[:, :-1, :])[..., kl].sum(-1)[box].sum())
+    out_y = float((Hy[1:, :, :] - Hy[:-1, :, :])[..., kl].sum(-1)[box].sum())
+    out_z = float((Hz[..., kt] - Hz[..., kb])[box].sum())
+    # downgradient diffusive flux, positive UP:  F = -K dT/dz = K (T_below - T_above)/dz
+    def _fd(k):
+        if k < 1 or k > K.shape[-1]:
+            return np.zeros_like(area)
+        return K[..., k - 1] * (T[..., k] - T[..., k - 1]) / (zc[k] - zc[k - 1]) * area
+    out_d = float((_fd(kt) - _fd(kb))[box].sum())
+    f = _SEC_PER_MONTH / vol
+    return -out_x * f - out_y * f, -out_z * f, -out_d * f
+
+
 def _box_budget_block(a, L, zc):
     """Volume budget of a lon/lat/depth box, ours vs NEMO, split by wall
     direction: which velocity component carries the convergence that heaves
@@ -342,6 +404,31 @@ def _box_budget_block(a, L, zc):
           f"horizontal net out {ox+oy:+.3f} | w_top(up) {wt_up:+.3f} at {z_if[kt]:.0f} m, "
           f"w_bot(up) {wb_up:+.3f} at {z_if[kb]:.0f} m => vertical net out {wt_up-wb_up:+.3f} | "
           f"residual {res:+.3f} (w sign '{sign}' closes it; {int(box.sum())} cells)")
+    hb_ours = None
+    if a.heat_budget:
+        Tsnap = np.asarray(snap["T"], dtype=np.float64)
+        Ksnap = np.asarray(snap["K_H_diag"], dtype=np.float64)
+        area_o = np.asarray(snap["cell_area"], dtype=np.float64)
+        mfw_up = mfw if sign == "up" else -mfw
+        hb_ours = _heat_terms(mfu, mfv, mfw_up, Tsnap, Ksnap, area_o,
+                              zc, z_if, kl, kt, kb, box)
+        dzl = np.diff(z_if)[kl]
+        tbar = float((Tsnap[..., kl] * dzl).sum(-1)[box].sum() / (dzl.sum() * box.sum()))
+        print(f"\n=== BOX HEAT BUDGET {z0:.0f}-{z1:.0f} m, K/month (+ = warms the layer) ===")
+        print(f"ours: horizontal adv {hb_ours[0]:+.3f}   vertical adv {hb_ours[1]:+.3f}   "
+              f"vertical diff {hb_ours[2]:+.3f}   sum {sum(hb_ours):+.3f}   "
+              f"(layer mean T {tbar:.3f} C)")
+        if a.heat_budget_prev:
+            prev = np.load(a.heat_budget_prev)
+            dt_days = float(snap["time_days"]) - float(prev["time_days"])
+            tprev = float((np.asarray(prev["T"], dtype=np.float64)[..., kl] * dzl).sum(-1)[box].sum()
+                          / (dzl.sum() * box.sum()))
+            obs = (tbar - tprev) / dt_days * 30.0
+            print(f"  CONTROL observed dT/dt over the previous {dt_days:.0f} days: {obs:+.3f} K/month;"
+                  f" residual (sum - observed) {sum(hb_ours) - obs:+.3f}."
+                  " A residual comparable to the terms means the instrument is being read,"
+                  " not the ocean -- ours is one instantaneous snapshot, so some residual is"
+                  " expected; a residual LARGER than the vertical term voids the comparison.")
     # NEMO
     def _load(fn, var):
         ds = nc.Dataset(fn)
@@ -409,6 +496,47 @@ def _box_budget_block(a, L, zc):
           f"meridional out {ny_:+.3f}  horizontal net out {nx_+ny_:+.3f} | w_top(up) {nwt:+.3f} at "
           f"{zw[ktn]:.0f} m, w_bot(up) {nwb:+.3f} at {zw[kbn]:.0f} m => vertical net out {nwt-nwb:+.3f} | "
           f"residual {resn:+.3f} (wo positive up; {int(boxn.sum())} cells)")
+    if a.heat_budget and hb_ours is not None:
+        dst2 = nc.Dataset(a.nemo_gridt)
+        try:
+            tv = next(v for v in ("to", "thetao", "votemper") if v in dst2.variables)
+            ton = np.ma.filled(np.ma.masked_invalid(dst2.variables[tv][:]), np.nan).astype(np.float64)
+            ton = np.nanmean(_select_recs(ton, a.nemo_t_recs or a.nemo_w_recs), axis=0)
+        finally:
+            dst2.close()
+        dsw2 = nc.Dataset(a.nemo_wfile)
+        try:
+            if "avt" not in dsw2.variables:
+                raise SystemExit("--heat-budget needs `avt` in --nemo-wfile")
+            avtn = np.ma.filled(np.ma.masked_invalid(dsw2.variables["avt"][:]), np.nan).astype(np.float64)
+            avtn = np.nanmean(_select_recs(avtn, a.nemo_w_recs), axis=0)
+        finally:
+            dsw2.close()
+        ton = np.where(np.isfinite(ton), ton, 0.0).transpose(1, 2, 0)
+        avtn = np.where(np.isfinite(avtn), avtn, 0.0).transpose(1, 2, 0)
+        uet = ue.transpose(1, 2, 0); vet = ve.transpose(1, 2, 0)
+        wot = (wo * area[None]).transpose(1, 2, 0)
+        Fw_n = np.concatenate([np.zeros_like(uet[:, :1]), uet], axis=1)
+        Fs_n = np.concatenate([np.zeros_like(vet[:1]), vet], axis=0)
+        Fup_n = np.concatenate([wot, np.zeros_like(wot[..., :1])], axis=-1)
+        z_ifn2 = np.concatenate([zw, [2.0 * zw[-1] - zw[-2]]])
+        hb_nemo = _heat_terms(Fw_n, Fs_n, Fup_n, ton, avtn[..., 1:], area,
+                              zu, z_ifn2, kln, ktn, kbn, boxn)
+        dzn2 = np.diff(z_ifn2)[kln]
+        tbn = float((ton[..., kln] * dzn2).sum(-1)[boxn].sum() / (dzn2.sum() * boxn.sum()))
+        print(f"NEMO: horizontal adv {hb_nemo[0]:+.3f}   vertical adv {hb_nemo[1]:+.3f}   "
+              f"vertical diff {hb_nemo[2]:+.3f}   sum {sum(hb_nemo):+.3f}   "
+              f"(layer mean T {tbn:.3f} C)")
+        def _r(x, y):
+            return float("nan") if abs(y) < 1e-12 else x / y
+        print(f"RATIO ours/NEMO  horizontal {_r(hb_ours[0], hb_nemo[0]):+.3f}   "
+              f"vertical {_r(hb_ours[1], hb_nemo[1]):+.3f}   "
+              f"diffusive {_r(hb_ours[2], hb_nemo[2]):+.3f}")
+        print("READ (pre-registered 2026-09-08): the claim that the cold 20 m is ADVECTIVE "
+              "needs the vertical term to be both LEADING on our side and off NEMO's by more "
+              "than the other two. A leading horizontal term, or a vertical ratio near 1, "
+              "refutes it and points back at the mixing closure.")
+
     print("READ: a layer that is being HEAVED DOWN has horizontal CONVERGENCE (net out < 0) "
           "balanced by descent below it; compare the zonal and meridional columns to see which "
           "component differs from NEMO.  Ours is one snapshot; NEMO a 5-day mean.")
