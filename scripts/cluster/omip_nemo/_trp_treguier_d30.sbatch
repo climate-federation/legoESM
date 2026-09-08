@@ -34,6 +34,10 @@
 # add a useful one.
 #
 # PRE-REGISTERED, day 30 vs GATEWAY rec 5, written BEFORE the run:
+#   NOT EXPECTED TO FIX THE 20-60 m MIXING COLLAPSE (adversarial review, GLM):
+#             the undercurrent is only ~2.5x too slow, so shear production is
+#             short by ~6x, not by the orders of magnitude the mixing is short.
+#             Do not read a null on mixing as a refutation of this arm.
 #   PRIMARY   the equatorial thermocline sharpens and the undercurrent core at
 #             220E rises from 0.20 m/s toward the oracle's 0.55.  No movement in
 #             either = the equatorial eddy coefficient is not the operator.

@@ -80,3 +80,48 @@ to test.
 The last two rows have documented reasons and should NOT be flipped casually:
 one destabilised the Gulf Stream when tried, the other is unsafe at the tripole
 fold. They are recorded so nobody re-derives them.
+
+### ★★ Below 20 m our momentum diffusivity is sitting on its FLOOR
+
+Re-reading the corrected band table rather than running anything: our momentum
+diffusivity is **2.95e-06 at 20-60 m and 2.95e-06 at 60-160 m** -- the same
+number to three figures across two very different depth ranges. A closure does
+not produce identical output in two regimes; a floor does. Under `--iwm` both
+sides force the molecular backgrounds (momentum 1.4e-6, tracer 1e-10), and our
+value sits just above the momentum one.
+
+So the honest statement of the defect is NOT "our Prandtl number is 11.4 against
+the oracle's 1.23". That ratio is what you get when BOTH diffusivities fall back
+toward backgrounds whose own ratio is four orders of magnitude -- it is a
+symptom of a dormant closure, not evidence of a limiter clamping. The real
+statement is:
+
+  **below the surface layer our TKE closure produces essentially nothing, while
+  the oracle's is active there.**
+
+That also means the Prandtl co-gate on the queued shear arm should be read as a
+consequence, not as an independent test: if the closure wakes up, the ratio
+falls on its own.
+
+### What the eddy arm can and cannot be expected to fix
+
+An adversarial review (GLM, 2026-09-08) retracted its earlier "irrelevant at the
+equator" ranking once shown the taper, and sharpened the mechanism: at 1-3
+degrees the cold-tongue front has slopes around 3e-4 over ~100 km, so a constant
+600 m2/s gives a bolus streamfunction of order 0.2 m2/s and an eddy velocity of
+a few mm/s -- a thermocline-flattening e-folding of roughly 200 days, against
+roughly seven years at the tapered value. Material, not negligible. It added
+that a constant coefficient across the equator, where the isopycnal slope
+REVERSES SIGN, produces a spurious convergent vertical eddy velocity of order
+1e-6 m/s parked in the undercurrent core -- 10-20% of the Ekman upwelling, and a
+pathology rather than mere over-diffusion. It also notes the Gent-McWilliams
+derivation itself fails inside the equatorial deformation radius, which is why
+the oracle tapers at all.
+
+BUT it named the weak link, and the point stands: the undercurrent is only about
+2.5x too slow, so shear production (which goes as shear squared) is short by
+roughly a factor of six -- nowhere near the orders of magnitude by which our
+mixing at 20-60 m falls short. **The eddy arm should therefore NOT be
+pre-registered to fix the mixing collapse.** It is a thermocline-and-undercurrent
+test. The mixing collapse needs its own explanation, and the floor observation
+above is the first hard evidence about it.
