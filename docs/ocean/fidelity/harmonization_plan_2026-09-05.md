@@ -401,3 +401,42 @@ This also gives the mixing-length mismatch a measured motive: nn_mxl=2 bounds
 the vertical derivative of the length scale, which is precisely what sets how
 far turbulence reaches BELOW the surface layer, and it is the band where we
 collapse.
+
+### 2026-09-08, later — the band deficit survives GLM's objection, and a second mismatch turns up
+
+GLM's strongest objection to the 20-60 m measurement was averaging order: ours
+is one instantaneous field, the oracle's a daily mean, and for an intermittent
+lognormal field that alone could manufacture a 100x gap. MEASURED and REFUTED
+(job 9685498) -- the oracle's own hour-to-hour spread of the box-median
+diffusivity is tiny:
+
+| band | hourly min | hourly max | max/min |
+|---|---|---|---|
+| 0-20 m | 1.47e-03 | 3.41e-03 | 2.32 |
+| 20-60 m | 9.52e-04 | 1.87e-03 | 1.96 |
+| 60-160 m | 9.89e-07 | 1.09e-06 | 1.11 |
+
+Every hour of the oracle's day sits within a factor 2 at 20-60 m, three orders
+above our 1.15e-05. Averaging order cannot explain the gap; the deficit is real.
+
+GLM's other candidate, the sub-mixed-layer TKE penetration (nn_etau), is ALREADY
+ON in our runs -- our driver defaults to the ORCA1 card (etau_mode="below_ml",
+rn_efr 0.08, Langmuir on) and the production card does not override it.
+
+BUT checking it exposed a genuine mismatch. ORCA1 inherits nn_htau=1 from
+namelist_ref, i.e. a latitude-dependent penetration depth
+htau = max(0.5, min(30, 45|sin(lat)|)); our config default is "constant10m"
+(nn_htau=0). At |lat| <= 2 the oracle's htau is about 1.6 m against our 10 m.
+NOTE THE SIGN: this makes OUR sub-mixed-layer TKE injection reach DEEPER than
+the oracle's, so correcting it would make our 20-60 m deficit worse, not better.
+It is a faithfulness item, not a lever. NOT changed -- it is an ASK.
+
+MECHANISM now visible in the numbers: our Prandtl number at 20-60 m is 6.91
+against the oracle's 1.15. Ours is clamp(4.5*Ri, 1, 10), so 6.91 implies a
+Richardson number near 1.5 where the oracle's implies about 0.26 -- our shear is
+far too weak there, which is the weak undercurrent again. The tracer limiter
+then suppresses heat mixing hardest exactly where the shear is missing. GLM's
+consequent warning is worth carrying into the arm's reading: the mixing-length
+flip could pass its 0.2 gate through the back door (deeper mixing lowers N2,
+which lowers Ri, which unclamps the limiter), so the arm should ALSO be read on
+whether the 20-60 m Prandtl number closes toward 1-2.
