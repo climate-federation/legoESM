@@ -109,6 +109,11 @@ def main(argv=None):
                          "steps were bitwise")
     args = ap.parse_args(argv)
 
+    if args.distributed and not args.flat_ref and not args.ref_npz:
+        print("[m6] REFUSED: --distributed needs a reference -- either "
+              "--flat-ref (6 processes build it here) or --ref-npz "
+              "<saved>; without one there is nothing to gate against")
+        raise SystemExit(2)
     import faulthandler
     import signal
     faulthandler.register(signal.SIGUSR1, all_threads=True)   # stack dump on demand

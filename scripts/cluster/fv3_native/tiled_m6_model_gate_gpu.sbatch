@@ -2,7 +2,7 @@
 #SBATCH --account=glab
 #SBATCH --job-name=m6_gpu
 #SBATCH --partition=short
-#SBATCH --time=01:00:00
+#SBATCH --time=08:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:2
 #SBATCH --constraint=a100
@@ -10,6 +10,12 @@
 #SBATCH --output=/burg-archive/glab/users/pg2328/fv3_duo_gaps/m6_gpu_gate_%j.log
 # M6 on REAL GPU RANKS: one window per process, one A100 per process,
 # jax.distributed via SLURM, NCCL collectives.  2 GPUs per node.
+# COMPILE TIME (2026-09-08): the n_split-unrolled step takes HOURS to
+# compile for CUDA -- jobs 9663001/9668306/9677460 were killed at 1-4 h
+# and looked like NCCL hangs; a SIGUSR1 stack dump (the gate registers
+# faulthandler) showed every rank inside backend_compile_and_load.  Hence
+# the 8 h cap, and the persistent JIT cache is left ON here (unlike the
+# many-rank CPU launcher) so a repeat run skips the compile.
 # Usage: sbatch --nodes=N --ntasks=2N --ntasks-per-node=2 --export=ALL,KT=..,PAD=..,REF=<npz> this
 set -uo pipefail
 WT=/burg-archive/glab/users/pg2328/legoESM_fv3jax
