@@ -114,7 +114,20 @@ def main() -> int:
                          "--mesh-mask/--nemo-w-recs)")
     ap.add_argument("--budget-layer", default="50,150")
     ap.add_argument("--heat-budget", action="store_true",
-                    help="with --box-budget: also split the layer's HEAT "
+                    help="LIMITATION FIRST (measured 2026-09-08, do not quote "
+                         "these terms as a closed budget): neither side can be "
+                         "closed from the archived fields. Ours stores "
+                         "INSTANTANEOUS fluxes, so the terms cannot match a "
+                         "15-day mean tendency; the oracle publishes 5-day "
+                         "MEANS, and a mean diffusivity times a mean gradient "
+                         "is not a mean flux -- where its mixing is "
+                         "intermittent the two are anticorrelated (avt at 50 m "
+                         "in the cold tongue: median 4.1e-04, max 3.8e+01 "
+                         "m2/s), which is what produced a +852 K/month "
+                         "diffusive term at 50-150 m. The terms are usable "
+                         "only for ORDER and SIGN in a layer with no "
+                         "intermittent mixing (15-25 m), never as a closure. "
+                         "With --box-budget: split the layer's HEAT "
                          "budget into horizontal advection, vertical "
                          "advection and vertical diffusion on both sides, in "
                          "K/month, using each side's own upwind temperature "
@@ -299,7 +312,7 @@ def _upwind(flux, lo_side, hi_side):
     return np.where(flux > 0.0, lo_side, hi_side)
 
 
-def _heat_terms(Fw, Fs, Fup, T, K, area, zc, z_if, kl, kt, kb, box):
+def _heat_terms(Fw, Fs, Fup, T, K, area, zc, z_if, kl, kt, kb, box, wet):
     """Layer heat budget, one side, in K/month.
 
     Sign convention, stated once and used everywhere: z is UP, every returned
@@ -310,20 +323,33 @@ def _heat_terms(Fw, Fs, Fup, T, K, area, zc, z_if, kl, kt, kb, box):
       Fup  (ny, nx, nz+1)  through each interface, positive UPWARD
       K    (ny, nx, nz-1)  tracer diffusivity on the INTERIOR interfaces
                            (interface index k maps to K[..., k-1])
+      wet  (ny, nx, nz)    True where the cell is ocean.  Cells below the
+                           bathymetry carry a FILL temperature, and a fill
+                           value next to real water is a 20 K gradient across
+                           one interface -- that produced a 852 K/month
+                           diffusive term on the oracle's side before this
+                           argument existed, so a dry neighbour zeroes the
+                           interface rather than being read as a gradient.
     Returns (horizontal advection, vertical advection, vertical diffusion).
     """
     Tl = np.concatenate([T[:, :1], T], axis=1)      # cell west of each face
     Tr = np.concatenate([T, T[:, -1:]], axis=1)     # cell east of each face
-    Hx = Fw * _upwind(Fw, Tl, Tr)
+    Wl = np.concatenate([wet[:, :1], wet], axis=1)
+    Wr = np.concatenate([wet, wet[:, -1:]], axis=1)
+    Hx = np.where(Wl & Wr, Fw * _upwind(Fw, Tl, Tr), 0.0)
     Td = np.concatenate([T[:1], T], axis=0)         # cell south of each face
     Tu = np.concatenate([T, T[-1:]], axis=0)        # cell north of each face
-    Hy = Fs * _upwind(Fs, Td, Tu)
+    Wd = np.concatenate([wet[:1], wet], axis=0)
+    Wu = np.concatenate([wet, wet[-1:]], axis=0)
+    Hy = np.where(Wd & Wu, Fs * _upwind(Fs, Td, Tu), 0.0)
     Ta = np.concatenate([T[..., :1], T], axis=-1)   # cell ABOVE each interface
     Tb = np.concatenate([T, T[..., -1:]], axis=-1)  # cell BELOW each interface
-    Hz = Fup * _upwind(Fup, Tb, Ta)                 # upward flux carries from below
+    Wa = np.concatenate([wet[..., :1], wet], axis=-1)
+    Wb = np.concatenate([wet, wet[..., -1:]], axis=-1)
+    Hz = np.where(Wa & Wb, Fup * _upwind(Fup, Tb, Ta), 0.0)
 
     dz = np.diff(z_if)
-    vol = float((area[..., None] * dz[None, None, :])[..., kl][box].sum())
+    vol = float((area[..., None] * dz[None, None, :] * wet)[..., kl][box].sum())
     # heat leaving the box through the east/north faces minus that entering
     out_x = float((Hx[:, 1:, :] - Hx[:, :-1, :])[..., kl].sum(-1)[box].sum())
     out_y = float((Hy[1:, :, :] - Hy[:-1, :, :])[..., kl].sum(-1)[box].sum())
@@ -332,9 +358,21 @@ def _heat_terms(Fw, Fs, Fup, T, K, area, zc, z_if, kl, kt, kb, box):
     def _fd(k):
         if k < 1 or k > K.shape[-1]:
             return np.zeros_like(area)
-        return K[..., k - 1] * (T[..., k] - T[..., k - 1]) / (zc[k] - zc[k - 1]) * area
-    out_d = float((_fd(kt) - _fd(kb))[box].sum())
+        both = wet[..., k] & wet[..., k - 1]
+        return np.where(both,
+                        K[..., k - 1] * (T[..., k] - T[..., k - 1])
+                        / (zc[k] - zc[k - 1]) * area, 0.0)
+    fd_cell = (_fd(kt) - _fd(kb))
+    out_d = float(fd_cell[box].sum())
     f = _SEC_PER_MONTH / vol
+    # An instrument that can be dominated by ONE cell is not measuring the box:
+    # report the worst single-cell share so an outlier cannot hide in the mean.
+    worst = float(np.abs(fd_cell[box]).max()) if box.any() else 0.0
+    share = worst / max(abs(out_d), 1e-30)
+    if share > 0.25:
+        print(f"  [warn] one cell carries {100 * share:.0f}% of the diffusive term "
+              f"({worst * f:+.3f} of {-out_d * f:+.3f} K/month) -- treat it as an "
+              "instrument outlier, not the ocean")
     return -out_x * f - out_y * f, -out_z * f, -out_d * f
 
 
@@ -410,10 +448,13 @@ def _box_budget_block(a, L, zc):
         Ksnap = np.asarray(snap["K_H_diag"], dtype=np.float64)
         area_o = np.asarray(snap["cell_area"], dtype=np.float64)
         mfw_up = mfw if sign == "up" else -mfw
-        hb_ours = _heat_terms(mfu, mfv, mfw_up, Tsnap, Ksnap, area_o,
-                              zc, z_if, kl, kt, kb, box)
+        wet_o = np.isfinite(Tsnap) & (np.abs(Tsnap) > 1e-6)
+        hb_ours = _heat_terms(mfu, mfv, mfw_up, np.nan_to_num(Tsnap), Ksnap, area_o,
+                              zc, z_if, kl, kt, kb, box, wet_o)
         dzl = np.diff(z_if)[kl]
-        tbar = float((Tsnap[..., kl] * dzl).sum(-1)[box].sum() / (dzl.sum() * box.sum()))
+        wl = (wet_o[..., kl] * dzl)
+        tbar = float((np.nan_to_num(Tsnap)[..., kl] * wl).sum(-1)[box].sum()
+                     / wl.sum(-1)[box].sum())
         print(f"\n=== BOX HEAT BUDGET {z0:.0f}-{z1:.0f} m, K/month (+ = warms the layer) ===")
         print(f"ours: horizontal adv {hb_ours[0]:+.3f}   vertical adv {hb_ours[1]:+.3f}   "
               f"vertical diff {hb_ours[2]:+.3f}   sum {sum(hb_ours):+.3f}   "
@@ -421,8 +462,8 @@ def _box_budget_block(a, L, zc):
         if a.heat_budget_prev:
             prev = np.load(a.heat_budget_prev)
             dt_days = float(snap["time_days"]) - float(prev["time_days"])
-            tprev = float((np.asarray(prev["T"], dtype=np.float64)[..., kl] * dzl).sum(-1)[box].sum()
-                          / (dzl.sum() * box.sum()))
+            Tp = np.nan_to_num(np.asarray(prev["T"], dtype=np.float64))
+            tprev = float((Tp[..., kl] * wl).sum(-1)[box].sum() / wl.sum(-1)[box].sum())
             obs = (tbar - tprev) / dt_days * 30.0
             print(f"  CONTROL observed dT/dt over the previous {dt_days:.0f} days: {obs:+.3f} K/month;"
                   f" residual (sum - observed) {sum(hb_ours) - obs:+.3f}."
@@ -512,6 +553,7 @@ def _box_budget_block(a, L, zc):
             avtn = np.nanmean(_select_recs(avtn, a.nemo_w_recs), axis=0)
         finally:
             dsw2.close()
+        wet_n = (np.isfinite(ton) & (np.abs(ton) > 1e-6)).transpose(1, 2, 0)
         ton = np.where(np.isfinite(ton), ton, 0.0).transpose(1, 2, 0)
         avtn = np.where(np.isfinite(avtn), avtn, 0.0).transpose(1, 2, 0)
         uet = ue.transpose(1, 2, 0); vet = ve.transpose(1, 2, 0)
@@ -521,9 +563,10 @@ def _box_budget_block(a, L, zc):
         Fup_n = np.concatenate([wot, np.zeros_like(wot[..., :1])], axis=-1)
         z_ifn2 = np.concatenate([zw, [2.0 * zw[-1] - zw[-2]]])
         hb_nemo = _heat_terms(Fw_n, Fs_n, Fup_n, ton, avtn[..., 1:], area,
-                              zu, z_ifn2, kln, ktn, kbn, boxn)
+                              zu, z_ifn2, kln, ktn, kbn, boxn, wet_n)
         dzn2 = np.diff(z_ifn2)[kln]
-        tbn = float((ton[..., kln] * dzn2).sum(-1)[boxn].sum() / (dzn2.sum() * boxn.sum()))
+        wln = (wet_n[..., kln] * dzn2)
+        tbn = float((ton[..., kln] * wln).sum(-1)[boxn].sum() / wln.sum(-1)[boxn].sum())
         print(f"NEMO: horizontal adv {hb_nemo[0]:+.3f}   vertical adv {hb_nemo[1]:+.3f}   "
               f"vertical diff {hb_nemo[2]:+.3f}   sum {sum(hb_nemo):+.3f}   "
               f"(layer mean T {tbn:.3f} C)")

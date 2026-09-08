@@ -16,7 +16,8 @@ NE=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00
 GW=$NE/RUN_GATEWAY
 RES=/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_base2_d30
 echo "HEAD: $(git -C $WT log -1 --oneline)"
-cd $WT
+cd $WT || exit 1
+export PYTHONPATH="$WT/src:$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT:$WT/scripts/validate"
 $PY -m pytest tests/ocean/unit/test_equatorial_heat_budget.py -q 2>&1 | tail -3
 for LAYER in 15,25 0,25 50,150; do
   echo; echo "################ layer $LAYER ################"
