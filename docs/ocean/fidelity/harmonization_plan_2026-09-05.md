@@ -344,3 +344,31 @@ diffusion: that refutation was arm vs control on identical cards.
 Also this day: the probe's 0-20 m heat-content block was DELETED rather than
 repaired. The two sides integrated to different actual depths and both were
 divided by a nominal 20 m, so its +5.16 K was the misalignment, not the ocean.
+
+## 2026-09-08 — the offline heat budget is NOT a usable discriminator
+
+Codex and GLM both proposed the same next measurement: split the layer's heat
+budget into horizontal advection, vertical advection and vertical diffusion on
+each side and see which term differs. It was built (six manufactured-solution
+tests pin the terms and the land mask), and it FAILS ITS OWN CONTROLS for
+reasons that live in the archived data, not in the arithmetic:
+
+- OUR side stores INSTANTANEOUS fluxes. The three terms are therefore checked
+  against a 15-day mean tendency, and the residual at 15-25 m (+3.3 K/month)
+  is larger than every term including the vertical one under test. By the
+  probe's own pre-registered rule that voids the comparison.
+- THE ORACLE publishes 5-day MEANS, and a mean diffusivity times a mean
+  gradient is not a mean flux. Where mixing is intermittent the two are
+  strongly anticorrelated: avt at 50 m in the cold tongue has median
+  4.1e-04 m2/s and max 3.8e+01. The reconstruction gives +852 K/month of
+  diffusive heating at 50-150 m -- an ocean that would boil.
+
+Two real instrument defects were found on the way and fixed (a sea-floor fill
+temperature read as a gradient, worth a factor 16 in a synthetic case; and no
+visibility of single-cell outliers). Neither was the cause of the 852: that is
+the product-of-means limitation above, and it cannot be fixed offline.
+
+WHAT WOULD MAKE IT WORK: time-averaged fluxes on our side, i.e. a 15-day rerun
+of the production tripole card writing DAILY snapshots so the fluxes can be
+averaged over the oracle's own 5-day window. That is a compute request and is
+NOT made unilaterally.
