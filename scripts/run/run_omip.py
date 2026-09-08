@@ -496,6 +496,31 @@ def parse_args(argv: list[str] | None = None):
                    help="Nudge T toward WOA18 with this restoring timescale [days]. "
                         "Applied after each block step. 0=disabled. "
                         "Typical 90-180 days for gentle spinup.")
+    p.add_argument("--tripole-mesh", type=str, default=None,
+                   help=(
+                       "Override the --grid tripole mesh file(s) chosen by "
+                       "--resolution: one NEMO mesh_mask/domain_cfg path, or "
+                       "os.pathsep-joined paths of a split mesh "
+                       "(mesh_hgr.nc:mesh_zgr.nc:mask.nc). The land mask and "
+                       "bathymetry of the tripole lane ALWAYS come from the "
+                       "mesh (tmaskutil, sum_k e3t_0*tmask)."))
+    p.add_argument("--tripole-fold-convention", type=str, default="auto",
+                   choices=["auto", "n_lon-1-i", "(n_lon-i)%n_lon"],
+                   help=(
+                       "North-fold index convention for a --tripole-mesh "
+                       "override (the registry meshes carry their validated "
+                       "convention). 'auto' picks the self-symmetric one and "
+                       "REFUSES a tie; pass it explicitly for a pivot row whose "
+                       "latitude is too flat to disambiguate (ORCA12 stripped: "
+                       "'(n_lon-i)%%n_lon')."))
+    p.add_argument("--tripole-strip-north-rows", type=int, default=0,
+                   help=(
+                       "Drop this many DEAD halo rows from the north end of "
+                       "the tripole mesh before building the grid (NEMO "
+                       "jperio=4 T-pivot meshes such as ORCA0083/ORCA12 end "
+                       "with one halo row above the self-dual pivot row; the "
+                       "operators fold the LAST row onto itself). Default 0 = "
+                       "mesh as stored (eORCA1.2 / eORCA025)."))
     p.add_argument("--bathymetry", type=str, default=None,
                    help=(
                        "Path to ETOPO/GEBCO NetCDF bathymetry file. "
@@ -1221,9 +1246,49 @@ def _validate_dz_ref_against_setup(dz, nlev: int, H_max: float) -> None:
         )
 
 
+def _spmd_device_count(run_config) -> int:
+    """Device count the lat-band SPMD lane will shard over (1 = off).
+
+    Multicontroller uses ALL global devices; single-controller uses
+    ``--spmd-n-devices`` or every local device.  Shared by the tripole
+    south-pad (needs it BEFORE the state is built) and the SPMD wiring.
+    """
+    if not run_config.enable_latlon_spmd:
+        return 1
+    if run_config.multicontroller:
+        _nd = len(jax.devices())
+        if run_config.spmd_n_devices and run_config.spmd_n_devices != _nd:
+            raise SystemExit(
+                f"--multicontroller uses ALL global devices ({_nd} across "
+                f"{jax.process_count()} processes); --spmd-n-devices "
+                f"({run_config.spmd_n_devices}) must be 0 (auto) or {_nd}.")
+        return _nd
+    return run_config.spmd_n_devices or len(jax.devices())
+
+
+def _spmd_sea_ice_guard(ice_dynamics: str, ice_categories: int) -> None:
+    """Refuse ``--enable-latlon-spmd --jra55-sea-ice`` combinations the lane
+    cannot carry.  The thermodynamic SLAB tile (``--ice-dynamics none``,
+    ``--ice-categories 1``) is elementwise, so it shards on the ocean's lat
+    bands with no halo; EVP/mEVP/free-drift dynamics and the ITD transport
+    reach ``pad_halo_latlon`` OUTSIDE the ocean's shard_map body, where the
+    armed SPMD halo backend has no band axis to ppermute over.
+    """
+    if ice_dynamics != "none" or int(ice_categories) != 1:
+        raise SystemExit(
+            "--enable-latlon-spmd supports --jra55-sea-ice only as the slab "
+            "thermodynamic tile (--ice-dynamics none --ice-categories 1); got "
+            f"--ice-dynamics {ice_dynamics!r} --ice-categories "
+            f"{int(ice_categories)}. Ice dynamics/ITD run their halo pads "
+            "outside the sharded ocean body and are not SPMD-wired.")
+
+
 def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   physics_preset: str, water_type: str,
                   use_bathymetry: bool = False,
+                  tripole_mesh: str | None = None,
+                  tripole_strip_north_rows: int = 0,
+                  tripole_fold_convention: str = "auto",
                   A_h_override: float = None,
                   B_h_override: float = None,
                   K_h_override: float = None,
@@ -1615,9 +1680,13 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             LateralMixingConfig,
         )
 
+        from legoesm.grids.tripole import mesh_file_list
         geom = create_tripole_grid(
-            params["mesh_path"],
-            fold_convention=params.get("fold_convention", "auto"))
+            mesh_file_list(tripole_mesh or params["mesh_path"]),
+            fold_convention=(
+                tripole_fold_convention if tripole_mesh
+                else params.get("fold_convention", "auto")),
+            strip_north_rows=int(tripole_strip_north_rows))
 
         if forcing_mode == "jra55_do_tropical":
             sf_config = SurfaceForcingConfig(scheme="none")
@@ -2754,12 +2823,8 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
     # Lat-band SPMD (--enable-latlon-spmd): the scan body's dynamics step
     # runs through the sharded wrapper (same forcing kwargs as _step_impl;
     # the wrapper's cache/arm-restore Python runs ONCE at block trace).
-    # Sea ice is refused upstream (the ice tile is not SPMD-audited yet).
-    if spmd_step is not None and enable_sea_ice:
-        raise ValueError(
-            "spmd_step + prognostic sea ice is unsupported "
-            "(run_omip_single refuses --jra55-sea-ice with "
-            "--enable-latlon-spmd).")
+    # Sea ice under SPMD: the slab tile is elementwise on the sharded state
+    # (run_omip_single's _spmd_sea_ice_guard refuses dynamics / ITD).
     # aux threading (codex r18 P1): the SPMD step's sharded geometry
     # stacks must cross THIS jit boundary as an ARGUMENT — captured in the
     # closure they become outer-trace constants whose value jax cannot
@@ -2967,12 +3032,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
     _maxvel_3d = model.config.barotropic.maxvel_barotropic
     enable_maxvel = _maxvel_3d > 0.0
 
-    # Lat-band SPMD: see _build_jra55_block_fn.
-    if spmd_step is not None and enable_sea_ice:
-        raise ValueError(
-            "spmd_step + prognostic sea ice is unsupported "
-            "(run_omip_single refuses --jra55-sea-ice with "
-            "--enable-latlon-spmd).")
+    # Lat-band SPMD: see _build_jra55_block_fn (slab ice rides along).
     if spmd_step is not None:
         def _dyn_step(st, d, aux=None, **kw):
             return spmd_step(st, d, aux=aux, **kw)
@@ -3503,6 +3563,12 @@ def _load_ice_restart(restart_path, ice_template):
         obj = getattr(ice_template, f)
         if obj is None or not hasattr(obj, "data"):
             continue
+        if tuple(data[key].shape) != tuple(obj.data.shape):
+            raise ValueError(
+                f"Restart ice field {key!r} shape {tuple(data[key].shape)} "
+                f"!= run's {tuple(obj.data.shape)} ({restart_path}); a "
+                "checkpoint written on a different (e.g. un-padded) grid "
+                "cannot resume this run.")
         replacements[f] = obj.replace(
             data=jnp.asarray(data[key], dtype=obj.data.dtype))
     if not replacements:
@@ -3569,6 +3635,12 @@ def _load_restart(restart_path, template_state, grid_type=None):
         obj = getattr(template_state, f)
         if obj is None or not hasattr(obj, "data"):
             continue
+        if tuple(data[f].shape) != tuple(obj.data.shape):
+            raise ValueError(
+                f"Restart field {f!r} shape {tuple(data[f].shape)} != run's "
+                f"{tuple(obj.data.shape)} ({restart_path}); a checkpoint "
+                "written on a different grid layout (resolution or SPMD "
+                "south-padding) cannot resume this run.")
         arr = jnp.asarray(data[f], dtype=obj.data.dtype)
         replacements[f] = obj.replace(data=arr)
 
@@ -3591,7 +3663,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                    start_step=0,
                    nudge_woa_tau=0.0, T_woa_3d=None, S_woa_3d=None,
                    snapshot_fn=None, spmd_step=None, spmd_gather=None,
-                   spmd_shard_stack=None):
+                   spmd_shard_stack=None, spmd_gather_ice=None):
     """Run time loop with diagnostics.
 
     Two forcing paths, mutually exclusive:
@@ -3640,10 +3712,12 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 "spmd_step + the JRA55 single-step fallback is unsupported "
                 "(_jra55_step calls model.step directly); use the "
                 "block-scan path (default).")
-        if jra55_state.get("enable_sea_ice", False):
+        if (jra55_state.get("enable_sea_ice", False)
+                and spmd_gather_ice is None):
             raise ValueError(
-                "spmd_step + prognostic sea ice is unsupported "
-                "(--jra55-sea-ice; the ice tile is not SPMD-audited).")
+                "spmd_step + prognostic sea ice needs spmd_gather_ice (the "
+                "restart writer gathers the sharded ice tile); run_omip_single "
+                "wires it next to spmd_gather.")
     if checkpoint_days is not None and checkpoint_dir is None:
         raise ValueError(
             "_run_omip_loop: checkpoint_days requires checkpoint_dir."
@@ -3703,6 +3777,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     if spmd_gather is not None:
         def save_restart(st, *a, **kw):
             gathered = spmd_gather(st)          # collective — ALL ranks
+            if kw.get("ice_state") is not None and spmd_gather_ice is not None:
+                kw["ice_state"] = spmd_gather_ice(kw["ice_state"])  # collective
             if not _io_rank:
                 return None
             if _multiproc:
@@ -4464,6 +4540,11 @@ def run_omip_single(grid_type: str, args) -> dict:
         grid_type, resolution, args.nlev, args.H_max,
         args.physics, args.water_type,
         use_bathymetry=(args.bathymetry is not None),
+        tripole_mesh=getattr(args, "tripole_mesh", None),
+        tripole_strip_north_rows=int(
+            getattr(args, "tripole_strip_north_rows", 0) or 0),
+        tripole_fold_convention=getattr(
+            args, "tripole_fold_convention", "auto"),
         A_h_override=args.A_h,
         B_h_override=args.B_h,
         K_h_override=args.K_h,
@@ -4488,6 +4569,52 @@ def run_omip_single(grid_type: str, args) -> dict:
     # NEMO zdfdrg drag-law + zdfiwm forcing-map overrides (no-op when the
     # flags are at their legacy defaults; rebuilds the model so the jitted
     # step captures the new config / maps).
+    _tripole_land_mask = None
+    _tripole_H_bathy = None
+    if grid_type == "tripole":
+        # The tripole lane takes land mask + bathymetry from NEMO's own mesh
+        # (the same reader the validated run_omip_core2 lane uses); before
+        # this the JRA55 tripole lane ran FLAT-BOTTOM ALL-OCEAN because
+        # --bathymetry is refused here and nothing else set them.
+        from legoesm.grids.tripole import (
+            mesh_file_list, pad_mask_bathy_south, pad_tripole_grid_south,
+            south_pad_rows,
+        )
+        from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+            LatLonCGridOceanModel,
+        )
+        from legoesm.ocean.init_tripole import read_mesh_mask_bathy
+        _mesh_files = mesh_file_list(
+            getattr(args, "tripole_mesh", None)
+            or _parse_resolution(grid_type, resolution)["mesh_path"])
+        _lm, _hb = read_mesh_mask_bathy(
+            _mesh_files,
+            strip_north_rows=int(
+                getattr(args, "tripole_strip_north_rows", 0) or 0))
+        _n_lat, _n_lon = int(grid.lat_T.shape[0]), int(grid.lat_T.shape[1])
+        if _lm.shape != (_n_lat, _n_lon):
+            raise SystemExit(
+                f"tripole mesh mask shape {_lm.shape} != grid "
+                f"{(_n_lat, _n_lon)} ({_mesh_files})")
+        # Lat-band SPMD needs n_lat % n_devices == 0: prepend LAND rows at
+        # the south (the fold is north-relative) and rebuild the model on
+        # the padded grid -- the run_omip_core2 --n-gpus recipe.
+        _n_pad = south_pad_rows(_n_lat, _spmd_device_count(run_config))
+        if _n_pad > 0:
+            grid = pad_tripole_grid_south(grid, _n_pad)
+            _lm, _hb = pad_mask_bathy_south(_lm, _hb, _n_pad)
+            # Plain rebuild on the padded grid; the drag / IWM overrides run
+            # AFTER this block so their grid-sized maps see the padded grid.
+            model = LatLonCGridOceanModel(grid, z_coord, config)
+            print(f"  SPMD south-pad: +{_n_pad} LAND rows -> n_lat="
+                  f"{int(grid.n_lat)} (fold still north at "
+                  f"j={int(grid.fold.fold_j)})")
+        _tripole_land_mask = jnp.asarray(_lm, dtype=jnp.float64)
+        _tripole_H_bathy = jnp.asarray(_hb, dtype=jnp.float64)
+        _n_wet = int(np.sum(_lm > 0.5))
+        print(f"  Tripole mesh: {[Path(f).name for f in _mesh_files]} "
+              f"({_n_wet}/{_lm.size} ocean cells, "
+              f"H_max={float(np.max(_hb)):.0f} m)")
     config, model = _apply_drag_iwm_overrides(
         args, grid_type, grid, z_coord, config, model)
 
@@ -4502,8 +4629,8 @@ def run_omip_single(grid_type: str, args) -> dict:
     T_woa, S_woa = init_ocean_from_woa(grid, z_coord, args.woa_t, args.woa_s)
 
     # Bathymetry: realistic (ETOPO) or flat-bottom.
-    H_bathy_init = None
-    land_mask_init = None
+    H_bathy_init = _tripole_H_bathy
+    land_mask_init = _tripole_land_mask
     bathy_cfg = None
     if args.bathymetry is not None and grid_type not in ("mpas", "tripole"):
         # MPAS bathymetry is handled after _init_rest_state via the
@@ -5012,9 +5139,8 @@ def run_omip_single(grid_type: str, args) -> dict:
     # silently no-op through the `_nd or len(devices)` resolution (r1 #3).
     if run_config.enable_latlon_spmd:
         if getattr(args, "jra55_sea_ice", False):
-            raise SystemExit(
-                "--enable-latlon-spmd does not support --jra55-sea-ice "
-                "yet (the prognostic ice tile is not SPMD-audited).")
+            _spmd_sea_ice_guard(str(args.ice_dynamics),
+                                int(args.ice_categories))
         if run_config.spmd_n_devices < 0:
             raise SystemExit(
                 f"--spmd-n-devices must be >= 0 "
@@ -5227,11 +5353,12 @@ def run_omip_single(grid_type: str, args) -> dict:
     # the restart load so a resumed state is sharded too.
     spmd_step = None
     spmd_gather = None
+    spmd_gather_ice = None
     spmd_shard_stack = None
     if run_config.enable_latlon_spmd:
-        if grid_type != "latlon":
+        if grid_type not in ("latlon", "tripole"):
             raise SystemExit(
-                f"--enable-latlon-spmd requires --grid latlon "
+                f"--enable-latlon-spmd requires --grid latlon or tripole "
                 f"(got {grid_type}).")
         if (jra55_state is not None
                 and jra55_state.get("_use_single_step", False)):
@@ -5245,19 +5372,7 @@ def run_omip_single(grid_type: str, args) -> dict:
                 "--enable-latlon-spmd is single-controller only unless "
                 "--multicontroller is set; multi-node ocean scaling needs "
                 "the route-B lane (jax.distributed cross-process NCCL).")
-        if _multi:
-            # Route-B: the mesh spans ALL global devices (one band per device
-            # across every process). A strict subset would leave some
-            # processes' devices out of the program (non-addressable
-            # participation hazard — matches the ocean bench's guard).
-            _nd = len(jax.devices())
-            if run_config.spmd_n_devices and run_config.spmd_n_devices != _nd:
-                raise SystemExit(
-                    f"--multicontroller uses ALL global devices ({_nd} across "
-                    f"{jax.process_count()} processes); --spmd-n-devices "
-                    f"({run_config.spmd_n_devices}) must be 0 (auto) or {_nd}.")
-        else:
-            _nd = run_config.spmd_n_devices or len(jax.devices())
+        _nd = _spmd_device_count(run_config)
         if _nd > 1:
             if grid.n_lat % _nd != 0:
                 raise SystemExit(
@@ -5267,8 +5382,10 @@ def run_omip_single(grid_type: str, args) -> dict:
             from functools import partial
 
             from legoesm.ocean.dynamics.sharded_ocean_step import (
+                gather_cell_pytree_latlon,
                 gather_state_latlon,
                 make_sharded_ocean_step,
+                shard_cell_pytree_latlon,
                 shard_forcing_stack_latlon,
                 shard_state_latlon,
             )
@@ -5280,6 +5397,17 @@ def run_omip_single(grid_type: str, args) -> dict:
             spmd_step = make_sharded_ocean_step(model, _dev.mesh)
             spmd_gather = partial(gather_state_latlon, mesh=_dev.mesh)
             state = shard_state_latlon(state, _dev.mesh)
+            if (jra55_state is not None
+                    and jra55_state.get("enable_sea_ice", False)):
+                # The slab ice tile (elementwise; guarded above) rides next to
+                # the ocean state in the block scan: lay it out on the same
+                # lat bands so the jitted scan sees ONE consistent sharding
+                # (a replicated/host tile next to process-spanning shards
+                # is an error under route-B).
+                jra55_state["ice_state_init"] = shard_cell_pytree_latlon(
+                    jra55_state["ice_state_init"], _dev.mesh)
+                spmd_gather_ice = partial(
+                    gather_cell_pytree_latlon, mesh=_dev.mesh)
             # Lay per-block forcing stacks out lat-band-sharded so the
             # in-scan interpolation / bulk fluxes stay shard-local (shared
             # layout helper — see shard_forcing_stack_latlon).
@@ -5315,6 +5443,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         snapshot_fn=_snapshot_fn,
         spmd_step=spmd_step,
         spmd_gather=spmd_gather,
+        spmd_gather_ice=spmd_gather_ice,
         spmd_shard_stack=spmd_shard_stack,
     )
     if spmd_gather is not None:

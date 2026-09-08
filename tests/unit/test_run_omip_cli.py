@@ -860,3 +860,42 @@ def test_runoff_map_not_built_when_routing_is_off():
     args = parse_args(["--grid", "mpas"])
     assert _build_runoff_map_for_run(
         args, object(), "mpas", np.ones((4, 4), dtype=bool)) is None
+
+
+def test_tripole_mesh_flags_parse():
+    """--tripole-mesh (pathsep-joined split mesh) and
+    --tripole-strip-north-rows (dead T-pivot halo row) reach args; defaults
+    keep the registry mesh + the mesh as stored."""
+    import os
+    a = parse_args(["--grid", "tripole"])
+    assert a.tripole_mesh is None and a.tripole_strip_north_rows == 0
+    spec = os.pathsep.join(["h.nc", "z.nc", "m.nc"])
+    a = parse_args(["--grid", "tripole", "--tripole-mesh", spec,
+                    "--tripole-strip-north-rows", "1"])
+    assert a.tripole_mesh == spec and a.tripole_strip_north_rows == 1
+    assert a.tripole_fold_convention == "auto"
+    a = parse_args(["--grid", "tripole", "--tripole-mesh", spec,
+                    "--tripole-fold-convention", "(n_lon-i)%n_lon"])
+    assert a.tripole_fold_convention == "(n_lon-i)%n_lon"
+    with pytest.raises(SystemExit):
+        parse_args(["--grid", "tripole", "--tripole-fold-convention", "bogus"])
+
+
+def test_spmd_sea_ice_guard_slab_only():
+    """--enable-latlon-spmd + --jra55-sea-ice is allowed ONLY for the slab
+    thermodynamic tile (dynamics none, one category); dynamics/ITD run their
+    halo pads outside the sharded ocean body and must be refused."""
+    from scripts.run.run_omip import _spmd_sea_ice_guard
+    _spmd_sea_ice_guard("none", 1)                    # slab: allowed
+    for dyn, ncat in (("evp", 1), ("mevp", 1), ("free_drift", 1), ("none", 3)):
+        with pytest.raises(SystemExit, match="slab thermodynamic tile"):
+            _spmd_sea_ice_guard(dyn, ncat)
+
+
+def test_spmd_device_count_off_and_single_controller():
+    from scripts.run.run_omip import _spmd_device_count
+    off = build_config_from_args(parse_args(["--grid", "tripole"]))
+    assert _spmd_device_count(off) == 1
+    on = build_config_from_args(parse_args([
+        "--grid", "tripole", "--enable-latlon-spmd", "--spmd-n-devices", "3"]))
+    assert _spmd_device_count(on) == 3
