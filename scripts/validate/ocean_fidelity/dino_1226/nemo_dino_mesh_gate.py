@@ -140,9 +140,9 @@ def main() -> int:
     from legoesm.core.precision import PrecisionPolicy, set_policy
     set_policy(PrecisionPolicy.fp64())
 
+    from legoesm.ocean.experiments import dino as dino_mod
     from legoesm.ocean.fidelity import nemo_dino_mesh as ndm
     from legoesm.ocean.fidelity.nemo_io import read_nemo_mesh_mask
-    from legoesm.ocean.experiments import dino as dino_mod
 
     if args.plant:
         _true = ndm.nemo_dino_mesh
@@ -175,8 +175,11 @@ def main() -> int:
 
     import netCDF4 as nc
     d = nc.Dataset(args.mesh_mask)
-    O = lambda k: np.asarray(d[k][0])                     # strip time axis
-    O3 = lambda k: np.moveaxis(np.asarray(d[k][0]), 0, -1)   # (z,y,x) -> (y,x,z)
+    def O(k):        # strip the time axis
+        return np.asarray(d[k][0])
+
+    def O3(k):       # (z,y,x) -> (y,x,z), matching nemo_io
+        return np.moveaxis(np.asarray(d[k][0]), 0, -1)
 
     nml = ndm.NEMO_DINO_R1
     n_lon, n_lat, jpk = ndm.nemo_dino_domain_size(nml)
@@ -268,8 +271,7 @@ def main() -> int:
     # (a) identical to the domain the certified twin gets from the FILE, leaf
     #     for leaf -- the strongest statement of "no second convention".
     from legoesm.ocean.fidelity.nemo_io import NemoState
-    from legoesm.ocean.fidelity.nemo_state_bridge import (
-        bridge_nemo_to_legoesm_topo)
+    from legoesm.ocean.fidelity.nemo_state_bridge import bridge_nemo_to_legoesm_topo
     fg = read_nemo_mesh_mask(args.mesh_mask, nn_hls=0)
     _z = np.zeros(fg.tmask.shape)
     file_br = bridge_nemo_to_legoesm_topo(

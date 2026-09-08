@@ -13,14 +13,12 @@ Two layers, because they can fail for different reasons:
 """
 from __future__ import annotations
 
-import importlib.util
 import os
 import subprocess
 import sys
 
 import numpy as np
 import pytest
-
 from legoesm.ocean.fidelity import nemo_dino_mesh as ndm
 
 _REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))

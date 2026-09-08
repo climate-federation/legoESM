@@ -67,7 +67,6 @@ import math
 from typing import NamedTuple
 
 import numpy as np
-
 from legoesm.ocean.constants_config import NEMO_OMEGA
 from legoesm.ocean.fidelity.nemo_io import NemoGrid
 
@@ -419,8 +418,11 @@ def nemo_dino_hgr(nml: NemoDinoNamelist = NEMO_DINO_R1) -> dict:
 
     e_t = _e1(phi_t)
     e_v = _e1(phi_v)
-    col = lambda a: np.broadcast_to(a[:, None], (n_lat, n_lon)).copy()
-    row = lambda a: np.broadcast_to(a[None, :], (n_lat, n_lon)).copy()
+    def col(a):      # a latitude-varying 1-D field, spread over columns
+        return np.broadcast_to(a[:, None], (n_lat, n_lon)).copy()
+
+    def row(a):      # a longitude-varying 1-D field, spread over rows
+        return np.broadcast_to(a[None, :], (n_lat, n_lon)).copy()
     ff_t = col(_ff(phi_t))
     ff_f = col(_ff(phi_v))
     # plamv == plamt and plamf == plamu (zvi == zti, zfi == zui); pphiu ==
@@ -475,8 +477,9 @@ def nemo_dino_bathymetry(nml: NemoDinoNamelist, hgr: dict, gdept_1d):
     taper = zcha_width / 2
 
     bathy = np.empty((n_lat, n_lon), dtype=np.float64)
-    zx_lam = np.array([_exp_bathy(float(l), zminlam, zmaxlam, zwidth, zdistLam,
-                                  taper) for l in lam_t], dtype=np.float64)
+    zx_lam = np.array([_exp_bathy(float(lam), zminlam, zmaxlam, zwidth,
+                                  zdistLam, taper) for lam in lam_t],
+                      dtype=np.float64)
     for jj in range(n_lat):
         p = float(phi_t[jj])
         zy_cha = _exp_bathy(p, zcha_min, zcha_max, zwidth, zdistLam, taper)
@@ -492,9 +495,9 @@ def nemo_dino_bathymetry(nml: NemoDinoNamelist, hgr: dict, gdept_1d):
     for jj in range(n_lat):
         p = float(phi_t[jj])
         for ji in range(n_lon):
-            l = float(lam_t[ji])
-            zds_taper = _smooth_step(l, zminlam, zminlam + nml.rn_ds_width)
-            zds = _gauss_ring(nml.rn_ds_width, zminlam, zmidPhi, zrad, l, p,
+            lam = float(lam_t[ji])
+            zds_taper = _smooth_step(lam, zminlam, zminlam + nml.rn_ds_width)
+            zds = _gauss_ring(nml.rn_ds_width, zminlam, zmidPhi, zrad, lam, p,
                               nml.rn_ds_depth, bathy[jj, ji])
             bathy[jj, ji] = zds_taper * zds + (1.0 - zds_taper) * bathy[jj, ji]
 
