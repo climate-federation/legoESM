@@ -993,7 +993,12 @@ def mpas_ocean_baroclinic_tendencies(
         # single-rank.  Remove when owned-mask plumbing lands on both paths
         # (the freshwater helper already exposes ``owned_mask`` +
         # ``global_sum_if_distributed``).
-        if bool(getattr(config, "normalize_freshwater", False)):
+        # Owned-cell mask from the refresh context (MPI layout or SPMD lane):
+        # with it the freshwater normalization means are owned-masked and
+        # globally reduced inside the freshwater helpers, so the multi-rank
+        # refusal below applies only to the legacy un-threaded path.
+        _hr_owned = getattr(halo_refresh, "owned_mask_cells", None)
+        if bool(getattr(config, "normalize_freshwater", False)) and _hr_owned is None:
             import jax as _jax
 
             from legoesm.parallel.reductions import (
@@ -1057,6 +1062,7 @@ def mpas_ocean_baroclinic_tendencies(
                 freshwater, _S_fw, h_k, config.rho_0, mask,
                 runoff_spread_m=_spread_arg, area=mesh.areaCell,
                 normalize=bool(getattr(config, "normalize_freshwater", False)),
+                owned_mask=_hr_owned,
             )
             dS_dt_3d = dS_dt_3d + (dS_fw_3d * mask[:, None]).astype(
                 dS_dt_3d.dtype)
@@ -1065,6 +1071,7 @@ def mpas_ocean_baroclinic_tendencies(
                 dS_dt_3d, freshwater, _S_fw, h_k[:, 0], config.rho_0, mask,
                 area=mesh.areaCell,
                 normalize=bool(getattr(config, "normalize_freshwater", False)),
+                owned_mask=_hr_owned,
             )
 
     # ---- Real salt-mass flux (e.g. sea-ice brine rejection) ----

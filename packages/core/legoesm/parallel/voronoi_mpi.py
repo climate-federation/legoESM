@@ -469,6 +469,16 @@ class MPASOceanHaloRefresh(NamedTuple):
     cells: Callable
     both: Callable
     vertices: Callable
+    # Distributed-reduction context carried WITH the refresh so the step's
+    # reduction sites (barotropic PCG dots / mass projection, eta-floor
+    # redistribution, conservation fixer) need no transport-specific global
+    # accessor: ``owned_mask_*`` weight the local partial sums (halo rows
+    # excluded), ``global_sum(list) -> list`` is the cross-rank SUM
+    # (allreduce on the MPI lane, ``psum`` on the SPMD lane).  ``None`` keeps
+    # the historical layout-accessor / ``is_multi_process`` paths.
+    owned_mask_cells: jnp.ndarray | None = None
+    owned_mask_edges: jnp.ndarray | None = None
+    global_sum: Callable | None = None
 
 
 def make_mpas_ocean_halo_refresh(layout) -> MPASOceanHaloRefresh:
@@ -504,8 +514,15 @@ def make_mpas_ocean_halo_refresh(layout) -> MPASOceanHaloRefresh:
             return tuple(fields)
         return tuple(_vx.exchange_vertex_field(f) for f in fields)
 
+    def _global_sum(vals):
+        from legoesm.parallel.reductions import batch_allreduce_mpi
+        return batch_allreduce_mpi(list(vals), op="sum")
+
     return MPASOceanHaloRefresh(edges=_edges, cells=_cells, both=_both,
-                                vertices=_vertices)
+                                vertices=_vertices,
+                                owned_mask_cells=layout.owned_mask_cells,
+                                owned_mask_edges=layout.owned_mask_edges,
+                                global_sum=_global_sum)
 
 
 def gather_voronoi_field(

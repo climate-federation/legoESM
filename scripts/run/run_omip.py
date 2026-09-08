@@ -131,6 +131,9 @@ class OMIPRunConfig(NamedTuple):
     # lane: wraps the loop's dynamics step in ``make_sharded_ocean_step``
     # (the #751/#758-validated lane-D step).  0 devices = all local.
     enable_latlon_spmd: bool = False
+    # Voronoi/MPAS SPMD (``voronoi_spmd_ocean``): the MPAS twin of the lat-band
+    # lane — reordered + padded mesh, owned-block sharding, ppermute halos.
+    enable_mpas_spmd: bool = False
     spmd_n_devices: int = 0
     # Route-B multicontroller (jax.distributed cross-process NCCL): promote the
     # lat-band lane to span ALL global devices across processes (multi-node).
@@ -222,6 +225,7 @@ def build_config_from_args(args) -> OMIPRunConfig:
         vertical_mixing=build_vertical_mixing_config_from_args(args),
         precision=args.precision,
         enable_latlon_spmd=getattr(args, "enable_latlon_spmd", False),
+        enable_mpas_spmd=getattr(args, "enable_mpas_spmd", False),
         spmd_n_devices=getattr(args, "spmd_n_devices", 0),
         multicontroller=getattr(args, "multicontroller", False),
         coordinator=getattr(args, "coordinator", None),
@@ -744,10 +748,30 @@ def parse_args(argv: list[str] | None = None):
                        "device count. Unsupported: --jra55-sea-ice, the "
                        "JRA55 single-step fallback."
                    ))
+    p.add_argument("--enable-mpas-spmd", action="store_true", default=False,
+                   help=(
+                       "Run the MPAS lane multi-device SPMD "
+                       "(legoesm.parallel.voronoi_spmd_ocean): the mesh is "
+                       "reordered + padded for the device count, the state is "
+                       "sharded in owned cell/edge blocks and every step "
+                       "fills owned+halo local buffers with coloured "
+                       "ppermute rounds, running MPASOceanModel._step_impl on "
+                       "each device's local mesh with in-step halo refreshes "
+                       "and psum reductions. Requires --grid mpas. Supports "
+                       "the restoring lane and the JRA55 block-scan lane with "
+                       "--no-gpu-interp; --jra55-sea-ice only with "
+                       "--ice-dynamics none and --ice-categories 1 (the "
+                       "thermodynamic tile is pointwise). normalize_freshwater "
+                       "is supported (owned-masked psum means). Refused: "
+                       "GPU-side forcing interpolation, ice rheology, "
+                       "use_baroclinic_rho_ref, runoff_depth_spread_map. "
+                       "Restarts carry the device count and are refused "
+                       "across a different one (cell order differs)."
+                   ))
     p.add_argument("--spmd-n-devices", type=int, default=0,
                    help=(
-                       "Device count for --enable-latlon-spmd "
-                       "(0 = all local devices)."
+                       "Device count for --enable-latlon-spmd / "
+                       "--enable-mpas-spmd (0 = all local devices)."
                    ))
     p.add_argument("--multicontroller", action="store_true", default=False,
                    help=(
@@ -1242,8 +1266,13 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   vertical_mixing: VerticalMixingConfig | None = None,
                   forcing_mode: str = "restoring",
                   use_conservation_fixer: bool = True,
-                  dz_ref_override=None):
+                  dz_ref_override=None,
+                  spmd_n_devices: int = 0):
     """Create grid, z_coord, config, model for any grid type.
+
+    ``spmd_n_devices > 1`` (MPAS only, ``--enable-mpas-spmd``) reorders + pads
+    the Voronoi mesh for that device count BEFORE the model / IC / forcing are
+    built on it, so every downstream per-cell array shares the sharded order.
 
     All grids use the SAME config-based diffusion (A_h, K_h, A_v, K_v)
     via ``physics=None`` (built-in tendencies) so that the 4 grids are
@@ -1516,6 +1545,15 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         )
 
         mesh = create_voronoi_mesh(params["level"])
+        if spmd_n_devices > 1:
+            from legoesm.parallel.voronoi_partition import (
+                reorder_voronoi_for_sharding,
+            )
+            _n0 = mesh.nCells
+            mesh = reorder_voronoi_for_sharding(mesh, spmd_n_devices)
+            print(f"  MPAS SPMD mesh: reordered for {spmd_n_devices} devices, "
+                  f"{_n0} -> {mesh.nCells} cells ({mesh.nCells - _n0} padded "
+                  f"ghosts, land)")
 
         # For JRA55 forcing mode, use scheme="none" so that external
         # tau/q_net from the bulk-flux solver are applied via the
@@ -2755,7 +2793,8 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
     # runs through the sharded wrapper (same forcing kwargs as _step_impl;
     # the wrapper's cache/arm-restore Python runs ONCE at block trace).
     # Sea ice is refused upstream (the ice tile is not SPMD-audited yet).
-    if spmd_step is not None and enable_sea_ice:
+    if (spmd_step is not None and enable_sea_ice
+            and not jra55_state.get("spmd_ice_ok", False)):
         raise ValueError(
             "spmd_step + prognostic sea ice is unsupported "
             "(run_omip_single refuses --jra55-sea-ice with "
@@ -2968,7 +3007,8 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
     enable_maxvel = _maxvel_3d > 0.0
 
     # Lat-band SPMD: see _build_jra55_block_fn.
-    if spmd_step is not None and enable_sea_ice:
+    if (spmd_step is not None and enable_sea_ice
+            and not jra55_state.get("spmd_ice_ok", False)):
         raise ValueError(
             "spmd_step + prognostic sea ice is unsupported "
             "(run_omip_single refuses --jra55-sea-ice with "
@@ -3381,6 +3421,11 @@ _RESTART_DIAGNOSTIC_SLOTS = ("mass_flux_u", "mass_flux_v", "mass_flux_w",
                              "salt_flux_u_int", "salt_flux_v_int")
 
 
+# Restart provenance for the MPAS SPMD lane (module slot: the loop's restart
+# writer has no view of the SPMD layout).  [0] = serial order.
+_MPAS_SPMD_N_DEVICES = [0]
+
+
 def _save_restart(state, day, step, output_dir, ice_state=None,
                   grid_type="latlon"):
     """Save a state restart in the global-overturning npz format.
@@ -3438,6 +3483,9 @@ def _save_restart(state, day, step, output_dir, ice_state=None,
         "step": int(step),
         "time_days": float(day),
         "grid_type": grid_type,
+        # 0 = serial cell order; >1 = MPAS SPMD reordered+padded order for
+        # that device count (set once by run_omip_single's SPMD wiring).
+        "mpas_spmd_n_devices": int(_MPAS_SPMD_N_DEVICES[0]),
     }
     for f in state._fields:
         if f in _RESTART_DIAGNOSTIC_SLOTS:
@@ -3510,7 +3558,8 @@ def _load_ice_restart(restart_path, ice_template):
     return ice_template._replace(**replacements)
 
 
-def _load_restart(restart_path, template_state, grid_type=None):
+def _load_restart(restart_path, template_state, grid_type=None,
+                  mpas_spmd_n_devices: int = 0):
     """Load a restart npz and populate the state from a template.
 
     The template state (from ``_init_rest_state``) provides the pytree
@@ -3551,6 +3600,15 @@ def _load_restart(restart_path, template_state, grid_type=None):
     # Provenance guard: refuse a cross-grid restart.  Only enforced when the
     # caller supplies the run's grid_type AND the npz records one (legacy
     # restarts predate the key and fall through unchanged).
+    # MPAS SPMD restarts are in the REORDERED + PADDED cell order of their
+    # device count; any other order (serial, or another count) is a
+    # silently-scrambled ocean — refuse in both directions.
+    _saved_nd = int(data["mpas_spmd_n_devices"]) if "mpas_spmd_n_devices" in data else 0
+    if _saved_nd != int(mpas_spmd_n_devices):
+        raise ValueError(
+            f"Restart {restart_path} was written by an MPAS SPMD run over "
+            f"{_saved_nd} device(s) (0 = serial order) but this run uses "
+            f"{int(mpas_spmd_n_devices)}; the cell order differs.")
     if grid_type is not None and "grid_type" in data:
         saved_grid_type = str(data["grid_type"])
         if saved_grid_type != grid_type:
@@ -3640,7 +3698,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 "spmd_step + the JRA55 single-step fallback is unsupported "
                 "(_jra55_step calls model.step directly); use the "
                 "block-scan path (default).")
-        if jra55_state.get("enable_sea_ice", False):
+        if (jra55_state.get("enable_sea_ice", False)
+                and not jra55_state.get("spmd_ice_ok", False)):
             raise ValueError(
                 "spmd_step + prognostic sea ice is unsupported "
                 "(--jra55-sea-ice; the ice tile is not SPMD-audited).")
@@ -4406,9 +4465,11 @@ def run_omip_single(grid_type: str, args) -> dict:
     # the full serial model AND writes the SAME output/restart paths, corrupting
     # them.  Hard-fail (all ranks raise identically) BEFORE any model/device
     # work rather than silently clobber (codex r2 #2).
-    if run_config.multicontroller and not run_config.enable_latlon_spmd:
+    if run_config.multicontroller and not (run_config.enable_latlon_spmd
+                                           or run_config.enable_mpas_spmd):
         raise SystemExit(
-            "--multicontroller requires --enable-latlon-spmd (it is the "
+            "--multicontroller requires --enable-latlon-spmd or "
+            "--enable-mpas-spmd (it is the "
             "route-B transport for the lat-band ocean SPMD step). Without the "
             "SPMD lane every rank would run the full model and clobber the "
             "same output files.")
@@ -4460,9 +4521,25 @@ def run_omip_single(grid_type: str, args) -> dict:
     # for cross-grid consistency; physics pipeline disabled).
     _dz_ref = load_dz_ref_file(args.dz_ref_file)
     _validate_dz_ref_against_setup(_dz_ref, args.nlev, args.H_max)
+    _mpas_spmd_nd = 0
+    if run_config.enable_mpas_spmd:
+        if grid_type != "mpas":
+            raise SystemExit(
+                f"--enable-mpas-spmd requires --grid mpas (got {grid_type}).")
+        if run_config.spmd_n_devices < 0:
+            raise SystemExit(
+                f"--spmd-n-devices must be >= 0 (got {run_config.spmd_n_devices}).")
+        if run_config.multicontroller:
+            _mpas_spmd_nd = len(jax.devices())
+        else:
+            _mpas_spmd_nd = run_config.spmd_n_devices or len(jax.devices())
+    # Restart provenance for THIS run (0 = serial cell order): set for every
+    # run so an earlier SPMD run in the same interpreter cannot leak its count.
+    _MPAS_SPMD_N_DEVICES[0] = int(_mpas_spmd_nd) if _mpas_spmd_nd > 1 else 0
     grid, z_coord, config, model, coord_kind = _create_setup(
         grid_type, resolution, args.nlev, args.H_max,
         args.physics, args.water_type,
+        spmd_n_devices=_mpas_spmd_nd,
         use_bathymetry=(args.bathymetry is not None),
         A_h_override=args.A_h,
         B_h_override=args.B_h,
@@ -4842,6 +4919,11 @@ def run_omip_single(grid_type: str, args) -> dict:
         bathy_cfg=bathy_cfg,
         use_etopo_postinit=(grid_type == "mpas" and args.bathymetry is not None),
     )
+    if _mpas_spmd_nd > 1:
+        from legoesm.parallel.voronoi_spmd_ocean import (
+            mask_padded_cells, n_real_cells,
+        )
+        state = mask_padded_cells(state, n_real_cells(grid))
     # --- MPAS ETOPO post-processing (matches run_comparison_mpas.py) ---
     # The generic init_ocean_bathymetry path doesn't do north-cap masking,
     # partial-cell snapping, or partial-cell coordinate creation for MPAS.
@@ -4859,6 +4941,12 @@ def run_omip_single(grid_type: str, args) -> dict:
             fill_isolated_basins=True,
         )
         H_bathy_raw, ocean_mask = load_bathymetry_mpas(grid, mpas_bathy_cfg)
+        if _mpas_spmd_nd > 1:
+            # padded ghost cells sit at lat/lon 0 and would read ETOPO depth
+            from legoesm.parallel.voronoi_spmd_ocean import n_real_cells
+            _nr = n_real_cells(grid)
+            H_bathy_raw = H_bathy_raw.at[_nr:].set(0.0)
+            ocean_mask = ocean_mask.at[_nr:].set(0.0)
 
         # Optional north cap (default: 90° = full globe, no cap).
         # The comparison scripts used 80°N for parity with lat-lon;
@@ -5001,6 +5089,7 @@ def run_omip_single(grid_type: str, args) -> dict:
     if args.restart is not None:
         state, restart_day, restart_step = _load_restart(
             args.restart, state, grid_type=grid_type,
+            mpas_spmd_n_devices=_MPAS_SPMD_N_DEVICES[0],
         )
         start_step = restart_step
         print(f"  Restart: loaded day {restart_day:.1f} (step {restart_step}) "
@@ -5010,6 +5099,14 @@ def run_omip_single(grid_type: str, args) -> dict:
     # BEFORE the JRA55 forcing setup below builds caches/state (codex r1 #1)
     # and before any device work; a negative device count would otherwise
     # silently no-op through the `_nd or len(devices)` resolution (r1 #3).
+    if run_config.enable_mpas_spmd and getattr(args, "jra55_sea_ice", False):
+        if str(args.ice_dynamics) != "none" or int(args.ice_categories) != 1:
+            raise SystemExit(
+                "--enable-mpas-spmd supports --jra55-sea-ice only as the "
+                "pointwise thermodynamic tile (--ice-dynamics none, "
+                "--ice-categories 1); ice rheology needs per-subcycle halo "
+                f"refreshes that are not built (got --ice-dynamics "
+                f"{args.ice_dynamics} --ice-categories {args.ice_categories}).")
     if run_config.enable_latlon_spmd:
         if getattr(args, "jra55_sea_ice", False):
             raise SystemExit(
@@ -5294,6 +5391,60 @@ def run_omip_single(grid_type: str, args) -> dict:
             print("  SPMD: single device visible — flag is a no-op.")
 
     # Run time loop
+    if run_config.enable_mpas_spmd:
+        _nd = _mpas_spmd_nd
+        if jax.process_count() > 1 and not run_config.multicontroller:
+            raise SystemExit(
+                "--enable-mpas-spmd is single-controller only unless "
+                "--multicontroller is set (route-B jax.distributed).")
+        if (run_config.multicontroller and run_config.spmd_n_devices
+                and run_config.spmd_n_devices != _nd):
+            raise SystemExit(
+                f"--multicontroller uses ALL global devices ({_nd}); "
+                f"--spmd-n-devices ({run_config.spmd_n_devices}) must be 0 or {_nd}.")
+        if jra55_state is not None:
+            if jra55_state.get("_use_single_step", False):
+                raise SystemExit(
+                    "--enable-mpas-spmd requires the JRA55 block-scan path "
+                    "(this run selected the single-step fallback).")
+            if jra55_state.get("_gpu_interp", False):
+                raise SystemExit(
+                    "--enable-mpas-spmd does not support GPU-side forcing "
+                    "interpolation yet (the regrid weights are not sliced per "
+                    "device); pass --no-gpu-interp.")
+            if jra55_state.get("enable_sea_ice", False):
+                jra55_state["spmd_ice_ok"] = True   # gated above: thermo-only tile
+        if _nd > 1:
+            from functools import partial
+            from legoesm.parallel.voronoi_spmd_ocean import (
+                build_mpas_ocean_spmd_layout,
+                gather_state_mpas_ocean_spmd,
+                make_sharded_mpas_ocean_step,
+                n_real_cells,
+                shard_cell_stack_spmd,
+                shard_state_mpas_ocean_spmd,
+            )
+            _layout = build_mpas_ocean_spmd_layout(
+                grid, _nd, n_cells_real=n_real_cells(grid),
+                tracer_advection=str(model.config.tracer_advection),
+                nlev=int(args.nlev))
+            spmd_step = make_sharded_mpas_ocean_step(model, _layout)
+            spmd_gather = partial(gather_state_mpas_ocean_spmd, layout=_layout)
+            spmd_shard_stack = partial(shard_cell_stack_spmd, layout=_layout)
+            state = shard_state_mpas_ocean_spmd(state, _layout)
+            if jra55_state is not None and jra55_state.get("ice_state_init") is not None:
+                jra55_state["ice_state_init"] = shard_cell_stack_spmd(
+                    jra55_state["ice_state_init"], _layout)
+            if jax.process_index() == 0:
+                _lane = ("route-B multicontroller" if run_config.multicontroller
+                         else "single-controller")
+                print(f"  SPMD ({_lane}): MPAS owned-block sharded step over "
+                      f"{_nd} devices across {jax.process_count()} process(es) "
+                      f"({jax.default_backend()}); cells/device={_layout.cells_per}, "
+                      f"local incl. halo={_layout.max_lc}, ppermute rounds="
+                      f"{len(_layout.ppermute_perms)}.")
+        elif jax.process_index() == 0:
+            print("  SPMD (mpas): single device visible — flag is a no-op.")
     state, diag, wall_time, ok, blowup_info = _run_omip_loop(
         model, state, grid_type, grid, z_coord,
         dt, n_steps, diag_every,
@@ -5486,6 +5637,13 @@ def main():
                 "final_SSS": None,
                 "final_SSH": None,
             })
+        finally:
+            if getattr(args, "enable_mpas_spmd", False):
+                # The MPAS SPMD layout arms a process-global "spmd" halo backend
+                # + device mesh; a following grid / serial run in this process
+                # must not inherit it (psum outside shard_map).
+                from legoesm.parallel.voronoi_spmd_ocean import disarm_mpas_ocean_spmd
+                disarm_mpas_ocean_spmd()
 
     if _root:
         print_summary()

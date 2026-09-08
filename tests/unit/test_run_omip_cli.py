@@ -70,6 +70,23 @@ def test_enable_latlon_spmd_flags_round_trip():
     assert cfg.spmd_n_devices == 4
 
 
+def test_enable_mpas_spmd_flags_round_trip():
+    """--enable-mpas-spmd parses and reaches OMIPRunConfig (the Voronoi SPMD
+    ocean lane); it shares --spmd-n-devices / --multicontroller with the
+    lat-band lane."""
+    args = parse_args(["--grid", "mpas"])
+    assert args.enable_mpas_spmd is False
+    cfg = build_config_from_args(args)
+    assert cfg.enable_mpas_spmd is False
+
+    args = parse_args(["--grid", "mpas", "--enable-mpas-spmd",
+                       "--spmd-n-devices", "8"])
+    cfg = build_config_from_args(args)
+    assert cfg.enable_mpas_spmd is True
+    assert cfg.enable_latlon_spmd is False
+    assert cfg.spmd_n_devices == 8
+
+
 def test_multicontroller_flags_round_trip():
     """--multicontroller / --coordinator parse and reach OMIPRunConfig
     (the route-B cross-process lane, part 2c of the ocean-SPMD promotion)."""
