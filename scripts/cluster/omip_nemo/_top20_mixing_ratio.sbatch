@@ -32,6 +32,9 @@ OURS = ("/burg-archive/glab/users/pg2328/_evd_wt/results/omip_nemo/"
 NEMO = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/"
         "EXP00/RUN_TRD2/ORCA1_1h_20010101_20010101_trd1h_T.nc")
 LO, HI, HW = 220.0, 240.0, 2.0
+# GLM's mechanism (2026-09-08) says the momentum-mixing gap that matters for the
+# undercurrent is the DEEP one, not the 0-20 m one; measure both bands.
+BANDS = ((0.0, 20.0), (20.0, 60.0), (60.0, 160.0))
 
 z = np.load(OURS)
 lat = np.asarray(z["lat_T"]); lon = np.asarray(z["lon_T"]) % 360.0
@@ -89,6 +92,20 @@ else:
 # by two different counts) and both were divided by a nominal 20 m, so the
 # printed +5.16 K was an instrument artefact. Never quote it. The diffusivity
 # ratio above is what carried the measurement.
+print("\n=== band-by-band diffusivity, ours vs NEMO daily mean (GLM depth test) ===")
+for b0, b1 in BANDS:
+    si = (zi >= b0) & (zi < b1)
+    sn = (depw >= b0) & (depw < b1)
+    if not si.any() or not sn.any():
+        continue
+    ko = np.nanmedian(K[:, si]); mo = np.nanmedian(KM[:, si])
+    kn = np.nanmedian([np.nanmedian(np.ma.filled(avt[t][sn], np.nan)[:, nbox]) for t in range(nt)])
+    mn = (np.nanmedian([np.nanmedian(np.ma.filled(avm[t][sn], np.nan)[:, nbox]) for t in range(nt)])
+          if avm is not None else np.nan)
+    print(f"  {b0:5.0f}-{b1:5.0f} m : tracer ours {ko:.3e} NEMO {kn:.3e} ratio {ko/kn:6.3f} | "
+          f"momentum ours {mo:.3e} NEMO {mn:.3e} ratio {mo/mn:6.3f} | "
+          f"Prandtl ours {mo/ko:5.2f} NEMO {mn/kn:5.2f}")
+
 print("\n=== shortwave absorbed within 0-20 m, from each optics (GLM CRITICAL-1) ===")
 for tag, frac_ir, e_ir, e_vis in (("ours/NEMO RGB", 0.58, 0.35, 23.0),):
     f20 = frac_ir * (1 - np.exp(-20.0 / e_ir)) + (1 - frac_ir) * (1 - np.exp(-20.0 / e_vis))
