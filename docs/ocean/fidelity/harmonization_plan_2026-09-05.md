@@ -372,3 +372,32 @@ WHAT WOULD MAKE IT WORK: time-averaged fluxes on our side, i.e. a 15-day rerun
 of the production tripole card writing DAILY snapshots so the fluxes can be
 averaged over the oracle's own 5-day window. That is a compute request and is
 NOT made unilaterally.
+
+## ★★★2026-09-08 — the mixing deficit is REAL, it is just BELOW 20 m
+
+Every mixing comparison in this campaign had been run on the top 20 m, and on
+heat. Widening it by depth and to momentum changes the verdict completely
+(cold tongue 220-240E, |lat|<=2, ours day 30 against the oracle's daily mean):
+
+| band | tracer ours/NEMO | momentum ours/NEMO | Prandtl ours | Prandtl NEMO |
+|---|---|---|---|---|
+| 0-20 m | 1.02 | 0.58 | 2.25 | 3.93 |
+| **20-60 m** | **0.009** | **0.052** | **6.91** | **1.15** |
+| 60-160 m | 0.16 | 1.33 | 17.8 | 2.10 |
+
+At 20-60 m we mix heat at ONE PERCENT of the oracle's rate and momentum at five
+percent. That is the largest single discrepancy measured in this campaign, and
+it sits exactly where the cold-tongue profile goes wrong: heat trapped above
+20 m (we are 0.5-1 K too warm at 0.5 m) over water that never mixes upward (we
+are 1.3 K too cold at 20 m). The oracle keeps a nearly neutral Prandtl number
+there (1.15); ours is 6.9, i.e. we damp heat exchange far harder than momentum.
+
+RETRACTION, stated plainly: "our mixing is equal or stronger, so the deficit is
+refuted" was true ONLY for 0-20 m. The refutation does not extend below, and I
+should have measured the band before generalising. The EVD refutation is
+untouched -- that was arm against control on identical cards.
+
+This also gives the mixing-length mismatch a measured motive: nn_mxl=2 bounds
+the vertical derivative of the length scale, which is precisely what sets how
+far turbulence reaches BELOW the surface layer, and it is the band where we
+collapse.
