@@ -75,6 +75,7 @@ def convective_K_A_flag(
     eos_fn=None,
     t_depth: jnp.ndarray | None = None,
     w_depth: jnp.ndarray | None = None,
+    e3w_int: jnp.ndarray | None = None,
     g: float = constants.g,
     rho_ref: float = _RHO_0_DEFAULT,
 ):
@@ -121,6 +122,17 @@ def convective_K_A_flag(
             f"{cfg.n2_mode!r}; expected 'insitu', 'insitu_signed', "
             "'adiabatic' or 'nemo_bn2'."
         )
+    # Same gate for the alpha/beta selector the nemo_bn2 branch forwards
+    # (mirrors ``eos.compute_buoyancy_frequency_nemo_bn2``'s own allowed set;
+    # validated HERE too so a typo raises even under an n2_mode that never
+    # reaches the kernel).
+    if cfg.n2_eos_form not in ("seos", "teos10"):
+        raise ValueError(
+            "Unknown EnhancedDiffusionConfig.n2_eos_form="
+            f"{cfg.n2_eos_form!r}; expected 'seos' (NEMO's 3-term simplified "
+            "EOS) or 'teos10' (NEMO's Roquet polynomial with the TEOS-10 "
+            "coefficient set, which is what ORCA1 runs: ln_teos10=.true.)."
+        )
 
     dz_actual = dz_ref * jacobian[..., jnp.newaxis]               # (..., nlev)
     dry_iface = (dz_actual[..., :-1] <= 0.0) | (dz_actual[..., 1:] <= 0.0)
@@ -147,7 +159,8 @@ def convective_K_A_flag(
     elif cfg.n2_mode == "nemo_bn2":
         # NEMO eosbn2 bn2 (S-EOS): local alpha,beta at each cell's gdept
         # interpolated to the w-point by the geometric zrw weight (SIGNED).
-        if T is None or S is None or t_depth is None or w_depth is None:
+        if (T is None or S is None or t_depth is None or w_depth is None
+                or e3w_int is None):
             raise ValueError(
                 "convective_K_A_flag: n2_mode='nemo_bn2' requires T, S and the "
                 "geometric depth ladders t_depth (gdept) / w_depth (interior "
@@ -158,7 +171,14 @@ def convective_K_A_flag(
         # path, where make_eos_fn's "nemo_seos" branch also has no custom-
         # coefficient threading from any recipe. Thread a cfg through here the
         # day a recipe carries non-default S-EOS coefficients.
-        N2 = compute_buoyancy_frequency_nemo_bn2(T, S, t_depth, w_depth, g=g)
+        # ``eos_form`` selects WHICH alpha/beta the bn2 assembly uses; this
+        # forward was MISSING, so the EVD trigger always took the S-EOS
+        # branch even on a TEOS-10 card whose TKE sibling
+        # (``TKEConfig.n2_eos_form``, threaded at
+        # vertical_mixing/_shared.py) used the Roquet polynomial.
+        N2 = compute_buoyancy_frequency_nemo_bn2(
+            T, S, t_depth, w_depth, g=g, eos_form=cfg.n2_eos_form,
+            e3w_int=e3w_int)
     else:
         # In-situ density N² (SIGNED); reference density on dry columns keeps
         # the numerator finite too (BIT-IDENTICAL legacy path).
@@ -267,14 +287,15 @@ def enhanced_diffusion_convection(
                 'EnhancedDiffusionConfig.n2_mode="nemo_bn2" needs eta and '
                 "H_bathy to build NEMO's live gdept(Kmm) ladder; "
                 "enhanced_diffusion_convection was called without them.")
-        from legoesm.ocean.eos import nemo_bn2_live_ladders
-        _t_depth, _w_depth = nemo_bn2_live_ladders(z_coord, eta, H_bathy)
+        from legoesm.ocean.eos import nemo_bn2_live_geometry
+        _t_depth, _w_depth, _e3w_int = nemo_bn2_live_geometry(
+            z_coord, eta, H_bathy)
     else:
-        _t_depth = _w_depth = None
+        _t_depth = _w_depth = _e3w_int = None
     K, A, flag = convective_K_A_flag(
         rho, z_coord.dz_ref, jacobian, cfg,
         T=T, S=S, p_cell=p_cell, eos_fn=eos_fn,
-        t_depth=_t_depth, w_depth=_w_depth,
+        t_depth=_t_depth, w_depth=_w_depth, e3w_int=_e3w_int,
         g=g, rho_ref=rho_ref,
     )
 

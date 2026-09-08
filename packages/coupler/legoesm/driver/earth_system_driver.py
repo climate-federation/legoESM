@@ -86,7 +86,15 @@ class EarthSystemDriver:
         from legoesm.land.config import LandConfig
 
         self._coupler_cfg = self._coupler_config or CouplerConfig()
-        land_cfg = self._land_config or LandConfig()
+        # PINNED to the bulk scheme when the caller supplies no land config.
+        # The library default is the two-leaf canopy, which needs per-PFT CANOPY
+        # parameters; this driver has no canopy parameter provider, so inheriting
+        # the default would run a canopy on generic constants and silently make
+        # every tuned per-PFT value inert (codex).  A caller that wants the canopy
+        # here passes a land config built with canopy parameters.
+        from legoesm.land.surface_scheme import SimpleSEBConfig
+        land_cfg = self._land_config or LandConfig(
+            surface_scheme=SimpleSEBConfig())
         ice_cfg = self._ice_config or SeaIceConfig()
         lake_cfg = self._lake_config or LakeConfig()
 

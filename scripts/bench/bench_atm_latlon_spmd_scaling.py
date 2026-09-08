@@ -99,7 +99,7 @@ from metadata import (  # noqa: E402
 )
 
 
-def _build_model(n_lat, n_lon, nlev):
+def _build_model(n_lat, n_lon, nlev, fix_mass=True):
     _import_jax()
     from legoesm import constants
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
@@ -110,20 +110,26 @@ def _build_model(n_lat, n_lon, nlev):
     grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon, radius=constants.R_earth,
                               omega=constants.Omega)
     sigma = create_sigma_coordinate(n_levels=nlev)
+    # The mass fixer is a GLOBAL area-weighted sum, which under lat-band
+    # sharding is an all-reduce over EVERY device on EVERY step. The halo
+    # no-communication arm does not remove it -- that arm only replaces the
+    # halo exchanges -- so its cost is reported by this benchmark as local
+    # work. Being able to switch it off is what makes the two separable.
+    # MEASUREMENT ONLY: a run with it off does not conserve mass.
     cfg = CGridLatLonPrimitiveEquationConfig(
-        fix_mass=True, use_polar_filter=False, use_ppm_transport=True,
+        fix_mass=fix_mass, use_polar_filter=False, use_ppm_transport=True,
         time_integrator="ssp_rk3")
     return CGridLatLonPrimitiveEquationModel(grid, sigma, cfg)
 
 
-def _build(n_lat, n_lon, nlev):
+def _build(n_lat, n_lon, nlev, fix_mass=True):
     _import_jax()
     # nd=1 lane + tests: global (unsharded) IC build, unchanged protocol.
     from legoesm.atmosphere.forcing.idealized.held_suarez import held_suarez_init_latlon
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         hydrostatic_to_cgrid)
 
-    model = _build_model(n_lat, n_lon, nlev)
+    model = _build_model(n_lat, n_lon, nlev, fix_mass)
     hs0 = held_suarez_init_latlon(model.grid, model.sigma_coord)
     c0 = hydrostatic_to_cgrid(hs0, model.grid)
     return model, c0
@@ -177,6 +183,19 @@ def main() -> int:
                         "scripts/bench/analyze_jax_trace_gaps.py). One "
                         "block only — tracing from step 0 fills the 1M-"
                         "event cap with compile-phase host events.")
+    p.add_argument("--p-lon", type=int, default=1,
+                   help="Longitude split of the device mesh. 1 (default) is "
+                        "the production latitude-band lane. >1 tiles in BOTH "
+                        "directions, which is the only way this lane's halo "
+                        "shrinks as devices are added: a band always "
+                        "exchanges two rows of the WHOLE longitude circle, "
+                        "so its halo bytes are the same at 8 devices and at "
+                        "128, while a tile's boundary shrinks with its area. "
+                        "Measured at 128 devices the halo moves 18.5 MB per "
+                        "device per step and communication is 42 percent of "
+                        "the "
+                        "step; a 16x8 tiling moves 1,280 boundary cells per "
+                        "tile against 8,192 for a band.")
     p.add_argument("--physics", choices=["none", "held_suarez"], default="none")
     p.add_argument("--dt", type=float, default=60.0)
     p.add_argument("--single-dev-fused-ms", type=float, default=None,
@@ -192,6 +211,12 @@ def main() -> int:
                    help="MEASURED link bandwidth [GB/s] of THIS machine's "
                         "fabric. Default: MACHINE-CALIBRATED-REQUIRED "
                         "placeholder in metadata.py -> bound_calibrated=false.")
+    p.add_argument("--no-fix-mass", action="store_true",
+                   help="Switch off the global mass fixer. It is an all-reduce "
+                        "over every device on every step, and the halo "
+                        "no-communication arm does not remove it, so its cost "
+                        "is reported as local work. MEASUREMENT ONLY: a run "
+                        "with this set does not conserve mass.")
     p.add_argument("--out", type=str, default="results/a1/spmd_scaling.jsonl")
     p.add_argument("--multicontroller", action="store_true",
                    help="Route-B multi-controller: jax.distributed.initialize "
@@ -218,11 +243,39 @@ def main() -> int:
     # the later in-loop guard below is kept as a belt-and-braces check for the
     # weak-mode derived n_lat, but the fatal case is caught here at submit time.
     from legoesm.scaling_preflight import (
-        preflight_or_exit, validate_divisibility, validate_memory,
+        preflight_or_exit, validate_band_rows_gpu, validate_divisibility,
+        validate_memory,
     )
+    # With a tiled split the latitude rows divide by p_lat, NOT by the device
+    # count: an 8-device 2x4 tiling of 12 rows is uniform and legal, and the
+    # band check would reject it at submit time.
+    _p_lon_pre = max(1, int(args.p_lon))
+    if args.n_devices % _p_lon_pre:
+        raise SystemExit(
+            f"--p-lon {_p_lon_pre} does not divide --n-devices "
+            f"{args.n_devices}")
+    _p_lat_pre = args.n_devices // _p_lon_pre
     if args.mode == "strong":
-        preflight_or_exit(validate_divisibility, args.n_lat, args.n_devices,
+        preflight_or_exit(validate_divisibility, args.n_lat, _p_lat_pre,
                           axis="n_lat")
+        if _p_lon_pre > 1:
+            preflight_or_exit(validate_divisibility, args.n_lon, _p_lon_pre,
+                              axis="n_lon")
+    # Thin-band NCCL-init deadlock guard: only the multi-node GPU lane is
+    # affected (the same program runs on CPU virtual devices), and it burns
+    # a full walltime silently, so refuse at submit time.  The platform has to
+    # be read here rather than assumed: applying the GPU floor to the CPU lane
+    # rejects the 12-row virtual-device benchmark this receipt was collected
+    # against.  JAX has not been imported yet (deferred for #1361), so the
+    # selection is taken from the environment variable that decides it.
+    _platforms = os.environ.get("JAX_PLATFORMS", "").strip().lower()
+    _on_cpu_only = bool(_platforms) and all(
+        p.strip() in ("cpu", "") for p in _platforms.split(","))
+    if args.multicontroller and not _on_cpu_only:
+        preflight_or_exit(validate_band_rows_gpu,
+                          (args.n_lat if args.mode == "strong"
+                           else args.nlat_per_dev * args.n_devices),
+                          _p_lat_pre, axis="n_lat")
     _n_lat_est = (args.n_lat if args.mode == "strong"
                   else args.nlat_per_dev * args.n_devices)
     _est = preflight_or_exit(
@@ -233,7 +286,30 @@ def main() -> int:
           f"est={_est / 1024**3:.1f} GB/device", flush=True)
 
     # Preflight has passed -> JAX may now be imported (deferred for #1361).
+    # Stage banners (every rank, flushed): the LL2304@192 arms hung for two
+    # full walltimes with NOTHING after the preflight line (jobs 26979367 /
+    # 26996572), so the hanging stage was undecidable from the log. Cheap,
+    # permanent, and rank-tagged so a straggler rank names itself.
+    import time as _t0mod
+    _t0 = _t0mod.time()
+
+    def _stage(msg):
+        import os as _os_stage
+        _r = _os_stage.environ.get("SLURM_PROCID", "?")
+        print(f"[stage +{_t0mod.time() - _t0:7.1f}s r{_r}] {msg}",
+              flush=True)
+
+    _stage("importing jax")
     _import_jax()
+    # LEGOESM_HANG_DEBUG=1: dump every thread's Python stack to stderr every
+    # 5 minutes. Pure stdlib. Three 192-rank arms hung INSIDE the first
+    # (compiling+executing) call with nothing to bisect on; the periodic
+    # dump names the exact frame (jit compile vs PJRT execute / NCCL init).
+    import os as _os_hd
+    if _os_hd.environ.get("LEGOESM_HANG_DEBUG", "") == "1":
+        import faulthandler
+        faulthandler.dump_traceback_later(300, repeat=True)
+        _stage("hang-debug armed: stack dump every 300 s")
 
     if args.multicontroller:
         # MUST run before any other JAX use (backend init).  The SHARED
@@ -244,13 +320,16 @@ def main() -> int:
         from legoesm.parallel.early_init import (
             init_multicontroller_distributed,
         )
+        _stage("distributed init (coordinator barrier)")
         init_multicontroller_distributed(args.coordinator)
+        _stage("distributed init done")
 
     from legoesm.atmosphere.dynamics.gcm.sharded_atm_latlon_step import (
         atm_latlon_geometry_bytes,
         build_sharded_held_suarez_state_atm_latlon,
         make_sharded_atm_latlon_segment,
-        make_sharded_atm_latlon_step)
+        make_sharded_atm_latlon_step,
+        make_sharded_atm_latlon_step_2d)
     seg_n = int(args.segment_steps)
     if seg_n < 0:
         raise SystemExit(f"--segment-steps must be >= 0, got {seg_n}")
@@ -260,7 +339,9 @@ def main() -> int:
         physics_fn = held_suarez_forcing_latlon
 
     nd = args.n_devices
+    _stage("querying devices (backend init)")
     avail = len(jax.devices())
+    _stage(f"backend up: {avail} devices")
     if avail < nd:
         raise SystemExit(f"need {nd} devices, have {avail} "
                          f"(set --xla_force_host_platform_device_count)")
@@ -271,12 +352,37 @@ def main() -> int:
         raise SystemExit(
             f"--multicontroller: --n-devices ({nd}) must equal the GLOBAL "
             f"device count ({avail} across {jax.process_count()} processes).")
+    p_lon = int(args.p_lon)
+    if p_lon < 1:
+        raise SystemExit(f"--p-lon must be >= 1, got {p_lon}")
+    if nd % p_lon != 0:
+        raise SystemExit(
+            f"--p-lon {p_lon} does not divide --n-devices {nd}")
+    p_lat = nd // p_lon
     n_lat = args.n_lat if args.mode == "strong" else args.nlat_per_dev * nd
-    if n_lat % nd != 0:
-        raise SystemExit(f"n_lat {n_lat} not divisible by n_devices {nd}")
+    if p_lon == 1:
+        if n_lat % nd != 0:
+            raise SystemExit(f"n_lat {n_lat} not divisible by n_devices {nd}")
+    else:
+        # Tiled lane: BOTH directions have to divide, and the segment lane
+        # is band-only, so refuse rather than silently running bands.
+        if n_lat % p_lat != 0:
+            raise SystemExit(
+                f"n_lat {n_lat} not divisible by p_lat {p_lat} "
+                f"(= n_devices / p_lon)")
+        if args.n_lon % p_lon != 0:
+            raise SystemExit(
+                f"n_lon {args.n_lon} not divisible by --p-lon {p_lon}")
+        if seg_n > 0:
+            raise SystemExit(
+                "--segment-steps is not wired for --p-lon > 1; run the "
+                "tiled lane in the default per-step mode")
+        if nd == 1:
+            raise SystemExit("--p-lon > 1 needs more than one device")
 
     if nd == 1:
-        model, c0 = _build(n_lat, args.n_lon, args.nlev)
+        model, c0 = _build(n_lat, args.n_lon, args.nlev,
+                           fix_mass=not args.no_fix_mass)
         mesh = None
         c = c0
     else:
@@ -286,14 +392,41 @@ def main() -> int:
         # devices own (no global build, no device_put replication, no
         # assert_equal all-gather). This is what lets full-node-packed CPU
         # rungs (128 procs/node) survive at large n_lat.
-        model = _build_model(n_lat, args.n_lon, args.nlev)
-        mesh = jax.sharding.Mesh(np.array(jax.devices()[:nd]),
-                                 axis_names=("lat",))
-        c = build_sharded_held_suarez_state_atm_latlon(
-            model.grid, model.sigma_coord, mesh)
+        _stage("building model geometry (host)")
+        model = _build_model(n_lat, args.n_lon, args.nlev,
+                             fix_mass=not args.no_fix_mass)
+        _stage("geometry built; creating mesh + band-local IC")
+        if p_lon > 1:
+            mesh = jax.sharding.Mesh(
+                np.array(jax.devices()[:nd]).reshape(p_lat, p_lon),
+                axis_names=("lat", "lon"))
+            # Tile-local IC, same builder as the band lane: a global build
+            # plus a device_put onto a cross-process sharding is serviced by
+            # an all-gather and asked for 105 GiB per device here.
+            c = build_sharded_held_suarez_state_atm_latlon(
+                model.grid, model.sigma_coord, mesh)
+        else:
+            mesh = jax.sharding.Mesh(np.array(jax.devices()[:nd]),
+                                     axis_names=("lat",))
+            c = build_sharded_held_suarez_state_atm_latlon(
+                model.grid, model.sigma_coord, mesh)
+    _stage("IC built; constructing step/segment fn")
     if seg_n > 0:
         seg_fn = make_sharded_atm_latlon_segment(
             model, mesh, seg_n, physics_fn=physics_fn)
+    elif p_lon > 1:
+        # shard_geometry=False, matching what the band lane has always
+        # defaulted to. The tiled factory defaults to SHARDED geometry
+        # stacks, and a sharded global array cannot be closed over by a
+        # multi-process program -- every tiled arm died with "Closing over
+        # jax.Array that spans non-addressable devices ... float32[4,8,512,
+        # 512]", which is the per-tile geometry stack. Replicated stacks are
+        # addressable everywhere, which is why the band lane never hit this.
+        # Cost is the whole grid's geometry on every device, about 0.4 GB
+        # here, independent of the device count.
+        step = make_sharded_atm_latlon_step_2d(model, mesh,
+                                               physics_fn=physics_fn,
+                                               shard_geometry=False)
     else:
         step = make_sharded_atm_latlon_step(model, mesh,
                                             physics_fn=physics_fn)
@@ -389,8 +522,12 @@ def main() -> int:
     _measured_med = med if valid else None
     # Honest per-device geometry residency (from the real band-grid shapes):
     # the default lane replicates all-band stacks; the segment lane shards.
-    geom_bytes = (atm_latlon_geometry_bytes(model.grid, nd) if nd > 1
-                  else None)
+    # atm_latlon_geometry_bytes builds nd latitude BANDS. For a tiled run
+    # that is the wrong geometry, and reporting it would be a fabricated
+    # number rather than a missing one, so emit null until a tiled
+    # calculation exists.
+    geom_bytes = (atm_latlon_geometry_bytes(model.grid, nd)
+                  if nd > 1 and p_lon == 1 else None)
 
     # Communication accounting (audit item 4) + calibrated T_bound (item 8).
     # nd=1: zero inter-device traffic is a FACT (recorded as 0), so the
@@ -438,6 +575,7 @@ def main() -> int:
     rec = dict(
         mode=args.mode, n_devices=nd, n_lat=n_lat, n_lon=args.n_lon,
         nlev=args.nlev, physics=args.physics, steps=args.steps,
+        fix_mass=not args.no_fix_mass,
         platform=jax.default_backend(),
         n_processes=jax.process_count(),
         multicontroller=bool(args.multicontroller),
@@ -505,7 +643,7 @@ def main() -> int:
         precision="float64" if jax.config.jax_enable_x64 else "float32",
         n_gpus=(nd if jax.default_backend() in ("gpu", "cuda", "rocm")
                 else 0),
-        decomposition="band" if nd > 1 else "none",
+        decomposition=("band" if p_lon == 1 else f"tiles_{p_lat}x{p_lon}") if nd > 1 else "none",
         # cells_per_rank is per PROCESS (n_ranks semantics); the per-device
         # share lives in extra.cells_per_device — a single-process 4-device
         # SPMD run has 1 rank owning ALL cells (codex finding 3).
@@ -515,8 +653,24 @@ def main() -> int:
         extra={
             "physics": args.physics,
             "steps": args.steps,
-            "warmup": args.warmup,
+            # Stamp the warm-up that ACTUALLY applied. The fused lane does not
+            # consult --warmup at all (it separates compile, probe steps and
+            # timed blocks explicitly), so recording the requested value there
+            # advertises a discard window the run never had.
+            "warmup": (args.warmup if seg_n > 0 else None),
+            "warmup_requested": args.warmup,
+            "warmup_applies": ("blocks dropped from steady stats" if seg_n > 0
+                               else "none: the fused lane discards a compile "
+                                    "call and --probe-steps probe steps, and "
+                                    "times every block after them"),
             "multicontroller": bool(args.multicontroller),
+            # Which decomposition ran. Without this a tiled row and a band
+            # row are indistinguishable in the receipt, and the whole point
+            # of the tiled lane is that it moves different bytes.
+            "p_lat": p_lat,
+            "p_lon": p_lon,
+            "decomposition": ("lat_bands" if p_lon == 1
+                              else f"tiles_{p_lat}x{p_lon}"),
             # M2b compiled-segment lane facts: a segment row is falsifiable
             # from the record alone (block timings + geometry residency +
             # the finite/validity verdict — codex batch4).
@@ -531,7 +685,8 @@ def main() -> int:
             # falsifiable from the record alone.
             "nccl": (_nccl_report if args.multicontroller
                      else None),
-            "cells_per_device": (n_lat // nd) * args.n_lon * args.nlev,
+            "cells_per_device": ((n_lat // p_lat) * (args.n_lon // p_lon)
+                                 * args.nlev),
         },
     ))
     if not valid:

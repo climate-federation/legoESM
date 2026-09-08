@@ -160,6 +160,20 @@ def test_tracer_budget_volume_matches_three_grids():
     ("cubed_sphere", "C24"),
 ])
 def test_restart_round_trip_bit_identical(grid_type, res, tmp_path):
+    """The ARCHIVE round-trip is exact: every ``Field``-valued slot comes back
+    ``np.array_equal``.
+
+    SCOPE OF THE NAME, so it is not requoted as more than it proves.  This
+    asserts save -> load array equality, and only for ``Field`` slots (the
+    legacy ``save_restart`` drops non-``Field`` carries silently).  It does NOT
+    assert that a model resumed from a restart STEPS to identical results
+    against an uninterrupted run — nothing here integrates past the restart.
+    It also holds only because ``JAX_ENABLE_X64`` is the same on both sides:
+    ``load_restart`` rebuilds via a bare ``jnp.asarray``, which DEMOTES f64 to
+    f32 with x64 unset and does not check for it (the RUN pair,
+    ``load_run_restart``, does).  See ``ocean/restart.py``'s SCOPE OF THE
+    GUARANTEE.
+    """
     from legoesm.ocean.restart import save_restart, load_restart, restart_metadata
     state, grid, z, model = _rest_state(grid_type, res)
     # Step once so the state has non-trivial floats.

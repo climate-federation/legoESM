@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import calendar
 import importlib.util
+import math
 from pathlib import Path
 
 import numpy as np
@@ -218,6 +219,116 @@ def build_latlon_config(cfg, yml):
     return ra.build_config_from_args(parsed)
 
 
+# --- campaign-YAML key validation (2026-08-24) ------------------------------
+# Every top-level key this training path actually reads.  A key outside this
+# set is a HARD ERROR: the lr/optimizer keys sat inert in the decks for a
+# whole campaign (v2 trained at 3e-4 while its deck said 1.5e-3), and a typo
+# like ``learning_rate`` would silently reintroduce exactly that.
+_WB_CONSUMED_TOP_KEYS = frozenset({
+    "classical", "convection", "dt", "era5_cadence_hours",
+    "era5_cloud_condensate", "era5_cloud_zarr", "era5_zarr", "eval_years",
+    "grad_accum", "grad_clip_norm", "gravity_wave_drag", "loss", "lr",
+    "microphysics", "n_epochs", "n_lat", "n_lon", "n_training_days",
+    "neural_gcm", "nlev", "optimizer", "rad_update_steps", "radiation",
+    "sfno", "smoke_radiation", "spectral", "train_windows", "train_years",
+    "turbulence", "warmup_steps", "weight_decay",
+})
+# Deck metadata this trainer never reads but the decks legitimately carry
+# (documentation / other tooling).  Kept OUT of the consumed set so the
+# distinction stays visible; anything here is tolerated, not honoured.
+_WB_METADATA_TOP_KEYS = frozenset({"grid", "cache_dir"})
+# Exactly the keys _spectral_pe_config + the dt lookup read from the
+# ``spectral`` block.  ``si_substep`` (typo) silently reverting a deck to the
+# unstable full step is the same defect class as the inert lr.
+_WB_SPECTRAL_KEYS = frozenset({
+    "n_max", "dt", "hyperdiff_coeff", "hyperdiff_order", "time_integrator",
+    "semi_implicit", "si_T_ref", "si_alpha", "si_substeps", "sponge_sigma",
+    "sponge_tau", "spectral_filter_order", "spectral_filter_strength",
+    "fix_mass", "anchor_mass_to_initial", "vertical_advection_scheme",
+    "frictional_heating",
+})
+# Exactly the keys the classical / neural_gcm / sfno builders read from their
+# nested blocks (#1663 review: these were unvalidated, so a nested typo like
+# ``nn_hiden`` silently fell back to the default -- the inert-key defect class).
+_WB_CLASSICAL_KEYS = frozenset({
+    "cloud", "clubb_top_press_hpa", "convection", "gwd", "microphysics",
+    "rad_update_interval_steps", "rrtmgp_gpoint_batch_size", "spatial_init_std",
+    "spatial_seed", "spatial_surface", "surface_bulk", "trainable_schemes",
+    "turbulence",
+})
+# neural_gcm and sfno share one arch/drag key surface (both neural cores); kept
+# permissive across the two so a valid arch key is never falsely rejected.
+_WB_NEURAL_KEYS = frozenset({
+    "surface_drag", "surface_drag_scheme", "surface_drag_confounded",
+    "nn_hidden", "nn_layers", "gauss_n_max", "sfno_embed_dim", "sfno_n_blocks",
+    "sfno_mlp_expansion",
+})
+
+
+def validate_wb_campaign_yaml(yml: dict) -> None:
+    """Refuse a campaign YAML carrying keys this training path does not read.
+
+    Unknown keys raise with a nearest-match hint.  Covers the top level and
+    the ``spectral``, ``loss``, ``classical``, ``neural_gcm`` and ``sfno``
+    blocks (#1663: the last three were unchecked, so a nested typo silently
+    defaulted).
+    """
+    import difflib
+
+    # Common synonyms difflib's ratio cannot reach (``learning_rate`` vs
+    # ``lr`` share two characters).
+    aliases = {"learning_rate": "lr", "epochs": "n_epochs",
+               "weight-decay": "weight_decay", "grad_clip": "grad_clip_norm"}
+
+    def _reject(unknown, known, where):
+        # Suggestions draw ONLY from consumed keys — pointing a typo at a
+        # tolerated-metadata key would "fix" it into a knob that does nothing
+        # (GLM review). Advisory only: nothing is auto-translated.
+        hints = []
+        lower_map = {kk.lower(): kk for kk in known}
+        for k in sorted(unknown):
+            if k in aliases and aliases[k] in known:
+                close = [aliases[k]]
+            else:
+                # match case-insensitively so ``w_t`` suggests ``w_T``
+                close = [lower_map[m] for m in difflib.get_close_matches(
+                    k.lower(), list(lower_map), n=1)]
+            hints.append(f"{k!r}" + (f" (did you mean {close[0]!r}?)"
+                                     if close else ""))
+        raise SystemExit(
+            f"unknown {where} key(s) in campaign YAML: {', '.join(hints)}. "
+            "Keys this trainer does not read are a hard error: inert deck "
+            "keys are how the wb_classical_v2 campaign trained at the wrong "
+            "learning rate.")
+
+    top_known = _WB_CONSUMED_TOP_KEYS | _WB_METADATA_TOP_KEYS
+    unknown = set(yml) - top_known
+    if unknown:
+        _reject(unknown, sorted(_WB_CONSUMED_TOP_KEYS), "top-level")
+    spec = yml.get("spectral") or {}
+    unknown = set(spec) - _WB_SPECTRAL_KEYS
+    if unknown:
+        _reject(unknown, sorted(_WB_SPECTRAL_KEYS), "spectral-block")
+    # Loss block: make_loss_config silently DROPS keys outside
+    # LossConfig._fields ("if k in valid"), so a ``w_t`` typo would fall back
+    # to the default weight — the same inert-key failure mode (codex + GLM).
+    loss = yml.get("loss") or {}
+    if loss:
+        from legoesm.training.losses import LossConfig
+
+        unknown = set(loss) - set(LossConfig._fields)
+        if unknown:
+            _reject(unknown, sorted(LossConfig._fields), "loss-block")
+    # Nested per-scheme blocks (#1663): typo'd keys here silently defaulted.
+    for _blk, _known in (("classical", _WB_CLASSICAL_KEYS),
+                         ("neural_gcm", _WB_NEURAL_KEYS),
+                         ("sfno", _WB_NEURAL_KEYS)):
+        _b = yml.get(_blk) or {}
+        _u = set(_b) - _known
+        if _u:
+            _reject(_u, sorted(_known), f"{_blk}-block")
+
+
 def make_loss_config(cfg, yml):
     from legoesm.training.losses import LossConfig
     lb = dict(yml.get("loss", {}))
@@ -319,8 +430,14 @@ def _build_mode_components_spectral(cfg, yml):
     grid = create_gaussian_grid(n_max)
     sigma = create_sigma_coordinate(nlev)
     pe_config = _spectral_pe_config(yml)
-    # No pole-cell clamp on the Gaussian grid; the SI step is stable at large
-    # dt (that is its purpose).  Explicit opt-out gets the AIMIP-proven 600 s.
+    # No pole-cell clamp on the Gaussian grid.  The SI step is NOT stable at
+    # arbitrary dt: only the linear gravity-wave subsystem is implicit, and
+    # the explicit RK3 advection has a spectral CFL bound
+    # (u * n_max * dt_sub / a < sqrt(3), dt_sub = dt / si_substeps).  Measured
+    # 2026-08-23 at T63: dt=1800 with si_substeps=1 blows up exponentially
+    # within 12 steps (any level count); dt<=900, or dt=1800 with
+    # si_substeps>=3, is stable.  Campaign YAMLs must satisfy the bound —
+    # gated by tests/unit/test_wb_campaign_dt_stability.py.
     dt = float(spec.get("dt", 1800.0 if pe_config.semi_implicit else 600.0))
 
     sponge_factor = None
@@ -414,14 +531,51 @@ def _build_mode_components_spectral(cfg, yml):
         # Without this the interval key is INERT and the SI SSP-RK3 step calls
         # RRTMGP three times per step — ~18x the intended rate at interval 6,
         # and the combined wrapper also freezes radiation's solar time (codex).
+        # CAM trop_cloud_top_press for CLUBB [hPa in the YAML, Pa inside]:
+        # None/absent -> CLUBBConfig's default 0.0 = feature off. The
+        # 32-level arm sets 50 hPa — the diagnostic scheme's measured
+        # stratospheric excursion lives 16-50 hPa there. A non-finite or
+        # non-positive value is a config error, not a silent off-switch.
+        _clubb_top_hpa = _cl.get("clubb_top_press_hpa")
+        if _clubb_top_hpa is None:
+            _clubb_top = None
+        else:
+            _clubb_top = float(_clubb_top_hpa) * 100.0
+            if not math.isfinite(_clubb_top) or _clubb_top <= 0.0:
+                raise ValueError(
+                    "classical.clubb_top_press_hpa must be a finite "
+                    f"positive pressure in hPa, got {_clubb_top_hpa!r}; "
+                    "omit the key to leave the CAM trop-cloud-top taper "
+                    "off.")
+
+        # Radiation g-point block size: the documented compile/memory
+        # tradeoff (see make_aimip_classical_spectral_physics).  The
+        # value-and-grad step needs ~50.5 GiB of scratch at T63/L32 with the
+        # default 16, which is at the limit of an 80 GB card; halving the
+        # block halves the radiation activations the backward pass holds, at
+        # the cost of more blocks to walk.  Exposed here so a run can be made
+        # to fit without editing code.
+        _gpt_batch = int(_cl.get("rrtmgp_gpoint_batch_size", 16))
+        if _gpt_batch < 1:
+            raise ValueError(
+                "classical.rrtmgp_gpoint_batch_size must be >= 1, got "
+                f"{_gpt_batch}; use the scan path by setting it to 1 rather "
+                "than 0 or a negative value.")
+
         def make_physics_fn(p):
             return make_aimip_classical_spectral_physics(
                 p, grid, dt, radiation=_radiation, split_rad=True,
-                rad_update_interval_steps=_rad_interval, **_schemes)
-        # The classical physics_fn takes (state, grid, sigma) — no ``forcing``
-        # kwarg, same as in the AIMIP trainer, where prescribed SST enters
-        # through the surface scheme rather than the physics signature.
-        uses_forcing = False
+                rad_update_interval_steps=_rad_interval,
+                rrtmgp_gpoint_batch_size=_gpt_batch,
+                clubb_top_press=_clubb_top, **_schemes)
+        # The sample's forcing carries ERA5 skin temperature and the scene's
+        # real calendar.  It used to be dropped here: the surface then sat at
+        # the lowest model level's own air temperature (zero sensible heat
+        # flux by construction) and radiation ran every scene on a
+        # spring-equinox noon sun.  The rollout now anchors the bulk-flux
+        # surface temperature to the prescribed field and advances the real
+        # calendar through the window.
+        uses_forcing = True
         split_rad_interval = _rad_interval
 
     elif cfg.mode == "neural_gcm":
@@ -516,6 +670,63 @@ def _build_mode_components_spectral(cfg, yml):
     return None, grid, sigma, params, make_run_seg, loss_config, dt
 
 
+def check_surface_drag_confound(yml, mode, training_core):
+    """Refuse — or name — a run whose learned arm has no surface stress.
+
+    Returns ``None`` when the two arms are equalised, or a one-line note when
+    the campaign has DECLARED that they cannot be, so a caller can record the
+    confound beside the numbers it produced.  Raises ``SystemExit`` for the one
+    declaration that is simply false on the selected core.
+
+    Two declarations exist, and they are not the same kind of thing:
+
+    ``core_does_not_read_the_key``
+        The learned column cannot be given the classical arm's surface stress
+        because the core it runs never reads the key.  True of the lat-lon
+        core, FALSE of the spectral one.  Selecting the spectral core with such
+        a config scores a learned arm carrying no surface stress against a
+        classical arm that has one -- the #1464 confound, back with a label on
+        it.  Refused.
+
+    ``builder_refuses_classical_scheme``
+        The classical arm runs a PROGNOSTIC turbulence scheme that the drag
+        builder cannot reproduce, so no choice of ``surface_drag_scheme``
+        equalises the arms.  The declaration is checked against the builder's
+        real refusal set by ``tests/unit/test_neural_momentum_sink.py``.  This
+        one is legitimate, but the run still produces a table whose two arms
+        differ by a momentum sink, so it is NAMED rather than refused.
+
+    Lives here, not in a driver, because this is the module every entry point
+    that builds a learned spectral arm already goes through -- guarding one
+    driver left the evaluation driver free to write a confounded scorecard.
+    """
+    neural = yml.get("neural_gcm") or {}
+    if not isinstance(neural, dict):
+        return None
+    if mode != "neural_gcm" or neural.get("surface_drag") is True:
+        return None
+    declared = neural.get("surface_drag_confounded")
+    if declared == "core_does_not_read_the_key" and training_core == "spectral":
+        raise SystemExit(
+            "this config declares surface_drag_confounded: "
+            "'core_does_not_read_the_key', which is only true on the lat-lon "
+            "core -- the spectral core DOES read neural_gcm.surface_drag, so "
+            "this run would give the learned arm no surface stress while the "
+            "classical arm it is compared against has one (#1464). Either run "
+            "--training-core latlon, or set neural_gcm.surface_drag: true with "
+            "surface_drag_scheme equal to classical.turbulence.")
+    if declared == "builder_refuses_classical_scheme":
+        classical = yml.get("classical")
+        scheme = classical.get("turbulence") if isinstance(classical, dict) else None
+        return (
+            f"learned arm has NO surface stress: the classical arm runs "
+            f"{scheme!r}, a prognostic scheme the drag builder cannot "
+            f"reproduce (declared surface_drag_confounded="
+            f"'builder_refuses_classical_scheme'). The two arms differ by a "
+            f"momentum sink as well as by the model -- this is not an "
+            f"equalised comparison (#1464).")
+    return None
+
 def build_mode_components(cfg, yml):
     """Return (model, grid, sigma, params, make_run_seg, loss_config, dt) for cfg.mode."""
     import jax
@@ -525,6 +736,13 @@ def build_mode_components(cfg, yml):
     from legoesm.training.training_driver import build_training_segment
 
     core = getattr(cfg, "training_core", "latlon")
+    # Every entry point that builds a learned arm comes through here -- train
+    # and eval alike -- so the #1464 surface-stress guard belongs here and not
+    # in one driver, where the other one simply walked past it.
+    note = check_surface_drag_confound(yml, getattr(cfg, "mode", None), core)
+    if note:
+        import logging
+        logging.getLogger("scale_build").warning("CONFOUNDED RUN: %s", note)
     if core == "spectral":
         return _build_mode_components_spectral(cfg, yml)
     if core != "latlon":
@@ -663,6 +881,53 @@ def era5_time_to_forcing_calendar(time_ns, year):
     return doy_1based, sod
 
 
+def validate_carry_holds_scheme(carry, microphysics: str, *, context: str) -> int:
+    """Refuse a scheme whose species the BUILT carry cannot hold.
+
+    Mirrors the production driver, which counts the leading non-None slots of
+    its live tracer state and validates that count.  Counting instead the
+    registry the scheme itself selected would be tautological — the two can
+    only ever agree, so such a check could never catch the failure it claims to
+    (codex).  Counting the carry catches a seeding path that silently produced
+    fewer slots than the scheme writes, which is exactly how the WeatherBench
+    classical arm trained to a NaN: nine-species microphysics on a
+    three-species state, six tendencies discarded per evaluation.
+
+    Deliberately NOT placed in the shared microphysics bridge: several dycore
+    tests build partial tracer states on purpose and rely on its tolerance, so
+    turning that into a hard error is a separate policy decision.
+    """
+    from legoesm.core.tracers import make_full_moisture_registry
+    from legoesm.driver.physics_pipeline import validate_microphysics_tracer_slots
+
+    have = 0
+    for name in make_full_moisture_registry().names:
+        if getattr(carry, name, None) is None:
+            break
+        have += 1
+    return validate_microphysics_tracer_slots(microphysics, have, context=context)
+
+
+def _era5_config(cfg, yml):
+    """The ERA5 store config for a training run.
+
+    ``era5_cloud_condensate: true`` in the campaign YAML pulls cloud liquid and
+    cloud ice into the initial condition from ``era5_cloud_zarr`` (ARCO-ERA5 by
+    default).  It is OFF unless asked for: the WeatherBench2 store carries no
+    condensate at all, so every sample would otherwise start cloud-free and the
+    microphysics parameters could not influence a six-hour forecast.
+    """
+    from legoesm.training.era5_to_state import TrainingERA5Config
+
+    c = TrainingERA5Config(dt_hours=int(yml.get("era5_cadence_hours", 6)))
+    c = c._replace(zarr_store=yml["era5_zarr"],
+                   load_cloud_condensate=bool(yml.get("era5_cloud_condensate",
+                                                      False)))
+    if yml.get("era5_cloud_zarr"):
+        c = c._replace(cloud_zarr=str(yml["era5_cloud_zarr"]))
+    return c
+
+
 def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
                                 rank=0, nproc=1, host_resident=False):
     """(ic, target, forcing) samples on the Gaussian grid for the spectral core.
@@ -681,24 +946,58 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     import jax.numpy as jnp
 
     from legoesm.training.era5_to_state import (
-        TrainingERA5Config, open_era5_zarr, load_era5_slice,
-        era5_to_spectral_carry, regrid_2d_to_gaussian,
+        era5_to_spectral_carry,
+        load_era5_slice,
+        open_era5_zarr,
+        regrid_2d_to_gaussian,
     )
 
-    era5_cfg = TrainingERA5Config(dt_hours=int(yml.get("era5_cadence_hours", 6)))._replace(
-        zarr_store=yml["era5_zarr"])
+    era5_cfg = _era5_config(cfg, yml)
     ds = open_era5_zarr(era5_cfg.zarr_store)
     times = np.asarray(ds.time.values, dtype="datetime64[ns]")
     snaps_per_day = 24 // era5_cfg.dt_hours
     roll_h = rollout_hours(cfg, yml)
     stride = int(roll_h) // era5_cfg.dt_hours
+    # The condensate store is opened ONCE and threaded through every slice --
+    # re-opening a remote zarr per sample would dominate the load.
+    cloud_ds = (open_era5_zarr(era5_cfg.cloud_zarr)
+                if era5_cfg.load_cloud_condensate else None)
+    # The surface-temperature reload below wants 2-D fields only; asking it for
+    # condensate would re-read the cloud store once per sample for data it
+    # throws away.
+    sst_cfg = era5_cfg._replace(load_cloud_condensate=False)
+
+    # Which water species the state must carry follows the scheme the arm
+    # selects, and the carry builder already knows how to seed them — it was
+    # simply never told which scheme was running here, so every state was built
+    # for the three warm-rain slots.  A nine-species microphysics then had its
+    # ice / snow / graupel / number tendencies silently dropped downstream.
+    # The learned arms run no microphysics or turbulence scheme at all, so they
+    # keep the three-slot carry and are byte-unchanged.
+    #
+    # Microphysics only. A stateful turbulence scheme (CLUBB, MYNN, EDMF) would
+    # also seed a prognostic energy carry, but the spectral rollout threads no
+    # turbulence state between steps and the spectral->carry conversion has
+    # nowhere to put one, so seeding it would make the forecast carry
+    # structurally different from the initial condition it is scored against.
+    # Carrying turbulence energy across steps on this path is separate work.
+    _cl = dict(yml.get("classical", {})) if cfg.mode == "physics" else {}
+    _micro = str(_cl.get("microphysics", "none"))
+
 
     samples = []
     for year, i_ic, i_tg in _sharded_indices(
             cfg, yml, times, snaps_per_day, stride, rank, nproc):
-        ic = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_ic), grid, sigma)
-        target = era5_to_spectral_carry(load_era5_slice(era5_cfg, i_tg), grid, sigma)
-        sst_src = load_era5_slice(era5_cfg, i_ic)
+        ic = era5_to_spectral_carry(
+            load_era5_slice(era5_cfg, i_ic, ds=ds, cloud_ds=cloud_ds),
+            grid, sigma, microphysics=_micro)
+        target = era5_to_spectral_carry(
+            load_era5_slice(era5_cfg, i_tg, ds=ds, cloud_ds=cloud_ds),
+            grid, sigma, microphysics=_micro)
+        if not samples:
+            validate_carry_holds_scheme(
+                ic, _micro, context=f"WB {cfg.mode} arm initial condition")
+        sst_src = load_era5_slice(sst_cfg, i_ic, ds=ds)
         sst = jnp.asarray(regrid_2d_to_gaussian(
             sst_src.sst, sst_src.lat, sst_src.lon, grid)).reshape(-1)
         doy_1based, sod = era5_time_to_forcing_calendar(times[i_ic], year)
@@ -725,8 +1024,10 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
     import jax.numpy as jnp
 
     from legoesm.training.era5_to_state import (
-        TrainingERA5Config, open_era5_zarr, load_era5_slice,
-        era5_to_latlon_carry, regrid_2d_to_gaussian,
+        era5_to_latlon_carry,
+        load_era5_slice,
+        open_era5_zarr,
+        regrid_2d_to_gaussian,
     )
     from legoesm.driver.compiled_segments import pack_forcing
 
@@ -735,13 +1036,20 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
             cfg, yml, grid, sigma,
             rank=rank, nproc=nproc, host_resident=host_resident)
 
-    era5_cfg = TrainingERA5Config(dt_hours=int(yml.get("era5_cadence_hours", 6)))._replace(
-        zarr_store=yml["era5_zarr"])
+    era5_cfg = _era5_config(cfg, yml)
     ds = open_era5_zarr(era5_cfg.zarr_store)
     times = np.asarray(ds.time.values, dtype="datetime64[ns]")
     snaps_per_day = 24 // era5_cfg.dt_hours
     roll_h = rollout_hours(cfg, yml)
     stride = int(roll_h) // era5_cfg.dt_hours
+
+    # Opened once, like the state store — a per-sample remote zarr open would
+    # dominate the load (see the spectral loader).
+    cloud_ds = (open_era5_zarr(era5_cfg.cloud_zarr)
+                if era5_cfg.load_cloud_condensate else None)
+    sst_cfg = era5_cfg._replace(load_cloud_condensate=False)   # 2-D only
+    _cl = dict(yml.get("classical", {})) if cfg.mode == "physics" else {}
+    _micro = str(_cl.get("microphysics", "none"))
 
     config = build_latlon_config(cfg, yml)
     driver = _driver_for_ctx(config)
@@ -750,9 +1058,13 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
     samples = []
     for year, i_ic, i_tg in _sharded_indices(
             cfg, yml, times, snaps_per_day, stride, rank, nproc):
-        ic = era5_to_latlon_carry(load_era5_slice(era5_cfg, i_ic), grid, sigma)
-        target = era5_to_latlon_carry(load_era5_slice(era5_cfg, i_tg), grid, sigma)
-        sst_src = load_era5_slice(era5_cfg, i_ic)
+        ic = era5_to_latlon_carry(
+            load_era5_slice(era5_cfg, i_ic, ds=ds, cloud_ds=cloud_ds),
+            grid, sigma, microphysics=_micro)
+        target = era5_to_latlon_carry(
+            load_era5_slice(era5_cfg, i_tg, ds=ds, cloud_ds=cloud_ds),
+            grid, sigma, microphysics=_micro)
+        sst_src = load_era5_slice(sst_cfg, i_ic, ds=ds)
         sst = regrid_2d_to_gaussian(sst_src.sst, sst_src.lat, sst_src.lon, grid)
         doy = float((times[i_ic] - np.datetime64(f"{year}-01-01"))
                     / np.timedelta64(1, "D"))

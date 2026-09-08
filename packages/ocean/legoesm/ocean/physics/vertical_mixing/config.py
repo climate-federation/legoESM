@@ -315,6 +315,11 @@ class TKEConfig(NamedTuple):
     #   ``enable_tke`` path does. Requires the caller to pass T/S/pressure
     #   + an EOS to :func:`tke_vertical_mixing`.
     n2_mode: str = "insitu"
+    # Which alpha/beta the n2_mode="nemo_bn2" assembly uses. "seos" (default,
+    # BIT-IDENTICAL legacy) is the 3-term simplified fit; "teos10" is NEMO's
+    # Roquet polynomial with the TEOS-10 coefficient set -- what ORCA1 runs
+    # (ln_teos10=.true., namelist_cfg:308). Ignored by every other n2_mode.
+    n2_eos_form: str = "seos"
     # ----- Diffusivity-stage N² time level (NEMO eosbn2 Nnow sequencing) -----
     # ``False`` (default, BIT-IDENTICAL legacy): the vertical-mixing
     #   diffusivity-stage N² is sampled on the POST-advection mid-step T/S
@@ -344,6 +349,12 @@ class TKEConfig(NamedTuple):
     #   ``T_n2b``/``S_n2b`` to ``tke_vertical_mixing``; Prandtl zri and the
     #   Langmuir PE integral are evaluated on that TRUE Nbb level.
     tke_n2_time_level: str = "step_entry"
+    # Evaluation lifetime of NEMO's rn2/rn2b and live W-grid geometry.
+    # ``implicit_solve_state`` (default, BIT-IDENTICAL legacy) rebuilds them
+    # from the state presented to the implicit solve. ``step_entry`` consumes
+    # a frozen TKEEntryN2Bundle built before the explicit update, matching
+    # stpmlf.F90:204-210 -> zdf_phy. Complete DINO NEMO cards select it.
+    tke_n2_evaluation_stage: str = "implicit_solve_state"
     # ----- Veros vertical-metric slots (the TKE metric-consistency fix) -----
     # legoESM's historical TKE chain mixes vertical-metric conventions: it
     # uses the centre spacing ``dz_half`` (Veros dzw) in slots where Veros
@@ -567,6 +578,50 @@ class TKEConfig(NamedTuple):
     #   geometry; construction raises otherwise) and the same raw C-grid
     #   face state that mode already requires.
     tke_shear_avm_weighting: str = "tpoint"
+    # Which closure coefficients feed the PRE-solve zdftke chain.
+    # ``current_subiteration`` is the historical legoESM formulation.
+    # ``carried_previous_step`` is NEMO's avm_k/avt_k lifetime: the pair
+    # carried from the preceding step feeds zdf_sh2, Prandtl, the TKE matrix
+    # and RHS, and is overwritten only by post-solve tke_avn.
+    tke_preclosure_coeff_source: str = "current_subiteration"
+    # TKE diffusion-matrix evaluation. ``factored`` is the historical shared
+    # solver construction. ``nemo_literal`` evaluates zdftke.F90:499-510 in
+    # source order from carried avm/dissl and raw live e3t/e3w operands.
+    # Complete DINO NEMO cards select the literal form; every generic and
+    # non-oracle card retains the byte-identical factored default.
+    tke_matrix_evaluation: str = "factored"
+    # Solver recurrence. ``shared_thomas`` preserves the generic historical
+    # path; complete DINO NEMO cards select the literal zdftke scan order.
+    tke_solver_evaluation: str = "shared_thomas"
+    # Arithmetic used by the nn_etau penetration profile. ``jax_expression``
+    # is the historical single jnp.exp call. ``nemo_literal`` reproduces the
+    # ordinary-range glibc-2.34 vector EXP linked into the DINO oracle; only
+    # the two complete DINO oracle cards select it.
+    tke_etau_exponential_evaluation: str = "jax_expression"
+    # Latitude-profile arithmetic for nn_htau=1. ``jax_expression`` is the
+    # historical jnp.deg2rad+jnp.sin path. ``nemo_literal`` consumes native
+    # mesh degrees and transcribes glibc-2.34's two-lane vector SIN arithmetic.
+    # Only complete DINO oracle cards select it.
+    tke_htau_evaluation: str = "jax_expression"
+    # Raw nn_mxl buoyancy length. ``factored`` preserves the historical
+    # sqrt(2)*sqrt(e)/sqrt(max(N2,1e-12)) expression. ``nemo_literal`` uses
+    # zdftke.F90 source association and NEMO's runtime rsmall.
+    tke_mxl_raw_evaluation: str = "factored"
+    # Langmuir source evaluation. ``vectorized`` is the historical shared
+    # construction. ``nemo_literal`` preserves zdftke.F90:422-463 operation
+    # order, including the per-column mbkt+1 no-crossing fallback. Only the
+    # complete DINO NEMO cards select it; all other cards remain vectorized.
+    tke_langmuir_evaluation: str = "vectorized"
+    # Evaluation lifetime of NEMO's zdf_sh2 operand.  The historical path
+    # evaluates from the state handed to the implicit solve.  Complete DINO
+    # NEMO cards instead freeze p_sh2 from the step-entry NOW/BEFORE faces and
+    # carried avm_k, matching zdfphy.F90:268 before the explicit update reaches
+    # zdftke.F90.  Kept legacy by default so all other cards remain unchanged.
+    tke_shear_evaluation_stage: str = "implicit_solve_state"
+    # Vertical divisor in face-native zdf_sh2.  Historical legoESM uses one
+    # T-point dz_half(J_now) for both factors.  Complete DINO NEMO cards use
+    # the live QCO u/v-face metrics at NOW and BEFORE separately.
+    tke_shear_metric_source: str = "tpoint_jacobian"
     # ----- Tracer/momentum Prandtl chain (abyssal over-diffusion fix) -----
     # ``"unit"`` (default, BIT-IDENTICAL legacy): K_H = max(K_M, kappaH_min)
     #   -- the MOMENTUM floor ``kappaM_min`` leaks into the TRACER floor

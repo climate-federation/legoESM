@@ -120,6 +120,11 @@ NVIDIA_GPU_XLA_FLAGS = {
     # that still accepts them.
     "xla_gpu_enable_latency_hiding_scheduler": "true",
     "xla_gpu_enable_highest_priority_async_stream": "true",
+    # Multi-shard autotune cache-sync crashes intermittently at >=64 ranks
+    # ("No configuration found in cache after synchronizing results across all
+    # shards"); disabling it is a no-op at <=1 shard.  A launcher that sets
+    # --xla_gpu_shard_autotuning explicitly still wins (set_xla_flags dedups).
+    "xla_gpu_shard_autotuning": "false",
     # CUDA Graphs / command buffers — XLA can capture sequences of
     # kernel launches and replay them as a single command buffer, which
     # eliminates the ~5-10μs per-launch overhead that dominates

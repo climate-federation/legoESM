@@ -42,7 +42,7 @@ from legoesm.land.canopy.stability import (
     compute_aerodynamics, sat_specific_humidity,
 )
 from legoesm.land.canopy.solver import (
-    CanopyForcingBundle, solve_canopy_closure, canopy_forward,
+    CanopyForcingBundle, solve_canopy_closure_diag, canopy_forward,
 )
 from legoesm.land.canopy.energy_balance import soil_surface_evap_resistance
 from legoesm.land.surface_scheme.base import SurfaceFluxOutput
@@ -170,10 +170,20 @@ def advance_TgC_ema(
 
 
 def _get(lp, name: str, fallback):
-    """Read from per-column params if available; else return fallback."""
+    """Read from per-column params if available; else return fallback.
+
+    ``None``-valued fields count as absent: LandSurfaceParams declares every
+    optional field with a ``None`` default, so ``getattr`` finds the attribute
+    and hands back the ``None`` — which then detonates arithmetic ("float -
+    NoneType") the first time a setup runs that never populated the field. The
+    LAI read below had grown its own local guard for exactly this; the AMIP
+    two-leaf run on the Voronoi mesh then hit the same trap on ``fC4``. One
+    guard here covers every field the same way.
+    """
     if lp is None:
         return fallback
-    return getattr(lp, name, fallback)
+    got = getattr(lp, name, None)
+    return fallback if got is None else got
 
 
 def compute_two_leaf_canopy_fluxes(
@@ -194,6 +204,7 @@ def compute_two_leaf_canopy_fluxes(
     w_frac_soil_evap: jnp.ndarray | None = None,
     soil_surface_relsat: jnp.ndarray | None = None,
     fwet: jnp.ndarray | None = None,
+    canopy_seed: jnp.ndarray | None = None,  # (ncol, 6) warm start; see below
 ) -> SurfaceFluxOutput:
     """Compute surface fluxes via the two-leaf canopy Newton + Picard closure.
 
@@ -255,7 +266,6 @@ def compute_two_leaf_canopy_fluxes(
         LAI    = jnp.full(ncol, _DEFAULT_LAI) if _lp_lai is None else _lp_lai
     hc         = _get(lp, "hc",       jnp.full(ncol, _DEFAULT_HC))
     fC4        = _get(lp, "fC4",      jnp.zeros(ncol))
-    FNonVeg    = _get(lp, "FNonVeg",  jnp.zeros(ncol))
     CI         = _get(lp, "CI",       jnp.full(ncol, _DEFAULT_CI))
     kn         = _get(lp, "kn",       jnp.full(ncol, _DEFAULT_KN))
 
@@ -375,7 +385,7 @@ def compute_two_leaf_canopy_fluxes(
     sw_rt = canopy_shortwave_rt(
         PAR_dir, PAR_diff, NIR_dir, NIR_diff, UV,
         SZA, LAI, CI, ALB_VIS, ALB_NIR,
-        Vc3_leaf_stressed, Vc4_leaf_stressed, kn, FNonVeg)
+        Vc3_leaf_stressed, Vc4_leaf_stressed, kn)
 
     # ---- Thermodynamic / atmosphere variables ----
     Ta    = forcing.T_lowest
@@ -394,8 +404,28 @@ def compute_two_leaf_canopy_fluxes(
     chi = _CI_CA_C3 - _CI_CA_C3_MINUS_C4 * fC4
     Ci_init = Ca * chi
 
-    initial_state = jnp.stack(
+    cold_state = jnp.stack(
         [Ta, Ta, Ci_init, Ci_init, Ta, q_c_init], axis=-1)  # (ncol, 6)
+
+    # ---- Warm start (numerical cache; cannot change the answer) ----
+    # ``canopy_seed`` is the previous timestep's LAST CONVERGED solution, carried
+    # by the caller.  A column whose seed is not finite (never solved yet, or the
+    # previous solve failed) falls back to the cold start above, so the first
+    # step and every non-canopy caller behave exactly as before.  The seed is
+    # sanitised BEFORE the select: ``where`` evaluates both branches, and a NaN
+    # in the discarded one would poison a reverse-mode tangent.
+    #
+    # This cannot move the converged answer: the solve's adjoint returns a ZERO
+    # cotangent for its seed by construction (see ``solver.solve_bwd``, asserted
+    # by ``tests/land/unit/test_canopy_solver_grad.py``), and the fixed point
+    # itself does not depend on where the iteration started.  What it changes is
+    # WHICH columns reach that fixed point inside the iteration budget.
+    if canopy_seed is None:
+        initial_state = cold_state
+    else:
+        _seed = jnp.asarray(canopy_seed, cold_state.dtype)
+        _ok = jnp.all(jnp.isfinite(_seed), axis=-1, keepdims=True)
+        initial_state = jnp.where(_ok, jnp.nan_to_num(_seed), cold_state)
 
     def _bcast(v):
         if hasattr(v, "shape") and v.shape == (ncol,):
@@ -424,7 +454,11 @@ def compute_two_leaf_canopy_fluxes(
         )
 
     def _solve_one_col(x0, bun):
-        return solve_canopy_closure(x0, bun, cc)
+        # Diagnostic entry point: identical solve, plus the terminal residual /
+        # damping / cap-exit flag the caller needs to tell a stalled column from
+        # a nearly-solved one.  Gradients are unchanged (zero cotangent on every
+        # diagnostic output).
+        return solve_canopy_closure_diag(x0, bun, cc)
 
     def _fwd_one_col(xf, bun):
         return canopy_forward(xf, bun, cc.LE_module, cc.stomatal_model,
@@ -439,9 +473,24 @@ def compute_two_leaf_canopy_fluxes(
     omega    = getattr(cc, "picard_omega", _DEFAULT_PICARD_OMEGA)
     Ts_bc_k = Ts_old
 
+    # Each Picard pass RESEEDS from the previous pass's converged solution
+    # instead of restarting cold.  Successive passes differ only in ``Ts_bc``,
+    # which the relaxation moves by a fraction of a kelvin, so the previous
+    # solution is a far better seed than the air temperature — same fixed point,
+    # fewer iterations to reach it.  Only a CONVERGED pass earns the right to
+    # seed the next one: a failed solve's last iterate is not a root, and
+    # reusing it would let one bad pass cascade through the rest.
+    # ``x_conv`` holds the last CONVERGED solution per column, NaN until one
+    # exists; it is both the next pass's seed and (after the loop) the cache
+    # handed back to the caller.
+    x_conv = jnp.full_like(initial_state, jnp.nan)
     for _picard_iter in range(n_picard):
         bundles_k = _build_bundle(Ts_bc_k)
-        x_final, n_iters = jax.vmap(_solve_one_col)(initial_state, bundles_k)
+        _seed_k = jnp.where(jnp.all(jnp.isfinite(x_conv), axis=-1, keepdims=True),
+                            jnp.nan_to_num(x_conv), initial_state)
+        (x_final, n_iters, converged, resid_sq, resid_rel, lam_f,
+         hit_cap) = jax.vmap(_solve_one_col)(_seed_k, bundles_k)
+        x_conv = jnp.where(converged[:, None], x_final, x_conv)
         fluxes_per_col = jax.vmap(_fwd_one_col)(x_final, bundles_k)
 
         G_k = jnp.clip(fluxes_per_col["G"], -500.0, 700.0)  # coeff-ok: physical range clamp on ground heat flux [W m-2]
@@ -585,12 +634,25 @@ def compute_two_leaf_canopy_fluxes(
         z0=z0m,
         gpp=GPP,
         sif=sif_out,
+        # Warm-start cache for the NEXT call: the last CONVERGED solve per
+        # column (NaN where this column has never converged, which the seed
+        # consumer reads as "cold start").  A numerical cache only — see the
+        # ``canopy_seed`` note above.
+        canopy_x=x_conv,
+        canopy_resid_sq=resid_sq,
+        canopy_resid_rel=resid_rel,
+        canopy_hit_cap=hit_cap,
         Tf_Sun=Tf_Sun,
         Tf_Sh=Tf_Sh,
         T_canopy_air=Tc_cvg,
         gs_Sun=gs_Sun,
         gs_Sh=gs_Sh,
         n_iters=n_iters,
+        # Whether the Newton closure actually reached a root on this column.
+        # False means the fluxes above are a stopped iterate, not a solution —
+        # the caller decides what to do with the column; it must not simply
+        # spend them.  Carried from the LAST Picard pass.
+        converged=converged,
         f_veg=f_veg,
         fSun=fSun,
         Ts_solve=Ts_cvg,

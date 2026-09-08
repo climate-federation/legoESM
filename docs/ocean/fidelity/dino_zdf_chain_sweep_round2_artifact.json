@@ -1,0 +1,949 @@
+{
+  "bars": {
+    "corr": 0.999999999,
+    "pointwise_column": 1e-15,
+    "rms_ratio_epsilon": 1e-06
+  },
+  "checked_out_parent_sha": "a58c33d5c7b7d4788f921d8626d9f499e29ff445",
+  "controls": {
+    "baseline_pass": true,
+    "nonfinite_fired": true,
+    "one_i_roll_fired": true,
+    "perturbation_fired": true,
+    "perturbed_ji_k": [
+      1,
+      1,
+      0
+    ]
+  },
+  "cpu_only": true,
+  "first_divergence": {
+    "localization": {
+      "first_diverging_operand": {
+        "legoesm_operand": "current sub-iteration K_M_curr",
+        "metrics": {
+          "aggregate_bar_pass": false,
+          "bar": 1e-15,
+          "column_bar_pass": false,
+          "correlation": 0.9984439417185291,
+          "focus": [
+            {
+              "column_error": 1.0223570819652076e-05,
+              "i": 1,
+              "j": 11,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 6.812587358712907e-05,
+              "i": 1,
+              "j": 12,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 1.27390393662401e-05,
+              "i": 1,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 2.3745448340743776e-05,
+              "i": 23,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            }
+          ],
+          "max_column_error": 3.3486302069727913,
+          "n_diverged_columns": 9920,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 0,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 332214,
+          "pass": false,
+          "reference_rms": 0.11958659817114417,
+          "rms_ratio": 1.0146340961467346,
+          "worst_column_ji": [
+            7,
+            45
+          ]
+        },
+        "name": "p_avm carried pre-step viscosity",
+        "nemo_line": "src/OCE/ZDF/zdfsh2.F90:80",
+        "note": "substitution does not close the composite because later e3uw/e3vw operands remain non-identical; ordered localization stops at this first input"
+      },
+      "first_passing_substitution": null,
+      "input_avm_current_subiteration_vs_nemo_carried": {
+        "aggregate_bar_pass": false,
+        "bar": 1e-15,
+        "column_bar_pass": false,
+        "correlation": 0.9984439417185291,
+        "focus": [
+          {
+            "column_error": 1.0223570819652076e-05,
+            "i": 1,
+            "j": 11,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 6.812587358712907e-05,
+            "i": 1,
+            "j": 12,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 1.27390393662401e-05,
+            "i": 1,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 2.3745448340743776e-05,
+            "i": 23,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          }
+        ],
+        "max_column_error": 3.3486302069727913,
+        "n_diverged_columns": 9920,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 0,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": false,
+        "reference_rms": 0.11958659817114417,
+        "rms_ratio": 1.0146340961467346,
+        "worst_column_ji": [
+          7,
+          45
+        ]
+      },
+      "legacy_substitute_tpoint_avm": {
+        "aggregate_bar_pass": false,
+        "bar": 1e-15,
+        "column_bar_pass": false,
+        "correlation": 0.872572023485589,
+        "focus": [
+          {
+            "column_error": 0.000509418256314999,
+            "i": 1,
+            "j": 11,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.0002524639332073648,
+            "i": 1,
+            "j": 12,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.00030135107467185615,
+            "i": 1,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.0003198499083110198,
+            "i": 23,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          }
+        ],
+        "max_column_error": 73.3145033537088,
+        "n_diverged_columns": 9920,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 0,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": false,
+        "reference_rms": 2.1591876738381648e-08,
+        "rms_ratio": 4.570890927788476,
+        "worst_column_ji": [
+          47,
+          1
+        ]
+      },
+      "nemo_operand_order": [
+        "face avm averages",
+        "face velocity differences",
+        "e3uw/e3vw divisors",
+        "four-face sum"
+      ],
+      "next_round_fix_design": {
+        "faithful_default": "carried_previous_step",
+        "kernel_change": "thread carried p_avm through zdf_sh2, the rn2b*p_avm Prandtl numerator, TKE matrix diagonals, and wave surface denominator; thread carried p_avt through the -p_avt*rn2 RHS. Only tke_avn after the solve overwrites the closure fields for the next step",
+        "legacy_opt_in": "current_subiteration",
+        "option": "tke_preclosure_coeff_source",
+        "required_red_tests": [
+          "distinct carried/current arrays select carried bits",
+          "restart avm bridge identity and next-step carry",
+          "matrix, RHS, and wave denominator consume carried fields",
+          "tke_avn overwrite happens only after the solve",
+          "legacy arm reproduces current-subiteration bits",
+          "JIT and finite gradients"
+        ],
+        "state_change": "carry avm/avt closure fields across steps; seed bridged runs from restart avm/avt"
+      },
+      "production_face_averaged_avm": {
+        "aggregate_bar_pass": false,
+        "bar": 1e-15,
+        "column_bar_pass": false,
+        "correlation": 0.8724557282383721,
+        "focus": [
+          {
+            "column_error": 0.003988213034679781,
+            "i": 1,
+            "j": 11,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.001192242866784581,
+            "i": 1,
+            "j": 12,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.0003036343372488517,
+            "i": 1,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.00031985379898143244,
+            "i": 23,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          }
+        ],
+        "max_column_error": 73.29360906131917,
+        "n_diverged_columns": 9920,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 0,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": false,
+        "reference_rms": 2.1591876738381648e-08,
+        "rms_ratio": 4.5702494863268415,
+        "worst_column_ji": [
+          47,
+          1
+        ]
+      },
+      "substitute_nemo_carried_avm": {
+        "aggregate_bar_pass": false,
+        "bar": 1e-15,
+        "column_bar_pass": false,
+        "correlation": 0.8727449627461308,
+        "focus": [
+          {
+            "column_error": 0.0039873911020625544,
+            "i": 1,
+            "j": 11,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.0011911817756983765,
+            "i": 1,
+            "j": 12,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.00030363434028808585,
+            "i": 1,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.0003198538005965099,
+            "i": 23,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          }
+        ],
+        "max_column_error": 73.29360954552244,
+        "n_diverged_columns": 9920,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 0,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": false,
+        "reference_rms": 2.1591876738381648e-08,
+        "rms_ratio": 4.570487208101698,
+        "worst_column_ji": [
+          47,
+          1
+        ]
+      }
+    },
+    "nemo_line": "src/OCE/ZDF/zdfsh2.F90:80-94",
+    "operation": "zdf_sh2",
+    "row": 4
+  },
+  "focus_columns_ji": [
+    [
+      11,
+      1
+    ],
+    [
+      12,
+      1
+    ],
+    [
+      13,
+      1
+    ],
+    [
+      13,
+      23
+    ]
+  ],
+  "fp64": true,
+  "jax": "0.10.0",
+  "jax_backend": "cpu",
+  "kt": 5761,
+  "lane": "d180",
+  "numpy": "2.4.4",
+  "platform": "Linux-5.14.0-611.36.1.el9_7.x86_64-x86_64-with-glibc2.34",
+  "probe_commit_sha": "a58c33d5c7b7d4788f921d8626d9f499e29ff445",
+  "python": "3.13.0",
+  "row4_localization": {
+    "first_diverging_operand": {
+      "legoesm_operand": "current sub-iteration K_M_curr",
+      "metrics": {
+        "aggregate_bar_pass": false,
+        "bar": 1e-15,
+        "column_bar_pass": false,
+        "correlation": 0.9984439417185291,
+        "focus": [
+          {
+            "column_error": 1.0223570819652076e-05,
+            "i": 1,
+            "j": 11,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 6.812587358712907e-05,
+            "i": 1,
+            "j": 12,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 1.27390393662401e-05,
+            "i": 1,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 2.3745448340743776e-05,
+            "i": 23,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          }
+        ],
+        "max_column_error": 3.3486302069727913,
+        "n_diverged_columns": 9920,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 0,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": false,
+        "reference_rms": 0.11958659817114417,
+        "rms_ratio": 1.0146340961467346,
+        "worst_column_ji": [
+          7,
+          45
+        ]
+      },
+      "name": "p_avm carried pre-step viscosity",
+      "nemo_line": "src/OCE/ZDF/zdfsh2.F90:80",
+      "note": "substitution does not close the composite because later e3uw/e3vw operands remain non-identical; ordered localization stops at this first input"
+    },
+    "first_passing_substitution": null,
+    "input_avm_current_subiteration_vs_nemo_carried": {
+      "aggregate_bar_pass": false,
+      "bar": 1e-15,
+      "column_bar_pass": false,
+      "correlation": 0.9984439417185291,
+      "focus": [
+        {
+          "column_error": 1.0223570819652076e-05,
+          "i": 1,
+          "j": 11,
+          "pass": false,
+          "wet": true
+        },
+        {
+          "column_error": 6.812587358712907e-05,
+          "i": 1,
+          "j": 12,
+          "pass": false,
+          "wet": true
+        },
+        {
+          "column_error": 1.27390393662401e-05,
+          "i": 1,
+          "j": 13,
+          "pass": false,
+          "wet": true
+        },
+        {
+          "column_error": 2.3745448340743776e-05,
+          "i": 23,
+          "j": 13,
+          "pass": false,
+          "wet": true
+        }
+      ],
+      "max_column_error": 3.3486302069727913,
+      "n_diverged_columns": 9920,
+      "n_nonfinite_wet_elements": 0,
+      "n_verified_columns": 0,
+      "n_wet_columns": 9920,
+      "n_wet_elements": 332214,
+      "pass": false,
+      "reference_rms": 0.11958659817114417,
+      "rms_ratio": 1.0146340961467346,
+      "worst_column_ji": [
+        7,
+        45
+      ]
+    },
+    "legacy_substitute_tpoint_avm": {
+      "aggregate_bar_pass": false,
+      "bar": 1e-15,
+      "column_bar_pass": false,
+      "correlation": 0.872572023485589,
+      "focus": [
+        {
+          "column_error": 0.000509418256314999,
+          "i": 1,
+          "j": 11,
+          "pass": false,
+          "wet": true
+        },
+        {
+          "column_error": 0.0002524639332073648,
+          "i": 1,
+          "j": 12,
+          "pass": false,
+          "wet": true
+        },
+        {
+          "column_error": 0.00030135107467185615,
+          "i": 1,
+          "j": 13,
+          "pass": false,
+          "wet": true
+        },
+        {
+          "column_error": 0.0003198499083110198,
+          "i": 23,
+          "j": 13,
+          "pass": false,
+          "wet": true
+        }
+      ],
+      "max_column_error": 73.3145033537088,
+      "n_diverged_columns": 9920,
+      "n_nonfinite_wet_elements": 0,
+      "n_verified_columns": 0,
+      "n_wet_columns": 9920,
+      "n_wet_elements": 332214,
+      "pass": false,
+      "reference_rms": 2.1591876738381648e-08,
+      "rms_ratio": 4.570890927788476,
+      "worst_column_ji": [
+        47,
+        1
+      ]
+    },
+    "nemo_operand_order": [
+      "face avm averages",
+      "face velocity differences",
+      "e3uw/e3vw divisors",
+      "four-face sum"
+    ],
+    "next_round_fix_design": {
+      "faithful_default": "carried_previous_step",
+      "kernel_change": "thread carried p_avm through zdf_sh2, the rn2b*p_avm Prandtl numerator, TKE matrix diagonals, and wave surface denominator; thread carried p_avt through the -p_avt*rn2 RHS. Only tke_avn after the solve overwrites the closure fields for the next step",
+      "legacy_opt_in": "current_subiteration",
+      "option": "tke_preclosure_coeff_source",
+      "required_red_tests": [
+        "distinct carried/current arrays select carried bits",
+        "restart avm bridge identity and next-step carry",
+        "matrix, RHS, and wave denominator consume carried fields",
+        "tke_avn overwrite happens only after the solve",
+        "legacy arm reproduces current-subiteration bits",
+        "JIT and finite gradients"
+      ],
+      "state_change": "carry avm/avt closure fields across steps; seed bridged runs from restart avm/avt"
+    },
+    "production_face_averaged_avm": {
+      "aggregate_bar_pass": false,
+      "bar": 1e-15,
+      "column_bar_pass": false,
+      "correlation": 0.8724557282383721,
+      "focus": [
+        {
+          "column_error": 0.003988213034679781,
+          "i": 1,
+          "j": 11,
+          "pass": false,
+          "wet": true
+        },
+        {
+          "column_error": 0.001192242866784581,
+          "i": 1,
+          "j": 12,
+          "pass": false,
+          "wet": true
+        },
+        {
+          "column_error": 0.0003036343372488517,
+          "i": 1,
+          "j": 13,
+          "pass": false,
+          "wet": true
+        },
+        {
+          "column_error": 0.00031985379898143244,
+          "i": 23,
+          "j": 13,
+          "pass": false,
+          "wet": true
+        }
+      ],
+      "max_column_error": 73.29360906131917,
+      "n_diverged_columns": 9920,
+      "n_nonfinite_wet_elements": 0,
+      "n_verified_columns": 0,
+      "n_wet_columns": 9920,
+      "n_wet_elements": 332214,
+      "pass": false,
+      "reference_rms": 2.1591876738381648e-08,
+      "rms_ratio": 4.5702494863268415,
+      "worst_column_ji": [
+        47,
+        1
+      ]
+    },
+    "substitute_nemo_carried_avm": {
+      "aggregate_bar_pass": false,
+      "bar": 1e-15,
+      "column_bar_pass": false,
+      "correlation": 0.8727449627461308,
+      "focus": [
+        {
+          "column_error": 0.0039873911020625544,
+          "i": 1,
+          "j": 11,
+          "pass": false,
+          "wet": true
+        },
+        {
+          "column_error": 0.0011911817756983765,
+          "i": 1,
+          "j": 12,
+          "pass": false,
+          "wet": true
+        },
+        {
+          "column_error": 0.00030363434028808585,
+          "i": 1,
+          "j": 13,
+          "pass": false,
+          "wet": true
+        },
+        {
+          "column_error": 0.0003198538005965099,
+          "i": 23,
+          "j": 13,
+          "pass": false,
+          "wet": true
+        }
+      ],
+      "max_column_error": 73.29360954552244,
+      "n_diverged_columns": 9920,
+      "n_nonfinite_wet_elements": 0,
+      "n_verified_columns": 0,
+      "n_wet_columns": 9920,
+      "n_wet_elements": 332214,
+      "pass": false,
+      "reference_rms": 2.1591876738381648e-08,
+      "rms_ratio": 4.570487208101698,
+      "worst_column_ji": [
+        47,
+        1
+      ]
+    }
+  },
+  "rows": {
+    "1_eos_rab_before": {
+      "alpha": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 0.9999999999999999,
+        "focus": [
+          {
+            "column_error": 1.5437334708770468e-16,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 1.5437334708770468e-16,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 3.0874669417540936e-16,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 3.0874669417540936e-16,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 3.0874669417540936e-16,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 342134,
+        "pass": true,
+        "reference_rms": 0.00017558117915742488,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          10
+        ]
+      },
+      "beta": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": null,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 342134,
+        "pass": true,
+        "reference_rms": 0.000746140350877193,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          1
+        ]
+      },
+      "disposition": "VERIFIED"
+    },
+    "2_bn2_before": {
+      "disposition": "VERIFIED",
+      "legacy_depth_difference": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": false,
+        "correlation": 1.0,
+        "focus": [
+          {
+            "column_error": 1.3211906947000172e-17,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 2.020644591894144e-17,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 1.9429274922059076e-17,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 1.3211906947000172e-17,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 6.366584806460317e-15,
+        "n_diverged_columns": 4630,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 5290,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": false,
+        "reference_rms": 6.811828981750718e-05,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          110,
+          24
+        ]
+      },
+      "output": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 1.0,
+        "focus": [
+          {
+            "column_error": 1.1657564953235446e-18,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 7.77170996882363e-19,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 1.8973901291073314e-22,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 7.77170996882363e-19,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 5.968673256056548e-16,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": true,
+        "reference_rms": 6.811828981750718e-05,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          53,
+          34
+        ]
+      }
+    },
+    "3_eos_rab_bn2_now": {
+      "disposition": "VERIFIED",
+      "output": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 0.9999999999999998,
+        "focus": [
+          {
+            "column_error": 8.937274901919926e-18,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 8.937274901919926e-18,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 3.885771696486925e-19,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 7.77154339297385e-19,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 5.968545325803916e-16,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": true,
+        "reference_rms": 6.81197498700911e-05,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          47,
+          41
+        ]
+      }
+    },
+    "4_zdf_sh2": {
+      "disposition": "DIVERGED",
+      "output": {
+        "aggregate_bar_pass": false,
+        "bar": 1e-15,
+        "column_bar_pass": false,
+        "correlation": 0.8724557282383721,
+        "focus": [
+          {
+            "column_error": 0.003988213034679781,
+            "i": 1,
+            "j": 11,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.001192242866784581,
+            "i": 1,
+            "j": 12,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.0003036343372488517,
+            "i": 1,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.00031985379898143244,
+            "i": 23,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          }
+        ],
+        "max_column_error": 73.29360906131917,
+        "n_diverged_columns": 9920,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 0,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": false,
+        "reference_rms": 2.1591876738381648e-08,
+        "rms_ratio": 4.5702494863268415,
+        "worst_column_ji": [
+          47,
+          1
+        ]
+      }
+    },
+    "5_bottom_drag_operands": {
+      "disposition": "UNMEASURED",
+      "reason": "stop at row 4"
+    }
+  },
+  "schema": "zdf-chain-sweep-v2",
+  "sha256": {
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/MY_SRC/stpmlf.F90": "26849c4fa34305317881959dd5a1e41af9b13aa4f96a290a998add955a73a283",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/MY_SRC/zdftke.F90": "5623a7444048927c766b0fd23ba4cc5854028e2ead67f1750febd789105c025e",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/dump_alpha_b.bin": "a2444bff1eb42a9dc1727502e673052ae7ca850ca5027091bb3e7399c6705fad",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/dump_beta_b.bin": "0be9b5d9feee9f995456ebcca322ca7681b1c3160b4b445bd7262ebc8a674ad0",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/eiv_dump_e3w.bin": "6c6c469250944c92d3af41cae6af2171092c877f20e22db603218e6c955f3730",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/eiv_dump_gdept.bin": "5df03d71a6f42a505a53efa1d613952aff90d682dfa2dd647ba6513db3ca3da4",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/ocean.output": "66162e1d54cc0c8648b0c220fe902b6a75f7b19a0e8c2349f5d11928809c0557",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/tke_dump_avm_in.bin": "f05299d26b198ffad1449bf29bebfa8f2035de0b339be030bbf1c4eba0bce5bd",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/tke_dump_rn2.bin": "df573f8c07abab1cc0a2fc7fd2093dd8276dccf0319d3375220340d91b5a6004",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/tke_dump_rn2b.bin": "fcd7ddee9e94b6158085f2ff5d174b2cb01e1b22a8524faa1b5be31a2b798961",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/tke_dump_sh2.bin": "2c18e0926b2b81c07ba3c5c371067d051ffea2d2fad0cc75c444af1654746f53",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/WORK/zdfphy.F90": "76eeec2a280d56c55bec9e59b579e5290623c408c03962d04652e406334b45fd",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/WORK/zdfsh2.F90": "c31f062e282b8710a0b565be7aecbc35b8e741b05a96a393402fcd5a737f28f8",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/OCE/TRA/eosbn2.F90": "689f8fdf5482e2bc6c7ecc59544ff7384fda6e4551e32be898e715501e55977d",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/OCE/ZDF/zdfsh2.F90": "c31f062e282b8710a0b565be7aecbc35b8e741b05a96a393402fcd5a737f28f8",
+    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/dump_lane.py": "41252d898b0d09b350c086aa678ddb890c7e6232fa2b46e88093a3b108a9bf62",
+    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/eos_rab_bn2_per_element.py": "3a82b0ef216fccf1b9112bfbac0005096eee491f15693d80f82320d3d80febda",
+    "/tmp/dino_mld_audit_codex/mld_maps.npz": "9fb7344d1e6f92232d211f6a52ff8636022f0d9b0b05acea2b0bae6e6afd9bf0",
+    "packages/ocean/legoesm/ocean/eos.py": "d8d3054b49bcc6c5a828dd0c53b1e0047ec8e6a13145790e9552c7f6f942139d",
+    "packages/ocean/legoesm/ocean/fidelity/time_levels.py": "810c731be7df80374b34075c67f97278c2fab51889b2c9e7be684238980a5b27"
+  },
+  "time_levels": {
+    "dump_alpha_b.bin": "before",
+    "dump_beta_b.bin": "before",
+    "eiv_dump_e3w.bin": "now",
+    "eiv_dump_gdept.bin": "now",
+    "tke_dump_avm_in.bin": "before",
+    "tke_dump_rn2.bin": "now",
+    "tke_dump_rn2b.bin": "before",
+    "tke_dump_sh2.bin": "before"
+  }
+}

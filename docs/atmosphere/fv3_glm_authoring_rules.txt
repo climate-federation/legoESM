@@ -1,0 +1,90 @@
+RULES
+1 Literal translation. A grid loop becomes a vectorised slice over the IDENTICAL
+  window only if no iteration reads what an earlier one writes; put that
+  one-line argument in a comment at the site. A k-recurrence becomes lax.scan,
+  never cumsum. In-place mutation becomes a returned value. An `if` on a static
+  config value stays a Python `if`.
+2 jnp.where evaluates BOTH arms. Use it only where both are total and finite.
+  Where the predicate is a loop index use a static index partition instead.
+3 No donate_argnums. f64 entry gate reading only static dtypes
+  (fv3_phase3d_common.require_f64_jax).
+4 Six-face state: leading axis of 6, face t is Fortran tile t+1, Fortran index
+  1-ng at numpy 0.  Convention C1 of the sibling modules: ONE dict of
+  face-stacked arrays, never a list of six per-face dicts.  km sits at AXIS 2 of
+  every stacked field, so a face-stacked field is (6, i, j, km).
+5 Unknown scheme/config value raises ValueError at entry on the STATIC value.
+6 A BARRIER, AN EXCHANGE OR A HALO EXTENT IS THE HALO MODULE'S, never
+  re-derived: call the named routine in legoesm.grids.fv3_duo_halos.  The two
+  duo barriers have DIFFERENT extents (barrier 1 over i = is..ie / j = js..je,
+  barrier 2 over i = is..ie+1 / j = js..je+1 with tile corners included), and a
+  barrier is applied ONE LEVEL AT A TIME with all six faces of that level
+  present -- a face blended against a stale neighbour is the defect these units
+  exist to avoid.
+7 d_con = 0.0 throughout, as the spec states, and it is NOT a parameter of this
+  module: the shipped duo decks set d_con = 0., so the KE-to-heat pathway and
+  its heat_source allocation (dyn_core.F90:322-325, gated on d_con > 1.0E-5) are
+  inactive.  If you expose d_con at all it must default to 0.0 and RAISE on a
+  non-zero value, since no fixture certifies that path.
+8 STAGE OBSERVATION IS BY RETURN, NOT BY CALLBACK (sibling convention C6). The
+  spec's stage_hook cannot exist under jit -- it would be handed tracers.  Do
+  not port it.  Instead RETURN the payloads that are NOT recoverable from the
+  other returns, and say in the docstring which stage each is:
+    - S10: the PRE-barrier ubb/vbb/ubbtemp/vbbtemp stacks (d_sw3's output);
+    - S11: the POST-barrier ubb/vbbtemp stacks;
+    - S16: geopk's pk/gz as they stood BEFORE one_grad_p, because one_grad_p
+      scratches pk and gz in place (a2b_ord4 with replace=.true.), so they are
+      unrecoverable afterwards;
+    - pk_remap only when remap_step is true, exactly as the spec gates it.
+  S12 (corner KE) and S13/S14 are recoverable from the above plus the returned
+  fields; do not invent extra returns for them, and say so in the docstring.
+9 THE NH CARRY IS FUNCTIONAL.  The spec mutates the `nh` dict (zh6, gz6, pk3_6,
+  pe6, pk6, peln6, ws6), `delz6`, `csw_press[t]['pkc']`, and the D winds.  Here
+  every one of those comes back in the returned dict and the CALLER threads it
+  forward (sibling convention C4: if the spec writes it, it is in the returned
+  dict).  `nh` arrives as a dict of face-stacked arrays: zh (6,i,j,km+1),
+  gz (6,i,j,km+1), zs (6,i,j), pk3 (6,i,j,km+1), pe (6,i,j,km+1),
+  pk (6,i,j,km+1), peln (6,i,j,km+1), ws (6,i,j).  Verify each against
+  field_shape / the kernel signatures below rather than trusting this list, and
+  state in the docstring where each shape came from.
+10 THE SPEC'S PER-LEVEL CONTAINERS ARE FACE-STACKED ON THIS LANE.  Where the
+  spec reads `outs[t]["levels"][k]["crx_adv"]`, this lane's producing phase
+  returns ONE face-stacked dict and the same quantity is
+  `outs["crx_adv"][t][..., k]`.  There is no "levels" key anywhere on this lane.
+  And the SHAPE TABLE (`field_shape` / `validate_stacked`) covers only the
+  DECLARED fields: the d_sw1 transport outputs have their own staggerings that
+  no table describes -- `field_shape("ut")` is the C-grid ut, (m_a, m_a, km),
+  while d_sw1's ut is (m_a+1, m_a, km).  Check those for face axis 6 and level
+  axis km, never against the table.
+11 A data-dependent Python guard cannot exist under jit, so it becomes a STATIC
+  check_* keyword that RAISES on a tracer rather than silently skipping
+  (sibling convention C5).
+12 dt is DYNAMIC (sibling convention C3) -- a new time step must not recompile
+  the phase.  ctx, km, and every deck constant or Python-branch selector are
+  STATIC.  ptop/akap/cp_air/p_fac/a_imp: keep them dynamic unless a callee
+  branches on them in Python; check each callee's signature below and state
+  which you made static and WHY.
+13 Every citation you write must be one you can support from the spec text or
+  the kernel docstrings given here.  Do NOT invent Fortran line numbers.  If the
+  spec cites a line, you may repeat it; if you are unsure, write the citation as
+  the spec's own words instead of a number.
+14 The module docstring must contain: the oracle cadence block copied from the
+  spec, a CONVENTIONS section stating which sibling conventions it inherits, and
+  a "what this module does NOT do" section (it introduces no numerics; the
+  barrier extents are the halo module's; d_con=0; the moist path is dead).
+
+
+
+BUDGET NOTE, and it is a hard constraint rather than a style preference.
+Two earlier attempts at this file hit the completion-token ceiling with
+85-90% of the budget spent on reasoning, and the OUTPUT WAS TRUNCATED
+MID-FUNCTION.  So:
+
+  * keep the module docstring under 70 lines -- state the oracle cadence,
+    the barrier's extent and what it acts on, the conventions inherited,
+    and what the module does NOT do; put nothing else there;
+  * put per-decision reasoning in SHORT comments at the site it applies
+    to, not in the docstring;
+  * do not restate the specification's prose;
+  * WRITE THE CODE FIRST IN YOUR ANSWER ORDER -- the file must be
+    complete and end with the make_*_jit factories.  A truncated file is
+    worth nothing, a terse complete one is worth everything.

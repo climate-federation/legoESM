@@ -64,6 +64,7 @@ from legoesm.atmosphere.physics.turbulence.surface_layer import (
     compute_surface_fluxes,
 )
 from legoesm.atmosphere.physics.turbulence.vertical_diffusion import (
+    diagnostic_heat_flux_full,
     implicit_vertical_diffusion,
 )
 
@@ -305,6 +306,13 @@ def holtslag_boville_turbulence(
     )
     q_new = implicit_vertical_diffusion(q_v, Kh_half, rho, dz_layer, dz_half, dt, sflx_q)
 
+    # Q1 diagnostic (LES-suite): NONLOCAL heat flux F = -Kh·(∂θ/∂z − γ) with the
+    # scheme's own countergradient γ (gamma_theta_half), θ [=T/Π] the dry potential
+    # temperature.  Pure diagnostic — does NOT feed tendencies.
+    wtheta_flux = diagnostic_heat_flux_full(
+        theta, dz_half, Kh_half, gamma_theta_half,
+    )
+
     return TurbulenceOutput(
         du_dt=(u_new - u) / dt,
         dv_dt=(v_new - v) / dt,
@@ -316,6 +324,7 @@ def holtslag_boville_turbulence(
         lhflx=lhflx,
         ustar=ustar,
         h_pbl=h_pbl,
+        wtheta_flux=wtheta_flux,
     )
 
 

@@ -182,6 +182,9 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/atmosphere/legoesm/atmosphere/physics/radiation/rrtmgp/optics/optics.py", "optics_factory"),
         ("packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py", "get_turbulence_fn"),
         ("packages/atmosphere/legoesm/atmosphere/physics/turbulence/integration.py", "make_turbulence_physics"),
+        # CLUBB cloud_source selector (native ADG1-PDF vs shared grid-scale saturation;
+        # the D9 forced-shared control). A typo must raise, not silently run the PDF cloud.
+        ("packages/atmosphere/legoesm/atmosphere/physics/turbulence/clubb.py", "diagnose_cloud_and_buoyancy"),
         ("packages/atmosphere/legoesm/atmosphere/forcing/scm/scm.py", "__init__"),
         ("packages/core/legoesm/core/bulk_flux.py", "validate_bulk_scheme"),
         # Stable-regime MOST stability-function dispatch (stability_scheme):
@@ -283,6 +286,18 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # "een" NEMO enstrophy-conserving). A typo must raise, not silently
         # run the legacy null-mode 4-pt average.
         ("packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py", "barotropic_substeps_latlon_cgrid"),
+        # Shared by BOTH barotropic entry points: the reconciliation-target
+        # guard moved here so the standard-halo path and its wide-halo twin
+        # cannot diverge on it again.
+        ("packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py", "_reconcile_targets"),
+        # NEMO mlf_baro_corr's AFTER-level reconciliation (barotropic_after_
+        # reconcile). Called at fn entry on the static config value from BOTH
+        # outer-step paths (_leapfrog_step and _nemo_mlf_step), so a typo stops
+        # the step instead of silently selecting "off" -- i.e. silently NOT
+        # running a reconciliation the card asked for.
+        ("packages/ocean/legoesm/ocean/dynamics/barotropic_common.py", "validate_after_reconcile"),
+        # n2_mode + n2_eos_form guards on the EVD convective trigger.
+        ("packages/ocean/legoesm/ocean/physics/convection/enhanced_diffusion.py", "convective_K_A_flag"),
         # In-substep C-grid face-depth scheme (barotropic_face_depth:
         # min_rule | nemo_ssh_avg, #1226 zero-deviation item 2). A typo must
         # raise, not silently run the wrong flux/drag face-thickness rule.
@@ -301,6 +316,18 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         ("packages/ocean/legoesm/ocean/dynamics/latlon_cgrid_operators.py", "pv_flux_al81_partial_cell"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model.py", "__init__"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_compute_advection_flux_div"),
+        # bbl_adv_option=2 (in-stage Campin-Goosse BBL) x tracer_time_integrator
+        # lane guard (S-42, docs/ocean/fidelity/nemo_branch_isomorphism_map.md):
+        # the in-stage BBL hook is built ONLY on the rk3_ws tracer lane, so a
+        # typo/mismatch on euler/ab2/rk3 used to resolve bbl_adv_option=2 and
+        # silently run NO boundary layer. Lock the guard so it can't be
+        # silently deleted; test_config_footguns.py exercises it directly.
+        # Also guards momentum_flux_scheme="nemo_up3" x momentum_time_integrator
+        # pairing (S-46/S-47, same map doc): NEMO's e3u(Kmm) face thickness for
+        # dyn_adv_up3 is wired only inside the rk3_ws stage program, so nemo_up3
+        # on any other integrator would silently run the legacy (measured
+        # first-order-wrong) face-thickness rule instead -- a pairing NEMO
+        # itself never runs. test_config_footguns.py exercises it directly.
         ("packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py", "_validate_config"),
         # outer_integrator dispatch (nemo_mlf P2, docs/ocean/fidelity/
         # nemo_mlf_step_transcription_spec.md §4/§7): a typo here would

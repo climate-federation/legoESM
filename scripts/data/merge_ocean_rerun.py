@@ -58,6 +58,12 @@ def main() -> None:
         "n_fail": sum(1 for r in by_key.values() if r["status"] == "FAIL"),
         "n_skip": sum(1 for r in by_key.values() if r["status"] == "SKIP"),
         "n_error": sum(1 for r in by_key.values() if r["status"] == "ERROR"),
+        # XFAIL/XPASS must be carried too: a count-based consumer that sees
+        # only n_fail/n_error would report a clean merge while an XPASS -- a
+        # known-failure entry that has started passing, i.e. a stale waiver --
+        # sits unaccounted for (codex review, #1609).
+        "n_xfail": sum(1 for r in by_key.values() if r["status"] == "XFAIL"),
+        "n_xpass": sum(1 for r in by_key.values() if r["status"] == "XPASS"),
         "quick_mode": True,
         "merged_from_reruns": True,
     }

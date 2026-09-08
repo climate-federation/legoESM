@@ -1264,7 +1264,12 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             raise ValueError(
                 f"dz_ref_override has {len(dz_ref_override)} levels but nlev="
                 f"{nlev}; pass --nlev {len(dz_ref_override)} to match.")
-        z_coord = create_z_star_from_thicknesses(dz_ref_override)
+        # A thickness-only override has no raw NEMO mesh e3w operand.  This
+        # generic MPAS/lat-lon route therefore opts into the documented legacy
+        # construction explicitly; NEMO state bridges pass raw e3w_0 and keep
+        # the faithful mesh-reference default.
+        z_coord = create_z_star_from_thicknesses(
+            dz_ref_override, nemo_e3w_source="depth_difference")
     elif use_bathymetry:
         # Partial cells with ETOPO: use the same vertical stretching
         # as the global-overturning production scripts (dz_surface=20,

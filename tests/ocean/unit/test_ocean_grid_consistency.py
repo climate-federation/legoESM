@@ -528,3 +528,38 @@ def test_linear_weights_cannot_overshoot_a_step():
     assert np.nanmax(raw) > 30.0 + 1e-6 or np.nanmin(raw) < 5.0 - 1e-6, (
         "control: the unlimited fit MUST overshoot here, or the limiter "
         "test proves nothing")
+
+
+# ---------------------------------------------------------------------------
+# Fields the two arms do not reduce the same way
+# ---------------------------------------------------------------------------
+#
+# The by-field decomposition compares each saved field across arms. For
+# surface speed the two arms build the field with DIFFERENT operators --
+# lat-lon takes a 2-point mean of the staggered components, MPAS does a
+# Perot reconstruction over ~6 edges -- so the row contains the difference
+# between the reductions as well as any difference in the flow. That has to
+# be stated where the number is printed, or the row reads as a cross-grid
+# result (2026-08-13).
+
+def test_surface_speed_is_flagged_as_not_comparable():
+    M = _load()
+    assert "speed_sfc" in M._NOT_LIKE_FOR_LIKE
+    why = M._NOT_LIKE_FOR_LIKE["speed_sfc"]
+    # The reason must name BOTH reductions, not just assert a caveat.
+    assert "Perot" in why and "2-point" in why
+
+
+def test_every_flagged_field_is_one_the_decomposition_actually_reports():
+    """A caveat for a field that is never printed protects nothing."""
+    M = _load()
+    assert set(M._NOT_LIKE_FOR_LIKE) <= set(M._DECOMPOSE_FIELDS)
+
+
+def test_the_fields_that_are_comparable_are_not_flagged():
+    """NON-VACUITY: the flag must distinguish, not blanket everything."""
+    M = _load()
+    for fld in ("eta", "SST"):
+        assert fld not in M._NOT_LIKE_FOR_LIKE, (
+            f"{fld} is reduced identically on both arms and must stay "
+            f"readable as a cross-grid number")

@@ -67,14 +67,22 @@ from legoesm.ocean.experiments.dino import (
     dino_step_surface_forcing,
 )
 
-# Reuse wholesale (module-reuse rule) -- same RUN_DIR/DT/loaders/self-checks
-# every sibling #1226 probe in this package already shares.
+# Reuse wholesale (module-reuse rule) -- DT (same value every lane) +
+# loaders/self-checks every sibling #1226 probe in this package already
+# shares. RUN_DIR/RESTART route through dump_lane (#1455 shared selector)
+# instead of zu_frc_term_walk's own (still-hardcoded-to-gdb_y5) RUN_DIR --
+# this probe must be lane-switchable independently of that (untouchable)
+# sibling.
+from scripts.validate.ocean_fidelity.dino_1226 import dump_lane
 from scripts.validate.ocean_fidelity.dino_1226.zu_frc_term_walk import (
-    RUN_DIR, DT, _load_interior, _load_full,
+    DT, _load_interior, _load_full,
 )
 from scripts.validate.ocean_fidelity.dino_1226.zu_frc_u_structure_probe import (
     _err_norm, _align_scan,
 )
+
+RUN_DIR = dump_lane.RUN_DIR
+RESTART = dump_lane.RESTART
 
 JPI, JPJ, HLS = 56, 203, 2
 SEAM_COL = 49  # already-documented periodic-seam/DINO-sill column (sill_lon_m_deg=1.0)
@@ -105,6 +113,7 @@ def _capture_state_mid(model, st, sf):
 
 
 def main() -> int:
+    print(dump_lane.banner())
     e3t_mode = require_explicit_e3t_mode(context="probe_bottom_drag")
     print(f"LEGOESM_NEMO_E3T={e3t_mode!r} (must be 'both')")
 
@@ -115,9 +124,9 @@ def main() -> int:
     assert dcfg.barotropic_drag_substep is True
 
     g = read_nemo_mesh_mask(os.path.join(RUN_DIR, "mesh_mask.nc"), nn_hls=0)
-    s = read_nemo_restart(os.path.join(RUN_DIR, "DINO_00057600_restart.nc"), nn_hls=0)
+    s = read_nemo_restart(os.path.join(RUN_DIR, RESTART), nn_hls=0)
     br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True)
-    before = read_nemo_restart_before(os.path.join(RUN_DIR, "DINO_00057600_restart.nc"), nn_hls=0)
+    before = read_nemo_restart_before(os.path.join(RUN_DIR, RESTART), nn_hls=0)
     st = bridge_before_state_topo(br._replace(state=br.state), g, before, periodic_i=True)
 
     cfg = dataclasses.replace(dcfg, lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)

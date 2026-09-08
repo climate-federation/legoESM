@@ -4,9 +4,15 @@ WHY THIS EXISTS
 ---------------
 On 2026-07-26, days into the #1226 investigation, we found legoESM had been
 building its entire vertical grid from NEMO's ``e3t_1d`` while NEMO integrates
-with ``e3t_0``. Below 2000 m the layer thicknesses were off by up to 12.9% and
-water columns were ~22 m too deep -- in exactly the depth range where the ACC
-deficit is sourced.
+with ``e3t_0``. From k=25 down (top face 982 m -- DINO's rn_hco=1000 m
+re-anchor, not the "~2000 m" this note used to say) the layer thicknesses were
+off by up to 70.4 m, which is 12.9% of e3t_0 and 14.8% of e3t_1d; quote the
+denominator, those are one measurement. In the 75% of columns that reach the
+bottom level this is a pure redistribution -- both ladders sum to the same
+4000.000 m over all 35 wet levels -- but the other 25% stop short, and there the
+1-D ladder put the bottom 70.4-104.2 m too deep (21.9 m unweighted mean over all
+wet columns), in exactly the depth range where the ACC deficit is sourced.
+(Re-measured 2026-08-21, #1455.)
 
 It survived every gate we had:
   * the day-0 twin gate asserts T/S/u/v/eta are BIT-EXACT  -> passes (state is
@@ -57,9 +63,11 @@ WAIVED = {
     "time_counter": "file time axis, not geometry.",
     "misf": "ice-shelf draft index; DINO has no ice shelves (ln_isf=F).",
     "stiffness": "Haney stiffness DIAGNOSTIC only; not used in any NEMO tendency.",
-    "e3uw_0": "UW-point thickness: used only by NEMO's implicit vertical "
-              "friction assembly, which legoESM builds from h_u directly.",
-    "e3vw_0": "VW-point thickness: as e3uw_0, for the v-column.",
+    "e3uw_0": "UW-point thickness: NEMO's implicit vertical friction divisor "
+              "(dynzdf.F90:200-203). On DINO's zco branch zgr_lib.F90:111-112 "
+              "sets pe3uw = pe3w, so it IS e3w_0, which is verified below; "
+              "legoESM divides by the same object via nemo_e3w_kmm.",
+    "e3vw_0": "VW-point thickness: as e3uw_0 (pe3vw = pe3w), for the v-column.",
     "glamu": "U-point longitude: legoESM derives U metrics from e1u/e2u, "
              "which ARE verified below.",
     "glamv": "V-point longitude: as glamu.",

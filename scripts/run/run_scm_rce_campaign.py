@@ -28,6 +28,7 @@ import traceback
 from dataclasses import asdict, dataclass, field
 from dataclasses import is_dataclass
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
@@ -41,6 +42,8 @@ from jax import lax
 from legoesm import constants
 from legoesm.atmosphere.idealized.rcemip_initial_conditions import (
     WING_P_SFC,
+    WING_Q_SFC_BY_SST,
+    wing2018_T_v0,
     wing2018_pressure_profile,
     wing2018_qv_profile,
     wing2018_temperature_profile,
@@ -82,6 +85,16 @@ from legoesm.grids.vertical import SigmaCoordinate
 from legoesm.training.scm_rce_metrics import (
     COLD_POINT_MAX_K,
     COLD_POINT_MIN_K,
+    DEFAULT_SUBCLOUD_TOP_M,
+    DEFAULT_THERMO_COLD_POINT_BUFFER_PA,
+    DEFAULT_THERMO_HUMIDITY,
+    DEFAULT_THERMO_LOGQ_FLOOR,
+    DEFAULT_THERMO_LOGQ_SCALE,
+    DEFAULT_THERMO_MIN_P_PA,
+    DEFAULT_THERMO_RH_BLEND_WIDTH_K,
+    DEFAULT_THERMO_RH_SCALE,
+    DEFAULT_THERMO_T_SCALE_K,
+    THERMO_HUMIDITY_VARIABLES,
     MADIAB_MAX_TOL_K,
     MADIAB_MEAN_TOL_K,
     PRECIP_NORMALIZATION_MM_DAY,
@@ -90,7 +103,16 @@ from legoesm.training.scm_rce_metrics import (
     TROP_MIN_Z_KM,
     moist_adiabat_diagnostics_jax,
     realism_reasons_from_diagnostics,
+    relative_humidity_profile,
     score_profiles_precip_jax,
+    score_thermo_jax,
+    thermo_terms_jax,
+    reference_cold_point,
+    tropospheric_mass_weights,
+    tropospheric_min_pressure,
+    subcloud_bulk_state,
+    subcloud_objective_jax,
+    subcloud_mass_weights,
     weighted_rmse as weighted_rmse_jax,
     weighted_std as weighted_std_jax,
 )
@@ -265,6 +287,12 @@ class ReferenceProfiles:
     files_used: list[str]
     sfc_cross_check: dict[str, float]
     precip_ref_mm_day: float = float("nan")
+    #: Surface evaporation of the REFERENCE [mm/day].  Preferably the
+    #: archive's own measured latent heat flux; NaN when no such file is
+    #: present, in which case the sub-cloud objective falls back to the
+    #: equilibrium identity E = P and the provenance string says so.
+    evap_ref_mm_day: float = float("nan")
+    evap_ref_note: str = ""
     precip_files_used: list[str] = field(default_factory=list)
     precip_unit_note: str = ""
     crm_clear_sky_subsidence_m_s: np.ndarray | None = None
@@ -300,6 +328,68 @@ class RunDiagnostics:
     T_profile: list[float] = field(default_factory=list)
     qv_profile: list[float] = field(default_factory=list)
     qcond_profile: list[float] = field(default_factory=list)
+    #: The two halves ``qcond_profile`` sums to, so an excess can be attributed
+    #: to detrained cloud or to un-sedimented precipitation rather than only
+    #: reported in total.  Comparable term by term against the reference's own
+    #: ``qcloud`` (clw+cli) and ``cond - qcloud`` (plw+pli).
+    qcloud_profile: list[float] = field(default_factory=list)
+    qprecip_profile: list[float] = field(default_factory=list)
+    #: Sub-cloud-layer profile errors, normalized by the reference's own
+    #: sub-cloud spread.  Reported for every run and optionally MINIMISED
+    #: (``--objective subcloud``), because the full-column score is condensate-
+    #: dominated and moves by less than the tuner's noise when this layer
+    #: changes.
+    subcloud_T_rmse: float = float("nan")
+    subcloud_qv_rmse: float = float("nan")
+    subcloud_evap_term: float = float("nan")
+    subcloud_score: float = float("nan")
+    subcloud_top_m: float = float("nan")
+    subcloud_n_levels: int = 0
+    #: Lowest-level bulk-flux state: what the surface fluxes actually see.
+    #: ``sfc_driver_kg_kg`` is ``r_sat(SST) - r_air``, the humidity difference
+    #: bulk evaporation is proportional to; ``sfc_delta_T_K`` is ``SST - T_air``.
+    sfc_relative_humidity: float = float("nan")
+    sfc_driver_kg_kg: float = float("nan")
+    sfc_delta_T_K: float = float("nan")
+    #: TEMPERATURE-AND-HUMIDITY objective (``--objective thermo``).  Full-column
+    #: temperature plus TROPOSPHERIC RELATIVE humidity, each divided by a fixed
+    #: physical tolerance (1 K, 5 % RH) rather than by the reference's own
+    #: spread.  Reported for every run whether or not it is the one minimised,
+    #: so an arm tuned on one objective can still be read on the other.
+    thermo_T_term: float = float("nan")
+    #: The humidity term that was MINIMISED, and both candidates, so an arm
+    #: tuned on one humidity variable can be read on the other.
+    thermo_humidity_variable: str = DEFAULT_THERMO_HUMIDITY
+    thermo_q_term: float = float("nan")
+    thermo_rh_term: float = float("nan")
+    thermo_logq_term: float = float("nan")
+    thermo_score: float = float("nan")
+    #: Physical-unit companions to the terms above, on the same masked levels,
+    #: plus the mask itself.  A score is not interpretable in a caption.
+    trop_rh_rmse: float = float("nan")
+    trop_qv_rmse_g_kg: float = float("nan")
+    trop_min_p_Pa: float = float("nan")
+    trop_n_levels: int = 0
+    #: SPREAD of the thermo score across the last few non-overlapping analysis
+    #: windows of the SAME run.  This is the score's own noise floor — internal
+    #: variability plus residual drift — and an "improvement" smaller than it is
+    #: not a result.  Nothing else in the campaign measures it, and every
+    #: downstream claim (the ranking, the seed comparison, the tuned parameter
+    #: values) inherits it.
+    thermo_score_window_std: float = float("nan")
+    thermo_score_window_mean: float = float("nan")
+    thermo_score_n_windows: int = 0
+    #: The SAME thermo score evaluated on a HELD-OUT analysis window ending one
+    #: window earlier.  A parameter set that matches the CRM only during the
+    #: window it was tuned on — because the column is still drifting, or because
+    #: the scheme is intermittent and one favourable phase happened to land
+    #: there — shows up as a gap between these two numbers and nowhere else.
+    heldout_thermo_score: float = float("nan")
+    #: PHYSICAL units on the held-out window (K, g/kg) — deliberately NOT the
+    #: same quantity as ``T_rmse``/``qv_rmse`` above, which are normalized by
+    #: the reference's own spread.  The unit suffix is the whole point.
+    heldout_T_rmse_K: float = float("nan")
+    heldout_qv_rmse_g_kg: float = float("nan")
 
 
 @dataclass
@@ -346,12 +436,207 @@ def _to_jsonable(obj: Any) -> Any:
     return obj
 
 
+#: What the derivative-free tuner minimises.  ``combined`` is the historical
+#: full-column score, which §8.2d measured to be 87-100 % condensate; the
+#: ``subcloud`` objective exists because that score cannot see the sub-cloud
+#: layer at all; ``thermo`` exists because it cannot see TEMPERATURE or
+#: HUMIDITY either (T contributes 0.01-2.3 % of it and q_v 0.008-3.4 %).  A
+#: typo must select nothing (dispatch-hardening), so the resolver raises rather
+#: than defaulting.
+TUNE_OBJECTIVES = ("combined", "subcloud", "thermo")
+
+#: The scalar each objective minimises, as a field of ``RunDiagnostics``.  One
+#: mapping, so the tuner, the CSV sort key and the figure label cannot pick
+#: three different numbers — a real failure mode: the shipped writer sorted a
+#: sub-cloud-tuned table by the combined score.
+OBJECTIVE_FIELD = {
+    "combined": "score",
+    "subcloud": "subcloud_score",
+    "thermo": "thermo_score",
+}
+
+
+def objective_value(run: "RunDiagnostics", objective: str) -> float:
+    """The scalar the tuner minimises for ``run``, by name.
+
+    A failed run scores ``+inf`` on every objective, so a scheme cannot win by
+    crashing; a NaN is mapped to ``+inf`` for the same reason (a NaN incumbent
+    makes every ``trial < best`` comparison False, which silently discards the
+    entire search — the bug this repo already hit once).
+    """
+    if objective not in TUNE_OBJECTIVES:
+        raise ValueError(
+            f"objective_value: unknown objective {objective!r}; "
+            f"expected one of {TUNE_OBJECTIVES}")
+    value = float(getattr(run, OBJECTIVE_FIELD[objective]))
+    return value if math.isfinite(value) else float("inf")
+
+
 def _weighted_std(profile: np.ndarray, weights: np.ndarray) -> float:
     return float(weighted_std_jax(jnp.asarray(profile), jnp.asarray(weights)))
 
 
 def _weighted_rmse(diff: np.ndarray, weights: np.ndarray) -> float:
     return float(weighted_rmse_jax(jnp.asarray(diff), jnp.asarray(weights)))
+
+
+def _subcloud_diagnostics(
+    ref: ReferenceProfiles,
+    T_profile: np.ndarray,
+    qv_profile: np.ndarray,
+    *,
+    subcloud_top_m: float,
+    evap_mm_day: float,
+    sst_K: float = FIXED_SST_K,
+) -> dict[str, float]:
+    """Sub-cloud profile scores plus the lowest level's bulk-flux state.
+
+    The bulk state is read at index ``-1`` because the SCM runs on the CRM
+    reference's own grid, so that index is the lowest full level on BOTH sides
+    and the numbers are directly comparable to the reference's.  All of it is
+    computed from the shared helpers in ``scm_rce_metrics``; nothing here
+    re-derives a saturation curve or a weighting.
+    """
+    weights = subcloud_mass_weights(
+        jnp.asarray(ref.z_m), jnp.asarray(ref.mass_weights),
+        top_m=subcloud_top_m,
+    )
+    T_sc, qv_sc, evap_sc, combined_sc = subcloud_objective_jax(
+        ref,
+        jnp.asarray(T_profile),
+        jnp.asarray(qv_profile),
+        jnp.asarray(evap_mm_day, dtype=jnp.float64),
+        subcloud_weights=weights,
+    )
+    rh, driver, delta_T = subcloud_bulk_state(
+        T_air_K=jnp.asarray(T_profile[-1], dtype=jnp.float64),
+        r_air=jnp.asarray(qv_profile[-1], dtype=jnp.float64),
+        p_air_Pa=jnp.asarray(ref.sigma_full[-1] * WING_P_SFC, dtype=jnp.float64),
+        sst_K=jnp.asarray(sst_K, dtype=jnp.float64),
+        p_sfc_Pa=jnp.asarray(WING_P_SFC, dtype=jnp.float64),
+    )
+    return {
+        "subcloud_T_rmse": float(T_sc),
+        "subcloud_qv_rmse": float(qv_sc),
+        "subcloud_evap_term": float(evap_sc),
+        "subcloud_score": float(combined_sc),
+        "subcloud_top_m": float(subcloud_top_m),
+        "subcloud_n_levels": int(np.sum(np.asarray(ref.z_m) <= subcloud_top_m)),
+        "sfc_relative_humidity": float(rh),
+        "sfc_driver_kg_kg": float(driver),
+        "sfc_delta_T_K": float(delta_T),
+    }
+
+
+def reference_pressure_profile(ref: ReferenceProfiles) -> np.ndarray:
+    """Full-level pressure [Pa] of the shared column.
+
+    ONE pressure profile is used for the SCM and for the CRM: the SCM runs on
+    the CRM reference's own vertical grid at the RCEMIP surface pressure, so a
+    relative humidity computed on two different pressure profiles would differ
+    by a nominal number rather than by anything physical.  The same expression
+    already backs the sub-cloud bulk state.
+    """
+    return np.asarray(ref.sigma_full, dtype=float) * WING_P_SFC
+
+
+def thermo_mask_weights(ref: ReferenceProfiles) -> tuple[np.ndarray, float]:
+    """``(masked mass weights, min pressure)`` for the thermodynamic objective.
+
+    Derived from the REFERENCE alone and therefore identical for every scheme,
+    so the objective scores one fixed domain rather than a per-model one.
+    """
+    p_full = reference_pressure_profile(ref)
+    min_p_Pa = tropospheric_min_pressure(
+        jnp.asarray(ref.T_ref), jnp.asarray(p_full), jnp.asarray(ref.z_m))
+    weights = np.asarray(tropospheric_mass_weights(
+        jnp.asarray(p_full), jnp.asarray(ref.mass_weights), min_p_Pa=min_p_Pa))
+    return weights, float(min_p_Pa)
+
+
+def _thermo_diagnostics(
+    ref: ReferenceProfiles,
+    T_profile: np.ndarray,
+    qv_profile: np.ndarray,
+    *,
+    humidity: str = DEFAULT_THERMO_HUMIDITY,
+) -> dict[str, float]:
+    """Every thermodynamic term for one profile pair, plus its companions.
+
+    All the arithmetic lives in ``scm_rce_metrics``; this only names the fields
+    and converts ``q_v`` to g/kg.  Both humidity variables are reported whatever
+    is being minimised, so a trade-off between them is visible.
+    """
+    p_full = reference_pressure_profile(ref)
+    weights, min_p_Pa = thermo_mask_weights(ref)
+    terms = thermo_terms_jax(
+        ref,
+        jnp.asarray(T_profile),
+        jnp.asarray(qv_profile),
+        jnp.asarray(p_full),
+        trop_weights=jnp.asarray(weights),
+    )
+    T_term = float(terms["T"])
+    q_term = float(terms[humidity])
+    return {
+        "thermo_humidity_variable": humidity,
+        "thermo_T_term": T_term,
+        "thermo_q_term": q_term,
+        "thermo_rh_term": float(terms["rh"]),
+        "thermo_logq_term": float(terms["logq"]),
+        "thermo_score": float(math.sqrt((T_term ** 2 + q_term ** 2) / 2.0)),
+        "trop_rh_rmse": float(terms["rh_rmse"]),
+        "trop_qv_rmse_g_kg": float(terms["qv_rmse_kg_kg"]) * 1000.0,
+        "trop_min_p_Pa": min_p_Pa,
+        "trop_n_levels": int(np.sum(weights > 0.0)),
+    }
+
+
+#: How many non-overlapping analysis windows the score's noise floor is
+#: estimated over.  Four windows of the default 5 days is days 80-100 — late
+#: enough that the column is near equilibrium, long enough that the spread is
+#: an estimate rather than a single difference.
+THERMO_NOISE_WINDOWS = 4
+
+
+def _thermo_window_spread(
+    ref: ReferenceProfiles,
+    T_hist: np.ndarray,
+    qv_hist: np.ndarray,
+    *,
+    last_steps: int,
+    humidity: str = DEFAULT_THERMO_HUMIDITY,
+) -> dict[str, float]:
+    """Mean and spread of the thermo score over the last few analysis windows.
+
+    The scored number is ONE window mean of a column with internal variability
+    and residual drift, and a derivative-free search with hundreds of
+    evaluations will happily select whatever fits that window's noise.  The
+    spread across adjacent windows of the SAME run bounds how much of a
+    reported improvement can be real.  It costs nothing: the history is already
+    in memory for the drift diagnostic.
+    """
+    n_steps = int(T_hist.shape[0])
+    scores = []
+    for w in range(THERMO_NOISE_WINDOWS):
+        end = n_steps - w * last_steps
+        start = end - last_steps
+        if start < 0:
+            break
+        scores.append(_thermo_diagnostics(
+            ref, T_hist[start:end].mean(axis=0), qv_hist[start:end].mean(axis=0),
+            humidity=humidity)["thermo_score"])
+    if len(scores) < 2:
+        return {}
+    arr = np.asarray(scores, dtype=float)
+    return {
+        "thermo_score_window_mean": float(arr.mean()),
+        # Sample standard deviation (ddof=1): with 2-4 windows the population
+        # form would understate the spread, and understating the noise floor is
+        # exactly the direction that manufactures a false improvement.
+        "thermo_score_window_std": float(arr.std(ddof=1)),
+        "thermo_score_n_windows": int(arr.size),
+    }
 
 
 def _score_profiles(
@@ -501,6 +786,37 @@ def _reference_crm_clear_sky_subsidence(
     return w_sub, cloud_fraction
 
 
+def reference_evap_from_hfls(reference_dir: Path) -> tuple[float, str] | None:
+    """Reference evaporation [mm/day] from the archive's own ``hfls_avg``.
+
+    ``None`` when the file is absent — the caller then falls back to the
+    equilibrium identity E = P and SAYS SO.  A missing measurement must never
+    be silently replaced by a derived one.
+
+    Averaged over the last quarter of the record, matching the campaign's
+    "settled window" convention rather than averaging spin-up in.
+    """
+    path = (Path(reference_dir) / "aux_0D"
+            / "SAM_CRM_RCE_small300_0D_hfls_avg.nc")
+    if not path.exists():
+        return None
+    try:
+        import xarray as xr
+    except ImportError:  # pragma: no cover - environment-dependent
+        return None
+    with xr.open_dataset(path) as ds:
+        name = "hfls_avg" if "hfls_avg" in ds else next(iter(ds.data_vars))
+        series = np.asarray(ds[name].values, dtype=float).reshape(-1)
+    finite = series[np.isfinite(series)]
+    if finite.size == 0:
+        return None
+    tail = finite[-max(1, finite.size // 4):]
+    hfls = float(np.mean(tail))
+    return (hfls / constants.L_v * SECONDS_PER_DAY,
+            f"measured hfls_avg={hfls:.2f} W/m^2 "
+            f"(last {tail.size}/{finite.size} samples)")
+
+
 def build_reference_profiles(
     reference_dir: Path,
     last_n: int,
@@ -555,6 +871,12 @@ def build_reference_profiles(
     crm_subsidence, crm_cloud_fraction = _reference_crm_clear_sky_subsidence(
         files,
     )
+    measured_evap = reference_evap_from_hfls(reference_dir)
+    if measured_evap is None:
+        evap_ref, evap_note = float(precip_ref), (
+            "EQUILIBRIUM IDENTITY E=P (no measured hfls_avg on disk)")
+    else:
+        evap_ref, evap_note = measured_evap
     return ReferenceProfiles(
         z_m=z_m,
         sigma_half=sigma_half,
@@ -566,6 +888,8 @@ def build_reference_profiles(
         files_used=[str(p) for p in files],
         sfc_cross_check=sfc_cross_check,
         precip_ref_mm_day=precip_ref,
+        evap_ref_mm_day=evap_ref,
+        evap_ref_note=evap_note,
         precip_files_used=precip_files,
         precip_unit_note=precip_note,
         crm_clear_sky_subsidence_m_s=crm_subsidence,
@@ -596,10 +920,27 @@ def make_sigma_coordinate_from_reference(ref: ReferenceProfiles) -> SigmaCoordin
     )
 
 
-def wing_initial_profiles(ref: ReferenceProfiles) -> tuple[jax.Array, jax.Array]:
+def wing_initial_profiles(
+    ref: ReferenceProfiles, sst_K: float = FIXED_SST_K,
+) -> tuple[jax.Array, jax.Array]:
+    """Wing (2018) analytic T and q_v IC for the RCEMIP case at ``sst_K``.
+
+    The surface humidity q0 is CASE data (12 / 18.65 / 24 g/kg at 295/300/305 K,
+    "adjusted so RH ~ 80% in the lower atmosphere for each SST"), and T_v0 =
+    T0*(1+0.608*q0) follows it -- pinning the 300 K q0 at another SST reproduces
+    the ~139% supersaturated IC that the case-specific T_v0 was introduced to
+    remove.  Only the three RCEMIP SSTs have a defined q0.
+    """
     z = jnp.asarray(ref.z_m, dtype=jnp.float64)
-    T = wing2018_temperature_profile(z)
-    qv = wing2018_qv_profile(z)
+    q_sfc = WING_Q_SFC_BY_SST.get(float(sst_K))
+    if q_sfc is None:
+        raise ValueError(
+            f"no RCEMIP surface humidity q0 defined for SST={sst_K} K; "
+            f"defined only for {sorted(WING_Q_SFC_BY_SST)} "
+            "(Wing 2018 Table 1). 298/302 K have no reference or IC.")
+    T_v0 = wing2018_T_v0(T_sfc=float(sst_K), q_sfc=q_sfc)
+    T = wing2018_temperature_profile(z, T_v0=T_v0, q_sfc=q_sfc)
+    qv = wing2018_qv_profile(z, q_sfc=q_sfc)
     return T, qv
 
 
@@ -612,6 +953,7 @@ def make_physics_config(
     gravity_wave_drag: str = BASELINE_SCHEMES["gravity_wave_drag"],
     convection: str = BASELINE_SCHEMES["convection"],
     base: PhysicsConfig | None = None,
+    sst_K: float = FIXED_SST_K,
     prognostic_spectral_gwd_thermal_tendency: bool = (
         SCM_PROGNOSTIC_SPECTRAL_GWD_THERMAL_TENDENCY
     ),
@@ -646,7 +988,7 @@ def make_physics_config(
                 ch4_ppbv=1700.0,
                 n2o_ppbv=320.0,
                 sfc_albedo_direct=float(
-                    sam_ocean_albedo(RCEMIP_COS_ZENITH, FIXED_SST_K)
+                    sam_ocean_albedo(RCEMIP_COS_ZENITH, sst_K)
                 ),
                 sfc_albedo=0.07,
                 include_clouds=True,
@@ -769,6 +1111,9 @@ def _config_cache_key(
     coriolis_s_inv: float,
     large_scale_forcing: str,
     bl_anchor_top_m: float = DEFAULT_SCM_RCE_BL_TOP_M,
+    subcloud_top_m: float = DEFAULT_SUBCLOUD_TOP_M,
+    thermo_humidity: str = DEFAULT_THERMO_HUMIDITY,
+    sst_K: float = FIXED_SST_K,
 ) -> str:
     effective_microphysics_substeps = _effective_scm_microphysics_substeps(
         cfg.microphysics.scheme,
@@ -787,6 +1132,12 @@ def _config_cache_key(
         "coriolis_s_inv": coriolis_s_inv,
         "large_scale_forcing": large_scale_forcing,
         "bl_anchor_top_m": bl_anchor_top_m,
+        "subcloud_top_m": subcloud_top_m,
+        "sst_K": sst_K,
+        # Post-processing only, like subcloud_top_m, but it decides WHICH
+        # humidity term becomes thermo_score, so a cache entry computed under
+        # one variable must never be served for another.
+        "thermo_humidity": thermo_humidity,
         "config": _to_jsonable(cfg),
     }
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -799,6 +1150,7 @@ def _make_scm_rce_forcing(
     surface_wind_m_s: float,
     coriolis_s_inv: float,
     large_scale_forcing: str,
+    sst_K: float = FIXED_SST_K,
 ) -> SCMForcing:
     if large_scale_forcing not in SCM_RCE_LARGE_SCALE_FORCING_CHOICES:
         raise ValueError(
@@ -823,7 +1175,7 @@ def _make_scm_rce_forcing(
         subsidence_w = lambda _t, w=w_sub: w
     return SCMForcing(
         prescribe="T_s",
-        T_s=lambda _t: FIXED_SST_K,
+        T_s=lambda _t, _sst=sst_K: _sst,
         f_c=coriolis_s_inv,
         u_geo=lambda _t: wind_profile,
         v_geo=lambda _t: zero_wind_profile,
@@ -840,7 +1192,7 @@ def _preseed_column_tracers(scm: SingleColumnModel, microphysics_scheme: str) ->
                 data=jnp.zeros_like(template),
                 name=name,
                 dims=DIMS_3D,
-                units="kg/kg" if not name.startswith("N_") else "1",
+                units="kg/kg" if not name.startswith("N_") else "1/kg",
             )
     slots = min_tracer_slots(microphysics_scheme)
     if slots > len(("q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_c", "N_r", "N_i")):
@@ -851,15 +1203,64 @@ def _preseed_column_tracers(scm: SingleColumnModel, microphysics_scheme: str) ->
     scm.state = scm.state._replace(tracers=tracers)
 
 
+#: The condensate species, in the ONE order both the total and the split sum
+#: them in.  Keeping a single ordered list is what lets the split be added
+#: without perturbing the total by a rounding ulp, so a re-run of an existing
+#: arm still reproduces its scores bit-for-bit.
+_CONDENSATE_TRACERS = ("q_c", "q_r", "q_i", "q_s", "q_g")
+#: The non-precipitating half.  Mirrors the CRM reference's own split, whose
+#: ``cond`` is ``clw_avg + cli_avg + plw_avg + pli_avg`` and whose ``qcloud``
+#: is ``clw_avg + cli_avg``; the archive's precipitating ice covers snow AND
+#: graupel, so both land in the precipitating half here.
+_CLOUD_TRACERS = frozenset({"q_c", "q_i"})
+
+
+def _condensate_species(microphysics_scheme: str) -> tuple[str, ...]:
+    """Condensate tracer names carried by ``microphysics_scheme``, in order.
+
+    p3 carries no separate graupel category — its rimed ice lives in the ice
+    variable — so ``q_g`` is excluded there.  This is the reference exclusion
+    the summed form has always applied, stated once instead of twice.
+    """
+    if microphysics_scheme == "p3":
+        return tuple(n for n in _CONDENSATE_TRACERS if n != "q_g")
+    return _CONDENSATE_TRACERS
+
+
 def _qcond_from_tracers(tracers: dict[str, Field], microphysics_scheme: str) -> jax.Array:
+    """Total condensate [kg/kg]."""
     qcond = jnp.zeros_like(tracers["q_v"].data)
-    names = ("q_c", "q_r", "q_i", "q_s")
-    if microphysics_scheme != "p3":
-        names = names + ("q_g",)
-    for name in names:
+    for name in _condensate_species(microphysics_scheme):
         if name in tracers:
             qcond = qcond + tracers[name].data
     return qcond
+
+
+def _condensate_parts_from_tracers(
+    tracers: dict[str, Field], microphysics_scheme: str,
+) -> tuple[jax.Array, jax.Array]:
+    """Split the column condensate into ``(cloud, precipitating)`` [kg/kg].
+
+    Scored against the CRM the total alone cannot say whether an excess is
+    cloud the convection scheme detrains or rain the microphysics fails to
+    sediment — opposite defects with opposite fixes.  The reference stores both
+    halves, so the SCM must too.
+
+    The sum of the two parts equals ``_qcond_from_tracers`` up to floating-point
+    association only; the TOTAL used for scoring is still taken from that
+    function, so this diagnostic cannot move a score.
+    """
+    zero = jnp.zeros_like(tracers["q_v"].data)
+    cloud = zero
+    precip = zero
+    for name in _condensate_species(microphysics_scheme):
+        if name not in tracers:
+            continue
+        if name in _CLOUD_TRACERS:
+            cloud = cloud + tracers[name].data
+        else:
+            precip = precip + tracers[name].data
+    return cloud, precip
 
 
 def _column_tracer(
@@ -900,6 +1301,9 @@ def _make_microphysics_precip_diagnostic(cfg: PhysicsConfig, dt: float):
         p_half_col = sigma_coord.pressure_at_half(p_s).reshape(ncol, nlev + 1)
         q_v = _column_tracer(state, "q_v", ncol, nlev, dtype)
         rho = _compute_rho(T_col, p_full_col, q_v)
+        from legoesm.atmosphere.physics.microphysics.integration import (
+            number_per_mass_to_per_volume,
+        )
         dz = _compute_layer_dz(T_col, p_half_col, q_v)
         hydrometeors = HydrometeorState(
             q_c=_column_tracer(state, "q_c", ncol, nlev, dtype),
@@ -907,8 +1311,12 @@ def _make_microphysics_precip_diagnostic(cfg: PhysicsConfig, dt: float):
             q_i=_column_tracer(state, "q_i", ncol, nlev, dtype),
             q_s=_column_tracer(state, "q_s", ncol, nlev, dtype),
             q_g=_column_tracer(state, "q_g", ncol, nlev, dtype),
-            N_c=_column_tracer(state, "N_c", ncol, nlev, dtype),
-            N_r=_column_tracer(state, "N_r", ncol, nlev, dtype),
+            # Stored per MASS; the scheme wants per VOLUME (production bridge
+            # convention, microphysics/integration.py).
+            N_c=number_per_mass_to_per_volume(
+                _column_tracer(state, "N_c", ncol, nlev, dtype), rho),
+            N_r=number_per_mass_to_per_volume(
+                _column_tracer(state, "N_r", ncol, nlev, dtype), rho),
             N_i=_column_tracer(state, "N_i", ncol, nlev, dtype),
         )
         micro_out = micro_fn(
@@ -1062,6 +1470,7 @@ def run_scm_rce(
     ref: ReferenceProfiles,
     *,
     label: str,
+    sst_K: float = FIXED_SST_K,
     days: float,
     dt: float,
     analysis_days: float,
@@ -1076,14 +1485,21 @@ def run_scm_rce(
     coriolis_s_inv: float = DEFAULT_SCM_RCE_CORIOLIS_S_INV,
     large_scale_forcing: str = DEFAULT_SCM_RCE_LARGE_SCALE_FORCING,
     bl_anchor_top_m: float = DEFAULT_SCM_RCE_BL_TOP_M,
+    subcloud_top_m: float = DEFAULT_SUBCLOUD_TOP_M,
+    thermo_humidity: str = DEFAULT_THERMO_HUMIDITY,
 ) -> RunDiagnostics:
+    if thermo_humidity not in THERMO_HUMIDITY_VARIABLES:
+        raise ValueError(
+            f"run_scm_rce: unknown thermo_humidity {thermo_humidity!r}; "
+            f"expected one of {THERMO_HUMIDITY_VARIABLES}")
     nsteps = max(1, int(round(days * SECONDS_PER_DAY / dt)))
-    T0, qv0 = wing_initial_profiles(ref)
+    T0, qv0 = wing_initial_profiles(ref, sst_K=sst_K)
     forcing = _make_scm_rce_forcing(
         ref,
         surface_wind_m_s=surface_wind_m_s,
         coriolis_s_inv=coriolis_s_inv,
         large_scale_forcing=large_scale_forcing,
+        sst_K=sst_K,
     )
     radiation_interval = max(1, int(cfg.radiation.update_interval_steps))
     use_cached_radiation = (
@@ -1137,7 +1553,7 @@ def run_scm_rce(
             dt=dt / effective_convection_substeps,
         )
 
-    sst_col = jnp.asarray([FIXED_SST_K], dtype=jnp.float64)
+    sst_col = jnp.asarray([sst_K], dtype=jnp.float64)
     forcing_dict = {"T_sfc": sst_col}
     z_profile = jnp.asarray(ref.z_m, dtype=jnp.float64)
     z_above_lowest = jnp.maximum(z_profile - z_profile[-1], 0.0)
@@ -1157,7 +1573,7 @@ def run_scm_rce(
     convective_precip_diagnostic = _make_convective_precip_diagnostic(cfg, dt)
 
     def apply_surface_sst_anchor(state):
-        T_bl = jnp.asarray(FIXED_SST_K, dtype=state.T.data.dtype) - (
+        T_bl = jnp.asarray(sst_K, dtype=state.T.data.dtype) - (
             DEFAULT_SCM_RCE_BL_LAPSE_K_M
             * z_above_lowest.astype(state.T.data.dtype)
         )
@@ -1283,6 +1699,13 @@ def run_scm_rce(
         qcond = _qcond_from_tracers(
             new_state.tracers, microphysics_scheme,
         )[0, 0, 0]
+        # Split diagnostic, recorded alongside the total.  The SCORE keeps
+        # using the total computed above, so this cannot perturb it.
+        qcloud_col, qprecip_col = _condensate_parts_from_tracers(
+            new_state.tracers, microphysics_scheme,
+        )
+        qcloud = qcloud_col[0, 0, 0]
+        qprecip = qprecip_col[0, 0, 0]
         # WHETHER convection is sub-stepped is irrelevant to whether its
         # condensate is double-counted; what matters is whether MICROPHYSICS
         # will sediment it.  The rule used to branch on sub-stepping, so the
@@ -1303,7 +1726,8 @@ def run_scm_rce(
         # same per-step weight, so the water budget can be closed with both
         # terms sampled identically (see applied_evap_mm_day).
         evap = applied_evap_mm_day(base_tend, new_state)
-        out = (new_state.T.data[0, 0, 0], qv, qcond, precip, evap)
+        out = (new_state.T.data[0, 0, 0], qv, qcond, qcloud, qprecip,
+               precip, evap)
         return (new_state, new_phys), out
 
     def cached_radiation_body(carry, k):
@@ -1334,6 +1758,13 @@ def run_scm_rce(
         qcond = _qcond_from_tracers(
             new_state.tracers, microphysics_scheme,
         )[0, 0, 0]
+        # Split diagnostic, recorded alongside the total.  The SCORE keeps
+        # using the total computed above, so this cannot perturb it.
+        qcloud_col, qprecip_col = _condensate_parts_from_tracers(
+            new_state.tracers, microphysics_scheme,
+        )
+        qcloud = qcloud_col[0, 0, 0]
+        qprecip = qprecip_col[0, 0, 0]
         # WHETHER convection is sub-stepped is irrelevant to whether its
         # condensate is double-counted; what matters is whether MICROPHYSICS
         # will sediment it.  The rule used to branch on sub-stepping, so the
@@ -1351,7 +1782,8 @@ def run_scm_rce(
                 (), dtype=new_state.T.data.dtype)
         precip = micro_precip + convective_precip_for_score
         evap = applied_evap_mm_day(nonrad_tend, new_state)
-        out = (new_state.T.data[0, 0, 0], qv, qcond, precip, evap)
+        out = (new_state.T.data[0, 0, 0], qv, qcond, qcloud, qprecip,
+               precip, evap)
         return (new_state, new_phys, rad_tend), out
 
     if use_cached_radiation:
@@ -1379,7 +1811,8 @@ def run_scm_rce(
     try:
         final_state, _final_phys, history = driver(scm.state, scm.phys_state)
         del final_state
-        T_hist, qv_hist, qcond_hist, precip_hist, evap_hist = (
+        (T_hist, qv_hist, qcond_hist, qcloud_hist, qprecip_hist,
+         precip_hist, evap_hist) = (
             np.asarray(x, dtype=float) for x in history
         )
         last_steps = max(1, int(round(analysis_days * SECONDS_PER_DAY / dt)))
@@ -1387,6 +1820,11 @@ def run_scm_rce(
         T_profile = T_hist[-last_steps:].mean(axis=0)
         qv_profile = qv_hist[-last_steps:].mean(axis=0)
         qcond_profile = np.maximum(qcond_hist[-last_steps:].mean(axis=0), 0.0)
+        # Averaged over the SAME window as the total they sum to, so the three
+        # profiles can be compared term by term against the reference's own
+        # cloud/precipitating split.
+        qcloud_profile = np.maximum(qcloud_hist[-last_steps:].mean(axis=0), 0.0)
+        qprecip_profile = np.maximum(qprecip_hist[-last_steps:].mean(axis=0), 0.0)
         precip_mm_day = float(np.maximum(np.mean(precip_hist[-last_steps:]), 0.0))
         evap_mm_day = float(np.mean(evap_hist[-last_steps:]))
 
@@ -1494,6 +1932,44 @@ def run_scm_rce(
             T_profile=T_profile.tolist(),
             qv_profile=qv_profile.tolist(),
             qcond_profile=qcond_profile.tolist(),
+            qcloud_profile=qcloud_profile.tolist(),
+            qprecip_profile=qprecip_profile.tolist(),
+            **(
+                _subcloud_diagnostics(
+                    ref, T_profile, qv_profile,
+                    subcloud_top_m=subcloud_top_m, evap_mm_day=evap_mm_day,
+                    sst_K=sst_K,
+                )
+                # A non-finite column would make the saturation call return
+                # garbage rather than raise; leave the sub-cloud fields at NaN
+                # so the objective reads +inf and the run cannot win.
+                if finite else {}
+            ),
+            **(_thermo_diagnostics(ref, T_profile, qv_profile,
+                                   humidity=thermo_humidity) if finite else {}),
+            **(
+                # The HELD-OUT window: the analysis window immediately before the
+                # scored one, already averaged above for the drift diagnostic.
+                # Free, and it is the only thing that separates "the column sits
+                # where the CRM does" from "one five-day slice of a drifting or
+                # intermittent column happened to land there".
+                {
+                    "heldout_thermo_score": _thermo_diagnostics(
+                        ref, T_prev, qv_prev,
+                        humidity=thermo_humidity)["thermo_score"],
+                    "heldout_T_rmse_K": _weighted_rmse(
+                        T_prev - ref.T_ref, ref.mass_weights),
+                    "heldout_qv_rmse_g_kg": _weighted_rmse(
+                        (qv_prev - ref.qv_ref) * 1000.0, ref.mass_weights),
+                }
+                if finite and prev_end > prev_start else {}
+            ),
+            **(
+                _thermo_window_spread(
+                    ref, T_hist, qv_hist, last_steps=last_steps,
+                    humidity=thermo_humidity)
+                if finite else {}
+            ),
         )
     except Exception as exc:  # noqa: BLE001 - campaign records per-scheme failures
         return RunDiagnostics(
@@ -1533,6 +2009,9 @@ def run_cached(
     coriolis_s_inv: float = DEFAULT_SCM_RCE_CORIOLIS_S_INV,
     large_scale_forcing: str = DEFAULT_SCM_RCE_LARGE_SCALE_FORCING,
     bl_anchor_top_m: float = DEFAULT_SCM_RCE_BL_TOP_M,
+    subcloud_top_m: float = DEFAULT_SUBCLOUD_TOP_M,
+    thermo_humidity: str = DEFAULT_THERMO_HUMIDITY,
+    sst_K: float = FIXED_SST_K,
 ) -> RunDiagnostics:
     key = _config_cache_key(
         cfg,
@@ -1544,6 +2023,12 @@ def run_cached(
         coriolis_s_inv,
         large_scale_forcing,
         bl_anchor_top_m,
+        # Post-processing only, but it CHANGES a recorded number, so a cache
+        # entry computed at one layer top must never be served for another.
+        subcloud_top_m,
+        # Same argument: it selects WHICH humidity term becomes thermo_score.
+        thermo_humidity,
+        sst_K,
     )
     if key not in cache:
         # COMPILED-EXECUTABLE HYGIENE.  Every entry here is a DIFFERENT static
@@ -1575,6 +2060,9 @@ def run_cached(
             coriolis_s_inv=coriolis_s_inv,
             large_scale_forcing=large_scale_forcing,
             bl_anchor_top_m=bl_anchor_top_m,
+            subcloud_top_m=subcloud_top_m,
+            thermo_humidity=thermo_humidity,
+            sst_K=sst_K,
         )
     cached = cache[key]
     return RunDiagnostics(
@@ -2004,6 +2492,30 @@ def _interp(constraint, frac: float) -> float:
     return float(min(max(value, lo), hi))
 
 
+def _frac_from_value(constraint, value: float) -> float:
+    """Inverse of :func:`_interp`: where ``value`` sits in the range, in the
+    parameter's own sampling scale.
+
+    Used by the local refinement so a step of "0.1 of the range" means the same
+    thing for a linearly-sampled fraction and for a log-sampled rate
+    coefficient (where it is a multiplicative step).  Clamped to [0, 1] so a
+    default sitting fractionally outside its own declared bounds — which the
+    registry permits, the bounds being a search range rather than a hard
+    validity limit — cannot produce a negative or >1 fraction and silently skip
+    every refinement of that parameter.
+    """
+    lo = float(constraint.min_val)
+    hi = float(constraint.max_val)
+    if not (hi > lo):
+        return 0.0
+    if _sample_scale(constraint) == "log":
+        value = min(max(float(value), lo), hi)
+        frac = math.log(value / lo) / math.log(hi / lo)
+    else:
+        frac = (float(value) - lo) / (hi - lo)
+    return float(min(max(frac, 0.0), 1.0))
+
+
 def _candidate_values(defaults: dict[str, float], constraints, n_eval: int, seed: int):
     yield defaults
     if n_eval <= 1:
@@ -2030,12 +2542,140 @@ def _candidate_values(defaults: dict[str, float], constraints, n_eval: int, seed
         yield cand
 
 
+#: Selectable tuning parameter sets.  The first three are the registry's own
+#: tiers; ``physical`` is the DERIVATIVE-FREE calibration set defined below.
+PARAM_SETS = ("core", "extended", "aggressive", "physical")
+
+#: What a scheme with no tunable parameter searched.  Explicit zeros rather
+#: than an empty dict, so a consumer reading "0 unique evaluations" learns the
+#: true fact instead of finding a missing key and printing the request.
+EMPTY_TUNE_STATS = {
+    "requested_evals": 0, "random_proposals": 0,
+    "refine_proposals": 0, "unique_evals": 0,
+}
+
+#: Marker the registry uses on a tier-0 parameter that is physically real but
+#: whose AD gradient vanishes (``see _CAPE_TRIGGER_AD_NOTE``, #1417).  Matched
+#: on the spec's own reference string so a newly re-classified parameter is
+#: picked up automatically instead of needing a name added here.
+_AD_UNREACHABLE_MARKER = "AD-unreachable"
+
+#: Parameters excluded from the ``physical`` set BY NAME, each with the reason.
+#: Only for cases the ``category`` field cannot express.
+PHYSICAL_SET_NAME_EXCLUSIONS = {
+    "atm.conv.KainFritschConfig.dtlcl_dx_scale":
+        "grid-length scaling (Kain 2004): a single column has no grid length, "
+        "so tuning it absorbs a resolution dependence into a column fit",
+}
+
+
+def resolve_param_selection(
+    scheme_key: str, param_set: str,
+) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    """``(tier, include_tier0, exclude)`` for ``build_trainable_params``.
+
+    ``core``/``extended``/``aggressive`` pass straight through to the registry
+    tiers.  ``physical`` is the set a DERIVATIVE-FREE calibration should use
+    when it is asked to tune "all the parameters of the scheme", and it differs
+    from ``aggressive`` in both directions — which is the whole reason it
+    exists, because ``aggressive`` is neither a superset nor a subset of "the
+    physics":
+
+    * it DROPS every ``category == "numerics"`` parameter (measured: four of
+      them are tier 3, e.g. a sigmoid layer-edge width and a mass-flux
+      normalisation scale), because a value chosen to fit a column is then a
+      statement about the discretisation;
+    * it ADDS the tier-0 parameters whose exclusion reason is that their AD
+      GRADIENT VANISHES — the CAPE trigger threshold of eight of the ten
+      schemes.  Those are textbook closure parameters; a gradient-free search
+      can move them, and leaving them out would mean the campaign never touched
+      the trigger of most of the schemes it claims to have tuned.
+    """
+    if param_set not in PARAM_SETS:
+        raise ValueError(
+            f"resolve_param_selection: unknown param_set {param_set!r}; "
+            f"expected one of {PARAM_SETS}")
+    if param_set != "physical":
+        return param_set, (), ()
+    metas = [m for m in build_registry() if m.scheme_key == scheme_key]
+    # Tier-0 parameters excluded ONLY because their AD gradient vanishes.  As of
+    # 2026-08-16 the CAPE thresholds are no longer among them — the trigger
+    # gained a straight-through gradient and they were promoted to tier 2, so
+    # the ordinary tier selection picks them up.  The opt-in stays because the
+    # class it serves (physically real, AD-unreachable) can recur.
+    include_tier0 = tuple(sorted(
+        m.qualified_name for m in metas
+        if m.tunable_tier == 0 and _AD_UNREACHABLE_MARKER in m.reference
+    ))
+    exclude = tuple(sorted(
+        m.qualified_name for m in metas
+        if m.tunable_tier != 0 and (
+            m.category == "numerics"
+            or m.qualified_name in PHYSICAL_SET_NAME_EXCLUSIONS
+        )
+    ))
+    return "aggressive", include_tier0, exclude
+
+
+def apply_tuned_preset(base_cfg, scheme, preset_dir):
+    """Apply a committed SCM-RCE tuned preset to ``base_cfg``'s convection sub.
+
+    Reads ``<preset_dir>/<scheme>.yaml`` (the recommended per-scheme medians)
+    and overlays it on the active convection subconfig with the SAME
+    ``apply_param_overrides`` path the tuner uses, so a basic (non-tuning) run
+    reproduces the tuned parameters and a tuning run STARTS from them.  Returns
+    ``(cfg, n_applied)``; a missing file or a header-only preset (kuo) is a
+    no-op returning ``(base_cfg, 0)`` rather than an error, because "no moved
+    parameters" is a legitimate result of the campaign.
+
+    Keys are the qualified ``scheme_key.field`` names; only those whose
+    ``scheme_key`` matches THIS scheme's active convection subconfig are
+    applied, so a mis-pointed file cannot silently tune the wrong scheme.
+    """
+    from pathlib import Path as _Path
+
+    from legoesm.driver.run_config_yaml import load_params_config
+
+    path = _Path(preset_dir) / f"{scheme}.yaml"
+    if not path.exists():
+        return base_cfg, 0
+    raw = load_params_config(path)
+    if not raw:
+        return base_cfg, 0
+    import sys as _sys
+
+    _c, _sel, sub = _active_subconfig(base_cfg, "convection")
+    # scheme_key lives in the module-level __param_spec__ keyed by class name;
+    # apply_param_overrides ALSO raises on any field the config lacks, so a
+    # mis-pointed preset fails safe either way — this just gives a clearer msg.
+    _spec = getattr(_sys.modules.get(type(sub).__module__), "__param_spec__", {})
+    sub_key = (_spec.get(type(sub).__name__, {}) or {}).get("scheme_key")
+    field_values = {}
+    for qualified, val in raw.items():
+        key, _, field = qualified.rpartition(".")
+        if sub_key is not None and key != sub_key:
+            # A preset for a DIFFERENT scheme: refuse silently-wrong tuning.
+            raise ValueError(
+                f"preset {path} carries {qualified!r} but the active "
+                f"convection subconfig is {sub_key!r}; wrong preset for "
+                f"convection={scheme!r}")
+        field_values[field] = val
+    if not field_values:
+        return base_cfg, 0
+    from legoesm.core.param_overrides import apply_param_overrides
+    tuned_sub = apply_param_overrides(sub, field_values)
+    return _set_active_subconfig(base_cfg, "convection", tuned_sub), len(
+        field_values)
+
+
 def tune_category_winner(
     category: str,
     base_cfg: PhysicsConfig,
     ref: ReferenceProfiles,
     cache: dict[str, RunDiagnostics],
     *,
+    joint_refs=None,
+    primary_sst_K: float = FIXED_SST_K,
     days: float,
     dt: float,
     analysis_days: float,
@@ -2052,52 +2692,142 @@ def tune_category_winner(
     coriolis_s_inv: float = DEFAULT_SCM_RCE_CORIOLIS_S_INV,
     large_scale_forcing: str = DEFAULT_SCM_RCE_LARGE_SCALE_FORCING,
     bl_anchor_top_m: float = DEFAULT_SCM_RCE_BL_TOP_M,
-) -> tuple[PhysicsConfig, list[TuneRecord], RunDiagnostics]:
+    subcloud_top_m: float = DEFAULT_SUBCLOUD_TOP_M,
+    objective: str = "combined",
+    param_set: str = "extended",
+    refine_frac: float = 0.0,
+    thermo_humidity: str = DEFAULT_THERMO_HUMIDITY,
+) -> tuple[PhysicsConfig, list[TuneRecord], RunDiagnostics, dict[str, int]]:
+    if not (0.0 <= float(refine_frac) <= 1.0):
+        raise ValueError(
+            f"tune_category_winner: refine_frac must be in [0, 1], got "
+            f"{refine_frac!r}")
     _component, scheme, subcfg = _active_subconfig(base_cfg, category)
     scheme_key = _scheme_key_for_subconfig(subcfg)
-    default_run = run_cached(
-        cache,
-        base_cfg,
-        ref,
-        label=f"tune-default:{category}:{scheme}",
-        days=days,
-        dt=dt,
-        analysis_days=analysis_days,
-        require_equilibrium=require_equilibrium,
-        require_realism=require_realism,
-        equil_T_tol_K=equil_T_tol_K,
-        equil_qv_tol=equil_qv_tol,
-        equil_qcond_tol=equil_qcond_tol,
-        scm_microphysics_substeps=scm_microphysics_substeps,
-        scm_convection_substeps=scm_convection_substeps,
-        surface_wind_m_s=surface_wind_m_s,
-        coriolis_s_inv=coriolis_s_inv,
-        large_scale_forcing=large_scale_forcing,
-        bl_anchor_top_m=bl_anchor_top_m,
-    )
+    # JOINT multi-SST objective for generalization: each candidate is scored at
+    # EVERY (sst, ref) pair and the scores are averaged, so the winner is the
+    # parameter set that fits all SSTs at once rather than one.  ``ref`` remains
+    # the PRIMARY reference (the run whose profiles are reported); joint_refs,
+    # when given, drives the score.  A single-SST call (joint_refs=None) keeps
+    # the exact previous behaviour.
+    _sst_pairs = (list(joint_refs) if joint_refs
+                  else [(primary_sst_K, ref)])
+
+    def _joint_eval(trial_cfg, label):
+        runs = []
+        for _sst, _r in _sst_pairs:
+            runs.append((_sst, run_cached(
+                cache, trial_cfg, _r,
+                label=f"{label}:sst{int(_sst)}",
+                sst_K=_sst,
+                days=days, dt=dt, analysis_days=analysis_days,
+                require_equilibrium=require_equilibrium,
+                require_realism=require_realism,
+                equil_T_tol_K=equil_T_tol_K, equil_qv_tol=equil_qv_tol,
+                equil_qcond_tol=equil_qcond_tol,
+                scm_microphysics_substeps=scm_microphysics_substeps,
+                scm_convection_substeps=scm_convection_substeps,
+                surface_wind_m_s=surface_wind_m_s,
+                coriolis_s_inv=coriolis_s_inv,
+                large_scale_forcing=large_scale_forcing,
+                bl_anchor_top_m=bl_anchor_top_m,
+                subcloud_top_m=subcloud_top_m,
+                thermo_humidity=thermo_humidity)))
+        all_ok = all(r.status == "ok" for _s, r in runs)
+        # MEAN across SSTs is the generalization objective; a candidate that is
+        # INVALID at ANY SST (crash / NaN / blow-up -> status != "ok") is
+        # disqualified (inf), never rewarded for a lucky single-SST fit.
+        # Whether a merely-drifting run counts as valid follows the caller's
+        # require_equilibrium, exactly as in the single-SST path.
+        score = (float(np.mean([objective_value(r, objective)
+                                for _s, r in runs]))
+                 if all_ok else float("inf"))
+        _prim = [r for _s, r in runs if _s == primary_sst_K]
+        if not _prim:
+            raise ValueError(
+                f"primary SST {primary_sst_K} not among joint SSTs "
+                f"{[s for s, _ in runs]}; the reported profile and the albedo/"
+                "base_cfg would be built for different SSTs.")
+        return score, _prim[0], all_ok
+
+    default_score, default_run, _default_ok = _joint_eval(
+        base_cfg, f"tune-default:{category}:{scheme}")
     if scheme_key is None or subcfg is None:
-        return base_cfg, [], default_run
+        return base_cfg, [], default_run, EMPTY_TUNE_STATS
+    tier, include_tier0, exclude = resolve_param_selection(scheme_key, param_set)
     params = build_trainable_params(
         active_scheme_keys={scheme_key},
-        tier="extended",
+        tier=tier,
+        include_tier0=include_tier0,
+        exclude=exclude,
         dtype=jnp.float64,
     )
     if not params.constraints:
-        return base_cfg, [], default_run
+        return base_cfg, [], default_run, EMPTY_TUNE_STATS
     constraints = params.constraints
     defaults = {c.name: float(params.as_dict()[c.name]) for c in constraints}
+    # A DEFAULT OUTSIDE ITS OWN BOUNDS is silently clamped by the sigmoid
+    # seeding (``range_to_sigmoid_array`` clips to 0.001/0.999), so candidate
+    # zero would not be the a-priori configuration and the reported "default"
+    # would not be the shipped value.  Refuse instead: the registry's bounds are
+    # a search range, and one that excludes the shipped value is a spec bug that
+    # must be fixed in the spec, not absorbed here.
+    out_of_bounds = {
+        c.name: (defaults[c.name], float(c.min_val), float(c.max_val))
+        for c in constraints
+        if not (float(c.min_val) <= defaults[c.name] <= float(c.max_val))
+    }
+    if out_of_bounds:
+        raise ValueError(
+            "tune_category_winner: these parameters' shipped defaults lie "
+            f"outside their declared bounds, so the search's 'default' would "
+            f"not be the a-priori configuration: {out_of_bounds}")
     best_cfg = base_cfg
     best_run = default_run
     best_values = defaults
     # A non-finite incumbent score makes EVERY ``trial < best`` comparison
     # False, so the tuner would report the defaults as "tuned" while silently
-    # discarding every trial.  The default run scores +inf when it fails
-    # (run_scm_rce), which compares correctly; NaN would not, so it is mapped
-    # to +inf here rather than trusted.
-    best_score = float(default_run.score)
-    if not math.isfinite(best_score):
-        best_score = float("inf")
-    for i, values in enumerate(_candidate_values(defaults, constraints, tune_evals, seed)):
+    # discarding every trial.  ``default_score`` is the JOINT mean (inf if any
+    # SST was invalid), so the incumbent the search must beat is the joint
+    # default, not one SST's objective_value.
+    best_score = default_score
+    # The random phase gets the budget minus whatever the refinement stage is
+    # given.  Computed BEFORE the loop so the two phases cannot overspend
+    # between them, and floored at 1 so `refine_frac=1.0` still evaluates the
+    # defaults.
+    n_refine = max(0, int(round(float(refine_frac) * tune_evals)))
+    n_random = max(1, tune_evals - n_refine)
+    candidates = list(_candidate_values(defaults, constraints, n_random, seed))
+
+    # ACCOUNTING.  `tune_evals` is a REQUESTED budget, not a count of columns
+    # integrated: candidate zero repeats the default run, and a refinement
+    # proposal that lands on the incumbent's own value hits the cache.  Reporting
+    # the request as if it were the work done overstates both the search and the
+    # evaluations-per-parameter that a reader divides by.
+    # Count keys INSERTED BY THIS CALL, not the cache size: the cache already
+    # holds the default run, and a caller may share one across schemes.
+    _keys_before = set(cache)
+    stats = {"requested_evals": int(tune_evals), "random_proposals": 0,
+             "refine_proposals": 0, "unique_evals": 0}
+
+    def _try(values: dict[str, float], label: str) -> None:
+        """Evaluate one candidate and keep it if it beats the incumbent.
+
+        A candidate EQUAL to the defaults is skipped: ``default_run`` already
+        is that column, and re-evaluating it does not reproduce it.  The
+        round trip ``value -> sigmoid raw -> value`` is accurate to about one
+        ULP (MEASURED: 7200.0 -> 7199.999999999998, 0.9 -> 0.8999999999999999,
+        every scheme affected), which is a DIFFERENT configuration, a different
+        cache key, and a separate 100-day integration.  A single column
+        integrated that long is chaotic, so the two scores differ by far more
+        than the perturbation: emanuel scored 6.9607 a priori and 6.7207 on the
+        bit-perturbed defaults, and the tuner recorded that 0.24 as an
+        improvement with ZERO parameters moved.  Skipping it removes the
+        spurious win and returns one evaluation to the budget.
+        """
+        nonlocal best_score, best_cfg, best_run, best_values
+        if all(values[c.name] == defaults[c.name] for c in constraints):
+            return
         raw_values = {
             c.name: _raw_from_physical(values[c.name], c) for c in constraints
         }
@@ -2120,35 +2850,67 @@ def tune_category_winner(
         tuned_tunable = apply_param_overrides(_tunable_subconfig(subcfg), field_values)
         tuned_subcfg = _rewrap_tunable_subconfig(subcfg, tuned_tunable)
         trial_cfg = _set_active_subconfig(base_cfg, category, tuned_subcfg)
-        trial_run = run_cached(
-            cache,
-            trial_cfg,
-            ref,
-            label=f"tune:{category}:{scheme}:eval{i:03d}",
-            days=days,
-            dt=dt,
-            analysis_days=analysis_days,
-            require_equilibrium=require_equilibrium,
-            require_realism=require_realism,
-            equil_T_tol_K=equil_T_tol_K,
-            equil_qv_tol=equil_qv_tol,
-            equil_qcond_tol=equil_qcond_tol,
-            scm_microphysics_substeps=scm_microphysics_substeps,
-            scm_convection_substeps=scm_convection_substeps,
-            surface_wind_m_s=surface_wind_m_s,
-            coriolis_s_inv=coriolis_s_inv,
-            large_scale_forcing=large_scale_forcing,
-            bl_anchor_top_m=bl_anchor_top_m,
-        )
-        if (trial_run.status == "ok"
-                and math.isfinite(trial_run.score)
-                and trial_run.score < best_score):
-            best_score = float(trial_run.score)
+        trial_score, trial_run, trial_ok = _joint_eval(trial_cfg, label)
+        stats["unique_evals"] = len(set(cache) - _keys_before)
+        if trial_ok and trial_score < best_score:
+            best_score = trial_score
             best_cfg = trial_cfg
             best_run = trial_run
             best_values = {
                 c.name: float(field_values[c.field]) for c in constraints
             }
+
+    for i, values in enumerate(candidates):
+        stats["random_proposals"] += 1
+        _try(values, f"tune:{category}:{scheme}:eval{i:03d}")
+
+    # LOCAL REFINEMENT.  A uniform random search over 19-25 parameters resolves
+    # nothing: 200 draws in 19 dimensions sit ~0.76 of the range apart on every
+    # axis, so the incumbent is a lucky corner rather than a local optimum.  A
+    # coordinate sweep AROUND the incumbent — each parameter moved alone by a
+    # shrinking fraction of its own range, both directions, incumbent updated
+    # greedily — costs the same per evaluation and is the cheapest thing that
+    # turns "the best of N lottery tickets" into "a point no single-parameter
+    # move improves".  It does NOT establish convergence, and does not remove
+    # the cross-scheme dimensionality confound; that is what the second seed is
+    # for.  Off by default (refine_frac=0.0) so every existing campaign keeps
+    # its exact search.
+    if n_refine > 0:
+        step_fracs = (0.25, 0.10, 0.04)
+        spent = 0
+        for step in step_fracs:
+            if spent >= n_refine:
+                break
+            for c in constraints:
+                if spent >= n_refine:
+                    break
+                for direction in (+1.0, -1.0):
+                    if spent >= n_refine:
+                        break
+                    incumbent = dict(best_values)
+                    lo = float(c.min_val)
+                    hi = float(c.max_val)
+                    current = float(incumbent[c.name])
+                    frac = (
+                        # Move in the parameter's OWN sampling scale, so a
+                        # log-sampled rate coefficient takes a multiplicative
+                        # step rather than one dominated by its top decade.
+                        _frac_from_value(c, current) + direction * step
+                    )
+                    if not (0.0 <= frac <= 1.0):
+                        continue
+                    proposal = _interp(c, frac)
+                    if proposal == current or not (lo <= proposal <= hi):
+                        continue
+                    incumbent[c.name] = proposal
+                    stats["refine_proposals"] += 1
+                    _try(
+                        incumbent,
+                        f"refine:{category}:{scheme}:s{step:g}:"
+                        f"{c.field}:{'+' if direction > 0 else '-'}",
+                    )
+                    spent += 1
+
     records = []
     meta_by_name = {m.qualified_name: m for m in build_registry()}
     for c in constraints:
@@ -2169,11 +2931,229 @@ def tune_category_winner(
                 lower=lo,
                 upper=hi,
                 units=meta.units,
-                score_default=float(default_run.score),
-                score_tuned=float(best_run.score),
+                # The objective actually minimised, not the historical combined
+                # score: a record whose "score_tuned" comes from a different
+                # metric than the search used reads as a failed search whenever
+                # the two disagree.  ``tune_focused_params`` already does this.
+                score_default=default_score,
+                score_tuned=best_score,
             )
         )
-    return best_cfg, records, best_run
+    return best_cfg, records, best_run, stats
+
+
+def tune_focused_params(
+    base_cfg: PhysicsConfig,
+    ref: ReferenceProfiles,
+    cache: dict[str, RunDiagnostics],
+    *,
+    joint_refs=None,
+    categories: Sequence[str],
+    include: Sequence[str],
+    days: float,
+    dt: float,
+    analysis_days: float,
+    require_equilibrium: bool,
+    require_realism: bool,
+    tune_evals: int,
+    seed: int,
+    equil_T_tol_K: float,
+    equil_qv_tol: float,
+    equil_qcond_tol: float,
+    tier: str = "extended",
+    objective: str = "subcloud",
+    scm_microphysics_substeps: int = DEFAULT_SCM_MICROPHYSICS_SUBSTEPS,
+    scm_convection_substeps: int = DEFAULT_SCM_CONVECTION_SUBSTEPS,
+    surface_wind_m_s: float = DEFAULT_SCM_RCE_SURFACE_WIND_M_S,
+    coriolis_s_inv: float = DEFAULT_SCM_RCE_CORIOLIS_S_INV,
+    large_scale_forcing: str = DEFAULT_SCM_RCE_LARGE_SCALE_FORCING,
+    bl_anchor_top_m: float = DEFAULT_SCM_RCE_BL_TOP_M,
+    subcloud_top_m: float = DEFAULT_SUBCLOUD_TOP_M,
+    thermo_humidity: str = DEFAULT_THERMO_HUMIDITY,
+    sst_K: float = FIXED_SST_K,
+) -> tuple[PhysicsConfig, list[TuneRecord], RunDiagnostics, RunDiagnostics]:
+    """Tune ONE NAMED parameter set that spans SEVERAL scheme categories.
+
+    ``tune_category_winner`` searches every extended-tier parameter of a single
+    category.  The sub-cloud layer is not owned by one category: it is
+    ventilated by the boundary-layer scheme's mixing, cooled and moistened by
+    the microphysics' rain re-evaporation, and dried by the convection scheme's
+    downdrafts.  Those knobs interact, so tuning them jointly is a different
+    experiment from tuning each category's whole parameter set in turn, and it
+    is the one the sub-cloud objective needs.
+
+    ``include`` is an explicit list of registry-qualified ``scheme_key.field``
+    names — the experiment's hypothesis written down, not a tier sweep. Every
+    name must resolve to a parameter of one of the ACTIVE schemes; a name that
+    silently selects nothing would shrink the search while the log still
+    claimed N parameters, so it raises.
+
+    Returns ``(best_cfg, records, default_run, best_run)``.  ``default_run`` is
+    returned explicitly rather than left implicit: when no candidate wins,
+    ``best_run IS default_run``, and a caller that cannot tell the two apart
+    reads "tuned == default" as a code-path signature, which it is not.
+    """
+    if objective not in TUNE_OBJECTIVES:
+        raise ValueError(
+            f"tune_focused_params: unknown objective {objective!r}; "
+            f"expected one of {TUNE_OBJECTIVES}")
+    resolved: dict[str, tuple[str, Any]] = {}
+    for category in categories:
+        if category not in CATEGORY_CONFIG_FIELD:
+            raise ValueError(
+                f"tune_focused_params: unknown category {category!r}; "
+                f"expected one of {sorted(CATEGORY_CONFIG_FIELD)}")
+        _component, scheme, subcfg = _active_subconfig(base_cfg, category)
+        scheme_key = _scheme_key_for_subconfig(subcfg)
+        if scheme_key is None or subcfg is None:
+            # e.g. convection="none": no tunable sub-config exists.  Skipping is
+            # correct, but it must be visible, never silent.
+            print(f"  [focused-tune] {category}={scheme}: no tunable "
+                  f"sub-config, skipped")
+            continue
+        resolved[scheme_key] = (category, subcfg)
+    if not resolved:
+        raise ValueError(
+            "tune_focused_params: none of the requested categories "
+            f"{list(categories)} has a tunable sub-config in this config.")
+
+    # RESOLVE THE PARAMETER SET FIRST.  A bad ``include`` must fail before the
+    # 100-day default column is paid for, not after it.
+    params = build_trainable_params(
+        active_scheme_keys=set(resolved),
+        tier=tier,
+        include=tuple(include),
+        dtype=jnp.float64,
+    )
+    constraints = [c for c in params.constraints if c.name in set(include)]
+    missing = sorted(set(include) - {c.name for c in constraints})
+    if missing:
+        raise ValueError(
+            f"tune_focused_params: {missing} matched no parameter of the "
+            f"active schemes {sorted(resolved)}. A selector that matches "
+            "nothing is a hard error, never a quietly smaller search.")
+    if not constraints:
+        raise ValueError("tune_focused_params: empty parameter set.")
+    print(f"  [focused-tune] {len(constraints)} parameters across "
+          f"{len(resolved)} schemes, objective={objective}, "
+          f"{tune_evals} evaluations")
+
+    default_run = run_cached(
+        cache, base_cfg, ref,
+        sst_K=sst_K,
+        label="focused-tune-default",
+        days=days, dt=dt, analysis_days=analysis_days,
+        require_equilibrium=require_equilibrium,
+        require_realism=require_realism,
+        equil_T_tol_K=equil_T_tol_K,
+        equil_qv_tol=equil_qv_tol,
+        equil_qcond_tol=equil_qcond_tol,
+        scm_microphysics_substeps=scm_microphysics_substeps,
+        scm_convection_substeps=scm_convection_substeps,
+        surface_wind_m_s=surface_wind_m_s,
+        coriolis_s_inv=coriolis_s_inv,
+        large_scale_forcing=large_scale_forcing,
+        bl_anchor_top_m=bl_anchor_top_m,
+        subcloud_top_m=subcloud_top_m,
+        thermo_humidity=thermo_humidity,
+    )
+
+    defaults = {c.name: float(params.as_dict()[c.name]) for c in constraints}
+    best_cfg = base_cfg
+    best_run = default_run
+    best_values = dict(defaults)
+    best_score = objective_value(default_run, objective)
+
+    for i, values in enumerate(
+            _candidate_values(defaults, constraints, tune_evals, seed)):
+        trial_params = TrainablePhysicsParams(
+            raw_values={c.name: _raw_from_physical(values[c.name], c)
+                        for c in constraints},
+            constraints=constraints,
+        )
+        overrides = trial_params.to_overrides()
+        trial_cfg = base_cfg
+        # The value that was APPLIED, not the one that was requested: the
+        # sampler's physical draw goes through raw <-> sigmoid, so the two can
+        # differ at round-off and it is the applied one that produced the score.
+        applied: dict[str, float] = {}
+        for scheme_key, (category, subcfg) in resolved.items():
+            field_values = overrides.get(scheme_key, {})
+            if not field_values:
+                continue
+            for c in constraints:
+                if c.name.rsplit(".", 1)[0] != scheme_key:
+                    continue
+                value = float(field_values[c.field])
+                lo, hi = float(c.min_val), float(c.max_val)
+                if not (lo <= value <= hi):
+                    raise AssertionError(
+                        f"{c.name}={value} escaped bounds [{lo}, {hi}]")
+                applied[c.name] = value
+            tuned_tunable = apply_param_overrides(
+                _tunable_subconfig(subcfg), field_values)
+            trial_cfg = _set_active_subconfig(
+                trial_cfg, category,
+                _rewrap_tunable_subconfig(subcfg, tuned_tunable))
+        if len(applied) != len(constraints):
+            raise AssertionError(
+                f"focused tune applied {len(applied)} of {len(constraints)} "
+                "parameters; an override was dropped between the sampler and "
+                "the config.")
+        trial_run = run_cached(
+            cache, trial_cfg, ref,
+            label=f"focused-tune:eval{i:03d}",
+            days=days, dt=dt, analysis_days=analysis_days,
+            require_equilibrium=require_equilibrium,
+            require_realism=require_realism,
+            equil_T_tol_K=equil_T_tol_K,
+            equil_qv_tol=equil_qv_tol,
+            equil_qcond_tol=equil_qcond_tol,
+            scm_microphysics_substeps=scm_microphysics_substeps,
+            scm_convection_substeps=scm_convection_substeps,
+            surface_wind_m_s=surface_wind_m_s,
+            coriolis_s_inv=coriolis_s_inv,
+            large_scale_forcing=large_scale_forcing,
+            bl_anchor_top_m=bl_anchor_top_m,
+            subcloud_top_m=subcloud_top_m,
+            thermo_humidity=thermo_humidity,
+            sst_K=sst_K,
+        )
+        trial_score = objective_value(trial_run, objective)
+        if trial_run.status == "ok" and trial_score < best_score:
+            best_score = trial_score
+            best_cfg = trial_cfg
+            best_run = trial_run
+            best_values = dict(applied)
+
+    meta_by_name = {m.qualified_name: m for m in build_registry()}
+    records = []
+    for c in constraints:
+        meta = meta_by_name[c.name]
+        tuned = float(best_values[c.name])
+        lo, hi = float(c.min_val), float(c.max_val)
+        if not (lo <= tuned <= hi):
+            raise AssertionError(f"tuned value escaped bounds: {c.name}={tuned}")
+        scheme_key = c.name.rsplit(".", 1)[0]
+        category, subcfg = resolved[scheme_key]
+        records.append(
+            TuneRecord(
+                category=category,
+                scheme=_active_subconfig(base_cfg, category)[1],
+                scheme_key=scheme_key,
+                parameter=c.field,
+                default=float(defaults[c.name]),
+                tuned=tuned,
+                lower=lo,
+                upper=hi,
+                units=meta.units,
+                # The objective actually minimised, so a reader cannot mistake
+                # a sub-cloud tune for a combined-score one.
+                score_default=default_score,
+                score_tuned=best_score,
+            )
+        )
+    return best_cfg, records, default_run, best_run
 
 
 def _parse_categories(raw: str, include_convection: bool) -> list[str]:
@@ -2611,7 +3591,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_tuning:
         for category in categories:
             print(f"[tune] {category}={winners[category]}")
-            tuned_cfg, records, tuned_run = tune_category_winner(
+            tuned_cfg, records, tuned_run, _tune_stats = tune_category_winner(
                 category,
                 tuned_cfg,
                 ref,

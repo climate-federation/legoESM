@@ -16,18 +16,10 @@ After convergence ``G = Rn_soil − LE_soil − H_soil`` is passed to
 ``solve_soil_thermal`` as the top BC exactly as in
 ``multilayer_land.py``.
 
-Newton step control (CLM5-inspired, section 2.5.3.2):
-  * per-component absolute caps on each iteration (constant, not
-    decaying) — prevents dusk overshoot that a scalar clamp cannot
-  * per-component convergence check on the raw (unclipped) Newton delta
-  * wide ``Ci`` cap so the Ball-Berry / Farquhar inner fixed point is
-    resolved in 1–2 iterations and does not dominate the outer loop
-  * sunlit-leaf degeneracy anchor when ``fSun < 0.05``
-
-Uses jax.lax.scan for JIT-compatible fixed-point iteration with a
-forward-mode autodiff Jacobian (jax.jacfwd).  The LE_module is captured
-as a static Python string in a functools.partial closure — it is never
-traced.
+The closure uses the core package's scaled Levenberg--Marquardt helper: an
+augmented-QR forward step with Nielsen gain-ratio rejection and an exact,
+column-equilibrated implicit adjoint.  Its convergence flag is based on the
+residual norm, and non-converged solves have zero gradient.
 
 **Coupling scheme**: only the DifferBESS FULLY_COUPLED formulation is
 implemented — leaves and soil share the same canopy air space (Tc, q_c)
@@ -37,37 +29,35 @@ with a clumping-index-weighted below-canopy resistance (see
 Newton residual shape minimal; they can be added back later if a
 multi-scheme comparison study needs them.
 
-Source: adapted from DifferBESS/algo/newton_root.py;
-        coupling architecture rewritten for legoESM's multilayer soil
-        thermal solver via outer Picard iteration.
+The coupling architecture was adapted for legoESM's multilayer soil thermal
+solver via an outer Picard iteration.
 """
 
 from __future__ import annotations
 
-import jax
-import jax.numpy as jnp
-from functools import partial
 from typing import NamedTuple
 
-from legoesm.land.canopy.config import CanopyConfig, VALID_LE_MODULES
-from legoesm.land.canopy.radiative_transfer import canopy_longwave_rt
-from legoesm.land.canopy.photosynthesis import photosynthesis
-from legoesm.land.canopy.stability import (
-    monin_obukhov_stability,
-    compute_boundary_layer_resistance,
-    compute_below_canopy_resistance,
-    sat_specific_humidity,
-)
+import jax
+import jax.numpy as jnp
+from legoesm.core.nonlinear import make_implicit_newton_solver
+from legoesm.land.canopy.config import VALID_LE_MODULES, CanopyConfig
 from legoesm.land.canopy.energy_balance import (
+    canopy_air_update,
     canopy_met_variables,
-    saturation_specific_humidity,
     leaf_energy_balance_bt,
     leaf_energy_balance_pm,
+    saturation_specific_humidity,
     soil_energy_balance_bt,
     soil_energy_balance_pm,
-    canopy_air_update,
 )
-
+from legoesm.land.canopy.photosynthesis import photosynthesis
+from legoesm.land.canopy.radiative_transfer import canopy_longwave_rt
+from legoesm.land.canopy.stability import (
+    LEAF_AREA_FLOOR,
+    compute_below_canopy_resistance,
+    compute_boundary_layer_resistance,
+    monin_obukhov_stability,
+)
 
 # --- Sunlit-leaf degeneracy anchor smoother (numerics; see solver notes) ---
 # tanh blend Tf_Sun -> Tf_Sh as the sunlit fraction shrinks; centred at
@@ -75,6 +65,48 @@ from legoesm.land.canopy.energy_balance import (
 # the old hard ``where(fSun < 0.05, ...)`` kink).
 _ANCHOR_FSUN_CENTER = 0.08   # [-] tanh centre in sunlit fraction
 _ANCHOR_FSUN_WIDTH  = 0.03   # [-] tanh transition half-width
+
+# --- Damped-least-squares canopy solve (numerics; never tunable) ------------
+# WHY NOT PLAIN NEWTON.  A small share of columns -- hot, bright and CALM --
+# never converged at any iteration count: the unsolved share was flat at 0.66%
+# from 25 iterations through 50.  They do not stall, they OSCILLATE, moving
+# ~3.9 K per iteration forever while solved columns move exactly 0.0.  In calm
+# air the aerodynamic conductance collapses and one direction of the Jacobian
+# goes nearly flat; Newton divides by that tiny slope, the step overshoots the
+# root, and a FIXED step clamp of the same magnitude as the overshoot turns the
+# overshoot into a stable period-2 cycle.  The root sits BETWEEN consecutive
+# iterates and the iteration can never land on it.
+#
+# Shrinking the clamp cannot fix that: the bulk of columns legitimately need
+# steps of order 1 K early on, and a clamp of 1.0 left 80-92% of ALL columns
+# unconverged.  One constant cannot serve both regimes.
+#
+# The cure is damping that ADAPTS: the step is the solution of a least-squares
+# problem whose damping rises whenever a step fails to reduce the residual and
+# falls when it succeeds, so ordinary columns never feel it and a cycling column
+# is damped until it lands inside the bracket.  Steps that fail are REJECTED
+# rather than taken, which is what makes the residual monotone.
+#
+# The damped system is solved in AUGMENTED form via QR, never through the normal
+# equations: this Jacobian's condition number is ~1e5, and squaring it to 1e10
+# exceeds single precision, which is what this path runs in -- that would trade
+# an oscillation for numerical noise.
+_LM_RTOL, _LM_ATOL = 1.0e-8, 1.0e-12     # [-] on the SQUARED residual norm
+
+# Characteristic increment of each unknown, in its own units:
+#   [Tf_Sun, Tf_Sh, Ci_Sun, Ci_Sh, Tc, q_c] = [K, K, umol/mol, umol/mol, K, kg/kg]
+# The solver previously CLAMPED every component to the same +/-5, which is 5 K on
+# a temperature and 5 umol/mol on a CO2 concentration -- both sensible -- but
+# FIVE HUNDRED TIMES its own magnitude on a specific humidity of ~0.01 kg/kg,
+# i.e. no constraint at all on the one variable that most needed one.  These
+# values are that characteristic magnitude per unknown; solving in them
+# (z = x/xscale) makes the damping act evenly across components.
+# NOTE: this is a SCALE, not the old hard clip -- there is no longer a fixed
+# +/-5 cap on the step.  The step is instead bounded by the adaptive damping and
+# the accept-only-if-the-residual-drops rule; a component's move is
+# xscale[i]*dz[i], which the damping shrinks whenever a trial is rejected.
+_LM_XSCALE = jnp.array([5.0, 5.0, 5.0, 5.0, 5.0, 5.0e-3])
+_LM_FSCALE = jnp.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0e-3])
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +305,14 @@ def _canopy_residual(
     # smoothly blending ``Tf_Sun → Tf_Sh`` as fSun shrinks (the two-leaf
     # partition is physically marginal anyway when direct beam is tiny).
     #
+    # NOTE (2026-08-21): retargeting this trigger to the sunlit LEAF AREA was
+    # tried and REVERTED.  It fires in the leafless limit, but it replaces the
+    # residual of the leaf that still HAS area with equality to the empty one —
+    # the wrong direction, and both reviewers flagged it as the mechanism that
+    # spreads a degenerate leaf state into the canopy air.  Measured, it moved
+    # the failure count only 186 -> 172 of 4500.  If this is revisited, the
+    # EMPTY class must lose its equation and the active class must keep its own.
+    #
     # The blend weight is a tanh smoother centred at ``fSun = 0.08`` with
     # transition half-width 0.03: anchor_weight ≈ 1 at fSun ≲ 0.05, ≈ 0
     # at fSun ≳ 0.11, and smoothly in between.  The earlier hard
@@ -291,9 +331,33 @@ def _canopy_residual(
         res_Ci_Sun,
         Ci_Sh  - Ci_Sh_new,
         Tc     - Tc_new,
-        (q_c   - q_c_new) * 1e3,   # scale humidity residual
+        q_c   - q_c_new,
     ])
-    return diff
+
+    # ---- Bare ground: no leaves, so no leaf equations ----
+    # At LAI == 0 the leaf rows above still get solved, through boundary-layer
+    # resistances of ~1e7 s/m.  Nothing then holds the leaf temperature: it
+    # drifts ~100 K from the canopy air (measured median 96 K on the failing
+    # columns) and the saturation humidity evaluated there makes the q_c row
+    # non-smooth, so the damped Newton steps are rejected and the solve stalls
+    # at the iteration cap.  Those columns were 90% of all non-converged solves
+    # (10.7% -> 2.0% with the pins; gradient gate -0.21 -> 1.14).  Pin the empty
+    # leaf state to the canopy air and ambient CO2; the Tc and q_c rows keep
+    # their full balance, in which the leaf terms are already ~0 at LAI == 0.
+    # The trigger is the leaf-area floor of the boundary-layer resistance: at
+    # or below it both leaf classes are bit-identical to bare ground, so a
+    # column with LAI = 1e-7 is pinned too, and no column with distinct leaf
+    # physics is.
+    bare = b.LAI <= LEAF_AREA_FLOOR
+    pinned = jnp.array([
+        Tf_Sun - Tc,
+        Tf_Sh  - Tc,
+        Ci_Sun - b.Ca,
+        Ci_Sh  - b.Ca,
+        diff[4],
+        diff[5],
+    ])
+    return jnp.where(bare, pinned, diff)
 
 
 # ---------------------------------------------------------------------------
@@ -457,13 +521,51 @@ def solve_canopy_closure(
 
     Returns
     -------
-    x_final : shape (6,)  — converged state
-    n_iters : scalar int  — iteration count when convergence was first reached
+    x_final : shape (6,)  — the final Newton iterate
+    n_iters : scalar int  — iteration count when the loop stopped
+    converged : scalar bool — whether the loop stopped because the Newton step
+        fell below ``tol`` (True) rather than because it ran out of iterations
+        or its Jacobian went singular (False).  A False here means ``x_final``
+        is NOT a root of the canopy residual, so the fluxes derived from it are
+        not physics; callers must not consume them as if they were.
     """
     # Fail-early on a typo'd LE_module: the internal leaf-energy dispatch is a
     # bare ``if LE_module == "BT": ... else: # PM``, so an unknown value would
     # SILENTLY run Penman-Monteith.  Guards the direct-call path (callers that
     # skip CanopyConfig.validate).  Shares config.VALID_LE_MODULES (no drift).
+    if config.LE_module not in VALID_LE_MODULES:
+        raise ValueError(
+            f"unknown LE_module {config.LE_module!r}; the leaf-energy method "
+            f"must be one of {VALID_LE_MODULES} ('BT'=bulk transfer, "
+            "'PM'=Penman-Monteith)")
+    solver = _make_implicit_newton_solver(
+        LE_module=config.LE_module,
+        stomatal_model=config.stomatal_model,
+        le_cap_mode=config.le_cap_mode,
+        use_ta_for_photosynthesis=config.use_ta_for_photosynthesis,
+        max_iters=config.max_iters,
+        tol=config.tol,
+    )
+    return solver(initial_state, bundle)[:3]
+
+
+def solve_canopy_closure_diag(
+    initial_state: jax.Array,
+    bundle: CanopyForcingBundle,
+    config: CanopyConfig,
+):
+    """As :func:`solve_canopy_closure`, plus the solver's terminal diagnostics.
+
+    Returns ``(x_final, n_iters, converged, n_sq_final, n_sq_rel, lam_final,
+    hit_cap)``.  ``n_sq_final`` is the solver's OWN squared residual norm at
+    exit; ``n_sq_rel`` is that divided by its value at the seed — the ratio the
+    RELATIVE convergence gate tests.  ``lam_final`` is the terminal damping and
+    ``hit_cap`` is 1.0 when the loop left by the iteration cap rather than by
+    the damping ceiling.
+
+    Diagnostics only: same solve, same convergence test, same gradients (the
+    extra outputs carry zero cotangent, exactly like ``n_iters``).
+    """
     if config.LE_module not in VALID_LE_MODULES:
         raise ValueError(
             f"unknown LE_module {config.LE_module!r}; the leaf-energy method "
@@ -492,38 +594,10 @@ def _make_implicit_newton_solver(
     max_iters: int,
     tol: float,
 ):
-    """Create a custom_vjp Newton solver bound to the static config args.
+    """Bind the shared implicit root solver to the canopy residual."""
+    del tol  # Legacy step tolerance; convergence is the residual contract.
 
-    Forward pass:
-        Damped Newton via ``jax.lax.while_loop`` with true early stopping —
-        the iteration halts as soon as ``||delta|| < tol``, saving wasted
-        work when convergence is fast.
-
-    Backward pass (implicit function theorem):
-        At the fixed point ``x*`` with ``F(x*; θ) = 0``,
-            ``dx*/dθ = −(∂F/∂x)⁻¹ · ∂F/∂θ``
-        which gives the adjoint
-            ``λ = (∂F/∂x)⁻ᵀ g_x``,  ``grad_θ = −(∂F/∂θ)ᵀ λ``.
-        Solved with an exact ``jnp.linalg.solve`` (verified to match central
-        finite differences); the canopy Jacobian is stiff (cond ~ 1e5) but
-        nonsingular at converged columns, and the earlier ``lstsq(rcond=1e-4)``
-        truncation biased the gradient.  Without IFT-based gradients,
-        ``jax.grad`` through the scan-based Newton produces NaN from
-        second-order tangents at near-singular Jacobians.
-
-    Guards (backward only):
-        * Convergence: if Newton did not converge (hit max_iters), the IFT
-          identity F(x*)=0 does not hold, so all gradients are zeroed.
-        * Divergence: if ``x*`` is NaN or the adjoint ``λ`` is NaN/Inf, all
-          gradients are zeroed (the whole solve is invalid).
-        * Per-leaf: otherwise only individual non-finite cotangent leaves are
-          zeroed.  The Monin-Obukhov scan is not differentiable w.r.t. its
-          aerodynamic forcing (Ta/Tv_atm/q_atm/ur/z0m/displa/z0 come back NaN),
-          but every trainable physics-parameter gradient is finite and kept.
-
-    Adapted from DifferBESS ``algo.newton_root._make_implicit_newton_solver``.
-    """
-    def _F(x, bundle):
+    def residual(x, bundle):
         return _canopy_residual(
             x, bundle,
             LE_module=LE_module,
@@ -532,99 +606,11 @@ def _make_implicit_newton_solver(
             use_ta_for_photosynthesis=use_ta_for_photosynthesis,
         )
 
-    def _forward(x0, bundle):
-        F = partial(_F, bundle=bundle)
-        Jac = jax.jacfwd(F)
-
-        def cond(state):
-            _, i, converged = state
-            return (~converged) & (i < max_iters)
-
-        def body(state):
-            x, i, _ = state
-            delta = jnp.linalg.solve(Jac(x), -F(x))
-            # Sanitise a non-finite Newton step BEFORE the clip: a singular
-            # Jacobian / non-finite residual at the calm cold-night MOST edge
-            # makes ``solve`` return NaN, and ``jnp.clip(nan)`` stays NaN — a
-            # single non-finite step then poisons the whole coupled land state
-            # (every soil leaf goes NaN, forcing the atomic land guard to revert
-            # the step).  Replace it with 0 (no update this iteration) so the
-            # closure returns the last finite iterate instead, keeping the flux
-            # finite.  inf is already mapped to +/-5 by the clip below.
-            delta = jnp.where(jnp.isfinite(delta), delta, 0.0)
-            # Constant scalar clamp on the Newton step.  The earlier
-            # decaying clamp (10 → 0.1) starved late iterations of step
-            # size during dusk transitions; constant 5.0 lets the solver
-            # traverse the radiation-collapse smoothly while still
-            # preventing catastrophic overshoot.
-            delta = jnp.clip(delta, -5.0, 5.0)  # coeff-ok: constant Newton step cap (see note above)
-            x_new = x + delta
-            new_converged = jnp.linalg.norm(delta) < tol
-            return (x_new, i + 1, new_converged)
-
-        x_final, n_iters, converged = jax.lax.while_loop(
-            cond, body, (x0, jnp.array(0), jnp.array(False)))
-        return x_final, n_iters, converged
-
-    @jax.custom_vjp
-    def solve(x0, bundle):
-        x_final, n_iters, _converged = _forward(x0, bundle)
-        return x_final, n_iters
-
-    def solve_fwd(x0, bundle):
-        x_final, n_iters, converged = _forward(x0, bundle)
-        return (x_final, n_iters), (x_final, bundle, converged)
-
-    def solve_bwd(res, g):
-        x_star, bundle, converged = res
-        g_x, _ = g  # ignore cotangent for the integer iteration count
-
-        # NaN / divergence guard: substitute zeros so the adjoint solve
-        # is well-defined even if Newton diverged.
-        x_safe = jnp.where(jnp.isnan(x_star), jnp.zeros_like(x_star), x_star)
-        had_nan = jnp.any(jnp.isnan(x_star)) | jnp.any(jnp.isnan(g_x))
-        # Convergence guard: the IFT adjoint dx*/dθ = -(∂F/∂x)^{-1} ∂F/∂θ is
-        # only valid at a true root F(x*) = 0.  If the forward Newton hit
-        # max_iters without ||Δx|| < tol, x* is not a root and the adjoint is
-        # inconsistent — zero the cotangent (mirrors the NaN guard) rather than
-        # emit a misleading gradient.  ``converged`` is the forward loop's own
-        # convergence flag, so genuinely-converged columns are never masked.
-        not_converged = ~converged
-
-        # Jacobian ∂F/∂x at the fixed point
-        J = jax.jacfwd(partial(_F, bundle=bundle))(x_safe)
-
-        # Adjoint solve: J^T λ = g_x.  Use an exact linear solve, not
-        # ``lstsq(rcond=1e-4)``: the canopy Jacobian is routinely stiff
-        # (cond(J) ~ 1e5 even at a well-converged midday column), and the
-        # rcond truncation silently *biased* the gradient (~5x too small vs
-        # central finite differences).  A genuinely singular J (low fSun,
-        # wilting, freezing) gives inf/nan here and is caught by the guard
-        # below.
-        lam = jnp.linalg.solve(J.T, g_x)
-
-        # Gradient w.r.t. bundle via VJP of F at x_safe
-        _, vjp_fn = jax.vjp(partial(_F, x_safe), bundle)
-        grad_bundle = vjp_fn(-lam)[0]
-
-        # ``solve_failed`` invalidates the WHOLE adjoint (Newton diverged, did
-        # not converge, or the adjoint solve produced inf/nan) → zero every
-        # gradient.  Otherwise mask only individual non-finite leaves: the
-        # Monin-Obukhov scan is not differentiable w.r.t. its aerodynamic
-        # forcing (Ta, Tv_atm, q_atm, ur, z0m, displa, z0), whose cotangents
-        # come back NaN — zero those alone and keep the finite gradients of
-        # every trainable physics parameter (Vcmax25, m, b0, TgC, CI, cv,
-        # d_leaf, emissivities, ...).  The old all-or-nothing mask let a single
-        # NaN forcing leaf zero the entire gradient (so jax.grad returned 0).
-        solve_failed = (had_nan | not_converged
-                        | jnp.any(jnp.isnan(lam)) | jnp.any(jnp.isinf(lam)))
-
-        def _mask_leaf(v):
-            bad = solve_failed | jnp.isnan(v) | jnp.isinf(v)
-            return jnp.where(bad, jnp.zeros_like(v), v)
-
-        grad_bundle = jax.tree.map(_mask_leaf, grad_bundle)
-        return jnp.zeros_like(x_star), grad_bundle
-
-    solve.defvjp(solve_fwd, solve_bwd)
-    return solve
+    return make_implicit_newton_solver(
+        residual,
+        x_scale=_LM_XSCALE,
+        f_scale=_LM_FSCALE,
+        max_iters=max_iters,
+        rtol=_LM_RTOL,
+        atol=_LM_ATOL,
+    )

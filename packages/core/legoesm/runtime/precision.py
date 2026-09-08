@@ -58,7 +58,14 @@ _FP64_STORAGE_MODES = frozenset({"fp64", "float64", "mixed_fp64_storage"})
 
 
 def available_precision_modes() -> tuple[str, ...]:
-    """Sorted names of the precision modes ``apply_precision`` accepts."""
+    """Sorted names of the KNOWN precision modes.
+
+    NOTE (#1665): listed does NOT mean activatable — ``'mixed'`` /
+    ``'mixed_fp64_storage'`` are known modes that ``apply_precision`` currently
+    REFUSES (raises ``NotImplementedError``) until the mixed-consistency
+    campaign lands. Enumerating consumers should treat only ``'fp32'``/
+    ``'fp64'`` as runnable in the interim.
+    """
     return tuple(sorted(_MODE_FACTORIES))
 
 
@@ -92,8 +99,22 @@ def resolve_precision(mode: str = "fp32") -> PrecisionPolicy:
 def apply_precision(mode: str = "fp32") -> PrecisionPolicy:
     """Resolve *mode*, activate the policy globally, and enable x64 if needed.
 
-    This is the **one-shot** entry point used by :func:`runtime.bootstrap`.
+    This is the **one-shot** entry point used by :func:`runtime.bootstrap`
+    AND by the driver CLIs directly, so gating a mode here covers every caller.
     """
+    # #1665 interim: 'mixed' (fp32 storage / fp64 compute) is NOT yet consistent
+    # — it silently runs fp64 under x64, its grid metrics floor the semi-implicit
+    # solve, and its mass-fix correction is state-affecting. Refuse it LOUDLY
+    # instead of misrepresenting the precision that actually runs; fp64 is what
+    # mixed was really doing. (A dedicated mixed-consistency campaign is tracked
+    # separately.) fp32/fp64 unaffected.
+    if mode.strip().lower() in ("mixed", "mixed_fp64_storage"):
+        raise NotImplementedError(
+            f"precision={mode!r} is disabled (#1665 interim): the mixed "
+            "fp32-storage/fp64-compute path is not yet consistent. Use "
+            "precision='fp64' (what mixed was actually running) or "
+            "precision='fp32'."
+        )
     policy = resolve_precision(mode)
 
     # Activate globally.

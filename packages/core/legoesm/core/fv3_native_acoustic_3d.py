@@ -32,6 +32,8 @@ survive the call.
 """
 from __future__ import annotations
 
+import copy
+
 import numpy as np
 
 from legoesm.core.fv3_native_cgrid_phase_3d import (
@@ -355,7 +357,12 @@ def acoustic_substep_3d(ctx: dict, state: list, dt: float, km: int, *,
             p_fac=p_fac, a_imp=a_imp, dp0=dp0,
             delz6=[state[t]["delz"] for t in range(6)],
             remap_step=remap_step, use_logp=use_logp, cfg=cfg,
-            remap_follows=remap_follows)
+            remap_follows=remap_follows,
+            # The hydrostatic branch above forwards this; the NH branch
+            # did not, so every S_nh_* stage the tail emits was
+            # unreachable from here and any probe asking for one got
+            # nothing back. Unexercised wiring is unknown wiring.
+            stage_hook=stage_hook)
     if press_out is not None:
         press_out[:] = press
 
@@ -416,6 +423,8 @@ def acoustic_loop_3d(ctx: dict, state: list, dt_atmos: float, km: int, *,
                      dp0: np.ndarray | None = None,
                      use_logp: bool = False,
                      press_out: list | None = None,
+                     substeps_out: list | None = None,
+                     stage_hook=None,
                      flux_cap: list | None = None) -> list:
     """`do it=1,n_split` -- one outer dynamics step.
 
@@ -429,6 +438,15 @@ def acoustic_loop_3d(ctx: dict, state: list, dt_atmos: float, km: int, *,
     `press_out`, when given, receives the pressure bundle of the FINAL
     sub-step -- the one `dyn_core.F90:344-348` marks `remap_step` and the
     one `Lagrangian_to_Eulerian` reads.
+
+    ``substeps_out``, when given, receives ONE deep copy of the six-face
+    prognostic bundle per sub-step (index ``it - 1``), taken immediately
+    after ``acoustic_substep_3d`` returns -- so asking for it costs
+    ``n_split`` full six-face state copies, held until the caller drops
+    them.  It is the per-sub-step twin of
+    ``press_out``: a diagnostic BY RETURN, never a callback, so a probe
+    cannot substitute its own chain for the one under test.  Cost is
+    ``n_split`` state copies; the caller decides whether to ask.
 
     ``hydrostatic=False``: pass ``dp0`` (dp_ref) and either a carry from
     :func:`build_nh_carry` or None to have one built from ``ctx['hs6']``.
@@ -455,7 +473,18 @@ def acoustic_loop_3d(ctx: dict, state: list, dt_atmos: float, km: int, *,
                             p_fac=p_fac, a_imp=a_imp, dp0=dp0,
                             use_logp=use_logp,
                             press_out=(press_out if remap_step else None),
+                            stage_hook=stage_hook,
                             flux_cap=flux_cap)
+        if substeps_out is not None:
+            # `.copy()` on an ndarray, deepcopy on anything else: a future
+            # non-array leaf would be silently CONVERTED by np.array (a
+            # tuple becomes an array, a dict raises mid-capture) rather
+            # than round-tripped (GLM m5, job 9450546).
+            substeps_out.append([
+                {k: (v.copy() if isinstance(v, np.ndarray)
+                     else copy.deepcopy(v))
+                 for k, v in state[t].items()}
+                for t in range(6)])
         if validate:
             # Fail at the sub-step that broke, not many steps later with a
             # field of NaN and no idea which stage produced it.

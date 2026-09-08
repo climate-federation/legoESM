@@ -2,13 +2,21 @@
 
 NEMO integrates with the 3-D scale factors ``e3t_0`` (key_vco_3d). ``e3t_1d`` is
 a different, UNSTRETCHED reference ladder. For DINO they agree in the upper
-ocean and diverge below ~2000 m by up to 12.9%: e3t_1d sums to 4506.375 m while
-e3t_0 is stretched so the deepest wet column is exactly the 4000 m domain depth.
+ocean and part company below the ~1000 m re-anchor (first level differing by
+more than 1% is k=25, top face 982.4 m), by up to 70.4 m at the deepest wet
+level -- 12.9% of e3t_0, 14.8% of e3t_1d. Both sum to the same 4000.000 m over
+the wet levels, so this is a REDISTRIBUTION of thickness, not a change of
+domain depth.
 
-Using e3t_1d put legoESM's abyssal layers 7-13% off and its water columns ~22 m
-too deep -- precisely the depth range where #1226's ACC deficit is sourced
-(80% of the missing thermal wind below 2000 m). Thermal wind integrates
-density x THICKNESS, so this corrupted the quantity the deficit is measured in.
+Using e3t_1d put legoESM's abyssal layers 0.9-14.8% off (of e3t_1d; 0.9-12.9%
+of e3t_0) over k=25..34, and left the bottom of
+its PARTIAL-DEPTH columns misplaced: identical in the 75% of wet columns that
+reach all 35 levels, but 70.4-104.2 m too deep in the other 25%, a 21.9 m mean
+over all wet columns -- and 4.70e-03 relative on total wet volume. That is
+precisely the depth range where #1226's ACC deficit is sourced (80% of the
+missing thermal wind below 2000 m). Thermal wind integrates density x
+THICKNESS, so this corrupted the quantity the deficit is measured in.
+(Numbers re-measured 2026-08-21 from RUN_TRAJ/mesh_mask.nc, #1455.)
 
 The bug was invisible for GYRE (key_linssh, where e3t_0 == e3t_1d), which is
 why it survived so long. These tests are synthetic -- they do not need the NEMO
@@ -71,10 +79,14 @@ def test_nemogrid_carries_e3t_0_optionally():
 def test_prefers_e3t_0_over_the_1d_ladder():
     """With mode="both" the helper returns NEMO's ACTUAL scale factors.
 
-    NOTE the shipped DEFAULT is mode="off" (the 1-D ladder): adopting e3t_0 is
-    geometrically correct but currently DESTABILISES the model (see the
-    docstring in nemo_state_bridge). These tests pin the correct behaviour so it
-    is ready the moment the instability is fixed.
+    NOTE the shipped MODEL-WIDE default is still mode="off" (the 1-D ladder).
+    The reason recorded here used to be that adopting e3t_0 "DESTABILISES the
+    model"; that instability DID NOT REPRODUCE in 2026-08-21 measurements (four
+    90-day twin arms from the day-180 restart, all stable at 0.633-0.635 m/s
+    peak speed, the two end arms confirmed under fp64), so it is now an
+    unexplained recorded observation rather than an established defect -- see
+    the note in nemo_state_bridge. The DINO twin harness already defaults to
+    NEMO's own ladders; these tests pin the behaviour either way.
     """
     from legoesm.ocean.fidelity.nemo_state_bridge import (
         effective_vertical_scale_factors,

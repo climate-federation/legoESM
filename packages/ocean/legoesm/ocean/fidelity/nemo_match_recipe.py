@@ -7,8 +7,10 @@ were validated against NEMO Mar day-90 SST (``docs/dev-notes/ocean_faithfulness_
 * **MPAS ico6 (~115 km ≈ ORCA1)** — SST RMSE **0.84** vs NEMO (best grid).
 * **tripole eORCA025 (¼°)** — SST RMSE **1.15**, corr 0.99.
 
-Unlike the numerics-faithful ``nemo_v1`` card (TKE / EEN / GSW / split-explicit),
-these are a *climate*-match stack: KPP vertical mixing, Laplacian Smagorinsky
+Unlike the NEMO-style ``legoesm_nemo_like_v1`` card (TKE / EEN / GSW /
+split-explicit; renamed from ``nemo_v1`` 2026-09-02 — its barotropic solver
+is legoESM's own generic arm, not NEMO's ``dyn_spg_ts``), these are a
+*climate*-match stack: KPP vertical mixing, Laplacian Smagorinsky
 lateral viscosity, the ``implicit_cn`` barotropic solver, GM/Redi at κ=600, and a
 ``tvd`` / ``adcroft`` dycore.  This module is the SINGLE SOURCE OF TRUTH for that
 proven dycore + coefficient block; ``scripts/run/run_omip.py::_create_setup``
@@ -150,7 +152,13 @@ class NEMOMatchMPASRecipeConfig:
     # the namelist provenance.  False keeps the constant `kappa_GM` above
     # (byte-identical default); True selects the NEMO-faithful Treguier scaling.
     gm_treguier: bool = False
-    gm_aei0: float = 1800.0
+    # 900 = 1/2*rn_Ue*rn_Le: ldftra.F90:290-293 sets zUfac = r1_2*rn_Ud for the
+    # LAPLACIAN operator, which ORCA1 runs (ln_traldf_lap=.true.), and NEMO's
+    # emitted aeiu_2d maxes at exactly 900 on eORCA1.  (Was 1800 = rn_Ue*rn_Le,
+    # i.e. the same product with NEMO's 1/2 simply omitted -- NOT a bilaplacian
+    # value; NEMO's bilaplacian coefficient has different units and its own
+    # 1/12 factor.)
+    gm_aei0: float = 900.0
     # Floor on the Treguier kappa_GM [m^2/s]; only meaningful with
     # gm_treguier=True.
     #
@@ -226,7 +234,13 @@ class NEMOMatchTripoleRecipeConfig:
     # the namelist provenance.  False keeps the constant `kappa_GM` above
     # (byte-identical default); True selects the NEMO-faithful Treguier scaling.
     gm_treguier: bool = False
-    gm_aei0: float = 1800.0
+    # 900 = 1/2*rn_Ue*rn_Le: ldftra.F90:290-293 sets zUfac = r1_2*rn_Ud for the
+    # LAPLACIAN operator, which ORCA1 runs (ln_traldf_lap=.true.), and NEMO's
+    # emitted aeiu_2d maxes at exactly 900 on eORCA1.  (Was 1800 = rn_Ue*rn_Le,
+    # i.e. the same product with NEMO's 1/2 simply omitted -- NOT a bilaplacian
+    # value; NEMO's bilaplacian coefficient has different units and its own
+    # 1/12 factor.)
+    gm_aei0: float = 900.0
     # Floor on the Treguier kappa_GM [m^2/s]; only meaningful with
     # gm_treguier=True.
     #
@@ -258,8 +272,8 @@ def _nemo_match_gm_redi(cfg) -> GMRediConfig | None:
         return None
     # NEMO ORCA1 runs GM with a FLOW-DEPENDENT coefficient (&namtra_eiv:
     # ln_ldfeiv=T, nn_aei_ijk_t=21 => aeiu/aeiv = F(growth rate of baroclinic
-    # instability), capped at aei0 = rn_Ue*rn_Le = 0.018*100e3 = 1800 m^2/s;
-    # ldftra.F90:386).  `gm_treguier=True` selects that scaling (TreguierConfig,
+    # instability), capped at aei0 = 1/2*rn_Ue*rn_Le = 0.5*0.018*100e3 = 900
+    # m^2/s for the laplacian operator ORCA1 runs; ldftra.F90:290-293).  `gm_treguier=True` selects that scaling (TreguierConfig,
     # the same block the DINO oracle card uses); the default keeps the constant
     # `kappa_GM` so existing runs stay byte-identical.  Treguier and Visbeck are
     # mutually exclusive (both are adaptive-kappa schemes) — enforced by

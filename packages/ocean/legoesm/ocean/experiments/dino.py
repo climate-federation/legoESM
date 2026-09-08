@@ -100,9 +100,10 @@ class DINOConfig:
     # Earth rotation rate [rad/s], feeds f = 2*omega*sin(lat) at grid
     # construction (create_mercator_grid). Defaults to legoESM's canonical
     # (rounded) value; the NEMO oracle card pins NEMO's own value via
-    # ocean.constants_config.NEMO_CONSTANTS_CONFIG (phycst.F90:89, the
-    # non-key_cice sidereal-day branch DINO takes: omega = 2*pi/rsiday,
-    # matching the key_cice literal to 8 sig figs). legoESM's rounded
+    # ocean.constants_config.NEMO_CONSTANTS_CONFIG (phycst.F90:91, the
+    # non-key_cice sidereal-day branch DINO takes: omega = 2*pi/rsiday --
+    # :89 is the key_cice literal, which DINO does NOT take and which this
+    # preset used to carry). legoESM's rounded
     # constants.Omega is a 4-sig-fig rounding of the SAME physical constant,
     # not a different convention -- global constants.Omega is left alone
     # (125 call sites across atm/ocean/ice, canaried by
@@ -117,10 +118,28 @@ class DINOConfig:
 
     # T/u-face horizontal metric convention (#1226) fed to
     # LatLonCGridOceanConfig.metric_convention (see that field's docstring in
-    # state.py for the NEMO usr_def_hgr.F90 citation + the #516 v-face
-    # exemption). Default "exact" is BIT-IDENTICAL to every prior DINO run;
+    # state.py for the NEMO usr_def_hgr.F90 citation + the #516 shared-metric
+    # contract). Default "exact" is BIT-IDENTICAL to every prior DINO run;
     # only the nemo_dino_kamm/_mlf DINO_RECIPES cards set "nemo_isotropic".
     metric_convention: str = "exact"
+
+    # One-variable reconstruction of the #1455 V-face Mercator defect.
+    # ``nemo_vpoint`` is production: e1v is evaluated at NEMO's own V-point
+    # latitude. ``legacy_tracer_midpoint`` is retained for frozen A/B arms and
+    # changes only dx_v, not the rest of the horizontal metric stack.
+    vface_zonal_metric_evaluation: str = "nemo_vpoint"
+
+    # Where the vertex Coriolis is EVALUATED (#1455).  "cell_average"
+    # (default, BIT-IDENTICAL to every prior DINO run) averages the two
+    # adjacent tracer rows; "face_latitude" evaluates f AT the v-face
+    # latitude, which is NEMO's own ff_f convention (2*omega*sin(gphif)).
+    # Measured against NEMO's dumped ff_f on the DINO mesh, the cell average
+    # is low by a median 3.6e-05 relative once the rotation rate is divided
+    # out (coriolis_omega_routing_audit.py). Threaded into
+    # LatLonCGridOceanConfig.coriolis_placement below; the bridged oracle lane
+    # must ALSO pass it to bridge_nemo_to_legoesm_topo, which is where that
+    # lane's geometry is built.
+    coriolis_placement: str = "cell_average"
 
     # ------------------------------------------------------------------
     # Bathymetry (Appendix A, Zenodo namelist)
@@ -166,6 +185,10 @@ class DINOConfig:
     wind_tau_values: tuple[float, ...] = (
         0.0, 0.2, -0.1, -0.02, -0.1, 0.1, 0.0,
     )  # [N/m²]
+    # Arithmetic/interval convention for the analytic profile.  The complete
+    # NEMO cards select ``nemo_literal``; the default preserves every other
+    # DINO consumer's existing arrays byte-for-byte.
+    dino_wind_profile_evaluation: str = "factored_smoothstep"
 
     # ------------------------------------------------------------------
     # Surface forcing — restoring (Sect 2.3, eqs 8-9; Appendix B eqs B1-B2)
@@ -285,6 +308,10 @@ class DINOConfig:
     # bit-identical.
     zdf_drag_in_matrix: bool = False
     zdf_baroclinic_only: bool = False
+    # Final dynzdf/trazdf matrix and recurrence evaluation.  Historical cards
+    # retain the normalised shared Thomas path; the NEMO cards select the
+    # literal source order in their recipe.
+    zdf_implicit_solver_evaluation: str = "shared_thomas"
     # NEMO dyn_drg in-subcycle barotropic drag (#1226): see
     # LatLonCGridOceanConfig.barotropic_drag_substep. Threaded 1:1.
     # Requires zdf_drag_in_matrix=True + zdf_baroclinic_only=True (NEMO's
@@ -307,6 +334,37 @@ class DINOConfig:
     # :1349-1379). Only differs from the default under the MLF leapfrog, so
     # only the nemo_dino_kamm_mlf card flips it.
     barotropic_een_seed: str = "window_start"
+    # 3-D momentum depth-mean reconciliation target (NEMO dyn_spg_ts N6): see
+    # BarotropicConfig.barotropic_reconcile_target docstring. "velocity_avg"
+    # = the primary/velocity boxcar mean, which is ALSO what NEMO's surviving
+    # (committed) reconciliation aims at on this configuration -- uu_b(Kaa)
+    # under ln_dynadv_vec=.TRUE.; "transport_avg" = NEMO's un_adv*r1_hu(Kmm)
+    # secondary/transport mean (dynspg_ts.F90:1170-1172), which NEMO installs
+    # mid-step and then UNDOES at stpmlf.F90:787-790. No card flips it away
+    # from the default any more: the nemo_dino_kamm_mlf card pins
+    # "velocity_avg" EXPLICITLY, together with barotropic_after_reconcile,
+    # because the two are one choice (#1455 R6, see the card).
+    barotropic_reconcile_target: str = "velocity_avg"
+    # NEMO's SECOND depth-mean reconciliation, mlf_baro_corr (cfgs/DINO/MY_SRC/
+    # stpmlf.F90:754-765): see BarotropicConfig.barotropic_after_reconcile.
+    # "off" (default, bit-identical) = legoESM's single in-solve reconciliation
+    # only; "nemo_mlf_baro_corr" adds NEMO's after-dyn_zdf site, which discards
+    # the implicit vertical solve's column-mean deposit. (NOT an "after
+    # thickness" change: NEMO's weighting is time-level independent -- the
+    # key_qco free-surface factor cancels only algebraically; round 49 requires
+    # its executed live reduction and reciprocal for last-bit equality.)
+    # Matching NEMO
+    # needs it TOGETHER with barotropic_reconcile_target="velocity_avg"; the
+    # nemo_dino_kamm_mlf card ships that pair (#1455 R6 arm D). It is one of
+    # the two arms that take the 90-day acceptance gate from 4/5 to 5/5 -- and
+    # the FAITHFUL one; the other (arm B) is not shipped, see the card.
+    # MARGIN CAVEAT, recorded (4d531d5da retraction 4c): arm D's FIFTH gate
+    # pass carries 0.044 Sv of margin, LESS THAN ONE noise floor -- and that
+    # 0.091 Sv floor is a 3-member estimate taken on TEN-YEAR branches and
+    # transferred to 90-DAY runs without the transfer ever being validated.
+    # "5/5" here means "the gate is no longer failing", not "the twin is
+    # finished". Every other card leaves it "off".
+    barotropic_after_reconcile: str = "off"
     S_star_eq: float = 37.25       # equatorial target S [g/kg]
     S_star_n: float = 35.1         # northern boundary target S [g/kg]
     S_star_s: float = 35.0         # southern boundary target S [g/kg]
@@ -410,12 +468,17 @@ class DINOConfig:
     # which LEAKS ~O(K_conv) mixing into weakly-STABLE water (N^2~+1e-6 s^-2) that
     # NEMO never mixes — over-eroding the thermocline (62-day matched-grid check:
     # basin-mean T@262m 8.78 vs NEMO 9.50; the hard step restores 9.55-9.57).
-    # NEMO's rn2 (eosbn2) is the ADIABATIC static stability (local alpha,beta),
-    # so the faithful pair is hard-step + n2_mode="adiabatic". Set on the
-    # nemo_paper (oracle) recipe; other recipes keep the smooth legoESM default.
+    # NEMO's rn2 is eosbn2 ``bn2`` (eosbn2.F90:1459-1467), which legoESM
+    # transcribes EXACTLY as n2_mode="nemo_bn2" -- that is what the
+    # nemo_dino_kamm cards select. n2_mode="adiabatic" is the parcel-
+    # displacement static stability (Veros form); it is CLOSE to bn2 in
+    # magnitude but NOT equivalent for the sign test the EVD trigger performs
+    # (48 missed interfaces out of NEMO's 60845 -- see the retraction block on
+    # the nemo_dino_kamm card). nemo_paper still selects "adiabatic"; other
+    # recipes keep the smooth legoESM default.
     # See docs/ocean/fidelity/dino_tendency_certificate.md.
     convection_smooth_transition: bool = True   # False = NEMO hard rn2<0 switch
-    convection_n2_mode: str = "insitu"          # "adiabatic" = NEMO eosbn2
+    convection_n2_mode: str = "insitu"          # "nemo_bn2" = NEMO eosbn2 rn2
     # NEMO zdfevd threshold (zdfevd.F90): EVD fires where the N² <= -1e-12 —
     # a small NEGATIVE threshold that ignores marginally-neutral interfaces
     # (vs the legoESM default 0.0). Default 0.0 keeps other recipes unchanged;
@@ -432,9 +495,11 @@ class DINOConfig:
     # threshold), enabled on the nemo_dino_kamm card below.
     # TKE static-stability trigger. Default "insitu" (BIT-IDENTICAL legacy).
     # NEMO's zdftke consumes the SAME rn2 (eosbn2 bn2) as zdfevd — select
-    # "nemo_bn2" to feed the TKE buoyancy the exact bn2 N². For the DINO S-EOS
-    # bn2 ≡ the "adiabatic" parcel N² to ~9e-7 s^-2 (see the nemo_dino_kamm
-    # convection comment), so no recipe switches by default.
+    # "nemo_bn2" to feed the TKE buoyancy the exact bn2 N². The nemo_dino_kamm
+    # cards select it for BOTH consumers; other recipes keep the legacy
+    # default. (The former note here, that bn2 and the "adiabatic" parcel N²
+    # agree to ~9e-7 s^-2 and so the choice is immaterial, is RETRACTED — see
+    # the retraction block on the nemo_dino_kamm card.)
     tke_n2_mode: str = "insitu"                 # "nemo_bn2" = NEMO eosbn2 rn2
     # NEMO's step-entry (Nnow) N² sequencing (bn2 computed BEFORE tra_adv,
     # stpmlf.F90:186-190) — Phase-2 #1317 T5. Consumed by BOTH zdfevd (via
@@ -531,6 +596,19 @@ class DINOConfig:
     # own seafloor. Without the mask every dry row re-widens the ldown carry
     # and the bottom limitation never arrives.
     tke_dry_wmask: bool = False                  # True = NEMO wmask'd en
+    # Coefficients read before tke_avn overwrites them. Generic/diagnostic
+    # recipes retain the historical current-subiteration path; complete NEMO
+    # cards explicitly select the carried restart/previous-step pair.
+    tke_preclosure_coeff_source: str = "current_subiteration"
+    tke_matrix_evaluation: str = "factored"
+    tke_solver_evaluation: str = "shared_thomas"
+    tke_etau_exponential_evaluation: str = "jax_expression"
+    tke_htau_evaluation: str = "jax_expression"
+    tke_mxl_raw_evaluation: str = "factored"
+    tke_langmuir_evaluation: str = "vectorized"
+    tke_shear_evaluation_stage: str = "implicit_solve_state"
+    tke_shear_metric_source: str = "tpoint_jacobian"
+    tke_n2_evaluation_stage: str = "implicit_solve_state"
     # T15 — bottom TKE BC: en(mbkt+1)=max(0.001875*CdU_bot*|u_bot|,rn_emin)
     # (zdftke.F90:279-288), reusing the shared nemo_effective_bottom_drag_r.
     # Deep/not entrainment-relevant (Phase-1 ranking) but implemented for
@@ -610,6 +688,44 @@ class DINOConfig:
     # nemo_dino_kamm card selects "nemo_bn2".  Dispatch raises on an unknown
     # value.
     gm_redi_slope_n2: str = "adiabatic"
+    gm_redi_slope_n2_evaluation: str = "recompute"
+    # Native ldf_slp input construction.  Global defaults preserve the legacy
+    # current-geometry density round trip; the two DINO NEMO cards select the
+    # literal Nbb geometry + zn/rho0 construction below.
+    gm_redi_slope_prd_geometry_stage: str = "current_step"
+    gm_redi_slope_prd_evaluation: str = "density_roundtrip"
+    # Native ldf_slp U/V metric arithmetic. The global division default is
+    # byte-identical; the two NEMO cards select stored reciprocal + multiply.
+    gm_redi_slope_metric_evaluation: str = "division"
+    # ldfslp 7 km limiter face thickness: static legacy construction or the
+    # NEMO QCO live e3u/e3v built from NOW SSH. Only the NEMO cards select live.
+    gm_redi_slope_face_thickness_evaluation: str = "static_face"
+    # traldf_iso zA11/zA22 face thickness. The generic default retains the
+    # historical T-point Jacobian; the two NEMO cards consume live QCO faces.
+    gm_redi_flux_face_thickness_evaluation: str = "tpoint_jacobian"
+    # Static Redi coefficient arithmetic. Generic cards preserve the grouped
+    # equatorial-kappa*cos(lat) path; the two NEMO cards use ldf_c2d literally.
+    gm_redi_horizontal_evaluation: str = "cosine_scaled"
+    # traldf_iso A31/A32 vertical-skew arithmetic. Generic cards retain the
+    # historical normalized-sum topology; the two NEMO cards use source order.
+    gm_redi_vertical_skew_evaluation: str = "normalized_sums"
+    # traldf_iso A33 slope-square association. Generic cards retain the
+    # exponent form; the two NEMO cards use the written left-associated form.
+    gm_redi_a33_evaluation: str = "normalized_square"
+    # W-position slope stage used by the Redi vertical flux. Generic cards
+    # retain the original Redi tuple; the two NEMO cards carry the post-stage
+    # pair already computed for the bolus path.
+    gm_redi_w_slope_stage_evaluation: str = "redi_tuple"
+    # ldfslp mixed-layer-ramp depth construction. Only the two DINO NEMO
+    # cards select raw-mesh NOW-QCO depths and literal face accumulation.
+    gm_redi_slope_depth_evaluation: str = "legacy_jacobian_t_surface"
+    # Treguier ldf_eiv column-reduction topology. Global default retains the
+    # historical tree reduction; the two NEMO cards use source-ordered left
+    # accumulation.
+    gm_treguier_vertical_reduction_evaluation: str = "tree"
+    # Treguier zn sqrt forward rule. Global default preserves the historical
+    # 1e-30 floor; the two DINO NEMO cards use exact SQRT(MAX(rn2b,0)).
+    gm_treguier_sqrt_evaluation: str = "guarded_floor"
     # GM eddy-induced (bolus) advection FORM for gm_redi_slope_scheme=
     # "nemo_iso_lap" (GMRediConfig.gm_bolus_advection): "centred" (default, byte-
     # identical — 2nd-order centred bolus flux inside the iso operator) or
@@ -761,6 +877,22 @@ class DINOConfig:
     # face depths).  The kamm cards override to "nemo_ssh_avg" (zero-deviation
     # track item 2 — see the card comment in DINO_RECIPES).
     barotropic_face_depth: str = "min_rule"
+    # ``generic`` (legacy shared FV association) | ``nemo_literal`` (active
+    # dynspg_ts source association). NEMO-fidelity cards select the latter.
+    barotropic_continuity_evaluation: str = "generic"
+    # ``generic`` keeps pre-normalised SM2005 weights on the cancelled H*U
+    # transport. ``nemo_literal`` preserves raw wgtbtp2, metric transport,
+    # reciprocal metric, and one final r1_wgt2s division (dynspg_ts.F90:
+    # 734-737,999-1000). NEMO-fidelity cards select the latter.
+    barotropic_transport_accumulation_evaluation: str = "generic"
+    # ``generic`` preserves the shared fused vertical reduction. The two
+    # NEMO-fidelity cards select ``nemo_literal``: BEFORE/Kbb live face
+    # thickness with source-ordered vertical accumulation (istate.F90:149-155).
+    barotropic_seed_evaluation: str = "generic"
+    # ``generic`` preserves the shared AL81 coefficient association.
+    # ``nemo_literal`` preserves dynspg_ts.F90:1517-1565 source ordering.
+    barotropic_een_coefficient_evaluation: str = "generic"
+    barotropic_pgf_evaluation: str = "generic"
     # LatLonCGridOceanConfig.barotropic.barotropic_seed_face_depth (#1226
     # round 2 item 1), threaded 1:1 via from_flat/BarotropicConfig.
     # "min_rule" (default, bit-identical legacy) | "nemo_ssh_avg" (the
@@ -838,6 +970,11 @@ class DINOConfig:
     # 1.000, zero free parameters). The kamm card selects "nemo_faithful"
     # (see VALID_ZAD_BOTTOM_FACE_MASK, legoesm.ocean.vertical).
     zad_bottom_face_mask: str = "min_rule"
+    # Coupled NEMO QCO ww + live Kmm face-thickness path for dynzad.
+    # Literal default keeps every non-DINO-fidelity recipe byte-identical.
+    zad_qco_evaluation: str = "generic"
+    # Coupled post-barotropic WZV call-2 hdiv x Kaa-r3t evaluation.
+    wzv_call2_evaluation: str = "generic"
     coriolis_scheme: str = "matsuno_split"        # "explicit_ab2" (MITgcm/Oceananigans/Veros)
     outer_integrator: str = "forward_euler"       # "ab2" | "leapfrog" (NEMO stp_MLF)
     # Vector-invariant vorticity flux scheme (relative + optionally planetary).
@@ -855,6 +992,9 @@ class DINOConfig:
     # (default, MITgcm hFacZ convention) or "nemo_avg" (NEMO nn_e3f_typ=1,
     # dynvor.F90::vor_een masked average — #1226 item 10).
     een_e3f_scheme: str = "min"
+    # "off" (default, bit-identical) or "nemo" (dyn_vor's e1v/e1u and e2u/e2v
+    # weighting on the EEN transport, dynvor.F90:791-792 and :804-806).
+    een_metric_weighting: str = "off"
     # Robert-Asselin filter coefficient (rn_atfp) for outer_integrator="leapfrog"
     # (NEMO plain RA, not Williams). NEMO default 0.1. Ignored otherwise.
     asselin_gamma: float = 0.1
@@ -1104,19 +1244,72 @@ DINO_RECIPES: dict[str, dict] = {
         "tke_dry_wmask": True,
         "tke_bottom_bc": True,                   # en(mbkt+1) bottom-friction BC (zdftke:279-288)
         "tke_kappaM_max": float("inf"),          # T21: tke_avn has NO avm ceiling
+        "tke_preclosure_coeff_source": "carried_previous_step",
+        "tke_matrix_evaluation": "nemo_literal",
+        "tke_solver_evaluation": "nemo_literal",
+        "tke_etau_exponential_evaluation": "nemo_literal",
+        "tke_htau_evaluation": "nemo_literal",
+        "tke_mxl_raw_evaluation": "nemo_literal",
+        "tke_langmuir_evaluation": "nemo_literal",
+        "tke_shear_evaluation_stage": "step_entry",
+        "tke_shear_metric_source": "nemo_qco_live_face",
+        "tke_n2_evaluation_stage": "step_entry",
+        "dino_wind_profile_evaluation": "nemo_literal",
         # -- Convection (namzdf: ln_zdfevd=T, rn_evd=100, nn_evdm=1; hard rn2<0 on eosbn2) --
-        # NEMO's rn2 is eosbn2 bn2 (S-EOS local alpha,beta at each cell's gdept,
-        # geometric zrw interp) — available as convection_n2_mode="nemo_bn2" /
-        # tke_n2_mode="nemo_bn2". VERIFIED same-state (bridge restart state) to
-        # reproduce NEMO rn2_stg at 99.9% per-depth agreement. Kept at
-        # "adiabatic" here because, for the DINO S-EOS, the parcel-displacement
-        # "adiabatic" N² is numerically EQUIVALENT to the exact bn2 (corr 1.0000,
-        # maxdiff ~9e-7 s^-2 → ~0.1% of marginal interfaces flip) — "adiabatic"
-        # already matches NEMO rn2_stg to 99.9% same-state, so the exact bn2 is a
-        # no-op-equivalent provenance option, not a fidelity fix. See
-        # tests/ocean/unit/test_nemo_bn2.py + docs/ocean/fidelity.
+        # NEMO's zdfevd trigger consumes rn2/rn2b from eosbn2 bn2 (eosbn2.F90:
+        # 1459-1467): LOCAL alpha/beta evaluated at each cell's own gdept,
+        # interpolated to the w-point by the geometric zrw weight, differenced
+        # LINEARLY in T and S. Both arms are built on the Nnn geometry
+        # (MY_SRC/stpmlf.F90:200-201) and consumed at zdfevd.F90:93 and :119.
+        # We select that exact transcription: convection_n2_mode="nemo_bn2"
+        # (enhanced_diffusion.py:147/161), matching tke_n2_mode above and
+        # gm_redi_slope_n2 below, which already select it.
+        #
+        # RETRACTION (2026-08-18). This line previously selected "adiabatic"
+        # (parcel displacement of both interface cells to the upper cell's
+        # pressure, differenced through the full nonlinear in-situ density) on
+        # the stated grounds that it is "numerically EQUIVALENT to the exact
+        # bn2 (corr 1.0000, maxdiff ~9e-7 s^-2)". That justification is
+        # REFUTED, and the metric that produced it could not have detected the
+        # failure: the EVD trigger is not a magnitude comparison but a SIGN
+        # TEST at rn2 < -1e-12, while the whole convective population sits at
+        # |N^2| ~ 1e-10..1e-12 — five orders below the stratified interior that
+        # sets the correlation. Measured on NEMO's own restart state, one step,
+        # fp64, over all 322294 wet interior interfaces (trigger population
+        # MIN(rn2,rn2b) <= -1e-12; window = interfaces 1..34, i.e. NEMO w-levels
+        # 2..35 — the full-window count incl. interface 0 is 70389/70389/0/0):
+        #     NEMO                          60845
+        #     n2_mode="nemo_bn2"            60845   0 missed, 0 spurious
+        #     n2_mode="adiabatic"           60797   48 MISSED, 0 spurious
+        # Agreement is exact at EVERY threshold swept (-1e-10..0: NEMO 41874,
+        # 67454, 70389, 70473, 70475 — nemo_bn2 identical at each; the parcel
+        # form is not), i.e. the two fields agree in their ORDERING near zero,
+        # not just on one cut. Directionality is state-dependent: at the
+        # measured state 48 missed / 0 spurious; across the four following
+        # trajectory states (kt 230401..230404, bn2 as reference) 32-43 missed
+        # and 0-2 spurious. WHY they differ (settled by review, adversarial
+        # decomposition at the spike): bn2's zrw weight puts alpha at
+        # z = gdept_lo*(1-zrw) + gdept_up*zrw = gdepw, EXACTLY the interface;
+        # the parcel form evaluates both parcels at the UPPER cell's depth —
+        # off-centred by dz/2 from where N^2 lives, first-order there instead
+        # of second. Swapping only that reference depth reproduces 47 of the
+        # 48 misses (the T/S weight is a 13% effect, no flip; the Boussinesq
+        # p/(rho0 g) depth reconstruction is 0.1%). At the spike — column
+        # (j=158,i=42), interface 9 / NEMO w-level 10, the BEFORE (rn2b) arm —
+        # the two disagree in SIGN on identical inputs: bn2 gives -4.066547e-09
+        # (fires; reproduces NEMO's rn2b to every printed digit), the parcel
+        # form gives +5.988313e-09 (does not fire). (The NOW arm at the same
+        # cell is -7.19e-12 vs -7.52e-13 — a threshold crossing, not a sign
+        # flip.) That one interface carried 99.995% of
+        # the run's largest per-step tracer error: 5.710106e-02 K collapses to
+        # -2.837890e-06 K when the exact N^2 is supplied, with the next five
+        # largest errors bit-identical (a surgical fix, not a reshuffle).
+        # Probe: scripts/validate/ocean_fidelity/dino_1226/evd_before_arm_n2.py
+        # Acceptance test: tests/ocean/unit/test_evd_n2_mode_kamm_card.py
+        # (card selection + a compensated-front column where the two modes
+        # disagree in sign at the knife-edge).
         "convection_smooth_transition": False,
-        "convection_n2_mode": "adiabatic",
+        "convection_n2_mode": "nemo_bn2",
         "convection_n2_threshold": -1e-12,
         # -- Bottom drag (namdrg: ln_non_lin=T; namdrg_bot rn_Cd0=1e-3, rn_ke0=2.5e-3) --
         "bottom_drag_scheme": "nemo_quadratic",  # r = Cd0*sqrt(u^2+v^2+ke0)
@@ -1141,6 +1334,7 @@ DINO_RECIPES: dict[str, dict] = {
         #    #1226. --
         "zdf_drag_in_matrix": True,
         "zdf_baroclinic_only": True,
+        "zdf_implicit_solver_evaluation": "nemo_literal",
         "barotropic_drag_substep": True,
         # -- Tracer advection (namtra_adv: ln_traadv_fct=T, nn_fct_h=nn_fct_v=2) --
         "tracer_advection": "fct2",
@@ -1180,6 +1374,19 @@ DINO_RECIPES: dict[str, dict] = {
         # ldfslp consumes rn2b, not a parcel-displacement N^2 (eosbn2.F90:1455).
         # DINO y5: |wslpi| ratio 1.0121 -> 0.9989, deep (k>=18) 1.0148 -> 0.9995.
         "gm_redi_slope_n2": "nemo_bn2",
+        "gm_redi_slope_n2_evaluation": "carried_step_entry",
+        "gm_redi_slope_prd_geometry_stage": "before_step",
+        "gm_redi_slope_prd_evaluation": "nemo_literal",
+        "gm_redi_slope_metric_evaluation": "nemo_reciprocal",
+        "gm_redi_slope_face_thickness_evaluation": "nemo_qco_live",
+        "gm_redi_flux_face_thickness_evaluation": "nemo_qco_live",
+        "gm_redi_horizontal_evaluation": "nemo_metric_literal",
+        "gm_redi_vertical_skew_evaluation": "nemo_literal",
+        "gm_redi_a33_evaluation": "nemo_literal",
+        "gm_redi_w_slope_stage_evaluation": "nemo_post_slope_pair",
+        "gm_redi_slope_depth_evaluation": "nemo_qco_live_literal",
+        "gm_treguier_vertical_reduction_evaluation": "nemo_left",
+        "gm_treguier_sqrt_evaluation": "nemo_forward_exact",
         "gm_bolus_kappa_face_average": True,
         # #1226 root cause: NEMO dynzad.F90 is the ADVECTIVE form w*du/dz,
         # not the FLUX form d(w*u)/dz that "centered_full" (and the default
@@ -1205,6 +1412,11 @@ DINO_RECIPES: dict[str, dict] = {
         # population. See fidelity_bar_gate.py PER_ELEMENT["dyn_adv ZAD"]
         # for the corrected localisation and current DEBT status.
         "zad_bottom_face_mask": "nemo_faithful",
+        # Round 39: neither operand is independently faithful.  The call-1
+        # Kaa-continuity ww + live e3u/e3v(Kmm) pair closes ZAD jointly while
+        # thickness alone worsens it, so expose only the coupled selector.
+        "zad_qco_evaluation": "nemo_literal",
+        "wzv_call2_evaluation": "nemo_literal",
         # NEMO's STANDARD gravity (phycst.F90:38) -- see NEMO_CONSTANTS_CONFIG.
         # 5.0e-5 from legoESM's canonical g; it was the whole remaining bn2
         # residual (N^2 median rel err 4.95e-05 -> 6.96e-06).
@@ -1235,8 +1447,14 @@ DINO_RECIPES: dict[str, dict] = {
         # +9.5e-6) / e1e2t (-2.5e-5..+4.1e-5) mesh_mask residual to ~1e-7
         # (roundoff) on the DINO R1 48x195 mesh. See
         # legoesm.grids.latlon.create_mercator_grid's docstring for the
-        # NEMO citation. Does NOT touch the #516 v-face metric.
+        # NEMO citation. Since #1455 it ALSO puts the two v-face scale
+        # factors on NEMO's own V-point Mercator latitude gphiv
+        # (usrdef_hgr.F90:113/:118) instead of the mean of the two adjacent
+        # tracer latitudes -- worth 3.3e-05 relative at the walls, and it
+        # makes the F-point lateral-viscosity coefficient exact. The #516
+        # transport contract is unchanged: the two end v-faces stay zero.
         "metric_convention": "nemo_isotropic",
+        "vface_zonal_metric_evaluation": "nemo_vpoint",
         "redi_S_max": 0.01,                      # rn_slpmax (namtra_ldf ref default)
         # -- Momentum (namdyn_adv: ln_dynadv_vec + nn_dynkeg=1; namdyn_vor: ln_dynvor_een) --
         "ke_gradient_scheme": "hollingsworth",
@@ -1295,6 +1513,11 @@ DINO_RECIPES: dict[str, dict] = {
         # TestNemoSshAvgFaceDepthGate (volume + tracer conserved; mode
         # measured conservation-inert vs min_rule at machine precision).
         "barotropic_face_depth": "nemo_ssh_avg",
+        "barotropic_continuity_evaluation": "nemo_literal",
+        "barotropic_transport_accumulation_evaluation": "nemo_literal",
+        "barotropic_een_coefficient_evaluation": "nemo_literal",
+        "barotropic_seed_evaluation": "nemo_literal",
+        "barotropic_pgf_evaluation": "nemo_literal",
         # #1226 round 2 item 1: the barotropic substep loop's ENTRY seed
         # (U_bar/V_bar, lego's re-derived stand-in for NEMO's persistent
         # un_e/vn_e = puu_b/pvv_b(Kbb or Kmm)) uses the SAME NEMO ssh-average
@@ -1414,6 +1637,36 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
                                           # (ln_dynvor_msk=F; no Neumann fill)
     "een_e3f_scheme": "nemo_avg",         # nn_e3f_typ=1: masked AVERAGE e3f
                                           # (dynvor.F90::vor_een, not min-rule)
+    # dynvor.F90:791-792 weights the meridional transport by e1v (the V-face
+    # zonal width) and :804 divides the assembled u-tendency by e1u,
+    # symmetrically e2u/e2v for v. THIS IS WHAT NEMO ACTUALLY COMPUTES, so the
+    # card ships it (#1455). Three reasons, in the order they matter:
+    #   1. FAITHFULNESS. legoESM's AL81 triad used neither factor, which is the
+    #      per-unit-width form -- a different operator on any grid whose
+    #      metrics vary. Measured against NEMO's own dumped vorticity tendency
+    #      on the one-step oracle state, supplying it closes 96-98% of the
+    #      wall-row disagreement and 86% of the far interior. It is a GLOBAL
+    #      fidelity correction that happened to be found at the wall.
+    #   2. IT CONSERVES THE RIGHT INVARIANT. On a stretched grid the weighted
+    #      form conserves the PHYSICAL kinetic-energy norm to roundoff (1e-16)
+    #      while the unweighted one conserves kinetic energy per unit AREA
+    #      instead, which is not a physical invariant. See
+    #      tests/ocean/unit/test_een_metric_weighting.py, which asserts both
+    #      directions.
+    #   3. GATE-NEUTRAL, MEASURED -- not assumed. One controlled 90-day pair
+    #      differing only in this field: all five acceptance-gate metrics PASS
+    #      at 5x on both arms and EVERY move is inside its noise floor (the
+    #      wall-row transport shifts 0.0062 Sv = 0.07x the floor). So there is
+    #      no compensating-error risk here: nothing was bought and nothing was
+    #      paid.
+    # It also removes a standing internal inconsistency: the barotropic solver
+    # has always run the metric-weighted EEN (barotropic_coriolis="een_metric"
+    # below) while the 3-D momentum ran the unweighted one.
+    # THE LESSON THIS CARRIES, because it cost a lane to learn: closing 96-98%
+    # of an OPERATOR mismatch moved the 90-day TRANSPORT by 0.07 noise floors.
+    # A tendency error and the transport error at the same place are DIFFERENT
+    # OBJECTS, and closing one is not evidence about the other.
+    "een_metric_weighting": "nemo",
     "coriolis_scheme": "explicit_ab2",    # Matsuno rotation OFF; Coriolis in the RHS
     "asselin_gamma": 0.1,                 # rn_atfp (plain Robert-Asselin, not Williams)
     # NEMO trazdf.F90:271-278 — combine tracer CONTENT (e3t·T), not bare
@@ -1476,6 +1729,165 @@ DINO_RECIPES["nemo_dino_kamm_mlf"] = {
     # under the leapfrog's Nbb seed, so it lands on THIS card only (under
     # FE the window seed IS Kmm and the options coincide byte-identically).
     "barotropic_een_seed": "nemo_kmm",
+    # ------------------------------------------------------------------
+    # The NEMO-faithful depth-mean reconciliation PAIR (#1455 R6).
+    #
+    # These two knobs are ONE choice, not two: NEMO reconciles the 3-D
+    # momentum depth mean TWICE per step, and which average the surviving
+    # site aims at is fixed by the same namelist switch that decides what
+    # the substep loop accumulated. Setting either alone runs a model that
+    # is NEMO at neither site. Measured 2026-08-21 in the four-arm A/B
+    # below; both are pinned here so a silent revert of one goes red
+    # (tests/ocean/unit/test_partial_cells_phase7.py and
+    # tests/ocean/unit/test_barotropic_after_reconcile.py).
+    #
+    # THE TWO NEMO SITES, re-read end to end in the build that ran
+    # (oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/MY_SRC):
+    #
+    #   SITE 1 -- dynspg_ts.F90:1170-1172, inside dyn_spg, NOW level.
+    #     "Correct velocities so that the barotropic velocity equals
+    #      (un_adv, vn_adv) (in all cases)"
+    #     puu(:,:,jk,Kmm) = ( puu(:,:,jk,Kmm) + un_adv(:,:)*r1_hu(:,:,Kmm)
+    #                         - puu_b(:,:,Kmm) ) * umask(:,:,jk)
+    #     un_adv is the TRANSPORT-weighted substep mean (accumulated
+    #     :736 as za2*zhU*r1_e2u, normalised :999 by r1_wgt2s). It is a
+    #     WITHIN-STEP advecting velocity for tracer advection and it is
+    #     UNDONE before the Asselin filter at stpmlf.F90:787-790 -- the
+    #     .NOT.ln_bt_fw branch, which is the branch DINO runs
+    #     (RUN_90D_TWIN/namelist_cfg:353, ln_bt_fw=.false.) -- the two
+    #     lines are algebraic inverses. So it never reaches the committed
+    #     VELOCITY, and matching it there is matching a quantity NEMO
+    #     throws away. It is NOT inert overall: tra_adv runs at
+    #     stpmlf.F90:528, between site 1 and site 2, and advects with the
+    #     un_adv-carrying velocity, so it does reach the committed TRACER
+    #     state. That is why site 1 exists. legoESM routes its own Hu_avg
+    #     to tracer advection on a separate path, so nothing here removes
+    #     the transport average from the model -- only from the committed
+    #     momentum.
+    #
+    #   SITE 2 -- stpmlf.F90:709 mlf_baro_corr, called :578 after dyn_zdf
+    #     and before dyn_atf_qco, AFTER level, body :754-765. It installs
+    #     uu_b(:,:,Kaa). On this card ln_dynadv_vec=.TRUE.
+    #     (namelist_cfg:321), so dynspg_ts.F90:978-980 accumulates
+    #     VELOCITIES (not transports) and :1001 normalises them -- i.e.
+    #     uu_b(Kaa) is the PRIMARY, VELOCITY-weighted boxcar substep
+    #     average, exactly. This is the reconciliation that survives into
+    #     the committed state.
+    #
+    # Hence the faithful pair: aim the in-solve reconciliation at the
+    # VELOCITY average (site 2's target, the one that survives), and run
+    # NEMO's second site as well.
+    #
+    # WHAT SITE 2 DOES PHYSICALLY: it recomputes the column mean AFTER the
+    # implicit vertical momentum solve and overwrites it with the
+    # barotropic solver's own average -- i.e. it DELETES the vertical
+    # solve's column-mean deposit. legoESM without it keeps that deposit.
+    # Measured +17.9 m3/s2 per southern u-row on the 90-day twin, 12x
+    # NEMO's OWN realized spin-up rate (+1.430; against legoESM's realized
+    # rates of +0.66..+1.00 it is 18-27x), discarded by NEMO every step.
+    #
+    # THE FOUR-ARM A/B (90-day DINO twin at d27dc0909, same IC, NEMO's own
+    # ladders, corrected clock, fp64, all stable; ACC gap = |lego - NEMO|
+    # in Sv, gate = the 5-metric 90-day acceptance gate):
+    #
+    #             reconcile      2nd site   ACC gap   gate
+    #   A         transport_avg  off         0.5965   4/5
+    #   B         transport_avg  ON          0.3042   5/5
+    #   C         velocity_avg   off         0.5694   4/5
+    #   D  <--    velocity_avg   ON          0.4107   5/5   FAITHFUL, shipped
+    #
+    # WHY D AND NOT THE LOWER-SCORING-ON-ACC B (0.3042):
+    #   1. B and D are NOT SEPARABLE on ACC. The single-run noise floor is
+    #      0.091 Sv, so a DIFFERENCE of two runs carries sqrt(2)*0.091 =
+    #      0.129 Sv. |B - D| = 0.107 Sv sits UNDER that bar. The same holds
+    #      on all four density metrics (every B-vs-D difference is
+    #      0.05x-0.16x its own floor). B and D are indistinguishable on all
+    #      five gate metrics; "B scores better" is not a readable result.
+    #   2. On the reduction that weights the physics, D is BEST by a wide
+    #      margin and B is the WORST non-baseline arm. The band mean is an
+    #      equal-weight mean over 13 u-rows, but five of them sit against
+    #      the southern wall where NEMO's own 90-day spin-up torque is
+    #      +0.119 against +18.465 for the other eight -- 0.6% of the band's
+    #      physics carrying 72% of the band-mean deficit. Re-reduced over
+    #      rows 6-13 (99.4% of NEMO's spin-up), closure vs arm A:
+    #      B 37.5%, C 41.5%, D 61.9%.
+    #      HONEST SCOPE ON THAT BAR: the pre-registration defined the >50%
+    #      criterion on the EQUAL-WEIGHT 13-row band mean, and on THAT
+    #      reduction BOTH arms miss (D 43.0%, B 48.5%). The rows-6-13
+    #      re-reduction that D clears at 61.9% was chosen AFTER the arms
+    #      ran, on the ground that the five wall rows carry 0.6% of the
+    #      physics. So: the pre-registered bar is MISSED as written and met
+    #      only on a post-hoc, physics-weighted reduction. That is a reason
+    #      to prefer D over B on RANKING (the ranking inverts between the
+    #      two reductions and the physics-weighted one is the defensible
+    #      choice), NOT a claim that the bar was cleared as pre-registered.
+    #      The criterion had a SECOND half -- ">50% closure AND the ACC gap
+    #      shrinking toward the floor" -- which D does satisfy (0.5965 ->
+    #      0.4107). Both verdicts live in
+    #      PHASE2_R6_alignment_and_prereg.md.
+    #   3. Highest-tier evidence, a MATCHED-STATE first step (legoESM
+    #      stepping the state bit-identical to NEMO's restart, against
+    #      NEMO's own first step -- same state, one variable, above any
+    #      90-day trajectory metric). Band-mean barotropic-solve torque:
+    #      transport_avg 0.524 vs NEMO 0.936 (diff -0.413); velocity_avg
+    #      0.993 vs NEMO 0.936 (diff +0.057). NEMO's own average matches
+    #      NEMO 7.2x better on a matched state.
+    #   NOTE ON B's NOMINAL ACC EDGE: by point 1 it is UNREADABLE, so no
+    #   mechanism is needed and none is asserted. Two errors partially
+    #   cancelling in B is one PLAUSIBLE reading (e1acaa685) and nothing
+    #   measured here isolates a second error; the recorded status is
+    #   "cause unknown, not guessed", and it stays that way. Reading a
+    #   mechanism off a sub-floor difference is the exact error retracted
+    #   in 4d531d5da, retraction 4(b).
+    #
+    # REMAINING LEDGER, stated so nobody reads this as closed. TWO
+    # SEPARATE open quantities -- do not merge them, they are different
+    # scales and different evidence:
+    #
+    #   (i) 0.411 Sv of ACC gap survives arm D, and NO named structural
+    #       DIFF between the two models is left to own it. Cause UNKNOWN;
+    #       no candidate is named here, because naming one without
+    #       evidence is the failure mode this campaign already paid for.
+    #
+    #   (ii) the +0.296 m3/s2 per-row ZDF-bt residue -- the part of the
+    #       implicit vertical solve's column-mean deposit that legoESM
+    #       still retains where NEMO discards all of it. Three mechanisms
+    #       contribute and no measurement separates them; all PLAUSIBLE:
+    #         (a) LEADING, and a legoESM defect in its own right: the
+    #             implicit momentum solve builds its u-face control volume
+    #             with interp_cell_to_uface on an ALREADY-MASKED
+    #             thickness, so at a staircase face it returns HALF a
+    #             thickness where NEMO's umask is 0. NEMO's rule is to
+    #             average the face thickness on the UNMASKED reference
+    #             ladder and mask AFTER (filed that way, not as "use the
+    #             min rule"); latlon_cgrid_operators.py's own docstring
+    #             states the house rule this violates for layer thickness.
+    #             HOW IT MOVES A TRANSPORT: the bias is in the COLUMN
+    #             DIVISOR -- sum_k dz_u picks up a half thickness at every
+    #             staircase level, inflating H_u and shrinking the depth
+    #             mean the reconciliation installs. The adjacent guard does
+    #             NOT already fix it: the face VISCOSITY is masked with a
+    #             3-D face mask, but the control volume is not, and the
+    #             u-mask applied to the solve is the 2-D surface mask
+    #             broadcast down. Nor does retraction 6 ("DINO has no
+    #             partial steps") neutralise it -- full-step z still has a
+    #             staircase and the thickness is still pre-masked.
+    #             Named, not fixed, not measured.
+    #         (b) the wet-column floor/weighting difference between the
+    #             two divisor conventions.
+    #         (c) in-matrix bottom drag, which makes the implicit solve
+    #             genuinely non-mean-preserving rather than merely
+    #             re-weighted.
+    # ------------------------------------------------------------------
+    # CONSEQUENCE FOR CALLERS: barotropic_after_reconcile has a site only in
+    # the leap-frog family, so since this flip
+    # `run_dino.py --recipe nemo_dino_kamm_mlf --outer-integrator forward_euler`
+    # (or ab2) RAISES at model construction instead of silently running a
+    # different composition. That is the dispatch gate doing its job, but it is
+    # a new way for a previously-working command line to stop; override with
+    # barotropic_after_reconcile="off" if a non-leapfrog arm is what you want.
+    "barotropic_reconcile_target": "velocity_avg",
+    "barotropic_after_reconcile": "nemo_mlf_baro_corr",
     # Phase-2 #1317 T4/T8/T13: TKE closure axes that read the leap-frog
     # BEFORE (Nbb) state (state.u_before/v_before, state.T_before/S_before)
     # — meaningful ONLY under the MLF integrator (construction raises
@@ -1779,20 +2191,39 @@ def dino_wind_stress(lat_deg, cfg: DINOConfig | None = None):
     lats = jnp.asarray(cfg.wind_tau_lats_deg, dtype=jnp.float64)
     taus = jnp.asarray(cfg.wind_tau_values, dtype=jnp.float64)
 
-    # Find the segment containing each lat (vectorized).
-    # For each lat point: locate the index ks s.t. lats[ks] <= lat <= lats[ks+1].
-    # Use right-side searchsorted so that lat == lats[i] maps to segment [i-1, i].
-    idx = jnp.clip(
-        jnp.searchsorted(lats, lat_deg, side="right") - 1,
-        0, lats.shape[0] - 2,
-    )
+    if cfg.dino_wind_profile_evaluation == "factored_smoothstep":
+        # Legacy interval construction.  Keep its tie behaviour and arithmetic
+        # graph intact for every non-oracle card.
+        idx = jnp.clip(
+            jnp.searchsorted(lats, lat_deg, side="right") - 1,
+            0, lats.shape[0] - 2,
+        )
+    elif cfg.dino_wind_profile_evaluation == "nemo_literal":
+        # usrdef_sbc.F90:611-623: choose the closest node, then the adjacent
+        # node on the side containing phi.  DINO grid latitudes remain inside
+        # the endpoint nodes; clipping also preserves the documented constant
+        # continuation for direct callers outside that interval.
+        nearest = jnp.argmin(
+            jnp.abs(lat_deg[..., None] - lats), axis=-1)
+        idx = jnp.where(lats[nearest] - lat_deg <= 0.0,
+                        nearest, nearest - 1)
+        idx = jnp.clip(idx, 0, lats.shape[0] - 2)
+    else:
+        raise ValueError(
+            "dino_wind_profile_evaluation must be 'nemo_literal' or "
+            f"'factored_smoothstep', got "
+            f"{cfg.dino_wind_profile_evaluation!r}")
     lat_lo = lats[idx]
     lat_hi = lats[idx + 1]
     tau_lo = taus[idx]
     tau_hi = taus[idx + 1]
 
     s = jnp.clip((lat_deg - lat_lo) / (lat_hi - lat_lo), 0.0, 1.0)
-    weight = (3.0 - 2.0 * s) * s ** 2  # cubic Hermite smooth-step
+    if cfg.dino_wind_profile_evaluation == "nemo_literal":
+        # Preserve the left-associated Fortran expression at
+        # cfgs/DINO/MY_SRC/usrdef_sbc.F90:632.
+        return tau_lo + (tau_hi - tau_lo) * (3.0 - 2.0 * s) * s ** 2
+    weight = (3.0 - 2.0 * s) * s ** 2
     return tau_lo + (tau_hi - tau_lo) * weight
 
 
@@ -2675,7 +3106,18 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
             bottom_tke_bc=cfg.tke_bottom_bc,
             tke_shear_production=cfg.tke_shear_production,
             tke_shear_avm_weighting=cfg.tke_shear_avm_weighting,
+            tke_preclosure_coeff_source=cfg.tke_preclosure_coeff_source,
+            tke_matrix_evaluation=cfg.tke_matrix_evaluation,
+            tke_solver_evaluation=cfg.tke_solver_evaluation,
+            tke_etau_exponential_evaluation=(
+                cfg.tke_etau_exponential_evaluation),
+            tke_htau_evaluation=cfg.tke_htau_evaluation,
+            tke_mxl_raw_evaluation=cfg.tke_mxl_raw_evaluation,
+            tke_langmuir_evaluation=cfg.tke_langmuir_evaluation,
+            tke_shear_evaluation_stage=cfg.tke_shear_evaluation_stage,
+            tke_shear_metric_source=cfg.tke_shear_metric_source,
             tke_n2_time_level=cfg.tke_n2_time_level,
+            tke_n2_evaluation_stage=cfg.tke_n2_evaluation_stage,
         )
         if cfg.tke_alpha is not None:
             # NEMO en self-diffusion uses 0.5·(avm[k+1]+avm[k]) (alpha_tke=1),
@@ -2814,6 +3256,93 @@ def dino_lat_lon_model_config(
             f"(got eos={cfg.eos!r}): the NEMO bn2 uses the S-EOS alpha/beta "
             "polynomial, so any other EOS would give slopes inconsistent with "
             "the model's own density.")
+    if cfg.gm_redi_slope_n2_evaluation not in (
+            "recompute", "carried_step_entry"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_slope_n2_evaluation "
+            f"{cfg.gm_redi_slope_n2_evaluation!r}; expected 'recompute' or "
+            "'carried_step_entry'")
+    if (cfg.gm_redi_slope_n2_evaluation == "carried_step_entry"
+            and cfg.gm_redi_slope_n2 != "nemo_bn2"):
+        raise ValueError(
+            "gm_redi_slope_n2_evaluation='carried_step_entry' requires "
+            "gm_redi_slope_n2='nemo_bn2'")
+    if cfg.gm_redi_slope_prd_geometry_stage not in ("current_step", "before_step"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_slope_prd_geometry_stage "
+            f"{cfg.gm_redi_slope_prd_geometry_stage!r}; expected 'current_step' "
+            "or 'before_step'")
+    if cfg.gm_redi_slope_prd_evaluation not in (
+            "density_roundtrip", "nemo_literal"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_slope_prd_evaluation "
+            f"{cfg.gm_redi_slope_prd_evaluation!r}; expected "
+            "'density_roundtrip' or 'nemo_literal'")
+    if (cfg.gm_redi_slope_prd_evaluation == "nemo_literal"
+            and cfg.eos != "nemo_seos"):
+        raise ValueError(
+            "DINOConfig.gm_redi_slope_prd_evaluation='nemo_literal' requires "
+            f"eos='nemo_seos' (got {cfg.eos!r})")
+    if cfg.gm_redi_slope_metric_evaluation not in (
+            "division", "nemo_reciprocal"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_slope_metric_evaluation "
+            f"{cfg.gm_redi_slope_metric_evaluation!r}; expected 'division' "
+            "or 'nemo_reciprocal'")
+    if cfg.gm_redi_slope_face_thickness_evaluation not in (
+            "static_face", "nemo_qco_live"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_slope_face_thickness_evaluation "
+            f"{cfg.gm_redi_slope_face_thickness_evaluation!r}; expected "
+            "'static_face' or 'nemo_qco_live'")
+    if cfg.gm_redi_flux_face_thickness_evaluation not in (
+            "tpoint_jacobian", "nemo_qco_live"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_flux_face_thickness_evaluation "
+            f"{cfg.gm_redi_flux_face_thickness_evaluation!r}; expected "
+            "'tpoint_jacobian' or 'nemo_qco_live'")
+    if cfg.gm_redi_horizontal_evaluation not in (
+            "cosine_scaled", "nemo_metric_literal"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_horizontal_evaluation "
+            f"{cfg.gm_redi_horizontal_evaluation!r}; expected "
+            "'cosine_scaled' or 'nemo_metric_literal'")
+    if cfg.gm_redi_vertical_skew_evaluation not in (
+            "normalized_sums", "nemo_literal"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_vertical_skew_evaluation "
+            f"{cfg.gm_redi_vertical_skew_evaluation!r}; expected "
+            "'normalized_sums' or 'nemo_literal'")
+    if cfg.gm_redi_a33_evaluation not in (
+            "normalized_square", "nemo_literal"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_a33_evaluation "
+            f"{cfg.gm_redi_a33_evaluation!r}; expected "
+            "'normalized_square' or 'nemo_literal'")
+    if cfg.gm_redi_w_slope_stage_evaluation not in (
+            "redi_tuple", "nemo_post_slope_pair"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_w_slope_stage_evaluation "
+            f"{cfg.gm_redi_w_slope_stage_evaluation!r}; expected "
+            "'redi_tuple' or 'nemo_post_slope_pair'")
+    if cfg.gm_redi_slope_depth_evaluation not in (
+            "legacy_jacobian_t_surface", "nemo_qco_live_literal"):
+        raise ValueError(
+            "unknown DINOConfig.gm_redi_slope_depth_evaluation "
+            f"{cfg.gm_redi_slope_depth_evaluation!r}; expected "
+            "'legacy_jacobian_t_surface' or 'nemo_qco_live_literal'")
+    if cfg.gm_treguier_vertical_reduction_evaluation not in (
+            "tree", "nemo_left"):
+        raise ValueError(
+            "unknown DINOConfig.gm_treguier_vertical_reduction_evaluation "
+            f"{cfg.gm_treguier_vertical_reduction_evaluation!r}; expected "
+            "'tree' or 'nemo_left'")
+    if cfg.gm_treguier_sqrt_evaluation not in (
+            "guarded_floor", "nemo_forward_exact"):
+        raise ValueError(
+            "unknown DINOConfig.gm_treguier_sqrt_evaluation "
+            f"{cfg.gm_treguier_sqrt_evaluation!r}; expected "
+            "'guarded_floor' or 'nemo_forward_exact'")
     if cfg.gm_redi_mld_criterion not in ("rho_c", "n2_integral"):
         raise ValueError(
             "unknown DINOConfig.gm_redi_mld_criterion "
@@ -2883,6 +3412,26 @@ def dino_lat_lon_model_config(
             msc_stabilize=True,
             mld_criterion=cfg.gm_redi_mld_criterion,
             slope_n2=cfg.gm_redi_slope_n2,
+            slope_n2_evaluation=cfg.gm_redi_slope_n2_evaluation,
+            slope_prd_geometry_stage=cfg.gm_redi_slope_prd_geometry_stage,
+            slope_prd_evaluation=cfg.gm_redi_slope_prd_evaluation,
+            slope_metric_evaluation=cfg.gm_redi_slope_metric_evaluation,
+            slope_face_thickness_evaluation=(
+                cfg.gm_redi_slope_face_thickness_evaluation),
+            redi_flux_face_thickness_evaluation=(
+                cfg.gm_redi_flux_face_thickness_evaluation),
+            kappa_redi_horizontal_evaluation=(
+                cfg.gm_redi_horizontal_evaluation),
+            redi_vertical_skew_evaluation=(
+                cfg.gm_redi_vertical_skew_evaluation),
+            redi_a33_evaluation=cfg.gm_redi_a33_evaluation,
+            redi_w_slope_stage_evaluation=(
+                cfg.gm_redi_w_slope_stage_evaluation),
+            kappa_redi_diffusive_velocity=cfg.U_T,
+            slope_depth_evaluation=cfg.gm_redi_slope_depth_evaluation,
+            treguier_vertical_reduction_evaluation=(
+                cfg.gm_treguier_vertical_reduction_evaluation),
+            treguier_sqrt_evaluation=cfg.gm_treguier_sqrt_evaluation,
             visbeck=VisbeckConfig(
                 enabled=(cfg.use_gm_redi
                          and cfg.gm_kappa_scheme == "visbeck"),
@@ -2913,6 +3462,23 @@ def dino_lat_lon_model_config(
             gm_bolus_kappa_face_average=cfg.gm_bolus_kappa_face_average,
             mld_criterion=cfg.gm_redi_mld_criterion,
             slope_n2=cfg.gm_redi_slope_n2,
+            slope_n2_evaluation=cfg.gm_redi_slope_n2_evaluation,
+            slope_prd_geometry_stage=cfg.gm_redi_slope_prd_geometry_stage,
+            slope_prd_evaluation=cfg.gm_redi_slope_prd_evaluation,
+            slope_metric_evaluation=cfg.gm_redi_slope_metric_evaluation,
+            slope_face_thickness_evaluation=(
+                cfg.gm_redi_slope_face_thickness_evaluation),
+            redi_flux_face_thickness_evaluation=(
+                cfg.gm_redi_flux_face_thickness_evaluation),
+            redi_vertical_skew_evaluation=(
+                cfg.gm_redi_vertical_skew_evaluation),
+            redi_a33_evaluation=cfg.gm_redi_a33_evaluation,
+            redi_w_slope_stage_evaluation=(
+                cfg.gm_redi_w_slope_stage_evaluation),
+            slope_depth_evaluation=cfg.gm_redi_slope_depth_evaluation,
+            treguier_vertical_reduction_evaluation=(
+                cfg.gm_treguier_vertical_reduction_evaluation),
+            treguier_sqrt_evaluation=cfg.gm_treguier_sqrt_evaluation,
             # Exactly ONE adaptive-κ diagnostic on (the GM/Redi dispatch
             # raises if both are enabled): "visbeck" (historical) or
             # "treguier" (the NEMO nn_aei_ijk_t=21 oracle scaling, cap
@@ -2950,8 +3516,27 @@ def dino_lat_lon_model_config(
         from legoesm.ocean.physics.bottom_drag.config import BottomDragConfig
         physics_cfg = OceanPhysicsConfig(
             vertical_mixing=_dino_vertical_mixing_config(cfg),
-            # GM/Redi goes on the model config directly, not here.
-            lateral_mixing=LateralMixingConfig(scheme="none"),
+            # GM/Redi executes from the model config directly. Keep the two
+            # newly selected literal-depth fields mirrored on this disabled
+            # shadow so config ratchets cannot report contradictory surfaces;
+            # scheme="none" means this copy remains behaviorally inert.
+            lateral_mixing=LateralMixingConfig(
+                scheme="none",
+                gm_redi=GMRediConfig(
+                    slope_face_thickness_evaluation=(
+                        cfg.gm_redi_slope_face_thickness_evaluation),
+                    redi_flux_face_thickness_evaluation=(
+                        cfg.gm_redi_flux_face_thickness_evaluation),
+                    kappa_redi_horizontal_evaluation=(
+                        cfg.gm_redi_horizontal_evaluation),
+                    redi_vertical_skew_evaluation=(
+                        cfg.gm_redi_vertical_skew_evaluation),
+                    redi_a33_evaluation=cfg.gm_redi_a33_evaluation,
+                    redi_w_slope_stage_evaluation=(
+                        cfg.gm_redi_w_slope_stage_evaluation),
+                    kappa_redi_diffusive_velocity=cfg.U_T,
+                    slope_depth_evaluation=(
+                        cfg.gm_redi_slope_depth_evaluation))),
             convection=OceanConvectionConfig(
                 scheme="enhanced_diffusion",
                 # NEMO nn_evdm=1: EVD on tracers AND momentum (nu_conv =
@@ -3007,11 +3592,14 @@ def dino_lat_lon_model_config(
         momentum_flux_scheme=cfg.momentum_flux_scheme,
         vertical_momentum_scheme=cfg.vertical_momentum_scheme,
         zad_bottom_face_mask=cfg.zad_bottom_face_mask,
+        zad_qco_evaluation=cfg.zad_qco_evaluation,
+        wzv_call2_evaluation=cfg.wzv_call2_evaluation,
         coriolis_scheme=cfg.coriolis_scheme,
         outer_integrator=cfg.outer_integrator,
         vorticity_scheme=cfg.vorticity_scheme,
         een_q_boundary=cfg.een_q_boundary,
         een_e3f_scheme=cfg.een_e3f_scheme,
+        een_metric_weighting=cfg.een_metric_weighting,
         asselin_gamma=cfg.asselin_gamma,
         tracer_combine=cfg.tracer_combine,
         fix_eta_drift=cfg.fix_eta_drift,
@@ -3050,11 +3638,16 @@ def dino_lat_lon_model_config(
         # #1226: T/u-face metric convention (see DINOConfig.metric_convention
         # + LatLonCGridOceanConfig.metric_convention docstrings).
         metric_convention=cfg.metric_convention,
+        # #1455 one-variable V-face Mercator ownership selector.
+        vface_zonal_metric_evaluation=cfg.vface_zonal_metric_evaluation,
+        # #1455: vertex-Coriolis placement (see the DINOConfig field).
+        coriolis_placement=cfg.coriolis_placement,
         # NEMO dynzdf wind placement (see DINOConfig.surface_stress_implicit).
         surface_stress_implicit=cfg.surface_stress_implicit,
         # NEMO dynzdf composition (#1226; see DINOConfig field docstrings).
         zdf_drag_in_matrix=cfg.zdf_drag_in_matrix,
         zdf_baroclinic_only=cfg.zdf_baroclinic_only,
+        zdf_implicit_solver_evaluation=cfg.zdf_implicit_solver_evaluation,
         barotropic_drag_substep=cfg.barotropic_drag_substep,
         # NEMO ln_bt_fw=.FALSE. centred barotropic forcing (#1226 item 3;
         # see DINOConfig.barotropic_forcing_centred docstring).
@@ -3062,6 +3655,12 @@ def dino_lat_lon_model_config(
         # NEMO dyn_cor_2D_init(Kmm) EEN coefficient seed (#1226 item 4; see
         # DINOConfig.barotropic_een_seed docstring).
         barotropic_een_seed=cfg.barotropic_een_seed,
+        # NEMO dyn_spg_ts N6 momentum reconciliation target (dynspg_ts.F90:1170;
+        # see DINOConfig.barotropic_reconcile_target docstring).
+        barotropic_reconcile_target=cfg.barotropic_reconcile_target,
+        # NEMO mlf_baro_corr, the after-level reconciliation (stpmlf.F90:
+        # 754-765; see DINOConfig.barotropic_after_reconcile docstring).
+        barotropic_after_reconcile=cfg.barotropic_after_reconcile,
         A_h=A_h_base,
         A_h_lat_scaling=True,         # cos(lat) per-row scaling — Phase 1B
         # Node 14: "nemo_div_curl" embeds ahmt/ahmf=½·rn_Uv·MAX(e1,e2) inside the
@@ -3093,6 +3692,13 @@ def dino_lat_lon_model_config(
         # Routed by from_flat into config.barotropic.
         barotropic_diffusion_alpha=cfg.barotropic_diffusion_alpha,
         barotropic_face_depth=cfg.barotropic_face_depth,
+        barotropic_continuity_evaluation=cfg.barotropic_continuity_evaluation,
+        barotropic_transport_accumulation_evaluation=(
+            cfg.barotropic_transport_accumulation_evaluation),
+        barotropic_een_coefficient_evaluation=(
+            cfg.barotropic_een_coefficient_evaluation),
+        barotropic_seed_evaluation=cfg.barotropic_seed_evaluation,
+        barotropic_pgf_evaluation=cfg.barotropic_pgf_evaluation,
         barotropic_seed_face_depth=cfg.barotropic_seed_face_depth,
         **_scheme,
         tracer_advection=cfg.tracer_advection,
@@ -3484,7 +4090,9 @@ EXPERIMENT_CONFIG = {
 # doesn't subtract Q_sr per paper eq 8). See Decisions Log 2026-05-14.
 # ---------------------------------------------------------------------
 
-def dino_lat_lon_surface_forcing_arrays(grid, cfg: DINOConfig | None = None):
+def dino_lat_lon_surface_forcing_arrays(
+    grid, cfg: DINOConfig | None = None, *, wind_lat_deg=None,
+):
     """Pre-compute lat-lon Mercator forcing fields that don't depend on state.
 
     Returns dict with:
@@ -3497,13 +4105,50 @@ def dino_lat_lon_surface_forcing_arrays(grid, cfg: DINOConfig | None = None):
         cfg = DINOConfig()
 
     lat_1d = jnp.degrees(grid.lat)               # (n_lat,)
+    wind_lat_1d = lat_1d
+    if cfg.dino_wind_profile_evaluation == "nemo_literal":
+        if wind_lat_deg is None:
+            # usrdef_hgr.F90:95-107 constructs DINO's stored degree-valued
+            # gphiu directly, before any radians representation exists.  Do
+            # the same for the complete NEMO card.  A lat(rad)->degrees
+            # round-trip moves 154 row-8 columns across the 1e-15 bar.
+            # Scalar ``math`` follows the same libm path as the active NEMO
+            # build (and is bit-identical to its 195 raw gphiu rows); NumPy's
+            # vector transcendental dispatch is not bit-identical here.
+            import math
+            rad = math.pi / 180.0
+            # A bridged NEMO geometry retains two halo rows/columns on each
+            # side (199x52 for the physical 195x48 card).  Its source spacing
+            # is still the physical 48-column spacing.  Ordinary standalone
+            # Mercator grids have no such halo and use their own n_lon.
+            is_nemo_halo_geometry = (
+                grid.n_lat == _NEMO_DINO_NLAT + 4
+                and grid.n_lon == _NEMO_DINO_NLON + 4
+                and (cfg.lon_east_deg - cfg.lon_west_deg) == 48.0
+            )
+            source_n_lon = (_NEMO_DINO_NLON if is_nemo_halo_geometry
+                            else grid.n_lon)
+            rn_e1_deg = ((cfg.lon_east_deg - cfg.lon_west_deg)
+                         / float(source_n_lon))
+            jeq = grid.n_lat // 2
+            half_offset = 0.0 if grid.n_lat % 2 else 0.5
+            wind_lat_deg = [
+                (1.0 / rad) * math.asin(math.tanh(
+                    rn_e1_deg * rad * float(j - jeq + half_offset)))
+                for j in range(grid.n_lat)
+            ]
+        wind_lat_1d = jnp.asarray(wind_lat_deg, dtype=jnp.float64)
+        if wind_lat_1d.shape != lat_1d.shape:
+            raise ValueError(
+                f"wind_lat_deg shape {wind_lat_1d.shape} != grid latitude "
+                f"shape {lat_1d.shape}")
     T_star_1d = dino_T_star_annual_mean(lat_1d, cfg)
     S_star_1d = dino_S_star(lat_1d, cfg)
     Q_sr_1d = dino_Q_sr_annual_mean(lat_1d, cfg)
-    tau_u_1d = dino_wind_stress(lat_1d, cfg)     # (n_lat,)
+    tau_u_1d = dino_wind_stress(wind_lat_1d, cfg)     # (n_lat,)
 
     shape_2d = (grid.n_lat, grid.n_lon)
-    tau_u_cell_1d = dino_wind_stress(lat_1d, cfg)      # τ at CELL lats
+    tau_u_cell_1d = dino_wind_stress(wind_lat_1d, cfg)  # τ at CELL lats
     # NEMO taum (usrdef_sbc:222-223): |τ|, boosted x1.3 in the westerlies
     # (utau > 0) — the TKE surface input only, never the momentum stress.
     taum_1d = jnp.abs(tau_u_cell_1d) * jnp.where(

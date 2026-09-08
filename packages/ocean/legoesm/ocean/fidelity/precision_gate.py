@@ -110,11 +110,17 @@ def require_explicit_e3t_mode(context: str = "oracle comparison") -> str:
 
     ``bridge_nemo_to_legoesm_topo`` defaults this to ``"off"``, which feeds
     legoESM NEMO's *analytic 1-D* ``e3t_1d`` while NEMO itself runs on the 3-D
-    ``e3t_0``.  Those two NEMO ladders differ by up to **12.9%** below k=25 --
-    NEMO builds its reference ladder in two passes (``zgr_lib.F90::zgr_sco_mi96``
-    re-anchors at ``kkconst = argmin(|gdepw - rn_hco|)``, and DINO's
-    ``rn_hco = 1000 m`` puts that at k=25 exactly) -- so the default silently
-    puts a 13% geometry error into the deepest third of the column.
+    ``e3t_0``.  At and below k=25 (0-based, as everywhere in this file) those two
+    NEMO ladders diverge, by up to **70.4 m**
+    at the deepest wet level -- which is 12.9% of ``e3t_0`` and 14.8% of
+    ``e3t_1d``.  Always quote the denominator here: those two percentages are
+    ONE measurement and have already been mistaken for a disagreement between
+    two.  NEMO builds its reference ladder in two passes
+    (``zgr_lib.F90::zgr_sco_mi96`` re-anchors at
+    ``kkconst = argmin(|gdepw - rn_hco|)``, and DINO's ``rn_hco = 1000 m`` puts
+    that at ``kkconst = 26`` in Fortran's 1-based indexing, i.e. k=25 here), so
+    the default silently puts a 12.9%-of-``e3t_0`` geometry error into the
+    deepest third of the column.
 
     It has now contaminated FOUR measurements.  The most recent cost a full
     false root-cause: the barotropic seed measured 2.31e-2 and was attributed to
@@ -122,10 +128,18 @@ def require_explicit_e3t_mode(context: str = "oracle comparison") -> str:
     (exact) and the error actually ACCUMULATES through the substeps -- the
     opposite conclusion.
 
-    The default is NOT changed here: it exists because legoESM is unstable when
-    started from a NEMO restart on the true ladder (gate row "STABILITY on NEMO
-    true grid"), which is a real unfixed defect.  So the mode stays a choice --
-    but it must be a CONSCIOUS one, never an inherited silent default.
+    The default is NOT changed here, and this gate stays fail-closed.  But its
+    STATED REASON no longer holds as written: the instability it cites (gate row
+    "STABILITY on NEMO true grid") DID NOT REPRODUCE in 2026-08-21 measurements
+    -- four 90-day DINO twin arms from the day-180 restart, differing only in
+    this variable, all ran stable to day 90 at 0.633-0.635 m/s peak speed, with
+    the two end arms confirmed under an fp64 precision policy (#1455; see
+    scripts/validate/ocean_fidelity/dino_1226/d180_step_walk.py and the note in
+    nemo_state_bridge.effective_vertical_scale_factors).  That is a
+    non-reproduction under one configuration, NOT a refutation, so "a real
+    unfixed defect" is downgraded to "an unexplained recorded observation".
+    Either way the mode stays a CONSCIOUS choice here, never an inherited silent
+    default -- which is the part of this gate that was always load-bearing.
     """
     import os
 
@@ -134,15 +148,20 @@ def require_explicit_e3t_mode(context: str = "oracle comparison") -> str:
         raise ValueError(
             f"{context}: LEGOESM_NEMO_E3T is NOT SET, so the bridge would "
             'silently use "off" -- NEMO\'s analytic e3t_1d, which differs from '
-            "the e3t_0 NEMO actually runs on by up to 12.9% below k=25. That "
+            "the e3t_0 NEMO actually runs on by up to 70.4 m below k=25 "
+            "(12.9% of e3t_0, 14.8% of e3t_1d). That "
             "default has already contaminated four measurements, most recently "
             "producing a completely wrong root cause for the barotropic seed. "
             'Set it explicitly: "both" (NEMO\'s true 3-D ladder, what a '
             'fidelity comparison wants) or "off" (the 1-D ladder) -- and say '
             "which in the report."
         )
-    if mode not in ("off", "e3t_only", "gdept_only", "both"):
+    # The accepted set comes from the bridge that enforces it, never re-listed
+    # here: a gate that accepted a mode the bridge rejects would pass the typo
+    # straight through to grid construction.
+    from legoesm.ocean.fidelity.nemo_state_bridge import NEMO_E3T_MODES
+    if mode not in NEMO_E3T_MODES:
         raise ValueError(
-            f"{context}: unknown LEGOESM_NEMO_E3T={mode!r}; expected "
-            '"off", "e3t_only", "gdept_only" or "both"')
+            f"{context}: unknown LEGOESM_NEMO_E3T={mode!r}; expected one of "
+            + ", ".join(repr(m) for m in NEMO_E3T_MODES))
     return mode

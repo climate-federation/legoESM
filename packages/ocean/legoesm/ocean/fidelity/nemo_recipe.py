@@ -35,14 +35,21 @@ from legoesm.ocean.physics.vertical_mixing.config import (
 from legoesm.ocean.state import LatLonCGridOceanConfig
 
 from legoesm import constants
-
-NEMO_CONSTANTS_CONFIG = ConstantsConfig(
-    g=constants.g_nemo,
-    rho_0=constants.rho_ocean_nemo,
-    c_sw=constants.c_p_seawater,
-    Omega=constants.Omega,
-    R_earth=constants.R_earth,
+from legoesm.ocean.constants_config import (
+    NEMO_CONSTANTS_CONFIG as _CANONICAL_NEMO_CONSTANTS,
 )
+
+# THE CANONICAL NEMO PRESET, re-exported -- not a second one built here.
+#
+# This module used to define its own ConstantsConfig under the SAME NAME as
+# ocean.constants_config.NEMO_CONSTANTS_CONFIG, agreeing on g/rho_0/c_sw/R_earth
+# and differing on Omega alone: it carried legoESM's rounded constants.Omega
+# while the canonical preset carries NEMO's own 2*pi/rsiday, 1.578e-05 apart.
+# Two same-named constants blocks with one silently divergent field is exactly
+# the shadowing pattern that put the DINO oracle lane on the wrong planet
+# (#1455); a NEMO card must not be able to pick the wrong NEMO.  Re-exported
+# rather than re-declared so there is one object and no way to drift.
+NEMO_CONSTANTS_CONFIG = _CANONICAL_NEMO_CONSTANTS
 
 
 class NEMORecipe(NamedTuple):
@@ -143,7 +150,7 @@ NEMO_BLOCK_MAPPING: tuple[tuple[str, str, str], ...] = (
     (
         "UP3 momentum option",
         "momentum_core",
-        "flux_form_upwind3 selects momentum_flux_scheme=upwind3",
+        "flux_form_upwind3 selects momentum_flux_scheme=nemo_up3",
     ),
     (
         "tracer advection",
@@ -327,7 +334,8 @@ def _momentum_options(momentum_core: str) -> dict[str, object]:
     if momentum_core == "flux_form_upwind3":
         return {
             "momentum_advection": "flux_form",
-            "momentum_flux_scheme": "upwind3",
+            # The NEMO-referenced UP3 arm (dynadv_up3.F90:166,169-170).
+            "momentum_flux_scheme": "nemo_up3",
             "ke_gradient_scheme": "centered",
         }
     raise ValueError(
@@ -861,8 +869,10 @@ def build_nemo_gyre_recipe(
     # abyssal circulation (surf/deep rms(u) 0.20 vs NEMO 8.2); linssh flips it
     # to NEMO's surface-intensified structure (5.91) and collapses the abyssal
     # density drift to NEMO's level. See nemo_gyre_fidelity_plan.md item A.
-    z_coord = create_z_star_from_thicknesses(e3t_wet, gdept_wet)._replace(
-        linear_free_surface=True)
+    z_coord = create_z_star_from_thicknesses(
+        e3t_wet, gdept_wet,
+        nemo_e3w_source="depth_difference",
+    )._replace(linear_free_surface=True)
     n_lev = int(e3t_wet.size)
 
     # Beta-plane geometry (uniform 106 km metric, NEMO f = f0 + beta*y).

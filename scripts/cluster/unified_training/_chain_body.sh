@@ -67,17 +67,24 @@ print(d.get('output_dir') or '')
     ;;
   wb)
     OUT="${OUT:-results/unified_wb/$(basename "${SUITE%.*}")}"
-    RESUME_FLAG=""   # WB trainer has no resume — never pass --resume
     WATCH_DIR="$OUT"
     WB_MODES="${VARIANT//+/,}"
+    # The WB trainer restores parameters, optimizer state and the frozen-leaf
+    # set from its last completed epoch, so this campaign chains like the aimip
+    # one. It used to be pinned to a single link and to never pass --resume,
+    # which is why a 12-epoch T63 run could not finish inside a 12-hour
+    # walltime: every link began again at epoch 0.
+    # Each mode has its own $OUT/<mode> directory and finds its OWN latest
+    # epoch, so a partially-trained fleet resumes per mode; a mode with no
+    # checkpoint simply starts at zero.
+    # Decided below, once _ckpt_sig exists: asking whether a PARAMETER file is
+    # present would advertise a resumed run where the trainer, which needs the
+    # optimizer state and a valid manifest too, will quietly start at epoch 0.
+    RESUME_FROM_SIG=1
+    RESUME_FLAG=""
     DRIVER=(scripts/run/run_weatherbench_campaign.py --config "$SUITE" \
             --modes "$WB_MODES" --stages train --out-root "$OUT")
     FINAL=""
-    if [ "$CHAIN" -gt 0 ]; then
-      echo "[unified-train] wb campaign is single-link (no trainer resume); refusing chained link $CHAIN" >&2
-      exit 2
-    fi
-    CHAIN_MAX=0   # single link: never resubmit (see header)
     ;;
   *)
     echo "[unified-train] Unknown CAMPAIGN '$CAMPAIGN' (aimip|wb)" >&2
@@ -86,22 +93,54 @@ print(d.get('output_dir') or '')
 esac
 
 mkdir -p "$OUT"
-echo "[unified-train] $(date) campaign=$CAMPAIGN variant=$VARIANT link=$CHAIN suite=$SUITE out=$OUT resume=${RESUME_FLAG:-no}"
 
 # Nanosecond mtime + size: two same-second checkpoint replacements must not
 # read as "no progress" (codex MED).
+# The wb campaign trains several families in ONE invocation and gives each its
+# own $OUT/<mode> directory, so the signature has to look one level down as
+# well; globbing only the top level saw no progress and refused to chain.
+# It watches the MANIFEST, which the trainer writes LAST: the parameter file
+# lands first, so a link killed while serialising the optimizer state would
+# otherwise report progress, chain, and hand the next link a checkpoint it
+# refuses to resume from — an epoch-0 restart wearing a chained run's name.
+# aimip has no manifests, so its own flat globs are unchanged.
 _ckpt_sig() {
+  # wb ASKS THE TRAINER what a complete epoch is rather than re-deciding here.
+  # A shell test of its own (a grep for a substring, a glob for the parameter
+  # file) drifts from the trainer's: it counted a truncated manifest as
+  # progress, so the wrapper chained and the next link refused, and the pair
+  # looped while reporting a chained run.
+  if [ "$CAMPAIGN" = "wb" ]; then
+    "$PY" "$REPO/scripts/run/train_weatherbench_scale.py" \
+      --print-latest-complete "$WATCH_DIR" 2>/dev/null
+    return
+  fi
   ls -t "$WATCH_DIR"/epoch_*.eqx "$WATCH_DIR"/chunk_latest.eqx 2>/dev/null \
     | head -1 | xargs -r stat -c '%n:%.Y:%s' 2>/dev/null
 }
 SIG_BEFORE="$(_ckpt_sig)"
+# One definition of "there is something to resume from", shared with the
+# trainer: a non-empty signature means a COMPLETE epoch exists.
+if [ "${RESUME_FROM_SIG:-0}" = "1" ]; then
+  if [ -n "$SIG_BEFORE" ] || [ "${RESUME:-0}" = "1" ]; then
+    RESUME_FLAG="--resume"
+  fi
+fi
+
+echo "[unified-train] $(date) campaign=$CAMPAIGN variant=$VARIANT link=$CHAIN suite=$SUITE out=$OUT resume=${RESUME_FLAG:-no}"
 
 # shellcheck disable=SC2086
 timeout -k 120 "${LINK_BUDGET_S}s" "$PY" -u "${DRIVER[@]}" $RESUME_FLAG
 RC=$?
 
+TIMED_OUT=0
 if [ "$RC" -eq 124 ] || [ "$RC" -eq 137 ]; then
-  if [ "$CAMPAIGN" = "aimip" ] && [ "$(_ckpt_sig)" != "$SIG_BEFORE" ]; then
+  SIG_AFTER="$(_ckpt_sig)"
+  # An EMPTY signature is never progress. Without this, a query that failed
+  # for any transient reason would read as a change from a previous non-empty
+  # signature and chain a link with nothing to resume from.
+  if [ -n "$SIG_AFTER" ] && [ "$SIG_AFTER" != "$SIG_BEFORE" ]; then
+    TIMED_OUT=1
     echo "[unified-train] hit link budget ${LINK_BUDGET_S}s (rc=$RC), checkpoint advanced -> chaining"
     RC=0
   else
@@ -111,7 +150,14 @@ if [ "$RC" -eq 124 ] || [ "$RC" -eq 137 ]; then
 fi
 echo "[unified-train] driver rc=$RC $(date)"
 
-if [ "$CAMPAIGN" = "aimip" ] && [ "$RC" -eq 0 ] && [ ! -f "$FINAL" ] && [ "$CHAIN" -lt "$CHAIN_MAX" ]; then
+# A campaign with a single FINAL artifact (aimip) chains until that file
+# appears.  wb has none — its train stage simply returns — so it chains only
+# when the link was CUT SHORT by the walltime with checkpoint progress to show
+# for it.  Chaining a wb link that exited normally would retrain a finished
+# campaign CHAIN_MAX more times.
+if [ "$RC" -eq 0 ] && [ "$CHAIN" -lt "$CHAIN_MAX" ] \
+   && { { [ -n "$FINAL" ] && [ ! -f "$FINAL" ]; } \
+        || { [ -z "$FINAL" ] && [ "$TIMED_OUT" -eq 1 ]; }; }; then
   echo "[unified-train] not complete -> chaining link $((CHAIN+1))/$CHAIN_MAX"
   resubmit_self
 elif [ -n "$FINAL" ] && [ -f "$FINAL" ]; then

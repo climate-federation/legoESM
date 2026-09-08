@@ -41,7 +41,7 @@ class AMIPExperimentConfig(NamedTuple):
     # Integration
     start_day: float = 0.0
     days: int = 200
-    diag_days: int = 5
+    diag_days: float = 5.0
     checkpoint_days: int = 0  # 0 = no checkpointing
 
     # Forcing
@@ -87,6 +87,25 @@ class AMIPExperimentConfig(NamedTuple):
     # crashed; add both).
     bechtold_cape_threshold: float = 70.0
     bechtold_conv_top_pa: float = 15000.0
+    # Convection scalars that the round-trip used to DROP (found by codex
+    # 2026-08-13): a run that set any of these from --params got the
+    # default back after a legacy-format restart, silently, mid-run.
+    # test_amip_round_trip_keeps_every_convection_scalar now fails if a
+    # new one is added here without being mirrored.
+    bechtold_epsilon_deep: float = 1.75e-3
+    bechtold_delta_deep: float = 0.75e-4
+    bechtold_capdcycl_land_tau_scale: float = 1.0
+    bechtold_subcloud_evap_scale: float = 1.0
+    bechtold_rhebc_land: float = 0.75
+    bechtold_rhebc_land_deep: float = 0.70
+    bechtold_rprcon: float = 1.4e-3
+    bechtold_dnoprc: float = 3.0e-4
+    bechtold_downdraft_entrain_rate: float = 3.0e-4
+    bechtold_downdraft_detrain_scale_m: float = 700.0
+    bechtold_downdraft_transport: bool = False
+    bechtold_subsidence_solve: str = "implicit_flux"
+    convective_buoyancy_death_memory: bool = False
+    convective_cloud: bool = False
     # Bechtold convective-downdraft strength (marine humid-BL evaporation lever).
     bechtold_downdraft_evap: float = 0.05
     bechtold_downdraft_alpha: float = 0.3

@@ -13,6 +13,10 @@ calls ``divergence_cgrid`` at :166 and re-diagnoses w via
 thicknesses vary 9-13% between adjacent abyssal levels and (the hypothesis
 says) this consistency breaks, giving the bolus a spurious divergent
 component that explains the restart-start instability (addenda 33/35/36).
+NOTE 2026-08-21 (#1455): that instability did not reproduce -- four 90-day arms
+from the day-180 restart, one variable, all stable at 0.633-0.635 m/s. This
+probe's premise is therefore an unexplained observation rather than a live
+failure to explain; the transport question it measures stands on its own.
 
 PRODUCTION DIVERGENCE OPERATOR USED (traced, not re-derived -- Rule 0):
 ``divergence_cgrid`` at
@@ -72,6 +76,10 @@ wet_u_mask = _slp.wet_u_mask
 wet_v_mask = _slp.wet_v_mask
 RUN_DIR = _slp.RUN_DIR
 RESTART = _slp.RESTART
+# _slp (ldf_slp_per_element.py) already routes RUN_DIR/RESTART through
+# dump_lane -- reuse ITS dump_lane instance (not a second load) for banner()
+# and the actual dumped kt, so this file's own print stays honest per-lane.
+dump_lane = _slp.dump_lane
 
 from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     compute_nemo_native_slopes,
@@ -240,8 +248,9 @@ def main() -> int:
         raise ValueError(
             f"this probe compares 'off' vs 'both' specifically; "
             f"LEGOESM_NEMO_E3T={e3t_mode!r} is neither")
-    print(f"restart used  = {os.path.join(RUN_DIR, RESTART)}  (kt=57601, "
-          f"DINO_00057600_restart.nc -> read_nemo_restart_before)")
+    print(dump_lane.banner())
+    print(f"restart used  = {os.path.join(RUN_DIR, RESTART)}  "
+          f"(kt={dump_lane.KT_DUMP} -> read_nemo_restart_before)")
     print(f"dump dir used = {RUN_DIR}")
     print(f"LEGOESM_NEMO_E3T (this process) = {e3t_mode} "
           f"(the A/B below builds BOTH branches in-process via the "

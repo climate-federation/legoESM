@@ -647,6 +647,29 @@ def test_dz_ref_file_builds_the_exact_z_star_coordinate(tmp_path):
         float(dz.sum()))
 
 
+def test_thickness_only_setup_explicitly_selects_legacy_e3w(monkeypatch):
+    """The real override path cannot claim a raw mesh operand it does not own."""
+    import numpy as np
+    import legoesm.ocean.vertical as vertical
+    from scripts.run import run_omip
+
+    seen = {}
+
+    class SetupReached(Exception):
+        pass
+
+    def capture(dz, **kwargs):
+        seen.update(kwargs)
+        raise SetupReached
+
+    monkeypatch.setattr(vertical, "create_z_star_from_thicknesses", capture)
+    with pytest.raises(SetupReached):
+        run_omip._create_setup(
+            "mpas", "ico1", 3, 60.0, "full", "type1",
+            dz_ref_override=np.array([10.0, 20.0, 30.0]))
+    assert seen == {"nemo_e3w_source": "depth_difference"}
+
+
 @pytest.mark.parametrize("bad,match", [
     ("", "empty"),
     ("5.0\n-1.0\n", "non-positive"),

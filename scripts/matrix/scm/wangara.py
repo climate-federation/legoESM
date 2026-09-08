@@ -40,31 +40,24 @@ from legoesm.atmosphere.physics.turbulence.config import (
 )
 from legoesm.atmosphere.forcing.scm.scm import SingleColumnModel
 from legoesm.atmosphere.forcing.scm.scm_forcing import SCMForcing
+from legoesm.atmosphere.forcing import wangara_day33
 
 
-_LATITUDE_DEG = -34.5
-_F_C = 2.0 * constants.Omega * jnp.sin(jnp.deg2rad(_LATITUDE_DEG))
-_THETA_INIT = 277.0
-_T_START_S = 9.0 * 3600.0
-
-
-def _w_th_s(t_s):
-    """Wangara surface kinematic sensible-heat flux [K m/s]."""
-    return 0.216 * jnp.cos(((t_s / 3600.0) - 13.0) / 11.0 * jnp.pi)
-
-
-def _w_qv_s(t_s):
-    """Wangara surface kinematic moisture flux [(kg/kg) m/s]."""
-    return 2.29e-5 * jnp.cos(((t_s / 3600.0) - 13.0) / 11.0 * jnp.pi)
+# The forcing is SHARED with the Wangara LES (run_spectral_cbl.py --case
+# wangara). It lives in one module because an SCM scored against an LES that
+# was given a different surface flux or geostrophic profile measures the
+# difference between the two forcings, not between the closures.
+_LATITUDE_DEG = wangara_day33.LATITUDE_DEG
+_F_C = wangara_day33.coriolis_parameter()
+_THETA_INIT = wangara_day33.THETA_INIT_K
+_T_START_S = wangara_day33.T_START_S
+_w_th_s = wangara_day33.surface_theta_flux
+_w_qv_s = wangara_day33.surface_qv_flux
 
 
 def _u_geo_profile(nlev: int, z_full: jnp.ndarray) -> jnp.ndarray:
     """Wangara geostrophic-wind profile (easterly, weakens with height)."""
-    return jnp.where(
-        z_full < 1000.0,
-        -5.5 + 2.9e-3 * z_full,
-        -2.6 + 1.4e-3 * (z_full - 1000.0),
-    )
+    return wangara_day33.geostrophic_u(z_full)
 
 
 def build_scm(

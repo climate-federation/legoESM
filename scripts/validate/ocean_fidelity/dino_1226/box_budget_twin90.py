@@ -39,7 +39,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, __file__.rsplit("/", 1)[0])
-from kamm_twin_90d import _build_twin_state, RUN_TRAJ, RUN_STEPDUMP, DT, STEPS_PER_DAY  # noqa: E402
+from kamm_twin_90d import (  # noqa: E402
+    _build_twin_state, RUN_TRAJ, RUN_STEPDUMP, RESTART_FILE, DT, STEPS_PER_DAY,
+    seasonal_t0_seconds,
+)
 
 from legoesm.ocean.experiments.dino import apply_dino_lat_lon_surface_forcing  # noqa: E402
 from legoesm.ocean.fidelity.box_heat_budget import (  # noqa: E402
@@ -93,12 +96,16 @@ def run(recipe: str, out_path: str, n_days: int, row_slice: slice,
     # itself now stores these (acc.time_series_term_J / .time_series_residual_J,
     # #1226) -- no local re-derivation needed.
 
-    t_seconds = 0.0
+    # #1455 SEASONAL CLOCK: NEMO's own day-of-year, read from the bridged
+    # restart. The accumulator re-derives T*/Qsr from t_seconds too
+    # (box_heat_budget.py:413-415), so the SAME clock must reach both.
+    t0_sec = seasonal_t0_seconds(f"{run_stepdump}/{RESTART_FILE}")
+    t_seconds = t0_sec
     acc.sample(st, dt_step=STEPS_PER_DAY * DT, t_seconds=t_seconds)
     for k in range(nsteps):
         st = apply_dino_lat_lon_surface_forcing(st, forcing, br.z_coord, cfg, DT,
-                                                t_seconds=(k + 1) * DT)
-        t_seconds = (k + 1) * DT
+                                                t_seconds=t0_sec + (k + 1) * DT)
+        t_seconds = t0_sec + (k + 1) * DT
         st = dyn(st, jnp.asarray(t_seconds))
         if (k + 1) % STEPS_PER_DAY == 0:
             acc.sample(st, dt_step=STEPS_PER_DAY * DT, t_seconds=t_seconds)
@@ -109,7 +116,7 @@ def run(recipe: str, out_path: str, n_days: int, row_slice: slice,
             if (k + 1) % (STEPS_PER_DAY * 10) == 0:
                 print(f"  day {(k+1)*DT/86400:5.1f}  T[{Td[m].min():.1f},{Td[m].max():.1f}]", flush=True)
 
-    total_seconds = t_seconds
+    total_seconds = t_seconds - t0_sec
     summary = acc.summary(total_seconds)
     accum_W_series = acc.time_series_term_J
     residual_series = acc.time_series_residual_J
@@ -163,6 +170,9 @@ def run(recipe: str, out_path: str, n_days: int, row_slice: slice,
         box_area_m2=summary["box_area_m2"],
         bands=np.array(DEPTH_BANDS_M, dtype=object),
         time_series_t=np.array(acc.time_series_t),
+        # #1455: which seasonal clock produced this artifact (time_series_t
+        # is ABSOLUTE model seconds, i.e. it starts at this offset).
+        seasonal_t0_seconds=np.float64(t0_sec),
         interval_days=interval_days,
         **{f"H_band{i}": np.array(acc.time_series_H[i]) for i in range(len(DEPTH_BANDS_M))},
         **{

@@ -162,6 +162,108 @@ def compute_nemo_boxcar_centred_weights(
     )
 
 
+def compute_nemo_boxcar_forward_weights(
+    n_substeps: int,
+    dtype: jnp.dtype,
+):
+    """NEMO forward ``nn_bt_flt=1`` primary/secondary weights.
+
+    This is the live OVERFLOW testcase arm: ``ln_bt_fw=T`` makes
+    ``jic=nn_e`` and ``ts_wgt`` CASE(1) selects exactly those one-based
+    substeps satisfying ``abs(jn-jic)/nn_e < 1/2``
+    (NEMO 5.0.2 ``dynspg_ts.F90:1058-1080``).  The final in-window index is
+    also NEMO's loop bound.  Tail-sum transport weights implement
+    ``ts_wgt:1097-1102`` and are normalized by their sum.
+    """
+    import numpy as _np
+    if n_substeps < 2:
+        raise ValueError(
+            f"nemo_boxcar_forward needs n_substeps >= 2, got {n_substeps!r}")
+    jn = _np.arange(1, 3 * n_substeps + 1, dtype=_np.float64)
+    primary = (
+        _np.abs(jn - n_substeps) / n_substeps < 0.5
+    ).astype(_np.float64)
+    n_loop = int(_np.max(_np.where(primary > 0.0)[0]) + 1)
+    primary = primary[:n_loop]
+    total = primary.sum(dtype=_np.float64)
+    averaged = primary / total
+    secondary = _np.cumsum(primary[::-1], dtype=_np.float64)[::-1]
+    secondary = secondary / secondary.sum(dtype=_np.float64)
+    return (
+        jnp.asarray(averaged, dtype=dtype),
+        jnp.asarray(1.0, dtype=dtype),
+        jnp.asarray(secondary, dtype=dtype),
+        n_loop,
+    )
+
+
+def compute_nemo_boxcar_raw_transport_weights(
+    n_substeps: int,
+    dtype: jnp.dtype,
+    substep_scale: int = 1,
+):
+    """Return NEMO's unnormalised ``wgtbtp2`` and ``r1_wgt2s`` divisor.
+
+    ``dynspg_ts.F90:1227-1294`` builds a raw 0/1 primary boxcar, forms each
+    secondary weight by summing the remaining primary weights, accumulates
+    ``za2 * zhU * r1_e2u`` with that raw integer-like ``za2``, and divides the
+    completed transport once at :999-1000.  The shared filter helper above
+    deliberately returns pre-normalised SM2005 weights; these arrays preserve
+    the distinct source association needed by DINO's literal accumulator.
+
+    Returns ``(wgtbtp2, r1_wgt2s, n_loop)``.  Shape/window validation mirrors
+    :func:`compute_nemo_boxcar_centred_weights` without changing its generic
+    arithmetic or byte contract.
+    """
+    import numpy as _np
+    if n_substeps < 2:
+        raise ValueError(
+            f"nemo_boxcar_centred needs n_substeps >= 2, got {n_substeps!r}")
+    if substep_scale < 1 or n_substeps % substep_scale != 0:
+        raise ValueError(
+            f"substep_scale={substep_scale!r} must be >=1 and divide "
+            f"n_substeps={n_substeps!r} (n_substeps = nn_e * substep_scale).")
+    half_width = n_substeps // substep_scale
+    jn = _np.arange(1, 3 * n_substeps + 1, dtype=_np.float64)
+    primary = (
+        _np.abs(jn - n_substeps) / half_width < 1.0
+    ).astype(_np.float64)
+    n_loop = int(_np.max(_np.where(primary > 0.0)[0]) + 1)
+    primary = primary[:n_loop]
+    secondary = _np.cumsum(primary[::-1], dtype=_np.float64)[::-1]
+    divisor = secondary.sum(dtype=_np.float64)
+    return (
+        jnp.asarray(secondary, dtype=dtype),
+        jnp.asarray(divisor, dtype=dtype),
+        n_loop,
+    )
+
+
+def compute_nemo_forward_raw_transport_weights(
+    n_substeps: int, dtype: jnp.dtype,
+):
+    """Raw ``wgtbtp2`` for ln_bt_fw=T, nn_bt_flt=1.
+
+    Literal transcription of ``ts_wgt`` primary CASE(1), its tail sum at
+    dynspg_ts.F90:1097-1102, and the single post-accumulation divisor at
+    :999-1000.
+    """
+    import numpy as _np
+    if n_substeps < 2:
+        raise ValueError(
+            f"nemo_boxcar_forward needs n_substeps >= 2, got {n_substeps!r}")
+    jn = _np.arange(1, 3 * n_substeps + 1, dtype=_np.float64)
+    primary = (
+        _np.abs(jn - n_substeps) / n_substeps < 0.5
+    ).astype(_np.float64)
+    n_loop = int(_np.max(_np.where(primary > 0.0)[0]) + 1)
+    secondary = _np.cumsum(
+        primary[:n_loop][::-1], dtype=_np.float64)[::-1]
+    return (jnp.asarray(secondary, dtype=dtype),
+            jnp.asarray(secondary.sum(dtype=_np.float64), dtype=dtype),
+            n_loop)
+
+
 def nemo_auto_substeps(
     dt: float,
     H_max_wet: float,
@@ -180,10 +282,21 @@ def nemo_auto_substeps(
     can only increase the substep count).
     """
     import math as _math
-    zcmax = _math.sqrt(g * max(H_max_wet, 0.0)
-                       * inv_e1_sq_plus_inv_e2_sq_max)
+    if not all(_math.isfinite(value) for value in (
+        dt, H_max_wet, inv_e1_sq_plus_inv_e2_sq_max, g, cmax
+    )):
+        raise ValueError("nemo_auto_substeps inputs must all be finite.")
+    if dt <= 0.0 or g <= 0.0 or cmax <= 0.0:
+        raise ValueError(
+            "nemo_auto_substeps requires dt, g, and cmax to be positive."
+        )
+    if H_max_wet < 0.0 or inv_e1_sq_plus_inv_e2_sq_max < 0.0:
+        raise ValueError(
+            "nemo_auto_substeps requires non-negative depth and metric inputs."
+        )
+    zcmax = _math.sqrt(g * H_max_wet * inv_e1_sq_plus_inv_e2_sq_max)
     n = int(_math.ceil(dt / cmax * zcmax))
-    if n < 2:
+    if n < 1:
         raise ValueError(
             f"nemo_auto_substeps computed n={n!r} (dt={dt}, cmax={cmax}) — "
             "check the metric/H inputs.")
@@ -195,7 +308,7 @@ def compute_filter_weights(
     dtype: jnp.dtype,
     *,
     use_cosine: bool,
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, int]:
     """Return per-substep accumulator weights for time-averaging.
 
     The cosine bell (Hanning window) suppresses the side lobes of the
@@ -203,8 +316,17 @@ def compute_filter_weights(
     coupling.  Both the lat-lon C-grid and MPAS solvers compute the
     weights with the same formula:
 
-        w_i = 1 + cos(2π · (i - n/2) / n)         (cosine)
+        w_i = 1 + cos(π · (i+1 - n) / n)          (cosine)
         w_i = 1                                   (box)
+
+    over ``i+1 = 1 .. 2n-1``, i.e. a window CENTRED ON ``t + dt`` rather
+    than on the middle of the step.  A window centred on ``t + dt/2``
+    returns a mid-step free surface as the end-of-step state, which
+    propagates gravity waves at roughly HALF their correct speed (measured
+    2026-08-12: T_model/T_exact 1.86 cosine, 1.92 box, and 1.00 for both
+    ``nemo_ab3am4`` and ``implicit_cn``, neither of which averages).  Costs
+    ``2n-1`` substeps instead of ``n``; NEMO's centred boxcar pays the same
+    factor.
 
     Transport (``Hu``) weights — continuity-consistent (SM2005)
     ----------------------------------------------------------------
@@ -218,14 +340,21 @@ def compute_filter_weights(
     The flux-form tracer step requires the depth-integrated transport
     ``Hu_avg`` to satisfy the discrete continuity invariant
     ``div(Hu_avg) == (eta_old − eta_avg)/dt`` (``dt = n·dt_s``) so a
-    uniform tracer is preserved.  Matching the two expressions gives the
+    uniform tracer is preserved.  EXACT ONLY FOR THE SOURCE-FREE
+    RECURRENCE: with a free-surface source ``S_j`` (slow eta forcing,
+    freshwater, eta diffusion applied after the accumulation) the identity
+    picks up the TRANSPORT-WEIGHTED source average,
+    ``div(Hu_avg) == (eta_old − eta_avg)/dt + Σ_j w_transport_j·S_j``.
+    That reduces to ``+ S`` only for a source held constant across the
+    substeps, which eta diffusion — being state-dependent, hence different
+    every substep — is NOT (codex 2026-08-12).  Matching the two expressions gives the
     ONLY consistent per-substep transport weight
 
         w_transport[j] = tail_j / (n_substeps · w_total).
 
     This is exactly the Shchepetkin & McWilliams (2005) secondary
     (transport) weight used by the ``power_law`` path; with a uniform
-    (box) ``w_i=1`` it is ``(n−j)/n²`` — NOT the flat ``1/n`` that the
+    (box) ``w_i=1`` it is ``(n_loop−j)/(n·n_loop)`` with ``n_loop = 2n−1`` — NOT the flat ``1/n`` that the
     earlier code used, which broke continuity for BOTH box and cosine
     (the cosine inconsistency was the worse of the two, ~99 % residual;
     box ~95 %).  Returning it here makes every non-``power_law`` filter
@@ -242,39 +371,208 @@ def compute_filter_weights(
 
     Returns
     -------
-    w_filter : jax.Array, shape (n_substeps,)
+    w_filter : jax.Array, shape (2*n_substeps - 1,)
         Per-substep averaging weight (eta / velocity) passed as ``xs``
         to ``lax.scan`` (or indexed inside ``fori_loop``).
     w_total : jax.Array, scalar
         ``sum(w_filter)`` — normalises the eta / velocity accumulators.
-    w_transport : jax.Array, shape (n_substeps,)
-        Per-substep TRANSPORT weight (continuity-consistent, sums to
-        ``(n+1)/(2n)`` for box; the accumulator ``Σ_i w_transport_i·flux_i``
-        IS the time-averaged transport ``Hu_avg`` directly — no further
-        ``/n_substeps`` normalisation).
+    w_transport : jax.Array, shape (2*n_substeps - 1,)
+        Per-substep TRANSPORT weight (continuity-consistent; the
+        accumulator ``Σ_i w_transport_i·flux_i`` IS the time-averaged
+        transport ``Hu_avg`` directly — no further ``/n_substeps``
+        normalisation).  On the centred window it sums to 1 ANALYTICALLY
+        for both filters — ``Σ_j tail_j == Σ_j j·w_j == n·w_total`` by the
+        window's symmetry about ``j = n`` — up to floating-point rounding
+        (measured 1.0000000000000002 at n=10, cosine, fp64: the reduction
+        orders differ).  On the old half window the box sum was
+        ``(n+1)/(2n)``.
+    n_loop : int
+        Number of substeps to run, ``2*n_substeps - 1``.
     """
-    i = jnp.arange(n_substeps, dtype=dtype)
+    # Substep ``i`` (0-based) produces the state at time ``t + (i+1)*dt_s``,
+    # so a window centred on ``t + dt`` is centred on ``i+1 == n_substeps``.
+    # Running the loop over ``i+1 in [1, 2n-1]`` makes the weights exactly
+    # symmetric about that centre, hence n_loop = 2*n_substeps - 1.
+    n_loop = 2 * n_substeps - 1
+    tau = jnp.arange(1, n_loop + 1, dtype=dtype) - n_substeps   # 0 at the centre
     if use_cosine:
-        # Hanning-window weights.  At ``n_substeps == 1`` (rare, only
-        # used by tests / 1-substep spin-ups) the formula
-        # ``1 + cos(2 pi (0 - 0.5)/1) = 1 + cos(-pi) = 0`` collapses to
-        # zero, which then divides by zero in
-        # ``eta_sum / w_total`` downstream.  Fall back to the box
-        # filter when the cosine bell would degenerate (codex
-        # adversarial review iter-1, bug #4).
-        if n_substeps < 2:
-            w_filter = jnp.ones(n_substeps, dtype=dtype)
-        else:
-            w_filter = 1.0 + jnp.cos(
-                2.0 * jnp.pi * (i - 0.5 * n_substeps) / n_substeps,
-            )
+        # Hanning bell of full width 2n centred at tau == 0.  Positive
+        # everywhere on this range (the smallest weight, at the two ends,
+        # is 1 - cos(pi/n) > 0), so the ``n_substeps < 2`` degeneracy the
+        # old half-window formula had -- 1 + cos(-pi) == 0, a division by
+        # zero downstream -- cannot arise and needs no special case.
+        w_filter = 1.0 + jnp.cos(jnp.pi * tau / n_substeps)
     else:
-        w_filter = jnp.ones(n_substeps, dtype=dtype)
+        w_filter = jnp.ones(n_loop, dtype=dtype)
     w_total = jnp.sum(w_filter)
     # tail_j = sum_{i>=j} w_filter[i]  (reverse cumulative sum).
     tail = jnp.cumsum(w_filter[::-1])[::-1]
+    # The denominator stays the PHYSICAL n_substeps: ``dt = n_substeps*dt_s``
+    # is the baroclinic step the transport must close continuity over, and it
+    # is unaffected by how far past t+dt the averaging window reaches.
     w_transport = tail / (jnp.asarray(n_substeps, dtype=dtype) * w_total)
-    return w_filter, w_total, w_transport
+    return w_filter, w_total, w_transport, n_loop
+
+
+AFTER_RECONCILE_SCHEMES = ("off", "nemo_mlf_baro_corr")
+
+
+def validate_after_reconcile(scheme: str) -> str:
+    """Dispatch gate for ``BarotropicConfig.barotropic_after_reconcile``.
+
+    Called on the STATIC config value at the top of each outer step, before any
+    array work, so a typo stops the run instead of silently selecting ``"off"``
+    (CLAUDE.md dispatch hardening: a bare ``else: <default>`` here would run
+    different physics on a misspelling).
+    """
+    if scheme not in AFTER_RECONCILE_SCHEMES:
+        raise ValueError(
+            f"unknown barotropic_after_reconcile scheme {scheme!r}: must be "
+            f"one of {AFTER_RECONCILE_SCHEMES}.")
+    return scheme
+
+
+def after_level_column_mean_reconcile(
+    field: jnp.ndarray,
+    h_face_ref: jnp.ndarray,
+    target_mean: jnp.ndarray,
+    face_mask3: jnp.ndarray,
+    min_water_col: float,
+) -> jnp.ndarray:
+    """NEMO ``mlf_baro_corr``'s committed reconciliation, as one kernel.
+
+    Transcribed from ``cfgs/DINO/MY_SRC/stpmlf.F90:754-765`` (the build that
+    ran; ``src/OCE`` differs and its line numbers do not apply)::
+
+        zue(ji,jj) = SUM_k e3u(ji,jj,jk,Kaa) * puu(ji,jj,jk,Kaa) * umask(ji,jj,jk)
+        puu(ji,jj,jk,Kaa) = ( puu(ji,jj,jk,Kaa)
+           &                - zue(ji,jj) * r1_hu(ji,jj,Kaa)
+           &                + uu_b(ji,jj,Kaa) ) * umask(ji,jj,jk)
+
+    i.e. replace the column's own thickness-weighted depth mean by
+    ``target_mean``.
+
+    WHICH THICKNESS, and why it is the REFERENCE one (this is not obvious from
+    the Fortran, and reading it as written gets it wrong).  Those two lines
+    LOOK like they weight at the after time level, ``Kaa``.  They do not.  DINO
+    builds with ``key_qco`` (``cpp_DINO.fcm``), whose substitutions
+    (``WORK/domzgr_substitute.h90:127,137,46,51``) are::
+
+        e3u(i,j,k,t)  ->  e3u_0(i,j,k) * (1 + r3u(i,j,t)*umask(i,j,k))
+        r1_hu(i,j,t)  ->  r1_hu_0(i,j) / (1 + r3u(i,j,t))
+
+    On a wet cell ``umask = 1``, the ``(1 + r3u(Kaa))`` factor is constant
+    over ``k`` and cancels as an algebraic identity::
+
+        zue * r1_hu(Kaa) = SUM_k( e3u_0 * u * umask ) / hu_0
+
+    This generic kernel evaluates that cancelled identity with the reference
+    ladder.  It is not execution-equivalent at the final ULP: registered round
+    49 showed that NEMO's separately materialized live reduction and reciprocal
+    are required for a bit-exact DINO result.  Production DINO therefore calls
+    :func:`nemo_literal_after_level_reconcile`; this kernel remains the generic
+    algebraic operator and its direct callers keep their prior behavior.
+
+    HOW THE CALLER MUST BUILD ``h_face_ref``, and one thing NOT to assume.
+    NEMO builds ``e3u_0`` as an ARITHMETIC mean of the adjacent ``e3t_0``
+    (``zgr_lib.F90``), not as a minimum -- ``min`` is the MOM6/MITgcm ``hFacW``
+    convention.  On a ladder that is horizontally uniform the two coincide, so
+    a min-rule face depth is exact there and only there.  DINO is exactly that
+    case (``namelist_cfg:70-72`` ``ln_zco_nam=.true.``, ``ln_zps_nam=.false.``,
+    i.e. a pure z-coordinate with NO partial steps; legoESM's bridge builds a
+    matching full-step coordinate), so on that card this kernel reproduces
+    ``SUM_k e3u_0*u*umask / hu_0`` exactly.  A card WITH partial steps would
+    need its face thickness built NEMO's way -- averaged on the unmasked
+    reference ladder and then masked -- before this kernel is faithful there.
+
+    Parameters
+    ----------
+    field
+        3-D face velocity at the after level, ``(..., nlev)``.
+    h_face_ref
+        REFERENCE face-cell thicknesses (NEMO ``e3u_0``), i.e. the ladder with
+        no free-surface scaling applied.  The caller names the ladder; this
+        function cannot check it.
+    target_mean
+        Depth-uniform mean to install, broadcastable against ``field`` with a
+        trailing singleton level axis (NEMO ``uu_b(:,:,Kaa)``).
+    face_mask3
+        3-D wet-face mask.  NEMO's ``umask`` factor, applied to the velocity
+        INSIDE the sum (as NEMO does), to the thicknesses, and to the result.
+    min_water_col
+        Divide guard on the summed column depth.  This is the LAND guard (a wet
+        column always exceeds it), not a physics clip: NEMO's own divisor adds
+        ``1 - ssumask`` for exactly this reason.
+
+    Returns
+    -------
+    jnp.ndarray
+        ``field`` with its reference-thickness column mean replaced.  Applying
+        it twice agrees with applying it once to roundoff, and it reduces to
+        the identity, to roundoff, when ``target_mean`` already equals the
+        column's own mean.
+
+    Sign/geometry convention: ``h_face_ref > 0``, thicknesses sum downward, and
+    no term changes sign with the z-axis direction -- this is a weighted-mean
+    replacement, not a flux.
+    """
+    wet = face_mask3 > 0
+    h = jnp.where(wet, h_face_ref, 0.0)
+    # mask the VELOCITY inside the sum too, as NEMO's ``* umask(ji,jj,jk)``
+    # does: ``0 * NaN`` is NaN, so an unmasked land value would poison the
+    # whole column mean rather than being ignored.
+    f = jnp.where(wet, field, 0.0)
+    depth = jnp.maximum(jnp.sum(h, axis=-1, keepdims=True), min_water_col)
+    own_mean = jnp.sum(h * f, axis=-1, keepdims=True) / depth
+    return (field - own_mean + target_mean) * face_mask3
+
+
+def nemo_literal_after_level_reconcile(
+    field: jnp.ndarray,
+    h_face_live: jnp.ndarray,
+    r1_h_live: jnp.ndarray,
+    target_mean: jnp.ndarray,
+    face_mask3: jnp.ndarray,
+) -> jnp.ndarray:
+    """Execute DINO ``mlf_baro_corr`` without algebraic QCO cancellation.
+
+    This is ``cfgs/DINO/MY_SRC/stpmlf.F90:752-765`` in source order: form
+    each live-thickness transport, left-accumulate levels, multiply by the
+    independently materialized live reciprocal depth, then subtract that mean
+    and add the barotropic target.  ``h_face_live`` is positive downward; this
+    operation only replaces a depth mean, so no vertical sign enters it.
+    """
+    b = jax.lax.optimization_barrier
+    field = jnp.asarray(field)
+    h_face_live = jnp.asarray(h_face_live, dtype=field.dtype)
+    r1_h_live = jnp.asarray(r1_h_live, dtype=field.dtype)
+    target_mean = jnp.asarray(target_mean, dtype=field.dtype)
+    face_mask3 = jnp.asarray(face_mask3, dtype=field.dtype)
+    if field.shape != h_face_live.shape or field.shape != face_mask3.shape:
+        raise ValueError(
+            "literal after-level field/thickness/mask shapes must match; got "
+            f"{field.shape}/{h_face_live.shape}/{face_mask3.shape}")
+    if r1_h_live.shape != field.shape[:-1]:
+        raise ValueError(
+            "literal after-level reciprocal must omit only the level axis; "
+            f"got {r1_h_live.shape} for field {field.shape}")
+    if target_mean.shape == field.shape[:-1]:
+        target_mean = target_mean[..., None]
+    if target_mean.shape != field.shape[:-1] + (1,):
+        raise ValueError(
+            "literal after-level target must have a singleton level axis; "
+            f"got {target_mean.shape} for field {field.shape}")
+
+    first = b(b(h_face_live[..., 0] * field[..., 0]) * face_mask3[..., 0])
+    transport = first
+    for jk in range(1, field.shape[-1]):
+        term = b(
+            b(h_face_live[..., jk] * field[..., jk])
+            * face_mask3[..., jk])
+        transport = b(transport + term)
+    own_mean = b(transport * r1_h_live)
+    corrected = b(b(field - own_mean[..., None]) + target_mean)
+    return b(corrected * face_mask3)
 
 
 def bebt_blend(

@@ -611,6 +611,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timerange", default="",
                          help="Variable timerange override, e.g. 19790101/19791231. "
                               "Empty = use the model output's own time span.")
+    parser.add_argument(
+        "--force-reference", default=None,
+        help="Override EVERY variable's reference dataset with this "
+             "climateeval.data class (e.g. climateeval.data.ERA5Monthly). "
+             "Default: keep each variable's suite-declared reference, so the "
+             "TOA fluxes score against CERES-EBAF instead of being dropped.")
     parser.add_argument("--fail-on-missing-data", action="store_true", default=False)
     parser.add_argument("--fail-on-metric-error", action="store_true", default=False,
                          help="ClimateEval's own default (True) turns ANY single "

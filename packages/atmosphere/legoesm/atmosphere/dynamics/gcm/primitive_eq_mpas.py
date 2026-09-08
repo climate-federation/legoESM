@@ -98,9 +98,18 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # Column-conserving tracer positivity clamp (borrow the clipped deficit
     # from the positives) instead of the mass-CREATING plain max(q, 0).  See
     # the "--- 3. Floors ---" note: the naive clamp invents ~+30 kg/m2/yr of
-    # water on the AMIP century.  Default False keeps existing MPAS results
-    # bit-identical; flip after validation.
-    conservative_tracer_clamp: bool = False
+    # water on the AMIP century.  Default TRUE since 2026-08-16 (owner
+    # decision: "conserving form always"); False restores the legacy clamp
+    # for bit-comparison against older runs.
+    conservative_tracer_clamp: bool = True
+    # #1354/#1515: applies ONLY to the plain-max hard-floor path (i.e. when
+    # conservative_tracer_clamp=False).  Then the q_v floor removes the latent
+    # heat tied to the clipped vapour (energy_consistent_moisture_floor) so
+    # column MSE is conserved instead of leaving +L_v*deficit of spurious heat.
+    # The default conservative BORROW is already column-MSE-neutral (it
+    # preserves the q_v integral with T untouched), so this is a no-op there and
+    # must NOT be stacked on it (that would inject -L_v*deficit of cooling).
+    energy_consistent_moisture_clip: bool = False
     anchor_mass_to_initial: bool = False  # iter-11: mirror PE/SW anchor pattern
     # Default integrator is the 5-stage 4th-order SSP scheme — NOT the
     # 3-stage ``ssp_rk3`` — because ``ssp_rk3`` has the smaller absolute-
@@ -1025,7 +1034,26 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
     ):
         self.mesh = mesh
         self.sigma_coord = sigma_coord
+        # The unstructured core's cost per cell per level varies threefold
+        # with the level count, and the lat-lon core measured flat over the
+        # same counts — so the advisory belongs here, not in the shared
+        # vertical-coordinate factory.
+        from legoesm.grids.vertical import warn_if_unaligned_levels
+        warn_if_unaligned_levels(
+            getattr(sigma_coord, "n_levels", 0),
+            where="MPASPrimitiveEquationModel")
         self.config = config or MPASPrimitiveEquationConfig()
+        # Owner decision 2026-08-16: conserving form always, and any
+        # NON-conserving form must announce itself. Static Python at build
+        # time (never in traced code).
+        if not self.config.conservative_tracer_clamp:
+            import logging
+            logging.getLogger(__name__).warning(
+                "MPAS floors: NON-CONSERVING plain max(q, 0) tracer clamp "
+                "selected (conservative_tracer_clamp=False). This clamp "
+                "CREATES mass at every transport undershoot (+30 kg/m2/yr "
+                "of water measured on the AMIP century) — legacy "
+                "bit-comparison mode only.")
         # Pre-compute the global total area once at construction time so
         # the per-step mass fixer does not include this constant in its
         # cross-device reduction payload (drops 3-element allreduce → 2).
@@ -1409,56 +1437,33 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
         # and +10 K/yr of warming.
         #
         # ``conservative_tracer_clamp`` swaps the naive clamp for the
-        # column-conserving borrow (shared with the LES lane).  Default False
-        # so existing MPAS results are bit-identical until the flag is set;
-        # the default is known-wrong and should flip once validated.
+        # column-conserving borrow (shared with the LES lane).  Default TRUE
+        # since 2026-08-16 (owner decision: conserving form always); False
+        # restores the legacy mass-creating clamp for bit-comparison runs.
         if state_new.tracers is not None:
-            if self.config.conservative_tracer_clamp:
-                # PER-MASS tracers get the conserving borrow — the mixing
-                # ratios AND the per-mass numbers N_i/N_s/N_g.  The former
-                # blanket number exclusion conflated PROCESS-level number
-                # non-conservation (microphysics may create/destroy number
-                # freely) with TRANSPORT-level conservation: advection
-                # conserves every mass-weighted per-mass field, and the naive
-                # clip INVENTS it at each undershoot.  MEASURED (checkpoint
-                # day 40, 2026-07-28): 28k cells/step undershoot, invention
-                # 6.8e-4 of the N_i field PER STEP = x2.2/day compound
-                # growth; N_i reached 1e193 and overflowed into NaN at day
-                # 803 of century3.  N_c/N_r are per-VOLUME [#/m^3] (see
-                # HydrometeorState), so a dsigma-weighted borrow has no
-                # conservation meaning for them (codex 2026-07-28) — they
-                # keep the plain clip pending a density-aware repair
-                # (follow-up; N_r inflation is ~e15 slower than N_i's and
-                # overflows only at ~year 36 at the measured rate).
-                # Borrow weight = TRUE layer mass dp (post-mass-fix p_s —
-                # the dry-mass fixer runs before the floors).  On pure sigma
-                # dp = dsigma*p_s and the per-column p_s factor cancels in
-                # the rescale, so results are unchanged there; on HYBRID
-                # grids dsigma is NOT the layer mass (documented above) and
-                # would mis-conserve the physical dp-integral by O(0.1%)
-                # (codex 2026-07-28 round 2).  Non-positive dp (a broken
-                # hybrid layer) is zero-weighted rather than borrowed from.
-                _ph = self.sigma_coord.pressure_at_half(state_new.p_s.data)
-                _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
-                # GLOBAL variant: the column-local fixer zeroes net-negative
-                # columns, and on spiky number fields that zeroing alone
-                # re-created x2.74/day growth (868/10242 columns per step at
-                # century4 d90) — the global residual redistribution closes
-                # the budget exactly (serial jnp.sum here; the MPI lane
-                # passes an allreduce-SUM reduction).
-                state_new = state_new._replace(tracers={
-                    k: f.replace(data=(
-                        conservative_positive_clip_global(
-                            f.data, _dp, axis=-1)[0]
-                        if is_borrow_eligible_tracer(k)
-                        else jnp.maximum(f.data, 0.0)))
-                    for k, f in state_new.tracers.items()
-                })
-            else:
-                state_new = state_new._replace(tracers={
-                    k: f.replace(data=jnp.maximum(f.data, 0.0))
-                    for k, f in state_new.tracers.items()
-                })
+            # Borrow weight = TRUE layer mass dp (post-mass-fix p_s — the
+            # dry-mass fixer runs before the floors).  On pure sigma dp =
+            # dsigma*p_s and the per-column p_s cancels in the rescale; on
+            # HYBRID dsigma is NOT the layer mass (mis-conserves by O(0.1%)),
+            # so use real dp.  Non-positive dp (broken hybrid layer) is
+            # zero-weighted rather than borrowed from.  The naive max(q,0)
+            # clamp INVENTED +30 kg/m2/yr of water (MEASURED 2026-07-26, 96%
+            # from the spiky q_i/q_c fields; N_i reached 1e193/NaN by day 803
+            # of century3) — the conserving BORROW is the default cure.
+            _ph = self.sigma_coord.pressure_at_half(state_new.p_s.data)
+            _dp = jnp.maximum(_ph[..., 1:] - _ph[..., :-1], 0.0)
+            # ONE shared positivity stage for every dycore (#1354/#1515):
+            # borrow (default) is frozen-MSE-neutral for vapour AND condensate;
+            # the hard-floor fallback carries the per-species latent-heat T
+            # correction incl ice.  Serial jnp.sum here; the MPI lane passes an
+            # allreduce-SUM reduction.
+            from legoesm.core.conservation import apply_water_positivity
+            _tr_out, _T_out = apply_water_positivity(
+                state_new.tracers, state_new.T.data, _dp,
+                conservative=self.config.conservative_tracer_clamp,
+                energy_consistent=self.config.energy_consistent_moisture_clip)
+            state_new = state_new._replace(
+                tracers=_tr_out, T=state_new.T.replace(data=_T_out))
 
         # (dry-mass fix moved to stage 3a, BEFORE the floors — see the note
         # there; running it after the tracer clamp shifted diagnosed column

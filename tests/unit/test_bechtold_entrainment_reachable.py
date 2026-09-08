@@ -10,6 +10,8 @@ These tests fail if the parameter is un-wired at ANY of the four sites: the
 spec, the flat ExperimentConfig field, the --params scalar map, or the
 pipeline threading.
 """
+import pathlib
+
 import pytest
 
 QUALIFIED = "atm.conv.BechtoldConfig.epsilon_deep"
@@ -84,3 +86,86 @@ def test_out_of_range_is_refused(field, bad):
     cfg = ExperimentConfig()._replace(**{field: bad})
     with pytest.raises(Exception):
         cfg.validate_strict()
+
+
+def test_exposing_bechtolds_rate_does_not_expose_tiedtkes():
+    """The two schemes have a field of the same name; only one is tunable.
+
+    Tiedtke's deep base rate is still held fixed in-scheme, so it must stay in
+    that scheme's `excluded` block, and the driver route must be qualified to
+    Bechtold at every hop: the registry key, the flat field name, and the
+    constructor that actually receives it.
+    """
+    import legoesm.atmosphere.physics.convection.config as cc
+    from legoesm.driver.run_config_yaml import build_atm_scalar_param_map
+
+    tiedtke = next(b for b in cc.__param_spec__.values()
+                   if b.get("scheme_key") == "atm.conv.TiedtkeConfig")
+    assert "epsilon_deep" in tiedtke["excluded"]
+    assert "epsilon_deep" not in tiedtke["params"]
+
+    routes = build_atm_scalar_param_map()
+    for field in ("epsilon_deep", "delta_deep"):
+        assert f"atm.conv.TiedtkeConfig.{field}" not in routes
+        # The flat field the Bechtold route lands on is Bechtold-prefixed, so
+        # a Tiedtke run cannot pick it up by accident.
+        assert routes[f"atm.conv.BechtoldConfig.{field}"].startswith("bechtold_")
+
+    # The behavioural half: resolving the TIEDTKE lane with the Bechtold knobs
+    # set must leave Tiedtke's own rates at their in-scheme defaults.  Asserted
+    # on the RESOLVED config, not on a patched constructor: the pipeline reads
+    # a pre-built `ConvectionConfig().tiedtke`, so a constructor spy would
+    # never fire and would pass no matter what the knob did.
+    import legoesm.driver.physics_pipeline as pp
+    from legoesm.driver.config import ExperimentConfig
+    _kernel, resolved = pp._resolve_convection(ExperimentConfig()._replace(
+        convection="tiedtke", bechtold_epsilon_deep=3.0e-3,
+        bechtold_delta_deep=1.8e-4))
+    defaults = cc.TiedtkeConfig()
+    for field in ("epsilon_deep", "delta_deep"):
+        assert getattr(resolved, field) == getattr(defaults, field), (
+            f"the Bechtold {field} knob reached the Tiedtke config: "
+            f"{getattr(resolved, field)} != {getattr(defaults, field)}")
+    # And the values it would have carried are genuinely different, or the
+    # assertion above is satisfied by a knob that does nothing anywhere.
+    assert defaults.epsilon_deep != 3.0e-3
+    assert defaults.delta_deep != 1.8e-4
+
+
+def test_cape_sink_ratio_has_a_consumer_and_is_offered_to_a_tuner():
+    """`cape_relaxation_sink` and the ratio it scales now have a consumer.
+
+    A sibling branch (main, pre-merge) once carried these fields with no
+    consumer and correctly excluded the ratio from tuning; this branch
+    implements the CAPE-relaxation closure in bechtold.py (the fix for the
+    Bechtold upper-troposphere warm-drift), so the exclusion's own stated
+    condition ("re-tier to 2 in the same PR that implements the sink") is now
+    satisfied. Promoted, not excluded.
+    """
+    import inspect
+
+    import legoesm.atmosphere.physics.convection.bechtold as bechtold
+    import legoesm.atmosphere.physics.convection.config as cc
+
+    blk = _bechtold_spec()
+    assert "cape_sink_heating_ratio" in blk["params"]
+    assert "cape_sink_heating_ratio" not in blk["excluded"]
+    src = pathlib.Path(bechtold.__file__).read_text(errors="replace")
+    assert "cape_relaxation_sink" in src
+    assert "cape_sink_heating_ratio" in src
+    assert inspect.ismodule(bechtold)
+    assert hasattr(cc.BechtoldConfig(), "cape_sink_heating_ratio")
+
+
+def test_the_polar_cap_flag_has_its_consumer():
+    """The #929 polar-night zero-CAPE fix: the flag is real and implemented.
+
+    A sibling branch (main, pre-merge) once carried this field with no
+    consumer and correctly dropped it as misleading; this branch implements
+    the cap in bechtold.py, so the field is legitimately advertised.
+    """
+    import legoesm.atmosphere.physics.convection.bechtold as bechtold
+    import legoesm.atmosphere.physics.convection.config as cc
+    assert "parcel_theta_cap" in cc.BechtoldConfig._fields
+    src = pathlib.Path(bechtold.__file__).read_text(errors="replace")
+    assert "config.parcel_theta_cap" in src

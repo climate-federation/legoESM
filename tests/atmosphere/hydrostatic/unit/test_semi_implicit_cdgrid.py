@@ -101,6 +101,29 @@ class TestAdjointResidual:
             f"Laplacian path"
         )
 
+    def test_operator_stays_symmetric_under_f32_metrics(self):
+        """Precision gate for the mixed-mode CG floor (review condition):
+        FV-adjoint symmetry must SURVIVE float32 metrics — residual ~1e-6, not
+        O(1).  If f32 rounding broke symmetry the metrics would be per-cell and
+        CG would misbehave, a worse failure than the benign ~1e-7 backward-error
+        floor.  Passing confirms the floor is benign as documented in
+        ``cg_metric_residual_floor``."""
+        # Pin an fp32 policy: this test's whole point is f32 metrics, and a
+        # prior test may have left an fp64/mixed policy active, which overrides
+        # metric_dtype and floats the metrics back to f64.
+        from legoesm.runtime.precision import apply_precision
+        apply_precision("fp32")
+        grid = create_cubed_sphere(8)
+        cdgrid_f32 = create_cubed_sphere_cdgrid(grid, metric_dtype=jnp.float32)
+        assert cdgrid_f32.dy_edge_x.dtype == jnp.float32
+        L = lambda p: cdgrid_scalar_laplacian(p, cdgrid_f32)
+        residual = adjoint_residual_norm(L, cdgrid_f32, n_samples=8)
+        assert residual < 1.0e-4, (
+            f"Helmholtz operator lost self-adjointness under f32 metrics "
+            f"(residual {residual:.3e}) — f32 rounding breaks CG symmetry; the "
+            f"metric-floor is NOT benign, revisit before trusting mixed-mode CG"
+        )
+
     def test_operator_is_negative_semidefinite(self, cdgrid):
         """The Laplacian ``∇² = div(grad)`` must be negative semi-
         definite under the area-weighted inner product so that

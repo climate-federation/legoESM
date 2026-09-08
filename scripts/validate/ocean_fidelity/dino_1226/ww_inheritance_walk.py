@@ -136,11 +136,18 @@ from legoesm.ocean.eos import nemo_r3t_stretch
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
 from legoesm.ocean.experiments.dino import dino_config_for_recipe, dino_lat_lon_model_config
 
-# Reuse wholesale (not re-derived): the established RUN_DIR/DT + the 3-D
-# full-domain dump loader, same convention every #1226 probe uses.
+# Reuse wholesale (not re-derived): DT (same value every lane) + the 3-D
+# full-domain dump loader, same convention every #1226 probe uses. RUN_DIR/
+# RESTART route through dump_lane (#1455 shared selector) instead of
+# zu_frc_term_walk's own (still-hardcoded-to-gdb_y5) RUN_DIR -- this probe
+# must be lane-switchable independently of that (untouchable) sibling.
+from scripts.validate.ocean_fidelity.dino_1226 import dump_lane
 from scripts.validate.ocean_fidelity.dino_1226.zu_frc_term_walk import (
-    RUN_DIR, DT, _load_full_3d,
+    DT, _load_full_3d,
 )
+
+RUN_DIR = dump_lane.RUN_DIR
+RESTART = dump_lane.RESTART
 
 register_dump("zad_dump_du.bin", "now", "dynadv.F90:97 dyn_zad Krhs increment (stock dynzad.F90:86-119).")
 register_dump("zad_dump_dv.bin", "now", "same as zad_dump_du")
@@ -201,6 +208,7 @@ def _v_to_nemo(a):
 
 
 def main() -> int:
+    print(dump_lane.banner())
     e3t_mode = require_explicit_e3t_mode(context="ww_inheritance_walk")
     print(f"LEGOESM_NEMO_E3T={e3t_mode!r} (must be 'both' for this walk)")
     assert e3t_mode == "both", "run with LEGOESM_NEMO_E3T=both (task rule)"
@@ -213,9 +221,9 @@ def main() -> int:
     jpkm1 = jpk - 1
 
     g = read_nemo_mesh_mask(os.path.join(RUN_DIR, "mesh_mask.nc"), nn_hls=0)
-    s = read_nemo_restart(os.path.join(RUN_DIR, "DINO_00057600_restart.nc"), nn_hls=0)
+    s = read_nemo_restart(os.path.join(RUN_DIR, RESTART), nn_hls=0)
     br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True)
-    before = read_nemo_restart_before(os.path.join(RUN_DIR, "DINO_00057600_restart.nc"), nn_hls=0)
+    before = read_nemo_restart_before(os.path.join(RUN_DIR, RESTART), nn_hls=0)
     br_before = bridge_before_state_topo(br._replace(state=br.state), g, before, periodic_i=True)
 
     cfg = dataclasses.replace(dcfg, lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)
@@ -502,9 +510,9 @@ def measure_dyn_ldf_corrected() -> dict:
     jpkm1 = jpk - 1
 
     g = read_nemo_mesh_mask(os.path.join(RUN_DIR, "mesh_mask.nc"), nn_hls=0)
-    s = read_nemo_restart(os.path.join(RUN_DIR, "DINO_00057600_restart.nc"), nn_hls=0)
+    s = read_nemo_restart(os.path.join(RUN_DIR, RESTART), nn_hls=0)
     br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True)
-    before = read_nemo_restart_before(os.path.join(RUN_DIR, "DINO_00057600_restart.nc"), nn_hls=0)
+    before = read_nemo_restart_before(os.path.join(RUN_DIR, RESTART), nn_hls=0)
     br_before = bridge_before_state_topo(br._replace(state=br.state), g, before, periodic_i=True)
 
     cfg = dataclasses.replace(dcfg, lon_west_deg=1.0, lon_east_deg=49.0, sill_lon_m_deg=1.0)

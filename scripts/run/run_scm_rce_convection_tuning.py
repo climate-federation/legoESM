@@ -114,7 +114,7 @@ def run_one_scheme(
         tuned_cfg, records, tuned = cfg, [], a_priori
     else:
         print(f"[tune]     convection={scheme} ({args.tune_evals} evals)")
-        tuned_cfg, records, tuned = campaign.tune_category_winner(
+        tuned_cfg, records, tuned, _tune_stats = campaign.tune_category_winner(
             "convection",
             cfg,
             ref,

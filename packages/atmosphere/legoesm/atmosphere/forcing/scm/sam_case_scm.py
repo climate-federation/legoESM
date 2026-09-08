@@ -123,6 +123,13 @@ class SAMSCMCaseSpec:
     # column still spans the full domain.
     les_sponge_frac: float
     note: str
+    # Cloud-droplet concentration the case's LES prescribes [1/m^3], for the
+    # cases whose driver sets one. None means the microphysics default stands,
+    # which is what the LES uses too. Carried for the same reason as les_f_c
+    # and the bulk coefficients: with condensation now ON in the single-column
+    # arm, a droplet number that differs from the LES's is a different drizzle
+    # rate and therefore a different liquid water path on the two sides.
+    les_n_c_m3: float | None = None
 
 
 # Only cases with a legoESM LES driver are registered: the whole point of this
@@ -146,6 +153,19 @@ SAM_SCM_CASES: dict[str, SAMSCMCaseSpec] = {
         note="van Zanten et al. 2011 precipitating trade cumulus; interactive "
              "bulk fluxes over a fixed SST.",
     ),
+    "astex": SAMSCMCaseSpec(
+        gsam_dir="ASTEX209", latitude_deg=34.0, les_domain_top_m=2000.0,
+        default_dt_s=30.0, surface_mode="fluxes",
+        bulk_ch=None, bulk_ce=None, les_z0_m=1.0e-4,
+        # prm: docoriolis = .false., so the LES has NO Coriolis. Deriving it
+        # from the latitude would give 8.1e-5 and a rotation the reference
+        # does not have.
+        les_f_c=0.0, les_sponge_frac=0.85,
+        note="ASTEX flight 209 stratocumulus; prescribed surface fluxes "
+             "(SHF 10, LHF 25 W/m^2), same Stevens (2005) simple longwave as "
+             "DYCOMS via doradsimple.",
+        les_n_c_m3=100.0e6,   # run_dycoms_les.py _STRATOCUMULUS_CASES
+    ),
     "dycoms": SAMSCMCaseSpec(
         gsam_dir="DYCOMS_RF01", latitude_deg=31.5, les_domain_top_m=1500.0,
         default_dt_s=30.0, surface_mode="fluxes",
@@ -153,6 +173,25 @@ SAM_SCM_CASES: dict[str, SAMSCMCaseSpec] = {
         les_f_c=0.376e-4, les_sponge_frac=0.85,
         note="Stevens et al. 2005 RF01 nocturnal stratocumulus; prescribed "
              "surface fluxes.",
+        les_n_c_m3=140.0e6,   # run_dycoms_les.py _STRATOCUMULUS_CASES
+    ),
+    "rf02": SAMSCMCaseSpec(
+        gsam_dir="DYCOMS_RF02", latitude_deg=31.5, les_domain_top_m=1500.0,
+        default_dt_s=30.0, surface_mode="fluxes",
+        bulk_ch=None, bulk_ce=None, les_z0_m=1.0e-4,
+        # NOT RF01's 0.376e-4, even though it is the same campaign at the same
+        # latitude. RF01's prm hardcodes `fcor`; RF02's does not, and sets
+        # `latitude0 = 31.5`, so its LES rotates at 2*Omega*sin(31.5). The
+        # expression is written out (rather than the number) so it cannot drift
+        # from the LES driver's, which computes the same thing; a test pins the
+        # two equal.
+        les_f_c=2.0 * constants.Omega * float(np.sin(np.deg2rad(31.5))),
+        les_sponge_frac=0.85,
+        note="Ackerman et al. 2009 RF02 nocturnal DRIZZLING stratocumulus; "
+             "prescribed surface fluxes (SHF 16, LHF 93 W/m^2), same Stevens "
+             "(2005) simple longwave as RF01 via doradsimple, and the deck's "
+             "SHEARED geostrophic wind.",
+        les_n_c_m3=55.0e6,   # run_dycoms_les.py _STRATOCUMULUS_CASES
     ),
 }
 
@@ -445,7 +484,8 @@ def load_sam_scm_case(
     Parameters
     ----------
     case
-        Key of :data:`SAM_SCM_CASES` (``"bomex"``, ``"rico"``, ``"dycoms"``).
+        Key of :data:`SAM_SCM_CASES` (``"bomex"``, ``"rico"``, ``"dycoms"``,
+        ``"rf02"``, ``"astex"``).
     nlev
         Number of SCM levels spanning the case column.
     sigma_top

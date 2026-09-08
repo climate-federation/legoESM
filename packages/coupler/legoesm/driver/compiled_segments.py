@@ -44,7 +44,9 @@ import jax
 import jax.numpy as jnp
 
 from legoesm import constants
+from legoesm.core.conservation import conservative_positive_clip
 from legoesm.core.field import Field
+from legoesm.core.tracers import make_full_moisture_registry
 from legoesm.thermo import saturation_mixing_ratio
 from legoesm.forcing.time_utils import day_to_calendar
 
@@ -1249,14 +1251,27 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
     if statics.energy_consistent_moisture_clip:
         # Issue #323: keep the q_v floor moist-static-energy neutral by
         # removing the latent heat of the clipped (un-removed) vapour sink.
+        # KNOWN EXCEPTION to "conserving form always": this opt-in branch
+        # conserves MSE but CREATES the clipped vapour; a jointly water- and
+        # energy-conserving floor is a separate limiter (codex 2026-08-16).
         q_v_upd, T_upd = energy_consistent_moisture_floor(_qv_raw, T_upd)
     else:
-        q_v_upd = jnp.maximum(_qv_raw, 0.0)
-    q_c_upd = jnp.maximum(moist["q_c"] + statics.dt * phys_out.dq_c_dt, 0.0)
-    q_r_upd = jnp.maximum(moist["q_r"] + statics.dt * phys_out.dq_r_dt, 0.0)
+        # Conserving form always (owner decision 2026-08-16): column borrow,
+        # never the mass-creating plain max(q, 0). Pure-sigma lane: dsigma is
+        # the layer-mass weight up to the per-column p_s factor, which
+        # cancels in the rescale.
+        q_v_upd = conservative_positive_clip(
+            _qv_raw, statics.dsigma, axis=-1)[0]
+    q_c_upd = conservative_positive_clip(
+        moist["q_c"] + statics.dt * phys_out.dq_c_dt, statics.dsigma,
+        axis=-1)[0]
+    q_r_upd = conservative_positive_clip(
+        moist["q_r"] + statics.dt * phys_out.dq_r_dt, statics.dsigma,
+        axis=-1)[0]
     def _dm_upd(fld, tend):
         return (None if fld is None
-                else jnp.maximum(fld + statics.dt * tend, 0.0))
+                else conservative_positive_clip(
+                    fld + statics.dt * tend, statics.dsigma, axis=-1)[0])
     q_i_upd = _dm_upd(moist["q_i"], phys_out.dq_i_dt)
     q_s_upd = _dm_upd(moist["q_s"], phys_out.dq_s_dt)
     q_g_upd = _dm_upd(moist["q_g"], phys_out.dq_g_dt)
@@ -1904,10 +1919,11 @@ def build_segment_fn(
                 q_v_dyn = _adv["q_v"].data
                 q_c_dyn = _adv["q_c"].data
                 q_r_dyn = _adv["q_r"].data
-                # Tracers NOT in the advected set (per-volume N_c/N_r are
-                # intentionally excluded, #772 review) fall back to their carry
-                # value — i.e. they stay column-locked — NOT to None, which
-                # would drop the double-moment number fields on an opt-in run.
+                # Every water species advects since 2026-08-14 (all stored
+                # per mass, registry-driven), so for present fields this
+                # fallback is dead; it remains for OPTIONAL fields that are
+                # None on warm-rain runs — those must stay None, not be
+                # invented.
                 q_i_dyn = _adv["q_i"].data if "q_i" in _adv else carry.q_i
                 q_s_dyn = _adv["q_s"].data if "q_s" in _adv else carry.q_s
                 q_g_dyn = _adv["q_g"].data if "q_g" in _adv else carry.q_g
@@ -2074,22 +2090,28 @@ def build_segment_fn(
                     _qv_owned, _T_owned = energy_consistent_moisture_floor(
                         _qv_raw, _T_owned)
                 else:
-                    _qv_owned = jnp.maximum(_qv_raw, 0.0)
+                    # Conserving form always (owner decision 2026-08-16):
+                    # column borrow on the owned subset (rows are whole
+                    # columns, so the borrow is rank-local and MPI-safe).
+                    _qv_owned = conservative_positive_clip(
+                        _qv_raw, dsigma, axis=-1)[0]
                 T_upd = T_new.at[_ofi].set(_T_owned)
                 q_v_upd = q_v_dyn.at[_ofi].set(_qv_owned)
-                q_c_upd = q_c_dyn.at[_ofi].set(
-                    jnp.maximum(q_c_dyn[_ofi] + _dt * phys_out.dq_c_dt, 0.0)
-                )
-                q_r_upd = q_r_dyn.at[_ofi].set(
-                    jnp.maximum(q_r_dyn[_ofi] + _dt * phys_out.dq_r_dt, 0.0)
-                )
+                q_c_upd = q_c_dyn.at[_ofi].set(conservative_positive_clip(
+                    q_c_dyn[_ofi] + _dt * phys_out.dq_c_dt, dsigma,
+                    axis=-1)[0])
+                q_r_upd = q_r_dyn.at[_ofi].set(conservative_positive_clip(
+                    q_r_dyn[_ofi] + _dt * phys_out.dq_r_dt, dsigma,
+                    axis=-1)[0])
                 # Double-moment tracers (None unless populated): evolve at owned
-                # indices from the matching microphysics tendencies, clipped
-                # non-negative like q_c/q_r.  Base = the (possibly advected)
-                # _dyn alias so non-owned faces keep dynamics-only values.
+                # indices from the matching microphysics tendencies, floored by
+                # the conserving borrow like q_c/q_r.  Base = the (possibly
+                # advected) _dyn alias so non-owned faces keep dynamics-only
+                # values.
                 def _dm_upd_owned(fld, tend):
                     return (None if fld is None else fld.at[_ofi].set(
-                        jnp.maximum(fld[_ofi] + _dt * tend, 0.0)))
+                        conservative_positive_clip(
+                            fld[_ofi] + _dt * tend, dsigma, axis=-1)[0]))
                 q_i_upd = _dm_upd_owned(q_i_dyn, phys_out.dq_i_dt)
                 q_s_upd = _dm_upd_owned(q_s_dyn, phys_out.dq_s_dt)
                 q_g_upd = _dm_upd_owned(q_g_dyn, phys_out.dq_g_dt)
@@ -3032,14 +3054,20 @@ def build_segment_fn(
 # q_v/q_c/q_r are always present on moist runs; the double-moment fields
 # are None for warm-rain runs (their None-ness is static pytree structure,
 # so the per-name `is not None` check below is trace-safe).
-# Tracers carried through the resolved-wind advective step (#771).  Mass
-# mixing ratios [kg/kg] and the per-MASS ice number N_i [#/kg] transport like
-# passive scalars.  N_c/N_r are per-VOLUME number densities [#/m^3] — advecting
-# them with the mass-mixing-ratio operator applies the wrong conservation law,
-# so they are intentionally excluded until a density-aware number transport
-# exists (their masses q_c/q_r still advect; the numbers stay column-locked).
+# Tracers carried through the resolved-wind advective step (#771).  ALL of
+# them: every species here is now stored per unit MASS — mixing ratios [kg/kg]
+# and all three numbers [#/kg] — so the mass-mixing-ratio operator is the right
+# conservation law for each, and the ratio q/N that sets particle size is
+# transport-invariant.
+#
+# N_c/N_r used to be excluded because they were stored per VOLUME [#/m^3], for
+# which this operator is wrong.  Excluding them was not a fix: it left the mass
+# advecting while the number stayed put, so the diagnosed particle size was
+# wrong by O(1) once a cloud moved further than its own width — worse than the
+# density-bounded error it avoided.  Storing them per mass is the density-aware
+# transport that exclusion was waiting for (2026-08-14).
 _ADVECTED_TRACER_NAMES = (
-    "q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_i",
+    "q_v", "q_c", "q_r", "q_i", "q_s", "q_g", "N_c", "N_r", "N_i",
 )
 
 
@@ -3076,9 +3104,11 @@ def _rebuild_state(carry: SegmentCarry, model, advect_moisture: bool = False):
         # driver gates on cubed_sphere+cdgrid); a state type without a
         # ``tracers`` field fails loudly here rather than silently
         # dropping the moisture.
+        _units = {t.name: t.units for t in make_full_moisture_registry().tracers}
         tracers = {
             nm: Field(getattr(carry, nm), name=nm,
-                      dims=("face", "x", "y", "level"), units="kg/kg")
+                      dims=("face", "x", "y", "level"),
+                      units=_units.get(nm, "kg/kg"))
             for nm in _ADVECTED_TRACER_NAMES
             if getattr(carry, nm) is not None
         }

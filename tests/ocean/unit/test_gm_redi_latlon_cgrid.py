@@ -1491,6 +1491,156 @@ class TestNemoIsoLapOperator:
             cfg_n.kappa_Redi, act)
         assert jnp.allclose(dT, dT_direct, rtol=1e-12, atol=1e-30)
 
+    def test_nemo_iso_lap_diagnostic_fluxes_preserve_default(self):
+        """Round-78 flux capture is observational: requesting zfu/zfv/zfw
+        must preserve the tendency exactly, while each returned flux is a
+        real, shape-matched production operand (not a zero/self control)."""
+        setup = _stratified_with_meridional_tilt()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian,
+         rho, T, S, cfg) = setup
+        S_x, S_y = self._slopes(setup)
+        z_top = jnp.cumsum(z_coord.dz_ref) - z_coord.dz_ref
+        act = ((mask[:, :, jnp.newaxis] > 0.5)
+               & (z_top[jnp.newaxis, jnp.newaxis, :]
+                  < H_bathy[:, :, jnp.newaxis])).astype(T.dtype)
+        plain = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act)
+        observed, diagnostics = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, return_diagnostics=True)
+        assert jnp.array_equal(observed, plain)
+        assert set(diagnostics) == {"zfu", "zfv", "zfw_kp1"}
+        assert all(value.shape == T.shape for value in diagnostics.values())
+        # The fixture varies meridionally only, so zfu is the intentional
+        # structural zero; zfv and the rotated vertical flux must both fire.
+        assert bool(jnp.any(diagnostics["zfv"] != 0.0))
+        assert bool(jnp.any(diagnostics["zfw_kp1"] != 0.0))
+
+    def test_nemo_iso_lap_zfu_operand_diagnostics_are_observational(self):
+        """Round-79 exposes real zfu operands only behind the explicit nested
+        diagnostic flag; the flag cannot silently change the public return
+        shape or the production tendency."""
+        setup = _stratified_with_meridional_tilt()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian,
+         rho, T, S, cfg) = setup
+        S_x, S_y = self._slopes(setup)
+        z_top = jnp.cumsum(z_coord.dz_ref) - z_coord.dz_ref
+        act = ((mask[:, :, jnp.newaxis] > 0.5)
+               & (z_top[jnp.newaxis, jnp.newaxis, :]
+                  < H_bathy[:, :, jnp.newaxis])).astype(T.dtype)
+        plain = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act)
+        observed, diagnostics = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, return_diagnostics=True,
+            return_operand_diagnostics=True)
+        assert jnp.array_equal(observed, plain)
+        operands = diagnostics["zfu_operands"]
+        assert set(operands) == {
+            "ahtu", "e1u", "e2u", "e3t", "e3u_flux", "uslp", "wmask",
+            "zmsku", "zdit", "zdkt", "avg4_u",
+        }
+        assert operands["ahtu"].shape == T.shape
+        assert operands["uslp"].shape == T.shape
+        assert bool(jnp.any(operands["ahtu"] != 0.0))
+        pinned = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act,
+            face_thickness_u=operands["e3t"],
+            face_thickness_v=operands["e3t"])
+        assert jnp.array_equal(pinned, plain)
+        with pytest.raises(ValueError, match="must be supplied together"):
+            nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+                cfg.kappa_Redi, act, face_thickness_u=operands["e3t"])
+        with pytest.raises(ValueError, match="requires return_diagnostics"):
+            nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+                cfg.kappa_Redi, act, return_operand_diagnostics=True)
+
+    def test_vertical_skew_literal_is_opt_in_and_default_is_byte_pinned(self):
+        """Round-88's source association is explicit and generic-safe."""
+        setup = _stratified_with_meridional_tilt()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian,
+         rho, T, S, cfg) = setup
+        S_x, S_y = self._slopes(setup)
+        act = jnp.broadcast_to(mask[:, :, None], T.shape)
+        # Positive but deliberately nonuniform face coefficients make the
+        # source pair-pair topology observably distinct from normalized sums.
+        jj, ii, kk = jnp.indices(T.shape, dtype=T.dtype)
+        kappa_u = (cfg.kappa_Redi + 0.13 * ii + 0.07 * jj + 0.03 * kk)
+        kappa_v = (cfg.kappa_Redi + 0.11 * ii + 0.05 * jj + 0.02 * kk)
+        legacy = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            kappa_u, act, kappa_Redi_v=kappa_v)
+        pinned = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            kappa_u, act, kappa_Redi_v=kappa_v,
+            vertical_skew_evaluation="normalized_sums")
+        literal = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            kappa_u, act, kappa_Redi_v=kappa_v,
+            vertical_skew_evaluation="nemo_literal")
+        assert jnp.array_equal(legacy, pinned)
+        # Planted violation: reverting the literal arm must be observable.
+        assert not jnp.array_equal(literal, pinned)
+        with pytest.raises(ValueError, match="vertical_skew_evaluation"):
+            nemo_iso_lap_tracer_tendency_latlon_cgrid(
+                T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+                kappa_u, act, vertical_skew_evaluation="unknown")
+
+    def test_nemo_iso_lap_bolus_slopes_are_independent_of_redi_slopes(self):
+        """The Kmm Redi slope carry must not move the earlier through-FCT
+        bolus transport.  A distinct bolus slope tuple changes only the
+        exported transport; the Redi tendency remains byte-identical."""
+        setup = _stratified_with_meridional_tilt()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian,
+         rho, T, S, cfg) = setup
+        u_mask, v_mask = self._closed_box(setup)
+        S_x, S_y = self._slopes(setup)
+        act = jnp.broadcast_to(mask[:, :, jnp.newaxis], T.shape)
+        zero = jnp.zeros_like(T)
+        native = (zero, zero, zero, zero)
+        ramp_i = jnp.broadcast_to(
+            1.0e-3 * jnp.arange(T.shape[1])[None, :, None], T.shape)
+        ramp_j = jnp.broadcast_to(
+            1.0e-3 * jnp.arange(T.shape[0])[:, None, None], T.shape)
+        bolus_native = (zero, zero, ramp_i, ramp_j)
+        base, base_bolus = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, native_slopes=native, kappa_GM=2000.0,
+            gm_bolus_advection="through_fct", return_bolus=True)
+        split, split_bolus = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, native_slopes=native,
+            bolus_native_slopes=bolus_native, kappa_GM=2000.0,
+            gm_bolus_advection="through_fct", return_bolus=True)
+        assert jnp.array_equal(split, base)
+        assert any(bool(jnp.any(a != b))
+                   for a, b in zip(split_bolus, base_bolus))
+
+    def test_nemo_iso_lap_zfw_operands_are_observational(self):
+        setup = _stratified_with_meridional_tilt()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian,
+         rho, T, S, cfg) = setup
+        S_x, S_y = self._slopes(setup)
+        act = jnp.broadcast_to(mask[:, :, jnp.newaxis], T.shape)
+        plain = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, msc_stabilize=True, dt=2700.0)
+        observed, diagnostics = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, msc_stabilize=True, dt=2700.0,
+            return_diagnostics=True, return_operand_diagnostics=True)
+        assert jnp.array_equal(observed, plain)
+        operands = diagnostics["zfw_operands"]
+        rebuilt = ((operands["skew_current"] + operands["a33_current"])
+                   * operands["act_below"])
+        assert jnp.array_equal(rebuilt, diagnostics["zfw_kp1"])
+        assert bool(jnp.any(operands["a33_current"] != 0.0))
+
     def test_nemo_iso_lap_gm_conserves(self):
         """The GM bolus (kappa_GM>0, NEMO ln_ldfeiv) is a curl-of-streamfunction
         transport, so its discrete divergence telescopes to zero and it conserves
@@ -2023,6 +2173,20 @@ class TestK33NemoNativeA33:
             aht, um3, vm3, wm3, wi, wj, e1u_c, e2v_c, e3w ** 2,
             dt=2700.0, msc=True)
         np.testing.assert_array_equal(np.asarray(ahw), np.asarray(ahw_f))
+        # Planted association violation: the historical exponent topology
+        # differs from NEMO's written left-associated multiply in fp64.
+        probe_aht = jnp.full_like(aht, 0.0005940911383846305)
+        probe_wi = jnp.full_like(wi, 0.05066177848148756)
+        probe_wj = jnp.zeros_like(wj)
+        ahw_square, _ = nemo_iso_a33(
+            probe_aht, um3, vm3, wm3, probe_wi, probe_wj,
+            e1u_c, e2v_c, e3w ** 2, msc=False,
+            evaluation="normalized_square")
+        ahw_literal, _ = nemo_iso_a33(
+            probe_aht, um3, vm3, wm3, probe_wi, probe_wj,
+            e1u_c, e2v_c, e3w ** 2, msc=False,
+            evaluation="nemo_literal")
+        assert bool(jnp.any(ahw_square != ahw_literal))
         assert float(jnp.min(akz)) >= 0.0
         # akz <= zcoef0*e3w2/dt with the -1/2 cap => akz < ah_wslp2 + akz_h*e3w2
         # (weak identity); the STRONG stability property: explicit remainder

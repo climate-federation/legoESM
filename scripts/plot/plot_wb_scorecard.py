@@ -361,8 +361,22 @@ def build_scorecard_figure(scorecards: dict, sota: dict | None = None, *,
     for j in range(n, len(flat_axes)):
         flat_axes[j].axis("off")
 
+    # A confound recorded in the file and not on the figure is decoration:
+    # the figure is what gets read. Any family whose learned column ran
+    # without the classical arm's surface stress is named here.
+    _confounded = sorted(
+        name for name, sc in (scorecards or {}).items()
+        if isinstance(sc, dict)
+        and isinstance(sc.get("meta"), dict)
+        and "no surface stress" in str(
+            sc["meta"].get("surface_drag_confound", "")).lower())
+    _note = ("\nNOT AN EQUALISED COMPARISON: "
+             + ", ".join(_confounded)
+             + " ran without the classical arm's surface friction"
+             if _confounded else "")
     fig.suptitle(
-        f"legoESM WeatherBench-2 scorecard vs SOTA — {metric.upper()} vs lead time",
+        f"legoESM WeatherBench-2 scorecard vs SOTA — {metric.upper()} vs lead time"
+        + _note,
         fontsize=13)
     fig.tight_layout(rect=(0, 0, 1, 0.98))
     return fig

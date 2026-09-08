@@ -101,7 +101,15 @@
 : "${AMIP_LAND_MASK:=/work/bd1083/b309178/diffESM/legoesm_ap/data/clm/sftlf_clm_1.9x2.5.nc}"
 
 # --- The machine-specific PATH flags (everything else is in the YAML) ---------
+# Harmonized surfdata: the CANOPY parameter source (per-PFT canopy height,
+# roughness ratio, Vcmax25, band albedos).  The default land surface scheme is
+# the two-leaf canopy, which is REFUSED without this — the CLM surfdata below
+# supplies soil texture and PFT cover, not canopy structure.  Two datasets, two
+# jobs; a canopy run needs both staged.
+: "${AMIP_SURFDATA:=${REPO:-/work/bd1083/b309178/diffESM/legoesm_pg/legoESM}/data/legoesm_surfdata_c260716.nc}"
+
 AMIP_PATH_FLAGS=(
+  --surfdata "${AMIP_SURFDATA}"
   --ic-path "${ERA5_IC}"
   --forcing-path "${SST}"
   --sic-path "${SIC}"

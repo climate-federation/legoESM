@@ -20,13 +20,22 @@ from typing import NamedTuple
 
 
 class SolverEntry(NamedTuple):
-    """One genuinely distinct solver implementation."""
+    """One genuinely distinct solver implementation.
+
+    ``(canonical_name, dynamics)`` pairs are UNIQUE across the matrix
+    (enforced by tests/unit/test_deprecation_warnings.py); a solver
+    serving several dynamics axes gets ONE ROW PER AXIS so consumers
+    filtering on ``dynamics`` see real coverage — free-text ``note`` is
+    NOT machine-readable (codex 2026-08-18) and never carries support
+    claims.
+    """
     component: str        # "atmosphere" | "ocean"
     dynamics: str         # "shallow_water" | "hydrostatic" | "nonhydrostatic"
     grid: str             # "cubed_sphere_cdgrid" | "spectral" | "latlon_fv" | ...
     canonical_name: str   # Canonical flat name for create_model / config
     class_name: str       # Canonical Python class name
     module: str           # Defining module path
+    note: str = ""        # Extra machine-readable coverage (e.g. more dynamics axes)
 
 
 # =====================================================================
@@ -90,6 +99,23 @@ ATMOSPHERE_MATRIX: tuple[SolverEntry, ...] = (
         "atmosphere", "nonhydrostatic", "mpas",
         "mpas_compressible_euler", "MPASCompressibleEulerModel",
         "legoesm.atmosphere.dynamics.gcm.compressible_euler_mpas",
+    ),
+
+    # -- FV3 six-face duo cube (certified fv_dynamics JAX lane) --
+    # ONE solver serves the hydrostatic AND nonhydrostatic arms (a static
+    # ``hydrostatic`` switch in the certified core), so a single entry;
+    # listed under its canonical "hydrostatic" axes.
+    SolverEntry(
+        "atmosphere", "hydrostatic", "fv3_duo_cube",
+        "fv3_duo_primitive_equations", "FV3DuoDynamicsModel",
+        "legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics",
+    ),
+    SolverEntry(
+        "atmosphere", "nonhydrostatic", "fv3_duo_cube",
+        "fv3_duo_primitive_equations", "FV3DuoDynamicsModel",
+        "legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics",
+        note="same class as the hydrostatic row: ONE certified core with "
+             "a static hydrostatic switch.",
     ),
 
     # -- U-cast (unstructured-cast hydrostatic primitive equations) --

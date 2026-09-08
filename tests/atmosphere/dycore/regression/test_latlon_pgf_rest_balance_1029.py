@@ -61,14 +61,23 @@ _BALANCED_TOL_MS = 1e-6   # terrain-PGF cancels discretely; only fp64 round-off
 #                           survives (measured: sigma ~0, hybrid ~9e-12 m/s)
 
 
-def _face_max_wind_after_rest_run(coord) -> tuple[float, float, bool]:
+def _face_max_wind_after_rest_run(coord, *, stratified: bool = False,
+                                  n_steps: int = _N_STEPS, h_0: float = 2000.0
+                                  ) -> tuple[float, float, bool]:
     """(max(|u|,|v|) over faces at t=0, after _N_STEPS, all-finite) for
     rest-over-topo.
 
     ``coord`` is the vertical coordinate (hybrid or sigma); the DCMIP 2-0-0
     mountain (h_0=2000 m) is the same for both. The metric is the raw C-grid
     face max over BOTH wind components — a cell-average could hide a
-    checkerboard face mode."""
+    checkerboard face mode.
+
+    ``stratified`` swaps the ISOTHERMAL DCMIP rest state for the exact
+    constant-lapse-rate one over the SAME mountain — exact for the CONTINUOUS
+    equations, but not for the model's discrete geopotential quadrature, so it
+    is a characterisation state and not a machine-rest one. The stratified
+    diagnosis lives at the tendency level below; this integrating path is kept
+    for the isothermal regressions."""
     from legoesm.grids.latlon import create_latlon_grid
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
         CGridLatLonPrimitiveEquationModel,
@@ -87,14 +96,20 @@ def _face_max_wind_after_rest_run(coord) -> tuple[float, float, bool]:
         use_polar_filter=True,
     )
     model = CGridLatLonPrimitiveEquationModel(grid, coord, cfg, dt=_DT)
-    state = hydrostatic_to_cgrid(
-        rest_state_topography_init_latlon(grid, coord, h_0=2000.0), grid)
+    if stratified:
+        from tests.test_cases.dcmip2012.rest_state_topography import (
+            lapse_rate_state_topography_init_latlon,
+        )
+        init = lapse_rate_state_topography_init_latlon(grid, coord, h_0=h_0)
+    else:
+        init = rest_state_topography_init_latlon(grid, coord, h_0=h_0)
+    state = hydrostatic_to_cgrid(init, grid)
 
     def face_max(s):
         return float(jnp.maximum(jnp.max(jnp.abs(s.u)), jnp.max(jnp.abs(s.v))))
 
     v0 = face_max(state)
-    for _ in range(_N_STEPS):
+    for _ in range(n_steps):
         state = model.step(state, _DT)
     finite = bool(
         jnp.all(jnp.isfinite(state.u)) & jnp.all(jnp.isfinite(state.v))
@@ -152,6 +167,115 @@ def test_hybrid_rest_over_topo_is_balanced():
     assert vN < _BALANCED_TOL_MS, (
         f"hybrid rest-over-topography drifted to {vN:.3e} m/s "
         f"(> {_BALANCED_TOL_MS} m/s) — #1029 SB81 PGF regression")
+
+
+# ---------------------------------------------------------------------------
+# Stratified terrain PGF: the t=0 residual, and how it converges (#1029)
+# ---------------------------------------------------------------------------
+# The four tests above use the ISOTHERMAL DCMIP state, for which the
+# Simmons-Burridge geopotential quadrature is exact -- which is why they reach
+# machine rest.  They therefore say nothing about a stratified atmosphere, i.e.
+# about every real run.
+#
+# The metric below is the t=0 wind TENDENCY from the raw tendency function, not
+# the wind after N steps: the polar filter, the mass fixer and the integrator
+# all sit between a tendency and a wind, and a residual that survives them is
+# not the same measurement as the pressure-gradient residual itself.
+
+
+def _initial_pgf_residual(coord, *, stratified: bool, h_0: float = 2000.0,
+                          n_lat: int = _N_LAT, n_lon: int = _N_LON) -> float:
+    """max(|du/dt|, |dv/dt|) at t=0 from exact rest [m/s^2].
+
+    Calls ``cgrid_latlon_hydrostatic_tendencies`` directly, so no filter, mass
+    fixer or time integration can add to or subtract from the answer.
+    """
+    import jax.numpy as jnp
+    from legoesm.grids.latlon import create_latlon_grid
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_latlon_cgrid import (
+        CGridLatLonPrimitiveEquationConfig,
+        cgrid_latlon_hydrostatic_tendencies,
+        hydrostatic_to_cgrid,
+    )
+    from tests.test_cases.dcmip2012.rest_state_topography import (
+        lapse_rate_state_topography_init_latlon,
+        rest_state_topography_init_latlon,
+    )
+
+    grid = create_latlon_grid(n_lat, n_lon)
+    init = (lapse_rate_state_topography_init_latlon(grid, coord, h_0=h_0)
+            if stratified else
+            rest_state_topography_init_latlon(grid, coord, h_0=h_0))
+    state = hydrostatic_to_cgrid(init, grid)
+    du, dv, _dT, _dps, _dq = cgrid_latlon_hydrostatic_tendencies(
+        state, grid, coord,
+        CGridLatLonPrimitiveEquationConfig(
+            A_h=0.0, fix_mass=True, anchor_mass_to_initial=True,
+            use_polar_filter=True))
+    return float(jnp.maximum(jnp.max(jnp.abs(du)), jnp.max(jnp.abs(dv))))
+
+
+def test_isothermal_terrain_pgf_residual_is_machine_zero():
+    """Control: with an isothermal state the t=0 residual is round-off.
+
+    The SB quadrature is exact for isothermal, so this must sit at machine
+    level.  If it does not, the tendency-level metric itself is broken and the
+    stratified numbers below mean nothing.
+    """
+    from legoesm.grids.vertical import create_sigma_coordinate, standard_hybrid_levels
+    for coord in (create_sigma_coordinate(_NLEV), standard_hybrid_levels(_NLEV)):
+        r = _initial_pgf_residual(coord, stratified=False)
+        assert r < 1e-12, f"isothermal t=0 PGF residual {r:.3e} m/s^2 is not round-off"
+
+
+def test_stratified_terrain_pgf_residual_converges_with_vertical_resolution():
+    """#1029, THE DISCRIMINATOR.
+
+    A stratified rest state over the mountain does produce a non-negligible
+    spurious acceleration.  Two explanations were live: a discrete
+    terrain-pressure-gradient inconsistency (which would NOT go away with more
+    levels, being set by the horizontal operator), or a vertical quadrature
+    truncation in the geopotential integral (which must).
+
+    Refining vertically at FIXED horizontal grid and FIXED mountain separates
+    them, and the answer is the second one: the residual falls monotonically as
+    levels are added.  So this is a convergent truncation error of the
+    terrain-following discretisation, not a cancellation failure -- the claim
+    an earlier revision of this file made and this test retracts.
+    """
+    from legoesm.grids.vertical import create_sigma_coordinate, standard_hybrid_levels
+    for name, factory in (("sigma", create_sigma_coordinate),
+                          ("hybrid", standard_hybrid_levels)):
+        rs = [_initial_pgf_residual(factory(n), stratified=True)
+              for n in (20, 40, 80)]
+        assert rs[0] > 1e-6, (
+            f"{name}: the coarse case is already at round-off "
+            f"({rs[0]:.3e} m/s^2) — nothing to converge, test is vacuous")
+        assert rs[1] < rs[0] and rs[2] < rs[1], (
+            f"{name}: t=0 stratified PGF residual does NOT fall with vertical "
+            f"resolution ({rs[0]:.3e} -> {rs[1]:.3e} -> {rs[2]:.3e} m/s^2). "
+            f"That would make it a discrete inconsistency of the horizontal "
+            f"terrain PGF rather than a vertical quadrature truncation, which "
+            f"is the opposite of what #1029 measured — re-open the attribution.")
+
+
+def test_stratified_terrain_pgf_residual_is_not_negligible_at_production_levels():
+    """Characterisation, not a bug assertion: how big is it where we run?
+
+    The residual converges (test above), so it is not required to be zero. What
+    matters for #1029 is its SIZE at the level count the failing
+    `held_suarez_topo` case actually uses. This pins that the stratified case is
+    many orders above the isothermal one at that resolution, so the isothermal
+    regression above cannot stand in for it.
+    """
+    from legoesm.grids.vertical import standard_hybrid_levels
+    coord = standard_hybrid_levels(_NLEV)
+    strat = _initial_pgf_residual(coord, stratified=True)
+    iso = _initial_pgf_residual(coord, stratified=False)
+    assert strat > 1e6 * max(iso, 1e-300), (
+        f"stratified residual {strat:.3e} is not far above the isothermal "
+        f"{iso:.3e} m/s^2 — the isothermal regression would then be an "
+        f"adequate proxy and this whole section is unnecessary")
 
 
 def test_hybrid_rest_over_topo_fp32_policy():

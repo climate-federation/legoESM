@@ -13,11 +13,10 @@ experiment directory::
 
 Example::
 
-    python scripts/run/init_experiment.py biophysics/spinup_5year \\
-        --name derecho_2026-07-01_5yr_spinup \\
-        --output-dir $SCRATCH/lmip/derecho_2026-07-01_5yr_spinup \\
-        -o forcing.year_start=1980 -o forcing.year_end=1984 \\
-        -o physics.bulk_scheme=constant
+    python scripts/run/init_experiment.py biophysics/lmip_biophys_2deg \\
+        --name spinup_1975 \\
+        --output-dir $SCRATCH/lmip/spinup_1975 \\
+        -o forcing.year_start=1975 -o forcing.year_end=1984
 """
 
 from __future__ import annotations
@@ -216,7 +215,7 @@ def _write_run_sh(path: Path, config_path: Path, output_dir: Path,
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("template", help="template name (e.g. biophysics/spinup_5year)")
+    ap.add_argument("template", help="template name (e.g. biophysics/lmip_biophys_2deg)")
     ap.add_argument("--name", required=True, help="experiment nickname")
     ap.add_argument("--output-dir", required=True, help="experiment directory to create")
     ap.add_argument("-o", "--override", action="append", default=[],

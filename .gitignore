@@ -183,3 +183,9 @@ data/*
 e3sm-source/
 data/bathymetry/etopo_1deg_clean.nc
 .claude/settings.json
+
+# Published DEPHY-format case files, downloaded by
+# scripts/data/fetch_dephy_cases.py from the groups that publish them. NOT
+# vendored: the transition composites are 36 MB each, and provenance belongs
+# upstream. The gSAM decks above stay tracked; these do not.
+data/les_cases/dephy/

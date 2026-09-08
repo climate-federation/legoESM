@@ -17,11 +17,26 @@ produced ``ldftra_dump_{ahtu,ahtv,gphiu,gphiv}.bin`` in RUN_DIR)::
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
+import sys
 
 import numpy as np
 
 os.environ.setdefault("JAX_ENABLE_X64", "1")
+
+# dump_lane: shared #1455 selector -- this probe had NO hardcoded run-dir
+# constant (a REQUIRED --run-dir, no default), so it was never lane-
+# switchable at all. ldftra_dump_{ahtu,ahtv,gphiu,gphiv}.bin exist on every
+# dump_lane lane (verified: RUN_GDB, RUN_SEQDUMP_D180_1R, RUN_SEQDUMP_Y20_1R
+# all have them), so --run-dir now DEFAULTS to dump_lane.RUN_DIR (gdb_y5 by
+# default) while staying overridable to any explicit path (e.g. the original
+# RUN_1226_AHTU one-off instrumentation run this script's docstring names).
+_dl_path = os.path.join(os.path.dirname(__file__), "dump_lane.py")
+_dl_spec = importlib.util.spec_from_file_location("_dump_lane", _dl_path)
+dump_lane = importlib.util.module_from_spec(_dl_spec)
+sys.modules["_dump_lane"] = dump_lane
+_dl_spec.loader.exec_module(dump_lane)
 
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (  # noqa: E402
     static_kappa_redi_override,
@@ -57,11 +72,14 @@ def _report(name: str, lego: np.ndarray, nemo: np.ndarray) -> tuple[float, float
 
 
 def main() -> int:
+    print(dump_lane.banner())
     ap = argparse.ArgumentParser()
-    ap.add_argument("--run-dir", required=True,
+    ap.add_argument("--run-dir", default=dump_lane.RUN_DIR,
                      help="NEMO DINO run directory containing ldftra_dump_*.bin "
-                          "and ocean.output")
+                          "and ocean.output (default: dump_lane's RUN_DIR for "
+                          "the selected DINO_1226_LANE)")
     args = ap.parse_args()
+    print(f"run-dir used = {args.run_dir}")
 
     jpi, jpj, jpk = _read_dims(args.run_dir)
     ahtu = _load3(os.path.join(args.run_dir, "ldftra_dump_ahtu.bin"), jpi, jpj, jpk)[0]

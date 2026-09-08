@@ -1671,6 +1671,65 @@ class TestNemoRiZriTranscription:
                               jnp.asarray(kappaM), cfg)
         return np.asarray(Pr)
 
+    def test_literal_nemo_association_is_bit_exact_and_old_paths_are_red(self):
+        """Matched-step scalar whose algebraically equivalent paths differ.
+
+        The hexadecimal inputs make this a stable hand-computed fp64 case.
+        NEMO evaluates ``(rn2b*p_avm)/zdiv`` and then constructs ``pdlr``
+        literally before taking its reciprocal.  Multiplying by ``1/zdiv``
+        or collapsing the pdlr expression to a clipped product is one ulp
+        different on this case, so either historical shortcut turns red.
+        """
+        rn2b = np.asarray([
+            np.float64.fromhex("0x1.04fa0afaa6d02p-14"),
+            np.float64.fromhex("0x1.ffc95566895cap-15"),
+        ])
+        p_avm = np.asarray([
+            np.float64.fromhex("0x1.95141a74aca4ap-4"),
+            np.float64.fromhex("0x1.7d1cb254e6652p-4"),
+        ])
+        p_sh2 = np.asarray([
+            np.float64.fromhex("0x1.693ab8013e477p-16"),
+            np.float64.fromhex("0x1.9c874ac1cebd0p-16"),
+        ])
+        rn_bshear = np.float64(1.0e-20)
+        ri_cri = np.float64(2.0) / (
+            np.float64(2.0) + np.float64(0.7) / np.float64(0.1))
+
+        zdiv = p_sh2 + rn_bshear
+        zri = (rn2b * p_avm) / zdiv
+        pdlr = np.maximum(
+            np.float64(0.1), ri_cri / np.maximum(ri_cri, zri))
+        expected = np.float64(1.0) / pdlr
+
+        cfg = TKEConfig(
+            prandtl_mode="nemo_ri", bshear_floor=float(rn_bshear),
+            prandtl_ri_coeff=float(np.float64(1.0) / ri_cri),
+            tke_n2_evaluation_stage="step_entry")
+        got = np.asarray(_prandtl_number(
+            jnp.asarray(rn2b), jnp.ones(2), jnp.asarray(p_avm), cfg,
+            p_sh2_override=jnp.asarray(p_sh2)))
+        np.testing.assert_array_equal(got, expected)
+
+        reciprocal_first = rn2b * p_avm * (np.float64(1.0) / zdiv)
+        old_direct_pr = np.maximum(
+            np.float64(1.0), np.minimum(
+                np.float64(10.0),
+                (np.float64(1.0) / ri_cri) * zri))
+        old_legacy_pr = np.maximum(
+            np.float64(1.0), np.minimum(
+                np.float64(10.0),
+                (np.float64(1.0) / ri_cri) * reciprocal_first))
+        assert np.any(reciprocal_first != zri)
+        assert np.any(old_direct_pr != expected)
+        assert np.any(old_legacy_pr != expected)
+
+        legacy = cfg._replace(tke_n2_evaluation_stage="implicit_solve_state")
+        legacy_got = np.asarray(_prandtl_number(
+            jnp.asarray(rn2b), jnp.ones(2), jnp.asarray(p_avm), legacy,
+            p_sh2_override=jnp.asarray(p_sh2)))
+        np.testing.assert_array_equal(legacy_got, old_legacy_pr)
+
     def test_matches_independent_loop_port_turbulent_column(self):
         rng = np.random.default_rng(42)
         n = 25
@@ -1970,3 +2029,41 @@ class TestMxlChoice3LdownSeed:
         assert bool(jnp.isfinite(l_eps).all())
         assert l_k.shape == (2, 3, n)
         assert l_eps.shape == (2, 3, n)
+
+
+
+# ---------------------------------------------------------------------------
+# WHY THERE IS NO TestFaceNativeUnderRK3 CLASS HERE (codex 9406102)
+# ---------------------------------------------------------------------------
+# One was added on 2026-08-14 asserting that nemo_face_native may construct off
+# the leap-frog family, on the argument that NEMO's RK3 step calls
+# `zdf_phy( kstp, Nbb, Nbb, Nrhs )` (stprk3.F90:165) so the now x before
+# product is a square on one time level. The source observation is correct and
+# both ORCA1 oracle runs are RK3 builds. The conclusion did not follow, for
+# three reasons, and the whole change was reverted:
+#
+#   1. legoESM's "RK3" is momentum_time_integrator, NOT outer_integrator --
+#      outer_integrator has no RK3 value at all (forward_euler, ab2, leapfrog,
+#      nemo_mlf). So "we are an RK3 model like NEMO" was a category error.
+#
+#   2. NEMO evaluates zdf_phy BEFORE stage 1, from the step-entry Nbb state.
+#      legoESM calls _apply_implicit_vertical_mixing(state_new, ...) AFTER the
+#      RK3 momentum stages and the barotropic solve, so its "now" is a
+#      post-stage value, not NEMO's Nbb. Feeding it as both factors is
+#      therefore NOT an Nbb x Nbb transcription.
+#
+#   3. The k_profiles branch written to support it was UNREACHABLE: the
+#      _needs_before raise fires for nemo_face_native before the else-branch
+#      is ever considered. The construction test added alongside it passed
+#      while proving nothing about the runtime path -- it exercised the
+#      constructor, which was the only thing the change had actually altered.
+#
+# Codex also showed the sibling rn2b argument was wrong in the other
+# direction: stprk3.F90:156 sets `rn2 = rn2b` before zdf_phy, so under RK3
+# they ARE equal, and tke_n2_time_level="nemo_before" is leapfrog-only for the
+# same missing-entry-state reason, not because RK3 keeps the levels distinct.
+#
+# Closing this properly means splitting the closure call in two: a step-entry
+# (NEMO Nbb) state for the face shear and rn2b, and the post-stage state for
+# the implicit vertical solve. That is a real refactor, not a guard tweak, and
+# until it exists the constructor guard is correct as written.

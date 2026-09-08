@@ -1,0 +1,30 @@
+#!/bin/bash
+#SBATCH --account=glab
+#SBATCH --partition=short
+#SBATCH --job-name=nhwsubp
+#SBATCH --time=03:00:00
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=120G
+#SBATCH --output=/burg-archive/glab/users/pg2328/fv3_duo_gaps/nh_wsubp_%j.log
+# Scores the port's w against the oracle's at the end of EVERY acoustic
+# sub-step, to split the NH gap's origin into "one stage is wrong"
+# (full-size at sub-step 1) versus "a coefficient is wrong" (accumulates
+# over the eight). Needs the sub-step oracle build to have run first
+# (scripts/cluster/fv3_native/build_nh_wsubstep_oracle.sbatch).
+set -uo pipefail
+REPO=${REPO:-/burg-archive/glab/users/pg2328/legoESM_fv3jax}
+[ -e "$REPO/.git" ] || { echo "PREFLIGHT FAILED: REPO=$REPO"; exit 5; }
+DIRTY=$(git -C "$REPO" status --porcelain | wc -l)
+[ "$DIRTY" -eq 0 ] || { echo "PREFLIGHT FAILED: dirty ($DIRTY) -- a number from an edited tree is attributable to no SHA"; exit 3; }
+SDUMP=${SDUMP:-/burg-archive/glab/users/pg2328/fv3_wsubstep/run_nh_1step}
+ls "$SDUMP"/sdump_it1_w_t1.dat >/dev/null 2>&1 || { echo "PREFLIGHT FAILED: no sub-step dumps under $SDUMP"; exit 4; }
+echo "host: $(hostname)"; echo "PINNED sha: $(git -C "$REPO" rev-parse HEAD)"
+PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
+export PYTHONPATH=$REPO/packages/core:$REPO/packages/atmosphere:$REPO/src
+export JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu
+cd "$REPO"
+$PY scripts/validate/fv3_native/nh_substep_w_parity.py --sdump "$SDUMP"
+echo "  rc=$?"
+echo NH_WSUBP_DONE

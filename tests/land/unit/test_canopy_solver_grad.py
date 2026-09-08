@@ -135,7 +135,7 @@ def test_cold_calm_forcing_stays_finite():
         ASW_Sun=_a(0.0), ASW_Sh=_a(0.0), ASW_Soil=_a(0.0),
         ur=_a(1.0e-4), Ts_bc=_a(235.0), Tv_atm=_a(233.0), q_atm=_a(1.0e-4))
     x0 = jnp.array([235.0, 235.0, 233.0, 233.0, 235.0, 1.0e-4])
-    out, _n_iters = solve_canopy_closure(x0, stressed, _CFG)
+    out, _n_iters, _conv = solve_canopy_closure(x0, stressed, _CFG)
     assert bool(jnp.all(jnp.isfinite(out)))
 
 
@@ -155,7 +155,7 @@ def test_canopy_forward_reports_gross_and_net():
     from legoesm.land.surface_scheme.two_leaf_canopy import _G_C_PER_UMOL_CO2
 
     bundle = _bundle()          # pure-C3 midday column (fC4 = 0)
-    x_star, _ = solve_canopy_closure(_X0, bundle, _CFG)
+    x_star, _, _ = solve_canopy_closure(_X0, bundle, _CFG)
     fluxes = canopy_forward(
         x_star, bundle, _CFG.LE_module, _CFG.stomatal_model,
         _CFG.le_cap_mode, _CFG.use_ta_for_photosynthesis)
@@ -297,7 +297,7 @@ def test_two_leaf_public_export_gpp_is_gross():
         ur=wind, CI=params.CI, z0m=z0m, displa=displa, z0=z_ref,
         cv=jnp.full(ncol, cc.cv), d_leaf=jnp.full(ncol, tlc._DEFAULT_D_LEAF),
         r_soil_surface=jnp.zeros(ncol))
-    x_star, _ = jax.vmap(lambda x, b: solve_canopy_closure(x, b, cc))(x0, bundle)
+    x_star, _, _ = jax.vmap(lambda x, b: solve_canopy_closure(x, b, cc))(x0, bundle)
     d = jax.vmap(lambda x, b: canopy_forward(
         x, b, cc.LE_module, cc.stomatal_model, cc.le_cap_mode,
         cc.use_ta_for_photosynthesis))(x_star, bundle)

@@ -5,9 +5,11 @@ Self-contained: builds a small synthetic beta-plane ``NemoGrid``/``NemoState``
 velocity staggering (NEMO east/north face -> legoESM u/v faces), and the state
 placement.
 """
+import jax
 import numpy as np
 import pytest
 
+from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.ocean.fidelity.nemo_io import NemoBeforeState, NemoGrid, NemoState
 from legoesm.ocean.fidelity.nemo_state_bridge import (
     bridge_before_state_topo,
@@ -38,6 +40,12 @@ def _synthetic():
         gdepw_1d=np.array([0.0, 10.0, 30.0]),
         tmask=np.ones((NY, NX, NZ)), umask=np.ones((NY, NX, NZ)),
         vmask=np.ones((NY, NX, NZ)),
+        gdept_0=np.broadcast_to(
+            np.array([5.0, 20.0, 45.0]), (NY, NX, NZ)),
+        gdepw_0=np.broadcast_to(
+            np.array([0.0, 10.0, 30.0]), (NY, NX, NZ)),
+        e3w_0=np.broadcast_to(
+            np.array([10.0, 15.0, 25.0]), (NY, NX, NZ)),
     )
     rng = np.random.default_rng(0)
     state = NemoState(
@@ -60,6 +68,11 @@ def test_bridge_geometry_and_staggering():
     assert st.u.data.shape == (NY, NX + 1, NZ)      # west-face array, n_lon+1
     assert st.v.data.shape == (NY + 1, NX, NZ)      # south-face array, n_lat+1
     assert st.eta.data.shape == (NY, NX)
+    assert out.z_coord.nemo_e3w_mesh_reference is True
+    assert np.array_equal(
+        np.asarray(out.z_coord.nemo_e3w_0), grid.e3w_0)
+    assert np.array_equal(
+        np.asarray(out.z_coord.nemo_gdepw_0), grid.gdepw_0)
 
     # Staggering. legoESM u[j,i] is the WEST face of T-cell (j,i)
     # (latlon_cgrid_operators.py:3623); NEMO u(i) is the EAST face = west face of
@@ -113,13 +126,19 @@ LON0, DLON_D = 0.0, 5.0
 
 
 def _synthetic_topo():
+    from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
+
     from legoesm import constants
     lat_deg = LAT0 + DLAT_D * np.arange(TNY)         # (TNY,)
     lon_deg = LON0 + DLON_D * np.arange(TNX)
     gphit = lat_deg[:, None] * np.ones((1, TNX))
     glamt = lon_deg[None, :] * np.ones((TNY, 1))
     gphiv = (lat_deg + 0.5 * DLAT_D)[:, None] * np.ones((1, TNX))  # north faces
-    R, Om = constants.R_earth, constants.Omega
+    # A stand-in for a NEMO mesh_mask must carry NEMO'S OWN rotation rate: the
+    # bridge builds f from NEMO's Earth by default (#1455), and a fixture on
+    # legoESM's rounded constant would be testing that the bridge reproduces
+    # the wrong planet.  That is exactly the defect the default fixes.
+    R, Om = constants.R_earth, NEMO_CONSTANTS_CONFIG.Omega
     lat_r = np.deg2rad(lat_deg)
     # Metrics from the sphere formulas create_latlon_geometry uses -> exact match.
     e1t = (R * np.deg2rad(DLON_D) * np.cos(lat_r))[:, None] * np.ones((1, TNX))
@@ -152,12 +171,21 @@ def _synthetic_topo():
 def test_topo_bridge_geometry_matches_nemo_metrics():
     """Built geometry reproduces NEMO's e1t/e2t/ff_t (Mercator, from mesh arrays)."""
     grid, state, _ = _synthetic_topo()
-    out = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=True)
+    out = bridge_nemo_to_legoesm_topo(
+        grid, state, periodic_i=True, carry_native_lat_deg=True)
     geom = out.geometry
     # dx_T = e1t, dy_T = e2t, f_T = ff_t to near-roundoff (x64).
     assert np.max(np.abs(np.asarray(geom.dx_T) - grid.e1t)) < 1e-4 * grid.e1t.max()
     assert np.max(np.abs(np.asarray(geom.dy_T) - grid.e2t)) < 1e-4 * grid.e2t.max()
     assert out.f_match_max_abs < 1e-3 * np.abs(grid.ff_t).max()
+    # Native degrees are a first-class oracle operand: a radian round trip is
+    # allowed to differ by ULPs, but this carried field must not.
+    np.testing.assert_array_equal(np.asarray(geom.native_lat_T_deg), grid.gphit)
+
+    # Scope pin: generic/non-oracle NEMO bridges retain the historical
+    # geometry pytree and do not carry the optional degree-valued field.
+    generic = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=True)
+    assert generic.geometry.native_lat_T_deg is None
 
 
 def test_topo_bridge_metric_convention_default_is_bit_identical():
@@ -169,6 +197,113 @@ def test_topo_bridge_metric_convention_default_is_bit_identical():
     for f in ("dx_T", "dy_T", "area_T", "dx_v", "dy_v", "area_q"):
         np.testing.assert_array_equal(
             getattr(out_default.geometry, f), getattr(out_exact.geometry, f))
+
+
+def test_topo_bridge_carries_raw_een_coefficient_operands_without_rebuilding():
+    """The literal dyn_cor_2D builder receives native mesh arrays bytewise.
+
+    Missing any member keeps the optional bundle absent; a partial bundle must
+    never be completed from lego geometry because last-bit metric association
+    and the wall rows are observable at the fidelity bar.
+    """
+    grid, state, _ = _synthetic_topo()
+    e3 = np.broadcast_to(
+        grid.e3t_1d[None, None, :], (TNY, TNX, TNZ)).copy()
+    fmask = np.array(grid.tmask, copy=True)
+    carried = grid._replace(
+        e3u_0=e3, e3v_0=e3 + 0.25, e3f_0=e3 + 0.5,
+        hu_0=np.sum(e3 * grid.umask, axis=-1),
+        hv_0=np.sum((e3 + 0.25) * grid.vmask, axis=-1),
+        fmask=fmask, e2u=grid.e2t + 1.0, e1v=grid.e1t + 2.0,
+        e1f=grid.e1t + 3.0, e2f=grid.e2t + 4.0)
+    old_policy = get_policy()
+    try:
+        set_policy(PrecisionPolicy.fp64())
+        out = bridge_nemo_to_legoesm_topo(
+            carried, state, periodic_i=True, full_step=True)
+    finally:
+        set_policy(old_policy)
+    raw = out.z_coord.nemo_een_barotropic
+    assert raw is not None
+    for name in raw._fields:
+        if name == "hf_0":
+            expected = np.sum(carried.e3f_0 * carried.fmask, axis=-1)
+        else:
+            expected = getattr(carried, name)
+        np.testing.assert_array_equal(np.asarray(getattr(raw, name)), expected)
+
+    missing = carried._replace(e2f=None)
+    out_missing = bridge_nemo_to_legoesm_topo(
+        missing, state, periodic_i=True, full_step=True)
+    assert out_missing.z_coord.nemo_een_barotropic is None
+
+
+def test_topo_bridge_omega_reference_default_is_bit_identical():
+    """Omitting the counterfactual reference mode is byte-identical to NEMO."""
+    from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
+
+    grid, state, _ = _synthetic_topo()
+    default = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=True)
+    explicit = bridge_nemo_to_legoesm_topo(
+        grid, state, periodic_i=True,
+        omega=NEMO_CONSTANTS_CONFIG.Omega, f_reference_mode="nemo")
+    default_leaves = jax.tree_util.tree_leaves(default)
+    explicit_leaves = jax.tree_util.tree_leaves(explicit)
+    assert len(default_leaves) == len(explicit_leaves)
+    for left, right in zip(default_leaves, explicit_leaves, strict=True):
+        np.testing.assert_array_equal(np.asarray(left), np.asarray(right))
+
+
+def test_topo_bridge_legacy_omega_changes_only_registered_geometry_fields():
+    """The old-Earth selector moves only Ω and its three Coriolis arrays."""
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
+
+    from legoesm import constants
+
+    previous = get_policy()
+    set_policy(PrecisionPolicy.fp64())
+    try:
+        grid, state, _ = _synthetic_topo()
+        nemo = bridge_nemo_to_legoesm_topo(grid, state, periodic_i=True)
+        legacy = bridge_nemo_to_legoesm_topo(
+            grid, state, periodic_i=True, omega=constants.Omega,
+            f_reference_mode="selected_omega")
+    finally:
+        set_policy(previous)
+    registered = {"f_T", "f_u", "f_v", "omega"}
+    for field in nemo.geometry._fields:
+        if field in registered:
+            continue
+        left = jax.tree_util.tree_leaves(getattr(nemo.geometry, field))
+        right = jax.tree_util.tree_leaves(getattr(legacy.geometry, field))
+        assert len(left) == len(right), field
+        for a, b in zip(left, right, strict=True):
+            np.testing.assert_array_equal(np.asarray(a), np.asarray(b), err_msg=field)
+    assert float(nemo.geometry.omega) == NEMO_CONSTANTS_CONFIG.Omega
+    assert float(legacy.geometry.omega) == constants.Omega
+    ratio = constants.Omega / NEMO_CONSTANTS_CONFIG.Omega
+    for field in ("f_T", "f_u", "f_v"):
+        np.testing.assert_allclose(
+            np.asarray(getattr(legacy.geometry, field)),
+            ratio * np.asarray(getattr(nemo.geometry, field)), rtol=1e-14, atol=0.0)
+    for field in ("T", "S", "u", "v", "eta", "H_bathy"):
+        np.testing.assert_array_equal(
+            getattr(legacy.state, field).data, getattr(nemo.state, field).data)
+
+
+def test_topo_bridge_legacy_omega_with_nemo_reference_is_rejected():
+    """Planted selector/reference disagreement must trip the original tight guard."""
+    from legoesm import constants
+
+    grid, state, _ = _synthetic_topo()
+    with pytest.raises(ValueError, match="Coriolis mismatch"):
+        bridge_nemo_to_legoesm_topo(
+            grid, state, periodic_i=True, omega=constants.Omega,
+            f_reference_mode="nemo")
+    with pytest.raises(ValueError, match="f_reference_mode"):
+        bridge_nemo_to_legoesm_topo(
+            grid, state, periodic_i=True, f_reference_mode="relaxed")
 
 
 def test_topo_bridge_metric_convention_isotropic_forwards_and_raises():
@@ -248,8 +383,14 @@ def _synthetic_topo_mercator():
     drives ``dy_T`` — the whole reason gphiv was added.  Uniform-dlat grids ignore
     lat_face (latlon.py:1319), so this is the case that catches a face sign-flip /
     off-by-one / N-S swap in the ``2*lat_1d[0]-gphiv[0]`` reflection."""
+    from legoesm.ocean.constants_config import NEMO_CONSTANTS_CONFIG
+
     from legoesm import constants
-    R, Om = constants.R_earth, constants.Omega
+    # A stand-in for a NEMO mesh_mask must carry NEMO'S OWN rotation rate: the
+    # bridge builds f from NEMO's Earth by default (#1455), and a fixture on
+    # legoESM's rounded constant would be testing that the bridge reproduces
+    # the wrong planet.  That is exactly the defect the default fixes.
+    R, Om = constants.R_earth, NEMO_CONSTANTS_CONFIG.Omega
     # Mercator: uniform in the Mercator y-coordinate -> stretched latitude faces.
     y = -0.6 + 0.18 * np.arange(TNY + 1)              # (TNY+1,) uniform Mercator y
     lat_face = 2.0 * np.arctan(np.exp(y)) - np.pi / 2.0   # (TNY+1,) rad, stretched

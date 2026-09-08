@@ -390,6 +390,100 @@ def brunt_vaisala_n_squared_from_gradient(theta, dtheta_dz):
     return constants.g * dtheta_dz / theta
 
 
+# --- Deardorff (1980) stable-layer SGS length limit -------------------------
+# SAM ``SGS_TKE/tke_full.f90`` dosmagor calibration. Stable mixing is suppressed
+# by SHRINKING the master length, not by driving a stability factor to zero.
+_DEARDORFF_STABLE_COEF = 0.76   # l = 0.76·√e/N (Deardorff 1980; PALM, ARPS, ERF)
+_DEARDORFF_CK = 0.1             # SAM Ck
+_DEARDORFF_SMIX_FLOOR = 0.1     # SAM floor on smix, as a fraction of the length
+_DEARDORFF_CEE_A = 0.19         # Cee = Ce/0.7·(0.19 + 0.51·smix/l)
+_DEARDORFF_CEE_B = 0.51
+_DEARDORFF_CEE_DIV = 0.7
+# Floor on the buoyancy-shutoff sqrt ARGUMENT [s⁻²]. This is the differentiable
+# model's own requirement, NOT SAM's: d√x/dx = 0.5/√x, so an unfloored argument
+# hands the optimizer 0.5/√1e-36 = 5e17 — finite, and useless. SAM never
+# differentiates its closure, so it can leave the argument bare. The floor caps
+# the slope at 0.5/√_STRAIN_FLOOR ≈ 1.6e5.
+#
+# It sits ONE order BELOW the caller's own strain floor (``S² = |∂V/∂z|² +
+# 1e-10``): at zero shear and neutral N², ``S² − N²/Pr_t = 1e-10`` already
+# exceeds this floor, so the floor does NOT bite and the ``deardorff`` option
+# reduces EXACTLY to ``(c_s·l)²·√(S² − N²/Pr_t)`` there, byte-identical to the
+# default. A floor ABOVE 1e-10 (an earlier 1e-9) silently changed the neutral
+# strain from √1e-10 to √1e-9 — a √10 error the reviewer caught.
+_STRAIN_FLOOR = 1.0e-11
+
+
+def deardorff_stable_eddy_viscosity(strain_sq, n2, length, c_s, Pr_t):
+    """Smagorinsky eddy viscosity with the Deardorff (1980) stable-length limit.
+
+    ``K_m = √(Ck³/Cee)·smix²·√(S² − N²/Pr_t)`` with the master length shrunk
+    under stable stratification to ``smix = clip(√(0.76·tk/(Ck·N)), 0.1·l, l)``
+    (SAM ``dosmagor``).  Where ``N² ≤ 0`` (neutral/unstable) ``smix = l`` and
+    ``√(Ck³/Cee) = c_s²`` EXACTLY, so this reduces identically to the plain
+    ``(c_s·l)²·√(S² − N²/Pr_t)`` Smagorinsky-Lilly form.
+
+    Sign convention: ``N² > 0`` is STABLE; the buoyancy term is SUBTRACTED from
+    the shear so stratification suppresses mixing and ``N² < 0`` enhances it.
+
+    Prandtl convention: this repo divides (``S² − N²/Pr_t``, equivalently
+    Lilly's ``1 − Ri/Pr_t``).  SAM MULTIPLIES (``S² − Pr·N²``).  The two agree
+    only at ``Pr_t = 1`` and invert across this scheme's tunable range
+    ``Pr_t ∈ (0.33, 3)``, so the repo convention is used here and SAM's is NOT
+    transplanted.
+
+    Parameters
+    ----------
+    strain_sq : array
+        RAW deformation ``S²`` [s⁻²] with NO buoyancy correction applied — the
+        ``N²/Pr_t`` subtraction happens here.  Passing an already-corrected
+        strain applies the correction twice and silently guts ``K_m``.
+    n2 : array
+        Brunt-Väisälä ``N²`` [s⁻²]; may be ≤ 0.
+    length : array
+        Master mixing length [m] (Blackadar in a column, grid ``Δ`` in an LES).
+        MUST be strictly positive: ``smix/length`` is an unguarded divide, so a
+        zero length gives 0/0 = NaN on both branches.  The single-column caller
+        satisfies this because :func:`mixing_length` floors ``z`` at 1 m
+        (``length ≥ 0.4 m``); a future LES caller passing a raw grid ``Δ`` must
+        ensure the same.
+    c_s, Pr_t : float
+        Smagorinsky constant and turbulent Prandtl number.
+
+    Returns
+    -------
+    array
+        ``K_m`` [m²/s], same shape.
+    """
+    # Buoyancy-corrected strain, floored so the reverse-mode slope is BOUNDED
+    # rather than merely finite.  Kept as one sqrt (never factored into
+    # S·√(1−Ri/Pr_t)) so there is a single guarded argument.
+    strain = jnp.sqrt(jnp.maximum(strain_sq - n2 / Pr_t, _STRAIN_FLOOR))
+
+    # Deardorff stable length.  smix ∝ N^(-1/2) diverges as N² → 0⁺, but the
+    # clip saturates at ``length`` there: the interior of the clip requires
+    # 0.01 < 0.76·tk/(Ck·N·l²) < 1, which bounds N away from zero, so the
+    # unbounded branch is never the selected one.  ``_STRAIN_FLOOR`` keeps
+    # ``tk`` > 0, so the inner sqrt argument is strictly positive.
+    tk = c_s ** 2 * length ** 2 * strain
+    n_stable = jnp.sqrt(jnp.maximum(n2, _STRAIN_FLOOR))
+    smix_raw = jnp.sqrt(_DEARDORFF_STABLE_COEF * tk
+                        / (_DEARDORFF_CK * n_stable))
+    smix = jnp.where(
+        n2 > 0.0,
+        jnp.clip(smix_raw, _DEARDORFF_SMIX_FLOOR * length, length),
+        length,
+    )
+
+    # Ce = Ck³/c_s⁴ and Cee = Ce/0.7·(0.19 + 0.51·smix/l).  At smix = l this is
+    # Cee = Ce, hence √(Ck³/Cee) = c_s² and the whole expression collapses to
+    # the unmodified Smagorinsky form — the neutral/unstable identity above.
+    ratio = smix / length
+    cee = (_DEARDORFF_CK ** 3 / c_s ** 4) / _DEARDORFF_CEE_DIV * (
+        _DEARDORFF_CEE_A + _DEARDORFF_CEE_B * ratio)
+    return jnp.sqrt(_DEARDORFF_CK ** 3 / cee) * smix ** 2 * strain
+
+
 def lilly_buoyancy_factor(Ri, Pr_t):
     """Lilly (1962) buoyancy stability factor ``√(max(0, 1 − Ri/Pr_t))`` that
     multiplies a strain-based Smagorinsky eddy viscosity to suppress mixing in

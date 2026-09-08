@@ -82,6 +82,13 @@ _spec.loader.exec_module(_bn2_alpha_compare)
 _read_dims = _bn2_alpha_compare._read_dims
 _load_haloed = _bn2_alpha_compare._load_haloed
 
+_dl_path = os.path.join(os.path.dirname(__file__), "dump_lane.py")
+_dl_spec = importlib.util.spec_from_file_location(
+    "_dump_lane_cancelling_rows_per_element", _dl_path)
+_dump_lane = importlib.util.module_from_spec(_dl_spec)
+sys.modules["_dump_lane_cancelling_rows_per_element"] = _dump_lane
+_dl_spec.loader.exec_module(_dump_lane)
+
 from legoesm.ocean.experiments.dino import (
     dino_config_for_recipe, dino_lat_lon_model_config,
     dino_wind_stress, dino_Q_sr_seasonal, dino_T_star_seasonal, dino_S_star,
@@ -106,8 +113,9 @@ from legoesm.ocean.physics.surface_forcing.config import (
 from legoesm.ocean.physics.surface_forcing.restoring import restoring_surface_forcing
 from legoesm.ocean.vertical import compute_layer_thickness
 
-RUN_DIR = "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_GDB"
-RESTART = "DINO_00057600_restart.nc"
+RUN_DIR = _dump_lane.RUN_DIR
+RESTART = _dump_lane.RESTART
+KT_DUMP = _dump_lane.KT_DUMP  # nit000; lane-dependent, see dump_lane.py
 FLOOR = 1.0e-12
 
 # ---------------------------------------------------------------------------
@@ -414,7 +422,7 @@ def measure_sbc(st) -> dict:
     # (usrdef_sbc.F90:535-536 `ztime = REAL(kt)*rn_dt/(rmmss*rhhmm)`, hours
     # since ndate0=year 1). This dump is written at kt=nit000=57601 (ocean.
     # output), rn_Dt=2700s (== cfg.dt).
-    kt_dump = 57601
+    kt_dump = KT_DUMP
     t_seconds = kt_dump * cfg.dt
     print(f"  kt(nit000)={kt_dump}  cfg.dt={cfg.dt}s  -> t_seconds={t_seconds:.1f} "
           f"({t_seconds/86400.0:.3f} days)")
@@ -624,6 +632,7 @@ def measure_atf(st) -> dict:
 
 
 def main() -> int:
+    print(_dump_lane.banner())
     print(f"LEGOESM_NEMO_E3T={os.environ.get('LEGOESM_NEMO_E3T')}  (pinned)")
     st = build_state()
 

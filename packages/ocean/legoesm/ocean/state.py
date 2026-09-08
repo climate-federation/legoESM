@@ -67,7 +67,15 @@ def constants_equal(a, b) -> bool | None:
     """
     try:
         return bool(a == b)
-    except TypeError:                       # TracerBoolConversionError et al.
+    except (TypeError, ValueError):
+        # TypeError: TracerBoolConversionError et al. (a JAX tracer).
+        # ValueError: "truth value of an array with more than one element is
+        # ambiguous" -- a numpy/JAX ARRAY operand with >1 element makes
+        # ``a == b`` an elementwise array, and ``bool()`` on that raises
+        # ValueError, not TypeError. Before this widening that ValueError
+        # escaped uncaught, breaking the "undecidable never discards a value
+        # the caller supplied" contract documented above for any array-valued
+        # constant.
         return None
 
 
@@ -94,7 +102,7 @@ def _reject_constant_conflicts(cc_explicit: ConstantsConfig,
         )
 
 
-def _physics_with_constants(physics, cc: ConstantsConfig):
+def physics_with_constants(physics, cc: ConstantsConfig):
     """Return ``physics`` carrying the model-level ``cc`` constants.
 
     ``OceanPhysicsConfig`` mirrors ``ConstantsConfig`` so the physics factories
@@ -131,6 +139,13 @@ def _physics_with_constants(physics, cc: ConstantsConfig):
             "propagate."
         )
     return physics                                  # already pinned to cc
+
+
+#: Historical private spelling. The routing rule is now needed by a second
+#: model as well, and this repository forbids importing a private symbol
+#: across modules, so the function is public; this alias keeps the
+#: white-box test that names the old spelling working.
+_physics_with_constants = physics_with_constants
 
 
 # ==============================================================================
@@ -538,6 +553,17 @@ class LatLonCGridOceanState(NamedTuple):
     # (dt = dt_mom) seeded from this field and stores the updated TKE back.
     # Default None -> inert (Mode-B diagnostic chain): zero behaviour change.
     tke: object = None
+    # NEMO TKE-closure coefficient memory (avm_k/avt_k). These are the
+    # post-tke_avn closure values, before EVD/IWM composition, carried to the
+    # next step when tke_preclosure_coeff_source="carried_previous_step".
+    tke_avm: object = None
+    tke_avt: object = None
+    # NEMO's SAVE'd ``dissl`` = sqrt(en)/zmxld closure memory.  The literal
+    # zdftke matrix/RHS consumes this carried value before post-solve tke_avn
+    # overwrites it; None remains inert on every non-literal card.
+    tke_dissl: object = None
+    # Surface W-level avm_k used by NEMO's z=0 TKE matrix/wave denominator.
+    tke_avm_surface: object = None
     # Prior-step ADVECTIVE TKE tendency [m^2/s^3] at the interior interfaces
     # (W-grid), 3-D Field (n_lat, n_lon, nlev-1) — the Adams-Bashforth history
     # dtke^{n-1} for the prognostic-TKE superbee advection (Veros vs.dtke,
@@ -919,9 +945,17 @@ class MomentumTendencyDiagnostics(NamedTuple):
     KE_PGF_u, KE_PGF_v : Field
         −∂(KE)/∂x − (1/ρ_0)·∂p/∂x   (kinetic-energy gradient + pressure gradient)
     vortcor_u, vortcor_v : Field
-        ζ × v_at_u  /  −ζ × u_at_v   (RELATIVE vorticity advection only;
-        the planetary Coriolis f×u is applied in the forward-backward step
-        function and is NOT included in these diagnostics)
+        The vorticity-flux momentum tendency.  WHAT IT CONTAINS DEPENDS ON THE
+        SELECTED SCHEME, so read it here rather than assuming:
+
+        * ``vorticity_scheme`` in the ``*_total`` family (e.g. ``een_total``,
+          NEMO's ``ln_dynvor_een``): the TOTAL (f+ζ) flux — the planetary part
+          IS included, because those schemes put ``f`` inside the triad and the
+          separate face-``f`` Coriolis add is gated off for exactly that reason
+          (``ocean_pe_latlon_cgrid.py``, the ``_f_vtx_al`` branch).  This is the
+          form that pairs with NEMO's ``dyn_vor`` when comparing term by term.
+        * otherwise: RELATIVE vorticity only (ζ × v_at_u / −ζ × u_at_v), with
+          the planetary Coriolis f×u applied in the step function instead.
     vertadv_u, vertadv_v : Field
         Flux-form 1st-order upwind ∂(w·u)/∂z, ∂(w·v)/∂z.  With
         ``adaptive_implicit_vertadv=True`` this holds the start-of-step
@@ -943,9 +977,10 @@ class MomentumTendencyDiagnostics(NamedTuple):
     Av_vert_u, Av_vert_v : Field
         A_v · ∂²u/∂z² (vertical viscosity on the perturbation)
     phys_u, phys_v : Field
-        ``phys.du_dt`` / ``phys.dv_dt`` from the surface-forcing physics
-        module (wind stress at the surface; possibly other physics
-        contributions if active)
+        ``phys.du_dt`` / ``phys.dv_dt`` from the configured physics module.
+    surface_stress_u, surface_stress_v : Field
+        Explicit external wind-stress tendency deposited in the surface cell.
+        Zero when no stress is supplied or ``surface_stress_implicit=True``.
     sponge_u, sponge_v : Field
         Sponge restoring (0 when no sponge)
     total_u, total_v : Field
@@ -979,6 +1014,8 @@ class MomentumTendencyDiagnostics(NamedTuple):
     Av_vert_v: Field
     phys_u: Field
     phys_v: Field
+    surface_stress_u: Field
+    surface_stress_v: Field
     sponge_u: Field
     sponge_v: Field
     total_u: Field
@@ -1048,7 +1085,7 @@ class BarotropicConfig(NamedTuple):
     barotropic_div_damp: float = 0.0  # Divergence damping on barotropic velocity (dimensionless)
     bebt: float = 0.2               # Semi-implicit barotropic PGF [0,1]. 0=forward-backward, 0.2=MOM6 default.
     maxvel_barotropic: float = 0.0  # Velocity clipping [m/s]. 0=disabled. MOM6 uses 6.0.
-    barotropic_time_filter: str = "cosine"  # "box", "cosine", "power_law" (SM2005 ROMS/MOM6/Oceananigans extended-window filter; damps the 2dx barotropic Coriolis null mode), or "nemo_boxcar_centred" (dynspg_ts ln_bt_fw=F + nn_bt_flt=2: boxcar width 2n centred at t+dt, 2n-1 substeps)
+    barotropic_time_filter: str = "cosine"  # "box", "cosine", "power_law" (SM2005 extended window), "nemo_boxcar_centred"/"nemo_boxcar_ab3" (centred nn_bt_flt=2), "nemo_boxcar1_ab3" (forward nn_bt_flt=1), or "nemo_ab3am4" (nn_bt_flt=3)
     # In-substep barotropic Coriolis discretization (node 16, DINO deep-eq jet).
     # "avg" (DEFAULT, bit-identical legacy): plain 4-point V->u / U->v average,
     #   which ANNIHILATES the 2dx zonal checkerboard (the C-grid barotropic
@@ -1087,6 +1124,31 @@ class BarotropicConfig(NamedTuple):
     # selecting "nemo_ssh_avg" is conservation-inert (machine-gated by
     # test_partial_cells_phase7.py::TestNemoSshAvgFaceDepthGate).
     barotropic_face_depth: str = "min_rule"
+    # Arithmetic used to assemble the continuity flux/divergence. ``generic``
+    # retains the shared FV operator. ``nemo_literal`` preserves NEMO's
+    # e2u*U*H / e1v*V*H operand order and multiply-by-reciprocal divergence.
+    barotropic_continuity_evaluation: str = "generic"
+    # Time-mean advective-transport accumulation. ``generic`` retains the
+    # pre-normalised SM2005 weight times cancelled H*U form. ``nemo_literal``
+    # carries raw wgtbtp2, accumulates za2*zhU*r1_e2u (V analog), and divides
+    # the completed sum once by r1_wgt2s (dynspg_ts.F90:734-737,999-1000).
+    barotropic_transport_accumulation_evaluation: str = "generic"
+    # Frozen EEN coefficient construction. ``generic`` retains the shared
+    # AL81 association. ``nemo_literal`` materializes NEMO dyn_cor_2D_init's
+    # eight coefficients with its triad, vertical recurrence, and post-factor
+    # association from bridge-carried raw QCO operands.
+    barotropic_een_coefficient_evaluation: str = "generic"
+    # Arithmetic used only for the 3-D -> 2-D velocity reduction that seeds
+    # the split-explicit window. ``generic`` retains the shared fused stacked
+    # reduction byte-for-byte. ``nemo_literal`` preserves the active DINO MLF
+    # restart construction: live Kbb QCO face thickness, surface-to-bottom
+    # accumulation, then r1_hu_0/(1+r3u) (V analog), istate.F90:149-155.
+    # Requires barotropic_seed_face_depth="nemo_ssh_avg" so the live face
+    # thickness and its separately associated reciprocal describe one state.
+    barotropic_seed_evaluation: str = "generic"
+    # Split-explicit surface-PGF arithmetic. ``nemo_literal`` consumes the
+    # carried U/V face metrics and preserves dynspg_ts.F90:776-780 ordering.
+    barotropic_pgf_evaluation: str = "generic"
     # Which OUTER time level seeds the FROZEN in-window EEN barotropic-Coriolis
     # coefficients (#1226 zero-deviation item 4; only read when
     # barotropic_coriolis is "een"/"een_metric").  NEMO freezes the dyn_cor_2D
@@ -1201,6 +1263,131 @@ class BarotropicConfig(NamedTuple):
     # mean carries unfiltered divergence noise (depth-uniform w noise).
     # Default False: bit-identical legacy behaviour.
     nemo_stage_mean_imposition: bool = False
+    # Which time-averaged barotropic mean the 3-D momentum update reconciles the
+    # velocity depth-mean onto after the substep window (NEMO dyn_spg_ts N6,
+    # dynspg_ts.F90:1170-1172:
+    #   puu(Kmm) = (puu(Kmm) + un_adv*r1_hu(Kmm) - puu_b(Kmm))*umask
+    # comment: "Correct velocities so that the barotropic velocity equals
+    # (un_adv, vn_adv)").  This is a depth-UNIFORM increment that replaces the
+    # 3-D velocity's NOW-thickness depth-mean (``puu_b``) with a chosen mean.
+    # NEMO uses ``un_adv/hu(Kmm)`` — the SECONDARY/transport-weighted substep
+    # accumulation (``wgtbtp2`` tail-sums) divided by the NOW column depth.
+    # "velocity_avg" (DEFAULT, bit-identical legacy): legoESM adds
+    # ``U_bar_avg`` = ``U_sum_f/w_total``, the PRIMARY/velocity boxcar mean
+    # (``wgtbtp1``).  The two kernels both sum to 1 but sample the substep
+    # velocity profile at different phases (DINO nn_e=23: primary centroid
+    # substep 22.0, secondary 14.67), so any RHS change shifts them by
+    # different amounts — only the velocity mean reaches the ACC velocity while
+    # the transport mean (``Hu_avg`` = NEMO's ``un_adv``, computed in the same
+    # call at barotropic_latlon_cgrid.py) is routed only to tracer advection
+    # (ocean_model_latlon_cgrid.py delta_U correction).  "transport_avg":
+    # reconcile the momentum depth-mean onto ``Hu_avg/H_u`` — NEMO's
+    # ``un_adv/hu(Kmm)`` (dynspg_ts.F90:1170-1172, unconditional: "in all
+    # cases"; the only other reconciliation, the ln_wd_dl branch at :1178,
+    # is dead for DINO and ALSO targets un_adv).  ``H_u`` is the MIN-RULE
+    # NOW u-face column depth (``<min_cell_to_uface(h_k_now)>``) — the SAME
+    # thickness the subtracted mean ``U_bar_corr`` (= ``puu_b``) is built
+    # from, so the reconciled depth-mean equals ``Hu_avg/H_u`` EXACTLY by
+    # internal consistency.  KNOWN second-order DEVIATION from NEMO
+    # (adversarial-review F1, measured): NEMO's r1_hu(Kmm) under key_qco is
+    # the SSH-AVERAGE now depth hu_0*(1+r3u(Kmm)) (domqco.F90:227 builds r3u
+    # from adjacent-cell ssh means), NOT a min-rule depth; on a DINO-like
+    # partial-cell bathymetry at eta=0.4 m the resulting depth-mean differs
+    # by ~1.3e-4 relative (~1e-5 m/s).  Min-rule is kept deliberately: in
+    # NEMO both the subtracted puu_b and the un_adv divisor use the same
+    # hu(Kmm), and mirroring that INTERNAL consistency (same thickness on
+    # both sides of the reconciliation) outranks matching the divisor alone
+    # — dividing by ssh-avg while subtracting a min-rule mean would leave a
+    # spurious residual depth-mean.  Closing the remaining 1.3e-4 requires
+    # moving BOTH sides to ssh-avg together (a separate change).
+    # Selectable per-run.  NOTE (#1455 R6): NO shipped card selects the
+    # non-default ``"transport_avg"`` any more -- the NEMO-DINO kamm_mlf card
+    # used to, and now pins ``"velocity_avg"`` explicitly alongside
+    # ``barotropic_after_reconcile="nemo_mlf_baro_corr"``, because NEMO installs
+    # the transport average on the NOW level and UNDOES it before committing
+    # (stpmlf.F90:787-790).  Unknown value
+    # raises at the substep post-loop (dispatch hardening, same pattern as
+    # ``barotropic_face_depth``/``barotropic_een_seed``).
+    barotropic_reconcile_target: str = "velocity_avg"
+    # barotropic_after_reconcile (NEMO mlf_baro_corr, cfgs/DINO/MY_SRC/
+    # stpmlf.F90:578 -> :754-765): NEMO reconciles the 3-D depth mean TWICE per
+    # step and legoESM once.
+    #
+    #   NEMO site 1, dynspg_ts.F90:1171-1173, inside dyn_spg (stpmlf.F90:332),
+    #     on the NOW level:  puu(Kmm) += un_adv*r1_hu(Kmm) - puu_b(Kmm).
+    #     This is a WITHIN-STEP advecting velocity for tra_adv (:528); it is
+    #     removed again at stpmlf.F90:787-790 (the .NOT.ln_bt_fw branch, live
+    #     on the DINO card) and NEVER reaches the committed state.
+    #   NEMO site 2, stpmlf.F90:754-765, AFTER dyn_zdf (:396): subtract the
+    #     column's own thickness-weighted mean, add uu_b(Kaa).  This one IS
+    #     committed, and it is what discards the implicit vertical solve's
+    #     column-mean deposit -- measured +17.9 m3/s2 per southern u-row on the
+    #     90-day DINO twin, 12x the realized spin-up rate, thrown away
+    #     every step.
+    #
+    # legoESM has no site-2 analogue.  Its single reconciliation happens inside
+    # the barotropic solve (``_reconcile_targets``) and the leap-frog combine
+    # then pins the after-level column mean; nothing runs after the implicit
+    # vertical solve, so legoESM keeps a residue of that deposit.
+    #
+    #   "off" (default)      -> unchanged, BIT-IDENTICAL.
+    #   "nemo_mlf_baro_corr" -> run NEMO's site 2, after the implicit vertical
+    #                           solve and before the Asselin filter.
+    #
+    # NOT ORTHOGONAL TO ``barotropic_reconcile_target`` -- they COMPOSE, and
+    # only one of the four combinations is NEMO.  NEMO commits uu_b(Kaa), its
+    # PRIMARY velocity-weighted boxcar, which is "velocity_avg"; the
+    # transport-weighted un_adv/hu ("transport_avg") is the average NEMO
+    # installs only transiently and then DELETES (stpmlf.F90:788).  So the
+    # faithful pair is velocity_avg + nemo_mlf_baro_corr; transport_avg +
+    # nemo_mlf_baro_corr commits, in NEMO's slot, the average NEMO throws away.
+    #
+    # ROUND-49 RETRACTION: treating the key_qco factor as cancelled is
+    # algebraically valid but not execution-equivalent at the last bit.  The
+    # faithful path carries raw pre-projection Kaa SSH, executes live e3u/e3v
+    # reduction, then applies the independently built r1_hu/r1_hv post-factor.
+    #
+    # DINO still has no partial steps (namelist_cfg:70-72), but the live QCO
+    # execution is not inert: its mathematically cancelling scale changes the
+    # final few ULPs through multiplication/reduction/division association.
+    #
+    # SCOPE, named rather than left to be discovered: the site is in the
+    # leap-frog branch of each outer step, so it is NOT applied on the
+    # forward-Euler first step (``state.u_before is None``), which returns
+    # straight out of ``_step_impl`` with no barotropic-mean slot to reconcile
+    # onto. NEMO DOES run mlf_baro_corr on its l_1st_euler step, so that is a
+    # real one-step gap. Whether a bridged/restart twin takes it is a
+    # property of the RUNNER'S DEFAULT, not of being a twin -- the correction
+    # #1640 forced. ``u_before`` arrives populated only when the before level
+    # is bridged; ``kamm_twin_90d.py`` defaulted that OFF until 2026-08-24, so
+    # a twin COULD enter step 1 with ``u_before is None`` and take this branch.
+    # RETRACTED (#1455, 2026-08-24): the note here previously said the
+    # campaign's own 90-day twin DID. Audited against the recorded run logs, it
+    # did not -- 18 of 18 recorded twin builds passed the bridge explicitly,
+    # and the acceptance gate has defaulted it ON since 2026-08-09. Since #1455
+    # the twin runner defaults to the bridged start too, so the shipped twin
+    # cannot take it; ``--legacy-euler-start`` still can. (The
+    # original wording here, "It is empty for a bridged/restart twin (u_before
+    # arrives populated, so that branch is never taken)", stays RETRACTED: it
+    # was asserted of every run when it was only ever true of a bridged one.)
+    # The same applies to a genuine FROM-REST run of a card that ships this
+    # option,
+    # which since #1455 R6 includes nemo_dino_kamm_mlf and therefore its
+    # from-rest drivers
+    # (scripts/validate/ocean_fidelity/dino_1226/box_budget_run.py and
+    # acc_momentum_budget.py). All of those miss NEMO's reconciliation on step
+    # 1 only. The step is no longer SILENT: the model emits a one-time
+    # RuntimeWarning (``_warn_euler_start_skips_after_reconcile``) whenever the
+    # Euler start is taken with the option on. Not a raise, deliberately --
+    # refusing it would break the shipped twin's default invocation; closing
+    # the gap needs ``_step_impl`` to surface the barotropic depth mean on its
+    # implicit-vmix path (named and costed at that helper, not done).
+    # Selecting this on an outer_integrator that has no such site
+    # (forward_euler, ab2) is rejected at model construction, not ignored.
+    #
+    # Unknown value raises at outer-step entry (barotropic_common.
+    # validate_after_reconcile), on both the leapfrog and the nemo_mlf path.
+    barotropic_after_reconcile: str = "off"
     # AB2 time-centering of the barotropic slow forcing F_slow (matches the
     # Oceananigans split-explicit Gᵁ = AB2-extrapolated depth-integral of the 3D
     # tendency, vs legoESM's default current-time depth-mean).  Investigated for
@@ -1378,11 +1565,15 @@ class LateralViscosityConfig(NamedTuple):
                                     # scaling.  Prevents viscosity from vanishing
                                     # at extreme latitudes.  Recommended 1000.0
                                     # for grids extending past 85°.
-    A_h_eq_boost: float = 1.0      # Equatorial Laplacian-viscosity boost.  When
-                                    # > 1, multiplies A_h by 1 + (boost-1) *
-                                    # exp(-(lat/sigma)²), so horizontal momentum
-                                    # gets extra dissipation near the equator
-                                    # where f→0 leaves no rotational stiffness.
+    A_h_eq_boost: float = 1.0      # Equatorial Laplacian-viscosity shaping.
+                                    # When != 1, multiplies A_h by 1 + (boost-1)
+                                    # * exp(-(lat/sigma)²).  > 1: extra
+                                    # dissipation near the equator where f→0
+                                    # leaves no rotational stiffness.  < 1 (>0):
+                                    # equatorial REDUCTION — NEMO ORCA1's
+                                    # eddy_viscosity_3D file drops ahm 20000 →
+                                    # 1000 m²/s at the equator so the EUC can
+                                    # exist; 0.05 with sigma ~7° mimics it.
                                     # Targets unconstrained equatorial dynamic
                                     # response at coarse resolution that drives
                                     # runaway upwelling cold tongues.  Typical
@@ -1464,6 +1655,26 @@ class LateralViscosityConfig(NamedTuple):
     A_h_cap_lat_deg: float = 75.0
     # Half-width of the polar-cap boost tanh transition [°]; default 5°.
     A_h_cap_width_deg: float = 5.0
+    # --- Prescribed latitudinal A_h profile (NEMO nn_ahm_ijk_t=-30 shape) ---
+    # ORCA1 reads its momentum viscosity from eddy_viscosity_3D.nc: 20000
+    # m2/s midlatitude REDUCED to ~1000 within ~2 deg of the equator.  This
+    # field carries that shape as a per-cell-centre-latitude RATIO to ``A_h``
+    # (a TUPLE of n_lat floats -- hashable, so the config stays a static jit
+    # constant).  ``None`` (default) = off, bit-identical.  When set it
+    # REPLACES the Gaussian ``A_h_eq_boost`` shaping (setting both raises at
+    # the viscosity stage: two overlapping equatorial shapes silently
+    # multiply); the polar-cap boost and ``A_h_floor`` still compose on top.
+    # Built by the driver from the file's zonal median (see run_omip_core2
+    # --A-h-profile-file); v-face values are midpoint-averaged from these.
+    A_h_lat_profile: tuple | None = None
+    # v-face (n_lat+1) profile OVERRIDE, set ONLY by the SPMD wrapper (#1666):
+    # a band derives its v-faces from its LOCAL cell profile, which wall-copies
+    # the band edges and so gets the interior band SEAMS wrong (first-order,
+    # material for a sharp profile -- codex+GLM).  The wrapper computes the
+    # exact global v-face profile once and band-slices it here so each band's
+    # seam faces match serial.  ``None`` (serial / non-profile) = derive from
+    # ``A_h_lat_profile``, bit-identical to before.  Hashable tuple (static).
+    A_h_lat_profile_v: tuple | None = None
 
 class PolarFilterConfig(NamedTuple):
     """Fourier polar-filter parameters (#501 config grouping).
@@ -1594,11 +1805,39 @@ class LatLonCGridOceanConfig(NamedTuple):
     # usr_def_hgr.F90 closed form ``pe1t = pe2t`` (see
     # create_mercator_grid's docstring for the full citation) -- ONLY the
     # nemo_dino_kamm*/nemo_faithful_grid oracle cards set this; every other
-    # recipe stays on "exact". Does NOT touch the v-face metric (#516
-    # vface_zonal_cos_lat invariant) -- see ensure_geometry/
-    # create_latlon_geometry docstrings. Dispatch raises in
+    # recipe stays on "exact". The separate selector below chooses the
+    # corrected versus legacy dx_v latitude only when this convention is
+    # nemo_isotropic on a variable-dlat grid; the #516 shared-metric
+    # invariants hold under either value. Dispatch raises in
     # LatLonCGridOceanModel._validate_config on an unknown value.
     metric_convention: str = "exact"
+
+    # Latitude used by the V-face zonal metric on variable-dlat,
+    # nemo_isotropic grids. ``nemo_vpoint`` is the corrected #1455 behavior;
+    # ``legacy_tracer_midpoint`` exists only as a controlled attribution arm.
+    # It is forwarded to ensure_geometry and affects dx_v only.
+    vface_zonal_metric_evaluation: str = "nemo_vpoint"
+
+    # Where the Coriolis parameter at the v-point / vertex is EVALUATED
+    # (#1455).  Fed to ``legoesm.grids.latlon.ensure_geometry`` at model
+    # construction, exactly like ``metric_convention`` above.
+    #   "cell_average"  (default, BIT-IDENTICAL to every prior release)
+    #                   f_v is the mean of the two adjacent tracer rows' f.
+    #   "face_latitude" f_v = 2*Omega*sin(phi_face), evaluated AT the v-face
+    #                   latitude -- NEMO's own ff_f convention, and what any
+    #                   C-grid model defining its Coriolis at the F-point does.
+    # f_v is the single array every C-grid Coriolis path reads, through one of
+    # two helpers: latlon_cgrid_operators.vertex_coriolis (barotropic EEN
+    # pre-block, 3-D EEN/ENE vorticity flux) and
+    # barotropic_common.coriolis_at_faces (semi-implicit / explicit_ab2
+    # face-f Coriolis).
+    # NB a grid that ARRIVES as a pre-built LatLonCGridGeometry (the NEMO
+    # bridge builds one) is passed through ensure_geometry unchanged, so the
+    # convention must be selected where THAT geometry is built.  The model
+    # raises rather than silently ignoring a non-default request in that case
+    # (LatLonCGridOceanModel._validate_config).  Dispatch raises on an unknown
+    # value there too.
+    coriolis_placement: str = "cell_average"
 
     # --- Lateral viscosity (#501 grouped into LateralViscosityConfig) ---
     lateral_viscosity: LateralViscosityConfig = LateralViscosityConfig()
@@ -1752,6 +1991,18 @@ class LatLonCGridOceanConfig(NamedTuple):
     #   own dumped vorticity tendency more closely (#1226 item 10). Unknown
     #   value raises in the operator.
     een_e3f_scheme: str = "min"
+    # Horizontal metric weighting on the AL81/EEN transport:
+    # "off" (default, bit-identical legacy) — the per-unit-width form, exact
+    #   on a uniform-metric grid.
+    # "nemo" — NEMO dyn_vor's own weighting (dynvor.F90:791-792 weights the
+    #   meridional transport by e1v, :804 divides the u-tendency by e1u, and
+    #   symmetrically e2u/e2v for v). Retaining the factors makes discrete
+    #   enstrophy conservation exact on the sphere; dropping them leaves an
+    #   O(dcos phi) residual that grows as dphi*tan(phi), i.e. largest at high
+    #   latitude. This is the SAME weighting barotropic_coriolis="een_metric"
+    #   already applies on the barotropic path. Unknown value raises in
+    #   _bc_pv_flux.
+    een_metric_weighting: str = "off"
     # WENO vertical momentum advection of the FULL velocity (matches Oceananigans, which
     # advects the full horizontal momentum vertically) instead of legoESM's default
     # baroclinic PERTURBATION u'=u−U_bar. The two differ by the flux-form redistribution
@@ -1817,7 +2068,19 @@ class LatLonCGridOceanConfig(NamedTuple):
     #   conservation.  Note: the Shu-Osher SSP (monotonicity) property
     #   is NOT preserved in this form — new extrema may appear with
     #   nonlinear limiters (TVD, WENO, FCT).
-    tracer_time_integrator: str = "euler"
+    tracer_time_integrator: str = "euler"  # also "ab2", "rk3" (SSP), "rk3_ws" (NEMO dt/3,dt/2,dt)
+    # NEMO's key_RK3 is one coupled, unbranched scheme identity: Kmm stage
+    # transports, the two-step FCT predictor, the per-stage barotropic
+    # correction, and the distinct advecting-transport mean are mandatory
+    # parts of tracer_time_integrator/momentum_time_integrator="rk3_ws".
+    # NEMO has no switches for those internal choices, so neither does the
+    # public legoESM configuration.  Causal A/B controls use private test hooks.
+    # stprk3_stg.F90:257-274,433-446; traadv_fct.F90:470-641.
+    # Advective bottom boundary layer.  0 disables it; 2 selects NEMO's
+    # Campin--Goosse density-driven scheme (trabbl.F90:415-454).  Unlike the
+    # removed RK3 micro-selectors, this is an actual NEMO namelist switch.
+    bbl_adv_option: int = 0
+    bbl_gamma_s: float = 0.0
     ab2_epsilon: float = 0.1  # AB2 stabilization (MITgcm ABepsBar) — also the
     #   Adams-Bashforth ε for the OUTER integrator (Veros AB_eps=0.1).
     # Outer (baroclinic) time integrator. "forward_euler" (default) = the existing
@@ -1951,6 +2214,15 @@ class LatLonCGridOceanConfig(NamedTuple):
     # "nemo_faithful": dynzad.F90:86-119 has NO interior mask at all; masking
     # is deferred to dynzdf.F90:121's post-hoc *umask(jk) on the tendency.
     zad_bottom_face_mask: str = "min_rule"
+    # Coupled QCO operand evaluation for NEMO dynzad.  "generic" preserves
+    # the historical z-star w + min-face thickness path byte-for-byte;
+    # "nemo_literal" supplies Kaa-continuity ww and live Kmm e3u/e3v as one
+    # inseparable operand pair.  Only meaningful with nemo_advective.
+    zad_qco_evaluation: str = "generic"
+    # Post-barotropic WZV call-2 composition. ``nemo_literal`` pairs the
+    # second Kmm hdiv with actual barotropic Kaa r3t; depends on the coupled
+    # call-1 QCO operands above. Generic default is byte-compatible.
+    wzv_call2_evaluation: str = "generic"
     # Lateral (harmonic) momentum-viscosity OPERATOR form. Selects how the A_h
     # Laplacian viscosity acts on the vector velocity field:
     #   "vector_laplacian" (default) — legoESM's VECTOR Laplacian
@@ -2300,28 +2572,11 @@ class LatLonCGridOceanConfig(NamedTuple):
     #     is unchanged — only the gradient slot moves.  Requires
     #     ``implicit_vertical_mixing=True`` (rejected otherwise at config
     #     validation).  Default False ⇒ BIT-IDENTICAL for every existing config.
+    # NEMO's own divisor is NOT a flag: ``e3w(Kmm)`` (trazdf.F90:219-221,
+    # dynzdf.F90:200-203) is unbranched inside the NEMO identity
+    # ``zdf_implicit_solver_evaluation="nemo_literal"``, so this Veros slot
+    # is mutually exclusive with that identity (rejected at construction).
     implicit_vmix_dzw_slot: bool = False
-    # --- NEMO-faithful implicit-solve gradient divisor (#1226 W1) ---
-    # NEMO (trazdf.F90:219-220) builds the SAME gradient divisor from
-    # ``e3w(...,Kmm)`` — called from stpmlf.F90:370 as
-    # ``tra_zdf(kstp, Nbb, Nnn, Nrhs, ts, Naa)``, whose dummy arg ``Kmm`` binds
-    # to ``Nnn``, NEMO's NOW time level.  legoESM's default divisor
-    # (``implicit_vmix_dzw_slot=False``) is the midpoint of the AFTER-solve
-    # thickness (``build_dz_half(dz_cell)``, ``dz_cell`` built from the
-    # barotropic-updated ``state_corr.eta``); this option instead builds the
-    # center-to-center divisor from the NOW-level (Nnn/Kmm) thickness,
-    # threaded to ``_apply_implicit_vertical_mixing`` via its ``eta_now``
-    # kwarg by every call site that passes a post-update AFTER state
-    # (_leapfrog_step — the DINO kamm_mlf production path — plus
-    # _unsplit_ab2_step, _ab2_step, _step_impl); the momentum-only friction
-    # call passes the step-entry NOW state directly (fallback correct).
-    # Mutually exclusive with ``implicit_vmix_dzw_slot`` (both pick the same
-    # divisor SLOT — Veros dzw vs NEMO e3w(Kmm) — selecting both is a config
-    # error, not a fallback). Requires ``implicit_vertical_mixing=True`` (same
-    # guard as ``implicit_vmix_dzw_slot``). Default False ⇒ BIT-IDENTICAL for
-    # every existing config. OPT-IN measurement knob only — NOT wired into any
-    # recipe/kamm card (measurement decides).
-    implicit_vmix_e3t_now_divisor: bool = False
     # --- Meridionally-FLAT (Oceananigans `Flat`-y topology) ---
     # When True, every meridional DIFFERENCE operator returns 0 — the faithful
     # legoESM analog of an Oceananigans `topology=(…, Flat, …)` dimension
@@ -2540,6 +2795,12 @@ class LatLonCGridOceanConfig(NamedTuple):
     # flux the model applied", so those configs RAISE instead of storing a
     # lie.
     store_salt_flux: bool = False
+    # Evaluation order of the final ZDF implicit applications.  The generic
+    # historical path normalises each matrix row and calls the shared Thomas
+    # solver.  ``nemo_literal`` preserves dynzdf/trazdf's unnormalised written
+    # matrices and their three separate ordered recurrences.  Appended to keep
+    # every positional constructor byte-compatible.
+    zdf_implicit_solver_evaluation: str = "shared_thomas"
 
     @classmethod
     def from_flat(cls, **flat) -> "LatLonCGridOceanConfig":
@@ -2558,7 +2819,7 @@ class LatLonCGridOceanConfig(NamedTuple):
         The physical constants are routed the same way: the flat
         ``g=``/``rho_0=``/``omega=``/``c_sw=``/``R_earth=`` kwargs land in the
         single ``constants: ConstantsConfig`` storage, and the resolved set is
-        propagated into ``physics`` (see :func:`_physics_with_constants`).
+        propagated into ``physics`` (see :func:`physics_with_constants`).
         Passing BOTH a flat scalar and a ``constants=`` that disagrees with it
         raises -- that combination is the silent-divergence bug this routing
         removes, so it is never resolved by a precedence rule.
@@ -2599,7 +2860,7 @@ class LatLonCGridOceanConfig(NamedTuple):
         if _cc_given:
             nested["constants"] = _cc_final
         if "physics" in flat:
-            flat["physics"] = _physics_with_constants(flat["physics"], _cc_final)
+            flat["physics"] = physics_with_constants(flat["physics"], _cc_final)
         _bd = {k: flat.pop(k) for k in DynBottomDragConfig._fields if k in flat}
         if _bd:
             nested["bottom_drag"] = DynBottomDragConfig(**_bd)
@@ -2709,7 +2970,7 @@ class LatLonCGridOceanConfig(NamedTuple):
                 _cc_final, _cc_given = _pc, True
         if _cc_given:
             nested["constants"] = _cc_final
-        _phys_new = _physics_with_constants(_phys, _cc_final)
+        _phys_new = physics_with_constants(_phys, _cc_final)
         if _phys_new is not _phys:
             overrides["physics"] = _phys_new
         return self._replace(**nested, **overrides)

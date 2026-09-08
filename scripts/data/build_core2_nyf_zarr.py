@@ -56,13 +56,33 @@ _N_REC = 1460
 _DAYS_PER_MONTH = np.array([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31])
 
 
-def _default_out() -> Path:
-    """Canonical legoESM CORE-II cache path (mirrors core2._cache_dir())."""
+#: Cache directory per variant.  Each variant gets its OWN directory so a
+#: build can never overwrite a cache that finished runs were forced with --
+#: the raw one has to stay on disk for those runs to remain reproducible.
+#: ``mod`` must match what ``legoesm.ocean.forcing.core2_nyf_cache_dir``
+#: resolves to, since that is what an unflagged run will read; the assertion
+#: in ``_default_out`` keeps the two from drifting apart.
+_VARIANT_DIR = {"mod": "core2_nyf_mod",
+                "windsonly": "core2_nyf_windsonly",
+                "base": "core2_nyf"}
+
+
+def _default_out(wind_variant: str) -> Path:
+    """Canonical legoESM CORE-II cache path for this variant."""
     from legoesm.ocean.fidelity import cache as _cache
-    return _cache.sub("forcing") / "core2_nyf" / "nyf.zarr"
+    out = _cache.sub("forcing") / _VARIANT_DIR[wind_variant] / "nyf.zarr"
+    if wind_variant == "mod":
+        from legoesm.ocean.forcing import core2_nyf_cache_dir
+        expected = core2_nyf_cache_dir() / "nyf.zarr"
+        if expected.exists() and expected != out:
+            raise SystemExit(
+                f"the corrected cache builds to {out} but runs resolve "
+                f"{expected}; one of the two is wrong and a run would be "
+                "forced with fields this build never wrote")
+    return out
 
 
-def build(inputs_dir: Path, out: Path) -> Path:
+def build(inputs_dir: Path, out: Path, wind_variant: str = "mod") -> Path:
     import xarray as xr
 
     def _open(name: str) -> "xr.Dataset":
@@ -83,25 +103,75 @@ def build(inputs_dir: Path, out: Path) -> Path:
     def _f64(a):
         return np.asarray(a, dtype=np.float64)
 
-    # u / v / T / q: KEEP the native 6-hourly axis (1460 records). Base
-    # (non-_MOD) variables are the raw CORE data.
-    u10 = _f64(du["U_10"].values)
-    v10 = _f64(dv["V_10"].values)
-    T_air = _f64(dt["T_10"].values)                        # K
+    # u / v / T / q: KEEP the native 6-hourly axis (1460 records).
+    #
+    # WIND VARIANT.  The CORE-II files carry both the raw NCEP-derived winds
+    # (U_10/V_10) and the Large & Yeager corrected ones (U_10_MOD/V_10_MOD),
+    # and NEMO ORCA1's namelist_cfg reads the _MOD pair (sn_wndi=U_10_MOD,
+    # sn_wndj=V_10_MOD).  We built from the base fields, which are the raw
+    # data -- a true statement that justified the wrong choice, because the
+    # oracle uses the correction.
+    #
+    # The _MOD fields are the scatterometer (QuikSCAT) tropical adjustment:
+    # NCEP-1 10 m winds are ~20-30% too weak over the equatorial Pacific, and
+    # measured on this file's own grid the paired speed sqrt(u^2+v^2) differs
+    # by +32.6% over nino3 and +8.9% globally, with only a 3-10 degree turning
+    # angle -- so it is a SPEED correction, not a rotation
+    # (scripts/validate/ocean_fidelity/core2_base_vs_mod_winds.py).  Since
+    # stress goes as the square, the base fields give roughly 1.8x too little
+    # equatorial wind stress.
+    # "windsonly" exists to ATTRIBUTE, not to run production.  Switching to
+    # the corrected cache moved global SST error from 0.97 to 0.81 and the
+    # cold-tongue bias by 1 C, but that cache changes shortwave (-5.4 W/m2),
+    # air temperature (+1.2 K), humidity and precipitation as well as the
+    # wind, so the improvement cannot be credited to the trades without a
+    # cache in which ONLY the winds moved.  It is deliberately NOT what NEMO
+    # reads -- never score a fidelity arm against it.
+    _WIND_VARS = {"mod": ("U_10_MOD", "V_10_MOD"),
+                  "windsonly": ("U_10_MOD", "V_10_MOD"),
+                  "base": ("U_10", "V_10")}
+    if wind_variant not in _WIND_VARS:
+        raise SystemExit(f"--wind-variant must be one of {sorted(_WIND_VARS)}")
+    _un, _vn = _WIND_VARS[wind_variant]
+    # Everything that is not the wind follows this flag, so a new channel
+    # cannot quietly pick a side.
+    _thermo_mod = (wind_variant == "mod")
+    for _nm, _ds in ((_un, du), (_vn, dv)):
+        if _nm not in _ds:
+            raise SystemExit(f"{_nm} not in the CORE-II file; refusing to "
+                             "silently fall back to another variable")
+    print(f"[wind] variant {wind_variant!r} -> {_un}/{_vn}; "
+          f"thermodynamic + radiative channels: "
+          f"{'corrected (_MOD)' if _thermo_mod else 'raw'}")
+    u10 = _f64(du[_un].values)
+    v10 = _f64(dv[_vn].values)
+    # T / q / radiation / precip: the SAME _MOD-vs-base choice as the winds.
+    # GLM's review: the CORE bulk formulae were tuned with the corrected set,
+    # so mixing raw winds with corrected humidity (or vice versa) is
+    # inconsistent. Verified before switching -- every base/_MOD pair has
+    # IDENTICAL shape, time axis and physical range (job 9450592); only the
+    # `units` attribute is absent on the _MOD variants, which this builder
+    # never reads. Deltas are modest next to the wind: T +1.2 K, q -3%,
+    # SWDN -5.4 W/m2, LWDN -0.7 W/m2, precip +15%.
+    _t_var = "T_10_MOD" if _thermo_mod else "T_10"
+    _q_var = "Q_10_MOD" if _thermo_mod else "Q_10"
+    T_air = _f64(dt[_t_var].values)                        # K
     # CORE-II Q_10 carries small (~-6e-3) negative specific humidities over
     # arid land (~3.8% of points, min over the Sahel) — a known artifact of the
     # source product. All such points are land (masked when regridded to the
     # ocean grid), so this clip to the physical floor is negligible vs what NEMO
     # ingests over open ocean, and prevents negative-humidity NaNs downstream.
-    q_air = np.maximum(_f64(dq["Q_10"].values), 0.0)       # kg/kg
+    q_air = np.maximum(_f64(dq[_q_var].values), 0.0)       # kg/kg
     if u10.shape[0] != _N_REC:
         raise ValueError(
             f"expected {_N_REC} 6-hourly wind records, got {u10.shape[0]}"
         )
 
     # Radiation is daily (365): broadcast each day across its 4 6-hourly slots.
-    sw_down = np.repeat(_f64(drad["SWDN"].values), _REC_PER_DAY, axis=0)
-    lw_down = np.repeat(_f64(drad["LWDN"].values), _REC_PER_DAY, axis=0)
+    _sw_var = "SWDN_MOD" if _thermo_mod else "SWDN"
+    _lw_var = "LWDN_MOD" if _thermo_mod else "LWDN"
+    sw_down = np.repeat(_f64(drad[_sw_var].values), _REC_PER_DAY, axis=0)
+    lw_down = np.repeat(_f64(drad[_lw_var].values), _REC_PER_DAY, axis=0)
     # Precip is monthly (12): broadcast each month across its (days*4) slots.
     # KEEP snow as its own channel (NEMO reads SNOW separately for the
     # snow-fusion / snow-heat-content terms of q_ns); precip stays the TOTAL.
@@ -109,10 +179,13 @@ def build(inputs_dir: Path, out: Path) -> Path:
         _f64(dprec["SNOW"].values),                          # kg/m^2/s
         _DAYS_PER_MONTH * _REC_PER_DAY, axis=0,
     )
-    precip = np.repeat(
-        _f64(dprec["RAIN"].values) + _f64(dprec["SNOW"].values),  # kg/m^2/s
-        _DAYS_PER_MONTH * _REC_PER_DAY, axis=0,
-    )
+    # PRC_MOD is the corrected TOTAL precipitation -- the direct analogue of
+    # our RAIN+SNOW construction (measured means 2.656e-5 vs 2.657e-5), and
+    # what NEMO's sn_prec reads. SNOW has no _MOD variant and NEMO reads it
+    # plain, so the snow channel above is unchanged either way.
+    _prc = (_f64(dprec["PRC_MOD"].values) if _thermo_mod
+            else _f64(dprec["RAIN"].values) + _f64(dprec["SNOW"].values))
+    precip = np.repeat(_prc, _DAYS_PER_MONTH * _REC_PER_DAY, axis=0)
     runoff = np.zeros_like(precip)                          # see module docstring
     # Sea-level pressure: 6-hourly like the winds (NEMO sn_slp), used for
     # moist-air density + the Goff saturation humidity.
@@ -197,10 +270,22 @@ def main() -> int:
                    help="NEMO ORCA1 INPUTS dir containing *.15JUNE2009.nc")
     p.add_argument("--out", type=Path, default=None,
                    help="output nyf.zarr path (default: legoESM core2 cache)")
+    p.add_argument("--wind-variant", choices=("mod", "windsonly", "base"),
+                   default="mod",
+                   help="Which CORE-II variant to read for EVERY corrected "
+                        "channel. 'mod' (default) = the Large & Yeager "
+                        "bias-corrected fields NEMO's namelist reads: "
+                        "U_10_MOD/V_10_MOD, T_10_MOD, Q_10_MOD, SWDN_MOD, "
+                        "LWDN_MOD, PRC_MOD (SNOW has no _MOD and is read "
+                        "plain, as NEMO does). 'base' = the raw fields this "
+                        "builder used before 2026-08-21, kept only to "
+                        "reproduce old caches. The name is historical -- it "
+                        "selects all channels, not just the wind.")
     args = p.parse_args()
-    out = args.out if args.out is not None else _default_out()
-    print(f"building CORE-II NYF zarr  ->  {out}")
-    build(args.inputs_dir, out)
+    out = (args.out if args.out is not None
+           else _default_out(args.wind_variant))
+    print(f"building CORE-II NYF zarr  ->  {out}  (wind {args.wind_variant})")
+    build(args.inputs_dir, out, wind_variant=args.wind_variant)
     print("validating ...")
     _validate(out)
     print(f"DONE: {out}")

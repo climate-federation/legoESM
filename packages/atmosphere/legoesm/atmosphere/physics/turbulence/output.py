@@ -59,6 +59,15 @@ class TurbulenceOutput(NamedTuple):
         NEGATIVE of these — the CMOR feed flips the sign.  ``None`` (the
         default) for schemes that do not export their surface stress;
         trailing optional fields so every existing constructor is unaffected.
+    wtheta_flux : jax.Array or None
+        Optional DIAGNOSTIC kinematic heat flux ``⟨w'θ'⟩`` [K m/s] the scheme would
+        transport at the given mean state, shape (ncol, nlev), on FULL levels. For a
+        local K-closure this is ``−Kh·∂θ/∂z`` (down-gradient); for a nonlocal closure
+        it INCLUDES the counter-gradient term (``−Kh·(∂θ/∂z − γ)``). ``None`` (the
+        default) for schemes that do not expose it. It is a pure diagnostic — it does
+        NOT feed the tendencies (those come from the flux DIVERGENCE / implicit solve)
+        and so cannot change any run. Consumed only by the LES-suite Q1 diagnostic
+        score (``les_suite`` compares it to the LES flux at the LES mean state).
     """
     du_dt: jax.Array
     dv_dt: jax.Array
@@ -73,3 +82,4 @@ class TurbulenceOutput(NamedTuple):
     cloud_fraction: jax.Array | None = None
     tau_x: jax.Array | None = None
     tau_y: jax.Array | None = None
+    wtheta_flux: jax.Array | None = None

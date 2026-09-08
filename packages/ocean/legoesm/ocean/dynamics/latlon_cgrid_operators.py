@@ -670,6 +670,26 @@ def streamfunction_vorticity_operator(
     return curl_vertex_cgrid(u_bt, v_bt, grid)
 
 
+def _stored_or_recomputed_vertex_area(grid, dtype=None):
+    """The ONE way a regular lat-lon operator gets its vertex dual-cell area
+    (#1455 adversarial review, MAJOR 4).
+
+    Prefer the geometry's STORED ``area_q``; fall back to the spherical-cap
+    recompute only for a bare ``LatLonGrid`` that has none.  Every consumer must
+    route through here, because the identities the vertex area appears in hold
+    by every operator SHARING one value -- and under
+    ``metric_convention="nemo_isotropic"`` the stored array is NEMO's
+    ``e1f*e2f`` while the recompute is the spherical cap, which differ by up to
+    4.1e-05.  Recording that hazard in prose (as the first version of this fix
+    did) leaves the next caller to trip over it.
+    """
+    if hasattr(grid, "area_q"):
+        A = jnp.abs(grid.area_q[:, 0])
+        return A if dtype is None else A.astype(dtype)
+    lat = grid.lat if dtype is None else jnp.asarray(grid.lat, dtype=dtype)
+    return _vertex_dual_area_interior(lat, grid.radius, grid.dlon)
+
+
 def vertex_area_cgrid(grid: LatLonGrid) -> jnp.ndarray:
     """Dual-cell area at vertex (corner) points, shape (n_lat+1, n_lon+1).
 
@@ -689,7 +709,20 @@ def vertex_area_cgrid(grid: LatLonGrid) -> jnp.ndarray:
         n_lon1 = A_int.shape[1]
         zero_row = jnp.zeros((1, n_lon1), dtype=A_int.dtype)
         return jnp.concatenate([zero_row, A_int, zero_row], axis=0)
-    A_lat = _vertex_dual_area_interior(grid.lat, grid.radius, grid.dlon)  # (n_lat+1,)
+    # Routed through the shared reader so this helper and ``curl_vertex_cgrid``
+    # cannot drift apart: the discrete-Stokes property in the docstring above
+    # is the statement that THIS area is the one the curl divided by.  Cast to
+    # the recompute's dtype so moving to the stored array cannot silently
+    # PROMOTE the caller -- this becomes ``RigidLidStaticData.A_vertex`` and
+    # enters the CG solve, and the stored ``area_q`` is fp64 under an fp32
+    # policy.  On the Cartesian beta-plane the recompute this replaces returned
+    # an all-but-zero area (it differences a pseudo-latitude that is not the
+    # Cartesian spacing) where the stored ``dx*dy`` is correct, so this is a fix
+    # on that grid too -- pinned in ``test_dino_vertex_area_nemo.py``.
+    A_lat = _stored_or_recomputed_vertex_area(
+        grid,
+        dtype=_vertex_dual_area_interior(
+            grid.lat, grid.radius, grid.dlon).dtype)
     # Interior rows carry area; pole rows (wall BC) zero — consistent with
     # curl_vertex_cgrid computing vorticity only on interior rows.
     A_lat = A_lat.at[0].set(0.0).at[-1].set(0.0)
@@ -1638,6 +1671,20 @@ def _vertex_dual_area_interior(lat, radius, dlon):
     """Raw vertex dual-cell area ``R**2 * dlon * |Δsin(lat)|`` of shape
     ``(n_lat+1,)`` (#515 consolidation).
 
+    SCOPE (#1455), recorded here rather than guarded, exactly as the analogous
+    ``dx_v`` hazard is recorded in ``vface_zonal_cos_lat``.  This builds the
+    ``metric_convention="exact"`` spherical cap.  A geometry built with
+    ``"nemo_isotropic"`` stores NEMO's ``e1f*e2f`` instead -- the midpoint
+    value of ``cos^2`` rather than its exact interval integral -- and the two
+    differ by up to 4.1e-05.  ``curl_vertex_cgrid`` and ``vertex_area_cgrid``
+    both read the STORED array and so never mix the two; the remaining callers
+    below (``strain_rate_cgrid``'s vertex floor and ``vertex_area_1d``)
+    recompute unconditionally and WOULD mix them.  Those are the Smagorinsky /
+    Leith / backscatter / lateral-friction paths, every one of which is off by
+    default and off on the DINO card, so the combination is unreached today.
+    Promote them to the stored array if any of those is ever switched on with
+    this convention selected.
+
     The single source for the interior of the regular (non-tripolar) lat-lon
     vertex/q-cell area, previously recomputed verbatim in ``vertex_area_cgrid``,
     ``strain_rate_cgrid`` and the Smagorinsky ``A_vertex`` floor.  Callers keep
@@ -1670,6 +1717,24 @@ def vface_zonal_cos_lat(grid: LatLonGrid) -> jnp.ndarray:
       mean-of-cos ``0.5·(cos lat[j-1] + cos lat[j])`` — they differ at
       O(dlat²) on a stretched grid because ``cos(½(a+b)) ≠
       ½(cos a + cos b)``);
+
+      SCOPE (#1455): that is the ``metric_convention="exact"``
+      construction, and it is what the RECOMPUTE branch below builds.
+      A rich geometry built with ``metric_convention="nemo_isotropic"``
+      instead stores a width evaluated at the TRUE v-face latitude
+      (NEMO's ``gphiv``, ``usrdef_hgr.F90:113``) — a different latitude,
+      because on a Mercator coordinate the midpoint of two latitudes is
+      not the latitude of the midpoint index.  Such a grid takes the
+      stored branch on any MERIDIONALLY-CLOSED topology, so it never
+      reaches the recompute and the two do not mix; the invariants
+      below hold either way, because they need every operator to share
+      ONE width, not a particular value.  SCOPED deliberately: under a
+      meridionally-PERIODIC topology this helper recomputes (see
+      ``reads_stored_vface_metric``) while direct readers of the stored
+      ``grid.dx_v`` would not, so that combination WOULD mix the two
+      constructions at 3.3e-05.  It is unreached today -- every card
+      selecting ``nemo_isotropic`` is a closed basin -- and is recorded
+      here rather than guarded;
     * the two polar walls ``j = 0`` and ``j = n_lat`` → EXACTLY ``0``
       (transport metric: no meridional flux through the pole wall).
 
@@ -1863,8 +1928,11 @@ def equatorial_boost_factor(
     sigma_deg : float
         Gaussian half-width in degrees.  Typical values 3-7°.
     boost : float
-        Multiplier at the exact equator (lat=0).  Values >= 1.0;
-        boost = 1.0 disables the enhancement.  Typical values 3-10.
+        Multiplier at the exact equator (lat=0).  Must be > 0.
+        boost = 1.0 disables the shaping.  > 1 enhances (typical 3-10);
+        < 1 REDUCES equatorial viscosity (NEMO ORCA1's eddy_viscosity_3D
+        file drops ahm from 20000 to 1000 m²/s at the equator to let the
+        EUC exist -- boost=0.05 with sigma~7° approximates that shape).
 
     Returns
     -------
@@ -1873,7 +1941,16 @@ def equatorial_boost_factor(
     boost_v : (n_lat+1,)
         Boost factor at v-face latitudes.
     """
-    if boost <= 1.0:
+    import math
+    if not (math.isfinite(boost) and boost > 0.0):
+        raise ValueError(f"equatorial boost must be finite and > 0 (a factor "
+                         f"on A_h), got {boost}")
+    if not (math.isfinite(sigma_deg) and sigma_deg > 0.0):
+        # codex 9430935 MAJOR-1: sigma=0 (or nan/inf) reaches 0/0 at the
+        # equator and injects NaNs into momentum; the CLI made it reachable.
+        raise ValueError(f"equatorial sigma_deg must be finite and > 0, "
+                         f"got {sigma_deg}")
+    if boost == 1.0:
         n_lat = grid.lat.shape[0]
         ones_u = jnp.ones(n_lat, dtype=grid.lat.dtype)
         ones_v = jnp.ones(n_lat + 1, dtype=grid.lat.dtype)
@@ -2200,8 +2277,10 @@ def strain_rate_cgrid(
         _fdtype = jnp.result_type(float)
         lat_f = jnp.asarray(lat, dtype=_fdtype)
         cos_lat_f = jnp.asarray(cos_lat, dtype=_fdtype)
+        # Shared reader (#1455 MAJOR 4): the strain rate at a corner and the
+        # vorticity at the SAME corner must divide by the same area.
         A_vertex = jnp.maximum(
-            _vertex_dual_area_interior(lat_f, R, dlon), 1e-30)
+            _stored_or_recomputed_vertex_area(grid, dtype=_fdtype), 1e-30)
 
         dx_cell = R * cos_lat_f * dlon
         dy_h = jnp.asarray(grid.dy, dtype=_fdtype) * 0.5
@@ -2622,7 +2701,7 @@ def vertex_area_1d(grid: LatLonGrid) -> jnp.ndarray:
         Area of each vertex dual cell.  Pole rows are set to a small
         positive floor (1e-30) to avoid division by zero.
     """
-    A_v = _vertex_dual_area_interior(grid.lat, grid.radius, grid.dlon)
+    A_v = _stored_or_recomputed_vertex_area(grid)   # #1455 MAJOR 4
     return jnp.maximum(A_v, 1e-30)
 
 
@@ -3539,6 +3618,54 @@ def neumann_fill_vertex(
 # Utility: compute face masks from cell mask
 # =============================================================================
 
+
+def _spmd_cut_vfaces(v_mask, a):
+    """Open the SPMD lat-band CUT v-face rows of ``v_mask`` using the
+    neighbour band's adjacent cell row of ``a`` (2-D or 3-D cell mask).
+
+    Inside the shard_map body the local ``a[:-1]*a[1:]`` product cannot see
+    the neighbour band, so both boundary v-face rows of the band come out as
+    WALLS at interior cuts — the "pole wall at the cut" failure.  perm_north
+    delivers band r+1's FIRST cell row (each source sends its own first row);
+    perm_south delivers band r-1's LAST row.  Non-target bands (the global
+    south end and the tripolar fold at the north) receive 0, so the product
+    reproduces the serial wall semantics there and ONLY interior cuts change.
+    Serial / mpi / single-band paths (backend not "spmd") return ``v_mask``
+    unchanged, bit-identical.
+    """
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    _mesh = get_spmd_mesh() if get_halo_backend() == "spmd" else None
+    if _mesh is None or "lat" not in tuple(getattr(_mesh, "axis_names", ())):
+        return v_mask
+    from legoesm.parallel.latlon_spmd import latlon_band_perms
+    n_dev = int(dict(_mesh.shape)["lat"])
+    if n_dev <= 1:
+        return v_mask
+    perm_north, perm_south = latlon_band_perms(n_dev)
+    a_north = jax.lax.ppermute(a[:1], "lat", perm_north)
+    a_south = jax.lax.ppermute(a[-1:], "lat", perm_south)
+    v_mask = v_mask.at[-1:].set(a[-1:] * a_north)
+    v_mask = v_mask.at[:1].set(a_south * a[:1])
+    return v_mask
+
+
+def _reject_yreentrant_under_spmd(where: str) -> None:
+    """The meridionally-periodic / flat wrap treats each band's OWN first and
+    last rows as the wrap pair, which under lat-band SPMD wires every interior
+    cut into a bogus local wrap.  The halo backend documents periodic-y as
+    local-only; refuse loudly instead of silently mis-wiring (codex
+    2026-08-24 finding 3)."""
+    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
+    _mesh = get_spmd_mesh() if get_halo_backend() == "spmd" else None
+    if _mesh is not None and "lat" in tuple(getattr(_mesh, "axis_names", ())):
+        if int(dict(_mesh.shape)["lat"]) > 1:
+            raise NotImplementedError(
+                f"{where}: meridionally-periodic/flat y-boundaries are not "
+                "supported under lat-band SPMD (each band would wrap onto "
+                "itself at the cuts); run single-band or implement the ring "
+                "exchange.")
+
+
 def compute_face_masks_3d(
     is_active_3d: jnp.ndarray,
     grid=None,
@@ -3590,12 +3717,15 @@ def compute_face_masks_3d(
     from legoesm.grids.halo_latlon import (
         get_meridionally_flat, get_meridionally_periodic)
     if get_meridionally_periodic() or get_meridionally_flat():
+        _reject_yreentrant_under_spmd("compute_face_masks_3d")
         wrap = a[-1:] * a[0:1]
         v_mask = jnp.concatenate([wrap, v_mask_interior, wrap], axis=0)
         return u_mask, v_mask
     south = jnp.zeros_like(a[:1])
     north = jnp.zeros_like(south)
     v_mask = jnp.concatenate([south, v_mask_interior, north], axis=0)
+    # SPMD lat-band interior cuts: see _spmd_cut_vfaces (no-op unless armed).
+    v_mask = _spmd_cut_vfaces(v_mask, a)
     return u_mask, v_mask
 
 
@@ -4042,6 +4172,7 @@ def pv_flux_ene(
     F_u = h_u * u * u_mask_3d            # (n_lat, n_lon+1, nlev)
     F_v = h_v * v * v_mask_3d            # (n_lat+1, n_lon, nlev)
 
+
     # --- 3. u-face flux: ¼ ( q_S·(F_v_SW+F_v_SE) + q_N·(F_v_NW+F_v_NE) ) ---
     # q already has shape (n_lat+1, n_lon+1, nlev) with the periodic wrap
     # column, so q[:-1]/q[1:] are the south/north vertices of each u-face.
@@ -4107,6 +4238,7 @@ def pv_flux_al81_partial_cell(
     f_vtx: jnp.ndarray | None = None,
     eps_h: float = 1.0e-10,
     q_boundary: str = "neumann_fill",
+    metric_widths: tuple | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Arakawa-Lamb 1981 (AL81) energy-and-enstrophy-conserving PV flux.
 
@@ -4250,6 +4382,30 @@ def pv_flux_al81_partial_cell(
         Floor on ``h_vtx`` to avoid divide-by-zero at fully-dry verts.
         Already partially handled by ``BIG_H`` sentinel; this is a
         belt-and-braces guard.
+    metric_widths : tuple ``(e1u, e1v, e2u, e2v)`` or None
+        NEMO's HORIZONTAL scale factors at the u- and v-points.  ``None``
+        (default) is the per-unit-width form this operator has always
+        computed, and is bit-identical.
+
+        NEMO's ``vor_een`` does NOT use the bare mass fluxes: it weights the
+        meridional transport by ``e1v``, the V-face zonal width
+        (``dynvor.F90:791-792`` ``zwy = e1v*e3v*pv``), and divides the
+        assembled u-tendency by ``e1u`` (``dynvor.F90:804`` ``r1_e1u``), and
+        symmetrically ``e2u``/``r1_e2v`` for the v-tendency.  On a grid with
+        uniform metrics the two forms are identical; on latitude-longitude
+        they differ by the cos-latitude ratio across a cell, which grows as
+        ``dphi*tan(phi)`` and is therefore largest near the poles.
+
+        Retaining the factors is what makes discrete enstrophy conservation
+        exact on the sphere.  This is the SAME weighting the barotropic EEN
+        Coriolis already applies under ``barotropic_coriolis="een_metric"``
+        (``barotropic_latlon_cgrid.een_barotropic_coriolis``, which folds it
+        in externally); the baroclinic path had no way to select it until
+        this argument existed.  Measured on the DINO oracle (#1455): supplying
+        it closes 98.7% of the wall-row disagreement against NEMO's own dumped
+        vorticity tendency, 3.10e-10 -> 4.1e-12 m/s2.
+
+        Each factor is a per-column 2-D face array broadcast over levels.
 
     Returns
     -------
@@ -4321,6 +4477,23 @@ def pv_flux_al81_partial_cell(
     # exactly zero — required for q·F to vanish at the coast.
     F_u = h_u * u * u_mask_3d            # (n_lat, n_lon+1, nlev)
     F_v = h_v * v * v_mask_3d            # (n_lat+1, n_lon, nlev)
+
+    # NEMO's horizontal metric weighting on the transport (see ``metric_widths``
+    # in the docstring).  Every triad term already reads the mass flux at a
+    # specific face, so multiplying the FLUX FIELD by that face's width attaches
+    # each term's own e1v/e2u exactly as NEMO's ffu/ffv coefficients do; the
+    # 1/e1u, 1/e2v normalisation is applied to the assembled tendency at the end.
+    # Identical construction to een_barotropic_coriolis, which does it outside
+    # this operator because it also has a depth integral to factor through.
+    _e1u = _e1v = _e2u = _e2v = None
+    if metric_widths is not None:
+        if len(metric_widths) != 4:
+            raise ValueError(
+                "pv_flux_al81_partial_cell: metric_widths must be the 4-tuple "
+                f"(e1u, e1v, e2u, e2v); got {len(metric_widths)} entries")
+        _e1u, _e1v, _e2u, _e2v = metric_widths
+        F_u = F_u * _e2u[..., jnp.newaxis]
+        F_v = F_v * _e1v[..., jnp.newaxis]
 
     # --- 3. Corner triads at every cell ----------------------------
     # Each triad lives at a corner of a cell.  We index triads by the
@@ -4509,6 +4682,15 @@ def pv_flux_al81_partial_cell(
         + t_SE_N * F_u_N_E     # north-cell SE × NE U  (NEMO ztse(ji,jj+1)·zwx(ji  ,jj+1))
     )
 
+    if metric_widths is not None:
+        # NEMO r1_e1u (dynvor.F90:804) and r1_e2v (:806).  The eps floor mirrors
+        # the h_vtx guard: e1u = R*cos(phi)*dlambda vanishes only on a
+        # pole-covering row, e2v is always positive.
+        diag_vortcor_u = diag_vortcor_u / jnp.maximum(
+            _e1u[..., jnp.newaxis], eps_h)
+        diag_vortcor_v = diag_vortcor_v / jnp.maximum(
+            _e2v[..., jnp.newaxis], eps_h)
+
     return diag_vortcor_u, diag_vortcor_v
 
 
@@ -4580,6 +4762,7 @@ def compute_face_masks(
     from legoesm.grids.halo_latlon import (
         get_meridionally_flat, get_meridionally_periodic)
     if get_meridionally_periodic() or get_meridionally_flat():
+        _reject_yreentrant_under_spmd("compute_face_masks")
         wrap = (land_mask[-1:] * land_mask[0:1]).astype(land_mask.dtype)
         v_mask = jnp.concatenate([wrap, v_mask_interior, wrap], axis=0)
         return u_mask, v_mask
@@ -4590,5 +4773,8 @@ def compute_face_masks(
     # that drives an instability over ~40 steps.
     north = jnp.zeros_like(south)
     v_mask = jnp.concatenate([south, v_mask_interior, north], axis=0)
-
+    # SPMD lat-band interior cuts (codex finding 2: the MLE path calls this
+    # 2-D builder IN-BODY and ANDs it into the 3-D mask, re-walling every cut
+    # the 3-D fix had opened).  Same shared exchange, no-op unless armed.
+    v_mask = _spmd_cut_vfaces(v_mask, land_mask)
     return u_mask, v_mask

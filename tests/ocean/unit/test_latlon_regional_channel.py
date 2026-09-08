@@ -68,10 +68,18 @@ def test_lock_exchange_test_matrix_includes_latlon_regional_entry():
     assert kw["alpha_T"] == 2.0e-4
     assert kw["beta_S"] == 0.0
     assert kw["T_ref"] == 17.5
-    # WENO5 tracer + momentum advection to minimise front diffusion and
-    # match the Veros peer's superbee tracer flux limiter as closely as
-    # the available legoESM scheme set permits.
-    assert kw["tracer_advection"] == "weno5"
+    # TRACER advection must be the SAME constant the global lat-lon and
+    # tripole lock-exchange arms use, not a second literal -- that is what
+    # stops the two lanes drifting apart, which is how this arm ended up on
+    # WENO5. WENO5 was chosen for sharpness and is essentially-
+    # non-oscillatory, NOT monotonicity-preserving; it finished this case
+    # with water at -3.00 degC from an initial [5, 30] (2026-08-13).
+    # Asserting the CONSTANT, not its value, so a deliberate family-wide
+    # change stays a one-line edit.
+    assert kw["tracer_advection"] == m.LOCKEX_CGRID_TRACER_ADV
+    # MOMENTUM advection is untouched: the undershoot was measured against
+    # the tracer scheme alone, and changing two things would have made the
+    # sweep unreadable.
     assert kw["momentum_advection"] == "weno5"
     # ~64 km zonal, ~4 km meridional, centred on the equator
     assert kw["lon_east"] - kw["lon_west"] > 0.5

@@ -202,8 +202,13 @@ def probe_latlon_cgrid(
         eos_veros_nonlin3=getattr(config, "eos_veros_nonlin3", None),
         **_eos_mk_kw,
     )
+    # The recipe's gravity, read the same way the two GM/Redi calls below it
+    # already do. Without it the probe's density is built on a hydrostatic
+    # pressure the run never used, so its per-process comparison is against a
+    # state the model does not integrate.
     rho = compute_ocean_rho(state, z_coord, J, eos_fn=eos_fn,
-                            eos_depth=_eos_depth, rho0=_eos_rho0)
+                            eos_depth=_eos_depth, rho0=_eos_rho0,
+                            g=config.constants.g)
 
     # GM/Redi isopycnal mixing — the lat-lon model applies this in its tracer
     # step (from the TOP-LEVEL config.gm_redi), not inside baroclinic_tendencies.

@@ -67,6 +67,12 @@ def mpi_abort_on_uncaught(fn=None, *, comm=None, code=1):
     rank 0 blocked in the allreduce until walltime (~11 h). Aborting on any rank
     converts that hang into an immediate, clean job death.
 
+    A CLEAN ``SystemExit`` is exempt: ``--help`` and ``sys.exit(0)`` are not a
+    dead rank, and aborting on them would turn printing the usage text into an
+    MPI_Abort. The test matches the interpreter's own exit status rather than
+    truthiness -- clean only for ``None`` and an integer zero, so
+    ``sys.exit("usage error")`` (which exits 1) still aborts.
+
     Single-rank / no ``mpi4py`` -> transparent passthrough (the exception just
     propagates), so serial training and unit tests are unaffected. Usable bare
     (``@mpi_abort_on_uncaught``) or parameterised (``@mpi_abort_on_uncaught(comm=c)``).
@@ -78,6 +84,18 @@ def mpi_abort_on_uncaught(fn=None, *, comm=None, code=1):
         def _wrapped(*args, **kwargs):
             try:
                 return f(*args, **kwargs)
+            except SystemExit as exc:
+                # A CLEAN exit is not a dead rank. ``--help`` and any
+                # ``sys.exit(0)`` raise SystemExit(0) through this wrapper, and
+                # aborting on it would turn "print the usage text" into
+                # MPI_Abort. Anything else IS a failure and still aborts --
+                # matching the interpreter, which exits 0 only for None and an
+                # integer 0, and exits 1 for a string or any other object
+                # (``sys.exit("")`` is a FAILING exit despite being falsy).
+                if not (exc.code is None
+                        or (isinstance(exc.code, int) and exc.code == 0)):
+                    _abort_multirank_job(comm, code=code)
+                raise
             except BaseException:
                 _abort_multirank_job(comm, code=code)
                 raise
@@ -135,6 +153,14 @@ def shard_samples(items, process_id, num_processes, *, drop_remainder=True):
         per = -(-n // num_processes)  # ceil
     start = process_id * per
     return list(items[start:start + per])
+
+
+# Non-finite-guard abort threshold: a per-scene skip is expected (that is the
+# guard's purpose); an epoch skipping more than this FRACTION of its steps is
+# systemic and raises instead of silently no-op "training" (GLM 2026-08-16
+# guard review). Not a config knob: a run that needs to raise it is a run
+# that needs diagnosing.
+_SKIP_ABORT_FRACTION = 0.25
 
 
 # ======================================================================
@@ -309,13 +335,54 @@ def mpi_data_parallel_train_step(value_and_grad_fn, params, opt_state, optimizer
     gradient allreduce is one mpi4jax collective per dtype per step and its
     ordering semantics are unchanged by this fix.
 
+    NON-FINITE GUARD. A single sample whose loss or gradient is non-finite
+    must not poison the parameters: one NaN gradient element makes the
+    optimizer update NaN, every later sample then reports a NaN loss, and
+    the whole epoch is lost — exactly how the WeatherBench classical arm
+    died twice (jobs 26929456/26956014: ERA5 scene 2016-09-01 06Z produces
+    NaN gradients under XLA fusion while the de-optimized program is finite;
+    the mechanism hunt continues on that pinned scene). The guard SKIPS the
+    optimizer update for that sample, logs it loudly with the loss value,
+    and returns a NaN loss so the caller can exclude it from the epoch mean
+    — silently averaging it in would hide the skip. The finiteness check is
+    agreed across ranks (allreduce MIN on the flag, plain control flow
+    outside jit) so replicas never diverge on whether an update happened.
+
     Because every rank applies the same cross-rank-averaged gradient, the
     replicas remain identical without any weight broadcast. Returns
-    ``(params, opt_state, mean_loss)``.
+    ``(params, opt_state, loss)`` — loss is NaN when the sample was skipped.
     """
+    import jax
+    import jax.numpy as jnp
     import optax
 
     loss, grad = value_and_grad_fn(params, sample)
+
+    # LOCAL finiteness as ONE device scalar (single host sync), agreed
+    # across ranks BEFORE the gradient allreduce — a poisoned gradient is
+    # never transmitted, and the flag collective replaces (not adds to) the
+    # wasted gradient reduction on bad steps (codex finding 2). The check
+    # runs outside jit/grad, so the non-AD-safe MIN reduction is fine.
+    _leaf_ok = [jnp.all(jnp.isfinite(g)) for g in jax.tree.leaves(grad)
+                if hasattr(g, "shape")]
+    finite = bool(jnp.isfinite(loss)
+                  & jnp.all(jnp.stack(_leaf_ok)) if _leaf_ok
+                  else jnp.isfinite(loss))
+    if num_processes > 1:
+        from legoesm.parallel.reductions import global_min_mpi
+        finite = bool(float(global_min_mpi(
+            jnp.asarray(1.0 if finite else 0.0), comm=comm)) > 0.5)
+    if not finite:
+        import logging
+        logging.getLogger(__name__).warning(
+            "NON-FINITE loss/gradient on this data-parallel step (local "
+            "loss=%s; under MPI the bad sample may be another rank's) — "
+            "optimizer update SKIPPED, parameters and optimizer state "
+            "unchanged, LR schedule not advanced. Investigate the scene "
+            "(per-sample scan: scripts/tmp/_probe_wb_grad_nan.py).",
+            float(loss))
+        return params, opt_state, jnp.asarray(float("nan"))
+
     grad = all_reduce_grad_mean(grad, num_processes, comm=comm)
     updates, opt_state = optimizer.update(grad, opt_state, params)
     params = optax.apply_updates(params, updates)
@@ -328,7 +395,7 @@ def mpi_data_parallel_train_step(value_and_grad_fn, params, opt_state, optimizer
 @mpi_abort_on_uncaught
 def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
                                     local_samples, n_epochs, num_processes, *,
-                                    comm=None, on_epoch=None):
+                                    comm=None, on_epoch=None, start_epoch=0):
     """Per-rank loop over this rank's ERA5 shard, gradients averaged across ranks
     each step. All ranks run lockstep (balanced shards from ``shard_samples`` with
     ``drop_remainder``), so the per-step ``allreduce`` never deadlocks. Rank-0
@@ -338,7 +405,16 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
     ``loss_fn(params, sample) -> scalar`` is jitted ONCE here, before the loops
     (:func:`build_dp_value_and_grad`); every sample then reuses that single
     traced forward+adjoint. Building it inside either loop reintroduces #1364.
+
+    ``start_epoch`` resumes a run: epochs before it are not re-run, and the
+    epoch INDEX passed to ``on_epoch`` keeps counting from where the previous
+    job stopped, so its checkpoints do not overwrite that job's.  The learning
+    -rate schedule is NOT re-derived from it — the schedule position lives in
+    the optimizer state, which a resuming caller restores.
     """
+    if not 0 <= start_epoch <= n_epochs:
+        raise ValueError(
+            f"start_epoch={start_epoch} outside [0, n_epochs={n_epochs}]")
     import jax
 
     # #1364: ONE trace/compile for the whole run. Hoisted above BOTH loops --
@@ -349,8 +425,9 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
     n_steps_done = 0
 
     history = []
-    for epoch in range(n_epochs):
+    for epoch in range(start_epoch, n_epochs):
         losses = []
+        n_skipped = 0
         for sample in local_samples:
             # #1286 fix A: samples are kept HOST-resident (numpy leaves) so the
             # whole training set is never parked in device memory; move ONE
@@ -361,7 +438,14 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
             params, opt_state, loss = mpi_data_parallel_train_step(
                 value_and_grad_fn, params, opt_state, optimizer, sample,
                 num_processes, comm=comm)
-            losses.append(float(loss))
+            # Non-finite-guard contract: NaN loss = the step SKIPPED this
+            # sample's update (see mpi_data_parallel_train_step). Excluded
+            # from the epoch mean — one poisoned scene must not turn the
+            # epoch's reported loss into NaN — and counted loudly instead.
+            if float(loss) != float(loss):   # NaN check without importing math
+                n_skipped += 1
+            else:
+                losses.append(float(loss))
             n_steps_done += 1
             # #1364 retrace guard: with fixed-shape samples the rollout must be
             # traced exactly once for the whole run. More than that means a
@@ -382,7 +466,31 @@ def mpi_data_parallel_training_loop(loss_fn, params, opt_state, optimizer,
                     "the jit was dropped/rebuilt inside the loop.",
                     n_traces(), n_steps_done)
                 retrace_warned = True
-        mean_loss = sum(losses) / max(len(losses), 1)
+        mean_loss = (sum(losses) / len(losses)
+                     if losses else float("nan"))
+        if n_skipped:
+            import logging
+            logging.getLogger(__name__).warning(
+                "epoch %d: %d/%d data-parallel step(s) SKIPPED on a "
+                "non-finite loss/gradient (on SOME rank, under MPI); the "
+                "epoch mean covers the %d ACCEPTED steps. The LR schedule "
+                "advances per accepted step, so it ends short by the "
+                "cumulative skip count — accepted semantics (codex "
+                "2026-08-16 guard review, finding 3).",
+                epoch, n_skipped, n_skipped + len(losses), len(losses))
+            # SKIP-RATE ABORT (GLM guard review): the guard exists for a few
+            # pathological scenes. If a large fraction of an epoch skips, the
+            # cause is systemic (diverged weights, a bad LR, a broken change)
+            # and "training" has become a silent no-op — fail loudly instead.
+            _total = n_skipped + len(losses)
+            if n_skipped > max(1, int(_SKIP_ABORT_FRACTION * _total)):
+                raise RuntimeError(
+                    f"epoch {epoch}: {n_skipped}/{_total} steps skipped on "
+                    f"non-finite loss/gradient (> "
+                    f"{_SKIP_ABORT_FRACTION:.0%} abort threshold). This is "
+                    "systemic — not the per-scene guard's job. Stop and "
+                    "diagnose (per-sample scan: "
+                    "scripts/tmp/_probe_wb_grad_nan.py).")
         history.append(mean_loss)
         if on_epoch is not None:
             on_epoch(epoch, mean_loss, params, opt_state)   # CURRENT params (not a stale closure)

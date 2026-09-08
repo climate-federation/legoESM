@@ -43,8 +43,25 @@ RUN = "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ"
 # initial state -- which makes lego's 1-year ACC growth directly comparable
 # to NEMO's own growth over the same year from the same state.
 INIT_RESTART = os.environ.get("DINO_INIT_RESTART")
+INIT_RESTART_PATH = INIT_RESTART or f"{RUN}/DINO_00000320_restart.nc"
 g = read_nemo_mesh_mask(f"{RUN}/mesh_mask.nc", nn_hls=0)
-s = read_nemo_restart(INIT_RESTART or f"{RUN}/DINO_00000320_restart.nc", nn_hls=0)
+s = read_nemo_restart(INIT_RESTART_PATH, nn_hls=0)
+# #1455 SEASONAL CLOCK: DINO's analytic forcing follows the DAY OF YEAR, so a
+# screen STATE-INITIALIZED from a developed NEMO restart must continue that
+# restart's own seasonal clock instead of restarting the year at zero.
+#
+# ONLY in DINO_INIT_RESTART (matched-state growth) mode. The DEFAULT arm starts
+# from the ANALYTIC REST state (`dino_lat_lon_state` below); its kt=320 restart
+# is a GEOMETRY DONOR ONLY and never supplies the state, so relative time IS
+# the day of year there and the offset must be 0. Applying the restart's
+# 10-day offset to the from-rest arm would put it out of phase with NEMO's own
+# year-1 spin-up AND break this script's stated control that the two arms
+# differ in the initial state alone.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from kamm_twin_90d import seasonal_t0_seconds  # noqa: E402
+T0_SEC = seasonal_t0_seconds(INIT_RESTART_PATH) if INIT_RESTART else 0.0
+print(f"seasonal clock: t0 = {T0_SEC:.0f} s "
+      f"({'restart adatrj' if INIT_RESTART else 'from-rest arm -> 0'})")
 br = bridge_nemo_to_legoesm_topo(g, s, periodic_i=True, full_step=True)
 ALPHA = float(sys.argv[3]) if len(sys.argv) > 3 else None
 cfg = dataclasses.replace(dino_config_for_recipe(RECIPE),
@@ -121,18 +138,13 @@ if INIT_RESTART:
     verify_day0_matches_restart(st, s, br.land_mask)
 mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
 if os.environ.get("DINO_NEMO_KMM_DIVISOR") is not None:
-    # #1226 W1: NEMO-faithful implicit-solve gradient divisor (trazdf.F90:
-    # 219-220 e3w(...,Kmm), the NOW/pre-solve thickness) vs legoESM's default
-    # AFTER-solve midpoint divisor. LatLonCGridOceanConfig field (not a
-    # DINOConfig field, unlike the ablations above), set on mc post-
-    # construction. Opt-in measurement knob only -- NOT a recipe/kamm default.
-    _v = os.environ["DINO_NEMO_KMM_DIVISOR"]
-    if _v not in ("0", "1"):
-        raise SystemExit(
-            f"Unknown DINO_NEMO_KMM_DIVISOR={_v!r}: expected '0' or '1'")
-    # mc is a NamedTuple (LatLonCGridOceanConfig), not a dataclass -> _replace.
-    mc = mc._replace(implicit_vmix_e3t_now_divisor=(_v == "1"))
-    print(f"ABLATION: implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
+    raise SystemExit(
+        "DINO_NEMO_KMM_DIVISOR is GONE. NEMO's e3w(Kmm) implicit-solve divisor "
+        "(trazdf.F90:219-221, dynzdf.F90:200-203) is no longer a flag: it is "
+        "unbranched inside the NEMO identity "
+        'zdf_implicit_solver_evaluation="nemo_literal", which this card already '
+        "selects. Compare across commits, not across this knob "
+        "(docs/ocean/fidelity/dino_zdf_divisor_arm_receipt.md).")
 # #1492 P2: NEMO-faithful step-composition A/B (docs/ocean/fidelity/
 # nemo_mlf_step_transcription_spec.md resolved decision 2). Default "" =
 # legacy (outer_integrator="leapfrog", i.e. _leapfrog_step, unchanged from
@@ -147,16 +159,17 @@ if _OI:
         raise SystemExit(
             f"Unknown DINO_OUTER_INTEGRATOR={_OI!r}: expected "
             "'leapfrog' or 'nemo_mlf'")
-    # nemo_mlf HARD-REQUIRES the NEMO e3w(Kmm) divisor at construction (spec
-    # resolved decision 4: a transcription that permits a non-NEMO divisor
-    # stops being a transcription at that row) -- auto-force it here so the
-    # env knob alone is sufficient without also setting DINO_NEMO_KMM_DIVISOR.
+    # nemo_mlf HARD-REQUIRES the NEMO implicit-ZDF identity at construction
+    # (spec resolved decision 4: a transcription that permits a non-NEMO
+    # divisor stops being a transcription at that row) -- auto-force it here
+    # so the env knob alone is sufficient.
     mc = mc._replace(
         outer_integrator=_OI,
-        implicit_vmix_e3t_now_divisor=(
-            True if _OI == "nemo_mlf" else mc.implicit_vmix_e3t_now_divisor))
+        zdf_implicit_solver_evaluation=(
+            "nemo_literal" if _OI == "nemo_mlf"
+            else mc.zdf_implicit_solver_evaluation))
     print(f"ABLATION: outer_integrator={mc.outer_integrator} "
-          f"implicit_vmix_e3t_now_divisor={mc.implicit_vmix_e3t_now_divisor}")
+          f"zdf_implicit_solver_evaluation={mc.zdf_implicit_solver_evaluation}")
 model = LatLonCGridOceanModel(br.geometry, br.z_coord, mc)
 forcing = dino_lat_lon_surface_forcing_arrays(br.geometry, cfg)
 sf = dino_step_surface_forcing(forcing)   # WIND: tau_x/taum into the dycore external-tau block
@@ -181,12 +194,12 @@ for year in range(1, YEARS + 1):
         kglob += 1
         if USE_RHS:
             st, ext_rate = apply_dino_lat_lon_surface_forcing(
-                st, forcing, br.z_coord, cfg, DT, t_seconds=kglob * DT,
+                st, forcing, br.z_coord, cfg, DT, t_seconds=T0_SEC + kglob * DT,
                 return_rate=True)
             st = dyn(st, ext_rate)
         else:
             st = apply_dino_lat_lon_surface_forcing(st, forcing, br.z_coord, cfg, DT,
-                                                    t_seconds=kglob * DT)
+                                                    t_seconds=T0_SEC + kglob * DT)
             st = dyn(st)
         if k >= ACC0:
             for f in acc: acc[f] = acc[f] + getattr(st, f).data

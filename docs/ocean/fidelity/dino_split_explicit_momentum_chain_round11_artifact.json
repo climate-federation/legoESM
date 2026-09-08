@@ -1,0 +1,250 @@
+{
+  "backend": "cpu",
+  "bindings": {
+    "dump_sha256": {
+      "qco_dump_zhU_substep1.bin": "569efde6dafe959e6ad49ae93ab1886ff90e20e18bab8d087879dafa0f637c5e",
+      "qco_dump_zhV_substep1.bin": "59b5d450e2f3cbb9522a7b8313eab4d36e35fb203750a329622e15bc7891f8a7",
+      "qco_dump_zhdiv_substep1.bin": "2ab46c0d95144d69186be1a264401da2264abde92b1fd7ef41e293130d058b42",
+      "qco_dump_zhup2_substep1.bin": "50e9094d079bfb68ee687cbbd2fa556f4350577ec3ea363436ef49fbe1ada25a",
+      "qco_dump_zhvp2_substep1.bin": "eed7771cd319f6db60a915b81ddb1e77bae88b7a0ec330edf1c27fed01e5d39d",
+      "qco_dump_zsshp2_substep1.bin": "8d47f377ae40068a70f9f80b187d2c97d137f9916f884d37f94a4b3f52e3d0af"
+    },
+    "round10_raw_sha256": "d2f2b8da84dffb6948f51a08f03327831ae3d5db9e5e812631c9f48e89b8822a",
+    "round10_sha256": "b15e942a7e69b6e352207146b6da06ffe25a8ee3e67395b4fb8ce86ff6e1e845",
+    "round8_sha256": "16883e8e140f3e25de24866d9deedf9dd6b18189ca4f280c1448144620b48a92",
+    "run": "/tmp/RUN_SPG_QCO_ROW13_ON.VXTF1J"
+  },
+  "controls": {
+    "fixed_baseline_9.4_reproduced": true,
+    "identity_at_bar": true,
+    "literal_classes_recorded": true,
+    "rms_plant_debt": true
+  },
+  "disposition": "STOP_9.6_AMBIGUOUS",
+  "git": {
+    "clean_after": true,
+    "clean_before": true,
+    "commit": "48273ecdb625b81f51ebb78263ff2e74c505e73e"
+  },
+  "jax_enable_x64": true,
+  "later_rows": {
+    "1.4": "ORDERED_BLOCKED",
+    "2": "ORDERED_BLOCKED",
+    "3": "ORDERED_BLOCKED",
+    "4": "ORDERED_BLOCKED",
+    "5": "ORDERED_BLOCKED",
+    "6": "ORDERED_BLOCKED"
+  },
+  "rows": {
+    "9.4": {
+      "bit_classes": [
+        {
+          "members": [
+            "nemo_literal_left"
+          ]
+        },
+        {
+          "members": [
+            "metric_depth_first"
+          ]
+        },
+        {
+          "members": [
+            "production_current"
+          ]
+        }
+      ],
+      "records": {
+        "metric_depth_first": {
+          "arithmetic_class": "POINTWISE",
+          "class_bar": 1e-15,
+          "correlation": 1.0,
+          "field": "zhU",
+          "gate_status": "DEBT",
+          "mean_abs_ratio": 1.0,
+          "n": 9758,
+          "normalized_rms_error": 8.957461496062945e-17,
+          "per_element_max_error_over_nemo_rms": 1.0350840730880728e-15,
+          "rms_ratio": 1.0,
+          "subrow": "9.4"
+        },
+        "nemo_literal_left": {
+          "arithmetic_class": "POINTWISE",
+          "class_bar": 1e-15,
+          "correlation": 1.0,
+          "field": "zhU",
+          "gate_status": "AT BAR",
+          "mean_abs_ratio": 1.0,
+          "n": 9758,
+          "normalized_rms_error": 0.0,
+          "per_element_max_error_over_nemo_rms": 0.0,
+          "rms_ratio": 1.0,
+          "subrow": "9.4"
+        },
+        "production_current": {
+          "arithmetic_class": "POINTWISE",
+          "class_bar": 1e-15,
+          "correlation": 1.0,
+          "field": "zhU",
+          "gate_status": "DEBT",
+          "mean_abs_ratio": 1.0,
+          "n": 9758,
+          "normalized_rms_error": 9.212350558912081e-17,
+          "per_element_max_error_over_nemo_rms": 2.0701681461761457e-15,
+          "rms_ratio": 1.0,
+          "subrow": "9.4"
+        }
+      },
+      "verdict": "LITERAL_OWNED"
+    },
+    "9.5": {
+      "bit_classes": [
+        {
+          "members": [
+            "nemo_literal_left"
+          ]
+        },
+        {
+          "members": [
+            "metric_depth_first"
+          ]
+        },
+        {
+          "members": [
+            "production_current"
+          ]
+        }
+      ],
+      "records": {
+        "metric_depth_first": {
+          "arithmetic_class": "POINTWISE",
+          "class_bar": 1e-15,
+          "correlation": 1.0,
+          "field": "zhV",
+          "gate_status": "DEBT",
+          "mean_abs_ratio": 1.0,
+          "n": 9868,
+          "normalized_rms_error": 8.756988202680804e-17,
+          "per_element_max_error_over_nemo_rms": 1.3390120785378716e-15,
+          "rms_ratio": 1.0,
+          "subrow": "9.5"
+        },
+        "nemo_literal_left": {
+          "arithmetic_class": "POINTWISE",
+          "class_bar": 1e-15,
+          "correlation": 1.0,
+          "field": "zhV",
+          "gate_status": "AT BAR",
+          "mean_abs_ratio": 1.0,
+          "n": 9868,
+          "normalized_rms_error": 0.0,
+          "per_element_max_error_over_nemo_rms": 0.0,
+          "rms_ratio": 1.0,
+          "subrow": "9.5"
+        },
+        "production_current": {
+          "arithmetic_class": "POINTWISE",
+          "class_bar": 1e-15,
+          "correlation": 1.0,
+          "field": "zhV",
+          "gate_status": "DEBT",
+          "mean_abs_ratio": 1.0,
+          "n": 9868,
+          "normalized_rms_error": 9.363774403150079e-17,
+          "per_element_max_error_over_nemo_rms": 2.6780241570757432e-15,
+          "rms_ratio": 1.0,
+          "subrow": "9.5"
+        }
+      },
+      "verdict": "LITERAL_OWNED"
+    },
+    "9.6": {
+      "bit_classes": [
+        {
+          "members": [
+            "nemo_literal_left"
+          ]
+        },
+        {
+          "members": [
+            "divide_after_sum"
+          ]
+        },
+        {
+          "members": [
+            "normalize_axes_separately"
+          ]
+        },
+        {
+          "members": [
+            "production_generic"
+          ]
+        }
+      ],
+      "records": {
+        "divide_after_sum": {
+          "arithmetic_class": "ACCUMULATING",
+          "class_bar": 1e-12,
+          "correlation": 1.0,
+          "field": "zhdiv",
+          "gate_status": "AT BAR",
+          "mean_abs_ratio": 1.0,
+          "n": 9920,
+          "normalized_rms_error": 8.633504635393172e-17,
+          "per_element_max_error_over_nemo_rms": 6.201549438221386e-16,
+          "rms_ratio": 1.0,
+          "subrow": "9.6"
+        },
+        "nemo_literal_left": {
+          "arithmetic_class": "ACCUMULATING",
+          "class_bar": 1e-12,
+          "correlation": 1.0,
+          "field": "zhdiv",
+          "gate_status": "AT BAR",
+          "mean_abs_ratio": 1.0,
+          "n": 9920,
+          "normalized_rms_error": 0.0,
+          "per_element_max_error_over_nemo_rms": 0.0,
+          "rms_ratio": 1.0,
+          "subrow": "9.6"
+        },
+        "normalize_axes_separately": {
+          "arithmetic_class": "ACCUMULATING",
+          "class_bar": 1e-12,
+          "correlation": 0.9999999999999999,
+          "field": "zhdiv",
+          "gate_status": "DEBT",
+          "mean_abs_ratio": 1.000000000000023,
+          "n": 9920,
+          "normalized_rms_error": 1.1401085724824811e-12,
+          "per_element_max_error_over_nemo_rms": 5.6451939032370496e-11,
+          "rms_ratio": 1.0000000000000209,
+          "subrow": "9.6"
+        },
+        "production_generic": {
+          "arithmetic_class": "ACCUMULATING",
+          "class_bar": 1e-12,
+          "correlation": 1.0,
+          "field": "zhdiv",
+          "gate_status": "DEBT",
+          "mean_abs_ratio": 0.9999999999999338,
+          "n": 9920,
+          "normalized_rms_error": 1.015842283037847e-11,
+          "per_element_max_error_over_nemo_rms": 1.835223362462335e-10,
+          "rms_ratio": 0.9999999999999645,
+          "subrow": "9.6"
+        }
+      },
+      "verdict": "AMBIGUOUS"
+    }
+  },
+  "runtime": {
+    "jax": "0.10.0",
+    "jaxlib": "0.10.0",
+    "numpy": "2.4.4",
+    "platform": "Linux-5.14.0-611.36.1.el9_7.x86_64-x86_64-with-glibc2.34",
+    "python": "3.13.0 | packaged by conda-forge | (main, Nov 27 2024, 19:18:50) [GCC 13.3.0]"
+  },
+  "schema": "dino-split-explicit-momentum-chain-round11-v1",
+  "session_id": "01a04e34-d1fb-73e0-b25a-177641f0a246"
+}

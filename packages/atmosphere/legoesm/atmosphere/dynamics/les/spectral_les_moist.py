@@ -237,9 +237,18 @@ def make_les_microphysics_fn(micro_config: MicrophysicsConfig,
                 return tr_td[..., idx]
             return jnp.zeros((ncol, nz), dtype=theta.dtype)
 
+        # Cloud and rain number are STORED per MASS [#/kg] so the transport
+        # operator is right for them; the schemes work per VOLUME.  Ice number
+        # is per mass on both sides.  See microphysics/integration.py.
+        from legoesm.atmosphere.physics.microphysics.integration import (
+            number_per_mass_to_per_volume,
+            number_per_volume_to_per_mass,
+        )
         hyd = HydrometeorState(
             q_c=slot(1), q_r=slot(2), q_i=slot(3), q_s=slot(4), q_g=slot(5),
-            N_c=slot(6), N_r=slot(7), N_i=slot(8),
+            N_c=number_per_mass_to_per_volume(slot(6), rho),
+            N_r=number_per_mass_to_per_volume(slot(7), rho),
+            N_i=slot(8),
             N_s=(slot(9) if nt > 9 else None),
             N_g=(slot(10) if nt > 10 else None),
         )
@@ -250,7 +259,9 @@ def make_les_microphysics_fn(micro_config: MicrophysicsConfig,
         dth = (out.dT_dt / exner).reshape(ncol, nz)
         dtheta_dt = flip(dth.reshape(ny, nx, nz))
         tend = [out.dq_v_dt, out.dq_c_dt, out.dq_r_dt, out.dq_i_dt,
-                out.dq_s_dt, out.dq_g_dt, out.dN_c_dt, out.dN_r_dt,
+                out.dq_s_dt, out.dq_g_dt,
+                number_per_volume_to_per_mass(out.dN_c_dt, rho),
+                number_per_volume_to_per_mass(out.dN_r_dt, rho),
                 out.dN_i_dt, out.dN_s_dt, out.dN_g_dt]
         dtr = jnp.zeros((ncol, nz, nt), dtype=theta.dtype)
         for idx, f in enumerate(tend):

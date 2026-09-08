@@ -1,0 +1,10 @@
+# The 13 August reference configuration, byte-faithful, for reruns under
+# CURRENT code.  The campaign deck supplies the science settings; the two lines
+# below undo what today's production carries that the reference did not:
+# the calibrated land (the deck already disables the land model itself) and
+# the energy-consistent moisture clip, which has no command-line off-switch.
+# A run from this file isolates CODE drift from CONFIGURATION drift when
+# compared against the recorded 13 August run.
+include: amip_campaign_mpas.yaml
+land_calibrated_physics: false
+energy_consistent_moisture_clip: false

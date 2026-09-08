@@ -60,6 +60,9 @@ from legoesm.atmosphere.physics.convection._plume import (
 from legoesm.atmosphere.physics.convection._emanuel_mixing import (
     emanuel_mixing_tendencies,
 )
+from legoesm.atmosphere.physics.convection._emanuel_downdraft import (
+    emanuel_downdraft,
+)
 
 
 __all__ = ("emanuel_convection",)
@@ -463,54 +466,65 @@ def emanuel_convection(
     # ``downdraft_efficiency`` below LCL, cooling and moistening the
     # sub-cloud layer.
     if config.enable_unsaturated_downdraft:
-        # Smooth indicator of "below LCL" (surface-last: index larger
-        # than k_lcl_smooth ⇒ below).
-        below_lcl = jax.nn.sigmoid(
-            config.below_lcl_index_sharpness
-            * (nlev_idx[None, :] - k_lcl_smooth[:, None])
-        )                                                # (ncol, nlev)
-        # Column-integrated condensate source [kg/m^2/s] and below-LCL
-        # mass [kg/m^2] both reduce ``* dp / g`` over the level axis —
-        # fuse them into one stacked reduction.
-        _col_pair = jnp.sum(
-            jnp.stack([dq_c_conv_dt_raw, below_lcl], axis=-1) * dp[..., None],
-            axis=-2,
-        ) / constants.g
-        column_condensate = _col_pair[..., 0]
-        below_mass = _col_pair[..., 1]
-        evap_rate = (
-            config.downdraft_efficiency
-            * column_condensate[:, None]
-            * below_lcl
-            / jnp.maximum(below_mass[:, None], 1e-6)
+        # The PORTED shaft (convect43c.f lines 713-830), not the previous
+        # column-integrated stand-in.  It needs the mixer's own intermediates
+        # (ELIJ, CLW, EP, QS, H, GZ, LV), so it is only available on the
+        # genuine-mixing path; requesting it on the legacy surrogate would
+        # silently run different physics than the flag advertises.
+        if not config.use_genuine_mixing:
+            raise ValueError(
+                "enable_unsaturated_downdraft requires use_genuine_mixing: "
+                "the ported CONVECT downdraft is driven by the buoyancy-sort "
+                "mixing matrix (ELIJ/MENT/CLW/EP), which the legacy surrogate "
+                "does not produce.")
+        # The mixer's intermediates are SURFACE-FIRST (oracle ordering); the
+        # environmental profiles here are surface-LAST.  Flip the latter, and
+        # flip the shaft's tendencies back before adding them.  PH(i) is the
+        # interface at the BOTTOM of level i, which surface-last is
+        # ``p_half[k+1]``, i.e. ``p_half[:, 1:]`` reversed.
+        _rev = lambda x: x[:, ::-1]  # noqa: E731 - local, one use per array
+        cpn_profile = (constants.c_pd * (1.0 - q_v)
+                       + constants.c_pv * q_v)
+        downdraft = emanuel_downdraft(
+            T=_rev(T), q=_rev(q_v), qs=mixing.qs,
+            p_full=_rev(p_full), p_half=_rev(p_half[:, 1:]),
+            h_dry_static=mixing.h_dry_static, gz=mixing.gz, lv=mixing.lv,
+            cpn=_rev(cpn_profile),
+            m_profile=mixing.m_profile, ment=mixing.ment, elij=mixing.elij,
+            clw=mixing.clw, ep=mixing.ep,
+            sigd=config.downdraft_sigd,
+            sigs=config.downdraft_sigs,
+            omtrain=config.downdraft_omtrain_pa_s,
+            omtsnow=config.downdraft_omtsnow_pa_s,
+            coeffr=config.downdraft_coeffr,
+            coeffs=config.downdraft_coeffs,
+            freeze_transition_K=config.downdraft_freeze_transition_K,
+            inertia_scale_hPa=config.downdraft_inertia_scale_hPa,
+            taper_p_fraction=config.downdraft_taper_p_fraction,
+            dhdp_min=config.downdraft_dhdp_min,
+            ep_gate_threshold=config.downdraft_ep_gate_threshold,
+            ep_gate_width=config.downdraft_ep_gate_width,
         )
-        # Evaporation cools T and moistens q (BL).  Conserve column
-        # water by removing the same column-integrated mass from the
-        # cloud-water source — distributed proportional to where
-        # cloud water is *produced* (i.e. dq_c_conv_dt_raw), not where
-        # it evaporates (BL).  The earlier formulation subtracted
-        # ``evap_rate`` from ``dq_c_conv_dt`` *at the BL*, then clipped
-        # to zero — which lost the bookkeeping (the BL has little
-        # ``dq_c_conv_dt_raw``) and effectively created vapor from
-        # nothing, flipping the sign of column ``Q_v`` on CAPE-positive
-        # soundings.
-        dT_evap = -(constants.L_v / constants.c_pd) * evap_rate
-        dq_v_evap = evap_rate
-        dT_dt = dT_dt + dT_evap
-        dq_v_dt = dq_v_dt + dq_v_evap
-        # ``col_dq_c`` is the same column reduction as
-        # ``column_condensate`` above; reuse it instead of recomputing.
-        col_dq_c = column_condensate
+        dT_dt = dT_dt + _rev(downdraft.dT_dt)
+        dq_v_dt = dq_v_dt + _rev(downdraft.dq_v_dt)
+
+        # WATER BOOKKEEPING, and it differs from the oracle's on purpose.
+        # CONVECT debits its own PRECIP diagnostic by what evaporated on the
+        # way down.  This model has no such diagnostic: the precipitating
+        # fraction EP*CLW leaves the mixer and the REST is handed to
+        # microphysics as ``dq_c_conv_dt``.  So the vapour the shaft adds is
+        # taken back out of that condensate source, column-integral for
+        # column-integral, distributed where the condensate is PRODUCED
+        # rather than where it evaporates -- the sub-cloud layer has almost
+        # no ``dq_c_conv_dt_raw``, and subtracting there then clipping at zero
+        # is exactly the bookkeeping loss that once flipped the sign of the
+        # column vapour budget.
+        col_evap = jnp.sum(
+            _rev(downdraft.dq_v_dt) * dp, axis=-1) / constants.g
+        col_dq_c = jnp.sum(dq_c_conv_dt_raw * dp, axis=-1) / constants.g
         weight = dq_c_conv_dt_raw / jnp.maximum(col_dq_c[:, None], 1e-12)
-        weight = jnp.where(
-            (col_dq_c > 1e-12)[:, None], weight, 0.0,
-        )
-        # ``∫ weight * dp/g = 1`` when ``col_dq_c > 0``, so
-        # ``∫ subtract * dp/g = downdraft_efficiency * col_dq_c``.
-        subtract = (
-            config.downdraft_efficiency * col_dq_c[:, None] * weight
-        )
-        dq_c_conv_dt = dq_c_conv_dt - subtract
+        weight = jnp.where((col_dq_c > 1e-12)[:, None], weight, 0.0)
+        dq_c_conv_dt = dq_c_conv_dt - col_evap[:, None] * weight
 
     dq_c_conv_dt = jnp.maximum(dq_c_conv_dt, 0.0)
 
@@ -603,6 +617,82 @@ def emanuel_convection(
     drying_col = jnp.sum(drying * dp, axis=-1) / constants.g
     add_weight = drying / jnp.maximum(drying_col[:, None], 1e-30)  # ∫w dp/g = 1
     dq_c_add = deficit[:, None] * add_weight              # ∫ dq_c_add dp/g = deficit
+
+    # THE PRECIPITATING BRANCH (the water this scheme used to destroy).
+    #
+    # On the genuine mixing path the negative net water IS the oracle's
+    # ``EP·CLW``: the precipitating fraction of the adiabatic condensate, which
+    # ``QTI = Q(NK) − EP·CLW`` removes from the updraught's total water and
+    # which CONVECT hands to ``WDTRAIN`` → ``PRECIP``.  Before this it was
+    # returned to NOTHING — ``deficit`` is pinned to 0 above, the receiving
+    # unsaturated downdraft ships OFF, and its ``precip_mm_day`` was consumed by
+    # no one even when ON.  MEASURED in a 100-day RCEMIP1 column: evaporation
+    # 2.41 mm/day (correct, the CRM's own value) against precipitation 0.28
+    # (CRM 2.4) with the column in steady state, i.e. 2.13 mm/day of water
+    # destroyed, ≈61 W/m² of spurious latent sink.  It is invisible in the
+    # temperature field because the latent heat was already released during
+    # ascent, which is why it survived so long.
+    #
+    # It is emitted as ``dq_r_conv_dt``, the in-updraught rain source the
+    # bechtold / tiedtke / mass_flux schemes already use for exactly this
+    # quantity (their ``precip_efficiency``-diverted condensate, #929); the
+    # physics pipeline column-integrates it into same-step surface precip.
+    # Deliberately NOT routed into ``dq_c_conv_dt``: ``EP`` already
+    # parameterises autoconversion, so the cloud route would convert it a
+    # second time, delay it by the host's autoconversion timescale, and load
+    # radiatively active anvil condensate the comment below rightly warns of.
+    # NO heating accompanies it — the latent heat is already in ``dT_dt``, and
+    # adding more would double-count L_v.
+    #
+    # HONEST NAMING, after review: this is a CLOSURE BY RESIDUAL, not a
+    # restoration of the oracle's precipitation pathway.  ``-net_water`` is the
+    # NET column residual — gross ``EP·CLW`` MINUS any downdraft moistening
+    # still present in ``dq_v_dt``, PLUS any other non-conservative term this
+    # port has, PLUS roundoff.  Two consequences a reader must know:
+    #   * with the unsaturated downdraft disabled this rains 100 % of what the
+    #     oracle would partially re-evaporate, so the sub-cloud moistening and
+    #     evaporative cooling of the shaft remain ABSENT;
+    #   * routing the residual to rain LAUNDERS any further water leak in this
+    #     scheme into "precipitation", so the column-closure test can no longer
+    #     detect one here.  That is the price of closing the budget this way.
+    #     tests/unit/test_emanuel_rain_is_physics_not_residue.py RECORDS the
+    #     emitted rain; an independent EP·CLW comparison that would fully
+    #     separate physics from residue is an open follow-up, not a shipped
+    #     check — do not cite one that does not exist.
+    #
+    # FIDELITY BOUND (third-review finding): the oracle's ``WDTRAIN`` is
+    # ``EP·CLW`` PLUS the off-diagonal detrained-mixture condensate ``AWAT``
+    # (convect43c.f:730-735).  This port routes ``MENT·AWAT`` to cloud, so the
+    # residual UNDER-counts oracle PRECIP; the difference arrives late via the
+    # anvil → microphysics chain.  Conserving, and consistent with
+    # "microphysics owns precipitation", but the residual is NOT the whole of
+    # WDTRAIN and must not be described as such.
+    #
+    # STATIC gating, not ``jnp.where``: ``use_genuine_mixing`` is a Python bool
+    # on the config (the CLAUDE.md feature-gating rule), and the distinction is
+    # LOAD-BEARING here — an always-present zeros array would trip the
+    # non-hydrostatic bridge's ``dq_r_conv_dt is not None and n_tracers < 2``
+    # raise (integration.py:1140) for vapor-only runs that carried no rain at
+    # all, including the legacy path that predates this fix.  Legacy emits
+    # ``None``, exactly as sbm/dca/kuo do.
+    if config.use_genuine_mixing:
+        _residual = jnp.maximum(-net_water, 0.0)
+        dq_r_conv_dt = _residual[:, None] * add_weight    # ∫dq_r dp/g = _residual
+        # A residual that could not be placed (no drying anywhere) must not be
+        # dropped on the floor; that is exactly how EP·CLW disappeared before.
+        # Provably unreachable today (a negative residual REQUIRES net drying,
+        # since dq_c_conv_dt >= 0), kept structural rather than incidental.
+        # Distributed uniformly in mass: per level ``g/Σdp`` [1/(kg s)] times
+        # the residual [kg/m^2/s] gives kg/kg/s.
+        _placed = jnp.sum(dq_r_conv_dt * dp, axis=-1) / constants.g
+        _col_dp = jnp.sum(dp, axis=-1, keepdims=True)
+        dq_r_conv_dt = dq_r_conv_dt + jnp.where(
+            (drying_col <= 0.0)[:, None],
+            (_residual - _placed)[:, None] * constants.g / _col_dp,
+            0.0,
+        )
+    else:
+        dq_r_conv_dt = None
     # Down-scale only the spurious-excess case; when net_water<0 qc_scale=1.
     qc_scale = jnp.clip(
         1.0 - jnp.maximum(net_water, 0.0)
@@ -636,6 +726,7 @@ def emanuel_convection(
         dT_dt=dT_dt,
         dq_v_dt=dq_v_dt,
         dq_c_conv_dt=dq_c_conv_dt,
+        dq_r_conv_dt=dq_r_conv_dt,
         cape=cape,
         convective_mask=cape_weight,
         du_dt_conv=None,

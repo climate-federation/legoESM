@@ -34,8 +34,37 @@ import numpy as np
 # (NEMO-vs-observation SST RMSE is ~0.5-1 K; we allow more for coarse legoESM).
 _TOL = {
     "sst_rmse_excellent_C": 1.5, "sst_rmse_good_C": 2.5,
+    # ENSO-box |bias| caps on the SST verdict (regional failure must not hide
+    # under the global L2; nino3 +2.8 C with global rmse 0.94 is NOT excellent).
+    "sst_box_bias_excellent_C": 1.0, "sst_box_bias_good_C": 2.0,
     "sss_rmse_excellent": 0.5, "sss_rmse_good": 1.0,   # gated (runoff=0)
 }
+
+
+def capped_sst_verdict(global_rmse, sst_boxes, tol=None):
+    """SST verdict = global-rmse tier CAPPED at the worst ENSO-box |bias| tier.
+
+    A global L2 hides an area-small regional failure (user callout 2026-08-18:
+    nino3 +2.8 C scored "excellent" under global rmse 0.94).  Returns
+    ``(verdict, capped_by)`` where ``capped_by`` is ``(box_name, bias)`` when a
+    box demoted the verdict, else ``None``.
+    """
+    t = tol or _TOL
+    rank = ("excellent", "good", "poor")
+
+    def tier(x, exc, good):
+        return "excellent" if x < exc else "good" if x < good else "poor"
+
+    v = tier(global_rmse, t["sst_rmse_excellent_C"], t["sst_rmse_good_C"])
+    capped_by = None
+    for bn, bs in (sst_boxes or {}).items():
+        if bs is None:
+            continue
+        bv = tier(abs(bs["bias"]),
+                  t["sst_box_bias_excellent_C"], t["sst_box_bias_good_C"])
+        if rank.index(bv) > rank.index(v):
+            v, capped_by = bv, (bn, bs["bias"])
+    return v, capped_by
 
 
 def _xyz(lat_rad, lon_rad):
@@ -102,6 +131,37 @@ def _band_breakdown(fieldL, fieldN, area, tgt_lat):
     out = {}
     for name, (lo, hi) in bands.items():
         m = (lat2d >= lo) & (lat2d < hi)
+        a = area * m
+        out[name] = _wstats(fieldL, fieldN, a) if a.sum() > 0 else None
+    return out
+
+
+# --- Named lat-lon boxes (lon in 0-360, the target grid's convention) -------
+# ENSO indices are the standard CLIVAR definitions. Niño 3.4 is the one used
+# for ENSO state; Niño 3 and 4 separate the eastern cold-tongue bias from the
+# western warm-pool bias, which fail for different reasons in an ocean-only
+# run -- the cold tongue is upwelling/mixing, the warm pool is surface flux.
+_BOXES = {
+    "nino34_5S5N_170W120W": (-5.0, 5.0, 190.0, 240.0),
+    "nino3_5S5N_150W90W":   (-5.0, 5.0, 210.0, 270.0),
+    "nino4_5S5N_160E150W":  (-5.0, 5.0, 160.0, 210.0),
+    "eq_pacific_2S2N":      (-2.0, 2.0, 140.0, 280.0),
+}
+
+
+def _box_breakdown(fieldL, fieldN, area, tgt_lat, tgt_lon):
+    """Area-weighted stats over named lat-lon boxes (ENSO regions).
+
+    The latitude bands alone cannot answer "is the Pacific right": tropics
+    23S-23N averages the equatorial cold tongue together with both subtropical
+    gyres, so a cold-tongue error and an off-equatorial error of opposite sign
+    cancel in that number.
+    """
+    lat2d = tgt_lat[:, None] * np.ones((1, area.shape[1]))
+    lon2d = np.ones((area.shape[0], 1)) * tgt_lon[None, :]
+    out = {}
+    for name, (la, lb, lo, hi) in _BOXES.items():
+        m = (lat2d >= la) & (lat2d <= lb) & (lon2d >= lo) & (lon2d <= hi)
         a = area * m
         out[name] = _wstats(fieldL, fieldN, a) if a.sum() > 0 else None
     return out
@@ -319,6 +379,16 @@ def main() -> int:
         if bs is not None:
             print(f"   {bn:22s} rmse={bs['rmse']:.2f} bias={bs['bias']:+.2f} "
                   f"corr={bs['corr']:.3f}")
+    # ENSO boxes. Reported for SST only: the equatorial Pacific is where an
+    # ocean-only run's cold-tongue error lives, and the 23S-23N band average
+    # hides it by mixing the cold tongue with both subtropical gyres.
+    sst_boxes = _box_breakdown(sstL, sstN, area, tgt_lat, tgt_lon)
+    print("[SST Pacific/ENSO boxes]")
+    for bn, bs in sst_boxes.items():
+        if bs is not None:
+            print(f"   {bn:24s} rmse={bs['rmse']:.2f} bias={bs['bias']:+.2f} "
+                  f"corr={bs['corr']:.3f}")
+
     # Per-band SSS too (only when the freshwater closure is applied, --sss-faithful):
     # localises WHERE a global SSS bias comes from -- the river-mouth / Arctic /
     # basin breakdown that pinned the MPAS runoff over-concentration (PR #560).
@@ -333,7 +403,10 @@ def main() -> int:
 
     def _verdict(rmse, exc, good):
         return ("excellent" if rmse < exc else "good" if rmse < good else "poor")
-    sst_v = _verdict(sst["rmse"], _TOL["sst_rmse_excellent_C"], _TOL["sst_rmse_good_C"])
+    sst_v, capped_by = capped_sst_verdict(sst["rmse"], sst_boxes)
+    if capped_by is not None:
+        print(f"[verdict] SST capped to {sst_v} by {capped_by[0]} "
+              f"bias {capped_by[1]:+.2f} C")
     sss_v = (_verdict(sss["rmse"], _TOL["sss_rmse_excellent"], _TOL["sss_rmse_good"])
              if args.sss_faithful else None)
 
@@ -406,6 +479,7 @@ def main() -> int:
         "n_ocean_cells": int(ocean.sum()),
         "SST": sst, "SST_verdict": sst_v,
         "SST_bands": sst_bands,
+        "SST_pacific_boxes": sst_boxes,
         # SSS is a real scored metric when the run applied the freshwater closure
         # (--sss-faithful); otherwise the legacy informational-only gated key.
         **({"SSS": sss, "SSS_verdict": sss_v, "SSS_bands": sss_bands}

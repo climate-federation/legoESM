@@ -83,9 +83,20 @@ _spec.loader.exec_module(_bn2_alpha_compare)
 _read_dims = _bn2_alpha_compare._read_dims
 _load_haloed = _bn2_alpha_compare._load_haloed
 
+# #1455 (dump_lane selector): loaded the same sibling-module way as
+# bn2_alpha_compare above.
+_dl_path = os.path.join(os.path.dirname(__file__), "dump_lane.py")
+_dl_spec = importlib.util.spec_from_file_location("_dump_lane", _dl_path)
+dump_lane = importlib.util.module_from_spec(_dl_spec)
+sys.modules["_dump_lane"] = dump_lane
+_dl_spec.loader.exec_module(dump_lane)
+
 from legoesm.ocean.fidelity.time_levels import time_level_for_dump
 
-RUN_DIR = "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_GDB"
+# RUN_DIR comes from the shared DINO_1226_LANE-selected run dir, not a
+# hardcoded RUN_GDB path -- the default lane (gdb_y5) resolves to exactly
+# what was hardcoded here before.
+RUN_DIR = dump_lane.RUN_DIR
 FLOOR = 1.0e-12
 
 # Sill-flank column ranges named in the task (0-based interior i-index).
@@ -102,6 +113,7 @@ def _bottom_level(mask3: np.ndarray) -> np.ndarray:
 
 
 def main() -> int:
+    print(dump_lane.banner())
     for name in ("baro_dump_u_before.bin", "baro_dump_v_before.bin",
                  "baro_dump_u_after.bin", "baro_dump_v_after.bin"):
         lvl = time_level_for_dump(name)
