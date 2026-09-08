@@ -58,8 +58,9 @@ import sys, collections
 peak = collections.defaultdict(int)
 for line in open(sys.argv[1]):
     for tok in line.strip().split(' '):
-        if ',' in tok:
-            i, m = tok.split(','); peak[int(i)] = max(peak[int(i)], int(m))
+        i, _, m = tok.partition(',')
+        if i.strip().isdigit() and m.strip().isdigit():
+            peak[int(i)] = max(peak[int(i)], int(m))
 print(dict(sorted(peak.items())))
 EOF
 echo "=== DONE $(date) ==="; exit $rc

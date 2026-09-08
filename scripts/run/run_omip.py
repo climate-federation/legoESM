@@ -44,6 +44,26 @@ if _PROJECT_ROOT not in sys.path:
 import jax
 jax.config.update("jax_enable_x64", True)
 
+# Route-B multicontroller (jax.distributed): the federation MUST be up before
+# any JAX call that initialises the XLA backend, and the legoESM imports below
+# do exactly that at import time (legoesm.land.canopy.solver builds jnp.array
+# constants when imported) -- so the ``--multicontroller`` sniff happens HERE,
+# before them, not in main() (that later call is an idempotent no-op).  Same
+# argv-sniff pattern as run_omip_core2's ``--fp32``.  First ORCA12 route-B
+# smoke (16 GPUs) died on exactly this ordering.
+if "--multicontroller" in sys.argv[1:]:
+    from legoesm.parallel.early_init import init_multicontroller_distributed
+
+    def _argv_coordinator():
+        for i, a in enumerate(sys.argv[1:], start=1):
+            if a == "--coordinator" and i + 1 < len(sys.argv):
+                return sys.argv[i + 1]
+            if a.startswith("--coordinator="):
+                return a.split("=", 1)[1]
+        return None
+
+    init_multicontroller_distributed(_argv_coordinator())
+
 import jax.numpy as jnp
 import numpy as np
 
