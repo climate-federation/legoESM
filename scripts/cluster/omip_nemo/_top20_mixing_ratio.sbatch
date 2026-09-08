@@ -106,6 +106,42 @@ for b0, b1 in BANDS:
           f"momentum ours {mo:.3e} NEMO {mn:.3e} ratio {mo/mn:6.3f} | "
           f"Prandtl ours {mo/ko:5.2f} NEMO {mn/kn:5.2f}")
 
+# If our turbulence simply STOPS shallower than the oracle's, that shows up as a
+# turbulent-layer depth, and as a mixed-layer depth from temperature alone --
+# the second is independent of any diffusivity convention.
+KTURB = 1.0e-4
+def _depth_of_last(mask, zlev):
+    out = np.full(mask.shape[0], np.nan)
+    for i in range(mask.shape[0]):
+        idx = np.flatnonzero(mask[i])
+        if idx.size:
+            out[i] = zlev[idx[-1]]
+    return out
+turb_o = _depth_of_last(K > KTURB, zi)
+Tcol = np.asarray(z["T"])[box]
+zc_o = np.abs(np.asarray(z["z_center_ref"]))
+def _mld(Tc, zlev, dT=0.2):
+    out = np.full(Tc.shape[0], np.nan)
+    for i in range(Tc.shape[0]):
+        ref = Tc[i, 0]
+        idx = np.flatnonzero(np.abs(Tc[i] - ref) > dT)
+        out[i] = zlev[idx[0]] if idx.size else zlev[-1]
+    return out
+mld_o = _mld(Tcol, zc_o)
+turb_n, mld_n = [], []
+for t in range(nt):
+    a_ = np.ma.filled(avt[t], np.nan)[:, nbox].T
+    turb_n.append(np.nanmedian(_depth_of_last(a_ > KTURB, depw)))
+tt = np.ma.filled(d.variables["votemper"][0], np.nan)[:, nbox].T
+mld_n = _mld(tt, np.asarray(d.variables["deptht"][:]))
+print("\n=== how deep does the turbulence reach? (cold tongue) ===")
+print(f"  turbulent layer (K > {KTURB:g} m2/s): ours median {np.nanmedian(turb_o):6.1f} m"
+      f"   NEMO median {np.nanmedian(turb_n):6.1f} m")
+print(f"  mixed layer (|T - T_surf| > 0.2 K):   ours median {np.nanmedian(mld_o):6.1f} m"
+      f"   NEMO median {np.nanmedian(mld_n):6.1f} m")
+print("  (the second line uses temperature only, so it does not depend on any"
+      " diffusivity convention)")
+
 print("\n=== shortwave absorbed within 0-20 m, from each optics (GLM CRITICAL-1) ===")
 for tag, frac_ir, e_ir, e_vis in (("ours/NEMO RGB", 0.58, 0.35, 23.0),):
     f20 = frac_ir * (1 - np.exp(-20.0 / e_ir)) + (1 - frac_ir) * (1 - np.exp(-20.0 / e_vis))
