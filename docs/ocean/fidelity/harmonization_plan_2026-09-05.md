@@ -320,3 +320,27 @@ aux3d linkage and the minimum-level policy, not just counts.
   NEXT: the remaining candidate is vertical advection, reconnecting to the earlier box budget (return
   flow -13/-14 Sv at 50-150 m vs NEMO +4.6; NEMO's ascent 37 Sv uniform to 286 m; sigma0>=25 surfaces
   sinking 5-17 m where NEMO lifts 6-12 m). Put that to codex+GLM before any code.
+
+## 2026-09-08 — momentum mixing is NOT matched (codex CRITICAL, then measured)
+
+The 0-20 m mixing comparison had only ever been run on HEAT. Codex's review of
+the advection claim pointed out that a matched tracer diffusivity says nothing
+about the momentum one, and the momentum one is what sets the undercurrent.
+Extending the same probe (same box, same file, same hours) gives:
+
+| 0-20 m, cold tongue 220-240E | ours | NEMO daily mean | NEMO matched hour |
+|---|---|---|---|
+| tracer diffusivity [m2/s] | 2.55e-03 | 2.46e-03 | 1.58e-03 |
+| momentum diffusivity [m2/s] | 5.75e-03 | 1.01e-02 | 7.06e-03 |
+| momentum / tracer | 2.25 | 4.09 | — |
+
+So we mix heat correctly and momentum at roughly half strength, and the split
+between the two is off by a factor 1.8. This is the same closure the
+mixing-length mismatch lives in (our card runs choice 3 while ORCA1's namelist
+sets nn_mxl=2 = our choice 4), and it is a direct candidate for the weak
+undercurrent (0.20 vs 0.55 m/s at 220E). It does NOT reinstate enhanced
+diffusion: that refutation was arm vs control on identical cards.
+
+Also this day: the probe's 0-20 m heat-content block was DELETED rather than
+repaired. The two sides integrated to different actual depths and both were
+divided by a nominal 20 m, so its +5.16 K was the misalignment, not the ocean.
