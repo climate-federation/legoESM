@@ -25,12 +25,21 @@ echo "HEAD: $(git log --oneline -1)"
 export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
+export OURS_SNAP NEMO_FILE NEMO_RECS
 $PY - <<'PY2'
 import numpy as np, netCDF4 as nc
-OURS = ("/burg-archive/glab/users/pg2328/_evd_wt/results/omip_nemo/"
-        "trp_evd_d30/snapshot_day0015.npz")
-NEMO = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/"
-        "EXP00/RUN_TRD2/ORCA1_1h_20010101_20010101_trd1h_T.nc")
+import os
+# codex CRITICAL 2026-09-08: this was hard-coded to the EVD ARM's day-15 state
+# while its output was being read as the BASELINE at day 30. Both the snapshot
+# and the oracle file are now inputs, and the run prints which it used.
+OURS = os.environ.get("OURS_SNAP", "/burg-archive/glab/users/pg2328/legoESM/"
+                      "results/omip_nemo/trp_base2_d30/snapshot_day0030.npz")
+NEMO = os.environ.get("NEMO_FILE", "/burg-archive/glab/users/pg2328/nemo_orca1/"
+                      "nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_TRD2/"
+                      "ORCA1_1h_20010101_20010101_trd1h_T.nc")
+NEMO_RECS = os.environ.get("NEMO_RECS", "")   # "" = every record
+print(f"[inputs] ours  {OURS}")
+print(f"[inputs] NEMO  {NEMO}  records {NEMO_RECS or 'all'}")
 LO, HI, HW = 220.0, 240.0, 2.0
 # GLM's mechanism (2026-09-08) says the momentum-mixing gap that matters for the
 # undercurrent is the DEEP one, not the 0-20 m one; measure both bands.
@@ -51,23 +60,32 @@ k_ours_mean = np.nanmean(K[:, sel_i])
 m_ours = np.nanmedian(KM[:, sel_i])
 
 d = nc.Dataset(NEMO)
-nlat = d.variables["nav_lat_grid_T"][:]; nlon = d.variables["nav_lon_grid_T"][:] % 360.0
+_la = "nav_lat_grid_T" if "nav_lat_grid_T" in d.variables else "nav_lat"
+_lo = "nav_lon_grid_T" if "nav_lon_grid_T" in d.variables else "nav_lon"
+nlat = d.variables[_la][:]; nlon = d.variables[_lo][:] % 360.0
 nbox = (np.abs(nlat) <= HW) & (nlon >= LO) & (nlon < HI)
 depw = d.variables["depthw"][:]
 avt = d.variables["avt"]
 avm = d.variables["avm"] if "avm" in d.variables else None
 selw = depw <= 20.0
-nt = avt.shape[0]
+_recs = ([int(x) for x in NEMO_RECS.split(",")] if NEMO_RECS
+         else list(range(avt.shape[0])))
+nt = len(_recs)
 utc = np.arange(nt) + 0.5
 loc = (utc + (LO + HI) / 2.0 / 15.0) % 24.0
 k_nemo_h, m_nemo_h = [], []
-for t in range(nt):
+for _i, t in enumerate(_recs):
     a = np.ma.filled(avt[t][selw], np.nan)[:, nbox]
     k_nemo_h.append(np.nanmedian(a))
     if avm is not None:
         m_nemo_h.append(np.nanmedian(np.ma.filled(avm[t][selw], np.nan)[:, nbox]))
 k_nemo_h = np.array(k_nemo_h); m_nemo_h = np.array(m_nemo_h)
-aft = (loc >= 14) & (loc < 18)
+# The local-hour split is meaningless unless the file actually resolves a day.
+DIURNAL = nt >= 12
+aft = (loc >= 14) & (loc < 18) if DIURNAL else np.ones(nt, bool)
+if not DIURNAL:
+    print(f"[note] {nt} record(s): no diurnal resolution, so every 'matched hour' "
+          "column below repeats the record mean -- read the daily column only.")
 
 print("\n=== 0-20 m TRACER diffusivity, cold tongue ===")
 print(f"  ours   (00Z snapshot = mid-afternoon local): median {k_ours:.3e}  mean {k_ours_mean:.3e} m2/s")
@@ -129,10 +147,11 @@ def _mld(Tc, zlev, dT=0.2):
     return out
 mld_o = _mld(Tcol, zc_o)
 turb_n, mld_n = [], []
-for t in range(nt):
+for _i, t in enumerate(_recs):
     a_ = np.ma.filled(avt[t], np.nan)[:, nbox].T
     turb_n.append(np.nanmedian(_depth_of_last(a_ > KTURB, depw)))
-tt = np.ma.filled(d.variables["votemper"][0], np.nan)[:, nbox].T
+_tv = next(v for v in ("votemper", "to", "thetao") if v in d.variables)
+tt = np.ma.filled(d.variables[_tv][_recs[0]], np.nan)[:, nbox].T
 mld_n = _mld(tt, np.asarray(d.variables["deptht"][:]))
 print("\n=== how deep does the turbulence reach? (cold tongue) ===")
 print(f"  turbulent layer (K > {KTURB:g} m2/s): ours median {np.nanmedian(turb_o):6.1f} m"

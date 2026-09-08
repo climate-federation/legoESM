@@ -440,3 +440,38 @@ consequent warning is worth carrying into the arm's reading: the mixing-length
 flip could pass its 0.2 gate through the back door (deeper mixing lowers N2,
 which lowers Ri, which unclamps the limiter), so the arm should ALSO be read on
 whether the 20-60 m Prandtl number closes toward 1-2.
+
+### ★2026-09-08 — CORRECTION: the band numbers were the EVD ARM at day 15, not the baseline at day 30
+
+Codex found it: the band card hard-coded the EVD arm's day-15 snapshot while I
+read its output as the production baseline at day 30, and compared it against a
+NEMO hourly file from a DIFFERENT YEAR (RUN_TRD2 is 2001; our run window and the
+GATEWAY files are 2000). Both halves of the comparison were mislabelled. The
+card now takes the snapshot, the oracle file and the record selection as inputs
+and prints all three.
+
+Redone on the production baseline at day 30 against the MATCHED 5-day window
+(GATEWAY grid_W record 5):
+
+| band | tracer ours | tracer NEMO | momentum ours | momentum NEMO | Prandtl ours / NEMO |
+|---|---|---|---|---|---|
+| 0-20 m | 3.38e-05 | 1.54e+01 | 1.38e-04 | 2.36e-02 | 4.09 / ~0 |
+| 20-60 m | 2.60e-07 | 1.93e-03 | 2.95e-06 | 2.37e-03 | 11.38 / 1.23 |
+| 60-160 m | 1.68e-07 | 6.21e-07 | 2.95e-06 | 2.02e-06 | 17.49 / 3.25 |
+
+WHAT CHANGES, stated plainly:
+- "0-20 m mixing is matched (1.02)" is WITHDRAWN. That was the EVD arm, whose
+  near-surface diffusivity is 75x the baseline's (2.55e-03 against 3.38e-05)
+  precisely because enhanced diffusion was on. Our BASELINE mixes far less than
+  the oracle at every depth.
+- The oracle's 5-day MEAN diffusivity at 0-20 m is 15 m2/s. That is not a
+  turbulence strength, it is the average of a knob that fires at 100 m2/s on
+  most nights, so a ratio against it measures nothing. Means of intermittent
+  diffusivities are not diffusivities.
+- WHAT SURVIVES BOTH COMPARISONS, and is the defensible claim: at 20-60 m our
+  mixing is orders of magnitude weaker than the oracle's, and our Prandtl number
+  is far too high (11.4 or 6.9 against its 1.2). The DIRECTION is robust; the
+  "one percent" figure is NOT, and should not be repeated.
+
+Status of the claim is downgraded from CONFIRMED to PLAUSIBLE pending a
+comparison in which both sides resolve the intermittency.
