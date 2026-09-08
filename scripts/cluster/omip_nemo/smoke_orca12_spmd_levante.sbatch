@@ -39,7 +39,10 @@ echo "mesh: $M (sha256 in $M/SHA256SUMS)"; cat $M/PROVENANCE.txt
 ( while true; do nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits | tr '\n' ' '; echo; sleep 15; done ) > $OUT/gpumem_node0.txt &
 MON=$!
 t0=$(date +%s)
+# per-rank stderr files: the failing rank's real XLA error (OOM etc.) survives
+# the coordination-service teardown noise in the aggregated log.
 srun --ntasks=$NGPU --ntasks-per-node=4 --gpus-per-node=4 --gpu-bind=none --kill-on-bad-exit=1 \
+  --error="$OUT/rank_%t.err" \
   "$PY" scripts/run/run_omip.py --grid tripole \
     --tripole-mesh "$M/mesh_hgr.nc:$M/mesh_zgr.nc:$M/mask.nc" --tripole-strip-north-rows 1 \
     --tripole-fold-convention "(n_lon-i)%n_lon" \
