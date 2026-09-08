@@ -125,3 +125,40 @@ mixing at 20-60 m falls short. **The eddy arm should therefore NOT be
 pre-registered to fix the mixing collapse.** It is a thermocline-and-undercurrent
 test. The mixing collapse needs its own explanation, and the floor observation
 above is the first hard evidence about it.
+
+### ★★★ The profile, level by level: our turbulence dies at 18 m
+
+Median over the 220 cold-tongue columns, our production baseline at day 30:
+
+| depth | K_M | K_H |
+|---|---|---|
+| 1.02 m | 4.25e-03 | 4.25e-04 |
+| 5.83 m | 6.23e-05 | 1.86e-05 |
+| 10.77 m | 9.07e-06 | 1.12e-06 |
+| 15.22 m | 3.02e-06 | 6.89e-07 |
+| **17.93 m** | **2.9929e-06** | 3.49e-07 |
+| 24.60 m | 2.9607e-06 | 2.47e-07 |
+| 50.45 m | 2.9486e-06 | 2.44e-07 |
+| 102.42 m | 2.9467e-06 | 1.70e-07 |
+| 155.10 m | 2.9469e-06 | 1.60e-07 |
+
+From 18 m to 155 m the momentum diffusivity is FLAT TO FOUR SIGNIFICANT FIGURES
+across 140 m of ocean. No closure does that. It is the background (the molecular
+1.4e-6 both sides force under internal-wave mixing, plus the wave field's own
+contribution), and our TKE closure contributes essentially nothing below 18 m.
+The oracle in the same band carries 1.9e-03, roughly five thousand times more.
+
+The floors are NOT the difference and must not be blamed: our card takes them
+from the oracle's own code path (internal-wave mixing forces the TKE floor to
+1e-10 and the mixing-length floor to 1e-3, overriding the TKE namelist), and an
+earlier campaign step showed that NOT applying them pinned our equatorial
+turbulence a hundredfold too high and damped the undercurrent. Both sides run
+the same floors. What differs is that the oracle's closure is PRODUCING
+turbulence at these depths and ours is not.
+
+That makes the queued shear arm the right next test: shear production is the
+term that should be sustaining turbulence there, and it is the one row of the
+closure still discretised differently from the oracle. It also explains why the
+system is hard to shift -- with the diffusivity at background, the TKE equation's
+own downward transport is proportional to that same tiny coefficient, so the
+quiet state sustains itself.
