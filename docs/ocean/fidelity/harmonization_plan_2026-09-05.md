@@ -305,3 +305,18 @@ aux3d linkage and the minimum-level policy, not just counts.
   Preflight also confirmed the resolved config is exactly the NEMO trigger and that the instrument
   discriminates: over a full diurnal cycle on the spin-up state, cold-tongue firing 0.61 mean / 0.77
   max at the first interface, 0.81 over the top three, global 0.31.
+- 2026-09-08 02:50 CONVECTION ARM CLOSED, NEGATIVE, AND THE FOLLOW-UP CLAIM CLOSED TOO. (1) The 30-day
+  arm met its pre-registered REFUTE condition: lens 3.87 vs control 3.80 vs NEMO 0.76, every regional
+  band identical to 2 dp, while firing (0.60 nightly) and delivery (24.0% of wet columns at >=50 m2/s,
+  max 101.8, control 0.000%) were both confirmed. The inversions it acts on are ~1e-6 K (control
+  1.4e-3, max 0.01 anywhere), so the firing fraction flattered it. (2) The diurnal pair removes the
+  last caveat: scheme on and off give identical cycles at every hour (min 2.15 both), our amplitude
+  0.43-0.52 matches NEMO's 0.45, and the gap is a 1.75 K offset around the clock. (3) The reframing
+  that suggested ("top-20 m mixing deficit") is refuted by GLM's own discriminator: 0-20 m tracer
+  diffusivity ratio 1.04 (daily) / 1.62 (matched hour) -- our mixing is equal or stronger.
+  INSTRUMENT WARNING: that probe's heat-content line does not align layer thicknesses; do not quote it.
+  CODEX CRITICAL, open: the card's mixing-length choice differs from ORCA1's namelist, weakening
+  ours-vs-oracle attribution for mixing questions (decision item 4, recommended to the user).
+  NEXT: the remaining candidate is vertical advection, reconnecting to the earlier box budget (return
+  flow -13/-14 Sv at 50-150 m vs NEMO +4.6; NEMO's ascent 37 Sv uniform to 286 m; sigma0>=25 surfaces
+  sinking 5-17 m where NEMO lifts 6-12 m). Put that to codex+GLM before any code.
