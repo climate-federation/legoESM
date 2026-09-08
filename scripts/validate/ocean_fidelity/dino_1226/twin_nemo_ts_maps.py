@@ -394,7 +394,7 @@ def load_run_dino_snapshot(run_dir: Path, day: int):
     require(run_dir.is_dir(), f"missing run directory {run_dir}")
     paths = sorted((run_dir / "snapshots").glob("snapshot_*.npz"))
     require(bool(paths), f"no snapshots under {run_dir / 'snapshots'}")
-    chosen, times = None, []
+    chosen, chosen_days, times = None, None, []
     for path in paths:
         with np.load(path, allow_pickle=False) as snap:
             t_days = float(np.asarray(snap["time_days"]))
@@ -402,7 +402,7 @@ def load_run_dino_snapshot(run_dir: Path, day: int):
         if abs(t_days - day) < 0.5:
             require(chosen is None,
                     f"two snapshots claim day {day}: {chosen} and {path}")
-            chosen = path
+            chosen, chosen_days = path, t_days
     require(chosen is not None,
             f"no snapshot at day {day} in {run_dir}; have days {times}")
 
@@ -430,12 +430,22 @@ def load_run_dino_snapshot(run_dir: Path, day: int):
         out[..., :value.shape[2]] = value.astype(np.float64)
         return out
 
+    # The arm producer carries a `stable` stamp; a run_dino snapshot does not,
+    # so stability is CHECKED here instead of trusted -- finite everywhere wet,
+    # and a temperature inside a range no DINO run can leave while healthy.
+    # (`run_dino.py` writes no git sha into run_metadata.json, so producer_git_sha
+    # can be "unknown"; producer_sha256 pins the exact bytes scored regardless.)
     wet = raw["land_mask"] > 0.5
     for name in ("T", "S"):
         require(np.isfinite(raw[name][wet]).all(),
                 f"snapshot {name} is not finite on wet columns -- the run "
                 "was unstable and must not be scored")
     require(np.isfinite(raw["eta"][wet]).all(), "snapshot eta is not finite")
+    t_wet = raw["T"][wet]
+    require(float(t_wet.min()) > -5.0 and float(t_wet.max()) < 45.0,
+            f"snapshot T spans [{float(t_wet.min()):.2f}, "
+            f"{float(t_wet.max()):.2f}] degC on wet cells -- outside any "
+            "healthy DINO state; the run was unstable and must not be scored")
     return (to36(raw["T"]), to36(raw["S"]),
             raw["eta"].astype(np.float64),
             raw["land_mask"].astype(np.float64),
@@ -444,7 +454,13 @@ def load_run_dino_snapshot(run_dir: Path, day: int):
              "producer_sha256": sha256(chosen),
              "producer_git_sha": str(meta.get("git_sha", "unknown")),
              "producer_run_metadata": str(meta_path) if meta else "absent",
-             "snapshot_time_days": float(day),
+             # The snapshot's OWN clock, not the requested day. --day selects
+             # within +/-0.5 d, and the NEMO side is pinned by --nemo-kt, so
+             # recording the request here would hide a half-day offset between
+             # the two states being differenced.
+             "snapshot_time_days": float(chosen_days),
+             "requested_day": float(day),
+             "snapshot_day_offset_days": float(chosen_days - day),
              "control_dtype": field_dtypes["T"],
              "field_dtypes": field_dtypes,
              "upcast_to_float64_for_scoring": True,

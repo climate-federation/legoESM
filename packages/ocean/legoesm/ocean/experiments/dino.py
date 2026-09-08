@@ -2736,8 +2736,20 @@ def nemo_faithful_dino_config(base: DINOConfig | None = None) -> DINOConfig:
     )
 
 
-@_lru_cache(maxsize=1)
 def nemo_faithful_dino_domain():
+    """See :func:`_nemo_faithful_dino_domain`; keyed on the precision policy.
+
+    The cache MUST be keyed on the storage dtype: the bridge builds its arrays
+    at whatever policy is live on the first call, and a bare ``lru_cache()``
+    would then hand a float32 domain back to a caller that had since selected
+    fp64 (or the reverse) -- silently, and with the two never comparable.
+    """
+    from legoesm.core.precision import get_policy
+    return _nemo_faithful_dino_domain(get_policy().storage)
+
+
+@_lru_cache(maxsize=4)
+def _nemo_faithful_dino_domain(_storage_dtype):
     """NEMO's DINO domain (geometry, vertical coordinate, land mask), analytic.
 
     Builds NEMO's mesh from its own namelist with
@@ -2751,8 +2763,10 @@ def nemo_faithful_dino_domain():
     face-mask conventions are then the certified ones by construction, not a
     second implementation that has to be kept in step.
 
-    Cached because the mesh depends only on NEMO's fixed DINO R1 namelist, and
-    the three driver entry points below each need it.
+    Cached on the precision policy's storage dtype: the MESH depends only on
+    NEMO's fixed DINO R1 namelist, but the arrays the bridge builds from it are
+    stored at the live policy, and the three driver entry points below each
+    need the same one.
 
     Returns
     -------

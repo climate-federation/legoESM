@@ -109,13 +109,17 @@ class Table:
         mx = float(np.max(np.abs(built.astype(np.float64)
                                  - oracle.astype(np.float64)))) if ne else 0.0
         # ulp is only meaningful for a ROUNDING-scale gap; a whole-value
-        # difference would print a meaningless 4.6e18 int-view distance.
-        ulp = (_ulp(built, oracle)
-               if ne and np.issubdtype(built.dtype, np.floating)
-               and mx < 1e-9 else 0)
+        # difference would print a meaningless 4.6e18 int-view distance, so it
+        # is reported as 0 there.  ``rounding_scale`` therefore has to gate the
+        # WAIVER as well: without it a zeroed, doubled or hemisphere-flipped
+        # ff_f (max|d| ~ 1.4e-04, i.e. 100% wrong) got ulp=0 and passed
+        # ``0 <= FF_ULP_WAIVER``.  The waiver is a BOUND, not an escape hatch.
+        rounding_scale = (ne and np.issubdtype(built.dtype, np.floating)
+                          and mx < 1e-9)
+        ulp = _ulp(built, oracle) if rounding_scale else 0
         verdict = "EXACT"
         if ne:
-            if ulp_waiver and ulp <= ulp_waiver:
+            if ulp_waiver and rounding_scale and ulp <= ulp_waiver:
                 verdict = f"WAIVED<={ulp_waiver}ulp"
             else:
                 verdict = "FAIL"
@@ -142,7 +146,7 @@ def main() -> int:
 
     from legoesm.ocean.experiments import dino as dino_mod
     from legoesm.ocean.fidelity import nemo_dino_mesh as ndm
-    from legoesm.ocean.fidelity.nemo_io import read_nemo_mesh_mask
+    from legoesm.ocean.fidelity.nemo_io import read_nemo_mesh_mask  # noqa: F401
 
     if args.plant:
         _true = ndm.nemo_dino_mesh
@@ -163,7 +167,7 @@ def main() -> int:
             return g._replace(tmask=tm, umask=um, vmask=vm)
 
         ndm.nemo_dino_mesh = _planted
-        dino_mod.nemo_faithful_dino_domain.cache_clear()
+        dino_mod._nemo_faithful_dino_domain.cache_clear()
         print("PLANT ACTIVE: one interior surface cell flipped\n")
 
     sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
@@ -212,10 +216,14 @@ def main() -> int:
                                    (n_lat, n_lon, jpk)), O3(f))
     # e3tw_to_other_e3 (zgr_lib.F90:206-264): column averages of a
     # horizontally-uniform ladder, so u/v/f/uw/vw equal e3t_0 / e3w_0.
-    for f, src in (("e3u_0", "e3t_0"), ("e3v_0", "e3t_0"), ("e3f_0", "e3t_0"),
-                   ("e3uw_0", "e3w_0"), ("e3vw_0", "e3w_0")):
+    for f, src in (("e3f_0", "e3t_0"), ("e3uw_0", "e3w_0"), ("e3vw_0", "e3w_0")):
         t.check(f, np.broadcast_to(lad[src][None, None, :],
                                    (n_lat, n_lon, jpk)), O3(f))
+    # e3u_0/e3v_0 are checked as the ARRAYS THE NemoGrid CARRIES, not as the
+    # ladder they were built from: the two are only the same if the assembly
+    # into NemoGrid is also right, and this is the gate's only sight of it.
+    t.check("e3u_0", g.e3u_0, O3("e3u_0"))
+    t.check("e3v_0", g.e3v_0, O3("e3v_0"))
     t.check("tmask", g.tmask, O3("tmask"))
     t.check("umask", g.umask, O3("umask"))
     t.check("vmask", g.vmask, O3("vmask"))
@@ -245,6 +253,14 @@ def main() -> int:
     # A non-constant here would mean the run was NOT the config we transcribe.
     t.check("misf", np.ones((n_lat, n_lon), dtype=np.int32), O("misf"))
     t.check("stiffness", np.zeros((n_lat, n_lon)), O("stiffness"))
+    # hu_0/hv_0 are DERIVED, not dumped (nemo_io.py:174-188 sums e3u_0*umask),
+    # so the oracle side is the file-read NemoGrid rather than a mesh_mask
+    # variable -- but they still have to be checked, because two probes read
+    # them (momentum_jacobian_probe.py, acc_momentum_budget.py) and nothing
+    # else in this gate would notice them zeroed or swapped.
+    _fg = read_nemo_mesh_mask(args.mesh_mask, nn_hls=0)
+    for f in ("hu_0", "hv_0"):
+        t.check(f, getattr(g, f), getattr(_fg, f))
     t.report()
 
     checked = {r[0] for r in t.rows}
@@ -265,8 +281,12 @@ def main() -> int:
     grid = dino_mod.dino_lat_lon_grid(cfg)
     z = dino_mod.dino_lat_lon_vertical(grid, cfg)
     st = dino_mod.dino_lat_lon_state(grid, z, cfg)
+    from legoesm.core.precision import get_policy
     print(f"  built {type(grid).__name__} {grid.n_lat}x{grid.n_lon}, "
           f"{z.n_levels} levels, dtype {np.asarray(grid.lat).dtype}")
+    print(f"  precision policy storage={get_policy().storage.__name__} -- this "
+          "section certifies the CONSTRUCTION, not the storage: run_dino.py "
+          "sets no policy, so a RUN builds the same mesh at float32.")
 
     # (a) identical to the domain the certified twin gets from the FILE, leaf
     #     for leaf -- the strongest statement of "no second convention".

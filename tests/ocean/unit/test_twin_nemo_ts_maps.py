@@ -47,3 +47,91 @@ def test_argmax_locator_reports_indices_coordinates_depth_and_sign():
 def test_cli_self_test_requires_no_oracle_inputs(capsys):
     assert M.main(["--self-test"]) == 0
     assert '"passed": true' in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# --run-dino-dir : the second producer (added with the DINO true-frame fix).
+# Synthetic run directories, so these run anywhere -- no NEMO file, no GPU.
+# ---------------------------------------------------------------------------
+
+def _write_run(tmp_path, *, days=(0.0, 360.0), shape=(199, 52), nlev=36,
+               t_fill=10.0):
+    import numpy as np
+    snaps = tmp_path / "snapshots"
+    snaps.mkdir(parents=True, exist_ok=True)
+    for i, d in enumerate(days):
+        np.savez(
+            snaps / f"snapshot_{i:05d}.npz",
+            time_days=np.float64(d), time_seconds=np.float64(d * 86400.0),
+            T=np.full((*shape, nlev), t_fill, dtype=np.float32),
+            S=np.full((*shape, nlev), 35.0, dtype=np.float32),
+            eta=np.zeros(shape, dtype=np.float32),
+            land_mask=np.ones(shape, dtype=np.float32),
+        )
+    return tmp_path
+
+
+def test_run_dino_loader_returns_the_full_nemo_frame_in_fp64(tmp_path):
+    import numpy as np
+    run = _write_run(tmp_path / "run")
+    T, S, ssh, land, stamps = M.load_run_dino_snapshot(run, 360)
+    assert T.shape == (199, 52, 36) and S.shape == (199, 52, 36)
+    assert ssh.shape == (199, 52) and land.shape == (199, 52)
+    assert T.dtype == S.dtype == np.float64
+    # The SOURCE dtype is reported truthfully rather than asserted to be fp64.
+    assert stamps["field_dtypes"]["T"] == "float32"
+    assert stamps["upcast_to_float64_for_scoring"] is True
+    assert stamps["producer"] == "run_dino_snapshot"
+    assert stamps["snapshot_time_days"] == 360.0
+
+
+def test_run_dino_loader_pads_a_short_ladder_to_nemos_36_levels(tmp_path):
+    import numpy as np
+    run = _write_run(tmp_path / "run35", nlev=35)
+    T, _S, _ssh, _land, stamps = M.load_run_dino_snapshot(run, 360)
+    assert T.shape[2] == 36
+    assert stamps["vertical_zero_pad_to_36_levels"] == 1
+    # The pad is zeros, i.e. only ever compared against NEMO's dry 36th level.
+    assert np.array_equal(T[..., 35], np.zeros((199, 52)))
+    assert np.allclose(T[..., 34], 10.0)
+
+
+def test_run_dino_loader_refuses_a_non_nemo_frame(tmp_path):
+    # The whole point of the frame fix: a 48x195 run must not be silently
+    # pasted into NEMO's domain.
+    run = _write_run(tmp_path / "old", shape=(195, 48), nlev=35)
+    with pytest.raises(RuntimeError, match="nemo-faithful-grid"):
+        M.load_run_dino_snapshot(run, 360)
+
+
+def test_run_dino_loader_refuses_a_missing_day(tmp_path):
+    run = _write_run(tmp_path / "run")
+    with pytest.raises(RuntimeError, match="no snapshot at day"):
+        M.load_run_dino_snapshot(run, 180)
+
+
+def test_run_dino_loader_refuses_an_unstable_run(tmp_path):
+    import numpy as np
+    run = _write_run(tmp_path / "nan")
+    bad = run / "snapshots" / "snapshot_00001.npz"
+    with np.load(bad) as z:
+        fields = {k: z[k] for k in z.files}
+    fields["T"] = fields["T"].copy()
+    fields["T"][10, 10, 0] = np.nan
+    np.savez(bad, **fields)
+    with pytest.raises(RuntimeError, match="not finite"):
+        M.load_run_dino_snapshot(run, 360)
+    # ...and a finite but unphysical state is refused too (no `stable` stamp
+    # exists on this producer, so the check has to be made here).
+    run2 = _write_run(tmp_path / "hot", t_fill=1e3)
+    with pytest.raises(RuntimeError, match="unstable"):
+        M.load_run_dino_snapshot(run2, 360)
+
+
+def test_arm_and_run_dino_readers_meet_at_one_scoring_path():
+    # `load_candidate` is the only fork; if a second scoring path appeared,
+    # one of these would stop being a pure reader.
+    import inspect
+    src = inspect.getsource(M.load_candidate)
+    assert "load_run_dino_snapshot" in src and "load_arm_npz" in src
+    assert "error_stats" not in src and "save_figures" not in src
