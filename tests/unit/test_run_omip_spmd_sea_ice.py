@@ -172,3 +172,27 @@ def test_run_loop_refuses_spmd_ice_without_gather_hook():
             None, None, "latlon", None, None, 600.0, 1, 1,
             jra55_state=js, spmd_step=object(), spmd_gather=None,
             spmd_gather_ice=None)
+
+
+def test_host_numpy_regrid_matches_device_regrid():
+    """The multi-process JRA55 regrid is done in NumPy on the host (byte-identical
+    across processes by construction); it must equal the device regrid_scalar
+    used by the single-process path to round-off."""
+    import jax.numpy as jnp
+    import numpy as np
+    from legoesm.grids.regridding import (
+        compute_latlon_to_voronoi_weights, regrid_scalar)
+    src_lat = np.deg2rad(np.linspace(-89, 89, 18))
+    src_lon = np.deg2rad(np.arange(0, 360, 10.0))
+    tgt_lat = np.deg2rad(np.linspace(-60, 60, 7)[:, None] * np.ones((1, 9)))
+    tgt_lon = np.deg2rad(np.linspace(5, 355, 9)[None, :] * np.ones((7, 1)))
+    rw = compute_latlon_to_voronoi_weights(src_lat, src_lon, tgt_lat.ravel(),
+                                           tgt_lon.ravel())
+    rw = rw._replace(target_shape=tgt_lat.shape)
+    recs = np.random.default_rng(1).standard_normal((3, 18, 36))
+    ref = np.stack([np.asarray(regrid_scalar(jnp.asarray(r), rw)) for r in recs])
+    flat = recs.reshape(3, -1)
+    out = (flat[:, np.asarray(rw.src_indices)]
+           * np.asarray(rw.weights, dtype=np.float64)[None]).sum(axis=-1)
+    out = out.reshape((3,) + tuple(rw.target_shape))
+    np.testing.assert_allclose(out, ref, rtol=1e-12)

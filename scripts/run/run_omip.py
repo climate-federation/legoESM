@@ -2739,12 +2739,30 @@ def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
     if "regrid_weights" in jra55_state:
         from legoesm.grids.regridding import regrid_scalar
         rw = jra55_state["regrid_weights"]
-        for var in raw_stack:
-            raw_stack[var] = jnp.stack([
-                regrid_scalar(raw_stack[var][i], rw)
-                for i in range(raw_stack[var].shape[0])
-            ])
-
+        # Route-B multicontroller: every process builds this stack itself and
+        # shard_forcing_stack_latlon then REQUIRES the bytes to agree across
+        # processes.  The k=4 IDW regrid is a gather + tiny float reduction;
+        # in the 16-GPU ORCA12 smoke (job 27324638) its GPU results differed
+        # across processes (all 10 leaves), while an identical standalone build
+        # agreed across CPU processes, GPUs and nodes -- the divergence is not
+        # located yet, so under multi-process the regrid is done in NumPy on
+        # the host (deterministic by construction, no device transfers); the
+        # single-process path keeps the GPU regrid byte-unchanged.
+        if jax.process_count() > 1:
+            _idx = np.asarray(rw.src_indices)
+            _w = np.asarray(rw.weights, dtype=np.float64)
+            for var in raw_stack:
+                recs = np.asarray(raw_stack[var], dtype=np.float64)
+                flat = recs.reshape(recs.shape[0], -1)
+                out = (flat[:, _idx] * _w[None]).sum(axis=-1)
+                raw_stack[var] = jnp.asarray(
+                    out.reshape((recs.shape[0],) + tuple(rw.target_shape)))
+        else:
+            for var in raw_stack:
+                raw_stack[var] = jnp.stack([
+                    regrid_scalar(raw_stack[var][i], rw)
+                    for i in range(raw_stack[var].shape[0])
+                ])
     runoff_stack = _route_runoff_stack(
         raw_stack["friver"], jra55_state.get("runoff_map"))
 
@@ -5445,6 +5463,22 @@ def run_omip_single(grid_type: str, args) -> dict:
             # layout helper — see shard_forcing_stack_latlon).
             spmd_shard_stack = partial(
                 shard_forcing_stack_latlon, mesh=_dev.mesh)
+            if _multi:
+                # Per-rank digests of the per-process build inputs the forcing
+                # gate (shard_forcing_stack_latlon) later requires to agree:
+                # when it fires, these lines say WHICH upstream object differed.
+                from legoesm.parallel.geometry_consistency import leaf_digest48
+                _d = {"lat_T": leaf_digest48(grid.lat_T),
+                      "lon_T": leaf_digest48(grid.lon_T),
+                      "land_mask": leaf_digest48(state.land_mask.data)
+                      if jax.process_count() == 1 else float("nan")}
+                _rw = (jra55_state or {}).get("regrid_weights")
+                if _rw is not None:
+                    _d["regrid_idx"] = leaf_digest48(_rw.src_indices)
+                    _d["regrid_w"] = leaf_digest48(_rw.weights)
+                print(f"  [rank {jax.process_index()}] SPMD build digests: "
+                      + " ".join(f"{k}={int(v) if v == v else 'sharded'}"
+                                 for k, v in _d.items()), flush=True)
             if jax.process_index() == 0:
                 _lane = "route-B multicontroller" if _multi else "single-controller"
                 print(f"  SPMD ({_lane}): lat-band sharded dynamics step over "
