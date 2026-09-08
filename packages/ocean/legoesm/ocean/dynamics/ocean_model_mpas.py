@@ -889,7 +889,12 @@ class MPASOceanModel:
             from legoesm.parallel.voronoi_mpi import (
                 get_active_voronoi_layout,
             )
-            if (get_active_voronoi_layout() is None
+            # The SPMD lane (voronoi_spmd_ocean) threads its owned mask +
+            # psum reducer through halo_refresh instead of an MPI layout;
+            # its distributed PCG is the same solver, so the layout-less
+            # refusal applies only when neither context exists.
+            _hr_spmd = getattr(halo_refresh, "owned_mask_cells", None) is not None
+            if (get_active_voronoi_layout() is None and not _hr_spmd
                     and (is_multi_process() or mpi_world_size() > 1)):
                 raise NotImplementedError(
                     "barotropic_solver='implicit_cn' under multi-rank MPAS "

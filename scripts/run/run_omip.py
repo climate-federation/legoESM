@@ -775,13 +775,14 @@ def parse_args(argv: list[str] | None = None):
                    ))
     p.add_argument("--multicontroller", action="store_true", default=False,
                    help=(
-                       "Promote --enable-latlon-spmd to ROUTE-B "
-                       "(jax.distributed, cross-process NCCL): the lat-band "
-                       "ocean mesh spans ALL global devices, one band per "
-                       "device across every process — the multi-node OMIP "
-                       "lane. Single-controller (one process, local devices) "
+                       "Promote --enable-latlon-spmd / --enable-mpas-spmd to "
+                       "ROUTE-B (jax.distributed, cross-process NCCL): the "
+                       "ocean device mesh spans ALL global devices, one band "
+                       "(lat-lon) or one owned cell block (MPAS) per device "
+                       "across every process — the multi-node OMIP lane. "
+                       "Single-controller (one process, local devices) "
                        "is the default when this is off. Requires --grid "
-                       "latlon. Launch under SLURM/mpiexec with one process "
+                       "latlon or mpas. Launch under SLURM/mpiexec with one process "
                        "per GPU; only rank 0 writes restarts/output."
                    ))
     p.add_argument("--coordinator", type=str, default=None,
@@ -5445,34 +5446,41 @@ def run_omip_single(grid_type: str, args) -> dict:
                       f"{len(_layout.ppermute_perms)}.")
         elif jax.process_index() == 0:
             print("  SPMD (mpas): single device visible — flag is a no-op.")
-    state, diag, wall_time, ok, blowup_info = _run_omip_loop(
-        model, state, grid_type, grid, z_coord,
-        dt, n_steps, diag_every,
-        label=f"{grid_type}/{resolution}",
-        restoring_targets=restoring_targets,
-        restoring_tau_s=restoring_tau_s,
-        restoring_ramp_days=ramp_days_eff,
-        jra55_state=jra55_state,
-        checkpoint_days=checkpoint_days,
-        checkpoint_dir=checkpoint_dir,
-        max_wallclock_seconds=run_config.max_wallclock_seconds,
-        restart_buffer_seconds=run_config.restart_buffer_seconds,
-        start_step=start_step,
-        nudge_woa_tau=args.nudge_woa_tau,
-        T_woa_3d=(T_woa * state.land_mask.data[..., jnp.newaxis]).astype(
-            state.T.data.dtype) if args.nudge_woa_tau > 0 and T_woa is not None else None,
-        S_woa_3d=(S_woa * state.land_mask.data[..., jnp.newaxis]).astype(
-            state.S.data.dtype) if args.nudge_woa_tau > 0 and S_woa is not None else None,
-        snapshot_fn=_snapshot_fn,
-        spmd_step=spmd_step,
-        spmd_gather=spmd_gather,
-        spmd_shard_stack=spmd_shard_stack,
-    )
-    if spmd_gather is not None:
-        # Downstream report/plot/save paths expect the full (n_lat+1)
-        # staggered v layout, not the sharded v_lower carry.  Every rank
-        # dispatches this gather (it is a collective); only rank 0 writes.
-        state = spmd_gather(state)
+    # Disarm the process-global SPMD backend on EVERY exit of the loop (a
+    # direct run_omip_single() caller has no main()-loop finally).
+    try:
+        state, diag, wall_time, ok, blowup_info = _run_omip_loop(
+            model, state, grid_type, grid, z_coord,
+            dt, n_steps, diag_every,
+            label=f"{grid_type}/{resolution}",
+            restoring_targets=restoring_targets,
+            restoring_tau_s=restoring_tau_s,
+            restoring_ramp_days=ramp_days_eff,
+            jra55_state=jra55_state,
+            checkpoint_days=checkpoint_days,
+            checkpoint_dir=checkpoint_dir,
+            max_wallclock_seconds=run_config.max_wallclock_seconds,
+            restart_buffer_seconds=run_config.restart_buffer_seconds,
+            start_step=start_step,
+            nudge_woa_tau=args.nudge_woa_tau,
+            T_woa_3d=(T_woa * state.land_mask.data[..., jnp.newaxis]).astype(
+                state.T.data.dtype) if args.nudge_woa_tau > 0 and T_woa is not None else None,
+            S_woa_3d=(S_woa * state.land_mask.data[..., jnp.newaxis]).astype(
+                state.S.data.dtype) if args.nudge_woa_tau > 0 and S_woa is not None else None,
+            snapshot_fn=_snapshot_fn,
+            spmd_step=spmd_step,
+            spmd_gather=spmd_gather,
+            spmd_shard_stack=spmd_shard_stack,
+        )
+        if spmd_gather is not None:
+            # Downstream report/plot/save paths expect the full (n_lat+1)
+            # staggered v layout, not the sharded v_lower carry.  Every rank
+            # dispatches this gather (it is a collective); only rank 0 writes.
+            state = spmd_gather(state)
+    finally:
+        if run_config.enable_mpas_spmd and spmd_step is not None:
+            from legoesm.parallel.voronoi_spmd_ocean import disarm_mpas_ocean_spmd
+            disarm_mpas_ocean_spmd()
 
     # Surface a failed FINAL async restart write while the run can still
     # report it (the writer thread swallows exceptions; _save_restart only

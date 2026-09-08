@@ -439,7 +439,7 @@ def barotropic_implicit_mpas(
     # the owned mask + psum reducer + cell exchange (voronoi_spmd_ocean).
     _hr_owned = getattr(halo_refresh, "owned_mask_cells", None)
     _dist = _vlayout is not None or _hr_owned is not None
-    if _vlayout is None and _world() > 1:
+    if _vlayout is None and _hr_owned is None and _world() > 1:
         raise NotImplementedError(
             "MPAS barotropic_solver='implicit_cn' under MPI requires the "
             "Voronoi partition layout (call initialize_voronoi_mpi and "
