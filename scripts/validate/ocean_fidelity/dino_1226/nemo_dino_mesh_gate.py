@@ -62,8 +62,18 @@ DEFAULT_MESH = ("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/"
 # NOT ADOPTED DELIBERATELY: calling libmvec would reproduce the file exactly,
 # and was demonstrated to (0/10348 unequal through a C shim), but it would make
 # legoESM's mesh depend on the HOST's glibc version.  A scalar-math NEMO
-# rebuild is the fix that belongs on the oracle's side; see
-# `docs/ocean/fidelity/dino_setup_audit.md`.
+# rebuild is the fix that belongs on the oracle's side --
+# `scripts/experiment/dino/nemo_scalar_math_rebuild.sh`, which pre-registers
+# what confirms and what refutes this diagnosis.
+#
+# WHY THE WAIVER IS SAFE, scoped to the path this gate covers: the DINO bridge
+# `bridge_nemo_to_legoesm_topo` reads `grid.ff_t` at ONE site
+# (nemo_state_bridge.py:616), a tolerance check of the Coriolis it BUILT from
+# `gphit`, and never reads `ff_f`.  So no ff_t value reaches a tendency.
+# NOT true of the sibling beta-plane bridge `bridge_nemo_to_legoesm`
+# (nemo_state_bridge.py:111), which fits f0/beta from `ff_t` and builds the
+# vertex Coriolis from `ff_f` -- that path serves GYRE, does not use this
+# transcription, and is out of this gate's scope.
 #
 # NOTE this residual never enters legoESM: the bridge BUILDS its Coriolis from
 # `gphit` (which is bit-exact) and only reads `ff_t` to check itself.
@@ -189,7 +199,8 @@ def main() -> int:
         t.check(f, hgr[f], O(f))
     for f in ("ff_t", "ff_f"):
         t.check(f, hgr[f], O(f), ulp_waiver=FF_ULP_WAIVER,
-                note="(NEMO binary's own SIN; never consumed by legoESM)")
+                note="(NEMO binary's own vector SIN; the DINO bridge reads "
+                     "ff_t only to check itself)")
     for f in ("gdept_1d", "gdepw_1d", "e3t_1d", "e3w_1d"):
         t.check(f, lad[f], O(f).ravel())
     for f, src in (("gdept_0", "gdept_0"), ("gdepw_0", "gdepw_0"),

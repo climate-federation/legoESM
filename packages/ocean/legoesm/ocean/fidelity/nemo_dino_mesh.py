@@ -45,9 +45,12 @@ of the file's domain variables bit-exact (0 cells unequal) EXCEPT ``ff_t`` and
 not ours: ``-O3`` vectorised the two whole-array Coriolis assignments into
 glibc's 2-wide vector sine (14 ``_ZGVbN2v_sin`` calls in ``usr_def_hgr``,
 against scalar ``asin``/``cos``/``tanh`` for the loop body), and that routine
-is accurate to 4 ulp rather than correctly rounded.  legoESM never reads
-``ff_t``: the bridge BUILDS Coriolis from ``gphit``, which is bit-exact, and
-reads ``ff_t`` only to check itself.  See the gate's ``FF_ULP_WAIVER``.
+is accurate to 4 ulp rather than correctly rounded.  No ``ff_t`` value reaches
+a tendency on this path: :func:`bridge_nemo_to_legoesm_topo` BUILDS Coriolis
+from ``gphit`` (bit-exact) and reads ``ff_t`` at a single site, to check
+itself.  (Its beta-plane sibling ``bridge_nemo_to_legoesm`` DOES consume both
+arrays, but serves GYRE and never sees this mesh.)  See the gate's
+``FF_ULP_WAIVER``.
 
 RELATION TO :mod:`legoesm.ocean.experiments.dino`.  ``dino.py`` carries a
 JAX/vectorised bowl (``_smooth_step`` / ``_exp_bathy`` / ``_gauss_ring`` /
