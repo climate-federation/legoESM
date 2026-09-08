@@ -618,6 +618,10 @@ class ExperimentConfig(NamedTuple):
     #   moisture rises (flattens the overcast runaway).
     cloud_p_xr: float | None = None
     cloud_alpha_xr: float | None = None
+    # Condensate-aware cover floor cf >= q_cond/(q_cond + q_ref) [kg/kg] for the
+    # RH-diagnosed schemes (CloudConfig.cover_condensate_q_ref).  None => scheme
+    # default (0.0 = off).  Paired-arm lever for the invisible-ice defect.
+    cloud_cover_condensate_q_ref: float | None = None
     # Marine-Sc albedo lever: blend strength [0,1] toward diagnostic-CLUBB cf in
     # the BL when --use-clubb-cloud-fraction is on (1.0 = full replacement, which
     # drove a real-SST surface-heating runaway; ~0.3-0.5 is gentler + stable).
@@ -2829,6 +2833,7 @@ class ExperimentConfig(NamedTuple):
             ("cloud_fsd", 0.0, 1.0),
             ("cloud_p_xr", 0.05, 1.0),
             ("cloud_alpha_xr", 10.0, 1000.0),
+            ("cloud_cover_condensate_q_ref", 1.0e-6, 1.0e-3),
             ("cloud_adiabatic_lwc_rate", 5.0e-7, 3.0e-6),
         ):
             _v = getattr(self, _f)

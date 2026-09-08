@@ -297,6 +297,7 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
         clubb_cf_override_floor=getattr(
             cfg, "cloud_clubb_cf_override_floor", None),
         saturation_scheme=getattr(cfg, "cloud_saturation_scheme", None),
+        cover_condensate_q_ref=getattr(cfg, "cloud_cover_condensate_q_ref", None),
     )
 
 
@@ -3728,6 +3729,8 @@ class ModelDriver:
                 # miss exactly the cold cirrus the switch adds (#1521).
                 saturation_scheme=getattr(
                     self.config, "cloud_saturation_scheme", None),
+                cover_condensate_q_ref=getattr(
+                    self.config, "cloud_cover_condensate_q_ref", None),
             )
         self.diagnostics = DiagnosticCollector(
             nlev=self.config.grid.nlev,

@@ -826,6 +826,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Xu-Randall condensate sensitivity alpha_xr (None="
                              "default 100; bounds 10..1000). LOWER => cloud "
                              "fraction grows more slowly with condensate.")
+    parser.add_argument("--cloud-cover-condensate-q-ref",
+                        dest="cloud_cover_condensate_q_ref", type=float,
+                        default=None,
+                        help="Condensate-aware cover floor for the RH cloud "
+                             "schemes: cf >= q_cond/(q_cond + q_ref) [kg/kg], "
+                             "so layers carrying prognostic condensate are "
+                             "never clear to radiation (bounds 1e-6..1e-3; "
+                             "LOWER => more cover per unit condensate). "
+                             "None = scheme default 0.0 (off, byte-identical).")
     parser.add_argument("--diagnostic-condensate-scheme",
                         dest="cloud_diagnostic_condensate_scheme",
                         choices=["constant", "adiabatic"], default="constant",
@@ -1971,6 +1980,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_fsd=args.cloud_fsd,
         cloud_p_xr=args.cloud_p_xr,
         cloud_alpha_xr=args.cloud_alpha_xr,
+        cloud_cover_condensate_q_ref=args.cloud_cover_condensate_q_ref,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
         convective_cloud=args.convective_cloud,

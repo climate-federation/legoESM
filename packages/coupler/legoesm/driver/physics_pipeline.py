@@ -333,6 +333,7 @@ class PhysicsPipeline:
         self._cloud_diagnostic_condensate_scheme = None
         self._cloud_adiabatic_lwc_rate = None
         self._cloud_saturation_scheme = None
+        self._cloud_cover_condensate_q_ref = None
         # Convection scheme name + grid/vertical-coordinate objects for
         # grid-operator-backed convection inputs (moisture convergence,
         # resolved w, CMT winds).  Set by build_physics_pipeline; with
@@ -2429,6 +2430,8 @@ class PhysicsPipeline:
                     self, "_clubb_cf_override_floor", None),
                 saturation_scheme=getattr(
                     self, "_cloud_saturation_scheme", None),
+                cover_condensate_q_ref=getattr(
+                    self, "_cloud_cover_condensate_q_ref", None),
             )
             # Column convective precip [kg/m²/s] for the convective cloud cover;
             # flattened to the (ncol,) column layout like the other inputs.
@@ -2452,10 +2455,17 @@ class PhysicsPipeline:
             # Cloud ice + double-moment NUMBER columns (None for warm-rain /
             # diagnostic-cloud runs ⇒ constant r_eff, legacy behaviour). When a
             # double-moment scheme supplies them, they drive the M2005 PSD
-            # liquid/ice effective radii — N_c per-VOLUME [#/m³], N_i per-MASS
-            # [#/kg], passed raw (same convention as the dynamical-core paths).
+            # liquid/ice effective radii.  Both tracers are STORED per MASS
+            # [#/kg]; the PSD wants N_c per VOLUME [#/m³], so convert with the
+            # column air density exactly as radiation/integration.py does
+            # (#1715: this site used to pass the per-mass value raw).  N_i is
+            # consumed per-mass and passes through.
             q_i_col = None if q_i is None else ad.flatten_3d(q_i)
-            n_cloud_col = None if N_c is None else ad.flatten_3d(N_c)
+            if N_c is None:
+                n_cloud_col = None
+            else:
+                _rho_nc = p_full_col / (constants.R_d * T_col)
+                n_cloud_col = jnp.maximum(ad.flatten_3d(N_c) * _rho_nc, 0.0)
             n_ice_col = None if N_i is None else ad.flatten_3d(N_i)
             # Aerosol-CCN droplet number for the radiation PSD: under
             # specified-Nc with aerosol coupling, feed the SAME
@@ -4278,6 +4288,8 @@ def build_physics_pipeline(grid, sigma, config):
         config, 'cloud_adiabatic_lwc_rate', None)
     pipeline._cloud_saturation_scheme = getattr(
         config, 'cloud_saturation_scheme', None)
+    pipeline._cloud_cover_condensate_q_ref = getattr(
+        config, 'cloud_cover_condensate_q_ref', None)
     # Marine-Sc albedo lever: blend strength toward diagnostic-CLUBB cf in the BL
     # (partial replacement — full replacement drove a real-SST surface-heating
     # runaway).  None => CloudConfig default (1.0 = full replacement).
