@@ -39,26 +39,31 @@ wet = np.asarray(z["land_mask"]) > 0.5
 box = wet & (np.abs(lat) <= HW) & (lon >= LO) & (lon < HI)
 zi = np.abs(np.asarray(z["z_interface_ref"]))          # interior interfaces
 K = np.asarray(z["K_H_diag"])[box]                     # (ncol, nlev-1)
+KM = np.asarray(z["K_M_diag"])[box]                    # momentum, same shape
 sel_i = zi <= 20.0
 print(f"ours: {box.sum()} columns; {sel_i.sum()} interfaces within 20 m "
       f"({zi[sel_i][0]:.2f}..{zi[sel_i][-1]:.2f} m)")
 k_ours = np.nanmedian(K[:, sel_i])
 k_ours_mean = np.nanmean(K[:, sel_i])
+m_ours = np.nanmedian(KM[:, sel_i])
 
 d = nc.Dataset(NEMO)
 nlat = d.variables["nav_lat_grid_T"][:]; nlon = d.variables["nav_lon_grid_T"][:] % 360.0
 nbox = (np.abs(nlat) <= HW) & (nlon >= LO) & (nlon < HI)
 depw = d.variables["depthw"][:]
 avt = d.variables["avt"]
+avm = d.variables["avm"] if "avm" in d.variables else None
 selw = depw <= 20.0
 nt = avt.shape[0]
 utc = np.arange(nt) + 0.5
 loc = (utc + (LO + HI) / 2.0 / 15.0) % 24.0
-k_nemo_h = []
+k_nemo_h, m_nemo_h = [], []
 for t in range(nt):
     a = np.ma.filled(avt[t][selw], np.nan)[:, nbox]
     k_nemo_h.append(np.nanmedian(a))
-k_nemo_h = np.array(k_nemo_h)
+    if avm is not None:
+        m_nemo_h.append(np.nanmedian(np.ma.filled(avm[t][selw], np.nan)[:, nbox]))
+k_nemo_h = np.array(k_nemo_h); m_nemo_h = np.array(m_nemo_h)
 aft = (loc >= 14) & (loc < 18)
 
 print("\n=== 0-20 m TRACER diffusivity, cold tongue ===")
@@ -67,6 +72,18 @@ print(f"  NEMO   daily mean {np.nanmean(k_nemo_h):.3e}   mid-afternoon {np.nanme
       f"   night(18-06) {np.nanmean(k_nemo_h[(loc>=18)|(loc<6)]):.3e} m2/s")
 print(f"  RATIO ours/NEMO  vs daily mean {k_ours/np.nanmean(k_nemo_h):.3f}"
       f"   vs matched afternoon {k_ours/np.nanmean(k_nemo_h[aft]):.3f}")
+# codex CRITICAL-2 (2026-09-08): a matched TRACER diffusivity says nothing about
+# the MOMENTUM one, which is what sets the undercurrent. Same box, same hours.
+print("\n=== 0-20 m MOMENTUM diffusivity, cold tongue (codex CRITICAL-2) ===")
+if m_nemo_h.size:
+    print(f"  ours median {m_ours:.3e} m2/s")
+    print(f"  NEMO daily mean {np.nanmean(m_nemo_h):.3e}   mid-afternoon {np.nanmean(m_nemo_h[aft]):.3e} m2/s")
+    print(f"  RATIO ours/NEMO  vs daily mean {m_ours/np.nanmean(m_nemo_h):.3f}"
+          f"   vs matched afternoon {m_ours/np.nanmean(m_nemo_h[aft]):.3f}")
+    print(f"  Prandtl (momentum/tracer)  ours {m_ours/k_ours:.3f}   NEMO {np.nanmean(m_nemo_h)/np.nanmean(k_nemo_h):.3f}")
+else:
+    print("  avm ABSENT from the NEMO hourly file -- momentum mixing UNTESTED, say so")
+
 # 0-20 m column heat content DELETED 2026-09-08: the two sides integrated to
 # different actual depths (our cell thicknesses vs NEMO's depthw ladder, sliced
 # by two different counts) and both were divided by a nominal 20 m, so the
