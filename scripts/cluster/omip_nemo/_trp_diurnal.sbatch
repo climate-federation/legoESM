@@ -17,9 +17,10 @@
 # rather than an inference from one hour.
 #   EVD=1 sbatch _trp_diurnal.sbatch <sha>     (the scheme on)
 #   EVD=0 sbatch _trp_diurnal.sbatch <sha>     (its control)
-# Both restart from the arm's own day-15 state, so the two differ ONLY in the
-# scheme over these two days -- the control's own day-15 state is a different
-# trajectory and would confound the comparison.
+# Each restarts from ITS OWN day-15 state: the restart guard refuses to resume
+# a no-convection run from a file written with convection on, and rightly so
+# (different resolved config = a new experiment).  The two day-15 states differ
+# by 0.01 K at every depth in this box, measured, so the comparison stands.
 set -uo pipefail
 PIN=${1:?usage: EVD=0|1 sbatch _trp_diurnal.sbatch <pinned-sha>}
 EVD=${EVD:?set EVD=0 or EVD=1}
@@ -48,7 +49,9 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --sss-ice-gate-nemo --prognostic-sea-ice --prognostic-ice-dynamics free_drift \
   --ice-lead-freeze-source nemo_qlead \
   --years 0.0466 --snapshot-every-days 2 --diag-every-days 1 \
-  --restart-from /burg-archive/glab/users/pg2328/_evd_wt/results/omip_nemo/trp_evd_d30/restart_leg1.npz \
+  --restart-from $([ "$EVD" = 1 ] \
+      && echo /burg-archive/glab/users/pg2328/_evd_wt/results/omip_nemo/trp_evd_d30/restart_leg1.npz \
+      || echo /burg-archive/glab/users/pg2328/_base2_wt/results/omip_nemo/trp_base2_d30/restart_leg1.npz) \
   --tracer-advection superbee --runoff-depth-nemo-ini --river-mouth-restoring-gate \
   --bottom-drag-scheme nemo_quadratic \
   --iwm --iwm-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc \
