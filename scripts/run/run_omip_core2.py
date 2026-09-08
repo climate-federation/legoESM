@@ -6107,6 +6107,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "tracers. Refused here: this driver has no "
                         "leap-frog-family outer integrator (now-only, as "
                         "NEMO under key_RK3).")
+    p.add_argument("--restart-branch-from-different-config", action="store_true",
+                   help="Resume from a restart whose resolved configuration "
+                        "differs from this run's. The guard exists because a "
+                        "silent difference makes a chained leg meaningless; "
+                        "a DELIBERATE branch (same state, one physics switch "
+                        "flipped, for a controlled pair) is the legitimate "
+                        "exception and is recorded in the run manifest.")
     p.add_argument("--evd-occupancy-every-hours", type=float, default=None,
                    help="Sample, every H hours, the fraction of wet columns "
                         "whose first interior interface carries the "
@@ -7984,6 +7991,12 @@ def main() -> int:
         # including them would false-abort a leg that merely turned a
         # diagnostic on or off.
         "gateway_transports", "diag_momentum_step",
+        # Same class: the occupancy/profile sampler only READS the state, so
+        # turning it on must not make a parent leg's restart un-resumable
+        # (it did: a two-day diurnal control could not resume its own
+        # baseline because the sampler flag was hashed).
+        "evd_occupancy_every_hours", "kprofile_snapshots",
+        "restart_branch_from_different_config",
     })
     # Path-valued args are normalised before hashing so an equivalent relative
     # path or symlink cannot false-abort a legitimate chained leg.
@@ -8099,7 +8112,14 @@ def main() -> int:
         state, ice_state, _rs_meta = load_run_restart(
             _rs_path, state, ice_template=ice_state,
             grid_type=app_grid_type, dt_seconds=dt,
-            n_forcing_records=n_rec, config_fingerprint=_restart_cfg_fp)
+            n_forcing_records=n_rec,
+            config_fingerprint=(None if args.restart_branch_from_different_config
+                                else _restart_cfg_fp))
+        if args.restart_branch_from_different_config:
+            print("[restart] BRANCH: the configuration check was waived by "
+                  "--restart-branch-from-different-config. This run is a "
+                  "branch off that state, NOT a continuation of it.",
+                  flush=True)
         # Source-revision drift: three DISTINCT outcomes (unknown / mismatch /
         # equal-but-dirty), decided by the pure helper so the logic is unit
         # tested rather than only exercised by a full driver run.
