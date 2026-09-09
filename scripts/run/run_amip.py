@@ -826,6 +826,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Xu-Randall condensate sensitivity alpha_xr (None="
                              "default 100; bounds 10..1000). LOWER => cloud "
                              "fraction grows more slowly with condensate.")
+    parser.add_argument("--snow-age-activation-K",
+                        dest="snow_age_activation_K", type=float, default=None,
+                        help="Snow grain-growth activation temperature [K] for "
+                             "the BATS/CLM temperature-dependent snow-age clock "
+                             "(BATS uses 5000; bounds 0..20000). The age clock "
+                             "then accumulates dt*exp(A*(1/T_freeze - 1/T_snow)), "
+                             "so cold dry polar snow keeps its fresh albedo "
+                             "while melting snow darkens as before. "
+                             "None = 0.0 = off (calendar clock, byte-identical).")
     parser.add_argument("--cloud-cover-condensate-q-ref",
                         dest="cloud_cover_condensate_q_ref", type=float,
                         default=None,
@@ -1981,6 +1990,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_p_xr=args.cloud_p_xr,
         cloud_alpha_xr=args.cloud_alpha_xr,
         cloud_cover_condensate_q_ref=args.cloud_cover_condensate_q_ref,
+        snow_age_activation_K=args.snow_age_activation_K,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
         convective_cloud=args.convective_cloud,

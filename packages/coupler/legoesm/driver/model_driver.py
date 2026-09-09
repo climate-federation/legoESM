@@ -2919,6 +2919,16 @@ class ModelDriver:
                 land_albedo=cfg.land_albedo._replace(
                     **biophysics_lmip_albedo_scalars()))
 
+        # Temperature-dependent snow ageing (opt-in): applied LAST, so it
+        # survives both the bake and the calibration re-apply above. The
+        # calibration fitted only the calendar-clock scalars and never saw this
+        # field, so it cannot be overwritten by it.
+        _act = getattr(self.config, "snow_age_activation_K", None)
+        if _act is not None:
+            cfg = cfg._replace(
+                land_albedo=cfg.land_albedo._replace(
+                    snow_age_activation_K=float(_act)))
+
         # A CANOPY SCHEME GETS CANOPY PARAMETERS.
         #
         # ``clm_multilayer_setup`` returns ``LandSurfaceParams`` — per-PFT
