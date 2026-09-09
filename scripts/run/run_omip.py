@@ -3697,7 +3697,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                    start_step=0,
                    nudge_woa_tau=0.0, T_woa_3d=None, S_woa_3d=None,
                    snapshot_fn=None, spmd_step=None, spmd_gather=None,
-                   spmd_shard_stack=None):
+                   spmd_shard_stack=None, spmd_gather_ice=None):
     """Run time loop with diagnostics.
 
     Two forcing paths, mutually exclusive:
@@ -3810,6 +3810,10 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     if spmd_gather is not None:
         def save_restart(st, *a, **kw):
             gathered = spmd_gather(st)          # collective — ALL ranks
+            if spmd_gather_ice is not None and kw.get("ice_state") is not None:
+                # The MPAS lane shards the sea-ice tile too; the restart
+                # writer's np.asarray would host-fetch remote shards.
+                kw = {**kw, "ice_state": spmd_gather_ice(kw["ice_state"])}
             if not _io_rank:
                 return None
             if _multiproc:
@@ -5374,6 +5378,7 @@ def run_omip_single(grid_type: str, args) -> dict:
     spmd_step = None
     spmd_gather = None
     spmd_shard_stack = None
+    spmd_gather_ice = None
     if run_config.enable_latlon_spmd:
         if grid_type != "latlon":
             raise SystemExit(
@@ -5474,6 +5479,7 @@ def run_omip_single(grid_type: str, args) -> dict:
                 nlev=int(args.nlev))
             spmd_step = make_sharded_mpas_ocean_step(model, _layout)
             spmd_gather = partial(gather_state_mpas_ocean_spmd, layout=_layout)
+            spmd_gather_ice = spmd_gather      # generic pytree gather
             spmd_shard_stack = partial(shard_cell_stack_spmd, layout=_layout)
             state = shard_state_mpas_ocean_spmd(state, _layout)
             if jra55_state is not None and jra55_state.get("ice_state_init") is not None:
@@ -5514,6 +5520,7 @@ def run_omip_single(grid_type: str, args) -> dict:
             spmd_step=spmd_step,
             spmd_gather=spmd_gather,
             spmd_shard_stack=spmd_shard_stack,
+            spmd_gather_ice=spmd_gather_ice,
         )
         if spmd_gather is not None:
             # Downstream report/plot/save paths expect the full (n_lat+1)

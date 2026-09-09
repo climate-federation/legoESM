@@ -589,7 +589,11 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
             if x is None or not hasattr(x, "shape") or x.ndim == 0:
                 kinds.append("rep")
             elif int(x.shape[0]) == n_cells:
-                kinds.append("cell" if isinstance(x, jax.core.Tracer) else "cell_static")
+                # Route-B multicontroller: a localised static would be a
+                # process-spanning sharded array captured by closure in the
+                # caller's jit (refused by JAX); ride the traced pack instead.
+                kinds.append("cell" if (isinstance(x, jax.core.Tracer)
+                                        or jax.process_count() > 1) else "cell_static")
             elif int(x.shape[0]) == n_edges:
                 kinds.append("edge")
             else:
@@ -680,9 +684,21 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
     model_state_template = None
     _cache: dict = {}
 
+    # The sharded per-device operands (local meshes, halo schedules, per-cell
+    # z_coord statics, upup stencil).  A jitted CALLER (the JRA55 block scan)
+    # must receive them as ARGUMENTS under route-B multicontroller — a
+    # process-spanning jax.Array cannot be a closure constant — so they are
+    # exposed as ``spmd_step.aux`` (the lat-lon lane's convention; the loop
+    # passes ``aux=spmd_step.aux`` into the block function).
+    default_aux = (layout.stacked_meshes, layout.halo_args, layout.vhalo_args,
+                   layout.upup or (), z_static)
+
     def spmd_step(state: MPASOceanState, dt, aux=None, *, freshwater=None,
                   surface_forcing=None, sponge=None):
         nonlocal model_state_template
+        if aux is None:
+            aux = default_aux
+        aux_meshes, aux_halo, aux_vhalo, aux_upup, aux_z = aux
         model_state_template = state
         has_tke = state.tke is not None
         cells = [state.T.data, state.S.data, state.eta.data, state.w.data,
@@ -713,7 +729,7 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
         if fn is None:
             n_rep = len(rep_leaves)
             n_stat = len(static_cells)
-            n_z = len(z_static)
+            n_z = len(aux_z)
 
             def _body(u_o, cpack_o, rho_ref, *rest):
                 rep = rest[:n_rep]
@@ -742,9 +758,8 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
             # runs ONE compiled program per step, not op-by-op dispatch.
             fn = jax.jit(fn)
             _cache[key] = fn
-        out = fn(state.u.data, cpack, rho, *rep_leaves, *static_cells, *z_static,
-                 layout.stacked_meshes, layout.halo_args, layout.vhalo_args,
-                 layout.upup or ())
+        out = fn(state.u.data, cpack, rho, *rep_leaves, *static_cells, *aux_z,
+                 aux_meshes, aux_halo, aux_vhalo, aux_upup)
         u_n, T_n, S_n, eta_n, w_n = out[:5]
         new = state._replace(
             u=state.u.replace(data=u_n), T=state.T.replace(data=T_n),
@@ -755,4 +770,5 @@ def make_sharded_mpas_ocean_step(model, layout: MPASOceanSPMDLayout) -> Callable
         return new
 
     spmd_step.layout = layout
+    spmd_step.aux = default_aux
     return spmd_step
