@@ -1872,6 +1872,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             LatLonCGridOceanModel,
         )
         from legoesm.ocean.fidelity.nemo_match_recipe import (
+            NEMOMatchTripoleRecipeConfig,
             nemo_match_tripole_model_config,
         )
         from legoesm.ocean.physics.combined import OceanPhysicsConfig
@@ -1933,7 +1934,27 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         # --ke-gradient-scheme hollingsworth`` (job 8106193 showed it does not
         # fix the equatorial cold-start blowup anyway); a fold-aware KE halo +
         # regression test is the prerequisite to ever making it the default.
-        config = nemo_match_tripole_model_config(physics=physics)
+        # The recipe is the proven NEMO-match bundle; --A-h / --K-h /
+        # --pgf-scheme reach it as recipe fields, or the flags are inert on
+        # this lane (a probe that lowered A_h by 33x reproduced the baseline
+        # to three digits, because nothing read it).  Unset leaves the recipe
+        # byte-identical.
+        _recipe_over = {}
+        if A_h_override is not None:
+            _recipe_over["A_h"] = A_h_override
+        if K_h_override is not None:
+            # The NEMO-match recipe has no horizontal tracer diffusivity field
+            # (tracer mixing on this lane is GM/Redi, kappa_Redi).  Say so
+            # rather than let the flag look applied.
+            print("  WARNING: --K-h does not apply to the tripole NEMO-match "
+                  "recipe (tracer mixing is GM/Redi, kappa_Redi); ignored.")
+        if pgf_scheme is not None:
+            _recipe_over["pgf_scheme"] = pgf_scheme
+        _recipe_cfg = (NEMOMatchTripoleRecipeConfig(**_recipe_over)
+                       if _recipe_over else None)
+        if _recipe_over:
+            print(f"  Tripole recipe overrides: {_recipe_over}")
+        config = nemo_match_tripole_model_config(_recipe_cfg, physics=physics)
         model = LatLonCGridOceanModel(geom, z_coord, config)
         return geom, z_coord, config, model, "tripole"
 

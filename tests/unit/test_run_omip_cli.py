@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 import pytest
 
 from scripts.run.run_omip import build_config_from_args, parse_args
@@ -687,6 +690,50 @@ def test_viscosity_overrides_reach_the_plain_latlon_lane():
     _, _, cfg_default, _, _ = run_omip._create_setup(
         "latlon", "8x16", 3, 1000.0, "none", "type1")
     assert float(cfg_default.lateral_viscosity.A_h) == 1.0e5    # default untouched
+
+
+def test_overrides_reach_the_tripole_recipe(monkeypatch, tmp_path):
+    """The tripole lane does NOT build its configuration in the branch the
+    other two tests cover: it calls the NEMO-match recipe, which the driver
+    used to invoke with its physics argument only.  A probe arm that lowered
+    the viscosity by a factor of 33 therefore reproduced the baseline to three
+    digits -- the knob reached nothing.  Pin that the overrides now arrive as
+    recipe fields, and that an un-overridden run still asks for the recipe
+    default."""
+    import scripts.run.run_omip as run_omip
+    from legoesm.ocean.fidelity import nemo_match_recipe
+
+    seen = {}
+    real = nemo_match_recipe.nemo_match_tripole_model_config
+
+    def capture(cfg=None, **kw):
+        seen["cfg"] = cfg
+        return real(cfg, **kw)
+
+    monkeypatch.setattr(nemo_match_recipe,
+                        "nemo_match_tripole_model_config", capture)
+    # reuse the synthetic NEMO-like mesh the tripole grid tests write, so this
+    # needs no data files
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "grids"))
+    from test_tripole_multifile_mesh import _write_tripole_like_mesh
+    mesh = tmp_path / "mesh.nc"
+    _write_tripole_like_mesh(mesh, 8, 12, dead_north_row=False)
+
+    _, _, cfg, _, _ = run_omip._create_setup(
+        "tripole", "eorca1", 3, 1000.0, "none", "type1",
+        tripole_mesh=str(mesh), tripole_fold_convention="(n_lon-i)%n_lon",
+        A_h_override=3.0e3, pgf_scheme="smc03")
+    assert seen["cfg"] is not None
+    assert seen["cfg"].A_h == 3.0e3
+    assert seen["cfg"].pgf_scheme == "smc03"
+    assert cfg.pgf_scheme == "smc03"
+    assert float(cfg.lateral_viscosity.A_h) == 3.0e3
+
+    seen.clear()
+    run_omip._create_setup("tripole", "eorca1", 3, 1000.0, "none", "type1",
+                           tripole_mesh=str(mesh),
+                           tripole_fold_convention="(n_lon-i)%n_lon")
+    assert seen["cfg"] is None          # recipe default, byte-identical
 
 
 def test_pgf_scheme_override_reaches_the_plain_latlon_lane():
