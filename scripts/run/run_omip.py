@@ -1369,6 +1369,27 @@ def _report_nonfinite(state, grid_type, grid, spmd_gather=None) -> None:
                    f"(n={len(rows)} of {n_rows}); nonfinite per band: "
                    + str(np.bincount(bad[:, 0] * n_bands // n_rows,
                                      minlength=n_bands).tolist()))
+    lat = getattr(grid, "lat_T", None)
+    lon = getattr(grid, "lon_T", None)
+    H = getattr(st, "H_bathy", None)
+
+    def _where(j, i):
+        out = f"row={j} col={i} band {j * n_bands // n_rows}/{n_bands}"
+        if lat is not None and np.ndim(lat) == 2:
+            la = np.asarray(lat)[j, i]
+            lo = np.asarray(lon)[j, i]
+            if np.abs(np.asarray(lat)).max() <= np.pi + 1e-6:
+                la, lo = np.degrees(la), np.degrees(lo)
+            out += f" lat={float(la):.2f} lon={float(lo):.2f}"
+        if H is not None:
+            out += f" depth={float(np.asarray(H.data)[j, i]):.1f}m"
+        return out
+
+    finT = np.where(np.isfinite(T), T, 0.0)
+    for name, idx in (("T max", np.argmax(finT)), ("T min", np.argmin(finT))):
+        c = np.unravel_index(idx, T.shape)
+        msg.append(f"    {name}={float(T[c]):.4g} at {_where(int(c[0]), int(c[1]))} "
+                   f"lev={int(c[2]) if len(c) > 2 else -1}")
     Tf = T[np.isfinite(T)]
     ef = eta[np.isfinite(eta)]
     if Tf.size and ef.size:
@@ -1378,6 +1399,31 @@ def _report_nonfinite(state, grid_type, grid, spmd_gather=None) -> None:
                    f"eta [{ef.min():.3g}, {ef.max():.3g}] max|eta| at row={jm[0]} "
                    f"col={jm[1]} band {int(jm[0]) * n_bands // n_rows}")
     print("\n".join(msg), flush=True)
+
+
+def _report_forcing_extremes(stack, tag: str) -> None:
+    """On BLOWUP: per rank, the min/max of every forcing leaf's LOCAL shard.
+    A regridded field carrying a fill value or an out-of-range value shows up
+    here as the leaf and the band it sits in, before any physics is blamed."""
+    if not isinstance(stack, dict):
+        return
+    rank = jax.process_index()
+    parts = []
+    for k in sorted(stack):
+        v = stack[k]
+        try:
+            loc = np.concatenate([np.asarray(sh.data).ravel()
+                                  for sh in v.addressable_shards])
+        except Exception:
+            loc = np.asarray(v).ravel()
+        if loc.size == 0:
+            continue
+        n_bad = int((~np.isfinite(loc)).sum())
+        fin = loc[np.isfinite(loc)]
+        parts.append(f"{k}[{fin.min():.4g},{fin.max():.4g}]"
+                     + (f" nonfinite={n_bad}" if n_bad else ""))
+    print(f"  [rank {rank}] forcing extremes ({tag}, local shard): "
+          + " ".join(parts), flush=True)
 
 
 def _spmd_device_count(run_config) -> int:
@@ -4239,6 +4285,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
 
             if not _check_finite(state, grid_type):
                 print(f"  BLOWUP at step {step}")
+                _report_forcing_extremes(
+                    raw_stack if use_gpu_interp else atm_stack, "block forcing")
                 _report_nonfinite(state, grid_type, grid, spmd_gather)
                 blown_up = True
                 break
