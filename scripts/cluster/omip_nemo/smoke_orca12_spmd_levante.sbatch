@@ -26,6 +26,12 @@ STEPS=${STEPS:-200}
 # ~130 GB RSS per process at ORCA12 (job 27326645: 4/node = OUT_OF_MEMORY on a
 # 512 GB node). 2 per node fits; the other two GPUs of the node stay idle.
 TPN=${TPN:-2}
+# Probe knobs: DIAG_EVERY (blowup-onset resolution, 1 = every step), EXTRA
+# (extra run_omip flags, e.g. "--jra55-no-sponge" or
+# "--jra55-zero-surface-fluxes"), MEMPROBE=1 (per-device live-array report).
+DIAG_EVERY=${DIAG_EVERY:-20}
+EXTRA=${EXTRA:-}
+[ -n "${MEMPROBE:-}" ] && export LEGOESM_OMIP_MEMPROBE=1
 NGPU=$(( SLURM_JOB_NUM_NODES * TPN ))
 DAYS=$(awk -v s="$STEPS" -v d="$DT" 'BEGIN {printf "%.10f", s*d/86400.0}')
 # H_max must equal the dz-file total to 1e-6 relative (run_omip's dz-ref gate).
@@ -39,7 +45,7 @@ export PYTHONPATH="$WT/packages/atmosphere:$WT/packages/core:$WT/packages/couple
 export JAX_PLATFORMS=cuda,cpu JAX_ENABLE_X64=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_MEM_FRACTION=0.92
 export LEGOESM_LATLON_SPMD_FUSED_HALO=1
-echo "=== ORCA12 smoke: nodes=$SLURM_JOB_NUM_NODES gpus=$NGPU dt=$DT steps=$STEPS days=$DAYS $(date) ==="
+echo "=== ORCA12 smoke: nodes=$SLURM_JOB_NUM_NODES gpus=$NGPU dt=$DT steps=$STEPS days=$DAYS diag_every=$DIAG_EVERY extra=[$EXTRA] memprobe=${MEMPROBE:-0} $(date) ==="
 echo "mesh: $M (sha256 in $M/SHA256SUMS)"; cat $M/PROVENANCE.txt
 ( while true; do nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits | tr '\n' ' '; echo; sleep 15; done ) > $OUT/gpumem_node0.txt &
 MON=$!
@@ -57,7 +63,7 @@ srun --ntasks=$NGPU --ntasks-per-node=$TPN --gpus-per-node=$TPN --gpu-bind=none 
     --jra55-sea-ice --ice-dynamics none --ice-categories 1 \
     --vertical-mixing-scheme kpp \
     --enable-latlon-spmd --multicontroller \
-    --diag-every 20 --output "$OUT" 2>&1 | tee $OUT/run.log | grep -v "^WARNING\|^I0000\|^E0000" | tail -80
+    --diag-every $DIAG_EVERY $EXTRA --output "$OUT" 2>&1 | tee $OUT/run.log | grep -v "^WARNING\|^I0000\|^E0000" | tail -80
 rc=${PIPESTATUS[0]}
 kill $MON 2>/dev/null
 echo "run_rc=$rc wall_s=$(( $(date +%s) - t0 ))"

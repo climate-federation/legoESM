@@ -926,6 +926,12 @@ def parse_args(argv: list[str] | None = None):
                    help="Disable global SSS restoring.")
     p.add_argument("--jra55-no-freeze-cap", action="store_true",
                    help="Disable the T_freeze cap inside the sponge zone.")
+    p.add_argument("--jra55-zero-surface-fluxes", action="store_true",
+                   help="PROBE: zero the surface forcing handed to the dynamics "
+                        "step (stress, heat, freshwater) after the bulk fluxes / "
+                        "ice partition; sponge, SSS restoring, freeze cap and "
+                        "the ice tile itself are untouched. Isolates a blowup "
+                        "from the forcing.")
     p.add_argument("--jra55-sea-ice", action="store_true", default=False,
                    dest="jra55_sea_ice",
                    help="Prognostic slab (thermodynamic) sea-ice tile coupled "
@@ -1291,6 +1297,87 @@ def _exit_build_ctx() -> None:
     _ACTIVE_BUILD_CTX = None
     if ctx is not None:
         ctx.__exit__(None, None, None)
+
+
+def _memprobe(tag: str) -> None:
+    """PROBE (env LEGOESM_OMIP_MEMPROBE=1): per local device, bytes in use /
+    peak (includes XLA's compile + scratch workspace) and the five largest
+    live arrays by per-device bytes.  Prints on every rank."""
+    if not os.environ.get("LEGOESM_OMIP_MEMPROBE"):
+        return
+    rank = jax.process_index()
+    for d in jax.local_devices():
+        ms = d.memory_stats() or {}
+        use = ms.get("bytes_in_use", 0) / 2**30
+        peak = ms.get("peak_bytes_in_use", 0) / 2**30
+        live = []
+        for a in jax.live_arrays():
+            try:
+                nb = sum(sh.data.nbytes for sh in a.addressable_shards
+                         if sh.device == d)
+            except Exception:  # deleted / non-addressable while iterating
+                continue
+            if nb:
+                live.append((nb, tuple(a.shape), str(a.dtype),
+                             "sharded" if not a.sharding.is_fully_replicated
+                             else "replicated"))
+        live.sort(reverse=True)
+        top = "; ".join(f"{nb/2**30:.2f}GiB {shp} {dt} {kind}"
+                        for nb, shp, dt, kind in live[:5])
+        print(f"  [rank {rank}] MEMPROBE {tag} {d}: in_use={use:.2f}GiB "
+              f"peak={peak:.2f}GiB live_total="
+              f"{sum(x[0] for x in live)/2**30:.2f}GiB top5: {top}", flush=True)
+
+
+def _report_nonfinite(state, grid_type, grid, spmd_gather=None) -> None:
+    """On BLOWUP: say WHERE (row/col/level, lat/lon, lat band, depth) the first
+    non-finite ocean cell sits, how many rows carry them, and the T/eta ranges
+    the bound check saw.  Rank 0 prints; the gather is a collective."""
+    if grid_type == "spectral":
+        return
+    st = spmd_gather(state) if spmd_gather is not None else state
+    T = np.asarray(st.T.data)
+    eta = np.asarray(st.eta.data)
+    mask = np.asarray(st.land_mask.data) > 0.5
+    if T.ndim == 3 and mask.ndim == 2:
+        T = np.where(mask[..., None], T, 0.0)
+        eta = np.where(mask, eta, 0.0)
+    if jax.process_index() != 0:
+        return
+    bad = np.argwhere(~np.isfinite(T))
+    n_bands = jax.device_count() if spmd_gather is not None else 1
+    n_rows = T.shape[0]
+    msg = [f"  BLOWUP detail: nonfinite T cells={len(bad)} "
+           f"nonfinite eta cells={int((~np.isfinite(eta)).sum())}"]
+    if len(bad):
+        rows = np.unique(bad[:, 0])
+        j, i = int(bad[0][0]), int(bad[0][1])
+        k = int(bad[0][2]) if bad.shape[1] > 2 else -1
+        band = j * n_bands // n_rows
+        loc = f"first (row={j}, col={i}, lev={k}) band {band}/{n_bands}"
+        lat = getattr(grid, "lat_T", None)
+        lon = getattr(grid, "lon_T", None)
+        if lat is not None and np.ndim(lat) == 2:
+            la, lo = float(np.asarray(lat)[j, i]), float(np.asarray(lon)[j, i])
+            if abs(la) <= np.pi + 1e-6 and np.abs(np.asarray(lat)).max() <= np.pi + 1e-6:
+                la, lo = np.degrees(la), np.degrees(lo)
+            loc += f" lat={la:.2f} lon={lo:.2f}"
+        H = getattr(st, "H_bathy", None)
+        if H is not None:
+            loc += f" depth={float(np.asarray(H.data)[j, i]):.1f}m"
+        msg.append(f"    {loc}; rows with nonfinite: {rows.min()}..{rows.max()} "
+                   f"(n={len(rows)} of {n_rows}); nonfinite per band: "
+                   + str(np.bincount(bad[:, 0] * n_bands // n_rows,
+                                     minlength=n_bands).tolist()))
+    Tf = T[np.isfinite(T)]
+    ef = eta[np.isfinite(eta)]
+    if Tf.size and ef.size:
+        jm = np.unravel_index(np.argmax(np.where(np.isfinite(eta), np.abs(eta), 0)),
+                              eta.shape)
+        msg.append(f"    finite ranges: T [{Tf.min():.3g}, {Tf.max():.3g}] "
+                   f"eta [{ef.min():.3g}, {ef.max():.3g}] max|eta| at row={jm[0]} "
+                   f"col={jm[1]} band {int(jm[0]) * n_bands // n_rows}")
+    print("\n".join(msg), flush=True)
 
 
 def _spmd_device_count(run_config) -> int:
@@ -2131,6 +2218,8 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         state["sponge_T_ref_3d"] = jnp.asarray(T_woa)
         state["sponge_S_ref_3d"] = jnp.asarray(S_woa)
     state["enable_sponge"] = sponge_enabled
+    state["zero_surface_fluxes"] = bool(
+        getattr(args, "jra55_zero_surface_fluxes", False))
 
     # SSS restoring — Haney piston-velocity formulation, applied
     # globally (i.e. on every ocean cell) after the dynamics step.
@@ -2875,6 +2964,7 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
     enable_ramp = T_ramp_seconds > 0
     enable_sponge = bool(jra55_state.get("enable_sponge", False))
     enable_sss = bool(jra55_state.get("enable_sss_restoring", False))
+    zero_fluxes = bool(jra55_state.get("zero_surface_fluxes", False))
     enable_freeze = bool(jra55_state.get("enable_freeze_cap", False))
     # Prognostic slab sea ice (opt-in --jra55-sea-ice): replaces the freeze-cap
     # SST stand-in.  Static gate ⇒ ice-off blocks are bit-identical.  Setup
@@ -3027,6 +3117,9 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
                     dt=dt, grid=ice_grid,
                     ocean_mask=state_in.land_mask.data,
                 )
+            if zero_fluxes:
+                fw = jax.tree_util.tree_map(jnp.zeros_like, fw)
+                sf = jax.tree_util.tree_map(jnp.zeros_like, sf)
             # Ramp sponge strength alongside wind stress.
             if enable_ramp and enable_sponge:
                 sponge_step = _sponge._replace(gamma=_sponge.gamma * ramp)
@@ -3116,6 +3209,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
     enable_ramp = T_ramp_seconds > 0
     enable_sponge = bool(jra55_state.get("enable_sponge", False))
     enable_sss = bool(jra55_state.get("enable_sss_restoring", False))
+    zero_fluxes = bool(jra55_state.get("zero_surface_fluxes", False))
     enable_freeze = bool(jra55_state.get("enable_freeze_cap", False))
 
     sponge = _build_sponge_forcing(jra55_state) if enable_sponge else None
@@ -3326,6 +3420,9 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
                         dt=dt, grid=ice_grid,
                         ocean_mask=state_in.land_mask.data,
                     )
+                if zero_fluxes:
+                    fw = jax.tree_util.tree_map(jnp.zeros_like, fw)
+                    sf = jax.tree_util.tree_map(jnp.zeros_like, sf)
 
                 sponge_k = (_sponge._replace(gamma=_sponge.gamma * ramp)
                             if enable_sponge else None)
@@ -4096,6 +4193,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                     atm_stack = spmd_shard_stack(atm_stack)
                     runoff_stack = spmd_shard_stack(runoff_stack)
             io_dt = time.time() - t_io_start
+            if block_start == start_step:
+                _memprobe("after preload")
 
             t_compute_start = time.time()
             if use_gpu_interp:
@@ -4131,6 +4230,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                     )
             jax.block_until_ready(state.T.data)
             compute_dt = time.time() - t_compute_start
+            if block_start == start_step:
+                _memprobe("after block 1")
 
             block_start += actual
             step = block_start
@@ -4138,6 +4239,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
 
             if not _check_finite(state, grid_type):
                 print(f"  BLOWUP at step {step}")
+                _report_nonfinite(state, grid_type, grid, spmd_gather)
                 blown_up = True
                 break
 
@@ -5631,6 +5733,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         elif jax.process_index() == 0:
             print("  SPMD: single device visible — flag is a no-op.")
     _exit_build_ctx()                          # end of the #1370 host-side build
+    _memprobe("after setup")
 
     # Run time loop
     state, diag, wall_time, ok, blowup_info = _run_omip_loop(
