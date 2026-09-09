@@ -1553,6 +1553,16 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         A_h = 1.0e5   # cubed-sphere/latlon need more dissipation at ~5°
         K_h = 1.0e5
 
+    # --A-h / --K-h reached ONLY the realistic-bathymetry lat-lon branch
+    # below, so on every other lane (the tripole NEMO-mesh lane included) the
+    # flags parsed and then did nothing.  Apply them where the per-grid
+    # defaults are set, i.e. once, for every branch.  Default is None on both,
+    # so a run that does not pass them is unchanged.
+    if A_h_override is not None:
+        A_h = A_h_override
+    if K_h_override is not None:
+        K_h = K_h_override
+
     if grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere
         from legoesm.ocean.dynamics.ocean_model import OceanModel

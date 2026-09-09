@@ -670,6 +670,25 @@ def test_thickness_only_setup_explicitly_selects_legacy_e3w(monkeypatch):
     assert seen == {"nemo_e3w_source": "depth_difference"}
 
 
+def test_viscosity_overrides_reach_the_plain_latlon_lane():
+    """--A-h / --K-h used to be read only by the realistic-bathymetry branch,
+    so on every other lane (the tripole NEMO-mesh lane included) they parsed
+    and did nothing.  A 1/12 degree run needs a viscosity ~30x below the ~5
+    degree default to satisfy the explicit stability limit, so an inert flag
+    there is a silently unstable run."""
+    import scripts.run.run_omip as run_omip
+
+    _, _, cfg, _, _ = run_omip._create_setup(
+        "latlon", "8x16", 3, 1000.0, "none", "type1",
+        A_h_override=3.0e3, K_h_override=2.0e3)
+    assert float(cfg.lateral_viscosity.A_h) == 3.0e3
+    assert float(cfg.K_h) == 2.0e3
+
+    _, _, cfg_default, _, _ = run_omip._create_setup(
+        "latlon", "8x16", 3, 1000.0, "none", "type1")
+    assert float(cfg_default.lateral_viscosity.A_h) == 1.0e5    # default untouched
+
+
 @pytest.mark.parametrize("bad,match", [
     ("", "empty"),
     ("5.0\n-1.0\n", "non-positive"),
