@@ -3920,7 +3920,10 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
         # the UNSHARDED state before sharding; re-priming here would run
         # np.asarray on the sharded ``state`` — a hard non-addressable error
         # under route-B (shards span processes).  Skip it when spmd_step is set.
-        if spmd_step is None:
+        # Only the lat-lon C-grid model has build-once caches to prime; the MPAS
+        # model has no such hook (calling it unconditionally aborted every
+        # single-device MPAS JRA55 run before its first step).
+        if spmd_step is None and hasattr(model, "prime_step_caches"):
             model.prime_step_caches(state)
         # Prognostic slab sea ice (--jra55-sea-ice): the block scan carries
         # (ocean_state, ice_state); thread the ice state across blocks.
