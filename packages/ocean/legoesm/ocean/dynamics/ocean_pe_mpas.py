@@ -641,6 +641,12 @@ def mpas_ocean_baroclinic_tendencies(
     # full ζ (including the planetary-Coriolis-free baroclinic+barotropic ζ)
     # carries the null-mode amplitude.  Invisible to ``B_h·del4(u)`` because
     # the null mode lives in the kernel of the discrete curl-to-velocity map.
+    if config.K_zeta_bih is None:
+        raise ValueError(
+            "MPAS ocean tendency: config.K_zeta_bih is None (the DERIVED "
+            "sentinel). It is resolved from the mesh by MPASOceanModel; build "
+            "the model, or pass a config with an explicit coefficient "
+            "(0.0 = the term off).")
     if config.K_zeta_bih > 0:
         # [stage-halo T3] vertex-channel mid-refresh: the curl -> vertex-
         # Laplacian -> tangential-gradient chain is 3 hops (codex r1 #2 —

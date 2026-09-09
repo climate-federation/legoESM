@@ -124,6 +124,17 @@ def test_multicontroller_without_spmd_refused():
         run_omip_single("latlon", args)
 
 
+def test_mpas_k_zeta_bih_pin_round_trips():
+    """--mpas-k-zeta-bih pins the biharmonic vorticity damping; absent = derived
+    from the mesh spacing (None reaches _create_setup, which leaves the model to
+    scale it)."""
+    assert parse_args(["--grid", "mpas"]).mpas_k_zeta_bih is None
+    assert parse_args(["--grid", "mpas", "--mpas-k-zeta-bih", "1e14"]
+                      ).mpas_k_zeta_bih == 1.0e14
+    assert parse_args(["--grid", "mpas", "--mpas-k-zeta-bih", "0"]
+                      ).mpas_k_zeta_bih == 0.0
+
+
 def test_jra55_sea_ice_flag_parses():
     """--jra55-sea-ice opt-in (default off) drives the prognostic slab ice
     wired into the JRA55 scan block loop."""

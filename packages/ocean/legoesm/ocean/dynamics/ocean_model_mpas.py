@@ -18,7 +18,11 @@ from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.state import physics_with_constants
-from legoesm.ocean.mpas_config import MPASOceanConfig
+from legoesm.ocean.mpas_config import (
+    K_ZETA_BIH_MAX_SPACING_RATIO,
+    MPASOceanConfig,
+    resolution_scaled_k_zeta_bih,
+)
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
     OceanZStarCoordinate,
@@ -191,6 +195,36 @@ class MPASOceanModel:
             self._constants_config = _cc if _cc is not None else _model_cc
         else:
             self._constants_config = _model_cc
+
+        # Resolution-scaled biharmonic vorticity damping.  Resolved HERE --
+        # the one place every driver, experiment and test hands a mesh and a
+        # configuration to the same constructor -- so no mesh can silently
+        # inherit a coefficient tuned at another resolution.  Ghost edges from
+        # the SPMD padding carry ``dvEdge = 0`` and ``dcEdge = 1`` (the latter
+        # avoids 0/0 in the gradient), so REAL edges are selected by dvEdge --
+        # selecting on dcEdge would keep every ghost at 1 m and both skew the
+        # mean and trip the uniformity guard on every sharded run.
+        if self.config.K_zeta_bih is None:
+            _dc = np.asarray(self.mesh.dcEdge)
+            _dv = np.asarray(self.mesh.dvEdge)
+            _dc = _dc[(_dv > 0.0) & (_dc > 0.0)]
+            if _dc.size == 0:
+                raise ValueError(
+                    "MPASOceanModel: K_zeta_bih=None requires a mesh with "
+                    "positive dcEdge to derive the coefficient from.")
+            _ratio = float(_dc.max()) / float(_dc.min())
+            if _ratio > K_ZETA_BIH_MAX_SPACING_RATIO:
+                raise ValueError(
+                    "MPASOceanModel: K_zeta_bih=None derives ONE coefficient "
+                    "from the mean cell spacing, which describes a "
+                    f"quasi-uniform mesh; this mesh spans {_ratio:.1f}x in "
+                    f"dcEdge (limit {K_ZETA_BIH_MAX_SPACING_RATIO}). Pin the "
+                    "coefficient explicitly (MPASOceanConfig(K_zeta_bih=...) / "
+                    "--mpas-k-zeta-bih) for a variable-resolution mesh.")
+            _dx = float(_dc.mean())
+            self.config = self.config._replace(
+                K_zeta_bih=resolution_scaled_k_zeta_bih(_dx, self.config),
+                K_zeta_bih_dx_m=_dx)
 
         _valid_solvers = ("explicit_substep", "implicit_cn")
         if self.config.barotropic_solver not in _valid_solvers:

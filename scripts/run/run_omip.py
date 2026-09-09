@@ -642,6 +642,14 @@ def parse_args(argv: list[str] | None = None):
                    default=_DEFAULT_KPP_CONFIG.A_bg,
                    help="KPP background viscosity [m^2/s]")
     # --- wide-halo split-explicit barotropic (scaling-audit item 3) ---
+    p.add_argument("--mpas-k-zeta-bih", type=float, default=None,
+                   dest="mpas_k_zeta_bih",
+                   help="Pin the MPAS biharmonic vorticity damping coefficient "
+                        "[m^4/s] (0 = term off). DEFAULT (flag absent): derived "
+                        "from the mesh's own mean cell spacing as "
+                        "K_ref*(dx/dx_ref)^3, anchored on the ico6 mesh the "
+                        "OMIP NEMO-match value (1e14) was tuned on -- so ico6 "
+                        "is unchanged and finer meshes get the scaled value.")
     p.add_argument("--barotropic-wide-halo", action="store_true",
                    dest="barotropic_wide_halo",
                    help="Opt-in wide-halo split-explicit barotropic: one "
@@ -1300,7 +1308,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   use_conservation_fixer: bool = True,
                   dz_ref_override=None,
                   spmd_n_devices: int = 0,
-                  mpas_lloyd: int = 50):
+                  mpas_lloyd: int = 50,
+                  mpas_k_zeta_bih: float | None = None):
     """Create grid, z_coord, config, model for any grid type.
 
     ``spmd_n_devices > 1`` (MPAS only, ``--enable-mpas-spmd``) reorders + pads
@@ -1638,8 +1647,15 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         # step already reads config.normalize_freshwater (ocean_pe_mpas) — the only
         # gap was the flag defaulting False on MPASOceanConfig.
         config = config._replace(normalize_freshwater=True)
+        if mpas_k_zeta_bih is not None:
+            # Explicit pin (--mpas-k-zeta-bih); otherwise the model derives it
+            # from this mesh's spacing (resolution_scaled_k_zeta_bih).
+            config = config._replace(K_zeta_bih=mpas_k_zeta_bih)
         model = MPASOceanModel(mesh, z_coord, config)
-        return mesh, z_coord, config, model, "mpas"
+        # The MODEL's config is the record: it carries the vorticity damping
+        # actually in force (derived from this mesh unless pinned), so the
+        # run's saved configuration shows the resolved value, not ``None``.
+        return mesh, z_coord, model.config, model, "mpas"
 
     elif grid_type == "spectral":
         from legoesm.grids.gaussian import create_gaussian_grid
@@ -4596,6 +4612,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         args.physics, args.water_type,
         spmd_n_devices=_mpas_spmd_nd,
         mpas_lloyd=int(getattr(args, "mpas_lloyd", 50)),
+        mpas_k_zeta_bih=getattr(args, "mpas_k_zeta_bih", None),
         use_bathymetry=(args.bathymetry is not None),
         A_h_override=args.A_h,
         B_h_override=args.B_h,
