@@ -25,6 +25,18 @@ machine for production runs.
 See ``docs/dev-notes/ocean_experiments_reference.md`` for a 1-minute
 orientation and the full scientific configuration, decisions log, and
 stability investigation.
+
+Numerics note (decision 2026-09-09, NEMO-fidelity campaign): on CPU the XLA
+compiler contracts ``a - b*c`` into a fused multiply-add, which NEMO's
+reference build never does. The two sites where that broke bit-exactness
+(the tracer and momentum implicit-solve sweeps) round the multiply
+separately by hand. A global switch exists — ``XLA_FLAGS=--xla_cpu_max_isa=AVX``
+(also ``SSE4_2``, or ``--xla_backend_optimization_level=0``) — and was
+measured: with the hand fixes in place it changes no operator result, moves
+GYRE trajectory rows by <= 7e-13 and no first-failing step, costs ~3% speed.
+It was deliberately NOT adopted. If a new fused-multiply-add mismatch appears
+in a NEMO-identity comparison, try that flag first to confirm the class
+before hand-fixing the site.
 """
 
 from __future__ import annotations
@@ -504,8 +516,34 @@ def _save_run_metadata(args, cfg: DINOConfig, grid, z, output_dir: Path,
 # Main
 # ---------------------------------------------------------------------
 
+def _is_nemo_fidelity_run(args) -> bool:
+    """The NEMO-identity DINO path: NEMO's exact mesh and/or a ``nemo_*`` card."""
+    return bool(args.nemo_faithful_grid) or str(args.recipe or "").startswith("nemo_")
+
+
+def _force_fp64_for_nemo_fidelity(args) -> None:
+    """NEMO-fidelity runs are ALWAYS fp64, and not by a flag (user decision
+    2026-09-09).  ``JAX_ENABLE_X64=1`` only permits float64; legoESM's
+    constructors cast to ``get_policy().control``, which defaults to float32,
+    so without this the NEMO-exact mesh and initial state are rebuilt in
+    single precision and stop being bit-exact.  Must run before any array is
+    built.  Other cards keep the default policy.
+    """
+    if not _is_nemo_fidelity_run(args):
+        return
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    set_policy(PrecisionPolicy.fp64())
+    policy = get_policy()
+    if policy.control != PrecisionPolicy.fp64().control:
+        raise SystemExit(
+            f"NEMO-fidelity run requires the fp64 precision policy, got {policy}")
+    print(f"[run_dino] NEMO-fidelity run: precision policy forced to fp64 "
+          f"(control={policy.control}, storage={policy.storage})", flush=True)
+
+
 def main():
     args = _parse_args()
+    _force_fp64_for_nemo_fidelity(args)
 
     # JAX x64 sanity check: DINO uses Wright EOS + barotropic split;
     # both need 64-bit precision to avoid silent eta drift and EOS noise.
