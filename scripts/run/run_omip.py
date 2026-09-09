@@ -5047,9 +5047,12 @@ def run_omip_single(grid_type: str, args) -> dict:
             # --dz-ref-file that disagrees with it must not be silently
             # discarded: it would leave the run's provenance describing a
             # vertical grid the model never used.
+            # Micron tolerance: the point is to catch a DIFFERENT vertical
+            # grid, not the rounding of a text file written from this same
+            # mesh (measured 5e-7 m for the ORCA12 dz file).
             if _dz_ref is not None and not np.allclose(
                     np.asarray(_dz_ref, dtype=np.float64), _e3t_1d,
-                    rtol=1e-9, atol=1e-9):
+                    rtol=1e-6, atol=1e-6):
                 raise SystemExit(
                     "--dz-ref-file disagrees with the tripole mesh's own "
                     "e3t_1d; drop the flag (the mesh supplies the reference "
