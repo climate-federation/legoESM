@@ -9,7 +9,7 @@
 #SBATCH --account=bd1179_gpu
 #SBATCH --partition=gpu
 #SBATCH --constraint=a100_80
-#SBATCH --nodes=8
+#SBATCH --nodes=4
 #SBATCH --gres=gpu:4
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=64
@@ -35,8 +35,12 @@ mkdir -p "$JAX_COMPILATION_CACHE_DIR"
 CONFIG=${CONFIG:-$LEGO/config/omip/fesom_forca20_1yr_jax.yaml}
 MESH=/work/ab0995/a270088/fesom_jax_meshes/mesh_forca20
 POOL=/work/ab0995/a270088/meshes/FORCA20
-PART=dist_32                # 32 GPUs = 8 nodes x 4; fixed together with the SBATCH --nodes=8 header
-NODES=8
+# 16 GPUs = 4 nodes x 4, fixed together with the SBATCH --nodes=4 header.  This is
+# the partition AWI ran FORCA20 production on, and for the same reason: 4-node
+# allocations start far sooner on this partition than 8-node ones (measured here,
+# 15.5 h queued for 8 nodes with no start).  ~0.61 s/step instead of ~0.33.
+PART=dist_16
+NODES=4
 OUT=/work/bd1083/b309178/diffESM/legoesm_pg/ocean_hires_runs/forca20_1yr
 ARCHIVE=$OUT/restart_archive
 SELF=$LEGO/scripts/cluster/fesom2_comparison/run_forca20_1yr_jax.sbatch
@@ -46,9 +50,9 @@ TOTAL=${TOTAL:-175200}      # one model year (1958, 365-day calendar) at dt=180
 # accumulators do not persist across jobs and the next job re-creates the period store, so a
 # mid-month boundary would overwrite that month's mean with a partial one (codex review).
 CANARY=14880                # first (cold) job = January (31 d x 480 steps/d): finiteness + throughput
-PERJOB=${PERJOB:-73440}     # cap per resumed job; the actual STEPS is the largest month boundary <= CUR+PERJOB
-                            # => 4 jobs: Jan (canary) | Feb-Jun 72000 | Jul-Nov 73440 | Dec 14880; the longest
-                            # is ~6.8 h at the AWI-measured 0.33 s/step at dist_32, ~5 h headroom under 11:45
+PERJOB=${PERJOB:-43200}     # cap per resumed job; the actual STEPS is the largest month boundary <= CUR+PERJOB
+                            # 43200 steps = 90 d ~ 7.3 h at the AWI-measured 0.61 s/step at dist_16,
+                            # leaving >4 h headroom under the 11:45 limit; the chain takes ~6 jobs
 GUARD_SECS=${GUARD_SECS:-1800}
 CHUNK=48
 mkdir -p $OUT $(dirname $SELF) /work/bd1083/b309178/diffESM/legoesm_pg/ocean_hires_runs/logs
@@ -71,7 +75,7 @@ YAML_YEAR=$($PY -c "import yaml,sys;print(yaml.safe_load(open('$CONFIG'))['forci
 if [ -e $OUT/.jobcount ]; then CNT=$(cat $OUT/.jobcount) || { echo "ABORT: .jobcount exists but is unreadable"; exit 1; }; else CNT=0; fi
 case "$CNT" in ''|*[!0-9]*) echo "ABORT: .jobcount corrupt ($CNT)"; exit 1;; esac
 CNT=$((CNT+1)); echo $CNT > $OUT/.jobcount
-if [ "$CNT" -gt 12 ]; then echo "ABORT: jobcount $CNT > 12 (runaway guard)"; exit 1; fi
+if [ "$CNT" -gt 16 ]; then echo "ABORT: jobcount $CNT > 12 (runaway guard)"; exit 1; fi
 RESTART_DIR=""
 if [ -f "$ARCHIVE/restart.latest" ]; then
   LTAG=$(cat "$ARCHIVE/restart.latest"); [ -n "$LTAG" ] && RESTART_DIR="$ARCHIVE/$LTAG"
