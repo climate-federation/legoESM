@@ -3556,12 +3556,11 @@ def _extract_scalars(state, grid_type, grid, z_coord):
         ssh = float(np.nanmean(np.where(mask > 0.5, np.asarray(eta_grid), np.nan)))
         return {"SST": sst, "SSS": sss, "SSH": ssh}
 
-    T = np.asarray(state.T.data)
-    S = np.asarray(state.S.data)
-    eta = np.asarray(state.eta.data)
-    mask = np.asarray(state.land_mask.data)
-
     if grid_type == "mpas":
+        T = np.asarray(state.T.data)
+        S = np.asarray(state.S.data)
+        eta = np.asarray(state.eta.data)
+        mask = np.asarray(state.land_mask.data)
         # MPAS: (nCells, nlev), mask: (nCells,)
         wet = mask > 0.5
         sst = float(np.mean(T[wet, 0])) if wet.any() else 0.0
@@ -3570,28 +3569,66 @@ def _extract_scalars(state, grid_type, grid, z_coord):
         u = np.asarray(state.u.data)
         max_u = float(np.max(np.abs(u)))
     else:
-        # Cubed-sphere (6,n,n,nlev) or latlon (nlat,nlon,nlev)
-        if T.ndim == 4:
-            mask_3d = mask[..., np.newaxis]
-        else:
-            mask_3d = mask[..., np.newaxis]
+        # Cubed-sphere (6,n,n,nlev) or latlon/tripole (nlat,nlon,nlev).
+        # Reductions, not host arrays: under lat-band SPMD the state is
+        # sharded across PROCESSES, and gathering it to compute a handful of
+        # scalars costs a full global copy on one device every diagnostic
+        # sample (7.4 GiB per field at ORCA12 -- it exhausted one arm's memory
+        # and hung another).  jnp reductions run in place on each band and
+        # return a replicated scalar, so this works on a sharded state and on
+        # a plain host array alike.  Masked means replace boolean indexing,
+        # whose output shape would be data-dependent.
+        T = state.T.data
+        S = state.S.data
+        eta = state.eta.data
+        mask = state.land_mask.data
         wet = mask > 0.5
-        wet_3d = mask_3d > 0.5
-        sst = float(np.mean(T[..., 0][wet]))
-        sss = float(np.mean(S[..., 0][wet]))
-        ssh = float(np.mean(eta[wet]))
-        u_raw = np.asarray(state.u.data)
-        v_raw = np.asarray(state.v.data) if hasattr(state, 'v') else np.zeros_like(u_raw)
+        # No clamp on the denominator: an all-land domain gives NaN, the way
+        # the mean over an empty selection did.  A plausible 0.0 would hide a
+        # broken mask behind a finite number.
+        n_wet = jnp.sum(wet)
+        sst = float(jnp.sum(jnp.where(wet, T[..., 0], 0.0)) / n_wet)
+        sss = float(jnp.sum(jnp.where(wet, S[..., 0], 0.0)) / n_wet)
+        ssh = float(jnp.sum(jnp.where(wet, eta, 0.0)) / n_wet)
+        u_raw = state.u.data
+        v_raw = state.v.data if hasattr(state, 'v') else jnp.zeros_like(u_raw)
         # C-grid lat-lon: u is (nlat, nlon+1, nlev), v is (nlat+1, nlon, nlev).
         # Interpolate staggered velocities to cell centers before computing speed.
         if grid_type in ("latlon", "tripole") and u_raw.shape[1] != T.shape[1]:
             u_c = 0.5 * (u_raw[:, :-1] + u_raw[:, 1:])
-            v_c = 0.5 * (v_raw[:-1, :] + v_raw[1:, :])
+            if v_raw.shape[0] == T.shape[0]:
+                # Lat-band sharded layout: the state carries v as its lower
+                # n_lat rows (the top pole-face row is dead by the carrier
+                # contract, so it is dropped).  The face north of each cell is
+                # the next row, which for a band's last row lives on the next
+                # band: a one-row shift, which the partitioner turns into an
+                # exchange with the neighbouring band -- not a gather of the
+                # field.  The global last row takes the dead pole face, 0.
+                v_next = jnp.roll(v_raw, -1, axis=0)
+                v_next = v_next.at[-1].set(0.0)
+                v_c = 0.5 * (v_raw + v_next)
+            else:
+                # Serial/gathered layout.  The top v-face row is dead by the
+                # same carrier contract, but only its MASK is checked when a
+                # state is sharded, so a dead face carrying non-zero data would
+                # make this disagree with the sharded branch above (which does
+                # not have that row at all).  Mask it here rather than assume.
+                v_top = v_raw[-1:, :]
+                vm = getattr(state, "v_mask", None)
+                if vm is not None:
+                    m_top = vm.data[-1:, :] > 0.5
+                    if m_top.ndim < v_top.ndim:
+                        m_top = m_top[..., jnp.newaxis]
+                    v_top = jnp.where(m_top, v_top, 0.0)
+                else:
+                    v_top = jnp.zeros_like(v_top)
+                v_c = 0.5 * (v_raw[:-1, :]
+                             + jnp.concatenate([v_raw[1:-1, :], v_top], axis=0))
         else:
             u_c = u_raw
             v_c = v_raw
-        speed_3d = np.sqrt(u_c**2 + v_c**2)
-        max_u = float(np.max(speed_3d))
+        speed_3d = jnp.sqrt(u_c**2 + v_c**2)
+        max_u = float(jnp.max(speed_3d))
 
     # ---- B2 standing-mode purity diagnostic P_bt ----
     # P_bt = ⟨|U_bar|²⟩ / ⟨|u_3d|²⟩ — fraction of KE in the depth-mean
@@ -3605,16 +3642,16 @@ def _extract_scalars(state, grid_type, grid, z_coord):
     j_max = i_max = -1
     if grid_type != "spectral" and grid_type != "mpas":
         nlev_state = u_c.shape[-1]
-        U_bar = np.mean(u_c, axis=-1)
-        V_bar = np.mean(v_c, axis=-1)
+        U_bar = jnp.mean(u_c, axis=-1)
+        V_bar = jnp.mean(v_c, axis=-1)
         ke_baro = 0.5 * (U_bar**2 + V_bar**2)
         ke_3d = 0.5 * speed_3d**2
-        wet_3d_b = np.broadcast_to(wet[..., np.newaxis], ke_3d.shape)
-        ke_baro_total = float(np.sum(np.where(wet, ke_baro, 0.0))) * nlev_state
-        ke_3d_total = float(np.sum(np.where(wet_3d_b, ke_3d, 0.0)))
+        ke_baro_total = float(jnp.sum(jnp.where(wet, ke_baro, 0.0))) * nlev_state
+        ke_3d_total = float(
+            jnp.sum(jnp.where(wet[..., jnp.newaxis], ke_3d, 0.0)))
         pbt = ke_baro_total / max(ke_3d_total, 1e-30)
-        speed_masked = np.where(wet[..., np.newaxis], speed_3d, -1.0)
-        idx = np.unravel_index(np.argmax(speed_masked), speed_3d.shape)
+        speed_masked = jnp.where(wet[..., jnp.newaxis], speed_3d, -1.0)
+        idx = np.unravel_index(int(jnp.argmax(speed_masked)), speed_3d.shape)
         j_max, i_max = int(idx[0]), int(idx[1])
 
     return {
@@ -4112,11 +4149,10 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     # ``blowup_info`` and is emitted in results.txt.
     blowup_info: dict | None = None
 
-    # Initial diagnostics (SPMD: gather the v_lower-carrying sharded state
-    # — _extract_scalars centers v and needs the full n_lat+1 rows)
-    scalars = _extract_scalars(
-        spmd_gather(state) if spmd_gather is not None else state,
-        grid_type, grid, z_coord)
+    # Initial diagnostics — straight off the sharded state (_extract_scalars
+    # reduces in place and handles the v_lower carrier), so the run never
+    # pays for a global copy of the state to report five scalars.
+    scalars = _extract_scalars(state, grid_type, grid, z_coord)
     for k, v in scalars.items():
         diag.setdefault(k, []).append(v)
     diag["day"].append(0.0)
@@ -4413,7 +4449,11 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                     state = state._replace(
                         eta=state.eta.replace(data=eta_corrected))
 
-            _st_diag = (spmd_gather(state) if spmd_gather is not None
+            # The scalars come off the sharded state directly; only the chi
+            # diagnostic below (regular lat-lon lane) needs a host-side eta,
+            # so that is the only case that still pays for a gather.
+            _st_diag = (spmd_gather(state)
+                        if spmd_gather is not None and grid_type == "latlon"
                         else state)
             scalars = _extract_scalars(_st_diag, grid_type, grid, z_coord)
 
@@ -4641,8 +4681,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             # SPMD: _extract_scalars centers v (needs the full n_lat+1
             # staggered rows) — gather the v_lower-carrying sharded state
             # at the diag cadence only.
-            _st_diag = spmd_gather(state) if spmd_gather is not None else state
-            scalars = _extract_scalars(_st_diag, grid_type, grid, z_coord)
+            scalars = _extract_scalars(state, grid_type, grid, z_coord)
             diag["day"].append(day)
             diag["step"].append(step)
             for k, v in scalars.items():
