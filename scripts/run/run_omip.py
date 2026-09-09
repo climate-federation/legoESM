@@ -545,6 +545,16 @@ def parse_args(argv: list[str] | None = None):
                        "REFUSES a tie; pass it explicitly for a pivot row whose "
                        "latitude is too flat to disambiguate (ORCA12 stripped: "
                        "'(n_lon-i)%%n_lon')."))
+    p.add_argument("--no-tripole-partial-cells", action="store_false",
+                   dest="tripole_partial_cells", default=True,
+                   help=("Keep the legacy z* bottom on the --grid tripole lane. "
+                         "DEFAULT is partial cells: z* stretches the WHOLE "
+                         "reference column into every water column, so a NEMO "
+                         "75-level grid gives the shallowest shelf column a "
+                         "4 mm surface layer and one step of surface heating "
+                         "sends it past 1000 C (measured, eORCA1 72.2N 73.6E). "
+                         "Partial cells keep the reference layer thicknesses "
+                         "and cut only the bottom cell, as NEMO does."))
     p.add_argument("--tripole-strip-north-rows", type=int, default=0,
                    help=(
                        "Drop this many DEAD halo rows from the north end of "
@@ -3616,6 +3626,58 @@ def _extract_scalars(state, grid_type, grid, z_coord):
     }
 
 
+# ===========================================================================
+# Partial-cell bottom geometry (shared by the realistic-bathymetry lat-lon
+# lane and the tripole NEMO-mesh lane)
+# ===========================================================================
+
+_PARTIAL_CELL_THIN_THRESHOLD = 0.3
+
+
+def _snap_thin_partial_cells(H_bathy, land_mask, z_coord,
+                             thin_threshold: float = _PARTIAL_CELL_THIN_THRESHOLD):
+    """Round bathymetry up to the interface above where the partial cell would
+    be thinner than ``thin_threshold`` of the reference layer, and turn any
+    column that loses its last level into land.
+
+    Thin partial cells at the bottom of deep equatorial columns drove the
+    day-13 pressure-gradient instability diagnosed in the 30-day spinup (f is
+    near zero there, so geostrophy cannot damp pressure-gradient errors
+    quickly).  The snap is the standard MOM6/MITgcm fix, so every column ends
+    with either a full bottom cell or a thick-enough partial one.
+
+    Returns ``(H_bathy, land_mask)`` as device arrays and prints what changed.
+    """
+    H_np = np.asarray(H_bathy, dtype=np.float64)
+    abs_z_half = np.abs(np.asarray(z_coord.z_half_ref, dtype=np.float64))
+    dz_ref_np = np.asarray(z_coord.dz_ref, dtype=np.float64)   # positive
+    # A column deeper than the deepest reference interface matches no layer
+    # below, so it would keep a bottom index past the last level.  Clamp it:
+    # the reference grid is the deepest ocean this vertical coordinate has.
+    n_too_deep = int(np.sum(H_np > abs_z_half[-1]))
+    if n_too_deep:
+        print(f"  Bathymetry deeper than the reference column "
+              f"({abs_z_half[-1]:.1f} m): {n_too_deep} cells clamped")
+        H_np = np.minimum(H_np, abs_z_half[-1])
+    H_snapped = H_np.copy()
+    n_snapped = 0
+    for k in range(z_coord.n_levels):
+        top = abs_z_half[k]
+        bot = abs_z_half[k + 1]
+        in_layer = (H_np > top) & (H_np <= bot)
+        too_thin = in_layer & ((H_np - top) < thin_threshold * dz_ref_np[k])
+        H_snapped = np.where(too_thin, top, H_snapped)
+        n_snapped += int(np.sum(too_thin))
+    new_land = (H_snapped <= 0.0) & (np.asarray(land_mask) > 0.5)
+    n_new_land = int(np.sum(new_land))
+    if n_new_land > 0:
+        land_mask = jnp.where(jnp.asarray(new_land), 0.0,
+                              jnp.asarray(land_mask))
+    print(f"  Partial-cell snap (cutoff {thin_threshold * 100:.0f}%): "
+          f"{n_snapped} cells snapped, {n_new_land} → land")
+    return jnp.asarray(H_snapped, dtype=jnp.float64), jnp.asarray(land_mask)
+
+
 def _check_finite(state, grid_type):
     """Check if state contains finite and physically sensible values."""
     if grid_type == "spectral":
@@ -3858,6 +3920,29 @@ def _load_ice_restart(restart_path, ice_template):
     if not replacements:
         return None
     return ice_template._replace(**replacements)
+
+
+def _assert_restart_geometry_matches(state_in, state_built, *, what: str):
+    """Refuse a restart whose bottom geometry differs from the one just built.
+
+    A checkpoint written before the tripole lane moved to partial cells carries
+    the OLD bathymetry and land mask.  Restoring them leaves the model stepping
+    on a vertical coordinate that was frozen at build time from the NEW snapped
+    bathymetry, so every column's bottom cell is silently inconsistent.  Shapes
+    match, so nothing else catches it.
+    """
+    for name in ("H_bathy", "land_mask"):
+        a = np.asarray(getattr(state_in, name).data)
+        b = np.asarray(getattr(state_built, name).data)
+        if a.shape != b.shape or not np.allclose(a, b, rtol=1e-9, atol=1e-9):
+            n_diff = int(np.sum(~np.isclose(a, b, rtol=1e-9, atol=1e-9))) \
+                if a.shape == b.shape else -1
+            raise SystemExit(
+                f"restart {what}: its {name} differs from the geometry this "
+                f"run built ({n_diff} cells differ). The vertical coordinate "
+                f"is frozen at build time, so resuming would step on a "
+                f"mismatched bottom geometry. Re-run without the restart, or "
+                f"reproduce the geometry the restart was written with.")
 
 
 def _load_restart(restart_path, template_state, grid_type=None):
@@ -4941,6 +5026,61 @@ def run_omip_single(grid_type: str, args) -> dict:
         print(f"  Tripole mesh: {[Path(f).name for f in _mesh_files]} "
               f"({_n_wet}/{_lm.size} ocean cells, "
               f"H_max={float(np.max(_hb)):.0f} m)")
+        if getattr(args, "tripole_partial_cells", True) and args.bathymetry is None:
+            # True depth levels with a partial bottom cell, as NEMO's zgr_zps
+            # builds them.  The reference thicknesses and T-point depths come
+            # from the mesh itself (never reconstructed: the T-point depths
+            # decide which level is the bottom one on a stretched grid), so the
+            # model's vertical grid is NEMO's own.
+            from legoesm.ocean.init_tripole import read_mesh_vertical_1d
+            from legoesm.ocean.vertical import (
+                create_partial_cell_coordinate, create_z_star_from_thicknesses,
+            )
+            _e3t_1d, _gdept_1d, _ = read_mesh_vertical_1d(_mesh_files)
+            if _e3t_1d.size != int(z_coord.n_levels):
+                raise SystemExit(
+                    f"--grid tripole partial cells: mesh has {_e3t_1d.size} "
+                    f"levels but the run was built with {int(z_coord.n_levels)}"
+                    f"; pass --nlev {_e3t_1d.size} (or "
+                    f"--no-tripole-partial-cells)")
+            # The mesh becomes the source of truth for the vertical grid, so a
+            # --dz-ref-file that disagrees with it must not be silently
+            # discarded: it would leave the run's provenance describing a
+            # vertical grid the model never used.
+            if _dz_ref is not None and not np.allclose(
+                    np.asarray(_dz_ref, dtype=np.float64), _e3t_1d,
+                    rtol=1e-9, atol=1e-9):
+                raise SystemExit(
+                    "--dz-ref-file disagrees with the tripole mesh's own "
+                    "e3t_1d; drop the flag (the mesh supplies the reference "
+                    "thicknesses) or pass --no-tripole-partial-cells")
+            _mesh_depth = float(np.sum(_e3t_1d))
+            if abs(_mesh_depth - float(args.H_max)) > 1e-6 * _mesh_depth:
+                raise SystemExit(
+                    f"--H-max {float(args.H_max):.6f} m disagrees with the "
+                    f"tripole mesh's reference depth {_mesh_depth:.6f} m "
+                    f"(sum of e3t_1d); pass --H-max {_mesh_depth:.6f}")
+            z_coord = create_z_star_from_thicknesses(
+                _e3t_1d, _gdept_1d, nemo_e3w_source="depth_difference")
+            _tripole_H_bathy, _tripole_land_mask = _snap_thin_partial_cells(
+                _tripole_H_bathy, _tripole_land_mask, z_coord)
+            # Reassign z_coord, do not keep a second coordinate alive: the
+            # eta-stretched operators, the climatology initialisation, the rest
+            # state, the restart writer and the multi-GPU band slicing all read
+            # this name, and they must see the same bottom geometry as the
+            # bathymetry (the tripole ETOPO path below does the same).
+            _z_star_for_snap = z_coord
+            z_coord = create_partial_cell_coordinate(
+                _z_star_for_snap, _tripole_H_bathy,
+                bottom_index_rule="nemo_tpoint")
+            model = LatLonCGridOceanModel(
+                grid, z_coord, config,
+                iwm_forcing=getattr(model, "_iwm_forcing", None))
+            _thin = float(np.min(np.asarray(z_coord.dz_ref)))
+            print(f"  Tripole partial cells (NEMO zgr_zps T-point rule): "
+                  f"{int(z_coord.n_levels)} reference levels, top "
+                  f"{float(np.asarray(z_coord.dz_ref)[0]):.3f} m, thinnest "
+                  f"reference layer {_thin:.3f} m")
     config, model = _apply_drag_iwm_overrides(
         args, grid_type, grid, z_coord, config, model)
 
@@ -5253,32 +5393,8 @@ def run_omip_single(grid_type: str, args) -> dict:
         # so that every column ends with a full bottom cell or a
         # "thick enough" partial cell.
         from legoesm.ocean.vertical import create_partial_cell_coordinate
-        H_np = np.asarray(H_bathy_init)
-        z_half_np = np.asarray(z_coord.z_half_ref)        # negative
-        dz_ref_np = np.asarray(z_coord.dz_ref)            # positive
-        abs_z_half = np.abs(z_half_np)                    # positive
-        H_snapped = H_np.copy()
-        n_snapped = 0
-        thin_threshold = 0.3
-        for k in range(z_coord.n_levels):
-            top = abs_z_half[k]
-            bot = abs_z_half[k + 1]
-            in_layer = (H_np > top) & (H_np <= bot)
-            partial_h = H_np - top
-            too_thin = in_layer & (partial_h < thin_threshold * dz_ref_np[k])
-            H_snapped = np.where(too_thin, top, H_snapped)
-            n_snapped += int(np.sum(too_thin))
-        # Cells where the new H_bathy is at the surface (k=0 case
-        # snapped down to 0) become land.  Update land_mask consistently.
-        new_land = (H_snapped <= 0.0) & (np.asarray(land_mask_init) > 0.5)
-        n_new_land = int(np.sum(new_land))
-        if n_new_land > 0:
-            land_mask_init = jnp.where(
-                jnp.asarray(new_land), 0.0, land_mask_init,
-            )
-        H_bathy_init = jnp.asarray(H_snapped, dtype=jnp.float64)
-        print(f"  Partial-cell snap (cutoff {thin_threshold*100:.0f}%): "
-              f"{n_snapped} cells snapped, {n_new_land} → land")
+        H_bathy_init, land_mask_init = _snap_thin_partial_cells(
+            H_bathy_init, land_mask_init, z_coord)
         z_coord_partial = create_partial_cell_coordinate(z_coord, H_bathy_init)
         from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
         model = LatLonCGridOceanModel(
@@ -5452,9 +5568,13 @@ def run_omip_single(grid_type: str, args) -> dict:
               f"S=[{float(S_woa_masked[state.land_mask.data > 0.5].min()):.1f}, "
               f"{float(S_woa_masked[state.land_mask.data > 0.5].max()):.1f}] PSU")
     if args.restart is not None:
+        _state_built = state
         state, restart_day, restart_step = _load_restart(
             args.restart, state, grid_type=grid_type,
         )
+        if grid_type == "tripole":
+            _assert_restart_geometry_matches(
+                state, _state_built, what=str(Path(args.restart).name))
         start_step = restart_step
         print(f"  Restart: loaded day {restart_day:.1f} (step {restart_step}) "
               f"from {Path(args.restart).name}")

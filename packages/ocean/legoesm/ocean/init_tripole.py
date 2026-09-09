@@ -92,6 +92,92 @@ def read_mesh_mask_bathy(mesh_path, *, strip_north_rows: int = 0):
     return land_mask, H_bathy
 
 
+def read_mesh_vertical_1d(mesh_path):
+    """Read NEMO's 1-D reference vertical grid from the mesh files.
+
+    Returns ``(e3t_1d, gdept_1d, gdepw_1d)`` in metres: the reference layer
+    thicknesses, the T-point depths and the W-point (interface) depths that
+    NEMO's own ``zgr_zps`` uses to place the bottom level.  The T-point depths
+    are what ``create_partial_cell_coordinate(..., bottom_index_rule=
+    "nemo_tpoint")`` needs; deriving them from the thicknesses instead changes
+    which level is the bottom one on a stretched grid, so they are read, never
+    reconstructed.
+
+    Same file-scan contract as :func:`read_mesh_mask_bathy` (first hit wins
+    across the listed mesh files).
+    """
+    import xarray as xr
+    from legoesm.grids.tripole import mesh_file_list
+
+    files = mesh_file_list(mesh_path)
+    dss = [xr.open_dataset(p, mask_and_scale=False) for p in files]
+    try:
+        def _var1d(name, *alts):
+            for ds in dss:
+                for nm in (name, *alts):
+                    if nm in ds:
+                        v = ds[nm]
+                        if not np.issubdtype(np.asarray(v.values).dtype,
+                                             np.floating):
+                            # mask_and_scale=False (needed because NEMO writes
+                            # _FillValue=0 on e3t) also disables unpacking, so a
+                            # packed integer variable would arrive as raw counts
+                            # and pass every range check below.
+                            raise ValueError(
+                                f"{nm} in {files} is {np.asarray(v.values).dtype}, "
+                                f"not floating point; this reader cannot unpack "
+                                f"scaled integer storage")
+                        a = np.asarray(v.values, dtype=np.float64)
+                        squeezed = a.squeeze()
+                        if squeezed.ndim != 1:
+                            raise ValueError(
+                                f"{nm} in {files} has shape {a.shape}; a 1-D "
+                                f"reference ladder is required (a leading time "
+                                f"or ensemble dimension is not collapsed here "
+                                f"because concatenating it would silently "
+                                f"multiply the level count)")
+                        return np.atleast_1d(squeezed)
+            raise KeyError(f"none of {(name, *alts)} found in mesh files {files}")
+
+        e3t_1d = _var1d("e3t_1d", "e3t_0_1d")
+        gdept_1d = _var1d("gdept_1d")
+        gdepw_1d = _var1d("gdepw_1d")
+    finally:
+        for ds in dss:
+            ds.close()
+    n = e3t_1d.size
+    if gdept_1d.size != n or gdepw_1d.size not in (n, n + 1):
+        raise ValueError(
+            f"inconsistent NEMO 1-D vertical arrays in {files}: "
+            f"e3t_1d {e3t_1d.size}, gdept_1d {gdept_1d.size}, "
+            f"gdepw_1d {gdepw_1d.size}")
+    for nm, a in (("e3t_1d", e3t_1d), ("gdept_1d", gdept_1d),
+                  ("gdepw_1d", gdepw_1d)):
+        if not np.all(np.isfinite(a)):
+            raise ValueError(f"{nm} in {files} is not finite")
+    # Strictly positive: a zero reference thickness would become a
+    # zero-thickness level and divide the tracer tendency by nothing.
+    if np.any(e3t_1d <= 0.0):
+        raise ValueError(f"e3t_1d in {files} has a non-positive thickness")
+    if np.any(np.diff(gdept_1d) <= 0.0):
+        raise ValueError(f"gdept_1d in {files} is not strictly increasing")
+    if np.any(gdepw_1d < 0.0):
+        raise ValueError(f"gdepw_1d in {files} has a negative depth")
+    # The two ladders must describe the SAME grid: every T point sits inside
+    # its own layer.  Meshes whose thicknesses and depths come from different
+    # NEMO configurations have equal level counts and would otherwise build a
+    # sheared coordinate in silence.
+    interfaces = np.concatenate([[0.0], np.cumsum(e3t_1d)])
+    if np.any(gdept_1d <= interfaces[:-1]) or np.any(gdept_1d >= interfaces[1:]):
+        bad = int(np.argmax((gdept_1d <= interfaces[:-1])
+                            | (gdept_1d >= interfaces[1:])))
+        raise ValueError(
+            f"gdept_1d and e3t_1d in {files} describe different vertical "
+            f"grids: level {bad} has T depth {gdept_1d[bad]:.4f} m outside its "
+            f"layer [{interfaces[bad]:.4f}, {interfaces[bad + 1]:.4f}] m")
+    return e3t_1d, gdept_1d, gdepw_1d
+
+
 def compute_woa_3d(grid, z_coord, woa_t, woa_s, H_bathy, land_mask):
     """WOA18 T,S interpolated to the model grid (°C / PSU), masked below the
     local seafloor (``bathymetry_depth``) and zeroed on land. Used both as the
