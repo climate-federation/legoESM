@@ -78,8 +78,24 @@ def _worker(tmp_dir: str) -> None:
     atm_stack, runoff_stack = run_omip._preload_jra55_forcing_block(
         0, n_block, dt, js)
 
-    # --- serial reference ---
-    block_fn = run_omip._build_jra55_block_fn(model, js, dt)
+    # --- serial reference, built from PERTURBED reference fields ---
+    # The SPMD builders below keep the UNPERTURBED closure and see the
+    # perturbed fields only through the ``refs`` argument, so parity holds
+    # only if the scan really consumes refs (a builder ignoring refs fails).
+    _REF_KEYS = (("sponge_gamma_2d", "sponge_gamma"),
+                 ("sponge_T_ref_3d", "sponge_T_ref"),
+                 ("sponge_S_ref_3d", "sponge_S_ref"),
+                 ("sss_target_2d", "sss_target"),
+                 ("_ocean_mask_2d", "ocean_mask"))
+    js_ref = dict(js)
+    for key, _ in _REF_KEYS:
+        if js.get(key) is None or key == "_ocean_mask_2d":
+            continue
+        js_ref[key] = (js[key] * 1.5 if key == "sponge_gamma_2d"
+                       else js[key] + 0.25)
+    assert any(js_ref[k] is not js.get(k) for k, _ in _REF_KEYS), \
+        "harness must exercise at least one reference field"
+    block_fn = run_omip._build_jra55_block_fn(model, js_ref, dt)
     ref_state, ref_ice = block_fn(state, atm_stack, runoff_stack,
                                   jnp.int32(0), ice0)
 
@@ -93,8 +109,13 @@ def _worker(tmp_dir: str) -> None:
     ice_s = shard_cell_pytree_latlon(ice0, dev.mesh)
     atm_s = shard_forcing_stack_latlon(atm_stack, dev.mesh)
     run_s = shard_forcing_stack_latlon(runoff_stack, dev.mesh)
+    # perturbed reference fields as band-sharded ARGUMENTS (route-B layout)
+    from legoesm.ocean.dynamics.sharded_ocean_step import shard_forcing_latlon
+    refs = {name: shard_forcing_latlon(jnp.asarray(js_ref[key]), dev.mesh)
+            for key, name in _REF_KEYS if js_ref.get(key) is not None}
     out_state, out_ice = block_spmd(ss, atm_s, run_s, jnp.int32(0), ice_s,
-                                    aux=getattr(spmd_step, "aux", None))
+                                    aux=getattr(spmd_step, "aux", None),
+                                    refs=refs)
     out_state = gather_state_latlon(out_state, dev.mesh, to_host=True)
     out_ice = gather_cell_pytree_latlon(out_ice, dev.mesh, to_host=True)
 
@@ -117,7 +138,7 @@ def _worker(tmp_dir: str) -> None:
     # --- the GPU-interp block builder (the runner DEFAULT, --gpu-interp) ---
     raw_stack, runoff_records, meta = run_omip._preload_jra55_raw_records(
         0, n_block, dt, js)
-    get_ref = run_omip._build_jra55_block_fn_interp(model, js, dt)
+    get_ref = run_omip._build_jra55_block_fn_interp(model, js_ref, dt)
     ref2_state, ref2_ice = get_ref(n_block)(
         state, raw_stack, runoff_records, meta["record_days"],
         jnp.float64(meta["block_start_day"]),
@@ -130,7 +151,7 @@ def _worker(tmp_dir: str) -> None:
         ss, raw_s, rr_s, meta["record_days"],
         jnp.float64(meta["block_start_day"]),
         jnp.float64(meta["block_start_day_forcing"]), ice_s,
-        aux=getattr(spmd_step, "aux", None))
+        aux=getattr(spmd_step, "aux", None), refs=refs)
     out2_state = gather_state_latlon(out2_state, dev.mesh, to_host=True)
     out2_ice = gather_cell_pytree_latlon(out2_ice, dev.mesh, to_host=True)
     for nm in ("T", "S", "eta", "u", "v"):

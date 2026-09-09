@@ -2896,10 +2896,12 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
         sss_alpha_static = 0.0
         sss_target_static = None
 
+    freeze_from_gamma = False
     if enable_freeze:
         sponge_gamma = jra55_state.get("sponge_gamma_2d", None)
         if sponge_gamma is not None and np.any(np.asarray(sponge_gamma) > 0):
             freeze_mask_static = sponge_gamma > 0.0
+            freeze_from_gamma = True
         else:
             # No sponge: cap globally over all ocean cells.
             # Use the land_mask from the initial state (captured below).
@@ -2934,7 +2936,28 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
 
     @jax.jit
     def block_fn(state, atm_stack, runoff_stack, block_start_step,
-                 ice_state=None, aux=None):
+                 ice_state=None, aux=None, refs=None):
+        # Reference fields: closure constants by default (single-process,
+        # byte-unchanged); under lat-band SPMD the driver passes them as the
+        # ``refs`` ARGUMENT, band-sharded like the forcing stack, so they are
+        # not replicated whole on every GPU (ORCA12: ~16 GB of 3-D sponge
+        # references per device) and route-B never closes over a
+        # non-addressable array.
+        _sponge, _sss_target, _freeze_mask = (
+            sponge, sss_target_static, freeze_mask_static)
+        if refs is not None:
+            from legoesm.ocean.sponge import SpongeForcing
+            if enable_sponge:
+                _sponge = SpongeForcing(
+                    gamma=refs["sponge_gamma"], T_ref=refs["sponge_T_ref"],
+                    S_ref=refs["sponge_S_ref"])
+            if enable_sss and "sss_target" in refs:
+                _sss_target = refs["sss_target"]
+            if freeze_from_gamma and "sponge_gamma" in refs:
+                _freeze_mask = refs["sponge_gamma"] > 0.0
+            elif freeze_mask_static is not None and "ocean_mask" in refs:
+                _freeze_mask = refs["ocean_mask"]
+
         def step_body(carry, idx):
             if enable_sea_ice:
                 state_in, ice_in = carry
@@ -3006,9 +3029,9 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
                 )
             # Ramp sponge strength alongside wind stress.
             if enable_ramp and enable_sponge:
-                sponge_step = sponge._replace(gamma=sponge.gamma * ramp)
+                sponge_step = _sponge._replace(gamma=_sponge.gamma * ramp)
             else:
-                sponge_step = sponge
+                sponge_step = _sponge
 
             new_state = _dyn_step(
                 state_in, dt, aux=aux,
@@ -3018,7 +3041,7 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
             # SSS restoring (gated at compile time via Python `if`).
             if enable_sss:
                 S = new_state.S.data
-                target = jnp.asarray(sss_target_static, dtype=S.dtype)
+                target = jnp.asarray(_sss_target, dtype=S.dtype)
                 alpha = jnp.asarray(sss_alpha_static, dtype=S.dtype)
                 mask = jnp.asarray(new_state.land_mask.data, dtype=S.dtype)
                 S_top_new = (
@@ -3034,7 +3057,7 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
                 T_freeze_C = jnp.asarray(T_freeze_C_static, dtype=T.dtype)
                 T_top = T[..., 0]
                 T_top_capped = jnp.where(
-                    freeze_mask_static,
+                    _freeze_mask,
                     jnp.maximum(T_top, T_freeze_C),
                     T_top,
                 )
@@ -3106,10 +3129,12 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
         sss_alpha_static = 0.0
         sss_target_static = None
 
+    freeze_from_gamma = False
     if enable_freeze:
         sponge_gamma = jra55_state.get("sponge_gamma_2d", None)
         if sponge_gamma is not None and np.any(np.asarray(sponge_gamma) > 0):
             freeze_mask_static = sponge_gamma > 0.0
+            freeze_from_gamma = True
         else:
             freeze_mask_static = jra55_state.get("_ocean_mask_2d", None)
         T_freeze_C_static = float(jra55_state["T_freeze_ocean_C"])
@@ -3147,7 +3172,28 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
         @jax.jit
         def block_fn(state, raw_stack, runoff_records, record_days,
                      block_start_day, block_start_day_forcing,
-                     ice_state=None, aux=None):
+                     ice_state=None, aux=None, refs=None):
+            # Reference fields: closure constants by default (single-process,
+            # byte-unchanged); under lat-band SPMD the driver passes them as the
+            # ``refs`` ARGUMENT, band-sharded like the forcing stack, so they are
+            # not replicated whole on every GPU (ORCA12: ~16 GB of 3-D sponge
+            # references per device) and route-B never closes over a
+            # non-addressable array.
+            _sponge, _sss_target, _freeze_mask = (
+                sponge, sss_target_static, freeze_mask_static)
+            if refs is not None:
+                from legoesm.ocean.sponge import SpongeForcing
+                if enable_sponge:
+                    _sponge = SpongeForcing(
+                        gamma=refs["sponge_gamma"], T_ref=refs["sponge_T_ref"],
+                        S_ref=refs["sponge_S_ref"])
+                if enable_sss and "sss_target" in refs:
+                    _sss_target = refs["sss_target"]
+                if freeze_from_gamma and "sponge_gamma" in refs:
+                    _freeze_mask = refs["sponge_gamma"] > 0.0
+                elif freeze_mask_static is not None and "ocean_mask" in refs:
+                    _freeze_mask = refs["ocean_mask"]
+
             dt_days = dt / 86400.0
 
             def step_body(carry, idx):
@@ -3281,7 +3327,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
                         ocean_mask=state_in.land_mask.data,
                     )
 
-                sponge_k = (sponge._replace(gamma=sponge.gamma * ramp)
+                sponge_k = (_sponge._replace(gamma=_sponge.gamma * ramp)
                             if enable_sponge else None)
                 new_state = _dyn_step(
                     state_in, dt, aux=aux, freshwater=fw,
@@ -3293,13 +3339,13 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
                     _sss_mask = new_state.land_mask.data
                     S_new = S.at[..., 0].set(
                         S[..., 0] - sss_alpha_static * (
-                            S[..., 0] - sss_target_static) * _sss_mask)
+                            S[..., 0] - _sss_target) * _sss_mask)
                     new_state = new_state._replace(
                         S=new_state.S.replace(data=S_new))
                 if enable_freeze:
                     T = new_state.T.data
                     T_top = jnp.where(
-                        freeze_mask_static,
+                        _freeze_mask,
                         jnp.maximum(T[..., 0], T_freeze_C_static),
                         T[..., 0],
                     )
@@ -3989,6 +4035,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
         # SPMD aux (codex r18 P1): pass the step's sharded geometry stacks
         # into every block_fn call as an ARGUMENT (see the builders' note).
         _spmd_aux = getattr(spmd_step, "aux", None)
+        _spmd_refs = jra55_state.get("_spmd_refs") if spmd_step is not None else None
         if use_gpu_interp:
             _get_block_fn_interp = _build_jra55_block_fn_interp(
                 model, jra55_state, dt, spmd_step=spmd_step)
@@ -4059,7 +4106,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                         record_meta["record_days"],
                         jnp.float64(record_meta["block_start_day"]),
                         jnp.float64(record_meta["block_start_day_forcing"]),
-                        ice_state, aux=_spmd_aux,
+                        ice_state, aux=_spmd_aux, refs=_spmd_refs,
                     )
                 else:
                     state = bfn(
@@ -4067,18 +4114,20 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                         record_meta["record_days"],
                         jnp.float64(record_meta["block_start_day"]),
                         jnp.float64(record_meta["block_start_day_forcing"]),
-                        aux=_spmd_aux,
+                        aux=_spmd_aux, refs=_spmd_refs,
                     )
             else:
                 if _ice_on:
                     state, ice_state = block_fn(
                         state, atm_stack, runoff_stack,
                         jnp.int32(block_start), ice_state, aux=_spmd_aux,
+                        refs=_spmd_refs,
                     )
                 else:
                     state = block_fn(
                         state, atm_stack, runoff_stack,
                         jnp.int32(block_start), aux=_spmd_aux,
+                        refs=_spmd_refs,
                     )
             jax.block_until_ready(state.T.data)
             compute_dt = time.time() - t_compute_start
@@ -5535,13 +5584,24 @@ def run_omip_single(grid_type: str, args) -> dict:
                     jra55_state["ice_state_init"], _dev.mesh)
                 spmd_gather_ice = partial(
                     gather_cell_pytree_latlon, mesh=_dev.mesh)
-            # NOTE (codex r8): the block scan closes over the sponge / SSS /
-            # nudging reference fields as jit constants. They must stay
-            # process-local replicated arrays -- a lat-band-sharded (non-
-            # addressable) closure constant cannot be materialised at trace
-            # time under route-B. At ORCA12 this is ~16 GB of 3-D references
-            # per GPU; sharding them requires passing them as scan ARGUMENTS
-            # (block-fn signature change), not done here.
+            if jra55_state is not None:
+                # The block scan's reference fields (sponge gamma / T_ref /
+                # S_ref, SSS target) go in as the ``refs`` ARGUMENT, lat-band
+                # sharded like the forcing stack -- not as closure constants
+                # replicated whole on every GPU (ORCA12: ~16 GB per device).
+                from legoesm.ocean.dynamics.sharded_ocean_step import (
+                    shard_forcing_latlon,
+                )
+                _refs = {}
+                for _key, _name in (("sponge_gamma_2d", "sponge_gamma"),
+                                    ("sponge_T_ref_3d", "sponge_T_ref"),
+                                    ("sponge_S_ref_3d", "sponge_S_ref"),
+                                    ("sss_target_2d", "sss_target"),
+                                    ("_ocean_mask_2d", "ocean_mask")):
+                    if jra55_state.get(_key) is not None:
+                        _refs[_name] = shard_forcing_latlon(
+                            jnp.asarray(jra55_state[_key]), _dev.mesh)
+                jra55_state["_spmd_refs"] = _refs or None
             # Lay per-block forcing stacks out lat-band-sharded so the
             # in-scan interpolation / bulk fluxes stay shard-local (shared
             # layout helper — see shard_forcing_stack_latlon).
