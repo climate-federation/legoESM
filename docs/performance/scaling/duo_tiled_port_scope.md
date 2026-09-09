@@ -705,3 +705,28 @@ refresh is worth about **14 ms/step (~6 %)**, CONFIRMED in-allocation and
 bitwise in every arm.  Note the within-allocation spread here was 12 ms
 between the two band arms, larger than the 1 ms of job 9675236 -- treat
 ~10 ms as the resolution of a single row either way.
+
+## 2026-09-09 — the packed-full-refresh abort is GONE; codex's barrier not merged
+
+codex (authoring in a worktree, GLM + Claude reviewing) diagnosed the
+abort as two collective-permutes sharing a rendezvous with no ordering
+dependency and fixed it with a `jax.lax.optimization_barrier` between the
+two directions.  Both reviewers called the diagnosis unproven, and the
+controls settled it:
+
+* channel ids: ALL 322 collective-permutes of the step carry
+  `channel_id=1` on this build, so the shared-channel premise is right
+  (and GLM's "JAX gives each ppermute its own channel" is wrong here);
+* NON-VACUITY: with codex's change reverted, the packed gate passes
+  BITWISE -- the abort does not reproduce;
+* the true failing configuration was band refresh AND packing together;
+  reproduced directly (two steps, both arms) it does not abort either,
+  in one process or on 54 real ranks.
+
+The failing executable no longer exists: the flux barrier now fires once
+per step instead of once per level, which changed the refresh program.
+So the barrier is a fix for a defect we can no longer exhibit -- NOT
+merged (an unmeasured finding must not buy a knob).  The gate's refusal
+of the flag pair is lifted, and the pair is bitwise on 54 ranks at
+0.210 s/step (band alone 0.217-0.229 in the same-allocation A/B), i.e.
+packing the entry refresh is worth nothing beyond the band lever.

@@ -254,11 +254,14 @@ def main(argv=None):
         return 2
     lay = win_model.window_layout
     if args.refresh_band is not None and args.pack_pad_refresh:
-        print("[m6] REFUSED: --refresh-band with --pack-pad-refresh (packing "
-              "the substep-entry FULL refresh aborts under XLA:CPU mpi "
-              "collectives with MPI_ERR_TRUNCATE, jobs 9665696/9665757, "
-              "while passing in one process; open)")
-        return 2
+        # 2026-09-09: this pair used to abort (MPI_ERR_TRUNCATE on 54 ranks,
+        # an XLA collective-permute rendezvous check in one process) and was
+        # refused here.  It no longer reproduces in either place -- the
+        # program changed since (the flux barrier now fires once per step,
+        # not once per level), so the failing executable is gone.  Allowed
+        # again, with the arms named in the log.
+        print("[m6] arms: band refresh for the firings, packed full refresh "
+              "at substep entry")
     if args.refresh_band is not None:
         win_model._window_comm.refresh_band = args.refresh_band
         print(f"[m6] M8-C arm: band-restricted refresh, depth "
