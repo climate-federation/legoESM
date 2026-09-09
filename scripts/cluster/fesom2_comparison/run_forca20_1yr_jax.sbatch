@@ -119,7 +119,10 @@ do_resubmit() {
   cd $LEGO && sbatch --dependency=afterany:$SLURM_JOB_ID \
     --export=ALL,CONFIG="$CONFIG",PERJOB="$PERJOB",TOTAL="$TOTAL",GUARD_SECS="$GUARD_SECS",PARENT_JOB="$SLURM_JOB_ID" $SELF
 }
-srun --cpu-bind=none "$PY" scripts/run_from_config.py "$CONFIG" --year $YEAR \
+# --cpus-per-task explicitly: srun refuses to reconcile SLURM_CPUS_PER_TASK with
+# SLURM_TRES_PER_TASK when the two disagree, and it does disagree here (127 vs 64),
+# which killed job 27339578 in seconds after 27 h of queueing. The CLI value wins.
+srun --cpu-bind=none --cpus-per-task=64 "$PY" scripts/run_from_config.py "$CONFIG" --year $YEAR \
     --mesh-dir "$MESH" --dist-dir "$POOL" --ic-dir "$MESH" --partition "$PART" \
     --steps "$STEPS" --chunk-steps "$CHUNK" --ragged --local-forcing \
     --diagnostics --progress \
