@@ -689,6 +689,22 @@ def test_viscosity_overrides_reach_the_plain_latlon_lane():
     assert float(cfg_default.lateral_viscosity.A_h) == 1.0e5    # default untouched
 
 
+def test_pgf_scheme_override_reaches_the_plain_latlon_lane():
+    """Same inert-flag defect as the viscosity overrides: the pressure-gradient
+    scheme selector was read only by the realistic-bathymetry branch.  The
+    tripole lane now carries partial cells, where the density-Jacobian scheme
+    is the one built for the geometry, so the selector has to reach it."""
+    import scripts.run.run_omip as run_omip
+
+    _, _, cfg, _, _ = run_omip._create_setup(
+        "latlon", "8x16", 3, 1000.0, "none", "type1", pgf_scheme="smc03")
+    assert cfg.pgf_scheme == "smc03"
+
+    _, _, cfg_default, _, _ = run_omip._create_setup(
+        "latlon", "8x16", 3, 1000.0, "none", "type1")
+    assert cfg_default.pgf_scheme == "adcroft"    # default untouched
+
+
 @pytest.mark.parametrize("bad,match", [
     ("", "empty"),
     ("5.0\n-1.0\n", "non-positive"),

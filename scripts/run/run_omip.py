@@ -1752,13 +1752,19 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 # an ocean test-matrix regression run.
             )
         else:
-            config = LatLonCGridOceanConfig.from_flat(
+            # --pgf-scheme was read only by the realistic-bathymetry branch
+            # above, so on this lane (the tripole NEMO mesh included) it
+            # parsed and did nothing.  Unset keeps the config default.
+            _flat = dict(
                 A_h=A_h, K_h=K_h, A_v=A_v, K_v=K_v,
                 n_barotropic_substeps=30,
                 use_conservation_fixer=use_conservation_fixer,
                 physics=None,
                 implicit_vertical_mixing=implicit_vertical_mixing,
             )
+            if pgf_scheme is not None:
+                _flat["pgf_scheme"] = pgf_scheme
+            config = LatLonCGridOceanConfig.from_flat(**_flat)
         model = LatLonCGridOceanModel(grid, z_coord, config)
         return grid, z_coord, config, model, "latlon"
 
