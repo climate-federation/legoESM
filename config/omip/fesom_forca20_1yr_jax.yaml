@@ -14,7 +14,7 @@ tracer: {}              # MFCT/QR4C/FCT defaults
 dt: 180.0               # [s]; one model year = 175200 steps
 dt_ramp: {after_step: 175200, dt: 240.0}   # outside the one-year window; kept identical to prod yaml
 mesh: /work/ab0995/a270088/fesom_jax_meshes/mesh_forca20
-partition: dist_32
+partition: dist_16   # 16 GPUs on 4 nodes; the launcher passes the same value
 forcing:
   kind: core2
   start_year: 1958
