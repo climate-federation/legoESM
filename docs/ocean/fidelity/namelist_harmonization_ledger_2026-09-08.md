@@ -206,3 +206,34 @@ needs state fields on the other two grids before the three-grid card agrees.
 
 STATUS: measured gap, no default changed. The flip is a scientific choice and is
 being put to the user before any arm is submitted.
+
+## 2026-09-10 (b) — the surface-wave terms cannot reach the deficit band, in
+## either model
+
+Two measurements and one code reading, all cheap, all on the matched window
+(our day-30 snapshot against GATEWAY record 5).
+
+MEASURED, and new: our turbulence stops at 17.9 m while the oracle's reaches
+73.2 m (median depth of the last interface with K > 1e-4 m2/s in the cold-tongue
+box). From temperature alone, which depends on no diffusivity convention, our
+mixed layer is 2.7 m against the oracle's 5.1 m. So the deficit is not a uniform
+scaling of the coefficient: our turbulent layer simply ENDS at the base of our
+mixed layer, where the oracle's continues four times deeper.
+
+READ OFF THE CODE, not measured: NEMO's sub-mixed-layer TKE penetration
+(nn_etau) decays as exp(-z/h_tau) with h_tau = max(0.5, min(30, 45*|sin phi|))
+under nn_htau=1 (tke.py:306, and orca1_zdftke_config sets etau_mode="below_ml",
+etau_frac=0.08, etau_htau_mode="latitude" -- faithful to ORCA1's namelist). In
+the cold-tongue box, |lat| <= 2 deg, that e-folding depth is 0.4-1.6 m. The term
+is therefore confined to the top metre or two IN BOTH MODELS, and it cannot be
+the source of the oracle's turbulence at 20-73 m. The same argument retires
+Langmuir (ln_lc), which is surface-trapped by construction.
+
+CONSEQUENCE, and it narrows the field rather than widening it: whatever sustains
+the oracle's turbulence in the deficit band is either generated locally there,
+or TRANSPORTED down from the surface layer by the TKE equation's own vertical
+self-diffusion. That self-diffusion is proportional to the very coefficient
+under test, which is the mechanism the carried-coefficient arm acts on. Local
+generation by shear discretisation was already refuted by its own arm.
+
+STATUS: etau and Langmuir eliminated for this band. Nothing changed in the model.
