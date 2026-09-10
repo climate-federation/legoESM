@@ -659,17 +659,30 @@ def test_the_euler_start_change_is_a_column_mean_replacement(method, outer):
 
 
 @pytest.mark.parametrize("method,outer", _PATHS)
-def test_off_is_bit_identical_on_the_euler_start_too(method, outer):
-    """The option stays opt-in on the new path: with it off, the first step
-    must not move one bit against the unset default."""
-    state, model = _channel(outer=outer, dino_drag=True)
-    default = getattr(model, method)(state, _DT)
-    explicit = _first_step(method, outer=outer, after="off", dino_drag=True)
-    for name in ("u", "v", "T", "S", "eta"):
+def test_the_euler_start_reconciliation_moves_ONLY_velocity(method, outer):
+    """The claim the campaign actually relies on, asserted rather than argued.
+
+    ``mlf_baro_corr`` is called after ``tra_zdf`` (stpmlf.f90:534 vs :507) and
+    writes only puu/pvv, so on this step it can move NO tracer and NO sea
+    level. That is what lets the temperature row be attributed elsewhere; if
+    it were false, the whole #1729 attribution would be.
+
+    (This replaces a test that compared the option OFF against the unset
+    DEFAULT -- which IS off, so it compared a config with itself and could
+    not fail. Review caught it; the version here is the claim that test was
+    reaching for.)
+    """
+    off = _first_step(method, outer=outer, after="off", dino_drag=True)
+    on = _first_step(method, outer=outer, after="nemo_mlf_baro_corr",
+                     dino_drag=True)
+    for name in ("T", "S", "eta"):
         np.testing.assert_array_equal(
-            np.asarray(getattr(explicit, name).data),
-            np.asarray(getattr(default, name).data),
-            err_msg=f"{name} moved with the option explicitly off")
+            np.asarray(getattr(on, name).data),
+            np.asarray(getattr(off, name).data),
+            err_msg=f"the reconciliation moved {name}, which it cannot touch")
+    # anti-vacuity: it DID run, it just did not reach the tracers
+    assert np.max(np.abs(np.asarray(on.u.data - off.u.data))) > 1e-6
+    assert np.max(np.abs(np.asarray(on.v.data - off.v.data))) > 1e-6
 
 
 @pytest.mark.parametrize("method,outer", _PATHS)

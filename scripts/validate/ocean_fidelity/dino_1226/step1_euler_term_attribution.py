@@ -12,11 +12,13 @@ move temperature at all.
 This probe decomposes the step-1 residual by turning ONE thing off at a time,
 each arm scored against NEMO's kt=1 now-level:
 
-  A  production      the shipped card, as run_dino.py runs it
-  B  no surface rate the same, with the external surface-tracer tendency
-                     withheld from model.step -- exactly what the old early
-                     return did by never forwarding ``external_tracer_rate``
-  C  no reconcile    the same, with barotropic_after_reconcile="off"
+  A  production       the shipped card, as run_dino.py runs it
+  B  rate withheld    the same body, with the external surface-tracer
+                      tendency withheld from model.step -- the ONE thing the
+                      old early return did by never forwarding
+                      ``external_tracer_rate``.  NOT a re-run of the old
+                      path: it keeps everything else the new body does.
+  C  reconcile off    the same, with barotropic_after_reconcile="off"
 
 B-vs-A sizes the dropped surface forcing; C-vs-A sizes ``mlf_baro_corr``.
 Whichever moves temperature owns the temperature row; a term that moves it by
@@ -61,7 +63,8 @@ def main() -> int:
 
     if not glob.glob(args.restart_glob):
         raise SystemExit(f"no restart tiles match {args.restart_glob}")
-    R = rebuild(args.restart_glob, ["tn", "sn", "sshn", "un", "vn"])
+    R = rebuild(args.restart_glob,
+                ["tn", "sn", "sshn", "un", "vn", "ub", "vb"])
 
     def O3(k):
         return np.moveaxis(R[k], 0, -1)
@@ -108,9 +111,20 @@ def main() -> int:
 
     arms = {
         "A production": one_step(mc, with_rate=True),
-        "B no surface rate": one_step(mc, with_rate=False),
-        "C no reconcile": one_step(mc_off, with_rate=True),
+        "B rate withheld": one_step(mc, with_rate=False),
+        "C reconcile off": one_step(mc_off, with_rate=True),
     }
+    # BINDING CHECK for arm C. If ``barotropic_after_reconcile="off"`` ever
+    # stopped selecting anything, every C column would read 0.0 and the table
+    # would say "mlf_baro_corr owns nothing" -- the wrong answer, printed
+    # confidently. Assert the arm binds before reading the table (review
+    # finding: the probe asserted nothing).
+    _du_c = float(np.max(np.abs(np.asarray(arms["A production"].u.data)
+                                - np.asarray(arms["C reconcile off"].u.data))))
+    if not _du_c > 0.0:
+        raise SystemExit(
+            "arm C is inert: turning the reconciliation off changed no "
+            "velocity, so this decomposition proves nothing about it")
     sc = {k: score(v) for k, v in arms.items()}
 
     print("\nrms residual vs NEMO kt=1 now-level (wet cells)")
@@ -121,8 +135,8 @@ def main() -> int:
 
     print("\nWHAT EACH TERM OWNS -- how far the arm moves from production")
     print(f"{'term':34s}" + "".join(f"{f:>13s}" for f in fields))
-    for label, arm in (("the surface tracer tendency", "B no surface rate"),
-                       ("mlf_baro_corr", "C no reconcile")):
+    for label, arm in (("the surface tracer tendency", "B rate withheld"),
+                       ("mlf_baro_corr", "C reconcile off")):
         row = []
         for f in fields:
             a = np.asarray(getattr(arms["A production"], f).data)
@@ -130,6 +144,29 @@ def main() -> int:
             row.append(float(np.max(np.abs(a - b))))
         print(f"{label:34s}" + "".join(f"{x:13.4e}" for x in row)
               + "   (max|A-arm|)")
+
+    # ---- the BEFORE level, which no snapshot carries -------------------
+    # NEMO's ub/vb at kt=1 are EXACTLY zero: from rest, mlf_baro_corr's
+    # ln_bt_fw=F tail (stpmlf.f90:720) removes exactly what dynspg_ts.f90:1003
+    # installed. Since #1729 legoESM builds the same round trip, and its own
+    # comment says the pair "cancels algebraically and not bitwise" -- so this
+    # is the row that says whether that prediction cost anything. It is scored
+    # here rather than in the step-1 gate because it lives on state.u_before,
+    # which run_dino's snapshot does not write.
+    print("\nBEFORE level after one step -- legoESM u_before/v_before vs "
+          "NEMO ub/vb")
+    ub_o, vb_o = O3("ub"), O3("vb")
+    print(f"  oracle max|ub| = {float(np.max(np.abs(ub_o))):.6e}   "
+          f"max|vb| = {float(np.max(np.abs(vb_o))):.6e}")
+    print(f"{'arm':20s}{'cells!=(u)':>12s}{'max|du|':>13s}"
+          f"{'cells!=(v)':>12s}{'max|dv|':>13s}")
+    for k, st in arms.items():
+        ub = np.asarray(st.u_before.data)[:, 1:, :]
+        vb = np.asarray(st.v_before.data)[1:, :, :]
+        nu = int(np.sum((ub != ub_o)[uwet]))
+        nv = int(np.sum((vb != vb_o)[vwet]))
+        print(f"{k:20s}{nu:12d}{float(np.max(np.abs((ub - ub_o)[uwet]))):13.4e}"
+              f"{nv:12d}{float(np.max(np.abs((vb - vb_o)[vwet]))):13.4e}")
     return 0
 
 

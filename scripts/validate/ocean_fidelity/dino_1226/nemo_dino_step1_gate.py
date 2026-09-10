@@ -49,6 +49,7 @@ from __future__ import annotations
 import argparse
 import glob
 import hashlib
+import json
 import os
 import sys
 
@@ -64,6 +65,7 @@ from nemo_dino_fromrest_gate import Table, _is_post_step  # noqa: E402
 
 DEFAULT_RESTART = ("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/"
                    "RUN_FROMREST_KT1/DINO_00000001_restart_*.nc")
+RN_DT = 2700.0                       # namdom rn_Dt, cfgs/DINO/*/namelist_cfg:116
 
 # Rule 1 dispositions for every restart variable that is part of the kt=1
 # AFTER state.  Anything else the file carries is either the initial state
@@ -76,8 +78,11 @@ WAIVED = {
     "utau_b": "kt=1 surface forcing; certified by nemo_dino_fromrest_gate",
     "vtau_b": "kt=1 surface forcing; certified by nemo_dino_fromrest_gate",
     "emp_b": "kt=1 surface forcing; certified by nemo_dino_fromrest_gate",
-    "qns_b": "kt=1 surface forcing; certified by nemo_dino_fromrest_gate "
-             "(oracle-side, DEBT there)",
+    "qns_b": "kt=1 surface forcing. Certified ORACLE-SIDE ONLY by "
+             "nemo_dino_fromrest_gate, and DEBT there (5304 cells, 5.7e-14, "
+             "last bit of the solar term). The temperature row above is "
+             "downstream of this flux, so that DEBT is not independent of "
+             "it -- read the two together",
     "sfx_b": "kt=1 surface forcing; certified by nemo_dino_fromrest_gate",
     "qsr_hc_b": "traqsr.F90 per-level solar heat content bookkeeping",
     "sbc_hc_b": "trasbc.F90 applied-heat bookkeeping",
@@ -86,8 +91,6 @@ WAIVED = {
                    "the Jerlov coefficients, not a prognostic",
     "rhd": "in-situ density anomaly diagnosed during the step, not carried "
            "in legoESM's state",
-    "dissl": "zdftke dissipation length; legoESM's TKE closure carries no "
-             "array under this name",
     "kt": "file bookkeeping", "ndastp": "file bookkeeping",
     "adatrj": "file bookkeeping", "ntime": "file bookkeeping",
     "rdt": "file bookkeeping", "time_counter": "file bookkeeping",
@@ -98,22 +101,35 @@ WAIVED = {
 # Carried by the restart AND by legoESM's state, but NOT written into
 # run_dino.py's snapshot -- so this gate cannot see them.  Listed loudly with
 # the measurement that would close each, never silently dropped.
+# RETRACTION, 2026-09-10.  Three of these first said legoESM had no
+# counterpart -- for `dissl`, `avt_k` and `avm_k` that was simply WRONG
+# (state.py:556-564 carries tke_dissl / tke_avm / tke_avt as closure memory,
+# and tke.py reads dissl back the next step), and for `ub`/`vb` it asserted a
+# non-cancellation the oracle refutes.  A waiver's REASON is a claim; a
+# plausible wrong one hides the defect permanently, which is exactly what the
+# ub/vb row was doing.
 UNMEASURED = {
-    "ub": "Kbb level, but NOT the raw initial velocity: mlf_baro_corr's "
-          "ln_bt_fw=F tail (stpmlf.f90:716-723) rewrites puu(Kmm) before the "
-          "index swap. legoESM's Euler start forms no separate edited "
-          "now-level velocity, so a row here would score a quantity the "
-          "model does not build. Closing it needs the Kmm branch of "
-          "mlf_baro_corr transcribed as well",
+    "ub": "MEASURED ELSEWHERE, not here. NEMO's ub/vb at kt=1 are EXACTLY "
+          "zero over all 16 tiles (max|ub| = max|vb| = 0.0): from rest, "
+          "mlf_baro_corr's ln_bt_fw=F tail (stpmlf.f90:720) removes exactly "
+          "what dynspg_ts.f90:1003 installed. legoESM DOES build this "
+          "quantity since #1729 (the Euler tail's kmm cycle), but it lives "
+          "on state.u_before, which run_dino's snapshot does not write. "
+          "Scored by step1_euler_term_attribution.py, which holds the state "
+          "object",
     "vb": "as ub",
     "en": "legoESM carries prognostic TKE on state.tke, but _save_snapshot "
           "(scripts/run/run_dino.py) writes only eta/T/S/u/v. Closing it "
           "needs tke in the snapshot, which changes every DINO run's "
           "artifacts -- not taken unasked",
-    "avt_k": "vertical diffusivity is a within-step quantity in legoESM "
-             "(tend.K_v), never stored on the state; closing it needs a "
-             "diagnostic hook in _step_impl",
-    "avm_k": "as avt_k (tend.A_v)",
+    "avt_k": "legoESM carries this as state.tke_avt (state.py:556-560, "
+             "'NEMO TKE-closure coefficient memory (avm_k/avt_k)') -- it is "
+             "closure memory, not merely a within-step diagnostic. Not in "
+             "the snapshot; the same one-line change as en would close it",
+    "avm_k": "as avt_k (state.tke_avm)",
+    "dissl": "legoESM carries this as state.tke_dissl (state.py:564, NEMO's "
+             "SAVE'd dissl), read back as dissl_old by the TKE closure on "
+             "the next step. Not in the snapshot; same as en",
 }
 
 # NEMO writes no barotropic-transport array in this restart, so the
@@ -127,16 +143,65 @@ NO_ORACLE_ARRAY = {
 }
 
 
-def _load_run(run_dir: str, index: int = 1) -> dict:
-    """The legoESM side, as run_dino.py wrote it (Rule 10)."""
+def _load_run(run_dir: str, mesh, index: int = 1) -> dict:
+    """The legoESM side, as run_dino.py wrote it (Rule 10) -- BOUND to the run.
+
+    An adversarial review broke the first version of this by hand-writing an
+    npz containing NEMO's own kt=1 answer over an all-land domain: every row
+    read AT BAR and the gate exited zero, under a header claiming it had
+    scored the production driver.  A gate that certifies a FILE certifies
+    nothing, so the file is now tied to the run that must have produced it:
+
+      * ``run_metadata.json`` must exist beside ``snapshots/`` and must say
+        this was the NEMO-faithful lat-lon card at dt = 2700 s;
+      * the snapshot index must be step ONE, computed from that run's own dt
+        and snapshot stride -- ``--dt 1350`` reaches t = 2700 s after TWO
+        steps, and the npz carries no step count of its own;
+      * the domain in the npz must BE NEMO's DINO domain: the land mask is
+        compared bit-for-bit against the analytic mesh, which is what refuses
+        the all-land forgery.
+    """
     p = os.path.join(run_dir, "snapshots", f"snapshot_{index:05d}.npz")
     if not os.path.exists(p):
         raise SystemExit(f"no snapshot at {p}")
+    mpath = os.path.join(run_dir, "run_metadata.json")
+    if not os.path.exists(mpath):
+        raise SystemExit(
+            f"no run_metadata.json in {run_dir}: a snapshot with no run "
+            f"behind it cannot certify the model")
+    with open(mpath) as fh:
+        meta = json.load(fh)
+    a = meta.get("args", {})
+    dt = float(a.get("dt") or 0.0)
+    if dt != RN_DT:
+        raise SystemExit(
+            f"this run used dt={dt} s; NEMO's kt=1 record is one {RN_DT} s "
+            f"step, so its state is not comparable")
+    stride = max(1, int(round(float(a.get("snapshot_every_days") or 0.0)
+                              * 86400.0 / dt)))
+    n_steps = index * stride
+    if n_steps != 1:
+        raise SystemExit(
+            f"snapshot_{index:05d} is step {n_steps} of this run (stride "
+            f"{stride}); this gate scores STEP 1 only")
+    if not a.get("nemo_faithful_grid") or a.get("grid") != "latlon":
+        raise SystemExit(
+            "this run is not the NEMO-faithful lat-lon card "
+            f"(nemo_faithful_grid={a.get('nemo_faithful_grid')!r}, "
+            f"grid={a.get('grid')!r})")
     d = np.load(p)
     out = {k: np.asarray(d[k], dtype=np.float64) for k in d.files}
+    surf = np.asarray(mesh.tmask[:, :, 0], dtype=np.float64)
+    lm = out.get("land_mask")
+    if lm is None or lm.shape != surf.shape or not np.array_equal(lm, surf):
+        raise SystemExit(
+            "the snapshot's land mask is not NEMO's DINO domain: this file "
+            "was not produced by the card it claims")
     with open(p, "rb") as fh:
         out["_sha256"] = hashlib.sha256(fh.read()).hexdigest()
     out["_path"] = p
+    out["_n_steps"] = n_steps
+    out["_recipe"] = a.get("recipe")
     return out
 
 
@@ -187,24 +252,22 @@ def main() -> int:
     def O3(k):       # (z,y,x) -> (y,x,z), the nemo_io array order
         return np.moveaxis(R[k], 0, -1)
 
+    g = ndm.nemo_dino_mesh()
     if args.run_dir is None:
         if not args.oracle_self_test:
             raise SystemExit("--run-dir is required (or --oracle-self-test)")
         T = S = eta = u = v = None
     else:
-        run = _load_run(args.run_dir)
+        run = _load_run(args.run_dir, g)
         print(f"legoESM after-state: {run['_path']}"
               f"\n  sha256 = {run['_sha256']}")
-        print(f"  day = {float(run['time_days']):.6f} "
-              f"(NEMO kt=1 = {2700.0 / 86400.0:.6f})")
-        # THE GATE MUST NOT SCORE A DIFFERENT STEP.  A snapshot from step 2,
-        # or from a run at another dt, would be compared against NEMO's kt=1
-        # and could read better or worse for a reason that has nothing to do
-        # with fidelity.  Refuse it rather than report it.
-        if abs(float(run["time_seconds"]) - 2700.0) > 1e-9:
+        print(f"  recipe = {run['_recipe']!r}  step = {run['_n_steps']}  "
+              f"day = {float(run['time_days']):.6f} "
+              f"(NEMO kt=1 = {RN_DT / 86400.0:.6f})")
+        if abs(float(run["time_seconds"]) - RN_DT) > 1e-9:
             raise SystemExit(
-                f"snapshot is at t={float(run['time_seconds'])} s, not one "
-                f"dt=2700 s step -- this gate scores STEP 1 only")
+                f"snapshot stamps t={float(run['time_seconds'])} s but its "
+                f"run says step 1 of dt={RN_DT} s -- inconsistent artifact")
         T, S = run["T"].copy(), run["S"].copy()
         eta = run["eta"].copy()
         # legoESM's u/v carry one REDUNDANT face column/row (the periodic
@@ -214,7 +277,6 @@ def main() -> int:
         u = run["u"][:, 1:, :].copy()
         v = run["v"][1:, :, :].copy()
 
-    g = ndm.nemo_dino_mesh()
     wet3 = g.tmask > 0.5
     uwet = g.umask > 0.5
     vwet = g.vmask > 0.5
@@ -293,6 +355,16 @@ def main() -> int:
 
     # ---- Rule 1 coverage -------------------------------------------------
     print("\nCOVERAGE (oracle-fidelity Rule 1)")
+    # The shared post-step filter matches on substrings, and "uu_"/"vv_" are
+    # among them -- so a record that DID carry the barotropic transports
+    # uu_b/vv_b would drop them silently instead of reporting them
+    # unaccounted (review finding). Assert their absence instead of relying
+    # on the filter to be right about it.
+    _bt = sorted(v for v in all_vars if v in ("uu_b", "vv_b", "ub_b", "vb_b"))
+    if _bt:
+        raise SystemExit(
+            f"this record carries barotropic transports {_bt}; the coverage "
+            f"filter would hide them. Add explicit rows before re-running.")
     after = {v for v in all_vars if not _is_post_step(v)}
     verified = t.checked
     debt = t.debt

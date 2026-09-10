@@ -10714,15 +10714,18 @@ class LatLonCGridOceanModel:
             # dynspg_ts.f90:1003 undone at stpmlf.f90:720, a pair that cancels
             # algebraically and not bitwise.  The ``* umask`` is NEMO's own,
             # on the same statement.
-            if _kmm_cycle:
-                u_f = kmm_u * u_mask3
-                u_f = u_f.at[:, -1].set(u_f[:, 0])
-                v_f = kmm_v * v_mask3
-            else:
-                # No mlf_baro_corr on this card, so NEMO writes puu(Kmm) on
-                # this step at all: the before level is the raw now level,
-                # exactly as the early return this replaced produced.
-                u_f, v_f = state.u.data, state.v.data
+            # ``kmm_u``/``kmm_v`` are the now-level velocity as NEMO leaves
+            # it -- the mlf_baro_corr Kmm round trip when this card runs it,
+            # the untouched now level otherwise.  The mask and the periodic
+            # wrap apply either way: NEMO's own statement carries ``* umask``
+            # (stpmlf.f90:720-721) and its lbc_lnk closes the zonal seam, and
+            # the leap-frog arm below does both.  The early return this
+            # replaced did NEITHER, which let a dry-face value survive into
+            # the next step's depth mean -- inert from rest, a leak from any
+            # other no-history state (review finding).
+            u_f = kmm_u * u_mask3
+            u_f = u_f.at[:, -1].set(u_f[:, 0])
+            v_f = kmm_v * v_mask3
             eta_f = state.eta.data
             T_f, S_f = state.T.data, state.S.data
         else:
@@ -10761,8 +10764,11 @@ class LatLonCGridOceanModel:
         # barotropic_forcing_centred (#1226 item 3): swap THIS step's
         # now-forcing into the carry for the NEXT step's before-value —
         # mirrors NEMO's sbcmod.F90:382-386 ``utau_b(:,:) = utauU(:,:)``
-        # end-of-step swap (done every step except nit000, which this
-        # function's forward-Euler-start branch above handles separately).
+        # end-of-step swap.  CORRECTED (#1729): this used to say nit000 was
+        # "handled separately" by a forward-Euler-start branch above. That
+        # branch is gone; the Euler start falls through to here and seeds the
+        # carry on the same line as every other step, which is what NEMO does
+        # (the swap is unconditional at sbcmod.F90:382-386).
         if getattr(_cfg_b, "barotropic_forcing_centred", False):
             naa = naa._replace(
                 **_seed_centred_forcing_carry(
@@ -11076,15 +11082,18 @@ class LatLonCGridOceanModel:
             # dynspg_ts.f90:1003 undone at stpmlf.f90:720, a pair that cancels
             # algebraically and not bitwise.  The ``* umask`` is NEMO's own,
             # on the same statement.
-            if _kmm_cycle:
-                u_f = kmm_u * u_mask3
-                u_f = u_f.at[:, -1].set(u_f[:, 0])
-                v_f = kmm_v * v_mask3
-            else:
-                # No mlf_baro_corr on this card, so NEMO writes puu(Kmm) on
-                # this step at all: the before level is the raw now level,
-                # exactly as the early return this replaced produced.
-                u_f, v_f = state.u.data, state.v.data
+            # ``kmm_u``/``kmm_v`` are the now-level velocity as NEMO leaves
+            # it -- the mlf_baro_corr Kmm round trip when this card runs it,
+            # the untouched now level otherwise.  The mask and the periodic
+            # wrap apply either way: NEMO's own statement carries ``* umask``
+            # (stpmlf.f90:720-721) and its lbc_lnk closes the zonal seam, and
+            # the leap-frog arm below does both.  The early return this
+            # replaced did NEITHER, which let a dry-face value survive into
+            # the next step's depth mean -- inert from rest, a leak from any
+            # other no-history state (review finding).
+            u_f = kmm_u * u_mask3
+            u_f = u_f.at[:, -1].set(u_f[:, 0])
+            v_f = kmm_v * v_mask3
             eta_f = state.eta.data
             T_f, S_f = state.T.data, state.S.data
         else:
@@ -11567,13 +11576,26 @@ class LatLonCGridOceanModel:
                 u_before=state.u, v_before=state.v, T_before=state.T,
                 S_before=state.S, eta_before=state.eta,
             )
+            # KNOWN, NAMED, NOT FIXED HERE (#1729, review finding). Seeding
+            # before:=now makes ``_euler_start`` False, so a scan-driven run
+            # from rest takes a 2dt FILTERED leap-frog first step, where NEMO
+            # takes a 1dt unfiltered Euler one (stpmlf.f90:131-133 plus the
+            # three filter guards). The seed is required -- lax.scan needs a
+            # constant carry treedef, and the None -> Field transition breaks
+            # it -- so closing this needs a traced first-step flag, not a
+            # different seed. It predates #1729 and is unchanged by it.
+            # SCOPE: only a driver that calls this reaches it, i.e.
+            # barotropic_solver="rigid_lid" or barotropic_slow_forcing_ab2
+            # (run_dino.py). The NEMO-faithful DINO card is neither
+            # (explicit_substep, slow_forcing_ab2 False) and runs the eager
+            # loop, so its first step is the Euler start.
 
         # barotropic_forcing_centred (#1226 item 3): seed tau_x_prev/
         # tau_y_prev/freshwater_eta_prev from THIS step's forcing (NEMO
         # nit000 rule, sbcmod.F90:568-573 -- "before" set equal to "now" on
         # the very first call, no restart) so a scan driver's first
         # centred step degenerates to plain NOW exactly like the eager
-        # ``_leapfrog_step`` forward-Euler-start branch. Reads
+        # ``_leapfrog_step`` Euler start. Reads
         # ``surface_forcing``/``freshwater`` out of ``step_kwargs`` (the
         # SAME forcing the scan will pass to ``step()``); a driver that
         # varies forcing per scan iteration (xs=...) rather than a fixed

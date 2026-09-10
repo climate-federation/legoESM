@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import glob
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -63,19 +64,72 @@ def test_gate_fails_on_a_one_ulp_lie():
     assert "PLANT ACTIVE" in r.stdout          # the plant was not a no-op
 
 
-@_needs_oracle
-@_needs_nc
-def test_gate_refuses_a_snapshot_that_is_not_step_one(tmp_path):
-    """Scoring step 2 against NEMO's kt=1 would be a number with no meaning."""
+def _fake_run(tmp_path, *, dt=2700.0, stride_days=2700.0 / 86400.0,
+              arrays=None, land_mask=None, metadata=True):
+    """A run directory that never ran. Every test below is an ATTACK."""
     snaps = tmp_path / "snapshots"
-    snaps.mkdir(parents=True)
+    snaps.mkdir(parents=True, exist_ok=True)
+    a = arrays or {}
     np.savez_compressed(
         snaps / "snapshot_00001.npz",
-        time_seconds=5400.0, time_days=5400.0 / 86400.0,
-        eta=np.zeros((199, 52)), T=np.zeros((199, 52, 36)),
-        S=np.zeros((199, 52, 36)), u=np.zeros((199, 53, 36)),
-        v=np.zeros((200, 52, 36)),
-        land_mask=np.ones((199, 52)), H_bathy=np.ones((199, 52)))
-    r = _run_gate("--run-dir", str(tmp_path))
+        time_seconds=dt, time_days=dt / 86400.0,
+        eta=a.get("eta", np.zeros((199, 52))),
+        T=a.get("T", np.zeros((199, 52, 36))),
+        S=a.get("S", np.zeros((199, 52, 36))),
+        u=a.get("u", np.zeros((199, 53, 36))),
+        v=a.get("v", np.zeros((200, 52, 36))),
+        land_mask=(np.ones((199, 52)) if land_mask is None else land_mask),
+        H_bathy=np.ones((199, 52)))
+    if metadata:
+        (tmp_path / "run_metadata.json").write_text(json.dumps({
+            "args": {"dt": dt, "snapshot_every_days": stride_days,
+                     "grid": "latlon", "nemo_faithful_grid": True,
+                     "recipe": "nemo_dino_kamm_mlf"}}))
+    return tmp_path
+
+
+@_needs_oracle
+@_needs_nc
+def test_gate_refuses_a_snapshot_with_no_run_behind_it(tmp_path):
+    """THE ATTACK THAT WORKED, kept so it cannot work again.
+
+    A reviewer hand-wrote a snapshot holding NEMO's own kt=1 answer over an
+    all-land domain, with no legoESM run anywhere. The first version of this
+    gate read five arrays and a timestamp, reported every row AT BAR, and
+    exited zero under a header claiming it had scored the production driver.
+    """
+    r = _run_gate("--run-dir", str(_fake_run(tmp_path, metadata=False)))
     assert r.returncode != 0
-    assert "scores STEP 1 only" in (r.stdout + r.stderr)
+    assert "no run behind it" in (r.stdout + r.stderr)
+
+
+@_needs_oracle
+@_needs_nc
+def test_gate_refuses_a_domain_that_is_not_NEMOs(tmp_path):
+    """The forgery's other half: metadata that says the right card, over a
+    domain that is not the card's. The land mask is what refuses it."""
+    r = _run_gate("--run-dir", str(_fake_run(tmp_path)))
+    assert r.returncode != 0
+    assert "not NEMO's DINO domain" in (r.stdout + r.stderr)
+
+
+@_needs_oracle
+@_needs_nc
+def test_gate_refuses_two_half_steps_that_land_on_the_same_clock(tmp_path):
+    """t = 2700 s is not the same claim as ONE step of 2700 s.
+
+    ``--dt 1350`` reaches that clock after TWO steps, and the snapshot itself
+    carries no step count -- so the step number has to come from the run's
+    own dt and stride, not from the timestamp.
+    """
+    run = _fake_run(tmp_path, dt=1350.0, stride_days=2700.0 / 86400.0)
+    # keep the file's stamp at NEMO's clock, which is the whole trap
+    snaps = run / "snapshots"
+    d = dict(np.load(snaps / "snapshot_00001.npz"))
+    d["time_seconds"] = np.array(2700.0)
+    d["time_days"] = np.array(2700.0 / 86400.0)
+    np.savez_compressed(snaps / "snapshot_00001.npz", **d)
+    r = _run_gate("--run-dir", str(run))
+    assert r.returncode != 0
+    out = r.stdout + r.stderr
+    assert "not comparable" in out or "STEP 1 only" in out
