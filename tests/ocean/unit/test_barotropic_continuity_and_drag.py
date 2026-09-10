@@ -31,6 +31,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from types import SimpleNamespace
 
 jax.config.update("jax_enable_x64", True)
 
@@ -41,9 +42,12 @@ from legoesm.ocean.state import LatLonCGridOceanConfig
 from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
     barotropic_substeps_latlon_cgrid,
     _depth_average_to_faces,
+    _nemo_literal_barotropic_pressure_gradient,
+    _nemo_literal_seed_depth_mean,
+    nemo_literal_accumulate_transport,
 )
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
-    divergence_cgrid, min_cell_to_uface, min_cell_to_vface,
+    divergence_cgrid, gradient_y_cgrid, min_cell_to_uface, min_cell_to_vface,
 )
 
 
@@ -78,6 +82,106 @@ def _cfg(**over):
         else:
             cfg = cfg._replace(**{k: v})
     return cfg._replace(barotropic=baro, bottom_drag=drag)
+
+
+class TestNemoLiteralTransportAccumulation:
+    """Round 59: raw za2*zhU*r1_e2u recurrence, one final division."""
+
+    def test_source_association_and_cancelled_form_violation(self):
+        """The control proves this test detects the old cancelled topology."""
+        e2u = jnp.asarray([[1.0000000000000002, 1.7, 3.1]], dtype=jnp.float64)
+        e1v = jnp.asarray(
+            [[1.3, 2.9], [1.0000000000000004, 4.7]], dtype=jnp.float64)
+        grid = SimpleNamespace(dy_u=e2u, dx_v=e1v)
+        hu = jnp.asarray([[4000.125, 73.25, 8100.5]], dtype=jnp.float64)
+        hv = jnp.asarray([[27.125, 9100.75], [5300.5, 61.25]], dtype=jnp.float64)
+        u = jnp.asarray([[0.173, -0.219, 0.037]], dtype=jnp.float64)
+        v = jnp.asarray([[0.117, -0.193], [0.071, 0.233]], dtype=jnp.float64)
+        um = jnp.ones_like(u)
+        vm = jnp.ones_like(v)
+        raw = jnp.asarray(45.0, dtype=jnp.float64)
+        got_u, got_v = nemo_literal_accumulate_transport(
+            jnp.zeros_like(u), jnp.zeros_like(v), raw,
+            hu, hv, u, v, um, vm, grid)
+        expected_u = (raw * ((e2u * u) * hu)) * (1.0 / e2u)
+        expected_v = (raw * ((e1v * v) * hv)) * (1.0 / e1v)
+        np.testing.assert_array_equal(np.asarray(got_u), np.asarray(expected_u))
+        np.testing.assert_array_equal(np.asarray(got_v), np.asarray(expected_v))
+
+        # Planted old implementation: pre-normalised/cancelled H*U. It is
+        # algebraically equal and therefore a credible regression, but must be
+        # bit-distinct for at least one face on these operands.
+        cancelled_u = raw * (hu * u)
+        cancelled_v = raw * (hv * v)
+        assert (not np.array_equal(np.asarray(got_u), np.asarray(cancelled_u))
+                or not np.array_equal(np.asarray(got_v),
+                                      np.asarray(cancelled_v))), (
+            "planted cancelled-form violation did not fire")
+
+        def objective(u_arg):
+            out_u, out_v = nemo_literal_accumulate_transport(
+                jnp.zeros_like(u_arg), jnp.zeros_like(v), raw,
+                hu, hv, u_arg, v, um, vm, grid)
+            return jnp.sum(out_u) + jnp.sum(out_v)
+
+        jitted = jax.jit(objective)(u)
+        grad = jax.grad(objective)(u)
+        assert np.isfinite(float(jitted))
+        assert np.all(np.isfinite(np.asarray(grad)))
+        assert np.max(np.abs(np.asarray(grad))) > 0.0
+
+    def test_literal_scan_and_fori_match(self):
+        grid, z, state = _flat_basin(n_lat=8, n_lon=16)
+        key_u, key_v = jax.random.split(jax.random.PRNGKey(59))
+        state = state._replace(
+            u=state.u.replace(data=(
+                0.03 * jax.random.normal(key_u, state.u.data.shape)
+                * state.u_mask.data[..., None])),
+            v=state.v.replace(data=(
+                0.03 * jax.random.normal(key_v, state.v.data.shape)
+                * state.v_mask.data[..., None])))
+        base = _cfg(
+            barotropic_time_filter="nemo_boxcar_centred",
+            barotropic_transport_accumulation_evaluation="nemo_literal")
+        scan_cfg = base._replace(barotropic=base.barotropic._replace(
+            differentiable_barotropic=True))
+        fori_cfg = base._replace(barotropic=base.barotropic._replace(
+            differentiable_barotropic=False))
+        scan_state, scan_flux = barotropic_substeps_latlon_cgrid(
+            state, 30.0, 6, grid, z, scan_cfg)
+        fori_state, fori_flux = barotropic_substeps_latlon_cgrid(
+            state, 30.0, 6, grid, z, fori_cfg)
+        for a, b in ((scan_state.eta.data, fori_state.eta.data),
+                     (scan_state.u.data, fori_state.u.data),
+                     (scan_state.v.data, fori_state.v.data),
+                     (scan_flux[0], fori_flux[0]),
+                     (scan_flux[1], fori_flux[1])):
+            np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+    def test_generic_default_is_byte_pinned_and_bad_selectors_are_red(self):
+        grid, z, state = _flat_basin(n_lat=8, n_lon=16)
+        default = _cfg(barotropic_time_filter="box")
+        explicit = _cfg(
+            barotropic_time_filter="box",
+            barotropic_transport_accumulation_evaluation="generic")
+        a, flux_a = barotropic_substeps_latlon_cgrid(
+            state, 30.0, 4, grid, z, default)
+        b, flux_b = barotropic_substeps_latlon_cgrid(
+            state, 30.0, 4, grid, z, explicit)
+        for x, y in ((a.eta.data, b.eta.data), (a.u.data, b.u.data),
+                     (a.v.data, b.v.data), (flux_a[0], flux_b[0]),
+                     (flux_a[1], flux_b[1])):
+            np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+        bad = _cfg(barotropic_transport_accumulation_evaluation="bogus")
+        with pytest.raises(ValueError, match="transport_accumulation"):
+            barotropic_substeps_latlon_cgrid(state, 30.0, 4, grid, z, bad)
+        wrong_filter = _cfg(
+            barotropic_time_filter="box",
+            barotropic_transport_accumulation_evaluation="nemo_literal")
+        with pytest.raises(ValueError, match="requires barotropic_time_filter"):
+            barotropic_substeps_latlon_cgrid(
+                state, 30.0, 4, grid, z, wrong_filter)
 
 
 class TestBarotropicContinuityInvariant:
@@ -226,6 +330,52 @@ class TestBarotropicFaceDepthNemoSshAvg:
             barotropic_substeps_latlon_cgrid(
                 state, 60.0, 4, grid, z, cfg, add_barotropic_coriolis=False)
 
+    def test_association_selector_holds_face_depth_and_drag_fixed(self):
+        """The climate A axis changes arithmetic, not face-depth physics.
+
+        With g=0 and Coriolis off, the velocity update contains only explicit
+        bottom drag. Identical U/V outputs therefore prove both arms used the
+        same carry-level H_u/H_v drag denominators. Identical returned Hu/Hv
+        prove the same flux-depth operands; bit-distinct eta proves the
+        registered generic versus NEMO-literal divergence association fired.
+        """
+        grid, z, state = _flat_basin(n_lat=8, n_lon=16)
+        key_u, key_v = jax.random.split(jax.random.PRNGKey(1226))
+        u0 = (0.017 + 0.013 * jax.random.normal(key_u, state.u.data.shape)) \
+            * state.u_mask.data[..., None]
+        v0 = (-0.019 + 0.011 * jax.random.normal(key_v, state.v.data.shape)) \
+            * state.v_mask.data[..., None]
+        jj = jnp.arange(grid.n_lat, dtype=jnp.float64)[:, None]
+        ii = jnp.arange(grid.n_lon, dtype=jnp.float64)[None, :]
+        eta0 = (0.031 + 0.00017 * ii + 0.00023 * jj) * state.land_mask.data
+        state = state._replace(
+            u=state.u.replace(data=u0), v=state.v.replace(data=v0),
+            eta=state.eta.replace(data=eta0))
+        base = _cfg(
+            barotropic_time_filter="box", barotropic_face_depth="nemo_ssh_avg",
+            bottom_drag_r=1.7e-3)
+        base = base._replace(constants=base.constants._replace(g=0.0))
+        generic = base._replace(barotropic=base.barotropic._replace(
+            barotropic_continuity_evaluation="generic"))
+        literal = base._replace(barotropic=base.barotropic._replace(
+            barotropic_continuity_evaluation="nemo_literal"))
+        sn_g, (hu_g, hv_g) = barotropic_substeps_latlon_cgrid(
+            state, 117.391304, 1, grid, z, generic,
+            add_barotropic_coriolis=False)
+        sn_l, (hu_l, hv_l) = barotropic_substeps_latlon_cgrid(
+            state, 117.391304, 1, grid, z, literal,
+            add_barotropic_coriolis=False)
+        np.testing.assert_array_equal(np.asarray(hu_g), np.asarray(hu_l))
+        np.testing.assert_array_equal(np.asarray(hv_g), np.asarray(hv_l))
+        np.testing.assert_array_equal(np.asarray(sn_g.u.data),
+                                      np.asarray(sn_l.u.data))
+        np.testing.assert_array_equal(np.asarray(sn_g.v.data),
+                                      np.asarray(sn_l.v.data))
+        assert not np.array_equal(np.asarray(sn_g.eta.data),
+                                  np.asarray(sn_l.eta.data)), (
+            "generic and nemo_literal produced bit-identical eta; the "
+            "association selector did not exercise distinct arithmetic")
+
     def test_default_min_rule_byte_identical_to_pre_change(self):
         """Default is "min_rule" — must reproduce the pre-#1226-field
         min-rule face depth exactly (the field is purely additive)."""
@@ -267,7 +417,8 @@ class TestBarotropicFaceDepthNemoSshAvg:
         state = state._replace(u=state.u.replace(data=u1))
 
         cfg = _cfg(barotropic_time_filter="box",
-                   barotropic_face_depth="nemo_ssh_avg")
+                   barotropic_face_depth="nemo_ssh_avg",
+                   barotropic_continuity_evaluation="nemo_literal")
         sn, (Hu, Hv) = barotropic_substeps_latlon_cgrid(
             state, 1.0, 1, grid, z, cfg, add_barotropic_coriolis=False)
         Hu = np.asarray(Hu)
@@ -343,6 +494,192 @@ class TestBarotropicSeedFaceDepth:
             barotropic_substeps_latlon_cgrid(
                 state, 60.0, 4, grid, z, cfg, add_barotropic_coriolis=False)
 
+    def test_unknown_seed_evaluation_raises_at_leaf_and_substep(self):
+        args = (
+            jnp.zeros((4, 5, 2)), jnp.zeros((5, 4, 2)),
+            jnp.ones((4, 4, 2)), jnp.asarray(1.0), jnp.ones((4, 4)),
+            jnp.ones((4, 5)), jnp.ones((5, 4)),
+        )
+        with pytest.raises(ValueError, match="barotropic_seed_evaluation"):
+            _depth_average_to_faces(*args, seed_evaluation="bogus_scheme")
+
+        grid, z, state = _flat_basin()
+        cfg = _cfg(barotropic_seed_evaluation="bogus_scheme")
+        with pytest.raises(ValueError, match="barotropic_seed_evaluation"):
+            barotropic_substeps_latlon_cgrid(
+                state, 60.0, 4, grid, z, cfg, add_barotropic_coriolis=False)
+
+    def test_nemo_literal_requires_nemo_ssh_avg_face_depth(self):
+        with pytest.raises(ValueError, match="requires.*nemo_ssh_avg"):
+            _depth_average_to_faces(
+                jnp.zeros((4, 5, 2)), jnp.zeros((5, 4, 2)),
+                jnp.ones((4, 4, 2)), jnp.asarray(1.0), jnp.ones((4, 4)),
+                jnp.ones((4, 5)), jnp.ones((5, 4)),
+                seed_face_depth="min_rule", seed_evaluation="nemo_literal")
+
+    def test_nemo_literal_source_order_jit_grad_and_planted_reversal(self):
+        """Pin ``istate.F90:149-155`` association independently of geometry.
+
+        The cancellation-heavy terms make source order observable.  Reversing
+        the level recurrence is the planted red control: it must not reproduce
+        the registered surface-to-bottom result.
+        """
+        field_np = np.asarray([[[1.0e16, 1.0, -1.0e16, 1.0]]], dtype=np.float64)
+        h_np = np.ones_like(field_np)
+        mask_np = np.ones((1, 1), dtype=np.float64)
+        r1_np = np.asarray([[0.25]], dtype=np.float64)
+
+        expected = np.zeros((1, 1), dtype=np.float64)
+        for jk in range(field_np.shape[-1]):
+            expected = expected + h_np[..., jk] * field_np[..., jk]
+        expected = (expected * r1_np) * mask_np
+
+        field = jnp.asarray(field_np)
+        h_face = jnp.asarray(h_np)
+        face_mask = jnp.asarray(mask_np)
+        r1_live = jnp.asarray(r1_np)
+        got = _nemo_literal_seed_depth_mean(field, h_face, face_mask, r1_live)
+        got_jit = jax.jit(_nemo_literal_seed_depth_mean)(
+            field, h_face, face_mask, r1_live)
+        np.testing.assert_array_equal(np.asarray(got), expected)
+        np.testing.assert_array_equal(np.asarray(got_jit), expected)
+
+        reversed_acc = np.zeros((1, 1), dtype=np.float64)
+        for jk in reversed(range(field_np.shape[-1])):
+            reversed_acc = reversed_acc + h_np[..., jk] * field_np[..., jk]
+        reversed_value = (reversed_acc * r1_np) * mask_np
+        assert not np.array_equal(reversed_value, expected), (
+            "planted reversed vertical recurrence did not separate from the "
+            "NEMO source order")
+
+        grad = jax.grad(lambda f: jnp.sum(
+            _nemo_literal_seed_depth_mean(f, h_face, face_mask, r1_live)))(field)
+        assert np.all(np.isfinite(np.asarray(grad)))
+        assert np.any(np.asarray(grad) != 0.0)
+
+    def test_nemo_literal_before_ssh_is_observable_against_now_control(self):
+        """A nonuniform BEFORE/NOW SSH pair must not collapse to one seed.
+
+        This is the unit-scale red control for the time-level owner measured in
+        round 18: the MLF caller supplies ``eta_init`` (BEFORE), and the seed
+        thickness/reciprocal must be constructed from that same value.
+        """
+        grid, z, state = _flat_basin(
+            n_lat=8, n_lon=16, H=1000.0, lat_cap_deg=90.0)
+        key_u, key_v = jax.random.split(jax.random.PRNGKey(149155))
+        u3 = jax.random.normal(key_u, state.u.data.shape) * state.u_mask.data[..., None]
+        v3 = jax.random.normal(key_v, state.v.data.shape) * state.v_mask.data[..., None]
+        eta_before = (0.31 * jnp.sin(grid.lon2d)
+                      + 0.09 * jnp.cos(2.0 * grid.lat2d)) * state.land_mask.data
+        eta_now = (-0.27 * jnp.cos(2.0 * grid.lon2d)
+                   + 0.07 * jnp.sin(grid.lat2d)) * state.land_mask.data
+        area = grid.area.astype(jnp.float64)
+        common = (jnp.asarray(0.0), state.land_mask.data,
+                  state.u_mask.data, state.v_mask.data, grid)
+
+        h_before = compute_layer_thickness(
+            eta_before, state.H_bathy.data, z, min_water_column_m=0.0)
+        seed_before = _depth_average_to_faces(
+            u3, v3, h_before, *common,
+            seed_face_depth="nemo_ssh_avg", seed_evaluation="nemo_literal",
+            eta_dyn=eta_before, H_bathy=state.H_bathy.data, area=area,
+            z_coord=z)
+        h_now = compute_layer_thickness(
+            eta_now, state.H_bathy.data, z, min_water_column_m=0.0)
+        seed_now = _depth_average_to_faces(
+            u3, v3, h_now, *common,
+            seed_face_depth="nemo_ssh_avg", seed_evaluation="nemo_literal",
+            eta_dyn=eta_now, H_bathy=state.H_bathy.data, area=area,
+            z_coord=z)
+
+        assert np.any(np.asarray(seed_before[0]) != np.asarray(seed_now[0]))
+        assert np.any(np.asarray(seed_before[1]) != np.asarray(seed_now[1]))
+
+    def test_nemo_literal_prefers_carried_reference_mesh_operands(self):
+        """The bridge's exact e3/hu/hv/area operands own the literal path.
+
+        A deliberately different model-native ``h_k`` makes the fallback a
+        red control: if dispatch silently stops consuming the carried NEMO
+        reference mesh, the bit-exact expected seed below changes.
+        """
+        n_lat, n_lon, nlev = 3, 4, 3
+        rng = np.random.default_rng(149155)
+        u_native = rng.normal(size=(n_lat, n_lon, nlev))
+        v_native = rng.normal(size=(n_lat, n_lon, nlev))
+        u3 = np.concatenate([u_native[:, -1:], u_native], axis=1)
+        v3 = np.concatenate([np.zeros_like(v_native[:1]), v_native], axis=0)
+        h_k = np.ones((n_lat, n_lon, nlev), dtype=np.float64)
+        eta = np.asarray([
+            [0.11, -0.07, 0.03, 0.19],
+            [-0.13, 0.05, 0.17, -0.02],
+            [0.09, 0.01, -0.15, 0.08],
+        ])
+        e3 = np.broadcast_to(
+            np.asarray([1.25, 2.5, 5.0]), (n_lat, n_lon, nlev)).copy()
+        hu0 = e3.sum(axis=-1)
+        hv0 = hu0.copy()
+        area_t = 2.0 + np.arange(n_lat * n_lon).reshape(n_lat, n_lon) / 13.0
+        area_u = 3.0 + np.arange(n_lat * n_lon).reshape(n_lat, n_lon) / 17.0
+        area_v = 4.0 + np.arange(n_lat * n_lon).reshape(n_lat, n_lon) / 19.0
+        z_coord = SimpleNamespace(
+            nemo_e3t_0=jnp.asarray(e3), nemo_hu_0=jnp.asarray(hu0),
+            nemo_hv_0=jnp.asarray(hv0), nemo_e1e2t=jnp.asarray(area_t),
+            nemo_e1e2u=jnp.asarray(area_u), nemo_e1e2v=jnp.asarray(area_v))
+        u_mask = np.ones((n_lat, n_lon + 1), dtype=np.float64)
+        v_mask = np.ones((n_lat + 1, n_lon), dtype=np.float64)
+        v_mask[0] = 0.0
+        v_mask[-1] = 0.0
+        mask = np.ones((n_lat, n_lon), dtype=np.float64)
+        grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+
+        area_eta = area_t * eta
+        r3u = (0.5 * (area_eta + np.roll(area_eta, -1, axis=1))
+               / hu0 / area_u)
+        north = np.concatenate([area_eta[1:], np.zeros_like(area_eta[:1])], axis=0)
+        r3v = 0.5 * (area_eta + north) / hv0 / area_v
+        wet_v = np.ones((n_lat, n_lon, nlev), dtype=np.float64)
+        wet_v[-1] = 0.0
+
+        def source_mean(field, live_h, live_r1, wet):
+            acc = np.zeros(field.shape[:2], dtype=np.float64)
+            for jk in range(nlev):
+                acc = acc + ((live_h[..., jk] * field[..., jk])
+                             * wet[..., jk])
+            return acc * live_r1
+
+        expected_u_native = source_mean(
+            u_native, e3 * (1.0 + r3u[..., None]),
+            (1.0 / hu0) / (1.0 + r3u), np.ones_like(e3))
+        expected_v_native = source_mean(
+            v_native, (e3 * (1.0 + r3v[..., None])) * wet_v,
+            ((1.0 / hv0) / (1.0 + r3v)) * wet_v[..., 0], wet_v)
+        expected_u = np.concatenate(
+            [expected_u_native[:, -1:], expected_u_native], axis=1)
+        expected_v = np.concatenate(
+            [np.zeros_like(expected_v_native[:1]), expected_v_native], axis=0)
+
+        args = (jnp.asarray(u3), jnp.asarray(v3), jnp.asarray(h_k),
+                jnp.asarray(0.0), jnp.asarray(mask), jnp.asarray(u_mask),
+                jnp.asarray(v_mask), grid)
+        got_u, got_v = _depth_average_to_faces(
+            *args, seed_face_depth="nemo_ssh_avg",
+            seed_evaluation="nemo_literal", eta_dyn=jnp.asarray(eta),
+            H_bathy=jnp.full_like(jnp.asarray(eta), 8.75),
+            area=jnp.asarray(area_t), z_coord=z_coord)
+        np.testing.assert_array_equal(np.asarray(got_u), expected_u)
+        np.testing.assert_array_equal(np.asarray(got_v), expected_v)
+
+        # Without the carried mesh the literal seed needs the card's own
+        # reference ladder (e3u_0 = min-rule of e3t_0, domain.F90:145); a
+        # caller with neither gets a refusal, never a silently different
+        # number.
+        with pytest.raises(ValueError, match="reference ladder"):
+            _depth_average_to_faces(
+                *args, seed_face_depth="nemo_ssh_avg",
+                seed_evaluation="nemo_literal", eta_dyn=jnp.asarray(eta),
+                H_bathy=jnp.full_like(jnp.asarray(eta), 8.75),
+                area=jnp.asarray(area_t), z_coord=None)
+
     def test_default_min_rule_byte_identical_to_pre_change(self):
         """Default is "min_rule" — the new kwarg is purely additive; a run
         with the option left at default must reproduce a run from BEFORE the
@@ -370,15 +707,18 @@ class TestBarotropicSeedFaceDepth:
         U_post, V_post = _depth_average_to_faces(
             state.u.data, state.v.data, h_k, min_wc, state.land_mask.data,
             state.u_mask.data, state.v_mask.data, grid,
-            seed_face_depth="min_rule")
+            seed_face_depth="min_rule", seed_evaluation="generic")
         np.testing.assert_array_equal(np.asarray(U_pre), np.asarray(U_post))
         np.testing.assert_array_equal(np.asarray(V_pre), np.asarray(V_post))
 
         # Full substep loop: default config vs explicit "min_rule".
         cfg_default = _cfg(barotropic_time_filter="cosine")
         cfg_explicit = _cfg(barotropic_time_filter="cosine",
-                            barotropic_seed_face_depth="min_rule")
+                            barotropic_seed_face_depth="min_rule",
+                            barotropic_seed_evaluation="generic",
+                            barotropic_pgf_evaluation="generic")
         assert cfg_default.barotropic.barotropic_seed_face_depth == "min_rule"
+        assert cfg_default.barotropic.barotropic_seed_evaluation == "generic"
         sn_a, (Hu_a, Hv_a) = barotropic_substeps_latlon_cgrid(
             state, 60.0, 30, grid, z, cfg_default, add_barotropic_coriolis=True)
         sn_b, (Hu_b, Hv_b) = barotropic_substeps_latlon_cgrid(
@@ -388,6 +728,37 @@ class TestBarotropicSeedFaceDepth:
         np.testing.assert_array_equal(np.asarray(sn_a.v.data), np.asarray(sn_b.v.data))
         np.testing.assert_array_equal(np.asarray(Hu_a), np.asarray(Hu_b))
         np.testing.assert_array_equal(np.asarray(Hv_a), np.asarray(Hv_b))
+
+    def test_nemo_literal_pgf_uses_face_metrics_and_source_order(self):
+        grid = ensure_geometry(create_latlon_grid(n_lat=5, n_lon=8))
+        # Make the V metric observably non-reconstructible from the legacy
+        # cell-height average, as on the NEMO Mercator bridge.
+        scale = 1.0 + 2.0e-4 * jnp.arange(6, dtype=jnp.float64)[:, None]
+        grid = grid._replace(dy_v=grid.dy_v * scale)
+        jj = jnp.arange(5, dtype=jnp.float64)[:, None]
+        ii = jnp.arange(8, dtype=jnp.float64)[None, :]
+        eta = 0.17 * jnp.sin(0.3 * ii) + 0.11 * jnp.cos(0.4 * jj)
+        um = jnp.ones((5, 9), dtype=jnp.float64)
+        vm = jnp.ones((6, 8), dtype=jnp.float64).at[0].set(0.0).at[-1].set(0.0)
+        g = jnp.asarray(9.80665)
+        pu, pv = _nemo_literal_barotropic_pressure_gradient(eta, grid, g, um, vm)
+
+        e = np.asarray(eta)
+        du = np.roll(e, -1, axis=1) - e
+        expected_u_native = ((-float(g) * du)
+                             * (1.0 / np.asarray(grid.dx_u)[:, 1:]))
+        expected_u = np.concatenate(
+            [expected_u_native[:, -1:], expected_u_native], axis=1)
+        dv = e[1:] - e[:-1]
+        expected_v = np.concatenate([
+            np.zeros_like(e[:1]),
+            ((-float(g) * dv) * (1.0 / np.asarray(grid.dy_v)[1:-1])),
+            np.zeros_like(e[:1]),
+        ], axis=0)
+        np.testing.assert_array_equal(np.asarray(pu), expected_u)
+        np.testing.assert_array_equal(np.asarray(pv), expected_v)
+        generic_v = -g * gradient_y_cgrid(eta, grid)
+        assert np.any(np.asarray(generic_v)[1:-1] != expected_v[1:-1])
 
     def test_ground_truth_column_reimplementation(self):
         """Independent, from-scratch NumPy re-derivation of the
@@ -628,9 +999,21 @@ class TestBarotropicSeedFaceDepth:
         for name in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
             c = dino_config_for_recipe(name)
             assert c.barotropic_seed_face_depth == "nemo_ssh_avg", name
+            assert c.barotropic_seed_evaluation == "nemo_literal", name
+            assert (c.barotropic_transport_accumulation_evaluation
+                    == "nemo_literal"), name
+            assert (c.barotropic_een_coefficient_evaluation
+                    == "nemo_literal"), name
+            assert c.barotropic_pgf_evaluation == "nemo_literal", name
             grid = create_latlon_grid(n_lat=8, n_lon=16)
             mc, _ = dino_lat_lon_model_config(grid, c)
             assert mc.barotropic.barotropic_seed_face_depth == "nemo_ssh_avg", name
+            assert mc.barotropic.barotropic_seed_evaluation == "nemo_literal", name
+            assert (mc.barotropic.barotropic_transport_accumulation_evaluation
+                    == "nemo_literal"), name
+            assert (mc.barotropic.barotropic_een_coefficient_evaluation
+                    == "nemo_literal"), name
+            assert mc.barotropic.barotropic_pgf_evaluation == "nemo_literal", name
 
         for name, spec in DINO_RECIPES.items():
             if name in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
@@ -639,3 +1022,8 @@ class TestBarotropicSeedFaceDepth:
             # #1226: nemo_ssh_avg seed is a kamm-only override; every other
             # recipe must stay at the bit-identical legacy default.
             assert c.barotropic_seed_face_depth == "min_rule", name
+            assert c.barotropic_seed_evaluation == "generic", name
+            assert (c.barotropic_transport_accumulation_evaluation
+                    == "generic"), name
+            assert c.barotropic_een_coefficient_evaluation == "generic", name
+            assert c.barotropic_pgf_evaluation == "generic", name

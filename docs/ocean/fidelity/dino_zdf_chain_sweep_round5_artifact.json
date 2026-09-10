@@ -1,0 +1,3017 @@
+{
+  "bars": {
+    "corr": 0.999999999,
+    "pointwise_column": 1e-15,
+    "rms_ratio_epsilon": 1e-06
+  },
+  "checked_out_parent_sha": "1551b3055b2c5f34944bf13d1268330ed073fb96",
+  "controls": {
+    "baseline_pass": true,
+    "nonfinite_fired": true,
+    "one_i_roll_fired": true,
+    "perturbation_fired": true,
+    "perturbed_ji_k": [
+      1,
+      1,
+      0
+    ]
+  },
+  "cpu_only": true,
+  "effective_env": {
+    "DINO_1226_LANE": "d180",
+    "FP64": "1",
+    "LEGOESM_BAROCLINIC_F32": "0",
+    "LEGOESM_FIDELITY_FP64": "1",
+    "LEGOESM_NEMO_E3T": "both",
+    "LEGOESM_TRACER_PAIR": "0",
+    "LEGOESM_VMIX_BATCHED": "0",
+    "LEGOESM_VMIX_F32_SOLVE": "0",
+    "LEGOESM_VMIX_TSPAIR": "1",
+    "rejected_ablation_overrides": [
+      "DINO_EEN_METRIC",
+      "DINO_BOLUS_ADV",
+      "DINO_RECONCILE_TARGET",
+      "DINO_AFTER_RECONCILE",
+      "DINO_NEMO_KMM_DIVISOR",
+      "DINO_OUTER_INTEGRATOR",
+      "DINO_TWIN_SEASONAL_KT0"
+    ]
+  },
+  "first_divergence": {
+    "controls": {
+      "baseline_pass": true,
+      "nonfinite_fired": true,
+      "one_i_roll_fired": true,
+      "perturbation_fired": true,
+      "perturbed_ji_k": [
+        1,
+        1,
+        0
+      ]
+    },
+    "first_failing_operand": {
+      "legoesm_line": "packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py:827-831",
+      "name": "rn2b evaluation lifetime/geometry",
+      "nemo_line": "cfgs/DINO/MY_SRC/stpmlf.F90:204-210; cfgs/DINO/MY_SRC/zdftke.F90:436-440"
+    },
+    "nemo_line": "cfgs/DINO/MY_SRC/zdftke.F90:436-440",
+    "next_round_fix_design": {
+      "construction": "at model-step entry compute and freeze the exact (rn2, rn2b, gdepw_Kmm, e3w_Kmm) bundle from the registered raw-mesh live geometry; carry it through zdf_mxl and every zdf_tke consumer. Langmuir must receive frozen gdepw_Kmm/e3w_Kmm rather than -z_interface/dz_half. Non-oracle cards retain the present recomputation and metric slots byte-for-byte.",
+      "faithful_default_on_complete_dino_nemo_cards": "step_entry",
+      "legacy_default_everywhere_else": "implicit_solve_state",
+      "legacy_opt_in_on_dino_nemo_cards": "implicit_solve_state",
+      "option": "tke_n2_evaluation_stage",
+      "required_source_order_after_fix": [
+        "zWlc2",
+        "zpelc",
+        "imlc",
+        "zhlc",
+        "zus3",
+        "zwlc",
+        "source"
+      ]
+    },
+    "offline_composite_diagnostic": {
+      "dispositive": false,
+      "metrics": {
+        "aggregate_bar_pass": false,
+        "bar": 1e-15,
+        "column_bar_pass": false,
+        "correlation": 0.9999434374311064,
+        "focus": [
+          {
+            "column_error": 7.921765987042532e-06,
+            "i": 1,
+            "j": 11,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 1.0216078875948975e-05,
+            "i": 1,
+            "j": 12,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 1.1159353126930354e-05,
+            "i": 1,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 5.33422621208234e-06,
+            "i": 23,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          }
+        ],
+        "max_column_error": 3.861848456925888,
+        "n_diverged_columns": 9155,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 765,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": false,
+        "reference_rms": 3.021261226904126e-08,
+        "rms_ratio": 0.9999931933889146,
+        "worst_column_ji": [
+          50,
+          48
+        ]
+      },
+      "reason": "no NEMO post-ln_lc stage dump"
+    },
+    "operand_localization": {
+      "e3w_Kmm": {
+        "aggregate_bar_pass": false,
+        "bar": 1e-15,
+        "column_bar_pass": false,
+        "correlation": 0.9999964034288128,
+        "focus": [
+          {
+            "column_error": 0.008037401439231092,
+            "i": 1,
+            "j": 11,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.008037410951174485,
+            "i": 1,
+            "j": 12,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.008037419358473392,
+            "i": 1,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.011972243534750286,
+            "i": 23,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.011975814450069084,
+        "n_diverged_columns": 9920,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 0,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": false,
+        "reference_rms": 161.21139623898387,
+        "rms_ratio": 1.003365146388825,
+        "worst_column_ji": [
+          106,
+          7
+        ]
+      },
+      "e3w_offset0": {
+        "aggregate_bar_pass": false,
+        "bar": 1e-15,
+        "column_bar_pass": false,
+        "correlation": 0.9998530179549192,
+        "focus": [
+          {
+            "column_error": 0.2610706002094242,
+            "i": 1,
+            "j": 11,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.26107088705606996,
+            "i": 1,
+            "j": 12,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.26107115944037795,
+            "i": 1,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.5546192608765913,
+            "i": 23,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.5547846821075015,
+        "n_diverged_columns": 9920,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 0,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": false,
+        "reference_rms": 138.97609275416644,
+        "rms_ratio": 1.1638972788866637,
+        "worst_column_ji": [
+          106,
+          7
+        ]
+      },
+      "e3w_vs_row2_live_geometry": {
+        "aggregate_bar_pass": false,
+        "bar": 1e-15,
+        "column_bar_pass": false,
+        "correlation": 0.9999964034288128,
+        "focus": [
+          {
+            "column_error": 0.008037401439231092,
+            "i": 1,
+            "j": 11,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.008037410951174485,
+            "i": 1,
+            "j": 12,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.008037419358473392,
+            "i": 1,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.011972243534750286,
+            "i": 23,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.011975814450069084,
+        "n_diverged_columns": 9920,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 0,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": false,
+        "reference_rms": 161.21139623898387,
+        "rms_ratio": 1.003365146388825,
+        "worst_column_ji": [
+          106,
+          7
+        ]
+      },
+      "gdepw_Kmm": {
+        "aggregate_bar_pass": false,
+        "bar": 1e-15,
+        "column_bar_pass": false,
+        "correlation": 0.9999999900729788,
+        "focus": [
+          {
+            "column_error": 0.0005883077362473732,
+            "i": 1,
+            "j": 11,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.0005864043662877782,
+            "i": 1,
+            "j": 12,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.0005846054471335143,
+            "i": 1,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.0005683245586142845,
+            "i": 23,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0006294510332078803,
+        "n_diverged_columns": 9920,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 0,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": false,
+        "reference_rms": 1142.254007929959,
+        "rms_ratio": 1.0000546452396641,
+        "worst_column_ji": [
+          2,
+          46
+        ]
+      },
+      "gdepw_offset0": {
+        "aggregate_bar_pass": false,
+        "bar": 1e-15,
+        "column_bar_pass": false,
+        "correlation": 0.9999865674468637,
+        "focus": [
+          {
+            "column_error": 0.2541146457296648,
+            "i": 1,
+            "j": 11,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.25411273546339197,
+            "i": 1,
+            "j": 12,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.2541109300263718,
+            "i": 1,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.4666199108124718,
+            "i": 23,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.46664996542569176,
+        "n_diverged_columns": 9920,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 0,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": false,
+        "reference_rms": 992.7155225624767,
+        "rms_ratio": 1.1506986651375626,
+        "worst_column_ji": [
+          7,
+          13
+        ]
+      },
+      "gdepw_vs_row2_live_geometry": {
+        "aggregate_bar_pass": false,
+        "bar": 1e-15,
+        "column_bar_pass": false,
+        "correlation": 0.9999999900729788,
+        "focus": [
+          {
+            "column_error": 0.0005883077362473732,
+            "i": 1,
+            "j": 11,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.0005864043662877782,
+            "i": 1,
+            "j": 12,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.0005846054471335143,
+            "i": 1,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.0005683245586142845,
+            "i": 23,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0006294510332078803,
+        "n_diverged_columns": 9920,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 0,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": false,
+        "reference_rms": 1142.254007929959,
+        "rms_ratio": 1.0000546452396641,
+        "worst_column_ji": [
+          2,
+          46
+        ]
+      },
+      "rn2b": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": false,
+        "controls": {
+          "baseline_pass": true,
+          "nonfinite_fired": true,
+          "one_i_roll_fired": true,
+          "perturbation_fired": true,
+          "perturbed_ji_k": [
+            1,
+            1,
+            0
+          ]
+        },
+        "correlation": 0.9999999999999983,
+        "focus": [
+          {
+            "column_error": 2.000840798268687e-11,
+            "i": 1,
+            "j": 11,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 2.6372659721814548e-11,
+            "i": 1,
+            "j": 12,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 2.789836063283117e-11,
+            "i": 1,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 8.686227287301026e-12,
+            "i": 23,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          }
+        ],
+        "max_column_error": 4.150231540863742e-07,
+        "n_diverged_columns": 9920,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 0,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "offline_composite_diagnostic": {
+          "dispositive": false,
+          "metrics": {
+            "aggregate_bar_pass": false,
+            "bar": 1e-15,
+            "column_bar_pass": false,
+            "correlation": 0.9999434374311064,
+            "focus": [
+              {
+                "column_error": 7.921765987042532e-06,
+                "i": 1,
+                "j": 11,
+                "pass": false,
+                "wet": true
+              },
+              {
+                "column_error": 1.0216078875948975e-05,
+                "i": 1,
+                "j": 12,
+                "pass": false,
+                "wet": true
+              },
+              {
+                "column_error": 1.1159353126930354e-05,
+                "i": 1,
+                "j": 13,
+                "pass": false,
+                "wet": true
+              },
+              {
+                "column_error": 5.33422621208234e-06,
+                "i": 23,
+                "j": 13,
+                "pass": false,
+                "wet": true
+              }
+            ],
+            "max_column_error": 3.861848456925888,
+            "n_diverged_columns": 9155,
+            "n_nonfinite_wet_elements": 0,
+            "n_verified_columns": 765,
+            "n_wet_columns": 9920,
+            "n_wet_elements": 332214,
+            "pass": false,
+            "reference_rms": 3.021261226904126e-08,
+            "rms_ratio": 0.9999931933889146,
+            "worst_column_ji": [
+              50,
+              48
+            ]
+          },
+          "reason": "no NEMO post-ln_lc stage dump"
+        },
+        "pass": false,
+        "reference_rms": 6.811828981750718e-05,
+        "rms_ratio": 1.000000000691871,
+        "worst_column_ji": [
+          113,
+          50
+        ]
+      },
+      "rn2b_offset0": {
+        "aggregate_bar_pass": false,
+        "bar": 1e-15,
+        "column_bar_pass": false,
+        "correlation": 0.7729945036220462,
+        "focus": [
+          {
+            "column_error": 0.003964397102818396,
+            "i": 1,
+            "j": 11,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.005559357817376125,
+            "i": 1,
+            "j": 12,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.0037339302791466284,
+            "i": 1,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 0.0037642128039947777,
+            "i": 23,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          }
+        ],
+        "max_column_error": 14.352492773746926,
+        "n_diverged_columns": 9920,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 0,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": false,
+        "reference_rms": 6.811828736364777e-05,
+        "rms_ratio": 1.0000000367153752,
+        "worst_column_ji": [
+          94,
+          49
+        ]
+      },
+      "rn2b_vs_verified_row2_production": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": false,
+        "correlation": 0.9999999999999983,
+        "focus": [
+          {
+            "column_error": 2.0008407205515875e-11,
+            "i": 1,
+            "j": 11,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 2.6372659721814548e-11,
+            "i": 1,
+            "j": 12,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 2.789836063283117e-11,
+            "i": 1,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 8.686227287301026e-12,
+            "i": 23,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          }
+        ],
+        "max_column_error": 4.150231540863742e-07,
+        "n_diverged_columns": 9920,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 0,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": false,
+        "reference_rms": 6.811828981750718e-05,
+        "rms_ratio": 1.000000000691871,
+        "worst_column_ji": [
+          113,
+          50
+        ]
+      },
+      "taum": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 1.0,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 9920,
+        "pass": true,
+        "reference_rms": 0.11208863491501521,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          1
+        ]
+      }
+    },
+    "operation": "Langmuir TKE source rn2b operand",
+    "output": {
+      "aggregate_bar_pass": true,
+      "bar": 1e-15,
+      "column_bar_pass": false,
+      "controls": {
+        "baseline_pass": true,
+        "nonfinite_fired": true,
+        "one_i_roll_fired": true,
+        "perturbation_fired": true,
+        "perturbed_ji_k": [
+          1,
+          1,
+          0
+        ]
+      },
+      "correlation": 0.9999999999999983,
+      "focus": [
+        {
+          "column_error": 2.000840798268687e-11,
+          "i": 1,
+          "j": 11,
+          "pass": false,
+          "wet": true
+        },
+        {
+          "column_error": 2.6372659721814548e-11,
+          "i": 1,
+          "j": 12,
+          "pass": false,
+          "wet": true
+        },
+        {
+          "column_error": 2.789836063283117e-11,
+          "i": 1,
+          "j": 13,
+          "pass": false,
+          "wet": true
+        },
+        {
+          "column_error": 8.686227287301026e-12,
+          "i": 23,
+          "j": 13,
+          "pass": false,
+          "wet": true
+        }
+      ],
+      "max_column_error": 4.150231540863742e-07,
+      "n_diverged_columns": 9920,
+      "n_nonfinite_wet_elements": 0,
+      "n_verified_columns": 0,
+      "n_wet_columns": 9920,
+      "n_wet_elements": 332214,
+      "offline_composite_diagnostic": {
+        "dispositive": false,
+        "metrics": {
+          "aggregate_bar_pass": false,
+          "bar": 1e-15,
+          "column_bar_pass": false,
+          "correlation": 0.9999434374311064,
+          "focus": [
+            {
+              "column_error": 7.921765987042532e-06,
+              "i": 1,
+              "j": 11,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 1.0216078875948975e-05,
+              "i": 1,
+              "j": 12,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 1.1159353126930354e-05,
+              "i": 1,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            },
+            {
+              "column_error": 5.33422621208234e-06,
+              "i": 23,
+              "j": 13,
+              "pass": false,
+              "wet": true
+            }
+          ],
+          "max_column_error": 3.861848456925888,
+          "n_diverged_columns": 9155,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 765,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 332214,
+          "pass": false,
+          "reference_rms": 3.021261226904126e-08,
+          "rms_ratio": 0.9999931933889146,
+          "worst_column_ji": [
+            50,
+            48
+          ]
+        },
+        "reason": "no NEMO post-ln_lc stage dump"
+      },
+      "pass": false,
+      "reference_rms": 6.811828981750718e-05,
+      "rms_ratio": 1.000000000691871,
+      "worst_column_ji": [
+        113,
+        50
+      ]
+    },
+    "row": 10
+  },
+  "focus_columns_ji": [
+    [
+      11,
+      1
+    ],
+    [
+      12,
+      1
+    ],
+    [
+      13,
+      1
+    ],
+    [
+      13,
+      23
+    ]
+  ],
+  "fp64": true,
+  "jax": "0.10.0",
+  "jax_backend": "cpu",
+  "kt": 5761,
+  "lane": "d180",
+  "numpy": "2.4.4",
+  "platform": "Linux-5.14.0-611.36.1.el9_7.x86_64-x86_64-with-glibc2.34",
+  "probe_commit_sha": "1551b3055b2c5f34944bf13d1268330ed073fb96",
+  "python": "3.13.0",
+  "row4_localization": null,
+  "rows": {
+    "10_langmuir_rn2b_operand": {
+      "disposition": "DIVERGED",
+      "output": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": false,
+        "controls": {
+          "baseline_pass": true,
+          "nonfinite_fired": true,
+          "one_i_roll_fired": true,
+          "perturbation_fired": true,
+          "perturbed_ji_k": [
+            1,
+            1,
+            0
+          ]
+        },
+        "correlation": 0.9999999999999983,
+        "focus": [
+          {
+            "column_error": 2.000840798268687e-11,
+            "i": 1,
+            "j": 11,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 2.6372659721814548e-11,
+            "i": 1,
+            "j": 12,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 2.789836063283117e-11,
+            "i": 1,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          },
+          {
+            "column_error": 8.686227287301026e-12,
+            "i": 23,
+            "j": 13,
+            "pass": false,
+            "wet": true
+          }
+        ],
+        "max_column_error": 4.150231540863742e-07,
+        "n_diverged_columns": 9920,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 0,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "offline_composite_diagnostic": {
+          "dispositive": false,
+          "metrics": {
+            "aggregate_bar_pass": false,
+            "bar": 1e-15,
+            "column_bar_pass": false,
+            "correlation": 0.9999434374311064,
+            "focus": [
+              {
+                "column_error": 7.921765987042532e-06,
+                "i": 1,
+                "j": 11,
+                "pass": false,
+                "wet": true
+              },
+              {
+                "column_error": 1.0216078875948975e-05,
+                "i": 1,
+                "j": 12,
+                "pass": false,
+                "wet": true
+              },
+              {
+                "column_error": 1.1159353126930354e-05,
+                "i": 1,
+                "j": 13,
+                "pass": false,
+                "wet": true
+              },
+              {
+                "column_error": 5.33422621208234e-06,
+                "i": 23,
+                "j": 13,
+                "pass": false,
+                "wet": true
+              }
+            ],
+            "max_column_error": 3.861848456925888,
+            "n_diverged_columns": 9155,
+            "n_nonfinite_wet_elements": 0,
+            "n_verified_columns": 765,
+            "n_wet_columns": 9920,
+            "n_wet_elements": 332214,
+            "pass": false,
+            "reference_rms": 3.021261226904126e-08,
+            "rms_ratio": 0.9999931933889146,
+            "worst_column_ji": [
+              50,
+              48
+            ]
+          },
+          "reason": "no NEMO post-ln_lc stage dump"
+        },
+        "pass": false,
+        "reference_rms": 6.811828981750718e-05,
+        "rms_ratio": 1.000000000691871,
+        "worst_column_ji": [
+          113,
+          50
+        ]
+      }
+    },
+    "1_eos_rab_before": {
+      "alpha": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 0.9999999999999999,
+        "focus": [
+          {
+            "column_error": 1.5437334708770468e-16,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 1.5437334708770468e-16,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 3.0874669417540936e-16,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 3.0874669417540936e-16,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 3.0874669417540936e-16,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 342134,
+        "pass": true,
+        "reference_rms": 0.00017558117915742488,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          10
+        ]
+      },
+      "beta": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": null,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 342134,
+        "pass": true,
+        "reference_rms": 0.000746140350877193,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          1
+        ]
+      },
+      "disposition": "VERIFIED"
+    },
+    "2_bn2_before": {
+      "disposition": "VERIFIED",
+      "legacy_depth_difference": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": false,
+        "correlation": 1.0,
+        "focus": [
+          {
+            "column_error": 1.3211906947000172e-17,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 2.020644591894144e-17,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 1.9429274922059076e-17,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 1.3211906947000172e-17,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 6.366584806460317e-15,
+        "n_diverged_columns": 4630,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 5290,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": false,
+        "reference_rms": 6.811828981750718e-05,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          110,
+          24
+        ]
+      },
+      "output": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 1.0,
+        "focus": [
+          {
+            "column_error": 1.1657564953235446e-18,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 7.77170996882363e-19,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 1.8973901291073314e-22,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 7.77170996882363e-19,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 5.968673256056548e-16,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": true,
+        "reference_rms": 6.811828981750718e-05,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          53,
+          34
+        ]
+      }
+    },
+    "3_eos_rab_bn2_now": {
+      "disposition": "VERIFIED",
+      "output": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 0.9999999999999998,
+        "focus": [
+          {
+            "column_error": 8.937274901919926e-18,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 8.937274901919926e-18,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 3.885771696486925e-19,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 7.77154339297385e-19,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 5.968545325803916e-16,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": true,
+        "reference_rms": 6.81197498700911e-05,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          47,
+          41
+        ]
+      }
+    },
+    "4_zdf_sh2": {
+      "continuation_preview": {
+        "first_divergence": {
+          "controls": {
+            "baseline_pass": true,
+            "nonfinite_fired": true,
+            "one_i_roll_fired": true,
+            "perturbation_fired": true,
+            "perturbed_ji_k": [
+              1,
+              1,
+              0
+            ]
+          },
+          "first_failing_operand": {
+            "legoesm_line": "packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py:827-831",
+            "name": "rn2b evaluation lifetime/geometry",
+            "nemo_line": "cfgs/DINO/MY_SRC/stpmlf.F90:204-210; cfgs/DINO/MY_SRC/zdftke.F90:436-440"
+          },
+          "nemo_line": "cfgs/DINO/MY_SRC/zdftke.F90:436-440",
+          "next_round_fix_design": {
+            "construction": "at model-step entry compute and freeze the exact (rn2, rn2b, gdepw_Kmm, e3w_Kmm) bundle from the registered raw-mesh live geometry; carry it through zdf_mxl and every zdf_tke consumer. Langmuir must receive frozen gdepw_Kmm/e3w_Kmm rather than -z_interface/dz_half. Non-oracle cards retain the present recomputation and metric slots byte-for-byte.",
+            "faithful_default_on_complete_dino_nemo_cards": "step_entry",
+            "legacy_default_everywhere_else": "implicit_solve_state",
+            "legacy_opt_in_on_dino_nemo_cards": "implicit_solve_state",
+            "option": "tke_n2_evaluation_stage",
+            "required_source_order_after_fix": [
+              "zWlc2",
+              "zpelc",
+              "imlc",
+              "zhlc",
+              "zus3",
+              "zwlc",
+              "source"
+            ]
+          },
+          "offline_composite_diagnostic": {
+            "dispositive": false,
+            "metrics": {
+              "aggregate_bar_pass": false,
+              "bar": 1e-15,
+              "column_bar_pass": false,
+              "correlation": 0.9999434374311064,
+              "focus": [
+                {
+                  "column_error": 7.921765987042532e-06,
+                  "i": 1,
+                  "j": 11,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 1.0216078875948975e-05,
+                  "i": 1,
+                  "j": 12,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 1.1159353126930354e-05,
+                  "i": 1,
+                  "j": 13,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 5.33422621208234e-06,
+                  "i": 23,
+                  "j": 13,
+                  "pass": false,
+                  "wet": true
+                }
+              ],
+              "max_column_error": 3.861848456925888,
+              "n_diverged_columns": 9155,
+              "n_nonfinite_wet_elements": 0,
+              "n_verified_columns": 765,
+              "n_wet_columns": 9920,
+              "n_wet_elements": 332214,
+              "pass": false,
+              "reference_rms": 3.021261226904126e-08,
+              "rms_ratio": 0.9999931933889146,
+              "worst_column_ji": [
+                50,
+                48
+              ]
+            },
+            "reason": "no NEMO post-ln_lc stage dump"
+          },
+          "operand_localization": {
+            "e3w_Kmm": {
+              "aggregate_bar_pass": false,
+              "bar": 1e-15,
+              "column_bar_pass": false,
+              "correlation": 0.9999964034288128,
+              "focus": [
+                {
+                  "column_error": 0.008037401439231092,
+                  "i": 1,
+                  "j": 11,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.008037410951174485,
+                  "i": 1,
+                  "j": 12,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.008037419358473392,
+                  "i": 1,
+                  "j": 13,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.011972243534750286,
+                  "i": 23,
+                  "j": 13,
+                  "pass": false,
+                  "wet": true
+                }
+              ],
+              "max_column_error": 0.011975814450069084,
+              "n_diverged_columns": 9920,
+              "n_nonfinite_wet_elements": 0,
+              "n_verified_columns": 0,
+              "n_wet_columns": 9920,
+              "n_wet_elements": 332214,
+              "pass": false,
+              "reference_rms": 161.21139623898387,
+              "rms_ratio": 1.003365146388825,
+              "worst_column_ji": [
+                106,
+                7
+              ]
+            },
+            "e3w_offset0": {
+              "aggregate_bar_pass": false,
+              "bar": 1e-15,
+              "column_bar_pass": false,
+              "correlation": 0.9998530179549192,
+              "focus": [
+                {
+                  "column_error": 0.2610706002094242,
+                  "i": 1,
+                  "j": 11,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.26107088705606996,
+                  "i": 1,
+                  "j": 12,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.26107115944037795,
+                  "i": 1,
+                  "j": 13,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.5546192608765913,
+                  "i": 23,
+                  "j": 13,
+                  "pass": false,
+                  "wet": true
+                }
+              ],
+              "max_column_error": 0.5547846821075015,
+              "n_diverged_columns": 9920,
+              "n_nonfinite_wet_elements": 0,
+              "n_verified_columns": 0,
+              "n_wet_columns": 9920,
+              "n_wet_elements": 332214,
+              "pass": false,
+              "reference_rms": 138.97609275416644,
+              "rms_ratio": 1.1638972788866637,
+              "worst_column_ji": [
+                106,
+                7
+              ]
+            },
+            "e3w_vs_row2_live_geometry": {
+              "aggregate_bar_pass": false,
+              "bar": 1e-15,
+              "column_bar_pass": false,
+              "correlation": 0.9999964034288128,
+              "focus": [
+                {
+                  "column_error": 0.008037401439231092,
+                  "i": 1,
+                  "j": 11,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.008037410951174485,
+                  "i": 1,
+                  "j": 12,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.008037419358473392,
+                  "i": 1,
+                  "j": 13,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.011972243534750286,
+                  "i": 23,
+                  "j": 13,
+                  "pass": false,
+                  "wet": true
+                }
+              ],
+              "max_column_error": 0.011975814450069084,
+              "n_diverged_columns": 9920,
+              "n_nonfinite_wet_elements": 0,
+              "n_verified_columns": 0,
+              "n_wet_columns": 9920,
+              "n_wet_elements": 332214,
+              "pass": false,
+              "reference_rms": 161.21139623898387,
+              "rms_ratio": 1.003365146388825,
+              "worst_column_ji": [
+                106,
+                7
+              ]
+            },
+            "gdepw_Kmm": {
+              "aggregate_bar_pass": false,
+              "bar": 1e-15,
+              "column_bar_pass": false,
+              "correlation": 0.9999999900729788,
+              "focus": [
+                {
+                  "column_error": 0.0005883077362473732,
+                  "i": 1,
+                  "j": 11,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0005864043662877782,
+                  "i": 1,
+                  "j": 12,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0005846054471335143,
+                  "i": 1,
+                  "j": 13,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0005683245586142845,
+                  "i": 23,
+                  "j": 13,
+                  "pass": false,
+                  "wet": true
+                }
+              ],
+              "max_column_error": 0.0006294510332078803,
+              "n_diverged_columns": 9920,
+              "n_nonfinite_wet_elements": 0,
+              "n_verified_columns": 0,
+              "n_wet_columns": 9920,
+              "n_wet_elements": 332214,
+              "pass": false,
+              "reference_rms": 1142.254007929959,
+              "rms_ratio": 1.0000546452396641,
+              "worst_column_ji": [
+                2,
+                46
+              ]
+            },
+            "gdepw_offset0": {
+              "aggregate_bar_pass": false,
+              "bar": 1e-15,
+              "column_bar_pass": false,
+              "correlation": 0.9999865674468637,
+              "focus": [
+                {
+                  "column_error": 0.2541146457296648,
+                  "i": 1,
+                  "j": 11,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.25411273546339197,
+                  "i": 1,
+                  "j": 12,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.2541109300263718,
+                  "i": 1,
+                  "j": 13,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.4666199108124718,
+                  "i": 23,
+                  "j": 13,
+                  "pass": false,
+                  "wet": true
+                }
+              ],
+              "max_column_error": 0.46664996542569176,
+              "n_diverged_columns": 9920,
+              "n_nonfinite_wet_elements": 0,
+              "n_verified_columns": 0,
+              "n_wet_columns": 9920,
+              "n_wet_elements": 332214,
+              "pass": false,
+              "reference_rms": 992.7155225624767,
+              "rms_ratio": 1.1506986651375626,
+              "worst_column_ji": [
+                7,
+                13
+              ]
+            },
+            "gdepw_vs_row2_live_geometry": {
+              "aggregate_bar_pass": false,
+              "bar": 1e-15,
+              "column_bar_pass": false,
+              "correlation": 0.9999999900729788,
+              "focus": [
+                {
+                  "column_error": 0.0005883077362473732,
+                  "i": 1,
+                  "j": 11,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0005864043662877782,
+                  "i": 1,
+                  "j": 12,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0005846054471335143,
+                  "i": 1,
+                  "j": 13,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0005683245586142845,
+                  "i": 23,
+                  "j": 13,
+                  "pass": false,
+                  "wet": true
+                }
+              ],
+              "max_column_error": 0.0006294510332078803,
+              "n_diverged_columns": 9920,
+              "n_nonfinite_wet_elements": 0,
+              "n_verified_columns": 0,
+              "n_wet_columns": 9920,
+              "n_wet_elements": 332214,
+              "pass": false,
+              "reference_rms": 1142.254007929959,
+              "rms_ratio": 1.0000546452396641,
+              "worst_column_ji": [
+                2,
+                46
+              ]
+            },
+            "rn2b": {
+              "aggregate_bar_pass": true,
+              "bar": 1e-15,
+              "column_bar_pass": false,
+              "controls": {
+                "baseline_pass": true,
+                "nonfinite_fired": true,
+                "one_i_roll_fired": true,
+                "perturbation_fired": true,
+                "perturbed_ji_k": [
+                  1,
+                  1,
+                  0
+                ]
+              },
+              "correlation": 0.9999999999999983,
+              "focus": [
+                {
+                  "column_error": 2.000840798268687e-11,
+                  "i": 1,
+                  "j": 11,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 2.6372659721814548e-11,
+                  "i": 1,
+                  "j": 12,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 2.789836063283117e-11,
+                  "i": 1,
+                  "j": 13,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 8.686227287301026e-12,
+                  "i": 23,
+                  "j": 13,
+                  "pass": false,
+                  "wet": true
+                }
+              ],
+              "max_column_error": 4.150231540863742e-07,
+              "n_diverged_columns": 9920,
+              "n_nonfinite_wet_elements": 0,
+              "n_verified_columns": 0,
+              "n_wet_columns": 9920,
+              "n_wet_elements": 332214,
+              "offline_composite_diagnostic": {
+                "dispositive": false,
+                "metrics": {
+                  "aggregate_bar_pass": false,
+                  "bar": 1e-15,
+                  "column_bar_pass": false,
+                  "correlation": 0.9999434374311064,
+                  "focus": [
+                    {
+                      "column_error": 7.921765987042532e-06,
+                      "i": 1,
+                      "j": 11,
+                      "pass": false,
+                      "wet": true
+                    },
+                    {
+                      "column_error": 1.0216078875948975e-05,
+                      "i": 1,
+                      "j": 12,
+                      "pass": false,
+                      "wet": true
+                    },
+                    {
+                      "column_error": 1.1159353126930354e-05,
+                      "i": 1,
+                      "j": 13,
+                      "pass": false,
+                      "wet": true
+                    },
+                    {
+                      "column_error": 5.33422621208234e-06,
+                      "i": 23,
+                      "j": 13,
+                      "pass": false,
+                      "wet": true
+                    }
+                  ],
+                  "max_column_error": 3.861848456925888,
+                  "n_diverged_columns": 9155,
+                  "n_nonfinite_wet_elements": 0,
+                  "n_verified_columns": 765,
+                  "n_wet_columns": 9920,
+                  "n_wet_elements": 332214,
+                  "pass": false,
+                  "reference_rms": 3.021261226904126e-08,
+                  "rms_ratio": 0.9999931933889146,
+                  "worst_column_ji": [
+                    50,
+                    48
+                  ]
+                },
+                "reason": "no NEMO post-ln_lc stage dump"
+              },
+              "pass": false,
+              "reference_rms": 6.811828981750718e-05,
+              "rms_ratio": 1.000000000691871,
+              "worst_column_ji": [
+                113,
+                50
+              ]
+            },
+            "rn2b_offset0": {
+              "aggregate_bar_pass": false,
+              "bar": 1e-15,
+              "column_bar_pass": false,
+              "correlation": 0.7729945036220462,
+              "focus": [
+                {
+                  "column_error": 0.003964397102818396,
+                  "i": 1,
+                  "j": 11,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.005559357817376125,
+                  "i": 1,
+                  "j": 12,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0037339302791466284,
+                  "i": 1,
+                  "j": 13,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0037642128039947777,
+                  "i": 23,
+                  "j": 13,
+                  "pass": false,
+                  "wet": true
+                }
+              ],
+              "max_column_error": 14.352492773746926,
+              "n_diverged_columns": 9920,
+              "n_nonfinite_wet_elements": 0,
+              "n_verified_columns": 0,
+              "n_wet_columns": 9920,
+              "n_wet_elements": 332214,
+              "pass": false,
+              "reference_rms": 6.811828736364777e-05,
+              "rms_ratio": 1.0000000367153752,
+              "worst_column_ji": [
+                94,
+                49
+              ]
+            },
+            "rn2b_vs_verified_row2_production": {
+              "aggregate_bar_pass": true,
+              "bar": 1e-15,
+              "column_bar_pass": false,
+              "correlation": 0.9999999999999983,
+              "focus": [
+                {
+                  "column_error": 2.0008407205515875e-11,
+                  "i": 1,
+                  "j": 11,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 2.6372659721814548e-11,
+                  "i": 1,
+                  "j": 12,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 2.789836063283117e-11,
+                  "i": 1,
+                  "j": 13,
+                  "pass": false,
+                  "wet": true
+                },
+                {
+                  "column_error": 8.686227287301026e-12,
+                  "i": 23,
+                  "j": 13,
+                  "pass": false,
+                  "wet": true
+                }
+              ],
+              "max_column_error": 4.150231540863742e-07,
+              "n_diverged_columns": 9920,
+              "n_nonfinite_wet_elements": 0,
+              "n_verified_columns": 0,
+              "n_wet_columns": 9920,
+              "n_wet_elements": 332214,
+              "pass": false,
+              "reference_rms": 6.811828981750718e-05,
+              "rms_ratio": 1.000000000691871,
+              "worst_column_ji": [
+                113,
+                50
+              ]
+            },
+            "taum": {
+              "aggregate_bar_pass": true,
+              "bar": 1e-15,
+              "column_bar_pass": true,
+              "correlation": 1.0,
+              "focus": [
+                {
+                  "column_error": 0.0,
+                  "i": 1,
+                  "j": 11,
+                  "pass": true,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0,
+                  "i": 1,
+                  "j": 12,
+                  "pass": true,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0,
+                  "i": 1,
+                  "j": 13,
+                  "pass": true,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0,
+                  "i": 23,
+                  "j": 13,
+                  "pass": true,
+                  "wet": true
+                }
+              ],
+              "max_column_error": 0.0,
+              "n_diverged_columns": 0,
+              "n_nonfinite_wet_elements": 0,
+              "n_verified_columns": 9920,
+              "n_wet_columns": 9920,
+              "n_wet_elements": 9920,
+              "pass": true,
+              "reference_rms": 0.11208863491501521,
+              "rms_ratio": 1.0,
+              "worst_column_ji": [
+                1,
+                1
+              ]
+            }
+          },
+          "operation": "Langmuir TKE source rn2b operand",
+          "output": {
+            "aggregate_bar_pass": true,
+            "bar": 1e-15,
+            "column_bar_pass": false,
+            "controls": {
+              "baseline_pass": true,
+              "nonfinite_fired": true,
+              "one_i_roll_fired": true,
+              "perturbation_fired": true,
+              "perturbed_ji_k": [
+                1,
+                1,
+                0
+              ]
+            },
+            "correlation": 0.9999999999999983,
+            "focus": [
+              {
+                "column_error": 2.000840798268687e-11,
+                "i": 1,
+                "j": 11,
+                "pass": false,
+                "wet": true
+              },
+              {
+                "column_error": 2.6372659721814548e-11,
+                "i": 1,
+                "j": 12,
+                "pass": false,
+                "wet": true
+              },
+              {
+                "column_error": 2.789836063283117e-11,
+                "i": 1,
+                "j": 13,
+                "pass": false,
+                "wet": true
+              },
+              {
+                "column_error": 8.686227287301026e-12,
+                "i": 23,
+                "j": 13,
+                "pass": false,
+                "wet": true
+              }
+            ],
+            "max_column_error": 4.150231540863742e-07,
+            "n_diverged_columns": 9920,
+            "n_nonfinite_wet_elements": 0,
+            "n_verified_columns": 0,
+            "n_wet_columns": 9920,
+            "n_wet_elements": 332214,
+            "offline_composite_diagnostic": {
+              "dispositive": false,
+              "metrics": {
+                "aggregate_bar_pass": false,
+                "bar": 1e-15,
+                "column_bar_pass": false,
+                "correlation": 0.9999434374311064,
+                "focus": [
+                  {
+                    "column_error": 7.921765987042532e-06,
+                    "i": 1,
+                    "j": 11,
+                    "pass": false,
+                    "wet": true
+                  },
+                  {
+                    "column_error": 1.0216078875948975e-05,
+                    "i": 1,
+                    "j": 12,
+                    "pass": false,
+                    "wet": true
+                  },
+                  {
+                    "column_error": 1.1159353126930354e-05,
+                    "i": 1,
+                    "j": 13,
+                    "pass": false,
+                    "wet": true
+                  },
+                  {
+                    "column_error": 5.33422621208234e-06,
+                    "i": 23,
+                    "j": 13,
+                    "pass": false,
+                    "wet": true
+                  }
+                ],
+                "max_column_error": 3.861848456925888,
+                "n_diverged_columns": 9155,
+                "n_nonfinite_wet_elements": 0,
+                "n_verified_columns": 765,
+                "n_wet_columns": 9920,
+                "n_wet_elements": 332214,
+                "pass": false,
+                "reference_rms": 3.021261226904126e-08,
+                "rms_ratio": 0.9999931933889146,
+                "worst_column_ji": [
+                  50,
+                  48
+                ]
+              },
+              "reason": "no NEMO post-ln_lc stage dump"
+            },
+            "pass": false,
+            "reference_rms": 6.811828981750718e-05,
+            "rms_ratio": 1.000000000691871,
+            "worst_column_ji": [
+              113,
+              50
+            ]
+          },
+          "row": 10
+        },
+        "row8_legacy_dump_control": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-15,
+          "column_bar_pass": false,
+          "correlation": 0.9999999999999998,
+          "focus": [
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 1.552067876841905e-15,
+          "n_diverged_columns": 154,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9766,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 9920,
+          "pass": false,
+          "reference_rms": 0.08941482531068491,
+          "rms_ratio": 1.0,
+          "worst_column_ji": [
+            65,
+            1
+          ]
+        },
+        "rows": {
+          "10_langmuir_rn2b_operand": {
+            "aggregate_bar_pass": true,
+            "bar": 1e-15,
+            "column_bar_pass": false,
+            "controls": {
+              "baseline_pass": true,
+              "nonfinite_fired": true,
+              "one_i_roll_fired": true,
+              "perturbation_fired": true,
+              "perturbed_ji_k": [
+                1,
+                1,
+                0
+              ]
+            },
+            "correlation": 0.9999999999999983,
+            "focus": [
+              {
+                "column_error": 2.000840798268687e-11,
+                "i": 1,
+                "j": 11,
+                "pass": false,
+                "wet": true
+              },
+              {
+                "column_error": 2.6372659721814548e-11,
+                "i": 1,
+                "j": 12,
+                "pass": false,
+                "wet": true
+              },
+              {
+                "column_error": 2.789836063283117e-11,
+                "i": 1,
+                "j": 13,
+                "pass": false,
+                "wet": true
+              },
+              {
+                "column_error": 8.686227287301026e-12,
+                "i": 23,
+                "j": 13,
+                "pass": false,
+                "wet": true
+              }
+            ],
+            "max_column_error": 4.150231540863742e-07,
+            "n_diverged_columns": 9920,
+            "n_nonfinite_wet_elements": 0,
+            "n_verified_columns": 0,
+            "n_wet_columns": 9920,
+            "n_wet_elements": 332214,
+            "offline_composite_diagnostic": {
+              "dispositive": false,
+              "metrics": {
+                "aggregate_bar_pass": false,
+                "bar": 1e-15,
+                "column_bar_pass": false,
+                "correlation": 0.9999434374311064,
+                "focus": [
+                  {
+                    "column_error": 7.921765987042532e-06,
+                    "i": 1,
+                    "j": 11,
+                    "pass": false,
+                    "wet": true
+                  },
+                  {
+                    "column_error": 1.0216078875948975e-05,
+                    "i": 1,
+                    "j": 12,
+                    "pass": false,
+                    "wet": true
+                  },
+                  {
+                    "column_error": 1.1159353126930354e-05,
+                    "i": 1,
+                    "j": 13,
+                    "pass": false,
+                    "wet": true
+                  },
+                  {
+                    "column_error": 5.33422621208234e-06,
+                    "i": 23,
+                    "j": 13,
+                    "pass": false,
+                    "wet": true
+                  }
+                ],
+                "max_column_error": 3.861848456925888,
+                "n_diverged_columns": 9155,
+                "n_nonfinite_wet_elements": 0,
+                "n_verified_columns": 765,
+                "n_wet_columns": 9920,
+                "n_wet_elements": 332214,
+                "pass": false,
+                "reference_rms": 3.021261226904126e-08,
+                "rms_ratio": 0.9999931933889146,
+                "worst_column_ji": [
+                  50,
+                  48
+                ]
+              },
+              "reason": "no NEMO post-ln_lc stage dump"
+            },
+            "pass": false,
+            "reference_rms": 6.811828981750718e-05,
+            "rms_ratio": 1.000000000691871,
+            "worst_column_ji": [
+              113,
+              50
+            ]
+          },
+          "5_bottom_drag_coefficient": {
+            "aggregate_bar_pass": true,
+            "bar": 1e-15,
+            "column_bar_pass": true,
+            "correlation": 1.0,
+            "focus": [
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 11,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 12,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 13,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 23,
+                "j": 13,
+                "pass": true,
+                "wet": true
+              }
+            ],
+            "max_column_error": 0.0,
+            "n_diverged_columns": 0,
+            "n_nonfinite_wet_elements": 0,
+            "n_verified_columns": 9920,
+            "n_wet_columns": 9920,
+            "n_wet_elements": 9920,
+            "pass": true,
+            "reference_rms": 5.2300478998316906e-05,
+            "rms_ratio": 1.0,
+            "worst_column_ji": [
+              1,
+              1
+            ]
+          },
+          "6_native_mld_index": {
+            "aggregate_bar_pass": true,
+            "bar": 1e-12,
+            "column_bar_pass": true,
+            "correlation": 1.0,
+            "focus": [
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 11,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 12,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 13,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 23,
+                "j": 13,
+                "pass": true,
+                "wet": true
+              }
+            ],
+            "integer_exact": true,
+            "max_column_error": 0.0,
+            "n_diverged_columns": 0,
+            "n_integer_mismatch_columns": 0,
+            "n_nonfinite_wet_elements": 0,
+            "n_verified_columns": 9920,
+            "n_wet_columns": 9920,
+            "n_wet_elements": 9920,
+            "off_by_one_control_fired": true,
+            "pass": true,
+            "reference_rms": 11.409646809721178,
+            "registered_row_class": "A/E",
+            "rms_ratio": 1.0,
+            "worst_column_ji": [
+              1,
+              1
+            ]
+          },
+          "7_native_mld_depth": {
+            "aggregate_bar_pass": true,
+            "bar": 1e-15,
+            "column_bar_pass": true,
+            "correlation": 1.0,
+            "focus": [
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 11,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 12,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 13,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 23,
+                "j": 13,
+                "pass": true,
+                "wet": true
+              }
+            ],
+            "max_column_error": 5.67046062233333e-16,
+            "n_diverged_columns": 0,
+            "n_nonfinite_wet_elements": 0,
+            "n_verified_columns": 9920,
+            "n_wet_columns": 9920,
+            "n_wet_elements": 9920,
+            "pass": true,
+            "reference_rms": 801.9583966343474,
+            "rms_ratio": 1.0,
+            "worst_column_ji": [
+              1,
+              6
+            ]
+          },
+          "8_surface_tke_boundary": {
+            "aggregate_bar_pass": true,
+            "bar": 1e-15,
+            "column_bar_pass": true,
+            "controls": {
+              "baseline_pass": true,
+              "horizontal_roll": "WAIVED: DINO analytic wind is zonally invariant",
+              "nonfinite_fired": true,
+              "perturbation_fired": true,
+              "perturbed_ji_k": [
+                1,
+                1,
+                0
+              ]
+            },
+            "correlation": 1.0,
+            "default_literal_utau_vs_sbc_dump": {
+              "aggregate_bar_pass": true,
+              "bar": 1e-15,
+              "column_bar_pass": true,
+              "correlation": 0.9999999999999998,
+              "focus": [
+                {
+                  "column_error": 0.0,
+                  "i": 1,
+                  "j": 11,
+                  "pass": true,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0,
+                  "i": 1,
+                  "j": 12,
+                  "pass": true,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0,
+                  "i": 1,
+                  "j": 13,
+                  "pass": true,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0,
+                  "i": 23,
+                  "j": 13,
+                  "pass": true,
+                  "wet": true
+                }
+              ],
+              "max_column_error": 0.0,
+              "n_diverged_columns": 0,
+              "n_nonfinite_wet_elements": 0,
+              "n_verified_columns": 9920,
+              "n_wet_columns": 9920,
+              "n_wet_elements": 9920,
+              "pass": true,
+              "reference_rms": 0.08941482531068491,
+              "rms_ratio": 1.0,
+              "worst_column_ji": [
+                1,
+                1
+              ]
+            },
+            "focus": [
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 11,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 12,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 13,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 23,
+                "j": 13,
+                "pass": true,
+                "wet": true
+              }
+            ],
+            "legacy_factored_utau_vs_sbc_dump": {
+              "aggregate_bar_pass": true,
+              "bar": 1e-15,
+              "column_bar_pass": false,
+              "correlation": 0.9999999999999998,
+              "focus": [
+                {
+                  "column_error": 0.0,
+                  "i": 1,
+                  "j": 11,
+                  "pass": true,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0,
+                  "i": 1,
+                  "j": 12,
+                  "pass": true,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0,
+                  "i": 1,
+                  "j": 13,
+                  "pass": true,
+                  "wet": true
+                },
+                {
+                  "column_error": 0.0,
+                  "i": 23,
+                  "j": 13,
+                  "pass": true,
+                  "wet": true
+                }
+              ],
+              "max_column_error": 1.552067876841905e-15,
+              "n_diverged_columns": 154,
+              "n_nonfinite_wet_elements": 0,
+              "n_verified_columns": 9766,
+              "n_wet_columns": 9920,
+              "n_wet_elements": 9920,
+              "pass": false,
+              "reference_rms": 0.08941482531068491,
+              "rms_ratio": 1.0,
+              "worst_column_ji": [
+                65,
+                1
+              ]
+            },
+            "max_column_error": 0.0,
+            "n_diverged_columns": 0,
+            "n_nonfinite_wet_elements": 0,
+            "n_verified_columns": 9920,
+            "n_wet_columns": 9920,
+            "n_wet_elements": 9920,
+            "pass": true,
+            "reference_rms": 0.00741031860229885,
+            "rms_ratio": 1.0,
+            "worst_column_ji": [
+              1,
+              1
+            ]
+          },
+          "9_bottom_tke_boundary": {
+            "aggregate_bar_pass": true,
+            "bar": 1e-15,
+            "bottom_index_identity": {
+              "n_mismatch_wet_columns": 0,
+              "n_wet_columns": 9920,
+              "nemo_source": "mesh_mask.nc:mbathy - 1",
+              "off_by_one_control_fired": true,
+              "pass": true
+            },
+            "column_bar_pass": true,
+            "controls": {
+              "baseline_pass": true,
+              "nonfinite_fired": true,
+              "one_i_roll_fired": true,
+              "perturbation_fired": true,
+              "perturbed_ji_k": [
+                1,
+                1,
+                0
+              ]
+            },
+            "correlation": null,
+            "focus": [
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 11,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 12,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 1,
+                "j": 13,
+                "pass": true,
+                "wet": true
+              },
+              {
+                "column_error": 0.0,
+                "i": 23,
+                "j": 13,
+                "pass": true,
+                "wet": true
+              }
+            ],
+            "max_column_error": 0.0,
+            "n_diverged_columns": 0,
+            "n_nonfinite_wet_elements": 0,
+            "n_verified_columns": 9920,
+            "n_wet_columns": 9920,
+            "n_wet_elements": 9920,
+            "pass": true,
+            "reference_rms": 1e-06,
+            "rms_ratio": 1.0,
+            "worst_column_ji": [
+              1,
+              1
+            ]
+          }
+        }
+      },
+      "controls": {
+        "baseline_pass": true,
+        "nonfinite_fired": true,
+        "one_i_roll_fired": true,
+        "perturbation_fired": true,
+        "perturbed_ji_k": [
+          1,
+          1,
+          0
+        ]
+      },
+      "disposition": "VERIFIED",
+      "output": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 1.0,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 332214,
+        "pass": true,
+        "reference_rms": 2.1591876738381648e-08,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          1
+        ]
+      }
+    },
+    "5_bottom_drag_coefficient": {
+      "disposition": "VERIFIED",
+      "output": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 1.0,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 9920,
+        "pass": true,
+        "reference_rms": 5.2300478998316906e-05,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          1
+        ]
+      }
+    },
+    "6_native_mld_index": {
+      "disposition": "VERIFIED",
+      "output": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-12,
+        "column_bar_pass": true,
+        "correlation": 1.0,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "integer_exact": true,
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_integer_mismatch_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 9920,
+        "off_by_one_control_fired": true,
+        "pass": true,
+        "reference_rms": 11.409646809721178,
+        "registered_row_class": "A/E",
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          1
+        ]
+      }
+    },
+    "7_native_mld_depth": {
+      "disposition": "VERIFIED",
+      "output": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "correlation": 1.0,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 5.67046062233333e-16,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 9920,
+        "pass": true,
+        "reference_rms": 801.9583966343474,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          6
+        ]
+      }
+    },
+    "8_surface_tke_boundary": {
+      "disposition": "VERIFIED",
+      "output": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "column_bar_pass": true,
+        "controls": {
+          "baseline_pass": true,
+          "horizontal_roll": "WAIVED: DINO analytic wind is zonally invariant",
+          "nonfinite_fired": true,
+          "perturbation_fired": true,
+          "perturbed_ji_k": [
+            1,
+            1,
+            0
+          ]
+        },
+        "correlation": 1.0,
+        "default_literal_utau_vs_sbc_dump": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-15,
+          "column_bar_pass": true,
+          "correlation": 0.9999999999999998,
+          "focus": [
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 0.0,
+          "n_diverged_columns": 0,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9920,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 9920,
+          "pass": true,
+          "reference_rms": 0.08941482531068491,
+          "rms_ratio": 1.0,
+          "worst_column_ji": [
+            1,
+            1
+          ]
+        },
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "legacy_factored_utau_vs_sbc_dump": {
+          "aggregate_bar_pass": true,
+          "bar": 1e-15,
+          "column_bar_pass": false,
+          "correlation": 0.9999999999999998,
+          "focus": [
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 11,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 12,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 1,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            },
+            {
+              "column_error": 0.0,
+              "i": 23,
+              "j": 13,
+              "pass": true,
+              "wet": true
+            }
+          ],
+          "max_column_error": 1.552067876841905e-15,
+          "n_diverged_columns": 154,
+          "n_nonfinite_wet_elements": 0,
+          "n_verified_columns": 9766,
+          "n_wet_columns": 9920,
+          "n_wet_elements": 9920,
+          "pass": false,
+          "reference_rms": 0.08941482531068491,
+          "rms_ratio": 1.0,
+          "worst_column_ji": [
+            65,
+            1
+          ]
+        },
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 9920,
+        "pass": true,
+        "reference_rms": 0.00741031860229885,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          1
+        ]
+      }
+    },
+    "9_bottom_tke_boundary": {
+      "disposition": "VERIFIED",
+      "output": {
+        "aggregate_bar_pass": true,
+        "bar": 1e-15,
+        "bottom_index_identity": {
+          "n_mismatch_wet_columns": 0,
+          "n_wet_columns": 9920,
+          "nemo_source": "mesh_mask.nc:mbathy - 1",
+          "off_by_one_control_fired": true,
+          "pass": true
+        },
+        "column_bar_pass": true,
+        "controls": {
+          "baseline_pass": true,
+          "nonfinite_fired": true,
+          "one_i_roll_fired": true,
+          "perturbation_fired": true,
+          "perturbed_ji_k": [
+            1,
+            1,
+            0
+          ]
+        },
+        "correlation": null,
+        "focus": [
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 11,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 12,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 1,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          },
+          {
+            "column_error": 0.0,
+            "i": 23,
+            "j": 13,
+            "pass": true,
+            "wet": true
+          }
+        ],
+        "max_column_error": 0.0,
+        "n_diverged_columns": 0,
+        "n_nonfinite_wet_elements": 0,
+        "n_verified_columns": 9920,
+        "n_wet_columns": 9920,
+        "n_wet_elements": 9920,
+        "pass": true,
+        "reference_rms": 1e-06,
+        "rms_ratio": 1.0,
+        "worst_column_ji": [
+          1,
+          1
+        ]
+      }
+    }
+  },
+  "schema": "zdf-chain-sweep-v6",
+  "sha256": {
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/MY_SRC/stpmlf.F90": "26849c4fa34305317881959dd5a1e41af9b13aa4f96a290a998add955a73a283",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/MY_SRC/usrdef_sbc.F90": "97416dd8eb6eeb73b3cc39d0e4b7d817d738817d7a5d58f894b7fbef554517f6",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/MY_SRC/zdftke.F90": "5623a7444048927c766b0fd23ba4cc5854028e2ead67f1750febd789105c025e",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/DINO_00005760_restart.nc": "0cc00f9945606d1dea52592280e363b45476103de96f5cef471d70b1b881ff3e",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/drg_dump_rCdU_bot.bin": "c50267a90764adec68a2835adcc96416715ff651c64b510c2101be323f6885fc",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/dump_alpha_b.bin": "a2444bff1eb42a9dc1727502e673052ae7ca850ca5027091bb3e7399c6705fad",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/dump_beta_b.bin": "0be9b5d9feee9f995456ebcca322ca7681b1c3160b4b445bd7262ebc8a674ad0",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/dump_hmlp.bin": "71a84771a70886b9ab8e63b0321669edaa004a304a1abd1c31d64916bb2666bb",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/dump_nmln.bin": "5c9aec1eee6a1a040990dedfceaa119a9f41825b7807862e6404e33b772c852a",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/eiv_dump_e3w.bin": "6c6c469250944c92d3af41cae6af2171092c877f20e22db603218e6c955f3730",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/eiv_dump_gdept.bin": "5df03d71a6f42a505a53efa1d613952aff90d682dfa2dd647ba6513db3ca3da4",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/mesh_mask.nc": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/ocean.output": "66162e1d54cc0c8648b0c220fe902b6a75f7b19a0e8c2349f5d11928809c0557",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/sbc_dump_utau.bin": "9c6943a02c5221feeb5b56d023418e69860d31d5ea0ded51437e7886811641f8",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/tke_dump_avm_in.bin": "f05299d26b198ffad1449bf29bebfa8f2035de0b339be030bbf1c4eba0bce5bd",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/tke_dump_dissl.bin": "facba1529b41577cf12b5d4cf5f43dc0ec9fed63ec4b073de17748204e8e15df",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/tke_dump_en.bin": "b7a28c78a10dc3ed15b424197f7139d53c42cdfea6fe4191d96796b635722565",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/tke_dump_pdlr.bin": "538af8f8f1a229e60bb23513fc87826554670a30ed05a45dbfe9e7cc38acd614",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/tke_dump_rn2.bin": "df573f8c07abab1cc0a2fc7fd2093dd8276dccf0319d3375220340d91b5a6004",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/tke_dump_rn2b.bin": "fcd7ddee9e94b6158085f2ff5d174b2cb01e1b22a8524faa1b5be31a2b798961",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_SEQDUMP_D180_1R/tke_dump_sh2.bin": "2c18e0926b2b81c07ba3c5c371067d051ffea2d2fad0cc75c444af1654746f53",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/WORK/zdfphy.F90": "76eeec2a280d56c55bec9e59b579e5290623c408c03962d04652e406334b45fd",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/WORK/zdfsh2.F90": "c31f062e282b8710a0b565be7aecbc35b8e741b05a96a393402fcd5a737f28f8",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/OCE/TRA/eosbn2.F90": "689f8fdf5482e2bc6c7ecc59544ff7384fda6e4551e32be898e715501e55977d",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/src/OCE/ZDF/zdfsh2.F90": "c31f062e282b8710a0b565be7aecbc35b8e741b05a96a393402fcd5a737f28f8",
+    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/PREREG_zdf_chain_sweep.md": "0c3ebc401280390250f1b71e86f026ac70db9565d085874aee5cc27e1cf963aa",
+    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/PREREG_zdf_chain_sweep_round3.md": "71c8b22ddd0a1a6e4616b45f3e563212a5b6baeac391d9df54880d14898d421c",
+    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/PREREG_zdf_chain_sweep_round4.md": "37e60cba17bbd8df00f651661f48d5b582e7a8c2573183e118f9567e62e76bf1",
+    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/dump_lane.py": "41252d898b0d09b350c086aa678ddb890c7e6232fa2b46e88093a3b108a9bf62",
+    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/eos_rab_bn2_per_element.py": "3a82b0ef216fccf1b9112bfbac0005096eee491f15693d80f82320d3d80febda",
+    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/kamm_twin_90d.py": "5e1d00ca06c480c275cf9a8704f45a842bc5a7a07f9b36ba71c33e835d915be6",
+    "/tmp/codex-zdf-sweep/scripts/validate/ocean_fidelity/dino_1226/zdf_chain_sweep.py": "c0b06fbb924f809825c3cc50a3611ad23f0eb867ea8a9ab46e349ca963510b97",
+    "/tmp/dino_mld_audit_codex/mld_maps.npz": "9fb7344d1e6f92232d211f6a52ff8636022f0d9b0b05acea2b0bae6e6afd9bf0",
+    "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py": "bd90cdb19a8a727eb1b212c2b2fcd4ae619c02af89be1419e6d0aa8685bf0040",
+    "packages/ocean/legoesm/ocean/eos.py": "d8d3054b49bcc6c5a828dd0c53b1e0047ec8e6a13145790e9552c7f6f942139d",
+    "packages/ocean/legoesm/ocean/experiments/dino.py": "8bd76051440ded46134ffdd04101738853d078bc1b28d6cd77afea3a2a1f609d",
+    "packages/ocean/legoesm/ocean/fidelity/nemo_io.py": "8ba2cbd28ca284e6bc3e2b6a93d3b35c5df001ee95646af3169f3e76c1080419",
+    "packages/ocean/legoesm/ocean/fidelity/nemo_state_bridge.py": "ed5c7df3fe9b810dfe1f21ae5f3934483b26d75f9f71a787234ddad8ad1c7900",
+    "packages/ocean/legoesm/ocean/fidelity/time_levels.py": "810c731be7df80374b34075c67f97278c2fab51889b2c9e7be684238980a5b27",
+    "packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py": "1ae34a95fd6c49e65109dac46175cfea6870c97918798e7ed786b77679046b46",
+    "packages/ocean/legoesm/ocean/physics/vertical_mixing/config.py": "2e8a8e1f1bc2de01dc7a35359ca2545be2e337f32f6fe2c1e0afbff5d9d73ea0",
+    "packages/ocean/legoesm/ocean/physics/vertical_mixing/k_profiles.py": "c147490fcba6e1d20f1c73eff0102a882933b3898bb6c960a5665832db65fff5",
+    "packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py": "dd049b0cab0272e1c2e52369bd8d2e5196dee3c0ccbc5c90aaa7f3cefabfd2a5",
+    "packages/ocean/legoesm/ocean/state.py": "0ef038bb3ac493b82585ac8bd3fcc0c9bf8e8800888e7c2e5f3dc0bd991d18b8",
+    "packages/ocean/legoesm/ocean/vertical.py": "65d7b597be3a89e3700ea1e3425b00614a3c36b7a0cfe2188f444fd820382265"
+  },
+  "time_levels": {
+    "drg_dump_rCdU_bot.bin": "now",
+    "dump_alpha_b.bin": "before",
+    "dump_beta_b.bin": "before",
+    "dump_hmlp.bin": "before",
+    "dump_nmln.bin": "before",
+    "eiv_dump_e3w.bin": "now",
+    "eiv_dump_gdept.bin": "now",
+    "sbc_dump_utau.bin": "now",
+    "tke_dump_avm_in.bin": "before",
+    "tke_dump_en.bin": "now",
+    "tke_dump_rn2.bin": "now",
+    "tke_dump_rn2b.bin": "before",
+    "tke_dump_sh2.bin": "before"
+  }
+}

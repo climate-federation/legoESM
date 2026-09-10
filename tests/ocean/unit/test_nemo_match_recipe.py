@@ -38,7 +38,11 @@ def test_mpas_factory_selects_canonical_blocks():
     assert mc.implicit_vertical_mixing is True
     assert mc.A_h == pytest.approx(1.0e5)
     assert mc.C_smag_lap == pytest.approx(0.33)
-    assert mc.K_zeta_bih == pytest.approx(1.0e14)
+    # Derived from the mesh (dx^3, anchored on the ico6 mesh it was tuned on);
+    # at that anchor spacing it reproduces the tuned 1e14 exactly.
+    from legoesm.ocean.mpas_config import resolution_scaled_k_zeta_bih
+    assert mc.K_zeta_bih is None
+    assert resolution_scaled_k_zeta_bih(mc.K_zeta_bih_ref_dx_m, mc) == 1.0e14
     assert mc.barotropic_implicit_pcg_maxiter == 300  # MPAS: flat (not grouped)
     assert mc.normalize_freshwater is True
     assert mc.gm_redi is not None

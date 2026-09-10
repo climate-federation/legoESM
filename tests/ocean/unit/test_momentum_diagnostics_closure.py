@@ -25,7 +25,7 @@ os.environ.setdefault("JAX_ENABLE_X64", "1")
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.vertical import create_ocean_z_star
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
-from legoesm.ocean.state import LatLonCGridOceanConfig
+from legoesm.ocean.state import LatLonCGridOceanConfig, OceanSurfaceForcing
 from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
     latlon_cgrid_ocean_baroclinic_tendencies,
 )
@@ -126,6 +126,47 @@ def test_diagnostic_closure_full_config(grid, z_coord):
     np.testing.assert_allclose(np.asarray(sum_v),
                                np.asarray(diag.total_v.data),
                                atol=1e-12, rtol=1e-12)
+
+
+def test_diagnostic_closure_external_surface_stress(grid, z_coord):
+    """External stress has its own diagnostic and closes on both faces.
+
+    This is deliberately zonal and meridional: omitting the diagnostic makes
+    both closures red, while a zonal-only forcing would hide the V-side miss.
+    """
+    cfg = LatLonCGridOceanConfig.from_flat(A_h=0.0, A_v=0.0,
+                                           bottom_drag_r=0.0)
+    state = _perturbed_state(grid, z_coord)
+    shape = (grid.n_lat, grid.n_lon)
+    forcing = OceanSurfaceForcing(
+        tau_x=jnp.full(shape, 0.12, dtype=jnp.float64),
+        tau_y=jnp.full(shape, -0.07, dtype=jnp.float64),
+    )
+
+    tendencies, diag = latlon_cgrid_ocean_baroclinic_tendencies(
+        state, grid, z_coord, cfg, surface_forcing=forcing,
+        diagnose_momentum=True,
+    )
+    assert float(jnp.max(jnp.abs(diag.surface_stress_u.data))) > 0.0
+    assert float(jnp.max(jnp.abs(diag.surface_stress_v.data))) > 0.0
+    np.testing.assert_allclose(np.asarray(_sum_components(diag, "u")),
+                               np.asarray(diag.total_u.data),
+                               atol=1e-12, rtol=1e-12)
+    np.testing.assert_allclose(np.asarray(_sum_components(diag, "v")),
+                               np.asarray(diag.total_v.data),
+                               atol=1e-12, rtol=1e-12)
+    np.testing.assert_array_equal(np.asarray(tendencies.du_dt.data),
+                                  np.asarray(diag.total_u.data))
+    np.testing.assert_array_equal(np.asarray(tendencies.dv_dt.data),
+                                  np.asarray(diag.total_v.data))
+    plain = latlon_cgrid_ocean_baroclinic_tendencies(
+        state, grid, z_coord, cfg, surface_forcing=forcing,
+        diagnose_momentum=False,
+    )
+    np.testing.assert_array_equal(np.asarray(plain.du_dt.data),
+                                  np.asarray(tendencies.du_dt.data))
+    np.testing.assert_array_equal(np.asarray(plain.dv_dt.data),
+                                  np.asarray(tendencies.dv_dt.data))
 
 
 def test_default_signature_unchanged(grid, z_coord):

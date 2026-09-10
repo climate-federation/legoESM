@@ -282,7 +282,7 @@ def dgrid_pressure_phase_3d(ctx: dict, dsw_outs: list, tail_outs: list,
     return press
 
 
-def _ext_scalar_planes_6(ctx: dict, planes6: list) -> None:
+def ext_scalar_planes_6(ctx: dict, planes6: list) -> None:
     """Duo A-grid scalar exchange for one 2-D plane per face, fail-closed.
 
     The NH D-stage sites (``dyn_core.F90:1482-1483``: ``ext_scalar(zh)``,
@@ -298,7 +298,7 @@ def _ext_scalar_planes_6(ctx: dict, planes6: list) -> None:
         return
     if not excluded:
         raise ValueError(
-            "_ext_scalar_planes_6: dyn_core.F90:1482-1483 exchanges "
+            "ext_scalar_planes_6: dyn_core.F90:1482-1483 exchanges "
             "zh/pkc with ext_scalar on the duo lane, and this context "
             "has no ext bundle. Build it with use_ext_bundle=True, or "
             "declare the substitution with ext_exclude=('ascalar',).")
@@ -522,11 +522,11 @@ def dgrid_nh_pressure_phase_3d(ctx: dict, csw_press: list, dsw_outs: list,
     # zh + pkc duo exchanges (:1482-1483), per interface level.
     for k in range(km + 1):
         zh_k = [nh["zh6"][t][:, :, k] for t in range(6)]
-        _ext_scalar_planes_6(ctx, zh_k)
+        ext_scalar_planes_6(ctx, zh_k)
         for t in range(6):
             nh["zh6"][t][:, :, k] = zh_k[t]
         pkc_k = [csw_press[t]["pkc"][:, :, k] for t in range(6)]
-        _ext_scalar_planes_6(ctx, pkc_k)
+        ext_scalar_planes_6(ctx, pkc_k)
         for t in range(6):
             csw_press[t]["pkc"][:, :, k] = pkc_k[t]
 
@@ -542,7 +542,7 @@ def dgrid_nh_pressure_phase_3d(ctx: dict, csw_press: list, dsw_outs: list,
     if square_domain:
         for k in range(km + 1):
             pkc_k = [csw_press[t]["pkc"][:, :, k] for t in range(6)]
-            _ext_scalar_planes_6(ctx, pkc_k)
+            ext_scalar_planes_6(ctx, pkc_k)
             for t in range(6):
                 csw_press[t]["pkc"][:, :, k] = pkc_k[t]
 

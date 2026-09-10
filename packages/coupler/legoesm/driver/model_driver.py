@@ -404,7 +404,8 @@ class _MPASSfcFluxAccum:
     the "monthly mean" of a day/night field like rsut kept the full
     instantaneous diurnal pattern while labeled ``time: mean``).
 
-    Covers slots 2..7 of the ``_sfc_diag`` contract (2 precip, 3 rlut,
+    Covers slots 0..7 of the ``_sfc_diag`` contract (0 sw_net_sfc and
+    1 lw_net_sfc, read only by the energy tracker; 2 precip, 3 rlut,
     4 rsut, 5 rsdt, 6 hfss, 7 hfls) — the strongly diurnal flux fields —
     plus the clear-sky TOA pair (10 rsutcs, 11 rlutcs; #843 lean-lane
     port), which is only ever non-None when ``--clear-sky-diag`` is on
@@ -435,7 +436,22 @@ class _MPASSfcFluxAccum:
     reporting precision, documented rather than engineered around.
     """
 
-    SLOTS = (2, 3, 4, 5, 6, 7, 10, 11)
+    # Slots 0 and 1 (sw_net_sfc, lw_net_sfc, both +into surface) were added
+    # 2026-09-05 for the #1354 energy budget.  They are NOT part of the CMOR
+    # feed -- there is no surface-radiation table entry -- but they are the
+    # LARGEST term in the column energy budget (~77 W/m^2 against a ~20 W/m^2
+    # signal), and the energy tracker was reading them as fixed-clock-time
+    # snapshots.  Measured on job 9632045: sampled sensible heat 8.0 W/m^2
+    # against an accumulated 20.5, and an apparent leak of +34.7 W/m^2 where
+    # accumulated channels gave ~11.  Accumulating costs one device-side add
+    # per step per slot and is what makes the budget answerable at all.
+    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 10, 11)
+    #: The slots the column energy budget reads (sw/lw net sfc, lw_up, sw_up,
+    #: sw_dn, hfss, hfls).  After the first radiation call every one of them
+    #: is non-None on EVERY step (the MPAS model holds the last radiation
+    #: value across held-radiation sub-steps, primitive_eq_mpas.step), which
+    #: is what lets ``window_ready`` demand equal per-slot counts.
+    ENERGY_SLOTS = (0, 1, 3, 4, 5, 6, 7)
 
     def __init__(self, expected_steps: int = 0, window_start_day: float = 0.0,
                  dt_s: float = 0.0):
@@ -490,6 +506,16 @@ class _MPASSfcFluxAccum:
     def has_samples(self) -> bool:
         """True if any slot accumulated at least one sample this interval."""
         return bool(self._n)
+
+    def window_ready(self, slots) -> bool:
+        """True iff the window is complete AND every slot in *slots* was
+        accumulated over the SAME number of samples.  A checkpoint written
+        before a slot existed restores the others with a full count while
+        the new slot only sees the post-restart remainder; ``is_complete()``
+        passes (it counts steps, not per-slot samples) and the short slot
+        would be published as a full interval mean (codex, #1354)."""
+        counts = {self._n.get(i, 0) for i in slots}
+        return self.is_complete() and len(counts) == 1 and counts != {0}
 
     def is_complete(self) -> bool:
         """True iff this interval saw EXACTLY the step count a complete
@@ -754,6 +780,11 @@ def _mpas_hard_saturation_poststep(T, q_v, q_c, p_s, sigma_full, dt,
 # seed ceiling is Morrison-consistent at low density (without floors the p/(R_dT)
 # ceiling loosens as 0.1/rho aloft — ~4x at 15 hPa, far more near the top).
 _ICE_SEED_RHO_FLOOR = 0.1        # [kg/m^3]
+
+# MultiLayerLandState fields that are numerical CACHES, not prognostic state:
+# never written to a checkpoint and never required by one, so a checkpoint
+# written before the field existed still restarts (the cache cold-starts).
+_LAND_ML_CACHE_FIELDS = ("canopy_x",)
 
 
 def _seed_nucleated_ice_number(N_i, dq_i, ice_nuc_mass, n_i_nuc_max, p_full, T):
@@ -1161,7 +1192,9 @@ class ModelDriver:
                 # Optional fields (TgC, surface_water) may be None — np.asarray
                 # would pickle a 0-d object array into the npz and crash the
                 # load-side jnp.asarray. Skip; restore only replaces saved keys.
-                if _v is not None:
+                # Cache fields (the canopy warm start) are skipped too: they
+                # carry no physics and an older reader would refuse the key.
+                if _v is not None and _f not in _LAND_ML_CACHE_FIELDS:
                     base[f"land_ml_{_f}"] = np.asarray(_v)
         return base if base else None
 
@@ -1296,8 +1329,9 @@ class ModelDriver:
                 f"land_ml checkpoint has unknown field(s) {sorted(unknown)}; "
                 f"current MultiLayerLandState fields are {sorted(valid)}")
         expected = {f for f in template._fields
-                    if getattr(template, f) is not None}
-        got = set(popped)
+                    if getattr(template, f) is not None
+                    and f not in _LAND_ML_CACHE_FIELDS}
+        got = set(popped) - set(_LAND_ML_CACHE_FIELDS)
         if got != expected:
             raise ValueError(
                 "land_ml checkpoint field set does not match the current "
@@ -9998,6 +10032,10 @@ class ModelDriver:
             # EnergyBudgetTracker per diag step from self.model._sfc_diag.
             "energy_toa_net": [], "energy_dE_dt": [], "energy_residual": [],
             "sw_net_sfc": [], "lw_net_sfc": [], "hfss": [], "hfls": [],
+            # 1.0 = the seven energy channels above are diagnostic-INTERVAL
+            # MEANS; 0.0 = end-of-interval snapshots, which alias the diurnal
+            # cycle of the land-dominated turbulent fluxes (#1354/#1353).
+            "energy_flux_interval_mean": [],
         }
 
         t_start = time.time()
@@ -10927,15 +10965,26 @@ class ModelDriver:
                 # toa_net = rsdt - rsut - rlut; the tracker's residual =
                 # toa_net - dE/dt.  hfss/hfls are recorded for the closure
                 # probe (LEAK = sfc_net_rad - hfss - hfls - residual).
-                # FLUX TIMING: these are the last radiation step's INSTANTANEOUS
-                # fluxes (a daily snapshot), not the diagnostic-interval mean.
-                # GLM review: for the GLOBAL mean this is adequate to catch the
-                # ~20 W/m^2 leak we hunt -- a fixed-time global snapshot
-                # integrates over all longitudes == all local times, so rsdt is
-                # S_0/4 exactly and rsut/rlut carry only ~1-5 W/m^2 of day-to-day
-                # noise (SNR ~10 sigma/day).  A REGIONAL/map budget would need
-                # the interval-mean (self._mpas_sfc_accum, CMOR-gated) instead
-                # (codex review); global localisation is deferred.
+                # FLUX TIMING: INTERVAL MEANS when the accumulator is running,
+                # snapshots otherwise, and the series records WHICH.
+                #
+                # This comment used to argue the snapshot was adequate: a
+                # fixed-time global sample spans all longitudes hence all local
+                # times, so rsdt is S_0/4 and TOA carries only ~1-5 W/m^2 of
+                # noise.  MEASURED 2026-09-04 (job 9632045) that argument holds
+                # for solar geometry and FAILS for the turbulent fluxes: the
+                # sampled sensible heat flux was 8.0 W/m^2 against the
+                # accumulated 20.5 -- 2.5x -- because sensible heat is dominated
+                # by LAND, which occupies limited longitudes with a sharply
+                # asymmetric diurnal cycle that one local time per longitude
+                # does not average.  The apparent leak came out +34.7 W/m^2
+                # against a ~20 W/m^2 hypothesis; substituting accumulated
+                # channels gave ~11.  A plausible wrong answer, the dangerous
+                # kind.  So prefer self._mpas_sfc_accum (#1353's interval means,
+                # widened to slots 0/1 above).  It is CMOR-gated, so with the
+                # feed off the tracker falls back to snapshots and stamps
+                # energy_flux_interval_mean = 0; the closure probe then REFUSES
+                # to report a leak rather than quoting a contaminated one.
                 # MPI-partitioned MPAS is skipped: the tracker uses local area
                 # weights + local state with no owned-cell mask or allreduce
                 # (halo double-count), exactly as the moisture tracker is
@@ -10943,6 +10992,23 @@ class ModelDriver:
                 # only, which is the #1354 L5 lane.
                 _ebd = getattr(self.diagnostics, "energy_tracker", None)
                 _sd = getattr(self.model, "_sfc_diag", None)
+                # GATE (codex review): `has_samples()` alone is not enough. A
+                # window can be SHORT -- the first interval after a
+                # feed-off->feed-on restart, or a checkpoint written before
+                # slots 0/1 existed -- and its mean is then over the wrong
+                # number of steps, or missing the surface-radiation pair
+                # entirely. Either way it would be stamped "interval mean" and
+                # sail past the probe, which is worse than the snapshot it
+                # replaced because it looks trustworthy. Require a COMPLETE
+                # window AND every slot the energy budget reads.
+                _facc_e = getattr(self, "_mpas_sfc_accum", None)
+                _use_accum = (_facc_e is not None
+                              and _facc_e.window_ready(_facc_e.ENERGY_SLOTS))
+                if (_facc_e is not None and _facc_e.is_complete()
+                        and not _use_accum):
+                    print("  energy tracker: complete window but energy "
+                          "slots have unequal sample counts -- this sample "
+                          "falls back to SNAPSHOT fluxes (stamped 0)")
                 _qv_e = (self.state.tracers["q_v"].data
                          if (self.state.tracers is not None
                              and "q_v" in self.state.tracers) else None)
@@ -10958,6 +11024,16 @@ class ModelDriver:
                             _qfrz_e = _fd if _qfrz_e is None else _qfrz_e + _fd
 
                 def _slot(i):
+                    # Interval mean first (the APPLIED quantity); the
+                    # end-of-interval snapshot only when no accumulator ran.
+                    # `mean()` returns a host array, so this round-trips
+                    # device->host->device. That is 7 small transfers per
+                    # DIAGNOSTIC step (12 in a 12-day run at --diag-days 1),
+                    # not per model step, so it is not on the hot path
+                    # (codex review, accepted rather than restructured --
+                    # `mean()` is shared with the CMOR feed).
+                    if _use_accum:   # window_ready() => every slot has a mean
+                        return jnp.asarray(_facc_e.mean(i))
                     return (_sd[i].data if (_sd is not None and len(_sd) > i
                                             and _sd[i] is not None) else None)
                 _sw_dn, _sw_up, _lw_up = _slot(5), _slot(4), _slot(3)
@@ -10992,6 +11068,12 @@ class ModelDriver:
                     _ts["energy_residual"].append(float(_eb.residual))
                     _ts["sw_net_sfc"].append(float(_eb.sfc_sw_net))
                     _ts["lw_net_sfc"].append(float(_eb.sfc_lw_net))
+                    # Which flux timing produced this sample.  The closure
+                    # probe refuses to report a leak from snapshots, because a
+                    # contaminated leak is plausible rather than obviously
+                    # broken (#1354).
+                    _ts["energy_flux_interval_mean"].append(
+                        1.0 if _use_accum else 0.0)
                     _ts["hfss"].append(float(_awm(_shf, _awt))
                                        if _shf is not None else float("nan"))
                     _ts["hfls"].append(float(_awm(_lhf, _awt))
@@ -11975,6 +12057,13 @@ class ModelDriver:
             energy_dE_dt=_arr("energy_dE_dt") if "energy_dE_dt" in ts else nan,
             hfss=_arr("hfss") if "hfss" in ts else nan,
             hfls=_arr("hfls") if "hfls" in ts else nan,
+            # Flux-timing provenance for the seven channels above. WITHOUT
+            # this the closure probe refuses every real series as "timing
+            # unknown" -- which is the correct refusal, and exactly what
+            # happens when a collected channel is never persisted.
+            energy_flux_interval_mean=(
+                _arr("energy_flux_interval_mean")
+                if "energy_flux_interval_mean" in ts else nan),
         )
         # Persist the run summary in the same place run_amip's main path
         # writes it, so `validate_amip_run.py` can read the status line.

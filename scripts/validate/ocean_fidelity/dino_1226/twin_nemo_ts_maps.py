@@ -52,15 +52,30 @@ import subprocess
 import sys
 from typing import Any
 
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
-os.environ.setdefault("JAX_PLATFORMS", "cpu")
-os.environ.setdefault("MPLCONFIGDIR", "/tmp/legoesm-matplotlib")
-
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
+
+
+def _set_script_env():
+    """Process-wide defaults for RUNNING this comparator as a script, and the
+    Matplotlib handle it returns.
+
+    Kept out of import so the unit tests -- and any other importer -- do not
+    inherit a CPU-only JAX, a hidden GPU or a redirected Matplotlib cache
+    (review comment: importing a module must not reconfigure the process).
+    Matplotlib is imported HERE rather than at module scope because importing
+    it before ``MPLCONFIGDIR`` is set fails outright on a node whose home is
+    read-only ("No usable temporary directory"), which is exactly the headless
+    case this function exists to configure.
+    """
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+    os.environ.setdefault("JAX_PLATFORMS", "cpu")
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/legoesm-matplotlib")
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    return plt
 
 ROOT = Path(__file__).resolve().parents[4]
 NEMO_ROOT = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2")
@@ -244,7 +259,7 @@ def plot_row(axes, candidate: np.ndarray, reference: np.ndarray,
     )
     for axis, field, title, kwargs in panels:
         image = axis.pcolormesh(lon, lat, field, shading="auto", **kwargs)
-        plt.colorbar(image, ax=axis, shrink=0.85)
+        axis.figure.colorbar(image, ax=axis, shrink=0.85)
         axis.set_title(title, fontsize=9)
         axis.set_xlabel("longitude [deg E]")
         axis.set_ylabel("latitude [deg N]")
@@ -255,6 +270,7 @@ def save_figures(output_dir: Path, day: int, fields: dict[str, np.ndarray],
                  masks: dict[str, np.ndarray], lon: np.ndarray, lat: np.ndarray,
                  depths: np.ndarray) -> dict[str, str]:
     surface_path = output_dir / f"surface_day{day}.png"
+    plt = _set_script_env()
     fig, axes = plt.subplots(3, 3, figsize=(13, 12), constrained_layout=True)
     plot_row(axes[0], fields["SSH_arm"], fields["SSH_nemo"], masks["surface"],
              lon, lat, f"SSH day {day}", "m", "viridis")
@@ -269,6 +285,7 @@ def save_figures(output_dir: Path, day: int, fields: dict[str, np.ndarray],
     target_depths = (300.0, 1000.0)
     levels = [int(np.argmin(np.abs(depths - target))) for target in target_depths]
     subsurface_path = output_dir / f"subsurface_day{day}.png"
+    plt = _set_script_env()
     fig, axes = plt.subplots(4, 3, figsize=(13, 15), constrained_layout=True)
     rows = (
         ("T", levels[0], "degC", "turbo"),
@@ -461,7 +478,11 @@ def load_run_dino_snapshot(run_dir: Path, day: int):
              "snapshot_time_days": float(chosen_days),
              "requested_day": float(day),
              "snapshot_day_offset_days": float(chosen_days - day),
-             "control_dtype": field_dtypes["T"],
+             # The dtype the SCORING arithmetic runs in.  This loader upcasts
+             # every field, so reporting the snapshot's float32 source here
+             # would suggest the comparison itself was float32; the source
+             # dtypes are reported separately in field_dtypes.
+             "control_dtype": "float64",
              "field_dtypes": field_dtypes,
              "upcast_to_float64_for_scoring": True,
              "vertical_zero_pad_to_36_levels": int(36 - raw["T"].shape[2])})
@@ -625,6 +646,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _set_script_env()
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.self_test:

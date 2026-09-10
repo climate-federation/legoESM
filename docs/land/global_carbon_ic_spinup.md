@@ -71,7 +71,11 @@ permafrost-`phi` restart round-trip. Exits non-zero on any mismatch.
 | `scripts/run/run_coupled.py` (coupled ESM) | yes | `--carbon-ic <finidat>` → `CoupledConfig.carbon_ic_path`; STRICT whole-grid match, needs multilayer land |
 | `scripts/run/run_lmip.py` (single-point LMIP) | yes | `--carbon-ic <finidat>` with `--carbon-scheme differland`, or the shipped `config/lmip/lmip_carbon_ic.yaml`; seeds the one column from the **nearest land cell** |
 | `scripts/run/run_amip.py` (AMIP) | no, by design | AMIP prescribes carbon and discards evolved pools |
-| `scripts/run/run_lmip_biophys.py` (global LMIP biophysics) | not yet | that driver pins `carbon="none"` — energy/water/snow/soil only, with GPP taped as a diagnostic. There are no pools to seed until its carbon cycle lands |
+| `scripts/run/run_lmip_biophys.py` (global LMIP biophysics) | yes, opt-in | `physics.carbon_prognostic: true` (needs `stomata_enabled`) makes the pools evolve instead of being re-derived and discarded each step; `restart.carbon_ic` then seeds them, STRICT whole-grid match. Off by default — see below |
+
+> **The biophysics lane is opt-in for a reason.** Its pools are PRESCRIBED by default: a fixed leaf carbon, re-derived and discarded every step, because the baked stomatal conductance was calibrated at that leaf area. Letting them evolve changes LAI and therefore the conductance — a different experiment, not a free upgrade. With the flag on, the pools ride in the time-integration carry, the permafrost `phi` is threaded, and `NBP` / `C_total` / `C_soil` / `C_veg` become tapeable.
+>
+> **That lane needs its own finidat.** The seed is a strict whole-grid match and the published IC is 96 x 144 (1.9 x 2.5), so it will NOT seed the default 2° biophysics grid — the loader rejects it rather than scrambling cells. Build one at your resolution with `--surfdata-preset legoesm_surfdata --resolution-deg <deg>` (§2).
 
 For the single-point LMIP the whole-grid contract cannot be met (one column at an
 arbitrary site), but the column can still be *initialised* from the nearest cell:
@@ -267,8 +271,33 @@ generations, so reproduce the *scorecard* (§3, to the tolerances
 `verify_carbon_ic_release.sbatch` applies), not the bytes. Bit-identity is only
 guaranteed by downloading the published artifact.
 
+## 5. The other half: the soil-state IC
+
+This recipe spins up **carbon pools**. The soil *physical* state — moisture and
+temperature profiles plus snow — has its own published spin-up and its own
+release: `docs/land/lmip_biophys_soil_ic_spinup.md` (#1624), a 10-year CRU-JRA
+spin-up of the calibrated 2° biophysics LMIP, ingested through `restart.from`.
+
+**The two compose**: both are on a 10-layer / 3.0 m soil column, so a run can
+take its soil state from the soil IC and its carbon pools from this one, and
+neither is a cold start. They are independent files with independent provenance —
+seeding one does not seed the other, and the carbon IC carries no soil state.
+
+Note that the global biophysics driver (`run_lmip_biophys.py`) still runs
+`carbon="none"`: under `physics.calibrated_land_physics` the pools are re-derived
+and discarded every step, on purpose, so the fitted conductance acts on the leaf
+area it was fitted with. So the carbon IC has no consumer *there* yet — its
+consumers are the coupled driver and the single-point `run_lmip.py` (§1). Wiring
+carbon into the global biophysics lane is the open piece.
+
+`scripts/validate/compare_lmip_biophys_clm.py` (#1624) scores that lane against
+CLM, which is the natural place to judge whether a seeded carbon cycle helps once
+it is wired.
+
 ## Related
 
 - `docs/land/arctic_carbon_residual_audit.md` — why the high latitudes are low.
 - `docs/land/carbon_equilibrium_audit.md` — the equilibrium method.
+- `docs/land/lmip_biophys_soil_ic_spinup.md` — the soil-state IC (the other half).
+- `scripts/validate/compare_lmip_biophys_clm.py` — LMIP biophysics vs CLM.
 - `scripts/plot/plot_global_carbon_ic.py` — regenerates `carbon_ic_maps.png`.

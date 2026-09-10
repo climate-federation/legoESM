@@ -13,6 +13,7 @@ Two layers, because they can fail for different reasons:
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 import subprocess
 import sys
@@ -113,6 +114,10 @@ def _run_gate(*extra):
 
 @pytest.mark.skipif(not os.path.exists(_MESH),
                     reason=f"NEMO oracle mesh not on this machine: {_MESH}")
+@pytest.mark.skipif(importlib.util.find_spec("netCDF4") is None,
+                    reason="netCDF4 not installed: the gate cannot read the "
+                           "oracle mesh, so a failure here would not be a "
+                           "gate regression")
 def test_gate_passes_against_the_oracle_mesh():
     r = _run_gate()
     assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
@@ -122,6 +127,10 @@ def test_gate_passes_against_the_oracle_mesh():
 
 @pytest.mark.skipif(not os.path.exists(_MESH),
                     reason=f"NEMO oracle mesh not on this machine: {_MESH}")
+@pytest.mark.skipif(importlib.util.find_spec("netCDF4") is None,
+                    reason="netCDF4 not installed: the gate cannot read the "
+                           "oracle mesh, so a failure here would not be a "
+                           "gate regression")
 def test_gate_plant_fails():
     # Non-vacuity: a one-cell lie about the bathymetry must be caught.
     r = _run_gate("--plant")

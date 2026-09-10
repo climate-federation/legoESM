@@ -283,7 +283,7 @@ _A2B_GEOM_KEYS = ("grid_lon", "grid_lat", "agrid_lon", "agrid_lat",
 
 
 def _require_f64_jax(fname: str, arrays: dict) -> None:
-    """Static-dtype gate mirroring the NumPy lane's ``_require_f64``.
+    """dtype-UNIFORMITY gate (2026-08-28): was strict float64. The JAX duo runtime now runs ONE uniform float dtype (FV3DuoConfig.storage_dtype), so this accepts f32 OR f64 provided every operand matches; the anti-silent-downcast guard moved to FV3DuoDynamicsModel.step's boundary check. The rationale below is the ORIGINAL strict-f64 history.
 
     Replicated rather than imported from ``fv3_nh_core`` -- see deviation
     (6) in the module docstring.  Reads only ``.dtype`` (static under
@@ -291,12 +291,23 @@ def _require_f64_jax(fname: str, arrays: dict) -> None:
     worse, with x64 disabled the whole chain would silently run in
     float32 -- and the oracle build is ``-fdefault-real-8``.
     """
+    # dtype-UNIFORMITY gate (2026-08-28): was strict float64; relaxed for
+    # the coarse fv3_duo precision policy (FV3DuoConfig.storage_dtype).
+    seen = None
     for name, a in arrays.items():
-        if jnp.asarray(a).dtype != jnp.float64:
+        if a is None:
+            continue
+        dt = jnp.asarray(a).dtype
+        if dt not in (jnp.float32, jnp.float64):
             raise TypeError(
-                f"{fname}: {name} must be float64 (got "
-                f"{jnp.asarray(a).dtype}); enable jax_enable_x64 and pass "
-                f"f64 operands (oracle build is -fdefault-real-8)")
+                f"{fname}: {name} must be float32 or float64 (got {dt})")
+        if seen is None:
+            seen = dt
+        elif dt != seen:
+            raise TypeError(
+                f"{fname}: MIXED float dtypes ({seen} vs {dt} on {name}); "
+                f"a phase must be single-precision-uniform "
+                f"(FV3DuoConfig.storage_dtype).")
 
 
 def _w(lo: int, ia: int, ib: int) -> slice:

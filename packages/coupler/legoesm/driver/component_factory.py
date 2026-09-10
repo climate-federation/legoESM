@@ -337,6 +337,50 @@ def _flatten_config_fields(cfg, prefix: str = ""):
             yield f"{prefix}{name}", val
 
 
+def resolve_fv3_duo_layout(*, world: int, n_local: int, n_global: int,
+                           distributed: bool) -> str:
+    """Pure fv3_duo layout policy -- returns 'shard' or 'single', or
+    raises ValueError.  Split out of ``create_atmosphere_dycore`` so the
+    auto-adapt + refusal rules are unit-testable with plain ints (no jax
+    devices, no model construction).
+
+    * *world*      = max(jax.process_count(), launcher_world_size()).
+    * *n_local*    = this process's local device count.
+    * *n_global*   = the global device count (== n_local single-process).
+    * *distributed*= config.distributed (the explicit --distributed flag).
+
+    Rules:
+    - A multi-process launch (world>1) WITHOUT --distributed is refused
+      (it would run the single-process I/O path across ranks).
+    - The device set is the GLOBAL set under --distributed, else this
+      process's LOCAL set.
+    - 2/3/6 devices -> 'shard' (face-shard + face-batch).
+    - Otherwise (1, or 4/5/7...): 'single'.  Under an EXPLICIT
+      --distributed that is a hard error (the user asked to distribute an
+      unshardable count); on the auto path it is a legitimate fall-back
+      the caller logs loudly.
+    """
+    if world > 1 and not distributed:
+        raise ValueError(
+            f"fv3_duo: this looks like a MULTI-PROCESS launch (world "
+            f"size {world}) but --distributed was not set. Multi-process "
+            f"SPMD is explicit (it changes the checkpoint/snapshot I/O "
+            f"path); pass --distributed --distributed-mode spmd. A "
+            f"genuinely single-process run inside a multi-task allocation: "
+            f"launch it with srun --ntasks=1. Single-process runs auto-"
+            f"adapt to the local device count with no flag.")
+    n = n_global if distributed else n_local
+    if n >= 2 and 6 % n == 0:
+        return "shard"
+    if distributed:
+        raise ValueError(
+            f"fv3_duo spmd: {n} device(s) cannot face-shard (need 2, 3 "
+            f"or 6 to divide the 6 cube faces). Provide 2/3/6 devices "
+            f"(GPUs, or xla_force_host_platform_device_count), or drop "
+            f"--distributed to run single-device.")
+    return "single"
+
+
 def _refuse_fv3_duo_non_default(config: ExperimentConfig) -> None:
     """Refuse EVERY non-default, non-allow-listed field, all at once.
 
@@ -716,7 +760,7 @@ def create_atmosphere_dycore(
         # coupling (zvir != 0) on both arms now, but this lane never
         # passes it and never routes tracers, so slice 1 stays dry by
         # construction; consv_te != 0 still raises in the core, and
-        # require_f64_jax gates every leaf.
+        # the dtype-uniformity gate checks every leaf.
         # This lane never routes physics tendencies, so any active scheme
         # would be SILENTLY inert — the exact failure mode dispatch
         # hardening exists to prevent.
@@ -747,12 +791,48 @@ def create_atmosphere_dycore(
                 f"{model_type!r} + held_suarez_forcing is uncertified. "
                 "Use model_type='hydrostatic' or drop "
                 "--held-suarez-forcing.")
-        if config.precision != "fp64":
+        # Precision -> FV3DuoConfig.storage_dtype (coarse policy,
+        # 2026-08-28). fp64 is the certified default. fp32/mixed are
+        # accepted here and mapped; the MODEL then gives the authoritative
+        # "runtime not yet wired" message (the dtype-uniformity gates + the
+        # config field are in place, but the in-phase fp64 workspaces + grid
+        # metrics are not yet threaded). Mapping rather than refusing here
+        # keeps the single source of truth in FV3DuoDynamicsModel.__init__.
+        _PRECISION_TO_DTYPE = {
+            "fp64": "float64", "float64": "float64",
+            # mixed_fp64_storage keeps fp64 STORAGE (only compute/accumulate
+            # differ in the general policy) -> uniform fp64 here = the
+            # certified path, runnable today.
+            "mixed_fp64_storage": "float64",
+            "fp32": "float32", "float32": "float32",
+            # "mixed" resolves to fp32 storage; a true per-op mixed split
+            # (fp64 pressure column / energy fixer) is a later increment,
+            # so the model refuses it with that note until then.
+            "mixed": "float32",
+        }
+        _storage_dtype = _PRECISION_TO_DTYPE.get(config.precision)
+        if _storage_dtype is None:
             raise ValueError(
-                f"fv3_duo requires precision='fp64' (require_f64_jax gates "
-                f"every state leaf in the certified lane; an f32 IC is a "
-                f"run that lost bits before step 1), got "
-                f"config.precision={config.precision!r}.")
+                f"fv3_duo: unsupported precision={config.precision!r}; "
+                f"expected one of {sorted(_PRECISION_TO_DTYPE)}.")
+        if _storage_dtype != "float64":
+            # fp32 / mixed (fp32-storage) map through, but the RUNTIME is
+            # not yet wired (the ~57 in-phase fp64 workspace allocations +
+            # the fp64 grid metrics/halo tables must be threaded to the
+            # storage dtype, and the pressure column / energy fixer kept
+            # fp64 for a true mixed mode). Refuse at the FACTORY (config
+            # level) so a driver run fails on the config, not deep in the
+            # model -- keeping "fp64" in the message as the supported
+            # value. The model carries an independent NotImplementedError
+            # guard for a DIRECT FV3DuoConfig(storage_dtype=...)
+            # construction that bypasses this factory. Tracked: fv3
+            # fp32/mixed increment 2.
+            raise ValueError(
+                f"fv3_duo currently runs precision='fp64' only "
+                f"(mixed_fp64_storage also resolves to uniform fp64); "
+                f"precision={config.precision!r} -> storage_dtype="
+                f"{_storage_dtype!r} needs the fp32/mixed RUNTIME which is "
+                f"not yet wired. Use fp64.")
         if config.distributed and config.distributed_mode != "spmd":
             raise ValueError(
                 f"fv3_duo distributed runs are SPMD-only "
@@ -795,54 +875,77 @@ def create_atmosphere_dycore(
         cfg = FV3DuoConfig(
             km=km,
             hydrostatic=(model_type == "hydrostatic"),
+            storage_dtype=_storage_dtype,
         )
-        if config.distributed:            # spmd (the guard above pinned it)
-            import jax
-            import numpy as np
-            from jax.sharding import Mesh, NamedSharding, PartitionSpec
+        # AUTO-ADAPT the execution layout to the VISIBLE devices (user
+        # 2026-08-28: "adjust automatically to the number of devices").
+        # The face sharding + face-batched step is near-bitwise the
+        # single-device loop (tolerance-gated: spmd_multiprocess_parity
+        # asserts rtol/atol 1e-12 at 2/3/6 devices; step_face_batched
+        # batched==loop asserts rtol 1e-13/atol 1e-12) -- it changes
+        # PERFORMANCE and the last bits only, NOT the physics, which is
+        # why auto-selecting it on device count is not a hidden SCIENTIFIC
+        # choice. The resolved layout is LOGGED (below) so it appears in
+        # the run record, never sits silently in a default.
+        #
+        # SCOPE: multi-PROCESS stays EXPLICIT behind --distributed -- it
+        # changes the driver's checkpoint/snapshot I/O (gather/broadcast/
+        # reshard) and the refusal gates key off config.distributed;
+        # auto-enabling it would run the single-process I/O path across
+        # ranks (each np.asarray sees only its own shards -> corrupt).
+        # Single-process auto-sharding is safe (every shard is host-local,
+        # so the single-process I/O path is correct as-is).
+        import jax
+        import numpy as np
+        from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
-            # Multi-controller SPMD (>1 process): the mesh must span the
-            # GLOBAL device set (jax.devices()), not this process's local
-            # devices -- the proven pattern in
-            # spmd_multiprocess_parity.py. Single-process keeps
-            # jax.local_devices() (identical to jax.devices() there).
-            multiprocess = jax.process_count() > 1
-            devs = jax.devices() if multiprocess else jax.local_devices()
-            if jax.local_device_count() < 1:
-                # Unreachable in practice (a process with zero local
-                # devices could not have run this far), kept as the
-                # loud failure mode instead of a confusing IndexError
-                # deeper in mesh construction.
-                raise ValueError(
-                    "fv3_duo spmd: this process has no local devices "
-                    "visible.")
-            if len(devs) == 1:
-                # GLM: a GPU-less env (JAX_PLATFORMS=cpu fallback, CUDA
-                # visibility failure) yields a silent 1-device mesh and
-                # the "SPMD" run executes unsharded while claiming
-                # distribution. Refuse: a 1-device distributed run
-                # certifies nothing.
-                raise ValueError(
-                    "fv3_duo spmd: only ONE device is visible "
-                    f"({'globally' if multiprocess else 'locally'}: "
-                    f"{devs[0]}); a 1-device 'distributed' run would "
-                    "execute unsharded. Drop --distributed, or provide "
-                    "2/3/6 devices (GPUs, or "
-                    "xla_force_host_platform_device_count).")
-            if 6 % len(devs) != 0:
-                raise ValueError(
-                    f"fv3_duo spmd: {len(devs)} "
-                    f"{'global' if multiprocess else 'local'} devices "
-                    f"does not divide the 6 cube faces (need 1, 2, 3 "
-                    f"or 6). Every rank owning a whole face is what the "
-                    f"restart/snapshot resharding assumes.")
+        from legoesm.parallel.early_init import launcher_world_size
+
+        # A multi-process launch WITHOUT --distributed never initialised
+        # jax.distributed, so jax.process_count() returns 1 even though N
+        # copies of this program are running -- each would then auto-shard
+        # over its LOCAL devices and clobber the others' output (GLM
+        # mechanism review 2026-08-28). Take the max of jax.process_count()
+        # and the launcher's declared world size (SLURM step / MPI / PMI /
+        # SLURM_NTASKS) -- REFUSE-SAFE, a false positive only costs the
+        # user a --distributed flag while a false negative corrupts. The
+        # decision is a PURE function of the counts (resolve_fv3_duo_layout),
+        # unit-tested in test_fv3_duo_layout_policy.
+        multiprocess = config.distributed
+        devs = jax.devices() if multiprocess else jax.local_devices()
+        layout = resolve_fv3_duo_layout(
+            world=max(jax.process_count(), launcher_world_size()),
+            n_local=jax.local_device_count(),
+            n_global=jax.device_count(),
+            distributed=config.distributed)
+
+        if layout == "shard":
             mesh = Mesh(np.array(devs), ("face",))
+            logger.info(
+                "  fv3_duo layout: face-sharded over %d %s device(s) "
+                "(1/2/3 faces each) + face-batched%s", len(devs),
+                "global" if multiprocess else "local",
+                " [multi-process SPMD]" if multiprocess else "")
             return FV3DuoDynamicsModel(
                 bundle, cfg,
                 step_out_shardings=NamedSharding(mesh,
                                                  PartitionSpec("face")),
                 step_spmd_mesh=mesh,
                 step_face_batched=True)
+
+        # 'single': 1 device, or an auto-path count that does not divide 6
+        # (4/5/7...). The latter is a LOUD fall-back (never a silent
+        # behaviour substitution) so the wasted devices are visible; the
+        # explicit-distributed unshardable case already raised inside
+        # resolve_fv3_duo_layout.
+        if len(devs) >= 2:
+            logger.warning(
+                "  fv3_duo layout: %d local devices do not divide the 6 "
+                "cube faces (need 2/3/6); running SINGLE-DEVICE on %s. "
+                "Set CUDA_VISIBLE_DEVICES to 2/3/6 devices to face-shard.",
+                len(devs), devs[0])
+        else:
+            logger.info("  fv3_duo layout: single-device (%s)", devs[0])
         return FV3DuoDynamicsModel(bundle, cfg)
 
     # ----- Doubly-periodic plane -----

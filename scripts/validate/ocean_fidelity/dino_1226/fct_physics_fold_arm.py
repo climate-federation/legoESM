@@ -226,7 +226,7 @@ def main(argv: list[str]) -> int:
                           "surface_tendency_placement", "wind_through_step",
                           "gm_bolus_advection", "tracer_wall_neumann_fill",
                           "implicit_vmix_dzw_slot",
-                          "implicit_vmix_e3t_now_divisor",
+                          "zdf_implicit_solver_evaluation",
                           "implicit_K33", "msc_stabilize"):
                     print(f"  CFG {f} = "
                           f"{getattr(cfg, f, getattr(mc, f, '<absent>'))!r}")

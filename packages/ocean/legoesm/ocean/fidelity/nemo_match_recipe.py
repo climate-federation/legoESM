@@ -7,8 +7,10 @@ were validated against NEMO Mar day-90 SST (``docs/dev-notes/ocean_faithfulness_
 * **MPAS ico6 (~115 km ≈ ORCA1)** — SST RMSE **0.84** vs NEMO (best grid).
 * **tripole eORCA025 (¼°)** — SST RMSE **1.15**, corr 0.99.
 
-Unlike the numerics-faithful ``nemo_v1`` card (TKE / EEN / GSW / split-explicit),
-these are a *climate*-match stack: KPP vertical mixing, Laplacian Smagorinsky
+Unlike the NEMO-style ``legoesm_nemo_like_v1`` card (TKE / EEN / GSW /
+split-explicit; renamed from ``nemo_v1`` 2026-09-02 — its barotropic solver
+is legoESM's own generic arm, not NEMO's ``dyn_spg_ts``), these are a
+*climate*-match stack: KPP vertical mixing, Laplacian Smagorinsky
 lateral viscosity, the ``implicit_cn`` barotropic solver, GM/Redi at κ=600, and a
 ``tvd`` / ``adcroft`` dycore.  This module is the SINGLE SOURCE OF TRUTH for that
 proven dycore + coefficient block; ``scripts/run/run_omip.py::_create_setup``
@@ -116,7 +118,10 @@ class NEMOMatchMPASRecipeConfig:
     # lateral viscosity / dissipation
     A_h: float = 1.0e5
     C_smag_lap: float = 0.33
-    K_zeta_bih: float = 1.0e14
+    # ``None`` = derived from the mesh as K_ref*(dx/dx_ref)^3, anchored on the
+    # ico6 mesh this recipe was tuned on (so ico6 keeps 1e14 m^4/s and every
+    # finer mesh gets the dx^3-scaled value).  A float pins the coefficient.
+    K_zeta_bih: float | None = None
 
     # vertical mixing (explicit-block coefficients; implicit solve uses them)
     A_v: float = 1.0e-4

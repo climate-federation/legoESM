@@ -75,7 +75,7 @@ Term-by-term matrix diff of NEMO `trazdf.F90:118-293` vs lego `_apply_implicit_v
   it's wired to Veros's reference thickness, not NEMO's `e3w(Kmm)`. Add a `nemo_kmm` slot value
   (NOW-time e3w from `state.eta`) + a conservation test. → moves to W1 (a form-stress suspect),
   NOT W2. So W2's "1 real port" item is REDUCED to a surgical option-add.
-- Flagged not-checked: `nemo_v1`'s `adaptive_implicit_vertadv` (ln_zad_Aimp fold) — separate lane.
+- Flagged not-checked: `legoesm_nemo_like_v1`'s `adaptive_implicit_vertadv` (ln_zad_Aimp fold; recipe renamed from `nemo_v1` 2026-09-02) — separate lane.
 
 ### W2 — The architectural port (1 real item)
 - **`tra_zdf` (z*-volume-form + GM/Redi vertical fold).** The one genuine implementation gap:
