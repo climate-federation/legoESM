@@ -49,6 +49,12 @@ if [ -s /tmp/alpha90_dirty.$$ ]; then
 fi
 rm -f /tmp/alpha90_dirty.$$
 
+# data/ is gitignored so it exists ONLY in the main checkout; this card
+# runs the WORKTREE code against that shared data root (the first launch
+# died at step 0 on a relative --mesh path, job 9657825/6).
+DATA_ROOT=/burg-archive/glab/users/pg2328/legoESM
+[ -e "$DATA_ROOT/data/grids/eORCA1.2_mesh_mask.nc" ] || {
+  echo "FATAL: mesh missing under DATA_ROOT=$DATA_ROOT"; exit 3; }
 export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader
@@ -58,7 +64,8 @@ IN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS
 
 XLA_PYTHON_CLIENT_PREALLOCATE=false LEGOESM_JIT_CACHE_DIR="" \
 JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py \
-  --grid tripole --mesh data/grids/eORCA1.2_mesh_mask.nc --dt 150 --min-levels 2 \
+  --grid tripole --mesh $DATA_ROOT/data/grids/eORCA1.2_mesh_mask.nc \
+  --dt 150 --min-levels 2 \
   --C-smag-lap 3.0 --smag-cfl-safety 0.125 --ew-cyclic-overlap --nemo-vertical \
   --partial-cell --pgf-scheme smc03 --adaptive-implicit-vertadv --momentum-rk3 \
   --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5 \
