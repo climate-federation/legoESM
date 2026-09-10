@@ -71,7 +71,7 @@ selw = depw <= 20.0
 _recs = ([int(x) for x in NEMO_RECS.split(",")] if NEMO_RECS
          else list(range(avt.shape[0])))
 nt = len(_recs)
-utc = np.arange(nt) + 0.5
+utc = np.asarray(_recs, dtype=float) + 0.5   # the SELECTED records' own hours
 loc = (utc + (LO + HI) / 2.0 / 15.0) % 24.0
 k_nemo_h, m_nemo_h = [], []
 for _i, t in enumerate(_recs):
@@ -117,12 +117,30 @@ for b0, b1 in BANDS:
     if not si.any() or not sn.any():
         continue
     ko = np.nanmedian(K[:, si]); mo = np.nanmedian(KM[:, si])
-    kn = np.nanmedian([np.nanmedian(np.ma.filled(avt[t][sn], np.nan)[:, nbox]) for t in range(nt)])
-    mn = (np.nanmedian([np.nanmedian(np.ma.filled(avm[t][sn], np.nan)[:, nbox]) for t in range(nt)])
+    # RECORD BUG, caught 2026-09-10: these two lines looped over range(nt) --
+    # the COUNT of selected records -- instead of _recs, their INDICES.  With
+    # NEMO_RECS=5 that read record 0, NEMO's first 5-day mean, while the 0-20 m
+    # block above correctly read record 5.  The same file then reported 1.4e-03
+    # and 1.5e+01 for the same band, which is what exposed it: record 0 is the
+    # initial adjustment, when convective mixing fires almost everywhere.
+    kn = np.nanmedian([np.nanmedian(np.ma.filled(avt[t][sn], np.nan)[:, nbox]) for t in _recs])
+    mn = (np.nanmedian([np.nanmedian(np.ma.filled(avm[t][sn], np.nan)[:, nbox]) for t in _recs])
           if avm is not None else np.nan)
     print(f"  {b0:5.0f}-{b1:5.0f} m : tracer ours {ko:.3e} NEMO {kn:.3e} ratio {ko/kn:6.3f} | "
           f"momentum ours {mo:.3e} NEMO {mn:.3e} ratio {mo/mn:6.3f} | "
           f"Prandtl ours {mo/ko:5.2f} NEMO {mn/kn:5.2f}")
+    # SELF-CHECK, and the one that would have caught the record bug directly:
+    # the 0-20 m band row and the standalone 0-20 m block read the same file,
+    # the same band and the same records, so their oracle values must agree.
+    # They disagreed by 4 orders of magnitude while the loop read record 0.
+    if (b0, b1) == (0.0, 20.0):
+        _ref = np.nanmean(k_nemo_h)
+        if not (0.5 < kn / _ref < 2.0):
+            raise SystemExit(
+                f"FATAL: the 0-20 m band row ({kn:.3e}) disagrees with the "
+                f"0-20 m block ({_ref:.3e}) on the same file, band and "
+                "records. One of the two is reading the wrong record; do not "
+                "quote either number until it is resolved.")
 
 # If our turbulence simply STOPS shallower than the oracle's, that shows up as a
 # turbulent-layer depth, and as a mixed-layer depth from temperature alone --
