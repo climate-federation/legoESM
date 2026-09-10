@@ -63,7 +63,11 @@ def test_pipeline_nc_assignment_carries_a_density_factor():
     assert hits, ("no n_cloud_col assignment builds from the N_c carry — "
                   "the site moved; update this test to follow it")
     for src in hits:
-        assert ("rho" in src or "compute_rho" in src) and "*" in src, (
+        # codex LOW: any rho-named variable would pass a bare substring
+        # check. Require the specific bridge variable this site binds from
+        # compute_rho two lines above, so an unrelated density cannot
+        # satisfy the pin.
+        assert "_rho_nc" in src and "*" in src, (
             f"the N_c carry reaches n_cloud_col with no density factor "
             f"(#1715 regression): {src}")
 
