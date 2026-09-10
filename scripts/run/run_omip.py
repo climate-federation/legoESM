@@ -1888,8 +1888,9 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         )
 
         from legoesm.grids.tripole import mesh_file_list
+        _mesh_files = mesh_file_list(tripole_mesh or params["mesh_path"])
         geom = create_tripole_grid(
-            mesh_file_list(tripole_mesh or params["mesh_path"]),
+            _mesh_files,
             fold_convention=(
                 tripole_fold_convention if tripole_mesh
                 else params.get("fold_convention", "auto")),
@@ -1955,8 +1956,36 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         if _recipe_over:
             print(f"  Tripole recipe overrides: {_recipe_over}")
         config = nemo_match_tripole_model_config(_recipe_cfg, physics=physics)
+
+        # Resolution-scaled lateral viscosity.  Resolved HERE: this is where a
+        # mesh and its land mask meet the configuration, and the mask is
+        # required because the grid builder clamps degenerate cells to a fixed
+        # floor, so the minimum over ALL cells is that floor on every mesh.
+        # The later south-padded rebuild adds LAND rows only, so the narrowest
+        # wet cell -- and therefore this number -- is the same there.
+        if config.lateral_viscosity.A_h is None:
+            from legoesm.ocean.init_tripole import read_mesh_mask_bathy
+            from legoesm.ocean.state import (
+                resolution_scaled_lateral_viscosity,
+                wet_min_spacing,
+            )
+            _lm, _ = read_mesh_mask_bathy(
+                _mesh_files, strip_north_rows=int(tripole_strip_north_rows))
+            _lv = config.lateral_viscosity
+            from legoesm.grids.tripole import DEFAULT_MIN_DX_M
+            _dx_min = wet_min_spacing(geom, _lm,
+                                      clamp_floor_m=DEFAULT_MIN_DX_M)
+            _A_h = resolution_scaled_lateral_viscosity(_dx_min, _lv)
+            config = config._replace(lateral_viscosity=_lv._replace(
+                A_h=_A_h, A_h_dx_m=_dx_min))
+            print(f"  Lateral viscosity from the mesh: A_h={_A_h:.6g} m2/s "
+                  f"(narrowest wet cell {_dx_min:.1f} m; anchor "
+                  f"{_lv.A_h_ref:.6g} m2/s at {_lv.A_h_ref_dx_m:.1f} m, "
+                  f"squared law)")
+
         model = LatLonCGridOceanModel(geom, z_coord, config)
-        return geom, z_coord, config, model, "tripole"
+        # the MODEL's config, so a saved configuration records what ran
+        return geom, z_coord, model.config, model, "tripole"
 
     raise ValueError(f"Unknown grid type: {grid_type}")
 

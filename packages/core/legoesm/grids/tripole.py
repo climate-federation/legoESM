@@ -391,13 +391,20 @@ def _compute_rotation_angles(
     return cos_alpha_u, sin_alpha_u, cos_alpha_v, sin_alpha_v
 
 
+# Floor clamped onto every per-cell length metric [m]: keeps degenerate
+# fold / land cells from producing zero or negative spacings.  Named so a
+# caller deriving a coefficient from the metrics can detect saturation on
+# it rather than pass a literal.
+DEFAULT_MIN_DX_M: float = 1000.0
+
+
 def create_tripole_grid(
     grid_file,
     *,
     radius: float = constants.R_earth,
     omega: float = constants.Omega,
     dtype=None,
-    min_dx_m: float = 1000.0,
+    min_dx_m: float = DEFAULT_MIN_DX_M,
     fold_convention: str = "auto",
     allow_ambiguous_legacy_fold: bool = False,
     strip_north_rows: int = 0,

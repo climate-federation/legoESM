@@ -1816,6 +1816,14 @@ class LatLonCGridOceanModel:
         iwm_forcing=None,
         _nemo_ws_test_hooks: _NEMOWSRK3TestHooks | None = None,
     ):
+        if config is not None and getattr(
+                getattr(config, "lateral_viscosity", None), "A_h", 0.0) is None:
+            raise ValueError(
+                "LatLonCGridOceanModel: lateral_viscosity.A_h is None "
+                "(= derive from the mesh) but nothing resolved it. Resolve it "
+                "from the mesh's narrowest WET cell before constructing the "
+                "model (legoesm.ocean.state.resolution_scaled_lateral_viscosity "
+                "+ wet_min_spacing), or pin a value.")
         self.z_coord = z_coord
         self._nemo_ws_test_hooks = (
             _nemo_ws_test_hooks or _NEMOWSRK3TestHooks())
@@ -2222,6 +2230,15 @@ class LatLonCGridOceanModel:
             "bbl_gamma_s": config.bbl_gamma_s,
         }
         for name, value in nonnegative.items():
+            if value is None:
+                # A_h=None means "derive from the mesh"; comparing it to 0.0
+                # would raise a bare TypeError instead of saying what to do.
+                raise ValueError(
+                    f"{name} is None (= derive from the mesh) but nothing "
+                    "resolved it. Resolve it from the mesh's narrowest WET "
+                    "cell before validating or running "
+                    "(legoesm.ocean.state.resolution_scaled_lateral_viscosity "
+                    "+ wet_min_spacing), or pin a value.")
             if value < 0.0:
                 raise ValueError(f"{name} must be >= 0, got {value!r}")
 

@@ -158,8 +158,12 @@ _FROZEN_MPAS_DYCORE = {
 }
 
 # Same FROZEN snapshot for the PROVEN tripole eORCA025 dycore (SST RMSE 1.15).
+# ``A_h`` is None = DERIVE from the mesh's narrowest wet cell: one value cannot
+# serve 1 degree and 1/12 degree (measured, 1e5 puts ORCA12 26x over the
+# explicit Laplacian limit).  The anchor mesh still derives 1e5, gated against
+# the real eORCA1.2 file in test_lateral_viscosity_resolution_scaling.py.
 _FROZEN_TRIPOLE_DYCORE = {
-    "A_h": 1.0e5,
+    "A_h": None,
     "A_v": 1.0e-4,
     "K_v": 1.0e-5,
     "B_h": 0.0,
