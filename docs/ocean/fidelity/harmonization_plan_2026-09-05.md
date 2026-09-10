@@ -517,3 +517,19 @@ INSTRUMENT NOTE: the band probe's turbulent-layer-depth block raised
 StopIteration on this run — the 5-day grid_W file carries no temperature
 variable, so the mixed-layer part cannot run against it. The band ratios above
 are unaffected. Fix the guard before quoting that block again.
+
+## 2026-09-10 — the heat budget CLOSES at 0-25 m, and advection is not deficient
+
+With the daily snapshots averaged over days 11-15 against the oracle's matching
+record, the 0-25 m budget closes: residual -5.3 K/month against terms of order
+60. Ratios ours/NEMO: horizontal advection 1.29, vertical advection 1.25,
+vertical diffusion 1.05.
+
+So in the top 25 m our advection is slightly STRONGER than the oracle's, not
+weaker, and the diffusion matches. The cold water at 20 m is therefore not an
+advective shortfall in this layer — which, with the shear arm retired, removes
+another candidate rather than adding one.
+
+The 15-25 m and 50-150 m layers remain unusable: the oracle's mean diffusivity
+there is contaminated by intermittent mixing and yields ~1000 K/month, the same
+product-of-means artefact recorded on 2026-09-08. Only the 0-25 m row is quotable.
