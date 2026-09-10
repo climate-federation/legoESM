@@ -4649,7 +4649,13 @@ def run_omip_single(grid_type: str, args) -> dict:
     # OMIP spin-up approach: the model gradually builds up the
     # climatological circulation from rest.
     from legoesm.ocean.init_woa import init_ocean_from_woa
-    T_woa, S_woa = init_ocean_from_woa(grid, z_coord, args.woa_t, args.woa_s)
+    # DEFERRED: the observed profiles are placed on the columns only after the
+    # bathymetry (and therefore the partial-cell geometry) is final -- see the
+    # init_ocean_from_woa call further down, after the model is built.
+    # Sampling them here, on the reference z* levels, put a cut bottom cell's
+    # water at the wrong depth.
+    _woa_paths = (args.woa_t, args.woa_s)
+    T_woa = S_woa = None
 
     # Bathymetry: realistic (ETOPO) or flat-bottom.
     H_bathy_init = None
@@ -5145,6 +5151,41 @@ def run_omip_single(grid_type: str, args) -> dict:
         print(f"  Tripole ETOPO: {n_ocean}/{n_total} ocean cells "
               f"(H_min={args.H_min}m, south_cap={args.south_cap_lat}°, "
               f"snap={snap_frac}, smooth={args.smoothing_passes})")
+
+    # Place the observed profiles at each cell's TRUE centre depth.  This runs
+    # UNCONDITIONALLY, exactly as the original load did: the restoring targets
+    # (the DEFAULT forcing mode), the JRA55 sponge / salinity-restoring targets
+    # and --nudge-woa-tau all read these fields whether or not --woa-init is
+    # set.  ``model.z_coord`` is the coordinate the run integrates on (partial
+    # cells included) and ``compute_centroid_depth`` is the package's own helper
+    # for that depth -- the same one the seamount rest test uses.
+    from legoesm.ocean.vertical import OceanPartialCellCoordinate
+    _zc_final = getattr(model, "z_coord", z_coord)
+    _cell_depths = None
+    if isinstance(_zc_final, OceanPartialCellCoordinate):
+        from legoesm.ocean.vertical import compute_centroid_depth
+        _H = jnp.asarray(state.H_bathy.data, dtype=jnp.float64)
+        # eta = 0 at initialisation; land columns are clamped so the helper's
+        # (eta + H)/H factor stays finite -- their values are masked out below.
+        _cell_depths = np.asarray(compute_centroid_depth(
+            jnp.zeros_like(_H), jnp.maximum(_H, 1e-3), _zc_final))
+        # Report the offset over ACTIVE wet cells only: cells below the
+        # seafloor inherit the bottom depth and would otherwise dominate.
+        _zref = np.abs(np.asarray(_zc_final.z_full_ref))
+        # ``[..., None]`` and not ``[:, None]``: the horizontal layout is
+        # (nCells,) on the icosahedral mesh but (n_lat, n_lon) on the lat-lon
+        # and tripole lanes, where a leading-axis insert cannot broadcast
+        # against (n_lat, n_lon, nlev) and aborted the run outright.
+        _live = (np.asarray(state.land_mask.data) > 0.5)[..., None] & (
+            np.asarray(_zc_final.is_active) > 0.5)
+        _off = np.abs(_cell_depths - _zref[None, :])[_live]
+        print("  WOA placement: per-cell centroid depths (partial cells); "
+              f"sampling depth moved vs the reference centres by "
+              f"{float(np.median(_off)):.1f} m median, "
+              f"{float(np.max(_off)):.1f} m max")
+    T_woa, S_woa = init_ocean_from_woa(
+        grid, _zc_final, _woa_paths[0], _woa_paths[1],
+        cell_center_depths=_cell_depths)
 
     if args.woa_init and T_woa is not None and S_woa is not None:
         # Replace rest-state T/S with WOA18 climatology.
