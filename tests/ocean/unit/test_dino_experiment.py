@@ -600,6 +600,68 @@ class TestDINORecipes:
         assert mc.flat_get("barotropic_slow_forcing_ab2") is True
 
 
+class TestNemoFaithfulInitialState:
+    """The initial state follows the DOMAIN, not a config flag (#1729)."""
+
+    def test_nemo_domain_gets_nemos_own_istate(self):
+        from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+        from legoesm.ocean.fidelity.nemo_dino_mesh import (
+            nemo_dino_istate, nemo_dino_mesh)
+        prev = get_policy()
+        set_policy(PrecisionPolicy.fp64())
+        try:
+            cfg = nemo_faithful_dino_config(
+                base=dino_config_for_recipe("nemo_dino_kamm_mlf"))
+            grid = dino_lat_lon_grid(cfg)
+            z = dino.dino_lat_lon_vertical(grid, cfg)
+            st = dino.dino_lat_lon_state(grid, z, cfg)
+            T, S = nemo_dino_istate(nemo_dino_mesh())
+            assert np.array_equal(np.asarray(st.T.data), T)
+            assert np.array_equal(np.asarray(st.S.data), S)
+            # NOT the paper profile: the anchors and the depth operand differ.
+            paper_T, _ = dino.dino_initial_T_S(
+                jnp.degrees(grid.lat), z.z_full_ref, cfg)
+            assert np.abs(np.asarray(paper_T)
+                          - T[:, 0, :]).max() > 1e-3
+        finally:
+            set_policy(prev)
+
+    def test_a_non_nemo_domain_keeps_the_paper_profile(self):
+        # Same card, ordinary Mercator grid: the analytic (lat, z) profile,
+        # broadcast over longitude, exactly as before.
+        cfg = dino_config_for_recipe("nemo_dino_kamm_mlf")
+        grid = dino_lat_lon_grid(cfg, n_lon=8)
+        z = dino.dino_lat_lon_vertical(grid, cfg)
+        T, S, _H, _m = dino.dino_lat_lon_initial_state_arrays(grid, z, cfg)
+        want_T, want_S = dino.dino_initial_T_S(
+            jnp.degrees(grid.lat), z.z_full_ref, cfg)
+        wet = np.asarray(_m) > 0.5
+        assert np.array_equal(np.asarray(T)[wet],
+                              np.broadcast_to(np.asarray(want_T)[:, None, :],
+                                              np.asarray(T).shape)[wet])
+        assert np.array_equal(np.asarray(S)[wet],
+                              np.broadcast_to(np.asarray(want_S)[:, None, :],
+                                              np.asarray(S).shape)[wet])
+
+    def test_nemo_frame_with_a_foreign_land_mask_keeps_the_paper_profile(self):
+        # The trigger checks all three of frame, level count and land mask.
+        # A NEMO-framed grid carrying somebody else's mask is not NEMO's
+        # domain, and must not silently get NEMO's initial condition.
+        cfg = nemo_faithful_dino_config(
+            base=dino_config_for_recipe("nemo_dino_kamm_mlf"))
+        grid = dino_lat_lon_grid(cfg)
+        z = dino.dino_lat_lon_vertical(grid, cfg)
+        mask = np.asarray(dino.nemo_faithful_dino_domain().land_mask).copy()
+        j, i = int(np.argwhere(mask > 0.5)[0][0]), int(np.argwhere(mask > 0.5)[0][1])
+        mask[j, i] = 0.0
+        T, _S, _H, _m = dino.dino_lat_lon_initial_state_arrays(
+            grid, z, cfg, land_mask_override=jnp.asarray(mask))
+        want_T, _ = dino.dino_initial_T_S(
+            jnp.degrees(grid.lat), z.z_full_ref, cfg)
+        assert np.array_equal(np.asarray(T)[:, 1, :][mask[:, 1] > 0.5],
+                              np.asarray(want_T)[mask[:, 1] > 0.5])
+
+
 class TestNemoFaithfulGrid:
     """Opt-in NEMO-exact DINO grid (nemo_faithful_grid).
 
@@ -830,24 +892,59 @@ class TestDinoWindStress:
         assert not np.array_equal(
             np.asarray(implicit["tau_u_cell_2d"][:, 0]), lossy)
 
-    def test_literal_forcing_nonoracle_grid_still_uses_source_degrees(self):
+    def test_literal_forcing_nonoracle_grid_uses_the_grids_own_latitudes(self):
+        # A grid that is NOT NEMO's DINO frame has no "source degrees" to
+        # recover, so nemo_literal evaluates at the grid's own cell latitudes
+        # -- the same array T*, S* and the solar flux use.  (This replaced a
+        # hand-rebuilt Mercator ladder whose spacing was
+        # (lon_east - lon_west)/n_lon; on NEMO's own frame that is 51/52
+        # instead of rn_e1_deg = 1.0, which is the defect this test used to
+        # pin.)
         cfg = dataclasses.replace(
             DINOConfig(), dino_wind_profile_evaluation="nemo_literal")
         grid = dino_lat_lon_grid(cfg, n_lon=4)
         got = dino.dino_lat_lon_surface_forcing_arrays(grid, cfg)
-        import math
-        rad = math.pi / 180.0
-        dlon_deg = ((cfg.lon_east_deg - cfg.lon_west_deg) / grid.n_lon)
-        jeq = grid.n_lat // 2
-        half_offset = 0.0 if grid.n_lat % 2 else 0.5
-        raw = np.asarray([
-            (1.0 / rad) * math.asin(math.tanh(
-                dlon_deg * rad * float(j - jeq + half_offset)))
-            for j in range(grid.n_lat)
-        ], dtype=np.float64)
-        want = dino_wind_stress(jnp.asarray(raw), cfg)
+        want = dino_wind_stress(jnp.degrees(grid.lat), cfg)
         assert np.array_equal(np.asarray(got["tau_u_cell_2d"][:, 0]),
                               np.asarray(want))
+
+    def test_a_lookalike_of_nemos_frame_raises_instead_of_being_guessed(self):
+        # Same shape as NEMO's DINO frame, different latitudes: handing it
+        # NEMO's ladder would be a silent substitution, and falling back to
+        # its own would hide that the card asked for something impossible.
+        cfg = nemo_faithful_dino_config(
+            base=dino_config_for_recipe("nemo_dino_kamm"))
+        grid = dino_lat_lon_grid(cfg)
+        bogus = grid._replace(lat=grid.lat + jnp.radians(0.01))
+        with pytest.raises(ValueError, match="NEMO's DINO frame"):
+            dino.dino_lat_lon_surface_forcing_arrays(bogus, cfg)
+
+    def test_explicit_wind_lat_moves_the_wind_only(self):
+        # ``wind_lat_deg`` names the WIND.  It must not silently redefine the
+        # restoring targets as well: a caller that deliberately passes a
+        # different stagger (the v-point latitudes) would move T* by ~0.19 K
+        # if it did.
+        cfg = nemo_faithful_dino_config(
+            base=dino_config_for_recipe("nemo_dino_kamm"))
+        grid = dino_lat_lon_grid(cfg)
+        from legoesm.ocean.fidelity.nemo_dino_mesh import nemo_dino_hgr
+        gphiv = np.asarray(nemo_dino_hgr()["phi_v"], dtype=np.float64)
+        got = dino.dino_lat_lon_surface_forcing_arrays(
+            grid, cfg, wind_lat_deg=gphiv)
+        # the wind followed gphiv ...
+        assert np.array_equal(
+            np.asarray(got["tau_u_cell_2d"][:, 0]),
+            np.asarray(dino_wind_stress(jnp.asarray(gphiv), cfg)))
+        # ... and the three restoring/solar targets did NOT.
+        lat = jnp.degrees(grid.lat)
+        for key, fn in (("T_star_2d", dino.dino_T_star_annual_mean),
+                        ("S_star_2d", dino.dino_S_star),
+                        ("Q_sr_2d", dino.dino_Q_sr_annual_mean)):
+            at_grid = np.asarray(fn(lat, cfg))
+            at_gphiv = np.asarray(fn(jnp.asarray(gphiv), cfg))
+            assert np.array_equal(np.asarray(got[key][:, 0]), at_grid), key
+            # non-vacuity: the two ARE different, so the check can fail
+            assert np.abs(at_grid - at_gphiv).max() > 1e-3, key
 
     def test_hits_knots(self):
         cfg = DINOConfig()

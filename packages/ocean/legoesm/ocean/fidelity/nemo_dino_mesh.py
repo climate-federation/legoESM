@@ -540,8 +540,117 @@ def nemo_dino_bathymetry(nml: NemoDinoNamelist, hgr: dict, gdept_1d):
     return bathy, k_top, k_bot
 
 
+# ---------------------------------------------------------------------------
+# usrdef_istate.F90 — the initial state
+# ---------------------------------------------------------------------------
+
+def nemo_dino_istate(g: NemoGrid, nn_initcase: int = 4):
+    """``usr_def_istate``'s T and S for DINO (usrdef_istate.F90:129-183).
+
+    Statement-for-statement transcription of ``nn_initcase = 4`` — the case
+    ``cfgs/DINO/RUN_TRAJ/namelist_cfg:58`` selects — returning
+    ``(T, S)`` of shape ``(n_lat, n_lon, jpk)`` in NEMO's own array order.
+
+    Three details decide bit-exactness, and each was measured rather than
+    assumed:
+
+    * **The depth operand is the 3-D** ``gdept_0``, not ``gdept_1d``.
+      ``istate.F90:132-134`` passes ``zgdept = gdept_3d * (1 + r3t(:,:,Kbb))``,
+      and a from-rest start has ``ssh = 0`` (``usr_def_istate_ssh``, case 4,
+      usrdef_istate.F90:227-228) hence ``r3t = 0``.  ``gdept_0`` is
+      ``zgr_lib``'s ``e3 -> depth`` re-integration of the ladder, which is NOT
+      the ``mi96`` analytic ``gdept_1d``: substituting ``gdept_1d`` moves the
+      initial temperature by up to 7.6e-2 K.
+    * **The profile is evaluated with scalar libm** ``math.tanh``, for the
+      reason the module docstring gives; ``np.tanh``/``jnp.tanh`` are not
+      bit-equal to it.  The profile depends only on depth, so this is 36
+      scalar evaluations, once, on the host.
+    * **The meridional blend's anchors come from the MODEL FIELDS**, not from
+      the namelist: ``zphiMAX = MAXVAL(gphit)`` (69.8517, not ``rn_phi_max``
+      = 70) and ``zTbot``/``zSbot`` = ``MINVAL(profile + 100*(1-tmask))``,
+      i.e. the profile at the deepest WET level, not at the deepest reference
+      level (usrdef_istate.F90:151-155).  Both are global reductions
+      (``mpp_max`` on the negated pair, :159-167); this is the single-domain
+      form, which is the same number.
+
+    The ``jk`` loop stops at ``jpkm1`` (:172), so the deepest level keeps the
+    un-blended ``profile * tmask``; on DINO that level is dry everywhere, so
+    it is zero either way — transcribed as written rather than relied upon.
+
+    ``nn_pert_seed`` (:178-183) is 0 on every DINO deck here, so the tiny
+    ensemble perturbation is a no-op and is not transcribed; a non-zero value
+    is refused rather than silently ignored.
+
+    MEASURED against ``RUN_FROMREST_KT1``'s ``tb``/``sb`` (the untouched
+    initial condition, since the Euler first step leaves ``Kbb`` alone):
+    all 372528 cells bit-exact, wet and dry.  Gated by
+    ``scripts/validate/ocean_fidelity/dino_1226/nemo_dino_istate_gate.py``.
+    """
+    if nn_initcase != 4:
+        raise ValueError(
+            f"nn_initcase={nn_initcase} is not transcribed; DINO R1 selects 4 "
+            "(namelist_cfg:58). The other cases are usrdef_istate.F90:65-128 "
+            "and :184-192.")
+    tmask = np.asarray(g.tmask, dtype=np.float64)
+    gphit = np.asarray(g.gphit, dtype=np.float64)
+    pdept = np.asarray(g.gdept_0, dtype=np.float64)
+    if pdept.shape != tmask.shape:
+        raise ValueError(
+            f"gdept_0 {pdept.shape} and tmask {tmask.shape} disagree.")
+
+    # The profile is a function of depth alone, and DINO's gdept_0 is
+    # horizontally uniform (full-step z, ln_zco_nam), so evaluate the 36
+    # scalar values once and broadcast.  Refuse a column-varying ladder
+    # rather than silently evaluating only column (0, 0) of it.
+    if not np.array_equal(pdept, np.broadcast_to(pdept[0, 0][None, None, :],
+                                                 pdept.shape)):
+        raise ValueError(
+            "nemo_dino_istate needs a horizontally uniform gdept_0 (full-step "
+            "z); this mesh varies gdept_0 by column, which would need the "
+            "profile evaluated per column.")
+    z1d = pdept[0, 0]
+
+    th = math.tanh   # scalar libm, as in NEMO's compiled loop
+
+    def _t(z):       # usrdef_istate.F90:135-140
+        return ((16. - 12. * th((z - 400) / 700))
+                * (-th((500. - z) / 150.) + 1.) / 2.
+                + (15. * (1. - th((z - 50.) / 1500.))
+                   - 1.4 * th((z - 100.) / 100.)
+                   + 7. * (1500. - z) / 1500.)
+                * (-th((z - 500.) / 150.) + 1.) / 2.)
+
+    def _s(z):       # usrdef_istate.F90:142-148
+        return ((36.25 - 1.13 * th((z - 305) / 460))
+                * (-th((500. - z) / 150.) + 1.) / 2
+                + (35.55 + 1.25 * (5000. - z) / 5000.
+                   - 1.62 * th((z - 60.) / 650.)
+                   + 0.2 * th((z - 35.) / 100.)
+                   + 0.2 * th((z - 1000.) / 5000.))
+                * (-th((z - 500.) / 150.) + 1.) / 2)
+
+    T = np.array([_t(float(z)) for z in z1d])[None, None, :] * tmask
+    S = np.array([_s(float(z)) for z in z1d])[None, None, :] * tmask
+
+    # :151-155 -- anchors from the model fields (global reductions)
+    zphiMAX = float(gphit.max())
+    zTbot = float((T + 100 * (1. - tmask)).min())
+    zSbot = float((S + 100 * (1. - tmask)).min())
+    z1_phiMAX = 1. / zphiMAX
+
+    # :172-175 -- NEMO's operand order is ((x - bot) * dphi) * (1/phiMAX),
+    # which is NOT the same rounding as (x - bot) * (dphi / phiMAX).
+    zdphi = (zphiMAX - np.abs(gphit))[:, :, None]
+    jpkm1 = tmask.shape[-1] - 1
+    sl = (slice(None), slice(None), slice(0, jpkm1))
+    T[sl] = ((T[sl] - zTbot) * zdphi * z1_phiMAX + zTbot) * tmask[sl]
+    S[sl] = ((S[sl] - zSbot) * zdphi * z1_phiMAX + zSbot) * tmask[sl]
+    return T, S
+
+
 __all__ = (
     "NemoDinoNamelist", "NEMO_DINO_R1", "merc_proj", "nemo_dino_domain_size",
     "mi96_1d", "depth_to_e3_1d", "e3_to_depth_1d", "vertical_ladders",
     "nemo_dino_hgr", "nemo_dino_bathymetry", "nemo_dino_mesh",
+    "nemo_dino_istate",
 )
