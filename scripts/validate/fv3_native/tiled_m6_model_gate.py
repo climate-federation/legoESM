@@ -429,7 +429,8 @@ def main(argv=None):
             import jax.numpy as jnp
             rc = int(np.asarray(mhu.process_allgather(
                 jnp.asarray(rc, dtype=jnp.int32))).max())
-        if rc != 0 and not args.diag_no_pad_refresh:
+        diag_arm = args.diag_no_pad_refresh or args.diag_no_entry_refresh
+        if rc != 0 and not diag_arm:
             print("[m6] TIMING REFUSED: the gated steps were not bitwise on "
                   "every rank -- a rank-count row on a wrong exchange is not "
                   "reported")
@@ -455,7 +456,7 @@ def main(argv=None):
             _report_timing(args, times, jax,
                            f"windows kt={args.kt} pad={args.pad}"
                            + (" DIAGNOSTIC no-per-firing-refresh (NOT a "
-                              "ladder row)" if args.diag_no_pad_refresh
+                              "ladder row)" if diag_arm
                               else ""))
     print(f"[m6] VERDICT kt={args.kt} pad={args.pad} steps={args.steps}: "
           f"{'BITWISE' if rc == 0 else 'DIFFERS'} vs "
