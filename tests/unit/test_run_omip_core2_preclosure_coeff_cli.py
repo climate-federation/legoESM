@@ -97,3 +97,66 @@ def test_parser_rejects_an_unknown_choice():
     p = _core2()._build_arg_parser()
     with pytest.raises(SystemExit):
         p.parse_args(["--tke-preclosure-coeff-source", "carried"])
+
+
+# --- the forwarding hops, which no behavioural test above reaches ------------
+# codex 9692836 MAJOR: the flag is parsed, validated and honoured by the
+# builder, but nothing covered ``main -> build_tripole``.  Reverting that one
+# keyword would leave the flag accepted on the command line and silently
+# discarded -- the exact dispatch footgun this repo forbids.  Calling
+# ``build_tripole`` for real needs the eORCA mesh, so the hop is checked
+# structurally instead: each caller must pass the argument along by NAME, and
+# from a name that carries the parsed value rather than a literal.
+
+def _forwarding_keyword(func_name, callee, kwarg):
+    """The AST keyword ``kwarg`` on every call to ``callee`` inside the
+    top-level function ``func_name`` of run_omip_core2."""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(_core2()))
+    fn = next((n for n in tree.body
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and n.name == func_name), None)
+    assert fn is not None, f"no top-level {func_name} in run_omip_core2"
+    found = []
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call):
+            continue
+        target = node.func
+        name = (target.attr if isinstance(target, ast.Attribute)
+                else getattr(target, "id", None))
+        if name != callee:
+            continue
+        found.append([k for k in node.keywords if k.arg == kwarg])
+    assert found, f"{func_name} never calls {callee}"
+    return found
+
+
+def test_build_tripole_forwards_the_flag_to_the_vmix_builder():
+    for kws in _forwarding_keyword("build_tripole", "build_tripole_vmix_config",
+                                   "tke_preclosure_coeff_source"):
+        assert kws, ("build_tripole calls build_tripole_vmix_config without "
+                     "forwarding tke_preclosure_coeff_source")
+
+
+def test_main_forwards_the_parsed_flag_into_build_tripole():
+    import ast
+    hops = _forwarding_keyword("main", "build_tripole",
+                               "tke_preclosure_coeff_source")
+    for kws in hops:
+        assert kws, ("main calls build_tripole without forwarding "
+                     "tke_preclosure_coeff_source; the flag would parse and "
+                     "then be silently discarded")
+        value = kws[0].value
+        # args.tke_preclosure_coeff_source, not a literal or a hardcoded mode
+        assert isinstance(value, ast.Attribute), ast.dump(value)
+        assert value.attr == "tke_preclosure_coeff_source"
+
+
+def test_the_forwarding_probe_can_fail():
+    """Non-vacuity for the two tests above: the same probe must report a
+    MISSING keyword as missing, or they would pass on any call at all."""
+    for kws in _forwarding_keyword("build_tripole", "build_tripole_vmix_config",
+                                   "a_keyword_no_caller_passes"):
+        assert not kws
