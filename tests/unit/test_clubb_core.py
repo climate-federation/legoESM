@@ -156,6 +156,14 @@ def test_momentum_level_closure_actually_runs():
             f"{name} did not respond to surface pressure — the momentum-level "
             "closure is not running")
 
+    # ...and it must be pinned at the GROUND, not the lid. Interpolated pressure
+    # is continuous, so pinning one end perturbs that end most; writing p_sfc at
+    # the top instead would still move every flux and pass the check above.
+    d = np.abs(np.asarray(base["wpthvp"]) - np.asarray(bumped["wpthvp"]))
+    assert d[:, 0].max() > d[:, -1].max(), (
+        "surface pressure moved the model lid more than the ground — it is "
+        "being written at the wrong end of the momentum grid")
+
 
 def test_pdf_closure_jit_and_grad():
     gr, ng, nzm = _gr()

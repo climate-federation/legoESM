@@ -117,6 +117,7 @@ the modules.)
 from __future__ import annotations
 
 import math
+import sys
 from typing import NamedTuple
 
 import jax
@@ -2850,6 +2851,9 @@ def calc_xpthvp_terms(exner, thv_ds, wprcp, wp2rcp, rtprcp, thlprcp,
 # Tolerance value for r_c [kg/kg] (``constants_clubb.F90:rc_tol``). Below this
 # a level counts as cloud-free for the cloud-cover geometry.
 _RC_TOL = 1.0e-6
+# Double-precision machine epsilon, matching the reference's fixed-precision
+# nudge in ``clip_rcm`` (which is dtype-independent there).
+_F64_EPS = sys.float_info.epsilon
 
 
 def calc_trapezoid_zt(variable_zm, variable_zt, gr: CLUBBGrid):
@@ -2893,9 +2897,15 @@ def clip_rcm(rtm, rcm):
     ``clip_explicit.F90:clip_rcm``. Prevents a negative diagnosed vapour
     mixing ratio ``rvm = rtm - rcm``. Cannot enforce ``rcm <= rtm`` when
     ``rtm`` is itself negative, which is the reference's documented limit too.
+
+    The nudge below the cap is the reference's fixed DOUBLE-precision epsilon,
+    not the working dtype's. In float32 the dtype epsilon is 1.2e-7 kg/kg — a
+    tenth of the cloud-water tolerance — so subtracting it from a marginally
+    cloudy capped layer would drop that layer below the tolerance and delete its
+    cloud outright. At double precision the two choices agree.
     """
-    eps = jnp.finfo(jnp.asarray(rtm).dtype).eps
-    return jnp.where(rtm < rcm, jnp.maximum(_ZERO_THRESHOLD, rtm - eps), rcm)
+    return jnp.where(rtm < rcm,
+                     jnp.maximum(_ZERO_THRESHOLD, rtm - _F64_EPS), rcm)
 
 
 def compute_cloud_cover(chi_mean, cloud_frac, rcm, gr: CLUBBGrid):

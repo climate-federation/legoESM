@@ -280,7 +280,10 @@ def test_cloud_cover_gradient_finite_over_clear_levels():
     deck[:, 2:5] = 3e-5           # a cloud deck with clear air above and below
     rcm = jnp.asarray(deck)
     cloud_frac = jnp.asarray(np.where(deck > 0.0, 0.4, 0.0))
-    chi = jnp.asarray(np.full((ng, nzt), 1e-5))
+    # chi is ZERO in the clear air, which is what makes the partial-fraction
+    # denominator (cloud water + |chi|) vanish there as well: this exercises
+    # BOTH guarded divisions, not just the vertical-fraction one.
+    chi = jnp.asarray(np.where(deck > 0.0, 1e-5, 0.0))
 
     def loss(rcm_in):
         cover, rc_in = compute_cloud_cover(chi, cloud_frac, rcm_in, gr)
