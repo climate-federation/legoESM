@@ -61,7 +61,12 @@ nvidia-smi --query-gpu=index,memory.free --format=csv,noheader
 echo "[gpu] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
 
 CKPT=/burg-archive/glab/users/pg2328/legoESM/results/dycore_1354/energy_12d_res5_intervalmean/checkpoint_day_0012.npz
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY -u \
+# Venue is a knob only because the GPU partition can be blocked for hours by
+# this account's own long ocean runs, and the measurement is a DIFFERENCE
+# between arms computed identically -- so it does not care which backend it
+# runs on. The probe reprints the whole published table, so a CPU run also
+# re-derives the GPU rows and doubles as a backend cross-check.
+JAX_PLATFORMS=${ICPAIR_PLATFORM:-cuda} JAX_ENABLE_X64=1 $PY -u \
   $ROOT/scripts/validate/amip_bias/reff_rsut_sensitivity.py "$CKPT" \
   --mesh-level 5 --n-times 8
 echo "rc=$?"
