@@ -2953,6 +2953,14 @@ def compute_cloud_cover(chi_mean, cloud_frac, rcm, gr: CLUBBGrid):
     vert_cloud_frac = jnp.maximum(cloud_frac[:, k],
                                   jnp.minimum(1.0, upper + lower))
     use_layer = (rcm_k >= _RC_TOL) & ~((rcm_up >= _RC_TOL) & (rcm_dn >= _RC_TOL))
+    # On a level this routine actually rewrites, the vertical fraction is
+    # strictly positive: at least one neighbour is cloudy (giving that side the
+    # full half) or, for an isolated cloudy level, both partial fractions are
+    # positive because rcm >= rc_tol there. It CAN be zero on the cloud-free
+    # levels that are masked out — and `where` evaluates both branches, so the
+    # division would hand reverse-mode AD a 0/0. The floor binds only where the
+    # result is discarded, so no value this routine returns is changed by it.
+    vert_cloud_frac = jnp.where(use_layer, vert_cloud_frac, 1.0)
     cover = jnp.where(use_layer, cloud_frac[:, k] / vert_cloud_frac,
                       cloud_frac[:, k])
     rc_in = jnp.where(use_layer, rcm_k / vert_cloud_frac, rcm_k)

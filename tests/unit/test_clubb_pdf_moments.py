@@ -266,6 +266,31 @@ def test_xprcp_fluxes_jit_grad():
 # Live bit-exact parity vs CLUBB-JAX reference
 # ---------------------------------------------------------------------------
 
+def test_cloud_cover_gradient_finite_over_clear_levels():
+    """A cloud-free level must not hand reverse-mode AD a 0/0.
+
+    The layer geometry divides by a vertical cloud fraction that is zero on the
+    clear levels the routine leaves alone. Both branches of a ``where`` are
+    evaluated and differentiated, so without a guard on that denominator the
+    gradient is NaN even though the returned values are right.
+    """
+    gr = _moment_inputs()["gr"]
+    ng, nzt = gr.zt.shape
+    deck = np.zeros((ng, nzt))
+    deck[:, 2:5] = 3e-5           # a cloud deck with clear air above and below
+    rcm = jnp.asarray(deck)
+    cloud_frac = jnp.asarray(np.where(deck > 0.0, 0.4, 0.0))
+    chi = jnp.asarray(np.full((ng, nzt), 1e-5))
+
+    def loss(rcm_in):
+        cover, rc_in = compute_cloud_cover(chi, cloud_frac, rcm_in, gr)
+        return jnp.sum(cover) + jnp.sum(rc_in)
+
+    assert jnp.isfinite(loss(rcm))
+    g = jax.grad(loss)(rcm)
+    assert jnp.all(jnp.isfinite(g)), f"non-finite cloud-cover gradient: {g}"
+
+
 @pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
                     reason="CLUBB-JAX reference tree not present")
 def test_level_set_reconciliation_parity_vs_clubb_jax_reference():
