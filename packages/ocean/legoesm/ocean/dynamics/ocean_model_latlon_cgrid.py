@@ -7271,18 +7271,29 @@ class LatLonCGridOceanModel:
             return state
         literal_matrix = (getattr(tke_cfg, "tke_matrix_evaluation", "factored")
                           == "nemo_literal")
-        carry_fields = (state.tke_avm, state.tke_avt,
-                        state.tke_avm_surface) + (
-                            (getattr(state, "tke_dissl", None),)
-                            if literal_matrix else ())
+        # The surface avm_k is produced by the closure ONLY under the nemo_z0
+        # face assembly (tke.py: _K_M_surface stays None otherwise, and the
+        # carried path demands preclosure_K_M_surface only in that same case).
+        # Seeding it unconditionally made every step-2 state PARTIAL: the
+        # post-solve writeback correctly stores None for it under
+        # "interior_pinned", so the guard below then rejected the state the
+        # model had just produced. That made carried_previous_step unusable on
+        # any card except the nemo_z0 ones. Required set now matches what the
+        # closure actually emits, exactly as tke_dissl already did.
+        surface_z0 = (getattr(tke_cfg, "tke_surface_bc_level",
+                              "interior_pinned") == "nemo_z0")
+        carry_fields = (state.tke_avm, state.tke_avt) + (
+            (state.tke_avm_surface,) if surface_z0 else ()) + (
+                (getattr(state, "tke_dissl", None),)
+                if literal_matrix else ())
         n_present = sum(field is not None for field in carry_fields)
         if n_present == len(carry_fields):
             return state
         if n_present:
             raise ValueError(
                 "carried_previous_step coefficient memory is partially "
-                "populated: tke_avm, tke_avt, tke_avm_surface, and any "
-                "literal-matrix tke_dissl must be "
+                "populated: tke_avm, tke_avt, the nemo_z0 tke_avm_surface and "
+                "any literal-matrix tke_dissl must be "
                 "all present for a restart/continued state or all None for "
                 "a true cold start")
 
@@ -7314,7 +7325,7 @@ class LatLonCGridOceanModel:
             state = state._replace(tke_avt=Field(
                 data=jnp.where(wet_w, avt0, 0.0), name="tke_avt",
                 dims=("lat", "lon", "level"), units="m^2/s"))
-        if state.tke_avm_surface is None:
+        if surface_z0 and state.tke_avm_surface is None:
             avms0 = (jnp.asarray(tke_cfg.kappaM_min, dtype=dtype)
                      * lm.astype(dtype))
             state = state._replace(tke_avm_surface=Field(
