@@ -14,6 +14,12 @@
 # binary's own vectorised sine); gated by
 # scripts/validate/ocean_fidelity/dino_1226/nemo_dino_mesh_gate.py.
 #
+# The INITIAL STATE and the WIND STRESS are NEMO's own, bit-for-bit: the card
+# starts from usr_def_istate's T/S (all 372528 cells equal to the oracle's
+# untouched Kbb level) and evaluates the stress at NEMO's stored gphiu (all
+# 9758 wet U-points equal to the oracle's utau_b). Gated by
+# scripts/validate/ocean_fidelity/dino_1226/nemo_dino_fromrest_gate.py.
+#
 # Known gap on this card (docs/ocean/fidelity/dino_config_reachability_audit.md):
 # the wind stress is the annual mean, not a seasonal cycle.
 #

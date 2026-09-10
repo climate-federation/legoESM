@@ -199,7 +199,11 @@ def _cos_sais(kt=1):
 
 
 def _oracle_heat_salt(gphit, tmask_surf, sst, sss, kt=1):
-    """usrdef_sbc.F90:206-280 -- sfx, qtot, qsr_dayMean, qns at kt."""
+    """usrdef_sbc.F90:206-280 -- sfx, qtot, qsr_dayMean, qns at kt.
+
+    Also returns ztstar and the solar day-mean, so the caller can invert
+    the oracle's own expression for the input it implies.
+    """
     c1, c2 = _cos_sais(kt)
     ts_s = RN_TSTAR_S - 0.5 * c2                     # :216-217
     ts_n = RN_TSTAR_N + 3.0 * c2
@@ -223,7 +227,7 @@ def _oracle_heat_salt(gphit, tmask_surf, sst, sss, kt=1):
     sfx = (RN_SRP * (sss - zsstar)) * tmask_surf                     # :208
     qtot = RN_TRP * (sst - ztstar)                                   # :257 (emp = 0)
     qns = (qtot - zqsr) * tmask_surf                                 # :279
-    return sfx, qns, c1, c2
+    return sfx, qns, c1, c2, ztstar, zqsr
 
 
 def main() -> int:
@@ -376,17 +380,55 @@ def main() -> int:
     print("\nSECTION 3  ORACLE SIDE ONLY -- NEMO's kt=1 heat/salt fluxes "
           "recomputed from usrdef_sbc.F90.\n           Certifies the RECORD "
           "and the seasonal clock; does NOT certify legoESM.")
-    sfx_o, qns_o, c1, c2 = _oracle_heat_salt(
+    sfx_o, qns_o, c1, c2, _ztstar, _zqsr = _oracle_heat_salt(
         g.gphit, g.tmask[:, :, 0], R["tb"][0], R["sb"][0])
     print(f"           kt=1 clock: ztime = 0.75 h, cos_sais1 = {c1!r}, "
           f"cos_sais2 = {c2!r}")
     t3.check("sfx (oracle-side)", sfx_o, R["sfx_b"], oracle_name="sfx_b")
     t3.check("qns (oracle-side)", qns_o, R["qns_b"], oracle_name="qns_b",
              debt=True,
-             note="(DEBT: residual is confined to the solar term -- exact on "
-                  "all 828 polar-night cells; cause not localised. Candidate: "
-                  "the seasonal-clock cosine's last ulp. UNMEASURED.)")
+             note="(DEBT: last-bit only, in the SOLAR term -- see the "
+                  "inversion below)")
     t3.report()
+    # WHERE THE qns DEBT LIVES, re-measured every run rather than asserted.
+    # Invert the oracle's own solar expression for the input it implies
+    # (Rule 1d's trick): qns_b = (qtot - zqsr)*tmask with qtot exact, so
+    # zqsr_implied = qtot - qns_b, and acos(zqsr/230) gives back the latitude
+    # NEMO's COS actually saw.
+    #
+    # TWO HYPOTHESES ARE RETRACTED HERE, both by measurement:
+    #  * "the seasonal-clock cosine's last ulp" -- REFUTED: nudging
+    #    zcos_sais1 by +-1..6 ulp makes the count WORSE in both directions
+    #    (5304 unequal at 0 ulp; 5652 at -1, 5798 at +1), so 0 is optimal.
+    #  * "glibc's vector cosine, as for ff_t/ff_f" -- REFUTED:
+    #    objdump --disassemble='__usrdef_sbc_MOD_usrdef_sbc_oce' BLD/bin/
+    #    nemo.exe shows 31 SCALAR cos@plt, 18 exp@plt, 3 sin@plt and NO
+    #    _ZGV* vector call in this routine.
+    # What survives: the implied latitude offset has median exactly 0 with a
+    # SYMMETRIC +-1..3 ulp spread (p5/p95 ~ -2.9e-14 / +4.5e-14 deg, against
+    # ulp(69 deg) = 1.4e-14), i.e. the ARGUMENT differs in its last bits --
+    # the signature of the compiled binary contracting
+    # rpi*(gphit - 23.5*zcos_sais1)/180 with an FMA, not of a wrong constant.
+    # ORACLE-SIDE and last-bit, so it changes no legoESM number.
+    _wetT = g.tmask[:, :, 0] > 0.5
+    _qtot = RN_TRP * (R["tb"][0] - _ztstar)
+    _implied = (_qtot - R["qns_b"])[_wetT]
+    _mine = _zqsr[_wetT]
+    _pos = _mine > 0
+    if int(_pos.sum()):
+        _a = np.ascontiguousarray(_mine[_pos], dtype=np.float64)
+        _b = np.ascontiguousarray(_implied[_pos], dtype=np.float64)
+        _ul = _a.view(np.int64) - _b.view(np.int64)
+        _u, _c = np.unique(_ul, return_counts=True)
+        _arg = RPI * (g.gphit[_wetT][_pos] - 23.5 * c1) / 180.
+        _argi = np.arccos(np.clip(_implied[_pos] / 230., -1, 1)) * np.sign(_arg)
+        _off = (_argi - _arg) * 180. / RPI
+        print(f"           qns solar term: ulp offsets "
+              f"{dict(zip(_u.tolist(), _c.tolist()))}")
+        print(f"           implied latitude offset: median "
+              f"{np.median(_off):+.3e} deg, p5 {np.percentile(_off, 5):+.3e}, "
+              f"p95 {np.percentile(_off, 95):+.3e}  "
+              f"(ulp(69 deg) = {np.spacing(69.0):.1e})")
     # Section 3 is oracle-side: it must not gate legoESM, but a BROKEN
     # transcription here would silently weaken the coverage claim, so the
     # bit-exact row is still fatal.
