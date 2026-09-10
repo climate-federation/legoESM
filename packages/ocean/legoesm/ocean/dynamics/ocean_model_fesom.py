@@ -23,7 +23,7 @@ Every ``fesom_jax`` import is at **function scope**.  Importing this module
 must NOT require ``fesom_jax`` — legoESM ships without it.  Only *using*
 the adapter (constructing the model, building a mesh, creating an IC) requires
 the package.  A clear :class:`ImportError` with the install command is raised
-at the call site via :func:`_require_fesom_jax`.
+at the call site via :func:`require_fesom_jax`.
 """
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ __all__ = [
 # Helper — deferred-import gate (F3)
 # =============================================================================
 
-def _require_fesom_jax() -> None:
+def require_fesom_jax() -> None:
     """Raise a helpful ImportError if fesom_jax is not installed."""
     try:
         import fesom_jax  # noqa: F401
@@ -318,7 +318,7 @@ class FesomOceanState:
         ocean (1.0) iff it has at least one wet layer, land (0.0)
         otherwise.
         """
-        _require_fesom_jax()
+        require_fesom_jax()
         from fesom_jax.pp import compute_vel_nodes
 
         nlev = int(mesh.nl) - 1
@@ -386,7 +386,7 @@ _FESOM_NATIVE_PI: float | None = None
 def _fesom_native_pi() -> float:
     global _FESOM_NATIVE_PI
     if _FESOM_NATIVE_PI is None:
-        _require_fesom_jax()
+        require_fesom_jax()
         from fesom_jax import config as _fcfg
         _FESOM_NATIVE_PI = float(_fcfg.PI)
     return _FESOM_NATIVE_PI
@@ -437,7 +437,7 @@ def use_legoesm_constants() -> tuple[dict[str, tuple[float, float]],
     Returns ``(changed, unreachable)`` where ``changed`` maps constant name
     to ``(old, new)``.
     """
-    _require_fesom_jax()
+    require_fesom_jax()
     import sys as _sys
 
     from legoesm import constants as _C
@@ -506,7 +506,7 @@ def rescale_mesh_coriolis(mesh: "Mesh") -> "Mesh":
     recompute from latitude, and no risk of using a different latitude
     convention than the mesh did.
     """
-    _require_fesom_jax()
+    require_fesom_jax()
     import dataclasses as _dc
 
     from legoesm import constants as _C
@@ -553,7 +553,7 @@ def build_flat_bottom_mesh(
             f"got {land_lat_threshold}."
         )
 
-    _require_fesom_jax()
+    require_fesom_jax()
     from fesom_jax.mesh import level_masks
 
     nl = int(nlev) + 1
@@ -688,7 +688,7 @@ def resolve_ale_cfg(vertical_coordinate: str):
     if vertical_coordinate == "linfs":
         return None
     if vertical_coordinate == "zstar":
-        _require_fesom_jax()
+        require_fesom_jax()
         from fesom_jax.ale import AleConfig
         return AleConfig()
     raise ValueError(
@@ -707,7 +707,7 @@ def element_centroid_lat_lon(mesh: "Mesh") -> tuple[jax.Array, jax.Array]:
     via a unit-vector mean -- rotation-independent and dateline-safe (a
     plain longitude average puts an element straddling 180 deg at 0 deg).
     """
-    _require_fesom_jax()
+    require_fesom_jax()
     geo = jnp.asarray(mesh.geo_coord_nod2D, dtype=jnp.float64)
     lon_n, lat_n = geo[:, 0], geo[:, 1]
     xyz = jnp.stack([jnp.cos(lat_n) * jnp.cos(lon_n),
@@ -736,7 +736,7 @@ def geographic_to_rotated_vector(mesh: "Mesh", u_geo, v_geo):
     private import from fesom_jax, and it degenerates to the identity on
     an unrotated mesh.
     """
-    _require_fesom_jax()
+    require_fesom_jax()
 
     def _azimuth(coord):
         c = jnp.asarray(coord, dtype=jnp.float64)
@@ -787,7 +787,7 @@ def with_fields(
     are set together so the IC is self-consistent at step 0. ``uv_node`` is
     recomputed from the new element velocity, never carried stale.
     """
-    _require_fesom_jax()
+    require_fesom_jax()
     from fesom_jax.pp import compute_vel_nodes
 
     inner = state.inner
@@ -948,7 +948,7 @@ def create_rest_state(
     ``mesh`` MUST be the flattened flat-bottom mesh from
     :func:`build_flat_bottom_mesh`.
     """
-    _require_fesom_jax()
+    require_fesom_jax()
     from fesom_jax.state import State
     from legoesm.ocean.eos import scale_depth as _SCALE_DEPTH
 
@@ -1004,7 +1004,7 @@ def create_lock_exchange_state(mesh: "Mesh", config: Any) -> FesomOceanState:
     The front uses **geographic** longitude and normalises the DIFFERENCE
     (not the longitude itself) to remain correct across the dateline.
     """
-    _require_fesom_jax()
+    require_fesom_jax()
     from fesom_jax.state import State
 
     state = State.rest(mesh, T0=config.T_reference_C, S0=config.S_uniform)
@@ -1053,7 +1053,7 @@ class FesomOceanModel:
     """
 
     def __init__(self, mesh: "Mesh", z_coord: Any, config: FesomOceanConfig):
-        _require_fesom_jax()
+        require_fesom_jax()
         from fesom_jax import config as fconfig
         from fesom_jax import ssh as fssh
         from fesom_jax.params import Params

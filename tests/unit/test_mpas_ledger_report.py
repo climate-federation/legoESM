@@ -6,7 +6,6 @@ import pathlib
 import sys
 
 import numpy as np
-import pytest
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
 _PROBE = _ROOT / "scripts" / "validate" / "mpas_ledger_report.py"

@@ -211,8 +211,6 @@ _ATM_SCALAR_PARAM_MAP: dict[str, str] = {
     "atm.conv.BechtoldConfig.epsilon_deep": "bechtold_epsilon_deep",
     "atm.conv.BechtoldConfig.delta_deep": "bechtold_delta_deep",
     "atm.conv.BechtoldConfig.dnoprc": "bechtold_dnoprc",
-    "atm.conv.BechtoldConfig.epsilon_deep": "bechtold_epsilon_deep",
-    "atm.conv.BechtoldConfig.delta_deep": "bechtold_delta_deep",
     "atm.conv.BechtoldConfig.capdcycl_land_tau_scale": "bechtold_capdcycl_land_tau_scale",
     "atm.conv.BechtoldConfig.subcloud_evap_scale": "bechtold_subcloud_evap_scale",
     "atm.conv.BechtoldConfig.rhebc_land": "bechtold_rhebc_land",

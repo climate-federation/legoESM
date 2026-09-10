@@ -18,6 +18,8 @@ import pathlib
 
 import numpy as np
 
+from legoesm import constants
+
 
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
@@ -35,7 +37,7 @@ def main(argv=None) -> int:
     nstep = int(d["n_steps"]) if "n_steps" in d else -1
     day = float(d["day"]) if "day" in d else float("nan")
 
-    L_v = 2.501e6  # display conversion only; ledger stores raw kg/m2/s
+    L_v = constants.L_v  # display conversion only; ledger stores raw kg/m2/s
     g_mean = rates.mean(axis=0)                                # (7, 2)
 
     print(f"{args.artifact}")

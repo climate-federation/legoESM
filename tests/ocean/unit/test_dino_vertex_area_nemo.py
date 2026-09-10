@@ -49,6 +49,7 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
+from legoesm import constants
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.grids import create_latlon_geometry
 from legoesm.ocean.dynamics.latlon_cgrid_operators import (
@@ -86,7 +87,7 @@ EXACT_CONVENTION_MAX_REL_GAP = 4.0965e-05
 # NEMO's own earth radius and degree->radian factor (phycst.F90 :26, :37) and
 # DINO's rn_e1_deg (usrdef_nam.F90:30 / namelist_cfg).  Quoted as NEMO's
 # values, not legoESM's, because this module reproduces NEMO's mesh.
-_RA, _RAD, _RN_E1_DEG = 6371229.0, np.pi / 180.0, 1.0
+_RA, _RAD, _RN_E1_DEG = constants.R_earth, np.pi / 180.0, 1.0
 
 
 @pytest.fixture(scope="module", autouse=True)

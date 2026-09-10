@@ -119,7 +119,10 @@ class NEMOMatchMPASRecipeConfig:
     # lateral viscosity / dissipation
     A_h: float = 1.0e5
     C_smag_lap: float = 0.33
-    K_zeta_bih: float = 1.0e14
+    # ``None`` = derived from the mesh as K_ref*(dx/dx_ref)^3, anchored on the
+    # ico6 mesh this recipe was tuned on (so ico6 keeps 1e14 m^4/s and every
+    # finer mesh gets the dx^3-scaled value).  A float pins the coefficient.
+    K_zeta_bih: float | None = None
 
     # vertical mixing (explicit-block coefficients; implicit solve uses them)
     A_v: float = 1.0e-4

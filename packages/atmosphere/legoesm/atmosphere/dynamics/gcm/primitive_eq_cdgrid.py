@@ -142,8 +142,6 @@ class CDGridPrimitiveEquationConfig(NamedTuple):
         # Apply zero_mean_tendency() to dp_s/dt every RK stage. Requires MPI allreduce.
     use_async_halo: bool = False
         # MPI interior/boundary split for compute-comm overlap.
-    use_fv3_lin_pgf: bool = False
-        # FV3 Lin (1997) cross-product PGF. FV3_3D iter 4: INERT — needs forward-backward stepping
         # for stability with RK3 (CFL-incompatible). Retained for future iter.
     div_damp_dddmp: float = 0.0
         # FV3_3D iter 5: adaptive Smag div damping. FV3 sw_core.F90:1720
@@ -363,8 +361,7 @@ def fv3_hydrostatic_tendencies(
     KE = 0.5 * (u_cell ** 2 + v_cell ** 2)
 
     # --- 5. Bernoulli function B = KE + Phi (cell centres) ---
-    # FV3_3D iter 4: Lin (1997) cross-product PGF not stable with RK3 (needs forward-backward);
-    # use_fv3_lin_pgf flag inert here.
+    # Lin (1997) cross-product PGF is not stable with RK3 (needs forward-backward).
     B = KE + Phi
 
     # --- 6. D-grid vorticity at cell centres via circulation ---

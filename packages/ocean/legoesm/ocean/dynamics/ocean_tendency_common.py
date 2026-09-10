@@ -702,6 +702,7 @@ def apply_freshwater_virtual_salt_top(
     *,
     area: jnp.ndarray | None = None,
     normalize: bool = False,
+    owned_mask: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Add the surface virtual-salt tendency to the top tracer level.
 
@@ -742,7 +743,7 @@ def apply_freshwater_virtual_salt_top(
             raise ValueError(
                 "apply_freshwater_virtual_salt_top: normalize=True requires `area`")
         dS_top = normalized_virtual_salt_flux(
-            freshwater, S_ref, h_top, rho_0, area, mask)
+            freshwater, S_ref, h_top, rho_0, area, mask, owned_mask=owned_mask)
     else:
         dS_top = virtual_salt_flux(freshwater, S_ref, h_top, rho_0)
     # Cast the freshwater contribution to dS_dt's dtype so the scatter

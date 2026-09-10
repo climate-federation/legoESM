@@ -982,7 +982,7 @@ class CoupledESMDriver:
             from legoesm.land.clm_surface_map import (
                 download_clm_surfdata, load_clm_surface, clm_hydraulics_config,
                 clm_multilayer_thermal_config, clm_multilayer_ch,
-                _TUNED_PFT_SNOWMASK_MULTILAYER)
+                TUNED_PFT_SNOWMASK_MULTILAYER)
             lat = self._atm._grid_lat; lon = self._atm._grid_lon
             lat_d = np.asarray(jnp.rad2deg(jnp.broadcast_to(lat, shape_2d)).ravel())
             lon_d = np.asarray(jnp.rad2deg(jnp.broadcast_to(lon, shape_2d)).ravel())
@@ -1001,7 +1001,7 @@ class CoupledESMDriver:
             _mask_cell = (
                 (1.0 - jnp.asarray(smap["glacier_frac"]))
                 * (jnp.asarray(smap["pft_fractions"])
-                   @ jnp.asarray(_TUNED_PFT_SNOWMASK_MULTILAYER))
+                   @ jnp.asarray(TUNED_PFT_SNOWMASK_MULTILAYER))
                 + jnp.asarray(smap["glacier_frac"])).astype(_sd)
             land_cfg = land_cfg._replace(
                 hydraulics=cast(clm_hydraulics_config(smap)),
