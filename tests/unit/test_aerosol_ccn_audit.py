@@ -49,8 +49,15 @@ def test_area_weighting_is_not_a_plain_mean():
 
 
 def test_annual_mean_precedes_the_area_mean():
+    """Two latitudes symmetric about the equator carry EQUAL cos weights, so
+    the expected value is the plain mean and only the ordering is under test.
+
+    (A degenerate [0.0, 0.0] axis would also give equal weights, but it now
+    trips the radians guard -- correctly, since no real latitude axis spans
+    less than 2*pi degrees.)
+    """
     mod = _load()
-    lat = np.array([0.0, 0.0])
+    lat = np.array([-30.0, 30.0])
     field = np.array([[1.0, 3.0], [3.0, 5.0]])
     np.testing.assert_allclose(mod.area_weighted_annual_mean(field, lat), 3.0)
 
@@ -79,7 +86,24 @@ def test_droplet_number_is_the_models_own_inversion():
     assert got[0, -1] > got[0, 0] * 2.0
 
 
-def test_zero_or_degenerate_latitude_axis_raises():
+def test_a_radian_latitude_axis_is_rejected():
+    """The real hazard: radians would give a UNIFORM mean wearing the name of
+    an area-weighted one, with no error at all."""
     mod = _load()
-    with pytest.raises(ValueError, match="degrees expected"):
+    with pytest.raises(ValueError, match="RADIANS"):
+        mod.cos_lat_weights(np.linspace(-np.pi / 2, np.pi / 2, 8))
+
+
+def test_poles_only_axis_raises():
+    """cos(90 deg) is 6.1e-17, not 0, so this needs a tolerance rather than a
+    positivity test -- the first version of this guard let it through."""
+    mod = _load()
+    with pytest.raises(ValueError, match="every row sits at a pole"):
         mod.cos_lat_weights(np.array([90.0, -90.0]))
+
+
+def test_a_real_latitude_axis_is_accepted():
+    """Non-vacuity partner: the guards must not reject the actual file."""
+    mod = _load()
+    w = mod.cos_lat_weights(np.linspace(-89.0, 89.0, 96))
+    assert np.isclose(w.sum(), 1.0)

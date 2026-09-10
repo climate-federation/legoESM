@@ -36,12 +36,27 @@ def cos_lat_weights(lat_deg):
     mean; a plain mean over latitude rows overstates the poles, which on
     this field are the CLEANEST rows and would flatter the answer.
     """
-    w = np.cos(np.deg2rad(np.asarray(lat_deg, dtype=np.float64)))
-    w = np.clip(w, 0.0, None)
+    lat = np.asarray(lat_deg, dtype=np.float64)
+    if lat.size == 0:
+        raise ValueError("empty latitude axis")
+    # A latitude axis handed over in RADIANS is the failure this guard exists
+    # for: deg2rad would shrink it to near zero, cos would be ~1 everywhere,
+    # and the result would be a UNIFORM mean wearing the name of an
+    # area-weighted one -- wrong with no error. Real latitude axes span far
+    # more than 2*pi degrees.
+    if np.max(np.abs(lat)) <= 2.0 * np.pi:
+        raise ValueError(
+            f"latitude axis spans only +/-{np.max(np.abs(lat)):.3f}; that "
+            "looks like RADIANS, and weighting it as degrees would silently "
+            "return a uniform mean (degrees expected).")
+    w = np.clip(np.cos(np.deg2rad(lat)), 0.0, None)
     total = w.sum()
-    if not np.isfinite(total) or total <= 0.0:
-        raise ValueError("cos(lat) weights do not sum to a positive value; "
-                         "check the latitude axis units (degrees expected).")
+    # cos(90 deg) is 6.1e-17 rather than 0, so a poles-only axis sums to a
+    # positive-but-meaningless total; compare against the axis length.
+    if not np.isfinite(total) or total <= 1e-8 * lat.size:
+        raise ValueError(
+            "cos(lat) weights sum to ~0, so every row sits at a pole and no "
+            "area-weighted mean is defined for this axis.")
     return w / total
 
 
