@@ -89,6 +89,31 @@ def build_ocean_triangulation(lon_deg, lat_deg, ocean_mask, max_edge_deg=5.0):
     return tri
 
 
+def plot_native_panel(ax, lon_deg, lat_deg, field, title, cmap, has_cartopy,
+                      vmin=None, vmax=None, symmetric=False, point_size=1.2):
+    """One panel drawn at the mesh's OWN resolution: one marker per node, no
+    interpolation and no binning.
+
+    Rasterising an unstructured mesh onto a regular grid is lossy in both
+    directions at once: a 0.25 degree cell averages several nodes together
+    where the mesh is fine, and stays empty where the mesh is coarser than the
+    cell, which then has to be filled from a neighbour.  Drawing the nodes
+    themselves shows the values the model actually carries.  Element polygons
+    would be truer still, but a masked triangulation of this mesh's 4.2 million
+    elements takes over 25 minutes to build against 8 seconds for the nodes.
+    """
+    f = np.asarray(field, dtype=np.float64)
+    vmin, vmax = _colour_limits(f, vmin, vmax, symmetric)
+    kw = {}
+    if has_cartopy:
+        import cartopy.crs as ccrs
+        kw["transform"] = ccrs.PlateCarree()
+    tc = ax.scatter(np.asarray(lon_deg), np.asarray(lat_deg), c=f, s=point_size,
+                    marker=".", linewidths=0, cmap=cmap, vmin=vmin, vmax=vmax,
+                    rasterized=True, **kw)
+    return _finish_map_panel(ax, tc, title, has_cartopy)
+
+
 def raster_mean(lon_deg, lat_deg, field, res_deg, fill_gap_cells=0):
     """Bin point values onto a regular lon-lat grid (cell mean; NaN where no
     point falls). Returns ``(lon_edges, lat_edges, grid[n_lat, n_lon])``.
@@ -223,7 +248,8 @@ def fesom_wet_columns(temp_levels, nlevels_nod2d, n_layers):
     return cols
 
 
-def plot_fesom_store(store_path, mesh_dir, output_dir, res_deg=0.25, fill_gap_cells=3):
+def plot_fesom_store(store_path, mesh_dir, output_dir, res_deg=0.25, fill_gap_cells=3,
+                     native=True, point_size=1.2, dpi=200):
     """6-panel PNG from a fesom_jax monthly (``<YYYY>_<MM>``) or daily
     (``day_<YYYY>_<DOY>``) canonical-global ushow zarr store.
 
@@ -252,6 +278,9 @@ def plot_fesom_store(store_path, mesh_dir, output_dir, res_deg=0.25, fill_gap_ce
         raise ValueError(f"mesh {mesh_dir} has {nlev_nod.shape[0]} nodes, store has {n_nod}")
 
     def panel(ax, field, title, cmap, **kw):
+        if native:
+            return plot_native_panel(ax, lon, lat, field, title, cmap,
+                                     _has_cartopy, point_size=point_size, **kw)
         lon_e, lat_e, grid = raster_mean(lon, lat, field, res_deg, fill_gap_cells=fill_gap_cells)
         return plot_raster_panel(ax, lon_e, lat_e, grid, title, cmap, _has_cartopy, **kw)
 
@@ -295,14 +324,16 @@ def plot_fesom_store(store_path, mesh_dir, output_dir, res_deg=0.25, fill_gap_ce
         panel(axes[1, 0], temp100, "T at 100 m [C]", "RdYlBu_r")
     panel(axes[1, 1], sss, "SSS [PSU]", "YlGnBu")
     panel(axes[1, 2], a_ice, "Sea-ice concentration", "Blues_r", vmin=0, vmax=1)
+    _how = ("native mesh, one point per node" if native
+            else f"{res_deg} deg raster")
     fig.suptitle(f"FESOM2-JAX {mesh_dir.name} — {label} ({kind}; {n_nod} nodes, "
-                 f"{res_deg} deg raster)",
+                 f"{_how})",
                  fontsize=14, y=0.98)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     out_dir = Path(output_dir) if output_dir is not None else store_path.parent.parent / "snapshots"
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"snapshot_{store_path.name}.png"
-    fig.savefig(out, dpi=120, bbox_inches="tight")
+    fig.savefig(out, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved: {out}")
     return out
@@ -405,6 +436,15 @@ def main():
                         "required with --fesom-store")
     p.add_argument("--res-deg", type=float, default=0.25,
                    help="lon-lat raster resolution for --fesom-store maps [deg] (default 0.25)")
+    p.add_argument("--raster", action="store_false", dest="native", default=True,
+                   help=("Bin --fesom-store fields onto a regular lon-lat grid instead of "
+                         "drawing the mesh's own nodes. Lossy: it averages nodes together "
+                         "where the mesh is finer than the cell and fills empty cells from "
+                         "a neighbour where it is coarser. Native is the default."))
+    p.add_argument("--point-size", type=float, default=1.2,
+                   help="Marker area for native rendering [pt^2] (default 1.2)")
+    p.add_argument("--dpi", type=int, default=200,
+                   help="Output resolution (default 200; native rendering needs it)")
     p.add_argument("--fill-gap-cells", type=int, default=3,
                    help="fill empty raster cells from up to N neighbours along the row "
                         "(display only; high-latitude cells are narrower than the mesh)")
@@ -425,7 +465,8 @@ def main():
             p.error("--fesom-store requires --mesh-dir")
         for store in args.fesom_store:
             plot_fesom_store(store, args.mesh_dir, args.output_dir, res_deg=args.res_deg,
-                             fill_gap_cells=args.fill_gap_cells)
+                             fill_gap_cells=args.fill_gap_cells, native=args.native,
+                             point_size=args.point_size, dpi=args.dpi)
     if not args.restarts:
         if not args.fesom_store:
             p.error("give MPAS restart file(s) or --fesom-store")
