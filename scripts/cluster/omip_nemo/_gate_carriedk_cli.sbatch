@@ -27,8 +27,10 @@ echo "=== 2. closure carried-coefficient unit module ==="
 JAX_ENABLE_X64=1 $PY -m pytest -q tests/ocean/unit/test_tke_carried_coefficients.py 2>&1 | tail -5
 
 echo "=== 3. the card's own flag string parses ==="
-FLAG=$(grep -o -- "--tke-preclosure-coeff-source [a-z_]*" \
-       scripts/cluster/omip_nemo/_trp_carriedk_d30.sbatch)
+# grep the RUN LINE, not the header: the pre-registration prose names the flag
+# too, and matching both fed argparse the flag twice with no value.
+FLAG=$(grep -v '^ *#' scripts/cluster/omip_nemo/_trp_carriedk_d30.sbatch \
+       | grep -o -- "--tke-preclosure-coeff-source [a-z_][a-z_]*")
 echo "card flag: $FLAG"
 [ -n "$FLAG" ] || { echo "FATAL: the arm card carries no coeff-source flag"; exit 1; }
 $PY - <<PYEOF
