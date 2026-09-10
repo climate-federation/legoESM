@@ -19,13 +19,15 @@ echo "HEAD: $(git -C $WT log -1 --oneline)"
 cd $WT || exit 1
 export PYTHONPATH="$WT/src:$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT:$WT/scripts/validate"
 $PY -m pytest tests/ocean/unit/test_equatorial_heat_budget.py -q 2>&1 | tail -3
+AVG=$(for d in 11 12 13 14 15; do printf "%s/snapshot_day00%s.npz," "/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_daily_d15" "$d"; done)
 for LAYER in 15,25 0,25 50,150; do
   echo; echo "################ layer $LAYER ################"
   $PY scripts/validate/ocean_fidelity/equatorial_thermocline.py \
-    --legoesm-snapshot $RES/snapshot_day0030.npz \
-    --heat-budget-prev $RES/snapshot_day0015.npz \
+    --legoesm-snapshot /burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_daily_d15/snapshot_day0015.npz \
+    --heat-budget-average "${AVG%,}" \
+    --heat-budget-prev /burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_daily_d15/snapshot_day0010.npz \
     --nemo-gridt $GW/ORCA1_5d_20000101_20000331_grid_T.nc \
-    --nemo-t-recs 5:6 --nemo-w-recs 5:6 \
+    --nemo-t-recs 2:3 --nemo-w-recs 2:3 \
     --nemo-wfile $GW/ORCA1_5d_20000101_20000331_grid_W.nc --nemo-w-var wo \
     --nemo-ufile $GW/ORCA1_5d_20000101_20000331_grid_U.nc \
     --nemo-vfile $GW/ORCA1_5d_20000101_20000331_grid_V.nc \

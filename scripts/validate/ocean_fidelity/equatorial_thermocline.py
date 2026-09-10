@@ -135,6 +135,12 @@ def main() -> int:
                          "(2026-09-08) for whether the cold 20 m is advective."
                          " Needs `to` in --nemo-gridt and `avt` in "
                          "--nemo-wfile.")
+    ap.add_argument("--heat-budget-average", default=None,
+                    help="comma-separated legoESM snapshots to AVERAGE before "
+                         "computing the budget, so our instantaneous fluxes "
+                         "become a time mean over the oracle's own window. "
+                         "Without this the budget cannot close (2026-09-08); "
+                         "with it, pass the matching --nemo-w-recs.")
     ap.add_argument("--heat-budget-prev", default=None,
                     help="earlier legoESM snapshot: gives the OBSERVED dT/dt "
                          "the three terms are checked against (the control -- "
@@ -306,6 +312,15 @@ def main() -> int:
 _SEC_PER_MONTH = 30.0 * 86400.0
 
 
+class _MeanSnap(dict):
+    """Time-averaged snapshot: same access surface as an npz for the budget."""
+
+    @property
+    def files(self):
+        return list(self.keys())
+
+
+
 def _upwind(flux, lo_side, hi_side):
     """Temperature carried by ``flux`` on a face: the LO-side cell when the
     flux is positive (flowing lo -> hi), the HI-side cell otherwise."""
@@ -399,7 +414,19 @@ def _box_budget_block(a, L, zc):
     lo, hi = (float(x) for x in a.box_budget.split(","))
     z0, z1 = (float(x) for x in a.budget_layer.split(","))
     half = float(a.budget_lat_halfwidth)
-    snap = np.load(a.legoesm_snapshot)
+    if a.heat_budget_average:
+        _files = [f.strip() for f in a.heat_budget_average.split(",") if f.strip()]
+        _mems = [np.load(f) for f in _files]
+        _keys = set(_mems[0].files)
+        snap = {k: (np.mean([np.asarray(m[k], dtype=np.float64) for m in _mems], axis=0)
+                    if np.asarray(_mems[0][k]).dtype.kind == "f"
+                    and np.asarray(_mems[0][k]).ndim > 0 else _mems[0][k])
+                for k in _keys}
+        snap = _MeanSnap(snap)
+        print(f"[budget] averaging {len(_files)} snapshots: "
+              f"{_files[0].split('/')[-1]} .. {_files[-1].split('/')[-1]}")
+    else:
+        snap = np.load(a.legoesm_snapshot)
     need = ("mass_flux_u", "mass_flux_v", "mass_flux_w", "dy_u", "dx_v",
             "cell_area")
     miss = [k for k in need if k not in snap.files]
