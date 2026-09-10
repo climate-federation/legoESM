@@ -39,9 +39,9 @@ ROOT=/burg-archive/glab/users/pg2328/legoESM_wt1690
 cd $ROOT || exit 1
 
 # ---- preflight: refuse to run a 30 h job against an unpinned tree ----------
-echo "HEAD:    $(git -C $ROOT rev-parse HEAD)"
-echo "SUBJECT: $(git -C $ROOT log --oneline -1)"
-git -C $ROOT status --porcelain -- scripts/run/run_omip_core2.py \
+echo "HEAD:    $(git -C $CODE_ROOT rev-parse HEAD)"
+echo "SUBJECT: $(git -C $CODE_ROOT log --oneline -1)"
+git -C $CODE_ROOT status --porcelain -- scripts/run/run_omip_core2.py \
     packages/ocean/legoesm/ocean/physics/vertical_mixing/ > /tmp/alpha90_dirty.$$
 if [ -s /tmp/alpha90_dirty.$$ ]; then
   echo "FATAL: model/driver paths are dirty at launch. Offending paths:"
@@ -49,13 +49,19 @@ if [ -s /tmp/alpha90_dirty.$$ ]; then
 fi
 rm -f /tmp/alpha90_dirty.$$
 
-# data/ is gitignored so it exists ONLY in the main checkout; this card
-# runs the WORKTREE code against that shared data root (the first launch
-# died at step 0 on a relative --mesh path, job 9657825/6).
+# data/ is gitignored so it lives ONLY in the main checkout, and the driver
+# REQUIRES the mesh path to be the same string for the grid build and the
+# mask/bathy read (it raises "tripole mesh mismatch" otherwise, job 9692794/5).
+# So: run with CWD = the data root and the mesh path RELATIVE, while the CODE
+# comes from this worktree via PYTHONPATH + an absolute script path. First
+# attempt died on a relative path from the worktree (9657825/6); second on an
+# absolute one that tripped the consistency guard.
 DATA_ROOT=/burg-archive/glab/users/pg2328/legoESM
+CODE_ROOT=$ROOT
 [ -e "$DATA_ROOT/data/grids/eORCA1.2_mesh_mask.nc" ] || {
   echo "FATAL: mesh missing under DATA_ROOT=$DATA_ROOT"; exit 3; }
-export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT"
+cd "$DATA_ROOT" || exit 2
+export PYTHONPATH="$(ls -d $CODE_ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$CODE_ROOT"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 nvidia-smi --query-gpu=index,memory.used,memory.free --format=csv,noheader
 export CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=index,memory.free \
@@ -63,9 +69,8 @@ export CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=index,memory.free \
 IN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS
 
 XLA_PYTHON_CLIENT_PREALLOCATE=false LEGOESM_JIT_CACHE_DIR="" \
-JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py \
-  --grid tripole --mesh $DATA_ROOT/data/grids/eORCA1.2_mesh_mask.nc \
-  --dt 150 --min-levels 2 \
+JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY -u $CODE_ROOT/scripts/run/run_omip_core2.py \
+  --grid tripole --mesh data/grids/eORCA1.2_mesh_mask.nc --dt 150 --min-levels 2 \
   --C-smag-lap 3.0 --smag-cfl-safety 0.125 --ew-cyclic-overlap --nemo-vertical \
   --partial-cell --pgf-scheme smc03 --adaptive-implicit-vertadv --momentum-rk3 \
   --geothermal --runoff --sss-restore --sss-restore-tau-days 45.5 \
@@ -86,7 +91,7 @@ JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py \
   --tke-surface-bc nemo_dirichlet --tke-surface-bc-level nemo_z0 --tke-mxl-choice 3 --tke-prognostic \
   --tke-kappa-convention veros_sqrte \
   --sw-rgb-chl --ice-ocean-heat-coeff 70 --gateway-transports \
-  --output $ROOT/results/omip_nemo/nemolev_trp_bclevel_d30_nemoz0 \
+  --output $CODE_ROOT/results/omip_nemo/nemolev_trp_bclevel_d30_nemoz0 \
   --mle --mle-ce 0.06
 rc=$?
 echo "=== run_omip_core2 rc=$rc ==="
