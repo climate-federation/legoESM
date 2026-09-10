@@ -730,3 +730,22 @@ merged (an unmeasured finding must not buy a knob).  The gate's refusal
 of the flag pair is lifted, and the pair is bitwise on 54 ranks at
 0.210 s/step (band alone 0.217-0.229 in the same-allocation A/B), i.e.
 packing the entry refresh is worth nothing beyond the band lever.
+
+### Where the residual sits (job 9692615, one allocation, interleaved)
+
+| arm | s/step |
+|---|---|
+| shipped configuration | 0.220 / 0.218 |
+| substep-entry refresh elided (WRONG, decomposition only) | 0.202 / 0.193 |
+
+So the three substep-entry full refreshes cost ~21 ms/step, and the
+remaining ~48 ms of the 69 ms between the no-per-firing-refresh floor
+(0.189) and compute (0.120) is the PER-FIRING boundary: 32 shard_map
+entries/exits per step, each with a sharding constraint, the normalize
+embed/restore for compute-extent arrays and the block cut/write-back.
+GLM's proposal for it is one shard_map per SUBSTEP with the firings
+chained inside (pad once, restore once, repaint the pad bands between
+bodies); its traps are the frozen tables' reach beyond the band, any body
+that writes pad cells a later firing reads, and two-hop corner pads.  Not
+attempted yet: it is a large refactor of the certified path for ~22 % of
+the step, and the entry refresh (21 ms) is the cheaper target.
