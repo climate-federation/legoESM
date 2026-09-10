@@ -85,7 +85,8 @@ NEMO_MATCH_BLOCK_MAPPING: tuple[tuple[str, str, str], ...] = (
     (
         "lateral viscosity",
         "A_h / C_smag_lap",
-        "constant A_h=1e5 + Laplacian Smagorinsky C_smag_lap=0.33",
+        "A_h derived from the mesh's narrowest wet cell (anchored so "
+        "eORCA1.2 keeps 1e5) + Laplacian Smagorinsky C_smag_lap=0.33",
     ),
     ("GM/Redi", "gm_redi", "GMRediConfig kappa_GM=kappa_Redi=600, S_max=0.005, centered slopes"),
     ("bottom drag", "bottom_drag_r / bbl", "linear r=1e-3 over a 100 m BBL, bg vel 0.1"),
@@ -201,7 +202,12 @@ class NEMOMatchTripoleRecipeConfig:
     n_barotropic_substeps: int = 30
 
     # lateral viscosity / dissipation
-    A_h: float = 1.0e5
+    # None = DERIVE from the mesh's narrowest wet cell, anchored so eORCA1.2
+    # keeps 1e5 (legoesm.ocean.state.resolution_scaled_lateral_viscosity).  One
+    # number cannot serve 1 degree and 1/12 degree: measured, 1e5 puts ORCA12
+    # 26x over the explicit Laplacian limit and its cold start diverges at
+    # step 10 with a 193 m/s current.
+    A_h: float | None = None
     B_h: float = 0.0
     C_smag_lap: float = 0.33
 

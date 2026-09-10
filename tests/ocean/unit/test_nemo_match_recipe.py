@@ -203,9 +203,20 @@ def test_tripole_factory_builds_valid_model_and_one_step_is_finite():
     from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
     from legoesm.ocean.vertical import create_ocean_z_star
 
+    from legoesm.ocean.state import resolution_scaled_lateral_viscosity
+
     grid = create_latlon_grid(8, 16)
     z_coord = create_ocean_z_star(n_levels=3, H_max=4000.0)
     config = nemo_match_tripole_model_config()
+    # The card leaves the lateral viscosity to be derived from the mesh, and
+    # the model refuses an unresolved one; this synthetic grid stands in for a
+    # mesh whose narrowest wet cell is the anchor's, so it keeps 1e5.
+    assert config.lateral_viscosity.A_h is None
+    _lv = config.lateral_viscosity
+    config = config._replace(lateral_viscosity=_lv._replace(
+        A_h=resolution_scaled_lateral_viscosity(_lv.A_h_ref_dx_m, _lv),
+        A_h_dx_m=_lv.A_h_ref_dx_m))
+    assert config.lateral_viscosity.A_h == 1.0e5
     model = LatLonCGridOceanModel(grid, z_coord, config)
     state = rest_state_latlon_cgrid_ocean(grid, z_coord)
     new_state = model.step(state, dt=60.0)
