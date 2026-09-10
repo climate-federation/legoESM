@@ -513,7 +513,8 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                         kappa_convention: str | None = None,
                         shear_production: str | None = None,
                         lc: bool | None = None,
-                        etau_mode: str | None = None):
+                        etau_mode: str | None = None,
+                        preclosure_coeff_source: str | None = None):
     """NEMO ORCA1 ``&namzdf_tke`` mapped onto :class:`TKEConfig`, value by value.
 
     Source of truth: ``cfgs/ORCA1/EXP00/RUN_REF/namelist_cfg`` overrides on top
@@ -872,6 +873,27 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                 "(same face geometry at NOW^2 -- the key_RK3 oracle variant) "
                 "or 'nemo_burchard'.")
         _cfg = _cfg._replace(tke_shear_production=shear_production)
+    # Coefficient lifetime (``--tke-preclosure-coeff-source``).  DEFAULT keeps
+    # the card value ("current_subiteration").  NEMO's zdf_tke consumes the
+    # SAVE'd avm_k/avt_k pair in zdf_sh2, the Prandtl ratio, the TKE matrix and
+    # the RHS, and overwrites that pair only AFTER the solve (zdftke.F90); it
+    # never evaluates production against a coefficient recomputed in the same
+    # call.  "carried_previous_step" is that lifetime, and it is what the DINO
+    # NEMO-oracle preset selects (experiments/dino.py).  The memory it needs
+    # (tke_avm/tke_avt/tke_avm_surface, plus tke_dissl under the literal
+    # matrix) lives on LatLonCGridOceanState only, so the caller restricts this
+    # to the tripole; the model seeds it at cold start from zdf_phy_init's
+    # background-times-wmask construction and bridges it across restarts.
+    if preclosure_coeff_source is not None:
+        if preclosure_coeff_source not in ("current_subiteration",
+                                           "carried_previous_step"):
+            raise ValueError(
+                "orca1_zdftke_config preclosure_coeff_source "
+                f"{preclosure_coeff_source!r} invalid; expected "
+                "'current_subiteration' (recompute within the call) or "
+                "'carried_previous_step' (NEMO's avm_k/avt_k lifetime).")
+        _cfg = _cfg._replace(
+            tke_preclosure_coeff_source=preclosure_coeff_source)
     # Mixing-length formulation (``--tke-mxl-choice``).  DEFAULT keeps the card
     # value (2 = Veros Bougeault-Lacarrere, the current production).  3 selects
     # NEMO nn_mxl=3: the lup/ldown |dl/dz|<=e3t sweeps WITH the ln_mxl0 wind-
@@ -1096,7 +1118,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                               tke_n2_mode=None, tke_n2_eos_form=None,
                               tke_prognostic=None, tke_kappa_convention=None,
                               tke_shear_production=None, tke_lc=None,
-                              tke_etau=None):
+                              tke_etau=None,
+                              tke_preclosure_coeff_source=None):
     """``VerticalMixingConfig`` for ``--tripole-vmix`` (+ optional zdfiwm).
 
     ``tripole_vmix``: "none" (byte-identical no-closure default), "tke"
@@ -1131,7 +1154,9 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                     ("--tke-n2-eos-form", tke_n2_eos_form),
                     ("--tke-prognostic", tke_prognostic),
                     ("--tke-kappa-convention", tke_kappa_convention),
-                    ("--tke-shear-production", tke_shear_production)):
+                    ("--tke-shear-production", tke_shear_production),
+                    ("--tke-preclosure-coeff-source",
+                     tke_preclosure_coeff_source)):
         if _v is not None and tripole_vmix != "tke":
             raise ValueError(
                 f"{_fl} {_v!r} requires --tripole-vmix tke; got --tripole-vmix "
@@ -1147,7 +1172,9 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                                    prognostic=tke_prognostic,
                                    kappa_convention=tke_kappa_convention,
                                    shear_production=tke_shear_production,
-                                   lc=tke_lc, etau_mode=tke_etau)
+                                   lc=tke_lc, etau_mode=tke_etau,
+                                   preclosure_coeff_source=(
+                                       tke_preclosure_coeff_source))
         if tke_eice is not None:
             if int(tke_eice) not in (0, 1, 3):
                 raise ValueError(
@@ -1193,7 +1220,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   tke_mxl_choice=None, tke_prognostic=None,
                   tke_n2_mode=None, tke_n2_eos_form=None,
                   tke_kappa_convention=None, tke_shear_production=None,
-                  tke_lc=None, tke_etau=None, A_h_profile_file=None,
+                  tke_lc=None, tke_etau=None,
+                  tke_preclosure_coeff_source=None, A_h_profile_file=None,
                   gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
                   gm_kappa_min=_GM_KAPPA_MIN_DEFAULT,
                   gm_slope_scheme=None, gm_bolus_advection=None,
@@ -1408,7 +1436,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
             tke_n2_mode=tke_n2_mode, tke_n2_eos_form=tke_n2_eos_form,
             tke_kappa_convention=tke_kappa_convention,
             tke_shear_production=tke_shear_production,
-            tke_lc=tke_lc, tke_etau=tke_etau)
+            tke_lc=tke_lc, tke_etau=tke_etau,
+            tke_preclosure_coeff_source=tke_preclosure_coeff_source)
         if _use_vmix:
             print(f"[setup] tripole vertical-mixing closure: {tripole_vmix}"
                   + (" (ORCA1 namzdf_tke namelist mapping)"
@@ -3208,7 +3237,8 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
                             tke_prognostic=None, tke_kappa_convention=None,
                             tke_shear_production=None,
                             tke_n2_mode=None, tke_n2_eos_form=None,
-                            tke_lc=None, tke_etau=None, mpas_vmix="kpp",
+                            tke_lc=None, tke_etau=None,
+                            tke_preclosure_coeff_source=None, mpas_vmix="kpp",
                             fesom_vmix="fesom"):
     """Reject the zdftke card knobs unless the tke closure is active.
 
@@ -3260,6 +3290,19 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
                 f"got --grid {grid!r} --tripole-vmix {tripole_vmix!r} "
                 f"--mpas-vmix {mpas_vmix!r} --fesom-vmix {fesom_vmix!r}, where "
                 f"it is silently discarded. Select the closure, or drop {_flag}.")
+    # Tighter than the loop above: the carried avm_k/avt_k memory this selects
+    # lives on LatLonCGridOceanState (state.py tke_avm/tke_avt/tke_avm_surface/
+    # tke_dissl) and nowhere else, so on MPAS or FESOM the flag would be
+    # accepted and then quietly do nothing -- the exact silent-no-op this
+    # validator exists to prevent.
+    if tke_preclosure_coeff_source is not None and not (
+            grid == "tripole" and tripole_vmix == "tke"):
+        raise SystemExit(
+            "--tke-preclosure-coeff-source selects NEMO's carried avm_k/avt_k "
+            "coefficient memory, which only the lat-lon C-grid ocean state "
+            "carries; it takes effect ONLY under --grid tripole "
+            f"--tripole-vmix tke. Got --grid {grid!r} --tripole-vmix "
+            f"{tripole_vmix!r}. MPAS and FESOM need the state fields first.")
 
 
 def _validate_pcg_variant_grid(grid, barotropic_pcg_variant=None,
@@ -6221,6 +6264,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "face state. Requires --partial-cell (k_profiles "
                         "builds wumask/wvmask/coast masks from "
                         "z_coord.is_active) and --tripole-vmix tke.")
+    p.add_argument("--tke-preclosure-coeff-source", type=str, default=None,
+                   choices=["current_subiteration", "carried_previous_step"],
+                   help="Which diffusivity the closure consumes BEFORE its own "
+                        "solve, for --grid tripole --tripole-vmix tke. None "
+                        "(default) keeps the card value "
+                        "('current_subiteration': the pair recomputed inside "
+                        "the same call). 'carried_previous_step' is NEMO's "
+                        "avm_k/avt_k lifetime -- zdf_tke feeds zdf_sh2, the "
+                        "Prandtl ratio, the TKE matrix and the RHS from the "
+                        "SAVE'd pair and overwrites it only AFTER the solve "
+                        "(zdftke.F90), so production is never evaluated "
+                        "against a coefficient the same call just produced. "
+                        "It is what the DINO NEMO-oracle preset selects. "
+                        "Tripole-only: the memory (tke_avm/tke_avt/"
+                        "tke_avm_surface, plus tke_dissl under the literal "
+                        "matrix) lives on LatLonCGridOceanState; the model "
+                        "seeds it cold from zdf_phy_init's background-times-"
+                        "wmask construction and bridges it across restarts.")
     p.add_argument("--tke-kappa-convention", type=str, default=None,
                    choices=["veros_sqrte", "gaspar_sqrt2e"],
                    help="Amplitude of K from TKE for --tripole-vmix tke. "
@@ -6754,6 +6815,8 @@ def main() -> int:
                             tke_n2_mode=args.tke_n2_mode,
                             tke_n2_eos_form=args.tke_n2_eos_form,
                             tke_lc=args.tke_lc, tke_etau=args.tke_etau,
+                            tke_preclosure_coeff_source=(
+                                args.tke_preclosure_coeff_source),
                             mpas_vmix=args.mpas_vmix,
                             fesom_vmix=args.fesom_vmix)
     # --gm-treguier is applied in build_tripole's GM/Redi override only; on any
@@ -6977,6 +7040,7 @@ def main() -> int:
             tke_shear_production=args.tke_shear_production,
             tke_lc=(None if args.tke_lc is None else args.tke_lc == "on"),
             tke_etau=args.tke_etau,
+            tke_preclosure_coeff_source=args.tke_preclosure_coeff_source,
             gm_treguier=args.gm_treguier,
             gm_aei0=args.gm_aei0,
             gm_kappa_min=args.gm_kappa_min,
