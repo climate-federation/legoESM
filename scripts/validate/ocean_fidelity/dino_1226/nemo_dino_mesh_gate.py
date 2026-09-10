@@ -95,10 +95,24 @@ WAIVED = {
 }
 
 
+def _monotone(x: np.ndarray) -> np.ndarray:
+    """IEEE-754 bit pattern remapped so integer order == float order.
+
+    The naive `a.view(int64) - b.view(int64)` is NOT a ulp distance across
+    zero: +/-5e-11 are two ulps apart as floats but 2^63 apart as raw
+    patterns, so a SIGN FLIP produced a huge NEGATIVE difference that an
+    `abs(...) <= waiver` test could wave through.  ff_f never crosses zero
+    here (min |ff_f| = 1.27e-6 against a 2.7e-20 residual), so the waiver was
+    right by luck rather than by construction; this makes it right by
+    construction.
+    """
+    i = np.ascontiguousarray(x, dtype=np.float64).view(np.int64)
+    return np.where(i < 0, np.int64(-(2 ** 63)) - i, i)
+
+
 def _ulp(a: np.ndarray, b: np.ndarray) -> int:
-    a = np.ascontiguousarray(a, dtype=np.float64)
-    b = np.ascontiguousarray(b, dtype=np.float64)
-    return int(np.max(np.abs(a.view(np.int64) - b.view(np.int64))))
+    return int(np.max(np.abs(_monotone(np.asarray(a, dtype=np.float64))
+                             - _monotone(np.asarray(b, dtype=np.float64)))))
 
 
 class Table:
@@ -293,8 +307,10 @@ def main() -> int:
     print(f"  built {type(grid).__name__} {grid.n_lat}x{grid.n_lon}, "
           f"{z.n_levels} levels, dtype {np.asarray(grid.lat).dtype}")
     print(f"  precision policy storage={get_policy().storage.__name__} -- this "
-          "section certifies the CONSTRUCTION, not the storage: run_dino.py "
-          "sets no policy, so a RUN builds the same mesh at float32.")
+          "section certifies the CONSTRUCTION at this policy; run_dino.py "
+          "forces fp64 for every NEMO-fidelity run, and the analytic domain "
+          "now REFUSES to build below fp64 (its gdept_0/e3w_0 identity misses "
+          "by 1.2e-4 m at float32).")
 
     # (a) identical to the domain the certified twin gets from the FILE, leaf
     #     for leaf -- the strongest statement of "no second convention".

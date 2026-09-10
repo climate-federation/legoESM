@@ -92,12 +92,9 @@ WAIVED = {
     "avm_k": "vertical viscosity after one TKE step",
     "dissl": "TKE dissipation length after one step",
     "rhd": "in-situ density anomaly diagnosed during the step",
-    "qns_b": "no legoESM counterpart array: the DINO card expresses the same "
-             "non-solar flux as a restoring timescale tau_T on the top cell "
-             "(see apply_dino_lat_lon_surface_forcing). Recorded ORACLE-SIDE "
-             "in section 3 instead",
-    "sfx_b": "no legoESM counterpart array (restoring timescale tau_S); "
-             "recorded ORACLE-SIDE in section 3",
+    "emp_b": "no legoESM counterpart array: the DINO card applies no "
+             "freshwater flux (rn_emp_prop=0, ln_emp_field=F). Checked "
+             "ORACLE-SIDE in section 2b as a property of the record",
     "qsr_hc_b": "traqsr.F90's per-level solar heat content; legoESM applies "
                 "the Jerlov column tendency directly and stores no such "
                 "array",
@@ -121,15 +118,27 @@ def _is_post_step(name: str) -> bool:
     return any(tok in name for tok in _POST_STEP)
 
 
+def _monotone(x: np.ndarray) -> np.ndarray:
+    """IEEE-754 bit pattern remapped so integer order == float order.
+
+    The naive `a.view(int64) - b.view(int64)` is NOT a ulp distance across
+    zero: -5e-11 and +5e-11 are two ulps apart in float terms but 2^63 apart
+    as raw patterns, which made a SIGN FLIP look like a huge-but-negative
+    distance and slip through an `abs(...) <= waiver` test.
+    """
+    i = np.ascontiguousarray(x, dtype=np.float64).view(np.int64)
+    return np.where(i < 0, np.int64(-(2 ** 63)) - i, i)
+
+
 def _ulp(a, b) -> int:
-    a = np.ascontiguousarray(a, dtype=np.float64)
-    b = np.ascontiguousarray(b, dtype=np.float64)
-    return int(np.max(np.abs(a.view(np.int64) - b.view(np.int64))))
+    return int(np.max(np.abs(_monotone(np.asarray(a, dtype=np.float64))
+                             - _monotone(np.asarray(b, dtype=np.float64)))))
 
 
 class Table:
     def __init__(self):
-        self.rows, self.failed, self.checked = [], False, set()
+        self.rows, self.failed = [], False
+        self.checked, self.debt = set(), set()
 
     def check(self, name, built, oracle, *, mask=None, oracle_name=None,
               debt=False, note=""):
@@ -137,13 +146,24 @@ class Table:
         gating (and says DEBT out loud, never 'matched')."""
         built = np.asarray(built, dtype=np.float64)
         oracle = np.asarray(oracle, dtype=np.float64)
-        self.checked.add(oracle_name or name)
+        # A DEBT row is NOT a verified row: keeping the two sets apart stops
+        # the coverage tally from reading "verified" next to a row whose own
+        # verdict says DEBT.
+        (self.debt if debt else self.checked).add(oracle_name or name)
         if built.shape != oracle.shape:
             self.rows.append((name, -1, float("nan"), -1,
                               f"FAIL shape {built.shape} vs {oracle.shape}"))
             self.failed = True
             return
         if mask is not None:
+            n_sel = int(np.count_nonzero(mask))
+            if n_sel == 0:
+                # A row over zero cells would print AT BAR and claim coverage
+                # while asserting nothing at all.
+                self.rows.append((name, -1, float("nan"), -1,
+                                  "FAIL mask selects 0 cells (vacuous row)"))
+                self.failed = True
+                return
             built, oracle = built[mask], oracle[mask]
         ne = int(np.sum(built != oracle))
         mx = float(np.max(np.abs(built - oracle))) if ne else 0.0
@@ -287,11 +307,28 @@ def main() -> int:
                 h[key] = a
             return h
 
+        # A THIRD PLANT, for the three restoring/solar rows.  The latitude
+        # plant above does NOT cover them: those rows compare the forcing
+        # against the SAME transcribed ladder, so a lie in the ladder moves
+        # both sides together.  Nudge the delivered T* instead -- 1 ulp, the
+        # smallest lie the row must catch.
+        _true_forcing = dino_mod.dino_lat_lon_surface_forcing_arrays
+
+        def _planted_forcing(grid, cfg=None, *, wind_lat_deg=None):
+            f = dict(_true_forcing(grid, cfg, wind_lat_deg=wind_lat_deg))
+            import jax.numpy as _jnp
+            t = np.asarray(f["T_star_2d"], dtype=np.float64).copy()
+            t[100, :] = np.nextafter(t[100, :], np.inf)
+            f["T_star_2d"] = _jnp.asarray(t)
+            return f
+
+        dino_mod.dino_lat_lon_surface_forcing_arrays = _planted_forcing
         ndm.nemo_dino_istate = _planted_istate
         ndm.nemo_dino_hgr = _planted_hgr
         dino_mod._nemo_faithful_dino_domain.cache_clear()
-        print("PLANT ACTIVE: 1 ulp on one wet initial-T cell, and 1 ulp on the "
-              "source latitude row where it moves the stress most")
+        print("PLANT ACTIVE: 1 ulp on one wet initial-T cell, 1 ulp on the "
+              "source latitude row where it moves the stress most, and "
+              "1 ulp on one row of the delivered T*")
 
     sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
                          capture_output=True, text=True).stdout.strip()
@@ -372,9 +409,52 @@ def main() -> int:
     t2.check("taum (wet U-points)", forcing["taum_2d"], taum_oracle,
              mask=umask_s, note="(oracle taum rebuilt from utau_b per "
                                 "usrdef_sbc.F90:222-223; not itself dumped)")
-    t2.check("emp", np.zeros_like(R["emp_b"]), R["emp_b"], oracle_name="emp_b",
-             note="(ln_emp_field=F, rn_emp_prop=0 -> both identically zero)")
+    # THE SIGN THE DYNAMICS ACTUALLY RECEIVES.  usrdef_sbc's utau is the stress
+    # ON the ocean; legoESM's PE external-tau block takes the ATMOSPHERIC
+    # convention and applies -tau, so dino_step_surface_forcing negates.  Score
+    # that array, not just the dict it came from, or a sign error between the
+    # two is out of the gate's reach entirely.
+    t2.check("tau_x into model.step", -np.asarray(sf.tau_x), R["utau_b"],
+             mask=umask_s, oracle_name="utau_b",
+             note="(the applicator's OCEAN-reaction negation, undone here)")
+    # THE THREE TARGETS THE FORCING FOLD ALSO MOVES.  Without these rows the
+    # T*/S*/solar half of the latitude fix is UNGATED: a reviewer sign-flipped
+    # T*, offset it by 111 K, reversed S* and zeroed the solar flux and the
+    # gate still said PASS.  There is no NEMO array to compare them against at
+    # this instant (legoESM's are the ANNUAL MEAN; NEMO's are the kt=1
+    # seasonal value), so what is pinned is the thing the diff changed: that
+    # all three are evaluated at NEMO's OWN gphit, bit-for-bit.
+    phi_t = ndm.nemo_dino_hgr()["phi_t"]
+    import jax.numpy as jnp
+    for key, fn in (("T_star", dino_mod.dino_T_star_annual_mean),
+                    ("S_star", dino_mod.dino_S_star),
+                    ("Q_sr", dino_mod.dino_Q_sr_annual_mean)):
+        t2.check(f"{key} at gphit", forcing[f"{key}_2d"][:, 0],
+                 np.asarray(fn(jnp.asarray(phi_t), cfg), dtype=np.float64),
+                 oracle_name=f"{key}_at_gphit",
+                 note="(evaluated at NEMO's stored gphit, usrdef_sbc.F90:"
+                      "174-181/:233-238/:268)")
+    # tau_u_face is the array the legacy (non-wind_through_step) applicator
+    # reads; it must carry the same stress as the cell-centred one.
+    t2.check("tau_u_face", np.asarray(forcing["tau_u_face"])[:, 1:],
+             np.broadcast_to(tau[:, :1], tau.shape)
+             if tau.shape[1] == 1 else np.repeat(tau[:, :1], tau.shape[1], 1),
+             oracle_name="tau_u_face",
+             note="(zonally uniform: every u-face carries the row's stress)")
     t2.report()
+
+    # emp: an ORACLE-SIDE record check, not a legoESM claim.  legoESM's DINO
+    # card carries no E-P array at all (rn_emp_prop = 0, ln_emp_field = F), so
+    # comparing a gate-side zeros() against it could never fail on any model
+    # change -- it would book emp_b as "verified" while asserting nothing.
+    if not bool(np.all(R["emp_b"] == 0.0)):
+        print("\nSECTION 2b  emp_b is NOT identically zero -- the record is "
+              "not the deck we transcribe")
+        t2.failed = True
+    else:
+        print("\nSECTION 2b  emp_b identically zero in the record "
+              "(ln_emp_field=F, rn_emp_prop=0), and legoESM's DINO card "
+              "applies no freshwater flux -- ORACLE-SIDE, see WAIVED")
 
     t3 = Table()
     print("\nSECTION 3  ORACLE SIDE ONLY -- NEMO's kt=1 heat/salt fluxes "
@@ -437,12 +517,15 @@ def main() -> int:
     print("\nSECTION 4  coverage (oracle-fidelity Rule 1)")
     ic_sbc = {v for v in all_vars if not _is_post_step(v)}
     verified = t.checked | t2.checked | t3.checked
-    unaccounted = sorted(ic_sbc - verified - set(WAIVED))
+    debt = (t.debt | t2.debt | t3.debt) - verified
+    unaccounted = sorted(ic_sbc - verified - debt - set(WAIVED))
     print(f"  {len(ic_sbc)} initial-state / surface-forcing variables in the "
           f"restart ({len(all_vars)} total, {len(all_vars) - len(ic_sbc)} "
           f"post-step trend/staggered dumps)")
-    print(f"  {len(verified & ic_sbc)} verified, "
+    print(f"  {len(verified & ic_sbc)} verified, {len(debt & ic_sbc)} DEBT, "
           f"{len(set(WAIVED) & ic_sbc)} waived, {len(unaccounted)} unaccounted")
+    for k in sorted(debt & ic_sbc):
+        print(f"  DEBT    {k}: measured, NOT at bar -- see the row above")
     for k in sorted(set(WAIVED) & ic_sbc):
         print(f"  WAIVED  {k}: {WAIVED[k]}")
     if unaccounted:

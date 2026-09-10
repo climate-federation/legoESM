@@ -517,6 +517,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     raw = rebuild(restart_pattern, list(level))
     require(set(raw) == set(level),
             f"incomplete rebuilt comparator: {sorted(raw)}")
+    if args.day == 0 and args.nemo_time_level == "now":
+        print("WARNING day 0 is being scored against the NOW level. If this "
+              "restart is a from-rest kt=1 record, the initial condition is "
+              "the BEFORE level (tb/sb/sshb) and the now level has already "
+              "taken the Euler step -- its sshn reaches 1.17e-1 m where the "
+              "initial ssh is exactly 0. Pass --nemo-time-level before.")
     nemo_t_full = np.moveaxis(np.asarray(raw[level[0]]), 0, -1)
     nemo_s_full = np.moveaxis(np.asarray(raw[level[1]]), 0, -1)
     nemo_ssh_full = np.asarray(raw[level[2]])

@@ -597,9 +597,11 @@ def nemo_dino_istate(g: NemoGrid, nn_initcase: int = 4):
     un-blended ``profile * tmask``; on DINO that level is dry everywhere, so
     it is zero either way — transcribed as written rather than relied upon.
 
-    ``nn_pert_seed`` (:178-183) is 0 on every DINO deck here, so the tiny
-    ensemble perturbation is a no-op and is not transcribed; a non-zero value
-    is refused rather than silently ignored.
+    ``nn_pert_seed`` (:178-183) is NOT transcribed.  Its default is 0
+    (usrdef_nam.F90:81) and neither ``namelist_cfg`` nor ``namelist_ref``
+    sets it, so on every deck here the 1e-10 K ensemble perturbation is a
+    no-op.  This function takes no seed argument and therefore cannot honour
+    a non-zero one: a deck that sets ``nn_pert_seed`` would need it added.
 
     MEASURED against ``RUN_FROMREST_KT1``'s ``tb``/``sb`` (the untouched
     initial condition, since the Euler first step leaves ``Kbb`` alone):
