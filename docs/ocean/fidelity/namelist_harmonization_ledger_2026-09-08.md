@@ -237,3 +237,44 @@ under test, which is the mechanism the carried-coefficient arm acts on. Local
 generation by shear discretisation was already refuted by its own arm.
 
 STATUS: etau and Langmuir eliminated for this band. Nothing changed in the model.
+
+## 2026-09-10 (c) — RETRACTION: "above 20 m we match" was the wrong oracle file
+
+The corrected band table (our day-30 snapshot against GATEWAY record 5, the
+matched window, with the record-index bug fixed and the 0-20 m self-check
+passing exactly):
+
+| band | tracer ours | tracer NEMO | ratio | Prandtl ours | Prandtl NEMO |
+|---|---|---|---|---|---|
+| 0-20 m | 2.60e-05 (median 3.38e-05) | 1.423e-03 | 0.024 | 4.09 | 4.66 |
+| 20-60 m | 2.595e-07 | 8.423e-04 | 0.0003 | 11.38 | 1.09 |
+| 60-160 m | 1.684e-07 | 8.205e-07 | 0.205 | 17.49 | 2.66 |
+
+RETRACTED: I have been saying the top 20 m MATCHES the oracle (ratio 1.02-1.04).
+That number came from the 2001 hourly RUN_TRD2 file, a different year from our
+run window. On the matched window the top 20 m is 0.024 of the oracle -- a
+factor of 42 too weak, not a match. Every statement built on "the deficit is
+confined to a narrow band below the mixed layer" is withdrawn with it.
+
+REVISED SHAPE. The deficit spans the whole upper 60 m and only closes below it:
+42x too weak at 0-20 m, ~3250x at 20-60 m, and within a factor of 5 (tracer) or
+1.35 (momentum) at 60-160 m. That is consistent with the turbulent-layer depth
+measured the same way -- ours ends at 17.9 m, the oracle's at 73.2 m.
+
+WHAT SURVIVES, and it is informative: the Prandtl ratio AGREES at 0-20 m (4.09
+against 4.66) and disagrees only where the coefficient has collapsed to
+background (11.38 against 1.09 at 20-60 m). The closure's momentum-to-tracer
+partition is therefore faithful where there is any turbulence at all; what is
+missing is the AMPLITUDE, i.e. the energy. That is the same conclusion the
+production/dissipation arithmetic reached from the other side.
+
+REVISED PRE-REGISTRATION for the running carried-coefficient arm (job 9692852).
+The primary threshold was written against the wrong oracle value:
+  * PRIMARY, unchanged as a trigger: 20-60 m tracer K rises 10x from 2.595e-07.
+    Below 2x still REFUTES.
+  * But FULL CLOSURE of that band now needs ~3250x, not 10x, so a 10x rise is
+    evidence the mechanism is live -- it is NOT an adoption, and must not be
+    reported as closing the band.
+  * ADDED, and cheaper to read than any ratio: the turbulent-layer depth must
+    move from 17.9 m toward 73.2 m. It is a depth, so it cannot be inflated by
+    unclamping a limiter the way a coefficient ratio can.
