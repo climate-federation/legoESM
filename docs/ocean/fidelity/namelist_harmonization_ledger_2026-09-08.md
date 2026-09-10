@@ -278,3 +278,40 @@ The primary threshold was written against the wrong oracle value:
   * ADDED, and cheaper to read than any ratio: the turbulent-layer depth must
     move from 17.9 m toward 73.2 m. It is a depth, so it cannot be inflated by
     unclamping a limiter the way a coefficient ratio can.
+
+## 2026-09-10 (d) — the energy ARRIVES and is destroyed within a few metres
+
+Read from the baseline day-30 snapshot, cold-tongue box, no simulation. Our own
+turbulent energy by depth:
+
+| depth | our TKE [m2/s2] |
+|---|---|
+| 1.02 m | 1.30e-03 |
+| 4.49 m | 2.33e-05 |
+| 21.04 m | 6.66e-08 |
+| 57.40 m | 2.16e-08 |
+
+Four orders of magnitude lost inside the top 20 m, and NEMO's rn_emin is 1e-10,
+so this is not the floor binding -- the energy is genuinely gone.
+
+THE SOURCE IS NOT THE PROBLEM (PLAUSIBLE, not confirmed). For a typical
+cold-tongue trade stress of order 0.05 N/m2, NEMO's Dirichlet condition
+rn_ebb*|tau|/rho0 with rn_ebb=67.83 gives about 3.3e-03 m2/s2. Our value one
+metre down is 1.30e-03, the same order. The probe could not close this properly
+because the snapshot carries no wind-stress field (INSTRUMENT DEBT: it saves T,
+S, u, v, tke, the two diffusivity diagnostics and the grid, but no stress), so
+the comparison rests on a typical stress rather than our own. Labelled PLAUSIBLE
+until the stress is saved.
+
+WHAT THAT LEAVES. Energy arrives at the surface at roughly the right size and is
+destroyed before it reaches 5 m. The decay between 1 m and 4.5 m is a factor of
+56. In this closure only two terms can do that: Kolmogoroff dissipation, which
+goes as e^1.5/l, and the failure of the TKE equation's own vertical
+self-diffusion to carry energy downward. That self-diffusion is proportional to
+our momentum coefficient, which in the same box and the same 0-20 m band is
+1.38e-04 against the oracle's 6.62e-03 -- 48x weaker. So the downward transport
+channel is 48x weaker exactly where the energy is being lost, which is the loop
+the running carried-coefficient arm acts on.
+
+This is the pre-registered "source faithful, loss downstream" outcome of the
+surface-TKE probe, and it supports the arm rather than replacing it.
