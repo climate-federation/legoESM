@@ -581,3 +581,34 @@ Status: the P/eps numbers are CONFIRMED from the snapshot; the attribution to a
 dropped source is PLAUSIBLE and is the next thing to read in the code, not to
 run. The shear arm's 1.22x is consistent — changing how production is
 DISCRETISED cannot matter if production is not reaching e at all.
+
+### ★CORRECTION, same day: the P/eps imbalance is REAL but SMALL in its implications
+
+I wrote that production "is not entering the equation". That overstates what the
+ratio supports, and I am withdrawing it. Dissipation goes as e^1.5, so a
+production-to-dissipation ratio of 16 implies an equilibrium energy only
+16^(2/3) ~ 6x above ours, not the orders of magnitude the diffusivity is short.
+Working it directly: eps = P at 20-60 m gives e_eq ~ 7.5e-08 against our
+2.83e-08 — a factor 2.6.
+
+Also checked in the code rather than assumed: the shear production is an
+EXPLICIT source in the right-hand side (rhs = e_old + dt*(P_s + buoy_source)),
+so it is not dropped from the solve. GLM's "missing interior source" reading is
+not supported by the source.
+
+WHAT THE ARITHMETIC ACTUALLY SAYS. With our energy, K = 0.1*l*sqrt(2e) needs
+l ~ 80 m to reach the oracle's 1.9e-03; with an oracle-like energy of ~1e-06 it
+still needs l ~ 14 m. Ours is 0.12 m. The LENGTH SCALE is the dominant
+shortfall, and in this closure the length is itself set by the energy through
+the buoyancy length sqrt(2e)/N: at our e and a thermocline N, that is ~0.02 m.
+So the two collapse together, which is why no single physics knob has moved it.
+
+This is consistent with codex's CRITICAL, which names the same feedback from the
+other end: if the coefficient consumed by the closure is the freshly-collapsed
+one rather than the carried previous-step value, production is evaluated with an
+already-dead K and the loop sustains itself.
+
+STATUS: the P/eps ratios stand as measured. The "production never arrives"
+attribution is RETRACTED. The live question is now narrow and checkable in code:
+which diffusivity does our shear production consume, the carried one or the
+recomputed one.
