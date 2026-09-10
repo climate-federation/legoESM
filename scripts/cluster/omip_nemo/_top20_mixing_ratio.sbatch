@@ -25,7 +25,7 @@ echo "HEAD: $(git log --oneline -1)"
 export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
-export OURS_SNAP NEMO_FILE NEMO_RECS
+export OURS_SNAP NEMO_FILE NEMO_RECS NEMO_TFILE
 $PY - <<'PY2'
 import numpy as np, netCDF4 as nc
 import os
@@ -150,14 +150,37 @@ turb_n, mld_n = [], []
 for _i, t in enumerate(_recs):
     a_ = np.ma.filled(avt[t], np.nan)[:, nbox].T
     turb_n.append(np.nanmedian(_depth_of_last(a_ > KTURB, depw)))
-_tv = next(v for v in ("votemper", "to", "thetao") if v in d.variables)
-tt = np.ma.filled(d.variables[_tv][_recs[0]], np.nan)[:, nbox].T
-mld_n = _mld(tt, np.asarray(d.variables["deptht"][:]))
+# The oracle's temperature is NOT in the diffusivity file: the 5-day GATEWAY
+# grid_W carries only w and the coefficients, so reading a temperature name out
+# of it raised StopIteration and killed the whole block, including the
+# turbulent-layer row above it that HAD its data.  The T file is a separate
+# input now, and its absence degrades one line instead of the card.
+NEMO_T = os.environ.get("NEMO_TFILE", "")
+mld_n = None
+if NEMO_T:
+    dt_ = nc.Dataset(NEMO_T)
+    try:
+        _tv = next((v for v in ("votemper", "to", "thetao")
+                    if v in dt_.variables), None)
+        if _tv is None:
+            print(f"[mld] {NEMO_T} carries no temperature "
+                  f"({sorted(dt_.variables)[:8]}...); NEMO mixed layer skipped")
+        else:
+            _trec = _recs[0] if dt_.variables[_tv].shape[0] > _recs[0] else 0
+            tt = np.ma.filled(dt_.variables[_tv][_trec], np.nan)[:, nbox].T
+            mld_n = _mld(tt, np.asarray(dt_.variables["deptht"][:]))
+            print(f"[mld] NEMO temperature from {NEMO_T} record {_trec}")
+    finally:
+        dt_.close()
+else:
+    print("[mld] NEMO_TFILE unset; NEMO mixed layer skipped (set it to the "
+          "grid_T file matching NEMO_FILE's window)")
 print("\n=== how deep does the turbulence reach? (cold tongue) ===")
 print(f"  turbulent layer (K > {KTURB:g} m2/s): ours median {np.nanmedian(turb_o):6.1f} m"
       f"   NEMO median {np.nanmedian(turb_n):6.1f} m")
+_mn = "   n/a (no T file)" if mld_n is None else f"{np.nanmedian(mld_n):6.1f} m"
 print(f"  mixed layer (|T - T_surf| > 0.2 K):   ours median {np.nanmedian(mld_o):6.1f} m"
-      f"   NEMO median {np.nanmedian(mld_n):6.1f} m")
+      f"   NEMO median {_mn}")
 print("  (the second line uses temperature only, so it does not depend on any"
       " diffusivity convention)")
 
