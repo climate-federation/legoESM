@@ -475,3 +475,45 @@ WHAT CHANGES, stated plainly:
 
 Status of the claim is downgraded from CONFIRMED to PLAUSIBLE pending a
 comparison in which both sides resolve the intermittency.
+
+## ★2026-09-10 — THE SHEAR ARM IS A NULL. THE SHEAR HYPOTHESIS IS RETIRED.
+
+Job 9685519 (leg 1) + 9689614 (leg 2), one variable against the production
+baseline: TKE shear production moved from our centred-square form to NEMO's own
+zdf_sh2 (face-native differences, product at NOW squared, coastal doubling), the
+variant fixed by the oracle's key_RK3 build. Both legs rc=0, all fields finite,
+and the leg-1 state digest differed from the baseline's, so the discretisation
+was genuinely active — this is a real null, not a no-op.
+
+Scored at day 30 against GATEWAY record 5, against the pre-registration written
+before the run:
+
+| gate | pre-registered | measured | verdict |
+|---|---|---|---|
+| PRIMARY 20-60 m tracer K | rise from 2.60e-07 by >=10x; refuted below 2x | 3.19e-07, a factor **1.22** | **REFUTED** |
+| co-gate 20-60 m Prandtl | falls from 11.4 toward 1.2 | 9.36 | barely moved |
+| secondary EUC core at 220E | 0.20 -> toward 0.55 m/s | 0.199 | unchanged |
+| guardrail SST rmse | within 0.05 of the baseline's 0.51 | 0.499 | passed |
+| guardrail nino3 bias | <= +1.10 | +1.15 | marginally breached |
+
+Momentum diffusivity at 20-60 m also did not move (2.98e-06 against the
+baseline's 2.95e-06) — still pinned at the background.
+
+VERDICT, stated plainly: the shear-production discretisation is NOT what keeps
+our turbulence dormant below 18 m. Taken with the earlier face-native arm, which
+was null on the vertical velocity, the meridional transport and the Pacific
+index, **the shear hypothesis is retired.** Two arms, two different measured
+quantities, both null.
+
+WHAT THIS LEAVES. The mixing collapse below 18 m is real and unexplained: our
+diffusivity sits at the background from 18 m to 155 m while the oracle carries
+1.9e-03 at 20-60 m, and neither the enhanced-diffusion knob, the mixing length,
+nor the shear discretisation moves it. The remaining candidates from the ledger
+are the eddy coefficient (staged, awaiting the user) and the tracer advection
+scheme; but neither is a turbulence term, so the honest position is that the
+production defect has not yet been localised to a named term.
+
+INSTRUMENT NOTE: the band probe's turbulent-layer-depth block raised
+StopIteration on this run — the 5-day grid_W file carries no temperature
+variable, so the mixed-layer part cannot run against it. The band ratios above
+are unaffected. Fix the guard before quoting that block again.
