@@ -1440,7 +1440,9 @@ def compute_nemo_native_slopes(
         acc = lax.optimization_barrier(
             corners + 2.0 * cardinals
             + 4.0 * fp[1:nlat + 1, 1:nlon + 1, :])
-        zcof = jnp.asarray(1.0 / 16.0, dtype=dtype)
+        # 1/16 normalises the (1,2,1)x(1,2,1) nine-point stencil assembled
+        # just above: corners + 2*cardinals + 4*centre sums to 16.
+        zcof = jnp.asarray(1.0 / 16.0, dtype=dtype)  # coeff-ok: stencil weight
         for factor in literal_factors:
             zcof = lax.optimization_barrier(zcof * factor)
         return lax.optimization_barrier(acc * zcof)

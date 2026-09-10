@@ -94,11 +94,6 @@ LITERAL_BUDGET: dict[str, dict[str, int]] = {
     "scripts/validate/land_beta_soil_bake_discriminator.py": {
         "0.716, 0.622, 0.723, 0.457, 0.507, 0.504, 0.488, 0.477)": 1,  # pre-existing, surfaced by discovery fix 2026-09-03
     },
-    "scripts/validate/ocean_fidelity/bulk_parity_fesom_nemo.py": {
-        "lw_up = constants.emissivity_ocean*constants.sigma_sb*(np.asarray(sst)+273.15)**4": 1,  # pre-existing, surfaced by discovery fix 2026-09-03
-        "q = 0.8 * 0.640380/1.22*np.exp(-5107.4/(tair+273.15))": 1,  # pre-existing, surfaced by discovery fix 2026-09-03
-        "qsat_a = 0.98*640380/1.22*np.exp(-5107.4/(tair+273.15))*1e-3 # ~kg/kg scale hack": 1,  # pre-existing, surfaced by discovery fix 2026-09-03
-    },
     "scripts/validate/ocean_fidelity/dino_1226/southern_wall_balance.py": {
         "* np.cos(np.deg2rad(np.asarray(A.gphit, float))) / 6371229.0)": 1,  # pre-existing, surfaced by discovery fix 2026-09-03
         "_R = 6371229.0 # NEMO ra # coeff-ok: oracle constant": 1,  # pre-existing, surfaced by discovery fix 2026-09-03
@@ -166,7 +161,6 @@ _RATCHET_DOWN = frozenset(
         "packages/ocean/legoesm/ocean/eos.py",
         "scripts/run/run_les_plane.py",
         "scripts/validate/land_beta_soil_bake_discriminator.py",
-        "scripts/validate/ocean_fidelity/bulk_parity_fesom_nemo.py",
         "scripts/validate/ocean_fidelity/dino_1226/southern_wall_balance.py",
         "scripts/validate/ocean_fidelity/dino_1226/vertex_area_pair_analysis.py",
     }

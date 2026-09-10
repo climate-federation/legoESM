@@ -211,7 +211,7 @@ def nemo_bbl_static_geometry(
     elif depth.shape != h.shape:
         raise ValueError(f"gdept_0 must be {(nlev,)} or {h.shape}, got {depth.shape}")
 
-    wet3 = h > jnp.asarray(1.0e-3, dtype=h.dtype)
+    wet3 = h > jnp.asarray(1.0e-3, dtype=h.dtype)  # coeff-ok: wet-cell thickness floor [m]
     n_active = jnp.sum(wet3.astype(jnp.int32), axis=-1)
     bot_k = jnp.maximum(n_active - 1, 0)
     dep_bot = jnp.take_along_axis(depth, bot_k[..., None], axis=-1)[..., 0]

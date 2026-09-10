@@ -153,10 +153,10 @@ class TestDeferredImports:
         assert cfg.a_ver is None
 
     def test_require_fesom_jax_raises_clearly(self, monkeypatch):
-        """If fesom_jax import fails, _require_fesom_jax raises an ImportError
+        """If fesom_jax import fails, require_fesom_jax raises an ImportError
         whose message names the package and gives an install command.
 
-        This test FAILS if _require_fesom_jax is removed, returns silently,
+        This test FAILS if require_fesom_jax is removed, returns silently,
         or raises a different exception type / message — covering every
         branch of the gate.
         """
@@ -179,9 +179,9 @@ class TestDeferredImports:
 
         monkeypatch.setattr(builtins, "__import__", fake_import)
         try:
-            from legoesm.ocean.dynamics.ocean_model_fesom import _require_fesom_jax
+            from legoesm.ocean.dynamics.ocean_model_fesom import require_fesom_jax
             with pytest.raises(ImportError) as excinfo:
-                _require_fesom_jax()
+                require_fesom_jax()
             msg = str(excinfo.value)
             assert "fesom_jax" in msg, (
                 f"ImportError message must name 'fesom_jax'; got: {msg!r}"
