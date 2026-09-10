@@ -552,3 +552,32 @@ has to explain small PRODUCTION, not a limiter, a floor, or a cap.
 
 That also rules out the last reading of the floors question: we had established
 the floors are faithful to the oracle; this shows they are not even active here.
+
+## ★★★2026-09-10 — PRODUCTION IS NOT REACHING THE TKE EQUATION
+
+GLM's discriminator, run offline on the baseline day-30 snapshot in the cold
+tongue: per level, shear production P = K_M * M^2 against dissipation
+eps = c_eps * e^1.5 / l (c_eps = 0.7, l inferred from our own K_M and e).
+
+Above 18 m, P/eps runs 0.07-0.6 — the surface layer is dissipation-dominated,
+as expected where wave breaking supplies the energy. BELOW 18 m it inverts and
+keeps climbing: 1.49 at 17.9 m, 5.68 at 24.6 m, 8.89 at 44.1 m, 16.16 at 73.2 m.
+
+A closure in balance has P ~ eps. Ours has production exceeding dissipation by
+up to a factor 16 while the energy sits flat at 2.83e-08 and the diffusivity is
+constant to four significant figures over 140 m. Energy that large and that
+persistent cannot be being added and then removed; it is NOT ENTERING THE
+EQUATION THAT SETS e.
+
+This reframes the whole campaign: the five eliminated candidates were all
+physics hypotheses, and this says the defect is upstream of the physics — a live
+source with no leverage on the prognostic variable. GLM's reading, which
+predicted exactly this signature: a production term dropped inside the implicit
+/ tridiagonal TKE solve; index offsets, wrong time levels and stale reads shift
+or lag structure but cannot erase vertical correlation the way a missing
+interior source does.
+
+Status: the P/eps numbers are CONFIRMED from the snapshot; the attribution to a
+dropped source is PLAUSIBLE and is the next thing to read in the code, not to
+run. The shear arm's 1.22x is consistent — changing how production is
+DISCRETISED cannot matter if production is not reaching e at all.
