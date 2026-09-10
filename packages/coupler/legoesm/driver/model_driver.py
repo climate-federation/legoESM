@@ -11197,11 +11197,18 @@ class ModelDriver:
                             n_steps=_led_nsteps,
                             day=elapsed_day + START_DAY,
                             # Rank locality is part of the reduction: under
-                            # cell partitioning these rows are one rank's
-                            # columns, so a reader must not present them as a
-                            # global table (the energy tracker refuses to run
-                            # at all in that case, which is why nothing
-                            # caught this before).
+                            # cell partitioning these rows would be ONE rank's
+                            # columns, and no weighting makes that a global
+                            # budget.  Today this is always False -- setup
+                            # already REFUSES --budget-ledger whenever the
+                            # world size exceeds one or a Voronoi layout
+                            # exists, which is strictly broader than this
+                            # predicate.  It is stamped anyway because that
+                            # refusal is documented as "serial-only FOR NOW":
+                            # when the ledger gather is wired the artifact
+                            # becomes rank-local, and the reader should refuse
+                            # at that moment rather than print a per-rank
+                            # table as a global one.
                             cell_partitioned=bool(
                                 _is_mpas_cell_partitioned(self)),
                             # The reduction the reader MUST use (#1354).  The
