@@ -762,33 +762,16 @@ def _global_dot_batch(
     # ``activate_latlon_spmd_halo`` (cube SPMD does not call this), so this
     # branch is inert for the serial and MPI paths.  ``psum`` is
     # self-transposing => AD-safe, same as ``allreduce(SUM)``.
-    from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
-    if get_halo_backend() == "spmd":
-        mesh = get_spmd_mesh()
-        if mesh is None:
-            # backend armed "spmd" but no mesh set: an invalid state
-            # reachable only via the public set_halo_backend("spmd")
-            # without a matching set_spmd_mesh.  FAIL FAST rather than
-            # silently return unreduced partial sums inside a sharded
-            # solve (codex LOW) — the supported activators
-            # (activate_latlon_spmd_halo / the cube equivalent) always set
-            # the mesh together with the backend.
-            raise RuntimeError(
-                "_global_dot_batch: halo backend is 'spmd' but no SPMD mesh "
-                "is set; arm it via activate_latlon_spmd_halo(mesh).")
-        # Route to psum ONLY for the lat-band ocean SPMD mesh, keyed on the
-        # ``"lat"`` axis BY NAME (activate_latlon_spmd_halo guarantees it).
-        # The cube atm SPMD backend ALSO sets backend=="spmd" but with a
-        # ``("face", ...)`` mesh; in a coupled run that mesh could be armed
-        # while this ocean barotropic PCG runs, and psum'ing over a
-        # non-lat (or replicated) axis would multiply the dots by the
-        # device count or crash (codex HIGH).  When the armed SPMD mesh is
-        # not the lat-band one, fall through to the MPI/local logic below
-        # (ocean fields are never cube-sharded, so the local/allreduce sum
-        # is the correct reduction there).
-        if "lat" in tuple(mesh.axis_names):
-            from legoesm.parallel.reductions import batch_psum_spmd
-            return batch_psum_spmd(local, "lat")
+    # Ocean SPMD lanes (lat-lon "lat" bands / Voronoi "device" blocks): the
+    # canonical gate ``spmd_reduce_axis`` names the axis or returns None so the
+    # cube-atm SPMD mesh (no ocean axis) falls through to the MPI/local logic
+    # below (ocean fields are never cube-sharded); it raises on a backend
+    # armed "spmd" without a mesh rather than silently returning partial sums.
+    from legoesm.parallel.reductions import spmd_reduce_axis
+    _ax = spmd_reduce_axis()
+    if _ax is not None:
+        from legoesm.parallel.reductions import batch_psum_spmd
+        return batch_psum_spmd(local, _ax)
     # Function-scope import: ``reductions`` pulls in mpi4jax lazily and
     # ``core.operators`` (cross-package), so keep it out of module top.
     from legoesm.parallel.reductions import (
