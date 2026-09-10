@@ -79,6 +79,12 @@ class DuoWindowSpmdComm:
     #: full refresh; an int = band depth in cells (ng + 1 is the
     #: certified value; ng - 1 is the sabotage that must fail).
     refresh_band = None
+    #: DIAGNOSTIC (GLM 2026-09-10): skip the substep-ENTRY full refresh
+    #: (the ``body is None`` firing) to split the ~69 ms between the
+    #: no-per-firing-refresh floor and compute into the entry refresh (A)
+    #: and the per-firing shard_map boundary (B).  Results are WRONG with
+    #: this on -- decomposition arm only, never a ladder row.
+    entry_refresh = True
     #: set to a list to record every firing at trace time as
     #: (name, kind, shapes) -- the M8 firing census
     firing_log = None
@@ -486,6 +492,8 @@ class DuoWindowSpmdComm:
         return (afxw.at[..., sel].set(ax), afyw.at[..., sel].set(ay))
 
     def refresh(self, bundle: dict) -> dict:
+        if not self.entry_refresh:
+            return dict(bundle)
         """Seam pads of every window-stacked padded array rebuilt from the
         neighbours' blocks (the two ppermute rounds, no exchange body)."""
         lay = self.lay

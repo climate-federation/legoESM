@@ -1979,6 +1979,7 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
               damp_v: float = 0.2, damp_t: float = 0.0,
               hydrostatic: bool = True, inline_q: bool = False,
               lim_fac: float = 1.0, duogrid: bool = True,
+              nq: int = 1,
               workspace_sentinel: float = 1.0e30):
     """JAX twin of ``fv3_native_duo_sw_core.d_sw1_duo``
     (sw_core.F90:500-998, DUO branch).
@@ -2092,7 +2093,14 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
     yfx_adv = _nw(isd, ied, js, je + 1)
     ra_x = _nw(is_, ie, jsd, jed)
     ra_y = _nw(isd, ied, js, je)
-    nq = 1
+    # nq = passenger tracers; only the WIDTH of the allflux stack depends
+    # on it here (slots 4.. are the tracer fluxes, which this lane leaves
+    # at the sentinel unless inline_q -- tracer transport runs in
+    # fv3_tracer2d, which loops over its own nq).  The caller passes the
+    # context's tab.nq so the stack matches what the barrier expects.
+    if int(nq) < 1:
+        raise ValueError(f"d_sw1_duo: nq={nq} < 1")
+    nq = int(nq)
     # dtype follows storage (fp32/fp64), from delp
     allflux_x = jnp.full((nci + 1, ncj, 4 + nq), jnp.nan, delp.dtype)
     allflux_y = jnp.full((nci, ncj + 1, 4 + nq), jnp.nan, delp.dtype)

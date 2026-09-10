@@ -102,6 +102,11 @@ def main(argv=None):
                     help="M8-C arm: per-firing pad refresh restricted to "
                          "the face-edge bands of this depth (ng+1 is the "
                          "certified value; ng-1 must FAIL the gate)")
+    ap.add_argument("--diag-no-entry-refresh", action="store_true",
+                    help="DIAGNOSTIC: skip the substep-ENTRY full refresh "
+                         "(results are WRONG; splits the residual between "
+                         "that refresh and the per-firing shard_map "
+                         "boundary) -- never a ladder row")
     ap.add_argument("--timing", type=int, default=0,
                     help="after the gated steps, run this many more steps "
                          "and report wall time per step (max over ranks, "
@@ -269,6 +274,10 @@ def main(argv=None):
     if args.pack_pad_refresh:
         win_model._window_comm.pack_pad_refresh = True
         print("[m6] M8-A arm: packed pad refresh")
+    if args.diag_no_entry_refresh:
+        win_model._window_comm.entry_refresh = False
+        print("[m6] DIAGNOSTIC ARM: substep-entry refresh OFF -- timing "
+              "only, results not a ladder row")
     if args.diag_no_pad_refresh:
         win_model._window_comm.pad_refresh_per_firing = False
         print("[m6] DIAGNOSTIC ARM: per-firing pad refresh OFF -- timing "

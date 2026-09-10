@@ -635,6 +635,7 @@ def dsw_transport_phase_3d(ctx, states: dict, csw_outs: dict, dt, km, *,
                 nord_v=c.nord_v, nord_t=0,
                 damp_v=c.damp_v, damp_t=0.0,
                 hydrostatic=hydrostatic,
+                nq=int(ctx.tab.nq),
                 workspace_sentinel=0.0))
         per_face_levels.append(levels)
 
@@ -809,6 +810,7 @@ def _dsw_transport_phase_3d_batched(ctx, states, uc6, vc6, divgd6, dt,
                          nord_v=c.nord_v, nord_t=0,
                          damp_v=c.damp_v, damp_t=0.0,
                          hydrostatic=hydrostatic,
+                         nq=int(ctx.tab.nq),
                          workspace_sentinel=0.0)
 
     vf1 = jax.vmap(one_face_sw1, in_axes=(0,) * 12)

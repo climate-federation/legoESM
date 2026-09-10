@@ -168,3 +168,40 @@ def test_window_barriers_with_a_level_axis_match_the_per_level_impl(kind):
         want = np.asarray(r)
         bad = (got != want) & ~(np.isnan(got) & np.isnan(want))
         assert not bad.any(), f"{kind} {nm}: {bad.sum()} cells differ"
+
+
+@pytest.mark.parametrize("nq", [1, 2])
+def test_barrier_stacks_follow_the_tracer_count(nq):
+    """nq>1 plumbing (2026-09-10): the halo tables, the d_sw1 flux stack
+    and the barrier guard must agree on 4+nq slots, and the barrier must
+    blend exactly the oracle's selection (iq==1, iq>=4: delp, pt and
+    every tracer).  Default stays nq=1; nothing here changes a deck."""
+    from legoesm.core.fv3_duo_stepper import build_jax_duo_stepper_context
+    from legoesm.grids.factory import create_fv3_duo_grid
+    from legoesm.grids.fv3_duo_halos import average_allflux_shared_edges
+
+    grid = create_fv3_duo_grid(N)
+    ctx = build_jax_duo_stepper_context(grid.ctx_np, nq=nq)
+    assert int(ctx.tab.nq) == nq
+    # dyn_core.F90:856 -- iq == 1 (delp), iq >= 4 (pt and the tracers)
+    assert ctx.tab.allflux_slots.tolist() == [0] + list(range(3, 4 + nq))
+    npx, n = N + 1, N
+    ns = 4 + nq
+    rng = np.random.default_rng(3)
+    afx = jnp.asarray(rng.standard_normal((6, npx, n, ns)))
+    afy = jnp.asarray(rng.standard_normal((6, n, npx, ns)))
+    ox, oy = average_allflux_shared_edges(afx, afy, ctx.tab)
+    assert ox.shape == afx.shape and oy.shape == afy.shape
+    # the UNSELECTED slots (2 = w, 3 = q_con in the oracle's numbering)
+    # come back byte-identical; the selected ones are blended somewhere
+    unsel = [s for s in range(ns) if s not in ctx.tab.allflux_slots.tolist()]
+    assert unsel, "every slot selected -- the exclusion is gone"
+    for s in unsel:
+        assert np.array_equal(np.asarray(ox[..., s]), np.asarray(afx[..., s]))
+    assert not np.array_equal(np.asarray(ox[..., ctx.tab.allflux_slots[-1]]),
+                              np.asarray(afx[..., ctx.tab.allflux_slots[-1]]))
+    # a stack built for a DIFFERENT nq must be refused, not blended
+    bad = jnp.asarray(rng.standard_normal((6, npx, n, ns + 1)))
+    bady = jnp.asarray(rng.standard_normal((6, n, npx, ns + 1)))
+    with pytest.raises(ValueError, match="slot axis"):
+        average_allflux_shared_edges(bad, bady, ctx.tab)

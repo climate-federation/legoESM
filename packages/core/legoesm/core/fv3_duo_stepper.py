@@ -429,6 +429,7 @@ def build_jax_duo_stepper_context(ctx: dict, *,
                                   skip_b_endpoints: bool = False,
                                   spmd_mesh=None,
                                   dtype=None,
+                                  nq: int = _STEPPER_NQ,
                                   ) -> DuoStepperContext:
     """Convert the NumPy ``build_six_face_duo_context`` dict ONCE.
 
@@ -496,17 +497,33 @@ def build_jax_duo_stepper_context(ctx: dict, *,
             f"ctx['gs6'] holds {len(gs6)} faces, not 6 -- a short list "
             f"would silently step a subset of the cube")
 
-    tab = build_jax_duo_halo_tables(ctx["ectx"], gs6, nq=_STEPPER_NQ,
+    # nq: how many passenger tracers the barrier stacks carry.  Default
+    # _STEPPER_NQ = 1, the frozen deck.  The tables are built PER nq (the
+    # allflux slot axis is 4+nq and tab.allflux_slots indexes it), so a
+    # different nq needs its own context -- it cannot be changed after.
+    if int(nq) < 1:
+        raise ValueError(f"nq={nq}: the duo lane carries at least one "
+                         f"passenger tracer")
+    tab = build_jax_duo_halo_tables(ctx["ectx"], gs6, nq=int(nq),
                                     skip_b_endpoints=skip_b_endpoints,
                                     dtype=dtype)
     if spmd_mesh is not None:
         # ENGINEERING knob (M3): route every step-side halo exchange
-        # through the O(halo) shard_map ring on this mesh.  Selects no
-        # scientific configuration; the ring exchanges are bitwise-equal
-        # to the certified path (test_fv3_duo_spmd).  Default None keeps
-        # the certified single-device trace byte-identical.
-        from legoesm.grids.fv3_duo_spmd import build_ring_comm
-        tab.ring_comm = build_ring_comm(tab, spmd_mesh)
+        # through the SPMD arm built on this mesh.  The mesh SHAPE picks
+        # the arm -- ('face',) = the O(halo) whole-face shard_map ring;
+        # ('face','tile_i','tile_j') = the tiled port's (6,kt,kt) tile
+        # arm (duo_tiled_port_scope.md M3; kt=1 is the G0 bridge).  Any
+        # other axis layout is refused by the respective builder.
+        # Selects no scientific configuration; the SPMD exchanges are
+        # bitwise-equal to the certified path (test_fv3_duo_spmd /
+        # test_fv3_duo_tiled).  Default None keeps the certified
+        # single-device trace byte-identical.
+        if tuple(spmd_mesh.axis_names) == ("face",):
+            from legoesm.grids.fv3_duo_spmd import build_ring_comm
+            tab.ring_comm = build_ring_comm(tab, spmd_mesh)
+        else:
+            from legoesm.grids.fv3_duo_spmd import build_tile_comm
+            tab.tile_comm = build_tile_comm(tab, spmd_mesh)
 
     out = DuoStepperContext()
     out.n, out.ng = n, ng
@@ -911,6 +928,7 @@ def dsw12_step_sixface(ctx: DuoStepperContext, states: dict,
                     hord_tm=cfg.hord_tm, hord_dp=cfg.hord_dp,
                     nord_v=cfg.nord_v, nord_t=0,
                     damp_v=cfg.damp_v, damp_t=0.0,
+                    nq=int(ctx.tab.nq),
                     workspace_sentinel=0.0)
           for t in range(6)]
     s1s = _stack_faces(s1)
