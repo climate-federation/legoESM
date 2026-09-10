@@ -66,17 +66,25 @@ DEFAULT_MESH = ("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/"
 # `scripts/experiment/dino/nemo_scalar_math_rebuild.sh`, which pre-registers
 # what confirms and what refutes this diagnosis.
 #
-# WHY THE WAIVER IS SAFE, scoped to the path this gate covers: the DINO bridge
-# `bridge_nemo_to_legoesm_topo` reads `grid.ff_t` at ONE site
-# (nemo_state_bridge.py:616), a tolerance check of the Coriolis it BUILT from
-# `gphit`, and never reads `ff_f`.  So no ff_t value reaches a tendency.
-# NOT true of the sibling beta-plane bridge `bridge_nemo_to_legoesm`
-# (nemo_state_bridge.py:111), which fits f0/beta from `ff_t` and builds the
-# vertex Coriolis from `ff_f` -- that path serves GYRE, does not use this
-# transcription, and is out of this gate's scope.
+# SCOPE OF THE WAIVER -- CORRECTED 2026-09-10, IT IS NOW LOAD-BEARING.
+# `ff_t` still never reaches a tendency: the DINO bridge
+# `bridge_nemo_to_legoesm_topo` reads it at ONE site (nemo_state_bridge.py:616)
+# as a tolerance check of the Coriolis it BUILT from `gphit`, which is
+# bit-exact.  `ff_f` is different.  Filling NemoGrid's optional half (without
+# which the standalone card aborts at step 1 on `nemo_e3w_source=
+# 'mesh_reference'`) makes `_nemo_een_barotropic_operands` available on the
+# analytic path as it already was on the file-read path, and that operand
+# bundle carries `ff_f` RAW into the EEN barotropic Coriolis.  So this residual
+# DOES now enter a tendency -- measured 5824 of 10348 vertices differing, max 2
+# ulp / 2.711e-20 s^-1 -- and the sentence that used to stand here ("no ff_t
+# value reaches a tendency", read as covering both) no longer covers it.
+# It is a BOUND, not a licence: section 3 checks the same <=FF_ULP_WAIVER
+# bound on that leaf and fails outside it.  The fix belongs on the oracle's
+# side -- `scripts/experiment/dino/nemo_scalar_math_rebuild.sh`.
 #
-# NOTE this residual never enters legoESM: the bridge BUILDS its Coriolis from
-# `gphit` (which is bit-exact) and only reads `ff_t` to check itself.
+# The sibling beta-plane bridge `bridge_nemo_to_legoesm` (nemo_state_bridge.py:
+# 111) also consumes both arrays, but serves GYRE, does not use this
+# transcription, and is out of this gate's scope.
 FF_ULP_WAIVER = 4
 
 # Rule 1 dispositions for every variable mesh_mask.nc carries.  VERIFIED rows
@@ -297,27 +305,46 @@ def main() -> int:
     file_br = bridge_nemo_to_legoesm_topo(
         fg, NemoState(T=_z, S=_z, u=_z, v=_z,
                       ssh=np.zeros(fg.tmask.shape[:2]), rhd=None),
-        periodic_i=True, full_step=True)
+        periodic_i=True, full_step=True, carry_native_lat_deg=True)
     ours = dino_mod.nemo_faithful_dino_domain()
     import jax.tree_util as _jtu
 
-    def _same(a, b):
-        """Leaf-for-leaf equality, descending into nested pytrees."""
+    def _same(a, b, ulp_waiver=0):
+        """Leaf-for-leaf equality, descending into nested pytrees.
+
+        ``ulp_waiver`` admits ONLY the documented ff_f residual (see
+        FF_ULP_WAIVER above), and only as a BOUND: a leaf that differs by
+        more than that, or by more than a rounding-scale amount, still fails.
+        """
         la = _jtu.tree_leaves(a)
         lb = _jtu.tree_leaves(b)
         if len(la) != len(lb):
             return False
         for x, y in zip(la, lb):
             x, y = np.asarray(x), np.asarray(y)
-            if x.shape != y.shape or not bool(np.array_equal(x, y)):
+            if x.shape != y.shape:
                 return False
+            if bool(np.array_equal(x, y)):
+                continue
+            if not ulp_waiver or not np.issubdtype(x.dtype, np.floating):
+                return False
+            mx = float(np.max(np.abs(x.astype(np.float64)
+                                     - y.astype(np.float64))))
+            if mx >= 1e-9 or _ulp(x, y) > ulp_waiver:
+                return False
+            print(f"  WAIVED<={ulp_waiver}ulp  leaf differs by "
+                  f"{_ulp(x, y)} ulp / {mx:.3e} (the NEMO binary's ff_f)")
         return _jtu.tree_structure(a) == _jtu.tree_structure(b)
 
     n_diff = 0
     for label, a_obj, b_obj in (("geometry", ours.geometry, file_br.geometry),
                                 ("z_coord", ours.z_coord, file_br.z_coord)):
         for fld in a_obj._fields:
-            if not _same(getattr(a_obj, fld), getattr(b_obj, fld)):
+            # nemo_een_barotropic carries ff_f RAW (nemo_state_bridge.py:69-83);
+            # it is the ONE leaf the documented ff_f waiver reaches.
+            waiver = (FF_ULP_WAIVER if fld == "nemo_een_barotropic" else 0)
+            if not _same(getattr(a_obj, fld), getattr(b_obj, fld),
+                         ulp_waiver=waiver):
                 print(f"  DIFF  {label}.{fld}")
                 n_diff += 1
     same_mask = bool(np.array_equal(np.asarray(ours.land_mask),

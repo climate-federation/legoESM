@@ -503,12 +503,23 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     restart_paths = [Path(path).resolve() for path in sorted(glob.glob(restart_pattern))]
     require(restart_paths, f"no restart tiles match {restart_pattern}")
     rebuild = load_rebuilder()
-    raw = rebuild(restart_pattern, ["tn", "sn", "sshn"])
-    require(set(raw) == {"tn", "sn", "sshn"},
+    # WHICH TIME LEVEL (oracle-fidelity Rule 1d).  NEMO's MLF restart carries
+    # both, and comparing against the wrong one silently substitutes
+    # |T_now - T_before| for "error".  "now" (tn/sn/sshn, the default) is the
+    # state AFTER the step the restart is stamped with, and is what a day-N
+    # comparison wants.  "before" (tb/sb/sshb, the Kbb level) is the ONLY
+    # correct reference for a DAY-0 comparison against a from-rest kt=1
+    # record: the Euler first step (l_1st_euler, istate.f90:114-115) advances
+    # Kmm/Kaa only, so Kbb is still the untouched initial condition while
+    # tn/sn/sshn have already moved (sshn reaches 1.17e-1 m by kt=1).
+    level = {"now": ("tn", "sn", "sshn"),
+             "before": ("tb", "sb", "sshb")}[args.nemo_time_level]
+    raw = rebuild(restart_pattern, list(level))
+    require(set(raw) == set(level),
             f"incomplete rebuilt comparator: {sorted(raw)}")
-    nemo_t_full = np.moveaxis(np.asarray(raw["tn"]), 0, -1)
-    nemo_s_full = np.moveaxis(np.asarray(raw["sn"]), 0, -1)
-    nemo_ssh_full = np.asarray(raw["sshn"])
+    nemo_t_full = np.moveaxis(np.asarray(raw[level[0]]), 0, -1)
+    nemo_s_full = np.moveaxis(np.asarray(raw[level[1]]), 0, -1)
+    nemo_ssh_full = np.asarray(raw[level[2]])
     require(np.isfinite(nemo_t_full).all() and np.isfinite(nemo_s_full).all()
             and np.isfinite(nemo_ssh_full).all(), "stitched NEMO state is incomplete")
 
@@ -580,6 +591,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "schema": "dino-twin-nemo-ts-maps-v1",
         "day": args.day,
         "nemo_kt": args.nemo_kt,
+        "nemo_time_level": args.nemo_time_level,
         "alignment": {
             "full_horizontal_shape": list(FULL_HORIZONTAL_SHAPE),
             "one_ring_slice": "[1:-1,1:-1]",
@@ -640,6 +652,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="fresh directory for PNGs and JSON sidecar")
     parser.add_argument("--nemo-run", type=Path, default=DEFAULT_NEMO_RUN)
     parser.add_argument("--mesh-mask", type=Path, default=DEFAULT_MESH)
+    parser.add_argument("--nemo-time-level", choices=("now", "before"),
+                        default="now",
+                        help="which MLF level of the NEMO restart to score "
+                             "against: 'now' (tn/sn/sshn, default) is the "
+                             "state after the stamped step; 'before' "
+                             "(tb/sb/sshb) is the Kbb level, and is the only "
+                             "correct reference for a day-0 comparison "
+                             "against a from-rest kt=1 record")
     parser.add_argument("--self-test", action="store_true",
                         help="run the planted wet-cell violation without inputs")
     return parser

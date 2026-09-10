@@ -363,8 +363,25 @@ def nemo_dino_mesh(nml: NemoDinoNamelist = NEMO_DINO_R1) -> NemoGrid:
         return np.broadcast_to(a1d[None, None, :], (n_lat, n_lon, jpk)).copy()
 
     e3t_0 = _lev(lad["e3t_0"])
+    e3w_0 = _lev(lad["e3w_0"])
+    # fmask = tmask(i,j)*tmask(i+1,j)*tmask(i,j+1)*tmask(i+1,j+1) (dommsk:152)
+    _te = np.roll(tmask, -1, axis=1)
+    fmask = np.zeros_like(tmask)
+    fmask[:-1] = tmask[:-1] * _te[:-1] * tmask[1:] * _te[1:]
     # e3tw_to_other_e3 (zgr_lib.F90:206-264) averages neighbouring columns;
     # on this horizontally-uniform ladder the averages equal e3t_0 exactly.
+    #
+    # THE OPTIONAL HALF OF NemoGrid IS NOT OPTIONAL HERE.  Until 2026-09-10
+    # these eight fields were left unset, and the analytic domain therefore
+    # disagreed with the file-read one on seven z_coord leaves -- gdepw_0,
+    # e3w_0, e1e2u, e1e2v, e2u, e1v and the EEN barotropic Coriolis operands
+    # -- so a standalone run and the certified twin were not the same
+    # experiment, which is the one thing this transcription exists to
+    # guarantee.  Since main's `nemo_e3w_source='mesh_reference'` landed it is
+    # worse than a fidelity gap: the standalone card ABORTS at step 1 with
+    # "requires z_coord.nemo_e3w_0".  Every value below is already checked
+    # bit-for-bit against mesh_mask by nemo_dino_mesh_gate.py; they simply
+    # were not being handed to the bridge.
     return NemoGrid(
         glamt=hgr["glamt"], gphit=hgr["gphit"],
         e1t=hgr["e1t"], e2t=hgr["e2t"], e1u=hgr["e1u"], e2v=hgr["e2v"],
@@ -372,7 +389,10 @@ def nemo_dino_mesh(nml: NemoDinoNamelist = NEMO_DINO_R1) -> NemoGrid:
         e3t_1d=lad["e3t_1d"], gdept_1d=lad["gdept_1d"], gdepw_1d=lad["gdepw_1d"],
         tmask=tmask, umask=umask, vmask=vmask,
         e3t_0=e3t_0, gdept_0=_lev(lad["gdept_0"]),
+        gdepw_0=_lev(lad["gdepw_0"]), e3w_0=e3w_0,
         gphiv=hgr["gphiv"],
+        e2u=hgr["e2u"], e1v=hgr["e1v"], e1f=hgr["e1f"], e2f=hgr["e2f"],
+        e3f_0=e3t_0, fmask=fmask,
         seam_wall_rows=None,
         e3u_0=e3t_0, e3v_0=e3t_0,
         hu_0=(e3t_0 * umask).sum(axis=-1), hv_0=(e3t_0 * vmask).sum(axis=-1),

@@ -1,6 +1,8 @@
 """Direct, oracle-independent tests for the DINO twin/NEMO map comparator."""
 from __future__ import annotations
 
+import inspect
+
 import numpy as np
 import pytest
 
@@ -135,3 +137,28 @@ def test_arm_and_run_dino_readers_meet_at_one_scoring_path():
     src = inspect.getsource(M.load_candidate)
     assert "load_run_dino_snapshot" in src and "load_arm_npz" in src
     assert "error_stats" not in src and "save_figures" not in src
+
+
+def test_nemo_time_level_defaults_to_now_and_offers_the_before_level():
+    """Rule 1d: the MLF level a comparison scores against is a CHOICE.
+
+    A day-0 comparison against a from-rest kt=1 record must read the Kbb
+    level (tb/sb/sshb); the now level has already taken the Euler step, and
+    its sshn is 1.17e-1 m where the initial ssh is exactly 0.
+    """
+    parser = M.build_parser()
+    assert parser.parse_args([]).nemo_time_level == "now"
+    assert parser.parse_args(
+        ["--nemo-time-level", "before"]).nemo_time_level == "before"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--nemo-time-level", "kaa"])
+
+
+def test_both_time_levels_name_real_restart_variables():
+    # Non-vacuity for the mapping itself: a typo in either tuple would send
+    # the rebuilder looking for a variable that does not exist, and the
+    # rebuilder returns a SHORT dict rather than raising.
+    src = inspect.getsource(M.run)
+    assert '"now": ("tn", "sn", "sshn")' in src
+    assert '"before": ("tb", "sb", "sshb")' in src
+    assert 'require(set(raw) == set(level)' in src

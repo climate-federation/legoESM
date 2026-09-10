@@ -2937,7 +2937,18 @@ def _nemo_faithful_dino_domain(_storage_dtype):
     rest = NemoState(T=z, S=z, u=z, v=z,
                      ssh=_np.zeros(g.tmask.shape[:2], dtype=_np.float64),
                      rhd=None)
-    return bridge_nemo_to_legoesm_topo(g, rest, periodic_i=True, full_step=True)
+    return bridge_nemo_to_legoesm_topo(
+        g, rest, periodic_i=True, full_step=True,
+        # The certified twin passes this whenever the card selects NEMO's
+        # literal TKE penetration profile (kamm_twin_90d.py:1311), because
+        # that profile is htau = max(0.5, min(30, 45|sin(lat)|)) in DEGREES
+        # and reconstructing degrees from the radians geometry is too lossy
+        # for it.  Every card this builder serves selects it, and without the
+        # degrees the run ABORTS at step 1 ("requires native T-point degree
+        # latitudes ... grid.native_lat_T_deg is None") -- so the standalone
+        # path has to hand the bridge what the twin hands it, or it is not
+        # the same experiment and does not run at all.
+        carry_native_lat_deg=True)
 
 
 def dino_lat_lon_grid(cfg: DINOConfig | None = None, n_lon: int = 50):
