@@ -533,3 +533,22 @@ another candidate rather than adding one.
 The 15-25 m and 50-150 m layers remain unusable: the oracle's mean diffusivity
 there is contaminated by intermittent mixing and yields ~1000 K/month, the same
 product-of-means artefact recorded on 2026-09-08. Only the 0-25 m row is quotable.
+
+## 2026-09-10 — the collapse is NOT a clamp: energy and length are both free and both small
+
+Decomposing our own diffusivity at day 30 in the cold tongue, using
+K_M = c_k * l * sqrt(2e) with our c_k = 0.1:
+
+| band | turbulence energy | implied length | K_M |
+|---|---|---|---|
+| 0-20 m | 1.80e-05 | 0.23 m | 1.38e-04 |
+| 20-60 m | 2.83e-08 | 0.12 m | 2.95e-06 |
+| 60-160 m | 3.86e-09 | 0.34 m | 2.95e-06 |
+
+At 20-60 m the energy sits 283x above its own floor (1e-10) and the length 124x
+above the mixing-length floor (1e-3 m). NEITHER IS CLAMPED. The closure is
+running freely and simply producing very little, so every remaining hypothesis
+has to explain small PRODUCTION, not a limiter, a floor, or a cap.
+
+That also rules out the last reading of the floors question: we had established
+the floors are faithful to the oracle; this shows they are not even active here.
