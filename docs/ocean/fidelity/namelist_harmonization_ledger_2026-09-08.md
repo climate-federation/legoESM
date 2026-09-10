@@ -162,3 +162,47 @@ closure still discretised differently from the oracle. It also explains why the
 system is hard to shift -- with the diffusivity at background, the TKE equation's
 own downward transport is proportional to that same tiny coefficient, so the
 quiet state sustains itself.
+
+## 2026-09-10 — the DINO NEMO-literal TKE bundle never reaches ORCA1
+
+Codex's CRITICAL asked which diffusivity our shear production consumes. Answered
+in code, no run:
+
+`tke.py:2746` sets `_carried_coeffs = (_coeff_source == "carried_previous_step")`,
+and `tke.py:3086-3088` then feeds shear production either the carried pair or the
+freshly recomputed one:
+
+    _K_M_pre = preclosure_K_M if _carried_coeffs else K_M_curr
+    P_s_curr = _K_M_pre * shear_sq   (or the face-native functional of it)
+
+`config.py:586` defaults the field to `current_subiteration`. A repo-wide grep
+shows `orca1_zdftke_config` (`run_omip_core2.py:508`) never sets it, so **every
+OMIP/ORCA1 run to date evaluates shear production with a coefficient it
+recomputed in the same call, not with NEMO's carried `avm_k`.** NEMO's `tke_tke`
+consumes the carried pair and overwrites it only after the solve, so codex's
+mechanism is real and present: a low recomputed K makes low production, which
+makes low K.
+
+This is not a missing feature. `carried_previous_step` is implemented, seeded at
+cold start (`ocean_model_latlon_cgrid.py:7255` reproduces `zdf_phy_init`'s
+background-times-wmask construction), restart-bridged, unit-tested
+(`tests/ocean/unit/test_tke_carried_coefficients.py`), and **selected by the
+DINO NEMO-oracle preset** (`experiments/dino.py:1247`). It is simply not wired
+into the ORCA1 card.
+
+The same is true of the rest of the bundle DINO's preset carries and ORCA1 does
+not: `tke_matrix_evaluation`/`tke_solver_evaluation` = `nemo_literal`, and the
+`nemo_literal` evaluations of etau/htau/mxl/Langmuir. Two are BLOCKED rather
+than unasked: `tke_surface_bc_level="nemo_z0"` was reverted on the ORCA1 card
+for a real metric defect (`dz_surface` is the top cell's midpoint, half
+`e3t(1)`, which doubles the virtual-surface coupling), and the literal matrix
+raises unless `nemo_z0` is selected, so the literal solver is downstream of that
+same defect.
+
+SCOPE. The coefficient memory (`tke_avm`, `tke_avt`, `tke_avm_surface`,
+`tke_dissl`) lives on `LatLonCGridOceanState` only (`state.py:558-566`). MPAS and
+FESOM2 have no slot, so this row can be harmonized on the tripole today and
+needs state fields on the other two grids before the three-grid card agrees.
+
+STATUS: measured gap, no default changed. The flip is a scientific choice and is
+being put to the user before any arm is submitted.
