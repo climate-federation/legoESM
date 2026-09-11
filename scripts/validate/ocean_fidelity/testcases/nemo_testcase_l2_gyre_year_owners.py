@@ -594,15 +594,32 @@ def forcing_gate(*, nemo_root: Path = YEAR_ROOT, seed: int = 0,
                 "transposed_max_abs": transposed,
                 "ratio": ratio,
                 "discriminates": ratio >= ROTATION_ROUNDTRIP_MIN_RATIO}
+        # ANY component discriminating is enough, and the blind ones are
+        # REPORTED rather than hidden.  GYRE is exactly 45 degrees
+        # (sin_alpha_u == cos_alpha_u to 0.0, MEASURED) and its wind has
+        # vtau == -utau to 0.0, so the transposed recovery of utau is
+        # ALGEBRAICALLY the identity recovery: -(cos*tau_y + sin*tau_x)
+        # = utau*(2 sin cos - cos^2 + sin^2) = utau at 45 degrees.  The utau
+        # component is therefore structurally blind to a transposition on THIS
+        # card, and vtau is what sees it.  A gate that demanded both would go
+        # red on a correct model for a reason that is the card's geometry.
+        rotation["blind_components"] = sorted(
+            name for name, entry in rotation.items()
+            if not entry["discriminates"])
         row["rotation_roundtrip"] = rotation
         row["exact"] = (all(row[f]["exact"] for f in SBC_FIELDS)
-                        and all(r["discriminates"] for r in rotation.values()))
+                        and any(entry["discriminates"]
+                                for name, entry in rotation.items()
+                                if name != "blind_components"))
         rows.append(row)
 
     exact = all(row["exact"] for row in rows)
+    blind = sorted({name for row in rows
+                    for name in row["rotation_roundtrip"]["blind_components"]})
     report = {"format": "gyre-year-owners-forcing-gate-v1", "case": CASE,
               "plant": plant, "seed": seed, "nemo_root": str(nemo_root),
               "mesh_sha256": mesh["mesh_sha256"], "rows": rows,
+              "rotation_blind_components": blind,
               "all_bit_exact": exact, "worktree": worktree_stamp()}
     print(f"\nSURFACE-FORCING STATEMENT GATE -- legoESM's CURRENT path vs the "
           f"LITERAL usrdef_sbc, on NEMO'S OWN state.  BIT-EXACT bar.")
@@ -623,12 +640,14 @@ def forcing_gate(*, nemo_root: Path = YEAR_ROOT, seed: int = 0,
           f"{'transposed':>13s}{'ratio':>13s}   verdict")
     for row in rows:
         for native, entry in row["rotation_roundtrip"].items():
+            if native == "blind_components":
+                continue
             print(f"  {row['case']:>26s}{native:>11s}"
                   f"{entry['identity_max_abs']:>13.4e}"
                   f"{entry['transposed_max_abs']:>13.4e}"
                   f"{entry['ratio']:>13.4e}"
                   + ("   DISCRIMINATES" if entry["discriminates"]
-                     else "   BLIND"))
+                     else "   BLIND (structural, see the code comment)"))
     if not exact:
         worst = max((row[f]["max_abs"], row["case"], f)
                     for row in rows for f in SBC_FIELDS)
