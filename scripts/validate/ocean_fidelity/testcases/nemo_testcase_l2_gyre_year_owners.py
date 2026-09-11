@@ -835,6 +835,9 @@ def main(argv=None) -> int:
     parser.add_argument("--day-gap", action="store_true")
     parser.add_argument("--switch-trace", type=int, default=None,
                         help="trace the EVD trigger mask over N steps")
+    parser.add_argument("--equal-input", type=int, default=None,
+                        help="run step KT from NEMO's OWN entry state and "
+                             "compare against NEMO's next entry state")
     parser.add_argument("--self-check", action="store_true")
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--lego-root", type=Path, default=None)
@@ -882,6 +885,9 @@ def main(argv=None) -> int:
                          seed=args.seed, mesh_path=args.mesh,
                          days=tuple(int(x) for x in args.days.split(",")),
                          plant=args.plant)
+    elif args.equal_input is not None:
+        report = equal_input_step(args.equal_input,
+                                  entry_root=args.entry_root, plant=args.plant)
     elif args.switch_trace is not None:
         left, right = (int(x) for x in args.seeds.split(","))
         report = switch_trace(args.switch_trace, args.root,
@@ -902,3 +908,130 @@ if __name__ == "__main__":
     except GateError as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         raise SystemExit(1) from error
+
+
+# --------------------------------------------- the EQUAL-INPUT single step ---
+def equal_input_step(kt: int, *, entry_root: Path = DEFAULT_ENTRY_ROOT,
+                     plant: str | None = None) -> dict:
+    """Does step ``kt`` CREATE the difference, or merely AMPLIFY the one it is
+    handed?
+
+    The per-step walk shows the temperature difference going from `2.0e-15` K
+    entering step 2 to `4.2e-04` K entering step 3.  A trajectory comparison
+    cannot separate "step 2's operators disagree" from "step 2 amplified what
+    step 1 left".  This separates them by running step ``kt`` from NEMO'S OWN
+    entry state and comparing the output against NEMO's own next entry state:
+
+      FREE-RUN  legoESM's own state entering kt   -> its own state entering kt+1
+      EQUAL-IN  NEMO's state entering kt          -> legoESM's state entering kt+1
+
+    If EQUAL-IN collapses to rounding, the step's operators agree and the
+    difference was carried in.  If it does not, the operators disagree and the
+    step is an owner.
+
+    TWO ARMS, because one prognostic pair has no entry record.  The step-entry
+    dump carries ``ts/uu/vv/ssh`` and NOT the prognostic barotropic pair
+    ``uu_b``/``vv_b``, which this card requires.  Arm A reseeds the 3-D state
+    only and leaves legoESM's own barotropic pair; arm B additionally reseeds
+    that pair from ``oracle_bt_frames_kt{kt-1}.bin``, which the card's writer
+    records at ``Naa`` after ``stp_2D`` and which ``stprk3`` then swaps into
+    ``Nbb`` -- i.e. exactly the seed step ``kt`` consumes.  A and B differing is
+    itself the measurement of how much the barotropic pair carries.
+    """
+    require(kt >= 2, "equal-input needs a step whose entry NEMO recorded")
+    _policy()
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    gate = _gate()
+    baro = _load("nemo_testcase_overflow_barotropic_gate",
+                 "nemo_testcase_overflow_barotropic_gate.py")
+    card = build_nemo_testcase_card(CASE)
+    masks = gate.expected_masks(card)
+    model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord,
+                                  card.recipe.model_config)
+
+    entry = {n: gate.read_entry(
+        Path(entry_root) / f"oracle_step_entry_kt{n:08d}.bin")
+        for n in (kt, kt + 1)}
+    frames = gate.read_bt(
+        Path(entry_root) / f"oracle_bt_frames_kt{kt - 1:08d}.bin", kt - 1)
+
+    # The free-run arm: step the card forward to the entry of kt, as the
+    # certified ladder does, and take one more step.
+    state = card.recipe.initial_state
+    for completed in range(kt - 1):
+        freshwater, surface = gate._surface_forcings(card, state, completed + 1)
+        state = model.step(state, dt=card.dt_s, freshwater=freshwater,
+                           surface_forcing=surface)
+    free_entry = state
+
+    def one_step(start):
+        freshwater, surface = gate._surface_forcings(card, start, kt)
+        return model.step(start, dt=card.dt_s, freshwater=freshwater,
+                          surface_forcing=surface)
+
+    seeded = baro.state_from_oracle_entry(free_entry, entry[kt], masks)
+    if plant == "equal-input-noop":
+        # The plant this arm needs: if the reseed silently did nothing, the
+        # two arms would be identical and the measurement would be vacuous.
+        seeded = free_entry
+    seeded_b = seeded
+    for name, values in (("uu_b", frames["uu_b"]), ("vv_b", frames["vv_b"])):
+        field = getattr(seeded_b, name)
+        require(field is not None, f"the card carries no {name}")
+        current = np.array(field.data, dtype=np.float64, copy=True)
+        reference = np.asarray(values, dtype=np.float64)
+        if name == "uu_b":
+            current[:, 1:] = np.where(masks["u"][..., 0], reference,
+                                      current[:, 1:])
+        else:
+            current[1:, :] = np.where(masks["v"][..., 0], reference,
+                                      current[1:, :])
+        seeded_b = seeded_b._replace(
+            **{name: field.replace(data=jnp.asarray(current))})
+
+    rows = {}
+    for arm, start in (("free_run", free_entry), ("equal_input_3d", seeded),
+                       ("equal_input_3d_plus_barotropic", seeded_b)):
+        out = gate.lego_fields(one_step(start))
+        row = {}
+        for name in FIELDS:
+            mask = masks[name]
+            left = np.asarray(out[name], dtype=np.float64)
+            right = np.asarray(entry[kt + 1][name], dtype=np.float64)
+            if right.ndim == 3:
+                right = right[..., :left.shape[-1]]
+            row[name] = {
+                "rms": _rms(left - right, mask),
+                "max_abs": float(np.max(np.abs((left - right)[mask]))),
+                "cells_unequal": int(np.count_nonzero(
+                    left[mask].view(np.uint64) != right[mask].view(np.uint64))),
+            }
+        rows[arm] = row
+    # The reseed must actually have changed the input, or every arm is the
+    # free run wearing a different name.
+    moved = {name: float(np.max(np.abs(
+        np.asarray(gate.lego_fields(seeded)[name], dtype=np.float64)
+        - np.asarray(gate.lego_fields(free_entry)[name], dtype=np.float64))))
+        for name in FIELDS}
+    require(max(moved.values()) > 0.0,
+            "the reseed changed NOTHING, so the equal-input arm is the free "
+            "run under another name and measures nothing")
+    report = {"format": "gyre-year-owners-equal-input-v1", "case": CASE,
+              "kt": kt, "plant": plant, "entry_root": str(entry_root),
+              "reseed_moved_input_by": moved, "arms": rows,
+              "worktree": worktree_stamp()}
+    print(f"\nEQUAL-INPUT STEP {kt}: does the step CREATE the difference or "
+          f"AMPLIFY the one it is handed?")
+    print(f"  the reseed moved the INPUT by: "
+          + "  ".join(f"{n} {moved[n]:.4e}" for n in FIELDS))
+    print(f"  {'arm':>32s}" + "".join(f"{f'rms {n}':>14s}" for n in FIELDS))
+    for arm, row in rows.items():
+        print(f"  {arm:>32s}"
+              + "".join(f"{row[n]['rms']:>14.4e}" for n in FIELDS))
+    return report
