@@ -358,3 +358,51 @@ it simply is not the lever.
 
 NEXT, and it needs the user's decision: the surface boundary PLACEMENT is now
 the leading untested candidate, and it is blocked behind one metric defect.
+
+## 2026-09-11 — surface PLACEMENT landed as faithfulness, not run as a lever
+
+TWO RETRACTIONS OF MY OWN, both caught before they cost anything.
+
+1. I told the user a dz_surface metric defect BLOCKED NEMO's surface placement
+   and asked them to approve fixing it. That defect was already fixed by #1690:
+   `tke_vertical_mixing` derives `dz_face_surface = dz_ref[0]*jacobian` for the
+   virtual-surface face, takes e3t(1) from the frozen bundle under
+   `n2_evaluation_stage="step_entry"`, and `k_profiles` already threads both
+   operands. Only the ORCA1 card COMMENT still recorded the revert. Codex 9698860
+   confirmed the full e3t(1) is used on the tripole path and the midpoint metric
+   never reaches that face. The comment is now corrected in place.
+
+2. My own precondition guard validated the card DEFAULTS rather than the
+   requested values, because it ran before `surface_bc` and `tke_mxl_choice`
+   were applied. Its own test failed on that, which is what the test was for.
+   The block now runs last.
+
+GLM'S MECHANISM REVIEW, and why no arm was run. Asked whether displacing the
+surface boundary one level can cost three orders of magnitude in the
+diffusivity 20-60 m below, GLM answered percent-level, with the reasoning:
+a boundary perturbation decays over sqrt(K_e * tau_diss), of order 1-10 m
+given eps ~ e^{3/2}/l, so at 20 m it is worth at most a few to ten percent and
+by 60 m essentially nothing; and K ~ l*sqrt(e) halves the sensitivity again.
+Below the pinned node the column still receives the same imposed energy, and
+at 20-60 m the budget is set by local production-dissipation balance, not by
+diffusive memory of the surface value.
+
+GLM named exactly one route to orders of magnitude: a regime flip, where the
+clamp pushes a level onto the rn_emin floor or trips a stability limit. THAT
+ROUTE IS CLOSED HERE BY MEASUREMENT -- our energy sits 283x above its floor
+and the length 124x above its own, both recorded earlier in this ledger. It
+also agrees with the independent ~4% column-probe estimate from a prior
+session.
+
+DECISION (user, 2026-09-11): land the flag as a faithfulness item, default
+unchanged, and do not spend the GPU-hours on a controlled arm. The option is
+selectable for anyone who wants it and the stale prose no longer misleads.
+
+STATUS OF THE EQUATORIAL DEFICIT: every named mechanism is now eliminated --
+enhanced vertical diffusion, mixing length, shear discretisation, advection,
+floors, backgrounds, the Prandtl form, nn_etau and Langmuir, the 1.5/0.5
+dissipation split, the coefficient lifetime (measured null), and now the
+surface placement (argued small by two independent estimates, not run).
+The cause is OPEN and honestly unknown. Do not re-open the list above without
+new evidence; the next move should be a fresh measurement, not another arm on
+an eliminated lever.
