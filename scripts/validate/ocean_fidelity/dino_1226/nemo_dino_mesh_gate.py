@@ -160,6 +160,9 @@ def main() -> int:
     ap.add_argument("--plant", action="store_true",
                     help="flip one wet cell of the transcribed mask; the gate "
                          "MUST then exit non-zero (non-vacuity self-test)")
+    ap.add_argument("--plant-dry-level", action="store_true",
+                    help="set the CONSTRUCTED ladder's dry level to an "
+                         "arbitrary value; the waiver MUST refuse it")
     ap.add_argument("--plant-ladder", action="store_true",
                     help="nudge ONE level of the CONSTRUCTED vertical ladder "
                          "by 1 ulp; section 4 MUST then exit non-zero "
@@ -195,6 +198,28 @@ def main() -> int:
         ndm.nemo_dino_mesh = _planted
         dino_mod._nemo_faithful_dino_domain.cache_clear()
         print("PLANT ACTIVE: one interior surface cell flipped\n")
+
+    if args.plant_dry_level:
+        # The ONE thing the scored rows deliberately do not cover.  A dry
+        # level is excluded from every row, so only the waiver can catch a lie
+        # about it -- and the waiver used to be a blanket pass (the row it
+        # replaced compared the model against ITSELF there and printed EXACT).
+        from legoesm.ocean.fidelity import nemo_state_bridge as _nsb2
+        _true_dry = _nsb2.effective_vertical_scale_factors
+
+        def _planted_dry(grid, tmask, mode=None):
+            e3t, td, src = _true_dry(grid, tmask, mode=mode)
+            lev = np.asarray(tmask).any(axis=(0, 1))
+            e3t = e3t.copy()
+            td = td.copy()
+            e3t[~lev] = 300.0
+            td[~lev] = td[~lev] * 1.01
+            return e3t, td, src
+
+        _nsb2.effective_vertical_scale_factors = _planted_dry
+        dino_mod._nemo_faithful_dino_domain.cache_clear()
+        print("DRY-LEVEL PLANT ACTIVE: the dry level holds neither NEMO "
+              "ladder's value\n")
 
     if args.plant_ladder:
         # Plant INSIDE the construction, not on the arrays after it: the point
@@ -492,21 +517,49 @@ def main() -> int:
     if dry.any():
         act = np.asarray(z.is_active)
         hp = np.asarray(z.h_partial)
+        # NOT a tautology, and NOT the old third conjunct: `dry` IS defined
+        # from tmask, so "0 wet mask on a dry level" was true by construction
+        # and certified nothing.  These two are independent of it -- the
+        # coordinate's own active flag and its own thickness.
         inert = (int(act[..., dry].sum()) == 0
-                 and float(np.abs(hp[..., dry]).max()) == 0.0
-                 and int(tmask3[..., dry].sum()) == 0)
+                 and float(np.abs(hp[..., dry]).max()) == 0.0)
+        # THE WAIVER IS BOUNDED IN POSITION, not just in value.  A dry level
+        # in the MIDDLE of the column is a different object entirely (it would
+        # sit between two integrated cells) and must never be waived silently.
+        if not np.all(dry[len(dry) - int(dry.sum()):]):
+            print(f"  dry levels {1 + np.where(dry)[0]} are not the TRAILING "
+                  "levels of the column: this is not NEMO's dummy bottom "
+                  "level and it is not waivable here")
+            g4.failed = True
+        print(f"  {int(dry.sum())} dry level(s), trailing: "
+              f"{list(1 + np.where(dry)[0])}")
         for k in np.where(dry)[0]:
             print(f"  WAIVED  level {k + 1} (NEMO's permanently dry dummy): "
                   f"e3t {dz[k]:.6f} vs {e3t_lev[k]:.6f} "
                   f"(delta {abs(dz[k] - e3t_lev[k]):.3f} m), gdept "
                   f"{td4_all[k]:.6f} vs {gdept_lev[k]:.6f} "
                   f"(delta {abs(td4_all[k] - gdept_lev[k]):.3f} m)")
-        print(f"  waiver precondition -- 0 active cells, 0 thickness and 0 "
-              f"wet mask on every dry level: {inert}")
+        print(f"  waiver precondition -- 0 active cells and 0 thickness on "
+              f"every dry level: {inert}")
         if not inert:
-            print("  the dry level is NOT inert on this run, so the gap above "
-                  "reaches the model: the waiver does not hold")
+            print("  the dry level carries an active cell or a thickness on "
+                  "this run, so the gap above reaches the model: the waiver "
+                  "does not hold")
             g4.failed = True
+        # WHAT THE WAIVER DOES NOT COVER, said out loud rather than implied by
+        # the word "inert".  The dry level still sets four REFERENCE-LADDER
+        # entries, measured on this run: H_max, the deepest half-interface
+        # z_half_ref[-1], the deepest cell centre z_full_ref[-1] and the
+        # deepest half-spacing dz_half_ref[-1].  None of them enters a live
+        # thickness on this card (that is h_partial, checked above), but they
+        # are carried state and the waiver is not a claim that nothing reads
+        # them.
+        print(f"  the waived level still sets H_max = {float(z.H_max):.6f} m, "
+              f"z_half_ref[-1] = {float(np.asarray(z.z_half_ref)[-1]):.6f}, "
+              f"z_full_ref[-1] = {float(np.asarray(z.z_full_ref)[-1]):.6f}, "
+              f"dz_half_ref[-1] = "
+              f"{float(np.asarray(z.dz_half_ref)[-1]):.6f} -- carried, not "
+              "integrated")
         # The waiver covers ONE specific value, not any value.  The reason it
         # exists is that the bridge leaves NEMO's OTHER ladder there, so that
         # is what is checked -- a dry level holding an arbitrary number is a

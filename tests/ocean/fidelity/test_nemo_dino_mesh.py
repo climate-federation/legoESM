@@ -182,3 +182,28 @@ def test_ladder_plant_flips_every_derived_row():
         r.stdout[-4000:]
     assert "PLANT DID NOT REACH" not in r.stdout
     assert "PLANT REACHED A RAW MESH ROW" not in r.stdout
+
+
+@pytest.mark.skipif(not os.path.exists(_MESH),
+                    reason=f"NEMO oracle mesh not on this machine: {_MESH}")
+@pytest.mark.skipif(importlib.util.find_spec("netCDF4") is None,
+                    reason="netCDF4 not installed: the gate cannot read the "
+                           "oracle mesh, so a failure here would not be a "
+                           "gate regression")
+def test_a_lie_about_the_waived_dry_level_is_refused():
+    """The one place section 4's scored rows deliberately do not look.
+
+    DINO's level 36 is NEMO's permanently dry dummy; the model never
+    integrates it, so it is excluded from every scored row and covered by a
+    WAIVER instead. The row it replaced compared the model against ITSELF
+    there and printed EXACT, and an arbitrary 300 m planted at that level
+    passed the whole gate. The waiver is bounded to NEMO's own other ladder,
+    so it is not a blanket pass on a level.
+    """
+    r = _run_gate("--plant-dry-level")
+    assert r.returncode != 0, r.stdout[-4000:]
+    assert "neither NEMO ladder's value" in r.stdout, r.stdout[-4000:]
+    # and it must not fire by accident on the honest run
+    ok = _run_gate()
+    assert ok.returncode == 0
+    assert "is NEMO's own 1-D ladder" in ok.stdout

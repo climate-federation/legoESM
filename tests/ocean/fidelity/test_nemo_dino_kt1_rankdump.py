@@ -71,15 +71,63 @@ def test_run_sh_refuses_to_write_the_record_inside_the_oracle(tmp_path, where):
 
 
 def test_run_sh_resolves_symlinks_before_deciding(tmp_path):
-    """A symlinked checkout must not make the oracle look like somewhere else."""
+    """Canonicalisation must be LOAD-BEARING, not incidental.
+
+    NEMO and OUT are given through DIFFERENT names for the same tree: NEMO by
+    its real path, OUT through a symlink that lands inside it. A guard that
+    compared the strings, or that resolved neither, would accept this.
+    """
     n = _fake_nemo(tmp_path)
-    link = tmp_path / "link"
-    link.symlink_to(n)
+    link = tmp_path / "elsewhere"
+    link.symlink_to(n / "cfgs")
     r = subprocess.run(
         ["bash", os.path.join(_DIR, "run.sh")], capture_output=True, text=True,
-        env={**os.environ, "NEMO": str(link),
-             "OUT": str(link / "cfgs" / "SHARED")})
+        env={**os.environ, "NEMO": str(n), "OUT": str(link / "SHARED")})
     assert r.returncode == 2 and "REFUSING" in r.stderr, r.stderr
+
+
+def test_run_sh_refuses_a_relative_out_that_lands_in_the_oracle(tmp_path):
+    """OUT is resolved BEFORE the guard, not after the script cd's to NEMO.
+
+    `guard` canonicalises against the invocation directory while the record is
+    created after `cd "$NEMO"`, so a relative OUT was checked in one place and
+    written in another -- `OUT=cfgs/SHARED` passed and then landed inside the
+    oracle.
+    """
+    n = _fake_nemo(tmp_path)
+    r = subprocess.run(
+        ["bash", os.path.join(_DIR, "run.sh")], capture_output=True, text=True,
+        cwd=str(n), env={**os.environ, "NEMO": str(n), "OUT": "cfgs/SHARED"})
+    assert r.returncode == 2 and "REFUSING" in r.stderr, r.stderr
+
+
+@pytest.mark.parametrize("out", ["/", "/tmp", "/home", "/data"])
+def test_run_sh_refuses_a_system_directory(tmp_path, out):
+    n = _fake_nemo(tmp_path)
+    r = subprocess.run(
+        ["bash", os.path.join(_DIR, "run.sh")], capture_output=True, text=True,
+        env={**os.environ, "NEMO": str(n), "OUT": out})
+    assert r.returncode == 2 and "system directory" in r.stderr, r.stderr
+
+
+def test_the_patch_target_inside_the_config_copy_is_ACCEPTED(tmp_path):
+    """The refusals must not refuse the one path the script has to write.
+
+    The checkout-wide guard added for `cfgs/SHARED` rejected the config copy's
+    own MY_SRC, which killed the acquisition after `makenemo` had already
+    created the copy -- and the leftover copy then tripped the "already
+    exists" refusal on every retry.
+    """
+    body = open(os.path.join(_DIR, "run.sh")).read()
+    guard = body[body.index("guard() {"):body.index("\nguard \"$COPY\"")]
+    probe = (guard + '\nguard "$NEMO/cfgs/DINO_KT1_RANKDUMP/MY_SRC/x.F90" '
+             'cfgcopy && echo ACCEPTED\n'
+             'guard "$NEMO/cfgs/DINO/MY_SRC/x.F90" cfgcopy && echo LEAKED\n')
+    r = subprocess.run(["bash", "-c", probe], capture_output=True, text=True,
+                       env={**os.environ, "NEMO": str(tmp_path / "nemo")})
+    assert "ACCEPTED" in r.stdout, r.stdout + r.stderr
+    assert "LEAKED" not in r.stdout
+    assert "REFUSING" in r.stderr
 
 
 def test_run_sh_refuses_to_reuse_a_config_copy(tmp_path):

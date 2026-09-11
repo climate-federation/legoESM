@@ -29,7 +29,11 @@ NEMO=${NEMO:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
 ARCH=${ARCH:-conda}
 CFGNAME=DINO_KT1_RANKDUMP
 COPY=$NEMO/cfgs/$CFGNAME
-OUT=${OUT:-/data/abyssal/dbalwada/dino_fromrest_y1/nemo_kt1_rankdump}
+# ABSOLUTE, resolved HERE. A relative OUT is canonicalised against the
+# INVOCATION directory by the guard below but created after `cd "$NEMO"`, so
+# `OUT=cfgs/SHARED` from anywhere else passed the guard and then landed inside
+# the oracle anyway.
+OUT=$(readlink -m "${OUT:-/data/abyssal/dbalwada/dino_fromrest_y1/nemo_kt1_rankdump}")
 NPROC=${NPROC:-16}
 SRCREF=$NEMO/cfgs/DINO/RUN_FROMREST_KT1
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -69,6 +73,14 @@ guard() {                       # guard <path being written> [allow-cfg-copy]
 }
 guard "$COPY" cfgcopy
 guard "$OUT"
+case "$OUT" in
+  /|/tmp|/home|/data) echo "REFUSING: OUT=$OUT is a system directory" >&2
+                      exit 2 ;;
+esac
+case "$(readlink -m "$NEMO")/" in
+  "$OUT"/*) echo "REFUSING: OUT=$OUT CONTAINS the NEMO checkout" >&2
+            exit 2 ;;
+esac
 
 # 2. Never reuse a config copy.  A half-built or previously-patched copy is the
 #    one way this script could produce a record that is not what it claims.
@@ -92,7 +104,7 @@ cd "$NEMO"
 # -j 0 creates the configuration without compiling, so MY_SRC can be patched
 # before a single object file exists.
 ./makenemo -r DINO -n "$CFGNAME" -m "$ARCH" -j 0
-guard "$COPY/MY_SRC/dynspg_ts.F90"
+guard "$COPY/MY_SRC/dynspg_ts.F90" cfgcopy
 python3 "$HERE/rankdump_patch.py" "$COPY/MY_SRC/dynspg_ts.F90"
 ./makenemo -n "$CFGNAME" -m "$ARCH" -j 8
 
