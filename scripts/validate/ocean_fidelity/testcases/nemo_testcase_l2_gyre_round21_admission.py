@@ -166,6 +166,9 @@ SCHEMAS: dict[str, tuple] = {
         ("r1_rho0", 1, "s", True),
         *[(n, n2, "2", True) for n in ("utau", "vtau", "r1_hu", "r1_hv")],
         *[(n, nc, "c", True) for n in ("post_wind_u", "post_wind_v")])),
+    # dynvor.f90:504-510,563-564 -- one zwz/zwx/zwy slab for jk=1:jpkm1.
+    "NEMO_L2_ENEOP_1": (7, (3, 4, 5), lambda n2, n3, nc: _f(
+        *[(n, n3 - n2, "m", True) for n in ("zwz", "zwx", "zwy")])),
 }
 
 # --- the ONLY admission ground that is not the halo -----------------------
@@ -177,12 +180,9 @@ SCHEMAS: dict[str, tuple] = {
 # gate reads that switch out of the run's OWN ocean.output.
 #
 # THE CASE THIS EXISTS FOR.  ``zFw`` in the momentum-side transport record:
-# under the VECTOR-INVARIANT arm the write at stprk3_stg.F90:343-345 precedes
-# tra_adv_trp (:592/:623), which is what creates zFw -- the source says so at
-# :318, "zFw used in tracers only and computed in tra_adv_trp" -- so the slot
-# is uninitialised memory there.  Under the FLUX-FORM arm the ELSE branch at
-# :326-334 fills zFw = e1e2t*ww BEFORE that same write, so the slot is a real
-# state-carrying field and waiving it would switch off the bit test on it.
+# in compiled R46 the VECTOR-INVARIANT arm at stprk3_stg.f90:329-337 leaves it
+# for tra_adv_trp (:777/:800), after the record at :350-357.  Under FLUX-FORM,
+# :338-345 fills zFw=e1e2t*ww before that record, so it must be bit-tested.
 # GYRE resolves ln_dynadv_vec = T; both tanks resolve F.
 #
 # FAIL CLOSED: if the run's ocean.output is missing or does not print the
@@ -192,23 +192,41 @@ UNDEFINED_SLOTS = {
     ("NEMO_L1_TRANSP_1", "zFw"): {
         "switch": "ln_dynadv_vec",
         "undefined_when": "T",
-        # RE-ANCHORED IN ROUND 38.  This string used to carry BARE LINE
-        # NUMBERS -- stprk3_stg.F90:343-345, :592, :623, :318, :326-334 --
-        # which are the L1 tank card's.  The GYRE card's own MY_SRC puts the
-        # same statements at :463, :295-301 and :287 (the round-34 receipt
-        # cites those), so one number set was published as the provenance of a
-        # waiver resolved on THREE different cards.  A line number is not
-        # portable between cards; the STATEMENT is, so the citation is the
-        # statement and the per-card numbers are labelled as such.
         "reason": (
             "under ln_dynadv_vec = T the record's WRITE in stprk3_stg.F90 "
             "precedes the CALL tra_adv_trp that computes zFw, so the slot is "
             "uninitialised memory there.  Under ln_dynadv_vec = F the "
             "flux-form branch that sets zFw = e1e2t*ww runs BEFORE the same "
             "WRITE, so the slot IS defined and is bit-tested.  Line numbers "
-            "differ per card: on the L1 tank cards the three statements are "
-            "stprk3_stg.F90:343-345, :318 and :326-334; on the GYRE card they "
-            "are :463, :287 and :295-301"),
+            "differ per card, both on the L1 tank cards and on the GYRE "
+            "card; the record report names its compiled writer."),
+    },
+}
+
+# Fields whose writer defines every horizontal point but not every vertical
+# slot.  These are narrower than ``UNDEFINED_SLOTS``: only the named region is
+# removed from the consumed projection; every other element remains a hard bit
+# gate.  ``stprk3_stg`` fills zFu/zFv only for jk=1:jpkm1 before both records
+# below are written (compiled R46 stprk3_stg.f90:292-295,312-316,350-357).
+# ``tra_adv_trp`` zeros jk=jpk later (compiled R46
+# traadv.f90:248-250), so that bottom slot cannot be consumed before its
+# definition.
+UNDEFINED_REGIONS = {
+    ("NEMO_L2_TRPOP_2", "zFu"): {
+        "region": "last_vertical_level",
+        "reason": "writer assigns jk=1:jpkm1; record precedes the later jpk zero",
+    },
+    ("NEMO_L2_TRPOP_2", "zFv"): {
+        "region": "last_vertical_level",
+        "reason": "writer assigns jk=1:jpkm1; record precedes the later jpk zero",
+    },
+    ("NEMO_L1_TRANSP_1", "zFu"): {
+        "region": "last_vertical_level",
+        "reason": "writer assigns jk=1:jpkm1; record precedes the later jpk zero",
+    },
+    ("NEMO_L1_TRANSP_1", "zFv"): {
+        "region": "last_vertical_level",
+        "reason": "writer assigns jk=1:jpkm1; record precedes the later jpk zero",
     },
 }
 
@@ -250,35 +268,26 @@ def _undefined_slots(run: Path) -> tuple[dict, list]:
         })
     return waived, rows
 
-# WHERE EACH RECORD IS WRITTEN.  Verified line by line against the MY_SRC
-# files that are actually compiled, not carried over from an older round:
-#   grep -n "<magic>" <card>/MY_SRC/<file>.F90
-#
-# ROUND 38: THE LINE NUMBERS ARE ONE CARD'S, AND THE CARD IS NAMED.  This
-# comment used to say these writers sit at "the same" lines on every card in
-# this campaign.  They do not -- the L1 tank cards and the GYRE L2 cards put
-# the same statements at different lines, which is the defect re-anchored in
-# UNDEFINED_SLOTS above -- so every value below is qualified with the card it
-# was read from, and a reader can tell a citation from a guess.
-_L2_CARD = "GYRE_OMIP_L2_P3_SM_R29ZDF"
-_L1_CARD = "LOCK_EXCHANGE_OMIP_L1_P3"
+# WHERE EACH RETURNED RECORD IS WRITTEN.  Round 47 binds every entry to the
+# actual widened R46 compiled ppsrc; inherited instrument names do not retain
+# their older R29/LOCK provenance after compilation into this executable.
+_R46 = "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo"
 SOURCES = {
-    "NEMO_L2_TRPOP_2": f"{_L2_CARD}/MY_SRC/stprk3_stg.F90:297",
-    "NEMO_L2_WZVOP_1": f"{_L2_CARD}/MY_SRC/traadv.F90:225",
-    "NEMO_L2_RKTRA_1": f"{_L2_CARD}/MY_SRC/stprk3_stg.F90:673",
-    "NEMO_L2_SLOW_2": f"{_L2_CARD}/MY_SRC/stp2d.F90:187",
-    "NEMO_L2_TRTRP_1": f"{_L2_CARD}/MY_SRC/stprk3_stg.F90:638",
-    "NEMO_L1_TRANSP_1": f"{_L1_CARD}/MY_SRC/stprk3_stg.F90:343",
-    "NEMO_L1_STAGE_1": f"{_L1_CARD}/MY_SRC/stprk3.F90:369",
-    "NEMO_L1_ENTRY_1": f"{_L1_CARD}/MY_SRC/stprk3.F90:96",
-    "NEMO_L1_RHS___1": f"{_L1_CARD}/MY_SRC/stprk3.F90:385",
-    "NEMO_L1_BTFRM_1": f"{_L1_CARD}/MY_SRC/stprk3.F90:348",
-    # Round 38: the two SELF_DESCRIBING magics had no provenance row at all,
-    # so a record this gate admits could name neither its writer nor a parser.
-    "NEMO_L2_ZDFMX_1": f"{_L2_CARD}/MY_SRC/dynzdf.F90 (round-29 instrument)",
-    "NEMO_L2_TRAZD_1": ("GYRE_OMIP_L2_P3_SM_R35TRAZDF/MY_SRC/trazdf.F90 "
-                        "(round-35 instrument; the avt/avs staging is round "
-                        "37's, on the R37TRAZDF card)"),
+    "NEMO_L2_TRPOP_2": f"{_R46}/stprk3_stg.f90:311",
+    "NEMO_L2_WZVOP_1": f"{_R46}/traadv.f90:271",
+    "NEMO_L2_RKTRA_1": f"{_R46}/stprk3_stg.f90:845",
+    "NEMO_L2_SLOW_2": f"{_R46}/stp2d.f90:195",
+    "NEMO_L2_TRTRP_1": f"{_R46}/stprk3_stg.f90:815",
+    "NEMO_L1_TRANSP_1": f"{_R46}/stprk3_stg.f90:355",
+    "NEMO_L1_STAGE_1": f"{_R46}/stprk3.f90:326",
+    "NEMO_L1_ENTRY_1": f"{_R46}/stprk3.f90:95",
+    "NEMO_L1_RHS___1": f"{_R46}/stprk3.f90:342",
+    "NEMO_L1_BTFRM_1": f"{_R46}/stprk3.f90:305",
+    "NEMO_L2_ZDFMX_1": f"{_R46}/dynzdf.f90:595",
+    "NEMO_L2_TRAZD_1": f"{_R46}/trazdf.f90:174",
+    "NEMO_L2_RKTS3_1": f"{_R46}/stprk3_stg.f90:422",
+    "NEMO_L2_ADVSP_1": f"{_R46}/dynadv.f90:185 (kstp widened)",
+    "NEMO_L2_ENEOP_1": f"{_R46}/dynvor.f90:509",
 }
 PARSERS = {
     "NEMO_L2_TRPOP_2": "nemo_testcase_l2_gyre_round13_tracer.py:93-140",
@@ -293,6 +302,9 @@ PARSERS = {
     "NEMO_L1_BTFRM_1": "nemo_testcase_phase3_first_divergence_gate.py:160-185",
     "NEMO_L2_ZDFMX_1": "nemo_testcase_l2_gyre_round29_zdf_matrix.py",
     "NEMO_L2_TRAZD_1": "nemo_testcase_l2_gyre_round35_trazdf_matrix.py",
+    "NEMO_L2_RKTS3_1": "nemo_testcase_l2_gyre_round40_stage3_operators.py",
+    "NEMO_L2_ADVSP_1": "nemo_testcase_l2_gyre_round41_dynadv_split.py",
+    "NEMO_L2_ENEOP_1": "nemo_testcase_l2_gyre_stage3_completion_gate.py:53-79",
 }
 
 
@@ -327,7 +339,7 @@ def read_header(raw: bytes, path: Path):
 
 def _owned_selector(projection: str, ids: np.ndarray, nx: int, ny: int):
     """Split differing flat indices into owned and halo, per projection."""
-    if projection == "3":
+    if projection in {"3", "m"}:
         ii, jj = ids % nx, (ids // nx) % ny
         index = np.stack([ii, jj, ids // (nx * ny)], axis=1)
     elif projection == "2":
@@ -345,6 +357,9 @@ def _owned_selector(projection: str, ids: np.ndarray, nx: int, ny: int):
 def _project(values: np.ndarray, projection: str, nx: int, ny: int, nz: int):
     if projection == "3":
         return values.reshape((nx, ny, nz), order="F")[
+            HALO:-HALO, HALO:-HALO, :]
+    if projection == "m":
+        return values.reshape((nx, ny, nz - 1), order="F")[
             HALO:-HALO, HALO:-HALO, :]
     if projection == "2":
         return values.reshape((nx, ny), order="F")[HALO:-HALO, HALO:-HALO]
@@ -374,14 +389,36 @@ def compare_record(a_path: Path, b_path: Path, plant, *, waived=None,
         return {"consumed_equal": False, "error": "header mismatch"}
 
     offset, changed, admitted, consumed_equal = header_bytes, [], [], True
+    reason_counts = {
+        "halo": 0,
+        "owned_undefined_slot": 0,
+        "owned_undefined_region": 0,
+        "owned_defined_violation": 0,
+    }
     for name, count, projection, _ in layout:
         defined = (magic, name) not in waived
+        region = UNDEFINED_REGIONS.get((magic, name))
         aa = np.frombuffer(a_bytes, np.float64, count, offset)
         bb = np.frombuffer(b_bytes, np.float64, count, offset)
         element_diff = aa.view(np.uint64) != bb.view(np.uint64)
         if np.any(element_diff):
             ids = np.flatnonzero(element_diff)
             owned, index = _owned_selector(projection, ids, nx, ny)
+            undefined_region = (
+                index[:, -1] == nz - 1
+                if region and region["region"] == "last_vertical_level"
+                else np.zeros(ids.size, dtype=bool)
+            )
+            field_reason_counts = {
+                "halo": int(np.count_nonzero(~owned)),
+                "owned_undefined_slot": int(np.count_nonzero(owned)) if not defined else 0,
+                "owned_undefined_region": int(np.count_nonzero(
+                    owned & undefined_region)) if defined else 0,
+                "owned_defined_violation": int(np.count_nonzero(
+                    owned & ~undefined_region)) if defined else 0,
+            }
+            for reason, number in field_reason_counts.items():
+                reason_counts[reason] += number
             changed.append({
                 "field": name,
                 "changed_elements": int(ids.size),
@@ -389,8 +426,12 @@ def compare_record(a_path: Path, b_path: Path, plant, *, waived=None,
                     np.frombuffer(a_bytes, np.uint8, count * 8, offset)
                     != np.frombuffer(b_bytes, np.uint8, count * 8, offset))),
                 "changed_in_owned_cells": int(np.count_nonzero(owned)),
+                "changed_in_undefined_region": int(
+                    np.count_nonzero(undefined_region)
+                ),
                 "first_index_0based": [int(v) for v in index[0]],
                 "slot_defined_at_write_point": defined,
+                "reason_counts": field_reason_counts,
             })
             # Every admitted difference is listed with its VALUES, capped so a
             # whole undefined array cannot bury the report.  An owned cell of
@@ -398,7 +439,7 @@ def compare_record(a_path: Path, b_path: Path, plant, *, waived=None,
             # bit test below is what fails on it.
             listed = 0
             for position in range(ids.size):
-                if owned[position] and defined:
+                if owned[position] and defined and not undefined_region[position]:
                     continue
                 if listed >= max_listed:
                     admitted.append(
@@ -410,13 +451,17 @@ def compare_record(a_path: Path, b_path: Path, plant, *, waived=None,
                     "record": a_path.name, "field": name,
                     "index_0based": [int(v) for v in index[position]],
                     "reason": ("halo" if not owned[position]
-                               else "slot undefined at the write point"),
+                               else "slot undefined at the write point"
+                               if not defined
+                               else region["reason"]),
                     "baseline_value": float(aa[ids[position]]),
                     "candidate_value": float(bb[ids[position]]),
                 })
                 listed += 1
         pa = _project(aa, projection, nx, ny, nz)
         pb = _project(bb, projection, nx, ny, nz)
+        if region and region["region"] == "last_vertical_level":
+            pa, pb = pa[..., :-1], pb[..., :-1]
         if defined and plant and not plant[0]:
             pb = np.ascontiguousarray(pb).copy()
             pb.reshape(-1)[0:1].view(np.uint64)[:] ^= np.uint64(1)
@@ -429,6 +474,11 @@ def compare_record(a_path: Path, b_path: Path, plant, *, waived=None,
     raw = np.frombuffer(a_bytes, np.uint8) != np.frombuffer(b_bytes, np.uint8)
     undefined = sorted({n for n, _, _, _ in layout
                         if (magic, n) in waived})
+    undefined_regions = [
+        {"field": n, **UNDEFINED_REGIONS[(magic, n)]}
+        for n, _, _, _ in layout
+        if (magic, n) in UNDEFINED_REGIONS
+    ]
     return {
         "consumed_equal": consumed_equal,
         "magic": magic,
@@ -437,9 +487,13 @@ def compare_record(a_path: Path, b_path: Path, plant, *, waived=None,
         "first_differing_byte_1based": (
             int(np.flatnonzero(raw)[0] + 1) if np.any(raw) else None),
         "changed_fields": changed,
+        "changed_elements": int(sum(
+            field["changed_elements"] for field in changed)),
+        "reason_counts": reason_counts,
         "admitted_differences": admitted,
         "undefined_slots": undefined,
         "undefined_slot_reasons": [waived[(magic, n)] for n in undefined],
+        "undefined_regions": undefined_regions,
         "writer": SOURCES.get(magic, "unregistered"),
         "parser": PARSERS.get(magic, "unregistered"),
     }
@@ -547,6 +601,8 @@ def _compare_bt(a: Path, b: Path, plant=None) -> dict:
 SELF_DESCRIBING = {
     "NEMO_L2_ZDFMX_1": 16,     # MY_SRC/dynzdf.F90, round-29 instrument
     "NEMO_L2_TRAZD_1": 16,     # MY_SRC/trazdf.F90, round-35 instrument
+    "NEMO_L2_RKTS3_1": 16,     # MY_SRC/stprk3_stg.F90, round-40 instrument
+    "NEMO_L2_ADVSP_1": 17,     # MY_SRC/dynadv.F90, round-41 instrument
 }
 
 
@@ -620,7 +676,13 @@ def _compare_self_describing(a: Path, b: Path, plant, *,
         ranked = [n for n in common if a_fields[n][0] == 3]
         if ranked:
             common = ranked + [n for n in common if n not in ranked]
-    changed, admitted, consumed_equal = [], [], True
+    changed, changed_fields, admitted, consumed_equal = [], [], [], True
+    reason_counts = {
+        "halo": 0,
+        "owned_undefined_slot": 0,
+        "owned_undefined_region": 0,
+        "owned_defined_violation": 0,
+    }
     # ONLY GROWTH IS LEGITIMATE.  Comparing the intersection lets an appended
     # array pass, which is the point; it must not also let a REMOVED one pass,
     # and with a plain intersection a candidate that dropped a field scored
@@ -651,6 +713,25 @@ def _compare_self_describing(a: Path, b: Path, plant, *,
         ids = np.flatnonzero(element_diff)
         projection = {0: "s", 2: "2", 3: "3"}[rank]
         owned, index = _owned_selector(projection, ids, nx, ny)
+        field_reason_counts = {
+            "halo": int(np.count_nonzero(~owned)),
+            "owned_undefined_slot": 0,
+            "owned_undefined_region": 0,
+            "owned_defined_violation": int(np.count_nonzero(owned)),
+        }
+        for reason, count in field_reason_counts.items():
+            reason_counts[reason] += count
+        changed_fields.append({
+            "field": name,
+            "changed_elements": int(ids.size),
+            "changed_bytes": int(np.count_nonzero(
+                aa.view(np.uint8) != bb.view(np.uint8)
+            )),
+            "changed_in_owned_cells": int(np.count_nonzero(owned)),
+            "first_index_0based": [int(v) for v in np.atleast_1d(index[0])],
+            "slot_defined_at_write_point": True,
+            "reason_counts": field_reason_counts,
+        })
         for position, flat in zip(index[owned][:max_listed],
                                   ids[owned][:max_listed]):
             changed.append([name, position.tolist() if hasattr(position, "tolist")
@@ -673,15 +754,37 @@ def _compare_self_describing(a: Path, b: Path, plant, *,
             })
         if np.any(owned):
             consumed_equal = False
+    raw_a, raw_b = a.read_bytes(), b.read_bytes()
+    # Appended self-describing fields are admitted schema growth, not changed
+    # bytes in the inherited payload. Compare the common byte prefix and
+    # report the growth separately below.
+    common_bytes = min(len(raw_a), len(raw_b))
+    raw_diff = (
+        np.frombuffer(raw_a, np.uint8, common_bytes)
+        != np.frombuffer(raw_b, np.uint8, common_bytes)
+    )
     return {
         "consumed_equal": bool(consumed_equal), "magic": a_magic,
         "compared_fields": common,
         "fields_only_on_one_side": sorted(set(a_fields) ^ set(b_fields)),
         "owned_field_differences": changed,
+        "changed_elements": int(sum(
+            field["changed_elements"] for field in changed_fields
+        )),
+        "reason_counts": reason_counts,
+        "changed_fields": changed_fields,
+        "raw_differing_bytes": int(np.count_nonzero(raw_diff)),
+        "first_differing_byte_1based": (
+            int(np.flatnonzero(raw_diff)[0] + 1) if np.any(raw_diff) else None
+        ),
         "admitted_differences": admitted,
         "appended_bytes": max(0, b.stat().st_size - a.stat().st_size),
-        "parser": "nemo_testcase_l2_gyre_round21_admission.py"
-                  "::_compare_self_describing",
+        "writer": SOURCES.get(a_magic, "unregistered"),
+        "parser": PARSERS.get(
+            a_magic,
+            "nemo_testcase_l2_gyre_round21_admission.py"
+            "::_compare_self_describing",
+        ),
     }
 
 

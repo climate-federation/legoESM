@@ -11125,16 +11125,16 @@ Round 46 starts from `14df593e10fe`.  No NEMO build or integration has been
 run by the agent.  The preregistered WRITE-only instrument records kt 1 and 2,
 stages 1–3, following the compiled source order and exact Kbb/Kmm/Kaa call
 tuples at
-`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3.f90:201-216`.
+`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3.f90:201-215`.
 Stage 1 spans the executing HPG/LDF/VOR/WZV/KEG/ZAD calls at
-`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stp2d.f90:140-166`; stages 2–3
+`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stp2d.f90:141-166`; stages 2–3
 span WZV and HPG/VOR/ADV at
 `GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:327-333` and
-`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:446-472`, with
+`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:447-469`, with
 stage-3-only LDF/ZDF at
 `GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:704-717` and
 all-stage barotropic replacement at
-`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:724-745`.
+`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:724-743`.
 
 The record includes named/ranked per-field extents, all RHS frames, stage
 states, live/reference e3 and r3 families, Kbb/Kmm/Kaa velocity and tracer/SSH

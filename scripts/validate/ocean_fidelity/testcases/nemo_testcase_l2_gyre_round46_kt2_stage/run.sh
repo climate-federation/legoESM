@@ -167,8 +167,12 @@ cp "$manifest"/* "$TARGET_RUN/"
   printf 'RUN_FINISHED_UTC=%s\nRUN_DONE\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>run.user.time.log
 )
 
-# Raw twin report, then consumed-field admission for any nondeterministic halo
-# bytes.  The two widened kt=1 records are deterministic hard byte gates.
+# Raw twin report, then the only verdict: schema-aware consumed-field
+# admission.  The widened kt=1 RKTS3/ADVSP records contain whole-array ``ww``
+# halos, so raw identity is informative but not gating.  The gate below also
+# bit-tests kt=2 RKTS3/ADVSP shared payloads against their within-run duplicate
+# named fields in oracle_momstage_kt00000002_s3.bin (28 and 29 exact pairs).
+# This proves duplicate identity, not that whole-array ``ww`` halos are defined.
 : >"$TARGET_RUN/round46_raw_twin_cmp.log"
 for source_record in "$SOURCE_RUN"/oracle_*.bin; do
   name=${source_record##*/}
@@ -179,11 +183,6 @@ for source_record in "$SOURCE_RUN"/oracle_*.bin; do
     printf 'RAW_DIFFERS   %s (consumed-field admission follows)\n' "$name"
   fi
 done | tee "$TARGET_RUN/round46_raw_twin_cmp.log"
-for name in oracle_rkstage3_terms_kt00000001.bin oracle_dynadv_split_kt00000001_s3.bin; do
-  grep -q "^RAW_IDENTICAL $name\$" "$TARGET_RUN/round46_raw_twin_cmp.log" || {
-    printf 'REFUSE: widened deterministic kt1 record moved: %s\n' "$name" >&2; exit 69;
-  }
-done
 
 readonly NEW="oracle_momstage_kt00000001_s1.bin oracle_momstage_kt00000001_s2.bin \
 oracle_momstage_kt00000001_s3.bin oracle_momstage_kt00000002_s1.bin \

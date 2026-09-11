@@ -32,11 +32,14 @@ from nemo_testcase_l2_gyre_round41_dynadv_split import (
     _zad_replay,
     read_split,
 )
+from nemo_testcase_l2_gyre_round21_admission import _compare_self_describing
 
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round46/oracle_kt2_stage")
 ROUND41 = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round41/oracle_dynadv_split")
 MAGIC = "NEMO_L2_R46STG1"
 DIMS = (36, 26, 31)
+OWNED_DIMS = (32, 22, 31)
+OWNED_3D_FIELDS = {"tke_en", "tke_avt_k", "tke_dissl"}
 HEADER_FIELDS = (
     "version",
     "kt",
@@ -227,7 +230,10 @@ def read_stage(path: Path, *, plant: str | None = None) -> dict:
                 require((n1, n2, n3) == (*DIMS[:2], 1), f"{path}: bad 2-D extents for {name}")
                 arrays[name] = _xy(a, n1, n2)
             else:
-                require((n1, n2, n3) == DIMS, f"{path}: bad 3-D extents for {name}")
+                expected = OWNED_DIMS if name in OWNED_3D_FIELDS else DIMS
+                require((n1, n2, n3) == expected,
+                        f"{path}: bad 3-D extents for {name}: "
+                        f"{(n1, n2, n3)} != {expected}")
                 arrays[name] = _xyz(a, n1, n2, n3)
     missing = REQUIRED - arrays.keys()
     # Stage-specific fields are additive to the common contract.
@@ -344,7 +350,32 @@ def _calibrate(records: dict, plant: str | None) -> dict:
     rows = {}
     for key, record in records.items():
         a = record["arrays"]
-        ww = _wzv_replay(a)
+        wzv_inputs = a
+        if key == (2, 1):
+            # stp2d.f90:157-162 updates r3t(Kaa)=ssh(Kaa)*r1_ht_0 after
+            # r46_begin recorded the named bundle and immediately before WZV.
+            # The same bundle carries the developed Kbb identity
+            # r3t(Kbb)=ssh(Kbb)*r1_ht_0, so recover NEMO's stored reciprocal
+            # from those two operands and replay the missing statement.  Every
+            # wet WZV cell has nonzero developed ssh; dry cells are masked out
+            # by sshwzv.f90:297-298.
+            wet = a["tmask"][..., 0] > 0.5
+            ext2 = np.zeros_like(wet)
+            ext2[1:25, 1:35] = True
+            require(np.all(a["ssh_Kbb"][wet & ext2] != 0.0),
+                    "kt2 stage1 cannot recover stored r1_ht_0 from zero ssh_Kbb")
+            r1_ht_0 = np.divide(
+                a["r3t_Kbb"], a["ssh_Kbb"],
+                out=np.zeros_like(a["r3t_Kbb"]),
+                where=a["ssh_Kbb"] != 0.0,
+            )
+            r3t_kaa = a["ssh_Kaa"] * r1_ht_0
+            rows["kt2.s1.r3t_Kaa_replay"] = int(np.count_nonzero(
+                (a["ssh_Kbb"] * r1_ht_0)[wet & ext2]
+                != a["r3t_Kbb"][wet & ext2]
+            ))
+            wzv_inputs = {**a, "r3t_Kaa": r3t_kaa}
+        ww = _wzv_replay(wzv_inputs)
         keg_u, keg_v = _keg_replay(_split_view(a))
         zad_u, zad_v = _zad_replay(_split_view(a))
         if plant == "calibration" and key == (2, 1):
@@ -425,6 +456,8 @@ def _given_inputs(records: dict, plant: str | None) -> list[dict]:
                         "n": int(mask.sum()),
                         "n_unequal": int(np.count_nonzero(got[mask] != ref[mask])),
                         "max_abs": float(np.max(np.abs(got[mask] - ref[mask]))),
+                        "reference_max_abs": float(np.max(np.abs(ref[mask]))),
+                        "model_max_abs": float(np.max(np.abs(got[mask]))),
                         "execution": "production-jit model component from NEMO stage inputs",
                     }
                 )
@@ -447,6 +480,8 @@ def _given_inputs(records: dict, plant: str | None) -> list[dict]:
                         "n": int(mask.sum()),
                         "n_unequal": int(np.count_nonzero(got[mask] != ref[mask])),
                         "max_abs": float(np.max(np.abs(got[mask] - ref[mask]))),
+                        "reference_max_abs": float(np.max(np.abs(ref[mask]))),
+                        "model_max_abs": float(np.max(np.abs(got[mask]))),
                         "execution": "production-jit model diagnostic from NEMO stage inputs",
                     }
                 )
@@ -476,7 +511,26 @@ def _given_inputs(records: dict, plant: str | None) -> list[dict]:
 
 
 def _trajectory(records: dict, plant: str | None) -> list[dict]:
-    """Start with NEMO's full kt=1 end bundle and score kt=2 stage states."""
+    """Advance the exact kt=1 card state, then score kt=2 stage states."""
+    # The widened record closes every named 3-D/TKE field, but not NEMO's
+    # persistent dynspg_ts AB3/AM4 substep history.  Seeding that history from
+    # an independent legoESM kt=1 step moved every stage globally even after
+    # all recorded entry fields were injected bit-exactly.  Refuse to print
+    # those contaminated numbers as a stage verdict; a future acquisition must
+    # add the six ubb_e/ub_e/vbb_e/vb_e/sshbb_e/sshb_e endpoint arrays.
+    if plant == "trajectory":
+        require(False, "trajectory plant: missing-history refusal fired")
+    return [{
+        "name": "GYRE-zco.kt1_end_to_kt2_stage_trajectory",
+        "status": "UNMEASURED",
+        "reason": "NEMO kt=1-end cross-window barotropic history was not recorded",
+        "required_fields": [
+            "ubb_e", "ub_e", "vbb_e", "vb_e", "sshbb_e", "sshb_e"
+        ],
+    }]
+
+    # Retained below as the preregistered experimental arm; unreachable until
+    # the required record exists and the refusal above is replaced by a parser.
     import jax
     import jax.numpy as jnp
     from legoesm.core.field import Field
@@ -494,39 +548,56 @@ def _trajectory(records: dict, plant: str | None) -> list[dict]:
         freshwater_closure="real_freshwater", fix_eta_drift=True
     )
     a = records[(2, 1)]["arrays"]
-    u0 = _owned3(a["u_Kbb"])
-    v0 = _owned3(a["v_Kbb"])
-    u = np.concatenate([u0[:, -1:, :], u0], axis=1)
-    v = np.concatenate([np.zeros_like(v0[:1]), v0], axis=0)
-    ub0, vb0 = _owned2(a["uu_b_Kbb"]), _owned2(a["vv_b_Kbb"])
-    ub = np.concatenate([ub0[:, -1:], ub0], axis=1)
-    vb = np.concatenate([np.zeros_like(vb0[:1]), vb0], axis=0)
+    # Independently advancing kt=1 preserves every hidden prognostic and TKE
+    # history slot.  Reconstructing only named fields from the initial state
+    # silently seeded different viscosity and produced a false all-cell miss.
     st = card.recipe.initial_state
+    freshwater1, surface1 = _surface_forcings(card, st, 1)
+    st = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg
+    ).step(st, dt=card.dt_s, freshwater=freshwater1, surface_forcing=surface1)
+    # Replace every recorded kt=1 endpoint operand while retaining the
+    # otherwise-unrecorded history slots from the independently advanced
+    # legoESM step.  This is the consumed-field bridge: no NEMO routine is
+    # called, and the entry rows below prove the fields used by kt=2 are exact.
+    u0, v0 = _owned3(a["u_Kbb"]), _owned3(a["v_Kbb"])
+    ub0, vb0 = _owned2(a["uu_b_Kbb"]), _owned2(a["vv_b_Kbb"])
 
     def field(data, name, dims):
         return Field(data=jnp.asarray(data), name=name, dims=dims)
 
     st = st._replace(
-        u=st.u.replace(data=jnp.asarray(u)),
-        v=st.v.replace(data=jnp.asarray(v)),
+        u=st.u.replace(data=jnp.asarray(np.concatenate([u0[:, -1:, :], u0], axis=1))),
+        v=st.v.replace(data=jnp.asarray(np.concatenate([np.zeros_like(v0[:1]), v0], axis=0))),
         T=st.T.replace(data=jnp.asarray(_owned3(a["T_Kbb"]))),
         S=st.S.replace(data=jnp.asarray(_owned3(a["S_Kbb"]))),
         eta=st.eta.replace(data=jnp.asarray(_owned2(a["ssh_Kbb"]))),
-        uu_b=st.uu_b.replace(data=jnp.asarray(ub)),
-        vv_b=st.vv_b.replace(data=jnp.asarray(vb)),
-        tke=field(_owned3(a["tke_en"], 31)[..., 1:30], "tke", ("lat", "lon", "level")),
+        uu_b=st.uu_b.replace(data=jnp.asarray(np.concatenate([ub0[:, -1:], ub0], axis=1))),
+        vv_b=st.vv_b.replace(data=jnp.asarray(np.concatenate([np.zeros_like(vb0[:1]), vb0], axis=0))),
+        tke=field(a["tke_en"][..., 1:30], "tke", ("lat", "lon", "level")),
         tke_avm=field(_owned3(a["tke_avm_k"], 31)[..., 1:30], "tke_avm", ("lat", "lon", "level")),
-        tke_avt=field(_owned3(a["tke_avt_k"], 31)[..., 1:30], "tke_avt", ("lat", "lon", "level")),
-        tke_dissl=field(
-            _owned3(a["tke_dissl"], 31)[..., 1:30], "tke_dissl", ("lat", "lon", "level")
-        ),
-        tke_avm_surface=field(
-            _owned3(a["tke_avm_k"], 31)[..., 0], "tke_avm_surface", ("lat", "lon")
-        ),
+        tke_avt=field(a["tke_avt_k"][..., 1:30], "tke_avt", ("lat", "lon", "level")),
+        tke_dissl=field(a["tke_dissl"][..., 1:30], "tke_dissl", ("lat", "lon", "level")),
+        tke_avm_surface=field(_owned3(a["tke_avm_k"], 31)[..., 0], "tke_avm_surface", ("lat", "lon")),
     )
     freshwater, surface = _surface_forcings(card, st, 2)
     masks = expected_masks(card)
     rows = []
+    entry = lego_fields(st)
+    for field, ref in (
+        ("u", _owned3(a["u_Kbb"])),
+        ("v", _owned3(a["v_Kbb"])),
+        ("T", _owned3(a["T_Kbb"])),
+        ("S", _owned3(a["S_Kbb"])),
+        ("ssh", _owned2(a["ssh_Kbb"])),
+    ):
+        mask = masks[field]
+        rows.append({
+            "name": f"GYRE-zco.kt1_end_bridge.{field}",
+            "n": int(mask.sum()),
+            "n_unequal": int(np.count_nonzero(entry[field][mask] != ref[mask])),
+            "max_abs": float(np.max(np.abs(entry[field][mask] - ref[mask]))),
+        })
     for stage in (1, 2, 3):
         hooks = _NEMOWSRK3TestHooks(expose_momentum_stage=stage)
         got = LatLonCGridOceanModel(
@@ -552,6 +623,26 @@ def _trajectory(records: dict, plant: str | None) -> list[dict]:
     if plant == "trajectory":
         require(any(r["max_abs"] > 0.5 for r in rows), "trajectory plant did not land")
     return rows
+
+
+def _exact_payload_pairs(left: dict, right: dict, pairs: dict[str, str], *,
+                         right_is_full: bool) -> dict:
+    """Bit-test the duplicate kt=2 payloads written by independent streams."""
+    rows = {}
+    for left_name, right_name in pairs.items():
+        a = np.asarray(left[left_name])
+        b = np.asarray(right[right_name])
+        if right_is_full:
+            b = _owned2(b) if a.ndim == 2 else _owned3(b, a.shape[-1])
+        rows[f"{left_name}={right_name}"] = bool(
+            a.shape == b.shape
+            and np.array_equal(
+                np.ascontiguousarray(a).view(np.uint64),
+                np.ascontiguousarray(b).view(np.uint64),
+            )
+        )
+    return {"pair_count": len(rows), "all_bit_identical": all(rows.values()),
+            "pairs": rows}
 
 
 def run(
@@ -589,13 +680,69 @@ def run(
             "header"
         ],
     }
-    twin = {
+    twin_reports = {
+        "round40": _compare_self_describing(
+            round40_kt1, new40, [True], max_listed=64),
+        "round41": _compare_self_describing(
+            round41_kt1, new41, [True], max_listed=64),
+    }
+    twin = {key: bool(value["consumed_equal"])
+            for key, value in twin_reports.items()}
+    raw_twin = {
         "round40": new40.read_bytes() == round40_kt1.read_bytes(),
         "round41": new41.read_bytes() == round41_kt1.read_bytes(),
     }
     if plant == "twin":
         twin["round40"] = False
-    require(all(twin.values()), f"deterministic kt1 legacy twin moved: {twin}")
+    require(all(twin.values()), f"consumed kt1 legacy twin moved: {twin}")
+
+    stage3 = records[(2, 3)]["arrays"]
+    kt2_payload_identity = {
+        "rkstage3_terms": _exact_payload_pairs(
+            read_stage3_terms(root / "oracle_rkstage3_terms_kt00000002.bin",
+                              expect_kt=2)["arrays"],
+            stage3,
+            {
+                "before_u": "rhs_entry_u", "before_v": "rhs_entry_v",
+                "after_hpg_u": "after_hpg_u", "after_hpg_v": "after_hpg_v",
+                "after_vor_u": "after_vor_u", "after_vor_v": "after_vor_v",
+                "after_adv_u": "after_adv_u", "after_adv_v": "after_adv_v",
+                "uu_Kmm": "u_Kmm", "vv_Kmm": "v_Kmm", "ww": "ww",
+                "r3t_Kmm": "r3t_Kmm", "r3u_Kmm": "r3u_Kmm",
+                "r3v_Kmm": "r3v_Kmm", "e3u_Kmm": "e3u_Kmm",
+                "e3v_Kmm": "e3v_Kmm", "e3t_Kmm": "e3t_Kmm",
+                "e3w_Kmm": "e3w_Kmm", "e3u_0": "e3u_0",
+                "e3v_0": "e3v_0", "e3t_0": "e3t_0",
+                "umask": "umask", "vmask": "vmask", "tmask": "tmask",
+                "wmask": "wmask", "e1e2t": "e1e2t",
+                "r1_e1u": "r1_e1u", "r1_e2v": "r1_e2v",
+            },
+            right_is_full=True,
+        ),
+        "dynadv_split": _exact_payload_pairs(
+            read_split(root / "oracle_dynadv_split_kt00000002_s3.bin",
+                       expect_kt=2)["arrays"],
+            stage3,
+            {
+                "before_keg_u": "after_vor_u", "before_keg_v": "after_vor_v",
+                "after_keg_u": "after_keg_u", "after_keg_v": "after_keg_v",
+                "after_zad_u": "after_zad_u", "after_zad_v": "after_zad_v",
+                "uu_Kmm": "u_Kmm", "vv_Kmm": "v_Kmm", "ww": "ww",
+                "wsd_effective": "wsd_effective", "e3t_Kmm": "e3t_Kmm",
+                "e3u_Kmm": "e3u_Kmm", "e3v_Kmm": "e3v_Kmm",
+                "e3w_Kmm": "e3w_Kmm", "e3t_0": "e3t_0",
+                "e3u_0": "e3u_0", "e3v_0": "e3v_0", "e3w_0": "e3w_0",
+                "e1e2t": "e1e2t", "e1e2u": "e1e2u", "e1e2v": "e1e2v",
+                "r1_e1u": "r1_e1u", "r1_e2v": "r1_e2v",
+                "r1_e1e2u": "r1_e1e2u", "r1_e1e2v": "r1_e1e2v",
+                "tmask": "tmask", "umask": "umask", "vmask": "vmask",
+                "wmask": "wmask",
+            },
+            right_is_full=False,
+        ),
+    }
+    require(all(row["all_bit_identical"] for row in kt2_payload_identity.values()),
+            f"kt2 duplicate payload moved: {kt2_payload_identity}")
     report = {
         "format": "nemo-testcase-l2-gyre-round46-kt2-stage-v1",
         "worktree": stamp,
@@ -603,7 +750,10 @@ def run(
         "record_sha256": hashes,
         "calibration_cells_unequal": calibration,
         "legacy_records_parsed": {key: True for key in legacy_records},
-        "legacy_kt1_byte_identity": twin,
+        "legacy_kt1_raw_byte_identity": raw_twin,
+        "legacy_kt1_consumed_identity": twin,
+        "legacy_kt1_admission": twin_reports,
+        "kt2_duplicate_payload_identity": kt2_payload_identity,
         "plant": plant,
         "given_inputs": [],
         "trajectory": [],
@@ -613,6 +763,8 @@ def run(
         report["given_inputs"] = _given_inputs(records, plant)
     if mode in {"trajectory", "all"}:
         report["trajectory"] = _trajectory(records, plant)
+        if any(row.get("status") != "PASS" for row in report["trajectory"]):
+            report["status"] = "UNMEASURED"
     return report
 
 
@@ -646,7 +798,7 @@ def main(argv=None) -> int:
         args.output.write_text(text + "\n")
     print(text)
     print("STATUS", report["status"])
-    return 1 if args.plant else 0
+    return 1 if args.plant or report["status"] != "PASS" else 0
 
 
 if __name__ == "__main__":

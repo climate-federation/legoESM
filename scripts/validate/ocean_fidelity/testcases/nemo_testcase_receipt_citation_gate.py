@@ -107,6 +107,15 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynzad.f90"),
     "GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynkeg.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynkeg.f90"),
+    # Round 47 must bind to the actual widened build, not its R41 source.
+    "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stp2d.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stp2d.f90"),
+    "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynzad.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynzad.f90"),
+    "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/traadv.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/traadv.f90"),
     "GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/zdfmxl.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/zdfmxl.f90"),
     "GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/ldfslp.f90": (
@@ -307,23 +316,45 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:327-333': [
         ('IF( ln_dynadv_vec ) THEN', 1),
         ('CALL wAimp', 1), 7],
-    'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3.f90:201-216': [
+    'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3.f90:201-215': [
         'CALL stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )',
-        'CALL stp_RK3_stg( 3, kstp, Nbb, Nnn, Nrhs, Naa )', 16],
-    'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stp2d.f90:140-166': [
-        'CALL dyn_hpg', 'CALL dyn_zad', 27],
-    'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:446-472': [
-        'CALL    dyn_hpg', 'CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs)', 27],
+        'CALL stp_RK3_stg( 3, kstp, Nbb, Nnn, Nrhs, Naa )', 15],
+    'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stp2d.f90:141-166': [
+        'CALL dyn_hpg', 'CALL dyn_zad', 26],
+    'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:447-469': [
+        'CALL    dyn_hpg', 'CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs)', 23],
     'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:704-717': [
         'CALL dyn_ldf', 'CALL dyn_zdf', 14],
-    'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:724-745': [
-        'barotropic velocity correction', 'corrected horizontal velocity', 22],
+    'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:724-743': [
+        ('barotropic velocity correction', 4), 'corrected horizontal velocity', 20],
     'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynadv.f90:152-176': [
         ('SELECT CASE( n_dynadv )', 1),
         'CALL dyn_zad', 25],
     'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynzad.f90:105-137': [
         'DO jk =  1,  jpk-2',
         '&                                              * zWdzV(ji,jj)', 33],
+    # --- ROUND 47: exact widened compiled branch ---
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:292-316': [
+        ('DO jk =  1,  jpkm1', 1),
+        '&           vn_adv, (r1_hv_0(:,:) /(1._wp+r3v(:,:,Kmm))), vv_b(:,:,Kmm)',
+        25],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:350-357': [
+        ('IF( lwp .AND. kstp == nit000 ) THEN', 1),
+        ('WRITE(l1_unit) zFu, zFv, zFw', 1), 8],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:329-335': [
+        ('IF( ln_dynadv_vec ) THEN', 1),
+        ('IF( ln_zad_Aimp .AND. kstg == 3 )', 1), 7],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynzad.f90:105-137': [
+        'DO jk =  1,  jpk-2',
+        '&                                              * zWdzV(ji,jj)', 33],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stp2d.f90:141-176': [
+        '!*  hydrostatic pressure gradient (HPG))',
+        "CALL r46_rhs( 'after_adv', uu, vv, Krhs )", 36],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:365-371': [
+        ('SELECT CASE( kstg )', 2),
+        'IF( .NOT.ln_dynadv_vec )   CALL dyn_adv', 7],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/traadv.f90:248-250': [
+        'pFu(ji,jj,jpk) = 0._wp', 'pFw(ji,jj,jpk) = 0._wp', 3],
     'GYRE_OMIP_L2_P3_SM_R41ADVSP/EXP00/ocean.output:535': (
         'Courant number targeted application   ln_zad_Aimp =  F', 1),
     'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynadv.f90:176-185': [

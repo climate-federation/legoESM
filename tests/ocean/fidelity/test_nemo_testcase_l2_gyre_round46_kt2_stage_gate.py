@@ -71,12 +71,14 @@ def _write(path: Path, *, stage=1, truncate=False) -> Path:
                 raw = np.asarray([value], dtype=np.float64).tobytes()
             elif name in TWO_D:
                 f.write(struct.pack("=4i", 2, NX, NY, 1))
-                fill = 1.0 if name.startswith(("e1", "r1_e1")) else 0.0
+                fill = 1.0 if name.startswith(("e1", "r1_e1", "r3", "ssh_")) else 0.0
                 raw = _payload(np.full((NY, NX), fill), 2)
             else:
-                f.write(struct.pack("=4i", 3, NX, NY, NZ))
+                owned = name in gate.OWNED_3D_FIELDS
+                nx, ny = gate.OWNED_DIMS[:2] if owned else (NX, NY)
+                f.write(struct.pack("=4i", 3, nx, ny, NZ))
                 fill = 1.0 if name.startswith(("e3", "tmask", "umask", "vmask", "wmask")) else 0.0
-                raw = _payload(np.full((NY, NX, NZ), fill), 3)
+                raw = _payload(np.full((ny, nx, NZ), fill), 3)
             f.write(raw[:-8] if truncate and index == 0 else raw)
             if truncate and index == 0:
                 break
@@ -118,6 +120,6 @@ def test_every_declared_plant_has_a_nonzero_exit_contract():
     run = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage/run.sh").read_text()
     for plant in ("header", "truncation", "calibration", "given", "trajectory", "twin", "stamp"):
         assert f'"{plant}"' in source
-    assert "return 1 if args.plant else 0" in source
+    assert 'return 1 if args.plant or report["status"] != "PASS" else 0' in source
     for plant in ("header", "truncation", "calibration", "twin", "stamp"):
         assert plant in run

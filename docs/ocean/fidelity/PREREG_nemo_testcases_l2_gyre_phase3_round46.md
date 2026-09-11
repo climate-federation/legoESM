@@ -10,20 +10,20 @@ it does not change a legoESM configuration or production operator.
 The executing GYRE build calls stage 1 as `(Kbb,Kmm,Krhs,Kaa) =
 (Nbb,Nbb,Nrhs,Naa)`, then swaps `Nnn/Naa`, calls stage 2 with
 `(Nbb,Nnn,Nrhs,Naa)`, swaps again, and calls stage 3 with the same symbolic
-tuple (`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3.f90:201-216`).
+tuple (`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3.f90:201-215`).
 Thus Kbb is the step-before level at all stages, Kmm is respectively before,
 stage-1 after, and stage-2 after, and Kaa is the stage destination.
 
 Stage 1's compiled operator order is HPG, LDF, VOR, WZV, KEG, ZAD
-(`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stp2d.f90:140-166`).
+(`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stp2d.f90:141-166`).
 Stages 2 and 3 form velocity-form `ww` from the passed Kbb/Kmm/Kaa tuple
 (`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:327-333`), then
 execute HPG, VOR, and `dyn_adv`
-(`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:446-472`).  Only
+(`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:447-469`).  Only
 stage 3 then executes LDF and ZDF
 (`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:704-717`) before
 every stage's reference-depth barotropic replacement
-(`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:724-745`).  The
+(`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:724-743`).  The
 active KEG and ZAD statements are
 `GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynkeg.f90:117-130` and
 `GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynzad.f90:105-137`.  The
