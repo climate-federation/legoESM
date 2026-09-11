@@ -642,8 +642,15 @@ def switch_trace(steps: int, out: Path, *, seeds: tuple[int, int] = (0, 1),
     lat = np.asarray(mesh["gphit"], dtype=np.float64)
 
     def fired(state):
+        # NEMO's trigger is MIN(rn2, rn2b) (zdfevd.f90:108).  On THIS card
+        # stprk3.F90:173-174 sets `rn2 = rn2b` and then calls
+        # `zdf_phy(kstp, Nbb, Nbb, Nrhs)`, so both arms ARE the whole-step
+        # entry tracer and the MIN is over two identical fields.  The before
+        # arm is passed explicitly anyway, so the two-level branch the model
+        # runs is the branch measured here rather than an argued equivalent.
         K, _A = _enhanced_diffusion_K(
             state, card.recipe.z_coord, conv,
+            before_tracers=(state.T.data, state.S.data),
             cc=card.recipe.model_config.physics.constants)
         mask = np.asarray(K, dtype=np.float64) >= k_conv
         if plant == "switch-blind":
