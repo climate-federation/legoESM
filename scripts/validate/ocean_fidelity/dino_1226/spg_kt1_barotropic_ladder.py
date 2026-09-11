@@ -47,8 +47,17 @@ through XIOS with DOMAIN attributes and are not raced:
 
 Both R4 rungs are the loop's EXIT, so a break there says "somewhere in the
 45 substeps" and no more.  Localising it needs the per-substep record that
-section 1 shows this run cannot provide; ``--emit-runsh`` writes the NEMO run
-that can.
+section 1 shows this run cannot provide.  ``scripts/validate/ocean_fidelity/dino_1226/nemo_dino_kt1_rankdump/run.sh`` acquires it, as a makenemo
+CONFIG COPY that cannot write inside the read-only oracle.
+
+REMOVED 2026-09-10, and it is worth saying why rather than letting it vanish
+from the diff: this script used to EMIT that re-run itself, and the script it
+emitted edited ``cfgs/DINO/MY_SRC/dynspg_ts.F90`` IN PLACE behind an exit trap
+and then ran ``makenemo -r DINO -n DINO``, which overwrites the oracle's own
+``cfgs/DINO/BLD`` and ``bin/nemo.exe`` -- and no trap restores those.  A
+reviewer found it still reachable after the config-copy acquisition landed.
+The safe acquisition replaces it; this script no longer writes anything under
+the oracle.
 
 Rule 10: the legoESM side is the production solver's own arrays, captured
 through the private ``_nemo_substep_trace_test_hook`` (no numerical selector
@@ -62,7 +71,7 @@ Usage (GPU only -- this card's XLA CPU compile crashes on this machine):
 
     CUDA_VISIBLE_DEVICES=<uuid> JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \\
     python scripts/validate/ocean_fidelity/dino_1226/\\
-        spg_kt1_barotropic_ladder.py [--plant] [--emit-runsh DIR]
+        spg_kt1_barotropic_ladder.py [--plant]
 
 ``--plant`` moves one wet cell of EVERY rung that is currently AT BAR -- the
 carried mesh ladder and all three loop-entry seeds -- by 1 ulp.  All four MUST
@@ -183,84 +192,10 @@ def audit_record(run_dir: str) -> dict:
     return out
 
 
-RUNSH = """#!/bin/bash
-# Re-run NEMO's DINO one-step-from-rest record with a barotropic
-# instrumentation that is not a 16-rank race.
-#
-# WHY.  cfgs/DINO/MY_SRC/dynspg_ts.F90 writes every dyn_spg_ts debug stream
-# to a fixed filename under two guards that do not mention the MPI rank:
-#     ll_spg_dump = ( kt == nit000 ) .AND. ( .NOT. l_istiled .OR. ntile == 1 )
-#                                                    ! dynspg_ts.F90:206
-#     IF( kt == nit000 ) THEN ... OPEN( UNIT=799, FILE='substep_dump.bin' ...
-#                                                    ! dynspg_ts.F90:926-928
-# With jpni x jpnj = 2 x 8 all sixteen ranks OPEN the same path with
-# STATUS='REPLACE' and write concurrently, so the bytes on disk are an
-# interleave.  spg_kt1_barotropic_ladder.py --audit proves it on the current
-# record.
-#
-# THE FIX IS ONE STRING PER OPEN: tag the filename with the rank.  No
-# production array is read or written differently, the guards keep the dumps
-# on the first step only, and the whole 52x199 domain becomes scoreable
-# instead of one indeterminate tile.
-#
-# Run this from the NEMO checkout with ARCH set to your makenemo -m arch.
-# It edits only MY_SRC debug WRITE/OPEN statements and restores the source on
-# every exit path.  ~2 minutes of wallclock; the run is one time step.
-set -eu
-NEMO=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
-CFG=$NEMO/cfgs/DINO
-OUT=${1:-$CFG/RUN_FROMREST_KT1_RANKED}
-
-cd "$CFG/MY_SRC"
-# The oracle source is READ-ONLY property.  Refuse to start without a real
-# arch (the placeholder below aborts makenemo and would otherwise leave the
-# source rewritten), never clobber an existing backup, and restore on ANY
-# exit -- including the abort.
-if [ "${ARCH:-}" = "" ]; then
-  echo "set ARCH=<your makenemo -m arch> before running this" >&2; exit 2
-fi
-if [ -e dynspg_ts.F90.bak_rankdump ]; then
-  echo "dynspg_ts.F90.bak_rankdump already exists -- a previous run did not" >&2
-  echo "restore the oracle source. Resolve by hand; refusing to overwrite." >&2
-  exit 2
-fi
-cp -n dynspg_ts.F90 dynspg_ts.F90.bak_rankdump
-trap 'mv -f "$CFG/MY_SRC/dynspg_ts.F90.bak_rankdump" \
-      "$CFG/MY_SRC/dynspg_ts.F90" 2>/dev/null || true' EXIT
-
-# Every debug OPEN in dyn_spg_ts gains a rank suffix.  narea is 1-based.
-python3 - <<'PY'
-import re
-src = open('dynspg_ts.F90').read()
-# 1) declare the suffix once, next to the existing ll_spg_dump declaration
-src = src.replace(
-    "      LOGICAL  ::   ll_spg_dump ",
-    "      CHARACTER(LEN=16) ::   cl_rk   ! #1728 per-rank debug suffix\n"
-    "      LOGICAL  ::   ll_spg_dump ", 1)
-src = src.replace(
-    "      ll_spg_dump = ( kt == nit000 )",
-    "      WRITE(cl_rk,'(A,I4.4,A)') '_r', narea-1, '.bin'\n"
-    "      ll_spg_dump = ( kt == nit000 )", 1)
-# 2) rank-tag every debug filename this routine opens
-src = re.sub(r"FILE='([A-Za-z0-9_]+)\\.bin'", r"FILE='\\1'//TRIM(cl_rk)", src)
-open('dynspg_ts.F90','w').write(src)
-PY
-grep -n "TRIM(cl_rk)" dynspg_ts.F90 | head -3
-
-cd "$NEMO"
-./makenemo -r DINO -n DINO -m "$ARCH" -j 8
-
-mkdir -p "$OUT" && cd "$OUT"
-cp -f "$CFG/RUN_FROMREST_KT1/namelist_cfg" .
-cp -f "$CFG/RUN_FROMREST_KT1/namelist_ref" .
-ln -sf "$CFG/BLD/bin/nemo.exe" nemo
-cp -f "$CFG/EXPREF"/*.xml . 2>/dev/null || \
-  cp -f "$CFG/RUN_FROMREST_KT1"/*.xml . 2>/dev/null || true
-mpirun -np 16 ./nemo
-
-# the trap above restores the oracle source on every exit path
-echo "record written to $OUT ; re-run the ladder with --run-dir $OUT"
-"""
+#: The acquisition that produces a race-free record.  A CONFIG COPY: it never
+#: writes inside cfgs/DINO or src/, and it refuses rather than trying.
+ACQUISITION = ("scripts/validate/ocean_fidelity/dino_1226/"
+               "nemo_dino_kt1_rankdump/run.sh")
 
 
 # ---------------------------------------------------------------- helpers
@@ -334,19 +269,9 @@ def main() -> int:
     ap.add_argument("--run-dir", default=RUN_KT1)
     ap.add_argument("--plant", action="store_true")
     ap.add_argument("--audit-only", action="store_true")
-    ap.add_argument("--emit-runsh", default=None,
-                    help="write the clean-record run script to this directory")
     ap.add_argument("--save-trace", default=None,
                     help="npz path for legoESM's per-substep trajectory")
     args = ap.parse_args()
-
-    if args.emit_runsh:
-        os.makedirs(args.emit_runsh, exist_ok=True)
-        p = os.path.join(args.emit_runsh, "run_dino_kt1_ranked_dumps.sh")
-        with open(p, "w") as fh:
-            fh.write(RUNSH)
-        os.chmod(p, 0o755)
-        print(f"wrote {p}")
 
     print("=" * 78)
     print("1. RECORD AUDIT -- are this run's dyn_spg_ts streams usable?")
@@ -398,7 +323,7 @@ def main() -> int:
               "on narea;")
         print("         all 16 ranks OPEN the same path with "
               "STATUS='REPLACE'.")
-        print("  fix:   --emit-runsh writes the rank-tagged re-run.")
+        print("  fix:   " + ACQUISITION + " acquires a clean record")
     if args.audit_only:
         return 0
 
@@ -659,7 +584,8 @@ def main() -> int:
     # If a later record passes the audit these rungs become scoreable, and a
     # gate that kept printing UNMEASURED would hide that.
     if raced:
-        reason = ("a rank-tagged spg dump (--emit-runsh); this record's "
+        reason = ("a rank-tagged spg dump (" + ACQUISITION + "); "
+                  "this record's "
                   "streams are a 16-rank interleave (section 1)")
         tab.unmeasured("R1 frozen forcing zu_frc/zv_frc/ssh_frc", reason)
         tab.unmeasured("R3 per-substep ssha_e/ua_e/va_e (x45)", reason)

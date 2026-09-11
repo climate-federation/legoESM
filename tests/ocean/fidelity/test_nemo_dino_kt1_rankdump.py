@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import shutil
+import subprocess
 
 import numpy as np
 import pytest
@@ -40,6 +41,63 @@ def test_run_sh_is_committed_and_executable():
     p = os.path.join(_DIR, "run.sh")
     assert os.path.exists(p)
     assert os.access(p, os.X_OK)
+
+
+def _fake_nemo(tmp_path):
+    """The smallest tree run.sh will accept far enough to reach its guards."""
+    n = tmp_path / "nemo"
+    (n / "cfgs" / "DINO" / "RUN_FROMREST_KT1").mkdir(parents=True)
+    (n / "arch").mkdir()
+    (n / "arch" / "arch-conda.fcm").write_text("")
+    return n
+
+
+@pytest.mark.parametrize("where", ["cfgs/SHARED", "cfgs/DINO/RUN_X", "src/OCE",
+                                   "cfgs", ""])
+def test_run_sh_refuses_to_write_the_record_inside_the_oracle(tmp_path, where):
+    """The record may not land anywhere in the NEMO checkout.
+
+    An earlier guard named only cfgs/DINO and src/, and a reviewer walked
+    OUT=$NEMO/cfgs/SHARED straight through it -- run.sh would then have
+    clobbered the namelist_ref every configuration includes.
+    """
+    n = _fake_nemo(tmp_path)
+    out = str(n / where) if where else str(n)
+    r = subprocess.run(
+        ["bash", os.path.join(_DIR, "run.sh")], capture_output=True, text=True,
+        env={**os.environ, "NEMO": str(n), "OUT": out})
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "REFUSING" in r.stderr, r.stderr
+
+
+def test_run_sh_resolves_symlinks_before_deciding(tmp_path):
+    """A symlinked checkout must not make the oracle look like somewhere else."""
+    n = _fake_nemo(tmp_path)
+    link = tmp_path / "link"
+    link.symlink_to(n)
+    r = subprocess.run(
+        ["bash", os.path.join(_DIR, "run.sh")], capture_output=True, text=True,
+        env={**os.environ, "NEMO": str(link),
+             "OUT": str(link / "cfgs" / "SHARED")})
+    assert r.returncode == 2 and "REFUSING" in r.stderr, r.stderr
+
+
+def test_run_sh_refuses_to_reuse_a_config_copy(tmp_path):
+    n = _fake_nemo(tmp_path)
+    (n / "cfgs" / "DINO_KT1_RANKDUMP").mkdir()
+    r = subprocess.run(
+        ["bash", os.path.join(_DIR, "run.sh")], capture_output=True, text=True,
+        env={**os.environ, "NEMO": str(n), "OUT": str(tmp_path / "out")})
+    assert r.returncode == 2 and "already exists" in r.stderr, r.stderr
+
+
+def test_run_sh_refuses_without_an_arch_file(tmp_path):
+    n = _fake_nemo(tmp_path)
+    (n / "arch" / "arch-conda.fcm").unlink()
+    r = subprocess.run(
+        ["bash", os.path.join(_DIR, "run.sh")], capture_output=True, text=True,
+        env={**os.environ, "NEMO": str(n), "OUT": str(tmp_path / "out")})
+    assert r.returncode == 2 and "arch-conda.fcm" in r.stderr, r.stderr
 
 
 def test_patch_refuses_to_touch_the_oracle_tree(tmp_path):
@@ -161,6 +219,56 @@ def test_reader_refuses_a_double_covered_tile_map(tmp_path):
               hls=hls, jpiglo=jpiglo, jpjglo=jpjglo, fill=float(narea))
     with pytest.raises(SystemExit, match="covered twice"):
         read_rankdump.stitch(str(tmp_path), 1)
+
+
+_LAYOUT = ("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/"
+           "RUN_FROMREST_KT1/layout.dat")
+
+#: The REAL DINO kt=1 decomposition, read off layout.dat (16 ranks, 2 x 8,
+#: nn_hls = 2, global 56 x 203 INCLUDING the halo for a 52 x 199 domain).
+#: (rank0, jpi, jpj, nimpp, njmpp) -- note the ragged last j-band, jpj = 28.
+_DINO_LAYOUT = [(r, 30, 29 if r < 14 else 28,
+                 1 if r % 2 == 0 else 27,
+                 1 + 25 * (r // 2))
+                for r in range(16)]
+
+
+def test_reader_stitches_the_REAL_16_rank_dino_decomposition(tmp_path):
+    """The tests above are a 2-rank i-only split; this is the decomposition
+    the record is actually produced on, including its ragged last j-band."""
+    hls, jpiglo, jpjglo = 2, 56, 203
+    for r, jpi, jpj, nimpp, njmpp in _DINO_LAYOUT:
+        _tile(tmp_path / f"substep_r{r:04d}_s001.bin", narea=r + 1, jn=1,
+              jpi=jpi, jpj=jpj, nimpp=nimpp, njmpp=njmpp, hls=hls,
+              jpiglo=jpiglo, jpjglo=jpjglo, fill=float(r))
+    s = read_rankdump.stitch(str(tmp_path), 1)
+    assert s["ranks"] == 16
+    f = s["un_e"]
+    assert f.shape == (jpjglo - 2 * hls, jpiglo - 2 * hls) == (199, 52)
+    assert not np.isnan(f).any(), "the tile map left a hole"
+    # every rank owns a contiguous block, and rank r's fill must land there
+    for r, jpi, jpj, nimpp, njmpp in _DINO_LAYOUT:
+        ni, nj = jpi - 2 * hls, jpj - 2 * hls
+        blk = f[njmpp - 1:njmpp - 1 + nj, nimpp - 1:nimpp - 1 + ni]
+        assert np.array_equal(blk, np.full((nj, ni), float(r))), \
+            f"rank {r} landed in the wrong place"
+
+
+@pytest.mark.skipif(not os.path.exists(_LAYOUT),
+                    reason=f"NEMO record layout not on this machine: {_LAYOUT}")
+def test_the_layout_constant_matches_the_oracles_own_layout_dat():
+    """The decomposition above is a CLAIM about the record; read the file."""
+    lines = open(_LAYOUT).read().splitlines()
+    hdr = next(i for i, ln in enumerate(lines)
+               if ln.split()[:6] == ["rank", "ii", "ij", "jpi", "jpj", "nimpp"])
+    rows = []
+    for ln in lines[hdr + 1:]:
+        p = ln.split()
+        if len(p) < 7 or not p[0].lstrip("-").isdigit():
+            break
+        rows.append(tuple(int(x) for x in (p[0], p[3], p[4], p[5], p[6])))
+    assert len(rows) == 16, rows
+    assert rows == _DINO_LAYOUT, (rows[:4], _DINO_LAYOUT[:4])
 
 
 def test_header_field_list_matches_the_patch():

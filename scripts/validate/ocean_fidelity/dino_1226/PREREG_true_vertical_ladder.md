@@ -179,3 +179,65 @@ velocity residual: it was the boxes, not the loop. What remains at step 1 is
 the TRACER path (T/S unmoved at ~5e-6 K), whose largest named component is the
 oracle-side `qns_b` solar-term DEBT already recorded by
 `nemo_dino_fromrest_gate`.
+
+## 7. WHAT THE DIFF REVIEW BROKE, AND WHAT IT COST
+
+Eleven findings; the first two would have made this round's evidence worthless.
+
+1. **THE GATE PASSED ON A WRONG LADDER.** The "e3t_0 reference ladder" row
+   fell back to the MODEL's own `dz[k]` as the oracle value on a level with no
+   wet cell — it compared the model against itself and printed EXACT. The
+   reviewer planted 300 m at every dry level and all 18 rows still read EXACT
+   with `GATE PASS`. The oracle side is now taken from `e3t_0` itself (it is
+   horizontally uniform over the WHOLE array, dry cells included, and the gate
+   now CHECKS that before using it). DINO's level 36 is the one dry level and
+   it is now an explicit WAIVER with its measurement printed (e3t 506.375 vs
+   617.462, gdept 4253.187 vs 4308.731), a precondition the gate verifies on
+   the run (0 active cells, 0 thickness, 0 wet mask), and a pin: the waived
+   value must be NEMO's OTHER ladder, not an arbitrary number, so the
+   reviewer's plant now exits non-zero.
+   NOT CHANGED, and on the ASKED table instead: moving the model's dry level
+   onto `e3t_0` as well. Measured, it alters `dz_ref[36]`, `t_depth_ref[36]`,
+   `z_full_ref[36]`, `z_half_ref[37]`, `dz_half_ref[35]` and `H_max` and
+   leaves `h_partial`, `H_bathy`, `is_active` and the initial T bit-identical
+   — but `H_max` and `dz_half_ref` are carried state and this is the campaign
+   owner's call, not a silent edit.
+2. **THE IN-PLACE ORACLE EDIT WAS STILL COMMITTED AND REACHABLE.**
+   `spg_kt1_barotropic_ladder.py --emit-runsh` wrote a script that edited
+   `cfgs/DINO/MY_SRC/dynspg_ts.F90` in place and ran `makenemo -r DINO -n
+   DINO`, overwriting the oracle's own `BLD` tree and `bin/nemo.exe` — which
+   no trap restores. The config-copy acquisition was supposed to replace it
+   and did not remove it. Deleted, with a test that asserts on the source
+   (the flag is gone, so no invocation can exercise it).
+3. **`run.sh` advertised a handoff that cannot work.** It told the operator to
+   re-score with `spg_kt1_barotropic_ladder.py`, which opens the OLD fixed
+   filenames — every one of them rank-tagged by the patch. It now says so and
+   names extending the ladder gate as the next change.
+4. **The record could be written into `cfgs/SHARED`.** The guard named only
+   `cfgs/DINO` and `src/`; `OUT=$NEMO/cfgs/SHARED` walked through and would
+   have clobbered the `namelist_ref` every configuration includes. The record
+   may now not land anywhere inside the checkout. A second hole found while
+   fixing it: `readlink -f` returns EMPTY for a path whose parent does not
+   exist, and `local real=$(...)` hides that from `set -e`, so every
+   not-yet-created path passed silently. Now `readlink -m`, with a
+   parametrised test over five locations plus a symlinked checkout.
+5. **One ppsrc token proved nothing.** `ACTION='WRITE'` already occurs once in
+   the pristine source. The build check now REFUSES if any token it greps for
+   is also present unpatched.
+6. **Three lanes flip their initial condition** at
+   `LEGOESM_NEMO_E3T=both` — `kamm_run5y_v3.py`, `box_budget_run.py`,
+   `dino_year_screen_fullframe.py` (which REQUIRES an explicit mode) — from
+   the paper profile to NEMO's own. That is the fix, and they are named.
+7. **Two of the four screens the docstring claims to cover cannot reach NEMO's
+   initial condition at all**: `dino_90d_screen` and `dino_year_screen` read
+   at `nn_hls=2`, so their mask is 203x56 against the mesh's 199x52 and the
+   predicate returns `None` at either mode. Pre-existing; named, not fixed.
+8. The plant banner said "level 1" while planting every level. Fixed.
+9. `r1_hu_0`/`r1_hv_0` re-derive the formula rather than calling it, so they
+   test the PREDICATE and the OPERAND, not the arithmetic. Written at the row.
+10. `e3uw_0`/`e3vw_0` catch the carried array being absent, zeroed, truncated
+    or swapped; they do not test the face interpolation, which on a uniform
+    ladder is the identity. Written at the row.
+11. The stitcher was only tested on a 2-rank i-split. It is now tested on the
+    REAL 16-rank decomposition, and the decomposition constant is itself
+    checked against the oracle's own `layout.dat`.

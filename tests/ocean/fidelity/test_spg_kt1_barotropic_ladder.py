@@ -81,22 +81,23 @@ def test_audit_names_two_streams_from_different_ranks():
 
 @_needs_oracle
 @_needs_nc
-def test_emit_runsh_writes_a_rank_tagged_rerun(tmp_path):
-    r = _run("--audit-only", "--emit-runsh", str(tmp_path))
-    assert r.returncode == 0, r.stderr[-2000:]
-    p = tmp_path / "run_dino_kt1_ranked_dumps.sh"
-    assert p.exists()
-    body = p.read_text()
-    # the whole point of the script: a per-rank filename
-    assert "narea-1" in body and "TRIM(cl_rk)" in body
-    # It edits the READ-ONLY oracle source, so it must restore it on EVERY
-    # exit path, must not clobber an existing backup, and must refuse to
-    # start without a real arch -- the placeholder that would otherwise abort
-    # makenemo and leave the oracle rewritten.
-    assert "trap " in body and "bak_rankdump" in body
-    assert "cp -n dynspg_ts.F90 dynspg_ts.F90.bak_rankdump" in body
-    assert '"${ARCH:-}" = ""' in body
-    assert "<YOUR_ARCH>" not in body
+def test_this_script_never_writes_inside_the_oracle():
+    """It used to, and a reviewer found it still reachable.
+
+    The removed ``--emit-runsh`` wrote a re-run that edited
+    ``cfgs/DINO/MY_SRC/dynspg_ts.F90`` in place behind an exit trap and then
+    ran ``makenemo -r DINO -n DINO``, overwriting the oracle's own BLD tree
+    and ``bin/nemo.exe`` -- which no trap restores.  The acquisition is now a
+    makenemo CONFIG COPY that refuses to touch either path.  This asserts on
+    the SOURCE, because the flag is gone and no invocation can exercise it.
+    """
+    body = open(_GATE).read()
+    assert "--emit-runsh" not in body
+    assert "emit_runsh" not in body
+    assert "makenemo" not in body.split('"""', 2)[2], \
+        "this script must not build NEMO outside its docstring"
+    assert "nemo_dino_kt1_rankdump/run.sh" in body, \
+        "the pointer to the safe acquisition was lost"
 
 
 def test_audit_fails_closed_when_there_is_nothing_to_audit(tmp_path):

@@ -216,7 +216,8 @@ def main() -> int:
 
         _nsb.effective_vertical_scale_factors = _planted_evsf
         dino_mod._nemo_faithful_dino_domain.cache_clear()
-        print("LADDER PLANT ACTIVE: level 1 thickness moved by 1 ulp\n")
+        print("LADDER PLANT ACTIVE: EVERY level of the constructed ladder "
+              "moved by 1 ulp\n")
 
     sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
                          capture_output=True, text=True).stdout.strip()
@@ -459,23 +460,76 @@ def main() -> int:
         st.eta.data, st.H_bathy.data, z,
         min_water_column_m=mc4.min_water_column_m))
     g4.check("e3t(Kmm) live thickness", h_live * tmask3, e3t0 * tmask3)
-    # the 1-D ladder the staircase is cut from, per level, against the value
-    # NEMO's own 3-D array holds at that level
+    # The 1-D ladder the staircase is cut from, per level, against the value
+    # NEMO's own 3-D array holds at that level.
+    #
+    # THE ORACLE SIDE IS NEVER BUILT FROM THE MODEL SIDE.  An earlier version
+    # of this row fell back to `dz[k]` on a level with no wet cell, i.e. it
+    # compared the model's ladder against ITSELF and printed EXACT; a reviewer
+    # planted an arbitrary 300 m at every dry level and the whole section
+    # still passed.  e3t_0/gdept_0 are horizontally uniform over the WHOLE
+    # array, dry cells included (measured spread exactly 0.0 at every level),
+    # so there is always a real oracle value to take.
     dz = np.asarray(z.dz_ref).ravel()
     nlev4 = e3t0.shape[-1]
-    e3t_lev = np.array([e3t0[np.argwhere(tmask3[:, :, k])[0][0],
-                             np.argwhere(tmask3[:, :, k])[0][1], k]
-                        if lev_any[k] else dz[k] for k in range(nlev4)])
-    gdept_lev = np.array([gdept0[np.argwhere(tmask3[:, :, k])[0][0],
-                                 np.argwhere(tmask3[:, :, k])[0][1], k]
-                          if lev_any[k] else 0.0 for k in range(nlev4)])
-    g4.check("e3t_0 reference ladder", dz, e3t_lev)
+    for _nm, _a in (("e3t_0", e3t0), ("gdept_0", gdept0), ("e3w_0", e3w0)):
+        _sp = float(np.max(_a.max(axis=(0, 1)) - _a.min(axis=(0, 1))))
+        if _sp != 0.0:
+            print(f"  {_nm} is NOT horizontally uniform (max spread {_sp:.3e} "
+                  "m): the per-level rows below are not well defined")
+            g4.failed = True
+    e3t_lev = e3t0[0, 0, :]
+    gdept_lev = gdept0[0, 0, :]
+    td4_all = np.asarray(z.t_depth_ref).ravel()
+    # LEVEL 36 IS WAIVED, MEASURED, AND ITS INERTNESS IS PROVEN HERE.
+    # zgr_msk_top_bot leaves NEMO's deepest level permanently dry, and the
+    # bridge leaves the 1-D value there rather than NEMO's 3-D one.  That is a
+    # real 111.088 m / 55.544 m gap and it is NOT silently absorbed into the
+    # rows above; it is printed, and the gate proves on this run that no
+    # column is active there and no thickness is carried there before it
+    # accepts the waiver.
+    dry = ~lev_any
+    if dry.any():
+        act = np.asarray(z.is_active)
+        hp = np.asarray(z.h_partial)
+        inert = (int(act[..., dry].sum()) == 0
+                 and float(np.abs(hp[..., dry]).max()) == 0.0
+                 and int(tmask3[..., dry].sum()) == 0)
+        for k in np.where(dry)[0]:
+            print(f"  WAIVED  level {k + 1} (NEMO's permanently dry dummy): "
+                  f"e3t {dz[k]:.6f} vs {e3t_lev[k]:.6f} "
+                  f"(delta {abs(dz[k] - e3t_lev[k]):.3f} m), gdept "
+                  f"{td4_all[k]:.6f} vs {gdept_lev[k]:.6f} "
+                  f"(delta {abs(td4_all[k] - gdept_lev[k]):.3f} m)")
+        print(f"  waiver precondition -- 0 active cells, 0 thickness and 0 "
+              f"wet mask on every dry level: {inert}")
+        if not inert:
+            print("  the dry level is NOT inert on this run, so the gap above "
+                  "reaches the model: the waiver does not hold")
+            g4.failed = True
+        # The waiver covers ONE specific value, not any value.  The reason it
+        # exists is that the bridge leaves NEMO's OTHER ladder there, so that
+        # is what is checked -- a dry level holding an arbitrary number is a
+        # planted or corrupted ladder and must fail even though nothing
+        # integrates it.  Without this the waiver is a blanket pass on a level.
+        e3t1d = O("e3t_1d").ravel()
+        gdept1d = O("gdept_1d").ravel()
+        stray = [int(k) + 1 for k in np.where(dry)[0]
+                 if dz[k] != e3t1d[k] or td4_all[k] != gdept1d[k]]
+        if stray:
+            print(f"  the waived level(s) {stray} hold neither NEMO ladder's "
+                  "value: this is not the documented gap, it is a corrupted "
+                  "or planted ladder")
+            g4.failed = True
+        else:
+            print("  waived value is NEMO's own 1-D ladder (e3t_1d/gdept_1d), "
+                  "not an arbitrary number: checked")
+    g4.check("e3t_0 reference ladder", dz[lev_any], e3t_lev[lev_any])
     # C5/C6 -- the S-EOS depth (eosbn2.F90:297 zh = gdept(Knn)) and the sco
     # pressure-gradient depth (dynhpg.F90:353/378 gdept_z0), both read from
     # z_coord.t_depth_ref (eos.py:823, ocean_pe_latlon_cgrid.py:1900-1906).
-    td4 = np.asarray(z.t_depth_ref).ravel()
     g4.check("gdept_0 T-depth ladder",
-             td4[lev_any], gdept_lev[lev_any])
+             td4_all[lev_any], gdept_lev[lev_any])
     # raw mesh fields the fidelity arms read straight off the coordinate
     g4.check("gdepw_0 (z_coord raw)", np.asarray(z.nemo_gdepw_0), gdepw0)
     g4.check("e3w_0 (z_coord raw)", np.asarray(z.nemo_e3w_0), e3w0)
@@ -483,6 +537,11 @@ def main() -> int:
     # e3uw_0/e3vw_0: zgr_lib.F90:206-264 builds them as column averages of a
     # horizontally-uniform e3w_0, so the raw e3w_0 the momentum vertical solve
     # interpolates to the face IS them.  Checked, not assumed.
+    #
+    # WHAT THESE TWO ROWS DO AND DO NOT TEST.  The left side is the array the
+    # coordinate CARRIES, so they catch it being absent, zeroed, truncated or
+    # swapped -- they do NOT test the face interpolation, which on a uniform
+    # ladder is the identity either way.
     g4.check("e3uw_0 == e3w_0", np.asarray(z.nemo_e3w_0), e3uw0)
     g4.check("e3vw_0 == e3w_0", np.asarray(z.nemo_e3w_0), e3vw0)
     # C9 -- the EEN relative-vorticity metric.  ln_dynvor_een = .true.
@@ -519,8 +578,15 @@ def main() -> int:
     # C4 -- the reciprocals the qco barotropic path divides by.
     # NEMO: r1_hu_0 = ssumask/(hu_0 + 1 - ssumask)   (domain.F90:159).
     # legoESM: wet_u/(hu_0 + 1 - wet_u) with wet_u = (hu_0 > 0)
-    # (vertical.py:180-182).  Scoring this also scores the PREDICATE: the two
-    # agree only if (hu_0 > 0) is NEMO's own ssumask.
+    # (vertical.py:180-182).
+    #
+    # WHAT THIS ROW TESTS: the PREDICATE and the OPERAND, not the formula.
+    # legoESM's two sites (vertical.py:181, ocean_model_latlon_cgrid.py:7516)
+    # build the reciprocal inside traced functions, so the formula is written
+    # out again here rather than called -- which means an arithmetic change at
+    # those sites would NOT show up.  What it does catch, and what is the
+    # actual question on this card, is whether legoESM's wet-U predicate
+    # (hu_0 > 0) is NEMO's own ssumask and whether hu_0 itself is NEMO's.
     ssu, ssv = O("umaskutil"), O("vmaskutil")
     mh_u = np.asarray(z.nemo_hu_0)
     mh_v = np.asarray(z.nemo_hv_0)

@@ -38,19 +38,36 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # 1. Never write inside the pristine oracle config or the shared source tree.
 #    Checked on the RESOLVED paths, not on the strings, so a symlinked NEMO or
 #    a CFGNAME containing '..' cannot slip past.
-guard() {                       # guard <path being written>
+guard() {                       # guard <path being written> [allow-cfg-copy]
+  # `readlink -m` canonicalises WITHOUT requiring the path to exist. `-f`
+  # returns EMPTY when an intermediate directory is missing, and an empty
+  # string matches none of the patterns below, so every not-yet-created path
+  # walked straight through -- and `local real=$(...)` hides the non-zero
+  # exit from `set -e`, so nothing said so.
   local real
-  real=$(readlink -f "$1")
+  real=$(readlink -m "$1")
   case "$real/" in
-    "$(readlink -f "$NEMO/cfgs/DINO")"/*)
+    "$(readlink -m "$NEMO/cfgs/DINO")"/*)
       echo "REFUSING: $1 resolves inside cfgs/DINO (read-only oracle)" >&2
       exit 2 ;;
-    "$(readlink -f "$NEMO/src")"/*)
+    "$(readlink -m "$NEMO/src")"/*)
       echo "REFUSING: $1 resolves inside src/ (read-only oracle)" >&2
       exit 2 ;;
   esac
+  # The RECORD may not land anywhere inside the oracle checkout at all. An
+  # earlier version only named cfgs/DINO and src/, and a reviewer showed
+  # OUT=$NEMO/cfgs/SHARED walked straight through it and would have clobbered
+  # the namelist_ref every configuration includes.
+  if [ "${2:-}" != "cfgcopy" ]; then
+    case "$real/" in
+      "$(readlink -m "$NEMO")"/*)
+        echo "REFUSING: $1 resolves inside the NEMO checkout $NEMO; the" >&2
+        echo "  record must be written outside the read-only oracle." >&2
+        exit 2 ;;
+    esac
+  fi
 }
-guard "$COPY"
+guard "$COPY" cfgcopy
 guard "$OUT"
 
 # 2. Never reuse a config copy.  A half-built or previously-patched copy is the
@@ -83,14 +100,24 @@ python3 "$HERE/rankdump_patch.py" "$COPY/MY_SRC/dynspg_ts.F90"
 # patch that compiled away (wrong guard, wrong key) would otherwise produce an
 # empty record that looks like a successful run.
 PP=$COPY/BLD/ppsrc/nemo/dynspg_ts.f90
-for token in "TRIM(cl_rk)" "substep_r" "ACTION='WRITE'"; do
+# Each token must be ABSENT from the pristine source, or it discriminates
+# nothing. ACTION='WRITE' was in this list and already occurs once unpatched.
+for token in "TRIM(cl_rk)" "substep_r" "cl_sub"; do
   if ! grep -qF "$token" "$PP"; then
     echo "REFUSING: '$token' is not in the COMPILED source $PP -- the writer" >&2
     echo "  did not survive preprocessing, so the record would be empty." >&2
     exit 3
   fi
 done
-echo "ppsrc check: the rank-tagged WRITE-only writer is in the compiled source"
+for token in "TRIM(cl_rk)" "substep_r" "cl_sub"; do
+  if grep -qF "$token" "$NEMO/cfgs/DINO/MY_SRC/dynspg_ts.F90"; then
+    echo "REFUSING: ppsrc token '$token' also occurs in the PRISTINE source," >&2
+    echo "  so finding it above proved nothing. Pick a token the patch adds." >&2
+    exit 3
+  fi
+done
+echo "ppsrc check: the rank-tagged writer is in the compiled source, and each"
+echo "  token checked is absent from the pristine source"
 
 # ---------------------------------------------------------------- run
 mkdir -p "$OUT"
@@ -108,4 +135,10 @@ python3 "$HERE/read_rankdump.py" --twin-check "$OUT" --reference "$SRCREF"
 echo
 echo "record written to $OUT"
 echo "  stitch a substep:  python3 $HERE/read_rankdump.py --run-dir $OUT --substep 1"
-echo "  re-score the ladder: spg_kt1_barotropic_ladder.py --run-dir $OUT"
+echo
+echo "NOT YET A DROP-IN FOR THE LADDER GATE. spg_kt1_barotropic_ladder.py"
+echo "  still opens the OLD fixed filenames (substep_dump.bin,"
+echo "  spg_dump_*.bin, sbc_dump_qns.bin); every one of them is rank-tagged"
+echo "  here, so pointing it at this directory would read nothing and its"
+echo "  own audit would report INDETERMINATE. Extending it to the tagged"
+echo "  names is the next change, and it needs this record to exist first."
