@@ -170,13 +170,15 @@ _NEMO_MXL0_LENGTH_SCALE = 2.0e5  # zraug numerator [m*kg/(m*s^2)^-1... NEMO zdft
 
 def _mxl0_surface_anchor(cfg: "TKEConfig", taum, rho_0: float, g: float):
     """ln_mxl0 surface mixing-length anchor (single owner; zdftke:575+602):
-    l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum). None unless the choice is a
+    zdf_tke_init first overwrites rn_mxl0 with the derived rmxl_min when
+    ln_mxl0 is true (zdftke:828-831), then tke_avn evaluates
+    l_sfc=max(rn_mxl0,vkarmn*2e5/(rho0*g)*taum). None unless the choice is a
     NEMO nn_mxl scheme (3 = nn_mxl=3, 4 = nn_mxl=2); ORCA1 sets ln_mxl0=.true.
     independently of nn_mxl, so BOTH need the anchor."""
     if cfg.tke_mxl_choice not in (3, 4):
         return None
     return jnp.maximum(
-        jnp.asarray(cfg.mxl0_min_m),
+        jnp.asarray(cfg.mxl_min),
         _NEMO_MXL0_VKARMN * _NEMO_MXL0_LENGTH_SCALE / (rho_0 * g)
         * jnp.maximum(taum, 0.0))
 _NEMO_TKE_EBB = 67.83          # rn_ebb  namelist_ref default — surface TKE input coef
@@ -733,11 +735,13 @@ def compute_mixing_lengths(
         l_int = _tke_raw_mixing_length(e, N2, cfg)
         # ln_mxl0 surface anchor l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum)
         # (zdftke:575+602), computed by the CALLER (which owns taum/rho_0/g)
-        # and passed via l_surface_anchor; None => the rn_mxl0 floor (windless).
+        # and passed via l_surface_anchor; None => the effective rn_mxl0 floor.
+        # With ln_mxl0, NEMO overwrites the namelist rn_mxl0 with rmxl_min at
+        # initialization (zdftke.F90:828-831), so cfg.mxl0_min_m is not live.
         if l_surface_anchor is not None:
             l_sfc = jnp.asarray(l_surface_anchor, dtype=l_int.dtype)
         else:
-            l_sfc = jnp.full(l_int.shape[:-1], cfg.mxl0_min_m,
+            l_sfc = jnp.full(l_int.shape[:-1], cfg.mxl_min,
                              dtype=l_int.dtype)
         # W-row stack: surface anchor + interior interfaces
         l_w = jnp.concatenate([l_sfc[..., None], l_int], axis=-1)  # (..., nlev)

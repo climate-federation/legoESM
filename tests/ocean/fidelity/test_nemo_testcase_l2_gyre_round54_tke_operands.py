@@ -16,14 +16,29 @@ SPEC.loader.exec_module(MODULE)
 
 
 def _record(path: Path) -> None:
-    parts = [MODULE.MAGIC, struct.pack("=13i", 1, 2, 1, 2, 32, 22, 31, 30,
+    parts = [MODULE.MAGIC, struct.pack("=13i", 2, 2, 1, 2, 32, 22, 31, 30,
                                       1, 32, 1, 22, 64)]
     shape = (32, 22, 31)
     for name in MODULE.FIELDS:
         parts.append(name.ljust(16).encode("ascii"))
-        if name == "rn_Dt":
+        if name in {"rn_Dt", "rn_ediff", "rn_ediss", "rn_ebb", "rn_emin",
+                    "rn_emin0", "rmxl_min", "rn_mxl0", "rn_bshear", "rn_lc",
+                    "nn_pdl", "nn_mxl", "ln_mxl0", "nn_etau", "nn_htau",
+                    "nn_eice", "ln_lc"}:
+            values = {
+                "rn_Dt": 14400.0, "rn_ediff": 0.1, "rn_ediss": 0.7,
+                "rn_ebb": 67.83, "rn_emin": 1.0e-6, "rn_emin0": 1.0e-4,
+                "rmxl_min": 0.01, "rn_mxl0": 0.01, "rn_bshear": 1.0e-20,
+                "rn_lc": 0.15, "nn_pdl": 1.0, "nn_mxl": 3.0,
+                "ln_mxl0": 1.0, "nn_etau": 0.0, "nn_htau": 1.0,
+                "nn_eice": 0.0, "ln_lc": 1.0,
+            }
+            value = values[name]
             parts.extend((struct.pack("=4i", 0, 1, 1, 1),
-                          struct.pack("=d", 14400.0)))
+                          struct.pack("=d", value)))
+        elif name == "taum_entry":
+            parts.extend((struct.pack("=4i", 2, 32, 22, 1),
+                          np.zeros((32, 22), dtype="=f8").tobytes(order="F")))
         else:
             parts.append(struct.pack("=4i", 3, *shape))
             parts.append(np.zeros(shape, dtype="=f8").tobytes(order="F"))
@@ -35,10 +50,11 @@ def test_reader_accepts_complete_schema(tmp_path):
     _record(path)
     result = MODULE.read_record(path)
     assert result["header"]["kt"] == 2
-    assert tuple(result["arrays"]["avt_output"].shape) == (32, 22, 31)
+    assert tuple(result["arrays"]["avt_pre_evd"].shape) == (32, 22, 31)
+    assert tuple(result["arrays"]["taum_entry"].shape) == (32, 22)
 
 
-@pytest.mark.parametrize("plant", ["header", "truncation", "nan"])
+@pytest.mark.parametrize("plant", ["header", "truncation", "nan", "config", "copy"])
 def test_reader_plants_fail(tmp_path, plant):
     path = tmp_path / "record.bin"
     _record(path)

@@ -8,9 +8,9 @@ set -euo pipefail
 export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:${PATH}
 readonly NEMO_ROOT=${NEMO_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
 readonly SOURCE_CFG=GYRE_OMIP_L2_P3_SM_R46KT2
-readonly TARGET_CFG=GYRE_OMIP_L2_P3_SM_R54TKE
+readonly TARGET_CFG=GYRE_OMIP_L2_P3_SM_R55TKE
 readonly SOURCE_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round46/oracle_kt2_stage
-readonly TARGET_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round54/oracle_tke_operands
+readonly TARGET_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round55/oracle_tke_operands
 readonly FINAL_RESTART=GYRE_OMIP_L2_P3_00000010_restart.nc
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
@@ -18,6 +18,7 @@ readonly REPO=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)
 readonly SOURCE_ROOT=$NEMO_ROOT/cfgs/$SOURCE_CFG
 readonly TARGET_ROOT=$NEMO_ROOT/cfgs/$TARGET_CFG
 readonly PATCH=$here/zdftke_round54.patch
+readonly ZDFPHY_PATCH=$here/zdfphy_round55.patch
 readonly WRITER=$here/l2_r54_tke.F90
 readonly ADMISSION=$here/../nemo_testcase_l2_gyre_round21_admission.py
 readonly GATE=$here/../nemo_testcase_l2_gyre_round54_tke_operands.py
@@ -32,7 +33,7 @@ export PYTHONPATH=$REPO/packages/core:$REPO/packages/ocean:$REPO/packages/atmosp
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 
-for path in "$PATCH" "$WRITER" "$ADMISSION" "$GATE"; do
+for path in "$PATCH" "$ZDFPHY_PATCH" "$WRITER" "$ADMISSION" "$GATE"; do
   [[ -f "$path" ]] || { printf 'REFUSE: missing %s\n' "$path" >&2; exit 64; }
 done
 [[ -d "$SOURCE_ROOT/EXP00" && -d "$SOURCE_ROOT/MY_SRC" ]]
@@ -41,9 +42,26 @@ done
   printf 'REFUSE: target exists: %s or %s\n' "$TARGET_ROOT" "$TARGET_RUN" >&2; exit 64;
 }
 grep -Eq 'nn_itend[[:space:]]*=[[:space:]]*([2-9]|[1-9][0-9]+)' "$SOURCE_ROOT/EXP00/namelist_cfg"
-grep -Eq 'nn_pdl[[:space:]]*=[[:space:]]*1' "$SOURCE_ROOT/EXP00/namelist_cfg" || {
-  printf 'REFUSE: writer requires the live nn_pdl=1 branch\n' >&2; exit 65;
-}
+# namzdf_tke is read from namelist_ref and then selectively overridden by
+# namelist_cfg (compiled zdftke.f90:734-738).  Gate the resolved run, not the
+# case file: GYRE inherits nn_pdl=1 and overrides only nn_etau=0.
+resolved=$(sed -n '/Namelist namzdf_tke/,/start from rest/p' "$SOURCE_RUN/ocean.output")
+for pattern in \
+  'prandl number flag.*nn_pdl.*= *1' \
+  'mixing length type.*nn_mxl.*= *3' \
+  'surface mixing length = F(stress).*ln_mxl0.*= *T' \
+  'surface  mixing length minimum value.*rn_mxl0.*4\.0000000000000001E-002' \
+  'test param. to add tke induced by wind.*nn_etau.*= *0' \
+  'type of tke penetration profile.*nn_htau.*= *1' \
+  'Langmuir cells parametrization.*ln_lc.*= *T' \
+  'coef to compute vertical velocity of LC.*rn_lc.*0\.14999999999999999' \
+  'langmuir & surface wave breaking under ice.*nn_eice.*= *0' \
+  'minimum mixing length with your parameters rmxl_min.*9\.9999999999999985E-003' \
+  'set rn_mxl0 = rmxl_min'; do
+  grep -Eq "$pattern" <<<"$resolved" || {
+    printf 'REFUSE: source run lacks resolved TKE row: %s\n' "$pattern" >&2; exit 65;
+  }
+done
 grep -q 'PUBLIC   dissl' "$SOURCE_ROOT/MY_SRC/zdftke.F90" || {
   printf 'REFUSE: source is not the round-46 zdftke instrument\n' >&2; exit 65;
 }
@@ -52,13 +70,20 @@ grep -q 'PUBLIC   dissl' "$SOURCE_ROOT/MY_SRC/zdftke.F90" || {
 dry=$(mktemp -d /tmp/gyre-r54-tke-source.XXXXXX)
 cp "$SOURCE_ROOT/MY_SRC/zdftke.F90" "$dry/zdftke.F90"
 patch -s "$dry/zdftke.F90" <"$PATCH"
+cp "$NEMO_ROOT/src/OCE/ZDF/zdfphy.F90" "$dry/zdfphy.F90"
+patch -s "$dry/zdfphy.F90" <"$ZDFPHY_PATCH"
 removed=$(diff "$NEMO_ROOT/src/OCE/ZDF/zdftke.F90" "$dry/zdftke.F90" | grep -c '^<' || true)
 [[ "$removed" -eq 0 ]] || {
   printf 'REFUSE: final zdftke removes %s shipped line(s)\n' "$removed" >&2; exit 66;
 }
+removed_zdfphy=$(diff "$NEMO_ROOT/src/OCE/ZDF/zdfphy.F90" "$dry/zdfphy.F90" | grep -c '^<' || true)
+[[ "$removed_zdfphy" -eq 0 ]] || {
+  printf 'REFUSE: final zdfphy removes %s shipped line(s)\n' "$removed_zdfphy" >&2; exit 66;
+}
 grep -q 'CALL r54_tke_begin' "$dry/zdftke.F90"
 grep -q 'CALL r54_tke_matrix_row' "$dry/zdftke.F90"
 grep -q 'CALL r54_tke_avn_row' "$dry/zdftke.F90"
+grep -q 'CALL r54_zdfphy_finish' "$dry/zdfphy.F90"
 
 for mount in /tmp "$(dirname "$TARGET_RUN")" "$NEMO_ROOT"; do
   free_kb=$(df -Pk "$mount" | awk 'NR==2 {print $4}')
@@ -70,20 +95,25 @@ done
 manifest=$(mktemp -d /tmp/gyre-r54-tke-manifest.XXXXXX)
 printf 'temporary provenance directory (retained): %s\n' "$manifest"
 printf '%s\n' "$COMMIT" >"$manifest/producer_commit.txt"
-sha256sum "$NEMO_ROOT/arch/arch-conda-scalarmath.fcm" "$PATCH" "$WRITER" \
-  "$SOURCE_ROOT/MY_SRC/zdftke.F90" >"$manifest/toolchain.sha256"
+sha256sum "$NEMO_ROOT/arch/arch-conda-scalarmath.fcm" "$PATCH" \
+  "$ZDFPHY_PATCH" "$WRITER" "$SOURCE_RUN/ocean.output" \
+  "$SOURCE_ROOT/BLD/ppsrc/nemo/zdftke.f90" \
+  "$SOURCE_ROOT/BLD/ppsrc/nemo/zdfphy.f90" >"$manifest/toolchain.sha256"
 
 cd "$NEMO_ROOT"
 # Configuration cloning is delegated to makenemo; no cfgs directory is copied.
 ./makenemo -r "$SOURCE_CFG" -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
 cp "$WRITER" "$TARGET_ROOT/MY_SRC/l2_r54_tke.F90"
 patch -s "$TARGET_ROOT/MY_SRC/zdftke.F90" <"$PATCH"
+cp "$NEMO_ROOT/src/OCE/ZDF/zdfphy.F90" "$TARGET_ROOT/MY_SRC/zdfphy.F90"
+patch -s "$TARGET_ROOT/MY_SRC/zdfphy.F90" <"$ZDFPHY_PATCH"
 touch "$TARGET_ROOT/MY_SRC/"*.F90
 ./makenemo -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
 readonly BINARY=$TARGET_ROOT/BLD/bin/nemo.exe
 [[ -x "$BINARY" ]]
-grep -q 'NEMO_L2_R54TKE1' "$TARGET_ROOT/BLD/ppsrc/nemo/l2_r54_tke.f90"
+grep -q 'NEMO_L2_R55TKE2' "$TARGET_ROOT/BLD/ppsrc/nemo/l2_r54_tke.f90"
 grep -q 'CALL r54_tke_matrix_row' "$TARGET_ROOT/BLD/ppsrc/nemo/zdftke.f90"
+grep -q 'CALL r54_zdfphy_finish' "$TARGET_ROOT/BLD/ppsrc/nemo/zdfphy.f90"
 if nm -D "$BINARY" | grep -q '_ZGV'; then
   printf 'REFUSE: vector-math symbol present\n' >&2; exit 68
 fi
@@ -106,16 +136,19 @@ cp "$manifest"/* "$TARGET_RUN/"
   { time mpirun -np 1 --oversubscribe ./nemo 2>&1 | tee run.user.stdout.log ; } 2>>run.user.time.log
   test "${PIPESTATUS[0]}" -eq 0
   [[ -s oracle_tke_operands_kt00000002.bin ]]
+  resolved=$(sed -n '/Namelist namzdf_tke/,/start from rest/p' ocean.output)
+  grep -Eq 'prandl number flag.*nn_pdl.*= *1' <<<"$resolved"
+  grep -Eq 'set rn_mxl0 = rmxl_min' <<<"$resolved"
   printf 'RUN_FINISHED_UTC=%s\nRUN_DONE\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>run.user.time.log
 )
 
 "$PY" "$GATE" --record "$TARGET_RUN/oracle_tke_operands_kt00000002.bin" \
   --expect-commit "$COMMIT" --producer-commit "$TARGET_RUN/producer_commit.txt" \
-  --output "$TARGET_RUN/round54_tke_validation.json"
-for plant in header truncation nan stamp; do
+  --output "$TARGET_RUN/round55_tke_validation.json"
+for plant in header truncation nan config copy stamp; do
   if "$PY" "$GATE" --record "$TARGET_RUN/oracle_tke_operands_kt00000002.bin" \
        --expect-commit "$COMMIT" --producer-commit "$TARGET_RUN/producer_commit.txt" \
-       --plant "$plant" >"$TARGET_RUN/round54_tke_${plant}_plant.log" 2>&1; then
+       --plant "$plant" >"$TARGET_RUN/round55_tke_${plant}_plant.log" 2>&1; then
     printf 'REFUSE: TKE %s plant stayed green\n' "$plant" >&2; exit 69
   fi
 done
@@ -125,18 +158,18 @@ done
 "$PY" "$ADMISSION" --baseline "$SOURCE_RUN" --candidate "$TARGET_RUN" \
   --twin /nonexistent --identical "$FINAL_RESTART" mesh_mask.nc \
   --allowed-new oracle_tke_operands_kt00000002.bin \
-  --output "$TARGET_RUN/round54_admission.json"
+  --output "$TARGET_RUN/round55_admission.json"
 if "$PY" "$ADMISSION" --baseline "$SOURCE_RUN" --candidate "$TARGET_RUN" \
      --twin /nonexistent --identical "$FINAL_RESTART" mesh_mask.nc \
      --allowed-new oracle_tke_operands_kt00000002.bin --plant-consumed \
-     --output "$TARGET_RUN/round54_admission_plant.json" \
-     >"$TARGET_RUN/round54_admission_plant.log" 2>&1; then
+     --output "$TARGET_RUN/round55_admission_plant.json" \
+     >"$TARGET_RUN/round55_admission_plant.log" 2>&1; then
   printf 'REFUSE: consumed-field admission plant stayed green\n' >&2; exit 69
 fi
 (
   cd "$TARGET_RUN"
-  sha256sum oracle_*.bin "$FINAL_RESTART" mesh_mask.nc round54_admission*.json \
-    round54_admission_plant.log round54_tke_validation.json \
-    round54_tke_*_plant.log >round54_outputs.sha256
+  sha256sum oracle_*.bin "$FINAL_RESTART" mesh_mask.nc round55_admission*.json \
+    round55_admission_plant.log round55_tke_validation.json \
+    round55_tke_*_plant.log >round55_outputs.sha256
 )
-printf 'ROUND54_TKE_OPERANDS_READY %s\n' "$TARGET_RUN"
+printf 'ROUND55_TKE_OPERANDS_READY %s\n' "$TARGET_RUN"

@@ -36,6 +36,20 @@ jax.config.update("jax_enable_x64", True)
 _RHO0 = 1026.0
 
 
+def test_ln_mxl0_uses_derived_rmxl_min_not_raw_namelist_value():
+    """NEMO overwrites rn_mxl0=rmxl_min when ln_mxl0 is true."""
+    from legoesm import constants
+    from legoesm.ocean.physics.vertical_mixing.tke import _mxl0_surface_anchor
+
+    cfg = TKEConfig(tke_mxl_choice=3, mxl_min=0.01, mxl0_min_m=0.04)
+    calm = _mxl0_surface_anchor(cfg, jnp.asarray([0.0]), _RHO0, constants.g)
+    np.testing.assert_array_equal(np.asarray(calm), np.asarray([0.01]))
+
+    # Plant the old transcription: the raw namelist value must be observable
+    # as different, otherwise this test could not reject the defect.
+    assert float(np.asarray(calm)[0]) != cfg.mxl0_min_m
+
+
 # ---------------------------------------------------------------------------
 # Langmuir source (Axell 2002 / NEMO ln_lc)
 # ---------------------------------------------------------------------------

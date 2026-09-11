@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed reader for the round-54 WRITE-only kt=2 TKE record."""
+"""Fail-closed reader for the round-55 WRITE-only kt=2 TKE record."""
 
 from __future__ import annotations
 
@@ -10,13 +10,17 @@ from pathlib import Path
 
 import numpy as np
 
-MAGIC = b"NEMO_L2_R54TKE1 "
+MAGIC = b"NEMO_L2_R55TKE2 "
 FIELDS = (
-    "rn_Dt", "en_entry", "avm_entry", "avt_entry", "dissl_entry",
-    "rn2", "rn2b", "sh2", "e3t_Kmm", "e3w_Kmm", "matrix_diag",
+    "rn_Dt", "rn_ediff", "rn_ediss", "rn_ebb", "rn_emin", "rn_emin0",
+    "rmxl_min", "rn_mxl0", "rn_bshear", "rn_lc", "nn_pdl", "nn_mxl",
+    "ln_mxl0", "nn_etau", "nn_htau", "nn_eice", "ln_lc", "taum_entry",
+    "tmask", "wmask", "avm_floor", "avt_floor", "en_entry", "avm_entry",
+    "avt_entry", "dissl_entry", "rn2", "rn2b", "sh2", "e3t_Kmm",
+    "e3w_Kmm", "matrix_diag",
     "matrix_upper", "matrix_lower", "rhs_pre_sweep", "en_post_sweep",
-    "mxl_momentum", "mxl_dissipation", "pdlr", "avm_output",
-    "avt_output", "dissl_output",
+    "mxl_momentum", "mxl_dissipation", "pdlr", "avm_closure",
+    "avt_closure", "dissl_output", "avm_pre_evd", "avt_pre_evd",
 )
 
 
@@ -50,7 +54,7 @@ def read_record(path: Path, *, plant: str | None = None) -> dict:
     keys = ("version", "kt", "Kbb", "Kmm", "jpi", "jpj", "jpk", "jpkm1",
             "ntsi", "ntei", "ntsj", "ntej", "real_bits")
     head = dict(zip(keys, header, strict=True))
-    require(head["version"] == 1 and head["kt"] == 2,
+    require(head["version"] == 2 and head["kt"] == 2,
             f"unexpected version/kt {head['version']}/{head['kt']}")
     require((head["jpi"], head["jpj"], head["jpk"], head["jpkm1"])
             == (32, 22, 31, 30), f"unexpected GYRE shape {head}")
@@ -61,9 +65,10 @@ def read_record(path: Path, *, plant: str | None = None) -> dict:
         label = take(16).decode("ascii").rstrip()
         require(label == expected, f"field order mismatch: {label!r} != {expected!r}")
         ndim, n1, n2, n3 = struct.unpack("=4i", take(16))
-        require(ndim in (0, 3), f"invalid rank for {label}: {ndim}")
-        shape = () if ndim == 0 else (n1, n2, n3)
-        count = 1 if ndim == 0 else n1 * n2 * n3
+        require(ndim in (0, 2, 3), f"invalid rank for {label}: {ndim}")
+        shape = (() if ndim == 0 else
+                 (n1, n2) if ndim == 2 else (n1, n2, n3))
+        count = 1 if ndim == 0 else int(np.prod(shape))
         value = np.frombuffer(take(count * 8), dtype="=f8").copy()
         if shape:
             value = value.reshape(shape, order="F")
@@ -73,15 +78,44 @@ def read_record(path: Path, *, plant: str | None = None) -> dict:
     require(offset == len(raw), f"record has {len(raw) - offset} trailing bytes")
 
     if plant == "nan":
-        arrays["avt_output"] = np.array(arrays["avt_output"], copy=True)
-        arrays["avt_output"].flat[0] = np.nan
+        arrays["avt_pre_evd"] = np.array(arrays["avt_pre_evd"], copy=True)
+        arrays["avt_pre_evd"].flat[0] = np.nan
+    elif plant == "config":
+        arrays["rn_mxl0"] = 0.04
+    elif plant == "copy":
+        arrays["avt_pre_evd"] = np.array(arrays["avt_pre_evd"], copy=True)
+        arrays["avt_pre_evd"][head["ntsi"] - 1, head["ntsj"] - 1, 1] += 1.0
     for name, value in arrays.items():
         require(np.all(np.isfinite(value)), f"{name} contains NaN/Inf")
     require(arrays["rn_Dt"] == 14400.0, f"wrong rn_Dt {arrays['rn_Dt']}")
+    expected = {
+        "rn_ediff": 0.1, "rn_ediss": 0.7, "rn_ebb": 67.83,
+        "rn_emin": 1.0e-6, "rn_emin0": 1.0e-4, "rn_bshear": 1.0e-20,
+        "rn_lc": 0.15, "nn_pdl": 1.0, "nn_mxl": 3.0,
+        "ln_mxl0": 1.0, "nn_etau": 0.0, "nn_htau": 1.0,
+        "nn_eice": 0.0, "ln_lc": 1.0,
+    }
+    for name, wanted in expected.items():
+        require(np.isclose(arrays[name], wanted, rtol=0.0, atol=1.0e-15),
+                f"wrong resolved {name}: {arrays[name]} != {wanted}")
+    require(abs(arrays["rmxl_min"] - 0.01) <= 2.0e-18,
+            f"wrong derived rmxl_min {arrays['rmxl_min']}")
+    require(arrays["rn_mxl0"] == arrays["rmxl_min"],
+            "ln_mxl0 did not overwrite rn_mxl0 with rmxl_min")
     for name in ("en_entry", "avm_entry", "avt_entry", "dissl_entry",
                  "en_post_sweep", "mxl_momentum", "mxl_dissipation",
-                 "avm_output", "avt_output", "dissl_output"):
+                 "avm_closure", "avt_closure", "dissl_output",
+                 "avm_pre_evd", "avt_pre_evd"):
         require(np.min(arrays[name]) >= 0.0, f"{name} has a negative value")
+    # zdfphy copies closure Kz on the consumed interior before EVD.  This is
+    # the acquisition's reason for instrumenting zdfphy as well as zdftke.
+    ii = slice(head["ntsi"] - 1, head["ntei"])
+    jj = slice(head["ntsj"] - 1, head["ntej"])
+    kk = slice(1, head["jpkm1"])
+    for name in ("avm", "avt"):
+        require(np.array_equal(arrays[f"{name}_pre_evd"][ii, jj, kk],
+                               arrays[f"{name}_closure"][ii, jj, kk]),
+                f"zdfphy pre-EVD {name} is not a bit copy of closure {name}")
     return {"header": head, "arrays": arrays}
 
 
@@ -91,7 +125,8 @@ def main(argv=None) -> int:
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--producer-commit", type=Path, required=True)
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--plant", choices=("header", "truncation", "nan", "stamp"))
+    parser.add_argument("--plant", choices=(
+        "header", "truncation", "nan", "config", "copy", "stamp"))
     args = parser.parse_args(argv)
     try:
         expected = args.expect_commit.lower()
@@ -110,7 +145,7 @@ def main(argv=None) -> int:
                 "max": float(np.max(arr)),
             }
         report = {
-            "format": "gyre-round54-tke-operands-v1",
+            "format": "gyre-round55-tke-operands-v2",
             "producer_commit": producer,
             "record": str(args.record),
             "header": rec["header"],

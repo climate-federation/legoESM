@@ -248,7 +248,9 @@ class TKEConfig(NamedTuple):
                                      # SINGLE length: l_eps = l_k = min(lup,ldn)).
                                      # NOTE the numbering is Veros-derived and
                                      # does NOT match NEMO's nn_mxl values.
-    mxl0_min_m: float = 0.04         # NEMO rn_mxl0 [m] (kappa*z0 = 0.4*0.1)
+    # Raw NEMO rn_mxl0 [m]. For NEMO choices 3/4, ln_mxl0 is true and NEMO
+    # overwrites this namelist value with the derived mxl_min at init.
+    mxl0_min_m: float = 0.04
     # NEMO dry-w-point TKE.  NEMO closes tke_tke with
     #     en(ji,jj,jk) = MAX( en(ji,jj,jk), rn_emin ) * wmask(ji,jj,jk)
     # (DINO cfgs/DINO/MY_SRC/zdftke.F90:565 = upstream
