@@ -308,6 +308,32 @@ _HARD_SAT_LOG_CADENCE_STEPS = 432
 _HARD_SAT_LOG_QV_EPS = 1.0e-9        # [kg/kg] count a point as "drained" above this
 
 
+def _mpas_zenith_ocean_albedo(lat, day, orbit=None):
+    """Briegleb (1992) open-ocean albedo at the daytime-effective daily-mean
+    solar cosine, per cell.
+
+    ``mu = Q_day / (S_0 * f_day)`` is the cosine a column sees AVERAGED OVER
+    ITS SUNLIT HOURS, which is the right weighting for an albedo that is held
+    fixed for the whole day.  The eccentricity factor is divided out because
+    ``mu`` is a geometric cosine, not a flux.  ``S_0`` cancels from the ratio,
+    so the value passed is immaterial and a fixed reference is used.
+
+    Polar night gives ``f_day -> 0``; the floor keeps ``mu`` finite there and
+    the albedo is irrelevant because there is no sunlight to reflect.
+    """
+    from legoesm.atmosphere.physics.radiation.solar import (
+        daily_mean_insolation, daylight_fraction, earth_sun_distance_factor,
+    )
+    from legoesm.surface_albedo import OceanAlbedoConfig, ocean_albedo
+
+    s_0 = constants.S_0
+    eccf = (earth_sun_distance_factor(day, orbit) if orbit is not None else 1.0)
+    q_day = daily_mean_insolation(lat, day, s_0, orbit=orbit) / eccf
+    f_day = daylight_fraction(lat, day, orbit=orbit)
+    mu = jnp.clip(q_day / (s_0 * jnp.maximum(f_day, 1.0e-6)), 0.0, 1.0)
+    return ocean_albedo(mu, OceanAlbedoConfig(method="zenith"))
+
+
 def _mpas_qv_smooth_step(q_v, mesh, nu, dt, nu4=0.0, mid_refresh=None):
     """MPAS post-step horizontal q_v smoothing (array-level, testable).
 
@@ -9604,13 +9630,27 @@ class ModelDriver:
         # do nothing, silently — the "unknown/unimplemented selection quietly
         # does something else" failure the dispatch-hardening rule exists to
         # stop. Raise until the zenith curve is shared with this lane.
-        if bool(getattr(cfg, "dynamic_albedo", False)):
-            raise NotImplementedError(
-                "dynamic_albedo=True is not implemented on the MPAS lane: "
-                "the surface albedo handed to radiation here is the static "
-                "tile blend (ocean/ice/land), so the zenith-angle-dependent "
-                "ocean curve the FV lane applies would be silently ignored. "
-                "Run the FV lane, or leave dynamic_albedo=False.")
+        # Zenith-angle-dependent open-ocean albedo (Briegleb 1992), the same
+        # curve the FV lane applies.  A FIXED 0.06 is roughly right for an
+        # overhead sun and badly wrong where the sun never rises far: measured
+        # on this configuration the poles carry a -20.3 W/m^2 CLEAR-SKY
+        # shortwave bias, i.e. the surface reflects too little, and a flat
+        # ocean albedo is one of three candidate causes.
+        #
+        # Cadence: the MPAS surface albedo is assembled ONCE PER FORCING DAY
+        # (with the SST/sea-ice sample), not per radiation call, so the cosine
+        # used here is the DAYTIME-EFFECTIVE daily mean
+        # ``mu = Q_day / (S_0 * f_day)`` -- exactly the quantity the FV lane
+        # uses on its non-diurnal path, and consistent with the daily cadence
+        # of the field it feeds.  Under a diurnal cycle this is an average over
+        # the sunlit day rather than the instantaneous value; that is an
+        # approximation of the ALBEDO, not of the insolation, and it is stated
+        # rather than hidden.
+        _zenith_ocean_alb = bool(getattr(cfg, "dynamic_albedo", False))
+        _alb_lat = None
+        if _zenith_ocean_alb:
+            _, _alb_lat_np = self._owned_p_s_and_lat()
+            _alb_lat = jnp.asarray(_alb_lat_np).reshape(-1)
         _albedo_ocean = float(cfg.albedo_ocean)
         _albedo_ice = float(cfg.albedo_ice)
         _albedo_land_static = None
@@ -10561,12 +10601,17 @@ class ModelDriver:
                         # to the scalar config albedo (0.06 = open ocean) for
                         # EVERY column, land included.
                         if _sfc_albedo_on:
+                            _alb_ocean_day = _albedo_ocean
+                            if _zenith_ocean_alb:
+                                _alb_ocean_day = _mpas_zenith_ocean_albedo(
+                                    _alb_lat, _force_day_canonical,
+                                    getattr(self, "orbit", None))
                             _sea_albedo_day = blend_surface_property(
-                                _sic_day, _albedo_ice, _albedo_ocean)
+                                _sic_day, _albedo_ice, _alb_ocean_day)
                             _forcing_daily["sfc_albedo"] = (
                                 blended_surface_albedo(
                                     _sic_day, _alb_f_land, _albedo_ice,
-                                    _albedo_ocean, _albedo_land_static))
+                                    _alb_ocean_day, _albedo_land_static))
                     if _ext_forcing:
                         _ext_p_s, _ext_lat = self._owned_p_s_and_lat()
                         _o3, _aer, _ghg = self._precompute_external_forcing(
