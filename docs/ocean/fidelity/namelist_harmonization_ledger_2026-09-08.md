@@ -315,3 +315,46 @@ the running carried-coefficient arm acts on.
 
 This is the pre-registered "source faithful, loss downstream" outcome of the
 surface-TKE probe, and it supports the arm rather than replacing it.
+
+## 2026-09-10 (e) — VERDICT: the coefficient lifetime is REFUTED
+
+The carried-coefficient arm ran to completion (jobs 9693002 leg 1, 9695257
+leg 2) and is scored against its pre-registration, matched protocol throughout
+(our day-30 snapshot vs GATEWAY record 5), one variable against trp_base2_d30.
+
+| metric | baseline | arm | oracle | pre-registered |
+|---|---|---|---|---|
+| 20-60 m tracer K | 2.595e-07 | 2.923e-07 | 8.423e-04 | rise 10x; <2x refutes |
+| turbulent-layer depth | 17.9 m | 24.6 m | 73.2 m | move toward 73.2 |
+| 20-60 m Prandtl | 11.38 | 10.19 | 1.09 | fall toward 1.09 |
+| 0-20 m tracer K | 3.382e-05 | 4.722e-05 | 1.423e-03 | -- |
+| SST rmse | 0.5003 | 0.5004 | -- | within 0.05 |
+| nino3 bias | +1.12 | +1.12 | -- | see note |
+| EUC core 220E | 0.199 | 0.200 | 0.546 | rise toward 0.546 |
+
+**REFUTED.** The primary rose 1.13x where 10x was required and below 2x was
+pre-registered as refuting. The mechanism codex ranked CRITICAL twice -- that
+evaluating shear production against a freshly recomputed coefficient rather
+than NEMO's carried avm_k self-starves the closure -- does not carry the
+equatorial mixing deficit. Coefficient lifetime joins the eliminated list.
+
+WHAT DID MOVE, and it is honest to report it: the turbulent layer deepened
+17.9 -> 24.6 m and the 0-20 m coefficient rose 1.40x. Real but small, and both
+are far short of the oracle. The Prandtl co-gate barely moved (11.38 -> 10.19),
+which is consistent: with the coefficient still at background in that band, the
+ratio has nothing to respond to.
+
+NOTE ON THE nino3 GUARDRAIL, so it is not misread: it was written as
+"<= +1.10", but the BASELINE is itself +1.12. That is a mis-set threshold from
+an older run, not a breach caused by the arm -- the arm and the baseline agree
+to three digits on every surface metric.
+
+THE ARM WAS STILL WORTH RUNNING. It exposed a real defect: carried_previous_step
+could not survive its own second timestep on any card except the nemo_z0 ones,
+because the cold-start seeder required a surface coefficient the closure only
+produces under nemo_z0. Fixed at 82cc4fe81 and completed here for the
+nemo_z0 + mxl_choice 1/2 combination codex flagged. The option is now usable;
+it simply is not the lever.
+
+NEXT, and it needs the user's decision: the surface boundary PLACEMENT is now
+the leading untested candidate, and it is blocked behind one metric defect.

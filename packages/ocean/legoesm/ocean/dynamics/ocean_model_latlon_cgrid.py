@@ -7280,8 +7280,15 @@ class LatLonCGridOceanModel:
         # model had just produced. That made carried_previous_step unusable on
         # any card except the nemo_z0 ones. Required set now matches what the
         # closure actually emits, exactly as tke_dissl already did.
-        surface_z0 = (getattr(tke_cfg, "tke_surface_bc_level",
-                              "interior_pinned") == "nemo_z0")
+        # codex 9693003 [HIGH]: nemo_z0 is necessary but NOT sufficient. The
+        # closure also needs the ln_mxl0 anchor, which _mxl0_surface_anchor
+        # returns only for tke_mxl_choice 3 or 4 (tke.py:176-177), so
+        # nemo_z0 + choice 1/2 writes None and hit the same partial-state
+        # crash this guard was meant to cure.
+        surface_z0 = (
+            getattr(tke_cfg, "tke_surface_bc_level",
+                    "interior_pinned") == "nemo_z0"
+            and int(getattr(tke_cfg, "tke_mxl_choice", 0)) in (3, 4))
         carry_fields = (state.tke_avm, state.tke_avt) + (
             (state.tke_avm_surface,) if surface_z0 else ()) + (
                 (getattr(state, "tke_dissl", None),)

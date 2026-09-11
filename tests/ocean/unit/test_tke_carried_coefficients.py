@@ -1250,11 +1250,16 @@ def test_carried_coefficients_are_jittable_and_differentiable():
     assert all(bool(jnp.all(jnp.isfinite(grad))) for grad in grads)
 
 
-def _carry_seed_fixture(surface_bc_level="interior_pinned"):
+def _carry_seed_fixture(surface_bc_level="interior_pinned", mxl_choice=3):
     cfg = TKEConfig(
         prognostic=True,
         tke_preclosure_coeff_source="carried_previous_step",
         tke_surface_bc_level=surface_bc_level,
+        # nemo_z0 has no meaning without a held surface value, so the fixture
+        # describes a configuration that could actually run (codex [MEDIUM]).
+        surface_bc=("nemo_dirichlet" if surface_bc_level == "nemo_z0"
+                    else "veros_flux"),
+        tke_mxl_choice=mxl_choice,
         kappaM_min=3.0, kappaH_min=5.0)
     State = namedtuple(
         "CarryState", "T land_mask tke_avm tke_avt tke_avm_surface")
@@ -1287,6 +1292,20 @@ def test_cold_start_carry_uses_nemo_wmask_on_partial_depth_columns():
     partial = state._replace(tke_avm=out.tke_avm)
     with pytest.raises(ValueError, match="partially populated"):
         LatLonCGridOceanModel._seed_tke_preclosure_carry(dummy, partial)
+
+
+def test_nemo_z0_without_the_mxl0_anchor_also_leaves_the_surface_slot_alone():
+    """codex 9693003 [HIGH]: the closure builds _K_M_surface only when the
+    ln_mxl0 anchor exists, and the anchor needs tke_mxl_choice 3 or 4. Keying
+    the guard on the boundary alone left nemo_z0 + choice 2 crashing on its
+    second step exactly as before."""
+    dummy, state = _carry_seed_fixture("nemo_z0", mxl_choice=2)
+    out = LatLonCGridOceanModel._seed_tke_preclosure_carry(dummy, state)
+    assert out.tke_avm is not None and out.tke_avt is not None
+    assert out.tke_avm_surface is None
+    # and the state the writeback produces must be accepted on the next step
+    again = LatLonCGridOceanModel._seed_tke_preclosure_carry(dummy, out)
+    assert again.tke_avm is out.tke_avm
 
 
 def test_interior_pinned_does_not_seed_a_surface_avm_it_never_consumes():
