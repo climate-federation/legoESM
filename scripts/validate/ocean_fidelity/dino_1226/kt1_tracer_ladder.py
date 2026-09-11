@@ -880,6 +880,55 @@ def stages12(R: dict, plant_shift: bool,
         return bad
     bad += stage5(calls, iT, iS, R, O3, wet3, z, real, plant_e3w,
                   plant_slopes)
+
+    # ---- STAGE 6: tra_qsr, scored operator-to-operator ----------------
+    # Temperature's remaining explainer was PLAUSIBLE (a regression on NEMO's
+    # near-orthogonal operators).  This turns it into a number the same way
+    # stage 4 did for tra_ldf: capture legoESM's OWN penetrative-solar
+    # tendency during the SAME forcing call and score it against NEMO's
+    # ``ttrd_qsr``.  NEMO: stpmlf.f90:505 CALL tra_qsr(kstp, Nnn, ts, Nrhs).
+    print("\nSTAGE 6 -- tra_qsr (penetrative solar), legoESM's own "
+          "tendency vs NEMO's ttrd_qsr")
+    # The DINO card imports the shared Jerlov kernel into its own namespace
+    # (experiments/dino.py:4712), so THAT is the name the step resolves.
+    ffmod = dm
+    _real_sw = ffmod.shortwave_penetration_tendency
+    sw_calls = []
+
+    def _sw_spy(*a, **kw):
+        r = _real_sw(*a, **kw)
+        sw_calls.append(np.asarray(r))
+        return r
+
+    ffmod.shortwave_penetration_tendency = _sw_spy
+    try:
+        dm.apply_dino_lat_lon_surface_forcing(
+            state0, forcing, z, cfg, DT, t_seconds=DT, return_rate=True)
+    finally:
+        ffmod.shortwave_penetration_tendency = _real_sw
+    if len(sw_calls) != 1:
+        print(f"  UNMEASURED: the solar kernel was called {len(sw_calls)} "
+              "times, expected 1")
+        bad += 1
+    else:
+        lego_qsr = sw_calls[0]
+        nemo_qsr = np.nan_to_num(O3("ttrd_qsr"))
+        if lego_qsr.shape != nemo_qsr.shape:
+            print(f"  UNMEASURED: shapes differ {lego_qsr.shape} vs "
+                  f"{nemo_qsr.shape}")
+            bad += 1
+        else:
+            st_ = _stats(lego_qsr, nemo_qsr, wet3)
+            print(_row("tra_qsr", st_))
+            den = float(nemo_qsr[wet3] @ nemo_qsr[wet3])
+            if den:
+                print("      best-fit lego/NEMO ratio = "
+                      f"{float(lego_qsr[wet3] @ nemo_qsr[wet3]) / den:.9f}")
+            # The step-1 temperature residual this term has to explain.
+            print(f"      x rDt={DT}: rms {st_['rms'] * DT:.4e} K against "
+                  "the step-1 T residual of 4.791e-06 K")
+            if st_["ne"]:
+                bad += 1
     return bad
 
 
