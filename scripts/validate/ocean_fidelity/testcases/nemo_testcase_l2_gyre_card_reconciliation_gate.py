@@ -118,6 +118,9 @@ def _policy():
 # LatLonCGridOceanModel is CAPTURED (Rule 10: instantiate and print, never
 # trust a declaration).  No spelling of the assignment can hide from this,
 # because every spelling ends at the constructor.
+_NO_MODEL_SOURCE: Path | None = None
+
+
 class _Captured(Exception):
     """Raised by the spy the instant a model is constructed."""
 
@@ -814,8 +817,19 @@ def oracle_provenance(*, roots=None) -> dict:
     return report
 
 
+def _write_no_model_source() -> Path:
+    """A harness that builds no model, for the capture's own plant."""
+    import tempfile
+
+    path = Path(tempfile.mkdtemp()) / "harness_without_a_model.py"
+    path.write_text("def run():\n    return 1\n")
+    return path
+
+
 def self_check() -> int:
     """Every plant must be refused, and the readers must be non-vacuous."""
+    global _NO_MODEL_SOURCE
+    _NO_MODEL_SOURCE = _write_no_model_source()
     failures = []
 
     def expect_raises(label, fn):
@@ -849,8 +863,10 @@ def self_check() -> int:
     expect_raises("program-drift", _program_drift)
     expect_raises("same-program-while-different", _plant_same_program)
     expect_raises("state-drift", lambda: config_diff(plant="state-drift"))
-    expect_raises("missing-function", lambda: model_construction_kwargs(
+    expect_raises("missing-function", lambda: model_config_argument(
         LADDER_GATE, "no_such_function"))
+    expect_raises("capture-with-no-model", lambda: capture_model_config(
+        "self_check_no_model", _NO_MODEL_SOURCE, lambda module: module.run()))
     expect_raises("oracle-floor-against-itself", lambda: oracle_floor(
         steps=2, roots=(ORACLE_V1_ROOT, ORACLE_V1_ROOT)))
     for name in failures:
