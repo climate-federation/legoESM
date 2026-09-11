@@ -38,14 +38,15 @@ def _main_config(argv):
             continue
         names = {n.id for target in node.targets for n in ast.walk(target)
                  if isinstance(n, ast.Name)}
-        if names & {"_snow", "_n_cat"}:
+        if names & {"_snow", "_n_cat", "_ice_sw_scheme"}:
             statements.append(node)
         elif ("ice_config" in names and isinstance(node.value, ast.Call)
               and isinstance(node.value.func, ast.Name)
               and node.value.func.id == "SeaIceConfig"):
             statements.append(node)
-    assert len(statements) == 3
+    assert len(statements) == 4
     env = dict(vars(runner), args=args, _supports_dyn=False,
+               _cli_flags_given=lambda: runner._cli_flags_given(argv),
                _supports_transport=True, grid=create_latlon_geometry(8, 12),
                _ice_dyn="free_drift", _transport="advect",
                _brine=BrineConfig(enabled=True), SeaIceConfig=SeaIceConfig,

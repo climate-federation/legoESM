@@ -4171,6 +4171,28 @@ def _ice_state_spatial_shape(grid, app_grid_type):
         "ice-state spatial shape (supported: mpas, fesom, tripole, latlon).")
 
 
+def _resolve_ice_shortwave(scheme, prognostic_sea_ice, *,
+                           sw_transmittance, transmittance_given=False):
+    """Select existing bulk optics, refusing inactive explicit overrides.
+
+    None preserves the constant scheme and the runner's transmission default.
+    State-dependent schemes own their transmission; no SI3 equivalence.
+    """
+    from legoesm.ice.config import SeaIceConfig
+
+    if scheme not in (None, "constant", "maykut_untersteiner", "delta_eddington"):
+        raise ValueError(f"Unknown ice shortwave scheme: {scheme!r}")
+    if scheme is not None and not prognostic_sea_ice:
+        raise ValueError("--ice-shortwave requires --prognostic-sea-ice")
+    resolved = SeaIceConfig().shortwave_scheme if scheme is None else scheme
+    if resolved != "constant":
+        if transmittance_given:
+            raise ValueError("--ice-thermo-sw-trans requires constant ice shortwave; "
+                             "the selected scheme owns its transmission")
+        return resolved, SeaIceConfig().sw_transmittance_const
+    return resolved, float(sw_transmittance)
+
+
 def _resolve_ice_snow(scheme, prognostic_sea_ice, *, k_snow=None, flooding=None):
     """Select the existing bulk snow column; no multilayer/BL99 claim.
 
@@ -5882,6 +5904,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "shelf columns injects +1.2..+3.5 PSU brine that NEMO "
                         "(starting WITH that ice) never sees.  Default None = "
                         "byte-identical zero-ice cold start.")
+    p.add_argument("--ice-shortwave", default=None,
+                   choices=("constant", "maykut_untersteiner", "delta_eddington"),
+                   help="Prognostic ice optics. Omitted: retain constant albedo and "
+                        "--ice-thermo-sw-trans. maykut_untersteiner: temperature/"
+                        "thickness albedo, no transmission or snow optics. "
+                        "delta_eddington: existing snow/pond-aware two-band "
+                        "surrogate with ice attenuation, not full SI3/CICE optics. "
+                        "Uses carried snow even with --ice-snow off; bulk also "
+                        "accumulates snowfall. Explicit --ice-thermo-sw-trans "
+                        "is incompatible with either state-dependent scheme.")
     p.add_argument("--ice-snow", choices=("off", "bulk"), default="off",
                    help="Select existing single bulk snow physics for prognostic "
                         "ice (accumulation, insulation, ablation and flooding). "
@@ -6880,6 +6912,10 @@ def main() -> int:
     _require_prognostic_ice_for_itd_flags(
         args.ice_categories, args.ice_ridging, args.prognostic_sea_ice,
         ice_ridging_closing_scheme=args.ice_ridging_closing_scheme)
+    _ice_sw_scheme, _ice_sw_trans = _resolve_ice_shortwave(
+        args.ice_shortwave, args.prognostic_sea_ice,
+        sw_transmittance=args.ice_thermo_sw_trans,
+        transmittance_given="ice_thermo_sw_trans" in _cli_flags_given())
     _snow = _resolve_ice_snow(
         args.ice_snow, args.prognostic_sea_ice,
         k_snow=args.ice_snow_k, flooding=args.ice_snow_flooding)
@@ -8085,13 +8121,11 @@ def main() -> int:
                                  closing_scheme=args.ice_ridging_closing_scheme),
             brine=_brine,            # brine-rejection salt flux -> ocean salt_flux
             snow=_snow,
-            # Under-ice transmitted SW is owned by the ICE model (constant-
-            # scheme transmittance): the ice EB is debited and the ocean
-            # receives it via resp.ocean_heat_extraction (-= sw_penetrated),
-            # closing the SW budget the old ocean-side A*tau*swd surrogate
-            # left open (codex L1).  The blend below therefore passes
-            # sw_transmittance_ice=0.0.
-            sw_transmittance_const=float(args.ice_thermo_sw_trans),
+            shortwave_scheme=_ice_sw_scheme,
+            # Ice pays for transmitted SW; the ocean receives it through
+            # negative ocean_heat_extraction. The blend's extra transmission
+            # stays zero to avoid double counting, for every optics selection.
+            sw_transmittance_const=_ice_sw_trans,
         )
         if args.ice_ocean_heat_coeff is not None:
             ice_config = ice_config._replace(

@@ -339,6 +339,7 @@ def test_closing_flag_forwarding_through_actual_main_statements(scheme):
                _supports_dyn=grid_supports_ice_dynamics(grid),
                _supports_transport=grid_supports_ice_transport(grid),
                _brine=BrineConfig(enabled=True), _snow=SnowConfig(), SeaIceConfig=SeaIceConfig,
+               _ice_sw_scheme="constant", _ice_sw_trans=args.ice_thermo_sw_trans,
                RidgingConfig=RidgingConfig,
                _resolve_ice_categories=_resolve_ice_categories,
                _require_prognostic_ice_for_itd_flags=_require_prognostic_ice_for_itd_flags)
