@@ -232,6 +232,14 @@ preregistration and one found by an independent review.
   temperature and ONE salinity, the initial profile's surface values, not
   across the year's range.  Raised by review; the bound is stated rather than
   the exposure denied.
+* **The gate scores the 600 WET surface cells and is blind to the closed
+  boundary ring.**  NEMO computes `emp`, `utau` and `vtau` over a WIDER index
+  range than `qsr` and `qns` (`usrdef_sbc.f90:139,156,189` carry `nn_hls`,
+  `:128,159,198` do not), and on the ring `emp` keeps its raw value because the
+  de-meaning multiplies `tmask`, which is zero there.  Those cells are land on
+  this card and every scored quantity is masked, so a difference there cannot
+  reach a scored number — but this gate does not look, and that is a property
+  of the gate, not a proof about the cells.
 * **The `nyear` operand is never exercised.**  All thirteen samples have
   `nyear = 1` read from the restarts' own `ndastp`, so the `-(nyear-1)` term is
   identically zero in both arms and legoESM has no such operand at all.  What
