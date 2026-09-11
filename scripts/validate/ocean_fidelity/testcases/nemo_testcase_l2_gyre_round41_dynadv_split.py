@@ -57,7 +57,8 @@ def _xyz(raw: np.ndarray, nx: int, ny: int, nz: int) -> np.ndarray:
     return raw.reshape((nx, ny, nz), order="F").transpose(1, 0, 2).copy()
 
 
-def read_split(path: Path, *, plant_header: bool = False) -> dict:
+def read_split(path: Path, *, plant_header: bool = False,
+               expect_kt: int = 1) -> dict:
     """Read the named/ranked stream fail-closed through physical EOF."""
     with path.open("rb") as handle:
         magic_raw = handle.read(16)
@@ -70,12 +71,14 @@ def read_split(path: Path, *, plant_header: bool = False) -> dict:
             header_values[2] = 2
         header = dict(zip(HEADER_FIELDS, header_values, strict=True))
         require(magic == MAGIC, f"{path}: bad magic {magic!r}")
-        require(
-            tuple(header[k] for k in ("version", "kt", "kstg", "Kbb", "Kmm",
-                                      "Krhs", "Kaa", "nn_dynkeg"))
-            == (1, 1, 3, 2, 2, 3, 3, 0),
-            f"{path}: wrong stage/branch header {header}",
-        )
+        require((header["version"], header["kt"], header["kstg"],
+                 header["nn_dynkeg"]) == (1, expect_kt, 3, 0),
+                f"{path}: wrong stage/branch header {header}")
+        require(header["Kbb"] == header["Kmm"]
+                and header["Krhs"] == header["Kaa"]
+                and all(header[name] in (1, 2, 3)
+                        for name in ("Kbb", "Kmm", "Krhs", "Kaa")),
+                f"{path}: invalid RK level tuple {header}")
         require((header["jpi"], header["jpj"], header["jpk"], header["jpkm1"],
                  header["bits"]) == (*DIMS, 30, 64),
                 f"{path}: wrong extents/dtype {header}")

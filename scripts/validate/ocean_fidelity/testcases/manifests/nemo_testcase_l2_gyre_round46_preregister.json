@@ -1,0 +1,42 @@
+{
+  "round": 46,
+  "status": "PREREGISTERED_UNMEASURED",
+  "base_commit": "14df593e10fe",
+  "source_config": "GYRE_OMIP_L2_P3_SM_R41ADVSP",
+  "target_config": "GYRE_OMIP_L2_P3_SM_R46KT2",
+  "executing_source": {
+    "stage_calls": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3.f90:201-216",
+    "stage1": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stp2d.f90:140-166",
+    "stage23": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:327-333,446-472,704-745",
+    "keg": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynkeg.f90:117-130",
+    "zad": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynzad.f90:105-137",
+    "wzv": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/sshwzv.f90:277-299"
+  },
+  "prediction": "With candidate explicit ZAD, kt2 stage1 first differs after ZAD; all earlier stage1 frames and WZV replay are bit-exact.",
+  "falsifier": "Any earlier boundary differs, WZV replay is nonexact, or after-ZAD is exact.",
+  "required_records": [
+    "oracle_momstage_kt00000001_s1.bin",
+    "oracle_momstage_kt00000001_s2.bin",
+    "oracle_momstage_kt00000001_s3.bin",
+    "oracle_momstage_kt00000002_s1.bin",
+    "oracle_momstage_kt00000002_s2.bin",
+    "oracle_momstage_kt00000002_s3.bin",
+    "oracle_rkstage3_terms_kt00000002.bin",
+    "oracle_dynadv_split_kt00000002_s3.bin"
+  ],
+  "plants": [
+    "header",
+    "truncation",
+    "calibration",
+    "given",
+    "trajectory",
+    "twin",
+    "stamp",
+    "consumed-field-admission"
+  ],
+  "ASKED": [
+    "Build the kt2 stage acquisition and stop for the operator.",
+    "Slope association scope answered 2026-09-12: NEMO-identity cards only; 92c00497f48f implements it."
+  ],
+  "UNASKED": []
+}

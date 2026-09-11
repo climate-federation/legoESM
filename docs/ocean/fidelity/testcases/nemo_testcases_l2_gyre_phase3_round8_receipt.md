@@ -11118,3 +11118,43 @@ identity paths pending the user's scope decision.
 
 Current UNASKED list: **empty**.  Historical round-42 UNASKED list: the two
 rows above.
+
+## Round 46 — kt=2 momentum stage acquisition, stopped before execution
+
+Round 46 starts from `14df593e10fe`.  No NEMO build or integration has been
+run by the agent.  The preregistered WRITE-only instrument records kt 1 and 2,
+stages 1–3, following the compiled source order and exact Kbb/Kmm/Kaa call
+tuples at
+`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3.f90:201-216`.
+Stage 1 spans the executing HPG/LDF/VOR/WZV/KEG/ZAD calls at
+`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stp2d.f90:140-166`; stages 2–3
+span WZV and HPG/VOR/ADV at
+`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:327-333` and
+`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:446-472`, with
+stage-3-only LDF/ZDF at
+`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:704-717` and
+all-stage barotropic replacement at
+`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:724-745`.
+
+The record includes named/ranked per-field extents, all RHS frames, stage
+states, live/reference e3 and r3 families, Kbb/Kmm/Kaa velocity and tracer/SSH
+levels, barotropic memory, masks, WZV fields, and TKE closure memory.  The gate
+parses through EOF, requires exact WZV/KEG/ZAD source replays, runs NEMO-given
+inputs through legoESM's own KEG/ZAD paths, and can start a kt=2 legoESM step
+from the recorded complete kt=1 endpoint.  Header, truncation, calibration,
+given-input, trajectory, legacy-twin, consumed-field-admission, and commit
+plants are fail-closed.  Scientific status remains **UNMEASURED** until the
+operator runs the acquisition.
+
+### Round-46 ASKED / UNASKED register
+
+| choice | status | disposition |
+|---|---|---|
+| literal slope-association scope | **ASKED-and-answered, 2026-09-12** | NEMO-identity cards only, exactly the scope implemented by `92c00497f48f`; the round-43 pending row is closed |
+| acquire kt=2 stage records and stop | ASKED round 46 | instrument and gate written; awaiting operator run |
+| configuration/physics/default change | UNASKED | none |
+
+The preregistered first differing statement is kt=2 stage-1 after ZAD, with
+exact earlier frames and exact WZV replay required.  Any earlier difference,
+any WZV replay difference, or exact after-ZAD refutes it.  Merge readiness:
+**HOLD — acquisition pending**.

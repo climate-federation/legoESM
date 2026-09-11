@@ -91,7 +91,7 @@ SLOPES_ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
 SLOPES_RECORD = "oracle_ldfslp_kt00000002.bin"
 
 
-def read_stage3_terms(path: Path) -> dict:
+def read_stage3_terms(path: Path, *, expect_kt: int = 1) -> dict:
     """Read ``NEMO_L2_RKTS3_1``: the stage-3 per-operator momentum frames.
 
     Self-describing: a 16-char name and ``rank, n1, n2, n3`` precede every
@@ -106,10 +106,12 @@ def read_stage3_terms(path: Path) -> dict:
         require(magic == "NEMO_L2_RKTS3_1", f"{path}: bad magic {magic!r}")
         (version, kt, kstg, kbb, kmm, krhs, kaa,
          nx, ny, nz, jpkm1, ntsi, ntei, ntsj, ntej, bits) = header
-        require(
-            (version, kt, kstg, kbb, kmm, krhs, kaa, nx, ny, nz, bits)
-            == (1, 1, 3, 1, 2, 3, 3, *DIMS, 64),
-            f"{path}: bad header {header}")
+        require((version, kt, kstg, nx, ny, nz, bits)
+                == (1, expect_kt, 3, *DIMS, 64),
+                f"{path}: bad header {header}")
+        require(all(level in (1, 2, 3) for level in (kbb, kmm, krhs, kaa))
+                and krhs == kaa,
+                f"{path}: invalid RK level tuple {kbb,kmm,krhs,kaa}")
         arrays = {}
         while True:
             name_raw = handle.read(16)
