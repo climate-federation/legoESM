@@ -749,3 +749,22 @@ bodies); its traps are the frozen tables' reach beyond the band, any body
 that writes pad cells a later firing reads, and two-hop corner pads.  Not
 attempted yet: it is a large refactor of the certified path for ~22 % of
 the step, and the entry refresh (21 ms) is the cheaper target.
+
+### Fused entry refresh: bitwise, and worth nothing (job 9705121)
+
+Interleaved same-allocation A/B, C96 kt=3, 54 ranks: fused 0.219 / 0.220,
+unfused 0.220 / 0.221 s/step.  Merging the three substep-entry firings
+into one (32 -> 29 firings, collectives unchanged) is inside the 2 ms
+noise.  Kept anyway -- fewer boundaries, one code path, bitwise -- but
+**not** claimed as a speedup.
+
+THIRD null result from reducing the NUMBER of things: packing collectives
+(M8-A), batching firings over levels, and now fusing the entry firings
+all bought ~0.  The only levers that ever paid were the ones that removed
+WORK: the in-place pad placement (whole-window copies) and the band
+refresh (85 % of the refresh's bytes, ~14 ms).  The 21 ms the entry
+refresh costs is therefore its BYTES, not its three boundaries -- the
+next attempt on it should shrink what a full refresh copies (e.g. the
+same face-edge band argument, which needs the certified pad >= reach
+invariant re-derived for a whole substep rather than one firing), not
+reorganise the calls.
