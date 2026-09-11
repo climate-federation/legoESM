@@ -2444,7 +2444,7 @@ _FESOM_WIRED_DESTS = frozenset({
     # climatologies through month_sample -- but the gate below rejects any
     # non-default dest that is not listed here, so omitting them made both
     # flags UNREACHABLE on this lane while looking wired (codex, gap 12).
-    "ice_exchange", "forcing_time_interp",
+    "ice_exchange", "forcing_time_interp", "chl_remap",
     "grid", "fesom_mesh_dir", "fesom_ic_dir", "fesom_unforced", "dt", "years",
     # vertical-mixing closure + the zdftke card knobs it consumes (same set
     # the MPAS lane threads; _validate_tke_card_grid gates them):
@@ -2793,7 +2793,8 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
     chl_clim = None
     if args.sw_rgb_chl:
         chl_clim = load_nemo_chl_monthly(grid, "fesom", lat_deg, lon_deg,
-                                         chl_file=args.chl_file)
+                                         chl_file=args.chl_file,
+                                         chl_remap=args.chl_remap)
 
     # --- B4: prognostic sea ice on the node cloud -------------------------
     ice_config = None
@@ -3786,7 +3787,42 @@ def load_nemo_siconc(grid, grid_type, lat2d_deg, lon2d_deg, siconc_file=None,
     return out
 
 
-def load_nemo_chl_monthly(grid, grid_type, lat2d_deg, lon2d_deg, chl_file=None):
+# ORCA1 remaps chlorophyll with weights_reg05_bilinear.nc (namelist_cfg:170),
+# not with inverse-distance weighting. The file is a 4-triple SCRIP bilinear
+# map whose weights sum to 1.0 to machine precision, produced by the same
+# `ncks -F -d lon,2,361 -d lat,1,331` slice as the CORE-II weights, so it
+# targets the INTERIOR of a 362x332 eORCA1 grid. Its source is
+# merged_ESACCI_BIOMER4V1R1_CHL_REG05.nc at (y=361, x=721) -- a half-degree
+# grid with DUPLICATE endpoint columns (0 and 360 both present), which is why
+# nx is 721 and not 720. Verified, not assumed.
+_CHL_SCRIP_WEIGHTS = (
+    "/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/"
+    "orca1_inputs/data_repository/input_fields/weights_reg05_bilinear.nc")
+
+
+def _scrip_to_full_tripole(interior, ny, nx):
+    """Place a (331, 360) SCRIP result into a full (332, 362) tripole field.
+
+    The weights cover the interior only. The dropped entries are not missing
+    data, they are the grid's own redundancy, so they are FILLED rather than
+    left as zeros -- a silent zero in a forcing field is the failure mode this
+    repo keeps hitting:
+      * columns 0 and 361 are the CYCLIC OVERLAP of columns 360 and 1;
+      * row 331 is the NORTH-FOLD row, filled from the row below it.
+    The fold fill is an approximation: a true eORCA fold maps the row onto
+    itself with a reversal. For a smooth surface field like chlorophyll at a
+    single row the difference is small, and this is stated rather than hidden.
+    """
+    out = np.zeros((ny, nx), dtype=np.float64)
+    out[0:331, 1:361] = interior
+    out[0:331, 0] = out[0:331, 360]      # west overlap  <- column 360
+    out[0:331, 361] = out[0:331, 1]      # east overlap  <- column 1
+    out[331, :] = out[330, :]            # north fold row
+    return out
+
+
+def load_nemo_chl_monthly(grid, grid_type, lat2d_deg, lon2d_deg, chl_file=None,
+                          chl_remap="idw"):
     """Load the monthly ESACCI chlorophyll climatology and IDW-regrid onto the grid.
 
     Returns a ``(12, *lat2d_deg.shape)`` array of surface chlorophyll [mg/m^3] for
@@ -3805,6 +3841,32 @@ def load_nemo_chl_monthly(grid, grid_type, lat2d_deg, lon2d_deg, chl_file=None):
         raise ValueError(
             f"expected monthly CHLA (12, y, x); got shape {chl.shape} in {chl_file or _CHL_NC}"
         )
+    if chl_remap not in ("idw", "nemo_scrip"):
+        raise SystemExit(
+            f"unknown chl_remap {chl_remap!r}; expected 'idw' or 'nemo_scrip'")
+    if chl_remap == "nemo_scrip":
+        # The oracle's own weights. Only defined for the tripole interior, so
+        # refuse loudly on any other target rather than remapping through a
+        # map built for a different grid.
+        from legoesm.ocean.coupler.omip2_applicator import (
+            apply_scrip_weights, load_scrip_weights)
+        if lat2d_deg.shape != (332, 362):
+            raise SystemExit(
+                f"chl_remap='nemo_scrip' needs the (332, 362) eORCA1 tripole; "
+                f"got {lat2d_deg.shape} on grid_type={grid_type!r}")
+        src0, wgt, nw = load_scrip_weights(_CHL_SCRIP_WEIGHTS)
+        src_shape = chl.shape[1:]
+        out = np.stack([
+            np.maximum(_scrip_to_full_tripole(
+                apply_scrip_weights(np.nan_to_num(chl[m], nan=0.0),
+                                    src0, wgt, nw, src_shape),
+                *lat2d_deg.shape), 0.03)
+            for m in range(12)])
+        print(f"[setup] RGB chlorophyll: ESACCI monthly via the ORACLE'S OWN "
+              f"bilinear weights ({nw} triples) onto {grid_type}, range "
+              f"{float(out.min()):.3f}-{float(out.max()):.3f} mg/m3, "
+              f"annual-mean {float(out.mean()):.3f}")
+        return out
     out_months = []
     for m in range(12):
         src = chl[m]
@@ -6159,6 +6221,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "The 6-hourly winds and the radiation fields are "
                         "ln_tint=.FALSE. in the oracle, so they are HELD by "
                         "both models and this flag does not touch them.")
+    p.add_argument("--chl-remap", choices=("idw", "nemo_scrip"),
+                   default="idw",
+                   help="How the ESACCI chlorophyll climatology is remapped. "
+                        "'idw' (default, unchanged) uses the four-neighbour "
+                        "inverse-distance regrid. 'nemo_scrip' reads ORCA1's "
+                        "OWN weights_reg05_bilinear.nc, which is what "
+                        "namelist_cfg:170 selects. Tripole only: the weights "
+                        "encode one destination grid and the selector refuses "
+                        "any other. Chlorophyll sets the shortwave "
+                        "penetration depth, so this feeds upper-ocean heating.")
     p.add_argument("--ice-exchange", choices=tuple(_ICE_EXCHANGE_SETS),
                    default=None,
                    help="Named sea-ice exchange-coefficient set for "
@@ -8403,7 +8475,8 @@ def main() -> int:
             raise ValueError(
                 f"--sw-rgb-chl is wired for latlon/tripole/mpas only, not {app_grid_type!r}")
         chl_clim = load_nemo_chl_monthly(
-            grid, app_grid_type, lat2d, lon2d, chl_file=args.chl_file)
+            grid, app_grid_type, lat2d, lon2d, chl_file=args.chl_file,
+                                         chl_remap=args.chl_remap)
     # allow_synthetic=False: this NEMO-faithful pipeline MUST use the real
     # 6-hourly CORE-II nyf.zarr; a silent fallback to 365 daily synthetic forcing
     # would corrupt the comparison invisibly. --forcing-path (set via --config

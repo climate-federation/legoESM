@@ -103,6 +103,10 @@ $PY -u scripts/run/run_omip_core2.py \
   \
   `# --- SET 4: forcing time interpolation ---------------------------------` \
   --forcing-time-interp linear \
+  --chl-remap nemo_scrip \
+  `# ORCA1 remaps chlorophyll with its own weights_reg05_bilinear.nc` \
+  `# (namelist_cfg:170), not with inverse-distance weighting. Chlorophyll` \
+  `# sets the shortwave penetration depth, so this feeds upper-ocean heating.` \
   `# ORCA1 carries ln_tint=.true. on exactly the three MONTHLY climatologies` \
   `# (sn_chl:170, sn_sss:185, sn_rnf:199) and ln_tint=.FALSE. on the 6-hourly` \
   `# winds and daily radiation (148-152), which both models therefore HOLD.` \
