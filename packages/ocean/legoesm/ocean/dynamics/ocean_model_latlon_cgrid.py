@@ -6111,10 +6111,15 @@ class LatLonCGridOceanModel:
                 # geometry. Keep the through-FCT bolus on the historical Naa
                 # slope geometry as the Redi tensor alone receives Kmm eta.
                 native_bolus_slope_eta=state_new.eta.data,
-                # tra_ldf runs after dynamics but e3u/e3v are indexed Kmm:
-                # carry the step-entry Nnn SSH rather than recomputing from
-                # state_new.eta (Naa). stpmlf.F90:528,548 + scheme.h90:73-74.
-                redi_flux_eta=state.eta.data,
+                # tra_ldf runs after dynamics, but EVERY e3/r3 operand in
+                # traldf_iso is indexed Kmm -- the u/v flux faces (:231-232),
+                # the A33 e3w divisor (:284), the tendency divisor (:292,
+                # :305) and the ze3w_2 inside akz (:823, :828).  r3t(:,:,Nnn)
+                # is not written between step entry and stpmlf.F90:368's
+                # tra_ldf call (:216/:265 write Naa; :397 writes Nnn only
+                # after tra_atf_qco), so Kmm here is the STEP-ENTRY height --
+                # not state_new.eta, which is Naa, after the barotropic solve.
+                redi_kmm_eta=state.eta.data,
                 return_bolus_transport=_want_bolus,
                 dt=dt,
                 eos_depth=getattr(_cfg_b, "eos_depth", "insitu"),
@@ -6160,6 +6165,9 @@ class LatLonCGridOceanModel:
                     native_slope_pn2=_gm_native_pn2,
                     native_slope_e3w=_gm_native_e3w,
                     native_slope_eta=state.eta.data,
+                    # The same Kmm geometry the explicit half receives: the
+                    # two sides of the akz split divide by one object.
+                    redi_kmm_eta=state.eta.data,
                     # #1226: the SAME wall masks the tendency dispatcher uses,
                     # so the nemo_native K33 slopes/masks are bit-identical to
                     # the explicit operator's (staircase-aware; the K33-side
@@ -11222,7 +11230,7 @@ class LatLonCGridOceanModel:
                 kappa_redi_v_override=_kri_v_static,
                 density_jacobian=_gm_dj,
                 native_slope_eta=state.eta.data,
-                redi_flux_eta=state.eta.data,
+                redi_kmm_eta=state.eta.data,
                 dt=dt, eos_depth=_eos_depth)
             dT_n = dT_n + dt * dT_gm    # noqa: N806
             dS_n = dS_n + dt * dS_gm    # noqa: N806
@@ -11236,6 +11244,10 @@ class LatLonCGridOceanModel:
                     kappa_redi_v_override=_kri_v_static,
                     density_jacobian=_gm_dj,
                     native_slope_eta=state.eta.data,
+                    # Bit-identical here (this lane's positional eta already
+                    # IS the step-entry height); passed so the two halves of
+                    # the akz split can never be given different objects.
+                    redi_kmm_eta=state.eta.data,
                     # #1226: same wall masks as the tendency call above.
                     u_mask=u_mask, v_mask=v_mask, dt=dt, eos_depth=_eos_depth)
         du_p = (state.u_incr_prev.data if state.u_incr_prev is not None

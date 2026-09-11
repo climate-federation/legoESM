@@ -2527,3 +2527,131 @@ class TestNemoIsoLapAhtMasking:
         alive = (vm > 0.0) & (um == 0.0)
         assert alive.any()
         assert np.abs(zfv[alive]).max() > 0.0
+
+
+# =====================================================================
+# redi_kmm_eta -- the Kmm time level of traldf_iso's own geometry (#1728)
+# =====================================================================
+class TestRediKmmEta:
+    """``traldf_iso`` indexes EVERY e3/r3 operand at ``Kmm``.
+
+    ``traldf_iso.f90:231-232`` (the u/v flux faces), ``:284`` (the A33 e3w
+    divisor), ``:292``/``:305`` (the tendency divisor) and ``:823``/``:828``
+    (the ``ze3w_2`` squared inside ``akz``) all read ``r3u/r3v/r3t(...,Kmm)``,
+    and ``stpmlf.f90:504`` calls ``tra_ldf`` with ``Kmm = Nnn``.  The shared
+    model step therefore hands the operator the STEP-ENTRY sea-surface height,
+    not the post-barotropic one.  ``redi_kmm_eta`` is the one argument that
+    carries it -- one argument for all six operands, because giving the flux
+    faces and the cell volume separate knobs is exactly how the two halves of
+    the ``akz`` split were once allowed to disagree.
+    """
+
+    @staticmethod
+    def _case():
+        from legoesm.ocean.vertical import create_z_star_from_thicknesses
+        n_lat, n_lon, nlev = 6, 7, 5
+        # A PARTIAL-CELL coordinate on purpose: it is the class the DINO card
+        # builds, and the one on which compute_ocean_jacobian IS NEMO's
+        # (1 + r3t) = 1 + ssh/ht_0 rather than the z* (eta+H)/H_max.
+        z = create_partial_cell_coordinate(
+            create_z_star_from_thicknesses(
+                np.array([10.0, 20.0, 40.0, 80.0, 160.0])),
+            jnp.full((n_lat, n_lon), 310.0))
+        # No raw NEMO mesh behind this synthetic ladder, so the w-point N^2
+        # helper must take its legacy e3w source.  That is orthogonal to the
+        # operand under test: every arm below shares it.
+        z = z._replace(nemo_e3w_mesh_reference=False)
+        grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+        rng = np.random.default_rng(17)
+        T = jnp.asarray(12.0 - 8.0 * np.linspace(0, 1, nlev)[None, None, :]
+                        + 0.2 * rng.normal(size=(n_lat, n_lon, nlev)))
+        S = jnp.asarray(35.0 + 0.1 * rng.normal(size=(n_lat, n_lon, nlev)))
+        eta = jnp.asarray(0.3 * rng.normal(size=(n_lat, n_lon)))
+        H = jnp.full((n_lat, n_lon), 310.0)
+        # kappa and dt are deliberately LARGE: NEMO's akz is
+        # MAX(rDt*(...) - 0.5, 0), which is identically zero on a gentle case
+        # (it is zero on all 342134 wet cells of the kt=1 record), and a test
+        # that never enters the branch would assert nothing about it.
+        cfg = GMRediConfig(slope_scheme="nemo_iso_lap",
+                           slope_positions="nemo_native",
+                           msc_stabilize=True, implicit_K33=True,
+                           kappa_Redi=2.0e4, kappa_GM=0.0)
+        kw = dict(mask=jnp.ones((n_lat, n_lon)),
+                  u_mask=jnp.ones((n_lat, n_lon + 1)),
+                  v_mask=jnp.ones((n_lat + 1, n_lon)), dt=8.64e4)
+        return T, S, eta, H, grid, z, cfg, kw
+
+    def test_none_is_the_positional_eta_and_a_different_height_moves_it(self):
+        """Inert when it names the height the operator already had; load-bearing
+        when it names another.  Both halves are needed: the first makes every
+        untouched card's byte-identical fingerprint meaningful, the second
+        proves the argument actually reaches the operator."""
+        T, S, eta, H, grid, z, cfg, kw = self._case()
+        base = np.asarray(gm_redi_tracer_tendency_latlon(
+            T, S, eta, H, grid, z, cfg, **kw)[0])
+        same = np.asarray(gm_redi_tracer_tendency_latlon(
+            T, S, eta, H, grid, z, cfg, redi_kmm_eta=eta, **kw)[0])
+        other = np.asarray(gm_redi_tracer_tendency_latlon(
+            T, S, eta, H, grid, z, cfg, redi_kmm_eta=eta + 0.5, **kw)[0])
+        assert np.max(np.abs(same - base)) == 0.0
+        assert np.max(np.abs(other - base)) > 0.0
+        assert np.all(np.isfinite(other))
+
+    def test_it_is_the_jacobian_the_operator_divides_by(self):
+        """The argument must rebuild the operator's ``e3t``, not only the flux
+        faces: the card that selects ``nemo_qco_live`` already had its u/v
+        faces on the Kmm height, so a version that only moved those would be a
+        no-op there and the whole fix would be silent."""
+        T, S, eta, H, grid, z, cfg, kw = self._case()
+        cfg_tp = cfg._replace(
+            redi_flux_face_thickness_evaluation="tpoint_jacobian")
+        eta2 = eta + 0.5
+        moved = np.asarray(gm_redi_tracer_tendency_latlon(
+            T, S, eta, H, grid, z, cfg_tp, redi_kmm_eta=eta2, **kw)[0])
+        # Feeding the OTHER height as the positional eta moves the density and
+        # the slopes as well, so the two are not expected to agree -- what is
+        # asserted is that the volume operand alone is enough to change the
+        # answer, which a faces-only implementation could not do.
+        base = np.asarray(gm_redi_tracer_tendency_latlon(
+            T, S, eta, H, grid, z, cfg_tp, **kw)[0])
+        assert np.max(np.abs(moved - base)) > 0.0
+
+    def test_k33_takes_the_same_height(self):
+        """The explicit A33 flux and the implicit K33 solve carry the two halves
+        of ONE coefficient; if only one of them moved to Kmm the pair would
+        disagree, which is the failure ``nemo_iso_a33_e3w`` was made shared to
+        prevent."""
+        T, S, eta, H, grid, z, cfg, kw = self._case()
+        cfg_k = cfg
+        k_base = np.asarray(compute_isoneutral_K33_latlon(
+            T, S, eta, H, grid, z, cfg_k, **kw))
+        k_same = np.asarray(compute_isoneutral_K33_latlon(
+            T, S, eta, H, grid, z, cfg_k, redi_kmm_eta=eta, **kw))
+        k_other = np.asarray(compute_isoneutral_K33_latlon(
+            T, S, eta, H, grid, z, cfg_k, redi_kmm_eta=eta + 0.5, **kw))
+        # The branch must actually be live, or the two assertions below are
+        # both satisfied by an all-zero array.
+        assert np.max(np.abs(k_base)) > 0.0, (
+            "akz is identically zero on this case, so nothing here tests the "
+            "e3w the stabilising correction divides by")
+        assert np.max(np.abs(k_same - k_base)) == 0.0
+        assert np.max(np.abs(k_other - k_base)) > 0.0
+
+    def test_the_model_step_hands_the_operator_the_step_entry_height(self):
+        """The statement this fix IS: at the GM/Redi call the step must pass its
+        own ``state.eta`` (Nnn), not ``state_new.eta`` (Naa).  Asserted on the
+        source of the call site, and shown to fail if the argument is dropped
+        -- a source check that names a symbol nothing runs proves nothing, so
+        the symbol named here is the keyword the operator actually reads."""
+        src = legoesm_source_path(
+            "ocean/dynamics/ocean_model_latlon_cgrid.py").read_text()
+        assert "redi_kmm_eta=state.eta.data" in src
+        assert "redi_flux_eta" not in src, (
+            "the widened keyword replaced the flux-faces-only one; a surviving "
+            "redi_flux_eta would mean a call site still moves only the faces")
+        # non-vacuity: the keyword it replaced must be gone from the operator
+        # side too, so no caller can reach a faces-only path.
+        gsrc = legoesm_source_path(
+            "ocean/physics/lateral_mixing/gm_redi_latlon_cgrid.py").read_text()
+        assert "redi_flux_eta" not in gsrc
+        assert "redi_kmm_eta" in gsrc

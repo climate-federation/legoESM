@@ -3895,7 +3895,7 @@ def gm_redi_tracer_tendency_latlon(
     native_slope_eta: jnp.ndarray | None = None,
     native_kappa_slope_eta: jnp.ndarray | None = None,
     native_bolus_slope_eta: jnp.ndarray | None = None,
-    redi_flux_eta: jnp.ndarray | None = None,
+    redi_kmm_eta: jnp.ndarray | None = None,
     dt: float | None = None,
     return_bolus_transport: bool = False,
     eos_depth: str = "insitu",
@@ -3913,12 +3913,23 @@ def gm_redi_tracer_tendency_latlon(
     T, S : (n_lat, n_lon, nlev)
     eta : (n_lat, n_lon)
         Sea-surface height.
-    redi_flux_eta : (n_lat, n_lon) or None
-        Optional carried Kmm sea-surface height used only to build
-        traldf_iso's live-QCO e3u/e3v flux faces. NEMO builds the lateral
-        tracer flux after the dynamics update but indexes these faces at Kmm,
-        so the MLF model step supplies its step-entry eta here. ``None`` keeps
-        same-level callers byte-identical.
+    redi_kmm_eta : (n_lat, n_lon) or None
+        Optional carried ``Kmm`` sea-surface height for EVERY geometric
+        operand of ``traldf_iso``.  NEMO runs ``tra_ldf`` AFTER the barotropic
+        solve has already written ``r3t(Kaa)`` (``stpmlf.F90:265``), yet the
+        operator indexes its own geometry at ``Kmm`` throughout — the u/v flux
+        faces (``traldf_iso.f90:231-232`` ``e3u_3d*(1+r3u(ji,jj,Kmm))``), the
+        A33 vertical-flux divisor (``:284`` ``e3w_3d(jk+1)*(1+r3t(ji,jj,Kmm))``),
+        the tendency divisor (``:292``, ``:305``
+        ``e3t_3d*(1+r3t(ji,jj,Kmm)*tmask)``) and the ``ze3w_2`` that squares
+        inside ``akz`` (``:823``, ``:828``).  ``r3t(:,:,Nnn)`` is not written
+        between step entry and that call (``:216``/``:265`` write ``Naa``;
+        ``:397`` writes ``Nnn`` only after ``tra_atf_qco``), so ``Kmm`` here is
+        the STEP-ENTRY height.  The MLF model step supplies it.
+        ONE argument, not two: the flux faces and the cell volume are the same
+        ``(1+r3t(Kmm))``, and giving them separate knobs is exactly how the two
+        halves of the ``akz`` split were allowed to disagree (#1728).
+        ``None`` keeps same-level callers byte-identical.
     H_bathy : (n_lat, n_lon)
         Bottom depth (positive).
     grid : LatLonGrid
@@ -4287,6 +4298,15 @@ def gm_redi_tracer_tendency_latlon(
                 "unknown GMRediConfig.redi_flux_face_thickness_evaluation "
                 f"{_flux_face_mode!r}; expected 'tpoint_jacobian' or "
                 "'nemo_qco_live'")
+        # ONE Kmm geometry for the whole operator (traldf_iso.f90:231-232,
+        # :284, :292, :305, :823, :828 -- every e3/r3 operand is indexed Kmm).
+        # Built with the SAME builder the Kaa jacobian came from, so the only
+        # thing that changes is the TIME LEVEL.
+        if redi_kmm_eta is None:
+            _kmm_J = jacobian
+        else:
+            from legoesm.ocean.vertical import compute_ocean_jacobian as _coj
+            _kmm_J = _coj(redi_kmm_eta, H_bathy, z_coord)
         _flux_e3u = None
         _flux_e3v = None
         if _flux_face_mode == "nemo_qco_live":
@@ -4302,7 +4322,7 @@ def gm_redi_tracer_tendency_latlon(
             _umask3, _vmask3, _ = nemo_iso_face_masks(
                 u_mask, v_mask, _active_3d)
             _e3t0 = jnp.asarray(_e3t0, dtype=T.dtype)[..., :T.shape[-1]]
-            _flux_eta = eta if redi_flux_eta is None else redi_flux_eta
+            _flux_eta = eta if redi_kmm_eta is None else redi_kmm_eta
             _flux_e3u, _flux_e3v = nemo_qco_live_face_thicknesses(
                 _flux_eta, z_coord, _e3t0, _e3t0, _umask3, _vmask3)
         _positions = getattr(cfg, "slope_positions", "mode_b")
@@ -4358,7 +4378,7 @@ def gm_redi_tracer_tendency_latlon(
             _bolus = None
             _dT = nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 T, S_x, S_y, mask, u_mask, v_mask,
-                z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
+                z_coord, _kmm_J, grid, kappa_Redi_eff, _active_3d,
                 native_slopes=_redi_nat, msc_stabilize=_msc, dt=dt,
                 bolus_native_slopes=_bolus_nat,
                 kappa_GM=kappa_GM, gm_bolus_advection=_gm_bolus,
@@ -4375,7 +4395,7 @@ def gm_redi_tracer_tendency_latlon(
                 dT_dt = _dT
             dS_dt = nemo_iso_lap_tracer_tendency_latlon_cgrid(
                 S, S_x, S_y, mask, u_mask, v_mask,
-                z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
+                z_coord, _kmm_J, grid, kappa_Redi_eff, _active_3d,
                 native_slopes=_redi_nat, msc_stabilize=_msc, dt=dt,
                 bolus_native_slopes=_bolus_nat,
                 kappa_GM=kappa_GM, gm_bolus_advection=_gm_bolus,
@@ -4404,7 +4424,7 @@ def gm_redi_tracer_tendency_latlon(
         _bolus = None
         _dT = nemo_iso_lap_tracer_tendency_latlon_cgrid(
             T, -S_x, -S_y, mask, u_mask, v_mask,
-            z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
+            z_coord, _kmm_J, grid, kappa_Redi_eff, _active_3d,
             kappa_GM=kappa_GM, gm_bolus_advection=_gm_bolus,
                 gm_bolus_kappa_face_average=_gm_kfa,
             return_bolus=return_bolus_transport,
@@ -4418,7 +4438,7 @@ def gm_redi_tracer_tendency_latlon(
             dT_dt = _dT
         dS_dt = nemo_iso_lap_tracer_tendency_latlon_cgrid(
             S, -S_x, -S_y, mask, u_mask, v_mask,
-            z_coord, jacobian, grid, kappa_Redi_eff, _active_3d,
+            z_coord, _kmm_J, grid, kappa_Redi_eff, _active_3d,
             kappa_GM=kappa_GM, gm_bolus_advection=_gm_bolus,
             gm_bolus_kappa_face_average=_gm_kfa,
             kappa_Redi_v=kappa_Redi_v_eff,
@@ -4458,6 +4478,7 @@ def compute_isoneutral_K33_latlon(
     native_slope_pn2: jnp.ndarray | None = None,
     native_slope_e3w: jnp.ndarray | None = None,
     native_slope_eta: jnp.ndarray | None = None,
+    redi_kmm_eta: jnp.ndarray | None = None,
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
     dt: float | None = None,
@@ -4594,7 +4615,16 @@ def compute_isoneutral_K33_latlon(
         _e2v_c = _geom.dy_v[1:, :]
         # z*-scaled thickness with the SAME jacobian as the operator's e3t
         # (from the shared density_jacobian thread).
-        _e3t = z_coord.dz_ref[None, None, :] * _J[:, :, jnp.newaxis]
+        # The SAME Kmm geometry the explicit half receives (traldf_iso.f90
+        # :284/:292/:305/:823/:828 index every e3/r3 operand at Kmm).  The two
+        # halves of the akz split must divide by ONE object, so this resolves
+        # from the same argument the explicit operator's ``_kmm_J`` does.
+        if redi_kmm_eta is None:
+            _J_vol = _J
+        else:
+            from legoesm.ocean.vertical import compute_ocean_jacobian as _coj
+            _J_vol = _coj(redi_kmm_eta, H_bathy, z_coord)
+        _e3t = z_coord.dz_ref[None, None, :] * _J_vol[:, :, jnp.newaxis]
         _msc = bool(getattr(cfg, "msc_stabilize", False))
         # Same e3w object as the explicit A33 flux (traldf_iso.f90:831-833):
         # the two sides of the split share one resolver by construction.
@@ -4602,7 +4632,7 @@ def compute_isoneutral_K33_latlon(
         # own guard: with msc=F, akz = ah_wslp2 and traldf_iso.f90:88-91 never
         # reads e3w at all, so a coordinate the resolver would REFUSE must not
         # be refused for a value nothing consumes.
-        _e3w = (nemo_iso_a33_e3w(z_coord, _e3t, _J, T.dtype) if _msc
+        _e3w = (nemo_iso_a33_e3w(z_coord, _e3t, _J_vol, T.dtype) if _msc
                 else _e3t)
         _, _akz = nemo_iso_a33(
             _aht, _um3, _vm3, _wm3, _wi, _wj,

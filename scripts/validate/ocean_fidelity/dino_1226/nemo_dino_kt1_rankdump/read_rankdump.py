@@ -65,6 +65,43 @@ def read_tile(path: str) -> dict:
     return out
 
 
+
+def haloless_shape(h: dict) -> tuple[int, int]:
+    """The global domain WITHOUT the global halo, from a tile's own header.
+
+    ``(jpjglo - 2*nn_hls, jpiglo - 2*nn_hls)`` -- 199 x 52 on DINO R1 -- so a
+    stitched field indexes exactly like ``mesh_mask.nc``.
+    """
+    hls = h["nn_hls"]
+    shape = (h["jpjglo"] - 2 * hls, h["jpiglo"] - 2 * hls)
+    if min(shape) < 1:
+        raise SystemExit(f"header gives a haloless shape {shape}")
+    return shape
+
+
+def tile_slices(h: dict, shape: tuple[int, int], path: str = "<tile>"):
+    """Where one rank's INNER region lands in the haloless global domain.
+
+    NEMO: the global (with-halo) index of local ``ji`` is ``ji + nimpp - 1``,
+    so the HALOLESS index is ``ji + nimpp - nn_hls - 2`` (0-based).  Only the
+    INNER region is taken, so a halo copy never overwrites its owner's cell.
+
+    Returns ``(gj0, gj1, gi0, gi1, j0, j1, i0, i1)``.  Shared by every
+    per-rank record on this branch (the barotropic substeps and the kt=1
+    slope dump), so the two cannot drift apart -- one decomposition, one
+    placement rule.
+    """
+    i0, i1 = h["Nis0"] - 1, h["Nie0"]
+    j0, j1 = h["Njs0"] - 1, h["Nje0"]
+    gi0, gj0 = h["nimpp"] - 1, h["njmpp"] - 1
+    ni, nj = i1 - i0, j1 - j0
+    if (gi0 < 0 or gj0 < 0 or gi0 + ni > shape[1] or gj0 + nj > shape[0]):
+        raise SystemExit(
+            f"{path}: rank {h['narea']} inner block [{gj0}:{gj0 + nj}, "
+            f"{gi0}:{gi0 + ni}] does not fit the haloless global {shape} -- "
+            "the header's nimpp/njmpp/Nis0 do not describe this decomposition")
+    return gj0, gj0 + nj, gi0, gi0 + ni, j0, j1, i0, i1
+
 def stitch(run_dir: str, substep: int) -> dict:
     """The 16 tiles of one substep, assembled on the HALOLESS global domain.
 
@@ -88,30 +125,15 @@ def stitch(run_dir: str, substep: int) -> dict:
             raise SystemExit(f"{p}: header says substep {h['jn']}, "
                              f"filename says {substep}")
         seen.append(h["narea"])
-        hls = h["nn_hls"]
+        # (nn_hls now read inside haloless_shape)
         if out == {}:
-            shape = (h["jpjglo"] - 2 * hls, h["jpiglo"] - 2 * hls)
-            if min(shape) < 1:
-                raise SystemExit(f"{p}: header gives a haloless shape {shape}")
+            shape = haloless_shape(h)
             out = {k: np.full(shape, np.nan) for k in ARRAYS}
             cover = np.zeros(shape, dtype=np.int32)
-        # NEMO: the global (with-halo) index of local ji is ji + nimpp - 1, so
-        # the HALOLESS index is ji + nimpp - nn_hls - 2 (0-based).  Take the
-        # INNER region only, so a halo copy never overwrites its owner's cell.
-        i0, i1 = h["Nis0"] - 1, h["Nie0"]
-        j0, j1 = h["Njs0"] - 1, h["Nje0"]
-        gi0, gj0 = h["nimpp"] - 1, h["njmpp"] - 1
-        ni, nj = i1 - i0, j1 - j0
-        if (gi0 < 0 or gj0 < 0 or gi0 + ni > cover.shape[1]
-                or gj0 + nj > cover.shape[0]):
-            raise SystemExit(
-                f"{p}: rank {h['narea']} inner block [{gj0}:{gj0 + nj}, "
-                f"{gi0}:{gi0 + ni}] does not fit the haloless global "
-                f"{cover.shape} -- the header's nimpp/njmpp/Nis0 do not "
-                "describe this decomposition")
+        gj0, gj1, gi0, gi1, j0, j1, i0, i1 = tile_slices(h, cover.shape, p)
         for k in ARRAYS:
-            out[k][gj0:gj0 + nj, gi0:gi0 + ni] = t[k][j0:j1, i0:i1]
-        cover[gj0:gj0 + nj, gi0:gi0 + ni] += 1
+            out[k][gj0:gj1, gi0:gi1] = t[k][j0:j1, i0:i1]
+        cover[gj0:gj1, gi0:gi1] += 1
     if sorted(seen) != list(range(1, len(seen) + 1)):
         raise SystemExit(f"ranks present are {sorted(seen)} -- not 1..N")
     # A tile map that double-covers or leaves a hole silently produces a

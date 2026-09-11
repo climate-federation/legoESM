@@ -259,8 +259,13 @@ def _replay(real, args, kwargs, **over):
     """
     kw = dict(kwargs)
     kw.update(over)
+    _jac = kw.pop("_jacobian", None)
     kw["return_diagnostics"] = True
     kw["return_operand_diagnostics"] = True
+    if _jac is not None:
+        # position 7 is the operator's ``jacobian`` -- the SINGLE object that
+        # builds e3t, the A33 e3w divisor and the ze3w_2 inside akz.
+        args = tuple(args[:7]) + (_jac,) + tuple(args[8:])
     r = real(*args, **kw)
     if kw.get("return_bolus"):
         tend, _bolus, diags = r
@@ -308,6 +313,7 @@ def _stage_split(diags, args, kwargs, z):
 
 
 def stage5(calls, iT, iS, R, O3, wet3, z, st, real, plant_e3w: bool,
+           jac_naa, plant_kmm: bool,
            plant_slopes: bool) -> int:
     """The preregistered substitution ladder (PREREG_kt1_ldf_stage_walk.md).
 
@@ -344,6 +350,16 @@ def stage5(calls, iT, iS, R, O3, wet3, z, st, real, plant_e3w: bool,
     #    (stpmlf.f90:132) and restored at :618.  This record is kt=1, so the
     #    two agree HERE and the row is a forward-looking finding, not a
     #    residual this record can score.
+    # Rule 10: the stabilising correction is read from legoESM's RESOLVED
+    # call, not from NEMO's namelist.  Every A33 row below is about a branch
+    # that exists only when this is True.
+    _msc_live = bool(kw_T.get("msc_stabilize", False))
+    print(f"  resolved msc_stabilize on the captured call: {_msc_live} "
+          "(NEMO namelist_cfg:267 ln_traldf_msc = .true.)")
+    if not _msc_live:
+        print("  ^^ the A33 stabilising-correction branch is OFF in legoESM "
+              "while NEMO's namelist turns it ON")
+        bad += 1
     print(f"  rDt operand: the card passes dt={kw_T.get('dt')!r} to "
           f"traldf_iso_a33; NEMO's rDt at kt=1 is rn_Dt={DT!r} "
           f"(stpmlf.f90:132) and 2*rn_Dt={2 * DT!r} from kt=2 "
@@ -443,16 +459,57 @@ def stage5(calls, iT, iS, R, O3, wet3, z, st, real, plant_e3w: bool,
     # time-level mismatch on one operand, not a missing quantity.  Arm T1
     # measures it; it was found by the diff review, not predicted here.
     from legoesm.ocean.eos import nemo_r3t_stretch
+    from legoesm.ocean.vertical import compute_ocean_jacobian as _coj
     _stretch_nnn = np.asarray(nemo_r3t_stretch(
         z, jnp.asarray(np.asarray(st.eta.data)),
         jnp.asarray(np.asarray(st.H_bathy.data))))
-    print(f"  stretch time level: the operator's jacobian (Naa) spans "
+    _jac_kmm = np.asarray(_coj(jnp.asarray(np.asarray(st.eta.data)),
+                               jnp.asarray(np.asarray(st.H_bathy.data)), z))
+    _jac_naa = np.asarray(jac_naa)
+    print(f"  stretch time level: the operator's jacobian spans "
           f"[{jac.min():.9f}, {jac.max():.9f}]; NEMO's (1+r3t(Kmm=Nnn)) "
-          f"spans [{_stretch_nnn.min():.9f}, {_stretch_nnn.max():.9f}]")
+          f"spans [{_stretch_nnn.min():.9f}, {_stretch_nnn.max():.9f}]; the "
+          f"post-barotropic Naa the step built spans "
+          f"[{_jac_naa.min():.9f}, {_jac_naa.max():.9f}]")
+    # LIVENESS.  The operator must BE on NEMO's Kmm object, not near it; and
+    # the two levels must be distinguishable on this record, or no arm below
+    # measures anything.  Both printed, both gated.
+    _d_kmm = float(np.max(np.abs(jac - _jac_kmm)))
+    _d_naa = float(np.max(np.abs(jac - _jac_naa)))
+    print(f"    the operator's jacobian vs Kmm: max|diff| = {_d_kmm:.3e}; "
+          f"vs the step's Naa: max|diff| = {_d_naa:.3e}")
+    if _d_kmm != 0.0:
+        print("  ^^ the operator is NOT on NEMO's Kmm stretch "
+              "(traldf_iso.f90:284/:292/:305/:823)")
+        bad += 1
+    if _d_naa == 0.0:
+        print("  ^^ Kmm and Naa are the same object on this record, so no arm "
+              "below can separate the two")
+        bad += 1
     e3w_nnn = np.asarray(raw_e3w0)[..., :z.n_levels] * _stretch_nnn[:, :, None]
-
+    # TWO regression witnesses, each restoring ONE historical operand, each
+    # with its own recorded bar:
+    #   V0  the pre-round Naa volume, NEMO's e3w   -> PR #1728 round 3's A0
+    #   W1  Naa volume AND the midpoint e3w        -> the pre-e3w-fix original
+    _jac_v0 = jnp.asarray(_jac_naa)
+    if plant_kmm:
+        print("  KMM PLANT ACTIVE: V0 is fed the Kmm jacobian while labelled "
+              "the step's Naa one; V0 MUST then NOT reproduce the pre-round "
+              "ratio")
+        _jac_v0 = jnp.asarray(jac)
+    # The midpoint witness must be built on the SAME Naa stretch it had
+    # before this round, or it would mix one round's operand with another's.
+    _e3t_naa = np.asarray(z.dz_ref)[None, None, :] * _jac_naa[:, :, None]
+    _e3w_mid_naa = 0.5 * (np.roll(_e3t_naa, 1, 2) + _e3t_naa)
+    _e3w_mid_naa[..., 0] = _e3t_naa[..., 0]
+    if plant_e3w:
+        _e3w_mid_naa = (np.asarray(raw_e3w0)[..., :z.n_levels]
+                        * _jac_naa[:, :, None])
     arms = [("A0 as the model runs it", {}),
-            ("W1 pre-fix midpoint e3w", {"msc_e3w_override": e3w_witness}),
+            ("V0 volume at Naa (pre-round)", {"_jacobian": _jac_v0}),
+            ("W1 Naa + midpoint e3w",
+             {"_jacobian": jnp.asarray(_jac_naa),
+              "msc_e3w_override": jnp.asarray(_e3w_mid_naa)}),
             ("T1 e3w at Kmm=Nnn", {"msc_e3w_override": jnp.asarray(e3w_nnn)})]
     if nat is not None:
         arms.append(("A1 + NEMO's own slopes",
@@ -494,8 +551,30 @@ def stage5(calls, iT, iS, R, O3, wet3, z, st, real, plant_e3w: bool,
     # WITNESS: restoring the interface-midpoint e3w must put the operator
     # back on the pre-fix ratio (0.996571 T / 0.996696 S, PR #1728).  A gate
     # that passes without this cannot tell the fix from the weather.
-    wT_ratio = results[("W1 pre-fix midpoint e3w", "T")][0]
-    wS_ratio = results[("W1 pre-fix midpoint e3w", "S")][0]
+    # V0: restoring ONLY the pre-round Naa volume must put the operator back
+    # on round 3's recorded 1.000004833 / 1.000004723 (PR #1728).  This is the
+    # regression witness for THIS round's statement.
+    v0T = results[("V0 volume at Naa (pre-round)", "T")][0]
+    v0S = results[("V0 volume at Naa (pre-round)", "S")][0]
+    print(f"  Kmm witness: the Naa-volume arm gives T {v0T:.9f} / "
+          f"S {v0S:.9f} against the recorded pre-round "
+          "1.000004833 / 1.000004723")
+    _v0hit = (abs(v0T - 1.000004833) < 2e-8 and abs(v0S - 1.000004723) < 2e-8)
+    if plant_kmm:
+        if _v0hit:
+            print("  ^^ the planted Kmm jacobian reproduced the PRE-ROUND "
+                  "ratio; V0 is not reading the operand it names")
+            bad += 1
+        else:
+            print("  the planted jacobian did not reproduce the pre-round "
+                  "ratio, as required")
+    elif not _v0hit:
+        print("  ^^ the pre-round volume operand no longer reproduces the "
+              "pre-round ratio; something OTHER than the stretch's time "
+              "level moved with it")
+        bad += 1
+    wT_ratio = results[("W1 Naa + midpoint e3w", "T")][0]
+    wS_ratio = results[("W1 Naa + midpoint e3w", "S")][0]
     print(f"  e3w witness: midpoint arm gives T {wT_ratio:.6f} / "
           f"S {wS_ratio:.6f} against the recorded pre-fix "
           "0.996571 / 0.996696")
@@ -604,7 +683,8 @@ def stage5(calls, iT, iS, R, O3, wet3, z, st, real, plant_e3w: bool,
 def stages12(R: dict, plant_shift: bool,
              plant_ldf_call: bool = False,
              plant_e3w: bool = False,
-             plant_slopes: bool = False) -> int:
+             plant_slopes: bool = False,
+             plant_kmm: bool = False) -> int:
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     set_policy(PrecisionPolicy.fp64())                      # Rule 1c
     from legoesm.ocean.experiments import dino as dm
@@ -827,13 +907,35 @@ def stages12(R: dict, plant_shift: bool,
                       dict(kw)))
         return r
 
+    # The dispatcher's POSITIONAL eta is the post-barotropic Naa height the
+    # step built.  Captured here rather than rebuilt, so STAGE 5's Naa
+    # regression witness uses the step's own object (Rule 10).
+    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as mdlmod
+    real_disp = mdlmod.gm_redi_tracer_tendency_latlon
+    disp_eta: list[np.ndarray] = []
+
+    def disp_spy(T_, S_, eta_, *a, **kw):
+        disp_eta.append(np.asarray(eta_))
+        return real_disp(T_, S_, eta_, *a, **kw)
+
     gmmod.nemo_iso_lap_tracer_tendency_latlon_cgrid = spy
+    mdlmod.gm_redi_tracer_tendency_latlon = disp_spy
     try:
         with jax.disable_jit():
             after2 = model.step(st, dt=DT, surface_forcing=sf_step,
                                 external_tracer_rate=rate)
     finally:
         gmmod.nemo_iso_lap_tracer_tendency_latlon_cgrid = real
+        mdlmod.gm_redi_tracer_tendency_latlon = real_disp
+    if not disp_eta:
+        print("  the GM/Redi dispatcher was never called; the Naa height "
+              "STAGE 5's regression witness needs was not captured")
+        return 1
+    from legoesm.ocean.vertical import compute_ocean_jacobian as _coj0
+    import jax.numpy as _jnp0
+    jac_naa = np.asarray(_coj0(_jnp0.asarray(disp_eta[0]),
+                               _jnp0.asarray(np.asarray(st.H_bathy.data)),
+                               z))
     # CONTROL (review finding): this is a SECOND, un-jitted step.  The
     # tendency captured from it can only explain the residual measured on the
     # FIRST step if the two steps agree.  Checked, not assumed.
@@ -950,6 +1052,7 @@ def stages12(R: dict, plant_shift: bool,
     if plant_ldf_call:
         return bad
     bad += stage5(calls, iT, iS, R, O3, wet3, z, st, real, plant_e3w,
+                  jac_naa, plant_kmm,
                   plant_slopes)
 
     # ---- STAGE 6: tra_qsr, scored operator-to-operator ----------------
@@ -1017,6 +1120,10 @@ def main() -> int:
                     help="feed stage 5's e3w arm the MIDPOINT thickness "
                          "while labelling it NEMO's; the arm MUST NOT "
                          "improve")
+    ap.add_argument("--plant-kmm", action="store_true",
+                    help="feed STAGE 5's Naa regression witness the Kmm "
+                         "jacobian while labelling it Naa; the witness MUST "
+                         "then fail to reproduce the pre-round ratio")
     ap.add_argument("--plant-slopes", action="store_true",
                     help="feed stage 5's slope arm the CARD's own slopes "
                          "while labelling them NEMO's; the arm MUST equal "
@@ -1036,7 +1143,7 @@ def main() -> int:
         print("\n--nemo-only: stages 1/2 skipped.")
         return 0
     bad += stages12(R, args.plant_shift, args.plant_ldf_call,
-                    args.plant_e3w, args.plant_slopes)
+                    args.plant_e3w, args.plant_slopes, args.plant_kmm)
     print(f"\n{'GATE PASS' if bad == 0 else f'GATE FAIL ({bad} rows)'}")
     return 0 if bad == 0 else 1
 

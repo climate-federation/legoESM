@@ -1,5 +1,12 @@
 #!/usr/bin/env python
-"""Rule 12 for the ``traldf_iso`` A33 ``e3w`` fix: which cards does it move?
+"""Rule 12 for the two ``traldf_iso`` transcription fixes: which cards move?
+
+SECTION A -- the A33 ``e3w`` divisor (PR #1728 round 3).
+SECTION B -- the stretch's TIME LEVEL (round 4): every ``e3``/``r3`` operand of
+``traldf_iso`` is indexed ``Kmm`` (``traldf_iso.f90:231-232``, ``:284``,
+``:292``, ``:305``, ``:823``, ``:828``), and the shared step now hands the
+operator the step-entry height instead of the post-barotropic one.
+
 
 The fix swaps the A33 vertical-flux divisor from the interface midpoint
 ``0.5*(e3t(k-1)+e3t(k))`` to NEMO's ``e3w_0(k)*(1+r3t)`` with
@@ -131,6 +138,123 @@ def main() -> int:
     for ln in out.splitlines():
         if "=True" in ln.replace(" ", "") or ": True" in ln:
             print("  " + ln.strip())
+
+    # =================================================================
+    # SECTION B -- the stretch's TIME LEVEL
+    # =================================================================
+    # The Kmm change is scoped to the ``nemo_iso_lap`` branch of
+    # gm_redi_tracer_tendency_latlon, and BOTH model call sites pass it
+    # unconditionally -- so "reaches" is exactly "runs nemo_iso_lap", and the
+    # number of operands that move depends on the card's flux-face mode:
+    #   nemo_qco_live   the u/v faces were ALREADY on the Kmm height, so the
+    #                   four VOLUME operands move (e3t x2, A33 e3w, ze3w_2)
+    #   tpoint_jacobian e3u_flux = e3v_flux = e3t, so SIX operands move
+    print("\nSECTION B -- the stretch's TIME LEVEL (Kmm), per card")
+    print(f"{'card':30s}{'scheme':14s}{'flux faces':18s}"
+          f"{'reaches':>9s}{'operands':>10s}  note")
+    moved_b = []
+    for name in sorted(dm.DINO_RECIPES):
+        try:
+            cfg = dm.dino_config_for_recipe(name)
+            if name.startswith("nemo_dino"):
+                cfg = dm.nemo_faithful_dino_config(base=cfg)
+        except Exception as exc:                       # noqa: BLE001
+            print(f"{name:30s}{'?':14s}{'?':18s}{'BUILD FAIL':>9s}"
+                  f"{'-':>10s}  {type(exc).__name__}")
+            failed.append(name)
+            continue
+        # Rule 10: the card's RESOLVED GMRediConfig, built the way the driver
+        # builds it -- not the ExperimentConfig's string and not a getattr
+        # default.  An earlier draft of this section read the defaults and
+        # reported "tpoint_jacobian" for a card that selects nemo_qco_live.
+        try:
+            _gg = dm.dino_lat_lon_grid(cfg)
+            _mc, _ = dm.dino_lat_lon_model_config(_gg, cfg)
+            gmc = _mc.gm_redi
+        except Exception as exc:                       # noqa: BLE001
+            print(f"{name:30s}{'?':14s}{'?':18s}{'CFG FAIL':>9s}"
+                  f"{'-':>10s}  {type(exc).__name__}: {exc}")
+            failed.append(name)
+            continue
+        if gmc is None:
+            print(f"{name:30s}{'(no gm_redi)':14s}{'-':18s}{'False':>9s}"
+                  f"{0:>10d}  card runs no GM/Redi at all")
+            continue
+        sch = gmc.slope_scheme
+        ffm = gmc.redi_flux_face_thickness_evaluation
+        reaches = (sch == "nemo_iso_lap")
+        nop = (0 if not reaches else (4 if ffm == "nemo_qco_live" else 6))
+        note = ("does not run the changed operator" if not reaches
+                else "REGISTERED: trajectory moves")
+        if reaches:
+            moved_b.append(name)
+        print(f"{name:30s}{str(sch):14s}{str(ffm):18s}{str(reaches):>9s}"
+              f"{nop:>10d}  {note}")
+    for case in ("LOCK_EXCHANGE-zco", "OVERFLOW-zps"):
+        try:
+            card = ntc.build_nemo_testcase_card(case)
+        except Exception:                                  # noqa: BLE001
+            continue
+        gmc = getattr(getattr(card, "model_config", None), "gm_redi", None)
+        sch = "n/a" if gmc is None else gmc.slope_scheme
+        ffm = ("-" if gmc is None
+               else gmc.redi_flux_face_thickness_evaluation)
+        reaches = (sch == "nemo_iso_lap")
+        nop = (0 if not reaches else (4 if ffm == "nemo_qco_live" else 6))
+        if reaches:
+            moved_b.append(case)
+        print(f"{case:30s}{str(sch):14s}{str(ffm):18s}{str(reaches):>9s}"
+              f"{nop:>10d}  "
+              f"{'REGISTERED: trajectory moves' if reaches else 'does not run the changed operator'}")
+    print("\nEvery place slope_scheme='nemo_iso_lap' is selected in "
+          "production code -- the ONLY cards Section B can reach:")
+    out_b = subprocess.run(
+        ["grep", "-rn", "--include=*.py", "--include=*.yaml",
+         "nemo_iso_lap", "packages/", "scripts/"],
+        capture_output=True, text=True).stdout
+    for ln in out_b.splitlines():
+        if "slope_scheme" in ln:
+            print("  " + ln.strip())
+
+    # NON-VACUITY for Section B, functional rather than structural: the new
+    # argument must be INERT when it names the height the operator already
+    # had, and LOAD-BEARING when it names a different one.  A sweep that
+    # cannot tell those apart says nothing about which cards move.
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        gm_redi_tracer_tendency_latlon as _gmt)
+    _c = dm.nemo_faithful_dino_config(
+        base=dm.dino_config_for_recipe("nemo_dino_kamm_mlf"))
+    _g = dm.dino_lat_lon_grid(_c)
+    _mcb, _ = dm.dino_lat_lon_model_config(_g, _c)
+    _z = dm.dino_lat_lon_vertical(_g, _c)
+    _st = dm.dino_lat_lon_state(_g, _z, _c)
+    _kw = dict(eos=_mcb.eos, eos_linear=_mcb.eos_linear,
+               mask=_st.land_mask.data, u_mask=_st.u_mask.data,
+               v_mask=_st.v_mask.data, rho_0=_mcb.constants.rho_0,
+               g=_mcb.constants.g, omega=_mcb.omega, dt=2700.0,
+               eos_depth=getattr(_mcb, "eos_depth", "insitu"),
+               native_bolus_slope_eta=_st.eta.data)
+    _eta = _st.eta.data
+    _args = (_st.T.data, _st.S.data, _eta, _st.H_bathy.data, _g, _z,
+             _mcb.gm_redi)
+    _base = np.asarray(_gmt(*_args, **_kw)[0])
+    _same = np.asarray(_gmt(*_args, redi_kmm_eta=_eta, **_kw)[0])
+    _other = np.asarray(_gmt(*_args, redi_kmm_eta=_eta + 1.0, **_kw)[0])
+    _d_same = float(np.max(np.abs(_same - _base)))
+    _d_other = float(np.max(np.abs(_other - _base)))
+    print(f"\nSECTION B non-vacuity: redi_kmm_eta=eta is inert "
+          f"(max|diff| = {_d_same:.3e}, bar 0.0); redi_kmm_eta=eta+1 m moves "
+          f"the tendency (max|diff| = {_d_other:.3e}, must be > 0)")
+    if _d_same != 0.0:
+        print("  ^^ the new argument is NOT inert when it names the height "
+              "the operator already had; every 'does not move' row above is "
+              "unsafe")
+        failed.append("section-B-inertness")
+    if _d_other <= 0.0:
+        print("  ^^ the new argument does NOT reach the operator; every "
+              "'REGISTERED' row above is unsupported")
+        failed.append("section-B-liveness")
+    print(f"\nSection B: {len(moved_b)} card(s) move: {moved_b}")
 
     print(f"\n{len(moved)} card(s) move: {moved}")
     if failed:
