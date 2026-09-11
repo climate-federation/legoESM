@@ -147,6 +147,7 @@ def main() -> int:
     ap.add_argument("--early-run", default=EARLY)
     ap.add_argument("--traj-run", default=TRAJ)
     ap.add_argument("--phase0-root", default=None)
+    ap.add_argument("--kt1-run", default="/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_KT1")
     ap.add_argument("--size-restoring", action="store_true")
     ap.add_argument("--days", default=None,
                     help="comma-separated override of the day list")
@@ -178,11 +179,22 @@ def main() -> int:
     else:
         want = list(DAYS_EARLY) + list(DAYS_TRAJ)
 
+    # WHICH FIELD LEADS cannot be read off five numbers in five different
+    # units.  The second table normalises each gap by the signal NEMO ITSELF
+    # has developed from rest by that day -- rms(NEMO(day) - NEMO(rest)) on
+    # the same wet mask -- which is dimensionless and comparable across
+    # fields.  NEMO's rest state is the kt=1 restart's BEFORE level (tb/sb/
+    # sshb/ub/vb), which the step-1 gate certifies IS the initial state.
+    rest = rebuild(os.path.join(a.kt1_run, "DINO_00000001_restart_*.nc"),
+                   ["tb", "sb", "sshb", "ub", "vb"])
+    REST = {"T": "tb", "S": "sb", "eta": "sshb", "u": "ub", "v": "vb"}
+
     print(f"\nDAY x FIELD GAP -- legoESM {a.run_dino_dir} vs NEMO, wet-masked "
           "rms, full frame, fp64")
     print(f"  {'day':>5s}{'kt':>7s}{'record':>12s}"
           + "".join(f"{n:>14s}" for n, _ in FIELDS))
     rows = {}
+    fracs = {}
     prov = {}
     for day in want:
         kt = day * STEPS_PER_DAY
@@ -196,7 +208,7 @@ def main() -> int:
         prov[day] = {"kt": kt, "nemo_run": run,
                      "nemo_tiles": len(glob.glob(pat)),
                      "lego_snapshot": spath, "lego_sha256": _sha(spath)}
-        out, delta = [], []
+        out, delta, frac = [], [], []
         for lname, nname in FIELDS:
             lego = _lego(snap, lname)
             nemo = (np.nan_to_num(R[nname]) if lname == "eta"
@@ -208,6 +220,10 @@ def main() -> int:
                     f"nemo {nemo.shape} mask {m.shape}")
             v = float(np.sqrt(np.mean((lego - nemo)[m] ** 2)))
             out.append(v)
+            r0 = (np.nan_to_num(rest[REST[lname]]) if lname == "eta"
+                  else np.nan_to_num(np.moveaxis(rest[REST[lname]], 0, -1)))
+            sig = float(np.sqrt(np.mean((nemo - r0)[m] ** 2)))
+            frac.append(v / sig if sig > 0 else float("nan"))
             if a.plant and lname == "T":
                 j, i, k = np.argwhere(m)[0]
                 for tag, dv in (("1 ulp", None), ("1e-4 K", 1e-4)):
@@ -217,6 +233,7 @@ def main() -> int:
                     vp = float(np.sqrt(np.mean((lp - nemo)[m] ** 2)))
                     delta.append((f"{lname}(j{j},i{i},k{k}) {tag}", vp - v))
         rows[day] = out
+        fracs[day] = frac
         print(f"  {day:>5d}{kt:>7d}{os.path.basename(run):>12s}"
               + "".join(f"{v:>14.4e}" for v in out))
         for tag, d in delta:
@@ -230,6 +247,19 @@ def main() -> int:
               "comparison whose noise floor is the Phase-0 spread above "
               "(~1.7e-10 K), seven orders below the gap they report, and the "
               "1e-4 K plant is the positive control that they move at all.")
+
+    if fracs:
+        print("\nTHE SAME GAPS as a FRACTION of the signal NEMO itself has "
+              "developed from rest by that day -- rms(NEMO(day) - NEMO(rest)) "
+              "on the same mask.  Dimensionless, so the five fields are "
+              "comparable and the LEADING one can be named.")
+        print(f"  {'day':>5s}" + "".join(f"{n:>14s}" for n, _ in FIELDS)
+              + "   leads")
+        for day in sorted(fracs):
+            f = fracs[day]
+            lead = [n for n, _ in FIELDS][int(np.nanargmax(f))]
+            print(f"  {day:>5d}" + "".join(f"{v:>14.4e}" for v in f)
+                  + f"   {lead}")
 
     floor = {}
     if a.phase0_root:
@@ -301,6 +331,9 @@ def main() -> int:
         json.dump({"rows": {str(k): dict(zip([n for n, _ in FIELDS], v))
                             for k, v in rows.items()},
                    "floor_K": {str(k): v for k, v in floor.items()},
+                   "fraction_of_nemo_signal": {
+                       str(k): dict(zip([n for n, _ in FIELDS], v))
+                       for k, v in fracs.items()},
                    "restoring_time_level": {str(k): v
                                             for k, v in sizes.items()},
                    "provenance": prov,
