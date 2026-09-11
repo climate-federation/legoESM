@@ -94,13 +94,6 @@ LITERAL_BUDGET: dict[str, dict[str, int]] = {
     "scripts/validate/land_beta_soil_bake_discriminator.py": {
         "0.716, 0.622, 0.723, 0.457, 0.507, 0.504, 0.488, 0.477)": 1,  # pre-existing, surfaced by discovery fix 2026-09-03
     },
-    "scripts/validate/ocean_fidelity/dino_1226/southern_wall_balance.py": {
-        "* np.cos(np.deg2rad(np.asarray(A.gphit, float))) / 6371229.0)": 1,  # pre-existing, surfaced by discovery fix 2026-09-03
-        "_R = 6371229.0 # NEMO ra # coeff-ok: oracle constant": 1,  # pre-existing, surfaced by discovery fix 2026-09-03
-    },
-    "scripts/validate/ocean_fidelity/dino_1226/vertex_area_pair_analysis.py": {
-        "_RA, _RAD, _RN_E1_DEG = 6371229.0, np.pi / 180.0, 1.0": 1,  # pre-existing, surfaced by discovery fix 2026-09-03
-    },
     # --- test fixtures: PERMANENT -----------------------------------------
     "tests/atmosphere/dycore/regression/test_pad_halo_4d_monotone_clip_iter490.py": {
         "field = jnp.full((6, n, n, nlev), 273.15)": 1,
@@ -161,8 +154,6 @@ _RATCHET_DOWN = frozenset(
         "packages/ocean/legoesm/ocean/eos.py",
         "scripts/run/run_les_plane.py",
         "scripts/validate/land_beta_soil_bake_discriminator.py",
-        "scripts/validate/ocean_fidelity/dino_1226/southern_wall_balance.py",
-        "scripts/validate/ocean_fidelity/dino_1226/vertex_area_pair_analysis.py",
     }
 )
 
