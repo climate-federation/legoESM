@@ -2989,6 +2989,9 @@ def compute_cloud_cover(chi_mean, cloud_frac, rcm, gr: CLUBBGrid):
 # ``l_predict_upwp_vpwp = .false.``). Round-off parity-tested vs CLUBB-JAX.
 
 _MAX_MAG_CORRELATION = 0.99   # Cauchy-Schwarz correlation bound (constants_clubb)
+# Safety ceiling on up2/vp2 [m^2/s^2] (advance_xp2_xpyp_module.F90 applies this
+# as a bare literal). A numerics guard, not a tunable closure coefficient.
+_UV_VARIANCE_MAX = 1000.0
 _MAX_MAG_CORRELATION_FLUX = 0.99  # flux correlation bound (constants_clubb)
 _ZERO_THRESHOLD = 0.0
 _ONE_THIRD = 1.0 / 3.0
@@ -3778,6 +3781,16 @@ def advance_xp2_xpyp(rtm, thlm, um, vm, rtp2, thlp2, rtpthlp, up2, vp2,
     thlp2_cv = clip_variance(thlp2_fh, thr_thlp2)
     rtp2_cv = clip_variance(rtp2_fh, thr_rtp2)
 
+    # Upper bound on the moisture variance: a fraction of the squared mean total
+    # water (advance_xp2_xpyp_module.F90). Without it the variance is free to
+    # exceed what the mean can physically support, and the Cauchy-Schwarz clip
+    # below then licenses a correspondingly oversized rt-thl covariance. The
+    # reference applies this to EVERY level, including the top one that
+    # clip_variance leaves alone, and applies it BEFORE that covariance clip.
+    rtm_zm = jnp.maximum(zt2zm(rtm, gr), _ZERO_THRESHOLD)
+    rtp2_cv = jnp.minimum(
+        rtp2_cv, jnp.maximum(rt_thr, params.rtp2_clip_coef * rtm_zm ** 2))
+
     # rtpthlp is a COVARIANCE (sign-indefinite): the reference applies neither
     # pos_definite_variances nor clip_variance to it (those force positivity,
     # valid only for variances) — only the Cauchy-Schwarz magnitude clip against
@@ -3817,8 +3830,10 @@ def advance_xp2_xpyp(rtm, thlm, um, vm, rtp2, thlp2, rtpthlp, up2, vp2,
                                     hf_lower, hf_upper, _CAM_FILL_HOLES_TYPE)
     vp2_fh = pos_definite_variances(soln_vp2, rho_ds_zm, gr.dzm, w_tol_sqd,
                                     hf_lower, hf_upper, _CAM_FILL_HOLES_TYPE)
-    up2_cv = clip_variance(up2_fh, w_tol_sqd)
-    vp2_cv = clip_variance(vp2_fh, w_tol_sqd)
+    # Safety ceiling on the horizontal velocity variances, as in the reference:
+    # applied to every level, outside the floor's top-level exclusion.
+    up2_cv = jnp.minimum(clip_variance(up2_fh, w_tol_sqd), _UV_VARIANCE_MAX)
+    vp2_cv = jnp.minimum(clip_variance(vp2_fh, w_tol_sqd), _UV_VARIANCE_MAX)
 
     return rtp2_cv, thlp2_cv, rtpthlp_clip, up2_cv, vp2_cv
 

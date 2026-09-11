@@ -22,6 +22,7 @@ jax.config.update("jax_enable_x64", True)
 from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb import make_clubb_grid  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
+    _UV_VARIANCE_MAX,
     advance_windm_edsclrm,
     advance_xp2_xpyp,
     calc_up2_vp2_lhs,
@@ -41,6 +42,7 @@ from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     xp2_xpyp_lhs,
     xp2_xpyp_rhs,
     xp2_xpyp_uv_rhs,
+    zt2zm,
 )
 
 from legoesm import constants  # noqa: E402
@@ -820,6 +822,43 @@ def test_advance_xp2_xpyp_runs_and_bounds():
     bound = 0.99 * np.sqrt(np.asarray(rtp2) * np.asarray(thlp2))
     assert np.all(np.abs(np.asarray(rtpthlp))[:, 1:-1] <= bound[:, 1:-1] + 1e-12)
     np.testing.assert_array_equal(np.asarray(rtpthlp)[:, -1], 0.0)  # upper BC
+
+
+def test_moisture_variance_capped_by_the_mean_it_fluctuates_about():
+    """rtp2 may not exceed a fraction of the squared mean total water.
+
+    The coefficient was declared in the config and read by nothing, so the
+    variance was unbounded from above. The cap is driven here by shrinking the
+    mean until it binds, and the test is written so that removing the cap makes
+    it fail rather than merely relaxing a bound nothing reaches.
+    """
+    kw = _advance_xp2_inputs()
+    cfg = kw["config"]
+    ng, nzm = kw["wp2"].shape
+    # A very dry column: the mean is small, so half its square is a tight cap,
+    # while the incoming variance is left large.
+    kw = dict(kw, rtm=jnp.full((ng, nzm - 1), 2.0e-3),
+              rtp2=jnp.full((ng, nzm), 1.0e-4))
+    rtp2 = np.asarray(advance_xp2_xpyp(**kw)[0])
+
+    gr = kw["gr"]
+    rtm_zm = np.asarray(jnp.maximum(zt2zm(kw["rtm"], gr), 0.0))
+    cap = np.maximum(cfg.rt_tol ** 2, cfg.params.rtp2_clip_coef * rtm_zm ** 2)
+    assert np.all(rtp2 <= cap + 1e-18), "moisture variance exceeds its cap"
+    # The cap must actually BIND somewhere, or this proves nothing.
+    assert np.any(rtp2 >= cap - 1e-18), "cap never binds — test is vacuous"
+
+
+def test_horizontal_velocity_variances_capped():
+    """up2/vp2 carry the reference's safety ceiling, on every level."""
+    kw = _advance_xp2_inputs()
+    ng, nzm = kw["wp2"].shape
+    huge = jnp.full((ng, nzm), 5.0e4)
+    up2, vp2 = advance_xp2_xpyp(**dict(kw, up2=huge, vp2=huge))[3:5]
+    for name, f in (("up2", up2), ("vp2", vp2)):
+        arr = np.asarray(f)
+        assert np.all(arr <= _UV_VARIANCE_MAX + 1e-9), f"{name} above the ceiling"
+        assert np.any(arr >= _UV_VARIANCE_MAX - 1e-9), f"{name} ceiling never binds"
 
 
 def test_advance_xp2_xpyp_jit_grad():
