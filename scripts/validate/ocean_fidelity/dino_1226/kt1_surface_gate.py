@@ -97,6 +97,11 @@ def _row(name, lego, nemo, wet):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--restart-glob", default=DEFAULT_RESTART)
+    ap.add_argument("--kt2-dir", default=None,
+                    help="the kt=2 trend record; adds the SIZE of the two "
+                         "registered surface statements (the flux's time "
+                         "level and NEMO's two-step average), read off "
+                         "NEMO's own sbc_hc_b/sbc_sc_b at kt=1 and kt=2")
     ap.add_argument("--plant", action="store_true",
                     help="move one wet level-0 rate cell by 1 ulp; on the "
                          "self-test arm the gate MUST then fail")
@@ -306,6 +311,68 @@ def main() -> int:
           "means the remaining step-1 residual is owned by something OTHER "
           "than the surface rate -- which is the finding, not a defect in "
           "this line.")
+
+    # ---- SIZE of the two registered surface statements (PR #1728) --------
+    # Both are LAGS, and both are visible in NEMO's own restart without any
+    # model run.  trasbc.f90:145-150 swaps sbc_tsc into sbc_tsc_b at every
+    # kt > nit000 and sets zfact = 0.5, so from the SECOND step NEMO applies
+    #     0.5*( sbc_tsc_b + sbc_tsc ) / e3t(1)      (trasbc.f90:169-170)
+    # while legoESM applies its own single evaluation at weight 1.  If the two
+    # models' instantaneous fluxes agreed exactly, the whole difference would
+    # be   0.5*( sbc_tsc(kt) - sbc_tsc(kt-1) ) / e3t(1),
+    # i.e. HALF ONE STEP's change in the surface flux.  The restart's
+    # sbc_hc_b/sbc_sc_b hold sbc_tsc as it was at the end of each step
+    # (trasbc.f90:175-176), so kt=1's and kt=2's give exactly that difference.
+    if a.kt2_dir:
+        import glob as _glob
+        import os as _os
+        _k1 = _os.path.join(_os.path.dirname(a.restart_glob.rstrip("/")),
+                            "DINO_00000001_restart_*.nc")
+        if not _glob.glob(_k1):
+            _k1 = a.restart_glob
+        _k2 = _os.path.join(a.kt2_dir, "DINO_00000002_restart_*.nc")
+        if not _glob.glob(_k2):
+            print(f"\n  SURFACE LAG SIZE: UNMEASURED -- no tiles match {_k2}")
+            bad += 1
+        else:
+            R1s = rebuild(_k1, ["sbc_hc_b", "sbc_sc_b"])
+            R2s = rebuild(_k2, ["sbc_hc_b", "sbc_sc_b"])
+            e3t0 = float(np.asarray(z.dz_ref)[0])
+            RDT = 2.0 * DT          # NEMO's leap-frog rDt at kt=2
+            print("\n  SIZE of the two registered surface statements, read "
+                  "off NEMO's own sbc_hc_b/sbc_sc_b at kt=1 and kt=2")
+            print(f"    {'tracer':8s}{'0.5*d(sbc)/e3t rms':>22s}"
+                  f"{'x rDt [K or psu]':>20s}{'pooled 3-D':>14s}")
+            _n3 = int(wet3.sum())
+            _sizes = {}
+            for tag, key in (("T", "sbc_hc_b"), ("S", "sbc_sc_b")):
+                d1 = np.nan_to_num(np.asarray(R1s[key], dtype=np.float64))
+                d2 = np.nan_to_num(np.asarray(R2s[key], dtype=np.float64))
+                lag = 0.5 * (d2 - d1) / e3t0          # [K/s] at level 0
+                m2 = wet3[..., 0]
+                rms = float(np.sqrt(np.mean(lag[m2] ** 2)))
+                per_step = rms * RDT
+                pooled = float(np.sqrt(
+                    np.sum((lag[m2] * RDT) ** 2) / _n3))
+                _sizes[tag] = pooled
+                print(f"    {tag:8s}{rms:22.4e}{per_step:20.4e}{pooled:14.4e}")
+            # The kt=2 gate's STATE rows are the thing this has to explain.
+            KT2_T_RMS_K = 6.1224e-06   # kt2_leapfrog_gate.py, PR #1728
+            KT2_S_RMS = 1.1380e-05
+            print(f"    the kt=2 gate measures T {KT2_T_RMS_K:.4e} K and "
+                  f"S {KT2_S_RMS:.4e} psu of STATE residual after one step")
+            print(f"    ratio lag/state:  T {_sizes['T'] / KT2_T_RMS_K:.3f}"
+                  f"   S {_sizes['S'] / KT2_S_RMS:.3f}")
+            print("    A ratio near 1 means these two statements ACCOUNT for "
+                  "the kt=2 state residual and are the next owner; a ratio "
+                  "far below 1 means something else owns it.  Both literals "
+                  "are FROZEN from that gate, so this compares a fresh "
+                  "number against a recorded one.")
+            print("    NOT CLOSED HERE: NEMO's average needs sbc_tsc_b, a "
+                  "carried field legoESM does not have, and the flux's time "
+                  "level needs the Kbb tracer at the forcing call.  Both are "
+                  "the user's decision; no kt>=2 surface row may be called "
+                  "AT BAR while they stand.")
 
     print(f"\n{'GATE PASS' if bad == 0 else f'GATE FAIL ({bad} rows)'}")
     if a.oracle_self_test and not a.plant and bad:
