@@ -28,6 +28,7 @@ import pytest
 
 from legoesm.ocean.physics.vertical_mixing.config import TKEConfig
 from legoesm.ocean.physics.vertical_mixing.tke import (
+    _nemo_literal_tke_solve,
     _prandtl_number,
     _solve_tke_backward_euler,
     compute_mixing_lengths,
@@ -2067,3 +2068,144 @@ class TestMxlChoice3LdownSeed:
 # (NEMO Nbb) state for the face shear and rn2b, and the post-stage state for
 # the implicit vertical solve. That is a real refactor, not a guard tweak, and
 # until it exists the constructor guard is correct as written.
+
+
+class TestNemoLiteralSolveCoversJpkm1:
+    """The deepest carried TKE row is NEMO's ``jpkm1`` and must be SOLVED.
+
+    legoESM carries ``n_levels-1`` interior W-interfaces plus one prepended
+    z=0 row, so the assembled system runs from NEMO's ``jk=1`` to ``jk=jpkm1``
+    INCLUSIVE and has no ``jk=jpk`` slot -- ``en(jpk)`` is read by nothing
+    (``zdftke.f90:468`` seeds the back-substitution without the
+    ``zd_up(jpkm1)*en(jpk)`` term, and ``tke_avn`` loops ``jk=1,jpkm1`` at
+    ``zdftke.f90:681-687``).
+
+    Until 2026-09-11 the solver computed ``jpkm1 = len-2`` and returned that
+    deepest row as its RAW right-hand side.  On the GYRE identity card that
+    right-hand side carries ``zdftke.f90:422-425``'s EXPLICIT half of the
+    semi-implicit dissipation split, ``+rn_Dt*0.5*rn_ediss*dissl*en``, with no
+    ``zdftke.f90:419`` diagonal against it, so that one row ran
+    ``e(n+1) = e(n) + 0.5*rn_ediss*rn_Dt/L * e(n)**1.5`` and the model went
+    non-finite at step 48 of the year.
+    """
+
+    @staticmethod
+    def _system(n=30):
+        a = jnp.full((n,), -0.1).at[0].set(0.0)
+        b = jnp.full((n,), 2.0).at[0].set(1.0)
+        c = jnp.full((n,), -0.1).at[0].set(0.0)
+        rhs = jnp.arange(1.0, n + 1.0)
+        return a, b, c, rhs
+
+    @staticmethod
+    def _dense_reference(a, b, c, rhs):
+        """NEMO's system written out: the last row has no ``jk+1`` coupling."""
+        n = a.shape[-1]
+        A = np.zeros((n, n))
+        for k in range(n):
+            A[k, k] = float(b[k])
+            if k:
+                A[k, k - 1] = float(a[k])
+            if k < n - 1:
+                A[k, k + 1] = float(c[k])
+        return np.linalg.solve(A, np.asarray(rhs))
+
+    def test_deepest_row_is_solved_not_returned_as_its_rhs(self):
+        a, b, c, rhs = self._system()
+        got = np.asarray(_nemo_literal_tke_solve(
+            a, b, c, rhs, jnp.asarray(1.0),
+            jnp.ones((a.shape[-1] - 1,)), 1e-30))
+        reference = self._dense_reference(a, b, c, rhs)[1:]
+        np.testing.assert_allclose(got, reference, rtol=0, atol=1e-14)
+        # The decisive assertion: the deepest row is NOT its own right-hand
+        # side.  That equality WAS the defect, and it is what this pins.
+        assert float(got[-1]) != float(rhs[-1])
+
+    def test_previous_len_minus_two_convention_is_red(self):
+        """Synthetic violation: the discarded ``jpkm1 = len-2`` convention.
+
+        Re-implemented here (not called) so the test above cannot pass
+        vacuously -- if someone restores it, the reference below is what the
+        solver would return, and the assertion says it must not.
+        """
+        a, b, c, rhs = self._system()
+        n = a.shape[-1]
+        jpkm1_old = n - 2
+        diag = np.empty(n)
+        diag[0] = 1.0 / 1.0
+        for k in range(1, jpkm1_old + 1):
+            diag[k] = float(b[k]) - float(a[k]) * float(c[k - 1]) / diag[k - 1]
+        work = np.empty(n)
+        work[0] = 1.0
+        for k in range(1, jpkm1_old + 1):
+            work[k] = float(rhs[k]) - float(a[k]) / diag[k - 1] * work[k - 1]
+        old = np.empty(n)
+        old[jpkm1_old] = work[jpkm1_old] / diag[jpkm1_old]
+        for k in range(jpkm1_old - 1, 0, -1):
+            old[k] = (work[k] - float(c[k]) * old[k + 1]) / diag[k]
+        old[jpkm1_old + 1:] = np.asarray(rhs)[jpkm1_old + 1:]
+        old_interior = old[1:]
+        # The discarded convention hands back the raw RHS at the deepest row.
+        assert old_interior[-1] == float(rhs[-1])
+        got = np.asarray(_nemo_literal_tke_solve(
+            a, b, c, rhs, jnp.asarray(1.0),
+            jnp.ones((n - 1,)), 1e-30))
+        assert not np.allclose(got, old_interior)
+
+    def test_dry_rows_below_the_seafloor_are_identity_rows(self):
+        """A column whose deepest rows are dry must carry ``en`` unchanged.
+
+        NEMO gets this from ``zcof = zfact1*tmask`` and the trailing
+        ``*wmask`` (``zdftke.f90:409,419,425``): below the seafloor every
+        coefficient vanishes, ``zdiag = 1`` and the right-hand side is the
+        untouched ``en``.  legoESM's ``w_active`` must reproduce it, and the
+        final ``MAX(en,rn_emin)*wmask`` (``zdftke.f90:473-475``) must then
+        zero those rows.
+        """
+        n = 30
+        a, b, c, rhs = self._system(n)
+        a = a.at[-3:].set(0.0)
+        b = b.at[-3:].set(1.0)
+        c = c.at[-4:-1].set(0.0)
+        w = jnp.ones((n - 1,)).at[-3:].set(0.0)
+        got = np.asarray(_nemo_literal_tke_solve(
+            a, b, c, rhs, jnp.asarray(1.0), w, 1e-30))
+        np.testing.assert_array_equal(got[-3:], np.zeros(3))
+        assert np.all(np.isfinite(got))
+
+
+class TestNemoLiteralMatrixRejectsImplicitBuoyancy:
+    """``zdftke.f90:419`` has no stratification term on the diagonal.
+
+    The literal diagonal is therefore built without ``buoy_sink_rate``; an
+    implicit-linearised selection would have its sink silently DELETED, not
+    moved.  Every shipped literal card selects ``nemo_explicit``, so this must
+    raise rather than run a configuration nothing chose.
+    """
+
+    def test_implicit_linearized_raises_under_the_literal_matrix(self):
+        n = 5
+        cfg = TKEConfig(
+            tke_matrix_evaluation="nemo_literal",
+            tke_solver_evaluation="nemo_literal",
+            dissipation_discretization="nemo_1p5_split",
+            tke_surface_bc_level="nemo_z0",
+            tke_buoyancy_sink="implicit_linearized",
+            positivity="floor")
+        with pytest.raises(ValueError, match="nemo_explicit"):
+            _solve_tke_backward_euler(
+                e_old=jnp.full((n,), 1e-6),
+                K_M_old=jnp.full((n,), 1e-4),
+                K_H_old=jnp.full((n,), 1e-5),
+                P_s=jnp.zeros((n,)), N2=jnp.full((n,), 1e-5),
+                l_eps=jnp.full((n,), 10.0),
+                dz_half=jnp.full((n,), 100.0),
+                surface_flux=jnp.asarray(0.0), dt=14400.0, cfg=cfg,
+                dz_cell=jnp.full((n + 1,), 100.0),
+                dz_surface=jnp.asarray(50.0),
+                surface_dirichlet=jnp.asarray(1e-4),
+                surface_bc_level="nemo_z0",
+                K_M_surface=jnp.asarray(1e-4),
+                w_active=jnp.ones((n,)),
+                nemo_e3t=jnp.full((n + 1,), 100.0),
+                dissl_old=jnp.full((n,), 1e-4))

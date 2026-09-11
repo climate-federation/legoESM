@@ -946,9 +946,18 @@ def _nemo_literal_tke_solve(
     ``a/b/c/rhs`` include the virtual z=0 row followed by NEMO's W rows.
     Unlike the shared Thomas solver, ``zdftke.F90:547-565`` first eliminates
     all diagonal coefficients, then eliminates the RHS in a separate loop,
-    seeds the solution at ``jpkm1`` (leaving the held ``jpk`` row out of the
-    recurrence), and only then reverse-substitutes. The final floor and W
+    seeds the solution at ``jpkm1`` (``zdftke.f90:468``,
+    ``en(jpkm1)=zd_lw(jpkm1)/zdiag(jpkm1)`` — i.e. WITHOUT the
+    ``zd_up(jpkm1)*en(jpk)`` term, which is how NEMO's held ``jpk`` row leaves
+    the recurrence), and only then reverse-substitutes. The final floor and W
     mask are part of the same source-ordered operation.
+
+    The supplied array runs from the z=0 row to NEMO's ``jpkm1`` INCLUSIVE and
+    carries NO ``jpk`` row: legoESM holds ``n_levels-1`` interior W-interfaces
+    (``z_half_ref[1:-1]``) plus the one prepended surface row, so its last
+    index IS ``jpkm1``, the deepest row NEMO SOLVES. ``en(jpk)`` is read by
+    nothing — the back-substitution above drops it and ``tke_avn`` loops
+    ``jk = 1, jpkm1`` (``zdftke.f90:681-687``) — so no slot is needed for it.
     """
     if not (a.shape == b.shape == c.shape == rhs.shape):
         raise ValueError("literal TKE tridiagonal operands must share a shape")
@@ -960,9 +969,14 @@ def _nemo_literal_tke_solve(
             "w_active must match the non-surface TKE rows; got "
             f"{w_active.shape} vs {expected_mask_shape}")
 
-    # For an extended length jpk, Python index jpk-2 is Fortran jpkm1.
-    # The final (Fortran jpk) row is deliberately excluded from both scans.
-    jpkm1 = a.shape[-1] - 2
+    # The array is NEMO's jk = 1..jpkm1, so its LAST index is Fortran jpkm1
+    # and every row of it is solved.  (It was ``- 2`` until 2026-09-11, which
+    # treated the deepest carried row as the held Fortran ``jpk`` row and
+    # returned it unsolved, i.e. as its raw right-hand side -- the right-hand
+    # side that carries zdftke.f90:422-425's EXPLICIT half of the dissipation
+    # split with no zdftke.f90:419 diagonal against it.  See
+    # docs/ocean/fidelity/testcases/nemo_testcases_l2_gyre_tke_runaway_receipt.md)
+    jpkm1 = a.shape[-1] - 1
     diag_seed = 1.0 / jnp.asarray(surface_en, dtype=b.dtype)
     work_seed = jnp.ones_like(diag_seed)
 
@@ -1217,6 +1231,22 @@ def _solve_tke_backward_euler(
             raise ValueError(
                 "tke_matrix_evaluation='nemo_literal' requires the NEMO "
                 "z=0 row and carried surface avm.")
+        # Dispatch hardening (claim-review finding, 2026-09-11): the literal
+        # diagonal is built WITHOUT ``buoy_sink_rate``, because zdftke.f90:419
+        # has no stratification term on zdiag -- the whole `- p_avt*rn2` is
+        # explicit on the RHS (:422-425).  So an implicit-linearised buoyancy
+        # selection would have its sink silently DELETED rather than moved:
+        # ``buoy_sink_rate`` would be computed and then never read.  Every
+        # shipped literal card already selects 'nemo_explicit'
+        # (nemo_testcase_recipe.py:129; experiments/dino.py:1234), so this
+        # raises on a combination nothing selects instead of running it wrong.
+        if getattr(cfg, "tke_buoyancy_sink",
+                   "implicit_linearized") != "nemo_explicit":
+            raise ValueError(
+                "tke_matrix_evaluation='nemo_literal' requires "
+                "tke_buoyancy_sink='nemo_explicit' (zdftke.f90:419 carries no "
+                "stratification term on the diagonal; any implicit split "
+                "would be silently dropped by the literal matrix).")
     # Dtype hygiene: surface_flux / external_source can promote to f64 (tau or
     # the EKE-diss source built at default precision) while e_old runs at the
     # storage policy's f32 — cast them down so the tridiagonal RHS scatter does
@@ -1353,28 +1383,41 @@ def _solve_tke_backward_euler(
         # source carries signed zzd_up/zzd_lw (both <= 0), places e3t(jk,Kmm)
         # in the upper denominator and e3t(jk-1,Kmm) in the lower, and forms
         # zdiag in this exact source association before the Thomas solve.
+        # Rows 0..N-1 are NEMO jk = 2..jpkm1, i.e. EVERY row zdftke solves
+        # (`DO jk = 2, jpkm1`, zdftke.f90:407).  The deepest of them was
+        # omitted until 2026-09-11.
         zcof = (-0.5 * dt) * jnp.asarray(
-            w_active[..., :N - 1], dtype=e_old.dtype)
+            w_active[..., :N], dtype=e_old.dtype)
         avm_min = jnp.asarray(2.0e-5, dtype=e_old.dtype)  # coeff-ok: zdftke:503,505
-        e3w_rows = jnp.asarray(dz_half[..., :N - 1], dtype=e_old.dtype)
+        e3w_rows = jnp.asarray(dz_half[..., :N], dtype=e_old.dtype)
         e3t = jnp.asarray(nemo_e3t, dtype=e_old.dtype)
+        # zzd_up at the deepest row needs p_avm(jk+1) = p_avm(jpk), which NEMO
+        # never writes: zdfphy.f90:226-228 sets avm_k(:,:,jk)=avmb(jk)*wmask
+        # and wmask(:,:,jpk)=0, and tke_avn only loops jk=1,jpkm1
+        # (zdftke.f90:681-687).  So the upper neighbour there is exactly zero.
+        upper_neighbour = jnp.concatenate(
+            [K_M_old[..., 1:N], jnp.zeros_like(K_M_old[..., :1])], axis=-1)
         upper_sum = jnp.maximum(
-            K_M_old[..., 1:N] + K_M_old[..., :N - 1], avm_min)
+            upper_neighbour + K_M_old[..., :N], avm_min)
         lower_neighbour = jnp.concatenate(
             [jnp.asarray(K_M_surface, dtype=e_old.dtype)[..., None],
-             K_M_old[..., :N - 2]], axis=-1)
+             K_M_old[..., :N - 1]], axis=-1)
         lower_sum = jnp.maximum(
-            K_M_old[..., :N - 1] + lower_neighbour, avm_min)
+            K_M_old[..., :N] + lower_neighbour, avm_min)
         literal_up = (zcof * upper_sum
-                      / (e3t[..., 1:N] * e3w_rows))
+                      / (e3t[..., 1:N + 1] * e3w_rows))
         literal_lw = (zcof * lower_sum
-                      / (e3t[..., :N - 1] * e3w_rows))
+                      / (e3t[..., :N] * e3w_rows))
         a_diff = jnp.concatenate(
             [jnp.zeros_like(literal_lw[..., :1]),
-             literal_lw[..., 1:],
-             jnp.zeros_like(literal_lw[..., :1])], axis=-1)
+             literal_lw[..., 1:]], axis=-1)
+        # zd_up(jpkm1) enters zdiag(jpkm1) (zdftke.f90:419) but NOT the
+        # back-substitution: zdftke.f90:468 seeds en(jpkm1) without the
+        # zd_up(jpkm1)*en(jpk) term.  Hence the trailing zero HERE and the
+        # full -literal_up in the diagonal BELOW.
         c_diff = jnp.concatenate(
-            [literal_up, jnp.zeros_like(literal_up[..., :1])], axis=-1)
+            [literal_up[..., :N - 1],
+             jnp.zeros_like(literal_up[..., :1])], axis=-1)
         b_diff = jnp.zeros_like(e_old)
     elif veros_slots and N >= 2:
         # ---- Veros-faithful assembly (tke.py:199-222), top-down ----
@@ -1450,12 +1493,10 @@ def _solve_tke_backward_euler(
                 "tke_matrix_evaluation='nemo_literal' requires "
                 "dissipation_discretization='nemo_1p5_split'.")
         dissl = jnp.asarray(dissl_old, dtype=e_old.dtype)
-        literal_diag = (1.0 - literal_lw - literal_up
-                        + ((1.5 * dt) * cfg.c_eps)
-                        * dissl[..., :N - 1]
-                        * jnp.asarray(w_active[..., :N - 1], dtype=e_old.dtype))
-        diag = jnp.concatenate(
-            [literal_diag, jnp.ones_like(literal_diag[..., :1])], axis=-1)
+        diag = (1.0 - literal_lw - literal_up
+                + ((1.5 * dt) * cfg.c_eps)
+                * dissl[..., :N]
+                * jnp.asarray(w_active[..., :N], dtype=e_old.dtype))
     elif _disc == "nemo_1p5_split":
         diag = 1.0 + dt * (1.5 * diss_rate + buoy_sink_rate) + b_diff  # coeff-ok: NEMO zdftke semi-implicit dissipation split weight (zfact2=1.5·rn_ediss, zdftke.F90:241)
     elif _disc == "backward_euler":

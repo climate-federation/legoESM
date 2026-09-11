@@ -403,7 +403,8 @@ CENSUS_FIELDS = ("eta", "u", "v", "w", "T", "S", "tke", "tke_avm", "tke_avt",
                  "tke_dissl", "tke_avm_surface", "uu_b", "vv_b")
 
 
-def census(steps: int, *, every: int = 1, start: int = 1) -> int:
+def census(steps: int, *, every: int = 1, start: int = 1,
+           corner: tuple[int, int, int] | None = None) -> int:
     """Step the card and report every prognostic field's range, per step.
 
     Exits NON-ZERO the moment any watched field stops being finite, and names
@@ -429,6 +430,9 @@ def census(steps: int, *, every: int = 1, start: int = 1) -> int:
     print(f"# case={CASE} dt_s={card.dt_s} steps={steps} "
           f"phase3_gate_sha256={gate_sha}")
     state = card.recipe.initial_state
+    _C_EPS = float(
+        card.recipe.model_config.physics.vertical_mixing.tke.c_eps)
+    corner_state = {"tke": None, "dissl": None}
     for kt in range(1, steps + 1):
         freshwater, surface = gate._surface_forcings(card, state, kt)
         try:
@@ -461,6 +465,37 @@ def census(steps: int, *, every: int = 1, start: int = 1) -> int:
                     length = float(np.sqrt(peak) / rate)
             cells.append("argmax_tke(j=%d,i=%d,k=%d)=%.3e L=%.4f"
                          % (index[0], index[1], index[2], peak, length))
+            if corner is not None:
+                # P2's falsifier, measured on the CARRIED state only: the
+                # deepest TKE row's step map.  NEMO's explicit half of the
+                # dissipation split (zdftke.f90:422-425, zfact3=0.5*rn_ediss)
+                # contributes dt*0.5*rn_ediss*dissl(n-1)*e(n-1); if that term
+                # alone accounts for the increment, the row carries NO implicit
+                # balance -- which is the claim.  ``dissl`` and ``tke`` are both
+                # carried, so this needs no reach into the solver.
+                jj, ii, kk = corner
+                e_new = float(values[jj, ii, kk])
+                d_old = corner_state["dissl"]
+                e_old = corner_state["tke"]
+                predicted = (float("nan") if d_old is None else
+                             card.dt_s * 0.5 * _C_EPS * d_old * e_old)
+                actual = (float("nan") if e_old is None else e_new - e_old)
+                share = (float("nan") if not np.isfinite(actual) or actual == 0.0
+                         else predicted / actual)
+                ratio15 = (float("nan") if e_old is None or e_old <= 0.0
+                           else (e_new - e_old) / e_old ** 1.5)
+                print("CORNER kt=%d e_old=%.8e e_new=%.8e dissl_old=%s "
+                      "d_predicted=%.8e d_actual=%.8e explicit_share=%.6f "
+                      "de_over_e15=%.6f neighbour_k-1=%.8e"
+                      % (kt, float("nan") if e_old is None else e_old, e_new,
+                         "None" if d_old is None else "%.8e" % d_old,
+                         predicted, actual, share, ratio15,
+                         float(values[jj, ii, kk - 1])), flush=True)
+                _d = getattr(state, "tke_dissl", None)
+                corner_state["tke"] = e_new
+                corner_state["dissl"] = (
+                    None if _d is None
+                    else float(np.asarray(getattr(_d, "data", _d))[jj, ii, kk]))
         for name in CENSUS_FIELDS:
             field = getattr(state, name, None)
             if field is None:
@@ -1079,6 +1114,10 @@ def main(argv=None) -> int:
                         help="step the card and report every field per step; exits non-zero on the first non-finite value")
     parser.add_argument("--census-every", type=int, default=1)
     parser.add_argument("--census-start", type=int, default=1)
+    parser.add_argument(
+        "--census-corner", default=None,
+        help=("J,I,K -- print the per-step TKE map at one cell during "
+              "--census (the deepest-row falsifier)"))
     parser.add_argument("--score-phase0", action="store_true")
     parser.add_argument("--score", action="store_true")
     parser.add_argument("--figures", action="store_true")
@@ -1095,8 +1134,13 @@ def main(argv=None) -> int:
     if args.self_check:
         return self_check()
     if args.census is not None:
+        _corner = None
+        if args.census_corner:
+            _corner = tuple(int(v) for v in args.census_corner.split(","))
+            if len(_corner) != 3:
+                raise SystemExit("--census-corner needs exactly J,I,K")
         return census(args.census, every=args.census_every,
-                      start=args.census_start)
+                      start=args.census_start, corner=_corner)
     if args.member is not None:
         return run_member(args.member, args.root, days=args.days,
                           mesh_path=args.mesh, tag=args.tag,
