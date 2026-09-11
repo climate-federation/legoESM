@@ -39,7 +39,7 @@ from legoesm.grids.cubed_sphere import CubedSphereGrid
 from legoesm.grids.latlon import LatLonCGridGeometry, LatLonGrid
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ice.dynamics import evp_solver, mevp_solver, free_drift_velocity
-from legoesm.ice.transport import advect_ice_tracers
+from legoesm.ice.transport import advect_ice_tracers, fv_flux_divergence_latlon_cgrid
 from legoesm.ice.itd import (
     aggregate_state,
     linear_remap,
@@ -66,6 +66,9 @@ from legoesm.ice.state import (
     slab_to_dynamic,
 )
 from legoesm.surface_albedo import ice_albedo as compute_ice_albedo
+
+# Historical helper default: convergence only unless the caller supplies Cs.
+_NO_SHEAR_RIDGING = 0.0
 
 
 def grid_supports_ice_dynamics(grid) -> bool:
@@ -255,16 +258,25 @@ def step_sea_ice(
             "Pass grid=<CubedSphereGrid> to step_sea_ice()."
         )
 
-    # Grid-TYPE guards: dynamics (EVP/mEVP) + ridging call grid-specific
+    if config.ridging.closing_scheme not in ("strain", "convergence"):
+        raise ValueError(
+            f"Unknown ridging closing scheme: {config.ridging.closing_scheme!r}; "
+            "expected 'strain' or 'convergence'."
+        )
+
+    # Grid-TYPE guards: dynamics (EVP/mEVP) + full ridging call grid-specific
     # STRAIN-RATE operators (cubed-sphere / lat-lon / MPAS only); tracer
     # transport calls FLUX-DIVERGENCE operators, which additionally exist on
-    # the tripole/curvilinear C-grid (grid_supports_ice_transport).  Reject an
-    # unsupported non-None grid up front with a clear message rather than
+    # the tripole/curvilinear C-grid (grid_supports_ice_transport). Explicit
+    # convergence-only ridging uses that same divergence, without strain ops.
+    # Reject an unsupported non-None grid up front with a clear message rather than
     # letting it fall through to the cubed-sphere branch and raise an opaque
     # AttributeError deep in the EVP loop (e.g. Gaussian spectral / Plane).
     if grid is not None:
         _needs_strain_ops = (
-            config.dynamics in ("evp", "mevp") or config.ridging.enabled
+            config.dynamics in ("evp", "mevp")
+            or (config.ridging.enabled
+                and config.ridging.closing_scheme == "strain")
         )
         if _needs_strain_ops and not _grid_supports_ice_dynamics(grid):
             raise ValueError(
@@ -274,9 +286,14 @@ def step_sea_ice(
                 "dynamics='none'/'free_drift' and ridging.enabled=False on "
                 "this grid."
             )
-        if config.transport == "advect" and not grid_supports_ice_transport(grid):
+        _needs_transport_ops = (
+            config.transport == "advect"
+            or (config.ridging.enabled
+                and config.ridging.closing_scheme == "convergence")
+        )
+        if _needs_transport_ops and not grid_supports_ice_transport(grid):
             raise ValueError(
-                "Sea-ice tracer transport requires a grid with implemented "
+                "Sea-ice transport/convergence ridging requires a grid with implemented "
                 "flux-divergence operators (CubedSphereGrid, LatLonGrid, "
                 "VoronoiMesh, or the tripole LatLonCGridGeometry); got "
                 f"{type(grid).__name__}.  Use transport='none' for "
@@ -288,6 +305,9 @@ def step_sea_ice(
             "ridging needs the convergence (strain-rate) operator.  Pass a "
             "supported grid, or set ridging.enabled=False."
         )
+    if (config.ridging.enabled and config.ridging.closing_scheme == "convergence"
+            and config.n_categories < 2):
+        raise ValueError("Convergence ridging requires n_categories >= 2.")
 
     # F10 guard: lat-lon EVP/mEVP strain-rate + stress-divergence use the
     # spherical metric tanθ/r, singular at the geographic pole (cosθ → 0).
@@ -1672,8 +1692,9 @@ def _closing_rate_from_velocity(
     v_ice: jnp.ndarray,
     grid,
     cap: float,
-    cs_shear: float = 0.0,
-    e_yield: float = 2.0,
+    cs_shear: float = _NO_SHEAR_RIDGING,
+    e_yield: float = SeaIceConfig().e_yield,
+    closing_scheme: str = "strain",
 ) -> jnp.ndarray:
     """Ridging closing rate from the velocity field (Rothrock 1975 / CICE).
 
@@ -1690,15 +1711,33 @@ def _closing_rate_from_velocity(
     ellipse ratio; ``cs_shear`` (Cs) the shear-ridging participation fraction
     (0 recovers the old convergence-only closing).
 
-    The grid is validated for operator support at ``step_sea_ice`` entry
-    (``_grid_supports_ice_dynamics``), so ``strain_rates`` is called
-    directly — no exception-swallowing fallback, which would silently
+    ``closing_scheme='convergence'`` explicitly omits shear. On the C-grid,
+    reuse the ice transport tendency for a unit scalar: ``-div(u)`` is
+    positive for closing. This retains geographic-to-face rotation, metric
+    factors and the shared north-fold flux; it introduces no tensor operator.
+    Like that transport, it has no coastal mask or landfast constraint.
+    On other supported grids use the existing strain trace.
+
+    The grid is validated for the selected operators at ``step_sea_ice`` entry,
+    so each operator is called directly — no exception-swallowing fallback,
+    which would silently
     disable ridging and detach the gradient w.r.t. velocity (forbidden by
     the repo AD rules).  The ``1e-20`` sqrt floors keep the gradient finite at
     zero deformation (numerics floor, not tunable).
     """
+    if closing_scheme not in ("strain", "convergence"):
+        raise ValueError(
+            f"Unknown ridging closing scheme: {closing_scheme!r}; "
+            "expected 'strain' or 'convergence'."
+        )
+    if closing_scheme == "convergence" and isinstance(grid, LatLonCGridGeometry):
+        convergence = fv_flux_divergence_latlon_cgrid(
+            jnp.ones_like(u_ice), u_ice, v_ice, grid)
+        return jnp.clip(convergence, 0, cap)
     eps_11, eps_22, eps_12 = strain_rates(u_ice, v_ice, grid)
     div = eps_11 + eps_22
+    if closing_scheme == "convergence":
+        return jnp.clip(-div, 0, cap)
     shear = jnp.sqrt((eps_11 - eps_22) ** 2 + 4.0 * eps_12 ** 2 + 1e-20)
     delta = jnp.sqrt(div ** 2 + (shear / e_yield) ** 2 + 1e-20)
     closing = 0.5 * cs_shear * (delta - jnp.abs(div)) + jnp.maximum(-div, 0.0)
@@ -2823,6 +2862,7 @@ def _step_dynamic_v2(
         closing_rate = _closing_rate_from_velocity(
             u_ice, v_ice, grid, cap=config.ridging.closing_rate_max,
             cs_shear=config.ridging.cs_shear_ridging, e_yield=config.e_yield,
+            closing_scheme=config.ridging.closing_scheme,
         )
         ridge_result = apply_ridging(
             conc, h, h_snow * conc, S_ice, closing_rate,

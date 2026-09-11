@@ -247,6 +247,10 @@ class RidgingConfig(NamedTuple):
     closing_rate_max: float = 1.0      # Cap on convergence rate [1/s]
                                         # (sanity bound; physical Δ rarely
                                         # exceeds 1e-5)
+    # "strain": existing convergence + shear closure. "convergence":
+    # convergence only, also available on the tripole C-grid via its existing
+    # fold-aware transport divergence. Does not enable rheology or landfast.
+    closing_scheme: str = "strain"
 
 
 class MeltPondConfig(NamedTuple):

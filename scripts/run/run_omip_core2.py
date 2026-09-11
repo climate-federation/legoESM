@@ -4172,12 +4172,17 @@ def _ice_state_spatial_shape(grid, app_grid_type):
 
 
 def _require_prognostic_ice_for_itd_flags(ice_categories, ice_ridging,
-                                          prognostic_sea_ice) -> None:
+                                          prognostic_sea_ice, *,
+                                          ice_ridging_closing_scheme="strain") -> None:
     """Refuse ``--ice-categories``/``--ice-ridging`` without
     ``--prognostic-sea-ice``: their only consumer is the prognostic-ice
     build, so without it the flags would be accepted and silently ignored
     (the surrogate ice paths have no thickness distribution) — the
     accept-then-ignore shape the reachability audit forbids (codex)."""
+    if ice_ridging_closing_scheme not in ("strain", "convergence"):
+        raise ValueError(f"Unknown ice ridging closing scheme: {ice_ridging_closing_scheme!r}")
+    if ice_ridging_closing_scheme != "strain" and not ice_ridging:
+        raise ValueError("--ice-ridging-closing-scheme convergence requires --ice-ridging")
     if (int(ice_categories) != 1 or ice_ridging) and not prognostic_sea_ice:
         raise ValueError(
             "--ice-categories/--ice-ridging configure the PROGNOSTIC ice "
@@ -4187,7 +4192,8 @@ def _require_prognostic_ice_for_itd_flags(ice_categories, ice_ridging,
 
 
 def _resolve_ice_categories(n_categories, ridging, supports_dynamics,
-                            grid_desc):
+                            grid_desc, *, closing_scheme="strain",
+                            supports_transport=False):
     """Resolve ``--ice-categories`` / ``--ice-ridging`` into the
     ``(n_categories, itd_remap, ridging_enabled)`` SeaIceConfig fields —
     refusing, never silently ignoring, a request that cannot take effect.
@@ -4204,11 +4210,12 @@ def _resolve_ice_categories(n_categories, ridging, supports_dynamics,
       ``'simple'`` linear remap (it moves only h/concentration/temperature
       across bins, breaking salt conservation), so a ``'simple'`` option
       could never legally run here (a phantom choice).
-    * ``--ice-ridging`` needs the grid's strain-rate operators (the closing
-      rate comes from the velocity deformation field): on a grid without
-      them (tripole ORCA) ``step_sea_ice`` would raise at entry, so refuse
-      up front with the actionable message instead.
+    * Full ``strain`` closing needs strain-rate operators. Explicitly
+      selecting ``convergence`` also permits transport-capable grids such as
+      tripole ORCA; this subset omits shear ridging and adds no rheology.
     """
+    if closing_scheme not in ("strain", "convergence"):
+        raise ValueError(f"Unknown ice ridging closing scheme: {closing_scheme!r}")
     n_cat = int(n_categories)
     if n_cat < 1:
         raise SystemExit(
@@ -4224,13 +4231,14 @@ def _resolve_ice_categories(n_categories, ridging, supports_dynamics,
                 "multi-category-only), so accepting the flag here would be a "
                 "no-op.")
         return 1, "simple", False
-    if ridging and not supports_dynamics:
+    if ridging and not (supports_dynamics or (
+            closing_scheme == "convergence" and supports_transport)):
         raise SystemExit(
             f"--ice-ridging: grid {grid_desc} lacks the strain-rate "
             "operators the ridging closing rate needs (step_sea_ice would "
             "reject it at entry).  Use --grid mpas (or a lat-lon grid), or "
-            "drop --ice-ridging (multi-category ITD without ridging still "
-            "runs).")
+            "select --ice-ridging-closing-scheme convergence on a "
+            "transport-capable grid (no shear ridging), or drop --ice-ridging.")
     return n_cat, "lipscomb2001", bool(ridging)
 
 
@@ -5863,9 +5871,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "participation/redistribution) for --prognostic-sea-ice. "
                         "Requires --ice-categories >= 2 (ridging moves ice "
                         "between thickness bins) and a grid with strain-rate "
-                        "operators (mpas, latlon; NOT tripole) — both checked "
-                        "up front, refused with an actionable error rather "
-                        "than silently ignored.")
+                        "operators, or explicitly select convergence-only "
+                        "closing on tripole with --ice-ridging-closing-scheme.")
+    p.add_argument("--ice-ridging-closing-scheme", choices=("strain", "convergence"),
+                   default="strain",
+                   help="Ridging deformation: strain (default, convergence + "
+                        "shear) or convergence only (also supported on tripole; "
+                        "no EVP, shear ridging, coastal mask or landfast). "
+                        "Selecting convergence requires --ice-ridging.")
     p.add_argument("--visc-schedule", type=str, default=None,
                    help="Piecewise viscosity schedule 'day:A_h:C_smag_lap,...'"
                         " e.g. '0:1e5:3.0,90:5e4:1.0,180:2e4:0.33' — start at "
@@ -6824,7 +6837,8 @@ def main() -> int:
             "--prognostic-sea-ice (the surrogate paths read the prescribed "
             "NEMO siconc climatology, not this file).")
     _require_prognostic_ice_for_itd_flags(
-        args.ice_categories, args.ice_ridging, args.prognostic_sea_ice)
+        args.ice_categories, args.ice_ridging, args.prognostic_sea_ice,
+        ice_ridging_closing_scheme=args.ice_ridging_closing_scheme)
 
     # --prescribed-flow gates (PRE-BUILD, on the static args): grid support +
     # the --spinup-drag rejection + the --no-gm-redi requirement.  NB: no
@@ -8016,13 +8030,15 @@ def main() -> int:
         # request against THIS grid's capabilities (refuse-not-ignore).
         _n_cat, _itd_remap, _ridging_on = _resolve_ice_categories(
             args.ice_categories, args.ice_ridging, _supports_dyn,
-            type(grid).__name__)
+            type(grid).__name__, closing_scheme=args.ice_ridging_closing_scheme,
+            supports_transport=_supports_transport)
         ice_config = SeaIceConfig(
             dynamics=_ice_dyn,
             transport=_transport,
             n_categories=_n_cat,
             itd_remap=_itd_remap,     # 'lipscomb2001' whenever _n_cat > 1
-            ridging=RidgingConfig(enabled=_ridging_on),
+            ridging=RidgingConfig(enabled=_ridging_on,
+                                 closing_scheme=args.ice_ridging_closing_scheme),
             brine=_brine,            # brine-rejection salt flux -> ocean salt_flux
             # Under-ice transmitted SW is owned by the ICE model (constant-
             # scheme transmittance): the ice EB is debited and the ocean
