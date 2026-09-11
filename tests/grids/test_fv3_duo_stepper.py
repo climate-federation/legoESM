@@ -217,6 +217,8 @@ def _cmp(got, ref, name, tol):
     assert np.array_equal(na, nb), (
         f"{name}: non-finite masks differ (jax {int(na.sum())} vs numpy "
         f"{int(nb.sum())} cells of {a.size})")
+    assert np.array_equal(a[na], b[nb], equal_nan=True), (
+        f"{name}: non-finite VALUES differ")
 
     sa = np.isfinite(a) & (np.abs(a) >= _SENTINEL_FLOOR)
     sb = np.isfinite(b) & (np.abs(b) >= _SENTINEL_FLOOR)
