@@ -835,6 +835,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "so cold dry polar snow keeps its fresh albedo "
                              "while melting snow darkens as before. "
                              "None = 0.0 = off (calendar clock, byte-identical).")
+    parser.add_argument("--land-snow-tau-days", dest="land_snow_tau_days",
+                        type=float, default=None,
+                        help="Snow-albedo age e-folding time [days]. Default: "
+                             "the land calibration's value (3.674 d). A 3.7-day "
+                             "clock darkens any snowpack older than a few weeks "
+                             "to its minimum albedo regardless of temperature, "
+                             "which is why every polar cell measured 0.521 "
+                             "against an observed 0.70-0.82. Pairs with "
+                             "--snow-age-activation-K, which alone does not "
+                             "move it.")
     parser.add_argument("--cloud-cover-condensate-q-ref",
                         dest="cloud_cover_condensate_q_ref", type=float,
                         default=None,
@@ -2004,6 +2014,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_alpha_xr=args.cloud_alpha_xr,
         cloud_cover_condensate_q_ref=args.cloud_cover_condensate_q_ref,
         snow_age_activation_K=args.snow_age_activation_K,
+        land_snow_tau_days=args.land_snow_tau_days,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
         convective_cloud=args.convective_cloud,

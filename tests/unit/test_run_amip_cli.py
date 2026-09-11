@@ -666,6 +666,58 @@ def test_mpas_qv_smoothing_flag_flows_to_config():
     # validate_strict bounds/lane guards live in test_mpas_qv_smoothing.
 
 
+def test_snow_albedo_ageing_flags_flow_to_config():
+    """--snow-age-activation-K and --land-snow-tau-days round-trip.
+
+    Both exist because every snow-covered polar cell measured the fully-aged
+    albedo 0.521 against an observed 0.70-0.82, and an arm moving the activation
+    temperature ALONE left it unchanged: the e-folding time is the binding
+    parameter and used to be a hardcoded calibrated constant no run could
+    select.  Neither had a round-trip test before.
+    """
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.snow_age_activation_K is None
+    assert cfg_default.land_snow_tau_days is None
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--snow-age-activation-K", "5000",
+        "--land-snow-tau-days", "60",
+    ]), parser))
+    assert cfg.snow_age_activation_K == 5000.0
+    assert cfg.land_snow_tau_days == 60.0
+    cfg.validate_strict()
+
+
+@pytest.mark.parametrize("bad", ["0.1", "500"])
+def test_land_snow_tau_days_out_of_range_is_refused(bad):
+    """0.5 d is melting spring snow and 400 d spans the cold plateau; outside
+    that the value is not a snow-ageing timescale."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--land-snow-tau-days", bad]), parser))
+    with pytest.raises(ValueError, match="land_snow_tau_days"):
+        cfg.validate_strict()
+
+
+def test_snow_albedo_responds_to_the_ageing_timescale():
+    """The parameter must be load-bearing, not merely present: at a fixed snow
+    age, lengthening the e-folding time has to RAISE the albedo, and at the
+    calibrated 3.674 days a two-month-old pack has to sit on its floor -- which
+    is the defect that motivated the knob."""
+    import jax.numpy as jnp
+    from legoesm.surface_albedo import LandAlbedoConfig, snow_albedo
+    age_s = jnp.asarray([60.0 * 86400.0])
+    short = LandAlbedoConfig(tau_snow_decay=3.674 * 86400.0)
+    long_ = LandAlbedoConfig(tau_snow_decay=60.0 * 86400.0)
+    a_short = float(snow_albedo(age_s, short)[0])
+    a_long = float(snow_albedo(age_s, long_)[0])
+    assert a_short == pytest.approx(short.alpha_snow_min, abs=1e-3)
+    assert a_long > a_short + 0.05
+
+
 def test_mpas_qv_biharmonic_flag_flows_to_config():
     """--mpas-qv-smooth-del4-m4s round-trip (scale-selective companion to the
     Laplacian, 2026-09-11); default OFF, and the two coefficients are

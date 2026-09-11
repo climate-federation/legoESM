@@ -2948,6 +2948,16 @@ class ModelDriver:
             cfg = cfg._replace(
                 land_albedo=cfg.land_albedo._replace(
                     snow_age_activation_K=float(_act)))
+        # Snow-age e-folding time, same placement and for the same reason: the
+        # calibration re-apply above sets tau_snow_decay, so an override has to
+        # land after it or it is silently discarded.
+        _tau_d = getattr(self.config, "land_snow_tau_days", None)
+        if _tau_d is not None:
+            cfg = cfg._replace(
+                land_albedo=cfg.land_albedo._replace(
+                    tau_snow_decay=float(_tau_d) * 86400.0))
+            logger.info("  land snow-albedo age e-folding: %.3g days "
+                        "(overrides the calibration)", float(_tau_d))
 
         # A CANOPY SCHEME GETS CANOPY PARAMETERS.
         #

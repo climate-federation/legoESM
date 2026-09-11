@@ -627,6 +627,21 @@ class ExperimentConfig(NamedTuple):
     # its fresh albedo. None => LandAlbedoConfig default (0.0 = off, the
     # calendar clock, byte-identical).
     snow_age_activation_K: float | None = None
+    # Snow-albedo age e-folding time [days].  None => the calibration's value
+    # (3.674 d under land_calibrated_physics, 11.64 d otherwise).
+    # WHY THIS IS A KNOB AT ALL: measured 2026-09-11 on the production AMIP,
+    # every snow-covered polar cell sat at the fully-aged albedo 0.521 against
+    # an observed 0.70 (Arctic tundra) to 0.82 (Antarctic plateau), because a
+    # 3.7-day clock darkens anything older than a few weeks regardless of how
+    # cold it is.  Turning on the temperature dependence alone does NOT fix it:
+    # an arm at the BATS activation of 5000 K slowed the clock by only 5-12% in
+    # ten days and left the albedo unchanged at 0.521.  The e-folding time is
+    # the binding parameter, and it was previously a hardcoded calibrated
+    # constant no run could select.  NOTE the calibration fitted 3.674 d with
+    # the temperature dependence OFF, so the two should eventually be refitted
+    # together; an arm moving this alone trades against that land-surface
+    # temperature calibration and must be scored on both.
+    land_snow_tau_days: float | None = None
     # Marine-Sc albedo lever: blend strength [0,1] toward diagnostic-CLUBB cf in
     # the BL when --use-clubb-cloud-fraction is on (1.0 = full replacement, which
     # drove a real-SST surface-heating runaway; ~0.3-0.5 is gentler + stable).
@@ -2873,6 +2888,9 @@ class ExperimentConfig(NamedTuple):
             ("cloud_alpha_xr", 10.0, 1000.0),
             ("cloud_cover_condensate_q_ref", 1.0e-6, 1.0e-3),
             ("snow_age_activation_K", 0.0, 20000.0),
+            # 0.5 d = melting spring snow; 400 d spans the cold-plateau
+            # timescale the literature supports (Warren & Wiscombe 1980).
+            ("land_snow_tau_days", 0.5, 400.0),
             ("cloud_adiabatic_lwc_rate", 5.0e-7, 3.0e-6),
         ):
             _v = getattr(self, _f)
