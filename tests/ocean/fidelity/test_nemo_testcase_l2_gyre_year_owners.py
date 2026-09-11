@@ -168,7 +168,14 @@ def test_run_sh_is_a_config_free_staging_script_and_never_builds():
     assert "BYTE-IDENTICAL" in text
     assert "GYRE_OMIP_L2_P3_00000180_restart.nc" in text
     # the refusal must be a refusal, not a warning
-    assert "exit 71" in text
+    assert "exit 71" in code
+    # A word-grep passes with the wrong card, a deleted comparison and any
+    # binary; an independent review said so.  These pin the three things that
+    # make the record admissible.
+    assert "SOURCE_CFG=GYRE_OMIP_L2_P3_SM_R41ADVSP" in code
+    assert 'cmp -s "$certified_binary" "$YEAR_RUN/nemo_pristine/nemo"' in code
+    assert 'cmp -s "$RUN_DIR/GYRE_OMIP_L2_P3_00000180_restart.nc"' in code
+    assert "NN_STOCK=6" in code and "NN_ITEND=180" in code
 
 
 def _worktree_is_dirty() -> bool:
@@ -187,7 +194,8 @@ def _worktree_is_dirty() -> bool:
 def test_forcing_gate_plants_all_exit_non_zero():
     """Each plant must turn the BIT-EXACT forcing gate red.  Without this the
     gate's green is unfalsifiable."""
-    for plant in ("forcing-phase", "forcing-qsr-pi", "forcing-nyear"):
+    for plant in ("forcing-phase", "forcing-qsr-pi", "forcing-nyear",
+                  "forcing-stress-transpose"):
         result = subprocess.run(
             [sys.executable, str(HARNESS), "--forcing-gate", "--days", "30",
              "--plant", plant],

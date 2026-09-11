@@ -30,11 +30,19 @@ MODES
   --self-check       the arithmetic and every plant.
 
 PLANTS (each exits NON-ZERO; each is exercised by the committed unit test)
-  forcing-phase    evaluates legoESM's forcing one step late
-  forcing-qsr-pi   swaps usrdef_sbc's literal 3.1415 for rpi in the literal arm
-  forcing-nyear    restores the (nyear-1) subtraction as if the run were year 2
-  day-offset       the day-by-day walk reads NEMO one day late
-  switch-blind     freezes the EVD trigger mask so no crossing can be found
+  forcing-phase            evaluates legoESM's forcing one step late
+  forcing-qsr-pi           swaps usrdef_sbc's literal 3.1415 for rpi
+  forcing-nyear            restores the (nyear-1) subtraction, as if year 2
+  forcing-stress-transpose swaps the geographic stress pair the model consumes
+  switch-blind             freezes the EVD trigger mask, so the trace must
+                           REFUSE rather than report "no crossing"
+
+``--plant day-offset`` is NOT a gate plant and never exits non-zero: the
+day-by-day walk and the per-step walk report numbers, they do not carry a bar.
+It reads NEMO one day late so the reader can see how much a day-misalignment
+would move the table, and it is labelled a DIAGNOSTIC everywhere it appears.
+An earlier version of this docstring claimed every plant exits non-zero; that
+was false for this one, and an independent review said so.
 """
 
 from __future__ import annotations
@@ -72,7 +80,12 @@ DEFAULT_ENTRY_ROOT = YEAR_ROOT / "nemo_pristine"
 EMP_SPLIT_LAT_DEG = 37.2
 WIND_BAND_LAT_DEG = (15.0, 29.0)
 FIELDS = ("T", "S", "u", "v", "ssh")
-SBC_FIELDS = ("qsr", "qns", "emp", "utau", "vtau")
+# The MODEL-FACING rows.  NEMO carries qns and qsr apart and the shared
+# forcing object carries their materialized SUM, so "q_net" is the row the
+# model actually consumes; sw_down pins qsr beside it, and the two together
+# pin qns without inventing a difference of rounded sums.
+SBC_FIELDS = ("qsr", "q_net", "emp", "utau", "vtau",
+              "utau_roundtrip", "vtau_roundtrip")
 
 
 class GateError(RuntimeError):
@@ -419,26 +432,68 @@ def forcing_gate(*, nemo_root: Path = YEAR_ROOT, seed: int = 0,
     lat = np.asarray(mesh["gphit"], dtype=np.float64)
     nlev = wet3.shape[-1]
 
-    def current(surface_ct, surface_sa, kt):
-        """legoESM's production forcing path, on a supplied surface state.
+    template = card.recipe.initial_state
+    cos_u = np.asarray(card.recipe.grid.cos_alpha_u, dtype=np.float64)[:, 1:]
+    sin_u = np.asarray(card.recipe.grid.sin_alpha_u, dtype=np.float64)[:, 1:]
 
-        This is the certified gate's own composition
-        (``nemo_testcase_l2_gyre_phase3_gate._surface_forcings``), with the
-        state passed in instead of read off a live model, so that the LITERAL
-        and the CURRENT arm see identical inputs.
+    def current(surface_ct, surface_sa, kt):
+        """THE PRODUCTION PATH, called -- not a second copy of its body.
+
+        A first version of this gate re-assembled the certified gate's own
+        composition here instead of CALLING it.  An independent review proved
+        the consequence by construction: poisoning ``_surface_forcings`` to
+        raise left the gate reporting ALL BIT-EXACT with zero calls, and
+        TRANSPOSING ``tau_x``/``tau_y`` inside the real ``_surface_forcings``
+        left all five fields bit-exact at all thirteen clock samples while the
+        per-step walk's kt=2 velocity residual went from `2.2e-13` to `2.2e-02`
+        m/s.  The gate certified the usrdef_sbc STATEMENTS and said nothing
+        about the forcing the MODEL CONSUMES.
+
+        So this calls ``_surface_forcings`` on a state carrying the supplied
+        surface tracers, and returns the MODEL-FACING quantities:
+
+          qsr   <- surface.sw_down          (what radiation receives)
+          q_net <- surface.q_net            (NEMO carries qns and qsr apart;
+                                             the shared object carries a sum,
+                                             so the SUM is the model-facing row)
+          emp   <- freshwater.evap          (what the salt budget receives)
+          utau  <- surface.tau_i_native     (what the momentum stage receives)
+          vtau  <- surface.tau_j_native
+
+        plus ``utau_roundtrip``/``vtau_roundtrip``, recovered by INVERTING the
+        geographic rotation the gate applies to ``tau_x``/``tau_y``.  A
+        transposed or mis-signed rotation moves those two and nothing else,
+        which is exactly the defect the review planted.
         """
-        t_seconds = kt * card.dt_s
-        sbc = gyre_surface_boundary_condition(card, t_seconds)
         ct = jnp.asarray(surface_ct, dtype=jnp.float64)
         sa = jnp.asarray(surface_sa, dtype=jnp.float64)
-        pt = nemo_potential_temperature_from_conservative(ct, sa)
-        qns = nemo_gyre_qns(ct, pt, sbc.t_star_c, sbc.qsr_w_m2,
-                            sbc.emp_kg_m2_s)
-        return {"qsr": np.asarray(sbc.qsr_w_m2, dtype=np.float64),
-                "qns": np.asarray(qns, dtype=np.float64),
-                "emp": np.asarray(sbc.emp_kg_m2_s, dtype=np.float64),
-                "utau": np.asarray(sbc.utau_pa, dtype=np.float64),
-                "vtau": np.asarray(sbc.vtau_pa, dtype=np.float64)}
+        nlev = int(np.asarray(template.T.data).shape[-1])
+        broadcast = lambda v: jnp.broadcast_to(  # noqa: E731
+            jnp.asarray(v, dtype=jnp.float64)[..., None],
+            np.asarray(template.T.data).shape)
+        state = template._replace(
+            T=template.T.replace(data=broadcast(ct)),
+            S=template.S.replace(data=broadcast(sa)))
+        require(nlev >= 1, "the card has no vertical levels")
+        freshwater, surface = gate._surface_forcings(card, state, kt)
+        sw = np.asarray(surface.sw_down, dtype=np.float64)
+        q_total = np.asarray(surface.q_net, dtype=np.float64)
+        tau_x = np.asarray(surface.tau_x, dtype=np.float64)
+        tau_y = np.asarray(surface.tau_y, dtype=np.float64)
+        if plant == "forcing-stress-transpose":
+            tau_x, tau_y = tau_y, tau_x
+        # phase3_gate.py:682-689 builds tau_x/tau_y from the native pair as
+        #   tau_x = -(cos*utau - sin*vtau);  tau_y = -(sin*utau + cos*vtau)
+        # so the inverse is utau = -(cos*tau_x + sin*tau_y) and
+        # vtau = sin*tau_x - cos*tau_y.  Derived from those two lines, not
+        # assumed.
+        return {"qsr": sw,
+                "q_net": q_total,
+                "emp": np.asarray(freshwater.evap, dtype=np.float64),
+                "utau": np.asarray(surface.tau_i_native, dtype=np.float64),
+                "vtau": np.asarray(surface.tau_j_native, dtype=np.float64),
+                "utau_roundtrip": -(cos_u * tau_x + sin_u * tau_y),
+                "vtau_roundtrip": sin_u * tau_x - cos_u * tau_y}
 
     def literal(surface_ct, surface_sa, kt, nyear):
         ct = np.asarray(surface_ct, dtype=np.float64)
@@ -447,6 +502,14 @@ def forcing_gate(*, nemo_root: Path = YEAR_ROOT, seed: int = 0,
         fields, _sites = r16._literal_sbc(
             lat, wet2, ct, pt, kt=kt, nyear=nyear,
             qsr_pi=(3.141592653589793 if plant == "forcing-qsr-pi" else None))
+        fields["utau_roundtrip"] = fields["utau"]
+        fields["vtau_roundtrip"] = fields["vtau"]
+        # phase3_gate.py:673 materializes q_net = nemo_source_round(qns + qsr).
+        # In fp64 that round is the identity, so the literal arm forms the same
+        # binary64 sum rather than a difference of rounded sums, which would
+        # manufacture a residual that neither model has.
+        fields["q_net"] = np.asarray(fields["qns"], dtype=np.float64) + \
+            np.asarray(fields["qsr"], dtype=np.float64)
         return fields
 
     rows = []
@@ -739,7 +802,7 @@ def self_check() -> int:
     def expect_raises(label, fn):
         try:
             fn()
-        except BaseException as error:               # noqa: BLE001
+        except Exception as error:                   # noqa: BLE001
             print(f"  PLANT {label}: raised {type(error).__name__} -- OK")
             return
         failures.append(label)
@@ -774,18 +837,24 @@ def self_check() -> int:
     pt = np.array([[19.9, 9.9]])
     base, _ = r16._literal_sbc(small_lat, small_wet, ct, pt)
     again, _ = r16._literal_sbc(small_lat, small_wet, ct, pt, kt=1, nyear=1)
-    for field in SBC_FIELDS:
-        if not np.array_equal(np.asarray(base[field]).view(np.uint64),
-                              np.asarray(again[field]).view(np.uint64)):
-            failures.append(f"_literal_sbc default changed {field}")
+    # NOTE: a first version wrote this as a for/else with no break, so the
+    # "OK" line printed even when the loop had appended failures.  An
+    # independent review found it.  The five fields checked are the literal
+    # transcription's own, not the gate's model-facing rows.
+    literal_fields = ("qsr", "qns", "emp", "utau", "vtau")
+    drifted = [field for field in literal_fields
+               if not np.array_equal(np.asarray(base[field]).view(np.uint64),
+                                     np.asarray(again[field]).view(np.uint64))]
+    if drifted:
+        failures.append(f"_literal_sbc default changed {drifted}")
     else:
         print("  _literal_sbc's kt=1/nyear=1 default is byte-unchanged -- OK")
     # 3. the literal SBC MOVES with kt, so a phase plant CAN be detected
     later, _ = r16._literal_sbc(small_lat, small_wet, ct, pt, kt=181)
-    moved = [f for f in SBC_FIELDS
+    moved = [f for f in literal_fields
              if not np.array_equal(np.asarray(base[f]).view(np.uint64),
                                    np.asarray(later[f]).view(np.uint64))]
-    if set(moved) != set(SBC_FIELDS):
+    if set(moved) != set(literal_fields):
         failures.append(f"only {moved} move between kt=1 and kt=181; a phase "
                         "plant could not be seen on the others")
     else:

@@ -77,7 +77,8 @@ control_restart=$YEAR_RUN/nemo_seed0/GYRE_OMIP_L2_P3_00000180_restart.nc
 [[ -d "$source_cfg/EXP00" ]] || { printf 'REFUSE: no %s/EXP00\n' "$source_cfg" >&2; exit 64; }
 [[ -x "$certified_binary" ]] || { printf 'REFUSE: no certified binary at %s\n' "$certified_binary" >&2; exit 64; }
 [[ -f "$HARNESS" ]] || { printf 'REFUSE: no harness at %s\n' "$HARNESS" >&2; exit 64; }
-for f in "$reference_restart" "$control_restart"; do
+for f in "$reference_restart" "$control_restart" \
+         "$YEAR_RUN/nemo_pristine/nemo"; do
   [[ -f "$f" ]] || { printf 'REFUSE: %s is missing; the byte-identity check is what licenses this record and it cannot be skipped\n' "$f" >&2; exit 64; }
 done
 # The two year-run day-30 restarts must already agree with each other, or the
@@ -111,8 +112,22 @@ for name in namelist_ref namelist_top_cfg namelist_top_ref \
             field_def_nemo-pisces.xml; do
   cp -L "$source_cfg/EXP00/$name" "$RUN_DIR/$name"
 done
+# THE BINARY MUST BE THE ONE THE REFERENCE RUN USED, and that is checked
+# against the binary itself, not against a provenance file.  The year round's
+# run.sh copies ONE binary.sha256 into EVERY run directory, so
+# nemo_pristine/binary.sha256 names the PATCHED (YRPERT) binary while
+# nemo_pristine/nemo IS the certified (R41ADVSP) one -- a provenance file that
+# does not describe the binary beside it.  Found by an independent review of
+# this round.  So: hash the executable.
+if ! cmp -s "$certified_binary" "$YEAR_RUN/nemo_pristine/nemo"; then
+  printf 'REFUSE: %s differs from the binary the reference run used (%s).\n' \
+    "$certified_binary" "$YEAR_RUN/nemo_pristine/nemo" >&2
+  printf '  This record would not be the same model as the year it is admitted against.\n' >&2
+  exit 65
+fi
 cp "$certified_binary" "$RUN_DIR/nemo"
-sha256sum "$certified_binary" >"$RUN_DIR/binary.sha256"
+sha256sum "$certified_binary" "$YEAR_RUN/nemo_pristine/nemo" \
+  "$YEAR_RUN/nemo_seed0/nemo" >"$RUN_DIR/binary.sha256"
 ( cd "$source_cfg" && find EXP00 MY_SRC -type f -print0 | sort -z | xargs -0 sha256sum ) \
   >"$RUN_DIR/source_cfg.sha256"
 
