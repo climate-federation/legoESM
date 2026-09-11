@@ -2405,6 +2405,7 @@ def _bc_pv_flux(
     dz_ref=None,
     h_vtx_override=None,
     f_vtx_override=None,
+    metric_reciprocals=None,
 ):
     """Stage 7b: vector-invariant potential-vorticity (vorticity) flux
     (Sadourny EC / Arakawa-Lamb-81 triad, or WENO-Z when momentum_advection is
@@ -2456,7 +2457,14 @@ def _bc_pv_flux(
     # is replaced by WENO-Z reconstruction (Silvestri et al. 2024).
 
     # Vorticity from TOTAL velocity (not perturbation u')
-    zeta = curl_vertex_cgrid(u, v, grid)  # (n_lat+1, n_lon+1, nlev)
+    if (een_metric_weighting == "nemo"
+            and vorticity_scheme in ("ene", "ene_total")):
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            nemo_vor_ene_vorticity_cgrid,
+        )
+        zeta = nemo_vor_ene_vorticity_cgrid(u, v, grid)
+    else:
+        zeta = curl_vertex_cgrid(u, v, grid)  # (n_lat+1, n_lon+1, nlev)
 
     # Layer thickness at vertices.  Use the min-rule (Adcroft-Hill-
     # Marshall 1997 / Pacanowski-Gnanadesikan 1998 / MITgcm convention)
@@ -2717,6 +2725,7 @@ def _bc_pv_flux(
                 f_vtx=_f_vtx,
                 q_boundary=een_q_boundary,
                 metric_widths=_mw,
+                metric_reciprocals=metric_reciprocals,
             )
 
     # Capture PV-flux advection contribution as the `vortcor` diagnostic
@@ -3076,7 +3085,7 @@ def _bc_vertical_momentum_advection(
 
 def _bc_horizontal_viscosity(
     du_dt, dv_dt, u, v, grid, mask, u_mask, v_mask, config, z_coord, H_bathy, dt,
-    rho_prime=None, h_k=None,
+    rho_prime=None, h_k=None, ldf_thickness_operands=None,
     vertex_mask=None,
 ):
     """Stages 10 + 10b: horizontal viscosity (A_h Laplacian + B_h biharmonic +
@@ -3302,7 +3311,9 @@ def _bc_horizontal_viscosity(
                 )
             diag_Ah_lap_u, diag_Ah_lap_v = nemo_ldf_lap_viscosity_e3_cgrid(
                 u, v, grid, _ahmt, _ahmf, h_k,
-                mask=mask, u_mask=u_mask, v_mask=v_mask, vertex_mask=_visc_vmask)
+                mask=mask, u_mask=u_mask, v_mask=v_mask,
+                vertex_mask=_visc_vmask,
+                thickness_operands=ldf_thickness_operands)
         else:
             diag_Ah_lap_u, diag_Ah_lap_v = nemo_ldf_lap_viscosity_cgrid(
                 u, v, grid, _ahmt, _ahmf,
@@ -4627,6 +4638,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     momentum_flux_transport_velocity=None,
     up3_upwind_selector=None,
     momentum_flux_face_thickness=None,
+    ldf_thickness_operands=None,
+    ene_metric_reciprocals=None,
     ene_generic_f_vtx=False,
     legacy_hpg_algebraic=False,
     nemo_operator_association: bool = False,
@@ -4899,6 +4912,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             dz_ref=z_coord.dz_ref,
             h_vtx_override=_h_vtx_override,
             f_vtx_override=_f_vtx_override,
+            metric_reciprocals=ene_metric_reciprocals,
         )
 
     # --- Stage 7b': PLANETARY Coriolis as an explicit tendency (Veros-faithful).
@@ -5055,6 +5069,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             du_dt, dv_dt, _u_ldf_local, _v_ldf_local, grid, mask, u_mask,
             v_mask, config, z_coord, H_bathy, dt,
             rho_prime=rho_prime, h_k=h_k,
+            ldf_thickness_operands=ldf_thickness_operands,
             vertex_mask=vertex_mask,
         )
     _nemo_after_ldf_u = du_dt

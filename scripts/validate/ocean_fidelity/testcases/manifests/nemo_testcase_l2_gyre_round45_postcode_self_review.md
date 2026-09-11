@@ -17,10 +17,10 @@ Verdict: **HOLD — PREREGISTERED PARTNER SET REFUTED; NO PHYSICS LANDING**.
    violations.  None meets both frozen partner criteria.
 4. This agrees with execution predicates: GYRE resolves `ln_zad_Aimp=F`
    (`GYRE_OMIP_L2_P3_SM_R41ADVSP/EXP00/ocean.output:535`); legoESM gates the
-   folded share at `ocean_model_latlon_cgrid.py:5923-5933`, its implicit
+   folded share at `ocean_model_latlon_cgrid.py:5927-5937`, its implicit
    carrier at `:6873-6890`, and the old post-step block also excludes RK3 at
    `:6901-6923`.  The executing internal reconstruction is
-   `ocean_pe_latlon_cgrid.py:4736-4757`.
+   `ocean_pe_latlon_cgrid.py:4749-4770`.
 5. NEMO's demanded placement remains source-proven: velocity-form `wzv` is
    called at compiled
    `GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:327-333`,

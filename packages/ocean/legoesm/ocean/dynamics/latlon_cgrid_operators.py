@@ -43,6 +43,7 @@ from legoesm.grids.operators_latlon_cgrid import (
     pad_ns_scalar,
     fold_row,
     pad_ns_vector_v,
+    pad_lon_cgrid,
     interp_cell_to_uface,
     interp_cell_to_vface,
     interp_u_to_vface_4pt,
@@ -579,6 +580,39 @@ def coriolis_cgrid_energy_conserving(
 # =============================================================================
 # Vector Laplacian: grad(div) - k x grad(curl)
 # =============================================================================
+
+
+def _nemo_vor_curl_bracket_cgrid(
+    u: jnp.ndarray, v: jnp.ndarray, grid: LatLonGrid,
+) -> jnp.ndarray:
+    """Compiled ``dynvor.f90:538-540`` circulation bracket on F points."""
+    sr = nemo_source_round
+    is_3d = u.ndim == 3
+    bu = (..., jnp.newaxis) if is_3d else (...,)
+    e1u = jnp.asarray(grid.dx_u)[bu]
+    e2v = jnp.asarray(grid.dy_v)[bu]
+    zu = sr(e1u * u)
+    zv = sr(e2v * v)
+    zv_pad = pad_lon_cgrid(zv, halo=1)
+    dv = sr(zv_pad[:, 1:] - zv_pad[:, :-1])
+    from legoesm.grids.halo_latlon import pad_with_pole_bc_lat
+    zu_pad = pad_with_pole_bc_lat(
+        zu, halo=1, south_value=0.0, north_value=0.0)
+    # south-minus-north is the written ``-(e1u*u north-e1u*u south)``.
+    du = sr(zu_pad[:-1] - zu_pad[1:])
+    return sr(dv + du)
+
+
+def nemo_vor_ene_vorticity_cgrid(
+    u: jnp.ndarray, v: jnp.ndarray, grid: LatLonGrid,
+) -> jnp.ndarray:
+    """Literal relative vorticity in compiled ``vor_ene`` source order."""
+    sr = nemo_source_round
+    bracket = _nemo_vor_curl_bracket_cgrid(u, v, grid)
+    r1_area = sr(1.0 / jnp.asarray(grid.area_q))
+    if bracket.ndim == 3:
+        r1_area = r1_area[..., jnp.newaxis]
+    return sr(bracket * r1_area)
 
 
 def recover_velocity_from_streamfunction(
@@ -1491,6 +1525,8 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     u_mask: jnp.ndarray | None = None,
     v_mask: jnp.ndarray | None = None,
     vertex_mask: jnp.ndarray | None = None,
+    thickness_operands: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray,
+                              jnp.ndarray, jnp.ndarray, jnp.ndarray] | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     r"""NEMO ``dyn_ldf_lev_lap`` Laplacian viscosity, e3-THICKNESS-WEIGHTED
     div/curl (#1455 topographic-step residual fix).
@@ -1583,20 +1619,92 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     u_eff = u if u_mask is None else u * _bm(u_mask)
     v_eff = v if v_mask is None else v * _bm(v_mask)
 
-    # Thickness at faces/vertex (e3u/e3v/e3f analogues), min-rule (same
-    # convention as h_u/h_v built for the vertical-velocity/PV stages).
-    h_u = min_cell_to_uface(h_k)
-    h_v = min_cell_to_vface(h_k, grid)
-    h_vtx = min_cell_to_vertex(h_k, grid)
+    # Historical single-thickness path remains unchanged for non-WS callers.
+    # The NEMO identity path supplies the six distinct operands read by
+    # dynldf_lev.f90:123,127-129,135,139.
+    if thickness_operands is None:
+        e3t_kbb = h_k
+        e3u_kbb = min_cell_to_uface(h_k)
+        e3v_kbb = min_cell_to_vface(h_k, grid)
+        e3f_live = min_cell_to_vertex(h_k, grid)
+        e3u_kmm = e3u_kbb
+        e3v_kmm = e3v_kbb
+    else:
+        (e3t_kbb, e3u_kbb, e3v_kbb, e3f_live,
+         e3u_kmm, e3v_kmm) = thickness_operands
+
+    if thickness_operands is not None:
+        # Literal compiled dynldf_lev.f90:121-140 evaluation.  The generic
+        # finite-volume helpers are algebraically equivalent, but regroup the
+        # stored reciprocal and metric products and therefore cannot close a
+        # bitwise oracle row.
+        sr = nemo_source_round
+        e2u = jnp.asarray(grid.dy_u)[..., jnp.newaxis]
+        e1v = jnp.asarray(grid.dx_v)[..., jnp.newaxis]
+        zu = sr(sr(e2u * e3u_kbb) * u_eff)
+        zv = sr(sr(e1v * e3v_kbb) * v_eff)
+        dx = sr(zu[:, 1:] - zu[:, :-1])
+        dy = sr(zv[1:] - zv[:-1])
+        flux_sum = sr(dx + dy)
+        r1_area_t = sr(1.0 / jnp.asarray(grid.area_T))[..., jnp.newaxis]
+        ahmt_live = _bc(ahmt)
+        if mask is not None:
+            ahmt_live = sr(ahmt_live * _bm(mask))
+        h_k_safe = jnp.where(e3t_kbb > 0.0, e3t_kbb, 1.0)
+        zdiv = sr(
+            sr(sr(ahmt_live * r1_area_t) / h_k_safe) * flux_sum)
+
+        curl_bracket = _nemo_vor_curl_bracket_cgrid(u_eff, v_eff, grid)
+        r1_area_f = sr(1.0 / jnp.asarray(grid.area_q))[..., jnp.newaxis]
+        ahmf_live = _bc(ahmf)
+        if mask is not None:
+            fmask = (vertex_mask if vertex_mask is not None
+                     else compute_vertex_mask(mask, grid=grid))
+            ahmf_live = sr(ahmf_live * _bm(fmask))
+        zcur = sr(
+            sr(sr(ahmf_live * e3f_live) * r1_area_f) * curl_bracket)
+
+        zdiv_pad_x = pad_lon_cgrid(zdiv, halo=1)
+        div_dx = sr(zdiv_pad_x[:, 1:] - zdiv_pad_x[:, :-1])
+        r1_e1u = sr(1.0 / jnp.asarray(grid.dx_u))[..., jnp.newaxis]
+        grad_div_u = sr(div_dx * r1_e1u)
+
+        from legoesm.grids.halo_latlon import (
+            pad_with_pole_bc_lat, zero_polar_lat_ends,
+        )
+        zdiv_pad_y = pad_with_pole_bc_lat(
+            zdiv, halo=1, south_value=0.0, north_value=0.0)
+        div_dy = sr(zdiv_pad_y[1:] - zdiv_pad_y[:-1])
+        r1_e2v = sr(1.0 / jnp.maximum(jnp.asarray(grid.dy_v), 1.0e-30))[
+            ..., jnp.newaxis]
+        grad_div_v = zero_polar_lat_ends(sr(div_dy * r1_e2v))
+
+        curl_dy = sr(zcur[1:] - zcur[:-1])
+        r1_e2u = sr(1.0 / jnp.asarray(grid.dy_u))[..., jnp.newaxis]
+        curl_u = sr(sr(sr(-curl_dy) * r1_e2u) / jnp.where(
+            e3u_kmm > 0.0, e3u_kmm, 1.0))
+        curl_dx = sr(zcur[:, 1:] - zcur[:, :-1])
+        r1_e1v = sr(1.0 / jnp.maximum(jnp.asarray(grid.dx_v), 1.0e-30))[
+            ..., jnp.newaxis]
+        curl_v = zero_polar_lat_ends(sr(
+            sr(curl_dx * r1_e1v) / jnp.where(
+                e3v_kmm > 0.0, e3v_kmm, 1.0)))
+        visc_u = sr(curl_u + grad_div_u)
+        visc_v = sr(curl_v + grad_div_v)
+        if u_mask is not None:
+            visc_u = sr(visc_u * _bm(u_mask))
+        if v_mask is not None:
+            visc_v = sr(visc_v * _bm(v_mask))
+        return visc_u, visc_v
 
     # 1. e3-weighted divergence at T-points: divergence_cgrid on the
     #    thickness-weighted faces reproduces NEMO's e2u*e3u*u / e1v*e3v*v
     #    flux sum exactly (SAME e1/e2 face metrics); ahmt/e3t is the outer
     #    scale (h90:27-29).
-    div_e3 = divergence_cgrid(h_u * u_eff, h_v * v_eff, grid)
+    div_e3 = divergence_cgrid(e3u_kbb * u_eff, e3v_kbb * v_eff, grid)
     if mask is not None:
         div_e3 = div_e3 * _bm(mask)
-    h_k_safe = jnp.where(h_k > 0.0, h_k, 1.0)  # dry T-cell: div_e3 already 0
+    h_k_safe = jnp.where(e3t_kbb > 0.0, e3t_kbb, 1.0)
     zdiv = div_e3 * _bc(ahmt) / h_k_safe
 
     # 2. e3-weighted vorticity at F-points: curl_vertex_cgrid is NEMO's
@@ -1606,7 +1714,7 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
         vmask = (vertex_mask if vertex_mask is not None
                  else compute_vertex_mask(mask, grid=grid))
         zeta = zeta * _bm(vmask)
-    zcur = zeta * _bc(ahmf) * h_vtx
+    zcur = zeta * _bc(ahmf) * e3f_live
 
     # 3. grad(zdiv) − k×grad(zcur)/e3u,e3v (h90:32-52; curl branch alone
     #    divides by the outer face thickness, div branch does not).
@@ -1614,8 +1722,8 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     grad_div_v = gradient_y_cgrid(zdiv, grid)
     grad_curl_u = gradient_curl_to_u(zcur, grid)
     grad_curl_v = gradient_curl_to_v(zcur, grid)
-    h_u_safe = jnp.where(h_u > 0.0, h_u, 1.0)   # dry u-face: grad_curl_u masked to 0 below
-    h_v_safe = jnp.where(h_v > 0.0, h_v, 1.0)
+    h_u_safe = jnp.where(e3u_kmm > 0.0, e3u_kmm, 1.0)
+    h_v_safe = jnp.where(e3v_kmm > 0.0, e3v_kmm, 1.0)
 
     visc_u = grad_div_u - grad_curl_u / h_u_safe
     visc_v = grad_div_v + grad_curl_v / h_v_safe
@@ -4276,6 +4384,7 @@ def pv_flux_ene(
     q_boundary: str = "neumann_fill",
     return_operands: bool = False,
     metric_widths: tuple | None = None,
+    metric_reciprocals: tuple | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray] | tuple[
     jnp.ndarray, jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
 ]:
@@ -4337,7 +4446,12 @@ def pv_flux_ene(
     # then zwz /= e3f) so the planetary term also gets the F-point
     # thickness weighting — the two are one operator, not two.
     total_vort = zeta if f_vtx is None else (zeta + f_vtx[..., jnp.newaxis])
-    q = total_vort / jnp.maximum(h_vtx, eps_h)
+    if metric_widths is None:
+        q = total_vort / jnp.maximum(h_vtx, eps_h)
+    else:
+        q = nemo_source_round(
+            nemo_source_round(total_vort)
+            / jnp.maximum(h_vtx, eps_h))
     # Neumann-fill only the RELATIVE part's discontinuity at the coast; the
     # planetary f is smooth everywhere, so fill the whole q (idempotent at
     # interior wet vertices).
@@ -4349,13 +4463,19 @@ def pv_flux_ene(
             f"got {q_boundary!r}")
 
     # --- 2. Mass fluxes at u/v faces (h·u, h·v), closed faces → 0 ---
-    F_u = h_u * u * u_mask_3d            # (n_lat, n_lon+1, nlev)
-    F_v = h_v * v * v_mask_3d            # (n_lat+1, n_lon, nlev)
-    if metric_widths is not None:
+    if metric_widths is None:
+        F_u = h_u * u * u_mask_3d        # (n_lat, n_lon+1, nlev)
+        F_v = h_v * v * v_mask_3d        # (n_lat+1, n_lon, nlev)
+    else:
         e1u, e1v, e2u, e2v = metric_widths
-        # dynvor.F90:518-522 materializes these metric-complete operands.
-        F_u = jnp.asarray(e2u)[..., jnp.newaxis] * F_u
-        F_v = jnp.asarray(e1v)[..., jnp.newaxis] * F_v
+        # dynvor.f90:559-562: preserve the written left association
+        # (metric*e3)*velocity.  The masks remain an exact zero/one closure.
+        F_u = nemo_source_round(
+            nemo_source_round(jnp.asarray(e2u)[..., jnp.newaxis] * h_u) * u)
+        F_v = nemo_source_round(
+            nemo_source_round(jnp.asarray(e1v)[..., jnp.newaxis] * h_v) * v)
+        F_u = nemo_source_round(F_u * u_mask_3d)
+        F_v = nemo_source_round(F_v * v_mask_3d)
 
 
     # --- 3. u-face flux: ¼ ( q_S·(F_v_SW+F_v_SE) + q_N·(F_v_NW+F_v_NE) ) ---
@@ -4385,9 +4505,16 @@ def pv_flux_ene(
     _F_v_N_W = jnp.roll(F_v_north, 1, axis=1)
     F_v_S_W = jnp.concatenate([_F_v_S_W, _F_v_S_W[:, 0:1, :]], axis=1)
     F_v_N_W = jnp.concatenate([_F_v_N_W, _F_v_N_W[:, 0:1, :]], axis=1)
-    diag_vortcor_u = 0.25 * (
-        q_S_u * (F_v_S_W + F_v_S_E) + q_N_u * (F_v_N_W + F_v_N_E)
-    )
+    if metric_widths is None:
+        diag_vortcor_u = 0.25 * (
+            q_S_u * (F_v_S_W + F_v_S_E) + q_N_u * (F_v_N_W + F_v_N_E)
+        )
+    else:
+        zy1 = nemo_source_round(F_v_S_W + F_v_S_E)
+        zy2 = nemo_source_round(F_v_N_W + F_v_N_E)
+        _u_inner = nemo_source_round(
+            nemo_source_round(q_S_u * zy1)
+            + nemo_source_round(q_N_u * zy2))
 
     # --- 4. v-face flux: -¼ ( q_W·(F_u_SW+F_u_NW) + q_E·(F_u_SE+F_u_NE) ) ---
     # q[:, :-1]/q[:, 1:] are the west/east vertices of each v-face.
@@ -4403,13 +4530,29 @@ def pv_flux_ene(
     F_u_S_E = F_u_south[:, 1:, :]
     F_u_N_W = F_u_north[:, :-1, :]
     F_u_N_E = F_u_north[:, 1:, :]
-    diag_vortcor_v = -0.25 * (
-        q_W_v * (F_u_S_W + F_u_N_W) + q_E_v * (F_u_S_E + F_u_N_E)
-    )
+    if metric_widths is None:
+        diag_vortcor_v = -0.25 * (
+            q_W_v * (F_u_S_W + F_u_N_W) + q_E_v * (F_u_S_E + F_u_N_E)
+        )
+    else:
+        zx1 = nemo_source_round(F_u_S_W + F_u_N_W)
+        zx2 = nemo_source_round(F_u_S_E + F_u_N_E)
+        _v_inner = nemo_source_round(
+            nemo_source_round(q_W_v * zx1)
+            + nemo_source_round(q_E_v * zx2))
 
     if metric_widths is not None:
-        diag_vortcor_u = diag_vortcor_u / jnp.asarray(e1u)[..., jnp.newaxis]
-        diag_vortcor_v = diag_vortcor_v / jnp.asarray(e2v)[..., jnp.newaxis]
+        if metric_reciprocals is None:
+            r1_e1u = nemo_source_round(1.0 / jnp.asarray(e1u))
+            r1_e2v = nemo_source_round(1.0 / jnp.asarray(e2v))
+        else:
+            r1_e1u, r1_e2v = metric_reciprocals
+        diag_vortcor_u = nemo_source_round(
+            nemo_source_round(0.25 * jnp.asarray(r1_e1u)[..., jnp.newaxis])
+            * _u_inner)
+        diag_vortcor_v = -nemo_source_round(
+            nemo_source_round(0.25 * jnp.asarray(r1_e2v)[..., jnp.newaxis])
+            * _v_inner)
 
     if return_operands:
         # WRITE-only oracle-fidelity seam.  Return the exact intermediates

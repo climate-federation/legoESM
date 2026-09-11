@@ -31,6 +31,7 @@ from legoesm.ocean.dynamics.latlon_cgrid_operators import (
     pv_flux_ene,
     pv_flux_al81_partial_cell,
     curl_vertex_cgrid,
+    nemo_vor_ene_vorticity_cgrid,
 )
 
 # Reuse the exact flat-bottom state + energy budget from the AL81 test.
@@ -152,6 +153,43 @@ def test_ene_differentiable():
 
     g = jax.jit(jax.grad(loss))(state["u"])
     assert np.all(np.isfinite(np.asarray(g)))
+
+
+def test_ene_nemo_metric_source_route_eager_jit_grad_and_red_operand():
+    """The compiled ENE metric route is eager/JIT/AD safe and reciprocal-live."""
+    state = _build_test_state(n_lat=8, n_lon=12, partial_cells=False, seed=13)
+    from legoesm.grids.latlon import ensure_geometry
+    grid = ensure_geometry(state["grid"])
+    widths = (grid.dx_u, grid.dx_v, grid.dy_u, grid.dy_v)
+    reciprocals = (1.0 / grid.dx_u, 1.0 / grid.dy_v)
+
+    def operator(u, reciprocal_pair):
+        zeta = nemo_vor_ene_vorticity_cgrid(u, state["v"], grid)
+        return pv_flux_ene(
+            zeta, state["h_vtx"], state["h_v"], state["v"],
+            state["h_u"], u, state["u_mask_3d"], state["v_mask_3d"],
+            state["vtx_mask"], q_boundary="nemo_live",
+            metric_widths=widths, metric_reciprocals=reciprocal_pair,
+        )
+
+    eager = operator(state["u"], reciprocals)
+    compiled = jax.jit(operator)(state["u"], reciprocals)
+    for left, right in zip(eager, compiled, strict=True):
+        assert np.all(np.isfinite(np.asarray(left)))
+        assert np.allclose(np.asarray(left), np.asarray(right), rtol=1e-14, atol=0.0)
+
+    def loss(u):
+        du, dv = operator(u, reciprocals)
+        return jnp.sum(du ** 2) + jnp.sum(dv ** 2)
+
+    grad = jax.jit(jax.grad(loss))(state["u"])
+    assert np.all(np.isfinite(np.asarray(grad)))
+
+    bumped = np.asarray(reciprocals[0]).copy()
+    bumped[2, 3] = np.nextafter(bumped[2, 3], np.inf)
+    planted = operator(state["u"], (jnp.asarray(bumped), reciprocals[1]))
+    assert any(not np.array_equal(np.asarray(a), np.asarray(b))
+               for a, b in zip(eager, planted, strict=True))
 
 
 def test_bc_pv_flux_rejects_unknown_vorticity_scheme():
