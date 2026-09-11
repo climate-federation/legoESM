@@ -85,6 +85,10 @@ class DuoWindowSpmdComm:
     #: and the per-firing shard_map boundary (B).  Results are WRONG with
     #: this on -- decomposition arm only, never a ladder row.
     entry_refresh = True
+    #: the three substep-entry bundles (state, NH carry, flux capacitors)
+    #: are refreshed in ONE firing; False restores three separate calls,
+    #: for attribution only (both arms bitwise)
+    fuse_entry_refresh = True
     #: set to a list to record every firing at trace time as
     #: (name, kind, shapes) -- the M8 firing census
     firing_log = None

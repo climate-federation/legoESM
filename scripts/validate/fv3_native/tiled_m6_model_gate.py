@@ -102,6 +102,10 @@ def main(argv=None):
                     help="M8-C arm: per-firing pad refresh restricted to "
                          "the face-edge bands of this depth (ng+1 is the "
                          "certified value; ng-1 must FAIL the gate)")
+    ap.add_argument("--unfused-entry-refresh", action="store_true",
+                    help="restore the three separate substep-entry "
+                         "refreshes (bitwise, attribution arm for the "
+                         "fused one)")
     ap.add_argument("--diag-no-entry-refresh", action="store_true",
                     help="DIAGNOSTIC: skip the substep-ENTRY full refresh "
                          "(results are WRONG; splits the residual between "
@@ -274,6 +278,9 @@ def main(argv=None):
     if args.pack_pad_refresh:
         win_model._window_comm.pack_pad_refresh = True
         print("[m6] M8-A arm: packed pad refresh")
+    if args.unfused_entry_refresh:
+        win_model._window_comm.fuse_entry_refresh = False
+        print("[m6] ARM: three separate substep-entry refreshes")
     if args.diag_no_entry_refresh:
         win_model._window_comm.entry_refresh = False
         print("[m6] DIAGNOSTIC ARM: substep-entry refresh OFF -- timing "

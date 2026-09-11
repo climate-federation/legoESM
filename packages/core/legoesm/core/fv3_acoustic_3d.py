@@ -378,11 +378,39 @@ def acoustic_substep_3d(ctx, state: dict, dt, km: int, *,
     # Static branch: with no window bundle the traced program is unchanged.
     wcomm = getattr(tab, "window_comm", None)
     if wcomm is not None:
-        state = wcomm.refresh(state)
+        # The three entry bundles are refreshed in ONE firing (codex
+        # 2026-09-11): the substep-entry refresh measured 21 ms/step of a
+        # 0.219 s step at 54 ranks, three separate shard_map boundaries.
+        # The refresh is a pure copy of neighbour rows into pad rows, so
+        # merging the dicts changes the packed message layout, never a
+        # value.  ATTRIBUTION: comm.fuse_entry_refresh = False restores
+        # the three calls, for an interleaved A/B in one allocation (both
+        # arms bitwise; selects no physics).
+        bundles = {"state": state}
         if nh is not None:
-            nh = wcomm.refresh(nh)
+            bundles["nh"] = nh
         if flux_cap is not None:
-            flux_cap = wcomm.refresh(flux_cap)
+            bundles["flux_cap"] = flux_cap
+        if getattr(wcomm, "fuse_entry_refresh", True):
+            refreshed = wcomm.refresh({
+                (namespace, name): value
+                for namespace, bundle in bundles.items()
+                for name, value in bundle.items()
+            })
+            bundles = {
+                namespace: {
+                    name: refreshed[namespace, name] for name in bundle
+                }
+                for namespace, bundle in bundles.items()
+            }
+        else:
+            bundles = {namespace: wcomm.refresh(bundle)
+                       for namespace, bundle in bundles.items()}
+        state = bundles["state"]
+        if nh is not None:
+            nh = bundles["nh"]
+        if flux_cap is not None:
+            flux_cap = bundles["flux_cap"]
     bd = ctx.bd
     i0 = bd.is_ - bd.isd
     j0 = bd.js - bd.jsd
