@@ -2323,15 +2323,17 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser,
         parser.error("--convective-buoyancy-death-memory requires --convection "
                      "tiedtke (plume buoyancy-death memory is a Tiedtke "
                      "plume-integrator option)")
-    if args.dynamic_albedo and (
-            args.grid_type in ("voronoi", "icosahedral", "mpas_voronoi",
-                               "mpas")
-            or args.discretization in ("spectral", "mpas")):
-        parser.error("--dynamic-albedo is consumed by the coupled physics "
-                     "pipeline (cubed_sphere / latlon only); the MPAS and "
-                     "spectral standalone radiation paths use the "
-                     "RRTMGPConfig constant surface albedo and would "
-                     "silently ignore the flag.")
+    # MPAS implements the zenith ocean curve in its own daily surface-albedo
+    # assembly, so only the SPECTRAL standalone path still has nowhere to put
+    # it.  Narrowed rather than deleted: a flag that is silently ignored is the
+    # defect this guard exists to prevent.
+    if args.dynamic_albedo and args.discretization == "spectral":
+        parser.error("--dynamic-albedo has no effect on the SPECTRAL "
+                     "standalone radiation path, which uses the RRTMGPConfig "
+                     "constant surface albedo and would silently ignore the "
+                     "flag. It is supported on cubed_sphere/latlon (coupled "
+                     "physics pipeline) and on MPAS (daily tile-blended "
+                     "surface albedo).")
     if args.use_multilayer_land and args.discretization == "spectral":
         parser.error("--use-multilayer-land runs inside the coupled physics "
                      "pipeline or the MPAS driver loop; the SPECTRAL "

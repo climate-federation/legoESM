@@ -66,3 +66,23 @@ def test_is_differentiable():
     d = g(jnp.deg2rad(jnp.asarray([10.0, 50.0, 80.0])))
     assert np.all(np.isfinite(np.asarray(d)))
     assert np.any(np.abs(np.asarray(d)) > 0.0)
+
+
+def test_the_launcher_accepts_the_flag_on_mpas_and_still_refuses_spectral():
+    """The guard is narrowed, not deleted: MPAS now implements the curve, the
+    spectral standalone path still has nowhere to put it and a silently ignored
+    flag is exactly what the guard exists to prevent."""
+    import sys
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[2] / "scripts" / "run"))
+    from run_amip import build_arg_parser, _postprocess_args, build_config_from_args
+
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--grid-type", "voronoi",
+        "--discretization", "mpas", "--dynamic-albedo"]), parser))
+    assert cfg.dynamic_albedo is True
+
+    with pytest.raises(SystemExit):
+        _postprocess_args(parser.parse_args([
+            "--dataset", "analytical", "--discretization", "spectral",
+            "--dynamic-albedo"]), parser)
