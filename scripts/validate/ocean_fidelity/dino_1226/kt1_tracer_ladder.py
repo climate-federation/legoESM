@@ -828,6 +828,15 @@ def stages12(R: dict, plant_shift: bool,
               "NEMO's Kbb-evaluated tra_ldf is not among them")
         return bad + 1
     iT, iS = wT[-1], wS[-1]
+    # The plant's bar is the ratio the CORRECT call gives on THIS commit,
+    # measured here, never a constant copied from a previous round -- a
+    # hardcoded 0.9966 silently went stale the moment the e3w fix landed.
+    _true_ratio = {}
+    for tag, idx, key in (("T", iT, "ttrd_ldf"), ("S", iS, "strd_ldf")):
+        _n = np.nan_to_num(O3(key))
+        _l = calls[idx][1]
+        _d = float(_n[wet3] @ _n[wet3])
+        _true_ratio[tag] = float(_l[wet3] @ _n[wet3]) / _d if _d else float("nan")
     if plant_ldf_call:
         # The Nnn advective pass, which is NOT what NEMO's tra_ldf computes.
         wT = [i for i in range(len(calls)) if i not in wT and i not in wS][:1]
@@ -865,8 +874,11 @@ def stages12(R: dict, plant_shift: bool,
         # the identification is load-bearing (S proves it) AND the temperature
         # row happens not to depend on it -- both facts are printed rather
         # than collapsed into one verdict.
-        moved = [abs(r - 0.9966) > 0.01 for r in _ratios]
-        print(f"  LDF-CALL PLANT: ratios {['%.6f' % r for r in _ratios]}; "
+        moved = [abs(r - t) > 0.01 for r, t in
+                 zip(_ratios, (_true_ratio["T"], _true_ratio["S"]))]
+        print(f"  LDF-CALL PLANT: ratios {['%.6f' % r for r in _ratios]} "
+              f"against the correct call's "
+              f"{['%.6f' % _true_ratio[t] for t in ('T', 'S')]}; "
               f"moved: {moved}")
         if not any(moved):
             print("  ^^ scoring the wrong call gives the same answer on EVERY "

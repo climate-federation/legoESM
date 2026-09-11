@@ -2182,6 +2182,41 @@ def nemo_iso_w_kappa_sums(aht, umask, vmask, aht_v=None):
     return ksum_u, cnt_u, ksum_v, cnt_v
 
 
+def nemo_iso_a33_e3w(z_coord, e3t, jacobian, dtype):
+    """NEMO's ``e3w(:,:,:,Kmm)`` in ``traldf_iso_a33``'s "above" convention.
+
+    ``traldf_iso.f90:831-833`` squares ``e3w_3d(ji,jj,jk)*(1+r3t(ji,jj,Kmm))``
+    for ``akz`` and ``:285`` divides the explicit A33 flux by the same object
+    one level down, with (``domzgr_substitute.h90:131``, ``:108``)
+
+        e3w(i,j,k,t) = e3w_0(i,j,k) * (1 + r3t(i,j,t))
+        e3w_0(k)     = gdept_0(k) - gdept_0(k-1)
+
+    the T-POINT DEPTH DIFFERENCE, which on a stretched ladder is NOT the
+    interface midpoint ``0.5*(e3t_k + e3t_{k-1})``.  Resolved through the
+    SINGLE shared resolver the implicit tracer and momentum solves already
+    use; that resolver returns ``None`` only for a coordinate whose T points
+    ARE the midpoints, and raises rather than silently substituting for one
+    where they are not — so the midpoint arm below is reached only where it
+    is the same object.
+
+    ONE implementation, called by BOTH sides of the explicit/implicit A33
+    split (the MSC block of
+    :func:`nemo_iso_lap_tracer_tendency_latlon_cgrid` and
+    :func:`compute_isoneutral_K33_latlon`), so the two ``akz`` can never
+    disagree — the same reason ``nemo_iso_a33`` itself is shared (#1226).
+    """
+    from legoesm.ocean.physics.vertical_mixing import nemo_e3w0_reference
+    raw = nemo_e3w0_reference(z_coord)
+    if raw is None:
+        e3w = 0.5 * (jnp.roll(e3t, +1, 2) + e3t)
+        # surface w-point (unused downstream: wslp(0) = 0)
+        return e3w.at[:, :, 0].set(e3t[:, :, 0])
+    # jacobian is the (1 + r3t) stretch e3t itself already carries.
+    return (jnp.asarray(raw, dtype=dtype)[..., :e3t.shape[-1]]
+            * jnp.asarray(jacobian, dtype=dtype)[:, :, jnp.newaxis])
+
+
 def nemo_iso_a33(aht, umask, vmask, wmask, wslpi, wslpj,
                  e1u_c, e2v_c, e3w2, dt=None, msc: bool = False, aht_v=None,
                  evaluation: str = "normalized_square"):
@@ -2605,29 +2640,9 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         # operand.  Production dispatch remains None until its registered
         # stage-22/23 bracket owns the substitution.
         if msc_e3w_override is None:
-            # traldf_iso.f90:285 divides by e3w(ji,jj,jk+1,Kmm) and :831-832
-            # squares the same object for akz, with (domzgr_substitute.h90:131)
-            #   e3w(i,j,k,t) = e3w_0(i,j,k) * (1 + r3t(i,j,t))
-            # and e3w_0(k) = gdept_0(k) - gdept_0(k-1): the T-POINT DEPTH
-            # DIFFERENCE, which on a stretched ladder is NOT the interface
-            # midpoint 0.5*(e3t_k + e3t_{k-1}).  Resolved through the SINGLE
-            # shared resolver the implicit solves already use, which returns
-            # None only for a coordinate whose T points ARE the midpoints (and
-            # raises rather than silently substituting for one where they are
-            # not) — so the midpoint arm below is reached only where it is the
-            # same object.
-            from legoesm.ocean.physics.vertical_mixing import (
-                nemo_e3w0_reference)
-            _raw_e3w0 = nemo_e3w0_reference(z_coord)
-            if _raw_e3w0 is None:
-                e3w_ab = 0.5 * (jnp.roll(e3t, +1, ax_z) + e3t)
-                e3w_ab = e3w_ab.at[:, :, 0].set(
-                    e3t[:, :, 0])   # surface w (unused: wslp(0)=0)
-            else:
-                # jacobian is this operator's (1 + r3t) stretch, the same
-                # factor e3t above already carries.
-                e3w_ab = (jnp.asarray(_raw_e3w0, dtype=dtype)[..., :q.shape[-1]]
-                          * jacobian[:, :, jnp.newaxis])
+            # traldf_iso.f90:285 / :831-833, through the ONE resolver the
+            # implicit K33 side calls too, so the split cannot diverge.
+            e3w_ab = nemo_iso_a33_e3w(z_coord, e3t, jacobian, dtype)
         else:
             e3w_ab = jnp.asarray(msc_e3w_override, dtype=dtype)
             if e3w_ab.shape != q.shape:
@@ -4576,8 +4591,9 @@ def compute_isoneutral_K33_latlon(
         # z*-scaled thickness with the SAME jacobian as the operator's e3t
         # (from the shared density_jacobian thread).
         _e3t = z_coord.dz_ref[None, None, :] * _J[:, :, jnp.newaxis]
-        _e3w = 0.5 * (jnp.roll(_e3t, +1, 2) + _e3t)
-        _e3w = _e3w.at[:, :, 0].set(_e3t[:, :, 0])
+        # Same e3w object as the explicit A33 flux (traldf_iso.f90:831-833):
+        # the two sides of the split share one resolver by construction.
+        _e3w = nemo_iso_a33_e3w(z_coord, _e3t, _J, T.dtype)
         _msc = bool(getattr(cfg, "msc_stabilize", False))
         _, _akz = nemo_iso_a33(
             _aht, _um3, _vm3, _wm3, _wi, _wj,
