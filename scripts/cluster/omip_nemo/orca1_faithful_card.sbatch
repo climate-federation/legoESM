@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=orca1_faith
 #SBATCH --account=glab
-#SBATCH --partition=gpu
+#SBATCH --partition=glab1
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=180G
-#SBATCH --time=12:00:00
+#SBATCH --mem=96G
+#SBATCH --time=24:00:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/orca1_faith_%j.out
 #
 # THE ORCA1-FAITHFUL PRODUCTION CARD.
