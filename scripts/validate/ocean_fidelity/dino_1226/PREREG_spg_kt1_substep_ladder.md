@@ -107,3 +107,110 @@ and salinity are functions of depth and LATITUDE only (`usrdef_istate.F90:173-17
 the zonal pressure gradient really is exactly zero at kt=1, while `vtrd_hpg` is 2.49e-06.
 Recorded because the reverse error — publishing a number built on a zero-filled bucket —
 is one this campaign has made before.
+
+---
+
+## ROUND 42 — the rank-tagged record arrived, and the table above was scored
+
+The re-run this document said it was blocked on exists
+(`/data/abyssal/dbalwada/dino_fromrest_y1/nemo_kt1_rankdump`, 720 files =
+16 ranks x 45 substeps). `spg_kt1_barotropic_ladder.py` now stitches it and
+scores R1 and R3 substep by substep.
+
+### The instrument was calibrated first, and it is not a formality
+
+Two statements of NEMO's, rebuilt from NEMO's own dumped arrays with legoESM
+absent, both at **0 cells unequal**:
+
+| check | statement | result |
+|---|---|---|
+| C1 | the swap, `dynspg_ts.f90:830`/`:838` — substep n+1's ENTRY must be substep n's EXIT | 0 of 44 joins x 3 fields |
+| C2 | `ts_bck_interp`, `:662-665` — `zsshp2_e = za0*ssha_e + za1*sshn_e + za2*sshb_e + za3*sshbb_e` | 0 of 45 substeps |
+
+C2 is the one that matters. It fails if a tile is placed at the wrong offset,
+if a header field is read in the wrong order, if a substep is mis-numbered, or
+if the two `zsshp2_e` assignments are confused (`:574` writes the AB3 mid-step
+eta and `:664` OVERWRITES it; the dump at `:926` sees only the second).
+`--plant-reader` moves one cell of C2's own prediction by 1 ulp and the gate
+then refuses to score anything below it.
+
+**C2 also MEASURES `ll_init`.** The identity only closes if substeps 1 and 2
+use the forward-backward and AB2-AM3 ramp rows, which is the `ll_init = .TRUE.`
+branch of `ts_bck_interp`. It does close, at 0 cells.
+
+### How the prediction resolved
+
+The prereg predicted the first break at substep 1, statement N13, because from
+rest the substep collapses to the frozen forcing. **That is what happened**, and
+the entry rows at substep 1 are 0 cells, so legoESM's operator ran on NEMO's own
+operands and the break is the operator's inputs, not inherited drift.
+
+But the break is NOT in the loop. Both sides satisfy their own closed identity
+at 0 cells — NEMO's `ua_e(1) = rDt_e*zu_frc` and legoESM's
+`u_exit(1) = dt_s*slow_u` — so `slow_u/slow_v` IS `zu_frc/zv_frc`, and the
+substep-1 residual is the forcing arriving different, multiplied by `rDt_e`:
+
+| row | cells != | max\|d\| | NEMO's own rms | ratio |
+|---|---|---|---|---|
+| R1 `zu_frc` | 8568 | 6.617e-23 | 2.418e-08 | 2.7e-15 (~12 ulp) |
+| R1 `zv_frc` | 9868 | 8.414e-11 | 1.414e-06 | **6.0e-05** |
+| R3 substep 1 `v_exit` | 9868 | 9.877e-09 | — | = 117.391 x 8.414e-11 exactly |
+
+**The barotropic loop's own statements are exonerated at substep 1.** The gap
+is almost entirely MERIDIONAL, and at kt=1 from rest `utrd_hpg` is identically
+zero while `vtrd_hpg` is 2.49e-06 — so the owner is the depth-weighted mean of
+the baroclinic momentum RHS that builds `zv_frc`, upstream of `dyn_spg_ts`.
+Localising it further needs a rank-tagged `dynhpg` dump; this record's
+`hpg_dump_dv.bin` is written from `dynhpg.F90`, which the rank-tagging regex
+does not reach, so it is still a 16-rank interleave. NOT MEASURED, named.
+
+### Retractions (Rule 11)
+
+**3. R0 is no longer the owner, and this document said it was.** The section
+above ("The owner, and what the evidence can and cannot say") attributed the
+substep-1 break to the layer thicknesses: `e3t_1d` vs `e3t_0`, "up to 70.4 m
+per level on 94134 of 342134 wet cells". That gap is CLOSED — R0a, R0b and R0c
+all read 0 cells unequal on the current branch. The residual survived the fix,
+so the thicknesses were never what it was made of.
+
+**4. "the split-explicit solver's SECOND step is the named owner" is not
+supported at kt=1.** The barotropic loop reproduces NEMO's arithmetic exactly
+given NEMO's operands; what it is handed differs. Whether the kt=2 gap has a
+second, independent owner inside the loop is a separate question, and round 42
+found one that is NOT a history: see below.
+
+### The kt=2 window (measured this round, in `kt2_leapfrog_gate.py`)
+
+`ll_fw_start` is TRUE only at `kt == nit000` with the Euler start
+(`dynspg_ts.f90:228-232`); at `kt == nit000 + 1` with `ln_bt_fw = .FALSE.` NEMO
+RESETS it and calls `ts_wgt` again (`:245-250`), moving the boxcar centre from
+`nn_e = 23` to `2*nn_e = 46`.
+
+| | substeps | primary boxcar nonzero on | integrated span |
+|---|---|---|---|
+| NEMO kt=1 | 45 | 1..45 | 5283 s |
+| NEMO kt=2 | **68** | **24..68** | 7983 s |
+| legoESM kt=1 | 45 | 1..45 | 5283 s |
+| legoESM kt=2 | **91** | 1..91 | 10683 s |
+
+Both centre the mean at substep 46 = `2*rn_Dt`, so the mean is at the right
+TIME; the window is twice as WIDE and runs 23 substeps past NEMO's end.
+legoESM doubles `n_substeps` 23 -> 46 with the timestep; NEMO holds `nn_e` at
+23 and moves the centre. `rDt_e` agrees (117.391 s) because
+`2*2700/46 == 2700/23` — the timestep is right by arithmetic accident while
+the COUNT and the WINDOW are not.
+
+NOT LANDED: the fix is a numerics change to the shared barotropic module that
+the GYRE RK3 card also reaches, and it is this round's one open decision.
+
+### Decision 33 (carrying NEMO's barotropic histories in NEMO's form)
+
+**Zero-sized on this card, read from the oracle and measured.**
+`ll_bt_av = .TRUE.` whenever `nn_bt_flt /= 3` (`dynspg_ts.f90:208-209`) and
+`ll_init = ll_bt_av` (`:214`) — both OUTSIDE the `IF( kt == nit000 )` block, so
+`:463-470` re-zeroes `sshb_e/sshbb_e/ub_e/ubb_e/vb_e/vbb_e` on EVERY step.
+There is nothing to carry. legoESM already matches: the `nemo_boxcar_ab3`
+branch sets `_ab3_hist = None` and `ramp=True` every step
+(`barotropic_latlon_cgrid.py:2366-2374`). Measured at kt=1 by C2 above; the
+kt=2 confirmation is prediction P2 of
+`nemo_dino_kt2_rankdump/run.sh`, which is prepared and not run.

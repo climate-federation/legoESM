@@ -46,9 +46,12 @@ through XIOS with DOMAIN attributes and are not raced:
       average
 
 Both R4 rungs are the loop's EXIT, so a break there says "somewhere in the
-45 substeps" and no more.  Localising it needs the per-substep record that
-section 1 shows this run cannot provide.  ``scripts/validate/ocean_fidelity/dino_1226/nemo_dino_kt1_rankdump/run.sh`` acquires it, as a makenemo
-CONFIG COPY that cannot write inside the read-only oracle.
+45 substeps" and no more.  Localising it needs the per-substep record, which
+``nemo_dino_kt1_rankdump/run.sh`` acquires as a makenemo CONFIG COPY that
+cannot write inside the read-only oracle.  WHEN THAT RECORD IS THE
+``--run-dir``, section 4 runs and scores R1 and R3 substep by substep; the
+audit decides which of the two paths this gate takes, and neither is
+hard-coded.
 
 REMOVED 2026-09-10, and it is worth saying why rather than letting it vanish
 from the diff: this script used to EMIT that re-run itself, and the script it
@@ -91,7 +94,7 @@ import numpy as np
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
 sys.path.insert(0, _HERE)
-from rebuild_nemo_restart import rebuild                       # noqa: E402
+from rebuild_nemo_restart import rebuild  # noqa: E402
 
 RUN_KT1 = ("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/"
            "RUN_FROMREST_KT1")
@@ -99,6 +102,7 @@ RN_DT = 2700.0                      # namdom rn_Dt
 R1_DT = 1.0 / RN_DT                 # stpmlf.F90:131-133 on the Euler step
 NN_E = 23                           # ln_bt_auto resolved value (ocean.output:1102)
 ICYCLE = 45                         # forward-start window (ocean.output:1265)
+_RDT_E = RN_DT / NN_E               # dynspg_ts.f90:1203, rn_Dt not rDt
 
 
 # ---------------------------------------------------------------- section 1
@@ -289,14 +293,333 @@ class Row:
                 print(f"{'':38s}  needs: {r['reason']}")
                 continue
             fl = "-" if r["floor"] is None else f"{r['floor']:13.4e}"
+            rm = "-" if r["rms"] is None else f"{r['rms']:13.4e}"
             print(f"{r['name']:38s}{r['cells']:>10d}{r['maxabs']:13.4e}"
-                  f"{r['rms']:13.4e}{fl:>13s}  {r['status']}")
+                  f"{rm:>13s}{fl:>13s}  {r['status']}")
+
+
+# ---------------------------------------------------------------- section 4
+#: NEMO's half-step-back interpolation coefficients, read from
+#: ``ts_bck_interp`` (dynspg_ts.f90, the SUBROUTINE near the end of the file)
+#: for this card's ``rn_bt_alpha = 0`` (namelist_cfg:360).  ``ll_init`` is
+#: TRUE on the Euler first step (stpmlf.f90:241), so the jn=1 and jn=2 rows
+#: are the forward-backward and AB2-AM3 ramps and every later substep is
+#: AB3-AM4.  Transcribed, not derived: a coefficient guessed here would make
+#: the calibration below fail for the wrong reason.
+_BCK = {1: (1.0, 0.0, 0.0, 0.0),
+        2: (1.0833333333333, -0.1666666666666, 0.0833333333333, 0.0)}
+_BCK_AB3AM4 = (0.614, 0.285, 0.088, 0.013)
+
+
+def _load_stitch():
+    """``stitch`` from the rank-tagged record's own reader, not a second copy.
+
+    RULE 4 (search before you build): the tile placement, the header parsing
+    and the double-cover check already exist in
+    ``nemo_dino_kt1_rankdump/read_rankdump.py`` and are shared with the kt=1
+    slope record.  A second implementation here could drift from it, and the
+    placement rule is exactly the part that must not.
+    """
+    import importlib.util
+    p = os.path.join(_HERE, "nemo_dino_kt1_rankdump", "read_rankdump.py")
+    if not os.path.exists(p):                              # pragma: no cover
+        raise SystemExit(f"the rank-dump reader is missing: {p}")
+    spec = importlib.util.spec_from_file_location("_read_rankdump", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.stitch
+
+
+def stitch_all(run_dir: str):
+    """Every substep of the rank-tagged record, stitched, in substep order."""
+    stitch = _load_stitch()
+    names = sorted(glob.glob(os.path.join(run_dir, "substep_r*_s*.bin")))
+    steps = sorted({int(os.path.basename(t).split("_s")[1][:-4])
+                    for t in names})
+    if steps != list(range(1, len(steps) + 1)):
+        raise SystemExit(f"substeps present are {steps} -- not 1..N")
+    return [stitch(run_dir, n) for n in steps]
+
+
+def nemo_self_calibration(subs, twet, uwet, vwet, tab, plant=False):
+    """Rebuild NEMO's substep n+1 operands from NEMO's substep n, in NEMO's
+    own numbers.  legoESM does not appear in this section at all.
+
+    Two statements, both transcribed:
+
+    * the SWAP, dynspg_ts.f90:830 ``un_e = ua_e`` and :838 ``sshn_e = ssha_e``
+      (with :828/:836 rotating the older levels one slot down).  So substep
+      n+1's ENTRY must be substep n's EXIT, bit for bit.
+    * the HALF-STEP BACK INTERPOLATION, dynspg_ts.f90:662-665
+      ``zsshp2_e = za0*ssha_e + za1*sshn_e + za2*sshb_e + za3*sshbb_e``
+      where the swap makes ``sshb_e(n) = sshn_e(n-1)`` and
+      ``sshbb_e(n) = sshn_e(n-2)``, both zero before they exist
+      (:464-467 under ``ll_init``).
+
+    WHY THIS IS THE CALIBRATION AND NOT A FORMALITY (Rule 3).  It is the only
+    check in this gate that can fail because the READER is wrong: a tile
+    placed at the wrong offset, a header field read in the wrong order, a
+    substep mis-numbered, or the two ``zsshp2_e`` assignments confused
+    (:574 writes the AB3 mid-step eta, :664 OVERWRITES it with this one, and
+    the dump at :926 sees only the second) all break it.  If it does not read
+    0 cells, nothing below it can be believed.
+    """
+    n = len(subs)
+    swap_bad = bck_bad = 0
+    _planted = False
+    swap_first = bck_first = None
+    swap_max = bck_max = 0.0
+    for i in range(n):
+        ssha, sshn = subs[i]["ssha_e"], subs[i]["sshn_e"]
+        sshb = subs[i - 1]["sshn_e"] if i >= 1 else np.zeros_like(sshn)
+        sshbb = subs[i - 2]["sshn_e"] if i >= 2 else np.zeros_like(sshn)
+        za = _BCK.get(i + 1, _BCK_AB3AM4)
+        pred = za[0] * ssha + za[1] * sshn + za[2] * sshb + za[3] * sshbb
+        if plant:
+            # A NONZERO cell, deliberately.  nextafter(0.0) is 4.94e-324, so
+            # planting into a zero would be detected by a comparison that
+            # only distinguishes zero from subnormal -- a much weaker claim
+            # than "one ulp of a live value is visible".  Substep 1's
+            # zsshp2_e is za0*ssha_e and ssha_e(1) is identically zero from
+            # rest, so the first substep with a nonzero prediction is used.
+            nz = (np.argwhere(twet & (pred != 0.0))
+                  if not _planted else np.empty((0, 2), int))
+            if nz.size:
+                _planted = True
+                pred = pred.copy()
+                pred[nz[0][0], nz[0][1]] = np.nextafter(
+                    pred[nz[0][0], nz[0][1]], np.inf)
+        bad = int((pred[twet] != subs[i]["zsshp2_e"][twet]).sum())
+        if bad:
+            bck_bad += bad
+            bck_first = bck_first if bck_first is not None else i + 1
+            bck_max = max(bck_max, float(np.abs(
+                (pred - subs[i]["zsshp2_e"])[twet]).max()))
+        if i + 1 < n:
+            for k_exit, k_entry, m in (("ssha_e", "sshn_e", twet),
+                                       ("ua_e", "un_e", uwet),
+                                       ("va_e", "vn_e", vwet)):
+                d = subs[i][k_exit][m] != subs[i + 1][k_entry][m]
+                if d.any():
+                    swap_bad += int(d.sum())
+                    swap_first = swap_first if swap_first is not None else i + 1
+                    swap_max = max(swap_max, float(np.abs(
+                        (subs[i][k_exit] - subs[i + 1][k_entry])[m]).max()))
+    print(f"  C1 swap identity        exit(n) == entry(n+1) over {n - 1} "
+          f"joins x 3 fields: {swap_bad} cells unequal"
+          + (f", first at substep {swap_first}, max|d| {swap_max:.3e}"
+             if swap_bad else ""))
+    print(f"  C2 ts_bck_interp        zsshp2_e rebuilt from NEMO's own "
+          f"sshn_e/ssha_e over {n} substeps: {bck_bad} cells unequal"
+          + (f", first at substep {bck_first}, max|d| {bck_max:.3e}"
+             if bck_bad else ""))
+    if swap_bad or bck_bad:
+        tab.unmeasured(
+            "CALIBRATION (NEMO from NEMO)",
+            "a reader that reproduces NEMO's own statements; it does not, so "
+            "every legoESM row below it is uninterpretable")
+        tab.fail = True
+        return False
+    print("  -> the reader reproduces NEMO's own two statements exactly, so "
+          "the tile placement, the header parsing and the substep ordering "
+          "are not what any residual below is made of")
+    return True
+
+
+#: Per-substep row -> the NEMO statement it stands for.  A row that breaks is
+#: reported as this statement, never as "the barotropic solver".
+_ROW_STATEMENT = {
+    "eta_entry": ("dynspg_ts.f90:489 sshn_e = pssh(Kbb) (substep 1) / "
+                  ":838 sshn_e = ssha_e (the swap)"),
+    "u_entry":   ("dynspg_ts.f90:490 un_e = puu_b(Kbb) (substep 1) / "
+                  ":830 un_e = ua_e (the swap)"),
+    "v_entry":   ("dynspg_ts.f90:491 vn_e = pvv_b(Kbb) (substep 1) / "
+                  ":832 vn_e = va_e (the swap)"),
+    "eta_pgf":   "dynspg_ts.f90:662-665 ts_bck_interp half-step back eta",
+    "eta_exit":  ("dynspg_ts.f90:627 ssha_e = (sshn_e - rDt_e*(ssh_frc + "
+                  "zhdiv))*ssmask"),
+    "u_exit":    ("dynspg_ts.f90:732-736 ua_e = (un_e + rDt_e*(zu_spg + "
+                  "zu_trd + zu_frc))*ssumask"),
+    "v_exit":    ("dynspg_ts.f90:738-742 va_e = (vn_e + rDt_e*(zv_spg + "
+                  "zv_trd + zv_frc))*ssvmask"),
+}
+#: legoESM trace slot -> (NEMO dump name, how to slice the lego array, mask key)
+_ROWS = (("eta_entry", "sshn_e",   "t"),
+         ("u_entry",   "un_e",     "u"),
+         ("v_entry",   "vn_e",     "v"),
+         ("eta_pgf",   "zsshp2_e", "t"),
+         ("eta_exit",  "ssha_e",   "t"),
+         ("u_exit",    "ua_e",     "u"),
+         ("v_exit",    "va_e",     "v"))
+
+
+def frozen_forcing_identity(subs, fro, tr, dt_s, twet, uwet, vwet):
+    """From rest at substep 1 the whole substep collapses to the forcing.
+
+    NEMO, dynspg_ts.f90:732-736 with every other operand identically zero at
+    jn=1 from rest (ssh_frc == 0 makes ssha_e(1) == 0 so zu_spg == 0; the rest
+    seed makes dyn_cor_2D and the bottom stress 0):
+
+        ua_e(1) = rDt_e * zu_frc * ssumask
+
+    legoESM's substep body reduces the same way.  So BOTH sides are checked
+    against their own arithmetic before the two are compared to each other.
+    An R1 row that scored legoESM's ``slow_u`` against NEMO's ``zu_frc``
+    without this is comparing two names, not two quantities -- and this
+    campaign has published a residual built on exactly that mistake before.
+    """
+    out = {}
+    for side, u, v, mu, mv, dt in (
+            ("NEMO", subs[0]["ua_e"], subs[0]["va_e"], uwet, vwet, None),
+            ("lego", np.asarray(tr["u_exit"][0])[:, 1:],
+             np.asarray(tr["v_exit"][0])[1:, :], uwet, vwet, dt_s)):
+        if side == "NEMO":
+            fu, fv, dt = fro["zu_frc"], fro["zv_frc"], None
+        else:
+            fu = np.asarray(tr["slow_u"][0])[:, 1:]
+            fv = np.asarray(tr["slow_v"][0])[1:, :]
+        step = dt if dt is not None else _RDT_E
+        out[side] = (int((step * fu[mu] != u[mu]).sum()),
+                     int((step * fv[mv] != v[mv]).sum()))
+        print(f"  identity  {side}: u_exit(1) == dt*forcing on "
+              f"{out[side][0]} cells unequal (u), {out[side][1]} (v)")
+    return out
+
+
+def _read_tile_header(path):
+    """One tile's self-describing header, through the record's own reader."""
+    import importlib.util
+    q = os.path.join(_HERE, "nemo_dino_kt1_rankdump", "read_rankdump.py")
+    spec = importlib.util.spec_from_file_location("_read_rankdump3", q)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.read_tile(path)["header"]
+
+
+def _render_substeps(per, first, n):
+    """The ordered table: one line per substep, cells unequal per statement."""
+    cols = [r[0] for r in _ROWS]
+    print()
+    print("  " + "jn".rjust(4) + "".join(c.rjust(13) for c in cols))
+    for i in range(n):
+        line = "  " + str(i + 1).rjust(4)
+        for c in cols:
+            line += str(per[i][c][0]).rjust(13)
+        print(line)
+        if first is not None and i + 1 == first[0]:
+            print("  " + "-" * (4 + 13 * len(cols))
+                  + "  <- first non-bit substep")
+    print("  (cells unequal, out of the wet cells of that field's grid; "
+          "0 is the bar)")
+    print()
+    print("  the same table as max|d|, because 'how many cells' cannot say "
+          "whether the gap GROWS across the window:")
+    print("  " + "jn".rjust(4) + "".join(c.rjust(13) for c in cols))
+    for i in [j for j in (0, 1, 2, 4, 9, 19, n - 1) if j < n]:
+        print("  " + str(i + 1).rjust(4)
+              + "".join(f"{per[i][c][1]:13.4e}" for c in cols))
+
+
+def substep_ladder(subs, tr, n_loop, twet, uwet, vwet, plant=False):
+    """legoESM's substep operator against NEMO's, substep by substep.
+
+    WHY THIS IS A GIVEN-INPUTS COMPARISON AND NOT JUST A FREE RUN, which is
+    the whole reason the table is read from the top down: legoESM is driven
+    from its own state, so at substep n its inputs are its own substep n-1
+    outputs.  But the three ENTRY rows are scored too, so at the FIRST substep
+    where any row breaks, the entry rows above it are known to be 0 cells --
+    i.e. that substep's operator ran on NEMO's own operands, bit for bit, and
+    the break belongs to the operator and not to inherited drift.  The gate
+    states which of the two it is rather than leaving it to be assumed; the
+    claim is only made when the entry rows at that substep are in fact 0.
+    """
+    masks = {"t": twet, "u": uwet, "v": vwet}
+    n = min(len(subs), int(n_loop))
+    first = None
+    per = []
+    for i in range(n):
+        row = {}
+        for slot, nemo_name, mk in _ROWS:
+            a = np.asarray(tr[slot][i])
+            a = a[:, 1:] if mk == "u" else (a[1:, :] if mk == "v" else a)
+            if plant and i == 0 and slot == "eta_exit":
+                a = a.copy()
+                q = np.argwhere(twet)[0]
+                a[q[0], q[1]] = np.nextafter(a[q[0], q[1]], np.inf)
+            o = subs[i][nemo_name]
+            m = masks[mk]
+            d = a[m] - o[m]
+            bad = int((~(a[m] == o[m])).sum())     # non-finite counts UNEQUAL
+            row[slot] = (bad, float(np.abs(d).max()) if d.size else 0.0)
+            if bad and first is None:
+                first = (i + 1, slot)
+        per.append(row)
+    return per, first, n
+
+
+def stitch_frozen_forcing(run_dir: str, hdrs):
+    """NEMO's frozen barotropic forcing, stitched from the rank-tagged streams.
+
+    These three streams have NO header of their own -- the writer is the
+    oracle's own (dynspg_ts.f90:441-443) and predates the rank tagging, which
+    only renamed the files.  ``zu_frc``/``zv_frc`` are written over the INNER
+    region ``ji=Nis0..Nie0, jj=Njs0..Nje0``; ``ssh_frc`` over the full local
+    ``(jpi,jpj)``.  So the geometry comes from the SUBSTEP files' headers for
+    the same ranks -- the same per-rank decomposition, read from the record
+    rather than assumed -- and a length that disagrees with it is fatal.
+    """
+    out = {}
+    for name, inner in (("zu_frc", True), ("zv_frc", True),
+                        ("ssh_frc", False)):
+        field = None
+        for rank, h in sorted(hdrs.items()):
+            p = os.path.join(run_dir, f"spg_dump_{name}_r{rank:04d}.bin")
+            if not os.path.exists(p):
+                return {}
+            a = np.fromfile(p, dtype="<f8")
+            gj0, gj1, gi0, gi1, j0, j1, i0, i1 = _tile_slices(h)
+            if field is None:
+                field = np.full((h["jpjglo"] - 2 * h["nn_hls"],
+                                 h["jpiglo"] - 2 * h["nn_hls"]), np.nan)
+            if inner:
+                want = (j1 - j0) * (i1 - i0)
+                if a.size != want:
+                    raise SystemExit(
+                        f"{p}: {a.size} doubles but this rank's own substep "
+                        f"header gives an inner region of {want}")
+                field[gj0:gj1, gi0:gi1] = a.reshape(j1 - j0, i1 - i0)
+            else:
+                if a.size != h["jpi"] * h["jpj"]:
+                    raise SystemExit(
+                        f"{p}: {a.size} doubles but its rank's header says "
+                        f"jpi*jpj = {h['jpi'] * h['jpj']}")
+                field[gj0:gj1, gi0:gi1] = a.reshape(
+                    h["jpj"], h["jpi"])[j0:j1, i0:i1]
+        if field is None or np.isnan(field).any():
+            raise SystemExit(f"{name}: the stitched field has holes")
+        out[name] = field
+    return out
+
+
+def _tile_slices(h):
+    """Placement of one rank's inner block, from the record's own reader."""
+    import importlib.util
+    p = os.path.join(_HERE, "nemo_dino_kt1_rankdump", "read_rankdump.py")
+    spec = importlib.util.spec_from_file_location("_read_rankdump2", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    shape = mod.haloless_shape(h)
+    return mod.tile_slices(h, shape)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-dir", default=RUN_KT1)
     ap.add_argument("--plant", action="store_true")
+    ap.add_argument("--plant-reader", action="store_true",
+                    help="move one cell of the CALIBRATION's own prediction "
+                         "by 1 ulp; C2 must then report cells unequal and "
+                         "the gate must refuse to score anything below it")
     ap.add_argument("--audit-only", action="store_true")
     ap.add_argument("--save-trace", default=None,
                     help="npz path for legoESM's per-substep trajectory")
@@ -381,16 +704,17 @@ def main() -> int:
         # BEFORE set_policy: PrecisionPolicy.fp64() turns x64 on itself, so a
         # check after it can never fire.
         raise SystemExit("JAX x64 is disabled; re-run with JAX_ENABLE_X64=1")
-    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.core.precision import PrecisionPolicy, set_policy
     set_policy(PrecisionPolicy.fp64())                            # Rule 1c
     import jax.numpy as jnp
+    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as ocean_model
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        compute_layer_thickness,
+        min_cell_to_uface,
+    )
     from legoesm.ocean.experiments import dino as dm
     from legoesm.ocean.fidelity import nemo_dino_mesh as ndm
-    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as ocean_model
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel)
-    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
-        compute_layer_thickness, min_cell_to_uface)
 
     pattern = os.path.join(args.run_dir, "DINO_00000001_restart_*.nc")
     if not glob.glob(pattern):
@@ -499,7 +823,8 @@ def main() -> int:
     # no such branch, so section 3's calibration would still pass bit-exactly
     # while the velocity rebuild was wrong.  Refuse rather than report.
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import (
-        nemo_flux_form_update_active)   # noqa: F401  (import-time contract)
+        nemo_flux_form_update_active,  # noqa: F401  (import-time contract)
+    )
     _primary_transport = (
         getattr(mc, "momentum_time_integrator", "euler") == "rk3_ws"
         and getattr(mc, "momentum_advection", "vector_invariant") == "flux_form"
@@ -634,13 +959,78 @@ def main() -> int:
         tab.unmeasured("R1 frozen forcing zu_frc/zv_frc/ssh_frc", reason)
         tab.unmeasured("R3 per-substep ssha_e/ua_e/va_e (x45)", reason)
     else:
-        tab.rows.append(dict(
-            name="R1/R3 spg streams", n=0, cells=None, maxabs=None, rms=None,
-            floor=None, status="UNMEASURED",
-            reason="NOTHING -- section 1 says this record's streams are "
-                   "usable, so these rungs are now scoreable and this gate "
-                   "has not been extended to score them. Extend it."))
-        tab.fail = True
+        # R1/R3 ARE SCOREABLE on a rank-tagged record, and section 4 scores
+        # them.  The calibration runs FIRST and its failure disqualifies
+        # every row below it (Rule 3: never report a residual before the
+        # instrument's noise floor is known -- here the floor is exactly
+        # zero, because the reader must reproduce NEMO's own arithmetic).
+        print()
+        print("=" * 78)
+        print("4. THE PER-SUBSTEP LADDER (rank-tagged record)")
+        print("=" * 78)
+        subs = stitch_all(args.run_dir)
+        hdrs = {}
+        for _t in sorted(glob.glob(os.path.join(args.run_dir,
+                                                "substep_r*_s001.bin"))):
+            _h = _read_tile_header(_t)
+            hdrs[_h["narea"] - 1] = _h
+        print(f"  stitched {len(subs)} substeps x {subs[0]['ranks']} "
+              f"ranks onto {subs[0]['sshn_e'].shape} (haloless global)")
+        print("  CALIBRATION -- NEMO rebuilt from NEMO, legoESM absent:")
+        ok = nemo_self_calibration(subs, twet, uwet, vwet, tab,
+                                   plant=args.plant_reader)
+        if ok:
+            fro = stitch_frozen_forcing(args.run_dir, hdrs)
+            if fro:
+                tab.score("R1 frozen forcing zu_frc",
+                          np.asarray(tr["slow_u"][0])[:, 1:], fro["zu_frc"],
+                          uwet,
+                          floor=float(np.sqrt(np.mean(
+                              fro["zu_frc"][uwet] ** 2))))
+                tab.score("R1 frozen forcing zv_frc",
+                          np.asarray(tr["slow_v"][0])[1:, :], fro["zv_frc"],
+                          vwet,
+                          floor=float(np.sqrt(np.mean(
+                              fro["zv_frc"][vwet] ** 2))))
+                frozen_forcing_identity(
+                    subs, fro, tr, float(np.asarray(cap["dt_s"])),
+                    twet, uwet, vwet)
+                print(f"  ssh_frc is identically zero in the record: "
+                      f"{bool((fro['ssh_frc'] == 0).all())} (no E-P on this "
+                      "card), so it cannot carry a residual")
+            else:
+                tab.unmeasured("R1 frozen forcing zu_frc/zv_frc",
+                               "the rank-tagged spg_dump_z[uv]_frc_r*.bin "
+                               "streams; this record has none")
+            per, first, n_scored = substep_ladder(
+                subs, tr, n_loop, twet, uwet, vwet, plant=args.plant)
+            _render_substeps(per, first, n_scored)
+            if first is None:
+                tab.score(f"R3 per-substep ladder (x{n_scored})",
+                          np.zeros(1), np.zeros(1), np.ones(1, bool))
+            else:
+                _sub, _slot = first
+                entry_clean = all(
+                    per[_sub - 1][k][0] == 0
+                    for k in ("eta_entry", "u_entry", "v_entry"))
+                tab.rows.append(dict(
+                    name=f"R3 substep {_sub} {_slot}",
+                    n=int(twet.sum()), cells=per[_sub - 1][_slot][0],
+                    maxabs=per[_sub - 1][_slot][1], rms=None, floor=None,
+                    status="DEBT"))
+                tab.fail = True
+                print()
+                print(f"  FIRST NON-BIT: substep {_sub}, row {_slot!r}")
+                print(f"    NEMO statement: {_ROW_STATEMENT[_slot]}")
+                print(f"    entry rows at substep {_sub} are 0 cells: "
+                      f"{entry_clean}"
+                      + ("  -> this substep's operator ran on NEMO's OWN "
+                         "operands, so the break is the operator's, not "
+                         "inherited drift"
+                         if entry_clean else
+                         "  -> the operands were ALREADY different entering "
+                         "this substep, so this row is inherited; read the "
+                         "first broken ENTRY row above instead"))
     # R4 -- the loop exit, from race-free restart fields
     floor_u = float(np.sqrt(np.mean((R["ubtacc_aa"][uwet]) ** 2)))
     floor_v = float(np.sqrt(np.mean((R["vbtacc_aa"][vwet]) ** 2)))
