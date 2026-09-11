@@ -896,12 +896,12 @@ def run(
         return host
 
     card = build_nemo_testcase_card(CASE)
-    # NEMO QCO represents E-P through changing volume, with sfx=0
-    # (usrdef_sbc.F90:138-145).  The fix_eta_drift projection is legoESM's
-    # required source-inclusive realization of that real-freshwater contract.
-    cfg = card.recipe.model_config._replace(
-        freshwater_closure="real_freshwater", fix_eta_drift=True
-    )
+    # ONE CARD, ONE PROGRAM.  The card resolves its own freshwater pair --
+    # real_freshwater (NEMO QCO carries E-P as volume with sfx=0,
+    # usrdef_sbc.F90:138-145) with fix_eta_drift=False (decision 35: NEMO has
+    # no global eta projection).  The gate no longer overrides it, so what it
+    # certifies is what the card runs.
+    cfg = card.recipe.model_config
     tke_cfg = cfg.physics.vertical_mixing.tke
     evd_cfg = cfg.physics.convection.enhanced_diffusion
     coverage_checks = {

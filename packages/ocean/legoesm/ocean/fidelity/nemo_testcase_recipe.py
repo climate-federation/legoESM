@@ -238,13 +238,22 @@ def _model_config(
             # pair, the from-rest year harness did not, and the two receipts
             # then disagreed about the same step.
             #
-            # fix_eta_drift is not a second, separable choice.  The model
-            # REFUSES real_freshwater with it off
-            # (ocean_model_latlon_cgrid.py:3006-3018), because the filtered
-            # barotropic substep delivers only the filter average of the eta
-            # source to the tracer thickness.  The pair is one selection.
+            # fix_eta_drift: OFF (decision 35, ASKED, user 2026-09-11: "no
+            # hidden extras -- a fixer could hide model errors").  NEMO adds
+            # emp LOCALLY: sshwzv.f90:137 `pssh(:,:,Kaa) = ( pssh(:,:,Kbb) -
+            # rDt * ( r1_rho0 * emp(:,:) + zhdiv(:,:) ) ) * ssmask(:,:)` and,
+            # inside the barotropic loop, dynspg_ts.f90:553; it has no
+            # global projection anywhere in its free-surface path.  legoESM's
+            # fix_eta_drift is a global uniform eta shift NEMO lacks (Rule 9).
+            # On this card it corrected nothing -- NEMO de-means the card's
+            # own emp (usrdef_sbc.f90:151-158; area mean 5.5e-22 kg/m2/s) --
+            # and seeded a 4.3e-19 m / 1.4e-14 K difference at kt=2 (card
+            # reconciliation receipt, section 7).  The model admits the
+            # unprojected real_freshwater pair only under nemo_literal
+            # barotropic continuity, where the source enters eta by NEMO's
+            # own substep statement; this card selects that continuity below.
             freshwater_closure="real_freshwater",
-            fix_eta_drift=True,
+            fix_eta_drift=False,
             barotropic=config.barotropic._replace(
                 barotropic_diffusion_alpha=0.0,
                 barotropic_face_depth="nemo_ssh_avg",

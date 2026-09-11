@@ -132,8 +132,11 @@ def test_a_harness_handed_a_different_program_is_seen(gate):
     untouched, and the pre-unification table must come back.
     """
     report = gate.config_diff(plant="program-drift")
+    # The legacy program is (virtual_salt_flux, fix_eta_drift=False).  Since
+    # decision 35 the card itself runs fix_eta_drift=False, so the drift the
+    # plant hands over is the closure row alone -- still a visible drift.
     assert sorted(row["field"] for row in report["differing_fields"]) == [
-        "fix_eta_drift", "freshwater_closure"]
+        "freshwater_closure"]
 
 
 @needs_oracle
@@ -144,6 +147,12 @@ def test_flatten_walks_into_nested_configs(gate):
     assert any("." in key for key in leaves), "nested configs were not walked"
     assert "freshwater_closure" in leaves and "fix_eta_drift" in leaves
     assert "lateral_viscosity.A_h" in leaves
+    # Decision 35 (user, 2026-09-11): the certified card carries NO global eta
+    # projection -- NEMO has none (sshwzv.f90:137 is local) -- and E-P stays a
+    # real volume source (usrdef_sbc.f90:160 sets sfx = 0).  A silent flip of
+    # either row puts a fixer back on the card, so both are pinned here.
+    assert leaves["freshwater_closure"] == "real_freshwater"
+    assert leaves["fix_eta_drift"] is False
 
 
 # ----------------------------------------------------------- the oracle floor --

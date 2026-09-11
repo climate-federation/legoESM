@@ -3004,8 +3004,21 @@ class LatLonCGridOceanModel:
         # Under the OLD virtual-salt closure that volume defect was masked
         # chemically by the salt forcing; real mode removes the mask, so the
         # combination must be refused rather than run non-conserving.
+        #
+        # NEMO-IDENTITY EXEMPTION (decision 35, ASKED 2026-09-11).  Under
+        # nemo_literal barotropic continuity the freshwater source enters eta
+        # by NEMO's own substep statement (dynspg_ts.f90:553) and the
+        # baroclinic step receives NEMO's filter average of it -- exactly what
+        # NEMO does, and NEMO has no global projection (sshwzv.f90:137 is
+        # local).  Refusing the unprojected pair there would force a
+        # stabiliser the oracle lacks (Rule 9); the general lane keeps the
+        # guard because its budget claim was measured on that lane.
+        _nemo_literal_continuity = (
+            config.barotropic.barotropic_continuity_evaluation
+            == "nemo_literal")
         if (config.freshwater_closure == "real_freshwater"
-                and not getattr(config, "fix_eta_drift", True)):
+                and not getattr(config, "fix_eta_drift", True)
+                and not _nemo_literal_continuity):
             raise ValueError(
                 'freshwater_closure="real_freshwater" requires '
                 "fix_eta_drift=True: the filtered barotropic substep delivers "
@@ -3014,7 +3027,9 @@ class LatLonCGridOceanModel:
                 "fix_eta_drift is what projects eta onto the source-inclusive "
                 "target. With it off the freshwater volume budget does not "
                 "close (in - out - dV/dt != 0) and, unlike the virtual-salt "
-                "closure, nothing compensates chemically (#1484).")
+                "closure, nothing compensates chemically (#1484). Only "
+                "barotropic_continuity_evaluation='nemo_literal' is exempt: "
+                "it reproduces NEMO's own unprojected budget by design.")
         if config.freshwater_closure not in _valid_fw:
             raise ValueError(
                 f"freshwater_closure must be one of {_valid_fw}, "
