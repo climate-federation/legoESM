@@ -688,6 +688,93 @@ def closure_ablation(*, steps: int = 2) -> dict:
     return report
 
 
+# Which NEMO BUILD wrote each record, and whether that build's transcendentals
+# were vectorised.  The campaign's own arch comment says libmvec's low bits
+# differ from scalar libm's; this checks it against the binaries rather than
+# repeating the sentence.
+ORACLE_BUILDS = {
+    "vectorized_v1": Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/"
+                          "cfgs/GYRE_OMIP_L2_P3/BLD/bin/nemo.exe"),
+    "scalarmath_R41ADVSP": Path(
+        "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+        "GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/bin/nemo.exe"),
+    "scalarmath_YRPERT": Path(
+        "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+        "GYRE_OMIP_L2_P3_SM_YRPERT/BLD/bin/nemo.exe"),
+}
+
+
+def oracle_provenance(*, roots=None) -> dict:
+    """WHICH BUILD wrote each record, and was its math vectorised?
+
+    Two NEMO records of one card cannot both be the oracle, and the answer is
+    not in a receipt -- it is in the binaries.  For each build: the count of
+    libmvec (``_ZGV*``) call sites in its executable, which is 0 exactly when
+    ``-fno-tree-vectorize`` was applied.  For each record: the executable
+    beside it, and whether that matches the ``binary.sha256`` stamped next to
+    it -- a stamp that names a different build than the file beside it is a
+    provenance defect, and one of these has that.
+    """
+    import subprocess
+
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    roots = dict(roots or {
+        "oracle_v1 (ladder gate default)": ORACLE_V1_ROOT,
+        "oracle_v2 (the year, and the certified receipts)": ORACLE_V2_ROOT,
+    })
+    builds = {}
+    for name, exe in ORACLE_BUILDS.items():
+        row = {"path": str(exe), "exists": exe.is_file()}
+        if row["exists"]:
+            row["sha256"] = sha256(exe)
+            dump = subprocess.run(["objdump", "-d", str(exe)],
+                                  capture_output=True, text=True)
+            row["libmvec_call_sites"] = sum(
+                1 for line in dump.stdout.splitlines() if "_ZGV" in line)
+            row["vectorized_transcendentals"] = row["libmvec_call_sites"] > 0
+        builds[name] = row
+    by_sha = {row.get("sha256"): name for name, row in builds.items()
+              if row.get("sha256")}
+    records = {}
+    for name, root in roots.items():
+        root = Path(root)
+        beside = root / "nemo"
+        stamp = root / "binary.sha256"
+        row = {"root": str(root)}
+        row["executable_sha256"] = sha256(beside) if beside.is_file() else None
+        row["build"] = by_sha.get(row["executable_sha256"])
+        if stamp.is_file():
+            first = stamp.read_text().split()
+            row["stamped_sha256"] = first[0] if first else None
+            row["stamped_path"] = first[1] if len(first) > 1 else None
+            row["stamp_agrees_with_file_beside_it"] = (
+                row["executable_sha256"] is None
+                or row["stamped_sha256"] == row["executable_sha256"])
+        records[name] = row
+    report = {"format": "gyre-card-reconciliation-oracle-provenance-v1",
+              "builds": builds, "records": records,
+              "worktree": worktree_stamp()}
+    print("\nWHICH BUILD WROTE WHICH RECORD")
+    for name, row in builds.items():
+        if not row["exists"]:
+            print(f"  {name:>22s}  MISSING {row['path']}")
+            continue
+        print(f"  {name:>22s}  sha {row['sha256'][:16]}  libmvec call sites "
+              f"{row['libmvec_call_sites']:>5d}  vectorised "
+              f"{row['vectorized_transcendentals']}")
+    for name, row in records.items():
+        exe = (row["executable_sha256"] or "none")[:16]
+        print(f"  {name}: executable beside it {exe} -> build {row['build']}")
+        if "stamped_sha256" in row and not row["stamp_agrees_with_file_beside_it"]:
+            print(f"      STAMP DISAGREES: binary.sha256 names "
+                  f"{row['stamped_sha256'][:16]} at {row['stamped_path']}")
+    require(any(row.get("libmvec_call_sites") for row in builds.values()),
+            "no build shows a libmvec call site; the objdump reader found "
+            "nothing and this mode would report every build as scalar")
+    return report
+
+
 def self_check() -> int:
     """Every plant must be refused, and the readers must be non-vacuous."""
     failures = []
@@ -743,6 +830,7 @@ def main(argv=None) -> int:
     parser.add_argument("--oracle-floor", action="store_true")
     parser.add_argument("--score-both-roots", action="store_true")
     parser.add_argument("--closure-ablation", action="store_true")
+    parser.add_argument("--oracle-provenance", action="store_true")
     parser.add_argument("--self-check", action="store_true")
     parser.add_argument("--steps", type=int, default=2,
                         help="how many step boundaries to walk; "
@@ -762,10 +850,11 @@ def main(argv=None) -> int:
         return self_check()
     require(args.config_diff or args.two_path or args.oracle_floor
             or args.score_both_roots
-            or args.closure_ablation,
+            or args.closure_ablation
+            or args.oracle_provenance,
             "choose --config-diff, --two-path, --oracle-floor, "
-            "--score-both-roots, --closure-ablation or "
-            "--self-check")
+            "--score-both-roots, --closure-ablation, "
+            "--oracle-provenance or --self-check")
     report = {}
     if args.config_diff:
         report["config_diff"] = config_diff(plant=args.plant)
@@ -775,6 +864,8 @@ def main(argv=None) -> int:
         report["score_both_roots"] = score_both_roots(steps=args.steps)
     if args.closure_ablation:
         report["closure_ablation"] = closure_ablation(steps=args.steps)
+    if args.oracle_provenance:
+        report["oracle_provenance"] = oracle_provenance()
     if args.two_path:
         report["two_path"] = two_path(steps=args.steps,
                                       entry_root=args.entry_root,
