@@ -10941,3 +10941,75 @@ coordinate pair, 27 on the two gate files).
 Evidence under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round40/`,
 `round40_evidence.sha256` over its files, plus the two acquisitions' own
 manifests under `round40_oracle_stage3_terms/` and `round40_oracle_ldfslp/`.
+
+## Round 41 — `dyn_adv` split preregistered; stopped at the acquisition boundary
+
+Round 41 starts at `c9feb3205c9f`.  Its prior-to-measurement contract is
+`manifests/nemo_testcase_l2_gyre_round41_preregister.json`; the adversarial
+pre-code review is beside it.  The acquisition refuses a dirty tree, so these
+files must be committed before the operator runs it.  No NEMO executable,
+`makenemo`, or `mpirun` was run by the agent, and no NEMO source was edited.
+
+### Stage-3 vector-advection alignment
+
+| statement | NEMO's compiled GYRE program | legoESM statement | finding before measurement |
+|---|---|---|---|
+| dispatch and time level | `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynadv.f90:134-138` calls KEG then ZAD with `Kmm`; the stage diagnoses `ww` from `uu/vv(Kmm)` immediately beforehand at `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/stprk3_stg.f90:326-332` | stage-3 vector-invariant C2 KE plus NEMO-advective ZAD, on the stage-2 state | branch/time level ALIGNED |
+| C2 KEG | `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynkeg.f90:117-130` rounds `zu`, rounds `zv`, forms `0.25*(zv+zu)`, then differences it and multiplies stored reciprocal metrics | `ocean_pe_latlon_cgrid.py:1884-1914` exposes one four-square expression to the compiler, then the shared gradients | algebra ALIGNED; association NOT ALIGNED and the preregistered owner |
+| ZAD transport/thickness | `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynzad.f90:105-137` sums adjacent `e1e2t*ww`, multiplies a Kmm velocity difference, and scales with live Kmm face thickness | `ocean_pe_latlon_cgrid.py:3028-3054` area-weights/interpolates `ww` and calls the one shared NEMO-advective helper with Kmm thickness | algebra ALIGNED; reciprocal and accumulation association UNMEASURED |
+| `ww` / `wsd` | `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/sshwzv.f90:271-298` builds `ww` bottom-up from Kmm velocity and the Kaa-Kbb QCO stretch.  Resolved `ln_wave=F` takes `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/sbcwave.f90:408-423`, which returns before allocating `wsd` at `:469-477`; ZAD therefore takes its `ww`-only arm | the coupled QCO seam provides stage-consistent `ww`; no Stokes vertical velocity is added | branch ALIGNED; numerical identity UNMEASURED |
+
+**PREREGISTERED PREDICTION.**  KEG carries the first non-bit statement and the
+round-40 `dyn_adv` debt: at least one KEG face is DEBT relative to KEG's own
+magnitude, while both ZAD faces are AT-BAR.  A green KEG or any red ZAD
+**REFUTES** that exclusive prediction; if both are red, both first unequal
+statements are named rather than assigning the total by subtraction.
+
+### Acquisition and controls
+
+The additions-only writer records the `Krhs` frames before KEG, after KEG and
+after ZAD; Kmm velocities; the exact `ww`; live/reference T/U/V/W thicknesses;
+T/U/V areas and reciprocal metrics; and T/U/V/W masks.  It never references
+the unallocated `wsd`; it records `ln_vortex_force=0` and a writer-defined
+all-zero `wsd_effective`.  The reader first requires a literal source-order
+replay of both sequential accumulator updates at 0 unequal cells, then closure
+of `after_zad` against round 40's `after_adv` at 0 unequal cells.  Header,
+calibration, closure, stamp, KEG and ZAD each have a named nonzero-exit plant.
+
+The operator command is:
+
+```bash
+scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round41_dynadv_split/run.sh
+```
+
+The script writes only under
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round41/oracle_dynadv_split/`,
+runs the raw twin report with consumed-field admission fall-through, hashes
+every oracle record and gate report, and prints READY only after validation.
+
+### Receipt hygiene: exactness vocabulary and one ORCA2 specification table
+
+The round-38--40 `DISCHARGED` audit found no remaining at-bar-but-not-exact
+mislabel: the tank ordering rows and GYRE kt=2 T/S rows explicitly say
+AT-BAR-NOT-EXACT; round 40 uses DISCHARGED only for the four zero-unequal
+stretch statements.  No historical wording needed alteration.
+
+| open shared lane | ORCA2 status | exact acquisition/specification required to close it |
+|---|---|---|
+| round-39 before-state isoneutral fold | UNMEASURED WITH SPEC | native ORCA2 before-state T/S/ssh, `nmln`, `hmlp`, slope operands and folded K33 at the first nonzero-slope step; score the same model operand path and trajectory |
+| round-40 QCO stretch | UNMEASURED WITH SPEC | native ORCA2 ssh, stored reference reciprocal thicknesses and resulting live T/U/V/W thicknesses on every topology-owned point, plus a native trajectory gate |
+| round-41 KEG/ZAD split | UNMEASURED WITH SPEC | first resolve ORCA2's vector/flux and implicit-ZAD switches; if this arm executes, acquire the same pre-KEG/post-KEG/post-ZAD frames, `ww`/effective-`wsd`, live thicknesses, metrics and masks, then score through its native card |
+| all shared changes' trajectories | UNMEASURED WITH SPEC | construct the missing native ORCA2 card on this branch and run its mechanically identical kt=1..10 trajectory contract; no lat-lon surrogate can discharge tripolar topology |
+
+### ASKED / UNASKED and stop
+
+| choice | status |
+|---|---|
+| write the split acquisition and stop | ASKED; complete in the repository, record UNMEASURED pending operator |
+| decision 23, mixed-layer criterion | OPEN, NOT AUTHORISED; unchanged |
+| decision 22, XLA ISA/FMA flag | CLOSED NOT ADOPTED; unchanged |
+| model arithmetic, scheme/default choice, stabiliser | UNASKED; none changed |
+| NEMO run/build, push, merge, deletion | forbidden to the agent; none performed |
+
+UNASKED list: **empty**.  The merge verdict remains **HOLD** until the record
+is returned and kt=2 U/V clear the exact bar.

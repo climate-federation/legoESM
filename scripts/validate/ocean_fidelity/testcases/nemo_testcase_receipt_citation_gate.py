@@ -80,6 +80,19 @@ FILES = {
     "GYRE_OMIP_L2_P3_SM_R38TRAZDFKT2/BLD/ppsrc/nemo/dynvor.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R38TRAZDFKT2/BLD/ppsrc/nemo"
         "/dynvor.f90"),
+    # Round 41 cites the exact round-40 compiled GYRE branches it instruments.
+    "GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynadv.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynadv.f90"),
+    "GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynkeg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynkeg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynzad.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynzad.f90"),
+    "GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/sshwzv.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/sshwzv.f90"),
+    "GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/sbcwave.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/sbcwave.f90"),
     "nemo_testcase_l2_gyre_phase3_gate.py": (
         REPO / "scripts/validate/ocean_fidelity/testcases"
              / "nemo_testcase_l2_gyre_phase3_gate.py"),
@@ -229,6 +242,30 @@ CITATION_MAP = {
         'SELECT CASE( nn_e3f_typ  )', ('END SELECT', 10), 24],
     'GYRE_OMIP_L2_P3_SM_R38TRAZDFKT2/BLD/ppsrc/nemo/dynvor.f90:556': (
         'zwz(ji,jj) = zwz(ji,jj) / (e3f_0vor(ji,jj,jk) *(1._wp+r3f(ji,jj)*fe3mask(ji,jj,jk)))', 1),
+    # --- ROUND 41: exact compiled KEG/ZAD dispatch and consumed ww branch ---
+    'GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynadv.f90:134-138': [
+        ('SELECT CASE( n_dynadv )', 1), 'CALL dyn_zad', 5],
+    'GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/stprk3_stg.f90:326-332': [
+        ('IF( ln_dynadv_vec ) THEN', 1),
+        ('IF( ln_zad_Aimp .AND. kstg == 3 )   CALL wAimp', 1), 7],
+    'GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynkeg.f90:117-130': [
+        'CASE ( nkeg_C2 )',
+        ('pvv(ji,jj,jk,Krhs) = pvv(ji,jj,jk,Krhs) -', 1), 14],
+    'GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynzad.f90:105-137': [
+        'DO jk =  1,  jpk-2',
+        '&                                              * zWdzV(ji,jj)', 33],
+    'GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/sshwzv.f90:271-298': [
+        ('DO jj = ntsj-( 1), ntej+(  1 )', 2),
+        ('r3t(ji,jj,Kaa) - r3t(ji,jj,Kbb)', 2), 28],
+    'GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/sbcwave.f90:408-423': [
+        'IF( .NOT. ln_wave ) THEN', 'RETURN', 16],
+    'GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/sbcwave.f90:469-477': [
+        ('IF( ln_sdw ) THEN', 1), 'wsd   (:,:,:) = 0._wp', 9],
+    'ocean_pe_latlon_cgrid.py:1884-1914': [
+        'elif config.ke_gradient_scheme == "c2":', 'dp_dy = _dKp_dy[..., 1]', 31],
+    'ocean_pe_latlon_cgrid.py:3028-3054': [
+        'area_w = jax.lax.optimization_barrier(',
+        'diag_vertadv_v = jax.lax.optimization_barrier(diag_vertadv_v)', 27],
     'cpp_GYRE_OMIP_L2_P3_SM_R38TRAZDFKT2.fcm:1': (
         'bld::tool::fppkeys key_qco key_vco_1d3d key_RK3', 1),
     # The statement is textually IDENTICAL at :160 (dom_qco_r3c) and :209
