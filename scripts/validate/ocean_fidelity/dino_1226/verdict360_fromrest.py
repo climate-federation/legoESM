@@ -206,6 +206,12 @@ def _nemo_istate_operands():
         company by up to 104.97 m, which crosses whole metres and therefore
         changes ``NINT``.
     """
+    # Rule 1c: fp64 EXPLICITLY.  The phase-0 rewrite dropped the policy call
+    # and it was harmless only because the mesh reader returns f64 anyway; a
+    # 1e-10 K perturbation is far below f32 resolution on a ~10 K field, so a
+    # policy slip here would silently make every member the control.
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    set_policy(PrecisionPolicy.fp64())
     from legoesm.ocean.fidelity import nemo_dino_mesh as ndm
     m = ndm.nemo_dino_mesh()
     dep3 = np.asarray(m.gdept_0, dtype=np.float64)
@@ -368,6 +374,21 @@ def score_phase0(out_root: str, snap: int) -> int:
         for f in sorted(glob.glob(os.path.join(d, "snapshot_*.npz"))):
             k = int(os.path.basename(f).split("_")[1].split(".")[0])
             per_day.setdefault(k * snap, []).append(np.load(f)["T"])
+    # THE MEMBERS MUST ACTUALLY DIFFER AT DAY 0.  If a member ran the
+    # unperturbed state -- the one way the no-knob path can fail silently --
+    # its day-0 distances collapse and the floor is manufactured downward,
+    # which is exactly the direction that would fake "INDISTINGUISHABLE".
+    if 0 in per_day and len(per_day[0]) >= 2:
+        w0, _ = _pairwise(per_day[0], per_day[0][:0], wet)
+        print(f"\n  day-0 pairwise rms spread: min {w0.min():.4e} K, "
+              f"max {w0.max():.4e} K (NEMO's perturbation amplitude is "
+              f"{PERT_AMPLITUDE_K:.1e} K, so a pair at 0 means a member ran "
+              "UNPERTURBED)")
+        if float(w0.min()) == 0.0:
+            raise SystemExit(
+                "two members are IDENTICAL at day 0: at least one ran the "
+                "unperturbed initial state, so the ensemble floor below "
+                "would be measured on a duplicated member")
     print(f"\n  {'day':>6s}{'members':>9s}{'spread rms [K]':>16s}"
           f"{'gap [K]':>12s}{'gap/2*floor':>13s}")
     floor = {}
@@ -388,6 +409,34 @@ def score_phase0(out_root: str, snap: int) -> int:
     if 360 not in floor:
         print("\n  no day-360 snapshot; the verdict needs one")
         return 1
+    # ---- THE PREREGISTERED §1 CLASSIFICATION, which outranks the binary ---
+    # PREREG §1: "a gap that is FLAT while chaos GROWS is the signature of a
+    # bounded deterministic offset, not of a diverging trajectory.  If that is
+    # what is happening, a day-360 yes/no verdict is a coin-flip on when a
+    # growing floor overtakes a flat gap and says nothing about fidelity."
+    # So the growth RATIOS are printed before the binary, not after it.
+    d0 = min(d for d in floor if d >= 30 and d in GAP_K)
+    fg = floor[360] / floor[d0] if floor[d0] > 0 else float("inf")
+    gg = GAP_K[360] / GAP_K[d0]
+    print(f"\n  PREREG §1 -- day {d0} to day 360: the FLOOR grows {fg:.1f}x "
+          f"({floor[d0]:.4e} -> {floor[360]:.4e} K) while the GAP grows "
+          f"{gg:.2f}x ({GAP_K[d0]:.4e} -> {GAP_K[360]:.4e} K).")
+    ratios = {d: GAP_K[d] / (2 * floor[d]) for d in sorted(GAP_K)
+              if d in floor and floor[d] > 0}
+    print("    gap/(2*floor) by day: "
+          + "  ".join(f"d{d}:{r:.2f}" for d, r in ratios.items()))
+    if fg > 10.0 * gg:
+        print("    CLASSIFICATION: BOUNDED DETERMINISTIC OFFSET, not chaos. "
+              "The gap is inside the floor at day 360 only because the floor "
+              "OVERTOOK it; early in the year, when both trajectories are "
+              "still deterministic, the gap is "
+              f"{ratios[d0]:.0f}x the floor. A day-360 binary is therefore "
+              "NOT a fidelity statement, and the next measurement is an "
+              "OPERATOR, not an ensemble.")
+    else:
+        print("    CLASSIFICATION: the gap and the floor grow together, so "
+              "the day-360 comparison is a genuine chaos test.")
+
     f360, gap360 = floor[360], GAP_K[360]
     r = gap360 / (2.0 * f360) if f360 > 0 else float("inf")
     need = float(np.sqrt(max(r * r - 1.0, 0.0))) if np.isfinite(r) else np.inf

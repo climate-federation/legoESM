@@ -107,27 +107,48 @@ def test_record_check_fails_on_a_short_tile_set(tmp_path):
 
 
 # ------------------------------------------------------ the slope-zero guard
-def _fake_stitch(monkeypatch, fields):
-    """Drive read_slopes.stitch's guard without inventing a tile format."""
-    shape = (4, 3, 5)
-    tiles = {k: np.full(shape, v) for k, v in fields.items()}
-    return tiles
+# These call read_slopes.stitch() on a REAL one-rank tile written in the
+# record's own binary format.  The first version of these tests grepped the
+# SOURCE for a sentence, and a reviewer restored the exact bug while keeping
+# the sentence -- all 14 tests stayed green and the valid record was refused
+# again.  A source-string assertion is not a test of behaviour.
+def _write_tile(d, values, jpi=4, jpj=3, jpk=2):
+    """One rank covering the whole haloless domain, header and body."""
+    hdr = dict(jpi=jpi, jpj=jpj, narea=1, nimpp=1, njmpp=1, nn_hls=0,
+               Nis0=1, Nie0=jpi, Njs0=1, Nje0=jpj, jpiglo=jpi, jpjglo=jpj,
+               jpk=jpk)
+    raw = np.array([hdr[k] for k in read_slopes.HEADER_FIELDS],
+                   dtype=np.int32).tobytes()
+    for name in read_slopes.ARRAYS:
+        raw += np.full((jpk, jpj, jpi), float(values.get(name, 0.0)),
+                       dtype=np.float64).tobytes()
+    (d / "ldfslp_at_traldf_r0000.bin").write_bytes(raw)
+    return d
 
 
-def test_all_four_zero_slopes_are_still_refused():
-    src = open(os.path.join(_D, "nemo_dino_kt1_slopes",
-                            "read_slopes.py")).read()
-    assert "all four slope fields are identically zero" in src
-    # and the OLD per-any rule must be gone, or a valid from-rest record is
-    # refused again
-    assert 'if not np.any(out[k]):\n            raise SystemExit' not in src
+def test_all_four_zero_slopes_are_still_refused(tmp_path):
+    _write_tile(tmp_path, {"ah_wslp2": 1.0})        # every slope zero
+    with pytest.raises(SystemExit) as e:
+        read_slopes.stitch(str(tmp_path))
+    assert "all four slope fields are identically zero" in str(e.value)
 
 
-def test_two_of_four_zero_slopes_are_accepted_and_annotated():
-    src = open(os.path.join(_D, "nemo_dino_kt1_slopes",
-                            "read_slopes.py")).read()
-    assert "usrdef_istate.F90:172-173" in src
-    assert "not an \"\"" not in src
+def test_two_of_four_zero_slopes_are_ACCEPTED(tmp_path, capsys):
+    """DINO from rest: no zonal density gradient, so uslp and wslpi ARE zero
+    (usrdef_istate.F90:172-173).  The old per-ANY guard refused this."""
+    _write_tile(tmp_path, {"vslp": 1e-2, "wslpj": 1e-2, "ah_wslp2": 1.0})
+    out = read_slopes.stitch(str(tmp_path))
+    assert not np.any(out["uslp"]) and not np.any(out["wslpi"])
+    assert np.all(out["vslp"] == 1e-2)
+    txt = capsys.readouterr().out
+    assert "uslp" in txt and "usrdef_istate.F90:172-173" in txt
+
+
+def test_a_record_with_all_four_nonzero_is_accepted(tmp_path):
+    _write_tile(tmp_path, {"uslp": 1.0, "vslp": 2.0, "wslpi": 3.0,
+                           "wslpj": 4.0})
+    out = read_slopes.stitch(str(tmp_path))
+    assert np.all(out["wslpj"] == 4.0)
 
 
 # ---------------------------------------------- the ensemble perturbation
@@ -198,6 +219,35 @@ def test_the_member_runner_refuses_without_the_phase0_field(tmp_path):
     with pytest.raises(SystemExit) as e:
         verdict.run_member(str(tmp_path), 1, 1, 1, "irrelevant.yaml")
     assert "--phase0" in str(e.value)
+
+
+def test_the_slope_gate_can_actually_fail():
+    """It could not: `return 0 if bad else 0 if not bad else 1` is 0 always,
+    so the gate printed GATE FAIL and exited 0 (reviewer-demonstrated)."""
+    src = open(os.path.join(_D, "kt1_slope_gate.py")).read()
+    assert "return 0 if bad else 0 if not bad else 1" not in src
+    ns: dict = {}
+    exec(compile("def _exit(bad):\n    return 1 if bad else 0", "<t>", "exec"),
+         ns)
+    assert "return 1 if bad else 0" in src
+    assert [ns["_exit"](b) for b in (0, 1, 2, 7)] == [0, 1, 1, 1]
+
+
+def test_the_kt2_coverage_block_counts_unclassified_variables():
+    """An unclassified restart variable must reach the exit path, not just
+    be printed -- four real NEMO carries could be added and the gate still
+    said GATE PASS."""
+    src = open(os.path.join(_D, "kt2_leapfrog_gate.py")).read()
+    assert "bad_cov = len(unknown)" in src
+    assert "bad = bad_cov" in src
+
+
+def test_the_surface_gate_has_an_oracle_self_test():
+    """--plant proves nothing on a gate that is already failing; the arm that
+    feeds the gate the oracle's own answer is what makes the plant binding."""
+    src = open(os.path.join(_D, "kt1_surface_gate.py")).read()
+    assert "--oracle-self-test" in src
+    assert "oracle_self_test" in src
 
 
 def test_the_new_gates_are_committed_and_executable():

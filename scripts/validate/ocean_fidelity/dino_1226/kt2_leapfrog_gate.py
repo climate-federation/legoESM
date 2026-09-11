@@ -203,12 +203,19 @@ def main() -> int:
              if not v.startswith(_skip) and not v.endswith("_stg")]
     _d.close()
     unknown = [v for v in _vars if v not in CARRIES]
-    unbridged = [v for v in _vars if CARRIES.get(v) is None and v in CARRIES]
+    # bad_cov is the Rule-1 count: an UNCLASSIFIED variable must FAIL the
+    # gate, not merely be printed.  The first version printed it and never
+    # touched the exit path, and a reviewer showed that four real NEMO
+    # carries (ssha, sshbb, ub2_b, vb2_b) could be added to the restart and
+    # the gate would still say GATE PASS.
+    bad_cov = len(unknown)
     print(f"\nCOVERAGE of the kt=1 restart (Rule 1): {len(_vars)} variables "
           "the next step can read; trend/accumulator outputs excluded by "
           "prefix")
     if unknown:
-        print(f"  UNCLASSIFIED (hard failure): {unknown}")
+        print(f"  UNCLASSIFIED (hard failure, {bad_cov} of them): {unknown}")
+        print("    ^^ each of these is either a carry the next step reads or "
+              "a waiver nobody wrote; Rule 1 admits no third option.")
     print("  bridged onto the state: "
           + ", ".join(v for v in _vars if CARRIES.get(v)))
     print("  NOT bridged: "
@@ -293,10 +300,10 @@ def main() -> int:
     O3 = _O3           # the stitched (nlev, nlat, nlon) -> (nlat, nlon, nlev)
 
     rows: dict[str, float] = {}
+    bad = bad_cov
     print("\nSTATE at the end of kt=2 (legoESM vs NEMO's kt=2 restart)")
     print(f"  {'field':14s}{'cells!=':>10s}{'max':>14s}{'rms':>14s}"
           f"{'NEMO step':>14s}")
-    bad = 0
     uwet = gmesh.umask > 0.5
     vwet = gmesh.vmask > 0.5
 

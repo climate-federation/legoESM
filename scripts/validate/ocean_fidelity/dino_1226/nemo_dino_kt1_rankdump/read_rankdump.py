@@ -274,6 +274,11 @@ def record_check(run_dir: str, reference: str, kt: int, allow) -> int:
     print(f"RECORD CHECK  kt={kt}: {len(tiles)} restart tiles"
           + (f", layout.dat lists {want} ranks" if want else ""))
     bad = 0
+    if want is None:
+        print("  FATAL: no readable layout.dat, so the tile count cannot be "
+              "checked against NEMO's own jpnij -- a 1-of-16 record would "
+              "pass this check silently")
+        bad += 1
     if want and len(tiles) != want:
         print(f"  FATAL: {len(tiles)} tiles for {want} ranks -- the record "
               "is incomplete and any stitch of it would have holes")

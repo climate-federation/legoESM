@@ -20,10 +20,25 @@ THREE ways -- all cells, cells at the cap, and cells strictly inside it -- and
 the interior count is printed first.  A gate that reported only the pooled
 number would be reporting the limiter.
 
-RULE 10.  The slopes scored are the ones the MODEL'S OWN STEP handed to the
-isoneutral operator, captured from the operator's ``native_slopes`` argument
-during ``model.step`` -- not a re-derivation through
-``compute_nemo_native_slopes`` with a hand-built state.
+RULE 10.  The slopes scored are the ones the MODEL'S OWN STEP BUILT, captured
+at the PRODUCER ``compute_nemo_native_slopes`` during ``model.step`` -- not a
+re-derivation with a hand-built state.
+
+WHY THE PRODUCER AND NOT THE CONSUMER (a hostile review killed the first
+version).  Spying on ``nemo_iso_lap_tracer_tendency_latlon_cgrid`` and reading
+its ``native_slopes`` argument sees only the EXPLICIT isoneutral operator.
+``compute_isoneutral_K33_latlon`` (gm_redi_latlon_cgrid.py:4459) builds its own
+slopes by calling ``compute_nemo_native_slopes`` DIRECTLY at :4573, and the
+K33 it returns from the Nnn advective pass is bound at
+ocean_model_latlon_cgrid.py:10446 and CONSUMED by the implicit vertical solve
+at :10630.  So a slope field that never touches the explicit operator still
+reaches the answer, and the consumer-side spy is structurally blind to it.
+
+WHAT THIS RECORD CANNOT SEE.  From rest NEMO sets ``ts(:,:,:,:,Kmm) =
+ts(:,:,:,:,Kbb)`` (istate.f90:139), so the two tracer time levels are the SAME
+FIELD.  Any agreement here therefore certifies the slope FORMULA and the
+geometry; it says NOTHING about which time level a slope set is built on.  A
+record at kt >= 3, where Nbb and Nnn have genuinely parted, is what would.
 
 NON-VACUITY.  ``--plant`` moves one wet interior slope cell by 1 ulp before
 scoring; the gate must then fail on that field.
@@ -71,10 +86,15 @@ def _score(name, lego, nemo, wet, cap_hit):
         ulp = np.spacing(np.abs(np.asarray(nemo)[m]))
         nz = ulp > 0
         u = float(np.max(d[nz] / ulp[nz])) if nz.any() else float("nan")
+        # A row in which NEMO's own field is identically zero is scoring
+        # NOTHING; calling that AT BAR is how a gate manufactures agreement
+        # (the surface gate says so about its buckets and this one did not).
+        vac = not np.any(np.asarray(nemo)[m])
+        verdict = ("VACUOUS (NEMO is 0 here)" if vac
+                   else "AT BAR" if n == 0 else "DEBT")
         print(f"  {name:10s}{tag:10s}{int(m.sum()):>10d}{n:>10d}"
-              f"{d.max():14.4e}{rms:14.4e}{rel:12.3e}{u:11.2f}  "
-              f"{'AT BAR' if n == 0 else 'DEBT'}")
-        if tag == "all" and n:
+              f"{d.max():14.4e}{rms:14.4e}{rel:12.3e}{u:11.3g}  {verdict}")
+        if tag == "all" and (n or vac):
             out = 1
     return out
 
@@ -114,22 +134,41 @@ def main() -> int:
     mc, _ = dm.dino_lat_lon_model_config(grid, cfg, physics=True)
     model = LatLonCGridOceanModel(grid, z, mc)
 
-    real = gmmod.nemo_iso_lap_tracer_tendency_latlon_cgrid
-    calls: list = []
-
     import traceback as _tb
 
+    real = gmmod.nemo_iso_lap_tracer_tendency_latlon_cgrid
+    real_prod = gmmod.compute_nemo_native_slopes
+    calls: list = []          # every slope field the step BUILDS
+
+    def _where():
+        st_ = [f for f in _tb.extract_stack()[:-2]
+               if "legoesm" in f.filename]
+        return " <- ".join(
+            f"{os.path.basename(f.filename)}:{f.lineno}" for f in st_[-2:])
+
+    def prod_spy(*aa, **kw):
+        r = real_prod(*aa, **kw)
+        sl = tuple(np.asarray(x) for x in (r[:4] if isinstance(r, tuple)
+                                           else (r,)))
+        calls.append((dict(kw), tuple(aa), _where(), sl))
+        return r
+
+    # The CONSUMER is also patched, but only so a card that stops routing
+    # native slopes into the operator is caught rather than silently scoring
+    # a producer nobody reads.
+    consumed: list = []
+
     def spy(q, *aa, **kw):
-        # WHICH call site: read it off the stack, never inferred.  Two of the
-        # four calls in one step carry a slope field NEMO does not have, and
-        # "which one" is the entire finding.
-        st_ = [f for f in _tb.extract_stack()[:-1]
-               if "legoesm" in f.filename or "run_dino" in f.filename]
-        where = " <- ".join(
-            f"{os.path.basename(f.filename)}:{f.lineno}" for f in st_[-3:])
-        calls.append((dict(kw), (q,) + tuple(aa), where))
+        sl = kw.get("native_slopes")
+        if sl is not None:
+            # (q,) + aa, not aa: q is the operator's FIRST POSITIONAL
+            # argument and dropping it made the replay below hand the grid
+            # where the tracer belongs.
+            consumed.append((dict(kw), (q,) + tuple(aa), _where(),
+                             tuple(np.asarray(x) for x in sl)))
         return real(q, *aa, **kw)
 
+    gmmod.compute_nemo_native_slopes = prod_spy
     gmmod.nemo_iso_lap_tracer_tendency_latlon_cgrid = spy
     try:
         st, rate = dm.apply_dino_lat_lon_surface_forcing(
@@ -138,16 +177,16 @@ def main() -> int:
             model.step(st, dt=DT, surface_forcing=sf_step,
                        external_tracer_rate=rate)
     finally:
+        gmmod.compute_nemo_native_slopes = real_prod
         gmmod.nemo_iso_lap_tracer_tendency_latlon_cgrid = real
     if not calls:
-        print("the isoneutral operator was never called: no slopes to score")
+        print("compute_nemo_native_slopes was never called: the card is not "
+              "on NEMO's four-position slopes and this record cannot score it")
         return 1
-    ns = [kw.get("native_slopes") for kw, _, _ in calls]
-    have = [x for x in ns if x is not None]
-    if not have:
-        print("the operator was called WITHOUT native_slopes, so the card is "
-              "not on NEMO's four-position slopes and this record cannot "
-              "score it")
+    if not consumed:
+        print("the isoneutral operator ran WITHOUT native_slopes on every "
+              "call, so nothing the producer built reaches the explicit "
+              "operator")
         return 1
     # Every call in one step must have been handed the SAME slopes; if not,
     # "the slopes the step used" is not a single object and scoring one of
@@ -156,20 +195,45 @@ def main() -> int:
     # gm_bolus_advection='through_fct', and the bolus half is handed its own
     # slopes (``bolus_native_slopes``).  So group, print the groups, and score
     # the set the ISONEUTRAL DIFFUSION calls used -- identified, not assumed.
-    groups: list[tuple[tuple, list[int]]] = []
-    for i, kw in enumerate(kw_ for kw_, _, _ in calls):
-        sl = kw.get("native_slopes")
-        if sl is None:
-            continue
-        for g_sl, idxs in groups:
-            if all(np.array_equal(np.asarray(x), np.asarray(y))
-                   for x, y in zip(g_sl, sl)):
-                idxs.append(i)
-                break
-        else:
-            groups.append((tuple(np.asarray(x) for x in sl), [i]))
-    print(f"\ncaptured {len(calls)} isoneutral calls carrying "
-          f"{len(groups)} DISTINCT slope set(s)")
+    def _group(lst):
+        gs: list[tuple[tuple, list[int]]] = []
+        for i, sl in enumerate(c[3] for c in lst):
+            if sl is None or len(sl) != 4:
+                continue
+            for g_sl, idxs in gs:
+                if all(np.array_equal(np.asarray(x), np.asarray(y))
+                       for x, y in zip(g_sl, sl)):
+                    idxs.append(i)
+                    break
+            else:
+                gs.append((tuple(np.asarray(x) for x in sl), [i]))
+        return gs
+
+    # TWO FAMILIES, and they are NOT the same object.  NEMO's ldf_slp builds
+    # all four positions in one pass and the record is dumped at tra_ldf's own
+    # call site, so the four-position tuple the OPERATOR CONSUMES is what the
+    # record is comparable to.  On this card that tuple is ASSEMBLED FROM TWO
+    # producer calls -- redi_w_slope_stage_evaluation='nemo_post_slope_pair'
+    # takes the U/V pair from one and the W pair from another
+    # (gm_redi_latlon_cgrid.py:4369-4370) -- so no single producer output
+    # equals it, and scoring only producers understates the agreement while
+    # scoring only consumers hides K33's own slopes.  Both are scored.
+    groups = _group(consumed)
+    pgroups = _group(calls)
+    print(f"\ncaptured {len(consumed)} isoneutral-operator calls carrying "
+          f"{len(groups)} DISTINCT CONSUMED slope tuple(s), assembled from "
+          f"{len(calls)} compute_nemo_native_slopes calls carrying "
+          f"{len(pgroups)} distinct PRODUCER set(s)")
+    for gi, (g_sl, idxs) in enumerate(pgroups):
+        best_p = max(float(np.max(np.abs(np.asarray(x) - np.asarray(R[nm]))))
+                     for nm, x in zip(("uslp", "vslp", "wslpi", "wslpj"),
+                                      g_sl))
+        print(f"  producer set {gi}: calls {idxs} from "
+              + " | ".join(calls[i][2] for i in idxs)
+              + f"\n      max|d| vs NEMO over the four fields: {best_p:.4e}")
+    print("  (the producer sets include compute_isoneutral_K33_latlon's own "
+          "slopes at gm_redi_latlon_cgrid.py:4573, which the implicit "
+          "vertical solve consumes -- a consumer-only spy is blind to them)")
     for gi, (g_sl, idxs) in enumerate(groups):
         print(f"  set {gi}: calls {idxs}  from "
               + " | ".join(calls[i][2] for i in idxs) + "\n           "
@@ -188,11 +252,11 @@ def main() -> int:
     # is precisely the silent choice Rule 1e is about, and on this record the
     # two sets differ by the same 5.58e-04 that separates one of them from
     # NEMO -- so which set is scored decides the verdict.
-    slope_sets = [g_sl for g_sl, _ in groups]
+    slope_sets = [list(g_sl) for g_sl, _ in groups]
 
     if a.plant:
-        print("PLANT ACTIVE: uslp[100,25,10] of slope set 0 moved by 1 ulp; "
-              "the gate MUST fail on uslp")
+        print("PLANT ACTIVE: vslp[100,25,10] of the CLOSEST slope set scaled "
+              "by 1+1e-6; the closest set's max|d| MUST move")
 
     g = ndm.nemo_dino_mesh()
     wet3 = g.tmask > 0.5
@@ -209,11 +273,40 @@ def main() -> int:
     bad = 0
     best = None
     set_worst: list[float] = []
+    # The plant has to land in the set the verdict reads, and it has to move
+    # a field NEMO is NONZERO in -- planting in uslp, which is identically
+    # zero from rest, perturbs a row that is vacuous anyway.  Both were wrong
+    # in the first version and a reviewer demonstrated it.
+    _set_d = [max(float(np.max(np.abs(np.asarray(x) - np.asarray(R[nm]))))
+                  for nm, x in zip(("uslp", "vslp", "wslpi", "wslpj"), g_sl))
+              for g_sl in slope_sets]
+    plant_set = int(np.argmin(_set_d)) if a.plant else -1
+    if a.plant:
+        # THE PLANT CARRIES ITS OWN CONTROL.  This gate is not at the bar, so
+        # "the gate fails" proves nothing; and a 1-ulp move cannot lift a
+        # max|d| that is ALREADY about one ulp.  So the arm perturbs by a
+        # relative 1e-6 and requires the chosen set's max|d| to MOVE.
+        _pv = np.array(slope_sets[plant_set][1])
+        _before = _set_d[plant_set]
+        _pv[100, 25, 10] *= (1.0 + 1e-6)
+        _after = max(
+            float(np.max(np.abs(np.asarray(x) - np.asarray(R[nm]))))
+            for nm, x in zip(("uslp", "vslp", "wslpi", "wslpj"),
+                             (slope_sets[plant_set][0], _pv,
+                              slope_sets[plant_set][2],
+                              slope_sets[plant_set][3])))
+        print(f"  PLANT CONTROL: closest-set max|d| {_before:.4e} -> "
+              f"{_after:.4e}  "
+              f"{'MOVED' if _after != _before else 'DID NOT MOVE'}")
+        if _after == _before:
+            print("  ^^ the plant did not change what the gate measures, so "
+                  "this arm proves nothing about the gate")
+            return 1
+        slope_sets[plant_set] = (slope_sets[plant_set][0], _pv,
+                                 slope_sets[plant_set][2],
+                                 slope_sets[plant_set][3])
     for gi, (uslp, vslp, wslpi, wslpj) in enumerate(slope_sets):
-        if a.plant and gi == 0:
-            j, i, k = 100, 25, 10
-            uslp = np.array(uslp)
-            uslp[j, i, k] = np.nextafter(uslp[j, i, k], np.inf)
+
         print(f"\nSLOPE SET {gi} (calls {groups[gi][1]}) at tra_ldf's call "
               f"site, kt=1  (limiter rn_slpmax = {RN_SLPMAX})")
         print(f"  {'field':10s}{'subset':10s}{'cells':>10s}{'!=':>10s}"
@@ -244,25 +337,33 @@ def main() -> int:
     else:
         print(f"\n  slope set {best} (calls {groups[best][1]}) is AT BAR "
               "against NEMO's own record.")
-        bad = 0
+        # bad is NOT reset here.  The first version set it to 0 the moment any
+        # one set reached the bar, which absorbed a plant in any other set --
+        # and every set reaches the answer (see the k33_implicit note below).
+        bad = sum(1 for gi in range(len(slope_sets)) if gi != best)
         if len(slope_sets) > 1:
-            # The step makes TWO GM/Redi evaluations and NEMO's ldf_slp runs
-            # ONCE, so a second slope field is only harmless if its pass's
-            # dissipative increment is thrown away.  That is a claim about the
-            # model's source, so it is CHECKED there rather than read off the
-            # comment next to it (prose is a pointer, never a fact).
+            # RETRACTED (hostile review, this round).  The first version
+            # said the off-bar set "belongs to a pass whose GM/Redi is
+            # DISCARDED", on the strength of ``_diss_incr_nn`` being bound
+            # once and never read.  That is true of the EXPLICIT increment
+            # and false of the answer: the Nnn pass ALSO returns
+            # ``k33_implicit`` (ocean_model_latlon_cgrid.py:10446), which the
+            # implicit vertical solve consumes at :10630.  So BOTH slope
+            # fields reach the state, and the off-bar one is a real defect,
+            # not bookkeeping.  Checked in the source rather than asserted:
             import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as _m
             src = open(_m.__file__).read()
             n_nn = src.count("_diss_incr_nn")
-            n_bb = src.count("diss_incr_bb") - src.count("_diss_incr_bb")
-            print(f"  the other set belongs to the Nnn advective pass, whose "
-                  f"dissipative increment is DISCARDED: '_diss_incr_nn' "
-                  f"occurs {n_nn}x in the model (bound, never read) while "
-                  f"'diss_incr_bb' -- the kept one -- occurs {n_bb}x.")
-            if n_nn != 1:
-                print("  ^^ _diss_incr_nn is READ somewhere: the Nnn pass's "
-                      "GM/Redi is no longer discarded, so its off-bar slopes "
-                      "now reach the answer and this gate must fail")
+            n_k33 = src.count("K33_iso=k33_implicit")
+            print(f"  BOTH sets reach the answer.  The Nnn pass's explicit "
+                  f"GM/Redi increment is dropped ('_diss_incr_nn' occurs "
+                  f"{n_nn}x, bound and never read), but its k33_implicit is "
+                  f"consumed by the implicit vertical solve "
+                  f"('K33_iso=k33_implicit' occurs {n_k33}x).")
+            if n_k33 == 0:
+                print("  ^^ k33_implicit is no longer consumed; re-derive "
+                      "which pass owns the vertical isoneutral diagonal "
+                      "before trusting the sentence above")
                 bad += 1
 
     # ah_wslp2 / akz are traldf_iso_a33's own operands; legoESM builds them
@@ -270,9 +371,10 @@ def main() -> int:
     # ah_wslp2/akz must be replayed from a call in the AT-BAR set; replaying
     # the discarded pass's call would score operands the answer never sees.
     _src_call = groups[best][1][0] if best is not None else 0
-    print(f"\n  ah_wslp2/akz replayed from call {_src_call} "
-          f"(slope set {best if best is not None else 0})")
-    kw, args, _ = calls[_src_call]
+    print(f"\n  ah_wslp2/akz replayed from isoneutral call {_src_call} "
+          f"(consumed slope tuple {best if best is not None else 0}, the one "
+          "closest to NEMO's record)")
+    kw, args, _, _sl = consumed[_src_call]
     kwd = {**kw, "return_diagnostics": True,
            "return_operand_diagnostics": True}
     r = real(*args, **kwd)
@@ -317,7 +419,7 @@ def main() -> int:
                           np.zeros_like(nemo, dtype=bool))
 
     print(f"\n{'GATE PASS' if bad == 0 else f'GATE FAIL ({bad} fields)'}")
-    return 0 if bad else 0 if not bad else 1
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":

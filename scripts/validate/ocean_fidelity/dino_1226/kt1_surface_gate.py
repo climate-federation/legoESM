@@ -35,6 +35,26 @@ the driver -- ``apply_dino_lat_lon_surface_forcing(..., return_rate=True)``,
 the exact object ``run_dino.py`` threads into ``model.step`` as
 ``external_tracer_rate`` -- not a reconstruction.
 
+WHAT THIS GATE CANNOT SEE (Rule 2, and a reviewer demonstrated it).  It scores
+the APPLICATOR'S RETURNED RATE and never calls ``model.step``.  A change to
+what the model DOES with that rate -- a factor planted where
+``external_tracer_rate`` is consumed, the backward-Euler vertical solve's
+damping of the level-0 increment -- leaves every row below byte-identical.
+Two consequences, both stated rather than hidden: the ACCOUNTING line at the
+end is a rate integrated as ``rate * dt``, which is NOT how the step applies
+it; and the gap between that number and the step-1 gate's is the size of
+everything this gate is blind to.
+
+RECONCILED WITH THE BAR GATE (Rule 1e).  ``fidelity_bar_gate.py`` records
+``tra_sbc`` at (1.00000000, 1.00000000), residual 1.936e-16.  That is NOT a
+disagreement with the rows below: ``coverage_rows_measure.py::measure_tra_sbc``
+builds its comparison with ``RestoringConfig(implicit=False)`` and says so in
+its own comment -- "an existing, deliberate divergence from production's
+implicit=True".  So the bar-gate row measures NEMO's formula reconstructed
+WITHOUT the implicit denominator, and is green precisely because it turns off
+the statement this gate finds.  Neither number is revised here; the two
+measure different objects, and the bar gate's blind spot is now written down.
+
 Usage
 -----
     CUDA_VISIBLE_DEVICES=<uuid> JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \\
@@ -78,8 +98,13 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--restart-glob", default=DEFAULT_RESTART)
     ap.add_argument("--plant", action="store_true",
-                    help="move one wet level-0 rate cell by 1 ulp; the gate "
-                         "MUST then fail")
+                    help="move one wet level-0 rate cell by 1 ulp; on the "
+                         "self-test arm the gate MUST then fail")
+    ap.add_argument("--oracle-self-test", action="store_true",
+                    help="REPLACE legoESM's rate with NEMO's own trend. "
+                         "Every row must read AT BAR.  Without this arm "
+                         "--plant proves nothing, because the real card is "
+                         "not at the bar and the gate fails either way.")
     a = ap.parse_args()
 
     R = rebuild(a.restart_glob, list(TRENDS) + list(OPERANDS))
@@ -103,6 +128,21 @@ def main() -> int:
         state0, forcing, z, cfg, DT, t_seconds=DT, return_rate=True)
     dT = np.asarray(rate[0], dtype=np.float64)
     dS = np.asarray(rate[1], dtype=np.float64)
+
+    def _O3pre(k):
+        return np.nan_to_num(np.moveaxis(R[k], 0, -1))
+
+    if a.oracle_self_test:
+        print("SELF-TEST: the legoESM side is REPLACED by NEMO's own trends. "
+              "This measures the GATE, not the model, and must never be "
+              "reported as a fidelity result.")
+        dT = (_O3pre("ttrd_nsr") + _O3pre("ttrd_qsr")).copy()
+        dS = _O3pre("strd_nsr").copy()
+        # The sbc_hc_b row compares against the NON-SOLAR half alone, so on
+        # the self-test arm its legoESM side must be the non-solar half too --
+        # otherwise the arm reports a failure that is the ARM's construction,
+        # not the gate's, and the plant below has nothing clean to break.
+        dT_nsr_self = _O3pre("ttrd_nsr").copy()
     if a.plant:
         dT = dT.copy()
         dT[100, 25, 0] = np.nextafter(dT[100, 25, 0], np.inf)
@@ -159,7 +199,8 @@ def main() -> int:
         implied = np.nan_to_num(np.asarray(R["sbc_hc_b"])) / e3t0
         print(f"\n  NEMO's own stored sbc_hc_b / e3t(1)={e3t0:.9f} m, which "
               "at kt=1 IS the level-0 non-solar trend (zfact=1, sbc_tsc_b=0):")
-        bad += _row("level 0: vs sbc_hc_b/e3t", dT[..., 0],
+        _lhs0 = (dT_nsr_self[..., 0] if a.oracle_self_test else dT[..., 0])
+        bad += _row("level 0: vs sbc_hc_b/e3t", _lhs0,
                     implied, wet3[..., 0])
         print(f"    implied qns = rho0*cp*sbc_hc_b: |max| "
               f"{float(np.abs(np.nan_to_num(np.asarray(R['sbc_hc_b'])) * constants.rho_ocean_ref * 3991.86795711963).max()):.4e} W/m2"
@@ -191,6 +232,11 @@ def main() -> int:
           f"({tau_S / 86400.0:.4f} d),  dt = {DT} s")
     print(f"    predicted S ratio tau_S/(tau_S+dt) = {pred:.9f}")
     print(f"    MEASURED  S ratio                  = {meas:.9f}")
+    orth = float(np.sqrt(np.mean((a_ - pred * b_) ** 2)))
+    print(f"    residual AFTER removing the predicted factor, "
+          f"rms(lego - pred*nemo) = {orth:.4e} K/s "
+          f"({orth / float(np.sqrt(np.mean(b_ ** 2))):.3e} of NEMO's own rms)"
+          " -- the ratio alone cannot see structure; this can.")
     print(f"    difference = {abs(pred - meas):.3e}  -> "
           + ("IDENTIFIED: the level-0 surface deficit IS the implicit "
              "denominator" if abs(pred - meas) < 1e-6 else
@@ -218,12 +264,23 @@ def main() -> int:
     # BEFORE being compared, and it is a prediction that can fail.
     STEP1_T_RMS_K = 4.7912e-06     # PR #1728, nemo_dino_step1_gate.py
     pooled = float(np.sqrt(np.sum((res[wet3]) ** 2) / int(wet3.sum()))) * DT
-    print(f"\n  ACCOUNTING: this rate residual integrated over one step and "
+    print(f"\n  ACCOUNTING: this rate residual integrated as rate*dt and "
           f"pooled over all {int(wet3.sum())} wet cells is {pooled:.4e} K; "
           f"the step-1 gate measures {STEP1_T_RMS_K:.4e} K "
           f"(ratio {pooled / STEP1_T_RMS_K:.4f}).")
+    print("    That literal is FROZEN (PR #1728, nemo_dino_step1_gate.py), so "
+          "this line compares a fresh number against a recorded one; re-run "
+          "the step-1 gate if the model has moved.  And rate*dt is NOT how "
+          "the step applies it -- the level-0 increment also passes through "
+          "the backward-Euler vertical solve, which damps it, and that is "
+          "the PLAUSIBLE owner of the difference from 1.0.  So this line "
+          "says the statement is the DOMINANT term, not the only one.")
 
     print(f"\n{'GATE PASS' if bad == 0 else f'GATE FAIL ({bad} rows)'}")
+    if a.oracle_self_test and not a.plant and bad:
+        print("  ^^ the SELF-TEST arm must be AT BAR on every row: the gate "
+              "cannot reproduce the oracle's own answer, so no number it "
+              "prints about the model means anything")
     return 1 if bad else 0
 
 
