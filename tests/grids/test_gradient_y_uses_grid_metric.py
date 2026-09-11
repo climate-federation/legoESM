@@ -16,20 +16,29 @@ here rather than imported.
 """
 from __future__ import annotations
 
+import contextlib
+
 import jax.numpy as jnp
 import numpy as np
-import pytest
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
 from legoesm.grids.latlon import create_latlon_geometry, create_latlon_grid
 from legoesm.grids.operators_latlon_cgrid import gradient_y_cgrid
 
 
-@pytest.fixture(autouse=True)
-def _fp64():
+@contextlib.contextmanager
+def fp64():
     """Rule 1c: a metric comparison at the default float32 measures its own
     rounding.  The "exact"-convention row below reads 1.5e-08 -- 0.13 x f32
     eps -- under the default policy and 2.2e-16 under fp64, which is the
     difference between "one ulp" and "a tenth of single precision".
+
+    THIS IS A CONTEXT MANAGER, NOT AN AUTOUSE FIXTURE, and the difference is
+    not style.  The first version paired a function-scoped autouse fixture with
+    a MODULE-scoped geometry: pytest builds higher-scoped fixtures FIRST, so
+    the geometry was constructed at whatever precision the surrounding session
+    happened to leave -- these tests passed run alone and ERRORED inside the
+    full suite.  Every geometry here is now built inside this block, so the
+    precision a number was measured at does not depend on what ran before it.
     """
     before = get_policy()
     set_policy(PrecisionPolicy.fp64())
@@ -52,8 +61,7 @@ def _mercator_lat(n_lat=60, e1_deg=1.0):
     return np.arcsin(np.tanh(np.deg2rad(e1_deg) * (j - n_lat / 2)))
 
 
-@pytest.fixture(scope="module")
-def isotropic():
+def _isotropic():
     return create_latlon_geometry(
         n_lat=60, n_lon=32, lat_1d=jnp.asarray(_mercator_lat()),
         metric_convention="nemo_isotropic")
@@ -65,113 +73,122 @@ def _field(grid):
     return jnp.asarray(np.sin(3 * lat) * np.cos(2 * lon) + 0.5 * lat)
 
 
-def test_divides_by_the_carried_metric_exactly(isotropic):
+def test_divides_by_the_carried_metric_exactly():
     """``df_dy * dy_v`` must reproduce the raw difference BIT for BIT."""
-    f = _field(isotropic)
-    got = np.asarray(gradient_y_cgrid(f, isotropic))
-    dy_v = np.asarray(isotropic.dy_v)
-    fp = np.asarray(f)
-    diff = np.empty_like(got)
-    diff[1:-1] = fp[1:] - fp[:-1]
-    diff[0] = 0.0                       # zero_polar_lat_ends
-    diff[-1] = 0.0
-    rebuilt = np.where(got == 0.0, 0.0, got * dy_v)
-    interior = slice(1, -1)
-    assert np.array_equal(rebuilt[interior], diff[interior]) or np.allclose(
-        rebuilt[interior], diff[interior], rtol=1e-15, atol=0.0)
+    with fp64():
+        isotropic = _isotropic()
+        f = _field(isotropic)
+        got = np.asarray(gradient_y_cgrid(f, isotropic))
+        dy_v = np.asarray(isotropic.dy_v)
+        fp = np.asarray(f)
+        diff = np.empty_like(got)
+        diff[1:-1] = fp[1:] - fp[:-1]
+        diff[0] = 0.0                       # zero_polar_lat_ends
+        diff[-1] = 0.0
+        rebuilt = np.where(got == 0.0, 0.0, got * dy_v)
+        interior = slice(1, -1)
+        assert np.array_equal(rebuilt[interior], diff[interior]) or np.allclose(
+            rebuilt[interior], diff[interior], rtol=1e-15, atol=0.0)
 
 
-def test_the_divisor_is_dy_v_and_not_a_lookalike(isotropic):
+def test_the_divisor_is_dy_v_and_not_a_lookalike():
     """Under the isotropic convention ``dx_v`` is BITWISE ``dy_v`` on the
     interior -- that is what "isotropic" means -- so a test whose fixture is
     only that geometry passes on an operator dividing by ``dx_v``.  An
     independent review made exactly that substitution and all the other rows
     stayed green.  This row uses a geometry where the candidates differ.
     """
-    g = create_latlon_geometry(n_lat=60, n_lon=32,
-                               lat_1d=jnp.asarray(_mercator_lat()))
-    dy_v = np.asarray(g.dy_v)
-    for name in ("dx_v", "dy_u", "dx_u"):
-        other = np.asarray(getattr(g, name))
-        if other.shape != dy_v.shape:
-            continue                      # a different stagger cannot be it
-        assert not np.array_equal(other, dy_v), (
-            f"{name} is bitwise dy_v on this geometry too, so this row "
-            "cannot discriminate them either")
-    f = _field(g)
-    got = np.asarray(gradient_y_cgrid(f, g))
-    for name in ("dx_v",):
-        other = np.asarray(getattr(g, name))
-        if other.shape != dy_v.shape:
-            continue
-        wrong = np.asarray(gradient_y_cgrid(
-            f, g._replace(dy_v=jnp.asarray(other))))
-        moved = np.abs(got - wrong) / np.maximum(np.abs(got), 1e-300)
-        assert np.nanmax(moved[1:-1]) > 1e-6, (
-            f"dividing by {name} instead of dy_v changes nothing measurable, "
-            "so the operator's divisor is not pinned by these tests")
+    with fp64():
+        g = create_latlon_geometry(n_lat=60, n_lon=32,
+                                   lat_1d=jnp.asarray(_mercator_lat()))
+        dy_v = np.asarray(g.dy_v)
+        for name in ("dx_v", "dy_u", "dx_u"):
+            other = np.asarray(getattr(g, name))
+            if other.shape != dy_v.shape:
+                continue                      # a different stagger cannot be it
+            assert not np.array_equal(other, dy_v), (
+                f"{name} is bitwise dy_v on this geometry too, so this row "
+                "cannot discriminate them either")
+        f = _field(g)
+        got = np.asarray(gradient_y_cgrid(f, g))
+        for name in ("dx_v",):
+            other = np.asarray(getattr(g, name))
+            if other.shape != dy_v.shape:
+                continue
+            wrong = np.asarray(gradient_y_cgrid(
+                f, g._replace(dy_v=jnp.asarray(other))))
+            moved = np.abs(got - wrong) / np.maximum(np.abs(got), 1e-300)
+            assert np.nanmax(moved[1:-1]) > 1e-6, (
+                f"dividing by {name} instead of dy_v changes nothing measurable, "
+                "so the operator's divisor is not pinned by these tests")
 
 
-def test_it_is_not_the_t_point_reconstruction(isotropic):
+def test_it_is_not_the_t_point_reconstruction():
     """The revert control: the two divisors give measurably different answers
     on this geometry, so an operator that went back to the reconstruction
     cannot pass the test above."""
-    dy_v = np.asarray(isotropic.dy_v)[:, 0]
-    rec = _reconstruction(isotropic)
-    rel = np.abs(rec / dy_v - 1.0)
-    assert rel.max() > 1e-4, (
-        "the two divisors agree on this geometry, so nothing here could "
-        f"detect the defect (max relative gap {rel.max():.3e})")
-    f = _field(isotropic)
-    got = np.asarray(gradient_y_cgrid(f, isotropic))
-    legacy = np.asarray(gradient_y_cgrid(
-        f, isotropic._replace(
-            dy_v=jnp.broadcast_to(jnp.asarray(rec)[:, None],
-                                  isotropic.dy_v.shape))))
-    # Measured 3.809e-05 on this geometry.  The larger divisor gaps (up to
-    # 4.2e-03) sit on the two polar rows, which ``zero_polar_lat_ends`` zeroes,
-    # so the interior is what a revert would actually move.
-    moved = np.abs(got - legacy) / np.maximum(np.abs(got), 1e-300)
-    assert np.nanmax(moved[1:-1]) > 1e-5, np.nanmax(moved[1:-1])
+    with fp64():
+        isotropic = _isotropic()
+        dy_v = np.asarray(isotropic.dy_v)[:, 0]
+        rec = _reconstruction(isotropic)
+        rel = np.abs(rec / dy_v - 1.0)
+        assert rel.max() > 1e-4, (
+            "the two divisors agree on this geometry, so nothing here could "
+            f"detect the defect (max relative gap {rel.max():.3e})")
+        isotropic = _isotropic()
+        f = _field(isotropic)
+        got = np.asarray(gradient_y_cgrid(f, isotropic))
+        legacy = np.asarray(gradient_y_cgrid(
+            f, isotropic._replace(
+                dy_v=jnp.broadcast_to(jnp.asarray(rec)[:, None],
+                                      isotropic.dy_v.shape))))
+        # Measured 3.809e-05 on this geometry.  The larger divisor gaps (up to
+        # 4.2e-03) sit on the two polar rows, which ``zero_polar_lat_ends`` zeroes,
+        # so the interior is what a revert would actually move.
+        moved = np.abs(got - legacy) / np.maximum(np.abs(got), 1e-300)
+        assert np.nanmax(moved[1:-1]) > 1e-5, np.nanmax(moved[1:-1])
 
 
 def test_uniform_dlat_is_bit_identical_to_the_reconstruction():
     """Every regular lat-lon card must be untouched by the change."""
-    g = create_latlon_geometry(n_lat=32, n_lon=64)
-    rec = _reconstruction(g)[:, None]
-    assert int((rec != np.asarray(g.dy_v)).sum()) == 0
-    f = _field(g)
-    got = np.asarray(gradient_y_cgrid(f, g))
-    legacy = np.asarray(gradient_y_cgrid(
-        f, g._replace(dy_v=jnp.broadcast_to(jnp.asarray(_reconstruction(g))
-                                            [:, None], g.dy_v.shape))))
-    assert np.array_equal(got, legacy)
+    with fp64():
+        g = create_latlon_geometry(n_lat=32, n_lon=64)
+        rec = _reconstruction(g)[:, None]
+        assert int((rec != np.asarray(g.dy_v)).sum()) == 0
+        f = _field(g)
+        got = np.asarray(gradient_y_cgrid(f, g))
+        legacy = np.asarray(gradient_y_cgrid(
+            f, g._replace(dy_v=jnp.broadcast_to(jnp.asarray(_reconstruction(g))
+                                                [:, None], g.dy_v.shape))))
+        assert np.array_equal(got, legacy)
 
 
 def test_variable_dlat_exact_convention_moves_by_at_most_one_ulp():
     """The other side of the blast radius, measured rather than asserted away."""
-    g = create_latlon_geometry(n_lat=60, n_lon=32,
-                               lat_1d=jnp.asarray(_mercator_lat()))
-    rel = np.abs(_reconstruction(g)[:, None] / np.asarray(g.dy_v) - 1.0)
-    assert rel.max() <= 4.0 * np.finfo(np.float64).eps, rel.max()
+    with fp64():
+        g = create_latlon_geometry(n_lat=60, n_lon=32,
+                                   lat_1d=jnp.asarray(_mercator_lat()))
+        rel = np.abs(_reconstruction(g)[:, None] / np.asarray(g.dy_v) - 1.0)
+        assert rel.max() <= 4.0 * np.finfo(np.float64).eps, rel.max()
 
 
 def test_a_grid_without_a_v_metric_still_works():
     """``LatLonGrid`` carries no ``dy_v`` and is still passed by the
     atmosphere lat-lon C-grid dycores, the operator adapter, nesting and the
     MPI band extension.  It must fall back, not raise."""
-    g = create_latlon_grid(n_lat=16, n_lon=32)
-    assert not hasattr(g, "dy_v")
-    f = jnp.asarray(np.random.default_rng(0).normal(size=(16, 32)))
-    out = np.asarray(gradient_y_cgrid(f, g))
-    assert out.shape == (17, 32)
-    assert np.isfinite(out).all()
-    # and it is exactly the reconstruction, i.e. its behaviour is unchanged
-    rec = _reconstruction(g)
-    fp = np.asarray(f)
-    want = np.zeros_like(out)
-    want[1:-1] = (fp[1:] - fp[:-1]) / rec[1:-1, None]
-    assert np.array_equal(out, want)
+    with fp64():
+        g = create_latlon_grid(n_lat=16, n_lon=32)
+        assert not hasattr(g, "dy_v")
+        f = jnp.asarray(np.random.default_rng(0).normal(size=(16, 32)))
+        out = np.asarray(gradient_y_cgrid(f, g))
+        assert out.shape == (17, 32)
+        assert np.isfinite(out).all()
+        # and it is exactly the reconstruction, i.e. its behaviour is unchanged
+        rec = _reconstruction(g)
+        fp = np.asarray(f)
+        want = np.zeros_like(out)
+        want[1:-1] = (fp[1:] - fp[:-1]) / rec[1:-1, None]
+        assert np.array_equal(out, want)
 
 
 #: Every place in the shipped packages that SELECTS NEMO's isotropic metric
