@@ -92,7 +92,7 @@ parent_delta=$(diff "$SOURCE_ROOT/MY_SRC/stprk3_stg.F90" "$dry/stprk3_stg.F90" |
 [[ -z "$(printf '%s\n' "$parent_delta" | grep -Ev 'kstp == nit000|oracle_rkstage3_terms_kt00000001' || true)" ]] || {
   printf 'REFUSE: stprk3_stg patch replaces a non-writer parent line\n' >&2; exit 66;
 }
-grep -q 'kt <= nit000 + 1' "$dry/stprk3_stg.F90"
+grep -q 'kstp <= nit000 + 1' "$dry/stprk3_stg.F90"
 grep -q 'oracle_dynadv_split_kt",I8.8' "$dry/dynadv.F90"
 
 for mount in /tmp "$ROUND46" "$NEMO_ROOT"; do
