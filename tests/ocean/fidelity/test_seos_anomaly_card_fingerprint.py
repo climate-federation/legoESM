@@ -39,7 +39,31 @@ FIRES = {("nemo_seos", "geometric")}
 
 
 def _fires(eos, eos_depth) -> bool:
+    """(eos, eos_depth) is NECESSARY, not sufficient.
+
+    The runtime ALSO requires the ``rho_prime`` else-branch: a caller passing
+    ``rho_ref_z_static`` or ``use_depth_dependent_ref`` subtracts a reference
+    PROFILE and never reaches the new arm.  This predicate does not model
+    that, so it OVER-counts -- which is the safe direction for a fingerprint
+    (it can name a card that did not change; it cannot miss one that did).
+    ``test_dino_cards_take_the_plain_reference_branch`` below closes the gap
+    for the cards that fire.
+    """
     return (eos, eos_depth) in FIRES
+
+
+def test_dino_cards_take_the_plain_reference_branch():
+    """The firing cards must subtract rho_0, not a reference profile."""
+    from legoesm.ocean.experiments import dino as dm
+
+    for recipe in sorted(DINO_RECIPES_THAT_FIRE):
+        cfg = dm.dino_config_for_recipe(recipe)
+        for field in ("rho_ref_z_static", "use_depth_dependent_ref"):
+            val = getattr(cfg, field, None)
+            assert not val, (
+                f"{recipe} sets {field}={val!r}, so its density does NOT "
+                "reach the exact-anomaly branch and the fingerprint's "
+                "'fires' verdict is wrong for it")
 
 
 def test_named_ocean_recipes_are_unchanged():
@@ -92,27 +116,36 @@ def test_nemo_testcase_cards_are_unchanged_and_say_why():
     assert len(seen) == len(cases)
 
 
-@pytest.mark.parametrize(
-    "recipe,expect_fires",
-    [("nemo_dino_kamm_mlf", True),
-     ("nemo_paper", True),
-     ("legoesm_default", False),
-     ("veros", False),
-     ("mitgcm", False),
-     ("oceananigans", False)],
-)
-def test_dino_recipe_fingerprint(recipe, expect_fires):
-    """The DINO recipes, one row each -- the only cards that change."""
+#: The DINO recipes that reach the exact-anomaly branch.  MEASURED, and the
+#: test below iterates the REGISTRY rather than this list, so a new card that
+#: fires turns it red instead of passing unnoticed.  An earlier version
+#: parametrized six literal names and omitted ``nemo_dino_kamm`` -- a live
+#: card whose density changed and which the commit message did not list.  An
+#: independent diff review found it.
+DINO_RECIPES_THAT_FIRE = {
+    "nemo_paper", "nemo_dino_kamm", "nemo_dino_kamm_mlf",
+}
+
+
+def test_dino_recipe_fingerprint_covers_every_registered_card():
+    """Every DINO recipe, one row each -- from the registry, not a literal."""
     from legoesm.ocean.experiments import dino as dm
 
-    cfg = dm.dino_config_for_recipe(recipe)
-    eos = cfg.eos
-    depth = getattr(cfg, "eos_depth", "insitu")
-    assert _fires(eos, depth) is expect_fires, (
-        f"recipe {recipe!r} resolves to (eos={eos!r}, eos_depth={depth!r}), "
-        f"which {'does' if _fires(eos, depth) else 'does not'} reach the "
-        f"exact-anomaly branch; the fingerprint expected "
-        f"{'it to' if expect_fires else 'it not to'}")
+    names = sorted(dm.DINO_RECIPES)
+    assert len(names) >= 6, (
+        f"only {len(names)} DINO recipes registered; this gate would be "
+        "nearly vacuous")
+    fires, quiet = set(), set()
+    for recipe in names:
+        cfg = dm.dino_config_for_recipe(recipe)
+        depth = getattr(cfg, "eos_depth", "insitu")
+        (fires if _fires(cfg.eos, depth) else quiet).add(recipe)
+    assert fires == DINO_RECIPES_THAT_FIRE, (
+        f"the set of DINO cards whose density changed is {sorted(fires)}, "
+        f"not {sorted(DINO_RECIPES_THAT_FIRE)}. Measure the new card before "
+        "widening this set -- every name in it is a card whose trajectory "
+        "this change can move")
+    assert quiet, "no DINO card is unaffected; that is implausible, re-read"
 
 
 def test_the_change_is_measurable_and_is_the_rho0_roundtrip():

@@ -88,9 +88,13 @@ NAMEOS = dict(rn_T0=10.0, rn_S0=35.0, rn_a0=0.165, rn_b0=7.6554e-1,
 
 #: The calibration must come in UNDER these.  It is a NEMO-from-NEMO
 #: comparison of a pointwise polynomial -- no reduction, no intrinsic whose
-#: order numpy cannot reproduce -- so it is expected to be EXACTLY zero and
-#: these are a ceiling on the instrument, never a tolerance granted to the
-#: model.  Measured 0.0 / 0.0 on 2026-09-11.
+#: order numpy cannot reproduce -- so it is expected to be EXACTLY zero.
+#: ENFORCED HERE, not by ``Table.calibrate``: that method resolves
+#: ``CALIB_MAX``/``CALIB_REL`` in ITS OWN module, where they are 1e-18/1e-12,
+#: so these names were dead when they were only module constants (an
+#: independent diff review found it) and a calibration drifting to 5e-13
+#: would have stayed CALIBRATED and re-floored every model row at 5e-13 --
+#: 2000x the residual this gate exists to see.
 CALIB_MAX = 1.0e-18
 CALIB_REL = 1.0e-15
 
@@ -234,7 +238,13 @@ def main() -> int:
     print()
     print("1. CALIBRATION -- NEMO's rhd rebuilt from NEMO's own operands")
     built = nemo_prd_literal(T_n, S_n, g3, r3t[None, :, :], tmask)
-    tab.calibrate("C1 literal eosbn2.f90:360-369", built, ref, sel)
+    c1 = tab.calibrate("C1 literal eosbn2.f90:360-369", built, ref, sel)
+    if c1 is not None and (c1["maxabs"] > CALIB_MAX or c1["rel"] > CALIB_REL):
+        c1["status"] = "REFUSED"
+        tab.fail = True
+        tab.note(f"C1 exceeded THIS gate's ceiling ({CALIB_MAX:g} absolute / "
+                 f"{CALIB_REL:g} relative); the shared Table's looser one does "
+                 "not govern here")
 
     # ---- the card's own geometry and its own production statements --------
     from legoesm.core.precision import PrecisionPolicy, set_policy
@@ -329,28 +339,71 @@ def main() -> int:
         jnp.asarray(T_l), jnp.asarray(S_l), zh_l, seos), dtype=np.float64)
     tab.score("R1 nemo_seos_prd_literal", L(r1) * tmask, ref, sel)
 
-    # R2 -- the PRODUCTION association: rho0 + zn, then subtract rho0
+    # R2 -- the association this round REPLACED: rho0 + zn, then subtract.
+    #
+    # THE RETRACTION LIVES HERE.  Scored EAGER and JITTED through the card's
+    # OWN eos callable.  XLA's algebraic simplifier folds `(rho0 + zn) - rho0`
+    # back to `zn` EXACTLY, so the residual this statement carries exists ONLY
+    # in eager mode -- and the production model runs jitted.  Every number
+    # this campaign measured under `jax.disable_jit()` is therefore a
+    # statement about a mode the model does not use, including round 43's
+    # "the remaining residual is the DENSITY at 1.3391e-13".
     eos_fn = make_eos_fn(mc.eos, getattr(mc, "eos_linear", None),
                          rho0=mc.rho_0)
     from legoesm import constants
     p_eos = (mc.rho_0 * constants.g) * zh_l
-    rho = eos_fn(jnp.asarray(T_l), jnp.asarray(S_l), p_eos)
-    r2 = np.asarray((rho - mc.rho_0) / mc.rho_0, dtype=np.float64)
-    diag = []
-    diag.append(("R2 the statement this round REPLACED: (rho0+zn) - rho0",
-                 L(r2) * tmask, ref))
 
-    # R3 -- the production STAGE, end to end, on NEMO's own state
-    land = jnp.asarray(np.asarray(z.is_active).any(axis=-1))
+    def _old(T_, S_):
+        return (eos_fn(T_, S_, p_eos) - mc.rho_0) / mc.rho_0
+
     with jax.disable_jit():
-        _j, _h, rho_prime, _p = pe._bc_geometry_and_density(
-            jnp.asarray(eta_l), jnp.asarray(H_col), z, mc,
-            jnp.asarray(T_l), jnp.asarray(S_l), land, grid, mc.rho_0, mc.g)
-    if np.asarray(rho_prime).dtype != np.float64:
-        raise SystemExit("rho_prime is not float64 (Rule 1c)")
+        r2 = np.asarray(_old(jnp.asarray(T_l), jnp.asarray(S_l)),
+                        dtype=np.float64)
+    r2j = np.asarray(jax.jit(_old)(jnp.asarray(T_l), jnp.asarray(S_l)),
+                     dtype=np.float64)
+    print(f"  the REPLACED statement, jit vs eager: max|d| "
+          f"{np.abs(r2j - r2).max():.4e} on "
+          f"{int((r2j != r2).sum())} of {r2.size} values -- XLA folds the "
+          "rho0 round trip, so its residual is EAGER-ONLY")
+    diag = []
+    diag.append(("R2 REPLACED (rho0+zn)-rho0, EAGER",
+                 L(r2) * tmask, ref))
+    diag.append(("R2j the SAME statement under JIT (XLA folds it)",
+                 L(r2j) * tmask, ref))
+
+    # R3 -- the production STAGE, end to end, on NEMO's own state, JITTED.
+    #
+    # JITTED IS THE MODEL'S MODE, and this gate used to run the stage under
+    # ``jax.disable_jit()``.  That is not a detail: MEASURED on both backends,
+    # XLA's algebraic simplifier folds ``(rho0 + zn) - rho0`` back to ``zn``
+    # EXACTLY (0 of 200000 values differing), while EAGER leaves 1.1369e-13.
+    # So a residual measured eager can be an artifact of an execution mode the
+    # model never uses.  Both are scored, and the JITTED row is the model's.
+    land = jnp.asarray(np.asarray(z.is_active).any(axis=-1))
+
+    def _stage(eta, h, T, S):
+        return pe._bc_geometry_and_density(
+            eta, h, z, mc, T, S, land, grid, mc.rho_0, mc.g)
+
+    stage_args = (jnp.asarray(eta_l), jnp.asarray(H_col),
+                  jnp.asarray(T_l), jnp.asarray(S_l))
+    _j, _h, rho_prime, _p = jax.jit(_stage)(*stage_args)
+    with jax.disable_jit():
+        _je, _he, rho_prime_eager, _pe = _stage(*stage_args)
+    for nm, a in (("rho_prime (jit)", rho_prime),
+                  ("rho_prime (eager)", rho_prime_eager)):
+        if np.asarray(a).dtype != np.float64:
+            raise SystemExit(f"{nm} is not float64 (Rule 1c)")
+    _dm = float(np.abs(np.asarray(rho_prime)
+                       - np.asarray(rho_prime_eager)).max())
+    print(f"  production stage, jit vs eager: max|d| {_dm:.4e} kg/m3 "
+          "(nonzero here means a residual measured eager is not the model's)")
     r3 = np.asarray(rho_prime, dtype=np.float64) / mc.rho_0
+    r3e = np.asarray(rho_prime_eager, dtype=np.float64) / mc.rho_0
     diag.append(("R3 the GATE's own rho'/rho_0 vs NEMO's zn*r1_rho0",
                  L(r3) * tmask, ref))
+    diag.append(("R3e the same stage run EAGER (not the model's mode)",
+                 L(r3e) * tmask, ref))
 
     # R3b IS THE MODEL'S ROW.  rho' in kg/m3 against NEMO's own ``zn``, with
     # no ``r1_rho0`` and no ``rho0`` on either side.  R3 above divides
@@ -361,8 +414,11 @@ def main() -> int:
     # quantity that exists on both sides without a conversion.
     zn_nemo = np.where(tmask > 0.5,
                        nemo_zn_literal(T_n, S_n, g3, r3t[None, :, :]), 0.0)
-    tab.score("R3b production rho' vs NEMO zn",
+    tab.score("R3b production rho' vs NEMO zn [JIT]",
               L(np.asarray(rho_prime, dtype=np.float64)) * tmask,
+              zn_nemo, sel)
+    tab.score("R3c the same stage EAGER",
+              L(np.asarray(rho_prime_eager, dtype=np.float64)) * tmask,
               zn_nemo, sel)
 
     # These two are DIAGNOSTICS, not model rows, and they are printed OUTSIDE
@@ -385,9 +441,23 @@ def main() -> int:
     tab.note("the reduction is max|d| over cells, normalised by rms(NEMO) -- "
              "NOT a per-cell relative error, which is unbounded wherever the "
              "anomaly passes through zero (T=10 C, S=35)")
-    tab.note("--plant-lego moves every row by the same amount because they "
-             "share one input; it proves the rows are LIVE, and cannot "
-             "discriminate between them")
+    tab.note("--plant-lego perturbs T, so it can move only the DENSITY rows "
+             "(R1, R3b and the diagnostics); the three DEPTH rows D0/D0b/D1 "
+             "do not read T and MUST NOT move.  An earlier note here claimed "
+             "it moved every row, which is false and was unchecked -- the "
+             "check is now in the code below")
+    if args.plant_lego:
+        moved = [r["name"] for r in tab.rows
+                 if r.get("maxabs", 0.0) > 0.0]
+        depth_rows = [r for r in tab.rows if r["name"].startswith("D")]
+        if any(r.get("maxabs", 0.0) > 0.0 for r in depth_rows):
+            print("PLANT-LEGO moved a DEPTH row; it perturbs T only and the "
+                  "depth rows do not read T, so the gate's wiring is wrong")
+            tab.fail = True
+        if not moved:
+            print("PLANT-LEGO moved NOTHING; the control is vacuous")
+            tab.fail = True
+        print(f"  PLANT-LEGO moved: {moved}")
     tab.render()
     if tab.floor is not None and tab.rows[0]["status"] != "CALIBRATED":
         print("\nthe NEMO-from-NEMO calibration is not CALIBRATED, so no row "

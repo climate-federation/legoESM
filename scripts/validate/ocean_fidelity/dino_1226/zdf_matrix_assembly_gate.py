@@ -30,14 +30,24 @@ WHAT THIS GATE CAN SEE, AND WHAT IT CANNOT (Rule 2, stated before the rows):
 
 * The dump sits inside the ``jj`` i-k-slice loop with ``STATUS='REPLACE'`` on
   one filename per rank, so each rank's file holds its LAST ``jj`` slice --
-  SIXTEEN rows of 199, 8.0% of the domain, and the gate says so on every row
-  rather than implying a global comparison.  The rows ARE attributable: the
-  index is derived from ``layout.dat`` (``njmpp``, ``jpj``) and ``nn_hls``,
-  and row C1 is what proves the derivation, because a wrong row would not
-  reproduce NEMO's own diagonal from NEMO's own off-diagonals.
-* ``zwt`` itself is NOT dumped, so the sweep is scored against a literal
-  transcription of ``:270-273`` fed NEMO's three dumped diagonals -- a
-  NEMO-from-NEMO reference, not a second model.
+  EIGHT distinct rows of 199, 4.0% of the domain, and the gate says so on
+  every row rather than implying a global comparison.  The rows ARE
+  attributable: each is its rank's LAST CORE ROW, read from the mesh tiles'
+  own ``DOMAIN_position_first/last``.  (They are NOT derived from
+  ``layout.dat``: an earlier version of this file parsed the wrong numeric
+  table there and placed a strip at global row 200 on a 199-row domain.)
+* **legoESM's ASSEMBLY OF THE OFF-DIAGONALS IS UNMEASURABLE FROM THIS
+  RECORD.**  ``zwi``/``zws`` are built from ``zwt = avt + akz``
+  (``trazdf.f90:186, 232-233``) and the record dumps neither ``avt`` per rank
+  nor ``akz``, so the only way to hand legoESM NEMO's operands is to invert
+  ``zwi = -p2dt*zwt/e3w`` -- a round trip that injects its own ulp and makes
+  the row measure the inversion.  An independent diff review caught an earlier
+  version of this file scoring an "A1 legoESM diagonal" row that was, character
+  for character, the calibration expression: a tautology that would have stayed
+  green through any edit to ``implicit_solver.py``.  Retracted.  What the
+  record CAN score is (a) legoESM's DRY-cell substitution rule, which is
+  legoESM's own statement and nothing to do with C1, and (b) legoESM's ORDERED
+  SWEEP, which is a pure function of the three dumped diagonals.
 * The RHS (``:285-290``) and the MOMENTUM diagonals are NOT IN THE RECORD.
   The acquisition script says so in its own header and so does this one; they
   are UNMEASURED here, not waived.
@@ -218,8 +228,13 @@ def main() -> int:
     e3t_aa = e3t0 * (1.0 + r3t_aa[None, :, :] * tmask)
     print()
     print("1. CALIBRATION -- NEMO's zwd rebuilt from NEMO's own zwi/zws")
-    tab.calibrate("C1 trazdf.f90:234 from the record",
-                  e3t_aa - (zwi + zws), ref_zwd, cov)
+    c1 = tab.calibrate("C1 trazdf.f90:234 from the record",
+                       e3t_aa - (zwi + zws), ref_zwd, cov)
+    # Enforced HERE: Table.calibrate resolves CALIB_* in ITS OWN module,
+    # where they are 1e-18/1e-12, so these names would otherwise be dead.
+    if c1 is not None and (c1["maxabs"] > CALIB_MAX or c1["rel"] > CALIB_REL):
+        c1["status"] = "REFUSED"
+        tab.fail = True
 
     # ---- legoESM's own assembly statement -------------------------------
     from legoesm.core.precision import PrecisionPolicy, set_policy
@@ -251,11 +266,25 @@ def main() -> int:
     diag_lego = np.asarray(jnp.asarray(e3t_l) - coeff_sum)
     diag_dry1 = np.where(wet_l > 0.0, diag_lego, 1.0)
 
-    tab.score("A1 legoESM diagonal, WET cells",
-              np.moveaxis(diag_dry1, -1, 0), ref_zwd, wet_cov)
-    tab.score("A2 legoESM diagonal, DRY cells",
+    # NOT SCORED, and this is the retraction: on WET cells this expression is
+    # C1's, character for character, so a zero here is an identity and not a
+    # measurement of legoESM.  It is asserted to be an identity instead --
+    # if it ever stops being one, the gate says so rather than quietly
+    # reporting a fidelity result.
+    ident = np.abs(np.moveaxis(diag_lego, -1, 0)
+                   - (e3t_aa - (zwi + zws)))[wet_cov]
+    print(f"  IDENTITY (not a measurement): the wet-cell expression here is "
+          f"C1's own, max|d| {ident.max():.3e} over {ident.size} cells -- "
+          "legoESM's off-diagonal assembly needs avt/akz, which this record "
+          "does not carry")
+    if ident.max() != 0.0:
+        tab.note("the wet-cell expression is no longer C1's; re-read this "
+                 "block before trusting anything below it")
+        tab.fail = True
+    # THESE two ARE legoESM's own statement: the substitution rule.
+    tab.score("A2 legoESM's DRY substitution (1.0)",
               np.moveaxis(diag_dry1, -1, 0), ref_zwd, dry_cov)
-    tab.score("A2b same without the 1.0 substitution",
+    tab.score("A2b the same cells WITHOUT it",
               np.moveaxis(diag_lego, -1, 0), ref_zwd, dry_cov)
 
     # ---- the sign of zero in the two boundary slots ---------------------
@@ -279,8 +308,38 @@ def main() -> int:
     print()
     print("4. THE DRY DIAGONAL AND THE SIGN OF ZERO -- do they change an "
           "answer?")
+    # The RHS is NONZERO ON DRY CELLS ON PURPOSE.  An earlier version used
+    # `randn * wet_l`, which zeroes it exactly where the question lives, so
+    # both arms returned 0/anything = 0 and the control could not fail.  An
+    # independent diff review found it.
+    #
+    # OUTSIDE the 8 dumped strips there is no matrix at all -- `nan_to_num`
+    # put zeros in the off-diagonals and the diagonal is whatever the mesh
+    # gives -- so those columns are replaced by the IDENTITY (diag 1, RHS 0).
+    # They are not part of any row and a fabricated column must not be able
+    # to inject a NaN into one that is.
     rng = np.random.default_rng(1728)
-    rhs = jnp.asarray(rng.standard_normal(diag_lego.shape) * wet_l)
+    col = np.moveaxis(cov.any(axis=0)[None, :, :]
+                      .repeat(nz, axis=0), 0, -1)      # (y, x, z)
+    rhs_np = rng.standard_normal(diag_lego.shape) * col
+    rhs = jnp.asarray(rhs_np)
+    diag_lego = np.where(col, diag_lego, 1.0)
+    diag_dry1 = np.where(col, diag_dry1, 1.0)
+    lower = np.where(col, lower, 0.0)
+    upper = np.where(col, upper, 0.0)
+    e3t_l = np.where(col, e3t_l, 1.0)
+    # LEVEL jpk IS UNTOUCHED MEMORY.  NEMO's assembly loop is jk = 1..jpkm1
+    # (trazdf.f90:231), so whatever the dump holds at jk = jpk was never
+    # written by this routine and must not enter a solve -- it can be an
+    # arbitrary bit pattern and it drove a NaN into this section before it
+    # was excluded.  Replace that level by the identity on both arms.
+    for arr, fill in ((diag_lego, 1.0), (diag_dry1, 1.0), (e3t_l, 1.0),
+                      (lower, 0.0), (upper, 0.0)):
+        arr[..., nz - 1] = fill
+    rhs_np[..., nz - 1] = 0.0
+    rhs = jnp.asarray(rhs_np)
+    print(f"  {int(col[..., 0].sum())} of {col[..., 0].size} columns carry a "
+          "dumped matrix; every other column is the identity here")
     solve = iv.nemo_ordered_tridiagonal_solve
     # NEMO's own dry diagonal is its REFERENCE thickness; legoESM's is 1.0.
     diag_nemo_dry = np.where(wet_l > 0.0, diag_lego, e3t_l)
@@ -318,6 +377,46 @@ def main() -> int:
                  "difference")
         tab.fail = True
 
+    # ---- legoESM's ORDERED SWEEP against trazdf.f90:270-299 -------------
+    # This IS a legoESM statement, and it is the one the record makes
+    # scoreable: the sweep is a pure function of the three dumped diagonals
+    # and a right-hand side, so the RHS being absent from the record does not
+    # block it -- ANY right-hand side is a valid given-inputs test.
+    print()
+    print("5. THE ORDERED SWEEP -- legoESM vs trazdf.f90:270-299, NEMO's own "
+          "matrix")
+    lo_np = np.moveaxis(np.asarray(lower), -1, 0)
+    up_np = np.moveaxis(np.asarray(upper), -1, 0)
+    # BOTH SIDES RUN THE SAME MATRIX -- legoESM's assembled one.  This row
+    # scores the SWEEP and nothing else; feeding the two sides different
+    # diagonals would confound it with the assembly, which this record
+    # cannot measure at all (see the header).
+    dg_np = np.moveaxis(diag_dry1, -1, 0)
+    rhs_np = np.moveaxis(np.asarray(rhs), -1, 0)
+    nlev = dg_np.shape[0]
+    zwt_r = np.empty_like(dg_np)
+    zwt_r[0] = dg_np[0]
+    for k in range(1, nlev):                       # :273
+        zwt_r[k] = dg_np[k] - lo_np[k] * up_np[k - 1] / zwt_r[k - 1]
+    z_r = np.empty_like(dg_np)
+    z_r[0] = rhs_np[0]                             # :285
+    for k in range(1, nlev):                       # :291
+        z_r[k] = rhs_np[k] - lo_np[k] / zwt_r[k - 1] * z_r[k - 1]
+    x_r = np.empty_like(dg_np)
+    x_r[-1] = z_r[-1] / zwt_r[-1]                  # :295
+    for k in range(nlev - 2, -1, -1):              # :298
+        x_r[k] = (z_r[k] - up_np[k] * x_r[k + 1]) / zwt_r[k]
+    x_l = np.moveaxis(np.asarray(solve(
+        jnp.asarray(lower), jnp.asarray(diag_dry1),
+        jnp.asarray(upper), rhs)), -1, 0)
+    sweep_cov = cov & (tmask > 0.5)
+    tab.score("A3 legoESM ordered sweep vs :270-299", x_l, x_r, sweep_cov)
+
+    tab.note("WHICH PLANT MOVES WHICH ROW: --plant perturbs NEMO's own zwd "
+             "and REFUSES C1, so nothing below it is quoted.  --plant-lego "
+             "perturbs legoESM's e3t_after; it moves C1's comparison and A2, "
+             "and it CANNOT move A3, which feeds the SAME matrix to both "
+             "sides by design -- the matrix is A3's input, not its subject")
     tab.note("THE RHS (trazdf.f90:285-290) and the MOMENTUM diagonals "
              "(dynzdf) are NOT IN THIS RECORD -- UNMEASURED, not waived")
     tab.render()
