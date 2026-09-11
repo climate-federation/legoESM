@@ -83,8 +83,22 @@ def test_literal_tracer_matrix_fuses_diffusion_and_implicit_transport():
         jnp.asarray(h * field_t), jnp.asarray(h * field_s), jnp.asarray(k),
         jnp.asarray(h), jnp.asarray(e3w), dt,
         jnp.ones(3, dtype=bool), implicit_w=jnp.asarray(wi))
-    np.testing.assert_allclose(got_t, expected_t, rtol=0.0, atol=2.0e-15)
-    np.testing.assert_allclose(got_s, expected_s, rtol=0.0, atol=2.0e-15)
+    # THE TOLERANCE IS ONE ULP OF THE COMPARED VALUE, not a constant.
+    # ``expected`` comes from ``np.linalg.solve`` -- LAPACK's LU with partial
+    # pivoting -- which is a DIFFERENT ALGORITHM from NEMO's ordered Thomas
+    # sweep, so one ulp is the most that can be asked of the agreement.  The
+    # old constant was atol = 2e-15 against values near 39.8, where one ulp is
+    # 7.1e-15: a SUB-ULP tolerance, which passed only because the two
+    # algorithms happened to agree to the last bit.  They stopped agreeing when
+    # the sweep started rounding its multiply separately, as gfortran does
+    # (trazdf.f90:532,546) -- so the EXPECTATION's tolerance was wrong, not the
+    # code, and the difference measured at the moment of the change was exactly
+    # 7.105427e-15 = 1.0 ulp on 1 of 3 cells.
+    for got, expected in ((got_t, expected_t), (got_s, expected_s)):
+        d = np.abs(np.asarray(got) - expected)
+        np.testing.assert_array_less(
+            d - np.spacing(np.abs(expected)), 1.0e-30,
+            err_msg="the ordered sweep and LAPACK must agree to one ulp")
     # Planted omission: removing wi must move the result.
     zero_t, _ = implicit_vertical_diffusion_nemo_tracer_pair(
         jnp.asarray(h * field_t), jnp.asarray(h * field_s), jnp.asarray(k),
