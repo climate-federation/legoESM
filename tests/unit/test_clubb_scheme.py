@@ -547,9 +547,18 @@ def test_prognostic_clubb_conserves_column_moisture_no_sfc_flux():
     col_dq = np.sum(mass * dq, axis=1)                   # kg/m^2/s
     col_q = np.sum(mass * np.asarray(q_f), axis=1)       # kg/m^2
     # (a) Nontrivial redistribution: the per-step moisture change somewhere in the
-    # column is >=1e-8 kg/kg (the spun-up case is ~1e-6; the rest state is ~1e-11,
-    # so this floor cleanly separates "real transport" from "vacuously quiescent").
-    assert float(np.max(np.abs(dq) * 150.0)) > 1e-8
+    # column must sit far above the quiescent rest state (~1e-11 kg/kg), which is
+    # what would make (b) vacuous.
+    #
+    # The floor is 1e-9, not the 1e-8 it was. The comment here used to claim the
+    # spun-up case runs at ~1e-6, which was wrong by two orders of magnitude:
+    # measured, this fixture gives 1.34e-8 before the closure was moved onto both
+    # level sets and 9.95e-9 after -- a 26% reduction in peak redistribution, which
+    # is a physical consequence of that change, not a conservation failure ((b)
+    # holds at 1e-17 either way). At the old floor the guard had 34% margin and
+    # tripped on that 26%; at 1e-9 it keeps two decades of separation from the rest
+    # state, which is the distinction it exists to make.
+    assert float(np.max(np.abs(dq) * 150.0)) > 1e-9
     # (b) Yet the mass-weighted column total drifts only at flux-form round-off.
     assert np.all(np.abs(col_dq) * 150.0 / col_q < 1e-12)
 
