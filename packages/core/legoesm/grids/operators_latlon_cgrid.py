@@ -750,19 +750,40 @@ def gradient_y_cgrid(
     # rank-local band, including the partition cuts.
     f_diff = f_padded[1:] - f_padded[:-1]  # (n_lat_v, n_lon[, nlev])
 
-    if is_tripolar(grid):
-        # Full 2D dy_v metric (varies in lon on the bipolar cap).  Floor the
-        # denominator: a tripole built with ``min_dx_m=0.0`` has an exact
-        # zero south pole row, and dividing every f_diff row before
-        # zero_polar_lat_ends would compute nonzero/0 = inf/NaN there (poisons
-        # jax_debug_nans and AD even though the row is overwritten to zero).
-        dy_v = jnp.maximum(grid.dy_v, 1.0e-30)  # (n_lat+1, n_lon)
+    # THE GRID'S OWN v-POINT METRIC WHEN IT HAS ONE.  ``LatLonCGridGeometry``
+    # carries ``dy_v``; the older ``LatLonGrid`` (still passed by the
+    # atmosphere lat-lon C-grid dycores, the operator adapter, nesting and the
+    # MPI band extension) does not, and for it the reconstruction below is the
+    # only definition of a v-face spacing there is.
+    #
+    # WHY THIS IS NOT COSMETIC (#1728).  The reconstruction is the
+    # finite-difference distance between two T-points,
+    # ``0.5*(dy_T[j] + dy_T[j-1])``.  Under ``metric_convention="nemo_isotropic"``
+    # the geometry's ``dy_v`` is instead NEMO's ``e2v`` --
+    # ``ra*rad*COS(rad*gphiv)*rn_e1_deg`` (usrdef_hgr.F90:118), the ISOTROPIC
+    # scale factor evaluated AT the v-face latitude -- and on DINO's Mercator
+    # rows the two differ by up to 8.2e-03 (median 2.8e-05).  That difference
+    # was the ENTIRE residual of the NEMO-DINO first-step pressure gradient:
+    # the measured per-cell ratio of legoESM's meridional PGF to NEMO's
+    # ``hpg_sco`` equalled ``e2v / (this reconstruction)`` to 3.5e-11, so
+    # nothing else in the operator contributed. The grid already carried e2v;
+    # this operator was the one place that did not read it.
+    #
+    # Floor the denominator: a tripole built with ``min_dx_m=0.0`` has an exact
+    # zero south pole row, and dividing every f_diff row before
+    # zero_polar_lat_ends would compute nonzero/0 = inf/NaN there (poisons
+    # jax_debug_nans and AD even though the row is overwritten to zero).
+    grid_dy_v = getattr(grid, "dy_v", None)
+    if grid_dy_v is not None:
+        dy_v = jnp.maximum(grid_dy_v, 1.0e-30)         # (n_lat+1, n_lon)
         bcast = (slice(None), slice(None)) + (jnp.newaxis,) * (f_diff.ndim - 2)
         df_dy = f_diff / dy_v[bcast]
     else:
-        # Regular / Mercator: 1D dy over latitude.  Uniform-dlat is a
-        # constant (= R * dlat); ``mode='edge'`` extends Mercator's
-        # variable dlat by one row (unchanged behaviour).
+        # No v-point metric on this grid object: rebuild the T-point-to-T-point
+        # spacing.  Uniform-dlat is a constant (= R * dlat) and this
+        # reproduces ``dy_v`` BIT-IDENTICALLY there; ``mode='edge'`` extends a
+        # variable dlat by one row, which fabricates the neighbour's spacing at
+        # an interior MPI cut -- another reason to prefer the carried metric.
         dy_h = grid.dy * 0.5                           # (n_lat,)
         dy_h_padded = jnp.pad(dy_h, (1, 1), mode="edge")
         dy_v = 0.5 * (dy_h_padded[1:] + dy_h_padded[:-1])  # (n_lat+1,)
