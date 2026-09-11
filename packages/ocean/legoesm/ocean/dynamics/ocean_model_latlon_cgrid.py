@@ -4023,6 +4023,7 @@ class LatLonCGridOceanModel:
                    _external_tracer_rate=None,
                    _ldf_state=None, _tke_n2_bundle_override=None,
                    _return_raw_kaa_qco: bool = False,
+                   _kmm_geometry_eta=None,
                    z_coord=None, config=None, iwm_fields=None):
         """Core step logic — no JIT wrapper.
 
@@ -4035,6 +4036,22 @@ class LatLonCGridOceanModel:
         into ``ts(Krhs)`` (trasbc.F90:150-155) BEFORE ``tra_zdf`` forms
         ``Kaa`` from it. ``None`` (every caller except the leap-frog Nnn
         pass under the new DINO placement) ⇒ bit-identical.
+
+        ``_kmm_geometry_eta`` (private, MLF): the leap-frog's TRUE now-level
+        (Kmm) sea surface height.  The dissipative Nbb pass substitutes the
+        WHOLE state down to the before level, but NEMO only moves the TRACER
+        and the DENSITY there -- every sea-level stretch inside ``ldf_slp``
+        (``ldfslp.f90:177, 216, 267, 268, 281-286, 336, 337, 345``) and inside
+        ``traldf_iso_lap`` (``traldf_iso.f90:231, 232, 284, 292, 305, 823,
+        828``) is indexed ``Kmm``.  Passing the step-entry height here restores
+        that split.  It is the UNFILTERED now height: ``ssh_atf`` rewrites
+        ``ssh(:,:,Nnn)`` at ``stpmlf.f90:425`` but ``r3t(:,:,Nnn)`` is not
+        refreshed from it until ``:571``, after ``tra_atf_qco``.  ``None``
+        (every caller except that one pass) => bit-identical, since the
+        operands then read ``state.eta`` exactly as before.  NOT applied to the
+        before-density's own depth: ``eos( ts, Nbb, rhd )`` (``stpmlf.f90:201``)
+        binds ``eos_insitu_New_t``'s ``Knn`` dummy to ``Nbb``, so that depth is
+        genuinely ``Kbb`` (``eosbn2.f90:325, :362``).
 
         ``_fct_tracer_before`` (private, MLF): ``(T_before, S_before)`` — the
         BEFORE-level (Nbb) tracers the leap-frog step passes so the FCT/Zalesak
@@ -6036,6 +6053,10 @@ class LatLonCGridOceanModel:
                 raise ValueError(
                     "GMRediConfig.slope_prd_geometry_stage must be 'current_step' "
                     f"or 'before_step', got {gm_cfg.slope_prd_geometry_stage!r}")
+            # NEMO's Kmm geometry for ldf_slp + traldf_iso (see the
+            # ``_kmm_geometry_eta`` paragraph in this method's docstring).
+            _kmm_eta = (state.eta.data if _kmm_geometry_eta is None
+                        else _kmm_geometry_eta)
             _slope_n2_eval = getattr(
                 gm_cfg, "slope_n2_evaluation", "recompute")
             if _slope_n2_eval == "carried_step_entry":
@@ -6105,7 +6126,7 @@ class LatLonCGridOceanModel:
                 native_prd_TS=_gm_native_prd_TS,
                 native_slope_pn2=_gm_native_pn2,
                 native_slope_e3w=_gm_native_e3w,
-                native_slope_eta=state.eta.data,
+                native_slope_eta=_kmm_eta,
                 # ldf_eiv_trp precedes dynamics and consumes the same-stage
                 # ldf_slp slopes, while the later tra_ldf tensor consumes Kmm
                 # geometry. Keep the through-FCT bolus on the historical Naa
@@ -6119,7 +6140,7 @@ class LatLonCGridOceanModel:
                 # tra_ldf call (:216/:265 write Naa; :397 writes Nnn only
                 # after tra_atf_qco), so Kmm here is the STEP-ENTRY height --
                 # not state_new.eta, which is Naa, after the barotropic solve.
-                redi_kmm_eta=state.eta.data,
+                redi_kmm_eta=_kmm_eta,
                 return_bolus_transport=_want_bolus,
                 dt=dt,
                 eos_depth=getattr(_cfg_b, "eos_depth", "insitu"),
@@ -6164,10 +6185,10 @@ class LatLonCGridOceanModel:
                     native_prd_TS=_gm_native_prd_TS,
                     native_slope_pn2=_gm_native_pn2,
                     native_slope_e3w=_gm_native_e3w,
-                    native_slope_eta=state.eta.data,
+                    native_slope_eta=_kmm_eta,
                     # The same Kmm geometry the explicit half receives: the
                     # two sides of the akz split divide by one object.
-                    redi_kmm_eta=state.eta.data,
+                    redi_kmm_eta=_kmm_eta,
                     # #1226: the SAME wall masks the tendency dispatcher uses,
                     # so the nemo_native K33 slopes/masks are bit-identical to
                     # the explicit operator's (staircase-aware; the K33-side
@@ -10500,6 +10521,14 @@ class LatLonCGridOceanModel:
             _ab2_scope_override="advective",
             _barotropic_substep_scale=_baro_scale,
             _tke_n2_bundle_override=_tke_n2_bundle,
+            # NEMO moves only the TRACER and the before-DENSITY to Kbb in this
+            # pass.  Every sea-level stretch that ldf_slp and traldf_iso read is
+            # Kmm (ldfslp.f90:177-345; traldf_iso.f90:231-828), so hand them the
+            # step-entry now height rather than the substituted before height.
+            # The before-density's OWN depth stays Kbb -- it is built from
+            # ``nbb.eta_before``, which this substitution never touched
+            # (stpmlf.f90:201 -> eosbn2.f90:325 with Knn=Nbb).
+            _kmm_geometry_eta=state.eta.data,
             z_coord=z_coord, config=config, iwm_fields=iwm_fields)
 
         # 2. Explicit combine.  MOMENTUM: leap-frog the BAROCLINIC deviation only

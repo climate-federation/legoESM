@@ -358,6 +358,108 @@ def main() -> int:
         failed.append("section-B-liveness")
     print(f"\nSection B: {len(moved_b)} card(s) move: {moved_b}")
 
+    # =================================================================
+    # SECTION C -- WHICH TIME LEVEL the Nbb dissipative pass hands over
+    # =================================================================
+    # PR #1728 round 5.  ``_leapfrog_step`` runs the dissipative operators on
+    # a state whose WHOLE geometry is substituted to the before level, but
+    # NEMO moves only the TRACER (traldf_iso.f90:184-205) and the before
+    # DENSITY (stpmlf.f90:201 -> eosbn2.f90:362 with Knn=Nbb) there; every
+    # sea-level stretch inside ldf_slp (ldfslp.f90:177-345) and traldf_iso
+    # (traldf_iso.f90:231-828) stays Kmm.  The step now hands that pass the
+    # step-entry height through ``_step_impl(_kmm_geometry_eta=...)``.
+    #
+    # A card can only be touched if it RUNS that pass, so the predicate is the
+    # resolved outer integrator, printed rather than assumed (Rule 10):
+    #   leapfrog       builds the substituted Nbb pass -> REGISTERED
+    #   nemo_mlf       ONE pass at Nnn, Kbb tracers handed over via _ldf_state
+    #                  -> already on NEMO's split, cannot move
+    #   anything else  no Nbb pass at all -> cannot move
+    print("\nSECTION C -- the Nbb pass's geometry time level, per card")
+    print(f"{'card':30s}{'integrator':16s}{'nbb pass':>10s}"
+          f"{'reaches':>9s}  note")
+    moved_c, seen_int = [], {}
+    for name in sorted(dm.DINO_RECIPES):
+        try:
+            cfg = dm.dino_config_for_recipe(name)
+            if name.startswith("nemo_dino"):
+                cfg = dm.nemo_faithful_dino_config(base=cfg)
+            grid = dm.dino_lat_lon_grid(cfg)
+            mc, _ = dm.dino_lat_lon_model_config(grid, cfg, physics=True)
+        except Exception as exc:                       # noqa: BLE001
+            print(f"{name:30s}{'?':16s}{'BUILD FAIL':>10s}{'-':>9s}  "
+                  f"{type(exc).__name__}: {exc}")
+            failed.append(name)
+            continue
+        integ = getattr(mc, "outer_integrator", "forward_euler")
+        seen_int[name] = integ
+        nbb = integ == "leapfrog"
+        gmc = getattr(mc, "gm_redi", None)
+        sch = getattr(gmc, "slope_scheme", "n/a") if gmc is not None else "n/a"
+        pos = (getattr(gmc, "slope_positions", "mode_b")
+               if gmc is not None else "n/a")
+        reaches = nbb and (sch == "nemo_iso_lap" or pos == "nemo_native")
+        if reaches:
+            moved_c.append(name)
+            note = "REGISTERED: trajectory moves"
+        elif nbb:
+            note = "runs the Nbb pass but no operand of it reads the height"
+        elif integ == "nemo_mlf":
+            note = "single Nnn pass (_ldf_state) -- already NEMO's split"
+        else:
+            note = f"no Nbb dissipative pass ({integ})"
+        print(f"{name:30s}{integ:16s}{str(nbb):>10s}{str(reaches):>9s}  {note}")
+
+    # The predicate above is a claim about the CODE, so it is measured on the
+    # code: run one step of a REGISTERED card and of a non-registered card,
+    # spying on what ``_step_impl`` is actually handed.  A non-registered card
+    # that is handed a height would move silently; a registered card that is
+    # handed None would make every REGISTERED row above a fiction.
+    import jax
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel)
+    real_impl = LatLonCGridOceanModel._step_impl
+    print("\n  spy: what _step_impl is handed, per pass, on one real step")
+    for probe in ("nemo_dino_kamm_mlf", "legoesm_default"):
+        if probe not in dm.DINO_RECIPES:
+            print(f"    {probe:22s} NOT A RECIPE -- the spy proves nothing")
+            failed.append(f"section-C-{probe}")
+            continue
+        seen = []
+
+        def _spy(self, state, dt, *a, **kw):
+            seen.append(kw.get("_kmm_geometry_eta"))
+            return real_impl(self, state, dt, *a, **kw)
+
+        try:
+            cfg = dm.dino_config_for_recipe(probe)
+            if probe.startswith("nemo_dino"):
+                cfg = dm.nemo_faithful_dino_config(base=cfg)
+            grid = dm.dino_lat_lon_grid(cfg)
+            z = dm.dino_lat_lon_vertical(grid, cfg)
+            mc, _ = dm.dino_lat_lon_model_config(grid, cfg, physics=True)
+            model = LatLonCGridOceanModel(grid, z, mc)
+            st = dm.dino_lat_lon_state(grid, z, cfg)
+            LatLonCGridOceanModel._step_impl = _spy
+            with jax.disable_jit():
+                model.step(st, dt=float(getattr(cfg, "dt", 2700.0)))
+        except Exception as exc:                       # noqa: BLE001
+            print(f"    {probe:22s} STEP FAILED {type(exc).__name__}: {exc}")
+            failed.append(f"section-C-{probe}")
+            continue
+        finally:
+            LatLonCGridOceanModel._step_impl = real_impl
+        handed = [("None" if v is None else "height") for v in seen]
+        want = (probe in moved_c)
+        got = any(v is not None for v in seen)
+        ok = (want == got)
+        print(f"    {probe:22s} passes={handed}  registered={want}  "
+              f"handed-a-height={got}  {'AGREES' if ok else 'CONTRADICTS'}")
+        if not ok:
+            failed.append(f"section-C-{probe}")
+
+    print(f"\nSection C: {len(moved_c)} card(s) move: {moved_c}")
+
     print(f"\n{len(moved)} card(s) move: {moved}")
     if failed:
         print(f"{len(failed)} card(s) could not be scored: {failed}")
