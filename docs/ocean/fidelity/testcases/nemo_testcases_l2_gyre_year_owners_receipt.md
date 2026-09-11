@@ -1,4 +1,4 @@
-# GYRE, WHO OWNS THE DAY-30 GAP: the whole year's difference is made in ONE TIME STEP
+# GYRE, WHO OWNS THE DAY-30 GAP: the difference is BORN in STEP 2, and step 2 is not bit-exact on NEMO's own inputs
 
 Preregistration: `docs/ocean/fidelity/PREREG_nemo_testcases_l2_gyre_year_owners.md`,
 written before any number below was read and frozen; no expectation, metric or
@@ -40,6 +40,19 @@ three records are one legoESM run and one NEMO run):
 | entering step 60 (day 9.83) | `5.2599e-03` K | 57 more |
 | day 30 (after 180 steps) | `1.4241e-02` K | 120 more |
 | day 360 (after 2160 steps) | `4.0714e-01` K | 1980 more |
+
+**A number that belongs beside the multiplier, and an independent review was
+right to ask for it.**  In ABSOLUTE terms step 2 supplies `4.15e-04` K of the
+day-30 gap's `1.4241e-02` K — **`2.9 %`**.  The remaining `97 %` is made by the
+178 steps after it.  What "step 2 owns the year" means is therefore precise and
+narrower than it sounds: step 2 is where the difference is BORN, taking it from
+rounding to finite, and nothing later does anything of the kind; the later
+growth is a few per cent per step compounding on what step 2 created.  As a
+fraction of the signal NEMO itself has developed, step 2's contribution is
+`8.4e-03` of NEMO's two-step change against `1.2e-02` of its thirty-day
+change — i.e. about `70 %` of the day-30 relative error is present after two
+steps.  Both framings are given because the absolute and relative readings
+differ by a factor of 24.
 
 **CONFIRMED, and section 1b upgrades it from a trajectory statement to an
 EQUAL-INPUT one: given NEMO's own state entering step 2, legoESM's step 2
@@ -276,7 +289,17 @@ SAME state — NEMO's own restart, which IS the `Kbb` state entering the next
 step (`stprk3.F90:155`, `CALL sbc( kstp, Nbb, Nbb )`) — so the inputs are
 identical by construction and any difference can only be the statement.
 
-| clock sample | `ztime` [h] | `qsr` | `qns` | `emp` | `utau` | `vtau` |
+**The rows are the MODEL-FACING quantities, not a re-assembly of them.**  The
+gate CALLS `nemo_testcase_l2_gyre_phase3_gate._surface_forcings` -- the
+function the certified step calls -- and compares what comes out of it:
+`surface.sw_down` against `qsr`, the materialized `surface.q_net` against the
+literal `qns + qsr`, `freshwater.evap` against `emp`, and
+`surface.tau_i_native` / `tau_j_native` against `utau` / `vtau`.  A first
+version re-assembled that composition here instead of calling it, and an
+independent review proved the consequence: a transposed stress pair inside the
+real function left every row bit-exact.  Retraction 9.
+
+| clock sample | `ztime` [h] | `qsr` | `q_net` | `emp` | `utau` | `vtau` |
 |---|---:|---:|---:|---:|---:|---:|
 | kt = 1 | `4.0` | 0 | 0 | 0 | 0 | 0 |
 | entering days 30, 60, … 330 | `724 … 7924` | 0 | 0 | 0 | 0 | 0 |
@@ -286,6 +309,28 @@ Cells unequal, of 600 wet, at every one of the thirteen samples: **zero**.
 The samples span the entire `8640`-hour seasonal cycle, so no phase,
 denominator, amplitude or calendar operand of the seasonal statements can be
 wrong.  **C1 REFUTED as an owner.**
+
+**The GEOGRAPHIC stress pair, which the five rows above do not pin.**  The
+shared forcing object also carries `tau_x`/`tau_y`, the geographic rotation of
+the native pair, and that is where a transposition or a sign error would live.
+Recovering the native pair from it costs `1.3878e-17` Pa in binary64 (because
+`cos² + sin²` is not exactly 1), so the row is scored as a DISCRIMINATION
+rather than at the bit-exact bar: how much further from the literal a
+TRANSPOSED pair lands.
+
+| | identity | transposed | ratio | verdict |
+|---|---:|---:|---:|---|
+| `utau`, all 13 samples | `1.3878e-17` Pa | `1.3878e-17` Pa | `1.0000` | **BLIND**, structurally |
+| `vtau`, all 13 samples | `1.3878e-17` Pa | `1.19e-01` … `1.78e-01` Pa | `8.55e+15` … `1.28e+16` | DISCRIMINATES |
+
+**`utau` cannot see a transposition on this card and no correct model could
+make it.**  Measured: GYRE's grid is exactly 45 degrees (`sin_alpha_u` equals
+`cos_alpha_u` to `0.0`) and its wind has `vtau` equal to `-utau` to `0.0`, so
+the transposed recovery of `utau` is algebraically the identity recovery --
+`utau*(2 sin cos - cos² + sin²)`, which is `utau` at 45 degrees.  The gate
+requires that the transposition be SEEN by SOME component and reports the blind
+ones rather than hiding them, which is the same shape as the year round's A2b
+leg.
 
 **The statements that were re-read line by line to make that claim** (Rule 0;
 `BLD/ppsrc/nemo/usrdef_sbc.f90`, the compiled file the card runs):
@@ -475,14 +520,84 @@ Neither A nor B nor C can own the day-30 gap: all three are threshold or
 saturation behaviours, and section 1 shows the day-30 gap is made in step 2,
 when the column is still the initial-state profile and nothing is convecting.
 
-## 6.  THE THRESHOLD SWITCH BETWEEN DAY 180 AND DAY 210
+## 6.  THE THRESHOLD SWITCH — TRACED TO A CELL AND A STEP.  E5 HELD.
 
-PENDING — the trace is `--switch-trace 1260 --every 6 --seeds 0,1`, stepping
-both members from rest with the model's OWN convective-coefficient field read
-every day, and its result is filled in below when it lands.  Its refusal is
-already in the harness: if the trigger never fires anywhere in the traced
-window, it EXITS NON-ZERO rather than reporting "no crossing", because an
-instrument that sees nothing may not be quoted as seeing nothing.
+`year_owners/switch_trace_seeds01.json`.  Two members of the TIP model, seeds 0
+and 1, stepped side by side from rest for 1260 steps (day 210), with the
+convective trigger mask read from the MODEL'S OWN coefficient field every sixth
+step.  1888 s wall.
+
+**The first step at which the two members' enhanced-vertical-diffusion trigger
+masks differ is `kt = 1213`, DAY 202** — inside the preregistered `[1080,
+1260]` window.  **E5 HELD.**
+
+| | value |
+|---|---|
+| step | `kt = 1213`, day `202.0` |
+| cell | `j = 10`, `i = 9`, `k = 1` |
+| depth | `15.096` m |
+| latitude | `27.652 N` |
+| cells whose mask differs | `2` of 17400 interfaces |
+| interfaces firing, seed 0 / seed 1 | `834` / `832` |
+| `T` rms between the two members at that step | `3.7552e-05` K |
+
+**And the between-member temperature difference jumps at that step and nowhere
+before it:**
+
+| day | interfaces firing, seed 0 / seed 1 | mask cells differing | `T` rms between members [K] |
+|---:|---:|---:|---:|
+| 198 | 760 / 760 | 0 | `2.0505e-08` |
+| 199 | 790 / 790 | 0 | `2.1601e-08` |
+| 200 | 800 / 800 | 0 | `2.2897e-08` |
+| 201 | 813 / 813 | 0 | `2.4159e-08` |
+| **202** | **834 / 832** | **2** | **`3.7552e-05`** |
+| 203 | 856 / 856 | 0 | `5.5345e-05` |
+| 204 | 874 / 874 | 0 | `6.0400e-05` |
+| 205 | 905 / 907 | 2 | `8.6260e-04` |
+| 206 | 928 / 928 | 0 | `9.4389e-05` |
+| 207 | 951 / 951 | 0 | `1.0329e-04` |
+| 208 | 973 / 972 | 1 | `3.3573e-04` |
+| 209 | 996 / 992 | 4 | `5.4552e-04` |
+
+**`1553x` in one step, at the step the masks first disagree, after 201 days in
+which they never did.**  Of 210 sampled days, exactly FOUR have a differing
+mask, and the first is day 202.
+
+**So the year receipt's section 7(d) is upgraded from PLAUSIBLE to CONFIRMED.**
+It named `ln_zdfevd`'s hard branch as the only threshold of that size in the
+configuration and said the timing matched, with no cell-level trace run.  The
+trace is run: the branch is
+`IF( MIN(rn2,rn2b) <= -1.e-12 ) p_avt = rn_evd*wmask`
+(`BLD/ppsrc/nemo/zdfevd.f90:107-110`), the card's transcription fires on 813
+interfaces at day 201 and 834 on day 202, two of those 834 are cells the other
+member does not fire, and the between-member temperature difference multiplies
+by `1553` in that step.
+
+**NEMO does not cross it in year 1 and legoESM does, and that asymmetry is now
+attached to a mechanism rather than to a correlation.**  The year receipt
+measures NEMO's own four-member ensemble at `0` cells over 1 mK on every
+scored day while legoESM's reaches 4014.
+
+**What this trace cannot see, and one of these is load-bearing.**
+
+* **It samples the mask once a DAY** (`--every 6`).  A crossing that flips and
+  flips back inside one day is invisible, so day 202 is an UPPER BOUND on the
+  first crossing, not a proof that none happened earlier.  What makes it
+  informative anyway is the companion series: the between-member difference is
+  flat at `2e-08` for 201 days and jumps `1553x` at the sampled step where the
+  mask first differs.  A crossing that had happened earlier and mattered would
+  have shown in that series.
+* **It reads the mask from the model's own `_enhanced_diffusion_K` with the
+  two-arm branch the model runs** (`before_tracers` passed explicitly, so the
+  `MIN(rn2, rn2b)` branch executes rather than an argued equivalent), but
+  WITHOUT the caller's `eos_fn`.  Under this card's `n2_mode = "nemo_bn2"` the
+  N² that drives the trigger comes from `compute_buoyancy_frequency_nemo_bn2`,
+  which takes `eos_form` and not `eos_fn`; the density `eos_fn` would build is
+  consumed only by the `insitu` branch.  That is a CODE READING, not a
+  measurement, and it is the trace's one unvalidated instrument assumption.
+* **It is two members of legoESM**, not legoESM against NEMO.  It explains the
+  FLOOR, which is what section 7(d) of the year receipt is about.  It says
+  nothing about the GAP, which sections 1 and 1b own.
 
 ## 7.  WHAT THIS ROUND CANNOT SEE
 
@@ -544,6 +659,25 @@ instrument that sees nothing may not be quoted as seeing nothing.
    is not the only discontinuity.  **Step 3 multiplies `u` and `v` by `9.31`
    and `9.18`** — ten orders below step 2, but the largest thing in the rest of
    the year, and it is momentum-only.
+9. **"The surface forcing is bit-exact" — RETRACTED in its first form and
+   re-established in a narrower, stronger one.**  The first version of the
+   gate re-assembled the certified gate's forcing composition instead of
+   CALLING it, so it certified the `usrdef_sbc` statements and said nothing
+   about the forcing the MODEL consumes.  An independent review proved the
+   consequence by construction: transposing `tau_x`/`tau_y` inside the real
+   `_surface_forcings` left every row bit-exact at every clock sample while the
+   per-step walk's kt=2 velocity residual went from `2.2e-13` to `2.2e-02` m/s.
+   The gate now calls the production function and scores what comes out of it,
+   and the exoneration is re-measured on that path.
+10. **"The title's claim that the whole year's difference is made in one step"
+    — RETRACTED.**  In absolute rms, step 2 supplies `2.9 %` of the day-30 gap.
+    What it owns is the BIRTH of the difference, not its size.
+11. **The YEAR round's own `binary.sha256` does not describe the binary beside
+    it.**  Its run.sh copies one provenance file into every run directory, so
+    `nemo_pristine/binary.sha256` names the PATCHED binary while
+    `nemo_pristine/nemo` hashes `a759e8…`, the certified one.  Measured here
+    because this round's acquisition is admitted against that run; recorded as
+    a defect of the year round's script, which this round does not edit.
 
 ## 8b.  REVIEWS
 
@@ -574,7 +708,28 @@ reproduced.
 
 ### The DIFF review
 
-Its findings are recorded in the round's commits.
+**Its first finding was that this round's central exoneration did not measure
+what it claimed**, and it proved it by construction rather than by argument.
+
+| finding | re-measured | what changed |
+|---|---|---|
+| **BLOCKING.** the forcing gate re-assembled the certified gate's composition instead of CALLING it, so it certified the usrdef_sbc STATEMENTS and said nothing about the forcing the MODEL CONSUMES.  Poisoning `_surface_forcings` to raise left the gate ALL BIT-EXACT with zero calls; TRANSPOSING `tau_x`/`tau_y` inside the real one left all five fields bit-exact at all thirteen samples while the per-step walk's kt=2 velocity residual went `2.2e-13` -> `2.2e-02` m/s | accepted as demonstrated; the construction is the measurement | the gate CALLS `_surface_forcings` and scores the model-facing rows (`sw_down`, the materialized `q_net`, `freshwater.evap`, `tau_i_native`, `tau_j_native`), plus two rows that invert the rotation.  Re-run: still bit-exact on all thirteen samples, and a new `forcing-stress-transpose` plant turns it red |
+| **BLOCKING.** the switch trace evaluated only the NOW arm of `MIN(rn2,rn2b)` | already fixed one commit after the reviewed range: `before_tracers` is passed so the two-level branch executes | stated in section 6 |
+| the trace omits the caller's `eos_fn` | under `n2_mode="nemo_bn2"` the trigger's N² takes `eos_form`, not `eos_fn`; the density `eos_fn` builds is consumed only by the `insitu` branch | recorded in section 6 as the trace's one unvalidated instrument assumption, labelled a code reading rather than a measurement |
+| the acquisition stages `R41ADVSP` while `nemo_seed0/binary.sha256` names `YRPERT` | **the sha FILE is wrong, not the binary.** `nemo_pristine/nemo` hashes `a759e8…` = R41ADVSP, which is what the script stages; the year round's run.sh copies ONE `binary.sha256` into every run directory, so a file naming `578c88…` sits beside a binary that is not it | the script now compares the EXECUTABLE against the reference run's executable and refuses on a difference; the year round's provenance defect is recorded here |
+| `--plant day-offset` never exits non-zero though the docstring claims every plant does | reproduced: the walks report numbers and carry no bar | the docstring says so and labels it a DIAGNOSTIC |
+| `self_check`'s byte-unchanged check is a `for`/`else` with no `break`, so "OK" printed even after failures were appended | reproduced | rewritten as a list comprehension; `expect_raises` narrowed from `BaseException` |
+| the run.sh test is a word-grep that passes with the wrong card, a deleted comparison and any binary | reproduced | it now pins the card name, both `cmp` invocations and the cadence |
+| "one step makes the year's gap" holds on the relative column and not the absolute one — step 2 is `2.9 %` of the day-30 gap in rms | reproduced | the verdict carries both, and the title no longer says "the whole year's difference" |
+| the `nyear` plant fires only because the bar is bit-exact; the term is a mathematical no-op | reproduced (`1.42e-13` W/m2) | already stated in section 3; restated as the plant's own bound |
+| `glob_2Dsum` applies `smask0_i = ssmask*dom_uniq`, so both arms' de-meaning is correct — but the gate's coverage should be SAID | reproduced from `lib_fortran_generic.h90:92` and `dommsk.F90:203-205` | section 3's mask blind spot |
+| `decompose` reads legoESM from the head root and NEMO from the year root with no legoESM provenance stamp | the two roots are correct (the head ensemble is the legoESM headline, the NEMO members live in the year root) but the stamp is missing | recorded as open debt; the two legoESM snapshots differ by `4.7e-08` K, which is the ENE commit the year receipt measures |
+| `top_cell` overlaps the depth bands, so the depth shares sum above 1 | reproduced | section 4 lists it as a separate row with its own enrichment, not as a fourth band |
+| `_load` re-executes and returns a fresh module each call | reproduced; constants only, no number moves | recorded, not fixed |
+| `--snap-steps` has no CLI round-trip test | reproduced | recorded as open debt |
+
+Its verdict was **SHIP WITH FIXES**, blocking on the first two rows.  Both are
+fixed above and the gate was re-run after the fix.
 
 ## 9.  ASKED / UNASKED
 
@@ -586,7 +741,8 @@ Its findings are recorded in the round's commits.
 | 4 | the time-level registry extends from 10 to 60 step-entry dumps | extend to the writer's own range | **UNASKED.**  Offered for revert.  It reads dumps the card already wrote and still fails closed one past them; no recorded number can move, because nothing previously READ those files |
 | 5 | `run_member` gains a snapshot cadence, default unchanged | additive | **UNASKED.**  Offered for revert.  Every scored member is byte-unchanged |
 | 6 | the EVD `<=` vs `<` and set-vs-max differences are RECORDED, not fixed | record | **ASKED**, pick: record.  Both are changes to the model's own convective switch and both would move every card that convects; neither can own the day-30 gap |
-| 7 | the switch trace's window and cadence | 1260 steps, mask read every 6 | **ASKED**, pick: to day 210 so the year receipt's jump is inside it, daily so a crossing is dated to a day |
+| 7 | the switch trace's window and cadence | 1260 steps, mask read every 6 | **ASKED**, pick: to day 210 so the year receipt's jump is inside it, daily so a crossing is dated to a day.  The cost of the cadence is stated in section 6: day 202 is an UPPER BOUND on the first crossing |
+| 8 | the stress round trip is scored as a discrimination ratio, not at the bit-exact bar | ratio, bar `1e6` | **UNASKED.**  Offered for revert.  Inverting a rotation in binary64 costs `1.4e-17` Pa, so a bit-exact bar would go red on a correct model for an arithmetic reason; relaxing a bar is forbidden, so the row was rescored as what it is for.  Measured discrimination `8.6e+15` to `1.3e+16` |
 
 ## 10.  OPEN, RANKED
 
@@ -603,6 +759,12 @@ Its findings are recorded in the round's commits.
 2. **Run the early-days acquisition** so days 10-29 stop being a gap in the
    record.
 3. **Census the non-convective `K_v` above `100` m2/s** to decide whether
-   NEMO's SET and legoESM's MAX ever disagree (section 5, row B).
-4. Decide the `<=` vs `<` threshold comparison (section 5, row A) — a one-
+   NEMO's SET and legoESM's MAX ever disagree (section 5, row B), and the same
+   census on `wmask = 0` firing interfaces for row C.
+4. **Re-trace the switch at `--every 1`** across days 195-210 to turn day 202
+   from an upper bound into the exact step.  Cheap: 90 steps of the pair.
+5. Decide the `<=` vs `<` threshold comparison (section 5, row A) — a one-
    character change to a convective switch, so it is a question, not a diff.
+6. Small debt named by the diff review and not closed: `decompose` stamps no
+   provenance for its legoESM side; `--snap-steps` has no CLI round-trip test;
+   `_load` re-executes a module on every call.
