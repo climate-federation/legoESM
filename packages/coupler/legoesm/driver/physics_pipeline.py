@@ -2452,10 +2452,25 @@ class PhysicsPipeline:
             # Cloud ice + double-moment NUMBER columns (None for warm-rain /
             # diagnostic-cloud runs ⇒ constant r_eff, legacy behaviour). When a
             # double-moment scheme supplies them, they drive the M2005 PSD
-            # liquid/ice effective radii — N_c per-VOLUME [#/m³], N_i per-MASS
-            # [#/kg], passed raw (same convention as the dynamical-core paths).
+            # liquid/ice effective radii.  The N_c CARRY is stored per MASS
+            # [#/kg] (checkpoint stamp ``number_convention = per_mass``); the
+            # PSD wants N_c per VOLUME [#/m³], so bridge with the MOIST air
+            # density — the SAME conversion the radiation physics_fn entry does
+            # (radiation/integration.py ``_extract_tracer_columns``).  #1715:
+            # this site passed the carry RAW, so a prognostic droplet number
+            # reached the liquid r_eff a factor rho too small (~0.5 at 500 hPa
+            # ⇒ r_eff ~26% too large aloft).  Inert in production only because
+            # the specified-Nc+CCN path overrides the (dead-zeros) carry below;
+            # live the moment predict_Nc feeds it.  N_i is used per-mass and
+            # passes through raw, matching the reference entry.
             q_i_col = None if q_i is None else ad.flatten_3d(q_i)
-            n_cloud_col = None if N_c is None else ad.flatten_3d(N_c)
+            if N_c is None:
+                n_cloud_col = None
+            else:
+                from legoesm.atmosphere.physics._shared import compute_rho
+                _rho_nc = compute_rho(T_col, p_full_col, q_v_col)
+                n_cloud_col = jnp.maximum(
+                    ad.flatten_3d(N_c) * _rho_nc, 0.0)
             n_ice_col = None if N_i is None else ad.flatten_3d(N_i)
             # Aerosol-CCN droplet number for the radiation PSD: under
             # specified-Nc with aerosol coupling, feed the SAME
