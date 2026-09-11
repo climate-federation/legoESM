@@ -152,7 +152,7 @@ cp "$manifest"/* "$TARGET_RUN/"
 "$PY" "$GATE" --record "$TARGET_RUN/oracle_tke_operands_kt00000002.bin" \
   --expect-commit "$COMMIT" --producer-commit "$TARGET_RUN/producer_commit.txt" \
   --output "$TARGET_RUN/round56_tke_validation.json"
-for plant in header truncation nan config copy shape stamp; do
+for plant in header truncation nan config copy shape prandtl stamp; do
   if "$PY" "$GATE" --record "$TARGET_RUN/oracle_tke_operands_kt00000002.bin" \
        --expect-commit "$COMMIT" --producer-commit "$TARGET_RUN/producer_commit.txt" \
        --plant "$plant" >"$TARGET_RUN/round56_tke_${plant}_plant.log" 2>&1; then

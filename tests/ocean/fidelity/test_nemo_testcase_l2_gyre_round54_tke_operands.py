@@ -41,7 +41,12 @@ def _record(path: Path) -> None:
                           np.zeros((32, 22), dtype="=f8").tobytes(order="F")))
         else:
             parts.append(struct.pack("=4i", 3, *shape))
-            parts.append(np.zeros(shape, dtype="=f8").tobytes(order="F"))
+            value = np.zeros(shape, dtype="=f8")
+            if name in {"tmask", "wmask", "mxl_momentum", "mxl_dissipation"}:
+                value.fill(1.0)
+            elif name == "pdlr":
+                value[:, :, 1:30] = 1.0
+            parts.append(value.tobytes(order="F"))
     path.write_bytes(b"".join(parts))
 
 
@@ -52,10 +57,19 @@ def test_reader_accepts_complete_schema(tmp_path):
     assert result["header"]["kt"] == 2
     assert tuple(result["arrays"]["avt_pre_evd"].shape) == (32, 22, 31)
     assert tuple(result["arrays"]["taum_entry"].shape) == (32, 22)
+    assert result["calibration"] == {
+        "wet_closure_cells": 32 * 22 * 30,
+        "wet_prandtl_cells": 32 * 22 * 29,
+        "prandtl_unequal": 0,
+        "avm_unequal": 0,
+        "avt_unequal": 0,
+        "dissl_unequal": 0,
+    }
 
 
 @pytest.mark.parametrize(
-    "plant", ["header", "truncation", "nan", "config", "copy", "shape"])
+    "plant", ["header", "truncation", "nan", "config", "copy", "shape",
+              "prandtl"])
 def test_reader_plants_fail(tmp_path, plant):
     path = tmp_path / "record.bin"
     _record(path)

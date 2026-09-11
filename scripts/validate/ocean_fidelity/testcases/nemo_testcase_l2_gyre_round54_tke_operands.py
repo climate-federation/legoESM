@@ -9,7 +9,6 @@ import struct
 from pathlib import Path
 
 import numpy as np
-
 from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 MAGIC = b"NEMO_L2_R56TKE2 "
@@ -33,6 +32,83 @@ class GateError(RuntimeError):
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise GateError(message)
+
+
+def _unequal_bits(actual: np.ndarray, expected: np.ndarray,
+                  mask: np.ndarray) -> int:
+    """Count unequal fp64 bit patterns on the explicitly consumed cells."""
+    actual_bits = np.asarray(actual, dtype="=f8").view("=u8")
+    expected_bits = np.asarray(expected, dtype="=f8").view("=u8")
+    return int(np.count_nonzero(actual_bits[mask] != expected_bits[mask]))
+
+
+def _calibrate_closure(arrays: dict, head: dict) -> dict[str, int]:
+    """Rebuild NEMO's recorded Prandtl factor and closure outputs exactly."""
+    jpkm1 = head["jpkm1"]
+    interior = np.zeros_like(arrays["wmask"], dtype=bool)
+    interior[:, :, 1:jpkm1] = arrays["wmask"][:, :, 1:jpkm1] != 0.0
+    wet = arrays["wmask"][:, :, :jpkm1] != 0.0
+
+    # Compiled R56TKE zdftke.f90:751,394-413.  Preserve NEMO's branch and
+    # association; in particular, do not turn the exact-zero guard into an
+    # epsilon or evaluate the inactive division arm.
+    rn2b = arrays["rn2b"][:, :, 1:jpkm1]
+    avm_entry = arrays["avm_entry"][:, :, 1:jpkm1]
+    sh2 = arrays["sh2"][:, :, 1:jpkm1]
+    zri = np.zeros_like(rn2b)
+    stable = rn2b > np.float64(0.0)
+    zdiv = sh2 + np.float64(arrays["rn_bshear"])
+    zero_div = stable & (zdiv == np.float64(0.0))
+    nonzero_div = stable & ~zero_div
+    numerator = rn2b * avm_entry
+    zri[zero_div] = numerator[zero_div] / np.float64(arrays["rn_bshear"])
+    zri[nonzero_div] = numerator[nonzero_div] / zdiv[nonzero_div]
+    ri_cri = (np.float64(2.0) /
+              (np.float64(2.0) + np.float64(arrays["rn_ediss"]) /
+               np.float64(arrays["rn_ediff"])))
+    pdlr_expected = np.maximum(
+        np.float64(0.1), ri_cri / np.maximum(ri_cri, zri))
+    pdlr_actual = arrays["pdlr"][:, :, 1:jpkm1]
+    pdlr_unequal = _unequal_bits(
+        pdlr_actual, pdlr_expected, interior[:, :, 1:jpkm1])
+
+    # Compiled R56TKE zdftke.f90:690-701.  This is the calibration arm: use
+    # only recorded NEMO operands and reproduce its exact statement order.
+    en = arrays["en_post_sweep"][:, :, :jpkm1]
+    zsqen = np.sqrt(en)
+    zav = np.float64(arrays["rn_ediff"]) * arrays[
+        "mxl_momentum"][:, :, :jpkm1] * zsqen
+    avm_expected = np.maximum(
+        zav, arrays["avm_floor"][:, :, :jpkm1]) * arrays[
+            "wmask"][:, :, :jpkm1]
+    avt_expected = np.maximum(
+        zav, arrays["avt_floor"][:, :, :jpkm1]) * arrays[
+            "wmask"][:, :, :jpkm1]
+    avt_expected[:, :, 1:jpkm1] = np.maximum(
+        arrays["pdlr"][:, :, 1:jpkm1] * avt_expected[:, :, 1:jpkm1],
+        arrays["avt_floor"][:, :, 1:jpkm1]) * arrays[
+            "wmask"][:, :, 1:jpkm1]
+    dissl_expected = zsqen / arrays["mxl_dissipation"][:, :, :jpkm1]
+
+    counts = {
+        "wet_closure_cells": int(np.count_nonzero(wet)),
+        "wet_prandtl_cells": int(np.count_nonzero(interior)),
+        "prandtl_unequal": pdlr_unequal,
+        "avm_unequal": _unequal_bits(
+            arrays["avm_closure"][:, :, :jpkm1], avm_expected, wet),
+        "avt_unequal": _unequal_bits(
+            arrays["avt_closure"][:, :, :jpkm1], avt_expected, wet),
+        "dissl_unequal": _unequal_bits(
+            arrays["dissl_output"][:, :, :jpkm1], dissl_expected, wet),
+    }
+    require(all(counts[f"{name}_unequal"] == 0
+                for name in ("prandtl", "avm", "avt", "dissl")),
+            f"closure calibration over {counts['wet_closure_cells']} wet "
+            f"closure cells/{counts['wet_prandtl_cells']} wet Prandtl cells "
+            "has unequal cells: "
+            + ", ".join(f"{name}={counts[f'{name}_unequal']}"
+                        for name in ("prandtl", "avm", "avt", "dissl")))
+    return counts
 
 
 def read_record(path: Path, *, plant: str | None = None) -> dict:
@@ -99,6 +175,13 @@ def read_record(path: Path, *, plant: str | None = None) -> dict:
     elif plant == "copy":
         arrays["avt_pre_evd"] = np.array(arrays["avt_pre_evd"], copy=True)
         arrays["avt_pre_evd"][head["ntsi"] - 1, head["ntsj"] - 1, 1] += 1.0
+    elif plant == "prandtl":
+        wet = np.argwhere(arrays["wmask"][:, :, 1:head["jpkm1"]] != 0.0)
+        require(wet.size != 0, "Prandtl plant found no wet recorded interface")
+        i, j, k0 = wet[0]
+        arrays["pdlr"] = np.array(arrays["pdlr"], copy=True)
+        arrays["pdlr"][i, j, k0 + 1] = np.nextafter(
+            arrays["pdlr"][i, j, k0 + 1], np.float64(np.inf))
     for name, value in arrays.items():
         require(np.all(np.isfinite(value)), f"{name} contains NaN/Inf")
     require(arrays["rn_Dt"] == 14400.0, f"wrong rn_Dt {arrays['rn_Dt']}")
@@ -130,7 +213,8 @@ def read_record(path: Path, *, plant: str | None = None) -> dict:
         require(np.array_equal(arrays[f"{name}_pre_evd"][ii, jj, kk],
                                arrays[f"{name}_closure"][ii, jj, kk]),
                 f"zdfphy pre-EVD {name} is not a bit copy of closure {name}")
-    return {"header": head, "arrays": arrays}
+    calibration = _calibrate_closure(arrays, head)
+    return {"header": head, "arrays": arrays, "calibration": calibration}
 
 
 def main(argv=None) -> int:
@@ -140,7 +224,8 @@ def main(argv=None) -> int:
     parser.add_argument("--producer-commit", type=Path, required=True)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant", choices=(
-        "header", "truncation", "nan", "config", "copy", "shape", "stamp"))
+        "header", "truncation", "nan", "config", "copy", "shape",
+        "prandtl", "stamp"))
     args = parser.parse_args(argv)
     try:
         expected = args.expect_commit.lower()
@@ -164,6 +249,7 @@ def main(argv=None) -> int:
             "producer_commit": producer,
             "record": str(args.record),
             "header": rec["header"],
+            "calibration": rec["calibration"],
             "fields": summary,
             "plant": args.plant,
             "status": "PASS",

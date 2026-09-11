@@ -5,6 +5,12 @@ Date: 2026-09-11. Parent `03098e6fe91c`; implementation/acquisition commit
 The clean producer stamp exists and the operand record was acquired at that
 commit. No round-56 trajectory was run.
 
+**ROUND-58 RETRACTION:** the acquisition is not admissible for operand
+substitution. Its assumed-shape entry dummies rebased reduced NEMO arrays;
+the new source-exact Prandtl calibration rejects the record with 635 unequal
+wet cells. The executable retraction and full source evidence are in
+`nemo_testcases_l2_gyre_round58_tke_operand_bounds_receipt.md`.
+
 ## Independent-review findings
 
 | finding | verdict and disposition |

@@ -88,7 +88,11 @@ CONTAINS
       & p_ediff,p_ediss,p_ebb,p_emin,p_emin0,p_mxl_min,p_mxl0,p_bshear, &
       & p_lc,p_nn_pdl,p_nn_mxl,p_ln_mxl0,p_nn_etau,p_nn_htau,p_nn_eice,p_ln_lc)
       INTEGER, INTENT(in) :: kt,Kbb,Kmm
-      REAL(wp), DIMENSION(:,:,:), INTENT(in) :: p_sh2,p_avm,p_avt,p_dissl
+      ! Match the executing dummies exactly.  A2D operands have global lower
+      ! bounds (Nis0:Nie0,Njs0:Nje0); assumed-shape rebases them to 1, so the
+      ! ntsi:ntei slice below otherwise reads the wrong cells/out of bounds.
+      REAL(wp), DIMENSION(A2D(0),jpk), INTENT(in) :: p_sh2,p_avt,p_dissl
+      REAL(wp), DIMENSION(jpi,jpj,jpk), INTENT(in) :: p_avm
       REAL(wp), INTENT(in) :: p_ediff,p_ediss,p_ebb,p_emin,p_emin0,p_mxl_min
       REAL(wp), INTENT(in) :: p_mxl0,p_bshear,p_lc
       INTEGER, INTENT(in) :: p_nn_pdl,p_nn_mxl,p_nn_etau,p_nn_htau,p_nn_eice
