@@ -289,11 +289,13 @@ def nemo_operands(mesh_path: Path) -> dict:
                            ).transpose(1, 2, 0)
         name = "gdept_0" if "gdept_0" in mesh.variables else "gdept_1d"
         gdept = np.asarray(mesh.variables[name][:], dtype=np.float64)
+        umask = np.asarray(mesh.variables["umask"][0], dtype=np.float64
+                           ).transpose(1, 2, 0)
     if gdept.ndim == 4:
         gdept = gdept[0].transpose(1, 2, 0)
     elif gdept.ndim == 2:
         gdept = np.broadcast_to(gdept[0], gphit.shape + (gdept.shape[1],))
-    return {"gphit": gphit, "gdept_0": gdept, "tmask": tmask,
+    return {"gphit": gphit, "gdept_0": gdept, "tmask": tmask, "umask": umask,
             "gdept_source": name, "mesh": str(mesh_path),
             "mesh_sha256": sha256(mesh_path)}
 
@@ -697,6 +699,14 @@ def _load_nemo(root: Path, seed: int, day: int, nlev: int) -> dict:
                 f"{matches[0]}: kt={recorded}, expected {step}")
 
         def xyz(name):
+            # The transpose is an API, so it is READ, not assumed: a restart
+            # written with a different axis order would otherwise be silently
+            # reindexed.  Shape alone would catch a scramble here (22, 32 and
+            # 31 are all distinct) but not on a square domain.
+            require(handle.variables[name].dimensions
+                    == ("time_counter", "nav_lev", "y", "x"),
+                    f"{name}: axes {handle.variables[name].dimensions}, "
+                    "expected (time_counter, nav_lev, y, x)")
             return np.asarray(handle.variables[name][0],
                               dtype=np.float64).transpose(1, 2, 0)[..., :nlev]
 
@@ -715,6 +725,9 @@ def _load_nemo(root: Path, seed: int, day: int, nlev: int) -> dict:
                   "v": xyz("vn"),
                   "ssh": np.asarray(handle.variables["sshn"][0],
                                     dtype=np.float64)}
+        require(handle.variables["sshn"].dimensions
+                == ("time_counter", "y", "x"),
+                f"sshn: axes {handle.variables['sshn'].dimensions}")
         # legoESM's own snapshots are checked for finiteness as they are
         # written; NEMO's were not checked at all, so a blown-up oracle member
         # would have entered the floor as a plausible number.
@@ -781,6 +794,7 @@ def score(root: Path, *, phase0_only: bool, mesh_path: Path = DEFAULT_NEMO_MESH,
                        card=card, area=area)
 
     rows, days, diagnostics = {}, [], {}
+    dry_faces = np.asarray(mesh["umask"][..., :nlev]) > 0.5
     repro = _repro_floor(root, prepare, wet3)
     for day in SCORED_DAYS:
         lego = [_load_lego(root, seed, day) for seed in SEEDS]
@@ -789,7 +803,21 @@ def score(root: Path, *, phase0_only: bool, mesh_path: Path = DEFAULT_NEMO_MESH,
             nemo = [_load_nemo(root, seed, day, nlev) for seed in SEEDS]
             nemo_p = [prepare(state, day) for state in nemo]
         days.append(day)
+        # _psi_field_sv sums u over the whole column with no mask and cumsums
+        # from the boundary row, so a non-zero velocity on a DRY face would
+        # enter the streamfunction as transport.  Measured, not assumed, on
+        # both models at every scored day (raised by review).
+        for label, states in (("lego", lego),
+                              *(() if phase0_only else (("nemo", nemo),))):
+            for index, state in enumerate(states):
+                leak = float(np.max(np.abs(
+                    np.asarray(state["u"])[~dry_faces])))
+                require(leak == 0.0,
+                        f"day {day}: {label} member {index} carries "
+                        f"{leak:.3e} m/s on a DRY u-face; the barotropic "
+                        "streamfunction would integrate it as transport")
         diagnostics[str(day)] = {
+            "dry_u_face_velocity_both_models": 0.0,
             "ensemble_cells_over_1mK_lego":
                 max(_cells_over(lego[i], lego[j], wet3)
                     for i in range(len(lego)) for j in range(i + 1, len(lego))),
@@ -848,6 +876,15 @@ def score(root: Path, *, phase0_only: bool, mesh_path: Path = DEFAULT_NEMO_MESH,
                 ratio, verdict = classify(gap_max)
                 ratio_control, verdict_control = classify(gap)
                 record.update({
+                    # PREREG section 6 defines gap_d as CONTROL vs CONTROL and
+                    # relegates the pooled cross-ensemble distance to "a
+                    # supporting column".  The preregistration is frozen, so
+                    # the control pair is the verdict of record; the
+                    # like-for-like max is reported beside it and both are
+                    # printed.  A review of this scoring round caught the
+                    # harness quoting the max as the headline.
+                    "verdict_preregistered": verdict_control,
+                    "ratio_preregistered": float(ratio_control),
                     "gap_control_pair": gap,
                     "gap_max_across_pairs": gap_max,
                     "pooled_across_min": float(np.min(across)),
@@ -860,6 +897,33 @@ def score(root: Path, *, phase0_only: bool, mesh_path: Path = DEFAULT_NEMO_MESH,
                     "verdict": verdict,
                 })
             entry["days"][str(day)] = record
+
+    # QNET IS NOT THE INDEPENDENT BUDGET-CLOSING ROW THE PREREGISTRATION
+    # HOPED FOR, and this measures how far it falls short rather than leaving
+    # the claim standing.  `_qnet_w` evaluates legoESM's OWN transcription of
+    # NEMO's restoring on each model's saved SST; NEMO's own `qns` is not in
+    # the members' output.  With a 40 W/m2/K restoring the row is therefore an
+    # area-weighted rescaling of the SST difference, blind to a
+    # forcing-transcription error.  Raised by an independent review; the
+    # preregistration is frozen, so the row stays scored and is RELABELLED
+    # here by its own measured correlation.
+    qnet_note = {"status": "UNMEASURED", "reason": "PHASE 0 has no gap"}
+    if not phase0_only:
+        ordered = [str(day) for day in days]
+        q = np.array([rows["QNET"]["days"][day]["gap_control_pair"]
+                      for day in ordered])
+        s = np.array([rows["SST"]["days"][day]["gap_control_pair"]
+                      for day in ordered])
+        qnet_note = {
+            "status": "MEASURED",
+            "pearson_r_against_SST_gap": float(np.corrcoef(q, s)[0, 1]),
+            "consequence": ("QNET is a rescaled SST row on this card, not an "
+                            "independent budget-closing discriminator; it is "
+                            "reported as such"),
+            "why": ("qns is 40 W/m2/K restoring to the analytic t_star "
+                    "(usrdef_sbc.F90:118-120) and is recomputed from each "
+                    "model's own SST by legoESM's transcription"),
+        }
 
     report = {
         "format": ("nemo-testcase-l2-gyre-year-fromrest-phase0-v1"
@@ -885,12 +949,12 @@ def score(root: Path, *, phase0_only: bool, mesh_path: Path = DEFAULT_NEMO_MESH,
         "relative_standard_error_of_spread": float(1.0 / np.sqrt(2 * (len(SEEDS) - 1))),
         "cell_count_threshold_K": CELL_COUNT_THRESHOLD_K,
         "diagnostics": diagnostics,
+        "QNET_row_is_a_rescaled_SST_row": qnet_note,
         "rows": rows,
         "worktree": worktree_stamp(),
     }
     report.update(_expectations(rows, phase0_only=phase0_only, repro=repro))
-    if phase0_only:
-        report["vacuity_gate"] = _vacuity(rows)
+    report["vacuity_gate"] = _vacuity(rows, phase0_only=phase0_only)
     return report
 
 
@@ -957,22 +1021,38 @@ def _expectations(rows: dict, *, phase0_only: bool, repro: dict) -> dict:
     }
     if phase0_only:
         return out
-    gaps = {day: temperature[day]["gap_max_across_pairs"]
-            for day in temperature}
+    # PREREG section 6: the gap is control vs control.  An earlier version of
+    # this function scored P3, P4 and the section-1 test on the max over the
+    # 16 cross-model pairs; that is the supporting column, not the gap.
+    gaps = {day: temperature[day]["gap_control_pair"] for day in temperature}
+    gaps_max = {day: temperature[day]["gap_max_across_pairs"]
+                for day in temperature}
     lo, hi = min(gaps.values()), max(gaps.values())
     out["P3_gap_band"] = {
+        "statistic": "control vs control (PREREG section 6)",
         "min_over_days": lo, "max_over_days": hi,
+        "min_over_days_max_pair": min(gaps_max.values()),
+        "max_over_days_max_pair": max(gaps_max.values()),
         "band": [P3_GAP_MIN_K, P3_GAP_MAX_K],
         "status": ("HELD" if lo >= P3_GAP_MIN_K and hi <= P3_GAP_MAX_K
                    else "REFUTED")}
-    verdicts = {day: temperature[day]["verdict"] for day in temperature}
+    verdicts = {day: temperature[day]["verdict_preregistered"]
+                for day in temperature}
+    # PREREG P4 is REFUTED "if any scored day gives gap_d <= 2*floor_d".  It
+    # is NOT refuted by the MARGINAL label, which is this harness's own
+    # sampling-error caveat and not part of the preregistered rule; scoring it
+    # as a refutation would have made a ratio of 1.5 refute P4 in the code
+    # while holding it in the document.  Caught by review.
     crossing = next((day for day in sorted(temperature, key=int)
-                     if temperature[day]["ratio_gap_over_2floor"] <= 1.0), None)
+                     if temperature[day]["ratio_preregistered"] <= 1.0), None)
     out["P4_distinguishable_every_day"] = {
         "verdicts": verdicts, "crossing_day": crossing,
-        "status": ("HELD" if all(value == "DISTINGUISHABLE"
-                                 for value in verdicts.values())
-                   else "REFUTED")}
+        "rule": "REFUTED iff any scored day has gap <= 2*floor",
+        "marginal_days": [day for day in temperature
+                          if verdicts[day] == "MARGINAL"],
+        "status": ("HELD" if all(
+            temperature[day]["ratio_preregistered"] > 1.0
+            for day in temperature) else "REFUTED")}
     g_gap = gaps[last] / gaps[mid] if gaps[mid] > 0 else np.inf
     g_floor = (temperature[last]["floor"] / temperature[mid]["floor"]
                if temperature[mid]["floor"] > 0 else np.inf)
@@ -990,11 +1070,18 @@ def _expectations(rows: dict, *, phase0_only: bool, repro: dict) -> dict:
     return out
 
 
-def _vacuity(rows: dict) -> dict:
-    """PHASE 0's only gate: the floor must be able to see anything at all."""
-    zero_days = [day for day, record in rows["T3D"]["days"].items()
-                 if record["floor"] <= 0.0]
-    return {
+def _vacuity(rows: dict, *, phase0_only: bool = True) -> dict:
+    """The floor must be able to see anything at all -- on BOTH models.
+
+    An earlier version ran only on PHASE 0, so NEMO's own spread entered the
+    verdict unchecked: four bit-identical NEMO members would have given a
+    floor made entirely of legoESM's spread and every row would have read
+    DISTINGUISHABLE for a reason that has nothing to do with fidelity.
+    Caught by an independent review of this scoring round.
+    """
+    days = rows["T3D"]["days"]
+    zero_days = [day for day, record in days.items() if record["floor"] <= 0.0]
+    out = {
         "floor_positive_every_day": not zero_days,
         "zero_floor_days": zero_days,
         "phase1_may_run": not zero_days,
@@ -1002,6 +1089,15 @@ def _vacuity(rows: dict) -> dict:
                    "would be read as DISTINGUISHABLE -- the exact false "
                    "positive this harness exists to avoid"),
     }
+    if not phase0_only:
+        for side in ("spread_lego", "spread_nemo"):
+            dead = [day for day, record in days.items()
+                    if record.get(side, 0.0) <= 0.0]
+            out[f"{side}_positive_every_day"] = not dead
+            out[f"{side}_zero_days"] = dead
+        out["both_ensembles_live"] = (out["spread_lego_positive_every_day"]
+                                      and out["spread_nemo_positive_every_day"])
+    return out
 
 
 # ----------------------------------------------------------- alignment gate --
@@ -1080,7 +1176,37 @@ def alignment_gate(root: Path, *, mesh_path: Path = DEFAULT_NEMO_MESH,
     require(not unexact,
             "A1 FAILED: legoESM's initial state is not BIT-EXACT against "
             f"NEMO's before level at the entry of step 1 on {unexact}; the "
-            "two models are not being compared cell for cell")
+            "two models do not start from the same state")
+
+    # WHAT A1 CANNOT SEE (Rule 2), MEASURED rather than reasoned about.  An
+    # independent review of this gate showed that GYRE's day-0 state is
+    # horizontally UNIFORM -- T and S are functions of depth alone and u, v,
+    # ssh are identically zero -- and that NEMO's tmask is symmetric under
+    # every axis reversal.  A1 therefore passes IDENTICALLY under all four
+    # horizontal mappings and carries NO horizontal frame evidence.  An
+    # earlier version of this file said A1 "binds the frame"; that is
+    # RETRACTED.  A1 binds the VALUES and, because the day-0 profile is
+    # monotonic in depth, the VERTICAL axis.  The horizontal frame is carried
+    # entirely by A2 and A3a.
+    mask_t = np.asarray(masks["T"], dtype=bool)
+    reference_t = np.asarray(oracle["T"][..., :nlev], dtype=np.float64)
+    horizontal = max(
+        float(reference_t[..., k][mask_t[..., k]].max()
+              - reference_t[..., k][mask_t[..., k]].min())
+        for k in range(nlev) if mask_t[..., k].any())
+    both = mask_t[..., 1:] & mask_t[..., :-1]
+    vertical = float(np.max(np.abs(np.diff(reference_t, axis=-1)[both])))
+    blindness = {
+        "max_horizontal_spread_of_day0_T_K": horizontal,
+        "day0_field_is_horizontally_uniform": horizontal == 0.0,
+        "mask_symmetric_under": [name for name, fn in _frame_mappings().items()
+                                 if np.array_equal(fn(mask_t), mask_t)],
+        "max_level_to_level_step_of_day0_T_K": vertical,
+        "sees": ("the VALUES both models start from, and -- because the day-0 "
+                 "profile varies from level to level -- the VERTICAL axis"),
+        "blind_to": ("the HORIZONTAL frame: a reversed j or i passes A1 "
+                     "identically on this card.  A2 and A3a carry that."),
+    }
 
     # A3 -- the netCDF restart reader.  A1 and A2 never touch it.
     #
@@ -1168,9 +1294,10 @@ def alignment_gate(root: Path, *, mesh_path: Path = DEFAULT_NEMO_MESH,
             "time_level": oracle["registry_level"],
             "kt": int(oracle["kt"]), "Nbb": int(oracle["Nbb"]),
             "fields": identity,
-            "binds": ("the binary record reader (36x26x31 Fortran order, "
-                      "cropped [2:-2,2:-2], transposed to (j,i,k)) and the "
-                      "certified gate's masks"),
+            "binds": ("the binary record reader's VALUES and vertical axis "
+                      "(36x26x31 Fortran order, cropped [2:-2,2:-2], "
+                      "transposed to (j,i,k)) and the certified gate's masks"),
+            "blind_spot": blindness,
         },
         "A2_operand_reconciliation": operands,
         "A3a_restart_coordinate_chain": {

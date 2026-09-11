@@ -291,3 +291,71 @@ def test_alignment_gate_passes_unplanted():
         capture_output=True, text=True)
     assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]
     assert "STATUS ALIGNED" in result.stdout
+
+
+# ------------------------------- what the scoring round's review turned red --
+def _temperature_rows(entries):
+    """A minimal T3D block in the shape `_expectations` consumes."""
+    return {"T3D": {"unit": "K", "days": {day: dict(record)
+                                          for day, record in entries.items()}}}
+
+
+def _day(floor, gap, gap_max=None):
+    ratio = gap / (2.0 * floor)
+    return {"floor": floor, "spread_lego": floor, "spread_nemo": floor,
+            "gap_control_pair": gap,
+            "gap_max_across_pairs": gap if gap_max is None else gap_max,
+            "ratio_preregistered": ratio,
+            "ratio_gap_over_2floor": ratio,
+            "verdict_preregistered": ("MARGINAL" if 0.5 <= ratio <= 2.0
+                                      else "DISTINGUISHABLE" if ratio > 1.0
+                                      else "INDISTINGUISHABLE"),
+            "verdict": "DISTINGUISHABLE"}
+
+
+def test_vacuity_gate_sees_a_DEAD_NEMO_ENSEMBLE(harness):
+    """Four bit-identical NEMO members must not read as a fidelity verdict."""
+    live = _temperature_rows({"30": _day(1e-9, 1e-2), "90": _day(1e-9, 1e-2),
+                              "360": _day(1e-7, 1e-1)})
+    assert harness._vacuity(live, phase0_only=False)["both_ensembles_live"]
+    dead = _temperature_rows({"30": _day(1e-9, 1e-2), "90": _day(1e-9, 1e-2),
+                              "360": _day(1e-7, 1e-1)})
+    for record in dead["T3D"]["days"].values():
+        record["spread_nemo"] = 0.0
+    report = harness._vacuity(dead, phase0_only=False)
+    assert not report["both_ensembles_live"]
+    assert report["spread_nemo_zero_days"] == ["30", "90", "360"]
+    # and PHASE 0 keeps its old, narrower contract
+    assert "both_ensembles_live" not in harness._vacuity(live)
+
+
+def test_P4_is_refuted_by_the_preregistered_rule_not_by_the_MARGINAL_label(
+        harness):
+    """PREREG P4: REFUTED iff some day has gap <= 2*floor.  Nothing else."""
+    repro = {"status": "UNMEASURED"}
+    marginal = _temperature_rows({"30": _day(1e-3, 3e-3), "90": _day(1e-3, 3e-3),
+                                  "360": _day(1e-3, 3e-3)})
+    out = harness._expectations(marginal, phase0_only=False, repro=repro)
+    assert out["P4_distinguishable_every_day"]["verdicts"]["360"] == "MARGINAL"
+    assert out["P4_distinguishable_every_day"]["status"] == "HELD"
+    # non-vacuity: a day that really does fall inside 2*floor REFUTES it
+    crossed = _temperature_rows({"30": _day(1e-3, 3e-3), "90": _day(1e-3, 3e-3),
+                                 "360": _day(1e-3, 1e-3)})
+    out = harness._expectations(crossed, phase0_only=False, repro=repro)
+    assert out["P4_distinguishable_every_day"]["status"] == "REFUTED"
+    assert out["P4_distinguishable_every_day"]["crossing_day"] == "360"
+
+
+def test_expectations_score_the_control_pair_not_the_cross_model_max(harness):
+    """PREREG section 6 makes the control pair the gap; the max is support."""
+    repro = {"status": "UNMEASURED"}
+    # control pair inside P3's band, max pair far outside it
+    rows = _temperature_rows({"30": _day(1e-9, 1e-2, gap_max=9.0),
+                              "90": _day(1e-9, 1e-2, gap_max=9.0),
+                              "360": _day(1e-7, 1e-1, gap_max=9.0)})
+    out = harness._expectations(rows, phase0_only=False, repro=repro)
+    assert out["P3_gap_band"]["status"] == "HELD"
+    assert out["P3_gap_band"]["max_over_days"] == pytest.approx(1e-1)
+    assert out["P3_gap_band"]["max_over_days_max_pair"] == pytest.approx(9.0)
+    # non-vacuity: scoring the MAX would have refuted it (9.0 > 3.0 K)
+    assert 9.0 > harness.P3_GAP_MAX_K
