@@ -12,19 +12,19 @@ the dirty tree). CPU, production JIT, fp64/scalar-libm. Preregistration:
 
 The certified GYRE NEMO-identity card applied `fix_eta_drift=True`: a global
 uniform eta shift sized by an area-weighted volume residual
-(`ocean_model_latlon_cgrid.py:6602-6665`). The user was asked (decision 35)
+(`ocean_model_latlon_cgrid.py:6602-6667`). The user was asked (decision 35)
 whether to keep a global correction NEMO does not have; answer, 2026-09-11:
 **turn it off — "no hidden extras; a fixer could hide model errors."**
 
 ## 2. What NEMO does (compiled `GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo`)
 
-- `sshwzv.f90:137`: `pssh(ji,jj,Kaa) = ( pssh(ji,jj,Kbb) - rDt * ( r1_rho0 *
+- `GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/sshwzv.f90:137`: `pssh(ji,jj,Kaa) = ( pssh(ji,jj,Kbb) - rDt * ( r1_rho0 *
   emp(ji,jj) + zhdiv(ji,jj) ) ) * ssmask(ji,jj)` — emp enters LOCALLY.
-- `dynspg_ts.f90:553`: `ssha_e(ji,jj) = ( sshn_e(ji,jj) - rDt_e * (
+- `GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynspg_ts.f90:553`: `ssha_e(ji,jj) = ( sshn_e(ji,jj) - rDt_e * (
   ssh_frc(ji,jj) + zhdiv ) ) * ssmask(ji,jj)` — the barotropic substep
   carries the source locally; the baroclinic step receives the filter average
   of that trajectory. No global sum exists in NEMO's free-surface path.
-- `usrdef_sbc.f90:151-158`: NEMO de-means the card's own emp
+- `GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/usrdef_sbc.f90:151-158`: NEMO de-means the card's own emp
   (`emp(ji,jj) = emp(ji,jj) - zsumemp * tmask(ji,jj,1)`), so the area-mean
   source is zero by construction (`5.5e-22` kg/m2/s, card reconciliation
   receipt §9.1): on this card the projection had nothing to correct.
@@ -34,7 +34,7 @@ whether to keep a global correction NEMO does not have; answer, 2026-09-11:
 | file | change |
 |---|---|
 | `packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py` (GYRE branch only) | `fix_eta_drift=True -> False`; `freshwater_closure="real_freshwater"` stays — the `none` arm KILLS the E-P channel (`3.95e-03` K after two steps, reconciliation receipt §7), so it is not an alternative |
-| `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py` | the #1484 guard that forces `fix_eta_drift=True` under `real_freshwater` is exempted ONLY when `barotropic_continuity_evaluation="nemo_literal"` — the statement that makes the source enter eta the way NEMO's `dynspg_ts.f90:553` does. The generic lane keeps the guard (its 55 %-delivery claim was measured on that lane). A relaxation admits one new combination and changes no arithmetic of any configuration that constructs today |
+| `packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py` | the #1484 guard that forces `fix_eta_drift=True` under `real_freshwater` is exempted ONLY when `barotropic_continuity_evaluation="nemo_literal"` — the statement that makes the source enter eta the way NEMO's `GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynspg_ts.f90:553` does. The generic lane keeps the guard (its 55 %-delivery claim was measured on that lane). A relaxation admits one new combination and changes no arithmetic of any configuration that constructs today |
 | `scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_phase3_gate.py` | the ladder's `_replace(freshwater_closure=..., fix_eta_drift=True)` override is gone; the gate certifies the card's own program (one card, one program) |
 | `tests/ocean/unit/test_real_freshwater_closure.py` | admission test for the exemption; **non-vacuous: with the exemption reverted, `1 failed`; with it, `16 passed`** (`unit_tests.log`) |
 | `tests/ocean/fidelity/test_nemo_testcase_l2_gyre_card_reconciliation.py` | the card's two rows pinned (`real_freshwater`, `False`); the program-drift plant now expects the closure row alone (the legacy program shares the card's `fix_eta_drift`); `8 passed` |

@@ -9,16 +9,16 @@ detached worktree.
 
 Question put: the certified GYRE NEMO-identity card applies a global sea-level
 correction every step (`fix_eta_drift=True`, a uniform eta shift sized by an
-area-weighted volume residual, `ocean_model_latlon_cgrid.py:6602-6665`) that
+area-weighted volume residual, `ocean_model_latlon_cgrid.py:6602-6667`) that
 NEMO does not have. Options: (1) turn it off on the GYRE card; (2) leave it on.
 User: **(1)** — "no hidden extras; seems like a fixer that could hide model
 errors."
 
 ## What NEMO does (compiled branch `GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo`)
 
-- `sshwzv.f90:137`: `pssh(ji,jj,Kaa) = ( pssh(ji,jj,Kbb) - rDt * ( r1_rho0 *
+- `GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/sshwzv.f90:137`: `pssh(ji,jj,Kaa) = ( pssh(ji,jj,Kbb) - rDt * ( r1_rho0 *
   emp(ji,jj) + zhdiv(ji,jj) ) ) * ssmask(ji,jj)` — emp enters LOCALLY.
-- `usrdef_sbc.f90:151-158`: NEMO de-means the card's own emp
+- `GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/usrdef_sbc.f90:151-158`: NEMO de-means the card's own emp
   (`emp(ji,jj) = emp(ji,jj) - zsumemp * tmask(ji,jj,1)`), so the area-mean
   source is zero by construction (measured `5.5e-22` kg/m2/s, card
   reconciliation receipt §9.1).
