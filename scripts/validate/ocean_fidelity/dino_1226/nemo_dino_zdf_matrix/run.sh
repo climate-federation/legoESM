@@ -82,7 +82,11 @@ set -euo pipefail
 
 NEMO=${NEMO:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
 ARCH=${ARCH:-conda}
-CFGNAME=DINO_ZDF_MATRIX
+# CFGNAME is overridable so a FAILED earlier build can be left in place for
+# inspection instead of deleted: the refusal below fires on an existing copy
+# (a stale copy still compiles), and deleting someone else's directory is not
+# this script's call.  Use e.g. CFGNAME=DINO_ZDF_MATRIX2.
+CFGNAME=${CFGNAME:-DINO_ZDF_MATRIX}
 COPY=$NEMO/cfgs/$CFGNAME
 OUT=$(readlink -m "${OUT:-/data/abyssal/dbalwada/dino_fromrest_y1/nemo_zdf_matrix}")
 NPROC=${NPROC:-16}
@@ -184,9 +188,17 @@ if anchor not in s:
                      "and this instrument would be inserted in the wrong place")
 insert = '''
             ! ---- #1728 WRITE-ONLY matrix dump (kt = nit000, nit000+1) ----
-            IF( kt <= nit000 + 1 ) THEN
+            ! nzdfmat_kt, NOT kt: the anchor below is inside tra_zdf_imp,
+            ! whose dummy arguments are (cdtype, p2dt, Kbb, Kmm, Krhs, pt,
+            ! Kaa, kjpt) -- there is no kt in scope here, and writing one
+            ! fails the build at trazdf.f90 with "Symbol 'kt' has no IMPLICIT
+            ! type".  tra_zdf (which does have kt) parks it in the module
+            ! variable immediately before the call.  It starts at -1, so a
+            ! call arriving through trczdf.F90 (key_top, not compiled here)
+            ! dumps NOTHING rather than dumping at an unknown step.
+            IF( nzdfmat_kt >= 0 .AND. nzdfmat_kt <= nit000 + 1 ) THEN
                WRITE( cl_zm, '("trazdf_",A3,"_kt",I8.8,"_rank",I2.2,".bin")' )  &
-                  &  'zwi', kt, narea - 1
+                  &  'zwi', nzdfmat_kt, narea - 1
                OPEN( UNIT=9201, FILE=TRIM(cl_zm), ACCESS='STREAM',              &
                   &  FORM='UNFORMATTED', STATUS='REPLACE' )
                DO jk2 = 1, jpk
@@ -194,7 +206,7 @@ insert = '''
                END DO
                CLOSE(9201)
                WRITE( cl_zm, '("trazdf_",A3,"_kt",I8.8,"_rank",I2.2,".bin")' )  &
-                  &  'zwd', kt, narea - 1
+                  &  'zwd', nzdfmat_kt, narea - 1
                OPEN( UNIT=9202, FILE=TRIM(cl_zm), ACCESS='STREAM',              &
                   &  FORM='UNFORMATTED', STATUS='REPLACE' )
                DO jk2 = 1, jpk
@@ -202,7 +214,7 @@ insert = '''
                END DO
                CLOSE(9202)
                WRITE( cl_zm, '("trazdf_",A3,"_kt",I8.8,"_rank",I2.2,".bin")' )  &
-                  &  'zws', kt, narea - 1
+                  &  'zws', nzdfmat_kt, narea - 1
                OPEN( UNIT=9203, FILE=TRIM(cl_zm), ACCESS='STREAM',              &
                   &  FORM='UNFORMATTED', STATUS='REPLACE' )
                DO jk2 = 1, jpk
@@ -218,6 +230,25 @@ s = s.replace(anchor, insert + anchor, 1)
 # so the patch produced a file that would not compile and said nothing.  It is
 # a regex now, and it RAISES when it finds no match, which is the only
 # difference that matters.
+# The step index the dump needs is NOT in scope inside tra_zdf_imp (its
+# dummy arguments are cdtype/p2dt/Kbb/Kmm/Krhs/pt/Kaa/kjpt).  tra_zdf HAS it,
+# so it parks it in a module variable one statement before the call.  Both
+# anchors are exact statements and both RAISE when they match nothing.
+mod_anchor = "   PUBLIC   tra_zdf_imp   ! called by trczdf.F90"
+if mod_anchor not in s:
+    raise SystemExit("REFUSED: trazdf.F90 module-PUBLIC anchor not found")
+s = s.replace(mod_anchor, mod_anchor + "\n\n"
+              "   INTEGER, PUBLIC ::   nzdfmat_kt = -1   ! #1728 step index for the\n"
+              "   !                                      ! matrix dump, set by tra_zdf\n", 1)
+call_anchor = "      CALL tra_zdf_imp( 'TRA', rDt, Kbb, Kmm, Krhs, pts, Kaa, jpts )"
+if call_anchor not in s:
+    raise SystemExit("REFUSED: the tra_zdf_imp call site anchor not found; "
+                     "nzdfmat_kt would never be set and every dump would be "
+                     "skipped by its own >= 0 guard")
+s = s.replace(call_anchor,
+              "      nzdfmat_kt = kt   ! #1728: kt is not in tra_zdf_imp's scope\n"
+              + call_anchor, 1)
+
 decl = re.search(r"^ *INTEGER *:: *ji, jj, jk, jn.*$", s, re.M)
 if decl is None:
     raise SystemExit("REFUSED: trazdf.F90 declaration anchor not found; the "
@@ -242,6 +273,13 @@ print("  MY_SRC/dynzdf.F90 present:", p.exists(),
       "WHICH, so it is left for the round that scores it.")
 PYEOF
 
+# ------------------------------------------------- scope self-check
+# EVERY BARE SYMBOL THE WRITER USES MUST BE IN SCOPE AT THE INSERTION POINT.
+# check_scope.py reads the PRISTINE COMPILED source for the enclosing
+# routine's real argument list; tests/ocean/fidelity/test_zdf_matrix_scope.py
+# proves it can FAIL by putting `kt` back.
+python3 "$HERE/check_scope.py" "$NEMO" "$COPY"
+
 # --------------------------------------------------------------- build
 ./makenemo -n "$CFGNAME" -m "$ARCH" -j 8
 
@@ -250,7 +288,7 @@ PYEOF
 # successful run.  Each token must be ABSENT from the pristine source, or it
 # discriminates nothing.
 PP=$COPY/BLD/ppsrc/nemo/trazdf.f90
-for token in "trazdf_" "cl_zm" "ji2, jk2"; do
+for token in "trazdf_" "cl_zm" "ji2, jk2" "nzdfmat_kt"; do
   if ! grep -qF "$token" "$PP"; then
     echo "REFUSED: '$token' is not in the COMPILED source $PP -- the writer" >&2
     echo "  did not survive preprocessing, so the record would be empty." >&2
