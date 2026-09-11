@@ -78,7 +78,7 @@ class DuoWindowSpmdComm:
     #: refresh moved ~100 MB/rank/step of redundant bytes.  ``None`` =
     #: full refresh; an int = band depth in cells (ng + 1 is the
     #: certified value; ng - 1 is the sabotage that must fail).
-    refresh_band = None
+    refresh_band = 4
     #: DIAGNOSTIC (GLM 2026-09-10): skip the substep-ENTRY full refresh
     #: (the ``body is None`` firing) to split the ~69 ms between the
     #: no-per-firing-refresh floor and compute into the entry refresh (A)

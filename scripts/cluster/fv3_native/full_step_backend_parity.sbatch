@@ -22,8 +22,17 @@
 # ARM selects hydro (default) or nh:
 #   sbatch --export=ALL,ARM=nh full_step_backend_parity.sbatch
 #   sbatch --export=ALL,ARM=moist full_step_backend_parity.sbatch
+# There is no established tolerance for arm-to-arm agreement yet.  A guessed
+# tight ceiling would fire on rounding, so the deliberately loose ceiling is 1
+# and every run surfaces a separate warning until evidence supports tightening.
 set -uo pipefail
-: "${MAX_REL:?MAX_REL is required; a comparison with no ceiling reports a number and certifies nothing}"
+# The USER chose the ceiling 1 on 2026-09-11: there is no established
+# tolerance for arm-to-arm agreement yet, a guessed tight number would fire
+# on rounding, and he wants the number surfaced every run instead. The
+# WARNING band is the value measured that day and is what gets tightened
+# first. Both stay overridable; neither is a silent default.
+export MAX_REL="${MAX_REL:-1}"
+export ARM_TO_ARM_WARN_REL="${ARM_TO_ARM_WARN_REL:-1.4e-4}"
 # REPO is overridable so a run can be pinned to a worktree
 # (scripts/cluster/fv3_native/pin_worktree.sh) instead of reading the
 # live checkout. A job that reads the tree being edited produces numbers
@@ -46,16 +55,17 @@ JIT="${JIT:-0}"
 # runner printed WORST and exited 0 whatever it said, so a regression was
 # visible only to a human reading the log (GLM MINOR, job 9444414). The
 # ceilings are the certified figures with a small margin: hydro and
-# hydro-moist certify at 1.1866e-09, the two NH arms at 6.6116e-04.
+# hydro-moist certify at 1.1866e-09.  The old 1e-3 NH ceiling predates the
+# boundary-floor fix and stopped binding; the lane now measures 1.4776e-06.
 case "$ARM" in
   hydro) EXTRA="--max-rel 2e-9" ;;
-  nh)    EXTRA="--nh --max-rel 1e-3" ;;
+  nh)    EXTRA="--nh --max-rel 3e-6" ;;
   # The moist arm needs --tracers: dp1 = zvir*q(sphum) has nothing to
   # read without them, and the runner refuses the combination anyway.
   moist) EXTRA="--moist --tracers --max-rel 2e-9" ;;
   # the NH moist arm: --nh redirects to the NH decks, --moist then
   # redirects those to their moist twins.
-  nhmoist) EXTRA="--nh --moist --tracers --max-rel 1e-3" ;;
+  nhmoist) EXTRA="--nh --moist --tracers --max-rel 3e-6" ;;
   # the energy fixer: hydrostatic + dry, scored against the deck
   # with consv_te = 1.0. Same ceiling as the other hydro arms.
   consv) EXTRA="--consv 1.0 --max-rel 2e-9" ;;
@@ -115,9 +125,18 @@ for k in sorted(keys):
 print(f"\nWORST BACKEND-TO-BACKEND rel = {worst[0]:.3e} at {worst[1]}")
 import math, os
 bound = float(os.environ["MAX_REL"])
+# Defaulted here too, not only in the shell above: this program is
+# extracted and run standalone by the test that proves the scan
+# skips bookkeeping keys, and a hard lookup made that test depend
+# on the job's environment.
+warning = float(os.environ.get("ARM_TO_ARM_WARN_REL", "1.4e-4"))
 if not math.isfinite(bound):
     print("FAIL: MAX_REL must be finite")
     raise SystemExit(1)
+if worst[0] > warning:
+    print(f"WARN: arm-to-arm worst={worst[0]:.3e} exceeds warning "
+          f"band={warning:.3e}; ceiling={bound:g} is deliberately loose and "
+          "expected to be tightened")
 if worst[0] > bound:
     print(f"FAIL: backend-to-backend {worst[0]:.3e} exceeds MAX_REL={bound:g} "
           f"at {worst[1]}")

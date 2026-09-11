@@ -19,10 +19,19 @@
 # The job also runs the harness's OWN dispatch test and then REVERSES the
 # forwarding to prove that test can fail. A dispatch test that passes with
 # the feature removed certifies nothing.
+# There is no established tolerance for arm-to-arm agreement yet.  A guessed
+# tight ceiling would fire on rounding, so the deliberately loose ceiling is 1
+# and every run surfaces a separate warning until evidence supports tightening.
 set -uo pipefail
 # --max-rel gates each arm against the oracle. BATCHED_VS_LOOP_MAX_REL
 # separately gates the batched arm against the loop arm.
-: "${BATCHED_VS_LOOP_MAX_REL:?BATCHED_VS_LOOP_MAX_REL is required; a comparison with no ceiling reports a number and certifies nothing}"
+# The USER chose the ceiling 1 on 2026-09-11: there is no established
+# tolerance for arm-to-arm agreement yet, a guessed tight number would fire
+# on rounding, and he wants the number surfaced every run instead. The
+# WARNING band is the value measured that day and is what gets tightened
+# first. Both stay overridable; neither is a silent default.
+export BATCHED_VS_LOOP_MAX_REL="${BATCHED_VS_LOOP_MAX_REL:-1}"
+export ARM_TO_ARM_WARN_REL="${ARM_TO_ARM_WARN_REL:-1.4e-4}"
 REPO=${REPO:-/burg-archive/glab/users/pg2328/legoESM_codex_m8}
 [ -e "$REPO/.git" ] || { echo "PREFLIGHT FAILED: REPO=$REPO"; exit 5; }
 DIRTY=$(git -C "$REPO" status --porcelain | wc -l)
@@ -63,7 +72,9 @@ git -C "$REPO" diff --quiet -- "$H" && echo "restored clean" || { echo "RESTORE 
 ARM="${ARM:-hydro}"
 case "$ARM" in
   hydro) EXTRA="--max-rel 2e-9" ;;
-  nh)    EXTRA="--nh --max-rel 1e-3" ;;
+  # 1e-3 predates the NH boundary-floor fix and stopped binding: this lane
+  # measures 1.4776e-06.
+  nh)    EXTRA="--nh --max-rel 3e-6" ;;
   moist) EXTRA="--moist --tracers --max-rel 2e-9" ;;
   *) echo "unknown ARM=$ARM"; exit 4 ;;
 esac
@@ -124,9 +135,18 @@ for k in sorted(keys):
 print(f"\nWORST ARM-TO-ARM rel = {worst[0]:.3e} at {worst[1]}")
 import math, os
 bound = float(os.environ["BATCHED_VS_LOOP_MAX_REL"])
+# Defaulted here too, not only in the shell above: this program is
+# extracted and run standalone by the test that proves the scan
+# skips bookkeeping keys, and a hard lookup made that test depend
+# on the job's environment.
+warning = float(os.environ.get("ARM_TO_ARM_WARN_REL", "1.4e-4"))
 if not math.isfinite(bound):
     print("FAIL: BATCHED_VS_LOOP_MAX_REL must be finite")
     raise SystemExit(1)
+if worst[0] > warning:
+    print(f"WARN: arm-to-arm worst={worst[0]:.3e} exceeds warning "
+          f"band={warning:.3e}; ceiling={bound:g} is deliberately loose and "
+          "expected to be tightened")
 if worst[0] > bound:
     print(f"FAIL: batched-vs-loop {worst[0]:.3e} exceeds "
           f"BATCHED_VS_LOOP_MAX_REL={bound:g} at {worst[1]}")

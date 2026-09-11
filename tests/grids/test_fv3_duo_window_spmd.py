@@ -22,6 +22,14 @@ from jax.sharding import Mesh  # noqa: E402
 N, NG, KM, KT, PAD = 24, 3, 5, 2, 4
 
 
+def test_band_restricted_refresh_is_the_default():
+    from legoesm.grids.fv3_duo_window_spmd import DuoWindowSpmdComm
+
+    assert DuoWindowSpmdComm.refresh_band == 4, (
+        "A measured, bitwise-exact improvement sitting switched off is "
+        "exactly how a known defect survives in production")
+
+
 @pytest.fixture(scope="module")
 def setup():
     if jax.device_count() < 6 * KT * KT:

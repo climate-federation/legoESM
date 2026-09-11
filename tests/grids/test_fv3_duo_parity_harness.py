@@ -38,6 +38,7 @@ _BATCHED_JOB = _JOB_DIR / "full_step_batched_parity.sbatch"
 _JOBS = [_JOB, _BATCHED_JOB]
 _ARM_CEILINGS = [(_JOB, "MAX_REL"),
                  (_BATCHED_JOB, "BATCHED_VS_LOOP_MAX_REL")]
+_ARM_WARNING = "ARM_TO_ARM_WARN_REL"
 _JIT_SELECTORS = [(_JOB,
                    '[ "$BK" = jax ] && [ "$JIT" = 1 ] && JFLAG="--jit"'),
                   (_BATCHED_JOB,
@@ -68,16 +69,63 @@ def test_the_parity_job_can_report_a_failure(job, arm_ceiling):
 
 
 @pytest.mark.parametrize(("job", "arm_ceiling"), _ARM_CEILINGS)
-def test_the_parity_job_refuses_an_unset_arm_ceiling(job, arm_ceiling):
+def test_the_arm_ceiling_and_warning_band_are_both_pinned(job, arm_ceiling):
+    """The ceiling stopped being a refusal when the user chose its value.
+
+    It was a refusal while nobody had picked a number, because a comparison
+    with no ceiling reports a number and certifies nothing. On 2026-09-11 the
+    user chose 1 deliberately -- there is no established tolerance for
+    arm-to-arm agreement yet and a guessed tight number would fire on
+    rounding -- so 1 is now an ASKED value, not a silent default, and the
+    warning band carries the number that actually gets tightened first.
+    Both stay overridable; this pins that neither drifts unnoticed.
+    """
+    body = job.read_text()
+    assert f'export {arm_ceiling}="${{{arm_ceiling}:-1}}"' in body, (
+        f"{arm_ceiling} no longer defaults to the value the user chose")
+    assert ('export ARM_TO_ARM_WARN_REL="${ARM_TO_ARM_WARN_REL:-1.4e-4}"'
+            in body), (
+        "the warning band no longer defaults to the 2026-09-11 measurement, "
+        "so a run that quietly worsened would stop saying so")
+
+
+@pytest.mark.parametrize(("job", "arm_ceiling"), _ARM_CEILINGS)
+def test_arm_delta_has_required_loose_ceiling_and_warning(job, arm_ceiling,
+                                                          tmp_path):
+    body = job.read_text()
+    assert f'export {arm_ceiling}="${{{arm_ceiling}:-1}}"' in body
+    assert _ARM_WARNING in body, (
+        "the comparison no longer reads a warning band at all")
+    delimiter = "PYEOF" if job == _BATCHED_JOB else "EOF"
+    program = body.rsplit(f"<<'{delimiter}'\n", 1)[1].split(
+        f"\n{delimiter}", 1)[0]
+    left = tmp_path / "left.json"
+    right = tmp_path / "right.json"
+    left.write_text(json.dumps({"metric": 1.0, "batched": False,
+                                "compiled": False}))
+    right.write_text(json.dumps({"metric": 1.5, "batched": True,
+                                 "compiled": False}))
     env = os.environ.copy()
-    env.pop(arm_ceiling, None)
-    env["REPO"] = str(_ROOT / "missing-refusal-control-repo")
-    result = subprocess.run(["bash", str(job)], cwd=_ROOT, env=env,
-                            capture_output=True, text=True)
-    assert result.returncode != 0
-    assert arm_ceiling in result.stderr
-    assert ("a comparison with no ceiling reports a number and certifies "
-            "nothing" in result.stderr)
+    env[arm_ceiling] = "1"
+    env[_ARM_WARNING] = "1.4e-4"
+    result = subprocess.run(
+        [sys.executable, "-", str(left), str(right), "0"], input=program,
+        env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert ("WARN: arm-to-arm worst=3.333e-01 exceeds warning "
+            "band=1.400e-04" in result.stdout)
+    assert "ceiling=1 is deliberately loose and expected to be tightened" in (
+        result.stdout)
+
+
+@pytest.mark.parametrize("job", _JOBS)
+def test_nonhydrostatic_oracle_ceiling_tracks_boundary_floor_fix(job):
+    body = job.read_text()
+    assert re.search(r'nh\)\s+EXTRA="--nh --max-rel 3e-6"', body)
+    if job == _JOB:
+        assert re.search(
+            r'nhmoist\)\s+EXTRA="--nh --moist --tracers --max-rel 3e-6"',
+            body)
 
 
 @pytest.mark.parametrize(("job", "arm_ceiling"), _ARM_CEILINGS)
