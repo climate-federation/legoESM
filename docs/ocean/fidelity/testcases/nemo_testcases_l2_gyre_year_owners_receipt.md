@@ -8,8 +8,25 @@ left the owner unnamed.
 
 Harness: `scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_year_owners.py`.
 Acquisition, for the operator: `scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_earlydays/run.sh`.
-Artifacts: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_owners/`.
+Artifacts: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_owners/`,
+SHA-256 of all 41 in `year_owners_artifacts.sha256` beside them.  The six the
+receipt quotes:
+
+| artifact | SHA-256 |
+|---|---|
+| `step_gap.json` | `f288b181aaf4ce03d6f294d4616e87a7bea268a25667fa4be7297d926c92d603` |
+| `equal_input_kt2.json` | `5fdaeaf3d329198ba8e0d390faf7630c2aeece54a22f4eec691f5f24afc8c3f3` |
+| `forcing_gate.json` | `d9e117acf55c777519bb7327da4264564f249f8bde318ba0637f997dbb7dd970` |
+| `decompose_day030.json` | `1b16d8c82e5a41deadec97a7064da3d51cacb3713186cdbecacc21a984c16296` |
+| `decompose_day360.json` | `0f2c82a343d72eb561c847c5f91b9e1a40905b31b29d52be1133b353fc5856e5` |
+| `switch_trace_seeds01.json` | `a07945d26b8a1ae0fae81a57a9a17ba39e2efc7f94d459b356d69379a1ac40d8` |
+
 CPU, fp64, `PrecisionPolicy.fp64(transcendentals="libm")`, `JAX_ENABLE_X64=1`.
+
+**Tests, quoted rather than summarised.**  `88 passed in 54.19s` over the new
+harness's own file, the year harness's, the time-level registry's and the
+certified phase-3 gate's.  The new file's own self-check exits `0` and all four
+forcing plants exit `1`.
 
 ## VERDICT
 
