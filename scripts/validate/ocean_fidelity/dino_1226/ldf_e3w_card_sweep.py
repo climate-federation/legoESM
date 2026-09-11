@@ -440,6 +440,17 @@ def main() -> int:
             mc, _ = dm.dino_lat_lon_model_config(grid, cfg, physics=True)
             model = LatLonCGridOceanModel(grid, z, mc)
             st = dm.dino_lat_lon_state(grid, z, cfg)
+            # The before level MUST differ from the now level, or this spy
+            # cannot tell the two apart and "handed a height" is satisfied by
+            # handing the WRONG one -- a diff reviewer demonstrated exactly
+            # that, wiring the keyword to eta_before and keeping the row at
+            # AGREES.  From rest eta == eta_before == 0, so the whole state's
+            # before level is seeded here with a displaced sea surface.
+            _eta_b = (jnp.asarray(st.eta.data) - 0.37
+                      * jnp.asarray(st.land_mask.data))
+            st = st._replace(
+                eta_before=st.eta.replace(data=_eta_b),
+                u_before=st.u, v_before=st.v, T_before=st.T, S_before=st.S)
             LatLonCGridOceanModel._step_impl = _spy
             with jax.disable_jit():
                 model.step(st, dt=float(getattr(cfg, "dt", 2700.0)))
@@ -453,7 +464,30 @@ def main() -> int:
         want = (probe in moved_c)
         got = any(v is not None for v in seen)
         ok = (want == got)
-        print(f"    {probe:22s} passes={handed}  registered={want}  "
+        # WHICH height, not merely SOME height.  ``_kmm_eta`` is the operand
+        # this whole round is about, so the spy compares the handed array
+        # against BOTH candidates and refuses to pass on the wrong one.
+        _now = np.asarray(st.eta.data)
+        _bef = np.asarray(_eta_b)
+        _sep = float(np.abs(_now - _bef).max())
+        which = []
+        for v in seen:
+            if v is None:
+                which.append("None")
+            elif np.array_equal(np.asarray(v), _now):
+                which.append("NOW")
+            elif np.array_equal(np.asarray(v), _bef):
+                which.append("BEFORE")
+            else:
+                which.append("OTHER")
+        if _sep <= 0.0:
+            print("    the two candidate heights are identical, so the "
+                  "NOW/BEFORE column below proves nothing")
+            failed.append("section-C-degenerate-seed")
+        if "BEFORE" in which or "OTHER" in which:
+            ok = False
+        print(f"    {probe:22s} passes={handed}  which={which}  "
+              f"|now-before|={_sep:.3f} m  registered={want}  "
               f"handed-a-height={got}  {'AGREES' if ok else 'CONTRADICTS'}")
         if not ok:
             failed.append(f"section-C-{probe}")

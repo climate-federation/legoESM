@@ -368,6 +368,53 @@ def main() -> int:
                   "far below 1 means something else owns it.  Both literals "
                   "are FROZEN from that gate, so this compares a fresh "
                   "number against a recorded one.")
+            # ---- THE SECOND STATEMENT, which the rows above DO NOT size.
+            # A diff reviewer showed the expression above measures only the
+            # two-step AVERAGE.  The other registered statement is the flux's
+            # TIME LEVEL: usrdef_sbc.f90:388/:436 evaluate it on
+            # ts(:,:,1,:,Kbb) while legoESM evaluates on its NOW tracer.  At
+            # kt=2 NEMO's Kbb IS the kt=1 restart's tb and its Kmm is that
+            # restart's tn (the index rotation at stpmlf.f90:577-580 happens
+            # BEFORE rst_write at :590), and legoESM's NOW at its own step 2 is
+            # the bridged tn -- so the whole difference is
+            #     r1_rho0_rcp * rn_trp * ( tn - tb )|surface / e3t(1),
+            # one step's change in SST times the restoring coefficient.  The
+            # rows above are silent about this and the first version of this
+            # section wrongly reported them as sizing BOTH statements.
+            _RN_TRP = -40.0            # namelist_cfg:37
+            _RN_SRP = -3.858e-3        # namelist_cfg:41
+            _RHO0, _RCP = 1026.0, 3991.86795711963      # DINOConfig / phycst
+            R1lv = rebuild(_k1, ["tn", "tb", "sn", "sb"])
+            print("\n  SIZE of the OTHER registered statement -- the flux's "
+                  "TIME LEVEL (NEMO reads Kbb, legoESM reads NOW)")
+            print(f"    {'tracer':8s}{'d(flux)/e3t rms':>22s}"
+                  f"{'x rDt [K or psu]':>20s}{'pooled 3-D':>14s}")
+            _tl = {}
+            for tag, kn, kb, coef, r1 in (
+                    ("T", "tn", "tb", _RN_TRP, 1.0 / (_RHO0 * _RCP)),
+                    ("S", "sn", "sb", _RN_SRP, 1.0 / _RHO0)):
+                # NOT ``a``/``b``: ``a`` is the parsed arguments and
+                # shadowing it made the gate raise AFTER printing its verdict.
+                _now = np.nan_to_num(np.asarray(R1lv[kn], dtype=np.float64))
+                _bef = np.nan_to_num(np.asarray(R1lv[kb], dtype=np.float64))
+                # rebuild returns (nlev, nlat, nlon); level 0 is the surface.
+                d = r1 * (coef * (_now[0] - _bef[0])) / e3t0
+                m2 = wet3[..., 0]
+                rms = float(np.sqrt(np.mean(d[m2] ** 2)))
+                pooled = float(np.sqrt(np.sum((d[m2] * RDT) ** 2) / _n3))
+                _tl[tag] = pooled
+                print(f"    {tag:8s}{rms:22.4e}{rms * RDT:20.4e}"
+                      f"{pooled:14.4e}")
+            print(f"    ratio time-level/state:  "
+                  f"T {_tl['T'] / KT2_T_RMS_K:.3f}   S {_tl['S'] / KT2_S_RMS:.3f}")
+            print(f"    the two statements TOGETHER: "
+                  f"T {(_sizes['T'] + _tl['T']) / KT2_T_RMS_K:.3f}   "
+                  f"S {(_sizes['S'] + _tl['S']) / KT2_S_RMS:.3f} of the kt=2 "
+                  "state residual (an upper bound -- they are summed as "
+                  "magnitudes, not as signed fields)")
+            print("    THE SALT ZERO IN THE FIRST TABLE IS A CONSEQUENCE OF "
+                  "THIS ONE: l_1st_euler freezes Kbb at kt=1, which is "
+                  "precisely the time level legoESM does not reproduce.")
             print("    NOT CLOSED HERE: NEMO's average needs sbc_tsc_b, a "
                   "carried field legoESM does not have, and the flux's time "
                   "level needs the Kbb tracer at the forcing call.  Both are "

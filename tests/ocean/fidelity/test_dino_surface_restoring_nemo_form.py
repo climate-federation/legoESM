@@ -300,3 +300,115 @@ def test_nemo_trasbc_refuses_the_two_shapes_it_cannot_reproduce():
             T, S, _G(), RestoringConfig(subtract_qsr=False, implicit=False,
                                         **base),
             rho_0=1026.0, c_p=3991.0, dz_0=10.0, nemo_trasbc=tup)
+
+
+
+def _seasonal_targets(dm, cfg, forcing, z, state):
+    """``(T_star, Q_sr)`` at ``t = DT``, the way the applicator resolves them.
+
+    ``ln_ann_cyc = .true.`` on this card (``namelist_cfg:35``), so both are
+    recomputed per step from the 360-day-year phase; the static arrays in
+    ``forcing`` are the annual means and restoring toward them would be a
+    different experiment."""
+    import jax.numpy as jnp
+    T_star = forcing["T_star_2d"]
+    Q_sr = forcing["Q_sr_2d"]
+    if getattr(cfg, "forcing_annual_cycle", False):
+        lat1 = forcing["lat_deg_1d"]
+        shape = T_star.shape
+        T_star = jnp.broadcast_to(
+            dm.dino_T_star_seasonal(lat1, DT, cfg)[:, None], shape)
+        Q_sr = jnp.broadcast_to(
+            dm.dino_Q_sr_seasonal(lat1, DT, cfg)[:, None], shape)
+    return np.asarray(T_star), np.asarray(Q_sr)
+
+def test_the_heat_restoring_is_nemos_association_bit_for_bit():
+    """The T twin of the salt test above, and it exists because a diff
+    reviewer PROVED the salt test alone was not enough: with the temperature
+    anomaly INVERTED (``T_star - T``, i.e. Newtonian damping turned into
+    anti-restoring) the entire 50-test DINO fidelity selection still passed and
+    the surface gate's printed verdict was byte-identical.  The T half of the
+    new block had zero bit-for-bit coverage.
+
+    NEMO's statement, with ``rn_emp_prop = 0`` so the concentration/dilution
+    member is identically zero:
+
+        qns = ( rn_trp*( ts(:,:,1,jp_tem,Kbb) - ztstar )
+                - zqsr_dayMean ) * tmask          usrdef_sbc.f90:436-438
+        sbc_tsc(jp_tem) = r1_rho0_rcp * qns       trasbc.f90:152
+        pts(:,:,1,Krhs) += sbc_tsc / e3t(:,:,1)   trasbc.f90:169-170  (kt=nit000)
+
+    The card's level-0 tendency is that PLUS ``tra_qsr``'s own level-0
+    penetration, so the solar member is taken from the model's own
+    ``shortwave_penetration_tendency`` -- this test is about the RESTORING's
+    association, and separating the two would require re-deriving Jerlov.
+    WHAT IT CANNOT SEE, written down rather than discovered later: the solar
+    member's own association (that is ``traqsr.F90``, a different routine and
+    the next statement), and the divisor's VALUE -- from rest the live stretch
+    is exactly 1, so a static divisor would pass.
+    """
+    # fp64 comes from the module-scoped autouse fixture
+    import jax.numpy as jnp
+    from legoesm.ocean.physics.shortwave_penetration import (
+        ShortwavePenetrationConfig, shortwave_penetration_tendency,
+    )
+    dm, cfg, grid, z, state, forcing = _dino_card()
+    _, (dT, _) = dm.apply_dino_lat_lon_surface_forcing(
+        state, forcing, z, cfg, DT, t_seconds=DT, return_rate=True)
+
+    T0 = np.asarray(state.T.data)[..., 0]
+    # ln_ann_cyc: T* and Q_sr are TIME-DEPENDENT on this card, so the static
+    # arrays are NOT what the applicator restores toward.  The salt twin above
+    # needs no such branch -- S* carries no annual cycle.
+    T_star, Q_sr = _seasonal_targets(dm, cfg, forcing, z, state)
+    mask = np.asarray(state.land_mask.data)
+    dz0_live = np.asarray(_nemo_dz0_live(dm, cfg, z, state))
+
+    qns = (-cfg.A_theta) * (T0 - T_star) - Q_sr          # usrdef_sbc.f90:436-438
+    nemo_T = (1.0 / (cfg.rho_0 * cfg.c_p)) * qns / dz0_live   # trasbc.f90:152,:170
+
+    ladder = getattr(cfg, "shortwave_penetration_ladder", "static")
+    if ladder == "nemo_live":
+        from legoesm.ocean.eos import nemo_r3t_stretch
+        z_half_stretch = nemo_r3t_stretch(z, state.eta.data,
+                                          state.H_bathy.data)
+    else:
+        z_half_stretch = None
+    sw = np.asarray(shortwave_penetration_tendency(
+        sw_down=jnp.asarray(Q_sr),
+        z_coord_dz_ref=z.dz_ref, z_coord_z_half_ref=z.z_half_ref,
+        jacobian=jnp.ones_like(state.eta.data),
+        config=ShortwavePenetrationConfig(water_type=cfg.jerlov_water_type),
+        rho_0=cfg.rho_0, c_sw=cfg.c_p, z_half_stretch=z_half_stretch))
+
+    want = (sw[..., 0] + nemo_T) * mask
+    got = np.asarray(dT)[..., 0]
+    bad = int((got != want).sum())
+    assert bad == 0, (
+        f"{bad} of {got.size} level-0 heat cells differ from NEMO's "
+        f"association; max|d| = {float(np.abs(got - want).max()):.3e}")
+
+
+def test_the_inverted_heat_anomaly_would_not_pass_that_test():
+    """Non-vacuity for the T test, planting the exact defect the reviewer got
+    past everything else: NEMO writes ``rn_trp*( ts - ztstar )`` with
+    ``rn_trp`` NEGATIVE (namelist_cfg:37, "must be negative"), so the
+    restoring member has the sign of ``-(T - T*)``.  Writing ``(T* - T)``
+    with the same negative coefficient inverts it into anti-restoring, and
+    the assertion above must be able to tell."""
+    # fp64 comes from the module-scoped autouse fixture
+    dm, cfg, grid, z, state, forcing = _dino_card()
+    T0 = np.asarray(state.T.data)[..., 0]
+    T_star, Q_sr = _seasonal_targets(dm, cfg, forcing, z, state)
+    dz0_live = np.asarray(_nemo_dz0_live(dm, cfg, z, state))
+    r1 = 1.0 / (cfg.rho_0 * cfg.c_p)
+    right = r1 * ((-cfg.A_theta) * (T0 - T_star) - Q_sr) / dz0_live
+    flipped = r1 * ((-cfg.A_theta) * (T_star - T0) - Q_sr) / dz0_live
+    differ = int((right != flipped).sum())
+    assert differ > 0, (
+        "the inverted anomaly is bit-identical to the correct one on every "
+        "cell, so the bit-for-bit heat test cannot see a sign flip")
+    # and it is a PHYSICS-sized difference, not a rounding one -- if this were
+    # small the test above would be pinning noise.
+    scale = float(np.abs(right).max())
+    assert float(np.abs(right - flipped).max()) > 1e-3 * scale
