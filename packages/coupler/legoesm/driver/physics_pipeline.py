@@ -333,6 +333,7 @@ class PhysicsPipeline:
         self._cloud_diagnostic_condensate_scheme = None
         self._cloud_adiabatic_lwc_rate = None
         self._cloud_saturation_scheme = None
+        self._cloud_cover_condensate_q_ref = None
         # Convection scheme name + grid/vertical-coordinate objects for
         # grid-operator-backed convection inputs (moisture convergence,
         # resolved w, CMT winds).  Set by build_physics_pipeline; with
@@ -2429,6 +2430,8 @@ class PhysicsPipeline:
                     self, "_clubb_cf_override_floor", None),
                 saturation_scheme=getattr(
                     self, "_cloud_saturation_scheme", None),
+                cover_condensate_q_ref=getattr(
+                    self, "_cloud_cover_condensate_q_ref", None),
             )
             # Column convective precip [kg/m²/s] for the convective cloud cover;
             # flattened to the (ncol,) column layout like the other inputs.
@@ -2458,8 +2461,13 @@ class PhysicsPipeline:
             # density — the SAME conversion the radiation physics_fn entry does
             # (radiation/integration.py ``_extract_tracer_columns``).  #1715:
             # this site passed the carry RAW, so a prognostic droplet number
-            # reached the liquid r_eff a factor rho too small (~0.5 at 500 hPa
-            # ⇒ r_eff ~26% too large aloft).  Inert in production only because
+            # reached the liquid r_eff a factor rho too small, i.e. r_eff too
+            # large by rho^(-1/3).  Realistic envelope 0-20%: typical liquid at
+            # 700-900 hPa sees 0-8%, and the coldest supercooled tops ~19-22%.
+            # (An earlier version of this comment said ~26% by pairing rho=0.5
+            # with 500 hPa; rho at 500 hPa is ~0.68, and rho=0.5 is ~340 hPa,
+            # which is too cold to carry liquid at all -- GLM review on #1730.)
+            # Inert in production only because
             # the specified-Nc+CCN path overrides the (dead-zeros) carry below;
             # live the moment predict_Nc feeds it.  N_i is used per-mass and
             # passes through raw, matching the reference entry.
@@ -2468,6 +2476,19 @@ class PhysicsPipeline:
                 n_cloud_col = None
             else:
                 from legoesm.atmosphere.physics._shared import compute_rho
+                # MOIST density.  NO floor on T here, deliberately: the
+                # other side of this merge carried jnp.maximum(T_col, 1.0),
+                # and both reviewers showed it TRADES A LOUD FAILURE FOR A
+                # SILENT ONE.  With an uninitialised or padded column
+                # (T = 0, N_c = 0) the unfloored form gives rho = inf and
+                # 0 * inf = NaN, which stops the run; the floored form gives
+                # rho ~348 kg/m^3 and 0 * 348 = 0, which is indistinguishable
+                # from a genuinely droplet-free column.  A floor is input
+                # validation wearing a numerical-safety costume, and this
+                # site has no validation to do.  ``q_v_col`` is
+                # ``ad.flatten_3d(q_v)`` from above and is not sharded until
+                # well below, so it is the identical array the other side
+                # built inline (checked: no rebinding in between).
                 _rho_nc = compute_rho(T_col, p_full_col, q_v_col)
                 n_cloud_col = jnp.maximum(
                     ad.flatten_3d(N_c) * _rho_nc, 0.0)
@@ -4293,6 +4314,8 @@ def build_physics_pipeline(grid, sigma, config):
         config, 'cloud_adiabatic_lwc_rate', None)
     pipeline._cloud_saturation_scheme = getattr(
         config, 'cloud_saturation_scheme', None)
+    pipeline._cloud_cover_condensate_q_ref = getattr(
+        config, 'cloud_cover_condensate_q_ref', None)
     # Marine-Sc albedo lever: blend strength toward diagnostic-CLUBB cf in the BL
     # (partial replacement — full replacement drove a real-SST surface-heating
     # runaway).  None => CloudConfig default (1.0 = full replacement).

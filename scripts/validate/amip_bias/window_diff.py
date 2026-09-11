@@ -1,135 +1,166 @@
 #!/usr/bin/env python3
-"""Paired arm-minus-control means over a short window, from the CMOR
-accumulator sidecars -- the scorer for few-day cloud arms.
+"""Paired-arm window means: partial-month CMOR file minus the restart sidecar.
 
-A 5-day arm never completes a calendar month, so it publishes no ``Amon``
-file.  It does write ``cmor_accum_day_<D>.npz`` at every checkpoint: the
-running SUM and sample COUNT of every CMOR field for the month in progress.
-Two sidecars D0 < D1 inside the same calendar month therefore give the exact
-window mean ``(S(D1) - S(D0)) / (n(D1) - n(D0))`` on the 5-degree CMOR grid,
-with no re-integration and no reading of log lines.  Restored through the
-accumulator's own ``set_state`` so the layout is never re-implemented here.
+A restart arm copies its parent's ``cmor_accum_day_<start>.npz`` (the monthly
+accumulator's running SUM and per-variable sample COUNT from the 1st of the
+month to day ``start``) and, on clean completion, the driver writes the open
+month as a partial-month ``Amon`` file (mean over the 1st .. ``end``) and
+retires the terminal sidecar.  The mean over the arm's OWN days is therefore
 
-The window MUST lie inside one month: a completed month is popped from the
-sidecar when it closes, and the probe refuses a pair whose buckets differ.
-Both arms of a pair must be scored over the SAME (D0, D1); the control's
-window is the same restart-transient the arm carries, so the difference is
-the arm's effect (plus code-drift, which the control arm exists to catch).
+    window = (mean_file * n_end - sum_start) / (n_end - n_start)
 
-Usage: window_diff.py --ctl <ctl_run> --d0 80 --d1 85 <arm_run> [<arm_run> ...]
-       (prints ctl absolute values, then arm - ctl, per regional_bias region)
+with ``n_end = n_start + cadence * (end - start)``.  The accumulator samples
+every 2-D variable once per day (measured on rhebc90_r6: counts 12 -> 22 for
+clt and 11 -> 21 for the fluxes between day 70 and day 80), so ``cadence`` is
+1/day and is asserted, not assumed: pass ``--cadence-from RUN`` naming a run
+with two sidecars and the counts are checked.
+
+Every arm is reduced identically, and the control's partial month is the
+arm's own days-before-``start`` history, so the arm-minus-control difference
+is exactly ``(n_end/(n_end - n_start))`` times the partial-file difference.
+Self-check: the sidecar's mean over 1..start must correlate spatially with
+the partial-month file (> 0.9 for every variable) or the two are not on the
+same grid/orientation and the script refuses.
+
+Prints area-weighted window means of the TOA/cloud/rain 2-D fields (globe,
+20S-20N, 10S-10N) and the arm-minus-control differences.  CRE_LW = rlutcs -
+rlut, CRE_SW = rsutcs - rsut.
+
+    window_diff.py --ctl cc_ctl --arms cc_cond3e5 cc_xr --start 80 --end 86
 """
 from __future__ import annotations
 
 import argparse
-import importlib.util
+import glob
+import json
 import pathlib
-import sys
 
 import numpy as np
 
-_DIR = pathlib.Path(__file__).resolve().parent
+ROOT = pathlib.Path("/work/bd1083/b309178/diffESM/legoesm_pg/amip_runs")
+FIELDS = ("rsut", "rlut", "rsutcs", "rlutcs", "clt", "clwvi", "clivi", "pr",
+          "prw", "tas", "hfls", "hfss")
+DERIVED = {"CRE_LW": ("rlutcs", "rlut"), "CRE_SW": ("rsutcs", "rsut")}
+BANDS = {"GLOBAL": (-90.0, 90.0), "tropics 20S-20N": (-20.0, 20.0),
+         "ITCZ 10S-10N": (-10.0, 10.0)}
+CADENCE_PER_DAY = 1.0
+MIN_SPATIAL_CORR = 0.9
 
 
-def _load(name):
-    spec = importlib.util.spec_from_file_location(name, _DIR / f"{name}.py")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-rb = _load("regional_bias")
-
-FIELDS_2D = ("rsut", "rlut", "rsutcs", "rlutcs", "clt", "clwvi", "clivi", "prw", "pr")
-
-
-def load_monthly_sums(path):
-    """{(year, month): {field: (sum, count)}} from one sidecar, via the
-    accumulator's own set_state."""
-    from legoesm.diagnostics.monthly_means import SpatialMonthlyAccumulator, _decode_manifest
-    with np.load(path, allow_pickle=False) as npz:
-        state = {k[len("monthly."):]: npz[k] for k in npz.files if k.startswith("monthly.")}
-    if "__manifest__" not in state:
-        raise SystemExit(f"FATAL: {path} has no monthly accumulator")
-    man = _decode_manifest(state["__manifest__"])
-    acc = SpatialMonthlyAccumulator(int(man["nlat"]), int(man["nlon"]), int(man["nlev"]))
-    acc.set_state(state)
-    return acc._data_2d, (acc.nlat, acc.nlon)
-
-
-def window_mean(run, d0, d1):
-    """Per-field mean over (d0, d1] on the CMOR grid, plus the sample count."""
-    s0, dims = load_monthly_sums(f"{rb.ROOT}/{run}/cmor_accum_day_{d0:04d}.npz")
-    s1, dims1 = load_monthly_sums(f"{rb.ROOT}/{run}/cmor_accum_day_{d1:04d}.npz")
-    if dims != dims1:
-        raise SystemExit("FATAL: sidecar grids differ")
-    if set(s0) != set(s1) or len(s1) != 1:
-        raise SystemExit(f"FATAL: window {d0}..{d1} of {run} crosses a month "
-                         f"boundary (buckets {sorted(s0)} vs {sorted(s1)}); "
-                         "pick a window inside one calendar month")
-    (key,) = s1
+def sidecar_sums(path):
+    """{var: (sum (nlat, nlon), count)} for the monthly accumulator's 2-D
+    fields, plus the (year, month) of the single open bucket."""
+    z = np.load(path, allow_pickle=True)
+    man = json.loads(str(z["monthly.__manifest__"]))
+    if man["type"] != "SpatialMonthlyAccumulator":
+        raise SystemExit(f"{path}: unexpected accumulator {man['type']!r}")
+    months = {(y, m) for y, m, *_ in man["data_2d"]}
+    if len(months) != 1:
+        raise SystemExit(f"{path}: {len(months)} months in the bucket; the "
+                         "window must lie inside one calendar month")
     out = {}
-    n = None
-    for f in FIELDS_2D:
-        if f not in s1[key]:
+    for _y, _m, var, count, key in man["data_2d"]:
+        out[var] = (np.asarray(z[f"monthly.{key}"], dtype=np.float64), int(count))
+    return out, months.pop()
+
+
+def partial_month(run, var, year, month):
+    """The open month's mean from the run's Amon file (last time index of the
+    newest file ending in ``month``), as (nlat, nlon), plus lat.  ``year`` is
+    the sidecar's relative year index and is not used for matching."""
+    import xarray as xr
+    pat = str(ROOT / run / "cmor" / "Amon" / f"{var}_Amon_*_gn_*.nc")
+    files = sorted(glob.glob(pat))
+    if not files:
+        raise SystemExit(f"{run}: no Amon file for {var} ({pat})")
+    # The sidecar's bucket key carries a RELATIVE year index (0 for the run's
+    # first year), so match the file on its END month only and take the
+    # newest such file; the open month is that file's last time step.
+    hits = [f for f in files
+            if pathlib.Path(f).stem.split("_")[-1].split("-")[-1][-2:] == f"{month:02d}"]
+    if not hits:
+        raise SystemExit(f"{run}/{var}: no Amon file ends in month {month:02d}: {files}")
+    d = xr.open_dataset(hits[-1], decode_times=False)
+    arr = np.asarray(d[var].isel(time=-1).values, dtype=np.float64)
+    lat = np.asarray(d["lat"].values, dtype=np.float64)
+    return arr, lat
+
+
+def check_cadence(run, days):
+    """Assert the accumulator samples every 2-D variable CADENCE_PER_DAY times
+    per day between two sidecars of ``run``."""
+    d0, d1 = sorted(days)
+    a, _ = sidecar_sums(ROOT / run / f"cmor_accum_day_{d0:04d}.npz")
+    b, _ = sidecar_sums(ROOT / run / f"cmor_accum_day_{d1:04d}.npz")
+    for var in FIELDS:
+        if var in a and var in b:
+            got = (b[var][1] - a[var][1]) / (d1 - d0)
+            if abs(got - CADENCE_PER_DAY) > 1e-9:
+                raise SystemExit(f"{run}/{var}: cadence {got}/day between days "
+                                 f"{d0}-{d1}, expected {CADENCE_PER_DAY}")
+
+
+def window_means(run, start, end):
+    """{var: window-mean (nlat, nlon)} over days start+1..end, plus lat."""
+    sums, (year, month) = sidecar_sums(ROOT / run / f"cmor_accum_day_{start:04d}.npz")
+    n_new = CADENCE_PER_DAY * (end - start)
+    if n_new <= 0:
+        raise SystemExit(f"{run}: empty window {start}..{end}")
+    out, lat = {}, None
+    for var in FIELDS:
+        if var not in sums:
             continue
-        a1, c1 = s1[key][f]
-        a0, c0 = s0[key].get(f, (np.zeros_like(a1), 0))
-        if c1 - c0 <= 0:
-            raise SystemExit(f"FATAL: no new samples of {f} in {d0}..{d1} for {run}")
-        out[f] = (a1 - a0) / (c1 - c0)
-        n = c1 - c0 if n is None else n
-    if "rlutcs" in out and "rlut" in out:
-        out["cre_lw"] = out["rlutcs"] - out["rlut"]
-    if "rsutcs" in out and "rsut" in out:
-        out["cre_sw"] = out["rsut"] - out["rsutcs"]
-    return out, n, dims
+        s0, c0 = sums[var]
+        mean_file, lat = partial_month(run, var, year, month)
+        if mean_file.shape != s0.shape:
+            raise SystemExit(f"{run}/{var}: file {mean_file.shape} vs sidecar {s0.shape}")
+        if c0 > 0:
+            r = np.corrcoef((s0 / c0).ravel(), mean_file.ravel())[0, 1]
+            if not r > MIN_SPATIAL_CORR:
+                raise SystemExit(f"{run}/{var}: sidecar/file spatial correlation "
+                                 f"{r:.3f} < {MIN_SPATIAL_CORR}; grid or "
+                                 "orientation mismatch")
+        n_end = c0 + n_new
+        out[var] = (mean_file * n_end - s0) / n_new
+        out[f"{var}__n"] = n_new
+    for name, (x, y) in DERIVED.items():
+        if x in out and y in out:
+            out[name] = out[x] - out[y]
+    return out, lat
 
 
-def cmor_grid(dims):
-    nlat, nlon = dims
-    lat = -90.0 + 180.0 / nlat * (np.arange(nlat) + 0.5)
-    lon = 360.0 / nlon * (np.arange(nlon) + 0.5)
-    return lat, lon
-
-
-def table(fields, lat, lon, title):
-    cols = [c for c in ("rsut", "rlut", "rsutcs", "rlutcs", "cre_sw", "cre_lw",
-                        "clt", "clivi", "clwvi", "prw", "pr") if c in fields]
-    print(f"\n=== {title} ===")
-    print(f"{'region':18s}" + "".join(f"{c:>9s}" for c in cols))
-    for name, box in rb.REGIONS.items():
-        vals = []
-        for c in cols:
-            v = rb.region_mean(fields[c], lat, lon, box)
-            if c == "pr":
-                v *= 86400.0          # kg/m2/s -> mm/day
-            elif c in ("clivi", "clwvi", "prw"):
-                v *= 1.0e3 if c != "prw" else 1.0   # kg/m2 -> g/m2 for condensate
-            vals.append(v)
-        print(f"{name:18s}" + "".join(f"{v:9.2f}" for v in vals))
-    print("  units: W/m2; clt %; clivi/clwvi g/m2; prw kg/m2; pr mm/day")
+def band_mean(field, lat, lat0, lat1):
+    w = np.cos(np.deg2rad(lat))
+    sel = (lat >= lat0) & (lat <= lat1)
+    return float((field[sel].mean(axis=1) * w[sel]).sum() / w[sel].sum())
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    ap.add_argument("arms", nargs="+")
     ap.add_argument("--ctl", required=True)
-    ap.add_argument("--d0", type=int, required=True)
-    ap.add_argument("--d1", type=int, required=True)
+    ap.add_argument("--arms", nargs="*", default=[])
+    ap.add_argument("--start", type=int, required=True)
+    ap.add_argument("--end", type=int, required=True)
+    ap.add_argument("--cadence-from", nargs=3, metavar=("RUN", "DAY0", "DAY1"),
+                    default=("rhebc90_r6", "70", "80"),
+                    help="run + two sidecar days that pin the sampling cadence")
     args = ap.parse_args(argv)
-    ctl, n_ctl, dims = window_mean(args.ctl, args.d0, args.d1)
-    lat, lon = cmor_grid(dims)
-    table(ctl, lat, lon, f"{args.ctl} window mean, days {args.d0}..{args.d1} "
-                          f"({n_ctl} samples)")
-    for arm in args.arms:
-        a, n_arm, dims_a = window_mean(arm, args.d0, args.d1)
-        if dims_a != dims or n_arm != n_ctl:
-            raise SystemExit(f"FATAL: {arm} window has {n_arm} samples vs ctl "
-                             f"{n_ctl}, or a different grid -- not a paired window")
-        table({k: a[k] - ctl[k] for k in a if k in ctl}, lat, lon,
-              f"{arm} - {args.ctl}, days {args.d0}..{args.d1} ({n_arm} samples)")
+    check_cadence(args.cadence_from[0], (int(args.cadence_from[1]), int(args.cadence_from[2])))
+
+    runs = [args.ctl] + list(args.arms)
+    means, lat = {}, None
+    for r in runs:
+        means[r], lat = window_means(r, args.start, args.end)
+    print(f"window days {args.start + 1}..{args.end} ({means[args.ctl]['rsut__n']:.0f} daily samples)")
+    cols = [v for v in list(FIELDS) + list(DERIVED) if v in means[args.ctl]]
+    for band, (lo, hi) in BANDS.items():
+        print(f"\n=== {band}: control value, then arm minus control ===")
+        print(f"{'run':14s}" + "".join(f"{c:>9s}" for c in cols))
+        ctl = {c: band_mean(means[args.ctl][c], lat, lo, hi) for c in cols}
+        print(f"{args.ctl:14s}" + "".join(f"{ctl[c]:9.3f}" for c in cols))
+        for r in args.arms:
+            d = {c: band_mean(means[r][c], lat, lo, hi) - ctl[c] for c in cols}
+            print(f"{r:14s}" + "".join(f"{d[c]:+9.3f}" for c in cols))
 
 
 if __name__ == "__main__":

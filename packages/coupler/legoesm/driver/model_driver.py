@@ -244,7 +244,7 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
     if _conv_cloud and allow_convective_cloud:
         logger.info(
             "convective_cloud=True ACTIVE on the MPAS standalone path: "
-            "Slingo cumulus fraction driven by the one-step-lagged "
+            "Slingo-1987-inspired surrogate cumulus fraction driven by the one-step-lagged "
             "PhysicsState.conv_precip carry (the convection module's "
             "column-integrated in-updraft rain production). Schemes with "
             "no rain split publish zero — their cumulus fraction is zero."
@@ -256,7 +256,7 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
         logger.warning(
             "convective_cloud=True is FORCED OFF on the spectral "
             "standalone radiation path: its lean loop carries no "
-            "PhysicsState, so there is no conv_precip for the Slingo "
+            "PhysicsState, so there is no conv_precip for the Slingo-1987-inspired surrogate "
             "fraction. The FV pipeline and the MPAS lane honour the "
             "setting."
         )
@@ -297,6 +297,7 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
         clubb_cf_override_floor=getattr(
             cfg, "cloud_clubb_cf_override_floor", None),
         saturation_scheme=getattr(cfg, "cloud_saturation_scheme", None),
+        cover_condensate_q_ref=getattr(cfg, "cloud_cover_condensate_q_ref", None),
     )
 
 
@@ -2935,6 +2936,16 @@ class ModelDriver:
                 land_albedo=cfg.land_albedo._replace(
                     **biophysics_lmip_albedo_scalars()))
 
+        # Temperature-dependent snow ageing (opt-in): applied LAST, so it
+        # survives both the bake and the calibration re-apply above. The
+        # calibration fitted only the calendar-clock scalars and never saw this
+        # field, so it cannot be overwritten by it.
+        _act = getattr(self.config, "snow_age_activation_K", None)
+        if _act is not None:
+            cfg = cfg._replace(
+                land_albedo=cfg.land_albedo._replace(
+                    snow_age_activation_K=float(_act)))
+
         # A CANOPY SCHEME GETS CANOPY PARAMETERS.
         #
         # ``clm_multilayer_setup`` returns ``LandSurfaceParams`` — per-PFT
@@ -3745,6 +3756,8 @@ class ModelDriver:
                 # miss exactly the cold cirrus the switch adds (#1521).
                 saturation_scheme=getattr(
                     self.config, "cloud_saturation_scheme", None),
+                cover_condensate_q_ref=getattr(
+                    self.config, "cloud_cover_condensate_q_ref", None),
             )
         self.diagnostics = DiagnosticCollector(
             nlev=self.config.grid.nlev,
@@ -10213,7 +10226,7 @@ class ModelDriver:
             # carry and must fail loudly (issue #405/#413).
             _NEW_OPTIONAL_PS_FIELDS = frozenset({
                 "aerosol_number",
-                # conv_precip (2026-07-24): the Slingo lag carry; zero-seed
+                # conv_precip (2026-07-24): the Slingo-1987-inspired surrogate lag carry; zero-seed
                 # is the correct pre-feature state (no convective cloud was
                 # diagnosed before it existed).
                 "conv_precip",

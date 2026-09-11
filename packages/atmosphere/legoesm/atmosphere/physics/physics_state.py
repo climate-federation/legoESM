@@ -393,7 +393,7 @@ def init_physics_state(
         # docstrings).
         dyn_tendency_T=None,
         dyn_tendency_qv=None,
-        # Lagged convective surface precip for the standalone-path Slingo
+        # Lagged convective surface precip for the standalone-path Slingo-1987-inspired surrogate
         # cumulus cloud fraction; zeros before the first convection step.
         conv_precip=jnp.zeros((ncol,), dtype=dtype),
     )

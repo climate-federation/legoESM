@@ -1151,7 +1151,7 @@ def _make_hydrostatic_radiation(
 
     When the attached cloud config enables ``convective_cloud``, the fn
     reads the LAGGED ``phys_state.conv_precip`` carry (published by the
-    convection module the previous step) and threads it into the Slingo
+    convection module the previous step) and threads it into the Slingo-1987-inspired surrogate
     cumulus cloud fraction — the standalone-path analogue of the FV
     pipeline's ``conv_precip`` threading.
 
@@ -1167,7 +1167,7 @@ def _make_hydrostatic_radiation(
     """
     _time, set_time = _make_time_state()
     _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
-    # Static build-time gate for the Slingo convective-cloud carry read:
+    # Static build-time gate for the Slingo-1987-inspired surrogate convective-cloud carry read:
     # only a cloud config that ENABLES convective_cloud makes the fn a
     # phys_state consumer (byte-identical otherwise).
     _conv_cloud_active = (
@@ -1384,7 +1384,7 @@ def _make_hydrostatic_radiation(
             if _cf_ovr is not None:
                 _cf_ovr = _cf_ovr.reshape(T_col.shape)
 
-        # Convective-precip READ (standalone-path Slingo cumulus fraction):
+        # Convective-precip READ (standalone-path Slingo-1987-inspired surrogate cumulus fraction):
         # the convection module published its column-integrated in-updraft
         # rain-production rate [kg/m^2/s] into ``phys_state.conv_precip``
         # LAST step (radiation runs first in the module chain — one-step

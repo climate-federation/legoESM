@@ -826,6 +826,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Xu-Randall condensate sensitivity alpha_xr (None="
                              "default 100; bounds 10..1000). LOWER => cloud "
                              "fraction grows more slowly with condensate.")
+    parser.add_argument("--snow-age-activation-K",
+                        dest="snow_age_activation_K", type=float, default=None,
+                        help="Snow grain-growth activation temperature [K] for "
+                             "the BATS/CLM temperature-dependent snow-age clock "
+                             "(BATS uses 5000; bounds 0..20000). The age clock "
+                             "then accumulates dt*exp(A*(1/T_freeze - 1/T_snow)), "
+                             "so cold dry polar snow keeps its fresh albedo "
+                             "while melting snow darkens as before. "
+                             "None = 0.0 = off (calendar clock, byte-identical).")
+    parser.add_argument("--cloud-cover-condensate-q-ref",
+                        dest="cloud_cover_condensate_q_ref", type=float,
+                        default=None,
+                        help="Condensate-aware cover floor for the RH cloud "
+                             "schemes: cf >= q_cond/(q_cond + q_ref) [kg/kg], "
+                             "so layers carrying prognostic condensate are "
+                             "never clear to radiation (bounds 1e-6..1e-3; "
+                             "LOWER => more cover per unit condensate). "
+                             "None = scheme default 0.0 (off, byte-identical).")
     parser.add_argument("--diagnostic-condensate-scheme",
                         dest="cloud_diagnostic_condensate_scheme",
                         choices=["constant", "adiabatic"], default="constant",
@@ -1539,7 +1557,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # --subgrid-autoconv already ship from run_coupled-mirrored #647 + #613).
     parser.add_argument("--cloud-conv-cloud-max", type=float, default=None,
                         dest="conv_cloud_max",
-                        help="Cap on convective (Slingo 1987) cloud cover "
+                        help="Cap on convective (Slingo-1987-inspired surrogate) cloud cover "
                              "(CloudConfig.conv_cloud_max). Limits anvil "
                              "over-reflection. Bounds (0.1, 1.0).")
     parser.add_argument("--conv-cloud-condensate", type=float, default=None,
@@ -1971,6 +1989,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_fsd=args.cloud_fsd,
         cloud_p_xr=args.cloud_p_xr,
         cloud_alpha_xr=args.cloud_alpha_xr,
+        cloud_cover_condensate_q_ref=args.cloud_cover_condensate_q_ref,
+        snow_age_activation_K=args.snow_age_activation_K,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
         convective_cloud=args.convective_cloud,

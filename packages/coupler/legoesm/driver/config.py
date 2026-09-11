@@ -557,7 +557,7 @@ class ExperimentConfig(NamedTuple):
     # ``RadiationConfig.use_clubb_cloud_fraction``; requires diagnostic CLUBB
     # turbulence (turbulence='clubb').  False (default) is byte-identical.
     use_clubb_cloud_fraction: bool = False
-    # Opt-in convective (cumulus) cloud-fraction source (Slingo 1987).  The
+    # Opt-in convective (cumulus) cloud-fraction source (Slingo-1987-inspired surrogate).  The
     # RH-based stratiform cloud schemes give ~0 cloud where an adjustment
     # convection scheme (sbm) holds the column subsaturated, so the convecting
     # tropics radiate surface LW to space (~4.5 K coupled cold bias).  When
@@ -575,7 +575,7 @@ class ExperimentConfig(NamedTuple):
     #                          optically THINNER cloud (lower albedo, still
     #                          LW-active).  Bounds (1e-6, 1e-3) — the lower end
     #                          was widened from 5e-5; see validate_strict.
-    #   cloud_conv_cloud_max — convective (Slingo) cover cap.  Bounds (0.1, 1.0).
+    #   cloud_conv_cloud_max — convective (Slingo-1987-inspired surrogate) cover cap.  Bounds (0.1, 1.0).
     #   cloud_conv_cloud_condensate — convective anvil in-cloud condensate
     #                          [kg/kg]; LOWER => optically THINNER / more realistic
     #                          anvil (lower albedo, still LW-active).  Bounds
@@ -618,6 +618,15 @@ class ExperimentConfig(NamedTuple):
     #   moisture rises (flattens the overcast runaway).
     cloud_p_xr: float | None = None
     cloud_alpha_xr: float | None = None
+    # Condensate-aware cover floor cf >= q_cond/(q_cond + q_ref) [kg/kg] for the
+    # RH-diagnosed schemes (CloudConfig.cover_condensate_q_ref).  None => scheme
+    # default (0.0 = off).  Paired-arm lever for the invisible-ice defect.
+    cloud_cover_condensate_q_ref: float | None = None
+    # Snow grain-growth activation temperature [K] (BATS ~5000): the snow-age
+    # clock accumulates dt*exp(A*(1/T_freeze - 1/T_snow)) so cold dry snow keeps
+    # its fresh albedo. None => LandAlbedoConfig default (0.0 = off, the
+    # calendar clock, byte-identical).
+    snow_age_activation_K: float | None = None
     # Marine-Sc albedo lever: blend strength [0,1] toward diagnostic-CLUBB cf in
     # the BL when --use-clubb-cloud-fraction is on (1.0 = full replacement, which
     # drove a real-SST surface-heating runaway; ~0.3-0.5 is gentler + stable).
@@ -2818,6 +2827,8 @@ class ExperimentConfig(NamedTuple):
             ("cloud_fsd", 0.0, 1.0),
             ("cloud_p_xr", 0.05, 1.0),
             ("cloud_alpha_xr", 10.0, 1000.0),
+            ("cloud_cover_condensate_q_ref", 1.0e-6, 1.0e-3),
+            ("snow_age_activation_K", 0.0, 20000.0),
             ("cloud_adiabatic_lwc_rate", 5.0e-7, 3.0e-6),
         ):
             _v = getattr(self, _f)
