@@ -53,11 +53,19 @@
 # nemo_dino_kt2_trends/run.sh already produced, or the instrument changed the
 # trajectory and the record is worthless.
 #
-# USAGE
+# HOW THE CONFIG COPY IS MADE, and this is a FIX not a style choice.  This
+# script used to build the copy with ``cp -a $NEMO/cfgs/DINO $COPY``.
+# ``cfgs/DINO`` is 60 GB -- 63 entries, of which 52 are RUN_* directories full
+# of this campaign's output -- and the oracle tree sits in a home directory at
+# its quota, so that copy filled the disk and the acquisition never ran.  The
+# copy is now ``makenemo -r DINO -n <COPY>``, which writes the SKELETON only
+# (MY_SRC, EXP00, cpp_*.fcm, BLD): 137 MB measured on the two copies that
+# already exist, and zero RUN_* directories.  The script CHECKS that rather
+# than trusting it, and every other acquisition on this branch already built
+# its copy this way -- this one was the outlier.
+#
+# USAGE -- ONE command, run by the user (it builds and launches NEMO):
 #   scripts/validate/ocean_fidelity/dino_1226/nemo_dino_zdf_matrix/run.sh
-#     -> prepares cfgs/DINO_ZDF_MATRIX and PRINTS the build + run commands
-#   scripts/validate/ocean_fidelity/dino_1226/nemo_dino_zdf_matrix/run.sh --go
-#     -> additionally RUNS them (the user's call, never the agent's)
 #
 # Optional environment: ARCH (default conda), NEMO, OUT, NPROC.
 set -euo pipefail
@@ -68,14 +76,14 @@ CFGNAME=DINO_ZDF_MATRIX
 COPY=$NEMO/cfgs/$CFGNAME
 OUT=$(readlink -m "${OUT:-/data/abyssal/dbalwada/dino_fromrest_y1/nemo_zdf_matrix}")
 NPROC=${NPROC:-16}
-GO=0
-[ "${1:-}" = "--go" ] && GO=1
+SRCREF=$NEMO/cfgs/DINO/RUN_FROMREST_KT1
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 # ---------------------------------------------------------------- refusals
 # Identical guard to nemo_dino_kt2_trends/run.sh, for the identical reason: a
 # relative OUT, a symlinked NEMO or a CFGNAME containing '..' must not be able
 # to resolve inside the read-only oracle configuration.
-guard() {
+guard() {                       # guard <path being written> [cfgcopy]
   local real
   real=$(readlink -m "$1")
   case "$real/" in
@@ -84,15 +92,58 @@ guard() {
     "$(readlink -m "$NEMO/src")"/*)
       echo "REFUSED: $1 resolves inside the pristine src/" >&2; exit 2 ;;
   esac
+  if [ "${2:-}" != "cfgcopy" ]; then
+    case "$real/" in
+      "$(readlink -m "$NEMO")"/*)
+        echo "REFUSED: $1 resolves inside the NEMO checkout $NEMO; the" >&2
+        echo "  record must be written outside the read-only oracle." >&2
+        exit 2 ;;
+    esac
+  fi
 }
-guard "$COPY"
+guard "$COPY" cfgcopy
 guard "$OUT"
 case "$CFGNAME" in *..*|*/*) echo "REFUSED: CFGNAME" >&2; exit 2 ;; esac
+case "$OUT" in
+  /|/tmp|/home|/data) echo "REFUSED: OUT=$OUT is a system directory" >&2
+                      exit 2 ;;
+esac
+if [ -e "$COPY" ]; then
+  echo "REFUSED: $COPY already exists." >&2
+  echo "  Delete it by hand if you are sure it is stale -- this script will" >&2
+  echo "  not decide that for you, because a stale copy still compiles." >&2
+  exit 2
+fi
+if [ ! -d "$SRCREF" ]; then
+  echo "REFUSED: $SRCREF not found (the namelists this record must reuse)" >&2
+  exit 2
+fi
+if [ ! -f "$NEMO/arch/arch-$ARCH.fcm" ]; then
+  echo "REFUSED: no arch/arch-$ARCH.fcm; set ARCH=<your makenemo -m arch>" >&2
+  exit 2
+fi
 
 # ------------------------------------------------------------- config copy
-rm -rf "$COPY"
-cp -a "$NEMO/cfgs/DINO" "$COPY"
+# -j 0 creates the configuration WITHOUT compiling, so MY_SRC can be patched
+# before a single object file exists.  This is the line that replaced
+# ``cp -a $NEMO/cfgs/DINO $COPY``; see the header.
+cd "$NEMO"
+./makenemo -r DINO -n "$CFGNAME" -m "$ARCH" -j 0
 mkdir -p "$OUT"
+
+# THE COPY MUST CARRY NO RUN DIRECTORY.  A skeleton is ~137 MB; cfgs/DINO is
+# 60 GB, essentially all of it RUN_* output, and copying that is what filled
+# the quota.  Checked on the copy that actually exists, not on the command
+# that made it, so any future edit that reintroduces a wholesale copy fails
+# here instead of on the disk.
+if find "$COPY" -maxdepth 1 -name 'RUN_*' -print -quit | grep -q .; then
+  echo "REFUSED: $COPY contains a RUN_* directory, so it is a wholesale copy" >&2
+  echo "  of cfgs/DINO and not a makenemo skeleton. Delete it and fix the" >&2
+  echo "  line that built it." >&2
+  exit 2
+fi
+echo "config copy: $(du -sh "$COPY" | cut -f1), $(find "$COPY" -maxdepth 1 \
+  -name 'RUN_*' | wc -l) RUN_* directories (must be 0)"
 
 # DINO has no MY_SRC/trazdf.F90 override, so the tracer solve runs the shared
 # src/OCE/TRA/trazdf.F90.  Copy it into the COPY's MY_SRC -- this is what
@@ -174,42 +225,83 @@ print("  MY_SRC/dynzdf.F90 present:", p.exists(),
       "WHICH, so it is left for the round that scores it.")
 PYEOF
 
+# --------------------------------------------------------------- build
+./makenemo -n "$CFGNAME" -m "$ARCH" -j 8
+
+# The PREPROCESSOR decides whether the writer is in the binary.  A patch that
+# compiled away would otherwise produce an empty record that looks like a
+# successful run.  Each token must be ABSENT from the pristine source, or it
+# discriminates nothing.
+PP=$COPY/BLD/ppsrc/nemo/trazdf.f90
+for token in "trazdf_" "cl_zm" "ji2, jk2"; do
+  if ! grep -qF "$token" "$PP"; then
+    echo "REFUSED: '$token' is not in the COMPILED source $PP -- the writer" >&2
+    echo "  did not survive preprocessing, so the record would be empty." >&2
+    exit 3
+  fi
+  if grep -qF "$token" "$NEMO/src/OCE/TRA/trazdf.F90"; then
+    echo "REFUSED: ppsrc token '$token' also occurs in the PRISTINE source," >&2
+    echo "  so finding it above proved nothing. Pick a token the patch adds." >&2
+    exit 3
+  fi
+done
+echo "ppsrc check: the matrix writer is in the compiled source, and each"
+echo "  token checked is absent from the pristine source"
+
 # --------------------------------------------------------------- namelist
+# The run happens in $OUT with the CERTIFIED kt=1 record's namelists -- the
+# same pattern as nemo_dino_kt2_trends/run.sh -- so the only difference
+# between this record's trajectory and the certified one is the end step.
 # nn_itend 1 -> 2 so kt=2 happens; nn_stock 2 so the kt=2 restart is written
 # (NEMO sets nitrst = kt + nn_stock - 1 at restart.f90:112 and writes only at
 # nitrst, :121 -- with nn_stock=1 there would be a kt=1 restart and no kt=2).
-sed -i 's/^\( *nn_itend *=\).*/\1   2/' "$COPY/EXPREF/namelist_cfg" 2>/dev/null || true
-sed -i 's/^\( *nn_stock *=\).*/\1   2/' "$COPY/EXPREF/namelist_cfg" 2>/dev/null || true
+# The OLD value is checked before each edit: a namelist that has already moved
+# must not be silently re-edited into something else.
+cd "$OUT"
+cp -f "$SRCREF/namelist_cfg" "$SRCREF/namelist_ref" .
+for x in "$SRCREF"/*.xml; do [ -e "$x" ] && cp -f "$x" .; done
+python3 - "$OUT/namelist_cfg" <<'PY'
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+for key, want_old, new in (("nn_itend", "1", "2"), ("nn_stock", "1", "2")):
+    m = re.search(r"^(\s*%s\s*=\s*)(\S+)(.*)$" % key, s, re.M)
+    if m is None:
+        raise SystemExit("REFUSED: %s not found in %s" % (key, p))
+    if m.group(2).rstrip() != want_old:
+        raise SystemExit(
+            "REFUSED: %s is %r, expected %r -- this namelist is not the kt=1 "
+            "record's, so editing it would produce a record that is not what "
+            "this script claims" % (key, m.group(2), want_old))
+    s = s[:m.start()] + m.group(1) + new + m.group(3) + s[m.end():]
+open(p, "w").write(s)
+print("namelist: nn_itend 1 -> 2, nn_stock 1 -> 2")
+PY
+
+# ------------------------------------------------------------------- run
+ln -sf "$COPY/BLD/bin/nemo.exe" nemo
+mpirun -np "$NPROC" ./nemo 2>&1 | tee run_zdf_matrix.log
+
+# ----------------------------------------------------------- record check
+# THE CHECK THAT DECIDES WHETHER THE RECORD IS USABLE.  Every inserted
+# statement is a WRITE of an array NEMO has already computed, so the kt=2
+# restart this build writes MUST be bit-identical to the one
+# nemo_dino_kt2_trends/run.sh already produced.  If it is not, the WRITE-only
+# claim in the header is FALSE and the matrix dump describes a different
+# trajectory than every other kt=2 number on this branch.
+KT2REF=${KT2REF:-/data/abyssal/dbalwada/dino_fromrest_y1/nemo_kt2_trends}
+python3 "$HERE/../nemo_dino_kt1_rankdump/read_rankdump.py" \
+    --twin-check "$OUT" --reference "$KT2REF" --kt 2
 
 cat <<MSG
 
-PREPARED: $COPY
-OUTPUT  : $OUT
+record written to $OUT
+  the three tracer diagonals and the RHS, per rank, at kt = 1 and kt = 2:
+    $OUT/trazdf_{zwi,zwd,zws}_kt000000{1,2}_rank??.bin
+  the kt=2 restart, twin-checked against $KT2REF above:
+    $OUT/DINO_00000002_restart_*.nc
 
-The two commands this record needs -- NOT run by the agent that wrote this
-script.  Run them yourself, or re-invoke with --go:
-
-  cd $NEMO
-  ./makenemo -n $CFGNAME -m $ARCH -j 8
-
-  cd $COPY/EXP00 && mpirun -np $NPROC ./nemo
-
-POST-RUN CHECK, and it is the one that decides whether the record is usable:
-
-  the kt=2 restart this build writes MUST be bit-identical to
-  /data/abyssal/dbalwada/dino_fromrest_y1/nemo_kt2_trends/DINO_00000002_restart_*.nc
-  variable by variable.  If it is not, the WRITE-only claim above is FALSE
-  and the matrix dump describes a different trajectory than every other kt=2
-  number on this branch.  The comparator already exists:
-
-  python scripts/validate/ocean_fidelity/dino_1226/nemo_dino_kt1_rankdump/read_rankdump.py --twin-check \\
-      $OUT /data/abyssal/dbalwada/dino_fromrest_y1/nemo_kt2_trends
-
+NOT IN THIS RECORD, and named rather than omitted: the MOMENTUM diagonals.
+dynzdf.F90 assembles zwi/zwd/zws twice (u then v) and the anchor has to name
+WHICH, so the momentum half is left for the round that scores it.
 MSG
-
-if [ "$GO" -eq 1 ]; then
-  cd "$NEMO" && ./makenemo -n "$CFGNAME" -m "$ARCH" -j 8
-  cd "$COPY/EXP00" && mpirun -np "$NPROC" ./nemo
-  mv -f "$COPY/EXP00"/trazdf_*.bin "$OUT"/ 2>/dev/null || true
-  mv -f "$COPY/EXP00"/DINO_0000000*_restart_*.nc "$OUT"/ 2>/dev/null || true
-fi
