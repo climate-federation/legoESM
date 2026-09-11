@@ -425,6 +425,73 @@ def two_path(*, steps: int = 2, entry_root: Path = LADDER_ENTRY_ROOT,
     return report
 
 
+def oracle_floor(*, steps: int = 3, roots=(LADDER_ENTRY_ROOT, YEAR_ENTRY_ROOT)) -> dict:
+    """How far apart are the ORACLE'S OWN two records of this card?
+
+    The ladder scores against ``gyre_kt1_10`` and the year against
+    ``year_fromrest/nemo_pristine``.  Their namelists differ only in run length
+    and output cadence, so they are the same configuration -- but they are not
+    the same executable, and NEMO is not bit-reproducible across builds.  A
+    residual smaller than THIS is a residual the campaign cannot attribute to
+    legoESM at all, so the number belongs next to every ladder row and is
+    measured here in THE LADDER'S OWN UNITS (``score``'s
+    ``normalized_max_abs``: max abs difference over max(max|oracle|, 1)).
+    """
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    _policy()
+    gate = _load("gyre_phase3_gate", LADDER_GATE)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+
+    card = build_nemo_testcase_card(CASE)
+    masks = gate.expected_masks(card)
+    nlev = card.recipe.z_coord.n_levels
+    left_root, right_root = (Path(r) for r in roots)
+    rows = []
+    for kt in range(1, steps + 1):
+        a = gate.read_entry(left_root / f"oracle_step_entry_kt{kt:08d}.bin")
+        b = gate.read_entry(right_root / f"oracle_step_entry_kt{kt:08d}.bin")
+        for field in FIELDS:
+            mask = np.asarray(masks[field], dtype=bool)
+            x = np.asarray(a[field], dtype=np.float64)
+            y = np.asarray(b[field], dtype=np.float64)
+            if x.ndim == 3:
+                x, y = x[..., :nlev], y[..., :nlev]
+            absolute = float(np.max(np.abs((x - y)[mask])))
+            reference = float(np.max(np.abs(x[mask])))
+            rows.append({
+                "kt": kt, "field": field,
+                "absolute_max": absolute,
+                "reference_max_abs": reference,
+                "normalized_max_abs": absolute / max(reference, 1.0),
+                "cells_unequal": int(np.count_nonzero(
+                    _bits(x)[mask] != _bits(y)[mask])),
+                "cells": int(mask.sum()),
+                "bar": 1.0e-15,
+            })
+    report = {
+        "format": "gyre-card-reconciliation-oracle-floor-v1",
+        "case": CASE, "roots": [str(left_root), str(right_root)],
+        "rows": rows, "worktree": worktree_stamp(),
+    }
+    print(f"\nTHE ORACLE'S OWN FLOOR: {left_root.name} against "
+          f"{right_root.name}, in the ladder's units")
+    print(f"  {'kt':>3s} {'field':>6s} {'abs':>14s} {'normalized':>14s} "
+          f"{'cells':>14s}  vs bar 1e-15")
+    for row in rows:
+        verdict = ("ABOVE THE BAR" if row["normalized_max_abs"] > row["bar"]
+                   else "under")
+        print(f"  {row['kt']:>3d} {row['field']:>6s} "
+              f"{row['absolute_max']:>14.6e} "
+              f"{row['normalized_max_abs']:>14.6e} "
+              f"{row['cells_unequal']:>7d}/{row['cells']:<6d}  {verdict}")
+    require(any(r["absolute_max"] > 0.0 for r in rows),
+            "the two oracle records are bit-identical at every scored row; "
+            "this mode measured nothing")
+    return report
+
+
 def self_check() -> int:
     """Every plant must be refused, and the readers must be non-vacuous."""
     failures = []
@@ -470,6 +537,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config-diff", action="store_true")
     parser.add_argument("--two-path", action="store_true")
+    parser.add_argument("--oracle-floor", action="store_true")
     parser.add_argument("--self-check", action="store_true")
     parser.add_argument("--steps", type=int, default=2)
     parser.add_argument("--entry-root", type=Path, default=LADDER_ENTRY_ROOT)
@@ -482,11 +550,14 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.self_check:
         return self_check()
-    require(args.config_diff or args.two_path,
-            "choose --config-diff, --two-path or --self-check")
+    require(args.config_diff or args.two_path or args.oracle_floor,
+            "choose --config-diff, --two-path, --oracle-floor or "
+            "--self-check")
     report = {}
     if args.config_diff:
         report["config_diff"] = config_diff(plant=args.plant)
+    if args.oracle_floor:
+        report["oracle_floor"] = oracle_floor()
     if args.two_path:
         report["two_path"] = two_path(steps=args.steps,
                                       entry_root=args.entry_root,
