@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import struct
 from pathlib import Path
@@ -35,6 +36,37 @@ ADMISSION_SPEC.loader.exec_module(admission)
 
 GNX, GNY, GNZ = gate.DIMS
 GN3 = GNX * GNY * GNZ
+
+
+def test_scalar_math_root_identity_defaults_and_planted_mismatch(
+    tmp_path, monkeypatch
+):
+    assert gate.ROOT == gate.SCALAR_MATH_ROOT
+    assert gate.STAGE2_ROOT == gate.SCALAR_MATH_ROOT
+    assert gate.STAGE3_ROOT == gate.SCALAR_MATH_ROOT
+
+    name = "oracle_step_entry_kt00000002.bin"
+    canonical = tmp_path / "canonical"
+    good = tmp_path / "good"
+    bad = tmp_path / "bad"
+    for root in (canonical, good, bad):
+        root.mkdir()
+    payload = b"certified scalar-math kt2"
+    (canonical / name).write_bytes(payload)
+    (good / name).write_bytes(payload)
+    (bad / name).write_bytes(payload + b" planted violation")
+    monkeypatch.setattr(gate, "SCALAR_MATH_ROOT", canonical)
+    monkeypatch.setitem(
+        gate.BIT_IDENTITY_EXPECTED, name, hashlib.sha256(payload).hexdigest())
+
+    rows = gate.require_scalar_math_roots(good, good, good)
+    assert all(row["status"] == "VERIFIED" for row in rows)
+    try:
+        gate.require_scalar_math_roots(good, good, bad)
+    except gate.GateError as exc:
+        assert "stage3 root is not certified scalar-math v2" in str(exc)
+    else:
+        raise AssertionError("planted vectorized/mismatched root was admitted")
 
 
 def _transport_record(values: np.ndarray) -> bytes:

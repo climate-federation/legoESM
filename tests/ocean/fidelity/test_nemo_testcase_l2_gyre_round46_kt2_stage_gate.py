@@ -123,3 +123,9 @@ def test_every_declared_plant_has_a_nonzero_exit_contract():
     assert 'return 1 if args.plant or report["status"] != "PASS" else 0' in source
     for plant in ("header", "truncation", "calibration", "twin", "stamp"):
         assert plant in run
+
+
+def test_retracted_round48_owner_prediction_cannot_abort_current_measurement():
+    source = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py").read_text()
+    assert '"interpretation": "POSTHOC_AFTER_ROUND49_ROUND50"' in source
+    assert "round48 first-non-bit prediction REFUTED" not in source

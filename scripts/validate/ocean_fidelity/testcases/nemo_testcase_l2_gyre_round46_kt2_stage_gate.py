@@ -569,6 +569,10 @@ def _given_inputs(records: dict, plant: str | None) -> tuple[list[dict], dict]:
     if plant == "given":
         require(any(r["max_abs"] > 0.5 for r in rows), "given-input plant did not land")
     first = {}
+    # Historical audit only: rounds 49/50 changed VOR/LDF after this round-48
+    # prediction was registered.  Retain the discriminating measurement and
+    # label the old prediction; never make a current gate fail on a retracted
+    # owner expectation.
     expected = {1: "ldf", 2: "vor", 3: "vor"}
     for stage in (1, 2, 3):
         order = ("hpg", "ldf", "vor", "adv") if stage == 1 else (
@@ -595,11 +599,8 @@ def _given_inputs(records: dict, plant: str | None) -> tuple[list[dict], dict]:
             "n_unequal": counts,
             "preregistered_operator": expected[stage],
             "prediction": "CONFIRMED" if measured == expected[stage] else "REFUTED",
+            "interpretation": "POSTHOC_AFTER_ROUND49_ROUND50",
         }
-    require(
-        all(row["prediction"] == "CONFIRMED" for row in first.values()),
-        f"round48 first-non-bit prediction REFUTED: {first}",
-    )
     return rows, first
 
 

@@ -427,6 +427,21 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stp2d.f90:141-175': [
         '!*  hydrostatic pressure gradient (HPG))',
         "CALL r46_rhs( 'after_zad', uu, vv, Krhs )", 35],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stp2d.f90:141-145': [
+        'hydrostatic pressure gradient (HPG))',
+        "CALL r46_rhs( 'after_hpg', uu, vv, Krhs )", 5],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:324-337': [
+        'vertical velocity and transport (ww,wi,zFw)',
+        ('ENDIF', 8), 14],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:472-480': [
+        'advection (VIF or FF)',
+        "CALL r46_rhs( 'after_adv', uu, vv, Krhs )", 9],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynzad.f90:100-130': [
+        ('vertical momentum advection', 2),
+        'END DO   ;   END DO   ;   END DO', 31],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynzad.f90:123-126': [
+        ('puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs)', 1),
+        '&                                            * ( zWdzV(ji,jj) + zzWdzV )', 4],
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stp2d.f90:301-308': [
         'Compute ssh and (uu_b,vv_b)  at N+1',
         'CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs, uu, vv, ssh, uu_b, vv_b, Kaa )', 8],
@@ -542,7 +557,7 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:6422': ('_g2 = _nemo_ws_stage_transport(', 1),
     'ocean_model_latlon_cgrid.py:6450': (
         '_stage3_hpg_operands = _stage_hpg_operands(', 1),
-    'nemo_testcase_l2_gyre_phase3_gate.py:284': (
+    'nemo_testcase_l2_gyre_phase3_gate.py:315': (
         'require(magic == "NEMO_L2_RKTRM_1", f"{path}: bad magic")', 1),
     'round38_oracle_trazdf_kt2/ocean.output:799': (
         'with Hollingsworth scheme (=1) or not (=0)       nn_dynkeg   =', 1),

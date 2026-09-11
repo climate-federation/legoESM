@@ -10326,7 +10326,7 @@ to stage 3:
 **NO OPERATOR IS NAMED THE OWNER, and the preregistration forbids it.**  NEMO
 has no stage-3 split to score these against: `oracle_rkstage2_terms` is
 header-locked to `kstg = 2`
-(`nemo_testcase_l2_gyre_phase3_gate.py:284`).  What the table buys is a
+(`nemo_testcase_l2_gyre_phase3_gate.py:315`).  What the table buys is a
 RANKING by the relative error each operator would have to carry, and even that
 ranking is WEAK IN ONE DIRECTION: `hpg` and `advection` are both differences
 of much larger intermediates — `hpg_sco` accumulates `zhpi` down the column

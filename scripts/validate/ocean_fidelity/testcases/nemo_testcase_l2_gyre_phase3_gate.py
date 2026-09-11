@@ -23,13 +23,12 @@ from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 BAR = 1.0e-15
 CASE = "GYRE-zco"
-ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gyre_kt1_10")
-STAGE2_ROOT = Path(
+SCALAR_MATH_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
-    "gyre_kt1_10_stage2_terms")
-STAGE3_ROOT = Path(
-    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
-    "gyre_kt1_10_stage3_walk")
+    "round19_oracle_v2_external")
+ROOT = SCALAR_MATH_ROOT
+STAGE2_ROOT = SCALAR_MATH_ROOT
+STAGE3_ROOT = SCALAR_MATH_ROOT
 STAGE_WW_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
     "round21_oracle_v2_stage_ww")
@@ -73,6 +72,38 @@ def sha256(path: Path) -> str:
         for block in iter(lambda: handle.read(1 << 20), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def require_scalar_math_roots(*roots: Path) -> list[dict]:
+    """Fail closed unless every selected root has the certified v2 kt=2 entry."""
+    name = "oracle_step_entry_kt00000002.bin"
+    expected = BIT_IDENTITY_EXPECTED[name]
+    canonical = SCALAR_MATH_ROOT / name
+    require(canonical.is_file(), f"missing scalar-math identity control {canonical}")
+    canonical_sha = sha256(canonical)
+    require(
+        canonical_sha == expected,
+        f"scalar-math identity control changed: {canonical_sha} != {expected}",
+    )
+    rows = []
+    for label, root in zip(("oracle", "stage2", "stage3"), roots, strict=True):
+        path = root / name
+        require(path.is_file(), f"missing {label} scalar-math identity control {path}")
+        observed = sha256(path)
+        require(
+            observed == canonical_sha,
+            f"{label} root is not certified scalar-math v2 at kt=2: "
+            f"{observed} != {canonical_sha}",
+        )
+        rows.append(
+            {
+                "name": f"scalar_math_root_identity.{label}",
+                "path": str(path),
+                "status": "VERIFIED",
+                "sha256": observed,
+            }
+        )
+    return rows
 
 
 def resolved_namelist_blocks(path: Path) -> set[str]:
@@ -816,6 +847,8 @@ def run(
     without_oracle_ene_coefficients=False,
     trajectory_only=False,
 ) -> dict:
+    scalar_math_root_identity = require_scalar_math_roots(
+        root, stage2_root, stage3_root)
     import jax
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
@@ -1169,6 +1202,7 @@ def run(
                 and barotropic_state_first_over_bar is None else "DEBT"),
             "execution_regime": "production-jit-cpu-fp64-x64-libm",
             "oracle_root": str(root),
+            "scalar_math_root_identity": scalar_math_root_identity,
             "max_step": max_step,
             "first_over_bar": first_over_bar,
             "barotropic_state_first_over_bar": barotropic_state_first_over_bar,
@@ -2502,6 +2536,7 @@ def run(
         "worktree": worktree_stamp(),
         "format": "nemo-testcase-l2-gyre-phase3-v2",
         "case": CASE,
+        "scalar_math_root_identity": scalar_math_root_identity,
         "status": status,
         "bar": BAR,
         "precision_policy": "fp64",
