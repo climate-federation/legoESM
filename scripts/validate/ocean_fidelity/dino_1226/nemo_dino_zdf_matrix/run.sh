@@ -34,9 +34,14 @@
 #   $OUT/trazdf_zwi_kt000000NN_rankRR.bin   the tracer sub-diagonal
 #   $OUT/trazdf_zwd_kt000000NN_rankRR.bin   the tracer diagonal
 #   $OUT/trazdf_zws_kt000000NN_rankRR.bin   the tracer super-diagonal
-#   $OUT/trazdf_rhs_kt000000NN_rankRR.bin   pt(:,:,:,jn,Kaa) entering the sweep
-#   $OUT/dynzdf_zwi|zwd|zws|rhs_u/_v ...    the momentum siblings
-#   $OUT/DINO_0000000{1,2}_restart_*.nc     so the record is self-contained
+#   $OUT/DINO_00000002_restart_*.nc         so the record is self-contained
+#
+# NOT IN IT, named rather than left to be discovered: the RHS entering the
+# sweep, and the MOMENTUM diagonals.  An earlier version of this header
+# promised both.  The RHS is pt(:,:,:,jn,Kaa) INSIDE the tracer loop, so it
+# needs a jn in the filename the three diagonals do not; dynzdf.F90 assembles
+# zwi/zwd/zws twice (u then v) and the anchor has to name WHICH.  Both are
+# left for the round that scores them.
 #
 # PER-RANK SUFFIXES, not a gathered array: NEMO's own MY_SRC already writes
 # this way (``ldftra.F90:535-539`` uses ``narea - 1``), and the stitching
@@ -68,6 +73,11 @@
 #   scripts/validate/ocean_fidelity/dino_1226/nemo_dino_zdf_matrix/run.sh
 #
 # Optional environment: ARCH (default conda), NEMO, OUT, NPROC.
+# THE ONE WRITE INTO THE ORACLE TREE, named rather than left to be found:
+# `makenemo` appends the new configuration's name to $NEMO/cfgs/work_cfgs.txt
+# and creates $NEMO/cfgs/<CFGNAME>/.  That is makenemo's own bookkeeping, it is
+# how every acquisition on this branch already works, and there is no flag to
+# turn it off.  The guards below are about everything else.
 set -euo pipefail
 
 NEMO=${NEMO:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
@@ -104,6 +114,13 @@ guard() {                       # guard <path being written> [cfgcopy]
 guard "$COPY" cfgcopy
 guard "$OUT"
 case "$CFGNAME" in *..*|*/*) echo "REFUSED: CFGNAME" >&2; exit 2 ;; esac
+if [ -d "$OUT/.git" ] || git -C "$OUT" rev-parse --git-dir >/dev/null 2>&1
+then
+  echo "REFUSED: OUT=$OUT is inside a git checkout; NEMO writes hundreds of" >&2
+  echo "  files there and they are not artifacts this repo should carry." >&2
+  echo "  (OUT=. resolves here, which is how this was found.)" >&2
+  exit 2
+fi
 case "$OUT" in
   /|/tmp|/home|/data) echo "REFUSED: OUT=$OUT is a system directory" >&2
                       exit 2 ;;
@@ -239,6 +256,11 @@ for token in "trazdf_" "cl_zm" "ji2, jk2"; do
     echo "  did not survive preprocessing, so the record would be empty." >&2
     exit 3
   fi
+  if [ ! -f "$NEMO/src/OCE/TRA/trazdf.F90" ]; then
+    echo "REFUSED: the pristine source is not where this check looks, so" >&2
+    echo "  'absent from the pristine source' would pass vacuously." >&2
+    exit 3
+  fi
   if grep -qF "$token" "$NEMO/src/OCE/TRA/trazdf.F90"; then
     echo "REFUSED: ppsrc token '$token' also occurs in the PRISTINE source," >&2
     echo "  so finding it above proved nothing. Pick a token the patch adds." >&2
@@ -296,12 +318,11 @@ python3 "$HERE/../nemo_dino_kt1_rankdump/read_rankdump.py" \
 cat <<MSG
 
 record written to $OUT
-  the three tracer diagonals and the RHS, per rank, at kt = 1 and kt = 2:
+  the three tracer diagonals, per rank, at kt = 1 and kt = 2:
     $OUT/trazdf_{zwi,zwd,zws}_kt000000{1,2}_rank??.bin
   the kt=2 restart, twin-checked against $KT2REF above:
     $OUT/DINO_00000002_restart_*.nc
 
-NOT IN THIS RECORD, and named rather than omitted: the MOMENTUM diagonals.
-dynzdf.F90 assembles zwi/zwd/zws twice (u then v) and the anchor has to name
-WHICH, so the momentum half is left for the round that scores it.
+NOT IN THIS RECORD, and named rather than omitted: the RHS entering the sweep
+and the MOMENTUM diagonals.  See the header for why each needs its own anchor.
 MSG

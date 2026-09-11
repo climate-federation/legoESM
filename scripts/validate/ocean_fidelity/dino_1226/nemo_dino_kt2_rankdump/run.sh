@@ -41,6 +41,11 @@
 #
 # Optional environment: ARCH (default conda), NEMO, OUT, NPROC, KT2REF.
 # ~6 minutes: one makenemo build plus a TWO TIME STEP run.
+# THE ONE WRITE INTO THE ORACLE TREE, named rather than left to be found:
+# `makenemo` appends the new configuration's name to $NEMO/cfgs/work_cfgs.txt
+# and creates $NEMO/cfgs/<CFGNAME>/.  That is makenemo's own bookkeeping, it is
+# how every acquisition on this branch already works, and there is no flag to
+# turn it off.  The guards below are about everything else.
 set -euo pipefail
 
 NEMO=${NEMO:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
@@ -80,6 +85,13 @@ guard() {                       # guard <path being written> [cfgcopy]
 guard "$COPY" cfgcopy
 guard "$OUT"
 case "$CFGNAME" in *..*|*/*) echo "REFUSING: CFGNAME" >&2; exit 2 ;; esac
+if [ -d "$OUT/.git" ] || git -C "$OUT" rev-parse --git-dir >/dev/null 2>&1
+then
+  echo "REFUSED: OUT=$OUT is inside a git checkout; NEMO writes hundreds of" >&2
+  echo "  files there and they are not artifacts this repo should carry." >&2
+  echo "  (OUT=. resolves here, which is how this was found.)" >&2
+  exit 2
+fi
 case "$OUT" in
   /|/tmp|/home|/data) echo "REFUSING: OUT=$OUT is a system directory" >&2
                       exit 2 ;;
@@ -130,6 +142,11 @@ for token in "TRIM(cl_st)" "substate_start_r" "substate_end_r" "_kt', kt, '_s'";
   if ! grep -qF "$token" "$PP"; then
     echo "REFUSING: '$token' is not in the COMPILED source $PP -- the writer" >&2
     echo "  did not survive preprocessing, so the record would be empty." >&2
+    exit 3
+  fi
+  if [ ! -f "$NEMO/cfgs/DINO/MY_SRC/dynspg_ts.F90" ]; then
+    echo "REFUSED: the pristine source is not where this check looks, so" >&2
+    echo "  'absent from the pristine source' would pass vacuously." >&2
     exit 3
   fi
   if grep -qF "$token" "$NEMO/cfgs/DINO/MY_SRC/dynspg_ts.F90"; then

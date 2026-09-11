@@ -341,7 +341,8 @@ def stitch_all(run_dir: str):
     return [stitch(run_dir, n) for n in steps]
 
 
-def nemo_self_calibration(subs, twet, uwet, vwet, tab, plant=False):
+def nemo_self_calibration(subs, twet, uwet, vwet, tab, plant=False,
+                          land_ref=None):
     """Rebuild NEMO's substep n+1 operands from NEMO's substep n, in NEMO's
     own numbers.  legoESM does not appear in this section at all.
 
@@ -356,17 +357,37 @@ def nemo_self_calibration(subs, twet, uwet, vwet, tab, plant=False):
       ``sshbb_e(n) = sshn_e(n-2)``, both zero before they exist
       (:464-467 under ``ll_init``).
 
-    WHY THIS IS THE CALIBRATION AND NOT A FORMALITY (Rule 3).  It is the only
-    check in this gate that can fail because the READER is wrong: a tile
-    placed at the wrong offset, a header field read in the wrong order, a
-    substep mis-numbered, or the two ``zsshp2_e`` assignments confused
-    (:574 writes the AB3 mid-step eta, :664 OVERWRITES it with this one, and
-    the dump at :926 sees only the second) all break it.  If it does not read
-    0 cells, nothing below it can be believed.
+    WHAT THESE TWO CAN AND CANNOT SEE (Rule 2, and an independent review
+    made this correction).  Both are POINTWISE: ``ts_bck_interp`` combines
+    four values at one ``(i,j)`` and the swap is a copy.  Both sides come
+    from the same stitched arrays, so both identities are invariant under any
+    permutation of cells -- **a systematic mis-stitch cancels exactly**.  They
+    calibrate the header parsing, the substep ordering, the coefficient rows
+    and the fact that ``:664`` OVERWRITES ``:574`` (the dump at ``:926`` sees
+    only the second).  They do NOT calibrate tile PLACEMENT.
+
+    C3 below is the placement check, and it is a different kind of statement:
+    ``ssha_e`` is multiplied by ``ssmask`` (``:627``), so it is exactly zero
+    on land.  A tile placed at the wrong offset moves the land pattern, which
+    no pointwise identity can notice and this one cannot miss.
     """
     n = len(subs)
+    # AN EMPTY MASK IS NOT AGREEMENT.  Row.score already refuses n=0; these
+    # two loops did not, so all-False masks made every identity vacuously
+    # true and the calibration reported "reproduces NEMO's own statements
+    # exactly" on a record that violated both.  Found by an independent
+    # review.
+    if n == 0 or not (twet.any() and uwet.any() and vwet.any()):
+        print(f"  CALIBRATION REFUSED: masks select {int(twet.sum())}/"
+              f"{int(uwet.sum())}/{int(vwet.sum())} cells over {n} substeps; "
+              "an identity checked on no cells is not an identity")
+        tab.unmeasured("CALIBRATION (NEMO from NEMO)",
+                       "a mask that selects some cells and a record with "
+                       "some substeps")
+        tab.fail = True
+        return False
     swap_bad = bck_bad = 0
-    _planted = False
+    _planted = _swap_planted = False
     swap_first = bck_first = None
     swap_max = bck_max = 0.0
     for i in range(n):
@@ -399,12 +420,20 @@ def nemo_self_calibration(subs, twet, uwet, vwet, tab, plant=False):
             for k_exit, k_entry, m in (("ssha_e", "sshn_e", twet),
                                        ("ua_e", "un_e", uwet),
                                        ("va_e", "vn_e", vwet)):
-                d = subs[i][k_exit][m] != subs[i + 1][k_entry][m]
+                _exit = subs[i][k_exit]
+                if plant and not _swap_planted and k_exit == "ua_e":
+                    _nzs = np.argwhere(m & (_exit != 0.0))
+                    if _nzs.size:
+                        _swap_planted = True
+                        _exit = _exit.copy()
+                        _exit[_nzs[0][0], _nzs[0][1]] = np.nextafter(
+                            _exit[_nzs[0][0], _nzs[0][1]], np.inf)
+                d = _exit[m] != subs[i + 1][k_entry][m]
                 if d.any():
                     swap_bad += int(d.sum())
                     swap_first = swap_first if swap_first is not None else i + 1
                     swap_max = max(swap_max, float(np.abs(
-                        (subs[i][k_exit] - subs[i + 1][k_entry])[m]).max()))
+                        (_exit - subs[i + 1][k_entry])[m]).max()))
     print(f"  C1 swap identity        exit(n) == entry(n+1) over {n - 1} "
           f"joins x 3 fields: {swap_bad} cells unequal"
           + (f", first at substep {swap_first}, max|d| {swap_max:.3e}"
@@ -420,9 +449,35 @@ def nemo_self_calibration(subs, twet, uwet, vwet, tab, plant=False):
             "every legoESM row below it is uninterpretable")
         tab.fail = True
         return False
-    print("  -> the reader reproduces NEMO's own two statements exactly, so "
-          "the tile placement, the header parsing and the substep ordering "
-          "are not what any residual below is made of")
+    # C3 -- PLACEMENT.  ssha_e carries ssmask (:627), so its zero set is the
+    # land mask.  Compared against the stitched mesh_mask that the R0 rungs
+    # already use, on the last substep (by which point ssha_e is nonzero
+    # everywhere wet; at substep 1 from rest it is identically zero and the
+    # check would be vacuous, which is why the substep is chosen and not
+    # defaulted).
+    land_bad = None
+    if land_ref is not None:
+        wetpat = np.zeros_like(land_ref, dtype=bool)
+        for i in range(n):
+            wetpat |= subs[i]["ssha_e"] != 0.0
+        land_bad = int((wetpat != land_ref).sum())
+        print(f"  C3 placement            the zero set of ssha_e (ssmask, "
+              f":627) against the stitched mesh_mask: {land_bad} cells "
+              "disagree")
+        if land_bad:
+            tab.unmeasured(
+                "CALIBRATION (NEMO from NEMO)",
+                "a reader whose tiles land where the mesh says they do; the "
+                "land pattern of ssha_e does not match tmask, so the stitch "
+                "is misplaced and nothing below can be read")
+            tab.fail = True
+            return False
+    else:
+        print("  C3 placement            UNMEASURED: no mesh mask was passed, "
+              "so a systematic mis-stitch would cancel in C1 and C2 and "
+              "nothing here would see it")
+    print("  -> the reader reproduces NEMO's own two statements exactly and "
+          "its tiles land where the mesh says they do")
     return True
 
 
@@ -534,27 +589,53 @@ def substep_ladder(subs, tr, n_loop, twet, uwet, vwet, plant=False):
     claim is only made when the entry rows at that substep are in fact 0.
     """
     masks = {"t": twet, "u": uwet, "v": vwet}
+    if plant:
+        # Pass 1 with no plant, to find a row that is AT BAR.  Planting into
+        # a row that already reads DEBT proves nothing about the gate, which
+        # this function's own docstring claimed and did not enforce.
+        _per0, _, _, _ = substep_ladder(subs, tr, n_loop, twet, uwet,
+                                        vwet, plant=False)
+        plant = next((((i + 1), k) for i in range(len(_per0))
+                      for k, _, _ in _ROWS if _per0[i][k][0] == 0), None)
+        if plant is None:
+            raise SystemExit(
+                "--plant found no row at 0 cells to plant into; every row is "
+                "already DEBT, so a plant here would prove nothing")
+        print(f"  PLANT: 1 ulp into substep {plant[0]} row {plant[1]!r}, "
+              "which is AT BAR without it")
     n = min(len(subs), int(n_loop))
+    # A COUNT MISMATCH IS A FINDING, NOT A SLICE.  If legoESM runs a different
+    # number of substeps than NEMO, min() would quietly score the overlap and
+    # the table would look complete -- which is exactly the defect this round
+    # found at kt=2 (91 against NEMO's 68).  Say it out loud instead.
+    mismatch = int(n_loop) != len(subs)
+    if mismatch:
+        print(f"  COUNT MISMATCH: NEMO's record has {len(subs)} substeps and "
+              f"legoESM runs {int(n_loop)}. Only the first {n} can be scored, "
+              "and the two loops are NOT the same loop -- this is a FAILING "
+              "row on its own, not a slice.")
+    if n == 0:
+        raise SystemExit("the record and the loop do not overlap at all")
     first = None
     per = []
     for i in range(n):
         row = {}
         for slot, nemo_name, mk in _ROWS:
+            m = masks[mk]
             a = np.asarray(tr[slot][i])
             a = a[:, 1:] if mk == "u" else (a[1:, :] if mk == "v" else a)
-            if plant and i == 0 and slot == "eta_exit":
+            if plant and (i + 1, slot) == plant:
                 a = a.copy()
-                q = np.argwhere(twet)[0]
+                q = np.argwhere(m)[0]
                 a[q[0], q[1]] = np.nextafter(a[q[0], q[1]], np.inf)
             o = subs[i][nemo_name]
-            m = masks[mk]
             d = a[m] - o[m]
             bad = int((~(a[m] == o[m])).sum())     # non-finite counts UNEQUAL
             row[slot] = (bad, float(np.abs(d).max()) if d.size else 0.0)
             if bad and first is None:
                 first = (i + 1, slot)
         per.append(row)
-    return per, first, n
+    return per, first, n, mismatch
 
 
 def stitch_frozen_forcing(run_dir: str, hdrs):
@@ -770,8 +851,8 @@ def main() -> int:
             return original(*a, **k)
         ba = sig.bind(*a, **k)
         ba.apply_defaults()
-        for nm in ("dt_s", "n_substeps", "F_slow_eta", "F_slow_u", "F_slow_v",
-                   "add_barotropic_coriolis"):
+        for nm in ("dt_s", "n_substeps", "substep_scale", "F_slow_eta",
+                   "F_slow_u", "F_slow_v", "add_barotropic_coriolis"):
             if nm in ba.arguments:
                 cap[nm] = ba.arguments[nm]
         k2 = dict(k)
@@ -796,14 +877,19 @@ def main() -> int:
 
     from legoesm.ocean.dynamics.barotropic_latlon_cgrid import _compute_weights
     n_sub = int(cap["n_substeps"])
+    # substep_scale COMES FROM THE CALL.  This used to read
+    # ``mc.barotropic.barotropic_substep_scale`` -- a field that exists
+    # nowhere in the package -- so the getattr silently returned 1.  It is
+    # right at kt=1 only because the Euler path really does pass 1; the
+    # leap-frog path passes 2 and the same line in the kt=2 gate produced a
+    # window the model never ran.  An independent review caught it there.
+    _scale = int(cap.get("substep_scale", 1))
     w_filter, w_total, w_transport, n_loop = _compute_weights(
-        mc, n_sub, np.float64,
-        substep_scale=getattr(mc.barotropic, "barotropic_substep_scale", 1)
-        if hasattr(mc.barotropic, "barotropic_substep_scale") else 1)
+        mc, n_sub, np.float64, substep_scale=_scale)
     w_filter = np.asarray(w_filter, dtype=np.float64)
     w_total = float(np.asarray(w_total))
     print(f"  loop: dt_s={float(np.asarray(cap['dt_s'])):.9f} s  "
-          f"n_substeps={n_sub}  n_loop={n_loop}  "
+          f"n_substeps={n_sub}  substep_scale={_scale}  n_loop={n_loop}  "
           f"sum(w_filter)={w_filter.sum():.17g}  w_total={w_total:.17g}")
     print(f"  NEMO: rDt_e={RN_DT / NN_E:.9f} s  nn_e={NN_E}  icycle={ICYCLE}")
 
@@ -978,7 +1064,8 @@ def main() -> int:
               f"ranks onto {subs[0]['sshn_e'].shape} (haloless global)")
         print("  CALIBRATION -- NEMO rebuilt from NEMO, legoESM absent:")
         ok = nemo_self_calibration(subs, twet, uwet, vwet, tab,
-                                   plant=args.plant_reader)
+                                   plant=args.plant_reader,
+                                   land_ref=twet)
         if ok:
             fro = stitch_frozen_forcing(args.run_dir, hdrs)
             if fro:
@@ -1002,12 +1089,29 @@ def main() -> int:
                 tab.unmeasured("R1 frozen forcing zu_frc/zv_frc",
                                "the rank-tagged spg_dump_z[uv]_frc_r*.bin "
                                "streams; this record has none")
-            per, first, n_scored = substep_ladder(
+            per, first, n_scored, _mismatch = substep_ladder(
                 subs, tr, n_loop, twet, uwet, vwet, plant=args.plant)
             _render_substeps(per, first, n_scored)
-            if first is None:
-                tab.score(f"R3 per-substep ladder (x{n_scored})",
-                          np.zeros(1), np.zeros(1), np.ones(1, bool))
+            if _mismatch:
+                tab.rows.append(dict(
+                    name=f"R3 substep COUNT {int(n_loop)} vs {len(subs)}",
+                    n=len(subs), cells=abs(int(n_loop) - len(subs)),
+                    maxabs=float(abs(int(n_loop) - len(subs))), rms=None,
+                    floor=None, status="DEBT"))
+                tab.fail = True
+            elif first is None:
+                # NOT a zero compared to itself.  The row carries the real
+                # comparison count and the worst residual over every substep
+                # and every scored slot, so AT BAR here is a statement about
+                # the data.  The first version was
+                # score(zeros(1), zeros(1), ones(1)) -- tautological, and an
+                # independent review said so.
+                _worst = max(per[i][k][1] for i in range(n_scored)
+                             for k, _, _ in _ROWS)
+                tab.rows.append(dict(
+                    name=f"R3 per-substep ladder (x{n_scored})",
+                    n=n_scored * len(_ROWS), cells=0, maxabs=_worst,
+                    rms=None, floor=None, status="AT BAR"))
             else:
                 _sub, _slot = first
                 entry_clean = all(
@@ -1022,11 +1126,33 @@ def main() -> int:
                 print()
                 print(f"  FIRST NON-BIT: substep {_sub}, row {_slot!r}")
                 print(f"    NEMO statement: {_ROW_STATEMENT[_slot]}")
-                print(f"    entry rows at substep {_sub} are 0 cells: "
+                # The headline row is the first in STATEMENT ORDER, which is
+                # not the largest: at substep 1 u_exit breaks by 7.6e-21 and
+                # v_exit by 9.9e-09.  Reporting only the first would make the
+                # break look thirteen orders smaller than it is, so every row
+                # that breaks at that substep is listed, largest first.
+                _also = sorted(
+                    ((per[_sub - 1][k][1], k) for k, _, _ in _ROWS
+                     if per[_sub - 1][k][0]), reverse=True)
+                print(f"    every row that breaks at substep {_sub}, "
+                      "largest first:")
+                for _d, _k in _also:
+                    print(f"      {_k:11s} {per[_sub - 1][_k][0]:6d} cells  "
+                          f"max|d| {_d:.4e}   {_ROW_STATEMENT[_k]}")
+                print("    the entry rows are the STATE operands only; the "
+                      "frozen forcing (R1) and the face-column depths (R0) "
+                      "enter the same statement and carry their own rows "
+                      "above -- read the three together")
+                print(f"    STATE operands at substep {_sub} are 0 cells: "
                       f"{entry_clean}"
                       + ("  -> this substep's operator ran on NEMO's OWN "
                          "operands, so the break is the operator's, not "
-                         "inherited drift"
+                         "inherited drift.  NOT the same as exonerating the "
+                         "loop: from rest at jn=1 the Coriolis, surface-"
+                         "pressure-gradient and bottom-stress terms are "
+                         "multiplied by zero, so they are UNTESTED here, and "
+                         "once jn=1 breaks no later substep is a given-"
+                         "inputs comparison either"
                          if entry_clean else
                          "  -> the operands were ALREADY different entering "
                          "this substep, so this row is inherited; read the "

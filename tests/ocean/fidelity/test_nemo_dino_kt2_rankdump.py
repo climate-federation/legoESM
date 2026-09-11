@@ -53,6 +53,33 @@ def _acquisition_scripts():
     return sorted(glob.glob(os.path.join(_D1226, "nemo_dino_*", "run.sh")))
 
 
+def _code_only(path):
+    """The script with comments stripped -- so a COMMENT can never satisfy a
+    check, and so a comment DESCRIBING a removed defect never trips one."""
+    return "".join(ln.split("#", 1)[0] for ln in open(path))
+
+
+#: Every way this repo has actually seen a directory copied, plus the ones a
+#: reviewer produced that the first version of the pattern missed:
+#: ``cfgs/DINO/.``, ``cfgs/DINO/``, an rsync, a variable holding the path, and
+#: a tar pipe.  GROW-ONLY.
+_COPY_PATTERNS = (
+    # cp/rsync naming the path, with or without a trailing / or /.
+    r"(?:cp|rsync)\s+[^\n|;]*cfgs/DINO/?\.?(?:\s|\"|\'|$)",
+    # tar -C .../cfgs ... DINO
+    r"tar\s+[^\n|;]*cfgs\b[^\n|;]*\bDINO\b",
+    # a variable that holds the oracle config, then copied
+    r"[A-Za-z_][A-Za-z0-9_]*=\S*cfgs/DINO/?\.?\s",
+)
+
+
+def _wholesale_copy_hits(body):
+    out = []
+    for pat in _COPY_PATTERNS:
+        out += re.findall(pat, body)
+    return out
+
+
 def test_there_are_acquisition_scripts_to_check():
     # A glob that matches nothing would make every test below vacuous.
     assert len(_acquisition_scripts()) >= 3
@@ -61,8 +88,7 @@ def test_there_are_acquisition_scripts_to_check():
 @pytest.mark.parametrize("path", _acquisition_scripts(),
                          ids=lambda p: os.path.basename(os.path.dirname(p)))
 def test_no_acquisition_script_copies_the_oracle_config_wholesale(path):
-    body = "".join(ln.split("#", 1)[0] for ln in open(path))
-    bad = re.findall(r"(?:cp|rsync)\s+[^\n|;]*cfgs/DINO(?:\s|\"|$)", body)
+    bad = _wholesale_copy_hits(_code_only(path))
     assert not bad, (
         f"{path} copies cfgs/DINO wholesale ({bad}); that is 60 GB of RUN_* "
         "output and it fills the home quota. Build the copy with "
@@ -72,7 +98,7 @@ def test_no_acquisition_script_copies_the_oracle_config_wholesale(path):
 @pytest.mark.parametrize("path", _acquisition_scripts(),
                          ids=lambda p: os.path.basename(os.path.dirname(p)))
 def test_every_acquisition_script_builds_a_makenemo_skeleton(path):
-    body = open(path).read()
+    body = _code_only(path)
     assert "./makenemo -r DINO -n" in body, (
         f"{path} does not build its config copy with makenemo -r DINO")
 
@@ -90,18 +116,30 @@ _RUNTIME_REFUSAL_REQUIRED = ("nemo_dino_zdf_matrix", "nemo_dino_kt2_rankdump")
 @pytest.mark.parametrize("name", _RUNTIME_REFUSAL_REQUIRED)
 def test_the_fixed_scripts_refuse_a_copy_containing_a_run_directory(name):
     path = os.path.join(_D1226, name, "run.sh")
-    body = open(path).read()
+    body = _code_only(path)
     assert "-name 'RUN_*'" in body and "REFUS" in body, (
         f"{path} lost its runtime refusal for a copy that contains a RUN_* "
         "directory; the copy rule would then live only in the comment")
 
 
-def test_the_wholesale_copy_detector_can_fail(tmp_path):
-    # Synthetic violation: the exact line that was in nemo_dino_zdf_matrix.
+#: The removed line, plus every disguise an independent review produced for
+#: it.  The first version of the detector caught only the first one.
+_DISGUISES = (
+    'cp -a "$NEMO/cfgs/DINO" "$COPY"',
+    'cp -a "$NEMO/cfgs/DINO/." "$COPY"',
+    'cp -a "$NEMO/cfgs/DINO/" "$COPY"',
+    'rsync -a "$NEMO/cfgs/DINO/" "$COPY/"',
+    'SRC=$NEMO/cfgs/DINO ; cp -a "$SRC" "$COPY"',
+    'tar -C "$NEMO/cfgs" -cf - DINO | tar -C "$COPY" -xf -',
+)
+
+
+@pytest.mark.parametrize("line", _DISGUISES)
+def test_the_wholesale_copy_detector_can_fail(line, tmp_path):
     p = tmp_path / "run.sh"
-    p.write_text('#!/bin/bash\ncp -a "$NEMO/cfgs/DINO" "$COPY"\n')
-    body = "".join(ln.split("#", 1)[0] for ln in open(p))
-    assert re.findall(r"(?:cp|rsync)\s+[^\n|;]*cfgs/DINO(?:\s|\"|$)", body)
+    p.write_text("#!/bin/bash\n" + line + "\n")
+    assert _wholesale_copy_hits(_code_only(p)), (
+        f"the detector misses {line!r}")
 
 
 def test_a_comment_mentioning_the_old_copy_is_not_a_violation(tmp_path):
@@ -109,8 +147,7 @@ def test_a_comment_mentioning_the_old_copy_is_not_a_violation(tmp_path):
     p = tmp_path / "run.sh"
     p.write_text('#!/bin/bash\n# used to be cp -a $NEMO/cfgs/DINO $COPY\n'
                  './makenemo -r DINO -n "$CFGNAME" -m "$ARCH" -j 0\n')
-    body = "".join(ln.split("#", 1)[0] for ln in open(p))
-    assert not re.findall(r"(?:cp|rsync)\s+[^\n|;]*cfgs/DINO(?:\s|\"|$)", body)
+    assert not _wholesale_copy_hits(_code_only(p))
 
 
 # ---------------------------------------------------------------- rules 2, 3
@@ -139,6 +176,16 @@ def test_kt2_patch_tags_every_stream_by_rank_and_step(tmp_path):
         assert out.count("WRITE(93") and f"{nm}(:,:)" in out
     # WRITE-only
     assert "ACTION='READ'" not in out and "ACTION='READWRITE'" not in out
+    # THE END DUMP MUST BE OUTSIDE THE SUBSTEP LOOP.  The first version
+    # anchored on the comment BEFORE `END DO` and inserted ahead of it, which
+    # put it inside: 45 opens per rank per step, and only the last write
+    # happening to hold the right state.
+    lines = out.splitlines()
+    i_end = next(i for i, ln in enumerate(lines)
+                 if ln.startswith("      END DO") and "end loop" in ln)
+    i_dump = next(i for i, ln in enumerate(lines) if "substate_end_r" in ln)
+    assert i_dump > i_end, (
+        "the end-of-loop sub-state dump is INSIDE the substep loop")
 
 
 @_needs_oracle_src
@@ -200,24 +247,31 @@ def test_ts_wgt_port_would_notice_a_changed_nn_e():
         g.nemo_ts_wgt(ll_fw=True, nn_bt_flt=3)
 
 
-def _fake_record(n=4, shape=(3, 5), rng=None):
-    """A synthetic NEMO substep record that satisfies NEMO's own statements."""
+def _fake_record(n=4, shape=(3, 5), rng=None, land=None):
+    """A synthetic NEMO substep record that satisfies NEMO's own statements.
+
+    ``land`` is a wet mask; every field is zeroed where it is False, the way
+    NEMO's ``ssmask`` multiply does (dynspg_ts.f90:627).  The identities are
+    linear, so zeroing every operand consistently keeps both of them exact --
+    which is what lets the placement test break C3 alone.
+    """
     rng = rng or np.random.default_rng(0)
     lad = _load(os.path.join(
         _D1226, "spg_kt1_barotropic_ladder.py"), "spg_lad")
+    msk = np.ones(shape) if land is None else land.astype(float)
     subs = []
     sshn = np.zeros(shape)
     un = np.zeros(shape)
     vn = np.zeros(shape)
     hist = [np.zeros(shape), np.zeros(shape)]     # sshb_e, sshbb_e
     for i in range(n):
-        ssha = rng.normal(size=shape)
-        ua = rng.normal(size=shape)
-        va = rng.normal(size=shape)
+        ssha = rng.normal(size=shape) * msk
+        ua = rng.normal(size=shape) * msk
+        va = rng.normal(size=shape) * msk
         za = lad._BCK.get(i + 1, lad._BCK_AB3AM4)
         zp2 = za[0] * ssha + za[1] * sshn + za[2] * hist[0] + za[3] * hist[1]
         subs.append({"sshn_e": sshn, "ssha_e": ssha, "zsshp2_e": zp2,
-                  "un_e": un, "vn_e": vn, "ua_e": ua, "va_e": va})
+                     "un_e": un, "vn_e": vn, "ua_e": ua, "va_e": va})
         hist = [sshn, hist[0]]
         sshn, un, vn = ssha, ua, va
     return lad, subs
@@ -261,6 +315,94 @@ def test_ladder_substep_rows_count_a_nan_as_unequal():
         tr["eta_exit"], "at") else tr["eta_exit"]
     tr["eta_exit"][0, 0, 0] = np.nan
     m = np.ones((3, 5), bool)
-    per, first, n = lad.substep_ladder(subs, tr, 1, m, m, m)
+    per, first, n, _ = lad.substep_ladder(subs, tr, 1, m, m, m)
     assert per[0]["eta_exit"][0] == 1
     assert first == (1, "eta_exit")
+
+
+def test_calibration_refuses_an_empty_mask():
+    # An identity checked on no cells is not an identity.  Before this guard,
+    # all-False masks made a record that violates BOTH statements report
+    # "reproduces NEMO's own statements exactly".
+    lad, subs = _fake_record()
+    subs[2] = dict(subs[2], zsshp2_e=subs[2]["zsshp2_e"] + 1.0,
+                   sshn_e=subs[2]["sshn_e"] + 1.0)
+    empty = np.zeros((3, 5), bool)
+    tab = lad.Row()
+    assert lad.nemo_self_calibration(subs, empty, empty, empty, tab) is False
+    assert tab.fail
+
+
+def test_calibration_placement_check_catches_a_shifted_stitch():
+    # C1 and C2 are POINTWISE, so a permutation of cells cancels in both --
+    # an independent review's correction.  C3 is the check that can see it:
+    # ssha_e carries ssmask (dynspg_ts.f90:627), so its zero set IS the land
+    # mask, and a misplaced tile moves it.
+    m = np.ones((3, 5), bool)
+    land = np.ones((3, 5), bool)
+    land[0, 0] = False
+    lad, subs = _fake_record(land=land)
+    tab = lad.Row()
+    assert lad.nemo_self_calibration(subs, m, m, m, tab,
+                                     land_ref=land) is True
+    assert not tab.fail
+    # Same record built on a SHIFTED land mask: both pointwise identities
+    # still hold exactly, and only C3 can tell.
+    shifted = np.ones((3, 5), bool)
+    shifted[0, 1] = False
+    lad2, subs2 = _fake_record(land=shifted)
+    tab_ok = lad2.Row()
+    assert lad2.nemo_self_calibration(subs2, m, m, m, tab_ok) is True
+    tab2 = lad2.Row()
+    assert lad2.nemo_self_calibration(subs2, m, m, m, tab2,
+                                      land_ref=land) is False
+    assert tab2.fail
+
+
+def _trace_for(subs, shape=(3, 5)):
+    """A legoESM trace that agrees with `subs` everywhere."""
+    nl, nc = shape
+    out = {}
+    for slot, nemo_name, mk in [(a, b, c) for a, b, c in
+                                _load(os.path.join(
+                                    _D1226,
+                                    "spg_kt1_barotropic_ladder.py"),
+                                    "spg_lad2")._ROWS]:
+        stack = []
+        for i in range(len(subs)):
+            o = subs[i][nemo_name]
+            if mk == "u":
+                a = np.zeros((nl, nc + 1))
+                a[:, 1:] = o
+            elif mk == "v":
+                a = np.zeros((nl + 1, nc))
+                a[1:, :] = o
+            else:
+                a = o.copy()
+            stack.append(a)
+        out[slot] = np.stack(stack)
+    return out
+
+
+def test_substep_ladder_reports_a_count_mismatch_instead_of_slicing():
+    lad, subs = _fake_record()
+    tr = _trace_for(subs)
+    m = np.ones((3, 5), bool)
+    per, first, n, mismatch = lad.substep_ladder(subs, tr, len(subs),
+                                                 m, m, m)
+    assert (first, n, mismatch) == (None, len(subs), False)
+    # legoESM running fewer substeps than the record must be a FINDING
+    per, first, n, mismatch = lad.substep_ladder(subs, tr, 2, m, m, m)
+    assert mismatch is True and n == 2
+
+
+def test_substep_ladder_plants_into_a_row_that_is_at_bar():
+    # A plant on a row that already reads DEBT proves nothing.  The plant
+    # now picks its target from an unplanted pass.
+    lad, subs = _fake_record()
+    tr = _trace_for(subs)
+    m = np.ones((3, 5), bool)
+    per, first, n, _ = lad.substep_ladder(subs, tr, len(subs), m, m, m,
+                                          plant=True)
+    assert first is not None, "the plant did not make any row unequal"
+    assert per[first[0] - 1][first[1]][0] == 1

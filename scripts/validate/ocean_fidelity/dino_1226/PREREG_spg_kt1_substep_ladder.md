@@ -179,7 +179,33 @@ given NEMO's operands; what it is handed differs. Whether the kt=2 gap has a
 second, independent owner inside the loop is a separate question, and round 42
 found one that is NOT a history: see below.
 
-### The kt=2 window (measured this round, in `kt2_leapfrog_gate.py`)
+### The kt=2 window — RETRACTED WITHIN THE ROUND (Rule 11)
+
+**The table below was wrong and the finding it carried is withdrawn.** The
+numbers as first published said legoESM ran 91 barotropic substeps at kt=2
+against NEMO's 68, and called that "this round's one open decision". It was a
+bug in the INSTRUMENT, not in the model: `kt2_leapfrog_gate.py` re-derived the
+loop with `_compute_weights(..., substep_scale=<default 1>)`, having read
+`substep_scale` from `mc.barotropic.barotropic_substep_scale`, a field that
+exists nowhere in the package, so the getattr silently returned 1. The
+leap-frog path passes **2** (`ocean_model_latlon_cgrid.py:10474`), and the
+captured `n_substeps = 46` was itself the tell — the forward-Euler path passes
+23. Both independent reviews found it, and the measurement with the real
+value is:
+
+| | substeps | primary boxcar nonzero on |
+|---|---|---|
+| NEMO kt=2 | 68 | 24..68 |
+| legoESM kt=2 | **68** | **24..68** |
+
+**AT BAR.** The same defective line was in this gate
+(`spg_kt1_barotropic_ladder.py`), where it was right at kt=1 only because the
+Euler path really does pass 1; both now take `substep_scale` from the CALL.
+
+The correct reading of NEMO's own statements below still stands, and it is
+worth keeping because it is what the kt=2 record's prediction P1 tests:
+
+### The kt=2 window as NEMO builds it (the reading, which was never in doubt)
 
 `ll_fw_start` is TRUE only at `kt == nit000` with the Euler start
 (`dynspg_ts.f90:228-232`); at `kt == nit000 + 1` with `ln_bt_fw = .FALSE.` NEMO
@@ -191,17 +217,17 @@ RESETS it and calls `ts_wgt` again (`:245-250`), moving the boxcar centre from
 | NEMO kt=1 | 45 | 1..45 | 5283 s |
 | NEMO kt=2 | **68** | **24..68** | 7983 s |
 | legoESM kt=1 | 45 | 1..45 | 5283 s |
-| legoESM kt=2 | **91** | 1..91 | 10683 s |
+| legoESM kt=2 | 68 | 24..68 | 7983 s |
 
-Both centre the mean at substep 46 = `2*rn_Dt`, so the mean is at the right
-TIME; the window is twice as WIDE and runs 23 substeps past NEMO's end.
-legoESM doubles `n_substeps` 23 -> 46 with the timestep; NEMO holds `nn_e` at
-23 and moves the centre. `rDt_e` agrees (117.391 s) because
-`2*2700/46 == 2700/23` — the timestep is right by arithmetic accident while
-the COUNT and the WINDOW are not.
+legoESM doubles `n_substeps` 23 -> 46 with the timestep and passes
+`substep_scale = 2`, which halves the half-width; NEMO holds `nn_e` at 23 and
+moves the centre. Different bookkeeping, same window.
 
-NOT LANDED: the fix is a numerics change to the shared barotropic module that
-the GYRE RK3 card also reaches, and it is this round's one open decision.
+STILL UNCALIBRATED, and named: the `ll_fw = .FALSE.` branch of the port has no
+number in any record to check it against — `ll_spg_dump` is `kt == nit000`
+only, so nothing states NEMO's kt=2 `icycle` out loud. Prediction P1 of
+`nemo_dino_kt2_rankdump/run.sh` is exactly that measurement. Until it runs, a
+port wrong in the same way legoESM is wrong would read AT BAR.
 
 ### Decision 33 (carrying NEMO's barotropic histories in NEMO's form)
 

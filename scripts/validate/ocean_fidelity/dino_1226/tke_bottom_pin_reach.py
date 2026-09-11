@@ -62,20 +62,33 @@ def main() -> int:
               "instead). The defect is DEAD here.")
         return 0
     bl = np.asarray(bl)
-    # N is the number of T levels the TKE solve carries.
-    N = int(np.asarray(z.dz_ref).shape[-1])
+    # N IS THE SOLVER'S N, not the coordinate's.  The clip is
+    # ``clip(bottom_level, 0, N-1)`` with ``N = e_old.shape[-1]``, and the TKE
+    # state carries one fewer level than dz_ref -- so reading N off dz_ref
+    # overstates the headroom by one and the census answers the wrong
+    # question.  An independent review caught that; the number below did not
+    # move (it is 0 either way) but the margin did, from two levels to one.
+    nlev = int(np.asarray(z.dz_ref).shape[-1])
+    N = nlev - 1
+    print(f"coordinate levels    {nlev}  (dz_ref)")
+    print(f"TKE solve levels N   {N}  (e_old.shape[-1]; the clip is "
+          f"clip(bottom_level, 0, N-1) = {N - 1})")
     wet = bl > 0
-    at_n = (bl == N) & wet
-    print(f"\nT levels carried N   {N}")
+    binds = (bl > N - 1) & wet            # the clip moves the index iff bl > N-1
     print(f"wet columns          {int(wet.sum())} of {bl.size}")
-    print(f"bottom_level == N    {int(at_n.sum())} columns "
-          f"({100.0 * at_n.sum() / max(1, wet.sum()):.2f}% of wet)")
-    print(f"bottom_level  > N    {int(((bl > N) & wet).sum())} columns")
     print(f"max bottom_level     {int(bl.max())}")
-    print("\nREACH: the clip binds on the 'bottom_level == N' count above. "
-          "0 means the defect is dead on this card and the correction would "
-          "change nothing; anything else is the number of columns whose TKE "
-          "bottom row is pinned one level higher than NEMO pins it.")
+    print(f"bottom_level == N-1  {int(((bl == N - 1) & wet).sum())} columns "
+          "(on the last row the clip allows, but NOT clipped)")
+    print(f"THE CLIP BINDS ON    {int(binds.sum())} columns "
+          f"({100.0 * binds.sum() / max(1, wet.sum()):.2f}% of wet)")
+    print("\nREACH: 0 means the defect is dead on this card and the "
+          "correction would change nothing; anything else is the number of "
+          "columns whose TKE bottom row is pinned one level higher than NEMO "
+          "pins it.")
+    print("STRUCTURAL, and stronger than this census: NEMO caps mbathy at "
+          "jpkm1, and bottom_level = mbathy - 1 <= N - 1, so the clip cannot "
+          "bind on ANY card whose bathymetry came from a NEMO mesh_mask -- "
+          "not just this one.  The census is what makes that checkable here.")
     return 0
 
 

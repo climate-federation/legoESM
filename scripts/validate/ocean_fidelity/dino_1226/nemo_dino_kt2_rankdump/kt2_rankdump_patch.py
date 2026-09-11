@@ -73,7 +73,12 @@ SUBSTATE = ("sshb_e", "sshbb_e", "ub_e", "ubb_e", "vb_e", "vbb_e")
 
 
 def _substate_block(tag: str, unit: int) -> str:
-    """One self-describing WRITE of the six sub-state arrays."""
+    """One self-describing WRITE of the six sub-state arrays.
+
+    The header's substep slot is written 0: neither dump belongs to a substep
+    (one is before the loop, one after it), and 0 is not a legal ``jn``, so a
+    reader cannot mistake either for a substep tile.
+    """
     body = "\n".join(
         f"            WRITE({unit}) {nm}(:,:)" for nm in SUBSTATE)
     hdr = _kt1_patch_module()._HEADER.replace(", jn,", ", 0,")
@@ -196,10 +201,16 @@ def patch(path: str) -> None:
     src = src.replace(init_anchor,
                       init_anchor + _substate_block("start", _unit(src, 9301)), 1)
 
-    loop_end = ("         !                                                 "
-                "! ==================== !\n"
-                "      END DO                                               "
-                "!        end loop      !")
+    # The anchor must include the line AFTER `END DO`, and the dump must go
+    # after the whole thing.  The first version anchored on the comment
+    # immediately BEFORE `END DO` and inserted ahead of it, which put the
+    # "end of loop" dump INSIDE the loop: 45 opens per rank per step, the
+    # docstring's claim false, and only the last write happening to hold the
+    # right state.  An independent review caught it in a dry run.
+    loop_end = ("      END DO                                               "
+                "!        end loop      !\n"
+                "      !                                                    "
+                "! ==================== !")
     if loop_end not in src:
         # fall back to the swap block's owner: the statement AFTER the last
         # swap is the loop's END DO, and anchoring on a comment that may not
@@ -210,7 +221,7 @@ def patch(path: str) -> None:
             "dynspg_ts.F90 after the ubb_e/ub_e/un_e swap and update this "
             "anchor.")
     src = src.replace(loop_end,
-                      _substate_block("end", _unit(src, 9302)) + loop_end, 1)
+                      loop_end + _substate_block("end", _unit(src, 9302)), 1)
 
     # 5. rank+kt tag every remaining once-per-step debug filename
     src, n_files = re.subn(r"FILE='([A-Za-z0-9_]+)\.bin'",

@@ -335,7 +335,7 @@ def main() -> int:
         if not _baro_cap:
             _ba = _baro_sig.bind(*aa, **kk)
             _ba.apply_defaults()
-            for _nm in ("dt_s", "n_substeps"):
+            for _nm in ("dt_s", "n_substeps", "substep_scale"):
                 if _nm in _ba.arguments:
                     _baro_cap[_nm] = float(_np.asarray(_ba.arguments[_nm]))
         return _baro_orig(*aa, **kk)
@@ -367,14 +367,34 @@ def main() -> int:
     _k2, _w1_2, _ = nemo_ts_wgt(ll_fw=False)
     print(f"\nBAROTROPIC WINDOW  port calibration: ts_wgt(ll_fw=True) gives "
           f"icycle = {_k1}; the kt=1 record states 45 (ocean.output:1265)")
+    print("  NOT CALIBRATED: the ll_fw=FALSE branch, which is the one this "
+          "row scores. No record on this branch states NEMO's kt=2 icycle "
+          "out loud -- the ll_spg_dump guard is kt==nit000 only -- so the "
+          "port's 68 rests on the transcription alone. That is exactly what "
+          "prediction P1 of nemo_dino_kt2_rankdump/run.sh measures, and "
+          "until it does, a port that is wrong in the same way legoESM is "
+          "wrong would read AT BAR here.")
     if _k1 != 45:
         print("  ^^ the port does not reproduce the record's own icycle, so "
               "its kt=2 number cannot be used")
         _k2 = None
     if _baro_cap:
         from legoesm.ocean.dynamics.barotropic_latlon_cgrid import _compute_weights
+        # substep_scale COMES FROM THE CALL, and the first version of this
+        # block took it from `getattr(mc.barotropic,
+        # "barotropic_substep_scale", 1)` -- a field that exists nowhere in
+        # the package, so the getattr silently returned 1 and this gate
+        # reported a 91-substep window the model never ran.  An independent
+        # review caught it.  The leap-frog path passes 2
+        # (ocean_model_latlon_cgrid.py:10474), and the captured
+        # n_substeps = 46 is itself the tell: the forward-Euler path passes
+        # 23.  Rule 10 is not "print a number", it is "print the number the
+        # code will actually use".
+        _scale = int(_baro_cap.get("substep_scale", 1))
+        print(f"  substep_scale (from the call) = {_scale}")
         _wf, _wt, _wtr, _nloop = _compute_weights(
-            mc, int(_baro_cap["n_substeps"]), _np.float64)
+            mc, int(_baro_cap["n_substeps"]), _np.float64,
+            substep_scale=_scale)
         print(f"  legoESM at kt=2: dt_s = {_baro_cap['dt_s']:.9f} s, "
               f"n_substeps = {int(_baro_cap['n_substeps'])}, "
               f"n_loop = {_nloop}")
@@ -387,16 +407,23 @@ def main() -> int:
             print("  NEMO's kt=2 primary boxcar is nonzero on substeps "
                   f"{_first}..{_k2} ({_nz} of {_k2}); at kt=1 it was "
                   "1..45")
-            _baro_bad = 1 if _nloop != _k2 else 0
-            print(f"  barotropic window n_loop (kt=2): "
-                  f"{'AT BAR' if not _baro_bad else 'DEBT'}")
-            if _nloop != _k2:
+            _baro_bad = 0
+            _c2 = next((i + 1 for i, w in enumerate(_w1_2) if w != 0.0), 0)
+            _lz = [i + 1 for i, w in enumerate(_np.asarray(_wf)) if w != 0.0]
+            print(f"  legoESM's primary boxcar is nonzero on substeps "
+                  f"{_lz[0]}..{_lz[-1]} ({len(_lz)} of {_nloop})")
+            if _nloop != _k2 or [_lz[0], _lz[-1]] != [_c2, _k2]:
+                _baro_bad = 1
                 print(f"  DEBT: legoESM integrates the barotropic mode over "
                       f"{_nloop} substeps x {_baro_cap['dt_s']:.4f} s = "
                       f"{_nloop * _baro_cap['dt_s']:.1f} s, NEMO over "
                       f"{_k2} x {RN_DT / NN_E:.4f} s = "
-                      f"{_k2 * RN_DT / NN_E:.1f} s (= 2*rn_Dt = "
-                      f"{2 * RN_DT:.1f} s, the leap-frog's own step)")
+                      f"{_k2 * RN_DT / NN_E:.1f} s. NEMO's window is centred "
+                      f"at 2*nn_e = {2 * NN_E}, i.e. at t + 2*rn_Dt = "
+                      f"{2 * RN_DT:.1f} s, and runs {_k2 - 2 * NN_E} "
+                      "substeps past it.")
+        print("  barotropic window + weights (kt=2): "
+              + ("AT BAR" if not _baro_bad else "DEBT"))
     else:
         print("  UNMEASURED: the barotropic solver was never called -- this "
               "counts as a failing row, because a window that was never "
