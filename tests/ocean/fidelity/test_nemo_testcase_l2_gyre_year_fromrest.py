@@ -220,3 +220,74 @@ def test_preregistered_bounds_are_constants_not_judgement(harness):
     assert harness.P2_FLOOR_GROWTH_MAX == 1.0e3
     assert harness.P3_GAP_MIN_K == 2.8e-3
     assert harness.VERDICT_FACTOR == 2.0
+
+
+# --------------------------------------------------------- the alignment gate --
+DATA_ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_fromrest")
+
+
+def test_frame_mappings_are_reversals_and_none_is_the_identity(harness):
+    """A3's alternatives must actually be alternatives.
+
+    If a "reversal" happened to be a no-op on the array under test, the
+    discrimination would pass vacuously and a flipped frame would score the
+    same as the right one.
+    """
+    mappings = harness._frame_mappings()
+    assert set(mappings) == {"identity", "reverse_j", "reverse_i",
+                             "reverse_both"}
+    field = np.arange(6.0).reshape(3, 2)
+    assert np.array_equal(mappings["identity"](field), field)
+    for name in ("reverse_j", "reverse_i", "reverse_both"):
+        assert not np.array_equal(mappings[name](field), field), name
+    # non-vacuity of the non-vacuity check: on a SYMMETRIC array the
+    # reversals ARE the identity, which is exactly the case the gate's ratio
+    # requirement exists to refuse.
+    symmetric = np.ones((3, 2))
+    assert all(np.array_equal(fn(symmetric), symmetric)
+               for fn in mappings.values())
+
+
+def test_level_for_depth_takes_the_nearest_centre(harness):
+    depths = np.array([5.0, 15.0, 100.0, 1000.0, 4000.0])
+    assert harness._level_for_depth(depths, 100.0) == 2
+    assert harness._level_for_depth(depths, 1000.0) == 3
+    # nearest, not first-over: 90 m is nearer 100 than 15
+    assert harness._level_for_depth(depths, 90.0) == 2
+    # non-vacuity: a different target must give a different level
+    assert harness._level_for_depth(depths, 6.0) == 0
+
+
+def test_alignment_thresholds_are_constants_not_judgement(harness):
+    assert harness.FRAME_COORD_TOL_DEG == 1.0e-4
+    assert harness.FRAME_COORD_RATIO == 1.0e4
+    assert harness.FIGURE_DEPTHS_M == (100.0, 1000.0)
+    # the figure depths are the preregistered band boundaries, not a choice
+    boundaries = {value for _, lo, hi in harness.DEPTH_BANDS
+                  for value in (lo, hi)}
+    assert set(harness.FIGURE_DEPTHS_M) <= boundaries
+
+
+@pytest.mark.skipif(not (DATA_ROOT / "nemo_seed0").is_dir(),
+                    reason="the NEMO members are not on this machine")
+@pytest.mark.parametrize("plant", ["frame-flip", "alignment-initial",
+                                   "operand-mismatch"])
+def test_alignment_gate_plants_exit_non_zero(plant):
+    """The gate must be SHOWN to fail; a gate that cannot fail is decoration."""
+    result = subprocess.run(
+        [sys.executable, str(HARNESS), "--alignment-gate",
+         "--root", str(DATA_ROOT), "--plant", plant],
+        capture_output=True, text=True)
+    assert result.returncode != 0, result.stdout[-2000:]
+    assert "GATE ERROR" in result.stderr, result.stderr[-2000:]
+
+
+@pytest.mark.skipif(not (DATA_ROOT / "nemo_seed0").is_dir(),
+                    reason="the NEMO members are not on this machine")
+def test_alignment_gate_passes_unplanted():
+    result = subprocess.run(
+        [sys.executable, str(HARNESS), "--alignment-gate",
+         "--root", str(DATA_ROOT)],
+        capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]
+    assert "STATUS ALIGNED" in result.stdout

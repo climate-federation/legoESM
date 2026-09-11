@@ -99,6 +99,35 @@ ROW_UNITS.update({f"T3D_{name}": "K" for name, _, _ in DEPTH_BANDS})
 # rms.
 CELL_COUNT_THRESHOLD_K = 1.0e-3
 
+# The ALIGNMENT GATE.  Every number in this file is an index-by-index
+# difference between two models, so a frame error does not raise -- it returns
+# a plausible number.  Three checks close the three readers, and each one is
+# exercised by a plant that must turn it red:
+#   A1  legoESM's initial state against NEMO's BEFORE level at the entry of
+#       step 1, BIT-EXACT (0 cells unequal, not "inside a tolerance").  This
+#       binds the BINARY record reader and the certified gate's own masks.
+#   A2  the card's latitude and depth against NEMO's mesh_mask, to 0.0.  This
+#       binds the MESH reader (reconcile_operands, already enforced).
+#   A3  orientation discrimination on the netCDF RESTART reader, which neither
+#       A1 nor A2 touches: the identity index mapping must beat every axis
+#       reversal by a wide margin.  A TRANSPOSED mapping cannot reach this
+#       check -- the array is 22x32 and a transpose raises on shape.
+DEFAULT_ENTRY = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gyre_kt1_10/"
+    "oracle_step_entry_kt00000001.bin")
+# A3's thresholds are on a GEOMETRY IDENTITY, never on the models agreeing.
+# The restart stores nav_lat/nav_lon in float32, so the identity mapping must
+# reproduce the mesh's own gphit/glamt to f32 rounding (1.19e-7 x ~50 deg =
+# 6e-6); a reversal misses by the domain's own extent, about 20 degrees.  The
+# ratio is what is actually required, so the check cannot pass vacuously on a
+# domain too small to discriminate.
+FRAME_COORD_TOL_DEG = 1.0e-4
+FRAME_COORD_RATIO = 1.0e4
+# The figure depths are NOT a free choice: they are the preregistered depth
+# bands' own boundaries (section 4), so the maps and the scored rows localise
+# a difference at the same two depths.
+FIGURE_DEPTHS_M = (100.0, 1000.0)
+
 
 class GateError(RuntimeError):
     pass
@@ -975,49 +1004,320 @@ def _vacuity(rows: dict) -> dict:
     }
 
 
+# ----------------------------------------------------------- alignment gate --
+def _frame_mappings():
+    """The index mappings a silent frame error could be hiding in.
+
+    Only reversals: a transpose is excluded by SHAPE (22 != 32), so it cannot
+    silently pass and does not need a row here.  Recorded rather than argued,
+    because "a transpose would raise" is a claim about the array, and the
+    array's shape is asserted below.
+    """
+    return {
+        "identity": lambda a: a,
+        "reverse_j": lambda a: a[::-1],
+        "reverse_i": lambda a: a[:, ::-1],
+        "reverse_both": lambda a: a[::-1, ::-1],
+    }
+
+
+def alignment_gate(root: Path, *, mesh_path: Path = DEFAULT_NEMO_MESH,
+                   entry_path: Path = DEFAULT_ENTRY,
+                   plant: str | None = None) -> dict:
+    """Prove the two models are compared cell for cell.  Never argue it."""
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+            "precision policy is not fp64/libm")
+    gate, gate_sha = _gate_module()
+    card = build_nemo_testcase_card(CASE)
+    mesh, wet3, wet2, _, _, _, _ = _geometry(card, mesh_path)
+    nlev = card.recipe.z_coord.n_levels
+
+    # A2 -- the mesh reader.  Raises on any rounded-operand disagreement.
+    operands = reconcile_operands(card, mesh, plant=plant)
+
+    # A1 -- the binary reader, against the state legoESM starts from.
+    require(Path(entry_path).is_file(), f"missing NEMO entry record {entry_path}")
+    oracle = gate.read_entry(Path(entry_path))
+    require((oracle["kt"], oracle["Nbb"]) == (1, 1),
+            f"{entry_path}: kt={oracle['kt']} Nbb={oracle['Nbb']}, "
+            "expected the BEFORE level at the entry of step 1")
+    initial = card.recipe.initial_state
+    if plant == "alignment-initial":
+        import jax.numpy as jnp
+        # One cell, one ulp-scale nudge.  A1 is a BIT-EXACT check, so this is
+        # the smallest possible synthetic violation and it must still be red.
+        bumped = np.asarray(initial.T.data).copy()
+        bumped[5, 5, 0] = np.nextafter(bumped[5, 5, 0], np.inf)
+        initial = initial._replace(
+            T=initial.T.replace(data=jnp.asarray(bumped)))
+    candidate = gate.lego_fields(initial)
+    masks = gate.expected_masks(card)
+    identity = {}
+    for field in ("T", "S", "u", "v", "ssh"):
+        reference = (oracle[field] if field == "ssh"
+                     else oracle[field][..., :nlev])
+        mask = np.asarray(masks[field], dtype=bool)
+        left = np.asarray(reference, dtype=np.float64)
+        right = np.asarray(candidate[field], dtype=np.float64)
+        require(left.shape == right.shape == mask.shape,
+                f"A1 {field}: shapes {left.shape} / {right.shape} / {mask.shape}")
+        require(bool(mask.any()), f"A1 {field}: empty mask")
+        unequal = int(np.count_nonzero(left[mask] != right[mask]))
+        identity[field] = {
+            "cells": int(np.count_nonzero(mask)),
+            "cells_unequal": unequal,
+            "max_abs_difference": float(np.max(np.abs(left[mask] - right[mask])))
+            if mask.any() else 0.0,
+            "exact": unequal == 0,
+        }
+    unexact = [name for name, row in identity.items() if not row["exact"]]
+    require(not unexact,
+            "A1 FAILED: legoESM's initial state is not BIT-EXACT against "
+            f"NEMO's before level at the entry of step 1 on {unexact}; the "
+            "two models are not being compared cell for cell")
+
+    # A3 -- the netCDF restart reader.  A1 and A2 never touch it.
+    #
+    # A3a is the one that GATES, and it never looks at legoESM: every restart
+    # carries its own nav_lat/nav_lon, so the reader's frame is tied to the
+    # mesh's gphit/glamt by an IDENTITY, and A2 already ties that mesh to the
+    # card.  A1 + A2 + A3a is then a chain of three exact measurements and the
+    # conclusion does not depend on the two models agreeing about anything.
+    #
+    # An earlier version of A3 gated on "the identity index mapping minimises
+    # the MODEL-MODEL difference by 10x".  That was a defect in the
+    # instrument, not a check: at day 360 the real gap is 0.41 K against a
+    # 1.5 K reversal signal, so a correct frame failed a 10x margin.  The
+    # minimisation survives below as a DIAGNOSTIC, gating nothing.
+    import netCDF4
+
+    mappings = _frame_mappings()
+    with netCDF4.Dataset(mesh_path) as handle:
+        mesh_lat = np.asarray(handle.variables["gphit"][0], dtype=np.float64)
+        mesh_lon = np.asarray(handle.variables["glamt"][0], dtype=np.float64)
+    chain = {}
+    for seed in SEEDS:
+        for day in (SNAP_DAYS, YEAR_DAYS):
+            step = day * STEPS_PER_DAY
+            matches = sorted((Path(root) / f"nemo_seed{seed}").glob(
+                f"*_{step:08d}_restart.nc"))
+            require(len(matches) == 1,
+                    f"A3a: seed {seed} step {step}: {len(matches)} restarts")
+            with netCDF4.Dataset(matches[0]) as handle:
+                lat = np.asarray(handle.variables["nav_lat"][:], dtype=np.float64)
+                lon = np.asarray(handle.variables["nav_lon"][:], dtype=np.float64)
+            if plant == "frame-flip":
+                lat, lon = lat[::-1], lon[::-1]
+            require(lat.shape == mesh_lat.shape,
+                    f"A3a: restart nav_lat {lat.shape} vs mesh {mesh_lat.shape}")
+            errors = {name: max(float(np.max(np.abs(fn(lat) - mesh_lat))),
+                                float(np.max(np.abs(fn(lon) - mesh_lon))))
+                      for name, fn in mappings.items()}
+            worst_reversal = min(value for name, value in errors.items()
+                                 if name != "identity")
+            row = {"max_abs_coord_error_deg": errors,
+                   "identity": errors["identity"],
+                   "nearest_reversal": worst_reversal,
+                   "ratio": (worst_reversal / errors["identity"]
+                             if errors["identity"] > 0 else float("inf"))}
+            chain[f"seed{seed}_day{day}"] = row
+            require(errors["identity"] <= FRAME_COORD_TOL_DEG,
+                    f"A3a seed {seed} day {day}: the restart's own nav_lat/"
+                    f"nav_lon miss NEMO's mesh by {errors['identity']:.3e} deg "
+                    f"under the identity mapping, over the "
+                    f"{FRAME_COORD_TOL_DEG:.1e} f32-rounding bound; the "
+                    "restart is being read in the wrong frame")
+            require(row["ratio"] >= FRAME_COORD_RATIO,
+                    f"A3a seed {seed} day {day}: the identity mapping beats "
+                    f"the nearest reversal by only {row['ratio']:.3g}x, under "
+                    f"{FRAME_COORD_RATIO:.0e}; this domain cannot discriminate "
+                    "a reversal and the check would be vacuous")
+
+    # A3b -- DIAGNOSTIC ONLY.  Reported because it is the thing a reader
+    # expects to see, and because its MARGIN shrinking with the day is itself
+    # a statement about how large the gap has become.
+    orientation = {}
+    for day in SCORED_DAYS:
+        lego = _load_lego(root, 0, day)["T"]
+        nemo = _load_nemo(root, 0, day, nlev)["T"]
+        require(lego.shape == nemo.shape == wet3.shape,
+                f"A3b day {day}: shapes {lego.shape} / {nemo.shape}")
+        scores = {name: _rms(lego - fn(nemo), wet3)
+                  for name, fn in mappings.items()}
+        best = min(scores, key=scores.get)
+        others = min(value for name, value in scores.items()
+                     if name != "identity")
+        orientation[str(day)] = {
+            "rms_by_mapping": scores, "best": best,
+            "margin_over_next": float(others / scores["identity"])
+            if scores["identity"] > 0 else float("inf")}
+
+    return {
+        "format": "nemo-testcase-l2-gyre-year-fromrest-alignment-v1",
+        "case": CASE,
+        "status": "ALIGNED",
+        "A1_day0_identity": {
+            "entry_record": str(entry_path),
+            "entry_sha256": sha256(Path(entry_path)),
+            "time_level": oracle["registry_level"],
+            "kt": int(oracle["kt"]), "Nbb": int(oracle["Nbb"]),
+            "fields": identity,
+            "binds": ("the binary record reader (36x26x31 Fortran order, "
+                      "cropped [2:-2,2:-2], transposed to (j,i,k)) and the "
+                      "certified gate's masks"),
+        },
+        "A2_operand_reconciliation": operands,
+        "A3a_restart_coordinate_chain": {
+            "mappings": sorted(mappings),
+            "identity_tolerance_deg": FRAME_COORD_TOL_DEG,
+            "ratio_required": FRAME_COORD_RATIO,
+            "restarts": chain,
+            "binds": ("the netCDF restart reader ((t,z,j,i) -> (j,i,k)), by "
+                      "the restart's OWN nav_lat/nav_lon against the mesh's "
+                      "gphit/glamt.  legoESM does not enter this check.  A "
+                      "TRANSPOSE cannot reach it either -- the array is "
+                      f"{wet3.shape[0]}x{wet3.shape[1]} and would raise"),
+        },
+        "A3b_orientation_diagnostic": {
+            "gates": False,
+            "days": orientation,
+            "note": ("the identity mapping minimising the MODEL-MODEL "
+                     "difference is evidence about the frame only while the "
+                     "gap is small; by day 360 it is not, which is why this "
+                     "row gates nothing"),
+        },
+        "frames": {
+            "nemo_restart_netcdf": "x=32, y=22, nav_lev=31 (no halo written)",
+            "nemo_binary_record": "36x26x31 = the nn_hls=2 halo allocation",
+            "compared_array": list(wet3.shape),
+            "wet_cells_3d": int(np.count_nonzero(wet3)),
+            "wet_cells_2d": int(np.count_nonzero(wet2)),
+            "note": ("the closed-boundary ring is masked out of every scored "
+                     "number by NEMO's OWN tmask; 30x20 of the 32x22 columns "
+                     "are wet"),
+        },
+        "phase3_gate_sha256": gate_sha,
+        "mesh_sha256": mesh["mesh_sha256"],
+        "worktree": worktree_stamp(),
+    }
+
+
 # ------------------------------------------------------------------ figures --
+def _level_for_depth(depth_1d, target_m: float) -> int:
+    """The level whose centre is nearest ``target_m``, from NEMO's own depths."""
+    return int(np.argmin(np.abs(np.asarray(depth_1d, dtype=np.float64) - target_m)))
+
+
 def figures(root: Path, out_dir: Path,
             mesh_path: Path = DEFAULT_NEMO_MESH) -> dict:
+    """The maps.  A DELIVERABLE of this round whatever the verdict says.
+
+    Seven quantities x three columns (legoESM, NEMO, the difference) at day 30
+    and at day 360: the three surface fields and, at each of the two
+    preregistered depth-band boundaries, temperature and salinity.  The
+    figure carries its own provenance -- both models' commits, the NEMO
+    restart's SHA-256 and the mesh's -- because a map with no provenance is a
+    picture, not a measurement.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from legoesm.core.precision import PrecisionPolicy, set_policy
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_nemo_testcase_card)
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
 
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     card = build_nemo_testcase_card(CASE)
-    _, wet3, wet2, _, _, _, _ = _geometry(card, mesh_path)
+    mesh, wet3, wet2, _, _, _, _ = _geometry(card, mesh_path)
     nlev = card.recipe.z_coord.n_levels
+    depth_1d = np.asarray(card.recipe.z_coord.t_depth_ref,
+                          dtype=np.float64)[:nlev]
+    levels = [( _level_for_depth(depth_1d, target), target)
+              for target in FIGURE_DEPTHS_M]
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    written = {}
+    stamp = worktree_stamp()
+    written, provenance = {}, {}
     for day in (SNAP_DAYS, YEAR_DAYS):
         lego = _load_lego(root, 0, day)
         nemo = _load_nemo(root, 0, day, nlev)
-        difference = lego["T"] - nemo["T"]
-        figure, axes = plt.subplots(2, 2, figsize=(11, 8))
-        surface = np.where(wet2, difference[..., 0], np.nan)
-        deep = np.where(wet3[..., 9], difference[..., 9], np.nan)
-        for axis, field, title in (
-                (axes[0][0], np.where(wet2, lego["T"][..., 0], np.nan),
-                 f"legoESM SST, day {day} [C]"),
-                (axes[0][1], np.where(wet2, nemo["T"][..., 0], np.nan),
-                 f"NEMO SST, day {day} [C]"),
-                (axes[1][0], surface, f"SST difference, day {day} [K]"),
-                (axes[1][1], deep, f"level-10 T difference, day {day} [K]")):
-            image = axis.pcolormesh(field.T, shading="auto",
-                                    cmap="RdBu_r" if "difference" in title
-                                    else "viridis")
-            axis.set_title(title, fontsize=9)
-            axis.set_xlabel("j")
-            axis.set_ylabel("i")
-            figure.colorbar(image, ax=axis)
-        figure.tight_layout()
-        path = out_dir / f"gyre_year_fromrest_day{day:03d}.png"
-        figure.savefig(path, dpi=130)
+        panels = [("SST", "degC", lego["T"][..., 0], nemo["T"][..., 0], wet2),
+                  ("SSS", "g/kg", lego["S"][..., 0], nemo["S"][..., 0], wet2),
+                  ("SSH", "m", lego["ssh"], nemo["ssh"], wet2)]
+        for index, target in levels:
+            actual = depth_1d[index]
+            panels.append((f"T at {actual:.0f} m (level {index + 1}, "
+                           f"nearest {target:.0f} m)", "degC",
+                           lego["T"][..., index], nemo["T"][..., index],
+                           wet3[..., index]))
+            panels.append((f"S at {actual:.0f} m (level {index + 1}, "
+                           f"nearest {target:.0f} m)", "g/kg",
+                           lego["S"][..., index], nemo["S"][..., index],
+                           wet3[..., index]))
+        figure, axes = plt.subplots(len(panels), 3,
+                                    figsize=(13.5, 2.5 * len(panels)))
+        for row, (name, unit, left, right, mask) in enumerate(panels):
+            masked_left = np.where(mask, left, np.nan)
+            masked_right = np.where(mask, right, np.nan)
+            difference = np.where(mask, left - right, np.nan)
+            lo = float(np.nanmin([np.nanmin(masked_left), np.nanmin(masked_right)]))
+            hi = float(np.nanmax([np.nanmax(masked_left), np.nanmax(masked_right)]))
+            span = float(np.nanmax(np.abs(difference)))
+            span = span if span > 0 else 1.0
+            for column, (field, title, kwargs) in enumerate((
+                    (masked_left, f"legoESM {name} [{unit}]",
+                     {"cmap": "viridis", "vmin": lo, "vmax": hi}),
+                    (masked_right, f"NEMO {name} [{unit}]",
+                     {"cmap": "viridis", "vmin": lo, "vmax": hi}),
+                    (difference, f"legoESM - NEMO [{unit}]  max|d|={span:.3e}",
+                     {"cmap": "RdBu_r", "vmin": -span, "vmax": span}))):
+                axis = axes[row][column]
+                image = axis.pcolormesh(field.T, shading="auto", **kwargs)
+                axis.set_title(title, fontsize=8)
+                axis.set_xlabel("j (NEMO y)", fontsize=7)
+                axis.set_ylabel("i (NEMO x)", fontsize=7)
+                axis.tick_params(labelsize=6)
+                figure.colorbar(image, ax=axis)
+        source = json.loads(
+            (Path(root) / "lego_seed0" / "manifest.json").read_text())
+        footer = (
+            f"GYRE from-rest year, day {day} of 360 "
+            f"({day * STEPS_PER_DAY} steps at dt={DT_S:.0f} s), control "
+            f"members (seed 0, unperturbed) | "
+            f"legoESM commit {source['worktree']['commit'][:12]} | "
+            f"scoring commit {stamp['commit'][:12]} "
+            f"(clean={stamp['clean']}) | "
+            f"NEMO {Path(nemo['path']).name} sha256 {nemo['sha256'][:16]} | "
+            f"mesh sha256 {mesh['mesh_sha256'][:16]} | fp64, libm, CPU | "
+            f"masked by NEMO's own tmask")
+        figure.suptitle(footer, fontsize=7, y=0.999)
+        figure.tight_layout(rect=(0, 0, 1, 0.985))
+        path = out_dir / f"gyre_year_fromrest_maps_day{day:03d}.png"
+        figure.savefig(path, dpi=120)
         plt.close(figure)
         written[str(path)] = sha256(path)
+        provenance[str(day)] = {
+            "figure": str(path), "sha256": written[str(path)],
+            "lego_member": str(Path(root) / "lego_seed0"),
+            "lego_commit": source["worktree"]["commit"],
+            "lego_clean": source["worktree"]["clean"],
+            "nemo_restart": nemo["path"], "nemo_sha256": nemo["sha256"],
+            "mesh_sha256": mesh["mesh_sha256"],
+            "levels": [{"index": int(index), "depth_m": float(depth_1d[index]),
+                        "requested_m": float(target)} for index, target in levels],
+            "scoring_commit": stamp["commit"],
+        }
+    (out_dir / "figure_provenance.json").write_text(
+        json.dumps(provenance, indent=2))
+    written[str(out_dir / "figure_provenance.json")] = sha256(
+        out_dir / "figure_provenance.json")
     return written
 
 
@@ -1171,7 +1471,12 @@ def main(argv=None) -> int:
               "--census (the deepest-row falsifier)"))
     parser.add_argument("--score-phase0", action="store_true")
     parser.add_argument("--score", action="store_true")
+    parser.add_argument("--alignment-gate", action="store_true",
+                        help=("prove the two models are compared cell for "
+                              "cell before any gap is quoted"))
     parser.add_argument("--figures", action="store_true")
+    parser.add_argument("--entry", type=Path, default=DEFAULT_ENTRY,
+                        help="NEMO's kt=1 BEFORE-level record, for A1")
     parser.add_argument("--self-check", action="store_true")
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--mesh", type=Path, default=DEFAULT_NEMO_MESH)
@@ -1179,7 +1484,8 @@ def main(argv=None) -> int:
     parser.add_argument("--plant", default=None,
                         choices=["perturbation-zero", "perturbation-relative",
                                  "floor-inflate", "gap-zero",
-                                 "operand-mismatch"])
+                                 "operand-mismatch", "frame-flip",
+                                 "alignment-initial"])
     args = parser.parse_args(argv)
 
     if args.self_check:
@@ -1198,16 +1504,36 @@ def main(argv=None) -> int:
         return run_member(args.member, args.root, days=args.days,
                           mesh_path=args.mesh, tag=args.tag,
                           plant=args.plant)
+    if args.alignment_gate:
+        report = alignment_gate(args.root, mesh_path=args.mesh,
+                                entry_path=args.entry, plant=args.plant)
+        target = args.json or (args.root / "alignment_gate.json")
+        Path(target).parent.mkdir(parents=True, exist_ok=True)
+        Path(target).write_text(json.dumps(report, indent=2))
+        print(json.dumps(report, indent=2))
+        print("STATUS ALIGNED")
+        return 0
     if args.figures:
-        written = figures(args.root, args.root / "figures", mesh_path=args.mesh)
+        written = figures(args.root, args.root / "maps", mesh_path=args.mesh)
         print(json.dumps(written, indent=2))
         return 0
     if not (args.score_phase0 or args.score):
-        parser.error("one of --member/--score-phase0/--score/--figures/"
-                     "--self-check is required")
+        parser.error("one of --member/--score-phase0/--score/"
+                     "--alignment-gate/--figures/--self-check is required")
+
+    # The gap is never quoted before the frame is proved.  A1/A2/A3 RAISE
+    # rather than return, so reaching the next line IS the alignment result.
+    alignment = None
+    if args.score:
+        alignment = alignment_gate(args.root, mesh_path=args.mesh,
+                                   entry_path=args.entry, plant=args.plant)
+        (args.root / "alignment_gate.json").write_text(
+            json.dumps(alignment, indent=2))
 
     report = score(args.root, phase0_only=args.score_phase0,
                    mesh_path=args.mesh, plant=args.plant)
+    if alignment is not None:
+        report["alignment_gate"] = alignment
     target = args.json or (args.root / ("phase0_floor.json"
                                         if args.score_phase0
                                         else "verdict_year.json"))
@@ -1216,14 +1542,19 @@ def main(argv=None) -> int:
     print(json.dumps({key: value for key, value in report.items()
                       if key != "rows"}, indent=2))
     temperature = report["rows"]["T3D"]["days"]
-    header = ("day    floor[K]      gap[K]   gap/(2*floor)  verdict"
+    header = ("day   spread_lego   spread_nemo         floor     gap_ctrl"
+              "      gap_max  gap/(2*floor)  verdict"
               if args.score else "day    floor[K]")
     print(header)
     for day in sorted(temperature, key=int):
         record = temperature[day]
         if args.score:
-            print(f"{int(day):3d}  {record['floor']:.6e}  {record['gap']:.6e}  "
-                  f"{record['ratio_gap_over_2floor']:13.4f}  {record['verdict']}")
+            print(f"{int(day):3d}  {record['spread_lego']:.6e}  "
+                  f"{record['spread_nemo']:.6e}  {record['floor']:.6e}  "
+                  f"{record['gap_control_pair']:.6e}  "
+                  f"{record['gap_max_across_pairs']:.6e}  "
+                  f"{record['ratio_gap_over_2floor']:13.4f}  "
+                  f"{record['verdict']}")
         else:
             print(f"{int(day):3d}  {record['floor']:.6e}")
     failures = [name for name, value in report.items()
