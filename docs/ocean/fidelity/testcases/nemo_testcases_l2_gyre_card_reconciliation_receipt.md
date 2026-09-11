@@ -410,6 +410,38 @@ consequence of the same statement, and that one IS live.
 | "`freshwater_closure` carries a salinity source that compounds over the year" | `--closure-ablation`: `real_freshwater` against `virtual_salt_flux` is `0` cells unequal on all five fields |
 | the first version of this round's own gate, which reported UNIFIED on two different programs | an adversarial review rebound the config through a local and the gate never saw it |
 
+## 7d. THE FIX EXPOSED THREE STALE CITATIONS, AND A COMMITTED GATE CAUGHT THEM
+
+Rule 12, in miniature. Inserting eighteen lines into
+`nemo_testcase_recipe.py` moved three anchors the receipt-citation gate pins:
+`274 -> 292`, `311 -> 329`, `931 -> 949`. The gate went red exactly as built.
+Corrected by the procedure that gate already records in its own map comment
+from round 34 — update the citation, record the shift beside it, re-audit —
+and `audit_map()` is empty afterwards. **Pure integer corrections; no
+citation's SYMBOL changed, so nothing any receipt claims has moved.**
+
+One of the three lives in `round8_receipt.md`, which another agent is editing
+concurrently on this branch. It is a single integer on one line, in a section
+about the pressure-gradient selector rather than the WS-RK3 stage program, and
+it is named here so that agent can take theirs on a conflict without losing
+anything.
+
+## 7e. THE SUITE
+
+`5 failed, 1083 passed, 7 skipped, 20 deselected in 2699.29s (0:44:59)` on the
+whole of `tests/ocean/fidelity`, and every one of the five is accounted for:
+
+| failure | cause | disposition |
+|---|---|---|
+| `test_nemo_testcase_round35_stamp_scope.py`, 2 tests | **MY MEASUREMENT, not my code**: I ran the suite with `LEGOESM_GATE_ALLOW_DIRTY=1` in the environment, and these two tests assert that exact latch does NOT leak | pass without the variable — re-run quoted below |
+| `test_nemo_testcase_receipt_citation_gate.py`, 3 tests | **MINE, real**: the card edit shifted three pinned citations | fixed, section 7d |
+
+After both: `24 passed in 1.60s` over those two files, and
+`70 passed, 2 deselected in 52.90s` over the reconciliation, year, year-owners
+and certified phase-3 gate files. The new gate's own file:
+`8 passed, 2 deselected`, plus `2 passed` on the slow-marked end-to-end pair.
+`--self-check`: seven plants, all refused, exit `0`.
+
 ## 8. CHOICES, ASKED AND UNASKED
 
 | # | choice | status |
