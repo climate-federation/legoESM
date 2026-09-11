@@ -1574,3 +1574,72 @@ twin's docstring still described the exchange it no longer performs, and the
 bitwise assertion the fix advertised existed only on the NumPy side.
 
 Units after all of it: 91 passed, 1 skipped (job 9470106).
+
+## ★ THE FACE-BATCHED ARM IS ORACLE-CERTIFIED (2026-09-11)
+
+Every oracle number above scored the per-face LOOP arm. The distributed
+window/SPMD step forces the face-BATCHED arm, so the arm production runs
+had only a transitive certificate: a 5e-12 batched-vs-loop unit test at
+k_split=2, and a bitwise window-vs-flat gate at nq=1. Neither of those is
+evaluated at the oracle's own configuration, so none of the three links
+met at a shared point -- it was three disconnected experiments, not a
+chain (GLM-5.2 named this; codex ranked it the top correctness gap).
+
+`full_step_batched_parity.sbatch` runs both arms in ONE job, only
+`--batched` differing, and scores each against the pinned Fortran:
+
+| deck | loop arm | BATCHED arm | ceiling |
+|---|---|---|---|
+| hydrostatic dry | 1.1866e-09 | **1.1866e-09** | 2e-9 |
+| hydrostatic moist | 1.1866e-09 | **1.1866e-09** | 2e-9 |
+| non-hydrostatic | 1.4776e-06 | **1.4776e-06** | 1e-3 |
+
+Worst one-step relative over all faces and fields. The two arms agree to
+the headline digit on every deck; per-metric differences are 1e-7..1e-4
+relative on residuals that are themselves 1e-9 to 1e-12, i.e. last-digit
+reassociation from the vmap, which is what a face-batched arm is expected
+to cost.
+
+### The COMPILED step, which is the one that deploys
+
+Every parity number this lane had published scored the EAGER step, while
+the model steps through the compiled builder -- a red test in the tree
+(`test_the_job_certifies_the_compiled_path`) had said so for weeks and
+nobody read it. `JIT=1` now selects the compiled arm (default off, so the
+eager numbers stay reproducible). Hydrostatic, both arms:
+
+| arm | eager | compiled |
+|---|---|---|
+| loop | 1.1866e-09 | 1.1866e-09 |
+| batched | 1.1866e-09 | 1.1866e-09 |
+
+GLM predicted that IF compilation moved anything it would be a single
+outlier cell from a flux-limiter state flip, not an ambient shift, and
+that with only 1.7x headroom under the 2e-9 ceiling one flip could
+false-fail. It did not happen: across 147 compared metrics the largest
+eager-vs-compiled difference is one cell crossing the diagnostic
+"within 10 % of the peak" threshold (69 -> 70 cells on one face's
+temperature), while every residual MAGNITUDE agrees to four significant
+figures. Compilation is neutral on this deck.
+
+### Two ceilings, and one of them was lost in a merge
+
+`--max-rel` bounds each arm against the ORACLE. A second gate, `MAX_REL`,
+bounded the two arms against EACH OTHER, and it is GONE: commit 3e3711bdb
+added it, no non-merge commit ever removed it, and every commit touching
+that file since is a MERGE. It was clobbered in a conflict resolution. The
+test that pinned it went red and stayed red, which is how a gate dies
+quietly. Restoring it needs a number nobody has chosen yet -- the old
+default was 0.0, i.e. bit-exactness, which no reassociating arm can meet.
+
+### Still open
+
+- The non-hydrostatic ceiling is 1e-3 while the lane now measures
+  1.4776e-06, ~670x tighter than the gate. The gate no longer binds.
+- The backend parity job still scores eager only; its compiled arm is the
+  remaining half of the compiled-path gap.
+- The window gate runs one tracer while the oracle deck carries two, and
+  the second is all-zero, so multi-tracer transport is untested on the
+  distributed arm.
+- k_split > 1 is accepted by the model and compared to the oracle by
+  nothing.
