@@ -2427,6 +2427,12 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
 # stage at a time (B2 wind stress + B3 heat/freshwater; B4 adds prognostic
 # ice + SSS restore (water_flux channel) + runoff + NEMO-monthly/WOA IC).
 _FESOM_WIRED_DESTS = frozenset({
+    # Gaps 11 and 12. Both ARE wired into this lane -- the FESOM ice block
+    # applies the exchange set, and the FESOM forcing loop samples the monthly
+    # climatologies through month_sample -- but the gate below rejects any
+    # non-default dest that is not listed here, so omitting them made both
+    # flags UNREACHABLE on this lane while looking wired (codex, gap 12).
+    "ice_exchange", "forcing_time_interp",
     "grid", "fesom_mesh_dir", "fesom_ic_dir", "fesom_unforced", "dt", "years",
     # vertical-mixing closure + the zdftke card knobs it consumes (same set
     # the MPAS lane threads; _validate_tke_card_grid gates them):
@@ -2949,7 +2955,7 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
                              q_net=sf.q_net * ramp,
                              sw_down=sf.sw_down * ramp)
         if chl_clim is not None:
-            sf = sf._replace(chl=chl_clim[_runoff_month_idx(step, dt)])
+            sf = sf._replace(chl=month_sample(chl_clim, step, dt, args.forcing_time_interp))
         # --- prognostic ice step (B4; mirrors the host loop's block) ------
         ice_resp = None
         if ice_config is not None:
@@ -2984,7 +2990,7 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
             if getattr(ice_resp, "ice_concentration_thermo", None) is not None:
                 _ice_conc_pre = ice_resp.ice_concentration_thermo
         fw = None
-        _R = (runoff_monthly[_runoff_month_idx(step, dt)]
+        _R = (month_sample(runoff_monthly, step, dt, args.forcing_time_interp)
               if runoff_monthly is not None else None)
         # Build the freshwater struct if the atmospheric P-E / runoff is
         # wanted OR the prognostic ice needs an ``ice_fw`` carrier.
@@ -3024,7 +3030,7 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
             _S_now = state.S.data[..., 0]
             _T_now = state.T.data[..., 0]          # potential temp [degC]
             _lm = jnp.asarray(state.land_mask.data, _S_now.dtype)
-            _tgt = (sss_restore_target[_runoff_month_idx(step, dt)]
+            _tgt = (month_sample(sss_restore_target, step, dt, args.forcing_time_interp)
                     if _sss_monthly else sss_restore_target)
             _sss_out = compute_sss_restoring_flux(
                 S_model_top=_S_now,
@@ -3928,6 +3934,62 @@ def _runoff_month_idx(step: int, dt: float) -> int:
     NEMO's NOLEAP month lengths (not equal 365/12 bins; codex MEDIUM)."""
     day = (step * dt / _SEC_PER_DAY) % 365.0
     return int(np.searchsorted(_MONTH_CUM, day, side="right"))
+
+
+# Gap 12: monthly forcing is HELD by calendar month here, but ORCA1 asks for
+# linear time interpolation on exactly these fields. From the run's own
+# namelist_cfg, column 4 of each sn_* entry is ln_tint:
+#
+#   sn_chl  (namelist_cfg:170)  freq -1, ln_tint = .true.
+#   sn_sss  (namelist_cfg:185)  freq -1, ln_tint = .true.
+#   sn_rnf  (namelist_cfg:199)  freq -1, ln_tint = .true.
+#
+# The WINDS and the radiation/air fields are ln_tint = .FALSE. (lines 148-152),
+# i.e. the oracle HOLDS its 6-hourly and daily forcing piecewise-constant. So
+# this is not "interpolate everything" -- holding the sub-daily fields is
+# already faithful, and only the three MONTHLY climatologies interpolate.
+# Ice-shelf forcing is deliberately excluded: its oracle input interpolation
+# is disabled.
+#
+# NEMO centres a monthly record at the MIDDLE of its month and interpolates
+# linearly between neighbouring centres, wrapping December->January for a
+# climatology, which is what _month_interp_weights reproduces.
+_MONTH_MID = _MONTH_CUM - _MONTH_DAYS / 2.0   # day-of-year of each mid-month
+
+
+def _month_interp_weights(step: int, dt: float):
+    """``(i0, i1, w)`` with ``field = (1-w)*F[i0] + w*F[i1]`` (NEMO ln_tint).
+
+    ``w`` is 0 exactly at a month's centre and rises linearly to 1 at the next
+    centre. Before January's centre and after December's the pair wraps, which
+    is correct for a CLIMATOLOGY and would be wrong for a dated time series --
+    these three fields are climatologies (``ln_clim = .true.`` in the same
+    namelist rows).
+    """
+    day = (step * dt / _SEC_PER_DAY) % 365.0
+    i1 = int(np.searchsorted(_MONTH_MID, day, side="right"))
+    i0 = i1 - 1
+    d0 = _MONTH_MID[i0 % 12] - (365.0 if i1 == 0 else 0.0)
+    d1 = _MONTH_MID[i1 % 12] + (365.0 if i1 == 12 else 0.0)
+    return i0 % 12, i1 % 12, float((day - d0) / (d1 - d0))
+
+
+def month_sample(field, step: int, dt: float, mode: str):
+    """Sample a 12-month leading axis: ``hold`` (default) or ``linear``.
+
+    ``hold`` is byte-identical to the previous ``field[_runoff_month_idx(...)]``
+    indexing, so an unset flag changes nothing.
+    """
+    if field is None:
+        return None
+    if mode == "hold":
+        return field[_runoff_month_idx(step, dt)]
+    if mode != "linear":
+        raise SystemExit(
+            f"unknown forcing time-interpolation mode {mode!r}; "
+            "expected 'hold' or 'linear'")
+    i0, i1, w = _month_interp_weights(step, dt)
+    return (1.0 - w) * field[i0] + w * field[i1]
 
 
 def _siconc_at_step(siconc, step: int, dt: float, monthly: bool):
@@ -6074,6 +6136,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "ice_skin: legacy ice-skin-deficit lead freeze with the "
                         "ocean debited L_f (double-counts the coupler's open-water "
                         "cooling; polar SST reached -3 C by day 105 on every grid).")
+    p.add_argument("--forcing-time-interp", choices=("hold", "linear"),
+                   default="hold",
+                   help="Time treatment of the MONTHLY forcing climatologies "
+                        "(chlorophyll, runoff, SSS restoring target). 'hold' "
+                        "(default, unchanged) holds each calendar month "
+                        "piecewise-constant. 'linear' interpolates between "
+                        "mid-month centres, which is what ORCA1 does: those "
+                        "three fields carry ln_tint=.true. in namelist_cfg. "
+                        "The 6-hourly winds and the radiation fields are "
+                        "ln_tint=.FALSE. in the oracle, so they are HELD by "
+                        "both models and this flag does not touch them.")
     p.add_argument("--ice-exchange", choices=tuple(_ICE_EXCHANGE_SETS),
                    default=None,
                    help="Named sea-ice exchange-coefficient set for "
@@ -9611,7 +9684,7 @@ def main() -> int:
         # switches the PE step to NEMO's RGB penetration.  NOT ramped — Chl is a
         # fixed optical climatology, independent of the dynamical spin-up ramp.
         if chl_clim is not None:
-            sf = sf._replace(chl=chl_clim[_runoff_month_idx(step, dt)])
+            sf = sf._replace(chl=month_sample(chl_clim, step, dt, args.forcing_time_interp))
         # PRESCRIBED-ice runs (--ice-albedo/--ice-thermo/--sss-restore ice
         # gate, NO --prognostic-sea-ice): thread the SAME climatological
         # concentration to the vertical-mixing closure so the TKE under-ice
@@ -9638,7 +9711,7 @@ def main() -> int:
         # physics instead consumes ``surface_forcing.freshwater`` directly, so for
         # the cube the NET flux is folded onto ``sf`` and no freshwater= arg is
         # passed (single application; avoids the double-count codex flagged).
-        _R = (runoff_monthly[_runoff_month_idx(step, dt)]
+        _R = (month_sample(runoff_monthly, step, dt, args.forcing_time_interp)
               if runoff_monthly is not None else None)
         _want_fw = args.emp_freshwater or (_R is not None)
         # Prognostic sea ice: step the REAL model on the SAME CORE-II forcing
@@ -9936,7 +10009,7 @@ def main() -> int:
                 _R_gate = _R if args.river_mouth_restoring_gate else None
                 # Monthly (12, ...) NEMO sn_sss target -> this step's month;
                 # static IC-surface target unchanged.
-                _sss_tgt_step = (sss_restore_target[_runoff_month_idx(step, dt)]
+                _sss_tgt_step = (month_sample(sss_restore_target, step, dt, args.forcing_time_interp)
                                  if _sss_monthly
                                  else sss_restore_target)
                 # WATER-FLUX CHANNEL (NEMO nn_sssr=2).  Default OFF: the
