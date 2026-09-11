@@ -11131,7 +11131,18 @@ class ModelDriver:
                     from legoesm.diagnostics.process_ledger import (
                         LEDGER_PROCESSES,
                     )
+                    from legoesm.parallel.geometry_consistency import (
+                        content_hash48 as _content_hash48,
+                    )
                     _led_rates = np.asarray(_led_accum) / max(_led_nsteps, 1)
+                    # Snapshot the SAME weights the energy tracker used for
+                    # dE/dt earlier in this block, copied so a later mask or
+                    # regrid cannot make the artifact disagree with the
+                    # number it will be differenced against (GLM: aliasing).
+                    _area_w_led = self.diagnostics._area_w
+                    if _area_w_led is not None:
+                        _area_w_led = np.asarray(
+                            _area_w_led, dtype=np.float64).ravel().copy()
                     _tot_e = _led_rates.sum(axis=1)[:, 1]     # (ncol,) W/m^2
                     _hot = int(np.argmax(np.abs(_tot_e)))
                     _hot_rows = _led_rates[_hot, :, 1]
@@ -11147,6 +11158,34 @@ class ModelDriver:
                     # must never silently get the other.  Overwritten each
                     # interval — on a blow-up the surviving file is the last
                     # pre-detonation interval, which is the one that matters.
+                    _led_area_kw = {}
+                    if _area_w_led is not None:
+                        # One line that makes a shape/rank/reorder mistake
+                        # fail HERE instead of silently downstream (GLM's
+                        # "missing invariant").
+                        if _area_w_led.size != _led_rates.shape[0]:
+                            raise ValueError(
+                                "budget ledger has "
+                                f"{_led_rates.shape[0]} columns but the area "
+                                f"weights have {_area_w_led.size}; the "
+                                "artifact would carry a reduction that does "
+                                "not match its own rows.")
+                        _led_area_kw = {
+                            "area_cell": _area_w_led,
+                            # Fingerprint so a reader supplying its own
+                            # weights can prove they are THESE weights, in
+                            # THIS order.  A length check cannot see a
+                            # permutation, and a permuted weight vector is
+                            # quietly wrong rather than loudly wrong.
+                            # ``content_hash48`` is the repo's existing
+                            # positional byte digest (parallel/
+                            # geometry_consistency.py), written for exactly
+                            # this "a permutation must not cancel" property
+                            # and float64-exact, so it stores in the npz as a
+                            # plain scalar.
+                            "area_hash48": np.asarray(
+                                _content_hash48(_area_w_led)),
+                        }
                     if self.output_dir is not None:
                         np.savez(
                             str(self.output_dir
@@ -11157,6 +11196,37 @@ class ModelDriver:
                                 ("water_kg_m2_s", "energy_W_m2")),
                             n_steps=_led_nsteps,
                             day=elapsed_day + START_DAY,
+                            # Rank locality is part of the reduction: under
+                            # cell partitioning these rows would be ONE rank's
+                            # columns, and no weighting makes that a global
+                            # budget.  Today this is always False -- setup
+                            # already REFUSES --budget-ledger whenever the
+                            # world size exceeds one or a Voronoi layout
+                            # exists, which is strictly broader than this
+                            # predicate.  It is stamped anyway because that
+                            # refusal is documented as "serial-only FOR NOW":
+                            # when the ledger gather is wired the artifact
+                            # becomes rank-local, and the reader should refuse
+                            # at that moment rather than print a per-rank
+                            # table as a global one.
+                            cell_partitioned=bool(
+                                _is_mpas_cell_partitioned(self)),
+                            # The reduction the reader MUST use (#1354).  The
+                            # rows are per-column, so a consumer picks the
+                            # weighting -- and an unweighted mean is not a
+                            # global mean on the SCVT mesh (areaCell max/min
+                            # 1.471).  Worse, the energy-budget tracker this
+                            # ledger gets differenced against is already
+                            # area-weighted, so an unweighted row and its
+                            # store tendency are different global operators
+                            # and their difference means nothing.  Shipping
+                            # the SAME weights the tracker used removes the
+                            # reader's opportunity to get it wrong.  The key
+                            # is OMITTED, not zero-filled, when there are no
+                            # weights: an empty float array is a valid array
+                            # that a third consumer can misread as a mesh,
+                            # while a missing key raises (GLM).
+                            **_led_area_kw,
                         )
                     _led_accum = None
                     _led_nsteps = 0
