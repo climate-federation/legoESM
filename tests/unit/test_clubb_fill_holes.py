@@ -25,7 +25,10 @@ from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     fill_holes_wp2_from_horz_tke,
 )
 
-_CLUBB_JAX_ROOT = Path(__file__).resolve().parents[2].parent / "CLUBB-JAX"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _clubb_ref_api as _ref  # noqa: E402
+
+_CLUBB_JAX_ROOT = _ref.ROOT
 
 
 def _field_with_holes(ng=3, nz=16, seed=0):
@@ -113,17 +116,18 @@ def test_parity_vs_reference():
 
     field, rho_ds, dz = _field_with_holes(seed=7)
     rho_dz = rho_ds * dz
+    ng, nz = np.asarray(field).shape
     np.testing.assert_allclose(
         np.asarray(fill_holes_global(field, rho_dz, 0.0, 1, 14)),
-        np.asarray(RF.fill_holes_global(field, rho_dz, 0.0, 1, 14)),
+        np.asarray(RF.fill_holes_global(nz, ng, 0.0, 1, 14, dz, rho_ds, field)),
         rtol=1e-12, atol=1e-14)
     np.testing.assert_allclose(
         np.asarray(fill_holes_sliding_window(field, rho_dz, 0.0, 1, 14)),
-        np.asarray(RF.fill_holes_sliding_window(field, rho_dz, 0.0, 1, 14)),
+        np.asarray(RF.fill_holes_sliding_window(nz, ng, 0.0, 1, 14, dz, rho_ds, field)),
         rtol=1e-12, atol=1e-14)
     np.testing.assert_allclose(
         np.asarray(fill_holes_vertical(field, rho_ds, dz, 0.0, 1, 14, 2)),
-        np.asarray(RF.fill_holes_vertical(field, rho_ds, dz, 0.0, 1, 14, 2)),
+        np.asarray(RF.fill_holes_vertical(nz, ng, 0.0, 1, 14, dz, rho_ds, 1, 2, field)),
         rtol=1e-12, atol=1e-14)
 
 
@@ -160,7 +164,8 @@ def test_horz_tke_fill_parity():
     wp2, up2, vp2 = _horz_tke_inputs(seed=2)
     thr = float((2.0e-2) ** 2)
     mine = fill_holes_wp2_from_horz_tke(wp2, up2, vp2, thr, 0, 9)
-    ref = RF.fill_holes_wp2_from_horz_tke(wp2, up2, vp2, thr, 0, 9)
+    ng, nz = np.asarray(wp2).shape
+    ref = RF.fill_holes_wp2_from_horz_tke(nz, ng, thr, 0, 9, wp2, up2, vp2)
     for a, b in zip(mine, ref):
         np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-12, atol=1e-14)
 

@@ -20,7 +20,10 @@ from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig  # noqa: E40
 from legoesm.atmosphere.physics.turbulence.clubb import make_clubb_grid, zm2zt, zt2zm  # noqa: E402
 from legoesm.atmosphere.physics.turbulence import clubb as T  # noqa: E402, N812
 
-_CLUBB_JAX_ROOT = Path(__file__).resolve().parents[2].parent / "CLUBB-JAX"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _clubb_ref_api as _ref  # noqa: E402
+
+_CLUBB_JAX_ROOT = _ref.ROOT
 _ILAMBDA0 = 66   # parameter_indices.ilambda0_stability_coef (1-based)
 
 
@@ -64,11 +67,11 @@ def test_stability_correction_parity():
     p = _inputs(ng, nzm, seed=3)
     Lscale_zm = jnp.maximum(zt2zm(p["Lscale"], gr), 0.0)
     lam = 0.04
-    cp = np.zeros((ng, 102))
-    cp[:, _ILAMBDA0 - 1] = lam
     np.testing.assert_array_equal(
         np.asarray(T.calc_stability_correction(p["brunt"], Lscale_zm, p["em"], lam)),
-        np.asarray(R.calc_stability_correction(p["brunt"], Lscale_zm, p["em"], jnp.asarray(cp))))
+        np.asarray(R.calc_stability_correction(
+            nzm, ng, p["brunt"], Lscale_zm, p["em"],
+            jnp.full((ng,), lam))))
 
 
 def test_tau_family_formulas():

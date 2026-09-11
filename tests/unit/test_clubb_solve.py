@@ -20,7 +20,10 @@ from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     tridiag_solve,
 )
 
-_CLUBB_JAX_ROOT = Path(__file__).resolve().parents[2].parent / "CLUBB-JAX"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _clubb_ref_api as _ref  # noqa: E402
+
+_CLUBB_JAX_ROOT = _ref.ROOT
 
 
 def _band_system(ng=3, n=10, seed=0):
@@ -78,11 +81,11 @@ def test_matches_clubb_reference_solver():
     """Thomas (reuse) vs CLUBB tridiag_lu_solve: same solve, agree to round-off."""
     if str(_CLUBB_JAX_ROOT) not in sys.path:
         sys.path.insert(0, str(_CLUBB_JAX_ROOT))
-    from clubb_jax.src.CLUBB_core.tridiag_lu_solver import tridiag_lu_solve_jax
+    from clubb_jax.src.CLUBB_core.tridiag_lu_solver import tridiag_lu_solve
 
     lhs, rhs = _band_system(ng=4, n=20, seed=3)
     mine = tridiag_solve(lhs, rhs)
-    ref = tridiag_lu_solve_jax(lhs, rhs)
+    ref = tridiag_lu_solve(lhs.shape[-1], lhs, rhs)
     np.testing.assert_allclose(np.asarray(mine), np.asarray(ref), rtol=1e-11, atol=1e-13)
 
 
@@ -162,18 +165,19 @@ def test_penta_jit_and_grad():
 @pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
                     reason="CLUBB-JAX reference tree not present")
 def test_penta_matches_clubb_reference():
-    """Bit-exact vs CLUBB penta_lu_solve_jax (verbatim algorithm port).
+    """Bit-exact vs CLUBB penta_lu_solve (verbatim algorithm port).
 
     The reference is ``jit``-compiled; JIT mine too so XLA fuses both identically
     (eager vs jitted float reassociation otherwise differs at round-off).
     """
     if str(_CLUBB_JAX_ROOT) not in sys.path:
         sys.path.insert(0, str(_CLUBB_JAX_ROOT))
-    from clubb_jax.src.CLUBB_core.penta_lu_solver import penta_lu_solve_jax
+    from clubb_jax.src.CLUBB_core.penta_lu_solver import penta_lu_solve
 
     lhs, rhs = _penta_system(ng=4, n=25, seed=7)
     np.testing.assert_array_equal(
-        np.asarray(jax.jit(penta_solve)(lhs, rhs)), np.asarray(penta_lu_solve_jax(lhs, rhs)))
+        np.asarray(jax.jit(penta_solve)(lhs, rhs)),
+        np.asarray(penta_lu_solve(lhs.shape[-1], lhs.shape[1], lhs, rhs)))
 
 
 if __name__ == "__main__":

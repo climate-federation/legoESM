@@ -27,7 +27,10 @@ from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
 
 # CAM-default gamma coefficients (CLUBBParams).
 _GC, _GB, _GCF = 0.308, 0.32, 5.0
-_CLUBB_JAX_ROOT = Path(__file__).resolve().parents[2].parent / "CLUBB-JAX"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _clubb_ref_api as _ref  # noqa: E402
+
+_CLUBB_JAX_ROOT = _ref.ROOT
 
 
 def _gr(ng=2, nzt=10):
@@ -54,23 +57,15 @@ def test_calc_wp3_on_wp2_clip_and_roundtrip():
 def test_calc_wp3_on_wp2_parity():
     if str(_CLUBB_JAX_ROOT) not in sys.path:
         sys.path.insert(0, str(_CLUBB_JAX_ROOT))
-    import clubb_jax.src.CLUBB_core.advance_helper_module as R  # noqa: N812
-    from clubb_jax.src.derived_types.grid_class import (
-        Grid, calc_zm2zt_weights, calc_zt2zm_weights)
+    import clubb_jax.src.CLUBB_core.advance_wp2_wp3_module as R  # noqa: N812
     gr, ng, nzm = _gr()
     nzt = nzm - 1
     rng = np.random.default_rng(2)
     wp2 = jnp.asarray(0.2 + 0.5 * rng.random((ng, nzm)))
     wp3 = jnp.asarray(2.0 * rng.standard_normal((ng, nzt)))
-    zm_np, zt_np, dzt_np = np.asarray(gr.zm), np.asarray(gr.zt), np.asarray(gr.dzt)
-    rg = Grid(nzm=nzm, nzt=nzt, ngrdcol=ng, zm=gr.zm, zt=gr.zt, dzm=gr.dzm, dzt=gr.dzt,
-              invrs_dzm=gr.invrs_dzm, invrs_dzt=gr.invrs_dzt,
-              weights_zt2zm=jnp.asarray(calc_zt2zm_weights(nzm, nzt, ng, zm_np, zt_np)),
-              weights_zm2zt=jnp.asarray(calc_zm2zt_weights(nzm, nzt, ng, zm_np, zt_np, dzt_np)),
-              k_lb_zm=0, k_ub_zm=nzm - 1, k_lb_zt=0, k_ub_zt=nzt - 1,
-              grid_dir_indx=1, grid_dir=1.0)
+    rg = _ref.ref_grid(gr)
     m_zm, m_zt = calc_wp3_on_wp2(wp2, wp3, 2.0e-2, gr)
-    r_zm, r_zt = R.calc_wp3_on_wp2(wp2, wp3, rg)
+    r_zm, r_zt = R.calc_wp3_on_wp2(nzm, nzt, ng, rg, wp2, wp3)
     np.testing.assert_allclose(np.asarray(m_zm), np.asarray(r_zm), rtol=1e-12, atol=1e-14)
     np.testing.assert_allclose(np.asarray(m_zt), np.asarray(r_zt), rtol=1e-12, atol=1e-14)
 
