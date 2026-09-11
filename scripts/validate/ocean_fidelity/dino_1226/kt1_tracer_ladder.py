@@ -178,7 +178,11 @@ def stage0(restart_glob: str, plant: bool = False) -> tuple[dict, int]:
                   + MUST_BE_ZERO + ("tot",)):
             want.append(f"{pre}_{s}")
     want += ["tn", "sn", "tb", "sb", "sshn", "sshb", "un", "vn", "ub", "vb",
-             "en", "avt_k", "avm_k", "dissl"]
+             "en", "avt_k", "avm_k", "dissl",
+             # NEMO's own tra_ldf inputs (stage 5) and the solar-term
+             # operands (stage 6).
+             "uslp_stg", "vslp_stg", "wslpi_stg", "wslpj_stg",
+             "qsr_hc_b", "fraqsr_1lev"]
     R = rebuild(restart_glob, want)
     if "ttrd_tot" not in R:
         raise SystemExit(
@@ -244,9 +248,304 @@ def stage0(restart_glob: str, plant: bool = False) -> tuple[dict, int]:
     return R, bad
 
 
+
+# ----------------------------------------------------------------- stage 5
+def _replay(real, args, kwargs, **over):
+    """Re-run the captured ``tra_ldf`` call with operands substituted.
+
+    Returns ``(tendency, diagnostics)``.  Nothing is re-implemented: this is
+    the model's own operator, called with the model's own arguments, with the
+    named kwargs replaced (Rule 10).
+    """
+    kw = dict(kwargs)
+    kw.update(over)
+    kw["return_diagnostics"] = True
+    kw["return_operand_diagnostics"] = True
+    r = real(*args, **kw)
+    if kw.get("return_bolus"):
+        tend, _bolus, diags = r
+    else:
+        tend, diags = r
+    return np.asarray(tend), diags
+
+
+def _stage_split(diags, args, kwargs, z):
+    """Split the operator's own tendency into its three flux stages.
+
+    Horizontal (``zfu``/``zfv``, N3-N6), vertical skew (``zA31``/``zA32``,
+    N7-N10) and the MSC A33 diagonal (N11/N13), each taken through the SAME
+    divergence + metric divisor the operator applies.  The three MUST sum to
+    the returned tendency; that closure is the control (Rule 5 -- a stage
+    split that does not close is bookkeeping, not attribution).
+    """
+    import numpy as _np
+    zfu = _np.asarray(diags["zfu"])
+    zfv = _np.asarray(diags["zfv"])
+    ops = diags["zfw_operands"]
+    skew = _np.asarray(ops["skew_current"])
+    a33 = _np.asarray(ops["a33_current"])
+    act_below = _np.asarray(ops["act_below"])
+    e1e2t = _np.asarray(ops["e1e2t"])
+    jac = _np.asarray(args[7])
+    act = _np.asarray(kwargs.get("active_3d", args[10] if len(args) > 10
+                                 else None))
+    e3t = _np.asarray(z.dz_ref)[None, None, :] * jac[:, :, None]
+    scale = (1.0 / e1e2t)[:, :, None] / e3t * act
+
+    hdiv = ((zfu - _np.roll(zfu, 1, 1)) + (zfv - _np.roll(zfv, 1, 0)))
+
+    def _vdiv(part):
+        f = part * act_below
+        top = _np.roll(f, 1, 2)
+        top[..., 0] = 0.0
+        return top - f
+
+    return {
+        "horizontal": hdiv * scale,
+        "skew": _vdiv(skew) * scale,
+        "a33": _vdiv(a33) * scale,
+    }
+
+
+def stage5(calls, iT, iS, R, O3, wet3, z, real, plant_e3w: bool,
+           plant_slopes: bool) -> int:
+    """The preregistered substitution ladder (PREREG_kt1_ldf_stage_walk.md).
+
+    Arms change ONE operand each and are scored against the record's own
+    ``ttrd_ldf``/``strd_ldf``.  Two of them are REGRESSION WITNESSES: they
+    restore the operand this round replaced, and they must reproduce the
+    pre-fix numbers -- so the gate cannot pass by accident, and the fix is
+    attributable to the statement it changed rather than to the round.
+    """
+    import jax.numpy as jnp
+    from legoesm.ocean.physics.vertical_mixing import nemo_e3w0_reference
+
+    print("\nSTAGE 5 -- tra_ldf, one statement at a time "
+          "(PREREG_kt1_ldf_stage_walk.md)")
+    bad = 0
+    args_T, kw_T = calls[iT][2], calls[iT][3]
+    jac = np.asarray(args_T[7])
+
+    # -- the level-axis wrap the operator's jnp.roll introduces and NEMO does
+    #    not have (wmask(jpk)=0).  Benign ONLY if the deepest level is
+    #    permanently dry; asserted, not assumed.
+    act = np.asarray(kw_T.get("active_3d", args_T[10]))
+    if act[..., -1].any():
+        print(f"  LEVEL WRAP UNSAFE: the deepest level carries "
+              f"{int(act[..., -1].sum())} active cells, so the operator's "
+              "periodic level roll wraps the surface onto the sea floor")
+        bad += 1
+    else:
+        print("  level-axis wrap: deepest level is permanently dry "
+              "(0 active cells), so the periodic roll is inert -- checked")
+
+    # -- the rDt operand (a33's stability threshold).  NEMO: domain.f90:310
+    #    rDt = 2*rn_Dt, reduced to rn_Dt on the Euler first step
+    #    (stpmlf.f90:132) and restored at :618.  This record is kt=1, so the
+    #    two agree HERE and the row is a forward-looking finding, not a
+    #    residual this record can score.
+    print(f"  rDt operand: the card passes dt={kw_T.get('dt')!r} to "
+          f"traldf_iso_a33; NEMO's rDt at kt=1 is rn_Dt={DT!r} "
+          f"(stpmlf.f90:132) and 2*rn_Dt={2 * DT!r} from kt=2 "
+          "(stpmlf.f90:618). UNMEASURED on this record by construction.")
+
+    # -- NEMO's OWN slopes.  TIME LEVEL, read not assumed (Rule 1d):
+    #    stpmlf.f90:216 CALL ldf_slp(kstp, rhd, rn2b, Nbb, Nnn) sets the
+    #    module SAVE arrays once per step and stpmlf.f90:504 CALL tra_ldf
+    #    consumes them unchanged; MY_SRC/trddump.F90:307 copies those arrays.
+    nat = None
+    try:
+        cand = tuple(np.nan_to_num(O3(k)) for k in
+                     ("uslp_stg", "vslp_stg", "wslpi_stg", "wslpj_stg"))
+    except KeyError:
+        cand = None
+    if cand is None or max(float(np.abs(a).max()) for a in cand) == 0.0:
+        print("  SLOPE ARM UNMEASURED: the record's uslp_stg/vslp_stg/"
+              "wslpi_stg/wslpj_stg are identically ZERO on all 16 tiles, "
+              "while rhd_stg/tn_stg/rn2_stg from the SAME snapshot carry "
+              "data. NEMO's tra_ldf cannot have run on zero slopes (the A33 "
+              "stage below is 1.07x the tendency), so the dump -- not the "
+              "run -- is what is empty. A frame that copies uslp/vslp/wslpi/"
+              "wslpj at tra_ldf's own call site is needed before the slope "
+              "routine can be separated from the operator.")
+    else:
+        nat = cand
+        print(f"  NEMO slopes from the record: max|uslp|="
+              f"{np.abs(nat[0]).max():.4e} max|wslpi|="
+              f"{np.abs(nat[2]).max():.4e} (rn_slpmax=0.01)")
+
+    # -- the ahtu/ahtv masking row (ldftra.f90:433-434).  This round's second
+    #    source-literal fix, measured in ISOLATION rather than folded into the
+    #    e3w arm: the flux the PRE-FIX operator emitted on faces where NEMO's
+    #    ahtu is identically zero, reconstructed from the operator's own
+    #    operands, and the tendency that flux produced.
+    _t0, _d0 = _replay(real, args_T, kw_T)
+    _fo = _d0["zfu_operands"]
+    from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+        nemo_iso_face_masks)
+    _um, _vm, _ = nemo_iso_face_masks(
+        np.asarray(args_T[4]), np.asarray(args_T[5]), act)
+    _um = np.asarray(_um)
+    _kap = np.asarray(args_T[9])
+    if _kap.ndim == 2:
+        _kap = _kap[:, :, None]
+    _kap = np.broadcast_to(_kap, act.shape)
+    # traldf_iso.f90:242  zfu = ahtu*(zA11*zdit + zA13*avg4); zdit already
+    # carries umask, so on a closed face only the zA13 term survives.
+    _zA13 = -np.asarray(_fo["e2u"])[:, :, None] * np.asarray(_fo["uslp"]) \
+        * np.asarray(_fo["zmsku"])
+    _removed = np.where(_um == 0.0, _kap * _zA13 * np.asarray(_fo["avg4_u"]),
+                        0.0)
+    _ncl = int(((_um == 0.0) & (act > 0.0)).sum())
+    _nnz = int((_removed != 0.0).sum())
+    print(f"  ahtu masking (ldftra.f90:433-434): {_ncl} closed u-faces on wet "
+          f"cells; the pre-fix operator emitted a nonzero zA13 flux on "
+          f"{_nnz} of them, max |zfu| there = {np.abs(_removed).max():.4e} "
+          "(NEMO's ahtu = 0 there, so NEMO emits none)")
+    _tend_from = (np.abs(_removed - np.roll(_removed, 1, 1)).max()
+                  / max(float(np.abs(np.asarray(_fo['e3t'])).min()), 1e-300))
+    print(f"    the flux appears in the divergence of the ADJACENT wet cell; "
+          f"max |d(removed zfu)| = "
+          f"{np.abs(_removed - np.roll(_removed, 1, 1)).max():.4e} m^3 K/s")
+    if np.abs(_removed).max() == 0.0:
+        print("    MEASURED INERT on this card at kt=1: every closed u-face "
+              "carries zero slope or zero 4-point vertical-gradient average, "
+              "so the fix changes no number HERE. It is landed as a "
+              "transcription fix, not as a residual this record scores.")
+    del _t0, _tend_from
+
+    # -- the e3w operand, and the arm that restores the pre-fix one ---------
+    raw_e3w0 = nemo_e3w0_reference(z)
+    if raw_e3w0 is None:
+        print("  UNMEASURED: this coordinate carries no NEMO e3w_0")
+        return bad + 1
+    e3w_nemo = np.asarray(raw_e3w0)[..., :z.n_levels] * jac[:, :, None]
+    e3t = np.asarray(z.dz_ref)[None, None, :] * jac[:, :, None]
+    e3w_mid = 0.5 * (np.roll(e3t, 1, 2) + e3t)
+    e3w_mid[..., 0] = e3t[..., 0]
+    _rel = np.abs(e3w_mid[..., 1:] - e3w_nemo[..., 1:]) / e3w_nemo[..., 1:]
+    print(f"  e3w operand: the pre-fix midpoint vs NEMO e3w_0*(1+r3t) -- "
+          f"max rel {_rel.max():.4e}, rms rel "
+          f"{np.sqrt((_rel ** 2).mean()):.4e}")
+    if plant_e3w:
+        print("  E3W PLANT ACTIVE: the witness arm is fed NEMO's OWN e3w "
+              "while labelled the pre-fix midpoint; it MUST then NOT "
+              "reproduce the pre-fix ratio")
+        e3w_witness = jnp.asarray(e3w_nemo)
+    else:
+        e3w_witness = jnp.asarray(e3w_mid)
+
+    arms = [("A0 as the model runs it", {}),
+            ("W1 pre-fix midpoint e3w", {"msc_e3w_override": e3w_witness})]
+    if nat is not None:
+        arms.append(("A1 + NEMO's own slopes",
+                     {"native_slopes": tuple(jnp.asarray(a) for a in nat)}))
+    if plant_slopes and nat is not None:
+        print("  SLOPE PLANT ACTIVE: arm A1 is fed the CARD's own slopes "
+              "while labelled NEMO's; A1 MUST equal A0 bit-for-bit")
+        arms[-1] = ("A1 + NEMO's own slopes",
+                    {"native_slopes": kw_T.get("native_slopes")})
+
+    print(f"    {'arm':26s}{'T ratio':>12s}{'T res rms':>12s}"
+          f"{'S ratio':>12s}{'S res rms':>12s}")
+    results = {}
+    for lbl, over in arms:
+        row = [lbl]
+        for tag, idx, key in (("T", iT, "ttrd_ldf"), ("S", iS, "strd_ldf")):
+            args, kw = calls[idx][2], calls[idx][3]
+            tend, diags = _replay(real, args, kw, **over)
+            nemo = np.nan_to_num(O3(key))
+            m = wet3
+            den = float(nemo[m] @ nemo[m])
+            ratio = float(tend[m] @ nemo[m]) / den if den else float("nan")
+            res = float(np.sqrt(np.mean((tend[m] - nemo[m]) ** 2)))
+            row += [ratio, res]
+            results[(lbl, tag)] = (ratio, res, tend, diags)
+        print(f"    {row[0]:26s}{row[1]:12.6f}{row[2]:12.4e}"
+              f"{row[3]:12.6f}{row[4]:12.4e}")
+
+    # CONTROL: A0 must be the call stage 4 scored, bit-for-bit.
+    a0T = results[(arms[0][0], "T")][2]
+    d0 = float(np.max(np.abs(a0T - calls[iT][1])))
+    print(f"  control: A0 replay vs the captured stage-4 tendency, "
+          f"max|diff| = {d0:.3e} K/s (bar 0.0)")
+    if d0 != 0.0:
+        print("  ^^ the replay is not the scored call; no arm above is "
+              "about the same operator")
+        bad += 1
+
+    # WITNESS: restoring the interface-midpoint e3w must put the operator
+    # back on the pre-fix ratio (0.996571 T / 0.996696 S, PR #1728).  A gate
+    # that passes without this cannot tell the fix from the weather.
+    wT_ratio = results[(arms[1][0], "T")][0]
+    wS_ratio = results[(arms[1][0], "S")][0]
+    print(f"  e3w witness: midpoint arm gives T {wT_ratio:.6f} / "
+          f"S {wS_ratio:.6f} against the recorded pre-fix "
+          "0.996571 / 0.996696")
+    _hit = (abs(wT_ratio - 0.996571) < 2e-5 and abs(wS_ratio - 0.996696) < 2e-5)
+    if plant_e3w:
+        if _hit:
+            print("  ^^ the planted (correct) e3w reproduced the PRE-FIX "
+                  "ratio; the witness is not reading the operand it names")
+            bad += 1
+        else:
+            print("  the planted e3w did not reproduce the pre-fix ratio, "
+                  "as required")
+    elif not _hit:
+        print("  ^^ the pre-fix operand no longer reproduces the pre-fix "
+              "ratio; something OTHER than e3w moved between the two")
+        bad += 1
+
+    # ---- per-stage table, and the akz branch census -------------------
+    for tag, idx, key in (("T", iT, "ttrd_ldf"), ("S", iS, "strd_ldf")):
+        args, kw = calls[idx][2], calls[idx][3]
+        tend, diags = results[(arms[0][0], tag)][2:4]
+        parts = _stage_split(diags, args, kw, z)
+        tot = parts["horizontal"] + parts["skew"] + parts["a33"]
+        clo = float(np.max(np.abs(tot - tend)[wet3]))
+        sc = float(np.sqrt(np.mean(tend[wet3] ** 2)))
+        print(f"  {tag} stage split closure: max|Sigma stages - tendency| = "
+              f"{clo:.3e} against tendency rms {sc:.3e}")
+        if clo > 1e-8 * max(sc, 1e-300):
+            print("  ^^ the stage split does not close; it is bookkeeping, "
+                  "not attribution (Rule 5)")
+            bad += 1
+        nemo = np.nan_to_num(O3(key))
+        print(f"    {'stage':14s}{'rms':>12s}{'share of |tend|':>18s}"
+              f"{'corr with NEMO resid':>22s}")
+        resid = (tend - nemo)[wet3]
+        for nm in ("horizontal", "skew", "a33"):
+            aa = parts[nm][wet3]
+            rr = float(np.sqrt(np.mean(aa ** 2)))
+            dd = np.sqrt(float(aa @ aa) * float(resid @ resid))
+            cc = float(aa @ resid) / dd if dd else float("nan")
+            print(f"    {nm:14s}{rr:12.4e}{rr / sc:18.4f}{cc:22.4f}")
+        if tag == "T":
+            ops = diags["zfw_operands"]
+            ah = np.asarray(ops["ah_wslp2"])
+            ak = np.asarray(ops["akz"])
+            on = (ak > 0.0) & wet3
+            print(f"    akz branch census: akz>0 (STABILISED, A33 flux "
+                  f"PROPORTIONAL to e3w) on {int(on.sum())}/"
+                  f"{int(wet3.sum())} wet cells; akz==0 (A33 flux INVERSE "
+                  f"in e3w) on {int((~on & wet3).sum())}. max ah_wslp2 = "
+                  f"{np.abs(ah[wet3]).max():.4e}")
+
+    if plant_slopes and nat is not None:
+        dT = float(np.max(np.abs(results[arms[-1][0], "T"][2] - a0T)))
+        print(f"  SLOPE PLANT: max|A1 - A0| = {dT:.3e} (bar 0.0)")
+        if dT != 0.0:
+            print("  ^^ feeding the card's own slopes changed the arm, so "
+                  "the slope substitution is not what it claims")
+            bad += 1
+    return bad
+
+
 # ----------------------------------------------------------------- stages 1/2
 def stages12(R: dict, plant_shift: bool,
-             plant_ldf_call: bool = False) -> int:
+             plant_ldf_call: bool = False,
+             plant_e3w: bool = False,
+             plant_slopes: bool = False) -> int:
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     set_policy(PrecisionPolicy.fp64())                      # Rule 1c
     from legoesm.ocean.experiments import dino as dm
@@ -463,7 +762,10 @@ def stages12(R: dict, plant_shift: bool,
     def spy(q, *a, **kw):
         r = real(q, *a, **kw)
         out = r[0] if (isinstance(r, tuple) and kw.get("return_bolus")) else r
-        calls.append((np.asarray(q), np.asarray(out)))
+        # args/kwargs retained so STAGE 5 can replay this EXACT call with one
+        # operand substituted -- the model's own path, one variable at a time.
+        calls.append((np.asarray(q), np.asarray(out), (q,) + tuple(a),
+                      dict(kw)))
         return r
 
     gmmod.nemo_iso_lap_tracer_tendency_latlon_cgrid = spy
@@ -508,16 +810,16 @@ def stages12(R: dict, plant_shift: bool,
     Tbef = np.asarray(st.T_before.data) if st.T_before is not None else None
     Sbef = np.asarray(st.S_before.data) if st.S_before is not None else None
     print("  call structure (max|q - x| on wet cells, per captured call):")
-    for i, (q, _) in enumerate(calls):
+    for i, (q, _, _a, _k) in enumerate(calls):
         bits = []
         for nm, ref in (("T", Tin), ("T_before", Tbef),
                         ("S", Sin), ("S_before", Sbef)):
             if ref is not None and q.shape == ref.shape:
                 bits.append(f"{nm}={float(np.max(np.abs((q - ref)[wet3]))):.3e}")
         print(f"    call {i}: " + "  ".join(bits))
-    wT = [i for i, (q, _) in enumerate(calls)
+    wT = [i for i, (q, _, _a, _k) in enumerate(calls)
           if q.shape == Tin.shape and np.array_equal(q[wet3], Tin[wet3])]
-    wS = [i for i, (q, _) in enumerate(calls)
+    wS = [i for i, (q, _, _a, _k) in enumerate(calls)
           if q.shape == Sin.shape and np.array_equal(q[wet3], Sin[wet3])]
     print(f"  exact wet-masked match against state.T / state.S: "
           f"T->{wT}  S->{wS}")
@@ -574,6 +876,10 @@ def stages12(R: dict, plant_shift: bool,
             print("  the identification is load-bearing on at least one "
                   "tracer, and it is made by an EXACT wet-masked input match "
                   "(max|q - state.T| = 0.000e+00), not by a call position")
+    if plant_ldf_call:
+        return bad
+    bad += stage5(calls, iT, iS, R, O3, wet3, z, real, plant_e3w,
+                  plant_slopes)
     return bad
 
 
@@ -587,6 +893,14 @@ def main() -> int:
     ap.add_argument("--plant-ldf-call", action="store_true",
                     help="score stage 4 against the WRONG captured call; "
                          "the ratio MUST move materially")
+    ap.add_argument("--plant-e3w", action="store_true",
+                    help="feed stage 5's e3w arm the MIDPOINT thickness "
+                         "while labelling it NEMO's; the arm MUST NOT "
+                         "improve")
+    ap.add_argument("--plant-slopes", action="store_true",
+                    help="feed stage 5's slope arm the CARD's own slopes "
+                         "while labelling them NEMO's; the arm MUST equal "
+                         "A0 bit-for-bit")
     ap.add_argument("--plant-shift", action="store_true",
                     help="shift stage 1's W-level alignment by one; the "
                          "closure residuals MUST explode (non-vacuity for "
@@ -601,7 +915,8 @@ def main() -> int:
     if args.nemo_only:
         print("\n--nemo-only: stages 1/2 skipped.")
         return 0
-    bad += stages12(R, args.plant_shift, args.plant_ldf_call)
+    bad += stages12(R, args.plant_shift, args.plant_ldf_call,
+                    args.plant_e3w, args.plant_slopes)
     print(f"\n{'GATE PASS' if bad == 0 else f'GATE FAIL ({bad} rows)'}")
     return 0 if bad == 0 else 1
 

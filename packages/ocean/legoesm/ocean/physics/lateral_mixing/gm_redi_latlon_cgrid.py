@@ -2426,6 +2426,19 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         aht_v = jnp.broadcast_to(kappa_Redi_v[:, :, jnp.newaxis], q.shape)
     else:
         aht_v = jnp.broadcast_to(jnp.asarray(kappa_Redi_v, dtype=dtype), q.shape)
+    # NEMO masks the diffusivity ONCE, at build:
+    #   ldftra.f90:433-434   ahtu(:,:,1:jpkm1) = ahtu(:,:,1:jpkm1) * umask(...)
+    #                        ahtv(:,:,1:jpkm1) = ahtv(:,:,1:jpkm1) * vmask(...)
+    # so every consumer sees a face-masked coefficient.  That masking is
+    # LOAD-BEARING on the horizontal flux: NEMO's uslp is a 16-point Shapiro
+    # smear of the umask-ed raw slope (ldfslp.f90:288 masks zwz, :298 smears
+    # it), so uslp is generally NONZERO on a closed u-face, and only
+    # ahtu = 0 stops traldf_iso.f90:242 emitting the zA13 term there.
+    # Applying it here makes the operator's four consumers (zfu, zfv, the
+    # w-point kappa sums and akz_h) read ONE masked field; the latter three
+    # already re-applied the same 0/1 mask, so this is bit-identical for them.
+    aht = aht * umask
+    aht_v = aht_v * vmask
 
     # --- Slope positions.  native_slopes = the ldfslp four-position fields
     # (uslp/vslp at tracer levels, wslpi/wslpj at top-of-cell w-points, NEMO
@@ -2592,9 +2605,29 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         # operand.  Production dispatch remains None until its registered
         # stage-22/23 bracket owns the substitution.
         if msc_e3w_override is None:
-            e3w_ab = 0.5 * (jnp.roll(e3t, +1, ax_z) + e3t)
-            e3w_ab = e3w_ab.at[:, :, 0].set(
-                e3t[:, :, 0])   # surface w (unused: wslp(0)=0)
+            # traldf_iso.f90:285 divides by e3w(ji,jj,jk+1,Kmm) and :831-832
+            # squares the same object for akz, with (domzgr_substitute.h90:131)
+            #   e3w(i,j,k,t) = e3w_0(i,j,k) * (1 + r3t(i,j,t))
+            # and e3w_0(k) = gdept_0(k) - gdept_0(k-1): the T-POINT DEPTH
+            # DIFFERENCE, which on a stretched ladder is NOT the interface
+            # midpoint 0.5*(e3t_k + e3t_{k-1}).  Resolved through the SINGLE
+            # shared resolver the implicit solves already use, which returns
+            # None only for a coordinate whose T points ARE the midpoints (and
+            # raises rather than silently substituting for one where they are
+            # not) — so the midpoint arm below is reached only where it is the
+            # same object.
+            from legoesm.ocean.physics.vertical_mixing import (
+                nemo_e3w0_reference)
+            _raw_e3w0 = nemo_e3w0_reference(z_coord)
+            if _raw_e3w0 is None:
+                e3w_ab = 0.5 * (jnp.roll(e3t, +1, ax_z) + e3t)
+                e3w_ab = e3w_ab.at[:, :, 0].set(
+                    e3t[:, :, 0])   # surface w (unused: wslp(0)=0)
+            else:
+                # jacobian is this operator's (1 + r3t) stretch, the same
+                # factor e3t above already carries.
+                e3w_ab = (jnp.asarray(_raw_e3w0, dtype=dtype)[..., :q.shape[-1]]
+                          * jacobian[:, :, jnp.newaxis])
         else:
             e3w_ab = jnp.asarray(msc_e3w_override, dtype=dtype)
             if e3w_ab.shape != q.shape:
