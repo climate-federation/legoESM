@@ -340,6 +340,141 @@ def _bicubic_interp_to_points(field, src_lat_deg, src_lon_deg,
 _NEMO_BICUBIC_CHANNELS = ("u10", "v10")
 
 
+# === gap 13, exact reproduction: read NEMO's OWN SCRIP weight files ==========
+#
+# The user chose exact reproduction over the method-equivalent Catmull-Rom
+# above. The oracle's weight files ARE on this machine (an earlier claim that
+# they were not was wrong and is retracted in the gap 13 commit):
+#
+#   cfgs/ORCA1/INPUTS/weights_coreII_2_eORCA1.4.2_bicubic.nc     (winds)
+#   cfgs/ORCA1/INPUTS/weights_coreII_2_eORCA1.4.2_bilinear.nc    (scalars)
+#   .../INPUTS/orca1_inputs/data_repository/input_fields/
+#       weights_reg05_bilinear.nc                                (chlorophyll)
+#
+# The copies sitting in EXP00/RUN_GATEWAY* are BROKEN SYMLINKS; use INPUTS.
+#
+# CONVENTIONS, every one of them MEASURED before any of this was written
+# (probe jobs recorded in scripts/cluster/omip_nemo/_scrip_*.sbatch):
+#   * variables srcNN / dstNN / wgtNN; destination shape (331, 360).
+#   * src holds 1-BASED FLAT indices in C order (lat-major) into the 94x192
+#     CORE-II grid, stored as FLOAT -- they must be cast before use.
+#   * the source latitude axis is used AS-IS (ascending). Proven with
+#     ANTISYMMETRIC test fields: a symmetric field such as cos(lat) cannot
+#     detect a latitude flip at all, which is how the first probe missed it.
+#   * the destination is the INTERIOR of our (332, 362) mesh, python
+#     [0:331, 1:361]. That is not inferred from arithmetic -- it is in the
+#     file's own history attribute, `ncks -F -d lon,2,361 -d lat,1,331`,
+#     i.e. drop both cyclic-overlap columns and the north-fold row.
+#   * ACCURACY: over the 113761 full 4-point stencils (95.5% of points) a
+#     LINEAR field is reproduced to a median 2.18e-08. The residual lives in
+#     5399 partial 2-point stencils and in 180 points in the ten northernmost
+#     rows, i.e. the tripolar fold.
+#
+# CAVEAT worth carrying: the files are named for eORCA1.4.2 while our mesh is
+# eORCA1.2. They are DIMENSIONALLY identical, which is why the indices line up,
+# but the coastline/land mask may differ in detail.
+_SCRIP_CACHE: dict = {}
+
+
+def load_scrip_weights(path):
+    """Read a NEMO/SCRIP remapping weights file.
+
+    Returns ``(src0, wgt, n)`` with ``src0`` the ZERO-based flat source indices
+    and ``wgt`` the raw weights, both ``(n, ny, nx)``. ``n`` is 4 for a
+    bilinear file and 16 for a bicubic one, and that count is what selects how
+    the weights are APPLIED -- see :func:`apply_scrip_weights`.
+    """
+    import xarray as xr
+    key = str(path)
+    cached = _SCRIP_CACHE.get(key)
+    if cached is not None:
+        return cached
+    with xr.open_dataset(path, decode_times=False) as d:
+        n = sum(1 for v in d.variables if str(v).startswith("src"))
+        if n not in (4, 16):
+            raise ValueError(
+                f"{path}: expected 4 (bilinear) or 16 (bicubic) weight "
+                f"triples, found {n}")
+        src = np.stack([np.asarray(d[f"src{k:02d}"]) for k in range(1, n + 1)])
+        wgt = np.stack([np.asarray(d[f"wgt{k:02d}"]) for k in range(1, n + 1)])
+    out = (src.astype(np.int64) - 1, np.asarray(wgt, dtype=np.float64), n)
+    _SCRIP_CACHE[key] = out
+    return out
+
+
+def _pad_source(field):
+    """One-cell halo: PERIODIC in longitude, edge-replicated in latitude.
+
+    NEMO builds the same padded array (``fly_dta``) so its bicubic stencil can
+    reach ni-1 and ni+1 around every corner. Longitude wraps because the
+    CORE-II grid is global; latitude replicates because it is not.
+    """
+    f = np.asarray(field, dtype=np.float64)
+    # Longitude: PERIODIC. NEMO first replicates the east-west edges and then,
+    # "if data grid is cyclic we can do better on east-west edges"
+    # (fldread.F90:1503), re-reads the wrap columns. CORE-II is a cyclic global
+    # grid, so the cyclic branch is the one that applies.
+    f = np.pad(f, ((0, 0), (1, 1)), mode="wrap")
+    # Latitude is NOT symmetric in NEMO, and this is easy to get wrong:
+    #   south edge  fly_dta(:,jpj1-1) = fly_dta(:,jpj1)            REPLICATE
+    #   north edge  fly_dta(:,jpj2+1) = 2*fly_dta(:,jpj2)
+    #                                   - fly_dta(:,jpj2-1)        EXTRAPOLATE
+    # (fldread.F90:1495-1499). Replicating BOTH ends -- which is what this
+    # function did first -- flattens the gradient in the northernmost source
+    # row and therefore perturbs the Arctic derivative stencils.
+    south = f[:1]
+    north = 2.0 * f[-1:] - f[-2:-1]
+    return np.concatenate([south, f, north], axis=0)
+
+
+def apply_scrip_weights(field, src0, wgt, n, src_shape):
+    """Remap one 2-D source field through NEMO's own weights.
+
+    For a BILINEAR file (n=4) this is the obvious weighted sum. For a BICUBIC
+    file (n=16) IT IS NOT: NEMO's fld_interp (fldread.F90:1543-1574) uses the
+    first four weights on the VALUES and the other twelve on CENTRED
+    DERIVATIVES of the source field --
+
+        5-8   x  0.5  * (f[i+1, j] - f[i-1, j])          d/di
+        9-12  x  0.5  * (f[i, j+1] - f[i, j-1])          d/dj
+        13-16 x  0.25 * ((f[i+1,j+1] - f[i-1,j+1])
+                         - (f[i+1,j-1] - f[i-1,j-1]))    cross
+
+    -- which is why those sixteen weights do NOT sum to one (measured range
+    0.8168 to 1.2017). Treating them as value weights would produce a
+    plausible, wrong field rather than an error.
+    """
+    ny_s, nx_s = src_shape
+    p = _pad_source(np.asarray(field).reshape(ny_s, nx_s))
+    # ALL FOUR weight groups address the SAME four corners: NEMO reuses
+    # data_jpi/data_jpj across its four `DO jn = 1,4` loops and only the weight
+    # slice changes. So the geometry comes from the first four triples, and
+    # triples 5-16 must repeat those same source indices -- asserted here
+    # rather than assumed, because if they did not this whole reading of the
+    # file would be wrong.
+    corners = src0[:4]
+    if n == 16 and not np.array_equal(np.tile(corners, (4, 1, 1)), src0):
+        raise ValueError(
+            "bicubic weights do not repeat the same four source corners "
+            "across their four weight groups; the file layout is not what "
+            "fld_interp assumes")
+    j = corners // nx_s
+    i = corners - j * nx_s
+    # Corner value in padded coordinates.
+    val = p[j + 1, i + 1]
+    if n == 4:
+        return (val * wgt).sum(axis=0)
+    out = (val * wgt[:4]).sum(axis=0)
+    d_di = 0.5 * (p[j + 1, i + 2] - p[j + 1, i])
+    d_dj = 0.5 * (p[j + 2, i + 1] - p[j, i + 1])
+    cross = 0.25 * ((p[j + 2, i + 2] - p[j + 2, i])
+                    - (p[j, i + 2] - p[j, i]))
+    out = out + (d_di * wgt[4:8]).sum(axis=0)
+    out = out + (d_dj * wgt[8:12]).sum(axis=0)
+    out = out + (cross * wgt[12:16]).sum(axis=0)
+    return out
+
+
 # Cache of pre-computed conservative-regrid weights, keyed by
 # (src_lat_shape, src_lon_shape, src_lat_first, src_lon_first,
 #  dst_lat_shape, dst_lon_shape, dst_lat_first, dst_lon_first).
