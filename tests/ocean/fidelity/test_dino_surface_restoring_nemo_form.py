@@ -412,3 +412,82 @@ def test_the_inverted_heat_anomaly_would_not_pass_that_test():
     # small the test above would be pinning noise.
     scale = float(np.abs(right).max())
     assert float(np.abs(right - flipped).max()) > 1e-3 * scale
+
+
+# ----------------------------------------------- decision 32: the TIME LEVEL
+def test_the_restoring_flux_reads_the_before_tracer_not_the_now_tracer():
+    """NEMO evaluates the restoring flux on ``Kbb``; legoESM read ``Nnn``.
+
+    ``usrdef_sbc.f90:388`` (salt) and ``:436-438`` (heat) read
+    ``ts(ji,jj,1,jn,Kbb)`` and nothing else, and ``sbc`` is reached as
+    ``CALL sbc( kstp, Nbb, Nnn )`` (``stpmlf.f90:173``), so that ``Kbb`` IS
+    the step's before level.
+
+    The check is a DISPLACEMENT, not an inspection: the same state is scored
+    twice, once with ``T_before``/``S_before`` unset and once with them set to
+    a field that differs by a known constant.  If the applicator read the NOW
+    tracer the two would be identical, which is exactly the synthetic
+    violation this test exists to catch.
+    """
+    dm, cfg, grid, z, state, forcing = _dino_card()
+    dT = 0.37                       # K, and psu for the salt twin
+    dS = -0.11
+    _, rate_now = dm.apply_dino_lat_lon_surface_forcing(
+        state, forcing, z, cfg, DT, t_seconds=DT, return_rate=True)
+    displaced = state._replace(
+        T_before=state.T.replace(data=state.T.data + dT),
+        S_before=state.S.replace(data=state.S.data + dS))
+    _, rate_bef = dm.apply_dino_lat_lon_surface_forcing(
+        displaced, forcing, z, cfg, DT, t_seconds=DT, return_rate=True)
+
+    t_now = np.asarray(rate_now[0])[..., 0]
+    t_bef = np.asarray(rate_bef[0])[..., 0]
+    s_now = np.asarray(rate_now[1])[..., 0]
+    s_bef = np.asarray(rate_bef[1])[..., 0]
+    wet = np.asarray(state.land_mask.data) > 0.5
+    assert wet.sum() > 1000
+    assert not np.array_equal(t_now[wet], t_bef[wet]), (
+        "displacing T_before by 0.37 K left the heat rate unchanged: the "
+        "applicator is still reading the NOW tracer (usrdef_sbc.f90:436)")
+    assert not np.array_equal(s_now[wet], s_bef[wet]), (
+        "displacing S_before by 0.11 psu left the salt rate unchanged: the "
+        "applicator is still reading the NOW tracer (usrdef_sbc.f90:388)")
+
+    # And the SIZE is the statement's own: NEMO's flux is linear in the
+    # tracer, so a constant displacement moves the rate by exactly
+    # r1_rho0_rcp*rn_trp*dT/e3t(1) (heat) and r1_rho0*rn_srp*dS/e3t(1) (salt).
+    dz0 = float(np.asarray(z.dz_ref)[0])
+    want_t = (1.0 / (cfg.rho_0 * cfg.c_p)) * (-cfg.A_theta) * dT / dz0
+    want_s = (1.0 / cfg.rho_0) * (-cfg.A_S) * dS / dz0
+    got_t = (t_bef - t_now)[wet]
+    got_s = (s_bef - s_now)[wet]
+    assert np.allclose(got_t, want_t, rtol=1e-12, atol=0.0), (
+        f"heat rate moved by {got_t.mean():.6e} K/s, NEMO's statement says "
+        f"{want_t:.6e}")
+    assert np.allclose(got_s, want_s, rtol=1e-12, atol=0.0), (
+        f"salt rate moved by {got_s.mean():.6e} psu/s, NEMO's statement says "
+        f"{want_s:.6e}")
+
+
+def test_a_state_with_no_before_level_is_byte_unchanged_by_decision_32():
+    """Rule 12: a card whose outer integrator carries no before level.
+
+    ``T_before``/``S_before`` default to ``None`` (``state.py:607-608``) and
+    only the leap-frog integrator populates them, so every non-leap-frog
+    caller of the shared applicator must be BIT-IDENTICAL.  This pins that as
+    a measurement rather than an argument, on the real applicator.
+    """
+    dm, cfg, grid, z, state, forcing = _dino_card()
+    assert state.T_before is None and state.S_before is None
+    _, rate = dm.apply_dino_lat_lon_surface_forcing(
+        state, forcing, z, cfg, DT, t_seconds=DT, return_rate=True)
+    # The NOW tracer is the fallback, so setting the before level to the NOW
+    # field reproduces it BIT for BIT -- the Euler-start case NEMO has at
+    # kt=nit000, where usr_def_istate has filled both slots identically.
+    same = state._replace(T_before=state.T, S_before=state.S)
+    _, rate2 = dm.apply_dino_lat_lon_surface_forcing(
+        same, forcing, z, cfg, DT, t_seconds=DT, return_rate=True)
+    for a, b, tag in ((rate[0], rate2[0], "T"), (rate[1], rate2[1], "S")):
+        d = np.abs(np.asarray(a) - np.asarray(b))
+        assert d.max() == 0.0, (
+            f"{tag}: the None fallback is not the NOW tracer (max {d.max():.3e})")

@@ -4715,8 +4715,35 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
         1.0 / cfg.rho_0,               # r1_rho0       phycst.f90:53
         dz_0_live,                     # e3t(:,:,1,Kmm)  trasbc.f90:170
     )
+    # THE FLUX'S TIME LEVEL (user decision 32, PR #1728).  NEMO evaluates the
+    # restoring flux on the BEFORE tracer -- every tracer read in usr_def_sbc's
+    # DINO branch is Kbb, and `sbc` is reached as `CALL sbc( kstp, Nbb, Nnn )`
+    # (stpmlf.f90:173), so that Kbb IS the step's before level:
+    #   usrdef_sbc.f90:388  sfx = ( rn_srp * ( ts(ji,jj,1,jp_sal,Kbb)
+    #                                          - zsstar ) ) * tmask(:,:,1)
+    #   usrdef_sbc.f90:436  qns = ( rn_trp * ( ts(ji,jj,1,jp_tem,Kbb)
+    #                                          - ztstar )
+    #                       :437        - emp * ts(ji,jj,1,jp_tem,Kbb) * rcp
+    #                       :438        - zqsr_dayMean ) * tmask(:,:,1)
+    # legoESM read its NOW tracer.  Sized off NEMO's own two restarts, with no
+    # model run, at 0.961 of the kt=2 temperature residual
+    # (kt1_surface_gate.py --kt2-dir).
+    #
+    # NO NEW CARRIED STATE and NO KNOB: T_before/S_before (state.py:607-608)
+    # are the leap-frog card's OWN Nbb fields, already carried.  A card whose
+    # outer integrator has no before level has them None and takes the NOW
+    # tracer exactly as before -- byte-unchanged by construction.
+    #
+    # THE EULER-START CASE.  Nbb and Nnn are distinct slots from
+    # nemogcm.f90:368 onward, so NEMO never aliases them; what makes kt=1
+    # insensitive is that usr_def_istate fills BOTH with the same field.
+    # legoESM's equivalent is T_before is None on the forward-Euler first step
+    # (NEMO's l_1st_euler), which is why the fallback below is the NOW tracer
+    # and why step 1 is bit-identical.
+    _T_sbc = state.T_before if state.T_before is not None else state.T
+    _S_sbc = state.S_before if state.S_before is not None else state.S
     rest_out = restoring_surface_forcing(
-        state.T.data, state.S.data, _LatLonGridShim(state, cell_mask),
+        _T_sbc.data, _S_sbc.data, _LatLonGridShim(state, cell_mask),
         restoring_cfg,
         sw_down=Q_sr_2d, dt=dt,
         rho_0=cfg.rho_0, c_p=cfg.c_p, dz_0=dz_0_live,
