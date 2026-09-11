@@ -709,12 +709,19 @@ def self_check() -> int:
     print(f"  year   model config argument: {year_arg}")
     if "model_config" not in ladder_arg and "cfg" not in ladder_arg:
         failures.append("ladder model-config argument reader")
-    expect_raises("config-drift", lambda: config_diff(plant="config-drift")
-                  and require(not config_diff(plant="config-drift")[
-                      "differing_fields"], "config-drift left no row"))
+    # Each plant must be REFUSED.  A plant that merely changes a number the
+    # gate prints is not a plant; these all have to reach an exception.
+    def _drift():
+        rows = config_diff(plant="config-drift")["differing_fields"]
+        require(not rows, f"config-drift is visible: {rows}")
+
+    expect_raises("config-drift", _drift)
     expect_raises("same-program-while-different", _plant_same_program)
+    expect_raises("state-drift", lambda: config_diff(plant="state-drift"))
     expect_raises("missing-function", lambda: model_construction_kwargs(
         LADDER_GATE, "no_such_function"))
+    expect_raises("oracle-floor-against-itself", lambda: oracle_floor(
+        steps=2, roots=(ORACLE_V1_ROOT, ORACLE_V1_ROOT)))
     for name in failures:
         print(f"  FAILED: {name}")
     return 1 if failures else 0
@@ -737,7 +744,10 @@ def main(argv=None) -> int:
     parser.add_argument("--score-both-roots", action="store_true")
     parser.add_argument("--closure-ablation", action="store_true")
     parser.add_argument("--self-check", action="store_true")
-    parser.add_argument("--steps", type=int, default=2)
+    parser.add_argument("--steps", type=int, default=2,
+                        help="how many step boundaries to walk; "
+                             "--oracle-floor and "
+                             "--score-both-roots read it too")
     parser.add_argument("--entry-root", type=Path, default=ORACLE_V2_ROOT,
                         help="the oracle record to score against; v2 is what "
                              "the certified receipts pass")
@@ -760,7 +770,7 @@ def main(argv=None) -> int:
     if args.config_diff:
         report["config_diff"] = config_diff(plant=args.plant)
     if args.oracle_floor:
-        report["oracle_floor"] = oracle_floor()
+        report["oracle_floor"] = oracle_floor(steps=args.steps)
     if args.score_both_roots:
         report["score_both_roots"] = score_both_roots(steps=args.steps)
     if args.closure_ablation:
