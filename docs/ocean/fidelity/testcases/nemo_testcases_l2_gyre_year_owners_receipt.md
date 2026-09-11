@@ -248,6 +248,13 @@ The STEP table, which is what carries the verdict, is in
 `year_owners/step_gap.json`; the eleven-order jump is between its `kt = 2` and
 `kt = 3` rows and nowhere else in sixty steps.
 
+The `leads` column uses normalizer **(a)** of section 4 (gap over NEMO's own
+from-rest change).  Under normalizer **(b)** (gap over the field's own standard
+deviation) `u` and `v` lead every day, because for a field that starts at rest
+the two normalizers coincide and `u`/`v` are the only rows that do not move
+between them.  Both are in section 4; the column is labelled rather than
+silently carrying one choice.
+
 | expectation | bound | measured | verdict |
 |---|---|---|---|
 | **E1** day-1 `T3D` above `1e-4` K | `> 1e-4` | `2.6994e-03` K | **HELD** |
@@ -578,10 +585,16 @@ Its findings are recorded in the round's commits.
 
 ## 10.  OPEN, RANKED
 
-1. **Name the operator inside step 2.**  Restart NEMO from the step-1 restart
-   and run ONE step with the card's own stage writers, then compare stage by
-   stage.  This is the whole campaign's next measurement: everything else in
-   the GYRE year is downstream of it.
+1. **Name the operator inside step 2, stage by stage.**  Section 1b establishes
+   that step 2 makes a `4.15e-04` K difference on NEMO's own inputs, on 17999
+   of 18000 cells.  It does not say WHICH of the step's operators does it.  The
+   card's own stage writers (`l1_dump_stage`, `l1_dump_rhs`, `l2_dump_zdf`,
+   `l1_dump_bt_frames`) fire at `kstp == nit000` only, so the measurement is:
+   restart NEMO from its own kt=1 restart so that step 2 BECOMES `nit000`, then
+   compare the three RK3 stages one at a time against legoESM seeded from the
+   same entry state.  That is a config copy and a one-step run, and it is the
+   whole campaign's next measurement: everything else in the GYRE year is
+   downstream of it.
 2. **Run the early-days acquisition** so days 10-29 stop being a gap in the
    record.
 3. **Census the non-convective `K_v` above `100` m2/s** to decide whether
