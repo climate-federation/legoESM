@@ -230,6 +230,37 @@ Every salt row equals the closed form `dt/(tau_S+dt)` to 1e-9, which is what
 makes the sweep a measurement rather than a restatement. Largest stability
 margin 1.3e-03, i.e. every card is ~770x inside the explicit bound.
 
+## §7b — THE YEAR, measured
+
+360 days from rest on the shipped card
+(`nemo_faithful_kamm_mlf.yaml`, `--days 360 --snapshot-every-days 30`), scored
+by `twin_nemo_ts_maps.py --run-dino-dir` against NEMO's own trajectory at the
+matched steps (days 30/60/90/180 vs `RUN_TRAJ` kt 960/1920/2880/5760; day 360 vs
+`RUN_FROMREST_Y1` kt 11520).  3-D wet-masked T rms, fp64 both sides, 339744 of
+354600 cells wet.
+
+| day | 30 | 60 | 90 | 180 | 360 |
+|---|---|---|---|---|---|
+| BEFORE [K] | 2.039e-03 | 2.157e-03 | 2.304e-03 | 4.590e-03 | 3.924e-03 |
+| **AFTER [K]** | **9.138e-04** | **1.212e-03** | **1.808e-03** | **3.133e-03** | **3.690e-03** |
+| after / before | 0.448 | 0.562 | 0.785 | 0.683 | 0.940 |
+| Phase-0 spread floor [K] | 1.2e-05 | — | 8.8e-04 | 1.4e-03 | 5.5e-03 |
+| gap / (2 x floor) | 81.8 -> **38.1** | — | 1.31 -> 1.03 | 1.64 -> 1.12 | 0.36 -> 0.34 |
+
+Read the LEFT of that table, not the right.  Phase 0 already established that
+the floor grows 437x over the year while the gap grows ~1.9x, so by day 180 the
+floor is the same size as the gap and days 180/360 cannot discriminate anything.
+Day 30, where the floor is 1.2e-05 K, is the informative column: **the gap fell
+55%**, from 81.8 to 38.1 times the distinguishability threshold.  It did not
+reach the floor, and §2's L5/L6 (the Kbb time level and the two-step flux
+average) are the registered reason it was not expected to.
+
+The model that produced this year is BIT-IDENTICAL to the committed tree: a
+one-step re-run after every later edit reproduces
+`snapshot_00001.npz` sha256 `5d0256a12d03c3fcbf53bb458b652b8314fd8437478fdda3082358696d643feb`,
+so the operand-diagnostics and gate edits that landed after the run are inert on
+the model, as claimed rather than assumed.
+
 ## §8 — ASKED / UNASKED
 
 **ASKED, one line, and the work does not depend on the answer.**
