@@ -1384,7 +1384,8 @@ def main(argv=None):
     print(f"port constants: kappa = {FV3_KAPPA!r}  cp_air = {FV3_CP_AIR!r}")
     print(f"                (2/7 = {2/7!r}; rel diff "
           f"{abs(FV3_KAPPA - 2/7)/(2/7):.3e})")
-    print(f"step arm: backend={args.backend} batched={args.batched}")
+    print(f"step arm: backend={args.backend} batched={args.batched} "
+          f"compiled={args.jit}")
 
     ctx = build_six_face_duo_context(N, NG, use_ext_bundle=True,
                                      use_ext_metrics=args.ext_metrics,
@@ -2054,6 +2055,7 @@ def main(argv=None):
         with open(args.json, "w") as fh:
             json.dump({"ic_worst_rel": worst, "step_worst_rel": worst_step,
                        "batched": args.batched,
+                       "compiled": args.jit,
                        "n_steps": args.n_steps,
                        "step_run": args.step_run,
                        "face_map": [{"port_face": pf + 1,

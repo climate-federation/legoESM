@@ -21,6 +21,7 @@ oracle output, which is not in the tree.
 
 import ast
 import inspect
+import re
 from pathlib import Path
 
 import numpy as np
@@ -29,7 +30,8 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[2]
 _JOB_DIR = _ROOT / "scripts" / "cluster" / "fv3_native"
 _JOB = _JOB_DIR / "full_step_backend_parity.sbatch"
-_JOBS = [_JOB, _JOB_DIR / "full_step_batched_parity.sbatch"]
+_BATCHED_JOB = _JOB_DIR / "full_step_batched_parity.sbatch"
+_JOBS = [_JOB, _BATCHED_JOB]
 _SCORER = _ROOT / "scripts" / "validate" / "fv3_native" / "full_step_oracle_parity.py"
 
 

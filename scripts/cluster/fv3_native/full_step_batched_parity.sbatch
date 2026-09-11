@@ -31,6 +31,8 @@ export PYTHONPATH=$REPO/packages/core:$REPO/packages/atmosphere:$REPO/src
 export JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu
 cd "$REPO"
 H=scripts/validate/fv3_native/full_step_oracle_parity.py
+JIT="${JIT:-0}"
+JFLAG=""; [ "$JIT" = 1 ] && JFLAG="--jit"
 
 echo "########## 1. the dispatch test, as written"
 $PY -m pytest tests/grids/test_fv3_duo_parity_harness.py -q 2>&1 | tail -5
@@ -68,7 +70,7 @@ mkdir -p "$OUT"
 for BAT in loop batched; do
   FLAG=""; [ "$BAT" = batched ] && FLAG="--batched"
   echo "########## 3. ARM=$ARM jax $BAT"
-  timeout 14400 $PY "$H" --backend jax $FLAG $EXTRA \
+  timeout 14400 $PY "$H" --backend jax $FLAG $JFLAG $EXTRA \
     --json "$OUT/${BAT}.json" > "$OUT/${BAT}.log" 2>&1
   RC=$?
   echo "rc=$RC"
@@ -79,7 +81,7 @@ for BAT in loop batched; do
 done
 
 echo "########## 4. ARM DELTA (batched vs loop, same everything else)"
-$PY - "$OUT/loop.json" "$OUT/batched.json" <<'PYEOF'
+$PY - "$OUT/loop.json" "$OUT/batched.json" "$JIT" <<'PYEOF'
 import json, sys
 try:
     a = json.load(open(sys.argv[1])); b = json.load(open(sys.argv[2]))
@@ -88,6 +90,12 @@ except Exception as e:
 assert a.get("batched") is False and b.get("batched") is True, (
     "the two runs do not record the arms they claim: "
     f"{a.get('batched')} / {b.get('batched')}")
+expected_compiled = sys.argv[3] == "1"
+assert (a.get("compiled") is expected_compiled
+        and b.get("compiled") is expected_compiled), (
+    "the two runs do not record the compiled arm they claim: "
+    f"{a.get('compiled')} / {b.get('compiled')} "
+    f"(expected {expected_compiled})")
 def flat(d, p=""):
     for k, v in (d or {}).items():
         if isinstance(v, dict):
