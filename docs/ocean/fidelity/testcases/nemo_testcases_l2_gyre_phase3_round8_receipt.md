@@ -5919,7 +5919,7 @@ cells on `u` and `2220` signed-zero flips on `v` (IEEE `-0.0 + 0.0 = +0.0`).
 legoESM was adding `8.256e-10` there because it evaluated the same operator on
 the STAGE velocity.  The shared seam for the BEFORE-level operand already
 existed and the leap-frog path already used it
-(`ocean_pe_latlon_cgrid.py:5034-5035`); the WS-RK3 stage RHS simply did not
+(`ocean_pe_latlon_cgrid.py:5038-5039`); the WS-RK3 stage RHS simply did not
 pass it.  Landed at `7521513a54c3` in that one shared place, no card switch,
 no new knob.  Stage 1 hands the helper the step-entry velocity already, so only
 the stage-3 call moves, and stage 2 never calls the operator.
@@ -6091,7 +6091,7 @@ thicknesses — `e3t`/`e3u`/`e3v` at `Kbb` inside the divergence
 (`dynldf_lev_rot_scheme.h90:28-29`), `e3f` carrying no time index at all
 (`dynldf_lev_rot_scheme.h90:24-25`), and `e3u`/`e3v` at `Kmm` in the final
 division.  legoESM's lateral operator receives ONE thickness: a single `h_k`
-argument at `ocean_pe_latlon_cgrid.py:5041`, built from the stage's own live
+argument at `ocean_pe_latlon_cgrid.py:5045`, built from the stage's own live
 `eta`, which at stage 3 is the `Kmm` sea level.  So after this round the
 velocity operand is NEMO's and the thickness operand is not.  **CONFIRMED by
 reading, UNMEASURED in size**: at kt=1 the whole term is exactly zero, so no
@@ -6512,7 +6512,7 @@ it moot.
 
 **legoESM cannot evaluate the changed operator on ORCA2 at all.**  The card
 selects `nemo_div_curl` with `A_h = 1e5`, and that branch refuses a tripolar
-grid: `ocean_pe_latlon_cgrid.py:3262-3265` raises unless the grid carries a
+grid: `ocean_pe_latlon_cgrid.py:3266-3269` raises unless the grid carries a
 positive scalar `dlon`, and ORCA2's is `0.0`.  That is why the existing ORCA2
 phase-2 gate zeroes `A_h` in its discarded tendency.  A second gap sits behind
 it: ORCA2 resolves `nn_ahm_ijk_t = -30`, i.e. `ahmt_3d`/`ahmf_3d` read from
@@ -9933,7 +9933,7 @@ the pre-change model.
 | GYRE-zco, kt=2 | YES | the round-38 record, `ah_wslp2` absolute maximum `3.3898494597440722e-08` | given NEMO's OWN before state: **DEBT**, 17400 / 17400 wet faces, max `3.3884e-08`, max relative `2.63`; legoESM's fold reaches `1.1728064666279615e-10`, 289x smaller.  Owner: the isoneutral SLOPE TRANSCRIPTION, which this round did not touch |
 | LOCK_EXCHANGE-zco | NO | legoESM resolves `gm_redi = None`; NEMO resolves `ln_traldf_OFF = T`, `ln_traldf_iso = F` (`lock_kt1_10/ocean.output:578`, `lock_kt1_10/ocean.output:584`), so `l_ldfslp = F` and `ldf_slp` is never called | kt=1..10 **BIT-IDENTICAL** before and after: the residual artifact's SHA-256 is the same on both arms, all 20 scored rows unmoved |
 | OVERFLOW-zps | NO | same, `overflow_kt1_10/ocean.output:690`, `overflow_kt1_10/ocean.output:696` | kt=1..10 **BIT-IDENTICAL**, same residual SHA-256, all 10 scored rows unmoved |
-| `build_nemo_gyre_recipe` (`fidelity/nemo_recipe.py:926`) | YES | the diff review's scope sweep: `gm_redi` on with `kappa_GM = 600`, `rk3_ws` on both integrators | **UNMEASURED WITH SPEC** — it has no trajectory gate.  Spec: the same operand gate driven off a record this configuration does not have.  Its committed tests are in the suite below |
+| `build_nemo_gyre_recipe` (`fidelity/nemo_recipe.py:941`) | YES | the diff review's scope sweep: `gm_redi` on with `kappa_GM = 600`, `rk3_ws` on both integrators | **UNMEASURED WITH SPEC** — it has no trajectory gate.  Spec: the same operand gate driven off a record this configuration does not have.  Its committed tests are in the suite below |
 | ORCA2 | UNKNOWN | no card on this branch | **UNMEASURED WITH SPEC**, unchanged |
 | DINO / every other integrator | NO | `_ldf_state` wins, and no other lane sets `tracer_time_integrator = "rk3_ws"` | untouched by construction; a test asserts the guard keeps both conditions |
 
@@ -10955,8 +10955,8 @@ files must be committed before the operator runs it.  No NEMO executable,
 | statement | NEMO's compiled GYRE program | legoESM statement | finding before measurement |
 |---|---|---|---|
 | dispatch and time level | `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynadv.f90:134-138` calls KEG then ZAD with `Kmm`; the stage diagnoses `ww` from `uu/vv(Kmm)` immediately beforehand at `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/stprk3_stg.f90:326-332` | stage-3 vector-invariant C2 KE plus NEMO-advective ZAD, on the stage-2 state | branch/time level ALIGNED |
-| C2 KEG | `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynkeg.f90:117-130` rounds `zu`, rounds `zv`, forms `0.25*(zv+zu)`, then differences it and multiplies stored reciprocal metrics | `ocean_pe_latlon_cgrid.py:1884-1914` exposes one four-square expression to the compiler, then the shared gradients | algebra ALIGNED; association NOT ALIGNED and the preregistered owner |
-| ZAD transport/thickness | `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynzad.f90:105-137` sums adjacent `e1e2t*ww`, multiplies a Kmm velocity difference, and scales with live Kmm face thickness | `ocean_pe_latlon_cgrid.py:3028-3054` area-weights/interpolates `ww` and calls the one shared NEMO-advective helper with Kmm thickness | algebra ALIGNED; reciprocal and accumulation association UNMEASURED |
+| C2 KEG | `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynkeg.f90:117-130` rounds `zu`, rounds `zv`, forms `0.25*(zv+zu)`, then differences it and multiplies stored reciprocal metrics | `ocean_pe_latlon_cgrid.py:1884-1918` now materializes the four products and source-ordered pair sums; round 41's pre-measurement one-expression observation is RETRACTED | exact association landed in round 42 |
+| ZAD transport/thickness | `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/dynzad.f90:105-137` sums adjacent `e1e2t*ww`, multiplies a Kmm velocity difference, and scales with live Kmm face thickness | `ocean_pe_latlon_cgrid.py:3032-3058` area-weights/interpolates `ww` and calls the one shared NEMO-advective helper with Kmm thickness | algebra ALIGNED; reciprocal and accumulation association UNMEASURED |
 | `ww` / `wsd` | `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/sshwzv.f90:271-298` builds `ww` bottom-up from Kmm velocity and the Kaa-Kbb QCO stretch.  Resolved `ln_wave=F` takes `GYRE_OMIP_L2_P3_SM_R40STG3TRM/BLD/ppsrc/nemo/sbcwave.f90:408-423`, which returns before allocating `wsd` at `:469-477`; ZAD therefore takes its `ww`-only arm | the coupled QCO seam provides stage-consistent `ww`; no Stokes vertical velocity is added | branch ALIGNED; numerical identity UNMEASURED |
 
 **PREREGISTERED PREDICTION.**  KEG carries the first non-bit statement and the
@@ -11013,3 +11013,71 @@ stretch statements.  No historical wording needed alteration.
 
 UNASKED list: **empty**.  The merge verdict remains **HOLD** until the record
 is returned and kt=2 U/V clear the exact bar.
+
+## Round 42 — admitted `dyn_adv`, exact C2/`ldf_slp` statements, decision 23
+
+### Round-41 blocker retraction and calibration
+
+The real stream header decodes to
+`(version,kt,kstg,Kbb,Kmm,Krhs,Kaa,nn_dynkeg)=(1,1,3,2,2,3,3,0)`.
+The former Kbb=1 admission rule is **RETRACTED**: this build calls
+`dyn_adv(kstp,Kmm,Kmm,...)` at
+`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:466-472`, and the
+writer records those local arguments at
+`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynadv.f90:176-185`.
+The model-side halo contract is last-owned-column substitution in x and zero
+in y.
+
+The independent source-order calibration is 0 unequal for KEG U/V, ZAD U/V,
+and round-40 closure U/V.  The wrong four-square KEG association and wrong
+reference-thickness ZAD divisor both fail; header, calibration, closure,
+stamp, KEG and ZAD plants all exit nonzero.  Given NEMO operands, before the
+fix KEG is DEBT on U (2/17400, 5.169878828456423e-26, relative
+2.887126798214743e-13) and V (2/17100, 2.5849394142282115e-26, relative
+1.028551927420229e-13); ZAD is exact on both.  The preregistered verdict is
+**CONFIRMED**.  NEMO separately evaluates the four square products, then the
+two sums and `0.25*(zv+zu)` at
+`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynkeg.f90:117-130`.
+Materializing that source association in the one shared C2 path makes all
+four KEG/ZAD rows 0 unequal.
+
+### Decision 23 and compiled `ldf_slp` walk
+
+The shared NEMO identity now selects `n2_integral`; DINO already resolves the
+same value and is unchanged.  On NEMO's kt=2 state, `nmln` and live `hmlp`
+are each 0/600 unequal.  This is the compiled positive-N2 integral and live
+depth path at
+`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/zdfmxl.f90:109-123`.
+
+After that decision the first non-bit statement is the stored-reciprocal
+metric multiplication at
+`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/ldfslp.f90:222-232`: division
+misses 6413 U and 6236 V values; multiplication is exact.  With the compiled
+live face/depth and source-parenthesized W/Shapiro associations at
+`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/ldfslp.f90:235-275` and
+`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/ldfslp.f90:284-333`, the model's
+own path gives 0 unequal for zau, zav, uslp, vslp, wslpi and wslpj.  Feeding
+those four recorded slopes through the shared A33 fold also gives 0/17400.
+The card's end-to-end K33 residual remains 1.4583733349836258e-10
+(17400/17400): the remaining 0.43%-of-NEMO-maximum boundary is upstream
+model-side prd/rn2 production, not `ldf_slp` or A33.  It is **DEBT**, never
+DISCHARGED.
+
+### Rule 12 and gates
+
+GYRE kt=1 is exact.  Its first-over-bar remains kt=2 U/V before and after:
+2.7478404751243857e-12 and 3.305560306813421e-12.  The exact criterion first
+moves the kt=2 tracer update, visible at the kt=3 before-state boundary; all
+70 trajectory rows and 53 worsening rows are registered in
+`round42_before_to_final_GYRE_compare.json`.  The stage-3 advection U maximum
+moves 2.0614443630503727e-16 to 2.0614443630503688e-16; V remains
+2.482727869951749e-16.  LOCK_EXCHANGE and OVERFLOW resolve flux-form momentum
+and no GM/Redi, so neither changed statement executes; their independent
+kt=1..10 comparisons are bit-identical.  ORCA2 remains **UNMEASURED WITH
+SPEC**: acquire native tripolar prd/rn2/slopes/A33 and vector-advection records,
+then its kt=1..10 trajectory.
+
+Round-42 gate reports and SHA-256 evidence are under
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round42/`.  ASKED: decision
+23 and exact compiled statements.  UNASKED: empty.  No NEMO source, build, or
+executable was touched.

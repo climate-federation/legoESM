@@ -6,6 +6,10 @@ The record is inadmissible until two independent source-order replays update
 rows then execute legoESM's own C2 KE-gradient and shared NEMO-advective ZAD
 paths on the dumped NEMO operands.  Exactness and the operator-relative
 ``1e-15`` bar are separate; only zero unequal cells can be DISCHARGED.
+
+The model-side one-sided halo convention is explicit: the last owned column is
+substituted at the x seam, while the missing y row is zero.  These are the
+native GYRE card conventions consumed by the shared model paths below.
 """
 from __future__ import annotations
 
@@ -69,7 +73,7 @@ def read_split(path: Path, *, plant_header: bool = False) -> dict:
         require(
             tuple(header[k] for k in ("version", "kt", "kstg", "Kbb", "Kmm",
                                       "Krhs", "Kaa", "nn_dynkeg"))
-            == (1, 1, 3, 1, 2, 3, 3, 0),
+            == (1, 1, 3, 2, 2, 3, 3, 0),
             f"{path}: wrong stage/branch header {header}",
         )
         require((header["jpi"], header["jpj"], header["jpk"], header["jpkm1"],
@@ -392,6 +396,11 @@ def run(record: Path, *, round40_root: Path, expect_commit: str,
     first = next((op for op in ("keg", "zad")
                   if any(r["status"] == "DEBT" and f".{op}." in r["name"]
                          for r in rows)), None)
+    keg_debt = any(r["status"] == "DEBT" and ".keg." in r["name"]
+                   for r in rows)
+    zad_debt = any(r["status"] == "DEBT" and ".zad." in r["name"]
+                   for r in rows)
+    prediction_verdict = "CONFIRMED" if keg_debt and not zad_debt else "REFUTED"
     status = "AT-BAR" if first is None else "DEBT"
     if plant in {"keg", "zad"}:
         planted = next(r for r in rows
@@ -405,6 +414,7 @@ def run(record: Path, *, round40_root: Path, expect_commit: str,
         "jax_backend": model["backend"],
         "rows": rows,
         "first_operator_over_bar": first,
+        "preregistered_prediction_verdict": prediction_verdict,
         "status": status,
     }
 
@@ -431,6 +441,8 @@ def main(argv=None) -> int:
               f"unequal {row['n_unequal']}/{row['n']} "
               f"max {row['absolute_max']:.17g} rel {row['relative_max_abs']:.6g}")
     print("FIRST-OPERATOR-OVER-BAR", report.get("first_operator_over_bar"))
+    print("PREREGISTERED-VERDICT",
+          report.get("preregistered_prediction_verdict", "UNMEASURED"))
     print("STATUS", report["status"])
     if args.plant:
         return 1

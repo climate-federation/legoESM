@@ -676,9 +676,9 @@ def test_native_slopes_are_lon_translation_equivariant():
                     "(zero-ghost) dependence is back")
 
 
-def test_native_slope_legacy_selector_keeps_output_bits_and_skips_barriers(
+def test_native_slope_source_association_is_independent_of_prd_selector(
         monkeypatch):
-    """Explicit legacy selection retains the pre-row-30 numerical path."""
+    """Every native slope uses NEMO's association, whatever produced prd."""
     import legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid as gm
     from legoesm.ocean.eos import make_eos_fn
     from legoesm.ocean.physics.lateral_mixing.config import GMRediConfig
@@ -700,10 +700,14 @@ def test_native_slope_legacy_selector_keeps_output_bits_and_skips_barriers(
         rho, jnp.asarray(T), jnp.asarray(S), mask, umask, vmask, z, grid,
         GMRediConfig(), eos_fn, active_3d=z.is_active)
 
-    def barrier_must_not_run(_value):
-        raise AssertionError("literal association reached the legacy card")
+    calls = 0
 
-    monkeypatch.setattr(gm.lax, "optimization_barrier", barrier_must_not_run)
+    def count_barrier(value):
+        nonlocal calls
+        calls += 1
+        return value
+
+    monkeypatch.setattr(gm.lax, "optimization_barrier", count_barrier)
     explicit = gm.compute_nemo_native_slopes(
         rho, jnp.asarray(T), jnp.asarray(S), mask, umask, vmask, z, grid,
         GMRediConfig(
@@ -711,6 +715,7 @@ def test_native_slope_legacy_selector_keeps_output_bits_and_skips_barriers(
             slope_prd_geometry_stage="current_step",
             slope_n2_evaluation="recompute"),
         eos_fn, active_3d=z.is_active)
+    assert calls > 0, "the native NEMO source association was bypassed"
     for implicit, selected in zip(default, explicit):
         np.testing.assert_array_equal(np.asarray(selected), np.asarray(implicit))
 

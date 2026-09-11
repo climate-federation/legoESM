@@ -19,7 +19,7 @@
       "operator": "dispatch/time level",
       "nemo": "stage 3: dyn_keg then dyn_zad; both consume uu/vv(Kmm=N+1/2)",
       "legoesm": "stage-3 model RHS, vector_invariant C2 KE plus nemo_advective vertical term, consumes the stage-2 state",
-      "finding": "ALIGNED; the acquisition header must be kt=1,kstg=3,Kbb=1,Kmm=2,Krhs=3,Kaa=3"
+      "finding": "CORRECTED AFTER REVIEW: the decoded acquisition header is kt=1,kstg=3,Kbb=2,Kmm=2,Krhs=3,Kaa=3. The earlier Kbb=1 expectation is RETRACTED: compiled stprk3_stg.f90:469 passes Kmm in both dyn_adv index positions, and dynadv.f90:184 records those local arguments."
     },
     {
       "operator": "KEG C2",

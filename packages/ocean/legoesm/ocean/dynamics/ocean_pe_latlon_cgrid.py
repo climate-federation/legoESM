@@ -1886,13 +1886,17 @@ def _bc_ke_and_pressure_gradients(
             #   zu = u(i-1,j)² + u(i,j)² ; zv = v(i,j-1)² + v(i,j)²
             #   zhke(T) = 0.25 * (zu + zv)
             # MEAN-of-squares of the surrounding faces (vs "centered"'s
-            # square-of-mean). Identical for uniform flow; C2 is smaller
-            # under shear, closing legoESM's ~26% keg overshoot vs NEMO.
+            # square-of-mean).  Preserve NEMO's three stored statements:
+            # separately round the U pair and V pair before adding them
+            # (compiled GYRE dynkeg.f90:121-125).
             # u(i-1,j)=u[:, :-1], u(i,j)=u[:, 1:]; v(i,j-1)=v[:-1], v(i,j)=v[1:].
-            KE = 0.25 * (
-                u[:, :-1, :] ** 2 + u[:, 1:, :] ** 2
-                + v[:-1, :, :] ** 2 + v[1:, :, :] ** 2
-            )
+            u_w_sq = nemo_source_round(u[:, :-1, :] * u[:, :-1, :])
+            u_e_sq = nemo_source_round(u[:, 1:, :] * u[:, 1:, :])
+            v_s_sq = nemo_source_round(v[:-1, :, :] * v[:-1, :, :])
+            v_n_sq = nemo_source_round(v[1:, :, :] * v[1:, :, :])
+            zu = nemo_source_round(u_w_sq + u_e_sq)
+            zv = nemo_source_round(v_s_sq + v_n_sq)
+            KE = nemo_source_round(0.25 * nemo_source_round(zv + zu))
         else:
             raise ValueError(
                 f"Unknown ke_gradient_scheme: {config.ke_gradient_scheme!r}. "
