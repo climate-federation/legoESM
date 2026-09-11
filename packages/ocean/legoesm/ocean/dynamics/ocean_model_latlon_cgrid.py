@@ -1019,6 +1019,14 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # ``_step_impl`` eagerly to obtain internals, because eager execution does
     # not certify the compiled production arithmetic.
     expose_barotropic_substeps: bool = False
+    # Return every already-materialized operand from the one compiled WS-RK3
+    # stage program.  Private WRITE-only round-51 instrument; no constructible
+    # model configuration can select it.
+    expose_live_stage_operands: bool = False
+    # Substitute NEMO's six raw b/bb arrays at the barotropic loop entry while
+    # leaving legoESM's deviation-form carried state untouched.  Private
+    # decision-33 measurement only.
+    barotropic_raw_history_override: object = None
     # Private companion for the 19-frame OVERFLOW causal gate. ``None``
     # preserves the production predicate; ``False`` restores the legacy
     # velocity-form update while the trace still crosses the compiled return
@@ -1615,6 +1623,18 @@ class _NEMOWSBarotropicTrace(NamedTuple):
     slow_forcing: object
     slow_forcing_operands: object
     transport_average: object
+
+
+class _NEMOWSLiveOperandTrace(NamedTuple):
+    """Private WRITE-only operands returned by the round-51 live-path gate."""
+
+    state_after: object
+    stage_states: object
+    operator_operands: object
+    stage_geometry: object
+    stage_qco: object
+    stage_coefficients: object
+    barotropic_targets: object
 
 
 def _nemo_qsr_stage3_rate(
@@ -4637,6 +4657,7 @@ class LatLonCGridOceanModel:
                    _shortwave_tendency_test_delta=None,
                    _vertical_K_test_override=None,
                    _return_barotropic_substeps: bool = False,
+                   _return_live_stage_operands: bool = False,
                    _ldf_state=None, _tke_n2_bundle_override=None,
                    _return_raw_kaa_qco: bool = False,
                    z_coord=None, config=None, iwm_fields=None):
@@ -4864,7 +4885,8 @@ class LatLonCGridOceanModel:
                 _ws_face_thickness_kbb = _nemo_ws_qco_stage_faces(
                     state.eta.data, _ws_h_ref, _ws_u_live_mask,
                     _ws_v_live_mask, _grid)[:2]
-        tend = self.tendencies(state, surface_forcing, sponge=sponge, dt=dt,
+        _tend_result = self.tendencies(
+                               state, surface_forcing, sponge=sponge, dt=dt,
                                precomputed_geom_density=_geom_density,
                                grid=_grid, vertex_mask=_vmask,
                                ab2_scope_override=_ab2_scope_override,
@@ -4874,7 +4896,14 @@ class LatLonCGridOceanModel:
                                momentum_flux_face_thickness=_ws_face_thickness_kbb,
                                nemo_operator_association=(
                                    self._nemo_ws_test_hooks
-                                   .nemo_stage_rhs_accumulation_order_arm))
+                                   .nemo_stage_rhs_accumulation_order_arm),
+                               return_nemo_operator_components=(
+                                   _return_live_stage_operands))
+        if _return_live_stage_operands:
+            tend, _, _nemo_ws_stage1_operator_operands = _tend_result
+        else:
+            tend = _tend_result
+            _nemo_ws_stage1_operator_operands = None
         # #1492 DINO surface_tendency_placement="leapfrog_rhs": fold the
         # externally-supplied surface tracer RATE into the SAME explicit RHS
         # every other tendency uses -- BEFORE the diss-withholding split and
@@ -5192,6 +5221,10 @@ class LatLonCGridOceanModel:
         _nemo_ws_exposed_stage2_rhs = None
         _nemo_ws_exposed_stage3_rhs = None
         _nemo_ws_stage_tracers = None
+        _nemo_ws_live_stage_states = None
+        _nemo_ws_live_stage_qco = None
+        _nemo_ws_live_operator_operands = [
+            _nemo_ws_stage1_operator_operands, None, None]
         _nemo_ws_tracer_content_rhs = None
         _nemo_ws_advection_content_rhs = None
         _nemo_ws_zdf_eta_kmm = None
@@ -5291,6 +5324,8 @@ class LatLonCGridOceanModel:
                 _expose_operator = (
                     stage_index == _operator_stage
                     and bool(self._nemo_ws_test_hooks.expose_momentum_operator))
+                _return_components = (
+                    _expose_operator or _return_live_stage_operands)
                 td_result = self.tendencies(
                                      st, surface_forcing, sponge=sponge, dt=dt,
                                      momentum_only=True,
@@ -5346,9 +5381,16 @@ class LatLonCGridOceanModel:
                                          self._nemo_ws_test_hooks
                                          .nemo_stage_rhs_accumulation_order_arm),
                                      return_nemo_operator_components=(
-                                         _expose_operator))
-                if _expose_operator:
+                                         _return_components))
+                if _return_components:
                     td, _, _operator_components = td_result
+                    if (_return_live_stage_operands
+                            and stage_index in (2, 3)):
+                        _nemo_ws_live_operator_operands[stage_index - 1] = (
+                            _operator_components)
+                else:
+                    td = td_result
+                if _expose_operator:
                     _operator_name = (
                         self._nemo_ws_test_hooks.expose_momentum_operator)
                     if _operator_name not in ("hpg", "vorticity", "advection"):
@@ -5365,8 +5407,6 @@ class LatLonCGridOceanModel:
                         _op_v = _op_v + extra_rhs[1]
                     nonlocal _nemo_ws_exposed_momentum_operator
                     _nemo_ws_exposed_momentum_operator = (_op_u, _op_v)
-                else:
-                    td = td_result
                 _du = td.du_dt.data
                 _dv = td.dv_dt.data
                 if extra_rhs is not None:
@@ -5764,6 +5804,13 @@ class LatLonCGridOceanModel:
                     _baro_seed = dict(
                         _baro_seed,
                         _nemo_legacy_seed_faces_test_override=True)
+                if (self._nemo_ws_test_hooks
+                        .barotropic_raw_history_override is not None):
+                    _baro_seed = dict(
+                        _baro_seed,
+                        _nemo_raw_history_test_override=(
+                            self._nemo_ws_test_hooks
+                            .barotropic_raw_history_override))
                 if (
                     self._nemo_ws_test_hooks
                     .legacy_barotropic_continuity_association
@@ -6456,6 +6503,18 @@ class LatLonCGridOceanModel:
             _ws_stage3_correction = (
                 _replace_stage_mean, target_u, target_v)
             _nemo_ws_live_stage_geometry = (_g0, _g1, _g2)
+            _nemo_ws_live_stage_states = (
+                (u0, v0, state.T.data, state.S.data, state.eta.data),
+                (u1_corr, v1_corr, _T_stage1, _S_stage1,
+                 _eta_live_one_third),
+                (u2_corr, v2_corr, _T_stage2, _S_stage2,
+                 _eta_live_one_half),
+            )
+            _nemo_ws_live_stage_qco = (
+                (_qt_b - 1.0, _qu_b - 1.0, _qv_b - 1.0),
+                (_qt_13 - 1.0, _qu_13 - 1.0, _qv_13 - 1.0),
+                (_qt_12 - 1.0, _qu_12 - 1.0, _qv_12 - 1.0),
+            )
             if self._nemo_ws_test_hooks.expose_tracer_transport_stage:
                 _stage_index = (
                     self._nemo_ws_test_hooks.expose_tracer_transport_stage - 1)
@@ -8225,6 +8284,34 @@ class LatLonCGridOceanModel:
             state_new = _nemo_ws_pre_implicit_state
 
         state_new = cast_pytree(state_new, None, "storage", allow_downcast=True)
+        if _return_live_stage_operands:
+            if (getattr(_cfg_b, "momentum_time_integrator", "euler")
+                    != "rk3_ws"):
+                raise ValueError(
+                    "live stage operands require momentum_time_integrator="
+                    "'rk3_ws'")
+            if (any(value is None for value in _nemo_ws_live_operator_operands)
+                    or _nemo_ws_live_stage_states is None
+                    or _nemo_ws_live_stage_geometry is None
+                    or _nemo_ws_live_stage_qco is None):
+                raise ValueError("live WS-RK3 operand trace is incomplete")
+            return _NEMOWSLiveOperandTrace(
+                state_after=state_new,
+                stage_states=_nemo_ws_live_stage_states,
+                operator_operands=tuple(_nemo_ws_live_operator_operands),
+                stage_geometry=_nemo_ws_live_stage_geometry,
+                stage_qco=_nemo_ws_live_stage_qco,
+                stage_coefficients=(
+                    (dt / 3.0, 1.0 / (dt / 3.0)),
+                    (dt / 2.0, 1.0 / (dt / 2.0)),
+                    (dt, 1.0 / dt),
+                ),
+                barotropic_targets=(target_u, target_v, Hu_avg, Hv_avg,
+                                     state_new.eta.data,
+                                     (_eta_live_one_third,
+                                      _eta_live_one_half,
+                                      state_new.eta.data)),
+            )
         if not _apply_implicit_vmix:
             # Faithful AB2 path: return the explicit-only state plus the
             # implicit-mixing diffusivity profiles (evaluated from u^n, like
@@ -10709,12 +10796,49 @@ class LatLonCGridOceanModel:
         # the same program.  Re-enable only this explicitly jitted kernel;
         # private hooks remain inside the identical compiled step.
         with jax.disable_jit(False):
-            return self._step_jitted(
+            result = self._step_jitted(
                 state, dt, freshwater, surface_forcing, sponge,
                 grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
                 external_tracer_rate=external_tracer_rate,
                 _shortwave_tendency_test_delta=_shortwave_tendency_test_delta,
                 _vertical_K_test_override=_vertical_K_test_override)
+            if self._nemo_ws_test_hooks.expose_live_stage_operands:
+                # Returning the diagnostic tuple changes XLA's optimization
+                # boundary and can move a last-bit rounding in the prognostic
+                # result.  Keep the trace compiled, but source ``state_after``
+                # from an independently compiled ordinary forward-Euler call.
+                # The round-51 observer control requires that returned state to
+                # equal the production call bit for bit.
+                state_after = self._step_live_operand_reference_jitted(
+                    state, dt, freshwater, surface_forcing, sponge,
+                    grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+                    _shortwave_tendency_test_delta=(
+                        _shortwave_tendency_test_delta),
+                    _vertical_K_test_override=_vertical_K_test_override)
+                return result._replace(state_after=state_after)
+            return result
+
+    @partial(jax.jit, static_argnums=(0,))
+    def _step_live_operand_reference_jitted(
+            self, state: LatLonCGridOceanState, dt: float,
+            freshwater=None, surface_forcing=None, sponge=None, *, grid=None,
+            vertex_mask=None, t_seconds=None,
+            _shortwave_tendency_test_delta=None,
+            _vertical_K_test_override=None) -> LatLonCGridOceanState:
+        """Ordinary compiled result paired with the private operand trace."""
+        new_state = self._step_impl(
+            state, dt, freshwater=freshwater,
+            surface_forcing=surface_forcing, sponge=sponge,
+            grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+            _shortwave_tendency_test_delta=_shortwave_tendency_test_delta,
+            _vertical_K_test_override=_vertical_K_test_override)
+        if self.config.polar_filter.use_polar_filter:
+            new_state = self._apply_polar_filter(new_state, dt, grid=grid)
+        if self.config.freeze_floor:
+            new_state = self._apply_freeze_floor(new_state)
+        if getattr(self.config, "ew_cyclic_overlap", False):
+            new_state = self._apply_ew_cyclic_overlap(new_state)
+        return new_state
 
     @partial(jax.jit, static_argnums=(0,))
     def _step_jitted(self, state: LatLonCGridOceanState, dt: float,
@@ -10748,6 +10872,16 @@ class LatLonCGridOceanModel:
                 surface_forcing=surface_forcing, sponge=sponge,
                 grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
                 _return_barotropic_substeps=True)
+        if self._nemo_ws_test_hooks.expose_live_stage_operands:
+            if _oi != "forward_euler":
+                raise ValueError(
+                    "expose_live_stage_operands is a private forward_euler "
+                    "WS-RK3 fidelity hook")
+            return self._step_impl(
+                state, dt, freshwater=freshwater,
+                surface_forcing=surface_forcing, sponge=sponge,
+                grid=grid, vertex_mask=vertex_mask, t_seconds=t_seconds,
+                _return_live_stage_operands=True)
         if self.config.barotropic.barotropic_solver == "implicit_unsplit":
             # MITgcm-faithful UNSPLIT implicit free surface (no barotropic/baroclinic
             # mode split). One AB2 predictor on the FULL 3D velocity + one implicit

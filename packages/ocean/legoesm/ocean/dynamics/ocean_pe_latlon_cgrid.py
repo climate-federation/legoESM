@@ -4750,11 +4750,11 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         )
     )
     zad_w, zad_h_u, zad_h_v = w, h_u, h_v
+    qco_dt = dt if zad_continuity_dt is None else zad_continuity_dt
     if getattr(config, "zad_qco_evaluation", "generic") == "nemo_literal":
         eta_before_field = getattr(state, "eta_before", None)
         eta_before = (eta if eta_before_field is None
                       else eta_before_field.data)
-        qco_dt = dt if zad_continuity_dt is None else zad_continuity_dt
         qco_tmask_3d = (
             z_coord.is_active.astype(eta.dtype)
             if isinstance(z_coord, OceanPartialCellCoordinate)
@@ -4872,6 +4872,9 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         _h_u_adv, _h_v_adv = (
             (h_u, h_v) if momentum_flux_face_thickness is None
             else momentum_flux_face_thickness)
+        _h_u_momentum = _h_u_adv
+        _h_v_momentum = _h_v_adv
+        _h_vtx_operand = None
         du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v = (
             _bc_horizontal_momentum_advection_flux_form(
                 du_dt, dv_dt, u, v, _h_u_adv, _h_v_adv, u_mask_3d, v_mask_3d,
@@ -4888,6 +4891,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         _h_u_vor, _h_v_vor = (
             (h_u, h_v) if momentum_flux_face_thickness is None
             else momentum_flux_face_thickness)
+        _h_u_momentum = _h_u_vor
+        _h_v_momentum = _h_v_vor
         _h_vtx_override = None
         _f_vtx_override = None
         if config.een_e3f_scheme == "nemo_avg4":
@@ -4900,6 +4905,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             if not ene_generic_f_vtx:
                 _f_vtx_override = nemo_qco_vorticity_f_cgrid(
                     z_coord, h_k.dtype)
+        _h_vtx_operand = _h_vtx_override
         du_dt, dv_dt, diag_vortcor_u, diag_vortcor_v = _bc_pv_flux(
             du_dt, dv_dt, u, v, _h_u_vor, _h_v_vor, h_k,
             u_mask_3d, v_mask_3d, mask, grid, _mom_adv,
@@ -5048,6 +5054,11 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dS_diss_lat = None
 
     # --- Stages 10 + 10b: horizontal + meridional viscosity. ---
+    # The raw LDF velocity operand is defined even on the non-executed stage-2
+    # arm so the live trace can state the operator's absence without an
+    # unbound diagnostic value.
+    _u_ldf_local = u if ldf_state is None else ldf_state[2]
+    _v_ldf_local = v if ldf_state is None else ldf_state[3]
     if skip_lateral_viscosity:
         # NEMO WS-RK3 stage 2 (stprk3_stg:318-334): eos+hpg+vor+adv ONLY —
         # dyn_ldf is applied at stages 1 and 3, not 2. Static bool; the zero
@@ -5064,8 +5075,6 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # (the accumulator this ADDS to) and every other consumer of ``u``/
         # ``v`` in this function stay on the step's own state. ``None`` ->
         # u_ldf_local is u -> bit-identical.
-        _u_ldf_local = u if ldf_state is None else ldf_state[2]
-        _v_ldf_local = v if ldf_state is None else ldf_state[3]
         (du_dt, dv_dt, diag_Ah_lap_u, diag_Ah_lap_v, diag_Bh_bilap_u,
          diag_Bh_bilap_v, diag_Cs_smag_u, diag_Cs_smag_v, diag_Cl_leith_u,
          diag_Cl_leith_v, kdiss_h_cell) = _bc_horizontal_viscosity(
@@ -5470,6 +5479,25 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # dyn_hpg -> dyn_vor -> dyn_adv (stprk3_stg.F90:321-334).  These are
         # the already-computed production arrays, not re-evaluated numerics.
         return tendencies, diagnostics, {
+            # Already-materialized operands consumed by this exact tendency
+            # evaluation.  These raw arrays are private WRITE-only fidelity
+            # output: the live stage trace returns them after the compiled
+            # production step completes, never feeding them back into a term.
+            "operand_velocity_u": u,
+            "operand_velocity_v": v,
+            "operand_ldf_velocity_u": _u_ldf_local,
+            "operand_ldf_velocity_v": _v_ldf_local,
+            "operand_J": J,
+            "operand_h_k": h_k,
+            "operand_rho_prime": rho_prime,
+            "operand_p_prime": p_prime_filled,
+            "operand_momentum_h_u": _h_u_momentum,
+            "operand_momentum_h_v": _h_v_momentum,
+            "operand_vorticity_h_vtx": _h_vtx_operand,
+            "operand_zad_w": zad_w,
+            "operand_zad_h_u": zad_h_u,
+            "operand_zad_h_v": zad_h_v,
+            "operand_zad_continuity_dt": qco_dt,
             "hpg_u": _mu(hpg_tendency_u),
             "hpg_v": _mv(hpg_tendency_v),
             "vorticity_u": _mu(diag_vortcor_u),

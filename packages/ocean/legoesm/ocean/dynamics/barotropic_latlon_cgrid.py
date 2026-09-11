@@ -1383,6 +1383,7 @@ def _run_substep_loop(
     coeffs, local_subcycle_clamp,
     linear_free_surface=False,
     ab3_za=None, ab3_zb=None, ab3_hist=None,
+    ab3_raw_hist=None,
     een_pre=None,
     drag_r_u=None, drag_r_v=None,
     tide_basis=None, tide_cos=None, tide_sin=None,
@@ -2051,7 +2052,15 @@ def _run_substep_loop(
         return new_carry
 
     if ab3_za is not None:
-        if ab3_hist is not None:
+        if ab3_raw_hist is not None:
+            # Private round-51 substitution arm: inject NEMO's six RAW
+            # end-of-window histories after the production state has reached
+            # this exact boundary.  This never changes the carried state form;
+            # it measures the pending raw-carry decision through the ordinary
+            # scan below.
+            (Ub0, Ubb0, Vb0, Vbb0, etab0, etabb0) = (
+                h.astype(dtype) for h in ab3_raw_hist)
+        elif ab3_hist is not None:
             # NEMO continuation (dynspg_ts ll_init=F): now-values reset to the
             # baroclinic state (ln_bt_fw), b/bb histories carried from the end
             # of the PREVIOUS window — one continuous AB3 series across windows.
@@ -2350,6 +2359,7 @@ def barotropic_substeps_latlon_cgrid(
     _nemo_flux_form_update_test_override=None,
     _nemo_continuity_update_test_override=None,
     _nemo_legacy_seed_faces_test_override=None,
+    _nemo_raw_history_test_override=None,
 ) -> LatLonCGridOceanState:
     """Run barotropic substeps on a C-grid lat-lon grid.
 
@@ -2753,6 +2763,14 @@ def barotropic_substeps_latlon_cgrid(
         _ab3_zb = _ab3_zb.astype(eta.dtype)
     else:
         _ab3_za = _ab3_zb = _ab3_hist = None
+    if _nemo_raw_history_test_override is not None:
+        if not _ab3 or _ab3_hist is None:
+            raise ValueError(
+                "raw barotropic-history substitution requires an AB3/AM4 "
+                "continuation step with an existing carried history")
+        if len(_nemo_raw_history_test_override) != 6:
+            raise ValueError(
+                "raw barotropic-history substitution requires six arrays")
     _loop_result = _run_substep_loop(
         eta, U_bar, V_bar,
         dt_s=dt_s, n_loop=n_loop, w_filter=w_filter, w_transport=w_transport,
@@ -2765,6 +2783,7 @@ def barotropic_substeps_latlon_cgrid(
         local_subcycle_clamp=config.barotropic.barotropic_local_subcycle_clamp,
         linear_free_surface=getattr(z_coord, 'linear_free_surface', False),
         ab3_za=_ab3_za, ab3_zb=_ab3_zb, ab3_hist=_ab3_hist,
+        ab3_raw_hist=_nemo_raw_history_test_override,
         tide_basis=_tide_basis, tide_cos=_tide_cos, tide_sin=_tide_sin,
         een_pre=_een_pre,
         drag_r_u=_drag_r_u, drag_r_v=_drag_r_v,
