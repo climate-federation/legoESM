@@ -521,11 +521,30 @@ def lego_side(nemo, tab, plant_lego=False, legacy_divisor=False):
     tab.score("R-rho  rhd (lego rho'/rho0 vs NEMO)", rp, nemo["rhd"], wet3)
 
     m = nemo["mesh"]
+    # THE DISCRIMINATOR FOR WHAT IS LEFT.  After the divisor the R1 row still
+    # sits well above the instrument floor, so a second term exists.  Feed the
+    # SAME transcription legoESM's OWN density instead of NEMO's and compare to
+    # legoESM's pressure gradient: if that closes, every remaining statement of
+    # hpg_sco agrees and the residual is the DENSITY, not the operator.
+    dv_from_lego_rho = nemo_hpg_sco(
+        rp, m["e3w_0"], m["gdept_0"], np.zeros(rp.shape[1:]),
+        np.zeros(rp.shape[1:]), 1.0 / m["e1u"], 1.0 / m["e2v"])[1]
+    vw_all = (m["vmask"] > 0.5)
+    vw_all[:, -1, :] = False
+    hpg_row = tab.score("R-hpg  lego PGF vs hpg_sco(lego rho)",
+                        dv_lego, dv_from_lego_rho, vw_all)
     hv_0 = (m["e3v_0"] * m["vmask"]).sum(axis=0)
     r1_hv_0 = m["vmaskutil"] / (hv_0 + 1.0 - m["vmaskutil"])
     zv_lego = nemo_depth_mean(dv_lego, m["e3v_0"], m["vmask"], r1_hv_0)
-    tab.score("R1 zv_frc  legoESM vs NEMO", zv_lego, nemo["fro"]["zv_frc"],
-              nemo["vwet"])
+    r1_row = tab.score("R1 zv_frc  legoESM vs NEMO", zv_lego,
+                       nemo["fro"]["zv_frc"], nemo["vwet"])
+    if hpg_row and r1_row and hpg_row["rel"] < 0.1 * r1_row["rel"]:
+        tab.note(
+            f"R-hpg ({hpg_row['rel']:.2e}) is {r1_row['rel'] / hpg_row['rel']:.0f}x "
+            f"BELOW R1 ({r1_row['rel']:.2e}): given the same density every "
+            "remaining statement of hpg_sco agrees, so what R1 still carries "
+            "is the DENSITY (R-rho), amplified by the pressure gradient's own "
+            "cancellation")
 
     print()
     print("4. THE STATEMENT WALK -- legoESM's PGF against the transcription, "
