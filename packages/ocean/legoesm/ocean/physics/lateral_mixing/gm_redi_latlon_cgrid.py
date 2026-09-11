@@ -1336,17 +1336,28 @@ def compute_nemo_native_slopes(
         * e1t[:, :, None]
     zcj = jnp.maximum(vm_jm1 + vmask3 + _km1(vm_jm1) + _km1(vmask3), zeps) \
         * e2t[:, :, None]
-    # Preserve ldfslp.F90:311-314's explicit pairings.  The j expression is
+    # Preserve compiled ldfslp.f90:294-297's explicit pairings.  The j expression is
     # intentionally cross-paired (jm1@iik + local@iikm1, then the converse),
     # not a left-associated sum of four faces.  The barriers make those source
     # parentheses survive XLA lowering; this matters after the exact prd carry,
     # where the remaining differences are a few ULP of a near-zero gradient.
-    _zai_now = lax.optimization_barrier(zgru_im1 + zgru)
-    _zai_before = lax.optimization_barrier(_km1(zgru_im1) + _km1(zgru))
-    zai = (lax.optimization_barrier(_zai_now + _zai_before) / zci) * wmask3
-    _zaj_cross1 = lax.optimization_barrier(zgrv_jm1 + _km1(zgrv))
-    _zaj_cross2 = lax.optimization_barrier(_km1(zgrv_jm1) + zgrv)
-    zaj = (lax.optimization_barrier(_zaj_cross1 + _zaj_cross2) / zcj) * wmask3
+    # Round 42 exposed a few-ULP association change on non-identity cards.
+    # Until the owner decides its global scope, select NEMO's association only
+    # on the existing DINO literal path and GYRE's raw-live-depth path.
+    _nemo_identity_association = (
+        _prd_mode == "nemo_literal"
+        or _depth_mode == "nemo_qco_live_literal"
+    )
+    if _nemo_identity_association:
+        _zai_now = lax.optimization_barrier(zgru_im1 + zgru)
+        _zai_before = lax.optimization_barrier(_km1(zgru_im1) + _km1(zgru))
+        zai = (lax.optimization_barrier(_zai_now + _zai_before) / zci) * wmask3
+        _zaj_cross1 = lax.optimization_barrier(zgrv_jm1 + _km1(zgrv))
+        _zaj_cross2 = lax.optimization_barrier(_km1(zgrv_jm1) + zgrv)
+        zaj = (lax.optimization_barrier(_zaj_cross1 + _zaj_cross2) / zcj) * wmask3
+    else:
+        zai = (zgru_im1 + zgru + _km1(zgru_im1) + _km1(zgru)) / zci * wmask3
+        zaj = (zgrv_jm1 + zgrv + _km1(zgrv_jm1) + _km1(zgrv)) / zcj * wmask3
     zbw = (-0.5 / jnp.asarray(g, dtype)) * pn2 * (prd + _km1(prd) + 2.0)
     # e3w is (nlev,) (static ladder, jacobian=None) or (nlat,nlon,nlev) (live,
     # jacobian passed) -- shape is trace-time-static, branch is safe under JIT.
@@ -1374,21 +1385,25 @@ def compute_nemo_native_slopes(
         if _stretch2d is not None:
             zck = zck * _stretch2d[:, :, None]
     in_ml_w = kidx < kanc[:, :, None]
-    # ldfslp.F90:320-328 writes the integer zfk selector as two multiplied
+    # Compiled ldfslp.f90:303-312 writes the integer zfk selector as two multiplied
     # arms followed by one addition and the final wmask.  This association is
     # part of the NEMO-native operator, independent of how prd was produced.
-    zfk = (~in_ml_w).astype(dtype)
-    _outside_i = lax.optimization_barrier(zfk * swi_int)
-    _outside_j = lax.optimization_barrier(zfk * swj_int)
-    _inside_depth = lax.optimization_barrier((1.0 - zfk) * zck)
-    _inside_i = lax.optimization_barrier(
-        _inside_depth * anc_i[:, :, None])
-    _inside_j = lax.optimization_barrier(
-        _inside_depth * anc_j[:, :, None])
-    wslpi = lax.optimization_barrier(
-        lax.optimization_barrier(_outside_i + _inside_i) * wmask3)
-    wslpj = lax.optimization_barrier(
-        lax.optimization_barrier(_outside_j + _inside_j) * wmask3)
+    if _nemo_identity_association:
+        zfk = (~in_ml_w).astype(dtype)
+        _outside_i = lax.optimization_barrier(zfk * swi_int)
+        _outside_j = lax.optimization_barrier(zfk * swj_int)
+        _inside_depth = lax.optimization_barrier((1.0 - zfk) * zck)
+        _inside_i = lax.optimization_barrier(
+            _inside_depth * anc_i[:, :, None])
+        _inside_j = lax.optimization_barrier(
+            _inside_depth * anc_j[:, :, None])
+        wslpi = lax.optimization_barrier(
+            lax.optimization_barrier(_outside_i + _inside_i) * wmask3)
+        wslpj = lax.optimization_barrier(
+            lax.optimization_barrier(_outside_j + _inside_j) * wmask3)
+    else:
+        wslpi = jnp.where(in_ml_w, zck * anc_i[:, :, None], swi_int) * wmask3
+        wslpj = jnp.where(in_ml_w, zck * anc_j[:, :, None], swj_int) * wmask3
     wslpi = wslpi.at[:, :, 0].set(0.0)
     wslpj = wslpj.at[:, :, 0].set(0.0)
 
@@ -1447,18 +1462,25 @@ def compute_nemo_native_slopes(
     cof_u = 0.25 * _u_lat * _u_vert
     cof_v = 0.25 * _v_lon * _v_vert
     cof_w = 0.25 * wmask3 * _w_u * _w_v
-    half = jnp.asarray(0.5, dtype=dtype)
-    quarter = jnp.asarray(0.25, dtype=dtype)
-    uslp = _shap(uslp, cof_u, (_u_lat, half, _u_vert, half))
-    vslp = _shap(vslp, cof_v, (_v_lon, half, _v_vert, half))
-    wslpi = _shap(wslpi, cof_w, (wmask3, _w_u, _w_v, quarter))
-    wslpj = _shap(wslpj, cof_w, (wmask3, _w_u, _w_v, quarter))
+    if _nemo_identity_association:
+        half = jnp.asarray(0.5, dtype=dtype)
+        quarter = jnp.asarray(0.25, dtype=dtype)
+        uslp = _shap(uslp, cof_u, (_u_lat, half, _u_vert, half))
+        vslp = _shap(vslp, cof_v, (_v_lon, half, _v_vert, half))
+        wslpi = _shap(wslpi, cof_w, (wmask3, _w_u, _w_v, quarter))
+        wslpj = _shap(wslpj, cof_w, (wmask3, _w_u, _w_v, quarter))
+    else:
+        uslp = _shap(uslp, cof_u)
+        vslp = _shap(vslp, cof_v)
+        wslpi = _shap(wslpi, cof_w)
+        wslpj = _shap(wslpj, cof_w)
     # ldfslp.F90:210 executes jk=jpkm1..2; U/V level 1 is never assigned and
     # enters ldftra as its initialized zero.  The vectorized transcription
     # otherwise evaluates that extra surface level.  Keep legacy cards byte-
     # identical and prescribe the literal DINO slot only.
-    uslp = uslp.at[..., 0].set(0.0)
-    vslp = vslp.at[..., 0].set(0.0)
+    if _nemo_identity_association:
+        uslp = uslp.at[..., 0].set(0.0)
+        vslp = vslp.at[..., 0].set(0.0)
     return uslp, vslp, wslpi, wslpj
 
 

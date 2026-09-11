@@ -21,7 +21,7 @@ def test_tanks_do_not_execute_either_round42_changed_operator():
 
 
 def test_dino_nemo_card_keeps_its_preexisting_n2_integral_selection():
-    before = dino_config_for_recipe("nemo_dino_kamm")
-    after = dino_config_for_recipe("nemo_dino_kamm")
-    assert before.gm_redi_mld_criterion == "n2_integral"
-    assert after.gm_redi_mld_criterion == before.gm_redi_mld_criterion
+    oracle = dino_config_for_recipe("nemo_dino_kamm")
+    non_oracle = dino_config_for_recipe("nemo_paper")
+    assert oracle.gm_redi_mld_criterion == "n2_integral"
+    assert non_oracle.gm_redi_mld_criterion == "rho_c"

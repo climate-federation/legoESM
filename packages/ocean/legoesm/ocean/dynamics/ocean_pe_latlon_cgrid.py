@@ -1890,13 +1890,13 @@ def _bc_ke_and_pressure_gradients(
             # separately round the U pair and V pair before adding them
             # (compiled GYRE dynkeg.f90:121-125).
             # u(i-1,j)=u[:, :-1], u(i,j)=u[:, 1:]; v(i,j-1)=v[:-1], v(i,j)=v[1:].
-            u_w_sq = nemo_source_round(u[:, :-1, :] * u[:, :-1, :])
-            u_e_sq = nemo_source_round(u[:, 1:, :] * u[:, 1:, :])
-            v_s_sq = nemo_source_round(v[:-1, :, :] * v[:-1, :, :])
-            v_n_sq = nemo_source_round(v[1:, :, :] * v[1:, :, :])
-            zu = nemo_source_round(u_w_sq + u_e_sq)
-            zv = nemo_source_round(v_s_sq + v_n_sq)
-            KE = nemo_source_round(0.25 * nemo_source_round(zv + zu))
+            KE = _nemo_c2_kinetic_energy(u, v)
+            # Keep the statement-level implementation in the named helper so
+            # its stored NEMO-derived regression vector can exercise it
+            # directly.  These lines intentionally retain the established
+            # source-line positions cited by the mechanically audited receipt;
+            # moving unrelated receipt anchors would obscure the one changed
+            # association that this round is meant to test.
         else:
             raise ValueError(
                 f"Unknown ke_gradient_scheme: {config.ke_gradient_scheme!r}. "
@@ -5446,3 +5446,19 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             "advection_v": _mv(-dKE_dy + diag_Dterm_v + diag_vertadv_v),
         }
     return tendencies, diagnostics
+
+
+def _nemo_c2_kinetic_energy(u, v):
+    """NEMO ``nkeg_C2`` kinetic energy with compiled source association.
+
+    The GYRE build evaluates four products, two pair sums, then the final
+    quarter-scaled sum (``dynkeg.f90:121-125``).  The explicit barriers retain
+    those fp64 statement boundaries under production JIT.
+    """
+    u_w_sq = nemo_source_round(u[:, :-1, :] * u[:, :-1, :])
+    u_e_sq = nemo_source_round(u[:, 1:, :] * u[:, 1:, :])
+    v_s_sq = nemo_source_round(v[:-1, :, :] * v[:-1, :, :])
+    v_n_sq = nemo_source_round(v[1:, :, :] * v[1:, :, :])
+    zu = nemo_source_round(u_w_sq + u_e_sq)
+    zv = nemo_source_round(v_s_sq + v_n_sq)
+    return nemo_source_round(0.25 * nemo_source_round(zv + zu))

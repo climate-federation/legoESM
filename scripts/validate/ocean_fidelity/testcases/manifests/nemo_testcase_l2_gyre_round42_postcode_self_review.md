@@ -1,6 +1,6 @@
 # Round 42 post-code adversarial self-review
 
-Verdict: **PASS THE EXACT STATEMENTS; CAMPAIGN REMAINS HOLD**.
+Verdict: **RETRACTED -- INDEPENDENT REVIEW FOUND DO-NOT-SHIP BLOCKERS**.
 
 1. The header correction is compelled by the decoded bytes and this build's
    compiled caller.  The old Kbb=1 claim is retracted in the gate, manifest,
@@ -27,4 +27,8 @@ Verdict: **PASS THE EXACT STATEMENTS; CAMPAIGN REMAINS HOLD**.
    tripolar topology.  No stabilizer, tolerance change, oracle-output
    injection, NEMO build/run, or unasked configuration choice was introduced.
 
-ASKED: decision 23 and compiled-source exact statements.  UNASKED: empty.
+The omitted blockers were the seven-test selector regression, the non-NEMO
+association movement, nonexistent final commit stamps, two FAIL trajectory
+comparisons not stated as failures, incorrect citations/docstrings, and two
+vacuous or missing behavioral tests.  `UNASKED: empty` was false; the receipt
+now carries both historical unasked changes and their disposition.

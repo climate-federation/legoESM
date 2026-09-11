@@ -368,6 +368,20 @@ def nemo_lat_lon_model_config(
         # GYRE runs ln_ldfeiv=F (no GM bolus), and the operator raises on
         # kappa_GM≠0, so force kappa_GM=0 when it is selected.
         _kappa_gm = 0.0 if cfg.lateral_operator == "nemo_iso_lap" else cfg.kappa_GM
+        # Decision 23 belongs to the compiled GYRE identity (WS-RK3 plus
+        # traldf_iso).  Other reusable NEMO recipes do not carry GYRE's raw
+        # gdept_0/gdepw_0 geometry and must retain their historical slope path.
+        _gyre_ldfslp = (
+            cfg.lateral_operator == "nemo_iso_lap"
+            and cfg.momentum_time_integrator == "rk3_ws"
+        )
+        _gyre_ldfslp_options = ({
+            "mld_criterion": "n2_integral",
+            "slope_metric_evaluation": "nemo_reciprocal",
+            "slope_face_thickness_evaluation": "nemo_qco_live",
+            "slope_depth_evaluation": "nemo_qco_live_literal",
+            "redi_a33_evaluation": "nemo_literal",
+        } if _gyre_ldfslp else {})
         gm_redi_cfg = GMRediConfig(
             kappa_GM=_kappa_gm,
             kappa_Redi=cfg.kappa_Redi,
@@ -400,21 +414,7 @@ def nemo_lat_lon_model_config(
             # nemo_iso_lap wants NEMO's ldfslp ML ramp + Shapiro slope fidelity.
             nemo_mld_slope_ramp=(cfg.lateral_operator == "nemo_iso_lap"),
             nemo_slope_shapiro=(cfg.lateral_operator == "nemo_iso_lap"),
-            # The NEMO identity is one compiled ldf_slp path, not a menu of
-            # mathematically similar implementations.  zdf_mxl builds nmln
-            # from the positive-N2 integral; ldf_slp consumes the carried
-            # eosbn2 prd/rn2 bundle, stored metric reciprocals, live QCO face
-            # thicknesses and live Kmm depths.  These selectors expose no
-            # new user choice: together they select the source associations
-            # in the shared implementation for every NEMO-native Redi card.
-            mld_criterion="n2_integral",
-            slope_metric_evaluation="nemo_reciprocal",
-            slope_face_thickness_evaluation="nemo_qco_live",
-            slope_depth_evaluation="nemo_qco_live_literal",
-            # traldf_iso.f90:296-297 carries each coefficient/slope product
-            # left-associated before the final sum.  This is the downstream
-            # K33 statement fed by the exact ldf_slp fields above.
-            redi_a33_evaluation="nemo_literal",
+            **_gyre_ldfslp_options,
         )
 
     return LatLonCGridOceanConfig.from_flat(

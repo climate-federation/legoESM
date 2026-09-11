@@ -77,7 +77,7 @@ def _row(name: str, reference: np.ndarray, actual: np.ndarray,
     }
 
 
-def run(*, plant: bool = False) -> dict:
+def run(*, expect_commit: str, plant: bool = False) -> dict:
     import jax
     import jax.numpy as jnp
 
@@ -97,6 +97,14 @@ def run(*, plant: bool = False) -> dict:
         nemo_iso_a33,
         nemo_iso_face_masks,
     )
+
+    stamp = worktree_stamp()
+    expected = expect_commit.lower()
+    actual = str(stamp["commit"]).lower()
+    require(len(expected) == 40 and all(c in "0123456789abcdef" for c in expected),
+            f"expected commit must be a full hexadecimal SHA: {expected!r}")
+    require(actual == expected,
+            f"commit stamp mismatch: report {actual}, expected {expected}")
 
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
@@ -234,7 +242,7 @@ def run(*, plant: bool = False) -> dict:
     rows.append(_row(
         f"{CASE}.kt2.traldf_iso.ah_wslp2",
         matrix_oracle["K33"], np.asarray(ah_wslp2[..., 1:]), wet_face,
-        "traldf_iso.f90:296-297 (zahu*wslpi)*wslpi + "
+        "traldf_iso.f90:793-794 (zahu*wslpi)*wslpi + "
         "(zahv*wslpj)*wslpj",
     ))
 
@@ -258,7 +266,7 @@ def run(*, plant: bool = False) -> dict:
     exact = all(r["exact"] for r in rows)
     report = {
         "format": "nemo-testcase-l2-gyre-round42-ldfslp-walk-v1",
-        "worktree": worktree_stamp(),
+        "worktree": stamp,
         "case": CASE,
         "bar": BAR,
         "execution_regime": "production_jit",
@@ -285,9 +293,10 @@ def run(*, plant: bool = False) -> dict:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--plant", action="store_true")
     args = parser.parse_args(argv)
-    report = run(plant=args.plant)
+    report = run(expect_commit=args.expect_commit, plant=args.plant)
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.output:
         args.output.write_text(text + "\n")

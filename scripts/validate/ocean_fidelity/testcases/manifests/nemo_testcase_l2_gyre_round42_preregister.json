@@ -5,6 +5,12 @@
   "bar": 1e-15,
   "regime": "CPU production JIT, fp64/libm, JAX x64, existing NEMO records only",
   "scope": "Correct and calibrate the round-41 dynadv split, score KEG/ZAD given NEMO operands, land only bit-exact shared statements under Rule 12, and implement user decision 23 for every NEMO-identity card.",
+  "post_review_correction": {
+    "status": "RETRACTED_IN_PART_AFTER_INDEPENDENT_REVIEW",
+    "selector_scope": "Decision 23 applied to GYRE only; applying its five selectors to every GM/Redi NEMO lat-lon recipe was unasked and is reverted outside GYRE.",
+    "association_scope": "The literal native-slope association was widened without asking. It is now limited to the existing DINO oracle and GYRE identity paths; wider scope is an ASKED pending decision.",
+    "verdict_timing": "The pre-fix P2 gate printed CONFIRMED. The fixed final gate prints REFUTED because its conjunction requires KEG to remain DEBT; exact KEG intentionally falsifies that pre-intervention predicate."
+  },
   "measured_before_preregistration": {
     "required_header_decode": "The existing stream decodes to (version,kt,kstg,Kbb,Kmm,Krhs,Kaa,nn_dynkeg)=(1,1,3,2,2,3,3,0). This is the mandatory review-blocker diagnosis, not a scientific score.",
     "compiled_cause": "GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:468-470 tags stage 3 then calls dyn_adv(kstp,Kmm,Kmm,...); dynadv.f90:184-185 writes its local Kbb,Kmm arguments. The round-41 Kbb=1 expectation is RETRACTED."
@@ -58,7 +64,10 @@
       "decision 23: use NEMO's n2_integral mixed-layer criterion on the committed GYRE/NEMO-identity card",
       "transcribe and land only statements proved bit-exact given NEMO inputs"
     ],
-    "UNASKED": []
+    "UNASKED": [
+      "round-42 implementation applied the GYRE selector bundle to every GM/Redi NEMO lat-lon recipe; corrected after review",
+      "round-42 implementation widened literal native-slope association to non-NEMO cards; corrected after review and wider scope remains pending"
+    ]
   },
   "forbidden": [
     "running makenemo, mpirun or NEMO",

@@ -11034,8 +11034,11 @@ reference-thickness ZAD divisor both fail; header, calibration, closure,
 stamp, KEG and ZAD plants all exit nonzero.  Given NEMO operands, before the
 fix KEG is DEBT on U (2/17400, 5.169878828456423e-26, relative
 2.887126798214743e-13) and V (2/17100, 2.5849394142282115e-26, relative
-1.028551927420229e-13); ZAD is exact on both.  The preregistered verdict is
-**CONFIRMED**.  NEMO separately evaluates the four square products, then the
+1.028551927420229e-13); ZAD is exact on both.  The preregistered verdict at the
+pre-fix commit is **CONFIRMED**.  The final fixed gate prints
+**PREREGISTERED-VERDICT REFUTED** because P2 mechanically requires KEG to stay
+DEBT; making KEG exact intentionally falsifies that pre-intervention
+conjunction.  NEMO separately evaluates the four square products, then the
 two sums and `0.25*(zv+zu)` at
 `GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynkeg.f90:117-130`.
 Materializing that source association in the one shared C2 path makes all
@@ -11057,7 +11060,9 @@ live face/depth and source-parenthesized W/Shapiro associations at
 `GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/ldfslp.f90:235-275` and
 `GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/ldfslp.f90:284-333`, the model's
 own path gives 0 unequal for zau, zav, uslp, vslp, wslpi and wslpj.  Feeding
-those four recorded slopes through the shared A33 fold also gives 0/17400.
+those four recorded slopes through the shared A33 fold also gives 0/17400;
+the coefficient/slope association is compiled at
+`GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/traldf_iso.f90:793-794`.
 The card's end-to-end K33 residual remains 1.4583733349836258e-10
 (17400/17400): the remaining 0.43%-of-NEMO-maximum boundary is upstream
 model-side prd/rn2 production, not `ldf_slp` or A33.  It is **DEBT**, never
@@ -11069,7 +11074,12 @@ GYRE kt=1 is exact.  Its first-over-bar remains kt=2 U/V before and after:
 2.7478404751243857e-12 and 3.305560306813421e-12.  The exact criterion first
 moves the kt=2 tracer update, visible at the kt=3 before-state boundary; all
 70 trajectory rows and 53 worsening rows are registered in
-`round42_before_to_final_GYRE_compare.json`.  The stage-3 advection U maximum
+`round42_before_to_final_GYRE_compare.json`.  That comparison gate is
+**FAIL**, not PASS: 53 rows violate the no-worsening contract, led by
+`kt10.before.T` at 1.0063482509536925e-05.  The KEG-to-slopes comparison is
+also **FAIL** with the same 53-row boundary, so the slope/criterion leg owns
+the regression; the scope correction below is remeasured before any final
+claim.  The stage-3 advection U maximum
 moves 2.0614443630503727e-16 to 2.0614443630503688e-16; V remains
 2.482727869951749e-16.  LOCK_EXCHANGE and OVERFLOW resolve flux-form momentum
 and no GM/Redi, so neither changed statement executes; their independent
@@ -11078,6 +11088,33 @@ SPEC**: acquire native tripolar prd/rn2/slopes/A33 and vector-advection records,
 then its kt=1..10 trajectory.
 
 Round-42 gate reports and SHA-256 evidence are under
-`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round42/`.  ASKED: decision
-23 and exact compiled statements.  UNASKED: empty.  No NEMO source, build, or
-executable was touched.
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round42/`, but every record
+stamped `a75339c05277...` is **INVALID AS FINAL EVIDENCE**: that commit does
+not exist in this repository.  Those final-status claims are retracted until
+every gate is rerun and fail-closed at the shipped review-fix commit.  ASKED:
+decision 23 and exact compiled statements.  UNASKED: empty.  No NEMO source,
+build, or executable was touched.
+
+### Independent-review corrections carried into round 43
+
+The preceding `UNASKED: empty` statement is **RETRACTED**.  Decision 23 was
+scoped to GYRE, but its five selectors were applied to every GM/Redi NEMO
+lat-lon recipe; the source association was also widened to every native-slope
+caller.  The selector bundle is now confined to the resolved GYRE path, and
+the association change is confined to the existing DINO oracle and GYRE
+identity paths pending the user's scope decision.
+
+| NEMO lat-lon recipe | current slope path | open exactness row |
+|---|---|---|
+| GYRE | decision-23 live geometry and literal associations | measured here |
+| rest | pre-round-42 defaults | raw NEMO `gdept_0`/`gdepw_0` absent; UNMEASURED |
+| Eady | pre-round-42 defaults | raw NEMO `gdept_0`/`gdepw_0` absent; UNMEASURED |
+
+| choice | historical status | corrected disposition |
+|---|---|---|
+| apply decision-23 selectors to every GM/Redi NEMO recipe | UNASKED round 42 | reverted outside GYRE |
+| apply the literal slope association to every native-slope caller | UNASKED round 42 | limited to NEMO identities; wider scope ASKED and pending |
+| keep the association limited to NEMO identities or widen it globally | ASKED round 43 | pending; no non-NEMO card moves |
+
+Current UNASKED list: **empty**.  Historical round-42 UNASKED list: the two
+rows above.

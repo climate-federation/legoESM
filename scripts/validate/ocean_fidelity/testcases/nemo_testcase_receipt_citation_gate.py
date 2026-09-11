@@ -105,6 +105,8 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/zdfmxl.f90"),
     "GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/ldfslp.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/ldfslp.f90"),
+    "GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/traldf_iso.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/traldf_iso.f90"),
     "nemo_testcase_l2_gyre_phase3_gate.py": (
         REPO / "scripts/validate/ocean_fidelity/testcases"
              / "nemo_testcase_l2_gyre_phase3_gate.py"),
@@ -300,6 +302,9 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/ldfslp.f90:284-333': [
         ('DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)', 5),
         '+ 4.*    zww(ji  ,jj  )                        ) * zcofw', 50],
+    'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/traldf_iso.f90:793-794': [
+        'pah_wslp2(ji,jj,jk) = zahu_w * wslpi(ji,jj,jk) * wslpi(ji,jj,jk)',
+        '&                + zahv_w * wslpj(ji,jj,jk) * wslpj(ji,jj,jk)', 2],
     'cpp_GYRE_OMIP_L2_P3_SM_R38TRAZDFKT2.fcm:1': (
         'bld::tool::fppkeys key_qco key_vco_1d3d key_RK3', 1),
     # The statement is textually IDENTICAL at :160 (dom_qco_r3c) and :209

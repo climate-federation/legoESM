@@ -18,4 +18,7 @@ Verdict: **PASS TO MEASURE AFTER THE FOUR REVIEW BLOCKERS ARE MECHANICAL**.
 6. The slope walk cannot land an explanation or at-bar residual: only a
    statement with zero unequal NEMO-output cells given NEMO inputs may change.
 
-ASKED: decision 23 and NEMO-exact statement transcriptions.  UNASKED: empty.
+Post-review correction: `UNASKED: empty` was false.  The implementation later
+widened the GYRE selector bundle and source association beyond the authorised
+identity cards.  Both are recorded in the receipt; the first is reverted and
+the second is identity-gated pending the user's wider-scope decision.
