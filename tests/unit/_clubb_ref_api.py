@@ -165,21 +165,28 @@ def ref_sclr_idx():
     return SclrIdx(0, 0, 0, 0, 0, 0)
 
 
-def ref_nu(config, ngrdcol: int, nzm: int):
-    """The grid-spacing-dependent diffusion coefficients, from OUR config.
+def ref_nu(config, gr, grid_type: int = 1):
+    """The grid-spacing-dependent diffusion coefficients, derived by UPSTREAM.
 
-    Upstream scales these by a factor derived from the average layer depth when
-    that option is on; it is off in the CAM tree, where the factor is one, so
-    the values pass through unchanged.
+    These are NOT the raw coefficients from our config. Upstream multiplies them
+    by a factor that grows with the average layer depth, and that scaling is
+    unconditional -- there is no flag in the CAM tree that turns it off. Building
+    the coefficients by hand therefore hands the reference different physics and
+    turns any comparison that uses them into a confound: at a hundred-metre mean
+    spacing the hand-built value is 5 where the reference's is 9.58.
+
+    So this calls upstream's own derivation on our parameter values, with the
+    mean layer depth taken from the grid the test is actually using.
     """
     ensure_importable()
-    from clubb_jax.src.CLUBB_core.nu_vert_res_dep import NuVertResDep
+    from clubb_jax.src.CLUBB_core.parameters_tunable import calc_derrived_params
 
-    p = config.params
-    col = lambda v: np.full((ngrdcol,), float(v))  # noqa: E731
-    return NuVertResDep(
-        nzm=int(nzm), nu1=col(p.nu1), nu2=col(p.nu2), nu6=col(p.nu6),
-        nu8=col(p.nu8), nu9=col(p.nu9), nu10=col(p.nu10), nu_hm=col(p.nu_hm))
+    params, _ = ref_params(config, ngrdcol := np.asarray(gr.zm).shape[0])
+    deltaz = np.full((ngrdcol,), float(np.mean(np.asarray(gr.dzt))))
+    nu, _lmin, _mixt_frac_max_mag = calc_derrived_params(
+        ref_grid(gr), ngrdcol, grid_type, deltaz, params,
+        False)  # l_prescribed_avg_deltaz is off in the CAM tree
+    return nu
 
 
 def ref_pdf_coefs(nz: int, ngrdcol: int):

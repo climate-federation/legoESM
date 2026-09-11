@@ -444,7 +444,7 @@ def test_parity_vs_clubb_jax_reference():
         edsclr, jnp.full((ng, nzt), 1.0e5),
         kw["rho_ds_zm"], kw["rho_ds_zt"], kw["invrs_rho_ds_zt"],
         kw["fcor"], False,
-        _ref.ref_nu(cfg, ng, nzm), 1.0,
+        _ref.ref_nu(cfg, gr), 1.0,
         1, False, True, False, False, False, False, 2, 0, 0,
         _ref.ref_stats(ng, nzm),
         kw["um"], kw["vm"], zt_zero, zt_zero, edsclr,

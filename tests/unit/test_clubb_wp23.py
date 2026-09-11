@@ -187,7 +187,7 @@ def test_all_lhs_builders_match_golden():
         np.testing.assert_allclose(np.asarray(out[key]), g[ref], rtol=1e-13, atol=1e-16)
 
 
-@pytest.mark.skip(reason="CONVERSION PENDING: upstream's vertical-velocity LHS builders needs a fuller host context than the test bridge yet supplies (it returns zeros for the fixture we hand it, so we are not driving it the way it expects). Our version stays pinned by this module's golden fixtures meanwhile.")
+@pytest.mark.skip(reason="CONVERSION PENDING: the pressure-damping comparison selects upstream's quartic-skewness branch while our helper computes the squared-skewness form, so it would compare two different equations (found by review). Settle which branch the CAM tree selects, then re-enable.")
 @pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
                     reason="CLUBB-JAX reference tree not present")
 def test_all_lhs_builders_parity():
@@ -302,7 +302,7 @@ def test_wp3_term_pr_turb_rhs_zero_on_uniform_fields():
     np.testing.assert_allclose(out, 0.0, atol=1e-14)
 
 
-@pytest.mark.skip(reason="CONVERSION PENDING: upstream's vertical-velocity RHS builders needs a fuller host context than the test bridge yet supplies (it returns zeros for the fixture we hand it, so we are not driving it the way it expects). Our version stays pinned by this module's golden fixtures meanwhile.")
+@pytest.mark.skip(reason='CONVERSION PENDING: the reference grid is passed both before and after the numerical arguments at three call sites, so the call raises before comparing anything (found by review). Fix those, then re-enable.')
 @pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
                     reason="CLUBB-JAX reference tree not present")
 def test_rhs_cam_eq_arm_builders_parity():
@@ -642,7 +642,7 @@ def test_clip_skewness_passes_small_wp3():
     np.testing.assert_allclose(out, np.asarray(wp3), rtol=1e-12, atol=1e-14)
 
 
-@pytest.mark.skip(reason="CONVERSION PENDING: upstream's skewness clip needs a fuller host context than the test bridge yet supplies (it returns zeros for the fixture we hand it, so we are not driving it the way it expects). Our version stays pinned by this module's golden fixtures meanwhile.")
+@pytest.mark.skip(reason='CONVERSION PENDING: the reference grid built here has a different column count and different heights from the fields under test (found by review), so the comparison is not on one column. Build the grid from the same fixture, then re-enable.')
 @pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
                     reason="CLUBB-JAX reference tree not present")
 def test_clip_skewness_parity():
