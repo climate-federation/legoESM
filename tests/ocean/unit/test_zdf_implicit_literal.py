@@ -307,3 +307,32 @@ def test_the_ordered_sweep_rounds_its_multiply_separately():
         jnp.asarray(lower), jnp.asarray(diagonal),
         jnp.asarray(upper), jnp.asarray(rhs)))
     assert (solved != separate).sum() == 0
+
+
+def test_the_anti_fusion_helper_is_not_the_identity_on_subnormals():
+    """Pin the one restriction the anti-fusion helper carries.
+
+    ``x + copysign(0.0, x)`` returns ``x`` for every NORMAL input, which is
+    what the ordered sweep needs, but under ``jit`` it FLUSHES a subnormal to
+    a signed zero where ``x + 0.0`` and ``x * 1.0`` would preserve it (the
+    GYRE lane's ``b157b082f8c5``, measured there by an independent claim
+    review).  The DINO card never forms a subnormal product in this solve, so
+    the restriction is inert there -- but a docstring that promises an
+    identity is a testable claim, and this is the test that makes it one.
+    """
+    from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
+        _round_the_multiply)
+
+    normals = jnp.asarray([1.0, -1.0, 1e-4, -1e4, 0.0, -0.0, 3.7e-300])
+    np.testing.assert_array_equal(
+        np.asarray(jax.jit(_round_the_multiply)(normals)), np.asarray(normals))
+    # ... and the signs of the two zeros survive, which is why copysign and
+    # not a bare ``+ 0.0`` is the construction.
+    assert np.signbit(np.asarray(jax.jit(_round_the_multiply)(normals))[5])
+
+    subnormals = jnp.asarray([5e-324, 1.5e-310, -5e-324])
+    flushed = np.asarray(jax.jit(_round_the_multiply)(subnormals))
+    # The control: assert the DEPARTURE, so this test fails the day XLA stops
+    # flushing and the docstring's restriction becomes false in the other
+    # direction.
+    np.testing.assert_array_equal(flushed, np.zeros(3))
