@@ -360,11 +360,12 @@ Three consequences, and none of them is "revert".
    the knob that names it.
 2. **It is nonetheless a DEFECT in the model's configuration surface**, and it
    is not GYRE-specific: any card on the NEMO RK3 lat-lon lane that selects
-   `virtual_salt_flux` silently gets no salt flux. An independent review
-   proposed the mechanism (the implicit vertical-mixing step rebuilds T/S from
-   a tracer-content RHS computed BEFORE the virtual-salt block) — **PLAUSIBLE,
-   read off the code, not measured to a statement.** Reported to the lane that
-   owns `ocean_model_latlon_cgrid.py`, not fixed here.
+   `virtual_salt_flux` silently gets no salt flux. **The mechanism is
+   CONFIRMED at a statement, not left plausible** — see section 7b(ii): the
+   `nemo_literal` implicit solve is handed only the tracer CONTENT, captured
+   before the virtual-salt block, and perturbing the field it ignores by
+   `+1e3` moves salinity by exactly `0.0`. Reported to the lane that owns
+   `ocean_model_latlon_cgrid.py`, not fixed here.
 3. **Half of this round's card change is therefore cosmetic and half is not.**
    `freshwater_closure="real_freshwater"` is bit-inert; `fix_eta_drift=True` is
    the whole measured effect. Both are still landed, because the point is that
