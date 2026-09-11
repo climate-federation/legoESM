@@ -190,20 +190,29 @@ def test_ladder_plant_flips_every_derived_row():
                     reason="netCDF4 not installed: the gate cannot read the "
                            "oracle mesh, so a failure here would not be a "
                            "gate regression")
-def test_a_lie_about_the_waived_dry_level_is_refused():
-    """The one place section 4's scored rows deliberately do not look.
+def test_a_lie_about_the_dry_level_is_refused():
+    """The permanently-dry level is SCORED, not waived (2026-09-10).
 
-    DINO's level 36 is NEMO's permanently dry dummy; the model never
-    integrates it, so it is excluded from every scored row and covered by a
-    WAIVER instead. The row it replaced compared the model against ITSELF
-    there and printed EXACT, and an arbitrary 300 m planted at that level
-    passed the whole gate. The waiver is bounded to NEMO's own other ladder,
-    so it is not a blanket pass on a level.
+    DINO's level 36 is NEMO's permanently dry dummy.  It used to be excluded
+    from every scored row and covered by a waiver, because the bridge left
+    the unrelated 1-D ladder's value there.  The user's instruction was to do
+    exactly what NEMO does, so the level now takes NEMO's own e3t_0/gdept_0
+    and the two ladder rows cover all 36 levels.
+
+    This test is the non-vacuity check for that: an arbitrary value planted
+    on the dry level must make those rows go red and the gate exit non-zero.
+    Before the change, the same plant passed the whole gate.
     """
     r = _run_gate("--plant-dry-level")
     assert r.returncode != 0, r.stdout[-4000:]
-    assert "neither NEMO ladder's value" in r.stdout, r.stdout[-4000:]
+    assert "e3t_0 reference ladder" in r.stdout, r.stdout[-4000:]
+    # the two ladder rows are the ones that must catch it
+    for row in ("e3t_0 reference ladder", "gdept_0 T-depth ladder"):
+        line = [ln for ln in r.stdout.splitlines() if ln.startswith(row)]
+        assert line and "FAIL" in line[0], (row, r.stdout[-4000:])
     # and it must not fire by accident on the honest run
     ok = _run_gate()
     assert ok.returncode == 0
-    assert "is NEMO's own 1-D ladder" in ok.stdout
+    assert "scored, not waived" in ok.stdout
+    # the coordinate-branch guard must have actually looked
+    assert "partial-cell: True" in ok.stdout, ok.stdout[-4000:]

@@ -201,9 +201,9 @@ def main() -> int:
 
     if args.plant_dry_level:
         # The ONE thing the scored rows deliberately do not cover.  A dry
-        # level is excluded from every row, so only the waiver can catch a lie
-        # about it -- and the waiver used to be a blanket pass (the row it
-        # replaced compared the model against ITSELF there and printed EXACT).
+        # level is now SCORED like every other level (the waiver is gone), so
+        # this plant must make the two ladder rows go red.  It is kept because
+        # it is the only plant that targets the dry level specifically.
         from legoesm.ocean.fidelity import nemo_state_bridge as _nsb2
         _true_dry = _nsb2.effective_vertical_scale_factors
 
@@ -518,17 +518,49 @@ def main() -> int:
         act = np.asarray(z.is_active)
         hp = np.asarray(z.h_partial)
         print(f"  {int(dry.sum())} permanently-dry level(s): "
-              f"{list(1 + np.where(dry)[0])} -- scored, not waived. "
-              f"On this run they carry {int(act[..., dry].sum())} active "
-              f"cells and max|h_partial| = "
-              f"{float(np.abs(hp[..., dry]).max()):.3e} m, so nothing "
-              "integrates them; they DO set H_max and the three deepest "
-              "reference interfaces, which is why they are scored.")
-        print(f"  carried reference values: H_max = {float(z.H_max):.6f} m, "
+              f"{list(1 + np.where(dry)[0])} -- scored, not waived. They DO "
+              "set H_max and the three deepest reference interfaces, which "
+              "is why they are scored.")
+        # THESE TWO HARD FAILS ARE INDEPENDENT OF THE WAIVER AND SURVIVE IT.
+        # A dry level in the MIDDLE of a column is a different object (it
+        # would sit between two integrated cells); and a dry level that
+        # carries an active cell or a thickness is being integrated after
+        # all.  Deleting the waiver deleted neither check -- a review of the
+        # first version of this diff found they had become print-only, which
+        # would have made the gate weaker than the version it replaced.
+        if not np.all(dry[len(dry) - int(dry.sum()):]):
+            print(f"  dry levels {1 + np.where(dry)[0]} are not the TRAILING "
+                  "levels of the column: this is not NEMO's dummy bottom "
+                  "level")
+            g4.failed = True
+        n_act = int(act[..., dry].sum())
+        max_hp = float(np.abs(hp[..., dry]).max())
+        print(f"  dry levels carry {n_act} active cells and max|h_partial| "
+              f"= {max_hp:.3e} m")
+        if n_act or max_hp != 0.0:
+            print("  a permanently-dry level carries an active cell or a "
+                  "thickness on this run: it is being integrated")
+            g4.failed = True
+        # H_max MOVED when the waiver went (4506.374704 -> 4617.462287 m on
+        # this card).  It is only harmless because this card's coordinate is
+        # the PARTIAL-CELL one, whose Jacobian is built from h_partial.  On
+        # the z-star branch the Jacobian is (eta + H_bathy)/H_max and every
+        # cell would move ~2.7%.  So the branch is PRINTED and asserted here
+        # rather than left to the reader (review finding).
+        from legoesm.ocean.vertical import OceanPartialCellCoordinate
+        is_pc = isinstance(z, OceanPartialCellCoordinate)
+        print(f"  H_max = {float(z.H_max):.6f} m, "
               f"z_half_ref[-1] = {float(np.asarray(z.z_half_ref)[-1]):.6f}, "
               f"z_full_ref[-1] = {float(np.asarray(z.z_full_ref)[-1]):.6f}, "
               f"dz_half_ref[-1] = "
-              f"{float(np.asarray(z.dz_half_ref)[-1]):.6f}")
+              f"{float(np.asarray(z.dz_half_ref)[-1]):.6f}; coordinate is "
+              f"{type(z).__name__} (partial-cell: {is_pc})")
+        if not is_pc:
+            print("  this card is NOT on the partial-cell coordinate, so "
+                  "H_max enters the vertical Jacobian directly and the dry "
+                  "level is no longer inert: re-measure before trusting any "
+                  "row here")
+            g4.failed = True
     g4.check("e3t_0 reference ladder", dz, e3t_lev)
     # C5/C6 -- the S-EOS depth (eosbn2.F90:297 zh = gdept(Knn)) and the sco
     # pressure-gradient depth (dynhpg.F90:353/378 gdept_z0), both read from

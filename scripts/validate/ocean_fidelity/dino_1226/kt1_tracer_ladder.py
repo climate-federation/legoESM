@@ -245,7 +245,8 @@ def stage0(restart_glob: str, plant: bool = False) -> tuple[dict, int]:
 
 
 # ----------------------------------------------------------------- stages 1/2
-def stages12(R: dict, plant_shift: bool) -> int:
+def stages12(R: dict, plant_shift: bool,
+             plant_ldf_call: bool = False) -> int:
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     set_policy(PrecisionPolicy.fp64())                      # Rule 1c
     from legoesm.ocean.experiments import dino as dm
@@ -303,7 +304,7 @@ def stages12(R: dict, plant_shift: bool) -> int:
         # "Interior legoESM W index k is NEMO W level k+2"
         # (ocean_model_latlon_cgrid.py:7219-7220, _seed_tke_preclosure_carry),
         # i.e. Fortran k+2 == python index k+1.  legoESM's array carries
-        # nlev-1 = 34 interior interfaces plus a zero tail; NEMO's index 35
+        # jpk-2 = 34 interior interfaces plus a zero tail; NEMO's index 35
         # (Fortran 36) is the permanently dry dummy.  The diagnostic column
         # below prints both sides at the same physical interfaces so a slip
         # is visible instead of silent.
@@ -468,36 +469,74 @@ def stages12(R: dict, plant_shift: bool) -> int:
     gmmod.nemo_iso_lap_tracer_tendency_latlon_cgrid = spy
     try:
         with jax.disable_jit():
-            model.step(st, dt=DT, surface_forcing=sf_step,
-                       external_tracer_rate=rate)
+            after2 = model.step(st, dt=DT, surface_forcing=sf_step,
+                                external_tracer_rate=rate)
     finally:
         gmmod.nemo_iso_lap_tracer_tendency_latlon_cgrid = real
+    # CONTROL (review finding): this is a SECOND, un-jitted step.  The
+    # tendency captured from it can only explain the residual measured on the
+    # FIRST step if the two steps agree.  Checked, not assumed.
+    _dT = float(np.max(np.abs(np.asarray(after2.T.data)
+                              - np.asarray(after.T.data))))
+    _dS = float(np.max(np.abs(np.asarray(after2.S.data)
+                              - np.asarray(after.S.data))))
+    # The bar is stated, not "zero": turning jit off changes the operation
+    # order, so the two steps agree to fp64 roundoff rather than bit-for-bit.
+    # What matters is whether that gap can reach the effect being explained,
+    # so it is required to sit at least 100x BELOW the residual this stage is
+    # about (T rms 1.837e-09 K/s x 2700 s = 4.96e-06 K).
+    _margin = 4.96e-06 / 100.0
+    print(f"  control: the un-jitted capture step vs the scored step -- "
+          f"max|dT| = {_dT:.3e} K, max|dS| = {_dS:.3e} psu, against a "
+          f"{_margin:.2e} K bar (1/100 of the residual being explained)")
+    if _dT > _margin:
+        print("  ^^ the capture step is far enough from the scored step to "
+              "matter; the row below would be about a different run")
+        bad += 1
     if len(calls) != 4:
         print(f"  UNMEASURED: the isoneutral tendency was called "
               f"{len(calls)} times, expected 4 (T,S x Nnn,Nbb pass)")
         return bad + 1
-    # IDENTIFY the Nbb dissipative pass by the input array, never by
-    # position.  legoESM calls the isoneutral tendency 4x per step: the Nnn
-    # advective pass (T,S) then the Nbb dissipative pass (T,S), and only the
-    # latter is what NEMO's tra_ldf(Kbb) computes.  On THIS record the Nnn
-    # pass sees an intermediate T that is NOT state.T, so the wet-masked
-    # exact match against state.T/state.S selects the Nbb pass uniquely --
-    # and the probe REFUSES if it is not unique rather than taking a
-    # position.
+    # WHICH CALL IS NEMO's tra_ldf?  A review of the first version of this
+    # probe found its two comments contradicted each other about the call
+    # structure and that nothing PROVED which call was scored.  So the
+    # structure is now printed per call and BOTH candidates are scored: if
+    # they give the same ratio, the identification cannot change the answer,
+    # and if they do not, the disagreement is on the page instead of hidden
+    # behind a position.
     Tin, Sin = np.asarray(st.T.data), np.asarray(st.S.data)
+    Tbef = np.asarray(st.T_before.data) if st.T_before is not None else None
+    Sbef = np.asarray(st.S_before.data) if st.S_before is not None else None
+    print("  call structure (max|q - x| on wet cells, per captured call):")
+    for i, (q, _) in enumerate(calls):
+        bits = []
+        for nm, ref in (("T", Tin), ("T_before", Tbef),
+                        ("S", Sin), ("S_before", Sbef)):
+            if ref is not None and q.shape == ref.shape:
+                bits.append(f"{nm}={float(np.max(np.abs((q - ref)[wet3]))):.3e}")
+        print(f"    call {i}: " + "  ".join(bits))
     wT = [i for i, (q, _) in enumerate(calls)
           if q.shape == Tin.shape and np.array_equal(q[wet3], Tin[wet3])]
     wS = [i for i, (q, _) in enumerate(calls)
           if q.shape == Sin.shape and np.array_equal(q[wet3], Sin[wet3])]
-    print(f"  Nbb-pass identification by wet-masked exact input match: "
+    print(f"  exact wet-masked match against state.T / state.S: "
           f"T->{wT}  S->{wS}")
-    if len(wT) != 1 or len(wS) != 1:
-        print("  UNMEASURED: the Nbb pass is not uniquely identifiable by "
-              "its input, so this row would rest on a call position")
+    if not wT or not wS:
+        print("  UNMEASURED: no captured call saw state.T (or state.S), so "
+              "NEMO's Kbb-evaluated tra_ldf is not among them")
         return bad + 1
-    iT, iS = wT[0], wS[0]
-    for lbl, idx, oracle_key in (("T", iT, "ttrd_ldf"),
-                                 ("S", iS, "strd_ldf")):
+    iT, iS = wT[-1], wS[-1]
+    if plant_ldf_call:
+        # The Nnn advective pass, which is NOT what NEMO's tra_ldf computes.
+        wT = [i for i in range(len(calls)) if i not in wT and i not in wS][:1]
+        wS = wT
+        print(f"  LDF-CALL PLANT ACTIVE: scoring call {wT} instead, which "
+              "is the Nnn advective pass; the ratio MUST move materially")
+
+    _ratios = []
+    for lbl, cands, oracle_key in (("T", wT, "ttrd_ldf"),
+                                   ("S", wS, "strd_ldf")):
+      for idx in cands:
         lego = calls[idx][1]
         nemo = np.nan_to_num(O3(oracle_key))
         if lego.shape != nemo.shape:
@@ -507,13 +546,34 @@ def stages12(R: dict, plant_shift: bool) -> int:
         else:
             m = wet3
         st_ = _stats(lego, nemo, m)
-        print(_row(f"{lbl} tra_ldf", st_))
+        print(_row(f"{lbl} tra_ldf [call {idx}]", st_))
         den = float(nemo[m] @ nemo[m])
         if den:
-            print(f"      best-fit lego/NEMO ratio = "
-                  f"{float(lego[m] @ nemo[m]) / den:.9f}")
-        if st_["ne"]:
+            _r = float(lego[m] @ nemo[m]) / den
+            _ratios.append(_r)
+            print(f"      best-fit lego/NEMO ratio = {_r:.9f}")
+        if st_["ne"] and idx == cands[-1]:
             bad += 1
+    if plant_ldf_call:
+        # ANY tracer moving is enough, and the first run of this plant showed
+        # why "all" would have been the wrong bar: scoring the Nnn advective
+        # pass moves SALINITY from 0.9967 to 5.53 but leaves TEMPERATURE at
+        # 0.9965, because the two passes' T inputs differ by only 1.5e-2 K out
+        # of a ~20 K field while their S inputs differ enough to matter.  So
+        # the identification is load-bearing (S proves it) AND the temperature
+        # row happens not to depend on it -- both facts are printed rather
+        # than collapsed into one verdict.
+        moved = [abs(r - 0.9966) > 0.01 for r in _ratios]
+        print(f"  LDF-CALL PLANT: ratios {['%.6f' % r for r in _ratios]}; "
+              f"moved: {moved}")
+        if not any(moved):
+            print("  ^^ scoring the wrong call gives the same answer on EVERY "
+                  "tracer, so the identification certifies nothing")
+            bad += 1
+        else:
+            print("  the identification is load-bearing on at least one "
+                  "tracer, and it is made by an EXACT wet-masked input match "
+                  "(max|q - state.T| = 0.000e+00), not by a call position")
     return bad
 
 
@@ -524,6 +584,9 @@ def main() -> int:
     ap.add_argument("--plant-closure", action="store_true",
                     help="move one additive trend by 1 ulp; stage 0 MUST "
                          "refuse (non-vacuity for the budget gate)")
+    ap.add_argument("--plant-ldf-call", action="store_true",
+                    help="score stage 4 against the WRONG captured call; "
+                         "the ratio MUST move materially")
     ap.add_argument("--plant-shift", action="store_true",
                     help="shift stage 1's W-level alignment by one; the "
                          "closure residuals MUST explode (non-vacuity for "
@@ -538,7 +601,7 @@ def main() -> int:
     if args.nemo_only:
         print("\n--nemo-only: stages 1/2 skipped.")
         return 0
-    bad += stages12(R, args.plant_shift)
+    bad += stages12(R, args.plant_shift, args.plant_ldf_call)
     print(f"\n{'GATE PASS' if bad == 0 else f'GATE FAIL ({bad} rows)'}")
     return 0 if bad == 0 else 1
 

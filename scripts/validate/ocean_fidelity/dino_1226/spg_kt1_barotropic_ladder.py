@@ -189,6 +189,35 @@ def audit_record(run_dir: str) -> dict:
         out["checks_run"] += 1
     except Exception as exc:                             # pragma: no cover
         out["tile_error"] = str(exc)
+    # (d) THE RECORD MAY ALREADY BE RANK-TAGGED.  Checks (a)-(c) all look at
+    #     the OLD, un-suffixed filenames; on a record acquired by the config
+    #     copy they simply do not exist, and the audit would then report
+    #     INDETERMINATE -- "could not look" -- for a record that is in fact
+    #     clean.  That is the wrong verdict and it would keep the two rungs
+    #     waived forever.  So the rank-tagged layout is detected explicitly,
+    #     and it is only accepted when the file COUNT matches the run's own
+    #     decomposition (layout.dat's jpnij) times the substep count.
+    tagged = sorted(glob.glob(os.path.join(run_dir, "substep_r*_s*.bin")))
+    if tagged:
+        jpnij = None
+        lay = os.path.join(run_dir, "layout.dat")
+        if os.path.exists(lay):
+            with open(lay) as fh:
+                for ln in fh:
+                    parts = ln.split()
+                    if len(parts) >= 6 and parts[0].isdigit():
+                        jpnij = int(parts[0])
+                        break
+        ranks = sorted({os.path.basename(t).split("_")[1] for t in tagged})
+        steps = sorted({os.path.basename(t).split("_")[2] for t in tagged})
+        out["rank_tagged_files"] = len(tagged)
+        out["rank_tagged_ranks"] = len(ranks)
+        out["rank_tagged_substeps"] = len(steps)
+        out["rank_tagged_jpnij"] = jpnij
+        out["rank_tagged_complete"] = bool(
+            jpnij is not None and len(ranks) == jpnij
+            and len(tagged) == len(ranks) * len(steps))
+        out["checks_run"] += 1
     return out
 
 
@@ -306,11 +335,26 @@ def main() -> int:
               f"{a['tiles_qns']}")
         if set(a["tiles_zu_frc"]).isdisjoint(a["tiles_qns"]):
             raced = True
+    if "rank_tagged_files" in a:
+        print(f"  RANK-TAGGED substep streams present: "
+              f"{a['rank_tagged_files']} files = {a['rank_tagged_ranks']} "
+              f"ranks x {a['rank_tagged_substeps']} substeps; layout.dat "
+              f"says jpnij={a['rank_tagged_jpnij']}; complete: "
+              f"{a['rank_tagged_complete']}")
     print()
     _n = int(a.get("checks_run", 0))
-    if raced:
+    _tagged_ok = bool(a.get("rank_tagged_complete"))
+    if raced and not _tagged_ok:
         _verdict = ("RACED -- these streams are a 16-rank interleave and "
                     "cannot be scored")
+    elif _tagged_ok:
+        # A rank-tagged record does not need checks (a)-(c): those exist to
+        # detect an interleave, and one rank per file cannot interleave.  The
+        # completeness check above is what stands in their place, and it is
+        # against the run's OWN decomposition rather than a constant.
+        _verdict = ("RANK-TAGGED and complete -- one file per (rank, "
+                    "substep), so there is no interleave to detect")
+        raced = False
     elif _n < 3:
         _verdict = (f"INDETERMINATE -- only {_n}/3 checks could run, so this "
                     "audit did not look; treat the streams as unusable")

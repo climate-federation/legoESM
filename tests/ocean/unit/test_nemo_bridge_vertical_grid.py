@@ -209,3 +209,22 @@ def test_a_dry_level_with_horizontal_variation_is_still_rejected():
     g = g._replace(e3t_0=e3t_0)
     with pytest.raises(ValueError, match="varies horizontally"):
         effective_vertical_scale_factors(g, tmask, mode="both")
+
+
+def test_a_dry_level_with_varying_gdept_is_rejected_too():
+    """The gdept_0 uniformity check is new and needs its own case.
+
+    The e3t_0 check fires first, so a fixture that varies BOTH proves nothing
+    about gdept_0 (review finding).  This one varies gdept_0 ONLY.
+    """
+    import pytest
+    from legoesm.ocean.fidelity.nemo_state_bridge import (
+        effective_vertical_scale_factors)
+    g, _, _, _ = _synthetic_grid()
+    tmask = np.asarray(g.tmask).copy()
+    tmask[:, :, -1] = 0.0
+    gdept_0 = np.asarray(g.gdept_0).copy()
+    gdept_0[0, 0, -1] += 5.0                  # vary gdept_0 on the DRY level
+    g = g._replace(gdept_0=gdept_0)
+    with pytest.raises(ValueError, match="gdept_0 varies horizontally"):
+        effective_vertical_scale_factors(g, tmask, mode="both")
