@@ -4900,6 +4900,20 @@ def apply_dino_mpas_surface_forcing(state, forcing, z_coord, cfg, dt,
             "DINO path only (seasonal T*/Q_sr recompute); the MPAS apply "
             "still uses the annual-mean arrays — reject rather than "
             "silently run the wrong forcing.")
+    # Same reject-don't-run rule for the solar ladder.  This applicator reads
+    # neither shortwave_penetration_ladder nor surface_flux_divisor, so a card
+    # that selects NEMO's qsr_2BD would silently get the STATIC reference
+    # ladder here.  A diff reviewer found that the author's own pattern above
+    # had not been applied to it.
+    _ladder = getattr(cfg, "shortwave_penetration_ladder", "static")
+    if _ladder != "static":
+        raise NotImplementedError(
+            f"DINOConfig.shortwave_penetration_ladder={_ladder!r} is wired on "
+            "the lat-lon DINO path only (the live gdepw ladder and NEMO's "
+            "qsr_2BD band/level structure both need the free-surface stretch "
+            "and the per-level wet mask); the MPAS apply would silently run "
+            "the static reference ladder — reject rather than run the wrong "
+            "solar profile.")
     dz_0 = float(z_coord.dz_ref[0])
     cell_mask = state.land_mask.data                  # (nCells,)
 

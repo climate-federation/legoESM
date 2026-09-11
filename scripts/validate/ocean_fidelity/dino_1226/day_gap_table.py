@@ -151,10 +151,13 @@ def main() -> int:
     ap.add_argument("--days", default=None,
                     help="comma-separated override of the day list")
     ap.add_argument("--plant", action="store_true",
-                    help="move ONE wet T cell of the day-1 candidate by 1 ulp; "
-                         "the day-1 T row MUST then differ from the unplanted "
-                         "run.  Without this the table cannot be shown to be "
-                         "able to move at all.")
+                    help="score every day TWICE -- unplanted, and with ONE wet "
+                         "T cell moved by 1 ulp -- and print the DELTA.  The "
+                         "first version printed only the planted table and "
+                         "asked the reader to eyeball it against another run; "
+                         "one ulp on one cell of 342134 is ~1e-19 of an rms "
+                         "printed to five digits, so the two tables were "
+                         "BYTE-IDENTICAL and the control proved nothing.")
     ap.add_argument("--json-out", default=None)
     a = ap.parse_args()
 
@@ -193,12 +196,9 @@ def main() -> int:
         prov[day] = {"kt": kt, "nemo_run": run,
                      "nemo_tiles": len(glob.glob(pat)),
                      "lego_snapshot": spath, "lego_sha256": _sha(spath)}
-        out = []
+        out, delta = [], []
         for lname, nname in FIELDS:
             lego = _lego(snap, lname)
-            if a.plant and day == want[0] and lname == "T":
-                lego = lego.copy()
-                lego[100, 25, 0] = np.nextafter(lego[100, 25, 0], np.inf)
             nemo = (np.nan_to_num(R[nname]) if lname == "eta"
                     else np.nan_to_num(np.moveaxis(R[nname], 0, -1)))
             m = masks[lname]
@@ -206,14 +206,30 @@ def main() -> int:
                 raise SystemExit(
                     f"shape mismatch day {day} {lname}: lego {lego.shape} "
                     f"nemo {nemo.shape} mask {m.shape}")
-            out.append(float(np.sqrt(np.mean((lego - nemo)[m] ** 2))))
+            v = float(np.sqrt(np.mean((lego - nemo)[m] ** 2)))
+            out.append(v)
+            if a.plant and lname == "T":
+                j, i, k = np.argwhere(m)[0]
+                for tag, dv in (("1 ulp", None), ("1e-4 K", 1e-4)):
+                    lp = lego.copy()
+                    lp[j, i, k] = (np.nextafter(lp[j, i, k], np.inf)
+                                   if dv is None else lp[j, i, k] + dv)
+                    vp = float(np.sqrt(np.mean((lp - nemo)[m] ** 2)))
+                    delta.append((f"{lname}(j{j},i{i},k{k}) {tag}", vp - v))
         rows[day] = out
         print(f"  {day:>5d}{kt:>7d}{os.path.basename(run):>12s}"
               + "".join(f"{v:>14.4e}" for v in out))
+        for tag, d in delta:
+            print(f"        PLANT {tag}: moves the rms by {d:+.4e} K "
+                  f"({'RESOLVED' if d != 0.0 else 'BELOW RESOLUTION'})")
     if a.plant:
-        print("  PLANT ACTIVE on the first day's T row (1 ulp) -- compare "
-              "against the unplanted run; an identical table means the table "
-              "cannot see a 1-ulp change and no row below is evidence.")
+        print("  PLANT lines are DELTAS computed in this same process, not a "
+              "second table to eyeball.  A 1-ulp move on ONE cell of 342134 "
+              "is BELOW this table's resolution and says so; that is not a "
+              "defect, it is the table's scale -- these rows are a CLIMATE "
+              "comparison whose noise floor is the Phase-0 spread above "
+              "(~1.7e-10 K), seven orders below the gap they report, and the "
+              "1e-4 K plant is the positive control that they move at all.")
 
     floor = {}
     if a.phase0_root:

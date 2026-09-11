@@ -298,12 +298,34 @@ def test_nemo_2bd_zeroes_every_level_below_nkv_and_the_default_does_not():
     # the reference ladder does NOT -- which is what makes the row above a
     # measurement of the statement rather than of an always-zero tail.
     assert np.abs(ref[..., 22:]).max() > 0.0
+    # AND THE CUT MUST BE AT nkV, NOT MERELY "SOMEWHERE".  A diff reviewer
+    # moved the cut to nk0 -- wiping twenty levels of solar heating -- and the
+    # single assertion above still passed, because any SHALLOWER cut also
+    # leaves [22:] at zero.  These two close it from the other side.
+    assert np.abs(nemo[..., 2:22]).max() > 0.0, (
+        "levels nk0..nkV-1 carry no solar heating: the cut is too shallow")
+    wrong = np.asarray(shortwave_penetration_tendency(
+        sw_down=q, nemo_2bd_levels=(2, 2), cell_wet=wet, **common))
+    assert np.abs(nemo - wrong).max() > 0.0, (
+        "cutting the trend at nk0 instead of nkV changes nothing, so this "
+        "test cannot see where the cut is")
+    assert np.abs(wrong[..., 2:22]).max() == 0.0
 
 
 def test_nemo_2bd_drops_the_infrared_band_below_nk0():
     """``traqsr.F90:676-683``: the deeper loop's attenuation is ``zz1*EXP``
-    alone.  Displacing the INFRARED extinction length must therefore leave
-    every level at or below ``nk0`` untouched while moving the ones above it.
+    alone.  Displacing the INFRARED extinction length must therefore move the
+    levels that carry the band and leave the ones below ``nk0`` untouched.
+
+    **THE DROP ITSELF IS INERT ON THIS CARD, AND THIS TEST MEASURES THAT
+    RATHER THAN CLAIMING OTHERWISE.**  A diff reviewer swept ``nk0`` over
+    {1, 2, 3, 5, 10, 22} and got BIT-IDENTICAL tendencies every time: at
+    ``gdepw(3) = 20.6 m`` against a 0.35 m e-folding the infrared term is
+    ~1e-26 of the visible one and underflows, so where the band is dropped
+    cannot be measured here.  The statement is transcribed because NEMO has
+    it, not because it moves a number -- and the final assertion below PINS
+    the inertness so a future ladder on which it is NOT inert shows up as a
+    test failure rather than as silence.
     """
     import jax.numpy as jnp
     import numpy as np
@@ -334,6 +356,24 @@ def test_nemo_2bd_drops_the_infrared_band_below_nk0():
     assert np.abs(a[..., :2] - b[..., :2]).max() > 0.0
     # levels 2..21 are visible-only and must NOT
     assert np.abs(a[..., 2:22] - b[..., 2:22]).max() == 0.0
+    # AND THE MEASURED INERTNESS OF THE DROP ITSELF, pinned rather than
+    # asserted in prose: moving nk0 changes nothing on this ladder.
+    from legoesm.ocean.physics.shortwave_penetration import (
+        ShortwavePenetrationConfig as _C)
+    def run_nk0(nk0):
+        return np.asarray(shortwave_penetration_tendency(
+            sw_down=q, z_coord_dz_ref=z.dz_ref,
+            z_coord_z_half_ref=z.z_half_ref,
+            jacobian=jnp.ones(wet.shape[:2]), config=_C(water_type="I"),
+            rho_0=cfg.rho_0, c_sw=cfg.c_p,
+            z_half_stretch=jnp.ones(wet.shape[:2]),
+            nemo_2bd_levels=(nk0, 22), cell_wet=wet))
+    base = run_nk0(2)
+    for nk0 in (1, 3, 5, 10, 22):
+        assert np.abs(run_nk0(nk0) - base).max() == 0.0, (
+            f"nk0={nk0} changes the tendency on this ladder: the infrared "
+            "drop is NO LONGER inert here and the commit's claim that its "
+            "measured contribution is 0.0 must be re-measured")
 
 
 def test_nemo_2bd_refuses_the_operands_it_cannot_run_without():

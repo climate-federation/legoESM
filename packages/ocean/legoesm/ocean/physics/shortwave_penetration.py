@@ -522,6 +522,7 @@ def nemo_qsr_ext_lev(z_coord, tmask, rdt: float,
     ``[..., nk0:nkV]`` with no index arithmetic.  NEMO's printed 1-based
     ``nk0``/``nkV`` are numerically the same integers.
     """
+    import hashlib
     import numpy as _np
 
     # The result is a property of the LADDER, the MASK and rDt, none of which
@@ -530,13 +531,19 @@ def nemo_qsr_ext_lev(z_coord, tmask, rdt: float,
     # two 35-level scans every step would be pure waste.  Memoised on the
     # identity of the vertical coordinate, which the cache also KEEPS ALIVE so
     # id() cannot be recycled onto a different object.
+    # The key includes the MASK, not only the coordinate: the Fortran loops
+    # over wmask/tmask, so two calls with the same ladder and a DIFFERENT mask
+    # are different questions.  A diff reviewer demonstrated the stale answer
+    # this omission returned (a 5-level mask got the full mask's (2, 22)).
+    _m = _np.ascontiguousarray(_np.asarray(tmask) > 0.5)
     key = (id(z_coord), float(rdt), float(rn_abs), float(rn_si0),
-           float(rn_si1), float(rho_0), float(c_sw))
+           float(rn_si1), float(rho_0), float(c_sw),
+           _m.shape, hashlib.sha256(_m.tobytes()).hexdigest())
     hit = _QSR_EXT_LEV_CACHE.get(key)
     if hit is not None:
         return hit[1]
 
-    t = _np.asarray(tmask) > 0.5
+    t = _m
     if t.ndim != 3:
         raise ValueError(f"tmask must be (nlat, nlon, nlev); got {t.shape}")
     # wmask == tmask requires column-monotone wetness; check, never assume.
@@ -547,6 +554,28 @@ def nemo_qsr_ext_lev(z_coord, tmask, rdt: float,
         raise ValueError(
             "wmask != tmask on this mesh (a wet cell sits under a dry one), "
             "so qsr_ext_lev's wmask cannot be substituted by tmask here.")
+    # THE MINVAL SUBSTITUTION.  The Fortran takes
+    # ``ze3t = MINVAL( e3t_3d(:,:,jk), mask=(wmask(:,:,jk+1)==1) )`` -- a
+    # horizontal minimum over the 3-D thickness -- and this takes the 1-D
+    # reference ``dz_ref[jk-1]``.  Those are the same number only when
+    # ``e3t_3d`` is horizontally uniform, i.e. a FULL-STEP z coordinate
+    # (DINO: ``ln_zco_nam=.true.``, ``ln_zps_nam=.false.``,
+    # ``RUN_TRAJ/namelist_cfg:70-71``, and ``ocean.output`` prints
+    # ``l_zco = T``).  A partial-step or s-coordinate card would get a
+    # silently different level, so it is REFUSED rather than approximated.
+    _hp = getattr(z_coord, "h_partial", None)
+    if _hp is not None:
+        _hp = _np.asarray(_hp, dtype=_np.float64)
+        if _hp.shape == t.shape:
+            _bad = _np.abs(_hp - _np.asarray(z_coord.dz_ref,
+                                             dtype=_np.float64))[t]
+            if _bad.size and float(_bad.max()) != 0.0:
+                raise ValueError(
+                    "qsr_ext_lev's MINVAL over e3t_3d is transcribed as the "
+                    "1-D reference thickness, which is exact only on a "
+                    "FULL-STEP z coordinate; this one has partial cells "
+                    f"(max |h_partial - dz_ref| over WET cells = "
+                    f"{float(_bad.max()):.6e} m).")
     gdepw = -_np.asarray(z_coord.z_half_ref, dtype=_np.float64)   # (nlev+1,)
     e3t = _np.asarray(z_coord.dz_ref, dtype=_np.float64)          # (nlev,)
     nlev = t.shape[-1]
@@ -566,11 +595,14 @@ def nemo_qsr_ext_lev(z_coord, tmask, rdt: float,
                     klev = jk
                     continue
                 zdw = float((gdepw[jk] * w[..., k0]).max())
-                sel = w[..., jk] if jk < nlev else _np.zeros_like(w[..., 0])
-                if not sel.any():
-                    # Fortran MINVAL over an empty mask returns +HUGE, which
-                    # makes the test below trivially true.  Reproduce that
-                    # branch explicitly instead of letting numpy raise.
+                # Fortran MINVAL over an EMPTY mask returns +HUGE, so
+                # LOG(zcoef*HUGE) overflows and zhext -> -Inf, making the test
+                # below trivially true.  jk runs to nlev-1 so wmask(jk+1) is
+                # always in range; the branch is reachable only for a level
+                # with wet cells but no wet cell BELOW it, i.e. a bed exactly
+                # at jk -- which this loop's own `t[..., k0].sum() > 0` guard
+                # does not exclude.
+                if not w[..., jk].any():
                     klev = jk
                     continue
                 ze3t = float(e3t[k0])
@@ -751,10 +783,28 @@ def _nemo_qsr_2bd_tendency(sw_down, dz_ref, z_half_ref, z_half_stretch,
     """
     nk0, nkv = levels
     nlev = dz_ref.shape[-1]
-    if not (0 < nk0 <= nkv <= nlev):
+    # nkV <= nlev-1, not <= nlev: qsr_ext_lev's own upper bound is jpkm1
+    # (traqsr.f90:1084 `klev = jpkm1`), and interface nkV+1 would need a wet
+    # mask at level nkV which a ladder of nlev levels does not have.  The
+    # looser bound admitted nkV == nlev and then raised a raw broadcast error
+    # two lines later (a diff reviewer demonstrated it).
+    if not (0 < nk0 <= nkv <= nlev - 1):
         raise ValueError(
-            f"nemo_2bd_levels {levels!r} is not 0 < nk0 <= nkV <= nlev="
-            f"{nlev}; qsr_ext_lev returns 1-based level counts.")
+            f"nemo_2bd_levels {levels!r} is not 0 < nk0 <= nkV <= nlev-1="
+            f"{nlev - 1}; qsr_ext_lev returns 1-based level counts bounded "
+            "by jpkm1.")
+    wm_shape = jnp.asarray(cell_wet).shape
+    if wm_shape[-1] != nlev:
+        raise ValueError(
+            f"cell_wet has {wm_shape[-1]} levels and the ladder has {nlev}; "
+            "qsr_2BD's wmask(jk+1) must be indexed on the SAME ladder or the "
+            "mask silently slides against the interfaces.")
+    if jnp.asarray(cell_wet).dtype not in (jnp.bool_,):
+        cw = jnp.asarray(cell_wet)
+        if not jnp.all((cw == 0) | (cw == 1)):
+            raise ValueError(
+                "cell_wet must be a 0/1 mask (qsr_2BD multiplies by wmask, "
+                "not by a fractional weight)")
     r1_rr = 1.0 / (rho_0 * c_sw)          # traqsr.F90:653-654 r1_rho0_rcp
     zz0 = R * r1_rr
     zz1 = (1.0 - R) * r1_rr
@@ -782,8 +832,6 @@ def _nemo_qsr_2bd_tendency(sw_down, dz_ref, z_half_ref, z_half_stretch,
     dz_actual = dz_ref[:nkv] * z_half_stretch[..., jnp.newaxis]
     dz_safe = jnp.where(dz_actual > 0.0, dz_actual, 1.0)
     top = jnp.where(dz_actual > 0.0, qsr_hc / dz_safe, 0.0)
-    if nkv == nlev:
-        return top
     return jnp.concatenate(
         [top, jnp.zeros(top.shape[:-1] + (nlev - nkv,), dtype=top.dtype)],
         axis=-1)

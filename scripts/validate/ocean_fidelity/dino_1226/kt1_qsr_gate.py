@@ -191,7 +191,12 @@ def main() -> int:
           "qsr_hc_b=0):  ttrd_qsr  ==  qsr_hc / (e3t_3d*(1+r3t*tmask))")
     print(f"  {'row':30s}{'cells':>9s}{'!=':>9s}{'max|d|':>13s}{'rms':>13s}"
           f"{'NEMO rms':>13s}{'ratio':>14s}")
-    bad += _row("closure: qsr_hc/e3t vs trd", closure, O3("ttrd_qsr"), wet3)
+    # NOT GATING: this row measures NEMO against NEMO.  ttrd_qsr is a
+    # difference of RHS accumulators and qsr_hc_b is the raw array, so the
+    # residual here is the ORACLE's own cancellation floor -- counting it
+    # against the model would make the gate unable to reach PASS even on the
+    # self-test arm, which a diff reviewer demonstrated.
+    _row("FLOOR closure: qsr_hc/e3t vs trd", closure, O3("ttrd_qsr"), wet3)
 
     # ---- legoESM's own solar kernel, called with the card's own operands.
     # THE FORCING (Rule 10): the card runs ``forcing_annual_cycle=True``, so
@@ -253,15 +258,36 @@ def main() -> int:
 
     if a.oracle_self_test:
         print("\nSELF-TEST: the legoESM side is REPLACED by NEMO's own "
-              "ttrd_qsr.  This measures the GATE, not the model.")
+              "ttrd_qsr, and the SCORED reference becomes that same array, so "
+              "the arm is a true identity check and must read GATE PASS.  "
+              "Scoring it against qsr_hc_b instead would only re-measure the "
+              "oracle's own floor.")
         dT = O3("ttrd_qsr").copy()
+        closure = O3("ttrd_qsr").copy()
     if a.plant:
+        # THE PLANT MUST CREATE A NEW INEQUALITY.  The first version moved a
+        # fixed index that was ALREADY unequal, so the gate's verdict and even
+        # its printed cell counts were unchanged and the control proved
+        # nothing -- a diff reviewer demonstrated it.  The cell is now CHOSEN
+        # from the data: the first wet sub-surface cell where the two sides
+        # currently agree bit for bit.
+        _eq = (dT == closure) & wet3
+        _eq[..., 0] = False
+        _idx = np.argwhere(_eq)
+        if not len(_idx):
+            raise SystemExit("no wet sub-surface cell currently agrees, so a "
+                             "1-ulp plant cannot create a NEW inequality here")
+        j, i, k = (int(v) for v in _idx[0])
         dT = dT.copy()
-        j, i, k = 100, 25, 10
-        assert wet3[j, i, k]
+        _before = int(((dT != closure) & wet3).sum())
         dT[j, i, k] = np.nextafter(dT[j, i, k], np.inf)
-        print("\nPLANT ACTIVE: one wet sub-surface solar rate cell moved "
-              "1 ulp; the gate MUST fail")
+        _after = int(((dT != closure) & wet3).sum())
+        print(f"\nPLANT ACTIVE: wet cell (j,i,k)=({j},{i},{k}) -- which "
+              f"AGREED before -- moved 1 ulp.  Unequal cells {_before} -> "
+              f"{_after}; the scored row MUST move and the gate MUST fail.")
+        if _after != _before + 1:
+            raise SystemExit("the plant did not create exactly one new "
+                             "inequality; the control is broken")
 
     print("\nlegoESM's solar tendency vs NEMO's ttrd_qsr (kt=1)")
     print(f"  {'row':30s}{'cells':>9s}{'!=':>9s}{'max|d|':>13s}{'rms':>13s}"
@@ -286,7 +312,9 @@ def main() -> int:
     bad += _row(f"  levels {nkv}.. (NEMO zero)", dT[..., nkv:],
                 trd[..., nkv:], wet3[..., nkv:])
     # the implied heat content, against NEMO's own stored array
-    bad += _row("implied qsr_hc vs qsr_hc_b", dT * ze3t, O3("qsr_hc_b"), wet3)
+    # NOT GATING for the same reason: multiplying the rate back by ze3t is
+    # its own rounding step, so this row can never be cleaner than that.
+    _row("FLOOR implied qsr_hc vs qsr_hc_b", dT * ze3t, O3("qsr_hc_b"), wet3)
 
     # ---- WHERE THE LAST ULPS LIVE.  A residual that is a CONSTANT RELATIVE
     # offset within a column is the surface flux Q_sr itself (one operand,

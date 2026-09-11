@@ -72,16 +72,33 @@ CERTIFIED_KT1 = ("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/"
 
 
 def _row(name, lego, nemo, wet):
+    """One scored row.
+
+    A ROW WHOSE REFERENCE IS IDENTICALLY ZERO IS **UNMEASURED**, NEVER AT BAR.
+    A diff reviewer showed the first version of this gate printed four AT BAR
+    rows that were zero-vs-zero, called itself GATE PASS, and was byte-
+    identical under its own --plant -- the repo's own "a control that perturbs
+    a zero is not a control", shipped as a gate.  A zero reference now
+    FAILS the gate with the reason printed, which is the honest verdict: this
+    gate cannot say anything about dyn_ldf at kt=2.
+    """
     d = np.abs(np.asarray(lego) - np.asarray(nemo))[wet]
     n = int((d != 0.0).sum())
     x, y = np.asarray(lego)[wet], np.asarray(nemo)[wet]
     den = float(y @ y)
     ratio = float(x @ y) / den if den else float("nan")
+    nemo_rms = float(np.sqrt(np.mean(y ** 2)))
+    if nemo_rms == 0.0:
+        verdict = "UNMEASURED (reference is identically zero)"
+        bad = 1
+    elif n == 0:
+        verdict, bad = "AT BAR", 0
+    else:
+        verdict, bad = "DEBT", 1
     print(f"  {name:34s}{n:>9d}{d.max():13.4e}"
           f"{float(np.sqrt(np.mean(d ** 2))):13.4e}"
-          f"{float(np.sqrt(np.mean(y ** 2))):13.4e}{ratio:14.9f}  "
-          f"{'AT BAR' if n == 0 else 'DEBT'}")
-    return 0 if n == 0 else 1
+          f"{nemo_rms:13.4e}{ratio:14.9f}  {verdict}")
+    return bad
 
 
 def main() -> int:
@@ -127,11 +144,13 @@ def main() -> int:
     vwet = np.asarray(g.vmask > 0.5)
     cell = np.asarray(g.tmask > 0.5)
 
-    print(f"  operator selector: lateral_viscosity_operator="
-          f"{getattr(mc.lateral_viscosity, 'operator', None)!r}  "
-          f"e3_weighting="
-          f"{getattr(mc.lateral_viscosity, 'e3_weighting', None)!r}  "
-          f"A_h={mc.lateral_viscosity.A_h!r}")
+    # Rule 10: PRINT the fields that exist.  The first version of this line
+    # read two attribute names the config does not have and printed None for
+    # both, which proved nothing about which operator the card selects.
+    _lv = mc.lateral_viscosity
+    print("  lateral_viscosity fields: "
+          + "  ".join(f"{f}={getattr(_lv, f)!r}" for f in _lv._fields
+                      if "oper" in f or "e3" in f or f == "A_h"))
     half_UM = mc.lateral_viscosity.A_h / (grid.radius * grid.dlon)
     ahmt, ahmf = nemo_lateral_viscosity_coefficients(grid, half_UM)
     print(f"  ahmt[0]={float(ahmt[0]):.6f}  ahmt[-1]={float(ahmt[-1]):.6f}  "
@@ -159,9 +178,6 @@ def main() -> int:
     # u-face i sits between cells i-1 and i (face 0 = the periodic image of
     # face 52), so its wetness is the MIN of the two cells it separates --
     # the same min-rule the operator uses for its face thicknesses.
-    _ext = np.concatenate([_act[:, -1:, :], _act], axis=1)     # (199,53,36)
-    _a_u = np.minimum(_ext, np.concatenate([_ext[:, 1:, :],
-                                            _ext[:, -1:, :]], axis=1))
     _a_u = np.minimum(np.concatenate([_act[:, -1:, :], _act], axis=1),
                       np.concatenate([_act, _act[:, :1, :]], axis=1))
     _a_v = np.minimum(np.concatenate([np.zeros_like(_act[:1]), _act], axis=0),
@@ -210,14 +226,19 @@ def main() -> int:
     d = np.abs(a1 - a2)
     du_n3 = d[:, 1:, :] if d.shape[1] == 53 else d
     nemo_u = _O3("utrd_ldf", R2)
-    print(f"\n  THE N3 STATEMENT ALONE (Kmm height minus Kbb height), on u:")
-    print(f"    rms {float(np.sqrt(np.mean(du_n3[uwet] ** 2))):.4e} m/s^2   "
-          f"max {du_n3[uwet].max():.4e}   "
-          f"= {float(np.sqrt(np.mean(du_n3[uwet] ** 2)) / np.sqrt(np.mean(nemo_u[uwet] ** 2))):.3e} "
-          f"of NEMO's own ldf tendency")
-    print(f"    x rDt = {float(np.sqrt(np.mean(du_n3[uwet] ** 2))) * 5400.0:.4e} "
-          f"m/s against the kt=2 u STATE residual 1.4101e-04 m/s "
-          f"(fraction {float(np.sqrt(np.mean(du_n3[uwet] ** 2))) * 5400.0 / 1.4101e-04:.3e})")
+    _n3 = float(np.sqrt(np.mean(du_n3[uwet] ** 2)))
+    _nr = float(np.sqrt(np.mean(nemo_u[uwet] ** 2)))
+    print("\n  THE N3 STATEMENT ALONE (Kmm height minus Kbb height), on u:")
+    print(f"    rms {_n3:.4e} m/s^2   max {du_n3[uwet].max():.4e}")
+    if _nr == 0.0:
+        print("    NEMO's own ldf tendency is identically zero at this step, "
+              "so there is nothing to take a fraction OF -- the statement's "
+              "relative size is UNDEFINED here, not small.")
+    else:
+        print(f"    = {_n3 / _nr:.3e} of NEMO's own ldf tendency")
+    print(f"    x rDt = {_n3 * 5400.0:.4e} m/s against the kt=2 u STATE "
+          f"residual 1.4101e-04 m/s "
+          f"(fraction {_n3 * 5400.0 / 1.4101e-04:.3e})")
     if a.plant:
         print("  PLANT ACTIVE (u scaled by 1+1e-12): every u row above must "
               "differ from the unplanted run")

@@ -367,19 +367,41 @@ def test_the_heat_restoring_is_nemos_association_bit_for_bit():
     qns = (-cfg.A_theta) * (T0 - T_star) - Q_sr          # usrdef_sbc.f90:436-438
     nemo_T = (1.0 / (cfg.rho_0 * cfg.c_p)) * qns / dz0_live   # trasbc.f90:152,:170
 
+    # THE SOLAR MEMBER MUST BE BUILT THE WAY THE CARD BUILDS IT.  This used to
+    # branch on `ladder == "nemo_live"` and fall through to the STATIC ladder
+    # for anything else, so the moment the card moved to "nemo_2bd" the test
+    # rebuilt a different solar member than the applicator runs and went red
+    # on 3450 level-0 cells at 8.5e-22 -- a stale string compare, not a
+    # defect in the applicator.  A diff reviewer caught it.  The branch now
+    # ENUMERATES every value the applicator accepts and RAISES on a new one,
+    # so the next ladder cannot silently reintroduce the same failure.
     ladder = getattr(cfg, "shortwave_penetration_ladder", "static")
-    if ladder == "nemo_live":
+    sw_kw = {}
+    if ladder == "static":
+        z_half_stretch = None
+    elif ladder in ("nemo_live", "nemo_2bd"):
         from legoesm.ocean.eos import nemo_r3t_stretch
         z_half_stretch = nemo_r3t_stretch(z, state.eta.data,
                                           state.H_bathy.data)
+        if ladder == "nemo_2bd":
+            from legoesm.ocean.physics.shortwave_penetration import (
+                nemo_qsr_ext_lev)
+            wet3 = jnp.asarray(z.is_active) > 0.5
+            sw_kw["nemo_2bd_levels"] = nemo_qsr_ext_lev(
+                z, wet3, rdt=2.0 * DT, rho_0=cfg.rho_0, c_sw=cfg.c_p)
+            sw_kw["cell_wet"] = wet3
     else:
-        z_half_stretch = None
+        raise AssertionError(
+            f"this test does not know how to build the solar member for "
+            f"shortwave_penetration_ladder={ladder!r}; add it here rather "
+            "than letting the test rebuild a different one")
     sw = np.asarray(shortwave_penetration_tendency(
         sw_down=jnp.asarray(Q_sr),
         z_coord_dz_ref=z.dz_ref, z_coord_z_half_ref=z.z_half_ref,
         jacobian=jnp.ones_like(state.eta.data),
         config=ShortwavePenetrationConfig(water_type=cfg.jerlov_water_type),
-        rho_0=cfg.rho_0, c_sw=cfg.c_p, z_half_stretch=z_half_stretch))
+        rho_0=cfg.rho_0, c_sw=cfg.c_p, z_half_stretch=z_half_stretch,
+        **sw_kw))
 
     want = (sw[..., 0] + nemo_T) * mask
     got = np.asarray(dT)[..., 0]
