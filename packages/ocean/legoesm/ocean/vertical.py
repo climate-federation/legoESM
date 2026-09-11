@@ -1500,6 +1500,16 @@ def compute_ocean_jacobian(
         # ONCE and MULTIPLIED at domqco.F90:209; NEMO never divides by ht_0
         # there, and ``a/b`` and ``a*(1/b)`` are not the same double.
         #
+        # THE REMAINING HALF-STATEMENT IS ZERO-SIZED ON THIS CARD, measured
+        # rather than left registered: this forms ``1.0/ht_0`` where NEMO
+        # forms ``ssmask/((ht_0 + 1) - ssmask)``, two roundings that in
+        # general do not cancel -- but DINO's ``ht_0`` spans
+        # 1969.82..4000.0, one binade, so ``+1-1`` round-trips exactly and
+        # the two agree on 0 of 9920 wet columns, max |d| = 0.0 (independent
+        # claim review).  It is a real difference on a card whose column
+        # depths cross a binade; it is not one here, and the ``jnp.where``
+        # above already supplies the ``ssmask`` numerator.
+        #
         # THE SAME STATEMENT IS ON THE LEAP-FROG PATH, which is what the DINO
         # card runs: ``dom_qco_r3c`` -- the non-RK3 routine -- writes
         # ``pr3t(ji,jj) = pssh(ji,jj) * r1_ht_0(ji,jj)`` at
