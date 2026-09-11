@@ -22,6 +22,34 @@ GATE = (REPO / "scripts" / "validate" / "ocean_fidelity" / "testcases"
         / "nemo_testcase_l2_gyre_card_reconciliation_gate.py")
 
 
+ORACLE = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gyre_kt1_10")
+# Capturing a harness's program RUNS that harness up to its model
+# construction, and both of them read the oracle tree on the way.  That is the
+# price of executing the program instead of parsing it, and the review that
+# killed the parsing reader made the price worth paying -- so the dependency is
+# declared and skipped on, never worked around by going back to source text.
+needs_oracle = pytest.mark.skipif(
+    not (ORACLE / "output.namelist.dyn").is_file(),
+    reason=f"no NEMO oracle tree at {ORACLE}")
+
+
+@pytest.fixture(autouse=True)
+def _allow_dirty_stamp():
+    """Tests run on whatever tree the developer has, committed or not.
+
+    The gate stamps provenance and FAILS CLOSED on a dirty tree, which is
+    correct for a recorded measurement and wrong for a test -- a test that only
+    passes on a clean tree is a test nobody runs while working.  The escape is
+    the documented one and it is SCOPED, because this latch is process-global
+    and leaking it would silently disarm the fail-closed stamp for every later
+    gate in the same process.
+    """
+    from legoesm.ocean.fidelity.provenance import allow_dirty_stamps
+
+    with allow_dirty_stamps(True):
+        yield
+
+
 @pytest.fixture(scope="module")
 def gate():
     assert GATE.is_file(), GATE
@@ -35,6 +63,7 @@ def gate():
 def _run(*args):
     env = {"PATH": "/usr/bin:/bin", "JAX_PLATFORMS": "cpu",
            "JAX_ENABLE_X64": "1",
+           "LEGOESM_GATE_ALLOW_DIRTY": "1",
            "PYTHONPATH": ":".join(str(REPO / "packages" / name)
                                   for name in ("core", "ocean", "atmosphere",
                                                "coupler", "ice", "land", "ml",
@@ -45,55 +74,80 @@ def _run(*args):
                           capture_output=True, text=True, cwd=str(REPO))
 
 
-# ------------------------------------------------------------ the AST reader --
-def test_reader_finds_each_harness_own_model_construction(gate):
-    """Both statements must be READ, or the table is a transcription."""
-    ladder = gate.model_config_argument(gate.LADDER_GATE, "run")
-    year = gate.model_config_argument(gate.YEAR_HARNESS, "run_member")
-    assert ladder and year
-    # Whatever they are, the gate must be able to name them; a reader that
-    # silently returned "" would make every row unattributable.
-    assert "config" in ladder or "cfg" in ladder
-    assert "config" in year or "cfg" in year
+# --------------------------------------------- the display-only source read --
+def test_construction_site_reader_names_a_line_for_each_harness(gate):
+    """DISPLAY ONLY: nothing is asserted from it, but it must not be blank."""
+    for path, function in ((gate.LADDER_GATE, "run"),
+                           (gate.YEAR_HARNESS, "run_member"),
+                           (gate.OWNERS_HARNESS, "equal_input_step")):
+        text = gate.model_config_argument(path, function)
+        assert text, f"{path.name}:{function} construction site unnamed"
 
 
-def test_reader_raises_on_a_function_that_does_not_exist(gate):
-    """Synthetic violation for the reader itself."""
-    with pytest.raises(gate.GateError):
-        gate.model_construction_kwargs(gate.LADDER_GATE, "no_such_function")
-
-
-def test_reader_raises_when_the_function_builds_no_model(gate, tmp_path):
+def test_construction_site_reader_raises_when_there_is_no_model(gate, tmp_path):
     source = tmp_path / "fake_harness.py"
     source.write_text("def run():\n    return 1\n")
     with pytest.raises(gate.GateError):
         gate.model_config_argument(source, "run")
 
 
+def test_capture_refuses_a_call_that_builds_no_model(gate, tmp_path):
+    """A capture that returned nothing would compare nothing."""
+    source = tmp_path / "fake_harness.py"
+    source.write_text("def run():\n    return 1\n")
+    with pytest.raises(gate.GateError):
+        gate.capture_model_config("fake_harness_nomodel", source,
+                                  lambda module: module.run())
+
+
 # ------------------------------------------------------- the resolved object --
-def test_the_two_harnesses_resolve_the_same_program(gate):
+@needs_oracle
+def test_the_three_harnesses_resolve_the_same_program(gate):
     """THE UNIFICATION GATE.  Empty table, or the campaign has two cards."""
     report = gate.config_diff()
     assert report["differing_fields"] == [], (
         "the kt=1..10 ladder and the from-rest year resolve DIFFERENT model "
         f"configurations from one card: {report['differing_fields']}")
+    assert report["differing_fields_year_owners"] == [], (
+        "the year-owners harness resolves a THIRD program: "
+        f"{report['differing_fields_year_owners']}")
 
 
-def test_a_drifted_field_is_seen(gate):
-    """Synthetic violation: the unification assertion CAN fail."""
+@needs_oracle
+def test_a_drifted_NESTED_field_is_seen(gate):
+    """Synthetic violation for the WALK: the drifted field is nested."""
     report = gate.config_diff(plant="config-drift")
-    assert [row["field"] for row in report["differing_fields"]] == ["A_h"]
+    assert [row["field"] for row in report["differing_fields"]] == [
+        "lateral_viscosity.A_h"]
 
 
+@needs_oracle
+def test_a_harness_handed_a_different_program_is_seen(gate):
+    """Synthetic violation for the CAPTURE, which is the one that matters.
+
+    A review defeated the previous source-reading version of this gate by
+    rebinding the config through a local, so no plant that perturbs the
+    resolved object AFTER the reader ran is worth anything.  This one changes
+    what the YEAR HARNESS is handed, leaving its construction statement
+    untouched, and the pre-unification table must come back.
+    """
+    report = gate.config_diff(plant="program-drift")
+    assert sorted(row["field"] for row in report["differing_fields"]) == [
+        "fix_eta_drift", "freshwater_closure"]
+
+
+@needs_oracle
 def test_flatten_walks_into_nested_configs(gate):
     """A flattener that stopped at the top level would hide most of the card."""
-    card, ladder, _, _, _ = gate.resolve_programs()
+    _card, ladder, _year, _owners = gate.resolve_programs()
     leaves = gate.flatten(ladder)
     assert any("." in key for key in leaves), "nested configs were not walked"
     assert "freshwater_closure" in leaves and "fix_eta_drift" in leaves
+    assert "lateral_viscosity.A_h" in leaves
 
 
 # ----------------------------------------------------------- the oracle floor --
+@needs_oracle
 def test_oracle_floor_refuses_a_root_compared_with_itself(gate):
     """A floor measured against the same record is zero by construction."""
     with pytest.raises(gate.GateError):
@@ -102,6 +156,7 @@ def test_oracle_floor_refuses_a_root_compared_with_itself(gate):
 
 
 # ---------------------------------------------------------------- end to end --
+@needs_oracle
 @pytest.mark.slow
 def test_require_unified_exits_zero_as_ci_would_run_it():
     result = _run("--config-diff", "--require-unified")
@@ -109,8 +164,17 @@ def test_require_unified_exits_zero_as_ci_would_run_it():
     assert "UNIFIED" in result.stdout
 
 
+@needs_oracle
 @pytest.mark.slow
 def test_require_unified_exits_nonzero_under_the_plant():
+    """It must fail for the RIGHT reason, not by crashing.
+
+    The previous version of this test passed vacuously: its plant raised
+    AttributeError and the subprocess exited non-zero because it had died.
+    The stdout assertion is what separates a refusal from a crash.
+    """
     result = _run("--config-diff", "--require-unified", "--plant",
-                  "config-drift")
+                  "program-drift")
     assert result.returncode != 0, result.stdout
+    assert "DIFFERENT programs" in (result.stdout + result.stderr), (
+        result.stdout + result.stderr)
