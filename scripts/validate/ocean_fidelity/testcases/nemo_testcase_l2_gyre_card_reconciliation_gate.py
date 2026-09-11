@@ -608,6 +608,86 @@ def score_both_roots(*, steps: int = 3) -> dict:
     return report
 
 
+def closure_ablation(*, steps: int = 2) -> dict:
+    """IS THE FRESHWATER CHANNEL ALIVE ON THIS LANE AT ALL?
+
+    Both independent reviews of this round raised the same arithmetic: GYRE's
+    ``emp`` reaches ``+-3.7e-05`` kg/m2/s, so over one ``14400`` s step in a
+    ``10`` m top cell a VIRTUAL SALT FLUX should move surface salinity by about
+    ``1.8e-03`` g/kg and a REAL FRESHWATER source should move ``ssh`` by about
+    ``5.2e-04`` m.  The measured difference between the two closures after two
+    steps is ``1.4e-14`` g/kg and ``4.3e-19`` m.  Eleven and fifteen orders
+    below.  That is not a small effect, it is an ABSENT one -- and a knob that
+    selects between two absent channels is cosmetic, so the card change this
+    round lands would be hygiene rather than physics.
+
+    So it is measured instead of argued: hold ``fix_eta_drift`` fixed and step
+    the card under all three closures, bit-comparing the trajectory.  If the
+    three are bit-identical the channel is inert on this lane -- which would
+    mean NEMO's ``emp`` reaches the state by another statement (the card's own
+    NEMO-literal ssh/wzv update, ``sshwzv.f90:137``) and the closure selector
+    never fires.  The PREDICTED sizes are printed next to the measured ones so
+    the reader can see the ratio rather than take a verdict.
+    """
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    _policy()
+    gate = _load("gyre_phase3_gate", LADDER_GATE)
+    card, ladder, _, _, _ = resolve_programs()
+    masks = gate.expected_masks(card)
+    arms = {}
+    for closure in ("real_freshwater", "virtual_salt_flux", "none"):
+        cfg = ladder._replace(freshwater_closure=closure, fix_eta_drift=True)
+        model = _model(card, cfg)
+        state = card.recipe.initial_state
+        for kt in range(1, steps + 1):
+            freshwater, surface = gate._surface_forcings(card, state, kt)
+            state = model.step(state, dt=card.dt_s, freshwater=freshwater,
+                               surface_forcing=surface)
+        arms[closure] = gate.lego_fields(state)
+    # The forcing this is all about, printed rather than assumed.
+    freshwater, _ = gate._surface_forcings(card, card.recipe.initial_state, 1)
+    evap = np.asarray(getattr(freshwater, "evap", freshwater), dtype=np.float64)
+    emp_max = float(np.max(np.abs(evap)))
+    dz0 = float(np.asarray(card.recipe.z_coord.dz_ref)[0])
+    rho0 = float(ladder.rho_0)
+    predicted = {
+        "emp_max_kg_m2_s": emp_max,
+        "virtual_salt_step_g_kg": emp_max * 35.0 * card.dt_s / (rho0 * dz0),
+        "real_freshwater_step_m": emp_max * card.dt_s / rho0,
+    }
+    rows = []
+    reference = "real_freshwater"
+    for closure in ("virtual_salt_flux", "none"):
+        for field in FIELDS:
+            mask = np.asarray(masks[field], dtype=bool)
+            a = np.asarray(arms[reference][field], dtype=np.float64)
+            b = np.asarray(arms[closure][field], dtype=np.float64)
+            rows.append({
+                "against": closure, "field": field,
+                "max_abs": float(np.max(np.abs((a - b)[mask]))),
+                "cells_unequal": int(np.count_nonzero(
+                    _bits(a)[mask] != _bits(b)[mask])),
+                "cells": int(mask.sum()),
+            })
+    report = {"format": "gyre-card-reconciliation-closure-ablation-v1",
+              "case": CASE, "steps": steps, "predicted_if_live": predicted,
+              "rows": rows, "worktree": worktree_stamp()}
+    print(f"\nIS THE FRESHWATER CHANNEL ALIVE?  {steps} steps, fix_eta_drift "
+          f"held True, real_freshwater as the reference arm")
+    print(f"  GYRE's own max |emp| this step: "
+          f"{predicted['emp_max_kg_m2_s']:.4e} kg/m2/s")
+    print(f"  IF the virtual-salt channel were live, S would move "
+          f"{predicted['virtual_salt_step_g_kg']:.4e} g/kg per step")
+    print(f"  IF the real-freshwater channel were live, ssh would move "
+          f"{predicted['real_freshwater_step_m']:.4e} m per step")
+    for row in rows:
+        print(f"  real_freshwater vs {row['against']:<18s} {row['field']:>4s}  "
+              f"max abs {row['max_abs']:.6e}   cells "
+              f"{row['cells_unequal']}/{row['cells']}")
+    return report
+
+
 def self_check() -> int:
     """Every plant must be refused, and the readers must be non-vacuous."""
     failures = []
@@ -655,6 +735,7 @@ def main(argv=None) -> int:
     parser.add_argument("--two-path", action="store_true")
     parser.add_argument("--oracle-floor", action="store_true")
     parser.add_argument("--score-both-roots", action="store_true")
+    parser.add_argument("--closure-ablation", action="store_true")
     parser.add_argument("--self-check", action="store_true")
     parser.add_argument("--steps", type=int, default=2)
     parser.add_argument("--entry-root", type=Path, default=ORACLE_V2_ROOT,
@@ -670,9 +751,11 @@ def main(argv=None) -> int:
     if args.self_check:
         return self_check()
     require(args.config_diff or args.two_path or args.oracle_floor
-            or args.score_both_roots,
+            or args.score_both_roots
+            or args.closure_ablation,
             "choose --config-diff, --two-path, --oracle-floor, "
-            "--score-both-roots or --self-check")
+            "--score-both-roots, --closure-ablation or "
+            "--self-check")
     report = {}
     if args.config_diff:
         report["config_diff"] = config_diff(plant=args.plant)
@@ -680,6 +763,8 @@ def main(argv=None) -> int:
         report["oracle_floor"] = oracle_floor()
     if args.score_both_roots:
         report["score_both_roots"] = score_both_roots(steps=args.steps)
+    if args.closure_ablation:
+        report["closure_ablation"] = closure_ablation(steps=args.steps)
     if args.two_path:
         report["two_path"] = two_path(steps=args.steps,
                                       entry_root=args.entry_root,
