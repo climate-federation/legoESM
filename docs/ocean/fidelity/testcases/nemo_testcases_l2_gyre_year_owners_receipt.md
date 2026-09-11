@@ -173,6 +173,47 @@ instruments into one curve is an unproven claim.  Closed here:
 So the per-step rows and the day-30/360 rows are the same legoESM trajectory
 against the same NEMO trajectory.
 
+**THE ORACLE HAS TWO RECORDS OF THIS CARD AND THEY ARE NOT THE SAME RECORD.
+This round read one of them and the ladder's recorded rows were taken against
+the other.**  Found by codex's parallel card-reconciliation work on this
+branch, measured with ITS committed gate
+(`nemo_testcase_l2_gyre_card_reconciliation_gate.py --oracle-floor`), and
+reproduced here to the last printed digit by an independent reading through
+`read_entry`.  The two records are byte-identical at kt=1 and diverge from
+kt=2:
+
+| kt | ladder record vs year record, `T` max abs [K] | wet cells unequal |
+|---:|---:|---:|
+| 1 | `0.0` | 0 / 18000 |
+| 2 | `1.0658e-14` | 154 |
+| 3 | `1.3500e-13` | 527 |
+| 10 | `1.8471e-10` | 17268 |
+
+**What it changes, and what it does not.**
+
+* **It changes the kt=2 reconciliation row above.**  This walk's kt=2 `T` is
+  `2.0438e-15` K rms against an ORACLE-vs-ORACLE spread of `4.5408e-16` K at
+  the same step.  The measured gap is only about `4.5x` the oracle's own
+  record-to-record spread, so the `0.9990` agreement tabulated against the
+  ladder's recorded `6.054358e-16` is agreement WITHIN THE ORACLE'S OWN
+  SPREAD, not a precision-level confirmation.  **The reconciliation row is
+  RETRACTED as evidence at kt=2** and stands only as evidence that the two
+  probes read the same field.
+* **It does not touch kt=10.**  The oracle spread there is `1.8471e-10` K
+  against this walk's `2.8136e-03` K gap — a factor of `1.5e+07`.  The `0.3 %`
+  difference from the ladder's recorded kt=10 row therefore cannot be the two
+  records; the attribution to the model's own later operator commits stands.
+* **It does not touch the verdict.**  Section 1b's equal-input residual is
+  `4.15e-04` K against an oracle spread of `1.35e-13` K at kt=3 — a factor of
+  `3.1e+09`.  Taking the oracle spread as an additional floor on the
+  denominator, step 2's temperature multiplier is bounded below by
+  `4.1544e-04 / (2.0438e-15 + 4.5408e-16) = 1.66e+11` instead of `2.03e+11`.
+  Eleven orders either way.
+* **Every per-step row in this receipt is against the YEAR record**
+  (`year_fromrest/nemo_pristine`), which is the record the day-30 and day-360
+  rows come from, so the walk and the year are one NEMO trajectory.  That was
+  the property section 1 needed and it is the one that holds.
+
 **What this instrument cannot see.**  It compares STATES, so it says which STEP
 owns the gap and says nothing about which OPERATOR inside that step does.  The
 per-operator record exists only at `kstp == nit000` on this card, so naming the
