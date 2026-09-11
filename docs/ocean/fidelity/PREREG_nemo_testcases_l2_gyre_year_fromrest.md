@@ -1,5 +1,13 @@
 # PREREG — the GYRE from-rest YEAR and its spread floor
 
+> **OUTCOME (added after the fact; the preregistration itself is unchanged
+> below).**  PHASE 0 is **BLOCKED**.  legoESM's certified GYRE card aborts at
+> **step 48 of 2160** because its prognostic TKE closure diverges
+> super-exponentially from about step 38, while every dynamical field stays
+> healthy.  Every expectation P1-P5 is therefore **UNMEASURED** -- neither held
+> nor refuted.  See
+> `docs/ocean/fidelity/testcases/nemo_testcases_l2_gyre_year_fromrest_receipt.md`.
+
 Written BEFORE any member runs, legoESM or NEMO.  It is the GYRE counterpart of
 the DINO from-rest protocol
 (`scripts/validate/ocean_fidelity/dino_1226/PREREG_verdict360_fromrest.md`, on

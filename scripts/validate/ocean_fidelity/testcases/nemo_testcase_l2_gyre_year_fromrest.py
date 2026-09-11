@@ -395,6 +395,76 @@ def run_member(seed: int, out_root: Path, *, days: int = YEAR_DAYS,
     return 0
 
 
+# ------------------------------------------------------------------- census --
+# The fields watched by --census.  A THROWAWAY PROBE'S NUMBER IS UNMEASURED, so
+# the probe that found the step-48 blocker lives here rather than in a heredoc:
+# it is re-runnable against a changed model, and it FAILS LOUDLY instead of
+# printing a table someone has to read.
+CENSUS_FIELDS = ("eta", "u", "v", "w", "T", "S", "tke", "tke_avm", "tke_avt",
+                 "tke_dissl", "tke_avm_surface", "uu_b", "vv_b")
+
+
+def census(steps: int, *, every: int = 1, start: int = 1) -> int:
+    """Step the card and report every prognostic field's range, per step.
+
+    Exits NON-ZERO the moment any watched field stops being finite, and names
+    the step and the field.  That is the whole point: the abort this was
+    written for reports a vertical-geometry guard, which is several operators
+    downstream of the field that actually diverged.
+    """
+    import jax
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+            "precision policy is not fp64/libm")
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    gate, gate_sha = _gate_module()
+    card = build_nemo_testcase_card(CASE)
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    print(f"# case={CASE} dt_s={card.dt_s} steps={steps} "
+          f"phase3_gate_sha256={gate_sha}")
+    state = card.recipe.initial_state
+    for kt in range(1, steps + 1):
+        freshwater, surface = gate._surface_forcings(card, state, kt)
+        try:
+            state = model.step(state, dt=card.dt_s, freshwater=freshwater,
+                               surface_forcing=surface)
+        except Exception as error:                       # noqa: BLE001
+            print(f"STEP {kt} RAISED: {str(error).splitlines()[0][:200]}")
+            print(f"STATUS ABORTED at step {kt} of {steps}")
+            return 1
+        cells, nonfinite = [], []
+        for name in CENSUS_FIELDS:
+            field = getattr(state, name, None)
+            if field is None:
+                continue
+            values = np.asarray(getattr(field, "data", field))
+            if values.dtype.kind != "f":
+                continue
+            bad = int(np.count_nonzero(~np.isfinite(values)))
+            if bad:
+                nonfinite.append((name, bad))
+            finite = values[np.isfinite(values)]
+            lo = float(finite.min()) if finite.size else float("nan")
+            hi = float(finite.max()) if finite.size else float("nan")
+            cells.append(f"{name}[{lo:.3e},{hi:.3e}]"
+                         + (f"!NONFINITE{bad}" if bad else ""))
+        if kt >= start and (kt % every == 0 or nonfinite):
+            print(f"kt={kt:4d} " + " ".join(cells), flush=True)
+        if nonfinite:
+            names = ", ".join(f"{name} ({bad} cells)" for name, bad in nonfinite)
+            print(f"STATUS NONFINITE at step {kt}: {names}")
+            return 1
+    print(f"STATUS FINITE through step {steps}")
+    return 0
+
+
 # ------------------------------------------------------------------ scoring --
 def _rms(values, wet) -> float:
     values = np.asarray(values, dtype=np.float64)
@@ -929,6 +999,11 @@ def main(argv=None) -> int:
     parser.add_argument("--days", type=int, default=YEAR_DAYS)
     parser.add_argument("--tag", default="",
                         help="suffix for the member directory; \"repro\" is the same-binary reproducibility re-run of seed 0")
+    parser.add_argument("--census", type=int, default=None,
+                        metavar="STEPS",
+                        help="step the card and report every field per step; exits non-zero on the first non-finite value")
+    parser.add_argument("--census-every", type=int, default=1)
+    parser.add_argument("--census-start", type=int, default=1)
     parser.add_argument("--score-phase0", action="store_true")
     parser.add_argument("--score", action="store_true")
     parser.add_argument("--figures", action="store_true")
@@ -944,6 +1019,9 @@ def main(argv=None) -> int:
 
     if args.self_check:
         return self_check()
+    if args.census is not None:
+        return census(args.census, every=args.census_every,
+                      start=args.census_start)
     if args.member is not None:
         return run_member(args.member, args.root, days=args.days,
                           mesh_path=args.mesh, tag=args.tag,

@@ -245,32 +245,63 @@ write_namelist() {            # write_namelist <dir> <seed|none>
            "$NN_ITEND" "$NN_STOCK" "$NN_WRITE" <<'PY'
 import re, sys
 src, dst, seed, itend, stock, write = sys.argv[1:7]
-text = original = open(src).read()
+text = open(src).read()
 for key, value in (("nn_itend", itend), ("nn_stock", stock), ("nn_write", write)):
     text, n = re.subn(r"^(\s*%s\s*=\s*)(\S+)" % key, r"\g<1>%s" % value,
                       text, count=1, flags=re.M)
     if n != 1:
-        raise SystemExit("REFUSE: %s not found once in %s" % (key, src))
+        raise SystemExit("REFUSE: %s not found exactly once in %s" % (key, src))
 if seed != "none":
-    block = re.search(r"^(&namusr_def.*)$", text, re.M)
+    # Insert at the END of &namusr_def, just before its closing '/', so the
+    # group's existing rows and comments keep their order.
+    block = re.search(r"^&namusr_def\b.*?^(/)\s*$", text, re.M | re.S)
     if block is None:
         raise SystemExit("REFUSE: no &namusr_def block in %s" % src)
-    text = (text[:block.end()]
-            + "\n   nn_pert_seed = %s   ! from-rest ensemble member seed\n" % seed
-            + text[block.end():])
+    text = (text[:block.start(1)]
+            + "   nn_pert_seed = %s   ! from-rest ensemble member seed\n" % seed
+            + text[block.start(1):])
 open(dst, "w").write(text)
-changed = [(a, b) for a, b in zip(original.splitlines(), text.splitlines()) if a != b]
-added = len(text.splitlines()) - len(original.splitlines())
+
+# The check that this namelist differs from the certified one ONLY in the
+# preregistered rows.  It compares PARSED ASSIGNMENTS, not lines: a line-by-line
+# zip shifts by one at the first insertion and then reports every subsequent
+# line as changed, which is exactly what the first version of this check did --
+# it refused a correct namelist with "197 changed rows".  Caught by dry-running
+# the writer against the certified namelist before the operator ever saw it.
+ASSIGN = re.compile(r"^\s*([A-Za-z_]\w*)\s*=\s*(.*?)\s*(?:!.*)?$")
+
+def rows(blob):
+    out = {}
+    for line in blob.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("!") or stripped.startswith("&"):
+            continue
+        match = ASSIGN.match(line)
+        if match:
+            out[match.group(1)] = match.group(2)
+    return out
+
+before, after = rows(open(src).read()), rows(text)
+changed = sorted(k for k in before if k in after and before[k] != after[k])
+added = sorted(set(after) - set(before))
+removed = sorted(set(before) - set(after))
 print("  namelist rows changed vs the certified card:")
-for a, b in changed:
-    print("    - %s\n    + %s" % (a.strip(), b.strip()))
-if added:
-    print("    + nn_pert_seed = %s   (a new row in &namusr_def)" % seed)
-allowed = 3
-if len(changed) > allowed or added > (1 if seed != "none" else 0):
-    raise SystemExit("REFUSE: %d changed rows and %d added rows; the "
-                     "preregistration allows nn_itend/nn_stock/nn_write and "
-                     "at most one nn_pert_seed" % (len(changed), added))
+for key in changed:
+    print("    %-14s %s -> %s" % (key, before[key], after[key]))
+for key in added:
+    print("    %-14s (new) -> %s" % (key, after[key]))
+allowed_changed = {"nn_itend", "nn_stock", "nn_write"}
+allowed_added = {"nn_pert_seed"} if seed != "none" else set()
+if removed or set(changed) - allowed_changed or set(added) - allowed_added:
+    raise SystemExit(
+        "REFUSE: changed=%s added=%s removed=%s; the preregistration allows "
+        "changed %s and added %s"
+        % (changed, added, removed, sorted(allowed_changed),
+           sorted(allowed_added)))
+if set(changed) != allowed_changed:
+    raise SystemExit(
+        "REFUSE: only %s changed; all of %s must change or this is not the "
+        "year run" % (changed, sorted(allowed_changed)))
 PY
 }
 
