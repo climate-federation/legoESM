@@ -187,7 +187,6 @@ def test_all_lhs_builders_match_golden():
         np.testing.assert_allclose(np.asarray(out[key]), g[ref], rtol=1e-13, atol=1e-16)
 
 
-@pytest.mark.skip(reason="CONVERSION PENDING: the pressure-damping comparison selects upstream's quartic-skewness branch while our helper computes the squared-skewness form, so it would compare two different equations (found by review). Settle which branch the CAM tree selects, then re-enable.")
 @pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
                     reason="CLUBB-JAX reference tree not present")
 def test_all_lhs_builders_parity():
@@ -225,8 +224,12 @@ def test_all_lhs_builders_parity():
     chk(W.wp2_term_pr1_lhs(p["C4"], p["invrs_tau_C4_zm"]),
         R.wp2_term_pr1_lhs(nzm, ng, rg, p["C4"], p["invrs_tau_C4_zm"]))
     chk(W.wp3_term_pr1_lhs(p["C8"], p["C8b"], p["invrs_tau_wp3_zt"], p["Skw_zt"]),
+        # Our helper computes the squared-skewness damping, which upstream
+        # produces with this flag TRUE; selecting FALSE would compare our
+        # squared form against upstream's quartic one. Under the CAM tree the
+        # coefficient multiplying it is zero, so both branches agree there.
         R.wp3_term_pr1_lhs(nzm - 1, ng, rg, p["C8"], p["C8b"], p["invrs_tau_wp3_zt"],
-                       p["Skw_zt"], False))
+                           p["Skw_zt"], True))
 
 
 def test_jit_and_grad():
@@ -302,7 +305,6 @@ def test_wp3_term_pr_turb_rhs_zero_on_uniform_fields():
     np.testing.assert_allclose(out, 0.0, atol=1e-14)
 
 
-@pytest.mark.skip(reason='CONVERSION PENDING: the reference grid is passed both before and after the numerical arguments at three call sites, so the call raises before comparing anything (found by review). Fix those, then re-enable.')
 @pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
                     reason="CLUBB-JAX reference tree not present")
 def test_rhs_cam_eq_arm_builders_parity():
@@ -324,29 +326,30 @@ def test_rhs_cam_eq_arm_builders_parity():
     rg = _refgr(gr, ng, nzm)
 
     def chk(a, b):
-        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+        # Same last-bit allowance as the LHS sweep (see assert_matches).
+        _ref.assert_matches(a, b)
 
     chk(W.wp2_term_pr_dfsn_rhs(p["C_wp2_pr_dfsn"], p["rho_ds_zt"], p["invrs_rho_ds_zm"],
                                p["wpup2"], p["wpvp2"], p["wp3"], gr),
         R.wp2_term_pr_dfsn_rhs(nzm, nzm - 1, ng, rg, p["C_wp2_pr_dfsn"], p["rho_ds_zt"], p["invrs_rho_ds_zm"],
-                               p["wpup2"], p["wpvp2"], p["wp3"], rg))
+                               p["wpup2"], p["wpvp2"], p["wp3"]))
     chk(W.wp3_term_pr_dfsn_rhs(p["C_wp3_pr_dfsn"], p["rho_ds_zm"], p["invrs_rho_ds_zt"],
                                p["wp2up2"], p["wp2vp2"], p["wp4"], p["up2"], p["vp2"], p["wp2"], gr),
         R.wp3_term_pr_dfsn_rhs(nzm, nzm - 1, ng, rg, p["C_wp3_pr_dfsn"], p["rho_ds_zm"], p["invrs_rho_ds_zt"],
-                               p["wp2up2"], p["wp2vp2"], p["wp4"], p["up2"], p["vp2"], p["wp2"], rg))
+                               p["wp2up2"], p["wp2vp2"], p["wp4"], p["up2"], p["vp2"], p["wp2"]))
     chk(W.wp2_terms_bp_pr2_rhs(p["C_uu_buoy"], p["thv_ds_zm"], p["wpthvp"]),
         R.wp2_terms_bp_pr2_rhs(nzm, ng, rg, p["C_uu_buoy"], p["thv_ds_zm"], p["wpthvp"]))
     chk(W.wp2_term_pr3_rhs(p["C_uu_shr"], p["C_uu_buoy"], p["thv_ds_zm"], p["wpthvp"],
                            p["upwp"], p["um"], p["vpwp"], p["vm"], gr),
         R.wp2_term_pr3_rhs(nzm, nzm - 1, ng, rg, p["C_uu_shr"], p["C_uu_buoy"], p["thv_ds_zm"], p["wpthvp"],
-                           p["upwp"], p["um"], p["vpwp"], p["vm"], rg))
+                           p["upwp"], p["um"], p["vpwp"], p["vm"]))
     chk(W.wp2_term_pr1_rhs(p["C4"], p["up2"], p["vp2"], p["invrs_tau_C4_zm"]),
         R.wp2_term_pr1_rhs(nzm, ng, rg, p["C4"], p["up2"], p["vp2"], p["invrs_tau_C4_zm"]))
     chk(W.wp3_terms_bp1_pr2_rhs(p["C11_Skw_fnc"], p["thv_ds_zt"], p["wp2thvp"]),
         R.wp3_terms_bp1_pr2_rhs(nzm - 1, ng, rg, p["C11_Skw_fnc"], p["thv_ds_zt"], p["wp2thvp"]))
     chk(W.wp3_term_pr1_rhs(p["C8"], p["C8b"], p["invrs_tau_wp3_zt"], p["Skw_zt"], p["wp3"]),
         R.wp3_term_pr1_rhs(nzm - 1, ng, rg, p["C8"], p["C8b"], p["invrs_tau_wp3_zt"],
-                       p["Skw_zt"], p["wp3"], False))
+                           p["Skw_zt"], p["wp3"], True))
 
 
 # --------------------------------------------------------------------------
@@ -642,7 +645,6 @@ def test_clip_skewness_passes_small_wp3():
     np.testing.assert_allclose(out, np.asarray(wp3), rtol=1e-12, atol=1e-14)
 
 
-@pytest.mark.skip(reason='CONVERSION PENDING: the reference grid built here has a different column count and different heights from the fields under test (found by review), so the comparison is not on one column. Build the grid from the same fixture, then re-enable.')
 @pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
                     reason="CLUBB-JAX reference tree not present")
 def test_clip_skewness_parity():
@@ -654,7 +656,10 @@ def test_clip_skewness_parity():
     rng = np.random.default_rng(23)
     wp3 = jnp.asarray(20.0 * rng.standard_normal((ng, nzt)))
     out = W.clip_skewness(wp3, wp2_zt, zt, sfc, skw_max)
-    ref = RC.clip_skewness_core(nzt, ng, _ref.ref_grid(_gr()[0]), sfc, skw_max,
+    zm_1d = np.concatenate([[0.0], 0.5 * (np.asarray(zt)[0, 1:] + np.asarray(zt)[0, :-1]),
+                            [2.0 * np.asarray(zt)[0, -1] - np.asarray(zt)[0, -2]]])
+    skw_gr = make_clubb_grid(jnp.asarray(np.tile(zm_1d, (ng, 1))), zt)
+    ref = RC.clip_skewness_core(nzt, ng, _ref.ref_grid(skw_gr), sfc, skw_max,
                                 wp2_zt, False, wp3)
     np.testing.assert_allclose(np.asarray(out), np.asarray(ref), rtol=1e-12, atol=1e-14)
 
