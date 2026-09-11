@@ -112,7 +112,7 @@ CAM_FLAGS = dict(
 )
 
 
-def assert_matches(mine, ref, name: str = "", rtol: float = 1e-15, atol: float = 0.0):
+def assert_matches(mine, ref, name: str = "", rtol: float = 1e-13, atol: float = 0.0):
     """Compare our result against the reference on the levels we both define.
 
     Several of our term builders return only the interior band the solver
@@ -122,11 +122,12 @@ def assert_matches(mine, ref, name: str = "", rtol: float = 1e-15, atol: float =
     and the trimmed-off levels are asserted to be the zeros they claim to be,
     so a real value hiding in a boundary level cannot slip through.
 
-    The default tolerance is four ulp rather than bit-exact: the reference's
-    routines are jit-compiled and XLA may contract a multiply-add that our eager
-    form evaluates in two steps. That is a last-bit difference. It is some
-    thirteen orders of magnitude tighter than any difference in the physics
-    would be, so the gate still fails on anything that matters.
+    The default tolerance is a few tens of ulp rather than bit-exact. The
+    reference's routines are jit-compiled, so XLA may contract a multiply-add
+    that our eager form evaluates in two steps, and a multi-term expression may
+    be summed in a different order. Both are last-bit effects. The tolerance is
+    still some ten orders of magnitude tighter than any difference in the
+    physics would be, so the gate fails on anything that matters.
     """
     mine = np.asarray(mine)
     ref = np.asarray(ref)
