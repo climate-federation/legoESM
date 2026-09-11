@@ -125,13 +125,20 @@ def test_the_dino_applicator_selects_nemos_explicit_form():
     assert float(np.abs(got - impl).max()) / scale > 1e-4
 
 
-def test_the_move_away_from_the_implicit_form_is_exactly_dt_over_tau_plus_dt():
-    """Size check: the statement removed is a known scalar factor, not a
-    reformulation.  If the two arms differ by anything other than
-    ``dt/(tau_S+dt)`` the flag reached something besides the restoring term."""
-    from legoesm.ocean.physics.surface_forcing.config import (
-        tau_from_flux_coefficient,
-    )
+def test_the_implicit_form_can_no_longer_be_reached_through_the_dino_card():
+    """This test used to SIZE the move away from the implicit denominator as
+    exactly ``dt/(tau_S+dt)``.  That sizing is now impossible to perform, and
+    the reason is the stronger statement: the DINO applicator hands the
+    restoring module NEMO's own association (``nemo_trasbc=``), which has no
+    damping denominator anywhere in ``usrdef_sbc.f90`` or ``trasbc.f90``, so
+    asking for the implicit form through this card RAISES instead of silently
+    returning it.  A knob whose wrong setting is unreachable is a better
+    guarantee than a knob whose wrong setting merely measures differently.
+
+    The original sizing survives, on synthetic arrays and with no card
+    involved, in ``test_explicit_and_implicit_restoring_are_the_two_distinct_
+    statements`` above.
+    """
     import legoesm.ocean.physics.surface_forcing.restoring as restmod
     dm, cfg, grid, z, state, forcing = _dino_card()
     real = restmod.restoring_surface_forcing
@@ -139,27 +146,21 @@ def test_the_move_away_from_the_implicit_form_is_exactly_dt_over_tau_plus_dt():
     def _implicit_arm(T, S, g, c, **kw):
         return real(T, S, g, c._replace(implicit=True), **kw)
 
-    kw = dict(t_seconds=DT, return_rate=True)
-    _, (_, dS_a) = dm.apply_dino_lat_lon_surface_forcing(
-        state, forcing, z, cfg, DT, **kw)
     restmod.restoring_surface_forcing = _implicit_arm
     try:
-        _, (_, dS_b) = dm.apply_dino_lat_lon_surface_forcing(
-            state, forcing, z, cfg, DT, **kw)
+        with pytest.raises(ValueError, match="implicit=True"):
+            dm.apply_dino_lat_lon_surface_forcing(
+                state, forcing, z, cfg, DT, t_seconds=DT, return_rate=True)
     finally:
         restmod.restoring_surface_forcing = real
-    tau_S = float(tau_from_flux_coefficient(cfg.A_S, cfg.rho_0, 1.0,
-                                            float(z.dz_ref[0])))
-    a, b = np.asarray(dS_a)[..., 0], np.asarray(dS_b)[..., 0]
-    scale = float(np.abs(a).max())
-    assert scale > 0.0
-    measured = float(np.abs(a - b).max()) / scale
-    predicted = DT / (tau_S + DT)
-    assert abs(measured - predicted) <= 1e-9 * predicted, (
-        f"measured {measured:.9e} vs dt/(tau+dt) {predicted:.9e}")
+
+    # Non-vacuity: the UNPATCHED card must still run, or the raise above
+    # would be indistinguishable from the card being broken outright.
+    _, (_, dS) = dm.apply_dino_lat_lon_surface_forcing(
+        state, forcing, z, cfg, DT, t_seconds=DT, return_rate=True)
+    assert float(np.abs(np.asarray(dS)).max()) > 0.0
 
 
-# ------------------------------------------------- the diagnostic that mirrors it
 def test_the_box_heat_budget_mirror_did_not_stay_on_the_implicit_form():
     """``box_heat_budget`` re-implements the applicator's restoring, so it is a
     diagnostic that can silently stop describing the model it budgets.
@@ -194,3 +195,108 @@ def test_the_card_sweep_is_committed_and_runs_every_caller():
     assert "DINO_RECIPES" in src and "neverworld2_lite" in src, (
         "the sweep must cover every caller of the shared applicator")
     assert len(DINO_RECIPES) >= 7
+
+
+# ------------------------------------------------- NEMO's ASSOCIATION, not
+# ------------------------------------------------- merely NEMO's algebra
+def _nemo_dz0_live(dm, cfg, z, state):
+    """The divisor trasbc.f90:170 uses, resolved from the card (Rule 10)."""
+    dz0 = float(np.asarray(z.dz_ref)[0])
+    divisor = getattr(cfg, "surface_flux_divisor", "static")
+    if divisor == "static":
+        return dz0
+    if divisor == "nemo_live":
+        from legoesm.ocean.eos import nemo_r3t_stretch
+        return dz0 * nemo_r3t_stretch(z, state.eta.data, state.H_bathy.data)
+    raise AssertionError(f"unhandled surface_flux_divisor {divisor!r}")
+
+
+def test_the_salt_restoring_is_nemos_association_bit_for_bit():
+    """The DINO card's level-0 salt tendency must equal an INDEPENDENT
+    transcription of NEMO's three statements with ZERO cells unequal.
+
+    ``sfx = ( rn_srp*( ts(:,:,1,jp_sal,Kbb) - zsstar ) )*tmask``
+                                                    usrdef_sbc.f90:388
+    ``sbc_tsc(:,:,jp_sal) = r1_rho0*sfx``           trasbc.f90:153
+    ``pts(:,:,1,Krhs) += zfact*( sbc_tsc_b + sbc_tsc )/e3t(1)``
+                                                    trasbc.f90:169-170
+    with ``zfact = 1`` and ``sbc_tsc_b = 0`` at ``kt = nit000``
+    (``trasbc.f90:139-143``).  The salt row is the clean one: no solar member,
+    no concentration/dilution member (``rn_emp_prop = 0``), so what is left is
+    exactly the association.
+    """
+    # fp64 comes from the module-scoped autouse fixture
+    dm, cfg, grid, z, state, forcing = _dino_card()
+    _, (_, dS) = dm.apply_dino_lat_lon_surface_forcing(
+        state, forcing, z, cfg, DT, t_seconds=DT, return_rate=True)
+    S0 = np.asarray(state.S.data)[..., 0]
+    S_star = np.asarray(forcing["S_star_2d"])
+    mask = np.asarray(state.land_mask.data)
+    dz0_live = np.asarray(_nemo_dz0_live(dm, cfg, z, state))
+    sfx = (-cfg.A_S) * (S0 - S_star)
+    want = (1.0 / cfg.rho_0) * sfx / dz0_live * mask
+    got = np.asarray(dS)[..., 0]
+    bad = int((got != want).sum())
+    assert bad == 0, (
+        f"{bad} of {got.size} level-0 salt cells differ from NEMO's "
+        f"association; max|d| = {float(np.abs(got - want).max()):.3e}")
+
+
+def test_the_timescale_association_would_not_pass_that_test():
+    """Non-vacuity for the test above: the SAME algebra written as
+    ``-(S - S*)/tau`` disagrees in the last bits, which is the entire reason
+    the association is transcribed rather than re-derived.  If this arm also
+    matched, the assertion above would be measuring nothing."""
+    # fp64 comes from the module-scoped autouse fixture
+    from legoesm.ocean.physics.surface_forcing.config import (
+        tau_from_flux_coefficient,
+    )
+    dm, cfg, grid, z, state, forcing = _dino_card()
+    S0 = np.asarray(state.S.data)[..., 0]
+    S_star = np.asarray(forcing["S_star_2d"])
+    dz0_live = np.asarray(_nemo_dz0_live(dm, cfg, z, state))
+    nemo = (1.0 / cfg.rho_0) * ((-cfg.A_S) * (S0 - S_star)) / dz0_live
+    tau_S = np.asarray(
+        tau_from_flux_coefficient(cfg.A_S, cfg.rho_0, 1.0, dz0_live))
+    timescale = -(S0 - S_star) / tau_S
+    differ = int((nemo != timescale).sum())
+    assert differ > 0, (
+        "the two associations agree bit-for-bit on every cell, so the "
+        "bit-for-bit test above cannot fail and proves nothing")
+    assert float(np.abs(nemo - timescale).max()) < 1e-15 * float(
+        np.abs(nemo).max() + 1e-300) * 1e3, (
+        "the two arms differ by more than rounding -- that is a physics "
+        "change, not an association change, and the wrong thing was edited")
+
+
+def test_nemo_trasbc_refuses_the_two_shapes_it_cannot_reproduce():
+    """The NEMO association folds ``zqsr_dayMean`` INSIDE ``qns``
+    (usrdef_sbc.f90:438) and has no damping denominator anywhere, so the two
+    configurations it cannot express must RAISE rather than silently return
+    the timescale form."""
+    # fp64 comes from the module-scoped autouse fixture
+    import jax.numpy as jnp
+    from legoesm.ocean.physics.surface_forcing.config import RestoringConfig
+    from legoesm.ocean.physics.surface_forcing.restoring import (
+        restoring_surface_forcing,
+    )
+
+    class _G:
+        grid_lat = np.zeros((3, 4))
+
+    T = jnp.zeros((3, 4, 2))
+    S = jnp.zeros((3, 4, 2))
+    tup = (-40.0, -3.858e-3, 1.0 / (1026.0 * 3991.0), 1.0 / 1026.0, 10.0)
+    base = dict(T_star_array=np.zeros((3, 4)), S_star_array=np.zeros((3, 4)),
+                tau_T=1.0e6, tau_S=1.0e6)
+    with pytest.raises(ValueError, match="implicit=True"):
+        restoring_surface_forcing(
+            T, S, _G(), RestoringConfig(subtract_qsr=True, implicit=True,
+                                        **base),
+            sw_down=np.zeros((3, 4)), dt=1.0, rho_0=1026.0, c_p=3991.0,
+            dz_0=10.0, nemo_trasbc=tup)
+    with pytest.raises(ValueError, match="subtract_qsr=True"):
+        restoring_surface_forcing(
+            T, S, _G(), RestoringConfig(subtract_qsr=False, implicit=False,
+                                        **base),
+            rho_0=1026.0, c_p=3991.0, dz_0=10.0, nemo_trasbc=tup)

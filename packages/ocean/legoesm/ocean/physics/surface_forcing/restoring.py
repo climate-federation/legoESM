@@ -79,6 +79,7 @@ def restoring_surface_forcing(
     rho_0: float | None = None,
     c_p: float | None = None,
     dz_0: float | None = None,
+    nemo_trasbc=None,
 ) -> SurfaceForcingOutput:
     """Apply SST/SSS restoring to target profiles in the surface layer.
 
@@ -98,6 +99,36 @@ def restoring_surface_forcing(
         Baroclinic timestep [s]. Required when ``cfg.implicit=True``.
     rho_0, c_p, dz_0 : float, optional
         Required for the Q_sr-subtraction term (W/m² → K/s conversion).
+    nemo_trasbc : tuple, optional
+        ``(rn_trp, rn_srp, r1_rho0_rcp, r1_rho0, e3t_live)`` — assemble the
+        surface tendency in NEMO's own STATEMENT ORDER instead of the
+        timescale form.  The two are algebraically identical and differ only
+        in floating-point association, which is exactly what an oracle
+        comparison at the last bit can see.  NEMO's three statements, for the
+        DINO card (``nn_forcingtype = 4``, ``rn_emp_prop = 0`` so the
+        concentration/dilution member is identically zero, and
+        ``lk_linssh = .false.`` so ``trasbc``'s linear-free-surface block is
+        not executed):
+
+        1. ``qns = ( rn_trp*( ts(:,:,1,jp_tem,Kbb) - ztstar )``
+           ``- emp*ts*rcp - zqsr_dayMean ) * tmask(:,:,1)``
+           — ``usrdef_sbc.f90:436-438``; the salt twin is
+           ``sfx = ( rn_srp*( ts(:,:,1,jp_sal,Kbb) - zsstar ) ) * tmask``
+           at ``:388``.
+        2. ``sbc_tsc(:,:,jp_tem) = r1_rho0_rcp * qns`` and
+           ``sbc_tsc(:,:,jp_sal) = r1_rho0 * sfx`` — ``trasbc.f90:152-153``.
+        3. ``pts(:,:,1,jn,Krhs) += zfact*( sbc_tsc_b + sbc_tsc )``
+           ``/ ( e3t_3d(:,:,1)*(1 + r3t(:,:,Kmm)*tmask(:,:,1)) )``
+           — ``trasbc.f90:169-170``.
+
+        The ``zfact``/``sbc_tsc_b`` half of statement 3 is NOT reproduced here:
+        at ``kt = nit000`` NEMO sets ``zfact = 1`` and ``sbc_tsc_b = 0``
+        (``trasbc.f90:139-143``), so the first step is exactly this expression,
+        while from ``kt = 2`` it becomes ``0.5*(sbc_tsc_b + sbc_tsc)`` — a
+        two-step average that needs a carried field legoESM does not have.
+        That gap is registered, not closed.  Passing this tuple requires
+        ``implicit=False`` (NEMO has no damping denominator) and
+        ``subtract_qsr=True`` (``ln_qsr = .true.``).
 
     Returns
     -------
@@ -163,6 +194,26 @@ def restoring_surface_forcing(
                 "for the W/m² → K/s conversion."
             )
         surf_dT = surf_dT - sw_down / (rho_0 * c_p * dz_0)
+
+    if nemo_trasbc is not None:
+        # NEMO's association, statement for statement -- see the parameter's
+        # docstring for the three lines this reproduces.
+        if cfg.implicit:
+            raise ValueError(
+                "nemo_trasbc= reproduces trasbc.f90, which has no damping "
+                "denominator; it is incompatible with RestoringConfig("
+                "implicit=True)."
+            )
+        if not cfg.subtract_qsr:
+            raise ValueError(
+                "nemo_trasbc= folds zqsr_dayMean INSIDE qns "
+                "(usrdef_sbc.f90:438), so it requires subtract_qsr=True."
+            )
+        rn_trp, rn_srp, r1_rho0_rcp, r1_rho0, e3t_live = nemo_trasbc
+        qns = rn_trp * (T[..., 0] - T_star) - sw_down    # usrdef_sbc.f90:436-438
+        sfx = rn_srp * (S[..., 0] - S_star)              # usrdef_sbc.f90:388
+        surf_dT = r1_rho0_rcp * qns / e3t_live           # trasbc.f90:152, :169-170
+        surf_dS = r1_rho0 * sfx / e3t_live               # trasbc.f90:153, :169-170
 
     nlev = shape_3d[-1]
     pad_axes_r = ((0, 0),) * (len(shape_3d) - 1)

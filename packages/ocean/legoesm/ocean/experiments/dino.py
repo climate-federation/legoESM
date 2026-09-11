@@ -4688,11 +4688,28 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
         subtract_qsr=True,
         implicit=False,
     )
+    # NEMO's own ASSOCIATION, not merely its algebra (PR #1728).  The
+    # timescale form -(T-T*)/tau and NEMO's r1_rho0_rcp*(rn_trp*(T-T*))/e3t
+    # are the same number in exact arithmetic and differ in their LAST BIT in
+    # fp64, which is precisely the resolution this card is being scored at:
+    # with the timescale form the level-0 rows differed from NEMO's own
+    # sbc_hc_b/sbc_sc_b on 6048 (T) and 8518 (S) wet cells at ratio
+    # 1.000000000.  rn_trp = -A_theta and rn_srp = -A_S are the namelist's own
+    # sign convention ("must be negative", namelist_cfg:37, :41); rho0*rcp is
+    # formed before its reciprocal exactly as phycst.f90:56-57 does.
+    _nemo_trasbc = (
+        -cfg.A_theta,                  # rn_trp        namelist_cfg:37
+        -cfg.A_S,                      # rn_srp        namelist_cfg:41
+        1.0 / (cfg.rho_0 * cfg.c_p),   # r1_rho0_rcp   phycst.f90:56-57
+        1.0 / cfg.rho_0,               # r1_rho0       phycst.f90:53
+        dz_0_live,                     # e3t(:,:,1,Kmm)  trasbc.f90:170
+    )
     rest_out = restoring_surface_forcing(
         state.T.data, state.S.data, _LatLonGridShim(state, cell_mask),
         restoring_cfg,
         sw_down=Q_sr_2d, dt=dt,
         rho_0=cfg.rho_0, c_p=cfg.c_p, dz_0=dz_0_live,
+        nemo_trasbc=_nemo_trasbc,
     )
     dT_dt_top = rest_out.dT_dt[..., 0]
     dS_dt_top = rest_out.dS_dt[..., 0]
