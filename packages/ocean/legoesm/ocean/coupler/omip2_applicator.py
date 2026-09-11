@@ -945,7 +945,68 @@ def apply_omip2_surface_fluxes(state, *, forcing, idx_t: int,
     )
 
 
-def _sample_omip2_forcing(forcing, idx_t, grid, grid_type):
+def scrip_interior_to_full_tripole(interior, ny=332, nx=362):
+    """Place a (331, 360) SCRIP result into a full (ny, nx) tripole field.
+
+    The oracle's weight files cover the INTERIOR only -- their own history
+    attribute records `ncks -F -d lon,2,361 -d lat,1,331`. The entries they
+    drop are not missing data, they are the grid's own redundancy, so they are
+    FILLED rather than left as zeros; a silent zero in a forcing field is the
+    failure mode this repo keeps hitting.
+
+      * columns 0 and 361 are the CYCLIC OVERLAP of columns 360 and 1;
+      * row 331 is the NORTH-FOLD row, filled from the row below.
+
+    The fold fill is an APPROXIMATION: a true eORCA fold maps the row onto
+    itself with a reversal. For a smooth surface forcing field at a single row
+    the difference is small, and this is stated rather than hidden.
+    """
+    interior = np.asarray(interior, dtype=np.float64)
+    if interior.shape != (ny - 1, nx - 2):
+        raise ValueError(
+            f"SCRIP interior {interior.shape} does not fit a ({ny}, {nx}) "
+            f"tripole; expected {(ny - 1, nx - 2)}")
+    out = np.zeros((ny, nx), dtype=np.float64)
+    out[0:ny - 1, 1:nx - 1] = interior
+    out[0:ny - 1, 0] = out[0:ny - 1, nx - 2]
+    out[0:ny - 1, nx - 1] = out[0:ny - 1, 1]
+    out[ny - 1, :] = out[ny - 2, :]
+    return out
+
+
+# ORCA1's own weight files, per sn_* in namelist_cfg. The RUN_GATEWAY copies
+# are BROKEN SYMLINKS; these INPUTS paths are the real files.
+_ORACLE_WEIGHTS_DIR = ("/burg-archive/glab/users/pg2328/nemo_orca1/"
+                       "nemo_5.0.1/cfgs/ORCA1/INPUTS/")
+_CORE2_BICUBIC = _ORACLE_WEIGHTS_DIR + "weights_coreII_2_eORCA1.4.2_bicubic.nc"
+_CORE2_BILINEAR = _ORACLE_WEIGHTS_DIR + "weights_coreII_2_eORCA1.4.2_bilinear.nc"
+
+
+def sample_forcing_tripole_scrip(forcing, idx_t):
+    """Remap every forcing channel onto the eORCA1 tripole with ORACLE WEIGHTS.
+
+    Per-channel, because the oracle is per-channel: sn_wndi/sn_wndj name the
+    BICUBIC weights file (namelist_cfg:148-149) and every other channel names
+    the BILINEAR one (150-152). Returns full (332, 362) fields.
+
+    This is a GRID-level routine, deliberately not a `method` on
+    :func:`_sample_forcing_points`: that function samples arbitrary POINT
+    lists, whereas a weights file encodes one fixed destination grid, and
+    pretending otherwise would let it be called for a grid it cannot serve.
+    """
+    out = {}
+    for name in _forcing_channels(forcing):
+        path = (_CORE2_BICUBIC if name in _NEMO_BICUBIC_CHANNELS
+                else _CORE2_BILINEAR)
+        src0, wgt, n = load_scrip_weights(path)
+        field = np.asarray(getattr(forcing, name)[idx_t], dtype=np.float64)
+        interior = apply_scrip_weights(field, src0, wgt, n, field.shape)
+        out[name] = scrip_interior_to_full_tripole(interior)
+    return out
+
+
+def _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
+                          forcing_remap="bilinear"):
     """Sample the CORE-II/JRA forcing channels onto the model grid for a record.
 
     Shared by :func:`compute_omip2_surface_forcing` (momentum/heat) and
@@ -954,6 +1015,14 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type):
     conservative regrid onto the regular T grid; ``tripole``/``cubed_sphere``/
     ``mpas`` use nearest-neighbour onto the (possibly 2-D / 1-D) cell centres.
     """
+    if forcing_remap not in ("bilinear", "nemo_scrip"):
+        raise ValueError(
+            f"unknown forcing_remap {forcing_remap!r}; expected 'bilinear' "
+            f"or 'nemo_scrip'")
+    if forcing_remap == "nemo_scrip" and grid_type != "tripole":
+        raise ValueError(
+            f"forcing_remap='nemo_scrip' is wired for the tripole only; the "
+            f"oracle's weights target that grid. Got grid_type={grid_type!r}.")
     if grid_type in ("latlon", "latlon_regional"):
         lat_deg = np.degrees(np.asarray(grid.lat))
         lon_deg = np.degrees(np.asarray(grid.lon))
@@ -962,6 +1031,14 @@ def _sample_omip2_forcing(forcing, idx_t, grid, grid_type):
         lat_pts = np.degrees(np.asarray(grid.lat_T))
         lon_pts = np.degrees(np.asarray(grid.lon_T))
         shp = lat_pts.shape
+        if forcing_remap == "nemo_scrip":
+            if shp != (332, 362):
+                raise ValueError(
+                    f"forcing_remap='nemo_scrip' needs the (332, 362) eORCA1 "
+                    f"tripole; this grid is {shp}. The weight files encode one "
+                    f"destination grid and remapping another through them "
+                    f"would give a plausible wrong field, not an error.")
+            return sample_forcing_tripole_scrip(forcing, idx_t)
         forc = _sample_forcing_points(
             forcing, idx_t, lat_pts.reshape(-1), lon_pts.reshape(-1), method="bilinear",
         )

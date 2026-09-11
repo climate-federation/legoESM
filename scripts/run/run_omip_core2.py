@@ -3801,24 +3801,14 @@ _CHL_SCRIP_WEIGHTS = (
 
 
 def _scrip_to_full_tripole(interior, ny, nx):
-    """Place a (331, 360) SCRIP result into a full (332, 362) tripole field.
+    """Thin alias: the real implementation lives in the coupler applicator.
 
-    The weights cover the interior only. The dropped entries are not missing
-    data, they are the grid's own redundancy, so they are FILLED rather than
-    left as zeros -- a silent zero in a forcing field is the failure mode this
-    repo keeps hitting:
-      * columns 0 and 361 are the CYCLIC OVERLAP of columns 360 and 1;
-      * row 331 is the NORTH-FOLD row, filled from the row below it.
-    The fold fill is an approximation: a true eORCA fold maps the row onto
-    itself with a reversal. For a smooth surface field like chlorophyll at a
-    single row the difference is small, and this is stated rather than hidden.
+    Kept as one line rather than a second copy -- the halo convention is the
+    same physics wherever it is applied, and two copies would drift.
     """
-    out = np.zeros((ny, nx), dtype=np.float64)
-    out[0:331, 1:361] = interior
-    out[0:331, 0] = out[0:331, 360]      # west overlap  <- column 360
-    out[0:331, 361] = out[0:331, 1]      # east overlap  <- column 1
-    out[331, :] = out[330, :]            # north fold row
-    return out
+    from legoesm.ocean.coupler.omip2_applicator import (
+        scrip_interior_to_full_tripole)
+    return scrip_interior_to_full_tripole(interior, ny, nx)
 
 
 def load_nemo_chl_monthly(grid, grid_type, lat2d_deg, lon2d_deg, chl_file=None,

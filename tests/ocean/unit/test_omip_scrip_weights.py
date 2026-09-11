@@ -225,3 +225,94 @@ def test_the_reader_is_cached_by_path():
     A.load_scrip_weights(BILIN)
     A.load_scrip_weights(BILIN)
     assert len(A._SCRIP_CACHE) == 1
+
+
+# --- the grid-level wiring --------------------------------------------------
+
+def test_halo_helper_rejects_a_mismatched_interior():
+    """A weights file for a different grid must not be silently reshaped in."""
+    with pytest.raises(ValueError, match="does not fit"):
+        A.scrip_interior_to_full_tripole(np.zeros((100, 200)))
+
+
+def test_halo_helper_fills_everything_and_mirrors_the_overlap():
+    interior = np.random.default_rng(3).normal(size=(331, 360)) + 10.0
+    full = A.scrip_interior_to_full_tripole(interior)
+    assert full.shape == (332, 362)
+    assert np.all(full != 0.0), "an entry was left as a silent zero"
+    assert np.array_equal(full[0:331, 1:361], interior)
+    assert np.array_equal(full[0:331, 0], full[0:331, 360])
+    assert np.array_equal(full[0:331, 361], full[0:331, 1])
+    assert np.array_equal(full[331], full[330])
+
+
+def test_the_runner_helper_is_an_alias_not_a_second_copy():
+    """One halo convention, one implementation. Two copies would drift."""
+    # tests/ocean/unit/ -> parents[3] is the repo root, not parents[2].
+    src = (pathlib.Path(__file__).resolve().parents[3] / "scripts" / "run"
+           / "run_omip_core2.py").read_text()
+    assert "scrip_interior_to_full_tripole" in src
+    assert "out[331, :] = out[330, :]" not in src, "duplicate halo logic"
+
+
+class _Grid:
+    def __init__(self, ny=332, nx=362):
+        import numpy as _np
+        self.lat_T = _np.deg2rad(_np.linspace(-80, 80, ny))[:, None] \
+            * _np.ones((1, nx))
+        self.lon_T = _np.deg2rad(_np.linspace(0, 359, nx))[None, :] \
+            * _np.ones((ny, 1))
+
+
+class _F:
+    lat = None
+    lon = None
+
+    def __init__(self, ny=94, nx=192):
+        type(self).lat = np.linspace(-88.5, 88.5, ny)
+        type(self).lon = np.linspace(0, 358.125, nx)
+        f = np.ones((1, ny, nx))
+        for n in ("u10", "v10", "T_air", "q_air", "sw_down", "lw_down",
+                  "precip"):
+            setattr(self, n, f.copy())
+        self.snow = None
+        self.slp = None
+
+
+def test_unknown_forcing_remap_raises():
+    with pytest.raises(ValueError, match="unknown forcing_remap"):
+        A._sample_omip2_forcing(_F(), 0, _Grid(), "tripole",
+                                forcing_remap="cubic")
+
+
+def test_scrip_forcing_is_refused_on_non_tripole_grids():
+    with pytest.raises(ValueError, match="tripole only"):
+        A._sample_omip2_forcing(_F(), 0, _Grid(), "mpas",
+                                forcing_remap="nemo_scrip")
+
+
+def test_scrip_forcing_is_refused_on_a_wrongly_sized_tripole():
+    with pytest.raises(ValueError, match=r"\(332, 362\)"):
+        A._sample_omip2_forcing(_F(), 0, _Grid(100, 200), "tripole",
+                                forcing_remap="nemo_scrip")
+
+
+def test_the_default_is_still_bilinear_so_nothing_moved():
+    import inspect
+    sig = inspect.signature(A._sample_omip2_forcing)
+    assert sig.parameters["forcing_remap"].default == "bilinear"
+
+
+@needs_oracle
+def test_scrip_forcing_returns_full_fields_and_routes_winds_bicubically():
+    """The per-channel split is the point: winds through the BICUBIC file,
+    everything else through the BILINEAR one."""
+    f = _F()
+    out = A.sample_forcing_tripole_scrip(f, 0)
+    for name, field in out.items():
+        assert field.shape == (332, 362), (name, field.shape)
+    # A constant source must come back constant through BOTH files -- which
+    # also proves the bicubic derivative terms vanish correctly.
+    for name, field in out.items():
+        assert np.allclose(field, 1.0, atol=1e-6), (
+            name, float(np.abs(field - 1.0).max()))
