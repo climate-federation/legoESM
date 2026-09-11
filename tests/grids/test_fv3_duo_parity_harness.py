@@ -20,6 +20,7 @@ oracle output, which is not in the tree.
 """
 
 import ast
+import inspect
 from pathlib import Path
 
 import numpy as np
@@ -78,6 +79,70 @@ def test_the_compiled_flag_is_refused_on_the_other_backend():
     spec.loader.exec_module(mod)
     with pytest.raises(SystemExit, match="backend jax"):
         mod.main(["--backend", "numpy", "--jit"])
+
+
+def test_batched_flag_is_refused_on_the_numpy_backend():
+    """Face batching is a JAX implementation arm, not a NumPy option."""
+    import importlib.util
+    import sys
+
+    spec = importlib.util.spec_from_file_location(
+        "full_step_oracle_parity", _SCORER)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["full_step_oracle_parity"] = mod
+    spec.loader.exec_module(mod)
+    with pytest.raises(SystemExit, match="only in the JAX dynamics lane"):
+        mod.main(["--backend", "numpy", "--batched"])
+
+
+def test_batched_arm_dispatch_and_compiled_cache_identity(monkeypatch):
+    """Both dispatches receive the arm, and compiled arms cannot alias."""
+    import importlib.util
+    import sys
+
+    from legoesm.core import fv3_cgrid_phase_3d, fv3_duo_stepper, fv3_dynamics
+
+    spec = importlib.util.spec_from_file_location(
+        "full_step_oracle_parity", _SCORER)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["full_step_oracle_parity"] = mod
+    spec.loader.exec_module(mod)
+
+    monkeypatch.setattr(fv3_duo_stepper, "build_jax_duo_stepper_context",
+                        lambda ctx: ctx)
+    monkeypatch.setattr(fv3_cgrid_phase_3d, "state_3d_to_jax",
+                        lambda state: {"x": np.stack([f["x"] for f in state])})
+    seen = []
+
+    def result(jstate, jpress, jq):
+        return {"state": jstate, "press": jpress, "q": jq}
+
+    def eager(_ctx, jstate, jpress, *, q, **kw):
+        seen.append(("eager", kw["batched"]))
+        return result(jstate, jpress, q)
+
+    def builder(_ctx, _km, **kw):
+        seen.append(("jit", kw["batched"]))
+        return lambda jstate, jpress, jq, **_dyn: result(jstate, jpress, jq)
+
+    monkeypatch.setattr(fv3_dynamics, "fv_dynamics_step", eager)
+    monkeypatch.setattr(fv3_dynamics, "make_fv_dynamics_step_jit", builder)
+    state = [{"x": np.zeros(1)} for _ in range(6)]
+    press = [{k: np.zeros(1) for k in ("ps", "pe", "peln", "pk", "pkz")}
+             for _ in range(6)]
+    q = [[np.zeros(1)] for _ in range(6)]
+
+    mod._make_jax_step({}, batched=True)({}, state, press, q=q, km=1)
+    keys = []
+    for batched in (False, True):
+        step = mod._make_jax_step({}, jit=True, batched=batched)
+        step({}, state, press, q=q, km=1)
+        keys.append(next(iter(inspect.getclosurevars(step).nonlocals["_cache"])))
+
+    assert seen == [("eager", True), ("jit", False), ("jit", True)]
+    assert keys[0] != keys[1]
+    assert ("batched", False) in keys[0]
+    assert ("batched", True) in keys[1]
 
 
 def test_two_lanes_that_failed_differently_do_not_compare_equal():

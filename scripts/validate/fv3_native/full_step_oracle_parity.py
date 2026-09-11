@@ -976,7 +976,7 @@ def perturb_boundary_metrics_coherent(ctx, eps: float, n: int, ng: int):
           + "  ".join(f"{k}={v}" for k, v in sorted(stats.items())))
 
 
-def _make_jax_step(ctx, jit=False):
+def _make_jax_step(ctx, jit=False, batched=False):
     """A drop-in for ``fv_dynamics_step`` that steps with the JAX lane.
 
     The scoring below is ~400 lines that read six per-face NumPy dicts
@@ -1042,16 +1042,17 @@ def _make_jax_step(ctx, jit=False):
             # deck and silently invalidate the response gate. Array deck
             # constants (ak/bk/ptop) are invariant across arms, so the scalar
             # kwargs are a sufficient key.
-            _key = tuple(sorted(
+            _key = (("batched", batched),) + tuple(sorted(
                 (k, v) for k, v in kw.items()
                 if isinstance(v, (int, float, bool, str, type(None)))))
             if _key not in _cache:
                 _static = dict(kw)
                 _cache[_key] = _jdyn.make_fv_dynamics_step_jit(
-                    jctx, _static.pop("km"), **_static)
+                    jctx, _static.pop("km"), batched=batched, **_static)
             out = _cache[_key](jstate, jpress, jq, **_dyn)
         else:
-            out = _jdyn.fv_dynamics_step(jctx, jstate, jpress, q=jq, **kw)
+            out = _jdyn.fv_dynamics_step(
+                jctx, jstate, jpress, q=jq, batched=batched, **kw)
 
         # Write back IN PLACE -- see the docstring.
         st = out["state"] if "state" in out else out
@@ -1230,7 +1231,13 @@ def main(argv=None):
                          "--backend jax. Compiles the DYNAMICS step only; "
                          "the physics step has no jit path (refused with "
                          "--physics).")
+    ap.add_argument("--batched", action="store_true",
+                    help="run the FACE-BATCHED dynamics arm. JAX backend "
+                         "only; off by default.")
     args = ap.parse_args(argv)
+    if args.batched and args.backend != "jax":
+        raise SystemExit("--batched requires --backend jax because face "
+                         "batching exists only in the JAX dynamics lane")
     if args.jit and args.backend != "jax":
         raise SystemExit("--jit applies to --backend jax only")
     if args.jit and args.physics != "none":
@@ -1377,6 +1384,7 @@ def main(argv=None):
     print(f"port constants: kappa = {FV3_KAPPA!r}  cp_air = {FV3_CP_AIR!r}")
     print(f"                (2/7 = {2/7!r}; rel diff "
           f"{abs(FV3_KAPPA - 2/7)/(2/7):.3e})")
+    print(f"step arm: backend={args.backend} batched={args.batched}")
 
     ctx = build_six_face_duo_context(N, NG, use_ext_bundle=True,
                                      use_ext_metrics=args.ext_metrics,
@@ -1738,7 +1746,7 @@ def main(argv=None):
     # (pt round-trips K -> theta_v -> K inside each call).
     step_fn = fv_dynamics_step
     if args.backend == "jax":
-        step_fn = _make_jax_step(ctx, jit=args.jit)
+        step_fn = _make_jax_step(ctx, jit=args.jit, batched=args.batched)
     for _step in range(args.n_steps):
         out = step_fn(ctx, state, press, bdt=args.dt, km=KM,
                       k_split=args.k_split, n_split=args.n_split,
@@ -2045,6 +2053,7 @@ def main(argv=None):
     if args.json:
         with open(args.json, "w") as fh:
             json.dump({"ic_worst_rel": worst, "step_worst_rel": worst_step,
+                       "batched": args.batched,
                        "n_steps": args.n_steps,
                        "step_run": args.step_run,
                        "face_map": [{"port_face": pf + 1,
