@@ -174,7 +174,12 @@ def step_gap(steps: int, out: Path, *, entry_root: Path = DEFAULT_ENTRY_ROOT,
             for name in FIELDS:
                 mask = masks[name]
                 left = np.asarray(fields[name], dtype=np.float64)
+                # The oracle's binary record carries NEMO's jpk = 31 levels;
+                # the card and its masks carry the 30 the model integrates.
+                # Crop the ORACLE, never pad the candidate.
                 right = np.asarray(oracle[name], dtype=np.float64)
+                if right.ndim == 3:
+                    right = right[..., :left.shape[-1]]
                 require(left.shape == right.shape == mask.shape,
                         f"kt={kt} {name}: shapes {left.shape} {right.shape} "
                         f"{mask.shape}")
@@ -185,8 +190,10 @@ def step_gap(steps: int, out: Path, *, entry_root: Path = DEFAULT_ENTRY_ROOT,
                 # The dimensionless version: the gap over the signal NEMO
                 # ITSELF has developed from rest by this step.  Five fields in
                 # five units cannot be ranked any other way.
-                signal = _rms(
-                    right - np.asarray(rest[name], dtype=np.float64), mask)
+                base = np.asarray(rest[name], dtype=np.float64)
+                if base.ndim == 3:
+                    base = base[..., :left.shape[-1]]
+                signal = _rms(right - base, mask)
                 row[f"frac_{name}"] = (row[f"rms_{name}"] / signal
                                        if signal > 0.0 else float("nan"))
             rows.append(row)
