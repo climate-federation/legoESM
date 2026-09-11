@@ -194,13 +194,18 @@ Seventeen thousand nine hundred and ninety-nine of eighteen thousand.  This is
 not a localized defect in one cell or one column; step 2 disagrees essentially
 everywhere.
 
-| field | equal-input OUTPUT rms | max abs | wet cells unequal |
-|---|---:|---:|---:|
-| `T` | `4.1544e-04` K | `8.7413e-03` K | 17999 / 18000 |
-| `S` | `5.9939e-05` g/kg | `1.3569e-03` g/kg | 17365 / 18000 |
-| `u` | `1.1909e-05` m/s | `7.1934e-04` m/s | 17400 / 17400 |
-| `v` | `1.7317e-05` m/s | `8.6069e-04` m/s | 17100 / 17100 |
-| `ssh` | `1.1826e-07` m | `7.0726e-07` m | 600 / 600 |
+Every row below is the EQUAL-INPUT arm, not the free run:
+
+| field | equal-input OUTPUT rms | max abs | wet cells unequal | (free-run cells, for contrast) |
+|---|---:|---:|---:|---:|
+| `T` | `4.1544e-04` K | `8.7413e-03` K | 17999 / 18000 | 17999 |
+| `S` | `5.9939e-05` g/kg | `1.3569e-03` g/kg | 17258 / 18000 | 17365 |
+| `u` | `1.1909e-05` m/s | `7.1934e-04` m/s | 17400 / 17400 | 17400 |
+| `v` | `1.7317e-05` m/s | `8.6069e-04` m/s | 17100 / 17100 | 17100 |
+| `ssh` | `1.1826e-07` m | `7.0726e-07` m | 600 / 600 | 600 |
+
+Feeding NEMO's own inputs changes the unequal-cell count on ONE row, `S`, and
+by 107 cells of 18000.  Every other row is identical.
 
 **The controls this arm needs, and what they say.**  The 3-D reseed is shown to
 have WRITTEN: it moved the input by `1.4211e-14` K, `2.1316e-14` g/kg,
