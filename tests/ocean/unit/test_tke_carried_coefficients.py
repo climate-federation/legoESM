@@ -1009,6 +1009,11 @@ def test_nemo_literal_solver_requires_literal_matrix():
 def test_nemo_literal_solver_dispatches_through_production_solve(monkeypatch):
     cfg = TKEConfig(
         tke_matrix_evaluation="nemo_literal",
+        # zdftke.f90:419 has no stratification term on the diagonal, so the
+        # literal matrix now REFUSES an implicit split. Every K_H_old/N2 in
+        # these cases is zero, so this selection is a proven numerical no-op
+        # here: buoy_source = -K_H*N2 = 0 under either branch.
+        tke_buoyancy_sink="nemo_explicit",
         tke_solver_evaluation="nemo_literal",
         dissipation_discretization="nemo_1p5_split",
         surface_bc="nemo_dirichlet", tke_surface_bc_level="nemo_z0",
@@ -1049,6 +1054,11 @@ def test_nemo_literal_matrix_matches_hand_computed_source_order(monkeypatch):
     """Nonuniform-e3t case pins every zdftke:499-510 operand and can go red."""
     cfg = TKEConfig(
         tke_matrix_evaluation="nemo_literal",
+        # zdftke.f90:419 has no stratification term on the diagonal, so the
+        # literal matrix now REFUSES an implicit split. Every K_H_old/N2 in
+        # these cases is zero, so this selection is a proven numerical no-op
+        # here: buoy_source = -K_H*N2 = 0 under either branch.
+        tke_buoyancy_sink="nemo_explicit",
         dissipation_discretization="nemo_1p5_split",
         alpha_tke=1.0, c_eps=0.7,
         tke_background=0.0, tke_surface_min=0.0,
@@ -1098,6 +1108,11 @@ def test_nemo_literal_rhs_applies_langmuir_before_budget(monkeypatch):
     """Matched-step arithmetic pins zdftke's two-statement RHS association."""
     cfg = TKEConfig(
         tke_matrix_evaluation="nemo_literal",
+        # zdftke.f90:419 has no stratification term on the diagonal, so the
+        # literal matrix now REFUSES an implicit split. Every K_H_old/N2 in
+        # these cases is zero, so this selection is a proven numerical no-op
+        # here: buoy_source = -K_H*N2 = 0 under either branch.
+        tke_buoyancy_sink="nemo_explicit",
         dissipation_discretization="nemo_1p5_split",
         alpha_tke=1.0, c_eps=0.7,
         tke_background=0.0, tke_surface_min=0.0,
@@ -1145,6 +1160,11 @@ def test_nemo_literal_dissipation_uses_post_langmuir_energy(monkeypatch):
     """zdftke:463 then :513-516 reuses the Langmuir-updated en operand."""
     cfg = TKEConfig(
         tke_matrix_evaluation="nemo_literal",
+        # zdftke.f90:419 has no stratification term on the diagonal, so the
+        # literal matrix now REFUSES an implicit split. Every K_H_old/N2 in
+        # these cases is zero, so this selection is a proven numerical no-op
+        # here: buoy_source = -K_H*N2 = 0 under either branch.
+        tke_buoyancy_sink="nemo_explicit",
         dissipation_discretization="nemo_1p5_split",
         alpha_tke=1.0, c_eps=0.5,
         tke_background=0.0, tke_surface_min=0.0,
@@ -1185,6 +1205,11 @@ def test_nemo_literal_matrix_is_jittable_and_differentiable():
     """Exercise the faithful matrix branch itself under JIT and reverse AD."""
     cfg = TKEConfig(
         tke_matrix_evaluation="nemo_literal",
+        # zdftke.f90:419 has no stratification term on the diagonal, so the
+        # literal matrix now REFUSES an implicit split. Every K_H_old/N2 in
+        # these cases is zero, so this selection is a proven numerical no-op
+        # here: buoy_source = -K_H*N2 = 0 under either branch.
+        tke_buoyancy_sink="nemo_explicit",
         dissipation_discretization="nemo_1p5_split",
         alpha_tke=1.0, c_eps=0.7,
         tke_background=1.0e-12, tke_surface_min=0.0,
@@ -1333,3 +1358,90 @@ def test_postsolve_carry_is_closure_output_not_evd_composite():
     assert float(jnp.max(A_total)) >= 10.0
     assert float(jnp.max(carry.K_M)) <= 1.0
     assert float(jnp.max(carry.K_H)) < 10.0
+
+
+def test_nemo_literal_matrix_pins_every_row_including_jpkm1(monkeypatch):
+    """All N rows hand-computed, NO bottom pin, and a DRY row in the mask.
+
+    Written to close two holes an adversarial diff review found in the
+    existing coverage (2026-09-11):
+
+    * every other literal-matrix case passes ``w_active = ones``, so dropping
+      NEMO's trailing ``* wmask`` from either half of the dissipation split
+      (``zdftke.f90:419`` diagonal, ``:422-425`` right-hand side) was a
+      no-op in the whole suite;
+    * the one hand-computed matrix case pins the deepest row with
+      ``bottom_dirichlet``, which overwrites ``diag[-1] = 1`` and
+      ``rhs[-1]``, so ANY dissipation mutation confined to NEMO's ``jpkm1``
+      row -- the row the September 2026 runaway lived on -- passed.
+
+    So: four W rows (NEMO ``jk = 2..5``, ``jpk = 6``), no bottom Dirichlet,
+    ``w_active = [1, 0, 1, 1]`` with the DEEPEST row WET, and every entry of
+    a/b/c/rhs written out by hand from the source.
+    """
+    cfg = TKEConfig(
+        tke_matrix_evaluation="nemo_literal",
+        tke_buoyancy_sink="nemo_explicit",
+        dissipation_discretization="nemo_1p5_split",
+        alpha_tke=1.0, c_eps=0.7,
+        tke_background=0.0, tke_surface_min=0.0,
+    )
+    captured = []
+
+    def capture(a, b, c, rhs):
+        captured.append(tuple(np.asarray(x) for x in (a, b, c, rhs)))
+        return rhs
+
+    monkeypatch.setattr(tke_mod, "_tridiag_thomas", capture)
+    base = dict(
+        e_old=jnp.asarray([[1.0, 2.0, 3.0, 4.0]]),
+        K_M_old=jnp.asarray([[4.0, 6.0, 10.0, 14.0]]),
+        K_H_old=jnp.zeros((1, 4)), P_s=jnp.zeros((1, 4)),
+        N2=jnp.zeros((1, 4)), l_eps=jnp.ones((1, 4)),
+        dz_half=jnp.asarray([[13.0, 17.0, 19.0, 23.0]]),
+        surface_flux=jnp.zeros((1,)), dt=2.0, cfg=cfg,
+        dz_surface=jnp.ones((1,)), surface_dirichlet=jnp.asarray([8.0]),
+        surface_bc_level="nemo_z0",
+        K_M_surface=jnp.asarray([2.0]),
+        w_active=jnp.asarray([[1.0, 0.0, 1.0, 1.0]]),
+        nemo_e3t=jnp.asarray([[2.0, 3.0, 5.0, 7.0, 11.0]]),
+        dissl_old=jnp.asarray([[0.1, 0.2, 0.3, 0.5]]),
+    )
+    tke_mod._solve_tke_backward_euler(**base)
+    a, b, c, rhs = captured[-1]
+
+    # zdftke.f90:412-415, with zcof = -0.5*rn_Dt*mask and the jpk upper
+    # neighbour p_avm(jpk) = 0 (zdfphy.f90:226-228; tke_avn loops jk=1,jpkm1).
+    lw = [-6.0 / 26.0, 0.0, -16.0 / 95.0, -24.0 / 161.0]
+    up = [-10.0 / 39.0, 0.0, -24.0 / 133.0, -14.0 / 253.0]
+    # zdftke.f90:419, zfact2 = 1.5*rn_Dt*rn_ediss = 2.1, times the W mask.
+    mask = [1.0, 0.0, 1.0, 1.0]
+    dissl = [0.1, 0.2, 0.3, 0.5]
+    diag = [1.0 - lw[k] - up[k] + 2.1 * dissl[k] * mask[k] for k in range(4)]
+    # zdftke.f90:422-425, zfact3 = 0.5*rn_ediss, times the SAME W mask.
+    e_old = [1.0, 2.0, 3.0, 4.0]
+    rhs_hand = [e_old[k] * (1.0 + 0.7 * dissl[k] * mask[k]) for k in range(4)]
+
+    np.testing.assert_allclose(a, [[0.0, lw[0], lw[1], lw[2], lw[3]]],
+                               rtol=0, atol=1e-15)
+    np.testing.assert_allclose(b, [[1.0] + diag], rtol=0, atol=1e-15)
+    # zd_up(jpkm1) is in the DIAGONAL (:419) but not in the back-substitution
+    # (:468), so the super-diagonal ends in zero while `up[3]` stays in diag.
+    np.testing.assert_allclose(c, [[0.0, up[0], up[1], up[2], 0.0]],
+                               rtol=0, atol=1e-15)
+    np.testing.assert_allclose(rhs, [[8.0] + rhs_hand], rtol=0, atol=1e-15)
+
+    # The regression this exists for: the deepest row is NOT an identity row.
+    assert b.shape[-1] == 5
+    assert b[0, -1] != 1.0
+    assert a[0, -1] != 0.0
+    assert rhs[0, -1] != e_old[-1]
+
+    # Non-vacuity, the two mutations that used to survive the whole suite.
+    unmasked_diag = 1.0 - lw[1] - up[1] + 2.1 * dissl[1]
+    assert unmasked_diag != diag[1]                    # wmask off the diagonal
+    assert e_old[1] * (1.0 + 0.7 * dissl[1]) != rhs_hand[1]   # wmask off the RHS
+    no_deep_diss = 1.0 - lw[3] - up[3]
+    assert no_deep_diss != diag[3]                     # jpkm1-only mutation
+    swapped = 1.0 - lw[0] - up[0] + 0.7 * dissl[0]     # 1.5 <-> 0.5 weights
+    assert swapped != diag[0]

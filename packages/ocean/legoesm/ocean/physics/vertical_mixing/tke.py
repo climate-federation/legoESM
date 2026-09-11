@@ -1030,12 +1030,17 @@ def _nemo_literal_tke_solve(
     else:
         solved_prefix = jnp.zeros(a.shape[:-1] + (0,), dtype=rhs.dtype)
 
-    # The uneliminated jpk row retains its RHS until the source's final
-    # MAX(..., rn_emin) * wmask statement.
-    solved = jnp.concatenate(
-        [solved_prefix, rhs[..., jpkm1 + 1:]], axis=-1)
-    return (jnp.maximum(solved, jnp.asarray(floor, dtype=solved.dtype))
-            * jnp.asarray(w_active, dtype=solved.dtype))
+    # Every supplied row is solved: the array ends at NEMO's jpkm1 and the
+    # held jpk row is not carried, so there is no uneliminated tail here.
+    # ``jpkm1`` indexes the LAST row by construction, and a shorter slice
+    # would silently drop a solved row rather than raise, so assert it.
+    if jpkm1 + 1 != a.shape[-1]:                       # pragma: no cover
+        raise AssertionError(
+            "literal TKE solve left rows beyond jpkm1 unsolved; the array "
+            "must run from the z=0 row to NEMO's jpkm1 inclusive")
+    return (jnp.maximum(solved_prefix,
+                        jnp.asarray(floor, dtype=solved_prefix.dtype))
+            * jnp.asarray(w_active, dtype=solved_prefix.dtype))
 
 
 def _solve_tke_backward_euler(
@@ -1227,6 +1232,20 @@ def _solve_tke_backward_euler(
             raise ValueError(
                 "dissl_old must match e_old shape; got "
                 f"{dissl_old.shape} vs {e_old.shape}.")
+        # The literal assembly reads N rows of e3w and of the W mask -- one
+        # more than it used to, now that NEMO's jpkm1 row is built.  A SHORT
+        # operand does not raise in JAX, it broadcasts or truncates, so the
+        # deepest row would silently take the wrong metric (diff-review
+        # finding, 2026-09-11).
+        if dz_half.shape[-1] < N:
+            raise ValueError(
+                "the literal TKE matrix needs one e3w row per solved W row "
+                f"(NEMO jk = 2..jpkm1); got dz_half with {dz_half.shape[-1]} "
+                f"rows for {N} W rows.")
+        if w_active.shape != e_old.shape:
+            raise ValueError(
+                "w_active must match e_old shape; got "
+                f"{w_active.shape} vs {e_old.shape}.")
         if surface_bc_level != "nemo_z0" or K_M_surface is None:
             raise ValueError(
                 "tke_matrix_evaluation='nemo_literal' requires the NEMO "

@@ -160,11 +160,16 @@ measurement).  It fired:
 | 44 | 1.14091e+06 | 2.00402e+10 | 3.48496e+00 | 2.00391e+10 | 2.00391e+10 | 1.000000 | 16.443864 |
 | 47 | 1.65688e+26 | 3.50687e+40 | 4.19950e+10 | 3.50687e+40 | 3.50687e+40 | 1.000000 | 16.443039 |
 
-Explicit share `1.000000` from step 41 on, against the `>= 0.99` falsifier, and
-the ratio converges on the predicted `16.4437`.  The neighbour row `k-1` sat at
-exactly `1.0e-06` at EVERY one of those steps — the row is decoupled in both
-directions, which is the `a=0`/`c=0` structure showing up in the data rather
-than in the source.  `u`, `v`, `T`, `S` went non-finite at step 47.
+Explicit share `1.000002` at step 41 and `1.000000` from step 42 on, against
+the `>= 0.99` falsifier.  The ratio converges to `16.443869`; the prediction
+from the census's own MEASURED `L` at that step (`306.4972 m`, not the rounded
+`306.50` the previous round quoted) is `16.443870`, i.e. the agreement is one
+part in `1e7`, not the one part in `1e4` implied by quoting `16.4437`.  The
+neighbour row `k-1` sat at exactly `1.0e-06` at EVERY one of those steps — the
+row is decoupled in both directions, which is the `a=0`/`c=0` structure showing
+up in the data rather than in the source.  `u`, `v`, `T`, `S` went non-finite
+at step 47, which is where the census catches it; the model's own abort is one
+step later, at 48.
 
 **Operator-level confirmation, independent of the model.** With a 30-row system
 (NEMO `jk=1..30`) the solver returned its deepest row as exactly its own
@@ -176,17 +181,62 @@ built from `zdftke:419` for the diagonal and `zdftke:468` for the missing
 
 ## MEASUREMENT — after the fix
 
-`tke_runaway/corner_after.log`, 250 steps of the same card:
+`tke_runaway/corner_after.log`, 250 steps of the same card.
 
-| kt | corner e | (e(n+1)-e(n))/e(n)^1.5 | domain max TKE | max avm | eta range | max abs u |
-|---:|---:|---:|---:|---:|---:|---:|
-| 79 | 1.00000e-06 | 0.000000 | — | — | — | — |
-| 240 | 1.00000e-06 | 0.000000 | 1.979e-03 | 2.822e-01 | [-0.112, +0.096] m | 0.130 m/s |
+P3(a) **HELD**.  The corner cell's step ratio `(e(n+1)-e(n))/e(n)^1.5` is
+`0.000000` at every printed step from 79 on; the cell sits on `rn_emin` and the
+domain's TKE maximum has moved to the SURFACE (`k=0`), where a wind-driven
+closure should put it.
 
-P3(a) **HELD** — the `16.44` map is gone; the corner sits on `rn_emin` and the
-domain's TKE maximum has moved to the SURFACE (`j=20, i=30, k=0`), where a
-wind-driven closure should put it.  P3(b) **HELD** — `1.979e-03` against the
-`1 m^2/s^2` bound, three orders of slack.  P3(c) is the year, below.
+P3(b) **HELD**.  The run's LARGEST domain TKE over all 250 steps is
+`2.852e-03 m^2/s^2` at `kt=10` (`corner_after.log`, the `kt=  10` row) — NOT the
+`1.979e-03` at `kt=240` that an earlier draft of this receipt and the commit
+message quoted, which is that one step's value.  Either way it is against a
+`1 m^2/s^2` bound, with two and a half orders of slack.
+
+THE CONTROLLED COMPARISON, at a MATCHED step.  A previous draft said the
+dynamical fields "stay in the ranges the healthy first 46 steps had"; that
+compared a 250-step window against a 46-step one and is withdrawn.  At the
+SAME step, `kt=40`, before and after:
+
+| field at kt=40 | before | after |
+|---|---|---|
+| eta | `[-4.534e-02, 4.394e-02]` | `[-4.534e-02, 4.394e-02]` |
+| u | `[-8.022e-02, 5.500e-02]` | `[-8.022e-02, 5.500e-02]` |
+| v | `[-3.327e-02, 1.493e-01]` | `[-3.327e-02, 1.493e-01]` |
+| T | `[0, 2.380e+01]` | `[0, 2.380e+01]` |
+| max TKE | `1.161e+00` at `(j=1,i=30,k=28)` | `1.986e-03` at `(j=1,i=10,k=0)` |
+| max avm | `3.241e+01` | `1.336e-01` |
+
+Every dynamical row agrees to printed precision at step 40 and only the closure
+differs — which is the point, and is a stronger statement than the withdrawn
+one.  P3(c) is the year, below.
+
+## MEASUREMENT — the kt=1..10 ladder, legoESM against itself (P4)
+
+`--ladder-dump` on the same committed harness, at `d8e97e1326de` and at this
+commit, 130 arrays, compared with `np.array_equal`
+(`tke_runaway/ladder_compare.log`):
+
+| kt | fields differing / 13 | max abs diff over all fields |
+|---:|---:|---:|
+| 1 | **0** | **0.0** |
+| 2 | 8 | 4.7520e-04 |
+| 3 | 12 | 1.0601e-03 |
+| 5 | 12 | 2.6663e-03 |
+| 10 | 12 | 1.1285e-02 |
+
+**kt=1 is BIT-IDENTICAL**, exactly as review A's replacement prediction said it
+would be: the deepest row's right-hand side is below `rn_emin` at `kt=1` and the
+post-solve floor (`zdftke:473-475`) clamps both arms to the same `1e-6`.  From
+`kt=2` the ladder moves; at `kt=10` the largest change is in the eddy viscosity
+(`1.13e-02 m^2/s`, on the deepest interface), and the velocities move by
+`1.4e-07 m/s`.
+
+**Whether that move is TOWARD NEMO is UNMEASURED**, because the gate that would
+say so refuses to run (see the obstacles section).  Nothing in this round is
+bit-exact against NEMO.  "FIXED" in the Rule-12 table below means the runaway is
+gone and the card completes, NOT that the card is at the exact bar.
 
 ## Retractions
 
@@ -229,8 +279,30 @@ trajectory; it turns a silent wrong answer into a loud refusal.
 | GYRE-zco (this card) | YES — `tke_matrix_evaluation`/`tke_solver_evaluation` both `nemo_literal`, `prognostic=True` (printed from the built card) | corner series + 250-step census above; year below | FIXED — the runaway is gone and the deepest row sits on `rn_emin` |
 | LOCK_EXCHANGE-zco | NO | the built card's `model_config.physics` is `None` — there is no vertical-mixing block to select a scheme in. NEMO agrees: `tests/LOCK_EXCHANGE_OMIP_L1_P3_R33ZDF/EXP00/namelist_cfg:131` sets `ln_zdfcst = .true.` | UNAFFECTED BY CONSTRUCTION, both sides |
 | OVERFLOW-zps | NO | same; NEMO `tests/OVERFLOW_OMIP_L1/EXP00/namelist_cfg:129` `ln_zdfcst = .true.` | UNAFFECTED BY CONSTRUCTION, both sides |
-| DINO (`nemo_dino_kamm`) | YES — `experiments/dino.py:1248-1249` selects both literal evaluations | the campaign's given-NEMO-inputs gate, `zdf_chain_walk`, was run BEFORE and AFTER on `cfgs/DINO/RUN_GDB`'s dumps; its stage table is IDENTICAL | the changed stage is UNMEASURABLE on DINO: that gate's `EN (tridiagonal solve)` row is UNMEASURED **for want of oracle data**, because NEMO's SAVEd previous-step `dissl` is not dumped for that run and the probe refuses to guess one. That verdict is the same before and after; it is not caused by this change. Registered as DEBT below |
+| DINO (`nemo_dino_kamm`) | YES — `experiments/dino.py:1248-1249` selects both literal evaluations | see below; the `zdf_chain_walk` logs are byte-identical before and after, and that fact is WORTH NOTHING on its own | UNMEASURED against NEMO; argued UNCHANGED from the code |
 | ORCA2 | UNKNOWN-with-spec | no ORCA2 card exists in `nemo_testcase_recipe.py` (the builders are LOCK_EXCHANGE-zco, OVERFLOW-zps, GYRE-zco) | UNMEASURED. Spec: an ORCA2 card selecting `tke_matrix_evaluation="nemo_literal"` on real bathymetry would exercise BOTH the deepest-row row fixed here AND the `bottom_level == N` pin registered below |
+
+### The DINO row, argued properly
+
+A diff reviewer was right that quoting the byte-identical `zdf_chain_walk` logs
+as evidence is a tautology dressed as a measurement: that probe feeds every
+stage NEMO's OWN dumps, and its `EN (tridiagonal solve)` stage reports `n = 0,
+UNMEASURED` because NEMO's SAVEd previous-step `dissl` is not dumped for that
+run and the probe refuses to guess one.  No stage in it consumes the changed
+solver, so it COULD NOT have moved.  The identity is recorded as a
+not-broken-anything check, not as fidelity evidence.
+
+The real argument for DINO is in the code, and it is about the bottom pin.
+DINO sets `bottom_tke_bc = True` (`experiments/dino.py`), so
+`tke.py`'s bottom-Dirichlet block runs AFTER the matrix assembly and forces
+`a = 0`, `c = 0`, `diag = 1`, `rhs = e_bd` on the pinned row.  On a FULL-DEPTH
+column the pin index clips to the deepest carried row, so that row is pinned
+both before and after this change and its value is unchanged.  On a SHALLOWER
+column the deepest carried row is below the seafloor, `w_active` is 0 there, so
+`zcof`, `literal_up`, `literal_lw` and the `dissl` term are all zero and the
+newly-built diagonal evaluates to exactly `1.0` — the constant it was hard-set
+to before.  Either way DINO's trajectory is unchanged by construction.  That is
+an ARGUMENT, not a measurement; DINO's own year was not re-run this round.
 
 ## REGISTER — rows this round MOVED or EXPOSED, none reverted
 
@@ -325,3 +397,36 @@ stated as a digest rather than as an opinion.
   byte-identical at `HEAD` (`git show HEAD:...tke.py`, "dz_cell requires
   dz_surface too") and the test's regex says "dz_cell and dz_surface".  A
   message/regex mismatch in a guard this round did not touch.
+
+## Review round — what the two diff reviews found, and what was done
+
+Two fresh, independent Claude reviewers, one per angle.  **Codex was
+unavailable** (another agent holds it, working the lateral-viscosity operators
+on this same branch) and **GLM was unavailable**, so both reviews are Claude
+agents with no shared context, each given a different attack surface.
+
+| finding | disposition |
+|---|---|
+| **The new tests could not catch a wrong dissipation treatment.** Two mutations survived the WHOLE repo: dropping NEMO's trailing `* wmask` from either half of the split (every literal-matrix case passes `w_active = ones`), and ANY dissipation mutation confined to the `jpkm1` row (the one hand-computed matrix case pins that row with `bottom_dirichlet`, which overwrites its diagonal and RHS) | FIXED. `test_nemo_literal_matrix_pins_every_row_including_jpkm1` writes out all four rows of `a`/`b`/`c`/`rhs` by hand with NO bottom pin, `w_active = [1,0,1,1]` and the DEEPEST row WET, and carries four explicit non-vacuity assertions for the mutations that used to survive |
+| `dz_half` and `w_active` lengths were unguarded, and the literal assembly now reads one more row of each; a short operand TRUNCATES silently in JAX | FIXED, two guards beside the existing `nemo_e3t` one |
+| the `rhs[..., jpkm1+1:]` tail is now always empty and its comment is stale | FIXED — the tail is gone and an assertion says the array must end at `jpkm1` |
+| the 1.5/0.5 weights, the carried-`dissl` operand and the add-back's sign are already pinned by `test_nemo_literal_matrix_matches_hand_computed_source_order` | confirmed, no action |
+| `c_diff`'s trailing zero is inert (the solver reads `c[..., :jpkm1]`); the load-bearing half is `-literal_up[N-1]` in the diagonal | confirmed |
+| `jpkm1 = L-1` verified against a dense solve at N = 1, 2, 3, 5, 29, max error 2.2e-16 | confirmed independently |
+| **the commit says the model "died at step 48"; the log says 47** | corrected above — 47 is where the census catches it, 48 is the model's own abort |
+| **"100.0000% from step 41" is off by one** — kt=41 is `1.000002` | corrected above |
+| **"the predicted 16.4437"** understates the agreement, which is 1 part in 1e7 against the measured `L` | corrected above |
+| **`1.979e-03` is the kt=240 value, not the run maximum** (`2.852e-03` at kt=10) | corrected above |
+| **"stays in the ranges the healthy first 46 steps had" compares a 250-step window to a 46-step one** | WITHDRAWN, replaced by the matched-`kt=40` table above |
+| **the byte-identical DINO logs are a tautology** — that probe's `EN` stage is UNMEASURED, so no stage consumes the changed solver | ACCEPTED. The Rule-12 row now says UNMEASURED and the real code argument is written out separately |
+| **register item 3 (the `ldown` seed) feeds the very diagonal this change activates** | ACCEPTED, the coupling is now stated |
+| **P3(c) had no result and the table still said FIXED** | the year is reported below, and "FIXED" is now defined as "the runaway is gone and the card completes", explicitly NOT "at the exact bar" |
+| the guard added from the claim review turned 5 existing literal tests red | those tests set `K_H_old` or `N2` to ZERO, so `buoy_source = -K_H*N2 = 0` under either branch and `buoy_sink_rate` is unread by the literal diagonal. They now select `nemo_explicit`; a provable numerical no-op, and the assertions are untouched |
+
+Pre-existing reds, each shown pre-existing before being dismissed:
+`test_tke_veros_dz_slots.py::test_solver_dz_cell_without_dz_surface_raises`
+(the raise it greps for is byte-identical at `HEAD`), and three in
+`test_implicit_vmix_face_control_volume.py`, which fail inside a test-side
+monkeypatch calling `np.asarray` on a traced array under
+`ocean_model_latlon_cgrid._step_jitted` — a file this round does not touch, in
+a test file with zero references to the TKE closure.

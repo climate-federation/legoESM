@@ -526,6 +526,53 @@ def census(steps: int, *, every: int = 1, start: int = 1,
     return 0
 
 
+
+def ladder_dump(steps: int, out: Path) -> int:
+    """Write every prognostic field at kt=1..steps, for a BIT comparison.
+
+    Rule 12 asks whether a change leaves the certified short ladder
+    bit-identical.  Printed ranges cannot answer that -- three decimal digits
+    hide everything below 1e-3 -- so this writes the arrays and the comparison
+    is ``np.array_equal`` on the two files.  Same card, same forcing, same
+    fp64/libm policy as :func:`census` and :func:`run_member`.
+    """
+    import jax
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+            "precision policy is not fp64/libm")
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    gate, gate_sha = _gate_module()
+    card = build_nemo_testcase_card(CASE)
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    state = card.recipe.initial_state
+    arrays = {}
+    for kt in range(1, steps + 1):
+        freshwater, surface = gate._surface_forcings(card, state, kt)
+        state = model.step(state, dt=card.dt_s, freshwater=freshwater,
+                           surface_forcing=surface)
+        for name in CENSUS_FIELDS:
+            field = getattr(state, name, None)
+            if field is None:
+                continue
+            values = np.asarray(getattr(field, "data", field))
+            if values.dtype.kind != "f":
+                continue
+            arrays[f"kt{kt:03d}_{name}"] = values
+    require(bool(arrays), "ladder dump captured no field")
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    np.savez(out, **arrays)
+    print(f"# ladder dump {out} fields={len(arrays)} steps={steps} "
+          f"phase3_gate_sha256={gate_sha}")
+    return 0
+
+
 # ------------------------------------------------------------------ scoring --
 def _rms(values, wet) -> float:
     values = np.asarray(values, dtype=np.float64)
@@ -1115,6 +1162,10 @@ def main(argv=None) -> int:
     parser.add_argument("--census-every", type=int, default=1)
     parser.add_argument("--census-start", type=int, default=1)
     parser.add_argument(
+        "--ladder-dump", type=Path, default=None,
+        help=("write the kt=1..N states to an .npz -- the Rule-12 "
+              "before/after bit-comparison of the certified short ladder"))
+    parser.add_argument(
         "--census-corner", default=None,
         help=("J,I,K -- print the per-step TKE map at one cell during "
               "--census (the deepest-row falsifier)"))
@@ -1134,6 +1185,8 @@ def main(argv=None) -> int:
     if args.self_check:
         return self_check()
     if args.census is not None:
+        if args.ladder_dump is not None:
+            return ladder_dump(args.census, args.ladder_dump)
         _corner = None
         if args.census_corner:
             _corner = tuple(int(v) for v in args.census_corner.split(","))
