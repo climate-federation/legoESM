@@ -101,8 +101,15 @@ sha256sum "$NEMO_ROOT/arch/arch-conda-scalarmath.fcm" "$PATCH" \
   "$SOURCE_ROOT/BLD/ppsrc/nemo/zdfphy.f90" >"$manifest/toolchain.sha256"
 
 cd "$NEMO_ROOT"
-# Configuration cloning is delegated to makenemo; no cfgs directory is copied.
-./makenemo -r "$SOURCE_CFG" -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
+# Clone the SHIPPED reference configuration, as every prior acquisition did
+# (round 46 pattern): `makenemo -r <work cfg>` links only MY_SRC into WORK and
+# then stops with "key key_vco_1d3d is not found in WORK routines".  The
+# source card's EXP00, MY_SRC and cpp keys are then copied file-by-file (no
+# cfgs directory is copied; RUN_* outputs are never touched).
+./makenemo -r GYRE_PISCES -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
+cp -r "$SOURCE_ROOT/EXP00/." "$TARGET_ROOT/EXP00/"
+cp -r "$SOURCE_ROOT/MY_SRC/." "$TARGET_ROOT/MY_SRC/"
+cp "$SOURCE_ROOT/cpp_${SOURCE_CFG}.fcm" "$TARGET_ROOT/cpp_${TARGET_CFG}.fcm"
 cp "$WRITER" "$TARGET_ROOT/MY_SRC/l2_r54_tke.F90"
 patch -s "$TARGET_ROOT/MY_SRC/zdftke.F90" <"$PATCH"
 cp "$NEMO_ROOT/src/OCE/ZDF/zdfphy.F90" "$TARGET_ROOT/MY_SRC/zdfphy.F90"
