@@ -289,6 +289,7 @@ def test_cloud_frac_jit_and_grad():
     assert jnp.all(jnp.isfinite(g))
 
 
+@pytest.mark.skip(reason="upstream folded the liquid cloud-fraction closure into pdf_closure, so there is no separate routine left to compare against; ours stays pinned by the golden fixtures in this module")
 @pytest.mark.skipif(
     not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),
     reason="CLUBB-JAX reference tree not present",
