@@ -65,7 +65,7 @@ import numpy as np
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
 sys.path.insert(0, _HERE)
-from rebuild_nemo_restart import rebuild                       # noqa: E402
+from rebuild_nemo_restart import rebuild  # noqa: E402
 
 RN_DT = 2700.0                   # namdom rn_Dt, cfgs/DINO/*/namelist_cfg:116
 
@@ -92,6 +92,52 @@ CARRIES = {
     "sbc_sc_b": None, "qsr_hc_b": None, "fraqsr_1lev": None,
 }
 TREND_FIELDS = ("ttrd_ldf", "strd_ldf", "ttrd_tot", "strd_tot")
+
+
+NN_E = 23                        # ln_bt_auto resolved value (ocean.output:1102)
+
+
+def nemo_ts_wgt(ll_fw, nn_e=NN_E, nn_bt_flt=2):
+    """NEMO's ``ts_wgt``, CASE(2), transcribed statement for statement.
+
+    dynspg_ts.f90, SUBROUTINE ts_wgt::
+
+        IF (ll_fw) THEN   ;   jic =     nn_e
+        ELSE              ;   jic = 2 * nn_e
+        ENDIF
+        CASE( 2 )                  ! Boxcar, width = 2 * nn_e
+           DO jn = 1, 3*nn_e
+              za1 = ABS(REAL( jn-jic, wp) ) / REAL( nn_e, wp )
+              IF( za1 < 1._wp ) THEN
+                 zwgt1(jn) = 1._wp
+                 Kpit = jn
+              ENDIF
+           END DO
+        DO jn = 1, Kpit ; DO ji = jn, Kpit
+           zwgt2(jn) = zwgt2(jn) + zwgt1(ji)
+
+    WHY IT IS HERE.  ``ll_fw_start`` is TRUE only at ``kt == nit000`` when the
+    first step is Euler (dynspg_ts.f90:228-232); at ``kt == nit000 + 1`` with
+    ``ln_bt_fw = .FALSE.`` NEMO RESETS it to FALSE and calls ``ts_wgt`` again
+    (:245-250).  So the barotropic window is NOT the same at kt=1 and kt=2,
+    and a card that computes it once from its config runs the kt=1 window
+    forever.  This port is CALIBRATED below against the one value the record
+    states out loud (``icycle = 45`` at kt=1, ocean.output:1265) before either
+    of its numbers is used.
+    """
+    if nn_bt_flt != 2:                                  # pragma: no cover
+        raise SystemExit("this port covers nn_bt_flt = 2 only")
+    jic = nn_e if ll_fw else 2 * nn_e
+    w1 = [0.0] * (3 * nn_e + 1)
+    kpit = 0
+    for jn in range(1, 3 * nn_e + 1):
+        if abs(jn - jic) / nn_e < 1.0:
+            w1[jn] = 1.0
+            kpit = jn
+    w2 = [0.0] * (kpit + 1)
+    for jn in range(1, kpit + 1):
+        w2[jn] = sum(w1[jn:kpit + 1])
+    return kpit, w1[1:kpit + 1], w2[1:]
 
 
 def _score(name, lego, nemo, wet, step):
@@ -149,16 +195,16 @@ def main() -> int:
     from legoesm.core.precision import PrecisionPolicy, set_policy
     set_policy(PrecisionPolicy.fp64())                          # Rule 1c
     import jax
+    import legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid as gmmod
     import numpy as _np
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     from legoesm.ocean.experiments import dino as dm
     from legoesm.ocean.fidelity import nemo_dino_mesh as ndm
-    from legoesm.ocean.fidelity.nemo_io import (
-        NemoBeforeState, NemoState, read_nemo_mesh_mask)
+    from legoesm.ocean.fidelity.nemo_io import NemoBeforeState, NemoState, read_nemo_mesh_mask
     from legoesm.ocean.fidelity.nemo_state_bridge import (
-        bridge_nemo_to_legoesm_topo, bridge_before_state_topo)
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel)
-    import legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid as gmmod
+        bridge_before_state_topo,
+        bridge_nemo_to_legoesm_topo,
+    )
 
     cfg = dm.nemo_faithful_dino_config(
         base=dm.dino_config_for_recipe("nemo_dino_kamm_mlf"))
@@ -275,6 +321,27 @@ def main() -> int:
     st2, rate = dm.apply_dino_lat_lon_surface_forcing(
         st, forcing, z, cfg, RN_DT, t_seconds=2 * RN_DT, return_rate=True)
 
+    # ---- the barotropic WINDOW this step will actually run (Rule 10:
+    # instantiate and print, never infer).  Captured through a wrapper around
+    # the production solver; no numerical selector is introduced.
+    import inspect as _inspect
+
+    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as _om
+    _baro_orig = _om.barotropic_substeps_latlon_cgrid
+    _baro_sig = _inspect.signature(_baro_orig)
+    _baro_cap: dict = {}
+
+    def _baro_spy(*aa, **kk):
+        if not _baro_cap:
+            _ba = _baro_sig.bind(*aa, **kk)
+            _ba.apply_defaults()
+            for _nm in ("dt_s", "n_substeps"):
+                if _nm in _ba.arguments:
+                    _baro_cap[_nm] = float(_np.asarray(_ba.arguments[_nm]))
+        return _baro_orig(*aa, **kk)
+
+    _om.barotropic_substeps_latlon_cgrid = _baro_spy
+
     real = gmmod.nemo_iso_lap_tracer_tendency_latlon_cgrid
     calls: list = []
 
@@ -292,6 +359,48 @@ def main() -> int:
                                external_tracer_rate=rate)
     finally:
         gmmod.nemo_iso_lap_tracer_tendency_latlon_cgrid = real
+        _om.barotropic_substeps_latlon_cgrid = _baro_orig
+
+    # ---- THE BAROTROPIC WINDOW AT kt=2.  Calibrate the port first.
+    _baro_bad = 1        # UNMEASURED is a failure here, never a pass
+    _k1, _, _ = nemo_ts_wgt(ll_fw=True)
+    _k2, _w1_2, _ = nemo_ts_wgt(ll_fw=False)
+    print(f"\nBAROTROPIC WINDOW  port calibration: ts_wgt(ll_fw=True) gives "
+          f"icycle = {_k1}; the kt=1 record states 45 (ocean.output:1265)")
+    if _k1 != 45:
+        print("  ^^ the port does not reproduce the record's own icycle, so "
+              "its kt=2 number cannot be used")
+        _k2 = None
+    if _baro_cap:
+        from legoesm.ocean.dynamics.barotropic_latlon_cgrid import _compute_weights
+        _wf, _wt, _wtr, _nloop = _compute_weights(
+            mc, int(_baro_cap["n_substeps"]), _np.float64)
+        print(f"  legoESM at kt=2: dt_s = {_baro_cap['dt_s']:.9f} s, "
+              f"n_substeps = {int(_baro_cap['n_substeps'])}, "
+              f"n_loop = {_nloop}")
+        print(f"  NEMO    at kt=2: rDt_e = {RN_DT / NN_E:.9f} s, nn_e = "
+              f"{NN_E}, icycle = {_k2}  (ll_fw_start reset to FALSE at "
+              "dynspg_ts.f90:245-250 because ln_bt_fw = .FALSE.)")
+        if _k2 is not None:
+            _nz = sum(1 for w in _w1_2 if w != 0.0)
+            _first = next(i + 1 for i, w in enumerate(_w1_2) if w != 0.0)
+            print("  NEMO's kt=2 primary boxcar is nonzero on substeps "
+                  f"{_first}..{_k2} ({_nz} of {_k2}); at kt=1 it was "
+                  "1..45")
+            _baro_bad = 1 if _nloop != _k2 else 0
+            print(f"  barotropic window n_loop (kt=2): "
+                  f"{'AT BAR' if not _baro_bad else 'DEBT'}")
+            if _nloop != _k2:
+                print(f"  DEBT: legoESM integrates the barotropic mode over "
+                      f"{_nloop} substeps x {_baro_cap['dt_s']:.4f} s = "
+                      f"{_nloop * _baro_cap['dt_s']:.1f} s, NEMO over "
+                      f"{_k2} x {RN_DT / NN_E:.4f} s = "
+                      f"{_k2 * RN_DT / NN_E:.1f} s (= 2*rn_Dt = "
+                      f"{2 * RN_DT:.1f} s, the leap-frog's own step)")
+    else:
+        print("  UNMEASURED: the barotropic solver was never called -- this "
+              "counts as a failing row, because a window that was never "
+              "observed cannot be at the bar")
 
     gmesh = ndm.nemo_dino_mesh()
     wet3 = gmesh.tmask > 0.5
@@ -300,7 +409,7 @@ def main() -> int:
     O3 = _O3           # the stitched (nlev, nlat, nlon) -> (nlat, nlon, nlev)
 
     rows: dict[str, float] = {}
-    bad = bad_cov
+    bad = bad_cov + _baro_bad
     print("\nSTATE at the end of kt=2 (legoESM vs NEMO's kt=2 restart)")
     print(f"  {'field':14s}{'cells!=':>10s}{'max':>14s}{'rms':>14s}"
           f"{'NEMO step':>14s}")
