@@ -151,3 +151,74 @@ measured at 05:35:43 on the clean tree, before any edit existed, and it
 reproduces the recorded baseline — T ratio `0.999995181`, S `0.999995294`,
 `cells!= 342090/342134` — to every printed digit.  The reviewer could not see
 that, and the correction is recorded here rather than argued about.
+
+## §8 — MEASURED (added after the arms ran; the sections above are unedited)
+
+`kt2_leapfrog_gate.py --run-dir .../nemo_kt2_trends`, one gate run per arm, the
+same kt=1 restart from `RUN_FROMREST_KT1`, the same kt=2 trend record, the same
+rebuilt mesh, fp64, `rdt = 5400` printed by the gate before it scores.  Only
+the named operand differs between rows.
+
+| arm | T ratio | T res rms [K/s] | T cells!= | S ratio | S res rms | S cells!= |
+|---|---|---|---|---|---|---|
+| A0 baseline | 0.999995181 | 7.6509e-13 | 342090 | 0.999995294 | 1.3381e-13 | 342090 |
+| A1 `redi_kmm_eta` | 0.999999987 | 2.0596e-14 | 320660 | 0.999999989 | 3.4499e-15 | 336234 |
+| **A2 + `native_slope_eta` — LANDED** | **0.999999991** | **1.2608e-14** | **315876** | **0.999999992** | **2.1425e-15** | **334669** |
+| A3 falsifier (+ the density's depth) | 1.067688597 | 1.0557e-07 | 342130 | 1.085219973 | 1.8246e-08 | 342128 |
+
+of 342134 wet cells.  A2 is better than A1 on every column, so the
+preregistered decision rule lands it.  Still DEBT: 315876 cells differ in their
+last bits and no row here is at the bar.
+
+**THE PREREGISTERED A1 VALUE MISSED.**  §3 predicted `1.000000015 ± 5e-9`;
+A1 measured `0.999999987`, which is 2.8e-8 away and outside the window.  The
+window came from an older probe that substituted the Kmm JACOBIAN alone,
+whereas the landed operand also carries the `nemo_qco_live` flux faces.  The
+DIRECTION was right and the size was right to within a factor; the value was
+not.  Recorded rather than quietly updated.
+
+**A3 EARNS row 3 of the §2 table rather than citing it.**  Moving the
+before-density's own depth to Kmm as well makes the tendency 8400x worse.  That
+is a measurement of the claim "`eos( ts, Nbb, rhd )` evaluates at the BEFORE
+height", not a re-reading of `eosbn2.f90:362`.
+
+## §9 — WHAT IT BOUGHT AT CLIMATE LENGTH, and what that says
+
+Days 10/20/30 from rest, scored against `RUN_TRAJ`'s own restarts at kt
+320/640/960 with `twin_nemo_ts_maps.py`, matched protocol on both sides (3-D
+temperature rms over the 339744 shared wet cells):
+
+| day | before [K] | after A2 [K] | ratio |
+|---|---|---|---|
+| 10 | 7.7868e-04 | 7.6779e-04 | 0.986 |
+| 20 | 1.0195e-03 | 1.0215e-03 | 1.002 |
+| 30 | 9.1377e-04 | 9.1382e-04 | 1.000 |
+
+A 61x reduction of the `tra_ldf` residual bought ~1% at day 10 and NOTHING at
+days 20 and 30.  That is not a reason to revert a faithful transcription
+(Rule 8); it is a statement about WHO OWNS the climate-length gap, and the
+answer is not the isoneutral operator.  Ranked at kt=2, residual rms against
+NEMO's OWN step rms — same reduction on both sides, same wet masks:
+
+| field | lego-vs-NEMO rms | NEMO's own kt=2 step rms | fraction |
+|---|---|---|---|
+| **u** | 1.4101e-04 m/s | 2.3409e-03 | **0.0602** |
+| eta | 3.4306e-04 m | 3.4988e-02 | 0.0098 |
+| v | 1.4292e-05 m/s | 2.5491e-03 | 0.0056 |
+| S | 1.1380e-05 psu | 2.2399e-03 | 0.0051 |
+| T | 6.1224e-06 K | 1.3384e-02 | 0.0005 |
+
+The zonal velocity is 6x the next row and 120x the temperature row.  **NEXT
+OWNER: the MOMENTUM half of the same Nbb pass**, and it has a named statement
+waiting — `dynldf_lev_lap` is THREE-way in NEMO (`Kbb` for the divergence at
+`dynldf_lev.f90:128-130`, an UNTIMED `r3f` for the curl at `:124`, `Kmm` for
+the trend divisor at `:136, :140`) where legoESM's Nbb pass is `Kbb`
+throughout.  **DISCRIMINATING MEASUREMENT:** the same arm structure as A1/A2
+but on the momentum divisor alone, re-scoring the gate's `u` row against NEMO's
+`un` at kt=2.  If the u fraction falls, `dyn_ldf` owns it; if it does not, the
+barotropic solve (the eta row) is next.
+
+**NOT the two surface statements.**  They were the standing expectation and
+they are now sized, off NEMO's own restart, at 2.5% of the kt=2 temperature
+residual and 0.0% of the salt residual (`kt1_surface_gate.py --kt2-dir`).
+RETRACTED as the leading candidate.
