@@ -2671,16 +2671,35 @@ def dino_lat_lon_vertical(grid, cfg: DINOConfig | None = None):
     if cfg is None:
         cfg = DINOConfig()
     if cfg.nemo_faithful_grid:
-        # NEMO's OWN ladder, via the same bridge the certified twin uses: 36
-        # reference levels from e3t_1d/gdept_1d wrapped in a full-step
-        # staircase cut at NEMO's own per-column k_bot.  This supersedes the
-        # analytic 35-level surrogate the "masked_zco" branch below builds;
-        # the two are the same construction to within NEMO's mi96 re-anchor,
-        # but only this one is the oracle's.  Level 36 is NEMO's permanently
-        # dry dummy and stays dry here too.
+        # 36 reference levels from e3t_1d/gdept_1d wrapped in a FULL-STEP
+        # staircase cut at NEMO's own per-column k_bot.  Level 36 is NEMO's
+        # permanently dry dummy and stays dry here too.
+        #
+        # KNOWN GAP, MEASURED (#1728, scripts/validate/ocean_fidelity/
+        # dino_1226/spg_kt1_barotropic_ladder.py rung R0).  NEMO's DINO
+        # carries TWO vertical ladders and this one is the wrong ladder.
+        # usr_def_zgr calls zgr_sco_mi96 on a FLAT column (zflat = zHmax =
+        # 4000 m, usrdef_zgr.F90:107-118), so the 3-D e3t_0 it returns is
+        # horizontally UNIFORM -- the column-to-column spread over the 342134
+        # wet cells is exactly 0.0 at every level -- but it is NOT the 1-D
+        # reference ladder e3t_1d that this staircase is cut from.  The two
+        # agree for k = 1..25 and then part company: e3t_0/e3t_1d = 0.979,
+        # 0.945, 0.924, 0.915, 0.919, 0.935, 0.965, 1.009, 1.070, 1.148 at
+        # k = 26..35.  Consequence: layer thicknesses here differ from NEMO's
+        # by up to 70.4 m on 94134 of 342134 wet cells, and the u-face column
+        # depth by up to 104.2 m (4.0%) on a quarter of the wet faces.
+        #
+        # The domain this returns ALREADY CARRIES NEMO's own e3t_0 on
+        # z_coord.nemo_e3t_0, bit-exact (0 of 342134 cells differ) -- the card
+        # simply does not run on it.  Adopting it changes the model state on
+        # every run of this card and is therefore a decision for the campaign
+        # owner, not a silent edit; the certified bridged twin already resolves
+        # the equivalent choice to NEMO's ladder (kamm_twin_90d
+        # .resolve_ladder_mode), and nemo_state_bridge documents the same
+        # default as "the KNOWN-WRONG 1-D ladder".
         if cfg.vertical_coordinate != "masked_zco":
             raise ValueError(
-                "nemo_faithful_grid=True is a full-step (ln_zco) NEMO domain "
+                "nemo_faithful_grid=True builds a masked full-step staircase "
                 f"and needs vertical_coordinate='masked_zco'; got "
                 f"{cfg.vertical_coordinate!r}.")
         return nemo_faithful_dino_domain().z_coord
