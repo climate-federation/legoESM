@@ -33,7 +33,10 @@ from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 
-_CLUBB_JAX_ROOT = Path(__file__).resolve().parents[2].parent / "CLUBB-JAX"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _clubb_ref_api as _ref  # noqa: E402
+
+_CLUBB_JAX_ROOT = _ref.ROOT
 _BETA, _MFMM = 2.4, derive_mixt_frac_max_mag(4.5)
 _CF_GOLDEN_NPZ = Path(__file__).resolve().parent / "clubb_fixtures" / "clubb_cloudfrac_golden.npz"
 

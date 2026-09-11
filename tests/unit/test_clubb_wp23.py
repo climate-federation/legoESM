@@ -19,10 +19,13 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm.atmosphere.physics.turbulence.clubb import make_clubb_grid  # noqa: E402
+from legoesm.atmosphere.physics.turbulence.clubb import make_clubb_grid, zt2zm  # noqa: E402
 from legoesm.atmosphere.physics.turbulence import clubb as W  # noqa: E402, N812
 
-_CLUBB_JAX_ROOT = Path(__file__).resolve().parents[2].parent / "CLUBB-JAX"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _clubb_ref_api as _ref  # noqa: E402
+
+_CLUBB_JAX_ROOT = _ref.ROOT
 
 
 def _gr(ng=2, nzt=10, stretched=True):
@@ -37,23 +40,8 @@ def _gr(ng=2, nzt=10, stretched=True):
 
 
 def _refgr(gr, ng, nzm):
-    """Build the reference Grid NamedTuple from a CLUBBGrid."""
-    if str(_CLUBB_JAX_ROOT) not in sys.path:
-        sys.path.insert(0, str(_CLUBB_JAX_ROOT))
-    from clubb_jax.src.derived_types.grid_class import (
-        Grid,
-        calc_zm2zt_weights,
-        calc_zt2zm_weights,
-    )
-    nzt = nzm - 1
-    zm_np, zt_np, dzt_np = np.asarray(gr.zm), np.asarray(gr.zt), np.asarray(gr.dzt)
-    return Grid(
-        nzm=nzm, nzt=nzt, ngrdcol=ng, zm=gr.zm, zt=gr.zt, dzm=gr.dzm, dzt=gr.dzt,
-        invrs_dzm=gr.invrs_dzm, invrs_dzt=gr.invrs_dzt,
-        weights_zt2zm=jnp.asarray(calc_zt2zm_weights(nzm, nzt, ng, zm_np, zt_np)),
-        weights_zm2zt=jnp.asarray(calc_zm2zt_weights(nzm, nzt, ng, zm_np, zt_np, dzt_np)),
-        k_lb_zm=0, k_ub_zm=nzm - 1, k_lb_zt=0, k_ub_zt=nzt - 1,
-        grid_dir_indx=1, grid_dir=1.0)
+    """The reference Grid for this column (built by upstream's own helpers)."""
+    return _ref.ref_grid(gr)
 
 
 # --------------------------------------------------------------------------
@@ -73,9 +61,9 @@ def test_weights_zt2zm_uniform_is_half():
 def test_weights_zt2zm_parity_stretched():
     if str(_CLUBB_JAX_ROOT) not in sys.path:
         sys.path.insert(0, str(_CLUBB_JAX_ROOT))
-    from clubb_jax.src.derived_types.grid_class import calc_zt2zm_weights
+    from clubb_jax.src.CLUBB_core.grid_class import _calc_zt2zm_weights
     gr, ng, nzm = _gr(stretched=True)
-    ref = calc_zt2zm_weights(nzm, nzm - 1, ng, np.asarray(gr.zm), np.asarray(gr.zt))
+    ref = _calc_zt2zm_weights(nzm, nzm - 1, ng, np.asarray(gr.zm), np.asarray(gr.zt))
     np.testing.assert_allclose(np.asarray(W.weights_zt2zm(gr)), np.asarray(ref),
                                rtol=1e-12, atol=1e-14)
 
@@ -211,27 +199,33 @@ def test_all_lhs_builders_parity():
     rg = _refgr(gr, ng, nzm)
 
     def chk(a, b):
-        # Pure algebra (no solve) → bit-exact, not round-off.
-        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+        # Pure algebra (no solve): the only admitted difference is the last bit
+        # of a jit-contracted multiply-add (see _clubb_ref_api.assert_matches).
+        _ref.assert_matches(a, b)
 
     chk(W.wp2_term_ta_lhs(p["invrs_rho_ds_zm"], p["rho_ds_zt"], gr),
-        R.wp2_term_ta_lhs(p["invrs_rho_ds_zm"], p["rho_ds_zt"], rg))
+        R.wp2_term_ta_lhs(nzm, nzm - 1, ng, rg, p["rho_ds_zt"], p["invrs_rho_ds_zm"]))
     chk(W.wp3_term_ta_ADG1_lhs(p["wp2"], p["a1_coef_zt"], p["a3_coef_zt"], p["wp3_on_wp2"],
                                p["rho_ds_zm"], p["invrs_rho_ds_zt"], gr),
-        R.wp3_term_ta_ADG1_lhs(p["wp2"], p["a1_coef_zt"], p["a3_coef_zt"], p["wp3_on_wp2"],
-                               p["rho_ds_zm"], p["invrs_rho_ds_zt"], rg))
+        R.wp3_term_ta_ADG1_lhs(nzm, nzm - 1, ng, rg, p["wp2"],
+                               zt2zm(p["a1_coef_zt"], gr), p["a1_coef_zt"],
+                               zt2zm(p["a3_coef_zt"], gr), p["a3_coef_zt"],
+                               p["wp3_on_wp2"], p["rho_ds_zm"], p["rho_ds_zt"],
+                               p["invrs_rho_ds_zt"], False, False))
     chk(W.wp3_term_tp_lhs(p["coef"], p["wp2"], p["rho_ds_zm"], p["invrs_rho_ds_zt"], gr),
-        R.wp3_term_tp_lhs(p["coef"], p["wp2"], p["rho_ds_zm"], p["invrs_rho_ds_zt"], rg))
+        R.wp3_term_tp_lhs(nzm, nzm - 1, ng, rg, p["coef"], p["wp2"], p["rho_ds_zm"],
+                          p["invrs_rho_ds_zt"]))
     chk(W.wp3_terms_ac_pr2_lhs(p["C11_Skw_fnc"], p["wm_zm"], gr),
-        R.wp3_terms_ac_pr2_lhs(p["C11_Skw_fnc"], p["wm_zm"], rg))
+        R.wp3_terms_ac_pr2_lhs(nzm, nzm - 1, ng, rg, p["C11_Skw_fnc"], p["wm_zm"]))
     chk(W.wp2_terms_ac_pr2_lhs(p["C_uu_shr"], p["wm_zt"], gr),
-        R.wp2_terms_ac_pr2_lhs(p["C_uu_shr"], p["wm_zt"], rg))
+        R.wp2_terms_ac_pr2_lhs(nzm, nzm - 1, ng, rg, p["C_uu_shr"], p["wm_zt"]))
     chk(W.wp2_term_dp1_lhs(p["C1_Skw_fnc"], p["invrs_tau_C1_zm"]),
-        R.wp2_term_dp1_lhs(p["C1_Skw_fnc"], p["invrs_tau_C1_zm"]))
+        R.wp2_term_dp1_lhs(nzm, ng, rg, p["C1_Skw_fnc"], p["invrs_tau_C1_zm"]))
     chk(W.wp2_term_pr1_lhs(p["C4"], p["invrs_tau_C4_zm"]),
-        R.wp2_term_pr1_lhs(p["C4"], p["invrs_tau_C4_zm"]))
+        R.wp2_term_pr1_lhs(nzm, ng, rg, p["C4"], p["invrs_tau_C4_zm"]))
     chk(W.wp3_term_pr1_lhs(p["C8"], p["C8b"], p["invrs_tau_wp3_zt"], p["Skw_zt"]),
-        R.wp3_term_pr1_lhs(p["C8"], p["C8b"], p["invrs_tau_wp3_zt"], p["Skw_zt"]))
+        R.wp3_term_pr1_lhs(nzm - 1, ng, rg, p["C8"], p["C8b"], p["invrs_tau_wp3_zt"],
+                       p["Skw_zt"], False))
 
 
 def test_jit_and_grad():
@@ -321,7 +315,7 @@ def test_rhs_cam_eq_arm_builders_parity():
         sys.path.insert(0, str(_CLUBB_JAX_ROOT))
     import clubb_jax.src.CLUBB_core.advance_wp2_wp3_module as R  # noqa: N812
     from legoesm import constants
-    R._grav = float(constants.g)
+    R.grav = float(constants.g)
 
     gr, ng, nzm = _gr()
     p = _inputs(gr, ng, nzm)
@@ -332,24 +326,25 @@ def test_rhs_cam_eq_arm_builders_parity():
 
     chk(W.wp2_term_pr_dfsn_rhs(p["C_wp2_pr_dfsn"], p["rho_ds_zt"], p["invrs_rho_ds_zm"],
                                p["wpup2"], p["wpvp2"], p["wp3"], gr),
-        R.wp2_term_pr_dfsn_rhs(p["C_wp2_pr_dfsn"], p["rho_ds_zt"], p["invrs_rho_ds_zm"],
+        R.wp2_term_pr_dfsn_rhs(nzm, nzm - 1, ng, rg, p["C_wp2_pr_dfsn"], p["rho_ds_zt"], p["invrs_rho_ds_zm"],
                                p["wpup2"], p["wpvp2"], p["wp3"], rg))
     chk(W.wp3_term_pr_dfsn_rhs(p["C_wp3_pr_dfsn"], p["rho_ds_zm"], p["invrs_rho_ds_zt"],
                                p["wp2up2"], p["wp2vp2"], p["wp4"], p["up2"], p["vp2"], p["wp2"], gr),
-        R.wp3_term_pr_dfsn_rhs(p["C_wp3_pr_dfsn"], p["rho_ds_zm"], p["invrs_rho_ds_zt"],
+        R.wp3_term_pr_dfsn_rhs(nzm, nzm - 1, ng, rg, p["C_wp3_pr_dfsn"], p["rho_ds_zm"], p["invrs_rho_ds_zt"],
                                p["wp2up2"], p["wp2vp2"], p["wp4"], p["up2"], p["vp2"], p["wp2"], rg))
     chk(W.wp2_terms_bp_pr2_rhs(p["C_uu_buoy"], p["thv_ds_zm"], p["wpthvp"]),
-        R.wp2_terms_bp_pr2_rhs(p["C_uu_buoy"], p["thv_ds_zm"], p["wpthvp"]))
+        R.wp2_terms_bp_pr2_rhs(nzm, ng, rg, p["C_uu_buoy"], p["thv_ds_zm"], p["wpthvp"]))
     chk(W.wp2_term_pr3_rhs(p["C_uu_shr"], p["C_uu_buoy"], p["thv_ds_zm"], p["wpthvp"],
                            p["upwp"], p["um"], p["vpwp"], p["vm"], gr),
-        R.wp2_term_pr3_rhs(p["C_uu_shr"], p["C_uu_buoy"], p["thv_ds_zm"], p["wpthvp"],
+        R.wp2_term_pr3_rhs(nzm, nzm - 1, ng, rg, p["C_uu_shr"], p["C_uu_buoy"], p["thv_ds_zm"], p["wpthvp"],
                            p["upwp"], p["um"], p["vpwp"], p["vm"], rg))
     chk(W.wp2_term_pr1_rhs(p["C4"], p["up2"], p["vp2"], p["invrs_tau_C4_zm"]),
-        R.wp2_term_pr1_rhs(p["C4"], p["up2"], p["vp2"], p["invrs_tau_C4_zm"]))
+        R.wp2_term_pr1_rhs(nzm, ng, rg, p["C4"], p["up2"], p["vp2"], p["invrs_tau_C4_zm"]))
     chk(W.wp3_terms_bp1_pr2_rhs(p["C11_Skw_fnc"], p["thv_ds_zt"], p["wp2thvp"]),
-        R.wp3_terms_bp1_pr2_rhs(p["C11_Skw_fnc"], p["thv_ds_zt"], p["wp2thvp"]))
+        R.wp3_terms_bp1_pr2_rhs(nzm - 1, ng, rg, p["C11_Skw_fnc"], p["thv_ds_zt"], p["wp2thvp"]))
     chk(W.wp3_term_pr1_rhs(p["C8"], p["C8b"], p["invrs_tau_wp3_zt"], p["Skw_zt"], p["wp3"]),
-        R.wp3_term_pr1_rhs(p["C8"], p["C8b"], p["invrs_tau_wp3_zt"], p["Skw_zt"], p["wp3"]))
+        R.wp3_term_pr1_rhs(nzm - 1, ng, rg, p["C8"], p["C8b"], p["invrs_tau_wp3_zt"],
+                       p["Skw_zt"], p["wp3"], False))
 
 
 # --------------------------------------------------------------------------
@@ -654,8 +649,8 @@ def test_clip_skewness_parity():
     rng = np.random.default_rng(23)
     wp3 = jnp.asarray(20.0 * rng.standard_normal((ng, nzt)))
     out = W.clip_skewness(wp3, wp2_zt, zt, sfc, skw_max)
-    ref = RC.clip_skewness_core(wp3, wp2_zt, zt, sfc, skw_max,
-                                l_use_wp3_lim_with_smth_Heaviside=False)
+    ref = RC.clip_skewness_core(nzt, ng, _ref.ref_grid(_gr()[0]), sfc, skw_max,
+                                wp2_zt, False, wp3)
     np.testing.assert_allclose(np.asarray(out), np.asarray(ref), rtol=1e-12, atol=1e-14)
 
 
@@ -782,7 +777,7 @@ def test_advance_wp2_wp3_composition_parity():
         l_use_wp3_lim_with_smth_Heaviside=False, l_lmm_stepping=False,
         l_standard_term_ta=False)
 
-    R._grav = float(constants.g)
+    R.grav = float(constants.g)
     ref = R.advance_wp2_wp3(
         kw["wp2"], kw["wp3"], kw["up2"], kw["vp2"], kw["sigma_sqd_w"], kw["wp3_on_wp2"],
         jnp.zeros((ng, nzm)), kw["wpup2"], kw["wpvp2"], kw["wp2up2"], kw["wp2vp2"],

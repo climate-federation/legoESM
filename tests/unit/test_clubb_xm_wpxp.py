@@ -21,7 +21,10 @@ jax.config.update("jax_enable_x64", True)
 from legoesm.atmosphere.physics.turbulence.clubb import make_clubb_grid  # noqa: E402
 from legoesm.atmosphere.physics.turbulence import clubb as X  # noqa: E402, N812
 
-_CLUBB_JAX_ROOT = Path(__file__).resolve().parents[2].parent / "CLUBB-JAX"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _clubb_ref_api as _ref  # noqa: E402
+
+_CLUBB_JAX_ROOT = _ref.ROOT
 _FIX = Path(__file__).resolve().parent / "clubb_fixtures"
 
 

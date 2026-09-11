@@ -47,7 +47,10 @@ from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
 
 from legoesm import constants  # noqa: E402
 
-_CLUBB_JAX_ROOT = Path(__file__).resolve().parents[2].parent / "CLUBB-JAX"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _clubb_ref_api as _ref  # noqa: E402
+
+_CLUBB_JAX_ROOT = _ref.ROOT
 _FIX = Path(__file__).resolve().parent / "clubb_fixtures"
 _C_K10, _NU10, _DT = 0.5, 0.0, 300.0
 _IC_K10 = 74   # 1-based clubb_params index for c_K10 (constants_clubb)
@@ -207,24 +210,28 @@ def test_xp2_term_builders_parity():
     rng = np.random.default_rng(31)
     Cn = jnp.asarray(0.5 + rng.random((ng, nzm)))
     itau = jnp.asarray(1e-3 + 1e-3 * rng.random((ng, nzm)))
-    np.testing.assert_array_equal(np.asarray(term_dp1_lhs(Cn, itau)),
-                                  np.asarray(R.term_dp1_lhs(Cn, itau)))
-    np.testing.assert_array_equal(np.asarray(term_dp1_rhs(Cn, itau, 1e-4)),
-                                  np.asarray(R.term_dp1_rhs(Cn, itau, 1e-4)))
+    _ref.assert_matches(term_dp1_lhs(Cn, itau),
+                        R.term_dp1_lhs(nzm, ng, _ref.ref_grid(gr), Cn, itau), "term_dp1_lhs")
+    _ref.assert_matches(term_dp1_rhs(Cn, itau, 1e-4),
+                        R.term_dp1_rhs(nzm, ng, Cn, itau, 1e-4), "term_dp1_rhs")
     xam = jnp.asarray(rng.standard_normal((ng, nzt)))
     xbm = jnp.asarray(rng.standard_normal((ng, nzt)))
     wpxap = jnp.asarray(rng.standard_normal((ng, nzm)))
     wpxbp = jnp.asarray(rng.standard_normal((ng, nzm)))
-    np.testing.assert_array_equal(
-        np.asarray(term_tp_rhs(xam, xbm, wpxap, wpxbp, gr.invrs_dzm)),
-        np.asarray(R.term_tp_rhs(xam, xbm, wpxap, wpxbp, gr.invrs_dzm)))
+    _ref.assert_matches(
+        term_tp_rhs(xam, xbm, wpxap, wpxbp, gr.invrs_dzm),
+        R.term_tp_rhs(nzm, nzt, ng, xam, xbm, wpxbp, wpxap, gr.invrs_dzm), "term_tp_rhs",
+        # The reference is jit-compiled and may contract a multiply-add our eager
+        # form evaluates separately: a last-bit difference, not a formula one.
+        rtol=1e-15)
     xbp2 = jnp.asarray(0.1 + rng.random((ng, nzm)))
     wp2 = jnp.asarray(0.2 + rng.random((ng, nzm)))
     itc4 = jnp.asarray(1e-3 + rng.random((ng, nzm)))
     itc14 = jnp.asarray(1e-3 + rng.random((ng, nzm)))
-    np.testing.assert_array_equal(
-        np.asarray(term_pr1(5.2, 2.2, xbp2, wp2, itc4, itc14, (2e-2) ** 2)),
-        np.asarray(R.term_pr1(5.2, 2.2, xbp2, wp2, itc4, itc14, (2e-2) ** 2)))
+    _ref.assert_matches(
+        term_pr1(5.2, 2.2, xbp2, wp2, itc4, itc14, (2e-2) ** 2),
+        R.term_pr1(nzm, ng, jnp.full((ng,), 5.2), jnp.full((ng,), 2.2),
+                   xbp2, wp2, itc4, itc14), "term_pr1")
     # term_pr2 uses grav -> patch reference constant to legoESM g, then bit-exact.
     R.grav = constants.g
     thv = jnp.asarray(300.0 + rng.random((ng, nzm)))
@@ -233,10 +240,10 @@ def test_xp2_term_builders_parity():
     vpwp = jnp.asarray(rng.standard_normal((ng, nzm)) * 0.05)
     um = jnp.asarray(rng.standard_normal((ng, nzt)))
     vm = jnp.asarray(rng.standard_normal((ng, nzt)))
-    # The reference term_pr2 only reads gr.invrs_dzm, which CLUBBGrid provides.
-    np.testing.assert_array_equal(
-        np.asarray(term_pr2(0.3, 0.3, thv, wpthvp, upwp, vpwp, um, vm, gr)),
-        np.asarray(R.term_pr2(0.3, 0.3, thv, wpthvp, upwp, vpwp, um, vm, gr)))
+    _ref.assert_matches(
+        term_pr2(0.3, 0.3, thv, wpthvp, upwp, vpwp, um, vm, gr),
+        R.term_pr2(nzm, nzt, ng, _ref.ref_grid(gr), jnp.full((ng,), 0.3),
+                   jnp.full((ng,), 0.3), thv, wpthvp, upwp, vpwp, um, vm), "term_pr2")
 
 
 def test_xp2_ta_shapes_and_boundaries():

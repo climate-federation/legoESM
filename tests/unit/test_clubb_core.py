@@ -364,7 +364,10 @@ def test_pdf_closure_buoyancy_uses_raw_not_floored_variance():
     assert not np.allclose(np.asarray(out["thlpthvp"]), np.asarray(floored_thlpthvp))
 
 
-_CLUBB_JAX_ROOT = Path(__file__).resolve().parents[2].parent / "CLUBB-JAX"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _clubb_ref_api as _ref  # noqa: E402
+
+_CLUBB_JAX_ROOT = _ref.ROOT
 
 
 @pytest.mark.skipif(not (_CLUBB_JAX_ROOT / "clubb_jax").exists(),

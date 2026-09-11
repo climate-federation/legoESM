@@ -112,6 +112,37 @@ CAM_FLAGS = dict(
 )
 
 
+def assert_matches(mine, ref, name: str = "", rtol: float = 1e-15, atol: float = 0.0):
+    """Compare our result against the reference on the levels we both define.
+
+    Several of our term builders return only the interior band the solver
+    consumes, where upstream returns the full column with its boundary levels
+    zeroed. That is a storage convention, not a physics difference, so the
+    reference is TRIMMED to our width rather than our result being padded --
+    and the trimmed-off levels are asserted to be the zeros they claim to be,
+    so a real value hiding in a boundary level cannot slip through.
+
+    The default tolerance is four ulp rather than bit-exact: the reference's
+    routines are jit-compiled and XLA may contract a multiply-add that our eager
+    form evaluates in two steps. That is a last-bit difference. It is some
+    thirteen orders of magnitude tighter than any difference in the physics
+    would be, so the gate still fails on anything that matters.
+    """
+    mine = np.asarray(mine)
+    ref = np.asarray(ref)
+    if ref.shape[-1] == mine.shape[-1] + 2:
+        edges = np.concatenate([ref[..., :1], ref[..., -1:]], axis=-1)
+        np.testing.assert_array_equal(
+            edges, np.zeros_like(edges),
+            err_msg=f"{name}: reference boundary levels are not zero, so "
+                    f"trimming them would hide a real difference")
+        ref = ref[..., 1:-1]
+    if rtol or atol:
+        np.testing.assert_allclose(mine, ref, rtol=rtol, atol=atol, err_msg=name)
+    else:
+        np.testing.assert_array_equal(mine, ref, err_msg=name)
+
+
 def ref_err_info(ngrdcol: int):
     """Upstream's per-column error record, initialised to "no error"."""
     ensure_importable()

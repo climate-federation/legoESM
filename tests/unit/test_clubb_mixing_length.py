@@ -35,7 +35,10 @@ from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
 from legoesm import constants  # noqa: E402
 
 # CLUBB-JAX reference tree (sibling of the repo); absent in CI -> parity skips.
-_CLUBB_JAX_ROOT = Path(__file__).resolve().parents[2].parent / "CLUBB-JAX"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _clubb_ref_api as _ref  # noqa: E402
+
+_CLUBB_JAX_ROOT = _ref.ROOT
 
 
 def _setup(nzt=30, dthv_dz=(0.0, 1.0e-2)):
