@@ -234,3 +234,140 @@ def test_differentiable_including_dry_cell():
             jnp.asarray(_SW), _DZ, _Z_HALF, jac, _cfg("II")))
     g_dry = jax.grad(loss_dry)(jnp.asarray(0.0))     # through the dz_safe gate
     assert jnp.isfinite(g_wet) and jnp.isfinite(g_dry)
+
+
+# ------------------------------------------- NEMO qsr_2BD, statement by statement
+def _dino_ladder():
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    set_policy(PrecisionPolicy.fp64())
+    from legoesm.ocean.experiments import dino as dm
+    cfg = dm.nemo_faithful_dino_config(
+        base=dm.dino_config_for_recipe("nemo_dino_kamm_mlf"))
+    grid = dm.dino_lat_lon_grid(cfg)
+    z = dm.dino_lat_lon_vertical(grid, cfg)
+    return dm, cfg, grid, z
+
+
+def test_nemo_qsr_ext_lev_reproduces_the_levels_nemo_printed():
+    """NEMO's ``ocean.output`` for this configuration prints, verbatim::
+
+           level of infrared extinction       =  2  ref depth = 20.593063338905267 m
+           level of visible light extinction  = 22  ref depth = 635.29067417406986 m
+
+    and ``qsr_ext_lev`` sees ``rDt = 2*rn_Dt`` because ``dom_init`` sets that
+    for the modified leap-frog (``domain.F90:309-310``) before ``tra_init``
+    runs.  Both halves are asserted: at ``rn_Dt`` the infrared level comes out
+    1, which is the wrong answer and the reason the factor is pinned.
+    """
+    import numpy as np
+    from legoesm.ocean.fidelity import nemo_dino_mesh as ndm
+    from legoesm.ocean.physics.shortwave_penetration import nemo_qsr_ext_lev
+    _dm, cfg, _grid, z = _dino_ladder()
+    tmask = np.asarray(ndm.nemo_dino_mesh().tmask) > 0.5
+    kw = dict(rho_0=cfg.rho_0, c_sw=cfg.c_p)
+    assert nemo_qsr_ext_lev(z, tmask, rdt=2 * 2700.0, **kw) == (2, 22)
+    assert nemo_qsr_ext_lev(z, tmask, rdt=2700.0, **kw) == (1, 22)
+    zh = np.asarray(z.z_half_ref)
+    assert abs(-float(zh[2]) - 20.593063338905267) < 1e-9
+    assert abs(-float(zh[22]) - 635.29067417406986) < 1e-8
+
+
+def test_nemo_2bd_zeroes_every_level_below_nkv_and_the_default_does_not():
+    """``tra_qsr``'s trend loop is ``DO jk = 1, nksr`` (``traqsr.F90:261``)
+    with ``nksr = nkV`` (``:1318``), so levels below it receive NOTHING.  The
+    reference kernel instead adds the whole un-absorbed remainder to the LAST
+    level of the ladder, which is the statement this pins.
+    """
+    import jax.numpy as jnp
+    import numpy as np
+    from legoesm.ocean.physics.shortwave_penetration import (
+        ShortwavePenetrationConfig, shortwave_penetration_tendency)
+    from legoesm.ocean.fidelity import nemo_dino_mesh as ndm
+    _dm, cfg, _grid, z = _dino_ladder()
+    wet = jnp.asarray(np.asarray(ndm.nemo_dino_mesh().tmask) > 0.5)
+    q = jnp.full(wet.shape[:2], 200.0)
+    stretch = jnp.ones(wet.shape[:2])
+    common = dict(z_coord_dz_ref=z.dz_ref, z_coord_z_half_ref=z.z_half_ref,
+                  jacobian=jnp.ones(wet.shape[:2]),
+                  config=ShortwavePenetrationConfig(water_type="I"),
+                  rho_0=cfg.rho_0, c_sw=cfg.c_p, z_half_stretch=stretch)
+    nemo = np.asarray(shortwave_penetration_tendency(
+        sw_down=q, nemo_2bd_levels=(2, 22), cell_wet=wet, **common))
+    ref = np.asarray(shortwave_penetration_tendency(sw_down=q, **common))
+    assert np.abs(nemo[..., 22:]).max() == 0.0
+    # the reference ladder does NOT -- which is what makes the row above a
+    # measurement of the statement rather than of an always-zero tail.
+    assert np.abs(ref[..., 22:]).max() > 0.0
+
+
+def test_nemo_2bd_drops_the_infrared_band_below_nk0():
+    """``traqsr.F90:676-683``: the deeper loop's attenuation is ``zz1*EXP``
+    alone.  Displacing the INFRARED extinction length must therefore leave
+    every level at or below ``nk0`` untouched while moving the ones above it.
+    """
+    import jax.numpy as jnp
+    import numpy as np
+    from legoesm.ocean.physics.shortwave_penetration import (
+        JERLOV_TYPES, JerlovParams, ShortwavePenetrationConfig,
+        shortwave_penetration_tendency)
+    from legoesm.ocean.fidelity import nemo_dino_mesh as ndm
+    _dm, cfg, _grid, z = _dino_ladder()
+    wet = jnp.asarray(np.asarray(ndm.nemo_dino_mesh().tmask) > 0.5)
+    q = jnp.full(wet.shape[:2], 200.0)
+    base = JERLOV_TYPES["I"]
+    JERLOV_TYPES["_probe"] = JerlovParams(R=base.R, zeta1=base.zeta1 * 1.5,
+                                          zeta2=base.zeta2)
+    try:
+        def run(wt):
+            return np.asarray(shortwave_penetration_tendency(
+                sw_down=q, z_coord_dz_ref=z.dz_ref,
+                z_coord_z_half_ref=z.z_half_ref,
+                jacobian=jnp.ones(wet.shape[:2]),
+                config=ShortwavePenetrationConfig(water_type=wt),
+                rho_0=cfg.rho_0, c_sw=cfg.c_p,
+                z_half_stretch=jnp.ones(wet.shape[:2]),
+                nemo_2bd_levels=(2, 22), cell_wet=wet))
+        a, b = run("I"), run("_probe")
+    finally:
+        JERLOV_TYPES.pop("_probe")
+    # levels 0 and 1 carry the IR band and must move
+    assert np.abs(a[..., :2] - b[..., :2]).max() > 0.0
+    # levels 2..21 are visible-only and must NOT
+    assert np.abs(a[..., 2:22] - b[..., 2:22]).max() == 0.0
+
+
+def test_nemo_2bd_refuses_the_operands_it_cannot_run_without():
+    import jax.numpy as jnp
+    import pytest as _pytest
+    from legoesm.ocean.physics.shortwave_penetration import (
+        ShortwavePenetrationConfig, shortwave_penetration_tendency)
+    dz = jnp.ones((4,))
+    zh = -jnp.arange(5.0)
+    kw = dict(sw_down=jnp.ones((2, 2)), z_coord_dz_ref=dz,
+              z_coord_z_half_ref=zh, jacobian=jnp.ones((2, 2)),
+              config=ShortwavePenetrationConfig(water_type="I"))
+    with _pytest.raises(ValueError, match="z_half_stretch"):
+        shortwave_penetration_tendency(nemo_2bd_levels=(1, 3), **kw)
+    with _pytest.raises(ValueError, match="cell_wet"):
+        shortwave_penetration_tendency(
+            nemo_2bd_levels=(1, 3), z_half_stretch=jnp.ones((2, 2)), **kw)
+    with _pytest.raises(ValueError, match="nk0"):
+        shortwave_penetration_tendency(
+            nemo_2bd_levels=(3, 1), z_half_stretch=jnp.ones((2, 2)),
+            cell_wet=jnp.ones((2, 2, 4), dtype=bool), **kw)
+
+
+def test_the_dino_card_selects_nemo_2bd_and_an_unknown_value_raises():
+    import pytest as _pytest
+    dm, cfg, _grid, _z = _dino_ladder()
+    assert cfg.shortwave_penetration_ladder == "nemo_2bd"
+    import dataclasses
+    bad = dataclasses.replace(cfg, shortwave_penetration_ladder="jerlov")
+    grid = dm.dino_lat_lon_grid(bad)
+    z = dm.dino_lat_lon_vertical(grid, bad)
+    state = dm.dino_lat_lon_state(grid, z, bad)
+    forcing = dm.dino_lat_lon_surface_forcing_arrays(grid, bad)
+    with _pytest.raises(ValueError, match="shortwave_penetration_ladder"):
+        dm.apply_dino_lat_lon_surface_forcing(state, forcing, z, bad, 2700.0,
+                                              t_seconds=2700.0,
+                                              return_rate=True)

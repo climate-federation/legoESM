@@ -42,6 +42,7 @@ from legoesm.ocean.constants_config import (
 )
 from legoesm.ocean.physics.shortwave_penetration import (
     ShortwavePenetrationConfig,
+    nemo_qsr_ext_lev,
     shortwave_penetration_tendency,
 )
 from legoesm.ocean.vertical import (
@@ -267,8 +268,17 @@ class DINOConfig:
     # eos.nemo_r3t_stretch factor surface_flux_divisor="nemo_live" uses
     # (reused verbatim -- not re-derived), shrinking the residual to
     # err_norm median 4.979e-07 (~40x, below the c_p-truncation floor).
-    # Only the ``nemo_dino_kamm``/``nemo_dino_kamm_mlf``-family exactness
-    # presets set "nemo_live". Unknown value raises (dispatch hardening).
+    # "nemo_2bd" (the DINO exactness preset, PR #1728) is "nemo_live" PLUS
+    # the three statements of qsr_2BD/tra_qsr the reference kernel does not
+    # reproduce: the INFRARED BAND IS DROPPED below nk0 (traqsr.F90:676-683),
+    # the trend loop is CUT at nksr=nkV so deeper levels get nothing
+    # (:261, :1318) instead of receiving the un-absorbed remainder, and every
+    # sub-surface attenuation carries wmask(jk+1) (:668, :679) so a column
+    # shallower than nkV deposits its residual light in the deepest WET cell.
+    # nk0/nkV are DERIVED from the mesh by shortwave_penetration.
+    # nemo_qsr_ext_lev (NEMO's own qsr_ext_lev), not configured -- on this card
+    # they come out 2 and 22, which is what NEMO's ocean.output prints.
+    # Measured by kt1_qsr_gate.py.  Unknown value raises (dispatch hardening).
     shortwave_penetration_ladder: str = "static"
     # NEMO trasbc.F90 surface-flux TIME-LEVEL PLACEMENT (#1492): NEMO's
     # tra_sbc writes sbc_tsc into the tracer RHS accumulator ts(Krhs) at Nnn
@@ -1575,9 +1585,10 @@ DINO_RECIPES: dict[str, dict] = {
         # trasbc.F90:152-153 live top-cell divisor (#1226) -- see
         # DINOConfig.surface_flux_divisor docstring.
         "surface_flux_divisor": "nemo_live",
-        # traqsr.F90:665-712 qsr_2BD live gdepw ladder (#1226) -- see
-        # DINOConfig.shortwave_penetration_ladder docstring.
-        "shortwave_penetration_ladder": "nemo_live",
+        # traqsr.F90:615-687 qsr_2BD, statement for statement (#1728) -- the
+        # live gdepw ladder (#1226) PLUS the band/level structure and the
+        # wmask; see DINOConfig.shortwave_penetration_ladder docstring.
+        "shortwave_penetration_ladder": "nemo_2bd",
     },
     # --- L2 — Veros (Vallis nonlinear EOS, TKE, superbee, streamfunction/AB2). ---
     # Dycore identity: recipes.py::veros_faithful_v1 (rigid_lid → the builder
@@ -4730,22 +4741,44 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
     # the surface_flux_divisor branch (which is only bound when THAT field
     # is also "nemo_live").
     ladder = getattr(cfg, "shortwave_penetration_ladder", "static")
+    sw_kw: dict = {}
     if ladder == "static":
         z_half_stretch = None
-    elif ladder == "nemo_live":
+    elif ladder in ("nemo_live", "nemo_2bd"):
         from legoesm.ocean.eos import nemo_r3t_stretch
         z_half_stretch = nemo_r3t_stretch(z_coord, state.eta.data, state.H_bathy.data)
+        if ladder == "nemo_2bd":
+            # traqsr.F90:1179,:1245 -- NEMO DERIVES the two extinction levels
+            # from the mesh at tra_qsr_init; they are not namelist values, so
+            # they are derived here too rather than written down.  The
+            # sub-surface wmask is the card's own per-level wet mask.
+            act = getattr(z_coord, "is_active", None)
+            if act is None:
+                raise ValueError(
+                    "shortwave_penetration_ladder='nemo_2bd' needs the "
+                    "per-level wet mask z_coord.is_active (qsr_2BD's "
+                    "wmask(jk+1), traqsr.F90:668,:679); this vertical "
+                    "coordinate has none.")
+            wet3 = jnp.asarray(act) > 0.5
+            # rDt, NOT dt: dom_init sets ``rDt = 2*rn_Dt`` for the modified
+            # leap-frog (domain.F90:309-310) and tra_qsr_init runs after it,
+            # so qsr_ext_lev sees the DOUBLED step.  Measured, not assumed:
+            # at rn_Dt the function returns nk0=1 and at 2*rn_Dt it returns
+            # nk0=2, and 2 is what NEMO's own ocean.output prints.
+            sw_kw["nemo_2bd_levels"] = nemo_qsr_ext_lev(
+                z_coord, wet3, rdt=2.0 * dt, rho_0=cfg.rho_0, c_sw=cfg.c_p)
+            sw_kw["cell_wet"] = wet3
     else:
         raise ValueError(
             f"Unknown DINOConfig.shortwave_penetration_ladder {ladder!r}: "
-            "expected 'static' or 'nemo_live'.")
+            "expected 'static', 'nemo_live' or 'nemo_2bd'.")
     dT_dt_sw = shortwave_penetration_tendency(
         sw_down=Q_sr_2d,
         z_coord_dz_ref=z_coord.dz_ref,
         z_coord_z_half_ref=z_coord.z_half_ref,
         jacobian=jacobian, config=sw_cfg,
         rho_0=cfg.rho_0, c_sw=cfg.c_p,
-        z_half_stretch=z_half_stretch,
+        z_half_stretch=z_half_stretch, **sw_kw,
     )
 
     # Combine: forward-Euler tracer update with all tendencies summed.

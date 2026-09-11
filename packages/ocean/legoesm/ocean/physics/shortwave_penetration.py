@@ -482,6 +482,109 @@ def apply_shortwave_penetration(
     )
 
 
+#: ``(id(z_coord), rdt, ...) -> (z_coord, (nk0, nkV))``.  The z_coord is
+#: stored so the id it is keyed by cannot be recycled.
+_QSR_EXT_LEV_CACHE: dict = {}
+
+
+def nemo_qsr_ext_lev(z_coord, tmask, rdt: float,
+                     rn_abs: float = 0.58, rn_si0: float = 0.35,
+                     rn_si1: float = 23.0,
+                     rho_0: float = _RHO_0_DEFAULT,
+                     c_sw: float = _C_SW_DEFAULT) -> tuple[int, int]:
+    """NEMO ``traqsr.F90::qsr_ext_lev``, the level of light extinction.
+
+    ``nk0`` (infrared) and ``nkV`` (visible) are NOT namelist values: NEMO
+    derives them from the mesh at ``tra_qsr_init`` (``:1179`` and ``:1245``)
+    and the ``jk`` loops of ``qsr_2BD``/``tra_qsr`` are cut at them.  Statement
+    for statement, from the compiled
+    ``cfgs/DINO/BLD/ppsrc/nemo/traqsr.f90::qsr_ext_lev``::
+
+        zcoef = zprec * rho0_rcp / ( rDt * zQmax * pfr)     ! zprec = 10.e-15
+        klev  = jpkm1                                       ! zQmax = 1000.
+        DO jk = jpkm1, 1, -1
+           IF( SUM( tmask(:,:,jk) ) > 0 ) THEN
+              zdw   = MAXVAL( gdepw_3d(:,:,jk+1) *     wmask(:,:,jk)       )
+              ze3t  = MINVAL(   e3t_3d(:,:,jk  ) , mask=(wmask(:,:,jk+1)==1))
+              zhext = - pL * LOG( zcoef * ze3t )
+              IF( zdw >= zhext )   klev = jk
+           ELSE
+              klev = jk
+           ENDIF
+        END DO
+
+    ``wmask`` is ``tmask(k)*tmask(k-1)`` with ``wmask(:,:,1)=tmask(:,:,1)``
+    (``dommsk``), which equals ``tmask`` on any column-monotone mask -- the
+    DINO card's -- so ``tmask`` is used directly and the equality is asserted.
+
+    Returns ``(nk0, nkV)`` as 0-BASED COUNTS, i.e. the number of T-levels the
+    corresponding band's loop covers, so a caller writes ``[..., :nk0]`` and
+    ``[..., nk0:nkV]`` with no index arithmetic.  NEMO's printed 1-based
+    ``nk0``/``nkV`` are numerically the same integers.
+    """
+    import numpy as _np
+
+    # The result is a property of the LADDER, the MASK and rDt, none of which
+    # change inside a run -- but the DINO driver calls the applicator once per
+    # Python step (run_dino.py:809-820, an un-jitted loop), so recomputing the
+    # two 35-level scans every step would be pure waste.  Memoised on the
+    # identity of the vertical coordinate, which the cache also KEEPS ALIVE so
+    # id() cannot be recycled onto a different object.
+    key = (id(z_coord), float(rdt), float(rn_abs), float(rn_si0),
+           float(rn_si1), float(rho_0), float(c_sw))
+    hit = _QSR_EXT_LEV_CACHE.get(key)
+    if hit is not None:
+        return hit[1]
+
+    t = _np.asarray(tmask) > 0.5
+    if t.ndim != 3:
+        raise ValueError(f"tmask must be (nlat, nlon, nlev); got {t.shape}")
+    # wmask == tmask requires column-monotone wetness; check, never assume.
+    w = _np.zeros_like(t)
+    w[..., 0] = t[..., 0]
+    w[..., 1:] = t[..., 1:] & t[..., :-1]
+    if not _np.array_equal(w, t):
+        raise ValueError(
+            "wmask != tmask on this mesh (a wet cell sits under a dry one), "
+            "so qsr_ext_lev's wmask cannot be substituted by tmask here.")
+    gdepw = -_np.asarray(z_coord.z_half_ref, dtype=_np.float64)   # (nlev+1,)
+    e3t = _np.asarray(z_coord.dz_ref, dtype=_np.float64)          # (nlev,)
+    nlev = t.shape[-1]
+    if gdepw.shape[0] != nlev + 1 or e3t.shape[0] != nlev:
+        raise ValueError(
+            f"ladder/mask mismatch: z_half_ref {gdepw.shape}, dz_ref "
+            f"{e3t.shape}, tmask levels {nlev}")
+    rho0_rcp = rho_0 * c_sw
+    out = []
+    for pL, pfr in ((rn_si0, rn_abs), (rn_si1, 1.0 - rn_abs)):
+        zcoef = 10.0e-15 * rho0_rcp / (rdt * 1000.0 * pfr)
+        klev = nlev - 1                                    # jpkm1, 1-based
+        for jk in range(nlev - 1, 0, -1):                  # jpkm1 .. 1
+            k0 = jk - 1                                    # 0-based T level
+            if t[..., k0].sum() > 0:
+                if not w[..., k0].any():
+                    klev = jk
+                    continue
+                zdw = float((gdepw[jk] * w[..., k0]).max())
+                sel = w[..., jk] if jk < nlev else _np.zeros_like(w[..., 0])
+                if not sel.any():
+                    # Fortran MINVAL over an empty mask returns +HUGE, which
+                    # makes the test below trivially true.  Reproduce that
+                    # branch explicitly instead of letting numpy raise.
+                    klev = jk
+                    continue
+                ze3t = float(e3t[k0])
+                zhext = -pL * _np.log(zcoef * ze3t)
+                if zdw >= zhext:
+                    klev = jk
+            else:
+                klev = jk
+        out.append(int(klev))
+    res = (out[0], out[1])
+    _QSR_EXT_LEV_CACHE[key] = (z_coord, res)
+    return res
+
+
 def shortwave_penetration_tendency(
     sw_down: jnp.ndarray,
     z_coord_dz_ref: jnp.ndarray,
@@ -491,6 +594,8 @@ def shortwave_penetration_tendency(
     rho_0: float = _RHO_0_DEFAULT,
     c_sw: float = _C_SW_DEFAULT,
     z_half_stretch: jnp.ndarray | None = None,
+    nemo_2bd_levels: tuple[int, int] | None = None,
+    cell_wet: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Compute 3D temperature tendency from subsurface SW absorption.
 
@@ -539,6 +644,22 @@ def shortwave_penetration_tendency(
     R = params.R
     zeta1 = params.zeta1
     zeta2 = params.zeta2
+
+    if nemo_2bd_levels is not None:
+        if z_half_stretch is None:
+            raise ValueError(
+                "nemo_2bd_levels selects NEMO's qsr_2BD statements, which "
+                "evaluate the profile at the LIVE gdepw(Kmm) "
+                "(traqsr.F90:667); pass z_half_stretch too.")
+        if cell_wet is None:
+            raise ValueError(
+                "nemo_2bd_levels needs cell_wet: qsr_2BD multiplies every "
+                "sub-surface attenuation by wmask(jk+1) (traqsr.F90:668, "
+                ":679), which is what deposits the residual light in the "
+                "deepest WET cell.")
+        return _nemo_qsr_2bd_tendency(
+            sw_down, z_coord_dz_ref, z_coord_z_half_ref, z_half_stretch,
+            cell_wet, R, zeta1, zeta2, rho_0, c_sw, nemo_2bd_levels)
 
     # Interface depths (negative), shape (nlev+1,) for the STATIC reference
     # ladder, or (..., nlev+1) once a per-column live stretch is applied.
@@ -593,3 +714,76 @@ def shortwave_penetration_tendency(
         sw_down[..., jnp.newaxis] * frac_absorbed / (rho_0 * c_sw * dz_safe)
     )
     return jnp.where(dz_actual > 0.0, dT_dt_raw, 0.0)
+
+
+def _nemo_qsr_2bd_tendency(sw_down, dz_ref, z_half_ref, z_half_stretch,
+                           cell_wet, R, zeta1, zeta2, rho_0, c_sw, levels):
+    """NEMO ``traqsr.F90::qsr_2BD`` + ``tra_qsr``'s division, statement for
+    statement, at ``kt == nit000`` (``z1_2 = 1``, ``qsr_hc_b = 0``).
+
+    The three statements this reproduces that the reference-ladder kernel does
+    not, all from the compiled ``cfgs/DINO/BLD/ppsrc/nemo/traqsr.f90``:
+
+    * ``:676-683`` -- BELOW ``nk0`` the INFRARED BAND IS GONE.  The deeper
+      loop's attenuation is ``zz1*EXP(...)`` alone, not both bands.
+    * ``:261``     -- the trend loop runs ``jk = 1, nksr`` with ``nksr = nkV``
+      (``:1318``), so every level below ``nkV`` receives NOTHING.  The
+      reference kernel instead adds the whole un-absorbed remainder to the
+      LAST level of the ladder.
+    * ``:668,:679`` -- ``zzatt`` is multiplied by ``wmask(jk+1)``, so a column
+      whose bed is above ``nkV`` deposits its residual light in the deepest
+      WET cell.  (On the DINO card no column is that shallow -- the minimum is
+      30 wet levels against ``nkV = 22`` -- so this statement is INERT here
+      and is transcribed for correctness, not for its measured size.)
+
+    and the ASSOCIATION, which is what the last unequal cells were: NEMO folds
+    ``r1_rho0_rcp`` into the band weights ``zz0``/``zz1`` (``:653-654``) BEFORE
+    the exponentials are summed and subtracted, and multiplies by the
+    RECIPROCAL extinction lengths ``r1_si0``/``r1_si1`` (``:1177``, ``:1243``)
+    rather than dividing.  ``(-a)*b`` and ``-(a*b)`` are bit-identical in IEEE,
+    so the sign placement of ``gdepw`` against this module's negative
+    ``z_half`` is not a difference.
+
+    NOT reproduced, and NOT reproducible without carried state: the two-step
+    average ``z1_2*(qsr_hc_b + qsr_hc)`` of ``:229-231``/``:261-265``, which
+    needs the previous step's ``qsr_hc``.  Its size is printed by
+    ``kt1_qsr_gate.py --kt2-dir``.
+    """
+    nk0, nkv = levels
+    nlev = dz_ref.shape[-1]
+    if not (0 < nk0 <= nkv <= nlev):
+        raise ValueError(
+            f"nemo_2bd_levels {levels!r} is not 0 < nk0 <= nkV <= nlev="
+            f"{nlev}; qsr_ext_lev returns 1-based level counts.")
+    r1_rr = 1.0 / (rho_0 * c_sw)          # traqsr.F90:653-654 r1_rho0_rcp
+    zz0 = R * r1_rr
+    zz1 = (1.0 - R) * r1_rr
+    r1_si0 = 1.0 / zeta1                  # :1177
+    r1_si1 = 1.0 / zeta2                  # :1243
+    # gdepw(k, Kmm) = gdepw_0(k) * (1 + r3t) -- :659, :667, :679.  This
+    # module's z_half_ref is NEGATIVE, so z_half*stretch == -(gdepw*stretch)
+    # and the leading minus of NEMO's exponent is already carried.
+    zs = z_half_ref * z_half_stretch[..., jnp.newaxis]      # (..., nlev+1)
+    e_ir = jnp.exp(zs * r1_si0)
+    e_vi = jnp.exp(zs * r1_si1)
+    both = zz0 * e_ir + zz1 * e_vi
+    visi = zz1 * e_vi
+    # wmask(jk+1) on every SUB-SURFACE interface; :658-660 leaves the surface
+    # interface unmasked.  Interface i sits at the bottom of 0-based level
+    # i-1, so its wmask is cell_wet[..., i-1+1] = cell_wet[..., i].
+    wm = jnp.asarray(cell_wet, dtype=both.dtype)
+    att = jnp.concatenate(
+        [both[..., :1],
+         jnp.where(jnp.arange(1, nkv + 1) <= nk0,
+                   both[..., 1:nkv + 1], visi[..., 1:nkv + 1])
+         * wm[..., 1:nkv + 1]],
+        axis=-1)                                            # (..., nkv+1)
+    qsr_hc = sw_down[..., jnp.newaxis] * (att[..., :-1] - att[..., 1:])
+    dz_actual = dz_ref[:nkv] * z_half_stretch[..., jnp.newaxis]
+    dz_safe = jnp.where(dz_actual > 0.0, dz_actual, 1.0)
+    top = jnp.where(dz_actual > 0.0, qsr_hc / dz_safe, 0.0)
+    if nkv == nlev:
+        return top
+    return jnp.concatenate(
+        [top, jnp.zeros(top.shape[:-1] + (nlev - nkv,), dtype=top.dtype)],
+        axis=-1)
