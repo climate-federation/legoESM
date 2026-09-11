@@ -2774,8 +2774,24 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
                     "zdit": zdit,
                     "zdjt": zdjt,
                     "wmask": wmask,
+                    # CONVENTION, and it is a trap worth naming: these two
+                    # are already ROLLED to the explicit A33 flux's (k, k+1)
+                    # index (`jnp.roll(_ahw_ab, -1, ax_z)` above), exactly like
+                    # the neighbouring `e3w_kp1`/`qdiff_kp1` -- so
+                    # `ah_wslp2[k]` here is NEMO's `ah_wslp2(jk=k+1)`.  A probe
+                    # that scores these against NEMO's own dump index-to-index
+                    # is off by one level; `kt1_slope_gate.py` was, and it
+                    # reported a fictitious 64% error for a term that agrees
+                    # with NEMO's own dump at regression ratio 1.000000 and a
+                    # max of 9 ulp (still DEBT under the exact bar -- 82019 of
+                    # 342134 cells differ in their last bits -- but rounding,
+                    # not a statement).  Score the `*_nemo_index` copies
+                    # below against NEMO, and use these for anything assembled
+                    # with `e3w_kp1`/`qdiff_kp1`.
                     "ah_wslp2": ah_wslp2,
                     "akz": akz,
+                    "ah_wslp2_nemo_index": _ahw_ab,
+                    "akz_nemo_index": _akz_ab,
                     "e1e2t": e1t * e2t,
                     "e3w_kp1": e3w_kp1,
                     "qdiff_kp1": q - jnp.roll(q, -1, axis=2),

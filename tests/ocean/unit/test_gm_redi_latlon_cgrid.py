@@ -1641,6 +1641,48 @@ class TestNemoIsoLapOperator:
         assert jnp.array_equal(rebuilt, diagnostics["zfw_kp1"])
         assert bool(jnp.any(operands["a33_current"] != 0.0))
 
+    def test_ah_wslp2_is_published_on_both_indices_and_they_differ(self):
+        """The operand dict carries ah_wslp2/akz TWICE, on two indices, and a
+        probe that picks the wrong one is off by a level.
+
+        ``ah_wslp2``/``akz`` are rolled to the explicit A33 flux's (k, k+1)
+        convention, like their neighbours ``e3w_kp1``/``qdiff_kp1``;
+        ``ah_wslp2_nemo_index``/``akz_nemo_index`` are the pre-roll arrays on
+        NEMO's own ``jk``, which is what NEMO's dump is comparable to.  The
+        kt=1 slope gate scored the rolled copy against NEMO's dump and reported
+        a 64% error for a term that is bit-equal to 9 ulp.
+
+        NON-VACUITY: the first assertion fails if the ``_nemo_index`` keys are
+        ever filled with the rolled array (the exact regression this pair
+        exists to prevent), and the second fails if they are filled with
+        anything that is not the array the rolled copy came from.
+        """
+        setup = _stratified_with_meridional_tilt()
+        (grid, z_coord, mask, u_mask, v_mask, eta, H_bathy, jacobian,
+         rho, T, S, cfg) = setup
+        S_x, S_y = self._slopes(setup)
+        act = jnp.broadcast_to(mask[:, :, jnp.newaxis], T.shape)
+        _, diagnostics = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            T, S_x, S_y, mask, u_mask, v_mask, z_coord, jacobian, grid,
+            cfg.kappa_Redi, act, msc_stabilize=True, dt=2700.0,
+            return_diagnostics=True, return_operand_diagnostics=True)
+        op = diagnostics["zfw_operands"]
+        for name in ("ah_wslp2", "akz"):
+            rolled = op[name]
+            native = op[f"{name}_nemo_index"]
+            assert jnp.array_equal(jnp.roll(native, -1, axis=2), rolled), (
+                f"{name}_nemo_index is not the array {name} was rolled from")
+        # `akz` is identically zero here (as it is on the DINO record), and a
+        # roll of zeros is zeros -- so the DIFFER assertion is only meaningful
+        # on a field that is actually nonzero, and it is stated that way rather
+        # than passing vacuously on both.
+        assert bool(jnp.any(op["ah_wslp2_nemo_index"] != 0.0)), (
+            "ah_wslp2 is zero in this fixture: the test below would be vacuous")
+        assert not bool(jnp.array_equal(op["ah_wslp2"],
+                                        op["ah_wslp2_nemo_index"])), (
+            "ah_wslp2_nemo_index is the ROLLED array: a probe scoring it "
+            "against NEMO's dump is still off by one level")
+
     def test_nemo_iso_lap_gm_conserves(self):
         """The GM bolus (kappa_GM>0, NEMO ln_ldfeiv) is a curl-of-streamfunction
         transport, so its discrete divergence telescopes to zero and it conserves

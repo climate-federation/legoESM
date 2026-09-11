@@ -4576,10 +4576,10 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
       eq 7  — wind τ_u → top-layer u tendency
       eq 8  — non-solar T restoring (A_θ(T*-T) − Q_sr) at top layer,
                via legoesm.ocean.physics.surface_forcing.restoring with
-               implicit=True (analytical implicit-Euler — stable for
-               any dt; required for DINO at paper-spec K_conv=100,
-               τ_T=11.85 days; see issue #266 / PR #267)
-      eq 9  — A_S(S*-S) salinity restoring at top layer (also implicit)
+               implicit=False — NEMO's own explicit form (usrdef_sbc.f90:
+               223, 272-273 evaluate the flux; trasbc.f90:169-170 apply it
+               with no damping denominator).  User decision 30, PR #1728.
+      eq 9  — A_S(S*-S) salinity restoring at top layer (also explicit)
       eq 10 — Jerlov type I column-distributed Q_sr through all levels
 
     ``return_rate`` (#1492, ``DINOConfig.surface_tendency_placement=
@@ -4639,13 +4639,13 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
     # is the K/s -> flux-content conversion, algebraically identical to
     # dividing qns's flux-content form by dz_0) -- so the live divisor
     # must feed dz_0 itself, BEFORE tau_T/tau_S and the Q_sr-subtraction
-    # term are built, not rescale the OUTPUT tendency after the fact: with
-    # RestoringConfig.implicit=True the denominator is (tau_T + dt), which
-    # is NOT proportional to 1/dz_0 in general (only the tau_T->dz_0 map
-    # itself is), so an after-the-fact dz_0/dz_0_live rescale of the
-    # implicit-Euler output is WRONG whenever dt is not negligible next to
-    # tau_T (this WAS tried and measured ~1.2% off against the independent
-    # transcription below -- retracted, see test file).
+    # term are built, not rescale the OUTPUT tendency after the fact.  That was
+    # doubly true while the restoring ran implicit=True -- the (tau_T + dt)
+    # denominator is not proportional to 1/dz_0 -- and it stays true now that
+    # it runs NEMO's explicit form, because the Q_sr subtraction term
+    # Q_sr/(rho_0*c_p*dz_0) carries its own dz_0.  An after-the-fact
+    # dz_0/dz_0_live rescale WAS tried and measured ~1.2% off against the
+    # independent transcription below -- retracted, see test file.
     # "static" (DEFAULT, bit-identical legacy) keeps dz_0 a per-run SCALAR
     # (z_coord.dz_ref[0]) exactly as before. "nemo_live" replaces it with
     # the 2D live array dz_0*(1+r3t) -- tau_T/tau_S/the Q_sr subtraction
@@ -4662,16 +4662,31 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
             f"Unknown DINOConfig.surface_flux_divisor {divisor!r}: expected "
             "'static' or 'nemo_live'.")
 
-    # T/S restoring via the legoESM module with implicit=True. Paper
+    # T/S restoring via the legoESM module, NEMO's explicit form. Paper
     # eq 8 split = subtract_qsr=True (Q_sr provided as sw_down).
     tau_T = tau_from_flux_coefficient(cfg.A_theta, cfg.rho_0, cfg.c_p, dz_0_live)
     tau_S = tau_from_flux_coefficient(cfg.A_S, cfg.rho_0, 1.0, dz_0_live)
+    # implicit=False is NEMO's form, and it is not a preference (user decision
+    # 30, PR #1728).  NEMO's restoring is a FLUX evaluated on the before-level
+    # tracer and applied forward -- `sfx = rn_srp*(ts(:,:,1,jp_sal,Kbb) - S*)`
+    # (usrdef_sbc.f90:223) and `qtot = rn_trp*(ts(:,:,1,jp_tem,Kbb) - T*)`
+    # (:272-273), divided ONCE by the live first thickness in
+    # `pts(:,:,1,jn,Krhs) += zfact*(sbc_tsc_b + sbc_tsc)
+    #  / (e3t_3d(:,:,1)*(1+r3t(:,:,Kmm)*tmask))` (trasbc.f90:169-170).  There
+    # is no damping denominator anywhere in that chain.  legoESM used to apply
+    # the analytical implicit-Euler form, i.e. tau -> tau + dt; the resulting
+    # level-0 deficit was MEASURED as exactly that factor on the salt row,
+    # which has no solar member: predicted tau_S/(tau_S+dt) = 0.998999633 vs
+    # measured 0.998999633 (kt1_surface_gate.py).  Stability is not at stake:
+    # dt/tau_T = 2.6e-3 and dt/tau_S = 1.0e-3 on this card, four orders inside
+    # the dt < 2*tau explicit bound, so this is Rule 9 (never carry a
+    # stabiliser the oracle lacks), not a trade.
     restoring_cfg = RestoringConfig(
         tau_T=tau_T, tau_S=tau_S,
         T_star_array=T_star_2d,
         S_star_array=forcing["S_star_2d"],
         subtract_qsr=True,
-        implicit=True,
+        implicit=False,
     )
     rest_out = restoring_surface_forcing(
         state.T.data, state.S.data, _LatLonGridShim(state, cell_mask),
@@ -4717,8 +4732,8 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
     )
 
     # Combine: forward-Euler tracer update with all tendencies summed.
-    # Restoring tendency is "effective" (already accounts for implicit
-    # Euler at given dt — stable for any dt). Mask land everywhere.
+    # Restoring tendency is NEMO's explicit flux -(T - T*)/tau -- no implicit
+    # denominator; see the RestoringConfig comment above. Mask land everywhere.
     # dT_dt_top/dS_dt_top carry the (possibly live-rescaled) restoring +
     # Q_sr-subtraction tendency at level 0 only; dT_dt_sw is the full-column
     # Jerlov penetration, independently gated by shortwave_penetration_ladder

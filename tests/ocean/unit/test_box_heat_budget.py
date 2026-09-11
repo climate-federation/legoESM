@@ -631,9 +631,20 @@ def test_physics_dt_is_the_model_timestep_not_the_sampling_interval(
     biases every explicit term. Direct check: call
     ``compute_box_heat_dT_terms`` with the correct model dt vs a 32x-longer
     "sampling interval" dt and confirm the FORCING term (the clearest
-    dt-sensitive case: ``restoring_surface_forcing(implicit=True)`` uses
-    ``eff_tau = tau + dt``) materially differs — i.e. dt really matters,
-    so accidentally passing the wrong one is not a no-op."""
+    dt-sensitive cases: the FCT limiter in the advective terms and the GM/Redi
+    MSC clamp in ``k33``) materially differ — i.e. dt really matters, so
+    accidentally passing the wrong one is not a no-op.
+
+    THE PROBE MOVED (PR #1728).  This guard used to watch the FORCING term,
+    whose dt-sensitivity came entirely from
+    ``restoring_surface_forcing(implicit=True)``'s ``eff_tau = tau + dt``.  The
+    DINO surface restoring now runs NEMO's EXPLICIT form (user decision 30;
+    ``usrdef_sbc.f90:223``/``:272-273`` evaluate the flux and
+    ``trasbc.f90:169-170`` apply it with no damping denominator), so FORCING is
+    dt-INVARIANT by construction and can no longer carry this guard.  The
+    guard therefore watches the terms that are still genuinely dt-sensitive,
+    AND pins FORCING's new dt-invariance — so a re-introduced implicit
+    denominator turns this test red from the other direction."""
     forcing = dino_lat_lon_surface_forcing_arrays(grid, dino_cfg)
     terms_model_dt = compute_box_heat_dT_terms(
         state, grid, z_coord, config, dino_cfg, forcing, DT, t_seconds=0.0,
@@ -642,12 +653,14 @@ def test_physics_dt_is_the_model_timestep_not_the_sampling_interval(
         state, grid, z_coord, config, dino_cfg, forcing, DT * 32, t_seconds=0.0,
     )
     mask = np.asarray(state.land_mask.data) > 0.5
-    forcing_model = np.asarray(terms_model_dt["forcing"])[mask]
-    forcing_sampling = np.asarray(terms_sampling_dt["forcing"])[mask]
-    assert not np.allclose(forcing_model, forcing_sampling, rtol=1e-6), (
-        "FORCING term is insensitive to dt -- the dt-conflation regression "
-        "guard would not catch a re-introduced bug; investigate whether "
-        "restoring_surface_forcing's implicit tau+dt path is still wired."
+    # The FORCING term must NOT move, because the surface restoring is now
+    # NEMO's explicit form.  A tau+dt denominator coming back makes this fail.
+    assert np.allclose(np.asarray(terms_model_dt["forcing"])[mask],
+                       np.asarray(terms_sampling_dt["forcing"])[mask],
+                       rtol=1e-12, atol=0.0), (
+        "FORCING moved with dt: an implicit-Euler restoring denominator is "
+        "back in the surface path, which NEMO's trasbc.f90:169-170 does not "
+        "have."
     )
 
     # End-to-end guard: sample() must use dt_model (=DT, fixed at
@@ -655,6 +668,13 @@ def test_physics_dt_is_the_model_timestep_not_the_sampling_interval(
     # the reported per-second FORCING rate must be ~IDENTICAL whether
     # sampled every 2 or every 4 steps (same physics, different bookkeeping
     # cadence only).
+    #
+    # HOW STRONG IS THIS HALF NOW?  Weaker than it was, and that is stated
+    # rather than assumed: with the restoring explicit, NO term this fixture
+    # produces is dt-sensitive (see the xfail below), so a dt_step leak into
+    # the physics dt would move nothing HERE.  The guard still fails if a
+    # future dt-sensitive term is added and wired to the wrong dt; it no
+    # longer proves the current wiring.
     model = LatLonCGridOceanModel(grid, z_coord, config)
     sf = dino_step_surface_forcing(forcing)
     _, acc2, t2 = _run(state, model, forcing, sf, dino_cfg,
@@ -681,3 +701,37 @@ def test_physics_dt_is_the_model_timestep_not_the_sampling_interval(
                 "noise -- dt_step may be leaking into the physics dt again"
             ),
         )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "UNCALIBRATED, deliberately: with the DINO surface restoring on "
+        "NEMO's explicit form (PR #1728) no term compute_box_heat_dT_terms "
+        "returns is dt-sensitive on THIS fixture -- the FCT limiter never "
+        "clips and the GM/Redi MSC clamp never fires, because akz = "
+        "MAX(rDt*(pakz + ah_wslp2/e3w^2) - 0.5, 0) needs |slope| > "
+        "e3w*sqrt(0.5/(rDt*aht)) ~ 2.6e-3 at e3w = 10 m, while this "
+        "fixture's slopes are ~1e-4 (traldf_iso.f90:826-831).  So the "
+        "'does dt matter at all' calibration that used to live in "
+        "test_physics_dt_is_the_model_timestep_not_the_sampling_interval "
+        "cannot be run.  strict=True on purpose: the day a term DOES move, "
+        "this goes XPASS-red and the calibration half gets re-armed rather "
+        "than staying quietly dead."
+    ),
+)
+def test_dt_conflation_guard_is_currently_UNCALIBRATED(
+    grid, z_coord, config, dino_cfg, state,
+):
+    forcing = dino_lat_lon_surface_forcing_arrays(grid, dino_cfg)
+    a = compute_box_heat_dT_terms(state, grid, z_coord, config, dino_cfg,
+                                  forcing, DT, t_seconds=0.0)
+    b = compute_box_heat_dT_terms(state, grid, z_coord, config, dino_cfg,
+                                  forcing, DT * 32, t_seconds=0.0)
+    mask = np.asarray(state.land_mask.data) > 0.5
+    moved = [k for k in ("adv_h", "adv_v", "iso_redi", "k33")
+             if not np.allclose(np.asarray(a[k])[mask],
+                                np.asarray(b[k])[mask], rtol=1e-6)]
+    assert moved, (
+        "no term moved when dt was multiplied by 32: the dt-conflation "
+        "calibration cannot be run on this fixture")

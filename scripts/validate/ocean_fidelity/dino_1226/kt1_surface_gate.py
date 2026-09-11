@@ -226,8 +226,14 @@ def main() -> int:
     a_ = dS[..., 0][wet3[..., 0]]
     meas = float(a_ @ b_) / float(b_ @ b_)
     pred = tau_S / (tau_S + DT)
-    print(f"\n  THE STATEMENT: RestoringConfig(implicit=True) -> denominator "
-          f"(tau + dt)   [dino.py:4674]")
+    print("\n  THE STATEMENT, AND WHETHER IT IS STILL THERE: an implicit-Euler"
+          " restoring denominator (tau + dt).  NEMO has none -- its flux is "
+          "evaluated on the before tracer (usrdef_sbc.f90:223, :272-273) and "
+          "applied with a single live-thickness division (trasbc.f90:169-170) "
+          "-- and the DINO applicator moved to that explicit form in PR #1728 "
+          "(user decision 30).  This block now discriminates BOTH ways: a "
+          "measured ratio of 1 means the denominator is gone, a measured ratio "
+          "equal to tau/(tau+dt) means it is back.")
     print(f"    tau_S = rho_0*dz_0/A_S = {tau_S:.6e} s "
           f"({tau_S / 86400.0:.4f} d),  dt = {DT} s")
     print(f"    predicted S ratio tau_S/(tau_S+dt) = {pred:.9f}")
@@ -237,15 +243,30 @@ def main() -> int:
           f"rms(lego - pred*nemo) = {orth:.4e} K/s "
           f"({orth / float(np.sqrt(np.mean(b_ ** 2))):.3e} of NEMO's own rms)"
           " -- the ratio alone cannot see structure; this can.")
-    print(f"    difference = {abs(pred - meas):.3e}  -> "
-          + ("IDENTIFIED: the level-0 surface deficit IS the implicit "
-             "denominator" if abs(pred - meas) < 1e-6 else
-             "NOT identified: this explanation does not hold"))
+    if abs(meas - 1.0) < 1e-12:
+        _verdict = ("REMOVED: the measured ratio is 1 to 1e-12, so NEMO's "
+                    "explicit form is in place.  This is the EXPECTED reading "
+                    "on the current model.")
+    elif abs(pred - meas) < 1e-6:
+        _verdict = ("BACK: the level-0 surface deficit IS the implicit "
+                    "denominator again -- a regression against "
+                    "trasbc.f90:169-170.")
+    else:
+        _verdict = ("NEITHER: the ratio is neither 1 nor tau/(tau+dt), so the "
+                    "level-0 salt deficit is some OTHER statement and this "
+                    "block no longer names it.")
+    print(f"    |meas - 1| = {abs(meas - 1.0):.3e}, |meas - pred| = "
+          f"{abs(pred - meas):.3e}  -> " + _verdict)
     print(f"    tau_T = rho_0*c_p*dz_0/A_theta = {tau_T:.6e} s "
           f"({tau_T / 86400.0:.4f} d); tau_T/(tau_T+dt) = "
           f"{tau_T / (tau_T + DT):.9f} -- the T row also carries the "
-          "undamped Q_sr penetration, so its ratio is a blend and only the "
-          "S row is a clean test of the statement.")
+          "undamped Q_sr penetration, so its ratio is a BLEND and only the "
+          "S row is a clean test of the statement.  Concretely, while the "
+          "implicit form was in place the T level-0 ratio measured 0.996917 "
+          "against this 0.997406: the Q_sr subtraction never carried the "
+          "denominator, so the covariance weights a damped member against an "
+          "undamped one.  Anyone reading the T ratio as the factor is reading "
+          "a blend.")
 
     print("\n  per-level residual of the T row (where the surface residual "
           "lives)")
@@ -262,7 +283,14 @@ def main() -> int:
     # rate residual is the whole story, integrating it over one step and
     # pooling level 0 into the 3-D rms must reproduce that number.  Predicted
     # BEFORE being compared, and it is a prediction that can fail.
-    STEP1_T_RMS_K = 4.7912e-06     # PR #1728, nemo_dino_step1_gate.py
+    # MOVED with the model, and the old value is kept next to it so the line
+    # cannot be read as unchanged: 4.7912e-06 K was the frozen figure while the
+    # restoring carried the implicit denominator, and it was re-measured on a
+    # deliberate revert arm (same commit, one variable) to confirm this gate's
+    # control before the new number was recorded.
+    STEP1_T_RMS_K = 1.1760e-07     # PR #1728, nemo_dino_step1_gate.py, NEMO's
+                                   # explicit restoring (was 4.7912e-06 with
+                                   # the implicit denominator)
     pooled = float(np.sqrt(np.sum((res[wet3]) ** 2) / int(wet3.sum()))) * DT
     print(f"\n  ACCOUNTING: this rate residual integrated as rate*dt and "
           f"pooled over all {int(wet3.sum())} wet cells is {pooled:.4e} K; "
@@ -272,9 +300,12 @@ def main() -> int:
           "this line compares a fresh number against a recorded one; re-run "
           "the step-1 gate if the model has moved.  And rate*dt is NOT how "
           "the step applies it -- the level-0 increment also passes through "
-          "the backward-Euler vertical solve, which damps it, and that is "
-          "the PLAUSIBLE owner of the difference from 1.0.  So this line "
-          "says the statement is the DOMINANT term, not the only one.")
+          "the backward-Euler vertical solve, which damps it.  With the "
+          "restoring explicit the surface RATE residual is at rounding while "
+          "the step-1 STATE residual is not, so a ratio far below 1 here now "
+          "means the remaining step-1 residual is owned by something OTHER "
+          "than the surface rate -- which is the finding, not a defect in "
+          "this line.")
 
     print(f"\n{'GATE PASS' if bad == 0 else f'GATE FAIL ({bad} rows)'}")
     if a.oracle_self_test and not a.plant and bad:

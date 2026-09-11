@@ -168,8 +168,38 @@ def main() -> int:
                              tuple(np.asarray(x) for x in sl)))
         return real(q, *aa, **kw)
 
+    # THE THIRD SPY, and it exists to settle a claim rather than to add a row.
+    # Last round said the off-bar PRODUCER slope set reaches the answer
+    # "through the implicit vertical solve".  Read NEMO instead of arguing:
+    # `ln_traldf_msc = .true.` (RUN_TRAJ/namelist_cfg:267), so `tra_zdf` adds
+    # **akz**, not ah_wslp2, to the implicit diffusivity (trazdf.f90:186 for
+    # avt, :204 for avs) -- and legoESM's `compute_isoneutral_K33_latlon`
+    # returns `_akz` too (gm_redi_latlon_cgrid.py:4650-4654).  So the object
+    # the implicit solve consumes is akz, and this spy MEASURES it instead of
+    # reasoning about it: if it is identically zero the producer set's DEBT
+    # cannot reach the kt=1 state through this path at all.
+    # AND THE SPY HAS TO BE INSTALLED WHERE THE CALL LOOKS THE NAME UP.  The
+    # model does `from ...gm_redi_latlon_cgrid import
+    # compute_isoneutral_K33_latlon` at ocean_model_latlon_cgrid.py:113, so the
+    # call sites (:6153, :11238) read the MODEL module's binding and patching
+    # only `gmmod` intercepts nothing -- the first version of this spy did
+    # exactly that and printed "never called", a false negative that would have
+    # read as a result.  Both namespaces are patched, and the row below refuses
+    # to conclude anything if no call is seen.
+    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as _omod
+    k33_out: list = []
+    real_k33 = gmmod.compute_isoneutral_K33_latlon
+    real_k33_m = _omod.compute_isoneutral_K33_latlon
+
+    def k33_spy(*aa, **kw):
+        r = real_k33(*aa, **kw)
+        k33_out.append(np.asarray(r[0] if isinstance(r, tuple) else r))
+        return r
+
     gmmod.compute_nemo_native_slopes = prod_spy
     gmmod.nemo_iso_lap_tracer_tendency_latlon_cgrid = spy
+    gmmod.compute_isoneutral_K33_latlon = k33_spy
+    _omod.compute_isoneutral_K33_latlon = k33_spy
     try:
         st, rate = dm.apply_dino_lat_lon_surface_forcing(
             state0, forcing, z, cfg, DT, t_seconds=DT, return_rate=True)
@@ -179,6 +209,8 @@ def main() -> int:
     finally:
         gmmod.compute_nemo_native_slopes = real_prod
         gmmod.nemo_iso_lap_tracer_tendency_latlon_cgrid = real
+        gmmod.compute_isoneutral_K33_latlon = real_k33
+        _omod.compute_isoneutral_K33_latlon = real_k33_m
     if not calls:
         print("compute_nemo_native_slopes was never called: the card is not "
               "on NEMO's four-position slopes and this record cannot score it")
@@ -232,8 +264,61 @@ def main() -> int:
               + " | ".join(calls[i][2] for i in idxs)
               + f"\n      max|d| vs NEMO over the four fields: {best_p:.4e}")
     print("  (the producer sets include compute_isoneutral_K33_latlon's own "
-          "slopes at gm_redi_latlon_cgrid.py:4573, which the implicit "
-          "vertical solve consumes -- a consumer-only spy is blind to them)")
+          "slopes at gm_redi_latlon_cgrid.py:4573 -- a consumer-only spy is "
+          "blind to them.  What that function RETURNS is measured below; last "
+          "round's claim that it reaches the state through the implicit solve "
+          "is RETRACTED, see the K33 row.)")
+    _k33_bad = 0
+    if not k33_out:
+        print("\n  K33/akz UNMEASURED: compute_isoneutral_K33_latlon was "
+              "never called on this card.  That is a CLAIM ABOUT THE SPY as "
+              "much as about the card -- treat it as a failed measurement, "
+              "not as 'the implicit path is inert'.")
+        _k33_bad = 1
+    else:
+        _k33max = max(float(np.abs(x).max()) for x in k33_out)
+        print(f"\n  IMPLICIT isoneutral coefficient the vertical solve "
+              f"consumes ({len(k33_out)} call(s) to "
+              f"compute_isoneutral_K33_latlon): max|K33| = {_k33max:.6e} "
+              "m^2/s")
+        # THE ORACLE SIDE IS READ FROM THE RECORD, not written into this
+        # string.  The first version asserted "NEMO's akz is 0 on all 372528
+        # cells" as a literal while `R["akz"]` was in hand -- a record where
+        # that stopped being true would have inverted the test silently.
+        _nemo_akz = np.abs(np.asarray(R["akz"]))
+        print(f"    NEMO's akz on THIS record: max {_nemo_akz.max():.6e}, "
+              f"nonzero on {int((_nemo_akz != 0).sum())} of "
+              f"{_nemo_akz.size} cells.  With ln_traldf_msc=T "
+              "(RUN_TRAJ/namelist_cfg:267) trazdf.f90:186/:204 add akz -- NOT "
+              "ah_wslp2 -- to the implicit diffusivity, so when BOTH sides are "
+              "zero the producer-set DEBT above cannot reach the kt=1 state "
+              "through the implicit solve.")
+        print("    SCOPE, and it is narrow: akz = MAX(rDt*(pakz + "
+              "ah_wslp2/e3w^2) - 0.5, 0)*e3w^2/rDt (traldf_iso.f90:826-831) "
+              "fires once |slope| > e3w*sqrt(0.5/(rDt*aht)) ~ 2.6e-3 at "
+              "e3w = 10 m -- well INSIDE rn_slpmax = 0.01.  From rest DINO's "
+              "slopes are ~1e-4, which is the ONLY reason both sides are "
+              "zero.  A spun-up thermocline or ACC front clears that "
+              "threshold, so this row says nothing about kt >> 1 and must be "
+              "re-run on a Y1/Y5 record before the implicit path is called "
+              "inert there.")
+        _both_zero = (_k33max == 0.0) and (_nemo_akz.max() == 0.0)
+        print("    -> "
+              + ("UNREACHABLE AT kt=1 ONLY (both sides exactly zero)"
+                 if _both_zero
+                 else f"REACHABLE: legoESM {_k33max:.6e} vs NEMO "
+                      f"{_nemo_akz.max():.6e} -- DEBT"))
+        if a.plant:
+            # The row's own control: a nonzero legoESM K33 against NEMO's zero
+            # MUST be called DEBT.  Without this the "exactly zero" branch is
+            # a branch nothing ever exercises.
+            print("    PLANT CONTROL (K33): a legoESM max of 1e-30 against "
+                  "NEMO's 0.0 classifies as "
+                  + ("REACHABLE/DEBT -- correct"
+                     if not ((1e-30 == 0.0) and (_nemo_akz.max() == 0.0))
+                     else "UNREACHABLE -- THE ROW CANNOT FAIL"))
+        if not _both_zero:
+            _k33_bad = 1
     for gi, (g_sl, idxs) in enumerate(groups):
         print(f"  set {gi}: calls {idxs}  from "
               + " | ".join(calls[i][2] for i in idxs) + "\n           "
@@ -270,7 +355,7 @@ def main() -> int:
               f"{int((v >= RN_SLPMAX * (1.0 - 1e-12)).sum())}, "
               f"within 1% of it = {int((v >= 0.99 * RN_SLPMAX).sum())}")
 
-    bad = 0
+    bad = _k33_bad
     best = None
     set_worst: list[float] = []
     # The plant has to land in the set the verdict reads, and it has to move
@@ -385,16 +470,55 @@ def main() -> int:
         bad += 1
     else:
         op = diags["zfw_operands"]
+        # RETRACTION (this round).  The previous version read op["ah_wslp2"],
+        # which the operator has ALREADY rolled to the explicit A33 flux's
+        # (k, k+1) index (gm_redi_latlon_cgrid.py, `jnp.roll(_ahw_ab, -1,
+        # ax_z)`), while NEMO's record is written on its own jk index.  The
+        # gate therefore scored ah_wslp2[k+1] against NEMO's ah_wslp2[k] and
+        # reported 0.6394 relative / regression ratio 0.7956 with "structure"
+        # -- an artifact of the level shift, not a model defect.  The operator
+        # now also publishes the un-rolled arrays under NEMO's own index, and
+        # the gate scores THOSE.  Measured after the correction, BY THIS GATE
+        # on the card's own path: 82019 cells unequal of 342134, max|d|
+        # 2.7756e-17, max 9 ulp, regression ratio 1.000000, per-cell
+        # lego/nemo min = median = max = 1.000000.
+        #
+        # RECONCILED, not overwritten (Rule 1e).  An independent arm that
+        # replayed `nemo_iso_a33` DIRECTLY, fed NEMO's own slopes from the
+        # record, reported 22100 of 332214 and max|d| 2.0817e-17 at 3 ulp.
+        # The two differ because they are different objects: that arm scores
+        # the KERNEL on NEMO's slopes over k=1..nlev-2, this one scores the
+        # OPERATOR on the card's own consumed slopes over every wet cell.
+        # Both land on regression ratio 1.0 with a max in the same 2e-17
+        # decade, i.e. fp64 summation order in the four-term zahu_w.  The
+        # number quoted from this gate is the one it prints.
         for name in ("ah_wslp2", "akz"):
-            if name not in op:
-                print(f"  {name} UNMEASURED: not in the operand diagnostics")
+            key = f"{name}_nemo_index"
+            if key not in op:
+                print(f"  {name} UNMEASURED: '{key}' not in the operand "
+                      "diagnostics (an older operator that publishes only the "
+                      "rolled copy -- scoring that one is the off-by-one bug "
+                      "this key exists to prevent)")
                 bad += 1
                 continue
-            lego = np.asarray(op[name])
+            lego = np.asarray(op[key])
             nemo = np.asarray(R[name])[..., :lego.shape[-1]]
             w = wet3[..., :lego.shape[-1]] & np.isfinite(nemo)
             bad += _score(name, lego, nemo, w,
                           np.zeros_like(nemo, dtype=bool))
+            # BLIND SPOT, WRITTEN DOWN RATHER THAN DISCOVERED LATER (Rule 2;
+            # a claim reviewer raised it and a first attempt to close it here
+            # was itself vacuous).  The row above scores the array's VALUES and
+            # says NOTHING about the level the operator puts them on: flipping
+            # `jnp.roll(_ahw_ab, -1, ax_z)` to `+1` leaves it at 1.000000.
+            # Scoring the rolled copy against NEMO's dump rolled the same way
+            # does not help either -- both sides get the SAME permutation, so
+            # every statistic is identical by construction (measured: byte-for
+            # -byte the same row).  A coefficient dump cannot see its own
+            # index; only a FLUX or a TENDENCY can.  The roll direction is
+            # pinned by `tests/ocean/unit/test_gm_redi_latlon_cgrid.py::
+            # test_ah_wslp2_is_published_on_both_indices_and_they_differ`
+            # (which goes red on the flip) and by the step-1 tendency gates.
             # A clean SCALAR ratio names a statement (a 4-point sum written as
             # an average, a missing mask normaliser); a ratio with structure
             # does not.  Printed so the reader can tell which.

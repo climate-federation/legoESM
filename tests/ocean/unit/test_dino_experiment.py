@@ -2596,14 +2596,14 @@ class TestSurfaceFluxDivisor:
 
     def test_nemo_live_matches_independent_transcription(self):
         """Live divisor: assert the top-layer T/S tendency equals an
-        INDEPENDENT in-test transcription of trasbc.F90:152-153's single-
-        division structure (not a call into the function under test, and
-        NOT a post-hoc rescale of the static tendency -- with
-        RestoringConfig.implicit=True the denominator is (tau_T + dt),
-        which is not simply proportional to 1/dz_0, so the transcription
-        must rebuild tau_T/tau_S from the LIVE dz_0 and re-run the SAME
-        analytic implicit-Euler formula restoring.py documents, entirely
-        without importing restoring.py or tau_from_flux_coefficient).
+        INDEPENDENT in-test transcription of trasbc.f90:153-154 + :169-170's
+        single-division structure (not a call into the function under test,
+        and NOT a post-hoc rescale of the static tendency -- the Q_sr
+        subtraction term Q_sr/(rho_0*c_p*dz_0) carries its own dz_0, so the
+        transcription must rebuild tau_T/tau_S from the LIVE dz_0 rather than
+        scaling the static answer, entirely without importing restoring.py or
+        tau_from_flux_coefficient).  Since PR #1728 the restoring is NEMO's
+        EXPLICIT form, so there is no (tau + dt) denominator on either side.
 
         PRE-FIX (surface_flux_divisor field did not exist / the applicator
         always divided by the static dz_ref[0]): this test's "nemo_live"
@@ -2626,11 +2626,18 @@ class TestSurfaceFluxDivisor:
         g, z, st, frc = self._fixture(eta_value, cfg_static)
         out_live = apply_dino_lat_lon_surface_forcing(st, frc, z, cfg_live, dt)
 
-        # Independent transcription of trasbc.F90:152-153 + usrdef_sbc.F90:279
-        # + the restoring.py analytic-implicit-Euler algebra (restoring.py's
-        # own docstring: dT_dt_eff = (T*-T)/(tau_T+dt)) -- built from scratch
-        # here, reading only T*/T/Q_sr/A_theta/dz_0_live/dt, never calling
+        # Independent transcription of trasbc.f90:153-154 + :169-170 +
+        # usrdef_sbc.f90:272-273/:294 -- built from scratch here, reading only
+        # T*/T/Q_sr/A_theta/dz_0_live, never calling
         # tau_from_flux_coefficient or restoring_surface_forcing.
+        #
+        # NO (tau + dt) DENOMINATOR (PR #1728, user decision 30).  This
+        # transcription used to carry restoring.py's analytic implicit-Euler
+        # algebra; the DINO surface restoring now runs NEMO's explicit form,
+        # and NEMO's chain has no damping denominator at all.  This test is
+        # also the only ABS(T) check in the tree -- the Rule-12 card sweep's
+        # rows cancel the Q_sr term between its two arms, so a wrong solar
+        # subtraction is caught HERE and in kt1_surface_gate.py, not there.
         dz_0 = float(z.dz_ref[0])
         stretch = np.asarray(nemo_r3t_stretch(z, st.eta.data, st.H_bathy.data))
         dz_0_live = dz_0 * stretch                              # e3t(:,:,1,Kmm)
@@ -2644,8 +2651,8 @@ class TestSurfaceFluxDivisor:
 
         tau_T_live = rho_0 * c_p * dz_0_live / cfg_static.A_theta
         tau_S_live = rho_0 * 1.0 * dz_0_live / cfg_static.A_S
-        surf_dT = -(T_top - T_star) / (tau_T_live + dt) - Q_sr / (rho_0 * c_p * dz_0_live)
-        surf_dS = -(S_top - S_star) / (tau_S_live + dt)
+        surf_dT = -(T_top - T_star) / tau_T_live - Q_sr / (rho_0 * c_p * dz_0_live)
+        surf_dS = -(S_top - S_star) / tau_S_live
 
         # Plus the Jerlov SW-penetration tendency's OWN level-0 deposit (eq
         # 10, traqsr.F90 -- a separate NEMO routine, untouched by this fix
@@ -2685,7 +2692,10 @@ class TestSurfaceFluxDivisor:
         # would dilute/mask the dilution signal under test.
         dz_0_static = dz_0   # DINOConfig() default: scalar, r3t=0 baseline
         tau_T_static = rho_0 * c_p * dz_0_static / cfg_static.A_theta
-        surf_dT_static = (-(T_top - T_star) / (tau_T_static + dt)
+        # Same explicit form as the live arm above: mixing a (tau + dt)
+        # denominator into one side of a dilution comparison makes it a
+        # two-variable test (PR #1728).
+        surf_dT_static = (-(T_top - T_star) / tau_T_static
                           - Q_sr / (rho_0 * c_p * dz_0_static))
         assert eta_value > 0.0
         assert float(np.mean(stretch[wet])) > 1.0
@@ -2904,7 +2914,9 @@ class TestShortwavePenetrationLadder:
         T_top = np.asarray(st.T.data[..., 0])
         T_star = np.asarray(frc["T_star_2d"])
         tau_T = rho_0 * c_p * dz_0 / cfg_static.A_theta
-        surf_dT = -(T_top - T_star) / (tau_T + dt) - Q_sr / (rho_0 * c_p * dz_0)
+        # No (tau + dt) denominator: the DINO restoring runs NEMO's explicit
+        # form since PR #1728 (usrdef_sbc.f90:272-273, trasbc.f90:169-170).
+        surf_dT = -(T_top - T_star) / tau_T - Q_sr / (rho_0 * c_p * dz_0)
         expect_dT_top_total = dt * (surf_dT + expect_dT_dt_sw[..., 0])
 
         wet = np.asarray(st.land_mask.data) > 0.5

@@ -230,7 +230,8 @@ def compute_box_heat_dT_terms(state, grid, z_coord, config, dino_cfg, forcing,
     2700 s for ``nemo_dino_kamm_mlf``), NOT the accumulator's (much longer)
     sampling interval — every one of these functions is ``dt``-SENSITIVE in
     its own right (physics-validator review, #1226):
-    ``restoring_surface_forcing(implicit=True)`` uses ``eff_tau = tau + dt``
+    ``restoring_surface_forcing`` ran ``implicit=True`` until PR #1728 moved
+    it to NEMO's explicit form; the implicit form used ``eff_tau = tau + dt``
     (a 32x-too-large ``dt`` biases the restoring rate low by
     ``dt_step/(tau+dt_step)``, ~8% at daily sampling with DINO's
     ``tau_T``); ``compute_advection_flux_div_pair``'s FCT limiter clips the
@@ -418,9 +419,22 @@ def compute_box_heat_dT_terms(state, grid, z_coord, config, dino_cfg, forcing,
         Q_sr_2d = forcing["Q_sr_2d"]
     tau_T = tau_from_flux_coefficient(dino_cfg.A_theta, dino_cfg.rho_0, dino_cfg.c_p, dz_0)
     tau_S = tau_from_flux_coefficient(dino_cfg.A_S, dino_cfg.rho_0, 1.0, dz_0)
+    # implicit=False tracks apply_dino_lat_lon_surface_forcing, which moved to
+    # NEMO's explicit form (user decision 30, PR #1728).  This budget is a
+    # diagnostic MIRROR of that applicator; if the two disagree the budget
+    # silently stops describing the model it is budgeting.
+    #
+    # AND IT ALREADY DISAGREES IN ANOTHER FIELD -- said here rather than left
+    # for the next reader to find.  The applicator honours
+    # DINOConfig.surface_flux_divisor, so on the two NEMO-oracle cards
+    # (`nemo_dino_kamm`, `nemo_dino_kamm_mlf`, which set 'nemo_live') it
+    # divides by the LIVE top-cell thickness dz_0*(1+r3t) while everything
+    # below still uses the static dz_ref[0].  That drift predates this change
+    # and is NOT fixed here; it bounds how closely this budget can be held to
+    # the model on those two cards.
     restoring_cfg = RestoringConfig(
         tau_T=tau_T, tau_S=tau_S, T_star_array=T_star_2d,
-        S_star_array=forcing["S_star_2d"], subtract_qsr=True, implicit=True,
+        S_star_array=forcing["S_star_2d"], subtract_qsr=True, implicit=False,
     )
     rest_out = restoring_surface_forcing(
         state.T.data, state.S.data, _GridShim(mask), restoring_cfg,
