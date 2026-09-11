@@ -157,16 +157,33 @@ def test_run_sh_is_a_config_free_staging_script_and_never_builds():
     makenemo call, the preregistration's ASKED item 1 is no longer describing
     the script and the receipt's admission argument is stale."""
     text = RUN_SH.read_text()
-    assert "makenemo" not in text
-    assert "cp -r" not in text          # never copy a whole cfgs/ directory
+    # The test that FAILED when first written asserted the WORD was absent,
+    # and the script's own comment explains that the agent must never run
+    # makenemo.  What matters is an EXECUTED call, so strip comment lines.
+    code = "\n".join(line for line in text.splitlines()
+                     if not line.lstrip().startswith("#"))
+    assert "makenemo" not in code
+    assert "cp -r" not in code          # never copy a whole cfgs/ directory
+    assert "mpirun" in code             # non-vacuity: the stripper kept code
     assert "BYTE-IDENTICAL" in text
     assert "GYRE_OMIP_L2_P3_00000180_restart.nc" in text
     # the refusal must be a refusal, not a warning
     assert "exit 71" in text
 
 
+def _worktree_is_dirty() -> bool:
+    """The harness stamps provenance and REFUSES on a dirty tree, so a plant
+    run would die on the stamp rather than on the plant and the test would
+    report a failure it did not cause."""
+    out = subprocess.run(["git", "status", "--porcelain"], cwd=str(ROOT),
+                         capture_output=True, text=True)
+    return bool(out.stdout.strip())
+
+
 @pytest.mark.skipif(not NEMO_RECORD.is_dir(),
                     reason="the NEMO year record is not on this machine")
+@pytest.mark.skipif(_worktree_is_dirty(),
+                    reason="the harness refuses to stamp a dirty worktree")
 def test_forcing_gate_plants_all_exit_non_zero():
     """Each plant must turn the BIT-EXACT forcing gate red.  Without this the
     gate's green is unfalsifiable."""
