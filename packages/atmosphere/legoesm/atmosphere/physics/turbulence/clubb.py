@@ -5374,9 +5374,13 @@ def compute_pdf_closure(diag, wp2, wp3, rtp2, thlp2, rtpthlp, up2, vp2,
     # Each level set is replaced by the trapezoidal layer average of itself and
     # the companion values that bracket it, so the two closures agree on the
     # layer-integrated quantity instead of drifting apart between calls.
+    # Only the fields the reference ALWAYS reconciles. It also averages the
+    # third-order scalar moments, but only when those statistics are asked for
+    # individually, and nothing in the moment advances reads them -- so averaging
+    # them unconditionally would be a difference from the reference that buys
+    # nothing.
     zt_trap = {name: calc_trapezoid_zt(zm_out[name], zt_out[name], gr)
-               for name in ("wprtp2", "wpthlp2", "wprtpthlp", "cloud_frac",
-                            "rcm", "wp2thvp", "wp2up")}
+               for name in ("cloud_frac", "rcm", "wp2thvp", "wp2up")}
     zm_trap = {name: calc_trapezoid_zm(zt_out[name], zm_out[name], gr)
                for name in ("wpthvp", "thlpthvp", "rtpthvp")}
 
@@ -5389,9 +5393,9 @@ def compute_pdf_closure(diag, wp2, wp3, rtp2, thlp2, rtpthlp, up2, vp2,
     cloud_frac, rcm = compute_cloud_cover(chi_mean, zt_trap["cloud_frac"], rcm, gr)
     cloud_frac = jnp.minimum(1.0, cloud_frac)
 
-    hom = {k: zt_out[k] for k in ("wp2rtp", "wp2thlp", "wpup2", "wpvp2")}
-    hom.update(wprtp2=zt_trap["wprtp2"], wpthlp2=zt_trap["wpthlp2"],
-               wprtpthlp=zt_trap["wprtpthlp"], wp2up=zt_trap["wp2up"],
+    hom = {k: zt_out[k] for k in ("wp2rtp", "wp2thlp", "wpup2", "wpvp2",
+                                  "wprtp2", "wpthlp2", "wprtpthlp")}
+    hom.update(wp2up=zt_trap["wp2up"],
                wp2up2_zm=zm_out["wp2up2"], wp2vp2_zm=zm_out["wp2vp2"],
                wp4_zm=zm_out["wp4"])
 
