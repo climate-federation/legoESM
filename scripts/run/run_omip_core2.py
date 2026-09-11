@@ -95,6 +95,48 @@ _GM_SLOPE_SCHEMES = ("triads", "centered", "nemo_iso_lap")
 _GM_BOLUS_FORMS = ("centred", "through_fct")
 
 
+def build_sss_restoring_config(*, sss_restore_tau_days,
+                               sss_restore_normalization=None,
+                               sss_restore_bound_mmday=None,
+                               sss_ice_gate_nemo=False,
+                               sss_restore_regions=None):
+    """Resolve the host-loop restoring config without changing its defaults.
+
+    ``uniform`` removes the regional tau overrides (NEMO namsbc_ssr's
+    spatially uniform rn_deds). Piston speed remains z1_m / tau; the
+    existing tau flag selects its magnitude. No new numerical law is used.
+    Invalid numeric CLI values exit cleanly via SystemExit in both callers;
+    unknown programmatic choices raise ValueError.
+    """
+    from legoesm import constants
+    from legoesm.ocean.forcing.sss_restoring import SSSRestoringConfig
+
+    if sss_restore_regions not in (None, "omip2", "uniform"):
+        raise ValueError(f"unknown --sss-restore-regions {sss_restore_regions!r}")
+    if sss_restore_normalization not in (None, "s_target", "live_s"):
+        raise ValueError(
+            f"unknown --sss-restore-normalization {sss_restore_normalization!r}")
+    if not np.isfinite(sss_restore_tau_days) or sss_restore_tau_days <= 0:
+        raise SystemExit("--sss-restore-tau-days must be finite and > 0.")
+    kwargs = {}
+    if sss_restore_regions == "uniform":
+        kwargs["regions"] = ()
+    if sss_restore_normalization is not None:
+        kwargs["normalization"] = sss_restore_normalization
+    if sss_ice_gate_nemo:
+        kwargs["ice_gate_mode"] = "nemo_linear"
+    if sss_restore_bound_mmday is not None:
+        if (not np.isfinite(sss_restore_bound_mmday)
+                or sss_restore_bound_mmday <= 0):
+            raise SystemExit("--sss-restore-bound-mmday must be finite and > 0.")
+        kwargs["max_flux_kg_m2_s"] = (
+            sss_restore_bound_mmday * 1.0e-3 / _SEC_PER_DAY
+            * float(constants.rho_water))
+    return SSSRestoringConfig(
+        enabled=True, tau_restore_days_default=float(sss_restore_tau_days),
+        **kwargs)
+
+
 def real_freshwater_restoring_conflict(freshwater_closure, sss_restore,
                                        sss_restore_normalization,
                                        sss_restore_channel=None):
@@ -115,6 +157,16 @@ def real_freshwater_restoring_conflict(freshwater_closure, sss_restore,
     Split out of ``main`` so the rule is unit-testable: ``main`` applies it
     only after the model is built, which no unit test can cheaply reach.
     """
+    for name, value, choices in (
+        ("freshwater_closure", freshwater_closure,
+         (None, "none", "virtual_salt_flux", "real_freshwater")),
+        ("sss_restore_normalization", sss_restore_normalization,
+         (None, "s_target", "live_s")),
+        ("sss_restore_channel", sss_restore_channel,
+         (None, "tracer", "water_flux")),
+    ):
+        if value not in choices:
+            raise ValueError(f"unknown {name} {value!r}; expected {choices}")
     if freshwater_closure != "real_freshwater" or not sss_restore:
         return None
     # EXEMPTION, and the only one: `--sss-restore-channel water_flux` with the
@@ -2216,7 +2268,7 @@ _FESOM_WIRED_DESTS = frozenset({
     # read-only facade, so the post-step tracer applicator cannot write back):
     "sss_restore", "sss_restore_channel", "sss_restore_tau_days",
     "sss_restore_bound_mmday", "sss_restore_file",
-    "sss_restore_normalization", "sss_ice_gate_nemo",
+    "sss_restore_normalization", "sss_ice_gate_nemo", "sss_restore_regions",
     # B4 — Dai-Trenberth runoff (node-adjacency coastal spread from
     # mesh.edges via FesomOceanGrid.cellsOnCell):
     "runoff", "runoff_spread_passes", "river_mouth_restoring_gate",
@@ -2238,7 +2290,7 @@ _FESOM_FORCED_ONLY_DESTS = (
     "ice_ocean_heat_coeff", "ice_thermo_sw_trans", "ice_lead_freeze_source",
     "sss_restore", "sss_restore_channel", "sss_restore_tau_days",
     "sss_restore_bound_mmday", "sss_restore_file",
-    "sss_restore_normalization", "sss_ice_gate_nemo",
+    "sss_restore_normalization", "sss_ice_gate_nemo", "sss_restore_regions",
     "runoff", "runoff_spread_passes", "river_mouth_restoring_gate",
     # NEMO zdfiwm (ln_zdfiwm=T in ORCA1): spliced additively onto the legoESM
     # closure by the FESOM TKE bridge, exactly as MPASOceanModel does.
@@ -2623,27 +2675,14 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
         # water_flux (the tracer channel cannot write into the read-only
         # FESOM state facade) and main() enforced normalization live_s.
         from legoesm.ocean.forcing.sss_restoring import (
-            SSSRestoringConfig,
             compute_sss_restoring_flux,
         )
-        if not (float(args.sss_restore_tau_days) > 0.0):
-            raise SystemExit("--sss-restore-tau-days must be > 0.")
-        _cfg_kwargs = {}
-        if args.sss_ice_gate_nemo:
-            _cfg_kwargs["ice_gate_mode"] = "nemo_linear"
-        if args.sss_restore_normalization is not None:
-            _cfg_kwargs["normalization"] = args.sss_restore_normalization
-        if args.sss_restore_bound_mmday is not None:
-            if not (float(args.sss_restore_bound_mmday) > 0.0):
-                raise SystemExit("--sss-restore-bound-mmday must be > 0.")
-            # mm/day water-equivalent -> kg/m^2/s (rho_water * m/day / s/day).
-            _cfg_kwargs["max_flux_kg_m2_s"] = (
-                float(args.sss_restore_bound_mmday) * 1.0e-3 / _SEC_PER_DAY
-                * float(_const.rho_water))
-        sss_restore_cfg = SSSRestoringConfig(
-            enabled=True,
-            tau_restore_days_default=float(args.sss_restore_tau_days),
-            **_cfg_kwargs,
+        sss_restore_cfg = build_sss_restoring_config(
+            sss_restore_tau_days=args.sss_restore_tau_days,
+            sss_restore_normalization=args.sss_restore_normalization,
+            sss_restore_bound_mmday=args.sss_restore_bound_mmday,
+            sss_ice_gate_nemo=args.sss_ice_gate_nemo,
+            sss_restore_regions=args.sss_restore_regions,
         )
         if args.sss_restore_file is not None:
             from legoesm.ocean.forcing.nemo_native_fields import (
@@ -5860,7 +5899,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "2 on lat-lon/cube. The area-conservative renorm keeps the "
                         "global total exact. Distinct from --runoff-depth-spread-m "
                         "(VERTICAL spread).")
-    p.add_argument("--river-mouth-restoring-gate", action="store_true",
+    p.add_argument("--river-mouth-restoring-gate",
+                   # Also declares --no-river-mouth-restoring-gate.
+                   action=argparse.BooleanOptionalAction, default=False,
                    help="Disable SSS restoring at river-mouth cells (runoff > "
                         "threshold) so the restoring does not fight the river "
                         "plume toward the coarse WOA climatology. NOTE this is "
@@ -5954,6 +5995,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "OMIP-2 interior; regional Arctic/Med/SO use shorter "
                         "built-in taus). NEMO ORCA1 RUN_REF equivalent: piston "
                         "-220 mm/day over the 10 m top layer = tau ~45.5 d.")
+    p.add_argument("--sss-restore-regions", default=None,
+                   choices=["omip2", "uniform"],
+                   help="Restoring geography: unset/omip2 retains regional tau "
+                        "overrides; uniform uses --sss-restore-tau-days everywhere "
+                        "(NEMO rn_deds). Ice and river gates remain independent.")
     p.add_argument("--sss-restore-channel", default=None,
                    choices=["tracer", "water_flux"],
                    help="How SSS restoring reaches the ocean (tripole/latlon). "
@@ -6591,6 +6637,9 @@ def main() -> int:
     # preserving for existing callers.
     p = _build_arg_parser()
     args = p.parse_args()
+
+    if args.sss_restore_regions is not None and not args.sss_restore:
+        raise ValueError("--sss-restore-regions requires --sss-restore")
 
     # EVD trigger flags: validated once here (raise under --convection none)
     # and consumed by build_tripole only -- on any other grid they would be
@@ -7650,31 +7699,14 @@ def main() -> int:
             raise ValueError(
                 "--sss-restore requires --woa-init (IC-surface target) or "
                 "--sss-restore-file (NEMO sn_sss monthly climatology).")
-        if not (float(args.sss_restore_tau_days) > 0.0):
-            raise ValueError("--sss-restore-tau-days must be > 0 (0 divides by "
-                             "zero in build_region_masks; negative = anti-restoring).")
-        from legoesm.ocean.forcing.sss_restoring import SSSRestoringConfig
-        from legoesm import constants
-        _cfg_kwargs = {}
-        if args.sss_ice_gate_nemo:
-            _cfg_kwargs["ice_gate_mode"] = "nemo_linear"
-        if args.sss_restore_normalization is not None:
-            _cfg_kwargs["normalization"] = args.sss_restore_normalization
-        if args.sss_restore_bound_mmday is not None:
-            if not (float(args.sss_restore_bound_mmday) > 0.0):
-                raise ValueError("--sss-restore-bound-mmday must be > 0.")
-            # mm/day water-equivalent -> kg/m^2/s (rho_water * m/day / 86400).
-            _cfg_kwargs["max_flux_kg_m2_s"] = (
-                float(args.sss_restore_bound_mmday) * 1.0e-3 / 86400.0
-                * float(constants.rho_water))
-        # Water-flux channel switch, resolved once so the step loop reads a
-        # plain bool (and so an unset flag can never accidentally enable it).
-        _sss_water_flux = (args.sss_restore_channel == "water_flux")
-        sss_restore_cfg = SSSRestoringConfig(
-            enabled=True,
-            tau_restore_days_default=float(args.sss_restore_tau_days),
-            **_cfg_kwargs,
+        sss_restore_cfg = build_sss_restoring_config(
+            sss_restore_tau_days=args.sss_restore_tau_days,
+            sss_restore_normalization=args.sss_restore_normalization,
+            sss_restore_bound_mmday=args.sss_restore_bound_mmday,
+            sss_ice_gate_nemo=args.sss_ice_gate_nemo,
+            sss_restore_regions=args.sss_restore_regions,
         )
+        _sss_water_flux = (args.sss_restore_channel == "water_flux")
         if args.sss_restore_file is not None:
             from legoesm.ocean.forcing.nemo_native_fields import (
                 load_nemo_sss_restoring_climatology,
@@ -7703,7 +7735,8 @@ def main() -> int:
                     if _sss_monthly
                     else sss_restore_target[_wet])
         print(f"[setup] SSS restoring ON: tau_default="
-              f"{args.sss_restore_tau_days:.0f} d + OMIP-2 regional masks; "
+              f"{args.sss_restore_tau_days:.0f} d"
+              f"{' + OMIP-2 regional masks' if sss_restore_cfg.regions else ' (uniform)'}; "
               f"flux bound {_bnd}; target = {_tgt_kind} "
               f"[{_tgt_wet.min():.1f},{_tgt_wet.max():.1f}] PSU")
 
