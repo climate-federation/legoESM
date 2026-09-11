@@ -1614,6 +1614,18 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
             _gm_kw["gm_bolus_advection"] = gm_bolus_advection
         if gm_msc_stabilize is not None:
             _gm_kw["msc_stabilize"] = bool(gm_msc_stabilize)
+            if gm_msc_stabilize:
+                # NOT a free choice: gm_redi_tracer_tendency_latlon RAISES
+                # unless implicit_K33 is also on, because the capped akz has
+                # to be applied by the implicit vertical solve or its part of
+                # the a33 diagonal is silently dropped. implicit_K33 is a
+                # GMRediConfig field with NO CLI flag and a False default, so
+                # before this line --gm-msc-stabilize could never be used on
+                # ANY lane: every run selecting it died at the first step.
+                # Found by RUNNING the production card -- the gap 9
+                # composition check built the config and validated it, but
+                # never took a step, and this guard lives in the tendency.
+                _gm_kw["implicit_K33"] = True
         _ovr["gm_redi"] = _gm_base._replace(**_gm_kw)
         print(f"[setup] tripole GM/Redi operator: "
               f"slope_scheme={_ovr['gm_redi'].slope_scheme}, "
