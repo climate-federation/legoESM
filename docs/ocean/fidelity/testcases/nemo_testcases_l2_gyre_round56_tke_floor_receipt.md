@@ -1,8 +1,9 @@
 # NEMO testcase L2 GYRE round 56 — derived TKE floor receipt
 
-Date: 2026-09-11. Parent `b8b62fa636d1`; CPU/fp64. **HOLD FOR
-ACQUISITION:** the implementation and writer are verified, but the Git index is
-read-only, so no clean commit stamp can exist and no trajectory was run.
+Date: 2026-09-11. Parent `03098e6fe91c`; implementation/acquisition commit
+`21e85d25284d`; CPU/fp64. **ACQUISITION COMPLETE; TRAJECTORY UNMEASURED.**
+The clean producer stamp exists and the operand record was acquired at that
+commit. No round-56 trajectory was run.
 
 ## Independent-review findings
 
@@ -21,6 +22,13 @@ The derived floor owns the initialization/interior floor/sweeps at compiled
 `:682-693`. Direct fp64 checks give
 `9.99999999999999847e-03` (bits `4576918229304087674`), one ULP below literal
 `0.01`, for GYRE and both DINO NEMO cards.
+
+**RETRACTION (round-57 review):** this was not one ULP on every executing card.
+The legacy `nemo_v1` card's `_nemo_tke_config` carried `mxl_min=1e-8`, so its
+resolved floor moved to `9.99999999999999847e-03`, about `1e6` times larger.
+Its 24-test recipe gate checks construction and stepping, not compiled-oracle
+TKE bits; that card is UNMEASURED-with-spec debt pending an
+`en/avm/avt/dissl` score using its own compiled operands.
 
 ## Syntax-only compilation
 
@@ -53,13 +61,19 @@ down one ULP on both NEMO cards; no trajectory claim is made. LOCK_EXCHANGE
 `ln_zdfcst=.true.` and do not execute TKE. ORCA2 remains
 UNMEASURED-with-spec: bit-score closure outputs from its own compiled operands.
 
-Tests: `133 passed`, `109 passed`, `3 passed`; final focused citation/stamp run
-`41 passed, 2 deselected` because the two real-receipt stamp tests correctly
-refuse this dirty tree. `git diff --check` is clean. Seven acquisition plants
-are exercised and each exits nonzero.
+The clean producer stamp is
+`phase3/round56/oracle_tke_operands/producer_commit.txt` and equals
+`21e85d25284de001c575e23f351a45c426ba5e15`. Acquisition validation PASS;
+twin admission PASS (`exact=43/63`, `changed=20`, `admitted=132`). All seven
+plant processes exited nonzero, but the shape plant was initially caught by
+the older fixed-GYRE extent guard rather than the new stamped-array-shape
+guard; round 57 corrects that plant.
 
-Commit attempt failed exactly: `fatal: Unable to create
-'/tmp/codex-gyre-git/.git/index.lock': Read-only file system`.
+Test-status correction: the branch has one red focused test,
+`tests/ocean/unit/test_rk3_ws_and_mxl3.py::test_rk3_ws_differs_from_rk3_and_is_finite`.
+It is pre-existing and also fails at `3a8d94ea1985`; it is not introduced by
+round 56. The earlier `133 passed`, `109 passed`, `3 passed` summary omitted
+that known red and is withdrawn.
 
 ASKED: all changes above. UNASKED: none; no freshwater pair, #1484 guard,
 ladder card resolution, NEMO source/data, or configuration choice was changed.

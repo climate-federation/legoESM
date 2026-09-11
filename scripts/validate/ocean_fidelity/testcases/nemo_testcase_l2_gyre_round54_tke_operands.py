@@ -56,8 +56,6 @@ def read_record(path: Path, *, plant: str | None = None) -> dict:
     keys = ("version", "kt", "Kbb", "Kmm", "jpi", "jpj", "jpk", "jpkm1",
             "ntsi", "ntei", "ntsj", "ntej", "real_bits")
     head = dict(zip(keys, header, strict=True))
-    if plant == "shape":
-        head["jpi"] += 1
     require(head["version"] == 2 and head["kt"] == 2,
             f"unexpected version/kt {head['version']}/{head['kt']}")
     require((head["jpi"], head["jpj"], head["jpk"], head["jpkm1"])
@@ -82,6 +80,11 @@ def read_record(path: Path, *, plant: str | None = None) -> dict:
     require(offset == len(raw), f"record has {len(raw) - offset} trailing bytes")
     expected_2d = (head["jpi"], head["jpj"])
     expected_3d = (*expected_2d, head["jpk"])
+    if plant == "shape":
+        # Corrupt an array against the unchanged producer stamp.  Mutating
+        # jpi instead would be rejected earlier by the fixed-GYRE census and
+        # would never exercise this stamped-extent-vs-array-shape guard.
+        arrays["avt_pre_evd"] = arrays["avt_pre_evd"][:-1, :, :]
     for name, value in arrays.items():
         shape = np.shape(value)
         if shape:

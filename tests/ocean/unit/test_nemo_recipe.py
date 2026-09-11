@@ -126,6 +126,18 @@ def test_nemo_card_builds_valid_latlon_model_and_is_setup_agnostic():
 
 def test_nemo_card_one_step_rest_sanity_is_finite():
     recipe = build_nemo_rest_recipe(n_lat=8, n_lon=12, nlev=4)
+    from legoesm.ocean.physics.vertical_mixing.k_profiles import (
+        _nemo_surface_tmask,
+    )
+
+    # OceanZStarCoordinate deliberately has no per-level is_active.  NEMO's
+    # tmask(:,:,1) operand must still come from the state mask carried by this
+    # card; round 56 raised before taking the step below.
+    assert not hasattr(recipe.z_coord, "is_active")
+    assert bool(jnp.array_equal(
+        _nemo_surface_tmask(recipe.initial_state, recipe.z_coord),
+        recipe.initial_state.land_mask.data,
+    ))
     model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, recipe.model_config)
 
     new_state = model.step(recipe.initial_state, dt=60.0)

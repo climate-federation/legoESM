@@ -105,6 +105,14 @@ def _wet_interface_mask(z_coord, dtype=None):
     return arr[..., 1:]
 
 
+def _nemo_surface_tmask(state, z_coord):
+    """Return NEMO ``tmask(:,:,1)`` from the card's wet-mask owner."""
+    is_active = getattr(z_coord, "is_active", None)
+    if is_active is not None:
+        return jnp.asarray(is_active)[..., 0]
+    return state.land_mask.data
+
+
 def compute_vertical_K_profiles(
     state,
     z_coord: "OceanZStarCoordinate",
@@ -770,11 +778,12 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     "is_active (a pure z-star column has no sub-seafloor row "
                     "for this option to act on).")
         if getattr(vmix_cfg.tke, "tke_mxl_choice", 2) in (3, 4):
-            if _is_active is None:
-                raise ValueError(
-                    "NEMO TKE mixing-length choices require z_coord.is_active "
-                    "for the surface tmask factor.")
-            _surface_tmask = _is_active[..., 0]
+            # NEMO uses tmask(:,:,1), the card's horizontal ocean mask, in
+            # the ln_mxl0 surface anchor (R56TKE ppsrc zdftke.f90:614-619).
+            # Every ocean state carries that mask, including flat-bottom
+            # OceanZStarCoordinate cards that intentionally have no
+            # per-level ``is_active`` partial-cell mask.
+            _surface_tmask = _nemo_surface_tmask(state, z_coord)
         # Before-advection (Nnow) T/S for the diffusivity-stage N²
         # (TKEConfig.n2_before_advection). None ⇒ the closure uses the
         # post-advection T_data/S_data ⇒ BIT-IDENTICAL.

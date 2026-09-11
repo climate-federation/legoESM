@@ -1792,7 +1792,8 @@ def main() -> int:
                                     / np.maximum(
                                         np.asarray(solve_kwargs["l_eps"])
                                         [..., :nmat],
-                                        np.float64(tke_cfg.mxl_min)))
+                                        np.float64(tke_mod._mixing_length_floor(
+                                            tke_cfg))))
                                 dissl_operand_source = "factored sqrt(en)/zmxld"
                             row12_operands = {
                                 "zcof_tmask": metrics(

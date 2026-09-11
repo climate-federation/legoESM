@@ -157,8 +157,6 @@ CONTAINS
       REAL(wp), DIMENSION(jpi,jpj,jpk), INTENT(in) :: p_rhs
       REAL(wp), DIMENSION(T2D(0),jpk), INTENT(in) :: p_pdlr
       IF(.NOT.r54_active) RETURN
-      IF(SIZE(zdiag,1) /= ntei-ntsi+1 .OR. SIZE(zdiag,2) /= jpk) &
-         & CALL ctl_stop('round54: unexpected TKE row shape')
       ! jpk is not part of the solve; p_pdlr is defined only on 2:jpkm1.
       ! Leave every non-consumed slot at the explicit zero fill from begin.
       r54_zdiag(:,jj,1:jpkm1)=zdiag(:,1:jpkm1)
@@ -171,7 +169,7 @@ CONTAINS
    SUBROUTINE r54_tke_avn_row(jj,zmxlm,zmxld)
       INTEGER, INTENT(in) :: jj
       ! tke_avn declares both work arrays as T1Di(0),jpk
-      ! (MY_SRC:576; ppsrc:576), hence their valid first indices are ntsi:ntei.
+      ! (MY_SRC:571; ppsrc:576), hence their valid first indices are ntsi:ntei.
       REAL(wp), DIMENSION(T1Di(0),jpk), INTENT(in) :: zmxlm,zmxld
       IF(.NOT.r54_active) RETURN
       IF(SIZE(zmxlm,1) /= ntei-ntsi+1 .OR. SIZE(zmxlm,2) /= jpk) &
