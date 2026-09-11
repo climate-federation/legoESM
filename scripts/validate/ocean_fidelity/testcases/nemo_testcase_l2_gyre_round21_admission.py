@@ -288,6 +288,7 @@ SOURCES = {
     "NEMO_L2_RKTS3_1": f"{_R46}/stprk3_stg.f90:422",
     "NEMO_L2_ADVSP_1": f"{_R46}/dynadv.f90:185 (kstp widened)",
     "NEMO_L2_ENEOP_1": f"{_R46}/dynvor.f90:509",
+    "NEMO_L2_R46STG1": f"{_R46}/l2_r46_stage.f90:write_r46_stage",
 }
 PARSERS = {
     "NEMO_L2_TRPOP_2": "nemo_testcase_l2_gyre_round13_tracer.py:93-140",
@@ -305,6 +306,7 @@ PARSERS = {
     "NEMO_L2_RKTS3_1": "nemo_testcase_l2_gyre_round40_stage3_operators.py",
     "NEMO_L2_ADVSP_1": "nemo_testcase_l2_gyre_round41_dynadv_split.py",
     "NEMO_L2_ENEOP_1": "nemo_testcase_l2_gyre_stage3_completion_gate.py:53-79",
+    "NEMO_L2_R46STG1": "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:183-247",
 }
 
 
@@ -603,6 +605,12 @@ SELF_DESCRIBING = {
     "NEMO_L2_TRAZD_1": 16,     # MY_SRC/trazdf.F90, round-35 instrument
     "NEMO_L2_RKTS3_1": 16,     # MY_SRC/stprk3_stg.F90, round-40 instrument
     "NEMO_L2_ADVSP_1": 17,     # MY_SRC/dynadv.F90, round-41 instrument
+    # MY_SRC/l2_r46_stage.F90: the round-46 source-order stage record uses
+    # the same named/ranked stream contract.  Round 48 inherited these files;
+    # omitting this registration made the acquisition gate try the fixed-
+    # layout reader and abort after the new barotropic record was safely
+    # written.
+    "NEMO_L2_R46STG1": 16,
 }
 
 

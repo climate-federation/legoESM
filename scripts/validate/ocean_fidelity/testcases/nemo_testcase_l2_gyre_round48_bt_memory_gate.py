@@ -107,6 +107,8 @@ def _bit_equal(left: np.ndarray, right: np.ndarray) -> bool:
 
 def run(root: Path, *, expect_commit: str, plant: str | None) -> dict:
     stamp = worktree_stamp()
+    require(stamp.get("clean") is True,
+            "barotropic-memory gate requires a clean producer worktree")
     expected = "0" * 40 if plant == "stamp" else expect_commit.lower()
     require(
         len(expected) == 40 and stamp["commit"].lower() == expected,

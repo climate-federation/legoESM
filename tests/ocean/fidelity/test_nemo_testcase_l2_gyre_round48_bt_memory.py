@@ -22,6 +22,7 @@ assert SPEC and SPEC.loader
 gate = importlib.util.module_from_spec(SPEC)
 sys.path.insert(0, str(TESTCASES))
 SPEC.loader.exec_module(gate)
+import nemo_testcase_l2_gyre_round21_admission as admission
 
 
 def _write(path: Path, *, kt: int, phase: int) -> Path:
@@ -63,7 +64,8 @@ def _root(tmp_path: Path) -> Path:
 
 def test_reader_and_boundary_gate(tmp_path, monkeypatch):
     root = _root(tmp_path)
-    monkeypatch.setattr(gate, "worktree_stamp", lambda: {"commit": "a" * 40})
+    monkeypatch.setattr(gate, "worktree_stamp", lambda: {
+        "commit": "a" * 40, "clean": True})
     report = gate.run(root, expect_commit="a" * 40, plant=None)
     assert report["status"] == "PASS"
     assert all(report["history_boundary_bit_identical"].values())
@@ -72,7 +74,8 @@ def test_reader_and_boundary_gate(tmp_path, monkeypatch):
 @pytest.mark.parametrize("plant", ["boundary", "seed", "reset", "stamp"])
 def test_semantic_plants_are_red(tmp_path, monkeypatch, plant):
     root = _root(tmp_path)
-    monkeypatch.setattr(gate, "worktree_stamp", lambda: {"commit": "a" * 40})
+    monkeypatch.setattr(gate, "worktree_stamp", lambda: {
+        "commit": "a" * 40, "clean": True})
     with pytest.raises(Exception):
         gate.run(root, expect_commit="a" * 40, plant=plant)
 
@@ -100,3 +103,9 @@ def test_writer_is_write_only_and_run_has_every_plant():
         assert f'"{plant}"' in (TESTCASES / "nemo_testcase_l2_gyre_round48_bt_memory_gate.py").read_text()
         assert plant in run
     assert "--plant-consumed" in run
+
+
+def test_round46_stage_stream_is_registered_with_its_named_reader():
+    assert admission.SELF_DESCRIBING["NEMO_L2_R46STG1"] == 16
+    assert "NEMO_L2_R46STG1" in admission.SOURCES
+    assert "NEMO_L2_R46STG1" in admission.PARSERS

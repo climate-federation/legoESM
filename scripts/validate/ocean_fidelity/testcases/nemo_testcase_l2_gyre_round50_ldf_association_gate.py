@@ -1,0 +1,445 @@
+#!/usr/bin/env python3
+"""Round-50 literal ``dynldf_lev`` replay and first-intermediate gate."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from collections import Counter
+from pathlib import Path
+
+import numpy as np
+
+from legoesm.ocean.fidelity.provenance import worktree_stamp
+from nemo_testcase_l2_gyre_phase3_gate import _surface_forcings, require
+from nemo_testcase_l2_gyre_round46_kt2_stage_gate import (
+    ROOT,
+    _owned2,
+    _owned3,
+    read_stage,
+    sha256,
+)
+
+
+SOURCE = (
+    "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/"
+    "dynldf_lev.f90:121-140"
+)
+
+
+def _u_face(value: np.ndarray) -> np.ndarray:
+    value = _owned3(value)
+    return np.concatenate((value[:, -1:, :], value), axis=1)
+
+
+def _v_face(value: np.ndarray, *, fill: float = 0.0) -> np.ndarray:
+    value = _owned3(value)
+    return np.concatenate((np.full_like(value[:1], fill), value), axis=0)
+
+
+def _op(name: str, left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    """One materialized fp64 source operation."""
+    if name == "mul":
+        out = np.multiply(left, right)
+    elif name == "add":
+        out = np.add(left, right)
+    elif name == "sub":
+        out = np.subtract(left, right)
+    elif name == "div":
+        out = np.divide(left, right)
+    else:  # pragma: no cover - internal dispatch is closed above
+        raise ValueError(name)
+    return np.asarray(out, dtype=np.float64)
+
+
+def literal_ldf_numpy(
+    u: np.ndarray,
+    v: np.ndarray,
+    *,
+    e3t_kbb: np.ndarray,
+    e3u_kbb: np.ndarray,
+    e3v_kbb: np.ndarray,
+    e3f_live: np.ndarray,
+    e3u_kmm: np.ndarray,
+    e3v_kmm: np.ndarray,
+    e2u: np.ndarray,
+    e1v: np.ndarray,
+    e2v: np.ndarray,
+    e1u: np.ndarray,
+    r1_e1e2t: np.ndarray,
+    r1_e1e2f: np.ndarray,
+    r1_e1u: np.ndarray,
+    r1_e2v: np.ndarray,
+    r1_e2u: np.ndarray,
+    r1_e1v: np.ndarray,
+    ahmt: np.ndarray,
+    ahmf: np.ndarray,
+    tmask: np.ndarray,
+    umask: np.ndarray,
+    vmask: np.ndarray,
+    fmask: np.ndarray,
+    plant: bool = False,
+) -> dict[str, np.ndarray]:
+    """Replay compiled lines 121--140 with one NumPy ufunc per operation."""
+    zu = _op("mul", e2u[..., None], e3u_kbb)
+    zu = _op("mul", zu, u)
+    zv = _op("mul", e1v[..., None], e3v_kbb)
+    zv = _op("mul", zv, v)
+    div_i = _op("sub", zu[:, 1:], zu[:, :-1])
+    div_j = _op("sub", zv[1:], zv[:-1])
+    div_bracket = _op("add", div_i, div_j)
+    zdiv_scale = _op("mul", ahmt, r1_e1e2t[..., None])
+    zdiv_scale = _op("div", zdiv_scale, np.where(e3t_kbb > 0, e3t_kbb, 1.0))
+    zdiv = _op("mul", zdiv_scale, div_bracket)
+
+    cur_v = _op("mul", e2v[..., None], v)
+    cur_u = _op("mul", e1u[..., None], u)
+    cur_v_pad = np.pad(cur_v, ((0, 0), (1, 1), (0, 0)), mode="wrap")
+    cur_di = _op("sub", cur_v_pad[:, 1:], cur_v_pad[:, :-1])
+    cur_u_pad = np.pad(cur_u, ((1, 1), (0, 0), (0, 0)))
+    cur_dj = _op("sub", cur_u_pad[:-1], cur_u_pad[1:])
+    cur_bracket = _op("add", cur_di, cur_dj)
+    zcur_scale = _op("mul", ahmf, e3f_live)
+    zcur_scale = _op("mul", zcur_scale, r1_e1e2f[..., None])
+    zcur = _op("mul", zcur_scale, cur_bracket)
+    if plant:
+        wet = fmask > 0
+        require(bool(wet.any()), "LDF plant has no wet F point")
+        target = tuple(np.argwhere(wet)[0])
+        zcur[target] = np.nextafter(zcur[target], np.inf)
+
+    zdiv_i = _op(
+        "sub",
+        np.pad(zdiv, ((0, 0), (1, 1), (0, 0)), mode="wrap")[:, 1:],
+        np.pad(zdiv, ((0, 0), (1, 1), (0, 0)), mode="wrap")[:, :-1],
+    )
+    grad_div_u = _op("mul", zdiv_i, r1_e1u[..., None])
+    zdiv_j = _op(
+        "sub",
+        np.pad(zdiv, ((1, 1), (0, 0), (0, 0)))[1:],
+        np.pad(zdiv, ((1, 1), (0, 0), (0, 0)))[:-1],
+    )
+    grad_div_v = _op("mul", zdiv_j, r1_e2v[..., None])
+    grad_div_v[[0, -1], ...] = 0.0
+
+    zcur_j = _op("sub", zcur[1:], zcur[:-1])
+    curl_u = _op("mul", -zcur_j, r1_e2u[..., None])
+    curl_u = _op("div", curl_u, np.where(e3u_kmm > 0, e3u_kmm, 1.0))
+    zcur_i = _op("sub", zcur[:, 1:], zcur[:, :-1])
+    curl_v = _op("mul", zcur_i, r1_e1v[..., None])
+    curl_v = _op("div", curl_v, np.where(e3v_kmm > 0, e3v_kmm, 1.0))
+    curl_v[[0, -1], ...] = 0.0
+    visc_u = _op("mul", _op("add", curl_u, grad_div_u), umask)
+    visc_v = _op("mul", _op("add", curl_v, grad_div_v), vmask)
+    return {
+        "div_u_product": zu,
+        "div_v_product": zv,
+        "div_bracket": div_bracket,
+        "zdiv_scale": zdiv_scale,
+        "zdiv": zdiv,
+        "curl_u_product": cur_u,
+        "curl_v_product": cur_v,
+        "curl_bracket": cur_bracket,
+        "zcur_scale": zcur_scale,
+        "zcur": zcur,
+        "grad_div_u": grad_div_u,
+        "grad_div_v": grad_div_v,
+        "curl_u": curl_u,
+        "curl_v": curl_v,
+        "visc_u": visc_u,
+        "visc_v": visc_v,
+    }
+
+
+def _ordered_bits(value: np.ndarray) -> np.ndarray:
+    bits = np.ascontiguousarray(value, dtype=np.float64).view(np.int64)
+    return np.where(bits < 0, np.iinfo(np.int64).min - bits, bits)
+
+
+def _score(name: str, got: np.ndarray, ref: np.ndarray, mask: np.ndarray) -> dict:
+    unequal = (got != ref) & mask
+    delta = got[mask] - ref[mask]
+    ulp = _ordered_bits(got[unequal]) - _ordered_bits(ref[unequal])
+    return {
+        "name": name,
+        "n": int(mask.sum()),
+        "n_unequal": int(unequal.sum()),
+        "max_abs": float(np.max(np.abs(delta))),
+        "signed_ulp_histogram": dict(sorted(Counter(map(int, ulp)).items())),
+    }
+
+
+def _spatial(name: str, got: np.ndarray, ref: np.ndarray, wet: np.ndarray) -> dict:
+    unequal = (got != ref) & wet
+    west = np.roll(wet, 1, axis=1)
+    east = np.roll(wet, -1, axis=1)
+    south = np.concatenate((np.zeros_like(wet[:1]), wet[:-1]), axis=0)
+    north = np.concatenate((wet[1:], np.zeros_like(wet[:1])), axis=0)
+    ring = wet & ~(west & east & south & north)
+    corner = wet & ((~west | ~east) & (~south | ~north))
+    by_j = np.count_nonzero(unequal, axis=(1, 2))
+    return {
+        "name": name,
+        "first_wet_ring": int(np.count_nonzero(unequal & ring)),
+        "wet_corners": int(np.count_nonzero(unequal & corner)),
+        "interior": int(np.count_nonzero(unequal & ~ring)),
+        "native_j_rows": {
+            str(j + 3): int(count) for j, count in enumerate(by_j) if count
+        },
+    }
+
+
+def _scale_variants(jnp, a, b, c):
+    """Closed association ladder for the compiled ``a*b/c`` statement."""
+    return {
+        "ab_div_c": (a * b) / c,
+        "a_mul_bdivc": a * (b / c),
+        "b_mul_adivc": b * (a / c),
+        "ab_mul_recipc": (a * b) * (1.0 / c),
+        "a_div_cdivb": a / (c / b),
+        "b_div_cdiva": b / (c / a),
+    }
+
+
+def run(root: Path, *, expect_commit: str, plant: bool) -> dict:
+    import jax
+    import jax.numpy as jnp
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.grids.operators_latlon_cgrid import compute_vertex_mask
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        nemo_ldf_lap_viscosity_e3_cgrid,
+        nemo_lateral_viscosity_coefficients,
+    )
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
+    from legoesm.ocean.vertical import nemo_qco_live_vorticity_e3f_cgrid
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(bool(jax.config.jax_enable_x64), "round50 requires x64")
+    stamp = worktree_stamp()
+    expected = ("0" * 40) if plant == "stamp" else expect_commit.lower()
+    require(stamp["clean"] and stamp["commit"].lower() == expected,
+            f"commit stamp mismatch: {stamp} != {expected}")
+
+    card = build_nemo_testcase_card("GYRE-zco")
+    cfg = card.recipe.model_config._replace(
+        freshwater_closure="real_freshwater", fix_eta_drift=True)
+    ocean = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, cfg)
+    grid = card.recipe.grid
+    half_uv = cfg.lateral_viscosity.A_h / (grid.radius * grid.dlon)
+    ahmt_1d, ahmf_1d = nemo_lateral_viscosity_coefficients(grid, half_uv)
+    rows, spatial, intermediate_rows, association_rows, hashes = [], [], [], [], {}
+    for stage in (1, 3):
+        path = root / f"oracle_momstage_kt00000002_s{stage}.bin"
+        record = read_stage(path)["arrays"]
+        hashes[path.name] = sha256(path)
+        u, v = _u_face(record["u_Kbb"]), _v_face(record["v_Kbb"])
+        ju, jv = _u_face(record["u_Kmm"]), _v_face(record["v_Kmm"])
+        umask, vmask = _u_face(record["umask"]), _v_face(record["vmask"])
+        tmask = _owned3(record["tmask"])
+        fmask = np.asarray(jax.vmap(
+            lambda m: compute_vertex_mask(m, grid=grid), in_axes=-1, out_axes=-1
+        )(jnp.asarray(tmask)))
+        e3f = np.asarray(nemo_qco_live_vorticity_e3f_cgrid(
+            jnp.asarray(_owned2(record["ssh_Kmm"])), card.recipe.z_coord,
+            jnp.float64, nn_e3f_typ=0))
+        operands = {
+            "u": u,
+            "v": v,
+            "e3t_kbb": _owned3(record["e3t_Kbb"]),
+            "e3u_kbb": _u_face(record["e3u_Kbb"]),
+            "e3v_kbb": _v_face(record["e3v_Kbb"], fill=1.0),
+            "e3f_live": e3f,
+            "e3u_kmm": _u_face(record["e3u_Kmm"]),
+            "e3v_kmm": _v_face(record["e3v_Kmm"], fill=1.0),
+            "e2u": np.asarray(grid.dy_u),
+            "e1v": np.asarray(grid.dx_v),
+            "e2v": np.asarray(grid.dy_v),
+            "e1u": np.asarray(grid.dx_u),
+            "r1_e1e2t": np.asarray(1.0 / grid.area_T),
+            "r1_e1e2f": np.asarray(1.0 / grid.area_q),
+            "r1_e1u": np.asarray(1.0 / grid.dx_u),
+            "r1_e2v": np.asarray(1.0 / grid.dy_v),
+            "r1_e2u": np.asarray(1.0 / grid.dy_u),
+            "r1_e1v": np.asarray(1.0 / grid.dx_v),
+            "ahmt": np.asarray(ahmt_1d)[:, None, None] * tmask,
+            "ahmf": np.asarray(ahmf_1d)[:, None, None] * fmask,
+            "tmask": tmask,
+            "umask": umask,
+            "vmask": vmask,
+            "fmask": fmask,
+            "plant": plant,
+        }
+        literal = literal_ldf_numpy(**operands)
+
+        zdiv_variants = jax.jit(lambda a0, b0, c0: _scale_variants(
+            jnp, a0, b0, c0))(
+                jnp.asarray(operands["ahmt"]),
+                jnp.asarray(operands["r1_e1e2t"])[..., None],
+                jnp.where(jnp.asarray(operands["e3t_kbb"]) > 0,
+                          jnp.asarray(operands["e3t_kbb"]), 1.0))
+        for name, value in zdiv_variants.items():
+            association_rows.append(_score(
+                f"kt2.s{stage}.zdiv_scale.{name}", np.asarray(value),
+                literal["zdiv_scale"], tmask > 0.5))
+        curl_u_variants = jax.jit(lambda a0, b0, c0: _scale_variants(
+            jnp, a0, b0, c0))(
+                jnp.asarray(-np.subtract(literal["zcur"][1:], literal["zcur"][:-1])),
+                jnp.asarray(operands["r1_e2u"])[..., None],
+                jnp.where(jnp.asarray(operands["e3u_kmm"]) > 0,
+                          jnp.asarray(operands["e3u_kmm"]), 1.0))
+        for name, value in curl_u_variants.items():
+            association_rows.append(_score(
+                f"kt2.s{stage}.curl_u.{name}", np.asarray(value),
+                literal["curl_u"], umask > 0.5))
+
+        thickness_values = tuple(jnp.asarray(operands[name]) for name in (
+            "e3t_kbb", "e3u_kbb", "e3v_kbb", "e3f_live",
+            "e3u_kmm", "e3v_kmm"))
+        reciprocal_values = tuple(jnp.asarray(operands[name]) for name in (
+            "r1_e1e2t", "r1_e1e2f", "r1_e1u", "r1_e2v",
+            "r1_e2u", "r1_e1v"))
+        direct_u, direct_v, model_intermediates = jax.jit(
+            lambda uu, vv, thickness_args, reciprocal_args:
+            nemo_ldf_lap_viscosity_e3_cgrid(
+                uu, vv, grid, ahmt_1d, ahmf_1d, jnp.asarray(operands["e3t_kbb"]),
+                mask=jnp.asarray(tmask), u_mask=jnp.asarray(umask),
+                v_mask=jnp.asarray(vmask), vertex_mask=jnp.asarray(fmask),
+                thickness_operands=thickness_args,
+                metric_reciprocal_operands=reciprocal_args,
+                return_intermediates=True,
+            )
+        )(jnp.asarray(u), jnp.asarray(v), thickness_values, reciprocal_values)
+        model_intermediates = {
+            name: np.asarray(value) for name, value in model_intermediates.items()
+        }
+
+        state = card.recipe.initial_state._replace(
+            u=card.recipe.initial_state.u.replace(data=jnp.asarray(ju)),
+            v=card.recipe.initial_state.v.replace(data=jnp.asarray(jv)),
+            T=card.recipe.initial_state.T.replace(data=jnp.asarray(_owned3(record["T_Kmm"]))),
+            S=card.recipe.initial_state.S.replace(data=jnp.asarray(_owned3(record["S_Kmm"]))),
+            eta=card.recipe.initial_state.eta.replace(data=jnp.asarray(_owned2(record["ssh_Kmm"]))),
+        )
+        _, surface = _surface_forcings(card, state, 2)
+        _, diagnostics, _ = jax.jit(lambda s, thickness_args, reciprocal_args:
+            ocean.tendencies(
+            s, surface, dt=card.dt_s, momentum_only=True,
+            skip_lateral_viscosity=False,
+            ldf_state=(s.T.data, s.S.data, jnp.asarray(u), jnp.asarray(v)),
+            momentum_flux_face_thickness=(jnp.asarray(operands["e3u_kmm"]),
+                                              jnp.asarray(operands["e3v_kmm"])),
+            ldf_thickness_operands=thickness_args,
+            ldf_metric_reciprocal_operands=reciprocal_args,
+            zad_continuity_dt=np.float64(1.0 / record["r1_Dt"]),
+            nemo_operator_association=True,
+            return_nemo_operator_components=True,
+        ))(state, thickness_values, reciprocal_values)
+        model_u = sum(np.asarray(getattr(diagnostics, f"{name}_u").data)
+                      for name in ("Ah_lap", "Bh_bilap", "Cs_smag", "Cl_leith"))
+        model_v = sum(np.asarray(getattr(diagnostics, f"{name}_v").data)
+                      for name in ("Ah_lap", "Bh_bilap", "Cs_smag", "Cl_leith"))
+        for face, literal_term, model_term, wet in (
+            ("u", literal["visc_u"][:, 1:], model_u[:, 1:], _owned3(record["umask"]) > 0.5),
+            ("v", literal["visc_v"][1:], model_v[1:], _owned3(record["vmask"]) > 0.5),
+        ):
+            prior_name = "after_hpg" if stage == 1 else "after_adv"
+            prior = _owned3(record[f"{prior_name}_{face}"])
+            ref = _owned3(record[f"after_ldf_{face}"])
+            post_literal = _op("add", prior, literal_term)
+            post_model = _op("add", prior, model_term)
+            rows.append(_score(f"kt2.s{stage}.numpy_literal.post_ldf.{face}", post_literal, ref, wet))
+            rows.append(_score(f"kt2.s{stage}.model_path.post_ldf.{face}", post_model, ref, wet))
+            rows.append(_score(f"kt2.s{stage}.numpy_vs_model.term.{face}", literal_term, model_term, wet))
+            spatial.append(_spatial(f"kt2.s{stage}.{face}", post_model, ref, wet))
+
+        # Keep the isolated helper as a diagnostic, but admission is owned by
+        # the production ``ocean.tendencies`` route above (Rule 10).  In
+        # particular, XLA may fuse the caller's mask/slope multiplications into
+        # the helper and legitimately give the isolated expression a different
+        # lowering; record that distinction instead of substituting the helper
+        # for the production path.
+        rows.append(_score(
+            f"kt2.s{stage}.direct_vs_model.term.u", np.asarray(direct_u),
+            model_u, umask > 0.5))
+        rows.append(_score(
+            f"kt2.s{stage}.direct_vs_model.term.v", np.asarray(direct_v),
+            model_v, vmask > 0.5))
+
+        intermediate_masks = {
+            "div_u_product": umask > 0.5,
+            "div_v_product": vmask > 0.5,
+            "div_bracket": tmask > 0.5,
+            "zdiv_scale": tmask > 0.5,
+            "zdiv": tmask > 0.5,
+            "curl_bracket": fmask > 0.5,
+            "zcur_scale": fmask > 0.5,
+            "zcur": fmask > 0.5,
+            "grad_div_u": umask > 0.5,
+            "grad_div_v": vmask > 0.5,
+            "curl_u": umask > 0.5,
+            "curl_v": vmask > 0.5,
+            "visc_u": umask > 0.5,
+            "visc_v": vmask > 0.5,
+        }
+        for name, model_value in model_intermediates.items():
+            mask = intermediate_masks[name]
+            intermediate_rows.append(_score(
+                f"kt2.s{stage}.{name}", literal[name], model_value, mask))
+
+    calibration = [r for r in rows if ".numpy_literal.post_ldf." in r["name"]]
+    model_rows = [r for r in rows if ".model_path.post_ldf." in r["name"]]
+    require(all(r["n_unequal"] == 0 for r in calibration),
+            f"literal replay did not calibrate: {calibration}")
+    exact = all(r["n_unequal"] == 0 for r in model_rows)
+    first_by_stage = {}
+    source_order = tuple(intermediate_masks)
+    for stage in (1, 3):
+        stage_rows = {r["name"].split(".")[-1]: r for r in intermediate_rows
+                      if f".s{stage}." in r["name"]}
+        first_by_stage[str(stage)] = next(
+            (name for name in source_order if stage_rows[name]["n_unequal"]), None)
+    if plant:
+        require(any(r["n_unequal"] for r in calibration),
+                "nextafter LDF plant did not move a scored row")
+    return {
+        "format": "nemo-testcase-l2-gyre-round50-ldf-association-v1",
+        "worktree": stamp,
+        "compiled_source": SOURCE,
+        "resolved": {
+            "dtype": str(np.asarray(grid.area_T).dtype),
+            "nn_ahm_ijk_t": 0,
+            "rn_Uv": 2.0,
+            "rn_Lv": 100000.0,
+            "ahmt_unique_wet": sorted(map(float, np.unique(
+                np.asarray(ahmt_1d)[:, None, None] * (_owned3(read_stage(
+                    root / "oracle_momstage_kt00000002_s1.bin")["arrays"]["tmask"]) > 0)))),
+        },
+        "record_sha256": hashes,
+        "rows": rows,
+        "spatial": spatial,
+        "intermediate_rows": intermediate_rows,
+        "association_rows": association_rows,
+        "first_differing_intermediate": first_by_stage,
+        "plant": plant,
+        "status": "PLANT_FIRED" if plant else ("CONFIRMED" if exact else "DEBT"),
+    }
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=ROOT)
+    parser.add_argument("--expect-commit", required=True)
+    parser.add_argument("--plant", action="store_true")
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args(argv)
+    report = run(args.root, expect_commit=args.expect_commit, plant=args.plant)
+    text = json.dumps(report, indent=2, sort_keys=True)
+    if args.output:
+        args.output.write_text(text + "\n")
+    print(text)
+    return 1 if args.plant or report["status"] != "CONFIRMED" else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

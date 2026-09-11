@@ -1414,7 +1414,6 @@ def nemo_ldf_lap_viscosity_cgrid(
     ahmt : (n_lat,)    T-point viscosity coefficient [m²/s].
     ahmf : (n_lat+1,)  F-point viscosity coefficient [m²/s].
     mask, u_mask, v_mask, vertex_mask : the usual C-grid masks.
-
     Returns
     -------
     visc_u, visc_v : the viscous momentum tendency (coefficient embedded).
@@ -1527,7 +1526,13 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     vertex_mask: jnp.ndarray | None = None,
     thickness_operands: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray,
                               jnp.ndarray, jnp.ndarray, jnp.ndarray] | None = None,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+    metric_reciprocal_operands: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray,
+                                      jnp.ndarray, jnp.ndarray,
+                                      jnp.ndarray] | None = None,
+    return_intermediates: bool = False,
+) -> tuple[jnp.ndarray, jnp.ndarray] | tuple[
+    jnp.ndarray, jnp.ndarray, dict[str, jnp.ndarray]
+]:
     r"""NEMO ``dyn_ldf_lev_lap`` Laplacian viscosity, e3-THICKNESS-WEIGHTED
     div/curl (#1455 topographic-step residual fix).
 
@@ -1601,6 +1606,11 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
     h_k : cell-centre layer thickness (NEMO e3t), same shape as ``u``'s
         cell-centre analogue (2-D or 3-D matching ``u``/``v``).
     mask, u_mask, v_mask, vertex_mask : the usual C-grid masks.
+    metric_reciprocal_operands : optional six-tuple
+        Stored ``r1_e1e2t``, ``r1_e1e2f``, ``r1_e1u``, ``r1_e2v``,
+        ``r1_e2u`` and ``r1_e1v`` operands.  The NEMO identity harness passes
+        these as dynamic given inputs so XLA cannot replace the compiled
+        multiply-then-divide statements with reciprocal multiplication.
 
     Returns
     -------
@@ -1639,62 +1649,97 @@ def nemo_ldf_lap_viscosity_e3_cgrid(
         # stored reciprocal and metric products and therefore cannot close a
         # bitwise oracle row.
         sr = nemo_source_round
+        # XLA may reassociate ``(a*b)/c`` as ``a*(b/c)`` inside a fused graph.
+        # NEMO stores the product before the division in dynldf_lev.f90:127,
+        # :135 and :139.  These barriers are arithmetic provenance, not a
+        # stabilizer: they preserve the compiled statement's fp64 rounding.
+        sb = jax.lax.optimization_barrier
+        def sbr(value):
+            return sb(sr(value))
+
         e2u = jnp.asarray(grid.dy_u)[..., jnp.newaxis]
         e1v = jnp.asarray(grid.dx_v)[..., jnp.newaxis]
-        zu = sr(sr(e2u * e3u_kbb) * u_eff)
-        zv = sr(sr(e1v * e3v_kbb) * v_eff)
-        dx = sr(zu[:, 1:] - zu[:, :-1])
-        dy = sr(zv[1:] - zv[:-1])
-        flux_sum = sr(dx + dy)
-        r1_area_t = sr(1.0 / jnp.asarray(grid.area_T))[..., jnp.newaxis]
+        zu = sbr(sbr(e2u * e3u_kbb) * u_eff)
+        zv = sbr(sbr(e1v * e3v_kbb) * v_eff)
+        dx = sbr(zu[:, 1:] - zu[:, :-1])
+        dy = sbr(zv[1:] - zv[:-1])
+        flux_sum = sbr(dx + dy)
+        if metric_reciprocal_operands is None:
+            r1_area_t = sr(1.0 / jnp.asarray(grid.area_T))[..., jnp.newaxis]
+            r1_area_f = sr(1.0 / jnp.asarray(grid.area_q))[..., jnp.newaxis]
+            r1_e1u = sr(1.0 / jnp.asarray(grid.dx_u))[..., jnp.newaxis]
+            r1_e2v = sr(
+                1.0 / jnp.maximum(jnp.asarray(grid.dy_v), 1.0e-30)
+            )[..., jnp.newaxis]
+            r1_e2u = sr(1.0 / jnp.asarray(grid.dy_u))[..., jnp.newaxis]
+            r1_e1v = sr(
+                1.0 / jnp.maximum(jnp.asarray(grid.dx_v), 1.0e-30)
+            )[..., jnp.newaxis]
+        else:
+            (r1_area_t, r1_area_f, r1_e1u, r1_e2v,
+             r1_e2u, r1_e1v) = (
+                jnp.asarray(value)[..., jnp.newaxis]
+                for value in metric_reciprocal_operands)
         ahmt_live = _bc(ahmt)
         if mask is not None:
             ahmt_live = sr(ahmt_live * _bm(mask))
         h_k_safe = jnp.where(e3t_kbb > 0.0, e3t_kbb, 1.0)
-        zdiv = sr(
-            sr(sr(ahmt_live * r1_area_t) / h_k_safe) * flux_sum)
+        zdiv_scale = jax.lax.div(
+            jax.lax.mul(ahmt_live, r1_area_t), h_k_safe)
+        zdiv = sbr(zdiv_scale * flux_sum)
 
         curl_bracket = _nemo_vor_curl_bracket_cgrid(u_eff, v_eff, grid)
-        r1_area_f = sr(1.0 / jnp.asarray(grid.area_q))[..., jnp.newaxis]
         ahmf_live = _bc(ahmf)
         if mask is not None:
             fmask = (vertex_mask if vertex_mask is not None
                      else compute_vertex_mask(mask, grid=grid))
             ahmf_live = sr(ahmf_live * _bm(fmask))
-        zcur = sr(
-            sr(sr(ahmf_live * e3f_live) * r1_area_f) * curl_bracket)
+        zcur_scale = sbr(sbr(ahmf_live * e3f_live) * r1_area_f)
+        zcur = sbr(zcur_scale * curl_bracket)
 
         zdiv_pad_x = pad_lon_cgrid(zdiv, halo=1)
-        div_dx = sr(zdiv_pad_x[:, 1:] - zdiv_pad_x[:, :-1])
-        r1_e1u = sr(1.0 / jnp.asarray(grid.dx_u))[..., jnp.newaxis]
-        grad_div_u = sr(div_dx * r1_e1u)
+        div_dx = sbr(zdiv_pad_x[:, 1:] - zdiv_pad_x[:, :-1])
+        grad_div_u = sbr(div_dx * r1_e1u)
 
         from legoesm.grids.halo_latlon import (
             pad_with_pole_bc_lat, zero_polar_lat_ends,
         )
         zdiv_pad_y = pad_with_pole_bc_lat(
             zdiv, halo=1, south_value=0.0, north_value=0.0)
-        div_dy = sr(zdiv_pad_y[1:] - zdiv_pad_y[:-1])
-        r1_e2v = sr(1.0 / jnp.maximum(jnp.asarray(grid.dy_v), 1.0e-30))[
-            ..., jnp.newaxis]
-        grad_div_v = zero_polar_lat_ends(sr(div_dy * r1_e2v))
+        div_dy = sbr(zdiv_pad_y[1:] - zdiv_pad_y[:-1])
+        grad_div_v = zero_polar_lat_ends(sbr(div_dy * r1_e2v))
 
-        curl_dy = sr(zcur[1:] - zcur[:-1])
-        r1_e2u = sr(1.0 / jnp.asarray(grid.dy_u))[..., jnp.newaxis]
-        curl_u = sr(sr(sr(-curl_dy) * r1_e2u) / jnp.where(
-            e3u_kmm > 0.0, e3u_kmm, 1.0))
-        curl_dx = sr(zcur[:, 1:] - zcur[:, :-1])
-        r1_e1v = sr(1.0 / jnp.maximum(jnp.asarray(grid.dx_v), 1.0e-30))[
-            ..., jnp.newaxis]
-        curl_v = zero_polar_lat_ends(sr(
-            sr(curl_dx * r1_e1v) / jnp.where(
-                e3v_kmm > 0.0, e3v_kmm, 1.0)))
-        visc_u = sr(curl_u + grad_div_u)
-        visc_v = sr(curl_v + grad_div_v)
+        curl_dy = sbr(zcur[1:] - zcur[:-1])
+        curl_u = jax.lax.div(
+            jax.lax.mul(-curl_dy, r1_e2u),
+            jnp.where(e3u_kmm > 0.0, e3u_kmm, 1.0))
+        curl_dx = sbr(zcur[:, 1:] - zcur[:, :-1])
+        curl_v = zero_polar_lat_ends(jax.lax.div(
+            jax.lax.mul(curl_dx, r1_e1v),
+            jnp.where(e3v_kmm > 0.0, e3v_kmm, 1.0)))
+        visc_u = sbr(curl_u + grad_div_u)
+        visc_v = sbr(curl_v + grad_div_v)
         if u_mask is not None:
-            visc_u = sr(visc_u * _bm(u_mask))
+            visc_u = sbr(visc_u * _bm(u_mask))
         if v_mask is not None:
-            visc_v = sr(visc_v * _bm(v_mask))
+            visc_v = sbr(visc_v * _bm(v_mask))
+        if return_intermediates:
+            return visc_u, visc_v, {
+                "div_u_product": zu,
+                "div_v_product": zv,
+                "div_bracket": flux_sum,
+                "zdiv_scale": zdiv_scale,
+                "zdiv": zdiv,
+                "curl_bracket": curl_bracket,
+                "zcur_scale": zcur_scale,
+                "zcur": zcur,
+                "grad_div_u": grad_div_u,
+                "grad_div_v": grad_div_v,
+                "curl_u": curl_u,
+                "curl_v": curl_v,
+                "visc_u": visc_u,
+                "visc_v": visc_v,
+            }
         return visc_u, visc_v
 
     # 1. e3-weighted divergence at T-points: divergence_cgrid on the

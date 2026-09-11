@@ -3086,6 +3086,7 @@ def _bc_vertical_momentum_advection(
 def _bc_horizontal_viscosity(
     du_dt, dv_dt, u, v, grid, mask, u_mask, v_mask, config, z_coord, H_bathy, dt,
     rho_prime=None, h_k=None, ldf_thickness_operands=None,
+    ldf_metric_reciprocal_operands=None,
     vertex_mask=None,
 ):
     """Stages 10 + 10b: horizontal viscosity (A_h Laplacian + B_h biharmonic +
@@ -3313,7 +3314,8 @@ def _bc_horizontal_viscosity(
                 u, v, grid, _ahmt, _ahmf, h_k,
                 mask=mask, u_mask=u_mask, v_mask=v_mask,
                 vertex_mask=_visc_vmask,
-                thickness_operands=ldf_thickness_operands)
+                thickness_operands=ldf_thickness_operands,
+                metric_reciprocal_operands=ldf_metric_reciprocal_operands)
         else:
             diag_Ah_lap_u, diag_Ah_lap_v = nemo_ldf_lap_viscosity_cgrid(
                 u, v, grid, _ahmt, _ahmf,
@@ -4639,6 +4641,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     up3_upwind_selector=None,
     momentum_flux_face_thickness=None,
     ldf_thickness_operands=None,
+    ldf_metric_reciprocal_operands=None,
     ene_metric_reciprocals=None,
     ene_generic_f_vtx=False,
     legacy_hpg_algebraic=False,
@@ -5070,6 +5073,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             v_mask, config, z_coord, H_bathy, dt,
             rho_prime=rho_prime, h_k=h_k,
             ldf_thickness_operands=ldf_thickness_operands,
+            ldf_metric_reciprocal_operands=ldf_metric_reciprocal_operands,
             vertex_mask=vertex_mask,
         )
     _nemo_after_ldf_u = du_dt
