@@ -308,7 +308,7 @@ _HARD_SAT_LOG_CADENCE_STEPS = 432
 _HARD_SAT_LOG_QV_EPS = 1.0e-9        # [kg/kg] count a point as "drained" above this
 
 
-def _mpas_qv_smooth_step(q_v, mesh, nu, dt):
+def _mpas_qv_smooth_step(q_v, mesh, nu, dt, nu4=0.0, mid_refresh=None):
     """MPAS post-step horizontal q_v smoothing (array-level, testable).
 
     UNWEIGHTED SCVT del2 (``scalar_del2_cell_3d``) + a q>=0 floor, mirroring
@@ -329,14 +329,34 @@ def _mpas_qv_smooth_step(q_v, mesh, nu, dt):
     mesh : VoronoiMesh
     nu : float — del2 diffusivity [m^2/s].
     dt : float — step [s].
+    nu4 : float — del4 (biharmonic) diffusivity [m^4/s]; 0 disables the term.
+        The biharmonic is SCALE-SELECTIVE: it separates two-cell from four-cell
+        structure by a factor sixteen where the Laplacian separates them by
+        four, so it can hold grid-scale noise down without flattening the
+        resolved humidity gradients.  It has NO maximum principle, so with it
+        on the q>=0 floor is load-bearing rather than a no-op and the per-level
+        ``sum_c A_c q_c`` integral is conserved only up to what that floor
+        clips.  The driver's setup guard enforces ``nu4*dt*g_max^2 <= 0.5``.
+    mid_refresh : Callable(array) -> array, optional — distributed-only halo
+        refresh for the biharmonic's intermediate Laplacian.
 
     Returns
     -------
     jax.Array, shape (nCells, nlev) — smoothed, floored q_v (q_v dtype).
     """
-    from legoesm.core.operators_voronoi import scalar_del2_cell_3d
+    from legoesm.core.operators_voronoi import (
+        scalar_del2_cell_3d,
+        scalar_del4_cell_3d,
+    )
     lap = scalar_del2_cell_3d(q_v, mesh)
-    return jnp.maximum(q_v + dt * nu * lap.astype(q_v.dtype), 0.0)
+    if nu4 <= 0.0:
+        # BIT-IDENTICAL to the pre-biharmonic path, including the association
+        # order of ``dt * nu * lap`` -- the existing bit-exactness test holds
+        # the del2-only lane to equality, not to a tolerance.
+        return jnp.maximum(q_v + dt * nu * lap.astype(q_v.dtype), 0.0)
+    del4 = scalar_del4_cell_3d(q_v, mesh, mid_refresh=mid_refresh)
+    tend = (nu * lap + nu4 * del4).astype(q_v.dtype)
+    return jnp.maximum(q_v + dt * tend, 0.0)
 
 
 def clear_sky_pass_effective(
@@ -9307,8 +9327,9 @@ class ModelDriver:
         # monotonicity factor is
         # geometry-only, so the CFL guard below is EXACT for the applied op.
         _qv_smooth_nu = float(getattr(cfg, "mpas_qv_smooth_del2_m2s", 0.0))
+        _qv_smooth_nu4 = float(getattr(cfg, "mpas_qv_smooth_del4_m4s", 0.0))
         _qv_halo_refresh = None
-        if _qv_smooth_nu > 0.0:
+        if _qv_smooth_nu > 0.0 or _qv_smooth_nu4 > 0.0:
             from legoesm.core.operators_voronoi import (
                 scalar_del2_cell_cfl_factor,
             )
@@ -9357,11 +9378,54 @@ class ModelDriver:
                     f"1/m^2). Max stable coefficient here: "
                     f"{0.5 / (DT * _g_max):.3e} m^2/s."
                 )
-            logger.info(
-                "  MPAS q_v del2 smoothing ON: nu=%.3g m^2/s "
-                "(nu*dt*g_max=%.4f of 0.5 monotone bound)",
-                _qv_smooth_nu, _cfl,
-            )
+            if _qv_smooth_nu > 0.0:
+                logger.info(
+                    "  MPAS q_v del2 smoothing ON: nu=%.3g m^2/s "
+                    "(nu*dt*g_max=%.4f of 0.5 monotone bound)",
+                    _qv_smooth_nu, _cfl,
+                )
+            if _qv_smooth_nu4 > 0.0:
+                # Gershgorin on the Laplacian gives |lambda| <= 2*g_max
+                # (diagonal -g_c, off-diagonal row sum g_c), so the
+                # biharmonic's spectral radius is at most 4*g_max^2 and
+                # forward-Euler stability nu4*|lambda|*dt <= 2 reduces to
+                # nu4*dt*g_max^2 <= 0.5.  Measured on the subdivision-6 mesh
+                # the Laplacian's radius is 1.364*g_max, so this is
+                # conservative by ~2x.  The biharmonic has NO maximum
+                # principle, so unlike the del2 case the bound buys STABILITY
+                # only; the q>=0 floor can still fire.
+                _cfl4 = _qv_smooth_nu4 * DT * _g_max ** 2
+                if _cfl4 > 0.5:
+                    raise ValueError(
+                        f"mpas_qv_smooth_del4_m4s={_qv_smooth_nu4:g} violates "
+                        f"the explicit-biharmonic stability bound: "
+                        f"nu4*dt*g_max^2 = {_cfl4:.3f} > 0.5 (dt={DT:g}s, mesh "
+                        f"g_max={_g_max:.3e} 1/m^2). Max coefficient here: "
+                        f"{0.5 / (DT * _g_max ** 2):.3e} m^4/s."
+                    )
+                logger.info(
+                    "  MPAS q_v del4 smoothing ON: nu4=%.3g m^4/s "
+                    "(nu4*dt*g_max^2=%.4f of 0.5 stability bound)",
+                    _qv_smooth_nu4, _cfl4,
+                )
+            if _qv_smooth_nu > 0.0 and _qv_smooth_nu4 > 0.0:
+                # The two guards above are each sufficient ALONE.  Applied in
+                # one explicit update they add, and the two separate budgets
+                # would admit a combined forward-Euler amplification of up to
+                # 3 (1 from the del2 branch, 2 from the del4 branch) where 2
+                # is the limit -- so the sum is bounded here as well (codex
+                # review, 2026-09-11).
+                _cfl_sum = DT * (2.0 * _qv_smooth_nu * _g_max
+                                 + 4.0 * _qv_smooth_nu4 * _g_max ** 2)
+                if _cfl_sum > 2.0:
+                    raise ValueError(
+                        f"the del2 and del4 q_v filters are individually "
+                        f"stable but jointly are not: dt*(2*nu*g_max + "
+                        f"4*nu4*g_max^2) = {_cfl_sum:.3f} > 2 "
+                        f"(nu={_qv_smooth_nu:g} m^2/s, "
+                        f"nu4={_qv_smooth_nu4:g} m^4/s, dt={DT:g}s, "
+                        f"g_max={_g_max:.3e} 1/m^2)."
+                    )
         _sst_forcing = (cfg.radiation != "none" and self.get_sst_sic is not None)
         _sic_day = None            # (nCells,) ice fraction of the last forcing day
         _ice_skin_on = bool(getattr(cfg, "mpas_ice_skin_prognostic", False))
@@ -10788,7 +10852,7 @@ class ModelDriver:
             # the per-level sum_c A_c q_c integral, NOT column water vapour —
             # an explicitly non-conservative filter (see the config field note).
             # Eager like the drain below (outside jit).
-            if _qv_smooth_nu > 0.0:
+            if _qv_smooth_nu > 0.0 or _qv_smooth_nu4 > 0.0:
                 _trc_sm = self.state.tracers
                 _qv_sm_in = _trc_sm["q_v"].data
                 if _qv_halo_refresh is not None:
@@ -10796,7 +10860,8 @@ class ModelDriver:
                     # read owner values (see the setup note, #1321).
                     _qv_sm_in = _qv_halo_refresh(_qv_sm_in)
                 _qv_new_sm = _mpas_qv_smooth_step(
-                    _qv_sm_in, self.grid, _qv_smooth_nu, DT)
+                    _qv_sm_in, self.grid, _qv_smooth_nu, DT,
+                    nu4=_qv_smooth_nu4, mid_refresh=_qv_halo_refresh)
                 _new_trc_sm = dict(_trc_sm)
                 _new_trc_sm["q_v"] = _trc_sm["q_v"].replace(data=_qv_new_sm)
                 self.state = self.state._replace(tracers=_new_trc_sm)

@@ -1471,6 +1471,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "filter). "
                              "Setup refuses coefficients above the explicit "
                              "monotonicity bound for the mesh+dt.")
+    parser.add_argument("--mpas-qv-smooth-del4-m4s", type=float, default=None,
+                        dest="mpas_qv_smooth_del4_m4s",
+                        help="MPAS lane only: horizontal q_v del4 (biharmonic) "
+                             "smoothing diffusivity [m^4/s], applied post-step "
+                             "alongside the del2 (0=off, default). "
+                             "Scale-selective: its damping ratio between any "
+                             "two scales is the del2's SQUARED (measured 6.08x "
+                             "vs 2.47x between 240 and 479 km on the "
+                             "subdivision-6 mesh), so it holds grid-scale "
+                             "noise down without flattening the resolved "
+                             "humidity gradients. NOT monotone, so the q>=0 "
+                             "floor can fire; setup refuses coefficients above "
+                             "the explicit stability bound for the mesh+dt.")
     parser.add_argument("--hines-total-rms-wind", type=float, default=None,
                         dest="hines_total_rms_wind",
                         help="Hines (1997) non-orographic GWD launch RMS wind "
@@ -2050,6 +2063,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             args.mpas_qv_smooth_del2_m2s
             if args.mpas_qv_smooth_del2_m2s is not None
             else _EXPERIMENT_DEFAULTS.mpas_qv_smooth_del2_m2s),
+        mpas_qv_smooth_del4_m4s=(
+            args.mpas_qv_smooth_del4_m4s
+            if args.mpas_qv_smooth_del4_m4s is not None
+            else _EXPERIMENT_DEFAULTS.mpas_qv_smooth_del4_m4s),
         hard_sat_ice_curve=args.hard_sat_ice_curve,
         homogeneous_ice_nucleation=args.homogeneous_ice_nucleation,
         morrison_flavor=args.morrison_flavor,

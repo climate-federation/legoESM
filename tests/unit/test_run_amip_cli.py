@@ -666,6 +666,24 @@ def test_mpas_qv_smoothing_flag_flows_to_config():
     # validate_strict bounds/lane guards live in test_mpas_qv_smoothing.
 
 
+def test_mpas_qv_biharmonic_flag_flows_to_config():
+    """--mpas-qv-smooth-del4-m4s round-trip (scale-selective companion to the
+    Laplacian, 2026-09-11); default OFF, and the two coefficients are
+    independent so an arm can move one without the other."""
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_default.mpas_qv_smooth_del4_m4s == 0.0
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--grid-type", "voronoi", "--discretization", "mpas",
+        "--mpas-qv-smooth-del4-m4s", "3.6e14",
+    ]), parser))
+    assert cfg.mpas_qv_smooth_del4_m4s == 3.6e14
+    assert cfg.mpas_qv_smooth_del2_m2s == 0.0
+
+
 def test_mpas_land_beta_soil_flag_flows_to_config():
     """--mpas-land-beta-soil round-trip (#1312 phase 2b traced beta_soil);
     default byte-identical OFF, --no- form revertible from a YAML True."""

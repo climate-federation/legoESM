@@ -1448,6 +1448,22 @@ class ExperimentConfig(NamedTuple):
     # but damps resolved gradients more broadly — use a gentle coefficient.
     # MPAS-only: refused on other discretizations (validate_strict).
     mpas_qv_smooth_del2_m2s: float = 0.0   # del2 diffusivity [m^2/s]; ~1e5-1e6 typical at 240 km
+    # Scale-SELECTIVE companion to the del2 above, added 2026-09-11 after the
+    # del2's cost was measured: across thirteen arms differing only in
+    # mpas_qv_smooth_del2_m2s, the humidity field's structure-function growth
+    # exponent falls monotonically from 1.56 at 2e5 to 0.46 at 1.1e4 — i.e. the
+    # del2 IS holding grid-scale noise down, but it has to be strong enough to
+    # flatten the resolved gradients that set tropical cloud cover along with
+    # it.  A biharmonic's eigenvalue is exactly minus the SQUARE of the del2's
+    # on every mesh mode, so its damping ratio between any two scales is the
+    # del2's squared: measured on the subdivision-6 mesh, 2.47x between 240 and
+    # 479 km becomes 6.08x.  (The continuum figures 4 and 16 do not apply to
+    # the discrete operator.)  It is NOT monotone, so the q>=0 floor is
+    # load-bearing when it is on and the per-level integral is conserved only
+    # up to what that floor clips; the driver enforces nu4*dt*g_max^2 <= 0.5 at
+    # setup.  MPAS-only, same as the del2.  Default 0.0 pending the controlled
+    # pair that picks the coefficient — see the arm before changing it.
+    mpas_qv_smooth_del4_m4s: float = 0.0   # del4 diffusivity [m^4/s]
     # Prognostic sea-ice skin temperature on the MPAS lane (Semtner 1976
     # zero-layer conduction + slab thermal inertia; forcing/surface_utils
     # helper).  The prescribed-SST anchor otherwise pins ice-covered cells
@@ -1767,10 +1783,10 @@ class ExperimentConfig(NamedTuple):
             )
         for _f, _lo, _hi in (
             ("bechtold_rprcon", 3.5e-4, 5.6e-3),
-            ("bechtold_epsilon_deep", 7.0e-4, 4.2e-3),
+            ("bechtold_epsilon_deep", 7.0e-4, 1.2e-2),
             ("bechtold_delta_deep", 3.0e-5, 1.8e-4),
             ("bechtold_dnoprc", 7.5e-5, 1.2e-3),
-            ("bechtold_epsilon_deep", 5.775e-04, 3.5e-03),
+            ("bechtold_epsilon_deep", 5.775e-04, 1.2e-2),
             ("bechtold_delta_deep", 2.475e-05, 2.25e-04),
             ("bechtold_capdcycl_land_tau_scale", 0.0, 2.0),
             ("bechtold_subcloud_evap_scale", 0.1, 4.0),
@@ -2401,6 +2417,13 @@ class ExperimentConfig(NamedTuple):
                     "in its step factories (qv_smooth_coeff) and would "
                     "silently ignore it."
                 )
+            if self.mpas_qv_smooth_del4_m4s != 0.0:
+                errors.append(
+                    "mpas_qv_smooth_del4_m4s is an MPAS-lane knob; "
+                    f"discretization={d.discretization!r} already smooths q_v "
+                    "in its step factories (qv_smooth_coeff) and would "
+                    "silently ignore it."
+                )
             if self.mpas_ice_skin_prognostic:
                 errors.append(
                     "mpas_ice_skin_prognostic is an MPAS-lane knob; "
@@ -2430,6 +2453,16 @@ class ExperimentConfig(NamedTuple):
                 f"mpas_qv_smooth_del2_m2s (horizontal q_v del2 diffusivity "
                 f"[m^2/s]) must be finite in [0, 1e8]; got "
                 f"{self.mpas_qv_smooth_del2_m2s!r}."
+            )
+        # Same shape one order up: 0 = off, and the ceiling is far above any
+        # biharmonic a stable explicit step admits (the driver enforces the
+        # mesh-specific bound nu4*dt*g_max^2 <= 0.5 at setup).
+        if not (math.isfinite(self.mpas_qv_smooth_del4_m4s)
+                and 0.0 <= self.mpas_qv_smooth_del4_m4s <= 1.0e18):
+            errors.append(
+                f"mpas_qv_smooth_del4_m4s (horizontal q_v del4 diffusivity "
+                f"[m^4/s]) must be finite in [0, 1e18]; got "
+                f"{self.mpas_qv_smooth_del4_m4s!r}."
             )
         # Ice-skin inert corners: the skin integrates the physics' exported
         # surface fluxes (radiation channel), so radiation="none" would leave
@@ -2755,7 +2788,7 @@ class ExperimentConfig(NamedTuple):
             ("morrison_dep_coeff", 1.0e-4, 1.0e-2),
             ("morrison_agg_coeff", 1.0e-4, 1.0e-2),
             ("morrison_k_au", 50.0, 5000.0),
-            ("morrison_fall_a_i", 230.0, 2100.0),
+            ("morrison_fall_a_i", 230.0, 6300.0),
             ("morrison_ice_snow_d_auto", 8.0e-5, 8.0e-4),
             ("morrison_hom_ice_nuc_N", 1.0e4, 1.0e7),
         ):
