@@ -733,12 +733,13 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             v_face_now = state.v.data
             u_face_before = u_face_now
             v_face_before = v_face_now
+        _is_active = getattr(z_coord, "is_active", None)
+        _surface_tmask = None
         _face_masks_3d = None
         if _shear_disc in ("nemo_face_native", "nemo_face_native_now2"):
             from legoesm.ocean.dynamics.latlon_cgrid_operators import (
                 compute_face_masks_3d,
             )
-            _is_active = getattr(z_coord, "is_active", None)
             if _is_active is None:
                 raise ValueError(
                     "TKEConfig.tke_shear_production='nemo_face_native' "
@@ -768,6 +769,12 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     "sub-seafloor w-interfaces -- got a z_coord with no "
                     "is_active (a pure z-star column has no sub-seafloor row "
                     "for this option to act on).")
+        if getattr(vmix_cfg.tke, "tke_mxl_choice", 2) in (3, 4):
+            if _is_active is None:
+                raise ValueError(
+                    "NEMO TKE mixing-length choices require z_coord.is_active "
+                    "for the surface tmask factor.")
+            _surface_tmask = _is_active[..., 0]
         # Before-advection (Nnow) T/S for the diffusivity-stage N²
         # (TKEConfig.n2_before_advection). None ⇒ the closure uses the
         # post-advection T_data/S_data ⇒ BIT-IDENTICAL.
@@ -951,6 +958,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     t_depth=_bn2_t_depth, w_depth=_bn2_w_depth,
                     e3w_int=_bn2_e3w,
                     ice_frac=_tke_ice_fr,
+                    surface_tmask=_surface_tmask,
                 )
                 return K_H_old, K_M_old, _tke_ctx
             tke_out = tke_vertical_mixing(
@@ -970,6 +978,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 t_depth=_bn2_t_depth, w_depth=_bn2_w_depth,
                 e3w_int=_bn2_e3w,
                 ice_frac=_tke_ice_fr,
+                surface_tmask=_surface_tmask,
                 bottom_dirichlet=tke_bottom_dirichlet,
                 bottom_level=tke_bottom_level,
                 T_n2b=T_n2b, S_n2b=S_n2b,
@@ -1039,6 +1048,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
             t_depth=_bn2_t_depth, w_depth=_bn2_w_depth,
             e3w_int=_bn2_e3w,
             ice_frac=_tke_ice_fr,
+            surface_tmask=_surface_tmask,
             # T8/T13 (tke_n2_time_level="nemo_before") + T4
             # (tke_shear_production="nemo_burchard"): Mode A (prognostic)
             # already threads these; Mode B (this diagnostic/quasi-steady

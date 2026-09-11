@@ -82,6 +82,7 @@ def test_mxl_choice3_no_longer_raises_without_veros_dz_slots():
         tau_x_surface=jnp.array([[0.05]]), tau_y_surface=jnp.array([[0.0]]),
         dt=1800.0, cfg=cfg, n_iterations=1,
         dz_ref=dz_ref, jacobian=jacobian,
+        surface_tmask=jnp.ones(T.shape[:-1]),
     )
     assert np.all(np.isfinite(np.asarray(out.K_M)))
     assert np.all(np.isfinite(np.asarray(out.tke_new)))
@@ -98,6 +99,7 @@ def test_mxl_choice3_still_raises_when_cell_thickness_unavailable():
             tau_x_surface=None, tau_y_surface=None,
             dt=1800.0, cfg=cfg, n_iterations=1,
             dz_ref=None, jacobian=None,
+            surface_tmask=jnp.ones(T.shape[:-1]),
         )
 
 
@@ -265,6 +267,7 @@ def test_nemo_dino_kamm_recipe_assembles_faithful_tke():
     from legoesm.ocean.experiments.dino import (
         DINO_RECIPES, _dino_vertical_mixing_config, dino_config_for_recipe,
     )
+    from legoesm.ocean.physics.vertical_mixing.tke import _mixing_length_floor
     for card in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
         cfg = dino_config_for_recipe(card)
         vm = _dino_vertical_mixing_config(cfg)
@@ -276,8 +279,11 @@ def test_nemo_dino_kamm_recipe_assembles_faithful_tke():
         assert t.kappa_convention == "veros_sqrte"
         assert t.alpha_tke == 1.0
         assert t.n2_mode == "nemo_bn2"
-        assert abs(t.mxl0_min_m - 0.01) < 1e-12    # NEMO rmxl_min (T19; was 0.04)
-        assert abs(t.mxl_min - 0.01) < 1e-12       # NEMO rmxl_min (T18; was 1e-8)
+        expected_floor = np.float64(1.0e-6) / (
+            np.float64(t.c_k) * np.sqrt(np.float64(t.tke_background)))
+        assert np.float64(_mixing_length_floor(t)).view(np.uint64) == \
+            expected_floor.view(np.uint64)
+        assert _mixing_length_floor(t) != 0.01
         assert abs(t.c_k - 0.1) < 1e-12            # rn_ediff
         assert abs(t.c_eps - 0.7) < 1e-12         # rn_ediss
         # Phase-2 #1317 Tier A (the ranked structural suspects).
@@ -348,7 +354,6 @@ def test_nemo_dino_kamm_recipe_assembles_faithful_tke():
         assert t.tke_buoyancy_sink == "implicit_linearized"
         assert t.n2_before_advection is False
         assert t.bottom_tke_bc is False
-        assert abs(t.mxl0_min_m - 0.04) < 1e-12
         assert abs(t.mxl_min - 1e-8) < 1e-12
         assert t.kappaM_max == 100.0                 # T21: unchanged elsewhere
         assert t.tke_shear_production == "squared_centered"

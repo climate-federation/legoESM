@@ -127,8 +127,6 @@ def _model_config(
             positivity="floor",
             tke_surface_bc_level="nemo_z0",
             tke_buoyancy_sink="nemo_explicit",
-            mxl_min=0.01,
-            mxl0_min_m=0.04,
             tke_dry_wmask=True,
             kappaM_max=float("inf"),
             tke_preclosure_coeff_source="carried_previous_step",

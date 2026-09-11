@@ -54,9 +54,23 @@ def test_reader_accepts_complete_schema(tmp_path):
     assert tuple(result["arrays"]["taum_entry"].shape) == (32, 22)
 
 
-@pytest.mark.parametrize("plant", ["header", "truncation", "nan", "config", "copy"])
+@pytest.mark.parametrize(
+    "plant", ["header", "truncation", "nan", "config", "copy", "shape"])
 def test_reader_plants_fail(tmp_path, plant):
     path = tmp_path / "record.bin"
     _record(path)
     with pytest.raises(MODULE.GateError):
         MODULE.read_record(path, plant=plant)
+
+
+def test_stamp_plant_exits_nonzero_before_report_emission(tmp_path):
+    path = tmp_path / "record.bin"
+    producer = tmp_path / "producer_commit.txt"
+    _record(path)
+    producer.write_text("1" * 40 + "\n")
+    assert MODULE.main([
+        "--record", str(path),
+        "--expect-commit", "1" * 40,
+        "--producer-commit", str(producer),
+        "--plant", "stamp",
+    ]) == 1

@@ -8,6 +8,7 @@ References: NEMO 5.0.1 src/OCE/ZDF/zdftke.F90 (lines 305-370 Langmuir,
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from types import SimpleNamespace
 
 os.environ.setdefault("JAX_ENABLE_X64", "1")
@@ -39,15 +40,47 @@ _RHO0 = 1026.0
 def test_ln_mxl0_uses_derived_rmxl_min_not_raw_namelist_value():
     """NEMO overwrites rn_mxl0=rmxl_min when ln_mxl0 is true."""
     from legoesm import constants
-    from legoesm.ocean.physics.vertical_mixing.tke import _mxl0_surface_anchor
+    from legoesm.ocean.physics.vertical_mixing.tke import (
+        _mixing_length_floor, _mxl0_surface_anchor,
+    )
 
-    cfg = TKEConfig(tke_mxl_choice=3, mxl_min=0.01, mxl0_min_m=0.04)
-    calm = _mxl0_surface_anchor(cfg, jnp.asarray([0.0]), _RHO0, constants.g)
-    np.testing.assert_array_equal(np.asarray(calm), np.asarray([0.01]))
+    cfg = TKEConfig(
+        tke_mxl_choice=3, mxl_min=0.04, c_k=0.1,
+        tke_background=1.0e-6)
+    expected = np.float64(1.0e-6) / (
+        np.float64(cfg.c_k) * np.sqrt(np.float64(cfg.tke_background)))
+    floor = _mixing_length_floor(cfg)
+    assert np.float64(floor).view(np.uint64) == expected.view(np.uint64)
+    assert floor != 0.01  # planted old card literal is one ULP too high
+    calm = _mxl0_surface_anchor(
+        cfg, jnp.asarray([0.0]), _RHO0, constants.g, jnp.asarray([1.0]))
+    np.testing.assert_array_equal(np.asarray(calm), np.asarray([expected]))
 
-    # Plant the old transcription: the raw namelist value must be observable
-    # as different, otherwise this test could not reject the defect.
-    assert float(np.asarray(calm)[0]) != cfg.mxl0_min_m
+    # Shipped zdftke.F90:602 multiplies stress by tmask before the MAX floor.
+    dry = _mxl0_surface_anchor(
+        cfg, jnp.asarray([1.0]), _RHO0, constants.g, jnp.asarray([0.0]))
+    np.testing.assert_array_equal(np.asarray(dry), np.asarray([expected]))
+    assert not hasattr(cfg, "mxl0_min_m")
+
+    with pytest.raises(ValueError, match="surface_tmask"):
+        _mxl0_surface_anchor(
+            cfg, jnp.asarray([1.0]), _RHO0, constants.g, None)
+
+    # The card fields remain differentiable; deriving the floor must not
+    # convert a traced rn_ediff to a host scalar.
+    grad = jax.grad(lambda ediff: _mixing_length_floor(
+        TKEConfig(tke_mxl_choice=3, c_k=ediff, tke_background=1.0e-6)))
+    assert np.isfinite(float(grad(jnp.asarray(0.1, dtype=jnp.float64))))
+
+
+def test_zero_step_probe_uses_the_shared_derived_floor():
+    """The diagnostic must not reconstruct a different surface floor."""
+    repo = Path(__file__).resolve().parents[3]
+    source = (
+        repo / "scripts/validate/ocean_fidelity/nemo_zero_step_closure.py"
+    ).read_text()
+    assert "_rmxl_min = _mixing_length_floor(cfg)" in source
+    assert "cfg.mxl0_min_m" not in source
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +463,8 @@ class TestOrchestratorWiring:
                 T * 0, T * 0, T, S, rho, dz_half, tke_old, tau, tau0,
                 cfg, 1026.0, 9.81, p_cell=p, dz_ref=z.dz_ref, jacobian=J,
                 eos_fn=eos_fn, z_interface=z.z_half_ref[1:-1],
-                dz_surface=0.5 * z.dz_half_ref[0] * J)
+                dz_surface=0.5 * z.dz_half_ref[0] * J,
+                surface_tmask=jnp.ones_like(tau))
             assert (ctx.langmuir_source is not None) == lc
             n2 = jnp.full(shape[:-1] + (nlev - 1,), 1e-6)
             outs[lc] = tke_integrate_post_mixing(
@@ -794,7 +828,8 @@ class TestNemoZ0SurfaceBCPlacement:
         out = tke_vertical_mixing(
             u, v, T, S, rho, dz_half, tke_old, tx, ty, dt=1800.0, cfg=cfg,
             rho_0=_RHO0, n_iterations=1, dz_ref=dz_ref, jacobian=jacobian,
-            dz_surface=dz_surface, z_interface=z_int)
+            dz_surface=dz_surface, z_interface=z_int,
+            surface_tmask=jnp.ones(T.shape[:-1]))
 
         # Independent hand-solve on the SAME inputs the orchestrator computed
         # internally: reconstruct N2/shear/K_M/l_eps/e_sfc from the same
@@ -842,7 +877,8 @@ class TestNemoZ0SurfaceBCPlacement:
         out = tke_vertical_mixing(
             u, v, T, S, rho, dz_half, tke_old, tx, ty, dt=1800.0, cfg=cfg,
             rho_0=_RHO0, n_iterations=1, dz_ref=dz_ref, jacobian=jacobian,
-            dz_surface=dz_surface, z_interface=z_int)
+            dz_surface=dz_surface, z_interface=z_int,
+            surface_tmask=jnp.ones(T.shape[:-1]))
 
         from legoesm.ocean.physics.vertical_mixing.tke import (
             _NEMO_TKE_EBB, _NEMO_TKE_EMIN0, _mxl0_surface_anchor,
@@ -862,7 +898,8 @@ class TestNemoZ0SurfaceBCPlacement:
         taum = float(np.asarray(taum_batch)[0, 0])
         e_sfc = max(_NEMO_TKE_EMIN0, _NEMO_TKE_EBB / _RHO0 * taum)
         e_old_np = np.asarray(tke_old)[0, 0]
-        l_anchor = _mxl0_surface_anchor(cfg, taum_batch, _RHO0, g)  # (1, 1)
+        l_anchor = _mxl0_surface_anchor(
+            cfg, taum_batch, _RHO0, g, jnp.ones_like(taum_batch))  # (1, 1)
         dz_cell = dz_ref * jacobian[..., None]
         l_k, l_eps = compute_mixing_lengths(
             tke_old, jnp.asarray(N2_arr), dz_half, cfg, signed_n2=False,

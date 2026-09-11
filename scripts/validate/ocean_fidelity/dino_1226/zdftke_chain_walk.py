@@ -186,8 +186,9 @@ def main() -> int:
     )
     require_fp64(st, context="zdftke_chain_walk twin state")
     tke_cfg = mc.physics.vertical_mixing.tke
+    from legoesm.ocean.physics.vertical_mixing.tke import _mixing_length_floor
     print(f"TKEConfig: c_k={tke_cfg.c_k} c_eps={tke_cfg.c_eps} "
-          f"mxl_min={tke_cfg.mxl_min} mxl0_min_m={tke_cfg.mxl0_min_m} "
+          f"mxl_min={_mixing_length_floor(tke_cfg):.17g} "
           f"tke_mxl_choice={tke_cfg.tke_mxl_choice} "
           f"prandtl_mode={tke_cfg.prandtl_mode} "
           f"prandtl_ri_coeff={tke_cfg.prandtl_ri_coeff} "
@@ -389,7 +390,8 @@ def main() -> int:
     taum_lego = np.sqrt(np.maximum(taum_lego, 0.0))
     # taum has the twin's own (ny,nx) shape; broadcast-match mesh_mask grid.
     l_sfc = _mxl0_surface_anchor(
-        tke_cfg, jnp.asarray(taum_lego), rho_0=1026.0, g=9.80665)
+        tke_cfg, jnp.asarray(taum_lego), rho_0=1026.0, g=9.80665,
+        surface_tmask=jnp.asarray(tmask[..., 0]))
     l_k, l_eps = compute_mixing_lengths(
         e_interior, N2_interior, jnp.zeros_like(e_interior),
         tke_cfg, dz_cell=dz_cell, l_surface_anchor=l_sfc,

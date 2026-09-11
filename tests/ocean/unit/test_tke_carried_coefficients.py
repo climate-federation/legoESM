@@ -332,26 +332,30 @@ def test_literal_raw_mxl_matches_hand_computed_source_order_and_red_control():
     dz = jnp.full((1, 3), 1.0e12)
     cfg = TKEConfig(tke_mxl_choice=3, mxl_min=0.01,
                     tke_mxl_raw_evaluation="nemo_literal")
+    floor = tke_mod._mixing_length_floor(cfg)
     lk, _ = tke_mod.compute_mixing_lengths(e, n2, dz[..., :2], cfg,
-                                            dz_cell=dz)
+                                            dz_cell=dz,
+                                            l_surface_anchor=jnp.asarray([floor]))
     rsmall = 0.5 * np.finfo(np.float64).eps
-    raw = np.maximum(0.01, np.sqrt((2.0 * np.asarray(e))
-                                   / np.maximum(np.asarray(n2), rsmall)))
+    raw = np.maximum(floor, np.sqrt((2.0 * np.asarray(e))
+                                    / np.maximum(np.asarray(n2), rsmall)))
     # With a huge dz allowance, the scan retains the raw physical interior;
     # the final carried slot is NEMO's untouched jpk pad.
-    raw[..., -1] = 0.01
+    raw[..., -1] = floor
     np.testing.assert_array_equal(np.asarray(lk).view(np.uint64),
                                   raw.view(np.uint64))
 
     factored, _ = tke_mod.compute_mixing_lengths(
         e, n2, dz[..., :2],
-        cfg._replace(tke_mxl_raw_evaluation="factored"), dz_cell=dz)
+        cfg._replace(tke_mxl_raw_evaluation="factored"), dz_cell=dz,
+        l_surface_anchor=jnp.asarray([floor]))
     assert np.asarray(factored)[0, 0].view(np.uint64) != raw[0, 0].view(np.uint64)
 
     with pytest.raises(ValueError, match="tke_mxl_raw_evaluation"):
         tke_mod.compute_mixing_lengths(
             e, n2, dz[..., :2],
-            cfg._replace(tke_mxl_raw_evaluation="unknown"), dz_cell=dz)
+            cfg._replace(tke_mxl_raw_evaluation="unknown"), dz_cell=dz,
+            l_surface_anchor=jnp.asarray([floor]))
 
 
 def test_literal_mxl_ldown_keeps_jpk_terminal_seed_unmodified():
@@ -359,19 +363,19 @@ def test_literal_mxl_ldown_keeps_jpk_terminal_seed_unmodified():
     n2 = jnp.full_like(e, 1.0e-12)
     dz_cell = jnp.asarray([[1.0, 2.0, 3.0, 4.0]])
     cfg = TKEConfig(tke_mxl_choice=3, mxl_min=0.01,
-                    mxl0_min_m=0.01,
                     tke_mxl_raw_evaluation="nemo_literal")
+    floor = tke_mod._mixing_length_floor(cfg)
     lk, _ = tke_mod.compute_mixing_lengths(
         e, n2, jnp.ones_like(e), cfg, dz_cell=dz_cell,
-        l_surface_anchor=jnp.asarray([0.01]))
+        l_surface_anchor=jnp.asarray([floor]))
     # The final carried slot is NEMO's untouched jpk pad, not another raw
     # buoyancy-length row.  The old recurrence produced 4.01 here.
-    assert float(lk[0, -1]) == 0.01
+    assert float(lk[0, -1]) == floor
     legacy, _ = tke_mod.compute_mixing_lengths(
         e, n2, jnp.ones_like(e),
         cfg._replace(tke_mxl_raw_evaluation="factored"),
-        dz_cell=dz_cell, l_surface_anchor=jnp.asarray([0.01]))
-    assert float(legacy[0, -1]) != 0.01
+        dz_cell=dz_cell, l_surface_anchor=jnp.asarray([floor]))
+    assert float(legacy[0, -1]) != floor
 
 
 @pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")

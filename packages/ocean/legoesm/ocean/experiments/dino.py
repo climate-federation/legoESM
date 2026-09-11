@@ -576,14 +576,11 @@ class DINOConfig:
     # T8 — Prandtl chain: NEMO's EXACT zri=rn2b*avm/(sh2+bshear) form
     # ("nemo_ri"), not Veros's own Ri=N2/shear_sq ("richardson", missing
     # the avm factor — see tke_prandtl_ri below, now wired to "nemo_ri").
-    # T18/T19 — mixing-length floors: NEMO's ln_mxl0 init OVERWRITES BOTH
-    # rn_mxl0 (surface) and rmxl_min (interior) to the SAME derived value
-    # rmxl_min=1e-6/(rn_ediff*sqrt(rn_emin))=0.01 m for DINO's rn_ediff=0.1,
-    # rn_emin=1e-6 (zdftke.F90:846,859-863) — the namelist rn_mxl0=0.04 is
-    # DEAD CODE once ln_mxl0=T. legoESM defaults: mxl_min=1e-8 (interior,
-    # WRONG SIGN vs NEMO's larger floor), mxl0_min_m=0.04 (dead value).
-    tke_mxl_min_m: float = 1.0e-8                # 0.01 = NEMO rmxl_min
-    tke_mxl0_min_m: float = 0.04                 # 0.01 = NEMO rmxl_min (dead namelist value)
+    # T18/T19 — non-NEMO recipes retain their configured mixing-length floor.
+    # NEMO choices derive rmxl_min from c_k/tke_background in the shared TKE
+    # implementation (shipped zdftke.F90:845-847), so this field is not a
+    # hidden NEMO-card choice.
+    tke_mxl_min_m: float = 1.0e-8                # non-NEMO configured floor
     # T18b — DRY-w-point TKE: NEMO closes tke_tke with
     # `en = MAX(en,rn_emin) * wmask` (cfgs/DINO/MY_SRC/zdftke.F90:565 =
     # upstream src/OCE/ZDF/zdftke.F90:469), so en is EXACTLY 0 below the
@@ -1237,8 +1234,6 @@ DINO_RECIPES: dict[str, dict] = {
         "convection_two_level_trigger": True,    # zdfevd MIN(rn2,rn2b) (zdfevd.F90:119)
         # -- Phase-2 #1317 Tier C: small faithful items (tke_prandtl_ri --
         #    already True above -> "nemo_ri" mode, see _dino_vertical_mixing_config) --
-        "tke_mxl_min_m": 0.01,                   # NEMO rmxl_min (interior floor; was 1e-8)
-        "tke_mxl0_min_m": 0.01,                  # NEMO rmxl_min (ln_mxl0 overwrites rn_mxl0=0.04)
         # `en = MAX(en,rn_emin)*wmask` (MY_SRC/zdftke.F90:565 = upstream
         # :469) -> en==0 below the seafloor -> zmxlm==rmxl_min (:759 / :651)
         "tke_dry_wmask": True,
@@ -3102,7 +3097,6 @@ def _dino_vertical_mixing_config(cfg: DINOConfig):
             tke_surface_bc_level=cfg.tke_surface_bc_level,
             tke_buoyancy_sink=cfg.tke_buoyancy_sink,
             mxl_min=cfg.tke_mxl_min_m,
-            mxl0_min_m=cfg.tke_mxl0_min_m,
             tke_dry_wmask=cfg.tke_dry_wmask,
             bottom_tke_bc=cfg.tke_bottom_bc,
             tke_shear_production=cfg.tke_shear_production,

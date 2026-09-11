@@ -165,22 +165,57 @@ _NEMO_TKE_CDRAG = 1.5e-3       # zcdrag [-] surface drag coeff      (zdftke.F90:
 # |τ| = ρ_air·C_d·U₁₀² and the Stokes drift u_s = 0.016·U₁₀) (zdftke.F90:243)
 _NEMO_TKE_LC_CSD = 0.5 * 0.016 * 0.016 / (_NEMO_TKE_RHO_AIR * _NEMO_TKE_CDRAG)
 _NEMO_MXL0_VKARMN = 0.4        # vkarmn (phycst) — the ln_mxl0 anchor prefactor
-_NEMO_MXL0_LENGTH_SCALE = 2.0e5  # zraug numerator [m*kg/(m*s^2)^-1... NEMO zdftke:575]
+_NEMO_MXL0_LENGTH_SCALE = 2.0e5  # zraug numerator; shipped zdftke.F90:575
+_NEMO_MOLECULAR_VISCOSITY = 1.0e-6
 
 
-def _mxl0_surface_anchor(cfg: "TKEConfig", taum, rho_0: float, g: float):
-    """ln_mxl0 surface mixing-length anchor (single owner; zdftke:575+602):
+def _mixing_length_floor(cfg: "TKEConfig"):
+    """Return the active scheme's mixing-length floor.
+
+    NEMO derives ``rmxl_min = 1.e-6_wp / (rn_ediff*SQRT(rn_emin))``
+    in binary64 (shipped ``zdftke.F90:845-847``; GYRE preprocessed
+    ``zdftke.f90:815-817``). legoESM's corresponding card fields are ``c_k``
+    (``rn_ediff``) and ``tke_background`` (``rn_emin``). Keep the source
+    association exactly; in particular, do not replace division by a
+    reciprocal. Veros choices retain their independently configured floor.
+    """
+    if cfg.tke_mxl_choice not in (3, 4):
+        return cfg.mxl_min
+    if not jax.config.x64_enabled:
+        raise ValueError("NEMO-derived rmxl_min requires JAX binary64 enabled")
+    rn_ediff = jnp.asarray(cfg.c_k, dtype=jnp.float64)
+    rn_emin = jnp.asarray(cfg.tke_background, dtype=jnp.float64)
+    return (jnp.asarray(_NEMO_MOLECULAR_VISCOSITY, dtype=jnp.float64)
+            / (rn_ediff * jnp.sqrt(rn_emin)))
+
+
+def _mxl0_surface_anchor(
+    cfg: "TKEConfig", taum, rho_0: float, g: float, surface_tmask,
+):
+    """ln_mxl0 surface anchor (shipped zdftke.F90:575,598-603,640-642).
+
     zdf_tke_init first overwrites rn_mxl0 with the derived rmxl_min when
-    ln_mxl0 is true (zdftke:828-831), then tke_avn evaluates
+    ln_mxl0 is true (shipped zdftke.F90:859-862; GYRE ppsrc:829-832), then
+    tke_avn evaluates
     l_sfc=max(rn_mxl0,vkarmn*2e5/(rho0*g)*taum). None unless the choice is a
     NEMO nn_mxl scheme (3 = nn_mxl=3, 4 = nn_mxl=2); ORCA1 sets ln_mxl0=.true.
     independently of nn_mxl, so BOTH need the anchor."""
     if cfg.tke_mxl_choice not in (3, 4):
         return None
+    if surface_tmask is None:
+        raise ValueError(
+            "NEMO tke_mxl_choice 3/4 requires surface_tmask for the "
+            "compiled `taum*tmask(:,:,1)` ln_mxl0 statement.")
+    taum = jnp.asarray(taum)
+    surface_tmask = jnp.asarray(surface_tmask, dtype=taum.dtype)
+    if surface_tmask.shape != taum.shape:
+        raise ValueError(
+            "surface_tmask must match taum; got "
+            f"{surface_tmask.shape} vs {taum.shape}.")
     return jnp.maximum(
-        jnp.asarray(cfg.mxl_min),
+        jnp.asarray(_mixing_length_floor(cfg), dtype=taum.dtype),
         _NEMO_MXL0_VKARMN * _NEMO_MXL0_LENGTH_SCALE / (rho_0 * g)
-        * jnp.maximum(taum, 0.0))
+        * jnp.maximum(taum, 0.0) * surface_tmask)
 _NEMO_TKE_EBB = 67.83          # rn_ebb  namelist_ref default — surface TKE input coef
 _NEMO_TKE_EMIN0 = 1.0e-4       # rn_emin0 [m²/s²] surface TKE minimum
 
@@ -708,21 +743,22 @@ def compute_mixing_lengths(
     l_k, l_eps : (..., nlev-1) — for use in K = c_k·l_k·sqrt(2e) and
         eps = c_eps·e^{3/2} / l_eps respectively.
     """
+    mxl_min = _mixing_length_floor(cfg)
     if cfg.tke_mxl_choice == 2:
         if signed_n2:
             # Veros mxl_choice=2: a single length used for BOTH K_M
             # (l_k) and dissipation (l_eps), as in veros/core/tke.py.
             l_buoy = _veros_buoyancy_length(
-                e, N2, dz_half, cfg.mxl_min, dz_cell=dz_cell)
+                e, N2, dz_half, mxl_min, dz_cell=dz_cell)
             return l_buoy, l_buoy
         l_up, l_dn = _bougeault_lacarrere_lengths(
-            e, N2, dz_half, cfg.mxl_min,
+            e, N2, dz_half, mxl_min,
         )
-        l_k = jnp.sqrt(jnp.maximum(l_up * l_dn, cfg.mxl_min ** 2))
+        l_k = jnp.sqrt(jnp.maximum(l_up * l_dn, mxl_min ** 2))
         l_eps = jnp.maximum(l_up, l_dn)
     elif cfg.tke_mxl_choice in (3, 4):
         # --- NEMO nn_mxl=3 (choice 3) / nn_mxl=2 (choice 4) + ln_mxl0 ---
-        # (zdftke.F90:575, 588-614, 658-690).  Both share the lup/ldown sweeps;
+        # (GYRE ppsrc zdftke.f90:593-675). Both share the lup/ldown sweeps;
         # they differ ONLY in the final l_eps (see below).
         if dz_cell is None:
             raise ValueError(
@@ -734,15 +770,20 @@ def compute_mixing_lengths(
         raw_evaluation = getattr(cfg, "tke_mxl_raw_evaluation", "factored")
         l_int = _tke_raw_mixing_length(e, N2, cfg)
         # ln_mxl0 surface anchor l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum)
-        # (zdftke:575+602), computed by the CALLER (which owns taum/rho_0/g)
-        # and passed via l_surface_anchor; None => the effective rn_mxl0 floor.
+        # (shipped zdftke.F90:575,598-603,640-642), computed by the CALLER
+        # (which owns taum/rho_0/g and the surface tmask)
+        # and passed via l_surface_anchor. The no-anchor fallback used to claim
+        # NEMO's ln_mxl0=F branch, but that branch uses raw rn_mxl0
+        # (GYRE ppsrc zdftke.f90:614-615), not rmxl_min; fail closed because
+        # legoESM exposes only the ln_mxl0=T NEMO path.
         # With ln_mxl0, NEMO overwrites the namelist rn_mxl0 with rmxl_min at
-        # initialization (zdftke.F90:828-831), so cfg.mxl0_min_m is not live.
+        # initialization (shipped zdftke.F90:859-862; GYRE ppsrc:829-832).
         if l_surface_anchor is not None:
             l_sfc = jnp.asarray(l_surface_anchor, dtype=l_int.dtype)
         else:
-            l_sfc = jnp.full(l_int.shape[:-1], cfg.mxl_min,
-                             dtype=l_int.dtype)
+            raise ValueError(
+                "NEMO tke_mxl_choice 3/4 requires l_surface_anchor; "
+                "ln_mxl0=False would require a separate raw rn_mxl0 path.")
         # W-row stack: surface anchor + interior interfaces
         l_w = jnp.concatenate([l_sfc[..., None], l_int], axis=-1)  # (..., nlev)
         e3t = dz_cell                                              # (..., nlev) or (..., nlev+1)
@@ -786,10 +827,11 @@ def compute_mixing_lengths(
         # ldown: upward scan  l(k) = min(l(k+1) + e3t(k+1), l(k)),
         # jk = jpkm1 downto 2 (zdftke.F90:786-789, DINO MY_SRC copy).
         #
-        # The carry MUST be seeded from ``cfg.mxl_min`` (NEMO's rmxl_min),
+        # The carry MUST be seeded from NEMO's derived ``rmxl_min``,
         # not from ``lT[-1]`` (the raw buoyancy length at the deepest
         # carried row, NEMO jk=jpkm1). NEMO's ``zmxlm(:,:)`` is initialised
-        # to ``rmxl_min`` for ALL jk (zdftke.F90:678) BEFORE the raw-fill
+        # to ``rmxl_min`` for ALL jk (GYRE ppsrc zdftke.f90:593-595) BEFORE
+        # the raw-fill at :619-621
         # loop, which only runs jk=2..jpkm1 (:739-742) — so ``zmxlm(jpk)``
         # is NEVER overwritten and stays at ``rmxl_min``. The ldown sweep's
         # FIRST iteration (jk=jpkm1) reads exactly that untouched
@@ -808,7 +850,7 @@ def compute_mixing_lengths(
         # supply), ``e3_bottom`` falls back to ``e3t(jpkm1)`` — a
         # documented, BOUNDED proxy (was UNBOUNDED before this fix).
         _seed = jnp.broadcast_to(
-            jnp.asarray(cfg.mxl_min, dtype=lT.dtype), lT.shape[1:])
+            jnp.asarray(mxl_min, dtype=lT.dtype), lT.shape[1:])
         if raw_evaluation == "nemo_literal":
             # NEMO leaves zmxlm(jpk) at rmxl_min and uses that UNMODIFIED
             # terminal pad as the carry for the first jk=jpkm1 iteration.
@@ -827,7 +869,7 @@ def compute_mixing_lengths(
                 [lT[:1], ldn_rest[::-1], first_ldn[None]], axis=0)
         lup = jnp.moveaxis(lup, 0, -1)[..., 1:]                    # interior
         ldn = jnp.moveaxis(ldn, 0, -1)[..., 1:]                    # interior
-        l_k = jnp.maximum(jnp.minimum(lup, ldn), cfg.mxl_min)
+        l_k = jnp.maximum(jnp.minimum(lup, ldn), mxl_min)
         if cfg.tke_mxl_choice == 4:
             # --- NEMO nn_mxl=2 (zdftke.F90:680-688) ---
             # CASE(2) applies BOTH slope sweeps sequentially IN PLACE to one
@@ -848,7 +890,7 @@ def compute_mixing_lengths(
             # lever, not a global one.  ORCA1's namelist runs nn_mxl=2.
             l_eps = l_k
         else:
-            l_eps = jnp.maximum(jnp.sqrt(lup * ldn), cfg.mxl_min)
+            l_eps = jnp.maximum(jnp.sqrt(lup * ldn), mxl_min)
     elif cfg.tke_mxl_choice == 1:
         # Veros buoyancy length, ``tke_mxl_choice=1`` (veros/core/tke.py:30-47):
         #   sqrttke = sqrt(max(0, e));  mxl = sqrt(2)·sqrttke / sqrt(max(1e-12, N²))
@@ -877,7 +919,7 @@ def compute_mixing_lengths(
         l_k = jnp.sqrt(2.0) * sqrttke / jnp.sqrt(N2_safe)
         if boundary_cap is not None:
             l_k = jnp.minimum(l_k, boundary_cap)
-        l_k = jnp.maximum(l_k, cfg.mxl_min)
+        l_k = jnp.maximum(l_k, mxl_min)
         l_eps = l_k
     else:
         raise ValueError(
@@ -894,21 +936,22 @@ def _tke_raw_mixing_length(
 ) -> jnp.ndarray:
     """Production selector for the pre-scan TKE buoyancy mixing length."""
     raw_evaluation = getattr(cfg, "tke_mxl_raw_evaluation", "factored")
+    mxl_min = _mixing_length_floor(cfg)
     if raw_evaluation == "factored":
         # Historical shared expression: keep byte-identical for every
         # non-DINO consumer.
         sqrt2e = jnp.sqrt(2.0) * jnp.where(
             e > 0.0, jnp.sqrt(jnp.where(e > 0.0, e, 1.0)), 0.0)
         n_safe = jnp.sqrt(jnp.maximum(n2, 1.0e-12))
-        return jnp.maximum(sqrt2e / n_safe, cfg.mxl_min)
+        return jnp.maximum(sqrt2e / n_safe, mxl_min)
     if raw_evaluation == "nemo_literal":
-        # zdftke.F90:831-833, compiled under DINO's -fdefault-real-8:
+        # GYRE ppsrc zdftke.f90:619-621, compiled in binary64:
         # rsmall=0.5*EPSILON(1.e0), then SQRT((2*en)/zrn2).
         rsmall = 0.5 * jnp.finfo(e.dtype).eps
         zrn2 = jnp.maximum(n2, rsmall)
         return jnp.maximum(
             jnp.sqrt((jnp.asarray(2.0, e.dtype) * e) / zrn2),
-            cfg.mxl_min)
+            mxl_min)
     raise ValueError(
         "Unknown TKEConfig.tke_mxl_raw_evaluation: expected "
         f"'factored' or 'nemo_literal', got {raw_evaluation!r}.")
@@ -1331,7 +1374,8 @@ def _solve_tke_backward_euler(
     if literal_matrix:
         diss_rate = cfg.c_eps * jnp.asarray(dissl_old, dtype=e_old.dtype)
     else:
-        diss_rate = cfg.c_eps * e_sqrt / jnp.maximum(l_eps, cfg.mxl_min)
+        diss_rate = cfg.c_eps * e_sqrt / jnp.maximum(
+            l_eps, _mixing_length_floor(cfg))
     _buoy_disc = getattr(cfg, "tke_buoyancy_sink", "implicit_linearized")
     if _buoy_disc not in ("implicit_linearized", "nemo_explicit"):
         raise ValueError(
@@ -2481,6 +2525,7 @@ def tke_vertical_mixing(
     w_depth: jnp.ndarray | None = None,
     e3w_int: jnp.ndarray | None = None,
     ice_frac: jnp.ndarray | None = None,
+    surface_tmask: jnp.ndarray | None = None,
     bottom_dirichlet: jnp.ndarray | None = None,
     bottom_level: jnp.ndarray | None = None,
     T_n2b: jnp.ndarray | None = None,
@@ -3063,7 +3108,7 @@ def tke_vertical_mixing(
     # Sub-iteration loop (Mode B convergence; Mode A uses n_iterations=1).
     tke_curr = tke_old
     # NEMO ln_mxl0 anchor for nn_mxl=3: l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum)
-    _l_anchor = _mxl0_surface_anchor(cfg, taum, rho_0, g)
+    _l_anchor = _mxl0_surface_anchor(cfg, taum, rho_0, g, surface_tmask)
     # T3-exact: NEMO's TRUE surface-w-level viscosity avm(jk=1)
     # (:func:`nemo_surface_avm`), consulted only by the nemo_z0 face
     # assembly. Requires the ln_mxl0 anchor (tke_mxl_choice=3) and a held
@@ -3319,6 +3364,7 @@ def tke_set_diffusivities(
     w_depth: jnp.ndarray | None = None,
     e3w_int: jnp.ndarray | None = None,
     ice_frac: jnp.ndarray | None = None,
+    surface_tmask: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, TKEPostMixingContext]:
     """Veros ``set_tke_diffusivities`` (tke.py:20-113) from the CARRIED TKE.
 
@@ -3394,7 +3440,7 @@ def tke_set_diffusivities(
     else:
         langmuir_source = None
 
-    _l_anchor = _mxl0_surface_anchor(cfg, taum, rho_0, g)
+    _l_anchor = _mxl0_surface_anchor(cfg, taum, rho_0, g, surface_tmask)
     l_k, l_eps = compute_mixing_lengths(
         tke_old, N2, dz_half, cfg, signed_n2=True, dz_cell=dz_cell,
         boundary_cap=boundary_cap, l_surface_anchor=_l_anchor)
@@ -3614,7 +3660,8 @@ def tke_integrate_post_mixing(
     c = jnp.concatenate(
         [-delta / vol[..., :n_w - 1], jnp.zeros_like(delta[..., :1])],
         axis=-1)
-    _diss_w = cfg.c_eps * sqrttke_w / jnp.maximum(mxl_w, cfg.mxl_min)
+    _diss_w = cfg.c_eps * sqrttke_w / jnp.maximum(
+        mxl_w, _mixing_length_floor(cfg))
     _disc = getattr(cfg, "dissipation_discretization", "backward_euler")
     if _disc == "nemo_1p5_split":
         # NEMO zdftke semi-implicit dissipation split (zdftke.F90:241-242,

@@ -706,7 +706,8 @@ def test_nn_mxl_choices_3_and_4_end_to_end_anchor_and_jacobian():
             u, u, T, S, eos_fn(T, S, p), dz_half, tke_old, None, None,
             cfg, RHO_0, G, taum_surface=taum, p_cell=p,
             dz_ref=zc.dz_ref, jacobian=J, eos_fn=eos_fn,
-            z_interface=zc.z_half_ref[1:-1], dz_surface=dz_surface)
+            z_interface=zc.z_half_ref[1:-1], dz_surface=dz_surface,
+            surface_tmask=jnp.ones_like(taum))
 
     for choice in (3, 4):
         cfg = PM_CFG._replace(tke_mxl_choice=choice)

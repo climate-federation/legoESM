@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed reader for the round-55 WRITE-only kt=2 TKE record."""
+"""Fail-closed reader for the round-56 WRITE-only kt=2 TKE record."""
 
 from __future__ import annotations
 
@@ -10,7 +10,9 @@ from pathlib import Path
 
 import numpy as np
 
-MAGIC = b"NEMO_L2_R55TKE2 "
+from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+MAGIC = b"NEMO_L2_R56TKE2 "
 FIELDS = (
     "rn_Dt", "rn_ediff", "rn_ediss", "rn_ebb", "rn_emin", "rn_emin0",
     "rmxl_min", "rn_mxl0", "rn_bshear", "rn_lc", "nn_pdl", "nn_mxl",
@@ -54,6 +56,8 @@ def read_record(path: Path, *, plant: str | None = None) -> dict:
     keys = ("version", "kt", "Kbb", "Kmm", "jpi", "jpj", "jpk", "jpkm1",
             "ntsi", "ntei", "ntsj", "ntej", "real_bits")
     head = dict(zip(keys, header, strict=True))
+    if plant == "shape":
+        head["jpi"] += 1
     require(head["version"] == 2 and head["kt"] == 2,
             f"unexpected version/kt {head['version']}/{head['kt']}")
     require((head["jpi"], head["jpj"], head["jpk"], head["jpkm1"])
@@ -76,6 +80,13 @@ def read_record(path: Path, *, plant: str | None = None) -> dict:
             value = value.reshape(()).item()
         arrays[label] = value
     require(offset == len(raw), f"record has {len(raw) - offset} trailing bytes")
+    expected_2d = (head["jpi"], head["jpj"])
+    expected_3d = (*expected_2d, head["jpk"])
+    for name, value in arrays.items():
+        shape = np.shape(value)
+        if shape:
+            require(shape == (expected_2d if name == "taum_entry" else expected_3d),
+                    f"{name} shape {shape} disagrees with stamped extents")
 
     if plant == "nan":
         arrays["avt_pre_evd"] = np.array(arrays["avt_pre_evd"], copy=True)
@@ -126,7 +137,7 @@ def main(argv=None) -> int:
     parser.add_argument("--producer-commit", type=Path, required=True)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant", choices=(
-        "header", "truncation", "nan", "config", "copy", "stamp"))
+        "header", "truncation", "nan", "config", "copy", "shape", "stamp"))
     args = parser.parse_args(argv)
     try:
         expected = args.expect_commit.lower()
@@ -145,7 +156,8 @@ def main(argv=None) -> int:
                 "max": float(np.max(arr)),
             }
         report = {
-            "format": "gyre-round55-tke-operands-v2",
+            "format": "gyre-round56-tke-operands-v2",
+            "worktree": worktree_stamp(),
             "producer_commit": producer,
             "record": str(args.record),
             "header": rec["header"],

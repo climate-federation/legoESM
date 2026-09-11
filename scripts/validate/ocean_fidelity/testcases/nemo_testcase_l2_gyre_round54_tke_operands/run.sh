@@ -8,9 +8,9 @@ set -euo pipefail
 export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:${PATH}
 readonly NEMO_ROOT=${NEMO_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
 readonly SOURCE_CFG=GYRE_OMIP_L2_P3_SM_R46KT2
-readonly TARGET_CFG=GYRE_OMIP_L2_P3_SM_R55TKE
+readonly TARGET_CFG=GYRE_OMIP_L2_P3_SM_R56TKE
 readonly SOURCE_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round46/oracle_kt2_stage
-readonly TARGET_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round55/oracle_tke_operands
+readonly TARGET_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round56/oracle_tke_operands
 readonly FINAL_RESTART=GYRE_OMIP_L2_P3_00000010_restart.nc
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
@@ -118,7 +118,7 @@ touch "$TARGET_ROOT/MY_SRC/"*.F90
 ./makenemo -n "$TARGET_CFG" -m conda-scalarmath del_key 'key_xios'
 readonly BINARY=$TARGET_ROOT/BLD/bin/nemo.exe
 [[ -x "$BINARY" ]]
-grep -q 'NEMO_L2_R55TKE2' "$TARGET_ROOT/BLD/ppsrc/nemo/l2_r54_tke.f90"
+grep -q 'NEMO_L2_R56TKE2' "$TARGET_ROOT/BLD/ppsrc/nemo/l2_r54_tke.f90"
 grep -q 'CALL r54_tke_matrix_row' "$TARGET_ROOT/BLD/ppsrc/nemo/zdftke.f90"
 grep -q 'CALL r54_zdfphy_finish' "$TARGET_ROOT/BLD/ppsrc/nemo/zdfphy.f90"
 if nm -D "$BINARY" | grep -q '_ZGV'; then
@@ -151,11 +151,11 @@ cp "$manifest"/* "$TARGET_RUN/"
 
 "$PY" "$GATE" --record "$TARGET_RUN/oracle_tke_operands_kt00000002.bin" \
   --expect-commit "$COMMIT" --producer-commit "$TARGET_RUN/producer_commit.txt" \
-  --output "$TARGET_RUN/round55_tke_validation.json"
-for plant in header truncation nan config copy stamp; do
+  --output "$TARGET_RUN/round56_tke_validation.json"
+for plant in header truncation nan config copy shape stamp; do
   if "$PY" "$GATE" --record "$TARGET_RUN/oracle_tke_operands_kt00000002.bin" \
        --expect-commit "$COMMIT" --producer-commit "$TARGET_RUN/producer_commit.txt" \
-       --plant "$plant" >"$TARGET_RUN/round55_tke_${plant}_plant.log" 2>&1; then
+       --plant "$plant" >"$TARGET_RUN/round56_tke_${plant}_plant.log" 2>&1; then
     printf 'REFUSE: TKE %s plant stayed green\n' "$plant" >&2; exit 69
   fi
 done
@@ -165,18 +165,18 @@ done
 "$PY" "$ADMISSION" --baseline "$SOURCE_RUN" --candidate "$TARGET_RUN" \
   --twin /nonexistent --identical "$FINAL_RESTART" mesh_mask.nc \
   --allowed-new oracle_tke_operands_kt00000002.bin \
-  --output "$TARGET_RUN/round55_admission.json"
+  --output "$TARGET_RUN/round56_admission.json"
 if "$PY" "$ADMISSION" --baseline "$SOURCE_RUN" --candidate "$TARGET_RUN" \
      --twin /nonexistent --identical "$FINAL_RESTART" mesh_mask.nc \
      --allowed-new oracle_tke_operands_kt00000002.bin --plant-consumed \
-     --output "$TARGET_RUN/round55_admission_plant.json" \
-     >"$TARGET_RUN/round55_admission_plant.log" 2>&1; then
+     --output "$TARGET_RUN/round56_admission_plant.json" \
+     >"$TARGET_RUN/round56_admission_plant.log" 2>&1; then
   printf 'REFUSE: consumed-field admission plant stayed green\n' >&2; exit 69
 fi
 (
   cd "$TARGET_RUN"
-  sha256sum oracle_*.bin "$FINAL_RESTART" mesh_mask.nc round55_admission*.json \
-    round55_admission_plant.log round55_tke_validation.json \
-    round55_tke_*_plant.log >round55_outputs.sha256
+  sha256sum oracle_*.bin "$FINAL_RESTART" mesh_mask.nc round56_admission*.json \
+    round56_admission_plant.log round56_tke_validation.json \
+    round56_tke_*_plant.log >round56_outputs.sha256
 )
-printf 'ROUND55_TKE_OPERANDS_READY %s\n' "$TARGET_RUN"
+printf 'ROUND56_TKE_OPERANDS_READY %s\n' "$TARGET_RUN"

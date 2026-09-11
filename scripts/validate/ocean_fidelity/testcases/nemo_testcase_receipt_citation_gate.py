@@ -634,8 +634,8 @@ CITATION_MAP = {
         'k33_implicit = compute_isoneutral_K33_latlon(', 1),
     # tracer_combine is READ by two step functions and SELECTED by a DINO
     # recipe -- the retraction of round 37's "a lever nothing selects".
-    'dino.py:1677': ('"tracer_combine": "thickness_weighted",', 1),
-    'dino.py:3605': ('tracer_combine=cfg.tracer_combine,', 1),
+    'dino.py:1672': ('"tracer_combine": "thickness_weighted",', 1),
+    'dino.py:3599': ('tracer_combine=cfg.tracer_combine,', 1),
     # A bare '}' is the eighth-most-common line in that file, so the endpoint
     # is the last SUBSTANTIVE line of the reconstruction rather than its brace.
     'nemo_testcase_l2_gyre_stage3_completion_gate.py:147-156': [
@@ -1045,8 +1045,9 @@ CITATION_MAP = {
         1],
     # the field is named twice: GYRE's bundle at 226, the tanks' at 329.
     # ROUND (card reconciliation): the GYRE card's own freshwater selection
-    # added eighteen lines above this anchor, so 311 became 329.
-    'nemo_testcase_recipe.py:338': [
+    # added eighteen lines above this anchor, so 311 became 329; decision 35
+    # added nine lines above it and round 56 removed two, so it is now 336.
+    'nemo_testcase_recipe.py:336': [
         ('zdf_baroclinic_only=True,', 2), ('zdf_baroclinic_only=True,', 2), 1],
     'provenance.py:96': 'def git_sha(*, allow_dirty: bool = False, repo: str | Path | None = None) -> str:',
     'cpp_GYRE_BARE.fcm:1': 'key_linssh key_vco_1d  key_RK3',
@@ -1089,7 +1090,7 @@ CITATION_MAP = {
     # ROUND (card reconciliation): the GYRE card's own freshwater selection
     # added eighteen lines above the SECOND and THIRD anchors, so 274 became
     # 292 and 931 became 949.  The first (92) is above the edit, unmoved.
-    'nemo_testcase_recipe.py:92,301,958': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
+    'nemo_testcase_recipe.py:92,299,956': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
     'BLD/ppsrc/nemo/dynspg_ts.f90:1224': 'REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv',
     'BLD/ppsrc/nemo/dynhpg.f90:378,397': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  '
           '0)              ! Surface value',

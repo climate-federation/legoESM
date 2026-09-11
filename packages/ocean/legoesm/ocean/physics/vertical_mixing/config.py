@@ -52,7 +52,6 @@ __param_spec__ = {
             "kappaM_max": "numerics: floor/cap",
             "kappaM_min": "numerics: floor/cap",
             "mxl_min": "numerics: floor/cap",
-            "mxl0_min_m": "numerics: floor/cap (NEMO rn_mxl0 ln_mxl0 surface length floor)",
             "prandtl_ri_coeff": "Galperin/Veros fixed Pr-Ri slope (6.6)",
             "tke_background": "numerics: floor/cap",
             "tke_surface_min": "numerics: floor/cap",
@@ -248,9 +247,6 @@ class TKEConfig(NamedTuple):
                                      # SINGLE length: l_eps = l_k = min(lup,ldn)).
                                      # NOTE the numbering is Veros-derived and
                                      # does NOT match NEMO's nn_mxl values.
-    # Raw NEMO rn_mxl0 [m]. For NEMO choices 3/4, ln_mxl0 is true and NEMO
-    # overwrites this namelist value with the derived mxl_min at init.
-    mxl0_min_m: float = 0.04
     # NEMO dry-w-point TKE.  NEMO closes tke_tke with
     #     en(ji,jj,jk) = MAX( en(ji,jj,jk), rn_emin ) * wmask(ji,jj,jk)
     # (DINO cfgs/DINO/MY_SRC/zdftke.F90:565 = upstream

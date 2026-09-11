@@ -1,8 +1,9 @@
 MODULE l2_r54_tke
-   !! Round-55 WRITE-only kt=2 TKE operand recorder.  Captured values are
+   !! Round-56 WRITE-only kt=2 TKE operand recorder.  Captured values are
    !! never read back by NEMO and the inactive arm is a no-op.
    USE dom_oce
-   USE zdf_oce,        ONLY : en, rn2, rn2b, avmb, avtb, avtb_2d
+   USE oce,            ONLY : rn2, rn2b
+   USE zdf_oce,        ONLY : en, avmb, avtb, avtb_2d
    USE sbc_oce,        ONLY : taum
    USE in_out_manager, ONLY : lwp, nit000
    USE lib_mpp,        ONLY : ctl_stop
@@ -11,12 +12,13 @@ MODULE l2_r54_tke
    PUBLIC :: r54_tke_begin, r54_tke_matrix_row, r54_tke_avn_row, &
       & r54_tke_finish, r54_zdfphy_finish
 
-   CHARACTER(LEN=16), PARAMETER :: r54_magic = 'NEMO_L2_R55TKE2'
+   CHARACTER(LEN=16), PARAMETER :: r54_magic = 'NEMO_L2_R56TKE2'
    INTEGER, SAVE :: r54_unit = -1
    LOGICAL, SAVE :: r54_active = .FALSE.
    REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) :: r54_zdiag, r54_zup, r54_zlow, r54_rhs
    REAL(wp), ALLOCATABLE, SAVE, DIMENSION(:,:,:) :: r54_mxlm, r54_mxld, r54_pdlr
 
+#  include "do_loop_substitute.h90"
 #  include "domzgr_substitute.h90"
 
 CONTAINS
@@ -53,8 +55,10 @@ CONTAINS
       LOGICAL, INTENT(in) :: momentum
       INTEGER :: ji, jj, jk
       REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: z
-      ALLOCATE(z(jpi,jpj,jpk)); z(:,:,:) = 0._wp
-      DO jk=1,jpk ; DO jj=1,jpj ; DO ji=1,jpi
+      ! Reduced NEMO arrays are declared on A2D(0), i.e. the no-halo
+      ! Nis0:Nie0,Njs0:Nje0 domain (do_loop_substitute.h90:72-73,83-89).
+      ALLOCATE(z(ntsi:ntei,ntsj:ntej,jpk)); z(:,:,:) = 0._wp
+      DO jk=1,jpk ; DO jj=ntsj,ntej ; DO ji=ntsi,ntei
          IF(momentum) THEN
             z(ji,jj,jk) = avmb(jk) * wmask(ji,jj,jk)
          ELSE
@@ -69,8 +73,8 @@ CONTAINS
       INTEGER, INTENT(in) :: family, level
       INTEGER :: ji, jj, jk
       REAL(wp), ALLOCATABLE, DIMENSION(:,:,:) :: z
-      ALLOCATE(z(jpi,jpj,jpk)); z(:,:,:) = 0._wp
-      DO jk=1,jpk ; DO jj=1,jpj ; DO ji=1,jpi
+      ALLOCATE(z(ntsi:ntei,ntsj:ntej,jpk)); z(:,:,:) = 0._wp
+      DO jk=1,jpk ; DO jj=ntsj,ntej ; DO ji=ntsi,ntei
          SELECT CASE(family)
          CASE(1) ; z(ji,jj,jk)=e3t(ji,jj,jk,level)
          CASE(2) ; z(ji,jj,jk)=e3w(ji,jj,jk,level)
@@ -99,7 +103,8 @@ CONTAINS
          & ACCESS='STREAM',FORM='UNFORMATTED',STATUS='REPLACE',ACTION='WRITE',IOSTAT=ios)
       IF(ios /= 0) CALL ctl_stop('round54: cannot open TKE record')
       WRITE(r54_unit) r54_magic
-      WRITE(r54_unit) 2,kt,Kbb,Kmm,jpi,jpj,jpk,jpkm1,ntsi,ntei,ntsj,ntej,STORAGE_SIZE(1._wp)
+      WRITE(r54_unit) 2,kt,Kbb,Kmm,ntei-ntsi+1,ntej-ntsj+1,jpk,jpkm1, &
+         & 1,ntei-ntsi+1,1,ntej-ntsj+1,STORAGE_SIZE(1._wp)
       CALL put0('rn_Dt           ',rn_Dt)
       CALL put0('rn_ediff        ',p_ediff)
       CALL put0('rn_ediss        ',p_ediss)
@@ -117,75 +122,87 @@ CONTAINS
       CALL put0('nn_htau         ',REAL(p_nn_htau,wp))
       CALL put0('nn_eice         ',REAL(p_nn_eice,wp))
       CALL put0('ln_lc           ',MERGE(1._wp,0._wp,p_ln_lc))
-      CALL put2('taum_entry      ',taum)
-      CALL put3('tmask           ',tmask)
-      CALL put3('wmask           ',wmask)
+      CALL put2('taum_entry      ',taum(ntsi:ntei,ntsj:ntej))
+      CALL put3('tmask           ',tmask(ntsi:ntei,ntsj:ntej,:))
+      CALL put3('wmask           ',wmask(ntsi:ntei,ntsj:ntej,:))
       CALL put_background('avm_floor       ',.TRUE.)
       CALL put_background('avt_floor       ',.FALSE.)
-      CALL put3('en_entry        ',en)
-      CALL put3('avm_entry       ',p_avm)
-      CALL put3('avt_entry       ',p_avt)
-      CALL put3('dissl_entry     ',p_dissl)
-      CALL put3('rn2             ',rn2)
-      CALL put3('rn2b            ',rn2b)
-      CALL put3('sh2             ',p_sh2)
+      CALL put3('en_entry        ',en(ntsi:ntei,ntsj:ntej,:))
+      CALL put3('avm_entry       ',p_avm(ntsi:ntei,ntsj:ntej,:))
+      CALL put3('avt_entry       ',p_avt(ntsi:ntei,ntsj:ntej,:))
+      CALL put3('dissl_entry     ',p_dissl(ntsi:ntei,ntsj:ntej,:))
+      CALL put3('rn2             ',rn2(ntsi:ntei,ntsj:ntej,:))
+      CALL put3('rn2b            ',rn2b(ntsi:ntei,ntsj:ntej,:))
+      CALL put3('sh2             ',p_sh2(ntsi:ntei,ntsj:ntej,:))
       CALL put_live('e3t_Kmm        ',1,Kmm)
       CALL put_live('e3w_Kmm        ',2,Kmm)
-      ALLOCATE(r54_zdiag(jpi,jpj,jpk),r54_zup(jpi,jpj,jpk), &
-         & r54_zlow(jpi,jpj,jpk),r54_rhs(jpi,jpj,jpk), &
-         & r54_mxlm(jpi,jpj,jpk),r54_mxld(jpi,jpj,jpk), &
-         & r54_pdlr(jpi,jpj,jpk))
+      ALLOCATE(r54_zdiag(ntsi:ntei,ntsj:ntej,jpk), &
+         & r54_zup(ntsi:ntei,ntsj:ntej,jpk), &
+         & r54_zlow(ntsi:ntei,ntsj:ntej,jpk), &
+         & r54_rhs(ntsi:ntei,ntsj:ntej,jpk), &
+         & r54_mxlm(ntsi:ntei,ntsj:ntej,jpk), &
+         & r54_mxld(ntsi:ntei,ntsj:ntej,jpk), &
+         & r54_pdlr(ntsi:ntei,ntsj:ntej,jpk))
       r54_zdiag=0._wp; r54_zup=0._wp; r54_zlow=0._wp; r54_rhs=0._wp
       r54_mxlm=0._wp; r54_mxld=0._wp; r54_pdlr=0._wp
    END SUBROUTINE r54_tke_begin
 
    SUBROUTINE r54_tke_matrix_row(jj,zdiag,zup,zlow,p_rhs,p_pdlr)
       INTEGER, INTENT(in) :: jj
-      REAL(wp), DIMENSION(:,:), INTENT(in) :: zdiag,zup,zlow
-      REAL(wp), DIMENSION(:,:,:), INTENT(in) :: p_rhs,p_pdlr
+      ! Compiled zdftke declares zdiag/zup/zlow as T1Di(0),jpk and p_pdlr
+      ! as T2D(0),jpk (MY_SRC:233,218; ppsrc:238,223).  Preserve those
+      ! explicit global lower bounds: assumed-shape would silently rebase 3
+      ! to 1 and made the old p_pdlr(:,jj,:) selection two rows off.
+      REAL(wp), DIMENSION(T1Di(0),jpk), INTENT(in) :: zdiag,zup,zlow
+      REAL(wp), DIMENSION(jpi,jpj,jpk), INTENT(in) :: p_rhs
+      REAL(wp), DIMENSION(T2D(0),jpk), INTENT(in) :: p_pdlr
       IF(.NOT.r54_active) RETURN
-      IF(SIZE(zdiag,1) /= jpi .OR. SIZE(zdiag,2) /= jpk) &
+      IF(SIZE(zdiag,1) /= ntei-ntsi+1 .OR. SIZE(zdiag,2) /= jpk) &
          & CALL ctl_stop('round54: unexpected TKE row shape')
       ! jpk is not part of the solve; p_pdlr is defined only on 2:jpkm1.
       ! Leave every non-consumed slot at the explicit zero fill from begin.
       r54_zdiag(:,jj,1:jpkm1)=zdiag(:,1:jpkm1)
       r54_zup(:,jj,1:jpkm1)=zup(:,1:jpkm1)
       r54_zlow(:,jj,1:jpkm1)=zlow(:,1:jpkm1)
-      r54_rhs(:,jj,1:jpkm1)=p_rhs(:,jj,1:jpkm1)
-      r54_pdlr(:,jj,2:jpkm1)=p_pdlr(:,jj,2:jpkm1)
+      r54_rhs(:,jj,1:jpkm1)=p_rhs(ntsi:ntei,jj,1:jpkm1)
+      r54_pdlr(:,jj,2:jpkm1)=p_pdlr(ntsi:ntei,jj,2:jpkm1)
    END SUBROUTINE r54_tke_matrix_row
 
    SUBROUTINE r54_tke_avn_row(jj,zmxlm,zmxld)
       INTEGER, INTENT(in) :: jj
-      REAL(wp), DIMENSION(:,:), INTENT(in) :: zmxlm,zmxld
+      ! tke_avn declares both work arrays as T1Di(0),jpk
+      ! (MY_SRC:576; ppsrc:576), hence their valid first indices are ntsi:ntei.
+      REAL(wp), DIMENSION(T1Di(0),jpk), INTENT(in) :: zmxlm,zmxld
       IF(.NOT.r54_active) RETURN
-      IF(SIZE(zmxlm,1) /= jpi .OR. SIZE(zmxlm,2) /= jpk) &
+      IF(SIZE(zmxlm,1) /= ntei-ntsi+1 .OR. SIZE(zmxlm,2) /= jpk) &
          & CALL ctl_stop('round54: unexpected mixing-length row shape')
       r54_mxlm(:,jj,1:jpkm1)=zmxlm(:,1:jpkm1)
       r54_mxld(:,jj,1:jpkm1)=zmxld(:,1:jpkm1)
    END SUBROUTINE r54_tke_avn_row
 
    SUBROUTINE r54_tke_finish(p_avm,p_avt,p_dissl)
-      REAL(wp), DIMENSION(:,:,:), INTENT(in) :: p_avm,p_avt,p_dissl
+      REAL(wp), DIMENSION(jpi,jpj,jpk), INTENT(in) :: p_avm
+      REAL(wp), DIMENSION(A2D(0),jpk), INTENT(in) :: p_avt,p_dissl
       IF(.NOT.r54_active) RETURN
       CALL put3('matrix_diag     ',r54_zdiag)
       CALL put3('matrix_upper    ',r54_zup)
       CALL put3('matrix_lower    ',r54_zlow)
       CALL put3('rhs_pre_sweep   ',r54_rhs)
-      CALL put3('en_post_sweep   ',en)
+      CALL put3('en_post_sweep   ',en(ntsi:ntei,ntsj:ntej,:))
       CALL put3('mxl_momentum    ',r54_mxlm)
       CALL put3('mxl_dissipation ',r54_mxld)
       CALL put3('pdlr            ',r54_pdlr)
-      CALL put3('avm_closure     ',p_avm)
-      CALL put3('avt_closure     ',p_avt)
-      CALL put3('dissl_output    ',p_dissl)
+      CALL put3('avm_closure     ',p_avm(ntsi:ntei,ntsj:ntej,:))
+      CALL put3('avt_closure     ',p_avt(ntsi:ntei,ntsj:ntej,:))
+      CALL put3('dissl_output    ',p_dissl(ntsi:ntei,ntsj:ntej,:))
    END SUBROUTINE r54_tke_finish
 
    SUBROUTINE r54_zdfphy_finish(p_avm,p_avt)
-      REAL(wp), DIMENSION(:,:,:), INTENT(in) :: p_avm,p_avt
+      REAL(wp), DIMENSION(jpi,jpj,jpk), INTENT(in) :: p_avm
+      REAL(wp), DIMENSION(A2D(0),jpk), INTENT(in) :: p_avt
       IF(.NOT.r54_active) RETURN
-      CALL put3('avm_pre_evd     ',p_avm)
-      CALL put3('avt_pre_evd     ',p_avt)
+      CALL put3('avm_pre_evd     ',p_avm(ntsi:ntei,ntsj:ntej,:))
+      CALL put3('avt_pre_evd     ',p_avt(ntsi:ntei,ntsj:ntej,:))
       CLOSE(r54_unit); r54_unit=-1; r54_active=.FALSE.
       DEALLOCATE(r54_zdiag,r54_zup,r54_zlow,r54_rhs,r54_mxlm,r54_mxld,r54_pdlr)
    END SUBROUTINE r54_zdfphy_finish
