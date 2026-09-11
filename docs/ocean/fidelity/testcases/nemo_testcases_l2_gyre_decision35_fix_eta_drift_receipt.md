@@ -8,6 +8,12 @@ the dirty tree). CPU, production JIT, fp64/scalar-libm. Preregistration:
 (written before the after-arm ran). Evidence:
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/decision35_fix_eta_drift/`.
 
+Provenance note: the after-arm was measured at `8590f9af002e` (this change on
+the round-54 base, the one-variable comparison); that commit was then rebased
+onto round 55 and is `5be840acf2be` on the branch. The evidence files carry
+the pre-rebase stamp. Round 55's TKE-floor change was NOT in the measured
+tree, so its effect is attributed separately by that round.
+
 ## 1. The decision (ASKED)
 
 The certified GYRE NEMO-identity card applied `fix_eta_drift=True`: a global
