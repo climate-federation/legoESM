@@ -163,22 +163,61 @@ def test_jacobian_forms_nemos_ratio_before_adding_one(zref):
     np.testing.assert_array_equal(got, nemo)
 
 
-def test_jacobian_min_column_clip_is_unchanged_by_the_ratio_form(zref):
-    """legoESM's own ``min_water_column_m`` floor keeps its pre-round-40 value.
+def test_jacobian_min_column_clip_and_the_claim_that_was_false(zref):
+    """legoESM's own ``min_water_column_m`` floor, stated as what it IS.
 
-    NEMO has no such floor; expressing it on the Jacobian rather than on the
-    water column leaves every clipped cell at exactly ``min_col/H`` and every
-    unclipped cell bit-identical to the unclipped call.
+    NEMO has no such floor.  Round 40 moved it from the water column onto the
+    Jacobian, and the GYRE commit that did so claimed every clipped cell stays
+    bit-identical.  THAT CLAIM IS FALSE, and the first version of this test hid
+    it twice over: its only clipped column had ``H = 1.0``, and the clipped
+    VALUE can never differ anyway, because ``min_col / H`` is still formed by a
+    division in both the old code and the new.  An independent diff review
+    found the real difference, which is in the PREDICATE: the old code clips
+    when ``eta + H < min_col``, the new one when ``1 + eta*(1/H) < min_col/H``,
+    and those are not the same double near the edge -- 255 of 40675 near-edge
+    columns in the reviewer's own sweep.
+
+    So this asserts three things, one of them the correction:
+      1. a clipped cell lands on ``min_col / H``;
+      2. an unclipped cell is bit-identical to the unclipped call, on operands
+         where the two STRETCH forms genuinely differ (otherwise that half is
+         arithmetic, not a test);
+      3. the two PREDICATES disagree on at least one column -- pinned, so the
+         false claim cannot quietly come back as a comment.
+
+    On the DINO card the clip is UNREACHABLE and that is measured, not assumed:
+    the shallowest wet column is 1969.83 m against a 0.5 m floor and the year
+    run's |eta| max is 0.897 m, so no column of that card can reach it.
     """
     coord = create_full_step_coordinate(
         zref, jnp.full((3,), len(np.asarray(zref.dz_ref)), dtype=jnp.int32))
-    bathy = jnp.asarray([1.0, 1.0, 4300.710017215397])
-    eta = jnp.asarray([-0.9, -0.2, -0.0013969278195402545])   # first is clipped
+    # column 0: clipped.  column 1: NOT clipped, and chosen (with column 2's
+    # partner below) so that (eta+H)/H and 1+eta*(1/H) are different doubles.
+    H_unclipped = 27.469830318264258
+    eta_unclipped = -1.7274640401377739
+    assert ((eta_unclipped + H_unclipped) / H_unclipped
+            != 1.0 + eta_unclipped * (1.0 / H_unclipped))     # non-vacuity
+    bathy = jnp.asarray([1.0, H_unclipped, 4300.710017215397])
+    eta = jnp.asarray([-0.9, eta_unclipped, -0.0013969278195402545])
     clipped = np.asarray(compute_ocean_jacobian(
         eta, bathy, coord, min_water_column_m=0.5))
     plain = np.asarray(compute_ocean_jacobian(eta, bathy, coord))
+    assert float(eta[0]) + 1.0 < 0.5                          # the clip binds
     assert clipped[0] == 0.5 / 1.0
     np.testing.assert_array_equal(clipped[1:], plain[1:])
+    # AND the unclipped column is NEMO's multiply form even when a clip is
+    # requested -- this is the assertion that goes RED on the pre-round-40
+    # code (the two above cannot, and the docstring says why).
+    assert clipped[1] == 1.0 + eta_unclipped * (1.0 / H_unclipped)
+
+    # 3. the predicates disagree -- the correction, pinned.
+    H_edge, eta_edge = 3526.2286909507593, -3525.7286909507593
+    old_binds = (eta_edge + H_edge) < 0.5
+    new_binds = (1.0 + eta_edge * (1.0 / H_edge)) < (0.5 / H_edge)
+    assert old_binds != new_binds, (
+        "the two clip predicates agree on this column, so the correction this "
+        "test records is no longer demonstrated and the operands need "
+        "re-deriving -- do NOT delete the assertion")
 
 
 def test_jacobian_multiplies_the_stored_reciprocal(zref):

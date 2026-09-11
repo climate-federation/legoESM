@@ -1449,9 +1449,17 @@ def compute_ocean_jacobian(
             jnp.asarray(H_bathy, dtype=jnp.asarray(eta).dtype), jnp.shape(eta))
     else:
         water_col = eta + H_bathy
-        if min_water_column_m is not None:
-            min_col = jnp.asarray(min_water_column_m, dtype=water_col.dtype)
-            water_col = jnp.maximum(water_col, min_col)
+    # ``min_col`` is materialised OUTSIDE the branch.  It used to exist only in
+    # the non-linssh arm while the partial-cell block below read it
+    # unconditionally, so a partial-cell coordinate that ever grew a
+    # ``linear_free_surface`` field would have raised NameError instead of
+    # doing anything explicable.  Unreachable today -- printed, not assumed:
+    # OceanPartialCellCoordinate carries no such field -- and latent is not a
+    # reason to leave it.
+    min_col = (None if min_water_column_m is None
+               else jnp.asarray(min_water_column_m, dtype=water_col.dtype))
+    if not linssh and min_col is not None:
+        water_col = jnp.maximum(water_col, min_col)
     if isinstance(z_coord, OceanPartialCellCoordinate):
         # Fully-DRY columns (H_bathy == 0, e.g. the DINO land-wall continent
         # on the true 199x52 frame) get the inert reference J = 1, not
@@ -1465,16 +1473,29 @@ def compute_ocean_jacobian(
         #   r3t(i,j)  = ssh(i,j) * r1_ht_0(i,j)              domqco.F90:209
         #   r1_ht_0   = ssmask / (ht_0 + 1 - ssmask), i.e. exactly 1/ht_0 on
         #               a wet column                          domain.F90:158
-        #   e3t(i,j,k,t) = e3t_0(i,j,k) * (1 + r3t(i,j,t))
-        #                                        domzgr_substitute.h90:139
+        #   e3t(i,j,k,t) = e3t_0(i,j,k) * (1 + r3t(i,j,t)*tmask(i,j,k))
+        #                    domzgr_substitute.h90:126 with Tmsk at :46
+        #                    (:139 is the gdept macro, not e3t)
         # Rounding the SUM first loses the low bits of the small ratio to
         # cancellation.  Measured on GYRE's kt=1 stage-3 ssh against NEMO's
         # own dumped arrays: (eta+H)/H differs from NEMO's 1+r3t_Kaa on 221
         # of 600 wet columns at 2.220446e-16 and its e3t on 5207 of 18000
         # cells at 1.136868e-13, while 1 + eta*(1/ht_0) reproduces both at
         # 0 cells unequal.  The clip below is legoESM's own and NEMO has
-        # none; expressing it on J rather than on the column keeps every
-        # clipped cell bit-identical to the pre-round-40 value.
+        # none.
+        #
+        # CORRECTION, because the GYRE commit this came from claims otherwise
+        # and an independent diff review measured it: moving the clip onto J
+        # does NOT leave every clipped cell bit-identical.  The clipped VALUE
+        # does (it is min_col/H_safe, a division, in both forms) but the
+        # PREDICATE does not -- old: eta + H < min_col; new:
+        # 1 + eta*(1/H) < min_col/H -- and near the edge those are different
+        # doubles, 255 of 40675 near-edge columns in the reviewer's sweep.
+        # On the DINO card the clip is UNREACHABLE (shallowest wet column
+        # 1969.83 m against a 0.5 m floor, run |eta| max 0.897 m), so this is
+        # registered rather than fixed here; it is a real difference on any
+        # card with a column that shallow.  Pinned by
+        # tests/ocean/unit/test_full_step_coordinate.py.
         # ``r1_ht_0 = ssmask/(ht_0 + 1 - ssmask)`` (domain.F90:158) is built
         # ONCE and MULTIPLIED at domqco.F90:209; NEMO never divides by ht_0
         # there, and ``a/b`` and ``a*(1/b)`` are not the same double.

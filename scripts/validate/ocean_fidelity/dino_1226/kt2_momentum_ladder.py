@@ -17,14 +17,14 @@ both rather than arguing them.
      and ``dyn_zdf`` has ALREADY removed the barotropic mode by then::
 
          puu(Kaa) = ( puu(Kaa) - puu_b(Kaa) ) * umask
-                                      cfgs/DINO/MY_SRC/dynzdf.F90:167-169
+                                      cfgs/DINO/MY_SRC/dynzdf.F90:168
 
-     so, in NEMO's own instrumentation's words (``MY_SRC/trddump.F90:55-61``),
+     so, in NEMO's own instrumentation's words (``MY_SRC/trddump.F90:58``),
      ``true zdf trend = utrd_zdf + uu_b(Naa)*r1_Dt``.  Rule 5: a residual
      bucket can never be an attribution.
 
   2. ``utrd_spg`` IS NOT A PRESSURE GRADIENT.  It is the change in
-     ``uu(Nrhs)`` across ``dyn_spg`` (``dynspg.F90:183-187``), and inside
+     ``uu(Nrhs)`` across ``dyn_spg`` (``dynspg.F90:185`` formed, ``:187`` emitted), and inside
      ``dyn_spg_ts`` that change is the depth-mean REMOVAL of the whole
      accumulated RHS (``MY_SRC/dynspg_ts.F90:350-353``) plus the split-explicit
      solver's own ``(uu_b(Kaa) - uu_b(Kbb))*r1_Dt`` re-injection (``:1125-1128``).
@@ -32,11 +32,23 @@ both rather than arguing them.
 
   3. THE TREND RUN IS NOT THE PRODUCTION OPERATOR for vorticity.  With
      ``l_trddyn`` true, ``dyn_vor`` calls ``vor_een`` TWICE -- ``ncor`` then
-     ``nrvm`` (``cfgs/DINO/MY_SRC/dynvor.F90:152,169``) -- where the
-     un-instrumented model calls it ONCE with ``ntot`` (``:228``).  So
+     ``nrvm`` (``cfgs/DINO/MY_SRC/dynvor.F90:153,170``) -- where the
+     un-instrumented model calls it ONCE with ``ntot`` (``:229``).  So
      ``utrd_pvo`` and ``utrd_rvo`` are two separately-rounded EEN passes and
      neither is comparable on its own to a single-pass ``(f+zeta)`` operator;
      only their SUM is, and only to the rounding of the split.
+
+     WHAT THAT DOES *NOT* MEAN, retracted here because this gate's first
+     version implied it: the kt=2 record is NOT contaminated at entry.  An
+     independent claim review refuted that with a number instead of a bound --
+     ``vor_een`` forms its transports as ``zwx = e2u*e3u(Kmm)*pu`` and
+     ``zwy = e1v*e3v(Kmm)*pv`` (``MY_SRC/dynvor.F90:829-832``), and at kt=1
+     from rest ``pu = pv = 0``, so EVERY pass adds EXACTLY 0.0 whatever
+     ``kvor`` is.  The state entering the kt=2 trend evaluation is bit-identical
+     to production.  Only the state LEAVING kt=2 carries the reassociation, and
+     that is bounded by the rounding of a 4.8e-07 m/s2 term over rDt, i.e.
+     ~6e-19 m/s against a kt=2 u gap of 1.4e-04 -- PLAUSIBLE, from magnitudes,
+     not measured.
 
 WHAT IT PRINTS.  Part A is oracle-only: the bucket inventory with each bucket
 CLASSIFIED (clean / bookkeeping / residual, each with its citation), the
@@ -62,6 +74,34 @@ THE BAR IS EXACT (Rule 1b): zero cells unequal per scored row.  Rows that are
 not at the bar say DEBT.  Rows whose oracle is identically zero say UNMEASURED,
 never AT BAR.
 
+WHAT THIS GATE CANNOT SEE (Rule 2, written down because the next bug lives
+here):
+
+  * IT RUNS EAGER.  Part B wraps the step in ``jax.disable_jit()``, as
+    ``kt2_leapfrog_gate.py`` does, so the seam can capture Python objects.
+    Production runs ``_step_jitted``.  That is not a small caveat on this
+    branch of all places: the commit immediately before this gate exists
+    BECAUSE XLA contracts an expression under jit that it does not contract
+    eagerly.  Every Part-B number is therefore a statement about the eager
+    evaluation of the model's own operators, and a jit-only fusion difference
+    is invisible here.
+
+  * LATERAL VISCOSITY GETS A FREE PASS AT kt=2, and the UNMEASURED row is not
+    the whole of it.  NEMO's ``utrd_ldf`` is identically zero on all 16 ranks
+    because ``dynldf_lev_lap`` acts on ``pu(Kbb)`` (``dynldf_lev.F90:55``) and
+    at kt=2 from rest ``Kbb`` still holds the rest state -- the Asselin filter
+    is skipped at kt=1 by ``.NOT. l_1st_euler`` (``dynatf_qco.F90:150``).  So
+    an ENTIRELY WRONG lateral-viscosity operator scores exactly as this one
+    does, and ``ahm0 = 0.5*0.27*10000 = 1350 m2/s`` is live and untested until
+    kt >= 3.  Named by an independent claim review.
+
+  * THE CORRECTED zdf BUCKET IS STILL NOT "vertical mixing".  Adding
+    ``uu_b*r1_Dt`` is exact only because ``ln_zad_Aimp = .false.`` on this card
+    (resolved namelist ``:345``); what remains in the bucket also holds the
+    wind stress (``MY_SRC/dynzdf.F90:356-360``), the explicit barotropic bottom
+    drag and the qco thickness re-weighting (``:145-150``).  Rule 5 applies to
+    the corrected bucket too.
+
 Usage
 -----
     CUDA_VISIBLE_DEVICES=<uuid> JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \
@@ -76,10 +116,16 @@ operator.  The size is not arbitrary -- a 1e-12 plant was measured to leave the
 vorticity pair's rms unchanged to every printed digit, and two of these rows
 are SATURATED (every wet cell already differs), so their cell count cannot move
 either and the count is not a usable control there.
-``--oracle-self-test`` replaces legoESM's side with the oracle bucket itself:
-every SCORED row must then be AT BAR and the gate must exit zero, which proves
-the comparison can pass at all.  Rows whose oracle is identically zero are
-UNMEASURED in both modes and never AT BAR.
+``--oracle-self-test`` puts the oracle bucket THROUGH the model side's own
+de-staggering (``restagger`` then ``lego``) instead of around it, so the slice,
+the ``moveaxis`` and the slot lookup are exercised; every SCORED row must then
+be AT BAR and the gate must exit zero.  ITS REMAINING BLIND SPOT, stated
+because a control with an unstated one is worse than none: ``restagger`` pads
+the same axis ``lego`` slices, so a WRONG de-staggering CONVENTION would round
+-trip through both and still pass.  What covers that is the direction of the
+error -- a wrong slice can only manufacture DEBT, never AT BAR -- and the
+citation the slice carries (``nemo_dino_step1_gate.py:275-277``).  Rows whose
+oracle is identically zero are UNMEASURED in both modes and never AT BAR.
 """
 from __future__ import annotations
 
@@ -107,17 +153,17 @@ CERTIFIED_KT1 = ("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
 BUCKETS = {
     "keg": ("clean", "dynkeg.F90:163 -- dyn_keg increment to Nrhs"),
     "zad": ("clean", "dynzad.F90:124 -- dyn_zad increment to Nrhs"),
-    "rvo": ("split", "MY_SRC/dynvor.F90:174 -- vor_een(nrvm), pass 2 of 2"),
-    "pvo": ("split", "MY_SRC/dynvor.F90:157 -- vor_een(ncor), pass 1 of 2"),
+    "rvo": ("split", "MY_SRC/dynvor.F90:170 vor_een(nrvm), emitted :174 -- pass 2 of 2"),
+    "pvo": ("split", "MY_SRC/dynvor.F90:153 vor_een(ncor), emitted :157 -- pass 1 of 2"),
     "ldf": ("clean", "MY_SRC/dynldf.F90:120 -- dynldf_lev_lap increment"),
-    "hpg": ("clean", "MY_SRC/dynhpg.F90:127 -- hpg_sco increment"),
+    "hpg": ("clean", "MY_SRC/dynhpg.F90:133 -- hpg_sco increment; :127 is the key_RK3 arm and DINO compiles the #else (cpp_DINO.fcm)"),
     "spg": ("bookkeeping",
-            "dynspg.F90:187 -- DELTA of uu(Nrhs) across dyn_spg_ts: the "
+            "dynspg.F90:185 forms the DELTA of uu(Nrhs) across dyn_spg_ts and :187 emits it: the "
             "depth-mean removal (MY_SRC/dynspg_ts.F90:350-353) plus the "
             "barotropic re-injection (:1125-1128), NOT a pressure gradient"),
     "zdf": ("residual",
             "MY_SRC/dynzdf.F90:597 -- (uu(Kaa)-uu(Kbb))*r1_Dt minus every "
-            "other bucket, and uu_b(Kaa) was removed at :167-169"),
+            "other bucket, and uu_b(Kaa) was removed at :168"),
     "atf": ("clean", "MY_SRC/dynatf_qco.F90:277 -- but it moves Nnn, not Naa"),
     "tau": ("zero", "iom_put only on this card; ln_drgimp=.TRUE."),
     "bfr": ("zero", "ln_drgimp=.TRUE. -- the drag is on the zdf diagonal"),
@@ -166,21 +212,35 @@ def part_a(R2, e3u0, e3v0, umask, vmask, check_stretch=False):
     uu_b = _column_mean(R2["un"], e3u0, umask)
     vv_b = _column_mean(R2["vn"], e3v0, vmask)
     if check_stretch:
-        # The claim is that a depth-INDEPENDENT stretch cancels.  Perturb it
-        # by 10% and show the mean does not move; a control that is a no-op
-        # would prove nothing, so the unperturbed difference is printed too.
-        pert = 1.0 + 0.10 * np.random.default_rng(0).random(uu_b.shape)
-        uu_b_p = _column_mean(R2["un"], e3u0 * pert[None, :, :], umask)
-        print(f"\n  STRETCH CONTROL: a depth-independent 10% column stretch "
-              f"moves uu_b by max {np.abs(uu_b_p - uu_b)[uw[0]].max():.3e} "
-              f"(it cancels); the stretch itself spans "
-              f"{pert.min():.4f}..{pert.max():.4f}")
+        # TWO ARMS, because one of them cannot fail.  A per-COLUMN scalar
+        # cancels ALGEBRAICALLY in a ratio of column sums, so showing that it
+        # moves nothing proves only that division works -- an independent diff
+        # review said exactly that, and it was right.  The arm that can fail
+        # is the depth-DEPENDENT one: if the stretch were per-LEVEL, the mean
+        # WOULD move, and the size of that movement is what makes the
+        # cancelling arm a statement about NEMO's r3u rather than about
+        # arithmetic.
+        rng = np.random.default_rng(0)
+        col = 1.0 + 0.10 * rng.random(uu_b.shape)
+        lev = 1.0 + 0.10 * rng.random(e3u0.shape)
+        d_col = np.abs(_column_mean(R2["un"], e3u0 * col[None, :, :], umask)
+                       - uu_b)[uw[0]].max()
+        d_lev = np.abs(_column_mean(R2["un"], e3u0 * lev, umask)
+                       - uu_b)[uw[0]].max()
+        print(f"\n  STRETCH CONTROL, two arms")
+        print(f"    depth-INDEPENDENT 10% stretch (NEMO's r3u): moves uu_b by "
+              f"max {d_col:.3e} -- it cancels, which is the claim")
+        print(f"    depth-DEPENDENT 10% stretch (the FALSIFIER): moves uu_b by "
+              f"max {d_lev:.3e} -- so the arm above is not a no-op")
+        if not (d_lev > 1e6 * max(d_col, 1e-300)):
+            print("    ^^ the falsifier did NOT separate the two arms; this "
+                  "control proves nothing and the uu_b recovery is UNMEASURED")
 
     bt_u = np.broadcast_to(uu_b * r1_dt, R2["utrd_zdf"].shape)
     bt_v = np.broadcast_to(vv_b * r1_dt, R2["vtrd_zdf"].shape)
     true_u, true_v = R2["utrd_zdf"] + bt_u, R2["vtrd_zdf"] + bt_v
     print("\n  THE RESIDUAL BUCKET, DECOMPOSED "
-          "(MY_SRC/trddump.F90:60-61: true zdf = utrd_zdf + uu_b(Naa)*r1_Dt)")
+          "(MY_SRC/trddump.F90:58: true zdf = utrd_zdf + uu_b(Naa)*r1_Dt)")
     print(f"  {'term':26s}{'u rms':>13s}{'u max':>13s}{'v rms':>13s}"
           f"{'v max':>13s}")
     for name, fu, fv in (("?trd_zdf as dumped", R2["utrd_zdf"], R2["vtrd_zdf"]),
@@ -203,7 +263,7 @@ def part_a(R2, e3u0, e3v0, umask, vmask, check_stretch=False):
         print(f"    {comp}: " + "  >  ".join(f"{k} {v:.3e}"
                                              for k, v in rank))
     print("    pvo and rvo are the TWO PASSES of one instrumented EEN call "
-          "(MY_SRC/dynvor.F90:152,169); only their sum is comparable to a "
+          "(MY_SRC/dynvor.F90:153,170); only their sum is comparable to a "
           "single-pass (f+zeta) operator.")
     return {"uu_b": uu_b, "vv_b": vv_b, "true_u": true_u, "true_v": true_v}
 
@@ -341,7 +401,8 @@ def part_b(a, R2, A, umask, vmask) -> int:
         print(f"  could not identify ONE now-level pass ({len(nnn)} "
               "candidates); the mapping below would be a guess, so it is "
               "refused.  NEMO takes dyn_adv/dyn_vor/dyn_hpg at Kmm = Nnn "
-              "(dynadv.F90:87, MY_SRC/dynvor.F90:152, dynhpg.F90:117), so "
+              "(MY_SRC/dynadv.F90:87 CASE np_VEC_c2 with dyn_keg at :89 and "
+                  "dyn_zad at :97; MY_SRC/dynvor.F90:153; dynhpg.F90:119), so "
               "the pass this gate scores has to be that one and nothing "
               "else.")
         return 1
@@ -358,6 +419,7 @@ def part_b(a, R2, A, umask, vmask) -> int:
     # same point; if the split does not close on it, every row below is a
     # residual of unknown composition and the gate says so instead of
     # printing a table.
+    closure_bad = 0
     for face in ("u", "v"):
         parts = [f for f in diag._fields
                  if f.endswith("_" + face) and not f.startswith("total")]
@@ -365,8 +427,21 @@ def part_b(a, R2, A, umask, vmask) -> int:
         tot = _arr(getattr(diag, "total_" + face))
         cl = float(np.max(np.abs(ssum - tot)))
         rel = cl / max(float(np.max(np.abs(tot))), 1e-300)
+        # The docstring said the gate refuses to print a table when the split
+        # does not close.  It printed one anyway -- this was print-only until
+        # a diff review said so.  1e-12 relative is far above the 1.4e-16 the
+        # closure measures and far below any real term dropping out.
+        ok = np.isfinite(rel) and rel < 1e-12
+        closure_bad += (not ok)
         print(f"  CLOSURE {face}: max|sum(parts) - total_{face}| = {cl:.4e} "
-              f"({rel:.2e} of max|total|)  over {len(parts)} slots")
+              f"({rel:.2e} of max|total|)  over {len(parts)} slots  "
+              f"{'OK' if ok else 'FAILED -- the per-operator rows below are '
+                                'residuals of unknown composition'}")
+    if closure_bad:
+        print("  the split does not close on the total the model used; "
+              "Rule 5 says the table below cannot be an attribution, so it "
+              "is not printed.")
+        return 1
 
     shapes = {f: np.asarray(getattr(diag, f)).shape for f in diag._fields}
     print("  captured diagnostic slots (Rule 10 -- printed, not assumed): "
@@ -377,9 +452,24 @@ def part_b(a, R2, A, umask, vmask) -> int:
         d = np.asarray(d.data if hasattr(d, "data") else d)
         # legoESM carries one redundant face (the periodic image west of
         # cell 0, the closed southern wall); NEMO's un/vn are east/north.
-        # Same inverse as nemo_dino_step1_gate.py:275-278.
+        # Same inverse as nemo_dino_step1_gate.py:275-277.
         d = d[:, 1:, :] if face == "u" else d[1:, :, :]
         return np.moveaxis(d, -1, 0)               # -> (nlev, ny, nx)
+
+    def restagger(oracle3, face):
+        """The INVERSE of ``lego``: NEMO's (nlev, ny, nx) -> legoESM's layout.
+
+        This exists so ``--oracle-self-test`` goes through ``lego`` instead of
+        around it.  The first version scored ``oracle`` against ``oracle`` and
+        therefore could not fail -- an independent diff review defeated it in
+        one line -- so the de-staggering slice, the ``moveaxis`` and the slot
+        lookup were all unexercised by the very control that claimed to prove
+        the comparison can pass.
+        """
+        d = np.moveaxis(np.asarray(oracle3), 0, -1)       # -> (ny, nx, nlev)
+        pad = ((0, 0), (1, 0), (0, 0)) if face == "u" else ((1, 0), (0, 0),
+                                                            (0, 0))
+        return np.pad(d, pad, mode="constant")
 
     # THE NON-VACUITY CONTROL RUNS ON EVERY ROW, EVERY TIME, rather than
     # behind a flag nobody remembers to pass.  Each scored row is recomputed
@@ -433,11 +523,25 @@ def part_b(a, R2, A, umask, vmask) -> int:
                       f"{'-':>13s}{'-':>13s}  UNMEASURED (no before pass)")
                 bad += 1
                 continue
-            raw = oracle if a.oracle_self_test else lego(name, face, src)
+            if a.oracle_self_test:
+                # Feed the oracle THROUGH the same de-staggering the model
+                # side goes through, so the control exercises it.
+                fake = src._replace(
+                    **{name: restagger(oracle, face)})
+                raw = lego(name, face, fake)
+            else:
+                raw = lego(name, face, src)
             mine = raw
             d = np.abs(mine - oracle)[wet]
-            d = d[np.isfinite(d)]
+            # A NON-FINITE cell is UNEQUAL, never filtered out.  Dropping them
+            # let an operator that returns NaN exactly where it disagrees
+            # score 0 cells unequal and print AT BAR, with the plant still
+            # moving so PLANT-DEAD did not catch it either -- an independent
+            # diff review reproduced that on a four-cell case.
+            n_nan = int((~np.isfinite(d)).sum())
+            d = np.where(np.isfinite(d), d, np.inf)
             n = int((d != 0.0).sum())
+            d_finite = d[np.isfinite(d)]
             dp = np.abs(raw * (1.0 + PLANT) - oracle)[wet]
             dp = dp[np.isfinite(dp)]
             if not np.isfinite(orms) or orms == 0.0:
@@ -447,15 +551,18 @@ def part_b(a, R2, A, umask, vmask) -> int:
                       f"{orms:13.4e}  UNMEASURED (oracle identically zero)")
                 bad += 1
                 continue
-            rms0 = float(np.sqrt(np.mean(d ** 2)))
+            rms0 = (float(np.sqrt(np.mean(d_finite ** 2)))
+                    if d_finite.size else float("nan"))
             rms1 = float(np.sqrt(np.mean(dp ** 2))) if dp.size else float("nan")
             moved = np.isfinite(rms1) and rms1 != rms0
             verdict = "AT BAR" if n == 0 else "DEBT"
+            if n_nan:
+                verdict = f"DEBT /{n_nan} NON-FINITE"
             if not moved:
                 verdict += " /PLANT-DEAD"
-            bad += (n != 0) or (not moved)
+            bad += (n != 0) or (not moved) or bool(n_nan)
             scored += 1
-            at_bar += (n == 0)
+            at_bar += (n == 0 and not n_nan)
             planted[f"{label}.{face}"] = rms0
             print(f"  {label+'.'+face:10s}{n:>10d}{d.max():13.4e}"
                   f"{rms0:13.4e}{orms:13.4e}{rms1 - rms0:13.3e}"
