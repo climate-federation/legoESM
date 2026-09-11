@@ -226,7 +226,25 @@ def _model_config(
             zdf_baroclinic_only=True,
             barotropic_drag_substep=True,
             use_conservation_fixer=False,
-            fix_eta_drift=False,
+            # GYRE HAS NO SALT FLUX.  usrdef_sbc.f90:160 is
+            # `sfx (ji,jj) = 0.0_wp   ! no salt flux`, and the card compiles
+            # key_qco (cpp_GYRE_OMIP_L2_P3_SM_YRPERT.fcm:1), so evaporation
+            # minus precipitation is carried by the cell VOLUME and by nothing
+            # else.  legoESM's library default is a VIRTUAL SALT FLUX -- a
+            # salinity source the oracle does not have -- so the card selects
+            # the volume channel HERE rather than leaving every harness to
+            # remember a _replace.  Leaving it to the harnesses is what put two
+            # programs on one card: the certified kt=1..10 gate applied the
+            # pair, the from-rest year harness did not, and the two receipts
+            # then disagreed about the same step.
+            #
+            # fix_eta_drift is not a second, separable choice.  The model
+            # REFUSES real_freshwater with it off
+            # (ocean_model_latlon_cgrid.py:3006-3018), because the filtered
+            # barotropic substep delivers only the filter average of the eta
+            # source to the tracer thickness.  The pair is one selection.
+            freshwater_closure="real_freshwater",
+            fix_eta_drift=True,
             barotropic=config.barotropic._replace(
                 barotropic_diffusion_alpha=0.0,
                 barotropic_face_depth="nemo_ssh_avg",
