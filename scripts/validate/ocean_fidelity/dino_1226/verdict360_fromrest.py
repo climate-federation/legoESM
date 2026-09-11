@@ -85,16 +85,45 @@ PERT_LAT_MULT = 179
 PERT_SEED_MULT = 997
 PERT_LAT_SCALE = 1000.0
 
-#: PREREGISTERED WINDOW for the PHASE 0 floor at day 360, in 3-D T rms [K].
-#: Below the low edge the day-360 verdict is fixed by construction (2*floor is
-#: already under the measured 4.3e-3 K gap, so "distinguishable" is guaranteed
-#: and uninformative).  Above the high edge the crossing happens INSIDE the
-#: year and the deliverable is the crossing day, not a day-360 answer.
-FLOOR_WINDOW_K = (2.0e-3, 1.0e-2)
+#: THE DECIDING FACTOR, derived rather than chosen.  A diff reviewer showed
+#: that the first draft's "window" [2e-3, 1e-2] K was 98% pre-determined and
+#: that its refusal branch was BACKWARDS.  The correct statement is one line of
+#: algebra, so it is written as algebra:
+#:
+#:   PHASE 1 can only ever INCREASE the floor, because the combined floor is
+#:   sqrt(spread_lego^2 + spread_nemo^2) >= spread_lego.  So:
+#:
+#:     gap <= 2*floor_lego   ->  INDISTINGUISHABLE is ALREADY established by
+#:                               PHASE 0 alone and PHASE 1 cannot overturn it.
+#:                               Spending the NEMO members buys nothing.
+#:     gap >  2*floor_lego   ->  distinguishable so far, and PHASE 1 can flip
+#:                               it ONLY IF NEMO's own from-rest spread is at
+#:                               least  sqrt((gap/(2*floor_lego))^2 - 1)
+#:                               times legoESM's.  That REQUIRED FACTOR is
+#:                               printed, and compared against what is known:
+#:                               on the restart-seeded record NEMO is 9-16600x
+#:                               TIGHTER, so a required factor above ~1 makes
+#:                               PHASE 1 dead on arrival.
+#:
+#: There is no free constant here to tune.
+NEMO_TIGHTER_RANGE = (9.0, 16600.0)   # restart-seeded record, PR #1728
 
-#: The measured from-rest gap this floor is to be read against (3-D T rms [K]),
-#: PR #1728.  Recorded here so the comparison cannot drift onto another run.
-GAP_K = {30: 2.061e-3, 60: 2.160e-3, 90: 2.412e-3, 180: 4.736e-3, 360: 4.283e-3}
+#: The measured from-rest gap this floor is read against, WITH ITS PROVENANCE.
+#: Hardcoding five numbers with no run behind them is how a comparison drifts
+#: onto another run; the stamp is checked by --score-phase0 against the maps
+#: sidecars when they are present.
+GAP_PROVENANCE = {
+    "run_dir": "/data/abyssal/dbalwada/dino_fromrest_y1/lego_trueframe_r3t",
+    "metric": "wet-masked 3-D temperature rms difference [K], "
+              "twin_nemo_ts_maps.py --run-dino-dir, field row 'T3D'",
+    "nemo_days_30_180": "cfgs/DINO/RUN_TRAJ kt 960/1920/2880/5760",
+    "nemo_day_360": "cfgs/DINO/RUN_FROMREST_Y1 kt 11520",
+    "commit": "PR #1728, the Kmm-stretch round",
+    "day360_snapshot_sha256":
+        "0ef0c080f1626edf9a9703221c65d779631161dfa778a5f2cf99a075704a8f2c",
+}
+GAP_K = {30: 2.0388e-3, 60: 2.1567e-3, 90: 2.3044e-3,
+         180: 4.5899e-3, 360: 3.9243e-3}
 
 N_MEMBERS = 4
 
@@ -243,28 +272,41 @@ def score_phase0(out_root: str, snap: int) -> int:
         print(f"  {day:>6d}{len(M):>9d}{f:>16.4e}"
               f"{(gap if gap else float('nan')):>12.4e}{r:>13.3f}")
     if 360 not in floor:
-        print("\n  no day-360 snapshot; the window verdict needs one")
+        print("\n  no day-360 snapshot; the verdict needs one")
         return 1
-    f360 = floor[360]
-    lo, hi = FLOOR_WINDOW_K
-    print(f"\n  PREREGISTERED WINDOW for the day-360 floor: "
-          f"[{lo:.1e}, {hi:.1e}] K; measured {f360:.4e} K")
-    json.dump({"floor_K": floor, "gap_K": GAP_K, "crossing_day": cross},
+    f360, gap360 = floor[360], GAP_K[360]
+    r = gap360 / (2.0 * f360) if f360 > 0 else float("inf")
+    need = float(np.sqrt(max(r * r - 1.0, 0.0))) if np.isfinite(r) else np.inf
+    print(f"\n  day-360 floor {f360:.4e} K, gap {gap360:.4e} K, "
+          f"gap/(2*floor) = {r:.3f}")
+    lo_t, hi_t = NEMO_TIGHTER_RANGE
+    proceed = (r > 1.0) and (need <= 1.0 / lo_t)
+    json.dump({"floor_K": floor, "gap_K": GAP_K,
+               "gap_provenance": GAP_PROVENANCE, "crossing_day": cross,
+               "ratio_360": r, "required_nemo_spread_factor": need,
+               "phase1_worth_running": bool(proceed)},
               open(os.path.join(out_root, "phase0_floor.json"), "w"), indent=1)
-    if f360 < lo:
-        print("  VERDICT: DEAD ON ARRIVAL.  2*floor is below the measured "
-              "day-360 gap by construction, so the NEMO members would buy a "
-              "'distinguishable' that was fixed before the runs. DO NOT spend "
-              "PHASE 1; the gap is a bounded deterministic offset and the "
-              "next measurement is an operator, not an ensemble.")
-        return 1
-    if f360 > hi:
-        print(f"  VERDICT: the floor overtakes the gap INSIDE the year "
-              f"(first day within 2*floor: {cross}).  The deliverable is that "
-              "CROSSING DAY, not a day-360 yes/no; PHASE 1 refines it.")
+    if r <= 1.0:
+        print("  VERDICT: INDISTINGUISHABLE at day 360, established by PHASE 0 "
+              "ALONE.  The combined floor can only be LARGER than legoESM's, "
+              "so the NEMO members cannot overturn this. DO NOT spend PHASE 1."
+              f"  First day within 2*floor: {cross}")
         return 0
-    print(f"  VERDICT: inside the window -- PHASE 1 is worth its NEMO time. "
-          f"First day within 2*floor: {cross}")
+    print(f"  distinguishable on legoESM's floor alone. For PHASE 1 to flip "
+          f"it, NEMO's own from-rest spread must be at least {need:.3f}x "
+          "legoESM's.")
+    print(f"  On the restart-seeded record NEMO is {lo_t:.0f}-{hi_t:.0f}x "
+          f"TIGHTER, i.e. a factor of at most {1.0 / lo_t:.4f}.")
+    if not proceed:
+        print("  VERDICT: PHASE 1 is DEAD ON ARRIVAL -- NEMO would have to be "
+              "LOOSER than legoESM by a factor its own record contradicts. "
+              "The gap is a bounded deterministic offset (it FALLS from "
+              f"{GAP_K[180]:.4e} K at day 180 to {gap360:.4e} K at day 360, "
+              "and a trajectory diverging from a 1e-10 K seed does not "
+              "shrink), so the next measurement is an OPERATOR, not an "
+              "ensemble.")
+        return 1
+    print("  VERDICT: PHASE 1 can change the answer -- worth its NEMO time.")
     return 0
 
 

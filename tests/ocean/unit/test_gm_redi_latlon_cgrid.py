@@ -2645,7 +2645,25 @@ class TestRediKmmEta:
         the symbol named here is the keyword the operator actually reads."""
         src = legoesm_source_path(
             "ocean/dynamics/ocean_model_latlon_cgrid.py").read_text()
-        assert "redi_kmm_eta=state.eta.data" in src
+        # NAME THE SITE, not the string.  A diff reviewer reverted the ONE
+        # load-bearing call -- the MLF/leap-frog tendency call -- and this
+        # assertion still passed, because three other occurrences remained.
+        # So the check is anchored on the argument list that call is in.
+        n = src.count("redi_kmm_eta=state.eta.data")
+        assert n == 4, (
+            f"expected 4 call sites to carry the Kmm height, found {n}; "
+            "the sites are the leap-frog tendency + its K33, and the "
+            "unsplit-AB2 tendency + its K33")
+        i = src.index("_gm_out = gm_redi_tracer_tendency_latlon(")
+        j = src.index("return_bolus_transport=_want_bolus", i)
+        call = src[i:j]
+        assert "redi_kmm_eta=state.eta.data" in call, (
+            "the leap-frog GM/Redi tendency call -- the one whose operator "
+            "this fix is about -- does not carry the Kmm height")
+        assert "state_new.eta.data, state_new.H_bathy.data" in call, (
+            "this is not the call site this test means to pin: its positional "
+            "height is no longer the post-barotropic one, so the Kmm argument "
+            "would be measuring nothing")
         assert "redi_flux_eta" not in src, (
             "the widened keyword replaced the flux-faces-only one; a surviving "
             "redi_flux_eta would mean a call site still moves only the faces")

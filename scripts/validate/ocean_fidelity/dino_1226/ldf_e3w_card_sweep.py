@@ -34,6 +34,39 @@ import sys
 import numpy as np
 
 
+
+def _reach(gmc, sch, ffm):
+    """Does this card execute either changed block, and how many operands move?
+
+    TWO blocks changed, and they are gated DIFFERENTLY -- a diff reviewer
+    demonstrated that the first draft's single ``slope_scheme`` predicate
+    misses the implicit half:
+
+      explicit ``nemo_iso_lap_tracer_tendency_latlon_cgrid``
+          reached when ``slope_scheme == 'nemo_iso_lap'``.
+      implicit ``compute_isoneutral_K33_latlon``'s ``_J_vol``
+          reached when ``slope_positions == 'nemo_native'`` -- which the
+          reviewer showed is satisfiable with ``slope_scheme='triads'``
+          (measured: max|K33(kmm) - K33(base)| = 6.73e-05 against max|K33|
+          = 0.178 on a 6x7x5 partial-cell case).
+
+    Operand count: ``nemo_qco_live`` already carried its u/v flux faces on the
+    Kmm height, so four VOLUME operands move; the default ``tpoint_jacobian``
+    sets ``e3u_flux = e3v_flux = e3t``, so six move.
+    """
+    if gmc is None:
+        return False, 0, "card runs no GM/Redi at all"
+    pos = getattr(gmc, "slope_positions", "mode_b")
+    msc = bool(getattr(gmc, "msc_stabilize", False))
+    expl = (sch == "nemo_iso_lap")
+    impl = (pos == "nemo_native" and msc)
+    if not (expl or impl):
+        return False, 0, "does not run either changed block"
+    nop = (4 if ffm == "nemo_qco_live" else 6) if expl else 0
+    which = ("explicit + implicit" if (expl and impl)
+             else ("explicit only" if expl else "implicit (K33) only"))
+    return True, nop, f"REGISTERED: trajectory moves ({which})"
+
 def main() -> int:
     from legoesm.core.precision import PrecisionPolicy, set_policy
     set_policy(PrecisionPolicy.fp64())
@@ -182,10 +215,7 @@ def main() -> int:
             continue
         sch = gmc.slope_scheme
         ffm = gmc.redi_flux_face_thickness_evaluation
-        reaches = (sch == "nemo_iso_lap")
-        nop = (0 if not reaches else (4 if ffm == "nemo_qco_live" else 6))
-        note = ("does not run the changed operator" if not reaches
-                else "REGISTERED: trajectory moves")
+        reaches, nop, note = _reach(gmc, sch, ffm)
         if reaches:
             moved_b.append(name)
         print(f"{name:30s}{str(sch):14s}{str(ffm):18s}{str(reaches):>9s}"
@@ -199,13 +229,85 @@ def main() -> int:
         sch = "n/a" if gmc is None else gmc.slope_scheme
         ffm = ("-" if gmc is None
                else gmc.redi_flux_face_thickness_evaluation)
-        reaches = (sch == "nemo_iso_lap")
-        nop = (0 if not reaches else (4 if ffm == "nemo_qco_live" else 6))
+        reaches, nop, note = _reach(gmc, sch, ffm)
         if reaches:
             moved_b.append(case)
         print(f"{case:30s}{str(sch):14s}{str(ffm):18s}{str(reaches):>9s}"
-              f"{nop:>10d}  "
-              f"{'REGISTERED: trajectory moves' if reaches else 'does not run the changed operator'}")
+              f"{nop:>10d}  {note}")
+
+    # --- the NEMO GYRE card and the OMIP driver: a diff reviewer showed the
+    # --- first draft of this section enumerated the DINO recipes ONLY, so a
+    # --- card selecting nemo_iso_lap elsewhere would have been invisible.
+    try:
+        from legoesm.ocean.fidelity import nemo_recipe as nrc
+        _gy = getattr(nrc, "_NEMO_GYRE_CARD_CONFIG", None)
+        if _gy is not None:
+            _lo = getattr(_gy, "lateral_operator", None)
+            # Rule 10: linear_free_surface is on the card's Z-COORDINATE, not
+            # on its recipe config (nemo_recipe.py:872-875 builds the z_coord
+            # then ``._replace(linear_free_surface=True)``).  The first draft
+            # of this row read it off the recipe, got False, and printed
+            # "trajectory moves" for a card that cannot move.
+            _bld = getattr(nrc, "build_nemo_gyre_card", None)
+            _zc = None
+            if _bld is not None:
+                try:
+                    _zc = getattr(_bld(), "z_coord", None)
+                except Exception:                              # noqa: BLE001
+                    _zc = None
+            if _zc is None:
+                _src = open("packages/ocean/legoesm/ocean/fidelity/"
+                            "nemo_recipe.py").read()
+                _lfs = "_replace(linear_free_surface=True)" in _src
+            else:
+                _lfs = bool(getattr(_zc, "linear_free_surface", False))
+            print(f"{'NEMO GYRE card':30s}{str(_lo):14s}"
+                  f"{'-':18s}{str(_lo == 'nemo_iso_lap' and not _lfs):>9s}"
+                  f"{0 if _lfs else 4:>10d}  "
+                  + ("selects nemo_iso_lap but sets linear_free_surface "
+                     "(key_linssh): compute_ocean_jacobian short-circuits "
+                     "(vertical.py:1443) so BOTH time levels are the eta=0 "
+                     "reference and the change is inert BY CONSTRUCTION, not "
+                     "by luck" if _lfs else "REGISTERED: trajectory moves"))
+            if _lo == "nemo_iso_lap" and not _lfs:
+                moved_b.append("NEMO GYRE card")
+    except Exception as exc:                                   # noqa: BLE001
+        print(f"{'NEMO GYRE card':30s}{'?':14s}{'-':18s}{'CFG FAIL':>9s}"
+              f"{'-':>10s}  {type(exc).__name__}: {exc}")
+        failed.append("NEMO GYRE card")
+    print(f"{'run_omip_core2 --gm-slope-':30s}{'nemo_iso_lap':14s}{'-':18s}"
+          f"{'True':>9s}{4:>10d}  "
+          "REGISTERED: selectable from the CLI (run_omip_core2.py:1107), so "
+          "any OMIP run that chooses it moves; no committed OMIP config does")
+
+    # --- two instruments that rebuild the operator OUTSIDE the model step ---
+    # They call the changed functions WITHOUT the Kmm height, so on the DINO
+    # card they now sit on the post-barotropic level while the model sits on
+    # the step-entry one.  Registered, not fixed here: they are comparison
+    # harnesses, and moving them is a separate one-variable change.
+    import subprocess as _sp
+    _hits = _sp.run(
+        ["grep", "-rn", "--include=*.py",
+         "-e", "gm_redi_tracer_tendency_latlon(",
+         "-e", "compute_isoneutral_K33_latlon(",
+         "packages/", "scripts/"],
+        capture_output=True, text=True).stdout.splitlines()
+    print("\nEvery caller of the two changed functions, and whether it "
+          "passes the Kmm height:")
+    for ln in _hits:
+        loc = ":".join(ln.split(":")[:2])
+        f = ln.split(":")[0]
+        if f.endswith("gm_redi_latlon_cgrid.py"):
+            continue                       # the definitions themselves
+        try:
+            txt = open(f).read()
+        except OSError:
+            continue
+        tag = ("carries redi_kmm_eta" if "redi_kmm_eta" in txt
+               else "NO Kmm height -- stays on the positional level "
+                    "(REGISTERED: this instrument now rebuilds a different "
+                    "operator than the model runs on the DINO card)")
+        print(f"  {loc:70s} {tag}")
     print("\nEvery place slope_scheme='nemo_iso_lap' is selected in "
           "production code -- the ONLY cards Section B can reach:")
     out_b = subprocess.run(

@@ -113,14 +113,21 @@ Replaced with numbers that can be wrong:
 
 * **PREDICTION P1 (falsifiable)**: the landed T ratio lands in
   `[1.0000000, 1.0000030]` and the landed T residual rms lands in
-  `[0, 4.0e-13]`. Anything outside either interval refutes it. The T1 arm
+  `[0, 4.0e-13]`. Anything outside either interval refutes it. (Noted by a
+  reviewer and true: only the ratio interval is genuinely two-sided — the
+  residual's lower edge of 0 cannot fail. The measured ratio landed exactly on
+  the `1.0000000` edge and the residual came in 5e9x below the interval's
+  upper end, at 7.226e-23 — a prediction beaten by nine orders is itself a
+  reason to demand the slope control named in §1d, not a victory.) The T1 arm
   already moved N3 alone from `1.000004833 / 7.716e-13` to
   `1.000002 / 3.769e-13`; N4/N5 are the same `(1+r3t(Kmm))` on the same cells,
   so the landed value must not be WORSE than T1's and must not overshoot below
   1.0 by more than the 4.1e-5 relative size of the operand change.
-* **PREDICTION P2**: it cannot be worse than A0. The two stretches differ by at
-  most 4.1e-5 relative (the gate prints both spans) and the operator is
-  first-order in the operand.
+* ~~**PREDICTION P2**~~ **WITHDRAWN.** It read "it cannot be worse than A0
+  … the operator is first-order in the operand", and a reviewer pointed out
+  that first-order-ness bounds the MAGNITUDE of a change, never its SIGN — the
+  conclusion does not follow from the stated reason, and the FALSIFIER below
+  already does the same work correctly.
 * **FALSIFIER**: the landed ratio moves AWAY from 1.0, or the residual rms
   exceeds A0's `7.716e-13`. Then these operands are not one object and the
   change is reverted.
@@ -137,6 +144,53 @@ Replaced with numbers that can be wrong:
   must then refuse.
 
 ### 1d. UNMEASURED by this record, stated up front
+
+**THE SLOPES — and a RETRACTION.** A diff reviewer said the 2.7-ulp number
+rests on an untested premise, because the gate's `A1` arm (the one that feeds
+the operator NEMO's OWN slopes) could not run on a record whose slope dump
+round 3 had registered as empty. Measured, rather than repeated:
+
+| field | max\|.\| | nonzero cells |
+|---|---|---|
+| `uslp_stg` | 0.000000e+00 | 0 |
+| `vslp_stg` | **1.000000e-02** | **323015** |
+| `wslpi_stg` | 0.000000e+00 | 0 |
+| `wslpj_stg` | **1.000000e-02** | **330527** |
+
+**The dump is NOT empty, and round 3's "NEMO's tra_ldf cannot have run on zero
+slopes, so the dump is what is empty" is RETRACTED.** Two of the four are
+exactly zero and from rest that is PHYSICS: DINO's `usr_def_istate` T and S
+depend only on latitude and depth, so there is no ZONAL density gradient at
+kt=1 and the i-direction slopes are identically zero by construction. The
+j-direction pair carries the field.
+
+So the `A1` control DOES run, and it is the control the reviewer asked for:
+
+```
+A0 as the model runs it   T 1.000000  rms 7.2257e-23
+A1 + NEMO's own slopes    T 1.000000  rms 5.1984e-23
+```
+
+Feeding the operator NEMO's own slopes leaves the answer at the fp64 floor, so
+the 2.7-ulp result is NOT resting on an untested premise — legoESM's slopes are
+NEMO's to this record's resolution.
+
+**What is still UNMEASURED, and it is why the slope record is still worth
+acquiring:** both nonzero fields sit EXACTLY at `rn_slpmax = 0.01`, so this
+record exercises the slope LIMITER and not the interior formula, and the
+i-direction pair is untested altogether. `nemo_dino_kt1_slopes/run.sh` gets the
+six operands at `tra_ldf`'s own call site; a record past the initial adjustment
+is what would exercise the interior.
+
+**THE IMPLICIT HALF.** `compute_isoneutral_K33_latlon`'s `_J_vol` moved with
+the explicit operator's jacobian, and **no arm of this gate reaches it** — the
+gate spies on the explicit operator and on the dispatcher, never on K33. A
+reviewer demonstrated the consequence: a planted factor in `_J_vol` leaves
+every row byte-identical. Printed as an UNMEASURED row. It also means the `V0`
+regression witness is valid for this round's statement ONLY because `akz` is
+identically zero here and the implicit half is inert; that caveat is printed
+next to the witness.
+
 
 `akz` is identically zero on all 342134 wet cells of the kt=1 from-rest record
 (measured, commit `23dc6b26`), so **N6 is multiplied by nothing this record can
@@ -166,7 +220,7 @@ from kt=2 on.
 | R1 | `tra_ldf` → `akz` threshold | `traldf_iso.f90:829-830` `zcoef0 = rDt*(pakz + pah_wslp2/ze3w_2)` | `dt=dt` into `gm_redi_tracer_tendency_latlon`, where the step's `dt` is `_step_impl(state, rdt, …)` and `rdt = (1.0 if euler_start else 2.0)*dt` (`ocean_model_latlon_cgrid.py:10880`, `:10913`) | **MATCH — see retraction** |
 | R2 | `tra_zdf` implicit solve | `trazdf.f90:99` `tra_zdf_imp('TRA', rDt, …)`; `:115`,`:119` `…*rDt` | `_apply_implicit_vmix(naa_expl, rdt, …)` (`:11009`) | MATCH |
 | R3 | `tra_adv` FCT | `traadv.f90:267` `tra_adv_fct(…, rDt, …)` | same `_step_impl(state, rdt, …)` pipeline | MATCH |
-| R4 | `dyn_zdf` | `dynzdf.f90:159-168`, `:303-310` | `dt_mom = rdt / cfg.dt_mom_ratio` (`:11002`) | MATCH **iff `dt_mom_ratio == 1`** — printed by the gate, not assumed |
+| R4 | `dyn_zdf` | `dynzdf.f90:159-168`, `:303-310` | `dt_mom = rdt / cfg.dt_mom_ratio` (`:11002`) | **UNMEASURED** — MATCH iff `dt_mom_ratio == 1`, and an earlier draft of this row claimed the gate prints it. It does not: `dt_mom_ratio` appears nowhere in `kt1_tracer_ladder.py` (a reviewer grepped it). The only check under `dino_1226/` is `friction_timestep_check.py`. Corrected to UNMEASURED rather than re-pointed, because the row that matters is the one the tra_ldf gate can see. |
 | R5 | `ssh_nxt` | `sshwzv.f90:140` `pssh(Kaa) = pssh(Kbb) - rDt*(…)` | the barotropic/ssh stage of the same `_step_impl` | MATCH |
 | R6 | `dyn_spg_ts` barotropic substep | `dynspg_ts.f90:1203` `rDt_e = rn_Dt / nn_e` — **`rn_Dt`, not `rDt`** | `_barotropic_substep_scale = 1 if euler_start else 2` (`:10909`) | MATCH (already certified by the substep ladder) |
 | R7 | `wzv` restart term | `sshwzv.f90:527` `zdt = 2._wp*rn_Dt` with the comment *"MLF: 2\*rn_Dt and not rDt (for restartability)"* | — | **UNMEASURED**: legoESM's equivalent is not enumerated here |
@@ -231,6 +285,42 @@ unavailable), both run on this file BEFORE the code existed.
 | the from-rest spread floor may be dead on arrival: the certified verdict-360 record shows the NEMO/legoESM spread growing 2200x between day 90 and day 360 while the from-rest gap grows only 1.8x | **ACCEPTED** — the harness now runs a legoESM-only 4-member pre-check FIRST and refuses to spend the NEMO members unless the floor is in a preregistered window |
 | NEMO members need no source patch: `nn_pert_seed` already exists in DINO's `usrdef_istate` and in the compiled `ppsrc` | **ACCEPTED and independently verified** (`BLD/ppsrc/nemo/usrdef_istate.f90:188-194`, `MY_SRC/usrdef_nam.F90:81,126`) — the members are a namelist line |
 | 4-vs-4 permutation gives at best p = 2/70 = 0.0286, and a 3-D rms is a category error for a mean-difference floor | **ACCEPTED** — the from-rest harness uses pairwise distances, and reports the floor-crossing day rather than a day-360 binary |
+
+## What the two DIFF reviews found, and what was done
+
+Two more fresh independent Claude agents, run on the diff. Eleven findings
+between them; the ones that changed code are marked.
+
+| finding | disposition |
+|---|---|
+| **the source test survived a PARTIAL revert** — it asserted the string `redi_kmm_eta=state.eta.data` was *somewhere* in the model file, and four occurrences exist, so reverting the one load-bearing call still passed (demonstrated) | **FIXED** — the test now pins the leap-frog tendency call's own argument list and asserts the site's positional height is still `state_new.eta`; re-demonstrated to FAIL under the reviewer's exact revert |
+| **half the diff is invisible to the kt=1 gate** — `compute_isoneutral_K33_latlon`'s `_J_vol` is never called or spied by it, so a planted factor leaves every row byte-identical | **FIXED as a printed UNMEASURED row** (§1d). The record cannot close it; `nemo_dino_kt2_trends` can |
+| **the kt=2 akz census could never run** — it unpacked a 2-tuple from a 3-tuple call (the DINO card resolves `gm_bolus_advection='through_fct'`) and read `diags["akz"]`, which does not exist (the key is `diags["zfw_operands"]["akz"]`), both swallowed by a bare `except` that printed "UNAVAILABLE" and left the exit code alone | **FIXED** — correct arity, correct key, and a FAILED ROW instead of a printed excuse |
+| **the kt=2 gate identified its scored call by NEAREST NEIGHBOUR with no bar**, against the NOW tracer, while the operator is fed the BEFORE one | **FIXED** — exact wet-masked match against the Kbb field, refuses unless exactly one call matches, prints the per-call distances |
+| **`--plant-euler` was vacuous** — `return 0 if bad else 1` passes whenever any row is DEBT, and every row is DEBT before the plant (the bar is exact) | **FIXED** — the plant now runs BOTH arms in one invocation and requires every scored row to move between them |
+| **the sweep's `reaches` predicate was wrong for the implicit half** — `_J_vol` is gated on `slope_positions == 'nemo_native'`, not on `slope_scheme`; the reviewer measured `max\|K33(kmm) − K33(base)\| = 6.73e-05` against `max\|K33\| = 0.178` on a card the sweep would have printed `reaches=False` | **FIXED** — one shared `_reach()` predicate covering both blocks, and the row says which of the two a card runs |
+| **the sweep enumerated DINO only** — it missed the NEMO GYRE card and `run_omip_core2 --gm-slope-scheme nemo_iso_lap` | **FIXED** — both enumerated. GYRE selects `nemo_iso_lap` and is inert, but BY CONSTRUCTION not by luck: it sets `linear_free_surface`, and `compute_ocean_jacobian` short-circuits to the eta=0 reference (`vertical.py:1443`), so both time levels are the same object. The sweep now says that instead of omitting the card |
+| **two instruments now rebuild a different operator than the model runs** — `ocean/fidelity/box_heat_budget.py` and `ocean/fidelity/tendency_probe.py` call the changed functions with no Kmm height | **REGISTERED, not fixed** — they are comparison harnesses, and moving them is a separate one-variable change. The sweep now lists every caller of both functions and whether it carries the height |
+| **`compute_nemo_native_slopes` still receives the Naa `jacobian` alongside the Nnn `eta`** | **REGISTERED** — largely masked on this card by the `e3w_Kmm` override; the "one Kmm geometry" claim is scoped to `traldf_iso`'s own operands and says so |
+| **the spread-floor window was 98% pre-determined and its refusal branch was BACKWARDS** — `floor < 2e-3` is precisely the case where NEMO's spread could still lift the combined floor over the threshold, and it was the case the script refused | **FIXED** — the arbitrary window is replaced by one line of algebra with no free constant: PHASE 1 can only INCREASE the floor, so `gap <= 2*floor` means INDISTINGUISHABLE is already established and PHASE 1 cannot overturn it, while `gap > 2*floor` needs NEMO's spread to be `sqrt((gap/2floor)^2 - 1)` times legoESM's. The required factor is printed and compared with the 9–16600x-tighter record |
+| **`GAP_K` was five constants with no provenance** | **FIXED** — run directory, metric definition, NEMO reference runs and the day-360 snapshot sha256 are recorded next to them |
+| the window constant was duplicated in the members' `run.sh` | **FIXED** — `run.sh` now READS phase 0's own verdict from its JSON and refuses on `phase1_worth_running: false` |
+| **is 7.226e-23 real?** ulp(1.458e-7) = 2.646e-23, so it is **2.7 ulp** — the signature of the same arithmetic with minor reassociation, not of agreement by construction. The NEMO side is `ttrd_ldf` read straight out of the restart tiles; nothing legoESM produces is written back into it, and the identical instrument reported 7.716e-13 one commit ago | **SOUND** — and the reviewer's demand for the `A1` slope control was met rather than deferred: chasing it RETRACTED round 3's "the slope dump is empty" (see §1d) and the control passes at 5.2e-23 |
+| **the step-1 paradox** — errors from independent sources add in quadrature, so removing a component that is 4.35e-4 of the total moves the state rms by `4.79e-6 × ½(4.35e-4)² = 4.5e-13 K`, eleven orders below the printed precision. A visible move would have been the anomaly | **SOUND** — and `tra_ldf` is now excluded as a step-1 explainer at the 1e-4 level |
+| the rDt retraction | **SOUND under hostile check** — `_step_impl`'s `dt` is never rebound between its `def` and the GM/Redi call; both leap-frog entries pass `rdt`; the third call site is the MITgcm lane where `rDt = 2·rn_Dt` does not apply |
+| could the three `run.sh` guards be made to write inside the oracle? | **NO** — a reviewer extracted the guard and ran ten hostile inputs (OUT inside `cfgs/DINO`, `$NEMO/cfgs/SHARED`, `src/OCE`, a symlink into `cfgs/DINO`, a relative `../..`, `OUT=/data`, OUT a parent of NEMO, `NEMO=…/cfgs/DINO`, `NEMO=…/cfgs/DINO/..`); all refused, each by the intended rule |
+| `slopes_patch.py`'s anchors and `read_slopes.py`'s transpose | **VERIFIED by a reviewer** — the anchors occur exactly twice in the pristine source (the `lap` and `blp` bodies) and all six dumped arrays are `(jpi,jpj,jpk)` (`ldfslp.F90:571,589`), so the `(6,jpk,jpj,jpi) → (jpj,jpi,jpk)` transpose is right |
+
+**The next owner, named by the reviews rather than by me:** the step-1 residual
+is essentially ALL surface — `1.041e-08 K/s × 2700 s = 2.81e-5 K` at level 0
+against `1.26e-6 K` below, and pooling over the levels reproduces the measured
+`4.79e-06 K`. The two candidates are the non-solar surface flux (`tra_sbc`) and
+the solar one; `tra_qsr` is already excluded operator-to-operator (ratio
+1.000000000, eleven orders below). **The discriminating measurement needs no
+run:** score legoESM's own surface-flux tracer tendency against `ttrd_nsr` /
+`strd_nsr`, which are already in the restart, per level — with the free
+cross-check that salinity has no solar member, so a comparably large S surface
+residual would name the shared surface-flux path.
 
 ## ASKED / UNASKED
 

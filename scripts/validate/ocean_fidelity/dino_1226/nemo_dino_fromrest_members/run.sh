@@ -62,21 +62,28 @@ if [ ! -f "$PHASE0" ]; then
   echo "    python .../verdict360_fromrest.py --score-phase0" >&2
   exit 2
 fi
+# The decision is READ from phase 0's own artifact, never re-derived here.  A
+# constant copied into two files is a constant that goes stale in one of them.
 python3 - "$PHASE0" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
-f = d["floor_K"].get("360")
-lo, hi = 2.0e-3, 1.0e-2
-if f is None:
-    raise SystemExit("REFUSING: phase0_floor.json carries no day-360 floor")
-if f < lo:
+if "phase1_worth_running" not in d:
     raise SystemExit(
-        "REFUSING: the measured day-360 floor %.4e K is below the "
-        "preregistered window low edge %.1e.  2*floor is already under the "
-        "measured gap, so these members would buy a verdict that was fixed "
-        "before they ran.  Do not spend the NEMO time." % (f, lo))
-print("phase-0 gate: day-360 floor %.4e K, window [%.1e, %.1e] -- PROCEED"
-      % (f, lo, hi))
+        "REFUSING: %s predates the derived phase-1 test (no "
+        "'phase1_worth_running' key).  Re-run verdict360_fromrest.py "
+        "--score-phase0." % sys.argv[1])
+if not d["phase1_worth_running"]:
+    raise SystemExit(
+        "REFUSING: phase 0 says these members cannot change the answer.\n"
+        "  day-360 gap/(2*floor) = %.3f; NEMO's own spread would have to be "
+        "%.3f x legoESM's for phase 1 to flip the verdict, and the "
+        "restart-seeded record has NEMO 9-16600x TIGHTER.\n"
+        "  Do not spend the NEMO time." % (d.get("ratio_360", float("nan")),
+                                           d.get("required_nemo_spread_factor",
+                                                 float("nan"))))
+print("phase-0 gate: PROCEED (gap/(2*floor) = %.3f, required NEMO spread "
+      "factor %.3f)" % (d.get("ratio_360", float("nan")),
+                        d.get("required_nemo_spread_factor", float("nan"))))
 PY
 
 # ---------------------------------------------------------------- refusals

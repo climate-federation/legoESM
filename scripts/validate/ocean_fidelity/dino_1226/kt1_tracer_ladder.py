@@ -376,19 +376,39 @@ def stage5(calls, iT, iS, R, O3, wet3, z, st, real, plant_e3w: bool,
     except KeyError:
         cand = None
     if cand is None or max(float(np.abs(a).max()) for a in cand) == 0.0:
-        print("  SLOPE ARM UNMEASURED: the record's uslp_stg/vslp_stg/"
-              "wslpi_stg/wslpj_stg are identically ZERO on all 16 tiles, "
-              "while rhd_stg/tn_stg/rn2_stg from the SAME snapshot carry "
-              "data. NEMO's tra_ldf cannot have run on zero slopes (the A33 "
-              "stage below is 1.07x the tendency), so the dump -- not the "
-              "run -- is what is empty. A frame that copies uslp/vslp/wslpi/"
-              "wslpj at tra_ldf's own call site is needed before the slope "
-              "routine can be separated from the operator.")
+        print("  SLOPE ARM UNMEASURED: all four of the record's "
+              "uslp_stg/vslp_stg/wslpi_stg/wslpj_stg are identically ZERO, "
+              "so nothing here can separate the slope routine from the "
+              "operator. nemo_dino_kt1_slopes/run.sh acquires them at "
+              "tra_ldf's own call site.")
     else:
         nat = cand
-        print(f"  NEMO slopes from the record: max|uslp|="
-              f"{np.abs(nat[0]).max():.4e} max|wslpi|="
-              f"{np.abs(nat[2]).max():.4e} (rn_slpmax=0.01)")
+        _nm = ("uslp", "vslp", "wslpi", "wslpj")
+        print("  NEMO slopes from the record: "
+              + "  ".join(f"max|{n}|={float(np.abs(a).max()):.4e}"
+                          for n, a in zip(_nm, nat)))
+        # RETRACTION, printed where the old claim was printed.  Round 3 of
+        # PR #1728 registered "the record's slope dump is empty -- NEMO's
+        # tra_ldf cannot have run on zero slopes".  That was WRONG about why.
+        # uslp and wslpi ARE exactly zero, and it is PHYSICS: DINO's
+        # usr_def_istate T and S depend only on latitude and depth, so at
+        # kt=1 from rest there is no ZONAL density gradient and the
+        # i-direction slopes are identically zero by construction.  The
+        # j-direction pair carries 323015 / 330527 nonzero cells.
+        _zero = [n for n, a in zip(_nm, nat) if float(np.abs(a).max()) == 0.0]
+        if _zero:
+            print(f"    {'/'.join(_zero)} are exactly zero, and from rest "
+                  "that is PHYSICS, not an empty dump: DINO's initial T and S "
+                  "depend only on latitude and depth, so there is no zonal "
+                  "density gradient at kt=1. RETRACTS round 3's 'the slope "
+                  "dump is what is empty'.")
+        _cap = [n for n, a in zip(_nm, nat)
+                if abs(float(np.abs(a).max()) - 0.01) < 1e-12]
+        if _cap:
+            print(f"    {'/'.join(_cap)} sit exactly AT rn_slpmax = 0.01, so "
+                  "this record exercises the slope LIMITER rather than the "
+                  "interior formula -- a residual at the fp64 floor below is "
+                  "therefore weaker evidence about ldf_slp than it looks.")
 
     # -- the ahtu/ahtv masking row (ldftra.f90:433-434).  This round's second
     #    source-literal fix, measured in ISOLATION rather than folded into the
@@ -466,6 +486,18 @@ def stage5(calls, iT, iS, R, O3, wet3, z, st, real, plant_e3w: bool,
     _jac_kmm = np.asarray(_coj(jnp.asarray(np.asarray(st.eta.data)),
                                jnp.asarray(np.asarray(st.H_bathy.data)), z))
     _jac_naa = np.asarray(jac_naa)
+    # UNMEASURED, and printed rather than inferred (a diff reviewer planted a
+    # factor into the implicit half and every row of this gate stayed
+    # byte-identical).  compute_isoneutral_K33_latlon's own `_J_vol` -- the
+    # implicit twin of the operand this round moves -- is NOT reached by any
+    # arm below: this gate spies on the EXPLICIT operator and on the
+    # dispatcher, never on K33, and akz is identically zero on this record so
+    # even the explicit `ze3w_2` is multiplied by nothing.
+    print("  UNMEASURED: the IMPLICIT half of this round's change "
+          "(compute_isoneutral_K33_latlon's _J_vol, the same Kmm jacobian) is "
+          "not reached by any arm below -- this gate captures the explicit "
+          "operator only, and akz is zero on this record. Closing it needs a "
+          "record that fires the stabiliser (nemo_dino_kt2_trends/run.sh).")
     print(f"  stretch time level: the operator's jacobian spans "
           f"[{jac.min():.9f}, {jac.max():.9f}]; NEMO's (1+r3t(Kmm=Nnn)) "
           f"spans [{_stretch_nnn.min():.9f}, {_stretch_nnn.max():.9f}]; the "
@@ -520,6 +552,19 @@ def stage5(calls, iT, iS, R, O3, wet3, z, st, real, plant_e3w: bool,
         arms[-1] = ("A1 + NEMO's own slopes",
                     {"native_slopes": kw_T.get("native_slopes")})
 
+    if nat is None:
+        print("  UNMEASURED: the A1 arm (NEMO's OWN slopes) cannot run, so "
+              "every ratio below is the OPERATOR scored while fed legoESM's "
+              "own slopes -- and a residual at the fp64 floor would then also "
+              "be asserting, untested, that those slopes are NEMO's. The "
+              "slope record (nemo_dino_kt1_slopes/run.sh) closes it.")
+    else:
+        print("  the A1 arm below IS that control: it feeds the operator "
+              "NEMO's own four slope fields from the record, so A0 and A1 "
+              "together separate 'the operator is right' from 'the slopes "
+              "are right'. What it does NOT cover is the i-direction pair "
+              "(identically zero from rest) and the interior of the slope "
+              "formula (the j pair is at the limiter).")
     print(f"    {'arm':26s}{'T ratio':>12s}{'T res rms':>12s}"
           f"{'S ratio':>12s}{'S res rms':>12s}")
     results = {}
@@ -556,6 +601,10 @@ def stage5(calls, iT, iS, R, O3, wet3, z, st, real, plant_e3w: bool,
     # regression witness for THIS round's statement.
     v0T = results[("V0 volume at Naa (pre-round)", "T")][0]
     v0S = results[("V0 volume at Naa (pre-round)", "S")][0]
+    print("  (the V0 witness restores the EXPLICIT operator's jacobian only; "
+          "the replay cannot reach compute_isoneutral_K33_latlon's _J_vol, so "
+          "V0 is a valid witness for this round's change only because akz is "
+          "zero on this record and the implicit half is inert)")
     print(f"  Kmm witness: the Naa-volume arm gives T {v0T:.9f} / "
           f"S {v0S:.9f} against the recorded pre-round "
           "1.000004833 / 1.000004723")

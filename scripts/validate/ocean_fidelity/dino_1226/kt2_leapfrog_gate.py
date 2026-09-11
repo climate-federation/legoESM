@@ -136,21 +136,23 @@ def main() -> int:
     before = read_nemo_restart_before(one, nn_hls=0)
     st = bridge_before_state_topo(br._replace(state=br.state), g, before,
                                   periodic_i=True)
+    st_lf = st
     if a.plant_euler:
-        print("EULER PLANT ACTIVE: the before levels are dropped, so the step "
-              "takes rdt = rn_Dt instead of 2*rn_Dt; every row below MUST "
-              "move")
-        st = st._replace(u_before=None, v_before=None, T_before=None,
-                         S_before=None, eta_before=None)
+        print("EULER PLANT ACTIVE: this run scores the leap-frog step AND an "
+              "arm with the before levels dropped (rdt = rn_Dt); every scored "
+              "row MUST differ between them, or the gate is not measuring a "
+              "leap-frog step at all.")
 
     # Rule 10: PRINT the timestep the step will actually use, do not infer it.
-    euler = st.u_before is None
+    euler = st_lf.u_before is None
     rdt = (1.0 if euler else 2.0) * RN_DT
     print(f"\nSTEP: euler_start={euler}  rdt={rdt}  "
           f"(NEMO kt=2: rDt = 2*rn_Dt = {2 * RN_DT})")
-    if not a.plant_euler and rdt != 2 * RN_DT:
-        print("  ^^ the step is NOT the leap-frog step this record scores")
+    if rdt != 2 * RN_DT:
+        print("  ^^ the step is NOT the leap-frog step this record scores; "
+              "the kt=1 restart did not carry the before levels")
         return 1
+    st = st_lf
 
     forcing = dm.dino_lat_lon_surface_forcing_arrays(grid, cfg)
     sf_step = (dm.dino_step_surface_forcing(forcing)
@@ -183,6 +185,7 @@ def main() -> int:
     def O3(k, R):
         return _np.moveaxis(R[k], 0, -1)
 
+    rows: dict[str, float] = {}
     print("\nSTATE at the end of kt=2 (legoESM vs NEMO's kt=2 restart)")
     print(f"  {'field':14s}{'cells!=':>10s}{'max':>14s}{'rms':>14s}"
           f"{'NEMO step':>14s}")
@@ -194,6 +197,8 @@ def main() -> int:
         nemo = O3(nemo_name, R2) if w is wet3 else R2[nemo_name]
         prev = O3(nemo_name, R1) if w is wet3 else R1[nemo_name]
         step = float(_np.abs(nemo - prev)[w].max())
+        rows[lego_name] = float(
+            _np.sqrt(_np.mean((_np.asarray(obj) - nemo)[w] ** 2)))
         bad += _score(lego_name, obj, nemo, w, step)
 
     print("\ntra_ldf at kt=2 (legoESM's own tendency vs NEMO's ttrd_ldf)")
@@ -207,9 +212,28 @@ def main() -> int:
                       "it (was ln_tra_trd on?)")
                 bad += 1
                 continue
-            src = _np.asarray(getattr(st2, tag).data)
-            idx = min(range(len(calls)),
-                      key=lambda i: _np.abs(calls[i][0] - src)[wet3].max())
+            # The operator is fed the BEFORE (Kbb) tracer, not the now one
+            # (stpmlf.f90:504 passes Kbb=Nbb), so "nearest to T-now" is not
+            # "NEMO's tra_ldf call".  Identify by an EXACT wet-masked match
+            # against the Kbb field the step carries, and REFUSE when nothing
+            # matches -- kt=1's own note records that scoring the wrong call
+            # moved a ratio from 0.9967 to 5.53.
+            src = _np.asarray(getattr(st2, tag + "_before").data
+                              if getattr(st2, tag + "_before", None) is not None
+                              else getattr(st2, tag).data)
+            hits = [i for i in range(len(calls))
+                    if _np.array_equal(calls[i][0][wet3], src[wet3])]
+            print(f"  call identification [{tag}]: "
+                  + "  ".join(f"call {i}: max|q-Kbb| "
+                              f"{_np.abs(calls[i][0] - src)[wet3].max():.3e}"
+                              for i in range(len(calls))))
+            if len(hits) != 1:
+                print(f"  ^^ {len(hits)} captured calls match the Kbb {tag} "
+                      "exactly; the scored call is not identified and no row "
+                      "below is about NEMO's tra_ldf")
+                bad += 1
+                continue
+            idx = hits[0]
             tend = calls[idx][1]
             nemo = _np.nan_to_num(O3(key, R2))
             den = float(nemo[wet3] @ nemo[wet3])
@@ -233,23 +257,66 @@ def main() -> int:
 
     # The akz census: this is the ONE thing the kt=1 record structurally could
     # not see, so it is printed whether or not it is at the bar.
-    try:
-        _, diags = real(*calls[0][2], **{**calls[0][3],
-                                         "return_diagnostics": True,
-                                         "return_operand_diagnostics": True})
-        akz = _np.asarray(diags["akz"])
-        fired = int((akz[wet3[..., :akz.shape[-1]]] > 0.0).sum())
-        tot = int(wet3[..., :akz.shape[-1]].sum())
+    kwd = {**calls[0][3], "return_diagnostics": True,
+           "return_operand_diagnostics": True}
+    r = real(*calls[0][2], **kwd)
+    # The DINO card resolves gm_bolus_advection='through_fct', so the captured
+    # call carries return_bolus=True and the operator returns a THREE-tuple
+    # when the diagnostics are also asked for (gm_redi_latlon_cgrid.py:2787).
+    diags = r[-1]
+    if not isinstance(diags, dict):
+        print(f"\n  akz census FAILED: the operator returned "
+              f"{type(r).__name__} of length {len(r)}, whose last member is "
+              f"{type(diags).__name__}, not the diagnostics dict")
+        bad += 1
+    elif "zfw_operands" not in diags:
+        print("\n  akz census FAILED: no 'zfw_operands' in the diagnostics -- "
+              "that block exists only when msc_stabilize is on "
+              "(gm_redi_latlon_cgrid.py:2764), so the stabilising correction "
+              "is OFF while NEMO's namelist_cfg:267 turns it on")
+        bad += 1
+    else:
+        akz = _np.asarray(diags["zfw_operands"]["akz"])
+        w = wet3[..., :akz.shape[-1]]
+        fired = int((akz[w] > 0.0).sum())
+        tot = int(w.sum())
         print(f"\n  akz branch census at kt=2: the stabiliser fires on "
-              f"{fired}/{tot} wet cells "
-              f"({'the A33 e3w and the implicit half are now SCORED' if fired else 'still UNMEASURED -- the branch is empty here too'})")
-    except Exception as exc:                                  # noqa: BLE001
-        print(f"\n  akz census UNAVAILABLE: {type(exc).__name__}: {exc}")
+              f"{fired}/{tot} wet cells -- "
+              + ("the A33 e3w (traldf_iso.f90:831-833) and the implicit half "
+                 "of the split are now SCORED by the rows above"
+                 if fired else
+                 "still UNMEASURED: the branch is empty at kt=2 as well, so "
+                 "those two operands remain multiplied by nothing"))
 
     if a.plant_euler:
-        print("\nPLANT: every row above was scored on an EULER step; a gate "
-              "that reported AT BAR here is not measuring the leap-frog.")
-        return 0 if bad else 1
+        st_eu = st_lf._replace(u_before=None, v_before=None, T_before=None,
+                               S_before=None, eta_before=None)
+        st2e, ratee = dm.apply_dino_lat_lon_surface_forcing(
+            st_eu, forcing, z, cfg, RN_DT, t_seconds=2 * RN_DT,
+            return_rate=True)
+        with jax.disable_jit():
+            after_e = model.step(st2e, dt=RN_DT, surface_forcing=sf_step,
+                                 external_tracer_rate=ratee)
+        print("\nPLANT (euler arm): every scored row must MOVE")
+        moved = 0
+        for lego_name, nemo_name, w in (("T", "tn", wet3), ("S", "sn", wet3),
+                                        ("eta", "sshn", wet2),
+                                        ("u", "un", wet3), ("v", "vn", wet3)):
+            nemo = O3(nemo_name, R2) if w is wet3 else R2[nemo_name]
+            r = float(_np.sqrt(_np.mean(
+                (_np.asarray(getattr(after_e, lego_name).data) - nemo)[w]
+                ** 2)))
+            ok = r != rows[lego_name]
+            moved += int(ok)
+            print(f"  {lego_name:6s} leap-frog rms {rows[lego_name]:.6e}  "
+                  f"euler rms {r:.6e}  {'MOVED' if ok else 'DID NOT MOVE'}")
+        if moved != len(rows):
+            print("  ^^ a row that does not move between a leap-frog and an "
+                  "Euler step is not measuring the timestep, and every rDt "
+                  "row above rests on it")
+            return 1
+        print("  every row moved, as required")
+        return 0
     print(f"\n{'GATE PASS' if bad == 0 else f'GATE FAIL ({bad} rows)'}")
     return 0 if bad == 0 else 1
 
