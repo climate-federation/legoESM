@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
-
 from legoesm.grids.latlon import create_latlon_grid
 from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks_3d
 from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
     LatLonCGridOceanModel,
 )
-from legoesm.ocean.experiments.dino import DINOConfig, DINO_RECIPES
+from legoesm.ocean.experiments.dino import DINO_RECIPES, DINOConfig
 from legoesm.ocean.init_latlon_cgrid import rest_state_latlon_cgrid_ocean
 from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
     implicit_vertical_diffusion_nemo_momentum,
@@ -264,9 +263,7 @@ def test_the_ordered_sweep_rounds_its_multiply_separately():
     import math
 
     import numpy as np
-
-    from legoesm.ocean.physics.vertical_mixing import (
-        nemo_ordered_tridiagonal_solve)
+    from legoesm.ocean.physics.vertical_mixing import nemo_ordered_tridiagonal_solve
 
     rng = np.random.default_rng(20260906)
     ncol, nlev = 512, 24
@@ -320,8 +317,7 @@ def test_the_anti_fusion_helper_is_not_the_identity_on_subnormals():
     the restriction is inert there -- but a docstring that promises an
     identity is a testable claim, and this is the test that makes it one.
     """
-    from legoesm.ocean.physics.vertical_mixing.implicit_solver import (
-        _round_the_multiply)
+    from legoesm.ocean.physics.vertical_mixing.implicit_solver import _round_the_multiply
 
     normals = jnp.asarray([1.0, -1.0, 1e-4, -1e4, 0.0, -0.0, 3.7e-300])
     np.testing.assert_array_equal(

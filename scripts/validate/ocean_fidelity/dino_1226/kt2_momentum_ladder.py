@@ -139,7 +139,7 @@ import numpy as np
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_HERE))
 sys.path.insert(0, _HERE)
-from rebuild_nemo_restart import rebuild                       # noqa: E402
+from rebuild_nemo_restart import rebuild  # noqa: E402
 
 RN_DT = 2700.0                   # namdom rn_Dt, cfgs/DINO/*/namelist_cfg:116
 MESH = ("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/"
@@ -153,12 +153,17 @@ CERTIFIED_KT1 = ("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
 BUCKETS = {
     "keg": ("clean", "dynkeg.F90:163 -- dyn_keg increment to Nrhs"),
     "zad": ("clean", "dynzad.F90:124 -- dyn_zad increment to Nrhs"),
-    "rvo": ("split", "MY_SRC/dynvor.F90:170 vor_een(nrvm), emitted :174 -- pass 2 of 2"),
-    "pvo": ("split", "MY_SRC/dynvor.F90:153 vor_een(ncor), emitted :157 -- pass 1 of 2"),
+    "rvo": ("split", "MY_SRC/dynvor.F90:170 vor_een(nrvm), emitted :174 "
+                     "-- pass 2 of 2"),
+    "pvo": ("split", "MY_SRC/dynvor.F90:153 vor_een(ncor), emitted :157 "
+                     "-- pass 1 of 2"),
     "ldf": ("clean", "MY_SRC/dynldf.F90:120 -- dynldf_lev_lap increment"),
-    "hpg": ("clean", "MY_SRC/dynhpg.F90:133 -- hpg_sco increment; :127 is the key_RK3 arm and DINO compiles the #else (cpp_DINO.fcm)"),
+    "hpg": ("clean", "MY_SRC/dynhpg.F90:133 -- hpg_sco increment; :127 is "
+                     "the key_RK3 arm and DINO compiles the #else "
+                     "(cpp_DINO.fcm)"),
     "spg": ("bookkeeping",
-            "dynspg.F90:185 forms the DELTA of uu(Nrhs) across dyn_spg_ts and :187 emits it: the "
+            "dynspg.F90:185 forms the DELTA of uu(Nrhs) across dyn_spg_ts "
+            "and :187 emits it: the "
             "depth-mean removal (MY_SRC/dynspg_ts.F90:350-353) plus the "
             "barotropic re-injection (:1125-1128), NOT a pressure gradient"),
     "zdf": ("residual",
@@ -227,7 +232,7 @@ def part_a(R2, e3u0, e3v0, umask, vmask, check_stretch=False):
                        - uu_b)[uw[0]].max()
         d_lev = np.abs(_column_mean(R2["un"], e3u0 * lev, umask)
                        - uu_b)[uw[0]].max()
-        print(f"\n  STRETCH CONTROL, two arms")
+        print("\n  STRETCH CONTROL, two arms")
         print(f"    depth-INDEPENDENT 10% stretch (NEMO's r3u): moves uu_b by "
               f"max {d_col:.3e} -- it cancels, which is the claim")
         print(f"    depth-DEPENDENT 10% stretch (the FALSIFIER): moves uu_b by "
@@ -433,10 +438,11 @@ def part_b(a, R2, A, umask, vmask) -> int:
         # closure measures and far below any real term dropping out.
         ok = np.isfinite(rel) and rel < 1e-12
         closure_bad += (not ok)
+        note = ("OK" if ok else
+                "FAILED -- the per-operator rows below are residuals of "
+                "unknown composition")
         print(f"  CLOSURE {face}: max|sum(parts) - total_{face}| = {cl:.4e} "
-              f"({rel:.2e} of max|total|)  over {len(parts)} slots  "
-              f"{'OK' if ok else 'FAILED -- the per-operator rows below are '
-                                'residuals of unknown composition'}")
+              f"({rel:.2e} of max|total|)  over {len(parts)} slots  {note}")
     if closure_bad:
         print("  the split does not close on the total the model used; "
               "Rule 5 says the table below cannot be an attribution, so it "
@@ -581,9 +587,10 @@ def part_b(a, R2, A, umask, vmask) -> int:
         # (oracle identically zero) are not scored either way, so they are
         # excluded from its verdict and still reported above.
         ok = scored > 0 and at_bar == scored
+        note = ("PASS" if ok else
+                "FAILED, so no DEBT row below it means anything")
         print(f"\n  SELF-TEST: {at_bar} of {scored} scored rows AT BAR "
-              f"-- {'PASS' if ok else 'FAILED, so no DEBT row below it means '
-                                      'anything'}")
+              f"-- {note}")
         print(f"\nGATE {'PASS' if ok else 'FAIL'}")
         return 0 if ok else 1
     print(f"\n  the 'plant drms' column is the built-in non-vacuity control: "
@@ -597,14 +604,15 @@ def part_b(a, R2, A, umask, vmask) -> int:
 def _bridge(kt1_dir):
     """NEMO's kt=1 restart onto legoESM's Kbb/Kmm, as kt2_leapfrog_gate does."""
     import importlib.util as ilu
+
     import netCDF4  # noqa: F401  (imported for the same reason rebuild needs it)
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
     from legoesm.ocean.experiments import dino as dm
-    from legoesm.ocean.fidelity.nemo_io import (
-        NemoBeforeState, NemoState, read_nemo_mesh_mask)
+    from legoesm.ocean.fidelity.nemo_io import NemoBeforeState, NemoState, read_nemo_mesh_mask
     from legoesm.ocean.fidelity.nemo_state_bridge import (
-        bridge_nemo_to_legoesm_topo, bridge_before_state_topo)
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel)
+        bridge_before_state_topo,
+        bridge_nemo_to_legoesm_topo,
+    )
 
     k1 = os.path.join(kt1_dir, "DINO_00000001_restart_*.nc")
     if not glob.glob(k1):

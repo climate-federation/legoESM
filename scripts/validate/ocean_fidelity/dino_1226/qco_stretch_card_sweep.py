@@ -50,8 +50,7 @@ def main() -> int:
     from legoesm.core.precision import PrecisionPolicy, set_policy
     set_policy(PrecisionPolicy.fp64())                          # Rule 1c
     from legoesm.ocean.experiments import dino as dm
-    from legoesm.ocean.vertical import (compute_layer_thickness,
-                                        OceanPartialCellCoordinate)
+    from legoesm.ocean.vertical import OceanPartialCellCoordinate, compute_layer_thickness
 
     print(f"{'recipe':22s}{'coordinate':30s}{'branch':10s}"
           f"{'max |dh|/h':>13s}{'wet cells moved':>17s}")

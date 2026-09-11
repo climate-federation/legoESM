@@ -22,7 +22,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
     compute_layer_thickness,
