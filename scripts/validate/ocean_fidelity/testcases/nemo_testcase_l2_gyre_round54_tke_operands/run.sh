@@ -49,7 +49,7 @@ resolved=$(sed -n '/Namelist namzdf_tke/,/start from rest/p' "$SOURCE_RUN/ocean.
 for pattern in \
   'prandl number flag.*nn_pdl.*= *1' \
   'mixing length type.*nn_mxl.*= *3' \
-  'surface mixing length = F(stress).*ln_mxl0.*= *T' \
+  'surface mixing length = F\(stress\).*ln_mxl0.*= *T' \
   'surface  mixing length minimum value.*rn_mxl0.*4\.0000000000000001E-002' \
   'test param. to add tke induced by wind.*nn_etau.*= *0' \
   'type of tke penetration profile.*nn_htau.*= *1' \
