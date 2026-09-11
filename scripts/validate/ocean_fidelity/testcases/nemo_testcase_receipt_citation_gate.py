@@ -99,6 +99,8 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90"),
     "GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynadv.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynadv.f90"),
+    "GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynzad.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynzad.f90"),
     "GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynkeg.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynkeg.f90"),
     "GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/zdfmxl.f90": (
@@ -107,6 +109,8 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/ldfslp.f90"),
     "GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/traldf_iso.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/traldf_iso.f90"),
+    "GYRE_OMIP_L2_P3_SM_R41ADVSP/EXP00/ocean.output": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/EXP00/ocean.output"),
     "nemo_testcase_l2_gyre_phase3_gate.py": (
         REPO / "scripts/validate/ocean_fidelity/testcases"
              / "nemo_testcase_l2_gyre_phase3_gate.py"),
@@ -280,10 +284,33 @@ CITATION_MAP = {
     'ocean_pe_latlon_cgrid.py:3032-3058': [
         'area_w = jax.lax.optimization_barrier(',
         'diag_vertadv_v = jax.lax.optimization_barrier(diag_vertadv_v)', 27],
+    'ocean_pe_latlon_cgrid.py:4736-4757': [
+        'zad_w, zad_h_u, zad_h_v = w, h_u, h_v',
+        'zad_h_v = jax.lax.optimization_barrier(zad_h_v)', 22],
+    'ocean_model_latlon_cgrid.py:5923-5933': [
+        '_freeze_hpg = self._nemo_ws_test_hooks.freeze_stage_hpg_operands',
+        ('getattr(_cfg_b, "adaptive_implicit_vertadv", False)', 1), 11],
+    'ocean_model_latlon_cgrid.py:6873-6890': [
+        ('if (getattr(_cfg_b, "adaptive_implicit_vertadv", False)', 1),
+        '/ jnp.maximum(_area_v, 1.0e-30))', 18],
+    'ocean_model_latlon_cgrid.py:6901-6923': [
+        '# 7b. Adaptive-implicit vertical momentum advection',
+        'and _pflow is None):', 23],
     # --- ROUND 42: this round's compiled header and slope walk ---
     'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:466-472': [
         '!* advection (VIF or FF)',
         ('CALL dyn_adv( kstp, Kmm, Kmm, uu, vv, Krhs, zFu, zFv, zFw )', 2), 7],
+    'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/stprk3_stg.f90:327-333': [
+        ('IF( ln_dynadv_vec ) THEN', 1),
+        ('CALL wAimp', 1), 7],
+    'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynadv.f90:152-176': [
+        ('SELECT CASE( n_dynadv )', 1),
+        'CALL dyn_zad', 25],
+    'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynzad.f90:105-137': [
+        'DO jk =  1,  jpk-2',
+        '&                                              * zWdzV(ji,jj)', 33],
+    'GYRE_OMIP_L2_P3_SM_R41ADVSP/EXP00/ocean.output:535': (
+        'Courant number targeted application   ln_zad_Aimp =  F', 1),
     'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynadv.f90:176-185': [
         'CALL dyn_zad     ( kt                , Kmm, puu, pvv, Krhs )',
         '&           jpi, jpj, jpk, jpkm1, ntsi, ntei, ntsj, ntej, STORAGE_SIZE(1._wp)', 10],
