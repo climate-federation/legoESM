@@ -272,11 +272,59 @@ nothing reads.  Every shipped literal card already selects `nemo_explicit`
 (`nemo_testcase_recipe.py:129`, `experiments/dino.py:1234`), so this changes no
 trajectory; it turns a silent wrong answer into a loud refusal.
 
+## MEASUREMENT — THE YEAR (P3(c)), and PHASE 0
+
+**P3(c) HELD.**  All four from-rest members — the unperturbed control `seed 0`
+and three `1e-10 K` IC perturbations — completed the full 360 days / 2160 steps
+on the certified GYRE card, `1743`-`1872` s of wall each on CPU/fp64.  The
+harness aborts on the first non-finite value at every 30-day snapshot, so
+twelve snapshots per member reaching disk IS the finiteness statement.  The old
+code could not reach step 48.
+
+`--score-phase0` then wrote `year_fromrest/phase0_floor.json` at commit
+`95cfcc38f18e` with a CLEAN worktree, and its own gates pass:
+
+```
+STATUS HELD
+P1_floor_360_below_1e-3_K : 1.6588e-07 K against 1e-3     HELD
+P2_floor_growth_below_1e3 : 332.17     against 1e3        HELD
+vacuity_gate.phase1_may_run : true      (floor positive on every scored day)
+floor_shape                 : FLOOR_GROWING
+```
+
+The ensemble spread, which IS the noise floor the later model-vs-model gap gets
+judged against (max over the six within-ensemble pairwise distances, i.e. the
+sample range at n=4):
+
+| row | unit | day 30 | day 90 | day 180 | day 360 |
+|---|---|---:|---:|---:|---:|
+| T3D | K | 4.9938e-10 | 1.7339e-09 | 2.3139e-08 | 1.6588e-07 |
+| S3D | g/kg | 2.1621e-10 | 2.9076e-10 | 3.0927e-09 | 1.3991e-08 |
+| SST | K | 5.7524e-10 | 2.1935e-09 | 1.9190e-08 | 6.3876e-08 |
+| SSH | m | 1.0332e-11 | 4.7240e-11 | 9.6197e-11 | 1.7854e-09 |
+| T3D 0-100 m | K | 9.4695e-10 | 2.2096e-09 | 4.2724e-08 | 3.0912e-07 |
+| T3D 100-1000 m | K | 1.8142e-10 | 2.2602e-09 | 1.3680e-08 | 8.6988e-08 |
+| T3D >1000 m | K | 8.2206e-11 | 6.9514e-11 | 8.0291e-11 | 2.3389e-09 |
+| PSI max | Sv | 2.6913e-10 | 9.9348e-10 | 4.1874e-10 | 1.1094e-07 |
+| PSI min | Sv | 1.2792e-10 | 4.4844e-10 | 4.0310e-10 | 5.9132e-08 |
+| QNET | W | 1.0294e+04 | 2.0874e+04 | 1.4077e+06 | 8.4027e+05 |
+
+The floor GROWS by 332x over the year rather than collapsing, which is the case
+the harness wants: a collapsing floor would make `gap/(2*floor)` a statement
+about the perturbation decaying rather than about fidelity.  Its relative
+standard error at n=4 is `0.41`, so these are order-of-magnitude figures, not
+three-digit ones.  `repro_floor` (the same-binary irreproducibility floor,
+which is a different quantity) stays UNMEASURED.
+
+This is a legoESM-only number.  **NEMO's side of the year does not exist yet**,
+so NOTHING here is a fidelity statement; Phase 0's only job is to say whether
+the floor can see anything at all, and it says yes.
+
 ## RULE 12 — every card that executes the changed statement
 
 | card | executes the literal TKE solve? | measurement | verdict |
 |---|---|---|---|
-| GYRE-zco (this card) | YES — `tke_matrix_evaluation`/`tke_solver_evaluation` both `nemo_literal`, `prognostic=True` (printed from the built card) | corner series + 250-step census above; year below | FIXED — the runaway is gone and the deepest row sits on `rn_emin` |
+| GYRE-zco (this card) | YES — `tke_matrix_evaluation`/`tke_solver_evaluation` both `nemo_literal`, `prognostic=True` (printed from the built card) |  corner series + 250-step census + the full 360-day year, all above | FIXED — the runaway is gone and the deepest row sits on `rn_emin` |
 | LOCK_EXCHANGE-zco | NO | the built card's `model_config.physics` is `None` — there is no vertical-mixing block to select a scheme in. NEMO agrees: `tests/LOCK_EXCHANGE_OMIP_L1_P3_R33ZDF/EXP00/namelist_cfg:131` sets `ln_zdfcst = .true.` | UNAFFECTED BY CONSTRUCTION, both sides |
 | OVERFLOW-zps | NO | same; NEMO `tests/OVERFLOW_OMIP_L1/EXP00/namelist_cfg:129` `ln_zdfcst = .true.` | UNAFFECTED BY CONSTRUCTION, both sides |
 | DINO (`nemo_dino_kamm`) | YES — `experiments/dino.py:1248-1249` selects both literal evaluations | see below; the `zdf_chain_walk` logs are byte-identical before and after, and that fact is WORTH NOTHING on its own | UNMEASURED against NEMO; argued UNCHANGED from the code |
@@ -376,6 +424,13 @@ Under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/tke_runaway/`
 e8f73d18c403f908585f282263944a78e1391ba7312fa4802d8e695a186c2683  corner_after.log
 f01b97591a1e463cd723dae387acb1938c0aa1c0ae351712d570d29c467cf939  dino_chain_before.log
 f01b97591a1e463cd723dae387acb1938c0aa1c0ae351712d570d29c467cf939  dino_chain_after.log
+7b9ce93e483f66dbad7487d6de7a2c423b710b96ca4c71dd547ab7f55acaaf80  operator_level.log
+235bf8b21921b11d47eb03eb50aeca57f0ee2e465f76fa867933f387d5cb5020  ladder_compare.log
+b61a8b9a7a0a9618a351a0439f36710c286e0783c1fa917b689730391a8389ab  ladder_before.npz
+317ef3633ec3091310262d60298fd79246363ef5c0c633723534e68d2d5e8157  ladder_after.npz
+ff2ca3eaff13516530d6536585bdcd7060db78af1798d883c70fc40bda8c83cd  phase0_score.log
+3bd6712968cabf7c2aadc304b7c3fabda7548a37b75250d67af2e73f007427bd  tke_suite_final2.log
+3508b5c452d09211eeb4d87bfaef5ec9610613ad9f9caba74a9659535294ebb2  ../year_fromrest/phase0_floor.json
 ```
 
 The two DINO logs are BYTE-IDENTICAL, which is the Rule-12 row for that card
@@ -430,3 +485,48 @@ Pre-existing reds, each shown pre-existing before being dismissed:
 monkeypatch calling `np.asarray` on a traced array under
 `ocean_model_latlon_cgrid._step_jitted` — a file this round does not touch, in
 a test file with zero references to the TKE closure.
+
+## HANDOFF — the NEMO acquisition, for the operator to run
+
+Phase 0 is complete and `year_fromrest/phase0_floor.json` exists, so the
+acquisition script's own gate is satisfied.  The agent does not run NEMO,
+`makenemo` or `mpirun`; these are the operator's commands.
+
+Phase 0, already run (reproduces the table above; no NEMO time):
+
+```
+cd /tmp/codex-gyre
+export PYTHONPATH=packages/core:packages/ocean:packages/atmosphere:packages/coupler:packages/ice:packages/land:packages/ml:packages/tools:src
+export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
+H=scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_year_fromrest.py
+for s in 0 1 2 3; do /home/dbalwada/legoESM/.venv/bin/python $H --member $s; done
+/home/dbalwada/legoESM/.venv/bin/python $H --score-phase0
+```
+
+Phase 1, NEMO — ONE command, which builds one patched config and runs five year
+members (`nn_pert_seed = 0..3` plus a pristine control on the UNPATCHED
+certified binary):
+
+```
+bash scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_year_fromrest_members/run.sh
+```
+
+It copies `GYRE_OMIP_L2_P3_SM_R41ADVSP` to `GYRE_OMIP_L2_P3_SM_YRPERT`, applies
+the two additive `MY_SRC` patches that add `nn_pert_seed`, checks the patches
+removed only the one `NAMELIST` line, verifies `nn_pert_seed` reached the
+COMPILED `ppsrc`, refuses if any namelist row outside
+`nn_itend`/`nn_stock`/`nn_write`/`nn_pert_seed` moved, runs
+`mpirun -np 1 ./nemo` per member at `nn_itend = 2160`, `nn_stock = 180`,
+requires every seed-0 restart to be BYTE-IDENTICAL to the pristine run's,
+refuses if any two members come out bit-identical, and writes
+`nemo_year_fromrest_restarts.sha256`.  It prints
+`GYRE_YEAR_FROMREST_NEMO_READY <dir>` on success.
+
+Then, back on the agent side:
+
+```
+/home/dbalwada/legoESM/.venv/bin/python $H --score
+/home/dbalwada/legoESM/.venv/bin/python $H --figures
+```
+
+STOPPING HERE for the acquisition, as the round's rules require.
