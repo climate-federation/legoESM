@@ -492,6 +492,69 @@ def oracle_floor(*, steps: int = 3, roots=(LADDER_ENTRY_ROOT, YEAR_ENTRY_ROOT)) 
     return report
 
 
+def score_both_roots(*, steps: int = 3) -> dict:
+    """Score the LADDER'S OWN program against BOTH oracle records.
+
+    The ladder reports one residual per row against ``gyre_kt1_10``.  If the
+    oracle's two records of this card differ by as much as that residual, the
+    row is not a measurement of legoESM -- so every row is taken twice here,
+    once against each record, and the oracle-vs-oracle floor is printed beside
+    it.  A row whose two residuals differ by about the floor is a row whose
+    number belongs to the ORACLE'S build, not to the model.
+    """
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    _policy()
+    gate = _load("gyre_phase3_gate", LADDER_GATE)
+    card, ladder, _, _, _ = resolve_programs()
+    model = _model(card, ladder)
+    masks = gate.expected_masks(card)
+    nlev = card.recipe.z_coord.n_levels
+    roots = {"ladder_root": LADDER_ENTRY_ROOT, "year_root": YEAR_ENTRY_ROOT}
+    state = card.recipe.initial_state
+    rows = []
+    for kt in range(1, steps + 1):
+        fields = gate.lego_fields(state)
+        entries = {name: gate.read_entry(
+            root / f"oracle_step_entry_kt{kt:08d}.bin")
+            for name, root in roots.items()}
+        for field in FIELDS:
+            mask = np.asarray(masks[field], dtype=bool)
+            mine = np.asarray(fields[field], dtype=np.float64)
+            row = {"kt": kt, "field": field, "bar": 1.0e-15}
+            for name, entry in entries.items():
+                theirs = np.asarray(entry[field], dtype=np.float64)
+                if theirs.ndim == 3:
+                    theirs = theirs[..., :nlev]
+                absolute = float(np.max(np.abs((mine - theirs)[mask])))
+                reference = float(np.max(np.abs(theirs[mask])))
+                row[name] = {
+                    "absolute_max": absolute,
+                    "normalized_max_abs": absolute / max(reference, 1.0),
+                    "cells_unequal": int(np.count_nonzero(
+                        _bits(mine)[mask] != _bits(theirs)[mask])),
+                    "exact": bool(np.array_equal(mine[mask], theirs[mask])),
+                }
+            rows.append(row)
+        if kt < steps:
+            freshwater, surface = gate._surface_forcings(card, state, kt)
+            state = model.step(state, dt=card.dt_s, freshwater=freshwater,
+                               surface_forcing=surface)
+    report = {"format": "gyre-card-reconciliation-both-roots-v1", "case": CASE,
+              "roots": {k: str(v) for k, v in roots.items()}, "rows": rows,
+              "worktree": worktree_stamp()}
+    print("\nTHE LADDER'S PROGRAM SCORED AGAINST BOTH ORACLE RECORDS")
+    print(f"  {'kt':>3s} {'field':>6s} {'vs ladder root':>16s} {'exact':>6s}"
+          f" {'vs year root':>16s} {'exact':>6s}")
+    for row in rows:
+        print(f"  {row['kt']:>3d} {row['field']:>6s} "
+              f"{row['ladder_root']['normalized_max_abs']:>16.6e} "
+              f"{str(row['ladder_root']['exact']):>6s} "
+              f"{row['year_root']['normalized_max_abs']:>16.6e} "
+              f"{str(row['year_root']['exact']):>6s}")
+    return report
+
+
 def self_check() -> int:
     """Every plant must be refused, and the readers must be non-vacuous."""
     failures = []
@@ -538,6 +601,7 @@ def main(argv=None) -> int:
     parser.add_argument("--config-diff", action="store_true")
     parser.add_argument("--two-path", action="store_true")
     parser.add_argument("--oracle-floor", action="store_true")
+    parser.add_argument("--score-both-roots", action="store_true")
     parser.add_argument("--self-check", action="store_true")
     parser.add_argument("--steps", type=int, default=2)
     parser.add_argument("--entry-root", type=Path, default=LADDER_ENTRY_ROOT)
@@ -550,14 +614,17 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     if args.self_check:
         return self_check()
-    require(args.config_diff or args.two_path or args.oracle_floor,
-            "choose --config-diff, --two-path, --oracle-floor or "
-            "--self-check")
+    require(args.config_diff or args.two_path or args.oracle_floor
+            or args.score_both_roots,
+            "choose --config-diff, --two-path, --oracle-floor, "
+            "--score-both-roots or --self-check")
     report = {}
     if args.config_diff:
         report["config_diff"] = config_diff(plant=args.plant)
     if args.oracle_floor:
         report["oracle_floor"] = oracle_floor()
+    if args.score_both_roots:
+        report["score_both_roots"] = score_both_roots(steps=args.steps)
     if args.two_path:
         report["two_path"] = two_path(steps=args.steps,
                                       entry_root=args.entry_root,
