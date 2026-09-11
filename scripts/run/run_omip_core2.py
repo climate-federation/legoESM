@@ -4171,6 +4171,33 @@ def _ice_state_spatial_shape(grid, app_grid_type):
         "ice-state spatial shape (supported: mpas, fesom, tripole, latlon).")
 
 
+def _resolve_ice_snow(scheme, prognostic_sea_ice, *, k_snow=None, flooding=None):
+    """Select the existing bulk snow column; no multilayer/BL99 claim.
+
+    None overrides retain SnowConfig defaults. Conductivity is in W/m/K;
+    ORCA1's namelist_ice_cfg:92 specifies 0.5, supplied explicitly by the
+    caller rather than replacing the library's conductivity default.
+    """
+    from legoesm.ice.config import SnowConfig
+
+    if scheme not in ("off", "bulk"):
+        raise ValueError(f"Unknown ice snow scheme: {scheme!r}; expected off or bulk")
+    if flooding not in (None, "on", "off"):
+        raise ValueError(f"Unknown ice snow flooding selection: {flooding!r}")
+    if scheme != "off" and not prognostic_sea_ice:
+        raise ValueError("--ice-snow bulk requires --prognostic-sea-ice")
+    if (k_snow is not None or flooding is not None) and scheme != "bulk":
+        raise ValueError("--ice-snow-k/--ice-snow-flooding require --ice-snow bulk")
+    snow = SnowConfig(enabled=scheme == "bulk")
+    if k_snow is not None:
+        if not (np.isfinite(k_snow) and k_snow > 0):
+            raise ValueError("--ice-snow-k must be finite and positive [W/m/K]")
+        snow = snow._replace(k_snow=float(k_snow))
+    if flooding is not None:
+        snow = snow._replace(flooding=flooding == "on")
+    return snow
+
+
 def _require_prognostic_ice_for_itd_flags(ice_categories, ice_ridging,
                                           prognostic_sea_ice, *,
                                           ice_ridging_closing_scheme="strain") -> None:
@@ -5855,6 +5882,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "shelf columns injects +1.2..+3.5 PSU brine that NEMO "
                         "(starting WITH that ice) never sees.  Default None = "
                         "byte-identical zero-ice cold start.")
+    p.add_argument("--ice-snow", choices=("off", "bulk"), default="off",
+                   help="Select existing single bulk snow physics for prognostic "
+                        "ice (accumulation, insulation, ablation and flooding). "
+                        "Default off preserves SnowConfig.enabled=False; initialized "
+                        "snow still participates in the existing brine-enabled "
+                        "thermodynamics. This is not BL99 multilayer ice/snow.")
+    p.add_argument("--ice-snow-k", type=float, default=None,
+                   help="Bulk snow conductivity [W/m/K]; requires --ice-snow bulk. "
+                        "Omitted: retain SnowConfig.k_snow. Local NEMO ORCA1 "
+                        "namelist_ice_cfg:92 selects 0.5 explicitly.")
+    p.add_argument("--ice-snow-flooding", choices=("on", "off"), default=None,
+                   help="Snow-ice flooding; requires --ice-snow bulk. Omitted: "
+                        "retain SnowConfig.flooding (True). Uses the existing "
+                        "bulk flotation conversion, not SI3 layer enthalpy.")
     p.add_argument("--ice-categories", type=int, default=1,
                    help="Number of sea-ice thickness categories for "
                         "--prognostic-sea-ice (default 1 = single-category, "
@@ -6839,6 +6880,9 @@ def main() -> int:
     _require_prognostic_ice_for_itd_flags(
         args.ice_categories, args.ice_ridging, args.prognostic_sea_ice,
         ice_ridging_closing_scheme=args.ice_ridging_closing_scheme)
+    _snow = _resolve_ice_snow(
+        args.ice_snow, args.prognostic_sea_ice,
+        k_snow=args.ice_snow_k, flooding=args.ice_snow_flooding)
 
     # --prescribed-flow gates (PRE-BUILD, on the static args): grid support +
     # the --spinup-drag rejection + the --no-gm-redi requirement.  NB: no
@@ -8040,6 +8084,7 @@ def main() -> int:
             ridging=RidgingConfig(enabled=_ridging_on,
                                  closing_scheme=args.ice_ridging_closing_scheme),
             brine=_brine,            # brine-rejection salt flux -> ocean salt_flux
+            snow=_snow,
             # Under-ice transmitted SW is owned by the ICE model (constant-
             # scheme transmittance): the ice EB is debited and the ocean
             # receives it via resp.ocean_heat_extraction (-= sw_penetrated),

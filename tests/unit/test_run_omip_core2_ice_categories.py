@@ -312,7 +312,7 @@ def test_closing_flag_forwarding_through_actual_main_statements(scheme):
     from legoesm.grids.latlon import create_latlon_geometry
     from legoesm.grids.cubed_sphere import create_cubed_sphere
     from legoesm.ice import SeaIceConfig
-    from legoesm.ice.config import BrineConfig, RidgingConfig
+    from legoesm.ice.config import BrineConfig, RidgingConfig, SnowConfig
     from legoesm.ice.sea_ice import grid_supports_ice_dynamics, grid_supports_ice_transport
 
     args = _build_arg_parser().parse_args([
@@ -338,7 +338,7 @@ def test_closing_flag_forwarding_through_actual_main_statements(scheme):
     env = dict(args=args, grid=grid, _ice_dyn="free_drift", _transport="advect",
                _supports_dyn=grid_supports_ice_dynamics(grid),
                _supports_transport=grid_supports_ice_transport(grid),
-               _brine=BrineConfig(enabled=True), SeaIceConfig=SeaIceConfig,
+               _brine=BrineConfig(enabled=True), _snow=SnowConfig(), SeaIceConfig=SeaIceConfig,
                RidgingConfig=RidgingConfig,
                _resolve_ice_categories=_resolve_ice_categories,
                _require_prognostic_ice_for_itd_flags=_require_prognostic_ice_for_itd_flags)
