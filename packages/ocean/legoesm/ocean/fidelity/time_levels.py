@@ -881,13 +881,27 @@ del _iday, _nn, _rank, _rr
 # at stprk3.F90:344-389.  Header checks in the testcase gate independently pin
 # the numeric Kaa/Kmm/Nrhs indices; these semantic labels select the comparison
 # role and deliberately fail closed for any new basename.
-for _kt in range(1, 11):
+# The ENTRY writer's OWN range, read off the card that runs it:
+# cfgs/GYRE_OMIP_L2_P3_SM_YRPERT/MY_SRC/stprk3.F90:90 gates it on
+# ``kstp >= nit000 .AND. kstp <= nit000 + 59``, so a run longer than ten steps
+# writes SIXTY of these and every one is the same whole-step Nbb entry state.
+# The registry covered only ten, so a GYRE year's own days 0..10 -- already on
+# disk -- could not be read at all.  NOTE the citation: the vendored copy at
+# scripts/.../nemo502_MY_SRC/stprk3.F90:90 is lane 1's, whose gate is
+# ``nit000 .OR. midpoint .OR. nitend``; the WRITE statement is byte-identical
+# but the two gates are not, so the lane-2 range is cited from the CARD.
+_STEP_ENTRY_LAST_KT = 60
+for _kt in range(1, _STEP_ENTRY_LAST_KT + 1):
     _step = f"{_kt:08d}"
     _DUMP_TIME_LEVEL[f"oracle_step_entry_kt{_step}.bin"] = (
         "before",
+        "cfgs/GYRE_OMIP_L2_P3_SM_YRPERT/MY_SRC/stprk3.F90:90-101 (lane 2) and "
         "scripts/validate/ocean_fidelity/testcases/nemo502_MY_SRC/"
-        "stprk3.F90:92-100 writes ts/uu/vv/ssh(...,Nbb) at whole-step entry",
+        "stprk3.F90:92-100 (lane 1) write ts/uu/vv/ssh(...,Nbb) at whole-step "
+        "entry; lane 2's gate is kstp <= nit000+59",
     )
+for _kt in range(1, 11):
+    _step = f"{_kt:08d}"
     _DUMP_TIME_LEVEL[f"oracle_bt_frames_kt{_step}.bin"] = (
         "after",
         "scripts/validate/ocean_fidelity/testcases/nemo502_MY_SRC/"

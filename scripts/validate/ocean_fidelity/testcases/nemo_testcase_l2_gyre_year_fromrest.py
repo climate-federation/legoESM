@@ -349,8 +349,19 @@ def _snapshot(state, gate) -> dict:
 
 def run_member(seed: int, out_root: Path, *, days: int = YEAR_DAYS,
                mesh_path: Path = DEFAULT_NEMO_MESH, tag: str = "",
-               plant: str | None = None) -> int:
-    """One legoESM member: from rest, ``days`` days, a snapshot every 30 days."""
+               plant: str | None = None, snap_steps: int = SNAP_STEPS) -> int:
+    """One legoESM member: from rest, ``days`` days, a snapshot every 30 days.
+
+    ``snap_steps`` exists so a FINER record can be taken through the SAME
+    stepping loop the scored members used, rather than by a second copy of it.
+    Its default is the preregistered 180-step (30-day) cadence, so every
+    scored member is byte-unchanged by this parameter; the day-by-day owner
+    round passes 6 (one day) and writes into its own root.  The snapshot
+    filename carries the DAY, so a cadence that is not a whole number of days
+    is refused rather than silently rounding two steps onto one name."""
+    require(snap_steps >= 1 and snap_steps % STEPS_PER_DAY == 0,
+            f"snap_steps={snap_steps} is not a positive whole number of days "
+            f"({STEPS_PER_DAY} steps); the snapshot name carries the day")
     import jax
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
@@ -402,7 +413,7 @@ def run_member(seed: int, out_root: Path, *, days: int = YEAR_DAYS,
         freshwater, surface = gate._surface_forcings(card, state, kt)
         state = model.step(state, dt=card.dt_s,
                            freshwater=freshwater, surface_forcing=surface)
-        if kt % SNAP_STEPS == 0:
+        if kt % snap_steps == 0:
             arrays = _snapshot(state, gate)
             require(all(np.all(np.isfinite(value)) for value in arrays.values()),
                     f"seed {seed}: non-finite state at day {kt // STEPS_PER_DAY}")
@@ -413,7 +424,9 @@ def run_member(seed: int, out_root: Path, *, days: int = YEAR_DAYS,
         "format": "nemo-testcase-l2-gyre-year-fromrest-member-v1",
         "case": CASE, "seed": seed, "tag": tag, "days": days,
         "steps": n_steps,
-        "dt_s": DT_S, "snapshot_days": list(range(SNAP_DAYS, days + 1, SNAP_DAYS)),
+        "dt_s": DT_S, "snapshot_step_interval": snap_steps,
+        "snapshot_days": list(range(snap_steps // STEPS_PER_DAY, days + 1,
+                                    snap_steps // STEPS_PER_DAY)),
         "phase3_gate_sha256": gate_sha,
         "perturbation": properties,
         "operands": operands,
@@ -1685,6 +1698,10 @@ def main(argv=None) -> int:
     parser.add_argument("--member", type=int, default=None,
                         help="run one legoESM member with this seed")
     parser.add_argument("--days", type=int, default=YEAR_DAYS)
+    parser.add_argument("--snap-steps", type=int, default=SNAP_STEPS,
+                        help="snapshot cadence in STEPS; the preregistered "
+                             "members use 180 (30 days) and are unchanged by "
+                             "this flag.  Must be a whole number of days.")
     parser.add_argument("--tag", default="",
                         help="suffix for the member directory; \"repro\" is the same-binary reproducibility re-run of seed 0")
     parser.add_argument("--census", type=int, default=None,
@@ -1734,7 +1751,7 @@ def main(argv=None) -> int:
     if args.member is not None:
         return run_member(args.member, args.root, days=args.days,
                           mesh_path=args.mesh, tag=args.tag,
-                          plant=args.plant)
+                          plant=args.plant, snap_steps=args.snap_steps)
     if args.alignment_gate:
         report = alignment_gate(args.root, mesh_path=args.mesh,
                                 entry_path=args.entry, plant=args.plant)
