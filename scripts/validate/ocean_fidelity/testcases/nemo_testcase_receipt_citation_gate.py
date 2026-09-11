@@ -1030,8 +1030,10 @@ CITATION_MAP = {
         ('CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )', 1),
         ('CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )', 1),
         1],
-    # the field is named twice: GYRE's bundle at 226, the tanks' at 311
-    'nemo_testcase_recipe.py:311': [
+    # the field is named twice: GYRE's bundle at 226, the tanks' at 329.
+    # ROUND (card reconciliation): the GYRE card's own freshwater selection
+    # added eighteen lines above this anchor, so 311 became 329.
+    'nemo_testcase_recipe.py:329': [
         ('zdf_baroclinic_only=True,', 2), ('zdf_baroclinic_only=True,', 2), 1],
     'provenance.py:96': 'def git_sha(*, allow_dirty: bool = False, repo: str | Path | None = None) -> str:',
     'cpp_GYRE_BARE.fcm:1': 'key_linssh key_vco_1d  key_RK3',
@@ -1071,7 +1073,10 @@ CITATION_MAP = {
          2],
     # ROUND 34: decision 19 added seventeen lines above the last of these
     # three, so 914 became 931.  The two earlier anchors are unmoved.
-    'nemo_testcase_recipe.py:92,274,931': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
+    # ROUND (card reconciliation): the GYRE card's own freshwater selection
+    # added eighteen lines above the SECOND and THIRD anchors, so 274 became
+    # 292 and 931 became 949.  The first (92) is above the edit, unmoved.
+    'nemo_testcase_recipe.py:92,292,949': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
     'BLD/ppsrc/nemo/dynspg_ts.f90:1224': 'REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv',
     'BLD/ppsrc/nemo/dynhpg.f90:378,397': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  '
           '0)              ! Surface value',
