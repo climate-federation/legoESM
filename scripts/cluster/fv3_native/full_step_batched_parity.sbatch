@@ -20,6 +20,9 @@
 # forwarding to prove that test can fail. A dispatch test that passes with
 # the feature removed certifies nothing.
 set -uo pipefail
+# --max-rel gates each arm against the oracle. BATCHED_VS_LOOP_MAX_REL
+# separately gates the batched arm against the loop arm.
+: "${BATCHED_VS_LOOP_MAX_REL:?BATCHED_VS_LOOP_MAX_REL is required; a comparison with no ceiling reports a number and certifies nothing}"
 REPO=${REPO:-/burg-archive/glab/users/pg2328/legoESM_codex_m8}
 [ -e "$REPO/.git" ] || { echo "PREFLIGHT FAILED: REPO=$REPO"; exit 5; }
 DIRTY=$(git -C "$REPO" status --porcelain | wc -l)
@@ -100,10 +103,16 @@ def flat(d, p=""):
     for k, v in (d or {}).items():
         if isinstance(v, dict):
             yield from flat(v, f"{p}{k}.")
-        elif isinstance(v, (int, float)):
+        elif (k not in BOOKKEEPING_KEYS
+              and isinstance(v, (int, float))
+              and not isinstance(v, bool)):
             yield f"{p}{k}", float(v)
+BOOKKEEPING_KEYS = {"batched", "compiled", "n_steps"}
 fa, fb = dict(flat(a)), dict(flat(b))
 keys = [k for k in fa if k in fb]
+if not keys:
+    print("no shared numeric measurement keys between the two runs")
+    raise SystemExit(1)
 print(f"{'metric':50s} {'loop':>12s} {'batched':>12s} {'rel':>10s}")
 worst = (0.0, None)
 for k in sorted(keys):
@@ -113,7 +122,17 @@ for k in sorted(keys):
     if rel > worst[0]: worst = (rel, k)
     print(f"{k:50s} {x:12.5e} {y:12.5e} {rel:10.2e}")
 print(f"\nWORST ARM-TO-ARM rel = {worst[0]:.3e} at {worst[1]}")
+import math, os
+bound = float(os.environ["BATCHED_VS_LOOP_MAX_REL"])
+if not math.isfinite(bound):
+    print("FAIL: BATCHED_VS_LOOP_MAX_REL must be finite")
+    raise SystemExit(1)
+if worst[0] > bound:
+    print(f"FAIL: batched-vs-loop {worst[0]:.3e} exceeds "
+          f"BATCHED_VS_LOOP_MAX_REL={bound:g} at {worst[1]}")
+    raise SystemExit(1)
+print(f"PASS: batched-vs-loop within BATCHED_VS_LOOP_MAX_REL={bound:g}")
 PYEOF
 BKRC=$?
-[ "$BKRC" -eq 0 ] || exit $BKRC
-echo BATPARITY_DONE
+echo "BATPARITY_DONE rc=$BKRC"
+exit $BKRC

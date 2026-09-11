@@ -21,7 +21,11 @@ oracle output, which is not in the tree.
 
 import ast
 import inspect
+import json
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -32,20 +36,94 @@ _JOB_DIR = _ROOT / "scripts" / "cluster" / "fv3_native"
 _JOB = _JOB_DIR / "full_step_backend_parity.sbatch"
 _BATCHED_JOB = _JOB_DIR / "full_step_batched_parity.sbatch"
 _JOBS = [_JOB, _BATCHED_JOB]
+_ARM_CEILINGS = [(_JOB, "MAX_REL"),
+                 (_BATCHED_JOB, "BATCHED_VS_LOOP_MAX_REL")]
+_JIT_SELECTORS = [(_JOB,
+                   '[ "$BK" = jax ] && [ "$JIT" = 1 ] && JFLAG="--jit"'),
+                  (_BATCHED_JOB,
+                   '[ "$JIT" = 1 ] && JFLAG="--jit"')]
 _SCORER = _ROOT / "scripts" / "validate" / "fv3_native" / "full_step_oracle_parity.py"
 
 
-@pytest.mark.parametrize("job", _JOBS)
-def test_the_parity_job_can_report_a_failure(job):
+@pytest.mark.parametrize(("job", "arm_ceiling"), _ARM_CEILINGS)
+def test_the_parity_job_can_report_a_failure(job, arm_ceiling):
     body = job.read_text()
-    assert "--max-rel" in body, (
+    arm_args = re.findall(r'EXTRA="([^"\n]*)"', body)
+    assert arm_args and all("--max-rel" in args for args in arm_args), (
         "the job compares the two backends and exits zero whatever it finds, "
         "so the parity table it produces cannot distinguish agreement from a "
         "one-percent error")
+    assert re.search(r"--backend [^\n]*\$EXTRA", body), (
+        "the per-arm oracle ceiling is defined but not passed to the scorer")
+    assert f'os.environ["{arm_ceiling}"]' in body, (
+        "the job does not gate its two arms against each other")
+    assert "if worst[0] > bound:" in body, (
+        "the arm-to-arm ceiling is read but does not gate the comparison")
+    assert re.search(r"^if not math\.isfinite\(bound\):$", body, re.MULTILINE), (
+        "a NaN or infinite value is not a ceiling")
     assert "exit $BKRC" in body, "the job discards its comparison's status"
     assert "SystemExit(0)" not in body, (
         "a missing or empty result file still exits zero, i.e. 'nothing was "
         "compared' is reported as 'the backends agree'")
+
+
+@pytest.mark.parametrize(("job", "arm_ceiling"), _ARM_CEILINGS)
+def test_the_parity_job_refuses_an_unset_arm_ceiling(job, arm_ceiling):
+    env = os.environ.copy()
+    env.pop(arm_ceiling, None)
+    env["REPO"] = str(_ROOT / "missing-refusal-control-repo")
+    result = subprocess.run(["bash", str(job)], cwd=_ROOT, env=env,
+                            capture_output=True, text=True)
+    assert result.returncode != 0
+    assert arm_ceiling in result.stderr
+    assert ("a comparison with no ceiling reports a number and certifies "
+            "nothing" in result.stderr)
+
+
+@pytest.mark.parametrize(("job", "arm_ceiling"), _ARM_CEILINGS)
+def test_arm_delta_scan_excludes_bookkeeping(job, arm_ceiling, tmp_path):
+    body = job.read_text()
+    delimiter = "PYEOF" if job == _BATCHED_JOB else "EOF"
+    full_program = body.rsplit(f"<<'{delimiter}'\n", 1)[1].split(
+        f"\n{delimiter}", 1)[0]
+    program = full_program.split("\nimport math, os\n", 1)[0]
+    left = {"batched": False, "compiled": False,
+            "residuals": {"face": {"field": {
+                "rel": 1.0, "vacuous_constant_ic": False,
+                "cells_over_10pct": 1}}}}
+    right = {"batched": True, "compiled": False,
+             "residuals": {"face": {"field": {
+                 "rel": 1.5, "vacuous_constant_ic": True,
+                 "cells_over_10pct": 1}}}}
+    paths = [tmp_path / "left.json", tmp_path / "right.json"]
+    for path, payload in zip(paths, (left, right)):
+        path.write_text(json.dumps(payload))
+    result = subprocess.run([sys.executable, "-", *map(str, paths), "0"],
+                            input=program, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "at residuals.face.field.rel" in result.stdout
+    env = os.environ.copy()
+    env[arm_ceiling] = str(np.finfo(float).tiny)
+    result = subprocess.run([sys.executable, "-", *map(str, paths), "0"],
+                            input=full_program, env=env,
+                            capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "exceeds" in result.stdout
+    for invalid in ("nan", "inf"):
+        env[arm_ceiling] = invalid
+        result = subprocess.run(
+            [sys.executable, "-", *map(str, paths), "0"],
+            input=full_program, env=env, capture_output=True, text=True)
+        assert result.returncode != 0
+        assert "must be finite" in result.stdout
+    for path, payload in zip(paths, (
+            {"batched": False, "compiled": False},
+            {"batched": True, "compiled": False})):
+        path.write_text(json.dumps(payload))
+    result = subprocess.run([sys.executable, "-", *map(str, paths), "0"],
+                            input=program, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "no shared numeric" in result.stdout
 
 
 @pytest.mark.parametrize("job", _JOBS)
@@ -190,13 +268,10 @@ def test_two_lanes_that_failed_differently_do_not_compare_equal():
     mod._cmp(a, np.array([1.0, np.nan, 3.0]), "field", 0.0)
 
 
-def test_the_job_certifies_the_compiled_path():
-    """The scorer's default may stay eager; this job's claim may not.
-
-    The table this job produces is the lane's certification, and the lane
-    deploys the compiled step. Measuring the eager one certifies a path
-    nobody runs (GLM-5.2)."""
-    body = _JOB.read_text()
-    assert "--jit" in body, (
-        "the parity job scores the eager step, so its table does not describe "
-        "the solver the model actually runs")
+@pytest.mark.parametrize(("job", "selector"), _JIT_SELECTORS)
+def test_the_job_certifies_the_compiled_path(job, selector):
+    """Both jobs expose the compiled arm without changing their defaults."""
+    body = job.read_text()
+    assert ('JIT="${JIT:-0}"' in body and selector in body
+            and re.search(r"--backend [^\n]*\$JFLAG", body)), (
+        "the parity job cannot opt in to scoring the compiled solver")

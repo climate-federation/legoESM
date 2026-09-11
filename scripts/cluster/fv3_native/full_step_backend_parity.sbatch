@@ -23,6 +23,7 @@
 #   sbatch --export=ALL,ARM=nh full_step_backend_parity.sbatch
 #   sbatch --export=ALL,ARM=moist full_step_backend_parity.sbatch
 set -uo pipefail
+: "${MAX_REL:?MAX_REL is required; a comparison with no ceiling reports a number and certifies nothing}"
 # REPO is overridable so a run can be pinned to a worktree
 # (scripts/cluster/fv3_native/pin_worktree.sh) instead of reading the
 # live checkout. A job that reads the tree being edited produces numbers
@@ -39,6 +40,8 @@ export PYTHONPATH=$REPO/packages/core:$REPO/packages/atmosphere:$REPO/src
 export JAX_ENABLE_X64=1 JAX_PLATFORMS=cpu
 cd "$REPO"
 ARM="${ARM:-hydro}"
+# Opt in to the compiled JAX arm without changing either job default.
+JIT="${JIT:-0}"
 # --max-rel makes each arm a GATE rather than a report. Without it the
 # runner printed WORST and exited 0 whatever it said, so a regression was
 # visible only to a human reading the log (GLM MINOR, job 9444414). The
@@ -63,8 +66,9 @@ mkdir -p "$OUT"
 
 for BK in numpy jax; do
   echo "########## ARM=$ARM BACKEND=$BK"
+  JFLAG=""; [ "$BK" = jax ] && [ "$JIT" = 1 ] && JFLAG="--jit"
   timeout 10800 $PY scripts/validate/fv3_native/full_step_oracle_parity.py \
-    --backend "$BK" $EXTRA --json "$OUT/${BK}.json" > "$OUT/${BK}.log" 2>&1
+    --backend "$BK" $JFLAG $EXTRA --json "$OUT/${BK}.json" > "$OUT/${BK}.log" 2>&1
   RC=$?
   echo "rc=$RC"
   # The decisive lines only: the residual table and the port's own
@@ -88,9 +92,12 @@ def flat(d, p=""):
     for k, v in (d or {}).items():
         if isinstance(v, dict):
             yield from flat(v, f"{p}{k}.")
-        elif isinstance(v, (int, float)):
+        elif (k not in BOOKKEEPING_KEYS
+              and isinstance(v, (int, float))
+              and not isinstance(v, bool)):
             yield f"{p}{k}", float(v)
 
+BOOKKEEPING_KEYS = {"batched", "compiled", "n_steps"}
 fa, fb = dict(flat(a)), dict(flat(b))
 keys = [k for k in fa if k in fb]
 if not keys:
@@ -106,7 +113,17 @@ for k in sorted(keys):
         worst = (rel, k)
     print(f"{k:50s} {x:12.5e} {y:12.5e} {rel:10.2e}")
 print(f"\nWORST BACKEND-TO-BACKEND rel = {worst[0]:.3e} at {worst[1]}")
+import math, os
+bound = float(os.environ["MAX_REL"])
+if not math.isfinite(bound):
+    print("FAIL: MAX_REL must be finite")
+    raise SystemExit(1)
+if worst[0] > bound:
+    print(f"FAIL: backend-to-backend {worst[0]:.3e} exceeds MAX_REL={bound:g} "
+          f"at {worst[1]}")
+    raise SystemExit(1)
+print(f"PASS: backend-to-backend within MAX_REL={bound:g}")
 EOF
 BKRC=$?
-[ "$BKRC" -eq 0 ] || exit $BKRC
-echo BKPARITY_DONE
+echo "BKPARITY_DONE rc=$BKRC"
+exit $BKRC
