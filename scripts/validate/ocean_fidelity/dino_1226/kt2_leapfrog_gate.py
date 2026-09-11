@@ -152,6 +152,87 @@ def _score(name, lego, nemo, wet, step):
     return 0 if n == 0 else 1
 
 
+
+#: Where nemo_dino_kt2_rankdump/run.sh writes its record by default.
+KT2_RANKDUMP = "/data/abyssal/dbalwada/dino_fromrest_y1/nemo_kt2_rankdump"
+
+
+def _count_kt2_substeps(run_dir):
+    """P1: how many barotropic substeps NEMO ran at kt=1 and kt=2.
+
+    One file per (rank, substep) is written by the record's own patch, so the
+    COUNT is the measurement -- no array is read and no convention enters.
+    Returns ``(n_ranks, {kt: substeps_per_rank})`` or None when the record is
+    absent, and RAISES when the ranks disagree with each other, because a
+    ragged count would make the number meaningless rather than approximate.
+    """
+    import glob as _glob
+    if not run_dir or not os.path.isdir(run_dir):
+        return None
+    per_kt, ranks = {}, set()
+    for kt in (1, 2):
+        cnt = {}
+        for p in _glob.glob(os.path.join(
+                run_dir, f"substep_r*_kt{kt:08d}_s*.bin")):
+            r = int(os.path.basename(p).split("_r")[1][:4])
+            cnt[r] = cnt.get(r, 0) + 1
+        if not cnt:
+            return None
+        vals = set(cnt.values())
+        if len(vals) != 1:
+            raise SystemExit(
+                f"kt={kt}: the ranks of {run_dir} hold different substep "
+                f"counts {sorted(vals)}; the record is incomplete and its "
+                "count cannot calibrate anything")
+        per_kt[kt] = vals.pop()
+        ranks |= set(cnt)
+    return len(ranks), per_kt
+
+
+def _substate_is_zero(run_dir, kt, tag="start"):
+    """P2: the six cross-step barotropic sub-state arrays at one step.
+
+    Each file is self-describing (the kt=1 record's header layout), so the
+    header is parsed and only the ARRAYS are counted -- reading the whole file
+    as float64 counts the header's 7 words as 'nonzero' and turns an all-zero
+    sub-state into 112 spurious hits, which is how this was nearly misread.
+    """
+    import glob as _glob
+    rr = _load_rankdump_reader()
+    if rr is None:
+        return None
+    nh = len(rr.HEADER_FIELDS)
+    paths = sorted(_glob.glob(os.path.join(
+        run_dir, f"substate_{tag}_r*_kt{kt:08d}.bin")))
+    if not paths:
+        return None
+    total = nonzero = 0
+    for p in paths:
+        raw = np.fromfile(p, dtype=np.uint8)
+        h = dict(zip(rr.HEADER_FIELDS,
+                     (int(v) for v in raw[:4 * nh].view(np.int32)),
+                     strict=True))
+        body = raw[4 * nh:].view(np.float64)
+        want = h["jpi"] * h["jpj"] * 6          # the six sub-state arrays
+        if body.size != want:
+            raise SystemExit(
+                f"{p}: {body.size} doubles but its own header gives "
+                f"jpi*jpj*6 = {want}")
+        total += body.size
+        nonzero += int((body != 0).sum())
+    return len(paths), total, nonzero
+
+
+def _load_rankdump_reader():
+    import importlib.util
+    p = os.path.join(_HERE, "nemo_dino_kt1_rankdump", "read_rankdump.py")
+    if not os.path.exists(p):
+        return None
+    spec = importlib.util.spec_from_file_location("_kt2_rankdump_rd", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-dir", required=True,
@@ -159,6 +240,11 @@ def main() -> int:
     ap.add_argument("--kt1-dir", default=None,
                     help="where the kt=1 restart lives (default: --run-dir if "
                          "it has one, else the certified RUN_FROMREST_KT1)")
+    ap.add_argument("--kt2-rankdump", default=KT2_RANKDUMP,
+                    help="the per-rank kt<=2 barotropic record "
+                         "(nemo_dino_kt2_rankdump/run.sh); it calibrates the "
+                         "ll_fw=FALSE substep count (P1) and measures the "
+                         "cross-step sub-state (P2)")
     ap.add_argument("--plant-euler", action="store_true",
                     help="drop the before levels so the step takes the EULER "
                          "branch (rdt = rn_Dt); every row MUST then move")
@@ -367,17 +453,51 @@ def main() -> int:
     _k2, _w1_2, _ = nemo_ts_wgt(ll_fw=False)
     print(f"\nBAROTROPIC WINDOW  port calibration: ts_wgt(ll_fw=True) gives "
           f"icycle = {_k1}; the kt=1 record states 45 (ocean.output:1265)")
-    print("  NOT CALIBRATED: the ll_fw=FALSE branch, which is the one this "
-          "row scores. No record on this branch states NEMO's kt=2 icycle "
-          "out loud -- the ll_spg_dump guard is kt==nit000 only -- so the "
-          "port's 68 rests on the transcription alone. That is exactly what "
-          "prediction P1 of nemo_dino_kt2_rankdump/run.sh measures, and "
-          "until it does, a port that is wrong in the same way legoESM is "
-          "wrong would read AT BAR here.")
+    # P1, CLOSED 2026-09-11.  The ll_fw=FALSE branch used to rest on the
+    # transcription alone -- no record stated NEMO's kt=2 icycle out loud, so
+    # a port wrong the same way the model is wrong would have read AT BAR.
+    # nemo_dino_kt2_rankdump now writes one file per (rank, substep) at kt<=2
+    # and COUNTING them is the calibration: 16 ranks x 45 at kt=1 and
+    # 16 x 68 at kt=2.
+    _p1 = _count_kt2_substeps(a.kt2_rankdump)
+    if _p1 is None:
+        print("  NOT CALIBRATED: the ll_fw=FALSE branch, which is the one "
+              "this row scores, has no record behind it. Acquire it with "
+              "nemo_dino_kt2_rankdump/run.sh; until then a port wrong the "
+              "same way legoESM is wrong would read AT BAR here.")
+    else:
+        n_rank, per_kt = _p1
+        print(f"  P1 CALIBRATED from nemo_dino_kt2_rankdump: {n_rank} ranks, "
+              f"substeps per rank kt=1 {per_kt.get(1)} / kt=2 {per_kt.get(2)}"
+              f" -- the ll_fw=FALSE branch now has a record behind it")
+        if per_kt.get(2) != _k2:
+            print(f"  ^^ the port's ll_fw=FALSE icycle is {_k2} and NEMO's "
+                  f"record holds {per_kt.get(2)}: the transcription is WRONG")
+            _k2 = None
     if _k1 != 45:
         print("  ^^ the port does not reproduce the record's own icycle, so "
               "its kt=2 number cannot be used")
         _k2 = None
+    # P2: nn_bt_flt = 2 makes ll_bt_av TRUE (dynspg_ts.f90:208-209) and
+    # ll_init = ll_bt_av (:214), both OUTSIDE the kt == nit000 block, so
+    # :463-470 re-zeroes the whole barotropic sub-state every step -- there is
+    # nothing to carry across kt.  Decision 33 read that off the source; this
+    # MEASURES it at kt=2, which is the step where a carry would first show.
+    for _kt in (1, 2):
+        _z = _substate_is_zero(a.kt2_rankdump, _kt, "start")
+        _e = _substate_is_zero(a.kt2_rankdump, _kt, "end")
+        if _z is None:
+            print(f"  P2 kt={_kt}: UNMEASURED (no sub-state dump in the "
+                  "kt<=2 record)")
+            continue
+        print(f"  P2 kt={_kt}: sub-state at loop ENTRY {_z[2]} of {_z[1]} "
+              f"values nonzero over {_z[0]} ranks"
+              + (f"; at loop EXIT {_e[2]} of {_e[1]}" if _e else ""))
+        if _z[2] != 0:
+            print("  ^^ NEMO DOES carry a barotropic sub-state into this "
+                  "step and legoESM re-zeroes it: that is a state difference, "
+                  "not a rounding one")
+
     if _baro_cap:
         from legoesm.ocean.dynamics.barotropic_latlon_cgrid import _compute_weights
         # substep_scale COMES FROM THE CALL, and the first version of this
