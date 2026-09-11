@@ -24,7 +24,7 @@ whether to keep a global correction NEMO does not have; answer, 2026-09-11:
   ssh_frc(ji,jj) + zhdiv ) ) * ssmask(ji,jj)` — the barotropic substep
   carries the source locally; the baroclinic step receives the filter average
   of that trajectory. No global sum exists in NEMO's free-surface path.
-- `GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/usrdef_sbc.f90:151-158`: NEMO de-means the card's own emp
+- `GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/usrdef_sbc.f90:151-157`: NEMO de-means the card's own emp
   (`emp(ji,jj) = emp(ji,jj) - zsumemp * tmask(ji,jj,1)`), so the area-mean
   source is zero by construction (`5.5e-22` kg/m2/s, card reconciliation
   receipt §9.1): on this card the projection had nothing to correct.

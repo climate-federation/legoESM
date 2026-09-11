@@ -18,7 +18,7 @@ errors."
 
 - `GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/sshwzv.f90:137`: `pssh(ji,jj,Kaa) = ( pssh(ji,jj,Kbb) - rDt * ( r1_rho0 *
   emp(ji,jj) + zhdiv(ji,jj) ) ) * ssmask(ji,jj)` — emp enters LOCALLY.
-- `GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/usrdef_sbc.f90:151-158`: NEMO de-means the card's own emp
+- `GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/usrdef_sbc.f90:151-157`: NEMO de-means the card's own emp
   (`emp(ji,jj) = emp(ji,jj) - zsumemp * tmask(ji,jj,1)`), so the area-mean
   source is zero by construction (measured `5.5e-22` kg/m2/s, card
   reconciliation receipt §9.1).

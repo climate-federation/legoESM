@@ -246,7 +246,7 @@ def _model_config(
             # global projection anywhere in its free-surface path.  legoESM's
             # fix_eta_drift is a global uniform eta shift NEMO lacks (Rule 9).
             # On this card it corrected nothing -- NEMO de-means the card's
-            # own emp (usrdef_sbc.f90:151-158; area mean 5.5e-22 kg/m2/s) --
+            # own emp (usrdef_sbc.f90:151-157; area mean 5.5e-22 kg/m2/s) --
             # and seeded a 4.3e-19 m / 1.4e-14 K difference at kt=2 (card
             # reconciliation receipt, section 7).  The model admits the
             # unprojected real_freshwater pair only under nemo_literal
