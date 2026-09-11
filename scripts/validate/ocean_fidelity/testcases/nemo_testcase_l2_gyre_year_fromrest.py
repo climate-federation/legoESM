@@ -739,6 +739,44 @@ def _load_nemo(root: Path, seed: int, day: int, nlev: int) -> dict:
         return fields
 
 
+def ensemble_provenance(root: Path) -> dict:
+    """ONE MODEL VERSION PER ENSEMBLE, read from the members' own manifests.
+
+    The report's own stamp records the SCORING tree, not the tree each member
+    ran in, so an ensemble split across two commits would produce a floor that
+    is partly a CODE DIFFERENCE and there would be no red anywhere.  Raised by
+    an independent review of this round -- in a round whose entire provenance
+    problem was exactly that.
+    """
+    members = {}
+    for seed in SEEDS:
+        manifest = Path(root) / f"lego_seed{seed}" / "manifest.json"
+        require(manifest.is_file(), f"missing member manifest {manifest}")
+        record = json.loads(manifest.read_text())
+        members[str(seed)] = {
+            "commit": record["worktree"]["commit"],
+            "clean": bool(record["worktree"]["clean"]),
+            "phase3_gate_sha256": record["phase3_gate_sha256"],
+            "steps": int(record["steps"]), "dt_s": float(record["dt_s"])}
+    commits = sorted({row["commit"] for row in members.values()})
+    require(len(commits) == 1,
+            f"the four legoESM members ran at {len(commits)} different "
+            f"commits {commits}; their spread would be partly a code "
+            "difference and the floor would not be a floor")
+    dirty = [seed for seed, row in members.items() if not row["clean"]]
+    require(not dirty,
+            f"legoESM members {dirty} ran on a DIRTY worktree; the commit does "
+            "not identify the code that produced them")
+    gates = sorted({row["phase3_gate_sha256"] for row in members.values()})
+    require(len(gates) == 1,
+            f"the members were stepped by {len(gates)} different versions of "
+            "the certified gate")
+    steps = sorted({row["steps"] for row in members.values()})
+    require(steps == [YEAR_STEPS],
+            f"the members carry {steps} steps, not [{YEAR_STEPS}]")
+    return members
+
+
 def _ensemble_spread(prepared: list[dict], row: str) -> float:
     """MAX over the within-ensemble pairs -- the sample RANGE, at n=4 about 2x
     a standard deviation BY CONSTRUCTION.  Recorded so the floor is never
@@ -793,8 +831,22 @@ def score(root: Path, *, phase0_only: bool, mesh_path: Path = DEFAULT_NEMO_MESH,
         return _fields(arrays, wet3, wet2, dz, dy, band_masks=bands, day=day,
                        card=card, area=area)
 
+    members = ensemble_provenance(root)
+    commits = {row["commit"] for row in members.values()}
+
     rows, days, diagnostics = {}, [], {}
     dry_faces = np.asarray(mesh["umask"][..., :nlev]) > 0.5
+    # ...and one NEMO binary per ensemble, by the same argument.
+    nemo_members = {}
+    if not phase0_only:
+        for seed in SEEDS:
+            stamp = Path(root) / f"nemo_seed{seed}" / "binary.sha256"
+            require(stamp.is_file(), f"missing NEMO binary stamp {stamp}")
+            nemo_members[str(seed)] = stamp.read_text().split()[0]
+        require(len(set(nemo_members.values())) == 1,
+                f"the four NEMO members ran different binaries "
+                f"{sorted(set(nemo_members.values()))}")
+
     repro = _repro_floor(root, prepare, wet3)
     for day in SCORED_DAYS:
         lego = [_load_lego(root, seed, day) for seed in SEEDS]
@@ -934,6 +986,9 @@ def score(root: Path, *, phase0_only: bool, mesh_path: Path = DEFAULT_NEMO_MESH,
         "verdict_factor": VERDICT_FACTOR, "marginal_band": list(MARGINAL_BAND),
         "phase3_gate_sha256": gate_sha,
         "mesh_sha256": mesh["mesh_sha256"],
+        "lego_members": members,
+        "lego_member_commit": sorted(commits)[0],
+        "nemo_members": nemo_members,
         "floor_kind": (
             "INITIAL-CONDITION-PERTURBATION spread, not run-to-run "
             "irreproducibility.  On a flow that damps an IC perturbation the "
@@ -1137,6 +1192,45 @@ def alignment_gate(root: Path, *, mesh_path: Path = DEFAULT_NEMO_MESH,
     # A2 -- the mesh reader.  Raises on any rounded-operand disagreement.
     operands = reconcile_operands(card, mesh, plant=plant)
 
+    # A2b -- THE WET MASK, because latitude alone cannot see a diagonal shift.
+    # An independent review of this round measured that GYRE's 45-degree
+    # rotation makes the latitude EXACTLY invariant along the anti-diagonal:
+    # in the interior overlap, |gphit[j+1,i-1] - gphit[j,i]| is 7.105e-15 deg.
+    # So a (j+1,i-1) misread would pass A2, and A1 is horizontally blind, and
+    # A3a compares two NEMO-side files that would shift together.  The MASK is
+    # the operand that does see it -- GYRE's wet rectangle is 30x20 inside a
+    # 32x22 array, so shifting it moves the closed-boundary ring -- and the
+    # non-vacuity of that statement is MEASURED here, not asserted.
+    nemo_wet = np.asarray(mesh["tmask"][..., :nlev]) > 0.5
+    card_wet = np.asarray(gate.expected_masks(card)["T"], dtype=bool)
+    if plant == "mask-shift":
+        card_wet = np.roll(np.roll(card_wet, 1, axis=0), -1, axis=1)
+    require(card_wet.shape == nemo_wet.shape,
+            f"A2b: card mask {card_wet.shape} vs NEMO tmask {nemo_wet.shape}")
+    differing = int(np.count_nonzero(card_wet != nemo_wet))
+    require(differing == 0,
+            f"A2b: the card's wet mask and NEMO's tmask disagree on "
+            f"{differing} cells; the two models are not on the same domain")
+    surface = nemo_wet[..., 0]
+    shift_power = {}
+    for dj in (-1, 0, 1):
+        for di in (-1, 0, 1):
+            if dj == 0 and di == 0:
+                continue
+            rows, cols = surface.shape
+            j0, j1 = max(0, dj), min(rows, rows + dj)
+            i0, i1 = max(0, di), min(cols, cols + di)
+            left = surface[j0:j1, i0:i1]
+            right = surface[j0 - dj:j1 - dj, i0 - di:i1 - di]
+            shift_power[f"j{dj:+d}_i{di:+d}"] = {
+                "mask_cells_differing": int(np.count_nonzero(left != right)),
+                "overlap_cells": int(left.size)}
+    blind_shifts = [name for name, row in shift_power.items()
+                    if row["mask_cells_differing"] == 0]
+    require(not blind_shifts,
+            f"A2b would be VACUOUS: the mask is invariant under {blind_shifts}, "
+            "so it cannot discriminate that shift and the frame is not closed")
+
     # A1 -- the binary reader, against the state legoESM starts from.
     require(Path(entry_path).is_file(), f"missing NEMO entry record {entry_path}")
     oracle = gate.read_entry(Path(entry_path))
@@ -1300,6 +1394,16 @@ def alignment_gate(root: Path, *, mesh_path: Path = DEFAULT_NEMO_MESH,
             "blind_spot": blindness,
         },
         "A2_operand_reconciliation": operands,
+        "A2b_wet_mask_identity": {
+            "cells_differing": differing,
+            "wet_cells": int(np.count_nonzero(nemo_wet)),
+            "total_cells": int(nemo_wet.size),
+            "mask_discriminates_every_pm1_shift": shift_power,
+            "binds": ("the HORIZONTAL SHIFT that latitude cannot see: GYRE's "
+                      "rotation makes gphit invariant along the anti-diagonal "
+                      "(7.105e-15 deg in the interior overlap), and the mask "
+                      "is not"),
+        },
         "A3a_restart_coordinate_chain": {
             "mappings": sorted(mappings),
             "identity_tolerance_deg": FRAME_COORD_TOL_DEG,
@@ -1612,7 +1716,7 @@ def main(argv=None) -> int:
                         choices=["perturbation-zero", "perturbation-relative",
                                  "floor-inflate", "gap-zero",
                                  "operand-mismatch", "frame-flip",
-                                 "alignment-initial"])
+                                 "alignment-initial", "mask-shift"])
     args = parser.parse_args(argv)
 
     if args.self_check:

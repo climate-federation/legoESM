@@ -359,3 +359,53 @@ def test_expectations_score_the_control_pair_not_the_cross_model_max(harness):
     assert out["P3_gap_band"]["max_over_days_max_pair"] == pytest.approx(9.0)
     # non-vacuity: scoring the MAX would have refuted it (9.0 > 3.0 K)
     assert 9.0 > harness.P3_GAP_MAX_K
+
+
+@pytest.mark.skipif(not (DATA_ROOT / "nemo_seed0").is_dir(),
+                    reason="the NEMO members are not on this machine")
+def test_the_mask_shift_plant_turns_A2b_red():
+    """GYRE's rotation makes LATITUDE invariant along the anti-diagonal, so
+    the wet mask is the only operand that sees a (j+1,i-1) misread."""
+    result = subprocess.run(
+        [sys.executable, str(HARNESS), "--alignment-gate",
+         "--root", str(DATA_ROOT), "--plant", "mask-shift"],
+        capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "A2b" in result.stderr, result.stderr[-2000:]
+
+
+def test_one_model_version_per_ensemble_is_required(harness, tmp_path):
+    """An ensemble split across two commits would make the floor partly a code
+    difference, with no red anywhere.  Exercised on the real reader."""
+    import json as _json
+
+    def write(seed, **override):
+        record = {"steps": harness.YEAR_STEPS, "dt_s": harness.DT_S,
+                  "phase3_gate_sha256": "deadbeef",
+                  "worktree": {"commit": "a" * 40, "clean": True}}
+        record.update({k: v for k, v in override.items() if k != "worktree"})
+        record["worktree"] = {**record["worktree"],
+                              **override.get("worktree", {})}
+        directory = tmp_path / f"lego_seed{seed}"
+        directory.mkdir(exist_ok=True)
+        (directory / "manifest.json").write_text(_json.dumps(record))
+
+    for seed in harness.SEEDS:
+        write(seed)
+    assert harness.ensemble_provenance(tmp_path)["0"]["commit"] == "a" * 40
+
+    for violation, kwargs, fragment in (
+            ("a second commit", {"worktree": {"commit": "b" * 40}}, "different"),
+            ("a dirty tree", {"worktree": {"clean": False}}, "DIRTY"),
+            ("a different gate", {"phase3_gate_sha256": "cafe"}, "certified gate"),
+            ("a short member", {"steps": 180}, "steps")):
+        write(3, **kwargs)
+        with pytest.raises(harness.GateError, match=fragment):
+            harness.ensemble_provenance(tmp_path)
+        write(3)                      # restore, so the next case is isolated
+        assert harness.ensemble_provenance(tmp_path), violation
+
+    # and a missing manifest is not silently skipped
+    (tmp_path / "lego_seed2" / "manifest.json").unlink()
+    with pytest.raises(harness.GateError, match="missing member manifest"):
+        harness.ensemble_provenance(tmp_path)
