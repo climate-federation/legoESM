@@ -49,12 +49,29 @@ DERIVED = {"CRE_LW": ("rlutcs", "rlut"), "CRE_SW": ("rsutcs", "rsut")}
 # (a 4 mm/day tropical mean is 4.6e-5 kg/m2/s).
 SCALE = {"pr": 86400.0, "evspsbl": 86400.0}
 UNITS = {"pr": "mm/d", "evspsbl": "mm/d"}
-BANDS = {"GLOBAL": (-90.0, 90.0), "tropics 20S-20N": (-20.0, 20.0),
-         "ITCZ 10S-10N": (-10.0, 10.0),
+# (lat_lo, lat_hi, lon_lo, lon_hi), longitudes in [0, 360) and allowed to wrap
+# past 360 (the Namibian box straddles the prime meridian).  The zonal bands
+# come first; the stratocumulus decks are included because the cloud bias
+# CHANGES SIGN between them -- Namibia is too cloudy while California is too
+# clear -- so a zonal mean averages the two defects away.  These boxes match
+# ``regional_bias.REGIONS`` so the two instruments cannot drift apart, but they
+# are evaluated here on the MATCHED day window rather than on each run's
+# published months: a restart arm publishes fewer months than its parent, and
+# comparing those climatologies directly is a sampling confound large enough to
+# move incoming solar by 40 W/m^2.
+BANDS = {"GLOBAL": (-90.0, 90.0, 0.0, 360.0),
+         "tropics 20S-20N": (-20.0, 20.0, 0.0, 360.0),
+         "ITCZ 10S-10N": (-10.0, 10.0, 0.0, 360.0),
+         "trades 10-30N": (10.0, 30.0, 0.0, 360.0),
+         "trades 10-30S": (-30.0, -10.0, 0.0, 360.0),
+         "Sc Peru": (-30.0, -10.0, 260.0, 290.0),
+         "Sc Namibia": (-25.0, -5.0, 350.0, 375.0),
+         "Sc California": (15.0, 35.0, 220.0, 250.0),
+         "SO stormtrack": (-60.0, -30.0, 0.0, 360.0),
          # The polar caps are a separate error of the opposite sign, so a
          # global mean hides them; both caps together, since the March
          # surface-albedo deficit is present in each.
-         "poles 60-90": (60.0, 90.0)}
+         "poles 60-90": (60.0, 90.0, 0.0, 360.0)}
 CADENCE_PER_DAY = 1.0
 
 
@@ -117,7 +134,8 @@ def partial_month(run, var, year, month):
     d = xr.open_dataset(hits[0], decode_times=False)
     arr = np.asarray(d[var].isel(time=-1).values, dtype=np.float64)
     lat = np.asarray(d["lat"].values, dtype=np.float64)
-    return arr, lat
+    lon = np.asarray(d["lon"].values, dtype=np.float64) % 360.0
+    return arr, lat, lon
 
 
 def check_cadence(run, days):
@@ -155,10 +173,10 @@ def window_means(run, start, end):
         raise SystemExit(
             f"{run}: the open month {(year, month)} has no samples yet for "
             f"{missing}; start the window later in the month")
-    out, lat = {}, None
+    out, lat, lon = {}, None, None
     for var in FIELDS:
         s0, c0 = sums[var]
-        mean_file, lat = partial_month(run, var, year, month)
+        mean_file, lat, lon = partial_month(run, var, year, month)
         if mean_file.shape != s0.shape:
             raise SystemExit(f"{run}/{var}: file {mean_file.shape} vs sidecar {s0.shape}")
         if c0 > 0:
@@ -173,13 +191,24 @@ def window_means(run, start, end):
     for name, (x, y) in DERIVED.items():
         if x in out and y in out:
             out[name] = out[x] - out[y]
-    return out, lat
+    return out, lat, lon
 
 
-def band_mean(field, lat, lat0, lat1):
+def band_mean(field, lat, lon, lat0, lat1, lon0=0.0, lon1=360.0):
+    """cos-lat area mean over a lat/lon box; the longitude window may wrap."""
     w = np.cos(np.deg2rad(lat))
-    sel = (lat >= lat0) & (lat <= lat1)
-    return float((field[sel].mean(axis=1) * w[sel]).sum() / w[sel].sum())
+    jsel = (lat >= lat0) & (lat <= lat1)
+    if not jsel.any():
+        raise SystemExit(f"no rows in latitude band {lat0}..{lat1}")
+    if lon1 - lon0 >= 360.0:
+        isel = np.ones(lon.shape, dtype=bool)
+    else:
+        shifted = (lon - lon0) % 360.0
+        isel = shifted <= (lon1 - lon0)
+    if not isel.any():
+        raise SystemExit(f"no columns in longitude band {lon0}..{lon1}")
+    sub = field[np.ix_(jsel, isel)]
+    return float((sub.mean(axis=1) * w[jsel]).sum() / w[jsel].sum())
 
 
 def main(argv=None):
@@ -195,20 +224,22 @@ def main(argv=None):
     check_cadence(args.cadence_from[0], (int(args.cadence_from[1]), int(args.cadence_from[2])))
 
     runs = [args.ctl] + list(args.arms)
-    means, lat = {}, None
+    means, lat, lon = {}, None, None
     for r in runs:
-        means[r], lat = window_means(r, args.start, args.end)
+        means[r], lat, lon = window_means(r, args.start, args.end)
     print(f"window days {args.start + 1}..{args.end} ({means[args.ctl]['rsut__n']:.0f} daily samples)")
     cols = [v for v in list(FIELDS) + list(DERIVED) if v in means[args.ctl]]
-    for band, (lo, hi) in BANDS.items():
+    for band, (lo, hi, wlo, whi) in BANDS.items():
         print(f"\n=== {band}: control value, then arm minus control ===")
         print(f"{'run':14s}" + "".join(
             f"{c + ('[' + UNITS[c] + ']' if c in UNITS else ''):>9s}"
             for c in cols))
-        ctl = {c: band_mean(means[args.ctl][c], lat, lo, hi) for c in cols}
+        ctl = {c: band_mean(means[args.ctl][c], lat, lon, lo, hi, wlo, whi)
+               for c in cols}
         print(f"{args.ctl:14s}" + "".join(f"{ctl[c]:9.3f}" for c in cols))
         for r in args.arms:
-            d = {c: band_mean(means[r][c], lat, lo, hi) - ctl[c] for c in cols}
+            d = {c: band_mean(means[r][c], lat, lon, lo, hi, wlo, whi) - ctl[c]
+                 for c in cols}
             print(f"{r:14s}" + "".join(f"{d[c]:+9.3f}" for c in cols))
 
 

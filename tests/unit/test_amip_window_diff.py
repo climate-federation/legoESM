@@ -69,13 +69,13 @@ def test_window_mean_recovers_the_arm_days(wd, tmp_path, monkeypatch):
     _sidecar(run / "cmor_accum_day_0080.npz", hist, {"rsut": 20, "rlut": 20})
     _amon(run, "rsut", (20 * _pattern(100.0, 200.0) + 6 * _pattern(130.0, 260.0)) / 26)
     _amon(run, "rlut", (20 * _pattern(10.0, 20.0) + 6 * _pattern(40.0, 50.0)) / 26)
-    m, lat = wd.window_means("arm", 80, 86)
+    m, lat, _lon = wd.window_means("arm", 80, 86)
     np.testing.assert_allclose(m["rsut"], _pattern(130.0, 260.0), rtol=1e-12)
     np.testing.assert_allclose(m["rlut"], _pattern(40.0, 50.0), rtol=1e-12)
     assert m["rsut__n"] == 6
     np.testing.assert_allclose(lat, LAT)
     # cos-weighted band mean of a symmetric pair is the plain mean
-    assert wd.band_mean(m["rsut"], lat, -90, 90) == pytest.approx(195.0)
+    assert wd.band_mean(m["rsut"], lat, _lon, -90, 90) == pytest.approx(195.0)
 
 
 def test_orientation_mismatch_is_refused(wd, tmp_path, monkeypatch):
@@ -138,7 +138,7 @@ def test_window_inside_the_open_month_is_accepted(wd, tmp_path, monkeypatch):
              {"rsut": 2}, months=((0, 4),))
     _amon(run, "rsut", (2 * _pattern(100.0, 200.0) + 10 * _pattern(130.0, 260.0)) / 12,
           tag="197904-197904")
-    m, _ = wd.window_means("arm", 92, 102)
+    m, _, _lon = wd.window_means("arm", 92, 102)
     np.testing.assert_allclose(m["rsut"], _pattern(130.0, 260.0), rtol=1e-12)
 
 
