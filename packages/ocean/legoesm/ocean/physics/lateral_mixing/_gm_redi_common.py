@@ -581,7 +581,12 @@ def compute_treguier_kappa_gm(
     # so sigma^2·dz = N²·(S_x²+S_y²)·dz  (ldf_eiv zah accumulation).
     zah = jnp.sum(sigma ** 2 * dz_half, axis=-1)
     zhw = TREGUIER_ZHW_OFFSET_M + jnp.sum(dz_half, axis=-1)
-    t_inv = jnp.sqrt(zah / zhw)
+    # Dry columns have zah=0 despite the local slope regularisation. Guard
+    # the sqrt argument BEFORE masking: sqrt(0)'s VJP otherwise gives NaNs
+    # under the final dry-column zero cotangent. Forward values are unchanged.
+    growth = zah / zhw
+    positive = growth > 0.0
+    t_inv = jnp.where(positive, jnp.sqrt(jnp.where(positive, growth, 1.0)), 0.0)
     f20 = 2.0 * omega * jnp.sin(
         jnp.deg2rad(TREGUIER_TAPER_LAT_DEG))
     taper = jnp.minimum(1.0, jnp.abs(f_coriolis) / f20)
@@ -659,7 +664,11 @@ def _eady_growth_and_length(
     # Local growth rate sigma_Eady ~ N * |S| at each interior interface.
     if n2_mode == "insitu":
         N2 = compute_buoyancy_frequency(
-            rho, z_coord.dz_ref, jacobian, rho_ref=rho_ref, g=g,
+            rho, z_coord.dz_ref,
+            # Dry columns carry zero quadrature weight below. Avoid a zero
+            # denominator BEFORE forming N2: later masking cannot rescue AD
+            # through inf * 0. Wet-column arithmetic is unchanged.
+            jnp.where(jacobian > 0.0, jacobian, 1.0), rho_ref=rho_ref, g=g,
         )
     elif n2_mode == "adiabatic":
         if T is None or S is None or p_cell is None or eos_fn is None:

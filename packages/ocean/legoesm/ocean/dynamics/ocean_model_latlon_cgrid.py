@@ -108,6 +108,7 @@ from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
     eke_3d_horizontal_transport,
     eke_3d_vertical_diffusion,
     gm_redi_tracer_tendency_latlon,
+    validate_redi_coefficient,
     gm_redi_density_and_jacobian,
     harmonic_lateral_kediss_eke_source,
     compute_isoneutral_K33_latlon,
@@ -1914,6 +1915,8 @@ class LatLonCGridOceanModel:
         # B_T operator (flux_divergence_viscosity_cgrid raises on tripolar);
         # fail at construction, not at the first traced step.
         _gm = self.config.gm_redi
+        if _gm is not None:
+            validate_redi_coefficient(_gm)
         if (_gm is not None and getattr(_gm, "eke", None) is not None
                 and _gm.eke.closure == "geometric"):
             from legoesm.ocean.dynamics.latlon_cgrid_operators import is_tripolar
@@ -6156,6 +6159,7 @@ class LatLonCGridOceanModel:
                     eos=_cfg_b.eos, eos_linear=_cfg_b.eos_linear,
                     mask=state.land_mask.data,
                     rho_0=_cfg_b.constants.rho_0, g=_cfg_b.constants.g,
+                    omega=_cfg_b.omega,
                     kappa_redi_override=kappa_redi_override,
                     kappa_redi_v_override=kappa_redi_v_override,
                     density_jacobian=_gm_dens_jac,
@@ -11269,6 +11273,7 @@ class LatLonCGridOceanModel:
                     _grid, _zc, gm_cfg, eos=_cfg_b.eos,
                     eos_linear=_cfg_b.eos_linear, mask=cmask,
                     rho_0=_cfg_b.constants.rho_0, g=_cfg_b.constants.g,
+                    omega=_cfg_b.omega,
                     kappa_redi_override=_kri_static,
                     kappa_redi_v_override=_kri_v_static,
                     density_jacobian=_gm_dj,

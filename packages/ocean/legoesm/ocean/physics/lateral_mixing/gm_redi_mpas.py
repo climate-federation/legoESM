@@ -637,6 +637,8 @@ def gm_redi_tracer_tendency_mpas(
     # Dispatch hardening (static config values, at function entry): the MPAS
     # path builds isoneutral slopes from in-situ density only.  A 'neutral'
     # slope_density request would be silently ignored below, so raise.
+    if cfg.redi_coefficient != "constant" or cfg.redi_f_f is not None:
+        raise ValueError("MPAS does not support the selected redi_coefficient")
     _validate_slope_density(cfg)
     if getattr(cfg, "slope_limit", "dm95_taper") != "dm95_taper":
         raise NotImplementedError(

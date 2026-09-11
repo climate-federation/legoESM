@@ -205,6 +205,34 @@ def real_freshwater_restoring_conflict(freshwater_closure, sss_restore,
         "until restoring is routed as a real water flux (#1484).")
 
 
+def _validate_omip_redi_selection(redi_coefficient, gm_slope_positions,
+                                  gm_slope_scheme, gm_treguier, gm_kappa_min,
+                                  no_gm_redi, redi_aht0, *, grid="tripole",
+                                  n_gpus=1, distributed=False):
+    """Validate the opt-in coefficient lane at CLI and programmatic entry."""
+    if redi_coefficient not in (None, "constant", "nemo21"):
+        raise ValueError(f"unknown redi_coefficient {redi_coefficient!r}")
+    if gm_slope_positions not in (None, "mode_b", "nemo_native"):
+        raise ValueError(f"unknown gm_slope_positions {gm_slope_positions!r}")
+    if redi_coefficient is not None or gm_slope_positions is not None:
+        if grid != "tripole" or no_gm_redi:
+            raise ValueError("Redi/native slope selections require enabled tripole GM/Redi")
+    if gm_slope_positions is not None and gm_slope_scheme != "nemo_iso_lap":
+        raise ValueError("gm_slope_positions requires gm_slope_scheme='nemo_iso_lap'")
+    if redi_aht0 is not None and redi_coefficient != "nemo21":
+        raise ValueError("redi_aht0 requires redi_coefficient='nemo21'")
+    if redi_coefficient == "nemo21":
+        if not gm_treguier or gm_kappa_min != 0:
+            raise ValueError("nemo21 requires --gm-treguier --gm-kappa-min 0")
+        if gm_slope_positions != "nemo_native" or gm_slope_scheme != "nemo_iso_lap":
+            raise ValueError("nemo21 requires explicit nemo_iso_lap and nemo_native slopes")
+        if n_gpus != 1 or distributed:
+            raise ValueError("nemo21 currently requires single-device execution")
+        if redi_aht0 is not None and (
+                not np.isfinite(redi_aht0) or redi_aht0 <= 0):
+            raise ValueError("redi_aht0 must be finite and positive")
+
+
 def _tripole_treguier_gm_redi(gm_aei0, gm_kappa_min):
     """GM/Redi block for ``--gm-treguier`` on the eORCA1 tripole.
 
@@ -1330,6 +1358,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   gm_kappa_min=_GM_KAPPA_MIN_DEFAULT,
                   gm_slope_scheme=None, gm_bolus_advection=None,
                   gm_msc_stabilize=None,
+                  redi_coefficient=None, redi_aht0=None, gm_slope_positions=None,
                   store_mass_flux=False, store_salt_flux=False):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
 
@@ -1343,6 +1372,11 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
     confounds model differences with IC differences over a few-year spinup. (WOA18 is
     a close stand-in for NEMO's exact Gouretski IC, which is the further refinement.)
     """
+    _validate_omip_redi_selection(
+        redi_coefficient, gm_slope_positions, gm_slope_scheme, gm_treguier,
+        gm_kappa_min, no_gm_redi, redi_aht0, n_gpus=n_gpus)
+    if gm_treguier and no_gm_redi:
+        raise ValueError("gm_treguier and no_gm_redi are mutually exclusive")
     # Dispatch hardening at the programmatic surface too (argparse `choices`
     # only guards the CLI): ""/None/typos must not silently run as "none".
     if gm_slope_scheme is not None and gm_slope_scheme not in _GM_SLOPE_SCHEMES:
@@ -1474,6 +1508,28 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
               f"(NEMO ORCA1 = nemo_iso_lap + through_fct + msc_stabilize; "
               f"NOTE the bolus then rides THIS run's tracer limiter, which is "
               f"not necessarily NEMO's FCT)")
+    if redi_coefficient is not None or gm_slope_positions is not None:
+        _gm_base = _ovr.get("gm_redi", config.flat_get("gm_redi"))
+        _gm_kw = {}
+        if gm_slope_positions is not None:
+            _gm_kw["slope_positions"] = gm_slope_positions
+        if redi_coefficient is not None:
+            _gm_kw["redi_coefficient"] = redi_coefficient
+        if redi_coefficient == "nemo21":
+            # NEMO ldftra.F90:433 uses ff_f, NOT our averaged grid.f_v.
+            # Read this exact mesh only for the opt-in; absent metadata raises.
+            import xarray as xr
+            with xr.open_dataset(mesh_path, decode_times=False) as _mesh:
+                if "gphif" not in _mesh:
+                    raise ValueError("nemo21 requires mesh gphif")
+                _lat_f = np.asarray(_mesh["gphif"]).squeeze()
+            if _lat_f.shape != grid.f.shape or not np.isfinite(_lat_f).all():
+                raise ValueError("nemo21 gphif must be finite and match the T grid")
+            _gm_kw["redi_f_f"] = (2.0 * config.omega
+                * jnp.sin(jnp.deg2rad(jnp.asarray(_lat_f, dtype=grid.f.dtype))))
+            if redi_aht0 is not None:
+                _gm_kw["redi_aht0"] = redi_aht0
+        _ovr["gm_redi"] = _gm_base._replace(**_gm_kw)
     # IMPLICIT vertical mixing (NEMO ln_zdf*, MOM6 CVMix, MPAS all do this; the
     # config default is True). _create_setup()'s arg default is False (explicit) --
     # at the NEMO 75-level grid the explicit KPP vertical-viscosity CFL blows the
@@ -6581,10 +6637,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "(TreguierConfig = NEMO &namtra_eiv nn_aei_ijk_t=21: "
                         "aeiu/aeiv = F(growth rate of baroclinic instability), "
                         "capped at aei0) INSTEAD of the tripole default's "
-                        "VISBECK adaptive kappa_GM. NEMO ORCA1 runs the former "
+                        "constant kappa_GM=600. NEMO ORCA1 runs Treguier "
                         "(rn_Ue=0.018, rn_Le=100e3, laplacian => "
                         "aei0 = 1/2*rn_Ue*rn_Le = 900 m^2/s); the two "
                         "are mutually exclusive. --grid tripole only.")
+    p.add_argument("--redi-coefficient", choices=("constant", "nemo21"), default=None,
+                   help="Redi coefficient law; nemo21 adds the NEMO 5.0.1 floor "
+                        "and tropical enhancement to GM face fields. Requires "
+                        "unfloored Treguier, native NEMO slopes, one device.")
+    p.add_argument("--redi-aht0", type=float, default=None,
+                   help="NEMO21 Redi scale [m2/s]; unset uses config ORCA1 scale.")
+    p.add_argument("--gm-slope-positions", choices=("mode_b", "nemo_native"),
+                   default=None, help="Slope placement for explicit nemo_iso_lap selection.")
     p.add_argument("--gm-slope-scheme", choices=_GM_SLOPE_SCHEMES, default=None,
                    help="Isoneutral-slope operator for GM/Redi (tripole only). "
                         "Unset keeps the recipe's 'centered'. 'nemo_iso_lap' is "
@@ -6758,6 +6822,16 @@ def main() -> int:
     # preserving for existing callers.
     p = _build_arg_parser()
     args = p.parse_args()
+    _validate_omip_redi_selection(
+        args.redi_coefficient, args.gm_slope_positions, args.gm_slope_scheme,
+        args.gm_treguier, args.gm_kappa_min, args.no_gm_redi, args.redi_aht0,
+        grid=args.grid, n_gpus=args.n_gpus, distributed=args.distributed)
+    # An explicit flag equal to its default is still an explicit selection.
+    if not args.gm_treguier and any(
+            token.split("=", 1)[0] in ("--gm-aei0", "--gm-kappa-min")
+            for token in sys.argv[1:]):
+        raise SystemExit("--gm-aei0 / --gm-kappa-min require --gm-treguier")
+
 
     if args.sss_restore_regions is not None and not args.sss_restore:
         raise ValueError("--sss-restore-regions requires --sss-restore")
@@ -7299,6 +7373,9 @@ def main() -> int:
             gm_treguier=args.gm_treguier,
             gm_aei0=args.gm_aei0,
             gm_kappa_min=args.gm_kappa_min,
+            redi_coefficient=args.redi_coefficient,
+            redi_aht0=args.redi_aht0,
+            gm_slope_positions=args.gm_slope_positions,
             gm_slope_scheme=args.gm_slope_scheme,
             gm_bolus_advection=args.gm_bolus_advection,
             gm_msc_stabilize=args.gm_msc_stabilize,
