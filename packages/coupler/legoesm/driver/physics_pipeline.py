@@ -2455,20 +2455,35 @@ class PhysicsPipeline:
             # Cloud ice + double-moment NUMBER columns (None for warm-rain /
             # diagnostic-cloud runs ⇒ constant r_eff, legacy behaviour). When a
             # double-moment scheme supplies them, they drive the M2005 PSD
-            # liquid/ice effective radii.  Both tracers are STORED per MASS
-            # [#/kg]; the PSD wants N_c per VOLUME [#/m³], so convert with the
-            # column air density exactly as radiation/integration.py does
-            # (#1715: this site used to pass the per-mass value raw).  N_i is
-            # consumed per-mass and passes through.
+            # liquid/ice effective radii.  The N_c CARRY is stored per MASS
+            # [#/kg] (checkpoint stamp ``number_convention = per_mass``); the
+            # PSD wants N_c per VOLUME [#/m³], so bridge with the MOIST air
+            # density — the SAME conversion the radiation physics_fn entry does
+            # (radiation/integration.py ``_extract_tracer_columns``).  #1715:
+            # this site passed the carry RAW, so a prognostic droplet number
+            # reached the liquid r_eff a factor rho too small, i.e. r_eff too
+            # large by rho^(-1/3).  Realistic envelope 0-20%: typical liquid at
+            # 700-900 hPa sees 0-8%, and the coldest supercooled tops ~19-22%.
+            # (An earlier version of this comment said ~26% by pairing rho=0.5
+            # with 500 hPa; rho at 500 hPa is ~0.68, and rho=0.5 is ~340 hPa,
+            # which is too cold to carry liquid at all -- GLM review on #1730.)
+            # Inert in production only because
+            # the specified-Nc+CCN path overrides the (dead-zeros) carry below;
+            # live the moment predict_Nc feeds it.  N_i is used per-mass and
+            # passes through raw, matching the reference entry.
             q_i_col = None if q_i is None else ad.flatten_3d(q_i)
             if N_c is None:
                 n_cloud_col = None
             else:
                 from legoesm.atmosphere.physics._shared import compute_rho
-                # MOIST density: the PSD un-does this conversion with the same
-                # compute_rho, so a dry rho here would bias N_c by ~0.6 q_v.
+                # MOIST density, and a 1 K floor on T: compute_rho divides
+                # by temperature, and the same floor guards the identical
+                # conversion in clouds/cloud_fraction.py.  q_v_col is
+                # ``ad.flatten_3d(q_v)`` computed above and is not yet
+                # sharded at this point, so it is the same array the other
+                # side of this merge built inline.
                 _rho_nc = compute_rho(jnp.maximum(T_col, 1.0), p_full_col,
-                                      ad.flatten_3d(q_v))
+                                      q_v_col)
                 n_cloud_col = jnp.maximum(ad.flatten_3d(N_c) * _rho_nc, 0.0)
             n_ice_col = None if N_i is None else ad.flatten_3d(N_i)
             # Aerosol-CCN droplet number for the radiation PSD: under

@@ -981,7 +981,6 @@ class ExperimentConfig(NamedTuple):
     # the full CLM PFT parameterisation validated.  Ignored unless land_surface_scheme
     # == 'clm_ml' (+ use_multilayer_land).
     clm_ml_use_surfdata_pft: bool = False
-    multilayer_soil_texture: str = "loam"  # van-Genuchten preset
     # Strategy B: hydrate MultiLayerLandState from an ERA5 land NetCDF
     # at IC time instead of the strategy-A uniform 0.5*theta_sat fill.
     # Build with probes/preprocess_era5_land_ic.sh; expects variables
@@ -1028,17 +1027,7 @@ class ExperimentConfig(NamedTuple):
     land_cover_surfdata: str = ""
 
     # Diagnostic T-based ice partition.  At every radiation call the
-    # grid-mean cloud water q_c is split into liquid + ice via
-    # f_ice(T) = clip((T_warm - T) / (T_warm - T_cold), 0, 1), and the
-    # ice portion is fed to RRTMGP so cirrus has radiative effect.  This
-    # is NOT a prognostic ice scheme (no Bergeron, no sedimentation —
-    # just a radiative diagnostic; see Phase 2 of cloud-micro plan).
-    #   cloud_T_warm  : liquid-only above this T [K] (default freezing pt)
-    #   cloud_T_cold  : ice-only below this T  [K] (default homog. ice
-    #                   nucleation, -38 C)
     #   cloud_r_eff_ice : ice effective radius [m]
-    cloud_T_warm: float = constants.T_freeze
-    cloud_T_cold: float = 235.15
     cloud_r_eff_ice: float = 30.0e-6
 
     # Land/ocean cloud droplet effective radius (Phase 3 of cloud-micro plan).
@@ -3245,10 +3234,7 @@ class ExperimentConfig(NamedTuple):
             use_multilayer_land=getattr(amip_cfg, 'use_multilayer_land', False),
             multilayer_n_layers=getattr(amip_cfg, 'multilayer_n_layers', 10),
             multilayer_soil_depth=getattr(amip_cfg, 'multilayer_soil_depth', 3.0),
-            multilayer_soil_texture=getattr(amip_cfg, 'multilayer_soil_texture', 'loam'),
             era5_land_ic_path=getattr(amip_cfg, 'era5_land_ic_path', ''),
-            cloud_T_warm=getattr(amip_cfg, 'cloud_T_warm', constants.T_freeze),
-            cloud_T_cold=getattr(amip_cfg, 'cloud_T_cold', 235.15),
             cloud_r_eff_ice=getattr(amip_cfg, 'cloud_r_eff_ice', 30.0e-6),
             cloud_r_eff_liq_ocean=getattr(amip_cfg, 'cloud_r_eff_liq_ocean', 10.0e-6),
             cloud_r_eff_liq_land=getattr(amip_cfg, 'cloud_r_eff_liq_land', 7.0e-6),

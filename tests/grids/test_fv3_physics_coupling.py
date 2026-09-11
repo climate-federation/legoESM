@@ -18,6 +18,7 @@ import pytest
 from jax import config as _jax_config
 _jax_config.update("jax_enable_x64", True)
 
+from legoesm import constants
 from legoesm.core.fv3_native_physics_coupling import (
     update_dwinds_phys_duo,
     update_dwinds_phys_duo_jax,
@@ -142,7 +143,7 @@ from legoesm.core.fv3_native_physics_coupling import (  # noqa: E402
 )
 
 NPZ = 20
-R_E = 6.371e6
+R_E = constants.R_earth
 
 
 def _hs_column(n=5, npz=NPZ, seed=1):
@@ -173,7 +174,7 @@ def _hs_ref(pt, ua, va, delp, peln, pkz, pe, lat, pdt, strat, radius=R_E):
     ny, nx, npz = pt.shape
     sday = 86400.0; akap = 2.0 / 7.0; p0 = 1.0e5
     rdt = 1.0 / pdt
-    rr = radius / 6371.0e3
+    rr = radius / constants.R_earth
     kf = sday * rr
     rkv = pdt / (1.0 * kf); rka = pdt / (40.0 * kf); rks = pdt / (4.0 * kf)
     t_ms = 10.0 * rr; t_st = 40.0 * rr

@@ -223,46 +223,12 @@ def normalize_freshwater_net(
     freshwater work, not part of the single-rank-correct default.
     """
     w = area * mask
-    if owned_mask is None:
-        num_local = jnp.sum(F_fw * w)
-        den_local = jnp.sum(w)
-        # Lat-band shard_map body (ARMED lat SPMD halo backend): the sums
-        # above are per-band PARTIALS over exact shards (band arrays carry no
-        # halo rows — the halo is exchanged transiently inside the pad ops),
-        # so psum them to the true global mean; a band-local mean would give
-        # every band a different correction, breaking global salt
-        # conservation and cross-band consistency.  Deliberately NOT
-        # ``ocean_global_sum``: its ``is_distributed()`` arm would ALSO
-        # allreduce route-A MPI rank-local sums, double-counting halo rows
-        # (route-A threads ``owned_mask`` instead — the branch below).
-        # Serial / MPI / cube-spmd ("face" mesh): inert -> the legacy
-        # bit-identical local sum.
-        from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
-        if get_halo_backend() == "spmd":
-            _mesh = get_spmd_mesh()
-            if _mesh is not None and "lat" in tuple(_mesh.axis_names):
-                import jax
-                num_local, den_local = jax.lax.psum(
-                    jnp.stack([num_local, den_local]), "lat")
-        F_mean = num_local / jnp.maximum(den_local, 1.0e-10)
-    else:
-        # MPI/SPMD: restrict local accumulators to OWNED cells (no halo
-        # double-count) then reduce globally.  Use the MPAS-AWARE reduction
-        # ``global_sum_if_distributed`` (keyed on ``is_multi_process()``), NOT
-        # ``ocean_global_sum``: the Voronoi/MPAS MPI path builds a partition
-        # layout WITHOUT arming the global halo backend, so ``is_distributed()``
-        # stays False there and ``ocean_global_sum`` would silently return the
-        # RANK-LOCAL owned-cell mean (codex review #1).  ``global_sum_if_
-        # distributed`` is the canonical owned-cell reduction used by
-        # ``conservation_mpas`` / ``eta_floor``; it is identity on one rank
-        # (so serial stays bit-identical) and is built on ``global_sum_mpi``
-        # (allreduce SUM, full VJP -> AD-safe).
-        from legoesm.parallel.reductions import global_sum_if_distributed
-        w_owned = w * owned_mask.astype(w.dtype)
-        num_local = jnp.sum(F_fw * w_owned)
-        den_local = jnp.sum(w_owned)
-        num, den = global_sum_if_distributed(jnp.stack([num_local, den_local]))
-        F_mean = num / jnp.maximum(den, 1.0e-10)
+    # One reduction shared with the salt correction (``_global_weighted_sums``):
+    # owned-masked when the caller threads ``owned_mask`` (MPI layout / Voronoi
+    # SPMD), psum over the armed ocean SPMD axis, allreduce on MPI, identity
+    # serially.
+    num, den = _global_weighted_sums(F_fw, jnp.ones_like(w), w, owned_mask=owned_mask)
+    F_mean = num / jnp.maximum(den, 1.0e-10)
     return F_fw - F_mean * mask
 
 
@@ -282,25 +248,25 @@ def _global_weighted_sums(num_field, den_field, w, owned_mask=None):
     passing it takes the MPI owned-cell arm via ``global_sum_if_distributed``
     (allreduce SUM, full VJP -> AD-safe).
     """
+    from legoesm.parallel.reductions import (
+        global_sum_if_distributed, spmd_reduce_axis,
+    )
+    w_eff = w if owned_mask is None else w * owned_mask.astype(w.dtype)
+    num_local = jnp.sum(num_field * w_eff)
+    den_local = jnp.sum(den_field * w_eff)
+    # Ocean SPMD lanes (lat-lon "lat" bands: exact shards, no halo rows;
+    # Voronoi "device" blocks: owned-masked above): ONE packed psum over the
+    # armed axis, checked FIRST because ``is_multi_process()`` is False under
+    # one process.  Inert on serial / MPI / cube-spmd ("face" mesh).
+    _ax = spmd_reduce_axis()
+    if _ax is not None:
+        import jax
+        num_g, den_g = jax.lax.psum(jnp.stack([num_local, den_local]), _ax)
+        return num_g, den_g
     if owned_mask is None:
-        num_local = jnp.sum(num_field * w)
-        den_local = jnp.sum(den_field * w)
-        # Lat-band shard_map body: the sums are per-band PARTIALS, so psum them
-        # to the true global value; a band-local mean would give every band a
-        # different correction and break global conservation.  Inert on
-        # serial / MPI / cube-spmd.
-        from legoesm.grids.halo import get_halo_backend, get_spmd_mesh
-        if get_halo_backend() == "spmd":
-            _mesh = get_spmd_mesh()
-            if _mesh is not None and "lat" in tuple(_mesh.axis_names):
-                import jax
-                num_local, den_local = jax.lax.psum(
-                    jnp.stack([num_local, den_local]), "lat")
         return num_local, den_local
-    from legoesm.parallel.reductions import global_sum_if_distributed
-    w_owned = w * owned_mask.astype(w.dtype)
-    num_local = jnp.sum(num_field * w_owned)
-    den_local = jnp.sum(den_field * w_owned)
+    # MPI owned-cell arm: the MPAS-aware reduction (keyed on the armed
+    # partition layout via ``is_multi_process``), identity on one rank.
     return global_sum_if_distributed(jnp.stack([num_local, den_local]))
 
 

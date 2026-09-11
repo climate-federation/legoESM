@@ -405,7 +405,8 @@ class _MPASSfcFluxAccum:
     the "monthly mean" of a day/night field like rsut kept the full
     instantaneous diurnal pattern while labeled ``time: mean``).
 
-    Covers slots 2..7 of the ``_sfc_diag`` contract (2 precip, 3 rlut,
+    Covers slots 0..7 of the ``_sfc_diag`` contract (0 sw_net_sfc and
+    1 lw_net_sfc, read only by the energy tracker; 2 precip, 3 rlut,
     4 rsut, 5 rsdt, 6 hfss, 7 hfls) — the strongly diurnal flux fields —
     plus the clear-sky TOA pair (10 rsutcs, 11 rlutcs; #843 lean-lane
     port), which is only ever non-None when ``--clear-sky-diag`` is on
@@ -446,6 +447,12 @@ class _MPASSfcFluxAccum:
     # accumulated channels gave ~11.  Accumulating costs one device-side add
     # per step per slot and is what makes the budget answerable at all.
     SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 10, 11)
+    #: The slots the column energy budget reads (sw/lw net sfc, lw_up, sw_up,
+    #: sw_dn, hfss, hfls).  After the first radiation call every one of them
+    #: is non-None on EVERY step (the MPAS model holds the last radiation
+    #: value across held-radiation sub-steps, primitive_eq_mpas.step), which
+    #: is what lets ``window_ready`` demand equal per-slot counts.
+    ENERGY_SLOTS = (0, 1, 3, 4, 5, 6, 7)
 
     def __init__(self, expected_steps: int = 0, window_start_day: float = 0.0,
                  dt_s: float = 0.0):
@@ -500,6 +507,16 @@ class _MPASSfcFluxAccum:
     def has_samples(self) -> bool:
         """True if any slot accumulated at least one sample this interval."""
         return bool(self._n)
+
+    def window_ready(self, slots) -> bool:
+        """True iff the window is complete AND every slot in *slots* was
+        accumulated over the SAME number of samples.  A checkpoint written
+        before a slot existed restores the others with a full count while
+        the new slot only sees the post-restart remainder; ``is_complete()``
+        passes (it counts steps, not per-slot samples) and the short slot
+        would be published as a full interval mean (codex, #1354)."""
+        counts = {self._n.get(i, 0) for i in slots}
+        return self.is_complete() and len(counts) == 1 and counts != {0}
 
     def is_complete(self) -> bool:
         """True iff this interval saw EXACTLY the step count a complete
@@ -10998,13 +11015,13 @@ class ModelDriver:
                 # replaced because it looks trustworthy. Require a COMPLETE
                 # window AND every slot the energy budget reads.
                 _facc_e = getattr(self, "_mpas_sfc_accum", None)
-                _ENERGY_SLOTS = (0, 1, 3, 4, 5, 6, 7)
-                _use_accum = bool(
-                    _facc_e is not None
-                    and _facc_e.has_samples()
-                    and _facc_e.is_complete()
-                    and all(_facc_e.mean(_i) is not None
-                            for _i in _ENERGY_SLOTS))
+                _use_accum = (_facc_e is not None
+                              and _facc_e.window_ready(_facc_e.ENERGY_SLOTS))
+                if (_facc_e is not None and _facc_e.is_complete()
+                        and not _use_accum):
+                    print("  energy tracker: complete window but energy "
+                          "slots have unequal sample counts -- this sample "
+                          "falls back to SNAPSHOT fluxes (stamped 0)")
                 _qv_e = (self.state.tracers["q_v"].data
                          if (self.state.tracers is not None
                              and "q_v" in self.state.tracers) else None)
@@ -11028,10 +11045,8 @@ class ModelDriver:
                     # not per model step, so it is not on the hot path
                     # (codex review, accepted rather than restructured --
                     # `mean()` is shared with the CMOR feed).
-                    if _use_accum:
-                        _m = _facc_e.mean(i)
-                        if _m is not None:
-                            return jnp.asarray(_m)
+                    if _use_accum:   # window_ready() => every slot has a mean
+                        return jnp.asarray(_facc_e.mean(i))
                     return (_sd[i].data if (_sd is not None and len(_sd) > i
                                             and _sd[i] is not None) else None)
                 _sw_dn, _sw_up, _lw_up = _slot(5), _slot(4), _slot(3)
@@ -11129,7 +11144,18 @@ class ModelDriver:
                     from legoesm.diagnostics.process_ledger import (
                         LEDGER_PROCESSES,
                     )
+                    from legoesm.parallel.geometry_consistency import (
+                        content_hash48 as _content_hash48,
+                    )
                     _led_rates = np.asarray(_led_accum) / max(_led_nsteps, 1)
+                    # Snapshot the SAME weights the energy tracker used for
+                    # dE/dt earlier in this block, copied so a later mask or
+                    # regrid cannot make the artifact disagree with the
+                    # number it will be differenced against (GLM: aliasing).
+                    _area_w_led = self.diagnostics._area_w
+                    if _area_w_led is not None:
+                        _area_w_led = np.asarray(
+                            _area_w_led, dtype=np.float64).ravel().copy()
                     _tot_e = _led_rates.sum(axis=1)[:, 1]     # (ncol,) W/m^2
                     _hot = int(np.argmax(np.abs(_tot_e)))
                     _hot_rows = _led_rates[_hot, :, 1]
@@ -11145,6 +11171,34 @@ class ModelDriver:
                     # must never silently get the other.  Overwritten each
                     # interval — on a blow-up the surviving file is the last
                     # pre-detonation interval, which is the one that matters.
+                    _led_area_kw = {}
+                    if _area_w_led is not None:
+                        # One line that makes a shape/rank/reorder mistake
+                        # fail HERE instead of silently downstream (GLM's
+                        # "missing invariant").
+                        if _area_w_led.size != _led_rates.shape[0]:
+                            raise ValueError(
+                                "budget ledger has "
+                                f"{_led_rates.shape[0]} columns but the area "
+                                f"weights have {_area_w_led.size}; the "
+                                "artifact would carry a reduction that does "
+                                "not match its own rows.")
+                        _led_area_kw = {
+                            "area_cell": _area_w_led,
+                            # Fingerprint so a reader supplying its own
+                            # weights can prove they are THESE weights, in
+                            # THIS order.  A length check cannot see a
+                            # permutation, and a permuted weight vector is
+                            # quietly wrong rather than loudly wrong.
+                            # ``content_hash48`` is the repo's existing
+                            # positional byte digest (parallel/
+                            # geometry_consistency.py), written for exactly
+                            # this "a permutation must not cancel" property
+                            # and float64-exact, so it stores in the npz as a
+                            # plain scalar.
+                            "area_hash48": np.asarray(
+                                _content_hash48(_area_w_led)),
+                        }
                     if self.output_dir is not None:
                         np.savez(
                             str(self.output_dir
@@ -11155,6 +11209,37 @@ class ModelDriver:
                                 ("water_kg_m2_s", "energy_W_m2")),
                             n_steps=_led_nsteps,
                             day=elapsed_day + START_DAY,
+                            # Rank locality is part of the reduction: under
+                            # cell partitioning these rows would be ONE rank's
+                            # columns, and no weighting makes that a global
+                            # budget.  Today this is always False -- setup
+                            # already REFUSES --budget-ledger whenever the
+                            # world size exceeds one or a Voronoi layout
+                            # exists, which is strictly broader than this
+                            # predicate.  It is stamped anyway because that
+                            # refusal is documented as "serial-only FOR NOW":
+                            # when the ledger gather is wired the artifact
+                            # becomes rank-local, and the reader should refuse
+                            # at that moment rather than print a per-rank
+                            # table as a global one.
+                            cell_partitioned=bool(
+                                _is_mpas_cell_partitioned(self)),
+                            # The reduction the reader MUST use (#1354).  The
+                            # rows are per-column, so a consumer picks the
+                            # weighting -- and an unweighted mean is not a
+                            # global mean on the SCVT mesh (areaCell max/min
+                            # 1.471).  Worse, the energy-budget tracker this
+                            # ledger gets differenced against is already
+                            # area-weighted, so an unweighted row and its
+                            # store tendency are different global operators
+                            # and their difference means nothing.  Shipping
+                            # the SAME weights the tracker used removes the
+                            # reader's opportunity to get it wrong.  The key
+                            # is OMITTED, not zero-filled, when there are no
+                            # weights: an empty float array is a valid array
+                            # that a third consumer can misread as a mesh,
+                            # while a missing key raises (GLM).
+                            **_led_area_kw,
                         )
                     _led_accum = None
                     _led_nsteps = 0
