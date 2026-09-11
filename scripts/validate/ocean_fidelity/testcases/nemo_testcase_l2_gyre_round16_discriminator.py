@@ -195,11 +195,27 @@ def _literal_sbc(
     wet: np.ndarray,
     surface_ct: np.ndarray,
     surface_pt: np.ndarray,
+    kt: int = 1,
+    nyear: int = 1,
+    qsr_pi: float | None = None,
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
-    """Literal usrdef_sbc_oce kt=1 statements and nine SIN/COS sites."""
+    """Literal usrdef_sbc_oce statements at step ``kt``, and nine SIN/COS sites.
+
+    ``kt`` and ``nyear`` are the routine's OWN time operands
+    (``BLD/ppsrc/nemo/usrdef_sbc.f90:107-108``:
+    ``ztime = REAL(kt)*rn_Dt/(rmmss*rhhmm) - (nyear-1)*rjjhh*zyydd``).  They
+    default to the kt=1 / year-1 values this file was written for, so round
+    16's own numbers are byte-unchanged; the day-by-day owner round passes the
+    day boundaries' kt and reads ``nyear`` from the run's own ``ndastp``.
+    ``qsr_pi`` overrides the source's literal ``3.1415`` and exists ONLY for
+    the owner round's plant, which must be able to make this gate red.
+    """
     rpi = F64(3.141592653589793)
     zyydd = F64(360.0)
-    ztime = _div(_mul(F64(1.0), F64(14400.0)), _mul(F64(60.0), F64(60.0)))
+    ztime = _sub(
+        _div(_mul(F64(kt), F64(14400.0)), _mul(F64(60.0), F64(60.0))),
+        _mul(_mul(F64(nyear - 1), F64(24.0)), zyydd),
+    )
     ztimemax1 = _mul(_add(_mul(F64(5.0), F64(30.0)), F64(21.0)), F64(24.0))
     ztimemin1 = _add(ztimemax1, _div(_mul(F64(24.0), zyydd), F64(2.0)))
     ztimemax2 = _mul(_add(_mul(F64(6.0), F64(30.0)), F64(21.0)), F64(24.0))
@@ -254,7 +270,8 @@ def _literal_sbc(
                 _mul(F64(28.3), tstar_scale), _libm("cos", tstar_arg)
             )
             qsr_arg = _div(
-                _mul(F64(3.1415), _sub(phi, _mul(F64(23.5), zcos_sais1))),
+                _mul(F64(3.1415) if qsr_pi is None else F64(qsr_pi),
+                     _sub(phi, _mul(F64(23.5), zcos_sais1))),
                 _mul(F64(0.9), F64(180.0)),
             )
             sites["qsr_cos_arg"][jj, ji] = qsr_arg
