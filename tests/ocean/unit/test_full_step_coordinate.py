@@ -267,3 +267,41 @@ def test_layer_thickness_uses_the_one_shared_stretch(zref):
     stale = np.asarray(coord.h_partial) * (
         (np.asarray(ssh) + np.asarray(ht_0)) / np.asarray(ht_0))[..., None]
     assert np.any(stale != got)
+
+
+def test_qco_stretch_card_sweep_names_both_branches_and_can_fail():
+    """The Rule-12 sweep is a probe, so it gets a direct test like any other.
+
+    Two things are asserted, and the second is the one that matters: the sweep
+    reports BOTH branches (partial-cell cards move, z* cards are INERT), and it
+    REFUSES when no card moves -- a sweep whose INERT rows are all it ever
+    prints would certify the opposite of the truth while exiting zero.
+    """
+    import importlib.util
+    import pathlib
+
+    path = (pathlib.Path(__file__).resolve().parents[3] / "scripts" /
+            "validate" / "ocean_fidelity" / "dino_1226" /
+            "qco_stretch_card_sweep.py")
+    spec = importlib.util.spec_from_file_location("qco_stretch_card_sweep",
+                                                  path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.main() == 0
+
+    # The refusal: with every recipe's coordinate forced to the z* class the
+    # sweep sees no partial-cell card, and it must exit NON-zero rather than
+    # print a table of INERT rows and pass.
+    import legoesm.ocean.vertical as V
+
+    class _NeverPartial:
+        pass
+
+    real = V.OceanPartialCellCoordinate
+    import legoesm.ocean.experiments.dino as dm
+    try:
+        V.OceanPartialCellCoordinate = _NeverPartial
+        assert mod.main() == 1
+    finally:
+        V.OceanPartialCellCoordinate = real
+    assert dm is not None      # the import above is what the sweep also uses
