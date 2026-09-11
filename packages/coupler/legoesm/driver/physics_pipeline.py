@@ -2476,15 +2476,22 @@ class PhysicsPipeline:
                 n_cloud_col = None
             else:
                 from legoesm.atmosphere.physics._shared import compute_rho
-                # MOIST density, and a 1 K floor on T: compute_rho divides
-                # by temperature, and the same floor guards the identical
-                # conversion in clouds/cloud_fraction.py.  q_v_col is
-                # ``ad.flatten_3d(q_v)`` computed above and is not yet
-                # sharded at this point, so it is the same array the other
-                # side of this merge built inline.
-                _rho_nc = compute_rho(jnp.maximum(T_col, 1.0), p_full_col,
-                                      q_v_col)
-                n_cloud_col = jnp.maximum(ad.flatten_3d(N_c) * _rho_nc, 0.0)
+                # MOIST density.  NO floor on T here, deliberately: the
+                # other side of this merge carried jnp.maximum(T_col, 1.0),
+                # and both reviewers showed it TRADES A LOUD FAILURE FOR A
+                # SILENT ONE.  With an uninitialised or padded column
+                # (T = 0, N_c = 0) the unfloored form gives rho = inf and
+                # 0 * inf = NaN, which stops the run; the floored form gives
+                # rho ~348 kg/m^3 and 0 * 348 = 0, which is indistinguishable
+                # from a genuinely droplet-free column.  A floor is input
+                # validation wearing a numerical-safety costume, and this
+                # site has no validation to do.  ``q_v_col`` is
+                # ``ad.flatten_3d(q_v)`` from above and is not sharded until
+                # well below, so it is the identical array the other side
+                # built inline (checked: no rebinding in between).
+                _rho_nc = compute_rho(T_col, p_full_col, q_v_col)
+                n_cloud_col = jnp.maximum(
+                    ad.flatten_3d(N_c) * _rho_nc, 0.0)
             n_ice_col = None if N_i is None else ad.flatten_3d(N_i)
             # Aerosol-CCN droplet number for the radiation PSD: under
             # specified-Nc with aerosol coupling, feed the SAME
