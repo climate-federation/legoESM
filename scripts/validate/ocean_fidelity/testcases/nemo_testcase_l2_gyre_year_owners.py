@@ -902,12 +902,6 @@ def main(argv=None) -> int:
     return 0
 
 
-if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except GateError as error:
-        print(f"GATE FAILED: {error}", file=sys.stderr)
-        raise SystemExit(1) from error
 
 
 # --------------------------------------------- the EQUAL-INPUT single step ---
@@ -1035,3 +1029,11 @@ def equal_input_step(kt: int, *, entry_root: Path = DEFAULT_ENTRY_ROOT,
         print(f"  {arm:>32s}"
               + "".join(f"{row[n]['rms']:>14.4e}" for n in FIELDS))
     return report
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except GateError as error:
+        print(f"GATE FAILED: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
