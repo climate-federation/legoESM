@@ -233,8 +233,9 @@ post-solve floor (`zdftke:473-475`) clamps both arms to the same `1e-6`.  From
 (`1.13e-02 m^2/s`, on the deepest interface), and the velocities move by
 `1.4e-07 m/s`.
 
-**Whether that move is TOWARD NEMO is UNMEASURED**, because the gate that would
-say so refuses to run (see the obstacles section).  Nothing in this round is
+**Whether that move is TOWARD NEMO is UNMEASURED**, and the against-NEMO gate
+disagrees with this self-A/B at kt=2 — see "THE AGAINST-NEMO LADDER" below, which
+records both and names the configuration difference.  Nothing in this round is
 bit-exact against NEMO.  "FIXED" in the Rule-12 table below means the runaway is
 gone and the card completes, NOT that the card is at the exact bar.
 
@@ -430,7 +431,9 @@ b61a8b9a7a0a9618a351a0439f36710c286e0783c1fa917b689730391a8389ab  ladder_before.
 317ef3633ec3091310262d60298fd79246363ef5c0c633723534e68d2d5e8157  ladder_after.npz
 ff2ca3eaff13516530d6536585bdcd7060db78af1798d883c70fc40bda8c83cd  phase0_score.log
 3bd6712968cabf7c2aadc304b7c3fabda7548a37b75250d67af2e73f007427bd  tke_suite_final2.log
+133de706738eb49770817df9ef1af7e46a7a19ee6185c96c5d1ec61d81801958  nemo_ladder_after.json
 3508b5c452d09211eeb4d87bfaef5ec9610613ad9f9caba74a9659535294ebb2  ../year_fromrest/phase0_floor.json
+6f8565649d7171bfd41020b2482ec9f010f9bd330a5c12a842e9f579f5d332e8  ../round48/round48_GYRE_kt1_2.json
 ```
 
 The two DINO logs are BYTE-IDENTICAL, which is the Rule-12 row for that card
@@ -438,15 +441,17 @@ stated as a digest rather than as an opinion.
 
 ## Instrument obstacles met this round, recorded not worked around
 
-* The GYRE `kt=1..10` gate against NEMO's record REFUSES to run at `d8e97e1326de`
-  on a clean tree, before any edit of mine:
+* The GYRE `kt=1..10` gate refuses to run against its DEFAULT oracle root:
   `gyre_kt1_10_stage2_terms/oracle_stage_kt00000001_s1.bin` hashes
   `35e6892b799aeaf8d06d4affcd71b5ba0c71dc41bc0e8970c033459c46cd1402` against the
   pinned `ce25b004e7e8289b6e803263f895576981ce22516ccddfbd85d7be5ce5bcaedc`, and
-  the gate stops at that identity check before the trajectory arm, `--trajectory-only`
-  included.  That is an ORACLE-ARTIFACT registry mismatch, not a legoESM state;
-  it is not mine to fix (NEMO is read-only here) and it means this round's
-  against-NEMO ladder rows are UNMEASURED with the reason named.
+  it stops at that identity check before the trajectory arm, `--trajectory-only`
+  included.  **That was an obstacle, not a blocker, and an earlier draft of this
+  receipt wrongly reported the ladder as unrunnable.**  The campaign's recent
+  rounds point the gate at `round19_oracle_v2_external`, where every pin matches;
+  the ladder is measured in its own section above.  The default root's mismatch
+  remains an oracle-artifact registry problem that is not mine to fix (NEMO is
+  read-only here).
 * `tests/ocean/unit/test_tke_veros_dz_slots.py::test_solver_dz_cell_without_dz_surface_raises`
   is RED, and was red before this change: the raise it greps for is
   byte-identical at `HEAD` (`git show HEAD:...tke.py`, "dz_cell requires
@@ -530,3 +535,60 @@ Then, back on the agent side:
 ```
 
 STOPPING HERE for the acquisition, as the round's rules require.
+
+## THE AGAINST-NEMO LADDER — measured, and UNRECONCILED (Rule 1e)
+
+The gate that compares `kt=1..10` against NEMO's record DOES run, once pointed
+at the oracle root the campaign actually uses.  My earlier "blocked" note was
+wrong in its conclusion though right in its facts: the DEFAULT root's stage-2
+artifact hash does not match the pin, but `round19_oracle_v2_external` does, and
+that is the root every recent round has used.  Corrected command:
+
+```
+scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_phase3_gate.py \
+  --oracle-root       /data/abyssal/.../phase3/round19_oracle_v2_external \
+  --stage2-oracle-root ... --stage3-oracle-root ... \
+  --max-step 10 --trajectory-only --without-oracle-ene-coefficients
+```
+
+AFTER, at commit `20974116a92b`, against the round-48 record
+`round48/round48_GYRE_kt1_2.json` (BEFORE, commit `fcacdf16d189`, SAME gate,
+SAME oracle root, same flags):
+
+| field, max abs residual vs NEMO | kt=1 before | kt=1 after | kt=2 before | kt=2 after |
+|---|---:|---:|---:|---:|
+| u | 0.0 | 0.0 | 2.7478404751243857e-12 | 2.7478404751243857e-12 |
+| v | 0.0 | 0.0 | 3.305560306813421e-12 | 3.305560306813421e-12 |
+| T | 0.0 | 0.0 | 1.4210854715202004e-14 | 1.4210854715202004e-14 |
+| S | 0.0 | 0.0 | 2.1316282072803006e-14 | 2.1316282072803006e-14 |
+| ssh | 0.0 | 0.0 | 4.336808689942018e-19 | 4.336808689942018e-19 |
+
+Every field, both steps, BIT-IDENTICAL before and after; `first_over_bar` stays
+`kt=2` on `u`/`v`, and `kt=1` is exact.  `kt=3..10` are `7e-4` to `5e-2 m/s`,
+which is the campaign's known downstream divergence and is not compared here
+because no matched BEFORE run past `kt=2` exists.
+
+**AND THAT DISAGREES WITH MY OWN SELF-A/B**, which found `kt=2` moving (`u` by
+`1.09e-10`, `T` by `5.5e-09`, TKE by `2.3e-07`).  Both cannot be describing the
+same trajectory, so NEITHER is recorded as "the" ladder answer.
+
+The reconciliation is NOT done, and the cause is already localised to a
+CONFIGURATION difference between the two instruments, which is the trap this
+campaign has hit before: the phase-3 gate does not run the card as built, it
+runs
+
+```
+cfg = card.recipe.model_config._replace(
+    freshwater_closure="real_freshwater", fix_eta_drift=True)
+```
+
+while the year harness steps `card.recipe.model_config` unmodified.  Two
+different resolved configurations, so the two trajectories are not the same
+run and their `kt=2` answers are not comparable.
+
+**The discriminating measurement, named and not yet run:** step the year
+harness's card with those two fields set the gate's way and re-take the
+self-A/B; if `kt=2` then comes out bit-identical, the gate's row stands and the
+self-A/B was measuring the other configuration.  Until that is run, what is
+CONFIRMED is: `kt=1` is bit-identical under BOTH instruments and exact against
+NEMO, and the gate's card is unchanged at `kt=1` and `kt=2` by this fix.
