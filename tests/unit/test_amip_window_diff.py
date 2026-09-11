@@ -28,12 +28,19 @@ def wd():
     return mod
 
 
-def _sidecar(path, sums, counts, months=((1979, 3),)):
+def _sidecar(path, sums, counts, months=((0, 3),), extra=None):
+    """``extra`` adds further buckets as {(year, month): {var: (sum, count)}},
+    e.g. a CLOSED month sitting alongside the open one."""
     data_2d, arrays = [], {}
     for i, (var, s) in enumerate(sums.items()):
         for y, m in months:
             key = f"arr_{i}_{m}"
             data_2d.append([y, m, var, counts[var], key])
+            arrays[f"monthly.{key}"] = s
+    for j, ((y, m), per_var) in enumerate(sorted((extra or {}).items())):
+        for i, (var, (s, c)) in enumerate(per_var.items()):
+            key = f"xtra_{j}_{i}_{m}"
+            data_2d.append([y, m, var, c, key])
             arrays[f"monthly.{key}"] = s
     man = {"version": 1, "type": "SpatialMonthlyAccumulator", "nlat": 2,
            "nlon": 3, "nlev": 1, "data_2d": data_2d, "data_3d": []}
@@ -54,6 +61,7 @@ def _pattern(a, b):
 
 
 def test_window_mean_recovers_the_arm_days(wd, tmp_path, monkeypatch):
+    monkeypatch.setattr(wd, "FIELDS", ("rsut", "rlut"))
     monkeypatch.setattr(wd, "ROOT", tmp_path)
     run = tmp_path / "arm"; run.mkdir()
     # 20 days of history at (100, 200) per day, then 6 arm days at (130, 260)
@@ -71,6 +79,7 @@ def test_window_mean_recovers_the_arm_days(wd, tmp_path, monkeypatch):
 
 
 def test_orientation_mismatch_is_refused(wd, tmp_path, monkeypatch):
+    monkeypatch.setattr(wd, "FIELDS", ("rsut",))
     monkeypatch.setattr(wd, "ROOT", tmp_path)
     run = tmp_path / "arm"; run.mkdir()
     _sidecar(run / "cmor_accum_day_0080.npz", {"rsut": 20 * _pattern(100.0, 200.0)}, {"rsut": 20})
@@ -91,9 +100,76 @@ def test_cadence_is_asserted(wd, tmp_path, monkeypatch):
         wd.check_cadence("parent", (70, 80))
 
 
-def test_two_open_months_are_refused(wd, tmp_path, monkeypatch):
+def test_closed_month_is_ignored(wd, tmp_path):
+    """A run past a month boundary keeps the finished month in the same bucket;
+    only the open (latest) month may enter the window arithmetic."""
     run = tmp_path / "arm"; run.mkdir()
-    _sidecar(run / "cmor_accum_day_0080.npz", {"rsut": np.ones((2, 3))}, {"rsut": 10},
-             months=((1979, 3), (1979, 4)))
-    with pytest.raises(SystemExit, match="months in the bucket"):
-        wd.sidecar_sums(run / "cmor_accum_day_0080.npz")
+    march = {"rsut": (31 * _pattern(999.0, 999.0), 31)}
+    _sidecar(run / "cmor_accum_day_0100.npz", {"rsut": 10 * _pattern(100.0, 200.0)},
+             {"rsut": 10}, months=((0, 4),), extra={(0, 3): march})
+    sums, month = wd.sidecar_sums(run / "cmor_accum_day_0100.npz")
+    assert month == (0, 4)
+    assert sums["rsut"][1] == 10
+    np.testing.assert_allclose(sums["rsut"][0], 10 * _pattern(100.0, 200.0))
+
+
+@pytest.mark.parametrize("start,end", [(80, 110), (85, 95)])
+def test_window_crossing_a_month_boundary_is_refused(wd, tmp_path, monkeypatch,
+                                                     start, end):
+    """Both a long window and a SHORT one that merely straddles 31 March must
+    be refused; the short one passes any elapsed-sample heuristic."""
+    monkeypatch.setattr(wd, "FIELDS", ("rsut",))
+    monkeypatch.setattr(wd, "ROOT", tmp_path)
+    run = tmp_path / "arm"; run.mkdir()
+    _sidecar(run / f"cmor_accum_day_{start:04d}.npz",
+             {"rsut": 26 * _pattern(100.0, 200.0)}, {"rsut": 26}, months=((0, 3),))
+    _amon(run, "rsut", _pattern(110.0, 210.0), tag="197903-197903")
+    with pytest.raises(SystemExit, match="inside one calendar month"):
+        wd.window_means("arm", start, end)
+
+
+def test_window_inside_the_open_month_is_accepted(wd, tmp_path, monkeypatch):
+    """The mirror case: days 92..102 lie wholly in April and must NOT be
+    refused just because the month has only two earlier samples."""
+    monkeypatch.setattr(wd, "FIELDS", ("rsut",))
+    monkeypatch.setattr(wd, "ROOT", tmp_path)
+    run = tmp_path / "arm"; run.mkdir()
+    _sidecar(run / "cmor_accum_day_0092.npz", {"rsut": 2 * _pattern(100.0, 200.0)},
+             {"rsut": 2}, months=((0, 4),))
+    _amon(run, "rsut", (2 * _pattern(100.0, 200.0) + 10 * _pattern(130.0, 260.0)) / 12,
+          tag="197904-197904")
+    m, _ = wd.window_means("arm", 92, 102)
+    np.testing.assert_allclose(m["rsut"], _pattern(130.0, 260.0), rtol=1e-12)
+
+
+def test_variable_missing_from_the_open_month_is_refused(wd, tmp_path, monkeypatch):
+    """A day-90 start finds an April bucket that has cloud but no shortwave
+    yet; dropping the field silently would hide it from the table."""
+    monkeypatch.setattr(wd, "FIELDS", ("rsut", "clt"))
+    monkeypatch.setattr(wd, "ROOT", tmp_path)
+    run = tmp_path / "arm"; run.mkdir()
+    _sidecar(run / "cmor_accum_day_0092.npz", {"clt": 2 * _pattern(50.0, 60.0)},
+             {"clt": 2}, months=((0, 4),))
+    _amon(run, "clt", _pattern(50.0, 60.0), tag="197904-197904")
+    with pytest.raises(SystemExit, match="no samples yet"):
+        wd.window_means("arm", 92, 102)
+
+
+def test_ambiguous_year_is_refused(wd, tmp_path, monkeypatch):
+    """Two files ending in the same month means the relative sidecar year
+    cannot pick one; refuse rather than take the newest."""
+    monkeypatch.setattr(wd, "ROOT", tmp_path)
+    run = tmp_path / "arm"; run.mkdir()
+    _amon(run, "rsut", _pattern(1.0, 2.0), tag="197903-197904")
+    _amon(run, "rsut", _pattern(3.0, 4.0), tag="198003-198004")
+    with pytest.raises(SystemExit, match="ambiguous"):
+        wd.partial_month("arm", "rsut", 0, 4)
+
+
+def test_bucket_key_matches_the_accumulator(wd):
+    """The window's month must be binned by the driver's own helpers."""
+    from legoesm.diagnostics.monthly_means import MonthlyAccumulator
+    from legoesm.forcing.time_utils import day_to_calendar
+    for day in (0, 30, 59, 60, 89, 90, 100, 110, 364, 365, 400):
+        doy, _ = day_to_calendar(float(day))
+        assert wd.bucket_key(day) == (day // 365, MonthlyAccumulator.day_to_month(doy))

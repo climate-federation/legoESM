@@ -37,31 +37,60 @@ import pathlib
 
 import numpy as np
 
+from legoesm.diagnostics.monthly_means import MonthlyAccumulator
+from legoesm.forcing.time_utils import day_to_calendar
+
 ROOT = pathlib.Path("/work/bd1083/b309178/diffESM/legoesm_pg/amip_runs")
 FIELDS = ("rsut", "rlut", "rsutcs", "rlutcs", "clt", "clwvi", "clivi", "pr",
           "prw", "tas", "hfls", "hfss")
 DERIVED = {"CRE_LW": ("rlutcs", "rlut"), "CRE_SW": ("rsutcs", "rsut")}
+# Rain and evaporation are accumulated in kg/m2/s, which prints as 0.000 at the
+# table's precision -- the precipitation gate was unreadable until this scaling
+# (a 4 mm/day tropical mean is 4.6e-5 kg/m2/s).
+SCALE = {"pr": 86400.0, "evspsbl": 86400.0}
+UNITS = {"pr": "mm/d", "evspsbl": "mm/d"}
 BANDS = {"GLOBAL": (-90.0, 90.0), "tropics 20S-20N": (-20.0, 20.0),
-         "ITCZ 10S-10N": (-10.0, 10.0)}
+         "ITCZ 10S-10N": (-10.0, 10.0),
+         # The polar caps are a separate error of the opposite sign, so a
+         # global mean hides them; both caps together, since the March
+         # surface-albedo deficit is present in each.
+         "poles 60-90": (60.0, 90.0)}
 CADENCE_PER_DAY = 1.0
+
+
+def bucket_key(day):
+    """The accumulator's (year, month) bucket for a simulation day, computed
+    with the SAME helpers the driver uses so the window can never be binned
+    differently from the sums it is subtracting."""
+    doy, _ = day_to_calendar(float(day))
+    return int(float(day) // 365.0), MonthlyAccumulator.day_to_month(doy)
 MIN_SPATIAL_CORR = 0.9
 
 
 def sidecar_sums(path):
-    """{var: (sum (nlat, nlon), count)} for the monthly accumulator's 2-D
-    fields, plus the (year, month) of the single open bucket."""
+    """{var: (sum (nlat, nlon), count)} for the monthly accumulator's OPEN
+    month, plus its (year, month).
+
+    A run that has crossed a month boundary keeps the CLOSED months in the same
+    bucket (a day-100 sidecar carries a complete March alongside a partial
+    April), so the open month is selected -- the latest one present -- and only
+    its sums are returned.  Mixing two months here would silently average a
+    complete month into a 10-day window.
+    """
     z = np.load(path, allow_pickle=True)
     man = json.loads(str(z["monthly.__manifest__"]))
     if man["type"] != "SpatialMonthlyAccumulator":
         raise SystemExit(f"{path}: unexpected accumulator {man['type']!r}")
     months = {(y, m) for y, m, *_ in man["data_2d"]}
-    if len(months) != 1:
-        raise SystemExit(f"{path}: {len(months)} months in the bucket; the "
-                         "window must lie inside one calendar month")
+    if not months:
+        raise SystemExit(f"{path}: empty accumulator bucket")
+    open_month = max(months)
     out = {}
     for _y, _m, var, count, key in man["data_2d"]:
+        if (_y, _m) != open_month:
+            continue
         out[var] = (np.asarray(z[f"monthly.{key}"], dtype=np.float64), int(count))
-    return out, months.pop()
+    return out, open_month
 
 
 def partial_month(run, var, year, month):
@@ -80,7 +109,12 @@ def partial_month(run, var, year, month):
             if pathlib.Path(f).stem.split("_")[-1].split("-")[-1][-2:] == f"{month:02d}"]
     if not hits:
         raise SystemExit(f"{run}/{var}: no Amon file ends in month {month:02d}: {files}")
-    d = xr.open_dataset(hits[-1], decode_times=False)
+    # The sidecar year is a RELATIVE index, so a multi-year run can offer the
+    # same end month in several files and "newest" would silently pick one.
+    if len(hits) > 1:
+        raise SystemExit(f"{run}/{var}: {len(hits)} Amon files end in month "
+                         f"{month:02d} ({hits}); the year is ambiguous")
+    d = xr.open_dataset(hits[0], decode_times=False)
     arr = np.asarray(d[var].isel(time=-1).values, dtype=np.float64)
     lat = np.asarray(d["lat"].values, dtype=np.float64)
     return arr, lat
@@ -106,10 +140,23 @@ def window_means(run, start, end):
     n_new = CADENCE_PER_DAY * (end - start)
     if n_new <= 0:
         raise SystemExit(f"{run}: empty window {start}..{end}")
+    # Every day the window adds must land in the sidecar's OPEN month, or the
+    # subtraction mixes a finished month into the mean.  Checked on the
+    # calendar, not on sample counts: a window that merely happens to be
+    # shorter than the elapsed month can still straddle the boundary.
+    spanned = {bucket_key(d) for d in range(start + 1, end + 1)}
+    if spanned != {(year, month)}:
+        raise SystemExit(
+            f"{run}: days {start + 1}..{end} span {sorted(spanned)} but the "
+            f"sidecar's open bucket is {(year, month)}; the window must lie "
+            "inside one calendar month")
+    missing = [v for v in FIELDS if v not in sums]
+    if missing:
+        raise SystemExit(
+            f"{run}: the open month {(year, month)} has no samples yet for "
+            f"{missing}; start the window later in the month")
     out, lat = {}, None
     for var in FIELDS:
-        if var not in sums:
-            continue
         s0, c0 = sums[var]
         mean_file, lat = partial_month(run, var, year, month)
         if mean_file.shape != s0.shape:
@@ -121,7 +168,7 @@ def window_means(run, start, end):
                                  f"{r:.3f} < {MIN_SPATIAL_CORR}; grid or "
                                  "orientation mismatch")
         n_end = c0 + n_new
-        out[var] = (mean_file * n_end - s0) / n_new
+        out[var] = (mean_file * n_end - s0) / n_new * SCALE.get(var, 1.0)
         out[f"{var}__n"] = n_new
     for name, (x, y) in DERIVED.items():
         if x in out and y in out:
@@ -155,7 +202,9 @@ def main(argv=None):
     cols = [v for v in list(FIELDS) + list(DERIVED) if v in means[args.ctl]]
     for band, (lo, hi) in BANDS.items():
         print(f"\n=== {band}: control value, then arm minus control ===")
-        print(f"{'run':14s}" + "".join(f"{c:>9s}" for c in cols))
+        print(f"{'run':14s}" + "".join(
+            f"{c + ('[' + UNITS[c] + ']' if c in UNITS else ''):>9s}"
+            for c in cols))
         ctl = {c: band_mean(means[args.ctl][c], lat, lo, hi) for c in cols}
         print(f"{args.ctl:14s}" + "".join(f"{ctl[c]:9.3f}" for c in cols))
         for r in args.arms:
