@@ -206,6 +206,7 @@ def iterate_eos_and_pressure_anomaly(
     if eos_depth not in ("insitu", "geometric"):
         raise ValueError(
             f"Unknown eos_depth {eos_depth!r}; expected 'insitu' or 'geometric'")
+    seos_anomaly = None
     if eos_depth == "geometric":
         # NEMO eos_insitu: feed p = rho_0*g*gdept so the EOS depth term
         # reconstructs the GEOMETRIC gdept exactly (no in-situ stretch).  The
@@ -222,6 +223,24 @@ def iterate_eos_and_pressure_anomaly(
         # would leave a zh = gdept*(config.g/constants.g) stretch when they differ.
         p_eos = (rho_0 * constants.g) * t_depth
         rho = eos_fn(T_filled, S_filled, p_eos, **eos_kw)
+        # NEMO forms the ANOMALY, never rho0 + zn (eosbn2.F90:365-369), and
+        # `rho - rho_0` cannot recover it: the sum rounds to 53 bits of ~1026
+        # and the subtraction hands back an anomaly carrying ~1.1e-16 kg/m3 of
+        # that rounding -- 1.3403e-13 of the anomaly's own rms, measured
+        # against NEMO's `rhd` restart field on 341964 of 342134 wet DINO
+        # cells, and the LAST departure of this stage from the oracle
+        # (scripts/validate/ocean_fidelity/dino_1226/
+        #  seos_restart_density_gate.py, rows R2/R3 vs the bit-exact R1).
+        # The EOS publishes its coefficients precisely so the anomaly can be
+        # ASKED FOR here instead of reconstructed by subtraction.  Under the
+        # opt-in f32-EOS lever the polynomial runs in single precision and
+        # this exactness is meaningless, so the lever keeps the subtraction.
+        _seos_cfg = (None if eos_kw
+                     else getattr(eos_fn, "nemo_seos_cfg", None))
+        if _seos_cfg is not None and float(_seos_cfg.rho0) == float(rho_0):
+            from legoesm.ocean.eos import nemo_seos_anomaly
+            seos_anomaly = nemo_seos_anomaly(
+                T_filled, S_filled, t_depth, _seos_cfg)
     else:
         rho = eos_fn(T_filled, S_filled, jnp.zeros_like(T), **eos_kw)
         for _ in range(n_iter):
@@ -263,6 +282,9 @@ def iterate_eos_and_pressure_anomaly(
         rho_ref_z = jnp.sum(rho * wet, axis=horiz_axes) / wet_count
         # Broadcast back across horizontal axes.
         rho_prime = rho - rho_ref_z
+    elif seos_anomaly is not None:
+        # The oracle's own anomaly, with no rho0 round trip in it.
+        rho_prime = seos_anomaly
     else:
         rho_prime = rho - rho_0
 

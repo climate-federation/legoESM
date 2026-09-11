@@ -490,15 +490,67 @@ def nemo_seos_eos(
     """
     if cfg is None:
         cfg = NemoSEOSConfig()
+    zh = p / (cfg.rho0 * constants.g)   # Boussinesq depth [m, positive down]
+    return cfg.rho0 + nemo_seos_anomaly(T, S, zh, cfg)
+
+
+def nemo_seos_anomaly(
+    T: jnp.ndarray,
+    S: jnp.ndarray,
+    depth_m: jnp.ndarray,
+    cfg: NemoSEOSConfig | None = None,
+) -> jnp.ndarray:
+    """NEMO simplified-EOS density anomaly ``zn`` [kg/m3], from GEOMETRIC depth.
+
+    This is ``eosbn2.F90:365-367`` (compiled: ``eosbn2.f90:365-367``) exactly
+    as written -- the quantity NEMO calls ``zn``, BEFORE it is scaled by
+    ``r1_rho0`` at ``:369``::
+
+        zn = - rn_a0 * ( 1 + 0.5*rn_lambda1*zt + rn_mu1*zh ) * zt
+             + rn_b0 * ( 1 - 0.5*rn_lambda2*zs - rn_mu2*zh ) * zs
+             - rn_nu * zt * zs
+
+    WHY IT IS ITS OWN FUNCTION.  ``rho - rho0`` is NOT a way to obtain this.
+    NEMO never materialises ``rho0 + zn``; a consumer that does, and then
+    subtracts ``rho0`` back, rounds the sum to 53 bits of ~1026 and so carries
+    an absolute error of ~1.1e-16 kg/m3 into an anomaly whose rms is ~0.85 --
+    measured at 1.3403e-13 relative against NEMO's OWN ``rhd`` restart field
+    over 341964 of 342134 wet DINO cells, and the SOLE remaining departure of
+    the production density stage from the oracle
+    (``seos_restart_density_gate.py`` rows R2/R3; row R1, which reads the
+    anomaly directly, is bit-exact).  Ask for the anomaly when you want the
+    anomaly.
+
+    :func:`nemo_seos_eos` is this expression plus ``rho0``, so the two can
+    never drift apart -- there is ONE copy of the polynomial, not two.
+    :func:`nemo_seos_prd_literal` is the same expression again in NEMO's
+    WRITTEN statement order behind ``optimization_barrier``s, and it returns
+    ``zn * (1/rho0)``; both agree with this one bit for bit on the DINO
+    record, and it is kept separate because its barrier structure is the point
+    of it.
+
+    Parameters
+    ----------
+    T : array -- Conservative/potential temperature [degC].
+    S : array -- Absolute/practical salinity [PSU].
+    depth_m : array -- GEOMETRIC depth [m, positive down]; NEMO's live
+        ``gdept(Kmm) = gdept_0*(1+r3t)``, NOT a pressure.
+    cfg : NemoSEOSConfig -- Coefficients (defaults to the DINO set).
+
+    Returns
+    -------
+    array : density anomaly ``rho - rho0`` [kg/m3].
+    """
+    if cfg is None:
+        cfg = NemoSEOSConfig()
     zt = T - cfg.T0
     zs = S - cfg.S0
-    zh = p / (cfg.rho0 * constants.g)   # Boussinesq depth [m, positive down]
-    zn = (
+    zh = depth_m
+    return (
         -cfg.a0 * (1.0 + 0.5 * cfg.lambda1 * zt + cfg.mu1 * zh) * zt
         + cfg.b0 * (1.0 - 0.5 * cfg.lambda2 * zs - cfg.mu2 * zh) * zs
         - cfg.nu * zt * zs
     )
-    return cfg.rho0 + zn
 
 
 def nemo_seos_prd_literal(
@@ -2497,7 +2549,14 @@ def make_eos_fn(eos="wright", eos_linear=None,
         cfg = eos_nemo_seos if eos_nemo_seos is not None else NemoSEOSConfig()
         def _nemo_seos(T, S, p):
             return nemo_seos_eos(T, S, p, cfg=cfg)
-        return _eos_compute_dtype_adapter(_nemo_seos)
+        _wrapped = _eos_compute_dtype_adapter(_nemo_seos)
+        # Publish the coefficients so a consumer that wants the ANOMALY can
+        # call nemo_seos_anomaly instead of subtracting rho0 back off rho.
+        # A generic (T,S,p)->rho signature cannot express "give me zn", and
+        # the subtraction is not a lossless way to ask for it: see
+        # nemo_seos_anomaly's docstring for the measured 1.3403e-13.
+        _wrapped.nemo_seos_cfg = cfg
+        return _wrapped
     elif eos == "nemo_eos80":
         # NEMO Roquet-55 EOS-80 polynomial (the full ln_eos80 EOS, distinct from
         # the 3-term nemo_seos). Fixed published coefficients; no config.
