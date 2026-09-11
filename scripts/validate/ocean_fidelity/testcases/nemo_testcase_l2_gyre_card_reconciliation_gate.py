@@ -51,13 +51,18 @@ HERE = Path(__file__).resolve().parent
 LADDER_GATE = HERE / "nemo_testcase_l2_gyre_phase3_gate.py"
 YEAR_HARNESS = HERE / "nemo_testcase_l2_gyre_year_fromrest.py"
 OWNERS_HARNESS = HERE / "nemo_testcase_l2_gyre_year_owners.py"
-# The ladder's oracle root and the year's are DIFFERENT NEMO RUNS of the same
-# namelist (they differ only in nn_itend/nn_stock/nn_write).  They are not
-# bit-identical to each other past kt=1, so the entry root is an explicit
-# argument at every call site and its identity is stamped in the report.
-LADDER_ENTRY_ROOT = Path(
+# TWO ORACLE RECORDS OF ONE CARD, and the campaign already knows why: v1 is
+# built without `-fno-tree-vectorize`, so gfortran vectorises transcendental
+# calls into glibc's libmvec, whose low bits differ from scalar libm; v2 is
+# built with the flag (arch/arch-conda-scalarmath.fcm).  Same CPP keys, same
+# physics, different low bits from kt=2 on.  The certified receipts pass
+# `--oracle-root .../round19_oracle_v2_external`, which is BIT-IDENTICAL to
+# the year's own root; the phase-3 gate module's OWN default is still v1.  The
+# root is therefore an explicit argument at every call site here and its
+# identity is stamped in every report -- this gate does not choose one.
+ORACLE_V1_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/gyre_kt1_10")
-YEAR_ENTRY_ROOT = Path(
+ORACLE_V2_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_fromrest/"
     "nemo_pristine")
 
@@ -296,7 +301,7 @@ def _bits(values) -> np.ndarray:
     return np.asarray(values, dtype=np.float64).view(np.uint64)
 
 
-def two_path(*, steps: int = 2, entry_root: Path = LADDER_ENTRY_ROOT,
+def two_path(*, steps: int = 2, entry_root: Path = ORACLE_V1_ROOT,
              plant: str | None = None) -> dict:
     """kt=1..``steps`` from rest on BOTH programs, bit-compared per boundary,
     then step 2 from NEMO's OWN entry state on both, scored against NEMO's
@@ -425,7 +430,7 @@ def two_path(*, steps: int = 2, entry_root: Path = LADDER_ENTRY_ROOT,
     return report
 
 
-def oracle_floor(*, steps: int = 3, roots=(LADDER_ENTRY_ROOT, YEAR_ENTRY_ROOT)) -> dict:
+def oracle_floor(*, steps: int = 3, roots=(ORACLE_V1_ROOT, ORACLE_V2_ROOT)) -> dict:
     """How far apart are the ORACLE'S OWN two records of this card?
 
     The ladder scores against ``gyre_kt1_10`` and the year against
@@ -510,7 +515,7 @@ def score_both_roots(*, steps: int = 3) -> dict:
     model = _model(card, ladder)
     masks = gate.expected_masks(card)
     nlev = card.recipe.z_coord.n_levels
-    roots = {"ladder_root": LADDER_ENTRY_ROOT, "year_root": YEAR_ENTRY_ROOT}
+    roots = {"oracle_v1": ORACLE_V1_ROOT, "oracle_v2": ORACLE_V2_ROOT}
     state = card.recipe.initial_state
     rows = []
     for kt in range(1, steps + 1):
@@ -544,14 +549,14 @@ def score_both_roots(*, steps: int = 3) -> dict:
               "roots": {k: str(v) for k, v in roots.items()}, "rows": rows,
               "worktree": worktree_stamp()}
     print("\nTHE LADDER'S PROGRAM SCORED AGAINST BOTH ORACLE RECORDS")
-    print(f"  {'kt':>3s} {'field':>6s} {'vs ladder root':>16s} {'exact':>6s}"
-          f" {'vs year root':>16s} {'exact':>6s}")
+    print(f"  {'kt':>3s} {'field':>6s} {'vs oracle v1':>16s} {'exact':>6s}"
+          f" {'vs oracle v2':>16s} {'exact':>6s}")
     for row in rows:
         print(f"  {row['kt']:>3d} {row['field']:>6s} "
-              f"{row['ladder_root']['normalized_max_abs']:>16.6e} "
-              f"{str(row['ladder_root']['exact']):>6s} "
-              f"{row['year_root']['normalized_max_abs']:>16.6e} "
-              f"{str(row['year_root']['exact']):>6s}")
+              f"{row['oracle_v1']['normalized_max_abs']:>16.6e} "
+              f"{str(row['oracle_v1']['exact']):>6s} "
+              f"{row['oracle_v2']['normalized_max_abs']:>16.6e} "
+              f"{str(row['oracle_v2']['exact']):>6s}")
     return report
 
 
@@ -604,7 +609,9 @@ def main(argv=None) -> int:
     parser.add_argument("--score-both-roots", action="store_true")
     parser.add_argument("--self-check", action="store_true")
     parser.add_argument("--steps", type=int, default=2)
-    parser.add_argument("--entry-root", type=Path, default=LADDER_ENTRY_ROOT)
+    parser.add_argument("--entry-root", type=Path, default=ORACLE_V2_ROOT,
+                        help="the oracle record to score against; v2 is what "
+                             "the certified receipts pass")
     parser.add_argument("--plant", choices=("config-drift", "vacuous-reseed",
                                             "same-program"))
     parser.add_argument("--output", type=Path)
