@@ -60,8 +60,20 @@ Usage (GPU: the card's XLA CPU compile crashes on this machine)::
     CUDA_VISIBLE_DEVICES=<uuid> JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \\
         python scripts/validate/ocean_fidelity/dino_1226/kt1_tracer_ladder.py
 
-``--plant`` perturbs legoESM's loaded closure fields by 1 ulp; the gate MUST
-then exit non-zero.  ``--nemo-only`` runs stage 0 alone (no JAX, no GPU).
+NON-VACUITY.  Every row here reports DEBT on a first run (the bar is EXACT
+and nothing is at it yet), so a plant that only makes a row fail would prove
+nothing -- it would be a no-op on a gate that is already red.  The plants are
+therefore on the INSTRUMENT, which is what a passing row would rest on:
+
+``--plant-closure``  scales one additive trend by 1 + 1e-9.  Stage 0's
+    budget check MUST then refuse and the script MUST exit non-zero before
+    any row is printed.
+``--plant-shift``    shifts stage 1's W-level alignment by one level.  The
+    closure residuals MUST then grow by orders of magnitude; if they do not,
+    the ~1e-17 agreement is insensitive to the alignment and proves nothing.
+    The script exits non-zero unless every field's residual grows by >=1e6x.
+
+``--nemo-only`` runs stage 0 alone (no JAX, no GPU).
 """
 from __future__ import annotations
 
@@ -131,7 +143,7 @@ def _row(name: str, s: dict) -> str:
 
 
 # ----------------------------------------------------------------- stage 0
-def stage0(restart_glob: str) -> tuple[dict, int]:
+def stage0(restart_glob: str, plant: bool = False) -> tuple[dict, int]:
     """NEMO-side only.  Returns (rebuilt arrays, exit status contribution)."""
     tiles = sorted(glob.glob(restart_glob))
     if not tiles:
@@ -172,6 +184,18 @@ def stage0(restart_glob: str) -> tuple[dict, int]:
         raise SystemExit(
             "the restart carries no ttrd_tot: ln_tra_trd was not T for this "
             "run, so there is no per-operator ladder in it at all")
+
+    if plant:
+        # Scale ONE additive member by 1 part in 1e9.  A 1-ulp move was tried
+        # first and is NOT detectable: the budget's tolerance is 1e-12 of
+        # max|ttrd_tot| = 5.9e-17 absolute, while one ulp of ttrd_ldf's
+        # largest cell is 2.2e-22 -- five orders below.  Planting it would
+        # have printed CLOSED and certified nothing, so the plant states the
+        # size it actually tests.
+        R["ttrd_ldf"] = R["ttrd_ldf"] * (1.0 + 1.0e-9)
+        R["strd_ldf"] = R["strd_ldf"] * (1.0 + 1.0e-9)
+        print("  CLOSURE PLANT ACTIVE: ttrd_ldf AND strd_ldf scaled by 1 + 1e-9 (a 1 ppb "
+              "error in one operator); the budget check below MUST refuse")
 
     bad = 0
     for pre, additive in (("ttrd", ADDITIVE_T), ("strd", ADDITIVE_S)):
@@ -221,7 +245,7 @@ def stage0(restart_glob: str) -> tuple[dict, int]:
 
 
 # ----------------------------------------------------------------- stages 1/2
-def stages12(R: dict, plant: bool) -> int:
+def stages12(R: dict, plant_shift: bool) -> int:
     from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
     set_policy(PrecisionPolicy.fp64())                      # Rule 1c
     from legoesm.ocean.experiments import dino as dm
@@ -271,11 +295,6 @@ def stages12(R: dict, plant: bool) -> int:
             bad += 1
             continue
         a = np.asarray(obj.data if hasattr(obj, "data") else obj, dtype=float)
-        if plant:
-            a = a.copy()
-            idx = np.argmax(np.abs(a))
-            flat = a.reshape(-1)
-            flat[idx] = np.nextafter(flat[idx], np.inf)
         b = O3(nemo_name)
         # LEVEL ALIGNMENT -- READ, then PRINTED, never assumed (Rule 10).
         # NEMO's avt/avm/en/dissl live on jpk = 36 W levels with avt(k) the
@@ -306,6 +325,19 @@ def stages12(R: dict, plant: bool) -> int:
               f"{float(np.max(np.abs(np.nan_to_num(b[..., -1])))):.3e}")
         a, b, msk = a_i, b_i, wmask
         s = _stats(a, b, msk)
+        if plant_shift:
+            # Shift the alignment by ONE level and require the residual to
+            # explode.  If it does not, the ~1e-17 agreement above is not
+            # evidence about the closure -- it is evidence about nothing.
+            b2 = O3(nemo_name)[..., 2:2 + nint]
+            s2 = _stats(a, b2, msk)
+            grew = (s2["rms"] / s["rms"]) if s["rms"] else float("inf")
+            print(f"    SHIFT PLANT: one-level shift gives rms "
+                  f"{s2['rms']:.4e} vs {s['rms']:.4e} ({grew:.3e}x)")
+            if not grew >= 1e6:
+                print("    ^^ the alignment is INSENSITIVE: this row does "
+                      "not test what it claims to")
+                bad += 1
         carried.append((nemo_name, s))
         print(_row(nemo_name, s))
         if s["ne"]:
@@ -489,12 +521,16 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--restart-glob", default=DEFAULT_RESTART)
     ap.add_argument("--nemo-only", action="store_true")
-    ap.add_argument("--plant", action="store_true",
-                    help="perturb legoESM's closure fields by 1 ulp; the "
-                         "gate MUST then exit non-zero")
+    ap.add_argument("--plant-closure", action="store_true",
+                    help="move one additive trend by 1 ulp; stage 0 MUST "
+                         "refuse (non-vacuity for the budget gate)")
+    ap.add_argument("--plant-shift", action="store_true",
+                    help="shift stage 1's W-level alignment by one; the "
+                         "closure residuals MUST explode (non-vacuity for "
+                         "the alignment the closure rows rest on)")
     args = ap.parse_args()
 
-    R, bad = stage0(args.restart_glob)
+    R, bad = stage0(args.restart_glob, plant=args.plant_closure)
     if bad:
         print(f"\nGATE FAIL: the instrument did not validate ({bad} "
               "problems). No row above may be quoted.")
@@ -502,7 +538,7 @@ def main() -> int:
     if args.nemo_only:
         print("\n--nemo-only: stages 1/2 skipped.")
         return 0
-    bad += stages12(R, args.plant)
+    bad += stages12(R, args.plant_shift)
     print(f"\n{'GATE PASS' if bad == 0 else f'GATE FAIL ({bad} rows)'}")
     return 0 if bad == 0 else 1
 

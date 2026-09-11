@@ -390,32 +390,52 @@ def effective_vertical_scale_factors(grid, tmask, mode=None):
         return e3t, t_depth, "e3t_1d"
     e3t3 = np.asarray(e3t3)
     nlev = e3t3.shape[-1]
+    # EVERY level takes NEMO's own value, the permanently-dry one included.
+    # A level with no wet cell used to keep the OTHER ladder's number, which
+    # left the deepest level 111.088 m away from NEMO's e3t_0 and its T-depth
+    # 55.544 m away.  Nothing on this card integrates that level, but it is
+    # still carried state -- it sets H_max and the three deepest reference
+    # interfaces -- and "NEMO's grid except one level" is not NEMO's grid.
+    # NEMO's e3t_0/gdept_0 are horizontally uniform at every level here, dry
+    # levels included, so a dry level HAS a well-defined NEMO value; the
+    # uniformity check below now covers those levels too rather than skipping
+    # them, so a partial-cell grid cannot slip through on a dry level.
+    # tmask arrives as float from the mesh_mask reader and as bool from some
+    # callers; a float array used as an index raises, so normalise once.
+    wet = np.asarray(tmask) > 0.5
+    lev_any = wet.any(axis=(0, 1))
+    everywhere = np.ones(wet.shape[:2], dtype=bool)
+
+    def _sel(k):
+        return wet[:, :, k] if lev_any[k] else everywhere
+
     spread = np.zeros(nlev)
     for k in range(nlev):
-        w = tmask[:, :, k]
-        if w.any():
-            v = e3t3[:, :, k][w]
-            spread[k] = float(v.max() - v.min())
+        v = e3t3[:, :, k][_sel(k)]
+        spread[k] = float(v.max() - v.min())
     if spread.max() > 1.0e-6:
         raise ValueError(
             f"mesh_mask e3t_0 varies horizontally (max spread {spread.max():.3e} "
-            "m over wet cells): this is a PARTIAL-CELL (ln_zps) grid, which "
+            "m over a level): this is a PARTIAL-CELL (ln_zps) grid, which "
             "bridge_nemo_to_legoesm_topo does not support."
         )
-    lev_any = tmask.any(axis=(0, 1))
     out_e3t = e3t.copy()
     for k in range(nlev):
-        if lev_any[k]:
-            out_e3t[k] = _level_value(e3t3[:, :, k][tmask[:, :, k]])
+        out_e3t[k] = _level_value(e3t3[:, :, k][_sel(k)])
     if _mode == "gdept_only":
         out_e3t = e3t.copy()            # keep the 1-D thickness ladder
     gd3 = getattr(grid, "gdept_0", None)
     out_td = t_depth.copy()
     if gd3 is not None and _mode in ("both", "gdept_only"):
         gd3 = np.asarray(gd3)
+        gspread = max(float(np.ptp(gd3[:, :, k][_sel(k)])) for k in range(nlev))
+        if gspread > 1.0e-6:
+            raise ValueError(
+                f"mesh_mask gdept_0 varies horizontally (max spread "
+                f"{gspread:.3e} m over a level): partial cells are not "
+                "supported by this bridge.")
         for k in range(nlev):
-            if lev_any[k]:
-                out_td[k] = _level_value(gd3[:, :, k][tmask[:, :, k]])
+            out_td[k] = _level_value(gd3[:, :, k][_sel(k)])
     return out_e3t, out_td, "e3t_0"
 
 

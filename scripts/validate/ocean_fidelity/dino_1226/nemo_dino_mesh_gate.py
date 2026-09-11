@@ -506,83 +506,34 @@ def main() -> int:
     e3t_lev = e3t0[0, 0, :]
     gdept_lev = gdept0[0, 0, :]
     td4_all = np.asarray(z.t_depth_ref).ravel()
-    # LEVEL 36 IS WAIVED, MEASURED, AND ITS INERTNESS IS PROVEN HERE.
-    # zgr_msk_top_bot leaves NEMO's deepest level permanently dry, and the
-    # bridge leaves the 1-D value there rather than NEMO's 3-D one.  That is a
-    # real 111.088 m / 55.544 m gap and it is NOT silently absorbed into the
-    # rows above; it is printed, and the gate proves on this run that no
-    # column is active there and no thickness is carried there before it
-    # accepts the waiver.
+    # NO WAIVER.  The permanently-dry level takes NEMO's own value like every
+    # other level (user decision 2026-09-10: "do exactly what NEMO does"), so
+    # the two ladder rows below are scored over ALL 36 levels, not over the
+    # wet ones only.  What used to be waived here was a real 111.088 m /
+    # 55.544 m gap on level 36; it is now zero, and the rows themselves are
+    # what proves it.  --plant-dry-level remains the non-vacuity check: it
+    # sets the dry level to an arbitrary value and these rows must go red.
     dry = ~lev_any
     if dry.any():
         act = np.asarray(z.is_active)
         hp = np.asarray(z.h_partial)
-        # NOT a tautology, and NOT the old third conjunct: `dry` IS defined
-        # from tmask, so "0 wet mask on a dry level" was true by construction
-        # and certified nothing.  These two are independent of it -- the
-        # coordinate's own active flag and its own thickness.
-        inert = (int(act[..., dry].sum()) == 0
-                 and float(np.abs(hp[..., dry]).max()) == 0.0)
-        # THE WAIVER IS BOUNDED IN POSITION, not just in value.  A dry level
-        # in the MIDDLE of the column is a different object entirely (it would
-        # sit between two integrated cells) and must never be waived silently.
-        if not np.all(dry[len(dry) - int(dry.sum()):]):
-            print(f"  dry levels {1 + np.where(dry)[0]} are not the TRAILING "
-                  "levels of the column: this is not NEMO's dummy bottom "
-                  "level and it is not waivable here")
-            g4.failed = True
-        print(f"  {int(dry.sum())} dry level(s), trailing: "
-              f"{list(1 + np.where(dry)[0])}")
-        for k in np.where(dry)[0]:
-            print(f"  WAIVED  level {k + 1} (NEMO's permanently dry dummy): "
-                  f"e3t {dz[k]:.6f} vs {e3t_lev[k]:.6f} "
-                  f"(delta {abs(dz[k] - e3t_lev[k]):.3f} m), gdept "
-                  f"{td4_all[k]:.6f} vs {gdept_lev[k]:.6f} "
-                  f"(delta {abs(td4_all[k] - gdept_lev[k]):.3f} m)")
-        print(f"  waiver precondition -- 0 active cells and 0 thickness on "
-              f"every dry level: {inert}")
-        if not inert:
-            print("  the dry level carries an active cell or a thickness on "
-                  "this run, so the gap above reaches the model: the waiver "
-                  "does not hold")
-            g4.failed = True
-        # WHAT THE WAIVER DOES NOT COVER, said out loud rather than implied by
-        # the word "inert".  The dry level still sets four REFERENCE-LADDER
-        # entries, measured on this run: H_max, the deepest half-interface
-        # z_half_ref[-1], the deepest cell centre z_full_ref[-1] and the
-        # deepest half-spacing dz_half_ref[-1].  None of them enters a live
-        # thickness on this card (that is h_partial, checked above), but they
-        # are carried state and the waiver is not a claim that nothing reads
-        # them.
-        print(f"  the waived level still sets H_max = {float(z.H_max):.6f} m, "
+        print(f"  {int(dry.sum())} permanently-dry level(s): "
+              f"{list(1 + np.where(dry)[0])} -- scored, not waived. "
+              f"On this run they carry {int(act[..., dry].sum())} active "
+              f"cells and max|h_partial| = "
+              f"{float(np.abs(hp[..., dry]).max()):.3e} m, so nothing "
+              "integrates them; they DO set H_max and the three deepest "
+              "reference interfaces, which is why they are scored.")
+        print(f"  carried reference values: H_max = {float(z.H_max):.6f} m, "
               f"z_half_ref[-1] = {float(np.asarray(z.z_half_ref)[-1]):.6f}, "
               f"z_full_ref[-1] = {float(np.asarray(z.z_full_ref)[-1]):.6f}, "
               f"dz_half_ref[-1] = "
-              f"{float(np.asarray(z.dz_half_ref)[-1]):.6f} -- carried, not "
-              "integrated")
-        # The waiver covers ONE specific value, not any value.  The reason it
-        # exists is that the bridge leaves NEMO's OTHER ladder there, so that
-        # is what is checked -- a dry level holding an arbitrary number is a
-        # planted or corrupted ladder and must fail even though nothing
-        # integrates it.  Without this the waiver is a blanket pass on a level.
-        e3t1d = O("e3t_1d").ravel()
-        gdept1d = O("gdept_1d").ravel()
-        stray = [int(k) + 1 for k in np.where(dry)[0]
-                 if dz[k] != e3t1d[k] or td4_all[k] != gdept1d[k]]
-        if stray:
-            print(f"  the waived level(s) {stray} hold neither NEMO ladder's "
-                  "value: this is not the documented gap, it is a corrupted "
-                  "or planted ladder")
-            g4.failed = True
-        else:
-            print("  waived value is NEMO's own 1-D ladder (e3t_1d/gdept_1d), "
-                  "not an arbitrary number: checked")
-    g4.check("e3t_0 reference ladder", dz[lev_any], e3t_lev[lev_any])
+              f"{float(np.asarray(z.dz_half_ref)[-1]):.6f}")
+    g4.check("e3t_0 reference ladder", dz, e3t_lev)
     # C5/C6 -- the S-EOS depth (eosbn2.F90:297 zh = gdept(Knn)) and the sco
     # pressure-gradient depth (dynhpg.F90:353/378 gdept_z0), both read from
     # z_coord.t_depth_ref (eos.py:823, ocean_pe_latlon_cgrid.py:1900-1906).
-    g4.check("gdept_0 T-depth ladder",
-             td4_all[lev_any], gdept_lev[lev_any])
+    g4.check("gdept_0 T-depth ladder", td4_all, gdept_lev)
     # raw mesh fields the fidelity arms read straight off the coordinate
     g4.check("gdepw_0 (z_coord raw)", np.asarray(z.nemo_gdepw_0), gdepw0)
     g4.check("e3w_0 (z_coord raw)", np.asarray(z.nemo_e3w_0), e3w0)
