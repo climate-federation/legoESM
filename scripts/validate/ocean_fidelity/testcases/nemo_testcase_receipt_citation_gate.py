@@ -143,6 +143,16 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R56TKE/BLD/ppsrc/nemo/zdftke.f90"),
     "GYRE_OMIP_L2_P3_SM_R56TKE/BLD/ppsrc/nemo/zdfphy.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R56TKE/BLD/ppsrc/nemo/zdfphy.f90"),
+    # Round 59 binds the rejected record to the R58 producer's own compiled
+    # writer, closure, allocation, and pre-EVD transfer.
+    "GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/l2_r54_tke.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/l2_r54_tke.f90"),
+    "GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/zdftke.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/zdftke.f90"),
+    "GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/zdfphy.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/zdfphy.f90"),
+    "GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/zdf_oce.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/zdf_oce.f90"),
     "nemo_testcase_l2_gyre_round54_tke_operands/l2_r54_tke.F90": (
         REPO / "scripts/validate/ocean_fidelity/testcases"
         "/nemo_testcase_l2_gyre_round54_tke_operands/l2_r54_tke.F90"),
@@ -263,6 +273,40 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 59: R58 RHS-bound retraction and widened calibration ---
+    'GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/zdftke.f90:394-412': [
+        ('IF( nn_pdl == 1 )', 3),
+        'p_pdlr(ji,jj,jk) = MAX(  0.1_wp,  ri_cri / MAX( ri_cri , zri )  )', 19],
+    'GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/zdftke.f90:691-701': [
+        'zsqen = SQRT', 'p_avt(ji,jj,jk)   = MAX', 11],
+    'GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/zdfphy.f90:348-354': [
+        'start from turbulent closure values', 'CALL r54_zdfphy_finish', 7],
+    'GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/zdftke.f90:466-483': [
+        ('DO jk =  2,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0)'
+         '                 ! First recurrence'),
+        'en(ji,jj,jk) = MAX( en(ji,jj,jk), rn_emin ) * wmask(ji,jj,jk)', 18],
+    'GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/zdftke.f90:589': (
+        'IF( ln_mxl0 ) zraug = vkarmn * 2.e5_wp / ( rho0 * grav )', 1),
+    'GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/zdftke.f90:601-603': [
+        'initialisation of interior minimum value', 'zmxld(:,:)  = rmxl_min', 3],
+    'GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/zdftke.f90:612-619': [
+        ('IF( ln_mxl0 ) THEN', 1),
+        'zmxlm(ji,1) = MAX( rn_mxl0, zmxlm(ji,1) )', 8],
+    'GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/zdftke.f90:628-629': [
+        'zrn2 = MAX( rn2(ji,jj,jk), rsmall )',
+        'zmxlm(ji,jk) = MAX(  rmxl_min,  SQRT( 2._wp * en(ji,jj,jk) / zrn2 )  )', 2],
+    'GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/zdftke.f90:634': (
+        'zmxld(:,1) = zmxlm(:,1)', 1),
+    'GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/zdftke.f90:669-682': [
+        'CASE ( 3 )', 'zmxld(ji,jk) = zemlp', 14],
+    'GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/zdf_oce.f90:85-87': [
+        ('ALLOCATE( avm', 1), 'avmb(jpk)', 3],
+    'GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/l2_r54_tke.f90:173-189': [
+        ('SUBROUTINE r54_tke_matrix_row', 1), 'r54_pdlr(:,jj,2:jpkm1)', 17],
+    'nemo_testcase_l2_gyre_round54_tke_operands/l2_r54_tke.F90:154-170': [
+        ('SUBROUTINE r54_tke_matrix_row', 1), 'r54_pdlr(:,jj,2:jpkm1)', 17],
+    'nemo_testcase_l2_gyre_round54_tke_operands.py:116-199': [
+        'def _calibrate_en_and_mixing', ('return counts', 2), 84],
     # --- round 58: fail-closed TKE operand acquisition retraction ---
     'GYRE_OMIP_L2_P3_SM_R56TKE/BLD/ppsrc/nemo/l2_r54_tke.f90:106-110': [
         ('SUBROUTINE r54_tke_begin', 1),
@@ -289,9 +333,9 @@ CITATION_MAP = {
     'nemo_testcase_l2_gyre_round54_tke_operands/l2_r54_tke.F90:91-95': [
         'Match the executing dummies exactly',
         ('REAL(wp), DIMENSION(jpi,jpj,jpk), INTENT(in) :: p_avm', 1), 5],
-    'nemo_testcase_l2_gyre_round54_tke_operands.py:45-111': [
-        'def _calibrate_closure', 'return counts', 67],
-    'nemo_testcase_l2_gyre_round54_tke_operands.py:178-184': [
+    'nemo_testcase_l2_gyre_round54_tke_operands.py:47-113': [
+        'def _calibrate_closure', ('return counts', 1), 67],
+    'nemo_testcase_l2_gyre_round54_tke_operands.py:273-279': [
         'elif plant == "prandtl":', 'np.float64(np.inf))', 7],
     # --- decision 35: the GYRE card drops fix_eta_drift (NEMO adds emp locally) ---
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/sshwzv.f90:137': (

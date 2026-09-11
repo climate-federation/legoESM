@@ -11,6 +11,8 @@ from pathlib import Path
 import numpy as np
 from legoesm.ocean.fidelity.provenance import worktree_stamp
 
+from legoesm import constants
+
 MAGIC = b"NEMO_L2_R56TKE2 "
 FIELDS = (
     "rn_Dt", "rn_ediff", "rn_ediss", "rn_ebb", "rn_emin", "rn_emin0",
@@ -111,6 +113,92 @@ def _calibrate_closure(arrays: dict, head: dict) -> dict[str, int]:
     return counts
 
 
+def _calibrate_en_and_mixing(arrays: dict, head: dict) -> dict[str, int]:
+    """Rebuild NEMO's TKE sweep and nn_mxl=3 lengths in source order."""
+    jpkm1 = head["jpkm1"]
+    wet_solve = arrays["wmask"][:, :, 1:jpkm1] != 0.0
+    wet_mixing = arrays["wmask"][:, :, :jpkm1] != 0.0
+
+    # Compiled R58TKE zdftke.f90:466-483.  NEMO first eliminates the
+    # diagonal, then overwrites zd_lw with the RHS recurrence, seeds jpkm1,
+    # back-substitutes, and finally applies MAX(en,rn_emin)*wmask.
+    diag = arrays["matrix_diag"][:, :, :jpkm1].copy()
+    upper = arrays["matrix_upper"][:, :, :jpkm1]
+    lower = arrays["matrix_lower"][:, :, :jpkm1]
+    rhs = arrays["rhs_pre_sweep"][:, :, :jpkm1]
+    work = np.zeros_like(rhs)
+    work[:, :, 0] = lower[:, :, 0]
+    for k in range(1, jpkm1):
+        diag[:, :, k] = (diag[:, :, k]
+                         - lower[:, :, k] * upper[:, :, k - 1]
+                         / diag[:, :, k - 1])
+    for k in range(1, jpkm1):
+        work[:, :, k] = (rhs[:, :, k]
+                         - lower[:, :, k] / diag[:, :, k - 1]
+                         * work[:, :, k - 1])
+    solved = np.zeros_like(rhs)
+    solved[:, :, jpkm1 - 1] = (
+        work[:, :, jpkm1 - 1] / diag[:, :, jpkm1 - 1])
+    for k in range(jpkm1 - 2, 0, -1):
+        solved[:, :, k] = ((work[:, :, k]
+                            - upper[:, :, k] * solved[:, :, k + 1])
+                           / diag[:, :, k])
+    solved[:, :, 1:jpkm1] = np.maximum(
+        solved[:, :, 1:jpkm1], np.float64(arrays["rn_emin"])) * arrays[
+            "wmask"][:, :, 1:jpkm1]
+
+    # Compiled R58TKE zdftke.f90:589,601-603,612-619,628-629,634,
+    # 669-682.  The GYRE record resolves ln_mxl0=T and nn_mxl=3.
+    floor = np.float64(arrays["rmxl_min"])
+    mxlm = np.full_like(arrays["en_post_sweep"], floor)
+    mxld = np.full_like(mxlm, floor)
+    zraug = (np.float64(constants.kappa_von_karman) * np.float64(2.0e5)
+             / (np.float64(constants.rho_ocean_nemo)
+                * np.float64(constants.g_nemo)))
+    mxlm[:, :, 0] = np.maximum(
+        np.float64(arrays["rn_mxl0"]),
+        zraug * arrays["taum_entry"] * arrays["tmask"][:, :, 0])
+    rsmall = np.float64(0.5) * np.finfo(np.float64).eps
+    zrn2 = np.maximum(arrays["rn2"][:, :, 1:jpkm1], rsmall)
+    mxlm[:, :, 1:jpkm1] = np.maximum(
+        floor, np.sqrt(
+            np.float64(2.0) * arrays["en_post_sweep"][:, :, 1:jpkm1]
+            / zrn2))
+    mxld[:, :, 0] = mxlm[:, :, 0]
+    for k in range(1, jpkm1):
+        mxld[:, :, k] = np.minimum(
+            mxld[:, :, k - 1] + arrays["e3t_Kmm"][:, :, k - 1],
+            mxlm[:, :, k])
+    for k in range(jpkm1 - 1, 0, -1):
+        mxlm[:, :, k] = np.minimum(
+            mxlm[:, :, k + 1] + arrays["e3t_Kmm"][:, :, k + 1],
+            mxlm[:, :, k])
+    momentum = np.minimum(mxld[:, :, :jpkm1], mxlm[:, :, :jpkm1])
+    dissipation = np.sqrt(
+        mxld[:, :, :jpkm1] * mxlm[:, :, :jpkm1])
+
+    counts = {
+        "wet_solve_cells": int(np.count_nonzero(wet_solve)),
+        "wet_mixing_cells": int(np.count_nonzero(wet_mixing)),
+        "en_unequal": _unequal_bits(
+            arrays["en_post_sweep"][:, :, 1:jpkm1],
+            solved[:, :, 1:jpkm1], wet_solve),
+        "mxl_momentum_unequal": _unequal_bits(
+            arrays["mxl_momentum"][:, :, :jpkm1], momentum, wet_mixing),
+        "mxl_dissipation_unequal": _unequal_bits(
+            arrays["mxl_dissipation"][:, :, :jpkm1],
+            dissipation, wet_mixing),
+    }
+    require(all(counts[name] == 0 for name in (
+        "en_unequal", "mxl_momentum_unequal", "mxl_dissipation_unequal")),
+        f"source-order calibration over {counts['wet_solve_cells']} wet solve "
+        f"cells/{counts['wet_mixing_cells']} wet mixing cells has unequal "
+        "cells: " + ", ".join(f"{name}={counts[name]}" for name in (
+            "en_unequal", "mxl_momentum_unequal",
+            "mxl_dissipation_unequal")))
+    return counts
+
+
 def read_record(path: Path, *, plant: str | None = None) -> dict:
     raw = path.read_bytes()
     if plant == "truncation":
@@ -175,6 +263,13 @@ def read_record(path: Path, *, plant: str | None = None) -> dict:
     elif plant == "copy":
         arrays["avt_pre_evd"] = np.array(arrays["avt_pre_evd"], copy=True)
         arrays["avt_pre_evd"][head["ntsi"] - 1, head["ntsj"] - 1, 1] += 1.0
+    elif plant == "sweep":
+        wet = np.argwhere(arrays["wmask"][:, :, 1:head["jpkm1"]] != 0.0)
+        require(wet.size != 0, "sweep plant found no wet solved interface")
+        i, j, k0 = wet[0]
+        arrays["rhs_pre_sweep"] = np.array(
+            arrays["rhs_pre_sweep"], copy=True)
+        arrays["rhs_pre_sweep"][i, j, k0 + 1] += np.float64(1.0)
     elif plant == "prandtl":
         wet = np.argwhere(arrays["wmask"][:, :, 1:head["jpkm1"]] != 0.0)
         require(wet.size != 0, "Prandtl plant found no wet recorded interface")
@@ -213,7 +308,8 @@ def read_record(path: Path, *, plant: str | None = None) -> dict:
         require(np.array_equal(arrays[f"{name}_pre_evd"][ii, jj, kk],
                                arrays[f"{name}_closure"][ii, jj, kk]),
                 f"zdfphy pre-EVD {name} is not a bit copy of closure {name}")
-    calibration = _calibrate_closure(arrays, head)
+    calibration = _calibrate_en_and_mixing(arrays, head)
+    calibration.update(_calibrate_closure(arrays, head))
     return {"header": head, "arrays": arrays, "calibration": calibration}
 
 
@@ -225,8 +321,9 @@ def main(argv=None) -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant", choices=(
         "header", "truncation", "nan", "config", "copy", "shape",
-        "prandtl", "stamp"))
+        "sweep", "prandtl", "stamp"))
     args = parser.parse_args(argv)
+    producer = None
     try:
         expected = args.expect_commit.lower()
         producer = args.producer_commit.read_text().strip().lower()
@@ -260,6 +357,16 @@ def main(argv=None) -> int:
         print(payload, end="")
         return 0
     except (GateError, OSError, UnicodeDecodeError, struct.error, ValueError) as exc:
+        if args.output is not None and args.plant is None:
+            failure = {
+                "error": str(exc),
+                "gate_worktree": worktree_stamp(),
+                "producer_commit": producer,
+                "record": str(args.record),
+                "status": "FAIL",
+            }
+            args.output.write_text(
+                json.dumps(failure, indent=2, sort_keys=True) + "\n")
         print(f"STATUS FAIL: {exc}")
         return 1
 

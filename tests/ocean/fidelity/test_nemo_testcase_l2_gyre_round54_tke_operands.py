@@ -42,10 +42,38 @@ def _record(path: Path) -> None:
         else:
             parts.append(struct.pack("=4i", 3, *shape))
             value = np.zeros(shape, dtype="=f8")
-            if name in {"tmask", "wmask", "mxl_momentum", "mxl_dissipation"}:
+            if name in {"tmask", "wmask"}:
+                value.fill(1.0)
+            elif name == "rn2":
                 value.fill(1.0)
             elif name == "pdlr":
                 value[:, :, 1:30] = 1.0
+            elif name == "matrix_diag":
+                value[:, :, :30] = 1.0
+                value[:, :, 0] = 1.0e4
+            elif name == "matrix_lower":
+                value[:, :, 0] = 1.0
+            elif name == "rhs_pre_sweep":
+                value[:, :, 1:30] = 1.0e-6
+                value[:, :, 1] = 2.0e-6
+            elif name == "en_post_sweep":
+                value[:, :, 0] = 1.0e-4
+                value[:, :, 1:30] = 1.0e-6
+                value[:, :, 1] = 2.0e-6
+            elif name in {"mxl_momentum", "mxl_dissipation"}:
+                value[:, :, :30] = 0.01
+            elif name == "avm_floor":
+                value[:, :, :30] = 1.2e-4
+            elif name == "avt_floor":
+                value[:, :, :30] = 1.2e-5
+            elif name in {"avm_closure", "avm_pre_evd"}:
+                value[:, :, :30] = 1.2e-4
+            elif name in {"avt_closure", "avt_pre_evd"}:
+                value[:, :, :30] = 1.2e-5
+            elif name == "dissl_output":
+                value[:, :, 0] = 1.0
+                value[:, :, 1:30] = 0.1
+                value[:, :, 1] = np.sqrt(2.0e-6) / 0.01
             parts.append(value.tobytes(order="F"))
     path.write_bytes(b"".join(parts))
 
@@ -58,6 +86,11 @@ def test_reader_accepts_complete_schema(tmp_path):
     assert tuple(result["arrays"]["avt_pre_evd"].shape) == (32, 22, 31)
     assert tuple(result["arrays"]["taum_entry"].shape) == (32, 22)
     assert result["calibration"] == {
+        "wet_solve_cells": 32 * 22 * 29,
+        "wet_mixing_cells": 32 * 22 * 30,
+        "en_unequal": 0,
+        "mxl_momentum_unequal": 0,
+        "mxl_dissipation_unequal": 0,
         "wet_closure_cells": 32 * 22 * 30,
         "wet_prandtl_cells": 32 * 22 * 29,
         "prandtl_unequal": 0,
@@ -69,7 +102,7 @@ def test_reader_accepts_complete_schema(tmp_path):
 
 @pytest.mark.parametrize(
     "plant", ["header", "truncation", "nan", "config", "copy", "shape",
-              "prandtl"])
+              "sweep", "prandtl"])
 def test_reader_plants_fail(tmp_path, plant):
     path = tmp_path / "record.bin"
     _record(path)

@@ -8,9 +8,9 @@ set -euo pipefail
 export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:${PATH}
 readonly NEMO_ROOT=${NEMO_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
 readonly SOURCE_CFG=GYRE_OMIP_L2_P3_SM_R46KT2
-readonly TARGET_CFG=GYRE_OMIP_L2_P3_SM_R58TKE
+readonly TARGET_CFG=GYRE_OMIP_L2_P3_SM_R59TKE
 readonly SOURCE_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round46/oracle_kt2_stage
-readonly TARGET_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round58/oracle_tke_operands
+readonly TARGET_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round59/oracle_tke_operands
 readonly FINAL_RESTART=GYRE_OMIP_L2_P3_00000010_restart.nc
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
@@ -151,11 +151,11 @@ cp "$manifest"/* "$TARGET_RUN/"
 
 "$PY" "$GATE" --record "$TARGET_RUN/oracle_tke_operands_kt00000002.bin" \
   --expect-commit "$COMMIT" --producer-commit "$TARGET_RUN/producer_commit.txt" \
-  --output "$TARGET_RUN/round56_tke_validation.json"
-for plant in header truncation nan config copy shape prandtl stamp; do
+  --output "$TARGET_RUN/round59_tke_validation.json"
+for plant in header truncation nan config copy shape sweep prandtl stamp; do
   if "$PY" "$GATE" --record "$TARGET_RUN/oracle_tke_operands_kt00000002.bin" \
        --expect-commit "$COMMIT" --producer-commit "$TARGET_RUN/producer_commit.txt" \
-       --plant "$plant" >"$TARGET_RUN/round56_tke_${plant}_plant.log" 2>&1; then
+       --plant "$plant" >"$TARGET_RUN/round59_tke_${plant}_plant.log" 2>&1; then
     printf 'REFUSE: TKE %s plant stayed green\n' "$plant" >&2; exit 69
   fi
 done
@@ -165,18 +165,18 @@ done
 "$PY" "$ADMISSION" --baseline "$SOURCE_RUN" --candidate "$TARGET_RUN" \
   --twin /nonexistent --identical "$FINAL_RESTART" mesh_mask.nc \
   --allowed-new oracle_tke_operands_kt00000002.bin \
-  --output "$TARGET_RUN/round56_admission.json"
+  --output "$TARGET_RUN/round59_admission.json"
 if "$PY" "$ADMISSION" --baseline "$SOURCE_RUN" --candidate "$TARGET_RUN" \
      --twin /nonexistent --identical "$FINAL_RESTART" mesh_mask.nc \
      --allowed-new oracle_tke_operands_kt00000002.bin --plant-consumed \
-     --output "$TARGET_RUN/round56_admission_plant.json" \
-     >"$TARGET_RUN/round56_admission_plant.log" 2>&1; then
+     --output "$TARGET_RUN/round59_admission_plant.json" \
+     >"$TARGET_RUN/round59_admission_plant.log" 2>&1; then
   printf 'REFUSE: consumed-field admission plant stayed green\n' >&2; exit 69
 fi
 (
   cd "$TARGET_RUN"
-  sha256sum oracle_*.bin "$FINAL_RESTART" mesh_mask.nc round56_admission*.json \
-    round56_admission_plant.log round56_tke_validation.json \
-    round56_tke_*_plant.log >round56_outputs.sha256
+  sha256sum oracle_*.bin "$FINAL_RESTART" mesh_mask.nc round59_admission*.json \
+    round59_admission_plant.log round59_tke_validation.json \
+    round59_tke_*_plant.log >round59_outputs.sha256
 )
-printf 'ROUND56_TKE_OPERANDS_READY %s\n' "$TARGET_RUN"
+printf 'ROUND59_TKE_OPERANDS_READY %s\n' "$TARGET_RUN"

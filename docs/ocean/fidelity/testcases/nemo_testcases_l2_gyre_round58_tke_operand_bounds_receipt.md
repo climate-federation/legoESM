@@ -48,9 +48,9 @@ The writer repair now gives `p_sh2`, `p_avt` and `p_dissl` explicit `A2D(0)`
 bounds and keeps `p_avm(jpi,jpj,jpk)` at
 `nemo_testcase_l2_gyre_round54_tke_operands/l2_r54_tke.F90:91-95`.
 The reader now reconstructs and bit-scores Prandtl plus `avm/avt/dissl` at
-`nemo_testcase_l2_gyre_round54_tke_operands.py:45-111`; a one-ULP mutation of
+`nemo_testcase_l2_gyre_round54_tke_operands.py:47-113`; a one-ULP mutation of
 one wet recorded `pdlr` cell is the non-vacuity plant at
-`nemo_testcase_l2_gyre_round54_tke_operands.py:178-184`. The corrected writer
+`nemo_testcase_l2_gyre_round54_tke_operands.py:273-279`. The corrected writer
 passes preprocessing and `gfortran -fsyntax-only`; the gate unit file passes
 9/9 tests.
 

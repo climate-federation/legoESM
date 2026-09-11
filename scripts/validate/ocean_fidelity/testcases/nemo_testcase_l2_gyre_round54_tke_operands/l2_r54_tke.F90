@@ -154,11 +154,11 @@ CONTAINS
    SUBROUTINE r54_tke_matrix_row(jj,zdiag,zup,zlow,p_rhs,p_pdlr)
       INTEGER, INTENT(in) :: jj
       ! Compiled zdftke declares zdiag/zup/zlow as T1Di(0),jpk and p_pdlr
-      ! as T2D(0),jpk (MY_SRC:233,218; ppsrc:238,223).  Preserve those
-      ! explicit global lower bounds: assumed-shape would silently rebase 3
-      ! to 1 and made the old p_pdlr(:,jj,:) selection two rows off.
+      ! as T2D(0),jpk (MY_SRC:233,218; ppsrc:238,223); zdf_oce allocates en
+      ! on A2D(0),jpk.  Preserve those explicit global lower bounds:
+      ! assumed/wrong full shapes silently rebase or misindex reduced arrays.
       REAL(wp), DIMENSION(T1Di(0),jpk), INTENT(in) :: zdiag,zup,zlow
-      REAL(wp), DIMENSION(jpi,jpj,jpk), INTENT(in) :: p_rhs
+      REAL(wp), DIMENSION(A2D(0),jpk), INTENT(in) :: p_rhs
       REAL(wp), DIMENSION(T2D(0),jpk), INTENT(in) :: p_pdlr
       IF(.NOT.r54_active) RETURN
       ! jpk is not part of the solve; p_pdlr is defined only on 2:jpkm1.
