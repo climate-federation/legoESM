@@ -144,6 +144,53 @@ _OMIP_EOS_REFUSED = {
 }
 
 
+# Gap 11: sea-ice exchange coefficients.
+#
+# Our SeaIceConfig defaults and ORCA1's namelist disagree on all four. The
+# oracle values below are read from the RUN'S OWN namelist_cfg, not the _ref
+# defaults -- namelist_ref carries 1.4e-3 for the three air-ice coefficients
+# and namelist_cfg OVERRIDES them to 1.0e-3, so quoting the reference file
+# would have been wrong by 40%.
+#
+#   ours          ORCA1                       source
+#   Cd_ice   1.5e-3   rn_Cd_ia  1.0e-3    namelist_cfg:140
+#   Ch_ice   1.5e-3   rn_Ch_ia  1.0e-3    namelist_cfg:142
+#   drag_atm 1.3e-3   rn_Cd_ia  1.0e-3    namelist_cfg:140
+#   drag_ocean 5.5e-3 rn_Cd_io  5.0e-3    namelist_ice_ref:136
+#
+# rn_Ce_ia = 1.0e-3, the SUBLIMATION coefficient (namelist_cfg:141), IS
+# covered, though not by a field of its own: our bulk formula drives the
+# latent flux with the SAME Ch as the sensible flux
+# (core/bulk_flux.py:1583, `lhflx = rho * L * Ch * wind * dq`), and ORCA1
+# happens to set rn_Ch_ia == rn_Ce_ia == 1.0e-3, so one field reproduces both.
+# Had the oracle given them different values we could not have matched both,
+# and that would be a structural gap rather than a coefficient one. (This
+# comment said "NOT COVERED" until codex's review pointed at the shared Ch.)
+#
+# Offered as a NAMED SET rather than four float knobs on purpose: these are one
+# calibrated choice in the oracle, and four independent flags would invite a
+# half-applied combination that matches neither model.
+_ICE_EXCHANGE_SETS = {
+    "nemo_si3": {"Cd_ice": 1.0e-3, "Ch_ice": 1.0e-3,
+                 "drag_atm": 1.0e-3, "drag_ocean": 5.0e-3},
+}
+
+
+def apply_ice_exchange_set(ice_config, name):
+    """Return ``ice_config`` with a named exchange-coefficient set applied.
+
+    ``None`` leaves the config untouched, which is what every existing run
+    does; the production card is unaffected.
+    """
+    if name is None:
+        return ice_config
+    if name not in _ICE_EXCHANGE_SETS:
+        raise SystemExit(
+            f"unknown --ice-exchange {name!r}; expected one of "
+            f"{tuple(_ICE_EXCHANGE_SETS)}")
+    return ice_config._replace(**_ICE_EXCHANGE_SETS[name])
+
+
 def _validate_omip_eos(eos):
     """Reject unknown EOS names, and any EOS whose tracer convention differs.
 
@@ -2768,6 +2815,8 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
                 ocean_heat_transfer_coeff=float(args.ice_ocean_heat_coeff))
         ice_config = ice_config._replace(
             lead_freeze_source=str(args.ice_lead_freeze_source))
+        # Gap 11: named oracle exchange-coefficient set. None = unchanged.
+        ice_config = apply_ice_exchange_set(ice_config, args.ice_exchange)
         ice_shape = _ice_state_spatial_shape(grid, "fesom")
         # Zero-ice cold start; S_ice_init=0 matches the host lanes' seed.
         ice_state = init_dynamic_ice_state(ice_shape, S_ice_init=0.0)
@@ -6025,6 +6074,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "ice_skin: legacy ice-skin-deficit lead freeze with the "
                         "ocean debited L_f (double-counts the coupler's open-water "
                         "cooling; polar SST reached -3 C by day 105 on every grid).")
+    p.add_argument("--ice-exchange", choices=tuple(_ICE_EXCHANGE_SETS),
+                   default=None,
+                   help="Named sea-ice exchange-coefficient set for "
+                        "--prognostic-sea-ice. Unset keeps this model's own "
+                        "values (ice-air drag and heat 1.5e-3, air-ice drag "
+                        "1.3e-3, ocean-ice drag 5.5e-3). 'nemo_si3' selects "
+                        "ORCA1's: 1.0e-3 for all three air-ice coefficients "
+                        "(namelist_cfg overrides the 1.4e-3 reference value) "
+                        "and 5.0e-3 ocean-ice. Applied as ONE set because "
+                        "that is how the oracle calibrates them.")
     p.add_argument("--ice-ocean-heat-coeff", type=float, default=None,
                    help="Ocean->ice basal turbulent heat-transfer coefficient "
                         "[W/m^2/K] for --prognostic-sea-ice "
@@ -8345,6 +8404,8 @@ def main() -> int:
                 ocean_heat_transfer_coeff=float(args.ice_ocean_heat_coeff))
         ice_config = ice_config._replace(
             lead_freeze_source=str(args.ice_lead_freeze_source))
+        # Gap 11: named oracle exchange-coefficient set. None = unchanged.
+        ice_config = apply_ice_exchange_set(ice_config, args.ice_exchange)
         ice_shape = _ice_state_spatial_shape(grid, app_grid_type)
         # Zero-ice cold start (h=0, concentration=0); spins up from the forcing.
         ice_state = init_dynamic_ice_state(ice_shape, S_ice_init=0.0)
