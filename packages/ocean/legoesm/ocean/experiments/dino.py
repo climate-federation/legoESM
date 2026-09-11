@@ -4780,13 +4780,21 @@ def apply_dino_lat_lon_surface_forcing(state, forcing, z_coord, cfg, dt,
             # they are derived here too rather than written down.  The
             # sub-surface wmask is the card's own per-level wet mask.
             act = getattr(z_coord, "is_active", None)
-            if act is None:
-                raise ValueError(
-                    "shortwave_penetration_ladder='nemo_2bd' needs the "
-                    "per-level wet mask z_coord.is_active (qsr_2BD's "
-                    "wmask(jk+1), traqsr.F90:668,:679); this vertical "
-                    "coordinate has none.")
-            wet3 = jnp.asarray(act) > 0.5
+            if act is not None:
+                wet3 = jnp.asarray(act) > 0.5
+            else:
+                # A PURE z* COORDINATE STORES NO PER-LEVEL MASK BECAUSE IT
+                # NEEDS NONE: its column is COMPRESSED by the Jacobian, not
+                # truncated by the bed (vertical.py:1360-1362), so every level
+                # is wet.  Reading that off the SHARED thickness helper rather
+                # than raising is not a fallback to a different rule -- it is
+                # the same rule, evaluated instead of pre-stored, and it
+                # returns exactly is_active on the coordinates that do store
+                # one.  Raising here instead broke two existing DINO tests
+                # that build the card on `create_dino_z_star`.
+                from legoesm.ocean.vertical import compute_layer_thickness
+                wet3 = compute_layer_thickness(
+                    state.eta.data, state.H_bathy.data, z_coord) > 0.0
             # rDt, NOT dt: dom_init sets ``rDt = 2*rn_Dt`` for the modified
             # leap-frog (domain.F90:309-310) and tra_qsr_init runs after it,
             # so qsr_ext_lev sees the DOUBLED step.  Measured, not assumed:
