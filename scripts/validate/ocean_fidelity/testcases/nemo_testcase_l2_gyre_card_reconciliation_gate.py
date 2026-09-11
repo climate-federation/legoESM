@@ -239,6 +239,46 @@ def resolve_programs(*, plant: str | None = None):
     return card, ladder, year, ladder_kwargs, year_kwargs
 
 
+def initial_state_rows(card, *, plant: str | None = None) -> list[dict]:
+    """The other half of the call-chain diff: does the year START where the
+    ladder starts?
+
+    The ladder steps ``card.recipe.initial_state`` directly.  The year harness
+    round-trips it through numpy and ADDS a perturbation field, which is
+    documented to be exactly zero for the control member -- documented, which
+    is not the same as measured.  Every prognostic field is compared BIT for
+    BIT, because a state constructor that differs in the last bit is a second
+    program just as surely as a config field is.
+    """
+    import jax.numpy as jnp
+
+    year = _load("gyre_year_fromrest", YEAR_HARNESS)
+    depth3 = np.asarray(card.recipe.z_coord.nemo_gdept_0, dtype=np.float64)
+    lat3 = np.broadcast_to(
+        np.asarray(card.recipe.grid.native_lat_T_deg,
+                   dtype=np.float64)[..., None], depth3.shape)
+    active = (np.asarray(card.recipe.z_coord.is_active)
+              & (np.asarray(card.recipe.land_mask) > 0.5)[..., None])
+    pert = year.nemo_istate_perturbation(depth3, lat3,
+                                         active.astype(np.float64), 0)
+    if plant == "state-drift":
+        pert = pert + 1.0e-18
+    start = card.recipe.initial_state
+    seeded = start._replace(T=start.T.replace(
+        data=jnp.asarray(np.asarray(start.T.data) + pert, dtype=jnp.float64)))
+    rows = []
+    for name in ("T", "S", "u", "v", "eta"):
+        a = np.asarray(getattr(start, name).data, dtype=np.float64)
+        b = np.asarray(getattr(seeded, name).data, dtype=np.float64)
+        rows.append({
+            "field": name,
+            "max_abs": float(np.max(np.abs(a - b))),
+            "cells_unequal": int(np.count_nonzero(_bits(a) != _bits(b))),
+            "cells": int(a.size),
+        })
+    return rows
+
+
 def config_diff(*, plant: str | None = None) -> dict:
     from legoesm.ocean.fidelity.provenance import worktree_stamp
 
@@ -260,13 +300,15 @@ def config_diff(*, plant: str | None = None) -> dict:
             "replace_kwargs": year_kwargs,
         },
     }
+    state_rows = initial_state_rows(card, plant=plant)
     report = {
-        "format": "gyre-card-reconciliation-config-diff-v1",
+        "format": "gyre-card-reconciliation-config-diff-v2",
         "case": CASE,
         "plant": plant,
         "statements": statements,
         "differing_fields": rows,
         "n_differing": len(rows),
+        "initial_state_rows": state_rows,
         "ladder_gate_sha256": sha256(LADDER_GATE),
         "year_harness_sha256": sha256(YEAR_HARNESS),
         "worktree": worktree_stamp(),
@@ -284,6 +326,12 @@ def config_diff(*, plant: str | None = None) -> dict:
     for row in rows:
         print(f"  {row['field']:<52s} ladder={row['ladder']:<24s} "
               f"year={row['year']}")
+    print("  the year's own INITIAL STATE against the card's, bit for bit:  "
+          + "  ".join(f"{r['field']} {r['cells_unequal']}/{r['cells']}"
+                      for r in state_rows))
+    require(all(row["cells_unequal"] == 0 for row in state_rows),
+            "the year harness does not START from the card's own state: "
+            f"{[r for r in state_rows if r['cells_unequal']]}")
     if plant == "same-program":
         require(not rows, "plant: the diff table is not empty")
     return report
@@ -613,7 +661,7 @@ def main(argv=None) -> int:
                         help="the oracle record to score against; v2 is what "
                              "the certified receipts pass")
     parser.add_argument("--plant", choices=("config-drift", "vacuous-reseed",
-                                            "same-program"))
+                                            "same-program", "state-drift"))
     parser.add_argument("--output", type=Path)
     parser.add_argument("--require-unified", action="store_true",
                         help="exit non-zero unless the two programs resolve to "
