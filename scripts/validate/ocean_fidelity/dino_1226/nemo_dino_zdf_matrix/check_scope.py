@@ -57,16 +57,64 @@ def _declared(text: str) -> set[str]:
     return names
 
 
-def module_scope_names(ppsrc_dir: pathlib.Path) -> set[str]:
-    """Every name declared BEFORE a ``CONTAINS`` in the compiled tree."""
-    names: set[str] = set()
-    for f in sorted(ppsrc_dir.glob("*.f90")):
-        text = f.read_text(errors="replace")
-        head = re.split(r"(?im)^\s*CONTAINS\s*$", text, maxsplit=1)[0]
-        names |= _declared(head)
+def _module_head(text: str) -> str:
+    """Everything a module declares BEFORE its ``CONTAINS``."""
+    return re.split(r"(?im)^\s*CONTAINS\s*$", text, maxsplit=1)[0]
+
+
+def _use_names(text: str) -> set[str]:
+    return {m.group(1).lower()
+            for m in re.finditer(r"^\s*USE\s+(\w+)", _module_head(text),
+                                 re.M)}
+
+
+def module_scope_names(ppsrc_dir: pathlib.Path,
+                       seed_text: str | None = None,
+                       depth: int = 2) -> set[str]:
+    """Names reachable through this file's ``USE`` closure, module scope only.
+
+    A name is a module variable only if it is declared BEFORE its module's
+    ``CONTAINS``; ``kt`` never is (it is always a dummy argument), which is the
+    discriminator this whole check rests on.
+
+    THE CLOSURE IS BOUNDED, and it used to not be: the first version harvested
+    every module-scope declaration in the COMPILED TREE -- 3340 names -- so a
+    symbol that is a module variable in some module this file never ``USE``s
+    (an independent review used ``x`` from ``storng.f90``) passed a check that
+    gfortran would reject.  Two levels is what DINO's own file needs
+    (``jpi``/``jpk`` reach ``trazdf`` through ``dom_oce`` -> ``par_oce``), and
+    the bound is stated rather than being "as far as it goes".
+
+    WHAT IT STILL CANNOT SEE: a name that is three USE levels away.  The
+    compiler catches that, and this check exists to move the failure earlier,
+    not to replace it.
+    """
+    if seed_text is None:                    # whole-tree mode, for the tests
+        names: set[str] = set()
+        for f in sorted(ppsrc_dir.glob("*.f90")):
+            names |= _declared(_module_head(f.read_text(errors="replace")))
+        if not names:
+            raise SystemExit(f"REFUSED: no module-scope names found under "
+                             f"{ppsrc_dir}; the check would pass vacuously")
+        return names
+    frontier = _use_names(seed_text)
+    seen: set[str] = set()
+    names = set()
+    for _ in range(max(depth, 1)):
+        nxt: set[str] = set()
+        for mod in sorted(frontier - seen):
+            seen.add(mod)
+            f = ppsrc_dir / f"{mod}.f90"
+            if not f.exists():
+                continue
+            text = f.read_text(errors="replace")
+            names |= _declared(_module_head(text))
+            nxt |= _use_names(text)
+        frontier = nxt
     if not names:
-        raise SystemExit(f"REFUSED: no module-scope names found under "
-                         f"{ppsrc_dir}; the check would pass vacuously")
+        raise SystemExit(
+            f"REFUSED: the USE closure of this file resolved to no names "
+            f"under {ppsrc_dir}; the check would pass vacuously")
     return names
 
 
@@ -102,7 +150,8 @@ def check(ppsrc_file: pathlib.Path, anchor: str, patched: str,
                          "\n".join(src[:start]), maxsplit=1)[0]
     in_scope |= _declared(head_only)                          # own module head
     in_scope |= module_scope_names(
-        ppsrc_dir if ppsrc_dir is not None else ppsrc_file.parent)
+        ppsrc_dir if ppsrc_dir is not None else ppsrc_file.parent,
+        seed_text="\n".join(src))
 
     blocks = re.findall(block_re, patched, re.S)
     if len(blocks) != 1:
@@ -123,7 +172,14 @@ def check(ppsrc_file: pathlib.Path, anchor: str, patched: str,
 
 #: The tracer matrix dump's own parameters, so run.sh and the test share them.
 ANCHOR = "zwt(ji,1) = zwd(ji,1)"
-BLOCK_RE = r"! ---- #1728 WRITE-ONLY matrix dump.*?\n\s*ENDIF"
+#: The block is delimited by TWO sentinel comments, not by "up to the first
+#: ENDIF".  The first version ended at ``.*?ENDIF``: a nested ``IF ... ENDIF``
+#: inside the dump truncated the scan, so a symbol placed AFTER the nested
+#: ENDIF was never looked at and the check certified a prefix of the very
+#: instrument it exists to check.  An independent review proved it by planting
+#: a bogus symbol there.
+BLOCK_RE = (r"! ---- #1728 WRITE-ONLY matrix dump.*?"
+            r"! ---- #1728 END matrix dump ----")
 DECLARED_BY_PATCH = {"ji2", "jk2", "cl_zm", "nzdfmat_kt"}
 
 

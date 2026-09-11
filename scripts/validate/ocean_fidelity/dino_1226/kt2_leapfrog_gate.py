@@ -169,7 +169,7 @@ def _count_kt2_substeps(run_dir):
     import glob as _glob
     if not run_dir or not os.path.isdir(run_dir):
         return None
-    per_kt, ranks = {}, set()
+    per_kt, ranks_per_kt = {}, {}
     for kt in (1, 2):
         cnt = {}
         for p in _glob.glob(os.path.join(
@@ -185,8 +185,15 @@ def _count_kt2_substeps(run_dir):
                 f"counts {sorted(vals)}; the record is incomplete and its "
                 "count cannot calibrate anything")
         per_kt[kt] = vals.pop()
-        ranks |= set(cnt)
-    return len(ranks), per_kt
+        ranks_per_kt[kt] = len(cnt)
+    # The rank count is PER STEP.  Unioning it across kt (which the first
+    # version did) would report 16 ranks when kt=2 held only 8 -- an
+    # independent review found it -- so a disagreement is fatal instead.
+    if len(set(ranks_per_kt.values())) != 1:
+        raise SystemExit(
+            f"{run_dir} holds {ranks_per_kt} ranks per step; a record that "
+            "loses ranks between steps cannot calibrate a substep count")
+    return ranks_per_kt[1], per_kt
 
 
 def _substate_is_zero(run_dir, kt, tag="start"):
@@ -493,6 +500,15 @@ def main() -> int:
         print(f"  P2 kt={_kt}: sub-state at loop ENTRY {_z[2]} of {_z[1]} "
               f"values nonzero over {_z[0]} ranks"
               + (f"; at loop EXIT {_e[2]} of {_e[1]}" if _e else ""))
+        # THE EXIT IS THE CONTROL, and it has to bind: an all-zero ENTRY means
+        # nothing if the instrument writes zeros whatever the model does.  A
+        # printed control is not a control (an independent review).
+        if _e is None or _e[2] == 0:
+            print("  ^^ P2 REFUSED: the loop EXIT sub-state is zero too, so "
+                  "an all-zero ENTRY proves nothing about the carry -- the "
+                  "dump could be writing zeros unconditionally")
+            _baro_bad = 1
+            continue
         if _z[2] != 0:
             print("  ^^ NEMO DOES carry a barotropic sub-state into this "
                   "step and legoESM re-zeroes it: that is a state difference, "

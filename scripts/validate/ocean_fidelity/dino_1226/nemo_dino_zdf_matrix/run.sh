@@ -222,6 +222,7 @@ insert = '''
                END DO
                CLOSE(9203)
             ENDIF
+            ! ---- #1728 END matrix dump ----
 '''
 s = s.replace(anchor, insert + anchor, 1)
 # The locals the dump needs, declared next to NEMO's own and never reused.
@@ -288,7 +289,7 @@ python3 "$HERE/check_scope.py" "$NEMO" "$COPY"
 # successful run.  Each token must be ABSENT from the pristine source, or it
 # discriminates nothing.
 PP=$COPY/BLD/ppsrc/nemo/trazdf.f90
-for token in "trazdf_" "cl_zm" "ji2, jk2" "nzdfmat_kt"; do
+for token in "trazdf_" "cl_zm" "ji2, jk2" "nzdfmat_kt" "END matrix dump"; do
   if ! grep -qF "$token" "$PP"; then
     echo "REFUSED: '$token' is not in the COMPILED source $PP -- the writer" >&2
     echo "  did not survive preprocessing, so the record would be empty." >&2

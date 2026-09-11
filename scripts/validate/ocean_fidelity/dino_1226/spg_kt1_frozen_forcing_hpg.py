@@ -41,8 +41,8 @@ filename with ``STATUS='REPLACE'``, so the surviving bytes are the last
 writer's -- a rank that wrote nonzeros is overwritten by a later rank writing
 zeros.  The tiles are not even the same size (14 ranks at ``jpi*jpj = 870``,
 ranks 14 and 15 at 840) and the file is exactly ``870*jpkm1`` doubles, so it
-cannot hold more than one rank's tile: their zeros cover at most 7.7% of the
-domain and are not attributable to a cell.  They are printed as CORROBORATION
+cannot hold more than one rank's tile: their zeros cover at most one tile --
+8.4% of the domain, measured -- and are not attributable to a cell.  They are printed as CORROBORATION
 with that coverage stated.  The operator set is established by C1 instead, on
 the rank-tagged global stitch.
 
@@ -387,9 +387,14 @@ def nemo_side(run_dir, tab, plant=False):
     zv_built = nemo_depth_mean(dv, m["e3v_0"], vmask, r1_hv_0)
     zu_built = nemo_depth_mean(du, m["e3u_0"], umask, r1_hu_0) + inc["wind u"]
 
-    vwet = (m["vmaskutil"] > 0.5) & np.isfinite(zv_built)
-    vwet[-1] = False                        # the last row has no j+1 neighbour
-    uwet = (m["umaskutil"] > 0.5) & np.isfinite(zu_built)
+    # The mask is GEOMETRY, never "where the numbers are finite": dropping a
+    # non-finite cell here would hide it from Table._prep, whose job is to call
+    # such a row UNMEASURED.  Only the last row is excluded, and for a reason
+    # that is not about values -- it has no j+1 neighbour on the haloless
+    # global domain.
+    vwet = (m["vmaskutil"] > 0.5)
+    vwet[-1] = False
+    uwet = (m["umaskutil"] > 0.5)
     rms_v = float(np.sqrt(np.mean(fro["zv_frc"][vwet] ** 2)))
     if plant:
         q = np.argwhere(vwet & (np.abs(zv_built) > 0.1 * rms_v))
@@ -506,19 +511,37 @@ def lego_side(nemo, tab, plant_lego=False, legacy_divisor=False):
     # legoESM v-face f sits between cells f-1 and f, so it is NEMO's v-point
     # f-1: drop face 0.  The same slice the barotropic ladder's R1 row uses.
     dv_lego = np.moveaxis(-np.asarray(dp_dy) / mc.rho_0, -1, 0)[:, 1:, :]
+    dv_plain, rp_plain = None, None
     if plant_lego:
+        # A STATUS FLIP IS NOT AVAILABLE HERE and pretending otherwise is what
+        # the first version did: EVERY legoESM row is already DEBT (R1 sits at
+        # 402x the floor), so "the row must go DEBT" is unfalsifiable, and the
+        # plant touched only dv_lego while R-rho is built from rho_prime and
+        # could not move at all.  An independent review found both.
+        #
+        # So the control is MOVEMENT, measured in ONE run: keep the unplanted
+        # arrays, perturb copies of BOTH, and require every scored legoESM row
+        # to move.  A row that does not is PLANT-DEAD and the gate fails.
         q = np.argwhere(nemo["vwet"])
         j, i = int(q[0][0]), int(q[0][1])
+        dv_plain, rp_plain = dv_lego, np.asarray(rho_prime)
         dv_lego = dv_lego.copy()
-        # Same reason as the NEMO-side plant: one ulp of a 1e-06 number is
-        # 2e-22, three orders below the instrument's floor.
         dv_lego[:, j, i] *= (1.0 + PLANT_REL)
-        print(f"  PLANT: legoESM's PGF column ({j},{i}) scaled by "
-              f"1 + {PLANT_REL:.0e}")
+        rho_prime = np.asarray(rho_prime).copy()
+        rho_prime[j, i, :] *= (1.0 + PLANT_REL)
+        print(f"  PLANT: legoESM's PGF column ({j},{i}) AND its density there "
+              f"scaled by 1 + {PLANT_REL:.0e}; one ulp would be 2e-22, three "
+              "orders below this instrument's floor")
 
     rp = np.moveaxis(np.asarray(rho_prime), -1, 0) / mc.rho_0
     wet3 = nemo["mesh"]["tmask"] > 0.5
-    tab.score("R-rho  rhd (lego rho'/rho0 vs NEMO)", rp, nemo["rhd"], wet3)
+    # ``[floor xfer]``: the floor was measured on a 36-term Fortran SUM and
+    # these two rows are POINTWISE, so it is roughly 100x loose for them.  It
+    # cannot manufacture a false pass here -- both read DEBT with it and would
+    # read DEBT without it -- but a row just above it is not a finding, and the
+    # label is what stops the next reader treating it as one.
+    tab.score("R-rho  rhd (lego rho'/rho0 vs NEMO) [floor xfer]", rp,
+              nemo["rhd"], wet3)
 
     m = nemo["mesh"]
     # THE DISCRIMINATOR FOR WHAT IS LEFT.  After the divisor the R1 row still
@@ -531,7 +554,7 @@ def lego_side(nemo, tab, plant_lego=False, legacy_divisor=False):
         np.zeros(rp.shape[1:]), 1.0 / m["e1u"], 1.0 / m["e2v"])[1]
     vw_all = (m["vmask"] > 0.5)
     vw_all[:, -1, :] = False
-    hpg_row = tab.score("R-hpg  lego PGF vs hpg_sco(lego rho)",
+    hpg_row = tab.score("R-hpg  lego PGF vs hpg_sco(lego rho) [floor xfer]",
                         dv_lego, dv_from_lego_rho, vw_all)
     hv_0 = (m["e3v_0"] * m["vmask"]).sum(axis=0)
     r1_hv_0 = m["vmaskutil"] / (hv_0 + 1.0 - m["vmaskutil"])
@@ -545,6 +568,36 @@ def lego_side(nemo, tab, plant_lego=False, legacy_divisor=False):
             "remaining statement of hpg_sco agrees, so what R1 still carries "
             "is the DENSITY (R-rho), amplified by the pressure gradient's own "
             "cancellation")
+
+    # THE PLANT'S OWN CONTROL, in this one run: every scored legoESM row must
+    # MOVE.  Status cannot be the control here -- all three rows are already
+    # DEBT -- so a row whose number does not change is reported PLANT-DEAD and
+    # the gate fails.
+    if dv_plain is not None:
+        rp0 = np.moveaxis(rp_plain, -1, 0) / mc.rho_0
+        dv0 = nemo_hpg_sco(rp0, m["e3w_0"], m["gdept_0"],
+                           np.zeros(rp0.shape[1:]), np.zeros(rp0.shape[1:]),
+                           1.0 / m["e1u"], 1.0 / m["e2v"])[1]
+        zv0 = nemo_depth_mean(dv_plain, m["e3v_0"], m["vmask"], r1_hv_0)
+        print()
+        print("PLANT CONTROL -- every scored legoESM row must MOVE")
+        dead = []
+        for name, a0, b0, a1, b1, msk in (
+                ("R-rho", rp0, nemo["rhd"], rp, nemo["rhd"], wet3),
+                ("R-hpg", dv_plain, dv0, dv_lego, dv_from_lego_rho, vw_all),
+                ("R1", zv0, nemo["fro"]["zv_frc"], zv_lego,
+                 nemo["fro"]["zv_frc"], nemo["vwet"])):
+            before = float(np.abs((a0 - b0)[msk]).max())
+            after = float(np.abs((a1 - b1)[msk]).max())
+            moved = after != before
+            print(f"  {name:6s} max|d| {before:.4e} -> {after:.4e}  "
+                  f"{'MOVED' if moved else 'PLANT-DEAD'}")
+            if not moved:
+                dead.append(name)
+        if dead:
+            tab.note(f"PLANT-DEAD rows {dead}: the plant cannot reach them, "
+                     "so their AT BAR/DEBT verdict is not underwritten")
+            tab.fail = True
 
     print()
     print("4. THE STATEMENT WALK -- legoESM's PGF against the transcription, "

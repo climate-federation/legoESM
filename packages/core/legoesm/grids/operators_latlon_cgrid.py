@@ -773,7 +773,18 @@ def gradient_y_cgrid(
     # zero south pole row, and dividing every f_diff row before
     # zero_polar_lat_ends would compute nonzero/0 = inf/NaN there (poisons
     # jax_debug_nans and AD even though the row is overwritten to zero).
-    grid_dy_v = getattr(grid, "dy_v", None)
+    # THE SAME PREDICATE THE FOUR SIBLING SITES OBEY, not a bare getattr.
+    # ``reads_stored_vface_metric`` is the generalisation of ``is_tripolar``
+    # and it carries a carve-out this operator must not bypass: under a
+    # MERIDIONALLY-PERIODIC topology ``zero_polar_lat_ends`` leaves rows 0 and
+    # -1 LIVE, and neither candidate is right there -- the stored ``dy_v`` is
+    # built for a CLOSED domain (``radius*dlat[0]`` at the south face) and the
+    # rebuild's ``mode='edge'`` pad repeats one cell instead of spanning the
+    # wrap.  They differ by 4.2e-03 on those two rows under the isotropic
+    # convention.  Taking the stored value there would be a silent change to a
+    # wrap row nothing has measured, so this follows the carve-out and the
+    # y-reentrant wrap row is REGISTERED, not decided here.
+    grid_dy_v = (grid.dy_v if reads_stored_vface_metric(grid) else None)
     if grid_dy_v is not None:
         dy_v = jnp.maximum(grid_dy_v, 1.0e-30)         # (n_lat+1, n_lon)
         bcast = (slice(None), slice(None)) + (jnp.newaxis,) * (f_diff.ndim - 2)

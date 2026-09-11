@@ -46,6 +46,7 @@ _GOOD = """
                END DO
                CLOSE(9201)
             ENDIF
+            ! ---- #1728 END matrix dump ----
 """
 #: The SAME block with the defect that failed the build restored.
 _BAD = _GOOD.replace("nzdfmat_kt >= 0 .AND. nzdfmat_kt <= nit000 + 1",
@@ -70,6 +71,22 @@ def test_the_defect_that_broke_the_build_is_refused():
     assert "tra_zdf_imp" in msg
 
 
+#: The block with a NESTED IF/ENDIF and a bogus symbol AFTER it.  The first
+#: version of BLOCK_RE stopped at the first ENDIF and never saw the symbol.
+_NESTED = _GOOD.replace("""               CLOSE(9201)""",
+"""               IF( narea == 1 ) THEN
+                  WRITE(9201) zwi(1,1)
+               ENDIF
+               CLOSE(9201)
+               IF( zz_bogus_1728 > 0 ) WRITE(9201) zwi(1,1)""")
+
+
+def test_a_symbol_after_a_nested_endif_is_still_checked():
+    with pytest.raises(SystemExit) as exc:
+        _run(_NESTED)
+    assert "zz_bogus_1728" in str(exc.value)
+
+
 def test_module_scope_names_are_not_vacuous():
     """The allowed set must really come from the compiled tree."""
     mod = _load()
@@ -79,3 +96,25 @@ def test_module_scope_names_are_not_vacuous():
     # `kt` is always a dummy argument, never a module variable -- that is the
     # whole discriminator, so assert it explicitly.
     assert "kt" not in names
+
+
+def test_the_allowed_set_is_this_file_s_use_closure_not_the_whole_tree():
+    """A module variable this file cannot reach must NOT be accepted.
+
+    The first version harvested every module-scope declaration in the compiled
+    tree (3340 names), so ``x`` -- a module variable in ``storng.f90``, which
+    ``trazdf`` does not USE at any depth -- passed a check gfortran rejects.
+    An independent review found it.
+    """
+    mod = _load()
+    src = _PPSRC.read_text(errors="replace")
+    closure = mod.module_scope_names(_PPSRC.parent, seed_text=src)
+    whole = mod.module_scope_names(_PPSRC.parent)
+    assert len(closure) < len(whole), (len(closure), len(whole))
+    # still reachable, at one and two USE levels
+    assert {"jpi", "jpk", "narea", "nit000"} <= closure
+    assert "kt" not in closure
+    bogus = _GOOD.replace("nzdfmat_kt >= 0", "x >= 0")
+    with pytest.raises(SystemExit) as exc:
+        _run(bogus)
+    assert "'x'" in str(exc.value), str(exc.value)

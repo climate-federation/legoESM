@@ -81,6 +81,37 @@ def test_divides_by_the_carried_metric_exactly(isotropic):
         rebuilt[interior], diff[interior], rtol=1e-15, atol=0.0)
 
 
+def test_the_divisor_is_dy_v_and_not_a_lookalike(isotropic):
+    """Under the isotropic convention ``dx_v`` is BITWISE ``dy_v`` on the
+    interior -- that is what "isotropic" means -- so a test whose fixture is
+    only that geometry passes on an operator dividing by ``dx_v``.  An
+    independent review made exactly that substitution and all the other rows
+    stayed green.  This row uses a geometry where the candidates differ.
+    """
+    g = create_latlon_geometry(n_lat=60, n_lon=32,
+                               lat_1d=jnp.asarray(_mercator_lat()))
+    dy_v = np.asarray(g.dy_v)
+    for name in ("dx_v", "dy_u", "dx_u"):
+        other = np.asarray(getattr(g, name))
+        if other.shape != dy_v.shape:
+            continue                      # a different stagger cannot be it
+        assert not np.array_equal(other, dy_v), (
+            f"{name} is bitwise dy_v on this geometry too, so this row "
+            "cannot discriminate them either")
+    f = _field(g)
+    got = np.asarray(gradient_y_cgrid(f, g))
+    for name in ("dx_v",):
+        other = np.asarray(getattr(g, name))
+        if other.shape != dy_v.shape:
+            continue
+        wrong = np.asarray(gradient_y_cgrid(
+            f, g._replace(dy_v=jnp.asarray(other))))
+        moved = np.abs(got - wrong) / np.maximum(np.abs(got), 1e-300)
+        assert np.nanmax(moved[1:-1]) > 1e-6, (
+            f"dividing by {name} instead of dy_v changes nothing measurable, "
+            "so the operator's divisor is not pinned by these tests")
+
+
 def test_it_is_not_the_t_point_reconstruction(isotropic):
     """The revert control: the two divisors give measurably different answers
     on this geometry, so an operator that went back to the reconstruction
@@ -155,56 +186,107 @@ ISOTROPIC_SELECTORS = {
     "packages/ocean/legoesm/ocean/experiments/dino.py",
     # the NEMO bridge auto-detects it from a mesh whose e1t == e2t
     "packages/ocean/legoesm/ocean/fidelity/nemo_state_bridge.py",
+    # two #1226 probes read it from LEGOESM_METRIC_CONVENTION
+    "scripts/validate/ocean_fidelity/dino_1226/ldf_slp_per_element.py",
+    "scripts/validate/ocean_fidelity/dino_1226/sshnxt_divhor_canonical.py",
 }
+
+#: The environment variable those probes read.  A file that consults it is a
+#: selector even though the literal never appears in its source.
+ISOTROPIC_ENV = "LEGOESM_METRIC_CONVENTION"
 
 
 def test_the_blast_radius_is_the_cards_we_named():
     """No card may join the isotropic convention silently.
 
-    The search is an AST walk, not a grep: prose mentions live INSIDE a
-    docstring's own string constant and comments are not in the tree at all,
-    so neither can be mistaken for a selection -- and ``==`` comparisons and
-    membership sets are excluded explicitly, because a grep for
-    ``= "nemo_isotropic"`` matches the second ``=`` of ``==`` and flagged
-    three implementation files that only VALIDATE the name.
+    The search is an AST walk over EVERY string constant with that value that
+    is not part of a comparison -- not a grep and not a match on assignment
+    forms.  An independent review fed the first version seven realistic
+    idioms (a positional argument, a list literal, an ``or``-default, a
+    ``setattr``, a ``dict.get`` default, a variable-built string) and it
+    missed all seven; it also scanned only ``packages/`` and ``src/`` while a
+    probe under ``scripts/`` selects the convention through an environment
+    variable.  Prose mentions live INSIDE a docstring's own constant and
+    comments are not in the tree at all, so neither can be mistaken for a
+    selection, and ``==``/membership tests are excluded explicitly.
     """
     import ast
     import pathlib
     root = pathlib.Path(__file__).resolve().parents[2]
+    files = []
+    for sub in ("packages", "src", "scripts"):
+        files += list((root / sub).rglob("*.py"))
     found = set()
-    for path in list((root / "packages").rglob("*.py")) + \
-            list((root / "src").rglob("*.py")):
+    for path in files:
         text = path.read_text(errors="replace")
+        rel = str(path.relative_to(root))
+        if ISOTROPIC_ENV in text:
+            try:
+                tree = ast.parse(text)
+            except SyntaxError:                            # pragma: no cover
+                tree = None
+            if tree is not None and any(
+                    isinstance(n, ast.Constant) and n.value == ISOTROPIC_ENV
+                    for n in ast.walk(tree)):
+                found.add(rel)
         if "nemo_isotropic" not in text:
             continue
         try:
             tree = ast.parse(text)
         except SyntaxError:                                # pragma: no cover
             continue
+        compared = set()
         for node in ast.walk(tree):
-            values = []
-            if isinstance(node, ast.Assign):
-                values = [node.value]
-            elif isinstance(node, ast.AnnAssign) and node.value is not None:
-                values = [node.value]
-            elif isinstance(node, ast.keyword):
-                values = [node.value]
-            elif isinstance(node, ast.Dict):
-                values = list(node.values)
-            elif isinstance(node, ast.Return) and node.value is not None:
-                # the NEMO bridge auto-detects the convention and RETURNS it
-                values = [node.value]
-            elif isinstance(node, ast.IfExp):
-                values = [node.body, node.orelse]
-            for v in values:
-                if (isinstance(v, ast.Constant)
-                        and v.value == "nemo_isotropic"):
-                    found.add(str(path.relative_to(root)))
+            if isinstance(node, ast.Compare):
+                for sub_node in ast.walk(node):
+                    compared.add(id(sub_node))
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Constant)
+                    and node.value == "nemo_isotropic"
+                    and id(node) not in compared):
+                found.add(rel)
     unexpected = found - ISOTROPIC_SELECTORS
     assert not unexpected, (
-        "these files now select metric_convention='nemo_isotropic' and were "
-        f"not in the named blast radius: {sorted(unexpected)}")
+        "these files now select metric_convention='nemo_isotropic' (or read "
+        f"{ISOTROPIC_ENV}) and were not in the named blast radius: "
+        f"{sorted(unexpected)}")
     missing = ISOTROPIC_SELECTORS - found
     assert not missing, (
         f"{sorted(missing)} no longer select it, so this test would not "
         "notice a new card either -- update the list deliberately")
+
+
+def test_the_blast_radius_walk_sees_the_idioms_a_review_fed_it():
+    """NON-VACUITY: the seven forms that got past the first version."""
+    import ast
+    src = """
+import os
+A = ["nemo_isotropic"]
+B = ("exact", "nemo_isotropic")
+def f(x):
+    return g(x, "nemo_isotropic")
+C = os.environ.get("X") or "nemo_isotropic"
+def h(o):
+    setattr(o, "metric_convention", "nemo_isotropic")
+D = {}.get("k", "nemo_isotropic")
+E = "nemo_" + "isotropic"
+def cmp(m):
+    return m == "nemo_isotropic"
+"""
+    tree = ast.parse(src)
+    compared = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Compare):
+            for sub_node in ast.walk(node):
+                compared.add(id(sub_node))
+    hits = [n for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and n.value == "nemo_isotropic"
+            and id(n) not in compared]
+    # six of the seven are literal constants outside a comparison; the
+    # variable-BUILT string ("nemo_" + "isotropic") is NOT one and is named
+    # here as the hole this walk still has.
+    assert len(hits) == 6, [ast.dump(h) for h in hits]
+    only_compare = [n for n in ast.walk(tree)
+                    if isinstance(n, ast.Constant)
+                    and n.value == "nemo_isotropic" and id(n) in compared]
+    assert len(only_compare) == 1, "the == form must be excluded, and only it"
