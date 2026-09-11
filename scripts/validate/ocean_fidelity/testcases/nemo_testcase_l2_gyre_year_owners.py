@@ -460,17 +460,28 @@ def forcing_gate(*, nemo_root: Path = YEAR_ROOT, seed: int = 0,
         # The forcing that CONSUMES this state is step kt = n+1's, and its
         # nyear is the one `day(n+1)` sets.  Within a year the two agree; the
         # gate asserts that rather than assuming it, and records ndastp.
+        # The forcing that CONSUMES the day-d restart is step d*6+1's.  At
+        # d = 360 that step lies PAST nn_itend and the run never takes it;
+        # the row is kept as a THIRTEENTH SAMPLE OF THE SEASONAL CLOCK (and
+        # is labelled so), not as a step of the scored trajectory.  Its nyear
+        # is the day-360 restart's, which is why the label says "clock".
         rows_kt = step + 1
-        cases.append((f"day{day:03d}_entering_kt{rows_kt}", rows_kt,
+        label = "clock" if step >= 2160 else "entering"
+        cases.append((f"day{day:03d}_{label}_kt{rows_kt}", rows_kt,
                       np.asarray(restart["T"])[..., 0],
                       np.asarray(restart["S"])[..., 0], nyear,
                       restart["path"]))
 
     for name, kt, ct, sa, nyear, source in cases:
+        # The plants perturb ONE arm.  legoESM's path has no nyear operand at
+        # all -- that is the point of the nyear plant -- so the nyear plant
+        # has to enter through the LITERAL arm, and the phase plant through
+        # the current one.  A first version computed use_nyear and then passed
+        # nyear, so the nyear plant was a dead variable and proved nothing.
         use_kt = kt + 1 if plant == "forcing-phase" else kt
         use_nyear = 2 if plant == "forcing-nyear" else nyear
         left = current(ct, sa, use_kt)
-        right = literal(ct, sa, kt, nyear)
+        right = literal(ct, sa, kt, use_nyear)
         row = {"case": name, "kt": kt, "nyear": nyear, "source": source,
                "ztime_hours": 4.0 * kt - (nyear - 1) * 24.0 * 360.0}
         for field in SBC_FIELDS:
