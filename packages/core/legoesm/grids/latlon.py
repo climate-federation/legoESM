@@ -1916,7 +1916,19 @@ def create_latlon_geometry(
         # ZONAL length of a v-face) via vface_zonal_cos_lat, and the
         # strain/stress adjoint pair + divergence/advection mass consistency
         # hold because every operator SHARES that metric, not because of its
-        # value.  dy_v is a different field and does not appear in either.
+        # value.  dy_v is a different field and does not enter EITHER of those
+        # two contracts.
+        #
+        # CORRECTED 2026-09-11 (#1728): the sentence used to end "and does not
+        # appear in either", which a reader takes as "dy_v reaches nothing".
+        # It does.  ``curl_vertex_cgrid`` has read it since #515, so it reaches
+        # the vorticity and, through ``vector_laplacian_cgrid``, the viscous
+        # chain; and ``gradient_y_cgrid`` now reads it too, which is what put
+        # NEMO's own e2v into the meridional pressure gradient (the kt=1
+        # frozen-forcing residual fell 8.4e-11 -> 1.7e-17 against NEMO's own
+        # dump).  Measured on the two contracts above and they hold: Laplacian
+        # self-adjointness and zero-net-source stay at <= 1.2e-15 under both
+        # conventions.
         dy_v = (radius * dlon) * cos_lat_v_1d[:, jnp.newaxis] \
             * jnp.ones((1, n_lon))
 
