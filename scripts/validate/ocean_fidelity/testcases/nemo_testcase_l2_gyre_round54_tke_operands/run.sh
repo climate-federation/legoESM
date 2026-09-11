@@ -8,9 +8,9 @@ set -euo pipefail
 export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:${PATH}
 readonly NEMO_ROOT=${NEMO_ROOT:-/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2}
 readonly SOURCE_CFG=GYRE_OMIP_L2_P3_SM_R46KT2
-readonly TARGET_CFG=GYRE_OMIP_L2_P3_SM_R56TKE
+readonly TARGET_CFG=GYRE_OMIP_L2_P3_SM_R58TKE
 readonly SOURCE_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round46/oracle_kt2_stage
-readonly TARGET_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round56/oracle_tke_operands
+readonly TARGET_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round58/oracle_tke_operands
 readonly FINAL_RESTART=GYRE_OMIP_L2_P3_00000010_restart.nc
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
