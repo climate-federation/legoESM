@@ -4171,6 +4171,34 @@ def _ice_state_spatial_shape(grid, app_grid_type):
         "ice-state spatial shape (supported: mpas, fesom, tripole, latlon).")
 
 
+def _resolve_ice_freezing(scheme, prognostic_sea_ice):
+    """Select the ocean-owned surface liquidus for prognostic ice only."""
+    from legoesm.ocean.eos import VALID_FREEZE_SCHEMES
+
+    if scheme is not None and scheme not in VALID_FREEZE_SCHEMES | {"nemo_teos10"}:
+        raise ValueError(f"Unknown prognostic ice freezing scheme: {scheme!r}")
+    if scheme is not None and not prognostic_sea_ice:
+        raise ValueError("--ice-freeze-scheme requires --prognostic-sea-ice")
+    return "constant" if scheme is None else scheme
+
+
+def _ice_freezing_temperature_K(surface_salinity, scheme):
+    """Surface boundary [K]; None preserves SeaIceConfig's fixed value.
+
+    Reuse ocean EOS functions without introducing an ice -> ocean package
+    dependency. nemo_teos10 expects absolute salinity; no SP/SA conversion is
+    inferred here. This is a surface evaluation, with no pressure correction.
+    """
+    from legoesm import constants
+    from legoesm.ocean.eos import freezing_point, nemo_eos_fzp
+
+    if scheme == "constant":
+        return None
+    if scheme == "nemo_teos10":
+        return constants.T_freeze + nemo_eos_fzp(surface_salinity)
+    return freezing_point(surface_salinity, scheme=scheme)
+
+
 def _resolve_ice_shortwave(scheme, prognostic_sea_ice, *,
                            sw_transmittance, transmittance_given=False):
     """Select existing bulk optics, refusing inactive explicit overrides.
@@ -5851,6 +5879,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "(Arctic-relevant: fresher shelf water freezes warmer). "
                         "Requires --freeze-floor and/or --ice-thermo (else no "
                         "consumer -> hard error).")
+    p.add_argument("--ice-freeze-scheme", default=None,
+                   choices=("constant", "linear_S", "unesco", "nemo_teos10"),
+                   help="Surface liquidus for --prognostic-sea-ice: omitted retains "
+                        "SeaIceConfig's constant; other choices use live ocean "
+                        "surface salinity. nemo_teos10 uses NEMO 5.0.1's CT/SA "
+                        "polynomial (input must be absolute salinity). Separate "
+                        "from --freeze-scheme, which controls ice surrogates.")
     p.add_argument("--ice-lead-freeze-source", type=str, default="nemo_qlead",
                    choices=["ice_skin", "nemo_qlead"],
                    help="SeaIceConfig.lead_freeze_source for --prognostic-sea-ice. "
@@ -6912,6 +6947,8 @@ def main() -> int:
     _require_prognostic_ice_for_itd_flags(
         args.ice_categories, args.ice_ridging, args.prognostic_sea_ice,
         ice_ridging_closing_scheme=args.ice_ridging_closing_scheme)
+    _ice_freeze_scheme = _resolve_ice_freezing(
+        args.ice_freeze_scheme, args.prognostic_sea_ice)
     _ice_sw_scheme, _ice_sw_trans = _resolve_ice_shortwave(
         args.ice_shortwave, args.prognostic_sea_ice,
         sw_transmittance=args.ice_thermo_sw_trans,
@@ -9409,6 +9446,8 @@ def main() -> int:
             ice_state, ice_resp = step_sea_ice(
                 ice_state, atm_ice, sst_K, ocn_u, ocn_v,
                 ice_config, U_min=0.0, dt=dt, grid=grid,
+                ocean_freezing_temperature_K=_ice_freezing_temperature_K(
+                    jnp.asarray(state.S.data)[..., 0], _ice_freeze_scheme),
                 q_open_top=_q_open_top(sf, float(np.asarray(z_coord.dz_ref)[0])),
                 ocean_dz_top_m=float(np.asarray(z_coord.dz_ref)[0]))
             if args.ew_cyclic_overlap and app_grid_type == "tripole":

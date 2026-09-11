@@ -2948,7 +2948,13 @@ def nemo_eos_fzp(S_psu, depth_m=None):
     ``T_f(S, z) = S · P(√(S/S0)) − 7.53e-4 · z`` with the eosbn2.F90
     polynomial ``P``; ``depth_m`` positive down (``None`` = surface).
     """
-    zs = jnp.sqrt(jnp.abs(jnp.asarray(S_psu)) / _NEMO_FZP_S0)
+    # At S=0 the full S*P(sqrt(abs(S)/S0)) has derivative P(0), but
+    # differentiating the unguarded square root produces 0*inf -> NaN.
+    # Guard inside sqrt as well as outside; retain the exact forward value.
+    sal_abs = jnp.abs(jnp.asarray(S_psu))
+    nonzero = sal_abs > 0.0
+    zs = jnp.where(nonzero, jnp.sqrt(jnp.where(
+        nonzero, sal_abs / _NEMO_FZP_S0, 1.0)), 0.0)
     poly = ((((_NEMO_FZP_C5 * zs + _NEMO_FZP_C4) * zs + _NEMO_FZP_C3) * zs
              + _NEMO_FZP_C2) * zs + _NEMO_FZP_C1) * zs + _NEMO_FZP_C0
     tf = poly * jnp.asarray(S_psu)

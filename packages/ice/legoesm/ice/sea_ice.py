@@ -203,12 +203,19 @@ def step_sea_ice(
     *,
     q_open_top=None,
     ocean_dz_top_m=None,
+    ocean_freezing_temperature_K=None,
 ):
     """Step the sea ice model forward by dt seconds.
 
     ``q_open_top`` [W/m2 per OPEN-water area, + into ocean] and
     ``ocean_dz_top_m`` [m] feed ``SeaIceConfig.lead_freeze_source ==
     "nemo_qlead"`` (NEMO's lead heat budget); ignored under "ice_skin".
+
+    ``ocean_freezing_temperature_K`` is the ocean's surface liquidus [K], with
+    exactly the SST shape (no ice-category axis). None retains the configured
+    constant. The ocean/driver owns the EOS; ice consumes this boundary value
+    for basal conduction, turbulent ocean heat and lead formation together.
+    The freshwater surface melt point ``T_melt_surface`` is independent.
 
     Dispatches to slab or dynamic model based on config.
 
@@ -236,6 +243,12 @@ def step_sea_ice(
     new_state : SeaIceState or DynamicSeaIceState
     response : TileResponse
     """
+    if ocean_freezing_temperature_K is not None:
+        liquidus = jnp.asarray(ocean_freezing_temperature_K)
+        if liquidus.shape != jnp.shape(ocean_sst):
+            raise ValueError("ocean_freezing_temperature_K must have the ocean SST shape")
+        config = config._replace(T_freeze_ocean=liquidus)
+
     # Validate: dynamics literal + grid requirement
     if config.dynamics not in ("none", "free_drift", "evp", "mevp"):
         raise ValueError(
