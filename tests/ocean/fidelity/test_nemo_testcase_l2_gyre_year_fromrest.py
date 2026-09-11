@@ -94,15 +94,54 @@ def test_group_constancy_assertion_can_fail(harness):
         harness.assert_perturbation_properties(broken, lat, wet)
 
 
-def test_the_scalar_floor_carries_no_extra_sqrt2(harness):
+def test_the_floor_carries_no_root_factor(harness):
     """The within-ensemble statistic is already a pairwise DIFFERENCE.
 
-    Two independent reviews of the preregistration caught a sqrt(2) applied on
-    top of it.  Pin it by source so it cannot creep back.
+    Two independent reviews caught a sqrt(2) applied on top of it, and a third
+    caught the FIRST fix: a grep for one exact spelling that `SQRT2 * floor`
+    would have walked past.  Check the property, not the spelling: the
+    module-level constant is gone.
+    """
+    assert not hasattr(harness, "SQRT" + "2")
+    assert "hypot" in HARNESS.read_text(), "the quadrature combination vanished"
+
+
+def test_ensemble_spread_is_the_max_over_pairs_and_propagates_nan(harness):
+    def prepared(values):
+        return [{"X": (value, None)} for value in values]
+
+    harness.SCALAR_ROWS = harness.SCALAR_ROWS  # documentational
+    rows = prepared([1.0, 2.0, 4.0, 8.0])
+    # _distance dispatches on membership in SCALAR_ROWS, so use a real one
+    name = harness.SCALAR_ROWS[0]
+    rows = [{name: (value, None)} for value in (1.0, 2.0, 4.0, 8.0)]
+    assert harness._ensemble_spread(rows, name) == 7.0
+    same = [{name: (3.0, None)} for _ in range(4)]
+    assert harness._ensemble_spread(same, name) == 0.0
+
+
+def test_distance_is_a_distance_for_fields_and_scalars(harness):
+    name = harness.SCALAR_ROWS[0]
+    assert harness._distance(name, 2.0, -3.0, None) == 5.0
+    wet = np.ones((1, 1, 2), dtype=bool)
+    a = np.array([[[1.0, 2.0]]])
+    b = np.array([[[1.0, 3.0]]])
+    assert abs(harness._distance("T3D", a, b, wet) - np.sqrt(0.5)) < 1e-12
+    assert harness._distance("T3D", a, a, wet) == 0.0
+    # and it is symmetric, which a difference-of-rms would not be
+    assert (harness._distance("T3D", a, b, wet)
+            == harness._distance("T3D", b, a, wet))
+
+
+def test_census_does_not_hide_a_non_finite_value(harness):
+    """The probe printed a finite-looking range for a half-infinite field.
+
+    That is the repo's own 'nanmax hides failures' rule biting inside the
+    probe written to catch exactly this, so pin the fix by source.
     """
     source = HARNESS.read_text()
-    needle = "floor" + " * " + "SQRT" + "2"
-    assert source.count(needle) == 0
+    assert "values[np.isfinite(values)]" not in source
+    assert "float(values.min()), float(values.max())" in source
 
 
 def test_depth_bands_partition_the_column_exactly_once(harness):

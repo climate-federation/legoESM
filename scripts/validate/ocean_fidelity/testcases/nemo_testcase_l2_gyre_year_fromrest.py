@@ -61,7 +61,6 @@ VERDICT_FACTOR = 2.0
 # estimate (dino_1226/floor90_ensemble.py:71), so a ratio inside this band is
 # reported as MARGINAL rather than as a verdict.
 MARGINAL_BAND = (0.5, 2.0)
-SQRT2 = float(np.sqrt(2.0))
 
 # Preregistered expectations, section 8.  Constants, not opinions.
 P1_FLOOR_360_MAX_K = 1.0e-3
@@ -440,6 +439,28 @@ def census(steps: int, *, every: int = 1, start: int = 1) -> int:
             print(f"STATUS ABORTED at step {kt} of {steps}")
             return 1
         cells, nonfinite = [], []
+        # WHERE the peak TKE sits, not just how big it is.  An independent
+        # review identified the runaway as the explicit half of the
+        # dissipation split acting as a source, and predicted the peak would
+        # sit on the DEEPEST active interface; that prediction is only
+        # testable if the index is printed.  It also prints the implied
+        # mixing length L = sqrt(en)/dissl, because NEMO's `dissl` is the RATE
+        # sqrt(en)/L (zdftke.F90:717), not a length -- so L is already inside
+        # any census that carries both fields.
+        tke_field = getattr(state, "tke", None)
+        if tke_field is not None:
+            values = np.asarray(getattr(tke_field, "data", tke_field))
+            flat = int(np.nanargmax(np.where(np.isfinite(values), values, -np.inf)))
+            index = np.unravel_index(flat, values.shape)
+            peak = float(values[index])
+            dissl = getattr(state, "tke_dissl", None)
+            length = float("nan")
+            if dissl is not None:
+                rate = float(np.asarray(getattr(dissl, "data", dissl))[index])
+                if rate > 0.0 and peak > 0.0:
+                    length = float(np.sqrt(peak) / rate)
+            cells.append("argmax_tke(j=%d,i=%d,k=%d)=%.3e L=%.4f"
+                         % (index[0], index[1], index[2], peak, length))
         for name in CENSUS_FIELDS:
             field = getattr(state, name, None)
             if field is None:
@@ -450,9 +471,14 @@ def census(steps: int, *, every: int = 1, start: int = 1) -> int:
             bad = int(np.count_nonzero(~np.isfinite(values)))
             if bad:
                 nonfinite.append((name, bad))
-            finite = values[np.isfinite(values)]
-            lo = float(finite.min()) if finite.size else float("nan")
-            hi = float(finite.max()) if finite.size else float("nan")
+            # RAW min/max, so an `inf` PRINTS as inf.  The first version of
+            # this line reduced over the finite subset only and so printed a
+            # healthy-looking range for a half-infinite field -- the repo's
+            # own "nanmax hides failures" rule, in its subtlest form, inside
+            # the probe written to catch exactly this.  A test pins the fix by
+            # source, so the discarded spelling must not appear anywhere in
+            # this file, comments included.
+            lo, hi = float(values.min()), float(values.max())
             cells.append(f"{name}[{lo:.3e},{hi:.3e}]"
                          + (f"!NONFINITE{bad}" if bad else ""))
         if kt >= start and (kt % every == 0 or nonfinite):
@@ -564,16 +590,29 @@ def _load_nemo(root: Path, seed: int, day: int, nlev: int) -> dict:
                               dtype=np.float64).transpose(1, 2, 0)[..., :nlev]
 
         # restart.F90:176-182 writes 'tn'/'sn'/'un'/'vn'/'sshn' from the Kbb
-        # slot in the RK3 branch, and stprk3.F90:237 has already swapped
-        # Nbb <- Naa before rst_write at :280 -- so the file stamped kt=n is
-        # the state AFTER n completed steps, which is legoESM after n
-        # model.step calls.  Measured, not assumed: see the preregistration's
-        # section 0.
-        return {"T": xyz("tn"), "S": xyz("sn"), "u": xyz("un"),
-                "v": xyz("vn"),
-                "ssh": np.asarray(handle.variables["sshn"][0],
-                                  dtype=np.float64),
-                "path": str(matches[0]), "sha256": sha256(matches[0])}
+        # slot in the RK3 branch, and the swap Nbb <- Naa happens before
+        # rst_write in the step routine THIS CARD COMPILES --
+        # cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/MY_SRC/stprk3.F90:237 and :280.
+        # (The shipped src/OCE/stprk3.F90 is the same code at :213 and :256;
+        # a review read the shipped file and flagged the citation as off by
+        # 43 lines, which is exactly the offset between the two.  The card
+        # runs its MY_SRC copy, so that is the one cited.)
+        # So the file stamped kt=n is the state AFTER n completed steps, which
+        # is legoESM after n model.step calls.  Measured, not assumed: see the
+        # preregistration's section 0.
+        fields = {"T": xyz("tn"), "S": xyz("sn"), "u": xyz("un"),
+                  "v": xyz("vn"),
+                  "ssh": np.asarray(handle.variables["sshn"][0],
+                                    dtype=np.float64)}
+        # legoESM's own snapshots are checked for finiteness as they are
+        # written; NEMO's were not checked at all, so a blown-up oracle member
+        # would have entered the floor as a plausible number.
+        for name, values in fields.items():
+            require(bool(np.all(np.isfinite(values))),
+                    f"{matches[0]}: NEMO field {name} is not finite "
+                    f"({int(np.count_nonzero(~np.isfinite(values)))} cells)")
+        fields.update({"path": str(matches[0]), "sha256": sha256(matches[0])})
+        return fields
 
 
 def _ensemble_spread(prepared: list[dict], row: str) -> float:
@@ -673,20 +712,40 @@ def score(root: Path, *, phase0_only: bool, mesh_path: Path = DEFAULT_NEMO_MESH,
                 across = [_distance(row, left[row][0], right[row][0],
                                     left[row][1])
                           for left in lego_p for right in nemo_p]
-                ratio = gap / (VERDICT_FACTOR * floor) if floor > 0 else np.inf
-                if not np.isfinite(ratio):
-                    verdict = "UNMEASURED_ZERO_FLOOR"
-                elif MARGINAL_BAND[0] <= ratio <= MARGINAL_BAND[1]:
-                    verdict = "MARGINAL"
-                elif ratio <= 1.0:
-                    verdict = "INDISTINGUISHABLE"
-                else:
-                    verdict = "DISTINGUISHABLE"
+                # LIKE FOR LIKE.  The floor is the MAX over six within-model
+                # pairs; scoring a SINGLE control-vs-control pair against it
+                # compares an extreme of six with one draw and inflates the
+                # floor by roughly 2x, biasing every row toward
+                # INDISTINGUISHABLE.  An independent review of this diff
+                # caught it.  The headline ratio therefore uses the max over
+                # the sixteen cross-model pairs, the same order statistic as
+                # the floor; the control-vs-control ratio is reported beside
+                # it and never silently replaces it.
+                gap_max = float(np.max(across))
+
+                def classify(numerator):
+                    if floor <= 0.0 or not np.isfinite(floor):
+                        return float("inf"), "UNMEASURED_ZERO_FLOOR"
+                    value = numerator / (VERDICT_FACTOR * floor)
+                    if not np.isfinite(value):
+                        return value, "UNMEASURED_NONFINITE"
+                    if MARGINAL_BAND[0] <= value <= MARGINAL_BAND[1]:
+                        return value, "MARGINAL"
+                    return value, ("INDISTINGUISHABLE" if value <= 1.0
+                                   else "DISTINGUISHABLE")
+
+                ratio, verdict = classify(gap_max)
+                ratio_control, verdict_control = classify(gap)
                 record.update({
-                    "gap": gap,
+                    "gap_control_pair": gap,
+                    "gap_max_across_pairs": gap_max,
                     "pooled_across_min": float(np.min(across)),
-                    "pooled_across_max": float(np.max(across)),
+                    "pooled_across_max": gap_max,
                     "ratio_gap_over_2floor": float(ratio),
+                    "statistic": ("max over 16 cross-model pairs vs max over "
+                                  "6 within-model pairs (like for like)"),
+                    "ratio_control_pair_over_2floor": float(ratio_control),
+                    "verdict_control_pair": verdict_control,
                     "verdict": verdict,
                 })
             entry["days"][str(day)] = record
@@ -787,7 +846,8 @@ def _expectations(rows: dict, *, phase0_only: bool, repro: dict) -> dict:
     }
     if phase0_only:
         return out
-    gaps = {day: temperature[day]["gap"] for day in temperature}
+    gaps = {day: temperature[day]["gap_max_across_pairs"]
+            for day in temperature}
     lo, hi = min(gaps.values()), max(gaps.values())
     out["P3_gap_band"] = {
         "min_over_days": lo, "max_over_days": hi,
@@ -975,15 +1035,30 @@ def self_check() -> int:
 
     # the verdict rule and its marginal band
     assert MARGINAL_BAND[0] < 1.0 < MARGINAL_BAND[1]
-    # no sqrt(2) is applied anywhere: the within-ensemble statistic is
-    # already a pairwise DIFFERENCE, so the single-run-std conversion
-    # factor does not apply.  Checked by grep so it cannot creep back.
+    # No square-root factor is applied to the floor anywhere: the
+    # within-ensemble statistic is already a pairwise DIFFERENCE, so the
+    # single-run-std conversion factor does not apply.  An earlier version of
+    # this check grepped for one exact spelling and would have walked past the
+    # others -- and, twice, matched the very line that named it.  Two
+    # non-self-referential properties instead: the module-level constant is
+    # GONE, and no executable line multiplies a floor by a root.
+    import sys as _sys
     source = Path(__file__).read_text()
-    # Built at runtime so this line does not contain its own needle -- a
-    # log/source scraper that matches the text it emits can never fire.
-    needle = "floor" + " * " + "SQRT" + "2"
-    assert source.count(needle) == 0, (
-        "the sqrt(2) double-count is back (only this check may name it)")
+    assert not hasattr(_sys.modules[__name__], "SQRT" + "2"), (
+        "the square-root constant is back; the pairwise floor does not take one")
+    import re as _re
+    multiply = _re.compile(
+        r"(floor\s*=[^=].*sqrt)|(sqrt[^)]*\)\s*\*\s*floor)|(floor\s*\*[^=]*sqrt)",
+        _re.I)
+    offenders = [line for line in source.splitlines()
+                 if multiply.search(line) and "hypot" not in line
+                 and not line.lstrip().startswith("#")
+                 and "selfcheck-probe" not in line]
+    assert not offenders, f"a root factor is applied to the floor: {offenders}"
+    # The check must be able to FAIL -- a grep that matches nothing by
+    # construction is the defect it exists to prevent.
+    assert multiply.search("floor = floor * np.sqrt(2.0)")  # selfcheck-probe
+    assert not multiply.search("floor = np.hypot(a, b)")     # selfcheck-probe
     print("SELF-CHECK OK: Fortran NINT, seed-0 no-op, three assertions each "
           "shown to fail on a synthetic violation, 2160-step year, rms is a "
           "distance, signed PSI in Sv, depth bands partition the column, "
@@ -1059,6 +1134,15 @@ def main(argv=None) -> int:
     if args.score_phase0 and not report["vacuity_gate"]["phase1_may_run"]:
         print("STATUS VACUOUS (the floor is zero somewhere; PHASE 1 refused)")
         return 1
+    if args.score:
+        print("\nday-360 verdict, EVERY scored row (only T3D gates P1-P5):")
+        for name in sorted(report["rows"]):
+            last = report["rows"][name]["days"][str(YEAR_DAYS)]
+            print(f"  {name:<12s} {report['rows'][name]['unit']:<6s} "
+                  f"gap={last['gap_max_across_pairs']:.6e} "
+                  f"floor={last['floor']:.6e} "
+                  f"ratio={last['ratio_gap_over_2floor']:.4f} "
+                  f"{last['verdict']}")
     if failures:
         print("STATUS REFUTED " + " ".join(failures))
         return 1

@@ -60,12 +60,18 @@ first output.
 
 That pre-measurement also **pins the restart's time level** (Rule 1d), which
 this round's whole comparator depends on.  `restart.F90:176-182` writes
-`'tn' <- ts(:,:,:,jp_tem,Kbb)` in the RK3 branch, and `stprk3.F90:237` swaps
-`Nbb <- Naa` at line 237 while `rst_write` is called at line 280 — so the
+`'tn' <- ts(:,:,:,jp_tem,Kbb)` in the RK3 branch, and the swap `Nbb <- Naa`
+happens before `rst_write` in the step routine THIS CARD COMPILES --
+`cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/MY_SRC/stprk3.F90:237` and `:280`.  (The
+shipped `src/OCE/stprk3.F90` is the same code at `:213` and `:256`; a review
+read the shipped file and flagged this citation as off by 43 lines, which is
+exactly the offset between the two.  The card runs its MY_SRC copy.)  So the
 restart stamped `kt=n` holds the state **after n completed steps**, which is
-legoESM after n `model.step` calls.  Confirmed by the agreement above; the
-alternative mapping (after n-1 steps) would have disagreed by a whole step's
-tendency, which at kt=10 is ~1e-3 K and would have been unmistakable.
+legoESM after n `model.step` calls.  The CODE READING is the evidence; the
+numerical agreement above only corroborates it, and weakly -- one step's
+tendency at kt=10 is ~1e-3 K against a 2.8e-3 K gap, a factor of about two, so
+the alternative mapping would NOT have been unmistakable.  An earlier draft
+called it unmistakable; that overstated it, and a review said so.
 
 **So GYRE's entering condition is nothing like DINO's.**  After FORTY HOURS the
 two models already differ by 2.8e-3 K rms — the size of DINO's gap after a
