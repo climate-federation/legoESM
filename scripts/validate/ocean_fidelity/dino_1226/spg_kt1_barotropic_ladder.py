@@ -595,14 +595,36 @@ def substep_ladder(subs, tr, n_loop, twet, uwet, vwet, plant=False):
         # this function's own docstring claimed and did not enforce.
         _per0, _, _, _ = substep_ladder(subs, tr, n_loop, twet, uwet,
                                         vwet, plant=False)
-        plant = next((((i + 1), k) for i in range(len(_per0))
-                      for k, _, _ in _ROWS if _per0[i][k][0] == 0), None)
+        # Prefer an AT-BAR row that has a NONZERO cell to plant into.
+        # nextafter(0.0) is 4.94e-324, so a plant into an all-zero field
+        # proves only that subnormals are distinguishable -- the same
+        # objection the calibration plant already answers.  From rest the
+        # first few rows ARE all zero, so this is not hypothetical.
+        _cands = [((i + 1), k) for i in range(len(_per0))
+                  for k, _, _ in _ROWS if _per0[i][k][0] == 0]
+
+        def _has_nonzero(sub, slot):
+            mk = dict((k, m) for k, _, m in _ROWS)[slot]
+            a = np.asarray(tr[slot][sub - 1])
+            a = a[:, 1:] if mk == "u" else (a[1:, :] if mk == "v" else a)
+            return bool((a[masks[mk]] != 0.0).any())
+
+        _nzc = next((c for c in _cands if _has_nonzero(*c)), None)
+        plant = _nzc if _nzc is not None else (_cands[0] if _cands else None)
         if plant is None:
             raise SystemExit(
                 "--plant found no row at 0 cells to plant into; every row is "
                 "already DEBT, so a plant here would prove nothing")
         print(f"  PLANT: 1 ulp into substep {plant[0]} row {plant[1]!r}, "
               "which is AT BAR without it")
+        if _nzc is None:
+            print("    that row is IDENTICALLY ZERO -- from rest every row "
+                  "that is still at the bar is, because the first substep "
+                  "has not moved anything yet and every later substep is "
+                  "already DEBT.  So the plant is nextafter(0.0) = 4.94e-324 "
+                  "and it proves the weaker statement that a subnormal is "
+                  "visible.  The calibration's own plant (--plant-reader) is "
+                  "the one that moves a live value, and it does.")
     n = min(len(subs), int(n_loop))
     # A COUNT MISMATCH IS A FINDING, NOT A SLICE.  If legoESM runs a different
     # number of substeps than NEMO, min() would quietly score the overlap and

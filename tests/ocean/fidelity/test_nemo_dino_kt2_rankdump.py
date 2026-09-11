@@ -406,3 +406,28 @@ def test_substep_ladder_plants_into_a_row_that_is_at_bar():
                                           plant=True)
     assert first is not None, "the plant did not make any row unequal"
     assert per[first[0] - 1][first[1]][0] == 1
+
+
+def test_plant_prefers_a_row_with_a_nonzero_value():
+    # nextafter(0.0) = 4.94e-324, so a plant into an all-zero field proves
+    # only that a subnormal is distinguishable.  The selector must prefer a
+    # row that carries a live value -- and must still pick SOMETHING when
+    # every at-bar row is zero, which is the case on the real from-rest
+    # record and is why the gate says so out loud there.
+    lad, subs = _fake_record()
+    tr = _trace_for(subs)
+    m = np.ones((3, 5), bool)
+    per, first, _, _ = lad.substep_ladder(subs, tr, len(subs), m, m, m,
+                                          plant=True)
+    assert first is not None
+    # the planted row's residual is one ulp of a LIVE value, not a subnormal
+    assert per[first[0] - 1][first[1]][1] > 1e-300
+
+    # all-zero trace and record: every row is at bar and every row is zero;
+    # the selector must fall back rather than raise.
+    zsubs = [{k: np.zeros((3, 5)) for k in s0} for s0 in subs]
+    ztr = _trace_for(zsubs)
+    per0, first0, _, _ = lad.substep_ladder(zsubs, ztr, len(zsubs),
+                                            m, m, m, plant=True)
+    assert first0 is not None
+    assert per0[first0[0] - 1][first0[1]][0] == 1
