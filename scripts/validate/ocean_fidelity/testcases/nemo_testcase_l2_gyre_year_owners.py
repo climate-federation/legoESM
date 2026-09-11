@@ -975,17 +975,24 @@ def equal_input_step(kt: int, *, entry_root: Path = DEFAULT_ENTRY_ROOT,
         # two arms would be identical and the measurement would be vacuous.
         seeded = free_entry
     seeded_b = seeded
+    moved_barotropic = {}
     for name, values in (("uu_b", frames["uu_b"]), ("vv_b", frames["vv_b"])):
         field = getattr(seeded_b, name)
         require(field is not None, f"the card carries no {name}")
         current = np.array(field.data, dtype=np.float64, copy=True)
         reference = np.asarray(values, dtype=np.float64)
+        before = np.array(current, copy=True)
         if name == "uu_b":
             current[:, 1:] = np.where(masks["u"][..., 0], reference,
                                       current[:, 1:])
         else:
             current[1:, :] = np.where(masks["v"][..., 0], reference,
                                       current[1:, :])
+        # The barotropic arm exists to see whether the prognostic pair carries
+        # the difference.  If the reseed writes nothing, "the arm changed
+        # nothing" is a statement about the harness, not about the physics --
+        # so the size of the write is MEASURED and reported next to the arm.
+        moved_barotropic[name] = float(np.max(np.abs(current - before)))
         seeded_b = seeded_b._replace(
             **{name: field.replace(data=jnp.asarray(current))})
 
@@ -1016,14 +1023,17 @@ def equal_input_step(kt: int, *, entry_root: Path = DEFAULT_ENTRY_ROOT,
     require(max(moved.values()) > 0.0,
             "the reseed changed NOTHING, so the equal-input arm is the free "
             "run under another name and measures nothing")
-    report = {"format": "gyre-year-owners-equal-input-v1", "case": CASE,
+    report = {"format": "gyre-year-owners-equal-input-v2", "case": CASE,
               "kt": kt, "plant": plant, "entry_root": str(entry_root),
-              "reseed_moved_input_by": moved, "arms": rows,
+              "reseed_moved_input_by": moved,
+              "reseed_moved_barotropic_by": moved_barotropic, "arms": rows,
               "worktree": worktree_stamp()}
     print(f"\nEQUAL-INPUT STEP {kt}: does the step CREATE the difference or "
           f"AMPLIFY the one it is handed?")
-    print(f"  the reseed moved the INPUT by: "
+    print(f"  the reseed moved the 3-D INPUT by: "
           + "  ".join(f"{n} {moved[n]:.4e}" for n in FIELDS))
+    print(f"  the reseed moved the BAROTROPIC pair by: "
+          + "  ".join(f"{n} {v:.4e}" for n, v in moved_barotropic.items()))
     print(f"  {'arm':>32s}" + "".join(f"{f'rms {n}':>14s}" for n in FIELDS))
     for arm, row in rows.items():
         print(f"  {arm:>32s}"
