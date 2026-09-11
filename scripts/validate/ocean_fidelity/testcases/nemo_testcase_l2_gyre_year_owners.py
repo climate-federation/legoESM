@@ -84,8 +84,14 @@ FIELDS = ("T", "S", "u", "v", "ssh")
 # forcing object carries their materialized SUM, so "q_net" is the row the
 # model actually consumes; sw_down pins qsr beside it, and the two together
 # pin qns without inventing a difference of rounded sums.
-SBC_FIELDS = ("qsr", "q_net", "emp", "utau", "vtau",
-              "utau_roundtrip", "vtau_roundtrip")
+SBC_FIELDS = ("qsr", "q_net", "emp", "utau", "vtau")
+# The geographic stress rotation cannot be a BIT-EXACT row: recovering the
+# native pair from tau_x/tau_y in binary64 costs about 1e-17 Pa because
+# cos^2 + sin^2 is not exactly 1.  So it is scored as a DISCRIMINATION instead
+# -- how much further from the literal a TRANSPOSED pair lands than the
+# identity does.  Self-calibrating, no absolute tolerance, and it cannot pass
+# vacuously on a domain where the two are indistinguishable.
+ROTATION_ROUNDTRIP_MIN_RATIO = 1.0e6
 
 
 class GateError(RuntimeError):
@@ -493,7 +499,9 @@ def forcing_gate(*, nemo_root: Path = YEAR_ROOT, seed: int = 0,
                 "utau": np.asarray(surface.tau_i_native, dtype=np.float64),
                 "vtau": np.asarray(surface.tau_j_native, dtype=np.float64),
                 "utau_roundtrip": -(cos_u * tau_x + sin_u * tau_y),
-                "vtau_roundtrip": sin_u * tau_x - cos_u * tau_y}
+                "vtau_roundtrip": sin_u * tau_x - cos_u * tau_y,
+                "utau_roundtrip_transposed": -(cos_u * tau_y + sin_u * tau_x),
+                "vtau_roundtrip_transposed": sin_u * tau_y - cos_u * tau_x}
 
     def literal(surface_ct, surface_sa, kt, nyear):
         ct = np.asarray(surface_ct, dtype=np.float64)
@@ -502,8 +510,6 @@ def forcing_gate(*, nemo_root: Path = YEAR_ROOT, seed: int = 0,
         fields, _sites = r16._literal_sbc(
             lat, wet2, ct, pt, kt=kt, nyear=nyear,
             qsr_pi=(3.141592653589793 if plant == "forcing-qsr-pi" else None))
-        fields["utau_roundtrip"] = fields["utau"]
-        fields["vtau_roundtrip"] = fields["vtau"]
         # phase3_gate.py:673 materializes q_net = nemo_source_round(qns + qsr).
         # In fp64 that round is the identity, so the literal arm forms the same
         # binary64 sum rather than a difference of rounded sums, which would
@@ -567,7 +573,30 @@ def forcing_gate(*, nemo_root: Path = YEAR_ROOT, seed: int = 0,
                 "exact": unequal == 0,
                 "field_max_abs": float(np.max(np.abs(b[wet2]))),
             }
-        row["exact"] = all(row[f]["exact"] for f in SBC_FIELDS)
+        # THE ROTATION ROUND TRIP.  The five rows above pin the native pair
+        # the model receives; they do NOT pin the geographic pair the shared
+        # forcing object carries, which is where a transposition or a sign
+        # error would live -- and an independent review proved that by
+        # planting one and watching the five rows stay bit-exact.
+        rotation = {}
+        for native, recovered in (("utau", "utau_roundtrip"),
+                                  ("vtau", "vtau_roundtrip")):
+            reference = np.asarray(right[native], dtype=np.float64)
+            identity = float(np.max(np.abs(
+                (np.asarray(left[recovered]) - reference)[wet2])))
+            transposed = float(np.max(np.abs(
+                (np.asarray(left[f"{recovered}_transposed"])
+                 - reference)[wet2])))
+            ratio = (transposed / identity if identity > 0.0
+                     else float("inf"))
+            rotation[native] = {
+                "identity_max_abs": identity,
+                "transposed_max_abs": transposed,
+                "ratio": ratio,
+                "discriminates": ratio >= ROTATION_ROUNDTRIP_MIN_RATIO}
+        row["rotation_roundtrip"] = rotation
+        row["exact"] = (all(row[f]["exact"] for f in SBC_FIELDS)
+                        and all(r["discriminates"] for r in rotation.values()))
         rows.append(row)
 
     exact = all(row["exact"] for row in rows)
@@ -585,6 +614,21 @@ def forcing_gate(*, nemo_root: Path = YEAR_ROOT, seed: int = 0,
                         for f in SBC_FIELDS)
               + ("   BIT-EXACT" if row["exact"] else "   DEBT"))
     print(f"  ALL BIT-EXACT: {exact}")
+    print(f"\n  THE GEOGRAPHIC STRESS ROTATION -- the five rows above are the "
+          f"NATIVE pair the\n  model receives; this is the ROTATED pair it "
+          f"also carries.  Recovering the\n  native pair from it costs ~1e-17 "
+          f"Pa in binary64, so the row is scored by\n  how much further a "
+          f"TRANSPOSED pair lands, not by bit equality.")
+    print(f"  {'case':>26s}{'component':>11s}{'identity':>13s}"
+          f"{'transposed':>13s}{'ratio':>13s}   verdict")
+    for row in rows:
+        for native, entry in row["rotation_roundtrip"].items():
+            print(f"  {row['case']:>26s}{native:>11s}"
+                  f"{entry['identity_max_abs']:>13.4e}"
+                  f"{entry['transposed_max_abs']:>13.4e}"
+                  f"{entry['ratio']:>13.4e}"
+                  + ("   DISCRIMINATES" if entry["discriminates"]
+                     else "   BLIND"))
     if not exact:
         worst = max((row[f]["max_abs"], row["case"], f)
                     for row in rows for f in SBC_FIELDS)
