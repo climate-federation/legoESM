@@ -14,8 +14,10 @@ CPU, fp64, `PrecisionPolicy.fp64(transcendentals="libm")`, `JAX_ENABLE_X64=1`.
 ## VERDICT
 
 **The GYRE year's model-model gap is created in STEP 2.  The largest
-single-step amplification anywhere in the following 2158 steps is `9.3`; step
-2's is `2.0e+11`.**
+single-step amplification anywhere in the following 2158 RESOLVED steps is
+`9.3`; step 2's is `2.0e+11` on temperature.**  ("Resolved" is steps 3-60: the
+oracle's per-step record stops at step 60, so the shape between day 10 and day
+360 is known only from the day-30 and day-360 points.)
 
 Wet-cell rms differences, legoESM against NEMO's own per-step record:
 
@@ -60,12 +62,14 @@ Three consequences, all of which change what the campaign should do next.
    that the kt=2 error compounded over 180 steps is `2.4e-12` K against a
    measured day-30 gap of `1.4e-02` K, and concluded "the per-step error must
    GROW by orders as the flow spins up".  It does not grow by orders over many
-   steps; it grows by eleven orders in ONE step and then amplifies by a few
-   percent per step.  The sentence "closing the remaining kt=2 DEBT rows cannot
-   be assumed to close the year" is too weak in one direction and too strong in
-   the other: closing those two rows is not sufficient (they are `3e-12` m/s
-   and step 2's OUTPUT is off by `4e-04` K), but **the step-2 operators are
-   where the year's gap is made**, and no other step comes within ten orders.
+   steps; it grows by eleven orders in ONE step and then amplifies, over the
+   57 later steps this record resolves, by a geometric mean of `4.6 %` per
+   step.  The sentence "closing the remaining kt=2 DEBT rows cannot be assumed
+   to close the year" is too weak in one direction and too strong in the
+   other: closing those two rows is not sufficient (they are `3e-12` m/s and
+   step 2's OUTPUT is off by `4e-04` K), but **the step-2 operators are where
+   the year's gap is made** — step 2's multiplier exceeds the largest later
+   single-step multiplier by `6.7` orders on `u` and `11.0` orders on `T`.
 2. **The day-30 owner and the kt=2 owner are the same question.**  The kt=1..10
    ladder that rounds 8..50 of this branch have been walking is not a separate,
    smaller problem from the year.  It is the whole problem.
