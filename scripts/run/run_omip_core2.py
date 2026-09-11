@@ -94,6 +94,73 @@ _GM_KAPPA_MIN_DEFAULT = 200.0
 _GM_SLOPE_SCHEMES = ("triads", "centered", "nemo_iso_lap")
 _GM_BOLUS_FORMS = ("centred", "through_fct")
 
+# Dynamics equation of state (gap 10). The runner previously set none at all,
+# so every lane ran the LatLonCGridOceanConfig default, "wright".
+#
+# "nemo_teos10" is DELIBERATELY ABSENT from this tuple even though
+# legoesm.ocean.eos.make_eos_fn implements it, and _validate_omip_eos below
+# rejects it by name rather than letting it fall through as "unknown". NEMO
+# under ln_teos10 (ORCA1 namelist_cfg:308) sets l_useCT=.TRUE.
+# (eosbn2.F90:1924) and documents its salinity as "TEOS10: SA ... g/kg"
+# (eosbn2.F90:218): its PROGNOSTIC tracers are Conservative Temperature and
+# Absolute Salinity, and it converts nothing anywhere -- the input files are
+# pre-converted offline with GSW. Our prognostic tracers and WOA initial
+# condition are potential temperature and PRACTICAL salinity, so selecting
+# the TEOS-10 polynomial here without converting the state would feed SP into
+# an SA polynomial. That is a unit error, not a scheme choice, and shipping
+# it behind a flag would be shipping a bug with a knob.
+#
+# "unesco80" is refused for the SAME reason, found by both reviewers of this
+# change and then MEASURED rather than taken on their word: UNESCO 1980 is the
+# IN-SITU temperature standard (the potential-temperature refit is Jackett &
+# McDougall 1995, a different polynomial). Our unesco80_eos reproduces the
+# published in-situ check value rho(35, 25, 10000 dbar) = 1062.538 to 2e-4
+# kg/m3, which a theta-form could not, and its docstring claiming "Potential
+# temperature" was simply wrong (fixed in the same commit). Our tracers are
+# potential temperature, so selecting it would be the same class of unit error
+# as TEOS-10.
+#
+# nemo_eos80 and nemo_seos ARE safe here: NEMO's own EOS-80 check value is
+# quoted for POTENTIAL temperature -- "rho = 1028.35011066567 kg/m^3 for
+# z=3000 dbar, pt=3 Celsius, sp=35.5 psu" (eosbn2.F90:226) -- which is the
+# convention our tracers already carry.
+_OMIP_EOS_FORMS = ("wright", "nemo_eos80", "nemo_seos")
+
+# Named refusals: selectable in the EOS module, but wrong for THIS runner's
+# tracer conventions. Kept separate from "unknown" so a typo and a real unit
+# error never report the same way.
+_OMIP_EOS_REFUSED = {
+    "nemo_teos10": (
+        "NEMO runs TEOS-10 on Conservative Temperature and ABSOLUTE salinity "
+        "(g/kg), but this model's tracers and its WOA initial condition are "
+        "potential temperature and PRACTICAL salinity. Measured, the mismatch "
+        "is 0.13 kg/m3 in density and 0.47% in stratification (job 9709204)."),
+    "unesco80": (
+        "UNESCO 1980 is the IN-SITU temperature standard, but this model's "
+        "tracers are POTENTIAL temperature. Measured, our unesco80_eos "
+        "reproduces the published in-situ check value rho(35, 25, 10000 dbar) "
+        "= 1062.538 to 2e-4 kg/m3, so it is the in-situ polynomial and not a "
+        "theta refit (job 9715403)."),
+}
+
+
+def _validate_omip_eos(eos):
+    """Reject unknown EOS names, and any EOS whose tracer convention differs.
+
+    A refused EOS is named explicitly and explains the UNIT reason, so it can
+    never be mistaken for a typo and quietly added to the accepted tuple.
+    """
+    if eos is None:
+        return
+    if eos in _OMIP_EOS_REFUSED:
+        raise SystemExit(
+            f"--eos {eos} is refused: {_OMIP_EOS_REFUSED[eos]} Converting the "
+            "initial condition, the SSS restoring target and the surface "
+            "forcing is the remaining work; this is a correctness refusal.")
+    if eos not in _OMIP_EOS_FORMS:
+        raise SystemExit(
+            f"unknown --eos {eos!r}; expected one of {_OMIP_EOS_FORMS}")
+
 
 def build_sss_restoring_config(*, sss_restore_tau_days,
                                sss_restore_normalization=None,
@@ -1357,7 +1424,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
                   gm_kappa_min=_GM_KAPPA_MIN_DEFAULT,
                   gm_slope_scheme=None, gm_bolus_advection=None,
-                  gm_msc_stabilize=None,
+                  gm_msc_stabilize=None, eos=None,
                   redi_coefficient=None, redi_aht0=None, gm_slope_positions=None,
                   store_mass_flux=False, store_salt_flux=False):
     """Build the eORCA1 tripole grid + model + initial state with NEMO's mask/bathy.
@@ -1536,6 +1603,12 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
     # cold-start (see the same fix in build_latlon_bathy). Force it on uniformly so
     # the tripole matches latlon/mpas; the convection block below is then redundant.
     _ovr["implicit_vertical_mixing"] = True
+    # Dynamics EOS (gap 10). None leaves the config default untouched, so the
+    # production card is unaffected; _validate_omip_eos has already rejected
+    # anything unsupported, including TEOS-10 on unconverted tracers.
+    _validate_omip_eos(eos)
+    if eos is not None:
+        _ovr["eos"] = eos
     # Grid-agnostic convective adjustment (Oceananigans-style enhanced
     # vertical diffusivity where N^2 < 0) and/or the Fox-Kemper MLE
     # restratification.  The tripole base config ships physics=None; opting in
@@ -6677,6 +6750,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "--gm-slope-scheme nemo_iso_lap does NOT imply it: the "
                         "akz split is gated on this SEPARATE field, so a NEMO "
                         "operator match needs both.")
+    p.add_argument("--eos", choices=_OMIP_EOS_FORMS, default=None,
+                   help="Dynamics equation of state (tripole only). Unset "
+                        "keeps the config default 'wright', which is what "
+                        "every lane has always run. ORCA1 itself runs "
+                        "ln_teos10=.true., but 'nemo_teos10' is REFUSED here: "
+                        "NEMO's TEOS-10 branch takes Conservative Temperature "
+                        "and ABSOLUTE salinity while our tracers are "
+                        "potential temperature and PRACTICAL salinity, so "
+                        "selecting it without converting the state would be a "
+                        "unit error. See --help output of the refusal for the "
+                        "measured size. unesco80 is refused too: it is the IN-SITU "
+                        "polynomial, confirmed against its published check "
+                        "value.")
     p.add_argument("--gm-kappa-min", type=float, default=_GM_KAPPA_MIN_DEFAULT,
                    help="Floor on the Treguier kappa_GM [m^2/s] for "
                         "--gm-treguier. The NEMO tropical taper min(1,|f/f20|) "
@@ -7165,6 +7251,18 @@ def main() -> int:
                                     args.gm_bolus_advection),
                                    ("--gm-msc-stabilize",
                                     args.gm_msc_stabilize)) if v is not None]
+    # Same shape for --eos: it is read only inside build_tripole, so on any
+    # other grid it would be silently discarded. Codex's gap-10 survey found
+    # the other two lanes cannot honour it anyway -- the FESOM backend
+    # hardcodes Jackett-McDougall and the MPAS AHH08 pressure gradient
+    # requires Wright -- so this is a hard refusal, not a warning. Validate
+    # here as well as in build_tripole so a bad value fails before any mesh
+    # or forcing is touched.
+    _validate_omip_eos(args.eos)
+    if args.eos is not None and args.grid != "tripole":
+        raise SystemExit(
+            f"--eos is wired for --grid tripole only (the EOS override lives "
+            f"in build_tripole); got --grid {args.grid!r}.")
     if _gm_op_flags and args.grid != "tripole":
         raise SystemExit(
             f"{' and '.join(_gm_op_flags)} is wired for --grid tripole only "
@@ -7379,6 +7477,7 @@ def main() -> int:
             gm_slope_scheme=args.gm_slope_scheme,
             gm_bolus_advection=args.gm_bolus_advection,
             gm_msc_stabilize=args.gm_msc_stabilize,
+            eos=args.eos,
             store_mass_flux=bool(getattr(args, "gateway_transports",
                                          False)),
             store_salt_flux=bool(getattr(args, "gateway_transports",

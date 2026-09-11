@@ -1275,7 +1275,20 @@ def unesco80_eos(
     Parameters
     ----------
     T : array
-        Potential temperature [°C]. Valid range: -2 to 40 °C.
+        IN-SITU temperature [°C] (IPTS-68). Valid range: -2 to 40 °C.
+
+        This said "Potential temperature" until 2026-09-11 and that was
+        WRONG. UNESCO 1980 is the in-situ standard; the potential-temperature
+        refit is Jackett & McDougall 1995, a different polynomial. Measured
+        against the published in-situ check value
+        ``rho(S=35, T=25, p=10000 dbar) = 1062.538``, this function returns
+        1062.5382 -- agreement to 2e-4 kg/m³, which it could not achieve if
+        it were a θ-form. Every prognostic tracer in this package is
+        POTENTIAL temperature, so callers must convert with
+        :func:`potential_temperature`'s inverse before using this EOS;
+        feeding θ straight in leaves the deep ocean too dense by roughly the
+        adiabatic compression term. The OMIP runner refuses to select it for
+        exactly this reason (``_OMIP_EOS_FORMS``).
     S : array
         Practical salinity [PSU]. Valid range: 0 to 42 PSU.
     p : array
