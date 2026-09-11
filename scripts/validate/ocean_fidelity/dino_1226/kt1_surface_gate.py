@@ -1,0 +1,231 @@
+#!/usr/bin/env python
+"""The SURFACE row of the kt=1 step-1 residual, operator to operator.
+
+WHY.  The step-1 T residual (4.7912e-06 K rms) is essentially all SURFACE:
+level 0 carries 1.041e-08 K/s against 4.67e-10 below, and pooling over the
+levels reproduces the measured state residual.  The isoneutral operator is
+excluded (2.7 ulp), so the next owner is the surface heat application.
+
+WHAT NEMO DOES, as COMPILED (``cfgs/DINO/BLD/ppsrc/nemo/trasbc.f90``):
+
+  * ``sbc_tsc(:,:,jp_tem) = r1_rho0_rcp * qns``  -- NON-SOLAR heat only;
+    ``sbc_tsc(:,:,jp_sal) = r1_rho0 * sfx``      -- salt from freeze/melt.
+  * the concentration/dilution ``emp`` term is inside ``IF( lk_linssh )``.
+    DINO runs ``key_qco`` (non-linear free surface), so **emp never enters
+    tra_sbc on this card** -- and ``sfx`` is zero with no ice.
+  * the RHS update is
+    ``pts(:,:,1,jn,Krhs) += zfact*(sbc_tsc_b + sbc_tsc)
+                            / ( e3t_3d(ji,jj,1) * (1 + r3t(ji,jj,Kmm)*tmask) )``
+    -- the REFERENCE first thickness times the LIVE ``Kmm`` stretch, i.e. the
+    same step-entry height ``tra_ldf`` indexes.
+  * ``zfact = 1`` and ``sbc_tsc_b = 0`` on the no-restart Euler start, and
+    ``0.5`` with the swapped ``sbc_tsc_b`` afterwards.  So kt=1 applies the
+    WHOLE now-flux and every later step applies the two-step average --
+    another statement the from-rest record can see only half of.
+  * the SOLAR part is not here at all: ``tra_qsr`` applies it with the
+    ``fraqsr_1lev`` split, and its trend is ``ttrd_qsr``.
+
+SO THE FREE CROSS-CHECK (it is why this gate scores S first): salinity has no
+solar member, so ``strd_nsr`` is the WHOLE surface salt trend.  A residual
+there names the SHARED surface path; a residual only on T names the heat/solar
+side.
+
+RULE 10.  The tendency scored is the one the card's own applicator returns to
+the driver -- ``apply_dino_lat_lon_surface_forcing(..., return_rate=True)``,
+the exact object ``run_dino.py`` threads into ``model.step`` as
+``external_tracer_rate`` -- not a reconstruction.
+
+Usage
+-----
+    CUDA_VISIBLE_DEVICES=<uuid> JAX_PLATFORMS=cuda JAX_ENABLE_X64=1 \\
+      python scripts/validate/ocean_fidelity/dino_1226/kt1_surface_gate.py
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+import numpy as np
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(_HERE))
+sys.path.insert(0, _HERE)
+from rebuild_nemo_restart import rebuild                        # noqa: E402
+
+DT = 2700.0
+DEFAULT_RESTART = ("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/"
+                   "RUN_FROMREST_KT1/DINO_00000001_restart_*.nc")
+TRENDS = ("ttrd_nsr", "strd_nsr", "ttrd_qsr", "ttrd_dmp", "strd_dmp")
+OPERANDS = ("sbc_hc_b", "sbc_sc_b", "qsr_hc_b", "fraqsr_1lev", "emp_b",
+            "sfx_b", "qns_b")
+
+
+def _row(name, lego, nemo, wet):
+    d = np.abs(np.asarray(lego) - np.asarray(nemo))[wet]
+    n = int((d != 0.0).sum())
+    a, b = np.asarray(lego)[wet], np.asarray(nemo)[wet]
+    den = float(b @ b)
+    ratio = float(a @ b) / den if den else float("nan")
+    print(f"  {name:26s}{int(wet.sum()):>9d}{n:>9d}{d.max():13.4e}"
+          f"{float(np.sqrt(np.mean(d ** 2))):13.4e}"
+          f"{float(np.sqrt(np.mean(b ** 2))):13.4e}{ratio:13.9f}  "
+          f"{'AT BAR' if n == 0 else 'DEBT'}")
+    return 0 if n == 0 else 1
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--restart-glob", default=DEFAULT_RESTART)
+    ap.add_argument("--plant", action="store_true",
+                    help="move one wet level-0 rate cell by 1 ulp; the gate "
+                         "MUST then fail")
+    a = ap.parse_args()
+
+    R = rebuild(a.restart_glob, list(TRENDS) + list(OPERANDS))
+    missing = [k for k in TRENDS if k not in R]
+    if missing:
+        raise SystemExit(f"the restart carries no {missing}: ln_tra_trd off?")
+
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    set_policy(PrecisionPolicy.fp64())                          # Rule 1c
+    from legoesm.ocean.experiments import dino as dm
+    from legoesm.ocean.fidelity import nemo_dino_mesh as ndm
+    from legoesm import constants
+
+    cfg = dm.nemo_faithful_dino_config(
+        base=dm.dino_config_for_recipe("nemo_dino_kamm_mlf"))
+    grid = dm.dino_lat_lon_grid(cfg)
+    z = dm.dino_lat_lon_vertical(grid, cfg)
+    state0 = dm.dino_lat_lon_state(grid, z, cfg)
+    forcing = dm.dino_lat_lon_surface_forcing_arrays(grid, cfg)
+    _, rate = dm.apply_dino_lat_lon_surface_forcing(
+        state0, forcing, z, cfg, DT, t_seconds=DT, return_rate=True)
+    dT = np.asarray(rate[0], dtype=np.float64)
+    dS = np.asarray(rate[1], dtype=np.float64)
+    if a.plant:
+        dT = dT.copy()
+        dT[100, 25, 0] = np.nextafter(dT[100, 25, 0], np.inf)
+        print("PLANT ACTIVE: one wet level-0 T rate cell moved 1 ulp; the "
+              "gate MUST fail")
+
+    g = ndm.nemo_dino_mesh()
+    wet3 = g.tmask > 0.5
+
+    def O3(k):
+        return np.nan_to_num(np.moveaxis(R[k], 0, -1))
+
+    # What NEMO's own surface buckets contain, BEFORE anything is compared to
+    # them: a bucket that is identically zero is not evidence of agreement.
+    print("NEMO's surface trend buckets at kt=1 (wet rms, nonzero cells)")
+    for k in TRENDS:
+        v = O3(k)
+        print(f"  {k:12s} rms {float(np.sqrt(np.mean(v[wet3] ** 2))):11.4e}  "
+              f"nonzero {int((v[wet3] != 0).sum()):>8d}  "
+              f"level-0 rms "
+              f"{float(np.sqrt(np.mean(v[..., 0][wet3[..., 0]] ** 2))):11.4e}")
+    for k in OPERANDS:
+        if k in R:
+            v = np.nan_to_num(np.asarray(R[k]))
+            print(f"  {k:12s} |max| {np.abs(v).max():11.4e}  "
+                  f"nonzero {int((v != 0).sum()):>8d}")
+
+    print("\nlegoESM's surface tracer rate (the object run_dino threads into "
+          "model.step) vs NEMO's own trends")
+    print(f"  {'row':26s}{'cells':>9s}{'!=':>9s}{'max|d|':>13s}{'rms':>13s}"
+          f"{'NEMO rms':>13s}{'ratio':>13s}")
+    bad = 0
+    # SALINITY FIRST: no solar member, so strd_nsr is the whole surface salt
+    # trend and this row is about the SHARED path only.
+    bad += _row("S: rate vs strd_nsr", dS, O3("strd_nsr"), wet3)
+    bad += _row("S: level 0 only", dS[..., :1], O3("strd_nsr")[..., :1],
+                wet3[..., :1])
+    tot = O3("ttrd_nsr") + O3("ttrd_qsr")
+    bad += _row("T: rate vs nsr+qsr", dT, tot, wet3)
+    bad += _row("T: level 0 only", dT[..., :1], tot[..., :1], wet3[..., :1])
+    bad += _row("T: sub-surface only", dT[..., 1:], tot[..., 1:], wet3[..., 1:])
+    # and the two halves separately, so a split that is right in total but
+    # wrong per bucket is visible
+    _row("T: rate vs ttrd_nsr alone", dT, O3("ttrd_nsr"), wet3)
+    _row("T: rate vs ttrd_qsr alone", dT, O3("ttrd_qsr"), wet3)
+
+    # The OPERAND row: NEMO stores sbc_tsc itself.  trasbc.f90 sets
+    # sbc_tsc(jp_tem) = r1_rho0_rcp*qns, and at kt=1 (zfact=1, sbc_tsc_b=0)
+    # the applied level-0 trend is exactly sbc_tsc / (e3t_3d(:,:,1)*(1+r3t)).
+    # From rest eta = 0, so r3t = 0 and the divisor is the REFERENCE dz -- the
+    # one place legoESM's dz_ref[0] and NEMO's live height cannot disagree.
+    if "sbc_hc_b" in R:
+        e3t0 = float(np.asarray(z.dz_ref)[0])
+        implied = np.nan_to_num(np.asarray(R["sbc_hc_b"])) / e3t0
+        print(f"\n  NEMO's own stored sbc_hc_b / e3t(1)={e3t0:.9f} m, which "
+              "at kt=1 IS the level-0 non-solar trend (zfact=1, sbc_tsc_b=0):")
+        bad += _row("level 0: vs sbc_hc_b/e3t", dT[..., 0],
+                    implied, wet3[..., 0])
+        print(f"    implied qns = rho0*cp*sbc_hc_b: |max| "
+              f"{float(np.abs(np.nan_to_num(np.asarray(R['sbc_hc_b'])) * constants.rho_ocean_ref * 3991.86795711963).max()):.4e} W/m2"
+              if hasattr(constants, "rho_ocean_ref") else "")
+
+    # ---- THE STATEMENT, named and then CHECKED by arithmetic ------------
+    # legoESM builds the surface restoring with RestoringConfig(implicit=True)
+    # (dino.py:4674), whose denominator is (tau + dt).  NEMO's tra_sbc has no
+    # such damping: sbc_tsc = r1_rho0_rcp*qns with qns at the now level,
+    # divided once by the live top thickness (trasbc.f90, quoted above).  So
+    # legoESM's level-0 tendency must be SMALLER by exactly tau/(tau+dt).
+    #
+    # Salinity is the clean test: no solar member, so the whole row is the
+    # restoring.  If the measured S ratio equals tau_S/(tau_S+dt) the
+    # statement is identified; if it does not, this explanation is dead.
+    from legoesm.ocean.physics.surface_forcing.config import (
+        tau_from_flux_coefficient)
+    dz0 = float(np.asarray(z.dz_ref)[0])
+    tau_T = float(tau_from_flux_coefficient(cfg.A_theta, cfg.rho_0, cfg.c_p,
+                                            dz0))
+    tau_S = float(tau_from_flux_coefficient(cfg.A_S, cfg.rho_0, 1.0, dz0))
+    b_ = O3("strd_nsr")[..., 0][wet3[..., 0]]
+    a_ = dS[..., 0][wet3[..., 0]]
+    meas = float(a_ @ b_) / float(b_ @ b_)
+    pred = tau_S / (tau_S + DT)
+    print(f"\n  THE STATEMENT: RestoringConfig(implicit=True) -> denominator "
+          f"(tau + dt)   [dino.py:4674]")
+    print(f"    tau_S = rho_0*dz_0/A_S = {tau_S:.6e} s "
+          f"({tau_S / 86400.0:.4f} d),  dt = {DT} s")
+    print(f"    predicted S ratio tau_S/(tau_S+dt) = {pred:.9f}")
+    print(f"    MEASURED  S ratio                  = {meas:.9f}")
+    print(f"    difference = {abs(pred - meas):.3e}  -> "
+          + ("IDENTIFIED: the level-0 surface deficit IS the implicit "
+             "denominator" if abs(pred - meas) < 1e-6 else
+             "NOT identified: this explanation does not hold"))
+    print(f"    tau_T = rho_0*c_p*dz_0/A_theta = {tau_T:.6e} s "
+          f"({tau_T / 86400.0:.4f} d); tau_T/(tau_T+dt) = "
+          f"{tau_T / (tau_T + DT):.9f} -- the T row also carries the "
+          "undamped Q_sr penetration, so its ratio is a blend and only the "
+          "S row is a clean test of the statement.")
+
+    print("\n  per-level residual of the T row (where the surface residual "
+          "lives)")
+    res = dT - tot
+    for k in range(min(6, res.shape[-1])):
+        m = wet3[..., k]
+        print(f"    k={k:2d}  res rms "
+              f"{float(np.sqrt(np.mean(res[..., k][m] ** 2))):11.4e}  "
+              f"NEMO rms "
+              f"{float(np.sqrt(np.mean(tot[..., k][m] ** 2))):11.4e}")
+
+    # ---- does this statement ACCOUNT for the step-1 state residual? -----
+    # The step-1 gate measures 4.7912e-06 K rms over all wet cells.  If this
+    # rate residual is the whole story, integrating it over one step and
+    # pooling level 0 into the 3-D rms must reproduce that number.  Predicted
+    # BEFORE being compared, and it is a prediction that can fail.
+    STEP1_T_RMS_K = 4.7912e-06     # PR #1728, nemo_dino_step1_gate.py
+    pooled = float(np.sqrt(np.sum((res[wet3]) ** 2) / int(wet3.sum()))) * DT
+    print(f"\n  ACCOUNTING: this rate residual integrated over one step and "
+          f"pooled over all {int(wet3.sum())} wet cells is {pooled:.4e} K; "
+          f"the step-1 gate measures {STEP1_T_RMS_K:.4e} K "
+          f"(ratio {pooled / STEP1_T_RMS_K:.4f}).")
+
+    print(f"\n{'GATE PASS' if bad == 0 else f'GATE FAIL ({bad} rows)'}")
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

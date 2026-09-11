@@ -147,18 +147,45 @@ def stitch(run_dir: str, substep: int) -> dict:
     return out
 
 
-def twin_check(run_dir: str, reference: str) -> int:
+def restart_tiles(d: str, kt: int):
+    """The restart tiles for time step ``kt`` under ``d``."""
+    return sorted(glob.glob(os.path.join(
+        d, "DINO_%08d_restart_*.nc" % kt)))
+
+
+def restart_steps(d: str):
+    """Every ``kt`` for which ``d`` holds restart tiles."""
+    out = set()
+    for f in glob.glob(os.path.join(d, "DINO_*_restart_*.nc")):
+        tok = os.path.basename(f).split("_")
+        if len(tok) > 1 and tok[1].isdigit():
+            out.add(int(tok[1]))
+    return sorted(out)
+
+
+def twin_check(run_dir: str, reference: str, kt: int = 1) -> int:
     import netCDF4 as nc
     fatal = admitted = 0
-    pats = sorted(glob.glob(os.path.join(
-        run_dir, "DINO_00000001_restart_*.nc")))
+    pats = restart_tiles(run_dir, kt)
     if not pats:
-        raise SystemExit(f"no restart tiles under {run_dir}")
-    print(f"TWIN CHECK  {len(pats)} tiles, every variable, byte for byte")
+        have = restart_steps(run_dir)
+        raise SystemExit(
+            f"no kt={kt} restart tiles under {run_dir}; it holds restarts at "
+            f"{have or 'no step at all'}.\n"
+            "NEMO writes a restart only when MOD(kt-1, nn_stock) == 0 sets "
+            "nitrst and kt reaches it (restart.f90:112, :121), so a record "
+            "acquired with nn_stock = N carries ONLY the kt = N restart.  A "
+            "record whose kt=1 restart was never written cannot be "
+            "twin-checked at kt=1 -- use --record-check, which scores what "
+            "the record DOES contain and says what it does not prove.")
+    print(f"TWIN CHECK  {len(pats)} tiles at kt={kt}, every variable, byte "
+          "for byte")
     for p in pats:
         q = os.path.join(reference, os.path.basename(p))
         if not os.path.exists(q):
-            raise SystemExit(f"reference tile missing: {q}")
+            raise SystemExit(
+                f"reference tile missing: {q} (the reference has restarts at "
+                f"{restart_steps(reference)})")
         a, b = nc.Dataset(p), nc.Dataset(q)
         if set(a.variables) != set(b.variables):
             print(f"  FATAL {os.path.basename(p)}: variable sets differ")
@@ -191,18 +218,114 @@ def twin_check(run_dir: str, reference: str) -> int:
     return 0
 
 
+def _namelist_values(path: str) -> dict:
+    """Every ``key = value`` in a NEMO namelist, comments stripped."""
+    out = {}
+    for line in open(path):
+        line = line.split("!", 1)[0]
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        if k:
+            out[k] = v.strip().rstrip(",").strip()
+    return out
+
+
+def record_check(run_dir: str, reference: str, kt: int, allow) -> int:
+    """The post-check for a record whose kt is NOT the reference's.
+
+    ``twin_check`` proves a record is a twin by comparing the SAME restart in
+    both directories.  That is impossible for the kt=2 record: with
+    ``nn_stock = 2`` NEMO never writes a kt=1 restart (``restart.f90:112``
+    sets ``nitrst = kt + nn_stock - 1 = 2`` at kt=1 and ``:121`` writes only
+    at ``nitrst``), and the ``.bin`` debug streams cannot stand in for it --
+    every rank opens them under one filename with no rank in it
+    (``stpmlf.F90:737``), so their bytes are whichever rank closed last.
+    MEASURED: 117 of 170 of those streams differ between two records that are
+    identical by construction.
+
+    So this checks what the record CAN be held to, and prints what it cannot:
+
+      1. the kt restart is present and covers every rank in ``layout.dat``;
+      2. the namelist differs from the reference's ONLY in ``allow``.
+
+    What underwrites feeding the reference's kt=1 restart to the gate is then
+    a separate, MEASURED fact: two independent runs of this configuration
+    wrote bit-identical kt=1 restarts (``--twin-check`` on the kt=1 slopes
+    record against ``RUN_FROMREST_KT1``: 16 tiles, every variable, 0 fatal,
+    0 admitted).  Determinism, not assumption.
+    """
+    tiles = restart_tiles(run_dir, kt)
+    if not tiles:
+        raise SystemExit(
+            f"no kt={kt} restart tiles under {run_dir}; it holds restarts at "
+            f"{restart_steps(run_dir) or 'no step at all'}")
+    # NEMO's own rank count, read from the file rather than counted: the
+    # header line names jpnij and the next line carries it.
+    lay = os.path.join(run_dir, "layout.dat")
+    want = None
+    if os.path.exists(lay):
+        L = open(lay).read().splitlines()
+        for i, ln in enumerate(L):
+            if ln.split()[:1] == ["jpnij"] and i + 1 < len(L):
+                want = int(L[i + 1].split()[0])
+                break
+    print(f"RECORD CHECK  kt={kt}: {len(tiles)} restart tiles"
+          + (f", layout.dat lists {want} ranks" if want else ""))
+    bad = 0
+    if want and len(tiles) != want:
+        print(f"  FATAL: {len(tiles)} tiles for {want} ranks -- the record "
+              "is incomplete and any stitch of it would have holes")
+        bad += 1
+    a = _namelist_values(os.path.join(run_dir, "namelist_cfg"))
+    b = _namelist_values(os.path.join(reference, "namelist_cfg"))
+    keys = sorted(set(a) | set(b))
+    delta = [k for k in keys if a.get(k) != b.get(k)]
+    print(f"  namelist delta vs {reference}: "
+          + (", ".join(f"{k} {b.get(k)!r} -> {a.get(k)!r}" for k in delta)
+             or "none"))
+    for k in delta:
+        if k not in allow:
+            print(f"  FATAL: {k} differs and is not in the allowed set "
+                  f"{sorted(allow)} -- this record is not the reference's "
+                  "trajectory with a different end step")
+            bad += 1
+    print("  NOT PROVEN BY THIS CHECK: that the kt=1 step of this run matched "
+          "the certified one, because this run never wrote a kt=1 restart "
+          "(restart.f90:112, :121 with nn_stock=%d)." % int(
+              a.get("nn_stock", -1) if str(a.get("nn_stock", "")).lstrip("-")
+              .isdigit() else -1))
+    print("  What carries it instead: the namelist delta above, and the "
+          "MEASURED bit-reproducibility of this configuration's kt=1 restart "
+          "across independent runs (--twin-check on the kt=1 slopes record).")
+    print("RECORD CHECK " + ("FAIL" if bad else "PASS"))
+    return 1 if bad else 0
+
+
 def main() -> int:
     assert len(HEADER_FIELDS) == 14, "header field list drifted from the patch"
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-dir")
     ap.add_argument("--substep", type=int, default=1)
     ap.add_argument("--twin-check")
+    ap.add_argument("--record-check")
     ap.add_argument("--reference")
+    ap.add_argument("--kt", type=int, default=1,
+                    help="the restart time step to check (default 1)")
+    ap.add_argument("--allow", default="",
+                    help="comma-separated namelist keys allowed to differ "
+                         "from the reference, for --record-check")
     a = ap.parse_args()
     if a.twin_check:
         if not a.reference:
             raise SystemExit("--twin-check needs --reference")
-        return twin_check(a.twin_check, a.reference)
+        return twin_check(a.twin_check, a.reference, a.kt)
+    if a.record_check:
+        if not a.reference:
+            raise SystemExit("--record-check needs --reference")
+        return record_check(a.record_check, a.reference, a.kt,
+                            {k for k in a.allow.split(",") if k})
     if not a.run_dir:
         raise SystemExit(__doc__)
     s = stitch(a.run_dir, a.substep)

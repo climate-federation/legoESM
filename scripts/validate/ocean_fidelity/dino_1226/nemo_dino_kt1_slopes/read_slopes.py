@@ -76,15 +76,30 @@ def stitch(run_dir: str) -> dict:
         raise SystemExit(
             f"{int((cover == 0).sum())} global cells uncovered and "
             f"{int((cover > 1).sum())} covered twice -- the tile map is wrong")
-    # A record whose slopes are identically zero is EXACTLY the defect this
-    # whole acquisition exists to repair.  Refuse it loudly rather than let a
+    # A record whose slopes are ALL identically zero is EXACTLY the defect
+    # this acquisition exists to repair.  Refuse that loudly rather than let a
     # gate score against nothing and report agreement.
+    #
+    # RETRACTED (PR #1728, the round that first read this record): the guard
+    # used to refuse when ANY ONE of the four was zero, and the acquisition's
+    # own header still says "tra_ldf cannot have run on zero slopes".  Two of
+    # them ARE zero here and that is PHYSICS, not an empty dump: DINO's
+    # ``usr_def_istate`` builds T and S from latitude and depth only
+    # (usrdef_istate.F90:172-173), so at kt=1 there is no ZONAL density
+    # gradient and the two i-direction slopes uslp and wslpi are identically
+    # zero while the j-direction vslp and wslpj carry 1.000e-02 on ~3.2e5
+    # cells.  The per-ANY guard therefore refused a VALID record.
+    if not any(np.any(out[k]) for k in ("uslp", "vslp", "wslpi", "wslpj")):
+        raise SystemExit(
+            "REFUSING: all four slope fields are identically zero over the "
+            "whole stitched record -- that is the same empty dump "
+            "RUN_FROMREST_KT1 carries, and scoring against it would "
+            "manufacture agreement.")
     for k in ("uslp", "vslp", "wslpi", "wslpj"):
         if not np.any(out[k]):
-            raise SystemExit(
-                f"REFUSING: {k} is identically zero over the whole stitched "
-                "record -- that is the same empty dump RUN_FROMREST_KT1 "
-                "carries, and scoring against it would manufacture agreement.")
+            print(f"  note: {k} is identically zero in this record; from rest "
+                  "that is DINO's zonally uniform initial state, not an "
+                  "empty dump (usrdef_istate.F90:172-173)")
     out["ranks"] = len(seen)
     return out
 

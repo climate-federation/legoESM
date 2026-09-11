@@ -28,11 +28,17 @@
 #                                     levels AND the per-operator ttrd_*/strd_*
 #                                     trends (ln_tra_trd/ln_dyn_trd are already
 #                                     .true. in the namelist this copies)
-#   $OUT/DINO_00000001_restart_*.nc   the kt=1 restart from the SAME run, which
-#                                     is the BEFORE/NOW state the kt=2 gate
-#                                     feeds legoESM -- so the two sides start
-#                                     from one object, not from two runs
 #   $OUT/*_kt00000002*.bin            the per-step streams this build writes
+#
+# IT DOES *NOT* PRODUCE A kt=1 RESTART, and an earlier version of this script
+# claimed it did -- then failed its own post-check looking for one.  NEMO sets
+# nitrst = kt + nn_stock - 1 the first time MOD(kt-1, nn_stock) == 0
+# (restart.f90:112) and writes only at nitrst (:121), so with nn_stock = 2 the
+# ONLY restart is kt=2.  The BEFORE/NOW state the gate feeds legoESM is
+# therefore the CERTIFIED RUN_FROMREST_KT1 restart, which is sound because
+# that restart is bit-reproducible across independent runs of this
+# configuration -- MEASURED, not assumed (--twin-check on the kt=1 slopes
+# record: 16 tiles, every variable, 0 fatal, 0 admitted).
 #
 # The ONLY namelist edits are nn_itend 1 -> 2 and nn_stock 1 -> 2.  No source
 # patch: this record needs no instrumentation the certified binary lacks.
@@ -136,17 +142,21 @@ grep -E "^\s*(nn_itend|nn_stock|rn_Dt|ln_rstart|ln_tra_trd|ln_dyn_trd)\s*=" name
 ln -sf "$COPY/BLD/bin/nemo.exe" nemo
 mpirun -np "$NPROC" ./nemo 2>&1 | tee run_kt2_trends.log
 
-# ------------------------------------------------------------- twin check
-# The kt=1 restart written by THIS run must be bit-identical to the certified
-# RUN_FROMREST_KT1, or the kt=2 state is not the continuation of the record
-# every other gate on this branch is scored against.  Proven, not asserted.
+# ----------------------------------------------------------- record check
+# NOT a twin check: there is no restart the two directories have in common to
+# compare (see the header).  What IS checkable is that the record is complete
+# and that its namelist is the reference's with ONLY the two counters moved --
+# which is the entire claim this record rests on.  The check prints what it
+# does NOT prove rather than leaving the reader to assume it did.
 python3 "$HERE/../nemo_dino_kt1_rankdump/read_rankdump.py" \
-    --twin-check "$OUT" --reference "$SRCREF"
+    --record-check "$OUT" --reference "$SRCREF" --kt 2 \
+    --allow nn_itend,nn_stock
 
 echo
 echo "record written to $OUT"
-echo "  kt=1 restart (the BEFORE/NOW state the gate feeds legoESM):"
-echo "    $OUT/DINO_00000001_restart_*.nc"
+echo "  kt=1 restart (the BEFORE/NOW state the gate feeds legoESM) is NOT in"
+echo "  this record -- nn_stock=2 means NEMO wrote only kt=2.  The gate takes"
+echo "  it from the certified $SRCREF (--kt1-dir)."
 echo "  kt=2 restart (the AFTER state and the per-operator trends):"
 echo "    $OUT/DINO_00000002_restart_*.nc"
 echo

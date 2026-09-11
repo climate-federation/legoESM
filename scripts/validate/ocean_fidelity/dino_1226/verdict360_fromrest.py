@@ -187,23 +187,56 @@ def _pairwise(A, B, wet):
     return np.array(within), np.array(across)
 
 
+def _nemo_istate_operands():
+    """NEMO's OWN ``pdept`` and ``gphit``, read from the mesh, not look-alikes.
+
+    ``usr_def_istate`` is called from ``istate.F90`` with ``pdept =
+    gdept(:,:,:,Kbb)``, which under DINO's ``ln_zco_nam = .true.``
+    (``RUN_FROMREST_KT1/namelist_cfg:70``) is ``gdept_0`` -- verified here to
+    be constant over (i,j) rather than assumed -- and ``gphit`` is latitude in
+    DEGREES.
+
+    The first draft of this harness used ``z_coord.t_depth_ref`` and
+    ``grid.lat``.  BOTH ARE WRONG and neither would have raised:
+      * ``grid.lat`` is in RADIANS (-1.219 .. 1.219), so ``NINT(lat*1000)``
+        would have been a different integer at every row -- a different
+        experiment wearing NEMO's formula;
+      * ``t_depth_ref`` is legoESM's cell-CENTRE depth and NEMO's ``gdept_1d``
+        is the analytic stretching value; they agree to k=25 and then part
+        company by up to 104.97 m, which crosses whole metres and therefore
+        changes ``NINT``.
+    """
+    from legoesm.ocean.fidelity import nemo_dino_mesh as ndm
+    m = ndm.nemo_dino_mesh()
+    dep3 = np.asarray(m.gdept_0, dtype=np.float64)
+    spread = float(np.max(dep3.max(axis=(0, 1)) - dep3.min(axis=(0, 1))))
+    if spread != 0.0:
+        raise SystemExit(
+            f"gdept_0 varies by {spread:.3e} m within a level, so this mesh is "
+            "not ln_zco and NEMO's perturbation would not be zonally uniform; "
+            "the harness's own uniformity assertion would then be wrong, not "
+            "the perturbation.")
+    lat3 = np.broadcast_to(
+        np.asarray(m.gphit, dtype=np.float64)[:, :, None], dep3.shape)
+    mask3 = np.asarray(m.tmask > 0.5).astype(np.float64)
+    return dep3, lat3, mask3
+
+
 def phase0(out_root: str, days: int, snap: int, gpu_note: str) -> int:
     """Four legoESM members from rest; the floor, and the window verdict."""
-    from legoesm.core.precision import PrecisionPolicy, set_policy
-    set_policy(PrecisionPolicy.fp64())
-    from legoesm.ocean.experiments import dino as dm
-    from legoesm.ocean.fidelity import nemo_dino_mesh as ndm
+    dep3, lat3, mask3 = _nemo_istate_operands()
 
-    cfg = dm.nemo_faithful_dino_config(
-        base=dm.dino_config_for_recipe("nemo_dino_kamm_mlf"))
-    grid = dm.dino_lat_lon_grid(cfg)
-    z = dm.dino_lat_lon_vertical(grid, cfg)
-    base = dm.dino_lat_lon_state(grid, z, cfg)
-    lat = np.asarray(grid.lat)
-    lat3 = np.broadcast_to(lat[:, None, None], base.T.data.shape)
-    dep = np.asarray(z.t_depth_ref)
-    dep3 = np.broadcast_to(dep[None, None, :], base.T.data.shape)
-    mask3 = np.asarray(ndm.nemo_dino_mesh().tmask > 0.5).astype(float)
+    # NINT is a step function, so an operand sitting on a half-integer is the
+    # one place fp64 noise could change the perturbation.  Measured, not hoped.
+    for nm, arr in (("NINT(pdept)", dep3[0, 0, :]),
+                    ("NINT(gphit*1000)", lat3[:, 0, 0] * PERT_LAT_SCALE)):
+        d = float(np.min(np.abs(np.abs(arr - np.floor(arr)) - 0.5)))
+        print(f"  {nm}: closest operand to a half-integer is {d:.4f} away "
+              f"(fp64 noise here is ~1e-13)")
+        if d < 1e-6:
+            print("  ^^ an operand sits ON a rounding boundary; NINT's "
+                  "round-half-away-from-zero and the oracle's could disagree")
+            return 1
 
     # The perturbation must be REAL and TINY: printed, not assumed.
     p1 = nemo_istate_perturbation(dep3, lat3, mask3, 1)
@@ -228,15 +261,96 @@ def phase0(out_root: str, days: int, snap: int, gpu_note: str) -> int:
         print("  ^^ the perturbation is NOT zonally uniform, so it is not "
               "NEMO's (usrdef_istate.F90:180)")
         return 1
+    # Distinct members are the whole experiment: two seeds that collided would
+    # give a floor of zero and an "indistinguishable" verdict for free.
+    fields = {s: nemo_istate_perturbation(dep3, lat3, mask3, s)
+              for s in range(1, N_MEMBERS + 1)}
+    for a in range(1, N_MEMBERS + 1):
+        for b in range(a + 1, N_MEMBERS + 1):
+            sep = float(np.abs(fields[a] - fields[b]).max())
+            if sep == 0.0:
+                print(f"  seeds {a} and {b} give the SAME field; the floor "
+                      "would be measured on a duplicated member")
+                return 1
+    print(f"  seed separation: min over pairs of max|dT_i - dT_j| = "
+          f"{min(float(np.abs(fields[a] - fields[b]).max()) for a in range(1, N_MEMBERS + 1) for b in range(a + 1, N_MEMBERS + 1)):.3e} K")
     for s in range(1, N_MEMBERS + 1):
         d = os.path.join(out_root, f"member_{s:02d}")
         os.makedirs(d, exist_ok=True)
-        np.save(os.path.join(d, "perturbation_T.npy"),
-                nemo_istate_perturbation(dep3, lat3, mask3, s))
+        np.save(os.path.join(d, "perturbation_T.npy"), fields[s])
     print(f"  per-member perturbation fields written under {out_root}/")
     print("\n  THE MEMBERS ARE NOT RUN BY THIS SCRIPT.  Run them with:\n"
           f"{gpu_note}")
     print("  then re-run with --score-phase0 to get the floor.")
+    return 0
+
+
+def run_member(out_root: str, seed: int, days: int, snap: int,
+               config: str) -> int:
+    """Run ONE member THROUGH ``run_dino.py``'s OWN ``main()``.
+
+    Rule 10, taken literally: the member is not a re-implementation of the
+    production loop, it IS the production loop.  ``scripts/run/run_dino.py``
+    is imported as a module, its ``dino_lat_lon_state`` is wrapped so the
+    returned state carries the perturbation NEMO's ``usr_def_istate`` would
+    have added, ``sys.argv`` is set to the card's own command line, and
+    ``main()`` runs.  Every other statement of the driver -- the fp64 policy,
+    the recipe overlay, the leap-frog/surface-placement guard, the forcing
+    call, ``model.step``, the snapshot writer -- executes unchanged.
+
+    This is why no ``--initial-T-perturbation`` production flag is added: the
+    ensemble machinery stays out of the driver that every DINO run uses.
+    """
+    import importlib.util
+
+    d = os.path.join(out_root, f"member_{seed:02d}")
+    pfile = os.path.join(d, "perturbation_T.npy")
+    if not os.path.exists(pfile):
+        raise SystemExit(
+            f"no {pfile}: run --phase0 first.  The member must use the SAME "
+            "perturbation bytes the phase-0 assertions were run against, not "
+            "a recomputed look-alike.")
+    pert = np.load(pfile)
+
+    repo = os.path.abspath(os.path.join(_HERE, "..", "..", "..", ".."))
+    driver = os.path.join(repo, "scripts", "run", "run_dino.py")
+    spec = importlib.util.spec_from_file_location("run_dino_member", driver)
+    rd = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rd)
+
+    orig = rd.dino_lat_lon_state
+    calls = []
+
+    def perturbed(grid, z_coord, cfg=None, land_mask_override=None):
+        st = orig(grid, z_coord, cfg, land_mask_override=land_mask_override)
+        base = np.asarray(st.T.data)
+        if base.shape != pert.shape:
+            raise SystemExit(
+                f"perturbation shape {pert.shape} != state T {base.shape}")
+        if base.dtype != np.float64:
+            raise SystemExit(
+                f"state T is {base.dtype}, not float64 -- a 1e-10 K "
+                "perturbation is below f32 resolution on a ~10 K field, so "
+                "this member would be the control")
+        out = st._replace(T=st.T.replace(data=st.T.data + pert))
+        moved = np.asarray(out.T.data) - base
+        calls.append((float(np.abs(moved).max()),
+                      int(np.count_nonzero(moved))))
+        return out
+
+    rd.dino_lat_lon_state = perturbed
+    sys.argv = [driver, "--config", config, "--days", str(days),
+                "--snapshot-every-days", str(snap), "--output-dir", d]
+    print(f"MEMBER seed={seed} -> {d}")
+    print(f"  argv: {' '.join(sys.argv[1:])}")
+    rd.main()
+    if not calls:
+        raise SystemExit(
+            "the wrapped state builder was NEVER CALLED, so this member ran "
+            "the UNPERTURBED initial state and is a duplicate of the control")
+    mx, n = calls[0]
+    print(f"  perturbation landed in the state that ran: max|dT| = {mx:.3e} K "
+          f"on {n} cells ({len(calls)} state build(s))")
     return 0
 
 
@@ -334,6 +448,11 @@ def main() -> int:
     ap.add_argument("--days", type=int, default=360)
     ap.add_argument("--snapshot-every-days", type=int, default=30)
     ap.add_argument("--phase0", action="store_true")
+    ap.add_argument("--run-member", type=int, default=None,
+                    help="run ONE member (seed 1..N) through run_dino.main()")
+    ap.add_argument("--config",
+                    default="scripts/experiment/dino/"
+                            "nemo_faithful_kamm_mlf.yaml")
     ap.add_argument("--score-phase0", action="store_true")
     ap.add_argument("--phase1", action="store_true")
     a = ap.parse_args()
@@ -341,28 +460,29 @@ def main() -> int:
         "    for s in 1 2 3 4; do\n"
         "      CUDA_VISIBLE_DEVICES=<uuid> JAX_PLATFORMS=cuda "
         "JAX_ENABLE_X64=1 \\\n"
-        "        python scripts/run/run_dino.py \\\n"
-        "          --config scripts/experiment/dino/"
-        "nemo_faithful_kamm_mlf.yaml \\\n"
-        f"          --days {a.days} --snapshot-every-days "
-        f"{a.snapshot_every_days} \\\n"
-        f"          --output-dir {a.out_root}/member_0$s \\\n"
-        "          --initial-T-perturbation "
-        f"{a.out_root}/member_0$s/perturbation_T.npy\n"
+        "        python scripts/validate/ocean_fidelity/dino_1226/"
+        "verdict360_fromrest.py \\\n"
+        f"          --run-member $s --days {a.days} "
+        f"--snapshot-every-days {a.snapshot_every_days} \\\n"
+        f"          --out-root {a.out_root}\n"
         "    done\n"
-        "  NOTE: --initial-T-perturbation DOES NOT EXIST YET.  It is a new\n"
-        "  production knob and is listed in the round's ASKED table with a\n"
-        "  recommendation AGAINST adding it; the alternative, which needs no\n"
-        "  knob, is for this harness to build and perturb the state itself\n"
-        "  and call the model directly.  Nothing here is run until that is\n"
-        "  decided.")
+        "  NO PRODUCTION FLAG IS ADDED.  --run-member imports\n"
+        "  scripts/run/run_dino.py and calls its OWN main() with only the\n"
+        "  initial-state builder wrapped, so the member runs the production\n"
+        "  driver statement for statement and the ensemble machinery stays\n"
+        "  out of the driver every DINO run uses.")
     if a.phase0:
         return phase0(a.out_root, a.days, a.snapshot_every_days, note)
+    if a.run_member is not None:
+        if not 1 <= a.run_member <= N_MEMBERS:
+            ap.error(f"--run-member must be in 1..{N_MEMBERS}")
+        return run_member(a.out_root, a.run_member, a.days,
+                          a.snapshot_every_days, a.config)
     if a.score_phase0:
         return score_phase0(a.out_root, a.snapshot_every_days)
     if a.phase1:
         return phase1(a.out_root, a.nemo_root, a.snapshot_every_days)
-    ap.error("choose --phase0, --score-phase0 or --phase1")
+    ap.error("choose --phase0, --run-member, --score-phase0 or --phase1")
 
 
 if __name__ == "__main__":
