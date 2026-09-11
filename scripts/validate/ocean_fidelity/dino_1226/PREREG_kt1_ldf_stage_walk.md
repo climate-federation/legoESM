@@ -114,3 +114,76 @@ PLAUSIBLE explainer.
   its own label.
 * `--plant-slopes` — feed the card's slopes while claiming NEMO's.  A1 must
   then equal A0 exactly.
+
+---
+
+## ADDENDUM — what was actually run, and what the preregistration got wrong
+
+Written after the measurement, per Rule 11.  Every departure from the plan
+above is here rather than left to be inferred from the code.
+
+**P1 FIRED.**  Substituting NEMO's `e3w` moved the operator from 0.996571x to
+1.000004833x on T (residual rms 5.008e-10 -> 7.716e-13) and 0.996696x to
+1.000004723x on S (8.668e-11 -> 1.348e-13).  The gate carries a regression
+witness that restores the midpoint and reproduces 0.996571 / 0.996696 exactly,
+so the move is attributable to this statement.
+
+**The sign argument survived, but for a reason the preregistration did not
+state.**  The claim review pointed out that where `akz > 0` the explicit A33
+flux is PROPORTIONAL to `e3w`, not inverse, so a too-large divisor would make
+it too LARGE — the opposite sign.  Measured: `akz` is identically zero on all
+342134 wet cells of this record, so every cell is in the inverse branch and
+the argument holds HERE.  It is not a general argument and the prereg should
+not have written it as one.
+
+**A1 and A2 were not runnable as written.**  The record's `uslp_stg`,
+`vslp_stg`, `wslpi_stg` and `wslpj_stg` are identically ZERO on all 16 tiles,
+while `rhd_stg`, `tn_stg` and `rn2_stg` from the same snapshot carry data.
+NEMO's `tra_ldf` cannot have run on zero slopes — the A33 stage is 1.07x the
+tendency — so the DUMP is empty, not the run.  The slope arm is therefore
+UNMEASURED, and A2 collapses onto A2b (which needs no slopes and is the arm
+that carried the result).  A3 was dropped: the record's `tb`/`sb` are the
+END-of-step filtered values, not the kt=1 before state, so substituting them
+would have answered a different question.
+
+**F1 and F2 were never evaluable** for the same reason (both are conditioned
+on feeding NEMO's own slopes).  What discriminated instead was the witness
+arm plus `--plant-e3w`: the pre-fix operand reproduces the pre-fix ratio and
+the planted (correct) operand does not.
+
+**Two findings arrived from review, not from this plan.**
+
+1. `ahtu`/`ahtv` are masked at build (`ldftra.f90:433-434`) and legoESM
+   applied that mask to the w-point kappa sums and `akz_h` but not to `zfu`
+   and `zfv`.  Landed.  MEASURED INERT on this card at kt=1: 5796 closed
+   u-faces on wet cells, zero of them carrying a nonzero `zA13` flux.
+
+2. **The stretch's TIME LEVEL is wrong, and it is the next owner.**  NEMO
+   reads `r3t(Kmm)` = Nnn, the step-entry SSH.  legoESM threads the jacobian
+   built from `state_new.eta` — Naa, the SSH after the barotropic step.  On
+   this record the operator's jacobian spans [0.999977232, 1.000041336] where
+   NEMO's `(1 + r3t(Kmm))` is exactly 1.  Measured (arm T1):
+
+   | arm | T ratio | T res rms | S ratio | S res rms |
+   |---|---|---|---|---|
+   | A0 as the model runs it | 1.000005 | 7.716e-13 | 1.000005 | 1.348e-13 |
+   | T1 `e3w` at Kmm=Nnn | 1.000002 | **3.769e-13** | 1.000002 | **6.679e-14** |
+
+   a further 2.05x on T and 2.02x on S.  NOT landed this round: the same
+   jacobian also builds the operator's `e3t` (the divergence divisor) and its
+   density, so the fix is "the whole operator at Kmm", not one operand, and
+   it must be measured per card before it lands.  The card already carries
+   the Nnn SSH for the flux face thicknesses (`redi_flux_eta`), so the
+   operator is currently INCONSISTENT: faces at Nnn, cell thickness at Naa.
+
+**Two things this record structurally cannot score, now printed as UNMEASURED
+rows rather than left implicit** (the diff review demonstrated both by
+planting a wrong operand and watching every row stay byte-identical):
+
+* `traldf_iso_a33`'s OWN `e3w` (the `ze3w_2` of `traldf_iso.f90:831-833`) and
+  the implicit K33 half of the split, because `akz` is identically zero from
+  rest.  A record that fires the stabiliser is needed.
+* `rDt`.  NEMO's a33 uses `rDt` (`domain.f90:310` = 2*rn_Dt, reduced to
+  rn_Dt on the Euler first step at `stpmlf.f90:132` and restored at `:618`)
+  while the card passes the base `dt`.  At kt=1 the two agree exactly; from
+  kt=2 the `akz` threshold is off by 2x.

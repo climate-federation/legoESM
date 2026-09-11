@@ -2213,7 +2213,10 @@ def nemo_iso_a33_e3w(z_coord, e3t, jacobian, dtype):
         # surface w-point (unused downstream: wslp(0) = 0)
         return e3w.at[:, :, 0].set(e3t[:, :, 0])
     # jacobian is the (1 + r3t) stretch e3t itself already carries.
-    return (jnp.asarray(raw, dtype=dtype)[..., :e3t.shape[-1]]
+    # No trailing-axis slice: nemo_e3w0_reference already REFUSES a field
+    # whose trailing size is not n_levels, so a slice here could only mask a
+    # real mismatch (diff review finding 8).
+    return (jnp.asarray(raw, dtype=dtype)
             * jnp.asarray(jacobian, dtype=dtype)[:, :, jnp.newaxis])
 
 
@@ -2745,6 +2748,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         }
         if return_operand_diagnostics:
             diagnostics["zfu_operands"] = {
+                # NOTE: face-MASKED, as NEMO's own ahtu is (ldftra.f90:433).
                 "ahtu": aht,
                 "e1u": e1u,
                 "e2u": e2u,
@@ -4591,10 +4595,15 @@ def compute_isoneutral_K33_latlon(
         # z*-scaled thickness with the SAME jacobian as the operator's e3t
         # (from the shared density_jacobian thread).
         _e3t = z_coord.dz_ref[None, None, :] * _J[:, :, jnp.newaxis]
+        _msc = bool(getattr(cfg, "msc_stabilize", False))
         # Same e3w object as the explicit A33 flux (traldf_iso.f90:831-833):
         # the two sides of the split share one resolver by construction.
-        _e3w = nemo_iso_a33_e3w(z_coord, _e3t, _J, T.dtype)
-        _msc = bool(getattr(cfg, "msc_stabilize", False))
+        # Resolved ONLY when ln_traldf_msc is on, matching the explicit side's
+        # own guard: with msc=F, akz = ah_wslp2 and traldf_iso.f90:88-91 never
+        # reads e3w at all, so a coordinate the resolver would REFUSE must not
+        # be refused for a value nothing consumes.
+        _e3w = (nemo_iso_a33_e3w(z_coord, _e3t, _J, T.dtype) if _msc
+                else _e3t)
         _, _akz = nemo_iso_a33(
             _aht, _um3, _vm3, _wm3, _wi, _wj,
             _e1u_c, _e2v_c, _e3w ** 2, dt=dt, msc=_msc, aht_v=_aht_v,

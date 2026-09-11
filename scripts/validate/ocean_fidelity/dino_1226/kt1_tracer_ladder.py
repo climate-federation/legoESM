@@ -307,7 +307,7 @@ def _stage_split(diags, args, kwargs, z):
     }
 
 
-def stage5(calls, iT, iS, R, O3, wet3, z, real, plant_e3w: bool,
+def stage5(calls, iT, iS, R, O3, wet3, z, st, real, plant_e3w: bool,
            plant_slopes: bool) -> int:
     """The preregistered substitution ladder (PREREG_kt1_ldf_stage_walk.md).
 
@@ -435,8 +435,25 @@ def stage5(calls, iT, iS, R, O3, wet3, z, real, plant_e3w: bool,
     else:
         e3w_witness = jnp.asarray(e3w_mid)
 
+    # The stretch's TIME LEVEL.  NEMO reads r3t(Kmm) = Nnn, the step-entry
+    # SSH (traldf_iso.f90:285, :831-833; stpmlf.f90:504 calls tra_ldf with
+    # Kmm=Nnn).  legoESM threads the jacobian built from state_new.eta, which
+    # is Naa -- the SSH AFTER the barotropic step.  The card already carries
+    # the Nnn SSH for the flux face thicknesses (redi_flux_eta), so this is a
+    # time-level mismatch on one operand, not a missing quantity.  Arm T1
+    # measures it; it was found by the diff review, not predicted here.
+    from legoesm.ocean.eos import nemo_r3t_stretch
+    _stretch_nnn = np.asarray(nemo_r3t_stretch(
+        z, jnp.asarray(np.asarray(st.eta.data)),
+        jnp.asarray(np.asarray(st.H_bathy.data))))
+    print(f"  stretch time level: the operator's jacobian (Naa) spans "
+          f"[{jac.min():.9f}, {jac.max():.9f}]; NEMO's (1+r3t(Kmm=Nnn)) "
+          f"spans [{_stretch_nnn.min():.9f}, {_stretch_nnn.max():.9f}]")
+    e3w_nnn = np.asarray(raw_e3w0)[..., :z.n_levels] * _stretch_nnn[:, :, None]
+
     arms = [("A0 as the model runs it", {}),
-            ("W1 pre-fix midpoint e3w", {"msc_e3w_override": e3w_witness})]
+            ("W1 pre-fix midpoint e3w", {"msc_e3w_override": e3w_witness}),
+            ("T1 e3w at Kmm=Nnn", {"msc_e3w_override": jnp.asarray(e3w_nnn)})]
     if nat is not None:
         arms.append(("A1 + NEMO's own slopes",
                      {"native_slopes": tuple(jnp.asarray(a) for a in nat)}))
@@ -477,8 +494,8 @@ def stage5(calls, iT, iS, R, O3, wet3, z, real, plant_e3w: bool,
     # WITNESS: restoring the interface-midpoint e3w must put the operator
     # back on the pre-fix ratio (0.996571 T / 0.996696 S, PR #1728).  A gate
     # that passes without this cannot tell the fix from the weather.
-    wT_ratio = results[(arms[1][0], "T")][0]
-    wS_ratio = results[(arms[1][0], "S")][0]
+    wT_ratio = results[("W1 pre-fix midpoint e3w", "T")][0]
+    wS_ratio = results[("W1 pre-fix midpoint e3w", "S")][0]
     print(f"  e3w witness: midpoint arm gives T {wT_ratio:.6f} / "
           f"S {wS_ratio:.6f} against the recorded pre-fix "
           "0.996571 / 0.996696")
@@ -510,6 +527,32 @@ def stage5(calls, iT, iS, R, O3, wet3, z, real, plant_e3w: bool,
             print("  ^^ the stage split does not close; it is bookkeeping, "
                   "not attribution (Rule 5)")
             bad += 1
+        # Closure alone is near-tautological: swapping the skew and a33
+        # LABELS leaves it exact and inverts the attribution (diff review
+        # finding 7).  So each stage is also rebuilt from the operands that
+        # DEFINE it -- the A33 flux from traldf_iso.f90:284-287's own
+        # factors -- and required to match the piece it claims to be.
+        _ops = diags["zfw_operands"]
+        _a33_rebuilt = (np.asarray(_ops["e1e2t"])[:, :, None]
+                        / np.asarray(_ops["e3w_kp1"])
+                        * (np.asarray(_ops["ah_wslp2"])
+                           - np.asarray(_ops["akz"]))
+                        * (np.asarray(_ops["qdiff_kp1"])
+                           * np.asarray(_ops["wmask"])[..., :]))
+        _a33_named = np.asarray(_ops["a33_current"])
+        # qdiff_kp1 is the RAW difference; the operator multiplies the
+        # wmask-carrying zdkt_kp1, so compare on the wmask-alive cells only.
+        _wm1 = np.roll(np.asarray(_ops["wmask"]), -1, 2) > 0.0
+        _sel = _wm1 & wet3
+        _lab = float(np.max(np.abs(_a33_rebuilt[_sel] - _a33_named[_sel])))
+        _scale = float(np.max(np.abs(_a33_named[_sel]))) or 1.0
+        print(f"  {tag} stage LABEL check: the piece called 'a33' rebuilt "
+              f"from e1e2t/e3w*(ah_wslp2-akz)*(T(k)-T(k+1)) differs by "
+              f"{_lab:.3e} against its own max {_scale:.3e}")
+        if _lab > 1e-10 * _scale:
+            print("  ^^ the stage labelled a33 is not the A33 flux; the "
+                  "attribution table above is mislabelled")
+            bad += 1
         nemo = np.nan_to_num(O3(key))
         print(f"    {'stage':14s}{'rms':>12s}{'share of |tend|':>18s}"
               f"{'corr with NEMO resid':>22s}")
@@ -530,6 +573,22 @@ def stage5(calls, iT, iS, R, O3, wet3, z, real, plant_e3w: bool,
                   f"{int(wet3.sum())} wet cells; akz==0 (A33 flux INVERSE "
                   f"in e3w) on {int((~on & wet3).sum())}. max ah_wslp2 = "
                   f"{np.abs(ah[wet3]).max():.4e}")
+            if not on.any():
+                # Diff review finding 1, and it is a REAL hole: with akz
+                # identically zero, traldf_iso_a33's OWN e3w (the ze3w_2 of
+                # traldf_iso.f90:831-833) is multiplied by nothing this
+                # record can see, and so is the implicit K33 half of the
+                # split.  Only the EXPLICIT divisor (traldf_iso.f90:285) is
+                # scored above.  Stated as an UNMEASURED row rather than
+                # left to be inferred from the census.
+                print("    UNMEASURED: akz is identically zero on this "
+                      "record, so traldf_iso_a33's own e3w (ze3w_2, "
+                      "traldf_iso.f90:831-833) and the implicit K33 half of "
+                      "the split are NOT scored by any row above. A record "
+                      "that fires the stabiliser is needed; the reviewer "
+                      "planted e3w2*4 at both a33 call sites and every row "
+                      "of this gate was byte-identical.")
+                bad += 1
 
     if plant_slopes and nat is not None:
         dT = float(np.max(np.abs(results[arms[-1][0], "T"][2] - a0T)))
@@ -890,7 +949,7 @@ def stages12(R: dict, plant_shift: bool,
                   "(max|q - state.T| = 0.000e+00), not by a call position")
     if plant_ldf_call:
         return bad
-    bad += stage5(calls, iT, iS, R, O3, wet3, z, real, plant_e3w,
+    bad += stage5(calls, iT, iS, R, O3, wet3, z, st, real, plant_e3w,
                   plant_slopes)
 
     # ---- STAGE 6: tra_qsr, scored operator-to-operator ----------------
