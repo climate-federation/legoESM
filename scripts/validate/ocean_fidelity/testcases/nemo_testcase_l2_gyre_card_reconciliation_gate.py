@@ -105,49 +105,66 @@ def _policy():
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
 
 
-# ------------------------------------------------------- the STATEMENT read --
-def model_construction_kwargs(path: Path, function: str) -> dict:
-    """Read the ``_replace`` a harness applies before it builds its model.
+# ------------------------------------------------ the program, as EXECUTED --
+# An adversarial review KILLED the first version of this reader.  It matched a
+# `_replace` whose receiver unparsed to exactly `card.recipe.model_config`, so
+# rebinding through a local --
+#     cfg = card.recipe.model_config
+#     cfg = cfg._replace(freshwater_closure="virtual_salt_flux", ...)
+# -- reintroduced the exact defect this gate exists to catch and the gate
+# reported "the SAME RESOLVED OBJECT", exit 0.  Reading source text for one
+# statement shape and calling the result "the program" was the bug.  So the
+# harness's OWN construction is EXECUTED and the object it hands to
+# LatLonCGridOceanModel is CAPTURED (Rule 10: instantiate and print, never
+# trust a declaration).  No spelling of the assignment can hide from this,
+# because every spelling ends at the constructor.
+class _Captured(Exception):
+    """Raised by the spy the instant a model is constructed."""
 
-    Rule 10 applied to the SOURCE: the resolved-object diff below says the two
-    programs differ; this says WHICH STATEMENT makes them differ, so the row
-    can be attributed rather than described.  Returns ``{}`` when the harness
-    hands the card's own config to ``LatLonCGridOceanModel`` untouched -- which
-    is itself the finding, not a missing measurement.
+
+def capture_model_config(module_name: str, path: Path, call, *,
+                         card_factory=None):
+    """Run ``call(module)`` and return the config it hands to the model.
+
+    ``card_factory`` replaces ``build_nemo_testcase_card`` for the duration,
+    which is how the ``program-drift`` plant makes a harness hand over a
+    DIFFERENT program without touching the construction statement at all.
     """
-    tree = ast.parse(path.read_text(), filename=str(path))
-    target = None
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == function:
-            target = node
-            break
-    require(target is not None, f"{path.name}: no function {function}")
-    # Every `<name> = card.recipe.model_config._replace(...)` in the function,
-    # plus every inline `_replace` inside a LatLonCGridOceanModel(...) call.
-    found: dict[str, object] = {}
-    sites = 0
-    for node in ast.walk(target):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if (isinstance(func, ast.Attribute) and func.attr == "_replace"
-                and ast.unparse(func.value) == "card.recipe.model_config"):
-            sites += 1
-            for keyword in node.keywords:
-                require(keyword.arg is not None,
-                        f"{path.name}: **kwargs in a model-config _replace")
-                try:
-                    found[keyword.arg] = ast.literal_eval(keyword.value)
-                except ValueError:
-                    found[keyword.arg] = ast.unparse(keyword.value)
-    require(sites <= 1,
-            f"{path.name}:{function}: {sites} distinct model-config _replace "
-            "sites; this reader reports one program per function")
-    return found
+    import legoesm.ocean.dynamics.ocean_model_latlon_cgrid as impl
+    import legoesm.ocean.fidelity.nemo_testcase_recipe as recipe
+
+    module = _load(module_name, path)
+    real_model = impl.LatLonCGridOceanModel
+    real_card = recipe.build_nemo_testcase_card
+    captured: list = []
+
+    def spy(grid, z_coord, cfg, *args, **kwargs):
+        captured.append(cfg)
+        raise _Captured
+
+    impl.LatLonCGridOceanModel = spy
+    if card_factory is not None:
+        recipe.build_nemo_testcase_card = card_factory
+    try:
+        call(module)
+    except _Captured:
+        pass
+    finally:
+        impl.LatLonCGridOceanModel = real_model
+        recipe.build_nemo_testcase_card = real_card
+    require(bool(captured),
+            f"{path.name}: the call constructed no ocean model, so this gate "
+            "captured no program and would have compared nothing")
+    return captured[0]
 
 
 def model_config_argument(path: Path, function: str) -> str:
-    """The third positional argument of the harness's own model construction."""
+    """The source text at the construction site.
+
+    DISPLAY ONLY.  It names the first ``LatLonCGridOceanModel(`` call in the
+    function so the table can point at a line; nothing is ASSERTED from it,
+    because the review above proved that source text is not the program.
+    """
     tree = ast.parse(path.read_text(), filename=str(path))
     target = None
     for node in ast.walk(tree):
@@ -223,20 +240,41 @@ def _legacy_year_config(card):
         freshwater_closure="virtual_salt_flux", fix_eta_drift=False)
 
 
-def resolve_programs(*, plant: str | None = None):
-    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-        build_nemo_testcase_card)
+def _legacy_card_factory(real_factory):
+    """A card whose config is the PRE-UNIFICATION one, for the plant."""
 
-    card = build_nemo_testcase_card(CASE)
-    ladder_kwargs = model_construction_kwargs(LADDER_GATE, "run")
-    ladder = card.recipe.model_config._replace(**ladder_kwargs) if ladder_kwargs \
-        else card.recipe.model_config
-    year_kwargs = model_construction_kwargs(YEAR_HARNESS, "run_member")
-    year = card.recipe.model_config._replace(**year_kwargs) if year_kwargs \
-        else card.recipe.model_config
+    def factory(case):
+        card = real_factory(case)
+        recipe = card.recipe._replace(
+            model_config=_legacy_year_config(card))
+        return card._replace(recipe=recipe)
+
+    return factory
+
+
+def resolve_programs(*, plant: str | None = None):
+    import tempfile
+
+    import legoesm.ocean.fidelity.nemo_testcase_recipe as recipe
+
+    card = recipe.build_nemo_testcase_card(CASE)
+    ladder = capture_model_config(
+        "gyre_phase3_gate", LADDER_GATE,
+        lambda m: m.run(m.ROOT, trajectory_only=True, max_step=2))
+    with tempfile.TemporaryDirectory() as scratch:
+        year = capture_model_config(
+            "gyre_year_fromrest", YEAR_HARNESS,
+            lambda m: m.run_member(0, scratch, days=1),
+            card_factory=(_legacy_card_factory(recipe.build_nemo_testcase_card)
+                          if plant == "program-drift" else None))
+    owners = capture_model_config(
+        "gyre_year_owners", OWNERS_HARNESS,
+        lambda m: m.equal_input_step(2))
     if plant == "config-drift":
-        year = year._replace(A_h=float(year.A_h) * 2.0)
-    return card, ladder, year, ladder_kwargs, year_kwargs
+        # A NESTED field, so the walk is exercised rather than the top level.
+        year = year._replace(lateral_viscosity=year.lateral_viscosity._replace(
+            A_h=float(year.lateral_viscosity.A_h) * 2.0))
+    return card, ladder, year, owners
 
 
 def initial_state_rows(card, *, plant: str | None = None) -> list[dict]:
@@ -244,11 +282,9 @@ def initial_state_rows(card, *, plant: str | None = None) -> list[dict]:
     ladder starts?
 
     The ladder steps ``card.recipe.initial_state`` directly.  The year harness
-    round-trips it through numpy and ADDS a perturbation field, which is
-    documented to be exactly zero for the control member -- documented, which
-    is not the same as measured.  Every prognostic field is compared BIT for
-    BIT, because a state constructor that differs in the last bit is a second
-    program just as surely as a config field is.
+    round-trips it through numpy and ADDS a perturbation field documented to be
+    exactly zero for the control member -- documented, which is not the same as
+    measured.  Every prognostic field is compared BIT for BIT.
     """
     import jax.numpy as jnp
 
@@ -283,49 +319,52 @@ def config_diff(*, plant: str | None = None) -> dict:
     from legoesm.ocean.fidelity.provenance import worktree_stamp
 
     _policy()
-    card, ladder, year, ladder_kwargs, year_kwargs = resolve_programs(plant=plant)
+    card, ladder, year, owners = resolve_programs(plant=plant)
     rows = config_rows(ladder, year)
+    owner_rows = config_rows(ladder, owners)
     statements = {
-        "ladder": {
-            "file": LADDER_GATE.name,
-            "function": "run",
-            "model_config_argument": model_config_argument(LADDER_GATE, "run"),
-            "replace_kwargs": ladder_kwargs,
-        },
-        "year": {
-            "file": YEAR_HARNESS.name,
-            "function": "run_member",
-            "model_config_argument": model_config_argument(
-                YEAR_HARNESS, "run_member"),
-            "replace_kwargs": year_kwargs,
-        },
+        "ladder": {"file": LADDER_GATE.name, "function": "run",
+                   "construction_site_source": model_config_argument(
+                       LADDER_GATE, "run")},
+        "year": {"file": YEAR_HARNESS.name, "function": "run_member",
+                 "construction_site_source": model_config_argument(
+                     YEAR_HARNESS, "run_member")},
+        "year_owners": {"file": OWNERS_HARNESS.name,
+                        "function": "equal_input_step",
+                        "construction_site_source": model_config_argument(
+                            OWNERS_HARNESS, "equal_input_step")},
     }
     state_rows = initial_state_rows(card, plant=plant)
     report = {
-        "format": "gyre-card-reconciliation-config-diff-v2",
+        "format": "gyre-card-reconciliation-config-diff-v3",
         "case": CASE,
         "plant": plant,
         "statements": statements,
         "differing_fields": rows,
         "n_differing": len(rows),
+        "differing_fields_year_owners": owner_rows,
         "initial_state_rows": state_rows,
         "ladder_gate_sha256": sha256(LADDER_GATE),
         "year_harness_sha256": sha256(YEAR_HARNESS),
+        "year_owners_sha256": sha256(OWNERS_HARNESS),
         "worktree": worktree_stamp(),
     }
     print("\nTHE SIDE-BY-SIDE TABLE: one row per model-config field on which "
-          "the two harnesses' RESOLVED programs differ")
-    print(f"  ladder  {statements['ladder']['file']}:run  "
-          f"config = {statements['ladder']['model_config_argument']}  "
-          f"_replace{ladder_kwargs or ' (none)'}")
-    print(f"  year    {statements['year']['file']}:run_member  "
-          f"config = {statements['year']['model_config_argument']}  "
-          f"_replace{year_kwargs or ' (none)'}")
-    if not rows:
-        print("  (empty -- the two programs are the SAME RESOLVED OBJECT)")
+          "the harnesses' EXECUTED programs differ")
+    print("  (each program is the object its own harness hands to "
+          "LatLonCGridOceanModel, captured by running it -- not read off the "
+          "source)")
+    for name, row in statements.items():
+        print(f"  {name:<12s} {row['file']}:{row['function']}  "
+              f"construction site reads `{row['construction_site_source']}`")
+    if not rows and not owner_rows:
+        print("  (empty -- all three programs are the SAME RESOLVED OBJECT)")
     for row in rows:
-        print(f"  {row['field']:<52s} ladder={row['ladder']:<24s} "
-              f"year={row['year']}")
+        print(f"  ladder vs year        {row['field']:<40s} "
+              f"ladder={row['ladder']:<24s} year={row['year']}")
+    for row in owner_rows:
+        print(f"  ladder vs year-owners {row['field']:<40s} "
+              f"ladder={row['ladder']:<24s} year={row['year']}")
     print("  the year's own INITIAL STATE against the card's, bit for bit:  "
           + "  ".join(f"{r['field']} {r['cells_unequal']}/{r['cells']}"
                       for r in state_rows))
@@ -361,7 +400,7 @@ def two_path(*, steps: int = 2, entry_root: Path = ORACLE_V1_ROOT,
     gate = _load("gyre_phase3_gate", LADDER_GATE)
     baro = _load("nemo_testcase_overflow_barotropic_gate",
                  HERE / "nemo_testcase_overflow_barotropic_gate.py")
-    card, ladder, year, _, _ = resolve_programs()
+    card, ladder, year, _owners = resolve_programs()
     if not config_rows(ladder, year):
         # After unification the year harness resolves the certified card, so
         # the historical program is reconstructed explicitly as the CONTROL.
@@ -559,7 +598,7 @@ def score_both_roots(*, steps: int = 3) -> dict:
 
     _policy()
     gate = _load("gyre_phase3_gate", LADDER_GATE)
-    card, ladder, _, _, _ = resolve_programs()
+    card, ladder, _year, _owners = resolve_programs()
     model = _model(card, ladder)
     masks = gate.expected_masks(card)
     nlev = card.recipe.z_coord.n_levels
@@ -633,7 +672,7 @@ def closure_ablation(*, steps: int = 2) -> dict:
 
     _policy()
     gate = _load("gyre_phase3_gate", LADDER_GATE)
-    card, ladder, _, _, _ = resolve_programs()
+    card, ladder, _year, _owners = resolve_programs()
     masks = gate.expected_masks(card)
     arms = {}
     for closure in ("real_freshwater", "virtual_salt_flux", "none"):
@@ -802,7 +841,12 @@ def self_check() -> int:
         rows = config_diff(plant="config-drift")["differing_fields"]
         require(not rows, f"config-drift is visible: {rows}")
 
+    def _program_drift():
+        rows = config_diff(plant="program-drift")["differing_fields"]
+        require(not rows, f"program-drift is visible: {rows}")
+
     expect_raises("config-drift", _drift)
+    expect_raises("program-drift", _program_drift)
     expect_raises("same-program-while-different", _plant_same_program)
     expect_raises("state-drift", lambda: config_diff(plant="state-drift"))
     expect_raises("missing-function", lambda: model_construction_kwargs(
@@ -817,8 +861,10 @@ def self_check() -> int:
 def _plant_same_program():
     """Assert an empty table while a field is deliberately perturbed."""
     _policy()
-    card, ladder, _, _, _ = resolve_programs()
-    drifted = ladder._replace(A_h=float(ladder.A_h) * 2.0)
+    card, ladder, _year, _owners = resolve_programs()
+    drifted = ladder._replace(
+        lateral_viscosity=ladder.lateral_viscosity._replace(
+            A_h=float(ladder.lateral_viscosity.A_h) * 2.0))
     rows = config_rows(ladder, drifted)
     require(not rows, "plant: the diff table is not empty")
 
@@ -839,8 +885,9 @@ def main(argv=None) -> int:
     parser.add_argument("--entry-root", type=Path, default=ORACLE_V2_ROOT,
                         help="the oracle record to score against; v2 is what "
                              "the certified receipts pass")
-    parser.add_argument("--plant", choices=("config-drift", "vacuous-reseed",
-                                            "same-program", "state-drift"))
+    parser.add_argument("--plant", choices=("config-drift", "program-drift",
+                                            "vacuous-reseed", "same-program",
+                                            "state-drift"))
     parser.add_argument("--output", type=Path)
     parser.add_argument("--require-unified", action="store_true",
                         help="exit non-zero unless the two programs resolve to "
@@ -871,12 +918,13 @@ def main(argv=None) -> int:
                                       entry_root=args.entry_root,
                                       plant=args.plant)
     if args.require_unified:
-        rows = report.get("config_diff", {}).get("differing_fields")
-        require(rows is not None,
-                "--require-unified needs --config-diff")
+        diff = report.get("config_diff")
+        require(diff is not None, "--require-unified needs --config-diff")
+        rows = diff["differing_fields"] + diff["differing_fields_year_owners"]
         require(not rows,
-                f"the ladder and the year resolve DIFFERENT programs: {rows}")
-        print("\nUNIFIED: the ladder and the year resolve the same object.")
+                f"the harnesses resolve DIFFERENT programs: {rows}")
+        print("\nUNIFIED: the ladder, the year and the year-owners harness "
+              "all hand the model the same object.")
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(report, indent=2, sort_keys=True,
