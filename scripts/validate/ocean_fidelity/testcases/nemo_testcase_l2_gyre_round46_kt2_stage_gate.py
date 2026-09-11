@@ -390,7 +390,7 @@ def _calibrate(records: dict, plant: str | None) -> dict:
     return rows
 
 
-def _given_inputs(records: dict, plant: str | None) -> list[dict]:
+def _given_inputs(records: dict, plant: str | None) -> tuple[list[dict], dict]:
     """Run legoESM operator routes on each complete NEMO kt=2 stage bundle."""
     import jax
     import jax.numpy as jnp
@@ -410,6 +410,9 @@ def _given_inputs(records: dict, plant: str | None) -> list[dict]:
         un, vn = _owned3(a["u_Kmm"]), _owned3(a["v_Kmm"])
         ju = np.concatenate([un[:, -1:, :], un], axis=1)
         jv = np.concatenate([np.zeros_like(vn[:1]), vn], axis=0)
+        ub, vb = _owned3(a["u_Kbb"]), _owned3(a["v_Kbb"])
+        ju_b = np.concatenate([ub[:, -1:, :], ub], axis=1)
+        jv_b = np.concatenate([np.zeros_like(vb[:1]), vb], axis=0)
         st = card.recipe.initial_state._replace(
             u=card.recipe.initial_state.u.replace(data=jnp.asarray(ju)),
             v=card.recipe.initial_state.v.replace(data=jnp.asarray(jv)),
@@ -429,7 +432,10 @@ def _given_inputs(records: dict, plant: str | None) -> list[dict]:
                 dt=card.dt_s,
                 momentum_only=True,
                 skip_lateral_viscosity=(stage == 2),
-                ldf_state=(state.T.data, state.S.data, state.u.data, state.v.data),
+                # Compiled dyn_ldf reads Kbb at every stage, whereas the rest
+                # of the RHS reads this stage's Kmm state.
+                ldf_state=(state.T.data, state.S.data,
+                           jnp.asarray(ju_b), jnp.asarray(jv_b)),
                 momentum_flux_face_thickness=(jnp.asarray(hu), jnp.asarray(hv)),
                 zad_continuity_dt=np.float64(1.0 / a["r1_Dt"]),
                 nemo_operator_association=True,
@@ -485,6 +491,61 @@ def _given_inputs(records: dict, plant: str | None) -> list[dict]:
                         "execution": "production-jit model diagnostic from NEMO stage inputs",
                     }
                 )
+        # Full-accumulator score through the production JIT path. Stages 2/3
+        # have the same source order as the shared model route. Stage 1 is the
+        # compiled stp2d exception (HPG -> LDF -> VOR -> KEG -> ZAD), so rebuild
+        # only its accumulator association from the already-computed production
+        # arrays inside a second JIT with an explicit barrier at every routine
+        # boundary. This is neither an oracle replay nor a tendency subtraction.
+        if stage == 1:
+            def stage1_accumulators(parts):
+                hpg_u = parts["after_hpg_u"].data
+                hpg_v = parts["after_hpg_v"].data
+                ldf_u = jax.lax.optimization_barrier(hpg_u + parts["ldf_u"].data)
+                ldf_v = jax.lax.optimization_barrier(hpg_v + parts["ldf_v"].data)
+                vor_u = jax.lax.optimization_barrier(ldf_u + parts["vorticity_u"].data)
+                vor_v = jax.lax.optimization_barrier(ldf_v + parts["vorticity_v"].data)
+                keg_u = jax.lax.optimization_barrier(vor_u + parts["keg_u"].data)
+                keg_v = jax.lax.optimization_barrier(vor_v + parts["keg_v"].data)
+                adv_u = jax.lax.optimization_barrier(keg_u + parts["zad_u"].data)
+                adv_v = jax.lax.optimization_barrier(keg_v + parts["zad_v"].data)
+                return {"hpg_u": hpg_u, "hpg_v": hpg_v,
+                        "ldf_u": ldf_u, "ldf_v": ldf_v,
+                        "vor_u": vor_u, "vor_v": vor_v,
+                        "adv_u": adv_u, "adv_v": adv_v}
+            accumulators = jax.jit(stage1_accumulators)(components)
+            boundaries = ("hpg", "ldf", "vor", "adv")
+            execution = "production-jit components in compiled stage-1 accumulator order"
+        else:
+            accumulators = {
+                "hpg_u": components["after_hpg_u"].data,
+                "hpg_v": components["after_hpg_v"].data,
+                "vor_u": components["after_vor_u"].data,
+                "vor_v": components["after_vor_v"].data,
+                "adv_u": components["after_adv_u"].data,
+                "adv_v": components["after_adv_v"].data,
+                "ldf_u": components["after_ldf_u"].data,
+                "ldf_v": components["after_ldf_v"].data,
+            }
+            boundaries = ("hpg", "vor", "adv", "ldf") if stage == 3 else (
+                "hpg", "vor", "adv")
+            execution = "production-jit accumulator at model routine barrier"
+        for op in boundaries:
+            for face in ("u", "v"):
+                value = np.asarray(accumulators[f"{op}_{face}"])
+                got = value[:, 1:, :] if face == "u" else value[1:, :, :]
+                ref = _owned3(a[f"after_{op}_{face}"])
+                mask = _owned3(a[f"{face}mask"]) > 0.5
+                if plant == "given" and (stage, op, face) == (1, "hpg", "u"):
+                    got = got.copy()
+                    got[tuple(np.argwhere(mask)[0])] += 1.0
+                rows.append({
+                    "name": f"GYRE-zco.kt2.s{stage}.post_{op}_accumulator.{face}",
+                    "n": int(mask.sum()),
+                    "n_unequal": int(np.count_nonzero(got[mask] != ref[mask])),
+                    "max_abs": float(np.max(np.abs(got[mask] - ref[mask]))),
+                    "execution": execution,
+                })
         # Separate accumulator-level KEG and explicit ZAD scores retain the
         # exact NEMO ww injection; the combined advection component above uses
         # the model's own WZV route and therefore diagnoses that seam too.
@@ -507,7 +568,39 @@ def _given_inputs(records: dict, plant: str | None) -> list[dict]:
                 )
     if plant == "given":
         require(any(r["max_abs"] > 0.5 for r in rows), "given-input plant did not land")
-    return rows
+    first = {}
+    expected = {1: "ldf", 2: "vor", 3: "vor"}
+    for stage in (1, 2, 3):
+        order = ("hpg", "ldf", "vor", "adv") if stage == 1 else (
+            ("hpg", "vor", "adv", "ldf") if stage == 3 else ("hpg", "vor", "adv")
+        )
+        measured = None
+        counts = None
+        for op in order:
+            pair = [
+                row for row in rows
+                if row["name"] in {
+                    f"GYRE-zco.kt2.s{stage}.post_{op}_accumulator.u",
+                    f"GYRE-zco.kt2.s{stage}.post_{op}_accumulator.v",
+                }
+            ]
+            require(len(pair) == 2, f"missing model-path boundary kt2 stage {stage} {op}")
+            by_face = {row["name"].rsplit(".", 1)[-1]: row for row in pair}
+            if any(row["n_unequal"] for row in pair):
+                measured = op
+                counts = {face: by_face[face]["n_unequal"] for face in ("u", "v")}
+                break
+        first[f"stage{stage}"] = {
+            "operator": measured,
+            "n_unequal": counts,
+            "preregistered_operator": expected[stage],
+            "prediction": "CONFIRMED" if measured == expected[stage] else "REFUTED",
+        }
+    require(
+        all(row["prediction"] == "CONFIRMED" for row in first.values()),
+        f"round48 first-non-bit prediction REFUTED: {first}",
+    )
+    return rows, first
 
 
 def _trajectory(records: dict, plant: str | None) -> list[dict]:
@@ -756,11 +849,14 @@ def run(
         "kt2_duplicate_payload_identity": kt2_payload_identity,
         "plant": plant,
         "given_inputs": [],
+        "model_path_first_nonbit": {},
         "trajectory": [],
         "status": "PASS",
     }
     if mode in {"given-inputs", "all"}:
-        report["given_inputs"] = _given_inputs(records, plant)
+        report["given_inputs"], report["model_path_first_nonbit"] = _given_inputs(
+            records, plant
+        )
     if mode in {"trajectory", "all"}:
         report["trajectory"] = _trajectory(records, plant)
         if any(row.get("status") != "PASS" for row in report["trajectory"]):

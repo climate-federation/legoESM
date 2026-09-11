@@ -114,6 +114,12 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stp2d.f90"),
     "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynzad.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynzad.f90"),
+    "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynspg_ts.f90"),
+    "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynhpg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynhpg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynldf_lev.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynldf_lev.f90"),
     "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/traadv.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/traadv.f90"),
     "GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/zdfmxl.f90": (
@@ -173,6 +179,9 @@ FILES = {
         REPO / "packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py",
     "ocean_model_latlon_cgrid.py":
         REPO / "packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py",
+    "barotropic_latlon_cgrid.py":
+        REPO / "packages/ocean/legoesm/ocean/dynamics/barotropic_latlon_cgrid.py",
+    "state.py": REPO / "packages/ocean/legoesm/ocean/state.py",
     "provenance.py": REPO / "packages/ocean/legoesm/ocean/fidelity/provenance.py",
     # --- round 35 paths: the implicit vertical TRACER solve ---
     # GYRE's OWN run log for this round, so a GYRE resolved value cannot bind
@@ -355,6 +364,62 @@ CITATION_MAP = {
         'IF( .NOT.ln_dynadv_vec )   CALL dyn_adv', 7],
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/traadv.f90:248-250': [
         'pFu(ji,jj,jpk) = 0._wp', 'pFw(ji,jj,jpk) = 0._wp', 3],
+    # --- ROUND 48: model-path first boundary and cross-step bt memory ---
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stp2d.f90:141-175': [
+        '!*  hydrostatic pressure gradient (HPG))',
+        "CALL r46_rhs( 'after_zad', uu, vv, Krhs )", 35],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stp2d.f90:301-308': [
+        'Compute ssh and (uu_b,vv_b)  at N+1',
+        'CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs, uu, vv, ssh, uu_b, vv_b, Kaa )', 8],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:695-711': [
+        'Round-29 L2 WRITE-only stage-3 pre-LDF momentum frame.',
+        'CALL dyn_ldf( kstp, Kbb, Kmm, uu, vv, Krhs )', 17],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynldf_lev.f90:64-74': [
+        'SUBROUTINE dynldf_lev_lap( kt, Kbb, Kmm, pu, pv, Krhs )',
+        'pu(Krhs), pv(Krhs) increased by the harmonic operator applied on pu(Kbb), pv(Kbb)', 11],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynldf_lev.f90:123-127': [
+        ('zwf(ji-1,jj-1) = ahmf', 1),
+        ('zwt(ji,jj)     = ahmt', 1), 5],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynhpg.f90:400-427': [
+        '!                                   ! add to the general momentum trend',
+        'pvv(ji,jj,jk,Krhs) = zhpj(ji,jj) + zvap', 28],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynspg_ts.f90:352-378': [
+        'IF( ln_bt_fw ) THEN                 ! FORWARD integration: start from NOW fields',
+        'vn_adv(:,:)     = 0._wp', 27],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynspg_ts.f90:824-827': [
+        'IF(.NOT.ll_bt_av ) THEN', 'pssh (:,:,Kaa) = ssha_e(:,:)', 4],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynspg_ts.f90:456-480': [
+        'Set extrapolation coefficients for predictor step:',
+        'va_e(ji,jj) = za1 * vn_e(ji,jj) + za2 * vb_e(ji,jj) + za3 * vbb_e(ji,jj)', 25],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynspg_ts.f90:749-757': [
+        '!* Swap', 'vn_e   (:,:) = va_e  (:,:)', 9],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynspg_ts.f90:953-980': [
+        "IF( TRIM(cdrw) == 'READ' ) THEN", "CALL iom_rstput( kt, nitrst, numrow, 'vb_e'", 28],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynspg_ts.f90:483-489': [
+        ('IF( .NOT.lk_linssh ) THEN', 1),
+        'zsshp2_e(:,:) = za1 * sshn_e(:,:)  + za2 * sshb_e(:,:) + za3 * sshbb_e(:,:)', 7],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynspg_ts.f90:593-600': [
+        'Half-step back interpolation of SSH',
+        '&            + za2 *  sshb_e(ji,jj) + za3 *  sshbb_e(ji,jj)', 8],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynspg_ts.f90:759-761': [
+        'sshbb_e(:,:) = sshb_e(:,:)', 'sshn_e (:,:) = ssha_e(:,:)', 3],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynspg_ts.f90:373-378': [
+        '! Initialize sums:', 'vn_adv(:,:)     = 0._wp', 6],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynspg_ts.f90:559-567': [
+        '! Sum over sub-time-steps to compute advective velocities',
+        'vn_adv(ji,jj) = vn_adv(ji,jj) + za2 * zhV(ji,jj) * r1_e1v(ji,jj)', 9],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynspg_ts.f90:797-804': [
+        '! Finalize sums:', 'pssh   (:,:,Kaa) = pssh   (:,:,Kaa) / r1_wgt1s', 8],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynspg_ts.f90:858-863': [
+        'END Phase 3 for RK3', "IF( lrst_oce )   CALL ts_rst( kt, 'WRITE' )", 6],
+    'state.py:648-666': [
+        '# Cross-window barotropic AB3/AM4 substep histories for',
+        'bt_hist: object = None', 19],
+    'barotropic_latlon_cgrid.py:2053-2076': [
+        ('if ab3_za is not None:', 7), 'etabb0 = eta - deta_bb', 24],
+    'barotropic_latlon_cgrid.py:2858-2869': [
+        ('state_new = state._replace(', 1),
+        ('vv_b=state.vv_b.replace(data=V_bar_avg),', 1), 12],
     'GYRE_OMIP_L2_P3_SM_R41ADVSP/EXP00/ocean.output:535': (
         'Courant number targeted application   ln_zad_Aimp =  F', 1),
     'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynadv.f90:176-185': [
@@ -921,8 +986,8 @@ CITATION_MAP = {
     'ocean.output:875': 'Barotropic time filter => nn_bt_flt',
     'lock_kt1_10/ocean.output:615': 'no explicit diffusion                ln_dynldf_OFF',
     'overflow_kt1_10/ocean.output:727': 'no explicit diffusion                ln_dynldf_OFF',
-    'ocean_pe_latlon_cgrid.py:5045': 'rho_prime=rho_prime, h_k=h_k,',
-    'ocean_pe_latlon_cgrid.py:5038-5039': [
+    'ocean_pe_latlon_cgrid.py:5057': 'rho_prime=rho_prime, h_k=h_k,',
+    'ocean_pe_latlon_cgrid.py:5050-5051': [
         '_u_ldf_local = u if ldf_state is None else ldf_state[2]',
         '_v_ldf_local = v if ldf_state is None else ldf_state[3]',
         2],

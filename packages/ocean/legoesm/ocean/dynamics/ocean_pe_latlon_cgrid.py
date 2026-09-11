@@ -4805,9 +4805,13 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # Diagnostics retain their historical combined KE_PGF bucket below.
         du_dt = jax.lax.optimization_barrier(hpg_tendency_u)
         dv_dt = jax.lax.optimization_barrier(hpg_tendency_v)
+        _nemo_after_hpg_u = du_dt
+        _nemo_after_hpg_v = dv_dt
     else:
         du_dt = KE_PGF_u
         dv_dt = KE_PGF_v
+        _nemo_after_hpg_u = du_dt
+        _nemo_after_hpg_v = dv_dt
     # Diagnostics scaffolding: zero arrays for terms that may be
     # inactive in this config; overwritten below where active.
     _diag_zero_u = jnp.zeros_like(du_dt)
@@ -4933,10 +4937,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         diag_vortcor_u = diag_vortcor_u + cor_u
         diag_vortcor_v = diag_vortcor_v + cor_v
 
+    _nemo_after_vor_u = du_dt
+    _nemo_after_vor_v = dv_dt
     if _nemo_vector_order:
         # End dyn_vor; then dyn_keg is the first subroutine of dyn_adv.
         du_dt = jax.lax.optimization_barrier(du_dt)
         dv_dt = jax.lax.optimization_barrier(dv_dt)
+        _nemo_after_vor_u = du_dt
+        _nemo_after_vor_v = dv_dt
         du_dt = jax.lax.optimization_barrier(du_dt + (-dKE_dx))
         dv_dt = jax.lax.optimization_barrier(dv_dt + (-dKE_dy))
 
@@ -4956,10 +4964,14 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         grid, _mom_adv, _weno_order, config, diagnose_momentum,
         u_full=u, v_full=v,
     )
+    _nemo_after_adv_u = du_dt
+    _nemo_after_adv_v = dv_dt
     if _nemo_vector_order:
         # End dyn_zad / dyn_adv before any following tendency routine.
         du_dt = jax.lax.optimization_barrier(du_dt)
         dv_dt = jax.lax.optimization_barrier(dv_dt)
+        _nemo_after_adv_u = du_dt
+        _nemo_after_adv_v = dv_dt
 
     # --- Stage 8b: GH #480 N/S free-slip-wall grid-mode filter. ---
     # At a free-slip N/S wall the 2dx-in-lon, v-dominant, ROTATIONAL grid mode
@@ -5045,6 +5057,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             rho_prime=rho_prime, h_k=h_k,
             vertex_mask=vertex_mask,
         )
+    _nemo_after_ldf_u = du_dt
+    _nemo_after_ldf_v = dv_dt
 
     # --- Energy backscatter (post-viscosity; lateral-friction family). ---
     # Jansen-Held (2014) energy backscatter (diagnostic-E, no
@@ -5444,6 +5458,27 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             # In vector-invariant form NEMO dyn_adv owns KEG + ZAD.
             "advection_u": _mu(-dKE_dx + diag_Dterm_u + diag_vertadv_u),
             "advection_v": _mv(-dKE_dy + diag_Dterm_v + diag_vertadv_v),
+            # Actual accumulator values at the production routine barriers.
+            # The GYRE gate uses these directly for stages 2/3, whose compiled
+            # order is HPG -> VOR -> ADV -> (stage-3 LDF).
+            "after_hpg_u": _mu(_nemo_after_hpg_u),
+            "after_hpg_v": _mv(_nemo_after_hpg_v),
+            "after_vor_u": _mu(_nemo_after_vor_u),
+            "after_vor_v": _mv(_nemo_after_vor_v),
+            "after_adv_u": _mu(_nemo_after_adv_u),
+            "after_adv_v": _mv(_nemo_after_adv_v),
+            "after_ldf_u": _mu(_nemo_after_ldf_u),
+            "after_ldf_v": _mv(_nemo_after_ldf_v),
+            # Isolated production terms needed to reconstruct stage 1, where
+            # compiled stp2d puts LDF between HPG and VOR.
+            "keg_u": _mu(-dKE_dx),
+            "keg_v": _mv(-dKE_dy),
+            "zad_u": _mu(diag_Dterm_u + diag_vertadv_u),
+            "zad_v": _mv(diag_Dterm_v + diag_vertadv_v),
+            "ldf_u": _mu(diag_Ah_lap_u + diag_Bh_bilap_u
+                           + diag_Cs_smag_u + diag_Cl_leith_u),
+            "ldf_v": _mv(diag_Ah_lap_v + diag_Bh_bilap_v
+                           + diag_Cs_smag_v + diag_Cl_leith_v),
         }
     return tendencies, diagnostics
 
