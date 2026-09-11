@@ -2691,15 +2691,28 @@ class TestRediKmmEta:
         # load-bearing call -- the MLF/leap-frog tendency call -- and this
         # assertion still passed, because three other occurrences remained.
         # So the check is anchored on the argument list that call is in.
-        n = src.count("redi_kmm_eta=state.eta.data")
+        # TWO spellings since PR #1728 round 5: the ``_step_impl`` pair reads a
+        # local ``_kmm_eta`` so the leap-frog's BEFORE-level dissipative pass
+        # can hand it the true Nnn height (NEMO indexes every e3/r3 of
+        # traldf_iso and ldf_slp at Kmm while only the TRACER is Kbb), and the
+        # ``_unsplit_ab2_step`` pair still reads ``state.eta.data`` directly.
+        # Counting both keeps the arity guard; pinning the local's definition
+        # keeps it from being satisfied by a local that means something else.
+        n = (src.count("redi_kmm_eta=state.eta.data")
+             + src.count("redi_kmm_eta=_kmm_eta"))
         assert n == 4, (
             f"expected 4 call sites to carry the Kmm height, found {n}; "
             "the sites are the leap-frog tendency + its K33, and the "
             "unsplit-AB2 tendency + its K33")
+        assert ("_kmm_eta = (state.eta.data if _kmm_geometry_eta is None"
+                in src), (
+            "the ``_kmm_eta`` local no longer defaults to the step-entry "
+            "height, so the two call sites that read it are not carrying "
+            "Kmm any more")
         i = src.index("_gm_out = gm_redi_tracer_tendency_latlon(")
         j = src.index("return_bolus_transport=_want_bolus", i)
         call = src[i:j]
-        assert "redi_kmm_eta=state.eta.data" in call, (
+        assert "redi_kmm_eta=_kmm_eta" in call, (
             "the leap-frog GM/Redi tendency call -- the one whose operator "
             "this fix is about -- does not carry the Kmm height")
         assert "state_new.eta.data, state_new.H_bathy.data" in call, (
