@@ -136,3 +136,49 @@ def test_gate_plant_fails():
     r = _run_gate("--plant")
     assert r.returncode != 0
     assert "GATE FAIL" in r.stdout
+
+
+@pytest.mark.skipif(not os.path.exists(_MESH),
+                    reason=f"NEMO oracle mesh not on this machine: {_MESH}")
+@pytest.mark.skipif(importlib.util.find_spec("netCDF4") is None,
+                    reason="netCDF4 not installed: the gate cannot read the "
+                           "oracle mesh, so a failure here would not be a "
+                           "gate regression")
+def test_model_consumed_geometry_is_nemos_own_ladder():
+    """Section 4: the card RUNS on NEMO's e3t_0, not only carries it.
+
+    Section 1+2 is blind to this (Rule 2: a mesh gate cannot see which of the
+    two ladders the model integrates), which is how the card spent months
+    cutting its staircase from `e3t_1d` while NEMO's DINO integrates `e3t_0`
+    (`key_vco_3d`, domzgr_substitute.h90:102).
+    """
+    r = _run_gate()
+    assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]
+    body = r.stdout.split("SECTION 4")[-1]
+    assert "FAIL" not in body, body
+    for row in ("e3t(Kmm) live thickness", "e3t_0 reference ladder",
+                "gdept_0 T-depth ladder", "e3u_0 live face thickness",
+                "ht_0 column depth", "r1_hu_0"):
+        assert row in body, f"section 4 lost its {row!r} row:\n{body}"
+
+
+@pytest.mark.skipif(not os.path.exists(_MESH),
+                    reason=f"NEMO oracle mesh not on this machine: {_MESH}")
+@pytest.mark.skipif(importlib.util.find_spec("netCDF4") is None,
+                    reason="netCDF4 not installed: the gate cannot read the "
+                           "oracle mesh, so a failure here would not be a "
+                           "gate regression")
+def test_ladder_plant_flips_every_derived_row():
+    """Non-vacuity for section 4, row by row rather than "the gate failed".
+
+    The plant moves the CONSTRUCTED ladder by 1 ulp at every level.  Each
+    ladder-derived row must flip; each raw mesh row must NOT, because it is
+    carried straight off the mesh and is not derived from the planted value.
+    That asymmetry is what proves the derived rows are the ones under test.
+    """
+    r = _run_gate("--plant-ladder")
+    assert r.returncode != 0
+    assert "8 of 8 ladder-derived rows flipped to FAIL" in r.stdout, \
+        r.stdout[-4000:]
+    assert "PLANT DID NOT REACH" not in r.stdout
+    assert "PLANT REACHED A RAW MESH ROW" not in r.stdout

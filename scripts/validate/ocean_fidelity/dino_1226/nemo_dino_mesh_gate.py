@@ -160,6 +160,10 @@ def main() -> int:
     ap.add_argument("--plant", action="store_true",
                     help="flip one wet cell of the transcribed mask; the gate "
                          "MUST then exit non-zero (non-vacuity self-test)")
+    ap.add_argument("--plant-ladder", action="store_true",
+                    help="nudge ONE level of the CONSTRUCTED vertical ladder "
+                         "by 1 ulp; section 4 MUST then exit non-zero "
+                         "(non-vacuity self-test for the geometry rows)")
     args = ap.parse_args()
 
     # Rule 1c: an oracle comparison runs fp64, and it says so.
@@ -191,6 +195,28 @@ def main() -> int:
         ndm.nemo_dino_mesh = _planted
         dino_mod._nemo_faithful_dino_domain.cache_clear()
         print("PLANT ACTIVE: one interior surface cell flipped\n")
+
+    if args.plant_ladder:
+        # Plant INSIDE the construction, not on the arrays after it: the point
+        # is to prove section 4 reads the ladder the card is built from.  The
+        # raw z_coord.nemo_* mesh fields are NOT derived from this return
+        # value, so their rows stay green -- that asymmetry is the evidence
+        # that the derived rows are the ones being tested.
+        from legoesm.ocean.fidelity import nemo_state_bridge as _nsb
+        _true_evsf = _nsb.effective_vertical_scale_factors
+
+        def _planted_evsf(grid, tmask, mode=None):
+            # EVERY level by 1 ulp, not one level.  Measured: a 1-ulp plant on
+            # the surface level alone is 2.2e-16 m, which vanishes inside a
+            # 4000 m column sum (ulp 4.5e-13), so it never reaches ht_0/hu_0
+            # and the plant would certify less than it appears to.  Planting
+            # every level moves the column depth on all 9920 wet columns.
+            e3t, td, src = _true_evsf(grid, tmask, mode=mode)
+            return (np.nextafter(e3t, np.inf), np.nextafter(td, np.inf), src)
+
+        _nsb.effective_vertical_scale_factors = _planted_evsf
+        dino_mod._nemo_faithful_dino_domain.cache_clear()
+        print("LADDER PLANT ACTIVE: level 1 thickness moved by 1 ulp\n")
 
     sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
                          capture_output=True, text=True).stdout.strip()
@@ -321,7 +347,12 @@ def main() -> int:
     file_br = bridge_nemo_to_legoesm_topo(
         fg, NemoState(T=_z, S=_z, u=_z, v=_z,
                       ssh=np.zeros(fg.tmask.shape[:2]), rhd=None),
-        periodic_i=True, full_step=True, carry_native_lat_deg=True)
+        periodic_i=True, full_step=True, carry_native_lat_deg=True,
+        # Same ladder as the card pins (#1728); without this the two sides of
+        # the comparison would stand on DIFFERENT vertical grids and the check
+        # would fail for a reason that has nothing to do with the mesh
+        # transcription it exists to test.
+        e3t_mode="both")
     ours = dino_mod.nemo_faithful_dino_domain()
     import jax.tree_util as _jtu
 
@@ -387,6 +418,153 @@ def main() -> int:
             t.failed = True
     print(f"  wet cells: {int(tmN.sum())} 3-D / "
           f"{int(tmN[:, :, 0].sum())} surface")
+
+    # ---- SECTION 4: the geometry the MODEL CONSUMES ----------------------
+    #
+    # Section 1+2 proves the TRANSCRIPTION equals NEMO's mesh.  It is blind to
+    # whether the model RUNS on it (oracle-fidelity Rule 2: a bit-exact state
+    # gate cannot see the boxes holding the state).  For months it did not:
+    # the card cut its staircase from the 1-D reference ladder e3t_1d while
+    # NEMO's DINO integrates the 3-D e3t_0 -- `key_qco key_vco_3d`
+    # (cfgs/DINO/cpp_DINO.fcm:1) makes `E3t_0(i,j,k)` expand to `e3t_3d`
+    # (domzgr_substitute.h90:102) and leaves e3t_1d reachable only under
+    # key_vco_1d (:72).
+    #
+    # So this section scores the geometry taken from the domain the driver's
+    # own path CONSTRUCTS (grid/z/st above) against mesh_mask.nc, field by
+    # field, at the same bar as everything else: ZERO CELLS UNEQUAL.
+    print("\nSECTION 4  the geometry the MODEL CONSUMES "
+          "(NEMO key_qco key_vco_3d)")
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import min_cell_to_vface
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        compute_layer_thickness, min_cell_to_uface)
+
+    g4 = Table()
+    tmask3 = O3("tmask") > 0.5
+    umask3 = O3("umask") > 0.5
+    vmask3 = O3("vmask") > 0.5
+    e3t0, gdept0, gdepw0 = O3("e3t_0"), O3("gdept_0"), O3("gdepw_0")
+    e3w0, e3u0, e3v0 = O3("e3w_0"), O3("e3u_0"), O3("e3v_0")
+    e3uw0, e3vw0 = O3("e3uw_0"), O3("e3vw_0")
+    lev_any = tmask3.any(axis=(0, 1))
+
+    # C1 -- the live layer thickness.  NEMO: e3t(i,j,k,t) = E3t_0*(1+r3t*tmask)
+    # (domzgr_substitute.h90:45 Tmsk, :102 E3t_0=e3t_3d; r3t = ssh*r1_ht_0,
+    # domqco.F90:160).  At rest r3t = 0, so the reference half is all of it.
+    # Rule 10: the model's OWN statement, with the card's own floor -- not a
+    # re-derivation with a convenient constant.
+    mc4, _ = dino_mod.dino_lat_lon_model_config(grid, cfg, physics=True)
+    h_live = np.asarray(compute_layer_thickness(
+        st.eta.data, st.H_bathy.data, z,
+        min_water_column_m=mc4.min_water_column_m))
+    g4.check("e3t(Kmm) live thickness", h_live * tmask3, e3t0 * tmask3)
+    # the 1-D ladder the staircase is cut from, per level, against the value
+    # NEMO's own 3-D array holds at that level
+    dz = np.asarray(z.dz_ref).ravel()
+    nlev4 = e3t0.shape[-1]
+    e3t_lev = np.array([e3t0[np.argwhere(tmask3[:, :, k])[0][0],
+                             np.argwhere(tmask3[:, :, k])[0][1], k]
+                        if lev_any[k] else dz[k] for k in range(nlev4)])
+    gdept_lev = np.array([gdept0[np.argwhere(tmask3[:, :, k])[0][0],
+                                 np.argwhere(tmask3[:, :, k])[0][1], k]
+                          if lev_any[k] else 0.0 for k in range(nlev4)])
+    g4.check("e3t_0 reference ladder", dz, e3t_lev)
+    # C5/C6 -- the S-EOS depth (eosbn2.F90:297 zh = gdept(Knn)) and the sco
+    # pressure-gradient depth (dynhpg.F90:353/378 gdept_z0), both read from
+    # z_coord.t_depth_ref (eos.py:823, ocean_pe_latlon_cgrid.py:1900-1906).
+    td4 = np.asarray(z.t_depth_ref).ravel()
+    g4.check("gdept_0 T-depth ladder",
+             td4[lev_any], gdept_lev[lev_any])
+    # raw mesh fields the fidelity arms read straight off the coordinate
+    g4.check("gdepw_0 (z_coord raw)", np.asarray(z.nemo_gdepw_0), gdepw0)
+    g4.check("e3w_0 (z_coord raw)", np.asarray(z.nemo_e3w_0), e3w0)
+    g4.check("e3t_0 (z_coord raw)", np.asarray(z.nemo_e3t_0), e3t0)
+    # e3uw_0/e3vw_0: zgr_lib.F90:206-264 builds them as column averages of a
+    # horizontally-uniform e3w_0, so the raw e3w_0 the momentum vertical solve
+    # interpolates to the face IS them.  Checked, not assumed.
+    g4.check("e3uw_0 == e3w_0", np.asarray(z.nemo_e3w_0), e3uw0)
+    g4.check("e3vw_0 == e3w_0", np.asarray(z.nemo_e3w_0), e3vw0)
+    # C9 -- the EEN relative-vorticity metric.  ln_dynvor_een = .true.
+    # (namelist_cfg:331), so e3f_0vor divides relative vorticity at every
+    # f-point and is built from the 3-D e3t_0.  The card carries NEMO's own
+    # e3f_0 raw in the EEN barotropic operand bundle.
+    _een = getattr(z, "nemo_een_barotropic", None)
+    if _een is None:
+        g4.rows.append(("e3f_0 (EEN operand)", -1, float("nan"), 0,
+                        "FAIL no nemo_een_barotropic on this coordinate"))
+        g4.failed = True
+    else:
+        g4.check("e3f_0 (EEN operand)", np.asarray(_een.e3f_0), O3("e3f_0"))
+    # C3 -- e3u_0/e3v_0 as the model builds them: the shallower neighbour's
+    # reference thickness (vertical.py nemo_qco_card_mesh_operands).
+    # BLIND SPOT, declared: NEMO builds e3u_0 = 0.5*(e3t(i)+e3t(i+1))
+    # (zgr_lib.F90:230), not the minimum taken here.  On a horizontally
+    # uniform ladder the two coincide exactly, so this row goes green WITHOUT
+    # testing the operator; on a non-uniform card it would not.
+    h_ref = jnp.asarray(np.asarray(z.h_partial))
+    e3u_live = np.asarray(min_cell_to_uface(h_ref))[:, 1:, :]
+    e3v_live = np.asarray(min_cell_to_vface(h_ref, grid))[1:, :, :]
+    g4.check("e3u_0 live face thickness", e3u_live * umask3, e3u0 * umask3)
+    g4.check("e3v_0 live face thickness", e3v_live * vmask3, e3v0 * vmask3)
+    # C2/C3 -- the column depths.  domain.F90:144-145.
+    ht0 = (e3t0 * tmask3).sum(axis=-1)
+    hu0 = (e3u0 * umask3).sum(axis=-1)
+    hv0 = (e3v0 * vmask3).sum(axis=-1)
+    g4.check("ht_0 column depth", np.asarray(st.H_bathy.data), ht0)
+    g4.check("hu_0 (z_coord raw)", np.asarray(z.nemo_hu_0), hu0)
+    g4.check("hv_0 (z_coord raw)", np.asarray(z.nemo_hv_0), hv0)
+    g4.check("hu_0 live face sum", (e3u_live * umask3).sum(axis=-1), hu0)
+    g4.check("hv_0 live face sum", (e3v_live * vmask3).sum(axis=-1), hv0)
+    # C4 -- the reciprocals the qco barotropic path divides by.
+    # NEMO: r1_hu_0 = ssumask/(hu_0 + 1 - ssumask)   (domain.F90:159).
+    # legoESM: wet_u/(hu_0 + 1 - wet_u) with wet_u = (hu_0 > 0)
+    # (vertical.py:180-182).  Scoring this also scores the PREDICATE: the two
+    # agree only if (hu_0 > 0) is NEMO's own ssumask.
+    ssu, ssv = O("umaskutil"), O("vmaskutil")
+    mh_u = np.asarray(z.nemo_hu_0)
+    mh_v = np.asarray(z.nemo_hv_0)
+    wet_u = (mh_u > 0.0).astype(np.float64)
+    wet_v = (mh_v > 0.0).astype(np.float64)
+    g4.check("r1_hu_0", wet_u / (mh_u + 1.0 - wet_u),
+             ssu / (hu0 + 1.0 - ssu))
+    g4.check("r1_hv_0", wet_v / (mh_v + 1.0 - wet_v),
+             ssv / (hv0 + 1.0 - ssv))
+    g4.report()
+    if g4.failed:
+        t.failed = True
+    if args.plant_ladder:
+        # Non-vacuity is checked ROW BY ROW, not by "the section failed": a
+        # plant that trips one row while leaving the rest green would still
+        # read as a pass here, and those rows would be certifying nothing.
+        # The raw z_coord.nemo_* fields are deliberately NOT in this set --
+        # they are carried straight off the mesh and are not derived from the
+        # planted ladder, so they MUST stay green, and that asymmetry is what
+        # shows the derived rows are the ones under test.
+        must_fail = {
+            "e3t(Kmm) live thickness", "e3t_0 reference ladder",
+            "gdept_0 T-depth ladder", "e3u_0 live face thickness",
+            "e3v_0 live face thickness", "ht_0 column depth",
+            "hu_0 live face sum", "hv_0 live face sum",
+        }
+        verdicts = {r[0]: r[4] for r in g4.rows}
+        survived = sorted(n for n in must_fail
+                          if not verdicts.get(n, "").startswith("FAIL"))
+        unexpected = sorted(n for n, v in verdicts.items()
+                            if n not in must_fail and v.startswith("FAIL"))
+        print(f"  LADDER PLANT: {len(must_fail) - len(survived)} of "
+              f"{len(must_fail)} ladder-derived rows flipped to FAIL")
+        if survived:
+            print(f"  PLANT DID NOT REACH (rows certify nothing): {survived}")
+            t.failed = True
+        if unexpected:
+            print(f"  PLANT REACHED A RAW MESH ROW (it should not): "
+                  f"{unexpected}")
+            t.failed = True
+        if not survived and not unexpected:
+            print("  plant is NON-VACUOUS and correctly scoped")
+            # A planted run must still exit non-zero overall.
+            t.failed = True
 
     print("\nGATE " + ("FAIL" if t.failed else "PASS"))
     return 1 if t.failed else 0

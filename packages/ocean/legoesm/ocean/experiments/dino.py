@@ -2671,32 +2671,27 @@ def dino_lat_lon_vertical(grid, cfg: DINOConfig | None = None):
     if cfg is None:
         cfg = DINOConfig()
     if cfg.nemo_faithful_grid:
-        # 36 reference levels from e3t_1d/gdept_1d wrapped in a FULL-STEP
-        # staircase cut at NEMO's own per-column k_bot.  Level 36 is NEMO's
-        # permanently dry dummy and stays dry here too.
+        # 36 reference levels from NEMO's own e3t_0/gdept_0 wrapped in a
+        # FULL-STEP staircase cut at NEMO's own per-column k_bot.  Level 36 is
+        # NEMO's permanently dry dummy and stays dry here too.
         #
-        # KNOWN GAP, MEASURED (#1728, scripts/validate/ocean_fidelity/
-        # dino_1226/spg_kt1_barotropic_ladder.py rung R0).  NEMO's DINO
-        # carries TWO vertical ladders and this one is the wrong ladder.
-        # usr_def_zgr calls zgr_sco_mi96 on a FLAT column (zflat = zHmax =
-        # 4000 m, usrdef_zgr.F90:107-118), so the 3-D e3t_0 it returns is
+        # THE LADDER (#1728, round 61; measured by
+        # scripts/validate/ocean_fidelity/dino_1226/nemo_dino_mesh_gate.py
+        # section 4 and by spg_kt1_barotropic_ladder.py rung R0).  NEMO's DINO
+        # carries TWO vertical ladders and this card used to run on the wrong
+        # one.  usr_def_zgr calls zgr_sco_mi96 on a FLAT column (zflat = zHmax
+        # = 4000 m, usrdef_zgr.F90:107-118), so the 3-D e3t_0 it returns is
         # horizontally UNIFORM -- the column-to-column spread over the 342134
         # wet cells is exactly 0.0 at every level -- but it is NOT the 1-D
-        # reference ladder e3t_1d that this staircase is cut from.  The two
-        # agree for k = 1..25 and then part company: e3t_0/e3t_1d = 0.979,
-        # 0.945, 0.924, 0.915, 0.919, 0.935, 0.965, 1.009, 1.070, 1.148 at
-        # k = 26..35.  Consequence: layer thicknesses here differ from NEMO's
-        # by up to 70.4 m on 94134 of 342134 wet cells, and the u-face column
-        # depth by up to 104.2 m (4.0%) on a quarter of the wet faces.
+        # reference ladder e3t_1d.  The two agree for k = 1..25 and then part
+        # company: e3t_0/e3t_1d = 0.979, 0.945, 0.924, 0.915, 0.919, 0.935,
+        # 0.965, 1.009, 1.070, 1.148 at k = 26..35.  On the 1-D ladder the
+        # layer thicknesses differed from NEMO's by up to 70.4 m on 94134 of
+        # 342134 wet cells and the u-face column depth by up to 104.2 m (4.0%)
+        # on a quarter of the wet faces.
         #
-        # The domain this returns ALREADY CARRIES NEMO's own e3t_0 on
-        # z_coord.nemo_e3t_0, bit-exact (0 of 342134 cells differ) -- the card
-        # simply does not run on it.  Adopting it changes the model state on
-        # every run of this card and is therefore a decision for the campaign
-        # owner, not a silent edit; the certified bridged twin already resolves
-        # the equivalent choice to NEMO's ladder (kamm_twin_90d
-        # .resolve_ladder_mode), and nemo_state_bridge documents the same
-        # default as "the KNOWN-WRONG 1-D ladder".
+        # The domain below now stands on NEMO's own ladder: the bridge call in
+        # _nemo_faithful_dino_domain pins e3t_mode="both".
         if cfg.vertical_coordinate != "masked_zco":
             raise ValueError(
                 "nemo_faithful_grid=True builds a masked full-step staircase "
@@ -2974,6 +2969,18 @@ def _nemo_faithful_dino_domain(_storage_dtype):
                      rhd=None)
     return bridge_nemo_to_legoesm_topo(
         g, rest, periodic_i=True, full_step=True,
+        # THE LADDER NEMO ACTUALLY INTEGRATES WITH (#1728, decision 27).
+        # DINO is compiled `key_qco key_vco_3d` (cfgs/DINO/cpp_DINO.fcm:1), and
+        # under key_vco_3d every reference scale factor in NEMO's source IS the
+        # 3-D array -- `#define E3t_0(i,j,k) e3t_3d(i,j,k)`, `#define
+        # DEPt_0(i,j,k) gdept_3d(i,j,k)` (domzgr_substitute.h90:102-119).  The
+        # 1-D ladder e3t_1d is reachable only under key_vco_1d (:72-87), which
+        # DINO does not define.  Passing the mode as a LITERAL rather than
+        # leaving it to the bridge's `LEGOESM_NEMO_E3T` default is deliberate:
+        # this card cannot be put back on a grid NEMO does not have.  The
+        # certified twin resolves the same choice the same way
+        # (kamm_twin_90d.resolve_ladder_mode).
+        e3t_mode="both",
         # The certified twin passes this whenever the card selects NEMO's
         # literal TKE penetration profile (kamm_twin_90d.py:1311), because
         # that profile is htau = max(0.5, min(30, 45|sin(lat)|)) in DEGREES
@@ -3081,6 +3088,8 @@ def _nemo_dino_domain_for(grid, z_coord, land_mask, cfg):
     """
     from legoesm.ocean.fidelity.nemo_dino_mesh import (
         nemo_dino_domain_size, nemo_dino_mesh)
+    from legoesm.ocean.fidelity.nemo_state_bridge import (
+        effective_vertical_scale_factors)
 
     if land_mask is None:
         return None
@@ -3104,9 +3113,24 @@ def _nemo_dino_domain_for(grid, z_coord, land_mask, cfg):
     # evaluated at NEMO's gdept_0, so a run whose cells are a different size is
     # a different experiment even at the same n_levels (a reviewer halved
     # z_full_ref -- 4000 m to 2000 m -- and got a bit-identical T back).
+    #
+    # NEMO's DINO carries TWO ladders and BOTH are its own (#1728): the 1-D
+    # reference e3t_1d, and the 3-D e3t_0 the run actually integrates
+    # (key_vco_3d, domzgr_substitute.h90:102).  They part company below k=25
+    # by up to 70.4 m, which is 7000x this tolerance.  Testing only e3t_1d
+    # made this a SILENT FALLBACK: the moment the card moved onto NEMO's own
+    # thicknesses the test failed, this returned None, and the run quietly
+    # swapped NEMO's initial state for the analytic paper profile -- measured
+    # cost at step 1, T rms 5.0e-6 -> 1.6e-2 K against NEMO's kt=1, i.e. 127%
+    # of NEMO's own first step.  Neither ladder is "the" ladder here; a run on
+    # either is on NEMO's DINO frame, and a run on neither is not.
     dz = np.asarray(z_coord.dz_ref, dtype=np.float64).ravel()
-    if dz.shape != g.e3t_1d.shape or not np.allclose(
-            dz, g.e3t_1d, rtol=0.0, atol=_NEMO_DINO_LADDER_TOL_M):
+    nemo_ladders = (g.e3t_1d,
+                    effective_vertical_scale_factors(
+                        g, np.asarray(g.tmask) > 0.5, mode="both")[0])
+    if not any(dz.shape == np.shape(lad) and np.allclose(
+            dz, lad, rtol=0.0, atol=_NEMO_DINO_LADDER_TOL_M)
+            for lad in nemo_ladders):
         return None
     mask = np.asarray(land_mask)
     if mask.shape != g.tmask.shape[:2]:

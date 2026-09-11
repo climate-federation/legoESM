@@ -243,6 +243,26 @@ def bridge_nemo_to_legoesm(
 NEMO_E3T_MODES = ("off", "e3t_only", "gdept_only", "both")
 
 
+def _level_value(v):
+    """One level's reference value: the EXACT value where the level is uniform.
+
+    ``np.mean`` over N identical float64 values is a sum-then-divide, and it
+    does not return the value.  Measured on NEMO's DINO R1 mesh before this
+    was written: the mean lands 1 ulp off the cell value on 3 of 35 ``e3t_0``
+    levels and on 18 of 35 ``gdept_0`` levels -- our reduction rounding the
+    ORACLE's own number, which a gate whose bar is "0 cells unequal" refuses.
+
+    DINO's ``e3t_0``/``gdept_0`` are horizontally uniform by construction:
+    ``usr_def_zgr`` calls ``zgr_sco_mi96`` on a FLAT column
+    (``zflat(:,:) = zHmax``, ``cfgs/DINO/MY_SRC/usrdef_zgr.F90:107-118``), so
+    there is a single value per level to take and averaging can only lose it.
+    A level that is NOT uniform keeps the mean it has always had, so no mesh
+    with real horizontal variation changes behaviour here.
+    """
+    lo = v.min()
+    return float(lo) if lo == v.max() else float(v.mean())
+
+
 def effective_vertical_scale_factors(grid, tmask, mode=None):
     """Per-level thickness + T-depth the NEMO run ACTUALLY integrates with.
 
@@ -386,7 +406,7 @@ def effective_vertical_scale_factors(grid, tmask, mode=None):
     out_e3t = e3t.copy()
     for k in range(nlev):
         if lev_any[k]:
-            out_e3t[k] = float(e3t3[:, :, k][tmask[:, :, k]].mean())
+            out_e3t[k] = _level_value(e3t3[:, :, k][tmask[:, :, k]])
     if _mode == "gdept_only":
         out_e3t = e3t.copy()            # keep the 1-D thickness ladder
     gd3 = getattr(grid, "gdept_0", None)
@@ -395,7 +415,7 @@ def effective_vertical_scale_factors(grid, tmask, mode=None):
         gd3 = np.asarray(gd3)
         for k in range(nlev):
             if lev_any[k]:
-                out_td[k] = float(gd3[:, :, k][tmask[:, :, k]].mean())
+                out_td[k] = _level_value(gd3[:, :, k][tmask[:, :, k]])
     return out_e3t, out_td, "e3t_0"
 
 
