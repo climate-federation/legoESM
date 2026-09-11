@@ -182,8 +182,12 @@ def _worktree_is_dirty() -> bool:
     """The harness stamps provenance and REFUSES on a dirty tree, so a plant
     run would die on the stamp rather than on the plant and the test would
     report a failure it did not cause."""
-    out = subprocess.run(["git", "status", "--porcelain"], cwd=str(ROOT),
-                         capture_output=True, text=True)
+    # TRACKED modifications only: that is what provenance.git_sha refuses on
+    # ("N tracked file(s) modified").  A first version used plain
+    # `git status --porcelain`, so an untracked file belonging to ANOTHER
+    # agent working the same branch skipped this test for no reason.
+    out = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
+                         cwd=str(ROOT), capture_output=True, text=True)
     return bool(out.stdout.strip())
 
 
