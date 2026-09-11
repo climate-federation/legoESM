@@ -70,10 +70,12 @@ for BAT in loop batched; do
   echo "########## 3. ARM=$ARM jax $BAT"
   timeout 14400 $PY "$H" --backend jax $FLAG $EXTRA \
     --json "$OUT/${BAT}.json" > "$OUT/${BAT}.log" 2>&1
-  echo "rc=$?"
+  RC=$?
+  echo "rc=$RC"
   grep -E "step arm:" "$OUT/${BAT}.log" | head -2
   sed -n '/one-step residual/,/^$/p' "$OUT/${BAT}.log" | head -25
   grep -E "^(FAIL|PASS|WORST|verdict)" "$OUT/${BAT}.log" | head -5
+  [ "$RC" -eq 0 ] || exit "$RC"
 done
 
 echo "########## 4. ARM DELTA (batched vs loop, same everything else)"
@@ -82,7 +84,7 @@ import json, sys
 try:
     a = json.load(open(sys.argv[1])); b = json.load(open(sys.argv[2]))
 except Exception as e:
-    print(f"cannot compare: {e}"); raise SystemExit(0)
+    print(f"cannot compare: {e}"); raise SystemExit(1)
 assert a.get("batched") is False and b.get("batched") is True, (
     "the two runs do not record the arms they claim: "
     f"{a.get('batched')} / {b.get('batched')}")
@@ -104,4 +106,6 @@ for k in sorted(keys):
     print(f"{k:50s} {x:12.5e} {y:12.5e} {rel:10.2e}")
 print(f"\nWORST ARM-TO-ARM rel = {worst[0]:.3e} at {worst[1]}")
 PYEOF
+BKRC=$?
+[ "$BKRC" -eq 0 ] || exit $BKRC
 echo BATPARITY_DONE

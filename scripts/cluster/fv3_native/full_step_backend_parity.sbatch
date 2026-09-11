@@ -65,12 +65,14 @@ for BK in numpy jax; do
   echo "########## ARM=$ARM BACKEND=$BK"
   timeout 10800 $PY scripts/validate/fv3_native/full_step_oracle_parity.py \
     --backend "$BK" $EXTRA --json "$OUT/${BK}.json" > "$OUT/${BK}.log" 2>&1
-  echo "rc=$?"
+  RC=$?
+  echo "rc=$RC"
   # The decisive lines only: the residual table and the port's own
   # tendency, which is what separates "wrong in detail" from "wrong
   # step". The full log stays in $OUT for either.
   sed -n '/one-step residual/,/^$/p' "$OUT/${BK}.log" | head -25
   grep -E "^(FAIL|PASS|WORST|verdict)" "$OUT/${BK}.log" | head -5
+  [ "$RC" -eq 0 ] || exit "$RC"
 done
 
 echo "########## BACKEND DELTA (jax vs numpy, same everything else)"
@@ -80,7 +82,7 @@ try:
     a = json.load(open(sys.argv[1])); b = json.load(open(sys.argv[2]))
 except Exception as e:            # a missing json means an arm died
     print(f"cannot compare: {e}")
-    raise SystemExit(0)
+    raise SystemExit(1)
 
 def flat(d, p=""):
     for k, v in (d or {}).items():
@@ -93,7 +95,7 @@ fa, fb = dict(flat(a)), dict(flat(b))
 keys = [k for k in fa if k in fb]
 if not keys:
     print("no shared numeric keys between the two runs")
-    raise SystemExit(0)
+    raise SystemExit(1)
 print(f"{'metric':50s} {'numpy':>12s} {'jax':>12s} {'rel':>10s}")
 worst = (0.0, None)
 for k in sorted(keys):
@@ -105,4 +107,6 @@ for k in sorted(keys):
     print(f"{k:50s} {x:12.5e} {y:12.5e} {rel:10.2e}")
 print(f"\nWORST BACKEND-TO-BACKEND rel = {worst[0]:.3e} at {worst[1]}")
 EOF
+BKRC=$?
+[ "$BKRC" -eq 0 ] || exit $BKRC
 echo BKPARITY_DONE

@@ -27,13 +27,16 @@ import numpy as np
 import pytest
 
 _ROOT = Path(__file__).resolve().parents[2]
-_JOB = _ROOT / "scripts" / "cluster" / "fv3_native" / "full_step_backend_parity.sbatch"
+_JOB_DIR = _ROOT / "scripts" / "cluster" / "fv3_native"
+_JOB = _JOB_DIR / "full_step_backend_parity.sbatch"
+_JOBS = [_JOB, _JOB_DIR / "full_step_batched_parity.sbatch"]
 _SCORER = _ROOT / "scripts" / "validate" / "fv3_native" / "full_step_oracle_parity.py"
 
 
-def test_the_parity_job_can_report_a_failure():
-    body = _JOB.read_text()
-    assert "MAX_REL" in body, (
+@pytest.mark.parametrize("job", _JOBS)
+def test_the_parity_job_can_report_a_failure(job):
+    body = job.read_text()
+    assert "--max-rel" in body, (
         "the job compares the two backends and exits zero whatever it finds, "
         "so the parity table it produces cannot distinguish agreement from a "
         "one-percent error")
@@ -43,8 +46,9 @@ def test_the_parity_job_can_report_a_failure():
         "compared' is reported as 'the backends agree'")
 
 
-def test_a_dead_backend_stops_the_job():
-    body = _JOB.read_text()
+@pytest.mark.parametrize("job", _JOBS)
+def test_a_dead_backend_stops_the_job(job):
+    body = job.read_text()
     assert 'exit "$RC"' in body, (
         "a backend that died leaves no result file; the job then found no "
         "shared metrics and finished successfully anyway")
@@ -65,6 +69,21 @@ def test_the_scorer_can_run_the_compiled_path():
     assert "fv_dynamics_step" in called, (
         "the eager path is gone; the established score would no longer be "
         "reproducible")
+
+
+def test_main_forwards_the_batched_arm_to_the_jax_step():
+    tree = ast.parse(_SCORER.read_text())
+    main = next(n for n in ast.walk(tree)
+                if isinstance(n, ast.FunctionDef) and n.name == "main")
+    call = next(n for n in ast.walk(main)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id == "_make_jax_step")
+    passed = {kw.arg: kw.value for kw in call.keywords}.get("batched")
+    assert (isinstance(passed, ast.Attribute)
+            and isinstance(passed.value, ast.Name)
+            and passed.value.id == "args" and passed.attr == "batched"), (
+        "main must forward args.batched; silently ignoring --batched would "
+        "certify the wrong arm, which is worse than crashing")
 
 
 def test_the_compiled_flag_is_refused_on_the_other_backend():
