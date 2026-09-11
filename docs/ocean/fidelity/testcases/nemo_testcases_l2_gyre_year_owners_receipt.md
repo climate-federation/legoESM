@@ -41,7 +41,13 @@ three records are one legoESM run and one NEMO run):
 | day 30 (after 180 steps) | `1.4241e-02` K | 120 more |
 | day 360 (after 2160 steps) | `4.0714e-01` K | 1980 more |
 
-**CONFIRMED.**  Between step 2 and step 3 the temperature difference is
+**CONFIRMED, and section 1b upgrades it from a trajectory statement to an
+EQUAL-INPUT one: given NEMO's own state entering step 2, legoESM's step 2
+produces a state that differs from NEMO's by `4.15e-04` K rms on 17999 of
+18000 wet cells.  Step 2 does not amplify a difference it is handed; it makes
+one.**
+
+Between step 2 and step 3 the temperature difference is
 multiplied by two hundred billion.  Over the 57 steps that follow it is
 multiplied by `12.7` in total, with a per-step geometric mean of `1.046` and
 individual steps ranging from `0.953` to `2.003` — it does not climb
@@ -72,7 +78,10 @@ Three consequences, all of which change what the campaign should do next.
    single-step multiplier by `6.7` orders on `u` and `11.0` orders on `T`.
 2. **The day-30 owner and the kt=2 owner are the same question.**  The kt=1..10
    ladder that rounds 8..50 of this branch have been walking is not a separate,
-   smaller problem from the year.  It is the whole problem.
+   smaller problem from the year.  It is the whole problem.  And the target
+   inside it is now specific: not the kt=2 ENTRY rows (`u`, `v` at `3e-12` m/s,
+   the ladder's standing DEBT) but the kt=2 OUTPUT, which section 1b shows is
+   wrong by `4.15e-04` K on NEMO's own inputs.
 3. **The surface forcing is exonerated as a statement** (section 3).  What step
    2 gets wrong is therefore an interior operator, and section 4 says where in
    the water column and the basin its consequence lands — with both of the two
@@ -145,6 +154,73 @@ statement about day 30 or beyond is falsifiable without a new NEMO run; and
 **the kt=1 row's exact `0.0` is a SEED check, not a step check** -- it compares
 the card's initial state against the dump that IS the initial state, which is
 what the year harness's A1 leg already certifies.
+
+## 1b.  STEP 2 *CREATES* THE DIFFERENCE — AN EQUAL-INPUT MEASUREMENT, NOT AN ARGUMENT
+
+A trajectory comparison cannot tell "step 2's operators disagree" from "step 2
+amplified what step 1 left".  An earlier draft of this receipt settled that by
+arguing no stable scheme multiplies a perturbation by `2e+11` in one step.  That
+is an argument.  Here is the measurement.
+
+`year_owners/equal_input_kt2.json`.  Step 2 is run three ways and each output is
+scored against NEMO's own state entering step 3:
+
+| arm | what it is given | `T` rms of the OUTPUT |
+|---|---|---:|
+| FREE RUN | legoESM's own state entering step 2 | `4.154394627928367e-04` K |
+| EQUAL INPUT, 3-D | **NEMO's** `ts/uu/vv/ssh` entering step 2 | `4.154394627918457e-04` K |
+| EQUAL INPUT, 3-D + barotropic | the same, plus `uu_b`/`vv_b` from the card's own `bt_frames` writer at kt=1, which `stprk3` swaps into `Nbb` — **this reseed wrote `0.0`; see below** | `4.154394627918457e-04` K |
+
+**Handing legoESM NEMO's exact inputs changes the answer in the TWELFTH
+significant figure** — a relative move of `2.4e-12`.
+
+**The third arm is not a third arm, and the reason is a result.**  The
+barotropic reseed wrote **exactly `0.0`** into both `uu_b` and `vv_b`:
+legoESM's prognostic barotropic pair entering step 2 is ALREADY BIT-IDENTICAL
+to NEMO's `bt_frames` record on every wet face.  So the arm is vacuous as a
+control — and that vacuity is an independent reproduction of the round-8
+result `GYRE equal-input kt1 Kaa uu_b/vv_b = 0 / 580, 0 / 570`.  It also
+removes the caveat this arm was built to carry: the barotropic pair is not an
+unreseeded input, because it needed no reseeding.  Measured, and stated as a
+vacuous arm rather than reported as a third confirming row.
+
+**So step 2's operators do not agree with NEMO's, given NEMO's own inputs.  The
+difference is MANUFACTURED by the step; it is not carried into it.  CONFIRMED,
+and it is the Rule-12 statement: the operator set of step 2 is not bit-exact on
+NEMO's own inputs, by `4.15e-04` K rms and `8.74e-03` K max, on 17999 of 18000
+wet cells.**
+
+Seventeen thousand nine hundred and ninety-nine of eighteen thousand.  This is
+not a localized defect in one cell or one column; step 2 disagrees essentially
+everywhere.
+
+| field | equal-input OUTPUT rms | max abs | wet cells unequal |
+|---|---:|---:|---:|
+| `T` | `4.1544e-04` K | `8.7413e-03` K | 17999 / 18000 |
+| `S` | `5.9939e-05` g/kg | `1.3569e-03` g/kg | 17365 / 18000 |
+| `u` | `1.1909e-05` m/s | `7.1934e-04` m/s | 17400 / 17400 |
+| `v` | `1.7317e-05` m/s | `8.6069e-04` m/s | 17100 / 17100 |
+| `ssh` | `1.1826e-07` m | `7.0726e-07` m | 600 / 600 |
+
+**The controls this arm needs, and what they say.**  The 3-D reseed is shown to
+have WRITTEN: it moved the input by `1.4211e-14` K, `2.1316e-14` g/kg,
+`2.7478e-12` m/s and `3.3056e-12` m/s (`ssh` by `0.0`, because both models'
+sea surface after one step is already bit-identical), and the harness REFUSES
+if the reseed moves nothing at all.  The barotropic write size is measured for
+the same reason and came out `0.0` on both components — which is why the third
+arm is reported above as vacuous rather than as agreement.  **A first version
+of this harness measured the 3-D write and not the barotropic one**, and would
+have reported "reseeding the barotropic pair changes nothing" as a physical
+result when it is a statement that nothing was written.  Found and fixed before
+the number was recorded.
+
+**What this arm cannot see.**  It reseeds the five prognostic fields the card's
+writer records; the barotropic pair needed no reseeding.  Anything else
+legoESM carries into a step that NEMO's dump does not record (the TKE state,
+the closure's carried coefficients) is NOT reseeded and stays legoESM's own.  Those carriers are a candidate for the
+residual `2.4e-12` relative move between the free-run and equal-input arms, and
+they are not a candidate for the `4.15e-04` K: at the entry of step 2 the flow
+is two hours old and every such carrier is within rounding of NEMO's.
 
 ## 2.  THE DAY-BY-DAY TABLE
 
