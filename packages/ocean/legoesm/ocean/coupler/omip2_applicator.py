@@ -222,6 +222,124 @@ def _bilinear_interp_to_points(field, src_lat_deg, src_lon_deg,
     return (f[i4, j4] * w4).sum(axis=0)
 
 
+# --- gap 13: bicubic, because ORCA1 remaps its WINDS bicubically ------------
+#
+# The docstring above says "NEMO interpolates CORE-II bilinearly (its weights
+# files)". That is true of the SCALAR channels and NOT of the winds. From the
+# run's own namelist_cfg:
+#
+#   sn_wndi / sn_wndj  (148-149)  weights_coreII_2_eORCA1.4.2_BICUBIC.nc
+#   sn_qsr/qlw/tair    (150-152)  weights_coreII_2_eORCA1.4.2_BILINEAR.nc
+#
+# So a single uniform method cannot be faithful whatever it is set to: the
+# oracle deliberately uses a higher-order remap for momentum and a linear one
+# for the thermodynamic fields.
+#
+# The oracle's own weight FILES are not on this machine, so this reproduces
+# NEMO's METHOD, not its exact weights. Catmull-Rom (a = -0.5) is the cubic
+# convolution SCRIPS/NEMO's bicubic remapping is built on; it is interpolating
+# (passes through the data) and reduces to the same stencil bilinear would use
+# when the field is linear.
+_BICUBIC_MAP_CACHE: dict = {}
+
+# Catmull-Rom cubic convolution kernel, a = -0.5.
+_CUBIC_A = -0.5
+
+
+def _cubic_weights(t):
+    """Cubic-convolution weights for the four points at offsets -1,0,1,2.
+
+    ``t`` in [0,1) is the fractional position between points 0 and 1. The four
+    weights sum to 1 for every t, which is what keeps a constant field exactly
+    constant through the remap.
+    """
+    t = np.asarray(t, dtype=np.float64)
+    a = _CUBIC_A
+    t1 = 1.0 + t                       # distance to the -1 point
+    t2 = t                             # to 0
+    t3 = 1.0 - t                       # to 1
+    t4 = 2.0 - t                       # to 2
+    w1 = a * (t1 ** 3) - 5 * a * (t1 ** 2) + 8 * a * t1 - 4 * a
+    w2 = (a + 2) * (t2 ** 3) - (a + 3) * (t2 ** 2) + 1.0
+    w3 = (a + 2) * (t3 ** 3) - (a + 3) * (t3 ** 2) + 1.0
+    w4 = a * (t4 ** 3) - 5 * a * (t4 ** 2) + 8 * a * t4 - 4 * a
+    return w1, w2, w3, w4
+
+
+def _bicubic_point_maps(src_lat_deg, src_lon_deg,
+                        dst_lat_deg_pts, dst_lon_deg_pts):
+    """16-point bicubic maps ``(i16, j16, w16)``, each ``(16, n_pts)``.
+
+    Longitude is PERIODIC (the stencil wraps across the seam); latitude is
+    CLAMPED at the source's outermost rows, matching what the bilinear map
+    already does there — CORE-II stops ~0.5 deg short of the pole, and a cubic
+    stencil that ran off the end would otherwise extrapolate into the gap.
+    """
+    src_lat = np.asarray(src_lat_deg, dtype=np.float64)
+    src_lon = np.asarray(src_lon_deg, dtype=np.float64)
+    # Full-content hash of EVERY coordinate array, via the collision-safe
+    # helper this module already grew for precisely this bug: a key built from
+    # endpoints alone can match two different destination grids and silently
+    # hand one of them the other's weights (codex found my first version
+    # repeating that August mistake).
+    key = _coord_key(src_lat, src_lon,
+                     np.asarray(dst_lat_deg_pts, dtype=np.float64),
+                     np.asarray(dst_lon_deg_pts, dtype=np.float64))
+    cached = _BICUBIC_MAP_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    dlat = np.asarray(dst_lat_deg_pts, dtype=np.float64).ravel()
+    dlon = np.asarray(dst_lon_deg_pts, dtype=np.float64).ravel()
+
+    ascending = src_lat[1] > src_lat[0]
+    lat_axis = src_lat if ascending else src_lat[::-1]
+    n_lat = lat_axis.size
+
+    # Bracketing row and fractional position, clamped to the interior.
+    i1 = np.clip(np.searchsorted(lat_axis, dlat, side="right") - 1,
+                 0, n_lat - 2)
+    tlat = (dlat - lat_axis[i1]) / (lat_axis[i1 + 1] - lat_axis[i1])
+    tlat = np.clip(tlat, 0.0, 1.0)
+    rows = [np.clip(i1 + k, 0, n_lat - 1) for k in (-1, 0, 1, 2)]
+    if not ascending:
+        rows = [n_lat - 1 - r for r in rows]
+
+    n_lon = src_lon.size
+    lon0 = float(src_lon[0])
+    dlon_step = float(src_lon[1] - src_lon[0])
+    x = (dlon - lon0) / dlon_step
+    j1 = np.floor(x).astype(int)
+    tlon = x - j1
+    cols = [np.mod(j1 + k, n_lon) for k in (-1, 0, 1, 2)]
+
+    wlat = _cubic_weights(tlat)
+    wlon = _cubic_weights(tlon)
+
+    i16, j16, w16 = [], [], []
+    for a_i in range(4):
+        for b_j in range(4):
+            i16.append(rows[a_i])
+            j16.append(cols[b_j])
+            w16.append(wlat[a_i] * wlon[b_j])
+    maps = (np.asarray(i16), np.asarray(j16), np.asarray(w16))
+    _BICUBIC_MAP_CACHE[key] = maps
+    return maps
+
+
+def _bicubic_interp_to_points(field, src_lat_deg, src_lon_deg,
+                              dst_lat_deg_pts, dst_lon_deg_pts):
+    """Bicubic sample of one 2-D field (see :func:`_bicubic_point_maps`)."""
+    i16, j16, w16 = _bicubic_point_maps(src_lat_deg, src_lon_deg,
+                                        dst_lat_deg_pts, dst_lon_deg_pts)
+    f = np.asarray(field, dtype=np.float64)
+    return (f[i16, j16] * w16).sum(axis=0)
+
+
+# The oracle's per-field split: momentum bicubic, everything else bilinear.
+_NEMO_BICUBIC_CHANNELS = ("u10", "v10")
+
+
 # Cache of pre-computed conservative-regrid weights, keyed by
 # (src_lat_shape, src_lon_shape, src_lat_first, src_lon_first,
 #  dst_lat_shape, dst_lon_shape, dst_lat_first, dst_lon_first).
@@ -385,12 +503,22 @@ def _sample_forcing_points(forcing, idx_t, lat_pts_deg, lon_pts_deg,
     cell centres).  ``method``: "nearest" (legacy) or "bilinear" (the tripole
     default — see :func:`_bilinear_point_maps` for why nearest-neighbour onto
     a finer structured grid prints zonal forcing bands)."""
-    if method not in ("nearest", "bilinear"):
+    if method not in ("nearest", "bilinear", "nemo_weights"):
         raise ValueError(f"_sample_forcing_points: unknown method {method!r}")
-    interp = (_bilinear_interp_to_points if method == "bilinear"
-              else _nn_interp_to_points)
+    _uniform = {"bilinear": _bilinear_interp_to_points,
+                "nearest": _nn_interp_to_points}.get(method)
     out = {}
     for name in _forcing_channels(forcing):
+        if method == "nemo_weights":
+            # PER-CHANNEL, because the oracle is per-channel: the winds carry
+            # bicubic weights files and every other channel carries bilinear
+            # ones. A uniform method cannot reproduce that whichever one it
+            # picks.
+            interp = (_bicubic_interp_to_points
+                      if name in _NEMO_BICUBIC_CHANNELS
+                      else _bilinear_interp_to_points)
+        else:
+            interp = _uniform
         out[name] = interp(
             getattr(forcing, name)[idx_t],
             forcing.lat, forcing.lon,
