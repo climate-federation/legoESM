@@ -186,10 +186,12 @@ def _verify_r63_stamp(record: Path, stamp: Path, producer: str) -> dict:
     return {"sha256": digest, "producer_commit": stamped_commit}
 
 
-def _r63_resolved_config(path: Path) -> dict:
+def _r63_resolved_config(path: Path, expect_itend: int = 2) -> dict:
     text = path.read_text(errors="replace")
     patterns = {
-        "two_steps": r"number of the last time step\s+nn_itend\s*=\s*2\b",
+        "run_horizon": (
+            rf"number of the last time step\s+nn_itend\s*=\s*{expect_itend}\b"
+        ),
         "no_assimilation": r"Assimilation cycle\s+nn_no\s*=\s*0\b",
         "no_tiling": r"ln_tile\s*=\s*F\b",
         "qsr": r"ln_traqsr\s*=\s*T\b",
@@ -224,6 +226,7 @@ def r63_calibrate(*, krhs_record: Path, tke_record: Path,
                   krhs_stamp: Path, tke_stamp: Path,
                   expect_commit: str, producer_commit: Path,
                   resolved_output: Path,
+                  expect_itend: int = 2,
                   plant: str | None = None) -> dict:
     producer = producer_commit.read_text().strip().lower()
     expected = expect_commit.lower()
@@ -251,9 +254,158 @@ def r63_calibrate(*, krhs_record: Path, tke_record: Path,
             "krhs": _calibrate_r63_krhs(krhs["arrays"]),
             "tke": _calibrate_r63_tke(tke["arrays"]),
         },
-        "resolved_configuration": _r63_resolved_config(resolved_output),
+        "resolved_configuration": _r63_resolved_config(
+            resolved_output, expect_itend),
+        "expected_last_step": expect_itend,
         "plant": plant,
         "status": "PASS",
+    }
+
+
+def _provisional_krhs_boundary_rows(live_content: dict, arrays: dict,
+                                    wet: dict) -> dict:
+    """Compare the first complete stage-3 term without re-associating NEMO.
+
+    The record is Fortran ``(i,j,k)`` while legoESM is ``(j,i,k)``.  Content
+    is the primary comparison because it is the value each implementation
+    actually materializes; the concentration-Krhs row is a diagnostic
+    inversion of that same boundary and is labelled as such in the report.
+    """
+    transpose = lambda value: np.ascontiguousarray(  # noqa: E731
+        np.asarray(value, dtype=np.float64).transpose(1, 0, 2))
+    p2dt = np.float64(arrays["p2dt"])
+    rows = {}
+    for tracer in ("T", "S"):
+        mask = np.asarray(wet[tracer], dtype=bool)
+        zero = transpose(arrays[f"krhs_zero_{tracer}"])
+        nemo_krhs = transpose(arrays[f"after_adv_{tracer}"])
+        base = transpose(arrays["e3t_Kbb"] * arrays[f"{tracer}_Kbb"])
+        coefficient = p2dt * transpose(arrays["e3t_Kmm"])
+        nemo_content = base + coefficient * nemo_krhs
+        model_content = np.asarray(live_content[tracer], dtype=np.float64)
+        model_krhs = np.zeros_like(model_content)
+        np.divide(model_content - base, coefficient, out=model_krhs,
+                  where=mask & (coefficient != 0.0))
+        rows[tracer] = {
+            "zero": field_stats(np.zeros_like(zero), zero, mask),
+            "after_complete_fct_advection_content": field_stats(
+                model_content, nemo_content, mask),
+            "after_complete_fct_advection_derived_krhs": field_stats(
+                model_krhs, nemo_krhs, mask),
+        }
+    require(all(row["zero"]["cells_unequal"] == 0 for row in rows.values()),
+            "the recorded zero boundary is not exact")
+    return rows
+
+
+def provisional_krhs_walk(*, entry_root: Path, stage_root: Path,
+                          krhs_record: Path, krhs_stamp: Path,
+                          producer_commit: Path, admission: Path,
+                          expect_commit: str,
+                          expect_record_commit: str) -> dict:
+    """Read the rejected R63 record only as a preregistration preview."""
+    import jax
+    import nemo_testcase_l2_gyre_phase3_gate as gate
+    import nemo_testcase_l2_gyre_round46_kt2_stage_gate as round46
+    import nemo_testcase_overflow_barotropic_gate as baro
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _NEMOWSRK3TestHooks,
+    )
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
+    stamp = worktree_stamp()
+    require(stamp["commit"].lower() == expect_commit.lower(),
+            f"commit stamp mismatch: {stamp['commit']} != {expect_commit}")
+    rejected = json.loads(admission.read_text())
+    require(rejected.get("verdict") == "FAIL",
+            "this mode is restricted to a rejected, PROVISIONAL record")
+    require(Path(rejected.get("candidate", "")).resolve()
+            == krhs_record.parent.resolve(),
+            "admission candidate does not own the Krhs record")
+    require(all(row.get("consumed_equal") is True
+                for row in rejected.get("classified_changed_records", [])),
+            "rejected run has a changed consumed field; preview refused")
+    require(rejected.get("violations") and all(
+        item.startswith("missing inherited records:")
+        for item in rejected["violations"]),
+        "rejected run failed for more than the truncated horizon")
+
+    producer = producer_commit.read_text().strip().lower()
+    require(producer == expect_record_commit.lower(),
+            f"record commit mismatch: {producer} != {expect_record_commit}")
+    record_stamp = _verify_r63_stamp(krhs_record, krhs_stamp, producer)
+    record = _read_r63_stream(krhs_record, kind="krhs")
+    calibration = _calibrate_r63_krhs(record["arrays"])
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    previous_tke = round46.read_stage(
+        stage_root / "oracle_momstage_kt00000001_s1.bin")
+    entry2 = gate.read_entry(entry_root / "oracle_step_entry_kt00000002.bin")
+    frames = gate.read_bt(entry_root / "oracle_bt_frames_kt00000001.bin", 1)
+    card = build_nemo_testcase_card("GYRE-zco")
+    masks = gate.expected_masks(card)
+    base_model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    initial = card.recipe.initial_state
+    freshwater1, surface1 = gate._surface_forcings(card, initial, 1)
+    free_entry = base_model.step(initial, dt=card.dt_s,
+                                 freshwater=freshwater1,
+                                 surface_forcing=surface1)
+    seeded = baro.state_from_oracle_entry(free_entry, entry2, masks)
+    seeded = _bridge_barotropic(seeded, frames, masks)
+    seeded = _bridge_tke(seeded, previous_tke["arrays"])
+    seeded_fields = gate.lego_fields(seeded)
+    input_identity = {}
+    for tracer in ("T", "S"):
+        record_kbb = np.ascontiguousarray(
+            record["arrays"][f"{tracer}_Kbb"].transpose(1, 0, 2))
+        input_identity[tracer] = field_stats(
+            seeded_fields[tracer], record_kbb, masks[tracer])
+        require(input_identity[tracer]["cells_unequal"] == 0,
+                f"model {tracer} input is not the record's Kbb field")
+    freshwater2, surface2 = gate._surface_forcings(card, seeded, 2)
+    exposed = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config,
+        _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+            expose_stage3_advection_content=True),
+    ).step(seeded, dt=card.dt_s, freshwater=freshwater2,
+           surface_forcing=surface2)
+    fields = gate.lego_fields(exposed)
+    live_content = {name: np.asarray(fields[name], dtype=np.float64)
+                    for name in ("T", "S")}
+    rows = _provisional_krhs_boundary_rows(
+        live_content, record["arrays"], {name: masks[name]
+                                         for name in ("T", "S")})
+    first = {
+        tracer: ("complete_fct_advection" if
+                 row["after_complete_fct_advection_content"]["cells_unequal"]
+                 else "not_reached")
+        for tracer, row in rows.items()
+    }
+    zc = card.recipe.z_coord
+    dtypes = {name: str(np.asarray(getattr(zc, name)).dtype)
+              for name in ("t_depth_ref", "dz_ref", "z_full_ref",
+                           "z_half_ref", "h_partial")}
+    return {
+        "format": "gyre-round64-provisional-krhs-walk-v1",
+        "status": "NOT ADMISSIBLE -- PROVISIONAL READ ONLY",
+        "reason": rejected["violations"],
+        "worktree": stamp,
+        "record_stamp": record_stamp,
+        "record_commit": producer,
+        "record": str(krhs_record),
+        "admission": str(admission),
+        "precision": {"jax_x64": bool(jax.config.jax_enable_x64),
+                      "geometry_dtypes": dtypes,
+                      "content_dtype": str(live_content["T"].dtype)},
+        "record_calibration": calibration,
+        "model_input_vs_record_Kbb": input_identity,
+        "first_differing_boundary": first,
+        "rows": rows,
     }
 
 
@@ -927,7 +1079,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mode",
-        choices=("measure", "self-check", "zdf-score", "krhs-calibrate"),
+        choices=("measure", "self-check", "zdf-score", "krhs-calibrate",
+                 "krhs-preview"),
         default="measure")
     parser.add_argument("--entry-root", type=Path, default=ENTRY_ROOT)
     parser.add_argument("--stage-root", type=Path, default=STAGE_ROOT)
@@ -938,7 +1091,10 @@ def main(argv=None) -> int:
     parser.add_argument("--tke-rhs-stamp", type=Path)
     parser.add_argument("--producer-commit", type=Path)
     parser.add_argument("--resolved-output", type=Path)
+    parser.add_argument("--admission", type=Path)
     parser.add_argument("--expect-commit")
+    parser.add_argument("--expect-record-commit")
+    parser.add_argument("--expect-itend", type=int, default=2)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant", choices=(
         "stamp", "truncation", "stage-swap", "tracer-bit", "input-noop",
@@ -966,7 +1122,7 @@ def main(argv=None) -> int:
                 entry_root=args.entry_root, stage_root=args.stage_root,
                 record=args.zdf_record, expect_commit=args.expect_commit,
                 plant=args.plant)
-        else:
+        elif args.mode == "krhs-calibrate":
             require(args.expect_commit is not None,
                     "--expect-commit is required for round-63 calibration")
             require(all(value is not None for value in (
@@ -987,12 +1143,30 @@ def main(argv=None) -> int:
                 expect_commit=args.expect_commit,
                 producer_commit=args.producer_commit,
                 resolved_output=args.resolved_output,
+                expect_itend=args.expect_itend,
                 plant=args.plant)
+        else:
+            require(args.expect_commit is not None,
+                    "--expect-commit is required for a provisional preview")
+            require(args.expect_record_commit is not None,
+                    "--expect-record-commit is required for a provisional preview")
+            require(all(value is not None for value in (
+                args.krhs_record, args.krhs_stamp, args.producer_commit,
+                args.admission)),
+                "krhs-preview requires record, stamp, producer, and admission")
+            require(args.plant is None,
+                    "krhs-preview has no post-hoc plant selector")
+            report = provisional_krhs_walk(
+                entry_root=args.entry_root, stage_root=args.stage_root,
+                krhs_record=args.krhs_record, krhs_stamp=args.krhs_stamp,
+                producer_commit=args.producer_commit,
+                admission=args.admission, expect_commit=args.expect_commit,
+                expect_record_commit=args.expect_record_commit)
         text = json.dumps(report, indent=2, sort_keys=True)
         if args.output:
             args.output.write_text(text + "\n")
         print(text)
-        print("STATUS PASS")
+        print(f"STATUS {report.get('status', 'PASS')}")
         return 1 if args.plant else 0
     except (GateError, RuntimeError, AssertionError, OSError, ValueError) as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)

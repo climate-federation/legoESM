@@ -149,6 +149,18 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dom_oce.f90"),
     "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/inc/do_loop_substitute.h90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/inc/do_loop_substitute.h90"),
+    # Round 64 audits the rejected record against its producer's compiled
+    # source rather than assuming the additive source patches compiled as read.
+    "GYRE_OMIP_L2_P3_SM_R63KRHS/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R63KRHS/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R63KRHS/BLD/ppsrc/nemo/traadv_fct.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R63KRHS/BLD/ppsrc/nemo/traadv_fct.f90"),
+    "GYRE_OMIP_L2_P3_SM_R63KRHS/BLD/ppsrc/nemo/trazdf.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R63KRHS/BLD/ppsrc/nemo/trazdf.f90"),
+    "GYRE_OMIP_L2_P3_SM_R63KRHS/BLD/ppsrc/nemo/zdftke.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R63KRHS/BLD/ppsrc/nemo/zdftke.f90"),
+    "GYRE_OMIP_L2_P3_SM_R63KRHS/EXP00/namelist_cfg": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R63KRHS/EXP00/namelist_cfg"),
     # Round 58 binds every TKE claim to the record producer's own compiled
     # branch, including the writer whose dummy-bound defect invalidated it.
     "GYRE_OMIP_L2_P3_SM_R56TKE/BLD/ppsrc/nemo/l2_r54_tke.f90": (
@@ -306,6 +318,41 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 64: R46/R63 compiled-delta and run-horizon audit ---
+    'GYRE_OMIP_L2_P3_SM_R46KT2/EXP00/namelist_cfg:21': (
+        'nn_itend    =      10', 1),
+    'GYRE_OMIP_L2_P3_SM_R63KRHS/EXP00/namelist_cfg:21': (
+        'nn_itend    =      2', 1),
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:825-863': [
+        ('DO jn = 1, jpts', 1),
+        'CALL tra_sbc_RK3( kstp, Kbb, Kmm', 39],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3.f90:168-201': [
+        'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )',
+        'CALL stp_RK3_stg( 1, kstp', 34],
+    'GYRE_OMIP_L2_P3_SM_R63KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:827-868': [
+        ('DO jn = 1, jpts', 1),
+        "CALL r63_snapshot( 'after_sbc'", 42],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/traadv_fct.f90:169-172': [
+        '! -- Upstream fluxes',
+        'output => ztFu(1,0,1,0)', 4],
+    'GYRE_OMIP_L2_P3_SM_R63KRHS/BLD/ppsrc/nemo/traadv_fct.f90:170-174': [
+        '! -- Upstream fluxes',
+        'output => ztFu(1,0,1,0)', 5],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/trazdf.f90:145-149': [
+        'zl2_trh(:,:,:) = pts(:,:,:,jp_tem,Krhs)',
+        'CALL tra_zdf_imp(', 5],
+    'GYRE_OMIP_L2_P3_SM_R63KRHS/BLD/ppsrc/nemo/trazdf.f90:146-151': [
+        'zl2_trh(:,:,:) = pts(:,:,:,jp_tem,Krhs)',
+        'CALL r63_content_finish(', 6],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/zdftke.f90:188-192': [
+        'IF( nn_pdl == 1 ) ALLOCATE( z_pdlr',
+        'CALL tke_avn(', 5],
+    'GYRE_OMIP_L2_P3_SM_R63KRHS/BLD/ppsrc/nemo/zdftke.f90:190-196': [
+        'IF( nn_pdl == 1 ) ALLOCATE( z_pdlr',
+        'CALL tke_avn(', 7],
+    'GYRE_OMIP_L2_P3_SM_R63KRHS/BLD/ppsrc/nemo/zdftke.f90:413-433': [
+        'CALL r63_tke_before_row(',
+        'CALL r63_tke_after_row(', 21],
     # --- round 63: compiled kt=2 stage-3 Krhs and RHS-product split ---
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:773-800': [
         ('IF( .NOT.ln_shuman ) THEN', 1),

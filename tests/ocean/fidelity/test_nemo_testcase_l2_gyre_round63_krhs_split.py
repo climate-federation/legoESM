@@ -14,6 +14,10 @@ SCRIPT = (
     ROOT / "scripts" / "validate" / "ocean_fidelity" / "testcases"
     / "nemo_testcase_l2_gyre_round54_tracer_decomposition.py"
 )
+R64_RUN = (
+    ROOT / "scripts" / "validate" / "ocean_fidelity" / "testcases"
+    / "nemo_testcase_l2_gyre_round64_krhs_split" / "run.sh"
+)
 
 
 def _module():
@@ -135,6 +139,54 @@ def test_round63_both_records_calibrate_bit_exact(tmp_path):
         for family in report["calibration"].values()
         for count in family.values()
     )
+
+
+def test_provisional_boundary_walk_can_fail_on_one_consumed_value():
+    module = _module()
+    shape = (4, 3, 2)  # record order i,j,k; model order j,i,k
+    record_shape = shape
+    tmask = np.ones(record_shape, dtype=np.float64)
+    arrays = {
+        "p2dt": np.float64(4.0),
+        "e3t_Kbb": np.full(record_shape, 2.0),
+        "e3t_Kmm": np.full(record_shape, 3.0),
+        "T_Kbb": np.full(record_shape, 10.0),
+        "S_Kbb": np.full(record_shape, 35.0),
+        "krhs_zero_T": np.zeros(record_shape),
+        "krhs_zero_S": np.zeros(record_shape),
+        "after_adv_T": np.full(record_shape, 2.0e-6),
+        "after_adv_S": np.full(record_shape, -3.0e-7),
+    }
+    def transpose(value):
+        return np.ascontiguousarray(value.transpose(1, 0, 2))
+    live = {
+        tracer: transpose(
+            arrays["e3t_Kbb"] * arrays[f"{tracer}_Kbb"]
+            + arrays["p2dt"] * arrays["e3t_Kmm"]
+            * arrays[f"after_adv_{tracer}"])
+        for tracer in ("T", "S")
+    }
+    wet = {name: transpose(tmask).astype(bool) for name in ("T", "S")}
+    exact = module._provisional_krhs_boundary_rows(live, arrays, wet)
+    assert all(row["after_complete_fct_advection_content"]["cells_unequal"] == 0
+               for row in exact.values())
+
+    planted = {name: value.copy() for name, value in live.items()}
+    planted["T"][0, 0, 0] = np.nextafter(
+        planted["T"][0, 0, 0], np.float64(np.inf))
+    detected = module._provisional_krhs_boundary_rows(planted, arrays, wet)
+    assert detected["T"]["after_complete_fct_advection_content"][
+        "cells_unequal"] == 1
+
+
+def test_round64_runner_preserves_the_ten_step_source_horizon():
+    run = R64_RUN.read_text()
+    assert "TARGET_CFG=GYRE_OMIP_L2_P3_SM_R64KRHS" in run
+    assert "round64/oracle_krhs_split" in run
+    assert "--expect-itend 10" in run
+    assert "nn_itend *= *10" in run
+    assert "sed -i" not in run
+    assert "cmp \"$SOURCE_ROOT/EXP00/namelist_cfg\"" in run
 
 
 @pytest.mark.parametrize(
