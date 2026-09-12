@@ -1442,6 +1442,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   woa_init: bool = False, woa_t=None, woa_s=None, n_gpus: int = 1,
                   pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None, A_h_eq_sigma_deg=None,
                   ke_gradient_scheme=None, partial_cell=False,
+                  lateral_side_bc=None, barotropic_coriolis=None,
                   adaptive_implicit_vertadv=None, bathy_smoothing_passes=0,
                   momentum_time_integrator=None, barotropic_solver=None,
                   barotropic_pcg_variant=None,
@@ -1543,6 +1544,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("A_h_eq_boost", A_h_eq_boost),
                               ("A_h_eq_sigma_deg", A_h_eq_sigma_deg),
                               ("ke_gradient_scheme", ke_gradient_scheme),
+                              ("lateral_side_bc", lateral_side_bc),
+                              ("barotropic_coriolis", barotropic_coriolis),
                               ("adaptive_implicit_vertadv", adaptive_implicit_vertadv),
                               ("momentum_time_integrator", momentum_time_integrator),
                               ("barotropic_solver", barotropic_solver),
@@ -1573,6 +1576,16 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                               ("tracer_advection", tracer_advection),
                               ("prescribed_flow", prescribed_flow),
                               ) if v is not None}
+    if pgf_scheme == "nemo_sco":
+        # NOT a free choice, and the same shape as the msc_stabilize pairing
+        # below: the PGF raises unless pgf_quadrature="nemo_trapezoid",
+        # because the zuap/stretch terms telescope against the dynhpg
+        # trapezoid p' on the SAME gdept ladder.  pgf_quadrature has no CLI
+        # flag of its own, so without this pairing "nemo_sco" could never be
+        # selected from the command line at all.
+        _ovr["pgf_quadrature"] = "nemo_trapezoid"
+        print("[setup] tripole PGF: nemo_sco (NEMO ln_hpg_sco) with "
+              "pgf_quadrature=nemo_trapezoid, paired automatically")
     if no_gm_redi:
         # Disable the recipe's GM/Redi (NEMOMatchTripoleRecipeConfig ships
         # gm_redi=True, kappa=600).  Appended AFTER the not-None filter above
@@ -1821,6 +1834,24 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                 grid, A_h_profile_file,
                 _ovr.get("A_h", config.lateral_viscosity.A_h))
         config = config.replace_flat(**_ovr)
+        # nemo_sco preconditions, checked on the MERGED config rather than on
+        # the flag: a base config may already select the scheme, and the
+        # pairing above is a positional side effect that a later _ovr mutation
+        # could in principle undo (GLM review).  Both of these otherwise raise
+        # deep inside the pressure-gradient at the first step, long after the
+        # setup that could explain them.
+        if getattr(config, "pgf_scheme", None) == "nemo_sco":
+            if config.pgf_quadrature != "nemo_trapezoid":
+                raise ValueError(
+                    'pgf_scheme="nemo_sco" resolved with pgf_quadrature='
+                    f'"{config.pgf_quadrature}"; the automatic pairing was '
+                    "overwritten after it was applied.")
+            if getattr(z_coord, "t_depth_ref", None) is None:
+                raise ValueError(
+                    'pgf_scheme="nemo_sco" needs an explicit t_depth_ref on '
+                    "the vertical coordinate (NEMO gdept); pass "
+                    "--nemo-vertical. An arithmetic-midpoint fallback does "
+                    "not reproduce NEMO gdept on a stretched grid.")
         model = LatLonCGridOceanModel(grid, z_coord, config)
         print(f"[setup] tripole config override: {_ovr}")
     land_mask, H_bathy = read_mesh_mask_bathy(mesh_path)
@@ -6014,8 +6045,30 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "below-seafloor masking) — prerequisite for the cube smc03 "
                         "PGF. Matches NEMO's vertical coordinate. Fixes the spurious "
                         "equatorial-bottom PGF cold-start blowup (job 8106208).")
-    p.add_argument("--pgf-scheme", type=str, default=None, choices=[None, "adcroft", "smc03"],
-                   help="Override tripole PGF scheme (default: run_omip's adcroft).")
+    p.add_argument("--pgf-scheme", type=str, default=None,
+                   choices=[None, "adcroft", "smc03", "nemo_sco"],
+                   help="Override tripole PGF scheme (default: run_omip's "
+                        "adcroft). 'nemo_sco' is NEMO ORCA1's ln_hpg_sco and "
+                        "pairs pgf_quadrature=nemo_trapezoid automatically "
+                        "(the scheme raises without it); it also needs an "
+                        "explicit t_depth_ref on the vertical coordinate, so "
+                        "use it with --nemo-vertical.")
+    p.add_argument("--lateral-side-bc", type=str, default=None,
+                   choices=["free_slip", "no_slip"],
+                   help="Lateral momentum boundary condition at coastal walls. "
+                        "NEMO ORCA1 runs rn_shlat=2, i.e. NO-SLIP; our config "
+                        "default is free_slip, so this gap was previously "
+                        "unreachable from the command line. Caveat carried "
+                        "from review: our no_slip is not yet demonstrated "
+                        "numerically equivalent to NEMO's shlat=2 partial-slip "
+                        "formulation. Default (None) preserves the config.")
+    p.add_argument("--barotropic-coriolis", type=str, default=None,
+                   choices=["avg", "een", "een_metric"],
+                   help="Coriolis discretization inside the barotropic "
+                        "substep loop. NEMO ORCA1 runs ln_dynvor_een; ours "
+                        "supports een/een_metric but had no flag at all. "
+                        "'avg' is the legacy 4-point average. Default (None) "
+                        "preserves the config.")
     p.add_argument("--A-h", type=float, default=None, help="Override Laplacian viscosity [m2/s].")
     p.add_argument("--tracer-advection", type=str, default=None,
                    help="Override the tracer advection scheme (e.g. ppm_fct "
@@ -7624,6 +7677,8 @@ def main() -> int:
             A_h_eq_sigma_deg=args.A_h_eq_sigma_deg,
             A_h_profile_file=args.A_h_profile_file,
             ke_gradient_scheme=args.ke_gradient_scheme,
+            lateral_side_bc=args.lateral_side_bc,
+            barotropic_coriolis=args.barotropic_coriolis,
             partial_cell=args.partial_cell,
             adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
             bathy_smoothing_passes=args.bathy_smoothing_passes,
