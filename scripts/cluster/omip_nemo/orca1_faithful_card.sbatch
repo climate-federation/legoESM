@@ -1,126 +1,80 @@
 #!/bin/bash
 #SBATCH --job-name=orca1_faith
 #SBATCH --account=glab
-# glab1 holds exactly ONE GPU node (g049) and it sits 'planned' behind
-# higher-priority reservations, so a job queued there can wait indefinitely.
-# 'short' has 36 GPU nodes at a 12 h cap, which this 30-day run fits.
 #SBATCH --partition=short
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=96G
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=64G
 #SBATCH --time=11:45:00
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/orca1_faith_%j.out
 #
-# THE ORCA1-FAITHFUL PRODUCTION CARD.
+# THE ORCA1-FAITHFUL PRODUCTION CARD, REBUILT.
 #
-# User decision, 2026-09-11: adopt ALL FOUR NEMO-faithfulness sets that landed
-# as selectable capability during the 20-gap programme. Until now the
-# production configuration selected NONE of them and every gap shipped with
-# its default preserved.
+# The first version of this card was written FROM SCRATCH with about twenty
+# flags and it went 100% NaN in velocity within a day. The cause was not the
+# adopted physics: the card simply was not a working configuration. The
+# known-good baseline (_trp_base2_d30.sbatch) carries about forty flags --
+# the equatorial viscosity shape and profile, the Smagorinsky settings, the
+# NEMO vertical coordinate, partial cells, the SMC03 pressure gradient,
+# min-levels, TKE vertical mixing, bottom drag, the restoring stack, the
+# geothermal and internal-wave forcing, the monthly IC -- and omitting any of
+# that is not "a simpler run", it is a different and unstable model.
 #
-# THIS IS A NEW BASELINE, NOT AN ARM. Four sets change together, which is the
-# ONE case the house rules permit a multi-change configuration: a deliberate
-# baseline, labelled as such. Its output is therefore NOT attributable term by
-# term against any pre-adoption run, and no single lever below may be credited
-# for a difference. Any single-lever claim from here needs a fresh
-# one-variable arm off THIS card.
+# So this card is now the BASELINE'S OWN FLAG BLOCK, verbatim, PLUS the four
+# adopted sets appended at the end. That is the only honest way to claim the
+# only difference is the adoption.
 #
-# Every scientific selector is named EXPLICITLY below, including several whose
-# default is already what we want. A default is not a record.
+# THIS IS A NEW BASELINE, NOT AN ARM: the adopted sets move together by user
+# authorisation, so the result is NOT attributable term by term against the
+# pre-adoption baseline, and no single lever may be credited for a difference.
 set -uo pipefail
 ROOT=/burg-archive/glab/users/pg2328/_omip_wt; cd $ROOT || exit 1
 echo "HEAD: $(git log --oneline -1)"
 export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
-export JAX_ENABLE_X64=1
-
+NEMOIN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS
 DAYS=${DAYS:-30}
-# --years is the runner's length knob; express the target in days.
 YEARS=$($PY -c "print(${DAYS}/365.0)")
-FORCING=${FORCING:-/burg-archive/home/pg2328/.cache/legoesm/ocean_fidelity/forcing/core2_nyf_mod}
 OUT=${OUT:-/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_orca1faith_d${DAYS}}
+echo "DAYS=$DAYS YEARS=$YEARS OUT=$OUT"
 
-$PY -u scripts/run/run_omip_core2.py \
-  `# --- geometry, resolution, timestep: stated even where defaulted ---` \
-  --grid tripole \
-  --mesh /burg-archive/glab/users/pg2328/legoESM/data/grids/eORCA1.2_mesh_mask.nc \
-  --nlev 75 \
-  --dt 150 \
-  --years "$YEARS" \
-  `# dt=150 s is CORRECT and was re-derived on 2026-09-11: tracers are` \
-  `# explicit, so the VERTICAL tracer CFL binds first -- max|w| 2.25e-03 m/s` \
-  `# against a 1.02 m top layer allows ~456 s, eight times below the 3488 s` \
-  `# horizontal bound. 150 s sits at vertical Courant ~0.33.` \
-  \
-  `# --- initial condition and forcing ---` \
-  --woa-init \
-  --forcing-path "$FORCING" \
-  \
-  `# --- SET 1: the measured bug fixes -------------------------------------` \
-  `# Thin-snow albedo (the surface went toward BLACK as snow thinned) and the` \
-  `# salinity-dependent freezing point are corrections, not preferences.` \
-  --prognostic-sea-ice \
+JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
+  --mesh data/grids/eORCA1.2_mesh_mask.nc --dt 150 --min-levels 2 \
+  --C-smag-lap 3.0 --smag-cfl-safety 0.125 \
+  --A-h 2e4 --A-h-profile-file $NEMOIN/orca1_inputs/data_repository/input_fields/eddy_viscosity_3D.nc \
+  --visc-schedule '0:1e4:3.0,8:1e4:1.5,16:1e4:0.5' \
+  --ew-cyclic-overlap --nemo-vertical --partial-cell --pgf-scheme smc03 \
+  --adaptive-implicit-vertadv --momentum-rk3 --geothermal --runoff \
+  --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 \
+  --sss-ice-gate-nemo --prognostic-sea-ice --prognostic-ice-dynamics free_drift \
+  --ice-lead-freeze-source nemo_qlead \
+  --years $YEARS --snapshot-every-days 5 --diag-every-days 1 \
+  --tracer-advection superbee --runoff-depth-nemo-ini --river-mouth-restoring-gate \
+  --bottom-drag-scheme nemo_quadratic \
+  --iwm --iwm-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc \
+  --dm2dc --isf --isf-forcing-file $NEMOIN/orca1_inputs/data_repository/input_fields/runoff-icb_DaiTrenberth_Depoorter.nc \
+  --bbl-adv --woa-init \
+  --woa-t /burg/glab/users/pg2328/legoESM/data/woce_gouretski/woce_t_woa57_annual.nc \
+  --woa-s /burg/glab/users/pg2328/legoESM/data/woce_gouretski/woce_s_woa57_annual.nc \
+  --nemo-monthly-init $NEMOIN/orca1_inputs/data_repository/initial_conditions/woce_temp_monthly_init_4p2.nc \
+    $NEMOIN/orca1_inputs/data_repository/initial_conditions/woce_salt_monthly_init_4p2.nc \
+  --sss-restore-file $NEMOIN/orca1_inputs/data_repository/input_fields/sss_climatology_for_restoring.nc \
+  --tripole-vmix tke --ice-init $NEMOIN/Ice_initialization.nc \
+  --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic \
+  --tke-kappa-convention veros_sqrte --sw-rgb-chl --ice-ocean-heat-coeff 70 \
+  --gateway-transports --mle --mle-ce 0.06 --kprofile-snapshots \
+  `# ---- THE FOUR ADOPTED SETS, and nothing else, appended ----` \
   --ice-freeze-scheme unesco \
-  `# NOT nemo_teos10: that liquidus consumes ABSOLUTE salinity and our tracers` \
-  `# are PRACTICAL. Choosing it here would be the same unit error the --eos` \
-  `# selector refuses by name. 'unesco' delivers the salinity DEPENDENCE that` \
-  `# gap 6 was about, on the salinity scale we actually carry. THIS IS THE ONE` \
-  `# JUDGEMENT CALL IN THIS CARD -- flagged rather than buried.` \
-  \
-  `# --- SET 2: ocean physics (GM/Redi + lateral operator) -----------------` \
-  --gm-treguier \
-  --gm-kappa-min 0 \
-  `# kappa_min=0 is REQUIRED by nemo21 and is the oracle's own behaviour: NEMO` \
-  `# tapers its GM coefficient to zero at the equator too (ldftra.F90:702,` \
-  `# "tropical decrease"). A 200 floor would not be faithful.` \
-  --gm-slope-scheme nemo_iso_lap \
-  --gm-slope-positions nemo_native \
-  --gm-bolus-advection through_fct \
-  --gm-msc-stabilize \
-  --redi-coefficient nemo21 \
-  --redi-aht0 900 \
-  `# nemo21 reads the mesh's exact gphif for ff_f (verified present in this` \
-  `# mesh) and applies NEMO ldftra.F90:428-438: max(0.2*aht0, GM_face) plus an` \
-  `# ADDITIVE tropical term, which is the only construction that reaches the` \
-  `# equator once GM has tapered to zero there.` \
-  \
-  `# EOS: DELIBERATELY NOT nemo_teos10, so this card is NOT fully faithful on` \
-  `# the dynamics density. ORCA1 runs ln_teos10=.true., but NEMO's TEOS-10` \
-  `# branch consumes Conservative Temperature and ABSOLUTE salinity` \
-  `# (eosbn2.F90:1924 sets l_useCT=.TRUE.) and converts nothing -- its inputs` \
-  `# are pre-converted offline. Ours are potential temperature and practical` \
-  `# salinity. Converting the IC, the SSS restoring target and the forcing is` \
-  `# the remaining work for gap 10. Measured cost of the mismatch if it were` \
-  `# selected anyway: 0.13 kg/m3 in density but only 0.47% in stratification.` \
-  `# The runner REFUSES --eos nemo_teos10 for this reason, so it is omitted` \
-  `# here rather than set: the dynamics runs 'wright'.` \
-  \
-  `# --- SET 3: ice (exchange coefficients, snow, optics) ------------------` \
-  --ice-exchange nemo_si3 \
-  `# ORCA1 namelist_cfg:140-142 and namelist_ice_ref:136 -- 1.0e-3 for all` \
-  `# three air-ice coefficients and 5.0e-3 ice-ocean, against our 1.5/1.3/5.5.` \
-  `# namelist_CFG overrides the 1.4e-3 in namelist_REF; quoting the reference` \
-  `# file would have been wrong by 40%.` \
-  --ice-snow bulk \
-  --ice-snow-flooding on \
-  \
-  `# --- SET 4: forcing time interpolation ---------------------------------` \
-  --forcing-time-interp linear \
-  --chl-remap nemo_scrip \
-  `# ORCA1 remaps chlorophyll with its own weights_reg05_bilinear.nc` \
-  `# (namelist_cfg:170), not with inverse-distance weighting. Chlorophyll` \
-  `# sets the shortwave penetration depth, so this feeds upper-ocean heating.` \
-  `# ORCA1 carries ln_tint=.true. on exactly the three MONTHLY climatologies` \
-  `# (sn_chl:170, sn_sss:185, sn_rnf:199) and ln_tint=.FALSE. on the 6-hourly` \
-  `# winds and daily radiation (148-152), which both models therefore HOLD.` \
-  `# Note: linear weights month k by (M[k-1]+2M[k]+M[k+1])/4 days, so February` \
-  `# integrates as 29.5 rather than 28 -- the annual runoff total shifts by` \
-  `# well under a percent. Stated, not assumed away.` \
-  \
-  --output "$OUT" \
-  --snapshot-every-days 5 \
-  2>&1 | tail -60
-
+  --gm-treguier --gm-kappa-min 0 \
+  --gm-slope-scheme nemo_iso_lap --gm-slope-positions nemo_native \
+  --gm-bolus-advection through_fct --gm-msc-stabilize \
+  --redi-coefficient nemo21 --redi-aht0 900 \
+  --ice-exchange nemo_si3 --ice-snow bulk --ice-snow-flooding on \
+  --forcing-time-interp linear --chl-remap nemo_scrip \
+  `# EOS stays wright: --eos nemo_teos10 is REFUSED because NEMO's TEOS-10` \
+  `# takes Conservative Temperature and ABSOLUTE salinity while our tracers` \
+  `# are potential temperature and PRACTICAL salinity.` \
+  --output $OUT 2>&1 | tail -40
 echo "=== card exit: $? ==="
 echo "OUT=$OUT"
 echo DONE
