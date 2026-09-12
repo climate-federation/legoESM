@@ -124,6 +124,7 @@ def make_physics(
     f_land=None,
     land_beta: float = 1.0,
     budget_ledger: bool = False,
+    budget_ledger_level_weight=None,
 ) -> Callable:
     """Create a combined physics function for a dynamical core.
 
@@ -205,7 +206,8 @@ def make_physics(
         fn = _make_hydrostatic_combined(
             config, dt, model_type="mpas", column_mesh=column_mesh,
             need_rad=need_rad, f_land=f_land, land_beta=land_beta,
-            budget_ledger=budget_ledger)
+            budget_ledger=budget_ledger,
+            budget_ledger_level_weight=budget_ledger_level_weight)
     else:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "

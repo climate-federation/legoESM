@@ -134,8 +134,11 @@ def test_the_physics_factory_accepts_the_weight():
     """The weight must reach the physics ledger rows, not just the config."""
     import inspect
     from legoesm.atmosphere.physics import combined
-    assert "budget_ledger_level_weight" in inspect.signature(
-        combined._make_hydrostatic_combined).parameters
+    # BOTH the factory and the PUBLIC wrapper the driver actually calls: the
+    # first wiring added it only to the inner factory, so every banded run died
+    # on an unexpected-keyword TypeError after the band had been computed.
+    for fn in (combined._make_hydrostatic_combined, combined.make_physics):
+        assert "budget_ledger_level_weight" in inspect.signature(fn).parameters, fn
 
 
 def test_the_dycore_config_carries_the_weight():
