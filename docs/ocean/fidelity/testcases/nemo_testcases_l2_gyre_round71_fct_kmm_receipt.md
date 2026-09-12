@@ -122,7 +122,18 @@ The round-71 instrument/helper/acquisition tests, the entire receipt-citation
 test file, Python compilation, Ruff on new Python files, shell parsing,
 `git diff --check`, and the dry Fortran syntax proof pass. The operator's first
 required repair is isolated in commit `69609b91f0b9`: the default real-receipt
-citation test now reports all 16 tests passed.
+citation test now reports all 16 tests passed. The combined focused run reports
+27 passed (`focused_tests.xml`, SHA-256
+`4d04018d10781cd2d8706f8d1549ff497f1a71119c2774a2b96608d503f5e4e5`).
+
+The receipt citation gate is stamped to clean commit
+`f2545f0ac7539edc93f80ce3662584665e1b2e93`; it audits all six round-71
+compiled-source citations and the complete map with no failure
+(`round71_citation_gate.json`, SHA-256
+`2dabccfc4bccfe8a815e82b50b99892409d6d00cad5f863ddc151a92c96e6816`).
+Shifting the stage-2 update citation by two lines produces
+SYMBOL-NOT-AT-LINE and exits 1 (`round71_citation_plant.json`, SHA-256
+`ecd989b0e4a14fcdd31b7d591d9b7172e54745a4aba1ffb621c9f646e56400d3`).
 
 ## ASKED / UNASKED and OPEN
 
