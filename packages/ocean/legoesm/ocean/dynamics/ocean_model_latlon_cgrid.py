@@ -7596,7 +7596,6 @@ class LatLonCGridOceanModel:
                 )
                 _pair_divs = (None, None)
             elif _tti == "rk3_ws":
-                _ws_stage_source_rates = _stage_source_rates
                 _bbl_context = None
                 if (_cfg_b.bbl_adv_option == 2
                         and not self._nemo_ws_test_hooks.disable_bbl):
@@ -7663,7 +7662,7 @@ class LatLonCGridOceanModel:
                         "nemo_rk3_two_step"
                         if self._nemo_ws_test_hooks.two_step_fct_predictor
                         else "one_step"),
-                    stage_source_rates=_ws_stage_source_rates,
+                    stage_source_rates=_stage_source_rates,
                     bbl_context=_bbl_context,
                     # One stage ladder: stages 1-2 were advanced by the
                     # momentum program on the same Kmm transports as the
