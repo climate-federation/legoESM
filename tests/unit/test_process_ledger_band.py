@@ -187,3 +187,33 @@ def test_the_dycore_actually_receives_the_band_from_a_config():
     assert w.shape == (NLEV,)
     assert w.sum() > 0.0 and w.sum() < NLEV      # a real band, not all-or-nothing
     _Out.budget_ledger_sigma_band = None
+
+
+def test_every_physics_build_site_receives_the_band():
+    """EVERY make_physics call in the driver must pass the weight, not just the
+    first. Measured when one did not: the production run subcycles radiation,
+    so 47 of every 48 steps ran a SECOND, unbanded physics function and the
+    ledger rows came out a 2%-banded, 98%-unbanded blend that looked plausible
+    and partitioned nowhere."""
+    import inspect, re
+    from legoesm.driver import model_driver
+    src = inspect.getsource(model_driver)
+    calls = [m.start() for m in re.finditer(r"\bmake_physics\(", src)]
+    assert calls, "no make_physics call found — test cannot fail"
+    for pos in calls:
+        tail = src[pos:pos + 1200]
+        depth, end = 0, None
+        for i, ch in enumerate(tail):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        assert end is not None, "unbalanced make_physics call"
+        call = tail[:end]
+        if "budget_ledger=" in call:
+            assert "budget_ledger_level_weight=" in call, (
+                "a make_physics call passes the ledger flag but not the band:\n"
+                + call)

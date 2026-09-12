@@ -9310,7 +9310,8 @@ class ModelDriver:
                                      or _land_beta_soil_on)
                                  else None),
                          land_beta=_land_beta,
-                         budget_ledger=_budget_ledger_on)
+                         budget_ledger=_budget_ledger_on,
+                         budget_ledger_level_weight=_ledger_weight)
             if _subcycle_rad else None
         )
         if _subcycle_rad:
