@@ -160,6 +160,8 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfphy.f90"),
     "GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfsh2.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfsh2.f90"),
+    "GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90"),
     "round33_lock_zdf_matrix/namelist_cfg": (
         Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
              "round33_lock_zdf_matrix/namelist_cfg")),
@@ -259,6 +261,10 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM/cpp_GYRE_OMIP_L2_P3_SM.fcm",
     "nemo_testcase_recipe.py":
         REPO / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py",
+    "packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py":
+        REPO / "packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py",
+    "tests/ocean/fidelity/test_nemo_testcase_l2_gyre_card_reconciliation.py":
+        REPO / "tests/ocean/fidelity/test_nemo_testcase_l2_gyre_card_reconciliation.py",
     # --- round 36 paths: THIS ROUND'S OWN BUILD ---
     # The R35TRAZDF card is the one that produced the round-35 record, and it
     # is the only build whose trazdf.f90 carries the instrument, so its line
@@ -286,6 +292,29 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- decision 36: RK3 face-native shear on the GYRE identity card ---
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90:168': (
+        'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 1),
+    'nemo_testcase_recipe.py:153-155': [
+        'tke_shear_production="nemo_face_native_now2"',
+        'tke_shear_metric_source="nemo_qco_live_face"', 3],
+    'ocean_model_latlon_cgrid.py:8917-8934': [
+        'if shear_disc not in ("nemo_face_native", "nemo_face_native_now2"):',
+        '_u_before, _v_before = _u_now, _v_now', 18],
+    'ocean_model_latlon_cgrid.py:8955-9028': [
+        'if metric_source == "nemo_qco_live_face":',
+        'ref_v * (1.0 + r3vb[..., None]),', 74],
+    'packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py:384-454': [
+        ('wumask = u_mask[..., :-1] * u_mask[..., 1:]', 2),
+        ('+ (zsh2v[:-1, :, :] + zsh2v[1:, :, :]) * coast_v', 2), 71],
+    'nemo_testcase_l2_gyre_round54_tke_operands.py:421-455': [
+        'def _model_substitution_walk(',
+        'require(jax.config.x64_enabled, "model substitution walk requires JAX fp64")',
+        35],
+    'tests/ocean/fidelity/test_nemo_testcase_l2_gyre_card_reconciliation.py:193-216': [
+        'def test_rk3_card_steps_with_nemo_face_shear_and_live_face_metric(gate):',
+        'assert all(np.all(np.isfinite(np.asarray(fields[k]))) for k in ("T", "S", "u", "v", "ssh"))',
+        24],
     # --- round 61: split of the actual kt=2 carry and face-shear replay ---
     'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfphy.f90:317-337': [
         ('IF( l_zdfsh2 ) THEN', 1),
@@ -1154,8 +1183,8 @@ CITATION_MAP = {
         '_nemo_ws_pre_implicit_state = (',
         'if self._nemo_ws_test_hooks.expose_pre_implicit_state else None)',
         3],
-    'ocean_model_latlon_cgrid.py:10241': ('u_solve_in = u_solve_in - _u_bt_mean', 1),
-    'ocean_model_latlon_cgrid.py:10358': ('u_solve_in = u_solve_in - (', 1),
+    'ocean_model_latlon_cgrid.py:10250': ('u_solve_in = u_solve_in - _u_bt_mean', 1),
+    'ocean_model_latlon_cgrid.py:10367': ('u_solve_in = u_solve_in - (', 1),
     'ocean_pe_latlon_cgrid.py:3276-3279': [
         ('if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):', 1),
         ('"with a scalar dlon (got dlon<=0; tripolar unsupported)."', 1),
@@ -1192,8 +1221,9 @@ CITATION_MAP = {
     # the field is named twice: GYRE's bundle at 226, the tanks' at 329.
     # ROUND (card reconciliation): the GYRE card's own freshwater selection
     # added eighteen lines above this anchor, so 311 became 329; decision 35
-    # added nine lines above it and round 56 removed two, so it is now 336.
-    'nemo_testcase_recipe.py:336': [
+    # added nine lines above it and round 56 removed two; decision 36 added
+    # fifteen more lines above it, so it is now 351.
+    'nemo_testcase_recipe.py:351': [
         ('zdf_baroclinic_only=True,', 2), ('zdf_baroclinic_only=True,', 2), 1],
     'provenance.py:96': 'def git_sha(*, allow_dirty: bool = False, repo: str | Path | None = None) -> str:',
     'cpp_GYRE_BARE.fcm:1': 'key_linssh key_vco_1d  key_RK3',
@@ -1234,9 +1264,10 @@ CITATION_MAP = {
     # ROUND 34: decision 19 added seventeen lines above the last of these
     # three, so 914 became 931.  The two earlier anchors are unmoved.
     # ROUND (card reconciliation): the GYRE card's own freshwater selection
-    # added eighteen lines above the SECOND and THIRD anchors, so 274 became
-    # 292 and 931 became 949.  The first (92) is above the edit, unmoved.
-    'nemo_testcase_recipe.py:92,299,956': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
+    # added eighteen lines above the SECOND and THIRD anchors, then decision
+    # 36 added fifteen more, so the current lines are 314 and 971.  The first
+    # (92) is above both edits and remains unmoved.
+    'nemo_testcase_recipe.py:92,314,971': [('pgf_scheme="nemo_sco",', 1), ('pgf_scheme="nemo_sco",', 2), 'if cfg.pgf_scheme != "nemo_sco":', 3],
     'BLD/ppsrc/nemo/dynspg_ts.f90:1224': 'REAL(wp), DIMENSION(jpi,jpj,jpk,jpt), INTENT(in   ) ::  puu, pvv',
     'BLD/ppsrc/nemo/dynhpg.f90:378,397': [('DO jj = ntsj-( 0), ntej+(  0 ) ; DO ji = ntsi-( 0), ntei+(  '
           '0)              ! Surface value',
