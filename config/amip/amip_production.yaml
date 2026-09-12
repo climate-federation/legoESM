@@ -310,7 +310,34 @@ homogeneous_ice_nucleation: true
 aerosol_ccn: true
 # Grid-scale moisture smoothing, the positivity fixer that borrows within a
 # column rather than creating water, and the prognostic sea-ice skin.
-mpas_qv_smooth_del2_m2s: 2.0e5
+# The moisture filter is a SCALE-SELECTIVE biharmonic, not a Laplacian, since
+# 2026-09-12. The Laplacian at 2.0e5 was itself a cause of the tropical
+# free-tropospheric moist bias: it flattened the resolved humidity gradients
+# along with the grid-scale noise it was added to suppress. 3.6421e14 m^4/s
+# matches that Laplacian's damping of the TWO-CELL mode exactly, measured on
+# the operator's own top eigenvalue on this mesh, so it changes selectivity
+# without changing the grid-scale damping production has always had.
+#
+# Measured on a 30-day controlled pair, days 101-110, against the Laplacian:
+# reflected shortwave 112.8 -> 108.0 (CERES 99-100), outgoing longwave
+# 233.7 -> 237.7 (CERES ~240), global cloud cover 72.2 -> 67.1 (ESACCI ~67),
+# tropical free-troposphere relative humidity 0.744 -> 0.688, and the humidity
+# field stays smooth (structure-function exponent 1.48 against the Laplacian's
+# 1.56; the refuted weaken-the-Laplacian arm scored 0.58).
+#
+# CHOSEN FROM A FOUR-POINT SWEEP, not from two points: 0.91e14 gives better
+# radiation still (shortwave 103.9, longwave 240.4, deep-tropical cover inside
+# the observed range) but its exponent is 1.02, at the step-discontinuity value,
+# and no instantaneous-humidity reference exists yet to say whether that is a
+# sharp front or under-damping. Both reviewers chose this value over it;
+# revisit when the daily reanalysis humidity reference is available.
+#
+# CAVEAT that is NOT fixed by this: the filter is a uniform drying. It improves
+# every region that was too cloudy and WORSENS every region already too clear —
+# the Californian stratocumulus deck loses a further 10 cover points on a deck
+# already 34 too clear, at every coefficient in the sweep.
+mpas_qv_smooth_del2_m2s: 0.0
+mpas_qv_smooth_del4_m4s: 3.6421e14
 mpas_conservative_tracer_clamp: true
 mpas_ice_skin_prognostic: true
 
