@@ -1,0 +1,39 @@
+commit e343e069c824955d87fbb7aac137eab1fe798a5f
+Author: Dhruv Balwada <dhruvbalwada@gmail.com>
+Date:   Sat Sep 12 08:47:05 2026 -0400
+
+    revert(ocean): retract refuted tracer content arm
+
+diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+index 29998c4cd..60096be72 100644
+--- a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+@@ -1905,24 +1905,10 @@ def _nemo_ws_rk3_tracer_pair_step(
+     fd2_a, fd2_b, _, _ = _flux_pair(a2, b2, dt, 2, h_k_new)
+     advection_content_a = h_k_old * tr_a - dt * fd2_a
+     advection_content_b = h_k_old * tr_b - dt * fd2_b
+-    # NEMO trazdf.f90:546-560 multiplies the COMPLETE accumulated Krhs by
+-    # e3t(Kmm) and p2dt in one statement.  Keeping advection in content form
+-    # while multiplying only the other sources by h(Kmm) is algebraically
+-    # equivalent but not the compiled source association.
+-    safe_h_rhs = jnp.maximum(h_one_half, 1.0e-10)
+-    rhs_a = nemo_source_round(
+-        nemo_source_round(-fd2_a / safe_h_rhs)
+-        + stage_source_rates[2][0])
+-    rhs_b = nemo_source_round(
+-        nemo_source_round(-fd2_b / safe_h_rhs)
+-        + stage_source_rates[2][1])
+-    h_rhs_dt = nemo_source_round(dt * h_one_half)
+-    content_a = nemo_source_round(
+-        nemo_source_round(h_k_old * tr_a)
+-        + nemo_source_round(h_rhs_dt * rhs_a))
+-    content_b = nemo_source_round(
+-        nemo_source_round(h_k_old * tr_b)
+-        + nemo_source_round(h_rhs_dt * rhs_b))
++    content_a = (advection_content_a
++                 + dt * h_one_half * stage_source_rates[2][0])
++    content_b = (advection_content_b
++                 + dt * h_one_half * stage_source_rates[2][1])
+     out_a = jnp.where(
+         active_3d > 0.5,
+         content_a / jnp.maximum(h_k_new, 1.0e-10), tr_a)
