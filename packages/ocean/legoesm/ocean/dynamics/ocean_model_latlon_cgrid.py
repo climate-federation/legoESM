@@ -1227,6 +1227,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # NEMO's native metric zFu/zFv/zFw triplet; momentum and later stages keep
     # the production transport.  Private diagnostic only.
     stage1_tracer_transport_override: object = None
+    # One-variable stage-2 tracer-transport operand arm.  The gate supplies
+    # NEMO's native metric zFu/zFv/zFw triplet only to the tracer helper;
+    # momentum and stages 1/3 keep the production transport.  Private
+    # diagnostic only.
+    stage2_tracer_transport_override: object = None
     # One-variable stage-3 transport operand injection.  The gate supplies the
     # oracle's native metric zFu/zFv/zFw triplet; conversion back to the shared
     # internal transport representation happens once at the construction
@@ -6273,6 +6278,21 @@ class LatLonCGridOceanModel:
                                  .expose_tracer_stage1_boundary)),
                 )
 
+            def _tracer_transport_geometry_override(geometry, override):
+                """Map a private owned zF triplet into the shared geometry."""
+                if override is None:
+                    return geometry
+                zfu_owned, zfv_owned, zfw = override
+                zfu = jnp.concatenate([zfu_owned[:, -1:, :], zfu_owned], axis=1)
+                zfv = jnp.concatenate([zfv_owned[-1:, :, :], zfv_owned], axis=0)
+                return (
+                    zfu / jnp.asarray(_grid.dy_u)[..., None],
+                    zfv / jnp.asarray(_grid.dx_v)[..., None],
+                    zfw / jnp.asarray(_grid.area_T)[..., None],
+                    geometry[3], geometry[4], geometry[5], geometry[6],
+                    zfu, zfv, geometry[9], geometry[10],
+                )
+
             def _stage_hpg_operands(T_stage, S_stage, eta_stage):
                 # Operands of the stage-2/3 eos+dyn_hpg call.  ``None`` keeps
                 # the step-entry bundle (Kbb operands, harness Arm A control);
@@ -6374,22 +6394,9 @@ class LatLonCGridOceanModel:
                 qco_before=_qv_b, qco_now=_qv_b, qco_after=_qv_13)
             u1_corr, v1_corr = _replace_stage_mean(
                 u1_raw, v1_raw, target_u, target_v)
-            _g0_tracer = _g0
-            _g0_tracer_override = (
+            _g0_tracer = _tracer_transport_geometry_override(
+                _g0,
                 self._nemo_ws_test_hooks.stage1_tracer_transport_override)
-            if _g0_tracer_override is not None:
-                _zfu_o, _zfv_o, _zfw_o = _g0_tracer_override
-                _zfu_faces = jnp.concatenate(
-                    [_zfu_o[:, -1:, :], _zfu_o], axis=1)
-                _zfv_faces = jnp.concatenate(
-                    [_zfv_o[-1:, :, :], _zfv_o], axis=0)
-                _g0_tracer = (
-                    _zfu_faces / jnp.asarray(_grid.dy_u)[..., None],
-                    _zfv_faces / jnp.asarray(_grid.dx_v)[..., None],
-                    _zfw_o / jnp.asarray(_grid.area_T)[..., None],
-                    _g0[3], _g0[4], _g0[5], _g0[6],
-                    _zfu_faces, _zfv_faces, _g0[9], _g0[10],
-                )
             _stage1_tracer_result = _stage_tracers(
                 1, (_g0_tracer, _g0, _g0))
             if self._nemo_ws_test_hooks.expose_tracer_stage1_boundary:
@@ -6451,8 +6458,12 @@ class LatLonCGridOceanModel:
                 _nemo_ws_exposed_stage2_raw = (u2_raw, v2_raw)
             u2_corr, v2_corr = _replace_stage_mean(
                 u2_raw, v2_raw, target_u, target_v)
+            _g1_tracer = _tracer_transport_geometry_override(
+                _g1,
+                self._nemo_ws_test_hooks.stage2_tracer_transport_override)
             _T_stage2, _S_stage2 = _stage_tracers(
-                2, (_g0, _g1, _g1), resume=(1, _T_stage1, _S_stage1))
+                2, (_g0, _g1_tracer, _g1),
+                resume=(1, _T_stage1, _S_stage1))
             if self._nemo_ws_test_hooks.expose_tracer_stage == 2:
                 _nemo_ws_exposed_tracer_stage = (
                     _T_stage2, _S_stage2, _eta_live_one_half)
@@ -6473,19 +6484,9 @@ class LatLonCGridOceanModel:
                         (target_u, target_v))),
                 **_stage_transport_kw)
             _g2_override = self._nemo_ws_test_hooks.stage3_transport_override
+            _g2 = _tracer_transport_geometry_override(_g2, _g2_override)
             if _g2_override is not None:
-                _zfu_o, _zfv_o, _zfw_o = _g2_override
-                _zfu_faces = jnp.concatenate(
-                    [_zfu_o[:, -1:, :], _zfu_o], axis=1)
-                _zfv_faces = jnp.concatenate(
-                    [_zfv_o[-1:, :, :], _zfv_o], axis=0)
-                _g2 = (
-                    _zfu_faces / jnp.asarray(_grid.dy_u)[..., None],
-                    _zfv_faces / jnp.asarray(_grid.dx_v)[..., None],
-                    _zfw_o / jnp.asarray(_grid.area_T)[..., None],
-                    _g2[3], _g2[4], _g2[5], jnp.zeros_like(_g2[6]),
-                    _zfu_faces, _zfv_faces, _g2[9], _g2[10],
-                )
+                _g2 = (*_g2[:6], jnp.zeros_like(_g2[6]), *_g2[7:])
             _stage3_hpg_operands = _stage_hpg_operands(
                 _T_stage2, _S_stage2, _eta_live_one_half)
             _stage3_vertical_up3 = _stage_vertical_up3(u2_corr, v2_corr, _g2)

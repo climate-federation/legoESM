@@ -35,6 +35,8 @@ def test_reader_accepts_exact_stage2_schema(tmp_path: Path) -> None:
     row = GATE.read_record(path, 2)
     assert row["header"] == (1, 2, 2, 3, 1, 2, 2, 36, 26, 31, 64)
     assert row["fields"]["Kmm_T"].shape == (32, 22, 31)
+    assert row["fields"]["r3t_Kbb"].shape == (32, 22)
+    assert row["fields"]["r3t_Kaa"].shape == (32, 22)
 
 
 def test_reader_rejects_wrong_magic_and_truncation(tmp_path: Path) -> None:

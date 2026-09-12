@@ -52,6 +52,11 @@ def read_record(path: Path, stage: int, *, truncate: bool = False) -> dict:
         raw = values[index * n3 : (index + 1) * n3]
         fields[name] = raw.reshape((nx, ny, nz), order="F")[2:-2, 2:-2, :]
         require(np.all(np.isfinite(fields[name])), f"{path}: non-finite {name}")
+    offset = len(names) * n3
+    for index, name in enumerate(("r3t_Kbb", "r3t_Kmm", "r3t_Kaa")):
+        raw = values[offset + index * n2 : offset + (index + 1) * n2]
+        fields[name] = raw.reshape((nx, ny), order="F")[2:-2, 2:-2]
+        require(np.all(np.isfinite(fields[name])), f"{path}: non-finite {name}")
     return {"header": header, "fields": fields, "sha256": sha256(path)}
 
 
