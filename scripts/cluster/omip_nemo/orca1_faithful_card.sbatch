@@ -33,10 +33,16 @@ echo "HEAD: $(git log --oneline -1)"
 export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 NEMOIN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS
+# TWO LEGS, as the baseline did: ~0.70 h per simulated day means 30 days is
+# ~21 h, well past the 12 h partition cap. --years is the ABSOLUTE target, so
+# leg 2 asks for the FULL 30 days and resumes from leg 1's restart.
 DAYS=${DAYS:-30}
-YEARS=$($PY -c "print(${DAYS}/365.0)")
+LEG=${LEG:-1}
+HALF=$($PY -c "print(${DAYS}/2)")
+TARGET=$([ "$LEG" = 1 ] && echo $HALF || echo $DAYS)
+YEARS=$($PY -c "print(${TARGET}/365.0)")
 OUT=${OUT:-/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_orca1faith_d${DAYS}}
-echo "DAYS=$DAYS YEARS=$YEARS OUT=$OUT"
+echo "DAYS=$DAYS LEG=$LEG TARGET=$TARGET YEARS=$YEARS OUT=$OUT"
 
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --mesh data/grids/eORCA1.2_mesh_mask.nc --dt 150 --min-levels 2 \
@@ -74,6 +80,8 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   `# EOS stays wright: --eos nemo_teos10 is REFUSED because NEMO's TEOS-10` \
   `# takes Conservative Temperature and ABSOLUTE salinity while our tracers` \
   `# are potential temperature and PRACTICAL salinity.` \
+  --restart-save $OUT/restart_leg$LEG.npz \
+  $([ "$LEG" = 2 ] && echo "--restart-from $OUT/restart_leg1.npz") \
   --output $OUT 2>&1 | tail -40
 echo "=== card exit: $? ==="
 echo "OUT=$OUT"
