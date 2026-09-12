@@ -1,0 +1,36 @@
+--- stprk3_stg.F90.r64
++++ stprk3_stg.F90
+@@ -885,6 +885,6 @@
+       ! without tiling; fail closed by emitting no file if that assumption
+       ! changes rather than recording a partly updated tiled accumulator.
+-      IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg <= 2 ) THEN
++      IF( lwp .AND. .NOT.ln_tile .AND. kstp <= nit000 + 1 .AND. kstg <= 2 ) THEN
+          WRITE(l1_filename,'("oracle_rktracer_operands_kt",I8.8,"_s",I1,".bin")') kstp, kstg
+          OPEN( NEWUNIT=l1_unit, FILE=TRIM(l1_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
+             &  STATUS='REPLACE', ACTION='WRITE', IOSTAT=l1_ios )
+@@ -906,14 +906,14 @@
+          CALL r63_snapshot( 'after_adv', ts, Krhs )
+          IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
+             & WRITE(l2_tracer_unit) ts(:,:,:,jp_tem,Krhs), ts(:,:,:,jp_sal,Krhs)
+-         IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg <= 2 ) &
++         IF( lwp .AND. .NOT.ln_tile .AND. kstp <= nit000 + 1 .AND. kstg <= 2 ) &
+             & WRITE(l1_unit) ts(:,:,:,jp_tem,Krhs), ts(:,:,:,jp_sal,Krhs)
+          !
+          CALL tra_sbc_RK3( kstp, Kbb, Kmm,      ts, Krhs,                kstg )   ! surface boundary condition
+          CALL r63_snapshot( 'after_sbc', ts, Krhs )
+          IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg == 3 ) &
+             & WRITE(l2_tracer_unit) ts(:,:,:,jp_tem,Krhs), ts(:,:,:,jp_sal,Krhs)
+-         IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg <= 2 ) &
++         IF( lwp .AND. .NOT.ln_tile .AND. kstp <= nit000 + 1 .AND. kstg <= 2 ) &
+             & WRITE(l1_unit) ts(:,:,:,jp_tem,Krhs), ts(:,:,:,jp_sal,Krhs)
+ 
+ !!gm ===>>> Question: I'm surprised not to see kstg in argument of tra_isf : potential BUG.to be checked..
+@@ -959,7 +959,7 @@
+          !
+          IF(sn_cfctl%l_prtctl)   CALL prt_ctl( tab3d_1=ts(:,:,:,jp_tem,Kaa), clinfo1='stp stg   - Ta: ', mask1=tmask,   &
+             &                                  tab3d_2=ts(:,:,:,jp_sal,Kaa), clinfo2=           ' Sa: ', mask2=tmask, clinfo3='tra' )
+-         IF( lwp .AND. .NOT.ln_tile .AND. kstp == nit000 .AND. kstg <= 2 ) THEN
++         IF( lwp .AND. .NOT.ln_tile .AND. kstp <= nit000 + 1 .AND. kstg <= 2 ) THEN
+             WRITE(l1_unit) ts(:,:,:,jp_tem,Kbb), ts(:,:,:,jp_sal,Kbb), &
+                &           ts(:,:,:,jp_tem,Kmm), ts(:,:,:,jp_sal,Kmm), &
+                &           ts(:,:,:,jp_tem,Kaa), ts(:,:,:,jp_sal,Kaa), &
