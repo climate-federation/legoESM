@@ -82,6 +82,14 @@ two/zero T/S association census exactly, while proving the private selector
 absent. That confirms the temporary edit transcribed the measured statement;
 it does not override the subsequent trajectory failure.
 
+Retraction lives in the instrument, not only this receipt. On the clean final
+tree at `66329cef763952059cb91b5020f55389cbc7172d`, the same round-69 mode
+exits 1 and prints **ROUND69 NATIVE SOURCE REFUTED**, with the original
+un-routed T content/kt3 maxima
+`1.679392691671e-3/1.627511417652e-4`. Report
+`round69_final_retraction.json` is status REFUTED, SHA-256
+`9472ef8d37e68c0e2da9375725d4a373e572920b0ad3c958d942249bee89d549`.
+
 ## Rule 12
 
 The complete GYRE report `gyre_after_kt1_10.json` is stamped to the same clean
@@ -124,11 +132,19 @@ quote. The review requirement is **UNMET/BLOCKED**, and absence of a verdict is
 not approval. The full log is `codex_round69_review.log`, SHA-256
 `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
-The instrument's direct tests pass 5/5 before and after withdrawal, including
-the exact pytree census and the final assertion that the refuted production
-source text is absent. Python compilation and `git diff --check` pass. The
-citation gate and its shifted-citation plant are recorded below after the
-receipt is frozen.
+The final focused admission/content/native-source/citation batch passes 32/32
+(`focused_tests.log`, SHA-256
+`a8d2261d677aeeb3f4dba9e47e480d49f3405e14f2bf19db36213fa56be93dd4`).
+It includes the exact pytree census and the assertion that the refuted
+production source text is absent. Python compilation, `git diff --check`, and
+an empty production-model diff against `c70771c9d025` pass.
+
+The citation gate checks all six compiled-source citations with no unmapped or
+failed row (`round69_citation_gate.json`, PASS, SHA-256
+`83f7ff9446eea51bec018e5839e2ee152851f7259a7ccdc147f8015644a75bec`).
+Shifting the LDF face-flux citation by two lines produces
+SYMBOL-NOT-AT-LINE and exits 1 (`round69_citation_plant.json`, SHA-256
+`5b9bda869b1f7caad37fec65389a2895ca95ded5982eaee97f7e3102cd5bb0ab`).
 
 ## ASKED / UNASKED and OPEN
 
