@@ -38,6 +38,36 @@ def _copy_operands(values: dict) -> dict:
     }
 
 
+def pytree_exact_census(got, want) -> dict:
+    """Count exact differences over every array leaf of two state pytrees."""
+    got_leaves, got_tree = jax.tree_util.tree_flatten(got)
+    want_leaves, want_tree = jax.tree_util.tree_flatten(want)
+    require(got_tree == want_tree, "state pytree structures differ")
+    require(len(got_leaves) == len(want_leaves), "state leaf counts differ")
+    cells = 0
+    unequal = 0
+    max_abs = 0.0
+    for got_leaf, want_leaf in zip(got_leaves, want_leaves, strict=True):
+        got_array = np.asarray(got_leaf)
+        want_array = np.asarray(want_leaf)
+        require(got_array.shape == want_array.shape,
+                "corresponding state leaf shapes differ")
+        cells += got_array.size
+        unequal += int(np.count_nonzero(got_array != want_array))
+        if got_array.size and np.issubdtype(got_array.dtype, np.number):
+            max_abs = max(
+                max_abs,
+                float(np.max(np.abs(
+                    got_array.astype(np.float64)
+                    - want_array.astype(np.float64)))))
+    return {
+        "leaves": len(got_leaves),
+        "cells": cells,
+        "cells_unequal": unequal,
+        "max_abs": max_abs,
+    }
+
+
 def cumulative_substitutions(
     *, live: dict, oracle: dict, oracle_content: np.ndarray,
     boundaries: dict[str, np.ndarray], source: np.ndarray,
@@ -296,9 +326,68 @@ def measure(args) -> dict:
         round66.transposed(arrays["content_T"]), reciprocal_calls[0]["wet"])
 
     model, seeded, dt, freshwater, surface = step_calls[-1]
-    baseline_state = type(model)(
+    baseline_state = jax.device_get(type(model)(
         model.grid, model.z_coord, model.config).step(
-            seeded, dt, freshwater=freshwater, surface_forcing=surface)
+            seeded, dt, freshwater=freshwater, surface_forcing=surface))
+
+    def run_native_source_arm(route: bool):
+        pair_start = len(pair_sources)
+        ldf_start = len(ldf_calls)
+        model_module._nemo_ws_rk3_tracer_pair_step = pair_capture
+        model_module.gm_redi_tracer_tendency_latlon = ldf_capture
+        try:
+            arm_state = jax.device_get(type(model)(
+                model.grid, model.z_coord, model.config,
+                _nemo_ws_test_hooks=model_module._NEMOWSRK3TestHooks(
+                    route_gm_redi_stage3_source=route),
+            ).step(seeded, dt, freshwater=freshwater,
+                   surface_forcing=surface))
+        finally:
+            model_module._nemo_ws_rk3_tracer_pair_step = real_pair
+            model_module.gm_redi_tracer_tendency_latlon = real_ldf
+        pair_run = pair_sources[pair_start:]
+        ldf_run = ldf_calls[ldf_start:]
+        require(pair_run and ldf_run,
+                "native source arm did not execute the production captures")
+        for duplicate in pair_run[1:]:
+            require(all(np.array_equal(value, reference)
+                        for value, reference in zip(
+                            duplicate, pair_run[0], strict=True)),
+                    "native source arm observed distinct content evaluations")
+        for duplicate in ldf_run[1:]:
+            require(all(np.array_equal(value, reference)
+                        for value, reference in zip(
+                            duplicate, ldf_run[0], strict=True)),
+                    "native source arm observed distinct LDF evaluations")
+        return arm_state, pair_run[0], ldf_run[0]
+
+    false_state, false_pair, false_ldf = run_native_source_arm(False)
+    route_enabled = not args.plant_native_null
+    native_state, native_pair, native_ldf = run_native_source_arm(route_enabled)
+    require(all(np.array_equal(value, reference)
+                for value, reference in zip(
+                    false_ldf, native_ldf, strict=True)),
+            "native arm changed the live GM/Redi result")
+
+    false_pair_for_control = list(false_pair)
+    if args.plant_native_content_ulp:
+        planted_content = np.array(false_pair_for_control[4], copy=True)
+        first_wet = tuple(np.argwhere(reciprocal_calls[0]["wet"])[0])
+        planted_content[first_wet] = np.nextafter(
+            planted_content[first_wet], np.float64(np.inf))
+        false_pair_for_control[4] = planted_content
+
+    false_state_exact = pytree_exact_census(false_state, baseline_state)
+    native_state_move = pytree_exact_census(native_state, false_state)
+    false_content_exact = {
+        "T": round54.field_stats(
+            false_pair_for_control[4], captured_content["T"],
+            reciprocal_calls[0]["wet"]),
+        "S": round54.field_stats(
+            false_pair_for_control[5], captured_content["S"],
+            reciprocal_calls[1]["wet"]),
+    }
+
     override_state = type(model)(
         model.grid, model.z_coord, model.config,
         _nemo_ws_test_hooks=model_module._NEMOWSRK3TestHooks(
@@ -307,7 +396,7 @@ def measure(args) -> dict:
                 jnp.asarray(routed_content["S"]),
             )),
     ).step(seeded, dt, freshwater=freshwater, surface_forcing=surface)
-    baseline_fields = gate.lego_fields(jax.device_get(baseline_state))
+    baseline_fields = gate.lego_fields(baseline_state)
     override_fields = gate.lego_fields(jax.device_get(override_state))
     production_override_state = type(model)(
         model.grid, model.z_coord, model.config,
@@ -319,10 +408,19 @@ def measure(args) -> dict:
     ).step(seeded, dt, freshwater=freshwater, surface_forcing=surface)
     production_override_fields = gate.lego_fields(
         jax.device_get(production_override_state))
+    native_fields = gate.lego_fields(native_state)
     entry3 = gate.read_entry(args.entry_root / "oracle_step_entry_kt00000003.bin")
     kt3 = {}
     production_kt3 = {}
+    native_source_rows = {}
     for name, capture in zip(TRACERS, reciprocal_calls, strict=True):
+        tracer_index = TRACERS.index(name)
+        native_source = native_pair[tracer_index]
+        false_source = false_pair[tracer_index]
+        native_content = native_pair[4 + tracer_index]
+        expected_source = (
+            false_source
+            + native_ldf[tracer_index] * capture["wet"].astype(np.float64))
         oracle_entry = entry3[name][..., :baseline_fields[name].shape[-1]]
         kt3[name] = {
             "baseline": round54.field_stats(
@@ -340,6 +438,25 @@ def measure(args) -> dict:
             "override_vs_baseline": round54.field_stats(
                 production_override_fields[name], baseline_fields[name],
                 capture["wet"]),
+        }
+        native_source_rows[name] = {
+            "source_injection": round54.field_stats(
+                native_source, expected_source, capture["wet"]),
+            "content_vs_oracle": round54.field_stats(
+                native_content, capture["oracle_content"], capture["wet"]),
+            "content_vs_false": round54.field_stats(
+                native_content, false_pair[4 + tracer_index], capture["wet"]),
+            "content_vs_host_reconstruction": round54.field_stats(
+                native_content, production_prediction_content[name],
+                capture["wet"]),
+            "kt3_vs_oracle": round54.field_stats(
+                native_fields[name], oracle_entry, capture["wet"]),
+            "kt3_vs_false": round54.field_stats(
+                native_fields[name], baseline_fields[name], capture["wet"]),
+            "finite": bool(
+                np.all(np.isfinite(native_source))
+                and np.all(np.isfinite(native_content))
+                and np.all(np.isfinite(np.asarray(native_fields[name])))),
         }
 
     prediction_match = {name: True for name in TRACERS}
@@ -414,8 +531,79 @@ def measure(args) -> dict:
                 and all(within_round67_floor.values()))
             else "REFUTED")
 
+    native_criteria = {}
+    if args.round69_native:
+        round68_report = json.loads(args.production_prediction_report.read_text())
+        frozen_host = round68_report["production_fct_prediction"]
+        host_retraction_preserved = {
+            name: bool(
+                production_baseline_rebuild[name]
+                == frozen_host["baseline_rebuild"][name])
+            for name in TRACERS
+        }
+        native_improves_t_20x = bool(
+            native_source_rows["T"]["content_vs_oracle"]["max_abs"] * 20.0
+            <= base["substitution_rows"]["T"]["live_baseline"]["max_abs"])
+        native_floors = {
+            "T": np.float64(5.954039670541533e-5),
+            "S": np.float64(7.651457963220310e-6),
+        }
+        within_native_floor = {
+            name: bool(
+                native_source_rows[name]["content_vs_oracle"]["max_abs"]
+                <= native_floors[name]
+                + native_source_rows[name][
+                    "content_vs_host_reconstruction"]["max_abs"])
+            for name in TRACERS
+        }
+        native_criteria = {
+            "default_state_exact": false_state_exact["cells_unequal"] == 0,
+            "default_content_exact": {
+                name: false_content_exact[name]["cells_unequal"] == 0
+                for name in TRACERS
+            },
+            "same_step_source_exact": {
+                name: native_source_rows[name]["source_injection"][
+                    "cells_unequal"] == 0
+                for name in TRACERS
+            },
+            "routed_content_moves": {
+                name: native_source_rows[name]["content_vs_false"][
+                    "cells_unequal"] > 0
+                for name in TRACERS
+            },
+            "routed_kt3_moves": {
+                name: native_source_rows[name]["kt3_vs_false"][
+                    "cells_unequal"] > 0
+                for name in TRACERS
+            },
+            "finite": {
+                name: native_source_rows[name]["finite"]
+                for name in TRACERS
+            },
+            "improves_t_20x": native_improves_t_20x,
+            "within_native_floor": within_native_floor,
+            "host_retraction_preserved": host_retraction_preserved,
+            "host_retraction_census": bool(
+                production_baseline_rebuild["T"]["cells_unequal"] == 3
+                and production_baseline_rebuild["S"]["cells_unequal"] == 0),
+        }
+
+        def all_true(value) -> bool:
+            if isinstance(value, dict):
+                return all(all_true(item) for item in value.values())
+            return bool(value)
+
+        status = (
+            "CONFIRMED"
+            if all(all_true(value) for value in native_criteria.values())
+            else "REFUTED")
+
     return {
-        "format": "nemo-testcase-l2-gyre-round68-production-fct-v1",
+        "format": (
+            "nemo-testcase-l2-gyre-round69-native-source-v1"
+            if args.round69_native
+            else "nemo-testcase-l2-gyre-round68-production-fct-v1"),
         "status": status,
         "worktree": base["worktree"],
         "record_producer": base["record_producer"],
@@ -431,6 +619,15 @@ def measure(args) -> dict:
             "vs_round67_recomputed_routed": production_vs_round67_routed,
             "kt3": production_kt3,
             "criteria": production_criteria,
+        },
+        "native_source_arm": {
+            "enabled": bool(args.round69_native),
+            "route_enabled": bool(route_enabled),
+            "default_state_exact": false_state_exact,
+            "default_content_exact": false_content_exact,
+            "state_move": native_state_move,
+            "rows": native_source_rows,
+            "criteria": native_criteria,
         },
         "criteria": {
             "content_within_floor_plus_association": content_criterion,
@@ -452,6 +649,9 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--expect-production-route", choices=("before", "after"),
         default="before")
+    parser.add_argument("--round69-native", action="store_true")
+    parser.add_argument("--plant-native-null", action="store_true")
+    parser.add_argument("--plant-native-content-ulp", action="store_true")
     parser.add_argument(
         "--prediction-report", type=Path,
         default=ROOT / "round67/round67_ldf_order_before.json")
@@ -478,13 +678,20 @@ def main(argv=None) -> int:
     except Exception as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
-    row = report["production_fct_prediction"]["content_rows"]["T"]
-    kt3 = report["production_fct_prediction"]["kt3"]["T"][
-        "production_content_override"]
-    print(
-        f"ROUND68 PRODUCTION FCT {report['status']}: "
-        f"content_T={row['content_vs_oracle']['max_abs']:.12e} "
-        f"kt3_T={kt3['max_abs']:.12e}")
+    if args.round69_native:
+        row = report["native_source_arm"]["rows"]["T"]
+        print(
+            f"ROUND69 NATIVE SOURCE {report['status']}: "
+            f"content_T={row['content_vs_oracle']['max_abs']:.12e} "
+            f"kt3_T={row['kt3_vs_oracle']['max_abs']:.12e}")
+    else:
+        row = report["production_fct_prediction"]["content_rows"]["T"]
+        kt3 = report["production_fct_prediction"]["kt3"]["T"][
+            "production_content_override"]
+        print(
+            f"ROUND68 PRODUCTION FCT {report['status']}: "
+            f"content_T={row['content_vs_oracle']['max_abs']:.12e} "
+            f"kt3_T={kt3['max_abs']:.12e}")
     return 0 if report["status"] == "CONFIRMED" else 1
 
 

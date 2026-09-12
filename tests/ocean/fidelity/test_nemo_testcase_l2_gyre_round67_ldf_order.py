@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = (
@@ -93,3 +94,36 @@ def test_production_fct_content_uses_captured_advection_and_kmm_source():
     planted[0, 0, 0] = np.nextafter(planted[0, 0, 0], np.inf)
     changed = module.production_fct_content(planted, source, ldf, operands)
     assert np.count_nonzero(changed != got) == 1
+
+
+def test_pytree_exact_census_checks_every_leaf_and_fires_on_one_ulp():
+    module = _module()
+    reference = {
+        "a": np.array([1.0, 2.0], dtype=np.float64),
+        "b": (np.array([3], dtype=np.int32),),
+    }
+    exact = module.pytree_exact_census(reference, reference)
+    assert exact == {
+        "leaves": 2, "cells": 3, "cells_unequal": 0, "max_abs": 0.0}
+
+    planted = {
+        "a": np.array(reference["a"], copy=True),
+        "b": reference["b"],
+    }
+    planted["a"][0] = np.nextafter(planted["a"][0], np.inf)
+    changed = module.pytree_exact_census(planted, reference)
+    assert changed["cells_unequal"] == 1
+    assert changed["max_abs"] > 0.0
+
+
+def test_native_source_arm_refuses_a_card_without_gm_redi():
+    module = _module()
+    card = module.round66.build_nemo_testcase_card("LOCK_EXCHANGE-zco")
+    with pytest.raises(ValueError, match="requires an executing GM/Redi"):
+        module.model_module.LatLonCGridOceanModel(
+            card.recipe.grid,
+            card.recipe.z_coord,
+            card.recipe.model_config,
+            _nemo_ws_test_hooks=module.model_module._NEMOWSRK3TestHooks(
+                route_gm_redi_stage3_source=True),
+        )
