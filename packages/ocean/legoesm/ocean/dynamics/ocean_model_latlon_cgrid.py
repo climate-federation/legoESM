@@ -8953,10 +8953,19 @@ class LatLonCGridOceanModel:
                 f"{metric_source!r}.")
         face_metrics = None
         if metric_source == "nemo_qco_live_face":
-            if state.eta_before is None:
-                raise ValueError(
-                    "tke_shear_metric_source='nemo_qco_live_face' requires "
-                    "state.eta_before for the Kbb face metric.")
+            if shear_disc == "nemo_face_native_now2":
+                # NEMO RK3 calls zdf_phy(kstp, Nbb, Nbb, Nrhs)
+                # (stprk3.f90:168): both factors of zdfsh2.f90:83-114 use
+                # the step-entry level, so r3u(Kbb) IS r3u(Kmm) and the
+                # Kbb face metric is the step-entry one.  Static branch on
+                # the variant, not on the presence of a before-state.
+                _eta_bef = _eta_now
+            else:
+                if state.eta_before is None:
+                    raise ValueError(
+                        "tke_shear_metric_source='nemo_qco_live_face' "
+                        "requires state.eta_before for the Kbb face metric.")
+                _eta_bef = state.eta_before.data
             e3w0 = getattr(_zc, "nemo_e3w_0", None)
             if e3w0 is None or not bool(getattr(
                     _zc, "nemo_e3w_mesh_reference", False)):
@@ -9005,7 +9014,7 @@ class LatLonCGridOceanModel:
                 )
 
             r3un, r3vn = _qco_r3(_eta_now)
-            r3ub, r3vb = _qco_r3(state.eta_before.data)
+            r3ub, r3vb = _qco_r3(_eta_bef)
             # DINO full-step z has e3uw_0 == e3vw_0 == raw mesh e3w_0
             # bit-for-bit; map NEMO east/north-face indexing to legoESM's
             # west/south raw-face arrays before applying each live factor.

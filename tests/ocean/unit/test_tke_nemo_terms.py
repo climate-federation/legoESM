@@ -1435,3 +1435,4 @@ class TestNemoBottomTkeVelocityConvention:
             u=state.u.replace(data=u_cc), v=state.v.replace(data=v_cc))
         with pytest.raises(ValueError, match="RAW face-staggered"):
             model._tke_bottom_dirichlet(collapsed)
+

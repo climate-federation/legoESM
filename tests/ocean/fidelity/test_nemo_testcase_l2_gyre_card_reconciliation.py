@@ -187,3 +187,30 @@ def test_require_unified_exits_nonzero_under_the_plant():
     assert result.returncode != 0, result.stdout
     assert "DIFFERENT programs" in (result.stdout + result.stderr), (
         result.stdout + result.stderr)
+
+
+@needs_oracle
+def test_rk3_card_steps_with_nemo_face_shear_and_live_face_metric(gate):
+    """Decision 36: the GYRE NEMO-identity card (RK3, no carried before-state)
+    selects NEMO's face-native shear (now2 variant), face avm weighting and
+    the live QCO face metric.  NEMO RK3 calls zdf_phy(kstp, Nbb, Nbb, Nrhs)
+    (stprk3.f90:168), so the Kbb face metric is the step-entry one and the
+    model must step twice (kt=1 seeds avm_k; kt=2 evaluates the step-entry
+    shear) instead of refusing for a missing eta_before.  Fails on the code
+    that raised."""
+    import numpy as np
+    card, ladder, _year, _owners = gate.resolve_programs()
+    tke = ladder.physics.vertical_mixing.tke
+    assert (tke.tke_shear_production, tke.tke_shear_avm_weighting,
+            tke.tke_shear_metric_source, tke.tke_shear_evaluation_stage) == (
+        "nemo_face_native_now2", "nemo_face", "nemo_qco_live_face", "step_entry")
+    phase3 = gate._load("gyre_phase3_gate", gate.LADDER_GATE)
+    model = gate._model(card, ladder)
+    state = card.recipe.initial_state
+    assert state.eta_before is None
+    for kt in (1, 2):
+        freshwater, surface = phase3._surface_forcings(card, state, kt)
+        state = model.step(state, dt=card.dt_s, freshwater=freshwater,
+                           surface_forcing=surface)
+    fields = phase3.lego_fields(state)
+    assert all(np.all(np.isfinite(np.asarray(fields[k]))) for k in ("T", "S", "u", "v", "ssh"))
