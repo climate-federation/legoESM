@@ -1,0 +1,110 @@
+"""The process ledger restricted to a vertical band.
+
+The column ledger integrates over the whole column and is therefore blind to a
+vertical-REDISTRIBUTION bias: measured on the production AMIP, convection's
+column water row is exactly zero (correct for a scheme that only moves water up
+and down) while the tropical free troposphere is twice as moist as observed.
+Restricting the integral to a band is what makes the instrument able to say
+which process supplies a LAYER, and these tests pin that it does so without
+changing the full-column answer when no band is asked for.
+"""
+from __future__ import annotations
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
+jax.config.update("jax_enable_x64", True)
+
+from legoesm.diagnostics.process_ledger import (
+    apply_level_weight, column_store_snapshot_column, ledger_entry_column,
+    sigma_band_weight,
+)
+
+NLEV = 10
+SIGMA_HALF = jnp.linspace(0.0, 1.0, NLEV + 1)
+DSIGMA = jnp.diff(SIGMA_HALF)
+P_S = jnp.asarray([1.0e5, 9.0e4])
+
+
+def test_band_weight_is_one_inside_zero_outside():
+    w = np.asarray(sigma_band_weight(SIGMA_HALF, 0.3, 0.7))
+    assert np.allclose(w[3:7], 1.0)
+    assert np.allclose(w[:3], 0.0) and np.allclose(w[7:], 0.0)
+
+
+def test_band_edges_are_fractional_and_adjacent_bands_partition_the_column():
+    """A band edge inside a layer must split it, and two abutting bands must
+    together weight every layer exactly once — otherwise the rows of two bands
+    would not sum to the full-column row."""
+    lower = np.asarray(sigma_band_weight(SIGMA_HALF, 0.0, 0.35))
+    upper = np.asarray(sigma_band_weight(SIGMA_HALF, 0.35, 1.0))
+    assert lower[3] == pytest.approx(0.5)
+    assert upper[3] == pytest.approx(0.5)
+    np.testing.assert_allclose(lower + upper, np.ones(NLEV))
+
+
+def test_full_column_band_reproduces_the_unbanded_ledger_exactly():
+    """The byte-identical default: asking for the whole column, or asking for
+    no band at all, must give the same number."""
+    rng = np.random.default_rng(0)
+    dq = jnp.asarray(rng.normal(size=(2, NLEV)) * 1e-6)
+    dT = jnp.asarray(rng.normal(size=(2, NLEV)) * 1e-4)
+    plain = ledger_entry_column(dq, dT, P_S, DSIGMA)
+    banded = ledger_entry_column(dq, dT, P_S, DSIGMA,
+                                 level_weight=sigma_band_weight(SIGMA_HALF, 0.0, 1.0))
+    np.testing.assert_allclose(np.asarray(plain), np.asarray(banded), rtol=0, atol=0)
+    none_band = ledger_entry_column(dq, dT, P_S, DSIGMA, level_weight=None)
+    np.testing.assert_allclose(np.asarray(plain), np.asarray(none_band), rtol=0, atol=0)
+
+
+def test_two_bands_sum_to_the_full_column():
+    """The property that makes the banded ledger trustworthy: attributing a
+    layer cannot change the total."""
+    rng = np.random.default_rng(1)
+    dq = jnp.asarray(rng.normal(size=(2, NLEV)) * 1e-6)
+    full = np.asarray(ledger_entry_column(dq, None, P_S, DSIGMA))
+    lo = np.asarray(ledger_entry_column(
+        dq, None, P_S, DSIGMA, level_weight=sigma_band_weight(SIGMA_HALF, 0.0, 0.42)))
+    hi = np.asarray(ledger_entry_column(
+        dq, None, P_S, DSIGMA, level_weight=sigma_band_weight(SIGMA_HALF, 0.42, 1.0)))
+    np.testing.assert_allclose(lo + hi, full, rtol=1e-12)
+
+
+def test_band_isolates_a_planted_layer():
+    """A tendency placed in ONE layer must appear only in the band containing
+    it — the test fails if the weight is applied after integration."""
+    dq = np.zeros((2, NLEV)); dq[:, 5] = 1e-6
+    dq = jnp.asarray(dq)
+    inside = np.asarray(ledger_entry_column(
+        dq, None, P_S, DSIGMA, level_weight=sigma_band_weight(SIGMA_HALF, 0.5, 0.6)))
+    outside = np.asarray(ledger_entry_column(
+        dq, None, P_S, DSIGMA, level_weight=sigma_band_weight(SIGMA_HALF, 0.0, 0.5)))
+    assert np.all(inside[:, 0] > 0.0)
+    np.testing.assert_allclose(outside[:, 0], 0.0, atol=1e-30)
+
+
+def test_snapshot_honours_the_band_too():
+    """The dynamics and clips rows come from paired SNAPSHOTS, so if those
+    ignored the band those two rows would be full-column while the physics rows
+    were banded -- a silently inconsistent table."""
+    rng = np.random.default_rng(2)
+    q = jnp.asarray(np.abs(rng.normal(size=(2, NLEV))) * 1e-3)
+    T = jnp.asarray(250.0 + rng.normal(size=(2, NLEV)))
+    w = sigma_band_weight(SIGMA_HALF, 0.0, 0.5)
+    full = np.asarray(column_store_snapshot_column(P_S, DSIGMA, T, q))
+    band = np.asarray(column_store_snapshot_column(P_S, DSIGMA, T, q, level_weight=w))
+    assert np.all(band[:, 0] < full[:, 0])
+    assert np.all(band[:, 1] < full[:, 1])
+
+
+def test_wrong_length_weight_is_refused():
+    with pytest.raises(ValueError, match="levels"):
+        apply_level_weight(jnp.zeros((2, NLEV)), jnp.ones(NLEV + 3))
+
+
+@pytest.mark.parametrize("lo,hi", [(0.5, 0.5), (0.7, 0.3), (-0.1, 0.5), (0.5, 1.2)])
+def test_invalid_band_is_refused(lo, hi):
+    with pytest.raises(ValueError, match="sigma_lo"):
+        sigma_band_weight(SIGMA_HALF, lo, hi)
