@@ -175,6 +175,9 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90"),
     "GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traldf_iso.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traldf_iso.f90"),
+    # Round 72 cites the exact acquired R71 compiled tracer-stage branch.
+    "GYRE_OMIP_L2_P3_SM_R71FCTST2/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R71FCTST2/BLD/ppsrc/nemo/stprk3_stg.f90"),
     "round64/oracle_krhs_split/ocean.output": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round64/"
         "oracle_krhs_split/ocean.output"),
@@ -335,6 +338,32 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 72: stage-1 transport is earlier than the exact RK replay ---
+    'GYRE_OMIP_L2_P3_SM_R71FCTST2/BLD/ppsrc/nemo/stprk3_stg.f90:289-290': [
+        'zub(ji,jj) = un_adv(ji,jj)*(r1_hu_0',
+        'zvb(ji,jj) = vn_adv(ji,jj)*(r1_hv_0', 2],
+    'GYRE_OMIP_L2_P3_SM_R71FCTST2/BLD/ppsrc/nemo/stprk3_stg.f90:295': (
+        'zFu(ji,jj,jk) = e2u(ji,jj)*(e3u_3d', 1),
+    'GYRE_OMIP_L2_P3_SM_R71FCTST2/BLD/ppsrc/nemo/stprk3_stg.f90:296': (
+        'zFv(ji,jj,jk) = e1v(ji,jj)*(e3v_3d', 1),
+    'GYRE_OMIP_L2_P3_SM_R71FCTST2/BLD/ppsrc/nemo/stprk3_stg.f90:843-853': [
+        ('IF( lwp .AND. .NOT.ln_tile .AND. kstp <= nit000 + 1 .AND. kstg <= 2 ) THEN', 1),
+        ('WRITE(l1_unit) zFu, zFv, zFw', 3), 11],
+    'GYRE_OMIP_L2_P3_SM_R71FCTST2/BLD/ppsrc/nemo/stprk3_stg.f90:860,867': [
+        'CALL tra_adv    ( kstp, Kbb, Kmm, Kaa, ts, Krhs',
+        'CALL tra_sbc_RK3( kstp, Kbb, Kmm,      ts, Krhs', 2],
+    'GYRE_OMIP_L2_P3_SM_R71FCTST2/BLD/ppsrc/nemo/stprk3_stg.f90:864-872': [
+        ('IF( lwp .AND. .NOT.ln_tile .AND. kstp <= nit000 + 1 .AND. kstg <= 2 ) &', 1),
+        ('WRITE(l1_unit) ts(:,:,:,jp_tem,Krhs), ts(:,:,:,jp_sal,Krhs)', 3), 9],
+    'GYRE_OMIP_L2_P3_SM_R71FCTST2/BLD/ppsrc/nemo/stprk3_stg.f90:899-901': [
+        'ts(ji,jj,jk,jn,Kaa) = (',
+        '/          ( 1._wp + r3t(ji,jj,Kaa) )', 3],
+    'GYRE_OMIP_L2_P3_SM_R71FCTST2/BLD/ppsrc/nemo/stprk3_stg.f90:907-913': [
+        ('IF( lwp .AND. .NOT.ln_tile .AND. kstp <= nit000 + 1 .AND. kstg <= 2 ) THEN', 2),
+        "WRITE(numout,*) 'L2_RK_TRACER_OPERAND_DUMP '", 7],
+    'GYRE_OMIP_L2_P3_SM_R71FCTST2/BLD/ppsrc/nemo/stprk3_stg.f90:299-321': [
+        '! Round-13 WRITE-only stage-1 transport operand record.',
+        "WRITE(numout,*) 'L2_RK_STAGE1_TRANSPORT_OPERAND_DUMP '", 23],
     # --- round 71: Kmm boundary and its producing stage-2 update ---
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3.f90:204-215': [
         ('Nrhs = Nnn   ;   Nnn  = Naa   ;   Naa  = Nrhs', 1),
