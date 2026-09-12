@@ -155,16 +155,36 @@ def production_fct_content(
     )
 
 
+def _replace_kmm_resume(resume, override):
+    """Replace only selected stage-2 tracers at the final WS helper boundary."""
+    require(resume is not None and resume[0] == 2,
+            "final WS helper did not receive the stage-2 Kmm tracer")
+    if override is None:
+        return resume
+    target_t, target_s = override
+    return (
+        2,
+        resume[1] if target_t is None else target_t,
+        resume[2] if target_s is None else target_s,
+    )
+
+
 def measure(args) -> dict:
-    require(not (args.round69_native and args.round70_pair),
-            "round-69 and round-70 modes are mutually exclusive")
+    require(sum((args.round69_native, args.round70_pair, args.round71_kmm)) <= 1,
+            "round-69, round-70, and round-71 modes are mutually exclusive")
     require(not (args.plant_pair_null_fct and args.plant_pair_content_ulp),
             "round-70 plants are mutually exclusive")
     require(args.round70_pair or not (
         args.plant_pair_null_fct or args.plant_pair_content_ulp),
         "round-70 plants require --round70-pair")
+    require(not (args.plant_kmm_null and args.plant_kmm_content_ulp),
+            "round-71 plants are mutually exclusive")
+    require(args.round71_kmm or not (
+        args.plant_kmm_null or args.plant_kmm_content_ulp),
+        "round-71 plants require --round71-kmm")
     reciprocal_calls: list[dict] = []
     pair_sources: list[tuple[np.ndarray, ...]] = []
+    pair_kmm: list[tuple[np.ndarray, np.ndarray]] = []
     qsr_calls: list[np.ndarray] = []
     ldf_calls: list[tuple[np.ndarray, np.ndarray]] = []
     step_calls: list[tuple] = []
@@ -174,6 +194,7 @@ def measure(args) -> dict:
     real_qsr = model_module._nemo_qsr_stage3_rate
     real_ldf = model_module.gm_redi_tracer_tendency_latlon
     real_step = model_module.LatLonCGridOceanModel.step
+    active_kmm_override: tuple[object | None, object | None] | None = None
 
     def reciprocal_capture(live, oracle, oracle_content, wet):
         reciprocal_calls.append({
@@ -195,7 +216,20 @@ def measure(args) -> dict:
                 advection_content_t, advection_content_s)))
 
     def pair_capture(*values, **kwargs):
-        result = real_pair(*values, **kwargs)
+        call_kwargs = kwargs
+        if kwargs.get("return_final_content", False):
+            resume = _replace_kmm_resume(
+                kwargs.get("resume"), active_kmm_override)
+            resume_t, resume_s = resume[1], resume[2]
+            if resume is not kwargs.get("resume"):
+                call_kwargs = dict(kwargs)
+                call_kwargs["resume"] = resume
+            jax.debug.callback(
+                lambda t, s: pair_kmm.append((
+                    np.asarray(t, dtype=np.float64),
+                    np.asarray(s, dtype=np.float64))),
+                resume_t, resume_s, ordered=True)
+        result = real_pair(*values, **call_kwargs)
         if kwargs.get("return_final_content", False):
             source_t, source_s = kwargs["stage_source_rates"][2]
             jax.debug.callback(
@@ -362,7 +396,8 @@ def measure(args) -> dict:
             seeded, dt, freshwater=freshwater, surface_forcing=surface))
 
     pair_matrix = {}
-    if args.round70_pair:
+    kmm_matrix = {}
+    if args.round70_pair or args.round71_kmm:
         original_fct_target = {
             name: np.array(value, dtype=np.float64, copy=True)
             for name, value in oracle_advection_content.items()
@@ -376,8 +411,13 @@ def measure(args) -> dict:
             fct_target["T"][first_wet] = np.nextafter(
                 fct_target["T"][first_wet], np.float64(np.inf))
 
-        def run_pair_arm(*, route_ldf: bool, use_fct: bool):
+        def run_pair_arm(
+            *, route_ldf: bool, use_fct: bool,
+            kmm_override: tuple[object | None, object | None] | None = None,
+        ):
+            nonlocal active_kmm_override
             pair_start = len(pair_sources)
+            kmm_start = len(pair_kmm)
             ldf_start = len(ldf_calls)
             override = None
             if use_fct:
@@ -385,6 +425,7 @@ def measure(args) -> dict:
                             jnp.asarray(fct_target["S"]))
             model_module._nemo_ws_rk3_tracer_pair_step = pair_capture
             model_module.gm_redi_tracer_tendency_latlon = ldf_capture
+            active_kmm_override = kmm_override
             try:
                 arm_state = jax.device_get(type(model)(
                     model.grid, model.z_coord, model.config,
@@ -394,12 +435,14 @@ def measure(args) -> dict:
                 ).step(seeded, dt, freshwater=freshwater,
                        surface_forcing=surface))
             finally:
+                active_kmm_override = None
                 model_module._nemo_ws_rk3_tracer_pair_step = real_pair
                 model_module.gm_redi_tracer_tendency_latlon = real_ldf
             pair_run = pair_sources[pair_start:]
+            kmm_run = pair_kmm[kmm_start:]
             ldf_run = ldf_calls[ldf_start:]
-            require(pair_run and ldf_run,
-                    "round-70 arm did not execute production captures")
+            require(pair_run and kmm_run and ldf_run,
+                    "FCT arm did not execute production captures")
             require(all(all(np.array_equal(value, reference)
                             for value, reference in zip(
                                 duplicate, pair_run[0], strict=True))
@@ -410,7 +453,12 @@ def measure(args) -> dict:
                                 duplicate, ldf_run[0], strict=True))
                         for duplicate in ldf_run[1:]),
                     "round-70 arm observed distinct LDF evaluations")
-            return arm_state, pair_run[0], ldf_run[0]
+            require(all(all(np.array_equal(value, reference)
+                            for value, reference in zip(
+                                duplicate, kmm_run[0], strict=True))
+                        for duplicate in kmm_run[1:]),
+                    "FCT arm observed distinct Kmm evaluations")
+            return arm_state, pair_run[0], ldf_run[0], kmm_run[0]
 
         untouched = run_pair_arm(route_ldf=False, use_fct=False)
         ldf_only = run_pair_arm(route_ldf=True, use_fct=False)
@@ -455,7 +503,7 @@ def measure(args) -> dict:
             untouched_field = np.asarray(
                 gate.lego_fields(untouched[0])[name], dtype=np.float64)
             arm_rows[name] = {}
-            for arm_name, (arm_state, arm_pair, arm_ldf) in arms.items():
+            for arm_name, (arm_state, arm_pair, arm_ldf, _) in arms.items():
                 field = np.asarray(
                     gate.lego_fields(arm_state)[name], dtype=np.float64)
                 content = arm_pair[4 + index]
@@ -551,6 +599,205 @@ def measure(args) -> dict:
             "rows": arm_rows,
             "criteria": criteria,
         }
+
+        if args.round71_kmm:
+            stage3 = round66.round46.read_stage(
+                args.stage_root / "oracle_momstage_kt00000002_s3.bin")
+            require(stage3["header"] == {
+                "version": 1, "kt": 2, "stage": 3,
+                "Kbb": 3, "Kmm": 2, "Krhs": 1, "Kaa": 1,
+                "jpi": 36, "jpj": 26, "jpk": 31, "jpkm1": 30,
+                "ntsi": 3, "ntei": 34, "ntsj": 3, "ntej": 24,
+                "bits": 64,
+            }, "round-46 kt2 stage-3 header changed")
+            original_kmm_target = {
+                name: np.asarray(round66.round46._owned3(
+                    stage3["arrays"][f"{name}_Kmm"]), dtype=np.float64)
+                for name in TRACERS
+            }
+            kmm_target = {
+                name: np.array(value, dtype=np.float64, copy=True)
+                for name, value in original_kmm_target.items()
+            }
+            if args.plant_kmm_null:
+                kmm_target = {
+                    "T": np.array(ldf_only[3][0], copy=True),
+                    "S": np.array(ldf_only[3][1], copy=True),
+                }
+            if args.plant_kmm_content_ulp:
+                first_wet = tuple(np.argwhere(reciprocal_calls[0]["wet"])[0])
+                kmm_target["T"][first_wet] = np.nextafter(
+                    kmm_target["T"][first_wet], np.float64(np.inf))
+
+            kmm_t = run_pair_arm(
+                route_ldf=True, use_fct=False,
+                kmm_override=(jnp.asarray(kmm_target["T"]), None))
+            kmm_s = run_pair_arm(
+                route_ldf=True, use_fct=False,
+                kmm_override=(None, jnp.asarray(kmm_target["S"])))
+            kmm_ts = run_pair_arm(
+                route_ldf=True, use_fct=False,
+                kmm_override=(jnp.asarray(kmm_target["T"]),
+                              jnp.asarray(kmm_target["S"])))
+            kmm_arms = {"kmm_T": kmm_t, "kmm_S": kmm_s, "kmm_TS": kmm_ts}
+            kmm_rows = {name: {} for name in TRACERS}
+            kmm_criteria = {
+                "round70_rows_exact": False,
+                "round70_criteria_exact": False,
+                "source_operand_non_bit": {},
+                "injected_target_exact": {},
+                "cross_tracer_isolation": {},
+                "joint_equals_single": {},
+                "same_step_ldf_exact": {},
+                "active_content_moves": {},
+                "active_state_moves": {},
+                "finite": {},
+                "kt3_improves_ldf_twofold": {},
+                "kt3_remains_worse_than_output_pair": {},
+                "retained_set_reduced_half": {},
+                "retained_debt_remains": {},
+            }
+            frozen_round70 = json.loads(args.round70_report.read_text())[
+                "round70_pair_matrix"]
+            kmm_criteria["round70_rows_exact"] = bool(
+                pair_matrix["rows"] == frozen_round70["rows"])
+            kmm_criteria["round70_criteria_exact"] = bool(
+                pair_matrix["criteria"] == frozen_round70["criteria"])
+
+            source_split = {}
+            for name, capture in zip(TRACERS, reciprocal_calls, strict=True):
+                index = TRACERS.index(name)
+                wet = capture["wet"]
+                oracle_entry = entry3_pair[name][..., :np.asarray(
+                    gate.lego_fields(baseline_state)[name]).shape[-1]]
+                untouched_field = np.asarray(
+                    gate.lego_fields(untouched[0])[name], dtype=np.float64)
+                ldf_field = np.asarray(
+                    gate.lego_fields(ldf_only[0])[name], dtype=np.float64)
+                paired_field = np.asarray(
+                    gate.lego_fields(paired[0])[name], dtype=np.float64)
+                original_target = original_kmm_target[name]
+                live_kmm = ldf_only[3][index]
+                source_row = round54.field_stats(
+                    live_kmm, original_target, wet)
+                expected_count = 17994 if name == "T" else 16769
+                kmm_criteria["source_operand_non_bit"][name] = bool(
+                    source_row["cells_unequal"] == expected_count
+                    and source_row["max_abs"] > 0.0)
+
+                for arm_name, arm in kmm_arms.items():
+                    field = np.asarray(
+                        gate.lego_fields(arm[0])[name], dtype=np.float64)
+                    content = arm[1][4 + index]
+                    kmm_rows[name][arm_name] = {
+                        "content_vs_oracle": round54.field_stats(
+                            content, capture["oracle_content"], wet),
+                        "content_vs_ldf_only": round54.field_stats(
+                            content, ldf_only[1][4 + index], wet),
+                        "kt3_vs_oracle": round54.field_stats(
+                            field, oracle_entry, wet),
+                        "kt3_vs_ldf_only": round54.field_stats(
+                            field, ldf_field, wet),
+                        "injected_kmm_vs_original_target": round54.field_stats(
+                            arm[3][index], original_target, wet),
+                    }
+                    kmm_criteria["finite"][f"{name}_{arm_name}"] = bool(
+                        np.all(np.isfinite(field))
+                        and np.all(np.isfinite(content))
+                        and np.all(np.isfinite(arm[3][index])))
+                    kmm_criteria["same_step_ldf_exact"][
+                        f"{name}_{arm_name}"] = bool(np.array_equal(
+                            arm[2][index], ldf_only[2][index]))
+
+                target_arm = kmm_t if name == "T" else kmm_s
+                other_arm = kmm_s if name == "T" else kmm_t
+                kmm_criteria["injected_target_exact"][name] = bool(
+                    kmm_rows[name]["kmm_TS"][
+                        "injected_kmm_vs_original_target"][
+                            "cells_unequal"] == 0)
+                kmm_criteria["cross_tracer_isolation"][name] = bool(
+                    round54.field_stats(
+                        np.asarray(gate.lego_fields(other_arm[0])[name]),
+                        ldf_field, wet)["cells_unequal"] == 0
+                    and round54.field_stats(
+                        other_arm[1][4 + index],
+                        ldf_only[1][4 + index], wet)["cells_unequal"] == 0)
+                kmm_criteria["joint_equals_single"][name] = bool(
+                    round54.field_stats(
+                        np.asarray(gate.lego_fields(kmm_ts[0])[name]),
+                        np.asarray(gate.lego_fields(target_arm[0])[name]),
+                        wet)["cells_unequal"] == 0
+                    and round54.field_stats(
+                        kmm_ts[1][4 + index], target_arm[1][4 + index], wet)[
+                            "cells_unequal"] == 0)
+                kmm_criteria["active_content_moves"][name] = bool(
+                    kmm_rows[name]["kmm_TS"]["content_vs_ldf_only"][
+                        "cells_unequal"] > 0)
+                kmm_criteria["active_state_moves"][name] = bool(
+                    kmm_rows[name]["kmm_TS"]["kt3_vs_ldf_only"][
+                        "cells_unequal"] > 0)
+
+                ldf_worsening, ldf_mask = worsening_census(
+                    untouched_field, ldf_field, oracle_entry, wet)
+                paired_worsening, paired_mask = worsening_census(
+                    untouched_field, paired_field, oracle_entry, wet)
+                kmm_field = np.asarray(
+                    gate.lego_fields(kmm_ts[0])[name], dtype=np.float64)
+                kmm_worsening, kmm_mask = worsening_census(
+                    untouched_field, kmm_field, oracle_entry, wet)
+                retained_mask = ldf_mask & paired_mask
+                new_pair_mask = (~ldf_mask) & paired_mask & wet
+                retained_count = int(np.count_nonzero(retained_mask))
+                new_pair_count = int(np.count_nonzero(new_pair_mask))
+                expected_retained = 1375 if name == "T" else 1891
+                expected_new = 1800 if name == "T" else 6374
+                require(retained_count == expected_retained,
+                        f"round-70 retained {name} set changed")
+                require(new_pair_count == expected_new,
+                        f"round-70 newly-worsened {name} set changed")
+                retained_kmm = int(np.count_nonzero(retained_mask & kmm_mask))
+                new_pair_kmm = int(np.count_nonzero(new_pair_mask & kmm_mask))
+                retained_removed_fraction = 1.0 - retained_kmm / retained_count
+                source_split[name] = {
+                    "live_kmm_vs_oracle": source_row,
+                    "ldf_only_worsening": ldf_worsening,
+                    "output_pair_worsening": paired_worsening,
+                    "kmm_pair_worsening": kmm_worsening,
+                    "round70_retained_cells": retained_count,
+                    "round70_newly_worsened_cells": new_pair_count,
+                    "retained_cells_still_worsened_by_kmm": retained_kmm,
+                    "retained_cells_removed_fraction": retained_removed_fraction,
+                    "round70_new_cells_worsened_by_kmm": new_pair_kmm,
+                }
+                kmm_max = kmm_rows[name]["kmm_TS"][
+                    "kt3_vs_oracle"]["max_abs"]
+                ldf_max = arm_rows[name]["ldf_only"][
+                    "kt3_vs_oracle"]["max_abs"]
+                output_pair_max = arm_rows[name]["paired"][
+                    "kt3_vs_oracle"]["max_abs"]
+                kmm_criteria["kt3_improves_ldf_twofold"][name] = bool(
+                    2.0 * kmm_max <= ldf_max)
+                kmm_criteria["kt3_remains_worse_than_output_pair"][name] = bool(
+                    kmm_max > output_pair_max)
+                kmm_criteria["retained_set_reduced_half"][name] = bool(
+                    retained_removed_fraction >= 0.5)
+                kmm_criteria["retained_debt_remains"][name] = bool(
+                    retained_kmm > 0)
+
+            kmm_matrix = {
+                "status": (
+                    "CONFIRMED" if all_true(kmm_criteria) else "REFUTED"),
+                "plant_null": bool(args.plant_kmm_null),
+                "plant_content_ulp": bool(args.plant_kmm_content_ulp),
+                "dtype": {
+                    "live_kmm": str(np.asarray(ldf_only[3][0]).dtype),
+                    "injected_kmm": str(np.asarray(kmm_ts[3][0]).dtype),
+                    "record_kmm": str(original_kmm_target["T"].dtype),
+                },
+                "rows": kmm_rows,
+                "source_split": source_split,
+                "criteria": kmm_criteria,
+            }
 
     if args.round69_native:
         require(args.expect_model_order == "after",
@@ -792,9 +1039,13 @@ def measure(args) -> dict:
             else "REFUTED")
     if args.round70_pair:
         status = pair_matrix["status"]
+    if args.round71_kmm:
+        status = kmm_matrix["status"]
 
     return {
         "format": (
+            "nemo-testcase-l2-gyre-round71-fct-kmm-v1"
+            if args.round71_kmm else
             "nemo-testcase-l2-gyre-round70-fct-ldf-pair-v1"
             if args.round70_pair else
             "nemo-testcase-l2-gyre-round69-native-source-v1"
@@ -826,6 +1077,7 @@ def measure(args) -> dict:
             "criteria": native_criteria,
         },
         "round70_pair_matrix": pair_matrix,
+        "round71_kmm_matrix": kmm_matrix,
         "criteria": {
             "content_within_floor_plus_association": content_criterion,
             "kt3_exact_pre_edit_prediction": prediction_match,
@@ -852,6 +1104,9 @@ def main(argv=None) -> int:
     parser.add_argument("--round70-pair", action="store_true")
     parser.add_argument("--plant-pair-null-fct", action="store_true")
     parser.add_argument("--plant-pair-content-ulp", action="store_true")
+    parser.add_argument("--round71-kmm", action="store_true")
+    parser.add_argument("--plant-kmm-null", action="store_true")
+    parser.add_argument("--plant-kmm-content-ulp", action="store_true")
     parser.add_argument(
         "--prediction-report", type=Path,
         default=ROOT / "round67/round67_ldf_order_before.json")
@@ -861,6 +1116,9 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--native-prediction-report", type=Path,
         default=ROOT / "round69/round69_native_source_before.json")
+    parser.add_argument(
+        "--round70-report", type=Path,
+        default=ROOT / "round70/round70_pair_before.json")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--entry-root", type=Path,
                         default=ROOT / "year_owners/nemo_seed0")
@@ -881,7 +1139,15 @@ def main(argv=None) -> int:
     except Exception as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
-    if args.round70_pair:
+    if args.round71_kmm:
+        row = report["round71_kmm_matrix"]["rows"]["T"]
+        ldf_max = report["round70_pair_matrix"]["rows"]["T"][
+            "ldf_only"]["kt3_vs_oracle"]["max_abs"]
+        print(
+            f"ROUND71 FCT KMM {report['status']}: "
+            f"ldf_T={ldf_max:.12e} "
+            f"kmm_T={row['kmm_TS']['kt3_vs_oracle']['max_abs']:.12e}")
+    elif args.round70_pair:
         row = report["round70_pair_matrix"]["rows"]["T"]
         print(
             f"ROUND70 FCT LDF PAIR {report['status']}: "

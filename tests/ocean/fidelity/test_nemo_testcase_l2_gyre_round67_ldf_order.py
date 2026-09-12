@@ -172,3 +172,29 @@ def test_helper_applies_fct_override_before_source(monkeypatch):
                                   np.asarray(override_a + 2.0 * source_a))
     np.testing.assert_array_equal(np.asarray(result[3]),
                                   np.asarray(override_b + 2.0 * source_b))
+
+
+def test_round71_kmm_resume_replaces_only_selected_tracer():
+    module = _module()
+    live_t = np.array([1.0, 2.0], dtype=np.float64)
+    live_s = np.array([3.0, 4.0], dtype=np.float64)
+    target_t = np.array([5.0, 6.0], dtype=np.float64)
+    target_s = np.array([7.0, 8.0], dtype=np.float64)
+    resume = (2, live_t, live_s)
+
+    assert module._replace_kmm_resume(resume, None) is resume
+    t_only = module._replace_kmm_resume(resume, (target_t, None))
+    s_only = module._replace_kmm_resume(resume, (None, target_s))
+    both = module._replace_kmm_resume(resume, (target_t, target_s))
+
+    assert t_only[1] is target_t and t_only[2] is live_s
+    assert s_only[1] is live_t and s_only[2] is target_s
+    assert both[1] is target_t and both[2] is target_s
+
+
+def test_round71_kmm_resume_rejects_a_non_stage2_boundary():
+    module = _module()
+    with np.testing.assert_raises_regex(
+        RuntimeError, "stage-2 Kmm tracer"
+    ):
+        module._replace_kmm_resume((1, np.ones(1), np.ones(1)), None)
