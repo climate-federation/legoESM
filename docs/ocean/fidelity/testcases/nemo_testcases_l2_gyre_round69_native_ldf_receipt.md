@@ -115,7 +115,14 @@ freshwater pair, #1484 guard, or held manifest changed.
 
 ## Review and focused checks
 
-REVIEW_PLACEHOLDER
+The required separate review was invoked on clean commit
+`01b17a379bf9b1ab75729dfce7c524480ee248cd` with
+`codex exec --sandbox read-only`. It exited 1 before reviewing. Its terminal
+result, verbatim, was **“Error: failed to initialize in-process app-server
+client: Read-only file system (os error 30)”**. There is no `VERDICT:` line to
+quote. The review requirement is **UNMET/BLOCKED**, and absence of a verdict is
+not approval. The full log is `codex_round69_review.log`, SHA-256
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
 The instrument's direct tests pass 5/5 before and after withdrawal, including
 the exact pytree census and the final assertion that the refuted production
