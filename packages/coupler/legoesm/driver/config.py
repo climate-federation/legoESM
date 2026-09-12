@@ -1806,7 +1806,9 @@ class ExperimentConfig(NamedTuple):
                 f"cutoff), got {self.bechtold_conv_top_pa}"
             )
         for _f, _lo, _hi in (
-            ("bechtold_rprcon", 3.5e-4, 5.6e-3),
+            # Ceiling raised with the scheme spec (see BechtoldConfig
+            # __param_spec__): the production value sat on the old bound.
+            ("bechtold_rprcon", 3.5e-4, 1.4e-2),
             ("bechtold_epsilon_deep", 7.0e-4, 1.2e-2),
             ("bechtold_delta_deep", 3.0e-5, 1.8e-4),
             ("bechtold_dnoprc", 7.5e-5, 1.2e-3),
