@@ -148,3 +148,15 @@ def test_the_dycore_config_carries_the_weight():
     assert c.budget_ledger_level_weight is None
     assert c._replace(budget_ledger_level_weight=jnp.ones(5)
                       ).budget_ledger_level_weight is not None
+
+
+def test_the_driver_reads_the_sigma_coordinate_it_actually_has():
+    """Regression: the first wiring read a sigma_coord attribute the driver does
+    not have, so every banded run died at setup with an AttributeError. Pin the
+    attribute name against the one the driver builds."""
+    import inspect
+    from legoesm.driver import model_driver
+    src = inspect.getsource(model_driver.ModelDriver)
+    assert "self.sigma = create_sigma_coordinate(" in src
+    assert "self.sigma_coord.sigma_half" not in src
+    assert "sigma_band_weight(\n                self.sigma.sigma_half" in src

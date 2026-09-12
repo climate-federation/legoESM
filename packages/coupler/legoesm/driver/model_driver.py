@@ -9257,15 +9257,25 @@ class ModelDriver:
                     "the band would select levels of a ledger that is never "
                     "computed.")
             from legoesm.diagnostics.process_ledger import sigma_band_weight
+            # HYBRID columns have no single sigma_half: the band would select
+            # different pressures under different surface pressures, so the
+            # weight would not mean one thing. Refused rather than silently
+            # computed on an approximate coordinate.
+            if not hasattr(self.sigma, "sigma_half"):
+                raise ValueError(
+                    "budget_ledger_sigma_band needs a sigma vertical "
+                    f"coordinate; this run uses {cfg.grid.vertical_coord!r}, "
+                    "whose layer pressures depend on the surface pressure so a "
+                    "single sigma band does not select one pressure range.")
             _ledger_weight = sigma_band_weight(
-                self.sigma_coord.sigma_half, float(_ledger_band[0]),
+                self.sigma.sigma_half, float(_ledger_band[0]),
                 float(_ledger_band[1]))
             logger.info(
                 "  budget ledger restricted to sigma band [%.3f, %.3f] "
                 "(%.1f%% of the column mass by layer weight)",
                 float(_ledger_band[0]), float(_ledger_band[1]),
-                100.0 * float(jnp.sum(_ledger_weight * self.sigma_coord.dsigma)
-                              / jnp.sum(self.sigma_coord.dsigma)))
+                100.0 * float(jnp.sum(_ledger_weight * self.sigma.dsigma)
+                              / jnp.sum(self.sigma.dsigma)))
         physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT,
                                   budget_ledger_level_weight=_ledger_weight,
                                   column_mesh=_column_mesh,
