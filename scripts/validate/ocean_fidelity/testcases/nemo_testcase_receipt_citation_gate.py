@@ -165,6 +165,8 @@ FILES = {
     # source claim to that rerun's own compiled branch.
     "GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3.f90"),
     "GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traadv_fct.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traadv_fct.f90"),
     "GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/zdftke.f90": (
@@ -333,6 +335,13 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 71: Kmm boundary and its producing stage-2 update ---
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3.f90:204-215': [
+        'Nrhs = Nnn   ;   Nnn  = Naa   ;   Naa  = Nrhs',
+        'CALL stp_RK3_stg( 3, kstp, Nbb, Nnn, Nrhs, Naa )', 12],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:899-901': [
+        'ts(ji,jj,jk,jn,Kaa) = (',
+        '/          ( 1._wp + r3t(ji,jj,Kaa) )', 3],
     # --- round 67: compiled tracer order and the held legoESM transcription ---
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:917-965': [
         ('CASE ( 3 )        !==  Stage 3', 2),
