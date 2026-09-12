@@ -169,6 +169,13 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traadv_fct.f90"),
     "GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/zdftke.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/zdftke.f90"),
+    "GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90"),
+    "GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traldf_iso.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traldf_iso.f90"),
+    "round64/oracle_krhs_split/ocean.output": Path(
+        "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round64/"
+        "oracle_krhs_split/ocean.output"),
     # Round 58 binds every TKE claim to the record producer's own compiled
     # branch, including the writer whose dummy-bound defect invalidated it.
     "GYRE_OMIP_L2_P3_SM_R56TKE/BLD/ppsrc/nemo/l2_r54_tke.f90": (
@@ -326,6 +333,36 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 66: admitted content operands and Krhs/LDF walk ---
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:827-950': [
+        ('DO jn = 1, jpts', 1),
+        'CALL tra_ldf( kstp, Kbb, Kmm, ts, Krhs )', 124],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90:548-562': [
+        'pt(ji,jj,1,jn,Kaa) =',
+        ('+ p2dt * (e3t_3d', 2), 15],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traldf_iso.f90:183-192': [
+        ('zdit(ji,jj,ik  ) =', 1),
+        ('zdkt(ji,jj,ikp1) =', 1), 10],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traldf_iso.f90:230-246': [
+        ('zA11 = e2_e1u(ji,jj)', 1),
+        ('+ ( zdkt(ji,jj+1,ikp1)', 1), 17],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traldf_iso.f90:287-305': [
+        ('pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) +', 1),
+        ('END DO   ;   END DO', 8), 19],
+    'round64/oracle_krhs_split/ocean.output:649-656': [
+        ('no explicit diffusion', 1), 'iso-neutral triad operator', 8],
+    'ocean_model_latlon_cgrid.py:1861-1911': [
+        'h_one_third = h_k_old',
+        '+ dt * h_one_half * stage_source_rates[2][1])', 51],
+    'ocean_model_latlon_cgrid.py:6137-6206': [
+        '_stage3_T_rate = (',
+        '/ jnp.maximum(_h_live_one_half, 1.0e-10),', 70],
+    'ocean_model_latlon_cgrid.py:7048-7480': [
+        'T_mid = state_new.T.data',
+        'S_mid = S_mid + dt * dS_gm * active_3d', 433],
+    'ocean_model_latlon_cgrid.py:7639-7677': [
+        ('_nemo_ws_rk3_tracer_pair_step(', 3),
+        'return_final_content=True,', 39],
     # --- round 65: admitted R64 Krhs/FCT/TKE walk ---
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:827-828': [
         ('DO jn = 1, jpts', 1), 'ts(:,:,:,jn,Krhs) = 0._wp', 2],
