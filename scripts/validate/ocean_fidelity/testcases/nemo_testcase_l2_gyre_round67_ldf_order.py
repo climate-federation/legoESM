@@ -93,6 +93,19 @@ def _one_ulp_plant(content: np.ndarray, wet: np.ndarray) -> dict:
     return row
 
 
+def production_fct_content(
+    advection_content: np.ndarray,
+    source: np.ndarray,
+    ldf: np.ndarray,
+    operands: dict,
+) -> np.ndarray:
+    """Use the production FCT content and NEMO's Kmm source association."""
+    return (
+        advection_content
+        + operands["p2dt"] * operands["e3t_Kmm"] * (source + ldf)
+    )
+
+
 def measure(args) -> dict:
     reciprocal_calls: list[dict] = []
     pair_sources: list[tuple[np.ndarray, ...]] = []
@@ -115,11 +128,15 @@ def measure(args) -> dict:
         })
         return real_reciprocal(live, oracle, oracle_content, wet)
 
-    def pair_sink(source_t, source_s, tracer_t, tracer_s, content_t, content_s):
+    def pair_sink(
+        source_t, source_s, tracer_t, tracer_s, content_t, content_s,
+        advection_content_t, advection_content_s,
+    ):
         pair_sources.append(tuple(
             np.asarray(value, dtype=np.float64)
             for value in (
-                source_t, source_s, tracer_t, tracer_s, content_t, content_s)))
+                source_t, source_s, tracer_t, tracer_s, content_t, content_s,
+                advection_content_t, advection_content_s)))
 
     def pair_capture(*values, **kwargs):
         result = real_pair(*values, **kwargs)
@@ -127,7 +144,7 @@ def measure(args) -> dict:
             source_t, source_s = kwargs["stage_source_rates"][2]
             jax.debug.callback(
                 pair_sink, source_t, source_s, values[0], values[1],
-                result[2], result[3],
+                result[2], result[3], result[4], result[5],
                 ordered=True)
         return result
 
@@ -177,7 +194,8 @@ def measure(args) -> dict:
     # round66's final production call is the kt=2 oracle-seeded call. Multiple
     # callback observations can occur under JAX, but the last observation must
     # carry that call's exact Kbb tracer.
-    source_t, source_s, pair_t, pair_s, content_t, content_s = pair_sources[-1]
+    (source_t, source_s, pair_t, pair_s, content_t, content_s,
+     advection_content_t, advection_content_s) = pair_sources[-1]
     _, seeded, dt, freshwater, surface = step_calls[-1]
     require(np.array_equal(pair_t, np.asarray(seeded.T.data, dtype=np.float64))
             and np.array_equal(pair_s, np.asarray(seeded.S.data, dtype=np.float64)),
@@ -191,11 +209,18 @@ def measure(args) -> dict:
     ldf = {"T": ldf_t, "S": ldf_s}
     sources = {"T": source_t, "S": source_s}
     captured_content = {"T": content_t, "S": content_s}
+    captured_advection_content = {
+        "T": advection_content_t,
+        "S": advection_content_s,
+    }
 
     results = {}
     routed_content = {}
     implementation_content = {}
     implementation_oracle_content = {}
+    production_prediction_content = {}
+    production_prediction_rows = {}
+    production_baseline_rebuild = {}
     for name, capture in zip(TRACERS, reciprocal_calls, strict=True):
         boundaries = {
             boundary: round66.transposed(arrays[f"{boundary}_{name}"])
@@ -223,6 +248,25 @@ def measure(args) -> dict:
             captured_content[name], routed_content[name], capture["wet"])
         implementation_oracle_content[name] = round54.field_stats(
             captured_content[name], capture["oracle_content"], capture["wet"])
+        current_ldf = (
+            np.zeros_like(ldf[name])
+            if args.expect_production_route == "after" else ldf[name]
+        )
+        production_baseline = production_fct_content(
+            captured_advection_content[name], sources[name],
+            np.zeros_like(ldf[name]), capture["live"])
+        production_prediction = production_fct_content(
+            captured_advection_content[name], sources[name],
+            current_ldf, capture["live"])
+        production_prediction_content[name] = production_prediction
+        production_baseline_rebuild[name] = round54.field_stats(
+            production_baseline, captured_content[name], capture["wet"])
+        production_prediction_rows[name] = {
+            "content_vs_oracle": round54.field_stats(
+                production_prediction, capture["oracle_content"], capture["wet"]),
+            "implementation_vs_prediction": round54.field_stats(
+                captured_content[name], production_prediction, capture["wet"]),
+        }
         results[name] = result
 
     content_criterion = {name: True for name in TRACERS}
@@ -262,8 +306,19 @@ def measure(args) -> dict:
     ).step(seeded, dt, freshwater=freshwater, surface_forcing=surface)
     baseline_fields = gate.lego_fields(jax.device_get(baseline_state))
     override_fields = gate.lego_fields(jax.device_get(override_state))
+    production_override_state = type(model)(
+        model.grid, model.z_coord, model.config,
+        _nemo_ws_test_hooks=model_module._NEMOWSRK3TestHooks(
+            pre_implicit_tracer_content_override=(
+                jnp.asarray(production_prediction_content["T"]),
+                jnp.asarray(production_prediction_content["S"]),
+            )),
+    ).step(seeded, dt, freshwater=freshwater, surface_forcing=surface)
+    production_override_fields = gate.lego_fields(
+        jax.device_get(production_override_state))
     entry3 = gate.read_entry(args.entry_root / "oracle_step_entry_kt00000003.bin")
     kt3 = {}
+    production_kt3 = {}
     for name, capture in zip(TRACERS, reciprocal_calls, strict=True):
         oracle_entry = entry3[name][..., :baseline_fields[name].shape[-1]]
         kt3[name] = {
@@ -273,6 +328,15 @@ def measure(args) -> dict:
                 override_fields[name], oracle_entry, capture["wet"]),
             "override_vs_baseline": round54.field_stats(
                 override_fields[name], baseline_fields[name], capture["wet"]),
+        }
+        production_kt3[name] = {
+            "baseline": round54.field_stats(
+                baseline_fields[name], oracle_entry, capture["wet"]),
+            "production_content_override": round54.field_stats(
+                production_override_fields[name], oracle_entry, capture["wet"]),
+            "override_vs_baseline": round54.field_stats(
+                production_override_fields[name], baseline_fields[name],
+                capture["wet"]),
         }
 
     prediction_match = {name: True for name in TRACERS}
@@ -292,8 +356,64 @@ def measure(args) -> dict:
             and all(override_match.values()))
         else "REFUTED")
 
+    production_criteria = {
+        "baseline_rebuild_exact": {
+            name: production_baseline_rebuild[name]["cells_unequal"] == 0
+            for name in TRACERS
+        },
+        "implementation_exact": {
+            name: production_prediction_rows[name][
+                "implementation_vs_prediction"]["cells_unequal"] == 0
+            for name in TRACERS
+        },
+        "frozen_prediction_exact": {name: True for name in TRACERS},
+        "frozen_kt3_exact": {name: True for name in TRACERS},
+        "override_equals_implementation": {name: True for name in TRACERS},
+    }
+    if args.expect_production_route == "after":
+        production_report = json.loads(
+            args.production_prediction_report.read_text())
+        frozen_rows = production_report["production_fct_prediction"]
+        for name in TRACERS:
+            production_criteria["frozen_prediction_exact"][name] = bool(
+                production_prediction_rows[name]["content_vs_oracle"]
+                == frozen_rows["content_rows"][name]["content_vs_oracle"])
+            production_criteria["frozen_kt3_exact"][name] = bool(
+                production_kt3[name]["baseline"]
+                == frozen_rows["kt3"][name]["production_content_override"])
+            production_criteria["override_equals_implementation"][name] = bool(
+                production_kt3[name]["override_vs_baseline"][
+                    "cells_unequal"] == 0)
+        status = (
+            "CONFIRMED"
+            if all(all(rows.values()) for rows in production_criteria.values())
+            else "REFUTED")
+    else:
+        round67_report = json.loads(args.prediction_report.read_text())
+        prediction_t = production_prediction_rows["T"]["content_vs_oracle"]
+        baseline_t = base["substitution_rows"]["T"]["live_baseline"]
+        improves_20x = bool(
+            prediction_t["max_abs"] * 20.0 <= baseline_t["max_abs"])
+        within_round67_floor = {}
+        for name in TRACERS:
+            frozen = round67_report["cumulative_substitutions"][name][
+                "arm_rows"]["routed_live"]["content"]["max_abs"]
+            association = round67_report[
+                "implementation_content_vs_routed"][name]["max_abs"]
+            within_round67_floor[name] = bool(
+                production_prediction_rows[name]["content_vs_oracle"][
+                    "max_abs"] <= frozen + association)
+        production_criteria["improves_t_20x"] = {"T": improves_20x}
+        production_criteria["within_round67_floor"] = within_round67_floor
+        status = (
+            "CONFIRMED"
+            if (all(production_criteria["baseline_rebuild_exact"].values())
+                and improves_20x
+                and all(within_round67_floor.values()))
+            else "REFUTED")
+
     return {
-        "format": "nemo-testcase-l2-gyre-round67-ldf-order-v2",
+        "format": "nemo-testcase-l2-gyre-round68-production-fct-v1",
         "status": status,
         "worktree": base["worktree"],
         "record_producer": base["record_producer"],
@@ -303,6 +423,12 @@ def measure(args) -> dict:
         "implementation_content_vs_routed": implementation_content,
         "implementation_content_vs_oracle": implementation_oracle_content,
         "kt3_prediction": kt3,
+        "production_fct_prediction": {
+            "content_rows": production_prediction_rows,
+            "baseline_rebuild": production_baseline_rebuild,
+            "kt3": production_kt3,
+            "criteria": production_criteria,
+        },
         "criteria": {
             "content_within_floor_plus_association": content_criterion,
             "kt3_exact_pre_edit_prediction": prediction_match,
@@ -321,8 +447,14 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--expect-model-order", choices=("before", "after"), required=True)
     parser.add_argument(
+        "--expect-production-route", choices=("before", "after"),
+        default="before")
+    parser.add_argument(
         "--prediction-report", type=Path,
         default=ROOT / "round67/round67_ldf_order_before.json")
+    parser.add_argument(
+        "--production-prediction-report", type=Path,
+        default=ROOT / "round68/round68_production_fct_before.json")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--entry-root", type=Path,
                         default=ROOT / "year_owners/nemo_seed0")
@@ -343,11 +475,12 @@ def main(argv=None) -> int:
     except Exception as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
-    row = report["cumulative_substitutions"]["T"]["arm_rows"]["routed_live"]
-    kt3 = report["kt3_prediction"]["T"]["routed_content_override"]
+    row = report["production_fct_prediction"]["content_rows"]["T"]
+    kt3 = report["production_fct_prediction"]["kt3"]["T"][
+        "production_content_override"]
     print(
-        f"ROUND67 LDF ORDER {report['status']}: "
-        f"content_T={row['content']['max_abs']:.12e} "
+        f"ROUND68 PRODUCTION FCT {report['status']}: "
+        f"content_T={row['content_vs_oracle']['max_abs']:.12e} "
         f"kt3_T={kt3['max_abs']:.12e}")
     return 0 if report["status"] == "CONFIRMED" else 1
 

@@ -74,3 +74,22 @@ def test_content_plant_is_non_vacuous():
     row = module._one_ulp_plant(content, wet)
     assert row["cells_unequal"] == 1
     assert row["max_abs"] > 0.0
+
+
+def test_production_fct_content_uses_captured_advection_and_kmm_source():
+    module = _module()
+    advection = np.array([[[2.0, 3.0]]], dtype=np.float64)
+    source = np.array([[[0.25, -0.5]]], dtype=np.float64)
+    ldf = np.array([[[-0.25, 0.75]]], dtype=np.float64)
+    operands = {
+        "p2dt": np.float64(4.0),
+        "e3t_Kmm": np.array([[[5.0, 7.0]]], dtype=np.float64),
+    }
+    got = module.production_fct_content(advection, source, ldf, operands)
+    want = advection + 4.0 * operands["e3t_Kmm"] * (source + ldf)
+    np.testing.assert_array_equal(got, want)
+
+    planted = np.array(advection, copy=True)
+    planted[0, 0, 0] = np.nextafter(planted[0, 0, 0], np.inf)
+    changed = module.production_fct_content(planted, source, ldf, operands)
+    assert np.count_nonzero(changed != got) == 1
