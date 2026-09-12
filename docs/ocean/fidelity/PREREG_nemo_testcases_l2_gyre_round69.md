@@ -113,3 +113,21 @@ row registered, no AT-BAR loss, and no earlier first-over-bar boundary.
 No NEMO source/build/run, configuration choice, carried-state change,
 stabilizer, year harness, reconciliation gate, freshwater pair, #1484 guard,
 or held/refuted manifest is modified. A failed prediction is kept as REFUTED.
+
+## Post-edit landing-gate correction after refused run
+
+The first production invocation wrote status **REFUTED** even though both
+frozen native content dictionaries and both frozen kt=3 dictionaries matched
+exactly. Two bookkeeping checks had compared different arms. First, the 20x
+check divided the routed result by the post-edit production baseline, which
+already contains the route, rather than round 68's frozen un-routed
+`1.679392691670500e-3 K m` baseline. Second, it required the post-edit host
+reconstruction to retain round 68's 3-cell un-routed association census; the
+post-edit quantity is the routed association and correctly reproduces the
+pre-edit native arm's separate 2-cell association row instead. No threshold,
+physics prediction, native target, or model code changes. Before the first
+successful post-edit run, calculate improvement against the frozen un-routed
+report, keep the 3-cell row explicitly as the historical retraction, and check
+the current 2-cell row against the frozen native association census. The
+refused report remains in `round69_native_source_after.json` until a stamped
+corrected run supersedes it by filename and checksum in the receipt.

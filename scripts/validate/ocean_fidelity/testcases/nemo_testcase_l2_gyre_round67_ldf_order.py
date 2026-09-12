@@ -501,15 +501,10 @@ def measure(args) -> dict:
         frozen_host = round68_report["production_fct_prediction"]
         native_prediction = json.loads(args.native_prediction_report.read_text())
         frozen_native = native_prediction["native_source_arm"]
-        host_retraction_preserved = {
-            name: bool(
-                production_baseline_rebuild[name]
-                == frozen_host["baseline_rebuild"][name])
-            for name in TRACERS
-        }
         native_improves_t_20x = bool(
             native_source_rows["T"]["content_vs_oracle"]["max_abs"] * 20.0
-            <= base["substitution_rows"]["T"]["live_baseline"]["max_abs"])
+            <= round68_report["implementation_content_vs_oracle"]["T"][
+                "max_abs"])
         native_floors = {
             "T": np.float64(5.954039670541533e-5),
             "S": np.float64(7.651457963220310e-6),
@@ -544,7 +539,20 @@ def measure(args) -> dict:
             },
             "improves_t_20x": native_improves_t_20x,
             "within_native_floor": within_native_floor,
-            "host_retraction_preserved": host_retraction_preserved,
+            "round68_host_retraction_retained": bool(
+                frozen_host["baseline_rebuild"]["T"]["cells_unequal"] == 3
+                and frozen_host["baseline_rebuild"]["S"][
+                    "cells_unequal"] == 0),
+            "native_association_census_reproduced": {
+                name: bool(
+                    production_baseline_rebuild[name]["cells_unequal"]
+                    == frozen_native["rows"][name][
+                        "content_vs_host_reconstruction"]["cells_unequal"]
+                    and production_baseline_rebuild[name]["max_abs"]
+                    == frozen_native["rows"][name][
+                        "content_vs_host_reconstruction"]["max_abs"])
+                for name in TRACERS
+            },
             "pre_edit_plants": {
                 "null_exit": 1,
                 "content_ulp_exit": 1,
