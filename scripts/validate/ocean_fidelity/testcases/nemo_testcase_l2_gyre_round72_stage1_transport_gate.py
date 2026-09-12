@@ -34,13 +34,17 @@ def _bits_equal(left: np.ndarray, right: np.ndarray) -> bool:
     return bool(np.array_equal(left.view(np.uint64), right.view(np.uint64)))
 
 
-def _read(path: Path, *, truncate: bool = False) -> dict[str, np.ndarray | tuple]:
+def _read(
+    path: Path, *, truncate: bool = False, header_delta: bool = False,
+) -> dict[str, np.ndarray | tuple]:
     with path.open("rb") as handle:
         magic = handle.read(16).decode("ascii").rstrip()
         header = struct.unpack("=8i", handle.read(32))
         values = np.fromfile(handle, dtype=np.float64)
     if truncate:
         values = values[:-1]
+    if header_delta:
+        header = (header[0], header[1] + 1, *header[2:])
     require(magic == "NEMO_L2_TRPOP_2", f"bad magic {magic!r}")
     require(header == (2, 2, 1, 3, *DIMS, 64), f"bad header {header}")
     nx, ny, nz = DIMS
@@ -66,6 +70,8 @@ def _read(path: Path, *, truncate: bool = False) -> dict[str, np.ndarray | tuple
 
 def _row(candidate: np.ndarray, oracle: np.ndarray, active: np.ndarray) -> dict:
     candidate, oracle = candidate[active], oracle[active]
+    require(np.all(np.isfinite(candidate)), "non-finite replay value")
+    require(np.all(np.isfinite(oracle)), "non-finite recorded value")
     delta = candidate - oracle
     return {
         "bit_exact": _bits_equal(candidate, oracle),
@@ -123,7 +129,7 @@ def main() -> None:
     expected_commit = "planted-wrong-commit" if args.plant == "stamp" else args.expect_commit
     require(parts == [sha256(path), expected_commit, RECORD], "record stamp mismatch")
     if args.plant == "header":
-        require(False, "planted header mismatch")
+        _read(path, header_delta=True)
     if args.plant == "truncation":
         _read(path, truncate=True)
     rows = validate(path, replay_ulp=args.plant == "replay-ulp")
