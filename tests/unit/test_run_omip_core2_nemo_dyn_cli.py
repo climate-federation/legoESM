@@ -144,3 +144,36 @@ def test_model_side_defaults_are_what_the_gap_claimed():
     from legoesm.ocean.state import BarotropicConfig, LatLonCGridOceanConfig
     assert LatLonCGridOceanConfig().lateral_side_bc == "free_slip"
     assert BarotropicConfig().barotropic_coriolis == "avg"
+
+
+def test_nemo_vertical_carries_the_depth_ladder_nemo_sco_needs():
+    """codex P1: --nemo-vertical loaded only thicknesses, so t_depth_ref
+    stayed None and nemo_sco raised even when the flag pair looked right.
+    The option was still unreachable -- the guard above just said so politely.
+
+    NEMO's gdept_1d is NOT the running sum of e3t_1d (it comes from NEMO's own
+    analytic stretching), so it has to be read, not derived."""
+    src = RUNNER.read_text()
+    assert "def _load_nemo_gdept_1d(" in src
+    i_load = src.index("_nemo_t_depth = _load_nemo_gdept_1d(_vfile)")
+    i_use = src.index("t_depth_ref_override=_nemo_t_depth,")
+    assert i_use > i_load, "the depths must be loaded before they are passed"
+    # and the setup helper must actually hand them to the coordinate builder
+    setup = (pathlib.Path(__file__).resolve().parents[2] / "scripts" / "run"
+             / "run_omip.py").read_text()
+    assert "dz_ref_override, t_depth_ref_override," in setup
+
+
+def test_a_mismatched_column_is_refused():
+    """Two arrays describing the same column with different level counts is a
+    wrong-file error, not something to broadcast past."""
+    assert "they describe the same column." in RUNNER.read_text()
+
+
+def test_missing_gdept_is_tolerated_not_fatal():
+    """Vertical files without gdept_1d must keep working for every run that
+    does not ask for nemo_sco."""
+    src = RUNNER.read_text()
+    i = src.index("def _load_nemo_gdept_1d(")
+    body = src[i:i + 1200]
+    assert 'if "gdept_1d" not in ds:' in body and "return None" in body

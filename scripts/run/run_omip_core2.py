@@ -1457,7 +1457,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   convection_cfg=None,
                   freeze_floor=None, freezing=None, ew_cyclic_overlap=None,
                   runoff_depth_spread_m=None, tracer_advection=None,
-                  mle=None, dz_ref_override=None,
+                  mle=None, dz_ref_override=None, t_depth_ref_override=None,
                   bottom_drag_scheme=None, bottom_drag_cd0=None,
                   bottom_drag_cdmax=None, bottom_drag_z0=None,
                   bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
@@ -1535,6 +1535,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         physics_preset="full", water_type="II",
         forcing_mode="jra55_do_tropical",
         dz_ref_override=dz_ref_override,
+        t_depth_ref_override=t_depth_ref_override,
     )
     # Optional dycore-stability overrides (for WOA cold-start tuning): rebuild
     # the config + model from run_omip's validated tripole base, changing only
@@ -3392,6 +3393,30 @@ def _load_nemo_e3t_1d(path: str):
     if dz.ndim != 1 or dz.size < 2 or not np.all(dz > 0):
         raise ValueError(f"{path}: bad e3t_1d (shape {dz.shape}, must be 1-D >0)")
     return dz
+
+
+def _load_nemo_gdept_1d(path: str):
+    """Read NEMO's 1-D reference T-point depths ``gdept_1d`` [m], or None.
+
+    Kept separate from :func:`_load_nemo_e3t_1d` rather than changing its
+    return arity. Thicknesses alone do NOT determine these depths: NEMO's
+    gdept_1d comes from its own analytic stretching, not from accumulating
+    e3t_1d, and the fidelity pressure gradient (``pgf_scheme="nemo_sco"``)
+    telescopes against exactly that ladder. Without it the coordinate falls
+    back to arithmetic midpoints, which is why nemo_sco refuses to run.
+
+    Returns None when the file has no gdept_1d, so callers that do not need
+    the faithful ladder are unaffected."""
+    import xarray as xr
+    with xr.open_dataset(path, decode_times=False) as ds:
+        if "gdept_1d" not in ds:
+            return None
+        t = np.asarray(ds["gdept_1d"].values, dtype=np.float64).ravel()
+    if t.ndim != 1 or t.size < 2 or not np.all(np.diff(t) > 0):
+        raise ValueError(
+            f"{path}: bad gdept_1d (shape {t.shape}; must be 1-D and strictly "
+            "increasing downward)")
+    return t
 # NEMO ORCA1 RUN_REF MONTHLY ocean grid_T (`tos` = SST [degC]) -> used to give the
 # annual-mean siconc a SEASONAL cycle (--ice-albedo-seasonal): NEMO sea ice sits
 # at the freezing point, so where the monthly SST is at/below freezing NEMO has
@@ -6264,6 +6289,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "The 6-hourly winds and the radiation fields are "
                         "ln_tint=.FALSE. in the oracle, so they are HELD by "
                         "both models and this flag does not touch them.")
+    p.add_argument("--forcing-remap", choices=("bilinear", "nemo_scrip"),
+                   default="bilinear",
+                   help="How the CORE-II/JRA55 atmospheric fields are remapped "
+                        "onto the model grid. 'bilinear' (default, unchanged) "
+                        "is our own four-neighbour interpolation. 'nemo_scrip' "
+                        "reads ORCA1's OWN weight files, so the winds arrive "
+                        "through the oracle's exact interpolation -- BICUBIC "
+                        "for u10/v10 and bilinear for the rest, which is what "
+                        "namsbc_blk selects. Tripole only: the weights encode "
+                        "one destination grid and the sampler refuses any "
+                        "other.")
     p.add_argument("--chl-remap", choices=("idw", "nemo_scrip"),
                    default="idw",
                    help="How the ESACCI chlorophyll climatology is remapped. "
@@ -7628,6 +7664,7 @@ def main() -> int:
     # 75-level reference column (e3t_1d) so vertical gradients (thermocline, MLD)
     # are resolved comparably to NEMO. Overrides --nlev/--H-max to the NEMO column.
     _nemo_dz = None
+    _nemo_t_depth = None
     if args.nemo_vertical:
         if args.grid == "cubed_sphere":
             raise ValueError(
@@ -7636,11 +7673,24 @@ def main() -> int:
                 "tripole, latlon_bathy, or mpas.")
         _vfile = args.nemo_vertical_file or _NEMO_DOMAIN_CFG
         _nemo_dz = _load_nemo_e3t_1d(_vfile)
+        # NEMO's OWN T-point depths, not midpoints accumulated from e3t_1d:
+        # the fidelity pressure gradient telescopes against this exact ladder,
+        # and without it pgf_scheme="nemo_sco" refuses to run (codex review
+        # found that --nemo-vertical alone left t_depth_ref=None, so the
+        # option was still unreachable after it was given a CLI flag).
+        _nemo_t_depth = _load_nemo_gdept_1d(_vfile)
+        if _nemo_t_depth is not None and _nemo_t_depth.size != _nemo_dz.size:
+            raise ValueError(
+                f"{_vfile}: gdept_1d has {_nemo_t_depth.size} levels but "
+                f"e3t_1d has {_nemo_dz.size}; they describe the same column.")
         args.nlev = int(_nemo_dz.size)
         args.H_max = float(_nemo_dz.sum())
         print(f"[setup] --nemo-vertical: {args.nlev} levels from {_vfile} "
               f"(dz {_nemo_dz[0]:.2f}->{_nemo_dz[-1]:.1f} m, H_max "
-              f"{args.H_max:.0f} m) -- matching NEMO ORCA1 L75.")
+              f"{args.H_max:.0f} m) -- matching NEMO ORCA1 L75; "
+              + ("gdept_1d carried (nemo_sco PGF available)"
+                 if _nemo_t_depth is not None
+                 else "NO gdept_1d in this file (nemo_sco PGF unavailable)"))
 
     # zdfiwm CLI → IWMConfig (shared with run_omip; None when --iwm absent
     # so the builders' iwm-block stays fully inert on legacy runs).
@@ -7707,6 +7757,7 @@ def main() -> int:
             ew_cyclic_overlap=(True if args.ew_cyclic_overlap else None),
             tracer_advection=args.tracer_advection,
             mle=mle_cfg, dz_ref_override=_nemo_dz,
+            t_depth_ref_override=_nemo_t_depth,
             bottom_drag_scheme=args.bottom_drag_scheme,
             bottom_drag_cd0=args.bottom_drag_cd0,
             bottom_drag_cdmax=args.bottom_drag_cdmax,
@@ -9806,6 +9857,7 @@ def main() -> int:
             dm2dc_window=_dm2dc_win,
             u_oce=_u_oce, v_oce=_v_oce,
             wind_current_feedback_vfac=_wind_vfac,
+            forcing_remap=args.forcing_remap,
         )
         if ramp < 1.0:
             sf = sf._replace(tau_x=sf.tau_x * ramp, tau_y=sf.tau_y * ramp,

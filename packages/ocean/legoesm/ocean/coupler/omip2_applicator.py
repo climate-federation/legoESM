@@ -1350,7 +1350,8 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
                                   tau_ice_sw: float = 0.03,
                                   dm2dc_window=None,
                                   u_oce=None, v_oce=None,
-                                  wind_current_feedback_vfac: float = 0.0):
+                                  wind_current_feedback_vfac: float = 0.0,
+                                  forcing_remap: str = "bilinear"):
     """Build an :class:`OceanSurfaceForcing` (tau_x, tau_y, q_net, sw_down) on
     the model grid from CORE-II / JRA55 forcing, for INTEGRATION INSIDE
     ``model.step(state, dt, surface_forcing=...)`` -- the dynamics-core
@@ -1392,12 +1393,19 @@ def compute_omip2_surface_forcing(state, *, forcing, idx_t: int,
     import-linter layering contract, so the top-layer run driver rotates and
     passes geographic currents here).  ``vfac == 0.0`` (default) with
     ``u_oce=v_oce=None`` is BYTE-IDENTICAL to the absolute-wind behaviour.
+
+    ``forcing_remap`` selects how the atmospheric fields reach the model grid:
+    ``"bilinear"`` (default, unchanged) or ``"nemo_scrip"``, which reads NEMO's
+    own SCRIP weight files so the winds arrive through the oracle's exact
+    interpolation -- bicubic for u10/v10, bilinear for the rest, as ORCA1's
+    namsbc_blk specifies. Tripole only; the sampler raises otherwise.
     """
     from legoesm.ocean.state import OceanSurfaceForcing
     sigma_sb = float(constants.sigma_sb)
     T_freeze = float(constants.T_freeze)
 
-    forc = _sample_omip2_forcing(forcing, idx_t, grid, grid_type)
+    forc = _sample_omip2_forcing(forcing, idx_t, grid, grid_type,
+                                 forcing_remap=forcing_remap)
 
     if dm2dc_window is not None:
         # NEMO ln_dm2dc (sbcdcy, Bernie et al. 2007): modulate the DAILY-MEAN

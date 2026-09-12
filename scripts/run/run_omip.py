@@ -1242,7 +1242,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   vertical_mixing: VerticalMixingConfig | None = None,
                   forcing_mode: str = "restoring",
                   use_conservation_fixer: bool = True,
-                  dz_ref_override=None):
+                  dz_ref_override=None, t_depth_ref_override=None):
     """Create grid, z_coord, config, model for any grid type.
 
     All grids use the SAME config-based diffusion (A_h, K_h, A_v, K_v)
@@ -1268,8 +1268,14 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         # generic MPAS/lat-lon route therefore opts into the documented legacy
         # construction explicitly; NEMO state bridges pass raw e3w_0 and keep
         # the faithful mesh-reference default.
+        # t_depth_ref_override carries NEMO's OWN gdept_1d when the caller has
+        # it. Thicknesses alone do not determine those depths, and the
+        # fidelity PGF (pgf_scheme="nemo_sco") telescopes against that exact
+        # ladder; None keeps the arithmetic-midpoint construction, which is
+        # the behaviour every existing run gets.
         z_coord = create_z_star_from_thicknesses(
-            dz_ref_override, nemo_e3w_source="depth_difference")
+            dz_ref_override, t_depth_ref_override,
+            nemo_e3w_source="depth_difference")
     elif use_bathymetry:
         # Partial cells with ETOPO: use the same vertical stretching
         # as the global-overturning production scripts (dz_surface=20,
