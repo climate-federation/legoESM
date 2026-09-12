@@ -161,6 +161,14 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R63KRHS/BLD/ppsrc/nemo/zdftke.f90"),
     "GYRE_OMIP_L2_P3_SM_R63KRHS/EXP00/namelist_cfg": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R63KRHS/EXP00/namelist_cfg"),
+    # Round 65 consumes the admitted R64 rerun and therefore binds every
+    # source claim to that rerun's own compiled branch.
+    "GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traadv_fct.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traadv_fct.f90"),
+    "GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/zdftke.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/zdftke.f90"),
     # Round 58 binds every TKE claim to the record producer's own compiled
     # branch, including the writer whose dummy-bound defect invalidated it.
     "GYRE_OMIP_L2_P3_SM_R56TKE/BLD/ppsrc/nemo/l2_r54_tke.f90": (
@@ -318,6 +326,44 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 65: admitted R64 Krhs/FCT/TKE walk ---
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:827-828': [
+        ('DO jn = 1, jpts', 1), 'ts(:,:,:,jn,Krhs) = 0._wp', 2],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:860': (
+        'CALL tra_adv    ( kstp, Kbb, Kmm, Kaa, ts, Krhs', 1),
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traadv_fct.f90:602-611': [
+        ('DO jk =  1,  jpkm1  ; DO jj = ntsj-(  0)', 9),
+        ('pt_up1(ji,jj,jk) = ( (e3t_3d', 3), 10],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traadv_fct.f90:607': (
+        'pt_rhs(ji,jj,jk) = pt_rhs(ji,jj,jk) + ztra', 2),
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traadv_fct.f90:503-510': [
+        'DO jk =  1,  jpkm1  ; DO jj = ntsj-(  2)',
+        'ptFw(ji,jj,jk) = MAX( pW(ji,jj,jk)', 8],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traadv_fct.f90:532-540': [
+        ('DO jk =  1,  jpkm1  ; DO jj = ntsj-(  1)', 5),
+        ('pt_up1(ji,jj,jk) = ( (e3t_3d', 2), 9],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traadv_fct.f90:570-580': [
+        ('DO jk =  1,  jpkm1  ; DO jj = ntsj-(  1)', 7),
+        '&                                       +   MIN( pW(ji,jj,jk)', 11],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traadv_fct.f90:197-201,264-269': [
+        ('CASE(  2  )                   !- 2nd order centered', 1),
+        ('END DO   ;   END DO   ;   END DO', 4),
+        ('CASE(  2  )                   !- 2nd order centered', 2),
+        ('END DO   ;   END DO   ;   END DO', 5), 11],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traadv_fct.f90:798-933': [
+        'z1_Dt = 1._wp / p2dt',
+        ('pcc(ji,jj,jk) = pcc(ji,jj,jk) * zcoef', 2), 136],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traadv_fct.f90:318-329': [
+        'CALL nonosc( Kaa, pt(:,:,:,jn,Kbb)',
+        'pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) + ztra', 12],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traadv_fct.f90:503-506': [
+        'DO jk =  1,  jpkm1  ; DO jj = ntsj-(  2)',
+        ('END DO   ;   END DO   ;   END DO', 21), 4],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/zdftke.f90:428-431': [
+        ('en(ji,jj,jk) = en(ji,jj,jk) + rn_Dt', 2),
+        (') * wmask(ji,jj,jk)', 2), 4],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/zdftke.f90:430': (
+        '+ zfact3 * dissl(ji,jj,jk) * en(ji,jj,jk)', 1),
     # --- round 64: R46/R63 compiled-delta and run-horizon audit ---
     'GYRE_OMIP_L2_P3_SM_R46KT2/EXP00/namelist_cfg:21': (
         'nn_itend    =      10', 1),
