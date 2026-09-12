@@ -135,6 +135,8 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/EXP00/namelist_cfg"),
     "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/traadv.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/traadv.f90"),
+    "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/trazdf.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/trazdf.f90"),
     # Round 58 binds every TKE claim to the record producer's own compiled
     # branch, including the writer whose dummy-bound defect invalidated it.
     "GYRE_OMIP_L2_P3_SM_R56TKE/BLD/ppsrc/nemo/l2_r54_tke.f90": (
@@ -292,6 +294,21 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 62: tracer operand ladder on the R46 kt=2 producer ---
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/trazdf.f90:450': (
+        'zwt(:,1) = 0._wp', 1),
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/trazdf.f90:461-477': [
+        'Diagonal, lower (i), upper (s)',
+        ('END DO   ;   END DO', 10), 17],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/trazdf.f90:523-528': [
+        'DO ji = ntsi-( 0), ntei+( 0 )          !* 1st recurrence',
+        ('END DO   ;   END DO', 13), 6],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/trazdf.f90:545-564': [
+        'DO ji = ntsi-( 0), ntei+( 0 )             !* 2nd recurrence',
+        ('END DO   ;   END DO', 16), 20],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/trazdf.f90:573-578': [
+        'DO ji = ntsi-( 0), ntei+( 0 )             !* 3d recurrence',
+        '&             / zwt(ji,jk) * tmask(ji,jj,jk)', 6],
     # --- decision 36: RK3 face-native shear on the GYRE identity card ---
     'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90:168': (
         'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 1),
@@ -307,10 +324,10 @@ CITATION_MAP = {
     'packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py:384-454': [
         ('wumask = u_mask[..., :-1] * u_mask[..., 1:]', 2),
         ('+ (zsh2v[:-1, :, :] + zsh2v[1:, :, :]) * coast_v', 2), 71],
-    'nemo_testcase_l2_gyre_round54_tke_operands.py:421-455': [
+    'nemo_testcase_l2_gyre_round54_tke_operands.py:421-456': [
         'def _model_substitution_walk(',
         'require(jax.config.x64_enabled, "model substitution walk requires JAX fp64")',
-        35],
+        36],
     'tests/ocean/fidelity/test_nemo_testcase_l2_gyre_card_reconciliation.py:193-216': [
         'def test_rk3_card_steps_with_nemo_face_shear_and_live_face_metric(gate):',
         'assert all(np.all(np.isfinite(np.asarray(fields[k]))) for k in ("T", "S", "u", "v", "ssh"))',

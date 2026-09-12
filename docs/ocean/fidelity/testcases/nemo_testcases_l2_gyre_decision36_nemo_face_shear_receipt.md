@@ -63,7 +63,7 @@ is non-vacuous: it passes at the after tip (`1 passed`) and, in a clean
 same-tip clone with only `f78547b752f7`'s model hunk reversed, fails nonzero at
 kt=2 with the old `eta_before` `ValueError`. The operand walk is a real
 production measurement: it requires fp64, constructs the printed card, and
-enters the production routines (`nemo_testcase_l2_gyre_round54_tke_operands.py:421-455`);
+enters the production routines (`nemo_testcase_l2_gyre_round54_tke_operands.py:421-456`);
 its after artifact is clean-stamped `f78547b752f7`, and its plants fail.
 
 Review verdict: **no blocking finding on the final three-commit stack**.
@@ -73,15 +73,16 @@ Review verdict: **no blocking finding on the final three-commit stack**.
 | prediction | before -> after | verdict against frozen claim/falsifier |
 |---|---|---|
 | P1 sh2 mechanism | max abs `4.102873968e-08 -> 1.517631579e-18`; unequal `17,400 -> 17,400`. K_H max abs `7.763531835e-03 -> 5.636255351e-13`; unequal `5,325 -> 5,310`. NEMO-velocity sh2 replay `0`, `0/17,400`. | **CONFIRMED**: below `1e-15`; the `>1e-12` falsifier does not fire. |
-| P2 ladder | kt3 T abs `8.741316412e-03 -> 1.627511418e-04` K (normalised `3.722344243e-04 -> 6.930486749e-06`); S abs `1.356888521e-03 -> 6.327755180e-06`. All kt2 rows bit-identical; first-over-bar remains kt2 u/v. | **CONFIRMED**: T improves `53.7x` and is below `1e-3`; neither falsifier fires. |
+| P2 ladder | kt3 T abs `8.741316412e-03 -> 1.627511418e-04` K (normalised `3.722344243e-04 -> 6.930486749e-06`); S abs `1.356888521e-03 -> 6.327755180e-06`. The kt2 rows are unchanged; first-over-bar remains kt2 u/v. | **CONFIRMED**: T improves `53.7x` and is below `1e-3`; neither falsifier fires. |
 | P3 month | day-30 3-D T rms `1.424101926e-02 -> 1.239756827e-02` K (`-12.94%`). | **REFUTED**: it does not reach `<5e-3`. The narrower “unchanged to 3 significant digits” falsifier also does not fire. |
 
 ## 5. Registered ladder rows (Rule 12)
 
-All five kt2 rows are bit-identical. No AT-BAR row moves out of the bar;
-first-over-bar remains kt2 u/v and barotropic kt2 uu_b/vv_b. Every one of the
-39 moved regular rows improves. Values below are normalised max abs (also the
-absolute max for u/v/ssh).
+**RETRACTION:** “All five kt2 rows are bit-identical” was false. Decision 36
+left the rows unchanged: T/S are AT-BAR but non-bit, u/v are DEBT, and ssh is
+exact. No AT-BAR row moves out of the bar; first-over-bar remains kt2 u/v and
+barotropic kt2 uu_b/vv_b. Every one of the 39 moved regular rows improves.
+Values below are normalised max abs (also the absolute max for u/v/ssh).
 
 | kt | T before -> after | S before -> after | u before -> after | v before -> after | ssh before -> after |
 |---:|---:|---:|---:|---:|---:|

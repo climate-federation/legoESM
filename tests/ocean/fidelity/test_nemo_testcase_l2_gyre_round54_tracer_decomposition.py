@@ -56,6 +56,30 @@ def test_partitions_cover_vertical_roles_once():
     }
 
 
+def test_zdf_operand_substitution_is_single_variable_and_row_local():
+    module = _module()
+    live = {
+        "K": np.arange(8.0).reshape(2, 4),
+        "dz": np.arange(10.0).reshape(2, 5),
+        "e3w": np.arange(8.0).reshape(2, 4),
+        "wet": np.ones((2, 5)),
+        "content_T": np.arange(10.0).reshape(2, 5),
+        "content_S": np.arange(10.0, 20.0).reshape(2, 5),
+    }
+    oracle = {name: value + 100.0 for name, value in live.items()}
+    only_k = module._substitute_zdf_operands(live, oracle, ("K",))
+    assert np.array_equal(only_k["K"], oracle["K"])
+    for name in set(live) - {"K"}:
+        assert np.array_equal(only_k[name], live[name])
+    surface = module._substitute_zdf_operands(
+        live, oracle, content_rows="surface")
+    for name in ("content_T", "content_S"):
+        assert np.array_equal(surface[name][..., 0], oracle[name][..., 0])
+        assert np.array_equal(surface[name][..., 1:], live[name][..., 1:])
+    for name in ("K", "dz", "e3w", "wet"):
+        assert np.array_equal(surface[name], live[name])
+
+
 def test_peak_rows_excludes_larger_dry_residuals():
     module = _module()
     oracle = np.zeros((2, 2, 3))

@@ -84,6 +84,34 @@ def field_stats(candidate, oracle, mask, weights=None) -> dict:
     }
 
 
+def _substitute_zdf_operands(live: dict, oracle: dict, names=(), *,
+                             content_rows: str | None = None) -> dict:
+    """Return one explicit ZDF-boundary substitution without mutating inputs."""
+    valid = {"K", "dz", "e3w", "wet", "content_T", "content_S"}
+    requested = set(names)
+    require(requested <= valid,
+            f"unknown ZDF operand substitutions: {sorted(requested - valid)}")
+    require(content_rows in (None, "surface", "interior", "bottom"),
+            f"unknown content row selection: {content_rows}")
+    result = {name: np.array(value, copy=True) for name, value in live.items()}
+    for name in requested:
+        require(name in oracle and result[name].shape == np.asarray(oracle[name]).shape,
+                f"ZDF operand {name} is missing or shape-incompatible")
+        result[name] = np.array(oracle[name], copy=True)
+    if content_rows is not None:
+        nlev = result["content_T"].shape[-1]
+        levels = np.zeros(nlev, dtype=bool)
+        if content_rows == "surface":
+            levels[0] = True
+        elif content_rows == "bottom":
+            levels[-1] = True
+        else:
+            levels[1:-1] = True
+        for name in ("content_T", "content_S"):
+            result[name][..., levels] = np.asarray(oracle[name])[..., levels]
+    return result
+
+
 def _partitions(wet3: np.ndarray) -> tuple[dict, dict, dict]:
     """The preregistered level, vertical-role, and fixed-index region cuts."""
     wet = np.asarray(wet3, dtype=bool)
@@ -533,46 +561,118 @@ def zdf_score(*, entry_root: Path, stage_root: Path, record: Path,
             live["K"], oracle_operands["K"], oracle_stable),
     }
 
-    def run_dispatch_arm(*, k=None, all_operands=False):
-        """Private one-variable solve-boundary substitution/ablation."""
-        def substitute_dispatch(f1, f2, c1, c2, k_live, dz, e3w, dt, wet, **kw):
-            if all_operands:
-                return real_dispatch(
-                    f1, f2, jnp.asarray(nemo_rhs["T"]),
-                    jnp.asarray(nemo_rhs["S"]),
-                    jnp.asarray(oracle_operands["K"]),
-                    jnp.asarray(oracle_operands["dz"]),
-                    jnp.asarray(oracle_operands["e3w"]),
-                    float(rec["arrays"]["rDt"]),
-                    jnp.asarray(oracle_operands["wet"]) > 0.5, **kw)
-            return real_dispatch(
-                f1, f2, c1, c2, jnp.asarray(k, dtype=k_live.dtype),
-                dz, e3w, dt, wet, **kw)
+    def run_dispatch_arm(operands: dict, *, direct_solution: bool = False):
+        """Re-enter the shared production dispatcher at the captured seam.
 
-        vmix.implicit_vertical_diffusion_ocean_tracer_pair_dispatch = substitute_dispatch
-        try:
-            return gate.lego_fields(run_hooks(_NEMOWSRK3TestHooks()))
-        finally:
-            vmix.implicit_vertical_diffusion_ocean_tracer_pair_dispatch = real_dispatch
+        The ordinary model step above supplies and stamps every live operand.
+        Re-entering only this already-reached shared boundary avoids compiling
+        the complete model once per arm (which exhausted LLVM memory) while
+        retaining the production solver rather than a detached transcription.
+        """
+        if direct_solution:
+            return {name: np.asarray(nemo_solution[name])
+                    for name in ("T", "S")}
+
+        def dispatch():
+            return real_dispatch(
+                jnp.zeros_like(jnp.asarray(operands["content_T"])),
+                jnp.zeros_like(jnp.asarray(operands["content_S"])),
+                jnp.asarray(operands["content_T"], dtype=jnp.float64),
+                jnp.asarray(operands["content_S"], dtype=jnp.float64),
+                jnp.asarray(operands["K"], dtype=jnp.float64),
+                jnp.asarray(operands["dz"], dtype=jnp.float64),
+                jnp.asarray(operands["e3w"], dtype=jnp.float64),
+                float(rec["arrays"]["rDt"]),
+                jnp.asarray(operands["wet"]) > 0.5,
+                evaluation="nemo_literal", implicit_w=None)
+
+        out_t, out_s = jax.jit(dispatch)()
+        return {"T": np.asarray(out_t), "S": np.asarray(out_s)}
 
     baseline_state = run_hooks(_NEMOWSRK3TestHooks())
     baseline = gate.lego_fields(baseline_state)
-    substituted = gate.lego_fields(run_hooks(_NEMOWSRK3TestHooks(
-        pre_implicit_tracer_content_override=(
-            jnp.asarray(nemo_rhs["T"]), jnp.asarray(nemo_rhs["S"])))))
+    live_for_arms = {
+        "K": live["K"], "dz": live["dz"], "e3w": live["e3w"],
+        "wet": live["wet"], "content_T": live["content_T"],
+        "content_S": live["content_S"],
+    }
+    oracle_for_arms = {
+        "K": oracle_operands["K"], "dz": oracle_operands["dz"],
+        "e3w": oracle_operands["e3w"], "wet": oracle_operands["wet"],
+        "content_T": nemo_rhs["T"], "content_S": nemo_rhs["S"],
+    }
+    plant_detection = None
+    if plant == "operand-ulp":
+        planted = np.array(oracle_for_arms["content_T"], copy=True)
+        first_wet = tuple(np.argwhere(wet_cell)[0])
+        planted[first_wet] = np.nextafter(planted[first_wet], np.float64(np.inf))
+        plant_detection = field_stats(
+            planted, oracle_for_arms["content_T"], wet_cell)
+        require(plant_detection["cells_unequal"] == 1
+                and plant_detection["max_abs"] > 0.0,
+                "one-ulp ZDF operand plant was not detected")
+        oracle_for_arms["content_T"] = planted
+
+    oracle_evd_k = _substitute_zdf_operands(live_for_arms, oracle_for_arms)
+    oracle_evd_k["K"][oracle_evd] = oracle_for_arms["K"][oracle_evd]
+    oracle_stable_k = _substitute_zdf_operands(live_for_arms, oracle_for_arms)
+    oracle_stable_k["K"][oracle_stable] = oracle_for_arms["K"][oracle_stable]
+    zero_k = _substitute_zdf_operands(live_for_arms, oracle_for_arms)
+    zero_k["K"] = np.zeros_like(zero_k["K"])
+    arm_operands = {
+        "nemo_content_substitution": _substitute_zdf_operands(
+            live_for_arms, oracle_for_arms, ("content_T", "content_S")),
+        "nemo_content_surface_row_substitution": _substitute_zdf_operands(
+            live_for_arms, oracle_for_arms, content_rows="surface"),
+        "nemo_content_interior_rows_substitution": _substitute_zdf_operands(
+            live_for_arms, oracle_for_arms, content_rows="interior"),
+        "nemo_content_bottom_row_substitution": _substitute_zdf_operands(
+            live_for_arms, oracle_for_arms, content_rows="bottom"),
+        "nemo_effective_K_substitution": _substitute_zdf_operands(
+            live_for_arms, oracle_for_arms, ("K",)),
+        "nemo_evd_K_interfaces_substitution": oracle_evd_k,
+        "nemo_stable_K_interfaces_substitution": oracle_stable_k,
+        "nemo_e3t_Kaa_substitution": _substitute_zdf_operands(
+            live_for_arms, oracle_for_arms, ("dz",)),
+        "nemo_e3w_Kmm_substitution": _substitute_zdf_operands(
+            live_for_arms, oracle_for_arms, ("e3w",)),
+        "nemo_wet_substitution": _substitute_zdf_operands(
+            live_for_arms, oracle_for_arms, ("wet",)),
+        "nemo_content_plus_K": _substitute_zdf_operands(
+            live_for_arms, oracle_for_arms,
+            ("content_T", "content_S", "K")),
+        "nemo_content_K_plus_e3t_Kaa": _substitute_zdf_operands(
+            live_for_arms, oracle_for_arms,
+            ("content_T", "content_S", "K", "dz")),
+        "nemo_content_K_e3t_plus_e3w": _substitute_zdf_operands(
+            live_for_arms, oracle_for_arms,
+            ("content_T", "content_S", "K", "dz", "e3w")),
+        "zero_effective_K_ablation": zero_k,
+        "all_nemo_zdf_operands_substitution": _substitute_zdf_operands(
+            live_for_arms, oracle_for_arms, tuple(oracle_for_arms)),
+    }
+    final_fields = {name: run_dispatch_arm(operands)
+                    for name, operands in arm_operands.items()}
+    # If the all-operand arm remains above bar, this boundary discriminator
+    # says whether the owner is inside the solve or in the caller's mask/
+    # return statements immediately after it.
+    final_fields["nemo_recorded_solution_return"] = run_dispatch_arm(
+        live_for_arms, direct_solution=True)
     final_rows = {}
-    nemo_k = run_dispatch_arm(k=oracle_operands["K"])
-    zero_k = run_dispatch_arm(k=np.zeros_like(oracle_operands["K"]))
-    all_zdf = run_dispatch_arm(all_operands=True)
     for arm, fields in (("baseline_all_recorded", baseline),
-                        ("nemo_content_substitution", substituted),
-                        ("nemo_effective_K_substitution", nemo_k),
-                        ("zero_effective_K_ablation", zero_k),
-                        ("all_nemo_zdf_operands_substitution", all_zdf)):
+                        *final_fields.items()):
         final_rows[arm] = {
             name: field_stats(fields[name], entry3[name][..., :nlev], masks[name])
             for name in ("T", "S")
         }
+        for name in ("T", "S"):
+            scale = float(np.max(np.abs(entry3[name][..., :nlev][masks[name]])))
+            final_rows[arm][name]["normalized_max_abs"] = (
+                final_rows[arm][name]["max_abs"] / scale)
+            final_rows[arm][name]["bar"] = 1.0e-15
+            final_rows[arm][name]["status"] = (
+                "AT-BAR" if final_rows[arm][name]["normalized_max_abs"] <= 1.0e-15
+                else "DEBT")
     record_to_entry = {
         name: field_stats(nemo_solution[name], entry3[name][..., :nlev], masks[name])
         for name in ("T", "S")
@@ -605,6 +705,7 @@ def zdf_score(*, entry_root: Path, stage_root: Path, record: Path,
             baseline_state, records[1]["arrays"]),
         "model_path_live_matrix": live_matrix_rows,
         "final_rows": final_rows,
+        "operator_plant_detection": plant_detection,
         "plant": plant,
     }
 
@@ -620,7 +721,7 @@ def main(argv=None) -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant", choices=(
         "stamp", "truncation", "stage-swap", "tracer-bit", "input-noop",
-        "self-compare", "content"))
+        "self-compare", "content", "operand-ulp"))
     args = parser.parse_args(argv)
     try:
         if args.mode == "self-check":
@@ -637,8 +738,8 @@ def main(argv=None) -> int:
         else:
             require(args.expect_commit is not None,
                     "--expect-commit is required for a measurement")
-            require(args.plant in (None, "stamp", "content"),
-                    "zdf-score accepts only stamp or content plants")
+            require(args.plant in (None, "stamp", "content", "operand-ulp"),
+                    "zdf-score accepts only stamp, content, or operand-ulp plants")
             report = zdf_score(
                 entry_root=args.entry_root, stage_root=args.stage_root,
                 record=args.zdf_record, expect_commit=args.expect_commit,

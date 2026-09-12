@@ -450,6 +450,7 @@ def _model_substitution_walk(
         compute_mixing_lengths,
         tke_vertical_mixing,
     )
+    import legoesm.ocean.physics.vertical_mixing.tke as tke_module
     from legoesm.ocean.vertical import compute_ocean_jacobian
 
     require(jax.config.x64_enabled, "model substitution walk requires JAX fp64")
@@ -770,6 +771,104 @@ def _model_substitution_walk(
     def closure_with(ops):
         return closure_output_with(ops).K_H
 
+    # Capture the operands at the production literal solver itself. The
+    # record carries these arrays immediately before NEMO's recurrences.
+    solver_inputs: dict[str, list[np.ndarray]] = {}
+    rhs_inputs: dict[str, list[np.ndarray]] = {}
+    rhs_meta: dict[str, bool] = {}
+    real_literal_solve = tke_module._nemo_literal_tke_solve
+    real_backward_solve = tke_module._solve_tke_backward_euler
+
+    def solver_sink(name):
+        return lambda value: solver_inputs.setdefault(name, []).append(
+            np.asarray(value, dtype=np.float64))
+
+    def capture_literal_solve(a, b, c, rhs, *args, **kwargs):
+        for name, value in (("lower", a), ("diagonal", b),
+                            ("upper", c), ("rhs", rhs)):
+            jax.debug.callback(solver_sink(name), value)
+        return real_literal_solve(a, b, c, rhs, *args, **kwargs)
+
+    def capture_backward_solve(*args, **kwargs):
+        for name in ("e_old", "K_H_old", "P_s", "N2",
+                     "dissl_old", "w_active"):
+            require(kwargs.get(name) is not None,
+                    f"production TKE RHS capture lacks {name}")
+            jax.debug.callback(solver_sink("rhs_" + name), kwargs[name])
+        rhs_meta["literal_external_rhs_is_none"] = (
+            kwargs.get("literal_external_rhs") is None)
+        if kwargs.get("literal_external_rhs") is not None:
+            jax.debug.callback(solver_sink("rhs_literal_external_rhs"),
+                               kwargs["literal_external_rhs"])
+        rhs_meta["external_source_is_none"] = (
+            kwargs.get("external_source") is None)
+        if kwargs.get("external_source") is not None:
+            jax.debug.callback(solver_sink("rhs_external_source"),
+                               kwargs["external_source"])
+        return real_backward_solve(*args, **kwargs)
+
+    tke_module._nemo_literal_tke_solve = capture_literal_solve
+    tke_module._solve_tke_backward_euler = capture_backward_solve
+    try:
+        captured_output = jax.jit(
+            lambda: closure_output_with(oracle_operands).tke_new)()
+        captured_output.block_until_ready()
+    finally:
+        tke_module._nemo_literal_tke_solve = real_literal_solve
+        tke_module._solve_tke_backward_euler = real_backward_solve
+    solver_names = {"lower", "diagonal", "upper", "rhs"}
+    require(solver_names.issubset(solver_inputs),
+            f"production TKE solve capture incomplete: {sorted(solver_inputs)}")
+    require(all(len(values) == 1 for values in solver_inputs.values()),
+            "production TKE solver did not execute exactly once")
+    solver_mask = np.asarray(yx("wmask")[..., :jpkm1]) != 0.0
+    # Row zero is a virtual identity in production; the literal solver makes
+    # NEMO's surface seeds itself. The deepest upper coefficient is unread.
+    solver_mask[..., 0] = False
+    solver_oracle = {
+        "lower": yx("matrix_lower")[..., :jpkm1],
+        "diagonal": yx("matrix_diag")[..., :jpkm1],
+        "upper": yx("matrix_upper")[..., :jpkm1],
+        "rhs": yx("rhs_pre_sweep")[..., :jpkm1],
+    }
+    solver_masks = {name: solver_mask.copy() for name in solver_names}
+    solver_masks["upper"][..., -1] = False
+    production_solver_inputs = {
+        name: _operand_score(values[0], solver_oracle[name], solver_masks[name])
+        for name, values in solver_inputs.items() if name in solver_names
+    }
+    for name in ("e_old", "K_H_old", "P_s", "N2",
+                 "dissl_old", "w_active"):
+        key = "rhs_" + name
+        require(key in solver_inputs and len(solver_inputs[key]) == 1,
+                f"production TKE RHS capture incomplete for {name}")
+        rhs_inputs[name] = solver_inputs.pop(key)
+    if rhs_meta.get("literal_external_rhs_is_none"):
+        base_rhs = rhs_inputs["e_old"][0]
+        if not rhs_meta.get("external_source_is_none"):
+            key = "rhs_external_source"
+            require(key in solver_inputs and len(solver_inputs[key]) == 1,
+                    "production TKE external source capture is incomplete")
+            base_rhs = (base_rhs + np.float64(arrays["rn_Dt"])
+                        * solver_inputs[key][0])
+    else:
+        key = "rhs_literal_external_rhs"
+        require(key in solver_inputs and len(solver_inputs[key]) == 1,
+                "production TKE external RHS capture is incomplete")
+        base_rhs = solver_inputs[key][0]
+    source_rhs = (
+        base_rhs + np.float64(arrays["rn_Dt"]) * (
+            rhs_inputs["P_s"][0]
+            - rhs_inputs["K_H_old"][0] * rhs_inputs["N2"][0]
+            + ((np.float64(0.5) * np.float64(arrays["rn_ediss"]))
+               * rhs_inputs["dissl_old"][0] * base_rhs)
+        ) * rhs_inputs["w_active"][0]
+    )
+    association_mask = solver_mask[..., 1:].copy()
+    association_mask[..., -1] = False
+    production_solver_inputs["rhs_nemo_written_association"] = _operand_score(
+        source_rhs, solver_oracle["rhs"][..., 1:], association_mask)
+
     # First-use order in compiled zdftke: surface BC, Langmuir, inverse
     # Prandtl, matrix construction, RHS.  "masks" is reported as the requested
     # joint field while tmask/wmask remain independently scored above.
@@ -912,6 +1011,7 @@ def _model_substitution_walk(
         "cumulative_operand_substitutions": cumulative_rows,
         "production_single_operand_substitutions": production_single_rows,
         "production_all_nemo_operands": production_oracle,
+        "production_solver_inputs_all_nemo_operands": production_solver_inputs,
         "single_exact": single_exact,
         "cumulative_first_exact": (
             cumulative_exact[0] if cumulative_exact else None),
