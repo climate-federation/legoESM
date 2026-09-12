@@ -15,11 +15,7 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 WRAPLIB=/burg-archive/glab/users/pg2328/mpiwrapper/install/lib64/libmpiwrapper.so
 cd "$WT" || exit 1
 export PYTHONPATH="$WT/packages/core:$WT/packages/atmosphere:$WT/packages/coupler:$WT/packages/ice:$WT/packages/land:$WT/packages/ocean:$WT/packages/ml:$WT/packages/tools:$WT/src"
-export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONUNBUFFERED=1
-# The model path enables JAX's persistent compile cache under ~/.cache on
-# Lustre (/burg at 99% full, 2026-09-05): every rank then reads/writes the
-# same cache files, and the 54/216-rank rows stalled for an hour in compile
-# ("very slow compile" of trivial modules).  Explicit opt-out here.
+export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1 PYTHONUNBUFFERED=1 JAX_LOG_COMPILES=1
 export LEGOESM_JIT_CACHE_DIR=""
 export XLA_FLAGS="--xla_cpu_max_isa=AVX"
 # task/cgroup without affinity: every rank sees all 32 cores, so XLA:CPU's

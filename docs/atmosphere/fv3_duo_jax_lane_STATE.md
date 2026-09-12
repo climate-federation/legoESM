@@ -1643,3 +1643,67 @@ default was 0.0, i.e. bit-exactness, which no reassociating arm can meet.
   distributed arm.
 - k_split > 1 is accepted by the model and compared to the oracle by
   nothing.
+
+### The user's three calls (2026-09-11), and what they cost
+
+| choice | before | after |
+|---|---|---|
+| arm-to-arm ceiling | none (a merge deleted it) | 1, deliberately loose, with a warning band at the measured 1.4e-4 |
+| non-hydrostatic oracle ceiling | 1e-3 | 3e-6 |
+| narrow halo refresh | off, nothing selected it | ON by default |
+
+The ceiling is loose ON PURPOSE: no tolerance for arm-to-arm agreement has
+been established, a guessed tight number would fire on rounding, and a missing
+one certifies nothing. Every run now prints the number against the warning
+band, so tightening it later is one environment variable.
+
+The refresh default was re-gated after the change: C96, kt=3, 54 ranks,
+12/12 leaves BITWISE against `ladder_ref_c96_v2.npz`, worst rel 0.000e+00. So
+the ~14 ms/step it saves costs nothing in numerics.
+
+
+## The 12-hour multi-GPU "hang" was XLA:GPU autotuning (2026-09-12)
+
+Job 9694183 (C24, km=5, kt=2, pad=5, n_split=1, 24 GPUs) printed the IC
+round-trip line from all 24 ranks and then went silent for 12 h.  Earlier jobs
+9663001/9668306/9677460 died the same way at 1-4 h, and a SIGUSR1 stack dump
+taken then showed every rank inside `backend_compile_and_load` -- that evidence
+was deleted from the launcher header in a later edit and is restored here.
+
+Phase instrumentation (timestamped lower/compile begin+complete, per rank, one
+file per rank) localised it: every rank enters compile within 2 s of the others
+and none leaves.
+
+CONTROLLED RESULT, job 9746516 -- both arms interleaved inside ONE allocation
+(g[187,191-192]), twice each, because every earlier arm had landed on a
+different node set and the same three nodes had produced both a pass and a hang:
+
+| arm | rep 1 | rep 2 |
+|---|---|---|
+| stock | 0/6 ranks compiled, killed at 600 s | 0/6, killed at 600 s |
+| `--xla_gpu_autotune_level=0` | 6/6 in 83 s | 6/6 in 77 s |
+
+Supporting rows, each a separate allocation and therefore NOT attributable on
+their own: autotune levels 1, 2 and 3 and `--xla_gpu_shard_autotuning=true` all
+hung; the same program compiles in 11-13 s on CPU at 6 and 24 devices, and in
+78 s on one GPU with the collective-free variant.
+
+REFUTED (job 9746442, same-allocation, 4 runs): moving the Triton and XLA
+autotune caches to per-rank node-local memory.  It hung exactly like stock.
+Two earlier single-allocation runs had appeared to fix the hang; that was node
+luck.  `$HOME` is Lustre at 94 % full, which made the storage hypothesis
+plausible, but it is not the cause.
+
+FIX: `--xla_gpu_autotune_level=0` in the multi-rank GPU launcher only, appended
+so it never clobbers an inherited `XLA_FLAGS`, with the resolved flags echoed
+into the run log.  Single-GPU and CPU launchers keep tuned kernels, so every
+already-certified bitwise number stays comparable.  Pinned by
+`tests/grids/test_fv3_gpu_autotune_flag.py`, shown red when the flag is removed.
+
+OPEN: (a) GLM's point that levels 1-3 still execute candidate kernels, so
+"the autotuner's setup rather than its timing loop" is inferred, not measured --
+a measured kernel containing the collective_permute would fit every datum
+equally well; (b) the runtime cost of level 0, unmeasured; (c) whether any
+bitwise result moves, since level 0 changes algorithm selection -- a
+single-GPU run with and without the flag would settle it in minutes;
+(d) this is a mitigation, not an upstream fix.

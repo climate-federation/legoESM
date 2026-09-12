@@ -12,10 +12,58 @@ output means the step gathered).  Exit 0 bitwise, 1 differs, 2 refused.
 from __future__ import annotations
 
 import argparse
+import ctypes
+import os
 import subprocess
 import sys
+import time
 
 import numpy as np
+
+
+def _phase_event(rank, phase, event, started=None):
+    """Print one UTC, per-rank boundary around a compilation/dispatch phase."""
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    elapsed = ("" if started is None
+               else f" elapsed_s={time.perf_counter() - started:.6f}")
+    print(f"[m6] PHASE {stamp} rank={rank} {phase} {event}{elapsed}",
+          flush=True)
+
+
+def _runtime_banner(jax):
+    """Print runtime-resolved compile, device, library, and affinity state."""
+    import jaxlib
+
+    local_devices = jax.local_devices()
+    gpu = any(device.platform in ("cuda", "gpu") for device in local_devices)
+    nccl = "n/a"
+    if gpu:
+        try:
+            library = ctypes.CDLL("libnccl.so.2")
+            version = ctypes.c_int()
+            library.ncclGetVersion.argtypes = [ctypes.POINTER(ctypes.c_int)]
+            library.ncclGetVersion.restype = ctypes.c_int
+            rc = library.ncclGetVersion(ctypes.byref(version))
+            if rc != 0:
+                raise RuntimeError(f"ncclGetVersion returned {rc}")
+            value = version.value
+            nccl = f"{value // 10000}.{value // 100 % 100}.{value % 100}"
+        except (OSError, AttributeError, RuntimeError) as exc:
+            nccl = f"unavailable:{type(exc).__name__}"
+    affinity = (sorted(os.sched_getaffinity(0))
+                if hasattr(os, "sched_getaffinity") else "unavailable")
+    cache_dir = getattr(jax.config, "jax_compilation_cache_dir", None)
+    print(
+        f"[m6] RUNTIME rank={jax.process_index()} "
+        f"compile_cache={cache_dir or 'none'} "
+        f"XLA_FLAGS={os.environ.get('XLA_FLAGS', '')!r} "
+        f"jax={jax.__version__} jaxlib={jaxlib.__version__} nccl={nccl} "
+        f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'all')!r} "
+        f"JAX_LOCAL_DEVICE_IDS={os.environ.get('JAX_LOCAL_DEVICE_IDS', 'all')!r} "
+        f"visible_devices={[str(device) for device in local_devices]} "
+        f"cpu_affinity={affinity}",
+        flush=True,
+    )
 
 
 def leaves(bundle):
@@ -33,7 +81,6 @@ def _report_timing(args, times, jax, label):
     """Per-step wall time: median over the timed steps of the CROSS-RANK
     MAX (every rank times its own step; the slowest rank owns the step),
     printed with the rank count and node count -- a ladder row."""
-    import os
     import numpy as np
     timed = np.asarray(times[args.steps:])
     if jax.process_count() > 1:
@@ -123,9 +170,6 @@ def main(argv=None):
               "--flat-ref (6 processes build it here) or --ref-npz "
               "<saved>; without one there is nothing to gate against")
         raise SystemExit(2)
-    import faulthandler
-    import signal
-    faulthandler.register(signal.SIGUSR1, all_threads=True)   # stack dump on demand
     import jax
     import jax.numpy as jnp
     if args.distributed:
@@ -137,6 +181,7 @@ def main(argv=None):
     jax.config.update("jax_enable_x64", True)
     from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
     rank0 = jax.process_index() == 0
+    _runtime_banner(jax)
 
     def rss(stage):
         """peak resident set of THIS process so far (MB) -- the 216-rank
@@ -333,13 +378,37 @@ def main(argv=None):
     n_expected = n_ic
     to_save = {f"ic:{p}": np.asarray(a) for p, a in ic_flat.items()}
 
+    # Name the three boundaries that were indistinguishable in the old log.
+    # lower().compile() warms the same jit cache used by model.step, leaving
+    # the gate's step and scoring logic unchanged.
+    inner = next((cell.cell_contents
+                  for cell in (win_model._step_fn.__closure__ or ())
+                  if hasattr(cell.cell_contents, "lower")), None)
+    if inner is None:
+        raise RuntimeError("M6 step wrapper contains no jitted callable")
+    lower_args = (win["state"], win["press"], win["q"], args.dt,
+                  win["omga"], win["nh"])
+    phase_start = time.perf_counter()
+    _phase_event(jax.process_index(), "lower", "begin")
+    lowered = inner.lower(*lower_args)
+    _phase_event(jax.process_index(), "lower", "complete", phase_start)
+    phase_start = time.perf_counter()
+    _phase_event(jax.process_index(), "compile", "begin")
+    _compiled_step = lowered.compile()
+    _phase_event(jax.process_index(), "compile", "complete", phase_start)
+
     rc = 0
-    import time
     times = []
     for it in range(args.steps):
         t0 = time.perf_counter()
+        if it == 0:
+            _phase_event(jax.process_index(), "first_dispatch", "begin")
         win = win_model.step(win, args.dt)
+        if it == 0:
+            _phase_event(jax.process_index(), "first_dispatch", "submitted")
         jax.block_until_ready(win)
+        if it == 0:
+            _phase_event(jax.process_index(), "first_dispatch", "complete", t0)
         times.append(time.perf_counter() - t0)
         rss(f"window step {it + 1}")
         # GLM 2026-09-05: the per-rank sub-cycle schedule must be IDENTICAL
