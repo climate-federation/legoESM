@@ -7597,18 +7597,6 @@ class LatLonCGridOceanModel:
                 _pair_divs = (None, None)
             elif _tti == "rk3_ws":
                 _ws_stage_source_rates = _stage_source_rates
-                if _cfg_b.gm_redi is not None:
-                    # NEMO accumulates the signed lateral-diffusion rate into
-                    # Krhs before tra_zdf forms its thickness-weighted content
-                    # RHS (stprk3_stg.F90:950-965; trazdf.F90:547-565).
-                    _ws_stage_source_rates = (
-                        _stage_source_rates[0],
-                        _stage_source_rates[1],
-                        (
-                            _stage_source_rates[2][0] + dT_gm * active_3d,
-                            _stage_source_rates[2][1] + dS_gm * active_3d,
-                        ),
-                    )
                 _bbl_context = None
                 if (_cfg_b.bbl_adv_option == 2
                         and not self._nemo_ws_test_hooks.disable_bbl):

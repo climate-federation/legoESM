@@ -116,11 +116,11 @@ def test_pytree_exact_census_checks_every_leaf_and_fires_on_one_ulp():
     assert changed["max_abs"] > 0.0
 
 
-def test_landed_native_source_route_has_no_private_selector():
+def test_refuted_native_source_route_is_absent():
     module = _module()
     hooks = module.model_module._NEMOWSRK3TestHooks
     assert "route_gm_redi_stage3_source" not in hooks._fields
     source = inspect.getsource(
         module.model_module.LatLonCGridOceanModel._step_impl)
-    assert "_stage_source_rates[2][0] + dT_gm * active_3d" in source
-    assert "_stage_source_rates[2][1] + dS_gm * active_3d" in source
+    assert "_stage_source_rates[2][0] + dT_gm * active_3d" not in source
+    assert "_stage_source_rates[2][1] + dS_gm * active_3d" not in source
