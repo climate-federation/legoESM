@@ -23,8 +23,12 @@ on the GYRE card.
 ## What changes
 
 `nemo_testcase_recipe.py` (GYRE branch only): `tke_shear_production=
-"nemo_face_native"`, `tke_shear_avm_weighting="nemo_face"`,
-`tke_shear_metric_source="nemo_qco_live_face"`. No shared code changes.
+"nemo_face_native_now2"` (the face-native statement with both factors at
+the step-entry level — the model refuses `nemo_face_native` outside the
+leap-frog family because that variant reads a carried before-state; under
+RK3 NEMO itself passes Nbb for both), `tke_shear_avm_weighting="nemo_face"`,
+`tke_shear_metric_source="nemo_qco_live_face"`. No shared code changes; the
+card constructs (checked before this file was committed).
 
 ## Predictions (falsifiers stated)
 

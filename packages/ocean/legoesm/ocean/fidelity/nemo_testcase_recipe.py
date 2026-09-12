@@ -146,8 +146,11 @@ def _model_config(
             # Nrhs), so both levels are the step-entry state.  Round 61
             # measured the legacy statement 4.1e-8 off NEMO in every wet
             # interface while every other closure operand agreed to 3e-17.
-            # The same three selections are the DINO NEMO card's.
-            tke_shear_production="nemo_face_native",
+            # The DINO NEMO card selects nemo_face_native (its leap-frog
+            # integrator carries the before-level state); under RK3 both
+            # factors are the step-entry velocities, which is the now2 variant
+            # (the model refuses nemo_face_native without a before state).
+            tke_shear_production="nemo_face_native_now2",
             tke_shear_avm_weighting="nemo_face",
             tke_shear_metric_source="nemo_qco_live_face",
             # RK3 has no leapfrog eta-before carrier; the QCO live metric is
