@@ -121,3 +121,16 @@ def test_stamp_plant_exits_nonzero_before_report_emission(tmp_path):
         "--producer-commit", str(producer),
         "--plant", "stamp",
     ]) == 1
+
+
+def test_operand_score_is_bit_exact_and_masked():
+    expected = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+    actual = expected.copy()
+    actual[0] = np.nextafter(actual[0], np.inf)
+    actual[2] = 99.0
+    score = MODULE._operand_score(
+        actual, expected, np.array([True, True, False]))
+    assert score["compared_cells"] == 2
+    assert score["unequal"] == 1
+    assert score["max_abs"] == np.spacing(1.0)
+    assert not score["exact"]

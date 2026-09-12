@@ -158,6 +158,8 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90"),
     "GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfphy.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfphy.f90"),
+    "GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfsh2.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfsh2.f90"),
     "round33_lock_zdf_matrix/namelist_cfg": (
         Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
              "round33_lock_zdf_matrix/namelist_cfg")),
@@ -284,6 +286,13 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 61: split of the actual kt=2 carry and face-shear replay ---
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfphy.f90:317-337': [
+        ('IF( l_zdfsh2 ) THEN', 1),
+        'CASE( np_TKE )   ;   CALL zdf_tke( kt, Kbb, Kmm, sh2, avm_k, avt_k )',
+        21],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfsh2.f90:83-114': [
+        'DO jk = 2, jpkm1', ('END DO   ;   END DO', 3), 32],
     # --- round 60: accepted R59 record and source-ordered TKE walk ---
     'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:277-281': [
         ('DO ji = ntsi-( 0), ntei+( 0 )', 1), 'zd_up(ji,1) = 0._wp', 5],

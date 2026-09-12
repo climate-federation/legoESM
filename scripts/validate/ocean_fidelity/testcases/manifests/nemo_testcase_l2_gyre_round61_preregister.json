@@ -1,0 +1,65 @@
+{
+  "round": 61,
+  "status": "PREREGISTERED_UNMEASURED",
+  "base_commit": "4baf0d012bda99a109a30a5bb761773814c451bc",
+  "source_config": "GYRE_OMIP_L2_P3_SM_R59TKE",
+  "record": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round59/oracle_tke_operands/oracle_tke_operands_kt00000002.bin",
+  "question": "Which individual operand carried into the kt=2 TKE closure owns the first 744-cell non-bit row?",
+  "compiled_source_order": [
+    "sh2: zdfphy.f90:317-320; zdfsh2.f90:83-114",
+    "rn2/rn2b: stprk3.f90:159-168; zdftke.f90:353-357,394-412,430-433",
+    "entry en/avm/avt/dissl: zdftke.f90:277-380,394-483,691-701",
+    "taum: zdftke.f90:251-256,277-281,339-380",
+    "e3t_Kmm/e3w_Kmm and masks: zdftke.f90:353-380,416-433"
+  ],
+  "ranking": [
+    {
+      "rank": 1,
+      "operand": "sh2",
+      "prediction": "Sole-owner candidate. The instantiated card selects squared_centered/tpoint/tpoint_jacobian while compiled NEMO executes face-native now-times-before shear with face-averaged carried avm and live Kmm/Kbb face metrics. Substituting NEMO sh2 alone is predicted to take the 744 unequal K_H cells to zero."
+    },
+    {
+      "rank": 2,
+      "operand": "kt1 closure exit carry: en, avm, avt, dissl",
+      "prediction": "May differ because kt1 produces the fields that enter kt2 and the held round-60 downstream association changes were not landed. If sh2 is not sole owner, the first cumulative exact row is predicted within this group, ordered en, avm, avt, dissl by first compiled consumption."
+    },
+    {
+      "rank": 3,
+      "operand": "rn2/rn2b",
+      "prediction": "Expected exact or downstream-only because the certified trajectory has exact kt2 T/S and the model already selects the compiled step-entry Nbb construction."
+    },
+    {
+      "rank": 4,
+      "operand": "taum, e3t_Kmm, e3w_Kmm, tmask, wmask",
+      "prediction": "Expected exact: the card already carries NEMO's forcing, ladder, live geometry and wet masks."
+    }
+  ],
+  "primary_confirm": "NEMO sh2 substitution alone changes the model-path K_H score from 744/17400 unequal to 0/17400, and recomputing NEMO's compiled sh2 statement from NEMO velocities and carried avm/geometry is bit-exact.",
+  "primary_refute": "Any unequal K_H cell remains after substituting only NEMO sh2, or a different single operand reaches zero first.",
+  "entry_carry_confirm": "If the primary prediction is refuted, one kt1-exit field differs at kt2 entry and its single substitution reaches zero, or the cumulative source-order walk first reaches zero at that field.",
+  "entry_carry_refute": "All four kt1-exit fields are bit-exact, or none is the first cumulative exact boundary.",
+  "measurement_contract": {
+    "precision": "CPU fp64, JAX x64, libm transcendental policy",
+    "mask": "the 17400 wet W interfaces copied by zdfphy, NEMO levels 2..jpkm1",
+    "comparison": "exact fp64 uint64 equality plus max absolute difference",
+    "single_operand_rule": "change exactly one model-carried operand to its NEMO record value; all other operands remain model values",
+    "cumulative_rule": "substitute operands in compiled source/first-consumption order; report the first exact row",
+    "plants": [
+      "one wet model operand changed by one ULP must make the operand gate exit nonzero",
+      "one consumed closure result changed by one ULP must make the walk gate exit nonzero",
+      "producer commit mismatch must exit nonzero"
+    ]
+  },
+  "rule12_if_fix_eligible": {
+    "GYRE": "given-NEMO-input statement exact; kt1..10 relative ladder against decision35 after arm; days 1..30 against decision35 after arm",
+    "LOCK_EXCHANGE": "resolved constant mixing, unchanged",
+    "OVERFLOW": "resolved constant mixing, unchanged",
+    "DINO": "same shared statement on a separate branch; own gate required",
+    "ORCA2": "UNMEASURED-with-spec: compiled operand replay then trajectory gate"
+  },
+  "ASKED": [
+    "Split and rank every carried kt2 TKE operand, then walk the named owner to its producing statement.",
+    "Land only a Rule-12-eligible shared transcription fix; stop if the owner is the already-open kt2 velocity gap."
+  ],
+  "UNASKED": []
+}

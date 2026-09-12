@@ -313,6 +313,28 @@ def read_record(path: Path, *, plant: str | None = None) -> dict:
     return {"header": head, "arrays": arrays, "calibration": calibration}
 
 
+def _operand_score(actual: np.ndarray, expected: np.ndarray,
+                   mask: np.ndarray) -> dict:
+    """Bit census for one carried operand on its consumed slots."""
+    actual = np.asarray(actual)
+    expected = np.asarray(expected)
+    mask = np.asarray(mask, dtype=bool)
+    require(actual.shape == expected.shape == mask.shape,
+            f"operand shapes disagree: {actual.shape}, {expected.shape}, "
+            f"{mask.shape}")
+    finite = mask & np.isfinite(actual) & np.isfinite(expected)
+    require(np.array_equal(finite, mask),
+            "operand has NaN/Inf on a consumed slot")
+    unequal = _unequal_bits(actual, expected, mask)
+    return {
+        "compared_cells": int(np.count_nonzero(mask)),
+        "unequal": unequal,
+        "max_abs": (float(np.max(np.abs(actual[mask] - expected[mask])))
+                    if np.any(mask) else 0.0),
+        "exact": unequal == 0,
+    }
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--record", type=Path, required=True)
@@ -320,11 +342,14 @@ def main(argv=None) -> int:
     parser.add_argument("--producer-commit", type=Path, required=True)
     parser.add_argument("--output", type=Path)
     parser.add_argument(
+        "--stage-root", type=Path,
+        help="round-46 root carrying kt=2 Kbb/Kmm velocities and face metrics")
+    parser.add_argument(
         "--walk", action="store_true",
         help="run the preregistered source-ordered legoESM closure walk")
     parser.add_argument("--plant", choices=(
         "header", "truncation", "nan", "config", "copy", "shape",
-        "sweep", "prandtl", "stamp", "walk"))
+        "sweep", "prandtl", "stamp", "walk", "operand"))
     args = parser.parse_args(argv)
     producer = None
     try:
@@ -346,7 +371,12 @@ def main(argv=None) -> int:
             planted[i, j, k0 + 1] = np.nextafter(
                 planted[i, j, k0 + 1], np.float64(np.inf))
             rec["arrays"]["avt_closure"] = planted
-        walk = (_model_substitution_walk(rec["arrays"], rec["header"])
+        if args.plant == "operand":
+            require(args.walk, "operand plant requires --walk")
+        walk = (_model_substitution_walk(
+                    rec["arrays"], rec["header"],
+                    plant_operand=args.plant == "operand",
+                    stage_root=args.stage_root)
                 if args.walk else None)
         summary = {}
         for name, value in rec["arrays"].items():
@@ -388,7 +418,10 @@ def main(argv=None) -> int:
         return 1
 
 
-def _model_substitution_walk(arrays: dict, head: dict) -> dict:
+def _model_substitution_walk(
+    arrays: dict, head: dict, *, plant_operand: bool = False,
+    stage_root: Path | None = None,
+) -> dict:
     """Run the frozen source-ordered closure walk through production code.
 
     NEMO records arrays in (x,y,k); legoESM owns (y,x,k).  Rows after the
@@ -398,17 +431,31 @@ def _model_substitution_walk(arrays: dict, head: dict) -> dict:
     """
     import jax
     import jax.numpy as jnp
+    import importlib.util
 
+    from legoesm.core.precision import (
+        PrecisionPolicy,
+        get_policy,
+        set_policy,
+    )
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
     from legoesm.ocean.fidelity.nemo_testcase_recipe import build_gyre_zco_card
     from legoesm.ocean.physics.vertical_mixing.tke import (
         TKEEntryN2Bundle,
         _mxl0_surface_anchor,
+        _safe_stress_modulus,
         compute_K_from_tke,
         compute_mixing_lengths,
         tke_vertical_mixing,
     )
+    from legoesm.ocean.vertical import compute_ocean_jacobian
 
     require(jax.config.x64_enabled, "model substitution walk requires JAX fp64")
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+            "model substitution walk did not resolve fp64/libm")
     jpkm1 = head["jpkm1"]
 
     def yx(name: str) -> np.ndarray:
@@ -422,6 +469,36 @@ def _model_substitution_walk(arrays: dict, head: dict) -> dict:
     require(cfg.tke_mxl_raw_evaluation in ("factored", "nemo_literal"),
             f"unknown instantiated raw evaluation {cfg.tke_mxl_raw_evaluation!r}")
     const = card.recipe.model_config.constants
+
+    # Instantiate the same production model and forcing helper as the
+    # certified kt=1..10 ladder.  One ordinary cold-start step produces the
+    # exact legoESM state handed to kt=2; no record field is injected here.
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    forcing_path = Path(__file__).with_name(
+        "nemo_testcase_l2_gyre_phase3_gate.py")
+    spec = importlib.util.spec_from_file_location(
+        "round61_gyre_phase3_forcing", forcing_path)
+    require(spec is not None and spec.loader is not None,
+            f"cannot load certified forcing helper {forcing_path}")
+    forcing_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(forcing_module)
+    state1 = card.recipe.initial_state
+    freshwater1, surface1 = forcing_module._surface_forcings(card, state1, 1)
+    state2 = model.step(
+        state1, dt=card.dt_s, freshwater=freshwater1,
+        surface_forcing=surface1)
+    require(all(getattr(state2, name, None) is not None for name in (
+        "tke", "tke_avm", "tke_avt", "tke_avm_surface", "tke_dissl")),
+        "kt=1 exit did not populate the complete TKE carry")
+    _, surface2 = forcing_module._surface_forcings(card, state2, 2)
+    model_bundle = model._tke_step_entry_n2_bundle(state2)
+    model_sh2 = model._tke_step_entry_p_sh2(state2)
+    require(model_bundle is not None and model_sh2 is not None,
+            "kt=2 production operands were not materialized")
+    model_taum = (jnp.maximum(jnp.asarray(surface2.taum), 0.0)
+                  if surface2.taum is not None else
+                  _safe_stress_modulus(surface2.tau_x, surface2.tau_y))
 
     # The consumed zdfphy copy is jk=2..jpkm1: 29 W rows x 600 wet columns.
     wet = yx("wmask")[..., 1:jpkm1] != 0.0
@@ -442,6 +519,176 @@ def _model_substitution_walk(arrays: dict, head: dict) -> dict:
     avt_entry = jnp.asarray(yx("avt_entry")[..., 1:jpkm1])
     dissl_entry = jnp.asarray(yx("dissl_entry")[..., 1:jpkm1])
     avm_surface = jnp.asarray(yx("avm_entry")[..., 0])
+
+    model_wmask = (jnp.asarray(card.recipe.z_coord.is_active[..., 1:])
+                   & (state2.land_mask.data[..., None] > 0.5))
+    model_tmask = (jnp.asarray(card.recipe.z_coord.is_active)
+                   & (state2.land_mask.data[..., None] > 0.5))
+    model_avm_full = jnp.concatenate(
+        [state2.tke_avm_surface.data[..., None], state2.tke_avm.data], axis=-1)
+    oracle_operands = {
+        "sh2": sh2,
+        "rn2": rn2,
+        "rn2b": rn2b,
+        "entry_en": jnp.asarray(yx("en_entry")[..., 1:jpkm1]),
+        "entry_avm": jnp.asarray(yx("avm_entry")[..., :jpkm1]),
+        "entry_avt": avt_entry,
+        "entry_dissl": dissl_entry,
+        "taum": taum,
+        "e3t_Kmm": jnp.asarray(yx("e3t_Kmm")[..., :jpkm1]),
+        "e3w_Kmm": e3w,
+        "tmask": jnp.asarray(yx("tmask")[..., :jpkm1]),
+        "wmask": wmask,
+    }
+    model_operands = {
+        "sh2": jnp.asarray(model_sh2),
+        "rn2": jnp.asarray(model_bundle.rn2),
+        "rn2b": jnp.asarray(model_bundle.rn2b),
+        "entry_en": jnp.asarray(state2.tke.data),
+        "entry_avm": model_avm_full,
+        "entry_avt": jnp.asarray(state2.tke_avt.data),
+        "entry_dissl": jnp.asarray(state2.tke_dissl.data),
+        "taum": jnp.asarray(model_taum),
+        "e3t_Kmm": jnp.asarray(model_bundle.e3t_Kmm),
+        "e3w_Kmm": jnp.asarray(model_bundle.e3w_Kmm),
+        "tmask": model_tmask.astype(jnp.float64),
+        "wmask": model_wmask.astype(jnp.float64),
+    }
+    if plant_operand:
+        planted_e3t = np.asarray(model_operands["e3t_Kmm"]).copy()
+        first_wet = tuple(np.argwhere(
+            np.asarray(oracle_operands["tmask"]) != 0.0)[0])
+        planted_e3t[first_wet] = np.nextafter(
+            planted_e3t[first_wet], np.float64(np.inf))
+        model_operands["e3t_Kmm"] = jnp.asarray(planted_e3t)
+    # Numerical fields are scored on NEMO's consumed wet slots.  The masks
+    # themselves are scored over every physical cropped slot because a dry
+    # discrepancy changes coast averaging/control flow.
+    operand_masks = {}
+    for name in oracle_operands:
+        if name in ("tmask", "wmask"):
+            mask = np.ones(np.shape(oracle_operands[name]), dtype=bool)
+        elif name == "e3t_Kmm":
+            mask = np.asarray(oracle_operands["tmask"]) != 0.0
+        elif name == "entry_avm":
+            mask = np.asarray(yx("wmask")[..., :jpkm1]) != 0.0
+        elif name == "taum":
+            mask = np.asarray(oracle_operands["tmask"])[..., 0] != 0.0
+        else:
+            mask = np.asarray(oracle_operands["wmask"]) != 0.0
+        operand_masks[name] = mask
+    operand_rows = {
+        name: _operand_score(
+            np.asarray(model_operands[name]),
+            np.asarray(oracle_operands[name]), operand_masks[name])
+        for name in oracle_operands
+    }
+    operand_rows["masks"] = {
+        "compared_cells": (
+            operand_rows["tmask"]["compared_cells"]
+            + operand_rows["wmask"]["compared_cells"]),
+        "unequal": (operand_rows["tmask"]["unequal"]
+                    + operand_rows["wmask"]["unequal"]),
+        "max_abs": max(operand_rows["tmask"]["max_abs"],
+                       operand_rows["wmask"]["max_abs"]),
+        "exact": (operand_rows["tmask"]["exact"]
+                  and operand_rows["wmask"]["exact"]),
+    }
+    require(not plant_operand,
+            "planted kt=2 e3t_Kmm operand violation detected: "
+            f"{operand_rows['e3t_Kmm']['unequal']} unequal")
+
+    sh2_velocity_attribution = None
+    if stage_root is not None:
+        from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+            compute_face_masks_3d,
+        )
+        from legoesm.ocean.physics.vertical_mixing._shared import (
+            avm_weighted_shear_production,
+        )
+
+        reader_path = Path(__file__).with_name(
+            "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py")
+        reader_spec = importlib.util.spec_from_file_location(
+            "round61_round46_stage_reader", reader_path)
+        require(reader_spec is not None and reader_spec.loader is not None,
+                f"cannot load stamped stage reader {reader_path}")
+        reader_module = importlib.util.module_from_spec(reader_spec)
+        reader_spec.loader.exec_module(reader_module)
+        stage_path = stage_root / "oracle_momstage_kt00000002_s1.bin"
+        stage = reader_module.read_stage(stage_path)["arrays"]
+
+        def owned3(name):
+            return np.asarray(stage[name])[2:-2, 2:-2, :jpkm1]
+
+        def uface(name, *, metric=False):
+            value = owned3(name)
+            if metric:
+                value = np.asarray(stage[name])[
+                    2:-2, 2:-2, 1:jpkm1]
+            return jnp.asarray(np.concatenate([value[:, -1:, :], value], axis=1))
+
+        def vface(name, *, metric=False):
+            value = owned3(name)
+            if metric:
+                value = np.asarray(stage[name])[
+                    2:-2, 2:-2, 1:jpkm1]
+            pad = np.ones_like(value[:1]) if metric else np.zeros_like(value[:1])
+            return jnp.asarray(np.concatenate([pad, value], axis=0))
+
+        u_mask, v_mask = compute_face_masks_3d(card.recipe.z_coord.is_active)
+        # Compiled zdfsh2 expands the qco macro as
+        # e3w_1d(jk)*(1+r3u/r3v(time-level)); it does not consume e3u/e3v.
+        e3w_ref = np.asarray(stage["e3w_0"])[
+            2:-2, 2:-2, 1:jpkm1]
+        ref_u = np.concatenate([e3w_ref[:, -1:, :], e3w_ref], axis=1)
+        ref_v = np.concatenate([e3w_ref[:1, :, :], e3w_ref], axis=0)
+
+        def ur3(name):
+            value = np.asarray(stage[name])[2:-2, 2:-2]
+            return np.concatenate([value[:, -1:], value], axis=1)
+
+        def vr3(name):
+            value = np.asarray(stage[name])[2:-2, 2:-2]
+            return np.concatenate([np.zeros_like(value[:1]), value], axis=0)
+
+        face_metrics = tuple(jnp.asarray(value) for value in (
+            ref_u * (1.0 + ur3("r3u_Kmm"))[..., None],
+            ref_u * (1.0 + ur3("r3u_Kbb"))[..., None],
+            ref_v * (1.0 + vr3("r3v_Kmm"))[..., None],
+            ref_v * (1.0 + vr3("r3v_Kbb"))[..., None],
+        ))
+        dummy_dz = jnp.ones_like(sh2)
+
+        def face_sh2(un, vn, ub, vb):
+            return avm_weighted_shear_production(
+                un, vn, ub, vb, dummy_dz, u_mask, v_mask, avm_entry,
+                face_metrics=face_metrics)
+
+        nemo_velocity_sh2 = face_sh2(
+            uface("u_Kmm"), vface("v_Kmm"),
+            uface("u_Kbb"), vface("v_Kbb"))
+        model_now_velocity_sh2 = face_sh2(
+            state2.u.data, state2.v.data,
+            uface("u_Kbb"), vface("v_Kbb"))
+        model_same_level_sh2 = face_sh2(
+            state2.u.data, state2.v.data,
+            state2.u.data, state2.v.data)
+        sh2_velocity_attribution = {
+            "stage_record": str(stage_path),
+            "nemo_velocities": _operand_score(
+                np.asarray(nemo_velocity_sh2), np.asarray(sh2),
+                operand_masks["sh2"]),
+            "model_Kmm_with_nemo_Kbb": _operand_score(
+                np.asarray(model_now_velocity_sh2), np.asarray(sh2),
+                operand_masks["sh2"]),
+            "model_Kmm_used_for_both_levels": _operand_score(
+                np.asarray(model_same_level_sh2), np.asarray(sh2),
+                operand_masks["sh2"]),
+            "model_selected_statement": operand_rows["sh2"],
+            "model_has_Kbb_face_velocity_carry": (
+                state2.u_before is not None and state2.v_before is not None),
+        }
 
     anchor = _mxl0_surface_anchor(
         cfg, taum, float(const.rho_0), float(const.g), tmask_surface)
@@ -489,6 +736,117 @@ def _model_substitution_walk(arrays: dict, head: dict) -> dict:
         preclosure_dissl=dissl_entry, precomputed_p_sh2=sh2,
         precomputed_n2_bundle=bundle))().K_H
 
+    model_jacobian = compute_ocean_jacobian(
+        state2.eta.data, state2.H_bathy.data, card.recipe.z_coord)
+    model_gdepw = jnp.asarray(model_bundle.gdepw_Kmm)
+    model_e3w_surface = jnp.asarray(model_bundle.e3w_surface_Kmm)
+
+    def closure_output_with(ops):
+        """Call the shared closure with one explicit kt=2 operand bundle."""
+        avm_all = ops["entry_avm"]
+        op_bundle = TKEEntryN2Bundle(
+            rn2=ops["rn2"], rn2b=ops["rn2b"],
+            gdepw_Kmm=model_gdepw, e3w_Kmm=ops["e3w_Kmm"],
+            e3t_Kmm=ops["e3t_Kmm"], e3w_surface_Kmm=model_e3w_surface)
+        return tke_vertical_mixing(
+            state2.u.data[:, :-1, :], state2.v.data[:-1, :, :],
+            state2.T.data, state2.S.data,
+            jnp.zeros_like(state2.T.data), ops["e3w_Kmm"],
+            ops["entry_en"], None, None,
+            float(arrays["rn_Dt"]), cfg, rho_0=float(const.rho_0),
+            g=float(const.g), n_iterations=1,
+            taum_surface=ops["taum"], dz_ref=jnp.asarray(z.dz_ref),
+            jacobian=model_jacobian,
+            z_interface=jnp.asarray(z.z_half_ref[1:jpkm1]),
+            dz_surface=-jnp.asarray(z.z_full_ref[0]) * model_jacobian,
+            surface_tmask=ops["tmask"][..., 0],
+            w_active=ops["wmask"], preclosure_K_M=avm_all[..., 1:],
+            preclosure_K_H=ops["entry_avt"],
+            preclosure_K_M_surface=avm_all[..., 0],
+            preclosure_dissl=ops["entry_dissl"],
+            precomputed_p_sh2=ops["sh2"],
+            precomputed_n2_bundle=op_bundle)
+
+    def closure_with(ops):
+        return closure_output_with(ops).K_H
+
+    # First-use order in compiled zdftke: surface BC, Langmuir, inverse
+    # Prandtl, matrix construction, RHS.  "masks" is reported as the requested
+    # joint field while tmask/wmask remain independently scored above.
+    substitution_order = (
+        "taum", "rn2b", "e3w_Kmm", "sh2", "entry_avm",
+        "e3t_Kmm", "entry_dissl", "entry_en", "entry_avt", "rn2",
+        "masks",
+    )
+
+    def replaced(base, name):
+        out = dict(base)
+        if name == "masks":
+            out["tmask"] = oracle_operands["tmask"]
+            out["wmask"] = oracle_operands["wmask"]
+        else:
+            out[name] = oracle_operands[name]
+        return out
+
+    baseline = np.asarray(jax.jit(lambda: closure_with(model_operands))())
+
+    def closure_score(name, value):
+        value = np.asarray(value)
+        unequal = _unequal_bits(value, oracle_avt, wet)
+        return {
+            "name": name,
+            "unequal": unequal,
+            "wet_cells": int(np.count_nonzero(wet)),
+            "max_abs": float(np.max(np.abs(value[wet] - oracle_avt[wet]))),
+            "exact": unequal == 0,
+        }
+
+    single_rows = [closure_score("all_model_operands", baseline)]
+    for name in substitution_order:
+        value = jax.jit(lambda op=replaced(model_operands, name):
+                        closure_with(op))()
+        single_rows.append(closure_score(name, value))
+    cumulative_rows = []
+    cumulative_ops = dict(model_operands)
+    for name in substitution_order:
+        cumulative_ops = replaced(cumulative_ops, name)
+        value = jax.jit(lambda op=dict(cumulative_ops): closure_with(op))()
+        cumulative_rows.append(closure_score(name, value))
+
+    oracle_en = np.asarray(e_post)
+
+    def production_score(name, value):
+        value = np.asarray(value)
+        unequal = _unequal_bits(value, oracle_en, wet)
+        return {
+            "name": name,
+            "unequal": unequal,
+            "wet_cells": int(np.count_nonzero(wet)),
+            "max_abs": float(np.max(np.abs(value[wet] - oracle_en[wet]))),
+            "exact": unequal == 0,
+        }
+
+    production_single_rows = [production_score(
+        "all_model_operands",
+        jax.jit(lambda: closure_output_with(model_operands).tke_new)())]
+    for name in substitution_order:
+        value = jax.jit(
+            lambda op=replaced(model_operands, name):
+            closure_output_with(op).tke_new)()
+        production_single_rows.append(production_score(name, value))
+    production_oracle = production_score(
+        "all_nemo_operands",
+        jax.jit(lambda: closure_output_with(oracle_operands).tke_new)())
+    if sh2_velocity_attribution is not None:
+        velocity_only_ops = dict(oracle_operands)
+        velocity_only_ops["sh2"] = model_now_velocity_sh2
+        velocity_production = production_score(
+            "model_Kmm_with_nemo_Kbb_sh2_only",
+            jax.jit(lambda: closure_output_with(
+                velocity_only_ops).tke_new)())
+        sh2_velocity_attribution["production_row_velocity_only"] = (
+            velocity_production)
+
     # Cumulative rows. The early model row includes NEMO's recorded carried
     # production/buoyancy/dissipation operands. The next row substitutes the
     # recorded matrix/RHS/sweep/floor result, then source-order downstream
@@ -534,6 +892,8 @@ def _model_substitution_walk(arrays: dict, head: dict) -> dict:
     first_index = next(i for i, row in enumerate(rows) if row["exact"])
     require(all(row["exact"] for row in rows[first_index:]),
             "a downstream substitution lost exactness after the first exact row")
+    cumulative_exact = [row["name"] for row in cumulative_rows if row["exact"]]
+    single_exact = [row["name"] for row in single_rows[1:] if row["exact"]]
     return {
         "card": card.case,
         "instantiated_tke_config": {
@@ -546,6 +906,15 @@ def _model_substitution_walk(arrays: dict, head: dict) -> dict:
             "tke_solver_evaluation": cfg.tke_solver_evaluation,
         },
         "wet_copy_cells": int(np.count_nonzero(wet)),
+        "kt2_carried_operands": operand_rows,
+        "sh2_velocity_attribution": sh2_velocity_attribution,
+        "single_operand_substitutions": single_rows,
+        "cumulative_operand_substitutions": cumulative_rows,
+        "production_single_operand_substitutions": production_single_rows,
+        "production_all_nemo_operands": production_oracle,
+        "single_exact": single_exact,
+        "cumulative_first_exact": (
+            cumulative_exact[0] if cumulative_exact else None),
         "rows": rows,
         "first_exact": first_exact,
         "status": "PASS",
