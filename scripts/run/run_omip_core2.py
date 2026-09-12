@@ -5458,10 +5458,30 @@ def _gateway_cumulative_close(gw_csv) -> None:
 
 
 def _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc: bool = True):
-    """Global meridional ocean heat transport (NH peak / SH min) [PW] from the
-    LIVE state.  Reuses the tested compute_mht_from_state{,_mpas} (ρ0·cp·Σ v·θ·h
-    per latitude).  Pure NumPy at run-end; APPENDS to transports.txt; non-fatal.
-    NH peak obs ~1.8 PW; NEMO ref via scripts/validate/nemo_transports.py --grid-t."""
+    """Global meridional ocean heat transport [PW] from the LIVE state.
+
+    Reuses the tested compute_mht_from_state{,_mpas} (ρ0·cp·Σ v·θ·h per
+    latitude).  Pure NumPy at run-end; APPENDS to transports.txt; non-fatal.
+
+    READ THE NH PEAK WITH CARE.  It is an INSTANTANEOUS section, and the
+    "NH peak" is the maximum over all northern rows, which on this grid lands
+    at the EQUATOR: measured on the day-30 ORCA1 state, 18.74 PW at 1°N, where
+    +1010 Sv of northward and -1011 Sv of southward transport very nearly
+    cancel and the residual is multiplied by a ~4.5 K contrast between the two
+    limbs.  Away from that band the same curve is ordinary (SH min -1.54 PW).
+    A snapshot's tropical overturning is not the time-mean heat transport, so
+    comparing that peak to the observed ~1.8 PW is a category error -- the
+    observational value is a multi-year mean at a fixed latitude.
+
+    That is why mht_26n_PW is reported alongside: 26°N is the RAPID array
+    latitude, where an observational number actually exists (~1.2 PW annual
+    mean), and it is far from the equatorial band that dominates the peak.
+    Checked and NOT the cause of the large peak: the arithmetic (a probe
+    reproduced 18.735 vs the reported 18.7386 from the model's own stored
+    mass_flux_v), the v-face geometry (same reason), the degC reference
+    (measured sensitivity 1.44 PW), and grid-scale noise (adjacent-longitude
+    sign changes 24.5% at the peak row vs 15-22% on control rows -- not
+    distinguishable from the normal field)."""
     try:
         from legoesm.ocean.vertical import compute_layer_thickness
         h = np.asarray(compute_layer_thickness(
@@ -5479,12 +5499,27 @@ def _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc: bool = True
             return
         if not io_proc:
             return
-        print(f"[transports] MHT NH peak = {mh['nh_peak_PW']:.2f} PW @ "
-              f"{mh['nh_peak_lat']:.0f}N, SH min = {mh['sh_min_PW']:.2f} PW "
-              f"(NH obs ~1.8 PW; NEMO via nemo_transports.py --grid-t)")
+        # 26N: the RAPID array latitude, where an observational number exists
+        # and where the equatorial band that dominates the raw peak does not
+        # reach. The peak alone invited a comparison it cannot support.
+        _c = np.asarray(mh.get("mht_PW"), dtype=np.float64)
+        _lat = np.asarray(mh.get("lat_deg"), dtype=np.float64)
+        _m26 = float("nan")
+        if _c.size and _c.size == _lat.size:
+            _ok = np.isfinite(_c) & np.isfinite(_lat)
+            if np.any(_ok):
+                _i = int(np.argmin(np.where(_ok, np.abs(_lat - 26.0), np.inf)))
+                _m26 = float(_c[_i])
+        print(f"[transports] MHT at 26N = {_m26:.2f} PW (RAPID obs ~1.2 PW "
+              f"annual mean) | INSTANTANEOUS curve: max {mh['nh_peak_PW']:.2f} "
+              f"PW @ {mh['nh_peak_lat']:.0f}N, SH min {mh['sh_min_PW']:.2f} PW "
+              f"-- the max is NOT comparable to an observed mean when it lands "
+              f"in the equatorial band (see _mht_diag docstring)")
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         with open(Path(out_dir) / "transports.txt", "a") as fh:
-            fh.write(f"mht_nh_peak_PW {mh['nh_peak_PW']:.4f}\n"
+            fh.write(f"mht_26n_PW {_m26:.4f}\n"
+                     f"mht_nh_peak_PW {mh['nh_peak_PW']:.4f}\n"
+                     f"mht_nh_peak_lat {mh['nh_peak_lat']:.2f}\n"
                      f"mht_sh_min_PW {mh['sh_min_PW']:.4f}\n")
     except Exception as e:  # diagnostic must never crash the run
         print(f"[transports] MHT diag skipped: {type(e).__name__}: {e}")
