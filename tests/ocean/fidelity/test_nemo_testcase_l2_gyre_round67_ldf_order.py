@@ -116,11 +116,59 @@ def test_pytree_exact_census_checks_every_leaf_and_fires_on_one_ulp():
     assert changed["max_abs"] > 0.0
 
 
-def test_refuted_native_source_route_is_absent():
+def test_round70_pair_hooks_remain_private():
     module = _module()
     hooks = module.model_module._NEMOWSRK3TestHooks
-    assert "route_gm_redi_stage3_source" not in hooks._fields
+    assert "route_gm_redi_stage3_source" in hooks._fields
+    assert "stage3_advection_content_override" in hooks._fields
     source = inspect.getsource(
         module.model_module.LatLonCGridOceanModel._step_impl)
-    assert "_stage_source_rates[2][0] + dT_gm * active_3d" not in source
-    assert "_stage_source_rates[2][1] + dS_gm * active_3d" not in source
+    assert "if self._nemo_ws_test_hooks.route_gm_redi_stage3_source" in source
+    assert source.count("_stage_source_rates[2][0] + dT_gm * active_3d") == 1
+    assert source.count("_stage_source_rates[2][1] + dS_gm * active_3d") == 1
+
+
+def test_worsening_census_uses_two_row_scale_ulps():
+    module = _module()
+    oracle = np.array([1.0, 2.0], dtype=np.float64)
+    baseline = np.array(oracle, copy=True)
+    candidate = np.array(oracle, copy=True)
+    candidate[0] += 2.0 * np.spacing(np.float64(2.0))
+    row, mask = module.worsening_census(
+        baseline, candidate, oracle, np.ones(2, dtype=bool))
+    assert row["cells_worsened"] == 0
+    candidate[0] += np.spacing(np.float64(2.0))
+    row, mask = module.worsening_census(
+        baseline, candidate, oracle, np.ones(2, dtype=bool))
+    assert row["cells_worsened"] == 1
+    assert mask.tolist() == [True, False]
+
+
+def test_helper_applies_fct_override_before_source(monkeypatch):
+    module = _module()
+
+    def zero_flux_pair(a, b, *args, **kwargs):
+        zeros = np.zeros_like(np.asarray(a))
+        return ((module.jnp.asarray(zeros), module.jnp.asarray(zeros)),
+                (module.jnp.asarray(zeros), module.jnp.asarray(zeros)))
+
+    monkeypatch.setattr(
+        module.model_module, "compute_advection_flux_div_pair", zero_flux_pair)
+    tracer = module.jnp.ones((1, 1, 1), dtype=module.jnp.float64)
+    ones = module.jnp.ones_like(tracer)
+    override_a = module.jnp.full_like(tracer, 7.0)
+    override_b = module.jnp.full_like(tracer, 11.0)
+    source_a = module.jnp.full_like(tracer, 0.5)
+    source_b = module.jnp.full_like(tracer, -0.25)
+    result = module.model_module._nemo_ws_rk3_tracer_pair_step(
+        tracer, tracer, "centered", ones, ones,
+        module.jnp.ones((1, 1, 2)), ones, ones, ones, ones, object(), 2.0,
+        ones, stage_source_rates=((source_a, source_b),) * 3,
+        stage3_advection_content_override=(override_a, override_b),
+        return_final_content=True)
+    np.testing.assert_array_equal(np.asarray(result[4]), np.asarray(override_a))
+    np.testing.assert_array_equal(np.asarray(result[5]), np.asarray(override_b))
+    np.testing.assert_array_equal(np.asarray(result[2]),
+                                  np.asarray(override_a + 2.0 * source_a))
+    np.testing.assert_array_equal(np.asarray(result[3]),
+                                  np.asarray(override_b + 2.0 * source_b))

@@ -1290,6 +1290,14 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # replaces the actual operand for a one-variable oracle arm; no public
     # card can construct it.
     pre_implicit_tracer_content_override: object = None
+    # Two-variable FCT/LDF pair discriminator. Replace the helper's
+    # already-materialized stage-3 complete-advection content before its
+    # ordinary source association; no public card can construct this hook.
+    stage3_advection_content_override: object = None
+    # Route the already-computed GM/Redi rate into the same stage-3 source
+    # tuple. NEMO calls tra_ldf before tra_zdf
+    # (stprk3_stg.F90:950-965); this is private causal evidence only.
+    route_gm_redi_stage3_source: bool = False
     # One-variable ablation of the stage-3 ZDF thickness time level.  The
     # faithful WS program uses N+1/2/Kmm; this private hook restores the former
     # whole-step-entry operand for the causal discriminator only.
@@ -1692,6 +1700,7 @@ def _nemo_ws_rk3_tracer_pair_step(
     stage_qco_weights=None,
     stop_after_stage: int = 3,
     resume=None,
+    stage3_advection_content_override=None,
     return_final_content: bool = False,
     return_stage1_trace: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
@@ -1905,6 +1914,9 @@ def _nemo_ws_rk3_tracer_pair_step(
     fd2_a, fd2_b, _, _ = _flux_pair(a2, b2, dt, 2, h_k_new)
     advection_content_a = h_k_old * tr_a - dt * fd2_a
     advection_content_b = h_k_old * tr_b - dt * fd2_b
+    if stage3_advection_content_override is not None:
+        advection_content_a, advection_content_b = (
+            stage3_advection_content_override)
     content_a = (advection_content_a
                  + dt * h_one_half * stage_source_rates[2][0])
     content_b = (advection_content_b
@@ -2373,6 +2385,18 @@ class LatLonCGridOceanModel:
                 "momentum exposure: they share the returned u/v slots")
         self.config = self._validate_config(
             config or LatLonCGridOceanConfig.from_flat())
+        if (self._nemo_ws_test_hooks.route_gm_redi_stage3_source
+                or self._nemo_ws_test_hooks
+                .stage3_advection_content_override is not None):
+            if self.config.tracer_time_integrator != "rk3_ws":
+                raise ValueError(
+                    "stage-3 FCT/LDF pair hooks require "
+                    "tracer_time_integrator='rk3_ws'")
+        if (self._nemo_ws_test_hooks.route_gm_redi_stage3_source
+                and self.config.gm_redi is None):
+            raise ValueError(
+                "route_gm_redi_stage3_source requires an executing GM/Redi "
+                "operator")
         # Convert LatLonGrid -> LatLonCGridGeometry once at construction.
         # All downstream operators see the enriched geometry with per-cell
         # metric arrays.  For a plain LatLonGrid this is a no-op on field
@@ -7596,6 +7620,16 @@ class LatLonCGridOceanModel:
                 )
                 _pair_divs = (None, None)
             elif _tti == "rk3_ws":
+                _ws_stage_source_rates = _stage_source_rates
+                if self._nemo_ws_test_hooks.route_gm_redi_stage3_source:
+                    _ws_stage_source_rates = (
+                        _stage_source_rates[0],
+                        _stage_source_rates[1],
+                        (
+                            _stage_source_rates[2][0] + dT_gm * active_3d,
+                            _stage_source_rates[2][1] + dS_gm * active_3d,
+                        ),
+                    )
                 _bbl_context = None
                 if (_cfg_b.bbl_adv_option == 2
                         and not self._nemo_ws_test_hooks.disable_bbl):
@@ -7662,7 +7696,7 @@ class LatLonCGridOceanModel:
                         "nemo_rk3_two_step"
                         if self._nemo_ws_test_hooks.two_step_fct_predictor
                         else "one_step"),
-                    stage_source_rates=_stage_source_rates,
+                    stage_source_rates=_ws_stage_source_rates,
                     bbl_context=_bbl_context,
                     # One stage ladder: stages 1-2 were advanced by the
                     # momentum program on the same Kmm transports as the
@@ -7674,6 +7708,9 @@ class LatLonCGridOceanModel:
                             or self._nemo_ws_test_hooks
                             .disable_tracer_vertical_transport)
                         else (2, *_nemo_ws_stage_tracers)),
+                    stage3_advection_content_override=(
+                        self._nemo_ws_test_hooks
+                        .stage3_advection_content_override),
                     return_final_content=True,
                 ))
                 _nemo_ws_tracer_content_rhs = (

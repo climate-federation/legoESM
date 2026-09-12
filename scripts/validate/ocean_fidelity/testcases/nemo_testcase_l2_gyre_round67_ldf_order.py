@@ -68,6 +68,25 @@ def pytree_exact_census(got, want) -> dict:
     }
 
 
+def worsening_census(
+    baseline: np.ndarray,
+    candidate: np.ndarray,
+    oracle: np.ndarray,
+    wet: np.ndarray,
+) -> tuple[dict, np.ndarray]:
+    """Count candidate cells worsening by more than two row-scale fp64 ULPs."""
+    scale = np.float64(max(float(np.max(np.abs(oracle[wet]))), 1.0))
+    ulp = np.spacing(scale)
+    degradation = np.abs(candidate - oracle) - np.abs(baseline - oracle)
+    worsened = np.asarray(wet, dtype=bool) & (degradation > 2.0 * ulp)
+    return {
+        "row_scale_ulp": float(ulp),
+        "cells_worsened": int(np.count_nonzero(worsened)),
+        "max_worsening_ulps": float(
+            max(0.0, float(np.max(degradation[wet]))) / ulp),
+    }, worsened
+
+
 def cumulative_substitutions(
     *, live: dict, oracle: dict, oracle_content: np.ndarray,
     boundaries: dict[str, np.ndarray], source: np.ndarray,
@@ -137,6 +156,13 @@ def production_fct_content(
 
 
 def measure(args) -> dict:
+    require(not (args.round69_native and args.round70_pair),
+            "round-69 and round-70 modes are mutually exclusive")
+    require(not (args.plant_pair_null_fct and args.plant_pair_content_ulp),
+            "round-70 plants are mutually exclusive")
+    require(args.round70_pair or not (
+        args.plant_pair_null_fct or args.plant_pair_content_ulp),
+        "round-70 plants require --round70-pair")
     reciprocal_calls: list[dict] = []
     pair_sources: list[tuple[np.ndarray, ...]] = []
     qsr_calls: list[np.ndarray] = []
@@ -252,11 +278,16 @@ def measure(args) -> dict:
     production_prediction_rows = {}
     production_baseline_rebuild = {}
     production_vs_round67_routed = {}
+    oracle_advection_content = {}
     for name, capture in zip(TRACERS, reciprocal_calls, strict=True):
         boundaries = {
             boundary: round66.transposed(arrays[f"{boundary}_{name}"])
             for boundary in ("after_adv", "after_sbc", "after_qsr", "after_ldf")
         }
+        oracle_adv_operands = dict(capture["oracle"])
+        oracle_adv_operands["Krhs"] = boundaries["after_adv"]
+        oracle_advection_content[name] = round66.content_statement(
+            oracle_adv_operands)
         live = capture["live"]
         source = sources[name]
         routed_krhs = None
@@ -329,6 +360,197 @@ def measure(args) -> dict:
     baseline_state = jax.device_get(type(model)(
         model.grid, model.z_coord, model.config).step(
             seeded, dt, freshwater=freshwater, surface_forcing=surface))
+
+    pair_matrix = {}
+    if args.round70_pair:
+        original_fct_target = {
+            name: np.array(value, dtype=np.float64, copy=True)
+            for name, value in oracle_advection_content.items()
+        }
+        fct_target = {
+            name: np.array(value, dtype=np.float64, copy=True)
+            for name, value in original_fct_target.items()
+        }
+        if args.plant_pair_content_ulp:
+            first_wet = tuple(np.argwhere(reciprocal_calls[0]["wet"])[0])
+            fct_target["T"][first_wet] = np.nextafter(
+                fct_target["T"][first_wet], np.float64(np.inf))
+
+        def run_pair_arm(*, route_ldf: bool, use_fct: bool):
+            pair_start = len(pair_sources)
+            ldf_start = len(ldf_calls)
+            override = None
+            if use_fct:
+                override = (jnp.asarray(fct_target["T"]),
+                            jnp.asarray(fct_target["S"]))
+            model_module._nemo_ws_rk3_tracer_pair_step = pair_capture
+            model_module.gm_redi_tracer_tendency_latlon = ldf_capture
+            try:
+                arm_state = jax.device_get(type(model)(
+                    model.grid, model.z_coord, model.config,
+                    _nemo_ws_test_hooks=model_module._NEMOWSRK3TestHooks(
+                        route_gm_redi_stage3_source=route_ldf,
+                        stage3_advection_content_override=override),
+                ).step(seeded, dt, freshwater=freshwater,
+                       surface_forcing=surface))
+            finally:
+                model_module._nemo_ws_rk3_tracer_pair_step = real_pair
+                model_module.gm_redi_tracer_tendency_latlon = real_ldf
+            pair_run = pair_sources[pair_start:]
+            ldf_run = ldf_calls[ldf_start:]
+            require(pair_run and ldf_run,
+                    "round-70 arm did not execute production captures")
+            require(all(all(np.array_equal(value, reference)
+                            for value, reference in zip(
+                                duplicate, pair_run[0], strict=True))
+                        for duplicate in pair_run[1:]),
+                    "round-70 arm observed distinct content evaluations")
+            require(all(all(np.array_equal(value, reference)
+                            for value, reference in zip(
+                                duplicate, ldf_run[0], strict=True))
+                        for duplicate in ldf_run[1:]),
+                    "round-70 arm observed distinct LDF evaluations")
+            return arm_state, pair_run[0], ldf_run[0]
+
+        untouched = run_pair_arm(route_ldf=False, use_fct=False)
+        ldf_only = run_pair_arm(route_ldf=True, use_fct=False)
+        if args.plant_pair_null_fct:
+            fct_target = {
+                "T": np.array(untouched[1][6], copy=True),
+                "S": np.array(untouched[1][7], copy=True),
+            }
+        fct_only = run_pair_arm(route_ldf=False, use_fct=True)
+        paired = run_pair_arm(route_ldf=True, use_fct=True)
+        arms = {
+            "untouched": untouched,
+            "ldf_only": ldf_only,
+            "fct_only": fct_only,
+            "paired": paired,
+        }
+        entry3_pair = gate.read_entry(
+            args.entry_root / "oracle_step_entry_kt00000003.bin")
+        arm_rows = {}
+        criteria = {
+            "ordinary_state_exact": pytree_exact_census(
+                untouched[0], baseline_state)["cells_unequal"] == 0,
+            "ordinary_content_exact": {},
+            "same_step_ldf_exact": {},
+            "fct_target_exact": {},
+            "active_content_moves": {},
+            "active_state_moves": {},
+            "finite": {},
+            "paired_content_ceiling": {},
+            "paired_improves_ldf_eightfold": {},
+            "paired_kt3_improves_both": {},
+            "ldf_worsening_removed_99pct": {},
+        }
+        for name, capture in zip(TRACERS, reciprocal_calls, strict=True):
+            index = TRACERS.index(name)
+            wet = capture["wet"]
+            oracle_content = capture["oracle_content"]
+            oracle_entry = entry3_pair[name][..., :np.asarray(
+                gate.lego_fields(baseline_state)[name]).shape[-1]]
+            untouched_content = untouched[1][4 + index]
+            untouched_adv = untouched[1][6 + index]
+            untouched_field = np.asarray(
+                gate.lego_fields(untouched[0])[name], dtype=np.float64)
+            arm_rows[name] = {}
+            for arm_name, (arm_state, arm_pair, arm_ldf) in arms.items():
+                field = np.asarray(
+                    gate.lego_fields(arm_state)[name], dtype=np.float64)
+                content = arm_pair[4 + index]
+                arm_rows[name][arm_name] = {
+                    "content_vs_oracle": round54.field_stats(
+                        content, oracle_content, wet),
+                    "content_vs_untouched": round54.field_stats(
+                        content, untouched_content, wet),
+                    "kt3_vs_oracle": round54.field_stats(
+                        field, oracle_entry, wet),
+                    "kt3_vs_untouched": round54.field_stats(
+                        field, untouched_field, wet),
+                    "source_vs_expected": round54.field_stats(
+                        arm_pair[index],
+                        (untouched[1][index] + untouched[2][index]
+                         * wet.astype(np.float64)
+                         if arm_name in ("ldf_only", "paired")
+                         else untouched[1][index]), wet),
+                    "advection_content_vs_target": round54.field_stats(
+                        arm_pair[6 + index],
+                        (fct_target[name] if arm_name in ("fct_only", "paired")
+                         else untouched_adv), wet),
+                }
+                criteria["finite"][f"{name}_{arm_name}"] = bool(
+                    np.all(np.isfinite(field))
+                    and np.all(np.isfinite(content))
+                    and np.all(np.isfinite(arm_ldf[index])))
+            criteria["ordinary_content_exact"][name] = bool(
+                round54.field_stats(
+                    untouched_content, captured_content[name], wet)[
+                        "cells_unequal"] == 0)
+            criteria["same_step_ldf_exact"][name] = bool(all(
+                np.array_equal(arm[2][index], untouched[2][index])
+                for arm in arms.values()))
+            frozen_target_row = round54.field_stats(
+                fct_only[1][6 + index], original_fct_target[name], wet)
+            criteria["fct_target_exact"][name] = bool(
+                frozen_target_row["cells_unequal"] == 0)
+            for arm_name in ("ldf_only", "fct_only", "paired"):
+                criteria["active_content_moves"][f"{name}_{arm_name}"] = bool(
+                    arm_rows[name][arm_name]["content_vs_untouched"][
+                        "cells_unequal"] > 0)
+                criteria["active_state_moves"][f"{name}_{arm_name}"] = bool(
+                    arm_rows[name][arm_name]["kt3_vs_untouched"][
+                        "cells_unequal"] > 0)
+            paired_max = arm_rows[name]["paired"]["content_vs_oracle"][
+                "max_abs"]
+            ldf_max = arm_rows[name]["ldf_only"]["content_vs_oracle"][
+                "max_abs"]
+            ceiling = 6.0e-6 if name == "T" else 1.0e-6
+            criteria["paired_content_ceiling"][name] = bool(
+                paired_max <= ceiling)
+            criteria["paired_improves_ldf_eightfold"][name] = bool(
+                paired_max * 8.0 <= ldf_max)
+            paired_kt3 = arm_rows[name]["paired"]["kt3_vs_oracle"]["max_abs"]
+            criteria["paired_kt3_improves_both"][name] = bool(
+                paired_kt3
+                < arm_rows[name]["untouched"]["kt3_vs_oracle"]["max_abs"]
+                and paired_kt3
+                < arm_rows[name]["ldf_only"]["kt3_vs_oracle"]["max_abs"])
+            ldf_worsening, ldf_mask = worsening_census(
+                untouched_field,
+                np.asarray(gate.lego_fields(ldf_only[0])[name]),
+                oracle_entry, wet)
+            paired_worsening, paired_mask = worsening_census(
+                untouched_field,
+                np.asarray(gate.lego_fields(paired[0])[name]),
+                oracle_entry, wet)
+            retained = int(np.count_nonzero(ldf_mask & paired_mask))
+            denominator = ldf_worsening["cells_worsened"]
+            removed_fraction = (
+                1.0 if denominator == 0 else 1.0 - retained / denominator)
+            criteria["ldf_worsening_removed_99pct"][name] = bool(
+                removed_fraction >= 0.99)
+            arm_rows[name]["worsening"] = {
+                "ldf_only": ldf_worsening,
+                "paired": paired_worsening,
+                "ldf_cells_still_worsened_by_pair": retained,
+                "ldf_worsening_removed_fraction": removed_fraction,
+                "frozen_target": frozen_target_row,
+            }
+
+        def all_true(value) -> bool:
+            if isinstance(value, dict):
+                return all(all_true(item) for item in value.values())
+            return bool(value)
+
+        pair_matrix = {
+            "status": (
+                "CONFIRMED" if all_true(criteria) else "REFUTED"),
+            "plant_null_fct": bool(args.plant_pair_null_fct),
+            "plant_content_ulp": bool(args.plant_pair_content_ulp),
+            "rows": arm_rows,
+            "criteria": criteria,
+        }
 
     if args.round69_native:
         require(args.expect_model_order == "after",
@@ -568,12 +790,16 @@ def measure(args) -> dict:
             "CONFIRMED"
             if all(all_true(value) for value in native_criteria.values())
             else "REFUTED")
+    if args.round70_pair:
+        status = pair_matrix["status"]
 
     return {
         "format": (
+            "nemo-testcase-l2-gyre-round70-fct-ldf-pair-v1"
+            if args.round70_pair else
             "nemo-testcase-l2-gyre-round69-native-source-v1"
-            if args.round69_native
-            else "nemo-testcase-l2-gyre-round68-production-fct-v1"),
+            if args.round69_native else
+            "nemo-testcase-l2-gyre-round68-production-fct-v1"),
         "status": status,
         "worktree": base["worktree"],
         "record_producer": base["record_producer"],
@@ -599,6 +825,7 @@ def measure(args) -> dict:
             "rows": native_source_rows,
             "criteria": native_criteria,
         },
+        "round70_pair_matrix": pair_matrix,
         "criteria": {
             "content_within_floor_plus_association": content_criterion,
             "kt3_exact_pre_edit_prediction": prediction_match,
@@ -622,6 +849,9 @@ def main(argv=None) -> int:
     parser.add_argument("--round69-native", action="store_true")
     parser.add_argument("--plant-native-null", action="store_true")
     parser.add_argument("--plant-native-content-ulp", action="store_true")
+    parser.add_argument("--round70-pair", action="store_true")
+    parser.add_argument("--plant-pair-null-fct", action="store_true")
+    parser.add_argument("--plant-pair-content-ulp", action="store_true")
     parser.add_argument(
         "--prediction-report", type=Path,
         default=ROOT / "round67/round67_ldf_order_before.json")
@@ -651,7 +881,13 @@ def main(argv=None) -> int:
     except Exception as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
-    if args.round69_native:
+    if args.round70_pair:
+        row = report["round70_pair_matrix"]["rows"]["T"]
+        print(
+            f"ROUND70 FCT LDF PAIR {report['status']}: "
+            f"ldf_T={row['ldf_only']['content_vs_oracle']['max_abs']:.12e} "
+            f"pair_T={row['paired']['content_vs_oracle']['max_abs']:.12e}")
+    elif args.round69_native:
         row = report["native_source_arm"]["rows"]["T"]
         print(
             f"ROUND69 NATIVE SOURCE {report['status']}: "
