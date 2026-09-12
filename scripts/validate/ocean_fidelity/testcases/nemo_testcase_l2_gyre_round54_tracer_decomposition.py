@@ -228,6 +228,8 @@ def r63_calibrate(*, krhs_record: Path, tke_record: Path,
                   resolved_output: Path,
                   expect_itend: int = 2,
                   plant: str | None = None) -> dict:
+    from legoesm.ocean.fidelity.provenance import worktree_stamp
+
     producer = producer_commit.read_text().strip().lower()
     expected = expect_commit.lower()
     if plant == "stamp":
@@ -246,6 +248,7 @@ def r63_calibrate(*, krhs_record: Path, tke_record: Path,
     tke = _read_r63_stream(tke_record, kind="tke", plant=tke_plant)
     return {
         "format": "gyre-round63-krhs-split-v1",
+        "worktree": worktree_stamp(),
         "producer_commit": producer,
         "records": {"krhs": str(krhs_record), "tke": str(tke_record)},
         "stamps": stamps,

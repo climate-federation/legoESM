@@ -333,6 +333,31 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 67: compiled tracer order and the held legoESM transcription ---
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:917-965': [
+        ('CASE ( 3 )        !==  Stage 3', 2),
+        'CALL tra_zdf( kstp, Kbb, Kmm, Krhs, ts    , Kaa  )', 49],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90:416-443': [
+        'IF( cdtype == \'TRA\' .AND. jn == jp_tem ) THEN',
+        'zwt(ji,jk) = avs(ji,jj,jk) + ah_wslp2(ji,jj,jk)', 28],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90:463-479': [
+        '! Diagonal, lower (i), upper (s)',
+        ('END DO   ;   END DO', 10), 17],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90:547-565': [
+        ('DO ji = ntsi-( 0), ntei+( 0 )', 2),
+        'pt(ji,jj,jk,jn,Kaa) = zrhs - zwi(ji,jk)', 19],
+    'ocean_model_latlon_cgrid.py:8038-8150': [
+        'T=state_new.T.replace(data=_adv_content_T)',
+        ('z_coord=z_coord, config=config, iwm_fields=iwm_fields)', 2), 113],
+    'ocean_model_latlon_cgrid.py:9993-9999': [
+        'K_v_cell = K_v_cell.astype(state.T.data.dtype)',
+        'K_v_cell = K_v_cell + K33_iso.astype(state.T.data.dtype)', 7],
+    'ocean_model_latlon_cgrid.py:10417-10438': [
+        ('if do_tracers:', 2),
+        'implicit_w=nemo_aimp_tracer_w))', 22],
+    'nemo_testcase_recipe.py:286-370': [
+        'return LatLonCGridOceanConfig.from_flat(',
+        'gm_redi=None,', 85],
     # --- round 66: admitted content operands and Krhs/LDF walk ---
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:827-950': [
         ('DO jn = 1, jpts', 1),
