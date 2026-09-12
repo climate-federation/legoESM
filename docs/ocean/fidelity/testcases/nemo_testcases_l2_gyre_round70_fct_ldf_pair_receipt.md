@@ -106,9 +106,18 @@ not approval. The full log is `codex_round70_review.log`, SHA-256
 No production diff is being landed, so this blocked review cannot silently
 approve one.
 
-The seven focused round-70/helper tests pass. Python compilation and
-`git diff --check` pass. The citation gate and its required shifted-citation
-plant are recorded below after the receipt-bearing clean commit.
+The seven focused round-70/helper tests pass (`focused_tests.xml`, SHA-256
+`3d5be6ce04ec3e9297cc5e6545afae99cf767740456e39670724f62f5d5168e0`).
+Python compilation and `git diff --check` pass.
+
+The citation gate is stamped to the clean receipt-bearing commit
+`77d7f1e2a333e6526ce24c23c10b0d4fb428f6c2`. It checks all seven cited
+compiled-source ranges, audits the full map with no stale entry, and passes
+(`round70_citation_gate.json`, SHA-256
+`43a126a4b70462ca0bd3cad716e534f9feab3597ecd394c41cf9eb023835182c`).
+Shifting the complete FCT writer citation by two lines produces
+SYMBOL-NOT-AT-LINE and exits 1 (`round70_citation_plant.json`, SHA-256
+`ccbf428cb61af1528faa5db03a3b458382f5c30d8c2d33035de9c9ab857cf59b`).
 
 ## ASKED / UNASKED and OPEN
 
