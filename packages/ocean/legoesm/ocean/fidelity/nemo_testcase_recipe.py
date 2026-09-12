@@ -137,9 +137,21 @@ def _model_config(
             tke_mxl_raw_evaluation="factored",
             tke_langmuir_evaluation="vectorized",
             tke_shear_evaluation_stage="step_entry",
+            # Decision 36 (user, 2026-09-12): NEMO's shear production
+            # statement, not legoESM's legacy centred one.  zdfsh2.f90:83-114
+            # (R59TKE ppsrc) forms sh2 at the uw/vw faces from the product of
+            # the Kmm and Kbb face velocity differences, the viscosity SUMMED
+            # on the two faces, and the live stretched face metric
+            # e3w_1d*(1+r3u); stprk3.f90:168 calls zdf_phy(kstp, Nbb, Nbb,
+            # Nrhs), so both levels are the step-entry state.  Round 61
+            # measured the legacy statement 4.1e-8 off NEMO in every wet
+            # interface while every other closure operand agreed to 3e-17.
+            # The same three selections are the DINO NEMO card's.
+            tke_shear_production="nemo_face_native",
+            tke_shear_avm_weighting="nemo_face",
+            tke_shear_metric_source="nemo_qco_live_face",
             # RK3 has no leapfrog eta-before carrier; the QCO live metric is
             # reconstructed at the current stage from the same raw ladder.
-            tke_shear_metric_source="tpoint_jacobian",
             tke_n2_evaluation_stage="step_entry",
             # stprk3.F90:154-181 evaluates the closure N2 at Nbb before any
             # stage.  On RK3 the canonical nemo_before operand is the same
