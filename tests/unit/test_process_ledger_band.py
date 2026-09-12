@@ -163,3 +163,27 @@ def test_the_driver_reads_the_sigma_coordinate_it_actually_has():
     assert "self.sigma = create_sigma_coordinate(" in src
     assert "self.sigma_coord.sigma_half" not in src
     assert "sigma_band_weight(\n                self.sigma.sigma_half" in src
+
+
+def test_the_dycore_actually_receives_the_band_from_a_config():
+    """The field existing on the dycore config is not enough — the factory must
+    SET it. Measured once when it did not: dynamics read 1.1504 identically in
+    a full-column, a free-troposphere and a boundary-layer run, so the table did
+    not partition and no physics could be read off it."""
+    from legoesm.driver.component_factory import _ledger_level_weight
+    from legoesm.grids.vertical import create_sigma_coordinate
+
+    class _Out:
+        budget_ledger_sigma_band = None
+
+    class _Cfg:
+        output = _Out()
+
+    sigma = create_sigma_coordinate(NLEV)
+    assert _ledger_level_weight(_Cfg(), sigma) is None
+
+    _Out.budget_ledger_sigma_band = (0.3, 0.7)
+    w = np.asarray(_ledger_level_weight(_Cfg(), sigma))
+    assert w.shape == (NLEV,)
+    assert w.sum() > 0.0 and w.sum() < NLEV      # a real band, not all-or-nothing
+    _Out.budget_ledger_sigma_band = None
