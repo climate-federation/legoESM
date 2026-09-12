@@ -99,6 +99,19 @@ from compare_omip_nemo import (  # noqa: E402
 # the two regions this campaign keeps failing in.
 _ARCTIC_LAT_N = 60.0
 
+# Named boxes the campaign directive scores by name.  The latitude bands cannot
+# see them: "tropics" spans all longitudes, so an equatorial Pacific cold-tongue
+# error is averaged against the Indian and Atlantic basins.  Longitudes are on
+# the target grid's 0..360 convention; a box whose west edge exceeds its east
+# edge wraps the dateline.  Same box definitions as BOX_REGIONS in
+# compare_tendencies_nemo.py, converted to 0..360.
+_NAMED_BOXES = (
+    ("nino3", -5.0, 5.0, 210.0, 270.0),
+    ("eq_pacific", -2.0, 2.0, 180.0, 280.0),
+    ("southern_ocean", -70.0, -45.0, 0.0, 360.0),
+    ("off_north_america", 30.0, 45.0, 280.0, 310.0),
+)
+
 # A zonal-mean row is drawn only where the three sources jointly resolve at
 # least this FRACTION of the cells the common ocean mask offers in that row.
 # A bare cell count is not comparable across resolutions or latitudes (10 cells
@@ -469,6 +482,16 @@ def main() -> int:
            "near_land": coastal,
            "near_land_arctic": coastal & arctic,
            "near_land_nonarctic": coastal & ~arctic}
+    lon2d = np.ones((tgt_lat.size, 1)) * tgt_lon[None, :]
+    for nm, la, lb, lo, hi in _NAMED_BOXES:
+        inlon = ((lon2d >= lo) & (lon2d <= hi) if lo <= hi
+                 else (lon2d >= lo) | (lon2d <= hi))
+        box = (lat2d >= la) & (lat2d <= lb) & inlon & ocean
+        if not box.any():
+            raise SystemExit(
+                f"FATAL: named box {nm!r} selects no ocean cell; its bounds "
+                "and the target grid's longitude convention disagree.")
+        sub[nm] = box
     print(f"[common] {n_common} cells on all three; "
           + ", ".join(f"{k} {int(v.sum())}" for k, v in sub.items()))
 
