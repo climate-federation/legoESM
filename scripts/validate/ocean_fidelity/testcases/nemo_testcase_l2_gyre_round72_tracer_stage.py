@@ -305,7 +305,7 @@ def measure(args) -> dict:
         row["cells_unequal"] == 0 for row in live_rows["1"].values())
     predicted_boundary = first_non_bit in ("stage2.zFu", "stage2.zFv")
     causal = {"executed": False}
-    if predicted_boundary:
+    if predicted_boundary or args.plant_transport_null:
         target = (
             jnp.asarray(to_lego(records[2]["fields"]["zFu"], nlev)),
             jnp.asarray(to_lego(records[2]["fields"]["zFv"], nlev)),
