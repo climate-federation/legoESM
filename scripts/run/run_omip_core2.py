@@ -3856,6 +3856,65 @@ _CHL_SCRIP_WEIGHTS = (
     "orca1_inputs/data_repository/input_fields/weights_reg05_bilinear.nc")
 
 
+_GHFLUX_NC = (
+    "/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/"
+    "orca1_inputs/data_repository/input_fields/geothermal_heat_flux.nc")
+_GHFLUX_SCRIP_WEIGHTS = (
+    "/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/"
+    "orca1_inputs/data_repository/input_fields/weights_ghflux_bilinear.nc")
+# The file stores mW/m^2 (measured: gh_flux(1,180,360), attrs units
+# "mW m^{-2}", min 12.45 max 2287 mean 79.1). The model wants W/m^2.
+_MW_PER_W = 1.0e-3
+
+
+def load_nemo_geothermal_flux(grid_type, out_shape):
+    """NEMO's geothermal seafloor heat flux [W/m^2] on the model grid.
+
+    NEMO ORCA1 runs ``ln_trabbc=.true., nn_geoflx=2``, which reads this map
+    through its OWN bilinear weights rather than applying a single number. The
+    field spans 12.45 to 2287 mW/m^2 -- a 180-fold contrast concentrated on
+    the ridges -- where a constant necessarily has none of that structure.
+
+    Static: NEMO gives it freq -12 with ln_tint=.false., so it is read once,
+    not interpolated in time.
+    """
+    import xarray as xr
+    with xr.open_dataset(_GHFLUX_NC, decode_times=False) as ds:
+        if "gh_flux" not in ds:
+            raise KeyError(f"{_GHFLUX_NC}: no gh_flux variable")
+        src = np.asarray(ds["gh_flux"].values, dtype=np.float64).squeeze()
+    if src.ndim != 2:
+        raise ValueError(
+            f"{_GHFLUX_NC}: gh_flux squeezed to {src.shape}, expected 2-D")
+    if grid_type != "tripole":
+        raise ValueError(
+            "--geothermal-map reads ORCA1's own SCRIP weights, which encode "
+            f"the eORCA1 destination grid; grid_type={grid_type!r} cannot use "
+            "them. Use --geothermal-flux-wm2 for a constant instead.")
+    from legoesm.ocean.coupler.omip2_applicator import (
+        apply_scrip_weights, load_scrip_weights)
+    src0, wgt, nw = load_scrip_weights(_GHFLUX_SCRIP_WEIGHTS)
+    out = _scrip_to_full_tripole(
+        apply_scrip_weights(np.nan_to_num(src, nan=0.0), src0, wgt, nw,
+                            src.shape),
+        *out_shape) * _MW_PER_W
+    if out.shape != tuple(out_shape):
+        raise ValueError(
+            f"geothermal map came out {out.shape}, expected {tuple(out_shape)}")
+    # Warming-only, like the scalar path: a negative seafloor flux would cool
+    # the abyss, and apply_geothermal_step only range-checks SCALARS.
+    if not np.all(np.isfinite(out)) or float(out.min()) < 0.0:
+        raise ValueError(
+            f"geothermal map has non-finite or negative cells (min "
+            f"{float(np.nanmin(out)):.4g} W/m^2) -- the weights or the source "
+            "units are wrong")
+    print(f"[setup] geothermal: NEMO's VARIABLE map via the oracle's own "
+          f"bilinear weights ({nw} triples), "
+          f"{float(out.min()):.4f}-{float(out.max()):.4f} W/m2, mean "
+          f"{float(out.mean()):.4f} (constant path would use one value)")
+    return out
+
+
 def _scrip_to_full_tripole(interior, ny, nx):
     """Thin alias: the real implementation lives in the coupler applicator.
 
@@ -7158,6 +7217,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "Grid-agnostic. Tiny + abyssal -- structural NEMO "
                         "faithfulness, NOT a surface-SST lever on spin-up "
                         "timescales. Default off.")
+    p.add_argument("--geothermal-map", action="store_true",
+                   help="Use NEMO's VARIABLE geothermal map (nn_geoflx=2) "
+                        "instead of a single constant: geothermal_heat_flux.nc "
+                        "read through ORCA1's own bilinear weights. The field "
+                        "spans 12.45-2287 mW/m2, a 180-fold contrast at the "
+                        "ridges that no constant can carry. Tripole only "
+                        "(the weights encode one destination grid), and "
+                        "mutually exclusive with --geothermal-flux-wm2.")
     p.add_argument("--geothermal-flux-wm2", type=float, default=None,
                    help="Constant seafloor geothermal heat flux [W/m^2] for "
                         "--geothermal. Default = GeothermalConfig default "
@@ -8565,6 +8632,22 @@ def main() -> int:
     # Monthly chlorophyll for the RGB SW-penetration scheme (--sw-rgb-chl).  Loaded
     # once; indexed per step by calendar month, then attached to the surface
     # forcing as ``chl`` (the PE C-grid step switches to rgb_chl when chl is set).
+    # NEMO's variable geothermal map (nn_geoflx=2), read ONCE: the field is
+    # static (freq -12, ln_tint=.false.), so re-reading it per step would only
+    # burn I/O. None keeps the constant-flux path every existing run uses.
+    _geo_map = None
+    if args.geothermal_map:
+        if not args.geothermal:
+            raise ValueError(
+                "--geothermal-map needs --geothermal; the map is the flux for "
+                "that boundary condition, not a switch that enables it.")
+        if args.geothermal_flux_wm2 is not None:
+            raise ValueError(
+                "--geothermal-map and --geothermal-flux-wm2 both set the "
+                "seafloor flux; one would silently win. Pick one.")
+        _geo_map = jnp.asarray(
+            load_nemo_geothermal_flux(app_grid_type, lat2d.shape))
+
     chl_clim = None
     if args.sw_rgb_chl:
         if app_grid_type not in ("latlon", "tripole", "mpas"):
@@ -10399,7 +10482,8 @@ def main() -> int:
             if args.geothermal_flux_wm2 is not None:
                 _geo_cfg = _geo_cfg._replace(flux_wm2=args.geothermal_flux_wm2)
             state = apply_geothermal_step(
-                state, dz_live=_dz, wet_cell=_wet, dt=dt, config=_geo_cfg)
+                state, dz_live=_dz, wet_cell=_wet, dt=dt, config=_geo_cfg,
+                flux_wm2=_geo_map)
         if isf_forcing is not None:
             # NEMO ISF 'spe' prescribed melt (ln_isfpar_mlt, cn_isfpar_mlt=
             # 'spe'): monthly Depoorter melt deposited over the per-column
