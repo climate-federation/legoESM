@@ -163,7 +163,8 @@ def _live_stage_rows(trace, sources, card, records, masks) -> tuple[dict, dict]:
             "zFv": round54.field_stats(
                 live_transport[1], to_lego(record["zFv"], nlev), masks["v"]),
             "zFw": round54.field_stats(
-                live_transport[2], to_lego(record["zFw"], nlev), masks["T"]),
+                live_transport[2], to_lego(record["zFw"]),
+                np.ones_like(live_transport[2], dtype=bool)),
         }
         for name, state_index in (("T", 2), ("S", 3)):
             live_kmm = np.asarray(state[state_index])
@@ -299,9 +300,11 @@ def measure(args) -> dict:
     predicted_boundary = first_non_bit in ("stage2.zFu", "stage2.zFv")
     causal = {"executed": False}
     if predicted_boundary:
-        target = tuple(
-            jnp.asarray(to_lego(records[2]["fields"][name], nlev))
-            for name in ("zFu", "zFv", "zFw"))
+        target = (
+            jnp.asarray(to_lego(records[2]["fields"]["zFu"], nlev)),
+            jnp.asarray(to_lego(records[2]["fields"]["zFv"], nlev)),
+            jnp.asarray(to_lego(records[2]["fields"]["zFw"])),
+        )
         if args.plant_transport_null:
             target = tuple(jnp.asarray(value)
                            for value in live_arrays["2"]["transport"])
