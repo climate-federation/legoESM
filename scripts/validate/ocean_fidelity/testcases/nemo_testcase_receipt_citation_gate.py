@@ -137,6 +137,18 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/traadv.f90"),
     "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/trazdf.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/trazdf.f90"),
+    "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/traadv_fct.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/traadv_fct.f90"),
+    "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/zdftke.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/zdftke.f90"),
+    "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/zdf_oce.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/zdf_oce.f90"),
+    "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/oce.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/oce.f90"),
+    "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dom_oce.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dom_oce.f90"),
+    "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/inc/do_loop_substitute.h90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/inc/do_loop_substitute.h90"),
     # Round 58 binds every TKE claim to the record producer's own compiled
     # branch, including the writer whose dummy-bound defect invalidated it.
     "GYRE_OMIP_L2_P3_SM_R56TKE/BLD/ppsrc/nemo/l2_r54_tke.f90": (
@@ -294,6 +306,48 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 63: compiled kt=2 stage-3 Krhs and RHS-product split ---
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:773-800': [
+        ('IF( .NOT.ln_shuman ) THEN', 1),
+        ('CALL tra_adv_trp( kstp, kstg, nit000', 2), 28],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:825-870': [
+        ('DO jn = 1, jpts', 1),
+        'IF( ln_isf )   CALL tra_isf', 46],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:886-908': [
+        ('SELECT CASE( kstg )', 4),
+        'L2_RK_TRACER_OPERAND_DUMP', 23],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:912-958': [
+        ('CASE ( 3 )', 3),
+        'CALL tra_zdf( kstp, Kbb, Kmm, Krhs', 47],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/traadv_fct.f90:94-111': [
+        'INTEGER                                  , INTENT(in   ) ::   kt',
+        ('REAL(wp), DIMENSION(ntsi-(nn_hls):ntei+(nn_hls)', 2), 18],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/traadv_fct.f90:164-198': [
+        'DO jn = 1, kjpt',
+        'ztFv(ji,jj,jk) = 0.5_wp * pV', 35],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/traadv_fct.f90:260-327': [
+        'SELECT CASE( kn_fct_v )',
+        'pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) + ztra', 68],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/trazdf.f90:86-88': [
+        'INTEGER                                  , INTENT(in)    :: kt',
+        'REAL(wp), DIMENSION(jpi,jpj,jpk,jpts,jpt)', 3],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/zdftke.f90:219-223': [
+        'INTEGER                                   , INTENT(in   ) ::   Kbb, Kmm',
+        ('REAL(wp), DIMENSION(ntsi-(0):ntei+(0)', 1), 5],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/zdftke.f90:409-427': [
+        'Matrix and right hand side in en',
+        ('END DO   ;   END DO', 5), 19],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/zdf_oce.f90:85-87': [
+        ('ALLOCATE( avm', 1), 'avmb(jpk)', 3],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/oce.f90:40-42': [
+        'DIMENSION(:,:,:,:,:) ::   ts',
+        'DIMENSION(:,:,:)     ::   rn2b ,  rn2', 3],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dom_oce.f90:170-180': [
+        '::     e3t_3d',
+        '::   r3t, r3u, r3v', 11],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/inc/do_loop_substitute.h90:72-89': [
+        '!    A1Di(H) = Nis0-(H):Nie0+(H)',
+        ('#define T2D(H) T1Di(H),T1Dj(H)', 1), 18],
     # --- round 62: tracer operand ladder on the R46 kt=2 producer ---
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/trazdf.f90:450': (
         'zwt(:,1) = 0._wp', 1),

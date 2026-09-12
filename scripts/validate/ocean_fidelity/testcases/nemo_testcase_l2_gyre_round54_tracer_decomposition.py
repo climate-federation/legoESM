@@ -10,7 +10,10 @@ kt=3 ENTRY record is the stage-3 reference.  See the round-54 preregistration.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
+import struct
 import sys
 from pathlib import Path
 
@@ -34,6 +37,18 @@ EXPECTED_T_RMS_K = 4.1543946279e-4
 EXPECTED_T_UNEQUAL = 17_999
 ANCHOR_ATOL_K = 5.0e-15
 
+R63_KRHS_FIELDS = (
+    "p2dt", "krhs_zero_T", "krhs_zero_S", "adv_up1_T", "adv_up1_S",
+    "after_adv_T", "after_adv_S", "after_sbc_T", "after_sbc_S",
+    "after_qsr_T", "after_qsr_S", "after_ldf_T", "after_ldf_S",
+    "T_Kbb", "S_Kbb", "e3t_Kbb", "e3t_Kmm", "r3t_Kbb", "r3t_Kmm",
+    "e3t_3d", "tmask", "content_T", "content_S",
+)
+R63_TKE_FIELDS = (
+    "rn_Dt", "zfact3", "en_rhs_entry", "shear", "avt", "rn2", "dissl",
+    "strat_product", "diss_product", "wmask", "en_rhs_post",
+)
+
 
 class GateError(RuntimeError):
     pass
@@ -42,6 +57,204 @@ class GateError(RuntimeError):
 def require(ok: bool, message: str) -> None:
     if not ok:
         raise GateError(message)
+
+
+def _read_r63_stream(path: Path, *, kind: str,
+                     plant: str | None = None) -> dict:
+    """Read one round-63 stream; this extends the existing tracer parser."""
+    raw = path.read_bytes()
+    if plant == "truncation":
+        raw = raw[:-8]
+    offset = 0
+
+    def take(count: int) -> bytes:
+        nonlocal offset
+        require(offset + count <= len(raw), f"{kind} record is truncated")
+        out = raw[offset:offset + count]
+        offset += count
+        return out
+
+    if kind == "krhs":
+        magic = b"NEMO_L2_R63KRS1 "
+        keys = ("version", "kt", "kstg", "Kbb", "Kmm", "Krhs",
+                "nx", "ny", "nlev", "ntsi", "ntsj", "real_bits",
+                "field_count")
+        fields = R63_KRHS_FIELDS
+    else:
+        require(kind == "tke", f"unknown round-63 stream kind {kind}")
+        magic = b"NEMO_L2_R63TKR1 "
+        keys = ("version", "kt", "nx", "ny", "nlev", "ntsi", "ntsj",
+                "real_bits", "field_count")
+        fields = R63_TKE_FIELDS
+    require(take(16) == magic, f"wrong {kind} magic")
+    header = dict(zip(
+        keys, struct.unpack(f"={len(keys)}i", take(4 * len(keys))),
+        strict=True))
+    require(header["version"] == 1 and header["kt"] == 2,
+            f"wrong {kind} version/kt")
+    require((header["nx"], header["ny"], header["nlev"]) == (32, 22, 30),
+            f"wrong {kind} inner-domain shape")
+    require(header["real_bits"] == 64, f"{kind} record is not fp64")
+    require(header["field_count"] == len(fields),
+            f"{kind} field-count stamp disagrees with schema")
+    arrays = {}
+    for expected in fields:
+        label = take(16).decode("ascii").rstrip()
+        require(label == expected,
+                f"{kind} field order mismatch: {label!r} != {expected!r}")
+        ndim, n1, n2, n3 = struct.unpack("=4i", take(16))
+        require(ndim in (0, 2, 3), f"invalid {kind} rank {ndim}")
+        shape = (() if ndim == 0 else
+                 (n1, n2) if ndim == 2 else (n1, n2, n3))
+        require(shape in ((), (32, 22), (32, 22, 30)),
+                f"wrong {kind} field shape {label}={shape}")
+        count = 1 if not shape else int(np.prod(shape))
+        value = np.frombuffer(take(8 * count), dtype="=f8").copy()
+        arrays[label] = (value.reshape(shape, order="F")
+                         if shape else value[0])
+    require(offset == len(raw), f"{kind} record has trailing bytes")
+    require(all(np.isfinite(value).all() for value in arrays.values()),
+            f"{kind} record contains NaN/Inf")
+    if plant == "ulp":
+        target = "content_T" if kind == "krhs" else "en_rhs_post"
+        mask_name = "tmask" if kind == "krhs" else "wmask"
+        wet = np.argwhere(arrays[mask_name] != 0.0)
+        require(wet.size != 0, f"{kind} one-ULP plant found no wet cell")
+        at = tuple(wet[0])
+        arrays[target][at] = np.nextafter(
+            arrays[target][at], np.float64(np.inf))
+    return {"header": header, "arrays": arrays}
+
+
+def _r63_unequal(left, right) -> int:
+    a = np.ascontiguousarray(left, dtype="=f8").view("=u8")
+    b = np.ascontiguousarray(right, dtype="=f8").view("=u8")
+    require(a.shape == b.shape, "round-63 calibration shape mismatch")
+    return int(np.count_nonzero(a != b))
+
+
+def _calibrate_r63_krhs(arrays: dict) -> dict:
+    """Rebuild compiled trazdf.f90:545-548 in its exact association."""
+    e3b = arrays["e3t_3d"] * (
+        np.float64(1.0) + arrays["r3t_Kbb"][..., None] * arrays["tmask"])
+    e3m = arrays["e3t_3d"] * (
+        np.float64(1.0) + arrays["r3t_Kmm"][..., None] * arrays["tmask"])
+    rows = {
+        "e3t_Kbb_unequal": _r63_unequal(e3b, arrays["e3t_Kbb"]),
+        "e3t_Kmm_unequal": _r63_unequal(e3m, arrays["e3t_Kmm"]),
+    }
+    for tracer in ("T", "S"):
+        # Preserve NEMO's written left product + p2dt * e3 * Krhs.
+        rebuilt = (arrays["e3t_Kbb"] * arrays[f"{tracer}_Kbb"]
+                   + np.float64(arrays["p2dt"]) * arrays["e3t_Kmm"]
+                   * arrays[f"after_ldf_{tracer}"])
+        rows[f"content_{tracer}_unequal"] = _r63_unequal(
+            rebuilt, arrays[f"content_{tracer}"])
+    require(all(value == 0 for value in rows.values()),
+            f"round-63 content calibration is not exact: {rows}")
+    return rows
+
+
+def _calibrate_r63_tke(arrays: dict) -> dict:
+    """Rebuild compiled zdftke.f90:416-424 without reassociation."""
+    strat = arrays["avt"] * arrays["rn2"]
+    diss = (np.float64(arrays["zfact3"]) * arrays["dissl"]
+            * arrays["en_rhs_entry"])
+    post = (arrays["en_rhs_entry"] + np.float64(arrays["rn_Dt"])
+            * ((arrays["shear"] - arrays["strat_product"])
+               + arrays["diss_product"]) * arrays["wmask"])
+    rows = {
+        "strat_product_unequal": _r63_unequal(
+            strat, arrays["strat_product"]),
+        "diss_product_unequal": _r63_unequal(
+            diss, arrays["diss_product"]),
+        "rhs_statement_unequal": _r63_unequal(post, arrays["en_rhs_post"]),
+    }
+    require(all(value == 0 for value in rows.values()),
+            f"round-63 TKE calibration is not exact: {rows}")
+    return rows
+
+
+def _verify_r63_stamp(record: Path, stamp: Path, producer: str) -> dict:
+    words = stamp.read_text().split()
+    require(len(words) == 3, f"bad per-file stamp {stamp}")
+    digest, stamped_commit, stamped_name = words
+    actual = hashlib.sha256(record.read_bytes()).hexdigest()
+    require(digest == actual, f"sha256 mismatch for {record.name}")
+    require(stamped_commit == producer, f"commit mismatch in {stamp.name}")
+    require(stamped_name == record.name, f"filename mismatch in {stamp.name}")
+    return {"sha256": digest, "producer_commit": stamped_commit}
+
+
+def _r63_resolved_config(path: Path) -> dict:
+    text = path.read_text(errors="replace")
+    patterns = {
+        "two_steps": r"number of the last time step\s+nn_itend\s*=\s*2\b",
+        "no_assimilation": r"Assimilation cycle\s+nn_no\s*=\s*0\b",
+        "no_tiling": r"ln_tile\s*=\s*F\b",
+        "qsr": r"ln_traqsr\s*=\s*T\b",
+        "no_bdy": r"ln_bdy\s*=\s*F\b",
+        "no_isf": r"ln_isfcav\s*=\s*F\b",
+        "fct": r"ln_traadv_fct\s*=\s*T\b",
+        "fct_h2": r"nn_fct_h\s*=\s*2\b",
+        "fct_v2": r"nn_fct_v\s*=\s*2\b",
+        "fct_imp1": r"nn_fct_imp\s*=\s*1\b",
+        "no_adaptive": r"ln_zad_Aimp\s*=\s*F\b",
+        "no_msc": r"ln_traldf_msc\s*=\s*F\b",
+        "no_bbc": r"ln_trabbc\s*=\s*F\b",
+        "no_bbl": r"ln_trabbl\s*=\s*F\b",
+        "no_damping": r"ln_tradmp\s*=\s*F\b",
+        "no_mfc": r"ln_zdfmfc\s*=\s*F\b",
+        "no_osm": r"ln_zdfosm\s*=\s*F\b",
+        "no_npc": r"ln_zdfnpc\s*=\s*F\b",
+    }
+    rows = {}
+    lines = text.splitlines()
+    for name, pattern in patterns.items():
+        matches = [(number, line.strip())
+                   for number, line in enumerate(lines, 1)
+                   if re.search(pattern, line)]
+        require(len(matches) == 1,
+                f"resolved ocean.output check {name} matched {len(matches)} lines")
+        rows[name] = {"line": matches[0][0], "text": matches[0][1]}
+    return rows
+
+
+def r63_calibrate(*, krhs_record: Path, tke_record: Path,
+                  krhs_stamp: Path, tke_stamp: Path,
+                  expect_commit: str, producer_commit: Path,
+                  resolved_output: Path,
+                  plant: str | None = None) -> dict:
+    producer = producer_commit.read_text().strip().lower()
+    expected = expect_commit.lower()
+    if plant == "stamp":
+        producer = "0" * 40
+    require(len(expected) == 40 and producer == expected,
+            f"producer stamp mismatch: {producer} != {expected}")
+    stamps = {
+        "krhs": _verify_r63_stamp(krhs_record, krhs_stamp, producer),
+        "tke": _verify_r63_stamp(tke_record, tke_stamp, producer),
+    }
+    krhs_plant = ("truncation" if plant == "krhs-truncation"
+                  else "ulp" if plant == "krhs-ulp" else None)
+    tke_plant = ("truncation" if plant == "tke-truncation"
+                 else "ulp" if plant == "tke-ulp" else None)
+    krhs = _read_r63_stream(krhs_record, kind="krhs", plant=krhs_plant)
+    tke = _read_r63_stream(tke_record, kind="tke", plant=tke_plant)
+    return {
+        "format": "gyre-round63-krhs-split-v1",
+        "producer_commit": producer,
+        "records": {"krhs": str(krhs_record), "tke": str(tke_record)},
+        "stamps": stamps,
+        "headers": {"krhs": krhs["header"], "tke": tke["header"]},
+        "calibration": {
+            "krhs": _calibrate_r63_krhs(krhs["arrays"]),
+            "tke": _calibrate_r63_tke(tke["arrays"]),
+        },
+        "resolved_configuration": _r63_resolved_config(resolved_output),
+        "plant": plant,
+        "status": "PASS",
+    }
 
 
 def _owned2(value) -> np.ndarray:
@@ -712,16 +925,25 @@ def zdf_score(*, entry_root: Path, stage_root: Path, record: Path,
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("measure", "self-check", "zdf-score"),
-                        default="measure")
+    parser.add_argument(
+        "--mode",
+        choices=("measure", "self-check", "zdf-score", "krhs-calibrate"),
+        default="measure")
     parser.add_argument("--entry-root", type=Path, default=ENTRY_ROOT)
     parser.add_argument("--stage-root", type=Path, default=STAGE_ROOT)
     parser.add_argument("--zdf-record", type=Path, default=ZDF_RECORD)
+    parser.add_argument("--krhs-record", type=Path)
+    parser.add_argument("--tke-rhs-record", type=Path)
+    parser.add_argument("--krhs-stamp", type=Path)
+    parser.add_argument("--tke-rhs-stamp", type=Path)
+    parser.add_argument("--producer-commit", type=Path)
+    parser.add_argument("--resolved-output", type=Path)
     parser.add_argument("--expect-commit")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--plant", choices=(
         "stamp", "truncation", "stage-swap", "tracer-bit", "input-noop",
-        "self-compare", "content", "operand-ulp"))
+        "self-compare", "content", "operand-ulp", "krhs-ulp", "tke-ulp",
+        "krhs-truncation", "tke-truncation"))
     args = parser.parse_args(argv)
     try:
         if args.mode == "self-check":
@@ -735,7 +957,7 @@ def main(argv=None) -> int:
                              stage_root=args.stage_root,
                              expect_commit=args.expect_commit,
                              plant=args.plant)
-        else:
+        elif args.mode == "zdf-score":
             require(args.expect_commit is not None,
                     "--expect-commit is required for a measurement")
             require(args.plant in (None, "stamp", "content", "operand-ulp"),
@@ -743,6 +965,28 @@ def main(argv=None) -> int:
             report = zdf_score(
                 entry_root=args.entry_root, stage_root=args.stage_root,
                 record=args.zdf_record, expect_commit=args.expect_commit,
+                plant=args.plant)
+        else:
+            require(args.expect_commit is not None,
+                    "--expect-commit is required for round-63 calibration")
+            require(all(value is not None for value in (
+                args.krhs_record, args.tke_rhs_record, args.krhs_stamp,
+                args.tke_rhs_stamp, args.producer_commit,
+                args.resolved_output)),
+                "round-63 calibration requires both records, both stamps, "
+                "and --producer-commit")
+            require(args.plant in (
+                None, "stamp", "krhs-ulp", "tke-ulp",
+                "krhs-truncation", "tke-truncation"),
+                "invalid round-63 calibration plant")
+            report = r63_calibrate(
+                krhs_record=args.krhs_record,
+                tke_record=args.tke_rhs_record,
+                krhs_stamp=args.krhs_stamp,
+                tke_stamp=args.tke_rhs_stamp,
+                expect_commit=args.expect_commit,
+                producer_commit=args.producer_commit,
+                resolved_output=args.resolved_output,
                 plant=args.plant)
         text = json.dumps(report, indent=2, sort_keys=True)
         if args.output:
