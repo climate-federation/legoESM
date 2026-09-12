@@ -1659,6 +1659,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "Writes segment-mean rates to budget_ledger.npz. "
                              "Single-rank only; default off = byte-identical "
                              "model.")
+    parser.add_argument("--budget-ledger-sigma-band", nargs=2, type=float,
+                        default=None, metavar=("SIGMA_LO", "SIGMA_HI"),
+                        dest="budget_ledger_sigma_band",
+                        help="Restrict the budget ledger to a sigma band "
+                             "(lo < hi in [0,1], sigma increasing downward). "
+                             "The whole-column ledger cannot see a vertical "
+                             "REDISTRIBUTION bias -- a mass-flux convection "
+                             "scheme's column water row is exactly zero -- so "
+                             "a band is what makes it answer which process "
+                             "supplies a LAYER. Needs --budget-ledger.")
     parser.add_argument(
         "--evaluate", action="store_true", default=False,
         help="Run ClimateEval after a successful AMIP run to compare "
@@ -1898,6 +1908,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cmip_output=args.cmip_output,
         clear_sky_diag=args.clear_sky_diag,
         budget_ledger=args.budget_ledger,
+        budget_ledger_sigma_band=(tuple(args.budget_ledger_sigma_band)
+                                  if args.budget_ledger_sigma_band else None),
         checkpoint_format=args.checkpoint_format,
         restart_buffer_seconds=args.restart_buffer_seconds,
         evaluation=EvaluationConfig(

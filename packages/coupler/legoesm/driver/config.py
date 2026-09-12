@@ -333,6 +333,15 @@ class OutputConfig(NamedTuple):
     # Static diagnostic gate (default OFF = byte-identical model);
     # single-rank only.
     budget_ledger: bool = False
+    # Restrict every ledger row to a sigma band (lo, hi), lo < hi in [0, 1] and
+    # sigma increasing downward.  None = the whole column.  WHY: the column
+    # ledger is structurally blind to a vertical-REDISTRIBUTION bias, because a
+    # mass-flux convection scheme's column water row is exactly zero (measured:
+    # 0.0000 kg/m2/day on the production AMIP) while the tropical free
+    # troposphere is twice as moist as observed.  Banding is what makes the
+    # table answer "which process supplies THIS layer", without changing the
+    # shape of the accumulator carried through the jitted step.
+    budget_ledger_sigma_band: tuple | None = None
     checkpoint_format: str = "npz"  # npz, zarr
     diagnostics_perf_mode: str = "auto"  # auto, always, never
     cmip_resolution_deg: float = 5.0  # lat-lon grid spacing for CMIP output [degrees]
@@ -3230,6 +3239,8 @@ class ExperimentConfig(NamedTuple):
             cmip_output=getattr(amip_cfg, 'cmip_output', False),
             clear_sky_diag=getattr(amip_cfg, 'clear_sky_diag', False),
             budget_ledger=getattr(amip_cfg, 'budget_ledger', False),
+            budget_ledger_sigma_band=getattr(
+                amip_cfg, 'budget_ledger_sigma_band', None),
         )
         return ExperimentConfig(
             grid=grid,

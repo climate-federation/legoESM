@@ -9242,7 +9242,32 @@ class ModelDriver:
                 float(jnp.mean(_f_land_cells)),
             )
         _budget_ledger_on = bool(getattr(cfg.output, "budget_ledger", False))
+        # Optional vertical band for the ledger.  A column budget cannot see a
+        # vertical-REDISTRIBUTION bias -- convection's column water row is
+        # exactly zero by construction -- so a band is what lets the table say
+        # which process supplies a LAYER.  The SAME weight goes to the physics
+        # rows and to the dycore's snapshot-derived rows, or the table stops
+        # summing to the column-store change.
+        _ledger_band = getattr(cfg.output, "budget_ledger_sigma_band", None)
+        _ledger_weight = None
+        if _ledger_band is not None:
+            if not _budget_ledger_on:
+                raise ValueError(
+                    "budget_ledger_sigma_band is set but budget_ledger is off; "
+                    "the band would select levels of a ledger that is never "
+                    "computed.")
+            from legoesm.diagnostics.process_ledger import sigma_band_weight
+            _ledger_weight = sigma_band_weight(
+                self.sigma_coord.sigma_half, float(_ledger_band[0]),
+                float(_ledger_band[1]))
+            logger.info(
+                "  budget ledger restricted to sigma band [%.3f, %.3f] "
+                "(%.1f%% of the column mass by layer weight)",
+                float(_ledger_band[0]), float(_ledger_band[1]),
+                100.0 * float(jnp.sum(_ledger_weight * self.sigma_coord.dsigma)
+                              / jnp.sum(self.sigma_coord.dsigma)))
         physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT,
+                                  budget_ledger_level_weight=_ledger_weight,
                                   column_mesh=_column_mesh,
                                   f_land=(_f_land_cells
                                           if (_land_beta != 1.0

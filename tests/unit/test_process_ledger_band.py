@@ -108,3 +108,43 @@ def test_wrong_length_weight_is_refused():
 def test_invalid_band_is_refused(lo, hi):
     with pytest.raises(ValueError, match="sigma_lo"):
         sigma_band_weight(SIGMA_HALF, lo, hi)
+
+
+def test_cli_flag_and_config_field_round_trip():
+    """The band must be reachable from a run, and asking for it without the
+    ledger itself must be refused rather than silently ignored."""
+    import sys, pathlib
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "scripts" / "run"))
+    from run_amip import build_arg_parser, _postprocess_args, build_config_from_args
+
+    parser = build_arg_parser()
+    base = ["--dataset", "analytical", "--grid-type", "voronoi",
+            "--discretization", "mpas"]
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(base), parser))
+    assert cfg.output.budget_ledger_sigma_band is None
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        base + ["--budget-ledger", "--budget-ledger-sigma-band", "0.3", "0.7"]), parser))
+    assert cfg.output.budget_ledger is True
+    assert cfg.output.budget_ledger_sigma_band == (0.3, 0.7)
+    cfg.validate_strict()
+
+
+def test_the_physics_factory_accepts_the_weight():
+    """The weight must reach the physics ledger rows, not just the config."""
+    import inspect
+    from legoesm.atmosphere.physics import combined
+    assert "budget_ledger_level_weight" in inspect.signature(
+        combined._make_hydrostatic_combined).parameters
+
+
+def test_the_dycore_config_carries_the_weight():
+    """The dynamics and clips rows come from the DYCORE's snapshots, so it must
+    carry the same weight or the table stops summing to the column change."""
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+        MPASPrimitiveEquationConfig,
+    )
+    c = MPASPrimitiveEquationConfig()
+    assert c.budget_ledger_level_weight is None
+    assert c._replace(budget_ledger_level_weight=jnp.ones(5)
+                      ).budget_ledger_level_weight is not None

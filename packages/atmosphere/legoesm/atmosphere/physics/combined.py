@@ -329,7 +329,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                                need_rad: bool = True,
                                f_land=None,
                                land_beta: float = 1.0,
-                               budget_ledger: bool = False) -> Callable:
+                               budget_ledger: bool = False,
+                               budget_ledger_level_weight=None) -> Callable:
     """Combined physics for any hydrostatic model (cubed-sphere, lat-lon, MPAS).
 
     Uses the unified ``HydrostaticTendencies`` with optional ``dv_dt``.
@@ -344,6 +345,12 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     # is byte-identical.  This is the documented feature-gating exception --
     # jnp.where would trace BOTH branches.
     _budget_ledger = bool(budget_ledger)
+    # Optional (nlev,) per-layer weight restricting every ledger row to a
+    # vertical band.  The column ledger cannot see a vertical-REDISTRIBUTION
+    # bias: convection's column water row is exactly zero by construction, so a
+    # scheme that moves water from the boundary layer into the mid-troposphere
+    # is invisible in it.  None = full column, byte-identical.
+    _ledger_level_weight = budget_ledger_level_weight
     tagged_fns = []
     # Aerosol-CCN specified-Nc coupling: the microphysics factory self-
     # detects the switch from its own sub-config, but the radiation factory
@@ -477,7 +484,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
             for _k in _LEDGER_WATER:
                 if _k in tt:
                     dq = tt[_k].data if dq is None else dq + tt[_k].data
-        return ledger_entry_column(dq, t.dT_dt.data, p_s, dsigma)
+        return ledger_entry_column(dq, t.dT_dt.data, p_s, dsigma,
+                                   level_weight=_ledger_level_weight)
 
     def _zero_tendencies(state, has_v):
         dims_T = state.T.dims
@@ -724,7 +732,8 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
                     _led = _led.at[:, ROW_RADIATION, :].add(
                         ledger_entry_column(
                             None, cached_rad.reshape(dT_dt.shape),
-                            state.p_s.data, sigma_coord.dsigma)
+                            state.p_s.data, sigma_coord.dsigma,
+                            level_weight=_ledger_level_weight)
                         .astype(_led.dtype))
             combined = _build_combined(
                 first, du_dt, dv_dt, dT_dt, dp_s_dt, dphis_dt,
