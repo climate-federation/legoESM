@@ -221,6 +221,7 @@ def measure(args) -> dict:
     production_prediction_content = {}
     production_prediction_rows = {}
     production_baseline_rebuild = {}
+    production_vs_round67_routed = {}
     for name, capture in zip(TRACERS, reciprocal_calls, strict=True):
         boundaries = {
             boundary: round66.transposed(arrays[f"{boundary}_{name}"])
@@ -267,6 +268,8 @@ def measure(args) -> dict:
             "implementation_vs_prediction": round54.field_stats(
                 captured_content[name], production_prediction, capture["wet"]),
         }
+        production_vs_round67_routed[name] = round54.field_stats(
+            production_prediction, routed_content[name], capture["wet"])
         results[name] = result
 
     content_criterion = {name: True for name in TRACERS}
@@ -398,8 +401,7 @@ def measure(args) -> dict:
         for name in TRACERS:
             frozen = round67_report["cumulative_substitutions"][name][
                 "arm_rows"]["routed_live"]["content"]["max_abs"]
-            association = round67_report[
-                "implementation_content_vs_routed"][name]["max_abs"]
+            association = production_vs_round67_routed[name]["max_abs"]
             within_round67_floor[name] = bool(
                 production_prediction_rows[name]["content_vs_oracle"][
                     "max_abs"] <= frozen + association)
@@ -426,6 +428,7 @@ def measure(args) -> dict:
         "production_fct_prediction": {
             "content_rows": production_prediction_rows,
             "baseline_rebuild": production_baseline_rebuild,
+            "vs_round67_recomputed_routed": production_vs_round67_routed,
             "kt3": production_kt3,
             "criteria": production_criteria,
         },

@@ -86,3 +86,14 @@ and no earlier first-over-bar boundary.
 No NEMO source/build/run, configuration choice, carried-state change, year
 harness, reconciliation gate, freshwater pair, #1484 guard, or held manifest
 is modified. A failed prediction is retained as REFUTED.
+
+## Pre-successful-run control correction
+
+The first invocation exited nonzero before writing a report. It attempted to
+read a production-versus-recomputed association row from the archived
+round-67 pre-edit JSON, but that historical report predates the row. No physics
+number was emitted or retained. Before the first successful measurement, the
+control is corrected to calculate the already-preregistered last-bit
+association directly between this run's production-content prediction and its
+round-67 recomputed routed content. The frozen prediction, floor, and
+falsifiers above are unchanged.
