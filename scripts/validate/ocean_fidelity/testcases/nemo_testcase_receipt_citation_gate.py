@@ -337,7 +337,7 @@ FILES = {
 CITATION_MAP = {
     # --- round 71: Kmm boundary and its producing stage-2 update ---
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3.f90:204-215': [
-        'Nrhs = Nnn   ;   Nnn  = Naa   ;   Naa  = Nrhs',
+        ('Nrhs = Nnn   ;   Nnn  = Naa   ;   Naa  = Nrhs', 1),
         'CALL stp_RK3_stg( 3, kstp, Nbb, Nnn, Nrhs, Naa )', 12],
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:899-901': [
         'ts(ji,jj,jk,jn,Kaa) = (',
