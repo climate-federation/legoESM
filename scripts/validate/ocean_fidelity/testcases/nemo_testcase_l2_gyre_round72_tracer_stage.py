@@ -138,6 +138,12 @@ def _live_stage_rows(trace, sources, card, records, masks) -> tuple[dict, dict]:
     active = jnp.asarray(card.recipe.z_coord.is_active, dtype=jnp.float64)
     rows: dict[str, dict] = {}
     arrays: dict[str, dict] = {}
+
+    @jax.jit
+    def cen2_rhs(tracer, p_u, p_v, p_w, thickness):
+        return model_module._nemo_cen2_tracer_rhs(
+            tracer, p_u, p_v, p_w, thickness, active, card.recipe.grid)
+
     for stage in (1, 2):
         record = records[stage]["fields"]
         state = trace.stage_states[stage - 1]
@@ -169,10 +175,10 @@ def _live_stage_rows(trace, sources, card, records, masks) -> tuple[dict, dict]:
         for name, state_index in (("T", 2), ("S", 3)):
             live_kmm = np.asarray(state[state_index])
             live_kbb = np.asarray(trace.stage_states[0][state_index])
-            rhs = jax.device_get(jax.jit(model_module._nemo_cen2_tracer_rhs)(
+            rhs = jax.device_get(cen2_rhs(
                 state[state_index], geometry[7], geometry[8],
                 geometry[2] * jnp.asarray(card.recipe.grid.area_T)[..., None],
-                geometry[3], active, card.recipe.grid))
+                geometry[3]))
             after_adv = np.asarray(rhs)
             after_sbc = after_adv + np.asarray(sources[(stage - 1) * 2
                                                        + TRACERS.index(name)])
