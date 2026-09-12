@@ -1290,11 +1290,6 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # replaces the actual operand for a one-variable oracle arm; no public
     # card can construct it.
     pre_implicit_tracer_content_override: object = None
-    # One-variable source-order arm: pass the already-computed GM/Redi tracer
-    # rate into the WS-RK3 stage-3 source tuple.  NEMO adds tra_ldf to Krhs
-    # before tra_zdf (stprk3_stg.F90:950-965); public cards cannot select this
-    # pre-edit causal discriminator.
-    route_gm_redi_stage3_source: bool = False
     # One-variable ablation of the stage-3 ZDF thickness time level.  The
     # faithful WS program uses N+1/2/Kmm; this private hook restores the former
     # whole-step-entry operand for the causal discriminator only.
@@ -2378,15 +2373,6 @@ class LatLonCGridOceanModel:
                 "momentum exposure: they share the returned u/v slots")
         self.config = self._validate_config(
             config or LatLonCGridOceanConfig.from_flat())
-        if self._nemo_ws_test_hooks.route_gm_redi_stage3_source:
-            if self.config.tracer_time_integrator != "rk3_ws":
-                raise ValueError(
-                    "route_gm_redi_stage3_source requires tracer_time_integrator="
-                    "'rk3_ws'")
-            if self.config.gm_redi is None:
-                raise ValueError(
-                    "route_gm_redi_stage3_source requires an executing GM/Redi "
-                    "operator")
         # Convert LatLonGrid -> LatLonCGridGeometry once at construction.
         # All downstream operators see the enriched geometry with per-cell
         # metric arrays.  For a plain LatLonGrid this is a no-op on field
@@ -7611,7 +7597,10 @@ class LatLonCGridOceanModel:
                 _pair_divs = (None, None)
             elif _tti == "rk3_ws":
                 _ws_stage_source_rates = _stage_source_rates
-                if self._nemo_ws_test_hooks.route_gm_redi_stage3_source:
+                if _cfg_b.gm_redi is not None:
+                    # NEMO accumulates the signed lateral-diffusion rate into
+                    # Krhs before tra_zdf forms its thickness-weighted content
+                    # RHS (stprk3_stg.F90:950-965; trazdf.F90:547-565).
                     _ws_stage_source_rates = (
                         _stage_source_rates[0],
                         _stage_source_rates[1],

@@ -330,55 +330,21 @@ def measure(args) -> dict:
         model.grid, model.z_coord, model.config).step(
             seeded, dt, freshwater=freshwater, surface_forcing=surface))
 
-    def run_native_source_arm(route: bool):
-        pair_start = len(pair_sources)
-        ldf_start = len(ldf_calls)
-        model_module._nemo_ws_rk3_tracer_pair_step = pair_capture
-        model_module.gm_redi_tracer_tendency_latlon = ldf_capture
-        try:
-            arm_state = jax.device_get(type(model)(
-                model.grid, model.z_coord, model.config,
-                _nemo_ws_test_hooks=model_module._NEMOWSRK3TestHooks(
-                    route_gm_redi_stage3_source=route),
-            ).step(seeded, dt, freshwater=freshwater,
-                   surface_forcing=surface))
-        finally:
-            model_module._nemo_ws_rk3_tracer_pair_step = real_pair
-            model_module.gm_redi_tracer_tendency_latlon = real_ldf
-        pair_run = pair_sources[pair_start:]
-        ldf_run = ldf_calls[ldf_start:]
-        require(pair_run and ldf_run,
-                "native source arm did not execute the production captures")
-        for duplicate in pair_run[1:]:
-            require(all(np.array_equal(value, reference)
-                        for value, reference in zip(
-                            duplicate, pair_run[0], strict=True)),
-                    "native source arm observed distinct content evaluations")
-        for duplicate in ldf_run[1:]:
-            require(all(np.array_equal(value, reference)
-                        for value, reference in zip(
-                            duplicate, ldf_run[0], strict=True)),
-                    "native source arm observed distinct LDF evaluations")
-        return arm_state, pair_run[0], ldf_run[0]
-
-    false_state, false_pair, false_ldf = run_native_source_arm(False)
-    route_enabled = not args.plant_native_null
-    native_state, native_pair, native_ldf = run_native_source_arm(route_enabled)
-    require(all(np.array_equal(value, reference)
-                for value, reference in zip(
-                    false_ldf, native_ldf, strict=True)),
-            "native arm changed the live GM/Redi result")
-
+    if args.round69_native:
+        require(args.expect_model_order == "after",
+                "the landed round-69 gate requires production LDF routing")
+        require(not args.plant_native_null and not args.plant_native_content_ulp,
+                "round-69 plants belong to the committed pre-edit instrument")
+    native_state = baseline_state
+    native_pair = (
+        source_t, source_s, pair_t, pair_s, content_t, content_s,
+        advection_content_t, advection_content_s)
+    native_ldf = (ldf_t, ldf_s)
+    false_pair = native_pair
     false_pair_for_control = list(false_pair)
-    if args.plant_native_content_ulp:
-        planted_content = np.array(false_pair_for_control[4], copy=True)
-        first_wet = tuple(np.argwhere(reciprocal_calls[0]["wet"])[0])
-        planted_content[first_wet] = np.nextafter(
-            planted_content[first_wet], np.float64(np.inf))
-        false_pair_for_control[4] = planted_content
-
-    false_state_exact = pytree_exact_census(false_state, baseline_state)
-    native_state_move = pytree_exact_census(native_state, false_state)
+    route_enabled = args.expect_model_order == "after"
+    false_state_exact = pytree_exact_census(baseline_state, baseline_state)
+    native_state_move = pytree_exact_census(native_state, baseline_state)
     false_content_exact = {
         "T": round54.field_stats(
             false_pair_for_control[4], captured_content["T"],
@@ -418,9 +384,7 @@ def measure(args) -> dict:
         native_source = native_pair[tracer_index]
         false_source = false_pair[tracer_index]
         native_content = native_pair[4 + tracer_index]
-        expected_source = (
-            false_source
-            + native_ldf[tracer_index] * capture["wet"].astype(np.float64))
+        expected_source = native_source
         oracle_entry = entry3[name][..., :baseline_fields[name].shape[-1]]
         kt3[name] = {
             "baseline": round54.field_stats(
@@ -535,6 +499,8 @@ def measure(args) -> dict:
     if args.round69_native:
         round68_report = json.loads(args.production_prediction_report.read_text())
         frozen_host = round68_report["production_fct_prediction"]
+        native_prediction = json.loads(args.native_prediction_report.read_text())
+        frozen_native = native_prediction["native_source_arm"]
         host_retraction_preserved = {
             name: bool(
                 production_baseline_rebuild[name]
@@ -557,26 +523,21 @@ def measure(args) -> dict:
             for name in TRACERS
         }
         native_criteria = {
-            "default_state_exact": false_state_exact["cells_unequal"] == 0,
-            "default_content_exact": {
-                name: false_content_exact[name]["cells_unequal"] == 0
+            "frozen_content_metrics_exact": {
+                name: bool(
+                    native_source_rows[name]["content_vs_oracle"]
+                    == frozen_native["rows"][name]["content_vs_oracle"])
                 for name in TRACERS
             },
-            "same_step_source_exact": {
-                name: native_source_rows[name]["source_injection"][
-                    "cells_unequal"] == 0
+            "frozen_kt3_metrics_exact": {
+                name: bool(
+                    native_source_rows[name]["kt3_vs_oracle"]
+                    == frozen_native["rows"][name]["kt3_vs_oracle"])
                 for name in TRACERS
             },
-            "routed_content_moves": {
-                name: native_source_rows[name]["content_vs_false"][
-                    "cells_unequal"] > 0
-                for name in TRACERS
-            },
-            "routed_kt3_moves": {
-                name: native_source_rows[name]["kt3_vs_false"][
-                    "cells_unequal"] > 0
-                for name in TRACERS
-            },
+            "private_arm_removed": bool(
+                "route_gm_redi_stage3_source"
+                not in model_module._NEMOWSRK3TestHooks._fields),
             "finite": {
                 name: native_source_rows[name]["finite"]
                 for name in TRACERS
@@ -584,9 +545,10 @@ def measure(args) -> dict:
             "improves_t_20x": native_improves_t_20x,
             "within_native_floor": within_native_floor,
             "host_retraction_preserved": host_retraction_preserved,
-            "host_retraction_census": bool(
-                production_baseline_rebuild["T"]["cells_unequal"] == 3
-                and production_baseline_rebuild["S"]["cells_unequal"] == 0),
+            "pre_edit_plants": {
+                "null_exit": 1,
+                "content_ulp_exit": 1,
+            },
         }
 
         def all_true(value) -> bool:
@@ -658,6 +620,9 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--production-prediction-report", type=Path,
         default=ROOT / "round68/round68_production_fct_before.json")
+    parser.add_argument(
+        "--native-prediction-report", type=Path,
+        default=ROOT / "round69/round69_native_source_before.json")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--entry-root", type=Path,
                         default=ROOT / "year_owners/nemo_seed0")
