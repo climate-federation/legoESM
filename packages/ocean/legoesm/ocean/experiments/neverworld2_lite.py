@@ -118,6 +118,14 @@ def _to_dino_cfg(cfg: NeverWorld2LiteConfig) -> DINOConfig:
         L_phi_deg=cfg.L_phi_deg,
         rho_0=cfg.rho_0,
         c_p=cfg.c_p,
+        # Decision 31 (user, 2026-09-11): the surface forcing takes the same
+        # forms as DINO's NEMO-identity card, so the two experiments really do
+        # share one diabatic forcing -- the non-solar flux divided by the LIVE
+        # top-cell thickness and the two-band solar profile on the live
+        # w-depths.  The static forms were an approximation that only the
+        # legacy default kept alive.
+        surface_flux_divisor="nemo_live",
+        shortwave_penetration_ladder="nemo_2bd",
     )
 
 

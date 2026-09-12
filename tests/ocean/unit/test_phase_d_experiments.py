@@ -162,3 +162,24 @@ def test_all_phase_d_experiments_registered():
         assert "create_initial_conditions" in cfg
         assert "create_forcings" in cfg
         assert "validate" in cfg
+
+
+def test_neverworld2_lite_shares_the_nemo_card_surface_forms():
+    """Decision 31 (user, 2026-09-11): NeverWorld2-lite borrows DINO's surface
+    forcing so the two experiments share one diabatic forcing.  DINO's
+    NEMO-identity card selects the live-thickness flux divisor and the
+    two-band solar ladder; the legacy static defaults would silently leave
+    NeverWorld2-lite on an approximation, so the translation is pinned to the
+    card's own values (read from the recipe, not restated)."""
+    from legoesm.ocean.experiments.dino import DINO_RECIPES
+    from legoesm.ocean.experiments.neverworld2_lite import (
+        NeverWorld2LiteConfig, _to_dino_cfg)
+
+    card = DINO_RECIPES["nemo_dino_kamm"]
+    dino_cfg = _to_dino_cfg(NeverWorld2LiteConfig())
+    for field in ("surface_flux_divisor", "shortwave_penetration_ladder"):
+        assert getattr(dino_cfg, field) == card[field], (
+            f"NeverWorld2-lite resolves {field}={getattr(dino_cfg, field)!r}; "
+            f"the NEMO card runs {card[field]!r}")
+    assert card["surface_flux_divisor"] == "nemo_live"       # the card is not static
+    assert card["shortwave_penetration_ladder"] == "nemo_2bd"
