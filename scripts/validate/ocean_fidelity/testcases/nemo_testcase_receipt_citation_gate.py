@@ -153,6 +153,17 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/zdfphy.f90"),
     "GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/zdf_oce.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/zdf_oce.f90"),
+    # Round 60's accepted record was emitted by the R59 compiled target.
+    "GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90"),
+    "GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfphy.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfphy.f90"),
+    "round33_lock_zdf_matrix/namelist_cfg": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+             "round33_lock_zdf_matrix/namelist_cfg")),
+    "round33_overflow_zdf_matrix/namelist_cfg": (
+        Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
+             "round33_overflow_zdf_matrix/namelist_cfg")),
     "nemo_testcase_l2_gyre_round54_tke_operands/l2_r54_tke.F90": (
         REPO / "scripts/validate/ocean_fidelity/testcases"
         "/nemo_testcase_l2_gyre_round54_tke_operands/l2_r54_tke.F90"),
@@ -273,6 +284,43 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 60: accepted R59 record and source-ordered TKE walk ---
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:277-281': [
+        ('DO ji = ntsi-( 0), ntei+( 0 )', 1), 'zd_up(ji,1) = 0._wp', 5],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:318-380': [
+        'IF( ln_lc ) THEN',
+        'en(ji,jj,jk) = en(ji,jj,jk) + rn_Dt * zus3(ji)', 63],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:394-433': [
+        ('IF( nn_pdl == 1 ) THEN', 1),
+        '&                                  ) * wmask(ji,jj,jk)', 40],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:466-483': [
+        ('DO jk =  2,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0)'
+         '                 ! First recurrence'),
+        'en(ji,jj,jk) = MAX( en(ji,jj,jk), rn_emin ) * wmask(ji,jj,jk)', 18],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:589-701': [
+        'IF( ln_mxl0 ) zraug = vkarmn * 2.e5_wp / ( rho0 * grav )',
+        'p_avt(ji,jj,jk)   = MAX( p_pdlr(ji,jj,jk) * p_avt(ji,jj,jk)', 113],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfphy.f90:348-354': [
+        'start from turbulent closure values', 'CALL r54_zdfphy_finish', 7],
+    'GYRE_OMIP_L2_P3_SM_R56TKE/BLD/ppsrc/nemo/zdftke.f90:277-281': [
+        ('DO ji = ntsi-( 0), ntei+( 0 )', 1), 'zd_up(ji,1) = 0._wp', 5],
+    'GYRE_OMIP_L2_P3_SM_R56TKE/BLD/ppsrc/nemo/zdftke.f90:318-380': [
+        'IF( ln_lc ) THEN',
+        'en(ji,jj,jk) = en(ji,jj,jk) + rn_Dt * zus3(ji)', 63],
+    'GYRE_OMIP_L2_P3_SM_R56TKE/BLD/ppsrc/nemo/zdftke.f90:416-433': [
+        'DO jk =  2,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0)    !* Matrix and right hand side in en',
+        '&                                  ) * wmask(ji,jj,jk)', 18],
+    'GYRE_OMIP_L2_P3_SM_R56TKE/BLD/ppsrc/nemo/zdftke.f90:466-483': [
+        ('DO jk =  2,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0)'
+         '                 ! First recurrence'),
+        'en(ji,jj,jk) = MAX( en(ji,jj,jk), rn_emin ) * wmask(ji,jj,jk)', 18],
+    'GYRE_OMIP_L2_P3_SM_R56TKE/BLD/ppsrc/nemo/zdftke.f90:589-682': [
+        'IF( ln_mxl0 ) zraug = vkarmn * 2.e5_wp / ( rho0 * grav )',
+        'zmxld(ji,jk) = zemlp', 94],
+    'round33_lock_zdf_matrix/namelist_cfg:131': (
+        'ln_zdfcst   = .true.', 1),
+    'round33_overflow_zdf_matrix/namelist_cfg:128': (
+        'ln_zdfcst   = .true.', 1),
     # --- round 59: R58 RHS-bound retraction and widened calibration ---
     'GYRE_OMIP_L2_P3_SM_R58TKE/BLD/ppsrc/nemo/zdftke.f90:394-412': [
         ('IF( nn_pdl == 1 )', 3),
@@ -336,7 +384,7 @@ CITATION_MAP = {
     'nemo_testcase_l2_gyre_round54_tke_operands.py:47-113': [
         'def _calibrate_closure', ('return counts', 1), 67],
     'nemo_testcase_l2_gyre_round54_tke_operands.py:273-279': [
-        'elif plant == "prandtl":', 'np.float64(np.inf))', 7],
+        'elif plant == "prandtl":', ('np.float64(np.inf))', 1), 7],
     # --- decision 35: the GYRE card drops fix_eta_drift (NEMO adds emp locally) ---
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/sshwzv.f90:137': (
         'pssh(ji,jj,Kaa) = (  pssh(ji,jj,Kbb) - rDt * ( r1_rho0 * emp(ji,jj) + zhdiv(ji,jj) )  ) * ssmask(ji,jj)', 1),

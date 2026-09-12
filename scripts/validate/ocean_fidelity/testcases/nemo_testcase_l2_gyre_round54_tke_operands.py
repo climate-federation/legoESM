@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed reader for the round-56 WRITE-only kt=2 TKE record."""
+"""Fail-closed reader and production-path walk for the kt=2 TKE record."""
 
 from __future__ import annotations
 
@@ -319,9 +319,12 @@ def main(argv=None) -> int:
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--producer-commit", type=Path, required=True)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--walk", action="store_true",
+        help="run the preregistered source-ordered legoESM closure walk")
     parser.add_argument("--plant", choices=(
         "header", "truncation", "nan", "config", "copy", "shape",
-        "sweep", "prandtl", "stamp"))
+        "sweep", "prandtl", "stamp", "walk"))
     args = parser.parse_args(argv)
     producer = None
     try:
@@ -332,6 +335,19 @@ def main(argv=None) -> int:
         require(len(expected) == 40 and producer == expected,
                 f"producer stamp mismatch: {producer} != {expected}")
         rec = read_record(args.record, plant=args.plant)
+        if args.plant == "walk":
+            require(args.walk, "walk plant requires --walk")
+            wet = np.argwhere(
+                rec["arrays"]["wmask"][:, :, 1:rec["header"]["jpkm1"]]
+                != 0.0)
+            require(wet.size != 0, "walk plant found no consumed wet interface")
+            i, j, k0 = wet[0]
+            planted = np.array(rec["arrays"]["avt_closure"], copy=True)
+            planted[i, j, k0 + 1] = np.nextafter(
+                planted[i, j, k0 + 1], np.float64(np.inf))
+            rec["arrays"]["avt_closure"] = planted
+        walk = (_model_substitution_walk(rec["arrays"], rec["header"])
+                if args.walk else None)
         summary = {}
         for name, value in rec["arrays"].items():
             arr = np.asarray(value)
@@ -347,6 +363,7 @@ def main(argv=None) -> int:
             "record": str(args.record),
             "header": rec["header"],
             "calibration": rec["calibration"],
+            "model_substitution_walk": walk,
             "fields": summary,
             "plant": args.plant,
             "status": "PASS",
@@ -369,6 +386,170 @@ def main(argv=None) -> int:
                 json.dumps(failure, indent=2, sort_keys=True) + "\n")
         print(f"STATUS FAIL: {exc}")
         return 1
+
+
+def _model_substitution_walk(arrays: dict, head: dict) -> dict:
+    """Run the frozen source-ordered closure walk through production code.
+
+    NEMO records arrays in (x,y,k); legoESM owns (y,x,k).  Rows after the
+    matrix substitution deliberately call the shared production
+    ``compute_mixing_lengths``/``compute_K_from_tke`` functions: this is not a
+    detached transcription of the candidate statement.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_gyre_zco_card
+    from legoesm.ocean.physics.vertical_mixing.tke import (
+        TKEEntryN2Bundle,
+        _mxl0_surface_anchor,
+        compute_K_from_tke,
+        compute_mixing_lengths,
+        tke_vertical_mixing,
+    )
+
+    require(jax.config.x64_enabled, "model substitution walk requires JAX fp64")
+    jpkm1 = head["jpkm1"]
+
+    def yx(name: str) -> np.ndarray:
+        value = np.asarray(arrays[name], dtype=np.float64)
+        return np.transpose(value, (1, 0, 2)) if value.ndim == 3 else value.T
+
+    card = build_gyre_zco_card()
+    require(card.case == "GYRE-zco", f"wrong instantiated card {card.case!r}")
+    cfg = card.recipe.model_config.physics.vertical_mixing.tke
+    require(cfg.tke_mxl_choice == 3, "GYRE card no longer selects nn_mxl=3")
+    require(cfg.tke_mxl_raw_evaluation in ("factored", "nemo_literal"),
+            f"unknown instantiated raw evaluation {cfg.tke_mxl_raw_evaluation!r}")
+    const = card.recipe.model_config.constants
+
+    # The consumed zdfphy copy is jk=2..jpkm1: 29 W rows x 600 wet columns.
+    wet = yx("wmask")[..., 1:jpkm1] != 0.0
+    oracle_avt = yx("avt_pre_evd")[..., 1:jpkm1]
+    require(int(np.count_nonzero(wet)) == 17400,
+            f"unexpected zdfphy wet-copy census {np.count_nonzero(wet)}")
+
+    e_post = jnp.asarray(yx("en_post_sweep")[..., 1:jpkm1])
+    rn2 = jnp.asarray(yx("rn2")[..., 1:jpkm1])
+    rn2b = jnp.asarray(yx("rn2b")[..., 1:jpkm1])
+    sh2 = jnp.asarray(yx("sh2")[..., 1:jpkm1])
+    e3w = jnp.asarray(yx("e3w_Kmm")[..., 1:jpkm1])
+    e3t_full = jnp.asarray(yx("e3t_Kmm"))
+    taum = jnp.asarray(yx("taum_entry"))
+    tmask_surface = jnp.asarray(yx("tmask")[..., 0])
+    wmask = jnp.asarray(yx("wmask")[..., 1:jpkm1])
+    avm_entry = jnp.asarray(yx("avm_entry")[..., 1:jpkm1])
+    avt_entry = jnp.asarray(yx("avt_entry")[..., 1:jpkm1])
+    dissl_entry = jnp.asarray(yx("dissl_entry")[..., 1:jpkm1])
+    avm_surface = jnp.asarray(yx("avm_entry")[..., 0])
+
+    anchor = _mxl0_surface_anchor(
+        cfg, taum, float(const.rho_0), float(const.g), tmask_surface)
+
+    def close_from_en(en_value, l_value=None):
+        if l_value is None:
+            l_value, _ = compute_mixing_lengths(
+                en_value, rn2, e3w, cfg, signed_n2=True,
+                dz_cell=e3t_full, l_surface_anchor=anchor)
+        return compute_K_from_tke(
+            en_value, l_value, cfg, N2=rn2, shear_sq=jnp.zeros_like(sh2),
+            N2_prandtl=rn2b, p_sh2_override=lambda _: sh2,
+            prandtl_K_M=avm_entry)[1]
+
+    # Rule 10: invoke the public production orchestrator with the printed card
+    # configuration.  The record supplies every carried closure operand; only
+    # the source routines themselves remain legoESM code.
+    z = card.recipe.z_coord
+    jacobian = e3t_full[..., :jpkm1] / jnp.asarray(z.dz_ref)
+    # z-star has one horizontal Jacobian. Fail closed if the record does not.
+    require(np.allclose(
+        np.asarray(jacobian),
+        np.asarray(jacobian[..., :1]) + np.zeros(np.shape(jacobian)),
+        rtol=2.0 * np.finfo(np.float64).eps, atol=0.0),
+        "recorded e3t is not a single z-star column Jacobian")
+    jac2 = jacobian[..., 0]
+    gdepw = (-jnp.asarray(z.z_half_ref[1:jpkm1])
+             * jac2[..., None])
+    bundle = TKEEntryN2Bundle(
+        rn2=rn2, rn2b=rn2b, gdepw_Kmm=gdepw, e3w_Kmm=e3w,
+        e3t_Kmm=e3t_full[..., :jpkm1])
+    shape30 = e_post.shape[:-1] + (jpkm1,)
+    dummy = jnp.zeros(shape30, dtype=e_post.dtype)
+    full = jax.jit(lambda: tke_vertical_mixing(
+        dummy, dummy, dummy, dummy, dummy, e3w,
+        jnp.asarray(yx("en_entry")[..., 1:jpkm1]), None, None,
+        float(arrays["rn_Dt"]), cfg, rho_0=float(const.rho_0),
+        g=float(const.g), n_iterations=1, taum_surface=taum,
+        dz_ref=jnp.asarray(z.dz_ref), jacobian=jac2,
+        z_interface=jnp.asarray(z.z_half_ref[1:jpkm1]),
+        dz_surface=-jnp.asarray(z.z_full_ref[0]) * jac2,
+        surface_tmask=tmask_surface, w_active=wmask,
+        preclosure_K_M=avm_entry, preclosure_K_H=avt_entry,
+        preclosure_K_M_surface=avm_surface,
+        preclosure_dissl=dissl_entry, precomputed_p_sh2=sh2,
+        precomputed_n2_bundle=bundle))().K_H
+
+    # Cumulative rows. The early model row includes NEMO's recorded carried
+    # production/buoyancy/dissipation operands. The next row substitutes the
+    # recorded matrix/RHS/sweep/floor result, then source-order downstream
+    # operands are substituted one family at a time.
+    model_after_solve = close_from_en(e_post)
+    model_after_surface = close_from_en(e_post)
+    nemo_l = jnp.asarray(yx("mxl_momentum")[..., 1:jpkm1])
+    model_after_mxl = close_from_en(e_post, nemo_l)
+    zsqen = np.sqrt(np.asarray(e_post))
+    zav = np.float64(arrays["rn_ediff"]) * np.asarray(nemo_l) * zsqen
+    avt_base = np.maximum(zav, yx("avt_floor")[..., 1:jpkm1]) * np.asarray(wmask)
+    after_prandtl = np.maximum(
+        yx("pdlr")[..., 1:jpkm1] * avt_base,
+        yx("avt_floor")[..., 1:jpkm1]) * np.asarray(wmask)
+
+    candidates = (
+        ("carried_production_buoyancy_dissipation", np.asarray(full)),
+        ("matrix_rhs_sweep_en_floor", np.asarray(model_after_solve)),
+        ("surface_rn_ebb_taum_and_taum_tmask", np.asarray(model_after_surface)),
+        ("raw_mixing_length_derived_floor_and_bounds", np.asarray(model_after_mxl)),
+        ("prandtl_factor", after_prandtl),
+        ("avt_derivation", yx("avt_closure")[..., 1:jpkm1]),
+        ("zdfphy_copy_before_evd", yx("avt_pre_evd")[..., 1:jpkm1]),
+    )
+    rows = []
+    for name, actual in candidates:
+        unequal = _unequal_bits(actual, oracle_avt, wet)
+        rows.append({
+            "name": name,
+            "unequal": unequal,
+            "wet_cells": int(np.count_nonzero(wet)),
+            "max_abs": float(np.max(np.abs(actual[wet] - oracle_avt[wet]))),
+            "exact": unequal == 0,
+        })
+    exact_rows = [row["name"] for row in rows if row["exact"]]
+    require(exact_rows, "no cumulative substitution row made avt bit-exact")
+    first_exact = exact_rows[0]
+    expected_first = ("prandtl_factor"
+                      if cfg.tke_mxl_raw_evaluation == "factored"
+                      else "matrix_rhs_sweep_en_floor")
+    require(first_exact == expected_first,
+            "frozen first-exact prediction refuted: got " + first_exact)
+    first_index = next(i for i, row in enumerate(rows) if row["exact"])
+    require(all(row["exact"] for row in rows[first_index:]),
+            "a downstream substitution lost exactness after the first exact row")
+    return {
+        "card": card.case,
+        "instantiated_tke_config": {
+            "tke_mxl_choice": cfg.tke_mxl_choice,
+            "tke_mxl_raw_evaluation": cfg.tke_mxl_raw_evaluation,
+            "mxl_min_effective": float(np.float64(arrays["rmxl_min"])),
+            "kappa_convention": cfg.kappa_convention,
+            "prandtl_mode": cfg.prandtl_mode,
+            "tke_matrix_evaluation": cfg.tke_matrix_evaluation,
+            "tke_solver_evaluation": cfg.tke_solver_evaluation,
+        },
+        "wet_copy_cells": int(np.count_nonzero(wet)),
+        "rows": rows,
+        "first_exact": first_exact,
+        "status": "PASS",
+    }
 
 
 if __name__ == "__main__":
