@@ -88,6 +88,12 @@ keys and includes, ran `gfortran -fsyntax-only`, independently checked the
 writer/reader layouts and exact byte count, printed
 `ROUND76_UAMID_PREFLIGHT_READY`, and exited 0. Its log SHA-256 is
 `f76b05102a6372673c69ad97415c86e7e5c9941b65f15c8d21a14bb1503c35ed`.
+The final whole-round whitespace audit then found three trailing spaces in
+context lines of the patch artifact. Commit
+`0e59eed390fc855ca2dca5d41b14b2455af66edc` removed them and moved only the
+local unit declaration to an equivalent clean context. The patch dry-applied,
+and the clean-commit exact-preprocessing/Fortran preflight was repeated at that
+commit; it produced the same readiness line and the same SHA-256 above.
 
 The layout plant removed `ubb_e`, printed `REFUSE: layout plant removed the
 ubb_e field`, and exited 69; its log SHA-256 is
@@ -126,15 +132,15 @@ remains held.
 
 ## Review and focused checks
 
-The required separate Codex pass was attempted twice with `codex exec
+The required separate Codex pass was attempted three times with `codex exec
 --sandbox read-only` against the complete committed round diff and an
 adversarial prompt covering the trace floor, source-order ownership, record
-layout, plants, stamps, and every Rule 12 row. Both attempts exited 1 before
+layout, plants, stamps, and every Rule 12 row. All attempts exited 1 before
 review because the client could not initialize in this filesystem sandbox.
 Its terminal result, quoted verbatim, is: **“Error: failed to initialize
 in-process app-server client: Read-only file system (os error 30)”**. There is
 no SHIP or DO NOT SHIP verdict; review is **UNMET/BLOCKED**, and absence of a
-verdict is not approval. Both logs have SHA-256
+verdict is not approval. All three logs have SHA-256
 `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 No production numerical diff is landing under the blocked review.
 
