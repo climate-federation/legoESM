@@ -186,6 +186,10 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R72ZFOP/BLD/ppsrc/nemo/dynspg_ts.f90"),
     "GYRE_OMIP_L2_P3_SM_R74ADV2/BLD/ppsrc/nemo/dynspg_ts.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R74ADV2/BLD/ppsrc/nemo/dynspg_ts.f90"),
+    # Round 76 consumes the admitted R75 operand record and binds the next
+    # producer acquisition to that record's own compiled branch.
+    "GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/dynspg_ts.f90"),
     "round64/oracle_krhs_split/ocean.output": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round64/"
         "oracle_krhs_split/ocean.output"),
@@ -384,6 +388,16 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R74ADV2/BLD/ppsrc/nemo/dynspg_ts.f90:581-584': [
         ('IF( lwp .AND. kt <= nit000 + 1 ) THEN', 2),
         '& l2_u_mid, l2_v_mid, zhup2_e, zhvp2_e, un_adv, vn_adv', 4],
+    # --- round 76: midpoint producer and downstream transport statements ---
+    'GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/dynspg_ts.f90:484-493': [
+        '!* Extrapolate barotropic velocities at mid-step (jn+1/2)',
+        ('END DO   ;   END DO', 3), 10],
+    'GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/dynspg_ts.f90:538-544': [
+        '! resulting flux at mid-step (not over the full domain)',
+        ('END DO   ;   END DO', 8), 7],
+    'GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/dynspg_ts.f90:571-580': [
+        '! Sum over sub-time-steps to compute advective velocities',
+        ('END DO   ;   END DO', 10), 10],
     # --- round 72: stage-1 transport is earlier than the exact RK replay ---
     'GYRE_OMIP_L2_P3_SM_R71FCTST2/BLD/ppsrc/nemo/stprk3_stg.f90:289-290': [
         'zub(ji,jj) = un_adv(ji,jj)*(r1_hu_0',
