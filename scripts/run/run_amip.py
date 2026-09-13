@@ -816,6 +816,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "marine BL => lower LWP floor => lower albedo). "
                              "Requires --turbulence clubb (diagnostic). Default "
                              "off = RH grid-scale cloud fraction (byte-identical).")
+    parser.add_argument("--clubb-prognostic", dest="clubb_prognostic",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Run CLUBB as a PROGNOSTIC higher-order closure: "
+                             "the scheme carries 15 higher-order moments as "
+                             "real state, including the total-water variance "
+                             "and its covariance with temperature, instead of "
+                             "re-estimating them each step from a mixing "
+                             "length times a local gradient. This is the "
+                             "sub-grid variance the cloud PDF otherwise has to "
+                             "guess. Requires --turbulence clubb. Default off "
+                             "= the diagnostic path (byte-identical).")
     parser.add_argument("--cloud-p-xr", dest="cloud_p_xr", type=float, default=None,
                         help="Xu-Randall cloud-fraction RH exponent p_xr (None="
                              "default 0.25; bounds 0.05..1.0). HIGHER => cloud "
@@ -1990,6 +2001,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         volcanic_aerosol_lw=args.volcanic_aerosol_lw,
         cloud_scheme=args.clouds,
         use_clubb_cloud_fraction=args.use_clubb_cloud_fraction,
+        clubb_prognostic=args.clubb_prognostic,
         microphysics=args.microphysics,
         nc_from_aerosol=args.aerosol_ccn,
         subgrid_autoconversion=args.subgrid_autoconversion,

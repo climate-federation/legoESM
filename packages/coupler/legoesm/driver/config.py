@@ -566,6 +566,18 @@ class ExperimentConfig(NamedTuple):
     # ``RadiationConfig.use_clubb_cloud_fraction``; requires diagnostic CLUBB
     # turbulence (turbulence='clubb').  False (default) is byte-identical.
     use_clubb_cloud_fraction: bool = False
+    # Run CLUBB as a PROGNOSTIC higher-order closure rather than a diagnostic
+    # one: the scheme then carries 15 higher-order moments as real state,
+    # including the total-water variance, the liquid-water-potential-temperature
+    # variance and their covariance.  Diagnostic CLUBB instead estimates those
+    # variances each step from a mixing length times a local gradient, so the
+    # cloud PDF is handed an equilibrium guess rather than a quantity with
+    # memory.  Requires turbulence='clubb'; ``init_physics_state`` seeds the
+    # packed (ncol, 15, nlev+1) carry when this is on, and the turbulence
+    # dispatch refuses to run prognostic CLUBB against an unseeded carry rather
+    # than silently re-seeding it every step.  False (default) is the
+    # byte-identical diagnostic path.
+    clubb_prognostic: bool = False
     # Opt-in convective (cumulus) cloud-fraction source (Slingo-1987-inspired surrogate).  The
     # RH-based stratiform cloud schemes give ~0 cloud where an adjustment
     # convection scheme (sbm) holds the column subsaturated, so the convecting
@@ -1798,10 +1810,10 @@ class ExperimentConfig(NamedTuple):
             # Ceiling raised with the scheme spec (see BechtoldConfig
             # __param_spec__): the production value sat on the old bound.
             ("bechtold_rprcon", 3.5e-4, 1.4e-2),
-            ("bechtold_epsilon_deep", 7.0e-4, 1.2e-2),
+            ("bechtold_epsilon_deep", 7.0e-4, 4.2e-3),
             ("bechtold_delta_deep", 3.0e-5, 1.8e-4),
             ("bechtold_dnoprc", 7.5e-5, 1.2e-3),
-            ("bechtold_epsilon_deep", 5.775e-04, 1.2e-2),
+            ("bechtold_epsilon_deep", 5.775e-04, 3.5e-03),
             ("bechtold_delta_deep", 2.475e-05, 2.25e-04),
             ("bechtold_capdcycl_land_tau_scale", 0.0, 2.0),
             ("bechtold_subcloud_evap_scale", 0.1, 4.0),

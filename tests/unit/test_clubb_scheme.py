@@ -2298,3 +2298,57 @@ def test_prognostic_surface_theta_l_variance_is_physical():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_prognostic_clubb_publishes_its_pdf_cloud_fraction():
+    """The prognostic entry must hand out the cloud fraction it already computes.
+
+    It used to advance the moments -- carrying a real total-water variance --
+    and then drop the PDF cloud fraction on the floor, so the radiation route
+    refused prognostic CLUBB outright and the cloud scheme stayed on the
+    humidity diagnosis. Turning the closure on therefore changed the boundary
+    layer and nothing about clouds, which is the opposite of why one would
+    turn it on.
+
+    Asserted on a column whose lowest levels are saturated, so a published
+    all-zero array (indistinguishable from "wired but dead") cannot pass.
+    """
+    import numpy as np
+    from legoesm import constants
+    from legoesm.thermo import saturation_mixing_ratio
+    from legoesm.atmosphere.physics.turbulence.clubb import (
+        clubb_turbulence_prognostic, init_clubb_moments, pack_clubb_moments)
+
+    ncol, nlev = 2, 24
+    p_half = jnp.asarray(np.linspace(2.0e3, 1.0e5, nlev + 1)[None].repeat(ncol, 0))
+    p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    z_half = jnp.asarray(np.linspace(16000.0, 0.0, nlev + 1)[None].repeat(ncol, 0))
+    z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
+    T = jnp.asarray(220.0 + 85.0 * (p_full / 1.0e5))
+    rh = jnp.asarray(np.linspace(0.05, 1.05, nlev)[None].repeat(ncol, 0))
+    q_v = rh * saturation_mixing_ratio(T, p_full)
+    u = jnp.full((ncol, nlev), 4.0)
+    v = jnp.zeros((ncol, nlev))
+    rho = p_full / (constants.R_d * T)
+    cfg = CLUBBConfig(prognostic=True)
+    mom = pack_clubb_moments(init_clubb_moments(ncol, nlev, cfg, dtype=jnp.float64))
+    for _ in range(20):
+        out, mom = clubb_turbulence_prognostic(
+            u, v, T, q_v, mom, p_full, p_half, z_full, z_half,
+            jnp.full((ncol,), 302.0), jnp.full((ncol,), 0.024), rho, 112.5, cfg)
+
+    cf = out.cloud_fraction
+    assert cf is not None, "prognostic CLUBB published no cloud fraction"
+    assert cf.shape == (ncol, nlev)
+    a = np.asarray(cf)
+    assert np.all(np.isfinite(a)) and a.min() >= 0.0 and a.max() <= 1.0
+    # NON-VACUITY: a saturated boundary layer must produce real cloud.
+    assert a.max() > 0.1, f"published an all-but-zero field (max {a.max():.3g})"
+    # TOP-DOWN, like the diagnostic entry: index 0 is the model top, so the
+    # cloud belongs at the BOTTOM. Handing out the ascending array unflipped
+    # once put boundary-layer cloud at the model top.
+    assert a[0].argmax() >= nlev - 4, (
+        f"cloud peaks at level {a[0].argmax()} of {nlev}; orientation is flipped")
+    # The troposphere-top taper must be ported too, not just the formula: no
+    # stratospheric PDF cloud from a region the mixing no longer maintains.
+    assert float(a[:, :3].max()) == 0.0

@@ -371,20 +371,20 @@ def _make_hydrostatic_combined(config: PhysicsConfig, dt: float,
     # Requiring the producer keeps the radiation override off the zero-init carry
     # (which would spuriously clear clouds).  Misconfiguration is LOUD, never a
     # silent no-op (dispatch-hardening).
-    _clubb_cfg = config.turbulence.clubb
-    _turb_produces_cf = (
-        config.turbulence.scheme == "clubb"
-        and not (_clubb_cfg is not None and getattr(_clubb_cfg, "prognostic", False))
-    )
+    # BOTH CLUBB paths now publish a PDF cloud fraction.  The prognostic one
+    # used to be refused here on the grounds that it emitted "packed moments, no
+    # diagnosed cloud fraction" -- true of the OUTPUT, never of the closure: the
+    # moment advance computes the post-advance PDF cloud fraction and simply did
+    # not hand it out.  It does now, so the prognostic path is the BETTER source,
+    # not an unsupported one: its variance is carried state rather than a
+    # mixing-length estimate re-derived each step.
+    _turb_produces_cf = config.turbulence.scheme == "clubb"
     if config.radiation.use_clubb_cloud_fraction and not _turb_produces_cf:
         raise ValueError(
             "RadiationConfig.use_clubb_cloud_fraction=True requires a "
-            "cloud-fraction-producing turbulence closure (turbulence.scheme="
-            "'clubb' with diagnostic CLUBBConfig.prognostic=False); got "
-            f"turbulence.scheme={config.turbulence.scheme!r}"
-            + (" with prognostic=True (packed moments, no diagnosed cloud "
-               "fraction)" if config.turbulence.scheme == "clubb" else "")
-            + ".  Enable diagnostic CLUBB or unset use_clubb_cloud_fraction."
+            "cloud-fraction-producing turbulence closure "
+            "(turbulence.scheme='clubb', diagnostic or prognostic); got "
+            f"turbulence.scheme={config.turbulence.scheme!r}."
         )
     _use_clubb_cf = config.radiation.use_clubb_cloud_fraction
     if config.radiation.scheme != "none":

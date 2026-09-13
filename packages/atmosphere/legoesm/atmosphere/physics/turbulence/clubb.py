@@ -6335,6 +6335,7 @@ def clubb_turbulence_prognostic(
             T_sfc, q_sfc, rho, dt, config, *_sfc_bcs(rho))
         shflx, lhflx, ustar = diags["shflx"], diags["lhflx"], diags["ustar"]
         Kh_full = flip_vertical(diags["Kh_zt"])
+        cloud_frac_a = diags["cloud_frac"]
     else:
         dt_sub = dt / n_sub
         tv_floor = config.T0 * 0.5
@@ -6369,6 +6370,10 @@ def clubb_turbulence_prognostic(
         lhflx = jnp.mean(diag_stk["lhflx"], axis=0)
         ustar = jnp.mean(diag_stk["ustar"], axis=0)
         Kh_full = flip_vertical(diag_stk["Kh_zt"][-1])
+        # Final sub-step, like Kh: the cloud fraction must correspond to the
+        # moments being returned as the carry, not to a sub-cycle average of
+        # states the host never sees.
+        cloud_frac_a = diag_stk["cloud_frac"][-1]
 
     # With an injected tiled flux, report the surface diagnostics as the INJECTED
     # dynamic values directly (Louis-equivalent), rather than clubb_step's
@@ -6378,9 +6383,27 @@ def clubb_turbulence_prognostic(
     if surface_flux is not None:
         _, _, shflx, lhflx, ustar = surface_flux
     h_pbl = diagnose_pbl_height(T, q_v, u, v, p_full, z_full)
+    # PUBLISH the PDF cloud fraction the moment advance already produced.
+    # Without this the prognostic path advances a real total-water variance and
+    # then throws away the only thing the cloud scheme could use it for: the
+    # radiation route refused prognostic CLUBB outright ("packed moments, no
+    # diagnosed cloud fraction"), so turning the closure on changed the boundary
+    # layer and left clouds on the humidity-based scheme.
+    # TOP-DOWN for the host, and tapered above the troposphere top by the SAME
+    # sigmoid the diagnostic entry uses and for the same reason -- CAM slices
+    # the column so CLUBB emits nothing above that reference pressure, and a
+    # consumer must not be handed stratospheric PDF cloud from a region the
+    # mixing no longer maintains.  Porting the exclusion, not just the formula.
+    cloud_fraction_td = flip_vertical(cloud_frac_a)
+    if config.trop_cloud_top_press > 0.0:
+        cloud_fraction_td = cloud_fraction_td * jax.nn.sigmoid(
+            (jnp.log(jnp.clip(p_full, 1.0, None))
+             - jnp.log(config.trop_cloud_top_press))
+            / config.trop_cloud_taper_lnp_width)
     output = TurbulenceOutput(
         du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, dq_v_dt=dq_v_dt,
-        Km=Kh_full, Kh=Kh_full, shflx=shflx, lhflx=lhflx, ustar=ustar, h_pbl=h_pbl)
+        Km=Kh_full, Kh=Kh_full, shflx=shflx, lhflx=lhflx, ustar=ustar,
+        h_pbl=h_pbl, cloud_fraction=cloud_fraction_td)
     return output, pack_clubb_moments(new_moments)
 
 

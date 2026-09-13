@@ -3855,6 +3855,31 @@ def turbulence_config_for(config):
         # (louis_Ck / louis_z0 / louis_Ch_neutral / louis_Cd_neutral have no
         # LouisConfig field and are NOT threaded here — still inert, see the
         # upstream note in the calibration repo.)
+        # Prognostic CLUBB: thread the experiment-level switch into the ACTIVE
+        # scheme's nested config here, for the same reason the marine-Sc flag
+        # above is threaded here -- this function is the single source every
+        # dycore's kernel consumes, so a knob set anywhere else is inert on the
+        # backends that do not read it.  Only meaningful for clubb; a run that
+        # asks for it under a different closure is refused rather than silently
+        # ignored, because "the flag did nothing" is the failure mode this
+        # placement exists to prevent.
+        if getattr(config, "clubb_prognostic", False):
+            if tc.scheme != "clubb":
+                raise ValueError(
+                    f"clubb_prognostic=True requires turbulence='clubb', got "
+                    f"{tc.scheme!r}. Prognostic higher-order moments are a "
+                    f"CLUBB feature; no other closure carries them.")
+            # ``TurbulenceConfig.clubb`` defaults to None and dispatch
+            # substitutes a fresh CLUBBConfig(), so _replace on the None here
+            # would crash -- and skipping it would drop the request silently,
+            # which is the same defect the surface-layer injection below was
+            # fixed for.  Materialize exactly what dispatch will, via the
+            # shared helper.
+            from legoesm.atmosphere.physics.turbulence.integration import (
+                materialize_sub_config,
+            )
+            tc = materialize_sub_config(tc)
+            tc = tc._replace(clubb=tc.clubb._replace(prognostic=True))
         if tc.scheme == "louis" and tc.louis is not None:
             _louis_updates = {}
             for exp_name, leaf_name in (
@@ -3893,6 +3918,21 @@ def turbulence_config_for(config):
     layout = active_column_layout()
     tc = override if layout is None else localize_turbulence_override(
         override, layout)
+    # An explicit override is authoritative and is NOT rewritten here -- but it
+    # must not silently swallow the prognostic-CLUBB request either, which is
+    # what "authoritative" would otherwise mean in practice: the run would ask
+    # for prognostic moments, be told nothing, and quietly get the diagnostic
+    # closure.  Refuse instead, and say where to set it.
+    if getattr(config, "clubb_prognostic", False):
+        _sub = getattr(tc, "clubb", None)
+        if tc.scheme != "clubb" or _sub is None or not _sub.prognostic:
+            raise ValueError(
+                "clubb_prognostic=True but an explicit turbulence_override is "
+                "in force and does not select prognostic CLUBB (override "
+                f"scheme={tc.scheme!r}, prognostic="
+                f"{getattr(_sub, 'prognostic', None)!r}). The override is "
+                "authoritative, so set CLUBBConfig(prognostic=True) inside it "
+                "rather than relying on the experiment-level flag.")
     return apply_surface_flux_config(tc, config)
 
 

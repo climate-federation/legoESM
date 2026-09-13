@@ -111,7 +111,7 @@ __param_spec__ = {
             # lower bound is unchanged; 1.2e-2 is ~7x IFS ENTRORG, well above
             # any value expected to be adopted, and exists to let an ARM bracket
             # the response, not to be shipped.
-            "epsilon_deep": {"units": "1/m", "bounds": (7.0e-4, 1.2e-2), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "IFS cuascn ENTRORG deep base rate", "shape": None},
+            "epsilon_deep": {"units": "1/m", "bounds": (7.0e-4, 4.2e-3), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "IFS cuascn ENTRORG deep base rate", "shape": None},
             "delta_deep": {"units": "1/m", "bounds": (3.0e-5, 1.8e-4), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "IFS cuascn deep detrainment base rate", "shape": None},
             "mc_normalize_scale": {"units": "kg/m^2/s", "bounds": (0.005, 0.2), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "Bechtold et al. (2008) Fig. 2", "shape": None},
             "parcel_dq": {"units": "kg/kg", "bounds": (0.0, 0.003), "tunable_tier": 3, "transform": "sigmoid", "category": "trigger", "reference": "Bechtold et al. (2008) scheme default", "shape": None},

@@ -131,6 +131,89 @@ def test_use_clubb_cloud_fraction_flag_flows_to_config():
     assert cfg_neg.use_clubb_cloud_fraction is False
 
 
+def test_clubb_prognostic_flag_reaches_the_turbulence_kernel():
+    """--clubb-prognostic must round-trip AND reach the nested scheme config.
+
+    The round-trip alone is not enough: ``turbulence_config_for`` is the single
+    source every dycore's kernel is built from, so a flag that reaches
+    ``ExperimentConfig`` but not that function is inert on every backend while
+    reporting success. Both halves are asserted here.
+    """
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert cfg_off.clubb_prognostic is False
+
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+        "--turbulence", "clubb",
+        "--clubb-prognostic",
+    ]), parser))
+    assert cfg_on.clubb_prognostic is True
+    # the half that actually decides what runs
+    assert turbulence_config_for(cfg_on).clubb.prognostic is True
+    # and the diagnostic default really is the other value, so the assertion
+    # above cannot pass by the field simply defaulting True.  Without the flag
+    # the nested sub-config is left as None and dispatch substitutes a fresh
+    # CLUBBConfig(), so ask what dispatch will actually run rather than reading
+    # a slot that is legitimately empty.
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        materialize_sub_config,
+    )
+    cfg_diag = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "clubb",
+    ]), parser))
+    diag_tc = materialize_sub_config(turbulence_config_for(cfg_diag))
+    assert diag_tc.clubb.prognostic is False
+
+
+def test_clubb_prognostic_under_another_closure_is_refused():
+    """Prognostic moments are a CLUBB feature; asking for them under Louis is a
+    configuration error, not something to ignore quietly."""
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "louis",
+        "--clubb-prognostic",
+    ]), parser))
+    with pytest.raises(ValueError, match="requires turbulence='clubb'"):
+        turbulence_config_for(cfg)
+
+
+def test_clubb_prognostic_not_swallowed_by_a_turbulence_override():
+    """An explicit turbulence override is authoritative, but it must not make
+    the prognostic request vanish.
+
+    Found by review: the threading sat inside the no-override branch, so a run
+    setting BOTH an override and clubb_prognostic resolved to the DIAGNOSTIC
+    closure while reporting nothing -- the inert-knob failure this repo keeps
+    hitting. Refusing is correct; silently honouring the flag would instead
+    rewrite an object the caller declared authoritative.
+    """
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+
+    base = ExperimentConfig(turbulence="clubb", clubb_prognostic=True)
+    diagnostic_override = base._replace(
+        turbulence_override=TurbulenceConfig(scheme="clubb"))
+    with pytest.raises(ValueError, match="turbulence_override"):
+        turbulence_config_for(diagnostic_override)
+
+    # an override that DOES select it resolves normally
+    ok = base._replace(turbulence_override=TurbulenceConfig(
+        scheme="clubb", clubb=CLUBBConfig(prognostic=True)))
+    assert turbulence_config_for(ok).clubb.prognostic is True
+    # and an override with the flag OFF is untouched (no false positive)
+    off = ExperimentConfig(turbulence="clubb", clubb_prognostic=False)._replace(
+        turbulence_override=TurbulenceConfig(scheme="clubb"))
+    assert turbulence_config_for(off).scheme == "clubb"
+
+
 def test_convective_precip_efficiency_cli_wiring_929():
     """#929: the shared --convective-precip-efficiency knob reaches the config
     for BOTH Tiedtke and Bechtold; UNSET is the ``None`` sentinel (each scheme
@@ -2028,7 +2111,14 @@ def test_config_yaml_round_trips_authoritative_values():
     assert cfg.microphysics == "morrison"
     assert cfg.cloud_scheme == "sundqvist"
     assert cfg.radiation == "rrtmg"          # rrtmgp builder alias
-    assert cfg.turbulence == "louis"
+    # Re-baselined 2026-09-13 (owner decision): the boundary layer moved from
+    # the Louis first-order closure to CLUBB run PROGNOSTICALLY, so the scheme
+    # carries the sub-grid total-water variance as state instead of
+    # re-diagnosing it from a mixing length each step. Both keys are asserted
+    # because the pair is what defines the baseline: CLUBB with the flag off is
+    # a different model from CLUBB with it on.
+    assert cfg.turbulence == "clubb"
+    assert cfg.clubb_prognostic is True
     # No tiled surface on this lane -- the tiled port is open work, and the
     # deck says so at the field.
     assert cfg.surface_tiled is False

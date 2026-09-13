@@ -85,8 +85,28 @@ clouds: sundqvist
 microphysics: morrison
 convection: bechtold        # mass-flux (IFS lineage), water-conserving by
                             # construction; C24 screen = revalidation gate
-turbulence: louis           # directive turbulence (was also required by the
-                            # cube-era tiled surface; MPAS runs untiled)
+# NEW BASELINE, 2026-09-13 (owner decision). This moves TWO things at once and
+# is therefore a deliberate re-baselining, not a one-variable arm: the boundary
+# layer changes closure AND gains prognostic sub-grid variance. Nothing here is
+# term-by-term comparable to a Louis-era run; score it against a fresh control.
+# WHY: the cloud-cover bias is a humidity/variance problem, not a cloud-closure
+# one -- roughly four fifths of tropical mid-troposphere cells sit near
+# saturation, which is why five convection knobs in a row returned null.
+# Diagnostic closures hand the cloud PDF a variance re-estimated each step from
+# a mixing length times a local gradient; CLUBB run prognostically carries the
+# total-water variance and its covariance with temperature as real state.
+turbulence: clubb           # was: louis (directive turbulence, and required by
+                            # the cube-era tiled surface; MPAS runs untiled)
+clubb_prognostic: true      # carry the 15 higher-order moments as state rather
+                            # than re-diagnosing them each step
+# NOT SET, and this is the open gap: radiation cannot yet consume the moist
+# closure's cloud fraction on THIS lane. use_clubb_cloud_fraction is refused on
+# the MPAS backend, which builds its radiation config directly and bypasses the
+# shared pipeline that threads the override, so setting it here would stop the
+# run at startup. Until that is wired, the prognostic variance reaches the
+# boundary layer but NOT the cloud optics: clouds stay on the humidity-based
+# grid-scale fraction, and this deck should not be expected to move the
+# cloud-cover bias on its own.
 gravity_wave_drag: mcfarlane+hines  # orographic (McFarlane) + non-orographic
                             # (Hines) composite (directive 2026-07-15). The
                             # 2026-07-15 A/B: on latlon24 the +hines lid
