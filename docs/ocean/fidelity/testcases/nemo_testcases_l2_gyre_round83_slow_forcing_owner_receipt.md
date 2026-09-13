@@ -149,11 +149,34 @@ held manifest, or NEMO source was modified.
 
 ## Review and focused verification
 
-The mandatory separate Codex review is recorded below after the Rule-12 table
-was written. REVIEW_RESULT_PENDING
+The mandatory separate review command was attempted against the complete
+Round-83 diff after the Rule-12 table was written. It failed before the review
+model started, so there is no `SHIP`/`DO NOT SHIP` verdict to quote. Its
+terminal line, quoted verbatim, is:
 
-Focused verification is recorded below after the final trace-only tree is
-sealed. TEST_RESULT_PENDING
+> Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+
+Per the operator's 2026-09-13 08:30 instruction: **independent review
+unavailable in-sandbox**; work continued. The complete captured output is
+`round83_codex_review.txt`, SHA-256
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
+No reviewer approval is claimed, and no physics is being shipped.
+
+The clean-tree citation gate passed all 7/7 compiled-source citations with no
+unmapped citation or map-audit failure. Shifting the HPG-to-ADV citation by two
+lines produced `SYMBOL-NOT-AT-LINE` and exited 1. The ordinary/plant artifacts
+have SHA-256
+`3b03f4360f89d9bd412f52aff6f685bc5f06aa637bdcac8ac7f291725d5e3109`
+and
+`e17c04ff30b3639f27751a89177be6806b6c62a0ebad866a20c7f79cd743829f`.
+
+Focused CPU/fp64 verification covered the Round-81 admission/record reader,
+Round-82 operand walk, new Round-83 source-chain helpers, and receipt citation
+gate: 25 tests passed in 1.69 seconds. Both modified scripts also compile, and
+`git diff --check` passes. The test log SHA-256 is
+`d9f83af3c2813810b066e09bcce3f94353e387a0f7a3abab1e6ebbf8e0af8ecb`.
+The known unrelated `test_rk3_ws_differs_from_rk3_and_is_finite` failure was
+not encountered.
 
 ## Choices and uncertainty
 
