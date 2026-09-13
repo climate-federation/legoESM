@@ -189,6 +189,9 @@ new model result.
 - New record parser, admitted U parser, and receipt citation-gate tests:
   **23 passed in 1.72 s**.  Evidence SHA-256:
   `debdb9258ed95512c3af2539df84473ca7fd413cfc50423547b1dd31ec5de4d4`.
+- Receipt citation gate: **PASS**, 11/11 compiled citations mapped, zero
+  citation or full-map failures.  Shifting the forcing-import citation by two
+  lines exited 1 with `SYMBOL-NOT-AT-LINE`.
 - Python compilation, `bash -n`, and `git diff --check`: PASS.
 - The record-dependent admission and ULP plants are deliberately UNMEASURED
   until the operator produces the record; the acquisition refuses success
