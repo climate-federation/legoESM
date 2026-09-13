@@ -358,6 +358,14 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R72ZFOP/BLD/ppsrc/nemo/dynspg_ts.f90:797-817': [
         '! Finalize sums:',
         "WRITE(numout,*) 'LANE2_BT_ADVMEAN_DUMP '", 21],
+    # --- round 74: automatic external-step resolution in the R72 producer ---
+    'GYRE_OMIP_L2_P3_SM_R72ZFOP/BLD/ppsrc/nemo/dynspg_ts.f90:1029-1045': [
+        'IF( ln_bt_auto )   nn_e = CEILING( rn_Dt / rn_bt_cmax * zcmax)',
+        'zcmax = zcmax * rDt_e', 17],
+    'GYRE_OMIP_L2_P3_SM_R72ZFOP/BLD/ppsrc/nemo/dynspg_ts.f90:1064-1067': [
+        "WRITE(numout,*) '     Barotropic time steps => in seconds",
+        "ELSE                  ; WRITE(numout,*) '        set      "
+        "(ln_bt_auto=F) with the namelist parameter nn_e '", 4],
     # --- round 72: stage-1 transport is earlier than the exact RK replay ---
     'GYRE_OMIP_L2_P3_SM_R71FCTST2/BLD/ppsrc/nemo/stprk3_stg.f90:289-290': [
         'zub(ji,jj) = un_adv(ji,jj)*(r1_hu_0',
