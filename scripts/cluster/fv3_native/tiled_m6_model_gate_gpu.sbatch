@@ -12,7 +12,7 @@
 # jax.distributed via SLURM, NCCL collectives.  2 GPUs per node.
 # Usage: sbatch --nodes=N --ntasks=2N --ntasks-per-node=2 --export=ALL,KT=..,PAD=..,REF=<npz> this
 set -uo pipefail
-WT=/burg-archive/glab/users/pg2328/legoESM_fv3jax
+WT=${WT:-/burg-archive/glab/users/pg2328/legoESM_fv3jax}
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 cd "$WT" || exit 1
 export PYTHONPATH="$WT/packages/core:$WT/packages/atmosphere:$WT/packages/coupler:$WT/packages/ice:$WT/packages/land:$WT/packages/ocean:$WT/packages/ml:$WT/packages/tools:$WT/src"

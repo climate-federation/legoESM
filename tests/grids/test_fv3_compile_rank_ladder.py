@@ -173,3 +173,32 @@ def test_runtime_banner_prints_resolved_settings(monkeypatch, capsys):
         "cpu_affinity=[2, 3]",
     ):
         assert expected in line
+
+
+def test_gate_nq_flag_defaults_to_one_and_reaches_every_ic_site():
+    """--nq (2026-09-13): default 1 keeps every existing reference npz
+    valid; and EVERY dcmip16_initial_state call in the gate -- the flat
+    reference, the in-process reference and the window arm -- must carry
+    n_tracers=args.nq, or one arm would silently run a different tracer
+    count from the one it is scored against."""
+    import ast
+    import inspect
+    parser = gate.main.__globals__["argparse"].ArgumentParser
+    assert parser is not None
+    tree = ast.parse(inspect.getsource(gate))
+    defaults = {}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and getattr(node.func, "attr", None)
+                == "add_argument" and node.args
+                and isinstance(node.args[0], ast.Constant)):
+            for kw in node.keywords:
+                if kw.arg == "default" and isinstance(kw.value, ast.Constant):
+                    defaults[node.args[0].value] = kw.value.value
+    assert defaults["--nq"] == 1
+    sites = [node for node in ast.walk(tree)
+             if isinstance(node, ast.Call)
+             and getattr(node.func, "attr", None) == "dcmip16_initial_state"]
+    assert len(sites) >= 3, "expected three IC construction sites"
+    for call in sites:
+        kws = {kw.arg: ast.unparse(kw.value) for kw in call.keywords}
+        assert kws.get("n_tracers") == "args.nq", ast.unparse(call)

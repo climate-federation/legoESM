@@ -93,6 +93,16 @@ class FV3DuoConfig(NamedTuple):
     storage_dtype: str = "float64"
 
 
+def lon_modulated_tracer(sphum, agrid_lon, n: int, ng: int, iq: int):
+    """``sphum * (1 + 0.5 sin(iq * lon))`` on the compute window of one
+    padded face array; halos untouched (zero, as sphum's are)."""
+    cs = slice(ng, ng + n)
+    q = np.array(sphum, dtype=np.float64)
+    lon = np.asarray(agrid_lon, dtype=np.float64)[cs, cs]
+    q[cs, cs, :] *= (1.0 + 0.5 * np.sin(iq * lon))[:, :, None]
+    return q
+
+
 class FV3DuoDynamicsModel:
     """One ``fv_dynamics`` outer step per ``step(state, dt)`` call.
 
@@ -370,8 +380,18 @@ class FV3DuoDynamicsModel:
     # Initial condition (slice 1: DCMIP16 baroclinic wave only)
     # ------------------------------------------------------------------
 
-    def dcmip16_initial_state(self, *, do_pert: bool = True) -> dict:
+    def dcmip16_initial_state(self, *, do_pert: bool = True,
+                              n_tracers: int = 1) -> dict:
         """The DCMIP16_BC (test_case = -13 / -12) bundle on this grid.
+
+        ``n_tracers > 1`` appends passenger tracers ``iq = 1..n-1`` built
+        as ``sphum * (1 + 0.5 sin(iq * lon))`` on the compute window (halos
+        stay zero, like sphum's).  sphum itself is zonally symmetric, so a
+        longitude-shifted copy would be the SAME field; the modulation is
+        what makes tracer ``iq`` distinguishable from tracer 0 and from
+        every other ``iq`` -- an index swap or a dropped tracer in the
+        sharded transport shows up, a copy would not.  Every extra tracer
+        is strictly positive where sphum is.
 
         ``sphum`` rides as a PASSENGER tracer (the lane advects it;
         ``zvir`` stays 0 so it never feeds back).  Pressures come from
@@ -400,6 +420,14 @@ class FV3DuoDynamicsModel:
                 ptop=self._ptop, akap=FV3_KAPPA, n=n, ng=ng, km=cfg.km)
             nh = build_nh_carry(flat_ctx, cfg.km, flat_ctx.hs6)
         q = [jnp.asarray(np.stack(sphum6))]
+        if n_tracers < 1:
+            raise ValueError(f"n_tracers must be >= 1, got {n_tracers}")
+        for iq in range(1, n_tracers):
+            q.append(jnp.asarray(np.stack([
+                lon_modulated_tracer(
+                    sphum6[t], self.grid.ctx_np["gs6"][t]["agrid_lon"],
+                    n, ng, iq)
+                for t in range(6)])))
         omga = jnp.zeros(
             (6,) + tuple(field_shape("delp", n, ng, cfg.km)),
             dtype=jnp.float64)

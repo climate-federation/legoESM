@@ -228,6 +228,57 @@ class TestFV3DuoDynamicsModel:
         q1 = np.asarray(out["q"][0])
         assert np.isfinite(q1).all()
 
+    def test_extra_tracers_are_nonzero_distinct_and_lon_modulated(
+            self, model):
+        """n_tracers appends sphum*(1+0.5 sin(iq*lon)) passengers: tracer 0
+        untouched, every extra one nonzero, distinct from the others, and
+        zero in the halos like sphum. A zonally-shifted copy of the
+        zonally-symmetric sphum would be the SAME field -- this is what
+        makes a swapped or dropped tracer visible."""
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            lon_modulated_tracer)
+        one = model.dcmip16_initial_state(n_tracers=1)
+        ic = model.dcmip16_initial_state(n_tracers=3)
+        assert len(one["q"]) == 1 and len(ic["q"]) == 3
+        q0, q1, q2 = (np.asarray(q) for q in ic["q"])
+        assert np.array_equal(q0, np.asarray(one["q"][0]))
+        cs = slice(NG, NG + N)
+        halo = np.ones(q0.shape[1:3], bool)
+        halo[cs, cs] = False
+        gs6 = model.grid.ctx_np["gs6"]
+        for iq, q in ((1, q1), (2, q2)):
+            assert not q[:, halo, :].any(), f"tracer {iq} halo not zero"
+            assert (q[:, cs, cs, :] > 0).all(), f"tracer {iq} not positive"
+            for t in range(6):
+                lon = np.asarray(gs6[t]["agrid_lon"])[cs, cs]
+                want = q0[t, cs, cs, :] * (1.0 + 0.5 * np.sin(iq * lon))[
+                    :, :, None]
+                np.testing.assert_allclose(q[t, cs, cs, :], want, rtol=1e-13)
+                # and the helper is what the model used
+                np.testing.assert_array_equal(
+                    q[t], lon_modulated_tracer(q0[t], gs6[t]["agrid_lon"],
+                                               N, NG, iq))
+        assert not np.array_equal(q1, q2)
+        assert not np.array_equal(q1, q0)
+
+    def test_n_tracers_below_one_is_refused(self, model):
+        with pytest.raises(ValueError, match="n_tracers"):
+            model.dcmip16_initial_state(n_tracers=0)
+
+    def test_one_step_advects_every_tracer(self, model):
+        """Two passengers through one step: both come back, both finite,
+        both moved, and they did not collapse onto each other."""
+        ic = model.dcmip16_initial_state(n_tracers=2)
+        out = model.step(ic, BDT)
+        assert len(out["q"]) == 2
+        for iq in range(2):
+            a, b = np.asarray(ic["q"][iq]), np.asarray(out["q"][iq])
+            assert a.shape == b.shape
+            assert np.isfinite(b).all(), f"tracer {iq} went non-finite"
+            assert float(np.abs(b - a).max()) > 0.0, f"tracer {iq} did not move"
+        assert not np.array_equal(np.asarray(out["q"][0]),
+                                  np.asarray(out["q"][1]))
+
     def test_validate_dycore_contract(self, model):
         from legoesm.components.protocol import validate_dycore
         validate_dycore(model)

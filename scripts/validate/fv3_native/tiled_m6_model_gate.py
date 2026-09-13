@@ -111,6 +111,10 @@ def main(argv=None):
     ap.add_argument("--steps", type=int, default=2,
                     help="outer steps to score (>= 1; 0 is refused)")
     ap.add_argument("--dt", type=float, default=900.0)
+    ap.add_argument("--nq", type=int, default=1,
+                    help="passenger tracers in the IC: sphum plus nq-1 "
+                         "longitude-modulated copies (nonzero, distinct); "
+                         "a reference npz must carry the same nq")
     ap.add_argument("--n-split", type=int, default=3)
     ap.add_argument("--distributed", action="store_true",
                     help="MULTI-PROCESS run (jax.distributed.initialize via "
@@ -217,7 +221,7 @@ def main(argv=None):
     ndev = 6 * args.kt * args.kt
     print(f"[m6] repo {sha} C{args.n} km={args.km} "
           f"{'NH' if args.nh else 'hydro'} kt={args.kt} pad={args.pad} "
-          f"steps={args.steps} dt={args.dt} n_split={args.n_split} "
+          f"steps={args.steps} dt={args.dt} n_split={args.n_split} nq={args.nq} "
           f"devices={jax.device_count()} processes={jax.process_count()} "
           f"rank={jax.process_index()} local_devices="
           f"{jax.local_device_count()}")
@@ -249,7 +253,7 @@ def main(argv=None):
         sh6 = NamedSharding(mesh6, P("face"))
         ref_model = FV3DuoDynamicsModel(grid, cfg, step_out_shardings=sh6,
                                         step_face_batched=True)
-        ref = ref_model.dcmip16_initial_state(do_pert=True)
+        ref = ref_model.dcmip16_initial_state(do_pert=True, n_tracers=args.nq)
         ref = jax.tree_util.tree_map(
             lambda a: jax.device_put(a, sh6) if hasattr(a, "ndim")
             and a.ndim >= 3 and a.shape[0] == 6 else a, ref)
@@ -291,7 +295,7 @@ def main(argv=None):
         sh6 = NamedSharding(mesh6, P("face"))
         ref_model = FV3DuoDynamicsModel(grid, cfg, step_out_shardings=sh6,
                                         step_face_batched=True)
-        ref = ref_model.dcmip16_initial_state(do_pert=True)
+        ref = ref_model.dcmip16_initial_state(do_pert=True, n_tracers=args.nq)
         ref = jax.tree_util.tree_map(
             lambda a: jax.device_put(a, sh6) if hasattr(a, "ndim")
             and a.ndim >= 3 and a.shape[0] == 6 else a, ref)
@@ -336,7 +340,7 @@ def main(argv=None):
               "only, results not a ladder row")
     print(f"[m6] {lay}; barriers {win_model._window_comm.barrier_mode}")
     rss("window model built")
-    win = win_model.dcmip16_initial_state(do_pert=True)
+    win = win_model.dcmip16_initial_state(do_pert=True, n_tracers=args.nq)
     rss("window IC")
 
     def flat_leaves(bundle_w):
