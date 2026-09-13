@@ -33,6 +33,19 @@
 # Every arm restarts from a COPY of cc_ctl's day-80 checkpoint, already placed
 # in each arm dir (never a newest-wins pointer: two arms advancing at once make
 # "latest" ambiguous).
+#
+# ONE DEVIATION, recorded because the arms are then not byte-identical at day 80:
+# the checkpoint was written by a Louis run, so its CLUBB moment slot holds the
+# minimal (ncol,1,1) placeholder while prognostic CLUBB needs (ncol,15,nlev+1).
+# The driver REFUSES to start rather than silently reseed a prognostic field
+# mid-restart, which is correct -- that would branch the trajectory without
+# saying so, and it is what killed the first launch of sc_clubbp. The fix is to
+# drop ONLY physstate_clubb_moments from that arm's copy, so the reseed is
+# confined to the moments and every other carry still resumes. See
+# sc_clubbp/WHY_THIS_CHECKPOINT_DIFFERS.txt. Cost: that arm spins its moments up
+# over the first hours, so it is not bit-comparable at day 80 the way the other
+# two are to each other. Boundary-layer moments equilibrate in hours, so the
+# 6-day window absorbs it.
 set -euo pipefail
 WT=/work/bd1083/b309178/diffESM/legoesm_pg/wt_cloudreview
 MAIN=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM
