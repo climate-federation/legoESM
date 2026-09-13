@@ -73,6 +73,13 @@ not treated as a waiver. The corrected operator script reruns the same required
 review after the parent comparison exists and refuses a response that does not
 end in one exact verdict.
 
+A separate pass was then invoked on the committed Round 80 preregistration,
+receipt, recovery script, and Rule 12 table with an explicit instruction to
+refute the STOPPED_FOR_RECORD claim and plants. It also exited 1 before reading
+the diff with the same terminal line quoted above. Thus Round 80 has no
+adversarial verdict to quote; `round80_codex_round_review_attempt.txt` retains
+the failed invocation rather than inventing one.
+
 ## First non-bit statement and magnitude rank
 
 No new model measurement supersedes Round 79. Its admitted direct gate remains
