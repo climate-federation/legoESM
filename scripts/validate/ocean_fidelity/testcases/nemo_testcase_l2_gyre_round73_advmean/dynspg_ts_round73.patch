@@ -1,9 +1,6 @@
 --- dynspg_ts.F90
 +++ dynspg_ts.F90
-@@ -598,6 +598,18 @@
-          l2_magic = 'NEMO_L2_BTORD_2'
-          WRITE(l2_ord_unit) l2_magic, 2, kt, 2, jpi, jpj, STORAGE_SIZE(1._wp), rDt_e
-       ENDIF
+@@ -600,0 +601,12 @@
 +      ! Round-73 WRITE-only extension of the existing transport-mean stream.
 +      ! kt=1 remains in the block above; this opens the identical stream at kt=2.
 +      IF( lwp .AND. kt == nit000 + 1 ) THEN
@@ -16,9 +13,6 @@
 +         WRITE(l2_adv_unit) l2_magic, 2, kt, icycle, jpi, jpj, STORAGE_SIZE(1._wp)
 +         WRITE(l2_adv_unit) r1_wgt2s, wgtbtp2(1:icycle), r1_e2u, r1_e1v
 +      ENDIF
- 
-       !                                             ! ==================== !
-       DO jn = 1, icycle                             !  sub-time-step loop  !
 @@ -736,7 +749,7 @@
           !
           !                             ! Sum over sub-time-steps to compute advective velocities
@@ -37,15 +31,9 @@
              WRITE(l2_adv_unit) jn, za2
              WRITE(l2_adv_unit) l2_adv_before_u, l2_adv_before_v, zhU, zhV, &
                 & l2_u_mid, l2_v_mid, zhup2_e, zhvp2_e, un_adv, vn_adv
-@@ -993,7 +1006,7 @@
-       ! (Divide by weights sums here to prevent from truncation errors)
-       un_adv(:,:) = un_adv(:,:) / r1_wgt2s 
-       vn_adv(:,:) = vn_adv(:,:) / r1_wgt2s 
+@@ -996 +1009 @@
 -      IF( lwp .AND. kt == nit000 )   WRITE(l2_adv_unit) un_adv, vn_adv
 +      IF( lwp .AND. kt <= nit000 + 1 )   WRITE(l2_adv_unit) un_adv, vn_adv
-       puu_b  (:,:,Kaa) = puu_b  (:,:,Kaa) / r1_wgt1s 
-       pvv_b  (:,:,Kaa) = pvv_b  (:,:,Kaa) / r1_wgt1s 
-       pssh   (:,:,Kaa) = pssh   (:,:,Kaa) / r1_wgt1s
 @@ -1005,7 +1018,7 @@
        ELSE
           CALL lbc_lnk( 'dynspg_ts', un_adv, 'U', -1._wp, vn_adv, 'V', -1._wp ) ! Boundary conditions
