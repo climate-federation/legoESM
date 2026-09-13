@@ -124,6 +124,10 @@ applies only the additive patch, compiles a new binary, runs the existing
 10-step GYRE configuration, requires final restart and mesh twins, admits all
 inherited artifacts, and permits only the new named record.  It never replaces
 canonical NEMO source and refuses an existing target or run directory.
+The no-argument wrapper handed to the operator has SHA-256
+`f4dcef7a66ccfd4210e28691af6cf9c34826253a3ab901eadc89e99ef0d911c6`;
+its unexpected-argument plant exited 64 and printed exactly
+`REFUSE: run.sh takes no arguments` without invoking the acquisition.
 
 Local preprocessing plus `gfortran -fsyntax-only` passed.  The committed clean
 preflight printed exactly
