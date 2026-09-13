@@ -136,9 +136,36 @@ executable changed.
 
 ## Review and focused verification
 
-Independent review: PENDING.
+The required separate read-only Codex command was run against the complete
+Round-86 diff and Rule-12 table. It failed before a reviewer model started, so
+there is no `SHIP` or `DO NOT SHIP` verdict. Its terminal verdict is quoted
+verbatim:
 
-Focused CPU/fp64 tests and the receipt citation gate: PENDING.
+> Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+
+Per the operator instruction, **independent review unavailable in-sandbox**;
+work continued. The complete output is `round86_codex_review.txt`, SHA-256
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
+No reviewer approval is claimed and no physics is shipped.
+
+Focused CPU/fp64 verification passes 69 tests covering the Round-41 literal
+KEG/ZAD replay, Round-46 stage gate, Round-84 association walk, Round-86
+helpers and controls, citation gate, ZAD bottom masks, QCO pairing, and
+ZDF/dynZDF composition. The decisive line is `69 passed in 37.35s`; log
+SHA-256 is
+`f9b0b652db4e94581cce5ecf8cc5b260e24393cd7be866e6524b4998ddaac26c`.
+Python compilation and `git diff --check` pass. The known unrelated
+`test_rk3_ws_differs_from_rk3_and_is_finite` failure was not encountered.
+
+The receipt citation gate passes all 3/3 compiled-source citations with zero
+unmapped or map-audit failures; artifact SHA-256 is
+`46f23527986b9623077b8e666e02f7fa163ee0061deaa9b2a9771ce7146f7caa`.
+Shifting the WZV citation by two lines exits 1 with
+`SYMBOL-NOT-AT-LINE`; plant SHA-256 is
+`9b80fd8e4f1564b7678a22ab2700907258738c3c491200f1e140f874f82a4277`.
+The first citation attempt refused an ambiguous repeated QCO-arm anchor; no
+citation was accepted from that attempt. Both endpoints were occurrence-pinned
+before the clean pass.
 
 ## Choices and uncertainty
 
