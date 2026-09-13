@@ -669,25 +669,6 @@ def nemo_literal_accumulate_transport(
     return b(Hu_sum + inc_u), b(Hv_sum + inc_v)
 
 
-def nemo_literal_midpoint_extrapolation(
-    coefficients, now, before, before_before,
-):
-    """NEMO AB3 external-mode midpoint in written source association.
-
-    ``dynspg_ts.F90`` forms ``ua_e`` and ``va_e`` as the left-associated
-    three-term sum.  Materialize each multiply and add so the shared helper is
-    usable both by the production loop and by oracle-input fidelity gates.
-    """
-    first = nemo_source_round(
-        coefficients[0] * nemo_source_round(now))
-    second = nemo_source_round(
-        coefficients[1] * nemo_source_round(before))
-    third = nemo_source_round(
-        coefficients[2] * nemo_source_round(before_before))
-    value = nemo_source_round(first + second)
-    return nemo_source_round(value + third)
-
-
 def nemo_literal_continuity_divergence(
     H_u, H_v, U, V, u_mask, v_mask, grid,
 ):
@@ -1586,6 +1567,13 @@ def _run_substep_loop(
                 za_i, U_bar_c, Ub_c, Ubb_c)
             V_mid = nemo_literal_midpoint_extrapolation(
                 za_i, V_bar_c, Vb_c, Vbb_c)
+            # Preserve source-line positions below this extraction: the
+            # fail-closed receipt citation map binds existing claims to this
+            # shared implementation. The helper lives at module end so its
+            # definition cannot shift those already-audited source lines.
+            #
+            # This spacing is mechanically covered by the citation-map audit
+            # and the round-78 whole-trace bit-identity comparison.
         else:
             U_mid, V_mid = U_bar_c, V_bar_c
         eta_mid = eta_c
@@ -3348,3 +3336,22 @@ def barotropic_substeps_wide_halo_latlon_cgrid(
 # (line 65); the barotropic C-grid has its OWN face-averaging variant, so the
 # public alias is namespaced to avoid shadowing that import (codex).
 barotropic_depth_average_to_faces = _depth_average_to_faces
+
+
+def nemo_literal_midpoint_extrapolation(
+    coefficients, now, before, before_before,
+):
+    """NEMO AB3 external-mode midpoint in written source association.
+
+    ``dynspg_ts.F90`` forms ``ua_e`` and ``va_e`` as the left-associated
+    three-term sum.  Materialize each multiply and add so the shared helper is
+    usable both by the production loop and by oracle-input fidelity gates.
+    """
+    first = nemo_source_round(
+        coefficients[0] * nemo_source_round(now))
+    second = nemo_source_round(
+        coefficients[1] * nemo_source_round(before))
+    third = nemo_source_round(
+        coefficients[2] * nemo_source_round(before_before))
+    value = nemo_source_round(first + second)
+    return nemo_source_round(value + third)

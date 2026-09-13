@@ -194,6 +194,10 @@ FILES = {
     # that wrote both the inherited transport-mean record and the new record.
     "GYRE_OMIP_L2_P3_SM_R76UAMID4/BLD/ppsrc/nemo/dynspg_ts.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R76UAMID4/BLD/ppsrc/nemo/dynspg_ts.f90"),
+    # Round 78 consumes the operator-admitted R77 acquisition and binds the
+    # source walk to that record producer's exact compiled branch.
+    "GYRE_OMIP_L2_P3_SM_R77UAMID5/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R77UAMID5/BLD/ppsrc/nemo/dynspg_ts.f90"),
     "round64/oracle_krhs_split/ocean.output": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round64/"
         "oracle_krhs_split/ocean.output"),
@@ -354,6 +358,16 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 78: midpoint operands and persistent absolute histories ---
+    'GYRE_OMIP_L2_P3_SM_R77UAMID5/BLD/ppsrc/nemo/dynspg_ts.f90:339-378': [
+        'IF( ll_init )THEN', 'pssh  (:,:,Kaa) = 0._wp', 40],
+    'GYRE_OMIP_L2_P3_SM_R77UAMID5/BLD/ppsrc/nemo/dynspg_ts.f90:481-509': [
+        'IF ((jn<3).AND.ll_init) THEN',
+        '& ubb_e(ntsi:ntei,ntsj:ntej), ua_e(ntsi:ntei,ntsj:ntej)', 29],
+    'GYRE_OMIP_L2_P3_SM_R77UAMID5/BLD/ppsrc/nemo/dynspg_ts.f90:783-795': [
+        '!* Swap', 'sshn_e (:,:) = ssha_e(:,:)', 13],
+    'GYRE_OMIP_L2_P3_SM_R77UAMID5/BLD/ppsrc/nemo/dynspg_ts.f90:991-1018': [
+        "IF( TRIM(cdrw) == 'READ' ) THEN", "CALL iom_rstput( kt, nitrst, numrow, 'vb_e'", 28],
     # --- round 77: valid midpoint record followed by an admission-parser stop ---
     'GYRE_OMIP_L2_P3_SM_R76UAMID4/BLD/ppsrc/nemo/dynspg_ts.f90:442-452': [
         '! Round-73 WRITE-only extension of the existing transport-mean stream.',
