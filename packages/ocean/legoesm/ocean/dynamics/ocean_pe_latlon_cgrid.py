@@ -3804,11 +3804,7 @@ def nemo_bottom_drag_rate_faces(
     u_bot = jnp.take_along_axis(u_c, _bl_idx, axis=-1)[..., 0]
     v_bot = jnp.take_along_axis(v_c, _bl_idx, axis=-1)[..., 0]
     h_bot = jnp.take_along_axis(h_k, _bl_idx, axis=-1)[..., 0]
-    # zdfdrg.f90:229-236 stores rCdU_bot before dynspg_ts.f90:1497-1501
-    # consumes it in a separate face loop. Preserve that array boundary so
-    # XLA cannot fuse the sqrt into either face average and retain extra
-    # precision that the compiled NEMO program has already rounded away.
-    r_t = nemo_source_round(nemo_effective_bottom_drag_r(
+    r_t = nemo_effective_bottom_drag_r(
         u_bot, v_bot, h_bot,
         scheme=_scheme,
         cd0=float(config.bottom_drag.bottom_drag_cd0),
@@ -3816,7 +3812,7 @@ def nemo_bottom_drag_rate_faces(
         z0=float(config.bottom_drag.bottom_drag_z0),
         ke0=float(config.bottom_drag.bottom_drag_ke0),
         von_karman=constants.kappa_von_karman,
-    ))
+    )
     # t-point -> face 2-point averages (NEMO dynzdf:
     # zCdu = 0.5*(rCdU(ji+1,jj)+rCdU(ji,jj))).  u-faces are lon-periodic
     # (face l couples cells l-1, l; face n_lon repeats face 0, mirroring

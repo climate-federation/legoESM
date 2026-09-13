@@ -516,8 +516,7 @@ def _nemo_ssh_avg_prep(H_bathy, mask, grid, dtype, _nfold_mask=None):
 
 def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
                         return_literal_inverse=False,
-                        return_ssh_average=False,
-                        return_entry_inverse=False):
+                        return_ssh_average=False):
     """Apply the NEMO ssh-average face-depth formula at one ``eta`` snapshot,
     given the loop-invariant ``prep = _nemo_ssh_avg_prep(...)`` tuple.  See
     :func:`nemo_ssh_avg_face_depth` for the full formula docstring."""
@@ -538,16 +537,6 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
     H_u = nemo_source_round(H_u_ref + ssh_avg_u)
     r1_u_denom = nemo_source_round(nemo_source_round(H_u + 1.0) - u_mask)
     r1_u = nemo_source_round(u_mask / r1_u_denom)
-    r1_u0_denom = nemo_source_round(
-        nemo_source_round(H_u_ref + 1.0) - u_mask)
-    r1_u0 = nemo_source_round(u_mask / r1_u0_denom)
-    r3_u_half_sum = nemo_source_round(0.5 * ssh_u_sum)
-    r3_u = nemo_source_round(
-        nemo_source_round(r3_u_half_sum * r1_u0[:, :-1])
-        * _r1_e1e2u[:, :-1])
-    r3_u = jnp.concatenate([r3_u, r3_u[:, 0:1]], axis=1)
-    r1_u_entry = nemo_source_round(
-        r1_u0 / nemo_source_round(1.0 + r3_u))
 
     area_pad = pad_ns_zero(area)
     eta_pad = pad_ns_zero(eta_dyn)
@@ -572,16 +561,6 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
     H_v = nemo_source_round(H_v_ref + ssh_avg_v)
     r1_v_denom = nemo_source_round(nemo_source_round(H_v + 1.0) - v_mask)
     r1_v = nemo_source_round(v_mask / r1_v_denom)
-    r1_v0_denom = nemo_source_round(
-        nemo_source_round(H_v_ref + 1.0) - v_mask)
-    r1_v0 = nemo_source_round(v_mask / r1_v0_denom)
-    r3_v_half_sum = nemo_source_round(0.5 * ssh_v_sum)
-    r3_v = nemo_source_round(
-        nemo_source_round(r3_v_half_sum * r1_v0) * _r1_e1e2v)
-    r1_v_entry = nemo_source_round(
-        r1_v0 / nemo_source_round(1.0 + r3_v))
-    if return_entry_inverse:
-        return H_u, H_v, r1_u_entry, r1_v_entry
     if return_literal_inverse:
         if return_ssh_average:
             return H_u, H_v, r1_u, r1_v, ssh_avg_u, ssh_avg_v
@@ -1505,11 +1484,6 @@ def _run_substep_loop(
         return _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area,
                                    _ssh_avg_prep)
 
-    def _ssh_avg_entry_inverse(eta_dyn):
-        return _nemo_ssh_avg_apply(
-            eta_dyn, u_mask, v_mask, grid, area, _ssh_avg_prep,
-            return_entry_inverse=True)[2:]
-
     _nemo_flux_form_update = nemo_flux_form_update_active(config)
     # Harness-only causal arm.  This is deliberately absent from public
     # configuration: NEMO exposes no switch inside its WS-RK3 flux-form
@@ -1522,8 +1496,6 @@ def _run_substep_loop(
                 "NEMO WS-RK3 flux-form external update requires "
                 "barotropic_face_depth='nemo_ssh_avg'")
         H_u_kmm, H_v_kmm = _ssh_avg_face_depths(eta)
-    if _face_depth_mode == "nemo_ssh_avg":
-        r1_H_u_entry, r1_H_v_entry = _ssh_avg_entry_inverse(eta)
 
     def substep_body(wts_i, carry):
         """Single barotropic substep with BEBT, slow forcing, MAXVEL, and cosine filter.
@@ -1543,11 +1515,6 @@ def _run_substep_loop(
         else:
             (eta_c, U_bar_c, V_bar_c,
              Hu_sum_c, Hv_sum_c, eta_sum_c, U_sum_c, V_sum_c) = carry
-
-        # The final xs item is the external-substep index. NEMO initializes
-        # its entry inverse depth from r1_h0/(1+r3) and only uses the direct
-        # updated-depth reciprocal after the first substep.
-        wts_i, substep_index = wts_i[:-1], wts_i[-1]
 
         # Unpack this substep's xs. Both extra pairs are STATIC options, so
         # the tuple layout is a compile-time constant, never a traced branch.
@@ -1589,15 +1556,9 @@ def _run_substep_loop(
         # depth + e1e2-area-weighted average of the CARRY-level ssh (eta_c,
         # the level-jn dynamic ssh — same time level NEMO's hu_e sees here).
         if _face_depth_mode == "nemo_ssh_avg":
-            H_u, H_v, r1_H_u, r1_H_v = _nemo_ssh_avg_apply(
-                eta_c, u_mask, v_mask, grid, area, _ssh_avg_prep,
-                return_literal_inverse=True)
-            r1_H_u = jnp.where(substep_index == 0, r1_H_u_entry, r1_H_u)
-            r1_H_v = jnp.where(substep_index == 0, r1_H_v_entry, r1_H_v)
+            H_u, H_v = _ssh_avg_face_depths(eta_c)
         else:
             H_u, H_v = _face_depths(H_total_c)
-            r1_H_u = 1.0 / jnp.maximum(H_u, min_water_col)
-            r1_H_v = 1.0 / jnp.maximum(H_v, min_water_col)
 
         if ab3_za is not None:
             # NEMO AB3 mid-step velocity extrapolation (dynspg_ts.F90:549-554)
@@ -1784,11 +1745,7 @@ def _run_substep_loop(
         # Static Python gate (drag_r_u is a closure capture) — no traced
         # control flow, carry unchanged, off ⇒ byte-identical.
         if drag_r_u is not None:
-            if _continuity_evaluation == "nemo_literal":
-                _drag_u = nemo_source_round(
-                    nemo_source_round(-drag_r_u * U_bar_c) * r1_H_u)
-            else:
-                _drag_u = -drag_r_u * U_bar_c / jnp.maximum(H_u, min_water_col)
+            _drag_u = -drag_r_u * U_bar_c / jnp.maximum(H_u, min_water_col)
         else:
             _drag_u = 0.0
         if _nemo_flux_form_update:
@@ -1840,11 +1797,7 @@ def _run_substep_loop(
         # NEMO dynspg_ts.F90:704: zv_trd += zCdU_v * vn_e * hvr_e — same
         # substep-START velocity + carry-eta face depth as the u-drag above.
         if drag_r_v is not None:
-            if _continuity_evaluation == "nemo_literal":
-                _drag_v = nemo_source_round(
-                    nemo_source_round(-drag_r_v * V_bar_c) * r1_H_v)
-            else:
-                _drag_v = -drag_r_v * V_bar_c / jnp.maximum(H_v, min_water_col)
+            _drag_v = -drag_r_v * V_bar_c / jnp.maximum(H_v, min_water_col)
         else:
             _drag_v = 0.0
         if _nemo_flux_form_update:
@@ -2093,11 +2046,11 @@ def _run_substep_loop(
                     else jnp.zeros_like(eta)),
                 "inverse_depth_u": jnp.where(
                     u_mask != 0,
-                    r1_H_u,
+                    1.0 / jnp.maximum(H_u, min_water_col),
                     0.0),
                 "inverse_depth_v": jnp.where(
                     v_mask != 0,
-                    r1_H_v,
+                    1.0 / jnp.maximum(H_v, min_water_col),
                     0.0),
                 "slow_u": F_slow_u_i,
                 "slow_v": F_slow_v_i,
@@ -2154,7 +2107,6 @@ def _run_substep_loop(
         # floats -- storing the reconstructed acceleration instead would be
         # (n_loop, n_lat, n_lon+1), which at n_loop ~ 960 is infeasible.
         _xs = _xs + (tide_cos, tide_sin)
-    _xs = _xs + (jnp.arange(n_loop, dtype=jnp.int32),)
 
     if return_trace:
         # A trace is a harness artifact, not a differentiability choice.  Scan
@@ -2184,9 +2136,8 @@ def _run_substep_loop(
             if ab3_za is not None:
                 return substep_body(
                     (w_filter[i], w_transport[i], ab3_za[i], ab3_zb[i])
-                    + _t_i + (i,), carry)
-            return substep_body(
-                (w_filter[i], w_transport[i]) + _t_i + (i,), carry)
+                    + _t_i, carry)
+            return substep_body((w_filter[i], w_transport[i]) + _t_i, carry)
 
         finals = jax.lax.fori_loop(0, n_loop, fori_body, init_carry)
 
