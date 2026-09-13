@@ -150,13 +150,16 @@ The full log is `round72/codex_round72_review.log`, SHA-256
 `92015cb4c0f52be782d229ae8a686707c0122077dd13c515153d648e2a22da67`.
 No production numerical diff is being landed under that blocked review.
 
-The round-72 replay/hook tests report four passed; the acquisition-gate tests
-report two passed; Ruff on the new round-72 Python files, shell parsing, Python
-compilation, `git diff --check`, and the dry Fortran syntax proof pass. The entire receipt-citation test file
-reports 16 passed after the line shifts caused by the private hook were
-re-anchored in their own commit. The citation gate audits this receipt against
-the R71 compiled branch; its shifted-citation plant targets the stage-1 `zFu`
-line and must exit nonzero with SYMBOL-NOT-AT-LINE.
+The round-72 replay/hook and acquisition-gate tests report four passed. The
+combined focused run reports 64 passed in 1,639.15 seconds; its JUnit artifact
+is `round72/focused_tests.xml`, SHA-256
+`9d4514880fd474267e6961703fcab629ec00f76c295887f881cbed944c51333c`.
+Ruff on the new round-72 Python files, shell parsing, Python compilation,
+`git diff --check`, and the dry Fortran syntax proof pass. The entire
+receipt-citation test file reports 16 passed after the line shifts caused by
+the private hook were re-anchored in their own commit. The citation gate audits
+this receipt against the R71 compiled branch; its shifted-citation plant
+targets the stage-1 `zFu` line and exits nonzero with SYMBOL-NOT-AT-LINE.
 
 ## ASKED / UNASKED and OPEN
 
