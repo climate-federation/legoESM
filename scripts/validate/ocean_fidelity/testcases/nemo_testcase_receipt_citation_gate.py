@@ -178,6 +178,12 @@ FILES = {
     # Round 72 cites the exact acquired R71 compiled tracer-stage branch.
     "GYRE_OMIP_L2_P3_SM_R71FCTST2/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R71FCTST2/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    # Round 73 consumes the admitted R72 record and binds the boundary and
+    # next acquisition to that producer's own compiled branches.
+    "GYRE_OMIP_L2_P3_SM_R72ZFOP/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R72ZFOP/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R72ZFOP/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R72ZFOP/BLD/ppsrc/nemo/dynspg_ts.f90"),
     "round64/oracle_krhs_split/ocean.output": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round64/"
         "oracle_krhs_split/ocean.output"),
@@ -338,6 +344,20 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 73: external mean already differs at the stage-1 boundary ---
+    'GYRE_OMIP_L2_P3_SM_R72ZFOP/BLD/ppsrc/nemo/stprk3_stg.f90:287-291': [
+        'CASE ( np_LIN, np_HYB )',
+        ('END DO   ;   END DO', 5), 5],
+    'GYRE_OMIP_L2_P3_SM_R72ZFOP/BLD/ppsrc/nemo/stprk3_stg.f90:295': (
+        'zFu(ji,jj,jk) = e2u(ji,jj)*(e3u_3d', 1),
+    'GYRE_OMIP_L2_P3_SM_R72ZFOP/BLD/ppsrc/nemo/stprk3_stg.f90:296': (
+        'zFv(ji,jj,jk) = e1v(ji,jj)*(e3v_3d', 1),
+    'GYRE_OMIP_L2_P3_SM_R72ZFOP/BLD/ppsrc/nemo/dynspg_ts.f90:559-572': [
+        '! Sum over sub-time-steps to compute advective velocities',
+        '& l2_u_mid, l2_v_mid, zhup2_e, zhvp2_e, un_adv, vn_adv', 14],
+    'GYRE_OMIP_L2_P3_SM_R72ZFOP/BLD/ppsrc/nemo/dynspg_ts.f90:797-817': [
+        '! Finalize sums:',
+        "WRITE(numout,*) 'LANE2_BT_ADVMEAN_DUMP '", 21],
     # --- round 72: stage-1 transport is earlier than the exact RK replay ---
     'GYRE_OMIP_L2_P3_SM_R71FCTST2/BLD/ppsrc/nemo/stprk3_stg.f90:289-290': [
         'zub(ji,jj) = un_adv(ji,jj)*(r1_hu_0',
