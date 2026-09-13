@@ -213,6 +213,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # ``--implicit-grav-wave-use-pcg --implicit-grav-wave-damping
     # 1e8`` (typical α ~ 1e7–1e8 m²/s) to remove the explicit-CFL
     # ceiling and enable larger ``--dt``.
+    # #1028: persistent D-grid winds on the cubed-sphere hydrostatic lane.
+    # The default cell-centre path interpolates the prognostic winds to the
+    # D-grid corners and back on EVERY step; that outer projection is a
+    # measured eddy damper (paired 200-day C36 Held-Suarez: max wind
+    # 13.0 -> 38.6 m/s sigma, 12.6 -> 40.9 hybrid, one knob, PR #1462).
+    parser.add_argument(
+        "--persistent-dgrid", action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Carry the cube's prognostic winds in FV3 D staggering between "
+             "steps instead of projecting cell-centre -> corner -> cell-centre "
+             "every step (#1028).  Cubed-sphere hydrostatic, single process; "
+             "every other lane refuses it rather than silently running the "
+             "damped path.",
+    )
     # Stage 3-E: Fourier polar filter for lat-lon C-grid.  Lifts the
     # pole-cell CFL constraint by truncating high-wavenumber Fourier
     # modes near the poles, so ``--dt`` can be set by the equatorial
@@ -1850,6 +1864,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         fix_mass=args.fix_mass,
         implicit_grav_wave_use_pcg=args.implicit_grav_wave_use_pcg,
         implicit_grav_wave_damping=args.implicit_grav_wave_damping,
+        # #1028: cube winds stay D-staggered between steps.
+        persistent_dgrid=args.persistent_dgrid,
         # Stage 3-E: polar filter for lat-lon C-grid pole-CFL relief.
         use_polar_filter=args.use_polar_filter,
         polar_filter_cutoff_deg=args.polar_filter_cutoff_deg,

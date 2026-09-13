@@ -915,6 +915,10 @@ class ModelDriver:
         self.model = None
         self.physics = None
         self.state = None
+        # #1028: set by _enter_persistent_dgrid() at run start; False means the
+        # prognostic winds are cell-centred (every lane except the cube
+        # hydrostatic one that opts in).
+        self._persistent_dgrid = False
         self.tracers: dict[str, jax.Array] = {}
         warm_registry = make_moisture_registry()
         required_slots = required_microphysics_tracer_slots(config.microphysics)
@@ -5359,6 +5363,165 @@ class ModelDriver:
                         f"Blow-up dump: could not restore {p.name} from "
                         f"{b.name}: {exc!r}")
 
+    # ------------------------------------------------------------------
+    # #1028 — persistent D-grid winds on the cubed-sphere hydrostatic lane
+    # ------------------------------------------------------------------
+    # The cube dycore has always accepted either staggering: its ``step``
+    # dispatches on the state type, and an ``FV3HydrostaticState`` skips the
+    # cell-centre -> corner -> cell-centre projection that the cell-centre
+    # entry performs on EVERY step.  That projection is a measured eddy
+    # damper: one paired 200-day C36 Held-Suarez run with this as the only
+    # change moved the equilibrated max wind 13.0 -> 38.6 m/s (sigma) and
+    # 12.6 -> 40.9 (hybrid) (PR #1462, docs/atmosphere/
+    # cube_structural_gaps_vs_fv3.md).  What was missing was a production
+    # driver that CARRIES the D state; this is that wiring.
+    #
+    # Everything that reads winds as cell-centred (physics inputs, CFL,
+    # diagnostics, output, checkpoints) goes through :meth:`_state_cc`, a
+    # read-only view.  Nothing writes a converted state back over the native
+    # winds, so the round trip never re-enters the prognostic path.
+
+    def _persistent_dgrid_active(self) -> bool:
+        """True iff the run is carrying D-staggered cube winds."""
+        return bool(getattr(self, "_persistent_dgrid", False))
+
+    def _enter_persistent_dgrid(self) -> None:
+        """Convert the prognostic state to FV3 D staggering, once, at run start.
+
+        Refuses LOUDLY on every lane this does not cover rather than silently
+        running the damped cell-centre path (dispatch discipline): the whole
+        point of the flag is the staggering the run actually carries, so a
+        silent fall-back would be the defect it exists to remove.
+        """
+        self._persistent_dgrid = False
+        if not getattr(self.config.dycore, "persistent_dgrid", False):
+            return
+        cfg = self.config
+        _why = None
+        if cfg.grid.grid_type != "cubed_sphere":
+            _why = (f"grid_type={cfg.grid.grid_type!r}: D staggering is the "
+                    "cubed-sphere FV3 wind layout")
+        elif cfg.dycore.model_type != "hydrostatic":
+            _why = (f"model_type={cfg.dycore.model_type!r}: only the "
+                    "hydrostatic cube dycore carries FV3HydrostaticState")
+        elif cfg.dycore.discretization not in ("cdgrid", "centered",
+                                               "finite_volume"):
+            _why = (f"discretization={cfg.dycore.discretization!r}: the "
+                    "fv3_duo / spectral / sfno lanes carry their own state")
+        elif getattr(self, "_ensemble_size", 1) not in (None, 1):
+            _why = ("an ensemble run: the member axis would have to ride the "
+                    "corner arrays and no gate covers that yet")
+        elif getattr(self, "_owned_face_ids", None) is not None:
+            _why = ("MPI face sharding: the corner arrays are (n+1) in both "
+                    "horizontal directions and the owned-face slicing this "
+                    "driver applies is written for (n)")
+        elif self._is_spmd_multiprocess():
+            _why = "multi-process SPMD (the corner sharding is unvalidated)"
+        elif getattr(self, "_requires_surface_flux_export", False):
+            _why = ("a COUPLED run: the coupled driver reads the atmosphere's "
+                    "lowest-level winds straight off the state "
+                    "(coupled_esm_driver) and has no cell-centre view yet")
+        elif (self._device_config is not None
+              and getattr(self._device_config, "mesh", None) is not None
+              and tuple(getattr(self._device_config, "tiling", (1, 1)))
+              != (1, 1)):
+            _why = ("sub-face tiling: the tiled adapter converts to cell "
+                    "centres by construction (tiled_step_adapter)")
+        if _why is not None:
+            raise SystemExit(
+                "dycore.persistent_dgrid=True is not supported on this lane: "
+                f"{_why}.  Persistent D-grid winds (#1028) are wired for the "
+                "single-process cubed-sphere hydrostatic lane only.  Unset the "
+                "flag to run the (eddy-damped) cell-centre path knowingly.")
+
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
+            FV3HydrostaticState, hydrostatic_to_fv3,
+        )
+        cdgrid = getattr(self.model, "cdgrid", None)
+        if cdgrid is None:
+            raise SystemExit(
+                "dycore.persistent_dgrid=True but the dynamics model exposes "
+                "no cdgrid; the cc->D lift has no geometry to use.")
+        if isinstance(self.state, FV3HydrostaticState):
+            # Already D (a restart that carried the native winds).
+            self._persistent_dgrid = True
+            return
+        self.state = hydrostatic_to_fv3(self.state, cdgrid)
+        self._persistent_dgrid = True
+        logger.info(
+            "#1028 persistent D-grid winds: the cube state stays in FV3 D "
+            "staggering between steps (one cc->D lift at run start; the "
+            "per-step cc round trip is gone).")
+
+    def _state_cc(self, state=None):
+        """Cell-centre VIEW of the prognostic state — read-only.
+
+        Identity when the run is not carrying D winds, so every call site is
+        byte-identical on the default path.  Never assign the result back to
+        ``self.state``: that would reinstate the projection this removes.
+        """
+        st = self.state if state is None else state
+        if not self._persistent_dgrid_active():
+            return st
+        from legoesm.atmosphere.dynamics.gcm.primitive_eq_cdgrid import (
+            FV3HydrostaticState, fv3_to_hydrostatic,
+        )
+        if not isinstance(st, FV3HydrostaticState):
+            return st
+        return fv3_to_hydrostatic(st, self.model.cdgrid)
+
+    def _add_cc_wind_increment(self, du_cc, dv_cc, dt):
+        """Add an operator-split CELL-CENTRE wind tendency to ``self.state``.
+
+        On the D lane the increment is lifted to the corners with the SAME
+        rotation-aware interpolation the dycore applies to its own cell-centre
+        physics tendencies (``center_to_dgrid_vector``; the dycore's
+        ``_lift_uv_cc`` is a one-line wrapper over it).  The lift is linear, so
+        lifting the increment and lifting the whole state give the same answer
+        for this term -- what changes is that the CARRIED state is never
+        projected back, which is where the eddy damping lived.
+        """
+        if not self._persistent_dgrid_active():
+            self.state = self.state._replace(
+                u=self.state.u.replace(data=self.state.u.data + dt * du_cc),
+                v=self.state.v.replace(data=self.state.v.data + dt * dv_cc),
+            )
+            return
+        from legoesm.core.operators_cdgrid import center_to_dgrid_vector
+        du_d, dv_d = center_to_dgrid_vector(du_cc, dv_cc, self.model.cdgrid)
+        self.state = self.state._replace(
+            u_d=self.state.u_d.replace(data=self.state.u_d.data + dt * du_d),
+            v_d=self.state.v_d.replace(data=self.state.v_d.data + dt * dv_d),
+        )
+
+    def _prognostic_wind_leaf(self):
+        """The carried zonal-wind array, whatever its staggering.
+
+        Used where the driver only needs SOMETHING to block on / inspect and
+        must not care whether the run carries cell-centre or D-grid winds.
+        """
+        st = self.state
+        return (st.u_d.data if hasattr(st, "u_d") else st.u.data)
+
+    def _scale_winds(self, factor):
+        """Multiply the prognostic winds by ``factor`` (Rayleigh decay).
+
+        ``factor`` depends on the vertical coordinate only, so it commutes
+        with the cc<->D interpolation: scaling the corner winds is the same
+        operation as scaling the centre winds and lifting.  A horizontally
+        varying drag would NOT commute and must not use this helper.
+        """
+        if not self._persistent_dgrid_active():
+            self.state = self.state._replace(
+                u=self.state.u.replace(data=self.state.u.data * factor),
+                v=self.state.v.replace(data=self.state.v.data * factor),
+            )
+            return
+        self.state = self.state._replace(
+            u_d=self.state.u_d.replace(data=self.state.u_d.data * factor),
+            v_d=self.state.v_d.replace(data=self.state.v_d.data * factor),
+        )
+
     def save_checkpoint(self, step: int, day: float) -> None:
         """Save checkpoint to output directory using unified restart API.
 
@@ -5839,7 +6002,7 @@ class ModelDriver:
                 ckpt_path = self._output_dir / f"checkpoint_day_{int(elapsed_day):04d}.npz"
                 save_restart(
                     path=ckpt_path,
-                    state=self.state,
+                    state=self._state_cc(),      # #1028: cc layout on disk
                     q_v=self.q_v,
                     step=step,
                     day=day,
@@ -5858,7 +6021,18 @@ class ModelDriver:
 
         # Single-process path (also the multi-controller SPMD write tail:
         # the state is gathered to a host replica first, process 0 writes).
-        _state, _q_v, _q_c, _q_r = self.state, self.q_v, self.q_c, self.q_r
+        # #1028: checkpoints keep the CELL-CENTRE wind layout every reader and
+        # analysis tool already expects, so a persistent-D run writes its
+        # cell-centre view here and ``_enter_persistent_dgrid`` lifts it back
+        # on the next start.  KNOWN COST, stated rather than hidden: that is
+        # one cc<->D projection per RESTART, against one per STEP on the old
+        # path -- at a 30-day restart cadence and a 600 s step, ~2e-4 of the
+        # old rate -- and it means a restarted persistent-D run is not
+        # bit-identical to an uninterrupted one.  Storing the corner winds
+        # natively (new leaf names + a format stamp) is the follow-up that
+        # removes even that.
+        _state, _q_v, _q_c, _q_r = (
+            self._state_cc(), self.q_v, self.q_c, self.q_r)
         _carry_aux = self._checkpoint_carry_aux()
         if self._is_spmd_multiprocess():
             # Multi-controller SPMD (cs_spmd step 5a): every process holds
@@ -6805,6 +6979,10 @@ class ModelDriver:
                     "carry through the operator-split / sharded / tiled steps first."
                 )
         self._segment_callback = segment_callback
+        # #1028: promote the cube's prognostic winds to FV3 D staggering ONCE,
+        # before the time loop, so the run carries them between steps instead
+        # of projecting cell-centre -> corner -> cell-centre every step.
+        self._enter_persistent_dgrid()
         # Checkpoint hook (a coupled driver passes its own save_checkpoint so
         # the FULL coupled state — not just the atmosphere — is written on a
         # periodic or wallclock-budget checkpoint).  Run-start wallclock anchor
@@ -12069,12 +12247,16 @@ class ModelDriver:
                     v_arr = fields.get("v")
                     ps_arr = fields["p_s"]
                 else:
-                    T_arr = self.state.T.data
-                    u_arr = self.state.u.data
-                    v_arr = (self.state.v.data
-                             if getattr(self.state, "v", None) is not None
+                    # #1028: max_wind is a cell-centre diagnostic (the #1049
+                    # dead-jet gate reads it), so take the cc view -- identity
+                    # unless the run carries D-staggered cube winds.
+                    _cc_ts = self._state_cc()
+                    T_arr = _cc_ts.T.data
+                    u_arr = _cc_ts.u.data
+                    v_arr = (_cc_ts.v.data
+                             if getattr(_cc_ts, "v", None) is not None
                              else None)
-                    ps_arr = self.state.p_s.data
+                    ps_arr = _cc_ts.p_s.data
                 final_day = float(self.config.days)
                 T_final = float(jnp.mean(T_arr))
                 # max_wind must include v: a meridional spike or NaN in
@@ -13726,7 +13908,7 @@ class ModelDriver:
     def _finalize_run(self, run_status, t_jit, t_start, n_steps_total,
                       START_DAY, N_DAYS, checkpoint_interval):
         """Shared finalization: save diagnostics, results, final checkpoint."""
-        jax.block_until_ready(self.state.u.data)
+        jax.block_until_ready(self._prognostic_wind_leaf())
         total_wall = time.time() - t_start
         logger.info(f"Done: {total_wall:.1f}s wall time, status={run_status}")
 
@@ -13826,6 +14008,18 @@ class ModelDriver:
                 "build_training_segment is single-rank / single-device only "
                 "(the SegmentCarry has no partition spec for SPMD/MPI sharding)."
             )
+        # #1028: the persistent-D conversion happens in ``run()``, which a
+        # training caller never enters -- so a driver built with the flag set
+        # would hand back a CELL-CENTRE training segment while its config says
+        # D-staggered.  Refuse rather than train on a different discretisation
+        # than the production run the loss is meant to match (codex review).
+        if getattr(self.config.dycore, "persistent_dgrid", False):
+            raise NotImplementedError(
+                "dycore.persistent_dgrid=True is not wired into "
+                "build_training_segment: the D-staggering conversion happens in "
+                "ModelDriver.run(), so this would silently build a cell-centre "
+                "segment. Train with the flag off, or wire the conversion into "
+                "the training carry first (#1028).")
 
         ctx = self._prepare_run_context(0, day, restore_carry=False)
         cfg = self.config
@@ -13845,6 +14039,7 @@ class ModelDriver:
 
         run_segment = build_segment_fn(
             model=self.model,
+            persistent_dgrid=self._persistent_dgrid_active(),   # #1028
             tiled_step_fn=self._maybe_build_tiled_step(DT),
             step_unified=step_unified,
             step_unified_no_rad=None,
@@ -14126,6 +14321,7 @@ class ModelDriver:
 
         run_segment = build_segment_fn(
             model=self.model,
+            persistent_dgrid=self._persistent_dgrid_active(),   # #1028
             tiled_step_fn=self._maybe_build_tiled_step(DT),
             step_unified=step_unified,
             step_unified_no_rad=step_unified_no_rad,
@@ -14481,7 +14677,8 @@ class ModelDriver:
                     _np.savez_compressed(
                         _dump_path,
                         T=_g(self.state.T.data), p_s=_g(self.state.p_s.data),
-                        u=_g(self.state.u.data), v=_g(self.state.v.data),
+                        u=_g(self._state_cc().u.data),
+                        v=_g(self._state_cc().v.data),
                         q_v=_g(self.q_v), q_c=_g(self.q_c), q_r=_g(self.q_r),
                         q_i=_g(_tr.get("q_i")), N_c=_g(_tr.get("N_c")),
                         N_i=_g(_tr.get("N_i")),
@@ -14591,7 +14788,9 @@ class ModelDriver:
                         and self._device_config is not None
                         and not self._device_config.is_distributed)
             if _is_root_seg or _spmd_mc:
-                error = self.diagnostics.check_stability(self.state, elapsed_day)
+                # #1028: the stability check reads cell-centre winds.
+                error = self.diagnostics.check_stability(
+                    self._state_cc(), elapsed_day)
             else:
                 error = None
             if self._mpi_rank is not None and not _spmd_mc:
@@ -14695,7 +14894,7 @@ class ModelDriver:
                 diag_info = self._sync_and_collect_diagnostics(
                     elapsed_day=elapsed_day,
                     day=day,
-                    state=self.state,
+                    state=self._state_cc(),      # #1028: diagnostics are cc
                     q_v=self.q_v,
                     q_c=self.q_c,
                     q_r=self.q_r,
@@ -14724,16 +14923,20 @@ class ModelDriver:
                 _dx_min = estimate_min_dx_cubed_sphere(cfg.grid.resolution) if hasattr(self.grid, 'n') else 1e6
 
                 # Under MPI, CFL on owned faces only, then global max
+                # CFL is a CELL-CENTRE number (the dx estimate is the centre
+                # spacing), so it reads the cell-centre view -- identity off
+                # the persistent-D lane (#1028).
+                _cc_cfl = self._state_cc()
                 if self._owned_face_ids is not None:
                     _ofi = self._owned_face_ids
                     _seg_max_cfl = float(cfl_number_from_state(
-                        self.state.u.data[_ofi], self.state.v.data[_ofi], _dx_min, DT,
+                        _cc_cfl.u.data[_ofi], _cc_cfl.v.data[_ofi], _dx_min, DT,
                     ))
                     from mpi4py import MPI
                     _seg_max_cfl = MPI.COMM_WORLD.allreduce(_seg_max_cfl, op=MPI.MAX)
                 else:
                     _seg_max_cfl = float(cfl_number_from_state(
-                        self.state.u.data, self.state.v.data, _dx_min, DT,
+                        _cc_cfl.u.data, _cc_cfl.v.data, _dx_min, DT,
                     ))
 
                 # Logging: rank 0 only under MPI
@@ -14784,6 +14987,7 @@ class ModelDriver:
                     )
                     run_segment = build_segment_fn(
                         model=self.model, step_unified=step_unified,
+                        persistent_dgrid=self._persistent_dgrid_active(),  # #1028
                         tiled_step_fn=self._maybe_build_tiled_step(DT),
                         step_unified_no_rad=step_unified_no_rad,
                         grid=self.grid, sigma_full=sigma_full, dsigma=dsigma,
@@ -15000,6 +15204,10 @@ class ModelDriver:
         )
 
         self.state = self.model.step_with_physics(self.state, DT)
+        # Physics reads winds at cell centres.  On the persistent-D lane this
+        # is a READ-ONLY view of the corner winds (#1028); on every other lane
+        # it is ``self.state`` itself, so the call below is byte-identical.
+        _cc_in = self._state_cc()
 
         # Double-moment hydrometeor inputs (None unless the registry carries
         # them) so coupled radiation/microphysics see ice + droplet number.
@@ -15017,7 +15225,7 @@ class ModelDriver:
                 jnp.bool_(warmup_need_rad),
                 self.state.T.data, self.state.p_s.data,
                 self.q_v, self.q_c, self.q_r, conv_prog,
-                self.state.u.data, self.state.v.data,
+                _cc_in.u.data, _cc_in.v.data,
                 sst, sic, self._grid_lat, self._grid_lon,
                 day_of_year, seconds_of_day, DT,
                 solar_weights, current_s_0,
@@ -15101,22 +15309,18 @@ class ModelDriver:
 
         self.state = self.state._replace(T=self.state.T.replace(data=new_T))
         if hasattr(phys_out, 'du_dt') and phys_out.du_dt is not None:
-            self.state = self.state._replace(
-                u=self.state.u.replace(data=self.state.u.data + DT * phys_out.du_dt),
-                v=self.state.v.replace(data=self.state.v.data + DT * phys_out.dv_dt),
-            )
+            # Cell-centre tendency; on the persistent-D lane it is lifted to
+            # the corners before it is added (#1028).
+            self._add_cc_wind_increment(phys_out.du_dt, phys_out.dv_dt, DT)
         # Conserving form always (owner decision 2026-08-16): the
         # hyperdiffusion tail is non-monotone, so its floor is the same
         # mass-creating clamp class as the physics floors above.
         self.q_v = self._conserving_floor(
             self.q_v + DT * hyperdiffusion_3d(self.q_v, self.grid, self._qv_smooth_coeff)
         )
-        self.state = self.state._replace(
-            u=self.state.u.replace(data=self.state.u.data * self._fric_decay),
-            v=self.state.v.replace(data=self.state.v.data * self._fric_decay),
-        )
+        self._scale_winds(self._fric_decay)
 
-        jax.block_until_ready(self.state.u.data)
+        jax.block_until_ready(self._prognostic_wind_leaf())
         t_jit = time.time() - t_jit_start
         logger.info(f"  JIT compiled in {t_jit:.1f}s")
 
@@ -15131,6 +15335,9 @@ class ModelDriver:
 
             # (a) Dynamics
             self.state = self.model.step_with_physics(self.state, DT)
+            # Cell-centre view for the physics inputs (identity off the
+            # persistent-D lane, #1028).
+            _cc_step = self._state_cc()
 
             # (b) Physics with radiation sub-cycling
             need_rad_py = (RAD_UPDATE_STEPS <= 1) or ((step + 1) % RAD_UPDATE_STEPS == 0)
@@ -15170,7 +15377,7 @@ class ModelDriver:
                     need_rad_jax,
                     self.state.T.data, self.state.p_s.data,
                     self.q_v, self.q_c, self.q_r, conv_prog,
-                    self.state.u.data, self.state.v.data,
+                    _cc_step.u.data, _cc_step.v.data,
                     sst, sic, self._grid_lat, self._grid_lon,
                     day_of_year, seconds_of_day, DT,
                     solar_weights, current_s_0,
@@ -15267,12 +15474,9 @@ class ModelDriver:
 
             # Apply momentum tendencies from turbulence/GWD
             if hasattr(phys_out, 'du_dt') and phys_out.du_dt is not None:
-                new_u = self.state.u.data + DT * phys_out.du_dt
-                new_v = self.state.v.data + DT * phys_out.dv_dt
-                self.state = self.state._replace(
-                    u=self.state.u.replace(data=new_u),
-                    v=self.state.v.replace(data=new_v),
-                )
+                # Cell-centre tendency; lifted to the corners first on the
+                # persistent-D lane (#1028).
+                self._add_cc_wind_increment(phys_out.du_dt, phys_out.dv_dt, DT)
 
             # Moisture conservation fixer
             if FIX_MOISTURE:
@@ -15288,10 +15492,7 @@ class ModelDriver:
             )
 
             # Rayleigh friction
-            self.state = self.state._replace(
-                u=self.state.u.replace(data=self.state.u.data * self._fric_decay),
-                v=self.state.v.replace(data=self.state.v.data * self._fric_decay),
-            )
+            self._scale_winds(self._fric_decay)
 
             # Diagnostics (diag_interval == 0 = writer disabled — guard the
             # modulo; spmd configs FORCE diag_days=0, codex round-2 MAJOR)
@@ -15300,7 +15501,7 @@ class ModelDriver:
                 diag_info = self._sync_and_collect_diagnostics(
                     elapsed_day=elapsed_day,
                     day=day,
-                    state=self.state,
+                    state=self._state_cc(),      # #1028: diagnostics are cc
                     q_v=self.q_v,
                     q_c=self.q_c,
                     q_r=self.q_r,
@@ -15323,8 +15524,9 @@ class ModelDriver:
                       f"precip={diag_info['mean_precip']:.1f}mm/d, "
                       f"max_v={diag_info['max_v']:.1f}m/s")
 
-                # Stability check
-                error = self.diagnostics.check_stability(self.state, elapsed_day)
+                # Stability check (#1028: cell-centre winds)
+                error = self.diagnostics.check_stability(
+                    self._state_cc(), elapsed_day)
                 if error:
                     logger.warning(f"  {error}")
                     run_status = error
