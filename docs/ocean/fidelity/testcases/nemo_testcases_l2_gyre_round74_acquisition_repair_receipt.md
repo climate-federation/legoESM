@@ -34,7 +34,7 @@ admission. It still copies EXP00 and MY_SRC file by file, compares the target
 actually runs the full acquisition.
 
 The preregistered clean preflight is **CONFIRMED**. On committed instrumentation
-commit `70f11fdcf1d0`, `--preflight-only` accepted every actual resolved row,
+commit `0cd759b031c0`, `--preflight-only` accepted every actual resolved row,
 dry-applied the exact additive patch, preprocessed it with the source build's
 keys and includes, passed `gfortran -fsyntax-only`, printed
 `ROUND74_ADVMEAN_PREFLIGHT_READY`, and exited 0 before the first `makenemo`
@@ -98,14 +98,14 @@ tip and reported 16 passed; ancestor commit `3d6dfd3015d3` had already repaired
 the cited-line shifts, so no no-op fix was created.
 
 The receipt citation gate passed from this heading to EOF with zero unmapped
-citations at clean commit `aa14db1007a3`; its report SHA-256 is
-`6075afd72b911c1fc921b4ff8a5ed8b6f07d7e2de65ca12d74fb2faa6cb9f6e2`.
+citations at clean commit `0cd759b031c0`; its report SHA-256 is
+`e14fbead4ac4d5e4aed6a3528caae62be08286f9da44327289c2bc377301e2d3`.
 Shifting the compiled automatic-count citation by two lines produced
 `SYMBOL-NOT-AT-LINE` and exited 1; the plant log SHA-256 is
-`57b4ae33f8eb8858f21e1de1ef9299635ef1f2dfad90018603c4bea83aa78c84`.
-The focused receipt-plus-record-gate run reported 18 passed in 1.60 seconds;
+`2f9c55de84e0b011850a469bc2c9bdfbdad7ca0bc8cd2e722c007e192c141728`.
+The focused receipt-plus-record-gate run reported 18 passed in 1.53 seconds;
 its JUnit SHA-256 is
-`a11c6174cfb3952e37bea33e50090c09c5e61dd9bd65281b0d27339869b1096e`.
+`646608338554bdd0c1f34e9306e49706fdfccb03b914b6d8123d8d770651b78f`.
 Shell parsing, Python compilation, and `git diff --check` pass.
 
 ## ASKED / UNASKED and OPEN
