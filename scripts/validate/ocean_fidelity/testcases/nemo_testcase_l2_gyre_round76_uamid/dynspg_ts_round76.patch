@@ -1,13 +1,8 @@
 --- dynspg_ts.F90
 +++ dynspg_ts.F90
-@@ -154,6 +154,7 @@
-       INTEGER  ::   ji, jj, jk, jn        ! dummy loop indices
-       INTEGER  ::   l2_unit, l2_ios, l2_drag_unit, l2_drag_ios, l2_adv_unit, l2_adv_ios
-       INTEGER  ::   l2_ord_unit, l2_ord_ios
+@@ -158,1 +158,2 @@
 +      INTEGER  ::   l2_uamid_unit, l2_uamid_ios
-       LOGICAL  ::   ll_fw_start           ! =T : forward integration 
        LOGICAL  ::   ll_init               ! =T : special startup of 2d equations
- LOGICAL, SAVE :: ll_bt_av    ! =T : boxcard time averaging   =F : foreward backward dissipation
 @@ -197,6 +198,7 @@
        CHARACTER(LEN=96) :: l2_drag_filename
        CHARACTER(LEN=96) :: l2_adv_filename
@@ -30,7 +25,7 @@
 +         WRITE(l2_uamid_unit) l2_magic, 1, kt, icycle, jpi, jpj, STORAGE_SIZE(1._wp), &
 +            & ntsi, ntei, ntsj, ntej
 +      ENDIF
- 
+
        !                                             ! ==================== !
        DO jn = 1, icycle                             !  sub-time-step loop  !
 @@ -652,6 +664,11 @@
@@ -42,7 +37,7 @@
 +            WRITE(l2_uamid_unit) un_e(ntsi:ntei,ntsj:ntej), ub_e(ntsi:ntei,ntsj:ntej), &
 +               & ubb_e(ntsi:ntei,ntsj:ntej), ua_e(ntsi:ntei,ntsj:ntej)
 +         ENDIF
- 
+
           IF( .NOT.lk_linssh ) THEN                        !* Update ocean depth (variable volume case only)
              !                                             !  ------------------
 @@ -995,6 +1012,10 @@
