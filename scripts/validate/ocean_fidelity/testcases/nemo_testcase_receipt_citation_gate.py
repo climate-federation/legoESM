@@ -355,13 +355,13 @@ FILES = {
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
     # --- round 77: valid midpoint record followed by an admission-parser stop ---
-    'GYRE_OMIP_L2_P3_SM_R76UAMID4/BLD/ppsrc/nemo/dynspg_ts.f90:442-453': [
+    'GYRE_OMIP_L2_P3_SM_R76UAMID4/BLD/ppsrc/nemo/dynspg_ts.f90:442-452': [
         '! Round-73 WRITE-only extension of the existing transport-mean stream.',
         ('WRITE(l2_adv_unit) r1_wgt2s, wgtbtp2(1:icycle), r1_e2u, r1_e1v', 2),
-        12],
-    'GYRE_OMIP_L2_P3_SM_R76UAMID4/BLD/ppsrc/nemo/dynspg_ts.f90:454-463': [
+        11],
+    'GYRE_OMIP_L2_P3_SM_R76UAMID4/BLD/ppsrc/nemo/dynspg_ts.f90:454-462': [
         '! Round-76 WRITE-only source-order record for the kt=2 U midpoint.',
-        '& ntsi, ntei, ntsj, ntej', 10],
+        '& ntsi, ntei, ntsj, ntej', 9],
     'GYRE_OMIP_L2_P3_SM_R76UAMID4/BLD/ppsrc/nemo/dynspg_ts.f90:501-509': [
         'ua_e(ji,jj) = za1 * un_e(ji,jj) + za2 * ub_e(ji,jj) + za3 * ubb_e(ji,jj)',
         '& ubb_e(ntsi:ntei,ntsj:ntej), ua_e(ntsi:ntei,ntsj:ntej)', 9],

@@ -16,7 +16,7 @@ inherited kt=2 transport-mean record differed in raw halo storage, but the
 shared admission checker had no parser for its `NEMO_L2_BTADV_2` magic and
 exited 2 at the first changed record. The compiled target opens and heads that
 inherited stream at
-`GYRE_OMIP_L2_P3_SM_R76UAMID4/BLD/ppsrc/nemo/dynspg_ts.f90:442-453`, then
+`GYRE_OMIP_L2_P3_SM_R76UAMID4/BLD/ppsrc/nemo/dynspg_ts.f90:442-452`, then
 writes its accumulator entry, metric transport, velocity, face depth, and exit
 fields in branch-resolved order at `:588-606`.
 
@@ -35,7 +35,7 @@ clean producer commit `b7e6efc26a4e355c29541051d1ff9aae437b742f`. Its validation
 JSON has SHA-256
 `a899bc01b64dd229febc291945613af19088cffced2d4e3d3dab783bd9ab655e` and
 status AT-BAR. The compiled target separately opens its reduced-domain stream
-with explicit full and owned bounds at `:454-463`, then writes all four operands
+with explicit full and owned bounds at `:454-462`, then writes all four operands
 immediately after the numerical association at `:501-509`.
 
 The repaired shared admission checker composes the campaign's strict
