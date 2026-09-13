@@ -472,8 +472,14 @@ def check_moist_deck(run_dir: str) -> None:
             f"total-energy fixer (fv_mapz.F90:628-747) is not ported.")
 
 
-def build_port_tracer_ic(sphum6) -> list:
+def build_port_tracer_ic(sphum6, ctx=None, second: str = "zero") -> list:
     """[face][iq] padded tracer arrays for the resolved deck.
+
+    ``second="modulated"`` fills ``liq_wat`` with the port's tracer 1,
+    ``sphum * (1 + 0.5 sin(lon))`` (``lon_modulated_tracer``), for a
+    WARM-STARTED oracle deck whose restart carries that same field
+    (``write_tracer_oracle_ic.py``); the IC control below then checks
+    liq_wat under the derived map instead of scoring 0 == 0.
 
     ``sphum`` comes from :func:`build_port_ic`, NOT from a second call:
     on the moist arm the IC's ``pt`` was divided by ``(1 + zvir*q)``
@@ -491,7 +497,18 @@ def build_port_tracer_ic(sphum6) -> list:
             "build_port_tracer_ic got sphum6=None -- build_port_ic was "
             "called with with_sphum=False, so there is no humidity to "
             "advect and none to have divided pt on the moist arm.")
-    return [[q, np.zeros_like(q)] for q in sphum6]
+    if second == "zero":
+        return [[q, np.zeros_like(q)] for q in sphum6]
+    if second == "modulated":
+        if ctx is None:
+            raise ValueError("second='modulated' needs the grid ctx")
+        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+            lon_modulated_tracer)
+        n, ng = ctx["n"], ctx["ng"]
+        return [[q, lon_modulated_tracer(q, ctx["gs6"][t]["agrid_lon"],
+                                         n, ng, 1)]
+                for t, q in enumerate(sphum6)]
+    raise ValueError(f"unknown second tracer {second!r}: zero | modulated")
 
 def tracer_window(q6, ctx) -> list:
     """Compute-window copies of the advected tracers, (i, j, k)."""
@@ -1109,6 +1126,12 @@ def main(argv=None):
     ap.add_argument("--max-rel", type=float, default=None,
                     help="gate: exit 1 if any field's one-step rel exceeds "
                          "this")
+    ap.add_argument("--tracer2", choices=("zero", "modulated"), default="zero",
+                    help="liq_wat IC on the port: 'zero' matches the "
+                         "cold-start oracle deck (vacuous as a transport "
+                         "test); 'modulated' = sphum*(1+0.5 sin lon) for a "
+                         "warm-started deck built by "
+                         "write_tracer_oracle_ic.py")
     ap.add_argument("--tracers", action="store_true",
                     help="score tracer advection (fv_tracer2d port): "
                          "initialise sphum/liq_wat from the analytic "
@@ -1549,7 +1572,7 @@ def main(argv=None):
         # port's analytic sphum against the zerostep fv_tracer.res.
         # sphum is analytic in (lat, ak, bk) with no quad step beyond
         # the agrid latitudes, so the quad-geometry floor applies.
-        q = build_port_tracer_ic(sphum6)
+        q = build_port_tracer_ic(sphum6, ctx=ctx, second=args.tracer2)
         p_tr_ic = tracer_window(q, ctx)
         worst_tr_ic = 0.0
         for pf in range(6):
@@ -1560,7 +1583,7 @@ def main(argv=None):
                 worst_tr_ic = max(worst_tr_ic, rel(a, b))
         print(f"TRACER IC control: worst rel {worst_tr_ic:.3e} over "
               f"{ADVECTED_TRACERS} (sphum analytic vs zerostep restart; "
-              f"liq_wat 0 == 0, vacuous).")
+              f"liq_wat {'0 == 0, vacuous' if args.tracer2 == 'zero' else 'modulated, under the derived map'}).")
         if worst_tr_ic > IC_CONTROL_MAX_REL:
             raise SystemExit(
                 f"TRACER INSTRUMENT CONTROL FAILED: IC rel "

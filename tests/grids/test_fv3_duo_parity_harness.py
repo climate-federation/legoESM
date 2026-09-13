@@ -323,3 +323,46 @@ def test_the_job_certifies_the_compiled_path(job, selector):
     assert ('JIT="${JIT:-0}"' in body and selector in body
             and re.search(r"--backend [^\n]*\$JFLAG", body)), (
         "the parity job cannot opt in to scoring the compiled solver")
+
+
+def _load_scorer():
+    import importlib.util
+    import sys
+    spec = importlib.util.spec_from_file_location(
+        "full_step_oracle_parity", _SCORER)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["full_step_oracle_parity"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_second_tracer_zero_is_the_default_and_modulated_is_the_port_field():
+    """--tracer2 (2026-09-13): 'zero' keeps the cold-start deck's vacuous
+    liq_wat; 'modulated' builds the same field the model's
+    n_tracers=2 IC builds, on a tiny fake ctx; anything else is refused."""
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+        lon_modulated_tracer)
+    mod = _load_scorer()
+    n, ng, km = 3, 1, 2
+    m = n + 2 * ng
+    rng = np.random.default_rng(1)
+    sphum6 = []
+    for _ in range(6):
+        q = np.zeros((m, m, km))
+        q[ng:ng + n, ng:ng + n, :] = rng.uniform(0.1, 1.0, (n, n, km))
+        sphum6.append(q)
+    lon6 = [rng.uniform(0, 2 * np.pi, (m, m)) for _ in range(6)]
+    ctx = {"n": n, "ng": ng, "gs6": [{"agrid_lon": lo} for lo in lon6]}
+    zero = mod.build_port_tracer_ic(sphum6)
+    assert all(np.array_equal(f[0], s) and not f[1].any()
+               for f, s in zip(zero, sphum6))
+    modl = mod.build_port_tracer_ic(sphum6, ctx=ctx, second="modulated")
+    for t in range(6):
+        np.testing.assert_array_equal(modl[t][0], sphum6[t])
+        np.testing.assert_array_equal(
+            modl[t][1], lon_modulated_tracer(sphum6[t], lon6[t], n, ng, 1))
+        assert modl[t][1][ng:ng + n, ng:ng + n, :].all()
+    with pytest.raises(ValueError, match="needs the grid ctx"):
+        mod.build_port_tracer_ic(sphum6, second="modulated")
+    with pytest.raises(ValueError, match="unknown second tracer"):
+        mod.build_port_tracer_ic(sphum6, ctx=ctx, second="shifted")
