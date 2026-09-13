@@ -154,6 +154,10 @@ environment where read-only Codex can initialize, and must quote its verdict.
 
 ## OPEN — exact handoff to round 80
 
+Acquisition script: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round79/run.sh.
+It performs no checkout; it requires a clean clone already at the frozen parent
+commit, captures that ladder, and reruns the read-only Codex review.
+
 1. **Unblock independent review first.** Run the mandated separate Codex
    read-only adversarial review on commits 0078f9cc, c47f9c33 and add5cbd5.
    DO NOT SHIP if it says DO NOT SHIP; disposition every finding explicitly.
