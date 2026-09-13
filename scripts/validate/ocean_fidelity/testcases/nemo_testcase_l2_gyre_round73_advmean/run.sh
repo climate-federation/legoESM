@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # USER-EXECUTED ACQUISITION ONLY. This script invokes makenemo/mpirun.
-# It creates a new configuration and never modifies canonical NEMO src/.
+# Round 74 repair: it creates a new configuration and never modifies canonical NEMO src/.
 export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:$PATH
 readonly NEMO_ROOT=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
 readonly SOURCE_CFG=GYRE_OMIP_L2_P3_SM_R72ZFOP

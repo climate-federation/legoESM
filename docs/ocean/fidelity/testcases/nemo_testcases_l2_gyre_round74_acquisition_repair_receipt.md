@@ -25,7 +25,7 @@ wet U cells differ, with maximum absolute difference
 ## Frozen repair and measurements
 
 The corrected acquisition script is
-`scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round74_advmean/run.sh`.
+`scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round73_advmean/run.sh`.
 It uses the new configuration `GYRE_OMIP_L2_P3_SM_R74ADV2` and new evidence
 directory `round74/oracle_advmean_kt2`, while retaining the R72 source card,
 round-73 additive WRITE-only patch, exact record layout, record gate, and twin
@@ -95,8 +95,18 @@ approval. The logs' SHA-256 values are
 
 The operator-mandated citation regression was the first test run on the fresh
 tip and reported 16 passed; ancestor commit `3d6dfd3015d3` had already repaired
-the cited-line shifts, so no no-op fix was created. The final citation gate and
-focused-test results are recorded in the sealing commit.
+the cited-line shifts, so no no-op fix was created.
+
+The receipt citation gate passed from this heading to EOF with zero unmapped
+citations at clean commit `aa14db1007a3`; its report SHA-256 is
+`6075afd72b911c1fc921b4ff8a5ed8b6f07d7e2de65ca12d74fb2faa6cb9f6e2`.
+Shifting the compiled automatic-count citation by two lines produced
+`SYMBOL-NOT-AT-LINE` and exited 1; the plant log SHA-256 is
+`57b4ae33f8eb8858f21e1de1ef9299635ef1f2dfad90018603c4bea83aa78c84`.
+The focused receipt-plus-record-gate run reported 18 passed in 1.60 seconds;
+its JUnit SHA-256 is
+`a11c6174cfb3952e37bea33e50090c09c5e61dd9bd65281b0d27339869b1096e`.
+Shell parsing, Python compilation, and `git diff --check` pass.
 
 ## ASKED / UNASKED and OPEN
 
