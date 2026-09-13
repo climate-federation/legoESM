@@ -77,6 +77,20 @@ def leaves(bundle):
     return out
 
 
+def tracer_window_change(flat, prev, n: int, ng: int):
+    """[(path, max |flat - prev| on the compute window)] for every tracer
+    leaf (paths under ['q']), sorted by path.  Zero means the passenger
+    did not move, which a sharded-vs-in-process comparison cannot see on
+    its own (GLM 2026-09-13)."""
+    cs = slice(ng, ng + n)
+    out = []
+    for path in sorted(p for p in flat if p.startswith("['q']")):
+        a = np.asarray(flat[path])[:, cs, cs, :]
+        b = np.asarray(prev[path])[:, cs, cs, :]
+        out.append((path, float(np.abs(a - b).max())))
+    return out
+
+
 def _report_timing(args, times, jax, label):
     """Per-step wall time: median over the timed steps of the CROSS-RANK
     MAX (every rank times its own step; the slowest rank owns the step),
@@ -173,6 +187,13 @@ def main(argv=None):
         print("[m6] REFUSED: --distributed needs a reference -- either "
               "--flat-ref (6 processes build it here) or --ref-npz "
               "<saved>; without one there is nothing to gate against")
+        raise SystemExit(2)
+    if args.ref_npz and not args.distributed:
+        # codex 2026-09-13: an in-process run builds its own reference and
+        # the file was silently ignored -- a no-op that looked like a gate
+        print("[m6] REFUSED: --ref-npz is only read by --distributed runs; "
+              "an in-process run scores against the reference it builds "
+              "itself and would ignore the file")
         raise SystemExit(2)
     import jax
     import jax.numpy as jnp
@@ -402,6 +423,7 @@ def main(argv=None):
 
     rc = 0
     times = []
+    prev_flat = ic_flat
     for it in range(args.steps):
         t0 = time.perf_counter()
         if it == 0:
@@ -449,6 +471,17 @@ def main(argv=None):
                         for p, a in wf.items()})
         n_ok = n_bad = 0
         worst = 0.0
+        # GLM 2026-09-13: "sharded == in-process" is vacuous for a tracer
+        # BOTH arms leave untouched, so every passenger must have moved on
+        # the compute window since the previous scored state
+        for path, moved in tracer_window_change(wf, prev_flat, grid.n,
+                                                grid.ng):
+            print(f"  step {it + 1} {path}: max window change {moved:.3e}")
+            if not moved > 0.0:
+                print(f"  step {it + 1} {path}: tracer did not move on the "
+                      f"compute window -- REFUSED")
+                n_bad += 1
+        prev_flat = wf
         extra = sorted(set(wf) - {p for p, _ in ref_leaves})
         if extra:
             print(f"  step {it + 1}: reference lacks window leaves {extra} "

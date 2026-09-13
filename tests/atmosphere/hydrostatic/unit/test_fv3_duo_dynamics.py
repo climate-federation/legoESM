@@ -235,8 +235,6 @@ class TestFV3DuoDynamicsModel:
         zero in the halos like sphum. A zonally-shifted copy of the
         zonally-symmetric sphum would be the SAME field -- this is what
         makes a swapped or dropped tracer visible."""
-        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
-            lon_modulated_tracer)
         one = model.dcmip16_initial_state(n_tracers=1)
         ic = model.dcmip16_initial_state(n_tracers=3)
         assert len(one["q"]) == 1 and len(ic["q"]) == 3
@@ -246,6 +244,8 @@ class TestFV3DuoDynamicsModel:
         halo = np.ones(q0.shape[1:3], bool)
         halo[cs, cs] = False
         gs6 = model.grid.ctx_np["gs6"]
+        win0 = q0[:, cs, cs, :]
+        assert (win0 > 0).all(), "sphum is not positive on the window"
         for iq, q in ((1, q1), (2, q2)):
             assert not q[:, halo, :].any(), f"tracer {iq} halo not zero"
             assert (q[:, cs, cs, :] > 0).all(), f"tracer {iq} not positive"
@@ -253,13 +253,37 @@ class TestFV3DuoDynamicsModel:
                 lon = np.asarray(gs6[t]["agrid_lon"])[cs, cs]
                 want = q0[t, cs, cs, :] * (1.0 + 0.5 * np.sin(iq * lon))[
                     :, :, None]
-                np.testing.assert_allclose(q[t, cs, cs, :], want, rtol=1e-13)
-                # and the helper is what the model used
-                np.testing.assert_array_equal(
-                    q[t], lon_modulated_tracer(q0[t], gs6[t]["agrid_lon"],
-                                               N, NG, iq))
+                # same float64 expression -> bit-equal, not "close" (GLM)
+                np.testing.assert_array_equal(q[t, cs, cs, :], want)
         assert not np.array_equal(q1, q2)
         assert not np.array_equal(q1, q0)
+
+    def test_agrid_lon_is_radians_on_the_axes_the_ic_assumes(self, bundle):
+        """Independent pin of what lon_modulated_tracer reads (GLM
+        2026-09-13: the tracer test re-reads the same agrid_lon the helper
+        consumed, so a degrees-valued or transposed longitude would pass
+        it). Radians: lon in [0, 2pi], lat in [-pi/2, pi/2] -- a lon<->lat
+        swap or degrees (~90 vs ~1.57) fails here. Axes: on the equatorial
+        faces the cell-centre longitude is EXACTLY constant along one
+        index (those grid lines are meridians) and varies along the other;
+        which index it is differs between faces 0/1 and 3/4 (measured
+        2026-09-13 at C12). sphum is built from agrid_lat on the same
+        [cs, cs] slice, so this is the convention both share."""
+        n, ng = bundle.n, bundle.ng
+        cs = slice(ng, ng + n)
+        gs6 = bundle.ctx_np["gs6"]
+        for t in range(6):
+            lon = np.asarray(gs6[t]["agrid_lon"])[cs, cs]
+            lat = np.asarray(gs6[t]["agrid_lat"])[cs, cs]
+            assert lon.shape == lat.shape == (n, n)
+            assert 0.0 <= lon.min() and lon.max() <= 2 * np.pi, f"face {t}"
+            assert np.abs(lat).max() <= np.pi / 2, f"face {t}"
+        for t, const_axis in ((0, 1), (1, 1), (3, 0), (4, 0)):
+            lon = np.asarray(gs6[t]["agrid_lon"])[cs, cs]
+            assert np.abs(np.diff(lon, axis=const_axis)).max() < 1e-12, (
+                f"face {t}: lon not constant along axis {const_axis}")
+            assert np.abs(np.diff(lon, axis=1 - const_axis)).min() > 0.0, (
+                f"face {t}: lon does not vary along axis {1 - const_axis}")
 
     def test_n_tracers_below_one_is_refused(self, model):
         with pytest.raises(ValueError, match="n_tracers"):
@@ -271,13 +295,23 @@ class TestFV3DuoDynamicsModel:
         ic = model.dcmip16_initial_state(n_tracers=2)
         out = model.step(ic, BDT)
         assert len(out["q"]) == 2
+        # codex 2026-09-13: scored on the COMPUTE WINDOW only -- a halo fill
+        # alone satisfied "moved", and a zeroed tracer passed every check.
+        cs = slice(NG, NG + N)
         for iq in range(2):
-            a, b = np.asarray(ic["q"][iq]), np.asarray(out["q"][iq])
-            assert a.shape == b.shape
+            a = np.asarray(ic["q"][iq])[:, cs, cs, :]
+            b = np.asarray(out["q"][iq])[:, cs, cs, :]
             assert np.isfinite(b).all(), f"tracer {iq} went non-finite"
-            assert float(np.abs(b - a).max()) > 0.0, f"tracer {iq} did not move"
-        assert not np.array_equal(np.asarray(out["q"][0]),
-                                  np.asarray(out["q"][1]))
+            assert (b > 0).any(), f"tracer {iq} is zero after the step"
+            assert float(np.abs(b - a).max()) > 0.0, (
+                f"tracer {iq} did not move on the compute window")
+        b0 = np.asarray(out["q"][0])[:, cs, cs, :]
+        b1 = np.asarray(out["q"][1])[:, cs, cs, :]
+        assert not np.array_equal(b0, b1)
+        # the modulation must SURVIVE transport: tracer 1 is not a constant
+        # multiple of tracer 0 after the step (a copy or an index swap is)
+        ratio = b1[b0 > 0] / b0[b0 > 0]
+        assert ratio.max() - ratio.min() > 0.1
 
     def test_validate_dycore_contract(self, model):
         from legoesm.components.protocol import validate_dycore

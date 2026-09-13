@@ -183,8 +183,6 @@ def test_gate_nq_flag_defaults_to_one_and_reaches_every_ic_site():
     count from the one it is scored against."""
     import ast
     import inspect
-    parser = gate.main.__globals__["argparse"].ArgumentParser
-    assert parser is not None
     tree = ast.parse(inspect.getsource(gate))
     defaults = {}
     for node in ast.walk(tree):
@@ -213,3 +211,33 @@ def test_gate_main_does_not_shadow_the_time_module():
     it. Python decides locals statically, so this is checkable without
     running the gate: `time` must not be a local variable of main."""
     assert "time" not in gate.main.__code__.co_varnames
+
+
+def test_tracer_window_change_reports_only_window_motion_per_tracer():
+    """The gate refuses a tracer whose compute window did not change.
+    Halo-only motion must read as ZERO (a halo fill is not transport), and
+    every ['q'] leaf is reported, sorted, while non-tracer leaves are not."""
+    import numpy as np
+    n, ng, km = 4, 2, 3
+    m = n + 2 * ng
+    cs = slice(ng, ng + n)
+    q0 = np.zeros((6, m, m, km))
+    q1 = np.ones((6, m, m, km))
+    moved0 = q0.copy(); moved0[:, cs, cs, :] = 1e-9         # window motion
+    halo1 = q1.copy(); halo1[:, 0, :, :] += 5.0             # halo only
+    flat = {"['q'][1]": halo1, "['q'][0]": moved0,
+            "['state']['pt']": np.zeros((6, m, m, km))}
+    prev = {"['q'][1]": q1, "['q'][0]": q0,
+            "['state']['pt']": np.ones((6, m, m, km))}
+    got = gate.tracer_window_change(flat, prev, n, ng)
+    assert [p for p, _ in got] == ["['q'][0]", "['q'][1]"]
+    assert got[0][1] == 1e-9
+    assert got[1][1] == 0.0
+
+
+def test_ref_npz_without_distributed_is_refused_before_any_work():
+    """codex 2026-09-13: an in-process run built its own reference and
+    silently ignored --ref-npz, a no-op dressed as a gate."""
+    with pytest.raises(SystemExit) as e:
+        gate.main(["--ref-npz", "does-not-need-to-exist.npz"])
+    assert e.value.code == 2
