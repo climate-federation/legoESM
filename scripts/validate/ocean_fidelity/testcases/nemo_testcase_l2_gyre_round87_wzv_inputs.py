@@ -45,7 +45,11 @@ def require(condition: bool, message: str) -> None:
         raise RuntimeError(message)
 
 
-def _row(candidate, oracle, active) -> dict[str, object]:
+def _row(candidate, oracle, active, *, name="unnamed") -> dict[str, object]:
+    shapes = (np.asarray(candidate).shape, np.asarray(oracle).shape,
+              np.asarray(active).shape)
+    require(shapes[0] == shapes[1] == shapes[2],
+            f"{name} comparison shape mismatch: {shapes}")
     row = round84._row(np.asarray(candidate), np.asarray(oracle), np.asarray(active))
     row["dtype"] = str(np.asarray(candidate).dtype)
     return row
@@ -245,7 +249,8 @@ def measure(args) -> dict[str, object]:
     actual_stage_w = np.asarray(live_step.stage_geometry[0][2])
     actual_postsolve = _row(actual_stage_w, oracle["ww"], _active("ww", active))
 
-    ordinary = {name: _row(live[name], oracle[name], _active(name, active)) for name in ORDER}
+    ordinary = {name: _row(live[name], oracle[name], _active(name, active), name=name)
+                for name in ORDER}
     rows = {name: dict(value) for name, value in ordinary.items()}
     plant_detail = None
     if args.plant:
