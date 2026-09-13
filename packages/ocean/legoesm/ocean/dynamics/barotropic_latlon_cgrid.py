@@ -2041,6 +2041,9 @@ def _run_substep_loop(
                 "drag_coefficient_v": (
                     -drag_r_v if drag_r_v is not None
                     else jnp.zeros_like(V_bar_c)),
+                "drag_coefficient_t": (
+                    -_drag_r_t if _drag_r_t is not None
+                    else jnp.zeros_like(eta)),
                 "inverse_depth_u": jnp.where(
                     u_mask != 0,
                     1.0 / jnp.maximum(H_u, min_water_col),
@@ -2642,7 +2645,7 @@ def barotropic_substeps_latlon_cgrid(
     # convention (``r_eff = -pCdU >= 0``) — shared helper, never re-derived.
     # Static config gate: flag off ⇒ None ⇒ the substep loop's drag branch
     # is not built ⇒ byte-identical.
-    _drag_r_u = _drag_r_v = None
+    _drag_r_u = _drag_r_v = _drag_r_t = None
     if getattr(config, "barotropic_drag_substep", False):
         from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
             nemo_bottom_drag_rate_faces,
@@ -2659,8 +2662,12 @@ def barotropic_substeps_latlon_cgrid(
         # the POST-momentum u* -- see the ``u_now`` docstring paragraph.
         _u_drg = u_corr if u_now is None else u_now.astype(_dt)
         _v_drg = v_corr if v_now is None else v_now.astype(_dt)
-        _r_u_bt, _r_v_bt, _, _ = nemo_bottom_drag_rate_faces(
-            _u_drg, _v_drg, _hk_now, z_coord, config, grid)
+        _drag_values = nemo_bottom_drag_rate_faces(
+            _u_drg, _v_drg, _hk_now, z_coord, config, grid,
+            return_cell_rate=return_trace)
+        _r_u_bt, _r_v_bt = _drag_values[:2]
+        if return_trace:
+            _drag_r_t = _drag_values[4]
         _drag_r_u = _r_u_bt.astype(_dt)
         _drag_r_v = _r_v_bt.astype(_dt)
 

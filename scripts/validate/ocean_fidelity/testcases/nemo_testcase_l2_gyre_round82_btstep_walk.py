@@ -91,6 +91,16 @@ def _native(trace, record_name: str) -> np.ndarray:
     return gate._trace_native(trace[key], key)
 
 
+def _face_replay_from_live_cells(trace) -> tuple[np.ndarray, np.ndarray]:
+    """Replay compiled dyn_drg_init's two face averages from its live input."""
+    cell = np.asarray(trace["drag_coefficient_t"], dtype=np.float64)
+    u_inner = np.float64(0.5) * (np.roll(cell, 1, axis=1) + cell)
+    u_full = np.concatenate([u_inner, u_inner[:, :1]], axis=1)
+    v_inner = np.float64(0.5) * (cell[:-1, :] + cell[1:, :])
+    v_full = np.pad(v_inner, ((1, 1), (0, 0)), mode="edge")
+    return u_full[:, 1:], v_full[1:, :]
+
+
 def _admit(args) -> dict:
     admission = json.loads(args.admission.read_text())
     require(admission["verdict"] == "PASS", "Round-81 twin admission failed")
@@ -173,6 +183,7 @@ def measure(args) -> dict:
          for index in (0, 1, 2, 3)], axis=-1)
     oracle_mid = np.array(fields["mid_coefficients"], copy=True)
     oracle_back = np.array(fields["back_coefficients"], copy=True)
+    replay_drag_u, replay_drag_v = _face_replay_from_live_cells(trace)
     for name in round81.ARRAY_FIELDS:
         require(
             live_arrays[name].shape == oracle_arrays[name].shape,
@@ -274,6 +285,12 @@ def measure(args) -> dict:
         "dtype": {"record": str(fields["u_entry"].dtype),
                   "live": str(live_arrays["u_entry"].dtype)},
         "first_non_bit_statement": first,
+        "drag_face_statement_on_live_cell_input": {
+            "u": round78.comparison(
+                replay_drag_u, oracle_arrays["drag_coefficient_u"][0], active["u"]),
+            "v": round78.comparison(
+                replay_drag_v, oracle_arrays["drag_coefficient_v"][0], active["v"]),
+        },
         "rows": rows,
         "plant": args.plant,
         "plant_detail": plant_detail,

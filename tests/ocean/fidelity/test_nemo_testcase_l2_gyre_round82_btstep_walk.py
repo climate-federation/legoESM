@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import numpy as np
+
 
 SCRIPT = (
     Path(__file__).parents[3]
@@ -38,3 +40,13 @@ def test_trace_mapping_covers_every_record_array() -> None:
     assert len(WALK.SOURCE_ORDER) == len(WALK.round81.ARRAY_FIELDS) + 7
     assert WALK._stagger("depth_u_mid") == "u"
     assert WALK._stagger("depth_v_mid") == "v"
+
+
+def test_face_replay_uses_live_cell_coefficient_without_reassociation() -> None:
+    cell = np.array([[1.0, 2.0, 4.0], [8.0, 16.0, 32.0]])
+    got_u, got_v = WALK._face_replay_from_live_cells(
+        {"drag_coefficient_t": cell})
+    np.testing.assert_array_equal(
+        got_u, np.array([[1.5, 3.0, 2.5], [12.0, 24.0, 20.0]]))
+    np.testing.assert_array_equal(
+        got_v, np.array([[4.5, 9.0, 18.0], [4.5, 9.0, 18.0]]))

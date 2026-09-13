@@ -572,6 +572,30 @@ def test_barotropic_drag_rate_uses_u_now_time_level():
     np.testing.assert_allclose(u_new[2, 2:-1, :], expect, rtol=1e-6)
 
 
+def test_bottom_drag_cell_rate_is_private_optional_diagnostic():
+    from legoesm.ocean.dynamics.ocean_pe_latlon_cgrid import (
+        nemo_bottom_drag_rate_faces,
+    )
+    from legoesm.ocean.vertical import compute_layer_thickness
+
+    grid, z, state, config = _partial_cell_channel(n_lat=4, n_lon=5)
+    h_k = compute_layer_thickness(
+        state.eta.data, state.H_bathy.data, z,
+        min_water_column_m=config.min_water_column_m,
+    )
+    ordinary = nemo_bottom_drag_rate_faces(
+        state.u.data, state.v.data, h_k, z, config, grid)
+    diagnostic = nemo_bottom_drag_rate_faces(
+        state.u.data, state.v.data, h_k, z, config, grid,
+        return_cell_rate=True,
+    )
+    assert len(ordinary) == 4
+    assert len(diagnostic) == 5
+    for expected, actual in zip(ordinary, diagnostic[:4], strict=True):
+        np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    assert diagnostic[4].shape == state.eta.data.shape
+
+
 def test_barotropic_drag_rate_partial_now_velocity_raises():
     """Supplying one component of the now-level velocity and not the other
     would build the drag rate's ``|U|`` from one component at the now level
@@ -588,4 +612,3 @@ def test_barotropic_drag_rate_partial_now_velocity_raises():
             barotropic_substeps_latlon_cgrid(
                 state, 600.0, 2, grid, z, config,
                 add_barotropic_coriolis=False, **kw)
-

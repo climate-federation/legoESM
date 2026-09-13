@@ -3749,7 +3749,9 @@ def _bc_horizontal_viscosity(
             diag_Cl_leith_v, kdiss_h_cell)
 
 
-def nemo_bottom_drag_rate_faces(u, v, h_k, z_coord, config, grid):
+def nemo_bottom_drag_rate_faces(
+    u, v, h_k, z_coord, config, grid, *, return_cell_rate=False,
+):
     """NEMO zdfdrg non-linear/log-layer bottom-drag rate at u/v faces,
     PLUS the partial-cell bottom-level indicator mask at those faces.
 
@@ -3774,6 +3776,10 @@ def nemo_bottom_drag_rate_faces(u, v, h_k, z_coord, config, grid):
         level axis — the caller broadcasts/selects the bottom level).
     is_bot_u_3d, is_bot_v_3d : jax.Array, shape (..., nlev)
         1.0 at each face-column's partial-cell bottom level, 0 elsewhere.
+    r_t : jax.Array, shape (n_lat, n_lon), optional
+        Returned only when the private diagnostic flag ``return_cell_rate`` is
+        true. This is the exact tracer-point rate consumed by both face
+        averages; production callers retain the historical four-value result.
     """
     if not isinstance(z_coord, OceanPartialCellCoordinate):
         raise ValueError(
@@ -3831,7 +3837,8 @@ def nemo_bottom_drag_rate_faces(u, v, h_k, z_coord, config, grid):
                     == bot_lev_u[..., jnp.newaxis]).astype(u.dtype)
     is_bot_v_3d = (level_idx[jnp.newaxis, jnp.newaxis, :]
                     == bot_lev_v[..., jnp.newaxis]).astype(v.dtype)
-    return r_eff_u, r_eff_v, is_bot_u_3d, is_bot_v_3d
+    result = (r_eff_u, r_eff_v, is_bot_u_3d, is_bot_v_3d)
+    return (*result, r_t) if return_cell_rate else result
 
 
 def _bc_bottom_drag(du_dt, dv_dt, u, v, h_u, h_v, J, z_coord, config, grid,
