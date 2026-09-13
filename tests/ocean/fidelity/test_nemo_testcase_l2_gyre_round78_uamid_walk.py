@@ -50,7 +50,7 @@ def test_source_order_stops_at_first_midpoint_input() -> None:
     assert first["differing_cells"] == 2
 
 
-def test_null_un_e_plant_moves_boundary() -> None:
+def test_null_ubb_e_plant_moves_boundary() -> None:
     exact = _row(True)
     rows = [
         {

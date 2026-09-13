@@ -205,7 +205,19 @@ def measure(args) -> dict:
     )
     oracle_live = {name: np.array(fields[name], copy=True) for name in record_gate.FIELDS}
     if args.plant == "null-live-un-e":
+        un_e_baseline = comparison(live["un_e"][0], fields["un_e"][0], active_u)
+        require(
+            not un_e_baseline["bit_exact"],
+            "null-live-un-e plant target is already exact",
+        )
         oracle_live["un_e"][0] = live["un_e"][0]
+    elif args.plant == "null-live-ubb-e":
+        ubb_e_baseline = comparison(live["ubb_e"][0], fields["ubb_e"][0], active_u)
+        require(
+            not ubb_e_baseline["bit_exact"],
+            "null-live-ubb-e plant target is already exact",
+        )
+        oracle_live["ubb_e"][0] = live["ubb_e"][0]
 
     scalar_mask = np.ones((), dtype=bool)
     rows = []
@@ -279,6 +291,10 @@ def measure(args) -> dict:
         args.plant == "null-live-un-e"
         and (first is None or first["substep"] != 1 or first["boundary"] != "un_e")
     )
+    ubb_plant_fires = bool(
+        args.plant == "null-live-ubb-e"
+        and (first is None or first["substep"] != 1 or first["boundary"] != "ubb_e")
+    )
     shared_plant_fires = bool(args.plant == "shared-result-ulp" and not shared_exact)
     return {
         "format": "nemo-testcase-l2-gyre-round78-uamid-walk-v1",
@@ -300,6 +316,7 @@ def measure(args) -> dict:
         },
         "plant": args.plant,
         "null_live_un_e_plant_fires": null_plant_fires,
+        "null_live_ubb_e_plant_fires": ubb_plant_fires,
         "shared_result_ulp_plant_fires": shared_plant_fires,
         "v_live_walk": "WITHHELD_UNTIL_U_OWNER",
     }
@@ -319,7 +336,9 @@ def main(argv=None) -> int:
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--capture", action="store_true")
     parser.add_argument(
-        "--plant", choices=("none", "null-live-un-e", "shared-result-ulp"), default="none"
+        "--plant",
+        choices=("none", "null-live-un-e", "null-live-ubb-e", "shared-result-ulp"),
+        default="none",
     )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -333,11 +352,11 @@ def main(argv=None) -> int:
         print("ROUND78 PRE-REFACTOR TRACE CAPTURED")
         return 0
     if args.plant != "none":
-        fires = (
-            report["null_live_un_e_plant_fires"]
-            if args.plant == "null-live-un-e"
-            else report["shared_result_ulp_plant_fires"]
-        )
+        fires = {
+            "null-live-un-e": report["null_live_un_e_plant_fires"],
+            "null-live-ubb-e": report["null_live_ubb_e_plant_fires"],
+            "shared-result-ulp": report["shared_result_ulp_plant_fires"],
+        }[args.plant]
         print(f"ROUND78 {args.plant.upper()} PLANT {'FIRED' if fires else 'STAYED_GREEN'}")
         return 1
     print(
