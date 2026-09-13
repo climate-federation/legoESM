@@ -472,6 +472,7 @@ TKE_MXL_CHOICES = (2, 3, 4)   # 2=Veros BL, 3=NEMO nn_mxl=3, 4=NEMO nn_mxl=2
 
 
 def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None,
+                        surface_bc_level: str | None = None,
                         mxl_choice: int | None = None,
                         n2_mode: str | None = None,
                         n2_eos_form: str | None = None,
@@ -590,10 +591,13 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         #   dz_cell<->e3t and dz_half<->e3w, but on --partial-cell the tripole
         #   caller supplies dz_ref*J while the real bottom thickness is
         #   h_partial*J, so the partial metric is silently discarded. It is
-        #   not an e3t/e3w mapping at partial bottoms. It also COLLIDES with
-        #   nemo_z0: both overload dz_surface, one as a Veros surface
-        #   half-volume and one as a top-cell face-gradient distance, and on
-        #   the centred grid those differ by 2x.
+        #   not an e3t/e3w mapping at partial bottoms. It ALSO used to collide
+        #   with nemo_z0 (both overloaded dz_surface, one as a Veros surface
+        #   half-volume and one as a top-cell face-gradient distance, a factor
+        #   2 apart on the centred grid) -- #1704 removed that collision by
+        #   giving nemo_z0 its own face distance derived from
+        #   dz_ref[0]*jacobian, so only the partial-bottom objection above
+        #   still stands.
         #
         # n2_mode="nemo_bn2" -- REVERTED, and this one was simply wrong.
         #   ORCA1 selects TEOS-10 (namelist_cfg:307). legoESM's `nemo_bn2`
@@ -601,11 +605,14 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         #   (S-EOS)". That is a DIFFERENT N2, not ORCA1's rn2. Closing this
         #   properly needs a TEOS-10 rab/bn2, not a config flip.
         #
-        # tke_surface_bc_level="nemo_z0" -- REVERTED. The placement is right
-        #   but the metric is not: dz_surface = -z_full_ref[0]*J is the top
-        #   cell's MIDPOINT, i.e. half dz_ref[0], while NEMO's jk=2 lower
-        #   coefficient needs the full top-cell e3t(1). That doubles the
-        #   virtual-surface coupling.
+        # tke_surface_bc_level="nemo_z0" -- was reverted here for a REAL
+        #   metric defect (dz_surface = -z_full_ref[0]*J is the top cell's
+        #   MIDPOINT, half dz_ref[0], while NEMO's jk=2 lower coefficient
+        #   needs the full top-cell e3t(1), which doubled the virtual-surface
+        #   coupling).  #1704 FIXED that metric -- the face distance is now
+        #   derived as dz_ref[0]*jacobian inside the kernel -- and the option
+        #   is ON below (#1690).  Kept here only so the old reason is not
+        #   mistaken for a live objection.
         #
         # ALSO REVERTED BY THE SAME REVIEW: --grid mpas shares this card and
         # mpas_integration.py:686 fail-loud rejects BOTH n2_mode != "insitu"
@@ -647,9 +654,12 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         #   "interior_pinned" pins the Dirichlet value AT the first interior
         #   interface instead -- one w-level too deep.  Worth only ~4% on its
         #   own (measured, and it REFUTED a root-cause hypothesis of mine), but
-        #   it is what NEMO does.  Requires the surface Dirichlet value, which
-        #   this card sets, and dz_surface, which k_profiles:811-815 threads
-        #   for exactly this option.
+        #   the z=0 placement is what NEMO does, and this card now selects it.
+        #   It requires the surface Dirichlet value, which this card sets; the
+        #   face distance it needs is NEMO's e3t(1), derived inside the closure
+        #   from the (dz_ref, jacobian) pair both the C-grid and the MPAS
+        #   bridge already thread (#1704) -- it is NOT dz_surface, which is the
+        #   top cell's midpoint depth and doubled the coupling before #1704.
         # STILL NOT NEMO, and not closable here: tke_shear_production stays
         # "squared_centered".  NEMO's zdf_sh2 is face-native with a now x
         # before velocity product and DOUBLES production adjacent to coasts
@@ -662,6 +672,28 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         # TKE.  The Veros flux (|τ|/ρ0)^{3/2} default was a flagged gap; the
         # Dirichlet form matches NEMO and cuts the summer-hemisphere warm SST.
         surface_bc="nemo_dirichlet",
+        # WHERE that Dirichlet value is held.  NEMO holds en(1) at the z=0
+        # W-point and solves the tridiagonal from jk=2, leaving the first
+        # interior interface (~10 m) on the interior floor rn_emin
+        # (zdftke.F90:361,564-565).  "interior_pinned" -- the library default
+        # this card used to inherit -- pins the FULL surface value (~6.6e-3
+        # m2/s2 under typical wind) one W-level too deep, i.e. ~66x the
+        # displacement of the DINO floor bug fixed in #1689.  The metric
+        # defect that forced the earlier revert (dz_surface = the top cell's
+        # MIDPOINT, half e3t(1), which doubled the virtual-surface coupling)
+        # was fixed in #1704: the face distance is now derived as
+        # dz_ref[0]*jacobian inside the kernel, with ONE owner, and the MPAS
+        # bridge threads the same (dz_ref, jacobian) pair, so this card still
+        # runs on --grid mpas.  Controlled d30 A/B on the tripole (#1690):
+        # NOT WORSE on the pre-registered falsifier -- global MLD rmse, median
+        # bias, correlation and the subpolar band unchanged, Southern Ocean a
+        # hair better, largest move anywhere +0.3 m in the tropics against a
+        # 42 m rmse; final-state gate metrics move in the 4th digit.  Set
+        # EXPLICITLY (never inherited) because it is a scientific choice.
+        # No CLI flag exists for this field (unlike --tke-surface-bc);
+        # reverting means editing this line, which is why the evidence
+        # for the choice is recorded here rather than in a run log.
+        tke_surface_bc_level="nemo_z0",
         # NEMO integrates `en` PROGNOSTICALLY (one backward-Euler step/model-step
         # carrying OceanState.tke).  The quasi-steady diagnostic Mode-B was the
         # flagged gap; prognostic accumulates the tropical mixing energy and
@@ -797,6 +829,30 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
                 f"orca1_zdftke_config surface_bc {surface_bc!r} invalid; "
                 "expected 'veros_flux' or 'nemo_dirichlet' (NEMO nn_bc_surf).")
         _cfg = _cfg._replace(surface_bc=surface_bc)
+    # WHERE the surface TKE is held (``--tke-surface-bc-level``).  The card
+    # selects NEMO's z=0 W-point (#1690); this knob is how an A/B arm asks for
+    # the old interior placement back.
+    if surface_bc_level is not None:
+        if surface_bc_level not in ("interior_pinned", "nemo_z0"):
+            raise ValueError(
+                f"orca1_zdftke_config surface_bc_level {surface_bc_level!r} "
+                "invalid; expected 'interior_pinned' or 'nemo_z0'.")
+        _cfg = _cfg._replace(tke_surface_bc_level=surface_bc_level)
+    # The z=0 placement places a HELD Dirichlet surface value.  The Veros flux
+    # form supplies none, and the closure raises on that pair -- so refuse it
+    # HERE, at config build, naming the flag that resolves it.  Quietly
+    # swapping the placement instead would move TWO axes on an arm whose whole
+    # purpose is to isolate ONE (the BC form), which is how an A/B stops
+    # measuring what it claims (GLM review; the crash itself was codex's).
+    if (_cfg.surface_bc != "nemo_dirichlet"
+            and _cfg.tke_surface_bc_level == "nemo_z0"):
+        raise ValueError(
+            "tke_surface_bc_level='nemo_z0' holds a Dirichlet surface TKE "
+            f"value at the z=0 W-point, but surface_bc={_cfg.surface_bc!r} "
+            "supplies no held value (the closure raises on this pair). "
+            "Run the legacy flux arm with "
+            "--tke-surface-bc veros_flux --tke-surface-bc-level interior_pinned "
+            "so BOTH axes are recorded in the run's own configuration.")
     # Langmuir + surface-TKE penetration overrides (``--tke-lc``/``--tke-etau``).
     # DEFAULT keeps the ORCA1 card (ln_lc=T, nn_etau=1).  The OFF settings
     # exist to build a "fesom-mimic" card: fesom-jax's CVMix TKE has no
@@ -940,7 +996,8 @@ def ah_profile_from_file(grid, path, A_h_base: float):
 
 
 def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
-                              tke_surface_bc=None, tke_mxl_choice=None,
+                              tke_surface_bc=None, tke_surface_bc_level=None,
+                              tke_mxl_choice=None,
                               tke_n2_mode=None, tke_n2_eos_form=None,
                               tke_prognostic=None, tke_kappa_convention=None,
                               tke_shear_production=None, tke_lc=None,
@@ -972,6 +1029,7 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
         KPPConfig, VerticalMixingConfig,
     )
     for _fl, _v in (("--tke-surface-bc", tke_surface_bc),
+                    ("--tke-surface-bc-level", tke_surface_bc_level),
                     ("--tke-mxl-choice", tke_mxl_choice),
                     ("--tke-lc", tke_lc),
                     ("--tke-etau", tke_etau),
@@ -989,6 +1047,7 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
         vm = VerticalMixingConfig(scheme="none")
     elif tripole_vmix == "tke":
         _tke = orca1_zdftke_config(iwm_enabled=_iwm_on, surface_bc=tke_surface_bc,
+                                   surface_bc_level=tke_surface_bc_level,
                                    mxl_choice=tke_mxl_choice,
                                    n2_mode=tke_n2_mode,
                                    n2_eos_form=tke_n2_eos_form,
@@ -1037,6 +1096,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
                   ddm=None, prescribed_flow=None, no_gm_redi=False,
                   tripole_vmix="none", tke_eice=None, tke_surface_bc=None,
+                  tke_surface_bc_level=None,
                   tke_mxl_choice=None, tke_prognostic=None,
                   tke_n2_mode=None, tke_n2_eos_form=None,
                   tke_kappa_convention=None, tke_shear_production=None,
@@ -1247,6 +1307,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         _vm_cfg = build_tripole_vmix_config(
             tripole_vmix, iwm=iwm if _use_iwm else None,
             tke_eice=tke_eice, tke_surface_bc=tke_surface_bc,
+            tke_surface_bc_level=tke_surface_bc_level,
             tke_mxl_choice=tke_mxl_choice, tke_prognostic=tke_prognostic,
             tke_n2_mode=tke_n2_mode, tke_n2_eos_form=tke_n2_eos_form,
             tke_kappa_convention=tke_kappa_convention,
@@ -2343,7 +2404,8 @@ def _validate_kpp_grid(grid, kpp_ri_crit=None, kpp_cv=None, kpp_eice=None,
 
 
 def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
-                            tke_surface_bc=None, tke_mxl_choice=None,
+                            tke_surface_bc=None, tke_surface_bc_level=None,
+                            tke_mxl_choice=None,
                             tke_prognostic=None, tke_kappa_convention=None,
                             tke_shear_production=None,
                             tke_n2_mode=None, tke_n2_eos_form=None,
@@ -2379,6 +2441,7 @@ def _validate_tke_card_grid(grid, tripole_vmix="none", tke_eice=None,
     """
     for _flag, _val in (("--tke-eice", tke_eice),
                         ("--tke-surface-bc", tke_surface_bc),
+                        ("--tke-surface-bc-level", tke_surface_bc_level),
                         ("--tke-mxl-choice", tke_mxl_choice),
                         ("--tke-lc", tke_lc),
                         ("--tke-etau", tke_etau),
@@ -5188,6 +5251,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "'veros_flux' selects the Veros flux form "
                         "(|tau|/rho0)^{3/2} (the pre-#1326 behaviour, for "
                         "A/B). Requires --tripole-vmix tke (else raises).")
+    p.add_argument("--tke-surface-bc-level", type=str, default=None,
+                   choices=["interior_pinned", "nemo_z0"],
+                   help="WHERE the surface TKE boundary value is held for "
+                        "--tripole-vmix tke. None (default) keeps the card "
+                        "value, which since #1690 is 'nemo_z0' (NEMO holds "
+                        "en(1) at the z=0 W-point and solves from jk=2, "
+                        "zdftke.F90:264,403-410). 'interior_pinned' pins it at "
+                        "the first interior interface (~10 m) instead -- the "
+                        "pre-#1690 behaviour, kept for A/B and REQUIRED with "
+                        "--tke-surface-bc veros_flux, which supplies no held "
+                        "value. Requires --tripole-vmix tke (else raises).")
     p.add_argument("--tke-lc", type=str, default=None, choices=("on", "off"),
                    help="Langmuir cell parameterisation in the tripole TKE "
                         "card (NEMO ln_lc). None keeps the ORCA1 card (on). "
@@ -5726,7 +5800,8 @@ def main() -> int:
         raise SystemExit("--A-h-profile-file is tripole-only (the profile is "
                          "built on the eORCA nominal latitude rows).")
     _validate_tke_card_grid(args.grid, args.tripole_vmix, args.tke_eice,
-                            args.tke_surface_bc, args.tke_mxl_choice,
+                            args.tke_surface_bc, args.tke_surface_bc_level,
+                            args.tke_mxl_choice,
                             args.tke_prognostic, args.tke_kappa_convention,
                             args.tke_shear_production,
                             tke_n2_mode=args.tke_n2_mode,
@@ -5938,6 +6013,7 @@ def main() -> int:
             tripole_vmix=args.tripole_vmix,
             tke_eice=args.tke_eice,
             tke_surface_bc=args.tke_surface_bc,
+            tke_surface_bc_level=args.tke_surface_bc_level,
             tke_mxl_choice=args.tke_mxl_choice,
             tke_n2_mode=args.tke_n2_mode,
             tke_n2_eos_form=args.tke_n2_eos_form,
@@ -6026,6 +6102,7 @@ def main() -> int:
                     "tke", iwm=None,
                     tke_eice=args.tke_eice,
                     tke_surface_bc=args.tke_surface_bc,
+                    tke_surface_bc_level=args.tke_surface_bc_level,
                     tke_mxl_choice=args.tke_mxl_choice,
                     tke_prognostic=args.tke_prognostic,
                     tke_n2_mode=args.tke_n2_mode,
