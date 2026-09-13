@@ -766,6 +766,7 @@ def _euc_merid_block(a, L, zc):
         print("max over 0-400 m (core speed) and its depth; + = eastward.")
         print(f"{'lon':>6} {'ours_max':>9} {'@m':>5} {'nemo_max':>9} {'@m':>5} "
               f"{'ours_10m':>9} {'nemo_10m':>9}")
+        _profiles = {}
         k400_o = zc <= 400.0
         k400_n = zu <= 400.0
         k10_o = int(np.argmin(np.abs(zc - 10.0)))
@@ -786,6 +787,29 @@ def _euc_merid_block(a, L, zc):
             s10_n = box_mean(un[k10_n], lat_n, lon_n, 0.0, lon0, 1.0, 1.0)
             print(f"{lon0:6d} {mo:9.3f} {zo:5.0f} {mn:9.3f} {zn_:5.0f} "
                   f"{s10_o:9.3f} {s10_n:9.3f}")
+            _profiles[lon0] = (prof_o, zc[k400_o], prof_n, zu[k400_n])
+
+        # THE MAX AND ITS DEPTH ARE NOT ENOUGH.  A single (speed, depth) pair
+        # cannot say whether a deep maximum is a genuine subsurface JET or the
+        # top of a broad deep drift that merely happens to be the largest
+        # eastward value in the column -- and that distinction decides whether
+        # a core-depth mismatch is a displaced jet or a missing one.  Both
+        # reviewers asked for the full profiles, and the loop above already
+        # computes them, so printing costs nothing.
+        print("\nEQUATORIAL u(z), |lat|<=1 box mean, m/s; + = eastward.")
+        print("Each side on ITS OWN levels -- the levels differ, so read the "
+              "SHAPE (is there a subsurface maximum, and how sharp) rather "
+              "than pairing rows.")
+        for lon0 in sorted(_profiles):
+            po, zo_, pn, zn2 = _profiles[lon0]
+            print(f"\n  {lon0}E   ours (depth m: u)          NEMO (depth m: u)")
+            for i in range(max(po.size, pn.size)):
+                lhs = (f"{zo_[i]:8.0f}:{po[i]:7.3f}"
+                       if i < po.size and np.isfinite(po[i]) else " " * 16)
+                rhs = (f"{zn2[i]:8.0f}:{pn[i]:7.3f}"
+                       if i < pn.size and np.isfinite(pn[i]) else "")
+                if lhs.strip() or rhs.strip():
+                    print(f"    {lhs}      {rhs}")
 
 
 def _upwelling_block(a, L, tgt_lat, tgt_lon, band, zc, regrid):
