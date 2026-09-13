@@ -1385,7 +1385,7 @@ def _run_substep_loop(
     ab3_za=None, ab3_zb=None, ab3_hist=None,
     ab3_raw_hist=None,
     een_pre=None,
-    drag_r_u=None, drag_r_v=None,
+    drag_r_u=None, drag_r_v=None, drag_r_t=None,
     tide_basis=None, tide_cos=None, tide_sin=None,
     transport_sum_init=None,
     primary_transport_average=False,
@@ -2042,7 +2042,7 @@ def _run_substep_loop(
                     -drag_r_v if drag_r_v is not None
                     else jnp.zeros_like(V_bar_c)),
                 "drag_coefficient_t": (
-                    -_drag_r_t if _drag_r_t is not None
+                    -drag_r_t if drag_r_t is not None
                     else jnp.zeros_like(eta)),
                 "inverse_depth_u": jnp.where(
                     u_mask != 0,
@@ -2664,9 +2664,9 @@ def barotropic_substeps_latlon_cgrid(
         _v_drg = v_corr if v_now is None else v_now.astype(_dt)
         _drag_values = nemo_bottom_drag_rate_faces(
             _u_drg, _v_drg, _hk_now, z_coord, config, grid,
-            return_cell_rate=return_trace)
+            return_cell_rate=_nemo_substep_trace_test_hook)
         _r_u_bt, _r_v_bt = _drag_values[:2]
-        if return_trace:
+        if _nemo_substep_trace_test_hook:
             _drag_r_t = _drag_values[4]
         _drag_r_u = _r_u_bt.astype(_dt)
         _drag_r_v = _r_v_bt.astype(_dt)
@@ -2799,7 +2799,7 @@ def barotropic_substeps_latlon_cgrid(
         ab3_raw_hist=_nemo_raw_history_test_override,
         tide_basis=_tide_basis, tide_cos=_tide_cos, tide_sin=_tide_sin,
         een_pre=_een_pre,
-        drag_r_u=_drag_r_u, drag_r_v=_drag_r_v,
+        drag_r_u=_drag_r_u, drag_r_v=_drag_r_v, drag_r_t=_drag_r_t,
         primary_transport_average=_primary_transport_average,
         return_trace=_nemo_substep_trace_test_hook,
         nemo_flux_form_update_test_override=(
