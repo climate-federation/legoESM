@@ -147,6 +147,14 @@ retry reported 52 passed in 1.68 seconds; its JUnit SHA-256 is
 It covers the inherited round-73 record gate, both round-76 instruments, the
 whole citation-gate regression, and the time-level registry.
 
+The receipt citation gate found four mapped compiled-source citations and no
+failures at clean receipt commit `bc4e7c53504f`; its JSON SHA-256 is
+`8e5ff21c1a04ac842dfdebed5a21dc6eec9ab6b2f945ad7f0ca5b1399802ebe3`.
+Shifting the midpoint citation by two lines produced
+`SYMBOL-NOT-AT-LINE` and exited 1; its log SHA-256 is
+`c6db2004e99ceb76840348661292392cea5a0103c680cd83fd8d824f48f7c781`.
+Shell parsing, Python compilation, focused Ruff, and `git diff --check` pass.
+
 ## Asked, unasked, and OPEN
 
 **ASKED:** walk the first non-bit U statement in magnitude order, refuse an
