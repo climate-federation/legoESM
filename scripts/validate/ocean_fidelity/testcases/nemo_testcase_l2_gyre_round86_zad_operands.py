@@ -165,10 +165,13 @@ def measure(args) -> dict[str, object]:
         "reciprocal_area_v": active_v[..., 0],
     }
 
-    ordinary_rows = {
-        name: _row(live[name], oracle[name], active[name])
-        for name in OPERAND_ORDER
-    }
+    ordinary_rows = {}
+    for name in OPERAND_ORDER:
+        shapes = (np.asarray(live[name]).shape, np.asarray(oracle[name]).shape,
+                  np.asarray(active[name]).shape)
+        require(shapes[0] == shapes[1] == shapes[2],
+                f"{name} comparison shape mismatch: {shapes}")
+        ordinary_rows[name] = _row(live[name], oracle[name], active[name])
     ordinary_rows["ww"]["scope"] = "owned t points, consumed levels 1:jpkm1"
 
     plant_detail = None
