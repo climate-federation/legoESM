@@ -184,7 +184,23 @@ def measure(args) -> dict:
 
     base, context = round72._capture_seeded_context(args)
     card, seeded, freshwater, surface, _ = context
-    ordinary_trace, _ = round72._live_trace(card, seeded, freshwater, surface)
+    ordinary_model = model_module.LatLonCGridOceanModel(
+        card.recipe.grid,
+        card.recipe.z_coord,
+        card.recipe.model_config,
+        _nemo_ws_test_hooks=model_module._NEMOWSRK3TestHooks(
+            expose_live_stage_operands=True
+        ),
+    )
+    ordinary_model.prime_step_caches(seeded)
+    ordinary_trace = jax.device_get(
+        ordinary_model.step(
+            seeded,
+            card.dt_s,
+            freshwater=freshwater,
+            surface_forcing=surface,
+        )
+    )
     baro_model = model_module.LatLonCGridOceanModel(
         card.recipe.grid,
         card.recipe.z_coord,
