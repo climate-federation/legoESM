@@ -142,9 +142,16 @@ report 27 passed in 1.51 seconds. Their JUnit SHA-256 is
 Shell parsing, Python compilation, focused Ruff with the inherited long-line
 and legacy test-name exceptions, and `git diff --check` pass.
 
-The receipt citation result and shifted-citation plant are recorded in the
-final seal commit after this receipt and its four compiled-source mappings are
-committed.
+The first citation run was **REFUTED**: both writer ranges ended on the
+following `ENDIF`, while their registered terminal symbols were one line
+earlier. The gate reported two `SYMBOL-NOT-AT-LINE` failures. Commit
+`90b52cfbe2c4` shortened each range to its actual terminal statement. At that
+clean commit the receipt gate found four citations, all mapped, and passed; its
+JSON/log SHA-256 is
+`0f3a099518d415d27d5c6ef504d8e264c0cbf8d9cbfc4672dfb0d376ea8d7703`.
+Shifting the midpoint-association citation by two lines produced
+`SYMBOL-NOT-AT-LINE` and exited 1; plant log SHA-256
+`c2eea00a72b6c3eb252ead994115505ff2e46e671e13600fb1f8aa44b819c41d`.
 
 ## Asked, unasked, and OPEN
 
