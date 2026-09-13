@@ -203,21 +203,30 @@ def measure(args) -> dict:
     )
 
     plant_detail = None
+    ordinary_slow_u = round78.comparison(
+        live_arrays["slow_u"][0], oracle_arrays["slow_u"][0], active["u"])
     if args.plant == "history-ulp":
         location = (0, *tuple(np.argwhere(active["u"])[0]))
         oracle_arrays["u_b"][location] = np.nextafter(
             oracle_arrays["u_b"][location], np.float64(np.inf))
-        plant_detail = {"field": "u_b", "location": list(location)}
+        plant_detail = {
+            "field": "u_b", "location": [int(index) for index in location]}
     elif args.plant == "slow-u-ulp":
-        equal = (
-            oracle_arrays["slow_u"].view(np.uint64)
-            == live_arrays["slow_u"].view(np.uint64)
-        ) & np.broadcast_to(active["u"], oracle_arrays["slow_u"].shape)
-        require(np.any(equal), "slow-U ULP plant has no exact wet target")
-        location = tuple(np.argwhere(equal)[0])
+        delta = np.where(
+            active["u"],
+            np.abs(live_arrays["slow_u"][0] - oracle_arrays["slow_u"][0]),
+            -np.inf,
+        )
+        location = (0, *np.unravel_index(np.argmax(delta), delta.shape))
+        direction = (
+            np.float64(np.inf)
+            if oracle_arrays["slow_u"][location] >= live_arrays["slow_u"][location]
+            else np.float64(-np.inf)
+        )
         oracle_arrays["slow_u"][location] = np.nextafter(
-            oracle_arrays["slow_u"][location], np.float64(np.inf))
-        plant_detail = {"field": "slow_u", "location": list(location)}
+            oracle_arrays["slow_u"][location], direction)
+        plant_detail = {
+            "field": "slow_u", "location": [int(index) for index in location]}
     elif args.plant == "null-slow-u":
         ordinary = round78.comparison(
             live_arrays["slow_u"][0], oracle_arrays["slow_u"][0], active["u"])
@@ -268,11 +277,7 @@ def measure(args) -> dict:
     if args.plant == "history-ulp":
         plant_fires = bool(first and first["substep"] == 1 and first["boundary"] == "u_b")
     elif args.plant == "slow-u-ulp":
-        location = tuple(plant_detail["location"])
-        plant_fires = bool(
-            oracle_arrays["slow_u"][location].view(np.uint64)
-            != live_arrays["slow_u"][location].view(np.uint64)
-        )
+        plant_fires = rows[0]["slow_u"] != ordinary_slow_u
     elif args.plant == "null-slow-u":
         plant_fires = rows[0]["slow_u"]["bit_exact"]
 
