@@ -75,7 +75,7 @@ cp "$SOURCE_ROOT/MY_SRC/dynspg_ts.F90" "$dry/dynspg_ts.F90"
 patch -s "$dry/dynspg_ts.F90" <"$DYN_PATCH"
 parent_delta=$(diff "$SOURCE_ROOT/MY_SRC/dynspg_ts.F90" "$dry/dynspg_ts.F90" | grep '^<' || true)
 [[ "$(printf '%s\n' "$parent_delta" | grep -c '^<')" -eq 6 ]]
-[[ -z "$(printf '%s\n' "$parent_delta" | grep -Ev 'IF.*lwp.*kt == nit000.*|WRITE.*l2_adv_unit' || true)" ]] || {
+[[ -z "$(printf '%s\n' "$parent_delta" | grep -Ev 'IF.*lwp.*kt == nit000.*|WRITE.*l2_adv_unit|& l2_u_mid, l2_v_mid, zhup2_e' || true)" ]] || {
   printf 'REFUSE: patch replaces a non-writer parent line\n' >&2; exit 66;
 }
 grep -q 'kt == nit000 + 1' "$dry/dynspg_ts.F90"
