@@ -127,3 +127,12 @@ claim because no such operand was recorded, and permits the live kt=2 stress
 only inside the forward cross-record calibration. Exact recovery of the
 recorded final forcing remains mandatory. The rejected JSON is retained and
 will be named in the receipt; none of its scientific values may be cited.
+
+The ordinary corrected walk refuted the assumption that reference face
+thickness was exact: every wet 3-D face differs at kt=2 because legoESM uses a
+live free-surface thickness there. Therefore the frozen `e3` plant's stated
+"become first" condition is impossible and **REFUTED**. The plant remains a
+one-ULP sensitivity control: it must alter the already non-bit `e3` row and
+exit nonzero. The RHS and final-forcing plants likewise compare against the
+ordinary row in the same invocation, so an already non-bit baseline cannot
+make either control vacuously green.

@@ -254,6 +254,20 @@ def measure(args) -> dict[str, object]:
     require(float(trace["wind_r1_rho0"]) == float(rho_reciprocal),
             "live/oracle density reciprocal differs")
 
+    ordinary_plant_target = {
+        "e3-ulp": comparison(live["u"]["e3"], oracle["u"]["e3"], active["u3"]),
+        "rhs-ulp": comparison(live["u"]["rhs"], oracle["u"]["rhs"], active["u3"]),
+        "final-ulp": comparison(
+            source_chain(
+                **{key: value for key, value in oracle["u"].items() if key != "final"},
+                rho_reciprocal=rho_reciprocal,
+                mask2=active["u2"].astype(np.float64),
+            )["final"],
+            oracle["u"]["final"],
+            active["u2"],
+        ),
+    }
+
     plant_detail = None
     if args.plant == "e3-ulp":
         at = tuple(np.argwhere(active["u3"])[0])
@@ -351,11 +365,14 @@ def measure(args) -> dict[str, object]:
         and first["boundary"] == "three_dimensional_rhs"
         and all(rows[face]["oracle_rhs_substitution_final"]["bit_exact"] for face in ("u", "v"))
     )
+    planted_row = {
+        "e3-ulp": rows["u"]["e3"],
+        "rhs-ulp": rows["u"]["three_dimensional_rhs"],
+        "final-ulp": cross_record["u"],
+    }.get(args.plant)
     plant_fires = bool(
-        (args.plant == "e3-ulp" and first and first["boundary"] == "e3")
-        or (args.plant == "rhs-ulp" and first and first["boundary"] == "three_dimensional_rhs"
-            and not cross_exact)
-        or (args.plant == "final-ulp" and not cross_exact)
+        args.plant != "none"
+        and planted_row != ordinary_plant_target[args.plant]
     )
     status = "CONFIRMED" if confirmed else ("PLANT_FIRED" if plant_fires else "REFUTED")
     return {
