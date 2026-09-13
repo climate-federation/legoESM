@@ -273,7 +273,7 @@ def measure(args) -> dict[str, object]:
 
     rows = {}
     cross_record = {}
-    chains = {}
+    reference_geometry_arms = {}
     for face in ("u", "v"):
         active3 = active[f"{face}3"]
         active2 = active[f"{face}2"]
@@ -291,8 +291,23 @@ def measure(args) -> dict[str, object]:
             **live[face], rho_reciprocal=rho_reciprocal,
             mask2=active2.astype(np.float64),
         )
-        chains[face] = {"oracle": oracle_chain, "live": live_chain}
+        reference_geometry_inputs = dict(live[face])
+        for name in ("e3", "mask3", "reciprocal_ref"):
+            reference_geometry_inputs[name] = oracle[face][name]
+        reference_geometry_chain = source_chain(
+            **reference_geometry_inputs,
+            rho_reciprocal=rho_reciprocal,
+            mask2=active2.astype(np.float64),
+        )
         cross_record[face] = comparison(oracle_chain["final"], oracle[face]["final"], active2)
+        reference_geometry_arms[face] = {
+            "depth_mean": comparison(
+                reference_geometry_chain["depth_mean"], oracle_chain["depth_mean"], active2),
+            "final_slow_forcing": comparison(
+                reference_geometry_chain["final"], oracle[face]["final"], active2),
+            "movement_from_current_depth_mean": comparison(
+                reference_geometry_chain["depth_mean"], live_chain["depth_mean"], active2),
+        }
         rows[face] = {
             "e3": comparison(live[face]["e3"], oracle[face]["e3"], active3),
             "mask": comparison(live[face]["mask3"], oracle[face]["mask3"], active3),
@@ -352,6 +367,7 @@ def measure(args) -> dict[str, object]:
         "round81_btstep_sha256": round81.sha256(args.record_root / round81.RECORD),
         "cross_record_replay": cross_record,
         "kt2_wind_stress_identity": "WITHHELD_NO_DIRECT_RECORD",
+        "reference_geometry_arm": reference_geometry_arms,
         "first_non_bit_statement": first,
         "rows": rows,
         "plant": args.plant,
