@@ -94,6 +94,9 @@ def _native(trace, record_name: str) -> np.ndarray:
 def _face_replay_from_live_cells(trace) -> tuple[np.ndarray, np.ndarray]:
     """Replay compiled dyn_drg_init's two face averages from its live input."""
     cell = np.asarray(trace["drag_coefficient_t"], dtype=np.float64)
+    if cell.ndim == 3:
+        cell = cell[0]
+    require(cell.ndim == 2, "live cell drag coefficient is not two-dimensional")
     u_inner = np.float64(0.5) * (np.roll(cell, 1, axis=1) + cell)
     u_full = np.concatenate([u_inner, u_inner[:, :1]], axis=1)
     v_inner = np.float64(0.5) * (cell[:-1, :] + cell[1:, :])
