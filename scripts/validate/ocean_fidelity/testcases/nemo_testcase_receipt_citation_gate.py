@@ -190,6 +190,10 @@ FILES = {
     # producer acquisition to that record's own compiled branch.
     "GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/dynspg_ts.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/dynspg_ts.f90"),
+    # Round 77 audits the failed admission against the exact compiled target
+    # that wrote both the inherited transport-mean record and the new record.
+    "GYRE_OMIP_L2_P3_SM_R76UAMID4/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R76UAMID4/BLD/ppsrc/nemo/dynspg_ts.f90"),
     "round64/oracle_krhs_split/ocean.output": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round64/"
         "oracle_krhs_split/ocean.output"),
@@ -350,6 +354,20 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 77: valid midpoint record followed by an admission-parser stop ---
+    'GYRE_OMIP_L2_P3_SM_R76UAMID4/BLD/ppsrc/nemo/dynspg_ts.f90:442-453': [
+        '! Round-73 WRITE-only extension of the existing transport-mean stream.',
+        ('WRITE(l2_adv_unit) r1_wgt2s, wgtbtp2(1:icycle), r1_e2u, r1_e1v', 2),
+        12],
+    'GYRE_OMIP_L2_P3_SM_R76UAMID4/BLD/ppsrc/nemo/dynspg_ts.f90:454-463': [
+        '! Round-76 WRITE-only source-order record for the kt=2 U midpoint.',
+        '& ntsi, ntei, ntsj, ntej', 10],
+    'GYRE_OMIP_L2_P3_SM_R76UAMID4/BLD/ppsrc/nemo/dynspg_ts.f90:501-509': [
+        'ua_e(ji,jj) = za1 * un_e(ji,jj) + za2 * ub_e(ji,jj) + za3 * ubb_e(ji,jj)',
+        '& ubb_e(ntsi:ntei,ntsj:ntej), ua_e(ntsi:ntei,ntsj:ntej)', 9],
+    'GYRE_OMIP_L2_P3_SM_R76UAMID4/BLD/ppsrc/nemo/dynspg_ts.f90:588-606': [
+        '! Sum over sub-time-steps to compute advective velocities',
+        'WRITE(l2_adv_unit) zhup2_e, zhvp2_e, un_adv, vn_adv', 19],
     # --- round 73: external mean already differs at the stage-1 boundary ---
     'GYRE_OMIP_L2_P3_SM_R72ZFOP/BLD/ppsrc/nemo/stprk3_stg.f90:287-291': [
         ('CASE ( np_LIN, np_HYB )', 2),
