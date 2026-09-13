@@ -84,9 +84,9 @@ grep -q 'oracle_bt_advmean_operands_kt",I8.8' "$dry/dynspg_ts.F90"
 
 check_layout() {
   local source=$1
-  [[ "$(grep -c 'WRITE(l2_adv_unit) l2_adv_before_u, l2_adv_before_v, zhU, zhV$' "$source")" -eq 1 ]]
-  [[ "$(grep -c 'WRITE(l2_adv_unit) l2_u_mid, l2_v_mid$' "$source")" -eq 1 ]]
-  [[ "$(grep -c 'WRITE(l2_adv_unit) ua_e, va_e$' "$source")" -eq 1 ]]
+  [[ "$(grep -c 'WRITE(l2_adv_unit) l2_adv_before_u, l2_adv_before_v, zhU, zhV$' "$source")" -eq 1 ]] &&
+  [[ "$(grep -c 'WRITE(l2_adv_unit) l2_u_mid, l2_v_mid$' "$source")" -eq 1 ]] &&
+  [[ "$(grep -c 'WRITE(l2_adv_unit) ua_e, va_e$' "$source")" -eq 1 ]] &&
   [[ "$(grep -c 'WRITE(l2_adv_unit) zhup2_e, zhvp2_e, un_adv, vn_adv$' "$source")" -eq 1 ]]
 }
 check_layout "$dry/dynspg_ts.F90"
