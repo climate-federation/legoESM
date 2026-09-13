@@ -119,6 +119,12 @@ WRITE anchor occurred twice, and dirty-tree provenance correctly failed two
 receipt tests. After pinning the second occurrence and committing the map, the
 final focused run reports 18 passed in 1.55 seconds. Its JUnit SHA-256 is
 `1eb934b947768c1ec2220efe2824012e3f55e8cec9f1ff8f9d04e30031fe5165`.
+The receipt citation gate found five mapped citations and no failures at clean
+receipt commit `a7d651a76ba8`; its JSON SHA-256 is
+`e5d9e43c57d2873d62586864ae9e590df9e0eb188781ef4a34b4f206858aa577`.
+Shifting the failed writer citation by two lines produced
+`SYMBOL-NOT-AT-LINE` and exited 1; its log SHA-256 is
+`894712ce1426e03b9a85a7ef609048772ebb8018156a47e8e9c258ef03248b72`.
 Shell parsing, Python compilation, exact preprocessing, Fortran syntax, and
 `git diff --check` pass.
 
