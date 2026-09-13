@@ -185,6 +185,8 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/dynldf_lev.f90"),
     "GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/dynzad.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/dynzad.f90"),
+    "GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/sshwzv.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/sshwzv.f90"),
     # Round 72 cites the exact acquired R71 compiled tracer-stage branch.
     "GYRE_OMIP_L2_P3_SM_R71FCTST2/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R71FCTST2/BLD/ppsrc/nemo/stprk3_stg.f90"),
@@ -389,6 +391,9 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/dynzad.f90:102-138': [
         'zWdzU(ntsi-(0):ntei+(0),ntsj-(0):ntej+(0)) = 0._wp',
         ('END DO   ;   END DO', 2), 37],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/sshwzv.f90:293-300': [
+        "ELSE                                            !==  Quasi-Eulerian vertical coordinate  ==!   ('key_qco')",
+        ('ENDIF', 5), 8],
     'round64/oracle_krhs_split/ocean.output:682-708': [
         'ldf_dyn : lateral momentum physics',
         'eddy viscosity. = constant', 27],
