@@ -118,7 +118,7 @@ def measure(args) -> dict:
                      and first is not None and first["substep"] == 2
                      and first["boundary"] == "un_e" and shared_exact
                      and all(row["bit_exact"] for row in replay)
-                     and base["status"] == "CONFIRMED")
+                     and base["status"] == "MEASURED")
     plant_fires = bool(args.plant == "history-ulp" and first is not None
                        and first["substep"] == 1
                        and first["boundary"] == "ubb_e")
