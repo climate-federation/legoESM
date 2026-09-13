@@ -117,8 +117,10 @@ not silently relabel kt=3 as the originally predicted boundary.
   self-test failures.
 - Shifting the compiled initialization citation by two lines exited 1 with
   `SYMBOL-NOT-AT-LINE`.
+- Focused tests for the reused offline comparator, shared cellwise admission
+  gate, and receipt citation gate: **38 passed in 1.91 s** under CPU/fp64.
 - `git diff --check`: PASS.
-- No focused physics test was rerun because this round changes no production or
+- No model-physics suite was rerun because this round changes no production or
   test code. Round 79's 87-test result remains prior evidence, not a Round 80
   test claim.
 
