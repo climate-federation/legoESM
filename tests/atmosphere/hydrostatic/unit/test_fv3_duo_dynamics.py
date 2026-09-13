@@ -264,11 +264,13 @@ class TestFV3DuoDynamicsModel:
         consumed, so a degrees-valued or transposed longitude would pass
         it). Radians: lon in [0, 2pi], lat in [-pi/2, pi/2] -- a lon<->lat
         swap or degrees (~90 vs ~1.57) fails here. Axes: on the equatorial
-        faces the cell-centre longitude is EXACTLY constant along one
-        index (those grid lines are meridians) and varies along the other;
-        which index it is differs between faces 0/1 and 3/4 (measured
-        2026-09-13 at C12). sphum is built from agrid_lat on the same
-        [cs, cs] slice, so this is the convention both share."""
+        faces the cell-centre longitude is NEARLY constant along one index
+        (the grid lines are meridians; the centres sit ~1e-4 rad off them,
+        measured 2026-09-13 at C12: max 2.6e-4 vs 1.2e-1 across) and varies
+        along the other; which index differs between faces 0/1 and 3/4. A
+        transposition swaps the two, three orders apart. sphum is built
+        from agrid_lat on the same [cs, cs] slice, so this is the
+        convention both share."""
         n, ng = bundle.n, bundle.ng
         cs = slice(ng, ng + n)
         gs6 = bundle.ctx_np["gs6"]
@@ -280,10 +282,11 @@ class TestFV3DuoDynamicsModel:
             assert np.abs(lat).max() <= np.pi / 2, f"face {t}"
         for t, const_axis in ((0, 1), (1, 1), (3, 0), (4, 0)):
             lon = np.asarray(gs6[t]["agrid_lon"])[cs, cs]
-            assert np.abs(np.diff(lon, axis=const_axis)).max() < 1e-12, (
-                f"face {t}: lon not constant along axis {const_axis}")
-            assert np.abs(np.diff(lon, axis=1 - const_axis)).min() > 0.0, (
-                f"face {t}: lon does not vary along axis {1 - const_axis}")
+            along = np.abs(np.diff(lon, axis=const_axis)).max()
+            across = np.abs(np.diff(lon, axis=1 - const_axis)).min()
+            assert along < 1e-2 * across, (
+                f"face {t}: lon changes {along:.2e} along axis {const_axis} "
+                f"vs {across:.2e} across -- not the assumed axis convention")
 
     def test_n_tracers_below_one_is_refused(self, model):
         with pytest.raises(ValueError, match="n_tracers"):
