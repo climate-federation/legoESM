@@ -142,8 +142,8 @@ def measure(args) -> dict[str, object]:
                 * np.asarray(card.recipe.grid.dy_v, dtype=np.float64))),
     }
     _, live_r3u, live_r3v = trace.stage_qco[0]
-    live["r3u"] = round83.native_u(live_r3u)
-    live["r3v"] = round83.native_v(live_r3v)
+    live["r3u"] = round83.native_u(live_r3u)[..., 0]
+    live["r3v"] = round83.native_v(live_r3v)[..., 0]
     oracle = {
         "velocity_u": round83.owned3(arrays["u_Kmm"]),
         "velocity_v": round83.owned3(arrays["v_Kmm"]),
