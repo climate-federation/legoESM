@@ -127,7 +127,30 @@ def _admit_round64(args) -> tuple[dict, dict]:
     stage_path = args.round64_root / "oracle_momstage_kt00000002_s1.bin"
     original_stage = args.round46_root / stage_path.name
     require(stage_path.is_file() and original_stage.is_file(), "missing kt=2 stage record")
-    require(sha256(stage_path) == sha256(original_stage), "Round-46 stage carry is not byte-exact")
+    classified = [
+        row for row in admission["classified_changed_records"]
+        if row["record"] == stage_path.name
+    ]
+    require(len(classified) == 1, "kt=2 stage record lacks one admission classification")
+    stage_admission = classified[0]
+    require(stage_admission["consumed_equal"], "kt=2 stage consumed projection differs")
+    require(stage_admission["owned_field_differences"] == [],
+            "kt=2 stage has an owned-field difference")
+    require(
+        stage_admission["reason_counts"] == {
+            "halo": 7,
+            "owned_defined_violation": 0,
+            "owned_undefined_region": 0,
+            "owned_undefined_slot": 0,
+        },
+        "kt=2 stage admission reasons changed",
+    )
+    used_fields = {
+        "after_ldf_u", "after_ldf_v", "e3u_0", "e3v_0", "umask", "vmask",
+        "u_Kmm", "v_Kmm", "uu_b_Kmm", "vv_b_Kmm", "has_ldf",
+    }
+    require(used_fields <= set(stage_admission["compared_fields"]),
+            "a consumed kt=2 stage field is outside admission coverage")
     slow_path = args.round64_root / "oracle_slow_forcing_kt00000001.bin"
     stage = round46.read_stage(stage_path)
     slow = round16.read_slow_forcing(slow_path)

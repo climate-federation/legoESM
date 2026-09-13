@@ -106,3 +106,14 @@ No configuration/default, selector, coefficient, timestep, carried-state
 representation, stabilizer, year harness, reconciliation gate, freshwater
 pair, #1484 guard, held manifest, canonical NEMO source, or existing evidence
 changes. No scientific choice is made.
+
+## Admission wording correction before scientific scoring
+
+The first gate attempt stopped before reading a scientific field because item
+1 above incorrectly called the whole Round-46 stage file byte-identical. The
+already-read Round-64 receipt had documented its exact exception: seven raw
+`ww` halo elements changed with zero owned changes and `consumed_equal=true`.
+The corrected gate requires that existing fail-closed classification and
+requires every field used here to be listed in `compared_fields`; it does not
+invent a new waiver. The frozen prediction, source order, values, and
+falsifiers above are unchanged.
