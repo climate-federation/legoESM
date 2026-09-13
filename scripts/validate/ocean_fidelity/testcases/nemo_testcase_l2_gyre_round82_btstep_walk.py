@@ -173,6 +173,20 @@ def measure(args) -> dict:
          for index in (0, 1, 2, 3)], axis=-1)
     oracle_mid = np.array(fields["mid_coefficients"], copy=True)
     oracle_back = np.array(fields["back_coefficients"], copy=True)
+    for name in round81.ARRAY_FIELDS:
+        require(
+            live_arrays[name].shape == oracle_arrays[name].shape,
+            f"{name} live/oracle shape mismatch: "
+            f"{live_arrays[name].shape} != {oracle_arrays[name].shape}",
+        )
+    require(
+        live_mid.shape == oracle_mid.shape,
+        f"mid coefficient shape mismatch: {live_mid.shape} != {oracle_mid.shape}",
+    )
+    require(
+        live_back.shape == oracle_back.shape,
+        f"back coefficient shape mismatch: {live_back.shape} != {oracle_back.shape}",
+    )
 
     plant_detail = None
     if args.plant == "history-ulp":
