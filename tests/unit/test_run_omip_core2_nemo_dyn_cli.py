@@ -177,3 +177,36 @@ def test_missing_gdept_is_tolerated_not_fatal():
     i = src.index("def _load_nemo_gdept_1d(")
     body = src[i:i + 1200]
     assert 'if "gdept_1d" not in ds:' in body and "return None" in body
+
+
+def test_kappah_min_flag_exists_and_preserves_the_config_by_default():
+    """NEMO sets rn_avt0 = 1.2e-5 (namelist_cfg:437). Our recipe RESOLVES
+    kappaH_min to 1e-10 -- five orders of magnitude smaller, i.e. no
+    background diffusivity at all -- and the measured equatorial K_H falls to
+    ~1e-6 through 10-90 m where NEMO's avt is ~1.9e-3. That is the depth range
+    of the +1.40 C surface / -1.55 C subsurface temperature dipole.
+
+    The flag is how that becomes selectable; the DEFAULT stays None so no
+    existing run changes."""
+    p = _parser()
+    assert p.parse_args([]).tke_kappah_min is None
+    assert p.parse_args(["--tke-kappah-min", "1.2e-5"]).tke_kappah_min == 1.2e-5
+
+
+def test_kappah_min_reaches_the_tke_config():
+    src = RUNNER.read_text()
+    assert "_tke = _tke._replace(kappaH_min=float(tke_kappah_min))" in src
+    assert "tke_kappah_min=tke_kappah_min)" in src, "vmix builder call"
+    assert "tke_kappah_min=args.tke_kappah_min," in src, "main() call site"
+
+
+def test_negative_diffusivity_is_refused():
+    assert "must be >= 0" in RUNNER.read_text()
+
+
+def test_the_momentum_floor_is_left_alone():
+    """One variable per arm. kappaM_min is also wrong against NEMO (ours
+    1.4e-6 vs rn_avm0 1.2e-4) but changing both at once would make the arm
+    unattributable."""
+    src = RUNNER.read_text()
+    assert "_replace(kappaM_min=" not in src

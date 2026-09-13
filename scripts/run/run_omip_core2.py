@@ -1362,7 +1362,7 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                               tke_shear_production=None, tke_lc=None,
                               tke_etau=None,
                               tke_preclosure_coeff_source=None,
-                              tke_surface_bc_level=None):
+                              tke_surface_bc_level=None, tke_kappah_min=None):
     """``VerticalMixingConfig`` for ``--tripole-vmix`` (+ optional zdfiwm).
 
     ``tripole_vmix``: "none" (byte-identical no-closure default), "tke"
@@ -1426,6 +1426,17 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                     f"--tke-eice {tke_eice!r} invalid; expected 0, 1 or 3 "
                     "(NEMO nn_eice modes).")
             _tke = _tke._replace(eice=int(tke_eice))
+        if tke_kappah_min is not None:
+            # NEMO's rn_avt0 (namelist_cfg:437 = 1.2e-5 m2/s), the background
+            # tracer diffusivity floor. Our recipe resolves kappaH_min to
+            # 1e-10, i.e. effectively none, and the measured equatorial K_H
+            # falls to ~1e-6 m2/s through 10-90 m where NEMO's avt is ~1.9e-3.
+            # Kept a flag rather than a changed default: moving the default
+            # would silently alter every existing run.
+            if float(tke_kappah_min) < 0.0:
+                raise ValueError(
+                    f"--tke-kappah-min {tke_kappah_min!r} must be >= 0")
+            _tke = _tke._replace(kappaH_min=float(tke_kappah_min))
         vm = VerticalMixingConfig(scheme="tke", tke=_tke)
     elif tripole_vmix == "kpp":
         vm = VerticalMixingConfig(scheme="kpp", kpp=KPPConfig())
@@ -1468,7 +1479,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                   tke_kappa_convention=None, tke_shear_production=None,
                   tke_lc=None, tke_etau=None,
                   tke_preclosure_coeff_source=None,
-                  tke_surface_bc_level=None, A_h_profile_file=None,
+                  tke_surface_bc_level=None, tke_kappah_min=None,
+                  A_h_profile_file=None,
                   gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
                   gm_kappa_min=_GM_KAPPA_MIN_DEFAULT,
                   gm_slope_scheme=None, gm_bolus_advection=None,
@@ -1744,7 +1756,8 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
             tke_shear_production=tke_shear_production,
             tke_lc=tke_lc, tke_etau=tke_etau,
             tke_preclosure_coeff_source=tke_preclosure_coeff_source,
-            tke_surface_bc_level=tke_surface_bc_level)
+            tke_surface_bc_level=tke_surface_bc_level,
+            tke_kappah_min=tke_kappah_min)
         if _use_vmix:
             print(f"[setup] tripole vertical-mixing closure: {tripole_vmix}"
                   + (" (ORCA1 namzdf_tke namelist mapping)"
@@ -6172,6 +6185,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "(the scheme raises without it); it also needs an "
                         "explicit t_depth_ref on the vertical coordinate, so "
                         "use it with --nemo-vertical.")
+    p.add_argument("--tke-kappah-min", type=float, default=None,
+                   help="Background TRACER diffusivity floor [m2/s] -- NEMO's "
+                        "rn_avt0. ORCA1 sets 1.2e-5 (namelist_cfg:437); our "
+                        "recipe resolves kappaH_min to 1e-10, i.e. no "
+                        "background at all, and the measured equatorial K_H "
+                        "falls to ~1e-6 through 10-90 m where NEMO's avt is "
+                        "~1.9e-3. Default (None) preserves the config so no "
+                        "existing run moves. The momentum floor kappaM_min is "
+                        "a SEPARATE field (ours 1.4e-6 vs NEMO rn_avm0 "
+                        "1.2e-4) and is deliberately NOT changed here -- one "
+                        "variable per arm.")
     p.add_argument("--lateral-side-bc", type=str, default=None,
                    choices=["free_slip", "no_slip"],
                    help="Lateral momentum boundary condition at coastal walls. "
@@ -7831,6 +7855,7 @@ def main() -> int:
             ke_gradient_scheme=args.ke_gradient_scheme,
             lateral_side_bc=args.lateral_side_bc,
             barotropic_coriolis=args.barotropic_coriolis,
+            tke_kappah_min=args.tke_kappah_min,
             partial_cell=args.partial_cell,
             adaptive_implicit_vertadv=(True if args.adaptive_implicit_vertadv else None),
             bathy_smoothing_passes=args.bathy_smoothing_passes,
