@@ -669,6 +669,25 @@ def nemo_literal_accumulate_transport(
     return b(Hu_sum + inc_u), b(Hv_sum + inc_v)
 
 
+def nemo_literal_midpoint_extrapolation(
+    coefficients, now, before, before_before,
+):
+    """NEMO AB3 external-mode midpoint in written source association.
+
+    ``dynspg_ts.F90`` forms ``ua_e`` and ``va_e`` as the left-associated
+    three-term sum.  Materialize each multiply and add so the shared helper is
+    usable both by the production loop and by oracle-input fidelity gates.
+    """
+    first = nemo_source_round(
+        coefficients[0] * nemo_source_round(now))
+    second = nemo_source_round(
+        coefficients[1] * nemo_source_round(before))
+    third = nemo_source_round(
+        coefficients[2] * nemo_source_round(before_before))
+    value = nemo_source_round(first + second)
+    return nemo_source_round(value + third)
+
+
 def nemo_literal_continuity_divergence(
     H_u, H_v, U, V, u_mask, v_mask, grid,
 ):
@@ -1563,18 +1582,10 @@ def _run_substep_loop(
         if ab3_za is not None:
             # NEMO AB3 mid-step velocity extrapolation (dynspg_ts.F90:549-554)
             # u^{m+1/2} = za1*u^m + za2*u^{m-1} + za3*u^{m-2}
-            def _nemo_midpoint(now, before, before_before):
-                first = nemo_source_round(
-                    za_i[0] * nemo_source_round(now))
-                second = nemo_source_round(
-                    za_i[1] * nemo_source_round(before))
-                third = nemo_source_round(
-                    za_i[2] * nemo_source_round(before_before))
-                value = nemo_source_round(first + second)
-                return nemo_source_round(value + third)
-
-            U_mid = _nemo_midpoint(U_bar_c, Ub_c, Ubb_c)
-            V_mid = _nemo_midpoint(V_bar_c, Vb_c, Vbb_c)
+            U_mid = nemo_literal_midpoint_extrapolation(
+                za_i, U_bar_c, Ub_c, Ubb_c)
+            V_mid = nemo_literal_midpoint_extrapolation(
+                za_i, V_bar_c, Vb_c, Vbb_c)
         else:
             U_mid, V_mid = U_bar_c, V_bar_c
         eta_mid = eta_c
