@@ -43,16 +43,40 @@ from legoesm.grids.latlon import (
 # =========================================================================
 
 
-def _read_nemo_mesh_mask(path: str | Path) -> dict:
-    """Read a NEMO mesh_mask (or domain_cfg) NetCDF file.
+def mesh_file_list(path) -> list[str]:
+    """Normalise a NEMO mesh spec to a list of file paths.
+
+    Accepts one path, a sequence of paths, or a single string with
+    ``os.pathsep``-joined paths.  Older NEMO runs (e.g. NOC ORCA0083) ship
+    the grid as THREE files -- ``mesh_hgr.nc`` (metrics/coordinates),
+    ``mesh_zgr.nc`` (vertical scale factors) and ``mask.nc`` (masks) -- while
+    newer ones bake everything into one ``mesh_mask.nc``/``domain_cfg.nc``.
+    """
+    import os
+    if isinstance(path, (str, Path)):
+        parts = str(path).split(os.pathsep)
+    else:
+        parts = [str(p) for p in path]
+    parts = [p for p in parts if p]
+    if not parts:
+        raise ValueError("mesh path list is empty")
+    return parts
+
+
+def _read_nemo_mesh_mask(path) -> dict:
+    """Read a NEMO mesh_mask (or domain_cfg) NetCDF file, or a LIST of files
+    that together hold the mesh (``mesh_hgr.nc`` + ``mesh_zgr.nc`` + ``mask.nc``).
 
     Returns a flat dict of 2D JAX arrays keyed by NEMO variable name.
-    Only the surface-level slice of 3D fields is kept.
+    Only the surface-level slice of 3D fields is kept.  With several files
+    the FIRST file holding a variable wins; a variable in none of them is
+    simply absent (as before).
 
     Parameters
     ----------
-    path : str or Path
-        Path to a NEMO ``mesh_mask*.nc`` or ``domcfg*.nc`` file.
+    path : str, Path, or sequence of them
+        Path(s) to NEMO ``mesh_mask*.nc`` / ``domcfg*.nc`` / ``mesh_hgr.nc`` /
+        ``mesh_zgr.nc`` / ``mask.nc`` files (see :func:`mesh_file_list`).
 
     Returns
     -------
@@ -68,7 +92,6 @@ def _read_nemo_mesh_mask(path: str | Path) -> dict:
             "Install with: pip install netCDF4"
         ) from exc
 
-    ds = netCDF4.Dataset(str(path), "r")
     out: dict[str, jax.Array] = {}
 
     # Standard NEMO mesh_mask variables (2D or 3D with time/depth dims)
@@ -79,26 +102,49 @@ def _read_nemo_mesh_mask(path: str | Path) -> dict:
     ]
     wanted_masks = ["tmask", "umask", "vmask", "fmask"]
 
-    for name in wanted_2d:
-        # Try with and without _0 suffix (domain_cfg convention)
-        for suffix in ["", "_0"]:
-            key = name + suffix
-            if key in ds.variables:
-                arr = ds.variables[key][:]
-                # Squeeze singleton dims (time, depth)
+    for one in mesh_file_list(path):
+        ds = netCDF4.Dataset(one, "r")
+        for name in wanted_2d:
+            if name in out:
+                continue
+            # Try with and without _0 suffix (domain_cfg convention)
+            for suffix in ["", "_0"]:
+                key = name + suffix
+                if key in ds.variables:
+                    arr = ds.variables[key][:]
+                    # Squeeze singleton dims (time, depth)
+                    while arr.ndim > 2:
+                        arr = arr[0]
+                    out[name] = jnp.array(arr, dtype=jnp.float64)
+                    break
+
+        for name in wanted_masks:
+            if name in out:
+                continue
+            if name in ds.variables:
+                arr = ds.variables[name][:]
                 while arr.ndim > 2:
                     arr = arr[0]
                 out[name] = jnp.array(arr, dtype=jnp.float64)
-                break
+        ds.close()
 
-    for name in wanted_masks:
-        if name in ds.variables:
-            arr = ds.variables[name][:]
-            while arr.ndim > 2:
-                arr = arr[0]
-            out[name] = jnp.array(arr, dtype=jnp.float64)
+    return out
 
-    ds.close()
+
+def strip_north_rows_raw(raw: dict, n: int) -> dict:
+    """Drop ``n`` rows from the NORTH (last axis-0 rows) of every 2-D mesh
+    field.  ``n == 0`` returns ``raw`` unchanged; negative raises."""
+    if n < 0:
+        raise ValueError(f"strip_north_rows must be >= 0, got {n}")
+    if n == 0:
+        return raw
+    out = {}
+    for k, v in raw.items():
+        if v.shape[0] <= n:
+            raise ValueError(
+                f"strip_north_rows={n} would remove every row of {k!r} "
+                f"(shape {tuple(v.shape)})")
+        out[k] = v[:-n]
     return out
 
 
@@ -229,10 +275,29 @@ def _detect_fold(
             f"fold_convention must be 'auto' or one of {list(perm_candidates)}, "
             f"got {fold_convention!r}."
         )
-    asym_by_perm = {
-        name: float(jnp.max(jnp.abs(lat_fold - lat_fold[p])))
-        for name, p in perm_candidates.items()
-    }
+    # Unfilled cyclic-halo columns: NOC ORCA0083 mesh_hgr stores (lat, lon) =
+    # (0, 0) in the last two columns of its fold rows (NEMO never filled them).
+    # No Arctic fold row passes through (0 N, 0 E), so such a column is a
+    # placeholder, not geometry; it is excluded from the symmetry check (for
+    # itself and as a partner) and reported.  Real asymmetries still fail.
+    lon_fold = glamt[fold_j]
+    unset = (lat_fold == 0.0) & (lon_fold == 0.0)
+    n_unset = int(jnp.sum(unset))
+    if n_unset:
+        if n_unset > n_lon // 4:
+            raise ValueError(
+                f"Fold row j={fold_j}: {n_unset} of {n_lon} columns are unset "
+                "(0,0) placeholders -- more than a cyclic halo; this is not a "
+                "usable fold row (wrong strip_north_rows or a broken mesh).")
+        print(f"  tripole fold check: ignoring {n_unset} unset (0,0) placeholder "
+              f"column(s) on the fold row j={fold_j}")
+
+    def _asym(p):
+        keep = ~(unset | unset[p])
+        d = jnp.abs(lat_fold - lat_fold[p])
+        return float(jnp.max(jnp.where(keep, d, 0.0)))
+
+    asym_by_perm = {name: _asym(p) for name, p in perm_candidates.items()}
     if fold_convention == "auto":
         # Symmetry-based auto-detect. A near-tie means BOTH conventions fit the
         # fold-row latitude equally well (e.g. a near-constant fold-row
@@ -374,22 +439,32 @@ def _compute_rotation_angles(
     return cos_alpha_u, sin_alpha_u, cos_alpha_v, sin_alpha_v
 
 
+# Floor clamped onto every per-cell length metric [m]: keeps degenerate
+# fold / land cells from producing zero or negative spacings.  Named so a
+# caller deriving a coefficient from the metrics can detect saturation on
+# it rather than pass a literal.
+DEFAULT_MIN_DX_M: float = 1000.0
+
+
 def create_tripole_grid(
-    grid_file: str | Path,
+    grid_file,
     *,
     radius: float = constants.R_earth,
     omega: float = constants.Omega,
     dtype=None,
-    min_dx_m: float = 1000.0,
+    min_dx_m: float = DEFAULT_MIN_DX_M,
     fold_convention: str = "auto",
     allow_ambiguous_legacy_fold: bool = False,
+    strip_north_rows: int = 0,
 ) -> LatLonCGridGeometry:
     """Load a tripolar grid from a NEMO mesh_mask NetCDF file.
 
     Parameters
     ----------
-    grid_file : str or Path
-        Path to a NEMO ``mesh_mask*.nc`` or ``domcfg*.nc`` file.
+    grid_file : str, Path, or sequence of them
+        Path to a NEMO ``mesh_mask*.nc`` / ``domcfg*.nc`` file, or the list
+        ``[mesh_hgr.nc, mesh_zgr.nc, mask.nc]`` of an older split mesh (see
+        :func:`mesh_file_list`).
     radius : float
         Sphere radius [m].  Overrides grid-file values for consistency
         with the rest of legoESM.
@@ -406,6 +481,13 @@ def create_tripole_grid(
         with implicit barotropics. Default 1 000 m matches the
         runner-side floor used in the 20-yr ORCA1 production run.
         Pass 0.0 to disable.
+    strip_north_rows : int, default 0
+        Drop this many rows from the NORTH end of every mesh field before
+        building the geometry.  NEMO ``jperio=4`` (T-point pivot) meshes such
+        as ORCA0083/ORCA12 end with a DEAD halo row above the self-dual pivot
+        row; dropping it makes the pivot row the last row, which is the only
+        fold layout the operators implement (last row identified with its own
+        permutation).  0 = the mesh as stored (eORCA1.2 / eORCA025 layout).
     fold_convention : {"auto", "n_lon-1-i", "(n_lon-i)%n_lon"}, default "auto"
         T-fold index convention forwarded to ``_detect_fold``. ``"auto"``
         symmetry-detects it; on a genuinely ambiguous (near-constant) fold row
@@ -434,6 +516,7 @@ def create_tripole_grid(
             dtype = jnp.float32
 
     raw = _read_nemo_mesh_mask(grid_file)
+    raw = strip_north_rows_raw(raw, strip_north_rows)
 
     # Coordinates at T-points [degrees -> radians]
     glamt = raw["glamt"]
@@ -947,3 +1030,38 @@ def download_orca1_grid(
     tmp_path.rename(filepath)
     print(f"Download complete: {filepath}")
     return filepath
+
+
+def south_pad_rows(n_lat: int, n_devices: int) -> int:
+    """Number of LAND rows to prepend at the SOUTH so ``n_lat`` is a multiple
+    of ``n_devices`` (the lat-band SPMD step needs one uniform band per device).
+
+    eORCA025 ``n_lat=1207`` is odd: for ``n_devices=2`` this returns 1 (-> 1208).
+    Returns 0 when already divisible (or ``n_devices <= 1``).
+    """
+    if n_devices <= 1:
+        return 0
+    rem = n_lat % n_devices
+    return 0 if rem == 0 else (n_devices - rem)
+
+
+def pad_mask_bathy_south(land_mask, H_bathy, n_pad: int):
+    """Prepend ``n_pad`` LAND rows (mask=0, bathy=0) to the SOUTH of the cell
+    ``(n_lat, n_lon)`` land-mask + bathymetry arrays.
+
+    Pairs with :func:`pad_tripole_grid_south` (which pads the GRID geometry the
+    same way + keeps the north fold): the padded mask/bathy + grid are fed to
+    the SAME rest-state / WOA-fill path, so the state is built on the padded
+    grid with the added rows masked LAND (inert dynamics).  The wet rows are
+    preserved bit-exact, shifted ``+n_pad`` in the lat index.
+    """
+    import numpy as np
+    if n_pad <= 0:
+        return land_mask, H_bathy
+    lm = np.asarray(land_mask)
+    hb = np.asarray(H_bathy)
+    n_lon = lm.shape[1]
+    zeros_lm = np.zeros((n_pad, n_lon), dtype=lm.dtype)
+    zeros_hb = np.zeros((n_pad, n_lon), dtype=hb.dtype)
+    return (np.concatenate([zeros_lm, lm], axis=0),
+            np.concatenate([zeros_hb, hb], axis=0))

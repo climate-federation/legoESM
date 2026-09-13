@@ -802,6 +802,7 @@ def _step_multilayer_land_impl(
             snowfall_bands, dt,
             Q_net=band_rad.Rn_bands - shflx[:, None] - lhflx[:, None],
             cfg=bands, T_snow_melt=config.T_snow_melt,
+            snow_age_activation_K=config.land_albedo.snow_age_activation_K,
             precip_rain_bands=_precip_rain_bands, wind=wind_speed)
         snow_bands_new = band_step.swe_bands
         ice_bands_new = band_step.ice_bands
@@ -820,6 +821,7 @@ def _step_multilayer_land_impl(
             Q_net=G_surface,
             snow_melt_rate=config.snow_melt_rate,
             T_snow_melt=config.T_snow_melt,
+            snow_age_activation_K=config.land_albedo.snow_age_activation_K,
         )
         snow_bands_new = state.snow_bands
         snow_age_bands_new = state.snow_age_bands

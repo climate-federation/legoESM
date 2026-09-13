@@ -40,6 +40,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import jax.numpy as jnp
+import warnings
+
 import numpy as np
 
 from legoesm import constants
@@ -72,8 +74,21 @@ def interp_column_to_depths(
     NaN-safe: non-finite source entries (land, below-seafloor fill) are
     dropped before interpolating, and a column with fewer than two valid
     entries returns all-NaN so the caller's fill logic — not a fabricated
-    value — decides what goes there.  Below the deepest valid source level
-    the deepest valid value is held (``np.interp``'s edge behaviour).
+    value — decides what goes there.
+
+    BELOW the deepest valid source level the result is ``NaN``, not the
+    deepest valid value.  Holding that value (``np.interp``'s edge behaviour)
+    is how a shelf column's warm bottom water reached the abyss: re-levelling
+    the PHC3 winter climatology onto the 102 WOA depths wrote 583 source
+    columns carrying above 15 degC below 1000 m, the worst at 29.4 degC where
+    the real deep ocean is about 2 degC, and 580 of those had an exactly
+    constant sub-1000 m tail — the signature of the held value.  Those columns
+    then fed every model column standing over them.  ``NaN`` instead lets the
+    per-level nearest-valid fill in :func:`init_ocean_from_woa` take the value
+    from the nearest source column that actually has an observation at that
+    depth.  ABOVE the shallowest valid level the edge value is still held: the
+    shallowest observation is the surface, and holding it is what an
+    observational analysis does there.
 
     Shared helper for the IC-preparation scripts that re-level an external
     climatology onto :data:`WOA_DEPTHS`.  NOTE this is no longer *required*:
@@ -88,17 +103,23 @@ def interp_column_to_depths(
     src_depths : 1-D array, positive downward, ascending.
     dst_depths : 1-D array, positive downward, ascending.
     """
-    good = np.isfinite(col_src)
+    # Both sides must be finite: a valid value paired with a NaN DEPTH would
+    # otherwise enter np.interp's xp (undefined) and make the deep cutoff's
+    # ``.max()`` NaN, silently disabling it (codex adversarial review).
+    good = np.isfinite(col_src) & np.isfinite(np.asarray(src_depths, dtype=float))
     if good.sum() < 2:
         return np.full(np.shape(dst_depths), np.nan)
-    return np.interp(dst_depths, np.asarray(src_depths)[good],
-                     np.asarray(col_src)[good])
+    src_depths = np.asarray(src_depths)
+    out = np.interp(dst_depths, src_depths[good], np.asarray(col_src)[good])
+    return np.where(np.asarray(dst_depths) > src_depths[good].max(),
+                    np.nan, out)
 
 
 def _interp_profile_to_z_coord(
     profile: np.ndarray,
     woa_depths: np.ndarray,
     z_coord: OceanZStarCoordinate,
+    model_depths: np.ndarray | None = None,
 ) -> np.ndarray:
     """Interpolate a 1-D WOA profile onto model z-star full levels.
 
@@ -115,8 +136,23 @@ def _interp_profile_to_z_coord(
     array, shape (nlev,)
         Profile on model full levels.
     """
-    # Model full-level depths (positive), z_full_ref is negative
-    model_depths = np.abs(np.asarray(z_coord.z_full_ref))
+    # Model level depths (positive down).  ``model_depths`` is THIS column's
+    # true cell-centre depths when the caller has partial cells; without it the
+    # reference full-cell centres are used, which is what a pure z* column has.
+    if model_depths is None:
+        model_depths = np.abs(np.asarray(z_coord.z_full_ref))
+    else:
+        model_depths = np.abs(np.asarray(model_depths, dtype=np.float64))
+        if not np.all(np.isfinite(model_depths)):
+            raise ValueError(
+                "model_depths must be finite; a non-finite cell-centre depth "
+                "would place the profile at an undefined level")
+        if not np.all(np.diff(model_depths) >= 0.0):
+            raise ValueError(
+                "model_depths must not decrease downward; an inverted column "
+                "means an off-by-one level or a wrong sign. (A FLAT tail is "
+                "legitimate: cells below the seafloor have zero thickness and "
+                "inherit the bottom cell's depth, and they are masked out.)")
 
     # Remove NaN entries from WOA profile
     valid = ~np.isnan(profile)
@@ -412,6 +448,106 @@ def load_woa18(
     return T_woa, S_woa, lat_woa, lon_woa, depth_woa
 
 
+def _fill_source_levels_nearest_valid(
+    fields: "list[np.ndarray] | tuple[np.ndarray, ...]",
+    src_lat_deg: np.ndarray,
+    src_lon_deg: np.ndarray,
+) -> tuple[list[np.ndarray], int]:
+    """Give every source cell an observation at every depth it is missing one.
+
+    For each depth level independently, a source cell with no observation takes
+    the value of the NEAREST source cell that does have one AT THAT SAME DEPTH.
+    This is what the observational analyses themselves do, and it is the only
+    fill that keeps a water mass both local and vertically ordered.
+
+    Why it is needed here: an observed column stops at the local seafloor, so a
+    model column standing over a shallow source cell has no observation below
+    that cell's floor.  The column fallback in
+    :func:`_interp_profile_to_z_coord` then propagated the shallowest valid
+    value down the whole column -- surface water written into the abyss.  On
+    the 28 km icosahedral mesh with ETOPO bathymetry that put 1228 wet columns
+    above 15 degC below a kilometre, the worst at 29.3 degC, against ~2 degC
+    for the real deep ocean; the resulting density contrast drove a first-step
+    pressure-gradient acceleration of 4.5e-3 m/s^2.
+
+    A level with NO observation anywhere on the source grid is left untouched:
+    there is no donor for it.  Such a level is then bridged in the VERTICAL by
+    :func:`_interp_profile_to_z_coord`, which interpolates across it from the
+    observed levels above and below — it does NOT reach the caller's constant
+    deep fill (codex adversarial review; the earlier wording here claimed it
+    did and was wrong).
+
+    All the fields are filled TOGETHER, from one donor column per cell and
+    depth: a cell counts as missing where ANY field is missing there, and the
+    donor supplies every field.  Temperature and salinity therefore always
+    describe the same water.  Choosing a donor per field would let a cell take
+    its temperature from one ocean and its salinity from another, which is a
+    density anomaly built out of two real observations.
+
+    Parameters
+    ----------
+    fields : sequence of arrays, each shape (n_lat, n_lon, n_depth)
+        Source fields with ``NaN`` marking a missing observation.
+    src_lat_deg, src_lon_deg : array, shape (n_lat,) / (n_lon,)
+        Source grid coordinates in degrees.
+
+    Returns
+    -------
+    filled : list of arrays, same shapes as ``fields``
+    n_filled : int
+        Number of (cell, level) entries per field that were given a donor.
+    """
+    from legoesm.grids.regridding import fill_missing_nearest_valid
+
+    arrs = [np.asarray(f, dtype=np.float64) for f in fields]
+    if not arrs:
+        raise ValueError("fields must not be empty.")
+    arr = arrs[0]
+    for a in arrs:
+        if a.ndim != 3:
+            raise ValueError(
+                f"source field must be (n_lat, n_lon, n_depth); got {a.shape}.")
+        if a.shape != arr.shape:
+            raise ValueError(
+                f"all source fields must share a shape; got {a.shape} and "
+                f"{arr.shape}.")
+
+    # Unit-sphere Cartesian coordinates: the nearest source cell is then exact
+    # across the dateline and over the poles, which differencing degrees is not.
+    lon2d, lat2d = np.meshgrid(np.asarray(src_lon_deg, dtype=np.float64),
+                               np.asarray(src_lat_deg, dtype=np.float64))
+    lat_rad = np.radians(lat2d).ravel()
+    lon_rad = np.radians(lon2d).ravel()
+    cos_lat = np.cos(lat_rad)
+    coords = np.stack([cos_lat * np.cos(lon_rad),
+                       cos_lat * np.sin(lon_rad),
+                       np.sin(lat_rad)], axis=-1)
+
+    n_depth = arr.shape[-1]
+    n_points = arr.shape[0] * arr.shape[1]
+    missing = np.zeros((n_depth, n_points), dtype=bool)
+    for a in arrs:
+        missing |= np.isnan(a.reshape(-1, n_depth).T)
+    has_donor = ~np.all(missing, axis=1)
+    n_filled = int(missing[has_donor].sum())
+    if n_filled == 0:
+        return arrs, 0
+
+    # Find the donor ONCE, as a point index, and gather every field through it.
+    # A point index is exact in float64 well past any plausible source grid.
+    donor = np.tile(np.arange(n_points, dtype=np.float64), (n_depth, 1))
+    donor[missing] = np.nan
+    donor = fill_missing_nearest_valid(donor[has_donor], coords)
+    donor = np.rint(donor).astype(np.intp)             # (n_donor_levels, n_pts)
+
+    out = []
+    for a in arrs:
+        levels = a.reshape(-1, n_depth).T.copy()       # (n_depth, n_points)
+        levels[has_donor] = np.take_along_axis(levels[has_donor], donor, axis=1)
+        out.append(levels.T.reshape(a.shape))
+    return out, n_filled
+
+
 def _nearest_neighbor_2d(
     target_lat: np.ndarray,
     target_lon: np.ndarray,
@@ -586,6 +722,7 @@ def init_ocean_from_woa(
     month: int | None = None,
     interp: str = "bilinear",
     bathymetry_depth: np.ndarray | None = None,
+    cell_center_depths: np.ndarray | None = None,
     T_fill_C: float | None = None,
     S_fill_psu: float | None = None,
     T_var: str | None = None,
@@ -723,6 +860,19 @@ def init_ocean_from_woa(
             monthly_layout=monthly_layout,
         )
 
+        # Per-LEVEL nearest-valid fill on the SOURCE grid, before any
+        # horizontal interpolation: a source cell missing an observation at a
+        # given depth takes it from the nearest source cell that has one at
+        # that same depth.  Without this a model column over a shallow source
+        # cell inherited that cell's shallowest value all the way down.
+        (T_woa, S_woa), n_fill = _fill_source_levels_nearest_valid(
+            (T_woa, S_woa), lat_woa, lon_woa)
+        if n_fill:
+            n_src = T_woa.shape[0] * T_woa.shape[1] * T_woa.shape[2]
+            print(f"[setup] observed T/S: filled {n_fill} of {n_src} source "
+                  "cell-levels from the nearest source column holding an "
+                  "observation at the same depth (one donor for T and S)")
+
         if interp == "bilinear":
             T_woa_horiz = _bilinear_2d(
                 lat_deg, lon_deg, lat_woa, lon_woa, T_woa,
@@ -760,13 +910,44 @@ def init_ocean_from_woa(
         else:
             woa_depths = WOA_DEPTHS[:T_woa.shape[-1]]
 
+        # Per-column sampling depths.  A partial bottom cell's centre sits
+        # ABOVE the reference full-cell centre -- by a measured median 22 m and
+        # up to 112 m at ico8/ETOPO -- so sampling the observation at the
+        # reference depth pulls water from the wrong level exactly where cells
+        # are cut, i.e. along the shelf break.
+        _cd = None
+        from legoesm.ocean.vertical import OceanPartialCellCoordinate
+        if cell_center_depths is None and isinstance(
+                z_coord, OceanPartialCellCoordinate):
+            warnings.warn(
+                "init_ocean_from_woa: partial-cell coordinate WITHOUT "
+                "cell_center_depths -- the observed profiles are being sampled "
+                "at the REFERENCE full-cell centres, which puts the wrong water "
+                "in every cut bottom cell (measured: up to 112 m of offset, a "
+                "first-step acceleration of 4.5e-3 m/s^2 at ico8/ETOPO). Pass "
+                "compute_centroid_depth(eta, H_bathy, z_coord).",
+                RuntimeWarning, stacklevel=2)
+        if cell_center_depths is not None:
+            _cd = np.abs(np.asarray(cell_center_depths, dtype=np.float64))
+            if _cd.shape[-1] != z_coord.n_levels:
+                raise ValueError(
+                    "cell_center_depths must have the model's level count "
+                    f"({z_coord.n_levels}); got shape {_cd.shape}")
+            _cd = _cd.reshape(-1, z_coord.n_levels)
+            if _cd.shape[0] != T_flat.shape[0]:
+                raise ValueError(
+                    f"cell_center_depths has {_cd.shape[0]} columns but the "
+                    f"grid has {T_flat.shape[0]}")
+
         T_out = np.stack([
-            _interp_profile_to_z_coord(T_flat[i], woa_depths, z_coord)
+            _interp_profile_to_z_coord(T_flat[i], woa_depths, z_coord,
+                                       None if _cd is None else _cd[i])
             for i in range(T_flat.shape[0])
         ]).reshape(lat_deg.shape + (z_coord.n_levels,))
 
         S_out = np.stack([
-            _interp_profile_to_z_coord(S_flat[i], woa_depths, z_coord)
+            _interp_profile_to_z_coord(S_flat[i], woa_depths, z_coord,
+                                       None if _cd is None else _cd[i])
             for i in range(S_flat.shape[0])
         ]).reshape(lat_deg.shape + (z_coord.n_levels,))
 

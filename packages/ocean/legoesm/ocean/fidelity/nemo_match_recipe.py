@@ -85,7 +85,8 @@ NEMO_MATCH_BLOCK_MAPPING: tuple[tuple[str, str, str], ...] = (
     (
         "lateral viscosity",
         "A_h / C_smag_lap",
-        "constant A_h=1e5 + Laplacian Smagorinsky C_smag_lap=0.33",
+        "A_h derived from the mesh's narrowest wet cell (anchored so "
+        "eORCA1.2 keeps 1e5) + Laplacian Smagorinsky C_smag_lap=0.33",
     ),
     ("GM/Redi", "gm_redi", "GMRediConfig kappa_GM=kappa_Redi=600, S_max=0.005, centered slopes"),
     ("bottom drag", "bottom_drag_r / bbl", "linear r=1e-3 over a 100 m BBL, bg vel 0.1"),
@@ -118,13 +119,25 @@ class NEMOMatchMPASRecipeConfig:
     # lateral viscosity / dissipation
     A_h: float = 1.0e5
     C_smag_lap: float = 0.33
-    # Explicit biharmonic filter on relative vorticity.  Was 1e14 fixed
-    # (not mesh-scaled): stability number K dt lambda_max^2 = 1.4 on the
-    # level-7 mesh (marginal) and 11 on level 8 (blew up in 10 steps,
-    # 2026-09-04).  Off by default (user decision 2026-09-06); a nonzero
-    # value is gated at the first step (MPASOceanModel
-    # check_vorticity_filter_stability).
-    K_zeta_bih: float = 0.0
+    # Explicit biharmonic filter on relative vorticity, OFF by default.
+    #
+    # Fixed 1e14 (not mesh-scaled) gave stability number K*dt*lambda_max^2 =
+    # 1.4 on the level-7 mesh and 11 on level 8, which blew up in 10 steps
+    # (2026-09-04); the filter was switched off by user decision 2026-09-06.
+    #
+    # main introduced a mesh-scaled rule instead (``None`` ->
+    # ``resolution_scaled_k_zeta_bih``, K_ref*(dx/dx_ref)^3 anchored on ico6).
+    # That machinery is KEPT and remains selectable by passing ``None``; only
+    # the DEFAULT stays off. Both reviewers reached that conclusion
+    # independently: the stability number goes as K*dt/dx^4, so a dx^3 scaling
+    # leaves it proportional to dt/dx -- mesh-invariant only if dt shrinks with
+    # the mesh, and codex confirmed the runner passes ``float(args.dt)``
+    # unchanged, so a finer mesh can still receive a fixed timestep. The rule
+    # rescues the level-8 case (K = 1e14/64) but is mitigation, not a fix.
+    # A nonzero or derived value is gated at the first step by
+    # MPASOceanModel.check_vorticity_filter_stability (codex: the gate covers
+    # BOTH derived and pinned coefficients, raising at stability number >= 2).
+    K_zeta_bih: float | None = 0.0
 
     # vertical mixing (explicit-block coefficients; implicit solve uses them)
     A_v: float = 1.0e-4
@@ -204,7 +217,12 @@ class NEMOMatchTripoleRecipeConfig:
     n_barotropic_substeps: int = 30
 
     # lateral viscosity / dissipation
-    A_h: float = 1.0e5
+    # None = DERIVE from the mesh's narrowest wet cell, anchored so eORCA1.2
+    # keeps 1e5 (legoesm.ocean.state.resolution_scaled_lateral_viscosity).  One
+    # number cannot serve 1 degree and 1/12 degree: measured, 1e5 puts ORCA12
+    # 26x over the explicit Laplacian limit and its cold start diverges at
+    # step 10 with a 193 m/s current.
+    A_h: float | None = None
     B_h: float = 0.0
     C_smag_lap: float = 0.33
 

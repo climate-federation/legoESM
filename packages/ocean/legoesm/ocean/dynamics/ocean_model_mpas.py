@@ -18,7 +18,11 @@ from legoesm.core.state import MPASOceanState, MPASOceanTendencies
 from legoesm.grids.voronoi import VoronoiMesh
 from legoesm.ocean.constants_config import ConstantsConfig
 from legoesm.ocean.state import physics_with_constants
-from legoesm.ocean.mpas_config import MPASOceanConfig
+from legoesm.ocean.mpas_config import (
+    K_ZETA_BIH_MAX_SPACING_RATIO,
+    MPASOceanConfig,
+    resolution_scaled_k_zeta_bih,
+)
 from legoesm.ocean.vertical import (
     OceanPartialCellCoordinate,
     OceanZStarCoordinate,
@@ -221,6 +225,36 @@ class MPASOceanModel:
         else:
             self._constants_config = _model_cc
 
+        # Resolution-scaled biharmonic vorticity damping.  Resolved HERE --
+        # the one place every driver, experiment and test hands a mesh and a
+        # configuration to the same constructor -- so no mesh can silently
+        # inherit a coefficient tuned at another resolution.  Ghost edges from
+        # the SPMD padding carry ``dvEdge = 0`` and ``dcEdge = 1`` (the latter
+        # avoids 0/0 in the gradient), so REAL edges are selected by dvEdge --
+        # selecting on dcEdge would keep every ghost at 1 m and both skew the
+        # mean and trip the uniformity guard on every sharded run.
+        if self.config.K_zeta_bih is None:
+            _dc = np.asarray(self.mesh.dcEdge)
+            _dv = np.asarray(self.mesh.dvEdge)
+            _dc = _dc[(_dv > 0.0) & (_dc > 0.0)]
+            if _dc.size == 0:
+                raise ValueError(
+                    "MPASOceanModel: K_zeta_bih=None requires a mesh with "
+                    "positive dcEdge to derive the coefficient from.")
+            _ratio = float(_dc.max()) / float(_dc.min())
+            if _ratio > K_ZETA_BIH_MAX_SPACING_RATIO:
+                raise ValueError(
+                    "MPASOceanModel: K_zeta_bih=None derives ONE coefficient "
+                    "from the mean cell spacing, which describes a "
+                    f"quasi-uniform mesh; this mesh spans {_ratio:.1f}x in "
+                    f"dcEdge (limit {K_ZETA_BIH_MAX_SPACING_RATIO}). Pin the "
+                    "coefficient explicitly (MPASOceanConfig(K_zeta_bih=...) / "
+                    "--mpas-k-zeta-bih) for a variable-resolution mesh.")
+            _dx = float(_dc.mean())
+            self.config = self.config._replace(
+                K_zeta_bih=resolution_scaled_k_zeta_bih(_dx, self.config),
+                K_zeta_bih_dx_m=_dx)
+
         _valid_solvers = ("explicit_substep", "implicit_cn")
         if self.config.barotropic_solver not in _valid_solvers:
             raise ValueError(
@@ -417,7 +451,10 @@ class MPASOceanModel:
         g = self.config.g
         H_max = self.z_coord.H_max
         n_sub = self.config.n_barotropic_substeps
-        dx_min = float(jnp.min(self.mesh.dcEdge))
+        # Padded ghost edges (SPMD / sharding pads) carry dcEdge=1, dvEdge=0;
+        # real edges always have dvEdge>0 — exclude the pads from the minimum.
+        _real = self.mesh.dvEdge > 0
+        dx_min = float(jnp.min(jnp.where(_real, self.mesh.dcEdge, jnp.inf)))
 
         c_baro = math.sqrt(g * H_max)
         dt_baro = dt / n_sub
@@ -913,7 +950,14 @@ class MPASOceanModel:
             # this local sum (single-rank-correct) until owned-mask plumbing
             # (``owned_mask`` + ``global_sum_if_distributed``) lands on both paths.
             if config.normalize_freshwater:
-                if config.freshwater_closure == "real_freshwater":
+                # Distributed context from the refresh object (MPI layout or
+                # SPMD lane): owned-masked partial sums + its cross-rank SUM.
+                # Without it the historical rank-local mean stays, guarded by
+                # the multi-rank refusal.
+                _hr_owned_eta = getattr(halo_refresh, "owned_mask_cells", None)
+                _hr_gsum_eta = getattr(halo_refresh, "global_sum", None)
+                if (config.freshwater_closure == "real_freshwater"
+                        and _hr_owned_eta is None):
                     # codex RED: the multi-rank refusal for freshwater
                     # normalization lives inside the virtual-salt block,
                     # which real_freshwater skips -- but this eta mean is
@@ -923,7 +967,9 @@ class MPASOceanModel:
                     )
                     refuse_multiprocess_eta_normalization("MPASOceanModel")
                 area = mesh.areaCell
-                ocean_area = jnp.sum(area * mask)
+                _w_eta = area * mask
+                if _hr_owned_eta is not None:
+                    _w_eta = _w_eta * _hr_owned_eta.astype(_w_eta.dtype)
                 # RESTORING IS EXCLUDED (codex round 2 RED; same fix as the
                 # lat-lon path).  The flag removes the CORE-II P-E+R imbalance,
                 # a forcing-dataset artifact; SSS restoring is not part of it,
@@ -935,8 +981,11 @@ class MPASOceanModel:
                 _F_rest = (0.0 if _fw_rest is None
                            else (jnp.asarray(_fw_rest) / config.rho_0) * mask)
                 _F_phys = F_slow_eta - _F_rest
-                F_mean = jnp.sum(_F_phys * area) / jnp.maximum(
-                    ocean_area, 1e-10)
+                _num_l = jnp.sum(_F_phys * _w_eta)
+                _den_l = jnp.sum(_w_eta)
+                if _hr_gsum_eta is not None:
+                    _num_l, _den_l = _hr_gsum_eta([_num_l, _den_l])
+                F_mean = _num_l / jnp.maximum(_den_l, 1e-10)
                 F_slow_eta = (_F_phys - F_mean * mask) + _F_rest
 
         F_slow_u_data = tend.F_slow_u.data if tend.F_slow_u is not None else None
@@ -972,7 +1021,12 @@ class MPASOceanModel:
             from legoesm.parallel.voronoi_mpi import (
                 get_active_voronoi_layout,
             )
-            if (get_active_voronoi_layout() is None
+            # The SPMD lane (voronoi_spmd_ocean) threads its owned mask +
+            # psum reducer through halo_refresh instead of an MPI layout;
+            # its distributed PCG is the same solver, so the layout-less
+            # refusal applies only when neither context exists.
+            _hr_spmd = getattr(halo_refresh, "owned_mask_cells", None) is not None
+            if (get_active_voronoi_layout() is None and not _hr_spmd
                     and (is_multi_process() or mpi_world_size() > 1)):
                 raise NotImplementedError(
                     "barotropic_solver='implicit_cn' under multi-rank MPAS "
@@ -1206,6 +1260,10 @@ class MPASOceanModel:
             # when running distributed; defaults to ``None`` (single-
             # rank, all cells owned) otherwise.
             owned_mask = getattr(self, "_owned_mask", None)
+            _hr_owned = getattr(halo_refresh, "owned_mask_cells", None)
+            if owned_mask is None and _hr_owned is not None:
+                # Refresh-carried context (MPI layout or SPMD ppermute lane).
+                owned_mask = _hr_owned
             if owned_mask is None:
                 # Distributed Voronoi runs arm a partition layout
                 # instead of setting ``self._owned_mask`` — pull the
@@ -1242,7 +1300,11 @@ class MPASOceanModel:
             # owned-masked from the same layout, so this dispatch is
             # globally correct on the partition path.
             from legoesm.parallel.reductions import is_multi_process
-            if is_multi_process():
+            _gsum = getattr(halo_refresh, "global_sum", None)
+            if _gsum is not None:
+                expected_dHeat, expected_dSalt = _gsum(
+                    [expected_dHeat_local, expected_dSalt_local])
+            elif is_multi_process():
                 from legoesm.parallel.reductions import global_sum_mpi
                 expected_dHeat = global_sum_mpi(expected_dHeat_local)
                 expected_dSalt = global_sum_mpi(expected_dSalt_local)
@@ -1254,6 +1316,7 @@ class MPASOceanModel:
                 expected_dHeat=expected_dHeat,
                 expected_dSalt=expected_dSalt,
                 owned_mask=owned_mask,
+                reduce_fn=_gsum,
             )
 
         if config.freeze_floor:

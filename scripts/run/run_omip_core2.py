@@ -387,41 +387,10 @@ from legoesm.ocean.init_tripole import (  # noqa: E402
     compute_woa_3d,
     squeeze_nemo_field_2d as _squeeze2d,
 )
-
-
-def _south_pad_rows(n_lat: int, n_gpus: int) -> int:
-    """Number of LAND rows to append at the SOUTH so ``n_lat`` is a multiple of
-    ``n_gpus`` (the lat-band SPMD step needs one uniform band per device).
-
-    eORCA025 ``n_lat=1207`` is odd: for ``n_gpus=2`` this returns 1 (-> 1208).
-    Returns 0 when already divisible (or ``n_gpus <= 1``).
-    """
-    if n_gpus <= 1:
-        return 0
-    rem = n_lat % n_gpus
-    return 0 if rem == 0 else (n_gpus - rem)
-
-
-def _pad_mask_bathy_south(land_mask: np.ndarray, H_bathy: np.ndarray,
-                          n_pad: int):
-    """Prepend ``n_pad`` LAND rows (mask=0, bathy=0) to the SOUTH of the cell
-    ``(n_lat, n_lon)`` land-mask + bathymetry arrays.
-
-    Pairs with :func:`legoesm.grids.tripole.pad_tripole_grid_south` (which pads
-    the GRID geometry the same way + keeps the north fold): the padded mask/bathy
-    + grid are fed to the SAME ``_init_rest_state`` / WOA-fill path, so the state
-    is built on the padded grid with the added rows masked LAND (inert dynamics).
-    The wet rows are preserved bit-exact, shifted ``+n_pad`` in the lat index.
-    """
-    if n_pad <= 0:
-        return land_mask, H_bathy
-    lm = np.asarray(land_mask)
-    hb = np.asarray(H_bathy)
-    n_lon = lm.shape[1]
-    zeros_lm = np.zeros((n_pad, n_lon), dtype=lm.dtype)
-    zeros_hb = np.zeros((n_pad, n_lon), dtype=hb.dtype)
-    return (np.concatenate([zeros_lm, lm], axis=0),
-            np.concatenate([zeros_hb, hb], axis=0))
+from legoesm.grids.tripole import (  # noqa: E402  (shared with run_omip.py)
+    pad_mask_bathy_south,
+    south_pad_rows,
+)
 
 
 def _ew_overlap_fill(a: np.ndarray) -> np.ndarray:
@@ -1877,7 +1846,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
         raise ValueError(
             f"mesh mask shape {land_mask.shape} != grid {(n_lat, n_lon)}"
         )
-    n_pad = _south_pad_rows(n_lat, n_gpus)
+    n_pad = south_pad_rows(n_lat, n_gpus)
     if n_pad > 0:
         # Multi-GPU lat-band SPMD divisibility: append n_pad LAND rows at the
         # SOUTH (grid geometry + mask + bathy together) BEFORE the state /
@@ -1888,7 +1857,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
             LatLonCGridOceanModel,
         )
         grid = pad_tripole_grid_south(grid, n_pad)
-        land_mask, H_bathy = _pad_mask_bathy_south(land_mask, H_bathy, n_pad)
+        land_mask, H_bathy = pad_mask_bathy_south(land_mask, H_bathy, n_pad)
         model = LatLonCGridOceanModel(grid, z_coord, config)  # rebuild on padded grid
         n_lat = int(grid.n_lat)
         print(f"[setup] SPMD south-pad: +{n_pad} LAND rows -> n_lat={n_lat} "

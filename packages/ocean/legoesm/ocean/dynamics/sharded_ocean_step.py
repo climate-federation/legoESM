@@ -563,6 +563,49 @@ def gather_state_latlon(state, mesh, *, to_host: bool = False):
     return state._replace(**updates)
 
 
+def shard_cell_pytree_latlon(tree, mesh):
+    """Lay out a pytree of CELL-centred fields (leading dim ``n_lat``) for the
+    lat-band SPMD lane -- the prognostic sea-ice tile (``SeaIceState`` /
+    ``DynamicSeaIceState``: every leaf is ``(n_lat, n_lon[, n_cat])``).
+
+    Same layout as the cell fields of :func:`shard_state_latlon` (``P("lat")``
+    on axis 0, scalars replicated) so the ice tile the OMIP block scan carries
+    next to the ocean state is sharded consistently with it; ``None`` leaves
+    pass through.  NO staggered (``n_lat+1``) field may be in ``tree`` -- the
+    ice tile has none; a leading dim that is not the mesh's ``n_lat`` multiple
+    raises inside ``addressable_shard_put`` rather than silently replicating.
+    Inverse: :func:`gather_cell_pytree_latlon`.
+    """
+    _agree_ocean_mesh_entry(mesh, tree, where="shard_cell_pytree_latlon")
+    assert_pytree_bytes_equal(tree, "shard_cell_pytree_latlon")
+
+    def _put(leaf):
+        if leaf is None or not hasattr(leaf, "ndim"):
+            return leaf
+        arr = jnp.asarray(leaf)
+        spec = _lat_spec(arr) if arr.ndim >= 1 else P()
+        return addressable_shard_put(arr, NamedSharding(mesh, spec))
+
+    return jax.tree.map(_put, tree)
+
+
+def gather_cell_pytree_latlon(tree, mesh, *, to_host: bool = False):
+    """Inverse of :func:`shard_cell_pytree_latlon`: replicate every leaf to a
+    single-device / host array (route-B safe via ``replicate_leaf``)."""
+    _agree_ocean_mesh_entry(mesh, tree, where="gather_cell_pytree_latlon")
+    from legoesm.parallel.latlon_spmd import replicate_leaf
+    rep = NamedSharding(mesh, P())
+    _mp = jax.process_count() > 1
+
+    def _get(leaf):
+        if leaf is None or not hasattr(leaf, "ndim"):
+            return leaf
+        out = replicate_leaf(leaf, rep, multiprocess=_mp)
+        return np.asarray(out) if to_host else out
+
+    return jax.tree.map(_get, tree)
+
+
 # Ordered flag names for the ocean SPMD entry gate. STATIC tuple: the payload
 # width is fixed by this literal, never by rank-local data.
 _OCEAN_SPMD_ENTRY_FLAGS = (

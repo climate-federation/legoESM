@@ -396,10 +396,15 @@ def _extract_tracer_columns(state, ncol, nlev, dtype=None,
     dict carries ``"N_c"`` / ``"N_i"`` — single-moment schemes and
     specified-Nc Morrison (``dopredictNc=.false.``) leave them absent, so those
     fall back to the constant ``config.r_eff_liq`` / ``r_eff_ice`` (unchanged
-    behaviour). UNIT NOTE: by legoESM convention ``N_c`` is per-VOLUME [#/m³]
-    and ``N_i`` per-MASS [#/kg] (see ``_warm_rain.effective_Nc`` and
-    ``morrison``); both match what ``compute_cloud_properties`` expects, so they
-    are passed RAW (no ρ rescale) — mirroring the cubed-sphere NH path.
+    behaviour). UNIT NOTE (corrected, #1715): the ``N_c`` CARRY is stored
+    per-MASS [#/kg] (checkpoint stamp ``number_convention = per_mass``) and is
+    converted to the per-VOLUME [#/m³] number ``compute_cloud_properties``
+    expects by multiplying with moist air density in
+    ``_extract_tracer_columns`` below; ``N_i`` is per-MASS and passed raw.
+    This docstring previously asserted the opposite convention for ``N_c``
+    ("passed RAW"), contradicting the conversion the function actually
+    performs — the same wrong prose that let the pipeline entry pass the
+    carry raw (#1715).
     """
     if dtype is None:
         # Try to infer dtype from state.T or state.T_hat.  Fall back to
@@ -1146,7 +1151,7 @@ def _make_hydrostatic_radiation(
 
     When the attached cloud config enables ``convective_cloud``, the fn
     reads the LAGGED ``phys_state.conv_precip`` carry (published by the
-    convection module the previous step) and threads it into the Slingo
+    convection module the previous step) and threads it into the Slingo-1987-inspired surrogate
     cumulus cloud fraction — the standalone-path analogue of the FV
     pipeline's ``conv_precip`` threading.
 
@@ -1162,7 +1167,7 @@ def _make_hydrostatic_radiation(
     """
     _time, set_time = _make_time_state()
     _T_sfc_override_cell, set_T_sfc_override = _make_T_sfc_override_cell()
-    # Static build-time gate for the Slingo convective-cloud carry read:
+    # Static build-time gate for the Slingo-1987-inspired surrogate convective-cloud carry read:
     # only a cloud config that ENABLES convective_cloud makes the fn a
     # phys_state consumer (byte-identical otherwise).
     _conv_cloud_active = (
@@ -1379,7 +1384,7 @@ def _make_hydrostatic_radiation(
             if _cf_ovr is not None:
                 _cf_ovr = _cf_ovr.reshape(T_col.shape)
 
-        # Convective-precip READ (standalone-path Slingo cumulus fraction):
+        # Convective-precip READ (standalone-path Slingo-1987-inspired surrogate cumulus fraction):
         # the convection module published its column-integrated in-updraft
         # rain-production rate [kg/m^2/s] into ``phys_state.conv_precip``
         # LAST step (radiation runs first in the module chain — one-step

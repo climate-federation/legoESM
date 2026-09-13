@@ -17,9 +17,8 @@ import pytest
 
 jax.config.update("jax_enable_x64", True)
 
-from legoesm import constants  # noqa: E402
-from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig  # noqa: E402
 from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
+    CLUBBConfig,  # noqa: E402
     CLUBBForcing,
     CLUBBMomentState,
     advance_clubb_core,
@@ -27,10 +26,12 @@ from legoesm.atmosphere.physics.turbulence.clubb import (  # noqa: E402
     compute_clubb_diagnostics,
     compute_pdf_closure,
     init_clubb_moments,
+    make_clubb_grid,  # noqa: E402
     pack_clubb_moments,
     unpack_clubb_moments,
 )
-from legoesm.atmosphere.physics.turbulence.clubb import make_clubb_grid  # noqa: E402
+
+from legoesm import constants  # noqa: E402
 
 
 def _gr(ng=2, nzt=12):
@@ -101,11 +102,15 @@ def _pdf_inputs(gr, ng, nzm, seed=3):
         up2=kw["up2"], vp2=kw["vp2"], wprtp=kw["wprtp"], wpthlp=kw["wpthlp"],
         upwp=jnp.asarray(1e-2 * rng.standard_normal((ng, nzm))),
         vpwp=jnp.asarray(1e-2 * rng.standard_normal((ng, nzm))),
-        wm_zt=zt(1e-3), rtm=zt(1e-3, 8e-3), thlm=zt(1.0, 295.0),
+        wm_zt=zt(1e-3), wm_zm=jnp.asarray(1e-3 * rng.standard_normal((ng, nzm))),
+        rtm=zt(1e-3, 8e-3), thlm=zt(1.0, 295.0),
         um=zt(2.0, 5.0), vm=zt(2.0),
         exner_zt=jnp.asarray(0.9 + 0.05 * rng.random((ng, nzt))),
         p_in_Pa_zt=jnp.asarray(7e4 + 2e4 * rng.random((ng, nzt))),
-        thv_ds_zt=zt(1.0, 300.0), gr=gr, config=CLUBBConfig(),
+        p_sfc=jnp.full((ng,), 1.0e5),
+        thv_ds_zt=zt(1.0, 300.0),
+        thv_ds_zm=jnp.asarray(300.0 + rng.standard_normal((ng, nzm))),
+        gr=gr, config=CLUBBConfig(),
     )
 
 
@@ -128,6 +133,36 @@ def test_pdf_closure_keys_shapes_finite():
     cf = np.asarray(out["cloud_frac"])
     assert np.all((cf >= 0.0) & (cf <= 1.0))
     assert np.all(np.asarray(out["rcm"]) >= 0.0)
+
+
+def test_momentum_level_closure_actually_runs():
+    """The momentum-level PDF closure must be a closure, not an interpolation.
+
+    Surface pressure reaches nothing except the momentum-grid pressure profile,
+    which only the momentum-level closure consumes. So if that closure ever
+    regressed to interpolating the thermodynamic-level answer, perturbing the
+    surface pressure would leave every output untouched. It must not.
+    """
+    gr, ng, nzm = _gr()
+    kw = _pdf_inputs(gr, ng, nzm)
+    base = compute_pdf_closure(**kw)
+    bumped = compute_pdf_closure(**dict(kw, p_sfc=kw["p_sfc"] * 1.05))
+
+    for name in ("wpthvp", "rtpthvp", "thlpthvp"):
+        a, b = np.asarray(base[name]), np.asarray(bumped[name])
+        scale = np.max(np.abs(a))
+        assert scale > 0.0, name
+        assert np.max(np.abs(a - b)) / scale > 1e-9, (
+            f"{name} did not respond to surface pressure — the momentum-level "
+            "closure is not running")
+
+    # ...and it must be pinned at the GROUND, not the lid. Interpolated pressure
+    # is continuous, so pinning one end perturbs that end most; writing p_sfc at
+    # the top instead would still move every flux and pass the check above.
+    d = np.abs(np.asarray(base["wpthvp"]) - np.asarray(bumped["wpthvp"]))
+    assert d[:, 0].max() > d[:, -1].max(), (
+        "surface pressure moved the model lid more than the ground — it is "
+        "being written at the wrong end of the momentum grid")
 
 
 def test_pdf_closure_jit_and_grad():
@@ -173,6 +208,7 @@ def _core_state_env(gr, ng, nzm, seed=7):
         brunt_vaisala_freq_sqd=jnp.asarray(1e-4 + 1e-4 * rng.random((ng, nzm))),
         exner_zt=jnp.asarray(0.9 + 0.05 * rng.random((ng, nzt))),
         p_in_Pa_zt=jnp.asarray(7e4 + 2e4 * rng.random((ng, nzt))),
+        p_sfc=jnp.full((ng,), 1.0e5),
         thv_ds_zt=zt(1.0, 300.0), thv_ds_zm=jnp.asarray(300.0 + rng.random((ng, nzm))),
         rho_ds_zm=rho, rho_ds_zt=jnp.asarray(0.5 * (rho[:, 1:] + rho[:, :-1])),
         invrs_rho_ds_zm=1.0 / rho,
@@ -273,8 +309,7 @@ def test_pdf_closure_buoyancy_uses_raw_not_floored_variance():
     (``rcm=0``) column the x'thv' fluxes reduce to closed form in the RAW
     (un-floored) regridded variances; pinning them there proves the floor does
     not leak a tolerance-level covariance into rtpthvp/thlpthvp."""
-    from legoesm.atmosphere.physics.turbulence.clubb import zm2zt, zt2zm
-    from legoesm.atmosphere.physics.turbulence.clubb import _EP1
+    from legoesm.atmosphere.physics.turbulence.clubb import _EP1, zm2zt
 
     gr, ng, nzm = _gr()
     nzt = nzm - 1
@@ -299,24 +334,33 @@ def test_pdf_closure_buoyancy_uses_raw_not_floored_variance():
     out = compute_pdf_closure(**kw)
     assert np.allclose(np.asarray(out["rcm"]), 0.0), "column must be cloud-free"
 
-    # Closed form with RAW (un-floored) regridded variances, top zm level zeroed.
-    rtp2_zt = zm2zt(kw["rtp2"], gr)
-    thlp2_zt = zm2zt(kw["thlp2"], gr)
-    rtpthlp_zt = zm2zt(kw["rtpthlp"], gr)
-    # Cloud-water flux terms (rc_coef * x'rc') vanish at rcm = 0.
-    rtpthvp_zt = rtpthlp_zt + _EP1 * kw["thv_ds_zt"] * rtp2_zt
-    thlpthvp_zt = thlp2_zt + _EP1 * kw["thv_ds_zt"] * rtpthlp_zt
-    k_ub = nzm - 1
-    exp_rtpthvp = zt2zm(rtpthvp_zt, gr).at[:, k_ub].set(0.0)
-    exp_thlpthvp = zt2zm(thlpthvp_zt, gr).at[:, k_ub].set(0.0)
+    # Closed form with RAW (un-floored) variances. The closure now runs on both
+    # level sets and the two are reconciled by the trapezoidal layer average, so
+    # the expected value is that same reconciliation of the two closed forms.
+    from legoesm.atmosphere.physics.turbulence.clubb import calc_trapezoid_zm
+
+    def closed_form(rtp2, thlp2, rtpthlp, thv_ds):
+        # Cloud-water flux terms (rc_coef * x'rc') vanish at rcm = 0.
+        return (rtpthlp + _EP1 * thv_ds * rtp2,
+                thlp2 + _EP1 * thv_ds * rtpthlp)
+
+    rtpthvp_zt, thlpthvp_zt = closed_form(
+        zm2zt(kw["rtp2"], gr), zm2zt(kw["thlp2"], gr), zm2zt(kw["rtpthlp"], gr),
+        kw["thv_ds_zt"])
+    rtpthvp_zm, thlpthvp_zm = closed_form(
+        kw["rtp2"], kw["thlp2"], kw["rtpthlp"], kw["thv_ds_zm"])
+    exp_rtpthvp = calc_trapezoid_zm(rtpthvp_zt, rtpthvp_zm, gr)
+    exp_thlpthvp = calc_trapezoid_zm(thlpthvp_zt, thlpthvp_zm, gr)
     np.testing.assert_allclose(np.asarray(out["rtpthvp"]), np.asarray(exp_rtpthvp),
                                rtol=0, atol=1e-12)
     np.testing.assert_allclose(np.asarray(out["thlpthvp"]), np.asarray(exp_thlpthvp),
                                rtol=0, atol=1e-12)
     # And the floored value would be visibly different (thl_tol^2 = 1e-4 >> 1e-6).
-    floored_thlpthvp = zt2zm(
-        jnp.maximum(thlp2_zt, CLUBBConfig().thl_tol ** 2)
-        + _EP1 * kw["thv_ds_zt"] * rtpthlp_zt, gr).at[:, k_ub].set(0.0)
+    floored_zt = (jnp.maximum(zm2zt(kw["thlp2"], gr), CLUBBConfig().thl_tol ** 2)
+                  + _EP1 * kw["thv_ds_zt"] * zm2zt(kw["rtpthlp"], gr))
+    floored_zm = (jnp.maximum(kw["thlp2"], CLUBBConfig().thl_tol ** 2)
+                  + _EP1 * kw["thv_ds_zm"] * kw["rtpthlp"])
+    floored_thlpthvp = calc_trapezoid_zm(floored_zt, floored_zm, gr)
     assert not np.allclose(np.asarray(out["thlpthvp"]), np.asarray(floored_thlpthvp))
 
 
@@ -333,8 +377,7 @@ def test_sigma_sqd_w_cam_form_matches_reference():
     if str(_CLUBB_JAX_ROOT) not in sys.path:
         sys.path.insert(0, str(_CLUBB_JAX_ROOT))
     import clubb_jax.src.CLUBB_core.sigma_sqd_w_module as R  # noqa: N812
-    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig
-    from legoesm.atmosphere.physics.turbulence.clubb import compute_sigma_sqd_w
+    from legoesm.atmosphere.physics.turbulence.clubb import CLUBBConfig, compute_sigma_sqd_w
 
     gr, ng, nzm = _gr()
     cfg = CLUBBConfig()

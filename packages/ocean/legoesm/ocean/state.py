@@ -1352,36 +1352,35 @@ class BarotropicConfig(NamedTuple):
     # final few ULPs through multiplication/reduction/division association.
     #
     # SCOPE, named rather than left to be discovered: the site is in the
-    # leap-frog branch of each outer step, so it is NOT applied on the
-    # forward-Euler first step (``state.u_before is None``), which returns
-    # straight out of ``_step_impl`` with no barotropic-mean slot to reconcile
-    # onto. NEMO DOES run mlf_baro_corr on its l_1st_euler step, so that is a
-    # real one-step gap. Whether a bridged/restart twin takes it is a
-    # property of the RUNNER'S DEFAULT, not of being a twin -- the correction
-    # #1640 forced. ``u_before`` arrives populated only when the before level
-    # is bridged; ``kamm_twin_90d.py`` defaulted that OFF until 2026-08-24, so
-    # a twin COULD enter step 1 with ``u_before is None`` and take this branch.
-    # RETRACTED (#1455, 2026-08-24): the note here previously said the
-    # campaign's own 90-day twin DID. Audited against the recorded run logs, it
-    # did not -- 18 of 18 recorded twin builds passed the bridge explicitly,
-    # and the acceptance gate has defaulted it ON since 2026-08-09. Since #1455
-    # the twin runner defaults to the bridged start too, so the shipped twin
-    # cannot take it; ``--legacy-euler-start`` still can. (The
-    # original wording here, "It is empty for a bridged/restart twin (u_before
-    # arrives populated, so that branch is never taken)", stays RETRACTED: it
-    # was asserted of every run when it was only ever true of a bridged one.)
-    # The same applies to a genuine FROM-REST run of a card that ships this
-    # option,
-    # which since #1455 R6 includes nemo_dino_kamm_mlf and therefore its
-    # from-rest drivers
+    # leap-frog family of outer steps only. Selecting it on forward_euler or
+    # ab2 is rejected at model construction, not ignored.
+    #
+    # IT NOW RUNS ON THE FIRST STEP TOO (#1729, 2026-09-10). Everything below
+    # this line used to describe a one-step gap: the forward-Euler start
+    # returned out of ``_step_impl`` before reaching the site, and the model
+    # emitted a one-time RuntimeWarning about it. NEMO runs mlf_baro_corr on
+    # its l_1st_euler step (stpmlf.f90:534 is guarded on ln_dynspg_ts alone),
+    # so the gap was real -- and it is now CLOSED rather than announced. The
+    # Euler start is a parameterisation of the same body, so it reaches this
+    # site like every other step, and the warning is deleted. The from-rest
+    # drivers that carried the gap
     # (scripts/validate/ocean_fidelity/dino_1226/box_budget_run.py and
-    # acc_momentum_budget.py). All of those miss NEMO's reconciliation on step
-    # 1 only. The step is no longer SILENT: the model emits a one-time
-    # RuntimeWarning (``_warn_euler_start_skips_after_reconcile``) whenever the
-    # Euler start is taken with the option on. Not a raise, deliberately --
-    # refusing it would break the shipped twin's default invocation; closing
-    # the gap needs ``_step_impl`` to surface the barotropic depth mean on its
-    # implicit-vmix path (named and costed at that helper, not done).
+    # acc_momentum_budget.py, plus any from-rest run of the
+    # nemo_dino_kamm_mlf card) no longer do; their step-1 numbers moved, so
+    # baselines recorded before that commit are not comparable.
+    #
+    # MEASURED, so that the name of this option is not read for more than it
+    # does: on the first step from rest it moves temperature, salinity and
+    # sea level by EXACTLY 0.0 -- it is called after tra_zdf (stpmlf.f90:507)
+    # and writes only the velocity arrays -- and it moves the velocity about
+    # 3% FURTHER from NEMO's own kt=1 record. Faithful and slightly worse is
+    # registered, not reverted.
+    #
+    # RETAINED RETRACTION (#1455): a previous version of this note said the
+    # campaign's 90-day twin took the Euler branch. It did not -- 18 of 18
+    # recorded twin builds bridged the before level explicitly. An earlier
+    # wording, "empty for a bridged/restart twin", also stays retracted: it
+    # was asserted of every run when it was only true of a bridged one.
     # Selecting this on an outer_integrator that has no such site
     # (forward_euler, ab2) is rejected at model construction, not ignored.
     #
@@ -1548,7 +1547,24 @@ class LateralViscosityConfig(NamedTuple):
     """
 
     # --- Lateral (harmonic Laplacian) viscosity ---
-    A_h: float = 1.0e4
+    # ``None`` = DERIVE from the mesh (see resolution_scaled_lateral_viscosity
+    # and A_h_ref / A_h_ref_dx_m below); any float = an explicit pin.
+    A_h: float | None = 1.0e4
+    # Anchor for a DERIVED ``A_h`` (``A_h=None``).  ``A_h_ref`` is the value
+    # the anchor mesh runs today and ``A_h_ref_dx_m`` is that mesh's narrowest
+    # WET cell, carried to full float precision so the anchor reproduces
+    # ``A_h_ref`` bit-identically rather than to within a rounding.
+    # ``A_h_dx_m`` records the spacing a derived value came from (0 = pinned),
+    # so a saved configuration says which mesh its viscosity belongs to.
+    # Appended at the END of the block: positional construction of existing
+    # callers stays valid.
+    A_h_ref: float = 1.0e5                  # [m²/s] at the reference spacing
+    # [m] eORCA1.2 narrowest wet cell, measured on a FLOAT64 grid.  The same
+    # mesh built in float32 gives 21286.244140625, so a run whose metrics are
+    # single precision derives a viscosity agreeing to ~1e-8 relative rather
+    # than bit-identically -- 8 significant digits, not a behaviour change.
+    A_h_ref_dx_m: float = 21286.244008030702
+    A_h_dx_m: float = 0.0                   # [m] spacing used (0 = pinned)
     A_h_lat_scaling: bool = False  # When True, A_h is scaled by cos(lat)^N to
                                     # keep the grid Reynolds number latitude-
                                     # independent on lat-lon grids.  Default
@@ -1721,6 +1737,112 @@ class PolarFilterConfig(NamedTuple):
 # time for the ``tidal_forcing`` default below.
 from legoesm.ocean.physics.tidal_forcing import TidalForcingConfig  # noqa: E402
 
+
+
+def resolution_scaled_lateral_viscosity(dx_min_m: float, config) -> float:
+    """Laplacian viscosity for a mesh whose narrowest WET cell is ``dx_min_m``.
+
+    Held fixed across resolutions, ``A_h`` is explicitly unstable on a finer
+    mesh: the ∇² operator's limit is ``A_h·Δt·(1/Δx² + 1/Δy²) ≤ 1/2``, which on
+    an isotropic cell is ``A_h·Δt/Δ² ≤ 1/4``, so a value tuned at ~21 km
+    violates it at 1.5 km.  Measured on the two real meshes: 1e5 m²/s
+    puts eORCA1.2 at 0.033 of the limit and ORCA12 at 26x OVER it, and an
+    ORCA12 cold start diverges at step 10 with a 193 m/s current while the same
+    run with a lowered viscosity completes 100 steps at 0.195 m/s.
+
+    The scaling is ``A_h(Δ) = A_ref · (Δ/Δ_ref)²``, which holds the diffusive
+    number ``A_h·Δt/Δ²`` — i.e. the distance to the stability limit — CONSTANT
+    across meshes: every mesh inherits the margin the anchor mesh has today
+    (0.033 at Δt = 150 s).  The ``Δ¹`` alternative, NEMO's ``ldf_dyn`` velocity-
+    scale convention, was measured and REFUSED: it gives ORCA12 7078 m²/s, a
+    diffusive number of 0.47, which is unstable.
+
+    The SMALLEST wet cell is the statistic, not the mean: on a tripole /
+    lat-lon family the meridians converge, so the spacing spans ~5x on eORCA1.2
+    and ~6x on ORCA12 as a permanent property of the grid, and the explicit
+    limit follows the narrowest cell.  ``min(Δx, Δy)`` is a PROXY for the
+    anisotropic combination above -- measured, the true equivalent-isotropic
+    spacing is 0.75x of it on eORCA1.2 and 0.85x on ORCA12 -- but the same
+    proxy is used for the anchor and for the target, so the ratio carries
+    across CONSERVATIVELY: measured against the true anisotropic limit the
+    derived ORCA12 value sits at 0.045 of it versus the anchor's 0.059, i.e.
+    0.76x the anchor's margin, not an equal one.  ONE scalar for the
+    whole domain is a deliberate limitation: the median cell is 4.2x the
+    narrowest on ORCA12, so the mid-latitudes run ~17x less viscous than a
+    median-anchored rule would make them, with the flow-dependent Smagorinsky
+    term (which the recipe keeps on) supplying the rest.  A per-cell field is
+    the alternative and is the user's decision, not this function's.  Land cells are excluded because
+    the grid builder clamps their metrics to a floor (exactly 1000 m on both
+    meshes), which carries no resolution information at all.
+
+    Returns ``config.A_h`` unchanged whenever it is not ``None`` — that is the
+    explicit pin, including ``0.0`` for no lateral viscosity.
+
+    Parameters
+    ----------
+    dx_min_m : narrowest WET cell spacing of the mesh the model runs on [m].
+    config : LateralViscosityConfig
+
+    Returns
+    -------
+    float
+        The viscosity [m²/s] to run with.
+    """
+    if config.A_h is not None:
+        return config.A_h
+    if not (dx_min_m > 0.0):
+        raise ValueError(
+            "resolution_scaled_lateral_viscosity: the narrowest wet cell must "
+            f"be positive, got {dx_min_m!r} m")
+    if not (config.A_h_ref_dx_m > 0.0):
+        raise ValueError(
+            "resolution_scaled_lateral_viscosity: A_h_ref_dx_m must be "
+            f"positive, got {config.A_h_ref_dx_m!r} m")
+    # A_h_ref = 0 or NaN would disable the viscosity silently: NaN passes the
+    # scheme's own ``A_h < 0`` validation and then makes every ``A_h > 0``
+    # gate false (codex).
+    if not (config.A_h_ref > 0.0) or config.A_h_ref != config.A_h_ref:
+        raise ValueError(
+            "resolution_scaled_lateral_viscosity: A_h_ref must be a positive "
+            f"finite viscosity, got {config.A_h_ref!r} m^2/s")
+    return config.A_h_ref * (dx_min_m / config.A_h_ref_dx_m) ** 2
+
+
+def wet_min_spacing(grid, land_mask, *, clamp_floor_m: float = 0.0) -> float:
+    """Narrowest WET cell of a curvilinear C-grid mesh [m].
+
+    ``min(dx_T, dy_T)`` over cells the land mask calls ocean.  The mask is
+    required: the grid builder floors EVERY per-cell metric at ``clamp_floor_m``
+    (1000 m by default), and degenerate land / fold cells sit on that floor, so
+    the minimum over ALL cells is the floor on every mesh and says nothing about
+    resolution.
+
+    ``clamp_floor_m`` guards the other end of the same clamp: on a mesh fine
+    enough for WET cells to reach the floor, this statistic saturates and the
+    derived viscosity would silently stop scaling.  That refuses rather than
+    returning a plausible number.  Pass 0.0 to skip the check (a grid built
+    without a floor).
+    """
+    import numpy as _np
+
+    dx = _np.minimum(_np.asarray(grid.dx_T, dtype=_np.float64),
+                     _np.asarray(grid.dy_T, dtype=_np.float64))
+    wet = _np.asarray(land_mask) > 0.5
+    if wet.shape != dx.shape:
+        raise ValueError(
+            f"wet_min_spacing: land mask {wet.shape} does not match the "
+            f"grid metrics {dx.shape}")
+    if not wet.any():
+        raise ValueError("wet_min_spacing: the land mask has no ocean cells")
+    d_min = float(dx[wet].min())
+    if clamp_floor_m > 0.0 and d_min <= clamp_floor_m * (1.0 + 1.0e-9):
+        raise ValueError(
+            f"wet_min_spacing: the narrowest WET cell ({d_min:g} m) sits on "
+            f"the grid builder's metric floor ({clamp_floor_m:g} m), so the "
+            "mesh's true spacing is not recoverable and a derived coefficient "
+            "would silently stop scaling with resolution. Rebuild the grid "
+            "with a smaller floor, or pin the coefficient explicitly.")
+    return d_min
 
 class LatLonCGridOceanConfig(NamedTuple):
     """Configuration for the lat-lon C-grid FV ocean model.

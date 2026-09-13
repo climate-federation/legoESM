@@ -103,14 +103,26 @@ def main() -> int:
     lego_lat_deg = np.degrees(np.asarray(grid.lat))
     row_col = gphiu[:, jpi // 2]
     jrow_start = None
-    for j0 in range(jpj - n_lat):
+    # +1 so a HALOLESS dump (jpj == n_lat, which NEMO 5 writes) still has
+    # one candidate offset; range(0) would have failed to align it.
+    for j0 in range(jpj - n_lat + 1):
         if np.max(np.abs(row_col[j0:j0 + n_lat] - lego_lat_deg)) < 1e-4:
             jrow_start = j0
             break
     if jrow_start is None:
         raise RuntimeError("could not align NEMO dump rows to legoESM grid.lat")
-    ahtu_row = ahtu[jrow_start, :]
+    # Take the column reference from MID-DOMAIN, not from the first aligned
+    # row.  On the true 199-row frame the alignment lands on NEMO's closed
+    # southern row (domzgr.F90:308-314), where ahtu is identically zero, so
+    # nz_cols is empty and nz_cols[1] raised IndexError.  Any interior row
+    # carries the same column layout -- ahtu has no longitude dependence on
+    # this grid, which is the assumption the row search above already makes.
+    ahtu_row = ahtu[jrow_start + n_lat // 2, :]
     nz_cols = np.nonzero(ahtu_row)[0]
+    if nz_cols.size < 2:
+        raise RuntimeError(
+            f"reference row {jrow_start + n_lat // 2} of the NEMO ahtu dump has "
+            f"{nz_cols.size} nonzero columns; cannot locate the interior block.")
     icol_start = int(nz_cols[1])  # skip the first (periodic-wrap halo) column
 
     ahtu_int = ahtu[jrow_start:jrow_start + n_lat, icol_start:icol_start + n_lon]

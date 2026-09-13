@@ -3799,3 +3799,21 @@ def test_sub_daily_diag_days_round_trips_and_never_disables_the_check():
     cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
     assert cfg_default.output.diag_days == pytest.approx(5.0)
+
+
+def test_cloud_cover_condensate_q_ref_round_trip_and_bounds():
+    """--cloud-cover-condensate-q-ref threads into ExperimentConfig (None by
+    default = scheme default, off); out-of-range refused by validate_strict."""
+    parser = build_arg_parser()
+    base = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical"]), parser))
+    assert base.cloud_cover_condensate_q_ref is None
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--cloud-cover-condensate-q-ref", "3e-5"]),
+        parser))
+    assert cfg.cloud_cover_condensate_q_ref == 3.0e-5
+    bad = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--cloud-cover-condensate-q-ref", "0.5"]),
+        parser))
+    with pytest.raises(Exception, match="cloud_cover_condensate_q_ref"):
+        bad.validate_strict()
