@@ -267,7 +267,6 @@ def main(argv=None):
                     if hasattr(a, "sharding") else a, bundle)
             return {p: np.asarray(a) for p, a in leaves(bundle)}
         to_save.update({f"ic:{p}": a for p, a in host(ref).items()})
-        import time
         times = []
         for it in range(args.steps + args.timing):
             t0 = time.perf_counter()

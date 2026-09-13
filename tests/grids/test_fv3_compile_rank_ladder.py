@@ -202,3 +202,14 @@ def test_gate_nq_flag_defaults_to_one_and_reaches_every_ic_site():
     for call in sites:
         kws = {kw.arg: ast.unparse(kw.value) for kw in call.keywords}
         assert kws.get("n_tracers") == "args.nq", ast.unparse(call)
+
+
+def test_gate_main_does_not_shadow_the_time_module():
+    """Job 9751309: a function-scope `import time` inside main's flat-ref
+    branch made `time` a LOCAL of the whole function, so the phase
+    instrumentation's `time.perf_counter()` on every OTHER path raised
+    UnboundLocalError right after the IC check -- the gate was broken for
+    every non-flat-ref run and its source-inspection test could not see
+    it. Python decides locals statically, so this is checkable without
+    running the gate: `time` must not be a local variable of main."""
+    assert "time" not in gate.main.__code__.co_varnames
