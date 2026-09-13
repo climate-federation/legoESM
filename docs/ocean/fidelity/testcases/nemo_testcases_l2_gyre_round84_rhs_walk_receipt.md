@@ -33,6 +33,12 @@ projection has zero owned-field differences; its seven raw differences are
 the previously admitted undefined `ww` halo values. The producer commit is
 `3b3b045bd9e03b60330204e7590e4c4470b7a0ca`.
 
+The required issue-#1455 coordination post could not be made: the installed
+GitHub CLI reports its configured token invalid, and no connected GitHub app
+is available in this sandbox. No external issue state was mutated. Round 85
+must post this receipt's exact HPG/LDF/ZAD/closure findings to #1455 once
+authenticated access is available.
+
 The sealed ordinary artifact is `rhs_walk.json`, SHA-256
 `faeaff7279a8474f440b3f6d8f2c4ee4e310c27c7cbd5c63ff6c59a49af3f39f`.
 Its status is **REFUTED** and its command exits 1. The complete boundary rows
