@@ -248,6 +248,43 @@ land_soil_moisture_init_frac: 0.25
 land_stomatal_beta: false
 snow_albedo_feedback: true  # prognostic SWE snow-albedo feedback, threaded into
                             # the multilayer land (#715)
+# POLAR SURFACE ALBEDO, two measured fixes adopted 2026-09-13 (owner decision).
+# The poles reflect 22 W/m2 too little in CLEAR SKY against CERES -- a surface
+# error no cloud lever can reach -- and both of these were measured earlier and
+# then left switched off.
+#
+# Snow-albedo ageing timescale [days]. Every snow-covered polar cell measured
+# 0.521 against an observed 0.70 (Arctic tundra) to 0.82 (Antarctic plateau),
+# because a 3.7-day clock darkens any snowpack older than a few weeks whatever
+# its temperature. At 150 days the measured albedo is 0.703 Arctic / 0.724
+# Antarctic, worth +6.8 W/m2 of polar clear-sky reflection. Turning on the
+# temperature dependence ALONE does not fix it: an arm at the BATS activation
+# slowed the clock 5-12% in ten days and left the albedo at 0.521, so the
+# e-folding time is the binding parameter.
+# CAVEAT, carried deliberately: the land calibration fitted 3.674 d with the
+# temperature dependence off, so this trades against that surface-temperature
+# calibration and any run adopting it must score land temperature too, not only
+# the albedo.
+# NOT ADOPTED, and this is a BLOCKING defect found in review, not a preference.
+# On the two-leaf canopy path (this deck's default) the land absorbs shortwave
+# through PFT BAND albedos -- 0.1 visible, 0.2 near-infrared, from the canopy
+# radiative transfer -- which never see snow, while the atmosphere is separately
+# handed the snow-age albedo as the surface value. Polar land therefore absorbs
+# ~85-90% of incident sunlight while the atmosphere reflects 52%, and raising
+# the snow albedo to 0.70 WIDENS that gap: reflected plus absorbed exceeds
+# incident, so the +6.8 W/m2 of polar clear-sky reflection this buys is largely
+# energy created at the surface rather than a radiative improvement.
+# The polar clear-sky deficit is real (-22.2 W/m2 vs CERES) and this parameter
+# is probably part of its cure, but the canopy's ground albedo and the exported
+# surface albedo have to be reconciled FIRST -- otherwise the TOA scorecard
+# improves while the surface energy budget breaks.
+# land_snow_tau_days: 150.0
+# Zenith-angle-dependent open-ocean albedo (Briegleb 1992). The flag name is
+# broader than its effect: on this lane it changes the OPEN-OCEAN term only and
+# leaves the ice and land blends alone. Measured +6.0 W/m2 of Southern Ocean
+# clear-sky reflection, which essentially erased that bias, and +1.3 at the
+# poles. Refused outright on the spectral path, which would ignore it.
+dynamic_albedo: true
 surface_bulk_scheme: coare3   # OCEAN tile (land tile uses MOST via #715)
 surface_gustiness_zi: 300.0  # == cmip_tuned_physics.yaml (run_coupled-mirrored #647 dest)
 surface_tiled: false        # MPAS standalone path has NO tiled surface (open

@@ -992,3 +992,57 @@ def test_driver_refuses_a_land_ic_from_a_different_soil_column(monkeypatch, tmp_
                       output_dir=tmp_path / "dst_ok")
     dst.setup()
     assert dst._land_ml_state.T_soil.shape[1] == n_layers
+
+
+def test_snow_ageing_override_survives_the_calibration_reapply(monkeypatch, tmp_path):
+    """The snow-albedo clock a run asks for must reach the land the run builds.
+
+    This guards WIRING, not arithmetic. The existing coverage builds a
+    ``LandAlbedoConfig`` directly, so deleting the driver's override would leave
+    it green -- review caught that. The ordering is the whole point: the
+    calibration re-apply rewrites every albedo scalar on the object the bake
+    produced, so an override placed before it is silently discarded, and a run
+    asking for a 150-day clock would quietly get the calibrated 3.674 days.
+
+    Adopted into the production deck on 2026-09-13 against a measured 22 W/m2
+    polar clear-sky reflection deficit, which makes the silent-discard failure
+    mode expensive: the arm would score as "the snow clock does nothing".
+    """
+    from legoesm.driver.config import DycoreConfig, GridConfig
+    from legoesm.land.config import biophysics_lmip_two_leaf_setup
+    _patch_land_loaders(monkeypatch)
+    cal = biophysics_lmip_two_leaf_setup()
+
+    base = _small_cfg()._replace(
+        grid=GridConfig(grid_type="mpas", resolution=2, nlev=8),
+        dycore=DycoreConfig(dt=600.0, discretization="mpas"),
+        mpas_land_beta_soil=True,
+        turbulence="louis",
+        land_calibrated_physics=True,      # the re-apply that used to win
+        land_stomatal_beta=False,
+        land_surface_scheme="two_leaf",
+        snow_albedo_feedback=True,
+        multilayer_n_layers=cal["soil_grid"].n_layers,
+        multilayer_soil_depth=cal["soil_grid"].total_depth,
+    )
+
+    # CONTROL: no override => the calibration's own clock, whatever it is.
+    base.validate_strict()
+    ctl = ModelDriver(base, output_dir=tmp_path / "ctl")
+    ctl.setup()
+    tau_calibrated = float(ctl.physics.land_ml_cfg.land_albedo.tau_snow_decay)
+
+    # ARM: the production value, in DAYS at the config boundary and SECONDS in
+    # the physics -- the unit hop is where this would go wrong silently.
+    cfg = base._replace(land_snow_tau_days=150.0)
+    cfg.validate_strict()
+    arm = ModelDriver(cfg, output_dir=tmp_path / "arm")
+    arm.setup()
+    tau_arm = float(arm.physics.land_ml_cfg.land_albedo.tau_snow_decay)
+
+    assert tau_arm == pytest.approx(150.0 * 86400.0), (
+        f"asked for a 150-day snow clock, the land model got {tau_arm / 86400.0:.3f} days")
+    # NON-VACUITY: the calibration really does set a different value, so the
+    # assertion above cannot pass by both sides happening to agree.
+    assert tau_calibrated != pytest.approx(tau_arm), (
+        "the calibration already used this value, so this test proves nothing")
