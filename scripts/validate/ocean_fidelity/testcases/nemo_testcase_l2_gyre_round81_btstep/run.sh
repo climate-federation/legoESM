@@ -87,7 +87,7 @@ check_layout() {
   [[ "$(grep -c '& ntsi, ntei, ntsj, ntej, 37, rDt_e' "$source")" -eq 1 ]] &&
   [[ "$(grep -c 'WRITE(l2_r81_unit) jn, za1, za2, za3' "$source")" -eq 1 ]] &&
   [[ "$(grep -c 'WRITE(l2_r81_unit) za0, za1, za2, za3, zsshp2_e' "$source")" -eq 1 ]] &&
-  [[ "$(grep -c '& sshn_e(ntsi:ntei,ntsj:ntej)' "$source")" -eq 1 ]] &&
+  [[ "$(grep -c '& sshn_e(ntsi:ntei,ntsj:ntej)$' "$source")" -eq 1 ]] &&
   [[ "$(grep -c "'ROUND81_BTSTEP_DUMP '" "$source")" -eq 1 ]]
 }
 check_layout "$dry/dynspg_ts.F90"
