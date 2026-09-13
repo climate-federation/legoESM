@@ -141,6 +141,13 @@ environment where read-only Codex can initialize, and must quote its verdict.
 
 ## REFUTED / retained findings
 
+- **Round-80 correction (2026-09-13):** the preregistered whole-step kt=2 U/V
+  movement is **REFUTED**.  The recovered exact-parent comparison found zero
+  movement in all 954 registered rows, so the Rule-12 table's phrase "first
+  possible whole-step movement kt3" is withdrawn rather than relabeled.  The
+  candidate remains HOLD; the source-order substep-2 U observation remains a
+  distinct direct measurement.
+
 - Round 51's raw-history-only arm remains refuted and held.  It predates the
   separately prognostic uu_b/vv_b plus stage reconciliation owner and is not
   evidence against this paired candidate.

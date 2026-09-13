@@ -198,6 +198,8 @@ FILES = {
     # source walk to that record producer's exact compiled branch.
     "GYRE_OMIP_L2_P3_SM_R77UAMID5/BLD/ppsrc/nemo/dynspg_ts.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R77UAMID5/BLD/ppsrc/nemo/dynspg_ts.f90"),
+    "GYRE_OMIP_L2_P3_SM_R77UAMID5/BLD/ppsrc/nemo/stp2d.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R77UAMID5/BLD/ppsrc/nemo/stp2d.f90"),
     "round64/oracle_krhs_split/ocean.output": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round64/"
         "oracle_krhs_split/ocean.output"),
@@ -358,6 +360,34 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 81: the complete kt=2 split-explicit operand order ---
+    'GYRE_OMIP_L2_P3_SM_R77UAMID5/BLD/ppsrc/nemo/dynspg_ts.f90:288-324': [
+        '!                          ! set values computed in RK3_ssh',
+        ('END DO   ;   END DO', 1), 37],
+    'GYRE_OMIP_L2_P3_SM_R77UAMID5/BLD/ppsrc/nemo/dynspg_ts.f90:481-505': [
+        'IF ((jn<3).AND.ll_init) THEN', ('END DO   ;   END DO', 3), 25],
+    'GYRE_OMIP_L2_P3_SM_R77UAMID5/BLD/ppsrc/nemo/dynspg_ts.f90:512-518': [
+        'IF( .NOT.lk_linssh ) THEN                        !* Update ocean depth',
+        'zsshp2_e(:,:) = za1 * sshn_e(:,:)  + za2 * sshb_e(:,:) + za3 * sshbb_e(:,:)',
+        7],
+    'GYRE_OMIP_L2_P3_SM_R77UAMID5/BLD/ppsrc/nemo/dynspg_ts.f90:549-583': [
+        '!                    !==  after SSH  ==!   (jn+1)',
+        ('END DO   ;   END DO', 9), 35],
+    'GYRE_OMIP_L2_P3_SM_R77UAMID5/BLD/ppsrc/nemo/dynspg_ts.f90:627-642': [
+        '! Half-step back interpolation of SSH for surface pressure computation at step jit+1/2',
+        ('END DO   ;   END DO', 14), 16],
+    'GYRE_OMIP_L2_P3_SM_R77UAMID5/BLD/ppsrc/nemo/dynspg_ts.f90:644-666': [
+        '! Add Coriolis trend:', ('ENDIF', 29), 23],
+    'GYRE_OMIP_L2_P3_SM_R77UAMID5/BLD/ppsrc/nemo/dynspg_ts.f90:678-702': [
+        '! Set next velocities:', ('END DO   ;   END DO', 17), 25],
+    'GYRE_OMIP_L2_P3_SM_R77UAMID5/BLD/ppsrc/nemo/dynspg_ts.f90:744-795': [
+        'IF( .NOT.lk_linssh ) THEN   !* Update ocean depth',
+        'sshn_e (:,:) = ssha_e(:,:)', 52],
+    'GYRE_OMIP_L2_P3_SM_R77UAMID5/BLD/ppsrc/nemo/stp2d.f90:127-214': [
+        'ALLOCATE( sshe_rhs(jpi,jpj)', ('END SELECT', 2), 88],
+    'GYRE_OMIP_L2_P3_SM_R77UAMID5/BLD/ppsrc/nemo/stp2d.f90:220-311': [
+        ('!              !=====================================!', 1),
+        'DEALLOCATE( sshe_rhs , Ue_rhs , Ve_rhs , CdU_u , CdU_v )', 92],
     # --- round 78: midpoint operands and persistent absolute histories ---
     'GYRE_OMIP_L2_P3_SM_R77UAMID5/BLD/ppsrc/nemo/dynspg_ts.f90:339-378': [
         'IF( ll_init )THEN', 'pssh  (:,:,Kaa) = 0._wp', 40],
