@@ -976,6 +976,13 @@ _DUMP_TIME_LEVEL["oracle_bt_advmean_operands_kt00000002.bin"] = (
     "NOW-level un_adv/vn_adv handoff; the round-73 source card widens only "
     "this WRITE-only stream to kt=2",
 )
+_DUMP_TIME_LEVEL["oracle_bt_uamid_operands_kt00000002.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/dynspg_ts.f90:484-493 "
+    "forms kt=2 ua_e from un_e/ub_e/ubb_e inside the NOW-step external loop; "
+    "the round-76 WRITE-only patch records those operands at that statement",
+)
 _DUMP_TIME_LEVEL["oracle_bt_ordered_operands_kt00000001.bin"] = (
     "now",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
