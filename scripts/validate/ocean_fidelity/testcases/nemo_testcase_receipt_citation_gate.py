@@ -175,6 +175,8 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90"),
     "GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traldf_iso.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traldf_iso.f90"),
+    "GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stp2d.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stp2d.f90"),
     # Round 72 cites the exact acquired R71 compiled tracer-stage branch.
     "GYRE_OMIP_L2_P3_SM_R71FCTST2/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R71FCTST2/BLD/ppsrc/nemo/stprk3_stg.f90"),
@@ -366,6 +368,29 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 83: the admitted cumulative RHS and slow-forcing producer ---
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stp2d.f90:141-176': [
+        '!*  hydrostatic pressure gradient (HPG))  *!   always called FIRST',
+        "CALL r46_rhs( 'after_adv', uu, vv, Krhs )", 36],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stp2d.f90:187-199': [
+        '! Lane-2 round-16 slow-forcing operand instrument.  WRITE-only:',
+        'WRITE(l2_slow_unit) e3u_3d, uu(:,:,:,Krhs), umask, e3v_3d, vv(:,:,:,Krhs), vmask',
+        13],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stp2d.f90:202-207': [
+        '!*  vertical averaging  *!',
+        'Ve_rhs(ji,jj) = SUM( e3v_3d', 6],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stp2d.f90:225-227': [
+        '!* baroclinic drag forcing *!',
+        'WRITE(l2_slow_unit) Ue_rhs, Ve_rhs, CdU_u, CdU_v', 3],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stp2d.f90:229-235': [
+        '!* wind forcing *!',
+        'Ve_rhs(ji,jj) =  Ve_rhs(ji,jj) + r1_rho0 * vtauV', 7],
+    'GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:291-327': [
+        '! set values computed in RK3_ssh',
+        ('END DO   ;   END DO', 1), 37],
+    'GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:1467-1526': [
+        'SUBROUTINE dyn_drg_init( Kbb, Kmm, puu, pvv, puu_b ,pvv_b, pu_RHSi, pv_RHSi, pCdU_u, pCdU_v )',
+        ('pv_RHSi(ji,jj) = pv_RHSi(ji,jj) + (r1_hv_0', 1), 60],
     # --- round 82: kt=2 drag coefficient, entry inverse, and forcing owner ---
     'GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/zdfdrg.f90:229-235': [
         'ELSE                                            !==  standard Cd  ==!',
