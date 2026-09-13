@@ -1,8 +1,11 @@
 # NEMO testcases L2 GYRE round 79 — absolute barotropic history receipt
 
-Date: 2026-09-13  
-Starting commit: 7590a8eb218387b6a940fa0d851fa4a7485423de  
-Writable clone: /tmp/autopilot-work-Jyrwcr5f  
+Date: 2026-09-13
+
+Starting commit: 7590a8eb218387b6a940fa0d851fa4a7485423de
+
+Writable clone: /tmp/autopilot-work-Jyrwcr5f
+
 Evidence root: /data/abyssal/dbalwada/nemo-testcases-l2/phase3/round79
 
 ## Verdict
