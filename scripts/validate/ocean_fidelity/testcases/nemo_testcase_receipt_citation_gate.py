@@ -817,11 +817,6 @@ CITATION_MAP = {
         'Set extrapolation coefficients for predictor step:',
         'zsshp2_e(:,:) = za1 * sshn_e(:,:)',
         ('!* Swap', 1), 'sshn_e (:,:) = ssha_e(:,:)', 47],
-    'barotropic_latlon_cgrid.py:2063-2085': [
-        'elif ab3_hist is not None:', 'etabb0 = eta - deta_bb', 23],
-    'barotropic_latlon_cgrid.py:2890-2901': [
-        'if _ab3 and not _boxcar_ab3 and hasattr(state, "bt_hist"):',
-        '_finals[0] - _finals[12], _finals[0] - _finals[13],', 12],
     # --- round 49: compiled GYRE LDF/ENE statements and call order ---
     'GYRE_OMIP_L2_P3_SM_R46KT2/EXP00/namelist_cfg:165-167': [
         '&namdyn_vor', 'ln_dynvor_ene = .true.', 3],
@@ -1030,14 +1025,6 @@ CITATION_MAP = {
         '! Finalize sums:', 'pssh   (:,:,Kaa) = pssh   (:,:,Kaa) / r1_wgt1s', 8],
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynspg_ts.f90:858-863': [
         'END Phase 3 for RK3', "IF( lrst_oce )   CALL ts_rst( kt, 'WRITE' )", 6],
-    'state.py:648-666': [
-        '# Cross-window barotropic AB3/AM4 substep histories for',
-        'bt_hist: object = None', 19],
-    'barotropic_latlon_cgrid.py:2054-2085': [
-        ('if ab3_za is not None:', 7), 'etabb0 = eta - deta_bb', 32],
-    'barotropic_latlon_cgrid.py:2877-2888': [
-        ('state_new = state._replace(', 1),
-        ('vv_b=state.vv_b.replace(data=V_bar_avg),', 1), 12],
     'GYRE_OMIP_L2_P3_SM_R41ADVSP/EXP00/ocean.output:535': (
         'Courant number targeted application   ln_zad_Aimp =  F', 1),
     'GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/dynadv.f90:176-185': [
