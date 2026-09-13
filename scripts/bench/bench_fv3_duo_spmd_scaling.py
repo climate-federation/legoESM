@@ -262,7 +262,13 @@ def _run_bare(args):
     import jax
 
     if not args.single_process:
-        jax.distributed.initialize(initialization_timeout=600)
+        # one GPU per task: the cgroup hides the node's other GPU but the
+        # driver still counts it (tiled_m6_model_gate_gpu.sbatch, job
+        # 9650417) -- honour the same pin the gate uses
+        ids = os.environ.get("JAX_LOCAL_DEVICE_IDS")
+        jax.distributed.initialize(
+            initialization_timeout=600,
+            local_device_ids=[int(i) for i in ids.split(",")] if ids else None)
     jax.config.update("jax_enable_x64", True)
     import numpy as np
     import jax.numpy as jnp

@@ -29,6 +29,15 @@ N=${N:-48}; KM=${KM:-10}; KT=${KT:-2}; PAD=${PAD:-11}; NHFLAG=""; [ "${NH:-0}" =
 echo "host: $(hostname) ranks=$SLURM_NTASKS nodes=$SLURM_JOB_NUM_NODES sha: $(git rev-parse HEAD) dirty: $(git status --porcelain | wc -l)"
 nvidia-smi -L || true
 echo "XLA_FLAGS=$XLA_FLAGS"
+# PREFLIGHT, record-only (2026-09-13): two 24-rank runs (9756806, 9756887)
+# compiled in ~100 s and then hung in the first EXECUTION; a third (9756793)
+# on overlapping nodes ran through.  The MPI launcher refuses a slow fabric
+# from one bare neighbour ppermute; here the number is only RECORDED next to
+# the outcome until enough rows exist to justify a threshold (no threshold
+# has been chosen -- ASK before adding one).
+PREOUT=$(srun --gpus-per-task=1 "$PY" scripts/bench/bench_fv3_duo_spmd_scaling.py --mode bare --n-timed 30 2>&1)
+echo "preflight: $(echo "$PREOUT" | grep -m1 'ONE neighbour ppermute' || echo "NO RESULT: $(echo "$PREOUT" | grep -m1 -iE 'error|Traceback' )") (nodes $SLURM_JOB_NODELIST)"
+echo "$PREOUT" | grep -m1 "BARE-SLOWEST" || true
 echo "===== M6 GPU gate C$N km=$KM ${NHFLAG:-hydro} kt=$KT pad=$PAD ranks=$SLURM_NTASKS ref=${REF:-none} ====="
 srun --gpus-per-task=1 --kill-on-bad-exit=0 "$PY" scripts/validate/fv3_native/tiled_m6_model_gate.py --n "$N" --km "$KM" $NHFLAG --kt "$KT" --pad "$PAD" --n-split "${NSPLIT:-3}" --steps "${STEPS:-2}" --distributed ${REF:+--ref-npz $REF} ${GATE_EXTRA:-} 2>&1 \
   | grep --line-buffered -vE "jax_plugins|xla_bridge|versions_helpers|for d in range|_check_cuda|plugin_module|^\s+\^$|RuntimeError: jaxlib|Deprecat|shard_map import"
