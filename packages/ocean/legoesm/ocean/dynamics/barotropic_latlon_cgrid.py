@@ -1606,7 +1606,8 @@ def _run_substep_loop(
             # extrapolation, hence the `not linear_free_surface` gate.  The
             # ll_init ramp rows have za=(1,0,0) ⇒ eta_mid == eta_c on the
             # first two substeps (NEMO-exact, :535-538).
-            eta_mid = _nemo_midpoint(eta_c, etab_c, etabb_c)
+            eta_mid = nemo_literal_midpoint_extrapolation(
+                za_i, eta_c, etab_c, etabb_c)
             if _face_depth_mode == "nemo_ssh_avg":
                 H_u_flux, H_v_flux = _ssh_avg_face_depths(eta_mid)
             else:
