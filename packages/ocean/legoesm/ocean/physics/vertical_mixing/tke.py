@@ -1468,7 +1468,9 @@ def _solve_tke_backward_euler(
                 "dissipation_discretization='nemo_1p5_split'.")
         dissl = jnp.asarray(dissl_old, dtype=e_old.dtype)
         literal_diag = (1.0 - literal_lw - literal_up
-                        + ((1.5 * dt) * cfg.c_eps)
+                        # NEMO's own literal 1.5*rdt factor in the
+                        # nemo_1p5_split dissipation matrix (zdt in zdftke.F90)
+                        + ((1.5 * dt) * cfg.c_eps)  # coeff-ok: NEMO zfact2 split weight
                         * dissl[..., :N - 1]
                         * jnp.asarray(w_active[..., :N - 1], dtype=e_old.dtype))
         diag = jnp.concatenate(
@@ -1859,7 +1861,7 @@ def _prandtl_number(
         zri = jnp.where(N2 > 0.0, zri_stratified, 0.0)
         if cfg.tke_n2_evaluation_stage == "step_entry":
             ri_cri = jnp.asarray(1.0 / cfg.prandtl_ri_coeff, dtype=N2.dtype)
-            pdlr = jnp.maximum(0.1, ri_cri / jnp.maximum(ri_cri, zri))
+            pdlr = jnp.maximum(0.1, ri_cri / jnp.maximum(ri_cri, zri))  # coeff-ok: NEMO zdfric pdlr floor
             return 1.0 / pdlr
         return jnp.maximum(
             1.0, jnp.minimum(10.0, cfg.prandtl_ri_coeff * zri))
@@ -2233,11 +2235,11 @@ def _nemo_glibc234_vector_exp(argument: jnp.ndarray) -> jnp.ndarray:
         return jnp.exp(argument)
 
     bits = jax.lax.bitcast_convert_type(argument, jnp.uint64)
-    high_word = ((bits & jnp.uint64(0x7FFF_FFFF_FFFF_FFFF))
-                 >> jnp.uint64(32))
+    high_word = ((bits & jnp.uint64(0x7FFF_FFFF_FFFF_FFFF))  # coeff-ok: sign-bit mask
+                 >> jnp.uint64(32))  # coeff-ok: high-word shift
     # Exact pcmpgtd cutoff in the linked routine.  Supplying zero to the
     # unselected literal arm prevents invalid exponent-bit assembly.
-    ordinary = high_word <= jnp.uint64(0x4086_232A)
+    ordinary = high_word <= jnp.uint64(0x4086_232A)  # coeff-ok: glibc pcmpgtd cutoff
     x = jnp.where(ordinary, argument, jnp.asarray(0.0, argument.dtype))
     rounded = _nemo_binary64_round
 
@@ -2258,10 +2260,10 @@ def _nemo_glibc234_vector_exp(argument: jnp.ndarray) -> jnp.ndarray:
     poly = rounded(poly + 1.0)
 
     encoded_bits = jax.lax.bitcast_convert_type(encoded_n, jnp.uint64)
-    table_index = encoded_bits & jnp.uint64(0x3FF)
+    table_index = encoded_bits & jnp.uint64(0x3FF)  # coeff-ok: 1024-entry table index
     exponent_bits = (
-        (encoded_bits & jnp.uint64(0xFFFF_FFFF_FFFF_FC00))
-        << jnp.uint64(42))
+        (encoded_bits & jnp.uint64(0xFFFF_FFFF_FFFF_FC00))  # coeff-ok: exponent mask
+        << jnp.uint64(42))  # coeff-ok: exponent-field shift
     table_bits = jnp.asarray(
         GLIBC234_EXP_TABLE_BITS, dtype=jnp.uint64)[table_index]
     scale = jax.lax.bitcast_convert_type(

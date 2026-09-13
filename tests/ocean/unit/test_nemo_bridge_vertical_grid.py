@@ -150,3 +150,81 @@ def test_bathymetry_from_e3t_0_gives_the_true_column_depth():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_a_permanently_dry_level_takes_nemos_value_not_the_other_ladder():
+    """Every level takes NEMO's own value, the permanently-dry one included.
+
+    Until 2026-09-10 the loop copied ``e3t_0``/``gdept_0`` only on levels with
+    a wet cell, so a level that is dry EVERYWHERE kept the unrelated 1-D
+    ladder's number.  On DINO that left the deepest level 111.088 m away from
+    NEMO's ``e3t_0`` and its T-depth 55.544 m away.  Nothing integrates such a
+    level, but it is carried state -- it sets ``H_max`` and the three deepest
+    reference interfaces -- and the user's instruction is to do exactly what
+    NEMO does.
+
+    NON-VACUITY: the assertions below compare against ``e3t_0``'s own value
+    AND assert it is materially different from ``e3t_1d``'s, so restoring the
+    wet-cell guard makes this test fail rather than pass silently.
+    """
+    from legoesm.ocean.fidelity.nemo_state_bridge import (
+        effective_vertical_scale_factors)
+    g, e3t_1d, e3t_0_1d, _ = _synthetic_grid()
+    tmask = np.asarray(g.tmask)
+    # make the DEEPEST level dry in every column
+    tmask = tmask.copy()
+    tmask[:, :, -1] = 0.0
+    assert not tmask[:, :, -1].any(), "fixture: the last level must be dry"
+
+    e3t, t_depth, src = effective_vertical_scale_factors(
+        g, tmask, mode="both")
+    assert src == "e3t_0"
+    gdept_0_1d = np.cumsum(e3t_0_1d) - 0.5 * e3t_0_1d
+    # the dry level holds NEMO's value ...
+    assert e3t[-1] == e3t_0_1d[-1]
+    assert t_depth[-1] == gdept_0_1d[-1]
+    # ... and that is NOT the other ladder's, so the guard cannot come back
+    assert abs(e3t_0_1d[-1] - e3t_1d[-1]) > 1.0
+    assert abs(gdept_0_1d[-1] - (np.cumsum(e3t_1d) - 0.5 * e3t_1d)[-1]) > 1.0
+    # every wet level is unchanged by this
+    np.testing.assert_array_equal(e3t[:-1], e3t_0_1d[:-1])
+
+
+def test_a_dry_level_with_horizontal_variation_is_still_rejected():
+    """The partial-cell guard now covers dry levels too.
+
+    Extending the copy to dry levels would otherwise have opened a hole: a
+    level with no wet cell was never checked for horizontal uniformity, so a
+    genuinely varying ``e3t_0`` there would have been silently collapsed to
+    one cell's value by ``_level_value``.
+    """
+    import pytest
+    from legoesm.ocean.fidelity.nemo_state_bridge import (
+        effective_vertical_scale_factors)
+    g, _, _, _ = _synthetic_grid()
+    tmask = np.asarray(g.tmask).copy()
+    tmask[:, :, -1] = 0.0
+    e3t_0 = np.asarray(g.e3t_0).copy()
+    e3t_0[0, 0, -1] += 5.0                     # vary it on the DRY level only
+    g = g._replace(e3t_0=e3t_0)
+    with pytest.raises(ValueError, match="varies horizontally"):
+        effective_vertical_scale_factors(g, tmask, mode="both")
+
+
+def test_a_dry_level_with_varying_gdept_is_rejected_too():
+    """The gdept_0 uniformity check is new and needs its own case.
+
+    The e3t_0 check fires first, so a fixture that varies BOTH proves nothing
+    about gdept_0 (review finding).  This one varies gdept_0 ONLY.
+    """
+    import pytest
+    from legoesm.ocean.fidelity.nemo_state_bridge import (
+        effective_vertical_scale_factors)
+    g, _, _, _ = _synthetic_grid()
+    tmask = np.asarray(g.tmask).copy()
+    tmask[:, :, -1] = 0.0
+    gdept_0 = np.asarray(g.gdept_0).copy()
+    gdept_0[0, 0, -1] += 5.0                  # vary gdept_0 on the DRY level
+    g = g._replace(gdept_0=gdept_0)
+    with pytest.raises(ValueError, match="gdept_0 varies horizontally"):
+        effective_vertical_scale_factors(g, tmask, mode="both")

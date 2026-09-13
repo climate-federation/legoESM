@@ -59,7 +59,7 @@ cd "$ROOT" || exit 2
 # Resolution in the directory name: the run-manifest guard refuses to mix two
 # configurations' provenance in one directory (correctly), and a res6 attempt
 # already wrote one here.
-OUT="${OUT:-$ROOT/results/dycore_1354/energy_12d_res5}"
+OUT="${OUT:-$ROOT/results/dycore_1354/energy_12d_res5_intervalmean}"
 mkdir -p "$OUT"
 
 # The two surfdata files are staged in THIS tree, not in the default repo the

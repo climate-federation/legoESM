@@ -69,9 +69,12 @@ BANDS = {"GLOBAL": (-90.0, 90.0, 0.0, 360.0),
          "Sc California": (15.0, 35.0, 220.0, 250.0),
          "SO stormtrack": (-60.0, -30.0, 0.0, 360.0),
          # The polar caps are a separate error of the opposite sign, so a
-         # global mean hides them; both caps together, since the March
-         # surface-albedo deficit is present in each.
-         "poles 60-90": (60.0, 90.0, 0.0, 360.0)}
+         # global mean hides them.  They are SEPARATE rows deliberately: in
+         # March the Arctic cap is snow-covered while the Antarctic is largely
+         # bare ice, so their albedo errors do not have the same size and a
+         # single combined cap would average two different defects.
+         "Arctic 60-90N": (60.0, 90.0, 0.0, 360.0),
+         "Antarctic 60-90S": (-90.0, -60.0, 0.0, 360.0)}
 CADENCE_PER_DAY = 1.0
 
 
@@ -108,6 +111,15 @@ def sidecar_sums(path):
             continue
         out[var] = (np.asarray(z[f"monthly.{key}"], dtype=np.float64), int(count))
     return out, open_month
+
+
+def publishes(run, var):
+    """Does this run write the variable at all?  The driver's 2-D diagnostic
+    writer skips a field whose source is None, so the clear-sky fluxes are
+    genuinely OPTIONAL output: a run without them has no Amon file for them and
+    must still be scorable on the fields it does write."""
+    return bool(glob.glob(str(ROOT / run / "cmor" / "Amon"
+                              / f"{var}_Amon_*_gn_*.nc")))
 
 
 def partial_month(run, var, year, month):
@@ -168,13 +180,19 @@ def window_means(run, start, end):
             f"{run}: days {start + 1}..{end} span {sorted(spanned)} but the "
             f"sidecar's open bucket is {(year, month)}; the window must lie "
             "inside one calendar month")
+    # Two different absences, and conflating them cost this tool a capability:
+    # a field the run NEVER writes (the clear-sky fluxes are optional) is
+    # skipped, while a field the run DOES write but whose open month holds no
+    # samples is refused -- that one would silently drop a scored column.
     missing = [v for v in FIELDS if v not in sums]
-    if missing:
+    unsampled = [v for v in missing if publishes(run, v)]
+    if unsampled:
         raise SystemExit(
             f"{run}: the open month {(year, month)} has no samples yet for "
-            f"{missing}; start the window later in the month")
+            f"{unsampled}; start the window later in the month")
+    fields = [v for v in FIELDS if v in sums]
     out, lat, lon = {}, None, None
-    for var in FIELDS:
+    for var in fields:
         s0, c0 = sums[var]
         mean_file, lat, lon = partial_month(run, var, year, month)
         if mean_file.shape != s0.shape:

@@ -30,33 +30,152 @@ def squeeze_nemo_field_2d(a: np.ndarray) -> np.ndarray:
 _squeeze2d = squeeze_nemo_field_2d
 
 
-def read_mesh_mask_bathy(mesh_path: str):
+def read_mesh_mask_bathy(mesh_path, *, strip_north_rows: int = 0):
     """Derive the 2-D ocean land mask and total bathymetric depth from NEMO's
-    own eORCA1 mesh_mask -- the most faithful geometry for the comparison.
+    own mesh files (eORCA1 ``mesh_mask.nc``, or the split ``mesh_hgr.nc`` +
+    ``mesh_zgr.nc`` + ``mask.nc`` of older runs such as NOC ORCA0083) -- the most
+    faithful geometry for the comparison.
+
+    ``mesh_path`` is one path, a sequence of paths, or an ``os.pathsep``-joined
+    string (see :func:`legoesm.grids.tripole.mesh_file_list`); variables are
+    looked up across all files, first hit wins.  ``strip_north_rows`` drops that
+    many NORTH rows (must match the ``create_tripole_grid`` call for the same
+    mesh -- see its docstring for the ORCA12 dead-halo-row case).
 
     Returns
     -------
     land_mask : (n_lat, n_lon) float64, 1 = ocean, 0 = land  (tmaskutil)
     H_bathy   : (n_lat, n_lon) float64, total wet-column depth [m]
-                (sum_k e3t_0 * tmask)
+                (sum_k e3t_0 * tmask; NEMO 3.x mesh_zgr names it ``e3t``)
     """
     import xarray as xr
-    ds = xr.open_dataset(mesh_path)
+    from legoesm.grids.tripole import mesh_file_list
+    # mask_and_scale=False: NEMO writes e3t_0 with _FillValue = 0.0, so xarray's
+    # default decoding turns every LAND scale factor (exactly 0) into NaN and
+    # the masked column sum below becomes NaN on land.  Read the raw values.
+    dss = [xr.open_dataset(p, mask_and_scale=False)
+           for p in mesh_file_list(mesh_path)]
+
+    def _var(*names):
+        for ds in dss:
+            for nm in names:
+                if nm in ds:
+                    return ds[nm].values
+        raise KeyError(
+            f"none of {names} found in mesh files {mesh_file_list(mesh_path)}")
+
     # Surface ocean/land mask (1 = ocean). Prefer the 2-D util mask.
-    if "tmaskutil" in ds:
-        land_mask = _squeeze2d(ds["tmaskutil"].values).astype(np.float64)
-    else:
-        land_mask = _squeeze2d(ds["tmask"].values).astype(np.float64)
+    land_mask = _squeeze2d(_var("tmaskutil", "tmask")).astype(np.float64)
     # Total wet-column depth = sum over z of e3t_0 where tmask is wet.
-    e3t = np.asarray(ds["e3t_0"].values)            # (t,z,y,x) or (z,y,x)
-    tmask = np.asarray(ds["tmask"].values)
+    e3t = np.asarray(_var("e3t_0", "e3t"))            # (t,z,y,x) or (z,y,x)
+    tmask = np.asarray(_var("tmask"))
     while e3t.ndim > 3:
         e3t = e3t[0]
     while tmask.ndim > 3:
         tmask = tmask[0]
     H_bathy = (e3t * tmask).sum(axis=0).astype(np.float64)   # (y, x)
-    # Guard: dry columns get 0 depth (they are land via land_mask anyway).
+    # Dry columns get exactly 0 depth; a non-finite depth on a WET column is a
+    # broken mesh, never something to carry into the dynamics.
+    H_bathy = np.where(land_mask > 0.5, H_bathy, 0.0)
+    if not np.all(np.isfinite(H_bathy[land_mask > 0.5])):
+        raise ValueError(
+            f"non-finite wet-column depth in mesh {mesh_file_list(mesh_path)}")
+    if strip_north_rows < 0:
+        raise ValueError(f"strip_north_rows must be >= 0, got {strip_north_rows}")
+    if strip_north_rows >= land_mask.shape[0]:
+        raise ValueError(
+            f"strip_north_rows={strip_north_rows} would remove every row of the "
+            f"{land_mask.shape} mask")
+    if strip_north_rows:
+        land_mask = land_mask[:-strip_north_rows]
+        H_bathy = H_bathy[:-strip_north_rows]
     return land_mask, H_bathy
+
+
+def read_mesh_vertical_1d(mesh_path):
+    """Read NEMO's 1-D reference vertical grid from the mesh files.
+
+    Returns ``(e3t_1d, gdept_1d, gdepw_1d)`` in metres: the reference layer
+    thicknesses, the T-point depths and the W-point (interface) depths that
+    NEMO's own ``zgr_zps`` uses to place the bottom level.  The T-point depths
+    are what ``create_partial_cell_coordinate(..., bottom_index_rule=
+    "nemo_tpoint")`` needs; deriving them from the thicknesses instead changes
+    which level is the bottom one on a stretched grid, so they are read, never
+    reconstructed.
+
+    Same file-scan contract as :func:`read_mesh_mask_bathy` (first hit wins
+    across the listed mesh files).
+    """
+    import xarray as xr
+    from legoesm.grids.tripole import mesh_file_list
+
+    files = mesh_file_list(mesh_path)
+    dss = [xr.open_dataset(p, mask_and_scale=False) for p in files]
+    try:
+        def _var1d(name, *alts):
+            for ds in dss:
+                for nm in (name, *alts):
+                    if nm in ds:
+                        v = ds[nm]
+                        if not np.issubdtype(np.asarray(v.values).dtype,
+                                             np.floating):
+                            # mask_and_scale=False (needed because NEMO writes
+                            # _FillValue=0 on e3t) also disables unpacking, so a
+                            # packed integer variable would arrive as raw counts
+                            # and pass every range check below.
+                            raise ValueError(
+                                f"{nm} in {files} is {np.asarray(v.values).dtype}, "
+                                f"not floating point; this reader cannot unpack "
+                                f"scaled integer storage")
+                        a = np.asarray(v.values, dtype=np.float64)
+                        squeezed = a.squeeze()
+                        if squeezed.ndim != 1:
+                            raise ValueError(
+                                f"{nm} in {files} has shape {a.shape}; a 1-D "
+                                f"reference ladder is required (a leading time "
+                                f"or ensemble dimension is not collapsed here "
+                                f"because concatenating it would silently "
+                                f"multiply the level count)")
+                        return np.atleast_1d(squeezed)
+            raise KeyError(f"none of {(name, *alts)} found in mesh files {files}")
+
+        e3t_1d = _var1d("e3t_1d", "e3t_0_1d")
+        gdept_1d = _var1d("gdept_1d")
+        gdepw_1d = _var1d("gdepw_1d")
+    finally:
+        for ds in dss:
+            ds.close()
+    n = e3t_1d.size
+    if gdept_1d.size != n or gdepw_1d.size not in (n, n + 1):
+        raise ValueError(
+            f"inconsistent NEMO 1-D vertical arrays in {files}: "
+            f"e3t_1d {e3t_1d.size}, gdept_1d {gdept_1d.size}, "
+            f"gdepw_1d {gdepw_1d.size}")
+    for nm, a in (("e3t_1d", e3t_1d), ("gdept_1d", gdept_1d),
+                  ("gdepw_1d", gdepw_1d)):
+        if not np.all(np.isfinite(a)):
+            raise ValueError(f"{nm} in {files} is not finite")
+    # Strictly positive: a zero reference thickness would become a
+    # zero-thickness level and divide the tracer tendency by nothing.
+    if np.any(e3t_1d <= 0.0):
+        raise ValueError(f"e3t_1d in {files} has a non-positive thickness")
+    if np.any(np.diff(gdept_1d) <= 0.0):
+        raise ValueError(f"gdept_1d in {files} is not strictly increasing")
+    if np.any(gdepw_1d < 0.0):
+        raise ValueError(f"gdepw_1d in {files} has a negative depth")
+    # The two ladders must describe the SAME grid: every T point sits inside
+    # its own layer.  Meshes whose thicknesses and depths come from different
+    # NEMO configurations have equal level counts and would otherwise build a
+    # sheared coordinate in silence.
+    interfaces = np.concatenate([[0.0], np.cumsum(e3t_1d)])
+    if np.any(gdept_1d <= interfaces[:-1]) or np.any(gdept_1d >= interfaces[1:]):
+        bad = int(np.argmax((gdept_1d <= interfaces[:-1])
+                            | (gdept_1d >= interfaces[1:])))
+        raise ValueError(
+            f"gdept_1d and e3t_1d in {files} describe different vertical "
+            f"grids: level {bad} has T depth {gdept_1d[bad]:.4f} m outside its "
+            f"layer [{interfaces[bad]:.4f}, {interfaces[bad + 1]:.4f}] m")
+    return e3t_1d, gdept_1d, gdepw_1d
 
 
 def compute_woa_3d(grid, z_coord, woa_t, woa_s, H_bathy, land_mask):

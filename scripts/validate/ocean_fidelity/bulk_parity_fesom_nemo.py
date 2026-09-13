@@ -16,9 +16,15 @@ W   = np.array([4., 8., 12., 16.])
 sst, dt_, w = np.meshgrid(SST, dT, W, indexing='ij')
 sst, dt_, w = sst.ravel(), dt_.ravel(), w.ravel()
 tair = sst - dt_
-# 80% RH specific humidity at T_air (rough, same for both sides)
-qsat_a = 0.98*640380/1.22*np.exp(-5107.4/(tair+273.15))*1e-3  # ~kg/kg scale hack
-q = 0.8 * 0.640380/1.22*np.exp(-5107.4/(tair+273.15))
+# 80% RH specific humidity at T_air (rough, same for both sides).
+# This is NEMO/FESOM's OWN bulk saturation curve (sbcblk: 0.98 * 640380/rho *
+# exp(-5107.4/T)), not ours: the whole point of this probe is that both sides
+# see the identical input humidity, so substituting legoesm.thermo here would
+# change what is being compared.
+# satcurve-ok: the oracle's bulk qsat, held identical on both sides of a
+# FESOM-vs-NEMO parity comparison.
+qsat_a = 0.98*640380/1.22*np.exp(-5107.4/(tair + constants.T_freeze))*1e-3
+q = 0.8 * 0.640380/1.22*np.exp(-5107.4/(tair + constants.T_freeze))
 swd = np.full_like(sst, 80.0); lwd = np.full_like(sst, 280.0)
 
 # --- fesom side ---
@@ -36,7 +42,8 @@ tau_x, tau_y, sh, lh, evap = air_sea_fluxes(
     T_air_K=jnp.asarray(tair)+constants.T_freeze,
     q_air=jnp.asarray(q),
     T_sfc_K=jnp.asarray(sst)+constants.T_freeze, algo="ncar")
-lw_up = constants.emissivity_ocean*constants.sigma_sb*(np.asarray(sst)+273.15)**4
+lw_up = (constants.emissivity_ocean * constants.sigma_sb
+         * (np.asarray(sst) + constants.T_freeze)**4)
 lw_net = constants.emissivity_ocean*lwd - lw_up
 sw_net = (1.0-0.066)*swd  # NEMO ocean albedo ~0.066
 Qnet_n = np.asarray(sh)+np.asarray(lh)+sw_net+lw_net

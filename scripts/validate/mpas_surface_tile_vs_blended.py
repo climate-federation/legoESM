@@ -32,9 +32,11 @@ evaluated against a partly land-influenced blended state.
 Kept in the tree rather than deleted because the correct version is a
 modification of this one and the four defects above are the specification for
 it.
-"""
 
-"""How much does the MPAS blended surface cost, in W/m^2? (#1320)
+--------------------------------------------------------------------------
+THE ORIGINAL HEADER, kept for the specification it carries:
+
+How much does the MPAS blended surface cost, in W/m^2? (#1320)
 
 The MPAS lane runs an UNTILED surface: one blended ``T_sfc``/``q_sfc`` per cell
 is fed to a single bulk scheme, with the land fraction handled by a skin-T
@@ -189,7 +191,7 @@ def main(argv=None) -> int:
     # Land skin 20 K below the air (strongly STABLE over land) while the ocean
     # is 5 K above it (UNSTABLE over water) -- the contrast that makes one
     # shared stability argument wrong for both tiles.
-    T_air = 273.15
+    T_air = constants.T_freeze
     col = _column(T_air=T_air, q_air=2.0e-3, wind=args.wind,
                   p_sfc=args.p_sfc, rho=1.25)
     for f in (0.1, 0.25, 0.5, 0.75, 0.9):

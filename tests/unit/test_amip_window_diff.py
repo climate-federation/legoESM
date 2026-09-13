@@ -78,6 +78,32 @@ def test_window_mean_recovers_the_arm_days(wd, tmp_path, monkeypatch):
     assert wd.band_mean(m["rsut"], lat, _lon, -90, 90) == pytest.approx(195.0)
 
 
+def test_band_mean_weights_by_area_and_selects_the_longitude_box():
+    """Both halves of the reduction get their own failing case.
+
+    The area weighting needs latitudes whose cosines DIFFER (a symmetric pair
+    weights equally, so dropping the weights entirely still gives the right
+    answer), and the longitude box needs a field that varies with longitude
+    (a zonally uniform one is unchanged by selecting every column).
+    """
+    spec = importlib.util.spec_from_file_location("window_diff", _P)
+    wd = importlib.util.module_from_spec(spec); spec.loader.exec_module(wd)
+    lat = np.array([0.0, 60.0])                  # cos = 1.0 and 0.5
+    lon = np.array([10.0, 100.0, 200.0])
+    field = np.array([[0.0, 30.0, 60.0], [0.0, 30.0, 60.0]], dtype=float)
+
+    # zonal mean is 30 at both rows, so area weighting cannot change it...
+    assert wd.band_mean(field, lat, lon, -90, 90) == pytest.approx(30.0)
+    # ...but a field that varies with LATITUDE exposes the weights: rows 0 and
+    # 100 under weights 1.0 and 0.5 average to 33.33, not the unweighted 50.
+    tilted = np.array([[0.0, 0.0, 0.0], [100.0, 100.0, 100.0]], dtype=float)
+    assert wd.band_mean(tilted, lat, lon, -90, 90) == pytest.approx(100.0 / 3.0)
+    # and the longitude box must actually select: one column, not all three
+    assert wd.band_mean(field, lat, lon, -90, 90, 150.0, 250.0) == pytest.approx(60.0)
+    # a box that wraps past 360 keeps the columns either side of the meridian
+    assert wd.band_mean(field, lat, lon, -90, 90, 350.0, 380.0) == pytest.approx(0.0)
+
+
 def test_orientation_mismatch_is_refused(wd, tmp_path, monkeypatch):
     monkeypatch.setattr(wd, "FIELDS", ("rsut",))
     monkeypatch.setattr(wd, "ROOT", tmp_path)
@@ -142,17 +168,37 @@ def test_window_inside_the_open_month_is_accepted(wd, tmp_path, monkeypatch):
     np.testing.assert_allclose(m["rsut"], _pattern(130.0, 260.0), rtol=1e-12)
 
 
-def test_variable_missing_from_the_open_month_is_refused(wd, tmp_path, monkeypatch):
+def test_published_variable_missing_from_the_open_month_is_refused(wd, tmp_path,
+                                                                  monkeypatch):
     """A day-90 start finds an April bucket that has cloud but no shortwave
-    yet; dropping the field silently would hide it from the table."""
+    yet, for a run that DOES write shortwave; dropping the field silently would
+    hide a scored column from the table."""
     monkeypatch.setattr(wd, "FIELDS", ("rsut", "clt"))
     monkeypatch.setattr(wd, "ROOT", tmp_path)
     run = tmp_path / "arm"; run.mkdir()
     _sidecar(run / "cmor_accum_day_0092.npz", {"clt": 2 * _pattern(50.0, 60.0)},
              {"clt": 2}, months=((0, 4),))
     _amon(run, "clt", _pattern(50.0, 60.0), tag="197904-197904")
+    _amon(run, "rsut", _pattern(100.0, 200.0), tag="197904-197904")
     with pytest.raises(SystemExit, match="no samples yet"):
         wd.window_means("arm", 92, 102)
+
+
+def test_unpublished_variable_is_skipped_not_refused(wd, tmp_path, monkeypatch):
+    """The clear-sky fluxes are OPTIONAL output -- the driver's 2-D writer
+    skips a field whose source is None -- so a run that never writes one must
+    still score on the fields it does write.  Refusing here once cost this tool
+    the ability to analyse exactly those runs."""
+    monkeypatch.setattr(wd, "FIELDS", ("clt", "rsutcs"))
+    monkeypatch.setattr(wd, "ROOT", tmp_path)
+    run = tmp_path / "arm"; run.mkdir()
+    _sidecar(run / "cmor_accum_day_0092.npz", {"clt": 2 * _pattern(50.0, 60.0)},
+             {"clt": 2}, months=((0, 4),))
+    _amon(run, "clt", (2 * _pattern(50.0, 60.0) + 10 * _pattern(80.0, 90.0)) / 12,
+          tag="197904-197904")
+    m, _lat, _lon = wd.window_means("arm", 92, 102)
+    np.testing.assert_allclose(m["clt"], _pattern(80.0, 90.0), rtol=1e-12)
+    assert "rsutcs" not in m
 
 
 def test_ambiguous_year_is_refused(wd, tmp_path, monkeypatch):

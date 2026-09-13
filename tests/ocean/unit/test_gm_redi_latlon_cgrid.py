@@ -2349,3 +2349,181 @@ class TestNemoNativeActive3dBottomTie:
             & (z_top[jnp.newaxis, jnp.newaxis, :] < H_bathy[:, :, jnp.newaxis])
         ).astype(jnp.float64)
         assert jnp.array_equal(act, expected)
+
+
+class TestNemoA33E3wResolver:
+    """``traldf_iso``'s A33 divisor is NEMO's ``e3w``, not the midpoint.
+
+    ``traldf_iso.f90:285`` divides the explicit A33 flux by
+    ``e3w_3d(jk+1)*(1+r3t(Kmm))`` and ``:831-833`` squares the same object for
+    ``akz``, with ``e3w_0(k) = gdept_0(k) - gdept_0(k-1)``
+    (``domzgr_substitute.h90:131``, ``:108``) -- the T-point depth difference,
+    which on a stretched ladder is NOT ``0.5*(e3t_k + e3t_{k-1})``.
+    """
+
+    def _stretched(self):
+        """A ladder whose T points are NOT the interface midpoints, carrying
+        NEMO's own ``e3w_0`` -- i.e. a coordinate where the two candidate
+        divisors genuinely differ."""
+        import numpy as np
+        from legoesm.ocean.vertical import create_z_star_from_thicknesses
+        dz = np.array([10.0, 14.0, 22.0, 40.0, 80.0])
+        # gdept sitting BELOW each midpoint, so diff(gdept) != mean(dz).
+        gdepw = np.concatenate([[0.0], np.cumsum(dz)])
+        gdept = gdepw[:-1] + 0.6 * dz
+        e3w = np.concatenate([[2.0 * gdept[0]], np.diff(gdept)])
+        z = create_z_star_from_thicknesses(dz)
+        return z._replace(
+            nemo_e3t_0=jnp.asarray(np.broadcast_to(dz, (2, 3, 5)).copy()),
+            nemo_gdept_0=jnp.asarray(np.broadcast_to(gdept, (2, 3, 5)).copy()),
+            nemo_e3w_0=jnp.asarray(np.broadcast_to(e3w, (2, 3, 5)).copy()),
+            nemo_e3w_mesh_reference=True,
+            t_depth_ref=jnp.asarray(gdept),
+        ), dz, e3w
+
+    def test_resolver_returns_nemo_e3w_not_the_midpoint(self):
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            nemo_iso_a33_e3w)
+        z, dz, e3w = self._stretched()
+        e3t = jnp.broadcast_to(jnp.asarray(dz), (2, 3, 5))
+        jac = jnp.ones((2, 3))
+        got = np.asarray(nemo_iso_a33_e3w(z, e3t, jac, jnp.float64))
+        mid = 0.5 * (np.roll(np.asarray(e3t), 1, 2) + np.asarray(e3t))
+        mid[..., 0] = np.asarray(e3t)[..., 0]
+        # It IS NEMO's field ...
+        assert np.allclose(got, np.broadcast_to(e3w, got.shape),
+                           rtol=0, atol=0)
+        # ... and the midpoint is a DIFFERENT number here, so the assertion
+        # above cannot pass vacuously (synthetic-violation check).
+        assert np.abs(got[..., 1:] - mid[..., 1:]).max() > 1e-6
+
+    def test_stretch_factor_is_applied(self):
+        """``e3w(Kmm) = e3w_0*(1+r3t)``: a non-unit stretch must scale it."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            nemo_iso_a33_e3w)
+        z, dz, e3w = self._stretched()
+        e3t = jnp.broadcast_to(jnp.asarray(dz), (2, 3, 5))
+        got = np.asarray(nemo_iso_a33_e3w(z, e3t, 1.25 * jnp.ones((2, 3)),
+                                          jnp.float64))
+        assert np.allclose(got, 1.25 * np.broadcast_to(e3w, got.shape),
+                           rtol=0, atol=0)
+
+    def test_midpoint_arm_survives_for_a_midpoint_ladder(self):
+        """A coordinate with no NEMO mesh field keeps the midpoint -- the arm
+        that makes every non-NEMO card byte-unchanged."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            nemo_iso_a33_e3w)
+        from legoesm.ocean.vertical import create_z_star_from_thicknesses
+        dz = np.array([10.0, 14.0, 22.0, 40.0, 80.0])
+        z = create_z_star_from_thicknesses(dz)._replace(t_depth_ref=None)
+        e3t = jnp.broadcast_to(jnp.asarray(dz), (2, 3, 5))
+        got = np.asarray(nemo_iso_a33_e3w(z, e3t, jnp.ones((2, 3)),
+                                          jnp.float64))
+        mid = 0.5 * (np.roll(np.asarray(e3t), 1, 2) + np.asarray(e3t))
+        mid[..., 0] = np.asarray(e3t)[..., 0]
+        assert np.array_equal(got, mid)
+
+    def test_explicit_and_implicit_halves_share_one_e3w(self):
+        """The explicit A33 flux carries ``ah_wslp2 - akz`` and the implicit
+        solve receives ``akz``; if the two sides resolved different ``e3w``
+        the pair would double-count or leave a gap.  Asserted by calling the
+        resolver the way BOTH call sites do and requiring identity."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            nemo_iso_a33_e3w)
+        z, dz, _ = self._stretched()
+        e3t = jnp.broadcast_to(jnp.asarray(dz), (2, 3, 5))
+        jac = jnp.full((2, 3), 1.03)
+        a = np.asarray(nemo_iso_a33_e3w(z, e3t, jac, jnp.float64))
+        b = np.asarray(nemo_iso_a33_e3w(z, e3t, jac, jnp.float64))
+        assert np.array_equal(a, b)
+        # And the source of both call sites names the SAME function, so a
+        # future edit to one cannot silently fork the other.
+        import inspect
+        from legoesm.ocean.physics.lateral_mixing import (
+            gm_redi_latlon_cgrid as _m)
+        for fn in (_m.nemo_iso_lap_tracer_tendency_latlon_cgrid,
+                   _m.compute_isoneutral_K33_latlon):
+            assert "nemo_iso_a33_e3w" in inspect.getsource(fn)
+
+
+class TestNemoIsoLapAhtMasking:
+    """NEMO masks the diffusivity once at build (``ldftra.f90:433-434``), and
+    that masking is what zeroes the horizontal flux on a CLOSED face: NEMO's
+    ``uslp`` is a 16-point Shapiro smear of the umask-ed raw slope
+    (``ldfslp.f90:288`` masks, ``:298`` smears), so ``uslp`` is generally
+    nonzero on a closed u-face and only ``ahtu = 0`` stops
+    ``traldf_iso.f90:242`` emitting the ``zA13`` term there."""
+
+    def test_zfu_is_zero_on_a_closed_u_face_carrying_a_slope(self):
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            nemo_iso_lap_tracer_tendency_latlon_cgrid)
+        from legoesm.ocean.vertical import create_z_star_from_thicknesses
+        n_lat, n_lon, nlev = 4, 5, 4
+        dz = np.array([10.0, 20.0, 40.0, 80.0])
+        z = create_z_star_from_thicknesses(dz)._replace(t_depth_ref=None)
+        grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+        mask = jnp.ones((n_lat, n_lon))
+        u_mask = jnp.ones((n_lat, n_lon + 1))
+        v_mask = jnp.ones((n_lat + 1, n_lon))
+        # Close ONE interior u-face (the east face of cell i=2).
+        u_mask = u_mask.at[:, 3].set(0.0)
+        act = jnp.ones((n_lat, n_lon, nlev))
+        jac = jnp.ones((n_lat, n_lon))
+        rng = np.random.default_rng(0)
+        q = jnp.asarray(rng.normal(size=(n_lat, n_lon, nlev)))
+        # A slope that is NONZERO on the closed face -- exactly the case
+        # NEMO's masked ahtu kills and an unmasked one would not.
+        slp = jnp.full((n_lat, n_lon, nlev), 3e-3)
+        _, diags = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            q, slp[:, :, :-1], slp[:, :, :-1], mask, u_mask, v_mask, z, jac,
+            grid, 1000.0, act, native_slopes=(slp, slp, slp, slp),
+            return_diagnostics=True, return_operand_diagnostics=True)
+        zfu = np.asarray(diags["zfu"])
+        # The operator's own umask, built the way the operator builds it.
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            nemo_iso_face_masks)
+        um = np.asarray(nemo_iso_face_masks(u_mask, v_mask, act)[0])
+        closed = um == 0.0
+        assert closed.any()
+        assert np.abs(zfu[closed]).max() == 0.0
+        # NON-VACUITY: without the mask the SAME operands give a nonzero flux
+        # there, so the assertion above is testing the mask and not a zero
+        # that was going to happen anyway.
+        fo = diags["zfu_operands"]
+        zA13 = (-np.asarray(fo["e2u"])[:, :, None] * np.asarray(fo["uslp"])
+                * np.asarray(fo["zmsku"]))
+        unmasked = 1000.0 * zA13 * np.asarray(fo["avg4_u"])
+        assert np.abs(unmasked[closed]).max() > 0.0
+
+    def test_aht_v_is_masked_with_vmask_not_umask(self):
+        """``aht_v`` aliases ``aht`` when no distinct v-face kappa is given;
+        the two must still pick up their OWN face mask."""
+        from legoesm.ocean.physics.lateral_mixing.gm_redi_latlon_cgrid import (
+            nemo_iso_lap_tracer_tendency_latlon_cgrid, nemo_iso_face_masks)
+        from legoesm.ocean.vertical import create_z_star_from_thicknesses
+        n_lat, n_lon, nlev = 4, 5, 4
+        z = create_z_star_from_thicknesses(
+            np.array([10.0, 20.0, 40.0, 80.0]))._replace(t_depth_ref=None)
+        grid = create_latlon_grid(n_lat=n_lat, n_lon=n_lon)
+        mask = jnp.ones((n_lat, n_lon))
+        # Close a u-face and a DIFFERENT v-face: if aht_v took umask the
+        # v-flux would die on the wrong row.
+        u_mask = jnp.ones((n_lat, n_lon + 1)).at[:, 3].set(0.0)
+        v_mask = jnp.ones((n_lat + 1, n_lon)).at[1, :].set(0.0)
+        act = jnp.ones((n_lat, n_lon, nlev))
+        rng = np.random.default_rng(1)
+        q = jnp.asarray(rng.normal(size=(n_lat, n_lon, nlev)))
+        slp = jnp.full((n_lat, n_lon, nlev), 3e-3)
+        _, diags = nemo_iso_lap_tracer_tendency_latlon_cgrid(
+            q, slp[:, :, :-1], slp[:, :, :-1], mask, u_mask, v_mask, z,
+            jnp.ones((n_lat, n_lon)), grid, 1000.0, act,
+            native_slopes=(slp, slp, slp, slp), return_diagnostics=True)
+        um, vm, _ = (np.asarray(a) for a in
+                     nemo_iso_face_masks(u_mask, v_mask, act))
+        zfv = np.asarray(diags["zfv"])
+        assert np.abs(zfv[vm == 0.0]).max() == 0.0
+        # and the v-flux is alive on the rows the U wall closed, proving it
+        # did not inherit umask.
+        alive = (vm > 0.0) & (um == 0.0)
+        assert alive.any()
+        assert np.abs(zfv[alive]).max() > 0.0

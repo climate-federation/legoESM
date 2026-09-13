@@ -160,7 +160,11 @@ class MPASOceanConfig(NamedTuple):
                            # ``pv_scheme == "mixed"``: α·energy + (1−α)·enstrophy.
                            # α=1.0 recovers pure energy; α=0.0 pure enstrophy.
                            # Ignored for pv_scheme in {"energy", "enstrophy"}.
-    K_zeta_bih: float = 0.0  # Biharmonic dissipation on relative vorticity ζ
+    K_zeta_bih: float | None = 0.0
+                             # ``None`` = DERIVE from the mesh (see
+                             # ``resolution_scaled_k_zeta_bih``); ``0.0`` = off;
+                             # any other value pins the coefficient.
+                             # Biharmonic dissipation on relative vorticity ζ
                              # [m⁴/s]. Adds −K_ζ·∇⁴ζ to the vorticity
                              # equation (scale-selective damping of grid-scale
                              # ζ patterns), applied as a tangential-gradient
@@ -440,6 +444,25 @@ class MPASOceanConfig(NamedTuple):
     # Arctic halocline-erosion audit).  Mirrors the lat-lon C-grid field.
     freshwater_salinity: str = "s_ref"   # "s_ref" | "local"
 
+    # --- resolution scaling of the biharmonic vorticity damping -------------
+    # Appended at the END of the schema on purpose: positional construction of
+    # this NamedTuple stays valid for every existing caller.
+    # Anchor for the DERIVED ``K_zeta_bih`` (``K_zeta_bih=None``): the value
+    # and the mesh spacing it was tuned at.  ``1e14`` is the OMIP NEMO-match
+    # MPAS recipe's coefficient, tuned on the ico6 mesh (SST RMSE 0.84 vs
+    # NEMO).  The spacing is that mesh's mean ``dcEdge`` at the DEFAULT 50
+    # Lloyd iterations, to full float precision, so an ico6 run reproduces
+    # ``K_zeta_bih_ref`` EXACTLY rather than to 0.1 % (measured: the ico6 mesh
+    # built by ``create_voronoi_mesh(6)`` derives 1.0e14 bit-identically).
+    # The same mesh at Lloyd 0 measures 120324.32 m, which the cubed law turns
+    # into 0.3 % on the coefficient.
+    K_zeta_bih_ref: float = 1.0e14                 # [m⁴/s] at the reference spacing
+    K_zeta_bih_ref_dx_m: float = 120194.609375     # [m] ico6 mean dcEdge, Lloyd 50
+    # Provenance of a DERIVED coefficient, stamped by the model constructor:
+    # the mesh spacing it was derived from (0.0 = pinned, not derived), so a
+    # saved configuration records WHICH mesh its coefficient belongs to and a
+    # replay on another mesh is visible rather than a silent re-pin.
+    K_zeta_bih_dx_m: float = 0.0
 
 class MPASSimpleOceanConfig(NamedTuple):
     """Configuration for simplified ocean on Voronoi mesh.
@@ -511,3 +534,57 @@ class MPASSimpleOceanConfig(NamedTuple):
     # Appended at the END to preserve positional construction (same convention
     # as LatLonCGridOceanConfig field additions).
     freezing: FreezingPointConfig = FreezingPointConfig()
+
+
+
+def resolution_scaled_k_zeta_bih(dx_mean_m: float, config: "MPASOceanConfig") -> float:
+    """Biharmonic vorticity damping coefficient for a mesh of spacing ``dx_mean_m``.
+
+    ``K_ζ`` damps the ζ-checkerboard null mode of the energy-conserving PV
+    flux.  Held fixed across resolutions it is BOTH over-dissipative and
+    explicitly unstable on a finer mesh: the ∇⁴ operator's stability limit
+    scales as ``Δ⁴/K_ζ``, so a coefficient tuned at ~120 km violates it at
+    28 km (measured: an ico8 cold start diverges at step 11 with the fixed
+    1e14 m⁴/s, and survives with the coefficient scaled).
+
+    The scaling is ``K_ζ(Δ) = K_ref · (Δ/Δ_ref)³`` — the NEMO ``ldf_dyn``
+    convention for a biharmonic operator, which holds the damping's velocity
+    scale ``K_ζ/Δ³`` constant and lets the stability limit grow LINEARLY with
+    refinement, rather than the ``Δ⁴`` law that would hold the limit fixed and
+    let the damping vanish.  ``config.K_zeta_bih_ref`` / ``K_zeta_bih_ref_dx_m``
+    carry the anchor, so the choice is in the configuration, not in a default
+    buried at a call site.
+
+    Returns ``config.K_zeta_bih`` unchanged whenever it is not ``None`` — that
+    is the explicit pin (including ``0.0`` = the term off).
+
+    Parameters
+    ----------
+    dx_mean_m : mean cell spacing of the mesh the model runs on [m]
+        (``mesh.dcEdge`` averaged over real, non-padded edges).
+    config : MPASOceanConfig
+
+    Returns
+    -------
+    float
+        The coefficient [m⁴/s] to run with.
+    """
+    if config.K_zeta_bih is not None:
+        return config.K_zeta_bih
+    if not (dx_mean_m > 0.0):
+        raise ValueError(
+            "resolution_scaled_k_zeta_bih: mean cell spacing must be positive, "
+            f"got {dx_mean_m!r} m")
+    if not (config.K_zeta_bih_ref_dx_m > 0.0):
+        raise ValueError(
+            "resolution_scaled_k_zeta_bih: K_zeta_bih_ref_dx_m must be positive, "
+            f"got {config.K_zeta_bih_ref_dx_m!r} m")
+    return config.K_zeta_bih_ref * (dx_mean_m / config.K_zeta_bih_ref_dx_m) ** 3
+
+
+# A single mean spacing describes a QUASI-UNIFORM mesh.  On a mesh whose edge
+# lengths span more than this factor (regional refinement), one scalar
+# coefficient is over-damping the coarse part or unstable in the fine part --
+# the ∇⁴ stability limit follows the SMALLEST edges -- so the derivation
+# refuses rather than returning a plausible number.
+K_ZETA_BIH_MAX_SPACING_RATIO: float = 4.0

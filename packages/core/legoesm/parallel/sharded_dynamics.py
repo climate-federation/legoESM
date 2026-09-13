@@ -4832,3 +4832,14 @@ def check_sharding(state, config: DeviceConfig, verbose: bool = False) -> dict:
         )
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Public names for the Voronoi partition / ppermute machinery shared with the
+# MPAS OCEAN SPMD lane (``legoesm.parallel.voronoi_spmd_ocean``).  Aliases, not
+# copies: the ocean lane must exchange exactly the rows the atmosphere lane
+# does (no private cross-module imports — tests/test_no_private_cross_imports).
+# ---------------------------------------------------------------------------
+build_voronoi_partition_infra = _build_voronoi_partition_infra
+build_ppermute_schedule = _build_ppermute_schedule
+ppermute_halo_fill = _ppermute_halo_fill
