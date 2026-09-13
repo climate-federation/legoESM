@@ -1013,7 +1013,7 @@ CITATION_MAP = {
         'diag_vertadv_v = jax.lax.optimization_barrier(diag_vertadv_v)', 27],
     'ocean_pe_latlon_cgrid.py:4762-4783': [
         'zad_w, zad_h_u, zad_h_v = w, h_u, h_v',
-        'zad_h_v = jax.lax.optimization_barrier(zad_h_v)', 22],
+        ('zad_h_v = jax.lax.optimization_barrier(zad_h_v)', 1), 22],
     'ocean_model_latlon_cgrid.py:6024-6034': [
         '_freeze_hpg = self._nemo_ws_test_hooks.freeze_stage_hpg_operands',
         ('getattr(_cfg_b, "adaptive_implicit_vertadv", False)', 1), 11],
