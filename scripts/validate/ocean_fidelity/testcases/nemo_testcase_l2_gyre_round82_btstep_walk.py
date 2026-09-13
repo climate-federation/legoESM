@@ -79,16 +79,16 @@ def first_non_bit(rows: list[dict]) -> dict | None:
 
 
 def _stagger(name: str) -> str:
-    if name.startswith("u_") or name.endswith("_u"):
+    if name.startswith(("u_", "depth_u_")) or name.endswith("_u"):
         return "u"
-    if name.startswith("v_") or name.endswith("_v"):
+    if name.startswith(("v_", "depth_v_")) or name.endswith("_v"):
         return "v"
     return "t"
 
 
 def _native(trace, record_name: str) -> np.ndarray:
     key = TRACE_KEYS.get(record_name, record_name)
-    return gate._trace_native(trace[key], record_name)
+    return gate._trace_native(trace[key], key)
 
 
 def _admit(args) -> dict:

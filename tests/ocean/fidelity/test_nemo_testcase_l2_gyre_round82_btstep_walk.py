@@ -36,3 +36,5 @@ def test_trace_mapping_covers_every_record_array() -> None:
     assert set(WALK.TRACE_KEYS).issubset(set(WALK.round81.ARRAY_FIELDS))
     assert set(WALK.round81.ARRAY_FIELDS).issubset(set(WALK.SOURCE_ORDER))
     assert len(WALK.SOURCE_ORDER) == len(WALK.round81.ARRAY_FIELDS) + 7
+    assert WALK._stagger("depth_u_mid") == "u"
+    assert WALK._stagger("depth_v_mid") == "v"
