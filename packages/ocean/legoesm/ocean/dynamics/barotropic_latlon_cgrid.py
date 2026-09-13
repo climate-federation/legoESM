@@ -2035,6 +2035,20 @@ def _run_substep_loop(
                            else _zero_cor_coeff),
                 "cor_u": jnp.asarray(_cor_u) * jnp.ones_like(U_bar_c),
                 "cor_v": jnp.asarray(_cor_v) * jnp.ones_like(V_bar_c),
+                "drag_coefficient_u": (
+                    -drag_r_u if drag_r_u is not None
+                    else jnp.zeros_like(U_bar_c)),
+                "drag_coefficient_v": (
+                    -drag_r_v if drag_r_v is not None
+                    else jnp.zeros_like(V_bar_c)),
+                "inverse_depth_u": jnp.where(
+                    u_mask != 0,
+                    1.0 / jnp.maximum(H_u, min_water_col),
+                    0.0),
+                "inverse_depth_v": jnp.where(
+                    v_mask != 0,
+                    1.0 / jnp.maximum(H_v, min_water_col),
+                    0.0),
                 "slow_u": F_slow_u_i,
                 "slow_v": F_slow_v_i,
                 "drag_u": jnp.asarray(_drag_u) * jnp.ones_like(U_bar_c),
