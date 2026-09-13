@@ -35,6 +35,10 @@ the user.  No NEMO source, year harness, reconciliation gate, freshwater pair,
   because it expected the inherited round-66 status CONFIRMED rather than its
   established value MEASURED.  The correction changed only that acceptance
   literal; the clean-commit rerun passed.
+- Citation-map retraction: e290dfa42073790047b3f74c87ee64537f64235a.
+  The first citation run correctly failed because five cumulative map entries
+  still named the removed deviation representation or line-shifted neighbors;
+  the obsolete claims were removed from the tool before the final audit.
 
 ## What changed
 
@@ -115,6 +119,9 @@ d2c0a985c0beec500e2b575ea971753a8a6d4d80f8a1f2e947f0bafcd6b71c26.
 - `test_nemo_ab3am4_filter.py` plus `test_ocean_run_restart.py`:
   **87 passed in 116.88 s** under CPU/fp64.
 - Restart-focused new/adjacent controls: **4 passed in 2.51 s**.
+- Receipt citation gate: **PASS**, 4/4 receipt citations mapped, zero map-audit
+  failures.  Shifting the compiled initialization citation by two lines exited
+  1 with SYMBOL-NOT-AT-LINE.
 - Known unrelated red test was not encountered in the focused suites.
 
 ## Separate Codex review
