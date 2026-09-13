@@ -19,8 +19,13 @@ import nemo_testcase_l2_gyre_round14_advmean as round14  # noqa: E402
 
 RECORD = "oracle_bt_advmean_operands_kt00000002.bin"
 N2 = 36 * 26
-EXPECTED_SIZE = 16 + 6 * 4 + 8 + 50 * 8 + 2 * N2 * 8 + 50 * (
-    4 + 8 + 10 * N2 * 8) + 4 * N2 * 8
+N_CYCLE = 50
+N_SUBSTEP_FIELDS = len(round14.ADVMEAN_SUBSTEP_FIELDS)
+EXPECTED_SIZE = (
+    16 + 6 * 4 + 8 + N_CYCLE * 8 + 2 * N2 * 8
+    + N_CYCLE * (4 + 8 + N_SUBSTEP_FIELDS * N2 * 8)
+    + 4 * N2 * 8
+)
 
 
 def require(condition: bool, message: str) -> None:

@@ -47,4 +47,7 @@ def test_replay_is_exact_and_nonzero_ulp_plant_fires() -> None:
 
 
 def test_expected_record_size_matches_layout() -> None:
+    assert GATE.N_SUBSTEP_FIELDS == 10
     assert GATE.EXPECTED_SIZE == 3_789_976
+    missing_two_fields = GATE.EXPECTED_SIZE - 2 * GATE.N_CYCLE * GATE.N2 * 8
+    assert missing_two_fields == 3_041_176

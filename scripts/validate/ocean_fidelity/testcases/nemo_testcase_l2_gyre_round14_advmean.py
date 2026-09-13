@@ -51,6 +51,12 @@ ORACLE_DYNSPG_SOURCE = Path(
     "cfgs/GYRE_OMIP_L2_P3_SM/MY_SRC/dynspg_ts.F90"
 )
 
+ADVMEAN_SUBSTEP_FIELDS = (
+    "sum_u_entry", "sum_v_entry", "metric_u", "metric_v",
+    "velocity_u", "velocity_v", "face_depth_u", "face_depth_v",
+    "sum_u_exit", "sum_v_exit",
+)
+
 
 def _xy(values: np.ndarray, nx: int, ny: int) -> np.ndarray:
     return values.reshape((nx, ny), order="F")[2:-2, 2:-2].T
@@ -86,22 +92,14 @@ def read_advmean(path: Path, *, expected_kt: int = 1) -> dict:
         weights = np.fromfile(handle, dtype=np.float64, count=ncycle)
         require(weights.size == ncycle, f"{path}: truncated weights")
         r1_e2u, r1_e1v = field(), field()
-        rows = {name: [] for name in (
-            "weight", "sum_u_entry", "sum_v_entry", "metric_u", "metric_v",
-            "velocity_u", "velocity_v", "face_depth_u", "face_depth_v",
-            "sum_u_exit", "sum_v_exit",
-        )}
+        rows = {name: [] for name in ("weight", *ADVMEAN_SUBSTEP_FIELDS)}
         for expected in range(1, ncycle + 1):
             raw = handle.read(4)
             require(len(raw) == 4, f"{path}: truncated substep {expected}")
             (jn,) = struct.unpack("=i", raw)
             require(jn == expected, f"{path}: substep {jn} != {expected}")
             rows["weight"].append(scalar())
-            for name in (
-                "sum_u_entry", "sum_v_entry", "metric_u", "metric_v",
-                "velocity_u", "velocity_v", "face_depth_u", "face_depth_v",
-                "sum_u_exit", "sum_v_exit",
-            ):
+            for name in ADVMEAN_SUBSTEP_FIELDS:
                 rows[name].append(field())
         pre_lbc_u, pre_lbc_v = field(), field()
         post_lbc_u, post_lbc_v = field(), field()
