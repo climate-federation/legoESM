@@ -207,19 +207,27 @@ def test_physics_increment_goes_through_the_driver_helper(cube):
     stub._persistent_dgrid = True
     stub.model = type("M", (), {"cdgrid": cdgrid})()
     stub.state = hydrostatic_to_fv3(state_cc, cdgrid)
-    before = np.asarray(stub.state.u_d.data).copy()
+    before_u = np.asarray(stub.state.u_d.data).copy()
+    before_v = np.asarray(stub.state.v_d.data).copy()
 
     ModelDriver._add_cc_wind_increment(stub, du, dv, dt)
 
     assert isinstance(stub.state, FV3HydrostaticState), (
         "the helper must leave the state D-staggered")
-    expect_u, _expect_v = center_to_dgrid_vector(du, dv, cdgrid)
+    expect_u, expect_v = center_to_dgrid_vector(du, dv, cdgrid)
     np.testing.assert_allclose(
-        np.asarray(stub.state.u_d.data), before + dt * np.asarray(expect_u),
+        np.asarray(stub.state.u_d.data), before_u + dt * np.asarray(expect_u),
         rtol=1e-6, atol=1e-6)
-    # ... and it MOVED the winds: an increment that changed nothing would make
+    # BOTH components: asserting only u leaves a helper that drops the
+    # meridional update passing (codex round 2 mutated exactly that and the
+    # test survived).
+    np.testing.assert_allclose(
+        np.asarray(stub.state.v_d.data), before_v + dt * np.asarray(expect_v),
+        rtol=1e-6, atol=1e-6)
+    # ... and it MOVED both winds: an increment that changed nothing would make
     # every assertion above vacuous.
-    assert np.abs(np.asarray(stub.state.u_d.data) - before).max() > 0.0
+    assert np.abs(np.asarray(stub.state.u_d.data) - before_u).max() > 0.0
+    assert np.abs(np.asarray(stub.state.v_d.data) - before_v).max() > 0.0
 
     # Off the persistent-D lane the same helper takes the cell-centre branch.
     stub_cc = _Stub()
@@ -230,6 +238,10 @@ def test_physics_increment_goes_through_the_driver_helper(cube):
     np.testing.assert_allclose(
         np.asarray(stub_cc.state.u.data),
         np.asarray(state_cc.u.data) + dt * np.asarray(du),
+        rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(stub_cc.state.v.data),
+        np.asarray(state_cc.v.data) + dt * np.asarray(dv),
         rtol=1e-6, atol=1e-6)
 
 

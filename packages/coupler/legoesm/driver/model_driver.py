@@ -14019,7 +14019,11 @@ class ModelDriver:
                 "build_training_segment: the D-staggering conversion happens in "
                 "ModelDriver.run(), so this would silently build a cell-centre "
                 "segment. Train with the flag off, or wire the conversion into "
-                "the training carry first (#1028).")
+                "the training carry first (#1028).  Note what training with "
+                "the flag off costs once production turns it ON: the damped "
+                "regime carries roughly a THIRD of the eddy amplitude, so a "
+                "model fitted on it meets a distribution it never saw (GLM "
+                "review) -- this refusal is fail-loud, not a resting place.")
 
         ctx = self._prepare_run_context(0, day, restore_carry=False)
         cfg = self.config
