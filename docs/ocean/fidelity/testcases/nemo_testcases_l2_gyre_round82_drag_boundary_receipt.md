@@ -131,8 +131,9 @@ the physics is held independently by the mechanical Rule-12 failure.
 Focused CPU/fp64 checks on the final trace-only tree: the Round-82 walk tests
 and the complete `test_zdf_dynzdf_composition.py` suite passed, 23 tests total.
 The known unrelated `test_rk3_ws_differs_from_rk3_and_is_finite` failure was
-not encountered. Citation-gate and shifted-citation-plant results are recorded
-below after this receipt is sealed.
+not encountered. The clean-tree citation gate passed all 7/7 compiled-source
+citations with zero map-audit failures. Shifting the compiled standard-drag
+citation by two lines exited 1 with `SYMBOL-NOT-AT-LINE`.
 
 ## Choices, uncertainty, and retractions
 
