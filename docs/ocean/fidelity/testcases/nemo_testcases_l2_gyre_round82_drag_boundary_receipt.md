@@ -128,8 +128,9 @@ Per the operator's 2026-09-13 08:30 instruction: **independent review
 unavailable in-sandbox**; work continued. No reviewer verdict is claimed, and
 the physics is held independently by the mechanical Rule-12 failure.
 
-Focused CPU/fp64 checks on the final trace-only tree: the Round-82 walk tests
-and the complete `test_zdf_dynzdf_composition.py` suite passed, 23 tests total.
+Focused CPU/fp64 checks on the final trace-only tree: the Round-82 walk,
+repository citation-gate, complete `test_zdf_dynzdf_composition.py`, and NEMO
+literal barotropic-continuity suites passed, 43 tests total in 30.91 seconds.
 The known unrelated `test_rk3_ws_differs_from_rk3_and_is_finite` failure was
 not encountered. The clean-tree citation gate passed all 7/7 compiled-source
 citations with zero map-audit failures. Shifting the compiled standard-drag
