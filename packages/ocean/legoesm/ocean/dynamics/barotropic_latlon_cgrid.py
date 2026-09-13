@@ -543,7 +543,8 @@ def _nemo_ssh_avg_apply(eta_dyn, u_mask, v_mask, grid, area, prep, *,
     r1_u0 = nemo_source_round(u_mask / r1_u0_denom)
     r3_u_half_sum = nemo_source_round(0.5 * ssh_u_sum)
     r3_u = nemo_source_round(
-        nemo_source_round(r3_u_half_sum * r1_u0) * _r1_e1e2u[:, :-1])
+        nemo_source_round(r3_u_half_sum * r1_u0[:, :-1])
+        * _r1_e1e2u[:, :-1])
     r3_u = jnp.concatenate([r3_u, r3_u[:, 0:1]], axis=1)
     r1_u_entry = nemo_source_round(
         r1_u0 / nemo_source_round(1.0 + r3_u))
