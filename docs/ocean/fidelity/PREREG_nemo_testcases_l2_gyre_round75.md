@@ -18,7 +18,7 @@ of 50 external substeps at
 The two velocity slots are `l2_u_mid` and `l2_v_mid`, but the kt=2 opening block
 allocates only `l2_adv_before_u` and `l2_adv_before_v` at the same compiled
 source's `:442-450`. The velocity snapshots are allocated and populated only
-inside the kt=1 instrumentation arm at `:381-384` and `:509-513`. Therefore
+inside the kt=1 instrumentation arm at `:390-393` and `:503-506`. Therefore
 the kt=2 stream writes zero bytes for those two unallocated allocatables.
 The deficit is exactly `50 * 2 * 36 * 26 * 8 = 748800` bytes. This is an
 acquisition-instrument defect, not a scientific result.

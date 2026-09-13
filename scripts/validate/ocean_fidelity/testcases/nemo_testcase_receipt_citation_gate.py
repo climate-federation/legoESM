@@ -184,6 +184,8 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R72ZFOP/BLD/ppsrc/nemo/stprk3_stg.f90"),
     "GYRE_OMIP_L2_P3_SM_R72ZFOP/BLD/ppsrc/nemo/dynspg_ts.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R72ZFOP/BLD/ppsrc/nemo/dynspg_ts.f90"),
+    "GYRE_OMIP_L2_P3_SM_R74ADV2/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R74ADV2/BLD/ppsrc/nemo/dynspg_ts.f90"),
     "round64/oracle_krhs_split/ocean.output": Path(
         "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round64/"
         "oracle_krhs_split/ocean.output"),
@@ -366,6 +368,22 @@ CITATION_MAP = {
         "WRITE(numout,*) '     Barotropic time steps => in seconds",
         "ELSE                  ; WRITE(numout,*) '        set      "
         "(ln_bt_auto=F) with the namelist parameter nn_e '", 4],
+    # --- round 75: the failed R74 writer omitted two unallocated arrays ---
+    'GYRE_OMIP_L2_P3_SM_R74ADV2/BLD/ppsrc/nemo/dynspg_ts.f90:390-393': [
+        ('IF( lwp .AND. kt == nit000 ) THEN', 2),
+        '&      l2_u_cor(jpi,jpj), l2_v_cor(jpi,jpj) )', 4],
+    'GYRE_OMIP_L2_P3_SM_R74ADV2/BLD/ppsrc/nemo/dynspg_ts.f90:442-450': [
+        'IF( lwp .AND. kt == nit000 + 1 ) THEN',
+        ('WRITE(l2_adv_unit) r1_wgt2s, wgtbtp2(1:icycle), r1_e2u, r1_e1v', 2), 9],
+    'GYRE_OMIP_L2_P3_SM_R74ADV2/BLD/ppsrc/nemo/dynspg_ts.f90:503-506': [
+        ('IF( lwp .AND. kt == nit000 ) THEN', 3),
+        'l2_v_mid  (:,:) = va_e(:,:)', 4],
+    'GYRE_OMIP_L2_P3_SM_R74ADV2/BLD/ppsrc/nemo/dynspg_ts.f90:572-579': [
+        'za2 = wgtbtp2(jn)',
+        'vn_adv(ji,jj) = vn_adv(ji,jj) + za2 * zhV(ji,jj) * r1_e1v(ji,jj)', 8],
+    'GYRE_OMIP_L2_P3_SM_R74ADV2/BLD/ppsrc/nemo/dynspg_ts.f90:581-584': [
+        ('IF( lwp .AND. kt <= nit000 + 1 ) THEN', 2),
+        '& l2_u_mid, l2_v_mid, zhup2_e, zhvp2_e, un_adv, vn_adv', 4],
     # --- round 72: stage-1 transport is earlier than the exact RK replay ---
     'GYRE_OMIP_L2_P3_SM_R71FCTST2/BLD/ppsrc/nemo/stprk3_stg.f90:289-290': [
         'zub(ji,jj) = un_adv(ji,jj)*(r1_hu_0',
