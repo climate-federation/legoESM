@@ -583,17 +583,25 @@ def test_bottom_drag_cell_rate_is_private_optional_diagnostic():
         state.eta.data, state.H_bathy.data, z,
         min_water_column_m=config.min_water_column_m,
     )
-    ordinary = nemo_bottom_drag_rate_faces(
-        state.u.data, state.v.data, h_k, z, config, grid)
-    diagnostic = nemo_bottom_drag_rate_faces(
-        state.u.data, state.v.data, h_k, z, config, grid,
-        return_cell_rate=True,
-    )
+    u = jnp.linspace(0.011, 0.019, state.u.data.size).reshape(state.u.data.shape)
+    v = jnp.linspace(-0.017, -0.009, state.v.data.size).reshape(state.v.data.shape)
+    ordinary = jax.jit(lambda uu, vv, hh: nemo_bottom_drag_rate_faces(
+        uu, vv, hh, z, config, grid))(u, v, h_k)
+    diagnostic = jax.jit(lambda uu, vv, hh: nemo_bottom_drag_rate_faces(
+        uu, vv, hh, z, config, grid, return_cell_rate=True))(u, v, h_k)
     assert len(ordinary) == 4
     assert len(diagnostic) == 5
     for expected, actual in zip(ordinary, diagnostic[:4], strict=True):
         np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
     assert diagnostic[4].shape == state.eta.data.shape
+    cell = np.asarray(diagnostic[4])
+    expected_u_inner = 0.5 * (np.roll(cell, 1, axis=1) + cell)
+    expected_u = np.concatenate(
+        [expected_u_inner, expected_u_inner[:, :1]], axis=1)
+    expected_v_inner = 0.5 * (cell[:-1] + cell[1:])
+    expected_v = np.pad(expected_v_inner, ((1, 1), (0, 0)), mode="edge")
+    np.testing.assert_array_equal(np.asarray(diagnostic[0]), expected_u)
+    np.testing.assert_array_equal(np.asarray(diagnostic[1]), expected_v)
 
 
 def test_barotropic_drag_rate_partial_now_velocity_raises():

@@ -3804,7 +3804,9 @@ def nemo_bottom_drag_rate_faces(
     u_bot = jnp.take_along_axis(u_c, _bl_idx, axis=-1)[..., 0]
     v_bot = jnp.take_along_axis(v_c, _bl_idx, axis=-1)[..., 0]
     h_bot = jnp.take_along_axis(h_k, _bl_idx, axis=-1)[..., 0]
-    r_t = nemo_effective_bottom_drag_r(
+    # The compiled NEMO program stores rCdU_bot before its separate U/V-face
+    # averaging loops. Preserve that binary64 boundary in the shared path.
+    r_t = nemo_source_round(nemo_effective_bottom_drag_r(
         u_bot, v_bot, h_bot,
         scheme=_scheme,
         cd0=float(config.bottom_drag.bottom_drag_cd0),
@@ -3812,7 +3814,7 @@ def nemo_bottom_drag_rate_faces(
         z0=float(config.bottom_drag.bottom_drag_z0),
         ke0=float(config.bottom_drag.bottom_drag_ke0),
         von_karman=constants.kappa_von_karman,
-    )
+    ))
     # t-point -> face 2-point averages (NEMO dynzdf:
     # zCdu = 0.5*(rCdU(ji+1,jj)+rCdU(ji,jj))).  u-faces are lon-periodic
     # (face l couples cells l-1, l; face n_lon repeats face 0, mirroring
@@ -4654,6 +4656,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
     legacy_hpg_algebraic=False,
     nemo_operator_association: bool = False,
     return_nemo_operator_components: bool = False,
+    nemo_stage_zad_operands=None,
 ):
     """Compute 3D baroclinic tendencies on a C-grid lat-lon grid.
 
@@ -4775,6 +4778,13 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # barriers XLA fuses the full tendency graph back through continuity;
         # the standalone dynzad kernel then differs at every active point even
         # though its captured operands are bit-exact (round 40).
+        zad_w = jax.lax.optimization_barrier(zad_w)
+        zad_h_u = jax.lax.optimization_barrier(zad_h_u)
+        zad_h_v = jax.lax.optimization_barrier(zad_h_v)
+    if nemo_stage_zad_operands is not None:
+        # Consume the materialized W and Kmm face-thickness operands produced
+        # by the shared WS-RK3 stage program, matching dynzad's call boundary.
+        zad_w, zad_h_u, zad_h_v = nemo_stage_zad_operands
         zad_w = jax.lax.optimization_barrier(zad_w)
         zad_h_u = jax.lax.optimization_barrier(zad_h_u)
         zad_h_v = jax.lax.optimization_barrier(zad_h_v)

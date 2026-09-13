@@ -4554,7 +4554,8 @@ class LatLonCGridOceanModel:
                    ene_generic_f_vtx=False,
                    legacy_hpg_algebraic=False,
                    nemo_operator_association=False,
-                   return_nemo_operator_components=False):
+                   return_nemo_operator_components=False,
+                   nemo_stage_zad_operands=None):
         """Compute baroclinic tendencies.
 
         ``momentum_only=True`` skips the (T/S-frozen) tracer-diffusion
@@ -4612,6 +4613,7 @@ class LatLonCGridOceanModel:
             ene_generic_f_vtx=ene_generic_f_vtx,
             legacy_hpg_algebraic=legacy_hpg_algebraic,
             nemo_operator_association=nemo_operator_association,
+            nemo_stage_zad_operands=nemo_stage_zad_operands,
             diagnose_momentum=return_nemo_operator_components,
             return_nemo_operator_components=return_nemo_operator_components,
         )
@@ -5328,6 +5330,7 @@ class LatLonCGridOceanModel:
                 u_in, v_in, skip_ldf, transport_mean=None,
                 stage_tracers_eta=None, extra_rhs=None,
                 stage_face_thickness=None, stage_index=0,
+                stage_zad_operands=None,
             ):
                 st = state._replace(
                     u=state.u.replace(data=u_in * u_mask_3d),
@@ -5424,6 +5427,7 @@ class LatLonCGridOceanModel:
                                      nemo_operator_association=(
                                          self._nemo_ws_test_hooks
                                          .nemo_stage_rhs_accumulation_order_arm),
+                                     nemo_stage_zad_operands=stage_zad_operands,
                                      return_nemo_operator_components=(
                                          _return_components))
                 if _return_components:
@@ -6381,6 +6385,19 @@ class LatLonCGridOceanModel:
                     stage_face_thickness=_face_thickness_kbb, stage_index=1)
                 _du1_rhs = _du1_rhs + (_p0_with_zub[0] - _p0_no_zub[0])
                 _dv1_rhs = _dv1_rhs + (_p0_with_zub[1] - _p0_no_zub[1])
+            # stp2d materializes stage-1 WZV before dyn_zad. The external
+            # solve makes that stage transport available only at this point,
+            # so replace the ZAD association without changing earlier terms.
+            _p0_with_zad = _mom_pert_ws(
+                u0, v0, False, None,
+                stage_face_thickness=_face_thickness_kbb,
+                stage_zad_operands=(_g0[2], _g0[4], _g0[5]),
+                stage_index=1)
+            _p0_without_zad = _mom_pert_ws(
+                u0, v0, False, None,
+                stage_face_thickness=_face_thickness_kbb, stage_index=1)
+            _du1_rhs = _du1_rhs + (_p0_with_zad[0] - _p0_without_zad[0])
+            _dv1_rhs = _dv1_rhs + (_p0_with_zad[1] - _p0_without_zad[1])
             # Stage 1: Kmm = Kbb, so the RHS carries (1 + r3u(Kbb)).
             _u1_rhs = _du1_rhs if _vert0 is None else _du1_rhs + _vert0[0]
             _v1_rhs = _dv1_rhs if _vert0 is None else _dv1_rhs + _vert0[1]
@@ -6439,6 +6456,7 @@ class LatLonCGridOceanModel:
                     _T_stage1, _S_stage1, _eta_live_one_third),
                 _stage_vertical_up3(u1_corr, v1_corr, _g1),
                 stage_face_thickness=_stage_face_thickness(_eta_live_one_third),
+                stage_zad_operands=(_g1[2], _g1[4], _g1[5]),
                 stage_index=2)
             _stage2_rhs_production = (p1u_corr, p1v_corr)
             if self._nemo_ws_test_hooks.stage2_momentum_rhs_override is not None:
@@ -6496,6 +6514,7 @@ class LatLonCGridOceanModel:
                 _stage3_hpg_operands,
                 _stage3_vertical_up3,
                 stage_face_thickness=_stage3_face_thickness,
+                stage_zad_operands=(_g2[2], _g2[4], _g2[5]),
                 stage_index=3)
             _expose_stage3_rhs = (
                 self._nemo_ws_test_hooks.expose_stage3_momentum_rhs)
@@ -6511,6 +6530,7 @@ class LatLonCGridOceanModel:
                     _stage3_hpg_operands,
                     _stage3_vertical_up3,
                     stage_face_thickness=_stage3_face_thickness,
+                    stage_zad_operands=(_g2[2], _g2[4], _g2[5]),
                     stage_index=3)
             elif _expose_stage3_rhs:
                 raise ValueError(
