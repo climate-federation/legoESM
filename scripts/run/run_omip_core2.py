@@ -690,9 +690,9 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         # hair better, largest move anywhere +0.3 m in the tropics against a
         # 42 m rmse; final-state gate metrics move in the 4th digit.  Set
         # EXPLICITLY (never inherited) because it is a scientific choice.
-        # No CLI flag exists for this field (unlike --tke-surface-bc);
-        # reverting means editing this line, which is why the evidence
-        # for the choice is recorded here rather than in a run log.
+        # Revert with --tke-surface-bc-level interior_pinned (added with this
+        # change, so BOTH axes of the surface-TKE choice appear in the run's
+        # own command line rather than one of them moving implicitly).
         tke_surface_bc_level="nemo_z0",
         # NEMO integrates `en` PROGNOSTICALLY (one backward-Euler step/model-step
         # carrying OceanState.tke).  The quasi-steady diagnostic Mode-B was the
@@ -993,6 +993,30 @@ def ah_profile_from_file(grid, path, A_h_base: float):
           f"{lat_deg[int(np.argmin(prof))]:.1f}) max {prof.max():.4f}; "
           f"A_h_base {A_h_base:g}")
     return tuple(float(x) for x in prof)
+
+
+def assert_tke_surface_pair_resolved(vmix_cfg) -> None:
+    """Refuse a z=0 surface-TKE placement without a held Dirichlet value.
+
+    The card-level raise in :func:`orca1_zdftke_config` catches the CLI route,
+    but a ``--config`` YAML replaces the whole physics config AFTER the card is
+    built, so the pair has to be checked on what the run RESOLVED to as well --
+    otherwise the YAML route reaches the closure's own error mid-run instead of
+    failing at setup (codex round 2, #1690).  Cheap and static; a non-TKE
+    scheme returns immediately.
+    """
+    tke = getattr(vmix_cfg, "tke", None)
+    if getattr(vmix_cfg, "scheme", None) != "tke" or tke is None:
+        return
+    if (getattr(tke, "tke_surface_bc_level", "interior_pinned") == "nemo_z0"
+            and getattr(tke, "surface_bc", None) != "nemo_dirichlet"):
+        raise ValueError(
+            "resolved vertical_mixing.tke: tke_surface_bc_level='nemo_z0' "
+            "holds a Dirichlet surface TKE value at the z=0 W-point, but "
+            f"surface_bc={getattr(tke, 'surface_bc', None)!r} supplies no held "
+            "value -- the closure raises on this pair (#1690). Pair "
+            "surface_bc='nemo_dirichlet' with 'nemo_z0', or "
+            "'interior_pinned' with the flux form.")
 
 
 def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
@@ -6228,13 +6252,18 @@ def main() -> int:
             # loud on the conflict rather than let YAML win over the explicit CLI.
             if "physics" in _ovr and (args.kpp_ri_crit is not None
                                       or args.kpp_cv is not None
-                                      or args.kpp_eice is not None):
+                                      or args.kpp_eice is not None
+                                      or args.tke_surface_bc is not None
+                                      or args.tke_surface_bc_level is not None):
                 raise ValueError(
                     "--kpp-ri-crit/--kpp-cv/--kpp-eice conflict with a --config "
                     "ocean.physics block: the YAML physics config would overwrite "
                     "the CLI KPP override. Set Ri_crit/Cv/eice in the YAML "
                     "(ocean.physics.vertical_mixing.kpp) OR drop the ocean.physics "
-                    "section and use the CLI flags -- not both.")
+                    "section and use the CLI flags -- not both.  The same "
+                    "applies to --tke-surface-bc / --tke-surface-bc-level "
+                    "(#1690): the YAML physics block would overwrite the "
+                    "surface-TKE pair those flags selected.")
             # Same class of conflict for #1442 (codex round-6 RED 3): this
             # rebuild happens AFTER the gateway builders set store_mass_flux
             # from --gateway-transports, so a YAML
@@ -6273,6 +6302,10 @@ def main() -> int:
                 # uniform fallback).
                 iwm_forcing=getattr(model, "_iwm_forcing", None),
             )
+            # #1690: check the surface-TKE pair on the RESOLVED config, not
+            # only on the card -- the YAML has just replaced it.
+            assert_tke_surface_pair_resolved(
+                getattr(model.config.physics, "vertical_mixing", None))
             print(f"[setup] --config {args.config} ocean override: {sorted(_ovr)}")
 
     # OMIP-2 weak SSS restoring toward the WOA surface-salinity climatology (the

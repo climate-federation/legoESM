@@ -637,3 +637,36 @@ def test_mpas_tke_default_card_still_applies_without_knobs(monkeypatch):
     assert vm is not None
     reference = r.build_tripole_vmix_config("tke", iwm=None)
     assert vm.tke == reference.tke
+
+
+def test_resolved_surface_tke_pair_is_checked_not_just_the_card():
+    """The z=0 placement / held-value pair is validated on the RESOLVED config.
+
+    The card-level raise catches the CLI route, but a ``--config`` YAML replaces
+    the whole physics config AFTER the card is built, so a YAML could reinstate
+    the invalid pair and only hit the closure's own error mid-run. codex raised
+    this on round 2 of #1690; this pins the setup-time check that answers it.
+    """
+    from legoesm.ocean.physics.vertical_mixing.config import (
+        TKEConfig, VerticalMixingConfig,
+    )
+    r = _runner()
+
+    bad = VerticalMixingConfig(
+        scheme="tke",
+        tke=TKEConfig(surface_bc="veros_flux",
+                      tke_surface_bc_level="nemo_z0"))
+    with pytest.raises(ValueError, match="nemo_z0"):
+        r.assert_tke_surface_pair_resolved(bad)
+
+    # Both valid pairings pass.
+    for _bc, _lvl in (("nemo_dirichlet", "nemo_z0"),
+                      ("veros_flux", "interior_pinned"),
+                      ("nemo_dirichlet", "interior_pinned")):
+        r.assert_tke_surface_pair_resolved(VerticalMixingConfig(
+            scheme="tke",
+            tke=TKEConfig(surface_bc=_bc, tke_surface_bc_level=_lvl)))
+
+    # A non-TKE scheme (or no config at all) is not this check's business.
+    r.assert_tke_surface_pair_resolved(VerticalMixingConfig(scheme="kpp"))
+    r.assert_tke_surface_pair_resolved(None)
