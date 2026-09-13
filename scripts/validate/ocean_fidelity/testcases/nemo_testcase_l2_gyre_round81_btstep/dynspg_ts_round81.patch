@@ -1,0 +1,156 @@
+--- dynspg_ts.F90
++++ dynspg_ts.F90
+@@ -154,6 +154,7 @@
+       INTEGER  ::   ji, jj, jk, jn        ! dummy loop indices
+       INTEGER  ::   l2_unit, l2_ios, l2_drag_unit, l2_drag_ios, l2_adv_unit, l2_adv_ios
+       INTEGER  ::   l2_ord_unit, l2_ord_ios
++      INTEGER  ::   l2_r81_unit, l2_r81_ios
+       LOGICAL  ::   ll_fw_start           ! =T : forward integration 
+       INTEGER  ::   l2_uamid_unit, l2_uamid_ios
+       LOGICAL  ::   ll_init               ! =T : special startup of 2d equations
+@@ -193,12 +194,14 @@
+       REAL(wp), ALLOCATABLE, DIMENSION(:,:) :: l2_drag_u, l2_drag_v
+       REAL(wp), ALLOCATABLE, DIMENSION(:,:) :: l2_adv_before_u, l2_adv_before_v
+       REAL(wp), ALLOCATABLE, DIMENSION(:,:) :: l2_du, l2_dv, l2_zhdiv
++      REAL(wp), ALLOCATABLE, DIMENSION(:,:) :: l2_r81_div
+       REAL(wp) :: l2_mid_za1, l2_mid_za2, l2_mid_za3
+       CHARACTER(LEN=96) :: l2_filename
+       CHARACTER(LEN=96) :: l2_drag_filename
+       CHARACTER(LEN=96) :: l2_adv_filename
+       CHARACTER(LEN=96) :: l2_ord_filename
+       CHARACTER(LEN=96) :: l2_uamid_filename
++      CHARACTER(LEN=96) :: l2_r81_filename
+       CHARACTER(LEN=16) :: l2_magic
+       REAL(wp) ::   zttide   ! Time of day for tidal updates
+       !!----------------------------------------------------------------------
+@@ -621,6 +624,18 @@
+          l2_magic = 'NEMO_L2_UAMID_1'
+          WRITE(l2_uamid_unit) l2_magic, 1, kt, icycle, jpi, jpj, STORAGE_SIZE(1._wp), &
+             & ntsi, ntei, ntsj, ntej
++         ALLOCATE( l2_r81_div(jpi,jpj) )
++         l2_r81_div(:,:) = 0._wp
++         WRITE(l2_r81_filename,'("oracle_bt_step_operands_kt",I8.8,".bin")') kt
++         OPEN( NEWUNIT=l2_r81_unit, FILE=TRIM(l2_r81_filename), ACCESS='STREAM', FORM='UNFORMATTED', &
++            & STATUS='REPLACE', ACTION='WRITE', IOSTAT=l2_r81_ios )
++         IF( l2_r81_ios /= 0 )   CALL ctl_stop( 'cannot open round-81 external-step trace' )
++         IF( STORAGE_SIZE(1._wp) /= 64 )   CALL ctl_stop( 'round-81 external-step trace requires fp64' )
++         l2_magic = 'NEMO_L2_BTSTP_1'
++         WRITE(l2_r81_unit) l2_magic, 1, kt, icycle, jpi, jpj, STORAGE_SIZE(1._wp), &
++            & ntsi, ntei, ntsj, ntej, 37, rDt_e
++         WRITE(l2_r81_unit) ssmask(ntsi:ntei,ntsj:ntej), &
++            & ssumask(ntsi:ntei,ntsj:ntej), ssvmask(ntsi:ntei,ntsj:ntej)
+       ENDIF
+ 
+       !                                             ! ==================== !
+@@ -677,6 +692,15 @@
+             !--      ssh      = (3/2+beta) ssh   -(1/2+2beta) ssh      + beta ssh          --!
+             !--------------------------------------------------------------------------------!
+             zsshp2_e(:,:) = za1 * sshn_e(:,:)  + za2 * sshb_e(:,:) + za3 * sshbb_e(:,:)
++            IF( lwp .AND. kt == nit000 + 1 ) THEN
++               WRITE(l2_r81_unit) jn, za1, za2, za3
++               WRITE(l2_r81_unit) un_e(ntsi:ntei,ntsj:ntej), vn_e(ntsi:ntei,ntsj:ntej), &
++                  & sshn_e(ntsi:ntei,ntsj:ntej), ub_e(ntsi:ntei,ntsj:ntej), &
++                  & vb_e(ntsi:ntei,ntsj:ntej), sshb_e(ntsi:ntei,ntsj:ntej), &
++                  & ubb_e(ntsi:ntei,ntsj:ntej), vbb_e(ntsi:ntei,ntsj:ntej), &
++                  & sshbb_e(ntsi:ntei,ntsj:ntej), ua_e(ntsi:ntei,ntsj:ntej), &
++                  & va_e(ntsi:ntei,ntsj:ntej), zsshp2_e(ntsi:ntei,ntsj:ntej)
++            ENDIF
+ 
+             IF( lwp .AND. kt == nit000 ) THEN
+                l2_eta_mid(:,:) = zsshp2_e(:,:)
+@@ -715,6 +739,9 @@
+             END_2D
+ #endif               
+             !
++            IF( lwp .AND. kt == nit000 + 1 ) THEN
++               WRITE(l2_r81_unit) zhup2_e(ntsi:ntei,ntsj:ntej), zhvp2_e(ntsi:ntei,ntsj:ntej)
++            ENDIF
+          ENDIF
+          !
+          !                    !==  after SSH  ==!   (jn+1)
+@@ -754,8 +781,14 @@
+                l2_dv(ji,jj) = zhV(ji,jj) - zhV(ji,jj-1)
+                l2_zhdiv(ji,jj) = zhdiv
+             ENDIF
++            IF( lwp .AND. kt == nit000 + 1 )   l2_r81_div(ji,jj) = zhdiv
+             ssha_e(ji,jj) = (  sshn_e(ji,jj) - rDt_e * ( ssh_frc(ji,jj) + zhdiv )  ) * ssmask(ji,jj)
+          END_2D
++         IF( lwp .AND. kt == nit000 + 1 ) THEN
++            WRITE(l2_r81_unit) zhU(ntsi:ntei,ntsj:ntej), zhV(ntsi:ntei,ntsj:ntej), &
++               & ssh_frc(ntsi:ntei,ntsj:ntej), l2_r81_div(ntsi:ntei,ntsj:ntej), &
++               & ssha_e(ntsi:ntei,ntsj:ntej)
++         ENDIF
+          !
+          ! Duplicate sea level across open boundaries (this is only cosmetic if linssh=T)
+          IF( ln_bdy )   CALL bdy_ssh( ssha_e )
+@@ -819,6 +852,9 @@
+             zsshp2_e(ji,jj) = za0 *  ssha_e(ji,jj) + za1 *  sshn_e (ji,jj)   &
+                &            + za2 *  sshb_e(ji,jj) + za3 *  sshbb_e(ji,jj)
+          END_2D
++         IF( lwp .AND. kt == nit000 + 1 ) THEN
++            WRITE(l2_r81_unit) za0, za1, za2, za3, zsshp2_e(ntsi:ntei,ntsj:ntej)
++         ENDIF
+          !
+          !                             ! Surface pressure gradient
+          zldg = ( 1._wp - rn_scal_load ) * grav    ! local factor
+@@ -826,9 +862,15 @@
+             zu_spg(ji,jj) = - zldg * ( zsshp2_e(ji+1,jj) - zsshp2_e(ji,jj) ) * r1_e1u(ji,jj)
+             zv_spg(ji,jj) = - zldg * ( zsshp2_e(ji,jj+1) - zsshp2_e(ji,jj) ) * r1_e2v(ji,jj)
+          END_2D
++         IF( lwp .AND. kt == nit000 + 1 ) THEN
++            WRITE(l2_r81_unit) zu_spg(ntsi:ntei,ntsj:ntej), zv_spg(ntsi:ntei,ntsj:ntej)
++         ENDIF
+          !
+          ! Add Coriolis trend:
+          CALL dyn_cor_2D( ua_e, va_e, zu_trd, zv_trd )
++         IF( lwp .AND. kt == nit000 + 1 ) THEN
++            WRITE(l2_r81_unit) zu_trd(ntsi:ntei,ntsj:ntej), zv_trd(ntsi:ntei,ntsj:ntej)
++         ENDIF
+          IF( lwp .AND. kt == nit000 ) THEN
+             l2_u_cor(:,:) = zu_trd(:,:)
+             l2_v_cor(:,:) = zv_trd(:,:)
+@@ -850,6 +892,12 @@
+                zv_trd(ji,jj) = zv_trd(ji,jj) + zCdU_v(ji,jj) * vn_e(ji,jj) * hvr_e(ji,jj)
+             END_2D
+          ENDIF
++         IF( lwp .AND. kt == nit000 + 1 ) THEN
++            WRITE(l2_r81_unit) zCdU_u(ntsi:ntei,ntsj:ntej), zCdU_v(ntsi:ntei,ntsj:ntej), &
++               & hur_e(ntsi:ntei,ntsj:ntej), hvr_e(ntsi:ntei,ntsj:ntej), &
++               & zu_trd(ntsi:ntei,ntsj:ntej), zv_trd(ntsi:ntei,ntsj:ntej), &
++               & zu_frc(ntsi:ntei,ntsj:ntej), zv_frc(ntsi:ntei,ntsj:ntej)
++         ENDIF
+          IF( lwp .AND. kt == nit000 ) THEN
+             l2_drag_product_u(:,:) = zCdU_u(:,:) * un_e(:,:)
+             l2_drag_product_v(:,:) = zCdU_v(:,:) * vn_e(:,:)
+@@ -954,6 +1002,9 @@
+          ENDIF
+          !                                                 ! open boundaries
+          IF( ln_bdy )   CALL bdy_dyn2d( jn, ua_e, va_e, un_e, vn_e, hur_e, hvr_e, ssha_e )
++         IF( lwp .AND. kt == nit000 + 1 ) THEN
++            WRITE(l2_r81_unit) ua_e(ntsi:ntei,ntsj:ntej), va_e(ntsi:ntei,ntsj:ntej)
++         ENDIF
+ #if defined key_agrif                                                           
+          CALL agrif_dyn_ts( jn )  ! Agrif
+ #endif
+@@ -988,6 +1039,10 @@
+          sshbb_e(:,:) = sshb_e(:,:)
+          sshb_e (:,:) = sshn_e(:,:)
+          sshn_e (:,:) = ssha_e(:,:)
++         IF( lwp .AND. kt == nit000 + 1 ) THEN
++            WRITE(l2_r81_unit) un_e(ntsi:ntei,ntsj:ntej), vn_e(ntsi:ntei,ntsj:ntej), &
++               & sshn_e(ntsi:ntei,ntsj:ntej)
++         ENDIF
+          !
+          !                                             !* Sum over whole bt loop (except in weight average)
+          !                                             !  ----------------------
+@@ -1015,6 +1070,9 @@
+       IF( lwp .AND. kt == nit000 + 1 ) THEN
+          CLOSE(l2_uamid_unit)
+          WRITE(numout,*) 'LANE2_BT_UAMID_DUMP ', kt, icycle, TRIM(l2_uamid_filename)
++         CLOSE(l2_r81_unit)
++         DEALLOCATE( l2_r81_div )
++         WRITE(numout,*) 'ROUND81_BTSTEP_DUMP ', kt, icycle, TRIM(l2_r81_filename)
+       ENDIF
+       IF( lwp .AND. kt == nit000 ) THEN
+          CLOSE(l2_unit)
+

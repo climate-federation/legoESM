@@ -983,6 +983,14 @@ _DUMP_TIME_LEVEL["oracle_bt_uamid_operands_kt00000002.bin"] = (
     "forms kt=2 ua_e from un_e/ub_e/ubb_e inside the NOW-step external loop; "
     "the round-76 WRITE-only patch records those operands at that statement",
 )
+_DUMP_TIME_LEVEL["oracle_bt_step_operands_kt00000002.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3_SM_R77UAMID5/BLD/ppsrc/nemo/dynspg_ts.f90:"
+    "481-795 executes the kt=2 NOW-step external recurrence; the round-81 "
+    "WRITE-only patch records its current/history/midpoint, continuity, "
+    "pressure, trend, forcing, update, and swap operands in source order",
+)
 _DUMP_TIME_LEVEL["oracle_bt_ordered_operands_kt00000001.bin"] = (
     "now",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
