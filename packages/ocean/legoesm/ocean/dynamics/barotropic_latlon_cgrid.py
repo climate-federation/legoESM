@@ -2064,25 +2064,13 @@ def _run_substep_loop(
             # NEMO continuation (dynspg_ts ll_init=F): now-values reset to the
             # baroclinic state (ln_bt_fw), b/bb histories carried from the end
             # of the PREVIOUS window — one continuous AB3 series across windows.
-            # DEVIATION form: ab3_hist holds (X_final - X_b, X_final - X_bb)
-            # of the previous window, reconstructed against THIS window's
-            # now-values. NEMO re-imposes the stp2d barotropic mean on the 3D
-            # velocity after every stage (stprk3_stg.F90:440 zub correction),
-            # so its raw-carried histories never see a window-boundary jump;
-            # legoESM's implicit vmix/bottom drag shift the depth mean after
-            # the solve, and a raw carry would feed that jump into the AB3
-            # extrapolation (x1.78 amplification) every window — pumping a
-            # spurious deep barotropic mode. Deviation form is identical to
-            # NEMO's raw carry when the mean is preserved (NEMO's case) and
-            # jump-transparent when it is not.
-            (dU_b, dU_bb, dV_b, dV_bb, deta_b, deta_bb) = (
+            # Carry NEMO's six ABSOLUTE arrays directly.  The outer stage now
+            # preserves the independently prognostic uu_b/vv_b boundary mean,
+            # so there is no unresolved window jump for a deviation form to
+            # hide.  Reconstructing the history with ``now - (final-history)``
+            # is algebraically equivalent but not bit-equivalent.
+            (Ub0, Ubb0, Vb0, Vbb0, etab0, etabb0) = (
                 h.astype(dtype) for h in ab3_hist)
-            Ub0 = U_bar - dU_b
-            Ubb0 = U_bar - dU_bb
-            Vb0 = V_bar - dV_b
-            Vbb0 = V_bar - dV_bb
-            etab0 = eta - deta_b
-            etabb0 = eta - deta_bb
         else:
             # cold start: histories = window-start values; with the ll_init
             # ramp rows 0-1 these never reach a full-AB3 row (NEMO-exact).
@@ -2755,6 +2743,10 @@ def barotropic_substeps_latlon_cgrid(
         # boundary (dynspg_ts.F90:200-226, 806-808). Static Python gate on
         # pytree structure — same pattern as the prognostic state.tke seed.
         _ab3_hist = getattr(state, "bt_hist", None)
+        if _ab3_hist is not None and _carried_baro is None:
+            raise ValueError(
+                "nemo_ab3am4 continuation requires the paired prognostic "
+                "uu_b/vv_b boundary mean when bt_hist is present")
         _ab3_za, _ab3_zb = nemo_ab3am4_coeff_arrays(
             n_loop, ramp=_ab3_hist is None)
         # cast to the state dtype: f64 coefficients would silently promote the
@@ -2890,16 +2882,10 @@ def barotropic_substeps_latlon_cgrid(
     if _ab3 and not _boxcar_ab3 and hasattr(state, "bt_hist"):
         # NEMO nn_bt_flt=3 only (nn_bt_flt=2 re-inits the sub-state each step ⇒
         # no cross-window carry).
-        # store the end-of-window (b, bb) histories in DEVIATION form
-        # (X_final - X_b, X_final - X_bb) for the next window (finals
-        # positions 8-13: Ub, Ubb, Vb, Vbb, etab, etabb after the final
-        # dynspg_ts:806-808 rotation; finals 0-2: eta_f, U_bar_f, V_bar_f).
-        # See the reconstruction comment in _run_substep_loop.
-        state_new = state_new._replace(bt_hist=(
-            _finals[1] - _finals[8], _finals[1] - _finals[9],
-            _finals[2] - _finals[10], _finals[2] - _finals[11],
-            _finals[0] - _finals[12], _finals[0] - _finals[13],
-        ))
+        # Store NEMO's six absolute end-of-window histories for the next
+        # window.  Positions 8-13 are Ub, Ubb, Vb, Vbb, etab, etabb after the
+        # final dynspg_ts rotation; no derived or live 3-D mean is involved.
+        state_new = state_new._replace(bt_hist=tuple(_finals[8:14]))
     if _nemo_substep_trace_test_hook:
         return state_new, (Hu_avg, Hv_avg), _substep_trace
     return state_new, (Hu_avg, Hv_avg)

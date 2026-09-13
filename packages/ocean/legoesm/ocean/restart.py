@@ -210,11 +210,14 @@ _RUN_METADATA_REQUIRED: tuple[str, ...] = (
     "_state_class", "_ice_class", "_inventory", "_ice_inventory",
     "_excluded", "_slot_kinds", "_ice_slot_kinds",
 )
-# Bumped when the on-disk layout changes incompatibly.
+# Bumped when the on-disk layout or persisted carry semantics change.
 # 3: every manifest entry carries the payload's shape + dtype, so the loader
 #    can cross-check the array against an independent record instead of relying
 #    on the resuming template (whose optional carries are None) — codex r8.
-_RUN_RESTART_FORMAT: int = 3
+# 4: bt_hist carries NEMO's six absolute AB3/AM4 arrays.  Version 3 stored
+#    final-minus-history deviations and is migrated explicitly on load.
+_RUN_RESTART_FORMAT: int = 4
+_READABLE_RUN_RESTART_FORMATS: frozenset[int] = frozenset((3, 4))
 # Upper bound on a tuple-valued carry's element count.  The manifest's `n`
 # drives key-name expansion BEFORE any array is read, so a hand-edited archive
 # with a huge n would otherwise allocate that many strings.  bt_hist (6) is the
@@ -1028,10 +1031,11 @@ def _require_run_format(fmt: Any, in_path: Path) -> None:
     can never disagree about what this build reads.
     """
     got = int(fmt) if fmt is not None else 0
-    if got != _RUN_RESTART_FORMAT:
+    if got not in _READABLE_RUN_RESTART_FORMATS:
         raise ValueError(
             f"load_run_restart: {in_path} has format version {got}, this build "
-            f"reads version {_RUN_RESTART_FORMAT}.  Regenerate the restart with "
+            f"reads versions {sorted(_READABLE_RUN_RESTART_FORMATS)}.  "
+            "Regenerate the restart with "
             "this build; older archives lack the per-slot shape/dtype records "
             "the loader cross-checks the payload against.")
 
@@ -1602,6 +1606,42 @@ def _rebuild_slots(template, kinds: dict, prefix: str, loaded: dict,
     return out
 
 
+def _migrate_v3_deviation_bt_hist(state, in_path: Path):
+    """Convert the only readable legacy bt_hist representation to v4.
+
+    Version 3 persisted ``final - history`` for each NEMO AB3/AM4 b/bb slot.
+    The matching final values are the independently persisted ``uu_b``,
+    ``vv_b`` and ``eta`` fields.  Refuse an incomplete archive rather than
+    silently treating deviations as NEMO's absolute histories.
+    """
+    hist = getattr(state, "bt_hist", None)
+    if hist is None:
+        return state
+
+    def fail(detail: str):
+        raise ValueError(
+            f"load_run_restart: {in_path} cannot migrate deviation-form "
+            f"bt_hist: {detail}")
+
+    if not isinstance(hist, tuple) or len(hist) != 6:
+        fail(f"expected six arrays, got {type(hist).__name__}")
+    uu_b = getattr(state, "uu_b", None)
+    vv_b = getattr(state, "vv_b", None)
+    eta = getattr(state, "eta", None)
+    if not all(isinstance(x, Field) for x in (uu_b, vv_b, eta)):
+        fail("the paired persisted uu_b, vv_b and eta fields are required")
+
+    finals = (uu_b.data, uu_b.data, vv_b.data, vv_b.data,
+              eta.data, eta.data)
+    absolute = []
+    for i, (final, delta) in enumerate(zip(finals, hist)):
+        if not hasattr(delta, "shape") or delta.shape != final.shape:
+            got = getattr(delta, "shape", None)
+            fail(f"element {i} has shape {got}, expected {final.shape}")
+        absolute.append(final - delta.astype(final.dtype))
+    return state._replace(bt_hist=tuple(absolute))
+
+
 def load_run_restart(path: str | Path, template_state, *,
                      ice_template=None,
                      grid_type: str | None = None,
@@ -1674,6 +1714,8 @@ def load_run_restart(path: str | Path, template_state, *,
 
     # Payload-dependent reconstruction (decode + shape + static geometry).
     state = _rebuild_slots(template_state, meta["slots"], "", loaded, in_path)
+    if meta["format"] == 3:
+        state = _migrate_v3_deviation_bt_hist(state, in_path)
     ice_state = (_rebuild_slots(ice_template, ice_kinds, _ICE_PREFIX, loaded,
                                 in_path)
                  if ice_kinds else None)

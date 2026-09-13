@@ -647,15 +647,11 @@ class LatLonCGridOceanState(NamedTuple):
     dpsin_prev: object = None
     # Cross-window barotropic AB3/AM4 substep histories for
     # barotropic_time_filter == "nemo_ab3am4" (NEMO dynspg_ts nn_bt_flt=3):
-    # 6-tuple of 2-D arrays in DEVIATION form — (U_f-U_b, U_f-U_bb, V_f-V_b,
-    # V_f-V_bb, eta_f-eta_b, eta_f-eta_bb), the last two substep values of
-    # the previous window relative to its final value (NEMO's persistent
-    # ubb_e/ub_e/vbb_e/vb_e/sshbb_e/sshb_e, written to NEMO's restart).
-    # Deviation form because NEMO re-imposes the stp2d barotropic mean on the
-    # 3D velocity after every stage (stprk3_stg.F90:440) so its raw histories
-    # never see a window-boundary jump; legoESM's post-solve implicit vmix
-    # shifts the depth mean, and raw carried values would feed that jump into
-    # the AB3 extrapolation each window (see _run_substep_loop).
+    # 6-tuple of absolute 2-D arrays — (ub_e, ubb_e, vb_e, vbb_e, sshb_e,
+    # sshbb_e), the last two substep values of the previous window.  These are
+    # NEMO's persistent nn_bt_flt=3 histories, including its restart state;
+    # storing them directly is required because reconstructing them as a
+    # subtraction from the next window's now-value changes the last bits.
     # None (default) ⇒ cold start: the barotropic solver applies NEMO's
     # ll_init ramp and POPULATES this field; afterwards each window continues
     # the AB3 series across the window boundary (dynspg_ts.F90:200-226).

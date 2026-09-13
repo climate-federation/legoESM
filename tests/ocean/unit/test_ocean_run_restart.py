@@ -725,6 +725,57 @@ def test_tuple_carry_elements_are_not_mistaken_for_orphans(tmp_path):
     _assert_slot_equal("bt_hist", got.bt_hist, state.bt_hist)
 
 
+def test_format3_deviation_bt_hist_migrates_to_absolute(tmp_path):
+    """A real v3 carry is converted once; its deltas are never reinterpreted."""
+    _, _, state = _base_state()
+    shape = state.eta.data.shape
+    final_u = jnp.arange(np.prod(shape), dtype=state.eta.data.dtype).reshape(shape)
+    final_v = final_u + 100.0
+    final_eta = final_u + 200.0
+    uu_b = state.eta.replace(data=final_u, name="uu_b", units="m/s",
+                             staggering="u")
+    vv_b = state.eta.replace(data=final_v, name="vv_b", units="m/s",
+                             staggering="v")
+    eta = state.eta.replace(data=final_eta)
+    deltas = tuple(jnp.full(shape, float(i + 1), dtype=final_u.dtype)
+                   for i in range(6))
+    state = state._replace(uu_b=uu_b, vv_b=vv_b, eta=eta, bt_hist=deltas)
+    path = tmp_path / "v3.npz"
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
+    with np.load(path, allow_pickle=False) as f:
+        payload = {k: f[k] for k in f.files}
+    payload["_format"] = np.asarray(3)
+    np.savez(path, **payload)
+
+    got, _, meta = load_run_restart(path, _base_state()[2],
+                                    grid_type="latlon")
+    assert meta["format"] == 3
+    finals = (final_u, final_u, final_v, final_v, final_eta, final_eta)
+    for actual, final, delta in zip(got.bt_hist, finals, deltas):
+        np.testing.assert_array_equal(np.asarray(actual),
+                                      np.asarray(final - delta))
+    # Planted old-semantics control: at least one migrated absolute array must
+    # differ from the stored deviation, or this test would accept a no-op.
+    assert not np.array_equal(np.asarray(got.bt_hist[0]), np.asarray(deltas[0]))
+
+
+def test_format3_bt_hist_without_paired_means_fails_loudly(tmp_path):
+    """Migration cannot guess the two absolute velocity anchors."""
+    _, _, state = _base_state()
+    shape = state.eta.data.shape
+    state = state._replace(
+        bt_hist=tuple(jnp.ones(shape, dtype=state.eta.data.dtype)
+                      for _ in range(6)))
+    path = tmp_path / "incomplete-v3.npz"
+    save_run_restart(path, state, step=1, time_days=0.0, grid_type="latlon")
+    with np.load(path, allow_pickle=False) as f:
+        payload = {k: f[k] for k in f.files}
+    payload["_format"] = np.asarray(3)
+    np.savez(path, **payload)
+    with pytest.raises(ValueError, match="cannot migrate deviation-form bt_hist"):
+        load_run_restart(path, _base_state()[2], grid_type="latlon")
+
+
 def test_underscore_named_payload_cannot_hide_a_carry(tmp_path):
     """codex r5 HIGH: the orphan check partitioned on the '_' prefix, so
     renaming the hidden `tke` array to `_tke` made it vanish from the payload
