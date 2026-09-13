@@ -197,6 +197,13 @@ histories.  `git diff --check` and Python compilation pass.  The known
 unrelated `test_rk3_ws_differs_from_rk3_and_is_finite` failure was not
 encountered.
 
+The receipt citation gate passes all 10/10 compiled-source citations with zero
+unmapped entries and zero global map-audit failures.  Its shifted-citation
+plant exits 1 and reports `SYMBOL-NOT-AT-LINE`.  The production additions
+shifted older legoESM source lines; the affected cumulative receipt and 29 map
+anchors were mechanically re-anchored, and the newly duplicated ZAD barrier
+endpoint was occurrence-pinned rather than accepted ambiguously.
+
 ## Choices and uncertainty
 
 Choices made: none.  Decision 37 and Decision 38 are applied exactly as given.
