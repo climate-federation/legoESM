@@ -245,7 +245,8 @@ def measure(args) -> dict:
     shared = np.asarray(jax.device_get(shared))
     shared_target = np.array(fields["ua_e"], copy=True)
     if args.plant == "shared-result-ulp":
-        locations = np.argwhere(np.broadcast_to(active_u, shared_target.shape) & (shared_target != 0.0))
+        active_target = np.broadcast_to(active_u, shared_target.shape)
+        locations = np.argwhere(active_target & (shared_target != 0.0))
         require(locations.size > 0, "shared-result plant requires a nonzero wet target")
         location = tuple(locations[0])
         shared_target[location] = np.nextafter(shared_target[location], np.inf)
