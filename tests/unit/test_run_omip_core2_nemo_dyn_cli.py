@@ -24,12 +24,16 @@ RUNNER = (pathlib.Path(__file__).resolve().parents[2]
           / "scripts" / "run" / "run_omip_core2.py")
 
 
-def _parser():
+def _module():
     import importlib.util
     spec = importlib.util.spec_from_file_location("_omip_core2", RUNNER)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return mod._build_arg_parser()
+    return mod
+
+
+def _parser():
+    return _module()._build_arg_parser()
 
 
 @pytest.mark.parametrize("flag,dest,good,bad", [
@@ -180,28 +184,78 @@ def test_missing_gdept_is_tolerated_not_fatal():
 
 
 def test_kappah_min_flag_exists_and_preserves_the_config_by_default():
-    """NEMO sets rn_avt0 = 1.2e-5 (namelist_cfg:437). Our recipe RESOLVES
-    kappaH_min to 1e-10 -- five orders of magnitude smaller, i.e. no
-    background diffusivity at all -- and the measured equatorial K_H falls to
-    ~1e-6 through 10-90 m where NEMO's avt is ~1.9e-3. That is the depth range
-    of the +1.40 C surface / -1.55 C subsurface temperature dipole.
+    """RETRACTED PREMISE, kept as the record of it.
 
-    The flag is how that becomes selectable; the DEFAULT stays None so no
-    existing run changes."""
+    This flag was added believing rn_avt0 = 1.2e-5 (namelist_cfg:437) was
+    ORCA1's background tracer diffusivity and our 1e-10 was a fidelity gap.
+    Wrong: ORCA1 sets ln_zdfiwm = .true. (namelist_cfg:434), and NEMO's
+    zdfiwm.F90:378 then overrides the namelist with avtb = 1e-10. Our resolved
+    1e-10 MATCHES the oracle. A namelist line is a declared value, not a
+    resolved one -- the same lesson already learned about our own configs,
+    here missed on the oracle's.
+
+    So the DEFAULT (None) is the NEMO-faithful setting and the flag is a
+    departure knob. That is what this pins."""
     p = _parser()
     assert p.parse_args([]).tke_kappah_min is None
     assert p.parse_args(["--tke-kappah-min", "1.2e-5"]).tke_kappah_min == 1.2e-5
 
 
-def test_kappah_min_reaches_the_tke_config():
+def test_the_iwm_override_is_what_sets_the_background_floors():
+    """The claim that made this flag look like a fidelity fix, pinned against
+    the code that refutes it. Under internal-wave mixing the wave field IS the
+    interior background, so BOTH floors come from zdfiwm, not from namzdf_tke.
+    ORCA1 runs ln_zdfiwm=.true., so these are the oracle's real values."""
     src = RUNNER.read_text()
-    assert "_tke = _tke._replace(kappaH_min=float(tke_kappah_min))" in src
-    assert "tke_kappah_min=tke_kappah_min)" in src, "vmix builder call"
-    assert "tke_kappah_min=args.tke_kappah_min," in src, "main() call site"
+    i = src.index("if iwm_enabled:")
+    body = src[i:i + 600]
+    assert "avmb, avtb = _const.nu_ocean_molecular, 1.0e-10" in body
+    assert "zdfiwm_init" in body
 
 
 def test_negative_diffusivity_is_refused():
-    assert "must be >= 0" in RUNNER.read_text()
+    """Codex mutation-tested the first version of this test: it grepped the
+    whole driver for "must be >= 0" and PASSED at 97d9cf420~1, before the
+    feature existed. So it now CALLS the validator."""
+    mod = _module()
+    assert mod._checked_kappah_min(1.2e-5) == 1.2e-5
+    assert mod._checked_kappah_min(0) == 0.0
+    with pytest.raises(ValueError, match="must be >= 0"):
+        mod._checked_kappah_min(-1e-6)
+
+
+def test_the_floor_is_refused_by_every_closure_that_would_drop_it():
+    """A flag accepted and silently ignored is the defect this whole series
+    keeps finding. Both reviewers flagged it: the check used to live INSIDE
+    the TKE branch, so kpp/none took the flag and ran the old floor."""
+    mod = _module()
+    for closure in ("none", "kpp"):
+        with pytest.raises(ValueError, match="requires --tripole-vmix tke"):
+            mod.build_tripole_vmix_config(closure, tke_kappah_min=1.2e-5)
+
+
+def test_the_floor_reaches_all_three_grids():
+    """The directive asks for harmonized physics across tripole, MPAS and
+    FESOM2. The floor first reached only the tripole builder, so the same
+    NEMO card ran with two different background diffusivities depending on
+    the grid."""
+    src = RUNNER.read_text()
+    assert src.count("tke_kappah_min=args.tke_kappah_min") >= 3, (
+        "the tripole, MPAS and FESOM lanes must all forward the floor")
+
+
+def test_the_floor_actually_lands_in_the_tke_config():
+    """Not a string match: build the config and read the field back.
+
+    Uses a value that is nobody's default. An earlier version asserted the
+    bare card default DIFFERS from 1.2e-5 and went red -- correctly: the
+    non-iwm card default already IS 1.2e-5 (nemo_recipe.py:286), which is how
+    the refuted premise above survived as long as it did."""
+    mod = _module()
+    probe = 7.5e-6
+    assert mod.build_tripole_vmix_config("tke").tke.kappaH_min != probe
+    vm = mod.build_tripole_vmix_config("tke", tke_kappah_min=probe)
+    assert vm.scheme == "tke" and vm.tke.kappaH_min == probe
 
 
 def test_the_momentum_floor_is_left_alone():

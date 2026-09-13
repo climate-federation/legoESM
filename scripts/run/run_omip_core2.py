@@ -1324,6 +1324,24 @@ def evd_top_interface_occupancy(K_H, land_mask, lat2d, lon2d, K_conv,
     return _m(fired_top, box), _m(fired_top, wet), _m(fired_any, box)
 
 
+def _checked_kappah_min(value):
+    """Validate ``--tke-kappah-min`` [m2/s] -- NEMO's rn_avt0.
+
+    Its own function so a test can CALL it.  The first version only had the
+    check inline in the TKE branch, and its test grepped the driver for the
+    message -- which codex showed passes at 97d9cf420~1, i.e. before the
+    feature existed.  A guard nothing can exercise is not a guard.
+
+    The wrong-closure case is handled separately, by this module's existing
+    TKE-only flag guard: ``--tripole-vmix kpp --tke-kappah-min 1.2e-5`` now
+    raises there instead of being accepted and dropped (codex P1, GLM #3).
+    """
+    v = float(value)
+    if v < 0.0:
+        raise ValueError(f"--tke-kappah-min {value!r} must be >= 0")
+    return v
+
+
 def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                               tke_surface_bc=None, tke_mxl_choice=None,
                               tke_n2_mode=None, tke_n2_eos_form=None,
@@ -1369,7 +1387,8 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                     ("--tke-shear-production", tke_shear_production),
                     ("--tke-preclosure-coeff-source",
                      tke_preclosure_coeff_source),
-                    ("--tke-surface-bc-level", tke_surface_bc_level)):
+                    ("--tke-surface-bc-level", tke_surface_bc_level),
+                    ("--tke-kappah-min", tke_kappah_min)):
         if _v is not None and tripole_vmix != "tke":
             raise ValueError(
                 f"{_fl} {_v!r} requires --tripole-vmix tke; got --tripole-vmix "
@@ -1396,16 +1415,18 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
                     "(NEMO nn_eice modes).")
             _tke = _tke._replace(eice=int(tke_eice))
         if tke_kappah_min is not None:
-            # NEMO's rn_avt0 (namelist_cfg:437 = 1.2e-5 m2/s), the background
-            # tracer diffusivity floor. Our recipe resolves kappaH_min to
-            # 1e-10, i.e. effectively none, and the measured equatorial K_H
-            # falls to ~1e-6 m2/s through 10-90 m where NEMO's avt is ~1.9e-3.
-            # Kept a flag rather than a changed default: moving the default
-            # would silently alter every existing run.
-            if float(tke_kappah_min) < 0.0:
-                raise ValueError(
-                    f"--tke-kappah-min {tke_kappah_min!r} must be >= 0")
-            _tke = _tke._replace(kappaH_min=float(tke_kappah_min))
+            # A DEPARTURE FROM NEMO, NOT A MATCH TO IT.  This knob was added on
+            # the belief that ORCA1's rn_avt0 = 1.2e-5 (namelist_cfg:437) was
+            # the oracle's background tracer diffusivity and our 1e-10 was a
+            # gap.  It is not: ORCA1 runs ln_zdfiwm = .true. (namelist_cfg:434)
+            # and NEMO's zdfiwm.F90:378 then overrides the namelist outright --
+            # `avtb(:) = 1.e-10_wp   ! very small diffusive minimum` -- because
+            # under internal-wave mixing the wave field IS the interior
+            # background.  Our resolved 1e-10 therefore MATCHES the oracle
+            # exactly, as the iwm block above this function already documented.
+            # Setting this flag moves us AWAY from ORCA1.  Kept as a
+            # sensitivity knob only; default None changes nothing.
+            _tke = _tke._replace(kappaH_min=_checked_kappah_min(tke_kappah_min))
         vm = VerticalMixingConfig(scheme="tke", tke=_tke)
     elif tripole_vmix == "kpp":
         vm = VerticalMixingConfig(scheme="kpp", kpp=KPPConfig())
@@ -3864,6 +3885,17 @@ def load_nemo_geothermal_flux(grid_type, out_shape):
     with xr.open_dataset(_GHFLUX_NC, decode_times=False) as ds:
         if "gh_flux" not in ds:
             raise KeyError(f"{_GHFLUX_NC}: no gh_flux variable")
+        # READ the units rather than trusting a comment. The finite/positive
+        # guard below is invariant under a factor of 1000, so a file that ever
+        # ships in W/m2 would pass every check and heat the abyss a thousand
+        # times too hard (GLM). Reading the attribute costs nothing and is the
+        # only check that is actually about magnitude.
+        _u = str(ds["gh_flux"].attrs.get("units", "")).lower()
+        if "mw" not in _u.replace(" ", ""):
+            raise ValueError(
+                f"{_GHFLUX_NC}: gh_flux units {_u!r} are not mW/m^2, but the "
+                f"loader applies a fixed {_MW_PER_W} conversion. Fix the "
+                "factor before using this file.")
         src = np.asarray(ds["gh_flux"].values, dtype=np.float64).squeeze()
     if src.ndim != 2:
         raise ValueError(
@@ -5455,9 +5487,14 @@ def _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc: bool = True
     comparing that peak to the observed ~1.8 PW is a category error -- the
     observational value is a multi-year mean at a fixed latitude.
 
-    That is why mht_26n_PW is reported alongside: 26°N is the RAPID array
-    latitude, where an observational number actually exists (~1.2 PW annual
-    mean), and it is far from the equatorial band that dominates the peak.
+    That is why mht_26n_PW is reported alongside: 26°N is far from the
+    equatorial band that dominates the peak, so it is a legible number rather
+    than a near-cancellation.  It is NOT a RAPID comparison, and an earlier
+    version of this line wrongly implied it was.  Both reviewers caught that
+    independently: compute_mht_from_state integrates ALL longitudes, so the
+    curve is a GLOBAL transport, while RAPID is Atlantic-only and an annual
+    mean — two mismatches, not one.  An Atlantic mask plus time-averaging
+    would be needed before any observed number may sit on this line.
     Checked and NOT the cause of the large peak: the arithmetic (a probe
     reproduced 18.735 vs the reported 18.7386 from the model's own stored
     mass_flux_v), the v-face geometry (same reason), the degC reference
@@ -5481,22 +5518,28 @@ def _mht_diag(state, grid, z_coord, app_grid_type, out_dir, io_proc: bool = True
             return
         if not io_proc:
             return
-        # 26N: the RAPID array latitude, where an observational number exists
-        # and where the equatorial band that dominates the raw peak does not
-        # reach. The peak alone invited a comparison it cannot support.
+        # 26N is reported because it is far from the equatorial band that
+        # dominates the raw peak, NOT because it is RAPID-comparable: this
+        # curve is a GLOBAL zonal integral of an INSTANTANEOUS section, and
+        # RAPID is an Atlantic annual mean. Quoting one against the other is
+        # the same category error the peak line used to make.
         _c = np.asarray(mh.get("mht_PW"), dtype=np.float64)
         _lat = np.asarray(mh.get("lat_deg"), dtype=np.float64)
-        _m26 = float("nan")
+        _m26 = _lat26 = float("nan")
         if _c.size and _c.size == _lat.size:
             _ok = np.isfinite(_c) & np.isfinite(_lat)
             if np.any(_ok):
                 _i = int(np.argmin(np.where(_ok, np.abs(_lat - 26.0), np.inf)))
-                _m26 = float(_c[_i])
-        print(f"[transports] MHT at 26N = {_m26:.2f} PW (RAPID obs ~1.2 PW "
-              f"annual mean) | INSTANTANEOUS curve: max {mh['nh_peak_PW']:.2f} "
-              f"PW @ {mh['nh_peak_lat']:.0f}N, SH min {mh['sh_min_PW']:.2f} PW "
-              f"-- the max is NOT comparable to an observed mean when it lands "
-              f"in the equatorial band (see _mht_diag docstring)")
+                # Without this the argmin silently labels whatever finite row
+                # is nearest as "26N" -- on a curve whose 26N row is NaN that
+                # could be any latitude at all.
+                if abs(float(_lat[_i]) - 26.0) <= 2.0:
+                    _m26, _lat26 = float(_c[_i]), float(_lat[_i])
+        print(f"[transports] MHT GLOBAL INSTANTANEOUS at {_lat26:.1f}N = "
+              f"{_m26:.2f} PW | curve max {mh['nh_peak_PW']:.2f} PW @ "
+              f"{mh['nh_peak_lat']:.0f}N, SH min {mh['sh_min_PW']:.2f} PW. "
+              f"NOT comparable to RAPID (Atlantic-only, annual mean) nor to "
+              f"any observed mean -- see the _mht_diag docstring")
         Path(out_dir).mkdir(parents=True, exist_ok=True)
         with open(Path(out_dir) / "transports.txt", "a") as fh:
             fh.write(f"mht_26n_PW {_m26:.4f}\n"
@@ -6155,16 +6198,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "explicit t_depth_ref on the vertical coordinate, so "
                         "use it with --nemo-vertical.")
     p.add_argument("--tke-kappah-min", type=float, default=None,
-                   help="Background TRACER diffusivity floor [m2/s] -- NEMO's "
-                        "rn_avt0. ORCA1 sets 1.2e-5 (namelist_cfg:437); our "
-                        "recipe resolves kappaH_min to 1e-10, i.e. no "
-                        "background at all, and the measured equatorial K_H "
-                        "falls to ~1e-6 through 10-90 m where NEMO's avt is "
-                        "~1.9e-3. Default (None) preserves the config so no "
-                        "existing run moves. The momentum floor kappaM_min is "
-                        "a SEPARATE field (ours 1.4e-6 vs NEMO rn_avm0 "
-                        "1.2e-4) and is deliberately NOT changed here -- one "
-                        "variable per arm.")
+                   help="Background TRACER diffusivity floor [m2/s]. A "
+                        "SENSITIVITY KNOB THAT DEPARTS FROM ORCA1, not a "
+                        "faithfulness lever: ORCA1 runs ln_zdfiwm=.true., and "
+                        "NEMO's zdfiwm.F90:378 then overrides rn_avt0 with "
+                        "avtb = 1e-10 (the wave field supplies the interior "
+                        "background instead), which is exactly what our recipe "
+                        "already resolves. Same for the momentum floor: "
+                        "zdfiwm sets avmb = rnu = 1.4e-6, our value. Default "
+                        "(None) preserves the config, and leaving it unset is "
+                        "the NEMO-faithful choice.")
     p.add_argument("--lateral-side-bc", type=str, default=None,
                    choices=["free_slip", "no_slip"],
                    help="Lateral momentum boundary condition at coastal walls. "
@@ -7981,7 +8024,8 @@ def main() -> int:
                     tke_n2_eos_form=args.tke_n2_eos_form,
                     tke_kappa_convention=args.tke_kappa_convention,
                     tke_shear_production=args.tke_shear_production,
-                    tke_lc=args.tke_lc, tke_etau=args.tke_etau)
+                    tke_lc=args.tke_lc, tke_etau=args.tke_etau,
+                    tke_kappah_min=args.tke_kappah_min)
                 if args.mpas_vmix == "tke"
                 else _kpp_vmix_override(args.kpp_ri_crit, args.kpp_cv,
                                         args.kpp_eice)),
@@ -8015,7 +8059,8 @@ def main() -> int:
                 tke_n2_eos_form=args.tke_n2_eos_form,
                 tke_kappa_convention=args.tke_kappa_convention,
                 tke_shear_production=args.tke_shear_production,
-                tke_lc=args.tke_lc, tke_etau=args.tke_etau)
+                tke_lc=args.tke_lc, tke_etau=args.tke_etau,
+                tke_kappah_min=args.tke_kappah_min)
                 if args.fesom_vmix == "legoesm_tke" else None))
         if args.fesom_unforced:
             run_fesom_b1_smoke(args, grid, z_coord, model, state)

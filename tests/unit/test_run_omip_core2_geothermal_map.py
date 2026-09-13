@@ -36,12 +36,35 @@ def test_flag_exists_and_is_off_by_default():
 
 
 def test_units_are_converted_not_assumed():
-    """The file is mW/m2 and the model wants W/m2. A missing 1e-3 would make
-    the seafloor flux 1000x too large and still look like a plausible array."""
+    """Codex mutation-tested the first version of this: it asserted the
+    constant was declared and the name appeared in the loader, so replacing
+    the multiplication with a DIVISION still passed while producing a flux
+    1e6 times too large. So this now RUNS the loader and checks the physical
+    magnitude.
+
+    The seafloor geothermal flux is textbook 0.05-0.10 W/m2 in the global
+    mean, and the source file's own mean is 79.1 mW/m2 = 0.0791 W/m2. Any
+    power-of-ten error leaves this window immediately.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_omip_core2_geo3", RUNNER)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    out = mod.load_nemo_geothermal_flux("tripole", (332, 362))
+    mean = float(out[out > 0].mean())
+    assert 0.02 < mean < 0.30, f"geothermal mean {mean} W/m2 is not physical"
+    assert float(out.max()) < 10.0, (
+        f"peak {float(out.max())} W/m2 exceeds any ridge value")
+
+
+def test_the_units_attribute_is_read_not_assumed():
+    """The finite/positive guard is invariant under a factor of 1000, so it
+    can never catch a file that ships in W/m2. Reading the attribute can."""
     src = RUNNER.read_text()
-    assert "_MW_PER_W = 1.0e-3" in src
     i = src.index("def load_nemo_geothermal_flux(")
-    assert "_MW_PER_W" in src[i:i + 3000], "the loader must apply the factor"
+    body = src[i:i + 3000]
+    assert 'attrs.get("units"' in body and "are not mW/m^2" in body
 
 
 def test_the_measured_variable_name_is_used():
