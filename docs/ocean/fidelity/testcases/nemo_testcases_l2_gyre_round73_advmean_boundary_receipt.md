@@ -109,16 +109,30 @@ manifest changed.
 
 ## Review and focused checks
 
-REVIEW_PLACEHOLDER
+The required independent pass was invoked twice with `codex exec --sandbox
+read-only` against the complete committed round diff and an adversarial prompt
+covering the first boundary, plants, compiled citations, acquisition safety,
+and every Rule 12 row. The retry also used its ephemeral mode and ignored user
+configuration. Both invocations exited 1 before reviewing because the client
+could not initialize in this filesystem sandbox. Its terminal result, quoted
+verbatim, is: **“Error: failed to initialize in-process app-server client:
+Read-only file system (os error 30)”**. There is no SHIP/DO NOT SHIP verdict;
+the independent review is **UNMET/BLOCKED**, and absence of a verdict is not
+approval. The identical first-pass and retry logs have SHA-256
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
+No production numerical diff is being landed under that blocked review.
 
 The operator's isolated citation-regression request was run first on the
 fresh branch tip: the complete citation test file reported 16 passed. The
 line shifts had already been corrected by ancestor commit `3d6dfd3015d3`, so
 there was no remaining defect and no no-op fix was manufactured.
 
-The round-73 measurement tests, acquisition gate tests, time-level registry,
-shell parse, Python compilation, new-file Ruff checks, patch dry-application,
-Fortran syntax proof, and `git diff --check` pass. The receipt-citation gate
+The focused run reports 49 passed in 1.79 seconds; its JUnit artifact has
+SHA-256 `187fe127c63af72a5651800d2874d3d33da6e0fc66c42f6d274d62dbaad5fd74`.
+It covers the inherited record gate, round-73 measurement and acquisition
+plants, time-level registry, and the complete citation test file. Shell parse,
+Python compilation, new-file Ruff checks, patch dry-application, Fortran
+syntax proof, and `git diff --check` also pass. The receipt-citation gate
 audits every source claim above against the R72 producer's compiled branch;
 its shifted-citation plant targets the active `np_HYB` range and exits
 nonzero with SYMBOL-NOT-AT-LINE.
