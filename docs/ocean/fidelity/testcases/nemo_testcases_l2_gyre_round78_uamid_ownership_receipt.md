@@ -112,6 +112,10 @@ being shipped.
 
 Focused tests cover the walk, strict signed-zero comparison, digest sensitivity,
 left association under JIT, citation-map self-audit, and citation-gate plants.
+The focused run passed 55/55 tests. The receipt citation gate passed all seven
+citations with zero unmapped entries or map-audit failures; shifting the
+compiled midpoint citation by two lines exited 1 with
+`SYMBOL-NOT-AT-LINE`.
 The GYRE ladder and year score were not run because the preregistration marks
 them UNREACHED absent a numerical candidate. NEMO source/build/run, the year
 harness, reconciliation gate, freshwater pair, #1484 guard, configuration,
