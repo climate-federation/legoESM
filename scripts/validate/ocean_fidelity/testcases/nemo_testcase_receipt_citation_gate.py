@@ -347,7 +347,7 @@ CITATION_MAP = {
     # --- round 73: external mean already differs at the stage-1 boundary ---
     'GYRE_OMIP_L2_P3_SM_R72ZFOP/BLD/ppsrc/nemo/stprk3_stg.f90:287-291': [
         ('CASE ( np_LIN, np_HYB )', 2),
-        ('END DO   ;   END DO', 5), 5],
+        ('END DO   ;   END DO', 2), 5],
     'GYRE_OMIP_L2_P3_SM_R72ZFOP/BLD/ppsrc/nemo/stprk3_stg.f90:295': (
         'zFu(ji,jj,jk) = e2u(ji,jj)*(e3u_3d', 1),
     'GYRE_OMIP_L2_P3_SM_R72ZFOP/BLD/ppsrc/nemo/stprk3_stg.f90:296': (
