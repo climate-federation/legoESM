@@ -136,3 +136,10 @@ one-ULP sensitivity control: it must alter the already non-bit `e3` row and
 exit nonzero. The RHS and final-forcing plants likewise compare against the
 ordinary row in the same invocation, so an already non-bit baseline cannot
 make either control vacuously green.
+
+The first corrected `e3` plant still stayed green because it perturbed the
+first wet cell while the gate reports only aggregate count and maximum; every
+cell already differed and that location did not own the maximum. This is a
+failed control, not a result. The repaired controls select the maximum-
+residual wet cell and move the oracle value one ULP away from the compared
+value, making the reported maximum itself observable.

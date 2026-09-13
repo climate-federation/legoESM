@@ -270,19 +270,33 @@ def measure(args) -> dict[str, object]:
 
     plant_detail = None
     if args.plant == "e3-ulp":
-        at = tuple(np.argwhere(active["u3"])[0])
+        delta = np.where(
+            active["u3"], np.abs(live["u"]["e3"] - oracle["u"]["e3"]), -np.inf)
+        at = np.unravel_index(np.argmax(delta), delta.shape)
         oracle["u"]["e3"] = np.array(oracle["u"]["e3"], copy=True)
-        oracle["u"]["e3"][at] = np.nextafter(oracle["u"]["e3"][at], np.inf)
+        direction = np.inf if oracle["u"]["e3"][at] >= live["u"]["e3"][at] else -np.inf
+        oracle["u"]["e3"][at] = np.nextafter(oracle["u"]["e3"][at], direction)
         plant_detail = {"field": "e3_u", "location": list(map(int, at))}
     elif args.plant == "rhs-ulp":
-        at = tuple(np.argwhere(active["u3"])[0])
+        delta = np.where(
+            active["u3"], np.abs(live["u"]["rhs"] - oracle["u"]["rhs"]), -np.inf)
+        at = np.unravel_index(np.argmax(delta), delta.shape)
         oracle["u"]["rhs"] = np.array(oracle["u"]["rhs"], copy=True)
-        oracle["u"]["rhs"][at] = np.nextafter(oracle["u"]["rhs"][at], np.inf)
+        direction = np.inf if oracle["u"]["rhs"][at] >= live["u"]["rhs"][at] else -np.inf
+        oracle["u"]["rhs"][at] = np.nextafter(oracle["u"]["rhs"][at], direction)
         plant_detail = {"field": "rhs_u", "location": list(map(int, at))}
     elif args.plant == "final-ulp":
-        at = tuple(np.argwhere(active["u2"])[0])
+        replay = source_chain(
+            **{key: value for key, value in oracle["u"].items() if key != "final"},
+            rho_reciprocal=rho_reciprocal,
+            mask2=active["u2"].astype(np.float64),
+        )["final"]
+        delta = np.where(
+            active["u2"], np.abs(replay - oracle["u"]["final"]), -np.inf)
+        at = np.unravel_index(np.argmax(delta), delta.shape)
         oracle["u"]["final"] = np.array(oracle["u"]["final"], copy=True)
-        oracle["u"]["final"][at] = np.nextafter(oracle["u"]["final"][at], np.inf)
+        direction = np.inf if oracle["u"]["final"][at] >= replay[at] else -np.inf
+        oracle["u"]["final"][at] = np.nextafter(oracle["u"]["final"][at], direction)
         plant_detail = {"field": "slow_u", "location": list(map(int, at))}
 
     rows = {}
