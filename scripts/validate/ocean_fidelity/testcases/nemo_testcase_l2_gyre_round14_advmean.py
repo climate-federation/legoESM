@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
-
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 from nemo_testcase_l2_gyre_phase3_gate import (
     CASE,
     DIMS,
@@ -36,8 +36,6 @@ from nemo_testcase_l2_gyre_phase3_gate import (
     sha256,
 )
 from nemo_testcase_state_ulp_probe import ulp_distance
-from legoesm.ocean.fidelity.provenance import worktree_stamp
-
 
 ORACLE_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
@@ -58,11 +56,16 @@ ADVMEAN_SUBSTEP_FIELDS = (
 )
 
 
-def _xy(values: np.ndarray, nx: int, ny: int) -> np.ndarray:
-    return values.reshape((nx, ny), order="F")[2:-2, 2:-2].T
+def _xy(
+    values: np.ndarray, nx: int, ny: int, *, include_halo: bool = False
+) -> np.ndarray:
+    field = values.reshape((nx, ny), order="F").T
+    return field if include_halo else field[2:-2, 2:-2]
 
 
-def read_advmean(path: Path, *, expected_kt: int = 1) -> dict:
+def read_advmean(
+    path: Path, *, expected_kt: int = 1, include_halo: bool = False
+) -> dict:
     """Read ``NEMO_L2_BTADV_2`` with strict header and EOF checks."""
     from legoesm.ocean.fidelity.time_levels import time_level_for_dump
 
@@ -86,7 +89,7 @@ def read_advmean(path: Path, *, expected_kt: int = 1) -> dict:
         def field() -> np.ndarray:
             value = np.fromfile(handle, dtype=np.float64, count=n2)
             require(value.size == n2, f"{path}: truncated field")
-            return _xy(value, nx, ny)
+            return _xy(value, nx, ny, include_halo=include_halo)
 
         divisor = scalar()
         weights = np.fromfile(handle, dtype=np.float64, count=ncycle)

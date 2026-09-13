@@ -139,6 +139,64 @@ def test_an_unregistered_magic_raises(tmp_path):
         admission.read_header(path.read_bytes(), path)
 
 
+def _advmean_record(*, halo_bump: bool = False, owned_bump: bool = False) -> bytes:
+    nx, ny, ncycle = 36, 26, 50
+    n2 = nx * ny
+    substep = np.zeros((len(admission.ADVMEAN_SUBSTEP_FIELDS), ncycle, n2))
+    if halo_bump:
+        substep[0, 0, 0] = 1.0
+    if owned_bump:
+        substep[0, 0, 2 + nx * 2] = 1.0
+    out = [
+        b"NEMO_L2_BTADV_2 ",
+        struct.pack("=6i", 2, 2, ncycle, nx, ny, 64),
+        np.asarray([1.0], dtype=np.float64).tobytes(),
+        np.ones(ncycle, dtype=np.float64).tobytes(),
+        np.zeros(2 * n2, dtype=np.float64).tobytes(),
+    ]
+    for step in range(ncycle):
+        out.append(struct.pack("=i", step + 1))
+        out.append(np.asarray([1.0], dtype=np.float64).tobytes())
+        out.extend(substep[field, step].tobytes() for field in range(10))
+    out.append(np.zeros(4 * n2, dtype=np.float64).tobytes())
+    return b"".join(out)
+
+
+def test_advmean_admission_classifies_halo_and_rejects_owned_change(tmp_path):
+    baseline = tmp_path / "baseline/oracle_bt_advmean_operands_kt00000002.bin"
+    candidate = tmp_path / "candidate/oracle_bt_advmean_operands_kt00000002.bin"
+    baseline.parent.mkdir()
+    candidate.parent.mkdir()
+    baseline.write_bytes(_advmean_record())
+
+    candidate.write_bytes(_advmean_record(halo_bump=True))
+    halo = admission._compare_advmean(baseline, candidate, [True])
+    assert halo["consumed_equal"]
+    assert halo["reason_counts"]["halo"] == 1
+    assert halo["reason_counts"]["owned_defined_violation"] == 0
+
+    candidate.write_bytes(_advmean_record(owned_bump=True))
+    owned = admission._compare_advmean(baseline, candidate, [True])
+    assert not owned["consumed_equal"]
+    assert owned["reason_counts"]["owned_defined_violation"] == 1
+    assert owned["admitted_differences"] == []
+
+
+def test_advmean_admission_plant_flips_an_owned_cell(tmp_path):
+    baseline = tmp_path / "baseline/oracle_bt_advmean_operands_kt00000002.bin"
+    candidate = tmp_path / "candidate/oracle_bt_advmean_operands_kt00000002.bin"
+    baseline.parent.mkdir()
+    candidate.parent.mkdir()
+    payload = _advmean_record()
+    baseline.write_bytes(payload)
+    candidate.write_bytes(payload)
+    plant = [False]
+    report = admission._compare_advmean(baseline, candidate, plant)
+    assert plant == [True]
+    assert not report["consumed_equal"]
+    assert report["reason_counts"]["owned_defined_violation"] == 1
+
+
 def test_every_schema_declares_a_reason_for_every_undefined_slot():
     """An undefined slot with no registered reason is a silent admission."""
     for magic, (_, _, fields) in admission.SCHEMAS.items():

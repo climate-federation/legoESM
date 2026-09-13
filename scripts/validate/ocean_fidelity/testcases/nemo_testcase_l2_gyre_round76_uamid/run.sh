@@ -6,9 +6,10 @@ set -euo pipefail
 export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:$PATH
 readonly NEMO_ROOT=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
 readonly SOURCE_CFG=GYRE_OMIP_L2_P3_SM_R75ADV3
-readonly TARGET_CFG=GYRE_OMIP_L2_P3_SM_R76UAMID4
+readonly TARGET_CFG=GYRE_OMIP_L2_P3_SM_R77UAMID5
 readonly SOURCE_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round75/oracle_advmean_kt2
-readonly TARGET_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round76/oracle_uamid_kt2
+readonly TARGET_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round77/oracle_uamid_kt2
+readonly ADMISSION_REPLAY=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round76/oracle_uamid_kt2
 readonly FINAL_RESTART=GYRE_OMIP_L2_P3_00000010_restart.nc
 readonly RECORD=oracle_bt_uamid_operands_kt00000002.bin
 
@@ -28,6 +29,7 @@ readonly ADMISSION=$here/../nemo_testcase_l2_gyre_round21_admission.py
 readonly PREREG_MAIN=$REPO/docs/ocean/fidelity/PREREG_nemo_testcases_l2_gyre_round76.md
 readonly PREREG_ACQ=$REPO/docs/ocean/fidelity/PREREG_nemo_testcases_l2_gyre_round76_uamid_acquisition.md
 readonly PREREG_LAYOUT=$REPO/docs/ocean/fidelity/PREREG_nemo_testcases_l2_gyre_round76_uamid_layout_correction.md
+readonly PREREG_R77=$REPO/docs/ocean/fidelity/PREREG_nemo_testcases_l2_gyre_round77.md
 readonly PY=/home/dbalwada/legoESM/.venv/bin/python
 readonly FC=/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran
 
@@ -40,7 +42,7 @@ export PYTHONPATH=$REPO/packages/core:$REPO/packages/ocean:$REPO/packages/atmosp
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 
-for path in "$DYN_PATCH" "$GATE" "$ADMISSION" "$PREREG_MAIN" "$PREREG_ACQ" "$PREREG_LAYOUT"; do
+for path in "$DYN_PATCH" "$GATE" "$ADMISSION" "$PREREG_MAIN" "$PREREG_ACQ" "$PREREG_LAYOUT" "$PREREG_R77"; do
   [[ -f "$path" ]] || { printf 'REFUSE: missing %s\n' "$path" >&2; exit 64; }
 done
 [[ -d "$SOURCE_ROOT/EXP00" && -d "$SOURCE_ROOT/MY_SRC" ]]
@@ -113,7 +115,16 @@ if [[ "$MODE" == --plant-layout ]]; then
 fi
 
 if [[ "$MODE" == --preflight-only ]]; then
-  printf 'ROUND76_UAMID_PREFLIGHT_READY %s\n' "$SOURCE_RUN"
+  "$PY" "$ADMISSION" --baseline "$SOURCE_RUN" --candidate "$ADMISSION_REPLAY" \
+    --twin /nonexistent --identical "$FINAL_RESTART" mesh_mask.nc \
+    --allowed-new "$RECORD" >/dev/null
+  if "$PY" "$ADMISSION" --baseline "$SOURCE_RUN" --candidate "$ADMISSION_REPLAY" \
+       --twin /nonexistent --identical "$FINAL_RESTART" mesh_mask.nc \
+       --allowed-new "$RECORD" --plant-consumed >/dev/null 2>&1; then
+    printf 'REFUSE: admission consumed-field plant stayed green\n' >&2
+    exit 69
+  fi
+  printf 'ROUND77_UAMID_PREFLIGHT_READY %s\n' "$SOURCE_RUN"
   exit 0
 fi
 
@@ -124,7 +135,7 @@ for mount in /tmp "$(dirname "$TARGET_RUN")" "$NEMO_ROOT"; do
   }
 done
 
-manifest=$(mktemp -d /tmp/gyre-r76-manifest.XXXXXX)
+manifest=$(mktemp -d /tmp/gyre-r77-manifest.XXXXXX)
 printf 'temporary provenance directory (retained): %s\n' "$manifest"
 printf '%s\n' "$COMMIT" >"$manifest/producer_commit.txt"
 (
@@ -133,6 +144,7 @@ printf '%s\n' "$COMMIT" >"$manifest/producer_commit.txt"
 ) >"$manifest/source_cfg.sha256"
 sha256sum "$NEMO_ROOT/arch/arch-conda-scalarmath.fcm" "$DYN_PATCH" \
   "$GATE" "$ADMISSION" "$PREREG_MAIN" "$PREREG_ACQ" "$PREREG_LAYOUT" \
+  "$PREREG_R77" \
   "$SOURCE_RUN/ocean.output" >"$manifest/toolchain.sha256"
 
 cd "$NEMO_ROOT"
@@ -177,31 +189,38 @@ cp "$manifest"/* "$TARGET_RUN/"
   printf '%s %s %s\n' "$digest" "$COMMIT" "$RECORD" >"$RECORD.stamp"
 )
 
-r76_gate() {
+r77_gate() {
   "$PY" "$GATE" --root "$TARGET_RUN" --expect-commit "$COMMIT" "$@"
 }
-r76_gate --output "$TARGET_RUN/round76_uamid_validation.json"
+r77_gate --output "$TARGET_RUN/round77_uamid_validation.json"
 for plant in stamp header truncation replay-ulp; do
-  if r76_gate --plant "$plant" >"$TARGET_RUN/round76_$plant-plant.log" 2>&1; then
-    printf 'REFUSE: round76 %s plant stayed green\n' "$plant" >&2; exit 69
+  if r77_gate --plant "$plant" >"$TARGET_RUN/round77_$plant-plant.log" 2>&1; then
+    printf 'REFUSE: round77 %s plant stayed green\n' "$plant" >&2; exit 69
   fi
 done
 
 "$PY" "$ADMISSION" --baseline "$SOURCE_RUN" --candidate "$TARGET_RUN" \
   --twin /nonexistent --identical "$FINAL_RESTART" mesh_mask.nc \
-  --allowed-new "$RECORD" --output "$TARGET_RUN/round76_admission.json"
+  --allowed-new "$RECORD" --output "$TARGET_RUN/round77_admission.json"
 if "$PY" "$ADMISSION" --baseline "$SOURCE_RUN" --candidate "$TARGET_RUN" \
      --twin /nonexistent --identical "$FINAL_RESTART" mesh_mask.nc \
      --allowed-new "$RECORD" --plant-consumed \
-     --output "$TARGET_RUN/round76_admission_plant.json" \
-     >"$TARGET_RUN/round76_admission_plant.log" 2>&1; then
-  printf 'REFUSE: round76 admission plant stayed green\n' >&2; exit 69
+     --output "$TARGET_RUN/round77_admission_plant.json" \
+     >"$TARGET_RUN/round77_admission_plant.log" 2>&1; then
+  printf 'REFUSE: round77 admission plant stayed green\n' >&2; exit 69
+fi
+if "$PY" "$ADMISSION" --baseline "$SOURCE_RUN" --candidate "$TARGET_RUN" \
+     --twin /nonexistent --identical "$FINAL_RESTART" mesh_mask.nc \
+     --allowed-new "$RECORD" oracle_round77_inventory_plant.bin \
+     --output "$TARGET_RUN/round77_admission_inventory_plant.json" \
+     >"$TARGET_RUN/round77_admission_inventory_plant.log" 2>&1; then
+  printf 'REFUSE: round77 admission inventory plant stayed green\n' >&2; exit 69
 fi
 
 (
   cd "$TARGET_RUN"
   sha256sum "$RECORD" "$RECORD.stamp" "$FINAL_RESTART" mesh_mask.nc \
-    round76_*.json round76_*-plant.log round76_admission_plant.log \
-    >round76_outputs.sha256
+    round77_*.json round77_*-plant.log round77_admission_plant.log \
+    round77_admission_inventory_plant.log >round77_outputs.sha256
 )
-printf 'ROUND76_UAMID_READY %s\n' "$TARGET_RUN"
+printf 'ROUND77_UAMID_READY %s\n' "$TARGET_RUN"

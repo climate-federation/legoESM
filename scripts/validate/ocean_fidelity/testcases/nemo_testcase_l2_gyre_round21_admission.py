@@ -47,10 +47,20 @@ import hashlib
 import json
 import re
 import struct
+import sys
 from pathlib import Path
 
 import numpy as np
 
+HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
+
+from nemo_testcase_l2_gyre_phase3_gate import GateError  # noqa: E402
+from nemo_testcase_l2_gyre_round14_advmean import (  # noqa: E402
+    ADVMEAN_SUBSTEP_FIELDS,
+    read_advmean,
+)
 
 HALO = 2  # nn_hls; cited per card in the module docstring above.
 DEFAULT_BASE = Path(
@@ -273,6 +283,10 @@ def _undefined_slots(run: Path) -> tuple[dict, list]:
 # their older R29/LOCK provenance after compilation into this executable.
 _R46 = "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo"
 SOURCES = {
+    "NEMO_L2_BTADV_2": (
+        "GYRE_OMIP_L2_P3_SM_R76UAMID4/BLD/ppsrc/nemo/"
+        "dynspg_ts.f90:442-453,588-607"
+    ),
     "NEMO_L2_TRPOP_2": f"{_R46}/stprk3_stg.f90:311",
     "NEMO_L2_WZVOP_1": f"{_R46}/traadv.f90:271",
     "NEMO_L2_RKTRA_1": f"{_R46}/stprk3_stg.f90:845",
@@ -291,6 +305,7 @@ SOURCES = {
     "NEMO_L2_R46STG1": f"{_R46}/l2_r46_stage.f90:write_r46_stage",
 }
 PARSERS = {
+    "NEMO_L2_BTADV_2": "nemo_testcase_l2_gyre_round14_advmean.py:read_advmean",
     "NEMO_L2_TRPOP_2": "nemo_testcase_l2_gyre_round13_tracer.py:93-140",
     "NEMO_L2_WZVOP_1": "nemo_testcase_l2_gyre_stage3_completion_gate.py:110-147",
     "NEMO_L2_RKTRA_1": "nemo_testcase_l2_gyre_round13_tracer.py:46-91",
@@ -585,6 +600,170 @@ def _compare_bt(a: Path, b: Path, plant=None) -> dict:
     }
 
 
+ADVMEAN_ARRAY_FIELDS = (
+    "r1_e2u", "r1_e1v", *ADVMEAN_SUBSTEP_FIELDS,
+    "pre_lbc_u", "pre_lbc_v", "post_lbc_u", "post_lbc_v",
+)
+ADVMEAN_SCALAR_FIELDS = ("divisor", "weights", "weight")
+
+
+def _read_advmean_for_admission(path: Path) -> dict:
+    """Use the campaign's strict reader while retaining halo values."""
+    raw = path.read_bytes()
+    if len(raw) < 40:
+        raise AdmissionError(f"{path}: truncated NEMO_L2_BTADV_2 header")
+    kt = struct.unpack("=6i", raw[16:40])[1]
+    try:
+        return read_advmean(path, expected_kt=kt, include_halo=True)
+    except (GateError, SystemExit, ValueError, OSError) as error:
+        raise AdmissionError(
+            f"{path}: invalid NEMO_L2_BTADV_2 record: {error}"
+        ) from error
+
+
+def _advmean_owned(shape: tuple[int, ...]) -> np.ndarray:
+    """Owned-cell selector for one field or all 50 substep fields."""
+    owned = np.zeros(shape, dtype=bool)
+    if len(shape) == 2:
+        owned[HALO:-HALO, HALO:-HALO] = True
+    elif len(shape) == 3:
+        owned[:, HALO:-HALO, HALO:-HALO] = True
+    else:  # pragma: no cover - strict reader fixes every array rank
+        raise AdmissionError(f"unexpected NEMO_L2_BTADV_2 rank {len(shape)}")
+    return owned
+
+
+def _compare_advmean(
+    a: Path, b: Path, plant=None, *, max_listed: int = 16
+) -> dict:
+    """Compare every transport-mean value, admitting only its two-cell halo."""
+    left = _read_advmean_for_admission(a)
+    right = _read_advmean_for_admission(b)
+    raw_a, raw_b = a.read_bytes(), b.read_bytes()
+    header_equal = left["header"] == right["header"]
+    consumed_equal = header_equal and len(raw_a) == len(raw_b)
+    changed_fields: list[dict] = []
+    admitted: list[dict] = []
+    reason_counts = {
+        "halo": 0,
+        "owned_undefined_slot": 0,
+        "owned_undefined_region": 0,
+        "owned_defined_violation": 0,
+    }
+
+    for name in ADVMEAN_SCALAR_FIELDS:
+        aa = np.atleast_1d(np.asarray(left[name], dtype=np.float64))
+        bb = np.atleast_1d(np.asarray(right[name], dtype=np.float64))
+        different = aa.view(np.uint64) != bb.view(np.uint64)
+        count = int(np.count_nonzero(different))
+        if not count:
+            continue
+        consumed_equal = False
+        reason_counts["owned_defined_violation"] += count
+        changed_fields.append({
+            "field": name,
+            "changed_elements": count,
+            "changed_bytes": int(np.count_nonzero(
+                aa.view(np.uint8) != bb.view(np.uint8)
+            )),
+            "changed_in_owned_cells": count,
+            "first_index_0based": [
+                int(value) for value in np.argwhere(different)[0]
+            ],
+            "slot_defined_at_write_point": True,
+            "reason_counts": {
+                "halo": 0,
+                "owned_undefined_slot": 0,
+                "owned_undefined_region": 0,
+                "owned_defined_violation": count,
+            },
+        })
+
+    for name in ADVMEAN_ARRAY_FIELDS:
+        aa = np.asarray(left[name], dtype=np.float64)
+        bb = np.asarray(right[name], dtype=np.float64)
+        if aa.shape != bb.shape:
+            consumed_equal = False
+            changed_fields.append({
+                "field": name,
+                "changed_elements": 0,
+                "changed_bytes": 0,
+                "changed_in_owned_cells": 0,
+                "error": f"shape changed {aa.shape} -> {bb.shape}",
+            })
+            continue
+        owned = _advmean_owned(aa.shape)
+        if plant is not None and plant and not plant[0]:
+            bb = np.ascontiguousarray(bb).copy()
+            target = int(np.flatnonzero(owned)[0])
+            bb.reshape(-1)[target:target + 1].view(np.uint64)[:] ^= np.uint64(1)
+            plant[0] = True
+        different = aa.view(np.uint64) != bb.view(np.uint64)
+        if not np.any(different):
+            continue
+        ids = np.argwhere(different)
+        owned_count = int(np.count_nonzero(different & owned))
+        halo_count = int(np.count_nonzero(different & ~owned))
+        reason_counts["halo"] += halo_count
+        reason_counts["owned_defined_violation"] += owned_count
+        if owned_count:
+            consumed_equal = False
+        aa_bytes = np.ascontiguousarray(aa).view(np.uint8)
+        bb_bytes = np.ascontiguousarray(bb).view(np.uint8)
+        changed_fields.append({
+            "field": name,
+            "changed_elements": int(ids.shape[0]),
+            "changed_bytes": int(np.count_nonzero(aa_bytes != bb_bytes)),
+            "changed_in_owned_cells": owned_count,
+            "first_index_0based": [int(value) for value in ids[0]],
+            "slot_defined_at_write_point": True,
+            "reason_counts": {
+                "halo": halo_count,
+                "owned_undefined_slot": 0,
+                "owned_undefined_region": 0,
+                "owned_defined_violation": owned_count,
+            },
+        })
+        halo_ids = ids[~owned[tuple(ids.T)]]
+        for index in halo_ids[:max_listed]:
+            location = tuple(index)
+            admitted.append({
+                "record": a.name,
+                "field": name,
+                "index_0based": [int(value) for value in index],
+                "reason": "halo",
+                "baseline_value": float(aa[location]),
+                "candidate_value": float(bb[location]),
+            })
+
+    if len(raw_a) != len(raw_b):
+        raw_differing = max(len(raw_a), len(raw_b))
+        first_raw = min(len(raw_a), len(raw_b)) + 1
+    else:
+        raw = np.frombuffer(raw_a, np.uint8) != np.frombuffer(raw_b, np.uint8)
+        raw_differing = int(np.count_nonzero(raw))
+        first_raw = int(np.flatnonzero(raw)[0] + 1) if np.any(raw) else None
+    return {
+        "consumed_equal": bool(consumed_equal),
+        "magic": "NEMO_L2_BTADV_2",
+        "dims_with_halo": [left["header"]["nx"], left["header"]["ny"], 1],
+        "header_equal": header_equal,
+        "raw_differing_bytes": raw_differing,
+        "first_differing_byte_1based": first_raw,
+        "changed_fields": changed_fields,
+        "changed_elements": int(sum(
+            field.get("changed_elements", 0) for field in changed_fields
+        )),
+        "reason_counts": reason_counts,
+        "admitted_differences": admitted,
+        "undefined_slots": [],
+        "undefined_slot_reasons": [],
+        "undefined_regions": [],
+        "writer": SOURCES["NEMO_L2_BTADV_2"],
+        "parser": PARSERS["NEMO_L2_BTADV_2"],
+    }
+
+
 # --- self-describing records ----------------------------------------------
 #
 # Two writers in this campaign emit a stream that carries its OWN field list:
@@ -833,7 +1012,8 @@ def run(baseline: Path, candidate: Path, *, twin=None,
         # round.  A pending plant now forces the comparison open on the first
         # record whether or not its bytes differ.
         magic = a.read_bytes()[:16].decode("ascii", "replace").rstrip()
-        comparable = (name.startswith("oracle_bt_ordered_operands")
+        comparable = (magic == "NEMO_L2_BTADV_2"
+                      or name.startswith("oracle_bt_ordered_operands")
                       or magic in SELF_DESCRIBING or magic in SCHEMAS)
         # A pending plant forces the FIRST record open -- but only one this
         # gate can parse.  Forcing open a byte-identical record whose magic is
@@ -844,7 +1024,9 @@ def run(baseline: Path, candidate: Path, *, twin=None,
             exact += 1
             continue
         try:
-            if name.startswith("oracle_bt_ordered_operands"):
+            if magic == "NEMO_L2_BTADV_2":
+                result = _compare_advmean(a, b, plant)
+            elif name.startswith("oracle_bt_ordered_operands"):
                 result = _compare_bt(a, b, plant)
             elif magic in SELF_DESCRIBING:
                 result = _compare_self_describing(a, b, plant)
@@ -871,10 +1053,12 @@ def run(baseline: Path, candidate: Path, *, twin=None,
             result["raw_identical_before_plant"] = True
         if twin is not None and twin.is_dir() and (twin / name).is_file():
             t = twin / name
-            if name.startswith("oracle_bt_ordered_operands"):
+            t_magic = t.read_bytes()[:16].decode("ascii", "replace").rstrip()
+            if t_magic == "NEMO_L2_BTADV_2":
+                other = _compare_advmean(t, b, [True])
+            elif name.startswith("oracle_bt_ordered_operands"):
                 other = _compare_bt(t, b, [True])
-            elif t.read_bytes()[:16].decode("ascii", "replace").rstrip() \
-                    in SELF_DESCRIBING:
+            elif t_magic in SELF_DESCRIBING:
                 other = _compare_self_describing(t, b, [True])
             else:
                 other = compare_record(t, b, [True], waived=waived)
