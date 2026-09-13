@@ -8,7 +8,7 @@
 #SBATCH --output=/burg-archive/glab/users/pg2328/fv3_duo_gaps/m6_model_gate_%j.log
 # M4b M6 model gate on 6*kt*kt virtual CPU devices in one process.
 set -u
-REPO=/burg-archive/glab/users/pg2328/legoESM_fv3jax
+REPO=${REPO:-/burg-archive/glab/users/pg2328/legoESM_fv3jax}
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 cd "$REPO" || exit 1
 export PYTHONPATH="$REPO/packages/core:$REPO/packages/atmosphere:$REPO/packages/coupler:$REPO/packages/ice:$REPO/packages/land:$REPO/packages/ocean:$REPO/packages/ml:$REPO/packages/tools:$REPO/src"
