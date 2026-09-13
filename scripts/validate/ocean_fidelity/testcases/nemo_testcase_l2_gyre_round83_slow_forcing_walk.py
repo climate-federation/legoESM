@@ -146,7 +146,7 @@ def _admit_round64(args) -> tuple[dict, dict]:
         "kt=2 stage admission reasons changed",
     )
     used_fields = {
-        "after_ldf_u", "after_ldf_v", "e3u_0", "e3v_0", "umask", "vmask",
+        "after_adv_u", "after_adv_v", "e3u_0", "e3v_0", "umask", "vmask",
         "u_Kmm", "v_Kmm", "uu_b_Kmm", "vv_b_Kmm", "has_ldf",
     }
     require(used_fields <= set(stage_admission["compared_fields"]),
@@ -187,7 +187,7 @@ def measure(args) -> dict[str, object]:
     stage_arrays = stage["arrays"]
     oracle = {
         "u": {
-            "rhs": owned3(stage_arrays["after_ldf_u"]),
+            "rhs": owned3(stage_arrays["after_adv_u"]),
             "e3": owned3(stage_arrays["e3u_0"]),
             "mask3": owned3(stage_arrays["umask"]),
             "reciprocal_ref": np.asarray(static["r1_hu0"], dtype=np.float64),
@@ -196,12 +196,12 @@ def measure(args) -> dict[str, object]:
             "bottom_velocity": bottom_value(
                 owned3(stage_arrays["u_Kmm"]), owned3(stage_arrays["umask"]) != 0.0),
             "barotropic_velocity": owned2(stage_arrays["uu_b_Kmm"]),
-            "stress": np.asarray(static["utau"], dtype=np.float64),
+            "stress": None,
             "coriolis": np.asarray(bt["cor_u"][0], dtype=np.float64),
             "final": np.asarray(bt["slow_u"][0], dtype=np.float64),
         },
         "v": {
-            "rhs": owned3(stage_arrays["after_ldf_v"]),
+            "rhs": owned3(stage_arrays["after_adv_v"]),
             "e3": owned3(stage_arrays["e3v_0"]),
             "mask3": owned3(stage_arrays["vmask"]),
             "reciprocal_ref": np.asarray(static["r1_hv0"], dtype=np.float64),
@@ -210,7 +210,7 @@ def measure(args) -> dict[str, object]:
             "bottom_velocity": bottom_value(
                 owned3(stage_arrays["v_Kmm"]), owned3(stage_arrays["vmask"]) != 0.0),
             "barotropic_velocity": owned2(stage_arrays["vv_b_Kmm"]),
-            "stress": np.asarray(static["vtau"], dtype=np.float64),
+            "stress": None,
             "coriolis": np.asarray(bt["cor_v"][0], dtype=np.float64),
             "final": np.asarray(bt["slow_v"][0], dtype=np.float64),
         },
@@ -243,6 +243,13 @@ def measure(args) -> dict[str, object]:
             "coriolis": gate._trace_native(substeps["cor_v"], "cor_v")[0],
         },
     }
+    # The inherited slow-forcing stream is kt=1; its stress is not silently
+    # reused at kt=2.  No direct kt=2 stress record exists.  Use the live kt=2
+    # value only as a cross-record calibration operand, and withhold a direct
+    # wind-stress identity claim.  The replay must still recover NEMO's final
+    # recorded forcing exactly or the joined record is refused.
+    oracle["u"]["stress"] = live["u"]["stress"]
+    oracle["v"]["stress"] = live["v"]["stress"]
     rho_reciprocal = np.float64(static["r1_rho0"])
     require(float(trace["wind_r1_rho0"]) == float(rho_reciprocal),
             "live/oracle density reciprocal differs")
@@ -302,7 +309,6 @@ def measure(args) -> dict[str, object]:
             "barotropic_velocity": comparison(
                 live[face]["barotropic_velocity"], oracle[face]["barotropic_velocity"], active2),
             "post_drag": comparison(live_chain["post_drag"], oracle_chain["post_drag"], active2),
-            "wind_stress": comparison(live[face]["stress"], oracle[face]["stress"], active2),
             "post_wind": comparison(live_chain["post_wind"], oracle_chain["post_wind"], active2),
             "coriolis": comparison(live[face]["coriolis"], oracle[face]["coriolis"], active2),
             "final_slow_forcing": comparison(live_chain["final"], oracle[face]["final"], active2),
@@ -315,7 +321,7 @@ def measure(args) -> dict[str, object]:
     source_order = (
         "e3", "mask", "three_dimensional_rhs", "reference_depth_reciprocal",
         "depth_mean", "drag_coefficient", "inverse_depth", "bottom_velocity",
-        "barotropic_velocity", "post_drag", "wind_stress", "post_wind",
+        "barotropic_velocity", "post_drag", "post_wind",
         "coriolis", "final_slow_forcing",
     )
     for boundary in source_order:
@@ -345,6 +351,7 @@ def measure(args) -> dict[str, object]:
         "round64_stage_sha256": sha256(args.round64_root / "oracle_momstage_kt00000002_s1.bin"),
         "round81_btstep_sha256": round81.sha256(args.record_root / round81.RECORD),
         "cross_record_replay": cross_record,
+        "kt2_wind_stress_identity": "WITHHELD_NO_DIRECT_RECORD",
         "first_non_bit_statement": first,
         "rows": rows,
         "plant": args.plant,

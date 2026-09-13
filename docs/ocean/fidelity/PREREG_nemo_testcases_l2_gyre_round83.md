@@ -117,3 +117,13 @@ The corrected gate requires that existing fail-closed classification and
 requires every field used here to be listed in `compared_fields`; it does not
 invent a new waiver. The frozen prediction, source order, values, and
 falsifiers above are unchanged.
+
+The first scientific-looking JSON from the join is also an instrument failure,
+not a campaign measurement. It selected stage field `after_ldf`, which is an
+intermediate cumulative row; the compiled producer's final cumulative RHS is
+the later `after_adv` row. It also compared kt=2 live stress with a kt=1 record.
+The corrected gate selects `after_adv`, refuses a direct kt=2 wind-identity
+claim because no such operand was recorded, and permits the live kt=2 stress
+only inside the forward cross-record calibration. Exact recovery of the
+recorded final forcing remains mandatory. The rejected JSON is retained and
+will be named in the receipt; none of its scientific values may be cited.
