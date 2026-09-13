@@ -868,6 +868,21 @@ def _euc_merid_block(a, L, zc):
         print("Each side on ITS OWN levels -- the levels differ, so read the "
               "SHAPE (is there a subsurface maximum, and how sharp) rather "
               "than pairing rows.")
+        # DEPTH-INTEGRATED TRANSPORT: does the column carry the same NET zonal
+        # momentum, merely distributed differently, or is it actually missing?
+        # That distinction is not visible in a core speed, and it is the one
+        # that separates a vertical-transfer defect from a momentum SINK.
+        # Independent of both closures -- it is just u integrated over depth.
+        print("\nNET ZONAL TRANSPORT 0-400 m, |lat|<=1 box mean [m2/s]; "
+              "+ = eastward.")
+        print(f"{'lon':>6} {'ours':>9} {'NEMO':>9} {'ours-NEMO':>10}")
+        for lon0 in sorted(_profiles):
+            po, zo_, pn, zn2 = _profiles[lon0]
+            _mo, _mn = np.isfinite(po), np.isfinite(pn)
+            _io = float(np.trapezoid(po[_mo], zo_[_mo])) if _mo.sum() > 1 else np.nan
+            _in = float(np.trapezoid(pn[_mn], zn2[_mn])) if _mn.sum() > 1 else np.nan
+            print(f"{lon0:6d} {_io:9.2f} {_in:9.2f} {_io - _in:10.2f}")
+
         for lon0 in sorted(_profiles):
             po, zo_, pn, zn2 = _profiles[lon0]
             print(f"\n  {lon0}E   ours (depth m: u)          NEMO (depth m: u)")
