@@ -183,16 +183,16 @@ def _oracle_trace(arrays):
 
 
 def _active(name, masks):
+    if name == "metric_u":
+        return masks["u"][..., 0]
+    if name == "metric_v":
+        return masks["v"][..., 0]
     if name.endswith("_u") and name not in ("zonal_difference",):
         return masks["u"]
     if name.endswith("_v"):
         return masks["v"]
     if name in ("metric_u", "metric_v", "reciprocal_area_t", "r3_kbb",
                 "r1_dt", "eta_kaa", "r3_kaa", "r3_delta"):
-        if name == "metric_u":
-            return masks["u"][..., 0]
-        if name == "metric_v":
-            return masks["v"][..., 0]
         if name == "r1_dt":
             return np.asarray(True)
         return masks["t"][..., 0]
