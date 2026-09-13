@@ -146,6 +146,42 @@ def prof_nemo(f3, la, lo):                      # (nz, ny, nx)
 KM_p = prof_ours(KM, slat, slon)
 u_p = prof_ours(u_o, slat, slon)
 un_p = prof_nemo(uo, ulat, ulon)
+
+# ---- GLM's unchecked warning: "reversed w smells like VERTICAL INDEXING" ---
+# The 240E vertical-velocity reversal has been carried as a finding since
+# 5e7161f66 (ours -14.8e-6 m/s against NEMO +18.9e-6). grid_W publishes `wo`
+# in m/s -- the SAME units as our mass_flux_w -- so the two profiles can be
+# compared directly on their own levels without any unit bridge. If our
+# profile is NEMO's shifted by one level, or sign-flipped throughout, the
+# "reversal" is an artifact of this probe family and the finding must be
+# retracted rather than built on.
+w_o = np.asarray(s["mass_flux_w"], np.float64)
+dw2 = nc.Dataset(f"{GW}_grid_W.nc")
+wn = np.asarray(np.ma.filled(np.ma.masked_invalid(
+    dw2.variables["wo"][REC]), np.nan), np.float64)
+wn = np.where(np.abs(wn) > 1e10, np.nan, wn)
+dw2.close()
+for _lon in (220.0, 240.0):
+    LON_SAVE, LON0 = LON0, _lon
+    wp_o = prof_ours(w_o, slat, slon)
+    wp_n = prof_nemo(wn, wlat, wlon)
+    print(f"\nEQUATORIAL w at {_lon:.0f}E, |lat|<=1 box mean [1e-6 m/s]; "
+          f"+ = UPWARD. Same units on both sides (our mass_flux_w and NEMO's "
+          f"wo are both m/s), each on its own levels.")
+    print(f"{'z_ours':>8} {'w_ours':>10}   {'z_NEMO':>8} {'w_NEMO':>10}")
+    for i in range(min(16, wp_o.size, wp_n.size)):
+        zo_i = zi[i] if i < zi.size else np.nan
+        print(f"{zo_i:8.1f} {1e6 * wp_o[i]:10.3f}   "
+              f"{zw[i]:8.1f} {1e6 * wp_n[i]:10.3f}")
+    _so = np.sign(wp_o[:16][np.isfinite(wp_o[:16])])
+    _sn = np.sign(wp_n[:16][np.isfinite(wp_n[:16])])
+    _n = min(_so.size, _sn.size)
+    if _n:
+        agree = float(np.mean(_so[:_n] == _sn[:_n]))
+        print(f"[w] sign agreement over the top {_n} levels: {100 * agree:.0f}%"
+              "  -- a systematic flip or a one-level offset here means the "
+              "reversal is an INDEXING artifact, not physics.")
+    LON0 = LON_SAVE
 avm_name = next((v for v in ("avm", "avm_k", "difvmo", "avm_oce")
                  if v in cand), None)
 avm_p = prof_nemo(cand[avm_name], wlat, wlon) if avm_name else None
