@@ -968,6 +968,14 @@ _DUMP_TIME_LEVEL["oracle_bt_advmean_operands_kt00000001.bin"] = (
     "the kt=1 substep transport accumulator and its normalized NOW-level "
     "un_adv/vn_adv handoff",
 )
+_DUMP_TIME_LEVEL["oracle_bt_advmean_operands_kt00000002.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3_SM_R72ZFOP/BLD/ppsrc/nemo/dynspg_ts.f90:559-572,"
+    "797-817 forms the substep transport accumulator and its normalized "
+    "NOW-level un_adv/vn_adv handoff; the round-73 source card widens only "
+    "this WRITE-only stream to kt=2",
+)
 _DUMP_TIME_LEVEL["oracle_bt_ordered_operands_kt00000001.bin"] = (
     "now",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
