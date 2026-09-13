@@ -392,8 +392,8 @@ CITATION_MAP = {
         'zWdzU(ntsi-(0):ntei+(0),ntsj-(0):ntej+(0)) = 0._wp',
         ('END DO   ;   END DO', 2), 37],
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/sshwzv.f90:293-300': [
-        "ELSE                                            !==  Quasi-Eulerian vertical coordinate  ==!   ('key_qco')",
-        ('ENDIF', 5), 8],
+        ("ELSE                                            !==  Quasi-Eulerian vertical coordinate  ==!   ('key_qco')", 2),
+        ('ENDIF', 11), 8],
     'round64/oracle_krhs_split/ocean.output:682-708': [
         'ldf_dyn : lateral momentum physics',
         'eddy viscosity. = constant', 27],
