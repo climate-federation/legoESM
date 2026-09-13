@@ -649,6 +649,74 @@ def _euc_merid_block(a, L, zc):
              & (np.abs((lon2 - lon0 + 180.0) % 360.0 - 180.0) <= dlon))
         return np.nanmean(field2d[m]) if m.any() else np.nan
 
+    # ---- SEA LEVEL ALONG THE EQUATOR: the pressure-gradient test ----------
+    # An undercurrent is maintained by the zonal pressure gradient the wind
+    # sets up by piling water in the west. Our eta and NEMO's ssh are both
+    # already here, so this settles the gradient question without a momentum
+    # budget. ONLY THE ZONAL GRADIENT OF THE DIFFERENCE IS MEANINGFUL -- the
+    # two models carry different reference pressures, so the offset itself
+    # says nothing (GLM).
+    #
+    # PRE-REGISTERED (GLM, before running): the difference rising eastward by
+    # >= 5 cm between 220E and 260E means a missing eastward force
+    # g*d(delta eta)/dx >= 1.1e-7 m/s^2, about 0.28 m/s per month, which is
+    # commensurate with the measured 0.33 m/s core deficit at 220E -> the
+    # pressure gradient IS the cause. An eastward trend <= 1 cm over 200-260E
+    # implies under 0.04 m/s/month -> gradient EXONERATED.
+    #
+    # GUARD, also GLM's: eta is only the BAROTROPIC part. A flat difference
+    # does not exonerate the gradient until the steric contribution from the
+    # T(x,z) structure at 100-150 m is checked, which is why the thermocline
+    # depths are printed alongside.
+    if a.nemo_gridt:
+        _ssh_o = np.asarray(snap["eta"], dtype=np.float64)
+        _dsg = nc.Dataset(a.nemo_gridt)
+        try:
+            _cands = ("sshn", "ssh", "ssh_m", "zos", "sossheig")
+            _nm = next((v for v in _cands if v in _dsg.variables), None)
+            if _nm is None:
+                print("\n[sea level] SKIPPED: none of "
+                      f"{_cands} in {a.nemo_gridt}; available 2-D: "
+                      + ", ".join(sorted(
+                          v for v, o in _dsg.variables.items()
+                          if o.ndim == 3))[:200])
+            else:
+                _sn = np.ma.filled(np.ma.masked_invalid(
+                    _dsg.variables[_nm][:]), np.nan).astype(np.float64)
+                _sn = _select_recs(_sn, a.nemo_w_recs)
+                _sn = np.nanmean(_sn, axis=0) if _sn.ndim == 3 else _sn
+                _latn = np.asarray(_dsg.variables["nav_lat"][:], np.float64)
+                _lonn = np.asarray(_dsg.variables["nav_lon"][:],
+                                   np.float64) % 360.0
+                print(f"\nEQUATORIAL SEA LEVEL, |lat|<=1 box mean [m]. NEMO "
+                      f"variable {_nm!r}. Read the GRADIENT of the "
+                      f"difference, never its offset.")
+                print(f"{'lon':>6} {'ours':>9} {'NEMO':>9} {'diff':>9}")
+                _lons = (180, 200, 220, 240, 260, 280)
+                _d = {}
+                for lon0 in _lons:
+                    o = box_mean(_ssh_o, lat_o, lon_o, 0.0, lon0, 1.0, 2.0)
+                    n = box_mean(_sn, _latn, _lonn, 0.0, lon0, 1.0, 2.0)
+                    _d[lon0] = o - n
+                    print(f"{lon0:6d} {o:9.4f} {n:9.4f} {o - n:9.4f}")
+                _r = _d.get(260, np.nan) - _d.get(220, np.nan)
+                _r2 = _d.get(260, np.nan) - _d.get(200, np.nan)
+                print(f"\n[sea level] difference change 220E->260E: "
+                      f"{100.0 * _r:+.2f} cm; 200E->260E: {100.0 * _r2:+.2f} cm")
+                if np.isfinite(_r):
+                    _acc = 9.80665 * _r / (40.0 * 111e3 * np.cos(0.0))
+                    print(f"[sea level] implied zonal acceleration difference "
+                          f"{_acc:+.3e} m/s^2 = {_acc * 2.592e6:+.3f} m/s per "
+                          f"30 days, against a measured core deficit of "
+                          f"0.33 m/s at 220E.")
+                print("[sea level] PRE-REGISTERED: >= +5 cm rise 220E->260E "
+                      "CONFIRMS the pressure gradient as the cause; <= +1 cm "
+                      "over 200E->260E REFUTES it. Between the two, report "
+                      "the number and claim no direction. eta is BAROTROPIC "
+                      "only -- do not exonerate without the steric term.")
+        finally:
+            _dsg.close()
+
     if a.meridional_lon and a.nemo_wfile:
         w_o = np.asarray(snap["mass_flux_w"], dtype=np.float64)
         z_if = np.concatenate([[0.0], 0.5 * (zc[:-1] + zc[1:])])
