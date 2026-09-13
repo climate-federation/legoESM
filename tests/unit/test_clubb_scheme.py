@@ -2352,3 +2352,47 @@ def test_prognostic_clubb_publishes_its_pdf_cloud_fraction():
     # The troposphere-top taper must be ported too, not just the formula: no
     # stratospheric PDF cloud from a region the mixing no longer maintains.
     assert float(a[:, :3].max()) == 0.0
+
+
+def test_pdf_variance_scale_is_live_and_monotonic():
+    """The variance multiplier must actually reach the PDF closure.
+
+    It exists to answer one question cheaply before a prognostic-closure
+    campaign is paid for: the diagnosed variance is a local-equilibrium
+    estimate (mixing length times local gradient) and is suspected of being far
+    too small in the tropical mid-troposphere. If scaling it moves nothing, a
+    prognostic variance will not move anything either.
+
+    A knob that silently does nothing would answer that question WRONG in the
+    most expensive direction -- it would read as "variance does not matter" --
+    so this asserts a strictly monotonic response, not merely a different one.
+    """
+    import numpy as np
+    from legoesm import constants
+    from legoesm.thermo import saturation_mixing_ratio
+    from legoesm.atmosphere.physics.turbulence.clubb import clubb_turbulence
+
+    ncol, nlev = 6, 30
+    p_half = jnp.asarray(np.linspace(2.0e3, 1.0e5, nlev + 1)[None].repeat(ncol, 0))
+    p_full = 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+    z_half = jnp.asarray(np.linspace(17000.0, 0.0, nlev + 1)[None].repeat(ncol, 0))
+    z_full = 0.5 * (z_half[:, :-1] + z_half[:, 1:])
+    T = jnp.asarray(196.0 + 106.0 * (p_full / 1.0e5) ** 0.35)
+    rh = jnp.asarray(np.linspace(0.45, 0.95, ncol)[:, None] * np.ones((1, nlev)))
+    q_v = rh * saturation_mixing_ratio(T, p_full)
+    u = jnp.full((ncol, nlev), 6.0)
+    v = jnp.zeros((ncol, nlev))
+    rho = p_full / (constants.R_d * T)
+    band = np.asarray((p_full[0] >= 4.0e4) & (p_full[0] <= 7.0e4))
+
+    means = []
+    for scale in (1.0, 2.0, 4.0, 8.0):
+        out, _ = clubb_turbulence(
+            u, v, T, q_v, jnp.full((ncol, nlev), 0.1), p_full, p_half,
+            z_full, z_half, jnp.full((ncol,), 301.0), jnp.full((ncol,), 0.021),
+            rho, 112.5, CLUBBConfig(pdf_variance_scale=scale))
+        means.append(float(np.asarray(out.cloud_fraction)[:, band].mean()))
+
+    assert all(np.isfinite(means)), means
+    assert means == sorted(means), f"not monotonic in the variance: {means}"
+    assert means[-1] > means[0], f"8x the variance changed nothing: {means}"

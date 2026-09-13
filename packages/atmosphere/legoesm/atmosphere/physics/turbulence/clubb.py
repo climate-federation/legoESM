@@ -318,7 +318,9 @@ __param_spec__ = {
             "w_tol": "numerics: w-moment tolerance/floor [m/s]",
             "wp2_max": "numerics: wp2 upper clip [m^2/s^2]",
         },
-        "params": {},
+        "params": {
+            "pdf_variance_scale": {"units": "1", "bounds": (0.25, 8.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_pdf", "reference": "multiplier on the DIAGNOSED sub-grid variance entering the PDF closure; 1.0 is the closure's own mixing-length estimate", "shape": None},
+        },
     },
 }
 
@@ -387,9 +389,13 @@ def diagnose_cloud_and_buoyancy(thlm, rtm, wp2, exner, p_in_Pa, thv_ds, Kh, Lsca
     # Down-gradient second-order fluxes and mixing-length variances.
     wpthlp = -Kh * ddz_thl
     wprtp = -Kh * ddz_rt
-    thlp2 = jnp.maximum((Lscale * ddz_thl) ** 2, config.thl_tol ** 2)
-    rtp2 = jnp.maximum((Lscale * ddz_rt) ** 2, config.rt_tol ** 2)
-    rtpthlp = Lscale ** 2 * ddz_thl * ddz_rt
+    # Scaled BEFORE the tolerance floors so the floors stay what they are --
+    # tolerances, not a scaled quantity -- and the covariance takes the same
+    # factor as the variances so the correlation the PDF sees is unchanged.
+    _vs = config.pdf_variance_scale
+    thlp2 = jnp.maximum(_vs * (Lscale * ddz_thl) ** 2, config.thl_tol ** 2)
+    rtp2 = jnp.maximum(_vs * (Lscale * ddz_rt) ** 2, config.rt_tol ** 2)
+    rtpthlp = _vs * Lscale ** 2 * ddz_thl * ddz_rt
     up2 = vp2 = jnp.maximum(wp2, config.w_tol ** 2)
 
     # sigma_sqd_w (Skw = 0 -> gamma = gamma_coef), computed directly on zt.
@@ -686,6 +692,19 @@ class CLUBBConfig(NamedTuple):
     cloud_source: str = "native"
     trop_cloud_top_press: float = 0.0
     trop_cloud_taper_lnp_width: float = 0.15
+    # Multiplier on the DIAGNOSED sub-grid variances entering the PDF closure
+    # (both variances and their covariance, so the correlation is preserved).
+    # 1.0 = the closure's own estimate, byte-identical.  This exists to answer
+    # one question cheaply before paying for a prognostic-closure campaign: the
+    # diagnostic variance is a local-equilibrium estimate, mixing length times
+    # local gradient, and is suspected of being far too small in the tropical
+    # mid-troposphere, where the real variance comes from detrained saturated
+    # air sitting beside dry environmental air -- nonlocal, with memory, and
+    # invisible to a vertical-gradient formula.  Scaling it is the one-line
+    # stand-in for carrying it prognostically: if the humidity distribution
+    # does not respond to 2x and 4x here, it will not respond to a prognostic
+    # variance either, and the campaign should look elsewhere.
+    pdf_variance_scale: float = 1.0
 
 
 # Derived parameters (recomputed from base config, never stored as magic
