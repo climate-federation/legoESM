@@ -91,7 +91,7 @@ post-solve transport is not the consumed stage-1 operand.
 
 The compiled velocity-form divergence forms the face products and hdiv, then
 materializes `pe3divUh = hdiv*live_e3t` as a separate statement
-(`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/divhor.f90:123-154`). WZV adds the
+(`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/divhor.f90:123-153`). WZV adds the
 Kaa-minus-Kbb stretch and carries bottom-up
 (`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/sshwzv.f90:293-300`). Later,
 `stp_RK3_stg` explicitly skips another WZV call for vector-invariant stage 1
