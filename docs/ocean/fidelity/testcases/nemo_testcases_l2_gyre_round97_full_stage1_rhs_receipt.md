@@ -111,14 +111,16 @@ bar. Rule 12 is therefore **FAIL**, regardless of unchanged maxima.
 The fresh 30-day candidate member completed every day. `round97/day_gap.json`,
 SHA-256
 `2baac87ac5f2eddbd2f7fc490f63eb7325120faeb595296edbfc9e44f9a590ef`,
-reports day-30 T RMS `1.239701129497169e-2 K`, exactly unchanged from the
-Round-85 before arm.
+reports day-30 T RMS `1.239701129497169e-2 K`, an improvement of
+`5.351136200815176e-13 K` from the Round-85 before arm
+(`1.2397011295506804e-2 K`). The preregistered bitwise-invariance prediction is
+therefore **REFUTED**; the receipt does not round this movement away.
 
 | testcase | disposition |
 |---|---|
 | GYRE stage twin | Named full-RHS statement becomes BIT, but kt1-stage1 W is now the first remaining owned non-bit output |
 | GYRE kt=1--10 | Rule-12 FAIL: 85/954 rows moved, 56 cellwise violations, no class change, first-over-bar unchanged |
-| GYRE days 1--30 | Fresh candidate member; day-30 T RMS unchanged |
+| GYRE days 1--30 | Fresh candidate member; day-30 T RMS improves by 5.351136200815176e-13 K |
 | LOCK_EXCHANGE-zco | Shared-path and constructibility tests pass; no tank-fidelity claim from GYRE operands |
 | OVERFLOW-zps | Shared-path and partial-cell constructibility tests pass; no tank-fidelity claim from GYRE operands |
 | DINO | Shared WS-RK3 source-selection risk remains explicit; no trajectory-neutrality claim and the 96--98% regional-cancellation warning remains in force |
@@ -138,8 +140,15 @@ The candidate stage-gate suite passed **15 tests in 2.64 s**. The separate
 LOCK_EXCHANGE, OVERFLOW and card-constructibility suite passed **31 tests in
 223.60 s**; log SHA-256 is
 `942c5da3f6418dc982c34c1a8cbe6c3cd0bf406d8d71ec1e63a18aeba66101ff`.
-Final receipt/citation tests and citation plants are recorded after this
-receipt's commit.
+The final focused stage/live-operand/citation suite passed **33 tests in
+4.03 s**; log SHA-256 is
+`6368d0bfad500876a4aef013a62dacddeca6d7a32380619c68c0d6abf72cd328`.
+The clean citation gate audited all four compiled-source citations and passed
+(artifact SHA-256
+`00f32a65310b05c8fa7ecacad4b794f2bff64ac9808051e48303455d948709e0`).
+Shifting the first citation by two lines exits 1 with
+`SYMBOL-NOT-AT-LINE` (plant artifact SHA-256
+`723b33e006d2a55ac77b4d92acc0457aebe80e81e5af02db6538f2b391935096`).
 
 GitHub issue #1455 could not be read or posted: this clone's only remote is the
 local read-only source checkout. No issue-update claim is made. Diagnostic log
