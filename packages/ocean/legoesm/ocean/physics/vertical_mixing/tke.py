@@ -851,15 +851,22 @@ def compute_mixing_lengths(
         # documented, BOUNDED proxy (was UNBOUNDED before this fix).
         _seed = jnp.broadcast_to(
             jnp.asarray(mxl_min, dtype=lT.dtype), lT.shape[1:])
-        # The untouched jpk pad is the seed, but NEMO's first executed
-        # iteration is jk=jpkm1: update that carried row with
-        # min(rmxl_min+e3t(jpk), raw(jpkm1)) before scanning upward
-        # (R56TKE ppsrc zdftke.f90:674-676).
-        first_ldn = jnp.minimum(_seed + e3_bottom, lT[-1])
-        _, ldn_rest = jax.lax.scan(
-            _down, first_ldn, (lT[1:-1][::-1], e3T[2:][::-1]))
-        ldn = jnp.concatenate(
-            [lT[:1], ldn_rest[::-1], first_ldn[None]], axis=0)
+        if raw_evaluation == "nemo_literal":
+            # NEMO leaves zmxlm(jpk) at rmxl_min and uses that UNMODIFIED
+            # terminal pad as the carry for the first jk=jpkm1 iteration.
+            # Do not apply a fictitious update to jpk itself from raw en(jpk).
+            _, ldn_rest = jax.lax.scan(
+                _down, _seed, (lT[1:-1][::-1], e3T[2:][::-1]))
+            ldn = jnp.concatenate(
+                [lT[:1], ldn_rest[::-1], _seed[None]], axis=0)
+        else:
+            # Historical shared recurrence, retained bit-for-bit outside the
+            # two literal DINO cards.
+            first_ldn = jnp.minimum(_seed + e3_bottom, lT[-1])
+            _, ldn_rest = jax.lax.scan(
+                _down, first_ldn, (lT[1:-1][::-1], e3T[2:][::-1]))
+            ldn = jnp.concatenate(
+                [lT[:1], ldn_rest[::-1], first_ldn[None]], axis=0)
         lup = jnp.moveaxis(lup, 0, -1)[..., 1:]                    # interior
         ldn = jnp.moveaxis(ldn, 0, -1)[..., 1:]                    # interior
         l_k = jnp.maximum(jnp.minimum(lup, ldn), mxl_min)
@@ -1800,37 +1807,6 @@ def _solve_tke_backward_euler(
 # ---------------------------------------------------------------------------
 
 
-def _nemo_inverse_prandtl_number(
-    N2: jnp.ndarray,
-    shear_sq: jnp.ndarray,
-    kappaM: jnp.ndarray,
-    cfg: TKEConfig,
-    p_sh2_override: jnp.ndarray | None = None,
-) -> jnp.ndarray:
-    """NEMO ``pdlr`` in compiled statement order.
-
-    NEMO stores the inverse Prandtl factor and consumes it directly in
-    ``p_avt = MAX(p_pdlr*p_avt, avtb)`` (GYRE R56TKE ppsrc
-    ``zdftke.f90:394-413,699-701``).  Keeping this value avoids the two extra
-    roundings in the algebraically equivalent ``Pr=1/pdlr; avt=avm/Pr`` path.
-    """
-    bshear = jnp.asarray(getattr(cfg, "bshear_floor", 1.0e-20), dtype=N2.dtype)
-    p_sh2 = kappaM * shear_sq if p_sh2_override is None else p_sh2_override
-    zdiv = p_sh2 + bshear
-    is_zero_zdiv = zdiv == 0.0
-    safe_zdiv = jnp.where(is_zero_zdiv, 1.0, zdiv)
-    numerator = N2 * kappaM
-    if cfg.tke_n2_evaluation_stage != "step_entry":
-        raise ValueError(
-            "literal inverse Prandtl is selected only by step-entry NEMO "
-            "recipes; historical callers retain their Prandtl association")
-    zri_stratified = jnp.where(
-        is_zero_zdiv, numerator / bshear, numerator / safe_zdiv)
-    ri_cri = jnp.asarray(1.0 / cfg.prandtl_ri_coeff, dtype=N2.dtype)
-    zri = jnp.where(N2 > 0.0, zri_stratified, 0.0)
-    return jnp.maximum(0.1, ri_cri / jnp.maximum(ri_cri, zri))
-
-
 def _prandtl_number(
     N2: jnp.ndarray,
     shear_sq: jnp.ndarray,
@@ -1903,22 +1879,70 @@ def _prandtl_number(
         Ri = N2 / jnp.maximum(shear_sq, 1e-12)
         return jnp.maximum(1.0, jnp.minimum(10.0, cfg.prandtl_ri_coeff * Ri))
     if cfg.prandtl_mode == "nemo_ri":
-        if cfg.tke_n2_evaluation_stage == "step_entry":
-            pdlr = _nemo_inverse_prandtl_number(
-                N2, shear_sq, kappaM, cfg, p_sh2_override)
-            return 1.0 / pdlr
-        # Preserve the historical multiply-by-reciprocal association for all
-        # non-literal cards; Rule 12 forbids leaking GYRE's source order.
-        bshear = jnp.asarray(
-            getattr(cfg, "bshear_floor", 1.0e-20), dtype=N2.dtype)
-        p_sh2 = (kappaM * shear_sq
-                 if p_sh2_override is None else p_sh2_override)
+        bshear = jnp.asarray(getattr(cfg, "bshear_floor", 1.0e-20),
+                             dtype=N2.dtype)
+        # p_sh2 (avm-weighted shear production, [m^2/s^3]) — zdfsh2.F90:80-94
+        # face-averages OLD avm onto the shear product. Default (p_sh2_
+        # override=None, BIT-IDENTICAL): legoESM's single per-interface
+        # K_M has no face-avg analog, so kappaM*shear_sq is the T-collapsed
+        # approximation (== P_s_curr at the call site, tke.py:1932).
+        # tke_shear_avm_weighting="nemo_face" (#1455): the caller supplies
+        # the exact face-averaged p_sh2 instead (_shared.
+        # avm_weighted_shear_production).
+        p_sh2 = kappaM * shear_sq if p_sh2_override is None else p_sh2_override
+        # NB with NEMO's default rn_bshear = 1e-20 the kappaM factors cancel
+        # almost everywhere (bshear is ~9 decades below kappaM*shear_sq in any
+        # realistic regime), so zri ~= N2/shear_sq: nemo_ri is then
+        # NEAR-DEGENERATE with "richardson" up to the ri_cri-vs-6.6 scaling.
+        # The weighted form matters only where the floor competes (kappaM or
+        # shear ~ 0) — keep it for faithfulness, but do not expect materially
+        # different production behaviour (review of 4aeeb867d, #1226).
+        #
+        # #1226 zdftke_chain_walk (STAGE 2 finding): faithful transcription
+        # of the FULL nn_pdl==1 conditional, zdftke.F90:459-476 (DINO
+        # MY_SRC copy):
+        #   IF (rn2b <= 0)      THEN zri = 0
+        #   ELSE
+        #     zdiv = p_sh2 + rn_bshear
+        #     IF (zdiv == 0)    THEN zri = rn2b*p_avm / rn_bshear
+        #     ELSE                   zri = rn2b*p_avm / zdiv   (zdiv may be
+        #                            NEGATIVE — p_sh2 can be a tiny negative
+        #                            float-noise value, |p_sh2| > rn_bshear;
+        #                            NEMO takes the division AS-IS, no
+        #                            positivity clamp on zdiv)
+        # The old code applied ``jnp.maximum(p_sh2 + bshear, 1e-30)``
+        # unconditionally, which FLIPS a genuinely negative zdiv to a tiny
+        # POSITIVE floor — turning a negative zri (-> pdlr=1.0, Pr=1) into a
+        # huge positive one (-> pdlr=0.1, Pr=10): the opposite end of the
+        # same clamp. Fix: only the exact-zero special case divides by
+        # rn_bshear; a negative zdiv is used AS-IS (matching NEMO's sign).
+        #
+        # AD safety (JAX where-NaN-grad trap): jnp.where evaluates BOTH
+        # branches, so a raw division by a possibly-zero zdiv in the
+        # untaken branch can still produce inf/NaN and NaN gradients. Use
+        # the double-where idiom: substitute a safe (nonzero) denominator
+        # in the branch that will be masked out, then select the branch
+        # with the ORIGINAL (correctly-signed) value on the taken side —
+        # never let the safe substitute leak into the selected result.
         is_zero_zdiv = p_sh2 + bshear == 0.0
-        safe_zdiv = jnp.where(is_zero_zdiv, 1.0, p_sh2 + bshear)
+        safe_zdiv = jnp.where(is_zero_zdiv, 1.0, p_sh2 + bshear)  # avoid 1/0
         numerator = N2 * kappaM
-        zri_stratified = numerator * jnp.where(
-            is_zero_zdiv, 1.0 / bshear, 1.0 / safe_zdiv)
+        if cfg.tke_n2_evaluation_stage == "step_entry":
+            # DINO/NEMO literal evaluation order, zdftke.F90:489-495.
+            # Do not replace division with multiplication by a reciprocal:
+            # the matched-state row-11 bar resolves that one-ulp difference.
+            zri_stratified = jnp.where(
+                is_zero_zdiv, numerator / bshear, numerator / safe_zdiv)
+        else:
+            # Historical association retained exactly for every card outside
+            # the two complete DINO NEMO recipes.
+            zri_stratified = numerator * jnp.where(
+                is_zero_zdiv, 1.0 / bshear, 1.0 / safe_zdiv)
         zri = jnp.where(N2 > 0.0, zri_stratified, 0.0)
+        if cfg.tke_n2_evaluation_stage == "step_entry":
+            ri_cri = jnp.asarray(1.0 / cfg.prandtl_ri_coeff, dtype=N2.dtype)
+            pdlr = jnp.maximum(0.1, ri_cri / jnp.maximum(ri_cri, zri))
+            return 1.0 / pdlr
         return jnp.maximum(
             1.0, jnp.minimum(10.0, cfg.prandtl_ri_coeff * zri))
     raise ValueError(
@@ -2061,13 +2085,7 @@ def compute_K_from_tke(
         # ONLY when the Bryan-Lewis profile below is off (enable_kappaH_profile=
         # False, as the NEMO recipe sets for NEMO's constant avtb); with BL on the
         # BL depth floor becomes the binding deep floor instead.
-        if (cfg.prandtl_mode == "nemo_ri"
-                and cfg.tke_n2_evaluation_stage == "step_entry"):
-            pdlr = _nemo_inverse_prandtl_number(
-                _N2_pr, shear_sq, _K_M_pr, cfg, _p_sh2_pr)
-            K_H = jnp.maximum(cfg.kappaH_min, pdlr * K_M)
-        else:
-            K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr)
+        K_H = jnp.maximum(cfg.kappaH_min, K_M / Pr)
         # Bryan-Lewis (1979) arctan depth floor on K_H (Veros
         # enable_kappaH_profile). Previously recorded-but-ignored; now wired
         # on the opt-in Prandtl path. Low impact in shallow domains; raises

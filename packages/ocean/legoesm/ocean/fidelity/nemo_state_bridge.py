@@ -869,7 +869,6 @@ def bridge_nemo_to_legoesm_topo(
         land_mask_override=jnp.asarray(land_mask),
         H_bathy_override=jnp.asarray(H_bathy.astype(np.float64)),
         nemo_prognostic_barotropic_velocity=True,
-        nemo_rk3_ssh_scratch=(state.ssh_kaa is not None),
     )
 
     # Surface face masks from NEMO umask/vmask (periodic-wrap for re-entrant i).
@@ -905,9 +904,6 @@ def bridge_nemo_to_legoesm_topo(
         eta=base.eta.replace(data=jnp.asarray(state.ssh)),
         uu_b=base.uu_b.replace(data=jnp.asarray(uu_b_face)),
         vv_b=base.vv_b.replace(data=jnp.asarray(vv_b_face)),
-        eta_rk3_kaa=(
-            base.eta_rk3_kaa.replace(data=jnp.asarray(state.ssh_kaa))
-            if base.eta_rk3_kaa is not None else None),
         u_mask=base.u_mask.replace(data=jnp.asarray(umask_face)),
         v_mask=base.v_mask.replace(data=jnp.asarray(vmask_face)),
     )

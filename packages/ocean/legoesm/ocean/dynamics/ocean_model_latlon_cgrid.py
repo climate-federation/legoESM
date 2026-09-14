@@ -1374,19 +1374,14 @@ def rk3_stage_velocity_update(
             f"rhs {rhs.shape} must match velocity_before "
             f"{velocity_before.shape}")
     if vector_form:
-        # Compiled GYRE dynzdf.f90:166-170 and stprk3_stg.f90:671-674, in
-        # NEMO's own statement order: multiply, add, then mask.  Materialize
-        # each binary64 source operation so this assignment remains the same
-        # operator when the carried Kaa scratch changes the surrounding JAX
-        # graph.
+        # dynzdf.F90:121-122 and stprk3_stg.F90:367-368, in NEMO's own
+        # association order: add, then mask.
         if face_mask.shape not in (velocity_before.shape,
                                    velocity_before.shape[:-1] + (1,)):
             raise ValueError(
                 f"face_mask {face_mask.shape} must match velocity_before "
                 f"{velocity_before.shape} or be its level-broadcast form")
-        scaled_rhs = nemo_source_round(dt_stage * rhs)
-        stage_sum = nemo_source_round(velocity_before + scaled_rhs)
-        return nemo_source_round(stage_sum * face_mask)
+        return (velocity_before + dt_stage * rhs) * face_mask
     # dynzdf.F90:127-132 and stprk3_stg.F90:373-378, key_qco form.
     return (qco_before * velocity_before
             + dt_stage * qco_now * rhs) / qco_after
@@ -4785,12 +4780,6 @@ class LatLonCGridOceanModel:
         _cfg_b = self.config if config is None else config  # SPMD band override
         if self._nemo_ws_test_hooks.omit_barotropic_substep_drag:
             _cfg_b = _cfg_b._replace(barotropic_drag_substep=False)
-        if (getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws"
-                and (state.uu_b is not None or state.vv_b is not None)
-                and state.eta_rk3_kaa is None):
-            raise ValueError(
-                "NEMO_RK3_KAA_SSH_REQUIRED: WS-RK3 state/restart lacks "
-                "the pre-solve ssh(Kaa) scratch (NEMO restart variable ssha)")
         state = cast_pytree(state, None, "compute")
         # ``_ab2_scope_override`` (private): the leap-frog step (``_leapfrog_step``)
         # drives this method in "advective" scope to WITHHOLD the dissipative
@@ -4892,8 +4881,7 @@ class LatLonCGridOceanModel:
         # rebuilt its own min-of-stretched-T pair.  ``None`` (every other
         # integrator) keeps that historical min rule.
         _ws_face_thickness_kbb = None
-        if (getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws"
-                and state.eta_rk3_kaa is not None):
+        if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws":
             # NEMO's e3u/e3v(Kbb) = e3u_0*(1+r3u(Kbb)) for the step-entry
             # dyn_adv (stp2d.F90:172 -> dynadv_up3.F90:160; the same pair
             # stage 1 consumes through zFu at stprk3_stg.F90:273-274), from
@@ -6397,9 +6385,19 @@ class LatLonCGridOceanModel:
                     stage_face_thickness=_face_thickness_kbb, stage_index=1)
                 _du1_rhs = _du1_rhs + (_p0_with_zub[0] - _p0_no_zub[0])
                 _dv1_rhs = _dv1_rhs + (_p0_with_zub[1] - _p0_no_zub[1])
-            # stp2d.F90:155-175 consumes the pre-solve WZV in dyn_zad before
-            # dyn_spg_ts runs.  The later _g0 transport feeds tracers; the
-            # executing vector branch has no second stage-one WZV call.
+            # stp2d materializes stage-1 WZV before dyn_zad. The external
+            # solve makes that stage transport available only at this point,
+            # so replace the ZAD association without changing earlier terms.
+            _p0_with_zad = _mom_pert_ws(
+                u0, v0, False, None,
+                stage_face_thickness=_face_thickness_kbb,
+                stage_zad_operands=(_g0[2], _g0[4], _g0[5]),
+                stage_index=1)
+            _p0_without_zad = _mom_pert_ws(
+                u0, v0, False, None,
+                stage_face_thickness=_face_thickness_kbb, stage_index=1)
+            _du1_rhs = _du1_rhs + (_p0_with_zad[0] - _p0_without_zad[0])
+            _dv1_rhs = _dv1_rhs + (_p0_with_zad[1] - _p0_without_zad[1])
             # Stage 1: Kmm = Kbb, so the RHS carries (1 + r3u(Kbb)).
             _u1_rhs = _du1_rhs if _vert0 is None else _du1_rhs + _vert0[0]
             _v1_rhs = _dv1_rhs if _vert0 is None else _dv1_rhs + _vert0[1]
@@ -8288,16 +8286,6 @@ class LatLonCGridOceanModel:
                 v=state_new.v.replace(data=_v_pin),
                 eta=state_new.eta.replace(data=_eta_pin),
             )
-
-        if getattr(_cfg_b, "momentum_time_integrator", "euler") == "rk3_ws":
-            # stprk3.F90:222-226, after the stage-3 Naa/Nbb swap: the freed
-            # old-Kbb slot becomes the next whole step's pre-solve Kaa scratch.
-            # Keep both source statements materialized, as in the compiled
-            # assignment ``ssh(Kaa) = 2*ssh(Kbb) - ssh(Kaa)``.
-            eta_kaa_next = nemo_source_round(
-                nemo_source_round(2.0 * state_new.eta.data) - state.eta.data)
-            state_new = state_new._replace(
-                eta_rk3_kaa=state.eta_rk3_kaa.replace(data=eta_kaa_next))
 
         # Private oracle-fidelity seam: NEMO's stage dumps are written inside
         # stprk3_stg immediately after each instantaneous Kaa update.  Expose
