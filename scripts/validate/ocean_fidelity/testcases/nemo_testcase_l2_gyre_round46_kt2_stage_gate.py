@@ -876,6 +876,8 @@ def _output_rows(trace, records, next_entries, transports, masks, kt: int,
 
         a = records[(kt, stage)]["arrays"]
         geom = trace.stage_geometry[stage - 1]
+        ww = np.asarray(geom[2])
+        ww_nlev = ww.shape[-1]
         geom_rows = (
             ("e3t_Kmm", _owned3(a["e3t_Kmm"]), np.asarray(geom[3]),
              _owned3(a["tmask"]) > 0.5),
@@ -883,8 +885,8 @@ def _output_rows(trace, records, next_entries, transports, masks, kt: int,
              _owned3(a["umask"]) > 0.5),
             ("e3v_Kmm", _owned3(a["e3v_Kmm"]), np.asarray(geom[5])[1:, :, :],
              _owned3(a["vmask"]) > 0.5),
-            ("ww", _owned3(a["ww"]), np.asarray(geom[2]),
-             _owned3(a["wmask"]) > 0.5),
+            ("ww", _owned3(a["ww"], ww_nlev), ww,
+             _owned3(a["wmask"], ww_nlev) > 0.5),
         )
         for field, ref, candidate, mask in geom_rows:
             row = _classification(score(
