@@ -61,7 +61,7 @@ srun --ntasks=$NGPU --ntasks-per-node=$TPN --gpus-per-node=$TPN --gpu-bind=none 
     --dt $DT --days $DAYS --precision fp64 \
     --forcing-mode jra55_do_tropical --jra55-cache $R/forcing/jra55_do_fesom_1958_1958_1deg_noleap.zarr \
     --jra55-sea-ice --ice-dynamics none --ice-categories 1 \
-    --vertical-mixing-scheme kpp \
+    --vertical-mixing-scheme kpp --tripole-closed-seas marmara,black_sea \
     --enable-latlon-spmd --multicontroller \
     --diag-every $DIAG_EVERY $EXTRA --output "$OUT" 2>&1 | tee $OUT/run.log | grep -v "^WARNING\|^I0000\|^E0000" | tail -80
 rc=${PIPESTATUS[0]}

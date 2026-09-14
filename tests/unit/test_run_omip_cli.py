@@ -990,6 +990,9 @@ def test_tripole_mesh_flags_parse():
                     "--tripole-strip-north-rows", "1"])
     assert a.tripole_mesh == spec and a.tripole_strip_north_rows == 1
     assert a.tripole_fold_convention == "auto"
+    assert a.tripole_closed_seas is None
+    a = parse_args(["--grid", "tripole", "--tripole-closed-seas", "marmara,black_sea"])
+    assert a.tripole_closed_seas == "marmara,black_sea"
     a = parse_args(["--grid", "tripole", "--tripole-mesh", spec,
                     "--tripole-fold-convention", "(n_lon-i)%n_lon"])
     assert a.tripole_fold_convention == "(n_lon-i)%n_lon"

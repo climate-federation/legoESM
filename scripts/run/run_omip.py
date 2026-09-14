@@ -559,6 +559,12 @@ def parse_args(argv: list[str] | None = None):
                          "sends it past 1000 C (measured, eORCA1 72.2N 73.6E). "
                          "Partial cells keep the reference layer thicknesses "
                          "and cut only the bottom cell, as NEMO does."))
+    p.add_argument("--tripole-closed-seas", type=str, default=None,
+                   help=("Comma-separated enclosed seas to mask as land on the "
+                         "--grid tripole lane (names in "
+                         "legoesm.ocean.init_tripole.CLOSED_SEAS, e.g. "
+                         "marmara,black_sea): basins the observed IC cannot "
+                         "fill.  Default: none masked."))
     p.add_argument("--tripole-strip-north-rows", type=int, default=0,
                    help=(
                        "Drop this many DEAD halo rows from the north end of "
@@ -5311,10 +5317,13 @@ def run_omip_single(grid_type: str, args) -> dict:
         _mesh_files = mesh_file_list(
             getattr(args, "tripole_mesh", None)
             or _parse_resolution(grid_type, resolution)["mesh_path"])
+        _closed = tuple(
+            n for n in (getattr(args, "tripole_closed_seas", None) or "").split(",") if n)
         _lm, _hb = read_mesh_mask_bathy(
             _mesh_files,
             strip_north_rows=int(
-                getattr(args, "tripole_strip_north_rows", 0) or 0))
+                getattr(args, "tripole_strip_north_rows", 0) or 0),
+            closed_seas=_closed)
         _n_lat, _n_lon = int(grid.lat_T.shape[0]), int(grid.lat_T.shape[1])
         if _lm.shape != (_n_lat, _n_lon):
             raise SystemExit(
@@ -5338,7 +5347,8 @@ def run_omip_single(grid_type: str, args) -> dict:
         _n_wet = int(np.sum(_lm > 0.5))
         print(f"  Tripole mesh: {[Path(f).name for f in _mesh_files]} "
               f"({_n_wet}/{_lm.size} ocean cells, "
-              f"H_max={float(np.max(_hb)):.0f} m)")
+              f"H_max={float(np.max(_hb)):.0f} m, closed seas masked: "
+              f"{list(_closed) or 'none'})")
         if getattr(args, "tripole_partial_cells", True) and args.bathymetry is None:
             # True depth levels with a partial bottom cell, as NEMO's zgr_zps
             # builds them.  The reference thicknesses and T-point depths come
