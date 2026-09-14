@@ -183,7 +183,19 @@ round; no new NEMO acquisition is needed.
 
 ## Independent review
 
-PENDING_REVIEW
+**Independent review unavailable in-sandbox.**  The required command exited 1
+before producing `SHIP`/`DO NOT SHIP`; this is not treated as approval.  Its
+terminal verdict is quoted verbatim:
+
+> WARNING: proceeding, even though we could not create PATH aliases: Read-only
+> file system (os error 30)  
+> Reading additional input from stdin...  
+> Error: failed to initialize in-process app-server client: Read-only file
+> system (os error 30)
+
+The complete capture is `round91/codex_review.txt`.  Per the operator's standing
+instruction, work continued through mechanical citation and test gates; no
+candidate physics was landed.
 
 ## Complete registered moved-row table
 
