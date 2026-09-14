@@ -111,12 +111,12 @@ run_deck run_hydro_zerostep_warmtracer_gfs 0 "$TRIC"
 run_deck run_hydro_1step_warmtracer_gfs 32 "$TRIC"
 
 echo "=== CONTROL 1: warm start reproduces the cold start (fv_core + sphum) ==="
-"$PY" "$CMP" --a "$PIN/run_hydro_1step_warm_gfs" --b "$SRC" --file fv_core.res --vars u,v,pt,delp --max-rel "${WARM_MAX_REL:-0}" || exit 10
+"$PY" "$CMP" --a "$PIN/run_hydro_1step_warm_gfs" --b "$SRC" --file fv_core.res --vars u,v,T,delp --max-rel "${WARM_MAX_REL:-0}" || exit 10
 "$PY" "$CMP" --a "$PIN/run_hydro_1step_warm_gfs" --b "$SRC" --file fv_tracer.res --vars sphum,liq_wat --max-rel "${WARM_MAX_REL:-0}" || exit 10
 echo "=== CONTROL 2: the tracer deck's zero step IS the IC it was given ==="
-"$PY" "$CMP" --a "$PIN/run_hydro_zerostep_warmtracer_gfs" --b "$ZS" --file fv_core.res --vars u,v,pt,delp || exit 10
+"$PY" "$CMP" --a "$PIN/run_hydro_zerostep_warmtracer_gfs" --b "$ZS" --file fv_core.res --vars u,v,T,delp || exit 10
 echo "=== CONTROL 3: a passenger changes nothing else -- tracer deck dynamics == control ==="
-"$PY" "$CMP" --a "$PIN/run_hydro_1step_warmtracer_gfs" --b "$PIN/run_hydro_1step_warm_gfs" --file fv_core.res --vars u,v,pt,delp || exit 10
+"$PY" "$CMP" --a "$PIN/run_hydro_1step_warmtracer_gfs" --b "$PIN/run_hydro_1step_warm_gfs" --file fv_core.res --vars u,v,T,delp || exit 10
 "$PY" "$CMP" --a "$PIN/run_hydro_1step_warmtracer_gfs" --b "$PIN/run_hydro_1step_warm_gfs" --file fv_tracer.res --vars sphum || exit 10
 echo "=== SIGNAL: liq_wat is nonzero and moved over the step ==="
 "$PY" "$CMP" --a "$PIN/run_hydro_zerostep_warmtracer_gfs" --b "$PIN/run_hydro_1step_warmtracer_gfs" --file fv_tracer.res --vars sphum,liq_wat --moved sphum,liq_wat --max-rel inf || exit 10

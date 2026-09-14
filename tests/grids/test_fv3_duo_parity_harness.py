@@ -366,3 +366,61 @@ def test_second_tracer_zero_is_the_default_and_modulated_is_the_port_field():
         mod.build_port_tracer_ic(sphum6, second="modulated")
     with pytest.raises(ValueError, match="unknown second tracer"):
         mod.build_port_tracer_ic(sphum6, ctx=ctx, second="shifted")
+
+
+def _fake_deck(tmp_path, name, tracers, dnats_lines):
+    d = tmp_path / name
+    d.mkdir()
+    (d / "field_table").write_text("".join(
+        f' "TRACER", "atmos_mod", "{t}"\n           "units", "kg/kg" /\n'
+        for t in tracers))
+    (d / "input.nml").write_text(" &fv_core_nml\n" + "".join(
+        f"       dnats = {v}\n" for v in dnats_lines) + " /\n")
+    return str(d)
+
+
+def test_deck_tracers_come_from_field_table_order_and_the_last_dnats(tmp_path):
+    """The pinned deck's nml sets dnats twice (0 then 1); Fortran takes
+    the LAST, so rainwat is inert and sphum/liq_wat advect. A deck adding
+    cl/cl2 BEFORE rainwat advects four."""
+    mod = _load_scorer()
+    plain = _fake_deck(tmp_path, "plain", ["sphum", "liq_wat", "rainwat"], [0, 1])
+    assert mod.read_deck_tracers(plain) == (("sphum", "liq_wat"), ("rainwat",))
+    term = _fake_deck(tmp_path, "term",
+                      ["sphum", "liq_wat", "cl", "cl2", "rainwat"], [0, 1])
+    assert mod.read_deck_tracers(term) == (("sphum", "liq_wat", "cl", "cl2"),
+                                           ("rainwat",))
+    mod.resolve_deck_tracers(term, term)
+    assert mod.ADVECTED_TRACERS == ("sphum", "liq_wat", "cl", "cl2")
+    assert mod.NR_TRACERS == 4
+    with pytest.raises(SystemExit, match="refusing to score across tracer sets"):
+        mod.resolve_deck_tracers(plain, term)
+
+
+def test_port_tracer_ic_follows_the_deck_names_including_the_terminator_pair(
+        tmp_path):
+    from legoesm.core.fv3_native_dcmip16_ic import dcmip16_terminator_six_face
+    from legoesm.grids.factory import create_fv3_duo_grid
+    mod = _load_scorer()
+    term = _fake_deck(tmp_path, "term",
+                      ["sphum", "liq_wat", "cl", "cl2", "rainwat"], [1])
+    mod.resolve_deck_tracers(term, term)
+    grid = create_fv3_duo_grid(12)
+    ctx = grid.ctx_np
+    n, ng, km = grid.n, grid.ng, 2
+    m = n + 2 * ng
+    sphum6 = [np.full((m, m, km), 1e-3) for _ in range(6)]
+    q = mod.build_port_tracer_ic(sphum6, ctx=ctx)
+    pairs = dcmip16_terminator_six_face(ctx, km)
+    for t in range(6):
+        assert len(q[t]) == 4
+        np.testing.assert_array_equal(q[t][0], sphum6[t])
+        assert not q[t][1].any()
+        np.testing.assert_array_equal(q[t][2], pairs[t][0])
+        np.testing.assert_array_equal(q[t][3], pairs[t][1])
+    with pytest.raises(ValueError, match="cl/cl2 need the grid ctx"):
+        mod.build_port_tracer_ic(sphum6)
+    odd = _fake_deck(tmp_path, "odd", ["sphum", "dust", "rainwat"], [1])
+    mod.resolve_deck_tracers(odd, odd)
+    with pytest.raises(ValueError, match="has no port IC"):
+        mod.build_port_tracer_ic(sphum6, ctx=ctx)

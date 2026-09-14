@@ -1094,3 +1094,55 @@ class TestFV3DuoSpmdDriver:
         drv = ModelDriver(self._cfg(tmp_path), output_dir=tmp_path)
         drv.setup()
         assert drv.run() == "COMPLETED"
+
+
+class TestTerminatorTracers:
+    """The oracle's DCMIP16 terminator pair, ported from test_cases.F90:
+    4136-4205 -- passive on an adiabatic deck, longitude-dependent, and
+    Cl + 2 Cl2 == qcly EXACTLY by construction."""
+
+    def test_pair_is_nonzero_lon_dependent_and_conserves_qcly(self):
+        from legoesm.core.fv3_native_dcmip16_ic import (
+            TERM_QCLY, dcmip16_terminator_cl_cl2)
+        lon = np.linspace(0.0, 2 * np.pi, 73)[None, :] * np.ones((5, 1))
+        lat = np.linspace(-1.2, 1.2, 5)[:, None] * np.ones((1, 73))
+        cl, cl2 = dcmip16_terminator_cl_cl2(lon, lat)
+        assert (cl >= 0).all() and (cl2 >= 0).all()
+        assert cl.max() > 0 and cl2.max() > 0
+        np.testing.assert_allclose(cl + 2 * cl2, TERM_QCLY, rtol=0, atol=4e-21)
+        # longitude dependence: along one latitude cl is not constant
+        assert cl[2].max() - cl[2].min() > 1e-7
+        # the night side (k1 = 0) is the pure Cl2 state: cl = 0, cl2 = qcly/2
+        night = cl == 0.0
+        assert night.any()
+        np.testing.assert_array_equal(cl2[night], TERM_QCLY / 2)
+
+    def test_six_face_pair_is_window_filled_and_level_independent(self, bundle):
+        from legoesm.core.fv3_native_dcmip16_ic import (
+            TERM_QCLY, dcmip16_terminator_six_face)
+        pairs = dcmip16_terminator_six_face(bundle.ctx_np, KM)
+        cs = slice(NG, NG + N)
+        halo = np.ones((MA, MA), bool); halo[cs, cs] = False
+        for cl, cl2 in pairs:
+            assert cl.shape == cl2.shape == (MA, MA, KM)
+            assert not cl[halo].any() and not cl2[halo].any()
+            for k in range(1, KM):
+                np.testing.assert_array_equal(cl[..., k], cl[..., 0])
+            np.testing.assert_allclose(
+                cl[cs, cs, :] + 2 * cl2[cs, cs, :], TERM_QCLY, rtol=0, atol=4e-21)
+        assert not np.array_equal(pairs[0][0], pairs[3][0])
+
+    def test_model_appends_the_pair_after_the_passengers(self, model):
+        from legoesm.core.fv3_native_dcmip16_ic import (
+            dcmip16_terminator_six_face)
+        ic = model.dcmip16_initial_state(n_tracers=2, terminator=True)
+        assert len(ic["q"]) == 4
+        pairs = dcmip16_terminator_six_face(model.grid.ctx_np, KM)
+        for iq in range(2):
+            np.testing.assert_array_equal(
+                np.asarray(ic["q"][2 + iq]),
+                np.stack([pairs[t][iq] for t in range(6)]))
+        plain = model.dcmip16_initial_state(n_tracers=2)
+        for iq in range(2):
+            np.testing.assert_array_equal(np.asarray(ic["q"][iq]),
+                                          np.asarray(plain["q"][iq]))

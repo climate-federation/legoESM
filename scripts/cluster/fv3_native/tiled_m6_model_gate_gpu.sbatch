@@ -24,7 +24,7 @@ export XLA_FLAGS="${XLA_FLAGS:+$XLA_FLAGS }--xla_gpu_autotune_level=0"
 export JAX_LOCAL_DEVICE_IDS=0
 # NCCL must use the InfiniBand interface, not the management ethernet
 # (duo_ranks_venue.sbatch, job 9610225); job 9663001 hung 4 h without it
-export NCCL_SOCKET_IFNAME=ib0 NCCL_DEBUG=WARN
+export NCCL_SOCKET_IFNAME=ib0 NCCL_DEBUG=${NCCL_DEBUG:-WARN}
 N=${N:-48}; KM=${KM:-10}; KT=${KT:-2}; PAD=${PAD:-11}; NHFLAG=""; [ "${NH:-0}" = 1 ] && NHFLAG="--nh"
 echo "host: $(hostname) ranks=$SLURM_NTASKS nodes=$SLURM_JOB_NUM_NODES sha: $(git rev-parse HEAD) dirty: $(git status --porcelain | wc -l)"
 nvidia-smi -L || true

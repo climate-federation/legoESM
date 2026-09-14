@@ -87,6 +87,41 @@ NR_TRACERS = 2          # ncnst=3, dnats=1 -> nr = 2 (run_out.txt:97)
 # advected+remapped, the dnats tail (rainwat) is INERT -- fv_dynamics.F90
 # :191 `nq = nq_tot - flagstruct%dnats`.
 ADVECTED_TRACERS = ("sphum", "liq_wat")
+# The pinned deck's set.  ``resolve_deck_tracers`` rebinds these module
+# names from the STEP deck's own field_table + dnats at run time (a deck
+# that lists cl/cl2 advects four), and the IC deck must agree.
+
+
+def read_deck_tracers(run_dir: str) -> tuple:
+    """(advected, inert) tracer names from a deck's field_table order and
+    its (last) dnats -- fv_dynamics.F90:191 ``nq = nq_tot - dnats``."""
+    ft = os.path.join(run_dir, "field_table")
+    names = []
+    for line in open(ft, errors="replace"):
+        m = re.match(r'\s*"TRACER"\s*,\s*"atmos_mod"\s*,\s*"([^"]+)"', line)
+        if m:
+            names.append(m.group(1))
+    if not names:
+        raise SystemExit(f"{ft}: no TRACER entries found")
+    dnats = _nml_int(_nml_text(run_dir), "dnats")
+    if not 0 <= dnats < len(names):
+        raise SystemExit(f"{run_dir}: dnats={dnats} against {len(names)} tracers")
+    cut = len(names) - dnats
+    return tuple(names[:cut]), tuple(names[cut:])
+
+
+def resolve_deck_tracers(ic_run: str, step_run: str) -> None:
+    """Bind ADVECTED_TRACERS / INERT_TRACERS / NR_TRACERS to the decks'."""
+    global ADVECTED_TRACERS, INERT_TRACERS, NR_TRACERS
+    adv, inert = read_deck_tracers(step_run)
+    adv_ic, inert_ic = read_deck_tracers(ic_run)
+    if (adv, inert) != (adv_ic, inert_ic):
+        raise SystemExit(
+            f"IC deck tracers {adv_ic}+{inert_ic} != step deck tracers "
+            f"{adv}+{inert}; refusing to score across tracer sets")
+    if "sphum" not in adv:
+        raise SystemExit(f"step deck advects {adv}: no sphum")
+    ADVECTED_TRACERS, INERT_TRACERS, NR_TRACERS = adv, inert, len(adv)
 # The moist RESPONSE (moist deck minus dry deck) is a first-order
 # quantity, not a residual, so port and oracle should agree on it as a
 # FIELD. The bound is loose because each side carries its own parity
@@ -497,18 +532,42 @@ def build_port_tracer_ic(sphum6, ctx=None, second: str = "zero") -> list:
             "build_port_tracer_ic got sphum6=None -- build_port_ic was "
             "called with with_sphum=False, so there is no humidity to "
             "advect and none to have divided pt on the moist arm.")
-    if second == "zero":
-        return [[q, np.zeros_like(q)] for q in sphum6]
-    if second == "modulated":
+    if second not in ("zero", "modulated"):
+        raise ValueError(f"unknown second tracer {second!r}: zero | modulated")
+    names = ADVECTED_TRACERS
+    term = None
+    if "cl" in names or "cl2" in names:
         if ctx is None:
-            raise ValueError("second='modulated' needs the grid ctx")
-        from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
-            lon_modulated_tracer)
-        n, ng = ctx["n"], ctx["ng"]
-        return [[q, lon_modulated_tracer(q, ctx["gs6"][t]["agrid_lon"],
-                                         n, ng, 1)]
-                for t, q in enumerate(sphum6)]
-    raise ValueError(f"unknown second tracer {second!r}: zero | modulated")
+            raise ValueError("cl/cl2 need the grid ctx")
+        from legoesm.core.fv3_native_dcmip16_ic import (
+            dcmip16_terminator_six_face)
+        term = dcmip16_terminator_six_face(ctx, sphum6[0].shape[-1])
+    out = []
+    for t, q in enumerate(sphum6):
+        face = []
+        for nm in names:
+            if nm == "sphum":
+                face.append(q)
+            elif nm == "liq_wat":
+                if second == "zero":
+                    face.append(np.zeros_like(q))
+                else:
+                    if ctx is None:
+                        raise ValueError("second='modulated' needs the grid ctx")
+                    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+                        lon_modulated_tracer)
+                    face.append(lon_modulated_tracer(
+                        q, ctx["gs6"][t]["agrid_lon"], ctx["n"], ctx["ng"], 1))
+            elif nm == "cl":
+                face.append(term[t][0])
+            elif nm == "cl2":
+                face.append(term[t][1])
+            else:
+                raise ValueError(
+                    f"advected tracer {nm!r} has no port IC (known: sphum, "
+                    f"liq_wat, cl, cl2)")
+        out.append(face)
+    return out
 
 def tracer_window(q6, ctx) -> list:
     """Compute-window copies of the advected tracers, (i, j, k)."""
@@ -1385,6 +1444,7 @@ def main(argv=None):
     # split by ROLE, not by pathname equality (codex): the physics gate applies
     # ONLY to the step deck; the IC is checked inert, and for the HS arm the IC
     # is the MOIST cold-start (adiabatic=.false.), so it is checked moist=True.
+    resolve_deck_tracers(args.ic_run, args.step_run)
     for _r, _is_step in ((args.ic_run, False), (args.step_run, True)):
         check_deck_matches_the_arm(
             _r, nh=args.nh,

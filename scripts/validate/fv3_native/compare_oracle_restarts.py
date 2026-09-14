@@ -9,7 +9,7 @@ under a baroclinic wave is a defect, not a match).
 Usage::
 
     python compare_oracle_restarts.py --a <run A> --b <run B> \
-        --file fv_core.res --vars u,v,pt,delp
+        --file fv_core.res --vars u,v,T,delp
     python compare_oracle_restarts.py --a <zerostep> --b <1step> \
         --file fv_tracer.res --vars sphum,liq_wat --moved sphum,liq_wat --max-rel inf
 """

@@ -52,7 +52,10 @@ from legoesm.core.fv3_dynamics import (
     p_var_hydrostatic,
     p_var_nonhydrostatic,
 )
-from legoesm.core.fv3_native_dcmip16_ic import dcmip16_bc_six_face_state
+from legoesm.core.fv3_native_dcmip16_ic import (
+    dcmip16_bc_six_face_state,
+    dcmip16_terminator_six_face,
+)
 from legoesm.core.fv3_native_eta import set_eta_analytic
 from legoesm.core.fv3_native_state_3d import field_shape
 from legoesm.core.fv3_tracer2d import check_nsplt_schedule
@@ -381,8 +384,15 @@ class FV3DuoDynamicsModel:
     # ------------------------------------------------------------------
 
     def dcmip16_initial_state(self, *, do_pert: bool = True,
-                              n_tracers: int = 1) -> dict:
+                              n_tracers: int = 1,
+                              terminator: bool = False) -> dict:
         """The DCMIP16_BC (test_case = -13 / -12) bundle on this grid.
+
+        ``terminator=True`` appends the oracle's own DCMIP16 terminator
+        pair ``cl, cl2`` (``dcmip16_terminator_six_face``) AFTER the
+        ``n_tracers`` list -- the same nonzero, longitude-dependent
+        passengers the Fortran cold start fills when its field_table lists
+        them, so a run can be scored tracer-for-tracer against that deck.
 
         ``n_tracers > 1`` appends passenger tracers ``iq = 1..n-1`` built
         as ``sphum * (1 + 0.5 sin(iq * lon))`` on the compute window (halos
@@ -428,6 +438,11 @@ class FV3DuoDynamicsModel:
                     sphum6[t], self.grid.ctx_np["gs6"][t]["agrid_lon"],
                     n, ng, iq)
                 for t in range(6)])))
+        if terminator:
+            pairs = dcmip16_terminator_six_face(self.grid.ctx_np, cfg.km)
+            for iq in range(2):
+                q.append(jnp.asarray(np.stack([pairs[t][iq]
+                                               for t in range(6)])))
         omga = jnp.zeros(
             (6,) + tuple(field_shape("delp", n, ng, cfg.km)),
             dtype=jnp.float64)
