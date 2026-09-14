@@ -176,8 +176,12 @@ round; no new NEMO acquisition is needed.
   direct W, ZAD U, and assignment boundary.
 - The assembled candidate passed 218 focused tests in 94.09 s before
   trajectory measurement.
-- Citation-gate and final restored-tree focused-test results are recorded in
-  the final sealing commit and evidence directory.
+- The citation gate found 16/16 mapped citations, no failures, no map-audit
+  failures, and passed all nine self-controls.  Shifting the first midpoint
+  citation by two lines produced `SYMBOL-NOT-AT-LINE` and exit 1 as required.
+- The restored final tree passed all 240 focused tests in 95.51 s.  This suite
+  covers TKE operands and identity, histories/drag bundle gates, receipt
+  citations, testcase configuration, and restart loading.
 - A separate read-only Codex review was requested; its exact terminal verdict
   is recorded below after the review attempt.
 
