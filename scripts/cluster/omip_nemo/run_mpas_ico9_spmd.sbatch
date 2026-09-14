@@ -39,6 +39,10 @@
 set -uo pipefail
 DT=${DT:-120}
 DAYS=${DAYS:-3}
+# TKE (FESOM2's scheme) adopted 2026-09-14 for the cross-lane campaign: the KPP run lost
+# 1.44 K of global SST in 30 days by draining the tropical top 50 m downward; the
+# half-day one-variable ladder at ico6 gave KPP -0.136 K, TKE -0.065, constant-K -0.034.
+VMIX=${VMIX:-tke}
 # Diagnostic cadence held at a fixed MODEL time (2880 s) so runs at different
 # timesteps stay comparable; it also sets the forcing block length, and a block
 # much longer than this exhausts an 80 GB card at this resolution.
@@ -68,7 +72,7 @@ srun --ntasks=$NGPU --ntasks-per-node=4 --cpus-per-task=16 --gpus-per-node=4 \
     --forcing-mode jra55_do_tropical --jra55-cache "$F/jra55_do_fesom_1958_1958_1deg_noleap.zarr" \
     --jra55-sea-ice --ice-dynamics none --ice-categories 1 --no-gpu-interp \
     --woa-init --woa-t "$IC" --woa-s "$IC" \
-    --vertical-mixing-scheme kpp --diag-every "$DIAG" \
+    --vertical-mixing-scheme "$VMIX" --diag-every "$DIAG" \
     --enable-mpas-spmd --multicontroller \
     --output "$OUT" 2>&1 | tee "$OUT/run.log" | grep -vE "^WARNING|^I0000|^E0000" | tail -70
 rc=${PIPESTATUS[0]}
