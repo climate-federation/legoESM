@@ -175,6 +175,16 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/zdftke.f90"),
     "GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90"),
+    # Round 92 binds the operand diagnosis to the exact acquired Round-90
+    # compiled card, including its write-only recorder.
+    "GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/dynspg_ts.f90"),
+    "GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/domain.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/domain.f90"),
+    "GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/l2_r90_baro.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/l2_r90_baro.f90"),
     "GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traldf_iso.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/traldf_iso.f90"),
     "GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stp2d.f90": (
@@ -384,6 +394,25 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 92: acquired correction record and live operand split ---
+    'GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/stprk3_stg.f90:668-687': [
+        'SELECT CASE( kstg )',
+        ('ENDIF', 21), 20],
+    'GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/stprk3_stg.f90:728-765': [
+        'DYN time integration + ZDF',
+        "CALL r46_state( 'post_baro', uu, vv, Kaa )", 38],
+    'GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/dynspg_ts.f90:763-804': [
+        '!* Sum over whole bt loop (except in weight average)',
+        'pssh   (:,:,Kaa) = pssh   (:,:,Kaa) / r1_wgt1s', 42],
+    'GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/domain.f90:195-215': [
+        'hv_0(:,:) = 0._wp',
+        'r1_hf_0(:,:) = ssfmask(:,:) / ( hf_0(:,:) + 1._wp -  ssfmask(:,:) )', 21],
+    'GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/l2_r90_baro.f90:20-36': [
+        'SUBROUTINE put2(name, value)',
+        'END SUBROUTINE put3', 17],
+    'GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/l2_r90_baro.f90:54-88': [
+        'SUBROUTINE r90_baro_begin(kt,kstg,Kaa,puu,pvv,pzub,pzvb)',
+        'END SUBROUTINE r90_baro_finish', 35],
     # --- round 89: source-rounded RK3 assignment and ordered stage walk ---
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:140-148': [
         ('SELECT CASE( kstg )', 1),
