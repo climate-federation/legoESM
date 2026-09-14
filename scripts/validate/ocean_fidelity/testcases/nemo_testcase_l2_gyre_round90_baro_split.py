@@ -146,8 +146,10 @@ def measure(args) -> dict[str, object]:
         oracle_target = round46._owned2(
             arrays["uu_b_Kaa" if face == "u" else "vv_b_Kaa"])
         oracle_final = round46._owned3(arrays[f"post_baro_{face}"])
-        oracle_h = round46._owned3(weights[f"e3{face}_0"])
-        oracle_r1 = round46._owned2(weights[f"r1_h{face}_0"])
+        # ``mesh_mask.nc`` is already the 22 x 32 owned-domain export, unlike
+        # the 26 x 36 instrument record whose fields need ``_owned*``.
+        oracle_h = np.asarray(weights[f"e3{face}_0"])
+        oracle_r1 = np.asarray(weights[f"r1_h{face}_0"])
 
         live_kbb = _native(trace.stage_states[0][state_index], face)
         live_rhs = _native(trace.stage_rhs[0][state_index], face)
