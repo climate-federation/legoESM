@@ -158,6 +158,7 @@ def test_stage_output_reference_uses_next_handoff_and_next_step():
     assert np.all(stage1["ssh"] == 24.0)
     assert np.all(stage3["T"] == 70.0)
     assert np.all(stage3["ssh"] == 72.0)
+    assert stage3["T"].shape[-1] == 30
 
 
 def test_stage_twin_private_overrides_are_off_by_default():

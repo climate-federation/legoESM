@@ -818,7 +818,9 @@ def _stage_reference(records, next_entries, kt: int, stage: int) -> dict:
     return {
         "u": _owned3(a["post_baro_u"]),
         "v": _owned3(a["post_baro_v"]),
-        "T": entry["T"], "S": entry["S"], "ssh": entry["ssh"],
+        "T": entry["T"][..., :30],
+        "S": entry["S"][..., :30],
+        "ssh": entry["ssh"],
     }
 
 
