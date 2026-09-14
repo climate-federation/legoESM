@@ -1153,7 +1153,11 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
             }
     for kt, transport_root in ((1, advmean_root), (2, stage_closure_root)):
         path = transport_root / f"oracle_tracer_transport_kt{kt:08d}_s3.bin"
-        transports[(kt, 3)] = read_transport(path, 3)
+        header = records[(kt, 3)]["header"]
+        transports[(kt, 3)] = read_transport(
+            path, 3, expected_kt=kt,
+            expected_slots=tuple(
+                header[name] for name in ("Kbb", "Kmm", "Kaa", "Krhs")))
 
     given = []
     given_entries = []

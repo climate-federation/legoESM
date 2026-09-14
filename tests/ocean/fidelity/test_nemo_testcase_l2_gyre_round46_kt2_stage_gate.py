@@ -189,6 +189,22 @@ def test_final_external_history_uses_last_pre_swap_current_and_before():
         11.0, 12.0, 13.0, 14.0, 15.0, 16.0)
 
 
+def test_kt2_transport_uses_recorded_rotated_pointer_slots(tmp_path):
+    from nemo_testcase_l2_gyre_phase3_gate import GateError, read_transport
+
+    path = tmp_path / "oracle_tracer_transport_kt00000002_s3.bin"
+    header = b"NEMO_L2_TRTRP_1 " + struct.pack(
+        "=11i", 1, 2, 3, 3, 2, 1, 1, NX, NY, NZ, 64)
+    values = np.zeros(3 * NX * NY * NZ, dtype=np.float64)
+    path.write_bytes(header + values.tobytes())
+    got = read_transport(
+        path, 3, expected_kt=2, expected_slots=(3, 2, 1, 1))
+    assert got["stage"] == 3 and got["Kmm"] == 2
+    with pytest.raises(GateError, match="wrong stage indices"):
+        read_transport(
+            path, 3, expected_kt=2, expected_slots=(1, 2, 3, 3))
+
+
 def test_qco_face_layout_drops_redundant_edge_and_singleton_level():
     u = np.zeros((NY - 4, NX - 3, 1))
     v = np.zeros((NY - 3, NX - 4, 1))

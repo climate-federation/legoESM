@@ -168,7 +168,7 @@ cp "$manifest"/* "$TARGET_RUN/"
   printf '%s %s %s\n' "$digest" "$COMMIT" "$RECORD" >"$RECORD.stamp"
 )
 
-"$PY" -c "import sys; sys.path.insert(0,'$here/..'); from nemo_testcase_l2_gyre_round46_kt2_stage_gate import read_transport; r=read_transport(__import__('pathlib').Path('$TARGET_RUN/$RECORD'),3); assert r['header']['kt']==2"
+"$PY" -c "import sys; sys.path.insert(0,'$here/..'); from nemo_testcase_l2_gyre_round46_kt2_stage_gate import read_transport; r=read_transport(__import__('pathlib').Path('$TARGET_RUN/$RECORD'),3,expected_kt=2,expected_slots=(3,2,1,1)); assert r['stage']==3"
 "$PY" "$ADMISSION" --baseline "$SOURCE_RUN" --candidate "$TARGET_RUN" \
   --twin /nonexistent --identical "$FINAL_RESTART" mesh_mask.nc \
   --allowed-new "$RECORD" --output "$TARGET_RUN/round94_admission.json"
