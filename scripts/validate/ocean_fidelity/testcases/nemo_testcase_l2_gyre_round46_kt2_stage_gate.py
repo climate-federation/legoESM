@@ -845,16 +845,20 @@ def _entry_override(records, kt: int, stage: int, *, plant=False):
 def _barotropic_override(records, advmean_root: Path, kt: int):
     import jax.numpy as jnp
     from nemo_testcase_l2_gyre_round14_advmean import read_advmean
+    from nemo_testcase_l2_gyre_phase3_gate import read_bt
 
-    a = records[(kt, 1)]["arrays"]
     avg = read_advmean(
         advmean_root / f"oracle_bt_advmean_operands_kt{kt:08d}.bin",
         expected_kt=kt,
     )
+    bt = read_bt(
+        advmean_root / f"oracle_bt_frames_kt{kt:08d}.bin", kt)
+    next_entry = read_entry(
+        advmean_root / f"oracle_step_entry_kt{kt + 1:08d}.bin")
     return (
-        jnp.asarray(_owned2(a["ssh_Kaa"])),
-        jnp.asarray(_u_full(_owned2(a["uu_b_Kaa"]))),
-        jnp.asarray(_v_full(_owned2(a["vv_b_Kaa"]))),
+        jnp.asarray(next_entry["ssh"]),
+        jnp.asarray(_u_full(bt["uu_b"])),
+        jnp.asarray(_v_full(bt["vv_b"])),
         jnp.asarray(_u_full(avg["post_lbc_u"])),
         jnp.asarray(_v_full(avg["post_lbc_v"])),
     )
