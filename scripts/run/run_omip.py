@@ -3255,12 +3255,6 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
             # a km column) -- the same approximation every surface freshwater
             # flux makes on this coordinate; exact per-layer thickness needs
             # the real_freshwater closure with a prognostic thickness.
-            # ponytail: the z-star rescale spreads the thickness loss over the
-            # whole column while the closure removed it from the frozen level,
-            # a per-layer inventory error of order x*dz_k/H (mm of water over
-            # a km column) -- the same approximation every surface freshwater
-            # flux makes on this coordinate; exact per-layer thickness needs
-            # the real_freshwater closure with a prognostic thickness.
             eta = new_state.eta.data - (ice_mass / frazil_rho0).astype(new_state.eta.data.dtype)
             new_state = new_state._replace(T=new_state.T.replace(data=res.T_C.astype(T.dtype)),
                                            S=new_state.S.replace(data=res.S_psu.astype(S.dtype)),
@@ -3583,12 +3577,6 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
             # the closure's virtual salt.  Same convention as the slab tile's
             # own lead freezing (ice_fw < 0), so a later melt returns exactly
             # this water.
-            # ponytail: the z-star rescale spreads the thickness loss over the
-            # whole column while the closure removed it from the frozen level,
-            # a per-layer inventory error of order x*dz_k/H (mm of water over
-            # a km column) -- the same approximation every surface freshwater
-            # flux makes on this coordinate; exact per-layer thickness needs
-            # the real_freshwater closure with a prognostic thickness.
             # ponytail: the z-star rescale spreads the thickness loss over the
             # whole column while the closure removed it from the frozen level,
             # a per-layer inventory error of order x*dz_k/H (mm of water over
