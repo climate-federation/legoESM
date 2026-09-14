@@ -6395,16 +6395,6 @@ class LatLonCGridOceanModel:
             # stp2d.F90:155-175 consumes the pre-solve WZV in dyn_zad before
             # dyn_spg_ts runs.  The later _g0 transport feeds tracers; the
             # executing vector branch has no second stage-one WZV call.
-            _p0_with_zad = _mom_pert_ws(
-                u0, v0, False, None,
-                stage_face_thickness=_face_thickness_kbb,
-                stage_zad_operands=(_g0[2], _g0[4], _g0[5]),
-                stage_index=1)
-            _p0_without_zad = _mom_pert_ws(
-                u0, v0, False, None,
-                stage_face_thickness=_face_thickness_kbb, stage_index=1)
-            _du1_rhs = _du1_rhs + (_p0_with_zad[0] - _p0_without_zad[0])
-            _dv1_rhs = _dv1_rhs + (_p0_with_zad[1] - _p0_without_zad[1])
             # Stage 1: Kmm = Kbb, so the RHS carries (1 + r3u(Kbb)).
             _u1_rhs = _du1_rhs if _vert0 is None else _du1_rhs + _vert0[0]
             _v1_rhs = _dv1_rhs if _vert0 is None else _dv1_rhs + _vert0[1]
