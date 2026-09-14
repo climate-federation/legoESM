@@ -1765,3 +1765,32 @@ the probe's `--assert-envelope` in both directions. OPEN: which branch
 
 Distributed link on the same tracer set: C48 kt=2, 24 devices, `--terminator`,
 2 steps: 14/14 leaves BITWISE, every tracer moving (job 9766088).
+
+## More rows closed, and two review rounds (2026-09-14, later)
+
+| row | result |
+|---|---|
+| k_split = 2 vs a new Fortran deck (`build_ksplit_oracle.sbatch`) | 2.13e-10, loop and batched, eager and compiled |
+| compiled moist, both arms | 1.1866e-09 |
+| compiled non-hydrostatic, both arms | 1.4776e-06 |
+| sharded NH gate, terminator set, C48 kt=2, 24 devices, 2 steps | 24/24 leaves BITWISE |
+
+Harness hardening from the reviews (codex, then GLM-5.2), each finding
+measured before acting: the namelist reader took the first match on a
+line (now the last); `--k-split`/`--n-split` are checked against the step
+deck; map ties are counted and refuse when a lon-dependent tracer is scored;
+tracer mass and Cl + 2 Cl2 are compared to the oracle after the step; the
+three deck builders publish a family whole or not at all.
+
+**A constant tracer is NOT preserved at face edges -- in the Fortran
+either.** GLM's constancy invariant failed at 1.818e-4; every deviating
+cell lies within 3 cells of a face edge, interior at 6.353e-16. The oracle's
+own Cl + 2 Cl2 breaks at the edges of its front-free tiles by the SAME
+1.818e-4 with the SAME interior. The port reproduces the duo-grid's edge
+behaviour to four digits; the probe gates the interior at rounding and pins
+the edge figure to the oracle's.
+
+Still open: the intermittent 24-GPU first-execution hang (two NCCL arms
+queued since 2026-09-14 morning); GPU timing; the autotuner-off runtime
+cost; the warm/cold Fortran divergence; which limiter branch flips on the
+plateau.
