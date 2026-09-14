@@ -148,6 +148,16 @@ new structural/control tests passed.  The candidate's direct instrument and
 tests are retained inside the held patch.  After rejection, production was
 restored and checked against input commit `66212eace1d1`; no production/test
 diff remains.  The known unrelated RK3-WS test failure was not encountered.
+Final focused verification passes 137 tests covering the phase-3 gate,
+Round-87 WZV controls, citation machinery, run restarts, and testcase recipes;
+the log SHA-256 is
+`3ff5529321bc90af75d538291b5d99015b84c1a42f553c147af1ee23adea19d0`.
+The receipt citation gate passes all 8/8 compiled-source citations with no
+unmapped citation, failed anchor, or global map-audit failure (SHA-256
+`cb422541a56219b55f5336c98d5d3544f8312683620fc99dd9e64afd725ba05d`).
+Shifting the scratch-rotation citation by two lines exits 1 with
+`SYMBOL-NOT-AT-LINE` (SHA-256
+`2fa63eaeb24ca603a0b56fc3056f6fdd3874e76dc7797f001fd41e85f9794234`).
 GitHub CLI authentication remains invalid and no GitHub connector is
 available, so this receipt could not be posted to issue #1455; no external
 state was mutated.
