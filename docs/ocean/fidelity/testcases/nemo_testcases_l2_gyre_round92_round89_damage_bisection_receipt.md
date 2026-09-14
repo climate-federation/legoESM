@@ -84,10 +84,10 @@ rows do not supersede Krhs as the first direct mismatch.
 ## Round-90 record admission and calibration retraction
 
 The compiled write-only recorder serializes every field's actual shape at
-`GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/l2_r90_baro.f90:20-36`. Its
+`GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/l2_r90_baro.f90:35-51`. Its
 correction arguments are assumed-shape owned arrays, while raw/final state,
 targets, geometry, and masks are emitted from their declared arrays at
-`GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/l2_r90_baro.f90:54-88`. The reader
+`GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/l2_r90_baro.f90:69-103`. The reader
 now admits that contract: global `36x26x31`, owned bounds `3:34,3:24`, owned
 zub/zvb `32x22`, and global shapes for the other fields. It still fails closed
 on magic, version, field inventory, per-field rank/extent, finite values,
