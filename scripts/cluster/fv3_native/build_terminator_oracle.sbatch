@@ -44,6 +44,7 @@ ldd "$EXE" | grep -q "not found" && { echo "PREFLIGHT FAILED: unresolved libs"; 
 cd "$REPO"
 echo "host: $(hostname)  exe: $EXE  repo sha: $(git rev-parse HEAD) dirty: $(git status --porcelain | wc -l)"
 
+STAGED=()
 run_deck () {  # name minutes
   local W=$PIN/$1 MIN=$2 STAGE
   STAGE=$PIN/$1.staging.$$
@@ -52,7 +53,7 @@ run_deck () {  # name minutes
   fi
   rm -rf "$STAGE"; mkdir -p "$STAGE/RESTART" "$STAGE/INPUT" || exit 8
   cp "$SRC"/{input.nml,diag_table,field_table} "$STAGE/" || exit 8
-  cd "$STAGE"
+  cd "$STAGE" || exit 8
   # ONE edit to the field_table: cl and cl2 inserted before rainwat, so
   # the dnats=1 tail is still rainwat alone.  Asserted below from the
   # run's own tracer restart, not from this sed.
@@ -73,7 +74,7 @@ i = s.index(' "TRACER", "atmos_mod", "rainwat"')
 open("field_table", "w").write(s[:i] + block + s[i:])
 PYEOF
   [ "$(grep -cE '^ *minutes *= *32' input.nml)" = 1 ] || { echo "nml: minutes line not unique"; exit 8; }
-  sed -i "s/^\( *minutes *= *\)32/\1$MIN/" input.nml
+  sed -i "s/^\( *minutes *= *\)32/\1$MIN/" input.nml || exit 8
   echo "=== RUN $1 (cold start, minutes=$MIN, field_table + cl, cl2) ==="
   mpirun -np 6 "$EXE" > run_out.txt 2>&1; local RC=$?
   local FAIL=""
@@ -93,7 +94,7 @@ PYEOF
   ORDER=$("$PY" -c "import netCDF4; ds=netCDF4.Dataset('RESTART/fv_tracer.res.tile1.nc'); print(','.join(v for v in ds.variables if ds.variables[v].ndim==4))" 2>/dev/null)
   [ "$ORDER" = "sphum,liq_wat,cl,cl2,rainwat" ] || FAIL="$FAIL; tracer order is '$ORDER'"
   if [ -n "$FAIL" ]; then
-    echo "RUN FAILED for $1 ($FAIL):"; head -20 run_out.txt; grep -iE 'error|fatal' logfile.000000.out | head; cd /; rm -rf "$STAGE"; exit 7
+    echo "RUN FAILED for $1 ($FAIL):"; head -20 run_out.txt; grep -iE 'error|fatal' logfile.000000.out | head; cd /; unstage_all; rm -rf "$STAGE"; exit 7
   fi
   {
     echo "generated_by  scripts/cluster/fv3_native/build_terminator_oracle.sbatch"
@@ -107,33 +108,42 @@ PYEOF
     grep -i "FMSConstants" logfile.000000.out | head -1
     grep -iE "^ *(WARM_START|HYDROSTATIC|ADIABATIC|NPZ|K_SPLIT|N_SPLIT|NWAT|DNATS|CONSV_TE|DO_TERMINATOR) " logfile.000000.out | head -12
   } > PROVENANCE
-  cd "$PIN"; rm -rf "$W"; mv "$STAGE" "$W"
-  echo "--- published $W ---"
+  cd "$PIN" || exit 8
+  STAGED+=("$1")
+  echo "--- staged $1 (publish after the cross-deck controls) ---"
 }
+publish_all () {  # codex 2026-09-14: a family is published whole or not at all
+  for d in "${STAGED[@]}"; do
+    rm -rf "$PIN/$d" && mv "$PIN/$d.staging.$$" "$PIN/$d" || { echo "PUBLISH FAILED for $d"; exit 11; }
+    echo "--- published $PIN/$d ---"
+  done
+}
+unstage_all () { for d in "${STAGED[@]}"; do rm -rf "$PIN/$d.staging.$$"; done; }
 
 run_deck run_hydro_zerostep_term_gfs 0
 run_deck run_hydro_1step_term_gfs 32
 
 echo "=== CONTROL 1: passengers change no dynamics -- 1-step term deck == pinned cold 1-step deck ==="
-"$PY" "$CMP" --a "$PIN/run_hydro_1step_term_gfs" --b "$SRC" --file fv_core.res --vars u,v,T,delp || exit 10
+"$PY" "$CMP" --a "$PIN/run_hydro_1step_term_gfs.staging.$$" --b "$SRC" --file fv_core.res --vars u,v,T,delp || { unstage_all; exit 10; }
 echo "=== RECORD: does the terminator branch's init-time halo update move sphum? (finding, not gate) ==="
-"$PY" "$CMP" --a "$PIN/run_hydro_1step_term_gfs" --b "$SRC" --file fv_tracer.res --vars sphum,liq_wat --max-rel inf
+"$PY" "$CMP" --a "$PIN/run_hydro_1step_term_gfs.staging.$$" --b "$SRC" --file fv_tracer.res --vars sphum,liq_wat --max-rel inf
 echo "=== CONTROL 2: the IC deck's dynamics are the pinned zero-step IC ==="
-"$PY" "$CMP" --a "$PIN/run_hydro_zerostep_term_gfs" --b "$PIN/run_hydro_zerostep_consv_gfs" --file fv_core.res --vars u,v,T,delp || exit 10
+"$PY" "$CMP" --a "$PIN/run_hydro_zerostep_term_gfs.staging.$$" --b "$PIN/run_hydro_zerostep_consv_gfs" --file fv_core.res --vars u,v,T,delp || { unstage_all; exit 10; }
 echo "=== SIGNAL: cl, cl2 nonzero and moved; sphum moved ==="
-"$PY" "$CMP" --a "$PIN/run_hydro_zerostep_term_gfs" --b "$PIN/run_hydro_1step_term_gfs" --file fv_tracer.res --vars sphum,cl,cl2 --moved sphum,cl,cl2 --max-rel inf || exit 10
+"$PY" "$CMP" --a "$PIN/run_hydro_zerostep_term_gfs.staging.$$" --b "$PIN/run_hydro_1step_term_gfs.staging.$$" --file fv_tracer.res --vars sphum,cl,cl2 --moved sphum,cl,cl2 --max-rel inf || { unstage_all; exit 10; }
 echo "=== CONSERVATION: Cl + 2 Cl2 == qcly on every tile at the IC (gate); after the step (RECORD: limited transport is not linear, and this deviation is the DCMIP terminator diagnostic itself) ==="
-"$PY" - <<'PYEOF' || exit 10
+STAGE_PID=$$ "$PY" - <<'PYEOF' || { unstage_all; exit 10; }
 import netCDF4, numpy as np, sys
 sys.path.insert(0, "/burg-archive/glab/users/pg2328/legoESM_codex_m8/packages/core")
 from legoesm.core.fv3_native_dcmip16_ic import TERM_QCLY
 P = "/burg-archive/glab/users/pg2328/fv3_oracle_pinned"
+import os; PID = os.environ["STAGE_PID"]
 res = {}
 for deck in ("run_hydro_zerostep_term_gfs", "run_hydro_1step_term_gfs"):
     worst = 0.0
     any_cl = False
     for t in range(1, 7):
-        with netCDF4.Dataset(f"{P}/{deck}/RESTART/fv_tracer.res.tile{t}.nc") as ds:
+        with netCDF4.Dataset(f"{P}/{deck}.staging.{PID}/RESTART/fv_tracer.res.tile{t}.nc") as ds:
             cl = np.asarray(ds["cl"][0]); cl2 = np.asarray(ds["cl2"][0])
             # a tile wholly on the night side has cl == 0 (tile 5 at C48);
             # cl2 is then qcly/2 there, never zero
@@ -147,4 +157,5 @@ ok = res["run_hydro_zerostep_term_gfs"] < 1e-12
 print("IC CONSERVATION", "OK" if ok else "VIOLATED", "; post-step deviation recorded above")
 sys.exit(0 if ok else 1)
 PYEOF
+publish_all
 echo TERMINATOR_ORACLE_DONE

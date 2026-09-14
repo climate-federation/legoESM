@@ -439,8 +439,12 @@ def test_a_lon_dependent_extra_scalar_breaks_the_zonal_mirror_tie():
     mod = _load_scorer()
     n, km = 6, 2
     sym = np.cos(np.linspace(-1.0, 1.0, n))            # symmetric along i
-    v = np.tile(sym[:, None, None], (1, n, km))
-    v = np.concatenate([v, v[-1:, :, :]], axis=0)       # (n+1, n, km)
+    # v is staggered along i (n+1 rows): its OWN symmetric profile, not a
+    # duplicated last row -- codex 2026-09-14: the duplicated row made v
+    # asymmetric, so the prognostics alone already picked the mirror and
+    # the test proved nothing about the extra scalar
+    sym_v = np.cos(np.linspace(-1.0, 1.0, n + 1))
+    v = np.tile(sym_v[:, None, None], (1, n, km))       # (n+1, n, km)
     u = np.zeros((n, n + 1, km))
     pt = np.tile(sym[:, None, None], (1, n, km)) + 300.0
     delp = np.full((n, n, km), 1.0e4)
@@ -463,9 +467,25 @@ def test_a_lon_dependent_extra_scalar_breaks_the_zonal_mirror_tie():
     port_plain = {k: a for k, a in port.items() if k != "cl"}
     r0, _, nm0, _, _, per0 = mod.score_pair(port_plain, orc_plain)
     assert r0 < 1e-15 and nm0 in ("id", "fi")
-    r_id = max(mod.rel(port_plain[k], mod.oracle_ij(orc_plain[k], False))
-               for k in ("pt", "delp"))
-    assert r_id < 1e-15, "the fixture is not mirror-symmetric; test is vacuous"
+    # NON-VACUITY: every prognostic field, u and v included, must accept
+    # BOTH the identity and the mirror at the floor -- otherwise the
+    # prognostics decide and the extra scalar is never needed
+    for nm_t in ("id", "fi"):
+        f = mod.DIHEDRAL[nm_t]
+        su, sv = mod.DIHEDRAL_SIGNS[nm_t]
+        got = {
+            "u": mod.rel(su * f(port_plain["u"]), mod.oracle_ij(orc_plain["u"], False)),
+            "v": mod.rel(sv * f(port_plain["v"]), mod.oracle_ij(orc_plain["v"], False)),
+            "pt": mod.rel(f(port_plain["pt"]), mod.oracle_ij(orc_plain["pt"], False)),
+            "delp": mod.rel(f(port_plain["delp"]), mod.oracle_ij(orc_plain["delp"], False)),
+        }
+        assert max(got.values()) < 1e-15, (nm_t, got)
+    # and with the extra, the WRONG transform must score badly on it
+    f = mod.DIHEDRAL["id"]
+    assert mod.rel(f(port["cl"]), mod.oracle_ij(orc["cl"], False)) > 0.1
+    # tie bookkeeping: two candidates fit without the extra, one with it
+    assert per0["_ties"] == 2, per0
+    assert per["_ties"] == 1, per
 
 
 def test_terminator_tracer_floor_is_derived_from_its_cancellation():
@@ -507,3 +527,13 @@ def test_arm_ksplit_nsplit_must_match_the_step_deck(tmp_path):
     with pytest.raises(SystemExit, match="deck has k_split=2"):
         mod.main(["--ic-run", decks[0], "--step-run", decks[1], "--k-split", "1",
                   "--n-split", "8", "--backend", "numpy"])
+
+
+def test_nml_value_takes_the_last_assignment_on_a_line_too():
+    """codex 2026-09-14: `k_split = 1, k_split = 2` on ONE line is legal
+    Fortran and the last wins; re.search took the first."""
+    mod = _load_scorer()
+    text = " &fv_core_nml\n   k_split = 1, k_split = 2\n   n_split = 8 ! n_split = 3\n /\n"
+    assert mod._nml_int(text, "k_split") == 2
+    assert mod._nml_int(text, "n_split") == 8
+    assert mod._nml_int("k_split = 3\nk_split = 4\n", "k_split") == 4

@@ -67,8 +67,13 @@ def main(argv=None) -> int:
         mask = np.zeros_like(q0, dtype=bool)
         mask[:, cs, cs, :] = (plateau_mask(q0[:, cs, cs, :], value)
                               if value else q0[:, cs, cs, :] == 0.0)
+        # ONE ulp OF THE PLATEAU VALUE (codex 2026-09-14: spacing(qcly)
+        # is two ulp at the 2e-6 plateau). cl's plateau is exactly 0,
+        # where an ulp is 5e-324 and meaningless; it is nudged by one ulp
+        # of qcly instead, as a "smallest positive value" control.
+        nudge = np.spacing(value) if value else ulp
         q1 = q0.copy()
-        q1[mask] += ulp
+        q1[mask] += nudge
         pert = dict(ic)
         pert["q"] = list(ic["q"])
         pert["q"][iq] = jnp.asarray(q1)
@@ -76,10 +81,11 @@ def main(argv=None) -> int:
         a = np.asarray(base["q"][iq])[:, cs, cs, :]
         b = np.asarray(out["q"][iq])[:, cs, cs, :]
         d = np.abs(a - b)
-        moved = d > 10 * ulp
-        print(f"{name}: plateau cells perturbed {int(mask.sum())}; one-step "
-              f"output max |change| {d.max():.3e} = {d.max() / ulp:.3g} ulp; "
-              f"cells moved > 10 ulp: {int(moved.sum())}; per-level max "
+        moved = d > 10 * nudge
+        print(f"{name}: plateau cells perturbed {int(mask.sum())} by "
+              f"{nudge:.3e}; one-step output max |change| {d.max():.3e} = "
+              f"{d.max() / nudge:.3g} nudges; cells moved > 10x: "
+              f"{int(moved.sum())}; per-level max "
               f"{[f'{d[..., k].max():.1e}' for k in range(d.shape[-1])]}")
         # the OTHER tracers must not move at all: passengers are independent
         for jq, other in ((0, "sphum"), (1, "cl"), (2, "cl2")):
@@ -102,7 +108,7 @@ def main(argv=None) -> int:
         spec.loader.exec_module(parity)
         env = parity.CL2_ULP_ENVELOPE_ABS
         ok_cl2 = 0.5 * env <= results["cl2"] <= 1.2 * env
-        ok_cl = results["cl"] <= 10 * ulp
+        ok_cl = results["cl"] <= 10 * ulp        # cl was nudged by ulp(qcly)
         print(f"envelope check: cl2 {results['cl2']:.3e} vs pinned {env:.3e} "
               f"-> {'OK' if ok_cl2 else 'DRIFTED'}; cl {results['cl'] / ulp:.1f} ulp "
               f"-> {'OK' if ok_cl else 'NOT SMOOTH'}")

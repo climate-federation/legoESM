@@ -367,9 +367,12 @@ def _nml_value(text: str, key: str, pattern: str):
     val = None
     for raw in text.splitlines():
         line = raw.split("!", 1)[0]          # `!` starts a comment
-        m = re.search(rf"\b{key}\s*=\s*({pattern})", line, re.IGNORECASE)
-        if m:
-            val = m.group(1)
+        # ALL matches on the line, last one wins -- `k_split=1, k_split=2`
+        # on one line is legal Fortran and reads as 2 (codex 2026-09-14;
+        # re.search took the first)
+        found = re.findall(rf"\b{key}\s*=\s*({pattern})", line, re.IGNORECASE)
+        if found:
+            val = found[-1]
     return val
 
 
@@ -744,6 +747,7 @@ def score_pair(port, orc) -> tuple:
     """
     best = (np.inf, None, None, None, None, None)
     best_select = np.inf
+    selects = []          # every candidate's selection cost, for tie detection
     ws = wind_scale(port, orc)
     for transposed in (False, True):
         ou = oracle_ij(orc["u"], transposed)
@@ -785,9 +789,18 @@ def score_pair(port, orc) -> tuple:
                                                            transposed),
                                  TRACER_SCALE.get(extra))
             r_select = max(per.values())
+            selects.append(r_select)
             if r_select < best_select:
                 best_select = r_select
                 best = (r, transposed, nm, su, sv, per)
+    # AMBIGUITY, made visible (codex 2026-09-14): candidates whose selection
+    # cost sits within the IC floor band of the winner are indistinguishable
+    # on the fields scored. Without a lon-dependent extra this is the state
+    # every pre-terminator certificate was in on the bump-free faces; the
+    # caller decides whether that is acceptable for what it scores.
+    if best[5] is not None:
+        band = max(10.0 * IC_CONTROL_MAX_REL, 2.0 * best_select)
+        best[5]["_ties"] = int(sum(1 for x in selects if x <= band))
     return best
 
 
@@ -1633,6 +1646,19 @@ def main(argv=None):
                     orc_ic[ot][nm] = orc_tr_ic[ot][nm]
     (cost, meta, perm, worst,
      per_field, wind_only) = derive_face_map(p_ic, orc_ic)
+    ambiguous = [pf for pf in range(6)
+                 if per_field[pf][perm[pf]].get("_ties", 1) > 1]
+    if ambiguous:
+        lon_scored = args.tracers and any(nm in ADVECTED_TRACERS
+                                          for nm in ("cl", "cl2"))
+        msg = (f"face map AMBIGUOUS on port faces {[f + 1 for f in ambiguous]}: "
+               f"more than one transform fits every scored field at the IC "
+               f"floor (the bump-free faces are mirror-symmetric in u/v/pt/delp)")
+        if lon_scored:
+            raise SystemExit("REFUSED: " + msg + " even with a lon-dependent "
+                             "tracer attached -- the map cannot be trusted")
+        print("WARNING: " + msg + "; nothing scored here depends on the "
+              "choice, but a longitude-dependent field would")
 
     print("\nIC cost matrix rel(port face -> oracle tile):")
     for pf in range(6):
@@ -1663,7 +1689,9 @@ def main(argv=None):
                 if min(cost[pf, ot], wind_only[pf, ot]) > 1e-6:
                     continue
                 print(f"  face {pf+1} -> tile {ot+1}: " +
-                      "  ".join(f"{k}={d[k]:9.2e}" for k in d))
+                      "  ".join(f"{k}={d[k]:9.2e}" for k in d
+                                if not k.startswith("_"))
+                      + (f"  ties={d['_ties']}" if d.get("_ties", 1) > 1 else ""))
         print("\nport IC field ranges (compute window):")
         for f in ("u", "v", "pt", "delp"):
             print(f"  {f:5s} " + "  ".join(
@@ -2207,6 +2235,49 @@ def main(argv=None):
         saved["nh"] = np.asarray(bool(args.nh))
         np.savez_compressed(args.save_fields, **saved)
         print(f"\nsaved mapped port/oracle planes -> {args.save_fields}")
+    if args.tracers:
+        # Two checks a ceiling cannot replace (codex 2026-09-14: a
+        # conservative REDISTRIBUTION bug on cl2 hides under 1.6e-3 of
+        # qcly). (1) Tracer MASS on the compute window, port vs oracle,
+        # after the step: both transports are flux-form, so the totals
+        # must agree to rounding whatever the limiter did. (2) For the
+        # terminator pair, Cl + 2 Cl2 - qcly after the step: the DCMIP
+        # diagnostic; the port's deviation must sit within cl2's ceiling
+        # of the oracle's, so cl2 cannot have been redistributed
+        # differently from cl.
+        print("\nTRACER MASS after one step (sum delp*q over the window, "
+              "port vs oracle, per tracer; must agree to rounding):")
+        for nm in ADVECTED_TRACERS:
+            mp = mo = 0.0
+            for pf in range(6):
+                ot = perm[pf]
+                a, b = map_scalar_pair(p_tr_1[pf][nm], orc_tr_1[ot][nm],
+                                       meta[pf][ot])
+                dp_p, dp_o = map_scalar_pair(p_1[pf]["delp"],
+                                             orc_1[ot]["delp"], meta[pf][ot])
+                mp += float((a * dp_p).sum()); mo += float((b * dp_o).sum())
+            r_m = abs(mp - mo) / max(abs(mp), abs(mo), 1e-300)
+            print(f"  {nm:8s} port {mp:.12e}  oracle {mo:.12e}  rel {r_m:.3e}")
+            if r_m > IC_CONTROL_MAX_REL:
+                worst_step = max(worst_step, r_m / IC_CONTROL_MAX_REL
+                                 * (args.max_rel or 1.0))
+                print(f"    MASS MISMATCH beyond rounding for {nm} -- counted "
+                      f"against the gate")
+        if "cl" in ADVECTED_TRACERS and "cl2" in ADVECTED_TRACERS:
+            from legoesm.core.fv3_native_dcmip16_ic import TERM_QCLY as _Q
+            dev_p = max(float(np.abs(p_tr_1[pf]["cl"] + 2.0 * p_tr_1[pf]["cl2"]
+                                     - _Q).max()) for pf in range(6)) / _Q
+            dev_o = max(float(np.abs(orc_tr_1[ot]["cl"] + 2.0 * orc_tr_1[ot]["cl2"]
+                                     - _Q).max()) for ot in range(6)) / _Q
+            gap = abs(dev_p - dev_o)
+            ceil = TRACER_STEP_MAX_REL.get("cl2", args.max_rel or 1.0)
+            print(f"\nTERMINATOR Cl + 2 Cl2 - qcly after one step (max, / qcly): "
+                  f"port {dev_p:.3e}  oracle {dev_o:.3e}  |gap| {gap:.3e} "
+                  f"({gap / ceil:.2f}x cl2's ceiling)")
+            if gap > ceil:
+                worst_step = max(worst_step, gap / ceil * (args.max_rel or 1.0))
+                print("    CLY DEVIATION differs beyond cl2's ceiling -- counted "
+                      "against the gate")
     print(f"\nWORST one-step rel over all faces and fields: {worst_step:.4e}")
     print(f"IC control (same harness, same map): {worst:.4e}")
     print(f"amplification over one step: "

@@ -55,6 +55,7 @@ echo "host: $(hostname)  exe: $EXE  repo sha: $(git rev-parse HEAD) dirty: $(git
 echo "=== STEP 0: write the modulated liq_wat into a copy of the zero-step tracer restarts ==="
 "$PY" "$WRITER" --zerostep-run "$ZS" --out-dir "$TRIC" || { echo "WRITER FAILED"; exit 7; }
 
+STAGED=()
 run_deck () {  # name minutes tracer_dir
   local W=$PIN/$1 MIN=$2 TR=$3 STAGE
   STAGE=$PIN/$1.staging.$$
@@ -66,12 +67,12 @@ run_deck () {  # name minutes tracer_dir
   [ -d "$SRC/INPUT" ] && cp -r "$SRC/INPUT/." "$STAGE/INPUT/"
   cp "$ZS"/RESTART/* "$STAGE/INPUT/" || exit 8
   if [ -n "$TR" ]; then cp "$TR"/fv_tracer.res.tile*.nc "$STAGE/INPUT/" || exit 8; fi
-  cd "$STAGE"
+  cd "$STAGE" || exit 8
   # exactly one edit each, asserted
   [ "$(grep -cE '^ *warm_start *= *\.F\.' input.nml)" = 1 ] || { echo "nml: warm_start line not unique"; exit 8; }
-  sed -i 's/^\( *warm_start *= *\)\.F\./\1.T./' input.nml
+  sed -i 's/^\( *warm_start *= *\)\.F\./\1.T./' input.nml || exit 8
   [ "$(grep -cE '^ *minutes *= *32' input.nml)" = 1 ] || { echo "nml: minutes line not unique"; exit 8; }
-  sed -i "s/^\( *minutes *= *\)32/\1$MIN/" input.nml
+  sed -i "s/^\( *minutes *= *\)32/\1$MIN/" input.nml || exit 8
   echo "=== RUN $1 (warm_start=.T., minutes=$MIN, tracer=${TR:-original}) ==="
   mpirun -np 6 "$EXE" > run_out.txt 2>&1; local RC=$?
   local FAIL=""
@@ -87,7 +88,7 @@ run_deck () {  # name minutes tracer_dir
     FAIL="$FAIL; no logfile"
   fi
   if [ -n "$FAIL" ]; then
-    echo "RUN FAILED for $1 ($FAIL):"; head -20 run_out.txt; grep -iE 'error|fatal' logfile.000000.out | head; cd /; rm -rf "$STAGE"; exit 7
+    echo "RUN FAILED for $1 ($FAIL):"; head -20 run_out.txt; grep -iE 'error|fatal' logfile.000000.out | head; cd /; unstage_all; rm -rf "$STAGE"; exit 7
   fi
   {
     echo "generated_by  scripts/cluster/fv3_native/build_warm_tracer_oracle.sbatch"
@@ -102,22 +103,31 @@ run_deck () {  # name minutes tracer_dir
     grep -i "FMSConstants" logfile.000000.out | head -1
     grep -iE "^ *(WARM_START|HYDROSTATIC|ADIABATIC|NPZ|K_SPLIT|N_SPLIT|NWAT|DNATS|CONSV_TE) " logfile.000000.out | head -12
   } > PROVENANCE
-  cd "$PIN"; rm -rf "$W"; mv "$STAGE" "$W"
-  echo "--- published $W ---"
+  cd "$PIN" || exit 8
+  STAGED+=("$1")
+  echo "--- staged $1 (publish after the cross-deck controls) ---"
 }
+publish_all () {  # codex 2026-09-14: a family is published whole or not at all
+  for d in "${STAGED[@]}"; do
+    rm -rf "$PIN/$d" && mv "$PIN/$d.staging.$$" "$PIN/$d" || { echo "PUBLISH FAILED for $d"; exit 11; }
+    echo "--- published $PIN/$d ---"
+  done
+}
+unstage_all () { for d in "${STAGED[@]}"; do rm -rf "$PIN/$d.staging.$$"; done; }
 
 run_deck run_hydro_1step_warm_gfs 32 ""
 run_deck run_hydro_zerostep_warmtracer_gfs 0 "$TRIC"
 run_deck run_hydro_1step_warmtracer_gfs 32 "$TRIC"
 
 echo "=== CONTROL 1: warm start reproduces the cold start (fv_core + sphum) ==="
-"$PY" "$CMP" --a "$PIN/run_hydro_1step_warm_gfs" --b "$SRC" --file fv_core.res --vars u,v,T,delp --max-rel "${WARM_MAX_REL:-0}" || exit 10
-"$PY" "$CMP" --a "$PIN/run_hydro_1step_warm_gfs" --b "$SRC" --file fv_tracer.res --vars sphum,liq_wat --max-rel "${WARM_MAX_REL:-0}" || exit 10
+"$PY" "$CMP" --a "$PIN/run_hydro_1step_warm_gfs.staging.$$" --b "$SRC" --file fv_core.res --vars u,v,T,delp --max-rel "${WARM_MAX_REL:-0}" || { unstage_all; exit 10; }
+"$PY" "$CMP" --a "$PIN/run_hydro_1step_warm_gfs.staging.$$" --b "$SRC" --file fv_tracer.res --vars sphum,liq_wat --max-rel "${WARM_MAX_REL:-0}" || { unstage_all; exit 10; }
 echo "=== CONTROL 2: the tracer deck's zero step IS the IC it was given ==="
-"$PY" "$CMP" --a "$PIN/run_hydro_zerostep_warmtracer_gfs" --b "$ZS" --file fv_core.res --vars u,v,T,delp || exit 10
+"$PY" "$CMP" --a "$PIN/run_hydro_zerostep_warmtracer_gfs.staging.$$" --b "$ZS" --file fv_core.res --vars u,v,T,delp || { unstage_all; exit 10; }
 echo "=== CONTROL 3: a passenger changes nothing else -- tracer deck dynamics == control ==="
-"$PY" "$CMP" --a "$PIN/run_hydro_1step_warmtracer_gfs" --b "$PIN/run_hydro_1step_warm_gfs" --file fv_core.res --vars u,v,T,delp || exit 10
-"$PY" "$CMP" --a "$PIN/run_hydro_1step_warmtracer_gfs" --b "$PIN/run_hydro_1step_warm_gfs" --file fv_tracer.res --vars sphum || exit 10
+"$PY" "$CMP" --a "$PIN/run_hydro_1step_warmtracer_gfs.staging.$$" --b "$PIN/run_hydro_1step_warm_gfs.staging.$$" --file fv_core.res --vars u,v,T,delp || { unstage_all; exit 10; }
+"$PY" "$CMP" --a "$PIN/run_hydro_1step_warmtracer_gfs.staging.$$" --b "$PIN/run_hydro_1step_warm_gfs.staging.$$" --file fv_tracer.res --vars sphum || { unstage_all; exit 10; }
 echo "=== SIGNAL: liq_wat is nonzero and moved over the step ==="
-"$PY" "$CMP" --a "$PIN/run_hydro_zerostep_warmtracer_gfs" --b "$PIN/run_hydro_1step_warmtracer_gfs" --file fv_tracer.res --vars sphum,liq_wat --moved sphum,liq_wat --max-rel inf || exit 10
+"$PY" "$CMP" --a "$PIN/run_hydro_zerostep_warmtracer_gfs.staging.$$" --b "$PIN/run_hydro_1step_warmtracer_gfs.staging.$$" --file fv_tracer.res --vars sphum,liq_wat --moved sphum,liq_wat --max-rel inf || { unstage_all; exit 10; }
+publish_all
 echo WARM_TRACER_ORACLE_DONE

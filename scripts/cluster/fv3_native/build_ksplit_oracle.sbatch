@@ -35,6 +35,7 @@ ldd "$EXE" | grep -q "not found" && { echo "PREFLIGHT FAILED: unresolved libs"; 
 cd "$REPO"
 echo "host: $(hostname)  exe: $EXE  repo sha: $(git rev-parse HEAD) dirty: $(git status --porcelain | wc -l)"
 
+STAGED=()
 run_deck () {  # name minutes
   local W=$PIN/$1 MIN=$2 STAGE
   STAGE=$PIN/$1.staging.$$
@@ -43,13 +44,13 @@ run_deck () {  # name minutes
   fi
   rm -rf "$STAGE"; mkdir -p "$STAGE/RESTART" "$STAGE/INPUT" || exit 8
   cp "$SRC"/{input.nml,diag_table,field_table} "$STAGE/" || exit 8
-  cd "$STAGE"
+  cd "$STAGE" || exit 8
   # ONE edit to the namelist: k_split 1 -> 2, asserted unique here and
   # resolved from the run's own logfile below.
   [ "$(grep -cE '^ *k_split *= *1' input.nml)" = 1 ] || { echo "nml: k_split line not unique"; exit 8; }
-  sed -i 's/^\( *k_split *= *\)1/\12/' input.nml
+  sed -i 's/^\( *k_split *= *\)1/\12/' input.nml || exit 8
   [ "$(grep -cE '^ *minutes *= *32' input.nml)" = 1 ] || { echo "nml: minutes line not unique"; exit 8; }
-  sed -i "s/^\( *minutes *= *\)32/\1$MIN/" input.nml
+  sed -i "s/^\( *minutes *= *\)32/\1$MIN/" input.nml || exit 8
   echo "=== RUN $1 (cold start, minutes=$MIN, k_split=2) ==="
   mpirun -np 6 "$EXE" > run_out.txt 2>&1; local RC=$?
   local FAIL=""
@@ -70,7 +71,7 @@ run_deck () {  # name minutes
   ORDER=$("$PY" -c "import netCDF4; ds=netCDF4.Dataset('RESTART/fv_tracer.res.tile1.nc'); print(','.join(v for v in ds.variables if ds.variables[v].ndim==4))" 2>/dev/null)
   [ "$ORDER" = "sphum,liq_wat,rainwat" ] || FAIL="$FAIL; tracer order is '$ORDER'"
   if [ -n "$FAIL" ]; then
-    echo "RUN FAILED for $1 ($FAIL):"; head -20 run_out.txt; grep -iE 'error|fatal' logfile.000000.out | head; cd /; rm -rf "$STAGE"; exit 7
+    echo "RUN FAILED for $1 ($FAIL):"; head -20 run_out.txt; grep -iE 'error|fatal' logfile.000000.out | head; cd /; unstage_all; rm -rf "$STAGE"; exit 7
   fi
   {
     echo "generated_by  scripts/cluster/fv3_native/build_ksplit_oracle.sbatch"
@@ -84,17 +85,26 @@ run_deck () {  # name minutes
     grep -i "FMSConstants" logfile.000000.out | head -1
     grep -iE "^ *(WARM_START|HYDROSTATIC|ADIABATIC|NPZ|K_SPLIT|N_SPLIT|NWAT|DNATS|CONSV_TE|DO_TERMINATOR) " logfile.000000.out | head -12
   } > PROVENANCE
-  cd "$PIN"; rm -rf "$W"; mv "$STAGE" "$W"
-  echo "--- published $W ---"
+  cd "$PIN" || exit 8
+  STAGED+=("$1")
+  echo "--- staged $1 (publish after the cross-deck controls) ---"
 }
+publish_all () {  # codex 2026-09-14: a family is published whole or not at all
+  for d in "${STAGED[@]}"; do
+    rm -rf "$PIN/$d" && mv "$PIN/$d.staging.$$" "$PIN/$d" || { echo "PUBLISH FAILED for $d"; exit 11; }
+    echo "--- published $PIN/$d ---"
+  done
+}
+unstage_all () { for d in "${STAGED[@]}"; do rm -rf "$PIN/$d.staging.$$"; done; }
 
 run_deck run_hydro_zerostep_ksplit2_gfs 0
 run_deck run_hydro_1step_ksplit2_gfs 32
 
 echo "=== CONTROL: the IC deck's state is the pinned zero-step IC (k_split does not enter the IC) ==="
-"$PY" "$CMP" --a "$PIN/run_hydro_zerostep_ksplit2_gfs" --b "$PIN/run_hydro_zerostep_consv_gfs" --file fv_core.res --vars u,v,T,delp || exit 10
-"$PY" "$CMP" --a "$PIN/run_hydro_zerostep_ksplit2_gfs" --b "$PIN/run_hydro_zerostep_consv_gfs" --file fv_tracer.res --vars sphum || exit 10
+"$PY" "$CMP" --a "$PIN/run_hydro_zerostep_ksplit2_gfs.staging.$$" --b "$PIN/run_hydro_zerostep_consv_gfs" --file fv_core.res --vars u,v,T,delp || { unstage_all; exit 10; }
+"$PY" "$CMP" --a "$PIN/run_hydro_zerostep_ksplit2_gfs.staging.$$" --b "$PIN/run_hydro_zerostep_consv_gfs" --file fv_tracer.res --vars sphum || { unstage_all; exit 10; }
 echo "=== SIGNAL: the k_split=2 step differs from the k_split=1 step (a no-op edit would be vacuous) and moved the state ==="
-"$PY" "$CMP" --a "$PIN/run_hydro_1step_ksplit2_gfs" --b "$SRC" --file fv_core.res --vars u,v,T,delp --moved u,v,T,delp --max-rel inf || exit 10
-"$PY" "$CMP" --a "$PIN/run_hydro_zerostep_ksplit2_gfs" --b "$PIN/run_hydro_1step_ksplit2_gfs" --file fv_core.res --vars u,v,T,delp --moved u,v,T,delp --max-rel inf || exit 10
+"$PY" "$CMP" --a "$PIN/run_hydro_1step_ksplit2_gfs.staging.$$" --b "$SRC" --file fv_core.res --vars u,v,T,delp --moved u,v,T,delp --max-rel inf || { unstage_all; exit 10; }
+"$PY" "$CMP" --a "$PIN/run_hydro_zerostep_ksplit2_gfs.staging.$$" --b "$PIN/run_hydro_1step_ksplit2_gfs.staging.$$" --file fv_core.res --vars u,v,T,delp --moved u,v,T,delp --max-rel inf || { unstage_all; exit 10; }
+publish_all
 echo KSPLIT_ORACLE_DONE
