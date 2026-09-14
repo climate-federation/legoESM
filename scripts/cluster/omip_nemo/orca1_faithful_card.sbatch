@@ -43,7 +43,9 @@ TARGET=$([ "$LEG" = 1 ] && echo $HALF || echo $DAYS)
 YEARS=$($PY -c "print(${TARGET}/365.0)")
 # trp_orca1faith_d30 is the pre-mask baseline every 2026-09-13/14 measurement
 # references; the masked card writes beside it, never over it.
-OUT=${OUT:-/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_orca1faithmask_d${DAYS}}
+# trp_orca1faithmask_d30 = mask only (leg 1 to day 15, 9769155); this card now
+# also carries NEMO's initial-condition time blend, so it writes beside both.
+OUT=${OUT:-/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_orca1faithtint_d${DAYS}}
 echo "DAYS=$DAYS LEG=$LEG TARGET=$TARGET YEARS=$YEARS OUT=$OUT"
 
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
@@ -66,6 +68,9 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --woa-s /burg/glab/users/pg2328/legoESM/data/woce_gouretski/woce_s_woa57_annual.nc \
   --nemo-monthly-init $NEMOIN/orca1_inputs/data_repository/initial_conditions/woce_temp_monthly_init_4p2.nc \
     $NEMOIN/orca1_inputs/data_repository/initial_conditions/woce_salt_monthly_init_4p2.nc \
+  `# ---- initial condition = what NEMO starts from: fldread ln_tint puts the` \
+  `# 1 January state at 0.5*December + 0.5*January of the monthly climatology ----` \
+  --nemo-init-tint \
   --sss-restore-file $NEMOIN/orca1_inputs/data_repository/input_fields/sss_climatology_for_restoring.nc \
   --tripole-vmix tke --ice-init $NEMOIN/Ice_initialization.nc \
   --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic \
