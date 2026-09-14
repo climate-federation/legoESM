@@ -114,7 +114,6 @@ def rest_state_latlon_cgrid_ocean(
     H_bathy_override: jnp.ndarray | None = None,
     stratification: str = "exponential",
     nemo_prognostic_barotropic_velocity: bool = False,
-    nemo_rk3_ssh_scratch: bool = False,
 ) -> LatLonCGridOceanState:
     """Create a rest-state initial condition on a C-grid lat-lon grid.
 
@@ -165,10 +164,6 @@ def rest_state_latlon_cgrid_ocean(
         the depth mean of zero 3-D velocity and copies Kbb to Kmm, hence exact
         zero.  Non-NEMO recipes leave the pair as ``None`` and gain no array
         pytree leaves.
-    nemo_rk3_ssh_scratch : bool, default False
-        Allocate NEMO WS-RK3's separately carried pre-solve ``ssh(Kaa)``
-        scratch.  NEMO cold starts copy ``ssh(Kbb)`` into this slot; both are
-        zero in this rest-state constructor.  Non-WS recipes leave it absent.
 
     Returns
     -------
@@ -280,9 +275,6 @@ def rest_state_latlon_cgrid_ocean(
                     name="vv_b", dims=dims_v2d, units="m/s",
                     staggering="edge")
               if nemo_prognostic_barotropic_velocity else None),
-        eta_rk3_kaa=(Field(data=zeros_2d, name="eta_rk3_kaa",
-                          dims=dims_2d, units="m")
-                     if nemo_rk3_ssh_scratch else None),
     )
 
 
