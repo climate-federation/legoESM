@@ -23,6 +23,7 @@ REQUIRED = {
     "baro_r1_hu_0", "baro_r1_hv_0", "baro_umask", "baro_vmask",
     "baro_final_u", "baro_final_v",
 }
+OWNED_2D = {"baro_zub", "baro_zvb"}
 
 
 def require(condition: bool, message: str) -> None:
@@ -64,12 +65,20 @@ def read_record(path: Path) -> dict[str, object]:
             require(len(raw_name) == 16, f"{path}: truncated field name")
             name = raw_name.decode("ascii").rstrip()
             require(name not in arrays, f"{path}: duplicate field {name}")
+            require(name in REQUIRED, f"{path}: unexpected field {name}")
             raw_shape = handle.read(16)
             require(len(raw_shape) == 16, f"{path}: short shape for {name}")
             rank, n1, n2, n3 = struct.unpack("=4i", raw_shape)
             require(rank in (2, 3), f"{path}: invalid rank for {name}")
-            require((n1, n2) == DIMS[:2] and
-                    (n3 == 1 if rank == 2 else n3 == DIMS[2]),
+            owned = (header["ntei"] - header["ntsi"] + 1,
+                     header["ntej"] - header["ntsj"] + 1)
+            expected = ((*owned, 1) if name in OWNED_2D else
+                        (*DIMS[:2], 1) if rank == 2 else DIMS)
+            expected_rank = 2 if name in OWNED_2D or name in {
+                "baro_target_u", "baro_target_v", "baro_r1_hu_0",
+                "baro_r1_hv_0",
+            } else 3
+            require(rank == expected_rank and (n1, n2, n3) == expected,
                     f"{path}: wrong shape for {name}: {(rank, n1, n2, n3)}")
             count = n1 * n2 * (1 if rank == 2 else n3)
             raw = handle.read(8 * count)
@@ -103,10 +112,10 @@ def measure(args) -> dict[str, object]:
     require(stamp_words[0] == _sha256(args.record), "record digest differs")
     faces = {}
     for face in ("u", "v"):
-        raw = arrays[f"baro_raw_{face}"]
+        raw = arrays[f"baro_raw_{face}"][2:-2, 2:-2]
         correction = arrays["baro_zub" if face == "u" else "baro_zvb"]
-        mask = arrays[f"baro_{face}mask"]
-        final = arrays[f"baro_final_{face}"].copy()
+        mask = arrays[f"baro_{face}mask"][2:-2, 2:-2]
+        final = arrays[f"baro_final_{face}"][2:-2, 2:-2].copy()
         active = mask > 0.5
         replay = raw + correction[..., None] * mask
         if args.plant == "final-ulp" and face == "u":
@@ -121,7 +130,7 @@ def measure(args) -> dict[str, object]:
             "max_abs": float(np.max(np.abs(replay[active] - final[active]))),
             "bit_exact": bool(not np.any(unequal)),
             "target_nonzero_wet": int(np.count_nonzero(
-                arrays[f"baro_target_{face}"][active[..., 0]])),
+                arrays[f"baro_target_{face}"][2:-2, 2:-2][active[..., 0]])),
         }
     exact = all(row["bit_exact"] for row in faces.values())
     if args.plant:

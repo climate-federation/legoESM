@@ -27,15 +27,18 @@ def _payload(value: np.ndarray, rank: int) -> bytes:
     return np.asarray(value).transpose(1, 0, 2).ravel(order="F").tobytes()
 
 
-def _write_record(path: Path) -> Path:
+def _write_record(path: Path, *, wrong_owned_extent: bool = False) -> Path:
     nx, ny, nz = gate.DIMS
+    owned_nx, owned_ny = nx - 4, ny - 4
     zeros3 = np.zeros((ny, nx, nz), dtype=np.float64)
     ones3 = np.ones((ny, nx, nz), dtype=np.float64)
     ones2 = np.ones((ny, nx), dtype=np.float64)
+    owned2 = np.ones(
+        (owned_ny - int(wrong_owned_extent), owned_nx), dtype=np.float64)
     values = {
         "baro_raw_u": zeros3, "baro_raw_v": zeros3,
         "baro_target_u": ones2, "baro_target_v": ones2,
-        "baro_zub": ones2, "baro_zvb": ones2,
+        "baro_zub": owned2, "baro_zvb": owned2,
         "baro_e3u_0": ones3, "baro_e3v_0": ones3,
         "baro_r1_hu_0": ones2, "baro_r1_hv_0": ones2,
         "baro_umask": ones3, "baro_vmask": ones3,
@@ -48,9 +51,10 @@ def _write_record(path: Path) -> Path:
         for name in sorted(values):
             value = values[name]
             rank = value.ndim
+            n1, n2 = value.shape[1], value.shape[0]
             handle.write(name.ljust(16).encode())
             handle.write(struct.pack(
-                "=4i", rank, nx, ny, 1 if rank == 2 else nz))
+                "=4i", rank, n1, n2, 1 if rank == 2 else value.shape[2]))
             handle.write(_payload(value, rank))
     return path
 
@@ -75,6 +79,16 @@ def test_final_add_ulp_plant_fires(tmp_path):
     report = gate.measure(_args(tmp_path, plant="final-ulp"))
     assert report["status"] == "PLANT_FIRED"
     assert not report["faces"]["u"]["bit_exact"]
+
+
+def test_record_reader_rejects_wrong_owned_correction_extent(tmp_path):
+    record = _write_record(tmp_path / "record.bin", wrong_owned_extent=True)
+    try:
+        gate.read_record(record)
+    except RuntimeError as error:
+        assert "wrong shape for baro_zub" in str(error)
+    else:
+        raise AssertionError("wrong owned correction extent was accepted")
 
 
 def test_source_card_is_additive_write_only_and_configuration_neutral():
