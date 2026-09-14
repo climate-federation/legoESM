@@ -1,0 +1,26 @@
+# FESOM2-JAX (fesom_jax) one-year production run on the FORCA20 mesh (2.13M nodes,
+# 5-22 km, median 14 km) — the "0.1-degree-equivalent FESOM" arm of the 2026-09-08
+# hi-res ocean campaign. Physics copied verbatim from fesom_jax's de-risked
+# configs/forca20_tke_mevp_prod.yaml (TKE + mEVP + zstar, GM off); only the run
+# orchestration keys differ (partition, paths). Every forcing input path is
+# written out explicitly (no reliance on the reader's Levante defaults).
+ale: {}                 # zstar
+gm: null                # GM off
+kpp: null               # KPP off — TKE is the mixing scheme
+tke: {}                 # TKE vertical mixing
+ice: {whichEVP: 1}      # mEVP sea-ice rheology
+visc: {}                # CORE2-default gammas
+tracer: {}              # MFCT/QR4C/FCT defaults
+dt: 180.0               # [s]; one model year = 175200 steps
+dt_ramp: {after_step: 175200, dt: 240.0}   # outside the one-year window; kept identical to prod yaml
+mesh: /work/ab0995/a270088/fesom_jax_meshes/mesh_forca20
+partition: dist_16   # 16 GPUs on 4 nodes; the launcher passes the same value
+forcing:
+  kind: core2
+  start_year: 1958
+  jra_dir: /pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0
+  sss_path: /pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/PHC2_salx.nc
+  runoff_path: /pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/CORE2_runoff.nc
+  chl_path: /pool/data/AWICM/FESOM2/FORCING/Sweeney/Sweeney_2005.nc
+restart_in: null
+restart_out: /work/bd1083/b309178/diffESM/legoesm_pg/ocean_hires_runs/forca20_1yr/restart

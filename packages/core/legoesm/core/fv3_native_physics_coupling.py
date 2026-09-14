@@ -110,7 +110,6 @@ _HS_KF_DAYS = 1.0        # Rayleigh k_f = 1/1 day
 _HS_SIGB = 0.7           # boundary-layer sigma
 _HS_MS_DAYS = 10.0       # mesosphere relaxation [day]
 _HS_ST_DAYS = 40.0       # stratosphere relaxation at 100 mb [day]
-_HS_REF_RADIUS = 6.371e6  # H&S reference radius for the time-scale ratio [m]
 _HS_STRAT_LAPSE = 2.25   # strat/meso lapse [K/km]
 _HS_P_MESO = 1.0e2       # mesosphere top boundary, 1 mb [Pa]
 _HS_P_STRAT = 100.0e2    # stratosphere boundary, 100 mb [Pa]
@@ -143,7 +142,7 @@ def held_suarez_tend(pt, ua, va, delp, peln, pkz, pe, lat, pdt,
     ny, nx, npz = pt.shape
 
     rdt = 1.0 / pdt
-    rad_ratio = radius / _HS_REF_RADIUS
+    rad_ratio = radius / constants.R_earth
     kf_day = _HS_SDAY * rad_ratio
     rkv = pdt / (_HS_KF_DAYS * kf_day)
     rka = pdt / (_HS_KA_DAYS * kf_day)
@@ -361,7 +360,7 @@ def held_suarez_tend_jax(pt, ua, va, delp, peln, pkz, pe, lat, pdt,
     ny, nx, npz = pt.shape
 
     rdt = 1.0 / pdt
-    rad_ratio = radius / _HS_REF_RADIUS
+    rad_ratio = radius / constants.R_earth
     kf_day = _HS_SDAY * rad_ratio
     rkv = pdt / (_HS_KF_DAYS * kf_day)
     rka = pdt / (_HS_KA_DAYS * kf_day)

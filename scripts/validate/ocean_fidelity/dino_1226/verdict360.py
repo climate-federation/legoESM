@@ -1375,9 +1375,10 @@ def main(argv=None):
           f"{100 * positive_control_null(K_WELCH):.1f}%")
     print(f"  (the median is the stable statistic; the fraction is noisy at "
           f"this sample size and the comparisons are correlated),")
-    print(f"  and the two-lag self-mismatch negative control "
-          f"{'rejects every transport as required' if neg_ok else 'FAILS -- '
-          'the rule accepts a known-different state at BOTH lags somewhere'}.")
+    neg_msg = ('rejects every transport as required' if neg_ok else
+               'FAILS -- the rule accepts a known-different state at BOTH '
+               'lags somewhere')
+    print(f"  and the two-lag self-mismatch negative control {neg_msg}.")
     print("\nEvery number above is a measurement; the pre-registration "
           "(PREREG_verdict360.md) says which ones were predicted, and the "
           "result commit carries its corrections.")
