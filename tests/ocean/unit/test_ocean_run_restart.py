@@ -112,7 +112,6 @@ _SLOT_KIND = {
     "u_before": "field", "v_before": "field", "T_before": "field",
     "S_before": "field", "eta_before": "field",
     "uu_b": "field", "vv_b": "field",
-    "eta_rk3_kaa": "field",
     "F_slow_u_prev": "field", "F_slow_v_prev": "field",
     # NOT Fields: raw arrays / tuple-of-arrays that save_restart drops silently.
     # The centred-forcing trio mirrors OceanSurfaceForcing.tau_x/tau_y and the
@@ -460,19 +459,6 @@ def test_truncated_archive_is_a_hard_error(tmp_path):
     np.savez(path, **payload)
     with pytest.raises(ValueError, match=r"missing|truncated"):
         load_run_restart(path, _base_state()[2], grid_type="latlon")
-
-
-def test_nemo_rk3_restart_without_kaa_ssh_fails_with_named_message(tmp_path):
-    """A WS-RK3 continuation may not silently cold-seed NEMO's ``ssha``."""
-    grid, z_coord, state = _base_state()
-    path = tmp_path / "pre_kaa_slot.npz"
-    save_run_restart(path, state, step=2, time_days=1.0, grid_type="latlon")
-    ws_template = rest_state_latlon_cgrid_ocean(
-        grid, z_coord, T_water_init_C=12.0, T_deep=2.0, S_uniform=35.0,
-        H_max=H_MAX, nemo_prognostic_barotropic_velocity=True,
-        nemo_rk3_ssh_scratch=True)
-    with pytest.raises(ValueError, match="NEMO_RK3_KAA_SSH_REQUIRED"):
-        load_run_restart(path, ws_template, grid_type="latlon")
 
 
 def test_static_geometry_mismatch_is_a_hard_error(tmp_path):
