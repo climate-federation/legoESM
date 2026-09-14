@@ -381,15 +381,15 @@ FILES = {
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
     # --- round 87: stage-1 WZV source order and Kaa scratch boundary ---
-    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stp2d.f90:300-311': [
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stp2d.f90:301-311': [
         '!             Compute ssh and (uu_b,vv_b)  at N+1  (Kaa)',
         'DEALLOCATE( sshe_rhs , Ue_rhs , Ve_rhs , CdU_u , CdU_v )', 12],
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/divhor.f90:123-154': [
         'SELECT CASE ( ik_ind )',
-        'pe3divUh(ji,jj,jk) = hdiv(ji,jj,jk)', 32],
+        ('pe3divUh(ji,jj,jk) = hdiv(ji,jj,jk)', 2), 32],
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:326-339': [
         '!              !- vertical velocity and transport (ww,wi,zFw) -!',
-        'ENDIF', 14],
+        ('ENDIF', 8), 14],
     # --- round 84: cumulative stage-1 HPG/LDF/ZAD walk ---
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/dynhpg.f90:378-435': [
         ('zcoef0 = - grav * 0.5_wp', 2), ('END DO', 5), 58],

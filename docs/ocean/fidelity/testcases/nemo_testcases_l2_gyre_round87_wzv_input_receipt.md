@@ -86,7 +86,7 @@ The executing `stp_2D` branch assigns `r3t(Kaa)` from the already-present
 `ssh(Kaa)`, then calls velocity-form WZV, KEG, and ZAD in that order
 (`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stp2d.f90:141-176`). The external
 mode solve that writes the next Kaa state occurs only afterward
-(`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stp2d.f90:300-311`). Thus a
+(`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stp2d.f90:301-311`). Thus a
 post-solve transport is not the consumed stage-1 operand.
 
 The compiled velocity-form divergence forms the face products and hdiv, then
