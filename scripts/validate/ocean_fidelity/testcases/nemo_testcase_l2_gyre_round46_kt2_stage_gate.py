@@ -949,6 +949,36 @@ def _entry_rows(trace, records, masks, kt: int, stage: int,
     return rows
 
 
+def _external_rows(outputs, records, advmean_root: Path, masks, kt: int,
+                   mode: str) -> list[dict]:
+    """Score the split-explicit handoff consumed by the RK3 stage ladder."""
+    eta, uu_b, vv_b, hu_avg, hv_avg = (
+        np.asarray(value) for value in outputs)
+    reference = _barotropic_override(records, advmean_root, kt)
+    ref_eta, ref_u, ref_v, ref_hu, ref_hv = (
+        np.asarray(value) for value in reference)
+    rows = []
+    fields = (
+        ("ssh", ref_eta, eta, masks["ssh"]),
+        ("uu_b", ref_u[:, 1:], uu_b[:, 1:], masks["u"][..., 0]),
+        ("vv_b", ref_v[1:, :], vv_b[1:, :], masks["v"][..., 0]),
+        ("Hu_avg", ref_hu[:, 1:], hu_avg[:, 1:], masks["u"][..., 0]),
+        ("Hv_avg", ref_hv[1:, :], hv_avg[1:, :], masks["v"][..., 0]),
+    )
+    for field, oracle, candidate, mask in fields:
+        row = _classification(score(
+            f"GYRE-zco.kt{kt}.external.output.{field}",
+            oracle, candidate, mask))
+        row.update({"kt": kt, "stage": "external", "field": field,
+                    "entry_mode": mode})
+        rows.append(row)
+    for field in ("ubb_e", "ub_e", "vbb_e", "vb_e", "sshbb_e", "sshb_e"):
+        rows.append(_unmeasured(
+            kt, "external", field,
+            "absolute external-step endpoint history is not published by the live trace"))
+    return rows
+
+
 def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                 memory_root: Path, plant: str | None) -> dict:
     """Decision-41 stage tables from recorded entries and the shared stage."""
@@ -1023,6 +1053,28 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                 "NEMO_RECORDED")
             given.extend(row for row in rows if row.get("stage") == stage)
 
+    for kt in (1, 2):
+        state = states[kt]
+        freshwater, surface = _surface_forcings(card, state, kt)
+        hooks = _NEMOWSRK3TestHooks(
+            expose_barotropic_substeps=True,
+            barotropic_raw_history_override=(raw_history if kt == 2 else None),
+        )
+        external = jax.device_get(LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, cfg,
+            _nemo_ws_test_hooks=hooks).step(
+                state, dt=card.dt_s, freshwater=freshwater,
+                surface_forcing=surface))
+        external_outputs = (
+            external.state_after_barotropic.eta.data,
+            external.state_after_barotropic.uu_b.data,
+            external.state_after_barotropic.vv_b.data,
+            external.transport_average[0], external.transport_average[1],
+        )
+        given.extend(_external_rows(
+            external_outputs, records, advmean_root, masks, kt,
+            "NEMO_RECORDED"))
+
     chained = []
     state = card.recipe.initial_state
     for kt in (1, 2):
@@ -1033,6 +1085,11 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                 expose_live_stage_operands=True)).step(
                     state, dt=card.dt_s, freshwater=freshwater,
                     surface_forcing=surface))
+        chained.extend(_external_rows(
+            (trace.barotropic_targets[4], trace.barotropic_targets[0],
+             trace.barotropic_targets[1], trace.barotropic_targets[2],
+             trace.barotropic_targets[3]),
+            records, advmean_root, masks, kt, "LEGO_CHAINED"))
         chained.extend(_output_rows(
             trace, records, next_entries, transports, masks, kt,
             "LEGO_CHAINED"))
