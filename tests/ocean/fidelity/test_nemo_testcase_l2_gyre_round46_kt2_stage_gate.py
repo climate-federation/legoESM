@@ -118,7 +118,8 @@ def test_instrument_contract_is_zero_first_write_only_and_widened():
 def test_every_declared_plant_has_a_nonzero_exit_contract():
     source = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py").read_text()
     run = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage/run.sh").read_text()
-    for plant in ("header", "truncation", "calibration", "given", "trajectory", "twin", "stamp"):
+    for plant in ("header", "truncation", "calibration", "given", "trajectory",
+                  "twin", "stage-entry-ulp", "stamp"):
         assert f'"{plant}"' in source
     assert 'return 1 if args.plant or report["status"] != "PASS" else 0' in source
     for plant in ("header", "truncation", "calibration", "twin", "stamp"):
@@ -129,3 +130,39 @@ def test_retracted_round48_owner_prediction_cannot_abort_current_measurement():
     source = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py").read_text()
     assert '"interpretation": "POSTHOC_AFTER_ROUND49_ROUND50"' in source
     assert "round48 first-non-bit prediction REFUTED" not in source
+
+
+def test_stage_output_reference_uses_next_handoff_and_next_step():
+    shape3 = (NY, NX, NZ)
+    shape2 = (NY, NX)
+
+    def arrays(fill):
+        return {
+            "post_baro_u": np.full(shape3, fill),
+            "post_baro_v": np.full(shape3, fill + 1),
+            "T_Kmm": np.full(shape3, fill + 2),
+            "S_Kmm": np.full(shape3, fill + 3),
+            "ssh_Kmm": np.full(shape2, fill + 4),
+        }
+
+    records = {(1, stage): {"arrays": arrays(10 * stage)}
+               for stage in (1, 2, 3)}
+    next_entries = {2: {
+        "T": np.full((NY - 4, NX - 4, NZ), 70.0),
+        "S": np.full((NY - 4, NX - 4, NZ), 71.0),
+        "ssh": np.full((NY - 4, NX - 4), 72.0),
+    }}
+    stage1 = gate._stage_reference(records, next_entries, 1, 1)
+    stage3 = gate._stage_reference(records, next_entries, 1, 3)
+    assert np.all(stage1["T"] == 22.0)
+    assert np.all(stage1["ssh"] == 24.0)
+    assert np.all(stage3["T"] == 70.0)
+    assert np.all(stage3["ssh"] == 72.0)
+
+
+def test_stage_twin_private_overrides_are_off_by_default():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import _NEMOWSRK3TestHooks
+
+    hooks = _NEMOWSRK3TestHooks()
+    assert hooks.stage_barotropic_output_override is None
+    assert hooks.stage_entry_override is None

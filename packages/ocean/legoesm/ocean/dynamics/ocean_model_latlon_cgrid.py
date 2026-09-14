@@ -1027,6 +1027,16 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # leaving legoESM's deviation-form carried state untouched.  Private
     # decision-33 measurement only.
     barotropic_raw_history_override: object = None
+    # Stage-twin driver only: replace the completed external solve handoff
+    # (eta, uu_b, vv_b, Hu_avg, Hv_avg) with a recorded NEMO handoff before
+    # any RK3 stage consumes it.  This is private instrumentation, never a
+    # constructible configuration choice.
+    stage_barotropic_output_override: object = None
+    # Stage-twin driver only: replace one stage's Kmm entry bundle
+    # (stage number, u, v, T, S, eta) at the pointer-swap boundary.  Stage 1
+    # is supplied by the prognostic input state; valid override stages are 2
+    # and 3.  The ordinary stage still runs through the shared implementation.
+    stage_entry_override: object = None
     # Private companion for the 19-frame OVERFLOW causal gate. ``None``
     # preserves the production predicate; ``False`` restores the legacy
     # velocity-form update while the trace still crosses the compiled return
@@ -1647,7 +1657,7 @@ class _NEMOWSLiveOperandTrace(NamedTuple):
     stage_geometry: object
     stage_qco: object
     stage_coefficients: object
-    barotropic_targets: object; stage_rhs: object; stage_raw_velocities: object; barotropic_correction_geometry: object  # noqa: E501,E702
+    barotropic_targets: object; stage_rhs: object; stage_raw_velocities: object; barotropic_correction_geometry: object; stage_outputs: object  # noqa: E501,E702
 
 
 def _nemo_qsr_stage3_rate(
@@ -5916,6 +5926,16 @@ class LatLonCGridOceanModel:
                     (Hu_avg, Hv_avg),
                 )
             state_new, (Hu_avg, Hv_avg) = _baro_result
+            _stage_baro_override = (
+                self._nemo_ws_test_hooks.stage_barotropic_output_override)
+            if _stage_baro_override is not None:
+                (_baro_eta, _baro_u, _baro_v,
+                 Hu_avg, Hv_avg) = _stage_baro_override
+                state_new = state_new._replace(
+                    eta=state_new.eta.replace(data=_baro_eta),
+                    uu_b=state_new.uu_b.replace(data=_baro_u),
+                    vv_b=state_new.vv_b.replace(data=_baro_v),
+                )
 
         # NEMO-RK3 scheme identity: HYB is the live stprk3_stg barotropic
         # update (module default at :44; stages at :143-144,206-207,225), so
@@ -6042,6 +6062,22 @@ class LatLonCGridOceanModel:
                 + (state_new.eta.data - state.eta.data) / 3.0)
             _eta_live_one_half = 0.5 * (
                 state.eta.data + state_new.eta.data)
+            _stage_entry_override = self._nemo_ws_test_hooks.stage_entry_override
+            if _stage_entry_override is not None:
+                _override_stage = _stage_entry_override[0]
+                if _override_stage not in (2, 3):
+                    raise ValueError(
+                        "stage_entry_override stage must be 2 or 3")
+                if _override_stage == 2:
+                    _eta_live_one_third = _stage_entry_override[5]
+                    _h_live_one_third = compute_layer_thickness(
+                        _eta_live_one_third, state.H_bathy.data, _zc,
+                        min_water_column_m=_cfg_b.min_water_column_m)
+                else:
+                    _eta_live_one_half = _stage_entry_override[5]
+                    _h_live_one_half = compute_layer_thickness(
+                        _eta_live_one_half, state.H_bathy.data, _zc,
+                        min_water_column_m=_cfg_b.min_water_column_m)
             # Stage 3 has Kmm=N+1/2 (stprk3_stg.F90:218-235), and tra_zdf
             # consumes e3w(Kmm) in both off-diagonals (trazdf.F90:207-221).
             # The old whole-step entry eta is retained only as a private
@@ -6431,6 +6467,10 @@ class LatLonCGridOceanModel:
                         _T_stage1_after_sbc, _S_stage1_after_sbc)
             else:
                 _T_stage1, _S_stage1 = _stage1_tracer_result
+            if (_stage_entry_override is not None
+                    and _stage_entry_override[0] == 2):
+                (_, u1_corr, v1_corr, _T_stage1, _S_stage1,
+                 _eta_live_one_third) = _stage_entry_override
             if self._nemo_ws_test_hooks.expose_tracer_stage == 1:
                 _nemo_ws_exposed_tracer_stage = (
                     _T_stage1, _S_stage1, _eta_live_one_third)
@@ -6482,6 +6522,10 @@ class LatLonCGridOceanModel:
             _T_stage2, _S_stage2 = _stage_tracers(
                 2, (_g0, _g1_tracer, _g1),
                 resume=(1, _T_stage1, _S_stage1))
+            if (_stage_entry_override is not None
+                    and _stage_entry_override[0] == 3):
+                (_, u2_corr, v2_corr, _T_stage2, _S_stage2,
+                 _eta_live_one_half) = _stage_entry_override
             if self._nemo_ws_test_hooks.expose_tracer_stage == 2:
                 _nemo_ws_exposed_tracer_stage = (
                     _T_stage2, _S_stage2, _eta_live_one_half)
@@ -8383,7 +8427,15 @@ class LatLonCGridOceanModel:
                                     state_new.eta.data,
                                     (_eta_live_one_third,
                                      _eta_live_one_half,
-                                     state_new.eta.data)), stage_rhs=_nemo_ws_live_stage_rhs, stage_raw_velocities=_nemo_ws_live_stage_raw, barotropic_correction_geometry=_nemo_ws_live_baro_geometry,  # noqa: E501
+                                     state_new.eta.data)), stage_rhs=_nemo_ws_live_stage_rhs, stage_raw_velocities=_nemo_ws_live_stage_raw, barotropic_correction_geometry=_nemo_ws_live_baro_geometry, stage_outputs=(  # noqa: E501
+                    (u1_corr, v1_corr, _T_stage1, _S_stage1,
+                     _eta_live_one_third),
+                    (u2_corr, v2_corr, _T_stage2, _S_stage2,
+                     _eta_live_one_half),
+                    (state_new.u.data, state_new.v.data,
+                     state_new.T.data, state_new.S.data,
+                     state_new.eta.data),
+                ),
             )
         if not _apply_implicit_vmix:
             # Faithful AB2 path: return the explicit-only state plus the

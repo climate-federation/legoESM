@@ -23,7 +23,10 @@ from nemo_testcase_l2_gyre_phase3_gate import (
     _surface_forcings,
     expected_masks,
     lego_fields,
+    read_entry,
+    read_transport,
     require,
+    score,
 )
 from nemo_testcase_l2_gyre_round40_stage3_operators import read_stage3_terms
 from nemo_testcase_l2_gyre_round41_dynadv_split import (
@@ -36,6 +39,10 @@ from nemo_testcase_l2_gyre_round21_admission import _compare_self_describing
 
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round46/oracle_kt2_stage")
 ROUND41 = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round41/oracle_dynadv_split")
+ADVMEAN_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round75/oracle_advmean_kt2")
+MEMORY_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round48/oracle_bt_memory")
 MAGIC = "NEMO_L2_R46STG1"
 DIMS = (36, 26, 31)
 OWNED_DIMS = (32, 22, 31)
@@ -719,6 +726,304 @@ def _trajectory(records: dict, plant: str | None) -> list[dict]:
     return rows
 
 
+def _u_full(value):
+    value = np.asarray(value)
+    return np.concatenate([value[:, -1:, ...], value], axis=1)
+
+
+def _v_full(value):
+    value = np.asarray(value)
+    return np.concatenate([np.zeros_like(value[:1]), value], axis=0)
+
+
+def _classification(row: dict) -> dict:
+    row["classification"] = "BIT" if row["exact"] else row["status"]
+    return row
+
+
+def _unmeasured(kt: int, stage: int | str, field: str, reason: str) -> dict:
+    return {
+        "name": f"GYRE-zco.kt{kt}.s{stage}.{field}",
+        "kt": kt,
+        "stage": stage,
+        "field": field,
+        "classification": "UNMEASURED_WITH_SPEC",
+        "reason": reason,
+    }
+
+
+def _raw_history_override(memory_root: Path):
+    """Read the admitted kt=1 endpoint histories without importing round 51."""
+    from nemo_testcase_l2_gyre_round48_bt_memory_gate import read_record
+
+    arrays = read_record(memory_root / "oracle_bt_memory_kt00000001_end.bin")["arrays"]
+    return (
+        _u_full(_owned2(arrays["ub_e"])),
+        _u_full(_owned2(arrays["ubb_e"])),
+        _v_full(_owned2(arrays["vb_e"])),
+        _v_full(_owned2(arrays["vbb_e"])),
+        _owned2(arrays["sshb_e"]),
+        _owned2(arrays["sshbb_e"]),
+    )
+
+
+def _bridge_kt2_state(card, cfg, records):
+    """Build the kt=2 Kbb state, retaining non-recorded pytrees from kt=1."""
+    import jax.numpy as jnp
+    from legoesm.core.field import Field
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+
+    state = card.recipe.initial_state
+    freshwater, surface = _surface_forcings(card, state, 1)
+    state = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg
+    ).step(state, dt=card.dt_s, freshwater=freshwater, surface_forcing=surface)
+    a = records[(2, 1)]["arrays"]
+
+    def field(data, name, dims):
+        return Field(data=jnp.asarray(data), name=name, dims=dims)
+
+    return state._replace(
+        u=state.u.replace(data=jnp.asarray(_u_full(_owned3(a["u_Kbb"])))),
+        v=state.v.replace(data=jnp.asarray(_v_full(_owned3(a["v_Kbb"])))),
+        T=state.T.replace(data=jnp.asarray(_owned3(a["T_Kbb"]))),
+        S=state.S.replace(data=jnp.asarray(_owned3(a["S_Kbb"]))),
+        eta=state.eta.replace(data=jnp.asarray(_owned2(a["ssh_Kbb"]))),
+        uu_b=state.uu_b.replace(data=jnp.asarray(_u_full(_owned2(a["uu_b_Kbb"])) )),
+        vv_b=state.vv_b.replace(data=jnp.asarray(_v_full(_owned2(a["vv_b_Kbb"])) )),
+        tke=field(a["tke_en"][..., 1:30], "tke", ("lat", "lon", "level")),
+        tke_avm=field(_owned3(a["tke_avm_k"], 31)[..., 1:30],
+                      "tke_avm", ("lat", "lon", "level")),
+        tke_avt=field(a["tke_avt_k"][..., 1:30],
+                      "tke_avt", ("lat", "lon", "level")),
+        tke_dissl=field(a["tke_dissl"][..., 1:30],
+                        "tke_dissl", ("lat", "lon", "level")),
+        tke_avm_surface=field(_owned3(a["tke_avm_k"], 31)[..., 0],
+                              "tke_avm_surface", ("lat", "lon")),
+    )
+
+
+def _stage_reference(records, next_entries, kt: int, stage: int) -> dict:
+    a = records[(kt, stage)]["arrays"]
+    if stage < 3:
+        nxt = records[(kt, stage + 1)]["arrays"]
+        return {
+            "u": _owned3(a["post_baro_u"]),
+            "v": _owned3(a["post_baro_v"]),
+            "T": _owned3(nxt["T_Kmm"]),
+            "S": _owned3(nxt["S_Kmm"]),
+            "ssh": _owned2(nxt["ssh_Kmm"]),
+        }
+    entry = next_entries[kt + 1]
+    return {
+        "u": _owned3(a["post_baro_u"]),
+        "v": _owned3(a["post_baro_v"]),
+        "T": entry["T"], "S": entry["S"], "ssh": entry["ssh"],
+    }
+
+
+def _entry_override(records, kt: int, stage: int, *, plant=False):
+    import jax.numpy as jnp
+
+    a = records[(kt, stage)]["arrays"]
+    T = _owned3(a["T_Kmm"]).copy()
+    if plant:
+        index = tuple(np.argwhere(_owned3(a["tmask"]) > 0.5)[0])
+        T[index] = np.nextafter(T[index], np.float64(np.inf))
+    return (
+        stage,
+        jnp.asarray(_u_full(_owned3(a["u_Kmm"]))),
+        jnp.asarray(_v_full(_owned3(a["v_Kmm"]))),
+        jnp.asarray(T),
+        jnp.asarray(_owned3(a["S_Kmm"])),
+        jnp.asarray(_owned2(a["ssh_Kmm"])),
+    )
+
+
+def _barotropic_override(records, advmean_root: Path, kt: int):
+    import jax.numpy as jnp
+    from nemo_testcase_l2_gyre_round14_advmean import read_advmean
+
+    a = records[(kt, 1)]["arrays"]
+    avg = read_advmean(
+        advmean_root / f"oracle_bt_advmean_operands_kt{kt:08d}.bin",
+        expected_kt=kt,
+    )
+    return (
+        jnp.asarray(_owned2(a["ssh_Kaa"])),
+        jnp.asarray(_u_full(_owned2(a["uu_b_Kaa"]))),
+        jnp.asarray(_v_full(_owned2(a["vv_b_Kaa"]))),
+        jnp.asarray(_u_full(avg["post_lbc_u"])),
+        jnp.asarray(_v_full(avg["post_lbc_v"])),
+    )
+
+
+def _output_rows(trace, records, next_entries, transports, masks, kt: int,
+                 mode: str) -> list[dict]:
+    rows = []
+    for stage, output in enumerate(trace.stage_outputs, start=1):
+        u, v, T, S, eta = (np.asarray(value) for value in output)
+        candidates = {"u": u[:, 1:, :], "v": v[1:, :, :],
+                      "T": T, "S": S, "ssh": eta}
+        refs = _stage_reference(records, next_entries, kt, stage)
+        for field in ("T", "S", "u", "v", "ssh"):
+            row = _classification(score(
+                f"GYRE-zco.kt{kt}.s{stage}.output.{field}",
+                refs[field], candidates[field], masks[field]))
+            row.update({"kt": kt, "stage": stage, "field": field,
+                        "entry_mode": mode})
+            rows.append(row)
+
+        a = records[(kt, stage)]["arrays"]
+        geom = trace.stage_geometry[stage - 1]
+        geom_rows = (
+            ("e3t_Kmm", _owned3(a["e3t_Kmm"]), np.asarray(geom[3]),
+             _owned3(a["tmask"]) > 0.5),
+            ("e3u_Kmm", _owned3(a["e3u_Kmm"]), np.asarray(geom[4])[:, 1:, :],
+             _owned3(a["umask"]) > 0.5),
+            ("e3v_Kmm", _owned3(a["e3v_Kmm"]), np.asarray(geom[5])[1:, :, :],
+             _owned3(a["vmask"]) > 0.5),
+            ("ww", _owned3(a["ww"]), np.asarray(geom[2]),
+             _owned3(a["wmask"]) > 0.5),
+        )
+        for field, ref, candidate, mask in geom_rows:
+            row = _classification(score(
+                f"GYRE-zco.kt{kt}.s{stage}.handoff.{field}",
+                ref, candidate, mask))
+            row.update({"kt": kt, "stage": stage, "field": field,
+                        "entry_mode": mode})
+            rows.append(row)
+
+        transport = transports.get((kt, stage))
+        if transport is None:
+            for field in ("zFu", "zFv", "zFw"):
+                rows.append(_unmeasured(
+                    kt, stage, field,
+                    "no admitted direct transport payload for this kt/stage"))
+            continue
+        for field, candidate, mask in (
+            ("zFu", np.asarray(geom[7])[:, 1:, :], _owned3(a["umask"]) > 0.5),
+            ("zFv", np.asarray(geom[8])[1:, :, :], _owned3(a["vmask"]) > 0.5),
+        ):
+            row = _classification(score(
+                f"GYRE-zco.kt{kt}.s{stage}.handoff.{field}",
+                _owned3(transport[field]), candidate, mask))
+            row.update({"kt": kt, "stage": stage, "field": field,
+                        "entry_mode": mode})
+            rows.append(row)
+        rows.append(_unmeasured(
+            kt, stage, "zFw",
+            "legacy momentum-side stream writes zFw before tracer WZV initializes it"))
+    return rows
+
+
+def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
+                memory_root: Path, plant: str | None) -> dict:
+    """Decision-41 stage tables from recorded entries and the shared stage."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import build_nemo_testcase_card
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(bool(jax.config.jax_enable_x64), "stage twin requires x64")
+    card = build_nemo_testcase_card("GYRE-zco")
+    cfg = card.recipe.model_config._replace(
+        freshwater_closure="real_freshwater", fix_eta_drift=True)
+    masks = expected_masks(card)
+    next_entries = {
+        kt: read_entry(stage_root / f"oracle_step_entry_kt{kt:08d}.bin")
+        for kt in (2, 3)
+    }
+    transports = {}
+    for stage in (1, 2, 3):
+        path = advmean_root / f"oracle_transport_kt00000001_s{stage}.bin"
+        if path.is_file():
+            transports[(1, stage)] = read_transport(path, stage)
+
+    given = []
+    planted_changed = None
+    states = {1: card.recipe.initial_state,
+              2: _bridge_kt2_state(card, cfg, records)}
+    raw_history = tuple(jnp.asarray(value) for value in _raw_history_override(memory_root))
+    clean_stage2_output = None
+    for kt in (1, 2):
+        state = states[kt]
+        freshwater, surface = _surface_forcings(card, state, kt)
+        for stage in (1, 2, 3):
+            entry_override = None if stage == 1 else _entry_override(
+                records, kt, stage,
+                plant=(plant == "stage-entry-ulp" and kt == 1 and stage == 2))
+            hooks = _NEMOWSRK3TestHooks(
+                expose_live_stage_operands=True,
+                barotropic_raw_history_override=(raw_history if kt == 2 else None),
+                stage_barotropic_output_override=_barotropic_override(
+                    records, advmean_root, kt),
+                stage_entry_override=entry_override,
+            )
+            trace = jax.device_get(LatLonCGridOceanModel(
+                card.recipe.grid, card.recipe.z_coord, cfg,
+                _nemo_ws_test_hooks=hooks).step(
+                    state, dt=card.dt_s, freshwater=freshwater,
+                    surface_forcing=surface))
+            rows = _output_rows(
+                trace, records, next_entries, transports, masks, kt,
+                "NEMO_RECORDED")
+            given.extend(row for row in rows if row.get("stage") == stage)
+            if kt == 1 and stage == 2:
+                planted_output = tuple(np.asarray(value)
+                                       for value in trace.stage_outputs[1])
+                if plant == "stage-entry-ulp":
+                    clean_hooks = hooks._replace(
+                        stage_entry_override=_entry_override(records, kt, stage))
+                    clean = jax.device_get(LatLonCGridOceanModel(
+                        card.recipe.grid, card.recipe.z_coord, cfg,
+                        _nemo_ws_test_hooks=clean_hooks).step(
+                            state, dt=card.dt_s, freshwater=freshwater,
+                            surface_forcing=surface))
+                    clean_stage2_output = tuple(
+                        np.asarray(value) for value in clean.stage_outputs[1])
+                    planted_changed = any(np.any(a.view(np.uint64) != b.view(np.uint64))
+                                          for a, b in zip(
+                                              planted_output, clean_stage2_output,
+                                              strict=True))
+    if plant == "stage-entry-ulp":
+        require(planted_changed is True,
+                "one-ULP stage-entry plant did not flip a stage output")
+
+    chained = []
+    state = card.recipe.initial_state
+    for kt in (1, 2):
+        freshwater, surface = _surface_forcings(card, state, kt)
+        trace = jax.device_get(LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, cfg,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                expose_live_stage_operands=True)).step(
+                    state, dt=card.dt_s, freshwater=freshwater,
+                    surface_forcing=surface))
+        chained.extend(_output_rows(
+            trace, records, next_entries, transports, masks, kt,
+            "LEGO_CHAINED"))
+        state = trace.state_after
+
+    measured = [row for row in given
+                if row.get("classification") != "UNMEASURED_WITH_SPEC"]
+    first = next((row for row in measured
+                  if row.get("classification") != "BIT"), None)
+    return {
+        "format": "nemo-testcase-l2-gyre-stage-twin-v1",
+        "given_nemo_entry": given,
+        "chained": chained,
+        "first_owned_nonbit": None if first is None else {
+            key: first[key] for key in (
+                "kt", "stage", "field", "n_unequal", "absolute_max",
+                "classification")},
+        "stage_entry_ulp_plant_changed_output": planted_changed,
+    }
+
+
 def _exact_payload_pairs(left: dict, right: dict, pairs: dict[str, str], *,
                          right_is_full: bool) -> dict:
     """Bit-test the duplicate kt=2 payloads written by independent streams."""
@@ -747,6 +1052,8 @@ def run(
     plant: str | None,
     round40_kt1: Path,
     round41_kt1: Path,
+    advmean_root: Path = ADVMEAN_ROOT,
+    memory_root: Path = MEMORY_ROOT,
 ) -> dict:
     stamp = worktree_stamp()
     expected = "0" * 40 if plant == "stamp" else expect_commit.lower()
@@ -852,6 +1159,7 @@ def run(
         "given_inputs": [],
         "model_path_first_nonbit": {},
         "trajectory": [],
+        "stage_twin": None,
         "status": "PASS",
     }
     if mode in {"given-inputs", "all"}:
@@ -862,6 +1170,9 @@ def run(
         report["trajectory"] = _trajectory(records, plant)
         if any(row.get("status") != "PASS" for row in report["trajectory"]):
             report["status"] = "UNMEASURED"
+    if mode == "stage-twin":
+        report["stage_twin"] = _stage_twin(
+            records, root, advmean_root, memory_root, plant)
     return report
 
 
@@ -870,15 +1181,20 @@ def main(argv=None) -> int:
     p.add_argument("--root", type=Path, default=ROOT)
     p.add_argument("--expect-commit", required=True)
     p.add_argument(
-        "--mode", choices=("validate", "given-inputs", "trajectory", "all"), default="validate"
+        "--mode",
+        choices=("validate", "given-inputs", "trajectory", "all", "stage-twin"),
+        default="validate",
     )
     p.add_argument("--round40-kt1", type=Path, required=True)
     p.add_argument(
         "--round41-kt1", type=Path, default=ROUND41 / "oracle_dynadv_split_kt00000001_s3.bin"
     )
+    p.add_argument("--advmean-root", type=Path, default=ADVMEAN_ROOT)
+    p.add_argument("--memory-root", type=Path, default=MEMORY_ROOT)
     p.add_argument(
         "--plant",
-        choices=("header", "truncation", "calibration", "given", "trajectory", "twin", "stamp"),
+        choices=("header", "truncation", "calibration", "given", "trajectory",
+                 "twin", "stage-entry-ulp", "stamp"),
     )
     p.add_argument("--output", type=Path)
     args = p.parse_args(argv)
@@ -889,6 +1205,8 @@ def main(argv=None) -> int:
         plant=args.plant,
         round40_kt1=args.round40_kt1,
         round41_kt1=args.round41_kt1,
+        advmean_root=args.advmean_root,
+        memory_root=args.memory_root,
     )
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.output:

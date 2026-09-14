@@ -218,7 +218,7 @@ def read_stage(path: Path, expected_stage: int) -> dict:
     }
 
 
-def read_transport(path: Path, expected_stage: int) -> dict:
+def read_transport(path: Path, expected_stage: int, *, expected_kt: int = 1) -> dict:
     level = _registered(path, "now")
     with path.open("rb") as handle:
         magic = handle.read(16).decode("ascii").rstrip()
@@ -239,7 +239,8 @@ def read_transport(path: Path, expected_stage: int) -> dict:
         )
     require((version, nx, ny, nz, bits) == (1, *DIMS, 64), f"{path}: bad header")
     require(
-        (kt, stage, kmm) == (1, expected_stage, LEVELS[expected_stage]["Kmm"]),
+        (kt, stage, kmm) == (
+            expected_kt, expected_stage, LEVELS[expected_stage]["Kmm"]),
         f"{path}: wrong Kmm",
     )
     require(values.size == 3 * nx * ny * nz, f"{path}: bad payload")

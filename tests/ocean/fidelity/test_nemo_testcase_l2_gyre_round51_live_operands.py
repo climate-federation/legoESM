@@ -53,6 +53,6 @@ def test_live_trace_and_raw_history_arms_are_private_and_off_by_default():
     default = _NEMOWSRK3TestHooks()
     assert default.expose_live_stage_operands is False
     assert default.barotropic_raw_history_override is None
-    assert _NEMOWSLiveOperandTrace._fields[-3:] == (
+    assert _NEMOWSLiveOperandTrace._fields[-4:] == (
         "stage_rhs", "stage_raw_velocities",
-        "barotropic_correction_geometry")
+        "barotropic_correction_geometry", "stage_outputs")
