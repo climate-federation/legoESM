@@ -126,12 +126,15 @@ def read_mesh_mask_bathy(mesh_path: str, *, nemo_domain_cfg: str | None = None):
         land_mask = _squeeze2d(ds["tmaskutil"].values).astype(np.float64)
     else:
         land_mask = _squeeze2d(ds["tmask"].values).astype(np.float64)
+    turned_to_land = None
     if nemo_domain_cfg:
+        mesh_wet = land_mask > 0.5
         land_mask = mask_to_nemo_domain(
             land_mask,
             _squeeze2d(ds["gphit"].values).astype(np.float64),
             _squeeze2d(ds["glamt"].values).astype(np.float64),
             nemo_domain_cfg)
+        turned_to_land = mesh_wet & (land_mask <= 0.5)
     # Total wet-column depth = sum over z of e3t_0 where tmask is wet.
     e3t = np.asarray(ds["e3t_0"].values)            # (t,z,y,x) or (z,y,x)
     tmask = np.asarray(ds["tmask"].values)
@@ -140,10 +143,14 @@ def read_mesh_mask_bathy(mesh_path: str, *, nemo_domain_cfg: str | None = None):
     while tmask.ndim > 3:
         tmask = tmask[0]
     H_bathy = (e3t * tmask).sum(axis=0).astype(np.float64)   # (y, x)
-    # Dry columns get exactly 0 depth. Without this a cell turned to land by
-    # nemo_domain_cfg would keep its tmask-summed depth, and the partial-cell
-    # build (which reads H_bathy) would see a wet column under a dry 2-D mask.
-    H_bathy = np.where(land_mask > 0.5, H_bathy, 0.0)
+    # Only the cells the domain mask turned to land get 0 depth: without it
+    # they keep their tmask-summed depth and the partial-cell build (which
+    # reads H_bathy) sees a wet column under a dry 2-D mask. Deliberately NOT
+    # `where(land_mask > 0.5, ...)` over the whole field: the raw eORCA1
+    # halo columns and fold row have tmaskutil == 0 with a positive summed
+    # depth, and the baseline (nemo_domain_cfg=None) must stay byte-identical.
+    if turned_to_land is not None:
+        H_bathy = np.where(turned_to_land, 0.0, H_bathy)
     return land_mask, H_bathy
 
 

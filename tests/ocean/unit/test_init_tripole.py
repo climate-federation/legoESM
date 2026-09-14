@@ -230,3 +230,38 @@ def test_mask_to_nemo_domain_finds_another_offset_across_a_360_wrap(tmp_path):
     _write_domain_cfg(dc, lat[inner], lon[inner] - 360.0, top)
     out = mask_to_nemo_domain(tmaskutil, lat, lon, str(dc))
     assert np.argwhere(out != tmaskutil).tolist() == [[3, 5]]
+
+
+def test_domain_mask_zeroes_depth_only_on_the_cells_it_turned_to_land(tmp_path):
+    """Codex, on the cherry-pick: the raw eORCA1 halo columns and fold row have
+    tmaskutil == 0 with a POSITIVE tmask-summed depth, and the baseline
+    (no keyword) must keep that depth byte-identically. So depth is zeroed on
+    the turned cells only. Here the halo column has tmask wet at every level."""
+    import xarray as xr
+    from legoesm.ocean.init_tripole import read_mesh_mask_bathy
+
+    mesh = tmp_path / "mesh_mask.nc"
+    tmaskutil, lat, lon = _write_mesh_with_halo(mesh)
+    ds = xr.open_dataset(mesh)
+    tmask = ds["tmask"].values.copy(); e3t0 = ds["e3t_0"].values.copy(); ds.close()
+    tmask[:, :, 0] = 1.0                            # halo column: util 0, tmask 1
+    xr.Dataset({
+        "tmaskutil": (("y", "x"), tmaskutil),
+        "tmask": (("z", "y", "x"), tmask),
+        "e3t_0": (("z", "y", "x"), e3t0),
+        "gphit": (("y", "x"), lat),
+        "glamt": (("y", "x"), lon),
+    }).to_netcdf(mesh, engine="scipy")
+    ny, nx = tmaskutil.shape
+    inner = (slice(0, ny - 1), slice(1, nx - 1))
+    top = tmaskutil[inner].copy()
+    top[3, 4] = 0.0
+    dc = tmp_path / "domain_cfg.nc"
+    _write_domain_cfg(dc, lat[inner], lon[inner], top)
+
+    m0, h0 = read_mesh_mask_bathy(str(mesh))
+    assert m0[1, 0] == 0.0 and h0[1, 0] == 200.0    # baseline: dry util, depth kept
+    m1, h1 = read_mesh_mask_bathy(str(mesh), nemo_domain_cfg=str(dc))
+    assert h1[1, 0] == 200.0                        # untouched by the keyword
+    assert m1[3, 5] == 0.0 and h1[3, 5] == 0.0      # the turned cell: dry AND 0 m
+    assert np.array_equal(np.argwhere(h1 != h0), [[3, 5]])
