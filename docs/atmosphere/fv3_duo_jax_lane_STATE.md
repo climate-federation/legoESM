@@ -1707,3 +1707,59 @@ equally well; (b) the runtime cost of level 0, unmeasured; (c) whether any
 bitwise result moves, since level 0 changes algorithm selection -- a
 single-GPU run with and without the flag would settle it in minutes;
 (d) this is a mitigation, not an upstream fix.
+
+## ★ MULTI-TRACER CERTIFICATE ON THE ORACLE'S OWN TRACER SET (2026-09-14)
+
+The distributed gate ran one tracer; the oracle deck's second tracer is zero
+everywhere. Two routes to a real second tracer:
+
+- **Warm-started Fortran decks** (`build_warm_tracer_oracle.sbatch`, job
+  9760100): the tracer deck's zero step returns the IC it was given and a
+  passenger changes nothing else, both bitwise -- but the warm-started one-step
+  state differs from the certified cold start by ~1e-3 (2 cm/s on a 20 m/s
+  jet, 0.12 Pa delp). Cause NOT found. The decks stay published with
+  PROVENANCE and are **not** a certified oracle.
+- **DCMIP16 terminator pair** (`build_terminator_oracle.sbatch`, job 9766068):
+  cold start, `cl`/`cl2` added to the field_table before rainwat. Controls,
+  all bitwise: 1-step u/v/T/delp and sphum vs the pinned cold deck; IC deck vs
+  the pinned zero-step. Cl + 2 Cl2 = qcly exactly at the IC, 1.06e-3 after one
+  step (limited transport; the DCMIP terminator diagnostic). One tile is wholly
+  on the night side, Cl = 0 there.
+
+The harness now reads the deck's tracer list (field_table order + last dnats)
+and builds the port IC per name. Two harness limitations surfaced and were
+fixed by measurement:
+
+1. **The derived face map was ambiguous up to a mirror on the bump-free
+   faces** (job 9766086: cl at rel 1.0 on faces 3, 5; cl2 0.97 on face 4;
+   u/v/pt/delp all at 1e-14). The DCMIP jet is hemispherically symmetric, so
+   nothing scored there depended on that mirror. A lon-dependent scalar now
+   selects the transform; the cost stays the prognostic residual.
+2. **cl is a 5-digit cancellation** (D - r with D, r ~ 0.25, cl ~ 4e-6): its
+   IC floor is 4 eps / (qcly/0.25) = 5.5e-11 by arithmetic, measured 6.9e-12;
+   the pair is scored on qcly, not each face's peak (the all-day tile's cl2
+   peaks at 1e-9).
+
+Result, one step vs the Fortran terminator decks (jobs 9767049/9767050,
+loop arm; batched pending):
+
+| tracer | one-step rel (scale) | note |
+|---|---|---|
+| sphum | 3.7e-12 | |
+| cl | 1.2e-11 | nonzero, longitude-dependent, matched to the floor |
+| cl2 | 8.2e-4 eager / 5.0e-4 compiled | see below |
+
+**cl2 is the scheme's own non-smoothness, not a port defect.** Localised to
+14-142 plateau cells per face adjacent to the front where the IC is exactly
+2e-6, largest aloft. The port's eager and compiled arms disagree there by the
+same 3.297e-9 (sphum, cl bit-identical between arms). Nudging that plateau by
+ONE ulp in the port's own IC moves the one-step cl2 by 3.297e-09 = 4e12 ulp in
+524 cells, same level profile, same value to four digits; nudging cl's zero
+plateau moves cl by 2 ulp (`tracer_ulp_sensitivity.py`, job 9767368). The
+Fortran's own rounding decides the same branch. **User call: cl2 gates at 2x
+that envelope (1.65e-3 of qcly)**, pinned with provenance and re-measured by
+the probe's `--assert-envelope` in both directions. OPEN: which branch
+(hord-6 flux switch vs kord-9 remap constraint).
+
+Distributed link on the same tracer set: C48 kt=2, 24 devices, `--terminator`,
+2 steps: 14/14 leaves BITWISE, every tracer moving (job 9766088).
