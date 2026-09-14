@@ -114,12 +114,7 @@ def test_lane1_cards_carry_oracle_w_grid_thicknesses():
 
 def test_gyre_card_selects_complete_resolved_operator_program():
     set_policy(PrecisionPolicy.fp64())
-    recipe = build_gyre_zco_card().recipe
-    cfg = recipe.model_config
-    assert recipe.initial_state.eta_rk3_kaa is not None
-    np.testing.assert_array_equal(
-        np.asarray(recipe.initial_state.eta_rk3_kaa.data),
-        np.asarray(recipe.initial_state.eta.data))
+    cfg = build_gyre_zco_card().recipe.model_config
     assert cfg.momentum_advection == "vector_invariant"
     assert cfg.vorticity_scheme == "ene_total"
     assert cfg.ke_gradient_scheme == "c2"
@@ -155,16 +150,6 @@ def test_gyre_card_selects_complete_resolved_operator_program():
     assert cfg.zdf_drag_in_matrix is True
     assert cfg.zdf_baroclinic_only is True
     assert cfg.barotropic_drag_substep is True
-
-
-def test_nemo_rk3_state_without_kaa_ssh_fails_with_named_message():
-    set_policy(PrecisionPolicy.fp64())
-    recipe = build_gyre_zco_card().recipe
-    model = LatLonCGridOceanModel(
-        recipe.grid, recipe.z_coord, recipe.model_config)
-    missing = recipe.initial_state._replace(eta_rk3_kaa=None)
-    with pytest.raises(ValueError, match="NEMO_RK3_KAA_SSH_REQUIRED"):
-        model._step_impl(missing, 1.0)
 
 
 def test_gyre_rk3_evd_uses_step_entry_for_both_n2_arms():

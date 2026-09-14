@@ -1,3 +1,27 @@
+ROUND 92 DAMAGE BISECTION (2026-09-14; candidate bb963136d341): HELD.
+Applied alone to the restored Round-85 production implementation, this member
+reproduces the Round-91 union damage exactly: kt2 T/S/U/V maxima
+3.0652394795183113e-3 / 4.835710022078388e-3 /
+6.733005735178965e-7 / 1.3183569256688065e-6 and kt3 T/S maxima
+1.566544749833554e-2 / 4.324733116938262e-3. First-over-bar regresses from
+kt2 U/V to kt2 T/S/U/V; day-30 T RMS is 1.2589964172802363e-2 K.
+
+WHY LOCAL PROOF AND TRAJECTORY DISAGREE. The six source-assignment rows remain
+bit-exact when driven by NEMO's Kbb and Krhs, and the five Kaa/W/WZV/ZAD rows
+remain bit-exact on NEMO inputs. The independent live kt2 stage-one split
+shows Kbb still bit-exact but the Krhs consumed by that assignment already
+differs at every active cell: U 17,400/17,400, max
+2.3323740139467519e-8; V 17,100/17,100, max 4.8049022149307440e-8.
+Thus the helper's local proof substituted the upstream operand that legoESM
+does not reproduce. The compiled assignment consuming Krhs is
+GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/stprk3_stg.f90:668-687.
+
+The direct correction record also retracts the prior bit-exact correction-
+helper claim: zub/zvb replay exactly, but the composed final helper remains
+1,815 U and 3,132 V cells unequal at maxima 3.4694469519536142e-18 and
+8.6736173798840355e-19. This AT-BAR-NOT-EXACT association is downstream of
+the first live Krhs mismatch and is not promoted as the damage owner.
+
 diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
 index cd26ce6442c0..a19f053a597b 100644
 --- a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
