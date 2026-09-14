@@ -545,6 +545,7 @@ def solve_canopy_closure(
         use_ta_for_photosynthesis=config.use_ta_for_photosynthesis,
         max_iters=config.max_iters,
         tol=config.tol,
+        newton_loop=getattr(config, "newton_loop", "while"),
     )
     return solver(initial_state, bundle)[:3]
 
@@ -578,6 +579,7 @@ def solve_canopy_closure_diag(
         use_ta_for_photosynthesis=config.use_ta_for_photosynthesis,
         max_iters=config.max_iters,
         tol=config.tol,
+        newton_loop=getattr(config, "newton_loop", "while"),
     )
     return solver(initial_state, bundle)
 
@@ -593,8 +595,14 @@ def _make_implicit_newton_solver(
     use_ta_for_photosynthesis: bool,
     max_iters: int,
     tol: float,
+    newton_loop: str = "while",
 ):
-    """Bind the shared implicit root solver to the canopy residual."""
+    """Bind the shared implicit root solver to the canopy residual.
+
+    ``newton_loop`` is forwarded verbatim; ``"fixed"`` trades the early exit
+    for a loop a second-order operator can compile (#1736).  Bit-identical
+    results either way.
+    """
     del tol  # Legacy step tolerance; convergence is the residual contract.
 
     def residual(x, bundle):
@@ -613,4 +621,5 @@ def _make_implicit_newton_solver(
         max_iters=max_iters,
         rtol=_LM_RTOL,
         atol=_LM_ATOL,
+        loop=newton_loop,
     )

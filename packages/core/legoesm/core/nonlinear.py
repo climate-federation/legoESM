@@ -18,6 +18,7 @@ def make_implicit_newton_solver(
     atol: float = 1.0e-12,
     lambda_initial: float = 1.0e-2,
     lambda_max: float = 1.0e10,
+    loop: str = "while",
 ):
     """Build a scaled Levenberg--Marquardt root solver with an IFT VJP.
 
@@ -30,7 +31,27 @@ def make_implicit_newton_solver(
     linear least-squares step uses augmented QR and Nielsen gain-ratio damping
     with rejected steps.  The backward pass uses an exact, column-equilibrated
     solve and returns zero cotangents for every non-converged root.
+
+    ``loop`` selects how the iteration is expressed, and ONLY that -- the two
+    modes return bit-identical results (pinned by
+    ``tests/unit/test_nonlinear_loop_modes.py``), because the fixed-length body
+    is masked by the same ``done`` flag the ``while`` condition tests, so an
+    iteration after convergence is an exact no-op:
+
+    * ``"while"`` (default) -- ``lax.while_loop``, which STOPS as soon as every
+      root has converged.  Cheapest, and what production runs.
+    * ``"fixed"`` -- ``lax.scan`` over exactly ``max_iters`` iterations.  Slower
+      whenever the solve converges early, and the reason it exists is
+      differentiability, not speed: forward-over-reverse (an ``hvp``, a
+      Gauss-Newton inner solve, a Lanczos spectrum) through a ``while_loop``
+      produced a program the XLA CPU backend ABORTED on -- a core dump, not an
+      exception (#1736).  ``"fixed"`` has no ``while`` primitive, so those
+      operators can run on objectives containing this solve.
     """
+    if loop not in ("while", "fixed"):
+        raise ValueError(
+            "make_implicit_newton_solver loop must be 'while' or 'fixed'; "
+            f"got {loop!r}.")
     x_scale = jnp.asarray(x_scale)
     f_scale = jnp.asarray(f_scale)
 
@@ -116,19 +137,39 @@ def make_implicit_newton_solver(
             )
 
         initial_converged = n_sq_0 <= atol
-        x_final, _, _, _, damping, n_iters, _ = jax.lax.while_loop(
-            cond,
-            body,
-            (
-                x0,
-                residual_0,
-                jacobian_z_0,
-                n_sq_0,
-                jnp.asarray(lambda_initial, dtype=x0.dtype),
-                jnp.array(0),
-                initial_converged,
-            ),
+        state_0 = (
+            x0,
+            residual_0,
+            jacobian_z_0,
+            n_sq_0,
+            jnp.asarray(lambda_initial, dtype=x0.dtype),
+            jnp.array(0),
+            initial_converged,
         )
+        if loop == "while":
+            x_final, _, _, _, damping, n_iters, _ = jax.lax.while_loop(
+                cond, body, state_0,
+            )
+        else:
+            # Fixed-length form (#1736): the same body, run exactly max_iters
+            # times, with every carry element FROZEN once ``done`` is set.  The
+            # while_loop stops at that same flag, so the two give bit-identical
+            # finals; this one merely keeps iterating over a state that no
+            # longer changes.  No ``while`` primitive, so forward-over-reverse
+            # can be compiled (an hvp through the while form aborted XLA).
+            def masked_body(state, _):
+                done = state[-1]
+                stepped = body(state)
+                frozen = tuple(
+                    jnp.where(done, old, new)
+                    for old, new in zip(state, stepped)
+                )
+                return frozen, None
+
+            state_f, _ = jax.lax.scan(
+                masked_body, state_0, None, length=int(max_iters),
+            )
+            x_final, _, _, _, damping, n_iters, _ = state_f
         residual_final = fun(x_final)
         n_sq_final = jnp.sum(residual_final * residual_final)
         converged = n_sq_final <= atol + rtol * n_sq_0

@@ -168,6 +168,15 @@ class CanopyConfig(NamedTuple):
     # than landing exactly on the cap; the extra rounds touch only the ~0.35% of
     # columns that need them.
     max_iters: int = 60
+    # #1736: how the implicit canopy solve expresses its iteration.  "while"
+    # (default, production) stops as soon as every column has converged.
+    # "fixed" runs exactly ``max_iters`` masked iterations -- bit-identical
+    # result, slower when the solve converges early, and the ONLY form a
+    # second-order operator can compile: forward-over-reverse through the
+    # while_loop produced a program the XLA CPU backend aborted on (a core
+    # dump, not an exception), which is why curvature.hvp could not run on any
+    # objective containing this solve.
+    newton_loop: str = "while"
     tol: float = 1e-2
     # Only the DifferBESS FULLY_COUPLED scheme is implemented (leaves and
     # soil share the canopy air space Tc, q_c via clumping-weighted
@@ -259,6 +268,13 @@ class CanopyConfig(NamedTuple):
                 f"must be one of {VALID_LE_MODULES} ('BT'=bulk transfer, "
                 f"'PM'=Penman-Monteith). The internal dispatch is a bare "
                 f"'else: # PM', so a typo would silently run PM.")
+        if self.newton_loop not in ("while", "fixed"):
+            raise ValueError(
+                f"unknown newton_loop {self.newton_loop!r}; the implicit "
+                "canopy solve iterates either as 'while' (production: stops at "
+                "convergence) or 'fixed' (exactly max_iters masked iterations, "
+                "bit-identical, and the only form a second-order operator can "
+                "compile -- #1736).")
         return self
 
 
