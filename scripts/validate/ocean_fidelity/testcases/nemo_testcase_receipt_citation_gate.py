@@ -387,7 +387,7 @@ CITATION_MAP = {
     # --- round 89: source-rounded RK3 assignment and ordered stage walk ---
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:140-148': [
         ('SELECT CASE( kstg )', 1),
-        'r1_Dt = 1._wp / rDt', 9],
+        ('r1_Dt = 1._wp / rDt', 1), 9],
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:198-202': [
         'CASE ( 2 )           !==  Stage 2',
         ('r1_Dt = 1._wp / rDt', 2), 5],
