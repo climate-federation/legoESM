@@ -277,6 +277,8 @@ _SLOT_POLICY: dict[str, str] = {
     # 175-182 writes Kbb uu_n/vv_n; :304-314 reads it).  This is live input to
     # the next external-mode window and S-21 transport, never diagnostic.
     "uu_b": _SLOT_PROGNOSTIC, "vv_b": _SLOT_PROGNOSTIC,
+    # NEMO WS-RK3 pre-solve Kaa SSH scratch (restart ``ssha``).
+    "eta_rk3_kaa": _SLOT_PROGNOSTIC,
     # SOM (Prather) advection moments — carried by the scheme.
     "T_som": _SLOT_PROGNOSTIC, "S_som": _SLOT_PROGNOSTIC,
     # AB2 tracer-advection history.
@@ -1685,6 +1687,15 @@ def load_run_restart(path: str | Path, template_state, *,
             meta, in_path, grid_type=grid_type, dt_seconds=dt_seconds,
             n_forcing_records=n_forcing_records,
             config_fingerprint=config_fingerprint)
+        if getattr(template_state, "eta_rk3_kaa", None) is not None:
+            inventory = meta.get("inventory") or {}
+            if (inventory.get("eta_rk3_kaa") != _INV_PERSISTED
+                    or "eta_rk3_kaa" not in meta["slots"]
+                    or "eta_rk3_kaa" not in payload_keys):
+                raise ValueError(
+                    "NEMO_RK3_KAA_SSH_REQUIRED: the restart lacks the "
+                    "persisted pre-solve RK3 Kaa SSH scratch; refusing to "
+                    "resume by silently substituting ssh(Kbb) or zero.")
         _validate_payload_keys(meta, payload_keys, in_path)
         _validate_run_layout(template_state, meta["slots"],
                              meta.get("inventory"), meta.get("state_class"),
