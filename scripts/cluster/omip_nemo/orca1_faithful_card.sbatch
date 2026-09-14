@@ -41,7 +41,9 @@ LEG=${LEG:-1}
 HALF=$($PY -c "print(${DAYS}/2)")
 TARGET=$([ "$LEG" = 1 ] && echo $HALF || echo $DAYS)
 YEARS=$($PY -c "print(${TARGET}/365.0)")
-OUT=${OUT:-/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_orca1faith_d${DAYS}}
+# trp_orca1faith_d30 is the pre-mask baseline every 2026-09-13/14 measurement
+# references; the masked card writes beside it, never over it.
+OUT=${OUT:-/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_orca1faithmask_d${DAYS}}
 echo "DAYS=$DAYS LEG=$LEG TARGET=$TARGET YEARS=$YEARS OUT=$OUT"
 
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
@@ -77,6 +79,9 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --redi-coefficient nemo21 --redi-aht0 900 \
   --ice-exchange nemo_si3 --ice-snow bulk --ice-snow-flooding on \
   --forcing-time-interp linear --chl-remap nemo_scrip \
+  `# ---- wet domain = the oracle's: the Great Lakes, Caspian and Lake Victoria` \
+  `# (207 cells wet in mesh_mask.nc, land in NEMO's domain_cfg) become land ----` \
+  --nemo-domain-mask \
   `# EOS stays wright: --eos nemo_teos10 is REFUSED because NEMO's TEOS-10` \
   `# takes Conservative Temperature and ABSOLUTE salinity while our tracers` \
   `# are potential temperature and PRACTICAL salinity.` \
