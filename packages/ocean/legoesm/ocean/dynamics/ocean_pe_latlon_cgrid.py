@@ -1653,8 +1653,7 @@ def nemo_qco_wzv_operands(
         # sensitive to those last bits through the vertical recurrence.
         safe_e3t = jnp.where(tmask[..., jk] > 0.5, live_t[..., jk], 1.0)
         hdiv = jax.lax.optimization_barrier(transport_div / safe_e3t)
-        level = jax.lax.optimization_barrier(
-            live_t[..., jk] * hdiv) * tmask[..., jk]
+        level = nemo_source_round(live_t[..., jk] * hdiv) * tmask[..., jk]
         flux_levels.append(level)
         barotropic_div = jax.lax.optimization_barrier(barotropic_div + level)
     flux_div = jnp.stack(flux_levels, axis=-1)
@@ -1670,23 +1669,23 @@ def nemo_qco_wzv_operands(
         eta_after = jax.lax.optimization_barrier(
             jnp.asarray(eta_after_override, dtype=eta_now.dtype)) * tmask[..., 0]
     eta_wzv_before = eta_now if eta_after_override is not None else eta_before
-    r3_after = jax.lax.optimization_barrier(eta_after * r1_h0)
-    r3_before = jax.lax.optimization_barrier(eta_wzv_before * r1_h0)
-    r3_delta = jax.lax.optimization_barrier(r3_after - r3_before)
-    r1_dt = jax.lax.optimization_barrier(
+    r3_after = nemo_source_round(eta_after * r1_h0)
+    r3_before = nemo_source_round(eta_wzv_before * r1_h0)
+    r3_delta = nemo_source_round(r3_after - r3_before)
+    r1_dt = nemo_source_round(
         jnp.asarray(1.0, dtype=eta_now.dtype) / dt)
-    stretch_rate = jax.lax.optimization_barrier(
-        (r1_dt * e3t0) * r3_delta[..., None])
+    stretch_rate = nemo_source_round(
+        nemo_source_round(r1_dt * e3t0) * r3_delta[..., None])
 
     # sshwzv.F90 bottom-up left recurrence.  A static Python loop preserves
     # source ordering under JIT and remains differentiable.
     carry = jnp.zeros_like(eta_now)
     levels = [None] * nlev
     for jk in range(nlev - 1, -1, -1):
-        bracket = jax.lax.optimization_barrier(
+        bracket = nemo_source_round(
             flux_div[..., jk] + stretch_rate[..., jk])
-        carry = jax.lax.optimization_barrier(
-            carry - bracket * tmask[..., jk])
+        carry = nemo_source_round(
+            carry - nemo_source_round(bracket * tmask[..., jk]))
         levels[jk] = carry
     ww = jnp.stack(levels + [jnp.zeros_like(carry)], axis=-1)
     return ww, live_u, live_v
@@ -4773,11 +4772,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # stp2d.F90 runs before dyn_spg_ts and hands sshwzv the separately
         # carried Kaa scratch.  Only WS-RK3 states own this slot.
         eta_kaa_field = getattr(state, "eta_rk3_kaa", None)
-        eta_kaa_override = (
-            eta_kaa_field.data
-            if (getattr(config, "momentum_time_integrator", "euler")
-                == "rk3_ws" and eta_kaa_field is not None)
-            else None)
+        eta_kaa_override = None  # Round-88 bisection half B.
         zad_w, zad_h_u, zad_h_v = _nemo_qco_zad_operands(
             eta, eta_before, u, v, grid, z_coord, u_mask_3d, v_mask_3d,
             qco_tmask_3d, qco_dt,
