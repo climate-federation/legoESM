@@ -121,6 +121,7 @@ class NemoState(NamedTuple):
     rhd: np.ndarray | None = None  # in-situ density anomaly, if dumped
     uu_b: np.ndarray | None = None  # restart uu_n = depth-mean U at Kbb
     vv_b: np.ndarray | None = None  # restart vv_n = depth-mean V at Kbb
+    ssh_kaa: np.ndarray | None = None  # restart ssha = next pre-solve Kaa
 
 
 def _check_hls(nn_hls: int) -> None:
@@ -254,6 +255,8 @@ def read_nemo_restart(path: str, *, nn_hls: int = 1) -> NemoState:
               if has_uu_b else None),
         vv_b=(_strip_halo_2d(np.asarray(r["vv_n"].values).squeeze(), nn_hls)
               if has_vv_b else None),
+        ssh_kaa=(_strip_halo_2d(np.asarray(r["ssha"].values).squeeze(), nn_hls)
+                 if "ssha" in r else None),
     )
 
 

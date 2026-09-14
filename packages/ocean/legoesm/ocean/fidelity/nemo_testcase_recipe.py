@@ -613,6 +613,7 @@ def _native_initial_state(
         land_mask_override=surface_wet,
         H_bathy_override=bathymetry,
         nemo_prognostic_barotropic_velocity=True,
+        nemo_rk3_ssh_scratch=True,
     )
     active = jnp.asarray(z_coord.is_active) & surface_wet[..., None]
     temperature = jnp.where(x_km[..., None] <= front_km, cold, warm)
@@ -835,6 +836,7 @@ def build_gyre_zco_card() -> NEMOTestcaseCard:
         land_mask_override=wet,
         H_bathy_override=bathymetry,
         nemo_prognostic_barotropic_velocity=True,
+        nemo_rk3_ssh_scratch=True,
     )
     t_profile, s_profile = _gyre_initial_profiles(_GYRE_GDEPT_1D[:30])
     active = np.asarray(z_coord.is_active)
