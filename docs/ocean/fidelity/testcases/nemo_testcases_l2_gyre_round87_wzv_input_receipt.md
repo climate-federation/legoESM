@@ -138,11 +138,27 @@ started. Its terminal verdict is quoted verbatim:
 
 Per the operator instruction, **independent review unavailable in-sandbox**;
 work continued. No `SHIP` verdict is claimed. Complete output is
-`round87_codex_review.txt`.
+`round87_codex_review.txt`, SHA-256
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
-FOCUSED_TEST_PLACEHOLDER
+Focused CPU/fp64 verification passes 50 tests covering the Round-46 literal
+stage replay, Round-84 RHS walk, Round-86 ZAD operand walk, Round-87 scalar
+calibration and controls, the receipt citation map, and ZAD/dynZDF composition.
+The decisive line is `50 passed in 32.66s`; log SHA-256 is
+`4a02858ea112e9816492f6b9847b93507533f4a399dcb13dab8f4eaac70d4405`.
+Python compilation, `git diff --check`, and the production-file restoration
+diff pass. The known unrelated `test_rk3_ws_differs_from_rk3_and_is_finite`
+failure was not encountered.
 
-CITATION_GATE_PLACEHOLDER
+The receipt citation gate passes all 5/5 compiled-source citations with zero
+unmapped citations, failures, or global map-audit failures; artifact SHA-256 is
+`7ca5fa38e03cb62b653bd5166c5591e0e9882d408d4359870f168258d0879468`.
+Shifting the `divhor` citation by two lines exits 1 with
+`SYMBOL-NOT-AT-LINE`; plant SHA-256 is
+`9d14528c83026797efca94ca28844f45bea53090f4f52be08dab9c7a4d8406b2`.
+Two earlier citation attempts were rejected: first for an off-by-one stp2d
+heading plus ambiguous repeated anchors, then for off-by-one extents. No
+citation from either failed attempt was accepted.
 
 ## Rule-12 disposition
 
