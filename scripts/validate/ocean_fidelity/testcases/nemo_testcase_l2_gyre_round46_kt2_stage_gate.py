@@ -556,6 +556,11 @@ def _given_inputs(
                 if plant == "given" and (stage, op, face) == (1, "hpg", "u"):
                     got = got.copy()
                     got[tuple(np.argwhere(mask)[0])] += 1.0
+                if (plant == "stage-rhs-ulp"
+                        and (stage, op, face) == (1, "hpg", "u")):
+                    got = got.copy()
+                    index = tuple(np.argwhere(mask)[0])
+                    got[index] = np.nextafter(got[index], np.float64(np.inf))
                 rows.append({
                     "name": f"GYRE-zco.kt{kt}.s{stage}.post_{op}_accumulator.{face}",
                     "n": int(mask.sum()),
@@ -585,6 +590,12 @@ def _given_inputs(
                 )
     if plant == "given":
         require(any(r["max_abs"] > 0.5 for r in rows), "given-input plant did not land")
+    if plant == "stage-rhs-ulp":
+        planted = next(
+            row for row in rows
+            if row["name"] == "GYRE-zco.kt1.s1.post_hpg_accumulator.u")
+        require(planted["n_unequal"] == 1,
+                "one-ULP exact-accumulator plant did not flip exactly one cell")
     first = {}
     # Historical audit only: rounds 49/50 changed VOR/LDF after this round-48
     # prediction was registered.  Retain the discriminating measurement and
@@ -1236,6 +1247,20 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
             expected_slots=tuple(
                 header[name] for name in ("Kbb", "Kmm", "Kaa", "Krhs")))
 
+    if plant == "stage-rhs-ulp":
+        planted_rows, _ = _given_inputs(
+            records, "stage-rhs-ulp", kt=1, stages=(1,))
+        planted = next(
+            row for row in planted_rows
+            if row["name"] == "GYRE-zco.kt1.s1.post_hpg_accumulator.u")
+        return {
+            "format": "nemo-testcase-l2-gyre-stage-twin-v3",
+            "given_nemo_entry": [], "chained": [],
+            "stage_entry_identity": [], "first_owned_nonbit": None,
+            "stage_rhs_ulp_plant_flipped_row": planted["n_unequal"] == 1,
+            "stage_rhs_ulp_plant_target": planted["name"],
+        }
+
     given = []
     given_entries = []
     states = {1: _bridge_stage_context(
@@ -1244,11 +1269,11 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
               2: _bridge_kt2_state(card, cfg, records)}
     raw_history = tuple(jnp.asarray(value) for value in _raw_history_override(memory_root))
     kt_values = ((1,) if plant in {
-        "stage-entry-ulp", "stage-context-ulp", "stage-rhs-ulp"
+        "stage-entry-ulp", "stage-context-ulp"
     } else (1, 2))
     stage_values = ((2,) if plant == "stage-entry-ulp" else
                     (1,) if plant in {
-                        "stage-context-ulp", "stage-rhs-ulp"
+                        "stage-context-ulp"
                     } else (1, 2, 3))
     for kt in kt_values:
         state = states[kt]
@@ -1271,8 +1296,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                     surface_forcing=surface))
             entry_rows = _entry_rows(
                 trace, records, masks, state, kt, stage, "NEMO_RECORDED",
-                plant_rhs=(plant == "stage-rhs-ulp" and kt == 1
-                           and stage == 1))
+                plant_rhs=False)
             given_entries.extend(entry_rows)
             if plant == "stage-entry-ulp" and (kt, stage) == (1, 2):
                 planted = next(row for row in entry_rows
@@ -1299,19 +1323,6 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                     "stage_entry_identity": entry_rows,
                     "first_owned_nonbit": None,
                     "stage_context_ulp_plant_flipped_row": True,
-                }
-            if plant == "stage-rhs-ulp" and (kt, stage) == (1, 1):
-                planted = next(
-                    row for row in entry_rows
-                    if row["field"] == "momentum_rhs_u")
-                require(planted["plant_index"] is not None,
-                        "one-ULP stage-RHS plant did not select a cell")
-                return {
-                    "format": "nemo-testcase-l2-gyre-stage-twin-v3",
-                    "given_nemo_entry": [], "chained": [],
-                    "stage_entry_identity": entry_rows,
-                    "first_owned_nonbit": None,
-                    "stage_rhs_ulp_plant_flipped_row": True,
                 }
             rows = _output_rows(
                 trace, records, next_entries, transports, masks,
