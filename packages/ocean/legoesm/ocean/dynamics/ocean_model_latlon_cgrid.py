@@ -1658,7 +1658,12 @@ class _NEMOWSLiveOperandTrace(NamedTuple):
     stage_qco: object
     stage_coefficients: object
     tke_entry: object
-    barotropic_targets: object; stage_rhs: object; stage_raw_velocities: object; barotropic_correction_geometry: object; stage_outputs: object  # noqa: E501,E702
+    barotropic_targets: object
+    stage_rhs: object
+    stage1_rhs_walk: object
+    stage_raw_velocities: object
+    barotropic_correction_geometry: object
+    stage_outputs: object
 
 
 def _nemo_qsr_stage3_rate(
@@ -5279,6 +5284,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_exposed_stage3_rhs = None
         _nemo_ws_stage_tracers = None
         _nemo_ws_live_stage_states = None; _nemo_ws_live_stage_raw = None; _nemo_ws_live_stage_rhs = None; _nemo_ws_live_baro_geometry = None  # noqa: E501,E702
+        _nemo_ws_live_stage1_rhs_walk = None
         _nemo_ws_live_stage_qco = None
         _nemo_ws_live_tke_entry = None
         _nemo_ws_live_operator_operands = [
@@ -6398,6 +6404,7 @@ class LatLonCGridOceanModel:
             # 3.136e-07 m/s^2 at the OVERFLOW kt=2 entry, exactly zero from
             # rest).
             _du1_rhs, _dv1_rhs = du_dt_pert, dv_dt_pert
+            _stage1_rhs_base = (_du1_rhs, _dv1_rhs)
             # The stage's NEMO e3u/e3v(Kmm) pair for the flux-form momentum
             # advection, from the ONE kernel (_nemo_ws_qco_stage_faces) keyed
             # on the stage ssh -- NOT read off the stage transport's geom[4],
@@ -6423,6 +6430,7 @@ class LatLonCGridOceanModel:
                     stage_face_thickness=_face_thickness_kbb, stage_index=1)
                 _du1_rhs = _du1_rhs + (_p0_with_zub[0] - _p0_no_zub[0])
                 _dv1_rhs = _dv1_rhs + (_p0_with_zub[1] - _p0_no_zub[1])
+            _stage1_rhs_post_transport = (_du1_rhs, _dv1_rhs)
             # stp2d materializes stage-1 WZV before dyn_zad. The external
             # solve makes that stage transport available only at this point,
             # so replace the ZAD association without changing earlier terms.
@@ -6436,9 +6444,16 @@ class LatLonCGridOceanModel:
                 stage_face_thickness=_face_thickness_kbb, stage_index=1)
             _du1_rhs = _du1_rhs + (_p0_with_zad[0] - _p0_without_zad[0])
             _dv1_rhs = _dv1_rhs + (_p0_with_zad[1] - _p0_without_zad[1])
+            _stage1_rhs_post_zad = (_du1_rhs, _dv1_rhs)
             # Stage 1: Kmm = Kbb, so the RHS carries (1 + r3u(Kbb)).
             _u1_rhs = _du1_rhs if _vert0 is None else _du1_rhs + _vert0[0]
             _v1_rhs = _dv1_rhs if _vert0 is None else _dv1_rhs + _vert0[1]
+            _nemo_ws_live_stage1_rhs_walk = (
+                _stage1_rhs_base,
+                _stage1_rhs_post_transport,
+                _stage1_rhs_post_zad,
+                (_u1_rhs, _v1_rhs),
+            )
             u1_raw = rk3_stage_velocity_update(
                 u0, _u1_rhs, dt_mom / 3.0, _ws_stage_u_mask,
                 vector_form=_vector_velocity_stage_update,
@@ -8419,6 +8434,7 @@ class LatLonCGridOceanModel:
                     or _nemo_ws_live_stage_states is None
                     or _nemo_ws_live_stage_geometry is None or _nemo_ws_live_stage_raw is None or _nemo_ws_live_stage_rhs is None or _nemo_ws_live_baro_geometry is None  # noqa: E501
                     or _nemo_ws_live_stage_qco is None
+                    or _nemo_ws_live_stage1_rhs_walk is None
                     or _nemo_ws_live_tke_entry is None):
                 raise ValueError("live WS-RK3 operand trace is incomplete")
             return _NEMOWSLiveOperandTrace(
@@ -8437,7 +8453,12 @@ class LatLonCGridOceanModel:
                                     state_new.eta.data,
                                     (_eta_live_one_third,
                                      _eta_live_one_half,
-                                     state_new.eta.data)), stage_rhs=_nemo_ws_live_stage_rhs, stage_raw_velocities=_nemo_ws_live_stage_raw, barotropic_correction_geometry=_nemo_ws_live_baro_geometry, stage_outputs=(  # noqa: E501
+                                     state_new.eta.data)),
+                stage_rhs=_nemo_ws_live_stage_rhs,
+                stage1_rhs_walk=_nemo_ws_live_stage1_rhs_walk,
+                stage_raw_velocities=_nemo_ws_live_stage_raw,
+                barotropic_correction_geometry=_nemo_ws_live_baro_geometry,
+                stage_outputs=(
                     (u1_corr, v1_corr, _T_stage1, _S_stage1,
                      _eta_live_one_third),
                     (u2_corr, v2_corr, _T_stage2, _S_stage2,

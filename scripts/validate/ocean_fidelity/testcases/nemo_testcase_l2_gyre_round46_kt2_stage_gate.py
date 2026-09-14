@@ -1097,6 +1097,37 @@ def _entry_rows(trace, records, masks, context, kt: int, stage: int,
             "plant_index": planted_at,
         })
         rows.append(row)
+    if kt == 1 and stage == 1:
+        rhs_walk_names = (
+            ("operator_accumulator", "compiled stp2d HPG/LDF/VOR/KEG/ZAD"),
+            ("transport_reconcile", "model-only stage transport reassociation"),
+            ("zad_reassociation", "model-only stage ZAD reassociation"),
+            ("final", "RK assignment input"),
+        )
+        reference_by_face = {
+            face: _owned3(a[f"after_adv_{face}"])
+            for face in ("u", "v")
+        }
+        for boundary_index, (boundary, statement) in enumerate(rhs_walk_names):
+            for face, candidate_full in zip(
+                    ("u", "v"), trace.stage1_rhs_walk[boundary_index],
+                    strict=True):
+                candidate_full = np.asarray(candidate_full)
+                candidate = (candidate_full[:, 1:, :] if face == "u"
+                             else candidate_full[1:, :, :])
+                row = _classification(score(
+                    f"GYRE-zco.kt1.s1.rhs_walk.{boundary}.{face}",
+                    reference_by_face[face], candidate, masks[face]))
+                row.update({
+                    "kt": 1,
+                    "stage": 1,
+                    "field": f"stage1_rhs_{boundary}_{face}",
+                    "entry_mode": mode,
+                    "boundary": boundary,
+                    "statement": statement,
+                    "reference_boundary": "after_adv",
+                })
+                rows.append(row)
     qco = tuple(np.asarray(value) for value in trace.stage_qco[stage - 1])
     qco_candidates = {
         "r3t_Kmm": qco[0],
@@ -1344,6 +1375,13 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                   if row.get("classification") != "BIT"), None)
     stage1_operator_rows, stage1_operator_first = _given_inputs(
         records, None, kt=1, stages=(1,))
+    stage1_rhs_rows = [
+        row for row in given_entries
+        if row.get("field", "").startswith("stage1_rhs_")
+    ]
+    first_rhs = next(
+        (row for row in stage1_rhs_rows
+         if row.get("classification") != "BIT"), None)
     return {
         "format": "nemo-testcase-l2-gyre-stage-twin-v3",
         "given_nemo_entry": given,
@@ -1353,6 +1391,14 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
             "compiled_order": ("hpg", "ldf", "vor", "adv"),
             "rows": stage1_operator_rows,
             "first_nonbit": stage1_operator_first["stage1"],
+            "post_operator_rhs_walk": stage1_rhs_rows,
+            "first_nonbit_model_statement": (
+                None if first_rhs is None else {
+                    key: first_rhs[key] for key in (
+                        "boundary", "statement", "field", "n_unequal",
+                        "absolute_max", "classification")
+                }
+            ),
         },
         "first_owned_nonbit": None if first is None else {
             key: first[key] for key in (
