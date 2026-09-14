@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import struct
 import sys
 from pathlib import Path
@@ -187,6 +188,16 @@ def test_stage_twin_scores_consumed_rhs_and_reuses_operator_walk():
     assert '"compiled_order": ("hpg", "ldf", "vor", "adv")' in source
     assert "stage1_operator_rows" in source
     assert '"first_nonbit_model_statement"' in source
+
+
+def test_ws_stage_one_consumes_the_full_unprojected_momentum_rhs():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    source = inspect.getsource(LatLonCGridOceanModel._step_impl)
+    assert "_du1_rhs, _dv1_rhs = du_dt, dv_dt" in source
+    assert "_du1_rhs, _dv1_rhs = du_dt_pert, dv_dt_pert" not in source
 
 
 def test_final_external_history_uses_last_pre_swap_current_and_before():
