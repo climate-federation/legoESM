@@ -111,6 +111,7 @@ def measure(args) -> dict[str, object]:
     require(base["status"] == "MEASURED", "kt2 seeded context changed")
     card, seeded, freshwater, surface, _ = context
     masks = gate.expected_masks(card)
+    nlev = card.recipe.z_coord.n_levels
 
     ordinary_model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
@@ -147,20 +148,22 @@ def measure(args) -> dict[str, object]:
     cross_record: dict[str, dict[str, object]] = {}
     for face in ("u", "v"):
         state_index = 0 if face == "u" else 1
-        mask3 = _owned(arrays[f"baro_{face}mask"]) > 0.5
+        mask3 = _owned(arrays[f"baro_{face}mask"])[..., :nlev] > 0.5
         mask2 = mask3[..., 0]
-        oracle_kbb = round46._owned3(stage_arrays[f"{face}_Kbb"])
-        oracle_rhs = round46._owned3(stage_arrays[f"after_adv_{face}"])
-        oracle_raw = _owned(arrays[f"baro_raw_{face}"])
+        oracle_kbb = round46._owned3(stage_arrays[f"{face}_Kbb"], nlev)
+        oracle_rhs = round46._owned3(stage_arrays[f"after_adv_{face}"], nlev)
+        oracle_raw = _owned(arrays[f"baro_raw_{face}"])[..., :nlev]
         oracle_target = _owned(arrays[f"baro_target_{face}"])
-        oracle_h = _owned(arrays[f"baro_e3{face}_0"])
+        oracle_h = _owned(arrays[f"baro_e3{face}_0"])[..., :nlev]
         oracle_r1 = _owned(arrays[f"baro_r1_h{face}_0"])
         oracle_z = np.asarray(arrays[
             "baro_zub" if face == "u" else "baro_zvb"])
-        oracle_final = _owned(arrays[f"baro_final_{face}"])
+        oracle_final = _owned(arrays[f"baro_final_{face}"])[..., :nlev]
 
-        companion_raw = round46._owned3(stage_arrays[f"post_update_{face}"])
-        companion_final = round46._owned3(stage_arrays[f"post_baro_{face}"])
+        companion_raw = round46._owned3(
+            stage_arrays[f"post_update_{face}"], nlev)
+        companion_final = round46._owned3(
+            stage_arrays[f"post_baro_{face}"], nlev)
         cross_record[face] = {
             "raw": _stats(companion_raw, oracle_raw, mask3),
             "final": _stats(companion_final, oracle_final, mask3),
