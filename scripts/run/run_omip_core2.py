@@ -2612,6 +2612,7 @@ def validate_fesom_stage(args, parser) -> None:
 
 def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
                       nemo_monthly_init=None, nemo_init_month: int = 1,
+                      nemo_init_tint: bool = False,
                       woa_init: bool = False, woa_t=None, woa_s=None,
                       vertical_mixing: str = "fesom", vmix_config=None,
                       iwm_forcing_file: str | None = None):
@@ -2716,6 +2717,7 @@ def build_fesom_ocean(mesh_dir: str, dt: float, ic_dir: str | None = None, *,
             nemo_monthly_init[0], nemo_monthly_init[1],
             _lat_deg, _lon_deg, n_levels=int(z_coord.n_levels),
             month=int(nemo_init_month),
+            nemo_tint=bool(nemo_init_tint),
             target_depths=-_z_full,
             src_tmask=nemo_src_tmask_for(_MESH, nemo_monthly_init[0]))
         state = with_fields(state, model.mesh, T=T_ic, S=S_ic)
@@ -6739,6 +6741,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "--nemo-init-month, replacing the (annual) --woa-init "
                         "T/S AFTER the state build. nemolev ladders only "
                         "(75 levels, no vertical interpolation).")
+    p.add_argument("--nemo-init-tint", action="store_true",
+                   help="Start from NEMO's fldread ln_tint value of the monthly "
+                        "IC at 00:00 on day 1 of --nemo-init-month (records "
+                        "centred mid-month; 1 Jan = 0.5*Dec + 0.5*Jan) instead "
+                        "of the single month's field. This is what ORCA1 "
+                        "actually initialises from (namelist_cfg sn_tem/sn_sal "
+                        "ln_tint=.true.).")
     p.add_argument("--nemo-init-month", type=int, default=1,
                    help="Month (1-12) of --nemo-monthly-init to use "
                         "(default 1 — a 1 January cold start).")
@@ -8055,6 +8064,7 @@ def main() -> int:
             args.fesom_mesh_dir, args.dt, ic_dir=args.fesom_ic_dir,
             nemo_monthly_init=args.nemo_monthly_init,
             nemo_init_month=args.nemo_init_month,
+            nemo_init_tint=args.nemo_init_tint,
             woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s,
             # ONE closure across the three grids: the SAME zdftke card
             # builder + knobs the tripole/MPAS lanes use.
@@ -8443,6 +8453,7 @@ def main() -> int:
             args.nemo_monthly_init[0], args.nemo_monthly_init[1],
             lat2d, lon2d, n_levels=int(z_coord.n_levels),
             month=int(args.nemo_init_month),
+            nemo_tint=bool(args.nemo_init_tint),
             src_tmask=nemo_src_tmask_for(_MESH, args.nemo_monthly_init[0]))
         _Td = state.T.data.dtype
         state = state._replace(

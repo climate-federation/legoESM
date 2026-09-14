@@ -228,3 +228,37 @@ def test_regrid_skips_flood_filled_land_when_tmask_given(tmp_path):
         v[:] = 35.0
     with pytest.raises(ValueError, match="coordinates do not match"):
         nemo_src_tmask_for(str(m), str(p3))
+
+
+def test_monthly_init_nemo_tint_is_the_mid_month_blend(tmp_path):
+    """NEMO (fldread ln_tint) starts 1 January from 0.5*Dec + 0.5*Jan, not
+    from January's mid-month field. The fixture's field is base + month
+    index, so the blend is exactly base + 5.5 for month=1 (Dec index 11,
+    Jan index 0). Other start months are refused (the record centres need
+    the run calendar). Without the keyword the January field is returned
+    unchanged (non-vacuity)."""
+    lat, lon, lat_i, lon_i = _model_coords()
+    nlev = 3
+    tp, sp = tmp_path / "t.nc", tmp_path / "s.nc"
+    for path, var, base in ((tp, "contemp", 10.0), (sp, "presalt", 34.0)):
+        with netCDF4.Dataset(path, "w") as ds:
+            ds.createDimension("time_counter", 12)
+            ds.createDimension("deptht", nlev)
+            ds.createDimension("y", 6)
+            ds.createDimension("x", 8)
+            v = ds.createVariable("nav_lat", "f8", ("y", "x")); v[:] = lat_i
+            v = ds.createVariable("nav_lon", "f8", ("y", "x")); v[:] = lon_i
+            v = ds.createVariable(var, "f8",
+                                  ("time_counter", "deptht", "y", "x"))
+            v[:] = np.broadcast_to(
+                base + np.arange(12)[:, None, None, None], (12, nlev, 6, 8))
+    T0, S0 = load_nemo_monthly_init_ts(str(tp), str(sp), lat, lon,
+                                       n_levels=nlev, month=1)
+    T1, S1 = load_nemo_monthly_init_ts(str(tp), str(sp), lat, lon,
+                                       n_levels=nlev, month=1, nemo_tint=True)
+    np.testing.assert_allclose(T0[:-1, 1:-1][3, 3, 0], 10.0)         # Jan
+    np.testing.assert_allclose(T1[:-1, 1:-1][3, 3, 0], 10.0 + 5.5)   # Dec/Jan
+    np.testing.assert_allclose(S1[:-1, 1:-1][3, 3, 0], 34.0 + 5.5)
+    with pytest.raises(ValueError, match="1 January"):
+        load_nemo_monthly_init_ts(str(tp), str(sp), lat, lon,
+                                  n_levels=nlev, month=2, nemo_tint=True)
