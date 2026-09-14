@@ -58,7 +58,9 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 
 GW=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY
-SNAP=/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_orca1faith_d30/snapshot_final.npz
+# Override with `sbatch --export=ALL,SNAP=<path>` to score an arm's snapshot
+# (e.g. trp_orca1z0_d30/snapshot_day0020.npz for the day-20 -> day-30 trend).
+SNAP=${SNAP:-/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_orca1faith_d30/snapshot_final.npz}
 MESH=/burg-archive/glab/users/pg2328/legoESM/data/grids/eORCA1.2_mesh_mask.nc
 
 ls -l "$SNAP" "$MESH" 2>&1 | cat

@@ -61,14 +61,19 @@ export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' 
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 
+# Override with `sbatch --export=ALL,SNAP=<path>` to score an arm's snapshot;
+# the default is the baseline every number in the header was measured on.
+export SNAP=${SNAP:-/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_orca1faith_d30/snapshot_final.npz}
+echo "SNAP: $SNAP"
+
 $PY - <<'PY'
+import os
 import numpy as np
 import netCDF4 as nc
 
 GW = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/"
       "EXP00/RUN_GATEWAY/ORCA1_5d_20000101_20000331")
-SNAP = ("/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/"
-        "trp_orca1faith_d30/snapshot_final.npz")
+SNAP = os.environ["SNAP"]
 REC, LON0 = 5, 220.0
 
 dw = nc.Dataset(f"{GW}_grid_W.nc")
@@ -218,5 +223,105 @@ else:
           "oracle side of this comparison does not exist in this stream, "
           "exactly as its vector wind stress did not. Do NOT substitute a "
           "diffusivity for a viscosity; they differ by the Prandtl ratio.")
+
+# ---- ARM SCORING BLOCK (a811a3e2f pre-registration, surface TKE at z=0) ----
+# Scores whatever SNAP points at against the SAME oracle record. The numbers
+# it prints are the ones the arm card registered on: K_M through 3-15 m as a
+# fraction of NEMO's avm (CONFIRM >= 0.80, REFUTE < 0.15, PARTIAL between),
+# OUR shear at 3.3 m (CONFIRM needs < 1.0e-02, from 2.37e-02), the TRIPWIRE
+# (K_M > 2x avm anywhere in the top 10 m), and GLM's attribution confound --
+# the shear PRODUCTION K*S^2 through 1-10 m on both sides, which separates
+# "top-layer source added" from "10 m clamp removed". Verdict text is NOT
+# printed by the probe; the rule is quoted and the reader applies it.
+#
+# ALIGNMENT, stated because the table above is offset on the NEMO side:
+# avm_p[k] sits at zw[k] (zw[0] = 0 is the surface W-point), while
+# dudz_n[i] = (u[i+1]-u[i])/(zu[i+1]-zu[i]) sits at zw[i+1]. The table prints
+# avm_p[i] beside dudz_n[i], one W-level apart -- harmless for shape reading,
+# wrong for a product. Here NEMO's production pairs avm_p[i+1] with
+# dudz_n[i], both at zw[i+1]. Ours pairs KM_p[i] with dudz_o[i], both at
+# zi[i] (z_interface_ref holds the 74 interior interfaces, zi[0] ~ 1 m).
+if avm_p is not None:
+    n_o = min(KM_p.size, dudz_o.size, zi.size)
+    zo, K_o, S_o = zi[:n_o], KM_p[:n_o], dudz_o[:n_o]
+    n_n = min(avm_p.size - 1, dudz_n.size)
+    zn, K_n, S_n = zw[1:n_n + 1], avm_p[1:n_n + 1], dudz_n[:n_n]
+    avm_at_zo = np.interp(zo, zw[:avm_p.size], avm_p)
+    P_o, P_n = K_o * S_o ** 2, K_n * S_n ** 2
+    P_n_at_zo = np.interp(zo, zn, P_n)
+
+    print(f"\n[arm] SNAP = {SNAP}")
+    print(f"[arm] TOP 15 m at {LON0:.0f}E, ours on zi vs NEMO interpolated "
+          f"to the same depths; production P = K*(du/dz)^2 [m2/s3]")
+    print(f"{'z':>6} {'K_M':>10} {'avm@z':>10} {'ratio':>7} {'S_ours':>10} "
+          f"{'P_ours':>10} {'P_NEMO@z':>10}")
+    top = zo <= 15.0
+    for i in np.flatnonzero(top):
+        r = K_o[i] / avm_at_zo[i] if avm_at_zo[i] > 0 else np.nan
+        print(f"{zo[i]:6.1f} {K_o[i]:10.3e} {avm_at_zo[i]:10.3e} {r:7.3f} "
+              f"{S_o[i]:10.3e} {P_o[i]:10.3e} {P_n_at_zo[i]:10.3e}")
+
+    # Codex: np.interp carries a NaN into both neighbouring intervals and
+    # nanmedian/nanmax would then score a band with holes as if it were
+    # complete. Every scoring quantity is required to be finite over its
+    # whole band, and the scoring is refused otherwise.
+    score = zo <= 15.0
+    need = (K_o[score], S_o[score], avm_at_zo[score])
+    if not all(np.isfinite(x).all() for x in need):
+        raise SystemExit("[arm] REFUSED: non-finite K_M, shear or "
+                         "interpolated avm inside the 0-15 m scoring band")
+    band = (zo >= 3.0) & (zo <= 15.0)
+    ratio_med = float(np.median(K_o[band] / avm_at_zo[band]))
+    i33 = int(np.argmin(np.abs(zo - 3.3)))
+    s33_n = float(np.interp(zo[i33], zn, S_n))
+    trip = float(np.max((K_o / avm_at_zo)[zo <= 10.0]))
+    # Codex: integrating each side over the samples it happens to have inside
+    # 1-10 m compares different intervals (NEMO's W-levels enclose 1.02-8.93 m).
+    # Both profiles are interpolated onto ONE common grid and integrated there.
+    zz = np.linspace(1.0, 10.0, 19)
+    Pint_o = float(np.trapezoid(np.interp(zz, zo, P_o), zz))
+    Pint_n = float(np.trapezoid(np.interp(zz, zn, P_n), zz))
+    if not (np.isfinite(Pint_o) and np.isfinite(Pint_n)):
+        raise SystemExit("[arm] REFUSED: non-finite production inside 1-10 m")
+    print(f"\n[arm] K_M / avm, 3-15 m, median of per-depth ratios: "
+          f"{ratio_med:.3f}   (baseline 0.05-0.06)")
+    print(f"[arm] shear at {zo[i33]:.1f} m: ours {S_o[i33]:.3e}, NEMO at the "
+          f"same depth {s33_n:.3e}   (baseline ours 2.371e-02)")
+    print(f"[arm] TRIPWIRE max K_M/avm in the top 10 m: {trip:.3f}   "
+          f"(> 2 means the surface VALUE was calibrated under the old "
+          f"placement -- re-examine before adopting anything)")
+    print(f"[arm] production K*S^2 integrated 1-10 m [m3/s3]: ours "
+          f"{Pint_o:.3e}, NEMO {Pint_n:.3e}, ratio {Pint_o / Pint_n:.3f}")
+    print("[arm] PRE-REGISTERED (a811a3e2f): CONFIRM = ratio >= 0.80 AND our "
+          "3.3 m shear < 1.0e-02; REFUTE = ratio < 0.15; PARTIAL = anything "
+          "else. The undercurrent is scored as a day-20 -> day-30 TREND by "
+          "the EUC probe, never by a threshold here.")
+    # GLM, on review: the production ratio CANNOT separate "clamp removed"
+    # from "top-layer source added" -- K*S^2 was already equal on both sides
+    # in the baseline by shear-equilibrium compensation, so ~1 is expected
+    # under either reading and under no change at all. It is kept as a
+    # disequilibrium indicator only. What discriminates is the SHAPE of the
+    # TKE profile itself: a z=0 Dirichlet source decays monotonically from
+    # the surface; a removed 10 m clamp erases an interior feature there.
+    print("[arm] the production ratio does NOT discriminate the two readings "
+          "(both predict ~1); the TKE profile shape below does.")
+    if "tke" in s.files:
+        e_p = prof_ours(np.asarray(s["tke"], np.float64), slat, slon)
+        ze = zi if e_p.size == zi.size else (zc if e_p.size == zc.size else None)
+        print(f"\n[arm] TKE profile, top 16 levels at {LON0:.0f}E [m2/s2] "
+              f"(NEMO does not publish en in this stream; compare the arm "
+              f"against the baseline run of this same probe)")
+        for i in range(min(16, e_p.size)):
+            zz_i = ze[i] if ze is not None else np.nan
+            print(f"{zz_i:8.1f} {e_p[i]:10.3e}")
+        top = e_p[:16]
+        mono = bool(np.all(np.diff(top[np.isfinite(top)]) <= 0))
+        print(f"[arm] TKE monotonically decreasing over the top 16 levels: "
+              f"{mono}  -- an interior maximum near 10 m is the clamp's "
+              f"signature, a surface maximum decaying downward is the "
+              f"z=0 source's.")
+    else:
+        print("[arm] snapshot carries no 'tke' field; profile-shape check "
+              "unavailable")
 PY
 echo DONE
