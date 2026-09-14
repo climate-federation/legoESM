@@ -119,7 +119,8 @@ def test_every_declared_plant_has_a_nonzero_exit_contract():
     source = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py").read_text()
     run = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage/run.sh").read_text()
     for plant in ("header", "truncation", "calibration", "given", "trajectory",
-                  "twin", "stage-entry-ulp", "stage-context-ulp", "stamp"):
+                  "twin", "stage-entry-ulp", "stage-context-ulp",
+                  "stage-rhs-ulp", "stamp"):
         assert f'"{plant}"' in source
     assert 'return 1 if args.plant or report["status"] != "PASS" else 0' in source
     for plant in ("header", "truncation", "calibration", "twin", "stamp"):
@@ -128,7 +129,8 @@ def test_every_declared_plant_has_a_nonzero_exit_contract():
 
 def test_retracted_round48_owner_prediction_cannot_abort_current_measurement():
     source = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py").read_text()
-    assert '"interpretation": "POSTHOC_AFTER_ROUND49_ROUND50"' in source
+    assert '"interpretation": (' in source
+    assert '"POSTHOC_AFTER_ROUND49_ROUND50" if kt == 2' in source
     assert "round48 first-non-bit prediction REFUTED" not in source
 
 
@@ -175,6 +177,15 @@ def test_stage_twin_refuses_unmeasured_required_rows():
     assert 'row.get("classification") == "UNMEASURED_WITH_SPEC"' in source
     assert 'report["stage_twin"]["first_owned_nonbit"] = None' in source
     assert 'report["stage_twin"]["first_measured_nonbit"]' in source
+
+
+def test_stage_twin_scores_consumed_rhs_and_reuses_operator_walk():
+    source = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py").read_text()
+    assert 'f"{rhs_boundary}_{face}"' in source
+    assert '"field": f"momentum_rhs_{face}"' in source
+    assert "kt=1, stages=(1,)" in source
+    assert '"compiled_order": ("hpg", "ldf", "vor", "adv")' in source
+    assert "stage1_operator_rows" in source
 
 
 def test_final_external_history_uses_last_pre_swap_current_and_before():
