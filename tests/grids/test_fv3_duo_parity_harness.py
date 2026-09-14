@@ -488,3 +488,22 @@ def test_cl2_one_step_ceiling_is_twice_the_measured_ulp_envelope():
         "cl2": 2.0 * mod.CL2_ULP_ENVELOPE_ABS / TERM_QCLY}
     assert 1e-3 < mod.TRACER_STEP_MAX_REL["cl2"] < 2e-3
     assert mod.CL2_ULP_ENVELOPE_ABS == 3.297e-09
+
+
+def test_arm_ksplit_nsplit_must_match_the_step_deck(tmp_path):
+    """--k-split/--n-split used to be taken on faith. A deck whose
+    namelist says k_split=2 refuses an arm asked to run k_split=1, before
+    any oracle file is read; the last assignment wins as Fortran reads it."""
+    mod = _load_scorer()
+    decks = []
+    for name in ("ic", "step"):
+        d = tmp_path / name; d.mkdir()
+        (d / "field_table").write_text(' "TRACER", "atmos_mod", "sphum"\n /\n')
+        (d / "input.nml").write_text(
+            " &fv_core_nml\n       k_split = 1\n       k_split = 2\n"
+            "       n_split = 8\n       dnats = 0\n /\n")
+        decks.append(str(d))
+    assert mod._nml_int(mod._nml_text(decks[1]), "k_split") == 2
+    with pytest.raises(SystemExit, match="deck has k_split=2"):
+        mod.main(["--ic-run", decks[0], "--step-run", decks[1], "--k-split", "1",
+                  "--n-split", "8", "--backend", "numpy"])

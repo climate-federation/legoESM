@@ -1501,6 +1501,18 @@ def main(argv=None):
     # ONLY to the step deck; the IC is checked inert, and for the HS arm the IC
     # is the MOIST cold-start (adiabatic=.false.), so it is checked moist=True.
     resolve_deck_tracers(args.ic_run, args.step_run)
+    # --k-split / --n-split were taken on faith: the step deck's own
+    # namelist decides what the oracle ran (last assignment wins, as
+    # Fortran reads it), and an arm that disagrees scores nothing.
+    _step_nml = _nml_text(args.step_run)
+    for _key, _val in (("k_split", args.k_split), ("n_split", args.n_split)):
+        _deck = _nml_int(_step_nml, _key)
+        if _deck != _val:
+            raise SystemExit(
+                f"{args.step_run}: deck has {_key}={_deck}, the arm was asked "
+                f"to run {_key}={_val}; refusing to score a different "
+                f"integration than the oracle ran (pass --{_key.replace('_', '-')} "
+                f"{_deck})")
     for _r, _is_step in ((args.ic_run, False), (args.step_run, True)):
         check_deck_matches_the_arm(
             _r, nh=args.nh,
