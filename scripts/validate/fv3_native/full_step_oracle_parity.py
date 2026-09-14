@@ -805,6 +805,7 @@ def score_pair(port, orc) -> tuple:
             selects.append(r_select)
             if r_select < best_select:
                 best_select = r_select
+                per["_select"] = float(r_select)
                 best = (r, transposed, nm, su, sv, per)
     # AMBIGUITY, made visible (codex 2026-09-14): candidates whose selection
     # cost sits within the IC floor band of the winner are indistinguishable
@@ -863,19 +864,32 @@ def derive_face_map(port, orc) -> tuple:
             meta[pf][ot] = (tr, nm, su, sv)
             per_field[pf][ot] = pf_r
             wind_only[pf, ot] = score_pair_winds_only(port[pf], orc[ot])[0]
-    best_perm, best_worst, second_worst = None, np.inf, np.inf
+    # The BIJECTION is chosen on the SELECTION cost (prognostic fields plus
+    # any lon-dependent extra), not on the prognostic cost alone: the
+    # zonally symmetric base state makes several tiles identical in
+    # u/v/pt/delp, so on those the pairing used to be decided by
+    # permutation order (measured 2026-09-14 after codex round 2: runner-up
+    # bijection at 1.000x the winner). The REPORTED worst stays the
+    # prognostic cost of the chosen bijection, so the IC floor gate is
+    # unchanged.
+    sel = np.array([[(per_field[pf][ot] or {}).get("_select", cost[pf, ot])
+                     for ot in range(6)] for pf in range(6)])
+    best_perm, best_sel, second_sel = None, np.inf, np.inf
     for perm in itertools.permutations(range(6)):
-        w = max(cost[pf, perm[pf]] for pf in range(6))
-        if w < best_worst:
-            second_worst, best_worst, best_perm = best_worst, w, perm
-        elif w < second_worst:
-            second_worst = w
-    # codex round 2: a within-pair tie is counted in score_pair, but two
-    # different TILE assignments could also fit -- the runner-up bijection's
-    # worst cost is recorded on the winner's per-field dicts as
-    # `_bijection_margin` (runner-up / winner); a margin near 1 means the
-    # tile pairing itself is ambiguous and is reported by main.
-    margin = (second_worst / best_worst) if best_worst > 0 else np.inf
+        w = max(sel[pf, perm[pf]] for pf in range(6))
+        if w < best_sel:
+            second_sel, best_sel, best_perm = best_sel, w, perm
+        elif w < second_sel:
+            second_sel = w
+    best_worst = max(cost[pf, best_perm[pf]] for pf in range(6))
+    # runner-up bijection's selection cost relative to the winner's: a
+    # margin near 1 means the tile pairing is ambiguous on everything
+    # scored, and main reports it (REFUSE with a lon-dependent tracer,
+    # WARN without)
+    if best_sel > 0:
+        margin = second_sel / best_sel
+    else:                       # exact zeros: a tie if the runner-up is 0 too
+        margin = 1.0 if second_sel == 0 else np.inf
     for pf in range(6):
         d = per_field[pf][best_perm[pf]]
         if d is not None:

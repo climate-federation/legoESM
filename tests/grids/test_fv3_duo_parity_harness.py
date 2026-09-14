@@ -559,3 +559,33 @@ def test_ulp_probe_pins_are_guarded_and_documented():
         u.main(["--assert-envelope", "--n", "24"])
     with pytest.raises(SystemExit, match="go together"):
         u.main(["--oracle-ic-run", "x"])
+
+
+def test_bijection_is_chosen_on_the_extra_scalar_when_tiles_are_identical():
+    """Six port faces with IDENTICAL prognostic fields (as the zonally
+    symmetric base state makes them) and a distinct extra scalar each; the
+    oracle tiles are a shuffle of them. Without the extra the pairing is a
+    permutation-order accident and the runner-up bijection scores 1.0x the
+    winner; with the extra the true shuffle is recovered and the margin is
+    large. The REPORTED worst stays the prognostic cost."""
+    mod = _load_scorer()
+    n, km = 6, 2
+    rng = np.random.default_rng(3)
+    u = np.zeros((n, n + 1, km)); v = np.zeros((n + 1, n, km))
+    pt = np.full((n, n, km), 300.0); delp = np.full((n, n, km), 1.0e4)
+
+    def as_oracle(a):
+        return np.ascontiguousarray(np.moveaxis(a.transpose(1, 0, 2), -1, 0))
+    port = [{"u": u, "v": v, "pt": pt, "delp": delp,
+             "cl": rng.uniform(1e-6, 4e-6, (n, n, km))} for _ in range(6)]
+    shuffle = [3, 0, 5, 1, 4, 2]           # oracle tile t = port face shuffle[t]
+    orc = [{k: as_oracle(a) for k, a in port[shuffle[t]].items()} for t in range(6)]
+    cost, meta, perm, worst, per_field, _ = mod.derive_face_map(port, orc)
+    assert [shuffle[perm[pf]] for pf in range(6)] == list(range(6)), perm
+    assert worst < 1e-15
+    assert per_field[0][perm[0]]["_bijection_margin"] > 1e3
+    plain_p = [{k: a for k, a in f.items() if k != "cl"} for f in port]
+    plain_o = [{k: a for k, a in f.items() if k != "cl"} for f in orc]
+    _, _, _, worst0, pf0, _ = mod.derive_face_map(plain_p, plain_o)
+    assert worst0 < 1e-15
+    assert pf0[0][0]["_bijection_margin"] == 1.0
