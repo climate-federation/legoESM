@@ -277,8 +277,23 @@ def load_nemo_monthly_init_ts(
     salt_var: str = "presalt",
     target_depths: np.ndarray | None = None,
     src_tmask: np.ndarray | None = None,
+    nemo_tint: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """(T, S) 3-D initial state for the given month (1-based).
+
+    ``nemo_tint=True`` reproduces what NEMO actually starts from: with
+    ``sn_tem/sn_sal ... ln_tint = .true.`` (ORCA1 namelist_cfg:81-82)
+    ``fldread`` places each monthly record at the MIDDLE of its month and
+    interpolates linearly to the model time (fldread.F90:913-917, 225-227),
+    so a run starting at 00:00 on 1 January takes ``0.5 * December +
+    0.5 * January`` (31/62, whatever the year). Only ``month=1`` is
+    supported with this option: other start dates need the run calendar
+    (2000 is a leap year) to place the record centres.
+    Measured 2026-09-14 (hudson2_9771697): NEMO's day-5 Hudson Bay surface
+    salinity is 28.90 against 25.10 for January alone and 28.88 for the
+    blend (rms over the box 2.98 vs 0.22); globally the blend fits NEMO's
+    day-5 S (0.34 vs 0.45) and SST (0.32 vs 0.61) better as well.
+    ``False`` (default) keeps the historical single-month field.
 
     ``src_tmask`` (``(nlev, y, x)`` bool from ``read_nemo_tmask_interior``):
     NEMO's per-level wet mask on the source grid.  The IC files are
@@ -307,6 +322,28 @@ def load_nemo_monthly_init_ts(
     """
     if not (1 <= int(month) <= 12):
         raise ValueError(f"month must be 1..12, got {month!r}")
+    if nemo_tint:
+        # Codex: the record centres follow NEMO's calendar (2000 is a leap
+        # year), so the weight is start-date specific; only the 1 January
+        # start (31/62 = 0.5 whatever the year) is defined here. Each month
+        # goes through the SAME wet-regrid + column-fill pipeline on its own
+        # and the finished fields are blended, so a hole in one month never
+        # discards the other month's value.
+        if int(month) != 1:
+            raise ValueError(
+                "nemo_tint is defined for a 1 January start only "
+                "(0.5 * December + 0.5 * January); other start months need "
+                "the run calendar to place NEMO's record centres.")
+        kw = dict(n_levels=n_levels, temp_var=temp_var, salt_var=salt_var,
+                  target_depths=target_depths, src_tmask=src_tmask,
+                  nemo_tint=False)
+        T_jan, S_jan = load_nemo_monthly_init_ts(
+            temp_path, salt_path, lat_T_deg, lon_T_deg, month=1, **kw)
+        T_dec, S_dec = load_nemo_monthly_init_ts(
+            temp_path, salt_path, lat_T_deg, lon_T_deg, month=12, **kw)
+        print("[setup] NEMO monthly init: fldread ln_tint blend for 1 January "
+              "= 0.5 * December + 0.5 * January")
+        return 0.5 * (T_jan + T_dec), 0.5 * (S_jan + S_dec)
     T_arr, src_lat, src_lon = _read_var(temp_path, temp_var)
     S_arr, _, _ = _read_var(salt_path, salt_var)
     for name, arr in (("temp", T_arr), ("salt", S_arr)):

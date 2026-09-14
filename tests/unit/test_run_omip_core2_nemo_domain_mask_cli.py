@@ -64,3 +64,13 @@ def test_the_flag_is_forwarded_to_every_builder_and_into_the_mesh_read():
     assert src.count("nemo_domain_cfg=_nemo_domain_cfg,") == 4
     assert "_nemo_domain_cfg = (args.nemo_domain_cfg or _NEMO_DOMAIN_CFG)" in src
     assert "if args.nemo_domain_mask else None" in src
+
+
+def test_nemo_init_tint_flag_round_trips_and_is_forwarded():
+    p = _module()._build_arg_parser()
+    assert p.parse_args([]).nemo_init_tint is False
+    assert p.parse_args(["--nemo-init-tint"]).nemo_init_tint is True
+    src = RUNNER.read_text()
+    assert src.count("nemo_tint=bool(args.nemo_init_tint)") == 1
+    assert src.count("nemo_tint=bool(nemo_init_tint)") == 1
+    assert src.count("nemo_init_tint=args.nemo_init_tint,") == 1
