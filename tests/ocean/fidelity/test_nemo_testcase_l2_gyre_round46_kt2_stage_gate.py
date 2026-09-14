@@ -173,6 +173,8 @@ def test_stage_twin_refuses_unmeasured_required_rows():
     source = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py").read_text()
     assert 'report["status"] = "UNMEASURED"' in source
     assert 'row.get("classification") == "UNMEASURED_WITH_SPEC"' in source
+    assert 'report["stage_twin"]["first_owned_nonbit"] = None' in source
+    assert 'report["stage_twin"]["first_measured_nonbit"]' in source
 
 
 def test_final_external_history_uses_last_pre_swap_current_and_before():

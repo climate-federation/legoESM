@@ -24,7 +24,7 @@ stages 1, 2, and 3 with their pointer swaps at
 `GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90:195-222`.
 The external solver rotates the absolute current/b/bb histories after each
 substep at
-`GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:1035-1042`.
+`GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:834-846`.
 The executing stage constructs horizontal transports at
 `GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/stprk3_stg.f90:278-324`, then
 `tra_adv_trp` initializes or updates all three effective tracer transports at

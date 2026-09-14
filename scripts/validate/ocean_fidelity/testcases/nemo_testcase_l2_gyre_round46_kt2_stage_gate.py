@@ -1441,6 +1441,12 @@ def run(
             report["status"] = "UNMEASURED"
             report["stage_twin"]["missing_required_rows"] = [
                 row["name"] for row in missing]
+            # Decision 41 permits an ownership label only after the complete
+            # stage contract closes.  Retain the ordering diagnostic without
+            # allowing a partial table to print an owned-stage claim.
+            report["stage_twin"]["first_measured_nonbit"] = (
+                report["stage_twin"]["first_owned_nonbit"])
+            report["stage_twin"]["first_owned_nonbit"] = None
     return report
 
 
