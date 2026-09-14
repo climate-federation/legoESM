@@ -1794,3 +1794,20 @@ Still open: the intermittent 24-GPU first-execution hang (two NCCL arms
 queued since 2026-09-14 morning); GPU timing; the autotuner-off runtime
 cost; the warm/cold Fortran divergence; which limiter branch flips on the
 plateau.
+
+### The autotuner-off fix costs nothing (2026-09-14, job 9776324)
+
+One RTX 8000, one allocation, the single-process timing arm twice with only
+XLA_FLAGS differing (C48 km=10, 20 timed steps): default 274.1 ms/step,
+`--xla_gpu_autotune_level=0` 272.2 ms/step; final states BITWISE identical
+(0 cells differ). Both questions left open by the fix are closed: no
+runtime penalty for this stencil-dominated dycore, and single-GPU tuned and
+multi-GPU untuned kernels produce the same bits.
+
+### The runtime hang reproduces at SIX ranks, and follows the nodes (in progress)
+
+Job 9776325: six GPU ranks (kt=1) on g[101,188,193] compiled in full and
+hung in the first execution; `--xla_gpu_nccl_termination_timeout_seconds`
+never fired. Every hang so far has included nodes from g185-193 or
+g045-054; every completion ran on g041-044 + g094-101. A pinned-node A/B at
+six ranks (jobs 9777265 good nodes / 9777266 g188+g193) is queued.
