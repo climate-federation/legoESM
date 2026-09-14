@@ -76,6 +76,10 @@ case "$ARM" in
   # measures 1.4776e-06.
   nh)    EXTRA="--nh --max-rel 3e-6" ;;
   moist) EXTRA="--moist --tracers --max-rel 2e-9" ;;
+  # the terminator decks (build_terminator_oracle.sbatch): cold start, the
+  # DCMIP16 cl/cl2 pair advected alongside sphum and a zero liq_wat --
+  # the first oracle row where a second tracer carries signal.
+  term)  EXTRA="--tracers --max-rel 2e-9 --ic-run /burg-archive/glab/users/pg2328/fv3_oracle_pinned/run_hydro_zerostep_term_gfs --step-run /burg-archive/glab/users/pg2328/fv3_oracle_pinned/run_hydro_1step_term_gfs" ;;
   *) echo "unknown ARM=$ARM"; exit 4 ;;
 esac
 OUT=/burg-archive/glab/users/pg2328/fv3_duo_gaps/batparity_${ARM}_${SLURM_JOB_ID:-0}

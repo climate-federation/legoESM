@@ -197,9 +197,11 @@ def test_gate_nq_flag_defaults_to_one_and_reaches_every_ic_site():
              if isinstance(node, ast.Call)
              and getattr(node.func, "attr", None) == "dcmip16_initial_state"]
     assert len(sites) >= 3, "expected three IC construction sites"
+    assert defaults.get("--terminator") in (None, False)
     for call in sites:
         kws = {kw.arg: ast.unparse(kw.value) for kw in call.keywords}
         assert kws.get("n_tracers") == "args.nq", ast.unparse(call)
+        assert kws.get("terminator") == "args.terminator", ast.unparse(call)
 
 
 def test_gate_main_does_not_shadow_the_time_module():

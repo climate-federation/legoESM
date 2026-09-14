@@ -131,11 +131,16 @@ P = "/burg-archive/glab/users/pg2328/fv3_oracle_pinned"
 res = {}
 for deck in ("run_hydro_zerostep_term_gfs", "run_hydro_1step_term_gfs"):
     worst = 0.0
+    any_cl = False
     for t in range(1, 7):
         with netCDF4.Dataset(f"{P}/{deck}/RESTART/fv_tracer.res.tile{t}.nc") as ds:
             cl = np.asarray(ds["cl"][0]); cl2 = np.asarray(ds["cl2"][0])
-            assert cl.max() > 0 and cl2.max() > 0, (deck, t)
+            # a tile wholly on the night side has cl == 0 (tile 5 at C48);
+            # cl2 is then qcly/2 there, never zero
+            assert cl2.max() > 0, (deck, t)
+            any_cl = any_cl or cl.max() > 0
             worst = max(worst, float(np.abs(cl + 2 * cl2 - TERM_QCLY).max() / TERM_QCLY))
+    assert any_cl, f"{deck}: cl is zero on every tile"
     res[deck] = worst
     print(f"  {deck}: worst |Cl + 2 Cl2 - qcly| / qcly over 6 tiles = {worst:.3e}")
 ok = res["run_hydro_zerostep_term_gfs"] < 1e-12
