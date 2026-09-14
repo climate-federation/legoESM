@@ -1240,11 +1240,16 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
     chained = []
     state = card.recipe.initial_state
     for kt in (1, 2):
-        freshwater, surface = _surface_forcings(card, state, kt)
-        trace = jax.device_get(LatLonCGridOceanModel(
+        model = LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord, cfg,
             _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
-                expose_live_stage_operands=True)).step(
+                expose_live_stage_operands=True))
+        # Mirror the public step shim before observing the stage-entry carry.
+        # A cold start seeds avm/avt/surface-avm/dissl; scoring the caller's
+        # pre-shim object would falsely report those consumed fields absent.
+        state = model._seed_tke_preclosure_carry(state)
+        freshwater, surface = _surface_forcings(card, state, kt)
+        trace = jax.device_get(model.step(
                     state, dt=card.dt_s, freshwater=freshwater,
                     surface_forcing=surface))
         chained.extend(_external_rows(

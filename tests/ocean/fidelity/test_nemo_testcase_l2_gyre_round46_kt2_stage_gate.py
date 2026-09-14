@@ -215,3 +215,11 @@ def test_missing_model_context_is_fail_closed_not_an_exception():
     assert len(rows) == 5
     assert {row["classification"] for row in rows} == {"UNMEASURED_WITH_SPEC"}
     assert all(row["entry_mode"] == "LEGO_CHAINED" for row in rows)
+
+
+def test_chained_observer_scores_the_public_step_seeded_context():
+    source = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py").read_text()
+    seed = "state = model._seed_tke_preclosure_carry(state)"
+    step = "trace = jax.device_get(model.step("
+    output = "np.asarray(card.recipe.grid.area_T), state, kt,"
+    assert source.index(seed) < source.index(step) < source.rindex(output)
