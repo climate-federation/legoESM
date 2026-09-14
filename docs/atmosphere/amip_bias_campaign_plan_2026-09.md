@@ -130,3 +130,34 @@ at 2592; 2.8 million held land column-steps by 3024). A 5-day cold-start
 rerun with 3-hourly checks (base90_diag) is running to catch the origin.
 Surviving runs of the same deck: dd_ctl, sc_*, r3_* (all restarts, daily
 checks), dd_diag (restart + transport + cap + clamp, 3-hourly checks).
+
+## Results 2026-09-14 evening
+- Iteration 0 REFUTED at 30 days (dd_on vs dd_ctl, days 101-110): tropical
+  evaporation +0.3 % (gate >= +3 %), rsut +1.8 W/m2 tropics (worse), rain
+  +0.27 mm/day, Peru evaporation +7 W/m2 and rsut +3.9. The penetrative
+  downdraft does not ventilate the boundary layer at this resolution. Lever
+  stays off. The CFL cap alone carried the arm through the day it blew up
+  twice before (cap cures the restart blow-up: PLAUSIBLE, one run).
+- COLD-START INSTABILITY of the production deck: base90_r6, base90_diag and
+  the checkpoint-cadence control all blow up at day 3.1-4.0 from the ERA5
+  1979-01-01 start (top-level winds 78 -> 446 m/s from day 2.8, model-top
+  temperature falls to 168 K, ice number explodes). Each single revert
+  survives 5 days with the top warming to 190 K like the old deck: dt 75 s
+  (+rad every 48 steps), Louis turbulence, or the Laplacian filter in place of
+  the biharmonic. The instability needs dt 112.5 + CLUBB + biharmonic
+  together. No ESMValTool baseline exists until one of them is chosen or the
+  instability itself is fixed. Restarted runs (day 80) are unaffected.
+- Iteration 6 instrument WORKS: K=24-step remat adjoint on the production
+  MPAS lane, 132 tunables in one backward pass, 67 GiB, 19 min. FD-verified
+  on epsilon_deep for free-tropospheric vapour (0.8 %). rh_crit gradients
+  FAIL the FD check (factor ~2; the cover threshold is piecewise) — do not use
+  them. Ranked free-troposphere vapour sensitivities per e-fold (g/kg per
+  45 min): cloud_depth_deep +0.010, epsilon_deep -0.0067,
+  cloud_depth_shallow_max -0.0065, rhebc_land -0.0054, rain_vent_f2 +0.0052,
+  M_b_max +0.0044, tau_bl +0.0040. 45 of 132 tunables reach the vapour at
+  all. K=72 needs 506 GiB (remat per step); K=33 attempted.
+- Iteration 3 fix drafted (uncommitted, land package): canopy absorbs and the
+  driver exports ONE broadband albedo, snow layered on each band's base.
+  Behaviour change to put to the user: the export no longer adds the
+  prognostic dry-soil brightening (reviewers: double count with the
+  soil-colour bands).
