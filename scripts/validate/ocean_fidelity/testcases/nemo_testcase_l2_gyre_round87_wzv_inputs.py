@@ -139,8 +139,8 @@ def _live_trace(card, seeded, trace):
     for jk in range(nlev):
         barotropic_div = jax.lax.optimization_barrier(
             barotropic_div + provisional["e3div"][..., jk])
-    eta_kaa = nemo_source_round(
-        eta - nemo_source_round(card.dt_s * barotropic_div))
+    eta_kaa = jax.lax.optimization_barrier(
+        eta_before - jax.lax.optimization_barrier(card.dt_s * barotropic_div))
     eta_kaa = eta_kaa * tmask[..., 0]
     r3_kaa = jax.lax.optimization_barrier(eta_kaa * r1_h0)
     result = _source_trace(
