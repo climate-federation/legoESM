@@ -3849,6 +3849,68 @@ _RESTART_WRITER: dict = {
 }
 
 
+def _large_tripole_io(state, grid_type):
+    """Coordinate multi-GB tripole output, leaving small/serial I/O alone.
+
+    A 256 MiB global temperature array implies several GiB of checkpoint
+    fields.  Use global shape/dtype metadata only: no gather or host copy.
+    """
+    return (grid_type == "tripole" and jax.process_count() > 1
+            and state.T.data.nbytes >= 256 * 1024**2)
+
+
+def _collective_root_io(operation):
+    """Run root-local I/O while all hosts await its completion together.
+
+    Call on EVERY rank, after any state gathers.  ``operation`` must not
+    issue collectives.  A worker keeps serialization off the coordinating
+    host thread; a one-second status broadcast keeps peers out of shutdown
+    and the next model collective until the write has finished.  Errors are
+    raised on every rank.  JAX heartbeat/shutdown deadlines are unchanged.
+
+    This does not implement a filesystem-stall watchdog: a live worker stuck
+    in I/O still requires the scheduler's walltime limit or cancellation.
+    """
+    from jax.experimental import multihost_utils
+
+    root = jax.process_index() == 0
+    done = threading.Event()
+    result = None
+    error = None
+
+    def write():
+        nonlocal result, error
+        try:
+            result = operation()
+        except BaseException as exc:
+            error = exc
+        finally:
+            done.set()
+
+    worker = None
+    if root:
+        worker = threading.Thread(target=write, name="omip-collective-io")
+        try:
+            worker.start()
+        except BaseException as exc:   # thread exhaustion: publish it, do not skip the collective
+            error, worker = exc, None
+            done.set()
+    while True:
+        # Only root waits; other ranks enter the same small collective.
+        # There is never a collective spanning the entire file write.
+        if root:
+            done.wait(timeout=1.0)
+        status = (2 if error is not None else 1) if done.is_set() else 0
+        status = int(np.asarray(multihost_utils.broadcast_one_to_all(
+            np.asarray(status, dtype=np.int32), is_source=root)))
+        if status:
+            if worker is not None:
+                worker.join()
+            if status == 2:
+                raise RuntimeError("rank-0 state write failed") from error
+            return result
+
+
 def _join_restart_writer():
     """Block until the in-flight background restart write (if any) completes.
 
@@ -4245,11 +4307,18 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     # returns the path — non-root gets ``None`` so its callers skip the
     # snapshot/print that would deref a missing filename.
     _multiproc = jax.process_count() > 1
+    _coordinate_io = _large_tripole_io(state, grid_type)
     if spmd_gather is not None:
         def save_restart(st, *a, **kw):
             gathered = spmd_gather(st)          # collective — ALL ranks
             if kw.get("ice_state") is not None and spmd_gather_ice is not None:
                 kw["ice_state"] = spmd_gather_ice(kw["ice_state"])  # collective
+            if _coordinate_io:
+                def write_and_join():
+                    path = _save_restart(gathered, *a, **kw)
+                    _join_restart_writer()
+                    return path
+                return _collective_root_io(write_and_join)
             if not _io_rank:
                 return None
             if _multiproc:
@@ -5200,7 +5269,13 @@ def run_omip_single(grid_type: str, args) -> dict:
     # OMIP spin-up approach: the model gradually builds up the
     # climatological circulation from rest.
     from legoesm.ocean.init_woa import init_ocean_from_woa
-    T_woa, S_woa = init_ocean_from_woa(grid, z_coord, args.woa_t, args.woa_s)
+    # DEFERRED: the observed profiles are placed on the columns only after the
+    # bathymetry (and therefore the partial-cell geometry) is final -- see the
+    # init_ocean_from_woa call further down, after the model is built.
+    # Sampling them here, on the reference z* levels, put a cut bottom cell's
+    # water at the wrong depth.
+    _woa_paths = (args.woa_t, args.woa_s)
+    T_woa = S_woa = None
 
     # Bathymetry: realistic (ETOPO) or flat-bottom.
     H_bathy_init = _tripole_H_bathy
@@ -5662,6 +5737,43 @@ def run_omip_single(grid_type: str, args) -> dict:
               f"(H_min={args.H_min}m, south_cap={args.south_cap_lat}°, "
               f"snap={snap_frac}, smooth={args.smoothing_passes})")
 
+    # Place the observed profiles at each cell's TRUE centre depth.  This runs
+    # UNCONDITIONALLY, exactly as the original load did: the restoring targets
+    # (the DEFAULT forcing mode), the JRA55 sponge / salinity-restoring targets
+    # and --nudge-woa-tau all read these fields whether or not --woa-init is
+    # set.  ``model.z_coord`` is the coordinate the run integrates on (partial
+    # cells included) and ``compute_centroid_depth`` is the package's own helper
+    # for that depth -- the same one the seamount rest test uses.
+    from legoesm.ocean.vertical import OceanPartialCellCoordinate
+    _zc_final = getattr(model, "z_coord", z_coord)
+    _cell_depths = None
+    if isinstance(_zc_final, OceanPartialCellCoordinate):
+        from legoesm.ocean.vertical import compute_centroid_depth
+        _H = jnp.asarray(state.H_bathy.data, dtype=jnp.float64)
+        # eta = 0 at initialisation; land columns are clamped so the helper's
+        # (eta + H)/H factor stays finite -- their values are masked out below.
+        _cell_depths = np.asarray(compute_centroid_depth(
+            jnp.zeros_like(_H), jnp.maximum(_H, 1e-3), _zc_final))
+        # Report the offset over ACTIVE wet cells only: cells below the
+        # seafloor inherit the bottom depth and would otherwise dominate.
+        _zref = np.abs(np.asarray(_zc_final.z_full_ref))
+        # ``[..., None]`` and not ``[:, None]``: the horizontal layout is
+        # (nCells,) on the icosahedral mesh but (n_lat, n_lon) on the lat-lon
+        # and tripole lanes, where a leading-axis insert cannot broadcast
+        # against (n_lat, n_lon, nlev) and aborted the run outright.
+        _live = (np.asarray(state.land_mask.data) > 0.5)[..., None] & (
+            np.asarray(_zc_final.is_active) > 0.5)
+        _off = np.abs(_cell_depths - _zref[None, :])[_live]
+        print("  WOA placement: per-cell centroid depths (partial cells); "
+              f"sampling depth moved vs the reference centres by "
+              f"{float(np.median(_off)):.1f} m median, "
+              f"{float(np.max(_off)):.1f} m max")
+        del _live, _off, _zref, _H
+    T_woa, S_woa = init_ocean_from_woa(
+        grid, _zc_final, _woa_paths[0], _woa_paths[1],
+        cell_center_depths=_cell_depths)
+    del _cell_depths   # a full-global (nj, ni, nlev) f64 array per rank at ORCA12
+
     if args.woa_init and T_woa is not None and S_woa is not None:
         # Replace rest-state T/S with WOA18 climatology.
         # Keep zero velocity, zero eta — let the model adjust.
@@ -5990,8 +6102,10 @@ def run_omip_single(grid_type: str, args) -> dict:
                 # gate (shard_forcing_stack_latlon) later requires to agree:
                 # when it fires, these lines say WHICH upstream object differed.
                 from legoesm.parallel.geometry_consistency import leaf_digest48
-                _d = {"lat_T": leaf_digest48(grid.lat_T),
-                      "lon_T": leaf_digest48(grid.lon_T),
+                _glat, _glon = ((grid.lat_T, grid.lon_T) if grid_type == "tripole"
+                                else (grid.lat, grid.lon))
+                _d = {"lat_T": leaf_digest48(_glat),
+                      "lon_T": leaf_digest48(_glon),
                       "land_mask": leaf_digest48(state.land_mask.data)
                       if jax.process_count() == 1 else float("nan")}
                 _rw = (jra55_state or {}).get("regrid_weights")
@@ -6049,7 +6163,11 @@ def run_omip_single(grid_type: str, args) -> dict:
     # spmd_gather collective above: under route-B multiproc only rank 0
     # spawns a writer thread, so a rank-0-only re-raise here must not be able
     # to skip that collective and hang the federation.
-    _join_restart_writer()
+    _coordinate_io = _large_tripole_io(state, grid_type)
+    if _coordinate_io:
+        _collective_root_io(_join_restart_writer)
+    else:
+        _join_restart_writer()
 
     # Route-B: only rank 0 writes output files (concurrent writes to the same
     # path corrupt them); every rank still builds ``results`` so the exit code
@@ -6098,7 +6216,7 @@ def run_omip_single(grid_type: str, args) -> dict:
     # a finished run can be scored offline (e.g. CATKE-vs-KPP MLD).  Purely
     # additive output; a diagnostic must never abort the run.  Rank-0 only
     # (writes a file); ``state`` is already gathered/addressable on every rank.
-    if _io_rank:
+    def write_final_snapshot():
         try:
             from legoesm.ocean.restart import (
                 save_mld_snapshot, grid_lat2d_lon2d_deg,
@@ -6114,6 +6232,11 @@ def run_omip_single(grid_type: str, args) -> dict:
             print(f"  MLD snapshot: {snap}")
         except Exception as e:  # diagnostic snapshot must never crash the run
             print(f"  Warning: MLD snapshot skipped: {type(e).__name__}: {e}")
+
+    if _coordinate_io:
+        _collective_root_io(write_final_snapshot)
+    elif _io_rank:
+        write_final_snapshot()
 
     ALL_RESULTS.append(results)
     return results
