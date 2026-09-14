@@ -186,6 +186,61 @@ def _oracle_trace(arrays):
     return values
 
 
+def _oracle_scalar_boundaries(arrays):
+    """Scalar NumPy replay whose final W is calibrated bitwise to NEMO."""
+    shape = (26, 36, 30)
+    hdiv = np.zeros(shape, dtype=np.float64)
+    e3div = np.zeros(shape, dtype=np.float64)
+    stretch = np.zeros(shape, dtype=np.float64)
+    bracket = np.zeros(shape, dtype=np.float64)
+    incoming = np.zeros(shape, dtype=np.float64)
+    outgoing = np.zeros(shape, dtype=np.float64)
+    ssh_kbb = np.asarray(arrays["ssh_Kbb"])
+    r3_kbb = np.asarray(arrays["r3t_Kbb"])
+    r1_h0 = np.divide(r3_kbb, ssh_kbb, out=np.zeros_like(r3_kbb),
+                      where=ssh_kbb != 0.0)
+    r3_kaa = np.asarray(arrays["ssh_Kaa"]) * r1_h0
+    for k in range(30):
+        for j in range(1, 25):
+            for i in range(1, 35):
+                zu = np.float64(arrays["e2u"][j, i] * arrays["e3u_Kmm"][j, i, k])
+                zu = np.float64(zu * arrays["u_Kmm"][j, i, k])
+                zuw = np.float64(arrays["e2u"][j, i - 1] * arrays["e3u_Kmm"][j, i - 1, k])
+                zuw = np.float64(zuw * arrays["u_Kmm"][j, i - 1, k])
+                zv = np.float64(arrays["e1v"][j, i] * arrays["e3v_Kmm"][j, i, k])
+                zv = np.float64(zv * arrays["v_Kmm"][j, i, k])
+                zvs = np.float64(arrays["e1v"][j - 1, i] * arrays["e3v_Kmm"][j - 1, i, k])
+                zvs = np.float64(zvs * arrays["v_Kmm"][j - 1, i, k])
+                total = np.float64(np.float64(zu - zuw) + np.float64(zv - zvs))
+                value = np.float64(total * arrays["r1_e1e2t"][j, i])
+                value = np.float64(value / arrays["e3t_Kmm"][j, i, k])
+                hdiv[j, i, k] = value
+                e3div[j, i, k] = np.float64(value * arrays["e3t_Kmm"][j, i, k])
+    carry = np.zeros((26, 36), dtype=np.float64)
+    for k in range(29, -1, -1):
+        for j in range(1, 25):
+            for i in range(1, 35):
+                incoming[j, i, k] = carry[j, i]
+                delta = np.float64(r3_kaa[j, i] - r3_kbb[j, i])
+                z = np.float64(arrays["r1_Dt"] * arrays["e3t_0"][j, i, k])
+                z = np.float64(z * delta)
+                stretch[j, i, k] = z
+                total = np.float64(e3div[j, i, k] + z)
+                bracket[j, i, k] = total
+                carry[j, i] = np.float64(carry[j, i] - total) * arrays["tmask"][j, i, k]
+                outgoing[j, i, k] = carry[j, i]
+    owned = np.s_[2:-2, 2:-2]
+    ww = np.concatenate(
+        [outgoing[owned], np.zeros((22, 32, 1), dtype=np.float64)], axis=-1)
+    require(np.array_equal(ww, np.asarray(arrays["ww"])[owned]),
+            "scalar intermediate trace does not reproduce NEMO W")
+    return {name: value[owned] for name, value in {
+        "hdiv": hdiv, "e3div": e3div, "stretch": stretch,
+        "bracket": bracket, "incoming_carry": incoming,
+        "outgoing_carry": outgoing,
+    }.items()} | {"ww": ww}
+
+
 def _direct_production_w(card, seeded, trace, eta_after_override):
     """Call the same shared WZV helper that the production tendency uses."""
     eta = seeded.eta.data
@@ -260,6 +315,7 @@ def measure(args) -> dict[str, object]:
     card, seeded, _, _, live_step = context
     live = jax.device_get(jax.jit(lambda: _live_trace(card, seeded, live_step))())
     oracle = _oracle_trace(arrays)
+    oracle.update(_oracle_scalar_boundaries(arrays))
     masks = gate.expected_masks(card)
     active = {"u": np.asarray(masks["u"], bool), "v": np.asarray(masks["v"], bool),
               "t": np.asarray(masks["T"], bool)}
