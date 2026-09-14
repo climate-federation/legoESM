@@ -246,13 +246,13 @@ def measure(args) -> dict[str, object]:
                 "one-ULP target plant was invisible at the calibrated output")
         status = "PLANT_FIRED"
     else:
-        require(all(faces[face]["rows"]["given_input_replay"]["bit_exact"]
-                    for face in ("u", "v")),
-                "given-input correction replay is not bit-exact")
-        require(all(faces[face]["rows"]["live_terms_replay"]["bit_exact"]
-                    for face in ("u", "v")),
-                "diagnostic terms do not reproduce the production correction")
-        confirmed = all(
+        calibration_exact = all(
+            faces[face]["rows"]["given_input_replay"]["bit_exact"]
+            for face in ("u", "v"))
+        self_replay_exact = all(
+            faces[face]["rows"]["live_terms_replay"]["bit_exact"]
+            for face in ("u", "v"))
+        confirmed = calibration_exact and self_replay_exact and all(
             faces[face]["target_to_raw_max_ratio"] >= 4.0
             and faces[face]["target_substitution_closure"] >= 0.75
             for face in ("u", "v"))
