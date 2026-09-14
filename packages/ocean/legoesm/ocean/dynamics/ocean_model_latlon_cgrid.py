@@ -1648,6 +1648,9 @@ class _NEMOWSLiveOperandTrace(NamedTuple):
     stage_qco: object
     stage_coefficients: object
     barotropic_targets: object
+    stage_rhs: object
+    stage_raw_velocities: object
+    barotropic_correction_geometry: object
 
 
 def _nemo_qsr_stage3_rate(
@@ -5268,6 +5271,9 @@ class LatLonCGridOceanModel:
         _nemo_ws_exposed_stage3_rhs = None
         _nemo_ws_stage_tracers = None
         _nemo_ws_live_stage_states = None
+        _nemo_ws_live_stage_raw = None
+        _nemo_ws_live_stage_rhs = None
+        _nemo_ws_live_baro_geometry = None
         _nemo_ws_live_stage_qco = None
         _nemo_ws_live_operator_operands = [
             _nemo_ws_stage1_operator_operands, None, None]
@@ -5958,6 +5964,15 @@ class LatLonCGridOceanModel:
             else:
                 _mean_h_u, _mean_H_u = _ws_h_u_ref, _ws_H_u_ref
                 _mean_h_v, _mean_H_v = _ws_h_v_ref, _ws_H_v_ref
+            if _return_live_stage_operands:
+                _nemo_ws_live_baro_geometry = (
+                    _mean_h_u,
+                    _mean_h_v,
+                    nemo_reference_depth_reciprocal(
+                        _mean_H_u, state.u_mask.data),
+                    nemo_reference_depth_reciprocal(
+                        _mean_H_v, state.v_mask.data),
+                )
 
             def _replace_stage_mean(u_in, v_in, target_u, target_v):
                 if not self._nemo_ws_test_hooks.stage_barotropic_correction:
@@ -6569,6 +6584,16 @@ class LatLonCGridOceanModel:
                  _eta_live_one_third),
                 (u2_corr, v2_corr, _T_stage2, _S_stage2,
                  _eta_live_one_half),
+            )
+            _nemo_ws_live_stage_raw = (
+                (u1_raw, v1_raw),
+                (u2_raw, v2_raw),
+                (u3_raw, v3_raw),
+            )
+            _nemo_ws_live_stage_rhs = (
+                (_u1_rhs, _v1_rhs),
+                (p1u_corr, p1v_corr),
+                (p2u_corr, p2v_corr),
             )
             _nemo_ws_live_stage_qco = (
                 (_qt_b - 1.0, _qu_b - 1.0, _qv_b - 1.0),
@@ -8366,6 +8391,9 @@ class LatLonCGridOceanModel:
             if (any(value is None for value in _nemo_ws_live_operator_operands)
                     or _nemo_ws_live_stage_states is None
                     or _nemo_ws_live_stage_geometry is None
+                    or _nemo_ws_live_stage_raw is None
+                    or _nemo_ws_live_stage_rhs is None
+                    or _nemo_ws_live_baro_geometry is None
                     or _nemo_ws_live_stage_qco is None):
                 raise ValueError("live WS-RK3 operand trace is incomplete")
             return _NEMOWSLiveOperandTrace(
@@ -8384,6 +8412,10 @@ class LatLonCGridOceanModel:
                                      (_eta_live_one_third,
                                       _eta_live_one_half,
                                       state_new.eta.data)),
+                stage_rhs=_nemo_ws_live_stage_rhs,
+                stage_raw_velocities=_nemo_ws_live_stage_raw,
+                barotropic_correction_geometry=(
+                    _nemo_ws_live_baro_geometry),
             )
         if not _apply_implicit_vmix:
             # Faithful AB2 path: return the explicit-only state plus the
