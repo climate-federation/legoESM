@@ -43,7 +43,7 @@ DAYS=${DAYS:-3}
 # timesteps stay comparable; it also sets the forcing block length, and a block
 # much longer than this exhausts an 80 GB card at this resolution.
 DIAG=${DIAG:-$(python3 -c "print(max(1, round(2880.0 / $DT)))")}
-WT=${LEGOESM_REPO:-/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/.claude/worktrees/agent-a1d51538e3e836840}
+WT=${LEGOESM_REPO:-$(cd "$(dirname "$0")/../../.." && pwd)}
 PY=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/.venv/bin/python
 PP="$WT/src"; for p in atmosphere core coupler ice land ml ocean tools; do PP="$PP:$WT/packages/$p"; done
 export PYTHONPATH=$PP
