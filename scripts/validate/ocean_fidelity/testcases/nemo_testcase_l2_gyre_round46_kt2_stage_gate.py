@@ -1266,6 +1266,15 @@ def run(
     if mode == "stage-twin":
         report["stage_twin"] = _stage_twin(
             records, root, advmean_root, memory_root, plant)
+        missing = [
+            row for table in ("given_nemo_entry", "chained")
+            for row in report["stage_twin"][table]
+            if row.get("classification") == "UNMEASURED_WITH_SPEC"
+        ]
+        if missing:
+            report["status"] = "UNMEASURED"
+            report["stage_twin"]["missing_required_rows"] = [
+                row["name"] for row in missing]
     return report
 
 

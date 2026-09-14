@@ -167,3 +167,9 @@ def test_stage_twin_private_overrides_are_off_by_default():
     hooks = _NEMOWSRK3TestHooks()
     assert hooks.stage_barotropic_output_override is None
     assert hooks.stage_entry_override is None
+
+
+def test_stage_twin_refuses_unmeasured_required_rows():
+    source = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py").read_text()
+    assert 'report["status"] = "UNMEASURED"' in source
+    assert 'row.get("classification") == "UNMEASURED_WITH_SPEC"' in source
