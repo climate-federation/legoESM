@@ -155,6 +155,12 @@ The focused CPU/fp64 suite passes 13 tests: the new synthetic record reader,
 final-add replay and live plant, the inherited Round-46 reader/control suite,
 and provenance controls.  `focused_tests.log` has SHA-256
 `2786b120206b5cbe330cdd83313b50bd26d3e9e266646797152e7112b500b8c4`.
+The citation gate maps every compiled-source citation in this receipt and
+passes with no unmapped citation; `citation_gate.json` has SHA-256
+`4ac90af8b646cf011cf292b0927e858ca6ec044be5308bb1887bcb92aac363f3`.
+Its shifted `stp2d.f90:301-311` citation plant changes the status to FAIL and
+exits 1; `citation_gate_plant.json` has SHA-256
+`1083dbba73a30969c442616b8c6f747b74bbf49579251e18e05c218dc74753a0`.
 Both Python tools compile, the run script passes `bash -n`, and
 `git diff --check` passes.  The known unrelated
 `test_rk3_ws_differs_from_rk3_and_is_finite` failure was not encountered.
