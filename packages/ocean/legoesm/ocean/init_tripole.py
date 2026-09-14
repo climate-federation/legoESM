@@ -140,7 +140,10 @@ def read_mesh_mask_bathy(mesh_path: str, *, nemo_domain_cfg: str | None = None):
     while tmask.ndim > 3:
         tmask = tmask[0]
     H_bathy = (e3t * tmask).sum(axis=0).astype(np.float64)   # (y, x)
-    # Guard: dry columns get 0 depth (they are land via land_mask anyway).
+    # Dry columns get exactly 0 depth. Without this a cell turned to land by
+    # nemo_domain_cfg would keep its tmask-summed depth, and the partial-cell
+    # build (which reads H_bathy) would see a wet column under a dry 2-D mask.
+    H_bathy = np.where(land_mask > 0.5, H_bathy, 0.0)
     return land_mask, H_bathy
 
 
