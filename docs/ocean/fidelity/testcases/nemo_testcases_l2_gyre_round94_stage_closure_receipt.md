@@ -199,9 +199,18 @@ remote is a local shared path, and `gh` reports “none of the git remotes
 configured for this repository point to a known GitHub host.” No ledger-post
 claim is made.
 
-The final focused-test and citation-gate results are recorded after this
-receipt is committed. The known unrelated
-`test_rk3_ws_differs_from_rk3_and_is_finite` red test was not selected.
+The normal citation gate passed all nine compiled-source citations with no
+unmapped citation or global map failure; artifact SHA-256
+`02eba7b5b32914afcaf4ceed4482fed434d20a0fc06268d988c3bdca30bcd412`.
+Its shifted Round-81 history citation plant exited 1 with
+`SYMBOL-NOT-AT-LINE`; artifact SHA-256
+`af7406098d5343896e7cc83bca70d43948df2eb57973bc7acec175753a6ebe6d`.
+
+The final focused stage, live-observer, phase-3, year-member, year-owner,
+citation-gate, and citation-metadata suite passed **99 tests in 55.65 s**; log
+SHA-256 `c2cd3ff9a84bb1eae42322e051fe5edc227eca3d543e986edac3c6bcf6ffc42e`.
+The known unrelated `test_rk3_ws_differs_from_rk3_and_is_finite` red test was
+not selected.
 
 ## OPEN for round 95
 
