@@ -1740,8 +1740,10 @@ fixed by measurement:
    the pair is scored on qcly, not each face's peak (the all-day tile's cl2
    peaks at 1e-9).
 
-Result, one step vs the Fortran terminator decks (jobs 9767049/9767050,
-loop arm; batched pending):
+Result, one step vs the Fortran terminator decks -- ALL FOUR ARMS PASS the
+gate (jobs 9767478/9767479: loop and batched, eager and compiled; cl2 at
+most 0.54x its ceiling; the arm-to-arm warning band, calibrated on the
+hydro deck, fires on cl2's branch flips between arms -- expected, ceiling 1):
 
 | tracer | one-step rel (scale) | note |
 |---|---|---|
