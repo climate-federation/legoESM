@@ -92,3 +92,26 @@ day-80 restarts are old-deck states and have no complete month).
   as one line "current -> proposed" when its arm passes its gate.
 - Whether to spend the ~40 GPU-h per 30-day arm serially or as a paired
   batch across accounts.
+
+## Iteration 1 result (2026-09-14, dd_ctl day 110, 2000 columns, 2 times of day, n_sub=1 adjoint, FD check on n_c 0.4 %)
+
+Gradients of global TOA flux per e-fold of the knob [W/m2]:
+
+| knob            | d rsut | d rlut |
+|-----------------|--------|--------|
+| cloud_fsd       | -66.7  | +107.9 |
+| r_eff (liquid)  | -30.0  | +1.5   |
+| LWP (q_c)       | +7.9   | -0.6   |
+| N_c             | +7.1   | -0.3   |
+| condensate floor| +7.7   | -1.8   |
+| IWP (q_i)       | -0.02  | -0.3   |
+
+Reading: ice is radiatively invisible (as before); fsd cannot rise above 1.0
+and LOWERING it raises rsut, so fsd cannot pair with a cover fix; the
+brightness knobs are worth <= 8 W/m2 per e-fold against a tropical +34, so
+the reflected-shortwave excess is COVER (humidity), not brightness — the
+pre-registered threshold for iteration 2's "cover term >= 50 %" is met by
+elimination. Iteration 2 as written (cover paired with fsd) is REFUTED; a
+cover fix must arrive with the humidity fix or it worsens SW.
+Clear-sky OLR kernel (ref1979 profile, 2048 columns): humidity alone covers
+65 % of the -15.3 W/m2, temperature 23 %, both 94 %.
