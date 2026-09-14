@@ -2245,17 +2245,27 @@ def main(argv=None):
         # diagnostic; the port's deviation must sit within cl2's ceiling
         # of the oracle's, so cl2 cannot have been redistributed
         # differently from cl.
-        print("\nTRACER MASS after one step (sum delp*q over the window, "
-              "port vs oracle, per tracer; must agree to rounding):")
+        print("\nTRACER MASS after one step (sum area*delp*q over the window, "
+              "port vs oracle, per tracer; must agree to rounding). AREA-"
+              "weighted: an unweighted sum is not conserved by a flux moving "
+              "tracer between cells of different area (first version, job "
+              "9769480, flagged cl2 at 2.9e-10 for exactly that reason):")
         for nm in ADVECTED_TRACERS:
             mp = mo = 0.0
             for pf in range(6):
                 ot = perm[pf]
+                area = np.asarray(ctx["gs6"][pf]["area"])[
+                    ctx["ng"]:ctx["ng"] + ctx["n"],
+                    ctx["ng"]:ctx["ng"] + ctx["n"]][:, :, None]
                 a, b = map_scalar_pair(p_tr_1[pf][nm], orc_tr_1[ot][nm],
                                        meta[pf][ot])
                 dp_p, dp_o = map_scalar_pair(p_1[pf]["delp"],
                                              orc_1[ot]["delp"], meta[pf][ot])
-                mp += float((a * dp_p).sum()); mo += float((b * dp_o).sum())
+                # a, b, dp_* are in the port's orientation after the map;
+                # the port's own area applies to both
+                area_m = DIHEDRAL[meta[pf][ot][1]](area)
+                mp += float((area_m * a * dp_p).sum())
+                mo += float((area_m * b * dp_o).sum())
             r_m = abs(mp - mo) / max(abs(mp), abs(mo), 1e-300)
             print(f"  {nm:8s} port {mp:.12e}  oracle {mo:.12e}  rel {r_m:.3e}")
             if r_m > IC_CONTROL_MAX_REL:
