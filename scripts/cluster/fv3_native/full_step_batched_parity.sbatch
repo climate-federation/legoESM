@@ -80,6 +80,10 @@ case "$ARM" in
   # DCMIP16 cl/cl2 pair advected alongside sphum and a zero liq_wat --
   # the first oracle row where a second tracer carries signal.
   term)  EXTRA="--tracers --max-rel 2e-9 --ic-run /burg-archive/glab/users/pg2328/fv3_oracle_pinned/run_hydro_zerostep_term_gfs --step-run /burg-archive/glab/users/pg2328/fv3_oracle_pinned/run_hydro_1step_term_gfs" ;;
+  # k_split = 2 deck (build_ksplit_oracle.sbatch): the acoustic loop
+  # twice per step. The ceiling is the hydro deck's until measured; the
+  # harness refuses if --k-split disagrees with the deck's namelist.
+  ksplit2) EXTRA="--k-split 2 --max-rel 2e-9 --ic-run /burg-archive/glab/users/pg2328/fv3_oracle_pinned/run_hydro_zerostep_ksplit2_gfs --step-run /burg-archive/glab/users/pg2328/fv3_oracle_pinned/run_hydro_1step_ksplit2_gfs" ;;
   *) echo "unknown ARM=$ARM"; exit 4 ;;
 esac
 OUT=/burg-archive/glab/users/pg2328/fv3_duo_gaps/batparity_${ARM}_${SLURM_JOB_ID:-0}
