@@ -238,6 +238,15 @@ def _run_single(args):
               f"FAILED {type(exc).__name__}", flush=True)
         raise SystemExit(2)
 
+    if args.dump_state:
+        # the FINAL state after n_warmup + 2*n_timed steps, every array
+        # leaf, so two single-mode runs under different XLA flags can be
+        # diffed bitwise (the autotuner-off question, 2026-09-14)
+        leaves = {jax.tree_util.keystr(k): np.asarray(a)
+                  for k, a in jax.tree_util.tree_leaves_with_path(b)
+                  if hasattr(a, "ndim")}
+        np.savez(args.dump_state, **leaves)
+        _log(f"dumped {len(leaves)} state leaves -> {args.dump_state}")
     lat_med = statistics.median(per)
     lat_mean = statistics.mean(per)
     card = str(jax.local_devices()[0])
@@ -603,6 +612,9 @@ def main(argv=None):
     ap.add_argument("--mode",
                     choices=("sharded", "single", "census", "ranks", "bare"),
                     required=True)
+    ap.add_argument("--dump-state", default=None,
+                    help="single mode: .npz of every state leaf after the "
+                         "timed steps, for a bitwise diff between runs")
     ap.add_argument("--payload-kb", type=int, default=16,
                     help="bare mode: per-rank payload of the one ppermute")
     ap.add_argument("--resolution", type=int, default=96)
