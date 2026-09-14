@@ -923,6 +923,32 @@ def _output_rows(trace, records, next_entries, transports, masks, kt: int,
     return rows
 
 
+def _entry_rows(trace, records, masks, kt: int, stage: int,
+                mode: str) -> list[dict]:
+    """Prove the exact Kmm state that actually entered one compiled stage."""
+    a = records[(kt, stage)]["arrays"]
+    u, v, temperature, salinity, eta = (
+        np.asarray(value) for value in trace.stage_states[stage - 1])
+    candidates = {
+        "u": u[:, 1:, :], "v": v[1:, :, :],
+        "T": temperature, "S": salinity, "ssh": eta,
+    }
+    references = {
+        "u": _owned3(a["u_Kmm"]), "v": _owned3(a["v_Kmm"]),
+        "T": _owned3(a["T_Kmm"]), "S": _owned3(a["S_Kmm"]),
+        "ssh": _owned2(a["ssh_Kmm"]),
+    }
+    rows = []
+    for field in ("T", "S", "u", "v", "ssh"):
+        row = _classification(score(
+            f"GYRE-zco.kt{kt}.s{stage}.entry.{field}",
+            references[field], candidates[field], masks[field]))
+        row.update({"kt": kt, "stage": stage, "field": field,
+                    "entry_mode": mode})
+        rows.append(row)
+    return rows
+
+
 def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                 memory_root: Path, plant: str | None) -> dict:
     """Decision-41 stage tables from recorded entries and the shared stage."""
@@ -950,15 +976,16 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
             transports[(1, stage)] = read_transport(path, stage)
 
     given = []
-    planted_changed = None
+    given_entries = []
     states = {1: card.recipe.initial_state,
               2: _bridge_kt2_state(card, cfg, records)}
     raw_history = tuple(jnp.asarray(value) for value in _raw_history_override(memory_root))
-    clean_stage2_output = None
-    for kt in (1, 2):
+    kt_values = (1,) if plant == "stage-entry-ulp" else (1, 2)
+    stage_values = (2,) if plant == "stage-entry-ulp" else (1, 2, 3)
+    for kt in kt_values:
         state = states[kt]
         freshwater, surface = _surface_forcings(card, state, kt)
-        for stage in (1, 2, 3):
+        for stage in stage_values:
             entry_override = None if stage == 1 else _entry_override(
                 records, kt, stage,
                 plant=(plant == "stage-entry-ulp" and kt == 1 and stage == 2))
@@ -974,30 +1001,27 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                 _nemo_ws_test_hooks=hooks).step(
                     state, dt=card.dt_s, freshwater=freshwater,
                     surface_forcing=surface))
+            entry_rows = _entry_rows(
+                trace, records, masks, kt, stage, "NEMO_RECORDED")
+            given_entries.extend(entry_rows)
+            if plant == "stage-entry-ulp" and (kt, stage) == (1, 2):
+                planted = next(row for row in entry_rows
+                               if kt == 1 and stage == 2
+                               and row["field"] == "T")
+                require(planted["n_unequal"] == 1,
+                        "one-ULP stage-entry plant did not flip exactly one entry row cell")
+                return {
+                    "format": "nemo-testcase-l2-gyre-stage-twin-v1",
+                    "given_nemo_entry": [], "chained": [],
+                    "stage_entry_identity": entry_rows,
+                    "first_owned_nonbit": None,
+                    "stage_entry_ulp_plant_flipped_row": True,
+                    "stage_entry_ulp_plant_changed_output": False,
+                }
             rows = _output_rows(
                 trace, records, next_entries, transports, masks, kt,
                 "NEMO_RECORDED")
             given.extend(row for row in rows if row.get("stage") == stage)
-            if kt == 1 and stage == 2:
-                planted_output = tuple(np.asarray(value)
-                                       for value in trace.stage_outputs[1])
-                if plant == "stage-entry-ulp":
-                    clean_hooks = hooks._replace(
-                        stage_entry_override=_entry_override(records, kt, stage))
-                    clean = jax.device_get(LatLonCGridOceanModel(
-                        card.recipe.grid, card.recipe.z_coord, cfg,
-                        _nemo_ws_test_hooks=clean_hooks).step(
-                            state, dt=card.dt_s, freshwater=freshwater,
-                            surface_forcing=surface))
-                    clean_stage2_output = tuple(
-                        np.asarray(value) for value in clean.stage_outputs[1])
-                    planted_changed = any(np.any(a.view(np.uint64) != b.view(np.uint64))
-                                          for a, b in zip(
-                                              planted_output, clean_stage2_output,
-                                              strict=True))
-    if plant == "stage-entry-ulp":
-        require(planted_changed is True,
-                "one-ULP stage-entry plant did not flip a stage output")
 
     chained = []
     state = card.recipe.initial_state
@@ -1022,11 +1046,13 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
         "format": "nemo-testcase-l2-gyre-stage-twin-v1",
         "given_nemo_entry": given,
         "chained": chained,
+        "stage_entry_identity": given_entries,
         "first_owned_nonbit": None if first is None else {
             key: first[key] for key in (
                 "kt", "stage", "field", "n_unequal", "absolute_max",
                 "classification")},
-        "stage_entry_ulp_plant_changed_output": planted_changed,
+        "stage_entry_ulp_plant_flipped_row": None,
+        "stage_entry_ulp_plant_changed_output": None,
     }
 
 
