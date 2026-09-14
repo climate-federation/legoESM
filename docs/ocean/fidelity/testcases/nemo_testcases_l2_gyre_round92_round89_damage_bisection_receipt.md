@@ -190,7 +190,7 @@ from GYRE or the tanks.
 - Every scientific artifact is clean-stamped at measured candidate
   `bb963136d341`; the production restoration was verified byte-for-byte against
   the preregistration parent for every path touched by the held patch.
-- The final focused suite passes 23/23 tests in 1.94 s. It covers the admitted
+- The final focused suite passes 23/23 tests in 1.85 s. It covers the admitted
   record and mixed extents, live trace observer/privacy, the citation parser,
   full-map audit, and citation-gate controls. The known unrelated RK3-WS test
   was not in this focused selection and was neither encountered nor waived.
