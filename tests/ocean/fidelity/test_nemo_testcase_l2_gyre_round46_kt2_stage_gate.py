@@ -185,3 +185,10 @@ def test_final_external_history_uses_last_pre_swap_current_and_before():
     histories = gate._final_history_from_btstep(arrays)
     assert tuple(float(value[0]) for value in histories) == (
         11.0, 12.0, 13.0, 14.0, 15.0, 16.0)
+
+
+def test_qco_face_layout_drops_redundant_edge_and_singleton_level():
+    u = np.zeros((NY - 4, NX - 3, 1))
+    v = np.zeros((NY - 3, NX - 4, 1))
+    assert u[:, 1:, 0].shape == (NY - 4, NX - 4)
+    assert v[1:, :, 0].shape == (NY - 4, NX - 4)

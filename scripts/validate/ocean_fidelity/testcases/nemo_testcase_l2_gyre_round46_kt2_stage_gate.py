@@ -1043,8 +1043,8 @@ def _entry_rows(trace, records, masks, context, kt: int, stage: int,
     qco = tuple(np.asarray(value) for value in trace.stage_qco[stage - 1])
     qco_candidates = {
         "r3t_Kmm": qco[0],
-        "r3u_Kmm": qco[1][:, 1:],
-        "r3v_Kmm": qco[2][1:, :],
+        "r3u_Kmm": qco[1][:, 1:, 0],
+        "r3v_Kmm": qco[2][1:, :, 0],
     }
     for field, candidate in qco_candidates.items():
         face = field[2]
