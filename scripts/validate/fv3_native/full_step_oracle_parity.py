@@ -2138,6 +2138,13 @@ def main(argv=None):
                                        meta[pf][ot])
                 r = rel(a, b, TRACER_SCALE.get(nm))
                 absd = float(np.abs(a - b).max())
+                if args.save_fields:
+                    saved[f"port_f{pf+1}_{nm}"] = np.asarray(a)
+                    saved[f"oracle_f{pf+1}_{nm}"] = np.asarray(b)
+                    a0, b0 = map_scalar_pair(p_tr_ic[pf][nm],
+                                             orc_tr_ic[ot][nm], meta[pf][ot])
+                    saved[f"port_ic_f{pf+1}_{nm}"] = np.asarray(a0)
+                    saved[f"oracle_ic_f{pf+1}_{nm}"] = np.asarray(b0)
                 tnd = tr_tend[nm][ot]
                 vac = (min(float(orc_tr_ic[t][nm].min()) for t in range(6))
                        == max(float(orc_tr_ic[t][nm].max())
