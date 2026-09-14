@@ -17,7 +17,9 @@ GATE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(GATE)
 
 
-def _record(path: Path, stage: int, *, bad_magic: bool = False) -> None:
+def _record(
+    path: Path, stage: int, *, kt: int = 2, bad_magic: bool = False,
+) -> None:
     nx, ny, nz = GATE.DIMS
     n3, n2 = nx * ny * nz, nx * ny
     levels = GATE.LEVELS[stage]
@@ -25,7 +27,7 @@ def _record(path: Path, stage: int, *, bad_magic: bool = False) -> None:
     with path.open("wb") as handle:
         magic = "BAD_MAGIC" if bad_magic else "NEMO_L2_RKTRA_1"
         handle.write(magic.ljust(16).encode())
-        handle.write(struct.pack("=11i", 1, 2, stage, *levels, nx, ny, nz, 64))
+        handle.write(struct.pack("=11i", 1, kt, stage, *levels, nx, ny, nz, 64))
         values.tofile(handle)
 
 
@@ -48,3 +50,17 @@ def test_reader_rejects_wrong_magic_and_truncation(tmp_path: Path) -> None:
     _record(good, 2)
     with pytest.raises(SystemExit, match="bad payload size"):
         GATE.read_record(good, 2, truncate=True)
+
+
+def test_reader_accepts_registered_kt1_schema(tmp_path: Path) -> None:
+    path = tmp_path / "record.bin"
+    _record(path, 1, kt=1)
+    row = GATE.read_record(path, 1, expected_kt=1)
+    assert row["header"][:3] == (1, 1, 1)
+
+
+def test_reader_rejects_unregistered_kt(tmp_path: Path) -> None:
+    path = tmp_path / "record.bin"
+    _record(path, 1, kt=3)
+    with pytest.raises(SystemExit, match="unsupported kt"):
+        GATE.read_record(path, 1, expected_kt=3)

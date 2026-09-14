@@ -119,7 +119,7 @@ def test_every_declared_plant_has_a_nonzero_exit_contract():
     source = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py").read_text()
     run = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage/run.sh").read_text()
     for plant in ("header", "truncation", "calibration", "given", "trajectory",
-                  "twin", "stage-entry-ulp", "stamp"):
+                  "twin", "stage-entry-ulp", "stage-context-ulp", "stamp"):
         assert f'"{plant}"' in source
     assert 'return 1 if args.plant or report["status"] != "PASS" else 0' in source
     for plant in ("header", "truncation", "calibration", "twin", "stamp"):
@@ -173,3 +173,15 @@ def test_stage_twin_refuses_unmeasured_required_rows():
     source = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py").read_text()
     assert 'report["status"] = "UNMEASURED"' in source
     assert 'row.get("classification") == "UNMEASURED_WITH_SPEC"' in source
+
+
+def test_final_external_history_uses_last_pre_swap_current_and_before():
+    arrays = {}
+    for index, name in enumerate(
+        ("u_entry", "u_b", "v_entry", "v_b", "eta_entry", "eta_b"),
+        start=1,
+    ):
+        arrays[name] = np.asarray([[index], [10 + index]], dtype=np.float64)
+    histories = gate._final_history_from_btstep(arrays)
+    assert tuple(float(value[0]) for value in histories) == (
+        11.0, 12.0, 13.0, 14.0, 15.0, 16.0)

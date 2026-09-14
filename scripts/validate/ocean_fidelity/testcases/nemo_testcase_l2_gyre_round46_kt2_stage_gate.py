@@ -43,6 +43,8 @@ ADVMEAN_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round75/oracle_advmean_kt2")
 MEMORY_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round48/oracle_bt_memory")
+BTSTEP_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round81/oracle_btstep_kt2")
 MAGIC = "NEMO_L2_R46STG1"
 DIMS = (36, 26, 31)
 OWNED_DIMS = (32, 22, 31)
@@ -783,7 +785,7 @@ def _bridge_kt2_state(card, cfg, records):
     def field(data, name, dims):
         return Field(data=jnp.asarray(data), name=name, dims=dims)
 
-    return state._replace(
+    state = state._replace(
         u=state.u.replace(data=jnp.asarray(_u_full(_owned3(a["u_Kbb"])))),
         v=state.v.replace(data=jnp.asarray(_v_full(_owned3(a["v_Kbb"])))),
         T=state.T.replace(data=jnp.asarray(_owned3(a["T_Kbb"]))),
@@ -799,6 +801,34 @@ def _bridge_kt2_state(card, cfg, records):
         tke_dissl=field(a["tke_dissl"][..., 1:30],
                         "tke_dissl", ("lat", "lon", "level")),
         tke_avm_surface=field(_owned3(a["tke_avm_k"], 31)[..., 0],
+                              "tke_avm_surface", ("lat", "lon")),
+    )
+    return state
+
+
+def _bridge_stage_context(state, arrays, *, plant: bool = False):
+    """Install the pre-stage closure bundle recorded after ``zdf_phy``."""
+    import jax.numpy as jnp
+    from legoesm.core.field import Field
+
+    tke = np.array(arrays["tke_en"][..., 1:30], copy=True)
+    if plant:
+        mask = _owned3(arrays["wmask"], 31)[..., 1:30] > 0.5
+        index = tuple(np.argwhere(mask & (tke != 0.0))[0])
+        tke[index] = np.nextafter(tke[index], np.float64(np.inf))
+
+    def field(data, name, dims):
+        return Field(data=jnp.asarray(data), name=name, dims=dims)
+
+    return state._replace(
+        tke=field(tke, "tke", ("lat", "lon", "level")),
+        tke_avm=field(_owned3(arrays["tke_avm_k"], 31)[..., 1:30],
+                      "tke_avm", ("lat", "lon", "level")),
+        tke_avt=field(arrays["tke_avt_k"][..., 1:30],
+                      "tke_avt", ("lat", "lon", "level")),
+        tke_dissl=field(arrays["tke_dissl"][..., 1:30],
+                        "tke_dissl", ("lat", "lon", "level")),
+        tke_avm_surface=field(_owned3(arrays["tke_avm_k"], 31)[..., 0],
                               "tke_avm_surface", ("lat", "lon")),
     )
 
@@ -864,8 +894,66 @@ def _barotropic_override(records, advmean_root: Path, kt: int):
     )
 
 
-def _output_rows(trace, records, next_entries, transports, masks, kt: int,
-                 mode: str) -> list[dict]:
+def _final_history_from_btstep(arrays: dict) -> tuple[np.ndarray, ...]:
+    """Apply NEMO's final ``bb<-b, b<-n`` history rotation to a record."""
+    last = -1
+    return (
+        arrays["u_entry"][last], arrays["u_b"][last],
+        arrays["v_entry"][last], arrays["v_b"][last],
+        arrays["eta_entry"][last], arrays["eta_b"][last],
+    )
+
+
+def _history_reference(memory_root: Path, btstep_root: Path, kt: int):
+    """Return the six absolute histories at the completed external boundary."""
+    if kt == 1:
+        from nemo_testcase_l2_gyre_round48_bt_memory_gate import read_record
+
+        arrays = read_record(
+            memory_root / "oracle_bt_memory_kt00000001_end.bin")["arrays"]
+        return tuple(arrays[name] for name in (
+            "ub_e", "ubb_e", "vb_e", "vbb_e", "sshb_e", "sshbb_e"))
+    from nemo_testcase_l2_gyre_round81_btstep_gate import read_record
+
+    arrays = read_record(
+        btstep_root / "oracle_bt_step_operands_kt00000002.bin", expected_kt=2)
+    # dynspg_ts rotates bb<-b, b<-n, n<-a at the end of each substep.
+    return _final_history_from_btstep(arrays)
+
+
+def _closure_rows(context, arrays, masks, kt: int, stage: int, mode: str,
+                  boundary: str) -> list[dict]:
+    """Score the closure fields computed once and consumed by every stage."""
+    candidates = {
+        "tke_en": np.asarray(context.tke.data),
+        "tke_avm_k": np.asarray(context.tke_avm.data),
+        "tke_avt_k": np.asarray(context.tke_avt.data),
+        "tke_dissl": np.asarray(context.tke_dissl.data),
+        "tke_avm_surface": np.asarray(context.tke_avm_surface.data),
+    }
+    references = {
+        "tke_en": np.asarray(arrays["tke_en"])[..., 1:30],
+        "tke_avm_k": _owned3(arrays["tke_avm_k"], 31)[..., 1:30],
+        "tke_avt_k": np.asarray(arrays["tke_avt_k"])[..., 1:30],
+        "tke_dissl": np.asarray(arrays["tke_dissl"])[..., 1:30],
+        "tke_avm_surface": _owned3(arrays["tke_avm_k"], 31)[..., 0],
+    }
+    wet_w = _owned3(arrays["wmask"], 31)[..., 1:30] > 0.5
+    field_masks = {name: wet_w for name in candidates}
+    field_masks["tke_avm_surface"] = masks["ssh"]
+    rows = []
+    for field in candidates:
+        row = _classification(score(
+            f"GYRE-zco.kt{kt}.s{stage}.{boundary}.{field}",
+            references[field], candidates[field], field_masks[field]))
+        row.update({"kt": kt, "stage": stage, "field": field,
+                    "entry_mode": mode, "boundary": boundary})
+        rows.append(row)
+    return rows
+
+
+def _output_rows(trace, records, next_entries, transports, masks, area_t,
+                 context, kt: int, mode: str) -> list[dict]:
     rows = []
     for stage, output in enumerate(trace.stage_outputs, start=1):
         u, v, T, S, eta = (np.asarray(value) for value in output)
@@ -902,6 +990,9 @@ def _output_rows(trace, records, next_entries, transports, masks, kt: int,
                         "entry_mode": mode})
             rows.append(row)
 
+        rows.extend(_closure_rows(
+            context, a, masks, kt, stage, mode, "output"))
+
         transport = transports.get((kt, stage))
         if transport is None:
             for field in ("zFu", "zFv", "zFw"):
@@ -912,6 +1003,8 @@ def _output_rows(trace, records, next_entries, transports, masks, kt: int,
         for field, candidate, mask in (
             ("zFu", np.asarray(geom[7])[:, 1:, :], _owned3(a["umask"]) > 0.5),
             ("zFv", np.asarray(geom[8])[1:, :, :], _owned3(a["vmask"]) > 0.5),
+            ("zFw", np.asarray(geom[2]) * area_t[..., None],
+             _owned3(a["wmask"], np.asarray(geom[2]).shape[-1]) > 0.5),
         ):
             nlev = candidate.shape[-1]
             row = _classification(score(
@@ -921,13 +1014,10 @@ def _output_rows(trace, records, next_entries, transports, masks, kt: int,
             row.update({"kt": kt, "stage": stage, "field": field,
                         "entry_mode": mode})
             rows.append(row)
-        rows.append(_unmeasured(
-            kt, stage, "zFw",
-            "legacy momentum-side stream writes zFw before tracer WZV initializes it"))
     return rows
 
 
-def _entry_rows(trace, records, masks, kt: int, stage: int,
+def _entry_rows(trace, records, masks, context, kt: int, stage: int,
                 mode: str) -> list[dict]:
     """Prove the exact Kmm state that actually entered one compiled stage."""
     a = records[(kt, stage)]["arrays"]
@@ -950,10 +1040,28 @@ def _entry_rows(trace, records, masks, kt: int, stage: int,
         row.update({"kt": kt, "stage": stage, "field": field,
                     "entry_mode": mode})
         rows.append(row)
+    qco = tuple(np.asarray(value) for value in trace.stage_qco[stage - 1])
+    qco_candidates = {
+        "r3t_Kmm": qco[0],
+        "r3u_Kmm": qco[1][:, 1:],
+        "r3v_Kmm": qco[2][1:, :],
+    }
+    for field, candidate in qco_candidates.items():
+        face = field[2]
+        mask = masks["ssh" if face == "t" else face][..., 0] if face != "t" else masks["ssh"]
+        row = _classification(score(
+            f"GYRE-zco.kt{kt}.s{stage}.entry.{field}",
+            _owned2(a[field]), candidate, mask))
+        row.update({"kt": kt, "stage": stage, "field": field,
+                    "entry_mode": mode, "boundary": "entry"})
+        rows.append(row)
+    rows.extend(_closure_rows(
+        context, a, masks, kt, stage, mode, "entry"))
     return rows
 
 
-def _external_rows(outputs, records, advmean_root: Path, masks, kt: int,
+def _external_rows(outputs, histories, records, advmean_root: Path,
+                   memory_root: Path, btstep_root: Path, masks, kt: int,
                    mode: str) -> list[dict]:
     """Score the split-explicit handoff consumed by the RK3 stage ladder."""
     eta, uu_b, vv_b, hu_avg, hv_avg = (
@@ -976,15 +1084,30 @@ def _external_rows(outputs, records, advmean_root: Path, masks, kt: int,
         row.update({"kt": kt, "stage": "external", "field": field,
                     "entry_mode": mode})
         rows.append(row)
-    for field in ("ubb_e", "ub_e", "vbb_e", "vb_e", "sshbb_e", "sshb_e"):
-        rows.append(_unmeasured(
-            kt, "external", field,
-            "absolute external-step endpoint history is not published by the live trace"))
+    history_ref = _history_reference(memory_root, btstep_root, kt)
+    history_fields = (
+        ("ub_e", history_ref[0], histories[0][:, 1:], masks["u"][..., 0]),
+        ("ubb_e", history_ref[1], histories[1][:, 1:], masks["u"][..., 0]),
+        ("vb_e", history_ref[2], histories[2][1:, :], masks["v"][..., 0]),
+        ("vbb_e", history_ref[3], histories[3][1:, :], masks["v"][..., 0]),
+        ("sshb_e", history_ref[4], histories[4], masks["ssh"]),
+        ("sshbb_e", history_ref[5], histories[5], masks["ssh"]),
+    )
+    for field, oracle, candidate, mask in history_fields:
+        if kt == 1:
+            oracle = _owned2(oracle)
+        row = _classification(score(
+            f"GYRE-zco.kt{kt}.external.output.{field}",
+            oracle, candidate, mask))
+        row.update({"kt": kt, "stage": "external", "field": field,
+                    "entry_mode": mode})
+        rows.append(row)
     return rows
 
 
 def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
-                memory_root: Path, plant: str | None) -> dict:
+                memory_root: Path, btstep_root: Path,
+                plant: str | None) -> dict:
     """Decision-41 stage tables from recorded entries and the shared stage."""
     import jax
     import jax.numpy as jnp
@@ -1003,19 +1126,32 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
         kt: read_entry(stage_root / f"oracle_step_entry_kt{kt:08d}.bin")
         for kt in (2, 3)
     }
+    from nemo_testcase_l2_gyre_round71_fct_stage2_gate import (
+        read_record as read_tracer_stage)
+
     transports = {}
-    for stage in (1, 2, 3):
-        path = advmean_root / f"oracle_transport_kt00000001_s{stage}.bin"
-        if path.is_file():
-            transports[(1, stage)] = read_transport(path, stage)
+    for kt in (1, 2):
+        for stage in (1, 2):
+            path = advmean_root / (
+                f"oracle_rktracer_operands_kt{kt:08d}_s{stage}.bin")
+            record = read_tracer_stage(path, stage, expected_kt=kt)["fields"]
+            transports[(kt, stage)] = {
+                field: np.ascontiguousarray(record[field].swapaxes(0, 1))
+                for field in ("zFu", "zFv", "zFw")
+            }
+    path = advmean_root / "oracle_tracer_transport_kt00000001_s3.bin"
+    transports[(1, 3)] = read_transport(path, 3)
 
     given = []
     given_entries = []
-    states = {1: card.recipe.initial_state,
+    states = {1: _bridge_stage_context(
+                  card.recipe.initial_state, records[(1, 1)]["arrays"],
+                  plant=plant == "stage-context-ulp"),
               2: _bridge_kt2_state(card, cfg, records)}
     raw_history = tuple(jnp.asarray(value) for value in _raw_history_override(memory_root))
-    kt_values = (1,) if plant == "stage-entry-ulp" else (1, 2)
-    stage_values = (2,) if plant == "stage-entry-ulp" else (1, 2, 3)
+    kt_values = (1,) if plant in {"stage-entry-ulp", "stage-context-ulp"} else (1, 2)
+    stage_values = ((2,) if plant == "stage-entry-ulp" else
+                    (1,) if plant == "stage-context-ulp" else (1, 2, 3))
     for kt in kt_values:
         state = states[kt]
         freshwater, surface = _surface_forcings(card, state, kt)
@@ -1036,7 +1172,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                     state, dt=card.dt_s, freshwater=freshwater,
                     surface_forcing=surface))
             entry_rows = _entry_rows(
-                trace, records, masks, kt, stage, "NEMO_RECORDED")
+                trace, records, masks, state, kt, stage, "NEMO_RECORDED")
             given_entries.extend(entry_rows)
             if plant == "stage-entry-ulp" and (kt, stage) == (1, 2):
                 planted = next(row for row in entry_rows
@@ -1052,8 +1188,21 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                     "stage_entry_ulp_plant_flipped_row": True,
                     "stage_entry_ulp_plant_changed_output": False,
                 }
+            if plant == "stage-context-ulp" and (kt, stage) == (1, 1):
+                planted = next(row for row in entry_rows
+                               if row["field"] == "tke_en")
+                require(planted["n_unequal"] == 1,
+                        "one-ULP stage-context plant did not flip exactly one row cell")
+                return {
+                    "format": "nemo-testcase-l2-gyre-stage-twin-v2",
+                    "given_nemo_entry": [], "chained": [],
+                    "stage_entry_identity": entry_rows,
+                    "first_owned_nonbit": None,
+                    "stage_context_ulp_plant_flipped_row": True,
+                }
             rows = _output_rows(
-                trace, records, next_entries, transports, masks, kt,
+                trace, records, next_entries, transports, masks,
+                np.asarray(card.recipe.grid.area_T), state, kt,
                 "NEMO_RECORDED")
             given.extend(row for row in rows if row.get("stage") == stage)
 
@@ -1076,7 +1225,8 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
             external.transport_average[0], external.transport_average[1],
         )
         given.extend(_external_rows(
-            external_outputs, records, advmean_root, masks, kt,
+            external_outputs, external.state_after_barotropic.bt_hist,
+            records, advmean_root, memory_root, btstep_root, masks, kt,
             "NEMO_RECORDED"))
 
     chained = []
@@ -1093,9 +1243,11 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
             (trace.barotropic_targets[4], trace.barotropic_targets[0],
              trace.barotropic_targets[1], trace.barotropic_targets[2],
              trace.barotropic_targets[3]),
-            records, advmean_root, masks, kt, "LEGO_CHAINED"))
+            trace.state_after.bt_hist, records, advmean_root, memory_root,
+            btstep_root, masks, kt, "LEGO_CHAINED"))
         chained.extend(_output_rows(
-            trace, records, next_entries, transports, masks, kt,
+            trace, records, next_entries, transports, masks,
+            np.asarray(card.recipe.grid.area_T), state, kt,
             "LEGO_CHAINED"))
         state = trace.state_after
 
@@ -1104,7 +1256,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
     first = next((row for row in measured
                   if row.get("classification") != "BIT"), None)
     return {
-        "format": "nemo-testcase-l2-gyre-stage-twin-v1",
+        "format": "nemo-testcase-l2-gyre-stage-twin-v2",
         "given_nemo_entry": given,
         "chained": chained,
         "stage_entry_identity": given_entries,
@@ -1147,6 +1299,7 @@ def run(
     round41_kt1: Path,
     advmean_root: Path = ADVMEAN_ROOT,
     memory_root: Path = MEMORY_ROOT,
+    btstep_root: Path = BTSTEP_ROOT,
 ) -> dict:
     stamp = worktree_stamp()
     expected = "0" * 40 if plant == "stamp" else expect_commit.lower()
@@ -1265,7 +1418,7 @@ def run(
             report["status"] = "UNMEASURED"
     if mode == "stage-twin":
         report["stage_twin"] = _stage_twin(
-            records, root, advmean_root, memory_root, plant)
+            records, root, advmean_root, memory_root, btstep_root, plant)
         missing = [
             row for table in ("given_nemo_entry", "chained")
             for row in report["stage_twin"][table]
@@ -1293,10 +1446,11 @@ def main(argv=None) -> int:
     )
     p.add_argument("--advmean-root", type=Path, default=ADVMEAN_ROOT)
     p.add_argument("--memory-root", type=Path, default=MEMORY_ROOT)
+    p.add_argument("--btstep-root", type=Path, default=BTSTEP_ROOT)
     p.add_argument(
         "--plant",
         choices=("header", "truncation", "calibration", "given", "trajectory",
-                 "twin", "stage-entry-ulp", "stamp"),
+                 "twin", "stage-entry-ulp", "stage-context-ulp", "stamp"),
     )
     p.add_argument("--output", type=Path)
     args = p.parse_args(argv)
@@ -1309,6 +1463,7 @@ def main(argv=None) -> int:
         round41_kt1=args.round41_kt1,
         advmean_root=args.advmean_root,
         memory_root=args.memory_root,
+        btstep_root=args.btstep_root,
     )
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.output:

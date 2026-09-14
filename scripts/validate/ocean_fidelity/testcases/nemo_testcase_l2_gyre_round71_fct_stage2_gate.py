@@ -28,14 +28,18 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def read_record(path: Path, stage: int, *, truncate: bool = False) -> dict:
+def read_record(
+    path: Path, stage: int, *, expected_kt: int = 2,
+    truncate: bool = False,
+) -> dict:
     with path.open("rb") as handle:
         magic = handle.read(16).decode("ascii").rstrip()
         header = struct.unpack("=11i", handle.read(44))
         values = np.fromfile(handle, dtype=np.float64)
     if truncate:
         values = values[:-1]
-    expected = (1, 2, stage, *LEVELS[stage], *DIMS, 64)
+    require(expected_kt in (1, 2), f"{path}: unsupported kt {expected_kt}")
+    expected = (1, expected_kt, stage, *LEVELS[stage], *DIMS, 64)
     require(magic == "NEMO_L2_RKTRA_1", f"{path}: bad magic {magic!r}")
     require(header == expected, f"{path}: header {header} != {expected}")
     nx, ny, nz = DIMS
