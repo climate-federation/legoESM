@@ -205,6 +205,10 @@ def measure(args) -> dict[str, object]:
             at = tuple(candidates[np.argmax(np.abs(
                 planted_target[tuple(candidates.T)]))])
             planted_target[at] = np.nextafter(planted_target[at], np.inf)
+        clean_calibrated = np.asarray(_correction(
+            jnp.asarray(oracle_raw), jnp.asarray(oracle_target),
+            jnp.asarray(oracle_h), jnp.asarray(oracle_r1),
+            jnp.asarray(mask3, dtype=jnp.float64)))
         calibration_target = planted_target if args.plant and face == "u" else oracle_target
         calibrated = np.asarray(_correction(
             jnp.asarray(oracle_raw), jnp.asarray(calibration_target),
@@ -238,7 +242,7 @@ def measure(args) -> dict[str, object]:
         direct_z_replay["provenance"] = "DIRECT NEMO OUTPUT CALIBRATION"
         rows.append(direct_z_replay)
         face_rows["given_z_replay"] = direct_z_replay
-        given_input = _stats(calibrated, oracle_final, mask3)
+        given_input = _stats(clean_calibrated, oracle_final, mask3)
         given_input["name"] = f"GYRE-zco.kt2.s1.baro.given_input_replay.{face}"
         given_input["provenance"] = "DIRECT NEMO OUTPUT CALIBRATION"
         rows.append(given_input)
@@ -248,20 +252,22 @@ def measure(args) -> dict[str, object]:
         replay_actual["provenance"] = "LIVE TRACE SELF-CALIBRATION"
         rows.append(replay_actual)
         face_rows["live_terms_replay"] = replay_actual
-        faces[face] = {"rows": face_rows}
+        faces[face] = {
+            "rows": face_rows,
+            "plant_effect": _stats(calibrated, clean_calibrated, mask3),
+        }
 
     if args.plant:
-        require(not faces["u"]["rows"]["given_input_replay"]["bit_exact"],
+        require(not faces["u"]["plant_effect"]["bit_exact"],
                 "one-ULP target plant was invisible")
         status = "PLANT_FIRED"
     else:
-        require(all(
+        calibration_exact = all(
             faces[face]["rows"][name]["bit_exact"]
             for face in ("u", "v")
             for name in ("given_z_replay", "given_input_replay",
-                         "live_terms_replay")),
-                "correction replay calibration is not bit-exact")
-        status = "MEASURED"
+                         "live_terms_replay"))
+        status = "MEASURED" if calibration_exact else "REFUTED"
 
     return {
         "format": "nemo-testcase-l2-gyre-round92-baro-split-v1",
