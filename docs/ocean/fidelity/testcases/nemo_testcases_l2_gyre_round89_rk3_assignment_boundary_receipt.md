@@ -139,7 +139,7 @@ For stages 1 and 2, the executing vector statement writes Kaa U/V as Kbb plus
 (`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:671-674`).
 The stage-3 vertical routine executes the same vector statement before its
 implicit solve
-(`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/dynzdf.f90:162-170`).  These are
+(`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/dynzdf.f90:163-170`).  These are
 the statements materialized by the held member and proven exact above.
 
 The compiled stage-2/3 source sequence is EOS, HPG, vorticity, then advection
@@ -147,7 +147,7 @@ The compiled stage-2/3 source sequence is EOS, HPG, vorticity, then advection
 Stage 3 next adds LDF
 (`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:692-714`), calls
 the vertical solve, forms depth means, and adds the barotropic correction
-(`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:728-760`).  The
+(`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:728-759`).  The
 last range is the cited first non-bit statement boundary.  It supports only
 the source-order location; a next-round operand split must decide whether the
 depth mean, target barotropic velocity, or final add is first non-bit.

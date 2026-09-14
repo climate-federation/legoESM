@@ -386,26 +386,26 @@ FILES = {
 CITATION_MAP = {
     # --- round 89: source-rounded RK3 assignment and ordered stage walk ---
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:140-148': [
-        'SELECT CASE( kstg )',
+        ('SELECT CASE( kstg )', 1),
         'r1_Dt = 1._wp / rDt', 9],
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:198-202': [
         'CASE ( 2 )           !==  Stage 2',
-        'r1_Dt = 1._wp / rDt', 5],
+        ('r1_Dt = 1._wp / rDt', 2), 5],
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:242-246': [
         'CASE ( 3 )           !==  Stage 3',
-        'r1_Dt = 1._wp / rDt', 5],
+        ('r1_Dt = 1._wp / rDt', 3), 5],
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:433-482': [
         'CALL    eos    (        ts, Kmm, rhd, rhop )',
         "CALL r46_rhs( 'after_adv', uu, vv, Krhs )", 50],
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:692-714': [
-        'CASE ( 3 )        !==  Stage 3',
+        ('CASE ( 3 )        !==  Stage 3', 1),
         "CALL r46_rhs( 'after_ldf', uu, vv, Krhs )", 23],
-    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:728-760': [
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:728-759': [
         "CALL r46_rhs( 'pre_zdf_rhs', uu, vv, Krhs )",
-        'vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)', 33],
-    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/dynzdf.f90:162-170': [
+        'vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)', 32],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/dynzdf.f90:163-170': [
         'RHS : time-stepping of all trends but the implicit one',
-        'pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kbb) + rDt * pvv(ji,jj,jk,Krhs) )', 9],
+        ('END DO   ;   END DO', 1), 8],
     # --- round 88: carried pre-solve RK3 Kaa SSH lifecycle ---
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3.f90:188-201': [
         '!  RK3 : single first external mode computation',
