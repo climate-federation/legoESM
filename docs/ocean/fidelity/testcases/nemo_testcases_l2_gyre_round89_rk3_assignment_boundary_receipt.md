@@ -176,8 +176,21 @@ The candidate was already mechanically rejected, so no `SHIP` interpretation
 is possible.
 
 Before scientific measurement, 121 focused source-assignment, Kaa/restart,
-recipe, and restart tests passed.  Final restored-tree tests and citation-gate
-results are recorded in the closing verification commit.
+recipe, and restart tests passed.  On the final restored tree, 161 focused
+tests covering the phase gate, assignment controls, citation machinery,
+restart loading, and testcase recipe pass in 36.72 seconds; the log SHA-256 is
+`ad8e65db0f5127c013bacd2bb9381224b0c2230f4428a9702db537bb85c57a37`.
+The receipt citation gate passes all 12/12 compiled-source citations with no
+failure or unmapped citation (SHA-256
+`d6db66ce8cb349385c7efcfa342f8d987598a05d807bd13b8448a62e22a85851`).
+Shifting the stage-1 clock citation by two lines exits 1 with
+`SYMBOL-NOT-AT-LINE` (SHA-256
+`a41c6ac446ed369cbf7c08f7279aa8b6c6ea15686d9d65d39edf48afad30524b`).
+
+GitHub CLI authentication is invalid and no GitHub connector is installed, so
+the receipt could not be posted to issue #1455; no external state was mutated.
+The authentication audit is preserved with SHA-256
+`65e4875da9730edfbfb6b4b3ee6461a0095f331b95bc078a7649d90d18e40b42`.
 
 ## OPEN — next round
 
