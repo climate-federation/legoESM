@@ -164,7 +164,7 @@ def _oracle_trace(arrays):
     r1_h0 = np.divide(r3_kbb, ssh_kbb, out=np.zeros_like(r3_kbb), where=ssh_kbb != 0.0)
     eta_kaa = np.asarray(arrays["ssh_Kaa"])[owned]
     r3_kaa = eta_kaa * r1_h0
-    values = _source_trace(
+    operands = (
         jnp.asarray(arrays["u_Kmm"])[owned][..., :30],
         jnp.asarray(arrays["v_Kmm"])[owned][..., :30],
         jnp.asarray(arrays["e2u"])[owned], jnp.asarray(arrays["e1v"])[owned],
@@ -175,11 +175,30 @@ def _oracle_trace(arrays):
         jnp.asarray(arrays["e3t_0"])[owned][..., :30], jnp.asarray(r3_kbb),
         jnp.asarray(r3_kaa), jnp.asarray(arrays["r1_Dt"]), jnp.asarray(wet),
     )
+    # Both arms must cross the same JIT boundary.  The first instrument
+    # version ran this reference trace eagerly and manufactured a 1.69e-21
+    # e3div association difference even though both operands were exact.
+    values = jax.jit(lambda: _source_trace(*operands))()
     values = jax.device_get(values)
     values["eta_kaa"] = eta_kaa
     values["e3t_0"] = np.asarray(arrays["e3t_0"])[owned][..., :30]
     values["tmask"] = wet
     return values
+
+
+def _direct_production_w(card, seeded, trace, eta_after_override):
+    """Call the same shared WZV helper that the production tendency uses."""
+    eta = seeded.eta.data
+    eta_before_field = getattr(seeded, "eta_before", None)
+    eta_before = eta if eta_before_field is None else eta_before_field.data
+    u, v, *_ = trace.stage_states[0]
+    tmask = card.recipe.z_coord.is_active.astype(eta.dtype)
+    umask, vmask = compute_face_masks_3d(card.recipe.z_coord.is_active, card.recipe.grid)
+    return pe.nemo_qco_wzv_operands(
+        eta, eta_before, u, v, card.recipe.grid, card.recipe.z_coord,
+        umask, vmask, tmask, card.dt_s,
+        eta_after_override=eta_after_override,
+    )[0]
 
 
 def _active(name, masks):
@@ -245,7 +264,13 @@ def measure(args) -> dict[str, object]:
     active = {"u": np.asarray(masks["u"], bool), "v": np.asarray(masks["v"], bool),
               "t": np.asarray(masks["T"], bool)}
     captured_w = np.asarray(live_step.operator_operands[0]["operand_zad_w"])
-    captured_consistency = _row(live["ww"], captured_w, _active("ww", active))
+    direct_current_w = jax.device_get(jax.jit(
+        lambda: _direct_production_w(card, seeded, live_step, None))())
+    direct_kaa_w = jax.device_get(jax.jit(
+        lambda: _direct_production_w(
+            card, seeded, live_step, jnp.asarray(oracle["eta_kaa"])))())
+    captured_consistency = _row(
+        direct_current_w, captured_w, _active("ww", active), name="captured_consistency")
     actual_stage_w = np.asarray(live_step.stage_geometry[0][2])
     actual_postsolve = _row(actual_stage_w, oracle["ww"], _active("ww", active))
 
@@ -267,17 +292,16 @@ def measure(args) -> dict[str, object]:
         fired = None
 
     first = next((name for name in ORDER if not rows[name]["bit_exact"]), None)
-    kaa_w = _recur(
-        np.asarray(live["e3div"]), np.asarray(live["e3t_0"]),
-        np.asarray(live["r1_dt"]), np.asarray(oracle["r3_kaa"]) - np.asarray(live["r3_kbb"]),
-        np.asarray(live["tmask"]),
-    )
-    kaa_w_row = _row(kaa_w, oracle["ww"], _active("ww", active))
+    kaa_w = np.asarray(direct_kaa_w)
+    kaa_w_row = _row(kaa_w, oracle["ww"], _active("ww", active), name="kaa_w")
+    oracle_kaa_twice_kbb = _row(
+        np.asarray(oracle["r3_kbb"]) + np.asarray(oracle["r3_kbb"]),
+        oracle["r3_kaa"], active["t"][..., 0], name="oracle_kaa_twice_kbb")
 
     split = round46._split_view(arrays)
     oracle_after = {face: np.asarray(arrays[f"after_zad_{face}"]) for face in ("u", "v")}
     zad = {}
-    for label, replacement_w in (("before", np.asarray(live["ww"])), ("kaa", kaa_w),
+    for label, replacement_w in (("before", np.asarray(direct_current_w)), ("kaa", kaa_w),
                                  ("actual_postsolve", actual_stage_w)):
         replay_u, replay_v = round86._replay_with(
             split, {"ww": round86._inject_owned(split["ww"], replacement_w[..., :30], nlev=30)})
@@ -304,6 +328,7 @@ def measure(args) -> dict[str, object]:
         "first_nonbit_operand": first, "captured_preexternal_consistency": captured_consistency,
         "actual_postsolve_transport_w": actual_postsolve,
         "kaa_substitution_w": kaa_w_row, "zad_replays": zad,
+        "posthoc_oracle_r3_kaa_equals_kbb_plus_kbb": oracle_kaa_twice_kbb,
         "kaa_zad_fraction_removed": removed, "prediction_confirmed": confirmed,
         "plant": args.plant, "plant_detail": plant_detail, "plant_fired": fired,
     }
