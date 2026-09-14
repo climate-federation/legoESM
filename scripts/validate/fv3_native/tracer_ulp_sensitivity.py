@@ -27,7 +27,52 @@ import numpy as np
 
 # Fortran run_hydro_1step_term_gfs, tiles 1 and 2 (front-free edges):
 # max |Cl + 2 Cl2 - qcly| / qcly within 3 cells of the tile edge.
-ORACLE_EDGE_NONCONSTANCY = 1.818e-4
+# Re-measurable with --oracle-ic-run/--oracle-step-run (below).
+ORACLE_EDGE_NONCONSTANCY = 1.8177e-4
+# The config every pinned number here was measured on.
+PINNED_CONFIG = (48, 5, 8, 1920.0)
+# --assert-envelope band for the cl2 response: [0.5, 1.2] x pinned. The
+# response is ONE limiter tie-break quantum: nudges of one and two ulp gave
+# the same 3.297e-09 to four digits, so drift beyond a few percent is a
+# scheme change, not noise; 1.2 leaves headroom for that, 0.5 catches a
+# halved response (fewer cells flipping) that would otherwise pass as
+# "smaller is better". A chosen band, stated as such.
+ENVELOPE_BAND = (0.5, 1.2)
+
+
+def measure_oracle_edge_nonconstancy(ic_run: str, step_run: str,
+                                     edge_cells: int = 3) -> float:
+    """max |Cl + 2 Cl2 - qcly| / qcly within ``edge_cells`` of a tile edge,
+    over the tiles with NO terminator front (cl constant at the IC), from
+    the two oracle restart sets. The committed path behind the pinned
+    constant."""
+    import netCDF4
+    from legoesm.core.fv3_native_dcmip16_ic import TERM_QCLY
+    worst = 0.0
+    for t in range(1, 7):
+        with netCDF4.Dataset(f"{ic_run}/RESTART/fv_tracer.res.tile{t}.nc") as z, \
+                netCDF4.Dataset(f"{step_run}/RESTART/fv_tracer.res.tile{t}.nc") as o:
+            cl0 = np.asarray(z["cl"][0])
+            # a FULLY DAYLIT tile: cl above the transition band everywhere.
+            # The all-night tile also has no front inside it, but the front
+            # lies just across its edges in the neighbouring tiles and its
+            # edge cells see it through the halo (1.056e-3 there, measured
+            # 2026-09-14) -- that is transport, not the edge non-constancy.
+            # The daylit tile's figure equals the port's constant-tracer
+            # figure to four digits, which is the evidence it is the
+            # right one.
+            if not (cl0.min() > 3.99e-6):
+                continue
+            dev = np.abs(np.asarray(o["cl"][0]) + 2.0 * np.asarray(o["cl2"][0])
+                         - TERM_QCLY) / TERM_QCLY
+            n = dev.shape[-1]
+            edge = np.zeros((n, n), bool)
+            edge[:edge_cells, :] = edge[-edge_cells:, :] = True
+            edge[:, :edge_cells] = edge[:, -edge_cells:] = True
+            worst = max(worst, float(dev[:, edge].max()))
+    if worst == 0.0:
+        raise SystemExit("no fully daylit tile found in the oracle decks")
+    return worst
 
 
 def plateau_mask(q, value, rtol=1e-12):
@@ -46,7 +91,28 @@ def main(argv=None) -> int:
                          "(CL2_ULP_ENVELOPE_ABS) and cl's stays <= 10 ulp -- "
                          "drift in either direction, or a scheme that "
                          "became smooth, re-opens the ceiling")
+    ap.add_argument("--oracle-ic-run", default=None,
+                    help="with --oracle-step-run: RE-MEASURE the oracle's "
+                         "edge non-constancy from its restarts instead of "
+                         "trusting ORACLE_EDGE_NONCONSTANCY (terminator decks)")
+    ap.add_argument("--oracle-step-run", default=None)
     args = ap.parse_args(argv)
+    if args.assert_envelope and (args.n, args.km, args.n_split, args.dt) != PINNED_CONFIG:
+        raise SystemExit(
+            f"--assert-envelope is pinned to C{PINNED_CONFIG[0]} km={PINNED_CONFIG[1]} "
+            f"n_split={PINNED_CONFIG[2]} dt={PINNED_CONFIG[3]} (the config the "
+            f"envelope and the edge figure were measured on); got "
+            f"({args.n}, {args.km}, {args.n_split}, {args.dt})")
+    oracle_edge = ORACLE_EDGE_NONCONSTANCY
+    if args.oracle_ic_run or args.oracle_step_run:
+        if not (args.oracle_ic_run and args.oracle_step_run):
+            raise SystemExit("--oracle-ic-run and --oracle-step-run go together")
+        oracle_edge = measure_oracle_edge_nonconstancy(args.oracle_ic_run,
+                                                       args.oracle_step_run)
+        print(f"oracle edge non-constancy RE-MEASURED: {oracle_edge:.4e} "
+              f"(pinned {ORACLE_EDGE_NONCONSTANCY:.4e})")
+        if abs(oracle_edge - ORACLE_EDGE_NONCONSTANCY) > 1e-2 * ORACLE_EDGE_NONCONSTANCY:
+            print("  PINNED VALUE IS STALE -- update ORACLE_EDGE_NONCONSTANCY")
     import jax
     jax.config.update("jax_enable_x64", True)
     import jax.numpy as jnp
@@ -125,7 +191,7 @@ def main(argv=None) -> int:
     dev_edge = float(dev.max())
     print(f"constancy: uniform tracer after one step -- interior deviation "
           f"{dev_int:.3e} (rounding ~1e-15); face-edge deviation {dev_edge:.3e} "
-          f"(oracle's own edge non-constancy {ORACLE_EDGE_NONCONSTANCY:.3e})")
+          f"(oracle's own edge non-constancy {oracle_edge:.3e})")
     results["constancy_interior"] = dev_int
     results["constancy_edge"] = dev_edge
     if args.assert_envelope:
@@ -138,16 +204,16 @@ def main(argv=None) -> int:
         parity = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(parity)
         env = parity.CL2_ULP_ENVELOPE_ABS
-        ok_cl2 = 0.5 * env <= results["cl2"] <= 1.2 * env
+        ok_cl2 = ENVELOPE_BAND[0] * env <= results["cl2"] <= ENVELOPE_BAND[1] * env
         ok_cl = results["cl"] <= 10 * ulp        # cl was nudged by ulp(qcly)
         ok_const = (results["constancy_interior"] <= 1e-12
-                    and abs(results["constancy_edge"] - ORACLE_EDGE_NONCONSTANCY)
-                    <= 1e-2 * ORACLE_EDGE_NONCONSTANCY)
+                    and abs(results["constancy_edge"] - oracle_edge)
+                    <= 1e-2 * oracle_edge)
         print(f"envelope check: cl2 {results['cl2']:.3e} vs pinned {env:.3e} "
               f"-> {'OK' if ok_cl2 else 'DRIFTED'}; cl {results['cl'] / ulp:.1f} ulp "
               f"-> {'OK' if ok_cl else 'NOT SMOOTH'}; constancy interior "
               f"{results['constancy_interior']:.1e}, edge {results['constancy_edge']:.4e} "
-              f"vs oracle {ORACLE_EDGE_NONCONSTANCY:.4e} -> "
+              f"vs oracle {oracle_edge:.4e} -> "
               f"{'OK' if ok_const else 'VIOLATED'}")
         return 0 if (ok_cl2 and ok_cl and ok_const) else 1
     return 0

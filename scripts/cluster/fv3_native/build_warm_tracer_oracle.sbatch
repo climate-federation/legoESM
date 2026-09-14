@@ -107,11 +107,31 @@ run_deck () {  # name minutes tracer_dir
   STAGED+=("$1")
   echo "--- staged $1 (publish after the cross-deck controls) ---"
 }
-publish_all () {  # codex 2026-09-14: a family is published whole or not at all
+publish_all () {  # codex 2026-09-14 (x2): whole family or nothing, and TRANSACTIONAL
+  # an existing deck is moved aside, never deleted, until every deck of
+  # the family is in place; any mv failure rolls the family back
+  local done=()
   for d in "${STAGED[@]}"; do
-    rm -rf "$PIN/$d" && mv "$PIN/$d.staging.$$" "$PIN/$d" || { echo "PUBLISH FAILED for $d"; exit 11; }
+    if [ -e "$PIN/$d" ]; then
+      mv "$PIN/$d" "$PIN/$d.old.$$" || { echo "PUBLISH FAILED moving old $d aside"; rollback "${done[@]}"; exit 11; }
+    fi
+    if ! mv "$PIN/$d.staging.$$" "$PIN/$d"; then
+      echo "PUBLISH FAILED for $d -- rolling the family back"
+      [ -e "$PIN/$d.old.$$" ] && mv "$PIN/$d.old.$$" "$PIN/$d"
+      rollback "${done[@]}"; exit 11
+    fi
+    done+=("$d")
     echo "--- published $PIN/$d ---"
   done
+  for d in "${STAGED[@]}"; do rm -rf "$PIN/$d.old.$$"; done
+}
+rollback () {  # undo published decks of this family: staging back, old back
+  local d
+  for d in "$@"; do
+    mv "$PIN/$d" "$PIN/$d.staging.$$" 2>/dev/null
+    [ -e "$PIN/$d.old.$$" ] && mv "$PIN/$d.old.$$" "$PIN/$d"
+  done
+  unstage_all
 }
 unstage_all () { for d in "${STAGED[@]}"; do rm -rf "$PIN/$d.staging.$$"; done; }
 

@@ -365,11 +365,24 @@ def _nml_value(text: str, key: str, pattern: str):
     Returns the last match's captured group, or None.
     """
     val = None
-    for raw in text.splitlines():
-        line = raw.split("!", 1)[0]          # `!` starts a comment
+    # comments stripped per line, then a line that ENDS in `=` continues
+    # onto the next (`k_split =` newline `2` is legal free-form namelist;
+    # codex 2026-09-14 -- it read as the previous assignment). Arrays,
+    # repeat counts (`3*1`) and quoted text remain out of scope: every key
+    # read here is a scalar and no pinned deck uses those forms.
+    lines = [raw.split("!", 1)[0] for raw in text.splitlines()]
+    joined, buf = [], ""
+    for line in lines:
+        buf = (buf + " " + line) if buf else line
+        if buf.rstrip().endswith("="):
+            continue
+        joined.append(buf)
+        buf = ""
+    if buf:
+        joined.append(buf)
+    for line in joined:
         # ALL matches on the line, last one wins -- `k_split=1, k_split=2`
-        # on one line is legal Fortran and reads as 2 (codex 2026-09-14;
-        # re.search took the first)
+        # on one line is legal Fortran and reads as 2
         found = re.findall(rf"\b{key}\s*=\s*({pattern})", line, re.IGNORECASE)
         if found:
             val = found[-1]
@@ -850,11 +863,23 @@ def derive_face_map(port, orc) -> tuple:
             meta[pf][ot] = (tr, nm, su, sv)
             per_field[pf][ot] = pf_r
             wind_only[pf, ot] = score_pair_winds_only(port[pf], orc[ot])[0]
-    best_perm, best_worst = None, np.inf
+    best_perm, best_worst, second_worst = None, np.inf, np.inf
     for perm in itertools.permutations(range(6)):
         w = max(cost[pf, perm[pf]] for pf in range(6))
         if w < best_worst:
-            best_worst, best_perm = w, perm
+            second_worst, best_worst, best_perm = best_worst, w, perm
+        elif w < second_worst:
+            second_worst = w
+    # codex round 2: a within-pair tie is counted in score_pair, but two
+    # different TILE assignments could also fit -- the runner-up bijection's
+    # worst cost is recorded on the winner's per-field dicts as
+    # `_bijection_margin` (runner-up / winner); a margin near 1 means the
+    # tile pairing itself is ambiguous and is reported by main.
+    margin = (second_worst / best_worst) if best_worst > 0 else np.inf
+    for pf in range(6):
+        d = per_field[pf][best_perm[pf]]
+        if d is not None:
+            d["_bijection_margin"] = float(margin)
     return cost, meta, best_perm, best_worst, per_field, wind_only
 
 
@@ -1648,6 +1673,12 @@ def main(argv=None):
      per_field, wind_only) = derive_face_map(p_ic, orc_ic)
     ambiguous = [pf for pf in range(6)
                  if per_field[pf][perm[pf]].get("_ties", 1) > 1]
+    bmargin = per_field[0][perm[0]].get("_bijection_margin", np.inf)
+    print(f"face-map bijection margin: runner-up assignment's worst cost is "
+          f"{bmargin:.3g}x the winner's" + ("  -- AMBIGUOUS TILE PAIRING"
+                                           if bmargin < 10.0 else ""))
+    if bmargin < 10.0:
+        ambiguous = list(range(6))
     if ambiguous:
         lon_scored = args.tracers and any(nm in ADVECTED_TRACERS
                                           for nm in ("cl", "cl2"))
@@ -2275,14 +2306,21 @@ def main(argv=None):
                       f"against the gate")
         if "cl" in ADVECTED_TRACERS and "cl2" in ADVECTED_TRACERS:
             from legoesm.core.fv3_native_dcmip16_ic import TERM_QCLY as _Q
-            dev_p = max(float(np.abs(p_tr_1[pf]["cl"] + 2.0 * p_tr_1[pf]["cl2"]
-                                     - _Q).max()) for pf in range(6)) / _Q
-            dev_o = max(float(np.abs(orc_tr_1[ot]["cl"] + 2.0 * orc_tr_1[ot]["cl2"]
-                                     - _Q).max()) for ot in range(6)) / _Q
-            gap = abs(dev_p - dev_o)
+            # CELLWISE under the derived map (codex round 2: comparing two
+            # unsigned maxima hid location, sign and integrated loss)
+            dev_p = dev_o = gap = 0.0
+            for pf in range(6):
+                ot = perm[pf]
+                fp_ = p_tr_1[pf]["cl"] + 2.0 * p_tr_1[pf]["cl2"] - _Q
+                fo_ = orc_tr_1[ot]["cl"] + 2.0 * orc_tr_1[ot]["cl2"] - _Q
+                a, b = map_scalar_pair(fp_, fo_, meta[pf][ot])
+                dev_p = max(dev_p, float(np.abs(a).max()) / _Q)
+                dev_o = max(dev_o, float(np.abs(b).max()) / _Q)
+                gap = max(gap, float(np.abs(a - b).max()) / _Q)
             ceil = TRACER_STEP_MAX_REL.get("cl2", args.max_rel or 1.0)
-            print(f"\nTERMINATOR Cl + 2 Cl2 - qcly after one step (max, / qcly): "
-                  f"port {dev_p:.3e}  oracle {dev_o:.3e}  |gap| {gap:.3e} "
+            print(f"\nTERMINATOR Cl + 2 Cl2 - qcly after one step (/ qcly): "
+                  f"max port {dev_p:.3e}  max oracle {dev_o:.3e}  "
+                  f"CELLWISE max |port - oracle| {gap:.3e} "
                   f"({gap / ceil:.2f}x cl2's ceiling)")
             if gap > ceil:
                 worst_step = max(worst_step, gap / ceil * (args.max_rel or 1.0))

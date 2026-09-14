@@ -537,3 +537,25 @@ def test_nml_value_takes_the_last_assignment_on_a_line_too():
     assert mod._nml_int(text, "k_split") == 2
     assert mod._nml_int(text, "n_split") == 8
     assert mod._nml_int("k_split = 3\nk_split = 4\n", "k_split") == 4
+    # value on the NEXT line (codex round 2): the last assignment is 2
+    assert mod._nml_int("k_split = 1\nk_split =\n   2\n", "k_split") == 2
+    assert mod._nml_int("k_split = 1 ! k_split =\n 5\n", "k_split") == 1
+
+
+def test_ulp_probe_pins_are_guarded_and_documented():
+    """codex round 2: every pinned number in tracer_ulp_sensitivity.py has a
+    config guard and a re-measurement path; the band is a named constant."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "tracer_ulp_sensitivity",
+        _ROOT / "scripts" / "validate" / "fv3_native" / "tracer_ulp_sensitivity.py")
+    u = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(u)
+    assert u.PINNED_CONFIG == (48, 5, 8, 1920.0)
+    assert u.ENVELOPE_BAND == (0.5, 1.2)
+    assert u.ORACLE_EDGE_NONCONSTANCY == 1.8177e-4
+    assert callable(u.measure_oracle_edge_nonconstancy)
+    with pytest.raises(SystemExit, match="pinned to C48"):
+        u.main(["--assert-envelope", "--n", "24"])
+    with pytest.raises(SystemExit, match="go together"):
+        u.main(["--oracle-ic-run", "x"])
