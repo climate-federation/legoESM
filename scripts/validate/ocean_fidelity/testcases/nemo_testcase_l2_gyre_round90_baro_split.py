@@ -288,9 +288,11 @@ def measure(args) -> dict[str, object]:
         "observer": observer,
         "cross_record_identity": cross_record,
         "post_hoc_instrument_retraction": (
-            "Round-90 baro_e3u_0/baro_e3v_0 are static reference fields, not "
-            "the compiled e3u_3d/e3v_3d Kaa operands; correction replay uses "
-            "the same run's companion e3u_Kaa/e3v_Kaa payloads."),
+            "REFUTED: the initial static-versus-executing-thickness hypothesis "
+            "does not explain the calibration miss. The compiled writer's "
+            "e3u_3d/e3v_3d payloads and the companion e3u_Kaa/e3v_Kaa payloads "
+            "are bit-identical; the companion remains a direct cross-record "
+            "identity check."),
         "rows": rows,
         "faces": faces,
         "first_nonbit_direct": next(
