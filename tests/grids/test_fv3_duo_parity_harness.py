@@ -424,3 +424,55 @@ def test_port_tracer_ic_follows_the_deck_names_including_the_terminator_pair(
     mod.resolve_deck_tracers(odd, odd)
     with pytest.raises(ValueError, match="has no port IC"):
         mod.build_port_tracer_ic(sphum6, ctx=ctx)
+
+
+def test_a_lon_dependent_extra_scalar_breaks_the_zonal_mirror_tie():
+    """Job 9766086: on the bump-free faces the derived map picked a
+    transform at random and the terminator cl came out at rel 1.0 on
+    three faces. The ambiguity is a MIRROR ALONG THE FACE'S LATITUDE
+    INDEX on the rotated faces: the DCMIP jet is hemispherically
+    symmetric, so the jet component (v there, varying along i) is
+    invariant under i-reversal, and the component the reversal negates
+    (u) is ~0. A synthetic face built that way, with an extra scalar that
+    is NOT symmetric along i: the chosen transform must match the extra,
+    and the returned cost must still be the prognostic residual."""
+    mod = _load_scorer()
+    n, km = 6, 2
+    sym = np.cos(np.linspace(-1.0, 1.0, n))            # symmetric along i
+    v = np.tile(sym[:, None, None], (1, n, km))
+    v = np.concatenate([v, v[-1:, :, :]], axis=0)       # (n+1, n, km)
+    u = np.zeros((n, n + 1, km))
+    pt = np.tile(sym[:, None, None], (1, n, km)) + 300.0
+    delp = np.full((n, n, km), 1.0e4)
+    cl = np.linspace(0.0, 4e-6, n)[:, None, None] * np.ones((n, n, km))
+    port = {"u": u, "v": v, "pt": pt, "delp": delp, "cl": cl}
+
+    def as_oracle(a):  # port (i, j, k) -> oracle stored (k, j, i)
+        return np.ascontiguousarray(np.moveaxis(a.transpose(1, 0, 2), -1, 0))
+    # oracle tile = the port face mirrored along i ('fi': u -> -u, which
+    # is invisible at u == 0); the prognostic fields cannot see the
+    # mirror, cl can
+    orc = {k: as_oracle(mod.DIHEDRAL["fi"](a) * (-1.0 if k == "u" else 1.0))
+           for k, a in port.items()}
+    r, transposed, nm, su, sv, per = mod.score_pair(port, orc)
+    assert nm == "fi" and not transposed, (nm, transposed, per)
+    assert per["cl"] < 1e-15
+    assert r < 1e-15  # cost = prognostic residual, unchanged by the extra
+    # and WITHOUT the extra the prognostic fields alone accept BOTH
+    orc_plain = {k: a for k, a in orc.items() if k != "cl"}
+    port_plain = {k: a for k, a in port.items() if k != "cl"}
+    r0, _, nm0, _, _, per0 = mod.score_pair(port_plain, orc_plain)
+    assert r0 < 1e-15 and nm0 in ("id", "fi")
+    r_id = max(mod.rel(port_plain[k], mod.oracle_ij(orc_plain[k], False))
+               for k in ("pt", "delp"))
+    assert r_id < 1e-15, "the fixture is not mirror-symmetric; test is vacuous"
+
+
+def test_terminator_tracer_floor_is_derived_from_its_cancellation():
+    from legoesm.core.fv3_native_dcmip16_ic import TERM_QCLY
+    mod = _load_scorer()
+    want = 4.0 * np.finfo(np.float64).eps / (TERM_QCLY / 0.25)
+    assert mod.TRACER_IC_MAX_REL["cl"] == want == mod.TRACER_IC_MAX_REL["cl2"]
+    assert 1e-11 < want < 1e-10          # ~5.5e-11; measured IC residual 6.9e-12
+    assert mod.TRACER_SCALE["cl2"] == TERM_QCLY
+    assert "sphum" not in mod.TRACER_IC_MAX_REL   # sphum keeps the 1e-12 floor

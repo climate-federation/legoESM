@@ -92,6 +92,24 @@ ADVECTED_TRACERS = ("sphum", "liq_wat")
 # that lists cl/cl2 advects four), and the IC deck must agree.
 
 
+# The terminator pair is scored on its NATURAL scale, qcly = Cl + 2 Cl2,
+# not each face's peak: on the all-daylight tile Cl2 peaks at ~1e-9 and a
+# rounding-level absolute difference reads as 1e-8 "relative" there.
+# Its floor is arithmetic, not tuning: Cl = D - r with D, r ~ 0.25 and
+# Cl ~ qcly, so the definition itself cancels qcly/0.25 = 1.6e-5 of the
+# operands and rounding at 2.2e-16 lands at ~1.4e-11 of qcly; the two
+# sides' libm/pi differ at that level. Measured 2026-09-14: 6.9e-12.
+TRACER_SCALE = {}
+TRACER_IC_MAX_REL = {}
+try:
+    from legoesm.core.fv3_native_dcmip16_ic import TERM_QCLY as _TERM_QCLY
+    TRACER_SCALE.update({"cl": _TERM_QCLY, "cl2": _TERM_QCLY})
+    TRACER_IC_MAX_REL.update({nm: 4.0 * np.finfo(np.float64).eps
+                              / (_TERM_QCLY / 0.25) for nm in ("cl", "cl2")})
+except ImportError:  # the harness imports before the package on some paths
+    pass
+
+
 def read_deck_tracers(run_dir: str) -> tuple:
     """(advected, inert) tracer names from a deck's field_table order and
     its (last) dnats -- fv_dynamics.F90:191 ``nq = nq_tot - dnats``."""
@@ -709,6 +727,7 @@ def score_pair(port, orc) -> tuple:
     to agree under ONE transform is strictly stronger.
     """
     best = (np.inf, None, None, None, None, None)
+    best_select = np.inf
     ws = wind_scale(port, orc)
     for transposed in (False, True):
         ou = oracle_ij(orc["u"], transposed)
@@ -738,12 +757,20 @@ def score_pair(port, orc) -> tuple:
             # terminator decks: faces 0-2 matched cl at 7e-12, faces 3 and
             # 5 at rel 1.0, face 4's cl2 at 0.97, with u/v/pt/delp all at
             # the 1e-14 floor. A field that breaks the symmetry pins it.
+            # The extra field SELECTS the transform (its mirror image
+            # scores ~1.0, the right one ~1e-11) but does not enter the
+            # returned cost: the IC floor gate stays on the four
+            # prognostic fields, and the tracer is judged against its
+            # own floor in the tracer IC control.
+            r = max(per.values())
             for extra in sorted((set(port) & set(orc)) - set(per)
                                 - {"w", "delz"}):
                 per[extra] = rel(f(port[extra]), oracle_ij(orc[extra],
-                                                           transposed))
-            r = max(per.values())
-            if r < best[0]:
+                                                           transposed),
+                                 TRACER_SCALE.get(extra))
+            r_select = max(per.values())
+            if r_select < best_select:
+                best_select = r_select
                 best = (r, transposed, nm, su, sv, per)
     return best
 
@@ -1657,19 +1684,26 @@ def main(argv=None):
         # the agrid latitudes, so the quad-geometry floor applies.
         # (q / p_tr_ic were built above so cl could constrain the map.)
         worst_tr_ic = 0.0
+        worst_tr_ic_over_floor = 0.0
         for pf in range(6):
             ot = perm[pf]
             for nm in ADVECTED_TRACERS:
                 a, b = map_scalar_pair(p_tr_ic[pf][nm], orc_tr_ic[ot][nm],
                                        meta[pf][ot])
-                worst_tr_ic = max(worst_tr_ic, rel(a, b))
+                r_nm = rel(a, b, TRACER_SCALE.get(nm))
+                worst_tr_ic = max(worst_tr_ic, r_nm)
+                floor = TRACER_IC_MAX_REL.get(nm, IC_CONTROL_MAX_REL)
+                worst_tr_ic_over_floor = max(worst_tr_ic_over_floor,
+                                             r_nm / floor)
         print(f"TRACER IC control: worst rel {worst_tr_ic:.3e} over "
               f"{ADVECTED_TRACERS} (sphum analytic vs zerostep restart; "
               f"liq_wat {'0 == 0, vacuous' if args.tracer2 == 'zero' else 'modulated, under the derived map'}).")
-        if worst_tr_ic > IC_CONTROL_MAX_REL:
+        if worst_tr_ic_over_floor > 1.0:
             raise SystemExit(
                 f"TRACER INSTRUMENT CONTROL FAILED: IC rel "
-                f"{worst_tr_ic:.3e} exceeds {IC_CONTROL_MAX_REL:.0e}; the "
+                f"{worst_tr_ic:.3e} is {worst_tr_ic_over_floor:.2f}x its "
+                f"tracer's floor ({IC_CONTROL_MAX_REL:.0e}, or the "
+                f"cancellation floor {TRACER_IC_MAX_REL} for cl/cl2); the "
                 f"port's tracer IC does not reproduce the oracle's, so "
                 f"the one-step tracer comparison would start from a "
                 f"different field. Refusing to print it.")
@@ -2102,7 +2136,7 @@ def main(argv=None):
             for nm in ADVECTED_TRACERS:
                 a, b = map_scalar_pair(p_tr_1[pf][nm], orc_tr_1[ot][nm],
                                        meta[pf][ot])
-                r = rel(a, b)
+                r = rel(a, b, TRACER_SCALE.get(nm))
                 absd = float(np.abs(a - b).max())
                 tnd = tr_tend[nm][ot]
                 vac = (min(float(orc_tr_ic[t][nm].min()) for t in range(6))
