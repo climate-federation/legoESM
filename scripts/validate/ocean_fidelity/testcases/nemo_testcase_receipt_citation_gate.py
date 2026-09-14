@@ -1169,9 +1169,16 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stp2d.f90:141-176': [
         '!*  hydrostatic pressure gradient (HPG))',
         "CALL r46_rhs( 'after_adv', uu, vv, Krhs )", 36],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stp2d.f90:202-208': [
+        'Ue_rhs(ji,jj) = SUM(',
+        'Ve_rhs(ji,jj) = SUM(', 7],
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:365-371': [
         ('SELECT CASE( kstg )', 2),
         'IF( .NOT.ln_dynadv_vec )   CALL dyn_adv', 7],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:664-673': [
+        'SELECT CASE( kstg )',
+        'uu(ji,jj,jk,Kaa) = ( uu(ji,jj,jk,Kbb) + rDt * uu(ji,jj,jk,Krhs) )',
+        10],
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/traadv.f90:248-250': [
         'pFu(ji,jj,jpk) = 0._wp', 'pFw(ji,jj,jpk) = 0._wp', 3],
     # --- ROUND 48: model-path first boundary and cross-step bt memory ---
