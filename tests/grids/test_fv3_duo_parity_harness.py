@@ -476,3 +476,15 @@ def test_terminator_tracer_floor_is_derived_from_its_cancellation():
     assert 1e-11 < want < 1e-10          # ~5.5e-11; measured IC residual 6.9e-12
     assert mod.TRACER_SCALE["cl2"] == TERM_QCLY
     assert "sphum" not in mod.TRACER_IC_MAX_REL   # sphum keeps the 1e-12 floor
+
+
+def test_cl2_one_step_ceiling_is_twice_the_measured_ulp_envelope():
+    """User call 2026-09-14: cl2 gates at 2x the one-ulp branch-flip
+    envelope measured by tracer_ulp_sensitivity.py (job 9767368), on the
+    qcly scale; every other tracer keeps the single --max-rel."""
+    from legoesm.core.fv3_native_dcmip16_ic import TERM_QCLY
+    mod = _load_scorer()
+    assert mod.TRACER_STEP_MAX_REL == {
+        "cl2": 2.0 * mod.CL2_ULP_ENVELOPE_ABS / TERM_QCLY}
+    assert 1e-3 < mod.TRACER_STEP_MAX_REL["cl2"] < 2e-3
+    assert mod.CL2_ULP_ENVELOPE_ABS == 3.297e-09

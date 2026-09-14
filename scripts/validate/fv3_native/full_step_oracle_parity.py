@@ -101,11 +101,27 @@ ADVECTED_TRACERS = ("sphum", "liq_wat")
 # sides' libm/pi differ at that level. Measured 2026-09-14: 6.9e-12.
 TRACER_SCALE = {}
 TRACER_IC_MAX_REL = {}
+# ONE-STEP ceiling per tracer, where a tracer has its own measured
+# envelope. cl2 sits on an exactly-flat 2e-6 plateau next to the
+# terminator front, and there the transport (hord_tr=6 / kord_tr=9) is
+# discontinuous: nudging the plateau by ONE ulp (8.5e-22) in the port's
+# own IC moves its one-step output by 3.297e-09 = 4e12 ulp in 524 cells
+# (tracer_ulp_sensitivity.py, job 9767368, C48 km=5 n_split=8 dt=1920),
+# the same value the oracle residual shows to four digits, while the
+# port's eager and compiled arms disagree there by the same amount and
+# sphum/cl are bit-identical. The Fortran's own rounding decides the same
+# branches, so "match the oracle" has no meaning below that envelope.
+# Ceiling = 2 x the envelope over qcly (user call 2026-09-14); a transport
+# bug would have to hide under 1.6e-3 of the tracer's scale, and
+# conservation / range checks below still see it.
+CL2_ULP_ENVELOPE_ABS = 3.297e-09
+TRACER_STEP_MAX_REL = {}
 try:
     from legoesm.core.fv3_native_dcmip16_ic import TERM_QCLY as _TERM_QCLY
     TRACER_SCALE.update({"cl": _TERM_QCLY, "cl2": _TERM_QCLY})
     TRACER_IC_MAX_REL.update({nm: 4.0 * np.finfo(np.float64).eps
                               / (_TERM_QCLY / 0.25) for nm in ("cl", "cl2")})
+    TRACER_STEP_MAX_REL["cl2"] = 2.0 * CL2_ULP_ENVELOPE_ABS / _TERM_QCLY
 except ImportError:  # the harness imports before the package on some paths
     pass
 
@@ -2154,12 +2170,25 @@ def main(argv=None):
                            "frac_of_tendency": (absd / tnd if tnd
                                                 else float("nan")),
                            "vacuous_constant_ic": bool(vac)}
-                worst_step = max(worst_step, r)
+                if nm in TRACER_STEP_MAX_REL:
+                    # scored against its own ceiling: contributes to the
+                    # gate as (r / ceiling) * max_rel so one --max-rel
+                    # still decides, and the ratio is printed
+                    over = r / TRACER_STEP_MAX_REL[nm]
+                    row[nm]["ceiling"] = TRACER_STEP_MAX_REL[nm]
+                    row[nm]["fraction_of_ceiling"] = over
+                    worst_step = max(worst_step,
+                                     over * (args.max_rel or 1.0))
+                else:
+                    worst_step = max(worst_step, r)
                 print(f"  face {pf+1} -> tile {ot+1}  {nm:8s} "
                       f"rel={r:9.3e}  |d|max={absd:11.5g}  "
                       f"tendency={tnd:11.5g}  "
                       f"|d|/tend={row[nm]['frac_of_tendency']:9.3e}"
-                      + ("  [VACUOUS: constant IC]" if vac else ""))
+                      + ("  [VACUOUS: constant IC]" if vac else "")
+                      + (f"  [{row[nm]['fraction_of_ceiling']:.2f}x its own "
+                         f"ceiling {TRACER_STEP_MAX_REL[nm]:.2e}]"
+                         if nm in TRACER_STEP_MAX_REL else ""))
 
     if args.save_fields:
         saved["fields"] = np.asarray(fields)
