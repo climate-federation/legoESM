@@ -1004,6 +1004,13 @@ _DUMP_TIME_LEVEL["oracle_tracer_transport_kt00000001_s3.bin"] = (
     "GYRE_OMIP_L2_P3/MY_SRC/stprk3_stg.F90:550-565 writes stage-3 "
     "zFu/zFv/zFw after tra_adv_trp and immediately before tra_adv",
 )
+_DUMP_TIME_LEVEL["oracle_tracer_transport_kt00000002_s3.bin"] = (
+    "now",
+    "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"
+    "GYRE_OMIP_L2_P3_SM_R94STGCLS/BLD/ppsrc/nemo/"
+    "stprk3_stg.f90:792-834 calls tra_adv_trp on the live stage-3 Kmm "
+    "state and writes its zFu/zFv/zFw immediately afterward",
+)
 _DUMP_TIME_LEVEL["oracle_rkstage2_ene_operands_kt00000001.bin"] = (
     "now",
     "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/"

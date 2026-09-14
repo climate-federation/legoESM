@@ -1657,6 +1657,7 @@ class _NEMOWSLiveOperandTrace(NamedTuple):
     stage_geometry: object
     stage_qco: object
     stage_coefficients: object
+    tke_entry: object
     barotropic_targets: object; stage_rhs: object; stage_raw_velocities: object; barotropic_correction_geometry: object; stage_outputs: object  # noqa: E501,E702
 
 
@@ -5279,6 +5280,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_stage_tracers = None
         _nemo_ws_live_stage_states = None; _nemo_ws_live_stage_raw = None; _nemo_ws_live_stage_rhs = None; _nemo_ws_live_baro_geometry = None  # noqa: E501,E702
         _nemo_ws_live_stage_qco = None
+        _nemo_ws_live_tke_entry = None
         _nemo_ws_live_operator_operands = [
             _nemo_ws_stage1_operator_operands, None, None]
         _nemo_ws_tracer_content_rhs = None
@@ -8202,13 +8204,14 @@ class LatLonCGridOceanModel:
                 # ``state_new`` is the working copy). None ⇒ BIT-IDENTICAL.
                 _n2_tracers = self._n2_before_advection_tracers(state, z_coord=z_coord, config=config)
                 _n2_tracers_before = self._n2_nemo_before_tracers(state, z_coord=z_coord, config=config)
-                state_new, tke_new = self._apply_implicit_vertical_mixing(
+                _tke_result = self._apply_implicit_vertical_mixing(
                     state_new, dt, surface_forcing,
                     K_v_phys=tend.K_v, A_v_phys=tend.A_v,
                     K33_iso=k33_implicit, dt_mom=dt_mom,
                     surface_tracer_forcing=tend.surface_tracer_forcing,
                     tracer_source=tend.tracer_source,
                     tke_old=_tke_old, tke_source=_tke_source, return_tke=True,
+                    return_tke_entry=_return_live_stage_operands,
                     grid=_grid, n2_tracers=_n2_tracers,
                     n2_tracers_before=_n2_tracers_before,
                     tke_n2_bundle=_tke_n2_bundle,
@@ -8225,7 +8228,12 @@ class LatLonCGridOceanModel:
                     nemo_tracer_content_rhs=_nemo_ws_tracer_content_rhs,
                     nemo_aimp_momentum_w_u=_nemo_ws_aimp_momentum_w_u,
                     nemo_aimp_momentum_w_v=_nemo_ws_aimp_momentum_w_v,
-                z_coord=z_coord, config=config, iwm_fields=iwm_fields)
+                    z_coord=z_coord, config=config, iwm_fields=iwm_fields)
+                if _return_live_stage_operands:
+                    (state_new, tke_new,
+                     _nemo_ws_live_tke_entry) = _tke_result
+                else:
+                    state_new, tke_new = _tke_result
             else:
                 _n2_tracers = self._n2_before_advection_tracers(state, z_coord=z_coord, config=config)
                 _n2_tracers_before = self._n2_nemo_before_tracers(state, z_coord=z_coord, config=config)
@@ -8410,7 +8418,8 @@ class LatLonCGridOceanModel:
             if (any(value is None for value in _nemo_ws_live_operator_operands)
                     or _nemo_ws_live_stage_states is None
                     or _nemo_ws_live_stage_geometry is None or _nemo_ws_live_stage_raw is None or _nemo_ws_live_stage_rhs is None or _nemo_ws_live_baro_geometry is None  # noqa: E501
-                    or _nemo_ws_live_stage_qco is None):
+                    or _nemo_ws_live_stage_qco is None
+                    or _nemo_ws_live_tke_entry is None):
                 raise ValueError("live WS-RK3 operand trace is incomplete")
             return _NEMOWSLiveOperandTrace(
                 state_after=state_new,
@@ -8423,6 +8432,7 @@ class LatLonCGridOceanModel:
                     (dt / 2.0, 1.0 / (dt / 2.0)),
                     (dt, 1.0 / dt),
                 ),
+                tke_entry=_nemo_ws_live_tke_entry,
                 barotropic_targets=(target_u, target_v, Hu_avg, Hv_avg,
                                     state_new.eta.data,
                                     (_eta_live_one_third,
@@ -9648,6 +9658,7 @@ class LatLonCGridOceanModel:
         tke_old=None,
         tke_source=None,
         return_tke: bool = False,
+        return_tke_entry: bool = False,
         K_diss_v_w=None,
         return_K_diss_v: bool = False,
         return_K_profiles: bool = False,
@@ -9772,6 +9783,7 @@ class LatLonCGridOceanModel:
                 "momentum-only call (return_tke must be False).")
         tke_new = None
         _tke_coeff_new = None
+        _tke_entry_used = None
         _post_mixing = self._tke_post_mixing_active()
         _tke_ctx = None
         from legoesm.ocean.physics.vertical_mixing import (
@@ -9950,6 +9962,7 @@ class LatLonCGridOceanModel:
                         and hasattr(tke_new, "K_M")
                         and hasattr(tke_new, "tke_new")):
                     _tke_coeff_new = tke_new
+                    _tke_entry_used = _tke_coeff_new.tke_entry
                     tke_new = _tke_coeff_new.tke_new
                 if _post_mixing:
                     # Phase 1 only (Veros set_tke_diffusivities from the
@@ -10763,6 +10776,12 @@ class LatLonCGridOceanModel:
         if return_K_diss_v:
             return state_out, K_diss_v_w
         if return_tke:
+            if return_tke_entry:
+                if _tke_entry_used is None:
+                    raise ValueError(
+                        "WRITE-only TKE entry trace requested, but the "
+                        "closure did not expose its consumed energy operand")
+                return state_out, tke_new, _tke_entry_used
             return state_out, tke_new
         return state_out
 

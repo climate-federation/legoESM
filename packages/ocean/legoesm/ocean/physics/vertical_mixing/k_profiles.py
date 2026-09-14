@@ -1017,7 +1017,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     TKECarryOutput,
                 )
                 _carry = TKECarryOutput(
-                    tke_new=tke_out.tke_new, K_M=tke_out.K_M,
+                    tke_new=tke_out.tke_new, tke_entry=_tke_seed,
+                    K_M=tke_out.K_M,
                     K_H=tke_out.K_H, K_M_surface=tke_out.K_M_surface,
                     dissl=tke_out.dissl)
                 return tke_out.K_H, tke_out.K_M, _carry

@@ -213,7 +213,7 @@ def test_missing_model_context_is_fail_closed_not_an_exception():
     }
     masks = {"ssh": np.ones((NY - 4, NX - 4), dtype=bool)}
     rows = gate._closure_rows(
-        Context(), arrays, masks, 1, 1, "LEGO_CHAINED", "output")
+        Context(), None, arrays, masks, 1, 1, "LEGO_CHAINED", "output")
     assert len(rows) == 5
     assert {row["classification"] for row in rows} == {"UNMEASURED_WITH_SPEC"}
     assert all(row["entry_mode"] == "LEGO_CHAINED" for row in rows)

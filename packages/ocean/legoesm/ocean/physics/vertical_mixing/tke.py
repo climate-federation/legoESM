@@ -393,6 +393,7 @@ class TKEEntryN2Bundle(NamedTuple):
 class TKECarryOutput(NamedTuple):
     """Prognostic TKE plus NEMO's post-``tke_avn`` closure memory."""
     tke_new: jnp.ndarray
+    tke_entry: jnp.ndarray
     K_M: jnp.ndarray
     K_H: jnp.ndarray
     K_M_surface: jnp.ndarray | None

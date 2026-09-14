@@ -105,6 +105,13 @@ def test_unregistered_dump_raises_and_never_defaults():
         time_level_for_dump("dump_something_new.bin")
 
 
+def test_round95_stage_closure_transport_is_registered_at_now_level():
+    name = "oracle_tracer_transport_kt00000002_s3.bin"
+    assert time_level_for_dump(name) == "now"
+    assert "R94STGCLS/BLD/ppsrc/nemo/stprk3_stg.f90" in (
+        _DUMP_TIME_LEVEL[name][1])
+
+
 def test_row18_direct_operand_dumps_are_registered_at_now_level():
     """The write-only operands are read in zdftke's live-Kmm etau block."""
     for name in ("tke_dump_etau_gdepw.bin", "tke_dump_etau_htau.bin"):

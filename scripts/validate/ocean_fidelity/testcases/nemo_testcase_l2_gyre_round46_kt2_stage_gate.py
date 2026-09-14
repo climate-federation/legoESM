@@ -45,6 +45,8 @@ MEMORY_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round48/oracle_bt_memory")
 BTSTEP_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round81/oracle_btstep_kt2")
+STAGE_CLOSURE_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round94/oracle_stage_closure")
 MAGIC = "NEMO_L2_R46STG1"
 DIMS = (36, 26, 31)
 OWNED_DIMS = (32, 22, 31)
@@ -921,11 +923,11 @@ def _history_reference(memory_root: Path, btstep_root: Path, kt: int):
     return _final_history_from_btstep(arrays)
 
 
-def _closure_rows(context, arrays, masks, kt: int, stage: int, mode: str,
-                  boundary: str) -> list[dict]:
+def _closure_rows(context, tke_entry, arrays, masks, kt: int, stage: int,
+                  mode: str, boundary: str) -> list[dict]:
     """Score the closure fields computed once and consumed by every stage."""
     candidate_fields = {
-        "tke_en": context.tke,
+        "tke_en": tke_entry,
         "tke_avm_k": context.tke_avm,
         "tke_avt_k": context.tke_avt,
         "tke_dissl": context.tke_dissl,
@@ -950,7 +952,8 @@ def _closure_rows(context, arrays, masks, kt: int, stage: int, mode: str,
             row.update({"entry_mode": mode, "boundary": boundary})
             rows.append(row)
             continue
-        candidate = np.asarray(candidate_field.data)
+        candidate = np.asarray(
+            candidate_field if field == "tke_en" else candidate_field.data)
         row = _classification(score(
             f"GYRE-zco.kt{kt}.s{stage}.{boundary}.{field}",
             references[field], candidate, field_masks[field]))
@@ -999,7 +1002,7 @@ def _output_rows(trace, records, next_entries, transports, masks, area_t,
             rows.append(row)
 
         rows.extend(_closure_rows(
-            context, a, masks, kt, stage, mode, "output"))
+            context, trace.tke_entry, a, masks, kt, stage, mode, "output"))
 
         transport = transports.get((kt, stage))
         if transport is None:
@@ -1064,7 +1067,7 @@ def _entry_rows(trace, records, masks, context, kt: int, stage: int,
                     "entry_mode": mode, "boundary": "entry"})
         rows.append(row)
     rows.extend(_closure_rows(
-        context, a, masks, kt, stage, mode, "entry"))
+        context, trace.tke_entry, a, masks, kt, stage, mode, "entry"))
     return rows
 
 
@@ -1115,6 +1118,7 @@ def _external_rows(outputs, histories, records, advmean_root: Path,
 
 def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                 memory_root: Path, btstep_root: Path,
+                stage_closure_root: Path,
                 plant: str | None) -> dict:
     """Decision-41 stage tables from recorded entries and the shared stage."""
     import jax
@@ -1147,8 +1151,9 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                 field: np.ascontiguousarray(record[field].swapaxes(0, 1))
                 for field in ("zFu", "zFv", "zFw")
             }
-    path = advmean_root / "oracle_tracer_transport_kt00000001_s3.bin"
-    transports[(1, 3)] = read_transport(path, 3)
+    for kt, transport_root in ((1, advmean_root), (2, stage_closure_root)):
+        path = transport_root / f"oracle_tracer_transport_kt{kt:08d}_s3.bin"
+        transports[(kt, 3)] = read_transport(path, 3)
 
     given = []
     given_entries = []
@@ -1313,6 +1318,7 @@ def run(
     advmean_root: Path = ADVMEAN_ROOT,
     memory_root: Path = MEMORY_ROOT,
     btstep_root: Path = BTSTEP_ROOT,
+    stage_closure_root: Path = STAGE_CLOSURE_ROOT,
 ) -> dict:
     stamp = worktree_stamp()
     expected = "0" * 40 if plant == "stamp" else expect_commit.lower()
@@ -1431,7 +1437,8 @@ def run(
             report["status"] = "UNMEASURED"
     if mode == "stage-twin":
         report["stage_twin"] = _stage_twin(
-            records, root, advmean_root, memory_root, btstep_root, plant)
+            records, root, advmean_root, memory_root, btstep_root,
+            stage_closure_root, plant)
         missing = [
             row for table in ("given_nemo_entry", "chained")
             for row in report["stage_twin"][table]
@@ -1467,6 +1474,8 @@ def main(argv=None) -> int:
     p.add_argument("--memory-root", type=Path, default=MEMORY_ROOT)
     p.add_argument("--btstep-root", type=Path, default=BTSTEP_ROOT)
     p.add_argument(
+        "--stage-closure-root", type=Path, default=STAGE_CLOSURE_ROOT)
+    p.add_argument(
         "--plant",
         choices=("header", "truncation", "calibration", "given", "trajectory",
                  "twin", "stage-entry-ulp", "stage-context-ulp", "stamp"),
@@ -1483,6 +1492,7 @@ def main(argv=None) -> int:
         advmean_root=args.advmean_root,
         memory_root=args.memory_root,
         btstep_root=args.btstep_root,
+        stage_closure_root=args.stage_closure_root,
     )
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.output:
