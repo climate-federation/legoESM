@@ -190,12 +190,31 @@ from GYRE or the tanks.
 - Every scientific artifact is clean-stamped at measured candidate
   `bb963136d341`; the production restoration was verified byte-for-byte against
   the preregistration parent for every path touched by the held patch.
-- Focused tests, the receipt citation gate and its shifted-citation plant, and
-  the required separate read-only Codex review are reported after final runs.
+- The final focused suite passes 23/23 tests in 1.94 s. It covers the admitted
+  record and mixed extents, live trace observer/privacy, the citation parser,
+  full-map audit, and citation-gate controls. The known unrelated RK3-WS test
+  was not in this focused selection and was neither encountered nor waived.
+- The receipt citation gate finds 6/6 mapped compiled-source citations, zero
+  failures, zero map-audit failures, and all nine self-controls firing. Its
+  shifted assignment-citation plant produces `SYMBOL-NOT-AT-LINE` and exits 1.
 
 ## Independent review
 
-REVIEW_PLACEHOLDER
+**Independent review unavailable in-sandbox.** The required command exited 1
+before producing a `SHIP` or `DO NOT SHIP` verdict; this is not treated as
+approval. Its terminal verdict is quoted verbatim:
+
+> WARNING: proceeding, even though we could not create PATH aliases: Read-only
+> file system (os error 30)
+>
+> Reading additional input from stdin...
+>
+> Error: failed to initialize in-process app-server client: Read-only file
+> system (os error 30)
+
+The complete capture is `round92/codex_review.txt`. Per the operator's standing
+instruction, the round continued through the mechanical gates; no candidate
+physics landed.
 
 ## Complete registered moved-row table
 
@@ -310,3 +329,7 @@ worsened counts are per cell.
 4. **No acquisition or configuration decision is pending.** The Round-90
    record is admitted and sufficient for this boundary. All held patches remain
    held; Rule 12 remains the only landing criterion.
+5. **Issue #1455 was not updated.** `gh auth status` reports that the configured
+   `dhruvbalwada` token is invalid. The next authenticated round should post
+   this receipt's held verdict, the 84-row register, and the Krhs diagnosis;
+   `round92/github_auth_status.txt` preserves the failure.
