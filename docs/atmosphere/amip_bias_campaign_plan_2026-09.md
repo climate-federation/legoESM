@@ -115,3 +115,18 @@ elimination. Iteration 2 as written (cover paired with fsd) is REFUTED; a
 cover fix must arrive with the humidity fix or it worsens SW.
 Clear-sky OLR kernel (ref1979 profile, 2048 columns): humidity alone covers
 65 % of the -15.3 W/m2, temperature 23 %, both 94 %.
+Kernel rerun with dd_ctl's OWN bias profile (not ref1979's): the current deck
+is WARM aloft (model - ERA5 = +2.4 K at 500, +6.7 K at 300, +7.0 K at 250 hPa)
+and holds 2.5-4x ERA5's vapour above 500 hPa; humidity alone covers 106 % of
+the clear-sky OLR deficit and the warm bias offsets 46 %. The old deck's cold
+upper troposphere is gone; the clear-sky OLR error is now entirely humidity.
+
+## Stability finding (2026-09-14)
+The current deck's COLD START (base90_r6, from ERA5 1979-01-01) blew up at
+day 4.0 with the downdraft transport OFF — the same day the downdraft arm
+blew up from a day-80 restart. The blow-up state is fully NaN. Onset lies
+between steps 2592 and 3024 (saturation adjustment drained 201 points, 2 g/kg,
+at 2592; 2.8 million held land column-steps by 3024). A 5-day cold-start
+rerun with 3-hourly checks (base90_diag) is running to catch the origin.
+Surviving runs of the same deck: dd_ctl, sc_*, r3_* (all restarts, daily
+checks), dd_diag (restart + transport + cap + clamp, 3-hourly checks).
