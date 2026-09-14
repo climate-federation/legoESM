@@ -165,16 +165,28 @@ The required separate `codex exec --sandbox read-only` review was attempted.
 Independent review is unavailable in-sandbox. Its result, quoted verbatim, is:
 **“Error: failed to initialize in-process app-server client: Read-only file
 system (os error 30)”**. No review verdict is treated as approval; no physics
-landed.
+landed. The log SHA-256 is
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
 The GitHub #1455 read/post path remains unavailable because this clone's only
-remote is a local shared path. No ledger-post claim is made.
+remote is a local shared path. No ledger-post claim is made; the diagnostic
+log SHA-256 is
+`c2f4fae9d835564474a18cf359bdaf697286a9fff69676cfd3a3fe457e045a42`.
 
-The citation gate and its shifted-citation plant are recorded below after the
-receipt is committed. The focused suite covers the stage gate, time-level
-registry, transport layout and wrong-slot plant, live observer, TKE carry,
-phase-3 gate, year member/owner, and citation metadata. The known unrelated
-`test_rk3_ws_differs_from_rk3_and_is_finite` red test is not selected.
+The final citation gate passes all three compiled-source citations with no
+unmapped citation, failed anchor, or global map failure. Its clean artifact
+SHA-256 is
+`762fb52947a382d700fc3cf298c13726b066ea5f69ec60ba6be29e5b86267ea2`.
+The shifted Round-94 transport citation plant exits 1 with
+`SYMBOL-NOT-AT-LINE`; its artifact SHA-256 is
+`e80da7a270926c1eb12006e8445b6fa26a703aea389065fffa435de5b3f0d3b0`.
+
+The final focused stage, live-observer, phase-3, year-member, year-owner,
+time-level, TKE-carry, and citation suite passed **168 tests in 75.79 s**; log
+SHA-256 is
+`66c7ecb6f8e4382150bb11154a6f6d699d478a73493795615ce2cd2c0ec9513a`.
+The known unrelated `test_rk3_ws_differs_from_rk3_and_is_finite` red test was
+not selected.
 
 ## OPEN for round 96
 
