@@ -1450,6 +1450,7 @@ def build_tripole_vmix_config(tripole_vmix: str, iwm=None, tke_eice=None,
 
 
 def build_tripole(nlev: int, H_max: float, mesh_path: str,
+                  nemo_domain_cfg: str | None = None,
                   woa_init: bool = False, woa_t=None, woa_s=None, n_gpus: int = 1,
                   pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None, A_h_eq_sigma_deg=None,
                   ke_gradient_scheme=None, partial_cell=False,
@@ -1868,7 +1869,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
                     "not reproduce NEMO gdept on a stretched grid.")
         model = LatLonCGridOceanModel(grid, z_coord, config)
         print(f"[setup] tripole config override: {_ovr}")
-    land_mask, H_bathy = read_mesh_mask_bathy(mesh_path)
+    land_mask, H_bathy = read_mesh_mask_bathy(mesh_path, nemo_domain_cfg=nemo_domain_cfg)
     if flat_bottom:
         H_bathy = np.where(land_mask > 0.5, H_max, 0.0)
         print("[setup] FLAT BOTTOM (topography removed -- PGF-over-topo control)")
@@ -1973,6 +1974,7 @@ def build_tripole(nlev: int, H_max: float, mesh_path: str,
 
 
 def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
+                       nemo_domain_cfg: str | None = None,
                        n_lat: int = 180, n_lon: int = 360,
                        woa_init: bool = False, woa_t=None, woa_s=None,
                        pgf_scheme=None, A_h=None, B_h=None, K_bih=None, flat_bottom=False, A_h_eq_boost=None, A_h_eq_sigma_deg=None,
@@ -2160,7 +2162,7 @@ def build_latlon_bathy(nlev: int, H_max: float, mesh_path: str,
         model = LatLonCGridOceanModel(grid, z_coord, config)
         print(f"[setup] latlon zdfddm ENABLED "
               f"(rn_avts={ddm.rn_avts:g} rn_hsbfr={ddm.rn_hsbfr:g})")
-    e_mask, e_H = read_mesh_mask_bathy(mesh_path)
+    e_mask, e_H = read_mesh_mask_bathy(mesh_path, nemo_domain_cfg=nemo_domain_cfg)
     ds = xr.open_dataset(mesh_path)
     src_lat = _squeeze2d(ds["gphit"].values)
     src_lon = _squeeze2d(ds["glamt"].values)
@@ -2306,6 +2308,7 @@ def _regrid_curv_to_points(field2d, src_lat_deg, src_lon_deg, ocean_mask,
 
 
 def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
+                       nemo_domain_cfg: str | None = None,
                        woa_init: bool = False, woa_t=None, woa_s=None,
                        flat_bottom: bool = False, A_h=None, hyperdiff_coeff=None,
                        div_damp_2=None, div_damp_4=None, baroclinic_rk3=None,
@@ -2405,7 +2408,7 @@ def build_cubed_sphere(nlev: int, H_max: float, mesh_path: str, n: int = 48,
     # model so partial cells can fold H_bathy into the vertical coordinate that
     # the model stores and steps with.
     import xarray as xr
-    e_mask, e_H = read_mesh_mask_bathy(mesh_path)
+    e_mask, e_H = read_mesh_mask_bathy(mesh_path, nemo_domain_cfg=nemo_domain_cfg)
     ds = xr.open_dataset(mesh_path)
     src_lat = _squeeze2d(ds["gphit"].values)
     src_lon = _squeeze2d(ds["glamt"].values)
@@ -3160,6 +3163,7 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
 
 
 def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
+                     nemo_domain_cfg: str | None = None,
                      lloyd_iterations: int = 20, woa_init: bool = False,
                      woa_t=None, woa_s=None, flat_bottom: bool = False,
                      A_h=None, B_h=None, K_bih=None, C_smag_lap=None,
@@ -3286,7 +3290,7 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
     # NEMO eORCA1 bathy/mask -> Voronoi cell centres (point-target IDW, the same
     # faithful geometry tripole/latlon/cube use).
     import xarray as xr
-    e_mask, e_H = read_mesh_mask_bathy(mesh_path)
+    e_mask, e_H = read_mesh_mask_bathy(mesh_path, nemo_domain_cfg=nemo_domain_cfg)
     # ORCA 2-pt cyclic-overlap fill of the eORCA source mask/bathy BEFORE the
     # Voronoi regrid + NN land/sea lookup.  The eORCA mask halo columns are
     # INCONSISTENT with their interior partners (verified: |col0 - col[nx-2]| = 1.0
@@ -5997,6 +6001,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "of the default tanh 20-level stretch. Overrides --nlev / "
                         "--H-max to the NEMO column (better-resolved thermocline "
                         "+ MLD, directly comparable to NEMO).")
+    p.add_argument("--nemo-domain-mask", action="store_true",
+                   help="Set to LAND every mesh cell the oracle runs dry "
+                        "(domain_cfg top_level == 0): on eORCA1 the Great "
+                        "Lakes, the Caspian Sea and Lake Victoria (207 "
+                        "cells) that mesh_mask.nc keeps wet. Applies to "
+                        "every grid built from the NEMO mesh (tripole, "
+                        "mpas, latlon_bathy, cubed_sphere); not fesom.")
+    p.add_argument("--nemo-domain-cfg", type=str, default=None,
+                   help="domain_cfg.nc for --nemo-domain-mask (default: the "
+                        "ORCA1 domain_cfg).")
     p.add_argument("--nemo-vertical-file", type=str, default=None,
                    help="NetCDF with e3t_1d for --nemo-vertical (default: the "
                         "ORCA1 domain_cfg).")
@@ -7843,9 +7857,17 @@ def main() -> int:
     if args.freeze_scheme != "constant":
         from legoesm.ocean.eos import FreezingPointConfig
         _freezing_ovr = FreezingPointConfig(scheme=args.freeze_scheme)
+    # --nemo-domain-mask: match the wet domain to the oracle's domain_cfg
+    # (mask_to_nemo_domain). FESOM builds from its own mesh and is unaffected.
+    _nemo_domain_cfg = (args.nemo_domain_cfg or _NEMO_DOMAIN_CFG) \
+        if args.nemo_domain_mask else None
+    if args.nemo_domain_mask and args.grid == "fesom":
+        print("[setup] --nemo-domain-mask has no effect on --grid fesom: the "
+              "FESOM node set is fixed by its mesh directory")
     if args.grid == "tripole":
         grid, z_coord, model, state, H_bathy = build_tripole(
             args.nlev, args.H_max, args.mesh,
+            nemo_domain_cfg=_nemo_domain_cfg,
             woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s,
             n_gpus=args.n_gpus,
             pgf_scheme=args.pgf_scheme, A_h=args.A_h, B_h=args.B_h, K_bih=args.K_bih,
@@ -7926,6 +7948,7 @@ def main() -> int:
     elif args.grid == "cubed_sphere":
         grid, z_coord, model, state, H_bathy = build_cubed_sphere(
             args.nlev, args.H_max, args.mesh, n=args.cube_n,
+            nemo_domain_cfg=_nemo_domain_cfg,
             woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s,
             flat_bottom=args.flat_bottom,
             A_h=args.cube_Ah, hyperdiff_coeff=args.cube_hyperdiff,
@@ -7956,6 +7979,7 @@ def main() -> int:
                 "threads the iwm config; the KPP override does not).")
         grid, z_coord, model, state, H_bathy = build_mpas_ocean(
             args.nlev, args.H_max, args.mesh,
+            nemo_domain_cfg=_nemo_domain_cfg,
             level=args.mpas_level, lloyd_iterations=args.mpas_lloyd,
             woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s,
             flat_bottom=args.flat_bottom, partial_cell=args.partial_cell,
@@ -8068,6 +8092,7 @@ def main() -> int:
                 f"Choose --latlon-res with n_lat % {args.n_gpus} == 0.")
         grid, z_coord, model, state, H_bathy = build_latlon_bathy(
             args.nlev, args.H_max, args.mesh, n_lat=_nlat, n_lon=_nlon,
+            nemo_domain_cfg=_nemo_domain_cfg,
             woa_init=args.woa_init, woa_t=args.woa_t, woa_s=args.woa_s,
             pgf_scheme=args.pgf_scheme, A_h=args.A_h, B_h=args.B_h, K_bih=args.K_bih,
             flat_bottom=args.flat_bottom, A_h_eq_boost=args.A_h_eq_boost,
@@ -8944,7 +8969,7 @@ def main() -> int:
         # codex r5 LOW: these were still hashed as RAW text, so an equivalent
         # relative or symlinked spelling false-aborted a valid chained leg.
         "nemo_vertical_file", "isf_forcing_file", "iwm_forcing_file",
-        "sss_restore_file",
+        "sss_restore_file", "nemo_domain_cfg",
         # nargs=2: ONE dest holding two paths, normalised element-wise below.
         "nemo_monthly_init",
     })
