@@ -25,6 +25,11 @@ import sys
 import numpy as np
 
 
+# Fortran run_hydro_1step_term_gfs, tiles 1 and 2 (front-free edges):
+# max |Cl + 2 Cl2 - qcly| / qcly within 3 cells of the tile edge.
+ORACLE_EDGE_NONCONSTANCY = 1.818e-4
+
+
 def plateau_mask(q, value, rtol=1e-12):
     return np.abs(np.asarray(q) - value) <= rtol * value
 
@@ -97,6 +102,32 @@ def main(argv=None) -> int:
                 print("PASSENGERS ARE NOT INDEPENDENT -- refusing")
                 return 2
         results[name] = float(d.max())
+    # CONSTANCY (GLM 2026-09-14): a uniform tracer must come back uniform
+    # under any consistent flux-form transport + remap -- an index or
+    # deposit bug shows up here with no envelope to hide under. Uses the
+    # cl2 slot at the qcly value, so it rides the same code path.
+    const = dict(ic)
+    const["q"] = list(ic["q"])
+    qc = np.zeros_like(np.asarray(ic["q"][2]))
+    qc[:, cs, cs, :] = TERM_QCLY
+    const["q"][2] = jnp.asarray(qc)
+    outc = np.asarray(model.step(const, args.dt)["q"][2])[:, cs, cs, :]
+    dev = np.abs(outc - TERM_QCLY) / TERM_QCLY
+    # MEASURED 2026-09-14 (job 9769402 + oracle restarts): the deviation
+    # lives ONLY within 3 cells of a face edge (5640 of 69120 cells at
+    # C48), interior at 6.353e-16 -- and the Fortran oracle's own
+    # Cl + 2 Cl2 breaks at the edges of its front-free tiles by the SAME
+    # 1.818e-4 with the SAME 6.353e-16 interior. The duo-grid edge
+    # treatment does not preserve a constant tracer in either code; the
+    # port reproduces the oracle's edge figure to four digits. So the
+    # interior is gated at rounding and the edge is pinned to the oracle.
+    dev_int = float(dev[:, 3:-3, 3:-3, :].max())
+    dev_edge = float(dev.max())
+    print(f"constancy: uniform tracer after one step -- interior deviation "
+          f"{dev_int:.3e} (rounding ~1e-15); face-edge deviation {dev_edge:.3e} "
+          f"(oracle's own edge non-constancy {ORACLE_EDGE_NONCONSTANCY:.3e})")
+    results["constancy_interior"] = dev_int
+    results["constancy_edge"] = dev_edge
     if args.assert_envelope:
         import importlib.util
         import os
@@ -109,10 +140,16 @@ def main(argv=None) -> int:
         env = parity.CL2_ULP_ENVELOPE_ABS
         ok_cl2 = 0.5 * env <= results["cl2"] <= 1.2 * env
         ok_cl = results["cl"] <= 10 * ulp        # cl was nudged by ulp(qcly)
+        ok_const = (results["constancy_interior"] <= 1e-12
+                    and abs(results["constancy_edge"] - ORACLE_EDGE_NONCONSTANCY)
+                    <= 1e-2 * ORACLE_EDGE_NONCONSTANCY)
         print(f"envelope check: cl2 {results['cl2']:.3e} vs pinned {env:.3e} "
               f"-> {'OK' if ok_cl2 else 'DRIFTED'}; cl {results['cl'] / ulp:.1f} ulp "
-              f"-> {'OK' if ok_cl else 'NOT SMOOTH'}")
-        return 0 if (ok_cl2 and ok_cl) else 1
+              f"-> {'OK' if ok_cl else 'NOT SMOOTH'}; constancy interior "
+              f"{results['constancy_interior']:.1e}, edge {results['constancy_edge']:.4e} "
+              f"vs oracle {ORACLE_EDGE_NONCONSTANCY:.4e} -> "
+              f"{'OK' if ok_const else 'VIOLATED'}")
+        return 0 if (ok_cl2 and ok_cl and ok_const) else 1
     return 0
 
 
