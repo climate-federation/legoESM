@@ -12,7 +12,10 @@ from pathlib import Path
 import numpy as np
 
 DIMS = (36, 26, 31)
-LEVELS = {1: (3, 3, 1, 1), 2: (3, 1, 2, 2)}
+LEVELS = {
+    1: {1: (1, 1, 3, 3), 2: (1, 3, 2, 2)},
+    2: {1: (3, 3, 1, 1), 2: (3, 1, 2, 2)},
+}
 
 
 def require(condition: bool, message: str) -> None:
@@ -39,7 +42,7 @@ def read_record(
     if truncate:
         values = values[:-1]
     require(expected_kt in (1, 2), f"{path}: unsupported kt {expected_kt}")
-    expected = (1, expected_kt, stage, *LEVELS[stage], *DIMS, 64)
+    expected = (1, expected_kt, stage, *LEVELS[expected_kt][stage], *DIMS, 64)
     require(magic == "NEMO_L2_RKTRA_1", f"{path}: bad magic {magic!r}")
     require(header == expected, f"{path}: header {header} != {expected}")
     nx, ny, nz = DIMS

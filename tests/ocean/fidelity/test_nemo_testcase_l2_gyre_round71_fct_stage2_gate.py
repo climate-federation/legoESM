@@ -22,7 +22,7 @@ def _record(
 ) -> None:
     nx, ny, nz = GATE.DIMS
     n3, n2 = nx * ny * nz, nx * ny
-    levels = GATE.LEVELS[stage]
+    levels = GATE.LEVELS.get(kt, GATE.LEVELS[2])[stage]
     values = np.arange(15 * n3 + 3 * n2, dtype=np.float64)
     with path.open("wb") as handle:
         magic = "BAD_MAGIC" if bad_magic else "NEMO_L2_RKTRA_1"
