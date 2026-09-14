@@ -1,0 +1,25 @@
+--- stprk3_stg.F90.r64
++++ stprk3_stg.F90
+@@ -22,5 +22,7 @@
+    USE l2_r46_stage, ONLY : r46_begin, r46_rhs, r46_ww, r46_state, r46_finish
+                        ! round-46 WRITE-only kt1/kt2 stage recorder
++   USE l2_r90_baro, ONLY : r90_baro_begin, r90_baro_finish
++                       ! round-90 WRITE-only kt2 stage-1 correction-site record
+    USE l2_r63_krhs, ONLY : r63_begin, r63_snapshot
+                        ! round-63 WRITE-only kt2 tracer accumulator recorder
+    USE eosbn2, ONLY : eos_l2_dump_next ! config-local WRITE-only lane-2 instrument
+@@ -769,6 +771,7 @@
+             zub(ji,jj) = uu_b(ji,jj,Kaa) - SUM( e3u_0(ji,jj,:)*uu(ji,jj,:,Kaa) ) * r1_hu_0(ji,jj)
+             zvb(ji,jj) = vv_b(ji,jj,Kaa) - SUM( e3v_0(ji,jj,:)*vv(ji,jj,:,Kaa) ) * r1_hv_0(ji,jj)
+          END_2D
++         CALL r90_baro_begin( kstp, kstg, Kaa, uu, vv, zub, zvb )
+          ! Phase-3 L2 WRITE-only stage-2 operand record.  The first payload
+          ! ends at the raw Kaa state and the diagnosed column correction; the
+          ! second payload below records the state after the ordinary source
+@@ -786,5 +789,6 @@
+             vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)
+          END_3D
++         CALL r90_baro_finish( kstp, kstg, Kaa, uu, vv )
+          CALL r46_state( 'post_baro', uu, vv, Kaa )
+          CALL r46_finish( kstp, kstg )
+          IF( lwp .AND. kstp == nit000 .AND. kstg == 2 ) THEN
