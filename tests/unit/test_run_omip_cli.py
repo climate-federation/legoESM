@@ -1015,3 +1015,9 @@ def test_spmd_device_count_off_and_single_controller():
     on = build_config_from_args(parse_args([
         "--grid", "tripole", "--enable-latlon-spmd", "--spmd-n-devices", "3"]))
     assert _spmd_device_count(on) == 3
+
+
+def test_frazil_flag_round_trips_and_defaults_off():
+    assert parse_args(["--grid", "mpas"]).frazil is False
+    assert parse_args(["--grid", "mpas", "--frazil"]).frazil is True
+    assert parse_args(["--grid", "mpas", "--frazil", "--no-frazil"]).frazil is False

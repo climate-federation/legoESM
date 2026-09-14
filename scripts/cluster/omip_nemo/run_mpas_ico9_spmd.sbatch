@@ -70,7 +70,7 @@ srun --ntasks=$NGPU --ntasks-per-node=4 --cpus-per-task=16 --gpus-per-node=4 \
     --nlev 47 --dt "$DT" --days "$DAYS" --precision fp64 \
     --bathymetry "$F/ETOPO_2022_v1_60s_N90W180_surface.nc" \
     --forcing-mode jra55_do_tropical --jra55-cache "$F/jra55_do_fesom_1958_1958_1deg_noleap.zarr" \
-    --jra55-sea-ice --ice-dynamics none --ice-categories 1 --no-gpu-interp \
+    --jra55-sea-ice --ice-dynamics none --ice-categories 1 --frazil --no-gpu-interp \
     --woa-init --woa-t "$IC" --woa-s "$IC" \
     --vertical-mixing-scheme "$VMIX" --diag-every "$DIAG" \
     --enable-mpas-spmd --multicontroller \
