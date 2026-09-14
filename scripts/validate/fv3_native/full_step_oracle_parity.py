@@ -728,10 +728,23 @@ def score_pair(port, orc) -> tuple:
             su, sv = DIHEDRAL_SIGNS[nm]
             r_u = rel(su * fu, pu_o, ws)
             r_v = rel(sv * fv, pv_o, ws)
-            r = max(r_u, r_v, r_pt, r_dp)
+            per = {"u": r_u, "v": r_v, "pt": r_pt, "delp": r_dp}
+            # Any further cell-centred scalar present on BOTH sides (a
+            # longitude-dependent tracer such as the terminator cl) is
+            # scored with factor +1 like pt/delp. On the faces without the
+            # baroclinic bump every prognostic field is zonally symmetric,
+            # so u/v/pt/delp cannot tell a face from its zonal mirror and
+            # the search picks one at random -- measured 2026-09-14 on the
+            # terminator decks: faces 0-2 matched cl at 7e-12, faces 3 and
+            # 5 at rel 1.0, face 4's cl2 at 0.97, with u/v/pt/delp all at
+            # the 1e-14 floor. A field that breaks the symmetry pins it.
+            for extra in sorted((set(port) & set(orc)) - set(per)
+                                - {"w", "delz"}):
+                per[extra] = rel(f(port[extra]), oracle_ij(orc[extra],
+                                                           transposed))
+            r = max(per.values())
             if r < best[0]:
-                best = (r, transposed, nm, su, sv,
-                        {"u": r_u, "v": r_v, "pt": r_pt, "delp": r_dp})
+                best = (r, transposed, nm, su, sv, per)
     return best
 
 
@@ -1550,6 +1563,19 @@ def main(argv=None):
         zvir=(FV3_RVGAS / FV3_RDGAS - 1.0)
         if (args.moist or args.physics == "held_suarez") else 0.0)
     p_ic = port_window(state, ctx)
+    q = p_tr_ic = None
+    if args.tracers:
+        q = build_port_tracer_ic(sphum6, ctx=ctx, second=args.tracer2)
+        p_tr_ic = tracer_window(q, ctx)
+        for nm in ("cl", "cl2"):
+            if nm in ADVECTED_TRACERS:
+                # a longitude-dependent scalar in the map derivation: see
+                # score_pair -- without it the map is ambiguous up to a
+                # zonal mirror on the bump-free faces
+                for pf in range(6):
+                    p_ic[pf][nm] = p_tr_ic[pf][nm]
+                for ot in range(6):
+                    orc_ic[ot][nm] = orc_tr_ic[ot][nm]
     (cost, meta, perm, worst,
      per_field, wind_only) = derive_face_map(p_ic, orc_ic)
 
@@ -1582,8 +1608,7 @@ def main(argv=None):
                 if min(cost[pf, ot], wind_only[pf, ot]) > 1e-6:
                     continue
                 print(f"  face {pf+1} -> tile {ot+1}: " +
-                      "  ".join(f"{k}={d[k]:9.2e}" for k in
-                               ("u", "v", "pt", "delp")))
+                      "  ".join(f"{k}={d[k]:9.2e}" for k in d))
         print("\nport IC field ranges (compute window):")
         for f in ("u", "v", "pt", "delp"):
             print(f"  {f:5s} " + "  ".join(
@@ -1625,15 +1650,12 @@ def main(argv=None):
           f"{IC_CONTROL_MAX_REL:.0e}; map matches the frozen 2026-08-07 "
           f"bijection). The map below is the one applied to the step.")
 
-    q = None
-    p_tr_ic = None
     if args.tracers:
         # TRACER instrument control, under the SAME derived map: the
         # port's analytic sphum against the zerostep fv_tracer.res.
         # sphum is analytic in (lat, ak, bk) with no quad step beyond
         # the agrid latitudes, so the quad-geometry floor applies.
-        q = build_port_tracer_ic(sphum6, ctx=ctx, second=args.tracer2)
-        p_tr_ic = tracer_window(q, ctx)
+        # (q / p_tr_ic were built above so cl could constrain the map.)
         worst_tr_ic = 0.0
         for pf in range(6):
             ot = perm[pf]
