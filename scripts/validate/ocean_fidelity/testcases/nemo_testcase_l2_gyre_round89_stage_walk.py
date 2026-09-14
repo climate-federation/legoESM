@@ -102,7 +102,13 @@ def measure(args) -> dict[str, object]:
     for stage in (1, 2, 3):
         arrays = records[stage]["arrays"]
         rhs_name = "pre_zdf_rhs" if stage == 3 else "after_adv"
-        rdt = np.float64(1.0 / arrays["r1_Dt"])
+        # The Round-46 callback stores the module reciprocal before the
+        # stage-1 SELECT CASE resets it, so that payload is stale only for
+        # stage 1.  Reconstruct rDt from the compiled stage clock at
+        # stprk3_stg.f90:140-148,196-202,240-246 for every stage instead of
+        # silently mixing clock sources.
+        divisor = {1: 3.0, 2: 2.0, 3: 1.0}[stage]
+        rdt = np.float64(card.dt_s / divisor)
         for face in ("u", "v"):
             before = _reference_face(arrays[f"{face}_Kbb"])
             rhs = _reference_face(arrays[f"{rhs_name}_{face}"])
@@ -169,7 +175,7 @@ def measure(args) -> dict[str, object]:
         card, seeded, freshwater, surface,
         _NEMOWSRK3TestHooks(expose_pre_implicit_state=True))
     arrays = records[3]["arrays"]
-    rdt = np.float64(1.0 / arrays["r1_Dt"])
+    rdt = np.float64(card.dt_s)
     for face in ("u", "v"):
         active = masks[face]
         expected = rk3_stage_velocity_update(
