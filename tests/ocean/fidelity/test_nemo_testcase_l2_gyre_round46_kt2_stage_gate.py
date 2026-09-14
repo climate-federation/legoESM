@@ -192,3 +192,26 @@ def test_qco_face_layout_drops_redundant_edge_and_singleton_level():
     v = np.zeros((NY - 3, NX - 4, 1))
     assert u[:, 1:, 0].shape == (NY - 4, NX - 4)
     assert v[1:, :, 0].shape == (NY - 4, NX - 4)
+
+
+def test_missing_model_context_is_fail_closed_not_an_exception():
+    class Context:
+        tke = None
+        tke_avm = None
+        tke_avt = None
+        tke_dissl = None
+        tke_avm_surface = None
+
+    arrays = {
+        "tke_en": np.zeros((NY - 4, NX - 4, NZ)),
+        "tke_avm_k": np.zeros((NY, NX, NZ)),
+        "tke_avt_k": np.zeros((NY - 4, NX - 4, NZ)),
+        "tke_dissl": np.zeros((NY - 4, NX - 4, NZ)),
+        "wmask": np.ones((NY, NX, NZ)),
+    }
+    masks = {"ssh": np.ones((NY - 4, NX - 4), dtype=bool)}
+    rows = gate._closure_rows(
+        Context(), arrays, masks, 1, 1, "LEGO_CHAINED", "output")
+    assert len(rows) == 5
+    assert {row["classification"] for row in rows} == {"UNMEASURED_WITH_SPEC"}
+    assert all(row["entry_mode"] == "LEGO_CHAINED" for row in rows)

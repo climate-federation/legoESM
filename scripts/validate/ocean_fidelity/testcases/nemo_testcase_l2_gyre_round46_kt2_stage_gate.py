@@ -924,12 +924,12 @@ def _history_reference(memory_root: Path, btstep_root: Path, kt: int):
 def _closure_rows(context, arrays, masks, kt: int, stage: int, mode: str,
                   boundary: str) -> list[dict]:
     """Score the closure fields computed once and consumed by every stage."""
-    candidates = {
-        "tke_en": np.asarray(context.tke.data),
-        "tke_avm_k": np.asarray(context.tke_avm.data),
-        "tke_avt_k": np.asarray(context.tke_avt.data),
-        "tke_dissl": np.asarray(context.tke_dissl.data),
-        "tke_avm_surface": np.asarray(context.tke_avm_surface.data),
+    candidate_fields = {
+        "tke_en": context.tke,
+        "tke_avm_k": context.tke_avm,
+        "tke_avt_k": context.tke_avt,
+        "tke_dissl": context.tke_dissl,
+        "tke_avm_surface": context.tke_avm_surface,
     }
     references = {
         "tke_en": np.asarray(arrays["tke_en"])[..., 1:30],
@@ -939,13 +939,21 @@ def _closure_rows(context, arrays, masks, kt: int, stage: int, mode: str,
         "tke_avm_surface": _owned3(arrays["tke_avm_k"], 31)[..., 0],
     }
     wet_w = _owned3(arrays["wmask"], 31)[..., 1:30] > 0.5
-    field_masks = {name: wet_w for name in candidates}
+    field_masks = {name: wet_w for name in candidate_fields}
     field_masks["tke_avm_surface"] = masks["ssh"]
     rows = []
-    for field in candidates:
+    for field, candidate_field in candidate_fields.items():
+        if candidate_field is None:
+            row = _unmeasured(
+                kt, stage, field,
+                "model stage-entry context has no explicit carried field")
+            row.update({"entry_mode": mode, "boundary": boundary})
+            rows.append(row)
+            continue
+        candidate = np.asarray(candidate_field.data)
         row = _classification(score(
             f"GYRE-zco.kt{kt}.s{stage}.{boundary}.{field}",
-            references[field], candidates[field], field_masks[field]))
+            references[field], candidate, field_masks[field]))
         row.update({"kt": kt, "stage": stage, "field": field,
                     "entry_mode": mode, "boundary": boundary})
         rows.append(row)
