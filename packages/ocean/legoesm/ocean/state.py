@@ -533,6 +533,10 @@ class LatLonCGridOceanState(NamedTuple):
         the current whole-step ``Kbb`` values and are populated only by cards
         selecting the NEMO WS-RK3 identity.  ``None`` on every other recipe
         means the pair contributes no array leaves to its pytree.
+    eta_rk3_kaa : Field or None
+        NEMO WS-RK3's pre-solve ``ssh(Kaa)`` scratch.  This is distinct from
+        the prognostic ``eta``/``ssh(Kbb)`` and is consumed by the next
+        whole-step stage-one WZV before the external-mode solve.
     T_som : Field or None
         SOM (Prather 1986) moments for temperature. Shape (n_lat, n_lon, nlev, 9).
         Order: [sx, sy, sz, sxx, syy, szz, sxy, sxz, syz].
@@ -559,6 +563,9 @@ class LatLonCGridOceanState(NamedTuple):
     # default so non-NEMO recipes gain no array pytree leaf.
     uu_b: object = None
     vv_b: object = None
+    # restart.F90 writes this slot as ``ssha`` and stp2d.F90 consumes it before
+    # dyn_spg_ts overwrites Kaa.  It is present only on NEMO WS-RK3 states.
+    eta_rk3_kaa: object = None
     T_som: object = None
     S_som: object = None
     T_flux_div_prev: object = None  # Previous advection flux divergence for T (AB2 only)
