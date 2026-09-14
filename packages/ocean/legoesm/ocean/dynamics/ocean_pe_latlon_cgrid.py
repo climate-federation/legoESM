@@ -1653,8 +1653,11 @@ def nemo_qco_wzv_operands(
         # sensitive to those last bits through the vertical recurrence.
         safe_e3t = jnp.where(tmask[..., jk] > 0.5, live_t[..., jk], 1.0)
         hdiv = jax.lax.optimization_barrier(transport_div / safe_e3t)
-        level = jax.lax.optimization_barrier(
-            live_t[..., jk] * hdiv) * tmask[..., jk]
+        # divhor.F90:152-154 stores pe3divUh as a separate source
+        # statement after the hdiv division. ``optimization_barrier`` is
+        # stripped from optimized HLO; use the surviving IEEE identity so
+        # the multiply cannot contract back through that division.
+        level = nemo_source_round(live_t[..., jk] * hdiv) * tmask[..., jk]
         flux_levels.append(level)
         barotropic_div = jax.lax.optimization_barrier(barotropic_div + level)
     flux_div = jnp.stack(flux_levels, axis=-1)
@@ -1662,30 +1665,34 @@ def nemo_qco_wzv_operands(
     fw = (jnp.zeros_like(eta_now) if freshwater_eta_tendency is None
           else jnp.asarray(freshwater_eta_tendency, dtype=eta_now.dtype))
     if eta_after_override is None:
-        eta_after = jax.lax.optimization_barrier(
-            eta_before - jax.lax.optimization_barrier(dt * barotropic_div))
+        # sshwzv.F90:126-137 advances pssh(Kaa) from pssh(Kbb).  At the
+        # stage-1 stp2d call Kbb is the live ``eta_now`` argument; the older
+        # carried eta_before belongs to leapfrog history and is not this
+        # RK3 scratch slot.
+        eta_after = nemo_source_round(
+            eta_now - nemo_source_round(dt * barotropic_div))
         eta_after = jax.lax.optimization_barrier(
             eta_after + jax.lax.optimization_barrier(dt * fw)) * tmask[..., 0]
     else:
         eta_after = jax.lax.optimization_barrier(
             jnp.asarray(eta_after_override, dtype=eta_now.dtype)) * tmask[..., 0]
-    r3_after = jax.lax.optimization_barrier(eta_after * r1_h0)
-    r3_before = jax.lax.optimization_barrier(eta_before * r1_h0)
-    r3_delta = jax.lax.optimization_barrier(r3_after - r3_before)
-    r1_dt = jax.lax.optimization_barrier(
+    r3_after = nemo_source_round(eta_after * r1_h0)
+    r3_before = nemo_source_round(eta_now * r1_h0)
+    r3_delta = nemo_source_round(r3_after - r3_before)
+    r1_dt = nemo_source_round(
         jnp.asarray(1.0, dtype=eta_now.dtype) / dt)
-    stretch_rate = jax.lax.optimization_barrier(
-        (r1_dt * e3t0) * r3_delta[..., None])
+    stretch_rate = nemo_source_round(
+        nemo_source_round(r1_dt * e3t0) * r3_delta[..., None])
 
     # sshwzv.F90 bottom-up left recurrence.  A static Python loop preserves
     # source ordering under JIT and remains differentiable.
     carry = jnp.zeros_like(eta_now)
     levels = [None] * nlev
     for jk in range(nlev - 1, -1, -1):
-        bracket = jax.lax.optimization_barrier(
+        bracket = nemo_source_round(
             flux_div[..., jk] + stretch_rate[..., jk])
-        carry = jax.lax.optimization_barrier(
-            carry - bracket * tmask[..., jk])
+        carry = nemo_source_round(
+            carry - nemo_source_round(bracket * tmask[..., jk]))
         levels[jk] = carry
     ww = jnp.stack(levels + [jnp.zeros_like(carry)], axis=-1)
     return ww, live_u, live_v

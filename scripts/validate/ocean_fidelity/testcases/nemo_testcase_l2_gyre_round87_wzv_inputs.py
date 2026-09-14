@@ -25,6 +25,7 @@ import nemo_testcase_l2_gyre_round83_slow_forcing_walk as round83  # noqa: E402
 import nemo_testcase_l2_gyre_round84_rhs_walk as round84  # noqa: E402
 import nemo_testcase_l2_gyre_round86_zad_operands as round86  # noqa: E402
 from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy  # noqa: E402
+from legoesm.core.source_rounding import nemo_source_round  # noqa: E402
 from legoesm.ocean.dynamics import ocean_pe_latlon_cgrid as pe  # noqa: E402
 from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
 from legoesm.ocean.dynamics.latlon_cgrid_operators import compute_face_masks_3d  # noqa: E402
@@ -60,7 +61,7 @@ def _source_trace(
     reciprocal_area_t, thickness_t, e3t_0, r3_kbb, r3_kaa, r1_dt, tmask,
 ):
     """Literal array-valued trace of divhor:123-154 + sshwzv:293-300."""
-    sr = jax.lax.optimization_barrier
+    sr = nemo_source_round
     metric_thickness_u = sr(metric_u[..., None] * thickness_u)
     metric_thickness_v = sr(metric_v[..., None] * thickness_v)
     flux_u = sr(metric_thickness_u * velocity_u)
@@ -82,7 +83,7 @@ def _source_trace(
     for jk in range(velocity_u.shape[-1] - 1, -1, -1):
         incoming.append(carry)
         bracket = sr(e3div[..., jk] + stretch[..., jk])
-        carry = sr(carry - bracket * tmask[..., jk])
+        carry = sr(carry - sr(bracket * tmask[..., jk]))
         brackets[jk] = bracket
         outgoing[jk] = carry
     incoming = list(reversed(incoming))
@@ -138,8 +139,8 @@ def _live_trace(card, seeded, trace):
     for jk in range(nlev):
         barotropic_div = jax.lax.optimization_barrier(
             barotropic_div + provisional["e3div"][..., jk])
-    eta_kaa = jax.lax.optimization_barrier(
-        eta_before - jax.lax.optimization_barrier(card.dt_s * barotropic_div))
+    eta_kaa = nemo_source_round(
+        eta - nemo_source_round(card.dt_s * barotropic_div))
     eta_kaa = eta_kaa * tmask[..., 0]
     r3_kaa = jax.lax.optimization_barrier(eta_kaa * r1_h0)
     result = _source_trace(

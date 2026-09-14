@@ -6385,19 +6385,11 @@ class LatLonCGridOceanModel:
                     stage_face_thickness=_face_thickness_kbb, stage_index=1)
                 _du1_rhs = _du1_rhs + (_p0_with_zub[0] - _p0_no_zub[0])
                 _dv1_rhs = _dv1_rhs + (_p0_with_zub[1] - _p0_no_zub[1])
-            # stp2d materializes stage-1 WZV before dyn_zad. The external
-            # solve makes that stage transport available only at this point,
-            # so replace the ZAD association without changing earlier terms.
-            _p0_with_zad = _mom_pert_ws(
-                u0, v0, False, None,
-                stage_face_thickness=_face_thickness_kbb,
-                stage_zad_operands=(_g0[2], _g0[4], _g0[5]),
-                stage_index=1)
-            _p0_without_zad = _mom_pert_ws(
-                u0, v0, False, None,
-                stage_face_thickness=_face_thickness_kbb, stage_index=1)
-            _du1_rhs = _du1_rhs + (_p0_with_zad[0] - _p0_without_zad[0])
-            _dv1_rhs = _dv1_rhs + (_p0_with_zad[1] - _p0_without_zad[1])
+            # stp2d.F90:155-175 materializes the stage-1 velocity-form WZV
+            # and consumes it in ZAD before dyn_spg_ts is called at :307-308.
+            # The later stage transport _g0 feeds tracer advection; the
+            # executing vector branch explicitly skips a second stage-1 WZV
+            # call (stprk3_stg.F90:331-339), so it must not replace this ZAD.
             # Stage 1: Kmm = Kbb, so the RHS carries (1 + r3u(Kbb)).
             _u1_rhs = _du1_rhs if _vert0 is None else _du1_rhs + _vert0[0]
             _v1_rhs = _dv1_rhs if _vert0 is None else _dv1_rhs + _vert0[1]
