@@ -270,6 +270,11 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfsh2.f90"),
     "GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90"),
+    # Round 95 consumes the operator-run Round-94 stage-closure record and
+    # therefore binds the transport boundary to that record's compiled card.
+    "GYRE_OMIP_L2_P3_SM_R94STGCLS/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R94STGCLS/BLD/ppsrc/nemo"
+        "/stprk3_stg.f90"),
     "round33_lock_zdf_matrix/namelist_cfg": (
         Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
              "round33_lock_zdf_matrix/namelist_cfg")),
@@ -1866,6 +1871,13 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/l2_r46_stage.f90:120-147': [
         "IF(ios /= 0) CALL ctl_stop('round46: cannot open stage record')",
         "CALL put2('r3v_Kaa         ',r3v(:,:,Kaa))", 28],
+    # --- round 95: complete the stage-program contract ---
+    'GYRE_OMIP_L2_P3_SM_R94STGCLS/BLD/ppsrc/nemo/stprk3_stg.f90:792-834': [
+        'CALL tra_adv_trp( kstp, kstg, nit000, Kbb, Kmm, Kaa, Krhs, zFu, zFv, zFw )',
+        "WRITE(numout,*) 'ROUND94_STAGE_CLOSURE_DUMP '", 43],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3.f90:200-226': [
+        'CALL stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )',
+        'ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)', 27],
 }
 
 
