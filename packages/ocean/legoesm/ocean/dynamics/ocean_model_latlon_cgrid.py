@@ -1924,22 +1924,13 @@ def _nemo_ws_rk3_tracer_pair_step(
     fd2_a, fd2_b, _, _ = _flux_pair(a2, b2, dt, 2, h_k_new)
     advection_content_a = h_k_old * tr_a - dt * fd2_a
     advection_content_b = h_k_old * tr_b - dt * fd2_b
-    # NEMO trazdf.f90:546-560 multiplies the COMPLETE accumulated Krhs by
-    # e3t(Kmm) and p2dt in one statement.  Keeping advection in content form
-    # while multiplying only the other sources by h(Kmm) is algebraically
-    # equivalent but not the compiled source association.
-    safe_h_rhs = jnp.maximum(h_one_half, 1.0e-10)
-    rhs_a = -fd2_a / safe_h_rhs + stage_source_rates[2][0]
-    rhs_b = -fd2_b / safe_h_rhs + stage_source_rates[2][1]
-    content_a = h_k_old * tr_a + dt * h_one_half * rhs_a
-    content_b = h_k_old * tr_b + dt * h_one_half * rhs_b
     if stage3_advection_content_override is not None:
         advection_content_a, advection_content_b = (
             stage3_advection_content_override)
-        content_a = (advection_content_a
-                     + dt * h_one_half * stage_source_rates[2][0])
-        content_b = (advection_content_b
-                     + dt * h_one_half * stage_source_rates[2][1])
+    content_a = (advection_content_a
+                 + dt * h_one_half * stage_source_rates[2][0])
+    content_b = (advection_content_b
+                 + dt * h_one_half * stage_source_rates[2][1])
     out_a = jnp.where(
         active_3d > 0.5,
         content_a / jnp.maximum(h_k_new, 1.0e-10), tr_a)
