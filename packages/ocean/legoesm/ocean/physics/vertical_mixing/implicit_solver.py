@@ -551,8 +551,15 @@ def nemo_tracer_tridiagonal(
         -jnp.asarray(dt, dtype=dtype) * K)
     e3w_safe = jnp.where(interface_wet > 0.0, e3w_now,
                          jnp.asarray(1.0, dtype=dtype))
-    coeff = (jax.lax.optimization_barrier(product / e3w_safe)
-             * interface_wet)
+    # Compiled NEMO assigns this complete quotient to zwi/zws before those
+    # arrays feed the diagonal and recurrences (trazdf.f90:474-476).  XLA CPU
+    # otherwise retains enough excess precision across the array expression
+    # to move 4,392 GYRE coefficients.  The signed-zero add forces the same
+    # fp64 materialization; its documented subnormal restriction is inert for
+    # these O(1e-4..1e4) coefficients.
+    coeff = (_round_the_multiply(
+        jax.lax.optimization_barrier(product / e3w_safe))
+        * interface_wet)
     lower = jnp.concatenate([zero, coeff], axis=-1)
     upper = jnp.concatenate([coeff, zero], axis=-1)
     coefficient_sum = jax.lax.optimization_barrier(lower + upper)

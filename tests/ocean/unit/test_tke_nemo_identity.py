@@ -31,6 +31,7 @@ from legoesm.ocean.physics.vertical_mixing.tke import (
     _nemo_literal_tke_solve,
     _prandtl_number,
     _solve_tke_backward_euler,
+    compute_K_from_tke,
     compute_mixing_lengths,
     tke_vertical_mixing,
 )
@@ -1735,6 +1736,42 @@ class TestNemoRiZriTranscription:
             jnp.asarray(rn2b), jnp.ones(2), jnp.asarray(p_avm), legacy,
             p_sh2_override=jnp.asarray(p_sh2)))
         np.testing.assert_array_equal(legacy_got, old_legacy_pr)
+
+    def test_avt_multiplies_stored_pdlr_without_reciprocal_round_trip(self):
+        """R56TKE zdftke:699-701 consumes ``pdlr*p_avt`` literally."""
+        rn2b = np.asarray([
+            np.float64.fromhex("0x1.04fa0afaa6d02p-14"),
+            np.float64.fromhex("0x1.ffc95566895cap-15"),
+        ])
+        p_avm = np.asarray([
+            np.float64.fromhex("0x1.95141a74aca4ap-4"),
+            np.float64.fromhex("0x1.7d1cb254e6652p-4"),
+        ])
+        p_sh2 = np.asarray([
+            np.float64.fromhex("0x1.693ab8013e477p-16"),
+            np.float64.fromhex("0x1.9c874ac1cebd0p-16"),
+        ])
+        raw_avt = np.asarray([0.037, 0.053], dtype=np.float64)
+        ri_cri = np.float64(2.0) / (
+            np.float64(2.0) + np.float64(0.7) / np.float64(0.1))
+        zri = rn2b * p_avm / (p_sh2 + np.float64(1.0e-20))
+        pdlr = np.maximum(np.float64(0.1), ri_cri / np.maximum(ri_cri, zri))
+        expected = pdlr * raw_avt
+        old_round_trip = raw_avt / (np.float64(1.0) / pdlr)
+        assert np.any(old_round_trip != expected)
+
+        cfg = TKEConfig(
+            c_k=1.0, kappa_convention="veros_sqrte", prandtl_mode="nemo_ri",
+            kappaM_min=0.0, kappaH_min=0.0, kappaM_max=float("inf"),
+            bshear_floor=1.0e-20, prandtl_ri_coeff=float(1.0 / ri_cri),
+            tke_n2_evaluation_stage="step_entry")
+        _, got = compute_K_from_tke(
+            jnp.ones(2), jnp.asarray(raw_avt), cfg,
+            N2=jnp.asarray(rn2b), shear_sq=jnp.ones(2),
+            N2_prandtl=jnp.asarray(rn2b),
+            p_sh2_override=lambda _: jnp.asarray(p_sh2),
+            prandtl_K_M=jnp.asarray(p_avm))
+        np.testing.assert_array_equal(np.asarray(got), expected)
 
     def test_matches_independent_loop_port_turbulent_column(self):
         rng = np.random.default_rng(42)

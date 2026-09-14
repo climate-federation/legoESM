@@ -339,9 +339,9 @@ def test_literal_raw_mxl_matches_hand_computed_source_order_and_red_control():
     rsmall = 0.5 * np.finfo(np.float64).eps
     raw = np.maximum(floor, np.sqrt((2.0 * np.asarray(e))
                                     / np.maximum(np.asarray(n2), rsmall)))
-    # With a huge dz allowance, the scan retains the raw physical interior;
-    # the final carried slot is NEMO's untouched jpk pad.
-    raw[..., -1] = floor
+    # With a huge dz allowance, the scan retains both raw physical rows;
+    # R56TKE zdftke:674-676 starts at jpkm1 and updates that row from the
+    # separately held jpk floor plus e3t(jpk).
     np.testing.assert_array_equal(np.asarray(lk).view(np.uint64),
                                   raw.view(np.uint64))
 
@@ -358,7 +358,7 @@ def test_literal_raw_mxl_matches_hand_computed_source_order_and_red_control():
             l_surface_anchor=jnp.asarray([floor]))
 
 
-def test_literal_mxl_ldown_keeps_jpk_terminal_seed_unmodified():
+def test_literal_mxl_ldown_updates_jpkm1_from_jpk_terminal_seed():
     e = jnp.asarray([[2.0, 3.0, 1.0e8]])
     n2 = jnp.full_like(e, 1.0e-12)
     dz_cell = jnp.asarray([[1.0, 2.0, 3.0, 4.0]])
@@ -368,14 +368,9 @@ def test_literal_mxl_ldown_keeps_jpk_terminal_seed_unmodified():
     lk, _ = tke_mod.compute_mixing_lengths(
         e, n2, jnp.ones_like(e), cfg, dz_cell=dz_cell,
         l_surface_anchor=jnp.asarray([floor]))
-    # The final carried slot is NEMO's untouched jpk pad, not another raw
-    # buoyancy-length row.  The old recurrence produced 4.01 here.
-    assert float(lk[0, -1]) == floor
-    legacy, _ = tke_mod.compute_mixing_lengths(
-        e, n2, jnp.ones_like(e),
-        cfg._replace(tke_mxl_raw_evaluation="factored"),
-        dz_cell=dz_cell, l_surface_anchor=jnp.asarray([floor]))
-    assert float(legacy[0, -1]) != floor
+    # The uncarried NEMO jpk pad stays at the floor; the carried jpkm1 row is
+    # updated once from floor + e3t(jpk), exactly zdftke:674-676.
+    assert float(lk[0, -1]) == floor + float(dz_cell[0, -1])
 
 
 @pytest.mark.skipif(not jax.config.x64_enabled, reason="binary64 receipt")
