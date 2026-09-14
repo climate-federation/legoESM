@@ -158,7 +158,7 @@ and provenance controls.  `focused_tests.log` has SHA-256
 The citation gate maps every compiled-source citation in this receipt and
 passes with no unmapped citation; `citation_gate.json` has SHA-256
 `4ac90af8b646cf011cf292b0927e858ca6ec044be5308bb1887bcb92aac363f3`.
-Its shifted `stp2d.f90:301-311` citation plant changes the status to FAIL and
+Its shifted external-solve citation plant changes the status to FAIL and
 exits 1; `citation_gate_plant.json` has SHA-256
 `1083dbba73a30969c442616b8c6f747b74bbf49579251e18e05c218dc74753a0`.
 Both Python tools compile, the run script passes `bash -n`, and
