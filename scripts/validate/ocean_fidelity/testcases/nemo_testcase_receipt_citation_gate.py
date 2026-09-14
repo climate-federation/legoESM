@@ -383,9 +383,9 @@ FILES = {
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
     # --- round 88: carried pre-solve RK3 Kaa SSH lifecycle ---
-    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3.f90:187-201': [
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3.f90:188-201': [
         '!  RK3 : single first external mode computation',
-        'CALL stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )', 15],
+        'CALL stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )', 14],
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3.f90:220-226': [
         'IF ( .NOT. l_perpetual_ts ) THEN',
         'ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)', 7],

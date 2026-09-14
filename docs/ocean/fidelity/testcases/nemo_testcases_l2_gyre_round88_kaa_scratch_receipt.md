@@ -103,7 +103,7 @@ fidelity gate before any cross-card claim.
 
 The admitted GYRE program calls the external-mode routine before entering RK3
 stage one
-(`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3.f90:187-201`).  Inside that
+(`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3.f90:188-201`).  Inside that
 routine, the compiled branch reads the already-present Kaa SSH, constructs W,
 and consumes it in ZAD
 (`GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stp2d.f90:141-176`).  The active
@@ -169,4 +169,3 @@ state was mutated.
    this rejected arm may be inferred.
 5. Once a composed candidate passes GYRE Rule 12, run both WS-RK3 tanks, the
    DINO shared-helper check, and ORCA2's stated specification before landing.
-
