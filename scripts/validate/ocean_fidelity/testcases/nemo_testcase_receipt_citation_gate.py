@@ -113,6 +113,8 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90"),
     "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3.f90"),
+    "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/l2_r46_stage.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/l2_r46_stage.f90"),
     "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/usrdef_sbc.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/usrdef_sbc.f90"),
     "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stp2d.f90": (
@@ -218,6 +220,10 @@ FILES = {
     # producer acquisition to that record's own compiled branch.
     "GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/dynspg_ts.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/dynspg_ts.f90"),
+    "GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/traadv.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/traadv.f90"),
     # Round 77 audits the failed admission against the exact compiled target
     # that wrote both the inherited transport-mean record and the new record.
     "GYRE_OMIP_L2_P3_SM_R76UAMID4/BLD/ppsrc/nemo/dynspg_ts.f90": (
@@ -1832,6 +1838,34 @@ CITATION_MAP = {
          2],
     'BLD/ppsrc/nemo/dynvor.f90:665': ('pu_rhs(ji,jj,jk) = pu_rhs(ji,jj,jk) + zuav * ( zwz(ji  ,jj-1) '
          '+ zwz(ji,jj) )'),
+    # --- round 94: consolidated stage-program contract ---
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90:168-190': [
+        'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )',
+        'CALL stp_2D( kstp, Nbb, Nbb, Naa, Nrhs )', 23],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90:195-222': [
+        '!  RK3 time integration',
+        'Nrhs = Nbb   ;   Nbb  = Naa   ;   Naa  = Nrhs', 28],
+    'GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:834-846': [
+        '!* Swap',
+        'sshn_e (:,:) = ssha_e(:,:)', 13],
+    'GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/stprk3_stg.f90:278-324': [
+        ('ALLOCATE( zub(', 1),
+        ('DEALLOCATE( zub, zvb )', 1), 47],
+    'GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/stprk3_stg.f90:792-819': [
+        ('IF( ln_shuman ) THEN', 1),
+        ('WRITE(l1_unit) zFu, zFv, zFw', 2), 28],
+    'GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/stprk3_stg.f90:843-853': [
+        ('IF( lwp .AND. .NOT.ln_tile .AND. kstp <= nit000 + 1 .AND. kstg <= 2 ) THEN', 1),
+        ('WRITE(l1_unit) zFu, zFv, zFw', 3), 11],
+    'GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/traadv.f90:247-250': [
+        ('DO jj = ntsj-( nn_hls), ntej+(  nn_hls-1 )', 2),
+        'pFw(ji,jj,jpk) = 0._wp', 4],
+    'GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/traadv.f90:253-280': [
+        'IF( kstg == 3 ) THEN',
+        'pFw(ji,jj,jk) = e1e2t(ji,jj) * ww(ji,jj,jk)', 28],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/l2_r46_stage.f90:120-147': [
+        "IF(ios /= 0) CALL ctl_stop('round46: cannot open stage record')",
+        "CALL put2('r3v_Kaa         ',r3v(:,:,Kaa))", 28],
 }
 
 

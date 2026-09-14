@@ -17,9 +17,9 @@ the Round-71 tracer-stage reader, the Round-46 stage reader, and the existing
 live production-JIT trace. Those are reused. No numerical statement or reader
 is duplicated.
 
-The compiled GYRE program computes vertical physics before the external solve
-and all three stages at
-`GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90:153-190`, then runs
+The compiled GYRE program calls vertical physics before the external solve
+at
+`GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90:168-190`, then runs
 stages 1, 2, and 3 with their pointer swaps at
 `GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90:195-222`.
 The external solver rotates the absolute current/b/bb histories after each
