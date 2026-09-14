@@ -13,8 +13,10 @@ but the canonical trajectory comparison is FAIL: 85 of 954 registered fields
 move and 56 rows contain a cell beyond the two-ULP oracle-relative movement
 bar. No row changes class and first-over-bar remains kt2 U/V.
 
-The candidate commit is `d0dce11ba0729418039233d05fe0bc14624942b2`.
-Production was restored at `7e6d26acf3705b5ca7a93ee174f087448ccb3453` and
+The measured candidate stamp is `d0dce11ba0729418039233d05fe0bc14624942b2`;
+the identical-tree commit in the delivered lineage is
+`3bca78d0270c2795908f273cb6ab8954889659c5`. Production was restored at
+`12018185fb9e47fae2b13c6ef3f26996fd6780bc` and
 the candidate is retained only in
 `scripts/validate/ocean_fidelity/testcases/manifests/
 nemo_testcase_l2_gyre_round97_held_full_stage1_rhs.patch`. No configuration,

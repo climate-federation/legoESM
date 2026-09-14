@@ -1,4 +1,5 @@
-ROUND 97 STAGE CANDIDATE (2026-09-14; candidate d0dce11ba072): HELD.
+ROUND 97 STAGE CANDIDATE (2026-09-14; measured candidate d0dce11ba072;
+identical-tree delivered-lineage commit 3bca78d0270c): HELD.
 
 LOCAL STAGE PROOF. Given NEMO's recorded kt=1 stage entry and external-step
 output, the full du_dt/dv_dt accumulator is BIT in both momentum-RHS rows and
