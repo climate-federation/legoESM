@@ -154,7 +154,12 @@ def measure(args) -> dict[str, object]:
         oracle_rhs = round46._owned3(stage_arrays[f"after_adv_{face}"], nlev)
         oracle_raw = _owned(arrays[f"baro_raw_{face}"])[..., :nlev]
         oracle_target = _owned(arrays[f"baro_target_{face}"])
-        oracle_h = _owned(arrays[f"baro_e3{face}_0"])[..., :nlev]
+        # The Round-90 writer's ``baro_e3*_0`` payload is a static reference
+        # and cannot calibrate the compiled QCO statement, whose preprocessed
+        # source consumes ``e3*_3d`` at Kaa. The byte-identical companion
+        # stage record from the same admitted run carries that live Kaa array.
+        oracle_h = round46._owned3(
+            stage_arrays[f"e3{face}_Kaa"], nlev)
         oracle_r1 = _owned(arrays[f"baro_r1_h{face}_0"])
         oracle_z = np.asarray(arrays[
             "baro_zub" if face == "u" else "baro_zvb"])
@@ -167,8 +172,12 @@ def measure(args) -> dict[str, object]:
         cross_record[face] = {
             "raw": _stats(companion_raw, oracle_raw, mask3),
             "final": _stats(companion_final, oracle_final, mask3),
+            "round90_static_e3_vs_executing_Kaa": _stats(
+                _owned(arrays[f"baro_e3{face}_0"])[..., :nlev],
+                oracle_h, mask3),
         }
-        require(all(row["bit_exact"] for row in cross_record[face].values()),
+        require(all(cross_record[face][name]["bit_exact"]
+                    for name in ("raw", "final")),
                 f"{face} correction and companion records disagree")
 
         live_kbb = _native(trace.stage_states[0][state_index], face)
@@ -272,6 +281,10 @@ def measure(args) -> dict[str, object]:
         "base_status": base["status"],
         "observer": observer,
         "cross_record_identity": cross_record,
+        "post_hoc_instrument_retraction": (
+            "Round-90 baro_e3u_0/baro_e3v_0 are static reference fields, not "
+            "the compiled e3u_3d/e3v_3d Kaa operands; correction replay uses "
+            "the same run's companion e3u_Kaa/e3v_Kaa payloads."),
         "rows": rows,
         "faces": faces,
         "first_nonbit_direct": next(
