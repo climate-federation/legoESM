@@ -907,9 +907,11 @@ def _output_rows(trace, records, next_entries, transports, masks, kt: int,
             ("zFu", np.asarray(geom[7])[:, 1:, :], _owned3(a["umask"]) > 0.5),
             ("zFv", np.asarray(geom[8])[1:, :, :], _owned3(a["vmask"]) > 0.5),
         ):
+            nlev = candidate.shape[-1]
             row = _classification(score(
                 f"GYRE-zco.kt{kt}.s{stage}.handoff.{field}",
-                _owned3(transport[field]), candidate, mask))
+                np.asarray(transport[field])[..., :nlev], candidate,
+                mask[..., :nlev]))
             row.update({"kt": kt, "stage": stage, "field": field,
                         "entry_mode": mode})
             rows.append(row)
