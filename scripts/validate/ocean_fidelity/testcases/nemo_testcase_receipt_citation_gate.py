@@ -189,6 +189,8 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/dynldf_lev.f90"),
     "GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/dynzad.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/dynzad.f90"),
+    "GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/dynzdf.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/dynzdf.f90"),
     "GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/sshwzv.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/sshwzv.f90"),
     # Round 72 cites the exact acquired R71 compiled tracer-stage branch.
@@ -382,6 +384,28 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 89: source-rounded RK3 assignment and ordered stage walk ---
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:140-148': [
+        'SELECT CASE( kstg )',
+        'r1_Dt = 1._wp / rDt', 9],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:198-202': [
+        'CASE ( 2 )           !==  Stage 2',
+        'r1_Dt = 1._wp / rDt', 5],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:242-246': [
+        'CASE ( 3 )           !==  Stage 3',
+        'r1_Dt = 1._wp / rDt', 5],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:433-482': [
+        'CALL    eos    (        ts, Kmm, rhd, rhop )',
+        "CALL r46_rhs( 'after_adv', uu, vv, Krhs )", 50],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:692-714': [
+        'CASE ( 3 )        !==  Stage 3',
+        "CALL r46_rhs( 'after_ldf', uu, vv, Krhs )", 23],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:728-760': [
+        "CALL r46_rhs( 'pre_zdf_rhs', uu, vv, Krhs )",
+        'vv(ji,jj,jk,Kaa) = vv(ji,jj,jk,Kaa) + zvb(ji,jj)*vmask(ji,jj,jk)', 33],
+    'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/dynzdf.f90:162-170': [
+        'RHS : time-stepping of all trends but the implicit one',
+        'pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kbb) + rDt * pvv(ji,jj,jk,Krhs) )', 9],
     # --- round 88: carried pre-solve RK3 Kaa SSH lifecycle ---
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3.f90:188-201': [
         '!  RK3 : single first external mode computation',
