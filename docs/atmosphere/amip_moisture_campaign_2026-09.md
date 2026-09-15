@@ -53,3 +53,36 @@ False (legacy) -> True (IFS route) in the production deck.
    supersaturation, codex).
 4. Precipitation-fraction / clear-fraction conditional rain evaporation
    for the stratiform rain that remains in q_r (H4).
+
+## Iteration A result — 5-day pair (wv_sfcrain − pa_ctl, days 80-85 published mean)
+Tropics 20S-20N unless stated. Control values in brackets.
+- prw −4.6 kg/m2 (ocean −5.2) [55.3]  → CONFIRM gate met (≥ −1).
+- pr: daily tropical mean arm/control 7.6/4.1, 6.7/4.9, 5.8/4.9, 5.5/5.6, 5.4/4.8
+  mm/day: a drain pulse decaying to +0.5 by day 5 → gate met.
+- Ocean hfls +0.4 W/m2 (evspsbl +0.01 mm/day) [101 W/m2] → gate NOT met at 5 days.
+  Land hfls +21.7, land evap +0.75 mm/day, land tas +1.0 K (more rain reaches the
+  ground; less cloud).
+- RH at 1000 hPa: ITCZ 0.86→0.85, trades 0.86→0.86 → gate NOT met; REFUTE
+  condition (|dRH1000| < 0.5 pt and |d hfls| < 1) formally met at 5 days.
+  RH at 850 hPa: ITCZ 0.71→0.58 (ERA5 0.73), trades 0.49→0.45: the layer the
+  re-evaporated rain was moistening is the CLOUD layer (700-850), not the
+  surface layer.
+- q/q_ERA5: ITCZ 700 hPa 1.40→1.15, 600 1.76→1.53, 500 2.43→2.22; trades-N
+  600 hPa 2.81→2.25. Mid-level bulge shrinks by a quarter to a third.
+- Lower troposphere WARMS: dT bias at 850 hPa ITCZ +1.0→+2.7 K, trades +2.3→+3.0
+  (the removed evaporative cooling); upper troposphere +4→+6 K at 250 hPa.
+- clt −31 points [85.5 → 54.6; ERA5 ~65]; rsut −38.7 W/m2 (ITCZ −52, bias +34
+  → −18); rlut +6.9 global, +18 ITCZ; dTOA +7.9 global. The pre-registered
+  FIX-FIRST trip (rsut > 10) fired: the RH-diagnosed cover collapses with the
+  4.6 kg/m2 drying. Whether it settles is the 30-day question.
+Reading: the third evaporation pass DID sustain the lower-free-troposphere
+moist bias (700-850 hPa) and about a third of the bulge above it; it did NOT
+(in 5 days) sustain the 1000 hPa surface-layer excess or the evaporation
+deficit. H1 as stated about the sub-cloud layer: NOT supported at 5 days;
+the BL memo's caveat (BL/evaporation need >= 2 weeks) applies.
+30-day pair launched from the same restart: wv_ctl30 (27471783, flag off,
+this worktree) and wv_sfcrain30 (27471784), checkpoint-days 5.
+Pre-registered for days 91-110: CONFIRM = ocean evaporation ratio to ERA5
+0.84 → ≥ 0.90 and RH1000 bias +11 → ≤ +7 and tropical clt within 10 points of
+ERA5 and |rsut bias| ≤ 15 W/m2; REFUTE = evaporation ratio +< 0.02 or clt/rsut
+overshoot larger than the original bias persisting through days 100-110.
