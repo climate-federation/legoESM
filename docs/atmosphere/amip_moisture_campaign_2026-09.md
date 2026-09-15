@@ -249,3 +249,14 @@ sensitivity. Sign caution (Savazzi 2022): CMT can strengthen or weaken the
 near-surface wind depending on the shallow/deep split.
 Structural item still open: partial-cloud condensation (H2) for the
 remaining 700-500 hPa excess.
+
+## Iteration D — CMT on the MPAS lane (commit 2bfdf5413)
+Arm wv_cmt (5 days from day 80 vs pa_ctl, --bechtold-enable-cmt, cmt_c_u =
+cmt_c_d = 0.7, mass-flux cap at the production 0.02). Pre-registered
+(tropical ocean, days 81-85 / day 85): CONFIRM = |u| at 1000-850 hPa ratio to
+ERA5 1.31 -> <= 1.15 AND lowest-level q -0.5 g/kg (RH -2 pts); wind corrected
+but |dq| < 0.15 refutes fast moisture sensitivity to the trades; wind NOT
+reduced (or increased, Savazzi 2022) = the CMT sign question, report it.
+Instrument: profile_rh_split (ua bias by level) on the published window.
+Note the cap: with M_b at 0.02 in 78 % of columns the CMT is proportional to
+a capped flux; a second arm with the cap at 0.10 follows if the sign is right.
