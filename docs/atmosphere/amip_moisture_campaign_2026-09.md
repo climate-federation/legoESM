@@ -180,3 +180,27 @@ Arms wv_mb005 (27478724), wv_mb010 (27478725): 5 days from day 80 vs pa_ctl,
 CONFIRM = lowest-level q falls >= 0.5 g/kg AND hfls rises >= 5 W/m2, stable;
 REFUTE = |dq| < 0.1 and |dhfls| < 2; FIX-FIRST = blow-up. Guardrails: RH500
 and prw (detrainment moistening), rain, the overturning.
+
+## Iteration A — 30-day result (wv_sfcrain30 − wv_ctl30, April file = days 90-110)
+| quantity              | ocean ctl | arm−ctl | land ctl | arm−ctl |
+|-----------------------|----------:|--------:|---------:|--------:|
+| prw [kg/m2]           |   58.5    |  −9.0   |  52.9    |  −5.1   |
+| hfls [W/m2]           |  103.6    |  +4.0   |  76.3    | +16.3   |
+| evspsbl [mm/day]      |   3.58    |  +0.14  |  2.64    |  +0.56  |
+| pr [mm/day]           |   4.44    |  +0.07  |  5.35    |  +0.62  |
+| clt [%]               |   83.2    | −28.2   |  79.7    | −34.5   |
+| rsut [W/m2]           |  118.6    | −37.7   | 139.0    | −41.6   |
+| rlut [W/m2]           |  245.3    | +21.2   | 243.0    | +19.0   |
+| rlutcs [W/m2]         |  267.2    |  +8.0   | 267.1    |  +6.9   |
+| tas [K]               |  299.3    |  −0.1   | 298.8    |  +1.0   |
+| lowest-level q, day 110 [g/kg] | 19.16 | −0.13 | | |
+| lowest-level RH, day 110       | 0.860 | +0.002 | | |
+Gates: prw CONFIRMED (about 60 % of the tropical-ocean excess removed);
+evaporation ratio 0.84 → ~0.87 (gate ≥ +0.03: met, marginal); RH1000 NOT met;
+the cloud-cover / radiation swing is a compensation exposed: the RH cover
+scheme (rh_crit 0.85) was tuned against the moist column, so the drier column
+now under-predicts cover (tropical rsut bias ~+30 → ~−8, rlut −8 → +13).
+The "downstream" hypothesis (drying the cloud layer dries the surface layer
+over weeks) is REFUTED at 30 days.
+Decision for the user (RULE 3): production default `convective_rain_to_surface`
+False → True, together with a cover re-tune by the cloud-cover session.
