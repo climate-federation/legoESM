@@ -41,7 +41,10 @@ def main(argv=None):
         rundir = f"{rb.ROOT}/{run}"
         exp = json.load(open(f"{rundir}/experiment_config.json"))
         lat, lon, area = mesh_coords(exp)
-        fl = _sftlf_on_mesh(run, lat, lon)
+        try:
+            fl = _sftlf_on_mesh(run, lat, lon)
+        except SystemExit:
+            fl = _sftlf_on_mesh("dd_ctl", lat, lon)   # same mesh; fx not yet published
         z = np.load(f"{rundir}/checkpoint_day_{args.day:04d}.npz", allow_pickle=True)
         T, ps, q = np.asarray(z["T"]), np.asarray(z["p_s"]), np.asarray(z["trc_q_v"])
         vg = np.asarray(z["meta_vgrid"])
