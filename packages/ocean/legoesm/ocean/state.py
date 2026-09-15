@@ -1617,6 +1617,13 @@ class LateralViscosityConfig(NamedTuple):
                                     # CFL violation at poles where dx shrinks.
                                     # Set False to keep full B_h everywhere
                                     # (requires smaller dt for CFL safety).
+    # FESOM2 resolution-scaled biharmonic: B(x) = B_h_gamma0 * h(x)^3 per face
+    # with h = sqrt(dx*dy) at that face (fesom_jax momentum.py, coef ~
+    # gamma0*len^3, gamma0 = 0.003 dimensionless; FESOM has no Laplacian).
+    # 0 = off.  Explicit limit gamma0*dt/h < 1/32 (3e-4 at h = 1.5 km, dt =
+    # 150 s).  Mutually exclusive with B_h and B_h_lat_scaling: set B_h = 0
+    # and B_h_lat_scaling = False; needs the 2-D face metrics (tripole).
+    B_h_gamma0: float = 0.0
     B_h_barotropic: float = 0.0  # Biharmonic hyperviscosity coeff [m^4/s]
                                    # applied to the DEPTH-MEAN (U_bar,
                                    # V_bar) only, via the F_slow channel

@@ -627,6 +627,11 @@ def parse_args(argv: list[str] | None = None):
                    help="Override Laplacian viscosity A_h [m²/s] (default: grid-dependent).")
     p.add_argument("--B-h", type=float, default=None,
                    help="Override biharmonic viscosity B_h [m⁴/s] (default: 5e9 for bathymetry).")
+    p.add_argument("--B-h-gamma0", type=float, default=None, dest="B_h_gamma0",
+                   help=("Tripole lane: FESOM2's resolution-scaled biharmonic "
+                         "B = gamma0*h^3 on the local face size (fesom_jax gamma0 = "
+                         "0.003); requires --A-h 0 --C-smag-lap 0 and replaces "
+                         "--B-h (2-D metrics only)."))
     p.add_argument("--K-h", type=float, default=None,
                    help="Override horizontal tracer diffusivity K_h [m²/s] (default: 1e3 with bathy).")
     p.add_argument("--no-lat-scaling", action="store_true",
@@ -1661,7 +1666,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   spmd_n_devices: int = 0,
                   mpas_lloyd: int = 50,
                   mpas_k_zeta_bih: float | None = None,
-                  sw_scheme: str = "auto"):
+                  sw_scheme: str = "auto",
+                  B_h_gamma0: float | None = None):
     """Create grid, z_coord, config, model for any grid type.
 
     ``spmd_n_devices > 1`` (MPAS only, ``--enable-mpas-spmd``) reorders + pads
@@ -2160,6 +2166,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             _recipe_over["pgf_scheme"] = pgf_scheme
         if B_h_override is not None:
             _recipe_over["B_h"] = B_h_override
+        if B_h_gamma0 is not None:
+            _recipe_over["B_h_gamma0"] = float(B_h_gamma0)
         if C_smag is not None:
             _recipe_over["C_smag"] = C_smag
         if C_smag_lap is not None:
@@ -5633,6 +5641,7 @@ def run_omip_single(grid_type: str, args) -> dict:
         grid_type, resolution, args.nlev, args.H_max,
         args.physics, args.water_type,
         sw_scheme=getattr(args, "sw_penetration", "auto"),
+        B_h_gamma0=getattr(args, "B_h_gamma0", None),
         spmd_n_devices=_mpas_spmd_nd,
         mpas_lloyd=int(getattr(args, "mpas_lloyd", 50)),
         mpas_k_zeta_bih=getattr(args, "mpas_k_zeta_bih", None),

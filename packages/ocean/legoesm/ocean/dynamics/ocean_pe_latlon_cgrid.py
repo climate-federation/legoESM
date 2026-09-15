@@ -3009,6 +3009,8 @@ def _bc_horizontal_viscosity(
     # ∇·(A_h∇u); "vector_laplacian" (default) = the grad(div)−k×grad(curl) form
     # below (bit-identical to the historical path).
     _visc_op = getattr(config, "lateral_viscosity_operator", "vector_laplacian")
+    if getattr(config.lateral_viscosity, "B_h_gamma0", 0.0) > 0:
+        _validate_biharmonic_gamma0(config.lateral_viscosity, grid)
     if _visc_op not in ("vector_laplacian", "flux_divergence", "nemo_div_curl"):
         raise ValueError(
             "lateral_viscosity_operator must be 'vector_laplacian', "
@@ -3333,9 +3335,23 @@ def _bc_horizontal_viscosity(
         diag_Ah_lap_u, diag_Ah_lap_v = _apply_slope_foot(diag_Ah_lap_u, diag_Ah_lap_v)
         du_dt = du_dt + diag_Ah_lap_u
         dv_dt = dv_dt + diag_Ah_lap_v
-    elif config.lateral_viscosity.B_h > 0:
+    elif (config.lateral_viscosity.B_h > 0
+          or getattr(config.lateral_viscosity, "B_h_gamma0", 0.0) > 0):
+        _validate_biharmonic_gamma0(config.lateral_viscosity, grid)
         bilap_u, bilap_v = _biharmonic_op(u, v)
-        if config.lateral_viscosity.B_h_lat_scaling:
+        if getattr(config.lateral_viscosity, "B_h_gamma0", 0.0) > 0:
+            # FESOM2 gamma0*h^3 on the LOCAL face size (2-D metrics).
+            coef_u, coef_v = biharmonic_gamma0_coefficients(
+                grid, config.lateral_viscosity.B_h_gamma0)
+            coef_u = coef_u.astype(bilap_u.dtype)
+            coef_v = coef_v.astype(bilap_v.dtype)
+            if bilap_u.ndim == 2:
+                diag_Bh_bilap_u = -coef_u * bilap_u
+                diag_Bh_bilap_v = -coef_v * bilap_v
+            else:
+                diag_Bh_bilap_u = -coef_u[:, :, None] * bilap_u
+                diag_Bh_bilap_v = -coef_v[:, :, None] * bilap_v
+        elif config.lateral_viscosity.B_h_lat_scaling:
             # Scale biharmonic coefficient with (cos(lat)/cos_max)^4 to prevent
             # CFL violation near poles where dx shrinks (MOM6 convention).
             scale_u, scale_v = biharmonic_scaling_factor(grid)
@@ -3907,6 +3923,49 @@ def surface_stress_faces(surface_forcing, u_dtype, z_coord, J, grid):
         tau_j_v = tau_n_v_face
     dz_0_u = interp_cell_to_uface(dz_0_T)
     return tau_i_u, tau_j_v, dz_0_u, dz_0_v
+
+
+def biharmonic_gamma0_coefficients(grid, gamma0):
+    """FESOM2 resolution-scaled biharmonic coefficients B(x) = gamma0 * h(x)^3.
+
+    ``h = sqrt(dx*dy)`` at each face from the 2-D face metrics [m]
+    (fesom_jax momentum.py: coef ~ gamma0 * len^3, gamma0 = 0.003
+    dimensionless).  Returns ``(coef_u (n_lat, n_lon+1), coef_v (n_lat+1,
+    n_lon))`` in m^4/s.
+    """
+    coef_u = gamma0 * (grid.dx_u * grid.dy_u) ** 1.5
+    coef_v = gamma0 * (grid.dx_v * grid.dy_v) ** 1.5
+    return coef_u, coef_v
+
+
+def _validate_biharmonic_gamma0(config, grid):
+    """Static checks for the ``B_h_gamma0`` biharmonic path (accepts the
+    model config or a ``LateralViscosityConfig``): B_h and B_h_gamma0 are
+    mutually exclusive, gamma0 excludes ``B_h_lat_scaling`` (it already
+    scales with the local face size), and it needs the 2-D face metrics."""
+    lv = getattr(config, "lateral_viscosity", config)
+    b_h = getattr(lv, "B_h", 0.0) or 0.0
+    gamma0 = getattr(lv, "B_h_gamma0", 0.0) or 0.0
+    lat_scaling = bool(getattr(lv, "B_h_lat_scaling", False))
+    a_h = getattr(lv, "A_h", 0.0) or 0.0
+    if a_h > 0.0 and gamma0 > 0.0:
+        raise ValueError(
+            "LateralViscosityConfig: B_h_gamma0 > 0 requires A_h = 0 (FESOM2 has no "
+            "Laplacian; the A_h branches would silently ignore gamma0).")
+    if b_h > 0.0 and gamma0 > 0.0:
+        raise ValueError(
+            "LateralViscosityConfig: B_h and B_h_gamma0 are mutually exclusive "
+            "(B_h is a scalar coefficient, B_h_gamma0 the FESOM2 gamma0*h^3 form); "
+            "set B_h = 0 when B_h_gamma0 > 0.")
+    if gamma0 > 0.0 and lat_scaling:
+        raise ValueError(
+            "LateralViscosityConfig: B_h_gamma0 already scales with the LOCAL face "
+            "size as gamma0*h^3; set B_h_lat_scaling = False when B_h_gamma0 > 0.")
+    if gamma0 > 0.0 and not hasattr(grid, "dx_u"):
+        raise ValueError(
+            "LateralViscosityConfig: B_h_gamma0 > 0 requires 2-D face metrics "
+            "grid.dx_u/dy_u/dx_v/dy_v in metres (curvilinear/tripolar grids); "
+            "this grid has no dx_u.")
 
 
 def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S, h_k, z_coord, J, grid, rho_0, mask, mask_3d, *, route_heat_to_implicit=False, withhold_stress=False, shortwave_scheme="auto", shortwave_water_type="II"):

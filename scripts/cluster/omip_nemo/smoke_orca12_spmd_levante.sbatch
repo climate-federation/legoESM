@@ -31,11 +31,11 @@ TPN=${TPN:-2}
 # "--jra55-zero-surface-fluxes"), MEMPROBE=1 (per-device live-array report).
 DIAG_EVERY=${DIAG_EVERY:-20}
 EXTRA=${EXTRA:-}
-# GM/Redi OFF to match the FESOM2 reference (user decision 2026-09-15).  The
-# lateral viscosity stays the mesh-derived Laplacian A_h + Laplacian Smagorinsky
-# 0.33: the biharmonic / biharmonic-Smagorinsky / Leith operators of this lane
-# use the regular lat-lon 1-D metrics (they divide by dlon = 0 on a tripolar
-# mesh), so run_omip refuses --B-h/--C-smag/--C-leith here -- open gap.
+# GM/Redi OFF to match the FESOM2 reference (user decision 2026-09-15).
+# Lateral viscosity as FESOM2: no Laplacian, biharmonic B = gamma0*h^3 on the local
+# face size (fesom_jax gamma0 = 0.003; --B-h-gamma0 on the 2-D tripole metrics,
+# explicit limit gamma0*dt/h = 3e-4 at the 1.5 km cells).  The mesh-derived
+# Laplacian + Smagorinsky of the earlier arms is --A-h <auto> --C-smag-lap 0.33.
 [ -n "${MEMPROBE:-}" ] && export LEGOESM_OMIP_MEMPROBE=1
 NGPU=$(( SLURM_JOB_NUM_NODES * TPN ))
 DAYS=$(awk -v s="$STEPS" -v d="$DT" 'BEGIN {printf "%.10f", s*d/86400.0}')
@@ -72,6 +72,7 @@ srun --ntasks=$NGPU --ntasks-per-node=$TPN --gpus-per-node=$TPN --gpu-bind=none 
     --sw-penetration sweeney_2band --chl-clim /pool/data/AWICM/FESOM2/FORCING/Sweeney/Sweeney_2005.nc --ocean-albedo 0.1 \
     --bottom-drag-scheme nemo_quadratic --bottom-drag-cd0 0.0025 --bottom-drag-ke0 0.0 \
     --runoff-source core2_climatology --runoff-file /pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/CORE2_runoff.nc \
+    --A-h 0 --C-smag-lap 0 --B-h-gamma0 0.003 \
     --woa-init --woa-t $R/forcing/phc3_winter_woa_format_nofabricated.nc --woa-s $R/forcing/phc3_winter_woa_format_nofabricated.nc --woa-void-fill \
     --enable-latlon-spmd --multicontroller \
     --diag-every $DIAG_EVERY $EXTRA --output "$OUT" 2>&1 | tee $OUT/run.log | grep -v "^WARNING\|^I0000\|^E0000" | tail -80
