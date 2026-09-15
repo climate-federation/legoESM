@@ -11,8 +11,8 @@
 #
 # Built from the working _score_orca1faith_d30.sbatch (cp -f, then the paths,
 # labels and the oracle record changed; nothing else). Both snapshots are
-# scored against the SAME oracle record: GATEWAY 5-day mean number DAY/5, so a
-# day-10 pair reads record 2 (days 6-10) and the day-30 pair reads record 5.
+# scored against the SAME oracle record: GATEWAY 5-day mean DAY/5-1 (0-based), so a
+# day-10 pair reads record 1 (days 5-10) and the day-30 pair reads record 5.
 #
 # This IS a one-variable comparison: trp_orca1z0_d30 differs from
 # trp_orca1faith_d30 in exactly --tke-surface-bc-level nemo_z0 (card
@@ -26,7 +26,7 @@
 # are wet for us and dry for the oracle -- excluded from any same-domain
 # statement.
 #
-# Usage: sbatch _score_orca1z0_d10.sbatch            (day 10, record 2)
+# Usage: sbatch _score_orca1z0_d10.sbatch            (day 10, record 1)
 #        sbatch --export=ALL,DAY=30 _score_orca1z0_d10.sbatch  (day 30, record 5)
 set -uo pipefail
 ROOT=/burg-archive/glab/users/pg2328/_omip_merge; cd $ROOT || exit 1
@@ -36,9 +36,13 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 export JAX_PLATFORMS=cpu
 R=/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo
 GW=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY/ORCA1_5d_20000101_20000331_grid_T.nc
-DAY=${DAY:-10}
-REC=$(( DAY / 5 ))
-[ $(( REC * 5 )) -eq "$DAY" ] || { echo "FATAL: DAY=$DAY is not a multiple of 5 -- no matching 5-day oracle record"; exit 1; }
+DAY=$(( 10#${DAY:-10} ))   # 10#: a zero-padded DAY would parse as octal
+# 0-based GATEWAY record k = mean over run days 5k..5k+5 (time_counter_bounds,
+# measured 2026-09-15), so the record that ENDS at snapshot day D is D/5-1 --
+# the convention of every day-30 scorecard (rec 5 = days 25-30) and of the
+# sector maps.  D/5 (used until 2026-09-15) was the record STARTING at D.
+REC=$(( DAY / 5 - 1 ))
+[ $(( (REC + 1) * 5 )) -eq "$DAY" ] && [ "$REC" -ge 0 ] || { echo "FATAL: DAY=$DAY is not a positive multiple of 5 -- no matching 5-day oracle record"; exit 1; }
 TAG=$(printf 'day%04d' "$DAY")
 # The card writes snapshot_final.npz at its target day (30), not a
 # day-numbered file; every other 5-day snapshot is day-numbered.
@@ -51,7 +55,7 @@ OUTDIR=$R/score_orca1z0_d$DAY
 for f in "$NEW" "$OLD" "$GW"; do
   [ -r "$f" ] || { echo "FATAL: missing $f"; exit 1; }
 done
-echo "=== inputs (mtimes prove which state is being scored); oracle record $REC = day $DAY ==="
+echo "=== inputs (mtimes prove which state is being scored); oracle record $REC (0-based) = days $((DAY-5))-$DAY ==="
 ls -l --time-style=+%Y-%m-%d_%H:%M "$NEW" "$OLD"
 $PY -u scripts/validate/ocean_fidelity/compare_three_way_nemo.py \
   --tripole "$NEW" \

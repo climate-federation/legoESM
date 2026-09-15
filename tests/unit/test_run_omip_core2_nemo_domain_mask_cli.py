@@ -74,3 +74,11 @@ def test_nemo_init_tint_flag_round_trips_and_is_forwarded():
     assert src.count("nemo_tint=bool(args.nemo_init_tint)") == 1
     assert src.count("nemo_tint=bool(nemo_init_tint)") == 1
     assert src.count("nemo_init_tint=args.nemo_init_tint,") == 1
+
+
+def test_nemo_init_tint_is_reachable_on_the_fesom_lane():
+    """Wired is not reachable: the FESOM lane refuses every user-set dest
+    absent from _FESOM_WIRED_DESTS, and --nemo-init-tint was forwarded into
+    build_fesom_ocean (8e7d98a55) without being listed, so the flag raised
+    SystemExit on that lane while its forwarding test passed (2026-09-15)."""
+    assert "nemo_init_tint" in _module()._FESOM_WIRED_DESTS

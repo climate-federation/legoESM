@@ -62,15 +62,27 @@ GW=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GA
 # (e.g. trp_orca1z0_d30/snapshot_day0020.npz for the day-20 -> day-30 trend).
 SNAP=${SNAP:-/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_orca1faith_d30/snapshot_final.npz}
 MESH=/burg-archive/glab/users/pg2328/legoESM/data/grids/eORCA1.2_mesh_mask.nc
+# Oracle record = the 5-day window ENDING at the snapshot day (0-based k covers
+# days 5k..5k+5): snapshot_dayNNNN -> NNNN/5-1; snapshot_final is day 30 -> 5.
+# Until 2026-09-15 the record was pinned at 5 whatever SNAP was handed.
+if [ -z "${REC:-}" ]; then
+  case "$(basename "$SNAP")" in
+    snapshot_day*.npz) d=$(basename "$SNAP" .npz); d=$((10#${d#snapshot_day}))
+      [ $((d % 5)) -eq 0 ] && [ "$d" -ge 5 ] || { echo "FATAL: day $d is not a positive multiple of 5; no 5-day record ends there"; exit 1; }
+      REC=$((d / 5 - 1)) ;;
+    *) REC=5; echo "WARNING: no day in $(basename "$SNAP"); assuming day 30 = record 5 (pass REC=<k> otherwise)" ;;
+  esac
+fi
+echo "oracle record $REC = days $((5*REC))-$((5*REC+5))"
 
 ls -l "$SNAP" "$MESH" 2>&1 | cat
 
 $PY -u scripts/validate/ocean_fidelity/equatorial_thermocline.py \
   --legoesm-snapshot "$SNAP" \
   --nemo-gridt "$GW/ORCA1_5d_20000101_20000331_grid_T.nc" \
-  --nemo-t-recs 5 \
+  --nemo-t-recs "$REC" \
   --nemo-wfile "$GW/ORCA1_5d_20000101_20000331_grid_W.nc" \
-  --nemo-w-var wo --nemo-w-recs 5 \
+  --nemo-w-var wo --nemo-w-recs "$REC" \
   --nemo-ufile "$GW/ORCA1_5d_20000101_20000331_grid_U.nc" \
   --nemo-vfile "$GW/ORCA1_5d_20000101_20000331_grid_V.nc" \
   --meridional-lon 200,220,240 \

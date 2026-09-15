@@ -2507,8 +2507,10 @@ _FESOM_WIRED_DESTS = frozenset({
     # NEMO zdfiwm (ln_zdfiwm=T in ORCA1): spliced additively onto the legoESM
     # closure by the FESOM TKE bridge, exactly as MPASOceanModel does.
     "iwm", "iwm_forcing_file",
-    # B4 — NEMO-monthly / WOA initial condition:
-    "nemo_monthly_init", "nemo_init_month", "woa_init", "woa_t", "woa_s",
+    # B4 — NEMO-monthly / WOA initial condition (--nemo-init-tint is the
+    # Dec/Jan blend NEMO itself starts from; build_fesom_ocean takes it):
+    "nemo_monthly_init", "nemo_init_month", "nemo_init_tint",
+    "woa_init", "woa_t", "woa_s",
 })
 
 # B4 selectors that CONSUME the forced loop's forcing/coupling — meaningless

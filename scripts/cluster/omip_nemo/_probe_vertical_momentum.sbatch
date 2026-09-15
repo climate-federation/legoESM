@@ -64,7 +64,20 @@ export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 # Override with `sbatch --export=ALL,SNAP=<path>` to score an arm's snapshot;
 # the default is the baseline every number in the header was measured on.
 export SNAP=${SNAP:-/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_orca1faith_d30/snapshot_final.npz}
-echo "SNAP: $SNAP"
+# Oracle record = the 5-day window ENDING at the snapshot day (0-based k covers
+# days 5k..5k+5): snapshot_dayNNNN -> NNNN/5-1; snapshot_final is day 30 -> 5.
+# Until 2026-09-15 this probe pinned record 5 whatever SNAP it was handed, so
+# day-20/25 snapshots were paired with NEMO days 25-30.  Override: REC=<k>.
+if [ -z "${REC:-}" ]; then
+  case "$(basename "$SNAP")" in
+    snapshot_day*.npz) d=$(basename "$SNAP" .npz); d=$((10#${d#snapshot_day}))
+      [ $((d % 5)) -eq 0 ] && [ "$d" -ge 5 ] || { echo "FATAL: day $d is not a positive multiple of 5; no 5-day record ends there"; exit 1; }
+      REC=$((d / 5 - 1)) ;;
+    *) REC=5; echo "WARNING: no day in $(basename "$SNAP"); assuming day 30 = record 5 (pass REC=<k> otherwise)" ;;
+  esac
+fi
+export REC
+echo "SNAP: $SNAP  (oracle record $REC = days $((5*REC))-$((5*REC+5)))"
 
 $PY - <<'PY'
 import os
@@ -74,7 +87,7 @@ import netCDF4 as nc
 GW = ("/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/"
       "EXP00/RUN_GATEWAY/ORCA1_5d_20000101_20000331")
 SNAP = os.environ["SNAP"]
-REC, LON0 = 5, 220.0
+REC, LON0 = int(os.environ["REC"]), 220.0
 
 dw = nc.Dataset(f"{GW}_grid_W.nc")
 print("grid_W 3-D fields (name: units -- long_name):")
