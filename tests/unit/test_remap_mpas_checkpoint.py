@@ -133,6 +133,15 @@ def test_refuses_nan_and_level_resolved_carries(uniform_src, tmp_path):
     out = tmp_path / "nan_out.npz"
     assert remap.main(["--src", str(bad), "--dst", str(out), "--tropopause-refine", "3.0"]) == 1
     assert not out.exists()
+    for nan_field, refine in (("physstate_cloud_fraction", "3.0"), ("trc_q_c", "1.0")):
+        bad = tmp_path / f"nan_{nan_field}_{refine}.npz"
+        dd = dict(d)
+        dd[nan_field] = d[nan_field].copy()
+        dd[nan_field][1, 3] = np.nan
+        np.savez(bad, **dd)
+        out = tmp_path / f"nan_{nan_field}_{refine}_out.npz"
+        assert remap.main(["--src", str(bad), "--dst", str(out), "--tropopause-refine", refine]) == 1
+        assert not out.exists(), (nan_field, refine)     # identity path and bounded field too
     clubb = tmp_path / "clubb.npz"
     dd = dict(d)
     dd["physstate_clubb_moments"] = np.zeros((NCOL, 15, NLEV + 1))   # prognostic CLUBB

@@ -115,6 +115,8 @@ def main(argv=None):
             return err(f"missing field {name}")
         if np.asarray(d[name]).shape[-1] != nlev:
             return err(f"{name} width != nlev {nlev}")
+        if not np.isfinite(np.asarray(d[name], dtype=np.float64)).all():
+            return err(f"{name} contains non-finite values; refusing to remap or copy")
     for name in ("physstate_clubb_moments", "physstate_gwd_spectrum"):
         if name in d and np.asarray(d[name]).shape[-1] in (nlev, nlev + 1):
             return err(f"{name} carries a level-resolved state this tool does not remap")
@@ -140,7 +142,8 @@ def main(argv=None):
         fb = f0.astype(np.float64)
         fa = remap_cons(fb, s_old, s_new, iv, args.kord, q_min)
         if name == "physstate_cloud_fraction":
-            report(name, fb, fa, s_old, s_new)
+            if not np.isfinite(report(name, fb, fa, s_old, s_new)):
+                worst = float("inf")
             fa = np.clip(fa, 0.0, 1.0)       # bounded field: the clip may cost ~1e-4
         else:
             fa = fa.astype(f0.dtype)         # check what will be STORED
