@@ -3947,17 +3947,26 @@ def _extract_scalars(state, grid_type, grid, z_coord):
         return {"SST": sst, "SSS": sss, "SSH": ssh}
 
     if grid_type == "mpas":
-        T = np.asarray(state.T.data)
-        S = np.asarray(state.S.data)
-        eta = np.asarray(state.eta.data)
-        mask = np.asarray(state.land_mask.data)
+        # Mirrors the lat-lon branch: under the route-B multicontroller the
+        # state fields are jax Arrays sharded across PROCESSES, so a host
+        # gather (np.asarray) of a field spanning devices is an error; the
+        # masked jnp reductions run in place on the shards and each returns
+        # a replicated scalar that float() can read.
+        T = state.T.data
+        S = state.S.data
+        eta = state.eta.data
+        mask = state.land_mask.data
         # MPAS: (nCells, nlev), mask: (nCells,)
         wet = mask > 0.5
-        sst = float(np.mean(T[wet, 0])) if wet.any() else 0.0
-        sss = float(np.mean(S[wet, 0])) if wet.any() else 0.0
-        ssh = float(np.mean(eta[wet])) if wet.any() else 0.0
-        u = np.asarray(state.u.data)
-        max_u = float(np.max(np.abs(u)))
+        n_wet = jnp.sum(wet)
+        # All-land mesh (n_wet == 0) now yields NaN, not the old 0.0: that
+        # plausible-looking 0.0 hid a broken land_mask; NaN makes it visible.
+        sst = float(jnp.sum(jnp.where(wet, T[..., 0], 0.0)) / n_wet)
+        sss = float(jnp.sum(jnp.where(wet, S[..., 0], 0.0)) / n_wet)
+        ssh = float(jnp.sum(jnp.where(wet, eta, 0.0)) / n_wet)
+        # u: (nEdges, nlev) edge array; padded ghost edges carry 0, so no wet
+        # mask is needed -- identical to the old np.max(np.abs(u)).
+        max_u = float(jnp.max(jnp.abs(state.u.data)))
     else:
         # Cubed-sphere (6,n,n,nlev) or latlon/tripole (nlat,nlon,nlev).
         # Reductions, not host arrays: under lat-band SPMD the state is
