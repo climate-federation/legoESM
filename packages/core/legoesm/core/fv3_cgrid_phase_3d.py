@@ -196,6 +196,7 @@ from legoesm.core.fv3_native_state_3d import (
 from legoesm.core.fv3_nh_core import riem_solver_c, update_dz_c
 from legoesm.core.fv3_pgrad import geopk, p_grad_c
 from legoesm.core.fv3_phase3d_common import (
+    batch_size,
     CSW_OUT_LIKE,
     build_batched_gs,
     require_bool,
@@ -288,7 +289,7 @@ def _require_grid_type_zero(fname: str, ctx) -> None:
     a doubly-periodic or cartesian gridstruct whose ``grid_type`` the
     spec would then ignore.
     """
-    bad = [t for t in range(6) if ctx.flags6[t].grid_type != 0]
+    bad = [t for t in range(batch_size(ctx)) if ctx.flags6[t].grid_type != 0]
     if bad:
         raise ValueError(
             f"{fname}: faces {bad} carry grid_type "
@@ -450,7 +451,7 @@ def csw_phase_3d(ctx, states: dict, dt2, km, *, nord: int = 2,
     # lane is functional, so the NumPy lane's `fort` 1-based views onto
     # one buffer do not exist here at all).  Kept as a literal loop
     # rather than vmapped: convention C2.
-    for t in range(6):
+    for t in range(batch_size(ctx)):
         per_level = {name: [] for name in names}
         # R1a, level axis: `c_sw`'s dummies are 2-D
         # (sw_core.F90:84-87), so a level CANNOT read another level --
@@ -527,7 +528,8 @@ def _csw_phase_3d_batched(ctx, states, dt2, km, *, names, nord,
             per_level[name].append(got[name])
     out = {}
     for name in names:
-        want = (6,) + field_shape(CSW_OUT_LIKE[name], n, ng, km)[:2]
+        want = (batch_size(ctx),) + field_shape(CSW_OUT_LIKE[name], n, ng,
+                                               km)[:2]
         for k, arr in enumerate(per_level[name]):
             if tuple(arr.shape) != want:
                 raise ValueError(
@@ -612,7 +614,7 @@ def cgrid_pressure_phase_3d(ctx, csw_outs: dict, km, *, dt2, ptop: float,
     # R1a, face axis: geopk and p_grad_c read one face's delpc/ptc/hs
     # and write one face's outputs; the C-grid phase has NO cross-face
     # exchange (those are dyn_core.F90:652/:655, the next unit).
-    for t in range(6):
+    for t in range(batch_size(ctx)):
         got = geopk(csw_outs["delpc"][t], csw_outs["ptc"][t], ctx.hs6[t],
                     bd, km=km, ptop=ptop, akap=akap, cp_air=cp_air,
                     cg=True, duogrid=True, computehalo=False,
@@ -672,7 +674,7 @@ def _check_delpc_positive(fname: str, delpc6, bd) -> None:
         "layer mass is FINITE here and only becomes NaN one stage later.")
     i0, i1 = bd.is_ - bd.isd, bd.ie - bd.isd + 1
     j0, j1 = bd.js - bd.jsd, bd.je - bd.jsd + 1
-    for t in range(6):
+    for t in range(arr.shape[0]):
         win = arr[t][i0:i1, j0:j1, :]
         if not np.all(np.isfinite(win)) or win.min() <= 0.0:
             k = int(np.argmin(win.min(axis=(0, 1))))
@@ -741,16 +743,17 @@ def cgrid_nh_pressure_phase_3d(ctx, csw_outs: dict, gz6, ws3_6, km, *,
     ws3_6 = jnp.asarray(ws3_6)
     zs6 = jnp.asarray(zs6)
     dp0 = jnp.asarray(dp0)
-    want_gz = (6,) + field_shape("gz", n, ng, km)
+    nb = batch_size(ctx)
+    want_gz = (nb,) + field_shape("gz", n, ng, km)
     if gz6.shape != want_gz:
         raise ValueError(
             f"cgrid_nh_pressure_phase_3d: gz6 has shape {gz6.shape}, "
             f"expected {want_gz} (km+1 INTERFACES, not km levels)")
     for nm, arr in (("ws3_6", ws3_6), ("zs6", zs6)):
-        if arr.shape != (6, m_a, m_a):
+        if arr.shape != (nb, m_a, m_a):
             raise ValueError(
                 f"cgrid_nh_pressure_phase_3d: {nm} has shape "
-                f"{arr.shape}, expected {(6, m_a, m_a)} (the PADDED 2-D "
+                f"{arr.shape}, expected {(nb, m_a, m_a)} (the PADDED 2-D "
                 f"plane update_dz_c indexes from is-ng)")
     if dp0.shape != (km,):
         raise ValueError(
@@ -782,7 +785,7 @@ def cgrid_nh_pressure_phase_3d(ctx, csw_outs: dict, gz6, ws3_6, km, *,
     # p_grad_c read and write that face's arrays only.  Functional
     # throughout, so unlike the NumPy lane there is no shared gz6/ws3_6
     # buffer for one face's write to reach another's read.
-    for t in range(6):
+    for t in range(nb):
         gz_t, ws_t = update_dz_c(
             bounds, km, dt2, dp0, zs6[t], ctx.gs6[t]["area"],
             csw_outs["ut"][t], csw_outs["vt"][t], gz6[t], ws3_6[t],
@@ -792,7 +795,8 @@ def cgrid_nh_pressure_phase_3d(ctx, csw_outs: dict, gz6, ws3_6, km, *,
             grid_type=ctx.flags6[t].grid_type)
         # `pkc` is intent(out)-shaped scratch in the oracle; allocate it
         # here rather than asking the caller for a buffer (R4).
-        pkc0 = jnp.zeros(pkc_shape, dtype=jnp.float64)
+        # dtype follows storage (fp32/fp64), from csw_outs["delpc"]
+        pkc0 = jnp.zeros(pkc_shape, dtype=csw_outs["delpc"][t].dtype)
         gz_t, pkc_t = riem_solver_c(
             1, dt2, bounds, km, akap, cp_air, ptop, ctx.hs6[t],
             csw_outs["wc"][t], csw_outs["ptc"][t], csw_outs["delpc"][t],
@@ -845,7 +849,8 @@ def _cgrid_nh_pressure_phase_3d_batched(ctx, csw_outs, gz6, ws3_6, *,
             sw_corner=False, se_corner=False,
             ne_corner=False, nw_corner=False,
             grid_type=grid_type)
-        pkc0 = jnp.zeros(pkc_shape, dtype=jnp.float64)
+        # dtype follows storage (fp32/fp64), from delpc_t
+        pkc0 = jnp.zeros(pkc_shape, dtype=delpc_t.dtype)
         gz2, pkc_t = riem_solver_c(
             1, dt2, bounds, km, akap, cp_air, ptop, hs_t, wc_t,
             ptc_t, delpc_t, gz1, pkc0, ws1, p_fac, a_imp)
