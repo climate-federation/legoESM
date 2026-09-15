@@ -2148,15 +2148,14 @@ class PhysicsPipeline:
         """Prescribed TOA incident shortwave [W/m^2] — the incoming solar the
         radiation solver is GIVEN, used for the ``rsdt`` diagnostic.
 
-        ``rsdt`` previously read ``sw_flux_down`` at the top halo, whose value
-        comes from the quadratic top-boundary extrapolation in
-        ``rte/two_stream._replace_top_flux``.  For downwelling SW the true TOA
-        value exceeds every interior level (the column only attenuates
-        downward), so the extrapolation's range-limit (kept deliberately to
-        bound the BUG-B drifted-state overshoot, ``sw_down`` 1121 W/m^2) caps
-        the diagnostic ~15 % below ``S_0 cos(SZA)`` (≈330 vs ≈340 W/m^2,
-        C48).  The physical TOA incident flux is not an extrapolation at all —
-        it is the prescribed insolation boundary condition.  This returns that
+        ``rsdt`` previously read ``sw_flux_down`` at the top halo, which at
+        the time was a range-limited quadratic extrapolation of interior faces
+        (``rte/two_stream._replace_top_flux``, since removed: it zeroed the
+        top layer's radiation) and sat ~15 % below ``S_0 cos(SZA)``.  The
+        solver now keeps the physical boundary value there, but the TOA
+        incident flux is still best reported from its own definition — the
+        prescribed insolation boundary condition (the solver clamps a tiny
+        cos(SZA) to 0.01 before applying it).  This returns that
         insolation with the EXACT convention the solver uses (the column
         ``insol`` in the radiation builders): instantaneous ``S_0 cos(SZA)``
         under a diurnal cycle, else the daily-mean insolation.  Computed on the

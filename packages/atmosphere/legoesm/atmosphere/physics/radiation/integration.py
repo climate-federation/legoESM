@@ -1532,14 +1532,14 @@ def _make_hydrostatic_radiation(
         _swn = rad_out.sw_flux_down[:, -1] - rad_out.sw_flux_up[:, -1]
         _lwn = rad_out.lw_flux_down[:, -1] - rad_out.lw_flux_up[:, -1]
         # TOA is the FIRST half-level (surface is the last, see above):
-        # rlut = lw_flux_up[:, 0], rsut = sw_flux_up[:, 0] — the range-limited
-        # top-halo up-faces, exactly what the compiled path reads
-        # (physics_pipeline.py:2219-2220), already in CMOR sign conventions.
-        # rsdt = PRESCRIBED toa_insolation (#620), NOT the quadratically clamped
-        # top-halo down-flux rad_out.sw_flux_down[:, 0] (~15% low; historically
-        # ~2x high before the range-limit) — matches the compiled path
-        # (physics_pipeline.py:2225-2228). Halo fallback keeps a value for any
-        # path that leaves toa_insolation=None (e.g. the zero-radiation stub).
+        # rlut = lw_flux_up[:, 0], rsut = sw_flux_up[:, 0] — the physical
+        # top-face fluxes of the two-stream recurrence (an earlier clipped
+        # extrapolation there is gone), exactly what the compiled path reads
+        # (physics_pipeline.py), already in CMOR sign conventions.
+        # rsdt = PRESCRIBED toa_insolation (#620), the boundary condition
+        # itself, matching the compiled path. Halo fallback keeps a value for
+        # any path that leaves toa_insolation=None (e.g. the zero-radiation
+        # stub).
         return _pack_hydrostatic_tendencies(
             dT_dt, state, shape_3d, shape_2d,
             sw_net_sfc=_swn, lw_net_sfc=_lwn,
