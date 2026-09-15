@@ -116,3 +116,28 @@ Pre-registered (days 81-85, tropical ocean, native lowest level):
   not ventilation-limited.
 - Any arm: sensible heat and stress change too (T, wind inputs re-labelled);
   report them; tas diagnostics still use 10 m + fresh q_s (known, unchanged).
+
+## Iteration B result — 5-day arms vs pa_ctl, tropical OCEAN (days 80-85 mean; native lowest level at day 85)
+| quantity                    | control | sea-water q_sfc | real input height |
+|-----------------------------|--------:|----------------:|------------------:|
+| hfls [W/m2]                 |  101.0  |   -11.9         |   -12.7           |
+| hfss [W/m2]                 |   14.9  |    +1.2         |    -7.1           |
+| lowest-level q [g/kg]       |  18.57  |   -0.30         |   -0.42           |
+| lowest-level RH             |  0.851  |   -0.004        |   +0.016          |
+| lowest-level T [K]          | 298.99  |   -0.20         |   -0.68           |
+| prw [kg/m2]                 |  57.1   |   -0.6          |   -1.3            |
+| pr [mm/day]                 |  4.54   |   -0.26         |   -0.30           |
+Both corrections cut evaporation by 12-13 % and dry the surface air by only
+0.3-0.4 g/kg; the height correction also halves the sensible heat flux and
+cools the surface layer, so its RH RISES. The pre-registered REFUTE condition
+(E falls > 10 % with < 1 RH point of drying) is met: the transfer law is NOT
+what maintains the moist surface layer; it was compensating for it. Whether
+the two corrections are still adopted (they are the physically consistent
+inputs) is a user decision — with them the evaporation deficit vs ERA5 grows
+from 0.84 to ~0.73 until something else dries the boundary layer.
+Reading (PLAUSIBLE, to be tested by the 30-day survivor-rain pair): the
+surface humidity is high because the humidity contrast across the boundary-
+layer top is weak — the cloud layer above it was kept moist by the rain
+re-evaporation — so mixing and convective venting export too little. If so,
+q_low in wv_sfcrain30 falls by >= 1 g/kg and evaporation rises during days
+10-30 without any surface-layer change.
