@@ -101,12 +101,6 @@ def test_planted_mismatch_is_caught(monkeypatch):
         _check(*_run())
 
 
-@pytest.mark.xfail(strict=True, reason="PRE-EXISTING partition defect (codex): "
-                   "sunlit direct-beam PAR absorption uses the leaf scattering "
-                   "coefficient, not the canopy albedo, so under a bright snow "
-                   "band albedo the ground's absorbed PAR goes negative while "
-                   "the column total still conserves. Flip to a plain assert "
-                   "when the partition is reconciled.")
 def test_ground_absorption_nonnegative_under_bright_snow():
     n = 3
     one = jnp.ones(n)
@@ -118,3 +112,11 @@ def test_ground_absorption_nonnegative_under_bright_snow():
         Vcmax25_C4_leaf=jnp.zeros(n), kn=0.3 * one)
     soil = np.asarray(out.ASW_Soil)
     assert np.all(soil >= -1e-9), soil
+    # components stay non-negative and the column total is exact
+    for a in (out.ASW_Sun, out.ASW_Sh):
+        assert np.all(np.asarray(a) >= -1e-9)
+    # the column total is the band-weighted absorbed fraction of what was
+    # handed in (PAR 250, NIR 250, UV 10 W/m2 here)
+    total = np.asarray(out.ASW_Sun + out.ASW_Sh + out.ASW_Soil)
+    want = (1 - 0.8) * 250.0 + (1 - 0.7) * 250.0 + (1 - rt._RHO_UV) * 10.0
+    np.testing.assert_allclose(total, want, rtol=1e-9)
