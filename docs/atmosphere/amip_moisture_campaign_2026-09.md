@@ -141,3 +141,18 @@ layer top is weak — the cloud layer above it was kept moist by the rain
 re-evaporation — so mixing and convective venting export too little. If so,
 q_low in wv_sfcrain30 falls by >= 1 g/kg and evaporation rises during days
 10-30 without any surface-layer change.
+
+## Iteration C — IFS shallow closure ON (existing switch, default off "pending its own A/B")
+Both reviewers' next candidate for the surface-layer excess: the sub-cloud
+moist-energy closure (cumastrn ZDHPBL) sets the shallow mass flux from the
+surface supply instead of CAPE. Arm wv_shallow (5 days from day 80,
+--bechtold-use-ifs-shallow-closure, else pa_ctl deck). Known caveats (codex):
+the MPAS bridge feeds it the previous step's SH+LH without the radiative
+term; the cape_weight^2 * M_b_max cap and the carry relaxation still bind.
+Pre-registered (tropical ocean, days 81-85 / day 85 native level): CONFIRM =
+lowest-level q falls >= 0.5 g/kg AND hfls rises >= 5 W/m2; REFUTE = |dq| <
+0.1 g/kg and |dhfls| < 2 W/m2 (then check offline whether the cap muted the
+target before discarding the closure).
+Existing Louis / CLUBB-diagnostic pair at day 86 (sc_louis / sc_clubbd):
+lowest-level q 18.50 vs 18.59 g/kg, RH 0.843 vs 0.850 — the turbulence
+scheme choice moves the tropical-ocean surface humidity by 0.1 g/kg only.
