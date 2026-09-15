@@ -130,3 +130,60 @@ def test_apply_forced_freeze_unions_with_the_measured_list():
         params, measured + forced[:1], forced)
     assert merged == sorted(set(measured) | set(forced))
     assert len(_leaf_names(arr)) == len(names) - len(merged)
+
+
+# ---------------------------------------------------------------- core gate
+
+@pytest.mark.parametrize("mode,yml_extra", [
+    ("physics", {"era5_surface_fluxes": True}),
+    ("neural_gcm", {"neural_gcm": {"spatial_embedding": True}}),
+    ("sfno", {"sfno": {"spatial_embedding": True}}),
+])
+def test_latlon_core_refuses_the_spectral_only_options(mode, yml_extra):
+    from types import SimpleNamespace
+
+    yml = yaml.safe_load(DECKS[0].read_text())
+    yml["neural_gcm"]["spatial_embedding"] = False
+    yml["sfno"]["spatial_embedding"] = False
+    for k, v in yml_extra.items():
+        if isinstance(v, dict):
+            yml[k].update(v)
+        else:
+            yml[k] = v
+    cfg = SimpleNamespace(mode=mode, training_core="latlon")
+    with pytest.raises(SystemExit, match="spectral"):
+        scale_build.build_mode_components(cfg, yml)
+
+
+# ---------------------------------------------------------------- shared forcing
+
+def test_build_spectral_forcing_carries_exactly_what_the_slice_carries():
+    import jax.numpy as jnp
+    import numpy as np
+    from legoesm.grids.gaussian import create_gaussian_grid
+    from legoesm.training.era5_to_state import ERA5Slice
+
+    grid = create_gaussian_grid(n_max=8)
+    n_lat, n_lon = 9, 12
+    lat = np.deg2rad(np.linspace(90.0, -90.0, n_lat))
+    lon = np.deg2rad(np.linspace(0.0, 330.0, n_lon))
+    z3 = np.zeros((n_lat, n_lon, 3), np.float32)
+    two = np.full((n_lat, n_lon), 2.0, np.float32)
+    base = dict(T=z3, u=z3, v=z3, q=z3, p_s=two, sst=np.full((n_lat, n_lon), 290.0, np.float32),
+                phis=two, lat=lat, lon=lon, plev_Pa=np.array([300.0, 500.0, 850.0]))
+    t = np.datetime64("2019-03-01T06:00")
+    plain = scale_build.build_spectral_forcing(ERA5Slice(**base), grid, t, 2019)
+    assert set(plain) == {"T_sfc", "sic", "day_of_year", "seconds_of_day"}
+    ncol = len(grid.lat) * len(grid.lon)
+    assert plain["T_sfc"].shape == (ncol,)
+    fluxy = scale_build.build_spectral_forcing(
+        ERA5Slice(**base, sfc_shf=two, sfc_lhf=two, sfc_tau_x=two,
+                  sfc_tau_y=-two, sfc_sw_up=two, sfc_sw_down=two,
+                  sfc_lw_up=two, land_frac=np.full((n_lat, n_lon), 1.5, np.float32)),
+        grid, t, 2019)
+    assert set(fluxy) == set(plain) | {
+        "sfc_shf", "sfc_lhf", "sfc_tau_x", "sfc_tau_y", "sfc_sw_up",
+        "sfc_sw_down", "sfc_lw_up", "land_frac"}
+    assert float(jnp.max(fluxy["sfc_tau_y"])) == -2.0
+    assert float(jnp.max(fluxy["land_frac"])) == 1.0  # clipped to [0, 1]
+    assert fluxy["land_frac"].shape == (ncol,)

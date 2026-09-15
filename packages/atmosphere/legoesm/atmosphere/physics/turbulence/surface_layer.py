@@ -165,6 +165,11 @@ def compute_surface_fluxes(
         config, tau_x, tau_y, shflx, lhflx, ustar, rho)
 
 
+# Floor on the prescribed stress magnitude inside ustar's nested roots; far
+# below any measurable stress, it only bounds the derivative at zero.
+_PRESCRIBED_TAU_FLOOR_PA = 1.0e-12  # coeff-ok: numerical floor for a 0/0 gradient
+
+
 def _apply_prescribed_scalar_fluxes(config, tau_x, tau_y, shflx, lhflx, ustar, rho):
     """Override the turbulent surface fluxes with prescribed values.
 
@@ -207,7 +212,11 @@ def _apply_prescribed_scalar_fluxes(config, tau_x, tau_y, shflx, lhflx, ustar, r
         if config.prescribed_tau_y_pa is not None:
             tau_y = jnp.full_like(tau_y, config.prescribed_tau_y_pa)
         # ustar^2 = |tau| / rho  =>  ustar = sqrt(sqrt(tx^2 + ty^2) / rho).
-        ustar = jnp.sqrt(jnp.sqrt(tau_x ** 2 + tau_y ** 2) / rho)
+        # The floor keeps the nested roots differentiable at exactly zero
+        # stress (a calm ERA5 column): without it the cotangent is 0/0.
+        ustar = jnp.sqrt(
+            jnp.sqrt(tau_x ** 2 + tau_y ** 2 + _PRESCRIBED_TAU_FLOOR_PA ** 2)
+            / rho)
     return tau_x, tau_y, shflx, lhflx, ustar
 
 

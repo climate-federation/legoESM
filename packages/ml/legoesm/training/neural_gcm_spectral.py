@@ -972,11 +972,9 @@ def make_turbulence_only_spectral_physics(dt,
         ncol = int(grid_.n_lat) * int(grid_.n_lon)
         ps = init_physics_state(ncol, int(sigma_coord.n_levels), cfg)
         _dt = ps.surface_T_sfc_override.dtype
-        # NaN sanitised: a NaN here reaches every column's stress and gradient.
-        tau_x = jnp.nan_to_num(
-            jnp.asarray(forcing["sfc_tau_x"]).reshape(ncol), nan=0.0).astype(_dt)
-        tau_y = jnp.nan_to_num(
-            jnp.asarray(forcing["sfc_tau_y"]).reshape(ncol), nan=0.0).astype(_dt)
+        # Verbatim (the loader refuses non-finite planes; see spectral_rollout).
+        tau_x = jnp.asarray(forcing["sfc_tau_x"]).reshape(ncol).astype(_dt)
+        tau_y = jnp.asarray(forcing["sfc_tau_y"]).reshape(ncol).astype(_dt)
         _t_raw = jnp.asarray(forcing["T_sfc"]).reshape(ncol).astype(_dt)
         t_sfc = jnp.where(jnp.isfinite(_t_raw), _t_raw, NO_SFC_T_OVERRIDE)
         ps = ps._replace(
@@ -1444,10 +1442,10 @@ def spectral_rollout(
                     f"{_k!r} has shape {_raw_f.shape}, expected "
                     f"({_ncol_grid},) — one value per column of the physics "
                     "grid.")
-            # A NaN in the carried physics state propagates through every
-            # step and gradient of the window.
-            _flux_override.append(
-                jnp.where(jnp.isfinite(_raw_f), _raw_f, 0.0))
+            # Taken VERBATIM: the loader refuses non-finite planes, and a
+            # silent NaN->0 here would turn a broken sample into "no flux"
+            # for the classical arm while the learned arms saw the NaN.
+            _flux_override.append(_raw_f)
         _flux_override = tuple(_flux_override)
     if forcing_base is not None:
         _missing = [k for k in ("T_sfc", "sic", "day_of_year", "seconds_of_day") if k not in forcing_base]

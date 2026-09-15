@@ -10,6 +10,7 @@ Covers:
 """
 from __future__ import annotations
 
+import jax.numpy as jnp
 import numpy as np
 import pytest
 from legoesm.atmosphere.physics.combined import PhysicsConfig
@@ -71,13 +72,6 @@ def test_stress_override_accepts_column_vector():
 def test_heat_flux_prescription_alone_leaves_momentum_alone():
     u, v, T, q_v, T_sfc, q_sfc, rho = _bulk_inputs()
     cfg_sh = SurfaceLayerConfig(prescribed_shflx_w_m2=25.0)
-    cfg_none = SurfaceLayerConfig()
-    for cfg in (cfg_sh, cfg_none):
-        tau_x, tau_y, _, _, ustar = compute_surface_fluxes(
-            u, v, T, q_v, T_sfc, q_sfc, rho, cfg
-        )
-        if cfg is cfg_sh:
-            np.testing.assert_allclose(tau_x, tau_x)  # no-op guard
     tx_ref, ty_ref, _, _, us_ref = compute_surface_fluxes(
         u, v, T, q_v, T_sfc, q_sfc, rho, SurfaceLayerConfig()
     )
@@ -160,3 +154,19 @@ def test_has_prescribed_surface_fluxes_and_field_names():
         "surface_tau_y_override_pa",
     }
     assert names <= set(PHYSSTATE_INPUT_FIELDS)
+
+
+def test_zero_prescribed_stress_has_a_finite_ustar_gradient():
+    """A calm ERA5 column (|tau| = 0) must not poison the adjoint: the nested
+    roots in ustar are 0/0 there without the floor."""
+    import jax
+
+    u, v, T, q_v, T_sfc, q_sfc, rho = _bulk_inputs()
+    cfg = SurfaceLayerConfig(prescribed_tau_x_pa=0.0, prescribed_tau_y_pa=0.0)
+
+    def ustar_sum(rho_):
+        return jnp.sum(compute_surface_fluxes(
+            u, v, T, q_v, T_sfc, q_sfc, rho_, cfg)[4])
+
+    g = jax.grad(ustar_sum)(jnp.asarray(rho))
+    assert bool(jnp.all(jnp.isfinite(g)))

@@ -932,6 +932,21 @@ def load_era5_slice(
             sfc_sw_up = (_swd - _swn) / acc
             sfc_sw_down = _swd / acc
             sfc_lw_up = (_lwd - _lwn) / acc
+            # A non-finite plane would become a zero flux (classical anchor)
+            # or a NaN input (learned arm) downstream, where nothing can
+            # raise; ERA5 has none, so a NaN here is a store defect.
+            for _nm, _arr in (("sfc_shf", sfc_shf), ("sfc_lhf", sfc_lhf),
+                              ("sfc_tau_x", sfc_tau_x),
+                              ("sfc_tau_y", sfc_tau_y),
+                              ("sfc_sw_up", sfc_sw_up),
+                              ("sfc_sw_down", sfc_sw_down),
+                              ("sfc_lw_up", sfc_lw_up)):
+                if not np.all(np.isfinite(_arr)):
+                    raise ValueError(
+                        f"load_surface_fluxes=True: {_nm} has "
+                        f"{int((~np.isfinite(_arr)).sum())} non-finite "
+                        f"values at time index {time_index} in {fzarr}; "
+                        "refusing to prescribe a broken boundary condition.")
 
         if _want_land:
             # Static land-sea mask (0..1): state store first, then the flux
@@ -968,6 +983,10 @@ def load_era5_slice(
                     f"{(len(lat), len(lon))}.")
             if _from_flux_store and flip_lat:
                 _d = _d[::-1]
+            if not np.all(np.isfinite(_d)):
+                raise ValueError(
+                    "land_sea_mask has non-finite values; refusing to feed "
+                    "a broken land fraction to the model.")
             land_frac = _d.astype(np.float32)
 
     # --- optional cloud condensate for the initial condition ---------------

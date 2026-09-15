@@ -334,7 +334,6 @@ def _sheared(state, seed=5):
 def test_turbulence_only_stress_changes_tendency(state):
     st, sigma = state
     st_s = _sheared(st)
-    ncol = len(st_s.vor_hat.data.shape)  # placeholder, real ncol below
     fn = make_turbulence_only_spectral_physics(dt=900.0)
     grid = create_gaussian_grid(n_max=10)
     ncol = len(grid.lat) * len(grid.lon)
@@ -357,3 +356,23 @@ def test_turbulence_only_single_stress_key_raises(state):
     forcing = {"sfc_tau_x": jnp.full((ncol,), 0.1)}
     with pytest.raises(ValueError):
         fn(st, grid, sigma, forcing=forcing)
+
+
+def test_prescribed_eastward_stress_accelerates_the_lowest_level_eastward(state):
+    """SIGN through the scheme: a stress ON THE ATMOSPHERE of +0.1 Pa
+    (eastward) must give du/dt > 0 at the lowest level under Louis."""
+    from legoesm.atmosphere.dynamics.gcm.spectral_pe import spectral_pe_to_grid
+
+    st, sigma = state
+    grid = create_gaussian_grid(n_max=10)
+    ncol = len(grid.lat) * len(grid.lon)
+    fn = make_turbulence_only_spectral_physics(dt=900.0, turbulence_scheme="louis")
+    f = _base_forcing(ncol)
+    f.update({"sfc_tau_x": jnp.full((ncol,), 0.1),
+              "sfc_tau_y": jnp.zeros((ncol,))})
+    tend = fn(st, grid, sigma, forcing=f)
+    du_dt = spectral_pe_to_grid(tend, grid, sigma)["u"][..., -1]
+    assert float(jnp.min(du_dt)) > 0.0
+    f["sfc_tau_x"] = jnp.full((ncol,), -0.1)
+    du_dt_w = spectral_pe_to_grid(fn(st, grid, sigma, forcing=f), grid, sigma)["u"][..., -1]
+    assert float(jnp.max(du_dt_w)) < 0.0

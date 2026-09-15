@@ -784,6 +784,20 @@ def build_mode_components(cfg, yml):
             f"unknown training_core {core!r}; choose 'latlon' (explicit "
             f"C-grid production core) or 'spectral' (Gaussian semi-implicit "
             f"training core, #817)")
+    # The prescribed-flux and spatial-embedding options are built on the
+    # spectral core only; on the lat-lon core the keys would be read by the
+    # loader and then silently dropped by the forcing/model builders.
+    _unsupported = []
+    if bool(yml.get("era5_surface_fluxes", False)):
+        _unsupported.append("era5_surface_fluxes")
+    _mode = getattr(cfg, "mode", None)
+    if _mode in ("neural_gcm", "sfno") and bool(
+            (yml.get(_mode, {}) or {}).get("spatial_embedding", False)):
+        _unsupported.append(f"{_mode}.spatial_embedding")
+    if _unsupported:
+        raise SystemExit(
+            f"{_unsupported} are only wired on --training-core spectral; the "
+            "lat-lon core would load the data and silently run without it.")
 
     config = build_latlon_config(cfg, yml)
     driver = ModelDriver(config)
@@ -960,10 +974,48 @@ def _era5_config(cfg, yml):
     if yml.get("era5_cloud_zarr"):
         c = c._replace(cloud_zarr=str(yml["era5_cloud_zarr"]))
     c = c._replace(
-        load_surface_fluxes=bool(yml.get("era5_surface_fluxes", False)))
+        load_surface_fluxes=bool(yml.get("era5_surface_fluxes", False)),
+        load_land_frac=wb_needs_land_frac(getattr(cfg, "mode", None), yml))
     if yml.get("era5_flux_zarr"):
         c = c._replace(flux_zarr=str(yml["era5_flux_zarr"]))
     return c
+
+
+def build_spectral_forcing(sl, grid, time_ns, year):
+    """The traced per-sample forcing dict of the spectral core, from a slice.
+
+    ONE builder for the training loader and the WB2 forecast eval, so a model
+    is scored with exactly the forcing it was trained with: the prescribed
+    surface-flux planes and the land fraction ride along whenever the slice
+    carries them (i.e. whenever its ``TrainingERA5Config`` asked for them),
+    regridded and flattened exactly like ``T_sfc``.  Signs are already the
+    model's: ``era5_to_state`` did the ERA5 flips.
+    """
+    import jax.numpy as jnp
+
+    from legoesm.training.era5_to_state import regrid_2d_to_gaussian
+
+    def _plane(field):
+        return jnp.asarray(regrid_2d_to_gaussian(
+            field, sl.lat, sl.lon, grid)).reshape(-1)
+
+    sst = _plane(sl.sst)
+    doy_1based, sod = era5_time_to_forcing_calendar(time_ns, year)
+    forcing = {
+        "T_sfc": sst,
+        "sic": jnp.zeros_like(sst),
+        "day_of_year": jnp.asarray(doy_1based),
+        "seconds_of_day": jnp.asarray(sod),
+    }
+    if sl.sfc_shf is not None:
+        for _key in ("sfc_shf", "sfc_lhf", "sfc_tau_x", "sfc_tau_y",
+                     "sfc_sw_up", "sfc_sw_down", "sfc_lw_up"):
+            forcing[_key] = _plane(getattr(sl, _key))
+    if sl.land_frac is not None:
+        # Static 0..1 mask; interpolation can overshoot, clip back.
+        forcing["land_frac"] = jnp.asarray(np.clip(regrid_2d_to_gaussian(
+            sl.land_frac, sl.lat, sl.lon, grid), 0.0, 1.0)).reshape(-1)
+    return forcing
 
 
 def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
@@ -981,26 +1033,27 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     B — no global materialization); with ``host_resident`` each built sample is
     moved off-device to host numpy (fix A — the loop ``device_put``s per batch).
     """
-    import jax.numpy as jnp
-
     from legoesm.training.era5_to_state import (
         era5_to_spectral_carry,
         load_era5_slice,
         open_era5_zarr,
-        regrid_2d_to_gaussian,
     )
 
-    # ic/target slices need the state only; the sample-start slice below is
-    # the one that carries the prescribed surface planes.
+    # ic/target slices need the state only; the sample-start slice (2-D
+    # fields only: asking it for condensate would re-read the cloud store per
+    # sample for data it throws away) is the one that carries the prescribed
+    # surface planes.
+    sst_cfg = _era5_config(cfg, yml)._replace(load_cloud_condensate=False)
     era5_cfg = _era5_config(cfg, yml)._replace(
         load_surface_fluxes=False, load_land_frac=False)
-    surface_fluxes = bool(yml.get("era5_surface_fluxes", False))
-    need_land = wb_needs_land_frac(cfg.mode, yml)
+    surface_fluxes = sst_cfg.load_surface_fluxes
     flux_ds = None
     global _WARNED_ERA5_FLUX_HOLD_FIXED
-    if surface_fluxes or need_land:
+    if surface_fluxes:
         # Opened once for the whole sharded loop; the loader honours flux_ds.
-        flux_ds = open_era5_zarr(era5_cfg.flux_zarr)
+        # A land fraction alone is NOT a reason to open it: the state store
+        # (WB2) carries the mask and the loader falls back lazily otherwise.
+        flux_ds = open_era5_zarr(sst_cfg.flux_zarr)
     if surface_fluxes and not _WARNED_ERA5_FLUX_HOLD_FIXED:
         _WARNED_ERA5_FLUX_HOLD_FIXED = True
         logger.warning(
@@ -1017,14 +1070,6 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     # re-opening a remote zarr per sample would dominate the load.
     cloud_ds = (open_era5_zarr(era5_cfg.cloud_zarr)
                 if era5_cfg.load_cloud_condensate else None)
-    # The surface-temperature reload below wants 2-D fields only; asking it for
-    # condensate would re-read the cloud store once per sample for data it
-    # throws away.
-    sst_cfg = era5_cfg._replace(
-        load_cloud_condensate=False,
-        load_surface_fluxes=surface_fluxes,
-        load_land_frac=need_land)
-
     # Which water species the state must carry follows the scheme the arm
     # selects, and the carry builder already knows how to seed them — it was
     # simply never told which scheme was running here, so every state was built
@@ -1056,29 +1101,7 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
             validate_carry_holds_scheme(
                 ic, _micro, context=f"WB {cfg.mode} arm initial condition")
         sst_src = load_era5_slice(sst_cfg, i_ic, ds=ds, flux_ds=flux_ds)
-        sst = jnp.asarray(regrid_2d_to_gaussian(
-            sst_src.sst, sst_src.lat, sst_src.lon, grid)).reshape(-1)
-        doy_1based, sod = era5_time_to_forcing_calendar(times[i_ic], year)
-        forcing = {
-            "T_sfc": sst,
-            "sic": jnp.zeros_like(sst),
-            "day_of_year": jnp.asarray(doy_1based),
-            "seconds_of_day": jnp.asarray(sod),
-        }
-        if surface_fluxes:
-            # Prescribed surface planes, regridded and flattened exactly like
-            # T_sfc.  Signs are already legoESM's (heat positive UP, stress ON
-            # THE ATMOSPHERE): era5_to_state did the ERA5 flips.
-            for _key in ("sfc_shf", "sfc_lhf", "sfc_tau_x", "sfc_tau_y",
-                         "sfc_sw_up", "sfc_sw_down", "sfc_lw_up"):
-                forcing[_key] = jnp.asarray(regrid_2d_to_gaussian(
-                    getattr(sst_src, _key), sst_src.lat, sst_src.lon,
-                    grid)).reshape(-1)
-        if need_land:
-            # Static 0..1 mask; interpolation can overshoot, clip back.
-            forcing["land_frac"] = jnp.asarray(np.clip(regrid_2d_to_gaussian(
-                sst_src.land_frac, sst_src.lat, sst_src.lon, grid),
-                0.0, 1.0)).reshape(-1)
+        forcing = build_spectral_forcing(sst_src, grid, times[i_ic], year)
         sample = (ic, target, forcing)
         samples.append(_sample_to_host(sample) if host_resident else sample)
     return samples

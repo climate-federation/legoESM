@@ -78,6 +78,14 @@ def test_sw_up_down_matches_albedo_and_threshold(setup):
         {"sfc_sw_up": 0.8 * sw_down_lo, "sfc_sw_down": sw_down_lo},
     )
     assert h_lo == pytest.approx(h_none, rel=1e-6)
+    # ... and keeps a per-step forcing albedo, not the config scalar.
+    h_lo_alb = heating(
+        state, grid, sigma, fn,
+        {"sfc_sw_up": 0.8 * sw_down_lo, "sfc_sw_down": sw_down_lo,
+         "sfc_albedo": jnp.full(ncol, 0.8)},
+    )
+    assert h_lo_alb == pytest.approx(h_alb, rel=1e-6)
+    assert h_lo_alb != pytest.approx(h_none, rel=1e-6)
 
 
 def test_mismatched_sw_pair_raises(setup):

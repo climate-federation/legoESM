@@ -892,6 +892,17 @@ def make_column_physics_fn(
     nlev = neural_physics.nlev
     use_static = neural_physics.n_static > 0
     use_flux = neural_physics.n_flux > 0
+    # A momentum source is handed the forcing only if it declares the kwarg:
+    # the historical ``(state, grid, sigma)`` callables keep working, the
+    # turbulence-only builder (which reads the ERA5 stress) declares it.
+    _mom_wants_forcing = False
+    if momentum_physics_fn is not None:
+        import inspect
+        try:
+            _mom_wants_forcing = "forcing" in inspect.signature(
+                momentum_physics_fn).parameters
+        except (TypeError, ValueError):
+            _mom_wants_forcing = False
 
     def physics_fn(state, grid_, sigma_coord, forcing=None):
         # Spectral -> grid-space fields
@@ -1004,12 +1015,10 @@ def make_column_physics_fn(
         if momentum_physics_fn is None:
             vor_t, div_t = zero_3d, zero_3d
         else:
-            # The forcing rides along only when there is one, so a plain
-            # ``(state, grid, sigma)`` momentum source keeps working.
-            _mom = (momentum_physics_fn(state, grid_, sigma_coord)
-                    if forcing is None else
-                    momentum_physics_fn(state, grid_, sigma_coord,
-                                        forcing=forcing))
+            _mom = (momentum_physics_fn(state, grid_, sigma_coord,
+                                        forcing=forcing)
+                    if _mom_wants_forcing else
+                    momentum_physics_fn(state, grid_, sigma_coord))
             vor_t = _mom.vor_hat.data
             div_t = _mom.div_hat.data
         # lnps stays ZERO regardless of the source — see the factory docstring

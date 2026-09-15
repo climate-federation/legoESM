@@ -226,7 +226,15 @@ def main(argv=None, ds=None):
         return carry_to_spectral_state(final_carry, grid)
 
     # --- ERA5 cases (ICs + forcing + WB2-grid verification) ---
-    era5_cfg = TrainingERA5Config(dt_hours=cadence)._replace(zarr_store=yml["era5_zarr"])
+    # The eval's surface forcing must match training: the prescribed-flux
+    # planes and the land fraction are loaded iff the deck (and mode) ask.
+    from legoesm.training.scale_build import wb_needs_land_frac
+    era5_cfg = TrainingERA5Config(dt_hours=cadence)._replace(
+        zarr_store=yml["era5_zarr"],
+        load_surface_fluxes=bool(yml.get("era5_surface_fluxes", False)),
+        load_land_frac=wb_needs_land_frac(cfg.mode, yml))
+    if yml.get("era5_flux_zarr"):
+        era5_cfg = era5_cfg._replace(flux_zarr=str(yml["era5_flux_zarr"]))
     cases = build_forecast_cases(
         era5_cfg, grid, sigma,
         leads_hours=cfg.leads_hours, eval_year=eval_year, n_inits=cfg.n_inits,
