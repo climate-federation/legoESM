@@ -56,7 +56,7 @@ export JAX_PLATFORMS=cuda,cpu JAX_ENABLE_X64=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_MEM_FRACTION=0.92
 export LEGOESM_LATLON_SPMD_FUSED_HALO=1
 echo "=== ORCA12 smoke: nodes=$SLURM_JOB_NUM_NODES gpus=$NGPU dt=$DT steps=$STEPS days=$DAYS diag_every=$DIAG_EVERY write=[$WRITE] extra=[$EXTRA] memprobe=${MEMPROBE:-0} $(date) ==="
-echo "PRE-REGISTRATION (IC stability guard arm): number = max|u| and its ij every $DIAG_EVERY steps; CONFIRMED = max|u| < 1 m/s at step $STEPS and no exponential growth anywhere; REFUTED = growth continues at (2056,3744) or elsewhere; a $STEPS-step ORCA12 integration cannot be done offline."
+echo "PRE-REGISTRATION (FESOM-IC arm, 2026-09-16): CONFIRMED = max|u| < 1 m/s at step 40 and no monotone growth anywhere; REFUTED = growth continues (then the next test is the partial-cell/Adcroft PGF, not the IC). "; echo "PRE-REGISTRATION (IC stability guard arm): number = max|u| and its ij every $DIAG_EVERY steps; CONFIRMED = max|u| < 1 m/s at step $STEPS and no exponential growth anywhere; REFUTED = growth continues at (2056,3744) or elsewhere; a $STEPS-step ORCA12 integration cannot be done offline."
 echo "mesh: $M (sha256 in $M/SHA256SUMS)"; cat $M/PROVENANCE.txt
 ( while true; do nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits | tr '\n' ' '; echo; sleep 15; done ) > $OUT/gpumem_node0.txt &
 MON=$!
