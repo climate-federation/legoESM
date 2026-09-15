@@ -1880,3 +1880,9 @@ class ConvectionConfig(NamedTuple):
     # NOT YET IMPLEMENTED in the production pipeline (see docstring above):
     # convection runs every step; only the SCM reads this (rejection guard).
     update_interval_steps: int = 1
+    # rain_to_surface=True: the in-updraught rain that survives the scheme's own
+    # downdraft + sub-cloud evaporation leaves the column as SURFACE precipitation
+    # (IFS cuflxn convention); False: it is handed to the microphysics rain
+    # tracer q_r at its formation levels, where the microphysics evaporates it
+    # again at grid-mean humidity.  Default pending a user decision (2026-09-15).
+    rain_to_surface: bool = False

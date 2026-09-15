@@ -775,6 +775,10 @@ class ExperimentConfig(NamedTuple):
     # 1978, convective_autoconversion_split), threaded to conv_config in
     # physics_pipeline; the scheme body raises on an unknown value.
     convective_precip_split: str = "constant"
+    # True: the in-updraught convective rain surviving the scheme's own sub-cloud
+    # evaporation leaves the column as surface precipitation (IFS); False: it is
+    # handed to the microphysics rain tracer (legacy). Default pending user decision.
+    convective_rain_to_surface: bool = False
     autoconv_q_c_crit: float = 5.0e-4   # [kg/kg] Sundqvist critical updraft cloud water
     autoconv_pe_max: float = 0.9        # [1] ceiling on the emergent precip fraction
 

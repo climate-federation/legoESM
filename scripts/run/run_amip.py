@@ -1153,6 +1153,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "uses each scheme's own default (Tiedtke 0.0=off, "
                              "Bechtold 0.7=on, the #929 fix); pass 0.0 to force "
                              "the legacy no-split path.")
+    parser.add_argument("--convective-rain-to-surface",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        dest="convective_rain_to_surface",
+                        help="Route the in-updraught convective rain that survives "
+                             "the scheme's own sub-cloud evaporation straight to "
+                             "surface precipitation (IFS convention) instead of "
+                             "into the microphysics rain tracer, where it is "
+                             "re-evaporated at grid-mean humidity.")
     parser.add_argument("--convective-precip-split", type=str, default="constant",
                         choices=["constant", "autoconversion"],
                         help="Convective precip-split scheme (Bechtold/Tiedtke): "
@@ -2010,6 +2018,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         hard_sat_max_heating_K=args.hard_sat_max_heating_K,
         convective_precip_efficiency=args.convective_precip_efficiency,
         convective_precip_split=args.convective_precip_split,
+        convective_rain_to_surface=args.convective_rain_to_surface,
         autoconv_q_c_crit=args.autoconv_q_c_crit,
         autoconv_pe_max=args.autoconv_pe_max,
         convective_buoyancy_death_memory=args.convective_buoyancy_death_memory,

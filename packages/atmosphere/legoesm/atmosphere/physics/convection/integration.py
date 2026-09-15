@@ -753,6 +753,7 @@ def _make_hydrostatic_convection(
         # AMIP, where the implied precip simply leaves the prescribed surface;
         # a convective-precip path here is a tracked follow-up).
         tracer_tends = None
+        _precip_conv = None
         if conv_fn is not None:
             dq_v_dt = conv_out.dq_v_dt.reshape(shape_3d)
             dq_c_conv_dt = conv_out.dq_c_conv_dt.reshape(shape_3d)
@@ -762,8 +763,12 @@ def _make_hydrostatic_convection(
             # ``precip_efficiency``) alongside the anvil-cloud source
             # ``dq_c_conv_dt``.  The unified PhysicsPipeline column-integrates
             # dq_r into same-step surface precip; this standalone bridge has no
-            # surface-precip accumulator, so we CONSERVE it: route it to the
-            # ``q_r`` rain tracer when the state has one (microphysics sediments
+            # surface-precip accumulator of its own, so by default we CONSERVE it in
+            # the column: route it to the ``q_r`` rain tracer when the state has one
+            # (microphysics sediments it -- and re-evaporates it at grid-mean RH;
+            # ``config.rain_to_surface`` instead emits it as the ``precip`` field the
+            # combined-physics accumulator sums, the IFS convention)
+            # (microphysics sediments
             # it), else fold it back into ``q_c`` so total convective condensate
             # (dq_c + dq_r) is preserved — byte-identical to the pre-split
             # all-condensate-to-cloud routing.  SIGN: ``dq_r_conv_dt >= 0`` is a
@@ -771,7 +776,11 @@ def _make_hydrostatic_convection(
             # no rain split emit ``None`` -> no-op (byte-identical).
             _dq_r_conv = conv_out.dq_r_conv_dt
             _has_qr = state.tracers is not None and "q_r" in state.tracers
-            if _dq_r_conv is not None and not _has_qr:
+            # Static Python bool (closure constant): rain_to_surface routes the
+            # survivor rain out of the column as surface precip below instead
+            # of into q_r / q_c.
+            _to_sfc = bool(getattr(convection_config, "rain_to_surface", False))
+            if _dq_r_conv is not None and not _has_qr and not _to_sfc:
                 dq_c_conv_dt = dq_c_conv_dt + _dq_r_conv.reshape(shape_3d)
             tracer_tends = {
                 "q_v": Field(
@@ -783,7 +792,7 @@ def _make_hydrostatic_convection(
                     dims=dims_3d, units="kg/kg/s",
                 ),
             }
-            if _dq_r_conv is not None and _has_qr:
+            if _dq_r_conv is not None and _has_qr and not _to_sfc:
                 tracer_tends["q_r"] = Field(
                     data=_dq_r_conv.reshape(shape_3d), name="dq_r_conv_dt",
                     dims=dims_3d, units="kg/kg/s",
@@ -808,6 +817,13 @@ def _make_hydrostatic_convection(
                 _p_conv_diag = jnp.sum(
                     jnp.maximum(_dq_r_conv.reshape(ncol, nlev), 0.0)
                     * _dp_col, axis=-1) / constants.g
+                if _to_sfc:
+                    # Column water removed == this flux (the q_r/q_c hand-off
+                    # above is skipped); latent heat already booked by the plume.
+                    _precip_conv = Field(
+                        data=_p_conv_diag.reshape(shape_2d).astype(_ps_dtype),
+                        name="precip_conv", dims=dims_2d, units="kg/m^2/s",
+                    )
                 if isinstance(conv_prog_out, dict):
                     conv_prog_out = {**conv_prog_out,
                                      "conv_precip": _p_conv_diag}
@@ -874,6 +890,7 @@ def _make_hydrostatic_convection(
                 dims=dims_2d, units="m^2/s^3",
             ),
             tracer_tendencies=tracer_tends,
+            precip=_precip_conv,
         )
         return tendencies, conv_prog_out
 

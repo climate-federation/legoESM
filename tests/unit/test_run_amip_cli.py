@@ -3977,3 +3977,23 @@ def test_cloud_cover_condensate_q_ref_round_trip_and_bounds():
         parser))
     with pytest.raises(Exception, match="cloud_cover_condensate_q_ref"):
         bad.validate_strict()
+
+
+def test_convective_rain_to_surface_round_trips():
+    """--convective-rain-to-surface reaches ExperimentConfig AND the
+    ConvectionConfig the combined-physics lanes build from it."""
+    from legoesm.driver.physics_pipeline import convection_config_for
+
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical", "--convection", "bechtold"]),
+        parser))
+    assert cfg_default.convective_rain_to_surface is False
+    assert convection_config_for(cfg_default).rain_to_surface is False
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--convective-rain-to-surface",
+    ]), parser))
+    assert cfg.convective_rain_to_surface is True
+    assert convection_config_for(cfg).rain_to_surface is True

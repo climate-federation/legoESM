@@ -3297,6 +3297,8 @@ def convection_config_for(config, grid_dx_m=None):
     cc = ConvectionConfig(scheme=scheme)
     if scheme == "none":
         return cc
+    cc = cc._replace(rain_to_surface=bool(
+        getattr(config, "convective_rain_to_surface", False)))
     _, leaf = _resolve_convection(config)
     if leaf is None or scheme not in cc._fields:
         # Schemes without a leaf slot (or resolver-handled specially) keep
