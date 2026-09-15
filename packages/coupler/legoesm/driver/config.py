@@ -72,6 +72,10 @@ class GridConfig(NamedTuple):
     # mid-troposphere (the lowest layer coarsens ~30%, measured).  Ignored by
     # the hybrid coordinate, which has its own `stretching`.
     tropopause_refine: float = 1.0
+    # Sigma-lane lid as a fraction of surface pressure (0.01 = 10 hPa at
+    # 1000 hPa); ignored by the hybrid coordinate, which uses
+    # p_top_Pa/stretching.  Recorded here so the resolved config is truthful.
+    sigma_top: float = 0.01
     use_duogrid: bool = False        # enable FV3 Duo-Grid halo (required for MPI multi-node)
 
 
@@ -1619,6 +1623,19 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"grid.nlev must be > 0, got {g.nlev}")
         if g.p_top_Pa <= 0:
             errors.append(f"grid.p_top_Pa must be > 0, got {g.p_top_Pa}")
+        if g.vertical_coord == "sigma":
+            if not (0.0 < g.sigma_top < 1.0):
+                errors.append(
+                    f"grid.sigma_top must be in (0, 1) on the sigma lane (got {g.sigma_top})")
+            if g.p_top_Pa != 200.0 or g.stretching != 2.0:
+                errors.append(
+                    "grid.p_top_Pa and grid.stretching are hybrid-only fields and are inert "
+                    "on the sigma lane; leave them at their defaults (200.0, 2.0) and set "
+                    "grid.sigma_top instead")
+        elif g.vertical_coord == "hybrid" and g.sigma_top != 0.01:
+            errors.append(
+                "grid.sigma_top is inert on the hybrid lane, which uses p_top_Pa/"
+                f"stretching; leave it at its default 0.01 (got {g.sigma_top})")
         # Tropopause refinement: 1.0 = uniform.  The upper bound is NOT a
         # vertical-CFL limit — the first-order-upwind vertical advective CFL
         # is only 0.26 at refine=3 / dt=75 s / omega=5 Pa/s and 0.39 at
