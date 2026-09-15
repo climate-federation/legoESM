@@ -193,8 +193,11 @@ def build_forecast_cases(
     # The prescribed-surface-flux store, opened ONCE for every init (the
     # training loader does the same); a land fraction alone comes from the
     # state store and needs no remote open.
-    flux_ds = (open_era5_zarr(era5_cfg.flux_zarr)
-               if era5_cfg.load_surface_fluxes else None)
+    flux_ds = None
+    if era5_cfg.load_surface_fluxes:
+        # flux_zarr == "" means "read the fluxes from the state store".
+        flux_ds = (open_era5_zarr(era5_cfg.flux_zarr) if era5_cfg.flux_zarr
+                   else ds)
 
     base = int(np.searchsorted(times, np.datetime64(f"{eval_year}-01-01")))
     if base >= n_times:

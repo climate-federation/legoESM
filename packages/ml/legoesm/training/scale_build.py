@@ -976,8 +976,10 @@ def _era5_config(cfg, yml):
     c = c._replace(
         load_surface_fluxes=bool(yml.get("era5_surface_fluxes", False)),
         load_land_frac=wb_needs_land_frac(getattr(cfg, "mode", None), yml))
-    if yml.get("era5_flux_zarr"):
-        c = c._replace(flux_zarr=str(yml["era5_flux_zarr"]))
+    if "era5_flux_zarr" in yml:
+        # An explicit "" selects the STATE store as the flux store (the
+        # loader's documented option), so the key's presence decides.
+        c = c._replace(flux_zarr=str(yml["era5_flux_zarr"] or ""))
     return c
 
 
@@ -1049,11 +1051,13 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
     surface_fluxes = sst_cfg.load_surface_fluxes
     flux_ds = None
     global _WARNED_ERA5_FLUX_HOLD_FIXED
+    ds = open_era5_zarr(era5_cfg.zarr_store)
     if surface_fluxes:
         # Opened once for the whole sharded loop; the loader honours flux_ds.
         # A land fraction alone is NOT a reason to open it: the state store
         # (WB2) carries the mask and the loader falls back lazily otherwise.
-        flux_ds = open_era5_zarr(sst_cfg.flux_zarr)
+        # flux_zarr == "" means "read the fluxes from the state store".
+        flux_ds = open_era5_zarr(sst_cfg.flux_zarr) if sst_cfg.flux_zarr else ds
     if surface_fluxes and not _WARNED_ERA5_FLUX_HOLD_FIXED:
         _WARNED_ERA5_FLUX_HOLD_FIXED = True
         logger.warning(
@@ -1061,7 +1065,6 @@ def _load_era5_samples_spectral(cfg, yml, grid, sigma, *,
             "fluxes is not implemented — every flux plane is HELD FIXED at "
             "its sample-start value for the whole training window "
             "(owner decision 2026-09-15).")
-    ds = open_era5_zarr(era5_cfg.zarr_store)
     times = np.asarray(ds.time.values, dtype="datetime64[ns]")
     snaps_per_day = 24 // era5_cfg.dt_hours
     roll_h = rollout_hours(cfg, yml)

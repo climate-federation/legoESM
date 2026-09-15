@@ -233,8 +233,8 @@ def main(argv=None, ds=None):
         zarr_store=yml["era5_zarr"],
         load_surface_fluxes=bool(yml.get("era5_surface_fluxes", False)),
         load_land_frac=wb_needs_land_frac(cfg.mode, yml))
-    if yml.get("era5_flux_zarr"):
-        era5_cfg = era5_cfg._replace(flux_zarr=str(yml["era5_flux_zarr"]))
+    if "era5_flux_zarr" in yml:   # "" = the state store, as in training
+        era5_cfg = era5_cfg._replace(flux_zarr=str(yml["era5_flux_zarr"] or ""))
     cases = build_forecast_cases(
         era5_cfg, grid, sigma,
         leads_hours=cfg.leads_hours, eval_year=eval_year, n_inits=cfg.n_inits,

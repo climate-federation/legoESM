@@ -17,6 +17,7 @@ from typing import Callable
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.core.field import Field
 from legoesm.core.state import (
@@ -2412,8 +2413,12 @@ def _make_spectral_pe_radiation(
             # Only RRTMGP consumes a per-call emissivity; the gray backend
             # reads its config scalar, so the prescribed flux would be
             # silently rescaled by it unless it is exactly 1.
-            if radiation_config.scheme != "rrtmgp" and float(
-                    radiation_config.gray.sfc_emissivity) != 1.0:
+            _gray_e = radiation_config.gray.sfc_emissivity
+            try:
+                _gray_e_is_one = bool(np.all(np.asarray(_gray_e) == 1.0))
+            except (TypeError, jax.errors.TracerArrayConversionError):
+                _gray_e_is_one = False   # traced: cannot be shown to be 1
+            if radiation_config.scheme != "rrtmgp" and not _gray_e_is_one:
                 raise ValueError(
                     "forcing['sfc_lw_up'] prescribes the upwelling LW as "
                     "sigma*T_rad^4 (emissivity 1), but the gray radiation "
@@ -2558,7 +2563,8 @@ def _make_spectral_pe_radiation(
             # albedo: there the ratio is undefined and the sun is down.
             _sw_up_c = _to_col(jnp.asarray(_sw_up_ovr))
             _sw_dn_c = _to_col(jnp.asarray(_sw_dn_ovr))
-            _own_alb_c = jnp.broadcast_to(jnp.asarray(_own_alb), (ncol,))
+            _own_alb_c = jnp.broadcast_to(
+                jnp.asarray(_to_col(jnp.asarray(_own_alb))), (ncol,))
             _alb_era5 = jnp.clip(
                 _sw_up_c / jnp.maximum(_sw_dn_c,
                                        _PRESCRIBED_ALBEDO_MIN_SW_DOWN_W_M2),

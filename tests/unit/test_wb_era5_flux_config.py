@@ -47,6 +47,10 @@ def test_era5_config_maps_the_flux_keys():
                "era5_flux_zarr": "gs://bucket/flux"})
     assert cfg.load_surface_fluxes is True
     assert cfg.flux_zarr == "gs://bucket/flux" != default_flux_zarr
+    # An explicit "" means "the state store is the flux store" and must
+    # survive the mapping (a falsy check would silently restore ARCO).
+    cfg = scale_build._era5_config(None, {**base, "era5_flux_zarr": ""})
+    assert cfg.flux_zarr == ""
 
 
 # ---------------------------------------------------------------- YAML keys
@@ -56,12 +60,29 @@ def test_decks_found():
 
 
 @pytest.mark.parametrize("deck", DECKS, ids=[d.name for d in DECKS])
-def test_committed_decks_set_the_new_flags(deck):
+def test_committed_decks_declare_the_new_flags_explicitly(deck):
+    """Every campaign deck names both choices (no hidden default) and
+    validates; the values are the deck's to choose."""
     yml = yaml.safe_load(deck.read_text())
-    assert yml["era5_surface_fluxes"] is False
-    assert yml["neural_gcm"]["spatial_embedding"] is True
-    assert yml["sfno"]["spatial_embedding"] is True
+    assert isinstance(yml["era5_surface_fluxes"], bool)
+    assert isinstance(yml["neural_gcm"]["spatial_embedding"], bool)
+    assert isinstance(yml["sfno"]["spatial_embedding"], bool)
     scale_build.validate_wb_campaign_yaml(yml)
+
+
+def test_one_committed_deck_selects_the_prescribed_fluxes():
+    """A knob ships with a config that selects it (CLAUDE.md), and the
+    spectral campaign default keeps the spatial embedding ON."""
+    flags = {d.name: yaml.safe_load(d.read_text()) for d in DECKS}
+    assert any(y["era5_surface_fluxes"] is True for y in flags.values())
+    assert flags["spectral_t63.yaml"]["neural_gcm"]["spatial_embedding"] is True
+    assert flags["spectral_t63.yaml"]["sfno"]["spatial_embedding"] is True
+    # the lat-lon deck cannot run either option: it must not select them
+    latlon = yaml.safe_load(
+        (REPO_ROOT / "config" / "wb" / "scale" / "train_07deg.yaml").read_text())
+    assert latlon["era5_surface_fluxes"] is False
+    assert latlon["neural_gcm"]["spatial_embedding"] is False
+    assert latlon["sfno"]["spatial_embedding"] is False
 
 
 def test_validate_accepts_the_new_keys_and_rejects_a_typo():

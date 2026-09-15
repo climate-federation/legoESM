@@ -247,29 +247,6 @@ PHYSSTATE_INPUT_FIELDS = frozenset({
 })
 
 
-def has_prescribed_surface_fluxes(phys_state):
-    """Return whether any prescribed surface-flux override is set.
-
-    Parameters
-    ----------
-    phys_state : PhysicsState
-        State to inspect.
-
-    Returns
-    -------
-    bool
-        True if any of the four prescribed surface-flux anchors
-        (sensible/latent heat [W/m^2], x/y stress [Pa]) is a concrete
-        array. Host-side ``is not None`` test on the four leaves only, so it
-        is safe to call outside a JAX trace (e.g. to pick a code path).
-    """
-    return any(
-        getattr(phys_state, _f, None) is not None
-        for _f in ("surface_shflx_override_w_m2",
-                   "surface_lhflx_override_w_m2",
-                   "surface_tau_x_override_pa",
-                   "surface_tau_y_override_pa"))
-
 
 def init_physics_state(
     ncol: int,

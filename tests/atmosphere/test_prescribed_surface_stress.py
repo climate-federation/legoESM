@@ -6,7 +6,7 @@ Covers:
 - _resolve_prescribed_surface_fluxes: verbatim W/m^2 / Pa transfer, kinematic
   conversion for surface_wth_override, and the conflict ValueError
 - PhysicsState: carrying overrides through update_physics_state,
-  has_prescribed_surface_fluxes, PHYSSTATE_INPUT_FIELDS membership
+  PHYSSTATE_INPUT_FIELDS membership
 """
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ import pytest
 from legoesm.atmosphere.physics.combined import PhysicsConfig
 from legoesm.atmosphere.physics.physics_state import (
     PHYSSTATE_INPUT_FIELDS,
-    has_prescribed_surface_fluxes,
     init_physics_state,
     update_physics_state,
 )
@@ -143,10 +142,7 @@ def test_update_physics_state_allows_clearing_override_via_update():
     assert updated.surface_tau_x_override_pa == 0.09
 
 
-def test_has_prescribed_surface_fluxes_and_field_names():
-    assert not has_prescribed_surface_fluxes(_make_phys_state())
-    ps = _make_phys_state(surface_lhflx_override_w_m2=-5.0)
-    assert has_prescribed_surface_fluxes(ps)
+def test_flux_anchor_slots_are_declared_inputs_not_physics_memory():
     names = {
         "surface_shflx_override_w_m2",
         "surface_lhflx_override_w_m2",

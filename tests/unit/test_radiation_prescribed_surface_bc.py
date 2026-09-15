@@ -107,3 +107,24 @@ def test_gradient_of_heating_wrt_sfc_lw_up_finite_nonzero(setup):
     assert g.shape == (ncol,)
     assert bool(jnp.all(jnp.isfinite(g)))
     assert float(jnp.max(jnp.abs(g))) > 0.0
+
+
+def test_dark_column_fallback_accepts_a_two_dimensional_albedo(setup):
+    """A build-time (n_lat, n_lon) albedo field is a supported layout; the
+    dark-column fallback must flatten it like every other override."""
+    state, grid, sigma, _fn, ncol = setup
+    from legoesm.atmosphere.physics.radiation.config import RadiationConfig
+    from legoesm.atmosphere.physics.radiation.integration import (
+        make_radiation_physics,
+    )
+
+    cfg = RadiationConfig(scheme="rrtmgp", diurnal_cycle=False)
+    alb2d = jnp.full((grid.n_lat, grid.n_lon), 0.45)
+    fn2d = make_radiation_physics(cfg, "spectral_pe", sfc_albedo_override=alb2d)
+    fn1d = make_radiation_physics(cfg, "spectral_pe",
+                                  sfc_albedo_override=alb2d.reshape(-1))
+    dark = {"sfc_sw_up": jnp.full(ncol, 0.4), "sfc_sw_down": jnp.full(ncol, 0.5)}
+    assert heating(state, grid, sigma, fn2d, dark) == pytest.approx(
+        heating(state, grid, sigma, fn1d, dark), rel=1e-9)
+    assert heating(state, grid, sigma, fn2d, dark) == pytest.approx(
+        heating(state, grid, sigma, fn2d, None), rel=1e-9)

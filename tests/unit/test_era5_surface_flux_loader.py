@@ -152,3 +152,21 @@ def test_surface_fluxes_imply_land_frac():
     state = _synthetic_era5("long", extra2d={"lsm": 0.25})
     sl = e2s.load_era5_slice(cfg, 0, ds=state, flux_ds=_flux_ds())
     np.testing.assert_allclose(sl.land_frac, 0.25)
+
+
+def test_non_finite_flux_plane_is_refused_with_the_field_named():
+    cfg = _flux_config(load_surface_fluxes=True)
+    bad = _flux_ds(with_land=True)
+    v = bad["mean_surface_latent_heat_flux"].values.copy()
+    v[0, 2, 3] = np.nan
+    bad["mean_surface_latent_heat_flux"].values[:] = v
+    with pytest.raises(ValueError, match="sfc_lhf.*non-finite"):
+        _load(cfg, bad)
+
+
+def test_flux_store_without_the_state_time_is_refused():
+    """No nearest-hour substitution: the flux snapshot must be AT the state time."""
+    cfg = _flux_config(load_surface_fluxes=True)
+    ds = _flux_ds(with_land=True).assign_coords(time=[7])
+    with pytest.raises(ValueError, match="no snapshot at the state time"):
+        _load(cfg, ds)

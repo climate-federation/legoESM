@@ -852,8 +852,16 @@ def load_era5_slice(
                                    else ds)
             if _flux_ctx["ds_t"] is None:
                 _fds = _flux_ctx["ds"]
-                _flux_ctx["ds_t"] = _fds.sel(time=ds_t.time.values,
-                                             method="nearest")
+                # EXACT timestamp: a prescribed boundary condition from the
+                # wrong hour is a silent forcing error, so no nearest-match.
+                _t_state = np.asarray(ds_t.time.values).reshape(-1)[0]
+                try:
+                    _flux_ctx["ds_t"] = _fds.sel(time=_t_state)
+                except KeyError as e:
+                    raise ValueError(
+                        f"flux store {fzarr} has no snapshot at the state "
+                        f"time {_t_state}; the WB2 6-hourly times must be "
+                        "a subset of the flux store's times.") from e
                 flux_lat_deg = np.asarray(_fds.lat.values, dtype=np.float64)
                 state_lat_deg = np.rad2deg(lat)
                 _flux_ctx["flip"] = (
@@ -945,7 +953,7 @@ def load_era5_slice(
                     raise ValueError(
                         f"load_surface_fluxes=True: {_nm} has "
                         f"{int((~np.isfinite(_arr)).sum())} non-finite "
-                        f"values at time index {time_index} in {fzarr}; "
+                        f"values at time index {time_idx} in {fzarr}; "
                         "refusing to prescribe a broken boundary condition.")
 
         if _want_land:
