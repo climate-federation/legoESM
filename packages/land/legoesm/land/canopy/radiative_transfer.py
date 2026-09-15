@@ -97,6 +97,14 @@ _KB_BEAM      = 0.5        # direct-beam extinction numerator = G-function for a
                            # spherical (uniform) leaf-angle distribution (Ryu 2011)
 
 
+def broadband_albedo(ALB_VIS: jax.Array, ALB_NIR: jax.Array) -> jax.Array:
+    """Broadband reflectance the two-leaf RT realises for these band albedos:
+    the band albedo weights PAR and NIR, the UV band reflects ``_RHO_UV``
+    regardless.  ``1 - sum(absorbed)/sw_down`` of :func:`canopy_shortwave_rt`
+    equals this exactly (the soil-reflection terms cancel in the sum)."""
+    return (_PAR_FRACTION * ALB_VIS + _NIR_FRACTION * ALB_NIR
+            + _UV_FRACTION * _RHO_UV)
+
 def canopy_cover(LAI: jax.Array, CI: jax.Array) -> jax.Array:
     """Fraction of the ground shaded by foliage, ``1 - exp(-G CI LAI)``.
 
