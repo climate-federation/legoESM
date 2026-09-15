@@ -662,7 +662,11 @@ class ExperimentConfig(NamedTuple):
     # the temperature dependence OFF, so the two should eventually be refitted
     # together; an arm moving this alone trades against that land-surface
     # temperature calibration and must be scored on both.
-    land_snow_tau_days: float | None = None
+    # DEFAULT 150 d (user 2026-09-15) once the canopy's absorbed shortwave and
+    # the exported albedo were reconciled: measured on a 30-day pair together
+    # with albedo_ice 0.80, polar clear-sky reflected SW bias -15.7 -> -2.7
+    # W/m2. None restores the calibration's 3.674 d.
+    land_snow_tau_days: float | None = 150.0
     # Marine-Sc albedo lever: blend strength [0,1] toward diagnostic-CLUBB cf in
     # the BL when --use-clubb-cloud-fraction is on (1.0 = full replacement, which
     # drove a real-SST surface-heating runaway; ~0.3-0.5 is gentler + stable).
@@ -1121,7 +1125,11 @@ class ExperimentConfig(NamedTuple):
     # SIC ramp threshold — NOT the ice surface temperature.  Legacy
     # name kept for AMIP config compatibility.
     T_ice: float = constants.T_freeze_ocean
-    albedo_ice: float = 0.65
+    # Flat over the prescribed ice fraction (no snow-on-ice / pond / temperature
+    # dependence on the MPAS lane). 0.80 = snow-covered late-winter ice
+    # (CICE/CCSM3 dry snow-on-ice broadband); 0.65 was a bare/melting value.
+    # DEFAULT moved 0.65 -> 0.80 (user 2026-09-15), see land_snow_tau_days.
+    albedo_ice: float = 0.80
     albedo_ocean: float = 0.06
     sfc_emissivity: float = constants.emissivity_ocean
     emissivity_ice: float = constants.emissivity_ice

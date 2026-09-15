@@ -211,6 +211,7 @@ from legoesm.core.fv3_native_state_3d import (
     require_no_remap_needed,
 )
 from legoesm.core.fv3_phase3d_common import (
+    batch_size,
     build_batched_gs,
     require_bool,
     require_f64_jax,
@@ -343,9 +344,9 @@ def _require_barrier_layout(fname: str, ctx, afx, afy, km: int) -> None:
     is how the wrong reason was caught; the guard itself was right
     either way, because both behaviours are silent.
     """
-    n, npx = ctx.n, ctx.npx
-    want_x = (6, npx, n, km)
-    want_y = (6, n, npx, km)
+    n, npx, nb = ctx.n, ctx.npx, batch_size(ctx)
+    want_x = (nb, npx, n, km)
+    want_y = (nb, n, npx, km)
     if afx.shape[:4] != want_x or afy.shape[:4] != want_y:
         raise ValueError(
             f"{fname}: barrier-1 operands have leading shapes "
@@ -356,7 +357,7 @@ def _require_barrier_layout(fname: str, ctx, afx, afy, km: int) -> None:
             f"silently lose part of the blend.")
 
 
-def _cap_shape(name: str, n: int, ng: int, km: int) -> tuple:
+def _cap_shape(name: str, n: int, ng: int, km: int, nb: int = 6) -> tuple:
     """Declared capacitor shape -- ``alloc_flux_capacitors``' contract.
 
     Transcribed from that allocator's docstring rather than re-derived
@@ -369,9 +370,9 @@ def _cap_shape(name: str, n: int, ng: int, km: int) -> tuple:
     """
     npx, m_a = n + 1, n + 2 * ng
     if name in ("mfx", "cx"):
-        return (6, npx, m_a, km)
+        return (nb, npx, m_a, km)
     if name in ("mfy", "cy"):
-        return (6, m_a, npx, km)
+        return (nb, m_a, npx, km)
     raise KeyError(f"unknown capacitor {name!r}; expected one of "
                    f"{list(CAPACITOR_FIELDS)}")
 
@@ -398,7 +399,7 @@ def _validate_flux_cap(fname: str, flux_cap: dict, ctx, km: int) -> None:
             f"fv3_native_tracer2d.alloc_flux_capacitors(n, ng, km).")
     for name in CAPACITOR_FIELDS:
         a = jnp.asarray(flux_cap[name])
-        want = _cap_shape(name, ctx.n, ctx.ng, km)
+        want = _cap_shape(name, ctx.n, ctx.ng, km, batch_size(ctx))
         if a.shape != want:
             raise ValueError(
                 f"{fname}: flux_cap[{name!r}] has shape {a.shape}, "
@@ -590,10 +591,12 @@ def dsw_transport_phase_3d(ctx, states: dict, csw_outs: dict, dt, km, *,
     # level at a time, and the oracle's own barrier block is a
     # `do k=1,npz` (dyn_core.F90:857 / :877).
     per_face_levels: list[list[dict]] = []
-    zx = jnp.zeros((npx, n), dtype=jnp.float64)
-    zy = jnp.zeros((n, npx), dtype=jnp.float64)
-    zcx = jnp.zeros((npx, m_a), dtype=jnp.float64)
-    zcy = jnp.zeros((m_a, npx), dtype=jnp.float64)
+    # dtype follows storage (fp32/fp64), from states["delp"]
+    _sdt = states["delp"].dtype
+    zx = jnp.zeros((npx, n), dtype=_sdt)
+    zy = jnp.zeros((n, npx), dtype=_sdt)
+    zcx = jnp.zeros((npx, m_a), dtype=_sdt)
+    zcy = jnp.zeros((m_a, npx), dtype=_sdt)
     # R1a, face axis: `d_sw1_duo` reads only face t's own fields,
     # gridstruct and flags and writes only face t's outputs -- no
     # iteration reads a location another writes, and this lane is
@@ -601,7 +604,7 @@ def dsw_transport_phase_3d(ctx, states: dict, csw_outs: dict, dt, km, *,
     # buffer do not exist here at all.  Cross-face coupling enters ONLY
     # at the exchanges above and at the barrier below, both of which
     # see all six faces at once.  Kept as a literal loop (C2).
-    for t in range(6):
+    for t in range(batch_size(ctx)):
         levels = []
         # R1a, level axis: `d_sw1`'s dummies are 2-D --
         # `dimension(bd%isd:bd%ied, bd%jsd:bd%jed)` at
@@ -632,6 +635,7 @@ def dsw_transport_phase_3d(ctx, states: dict, csw_outs: dict, dt, km, *,
                 nord_v=c.nord_v, nord_t=0,
                 damp_v=c.damp_v, damp_t=0.0,
                 hydrostatic=hydrostatic,
+                nq=int(ctx.tab.nq),
                 workspace_sentinel=0.0))
         per_face_levels.append(levels)
 
@@ -648,7 +652,7 @@ def dsw_transport_phase_3d(ctx, states: dict, csw_outs: dict, dt, km, *,
         for name in CAPACITOR_FIELDS:
             src = _CAP_FROM_DSW1[name]
             per_face = []
-            for t in range(6):
+            for t in range(batch_size(ctx)):
                 arr = jnp.asarray(flux_cap[name][t])
                 for k in range(km):
                     v = per_face_levels[t][k][src]
@@ -683,10 +687,12 @@ def dsw_transport_phase_3d(ctx, states: dict, csw_outs: dict, dt, km, *,
     # location another writes, in either order.
     afx_pre = [stack_levels("dsw_transport_phase_3d", "allflux_x",
                              [per_face_levels[t][k]["allflux_x"]
-                              for k in range(km)]) for t in range(6)]
+                              for k in range(km)])
+               for t in range(batch_size(ctx))]
     afy_pre = [stack_levels("dsw_transport_phase_3d", "allflux_y",
                              [per_face_levels[t][k]["allflux_y"]
-                              for k in range(km)]) for t in range(6)]
+                              for k in range(km)])
+               for t in range(batch_size(ctx))]
     afx_pre = jnp.stack(afx_pre, axis=0)
     afy_pre = jnp.stack(afy_pre, axis=0)
     _require_barrier_nq("dsw_transport_phase_3d", ctx,
@@ -694,15 +700,10 @@ def dsw_transport_phase_3d(ctx, states: dict, csw_outs: dict, dt, km, *,
     _require_barrier_layout("dsw_transport_phase_3d", ctx, afx_pre,
                             afy_pre, km)
 
-    afx_lv, afy_lv = [], []
-    for k in range(km):
-        ax, ay = average_allflux_shared_edges(afx_pre[:, :, :, k, :],
-                                              afy_pre[:, :, :, k, :],
-                                              ctx.tab)
-        afx_lv.append(ax)
-        afy_lv.append(ay)
-    afx6 = jnp.stack(afx_lv, axis=3)
-    afy6 = jnp.stack(afy_lv, axis=3)
+    # all levels in ONE barrier call (M8-B, 2026-09-06): the level axis
+    # (3) rides through -- the flat path vmaps the certified per-level
+    # blend over it, the window arm fires one exchange instead of km
+    afx6, afy6 = average_allflux_shared_edges(afx_pre, afy_pre, ctx.tab)
 
     # --- d_sw2 at every level, on the AVERAGED fluxes (:914 / :950) ---
     names = ("delp", "pt") + (() if hydrostatic else ("w", "dw"))
@@ -714,7 +715,7 @@ def dsw_transport_phase_3d(ctx, states: dict, csw_outs: dict, dt, km, *,
     # `bd%isd:bd%ied, bd%jsd:bd%jed` shapes), and the oracle's own
     # `do k=1,npz` at :914 wraps the :950 call.  Both independent, both
     # left as literal loops (C2).
-    for t in range(6):
+    for t in range(batch_size(ctx)):
         per_level = {name: [] for name in names}
         for k in range(km):
             s1 = per_face_levels[t][k]
@@ -744,7 +745,7 @@ def dsw_transport_phase_3d(ctx, states: dict, csw_outs: dict, dt, km, *,
     out = {name: jnp.stack(
         [stack_levels(f"dsw_transport_phase_3d[face {t + 1}]", name,
                        [per_face_levels[t][k][name] for k in range(km)])
-         for t in range(6)], axis=0)
+         for t in range(batch_size(ctx))], axis=0)
         for name in DSW1_OUT_2D if not name.startswith("allflux_")}
     out["allflux_x"] = afx6
     out["allflux_y"] = afy6
@@ -809,13 +810,17 @@ def _dsw_transport_phase_3d_batched(ctx, states, uc6, vc6, divgd6, dt,
                          nord_v=c.nord_v, nord_t=0,
                          damp_v=c.damp_v, damp_t=0.0,
                          hydrostatic=hydrostatic,
+                         nq=int(ctx.tab.nq),
                          workspace_sentinel=0.0)
 
     vf1 = jax.vmap(one_face_sw1, in_axes=(0,) * 12)
-    zx6 = jnp.zeros((6, npx, n), dtype=jnp.float64)
-    zy6 = jnp.zeros((6, n, npx), dtype=jnp.float64)
-    zcx6 = jnp.zeros((6, npx, m_a), dtype=jnp.float64)
-    zcy6 = jnp.zeros((6, m_a, npx), dtype=jnp.float64)
+    # dtype follows storage (fp32/fp64), from states["delp"]
+    _sdt = states["delp"].dtype
+    nb = batch_size(ctx)
+    zx6 = jnp.zeros((nb, npx, n), dtype=_sdt)
+    zy6 = jnp.zeros((nb, n, npx), dtype=_sdt)
+    zcx6 = jnp.zeros((nb, npx, m_a), dtype=_sdt)
+    zcy6 = jnp.zeros((nb, m_a, npx), dtype=_sdt)
     per_level = []
     for k in range(km):
         if flux_cap is None:
@@ -861,15 +866,13 @@ def _dsw_transport_phase_3d_batched(ctx, states, uc6, vc6, divgd6, dt,
     _require_barrier_nq(fname, ctx, int(afx_pre.shape[-1]))
     _require_barrier_layout(fname, ctx, afx_pre, afy_pre, km)
 
-    afx_lv, afy_lv = [], []
-    for k in range(km):
-        ax, ay = average_allflux_shared_edges(afx_pre[:, :, :, k, :],
-                                              afy_pre[:, :, :, k, :],
-                                              ctx.tab)
-        afx_lv.append(ax)
-        afy_lv.append(ay)
-    afx6 = jnp.stack(afx_lv, axis=3)
-    afy6 = jnp.stack(afy_lv, axis=3)
+    # all levels in ONE barrier call (M8-B, 2026-09-07): the level axis
+    # (3) rides through -- the flat dispatcher vmaps the certified
+    # per-level blend over it, the window arm fires once instead of km.
+    # The 2026-09-06 change reached only the LOOP arm of this phase; the
+    # window step runs THIS arm, where the census still showed 30 of the
+    # 59 firings per step.
+    afx6, afy6 = average_allflux_shared_edges(afx_pre, afy_pre, ctx.tab)
 
     # --- d_sw2 at every level, faces vmapped (:914 / :950) ------------
     names2 = ("delp", "pt") + (() if hydrostatic else ("w", "dw"))
