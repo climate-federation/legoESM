@@ -96,6 +96,12 @@ def test_mpas_lloyd_flag_round_trip():
     assert parse_args(["--grid", "mpas", "--mpas-lloyd", "0"]).mpas_lloyd == 0
 
 
+def test_no_final_snapshot_flag_round_trip():
+    """--no-final-snapshot is off by default; probe arms select it."""
+    assert parse_args(["--grid", "mpas"]).no_final_snapshot is False
+    assert parse_args(["--grid", "tripole", "--no-final-snapshot"]).no_final_snapshot is True
+
+
 def test_multicontroller_flags_round_trip():
     """--multicontroller / --coordinator parse and reach OMIPRunConfig
     (the route-B cross-process lane, part 2c of the ocean-SPMD promotion)."""

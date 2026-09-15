@@ -505,6 +505,11 @@ def parse_args(argv: list[str] | None = None):
                    help="Short 30-day run for CI")
     p.add_argument("--output", type=str, default="results/omip")
     p.add_argument("--checkpoint-days", type=float, default=30.0)
+    p.add_argument("--no-final-snapshot", action="store_true",
+                   help="Skip the end-of-run MLD snapshot (snapshot_final.npz). "
+                        "For probe arms at ORCA12 the 14 GB compressed write "
+                        "outlasts the walltime; with --checkpoint-days 0 the "
+                        "arm then writes only its csv/json diagnostics.")
     p.add_argument("--max-wallclock-seconds", type=float, default=0.0,
                    help="Wallclock budget [s] for clean checkpoint+exit")
     p.add_argument("--restart-buffer-seconds", type=float, default=600.0,
@@ -6479,7 +6484,10 @@ def run_omip_single(grid_type: str, args) -> dict:
         except Exception as e:  # diagnostic snapshot must never crash the run
             print(f"  Warning: MLD snapshot skipped: {type(e).__name__}: {e}")
 
-    if _coordinate_io:
+    if args.no_final_snapshot:
+        if _io_rank:
+            print("  MLD snapshot skipped (--no-final-snapshot)")
+    elif _coordinate_io:
         _collective_root_io(write_final_snapshot)
     elif _io_rank:
         write_final_snapshot()
