@@ -118,3 +118,39 @@ def test_builders_treat_every_ref_key_as_optional():
     for src in (src_a, src_b):
         assert 'if enable_sponge and "sponge_gamma" in refs:' in src
         assert 'if enable_sss and "sss_area" in refs:' in src
+
+
+def test_phc2_target_goes_through_the_host_regrid(tmp_path, monkeypatch):
+    """Route-B multicontroller: the GPU regrid differed byte-wise across
+    processes, so the target must take the deterministic host regrid."""
+    import inspect
+
+    from legoesm.grids.regridding import RegridWeights
+
+    lat = np.array([-1.5, -0.5, 0.5, 1.5]); lon = 0.5 + np.arange(8.0)
+    f = tmp_path / "phc2.nc"
+    _write_phc2_like(f, lat, lon)
+    rw = RegridWeights(src_indices=jnp.arange(32)[:, None], weights=jnp.ones((32, 1)),
+                       target_shape=(4, 8), src_flat_size=32)
+    recorded = []
+
+    def stub(recs, rw_):
+        recorded.append(np.asarray(recs).copy())
+        return np.zeros((12,) + tuple(rw_.target_shape))
+
+    monkeypatch.setattr(run_omip, "_regrid_records_host", stub)
+    out = run_omip._load_phc2_monthly_sss_target(str(f), rw, lat, lon)
+    assert len(recorded) == 1 and recorded[0].shape == (12, 4, 8)
+    assert not np.isnan(recorded[0]).any()
+    assert out.shape == (12, 4, 8)
+    src = inspect.getsource(run_omip._load_phc2_monthly_sss_target)
+    assert "_regrid_records_host(" in src and "regrid_scalar(" not in src
+
+
+def test_both_spmd_branches_set_the_ref_sharder():
+    import inspect
+
+    src = inspect.getsource(run_omip.run_omip_single)
+    i = src.index("spmd_shard_stack = partial(shard_cell_stack_spmd")
+    assert "spmd_shard_ref = spmd_shard_stack" in src[i:i + 500]
+    assert "spmd_shard_ref = partial(shard_forcing_latlon" in src

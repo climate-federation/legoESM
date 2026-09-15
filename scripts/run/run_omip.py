@@ -649,7 +649,10 @@ def parse_args(argv: list[str] | None = None):
     p.add_argument("--C-smag", type=float, default=None,
                    help="Smagorinsky biharmonic coefficient (dimensionless, OM4 uses 0.06).")
     p.add_argument("--C-smag-lap", type=float, default=None,
-                   help="Laplacian Smagorinsky coefficient (dimensionless, default 0.15).")
+                   help="Laplacian Smagorinsky coefficient (dimensionless). Unset "
+                        "keeps each lane's own value: 0.15 on the lat-lon "
+                        "bathymetry branch, 0.33 in the MPAS / tripole NEMO-match "
+                        "recipes.")
     p.add_argument("--A-h-floor", type=float, default=2000.0,
                    help="Minimum effective A_h after latitude scaling [m²/s] (default 2000).")
     p.add_argument("--C-leith", type=float, default=None,
@@ -2921,7 +2924,7 @@ def _load_phc2_monthly_sss_target(path, regrid_weights, cache_lat, cache_lon) ->
     """
     import netCDF4
 
-    from legoesm.grids.regridding import fill_missing_nearest_valid, regrid_scalar
+    from legoesm.grids.regridding import fill_missing_nearest_valid
 
     with netCDF4.Dataset(path) as ds:
         file_lat = np.asarray(ds["lat"][:])
@@ -2952,8 +2955,10 @@ def _load_phc2_monthly_sss_target(path, regrid_weights, cache_lat, cache_lon) ->
     lo = np.deg2rad(lon2d.ravel())
     xyz = np.stack([np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo), np.sin(la)], axis=-1)
     filled = np.asarray(fill_missing_nearest_valid(data.reshape(12, -1), xyz)).reshape(12, nlat, nlon)
-    target = np.asarray([np.asarray(regrid_scalar(jnp.asarray(filled[m]), regrid_weights))
-                         for m in range(12)])
+    # Regrid on the HOST (deterministic NumPy), not on each process's GPU:
+    # under the route-B multicontroller the GPU regrid gave byte-different
+    # results across processes (the defect _regrid_records_host exists for).
+    target = np.asarray(_regrid_records_host(filled, regrid_weights))
     return target.reshape((12,) + tuple(regrid_weights.target_shape))
 
 
@@ -6582,6 +6587,11 @@ def run_omip_single(grid_type: str, args) -> dict:
             spmd_gather = partial(gather_state_mpas_ocean_spmd, layout=_layout)
             spmd_gather_ice = spmd_gather      # generic pytree gather
             spmd_shard_stack = partial(shard_cell_stack_spmd, layout=_layout)
+            # The per-block SSS references (monthly target (nCells,), area)
+            # must be block-sharded like the forcing stacks under MPAS SPMD,
+            # not handed to the jitted block as global arrays;
+            # shard_cell_stack_spmd handles 1-D per-cell leaves.
+            spmd_shard_ref = spmd_shard_stack
             state = shard_state_mpas_ocean_spmd(state, _layout)
             if jra55_state is not None and jra55_state.get("ice_state_init") is not None:
                 jra55_state["ice_state_init"] = shard_cell_stack_spmd(
