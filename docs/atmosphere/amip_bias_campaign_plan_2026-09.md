@@ -192,3 +192,9 @@ recover ~+10 of the -19.4; the aged-snow floor (0.52 vs a dry-snow 0.65-0.70)
 is the next candidate and is a calibrated scalar fitted under the broken
 absorption. 30-day pair launched: pa30_ctl vs pa30_both (tau 150 d + ice
 0.80), days 101-110 against dd_ctl's windows.
+30-day result (pa30_both vs pa30_ctl, days 80-110, published months vs CERES):
+poles 60-90 clear-sky rsut bias -15.7 -> -2.7 W/m2; all-sky -22.3 -> -11.1;
+polar clt bias -46 -> -50 points (the remaining all-sky deficit is CLOUD);
+global rsut bias +10.2 -> +12.6; polar tas -0.5 K. Iteration 3 CONFIRMED for
+the surface term. Production change (tau 150 d, ice 0.80) put to the user.
+Next polar lever is cloud cover, not albedo.
