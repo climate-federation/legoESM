@@ -1751,9 +1751,11 @@ class ModelDriver:
             from legoesm.grids.vertical import create_sigma_coordinate
             self.sigma = create_sigma_coordinate(
                 gc.nlev, sigma_top=gc.sigma_top,
-                tropopause_refine=getattr(gc, "tropopause_refine", 1.0))
+                tropopause_refine=getattr(gc, "tropopause_refine", 1.0),
+                layout=gc.sigma_layout)
 
-        _lid = (f", sigma_top={gc.sigma_top:g}" if gc.vertical_coord == "sigma" else "")
+        _lid = (f", sigma_top={gc.sigma_top:g}, layout={gc.sigma_layout}"
+                if gc.vertical_coord == "sigma" else "")
         logger.info(f"  Grid: {gc.grid_type} {gc.resolution}, "
               f"{gc.nlev} levels ({gc.vertical_coord}{_lid})")
 

@@ -380,6 +380,7 @@ class Config:
                 "stretching": grid.get("stretching", 2.0),
                 "tropopause_refine": float(grid.get("tropopause_refine", 1.0)),
                 "sigma_top": float(grid.get("sigma_top", 0.01)),
+                "sigma_layout": str(grid.get("sigma_layout", "standard")),
             },
             "dycore": {
                 "model_type": _normalize_dynamics(atm.get("dynamics", "hydrostatic")),

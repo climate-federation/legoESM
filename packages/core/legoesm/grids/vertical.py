@@ -209,6 +209,35 @@ def warn_if_unaligned_levels(n_levels: int, dtype=None, *, where: str) -> None:
     )
 
 
+SIGMA_LAYOUTS = ("standard", "l30_trop_logstrat")
+
+
+def l30_trop_logstrat_sigma_half(n_levels: int, sigma_top: float, dtype) -> jnp.ndarray:
+    """Half-level sigmas for the L30-troposphere / log-stratosphere layout.
+
+    Keeps the production L30 sigma grid's bottom 27 layers EXACTLY
+    (``jnp.linspace(0.01, 1.0, 31, dtype)[3:]``, join at sigma 0.109) and
+    replaces its top three layers by ``n_levels - 27`` layers uniform in
+    ln(sigma) from ``sigma_top`` to the join (at p_s 1000 hPa, n_levels 36,
+    sigma_top 0.002: 2.0-3.1, 3.1-4.9, 4.9-7.6, 7.6-11.8, 11.8-18.4,
+    18.4-28.7, 28.7-44.8, 44.8-69.9, 69.9-109 hPa).  Raises ValueError unless
+    ``n_levels >= 28`` and ``0 < sigma_top < 0.109``.
+    """
+    if n_levels < 28:
+        raise ValueError(
+            f"n_levels must be >= 28 for the l30_trop_logstrat layout, got {n_levels}")
+    join_f = float(jnp.linspace(0.01, 1.0, 31)[3])
+    if not 0.0 < sigma_top < join_f:
+        raise ValueError(
+            f"sigma_top must satisfy 0 < sigma_top < {join_f:.4g}, got {sigma_top}")
+    old_half = jnp.linspace(0.01, 1.0, 31, dtype=dtype)
+    join = old_half[3]
+    n = n_levels - 27
+    upper = sigma_top * (join / sigma_top) ** (jnp.arange(n + 1, dtype=dtype) / n)
+    upper = upper.at[0].set(sigma_top).at[-1].set(join)
+    return jnp.concatenate((upper[:-1], old_half[3:]))
+
+
 def create_sigma_coordinate(
     n_levels: int,
     sigma_top: float = 0.01,
@@ -216,6 +245,8 @@ def create_sigma_coordinate(
     tropopause_refine: float = 1.0,
     sigma_refine: float = 0.12,
     refine_width: float = 0.45,
+    *,
+    layout: str = "standard",
 ) -> SigmaCoordinate:
     """Create a sigma coordinate (uniform by default).
 
@@ -239,6 +270,10 @@ def create_sigma_coordinate(
         level count — the fix for the unresolved tropical cold point.
     sigma_refine, refine_width : float
         Centre (in sigma) and log-sigma half-width of the refinement.
+    layout : str
+        One of ``SIGMA_LAYOUTS``: ``"standard"`` (default) keeps the uniform
+        or tropopause-refined placement; ``"l30_trop_logstrat"`` pins the L30
+        grid below sigma 0.109 and adds log-spaced layers up to ``sigma_top``.
 
     Returns
     -------
@@ -255,7 +290,16 @@ def create_sigma_coordinate(
             dtype = get_policy().compute
         except Exception:
             dtype = jnp.float32
-    if tropopause_refine == 1.0:
+    if layout not in SIGMA_LAYOUTS:
+        raise ValueError(
+            f"layout must be one of SIGMA_LAYOUTS={SIGMA_LAYOUTS}, got {layout!r}")
+    if layout == "l30_trop_logstrat":
+        if tropopause_refine != 1.0:
+            raise ValueError(
+                "layout='l30_trop_logstrat' requires tropopause_refine == 1.0, "
+                f"got tropopause_refine={tropopause_refine}")
+        sigma_half = l30_trop_logstrat_sigma_half(n_levels, sigma_top, dtype)
+    elif tropopause_refine == 1.0:
         # Uniform (default) — kept as the literal linspace so the untouched
         # path stays bit-identical to the pre-refinement code.
         sigma_half = jnp.linspace(sigma_top, 1.0, n_levels + 1, dtype=dtype)

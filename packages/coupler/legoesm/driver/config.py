@@ -76,6 +76,11 @@ class GridConfig(NamedTuple):
     # 1000 hPa); ignored by the hybrid coordinate, which uses
     # p_top_Pa/stretching.  Recorded here so the resolved config is truthful.
     sigma_top: float = 0.01
+    # Sigma-lane level layout (grids.vertical.SIGMA_LAYOUTS): "standard" =
+    # uniform/tropopause-refined; "l30_trop_logstrat" = the L30 troposphere
+    # kept bit-identical below sigma 0.109 plus nlev-27 log-spaced
+    # stratospheric layers up to sigma_top (the raised-lid experiment).
+    sigma_layout: str = "standard"
     use_duogrid: bool = False        # enable FV3 Duo-Grid halo (required for MPI multi-node)
 
 
@@ -1627,6 +1632,22 @@ class ExperimentConfig(NamedTuple):
             if not (0.0 < g.sigma_top < 1.0):
                 errors.append(
                     f"grid.sigma_top must be in (0, 1) on the sigma lane (got {g.sigma_top})")
+            if g.sigma_layout not in ("standard", "l30_trop_logstrat"):
+                errors.append(
+                    "grid.sigma_layout must be 'standard' or 'l30_trop_logstrat' "
+                    f"(got {g.sigma_layout!r})")
+            elif g.sigma_layout == "l30_trop_logstrat":
+                if g.nlev < 28:
+                    errors.append(
+                        f"grid.sigma_layout 'l30_trop_logstrat' needs nlev >= 28 (got {g.nlev})")
+                if not (0.0 < g.sigma_top < 0.109):
+                    errors.append(
+                        "grid.sigma_layout 'l30_trop_logstrat' needs 0 < sigma_top < 0.109 "
+                        f"(the L30 join; got {g.sigma_top})")
+                if g.tropopause_refine != 1.0:
+                    errors.append(
+                        "grid.sigma_layout 'l30_trop_logstrat' keeps the L30 troposphere and "
+                        f"cannot combine with tropopause_refine={g.tropopause_refine}")
             if g.p_top_Pa != 200.0 or g.stretching != 2.0:
                 errors.append(
                     "grid.p_top_Pa and grid.stretching are hybrid-only fields and are inert "
@@ -1636,6 +1657,9 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "grid.sigma_top is inert on the hybrid lane, which uses p_top_Pa/"
                 f"stretching; leave it at its default 0.01 (got {g.sigma_top})")
+        elif g.vertical_coord == "hybrid" and g.sigma_layout != "standard":
+            errors.append(
+                f"grid.sigma_layout={g.sigma_layout!r} is inert on the hybrid lane")
         # Tropopause refinement: 1.0 = uniform.  The upper bound is NOT a
         # vertical-CFL limit — the first-order-upwind vertical advective CFL
         # is only 0.26 at refine=3 / dt=75 s / omega=5 Pa/s and 0.39 at
