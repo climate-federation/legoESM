@@ -276,3 +276,11 @@ the 1000-925 hPa structure the 30-level uniform-sigma grid (≈33 hPa, ≈300 m
 layers in the boundary layer) cannot resolve a mixed layer / transition layer
 / inversion in — a vertical-resolution arm is the natural next test and a
 user decision (shared with the UTLS session's vertical-grid work).
+
+## Iteration D result — CMT (wv_cmt vs pa_ctl, 5 days, conserving kernel)
+Tropical-ocean wind speed 1000/925/850 hPa: 5.32/6.71/5.90 → 5.32/6.73/5.82
+m/s; hfls +0.2, lowest-level q 0.00, prw −0.05, pr +0.28 ocean. REFUTED as the
+trade-wind fix at the production mass flux (cap 0.02): the momentum flux is
+proportional to a capped M_u and the shear-only Gregory closure; the 31 %
+wind excess is dynamical. (A CMT arm with the cap at 0.10 would be ~2-5x
+stronger; not launched — the cap arm itself moved nothing at the surface.)
