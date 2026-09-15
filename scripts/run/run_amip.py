@@ -704,6 +704,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "Causality probe for the polar-night stable-"
                              "transport runaway; None keeps the scheme "
                              "default byte-identically.")
+    parser.add_argument("--surface-z-ref-model-level", dest="surface_z_ref_model_level",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Tell the ocean MOST solver the real height of the lowest "
+                             "model level instead of labelling its inputs as z_ref (10 m).")
+    parser.add_argument("--surface-ocean-q-sfc-saline", dest="surface_ocean_q_sfc_saline",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Ocean surface humidity = 0.98 x q_sat(SST, p_s) (sea water at "
+                             "the surface pressure) instead of fresh water at the lowest level.")
     parser.add_argument("--gustiness-zi", dest="surface_gustiness_zi", type=float,
                         default=None,
                         help="COARE convective-gustiness BL depth z_i [m]. "
@@ -2029,6 +2037,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_stability_scheme=args.surface_stability_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
+        surface_z_ref_model_level=args.surface_z_ref_model_level,
+        surface_ocean_q_sfc_saline=args.surface_ocean_q_sfc_saline,
         hb_kvf_min=args.hb_kvf_min,
         louis_cloudtop_entrainment_efficiency=args.louis_cloudtop_entrainment_efficiency,
         surface_thermo_convention=args.bulk_thermo_convention,

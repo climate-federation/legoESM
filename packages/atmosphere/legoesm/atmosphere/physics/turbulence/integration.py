@@ -93,6 +93,9 @@ class TurbulenceSchemeTraits(NamedTuple):
     energy_field: str | None
 
 
+# Sea-water saturation reduction of q_sat (coupler.py uses the same value).
+_Q_SAT_SALINE_FACTOR = 0.98
+
 _ENERGY_FIELD_BY_SCHEME = {
     "tke": "tke",
     "clubb_lite": "tke",
@@ -698,7 +701,18 @@ def _make_mpas_turbulence(
             T_sfc = jnp.asarray(forcing["T_sfc"]).reshape(nCells)
         else:
             T_sfc = _resolve_T_sfc(T_col, phys_state)
-        q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
+        # Static switches from the scheme's surface sub-config (the per-step
+        # prescribed-flux fold below does not touch these fields).
+        _surf = scheme_config.surface
+        if getattr(_surf, "ocean_q_sfc_saline", False):
+            # Sea water at the SURFACE pressure (the coupled lane's convention);
+            # the land fraction's humidity is overridden below either way.
+            from legoesm.core.bulk_flux import ocean_surface_q_sat
+            q_sfc = ocean_surface_q_sat(
+                T_sfc, p_s.reshape(nCells), thermo_convention=_surf.thermo_convention,
+                bulk_scheme=_surf.bulk_scheme, saline_factor=_Q_SAT_SALINE_FACTOR)
+        else:
+            q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
         # MPAS land surface boundary: throttle the LAND fraction's surface
         # humidity gradient by a soil-moisture availability beta instead of
         # the saturated infinite-swamp value the nearest-ocean SST fill
@@ -802,6 +816,10 @@ def _make_mpas_turbulence(
             _tx, _ty, _sh, _lh, _us = compute_surface_fluxes(
                 u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
                 T_sfc, q_sfc, rho[:, -1], step_config.surface,
+                # The inputs ARE lowest-full-level values; tell the MOST solver
+                # their height instead of labelling them as config.z_ref (10 m).
+                z_ref=(z_full[:, -1] if getattr(_surf, "z_ref_model_level", False)
+                       else None),
             )
             _lh_land = jnp.asarray(
                 forcing["lhflx_land"], dtype=q_sfc.dtype).reshape(nCells)

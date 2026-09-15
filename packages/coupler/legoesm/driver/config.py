@@ -808,6 +808,11 @@ class ExperimentConfig(NamedTuple):
     # (the persistent tropical hfls<<Earth / R_TOA imbalance lever).  Threaded
     # into the atmosphere SurfaceLayerConfig + the slab SimpleOceanConfig.
     surface_gustiness_zi: float | None = None
+    # Ocean surface-layer corrections (MPAS lane; both default off pending a
+    # user decision): tell the MOST solver the lowest level's real height, and
+    # use sea-water saturation at the surface pressure for the ocean q_sfc.
+    surface_z_ref_model_level: bool = False
+    surface_ocean_q_sfc_saline: bool = False
     # Thermodynamic constants set for the MOST surface fluxes (#762):
     # "legoesm" (default, byte-identical) = constant L_v / dry c_pd;
     # "aerobulk" = NEMO/AeroBulk/COARE parity (SST-dependent L_vap(T_sfc),

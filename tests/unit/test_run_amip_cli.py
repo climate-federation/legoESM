@@ -3997,3 +3997,27 @@ def test_convective_rain_to_surface_round_trips():
     ]), parser))
     assert cfg.convective_rain_to_surface is True
     assert convection_config_for(cfg).rain_to_surface is True
+
+
+def test_surface_height_and_saline_flags_round_trip():
+    """--surface-z-ref-model-level / --surface-ocean-q-sfc-saline reach
+    ExperimentConfig AND the surface sub-config turbulence_config_for builds."""
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+
+    parser = build_arg_parser()
+    default_cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical", "--turbulence", "louis"]), parser))
+    assert default_cfg.surface_z_ref_model_level is False
+    assert default_cfg.surface_ocean_q_sfc_saline is False
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "louis",
+        "--surface-bulk-scheme", "coare3",
+        "--surface-z-ref-model-level", "--surface-ocean-q-sfc-saline",
+    ]), parser))
+    assert cfg.surface_z_ref_model_level is True
+    assert cfg.surface_ocean_q_sfc_saline is True
+    surf = turbulence_config_for(cfg).louis.surface
+    assert surf.z_ref_model_level is True
+    assert surf.ocean_q_sfc_saline is True
+    assert surf.bulk_scheme == "coare3"

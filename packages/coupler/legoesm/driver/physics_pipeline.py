@@ -3772,8 +3772,10 @@ def apply_surface_flux_config(tc, config):
     gzi = getattr(config, "surface_gustiness_zi", None)
     stc = getattr(config, "surface_thermo_convention", "legoesm")
     sss = getattr(config, "surface_stability_scheme", "dyer1974")
+    zml = bool(getattr(config, "surface_z_ref_model_level", False))
+    qsal = bool(getattr(config, "surface_ocean_q_sfc_saline", False))
     if (sbs == "constant" and gzi is None and stc == "legoesm"
-            and sss == "dyer1974"):
+            and sss == "dyer1974" and not zml and not qsal):
         return tc
     # `TurbulenceConfig.clubb` defaults to None and dispatch substitutes a fresh
     # CLUBBConfig(), so bailing on the None sub-config here SILENTLY DROPPED the
@@ -3797,6 +3799,10 @@ def apply_surface_flux_config(tc, config):
         # COARE convective-gustiness BL depth (only effective with a MOST
         # bulk_scheme); the diagnosed fix for the calm-warm-ocean low hfls.
         surf = surf._replace(gustiness_w_zi=gzi)
+    if zml:
+        surf = surf._replace(z_ref_model_level=True)
+    if qsal:
+        surf = surf._replace(ocean_q_sfc_saline=True)
     if stc != "legoesm":
         # AeroBulk thermodynamic-constants parity (#762; only effective
         # with a MOST bulk_scheme).
