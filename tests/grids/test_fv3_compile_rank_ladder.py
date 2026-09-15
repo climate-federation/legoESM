@@ -243,3 +243,18 @@ def test_ref_npz_without_distributed_is_refused_before_any_work():
     with pytest.raises(SystemExit) as e:
         gate.main(["--ref-npz", "does-not-need-to-exist.npz"])
     assert e.value.code == 2
+
+
+def test_gpu_peak_ceiling_is_refused_outside_rounding_and_wired_in_the_launcher():
+    """User call 2026-09-15: GPU rows pass within a peak-relative ceiling;
+    the flag refuses anything that is not rounding-level, and the GPU
+    launcher passes it while the CPU launcher does not."""
+    from pathlib import Path
+    with pytest.raises(SystemExit) as e:
+        gate.main(["--distributed", "--ref-npz", "x.npz", "--gpu-max-rel-peak", "1e-3"])
+    assert e.value.code == 2
+    root = Path(__file__).resolve().parents[2] / "scripts" / "cluster" / "fv3_native"
+    gpu = (root / "tiled_m6_model_gate_gpu.sbatch").read_text()
+    cpu = (root / "tiled_m6_model_gate.sbatch").read_text()
+    assert "--gpu-max-rel-peak" in gpu and 'GPU_MAX_REL_PEAK:-1e-13' in gpu
+    assert "--gpu-max-rel-peak" not in cpu

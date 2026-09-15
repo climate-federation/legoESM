@@ -39,7 +39,11 @@ PREOUT=$(srun --gpus-per-task=1 "$PY" scripts/bench/bench_fv3_duo_spmd_scaling.p
 echo "preflight: $(echo "$PREOUT" | grep -m1 'ONE neighbour ppermute' || echo "NO RESULT: $(echo "$PREOUT" | grep -m1 -iE 'error|Traceback' )") (nodes $SLURM_JOB_NODELIST)"
 echo "$PREOUT" | grep -m1 "BARE-SLOWEST" || true
 echo "===== M6 GPU gate C$N km=$KM ${NHFLAG:-hydro} kt=$KT pad=$PAD ranks=$SLURM_NTASKS ref=${REF:-none} ====="
-srun --gpus-per-task=1 --kill-on-bad-exit=0 "$PY" scripts/validate/fv3_native/tiled_m6_model_gate.py --n "$N" --km "$KM" $NHFLAG --kt "$KT" --pad "$PAD" --n-split "${NSPLIT:-3}" --steps "${STEPS:-2}" --distributed ${REF:+--ref-npz $REF} ${GATE_EXTRA:-} 2>&1 \
+# GPU rows are judged within GPU_MAX_REL_PEAK of each leaf's peak (user call
+# 2026-09-15): two XLA:GPU programs differ at rounding, measured 1.5e-14.
+GPU_MAX_REL_PEAK=${GPU_MAX_REL_PEAK:-1e-13}
+echo "GPU_MAX_REL_PEAK=$GPU_MAX_REL_PEAK"
+srun --gpus-per-task=1 --kill-on-bad-exit=0 "$PY" scripts/validate/fv3_native/tiled_m6_model_gate.py --n "$N" --km "$KM" $NHFLAG --kt "$KT" --pad "$PAD" --n-split "${NSPLIT:-3}" --steps "${STEPS:-2}" --distributed ${REF:+--ref-npz $REF} --gpu-max-rel-peak "$GPU_MAX_REL_PEAK" ${GATE_EXTRA:-} 2>&1 \
   | grep --line-buffered -vE "jax_plugins|xla_bridge|versions_helpers|for d in range|_check_cuda|plugin_module|^\s+\^$|RuntimeError: jaxlib|Deprecat|shard_map import"
 RC=${PIPESTATUS[0]}
 echo "SRUN_RC=$RC"
