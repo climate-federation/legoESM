@@ -128,3 +128,16 @@ def test_dark_column_fallback_accepts_a_two_dimensional_albedo(setup):
         heating(state, grid, sigma, fn1d, dark), rel=1e-9)
     assert heating(state, grid, sigma, fn2d, dark) == pytest.approx(
         heating(state, grid, sigma, fn2d, None), rel=1e-9)
+
+
+def test_prescribed_radiative_fluxes_refused_on_a_scheme_that_ignores_them(setup):
+    state, grid, sigma, _fn, ncol = setup
+    from legoesm.atmosphere.physics.radiation.config import RadiationConfig
+    from legoesm.atmosphere.physics.radiation.integration import (
+        make_radiation_physics,
+    )
+
+    fn = make_radiation_physics(
+        RadiationConfig(scheme="simple_lw", diurnal_cycle=False), "spectral_pe")
+    with pytest.raises(ValueError, match="only consumed by the rrtmgp and gray"):
+        fn(state, grid, sigma, forcing={"sfc_lw_up": jnp.full(ncol, 300.0)})

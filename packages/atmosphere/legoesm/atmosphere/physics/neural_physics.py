@@ -967,9 +967,8 @@ def make_column_physics_fn(
                         "(land-sea fraction in [0, 1] per column)")
                 lat_col = jnp.broadcast_to(
                     grid_.lat[:, None], (n_lat, n_lon)).reshape(-1)
-                land_col = jnp.clip(jnp.nan_to_num(
-                    jnp.asarray(forcing["land_frac"]), nan=0.0),
-                    0.0, 1.0).reshape(-1)
+                land_col = jnp.clip(jnp.asarray(forcing["land_frac"]),
+                                    0.0, 1.0).reshape(-1)
                 parts += [
                     jnp.sin(lat_col),
                     jnp.cos(lat_col),

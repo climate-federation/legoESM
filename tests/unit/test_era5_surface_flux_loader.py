@@ -170,3 +170,12 @@ def test_flux_store_without_the_state_time_is_refused():
     ds = _flux_ds(with_land=True).assign_coords(time=[7])
     with pytest.raises(ValueError, match="no snapshot at the state time"):
         _load(cfg, ds)
+
+
+def test_flux_store_on_a_shifted_grid_is_refused():
+    """Same shape and latitude sense but different coordinates: refused."""
+    cfg = _flux_config(load_surface_fluxes=True)
+    ds = _flux_ds(with_land=True)
+    shifted = ds.assign_coords(lon=ds.lon.values + 15.0)
+    with pytest.raises(ValueError, match="grid coordinates differ"):
+        _load(cfg, shifted)

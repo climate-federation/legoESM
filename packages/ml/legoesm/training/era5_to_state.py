@@ -649,9 +649,10 @@ def load_era5_slice(
         to feed REAL ERA5 through the SAME extraction/regrid chain WITHOUT a Zarr store
         or network.  ``None`` (default) opens the configured store as before.
     flux_ds : xarray.Dataset, optional
-        A PRE-OPENED radiation-flux store (see ``config.flux_zarr``); pass it
-        when looping over many snapshots so the flux zarr is opened once.
-        Only consulted when ``config.load_radiation_fluxes`` is True.
+        A PRE-OPENED flux store (see ``config.flux_zarr``); pass it when
+        looping over many snapshots so the flux zarr is opened once.
+        Consulted by ``load_radiation_fluxes``, ``load_surface_fluxes`` and
+        (as the fallback behind the state store) ``load_land_frac``.
     cloud_ds : xarray.Dataset, optional
         A PRE-OPENED cloud-condensate store (see ``config.cloud_zarr``); same
         reason.  Only consulted when ``config.load_cloud_condensate`` is True.
@@ -867,6 +868,20 @@ def load_era5_slice(
                 _flux_ctx["flip"] = (
                     np.sign(flux_lat_deg[1] - flux_lat_deg[0])
                     != np.sign(state_lat_deg[1] - state_lat_deg[0]))
+                # Same COORDINATES, not just the same shape and sense: a
+                # shifted longitude origin would prescribe every plane at
+                # the wrong location and nothing downstream could tell.
+                _fl = flux_lat_deg[::-1] if _flux_ctx["flip"] else flux_lat_deg
+                _flon = np.asarray(_fds.lon.values, dtype=np.float64)
+                _slon = np.rad2deg(lon)
+                if (_fl.shape != state_lat_deg.shape
+                        or _flon.shape != _slon.shape
+                        or not np.allclose(_fl, state_lat_deg, atol=1e-6)
+                        or not np.allclose(_flon, _slon, atol=1e-6)):
+                    raise ValueError(
+                        f"flux store {fzarr} grid coordinates differ from the "
+                        "state store's (lat/lon values, not only the shape); "
+                        "refusing to prescribe fluxes at the wrong locations.")
             return _flux_ctx["ds"], _flux_ctx["ds_t"], _flux_ctx["flip"]
 
         def _flux_2d(name, flag):

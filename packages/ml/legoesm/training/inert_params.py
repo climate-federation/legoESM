@@ -68,6 +68,8 @@ PRESCRIBED_SURFACE_LEAF_MARKERS = (
     "surface_Ch_neutral",
     "surface_z0",
     "surface_z0h_z0_ratio",
+    "surface_most_unstable_gamma",
+    "surface_most_stable_beta",
     "rrtmgp_sfc_albedo",
     "rrtmgp_sfc_emissivity",
     "gray_sfc_albedo",

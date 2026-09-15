@@ -2394,6 +2394,17 @@ def _make_spectral_pe_radiation(
         # ``set_T_sfc_override`` closure.  Same precedence as the
         # hydrostatic/MPAS radiation factory.
         _lw_up_ovr = forcing.get("sfc_lw_up") if forcing is not None else None
+        if forcing is not None and radiation_config.scheme not in (
+                "rrtmgp", "gray") and any(
+                forcing.get(k) is not None
+                for k in ("sfc_lw_up", "sfc_sw_up", "sfc_sw_down")):
+            # simple_lw / mc3d take no surface temperature or albedo
+            # override, so the prescribed boundary condition would be
+            # silently ignored.
+            raise ValueError(
+                "prescribed radiative surface fluxes (sfc_lw_up / sfc_sw_up "
+                "/ sfc_sw_down) are only consumed by the rrtmgp and gray "
+                f"schemes; radiation scheme is {radiation_config.scheme!r}.")
         if _lw_up_ovr is not None:
             # Prescribed upwelling LW as the radiative surface boundary
             # condition: hand the backend the brightness temperature
