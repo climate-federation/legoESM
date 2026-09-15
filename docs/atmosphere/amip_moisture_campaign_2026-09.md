@@ -224,3 +224,28 @@ rain re-evaporation, transfer-law corrections, Louis/CLUBB, shallow closure,
 mass-flux cap — all null within 0.1-0.4 g/kg. The moist layer spans
 1000-925 hPa; the 850 hPa level dried in the 30-day route arm while 925-1000
 did not; 700-500 hPa is still 1.15-1.6x ERA5 after the route fix.
+
+## Round 5 synthesis (codex xhigh + GLM), 2026-09-15 late
+Agreed: the surface excess is the lower-troposphere humidity expressed at the
+surface — venting acts on the humidity contrast across the boundary-layer
+top, and the replacement air (925 hPa +12 RH points; 700 hPa still +15-60 %)
+is itself too moist. Disagreements: none on mechanism; codex wants the
+post-step numerics excluded first, GLM wants a free-troposphere nudging arm.
+Reference check: observed trade-wind mixed-layer q at 26-27 C is 15-17 g/kg
+(EUREC4A 15.5, RICO 15.6, BOMEX 16.8); model 18.6 (mixing ratio; 18.3 as
+specific humidity) is 1.5-3 g/kg too moist depending on regime; RH 0.85 vs
+~0.80 is the more robust statement.
+Done: the biharmonic moisture filter + its floor measured offline on the
+day-110 state: −0.003 kg/m2/day in sigma 0.95-1.0 (tropical ocean), floor
+creates 0.0000 — numerical moistening REFUTED (threshold 0.2).
+Running: wv_mb010sh (shallow closure ON with the cap released to 0.10,
+27480130) — the one untested combination.
+Next code (GLM drafting, codex + Claude review): CMT wired to MPAS edge
+winds (bridge hands the scheme reconstructed cell winds, projects du/dv back
+to edge normals through a shared voronoi helper; `bechtold_enable_cmt`);
+5-day arm gates (codex): trade ratio 1.31 → ≤ 1.15 AND lowest-level q −0.5
+g/kg CONFIRM; wind corrected with |dq| < 0.15 refutes fast moisture
+sensitivity. Sign caution (Savazzi 2022): CMT can strengthen or weaken the
+near-surface wind depending on the shallow/deep split.
+Structural item still open: partial-cloud condensation (H2) for the
+remaining 700-500 hPa excess.
