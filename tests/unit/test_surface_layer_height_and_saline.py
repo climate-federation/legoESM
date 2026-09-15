@@ -8,7 +8,9 @@
    10 m array must equal the config default bit for bit (the off path).
 2. ``ocean_surface_q_sat`` with the 0.98 factor is exactly 0.98 x the
    fresh-water value at the same T, p.
-3. The MPAS turbulence bridge applies the two switches: with
+3. The MPAS turbulence bridge applies the two switches (the height switch also
+   hands the solver the potential temperature at the input height, COARE's
+   dry-adiabatic correction): with
    ``ocean_q_sfc_saline`` the ocean q_sfc it uses is 0.98*q_sat(SST, p_s),
    and with ``z_ref_model_level`` its latent flux drops -- checked by CALLING
    the bridge with a spy on compute_surface_fluxes.  Fails when the bridge
@@ -79,7 +81,7 @@ def test_mpas_bridge_applies_both_switches():
     real = sl.compute_surface_fluxes   # the bridge imports it at call time
 
     def spy(*a, **k):
-        seen["q_sfc"] = np.asarray(a[5]); seen["z_ref"] = k.get("z_ref")
+        seen["q_sfc"] = np.asarray(a[5]); seen["z_ref"] = k.get("z_ref"); seen["T_in"] = np.asarray(a[2])
         out = real(*a, **k); seen["lh"] = np.asarray(out[3]); return out
 
     def run(zml, qsal):
@@ -107,3 +109,6 @@ def test_mpas_bridge_applies_both_switches():
     z = np.asarray(hgt["z_ref"])
     assert z.shape == (ncol,) and np.all(z > 50.0) and np.all(z < 400.0), z
     assert np.all(hgt["lh"] < off["lh"])
+    # potential temperature at the input height: T + g/c_p * z (COARE)
+    from legoesm import constants
+    np.testing.assert_allclose(hgt["T_in"] - off["T_in"], constants.g / constants.c_pd * z, rtol=1e-12)

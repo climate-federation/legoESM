@@ -813,13 +813,20 @@ def _make_mpas_turbulence(
                 compute_surface_fluxes,
             )
             _fl = jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
+            if getattr(_surf, "z_ref_model_level", False):
+                # The inputs ARE lowest-full-level values: tell the MOST solver
+                # their height instead of labelling them as config.z_ref (10 m),
+                # and hand it the potential temperature at that height (COARE:
+                # dT = T_sfc - (T + g/c_p * z), ~1.5 K at 150 m) so the stability
+                # is not read off a dry-adiabatic lapse.
+                _z_in = z_full[:, -1]
+                _T_in = T_col[:, -1] + (constants.g / constants.c_pd) * _z_in
+            else:
+                _z_in = None
+                _T_in = T_col[:, -1]
             _tx, _ty, _sh, _lh, _us = compute_surface_fluxes(
-                u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
-                T_sfc, q_sfc, rho[:, -1], step_config.surface,
-                # The inputs ARE lowest-full-level values; tell the MOST solver
-                # their height instead of labelling them as config.z_ref (10 m).
-                z_ref=(z_full[:, -1] if getattr(_surf, "z_ref_model_level", False)
-                       else None),
+                u_col[:, -1], v_col[:, -1], _T_in, q_v_col[:, -1],
+                T_sfc, q_sfc, rho[:, -1], step_config.surface, z_ref=_z_in,
             )
             _lh_land = jnp.asarray(
                 forcing["lhflx_land"], dtype=q_sfc.dtype).reshape(nCells)
