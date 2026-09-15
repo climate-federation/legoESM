@@ -204,3 +204,23 @@ The "downstream" hypothesis (drying the cloud layer dries the surface layer
 over weeks) is REFUTED at 30 days.
 Decision for the user (RULE 3): production default `convective_rain_to_surface`
 False → True, together with a cover re-tune by the cloud-cover session.
+
+## Cap arms result (5 days vs pa_ctl, tropical ocean)
+| quantity            | ctl   | M_b_max 0.05 | M_b_max 0.10 |
+|---------------------|------:|-------------:|-------------:|
+| mean active M_b [kg/m2/s], day 85 | 0.018 (78 % at cap) | 0.033 (31 %) | 0.038 (5 %) |
+| hfls [W/m2]         | 101.0 | −2.4 | −2.4 |
+| lowest-level q      | 18.57 | −0.09 | −0.03 |
+| lowest-level RH     | 0.851 | +0.006 | +0.007 |
+| prw [kg/m2]         | 57.1  | −0.3 | −0.4 |
+| pr [mm/day]         | 4.54  | +0.22 | −0.06 |
+| clt [%]             | 86.8  | −2.0 | −5.4 |
+| rsut [W/m2]         | 124.7 | +4.2 | −0.3 |
+The cap was binding and now is not, the closures act, and the surface layer
+does not dry: the sub-cloud venting is not limited by the mass flux. REFUTED
+as the surface-layer maintainer (fifth lever). Stable in both arms.
+Score so far for the tropical-ocean surface layer (q 18.6 g/kg, RH 0.85):
+rain re-evaporation, transfer-law corrections, Louis/CLUBB, shallow closure,
+mass-flux cap — all null within 0.1-0.4 g/kg. The moist layer spans
+1000-925 hPa; the 850 hPa level dried in the 30-day route arm while 925-1000
+did not; 700-500 hPa is still 1.15-1.6x ERA5 after the route fix.
