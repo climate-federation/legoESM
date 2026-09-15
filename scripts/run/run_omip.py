@@ -686,6 +686,22 @@ def parse_args(argv: list[str] | None = None):
                    choices=["full", "minimal", "none"])
     p.add_argument("--water-type", type=str, default="II",
                    choices=["I", "IA", "IB", "II", "III"])
+    p.add_argument("--sw-penetration", type=str, default="auto",
+                   choices=["auto", "jerlov_2band", "sweeney_2band"],
+                   help=("Column shortwave scheme on the JRA55 MPAS/tripole lanes: "
+                         "'auto' = the lanes' historical two-band type-II with the "
+                         "0.94 skin split (byte-identical); 'jerlov_2band' = two-band "
+                         "with --water-type; 'sweeney_2band' = FESOM2's chlorophyll "
+                         "two-band (needs --chl-clim; 0.54 of the NET shortwave "
+                         "penetrates). Explicit schemes hand the forcing the "
+                         "post-albedo shortwave, as FESOM2 does."))
+    p.add_argument("--chl-clim", type=str, default=None,
+                   help=("Monthly surface chlorophyll climatology (Sweeney 2005 "
+                         "NetCDF, variable 'chl', 12 x 180 x 360 on the forcing-cache "
+                         "grid) for --sw-penetration sweeney_2band."))
+    p.add_argument("--ocean-albedo", type=float, default=0.06,
+                   help=("Open-water shortwave albedo of the bulk-flux coupler "
+                         "(default 0.06; FESOM2/CORE2 uses 0.1)."))
     p.add_argument("--tke-card", type=str, default="default",
                    choices=("default", "fesom2"),
                    help="TKE closure constant set: 'default' (Veros/legoESM "
@@ -1594,7 +1610,8 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   dz_ref_override=None,
                   spmd_n_devices: int = 0,
                   mpas_lloyd: int = 50,
-                  mpas_k_zeta_bih: float | None = None):
+                  mpas_k_zeta_bih: float | None = None,
+                  sw_scheme: str = "auto"):
     """Create grid, z_coord, config, model for any grid type.
 
     ``spmd_n_devices > 1`` (MPAS only, ``--enable-mpas-spmd``) reorders + pads
@@ -1905,7 +1922,9 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         # use the same "combined" config as the comparison scripts.
         # forcing_mode is passed from run_omip_single() via the parameter.
         if forcing_mode == "jra55_do_tropical":
-            sf_config = SurfaceForcingConfig(scheme="none")
+            sf_config = SurfaceForcingConfig(
+                scheme="none", shortwave_scheme=sw_scheme,
+                shortwave_water_type=water_type)
         else:
             sf_config = SurfaceForcingConfig(
                 scheme="combined",
@@ -2033,7 +2052,9 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             strip_north_rows=int(tripole_strip_north_rows))
 
         if forcing_mode == "jra55_do_tropical":
-            sf_config = SurfaceForcingConfig(scheme="none")
+            sf_config = SurfaceForcingConfig(
+                scheme="none", shortwave_scheme=sw_scheme,
+                shortwave_water_type=water_type)
         else:
             sf_config = SurfaceForcingConfig(
                 scheme="restoring",
@@ -2436,6 +2457,7 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         z_t_atm=10.0,
         z_q_atm=10.0,
         stability_scheme=args.surface_stability_scheme,
+        ocean_albedo=float(getattr(args, "ocean_albedo", 0.06)),
     )
 
     state: dict = {
@@ -2498,6 +2520,16 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         and S_woa is not None
         and z_coord is not None
     )
+    if getattr(args, "sw_penetration", "auto") == "sweeney_2band":
+        if not getattr(args, "chl_clim", None):
+            raise ValueError("--sw-penetration sweeney_2band needs --chl-clim <Sweeney_2005.nc>")
+        if regrid_weights is None:
+            raise ValueError("--sw-penetration sweeney_2band needs the JRA55 regrid "
+                             "weights (MPAS / tripole lanes).")
+        state["chl_monthly"] = jnp.asarray(_load_monthly_clim_target(
+            args.chl_clim, "chl", regrid_weights,
+            np.asarray(ds["lat"]), np.asarray(ds["lon"])))
+    state["sw_net_to_forcing"] = getattr(args, "sw_penetration", "auto") != "auto"
     if sss_restoring_enabled:
         state["sss_target_2d"] = jnp.asarray(S_woa[..., 0])
         state["sss_piston_velocity"] = float(args.sss_piston_velocity)
@@ -2914,13 +2946,20 @@ def _preload_jra55_forcing_block(start_step_idx, n_steps, dt, jra55_state):
 
 
 def _load_phc2_monthly_sss_target(path, regrid_weights, cache_lat, cache_lon) -> np.ndarray:
-    """Load the monthly PHC2 SSS climatology and regrid it to the model grid.
+    """Monthly PHC2 SSS climatology (``SALT``, missing -99.0) on the model grid."""
+    return _load_monthly_clim_target(path, "SALT", regrid_weights, cache_lat, cache_lon,
+                                     missing_value=-99.0)
 
-    Reads ``SALT`` of shape (12, 180, 360) from ``path``, treating
-    ``missing_value`` -99.0 (and any masked / NaN entries) as land, gap-fills
-    those points by nearest valid neighbour on the unit sphere, then regrids
-    each month with ``regrid_scalar``.  Returns an array of shape
-    ``(12,) + tuple(regrid_weights.target_shape)``.
+
+def _load_monthly_clim_target(path, var, regrid_weights, cache_lat, cache_lon,
+                              missing_value=None) -> np.ndarray:
+    """Load a 12-month (12, 180, 360) climatology and regrid it to the model grid.
+
+    Entries equal to ``missing_value`` (and any masked / NaN entries) are
+    treated as land, gap-filled by nearest valid neighbour on the unit sphere,
+    then each month is regridded on the host.  Returns an array of shape
+    ``(12,) + tuple(regrid_weights.target_shape)``.  Used for the PHC2 SSS
+    restoring target and the Sweeney chlorophyll climatology.
     """
     import netCDF4
 
@@ -2937,15 +2976,16 @@ def _load_phc2_monthly_sss_target(path, regrid_weights, cache_lat, cache_lon) ->
                 f"lat: match={lat_ok} (file shape {file_lat.shape} vs cache "
                 f"{np.shape(cache_lat)}); lon: match={lon_ok} (file shape "
                 f"{file_lon.shape} vs cache {np.shape(cache_lon)})")
-        salt = ds.variables["SALT"][:]
+        salt = ds.variables[var][:]
 
     data = np.ma.asanyarray(salt)
-    data = np.ma.masked_equal(data, -99.0)
+    if missing_value is not None:
+        data = np.ma.masked_equal(data, missing_value)
     data = np.ma.masked_invalid(data)
     data = np.ma.filled(data.astype(np.float64), np.nan)
     nlat, nlon = file_lat.size, file_lon.size
     if data.shape != (12, nlat, nlon):
-        raise ValueError(f"{path}: expected SALT with shape (12, {nlat}, {nlon}), "
+        raise ValueError(f"{path}: expected {var} with shape (12, {nlat}, {nlon}), "
                          f"got {tuple(data.shape)}")
 
     # Unit-sphere Cartesian coordinates of the (lat, lon) meshgrid, flattened
@@ -2999,10 +3039,18 @@ def _refs_for_block(base_refs, jra55_state, day0, shard_fn=None):
     launcher), so a block straddling a month boundary keeps the old target
     for at most that long, once a month.
     """
-    if "sss_target_monthly" not in jra55_state:
-        return base_refs
     refs = dict(base_refs or {})
     m = _sss_month_index(day0)
+    if "chl_monthly" in jra55_state:
+        chl_monthly = jra55_state["chl_monthly"]
+        if shard_fn is None:
+            refs["chl"] = chl_monthly[m]
+        else:
+            if "_chl_monthly_sharded" not in jra55_state:
+                jra55_state["_chl_monthly_sharded"] = [shard_fn(chl_monthly[k]) for k in range(12)]
+            refs["chl"] = jra55_state["_chl_monthly_sharded"][m]
+    if "sss_target_monthly" not in jra55_state:
+        return refs if "chl" in refs else base_refs
     monthly = jra55_state["sss_target_monthly"]
     if shard_fn is None:
         refs["sss_target"] = monthly[m]
@@ -3376,6 +3424,8 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
     enable_ramp = T_ramp_seconds > 0
     enable_sponge = bool(jra55_state.get("enable_sponge", False))
     enable_sss = bool(jra55_state.get("enable_sss_restoring", False))
+    sw_net_to_forcing = bool(jra55_state.get("sw_net_to_forcing", False))
+    use_chl = "chl_monthly" in jra55_state
     sss_remove_mean = bool(jra55_state.get("sss_remove_mean", False))
     zero_fluxes = bool(jra55_state.get("zero_surface_fluxes", False))
     enable_freeze = bool(jra55_state.get("enable_freeze_cap", False))
@@ -3458,6 +3508,7 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
         _sponge, _sss_target, _freeze_mask = (
             sponge, sss_target_static, freeze_mask_static)
         _sss_area = sss_area_static
+        _chl = None
         if refs is not None:
             from legoesm.ocean.sponge import SpongeForcing
             # refs may carry ONLY the per-block SSS entries (monthly target
@@ -3470,6 +3521,7 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
                 _sss_target = refs["sss_target"]
             if enable_sss and "sss_area" in refs:
                 _sss_area = refs["sss_area"]
+            _chl = refs["chl"] if use_chl and "chl" in refs else None
             if freeze_from_gamma and "sponge_gamma" in refs:
                 _freeze_mask = refs["sponge_gamma"] > 0.0
             elif freeze_mask_static is not None and "ocean_mask" in refs:
@@ -3526,11 +3578,15 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
                 ice_fw=jnp.zeros_like(runoff_stack[idx]),
             )
             sf = OceanSurfaceForcing(
-                sw_down=atm.sw_down,
+                # Explicit --sw-penetration schemes take the post-albedo
+                # shortwave (FESOM2's 0.54*(1-albw)*SW); "auto" keeps the
+                # historical raw sw_down.
+                sw_down=sw_net if sw_net_to_forcing else atm.sw_down,
                 q_net=q_net,
                 tau_x=tau_x,
                 tau_y=tau_y,
                 freshwater=None,
+                chl=_chl,
             )
             # Prognostic slab sea ice: advance the ice tile and partition the
             # surface forcing (open-ocean fluxes x f_ocean=(1-A) + the ice
@@ -3635,6 +3691,8 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
     enable_ramp = T_ramp_seconds > 0
     enable_sponge = bool(jra55_state.get("enable_sponge", False))
     enable_sss = bool(jra55_state.get("enable_sss_restoring", False))
+    sw_net_to_forcing = bool(jra55_state.get("sw_net_to_forcing", False))
+    use_chl = "chl_monthly" in jra55_state
     sss_remove_mean = bool(jra55_state.get("sss_remove_mean", False))
     zero_fluxes = bool(jra55_state.get("zero_surface_fluxes", False))
     enable_freeze = bool(jra55_state.get("enable_freeze_cap", False))
@@ -3713,6 +3771,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
             _sponge, _sss_target, _freeze_mask = (
                 sponge, sss_target_static, freeze_mask_static)
             _sss_area = sss_area_static
+            _chl = None
             if refs is not None:
                 from legoesm.ocean.sponge import SpongeForcing
                 # refs may carry ONLY the per-block SSS entries (monthly target
@@ -3725,6 +3784,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
                     _sss_target = refs["sss_target"]
                 if enable_sss and "sss_area" in refs:
                     _sss_area = refs["sss_area"]
+                _chl = refs["chl"] if use_chl and "chl" in refs else None
                 if freeze_from_gamma and "sponge_gamma" in refs:
                     _freeze_mask = refs["sponge_gamma"] > 0.0
                 elif freeze_mask_static is not None and "ocean_mask" in refs:
@@ -3846,9 +3906,10 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
                     ice_fw=jnp.zeros_like(sst_K, dtype=_dtype),
                 )
                 sf = OceanSurfaceForcing(
-                    sw_down=atm.sw_down, q_net=q_net,
+                    sw_down=sw_net if sw_net_to_forcing else atm.sw_down, q_net=q_net,
                     tau_x=tile.tau_x * ramp, tau_y=tile.tau_y * ramp,
                     freshwater=None,
+                    chl=_chl,
                 )
 
                 # Prognostic slab sea ice: partition surface forcing between
@@ -5509,6 +5570,7 @@ def run_omip_single(grid_type: str, args) -> dict:
     grid, z_coord, config, model, coord_kind = _create_setup(
         grid_type, resolution, args.nlev, args.H_max,
         args.physics, args.water_type,
+        sw_scheme=getattr(args, "sw_penetration", "auto"),
         spmd_n_devices=_mpas_spmd_nd,
         mpas_lloyd=int(getattr(args, "mpas_lloyd", 50)),
         mpas_k_zeta_bih=getattr(args, "mpas_k_zeta_bih", None),

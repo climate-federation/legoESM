@@ -3909,7 +3909,7 @@ def surface_stress_faces(surface_forcing, u_dtype, z_coord, J, grid):
     return tau_i_u, tau_j_v, dz_0_u, dz_0_v
 
 
-def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S, h_k, z_coord, J, grid, rho_0, mask, mask_3d, *, route_heat_to_implicit=False, withhold_stress=False):
+def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u, v, T, S, h_k, z_coord, J, grid, rho_0, mask, mask_3d, *, route_heat_to_implicit=False, withhold_stress=False, shortwave_scheme="auto", shortwave_water_type="II"):
     """Stage 10b': external surface forcing (wind stress tau_x/tau_y, net heat
     q_net, penetrating shortwave) from a coupled / OMIP OceanSurfaceForcing,
     with tripolar east-north -> grid-aligned rotation. Pure verbatim extraction
@@ -3991,7 +3991,65 @@ def _bc_external_surface_forcing(du_dt, dv_dt, dT_dt, dS_dt, surface_forcing, u,
             # uses the SAME scatter-add/add sequence as before (bit-identical
             # default-off path); the implicit branch starts from zeros.
             dT_target = dT_surf if route_heat_to_implicit else dT_dt
-            if _sf_sw is not None and _sf_chl is not None:
+            if shortwave_scheme not in ("auto", "jerlov_2band", "sweeney_2band"):
+                raise ValueError(
+                    f"unknown surface_forcing.shortwave_scheme {shortwave_scheme!r}; "
+                    "expected 'auto', 'jerlov_2band' or 'sweeney_2band'")
+            if shortwave_scheme == "sweeney_2band" and _sf_sw is not None:
+                # FESOM2 chlorophyll two-band: the visible fraction of the net
+                # shortwave penetrates on the live partial-cell thickness, the
+                # rest heats the surface cell; column total stays q_net.
+                if _sf_chl is None:
+                    raise ValueError(
+                        "surface_forcing.shortwave_scheme='sweeney_2band' requires "
+                        "OceanSurfaceForcing.chl; got None")
+                from legoesm.ocean.physics.shortwave_penetration import (
+                    apply_shortwave_penetration,
+                    ShortwavePenetrationConfig,
+                    penetrating_fraction,
+                )
+                _sw_cfg = ShortwavePenetrationConfig(scheme="sweeney_2band")
+                sw_T = jnp.asarray(_sf_sw, dtype=T.dtype)
+                sw_absorbed = sw_T * jnp.asarray(penetrating_fraction(_sw_cfg), dtype=T.dtype)
+                q_nonsolar = q_net_T - sw_absorbed
+                # Surface deposit on the LIVE top thickness (partial top
+                # cells), so the column integrates to q_net.
+                _inv_rho_csw_h0 = 1.0 / (
+                    jnp.asarray(rho_0, dtype=T.dtype)
+                    * jnp.asarray(_c_sw, dtype=T.dtype)
+                    * jnp.maximum(jnp.asarray(h_k[..., 0], dtype=T.dtype), 1e-10))
+                dT_target = dT_target.at[..., 0].add(
+                    q_nonsolar * _inv_rho_csw_h0 * mask
+                )
+                wet_cell = jnp.asarray(h_k > 0.0, dtype=T.dtype)
+                sw_tend = apply_shortwave_penetration(
+                    _sw_cfg, sw_absorbed,
+                    chl=jnp.asarray(_sf_chl, dtype=T.dtype),
+                    dz_live=h_k, wet_cell=wet_cell, rho_0=float(rho_0),
+                )
+                dT_target = dT_target + sw_tend * mask_3d
+            elif shortwave_scheme == "jerlov_2band" and _sf_sw is not None:
+                # Two-band Jerlov with the configured water type (routes the
+                # run_omip --water-type flag; "auto" keeps the kernel default).
+                from legoesm.ocean.physics.shortwave_penetration import (
+                    shortwave_penetration_tendency,
+                    ShortwavePenetrationConfig,
+                    penetrating_fraction,
+                )
+                _sw_cfg = ShortwavePenetrationConfig(
+                    scheme="jerlov_2band", water_type=shortwave_water_type)
+                sw_T = jnp.asarray(_sf_sw, dtype=T.dtype)
+                sw_absorbed = sw_T * jnp.asarray(penetrating_fraction(_sw_cfg), dtype=T.dtype)
+                q_nonsolar = q_net_T - sw_absorbed
+                dT_target = dT_target.at[..., 0].add(
+                    q_nonsolar * inv_rho_csw_dz * mask
+                )
+                sw_tend = shortwave_penetration_tendency(
+                    sw_absorbed, z_coord.dz_ref, z_coord.z_half_ref, J, _sw_cfg,
+                    rho_0=float(rho_0),
+                )
+                dT_target = dT_target + sw_tend * mask_3d
+            elif _sf_sw is not None and _sf_chl is not None:
                 # NEMO RGB chlorophyll penetration (ln_qsr_rgb).  NEMO
                 # partitions 100% of net SW across IR + R/G/B bands, so NO
                 # 0.94 "skin" pre-split here: the full sw is the penetrating
@@ -4879,6 +4937,8 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             h_k, z_coord, J, grid, rho_0, mask, mask_3d,
             route_heat_to_implicit=_sf_implicit,
             withhold_stress=_stress_implicit,
+            shortwave_scheme=getattr(_sf_cfg, "shortwave_scheme", "auto"),
+            shortwave_water_type=getattr(_sf_cfg, "shortwave_water_type", "II"),
         )
     )
 

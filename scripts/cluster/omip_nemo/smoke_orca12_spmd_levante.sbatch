@@ -69,6 +69,7 @@ srun --ntasks=$NGPU --ntasks-per-node=$TPN --gpus-per-node=$TPN --gpu-bind=none 
     --vertical-mixing-scheme tke --tke-card fesom2 --tripole-closed-seas marmara,black_sea \
     --no-gm-redi \
     --sss-piston-velocity 1.929e-6 --sss-restoring-target phc2_monthly --sss-restoring-remove-mean \
+    --sw-penetration sweeney_2band --chl-clim /pool/data/AWICM/FESOM2/FORCING/Sweeney/Sweeney_2005.nc --ocean-albedo 0.1 \
     --woa-init --woa-t $R/forcing/phc3_winter_woa_format_nofabricated.nc --woa-s $R/forcing/phc3_winter_woa_format_nofabricated.nc --woa-void-fill \
     --enable-latlon-spmd --multicontroller \
     --diag-every $DIAG_EVERY $EXTRA --output "$OUT" 2>&1 | tee $OUT/run.log | grep -v "^WARNING\|^I0000\|^E0000" | tail -80
