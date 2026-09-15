@@ -97,3 +97,54 @@ def test_convection_cmt_off_gives_exact_zeros_on_the_edges():
     mesh, du, _ = _run(False)
     assert du.shape == (mesh.nEdges, NLEV)
     assert np.all(du == 0.0)
+
+
+def test_mass_weighted_projection_conserves_column_momentum_on_hybrid_levels():
+    """codex P1: with differing surface pressures the plain two-cell average of
+    a cell-conservative tendency is NOT conservative against the dycore's
+    edge layer mass (the two-cell mean of dp); the mass-weighted form is."""
+    from legoesm.grids.vertical import create_hybrid_coordinate
+    mesh = create_voronoi_mesh(3, lloyd_iterations=3)
+    nlev = 12
+    s_h = np.linspace(0.02, 1.0, nlev + 1)
+    a = 0.4 * s_h * (1.0 - s_h)
+    coord = create_hybrid_coordinate(nlev, jnp.asarray(a), jnp.asarray(s_h - a))
+    rng = np.random.default_rng(1)
+    p_s = jnp.asarray(7.0e4 + 3.0e4 * rng.random(mesh.nCells))
+    p_half = np.asarray(coord.pressure_at_half(p_s), dtype=np.float64)
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    du = rng.standard_normal((mesh.nCells, nlev))
+    dv = rng.standard_normal((mesh.nCells, nlev))
+    du -= (du * dp).sum(1, keepdims=True) / dp.sum(1, keepdims=True)   # mass-weighted column mean zero
+    dv -= (dv * dp).sum(1, keepdims=True) / dp.sum(1, keepdims=True)
+    c0, c1 = np.asarray(mesh.cellsOnEdge[0]), np.asarray(mesh.cellsOnEdge[1])
+    dp_edge = 0.5 * (dp[c0] + dp[c1])
+    plain = np.asarray(cell_vector_to_edge_normal(jnp.asarray(du), jnp.asarray(dv), mesh))
+    weighted = np.asarray(cell_vector_to_edge_normal(jnp.asarray(du), jnp.asarray(dv), mesh, dp_cell=jnp.asarray(dp)))
+    scale = np.abs(dp_edge * weighted).sum(1).max()
+    assert np.abs((dp_edge * weighted).sum(1)).max() < 1e-12 * scale
+    assert np.abs((dp_edge * plain).sum(1)).max() > 1e-6 * scale, "the plain average must fail this, or the test is vacuous"
+
+
+def test_cmt_kernel_conserves_column_momentum():
+    """codex P1 (pre-existing): the kernel repeated the last flux at the bottom
+    and clipped per level, leaving -flux_last in the column.  Now the bottom
+    flux is zero and the cap is column-uniform: sum dp*du_dt = 0 to round-off
+    for a sheared, convecting column, before and after the cap binds."""
+    from legoesm.atmosphere.physics.convection._plume import cmt_gregory_1997
+    ncol, nlev = 4, 20
+    rng = np.random.default_rng(2)
+    p_half = np.linspace(1.0e4, 1.0e5, nlev + 1)[None, :] * np.ones((ncol, 1))
+    p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1]); dp = p_half[:, 1:] - p_half[:, :-1]
+    rho = p_full / (287.0 * 280.0)
+    u = 10.0 * np.linspace(1.0, 0.0, nlev)[None, :] + rng.standard_normal((ncol, nlev))
+    v = 3.0 * np.linspace(0.0, 1.0, nlev)[None, :]
+    M_u = 0.05 * np.exp(-((np.arange(nlev) - 12) / 4.0) ** 2)[None, :] * np.ones((ncol, 1))
+    for amp in (1.0, 200.0):   # the second drives the cap
+        du, dv = cmt_gregory_1997(jnp.asarray(u * amp), jnp.asarray(v * amp), jnp.asarray(M_u), None,
+                                  jnp.asarray(p_full), jnp.asarray(p_half), jnp.asarray(rho), c_u=0.7, c_d=0.7)
+        du, dv = np.asarray(du), np.asarray(dv)
+        assert np.abs(du).max() > 0.0
+        col = (dp * du).sum(1); scale = np.abs(dp * du).sum(1).max()
+        assert np.abs(col).max() < 1e-12 * scale, col
+        assert np.abs((dp * dv).sum(1)).max() < 1e-12 * np.abs(dp * dv).sum(1).max()

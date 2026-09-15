@@ -4047,9 +4047,12 @@ def test_bechtold_M_b_max_threads_and_validates():
         ExperimentConfig(bechtold_M_b_max=0.5).validate_strict()
 
 
-def test_bechtold_enable_cmt_round_trips():
-    """--bechtold-enable-cmt reaches ExperimentConfig and the BechtoldConfig
-    leaf on both resolvers; default off."""
+def test_bechtold_enable_cmt_round_trips_and_default_preserves_each_lane():
+    """--bechtold-enable-cmt reaches the BechtoldConfig leaf on both resolvers.
+    The None default keeps every lane where it was before the MPAS wiring:
+    OFF on MPAS (the bridge handed the scheme zero winds), ON elsewhere
+    (BechtoldConfig.enable_cmt); codex review of 2bfdf5413 caught the first
+    version silently switching the spectral lane's CMT off."""
     from legoesm.driver.physics_pipeline import _resolve_convection, convection_config_for
 
     parser = build_arg_parser()
@@ -4058,7 +4061,11 @@ def test_bechtold_enable_cmt_round_trips():
     assert cfg.bechtold_enable_cmt is True
     assert _resolve_convection(cfg)[1].enable_cmt is True
     assert convection_config_for(cfg).bechtold.enable_cmt is True
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold", "--no-bechtold-enable-cmt"]), parser))
+    assert convection_config_for(off).bechtold.enable_cmt is False
     dflt = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--convection", "bechtold"]), parser))
-    assert dflt.bechtold_enable_cmt is False
-    assert convection_config_for(dflt).bechtold.enable_cmt is False
+    assert dflt.bechtold_enable_cmt is None
+    assert convection_config_for(dflt._replace(grid=dflt.grid._replace(grid_type="mpas"))).bechtold.enable_cmt is False
+    assert convection_config_for(dflt._replace(grid=dflt.grid._replace(grid_type="gaussian"))).bechtold.enable_cmt is True

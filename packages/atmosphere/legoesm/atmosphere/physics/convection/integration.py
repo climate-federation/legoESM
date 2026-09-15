@@ -433,13 +433,20 @@ def _make_hydrostatic_convection(
                     else jnp.zeros_like(u_col)
                 )
             elif hasattr(grid, "cellsOnEdge") and hasattr(grid, "angleEdge"):
-                # MPAS: the prognostic wind is the edge-normal velocity
-                # (nEdges, nlev); rebuild cell-centred (u, v) for CMT.
-                from legoesm.grids.voronoi import reconstruct_cell_velocity
+                if bool(getattr(scheme_config, "enable_cmt", False)):
+                    # MPAS: the prognostic wind is the edge-normal velocity
+                    # (nEdges, nlev); rebuild cell-centred (u, v) for CMT.
+                    from legoesm.grids.voronoi import reconstruct_cell_velocity
 
-                u_col, v_col = reconstruct_cell_velocity(_u_data, grid)
-                u_col = u_col.astype(_state_dtype)
-                v_col = v_col.astype(_state_dtype)
+                    u_col, v_col = reconstruct_cell_velocity(_u_data, grid)
+                    u_col = u_col.astype(_state_dtype)
+                    v_col = v_col.astype(_state_dtype)
+                else:
+                    # CMT off: keep the pre-2026-09-15 zero winds bit for bit
+                    # (the diurnal-CAPE wind term stays inert on this lane —
+                    # a separate decision, see the campaign doc).
+                    u_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+                    v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
             else:
                 raise ValueError(
                     "convection: CMT-capable scheme received winds of shape "
@@ -862,7 +869,9 @@ def _make_hydrostatic_convection(
                             else jnp.zeros_like(conv_out.du_dt_conv))
                 du_dt = cell_vector_to_edge_normal(
                     conv_out.du_dt_conv.reshape(ncol, nlev),
-                    _dv_conv.reshape(ncol, nlev), grid).astype(_state_dtype)
+                    _dv_conv.reshape(ncol, nlev), grid,
+                    dp_cell=p_half_col[:, 1:] - p_half_col[:, :-1],
+                ).astype(_state_dtype)
             else:
                 # A shape mismatch here is a wiring defect: raise, never zero.
                 du_dt = conv_out.du_dt_conv.reshape(u_target_shape)

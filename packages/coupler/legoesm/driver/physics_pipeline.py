@@ -3376,7 +3376,7 @@ def _resolve_convection(config):
             # 2026-07-22): fallback matches the BechtoldConfig default.
             subsidence_solve=getattr(
                 config, 'bechtold_subsidence_solve', 'implicit_flux'),
-            enable_cmt=bool(getattr(config, 'bechtold_enable_cmt', False)),
+            enable_cmt=_resolve_enable_cmt(config),
             cmt_c_u=getattr(config, 'bechtold_cmt_c_u', 0.7),
             cmt_c_d=getattr(config, 'bechtold_cmt_c_d', 0.7),
             p_conv_top_pa=getattr(config, 'bechtold_conv_top_pa', 15000.0),
@@ -3481,6 +3481,26 @@ def _resolve_convection(config):
     _check_pipeline_convection_supported(scheme, conv_config)
 
     return conv_fn, conv_config
+
+
+def _resolve_enable_cmt(config) -> bool:
+    """CMT switch with a LANE-PRESERVING default (2026-09-15).
+
+    ``bechtold_enable_cmt`` None keeps every lane where it was before the MPAS
+    wiring: the MPAS bridge handed Bechtold zero winds (CMT inert), the other
+    lanes inherited ``BechtoldConfig.enable_cmt`` (True).  An explicit bool
+    wins everywhere."""
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+    from legoesm.driver.config import normalize_grid_type
+
+    val = getattr(config, "bechtold_enable_cmt", None)
+    if val is not None:
+        return bool(val)
+    _grid = getattr(config, "grid", None)
+    _gt = getattr(_grid, "grid_type", None) if _grid is not None else getattr(config, "grid_type", "cubed_sphere")
+    if normalize_grid_type(_gt) in ("mpas", "voronoi"):
+        return False
+    return bool(BechtoldConfig().enable_cmt)
 
 
 def _check_pipeline_convection_supported(scheme, conv_config):

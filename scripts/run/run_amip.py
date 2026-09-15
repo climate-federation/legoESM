@@ -1035,7 +1035,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "0.85/0.92 ocean). Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_land_rhebc}.")
     parser.add_argument("--bechtold-enable-cmt", dest="bechtold_enable_cmt",
-                        action=argparse.BooleanOptionalAction, default=False,
+                        action=argparse.BooleanOptionalAction, default=None,
                         help="Gregory-1997 convective momentum transport in Bechtold "
                              "(applied to the MPAS edge winds).")
     parser.add_argument("--bechtold-use-ifs-shallow-closure",

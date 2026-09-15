@@ -2096,17 +2096,31 @@ def reconstruct_cell_velocity(u_edge, mesh):
     return u_east, v_north
 
 
-def cell_vector_to_edge_normal(du_cell, dv_cell, mesh):
+def cell_vector_to_edge_normal(du_cell, dv_cell, mesh, dp_cell=None):
     """Project cell-centred vector components onto the MPAS edge normals.
 
     Each component is averaged onto the edge from its two adjacent cells
     (``cellsOnEdge``), then dotted with the edge-normal unit vector
     ``(cos angleEdge, sin angleEdge)``.  The single cell->edge projection every
     physics bridge uses for its momentum tendency on this mesh.
+
+    With ``dp_cell`` (layer pressure thickness, (nCells, nlev)) the average is
+    MASS-weighted, ``(dp0*x0 + dp1*x1)/(dp0 + dp1)``: since the dycore's edge
+    layer mass is the two-cell mean of ``dp``, a tendency whose mass-weighted
+    column integral vanishes at every cell then vanishes at every edge too
+    (exact on hybrid levels with differing surface pressures; the plain
+    average only conserves on pure sigma).  ``None`` keeps the plain average
+    bit for bit.
     """
     c0 = mesh.cellsOnEdge[0]  # (nEdges,)
     c1 = mesh.cellsOnEdge[1]  # (nEdges,)
-    du_e_east = 0.5 * (du_cell[c0] + du_cell[c1])
-    dv_e_north = 0.5 * (dv_cell[c0] + dv_cell[c1])
+    if dp_cell is None:
+        du_e_east = 0.5 * (du_cell[c0] + du_cell[c1])
+        dv_e_north = 0.5 * (dv_cell[c0] + dv_cell[c1])
+    else:
+        w0, w1 = dp_cell[c0], dp_cell[c1]
+        inv = 1.0 / (w0 + w1)
+        du_e_east = (w0 * du_cell[c0] + w1 * du_cell[c1]) * inv
+        dv_e_north = (w0 * dv_cell[c0] + w1 * dv_cell[c1]) * inv
     angle = mesh.angleEdge[:, None]
     return du_e_east * jnp.cos(angle) + dv_e_north * jnp.sin(angle)
