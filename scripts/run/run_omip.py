@@ -948,6 +948,13 @@ def parse_args(argv: list[str] | None = None):
                        "(area-weighted), closer to FESOM's mapper and avoids "
                        "a salinity crater under a big river."
                    ))
+    p.add_argument("--runoff-source", type=str, default="jra55_friver",
+                   choices=["jra55_friver", "core2_climatology"],
+                   help=("River runoff: the JRA55-do 'friver' records (default) or "
+                         "FESOM2's constant CORE2 climatology (--runoff-file), "
+                         "which replaces every record on the model grid."))
+    p.add_argument("--runoff-file", type=str, default=None,
+                   help="CORE2_runoff.nc for --runoff-source core2_climatology.")
     p.add_argument("--runoff-radius-km", type=float, default=500.0,
                    help=("Search radius [km] for --runoff-routing "
                          "(default 500, matching FESOM2's runoff_radius)."))
@@ -1315,13 +1322,56 @@ def _mean_runoff_record(args):
     return acc / n_rec
 
 
-def _route_runoff_stack(runoff_stack, rmap):
+def _load_core2_runoff_static(path, regrid_weights, cache_lat, cache_lon) -> np.ndarray:
+    """FESOM2's CORE2 climatological runoff regridded to the model grid.
+
+    Reads ``Foxx_o_roff`` (shape (1, nlat, nlon), units (kg/s)/m^2, the same
+    kg m-2 s-1 as the JRA55 ``friver``; missing_value 1e30 over land).  Masked
+    / NaN / missing entries are ZERO runoff (land), the field is regridded on
+    the host (deterministic across processes) and the single record is
+    returned with shape ``tuple(regrid_weights.target_shape)`` as float64.
+    """
+    import netCDF4
+
+    cache_lat = np.asarray(cache_lat, dtype=np.float64)
+    cache_lon = np.asarray(cache_lon, dtype=np.float64)
+    with netCDF4.Dataset(path) as ds:
+        file_lat = np.asarray(ds.variables["lat"][:], dtype=np.float64)
+        file_lon = np.asarray(ds.variables["lon"][:], dtype=np.float64)
+        if file_lat.shape != cache_lat.shape or not np.allclose(file_lat, cache_lat):
+            raise ValueError(
+                f"{path}: CORE2 runoff 'lat' axis does not match the forcing-cache "
+                f"grid (file {file_lat.shape} vs cache {cache_lat.shape})")
+        if file_lon.shape != cache_lon.shape or not np.allclose(file_lon, cache_lon):
+            raise ValueError(
+                f"{path}: CORE2 runoff 'lon' axis does not match the forcing-cache "
+                f"grid (file {file_lon.shape} vs cache {cache_lon.shape})")
+        raw = ds.variables["Foxx_o_roff"][:]
+    data = np.asarray(np.ma.filled(np.ma.masked_invalid(raw), 0.0), dtype=np.float64)
+    # unmasked sentinels (1e30, incl. float32 round-trips) -> 0.0
+    data = np.where(np.isnan(data) | np.isclose(data, 1.0e30, rtol=1e-6), 0.0, data)
+    records = data.reshape(1, file_lat.size, file_lon.size)
+    regridded = np.asarray(_regrid_records_host(records, regrid_weights))
+    return np.asarray(regridded[0], dtype=np.float64).reshape(
+        tuple(regrid_weights.target_shape))
+
+
+def _route_runoff_stack(runoff_stack, rmap, static=None):
     """Apply the routing plan to a stacked runoff field, or pass it through.
 
     Routing is LINEAR in the runoff field and the plan is static, so routing
     the RECORDS once here is identical to routing every interpolated step
-    inside the scan — and far cheaper.
+    inside the scan — and far cheaper.  When ``static`` is not None (a field
+    already on the model grid, kg/m^2/s: FESOM2's CORE2 climatological
+    runoff) the JRA55 per-record runoff is REPLACED by its per-record
+    broadcast before the plan is applied.
     """
+    if static is not None:
+        if tuple(static.shape) != tuple(runoff_stack.shape[1:]):
+            raise ValueError(
+                f"static runoff field shape {tuple(static.shape)} does not match "
+                f"the runoff stack record shape {tuple(runoff_stack.shape[1:])}")
+        runoff_stack = jnp.broadcast_to(static, runoff_stack.shape)
     if rmap is None:
         return runoff_stack
     from legoesm.ocean.forcing.runoff_mapper import apply_runoff_map
@@ -2530,6 +2580,15 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
             args.chl_clim, "chl", regrid_weights,
             np.asarray(ds["lat"]), np.asarray(ds["lon"])))
     state["sw_net_to_forcing"] = getattr(args, "sw_penetration", "auto") != "auto"
+    if getattr(args, "runoff_source", "jra55_friver") == "core2_climatology":
+        if not getattr(args, "runoff_file", None):
+            raise ValueError("--runoff-source core2_climatology needs --runoff-file <CORE2_runoff.nc>")
+        if regrid_weights is None:
+            raise ValueError("--runoff-source core2_climatology needs the JRA55 regrid "
+                             "weights (MPAS / tripole lanes).")
+        state["runoff_static"] = jnp.asarray(_load_core2_runoff_static(
+            args.runoff_file, regrid_weights,
+            np.asarray(ds["lat"]), np.asarray(ds["lon"])))
     if sss_restoring_enabled:
         state["sss_target_2d"] = jnp.asarray(S_woa[..., 0])
         state["sss_piston_velocity"] = float(args.sss_piston_velocity)
@@ -2941,7 +3000,8 @@ def _preload_jra55_forcing_block(start_step_idx, n_steps, dt, jra55_state):
     # is linear in the field and its plan is static, so this is
     # identical to routing every interpolated step inside the scan.
     runoff_stack = _route_runoff_stack(
-        jnp.stack(runoffs), jra55_state.get("runoff_map"))
+        jnp.stack(runoffs), jra55_state.get("runoff_map"),
+        static=jra55_state.get("runoff_static"))
     return atm_stack, runoff_stack
 
 
@@ -3267,7 +3327,8 @@ def _slice_preloaded_records(start_step_idx, n_steps, dt, jra55_state,
 
     raw_stack = {var: all_records[var][jnp.array(indices)] for var in all_records}
     runoff_stack = _route_runoff_stack(
-        raw_stack["friver"], jra55_state.get("runoff_map"))
+        raw_stack["friver"], jra55_state.get("runoff_map"),
+        static=jra55_state.get("runoff_static"))
 
     record_meta = {
         "record_days": record_days,
@@ -3358,7 +3419,8 @@ def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
                     for i in range(raw_stack[var].shape[0])
                 ])
     runoff_stack = _route_runoff_stack(
-        raw_stack["friver"], jra55_state.get("runoff_map"))
+        raw_stack["friver"], jra55_state.get("runoff_map"),
+        static=jra55_state.get("runoff_static"))
 
     record_meta = {
         "record_days": record_days,          # (n_records,) fractional days
