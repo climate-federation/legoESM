@@ -308,7 +308,33 @@ _HARD_SAT_LOG_CADENCE_STEPS = 432
 _HARD_SAT_LOG_QV_EPS = 1.0e-9        # [kg/kg] count a point as "drained" above this
 
 
-def _mpas_qv_smooth_step(q_v, mesh, nu, dt):
+def _mpas_zenith_ocean_albedo(lat, day, orbit=None):
+    """Briegleb (1992) open-ocean albedo at the daytime-effective daily-mean
+    solar cosine, per cell.
+
+    ``mu = Q_day / (S_0 * f_day)`` is the cosine a column sees AVERAGED OVER
+    ITS SUNLIT HOURS, which is the right weighting for an albedo that is held
+    fixed for the whole day.  The eccentricity factor is divided out because
+    ``mu`` is a geometric cosine, not a flux.  ``S_0`` cancels from the ratio,
+    so the value passed is immaterial and a fixed reference is used.
+
+    Polar night gives ``f_day -> 0``; the floor keeps ``mu`` finite there and
+    the albedo is irrelevant because there is no sunlight to reflect.
+    """
+    from legoesm.atmosphere.physics.radiation.solar import (
+        daily_mean_insolation, daylight_fraction, earth_sun_distance_factor,
+    )
+    from legoesm.surface_albedo import OceanAlbedoConfig, ocean_albedo
+
+    s_0 = constants.S_0
+    eccf = (earth_sun_distance_factor(day, orbit) if orbit is not None else 1.0)
+    q_day = daily_mean_insolation(lat, day, s_0, orbit=orbit) / eccf
+    f_day = daylight_fraction(lat, day, orbit=orbit)
+    mu = jnp.clip(q_day / (s_0 * jnp.maximum(f_day, 1.0e-6)), 0.0, 1.0)
+    return ocean_albedo(mu, OceanAlbedoConfig(method="zenith"))
+
+
+def _mpas_qv_smooth_step(q_v, mesh, nu, dt, nu4=0.0, mid_refresh=None):
     """MPAS post-step horizontal q_v smoothing (array-level, testable).
 
     UNWEIGHTED SCVT del2 (``scalar_del2_cell_3d``) + a q>=0 floor, mirroring
@@ -329,14 +355,34 @@ def _mpas_qv_smooth_step(q_v, mesh, nu, dt):
     mesh : VoronoiMesh
     nu : float — del2 diffusivity [m^2/s].
     dt : float — step [s].
+    nu4 : float — del4 (biharmonic) diffusivity [m^4/s]; 0 disables the term.
+        The biharmonic is SCALE-SELECTIVE: it separates two-cell from four-cell
+        structure by a factor sixteen where the Laplacian separates them by
+        four, so it can hold grid-scale noise down without flattening the
+        resolved humidity gradients.  It has NO maximum principle, so with it
+        on the q>=0 floor is load-bearing rather than a no-op and the per-level
+        ``sum_c A_c q_c`` integral is conserved only up to what that floor
+        clips.  The driver's setup guard enforces ``nu4*dt*g_max^2 <= 0.5``.
+    mid_refresh : Callable(array) -> array, optional — distributed-only halo
+        refresh for the biharmonic's intermediate Laplacian.
 
     Returns
     -------
     jax.Array, shape (nCells, nlev) — smoothed, floored q_v (q_v dtype).
     """
-    from legoesm.core.operators_voronoi import scalar_del2_cell_3d
+    from legoesm.core.operators_voronoi import (
+        scalar_del2_cell_3d,
+        scalar_del4_cell_3d,
+    )
     lap = scalar_del2_cell_3d(q_v, mesh)
-    return jnp.maximum(q_v + dt * nu * lap.astype(q_v.dtype), 0.0)
+    if nu4 <= 0.0:
+        # BIT-IDENTICAL to the pre-biharmonic path, including the association
+        # order of ``dt * nu * lap`` -- the existing bit-exactness test holds
+        # the del2-only lane to equality, not to a tolerance.
+        return jnp.maximum(q_v + dt * nu * lap.astype(q_v.dtype), 0.0)
+    del4 = scalar_del4_cell_3d(q_v, mesh, mid_refresh=mid_refresh)
+    tend = (nu * lap + nu4 * del4).astype(q_v.dtype)
+    return jnp.maximum(q_v + dt * tend, 0.0)
 
 
 def clear_sky_pass_effective(
@@ -2945,6 +2991,16 @@ class ModelDriver:
             cfg = cfg._replace(
                 land_albedo=cfg.land_albedo._replace(
                     snow_age_activation_K=float(_act)))
+        # Snow-age e-folding time, same placement and for the same reason: the
+        # calibration re-apply above sets tau_snow_decay, so an override has to
+        # land after it or it is silently discarded.
+        _tau_d = getattr(self.config, "land_snow_tau_days", None)
+        if _tau_d is not None:
+            cfg = cfg._replace(
+                land_albedo=cfg.land_albedo._replace(
+                    tau_snow_decay=float(_tau_d) * 86400.0))
+            logger.info("  land snow-albedo age e-folding: %.3g days "
+                        "(overrides the calibration)", float(_tau_d))
 
         # A CANOPY SCHEME GETS CANOPY PARAMETERS.
         #
@@ -9203,7 +9259,42 @@ class ModelDriver:
                 float(jnp.mean(_f_land_cells)),
             )
         _budget_ledger_on = bool(getattr(cfg.output, "budget_ledger", False))
+        # Optional vertical band for the ledger.  A column budget cannot see a
+        # vertical-REDISTRIBUTION bias -- convection's column water row is
+        # exactly zero by construction -- so a band is what lets the table say
+        # which process supplies a LAYER.  The SAME weight goes to the physics
+        # rows and to the dycore's snapshot-derived rows, or the table stops
+        # summing to the column-store change.
+        _ledger_band = getattr(cfg.output, "budget_ledger_sigma_band", None)
+        _ledger_weight = None
+        if _ledger_band is not None:
+            if not _budget_ledger_on:
+                raise ValueError(
+                    "budget_ledger_sigma_band is set but budget_ledger is off; "
+                    "the band would select levels of a ledger that is never "
+                    "computed.")
+            from legoesm.diagnostics.process_ledger import sigma_band_weight
+            # HYBRID columns have no single sigma_half: the band would select
+            # different pressures under different surface pressures, so the
+            # weight would not mean one thing. Refused rather than silently
+            # computed on an approximate coordinate.
+            if not hasattr(self.sigma, "sigma_half"):
+                raise ValueError(
+                    "budget_ledger_sigma_band needs a sigma vertical "
+                    f"coordinate; this run uses {cfg.grid.vertical_coord!r}, "
+                    "whose layer pressures depend on the surface pressure so a "
+                    "single sigma band does not select one pressure range.")
+            _ledger_weight = sigma_band_weight(
+                self.sigma.sigma_half, float(_ledger_band[0]),
+                float(_ledger_band[1]))
+            logger.info(
+                "  budget ledger restricted to sigma band [%.3f, %.3f] "
+                "(%.1f%% of the column mass by layer weight)",
+                float(_ledger_band[0]), float(_ledger_band[1]),
+                100.0 * float(jnp.sum(_ledger_weight * self.sigma.dsigma)
+                              / jnp.sum(self.sigma.dsigma)))
         physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT,
+                                  budget_ledger_level_weight=_ledger_weight,
                                   column_mesh=_column_mesh,
                                   f_land=(_f_land_cells
                                           if (_land_beta != 1.0
@@ -9236,7 +9327,8 @@ class ModelDriver:
                                      or _land_beta_soil_on)
                                  else None),
                          land_beta=_land_beta,
-                         budget_ledger=_budget_ledger_on)
+                         budget_ledger=_budget_ledger_on,
+                         budget_ledger_level_weight=_ledger_weight)
             if _subcycle_rad else None
         )
         if _subcycle_rad:
@@ -9324,8 +9416,9 @@ class ModelDriver:
         # monotonicity factor is
         # geometry-only, so the CFL guard below is EXACT for the applied op.
         _qv_smooth_nu = float(getattr(cfg, "mpas_qv_smooth_del2_m2s", 0.0))
+        _qv_smooth_nu4 = float(getattr(cfg, "mpas_qv_smooth_del4_m4s", 0.0))
         _qv_halo_refresh = None
-        if _qv_smooth_nu > 0.0:
+        if _qv_smooth_nu > 0.0 or _qv_smooth_nu4 > 0.0:
             from legoesm.core.operators_voronoi import (
                 scalar_del2_cell_cfl_factor,
             )
@@ -9374,11 +9467,54 @@ class ModelDriver:
                     f"1/m^2). Max stable coefficient here: "
                     f"{0.5 / (DT * _g_max):.3e} m^2/s."
                 )
-            logger.info(
-                "  MPAS q_v del2 smoothing ON: nu=%.3g m^2/s "
-                "(nu*dt*g_max=%.4f of 0.5 monotone bound)",
-                _qv_smooth_nu, _cfl,
-            )
+            if _qv_smooth_nu > 0.0:
+                logger.info(
+                    "  MPAS q_v del2 smoothing ON: nu=%.3g m^2/s "
+                    "(nu*dt*g_max=%.4f of 0.5 monotone bound)",
+                    _qv_smooth_nu, _cfl,
+                )
+            if _qv_smooth_nu4 > 0.0:
+                # Gershgorin on the Laplacian gives |lambda| <= 2*g_max
+                # (diagonal -g_c, off-diagonal row sum g_c), so the
+                # biharmonic's spectral radius is at most 4*g_max^2 and
+                # forward-Euler stability nu4*|lambda|*dt <= 2 reduces to
+                # nu4*dt*g_max^2 <= 0.5.  Measured on the subdivision-6 mesh
+                # the Laplacian's radius is 1.364*g_max, so this is
+                # conservative by ~2x.  The biharmonic has NO maximum
+                # principle, so unlike the del2 case the bound buys STABILITY
+                # only; the q>=0 floor can still fire.
+                _cfl4 = _qv_smooth_nu4 * DT * _g_max ** 2
+                if _cfl4 > 0.5:
+                    raise ValueError(
+                        f"mpas_qv_smooth_del4_m4s={_qv_smooth_nu4:g} violates "
+                        f"the explicit-biharmonic stability bound: "
+                        f"nu4*dt*g_max^2 = {_cfl4:.3f} > 0.5 (dt={DT:g}s, mesh "
+                        f"g_max={_g_max:.3e} 1/m^2). Max coefficient here: "
+                        f"{0.5 / (DT * _g_max ** 2):.3e} m^4/s."
+                    )
+                logger.info(
+                    "  MPAS q_v del4 smoothing ON: nu4=%.3g m^4/s "
+                    "(nu4*dt*g_max^2=%.4f of 0.5 stability bound)",
+                    _qv_smooth_nu4, _cfl4,
+                )
+            if _qv_smooth_nu > 0.0 and _qv_smooth_nu4 > 0.0:
+                # The two guards above are each sufficient ALONE.  Applied in
+                # one explicit update they add, and the two separate budgets
+                # would admit a combined forward-Euler amplification of up to
+                # 3 (1 from the del2 branch, 2 from the del4 branch) where 2
+                # is the limit -- so the sum is bounded here as well (codex
+                # review, 2026-09-11).
+                _cfl_sum = DT * (2.0 * _qv_smooth_nu * _g_max
+                                 + 4.0 * _qv_smooth_nu4 * _g_max ** 2)
+                if _cfl_sum > 2.0:
+                    raise ValueError(
+                        f"the del2 and del4 q_v filters are individually "
+                        f"stable but jointly are not: dt*(2*nu*g_max + "
+                        f"4*nu4*g_max^2) = {_cfl_sum:.3f} > 2 "
+                        f"(nu={_qv_smooth_nu:g} m^2/s, "
+                        f"nu4={_qv_smooth_nu4:g} m^4/s, dt={DT:g}s, "
+                        f"g_max={_g_max:.3e} 1/m^2)."
+                    )
         _sst_forcing = (cfg.radiation != "none" and self.get_sst_sic is not None)
         _sic_day = None            # (nCells,) ice fraction of the last forcing day
         _ice_skin_on = bool(getattr(cfg, "mpas_ice_skin_prognostic", False))
@@ -9547,13 +9683,27 @@ class ModelDriver:
         # do nothing, silently — the "unknown/unimplemented selection quietly
         # does something else" failure the dispatch-hardening rule exists to
         # stop. Raise until the zenith curve is shared with this lane.
-        if bool(getattr(cfg, "dynamic_albedo", False)):
-            raise NotImplementedError(
-                "dynamic_albedo=True is not implemented on the MPAS lane: "
-                "the surface albedo handed to radiation here is the static "
-                "tile blend (ocean/ice/land), so the zenith-angle-dependent "
-                "ocean curve the FV lane applies would be silently ignored. "
-                "Run the FV lane, or leave dynamic_albedo=False.")
+        # Zenith-angle-dependent open-ocean albedo (Briegleb 1992), the same
+        # curve the FV lane applies.  A FIXED 0.06 is roughly right for an
+        # overhead sun and badly wrong where the sun never rises far: measured
+        # on this configuration the poles carry a -20.3 W/m^2 CLEAR-SKY
+        # shortwave bias, i.e. the surface reflects too little, and a flat
+        # ocean albedo is one of three candidate causes.
+        #
+        # Cadence: the MPAS surface albedo is assembled ONCE PER FORCING DAY
+        # (with the SST/sea-ice sample), not per radiation call, so the cosine
+        # used here is the DAYTIME-EFFECTIVE daily mean
+        # ``mu = Q_day / (S_0 * f_day)`` -- exactly the quantity the FV lane
+        # uses on its non-diurnal path, and consistent with the daily cadence
+        # of the field it feeds.  Under a diurnal cycle this is an average over
+        # the sunlit day rather than the instantaneous value; that is an
+        # approximation of the ALBEDO, not of the insolation, and it is stated
+        # rather than hidden.
+        _zenith_ocean_alb = bool(getattr(cfg, "dynamic_albedo", False))
+        _alb_lat = None
+        if _zenith_ocean_alb:
+            _, _alb_lat_np = self._owned_p_s_and_lat()
+            _alb_lat = jnp.asarray(_alb_lat_np).reshape(-1)
         _albedo_ocean = float(cfg.albedo_ocean)
         _albedo_ice = float(cfg.albedo_ice)
         _albedo_land_static = None
@@ -10504,12 +10654,17 @@ class ModelDriver:
                         # to the scalar config albedo (0.06 = open ocean) for
                         # EVERY column, land included.
                         if _sfc_albedo_on:
+                            _alb_ocean_day = _albedo_ocean
+                            if _zenith_ocean_alb:
+                                _alb_ocean_day = _mpas_zenith_ocean_albedo(
+                                    _alb_lat, _force_day_canonical,
+                                    getattr(self, "orbit", None))
                             _sea_albedo_day = blend_surface_property(
-                                _sic_day, _albedo_ice, _albedo_ocean)
+                                _sic_day, _albedo_ice, _alb_ocean_day)
                             _forcing_daily["sfc_albedo"] = (
                                 blended_surface_albedo(
                                     _sic_day, _alb_f_land, _albedo_ice,
-                                    _albedo_ocean, _albedo_land_static))
+                                    _alb_ocean_day, _albedo_land_static))
                     if _ext_forcing:
                         _ext_p_s, _ext_lat = self._owned_p_s_and_lat()
                         _o3, _aer, _ghg = self._precompute_external_forcing(
@@ -10805,7 +10960,7 @@ class ModelDriver:
             # the per-level sum_c A_c q_c integral, NOT column water vapour —
             # an explicitly non-conservative filter (see the config field note).
             # Eager like the drain below (outside jit).
-            if _qv_smooth_nu > 0.0:
+            if _qv_smooth_nu > 0.0 or _qv_smooth_nu4 > 0.0:
                 _trc_sm = self.state.tracers
                 _qv_sm_in = _trc_sm["q_v"].data
                 if _qv_halo_refresh is not None:
@@ -10813,7 +10968,8 @@ class ModelDriver:
                     # read owner values (see the setup note, #1321).
                     _qv_sm_in = _qv_halo_refresh(_qv_sm_in)
                 _qv_new_sm = _mpas_qv_smooth_step(
-                    _qv_sm_in, self.grid, _qv_smooth_nu, DT)
+                    _qv_sm_in, self.grid, _qv_smooth_nu, DT,
+                    nu4=_qv_smooth_nu4, mid_refresh=_qv_halo_refresh)
                 _new_trc_sm = dict(_trc_sm)
                 _new_trc_sm["q_v"] = _trc_sm["q_v"].replace(data=_qv_new_sm)
                 self.state = self.state._replace(tracers=_new_trc_sm)

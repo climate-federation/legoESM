@@ -85,8 +85,28 @@ clouds: sundqvist
 microphysics: morrison
 convection: bechtold        # mass-flux (IFS lineage), water-conserving by
                             # construction; C24 screen = revalidation gate
-turbulence: louis           # directive turbulence (was also required by the
-                            # cube-era tiled surface; MPAS runs untiled)
+# NEW BASELINE, 2026-09-13 (owner decision). This moves TWO things at once and
+# is therefore a deliberate re-baselining, not a one-variable arm: the boundary
+# layer changes closure AND gains prognostic sub-grid variance. Nothing here is
+# term-by-term comparable to a Louis-era run; score it against a fresh control.
+# WHY: the cloud-cover bias is a humidity/variance problem, not a cloud-closure
+# one -- roughly four fifths of tropical mid-troposphere cells sit near
+# saturation, which is why five convection knobs in a row returned null.
+# Diagnostic closures hand the cloud PDF a variance re-estimated each step from
+# a mixing length times a local gradient; CLUBB run prognostically carries the
+# total-water variance and its covariance with temperature as real state.
+turbulence: clubb           # was: louis (directive turbulence, and required by
+                            # the cube-era tiled surface; MPAS runs untiled)
+clubb_prognostic: true      # carry the 15 higher-order moments as state rather
+                            # than re-diagnosing them each step
+# NOT SET, and this is the open gap: radiation cannot yet consume the moist
+# closure's cloud fraction on THIS lane. use_clubb_cloud_fraction is refused on
+# the MPAS backend, which builds its radiation config directly and bypasses the
+# shared pipeline that threads the override, so setting it here would stop the
+# run at startup. Until that is wired, the prognostic variance reaches the
+# boundary layer but NOT the cloud optics: clouds stay on the humidity-based
+# grid-scale fraction, and this deck should not be expected to move the
+# cloud-cover bias on its own.
 gravity_wave_drag: mcfarlane+hines  # orographic (McFarlane) + non-orographic
                             # (Hines) composite (directive 2026-07-15). The
                             # 2026-07-15 A/B: on latlon24 the +hines lid
@@ -228,6 +248,46 @@ land_soil_moisture_init_frac: 0.25
 land_stomatal_beta: false
 snow_albedo_feedback: true  # prognostic SWE snow-albedo feedback, threaded into
                             # the multilayer land (#715)
+# POLAR SURFACE ALBEDO, two measured fixes adopted 2026-09-13 (owner decision).
+# The poles reflect 22 W/m2 too little in CLEAR SKY against CERES -- a surface
+# error no cloud lever can reach -- and both of these were measured earlier and
+# then left switched off.
+#
+# Snow-albedo ageing timescale [days]. Every snow-covered polar cell measured
+# 0.521 against an observed 0.70 (Arctic tundra) to 0.82 (Antarctic plateau),
+# because a 3.7-day clock darkens any snowpack older than a few weeks whatever
+# its temperature. At 150 days the measured albedo is 0.703 Arctic / 0.724
+# Antarctic, worth +6.8 W/m2 of polar clear-sky reflection. Turning on the
+# temperature dependence ALONE does not fix it: an arm at the BATS activation
+# slowed the clock 5-12% in ten days and left the albedo at 0.521, so the
+# e-folding time is the binding parameter.
+# CAVEAT, carried deliberately: the land calibration fitted 3.674 d with the
+# temperature dependence off, so this trades against that surface-temperature
+# calibration and any run adopting it must score land temperature too, not only
+# the albedo.
+# ADOPTED 2026-09-15 (user), after the canopy's absorbed shortwave and the
+# exported surface albedo were reconciled (commit 8065cb0e9): the land now
+# absorbs with the SAME snow-aged albedo the atmosphere reflects with, so a
+# brighter snow no longer creates energy at the surface. Without this the
+# 3.67-day ageing put every polar snow cell at the aged 0.52. Measured on a
+# 30-day pair (pa30_both vs pa30_ctl, days 80-110, with albedo_ice below):
+# polar clear-sky reflected SW bias -15.7 -> -2.7 W/m2 vs CERES; all-sky
+# -22.3 -> -11.1 (the rest is the polar cloud deficit); global reflected SW
+# bias +10.2 -> +12.6; polar tas -0.5 K. The 5-day single-lever arm gave
+# +7.3 of the pair's polar clear-sky gain.
+land_snow_tau_days: 150.0
+# Sea-ice albedo, flat over the prescribed ice fraction (no snow-on-ice, pond
+# or temperature dependence is wired on this lane). 0.65 is a bare/melting-ice
+# value; late-winter ice is snow-covered (CICE/CCSM3 dry snow-on-ice 0.80-0.85
+# broadband). ADOPTED 2026-09-15 (user); the 5-day single-lever arm gave +2.7
+# of the pair's polar clear-sky gain in a window that barely lights the Arctic.
+albedo_ice: 0.80
+# Zenith-angle-dependent open-ocean albedo (Briegleb 1992). The flag name is
+# broader than its effect: on this lane it changes the OPEN-OCEAN term only and
+# leaves the ice and land blends alone. Measured +6.0 W/m2 of Southern Ocean
+# clear-sky reflection, which essentially erased that bias, and +1.3 at the
+# poles. Refused outright on the spectral path, which would ignore it.
+dynamic_albedo: true
 surface_bulk_scheme: coare3   # OCEAN tile (land tile uses MOST via #715)
 surface_gustiness_zi: 300.0  # == cmip_tuned_physics.yaml (run_coupled-mirrored #647 dest)
 surface_tiled: false        # MPAS standalone path has NO tiled surface (open
@@ -310,7 +370,34 @@ homogeneous_ice_nucleation: true
 aerosol_ccn: true
 # Grid-scale moisture smoothing, the positivity fixer that borrows within a
 # column rather than creating water, and the prognostic sea-ice skin.
-mpas_qv_smooth_del2_m2s: 2.0e5
+# The moisture filter is a SCALE-SELECTIVE biharmonic, not a Laplacian, since
+# 2026-09-12. The Laplacian at 2.0e5 was itself a cause of the tropical
+# free-tropospheric moist bias: it flattened the resolved humidity gradients
+# along with the grid-scale noise it was added to suppress. 3.6421e14 m^4/s
+# matches that Laplacian's damping of the TWO-CELL mode exactly, measured on
+# the operator's own top eigenvalue on this mesh, so it changes selectivity
+# without changing the grid-scale damping production has always had.
+#
+# Measured on a 30-day controlled pair, days 101-110, against the Laplacian:
+# reflected shortwave 112.8 -> 108.0 (CERES 99-100), outgoing longwave
+# 233.7 -> 237.7 (CERES ~240), global cloud cover 72.2 -> 67.1 (ESACCI ~67),
+# tropical free-troposphere relative humidity 0.744 -> 0.688, and the humidity
+# field stays smooth (structure-function exponent 1.48 against the Laplacian's
+# 1.56; the refuted weaken-the-Laplacian arm scored 0.58).
+#
+# CHOSEN FROM A FOUR-POINT SWEEP, not from two points: 0.91e14 gives better
+# radiation still (shortwave 103.9, longwave 240.4, deep-tropical cover inside
+# the observed range) but its exponent is 1.02, at the step-discontinuity value,
+# and no instantaneous-humidity reference exists yet to say whether that is a
+# sharp front or under-damping. Both reviewers chose this value over it;
+# revisit when the daily reanalysis humidity reference is available.
+#
+# CAVEAT that is NOT fixed by this: the filter is a uniform drying. It improves
+# every region that was too cloudy and WORSENS every region already too clear —
+# the Californian stratocumulus deck loses a further 10 cover points on a deck
+# already 34 too clear, at every coefficient in the sweep.
+mpas_qv_smooth_del2_m2s: 0.0
+mpas_qv_smooth_del4_m4s: 3.6421e14
 mpas_conservative_tracer_clamp: true
 mpas_ice_skin_prognostic: true
 

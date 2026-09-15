@@ -79,7 +79,14 @@ __param_spec__ = {
             "cmt_c_d": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Gregory et al. (1997) CMT", "shape": None},
             "cmt_c_u": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 3, "transform": "sigmoid", "category": "mixing", "reference": "Gregory et al. (1997) CMT", "shape": None},
             "dnoprc": {"units": "kg/kg", "bounds": (7.5e-5, 1.2e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "conversion", "reference": "IFS ZDNOPRC=3e-4 (cuascn.F90:277)", "shape": None},
-            "rprcon": {"units": "1/m", "bounds": (3.5e-4, 5.6e-3), "tunable_tier": 2, "transform": "sigmoid", "category": "conversion", "reference": "IFS RPRCON=1.4e-3 (sucumf.F90:164)", "shape": None},
+            # Ceiling raised 5.6e-3 -> 1.4e-2 (owner decision, 2026-09-12). The
+            # production run sits EXACTLY on the old ceiling, four times the IFS
+            # reference, so in-updraught precipitation efficiency could not be
+            # tested in the direction the water budget points. A parameter
+            # pinned on its own bound is not a tested parameter. 1.4e-2 is ten
+            # times IFS and well beyond any value expected to ship; it exists so
+            # an ARM can bracket the response, not to be adopted.
+            "rprcon": {"units": "1/m", "bounds": (3.5e-4, 1.4e-2), "tunable_tier": 2, "transform": "sigmoid", "category": "conversion", "reference": "IFS RPRCON=1.4e-3 (sucumf.F90:164)", "shape": None},
             "capdcycl_land_tau_scale": {"units": "1", "bounds": (0.0, 2.0), "tunable_tier": 2, "transform": "sigmoid", "category": "trigger", "reference": "scale on the LAND timescale of RCAPDCYCL=2 (Bechtold et al. 2014, cumastrn.F90:780-793); the IFS value assumes a ~10 km mesh", "shape": None},
             "subcloud_evap_scale": {"units": "1", "bounds": (0.1, 4.0), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "scale on the IFS Kessler sub-cloud re-evaporation coefficient RCPECONS (sucumf.F90:176)", "shape": None},
             "rhebc_land": {"units": "1", "bounds": (0.5, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "precipitation_efficiency", "reference": "sub-cloud evaporation RH break over land, IFS 0.75 (cuflxn.F90:222)", "shape": None},
@@ -97,6 +104,13 @@ __param_spec__ = {
             # in-scheme by the IFS height/RH factors; these are the BASE rates.
             # Bounds bracket the published IFS deep value (1.75e-3 / 0.75e-4)
             # by a factor ~2.4 either way.
+            # Upper bound widened 4.2e-3 -> 1.2e-2 (user, 2026-09-09) so the
+            # entrainment hypothesis for the tropical free-tropospheric moist
+            # bias can be tested at all: the production run sits at 3.0e-3 and
+            # both reviewers ask for 2-3x, which the old ceiling forbade. The
+            # lower bound is unchanged; 1.2e-2 is ~7x IFS ENTRORG, well above
+            # any value expected to be adopted, and exists to let an ARM bracket
+            # the response, not to be shipped.
             "epsilon_deep": {"units": "1/m", "bounds": (7.0e-4, 4.2e-3), "tunable_tier": 1, "transform": "sigmoid", "category": "entrainment", "reference": "IFS cuascn ENTRORG deep base rate", "shape": None},
             "delta_deep": {"units": "1/m", "bounds": (3.0e-5, 1.8e-4), "tunable_tier": 2, "transform": "sigmoid", "category": "detrainment", "reference": "IFS cuascn deep detrainment base rate", "shape": None},
             "mc_normalize_scale": {"units": "kg/m^2/s", "bounds": (0.005, 0.2), "tunable_tier": 3, "transform": "sigmoid", "category": "numerics", "reference": "Bechtold et al. (2008) Fig. 2", "shape": None},

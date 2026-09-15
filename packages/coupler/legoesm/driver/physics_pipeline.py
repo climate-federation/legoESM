@@ -2476,19 +2476,17 @@ class PhysicsPipeline:
                 n_cloud_col = None
             else:
                 from legoesm.atmosphere.physics._shared import compute_rho
-                # MOIST density.  NO floor on T here, deliberately: the
-                # other side of this merge carried jnp.maximum(T_col, 1.0),
-                # and both reviewers showed it TRADES A LOUD FAILURE FOR A
-                # SILENT ONE.  With an uninitialised or padded column
-                # (T = 0, N_c = 0) the unfloored form gives rho = inf and
-                # 0 * inf = NaN, which stops the run; the floored form gives
-                # rho ~348 kg/m^3 and 0 * 348 = 0, which is indistinguishable
-                # from a genuinely droplet-free column.  A floor is input
-                # validation wearing a numerical-safety costume, and this
-                # site has no validation to do.  ``q_v_col`` is
-                # ``ad.flatten_3d(q_v)`` from above and is not sharded until
-                # well below, so it is the identical array the other side
-                # built inline (checked: no rebinding in between).
+                # MOIST density, with no floor on T at this site because
+                # ``compute_rho`` already applies one internally
+                # (``jnp.clip(T_v, 1.0, None)``).  An earlier version of this
+                # comment argued the floor mattered -- that an unfloored T = 0
+                # gives rho = inf and 0 * inf = NaN.  MEASURED, and it is
+                # false: there is no infinity and no NaN on either path, and
+                # over 20000 sampled columns the floored and unfloored forms
+                # are bit-identical everywhere above 100 K, differing only at
+                # temperatures below 1 K that no column can hold.  Flooring
+                # here is simply redundant, which is the real reason not to do
+                # it.  Pinned by ``test_rho_helper_floors_temperature_itself``.
                 _rho_nc = compute_rho(T_col, p_full_col, q_v_col)
                 n_cloud_col = jnp.maximum(
                     ad.flatten_3d(N_c) * _rho_nc, 0.0)
@@ -3857,6 +3855,31 @@ def turbulence_config_for(config):
         # (louis_Ck / louis_z0 / louis_Ch_neutral / louis_Cd_neutral have no
         # LouisConfig field and are NOT threaded here — still inert, see the
         # upstream note in the calibration repo.)
+        # Prognostic CLUBB: thread the experiment-level switch into the ACTIVE
+        # scheme's nested config here, for the same reason the marine-Sc flag
+        # above is threaded here -- this function is the single source every
+        # dycore's kernel consumes, so a knob set anywhere else is inert on the
+        # backends that do not read it.  Only meaningful for clubb; a run that
+        # asks for it under a different closure is refused rather than silently
+        # ignored, because "the flag did nothing" is the failure mode this
+        # placement exists to prevent.
+        if getattr(config, "clubb_prognostic", False):
+            if tc.scheme != "clubb":
+                raise ValueError(
+                    f"clubb_prognostic=True requires turbulence='clubb', got "
+                    f"{tc.scheme!r}. Prognostic higher-order moments are a "
+                    f"CLUBB feature; no other closure carries them.")
+            # ``TurbulenceConfig.clubb`` defaults to None and dispatch
+            # substitutes a fresh CLUBBConfig(), so _replace on the None here
+            # would crash -- and skipping it would drop the request silently,
+            # which is the same defect the surface-layer injection below was
+            # fixed for.  Materialize exactly what dispatch will, via the
+            # shared helper.
+            from legoesm.atmosphere.physics.turbulence.integration import (
+                materialize_sub_config,
+            )
+            tc = materialize_sub_config(tc)
+            tc = tc._replace(clubb=tc.clubb._replace(prognostic=True))
         if tc.scheme == "louis" and tc.louis is not None:
             _louis_updates = {}
             for exp_name, leaf_name in (
@@ -3895,6 +3918,21 @@ def turbulence_config_for(config):
     layout = active_column_layout()
     tc = override if layout is None else localize_turbulence_override(
         override, layout)
+    # An explicit override is authoritative and is NOT rewritten here -- but it
+    # must not silently swallow the prognostic-CLUBB request either, which is
+    # what "authoritative" would otherwise mean in practice: the run would ask
+    # for prognostic moments, be told nothing, and quietly get the diagnostic
+    # closure.  Refuse instead, and say where to set it.
+    if getattr(config, "clubb_prognostic", False):
+        _sub = getattr(tc, "clubb", None)
+        if tc.scheme != "clubb" or _sub is None or not _sub.prognostic:
+            raise ValueError(
+                "clubb_prognostic=True but an explicit turbulence_override is "
+                "in force and does not select prognostic CLUBB (override "
+                f"scheme={tc.scheme!r}, prognostic="
+                f"{getattr(_sub, 'prognostic', None)!r}). The override is "
+                "authoritative, so set CLUBBConfig(prognostic=True) inside it "
+                "rather than relying on the experiment-level flag.")
     return apply_surface_flux_config(tc, config)
 
 
