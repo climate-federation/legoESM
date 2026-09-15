@@ -260,3 +260,19 @@ reduced (or increased, Savazzi 2022) = the CMT sign question, report it.
 Instrument: profile_rh_split (ua bias by level) on the published window.
 Note the cap: with M_b at 0.02 in 78 % of columns the CMT is proportional to
 a capped flux; a second arm with the cap at 0.10 follows if the sign is right.
+
+## Shallow closure ON + cap 0.10 (wv_mb010sh, 5 days vs pa_ctl)
+Tropical ocean: hfls +2.9 W/m2 (evaporation +3 %), lowest-level q −0.14 g/kg,
+RH unchanged (T −0.15 K), prw −0.2, clt −5.8, rsut −2.6; land: hfls +11,
+pr +0.8 mm/day. The largest surface response of the six levers, still a
+third of the CONFIRM gate — inconclusive, not a fix.
+CMT arm relaunched (wv_cmt, 27481448) on the conserving kernel after codex's
+review of the wiring (8fdecb0ac); the first launch ran a kernel that leaked
+column momentum at the surface and was cancelled.
+Standing conclusion for the surface layer after six levers: no single
+parameterization switch on this deck moves the tropical-ocean surface
+humidity by more than 0.15 g/kg in 5 days or 30 days; the excess lives in
+the 1000-925 hPa structure the 30-level uniform-sigma grid (≈33 hPa, ≈300 m
+layers in the boundary layer) cannot resolve a mixed layer / transition layer
+/ inversion in — a vertical-resolution arm is the natural next test and a
+user decision (shared with the UTLS session's vertical-grid work).
