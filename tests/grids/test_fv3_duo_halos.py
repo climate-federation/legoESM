@@ -11,9 +11,9 @@ Four gates per public routine (the NH JAX-mirror pattern,
    fields otherwise.  Random beats smooth for an INDEX map: a smooth
    field hides a transposed or off-by-one index, random cannot.
 2. **jit vs eager** as an ASSERTION, not a comment.
-3. **guards**: float32 raises ``TypeError``, an unknown stagger/ring/key
-   raises ``ValueError`` -- each shown non-vacuous by the same call
-   succeeding on the admitted input.
+3. **guards**: uniform float32 and float64 are admitted, mixed floating
+   dtypes raise ``TypeError``, and an unknown stagger/ring/key raises
+   ``ValueError`` -- each rejection is paired with an admitted input.
 4. ``jax.test_util.check_grads(order=2)``.
 
 Plus two gates whose power does not depend on a tolerance:
@@ -1164,24 +1164,29 @@ def test_barrier1_makes_every_shared_edge_single_valued(tab):
 # gate 3: entry guards, each shown non-vacuous
 # ---------------------------------------------------------------------------
 
-def test_float32_operands_raise_typeerror(tab):
+def test_float_operands_must_have_one_uniform_dtype(tab):
     f32 = jnp.asarray(_rnd6((MA, MA), 46), dtype=jnp.float32)
     f64 = jnp.asarray(_rnd6((MA, MA), 46))
-    with pytest.raises(TypeError, match="float64"):
-        jx.exchange_agrid_scalar_halos(f32, tab)
-    jx.exchange_agrid_scalar_halos(f64, tab)          # non-vacuous
+    assert jx.exchange_agrid_scalar_halos(f32, tab).dtype == jnp.float32
+    assert jx.exchange_agrid_scalar_halos(f64, tab).dtype == jnp.float64
 
     u32 = jnp.asarray(_rnd6((MA, MB), 47), dtype=jnp.float32)
+    v32 = jnp.asarray(_rnd6((MB, MA), 48), dtype=jnp.float32)
     v64 = jnp.asarray(_rnd6((MB, MA), 48))
-    with pytest.raises(TypeError, match="float64"):
+    got_u32, got_v32 = jx.exchange_dgrid_vector_halos(u32, v32, tab)
+    assert got_u32.dtype == jnp.float32
+    assert got_v32.dtype == jnp.float32
+    with pytest.raises(TypeError, match="MIXED float dtypes"):
         jx.exchange_dgrid_vector_halos(u32, v64, tab)
-    jx.exchange_dgrid_vector_halos(jnp.asarray(u32, dtype=jnp.float64),
-                                   v64, tab)
 
-    with pytest.raises(TypeError, match="float64"):
+    fx32 = jnp.asarray(_rnd6((NPX, N), 49), dtype=jnp.float32)
+    fy32 = jnp.asarray(_rnd6((N, NPX), 50), dtype=jnp.float32)
+    got_fx32, got_fy32 = jx.average_shared_edge_cgrid(fx32, fy32, tab)
+    assert got_fx32.dtype == jnp.float32
+    assert got_fy32.dtype == jnp.float32
+    with pytest.raises(TypeError, match="MIXED float dtypes"):
         jx.average_shared_edge_cgrid(
-            jnp.asarray(_rnd6((NPX, N), 49), dtype=jnp.float32),
-            jnp.asarray(_rnd6((N, NPX), 50)), tab)
+            fx32, jnp.asarray(fy32, dtype=jnp.float64), tab)
 
 
 def test_unknown_stagger_ring_and_key_raise(tab):
@@ -1369,3 +1374,29 @@ def test_stack6_unstack6_roundtrip():
     assert len(back) == 6
     for t in range(6):
         assert _bitwise_equal(back[t], lst[t])
+
+
+def test_blend_as_stencil_identity_holds_in_f32_including_subnormals(tab):
+    """The certified numerics turn the barrier blend into a stencil on
+    ``0.5*(a + s*b) == 0.5*a + (0.5*s)*b``, exact for NORMAL operands.
+    f32 normals bottom out near 1.2e-38, so tracer-scale magnitudes can
+    reach subnormals where the two forms may differ (GLM 2026-09-10).
+    This pins where the identity holds and where it stops."""
+    import numpy as _np
+    rng = _np.random.default_rng(77)
+    for dtype, scales, must_hold in ((_np.float64, (1e0, 1e-20, 1e-300), True),
+                                     (_np.float32, (1e0, 1e-20, 1e-30), True),
+                                     (_np.float32, (1e-40,), False)):
+        for sc in scales:
+            a = (rng.standard_normal(4096) * sc).astype(dtype)
+            b = (rng.standard_normal(4096) * sc).astype(dtype)
+            for s in (dtype(1.0), dtype(-1.0)):
+                lhs = dtype(0.5) * (a + s * b)
+                rhs = dtype(0.5) * a + (dtype(0.5) * s) * b
+                same = _np.array_equal(lhs.view(_np.uint8), rhs.view(_np.uint8))
+                if must_hold:
+                    assert same, f"{dtype.__name__} at {sc}: identity broke"
+                else:
+                    # not asserted to break every time; the point is that
+                    # this range is OUTSIDE the certified precondition
+                    pass
