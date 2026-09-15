@@ -136,7 +136,8 @@ def test_cmt_kernel_conserves_column_momentum():
     rng = np.random.default_rng(2)
     p_half = np.linspace(1.0e4, 1.0e5, nlev + 1)[None, :] * np.ones((ncol, 1))
     p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1]); dp = p_half[:, 1:] - p_half[:, :-1]
-    rho = p_full / (287.0 * 280.0)
+    from legoesm import constants
+    rho = p_full / (constants.R_d * 280.0)
     u = 10.0 * np.linspace(1.0, 0.0, nlev)[None, :] + rng.standard_normal((ncol, nlev))
     v = 3.0 * np.linspace(0.0, 1.0, nlev)[None, :]
     M_u = 0.05 * np.exp(-((np.arange(nlev) - 12) / 4.0) ** 2)[None, :] * np.ones((ncol, 1))
