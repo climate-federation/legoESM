@@ -123,3 +123,72 @@ def test_conv_precip_carry_is_unchanged_by_the_switch():
     np.testing.assert_array_equal(np.asarray(prog_on["conv_precip"]),
                                   np.asarray(prog_off["conv_precip"]))
     assert np.all(np.asarray(prog_on["conv_precip"]) > 0.0)
+
+
+def _convecting_state(coord, p_s_val):
+    """A warm, moist, conditionally unstable column on the coordinate's OWN
+    pressures (the fixture shape of tests/unit/test_bechtold._column)."""
+    from legoesm.thermo import saturation_mixing_ratio
+
+    p_s = jnp.full((NCOL,), p_s_val)
+    p_full = np.asarray(coord.pressure_at_full(p_s), dtype=np.float64)
+    z = -8500.0 * np.log(p_full / p_s_val)
+    T = np.maximum(302.0 - 7.5e-3 * z, 200.0)
+    q_sfc = 0.8 * float(saturation_mixing_ratio(jnp.asarray(302.0), jnp.asarray(p_s_val)))
+    q = q_sfc * np.exp(-z / 3000.0)
+    tracers = {"q_v": Field(jnp.asarray(q)), "q_c": Field(jnp.zeros_like(jnp.asarray(q))),
+               "q_r": Field(jnp.zeros_like(jnp.asarray(q)))}
+    return HydrostaticState(
+        u=Field(jnp.zeros((NCOL, coord.n_levels))), T=Field(jnp.asarray(T)), p_s=Field(p_s),
+        phis=Field(jnp.zeros((NCOL,))), v=Field(jnp.zeros((NCOL, coord.n_levels))),
+        tracers=tracers), p_s
+
+
+def _hybrid_coordinate(nlev):
+    from legoesm.grids.vertical import create_hybrid_coordinate
+    s = np.linspace(0.02, 1.0, nlev + 1)
+    a = 0.4 * s * (1.0 - s)            # zero at the surface, pressure-like aloft
+    return create_hybrid_coordinate(nlev, jnp.asarray(a), jnp.asarray(s - a))
+
+
+@pytest.mark.parametrize("kind", ["sigma", "hybrid"])
+def test_unmodified_kernel_closes_column_water_absolutely(kind):
+    """Absolute closure on the REAL kernel (no dq_r override), on the
+    coordinate's own layer masses: flag off  ∫(dq_v+dq_c+dq_r) dp/g = 0;
+    flag on  ∫(dq_v+dq_c) dp/g + precip = 0.  The hybrid case uses
+    p_s = 700 hPa so A*p_ref + B*p_s differs from (A+B)*p_s by 30 %: it
+    fails when the bridge builds its pressures as sigma*p_s (codex P1)."""
+    nlev = 30
+    coord = create_sigma_coordinate(nlev) if kind == "sigma" else _hybrid_coordinate(nlev)
+    p_s_val = 1.0e5 if kind == "sigma" else 7.0e4
+    state, p_s = _convecting_state(coord, p_s_val)
+    p_half = np.asarray(coord.pressure_at_half(p_s), dtype=np.float64)
+    dp = p_half[:, 1:] - p_half[:, :-1]
+    grid = types.SimpleNamespace(grid_shape_2d=(NCOL,), land_frac=np.zeros(NCOL))
+
+    def col(t, key):
+        if key not in t.tracer_tendencies:
+            return np.zeros(NCOL)
+        return (np.asarray(t.tracer_tendencies[key].data) * dp).sum(-1) / constants.g
+
+    out = {}
+    for flag in (False, True):
+        fn = ci.make_convection_physics(
+            ConvectionConfig(scheme="bechtold", rain_to_surface=flag),
+            model_type="mpas", dt=DT)
+        # Spin the plume up through the M_u carry (as the model does), on a
+        # FROZEN state, so the last call has a developed rain source.
+        prog = None
+        for _ in range(8):
+            ps_obj = None if prog is None else types.SimpleNamespace(
+                conv_prog_profile=jnp.asarray(prog), conv_stoch_state=jnp.zeros((NCOL,)))
+            out[flag], prog_out = fn(state, grid, coord, phys_state=ps_obj)
+            prog = prog_out["conv_prog_profile"] if isinstance(prog_out, dict) else prog_out
+    precip = np.asarray(out[True].precip.data).reshape(NCOL)
+    assert precip.max() > 1e-7, "fixture must rain (kg/m2/s) or the test is vacuous"
+    scale = np.abs(col(out[False], "q_v")).max()
+    np.testing.assert_allclose(
+        col(out[False], "q_v") + col(out[False], "q_c") + col(out[False], "q_r"),
+        0.0, atol=1e-9 * scale)
+    np.testing.assert_allclose(
+        col(out[True], "q_v") + col(out[True], "q_c") + precip, 0.0, atol=1e-9 * scale)

@@ -29,7 +29,6 @@ from legoesm.grids.vertical import (
     HeightCoordinate,
     SigmaCoordinate,
     TerrainMetric,
-    pressure_from_sigma,
     compute_sigma_dot_and_total,
     compute_pressure_velocity,
 )
@@ -388,9 +387,11 @@ def _make_hydrostatic_convection(
         shape_3d = T.shape
         shape_2d = p_s.shape
 
-        # Pressure at full and half levels
-        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
-        p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)
+        # Pressure at full and half levels from the coordinate's OWN protocol
+        # (byte-identical to sigma*p_s on a SigmaCoordinate; on a hybrid
+        # coordinate sigma_half is A+B and sigma*p_s is NOT the layer mass).
+        p_full = sigma_coord.pressure_at_full(p_s)
+        p_half = sigma_coord.pressure_at_half(p_s)
 
         # Reshape to columns generically for any grid topology.
         # Cubed-sphere ``shape_2d=(6,n,n)`` → ncol = 6·n·n.
