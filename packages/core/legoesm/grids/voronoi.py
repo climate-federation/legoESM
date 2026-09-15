@@ -2094,3 +2094,19 @@ def reconstruct_cell_velocity(u_edge, mesh):
         v_north = jnp.sum(contrib * sin_a, axis=0)
 
     return u_east, v_north
+
+
+def cell_vector_to_edge_normal(du_cell, dv_cell, mesh):
+    """Project cell-centred vector components onto the MPAS edge normals.
+
+    Each component is averaged onto the edge from its two adjacent cells
+    (``cellsOnEdge``), then dotted with the edge-normal unit vector
+    ``(cos angleEdge, sin angleEdge)``.  The single cell->edge projection every
+    physics bridge uses for its momentum tendency on this mesh.
+    """
+    c0 = mesh.cellsOnEdge[0]  # (nEdges,)
+    c1 = mesh.cellsOnEdge[1]  # (nEdges,)
+    du_e_east = 0.5 * (du_cell[c0] + du_cell[c1])
+    dv_e_north = 0.5 * (dv_cell[c0] + dv_cell[c1])
+    angle = mesh.angleEdge[:, None]
+    return du_e_east * jnp.cos(angle) + dv_e_north * jnp.sin(angle)

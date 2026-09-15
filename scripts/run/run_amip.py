@@ -1034,6 +1034,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "evaporation (cuflxn.F90 0.70/0.75 land vs "
                              "0.85/0.92 ocean). Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_land_rhebc}.")
+    parser.add_argument("--bechtold-enable-cmt", dest="bechtold_enable_cmt",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Gregory-1997 convective momentum transport in Bechtold "
+                             "(applied to the MPAS edge winds).")
     parser.add_argument("--bechtold-use-ifs-shallow-closure",
                         dest="bechtold_use_ifs_shallow_closure",
                         action=argparse.BooleanOptionalAction,
@@ -2178,6 +2182,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_dx_m=args.bechtold_dx_m,
         bechtold_use_ifs_downdraft=args.bechtold_use_ifs_downdraft,
         bechtold_use_ifs_shallow_closure=args.bechtold_use_ifs_shallow_closure,
+        bechtold_enable_cmt=args.bechtold_enable_cmt,
         bechtold_use_ifs_capdcycl=args.bechtold_use_ifs_capdcycl,
         bechtold_use_ifs_land_rhebc=args.bechtold_use_ifs_land_rhebc,
         bechtold_use_ifs_snow_melt=args.bechtold_use_ifs_snow_melt,

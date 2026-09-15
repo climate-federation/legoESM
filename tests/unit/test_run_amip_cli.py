@@ -4045,3 +4045,20 @@ def test_bechtold_M_b_max_threads_and_validates():
     assert _ATM_SCALAR_PARAM_MAP["atm.conv.BechtoldConfig.M_b_max"] == "bechtold_M_b_max"
     with pytest.raises(ValueError, match="bechtold_M_b_max"):
         ExperimentConfig(bechtold_M_b_max=0.5).validate_strict()
+
+
+def test_bechtold_enable_cmt_round_trips():
+    """--bechtold-enable-cmt reaches ExperimentConfig and the BechtoldConfig
+    leaf on both resolvers; default off."""
+    from legoesm.driver.physics_pipeline import _resolve_convection, convection_config_for
+
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold", "--bechtold-enable-cmt"]), parser))
+    assert cfg.bechtold_enable_cmt is True
+    assert _resolve_convection(cfg)[1].enable_cmt is True
+    assert convection_config_for(cfg).bechtold.enable_cmt is True
+    dflt = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert dflt.bechtold_enable_cmt is False
+    assert convection_config_for(dflt).bechtold.enable_cmt is False

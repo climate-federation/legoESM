@@ -645,7 +645,10 @@ def _make_mpas_turbulence(
     _accepts_surface_flux = kernel_accepts_surface_flux(turb_fn)
 
     def physics_fn(state, mesh, sigma_coord, phys_state=None, forcing=None):
-        from legoesm.grids.voronoi import reconstruct_cell_velocity
+        from legoesm.grids.voronoi import (
+            cell_vector_to_edge_normal,
+            reconstruct_cell_velocity,
+        )
 
         tke_out = None
         if turb_fn is None:
@@ -870,12 +873,7 @@ def _make_mpas_turbulence(
         # vectors (``cellsOnEdge[0]`` and ``cellsOnEdge[1]``).
         du_cell = turb_out.du_dt  # (nCells, nlev)
         dv_cell = turb_out.dv_dt
-        c0 = mesh.cellsOnEdge[0]  # (nEdges,)
-        c1 = mesh.cellsOnEdge[1]  # (nEdges,)
-        du_e_east = 0.5 * (du_cell[c0] + du_cell[c1])
-        dv_e_north = 0.5 * (dv_cell[c0] + dv_cell[c1])
-        angle = mesh.angleEdge[:, None]
-        du_edge_normal = du_e_east * jnp.cos(angle) + dv_e_north * jnp.sin(angle)
+        du_edge_normal = cell_vector_to_edge_normal(du_cell, dv_cell, mesh)
 
         dT_cell = turb_out.dT_dt
 

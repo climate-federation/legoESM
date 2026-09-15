@@ -420,12 +420,9 @@ def _make_hydrostatic_convection(
         # lat-lon the prognostic winds live at cell centres so the
         # ``(...,nlev) → (ncol, nlev)`` reshape works directly.  On
         # MPAS the prognostic ``u`` is the normal velocity on edges
-        # (``shape (nEdges, nlev)``) so the reshape would mismatch
-        # ``ncol = nCells``.  In that case we degrade gracefully to
-        # zero u/v columns — the CMT-capable scheme still runs (it
-        # produces zero CMT) and the rest of the column physics
-        # (Tiedtke / ZM / Bechtold mass-flux closures) is unaffected.
-        # Proper edge→cell interpolation for MPAS CMT is a follow-up.
+        # (``shape (nEdges, nlev)``): rebuild cell-centred winds with the
+        # Perot reconstruction (before 2026-09-15 this branch handed the
+        # scheme zero winds, so CMT was silently dead on the MPAS lane).
         if is_cmt_capable:
             _u_data = state.u.data
             if _u_data.shape[0] == ncol or _u_data.shape[:-1] == shape_2d:
@@ -435,10 +432,19 @@ def _make_hydrostatic_convection(
                     if state.v is not None
                     else jnp.zeros_like(u_col)
                 )
+            elif hasattr(grid, "cellsOnEdge") and hasattr(grid, "angleEdge"):
+                # MPAS: the prognostic wind is the edge-normal velocity
+                # (nEdges, nlev); rebuild cell-centred (u, v) for CMT.
+                from legoesm.grids.voronoi import reconstruct_cell_velocity
+
+                u_col, v_col = reconstruct_cell_velocity(_u_data, grid)
+                u_col = u_col.astype(_state_dtype)
+                v_col = v_col.astype(_state_dtype)
             else:
-                # MPAS / unsupported wind staggering: zero CMT inputs.
-                u_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
-                v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+                raise ValueError(
+                    "convection: CMT-capable scheme received winds of shape "
+                    f"{_u_data.shape} that are neither cell columns nor MPAS "
+                    "edge normals")
         else:
             u_col = None
             v_col = None
@@ -847,24 +853,26 @@ def _make_hydrostatic_convection(
         # extraction step above.
         u_target_shape = state.u.data.shape
         if conv_fn is not None and conv_out.du_dt_conv is not None:
-            # Reshape only when the column-physics output matches the
-            # u-grid layout.  When MPAS shifted CMT to zero (edge winds
-            # not interpolated to cells) we keep the zero on the
-            # u-grid layout instead of broadcasting cells back to edges.
-            try:
+            if state.v is None and hasattr(grid, "cellsOnEdge"):
+                # MPAS: project the cell-centred (du, dv) onto the edge
+                # normals (the turbulence bridge's projection, shared).
+                from legoesm.grids.voronoi import cell_vector_to_edge_normal
+
+                _dv_conv = (conv_out.dv_dt_conv if conv_out.dv_dt_conv is not None
+                            else jnp.zeros_like(conv_out.du_dt_conv))
+                du_dt = cell_vector_to_edge_normal(
+                    conv_out.du_dt_conv.reshape(ncol, nlev),
+                    _dv_conv.reshape(ncol, nlev), grid).astype(_state_dtype)
+            else:
+                # A shape mismatch here is a wiring defect: raise, never zero.
                 du_dt = conv_out.du_dt_conv.reshape(u_target_shape)
-            except (TypeError, ValueError):
-                du_dt = jnp.zeros(u_target_shape, dtype=_state_dtype)
         else:
             du_dt = jnp.zeros(u_target_shape, dtype=_state_dtype)
         dv_dt_field = None
         if state.v is not None:
             v_target_shape = state.v.data.shape
             if conv_fn is not None and conv_out.dv_dt_conv is not None:
-                try:
-                    dv_dt = conv_out.dv_dt_conv.reshape(v_target_shape)
-                except (TypeError, ValueError):
-                    dv_dt = jnp.zeros(v_target_shape, dtype=_state_dtype)
+                dv_dt = conv_out.dv_dt_conv.reshape(v_target_shape)
             else:
                 dv_dt = jnp.zeros(v_target_shape, dtype=_state_dtype)
             dv_dt_field = Field(

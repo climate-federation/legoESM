@@ -1275,6 +1275,9 @@ class ExperimentConfig(NamedTuple):
     # (2026-09-15). 0.02 here reproduces that production behaviour; the
     # default is a pending user decision.
     bechtold_M_b_max: float = 0.02   # BechtoldConfig.M_b_max [kg/m^2/s]
+    # Gregory-1997 convective momentum transport; applied to MPAS edge winds
+    # through the shared cell->edge projection (2026-09-15). Default off.
+    bechtold_enable_cmt: bool = False
     bechtold_dnoprc: float = 3.0e-4   # BechtoldConfig.dnoprc [kg/kg]
     # Deep-plume entrainment / detrainment base rates (IFS cuascn), exposed
     # 2026-08-14. These set the ITCZ WIDTH and tropical rain concentration:
@@ -3415,6 +3418,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_rhebc_land_deep=getattr(amip_cfg, 'bechtold_rhebc_land_deep', 0.70),
             bechtold_rprcon=getattr(amip_cfg, 'bechtold_rprcon', 1.4e-3),
             bechtold_M_b_max=getattr(amip_cfg, 'bechtold_M_b_max', 0.02),
+            bechtold_enable_cmt=getattr(amip_cfg, 'bechtold_enable_cmt', False),
             bechtold_dnoprc=getattr(amip_cfg, 'bechtold_dnoprc', 3.0e-4),
             bechtold_subsidence_solve=getattr(amip_cfg, 'bechtold_subsidence_solve', "implicit_flux"),
             convective_buoyancy_death_memory=getattr(amip_cfg, 'convective_buoyancy_death_memory', False),
@@ -3593,6 +3597,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_rhebc_land_deep=self.bechtold_rhebc_land_deep,
             bechtold_rprcon=self.bechtold_rprcon,
             bechtold_M_b_max=self.bechtold_M_b_max,
+            bechtold_enable_cmt=self.bechtold_enable_cmt,
             bechtold_dnoprc=self.bechtold_dnoprc,
             bechtold_downdraft_entrain_rate=self.bechtold_downdraft_entrain_rate,
             bechtold_downdraft_detrain_scale_m=self.bechtold_downdraft_detrain_scale_m,
