@@ -161,3 +161,24 @@ checks), dd_diag (restart + transport + cap + clamp, 3-hourly checks).
   Behaviour change to put to the user: the export no longer adds the
   prognostic dry-soil brightening (reviewers: double count with the
   soil-colour bands).
+
+## Iteration 3 arms (2026-09-15, pre-registered before any number exists)
+Diagnosis (codex, file:line in _tools/_codex_polar_diag.txt; GLM arithmetic):
+sea-ice albedo is a flat 0.65 over the ice fraction only (surface_utils.py:108,
+model_driver.py:10755); land snow ages 0.81 -> 0.52 on 3.67 days with the
+temperature clock OFF (A=0, calendar ageing); glacier bands 0.82/0.62 are
+darkened to 0.52 by the same overlay; the ice package's temperature/pond optics
+(ice/shortwave.py:272,380) are not wired to this lane. GLM's cap arithmetic:
+Arctic land snow ~+20, Arctic sea ice ~+14, Antarctic ~+4 W/m2 recoverable.
+The replay attribution instrument FAILS its own Arctic control (+26 W/m2) and
+is not used.
+Arms, 5 days from dd_ctl's day-80 restart, all on the reconciled land albedo
+(8065cb0e9): pa_ctl (reconciliation only), pa_tau150 (snow ageing 150 d),
+pa_ice080 (sea-ice albedo 0.80). Scored with window_diff days 81-85, arm minus
+pa_ctl, poles 60-90 rsutcs.
+CONFIRM: tau150 recovers >= +8 W/m2 polar clear-sky (GLM: bias -19.4 -> ~-8);
+ice080 >= +5. REFUTE: < +3 (the lever is not reaching the flux). Reject any
+arm whose polar cloud cover moves > 2 points or whose global rsutcs moves
+outside the polar caps by > 0.5. Note pa_ctl itself measures the
+reconciliation's atmospheric effect against dd_ctl (expected ~0 at TOA: only
+the land's absorption changed).
