@@ -31,6 +31,11 @@ TPN=${TPN:-2}
 # "--jra55-zero-surface-fluxes"), MEMPROBE=1 (per-device live-array report).
 DIAG_EVERY=${DIAG_EVERY:-20}
 EXTRA=${EXTRA:-}
+# GM/Redi OFF to match the FESOM2 reference (user decision 2026-09-15).  The
+# lateral viscosity stays the mesh-derived Laplacian A_h + Laplacian Smagorinsky
+# 0.33: the biharmonic / biharmonic-Smagorinsky / Leith operators of this lane
+# use the regular lat-lon 1-D metrics (they divide by dlon = 0 on a tripolar
+# mesh), so run_omip refuses --B-h/--C-smag/--C-leith here -- open gap.
 [ -n "${MEMPROBE:-}" ] && export LEGOESM_OMIP_MEMPROBE=1
 NGPU=$(( SLURM_JOB_NUM_NODES * TPN ))
 DAYS=$(awk -v s="$STEPS" -v d="$DT" 'BEGIN {printf "%.10f", s*d/86400.0}')
@@ -62,6 +67,7 @@ srun --ntasks=$NGPU --ntasks-per-node=$TPN --gpus-per-node=$TPN --gpu-bind=none 
     --forcing-mode jra55_do_tropical --jra55-cache $R/forcing/jra55_do_fesom_1958_1958_1deg_noleap.zarr \
     --jra55-sea-ice --ice-dynamics none --ice-categories 1 \
     --vertical-mixing-scheme kpp --tripole-closed-seas marmara,black_sea \
+    --no-gm-redi \
     --woa-init --woa-t $R/forcing/phc3_winter_woa_format_nofabricated.nc --woa-s $R/forcing/phc3_winter_woa_format_nofabricated.nc --woa-void-fill \
     --enable-latlon-spmd --multicontroller \
     --diag-every $DIAG_EVERY $EXTRA --output "$OUT" 2>&1 | tee $OUT/run.log | grep -v "^WARNING\|^I0000\|^E0000" | tail -80

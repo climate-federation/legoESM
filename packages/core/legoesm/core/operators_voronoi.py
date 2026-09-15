@@ -853,7 +853,8 @@ def bilaplacian_cell_3d(f_cell_3d, mesh, *, mask=None):
 
 
 def smagorinsky_biharmonic_3d(u_edge_3d, mesh, C_smag, *, mid_refresh=None):
-    """Smagorinsky biharmonic viscosity: ``-del2(A_smag * del2(u))``.
+    """Smagorinsky biharmonic viscosity: ``-del2(B_smag * del2(u))``,
+    ``B_smag = C_smag^2 * Delta^4 * |D|`` [m^4/s].
 
     Flow-dependent biharmonic viscosity using the Smagorinsky (1963)
     formulation.  The strain rate is decomposed into divergence (tension)
@@ -864,9 +865,9 @@ def smagorinsky_biharmonic_3d(u_edge_3d, mesh, C_smag, *, mid_refresh=None):
     *between* the two Laplacian applications, following the standard
     MPAS-Ocean / ICON-O approach::
 
-        del2(u)  ->  multiply by A_smag  ->  del2 again  ->  negate
+        del2(u)  ->  multiply by B_smag  ->  del2 again  ->  negate
 
-    This is NOT equivalent to ``A_smag * del4(u)`` when A_smag varies
+    This is NOT equivalent to ``B_smag * del4(u)`` when B_smag varies
     in space.
 
     Parameters
@@ -900,11 +901,17 @@ def smagorinsky_biharmonic_3d(u_edge_3d, mesh, C_smag, *, mid_refresh=None):
     # --- Smagorinsky coefficient [m²/s] at edges ---
     # Geometric mean of primal/dual edge lengths as grid scale.
     delta_edge = jnp.sqrt(mesh.dcEdge * mesh.dvEdge)  # (nEdges,)
-    A_smag = (C_smag * delta_edge[:, None]) ** 2 * deformation  # (nEdges, nlev)
+    # Biharmonic coefficient [m^4/s]: B = (C Delta)^2 Delta^2 |D| = C^2 Delta^4 |D|,
+    # the convention of the lat-lon stress-tensor form
+    # (latlon_cgrid_operators.smagorinsky_biharmonic_tendency_cgrid) and MOM6.
+    # vector_laplacian_del2_3d is dimensional (1/m^2), so a Laplacian-units
+    # (C Delta)^2 |D| coefficient here was short by Delta^2.
+    B_smag = ((C_smag * delta_edge[:, None]) ** 2
+              * delta_edge[:, None] ** 2 * deformation)  # (nEdges, nlev)
 
-    # --- Two-pass biharmonic: -del2(A_smag * del2(u)) ---
+    # --- Two-pass biharmonic: -del2(B_smag * del2(u)) ---
     del2_u = vector_laplacian_del2_3d(u_edge_3d, mesh)  # (nEdges, nlev)
-    intermediate = A_smag * del2_u                        # (nEdges, nlev)
+    intermediate = B_smag * del2_u                        # (nEdges, nlev)
     if mid_refresh is not None:
         # Distributed mid-operator refresh — see vector_laplacian_del4_3d.
         (intermediate,) = mid_refresh(intermediate)

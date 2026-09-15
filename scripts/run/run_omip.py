@@ -638,7 +638,7 @@ def parse_args(argv: list[str] | None = None):
                    help="Eq A_h boost Gaussian half-width [degrees]. Typical 3-7.")
     p.add_argument("--C-smag", type=float, default=None,
                    help="Smagorinsky biharmonic coefficient (dimensionless, OM4 uses 0.06).")
-    p.add_argument("--C-smag-lap", type=float, default=0.15,
+    p.add_argument("--C-smag-lap", type=float, default=None,
                    help="Laplacian Smagorinsky coefficient (dimensionless, default 0.15).")
     p.add_argument("--A-h-floor", type=float, default=2000.0,
                    help="Minimum effective A_h after latitude scaling [m²/s] (default 2000).")
@@ -1547,7 +1547,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   A_h_eq_boost: float = 1.0,
                   A_h_eq_sigma_deg: float = 5.0,
                   C_smag: float = None,
-                  C_smag_lap: float = 0.15,
+                  C_smag_lap: float | None = None,
                   A_h_floor: float = 2000.0,
                   C_leith: float = None,
                   pgf_scheme: str = None,
@@ -1758,7 +1758,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 # conserved via fix_eta_drift; this adds the salt normalization.
                 normalize_freshwater=True,
                 C_smag=_C_smag,
-                C_smag_lap=C_smag_lap,
+                C_smag_lap=(C_smag_lap if C_smag_lap is not None else 0.15),
                 C_leith=_C_leith,
                 C_leith_modified=(_C_leith > 0),
                 slope_foot_alpha=slope_foot_alpha,
@@ -1841,6 +1841,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         from legoesm.grids.voronoi import create_voronoi_mesh
         from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
         from legoesm.ocean.fidelity.nemo_match_recipe import (
+            NEMOMatchMPASRecipeConfig,
             nemo_match_mpas_model_config,
         )
         from legoesm.ocean.physics.combined import OceanPhysicsConfig
@@ -1906,7 +1907,25 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         # (single source of truth, locked to the catalog recipe
         # ``omip_nemo_match_mpas_v1`` by tests/ocean/unit/test_recipes.py), then
         # overlay only the run-dependent SETUP physics above.
-        config = nemo_match_mpas_model_config(physics=physics)
+        _mpas_over = {}
+        if A_h_override is not None:
+            _mpas_over["A_h"] = A_h_override
+        if B_h_override is not None:
+            _mpas_over["B_h"] = B_h_override
+        if C_smag is not None:
+            _mpas_over["C_smag"] = C_smag
+        if C_smag_lap is not None:
+            _mpas_over["C_smag_lap"] = C_smag_lap
+        if C_leith is not None:
+            _mpas_over["C_leith"] = C_leith
+        if no_gm_redi:
+            _mpas_over["gm_redi"] = False
+        if _mpas_over:
+            print(f"  MPAS recipe overrides: {_mpas_over}")
+        config = nemo_match_mpas_model_config(
+            NEMOMatchMPASRecipeConfig(**_mpas_over) if _mpas_over else None,
+            physics=physics,
+        )
         # Enforce global surface-freshwater balance, exactly as the lat-lon/tripole
         # config does (LatLonCGridOceanConfig.from_flat(normalize_freshwater=True) above).
         # The CORE-II P-E+R integral is a net ~+0.65 Sv freshwater input (a true
@@ -2036,6 +2055,18 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   "recipe (tracer mixing is GM/Redi, kappa_Redi); ignored.")
         if pgf_scheme is not None:
             _recipe_over["pgf_scheme"] = pgf_scheme
+        if B_h_override is not None:
+            _recipe_over["B_h"] = B_h_override
+        if C_smag is not None:
+            _recipe_over["C_smag"] = C_smag
+        if C_smag_lap is not None:
+            _recipe_over["C_smag_lap"] = C_smag_lap
+        if C_leith is not None:
+            _recipe_over["C_leith"] = C_leith
+        if no_gm_redi:
+            _recipe_over["gm_redi"] = False
+        # --B-h / --C-smag / --C-leith > 0 are refused by the recipe factory
+        # itself (the operators are not tripole-safe); nothing to guard here.
         _recipe_cfg = (NEMOMatchTripoleRecipeConfig(**_recipe_over)
                        if _recipe_over else None)
         if _recipe_over:
