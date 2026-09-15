@@ -816,6 +816,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "marine BL => lower LWP floor => lower albedo). "
                              "Requires --turbulence clubb (diagnostic). Default "
                              "off = RH grid-scale cloud fraction (byte-identical).")
+    parser.add_argument("--clubb-prognostic", dest="clubb_prognostic",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Run CLUBB as a PROGNOSTIC higher-order closure: "
+                             "the scheme carries 15 higher-order moments as "
+                             "real state, including the total-water variance "
+                             "and its covariance with temperature, instead of "
+                             "re-estimating them each step from a mixing "
+                             "length times a local gradient. This is the "
+                             "sub-grid variance the cloud PDF otherwise has to "
+                             "guess. Requires --turbulence clubb. Default off "
+                             "= the diagnostic path (byte-identical).")
     parser.add_argument("--cloud-p-xr", dest="cloud_p_xr", type=float, default=None,
                         help="Xu-Randall cloud-fraction RH exponent p_xr (None="
                              "default 0.25; bounds 0.05..1.0). HIGHER => cloud "
@@ -835,6 +846,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "so cold dry polar snow keeps its fresh albedo "
                              "while melting snow darkens as before. "
                              "None = 0.0 = off (calendar clock, byte-identical).")
+    parser.add_argument("--land-snow-tau-days", dest="land_snow_tau_days",
+                        type=float, default=_EXPERIMENT_DEFAULTS.land_snow_tau_days,
+                        help="Snow-albedo age e-folding time [days]. Default: "
+                             "150 (production, 2026-09-15); the land "
+                             "calibration's own value is 3.674 d. A 3.7-day "
+                             "clock darkens any snowpack older than a few weeks "
+                             "to its minimum albedo regardless of temperature, "
+                             "which is why every polar cell measured 0.521 "
+                             "against an observed 0.70-0.82. Pairs with "
+                             "--snow-age-activation-K, which alone does not "
+                             "move it.")
     parser.add_argument("--cloud-cover-condensate-q-ref",
                         dest="cloud_cover_condensate_q_ref", type=float,
                         default=None,
@@ -1471,6 +1493,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "filter). "
                              "Setup refuses coefficients above the explicit "
                              "monotonicity bound for the mesh+dt.")
+    parser.add_argument("--mpas-qv-smooth-del4-m4s", type=float, default=None,
+                        dest="mpas_qv_smooth_del4_m4s",
+                        help="MPAS lane only: horizontal q_v del4 (biharmonic) "
+                             "smoothing diffusivity [m^4/s], applied post-step "
+                             "alongside the del2 (0=off, default). "
+                             "Scale-selective: its damping ratio between any "
+                             "two scales is the del2's SQUARED (measured 6.08x "
+                             "vs 2.47x between 240 and 479 km on the "
+                             "subdivision-6 mesh), so it holds grid-scale "
+                             "noise down without flattening the resolved "
+                             "humidity gradients. NOT monotone, so the q>=0 "
+                             "floor can fire; setup refuses coefficients above "
+                             "the explicit stability bound for the mesh+dt.")
     parser.add_argument("--hines-total-rms-wind", type=float, default=None,
                         dest="hines_total_rms_wind",
                         help="Hines (1997) non-orographic GWD launch RMS wind "
@@ -1636,6 +1671,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "Writes segment-mean rates to budget_ledger.npz. "
                              "Single-rank only; default off = byte-identical "
                              "model.")
+    parser.add_argument("--budget-ledger-sigma-band", nargs=2, type=float,
+                        default=None, metavar=("SIGMA_LO", "SIGMA_HI"),
+                        dest="budget_ledger_sigma_band",
+                        help="Restrict the budget ledger to a sigma band "
+                             "(lo < hi in [0,1], sigma increasing downward). "
+                             "The whole-column ledger cannot see a vertical "
+                             "REDISTRIBUTION bias -- a mass-flux convection "
+                             "scheme's column water row is exactly zero -- so "
+                             "a band is what makes it answer which process "
+                             "supplies a LAYER. Needs --budget-ledger.")
     parser.add_argument(
         "--evaluate", action="store_true", default=False,
         help="Run ClimateEval after a successful AMIP run to compare "
@@ -1875,6 +1920,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cmip_output=args.cmip_output,
         clear_sky_diag=args.clear_sky_diag,
         budget_ledger=args.budget_ledger,
+        budget_ledger_sigma_band=(tuple(args.budget_ledger_sigma_band)
+                                  if args.budget_ledger_sigma_band else None),
         checkpoint_format=args.checkpoint_format,
         restart_buffer_seconds=args.restart_buffer_seconds,
         evaluation=EvaluationConfig(
@@ -1955,6 +2002,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         volcanic_aerosol_lw=args.volcanic_aerosol_lw,
         cloud_scheme=args.clouds,
         use_clubb_cloud_fraction=args.use_clubb_cloud_fraction,
+        clubb_prognostic=args.clubb_prognostic,
         microphysics=args.microphysics,
         nc_from_aerosol=args.aerosol_ccn,
         subgrid_autoconversion=args.subgrid_autoconversion,
@@ -1991,6 +2039,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_alpha_xr=args.cloud_alpha_xr,
         cloud_cover_condensate_q_ref=args.cloud_cover_condensate_q_ref,
         snow_age_activation_K=args.snow_age_activation_K,
+        land_snow_tau_days=args.land_snow_tau_days,
         cloud_diagnostic_condensate_scheme=args.cloud_diagnostic_condensate_scheme,
         cloud_adiabatic_lwc_rate=args.cloud_adiabatic_lwc_rate,
         convective_cloud=args.convective_cloud,
@@ -2050,6 +2099,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             args.mpas_qv_smooth_del2_m2s
             if args.mpas_qv_smooth_del2_m2s is not None
             else _EXPERIMENT_DEFAULTS.mpas_qv_smooth_del2_m2s),
+        mpas_qv_smooth_del4_m4s=(
+            args.mpas_qv_smooth_del4_m4s
+            if args.mpas_qv_smooth_del4_m4s is not None
+            else _EXPERIMENT_DEFAULTS.mpas_qv_smooth_del4_m4s),
         hard_sat_ice_curve=args.hard_sat_ice_curve,
         homogeneous_ice_nucleation=args.homogeneous_ice_nucleation,
         morrison_flavor=args.morrison_flavor,
@@ -2295,15 +2348,17 @@ def _postprocess_args(args: argparse.Namespace, parser: argparse.ArgumentParser,
         parser.error("--convective-buoyancy-death-memory requires --convection "
                      "tiedtke (plume buoyancy-death memory is a Tiedtke "
                      "plume-integrator option)")
-    if args.dynamic_albedo and (
-            args.grid_type in ("voronoi", "icosahedral", "mpas_voronoi",
-                               "mpas")
-            or args.discretization in ("spectral", "mpas")):
-        parser.error("--dynamic-albedo is consumed by the coupled physics "
-                     "pipeline (cubed_sphere / latlon only); the MPAS and "
-                     "spectral standalone radiation paths use the "
-                     "RRTMGPConfig constant surface albedo and would "
-                     "silently ignore the flag.")
+    # MPAS implements the zenith ocean curve in its own daily surface-albedo
+    # assembly, so only the SPECTRAL standalone path still has nowhere to put
+    # it.  Narrowed rather than deleted: a flag that is silently ignored is the
+    # defect this guard exists to prevent.
+    if args.dynamic_albedo and args.discretization == "spectral":
+        parser.error("--dynamic-albedo has no effect on the SPECTRAL "
+                     "standalone radiation path, which uses the RRTMGPConfig "
+                     "constant surface albedo and would silently ignore the "
+                     "flag. It is supported on cubed_sphere/latlon (coupled "
+                     "physics pipeline) and on MPAS (daily tile-blended "
+                     "surface albedo).")
     if args.use_multilayer_land and args.discretization == "spectral":
         parser.error("--use-multilayer-land runs inside the coupled physics "
                      "pipeline or the MPAS driver loop; the SPECTRAL "

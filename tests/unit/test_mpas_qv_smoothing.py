@@ -310,3 +310,187 @@ class TestDistributedEquivalence:
             "poisoned halo did not perturb owned cells — the equivalence "
             "test above would be vacuous"
         )
+
+
+class TestBiharmonic:
+    """The scale-selective companion filter (2026-09-11).
+
+    The Laplacian separates two-cell from four-cell structure by four; the
+    biharmonic by sixteen.  That ratio IS the reason the operator exists, so it
+    is the thing pinned here — along with the conservation and sign properties
+    that let it be used as a filter at all.
+    """
+
+    def test_sign_damps(self, mesh):
+        """``q + dt*nu4*del4(q)`` must SHRINK a perturbation, not grow it."""
+        from legoesm.core.operators_voronoi import scalar_del4_cell_3d
+        q = _rand_q(mesh, seed=3)
+        anom = q - q.mean(axis=0, keepdims=True)
+        nu4, dt = 1.0e14, 100.0
+        out = q + dt * nu4 * scalar_del4_cell_3d(q, mesh)
+        out_anom = out - out.mean(axis=0, keepdims=True)
+        assert float(jnp.std(out_anom)) < float(jnp.std(anom))
+
+    def test_conserves_the_per_level_integral(self, mesh):
+        """Each pass is a flux divergence, so the area integral is unchanged."""
+        from legoesm.core.operators_voronoi import scalar_del4_cell_3d
+        q = _rand_q(mesh, seed=4)
+        d4 = scalar_del4_cell_3d(q, mesh)
+        area = jnp.asarray(mesh.areaCell)[:, None]
+        assert float(jnp.max(jnp.abs((area * d4).sum(axis=0)))) < 1e-20
+
+    def test_eigenvalue_is_minus_the_laplacian_squared(self, mesh):
+        """The whole selectivity argument reduces to this identity: because the
+        operator is ``-del2(del2)``, its eigenvalue on every mesh mode is minus
+        the SQUARE of the Laplacian's, so the damping RATIO between any two
+        scales is squared.  Pinned on the discrete operator's own top mode, not
+        argued from a continuum ``k^4``; the textbook 4-versus-16 figures do not
+        hold here (measured 2.47 and 6.08 between 240 and 479 km)."""
+        from legoesm.core.operators_voronoi import scalar_del4_cell_3d
+        rng = np.random.default_rng(0)
+        v = jnp.asarray(rng.normal(size=(mesh.nCells, 1)))
+        lam = 0.0
+        for _ in range(300):
+            w = scalar_del2_cell_3d(v, mesh)
+            lam = float(jnp.linalg.norm(w))
+            v = w / lam
+        d4 = scalar_del4_cell_3d(v, mesh)
+        lam4 = float((d4 * v).sum() / (v * v).sum())
+        # del4 = -del2(del2), and del2's eigenvalue is negative, so the
+        # biharmonic eigenvalue is -lam^2 on the same mode.
+        assert lam4 == pytest.approx(-lam ** 2, rel=1e-6)
+
+    def test_gershgorin_bound_holds(self, mesh):
+        """The driver's stability guard assumes |lambda(del2)| <= 2*g_max.  A
+        guard resting on a FALSE bound would admit an unstable coefficient, so
+        the bound is measured rather than asserted in prose."""
+        rng = np.random.default_rng(1)
+        v = jnp.asarray(rng.normal(size=(mesh.nCells, 1)))
+        lam = 0.0
+        for _ in range(300):
+            w = scalar_del2_cell_3d(v, mesh)
+            lam = float(jnp.linalg.norm(w))
+            v = w / lam
+        g_max = float(scalar_del2_cell_cfl_factor(mesh))
+        assert lam <= 2.0 * g_max
+        assert lam > g_max          # and g_max ALONE is not a bound
+
+    def test_driver_step_applies_both_terms(self, mesh):
+        """The driver helper with only the biharmonic on must differ from the
+        Laplacian-only result and from the untouched field."""
+        from legoesm.core.operators_voronoi import scalar_del4_cell_3d
+        from legoesm.driver.model_driver import _mpas_qv_smooth_step
+        q = _rand_q(mesh, seed=5)
+        dt = 100.0
+        # Scale the coefficients to THIS mesh: the biharmonic goes as 1/dx^4,
+        # so a value sized for a 120 km mesh is invisible on a 2000 km one.
+        g_max = float(scalar_del2_cell_cfl_factor(mesh))
+        nu2 = 0.1 / (dt * g_max)
+        nu4 = 0.1 / (dt * g_max ** 2)
+        off = _mpas_qv_smooth_step(q, mesh, 0.0, dt)
+        d2 = _mpas_qv_smooth_step(q, mesh, nu2, dt)
+        d4 = _mpas_qv_smooth_step(q, mesh, 0.0, dt, nu4=nu4)
+        both = _mpas_qv_smooth_step(q, mesh, nu2, dt, nu4=nu4)
+        np.testing.assert_allclose(np.asarray(off), np.asarray(q))
+        assert not np.allclose(np.asarray(d4), np.asarray(q))
+        assert not np.allclose(np.asarray(d4), np.asarray(d2))
+        want = np.clip(np.asarray(q + dt * (nu2 * scalar_del2_cell_3d(q, mesh)
+                                            + nu4 * scalar_del4_cell_3d(q, mesh))),
+                       0.0, None)
+        np.testing.assert_allclose(np.asarray(both), want, rtol=1e-12)
+
+    def test_validate_mpas_accepts_biharmonic(self):
+        _mpas_cfg(mpas_qv_smooth_del4_m4s=3.6e14).validate_strict()
+
+    def test_validate_cdgrid_refuses_biharmonic(self):
+        with pytest.raises(ValueError, match="MPAS-lane"):
+            _cdgrid_cfg(mpas_qv_smooth_del4_m4s=3.6e14).validate_strict()
+
+    @pytest.mark.parametrize("bad", [-1.0, float("nan"), float("inf"), 2.0e18])
+    def test_validate_biharmonic_bounds(self, bad):
+        with pytest.raises(ValueError, match="mpas_qv_smooth_del4_m4s"):
+            _mpas_cfg(mpas_qv_smooth_del4_m4s=bad).validate_strict()
+
+    @pytest.mark.parametrize("n_ranks", [2, 3])
+    def test_biharmonic_owned_cells_match_serial(self, mesh, n_ranks):
+        """The biharmonic reaches TWO cells, so the composed operator equals
+        ``-del2(del2)`` on owned cells only if the local mesh carries enough
+        halo.  MEASURED, not assumed: at this partitioner's default halo depth
+        it already does, so the driver's optional mid-operator exchange is
+        redundant here and is kept only for a depth-1 partition.  Both paths
+        are pinned against serial, and the poisoned halo proves the test can
+        fail.
+        """
+        from legoesm.driver.model_driver import _mpas_qv_smooth_step
+        from legoesm.parallel.halo_exchange_voronoi import (
+            exchange_local_simulated,
+        )
+        from legoesm.parallel.voronoi_partition import (
+            build_local_mesh, partition_voronoi_mesh, scatter_to_local,
+        )
+
+        nlev = 5
+        rng = np.random.default_rng(22)
+        q_global = jnp.asarray(rng.uniform(0.0, 0.02, size=(mesh.nCells, nlev)))
+        dt = 75.0
+        g_max = float(scalar_del2_cell_cfl_factor(mesh))
+        nu4 = 0.1 / (dt * g_max ** 2)
+        q_serial = _mpas_qv_smooth_step(q_global, mesh, 0.0, dt, nu4=nu4)
+
+        parts = [partition_voronoi_mesh(mesh, n_ranks, r) for r in range(n_ranks)]
+        local_meshes = [build_local_mesh(mesh, p) for p in parts]
+        poisoned = []
+        for p in parts:
+            ql = np.asarray(scatter_to_local(q_global, p, "cell")).copy()
+            ql[p.n_owned_cells:, :] = 9.99
+            poisoned.append(jnp.asarray(ql))
+        refreshed = exchange_local_simulated(parts, poisoned, entity="cell")
+
+        stale_differs = False
+        for r, (p, lm, ql) in enumerate(zip(parts, local_meshes, refreshed)):
+            own = p.n_owned_cells
+            g_ids = np.asarray(p.local_cells[:own])
+            want = np.asarray(q_serial)[g_ids]
+            got = _mpas_qv_smooth_step(ql, lm, 0.0, dt, nu4=nu4)
+            np.testing.assert_allclose(
+                np.asarray(got[:own]), want, atol=1e-13, rtol=0.0,
+                err_msg=f"rank {r}/{n_ranks}: biharmonic owned-cell mismatch")
+            # Same call on the UNREFRESHED input must NOT match, or the halo
+            # exchange the driver performs is doing nothing and this test
+            # could never fail.
+            bad = _mpas_qv_smooth_step(poisoned[r], lm, 0.0, dt, nu4=nu4)
+            if not np.allclose(np.asarray(bad[:own]), want, atol=1e-13, rtol=0.0):
+                stale_differs = True
+        assert stale_differs, (
+            "a poisoned halo changed nothing — the exchange is not load-bearing "
+            "and this test proves nothing")
+
+    def test_floor_clipping_is_negligible_at_the_matched_coefficient(self, mesh):
+        """Both reviewers asked for the plain ``max(q, 0)`` to be replaced by
+        the conserving borrow, because the biharmonic has no maximum principle
+        and this model once invented 0.08 kg/m2/day through an unlimited tracer
+        clip.  Measured instead of argued.  On the production state at the
+        coefficient that matches the Laplacian's grid-scale damping, the
+        clipped deficit is 5.0e-11 of the field, and 1.1e-9 even at fifteen
+        times that coefficient — far below the concern.  Reproduced here on a
+        humidity-like field at the same fraction of the stability guard, with
+        the threshold set an order of magnitude above what is measured so a
+        real regression trips it.
+        """
+        from legoesm.core.operators_voronoi import scalar_del4_cell_3d
+        rng = np.random.default_rng(23)
+        nlev = 5
+        lat = np.asarray(mesh.latCell)[:, None]
+        # Smooth and positive, with the roughness a real humidity field carries
+        # (its structure-function exponent is ~1.5, not white noise).
+        q = jnp.asarray(np.clip(
+            0.02 * np.cos(lat) ** 2 * np.ones((1, nlev))
+            + 2e-4 * rng.normal(size=(mesh.nCells, nlev)), 0.0, None))
+        dt = 75.0
+        g_max = float(scalar_del2_cell_cfl_factor(mesh))
+        nu4 = 0.0133 * 0.5 / (dt * g_max ** 2)   # production's 1.33% of guard
+        raw = q + dt * nu4 * scalar_del4_cell_3d(q, mesh)
+        ratio = float(jnp.abs(jnp.minimum(raw, 0.0)).sum()) / float(q.sum())
+        assert ratio < 1e-8, (
+            f"clipped deficit is {ratio:.2e} of the field; the conserving "
+            "borrow decision must be revisited")

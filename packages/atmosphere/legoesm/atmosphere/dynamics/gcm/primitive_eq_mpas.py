@@ -101,6 +101,12 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # decision: "conserving form always"); False restores the legacy clamp
     # for bit-comparison against older runs.
     conservative_tracer_clamp: bool = True
+    # Optional (nlev,) per-layer weight restricting the budget ledger's
+    # SNAPSHOT-derived rows (dynamics, clips) to a vertical band, matching the
+    # weight the physics rows use. Both sides must carry the same weight or the
+    # rows no longer sum to the column-store change and the table is silently
+    # inconsistent. None = full column, byte-identical.
+    budget_ledger_level_weight: object = None
     # #1354/#1515: applies ONLY to the plain-max hard-floor path (i.e. when
     # conservative_tracer_clamp=False).  Then the q_v floor removes the latent
     # heat tied to the clipped vapour (energy_consistent_moisture_floor) so
@@ -1166,11 +1172,14 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 column_store_snapshot_column,
             )
 
+            _led_w = self.config.budget_ledger_level_weight
+
             def _snap(s):
                 water = [s.tracers[k].data for k in LEDGER_WATER_SPECIES
                          if s.tracers is not None and k in s.tracers]
                 return column_store_snapshot_column(
-                    s.p_s.data, self.sigma_coord.dsigma, s.T.data, *water)
+                    s.p_s.data, self.sigma_coord.dsigma, s.T.data, *water,
+                    level_weight=_led_w)
 
             _s_pre = _snap(state)
             _s_dyn = _snap(_state_postdyn)
