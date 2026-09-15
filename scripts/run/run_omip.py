@@ -90,7 +90,9 @@ from legoesm.ocean.physics.lateral_mixing.config import (
 )
 from legoesm.ocean.physics.vertical_mixing.config import (
     KPPConfig,
+    TKEConfig,
     VerticalMixingConfig,
+    tke_fesom2_card,
 )
 
 # ===========================================================================
@@ -200,8 +202,16 @@ def build_vertical_mixing_config_from_args(
             iwm=build_iwm_config_from_args(args),
             ddm=build_ddm_config_from_args(args),
         )
+    tke_card = getattr(args, "tke_card", "default")
+    if tke_card == "default":
+        tke_cfg = TKEConfig()
+    elif tke_card == "fesom2":
+        tke_cfg = tke_fesom2_card()
+    else:
+        raise ValueError(f"unknown --tke-card {tke_card!r}")
     return VerticalMixingConfig(
         scheme=scheme,
+        tke=tke_cfg,
         kpp=KPPConfig(
             Ri_crit=args.kpp_ri_crit,
             K_max=args.kpp_k_max,
@@ -673,6 +683,13 @@ def parse_args(argv: list[str] | None = None):
                    choices=["full", "minimal", "none"])
     p.add_argument("--water-type", type=str, default="II",
                    choices=["I", "IA", "IB", "II", "III"])
+    p.add_argument("--tke-card", type=str, default="default",
+                   choices=("default", "fesom2"),
+                   help="TKE closure constant set: 'default' (Veros/legoESM "
+                        "defaults, diagnostic TKE) or 'fesom2' (prognostic TKE "
+                        "carried on the state, with the FESOM2-JAX FORCA20 "
+                        "constants: Pr=clamp(6.6 Ri,1,10), no Bryan-Lewis "
+                        "floor, Av/Kv 1e-4/1e-5, surface flux coeff 3.75).")
     p.add_argument("--vertical-mixing-scheme", type=str, default=None,
                    choices=_VALID_VERTICAL_MIXING_SCHEMES,
                    help="Override vertical mixing scheme")
@@ -975,6 +992,18 @@ def parse_args(argv: list[str] | None = None):
                    help="Sponge-zone width inside the active domain [°].")
     p.add_argument("--sponge-tau-days", type=float, default=5.0,
                    help="Sponge relaxation timescale at the boundary [days].")
+    p.add_argument("--sss-restoring-target", type=str, default="woa_winter",
+                   choices=("woa_winter", "phc2_monthly"),
+                   help="Target field of the Haney SSS restoring: the PHC3 "
+                        "winter surface slice of the initial condition "
+                        "(default) or the monthly PHC2 climatology FESOM2 "
+                        "restores to, the month picked by the model calendar day.")
+    p.add_argument("--sss-target-file", type=str,
+                   default="/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/PHC2_salx.nc",
+                   help="PHC2 monthly SSS file (--sss-restoring-target phc2_monthly).")
+    p.add_argument("--sss-restoring-remove-mean", action="store_true",
+                   help="Subtract the area-weighted global mean of the restoring "
+                        "tendency each step, as FESOM2 does, so restoring adds no net salt.")
     p.add_argument("--sss-piston-velocity", type=float, default=5.0e-7,
                    help=(
                        "SSS restoring piston velocity [m/s] "
@@ -2470,6 +2499,31 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         state["sss_target_2d"] = jnp.asarray(S_woa[..., 0])
         state["sss_piston_velocity"] = float(args.sss_piston_velocity)
         state["dz_top"] = float(np.asarray(z_coord.dz_ref)[0])
+        _sss_kind = getattr(args, "sss_restoring_target", "woa_winter")
+        if _sss_kind == "woa_winter":
+            pass
+        elif _sss_kind == "phc2_monthly":
+            if regrid_weights is None:
+                raise ValueError("--sss-restoring-target phc2_monthly needs the "
+                                 "JRA55 regrid weights (MPAS / tripole lanes).")
+            _monthly = _load_phc2_monthly_sss_target(
+                args.sss_target_file, regrid_weights,
+                np.asarray(ds["lat"]), np.asarray(ds["lon"]))
+            state["sss_target_monthly"] = jnp.asarray(_monthly)
+            state["sss_target_2d"] = state["sss_target_monthly"][0]
+        else:
+            raise ValueError(f"unknown --sss-restoring-target {_sss_kind!r}")
+        state["sss_remove_mean"] = bool(getattr(args, "sss_restoring_remove_mean", False))
+        if state["sss_remove_mean"]:
+            _area = (getattr(grid, "areaCell", None) if grid_type == "mpas"
+                     else getattr(grid, "area", None))
+            if _area is None:
+                raise ValueError("--sss-restoring-remove-mean: this grid exposes "
+                                 "no cell area (areaCell / area).")
+            state["sss_area"] = jnp.asarray(np.asarray(_area))
+        print(f"  SSS restoring: target={_sss_kind} "
+              f"piston={float(args.sss_piston_velocity):g} m/s "
+              f"remove_mean={state['sss_remove_mean']}")
     state["enable_sss_restoring"] = sss_restoring_enabled
 
     # T_freeze cap — stand-in for the missing sea-ice model.
@@ -2856,6 +2910,112 @@ def _preload_jra55_forcing_block(start_step_idx, n_steps, dt, jra55_state):
     return atm_stack, runoff_stack
 
 
+def _load_phc2_monthly_sss_target(path, regrid_weights, cache_lat, cache_lon) -> np.ndarray:
+    """Load the monthly PHC2 SSS climatology and regrid it to the model grid.
+
+    Reads ``SALT`` of shape (12, 180, 360) from ``path``, treating
+    ``missing_value`` -99.0 (and any masked / NaN entries) as land, gap-fills
+    those points by nearest valid neighbour on the unit sphere, then regrids
+    each month with ``regrid_scalar``.  Returns an array of shape
+    ``(12,) + tuple(regrid_weights.target_shape)``.
+    """
+    import netCDF4
+
+    from legoesm.grids.regridding import fill_missing_nearest_valid, regrid_scalar
+
+    with netCDF4.Dataset(path) as ds:
+        file_lat = np.asarray(ds["lat"][:])
+        file_lon = np.asarray(ds["lon"][:])
+        lat_ok = np.shape(file_lat) == np.shape(cache_lat) and np.allclose(file_lat, cache_lat)
+        lon_ok = np.shape(file_lon) == np.shape(cache_lon) and np.allclose(file_lon, cache_lon)
+        if not (lat_ok and lon_ok):
+            raise ValueError(
+                f"{path}: PHC2 lat/lon axes disagree with the forcing cache grid -- "
+                f"lat: match={lat_ok} (file shape {file_lat.shape} vs cache "
+                f"{np.shape(cache_lat)}); lon: match={lon_ok} (file shape "
+                f"{file_lon.shape} vs cache {np.shape(cache_lon)})")
+        salt = ds.variables["SALT"][:]
+
+    data = np.ma.asanyarray(salt)
+    data = np.ma.masked_equal(data, -99.0)
+    data = np.ma.masked_invalid(data)
+    data = np.ma.filled(data.astype(np.float64), np.nan)
+    nlat, nlon = file_lat.size, file_lon.size
+    if data.shape != (12, nlat, nlon):
+        raise ValueError(f"{path}: expected SALT with shape (12, {nlat}, {nlon}), "
+                         f"got {tuple(data.shape)}")
+
+    # Unit-sphere Cartesian coordinates of the (lat, lon) meshgrid, flattened
+    # C-order to match data.reshape(12, -1).
+    lon2d, lat2d = np.meshgrid(file_lon, file_lat)
+    la = np.deg2rad(lat2d.ravel())
+    lo = np.deg2rad(lon2d.ravel())
+    xyz = np.stack([np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo), np.sin(la)], axis=-1)
+    filled = np.asarray(fill_missing_nearest_valid(data.reshape(12, -1), xyz)).reshape(12, nlat, nlon)
+    target = np.asarray([np.asarray(regrid_scalar(jnp.asarray(filled[m]), regrid_weights))
+                         for m in range(12)])
+    return target.reshape((12,) + tuple(regrid_weights.target_shape))
+
+
+def _sss_month_index(day: float) -> int:
+    """Month index (0-11) containing ``day`` on a noleap calendar (day 0 = 1 Jan)."""
+    lengths = (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+    return int(np.searchsorted(np.cumsum(lengths), float(day) % 365.0, side="right"))
+
+
+def _restore_sss_top(S, target, alpha, mask, area=None, remove_mean=False):
+    """Haney piston restoring of the top layer.
+
+    The tendency ``alpha * (target - S_top) * mask`` is applied to the top
+    layer only; with ``remove_mean`` False the result is byte-identical to
+    ``S_top - alpha * (S_top - target) * mask``.  ``remove_mean`` subtracts
+    the area-weighted wet-cell mean of the tendency (FESOM2
+    ``sss_runoff_fluxes`` relax_salt balance) so the restoring adds no net
+    salt; it requires ``area`` (global reductions: fine on GSPMD arrays).
+    """
+    if remove_mean and area is None:
+        raise ValueError("remove_mean=True requires 'area' (cell areas).")
+    S_top = S[..., 0]
+    tend = alpha * (target - S_top) * mask
+    if remove_mean:
+        tend = (tend - jnp.sum(tend * area) / jnp.sum(area * mask)) * mask
+    return S.at[..., 0].set(S_top + tend)
+
+
+def _refs_for_block(base_refs, jra55_state, day0, shard_fn=None):
+    """Per-block reference dict for the SSS restoring.
+
+    Selects the current month's slice of the PHC2 climatology as
+    ``sss_target`` (no temporal interpolation -- FESOM reads the current
+    month) and, when mean removal is on, the ``sss_area`` for it.  Under
+    lat-band SPMD each month and the area go through ``shard_fn`` once and
+    are cached on ``jra55_state``.  The month is fixed for the whole block
+    (one forcing block = the diagnostic cadence, 2880 s on the ico9
+    launcher), so a block straddling a month boundary keeps the old target
+    for at most that long, once a month.
+    """
+    if "sss_target_monthly" not in jra55_state:
+        return base_refs
+    refs = dict(base_refs or {})
+    m = _sss_month_index(day0)
+    monthly = jra55_state["sss_target_monthly"]
+    if shard_fn is None:
+        refs["sss_target"] = monthly[m]
+    else:
+        if "_sss_monthly_sharded" not in jra55_state:
+            jra55_state["_sss_monthly_sharded"] = [shard_fn(monthly[k]) for k in range(12)]
+        refs["sss_target"] = jra55_state["_sss_monthly_sharded"][m]
+    if jra55_state.get("sss_remove_mean", False):
+        area = jra55_state["sss_area"]
+        if shard_fn is None:
+            refs["sss_area"] = area
+        else:
+            if "_sss_area_sharded" not in jra55_state:
+                jra55_state["_sss_area_sharded"] = shard_fn(area)
+            refs["sss_area"] = jra55_state["_sss_area_sharded"]
+    return refs
+
+
 def _regrid_records_host(recs, rw):
     """Deterministic HOST (NumPy) k-neighbour regrid of stacked records.
 
@@ -3211,6 +3371,7 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
     enable_ramp = T_ramp_seconds > 0
     enable_sponge = bool(jra55_state.get("enable_sponge", False))
     enable_sss = bool(jra55_state.get("enable_sss_restoring", False))
+    sss_remove_mean = bool(jra55_state.get("sss_remove_mean", False))
     zero_fluxes = bool(jra55_state.get("zero_surface_fluxes", False))
     enable_freeze = bool(jra55_state.get("enable_freeze_cap", False))
     # Prognostic slab sea ice (opt-in --jra55-sea-ice): replaces the freeze-cap
@@ -3229,9 +3390,11 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
         sss_dz = float(jra55_state["dz_top"])
         sss_alpha_static = sss_pv * dt / max(sss_dz, 1e-6)
         sss_target_static = jra55_state["sss_target_2d"]
+        sss_area_static = jra55_state.get("sss_area")
     else:
         sss_alpha_static = 0.0
         sss_target_static = None
+        sss_area_static = None
 
     freeze_from_gamma = False
     if enable_freeze:
@@ -3289,14 +3452,19 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
         # non-addressable array.
         _sponge, _sss_target, _freeze_mask = (
             sponge, sss_target_static, freeze_mask_static)
+        _sss_area = sss_area_static
         if refs is not None:
             from legoesm.ocean.sponge import SpongeForcing
-            if enable_sponge:
+            # refs may carry ONLY the per-block SSS entries (monthly target
+            # on a non-sharded lane): every key is optional.
+            if enable_sponge and "sponge_gamma" in refs:
                 _sponge = SpongeForcing(
                     gamma=refs["sponge_gamma"], T_ref=refs["sponge_T_ref"],
                     S_ref=refs["sponge_S_ref"])
             if enable_sss and "sss_target" in refs:
                 _sss_target = refs["sss_target"]
+            if enable_sss and "sss_area" in refs:
+                _sss_area = refs["sss_area"]
             if freeze_from_gamma and "sponge_gamma" in refs:
                 _freeze_mask = refs["sponge_gamma"] > 0.0
             elif freeze_mask_static is not None and "ocean_mask" in refs:
@@ -3388,15 +3556,14 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
             # SSS restoring (gated at compile time via Python `if`).
             if enable_sss:
                 S = new_state.S.data
-                target = jnp.asarray(_sss_target, dtype=S.dtype)
-                alpha = jnp.asarray(sss_alpha_static, dtype=S.dtype)
-                mask = jnp.asarray(new_state.land_mask.data, dtype=S.dtype)
-                S_top_new = (
-                    S[..., 0] - alpha * (S[..., 0] - target) * mask
-                )
-                new_state = new_state._replace(
-                    S=new_state.S.replace(data=S.at[..., 0].set(S_top_new)),
-                )
+                new_state = new_state._replace(S=new_state.S.replace(
+                    data=_restore_sss_top(
+                        S, jnp.asarray(_sss_target, dtype=S.dtype),
+                        jnp.asarray(sss_alpha_static, dtype=S.dtype),
+                        jnp.asarray(new_state.land_mask.data, dtype=S.dtype),
+                        area=(jnp.asarray(_sss_area, dtype=S.dtype)
+                              if sss_remove_mean else None),
+                        remove_mean=sss_remove_mean)))
 
             # T_freeze cap inside sponge.
             if enable_freeze:
@@ -3463,6 +3630,7 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
     enable_ramp = T_ramp_seconds > 0
     enable_sponge = bool(jra55_state.get("enable_sponge", False))
     enable_sss = bool(jra55_state.get("enable_sss_restoring", False))
+    sss_remove_mean = bool(jra55_state.get("sss_remove_mean", False))
     zero_fluxes = bool(jra55_state.get("zero_surface_fluxes", False))
     enable_freeze = bool(jra55_state.get("enable_freeze_cap", False))
 
@@ -3473,9 +3641,11 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
         sss_dz = float(jra55_state["dz_top"])
         sss_alpha_static = sss_pv * dt / max(sss_dz, 1e-6)
         sss_target_static = jra55_state["sss_target_2d"]
+        sss_area_static = jra55_state.get("sss_area")
     else:
         sss_alpha_static = 0.0
         sss_target_static = None
+        sss_area_static = None
 
     freeze_from_gamma = False
     if enable_freeze:
@@ -3537,14 +3707,19 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
             # non-addressable array.
             _sponge, _sss_target, _freeze_mask = (
                 sponge, sss_target_static, freeze_mask_static)
+            _sss_area = sss_area_static
             if refs is not None:
                 from legoesm.ocean.sponge import SpongeForcing
-                if enable_sponge:
+                # refs may carry ONLY the per-block SSS entries (monthly target
+                # on a non-sharded lane): every key is optional.
+                if enable_sponge and "sponge_gamma" in refs:
                     _sponge = SpongeForcing(
                         gamma=refs["sponge_gamma"], T_ref=refs["sponge_T_ref"],
                         S_ref=refs["sponge_S_ref"])
                 if enable_sss and "sss_target" in refs:
                     _sss_target = refs["sss_target"]
+                if enable_sss and "sss_area" in refs:
+                    _sss_area = refs["sss_area"]
                 if freeze_from_gamma and "sponge_gamma" in refs:
                     _freeze_mask = refs["sponge_gamma"] > 0.0
                 elif freeze_mask_static is not None and "ocean_mask" in refs:
@@ -3695,12 +3870,14 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
 
                 if enable_sss:
                     S = new_state.S.data
-                    _sss_mask = new_state.land_mask.data
-                    S_new = S.at[..., 0].set(
-                        S[..., 0] - sss_alpha_static * (
-                            S[..., 0] - _sss_target) * _sss_mask)
-                    new_state = new_state._replace(
-                        S=new_state.S.replace(data=S_new))
+                    new_state = new_state._replace(S=new_state.S.replace(
+                        data=_restore_sss_top(
+                            S, jnp.asarray(_sss_target, dtype=S.dtype),
+                            jnp.asarray(sss_alpha_static, dtype=S.dtype),
+                            jnp.asarray(new_state.land_mask.data, dtype=S.dtype),
+                            area=(jnp.asarray(_sss_area, dtype=S.dtype)
+                                  if sss_remove_mean else None),
+                            remove_mean=sss_remove_mean)))
                 if enable_freeze:
                     T = new_state.T.data
                     T_top = jnp.where(
@@ -4357,7 +4534,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                    start_step=0,
                    nudge_woa_tau=0.0, T_woa_3d=None, S_woa_3d=None,
                    snapshot_fn=None, spmd_step=None, spmd_gather=None,
-                   spmd_shard_stack=None, spmd_gather_ice=None):
+                   spmd_shard_stack=None, spmd_gather_ice=None,
+                   spmd_shard_ref=None):
     """Run time loop with diagnostics.
 
     Two forcing paths, mutually exclusive:
@@ -4600,6 +4778,9 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
         # into every block_fn call as an ARGUMENT (see the builders' note).
         _spmd_aux = getattr(spmd_step, "aux", None)
         _spmd_refs = jra55_state.get("_spmd_refs") if spmd_step is not None else None
+        # Monthly SSS target / area for the mean removal: selected per block by
+        # the block's model day (band-sharded once under lat-band SPMD).
+        _sss_shard_fn = spmd_shard_ref if spmd_step is not None else None
         if use_gpu_interp:
             _get_block_fn_interp = _build_jra55_block_fn_interp(
                 model, jra55_state, dt, spmd_step=spmd_step)
@@ -4666,13 +4847,16 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             t_compute_start = time.time()
             if use_gpu_interp:
                 bfn = _get_block_fn_interp(actual)
+                _refs_blk = _refs_for_block(
+                    _spmd_refs, jra55_state,
+                    float(record_meta["block_start_day"]), shard_fn=_sss_shard_fn)
                 if _ice_on:
                     state, ice_state = bfn(
                         state, raw_stack, runoff_records,
                         record_meta["record_days"],
                         jnp.float64(record_meta["block_start_day"]),
                         jnp.float64(record_meta["block_start_day_forcing"]),
-                        ice_state, aux=_spmd_aux, refs=_spmd_refs,
+                        ice_state, aux=_spmd_aux, refs=_refs_blk,
                     )
                 else:
                     state = bfn(
@@ -4680,20 +4864,23 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                         record_meta["record_days"],
                         jnp.float64(record_meta["block_start_day"]),
                         jnp.float64(record_meta["block_start_day_forcing"]),
-                        aux=_spmd_aux, refs=_spmd_refs,
+                        aux=_spmd_aux, refs=_refs_blk,
                     )
             else:
+                _refs_blk = _refs_for_block(
+                    _spmd_refs, jra55_state,
+                    float(block_start) * dt / 86400.0, shard_fn=_sss_shard_fn)
                 if _ice_on:
                     state, ice_state = block_fn(
                         state, atm_stack, runoff_stack,
                         jnp.int32(block_start), ice_state, aux=_spmd_aux,
-                        refs=_spmd_refs,
+                        refs=_refs_blk,
                     )
                 else:
                     state = block_fn(
                         state, atm_stack, runoff_stack,
                         jnp.int32(block_start), aux=_spmd_aux,
-                        refs=_spmd_refs,
+                        refs=_refs_blk,
                     )
             jax.block_until_ready(state.T.data)
             compute_dt = time.time() - t_compute_start
@@ -5990,6 +6177,17 @@ def run_omip_single(grid_type: str, args) -> dict:
               f"{float(T_woa_masked[state.land_mask.data > 0.5].max()):.1f}]°C, "
               f"S=[{float(S_woa_masked[state.land_mask.data > 0.5].min()):.1f}, "
               f"{float(S_woa_masked[state.land_mask.data > 0.5].max()):.1f}] PSU")
+    # Prognostic-TKE scan carry: the None -> Field promotion happens HERE,
+    # once -- BEFORE the restart load (the loader restores only the fields
+    # the template carries, so an unseeded template would drop a saved tke)
+    # and before SPMD sharding / the first scanned step, so the carry pytree
+    # is stable.  Both seeders are no-ops unless the prognostic TKE closure
+    # is active.
+    if grid_type == "mpas":
+        state = model.seed_tke(state)
+    elif getattr(model, "_tke_prognostic_active", None) is not None \
+            and model._tke_prognostic_active():
+        state = model.seed_scan_carry(state, dt)
     if args.restart is not None:
         _state_built = state
         state, restart_day, restart_step = _load_restart(
@@ -6241,6 +6439,7 @@ def run_omip_single(grid_type: str, args) -> dict:
     spmd_gather = None
     spmd_gather_ice = None
     spmd_shard_stack = None
+    spmd_shard_ref = None
     if run_config.enable_latlon_spmd:
         if grid_type not in ("latlon", "tripole"):
             raise SystemExit(
@@ -6312,6 +6511,7 @@ def run_omip_single(grid_type: str, args) -> dict:
                         _refs[_name] = shard_forcing_latlon(
                             jnp.asarray(jra55_state[_key]), _dev.mesh)
                 jra55_state["_spmd_refs"] = _refs or None
+                spmd_shard_ref = partial(shard_forcing_latlon, mesh=_dev.mesh)
             # Lay per-block forcing stacks out lat-band-sharded so the
             # in-scan interpolation / bulk fluxes stay shard-local (shared
             # layout helper — see shard_forcing_stack_latlon).
@@ -6407,6 +6607,7 @@ def run_omip_single(grid_type: str, args) -> dict:
             restoring_tau_s=restoring_tau_s,
             restoring_ramp_days=ramp_days_eff,
             jra55_state=jra55_state,
+            spmd_shard_ref=spmd_shard_ref,
             checkpoint_days=checkpoint_days,
             checkpoint_dir=checkpoint_dir,
             max_wallclock_seconds=run_config.max_wallclock_seconds,

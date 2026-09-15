@@ -66,8 +66,9 @@ srun --ntasks=$NGPU --ntasks-per-node=$TPN --gpus-per-node=$TPN --gpu-bind=none 
     --dt $DT --days $DAYS --precision fp64 \
     --forcing-mode jra55_do_tropical --jra55-cache $R/forcing/jra55_do_fesom_1958_1958_1deg_noleap.zarr \
     --jra55-sea-ice --ice-dynamics none --ice-categories 1 \
-    --vertical-mixing-scheme kpp --tripole-closed-seas marmara,black_sea \
+    --vertical-mixing-scheme tke --tke-card fesom2 --tripole-closed-seas marmara,black_sea \
     --no-gm-redi \
+    --sss-piston-velocity 1.929e-6 --sss-restoring-target phc2_monthly --sss-restoring-remove-mean \
     --woa-init --woa-t $R/forcing/phc3_winter_woa_format_nofabricated.nc --woa-s $R/forcing/phc3_winter_woa_format_nofabricated.nc --woa-void-fill \
     --enable-latlon-spmd --multicontroller \
     --diag-every $DIAG_EVERY $EXTRA --output "$OUT" 2>&1 | tee $OUT/run.log | grep -v "^WARNING\|^I0000\|^E0000" | tail -80

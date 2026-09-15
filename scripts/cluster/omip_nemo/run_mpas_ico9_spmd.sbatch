@@ -43,6 +43,18 @@ DAYS=${DAYS:-3}
 # 1.44 K of global SST in 30 days by draining the tropical top 50 m downward; the
 # half-day one-variable ladder at ico6 gave KPP -0.136 K, TKE -0.065, constant-K -0.034.
 VMIX=${VMIX:-tke}
+# Prognostic TKE with the FESOM2 FORCA20 constants (user decision 2026-09-15):
+# TKE carried on the state, Pr = clamp(6.6 Ri, 1, 10), constant Av/Kv
+# backgrounds 1e-4/1e-5, no Bryan-Lewis floor, surface flux coefficient 3.75.
+# The previous arm ran legoESM's diagnostic TKE (re-seeded each step).
+TKE_CARD=${TKE_CARD:-fesom2}
+# SSS restoring matched to FESOM2 (user decision 2026-09-15): piston 10 m / 60 d
+# = 1.929e-6 m/s (was 5e-7), monthly PHC2 climatology target picked by the
+# model calendar day (was the PHC3 winter slice of the initial condition), and
+# the area-weighted global mean of the restoring tendency removed each step.
+SSS_PISTON=${SSS_PISTON:-1.929e-6}
+SSS_TARGET=${SSS_TARGET:-phc2_monthly}
+SSS_MEAN=${SSS_MEAN:---sss-restoring-remove-mean}
 # Lateral dissipation matched to the FESOM2 reference (user decision 2026-09-15):
 # no GM/Redi (FESOM runs none at this resolution), no Laplacian viscosity, no
 # Laplacian Smagorinsky; a constant biharmonic B_h = gamma0 * h^3 with FESOM's
@@ -83,8 +95,9 @@ srun --ntasks=$NGPU --ntasks-per-node=4 --cpus-per-task=16 --gpus-per-node=4 \
     --forcing-mode jra55_do_tropical --jra55-cache "$F/jra55_do_fesom_1958_1958_1deg_noleap.zarr" \
     --jra55-sea-ice --ice-dynamics none --ice-categories 1 --no-gpu-interp \
     --woa-init --woa-t "$IC" --woa-s "$IC" \
-    --vertical-mixing-scheme "$VMIX" --diag-every "$DIAG" \
+    --vertical-mixing-scheme "$VMIX" --tke-card "$TKE_CARD" --diag-every "$DIAG" \
     --no-gm-redi --A-h 0 --C-smag-lap 0 --B-h "$B_H" --C-smag "$C_SMAG" \
+    --sss-piston-velocity "$SSS_PISTON" --sss-restoring-target "$SSS_TARGET" $SSS_MEAN \
     --enable-mpas-spmd --multicontroller \
     --output "$OUT" 2>&1 | tee "$OUT/run.log" | grep -vE "^WARNING|^I0000|^E0000" | tail -70
 rc=${PIPESTATUS[0]}

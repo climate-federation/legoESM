@@ -2991,7 +2991,7 @@ def tke_vertical_mixing(
         # directly (e.g. the DINO usrdef x1.3 westerly boost, which enters
         # the TKE input but NOT the momentum stress).
         taum = jnp.maximum(jnp.asarray(taum_surface), 0.0)
-        surface_flux = (taum / rho_0) ** 1.5
+        surface_flux = cfg.surface_flux_coeff * (taum / rho_0) ** 1.5
     elif tau_x_surface is None and tau_y_surface is None:
         surface_flux = jnp.zeros(rho_cell.shape[:-1], dtype=rho_cell.dtype)
         taum = surface_flux  # |τ| = 0 (unforced)
@@ -2999,7 +2999,7 @@ def tke_vertical_mixing(
         tx = tau_x_surface if tau_x_surface is not None else jnp.zeros_like(rho_cell[..., 0])
         ty = tau_y_surface if tau_y_surface is not None else jnp.zeros_like(rho_cell[..., 0])
         taum = _safe_stress_modulus(tx, ty)
-        surface_flux = (taum / rho_0) ** 1.5
+        surface_flux = cfg.surface_flux_coeff * (taum / rho_0) ** 1.5
 
     # Surface TKE BC dispatch (single owner; raises on unknown).
     surface_dirichlet = _surface_tke_dirichlet(cfg, taum, rho_0)
@@ -3367,7 +3367,7 @@ def tke_set_diffusivities(
         ty = (tau_y_surface if tau_y_surface is not None
               else jnp.zeros_like(rho_cell[..., 0]))
         taum = _safe_stress_modulus(tx, ty)
-    surface_flux = (taum / rho_0) ** 1.5
+    surface_flux = cfg.surface_flux_coeff * (taum / rho_0) ** 1.5
     # NEMO nn_bc_surf=1 option (TKEConfig.surface_bc; single-owner dispatch).
     surface_dirichlet = _surface_tke_dirichlet(cfg, taum, rho_0)
     # NEMO ln_lc Langmuir source (zdftke:332-370), applied pre-solve in
