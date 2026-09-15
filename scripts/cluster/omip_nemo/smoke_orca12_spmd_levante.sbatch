@@ -69,7 +69,7 @@ srun --ntasks=$NGPU --ntasks-per-node=$TPN --gpus-per-node=$TPN --gpu-bind=none 
     --vertical-mixing-scheme tke --tke-card fesom2 --tripole-closed-seas marmara,black_sea \
     --no-gm-redi \
     --sss-piston-velocity 1.929e-6 --sss-restoring-target phc2_monthly --sss-restoring-remove-mean \
-    --woa-init --woa-t $R/forcing/phc3_winter_woa_format_nofabricated.nc --woa-s $R/forcing/phc3_winter_woa_format_nofabricated.nc --woa-void-fill \
+    --woa-init --ic-from-fesom-mesh ${FESOM_MESH:-/work/ab0995/a270088/fesom_jax_meshes/mesh_forca20} \
     --enable-latlon-spmd --multicontroller \
     --diag-every $DIAG_EVERY $EXTRA --output "$OUT" 2>&1 | tee $OUT/run.log | grep -v "^WARNING\|^I0000\|^E0000" | tail -80
 rc=${PIPESTATUS[0]}

@@ -834,6 +834,41 @@ def _bilinear_2d(
     return result.reshape(out_shape)
 
 
+def _grid_lat_lon_deg(grid):
+    """Target-cell (lat_deg, lon_deg) for any ocean grid, shape = spatial layout."""
+    # Extract latitude in degrees from the grid.
+    # Dispatch order matters: GaussianGrid has both 'lat' and 'lat2d',
+    # while CubedSphereGrid has 'lat' (3D) but no 'lat2d'.
+    if hasattr(grid, 'lat2d'):
+        # Grids exposing a 2-D lat2d (GaussianGrid, LatLonGrid, and the
+        # orthogonal-curvilinear tripole LatLonCGridGeometry). Use the grid's
+        # TRUE 2-D longitude (lon2d) -- on the tripole grid longitude varies
+        # down every i-column, and grid.lon is only the 1-D SOUTHERNMOST row
+        # (lon_T[0, :]); pairing it with the 2-D lat_T mis-sampled WOA by a
+        # median ~9 deg (up to ~155 deg in the bipolar cap) at every cell. For
+        # regular lat-lon / Gaussian grids lon2d is the meshgrid of the 1-D lon,
+        # so this is identical there (no regression); fall back to the broadcast
+        # 1-D lon only for a grid that lacks lon2d.
+        lat_deg = np.asarray(grid.lat2d) * (180.0 / np.pi)
+        lon2d = getattr(grid, 'lon2d', None)
+        if lon2d is not None:
+            lon_deg = np.asarray(lon2d) * (180.0 / np.pi)
+        else:
+            lon_1d = np.asarray(grid.lon) * (180.0 / np.pi)
+            lon_deg = np.broadcast_to(lon_1d[np.newaxis, :], lat_deg.shape)
+    elif hasattr(grid, 'latCell'):
+        # VoronoiMesh: latCell in radians, shape (nCells,)
+        lat_deg = np.asarray(grid.latCell) * (180.0 / np.pi)
+        lon_deg = np.asarray(grid.lonCell) * (180.0 / np.pi)
+    elif hasattr(grid, 'lat') and hasattr(grid, 'lon'):
+        # CubedSphereGrid or LatLonGrid: lat/lon in radians
+        lat_deg = np.asarray(grid.lat) * (180.0 / np.pi)
+        lon_deg = np.asarray(grid.lon) * (180.0 / np.pi)
+    else:
+        raise TypeError(f"Unsupported grid type: {type(grid)}")
+    return lat_deg, lon_deg
+
+
 def init_ocean_from_woa(
     grid,
     z_coord: OceanZStarCoordinate,
@@ -945,36 +980,7 @@ def init_ocean_from_woa(
             f"S_fill_psu must be finite; got {S_fill}."
         )
 
-    # Extract latitude in degrees from the grid.
-    # Dispatch order matters: GaussianGrid has both 'lat' and 'lat2d',
-    # while CubedSphereGrid has 'lat' (3D) but no 'lat2d'.
-    if hasattr(grid, 'lat2d'):
-        # Grids exposing a 2-D lat2d (GaussianGrid, LatLonGrid, and the
-        # orthogonal-curvilinear tripole LatLonCGridGeometry). Use the grid's
-        # TRUE 2-D longitude (lon2d) -- on the tripole grid longitude varies
-        # down every i-column, and grid.lon is only the 1-D SOUTHERNMOST row
-        # (lon_T[0, :]); pairing it with the 2-D lat_T mis-sampled WOA by a
-        # median ~9 deg (up to ~155 deg in the bipolar cap) at every cell. For
-        # regular lat-lon / Gaussian grids lon2d is the meshgrid of the 1-D lon,
-        # so this is identical there (no regression); fall back to the broadcast
-        # 1-D lon only for a grid that lacks lon2d.
-        lat_deg = np.asarray(grid.lat2d) * (180.0 / np.pi)
-        lon2d = getattr(grid, 'lon2d', None)
-        if lon2d is not None:
-            lon_deg = np.asarray(lon2d) * (180.0 / np.pi)
-        else:
-            lon_1d = np.asarray(grid.lon) * (180.0 / np.pi)
-            lon_deg = np.broadcast_to(lon_1d[np.newaxis, :], lat_deg.shape)
-    elif hasattr(grid, 'latCell'):
-        # VoronoiMesh: latCell in radians, shape (nCells,)
-        lat_deg = np.asarray(grid.latCell) * (180.0 / np.pi)
-        lon_deg = np.asarray(grid.lonCell) * (180.0 / np.pi)
-    elif hasattr(grid, 'lat') and hasattr(grid, 'lon'):
-        # CubedSphereGrid or LatLonGrid: lat/lon in radians
-        lat_deg = np.asarray(grid.lat) * (180.0 / np.pi)
-        lon_deg = np.asarray(grid.lon) * (180.0 / np.pi)
-    else:
-        raise TypeError(f"Unsupported grid type: {type(grid)}")
+    lat_deg, lon_deg = _grid_lat_lon_deg(grid)
 
     if T_path is not None and S_path is not None:
         # Load from WOA18 NetCDF files.  The guard above ensures that
@@ -1345,3 +1351,172 @@ def woa_ocean_bathymetry(
     wet = H > 0.0
     H = np.where(wet, np.clip(H, min_depth_m, H_max), 0.0)
     return H.astype(np.float64)
+
+
+def init_ocean_from_fesom_mesh(grid, z_coord, mesh_dir, *, cell_center_depths=None,
+                               k=4, isolated_factor=3.0, wet_mask=None, log=print):
+    """Build initial potential temperature and salinity on the model grid.
+
+    Horizontally interpolates the cached FESOM2-JAX nodal initial-state fields
+    (inverse-distance-squared weighting of the ``k`` nearest mesh nodes, chord
+    distances on the unit sphere) and vertically interpolates linearly in depth
+    onto the target cell-centre depths.
+
+    Units
+    -----
+    T_ic / S_ic : potential temperature [degC] and salinity [psu], (nod2D, 70);
+                  layer values padded with 0.0 below each node's bottom.
+    Z           : source layer mid-depths [m], negative (|Z| is positive-down).
+    depths      : target cell-centre depths [m], positive-down.
+    distances   : chord distances on the unit sphere, converted to metres with
+                  ``constants.R_earth`` [m] for the isolation diagnostic.
+
+    Vertical convention
+    -------------------
+    Each nodal profile is extended downward with its deepest *wet* layer value
+    (layer index ``nlevels_nod2D - 2``); the 0.0 padding below a node's bottom
+    is never used.  Above the shallowest source layer the top value is held
+    constant; below the deepest wet layer the extended value is held constant.
+
+    Closed seas
+    -----------
+    This function fills every target cell; masking of closed seas (and land)
+    in the returned fields is the responsibility of the caller.  ``wet_mask``
+    (spatial shape, True = ocean) only restricts the isolated-cell report to
+    ocean cells, so land does not swamp the count.
+
+    Returns ``(T, S)`` as float64 jax arrays of shape ``spatial + (nlev,)``.
+    """
+    import os
+    from scipy.spatial import cKDTree
+
+    # ------------------------------------------------------------------ load
+    T_ic = np.asarray(np.load(os.path.join(mesh_dir, "T_ic.npy")), dtype=np.float64)
+    S_ic = np.asarray(np.load(os.path.join(mesh_dir, "S_ic.npy")), dtype=np.float64)
+    geo = np.asarray(np.load(os.path.join(mesh_dir, "geo_coord_nod2D.npy")), dtype=np.float64)
+    Z = np.asarray(np.load(os.path.join(mesh_dir, "Z.npy")), dtype=np.float64)
+    nlevels = np.asarray(np.load(os.path.join(mesh_dir, "nlevels_nod2D.npy")), dtype=np.int64)
+    res_path = os.path.join(mesh_dir, "mesh_resolution.npy")
+    mesh_res = (np.asarray(np.load(res_path), dtype=np.float64)
+                if os.path.exists(res_path) else None)
+
+    # -------------------------------------------------------------- validate
+    if T_ic.ndim != 2 or T_ic.shape != S_ic.shape:
+        raise ValueError(f"T_ic/S_ic shape mismatch: {T_ic.shape} vs {S_ic.shape}")
+    nod2, nz_full = T_ic.shape
+    if geo.shape != (nod2, 2):
+        raise ValueError(f"geo_coord_nod2D shape {geo.shape} != {(nod2, 2)}")
+    if nlevels.shape != (nod2,):
+        raise ValueError(f"nlevels_nod2D shape {nlevels.shape} != {(nod2,)}")
+    if Z.ndim != 1 or Z.shape[0] != nz_full - 1:
+        raise ValueError(f"Z shape {Z.shape} incompatible with {nz_full} profile layers")
+    if np.any(nlevels < 2) or np.any(nlevels > nz_full):
+        raise ValueError("nlevels_nod2D out of range [2, n_layers]")
+    if mesh_res is not None and mesh_res.shape != (nod2,):
+        raise ValueError(f"mesh_resolution shape {mesh_res.shape} != {(nod2,)}")
+
+    z_abs = np.abs(Z)  # positive-down source mid-depths, strictly increasing
+    if np.any(np.diff(z_abs) <= 0.0):
+        raise ValueError("|Z| must be strictly increasing with depth")
+
+    nlev = int(z_coord.n_levels)
+
+    lat_deg, lon_deg = _grid_lat_lon_deg(grid)
+    lat_flat = np.asarray(lat_deg, dtype=np.float64).ravel()
+    lon_flat = np.asarray(lon_deg, dtype=np.float64).ravel()
+    spatial = np.shape(lat_deg)
+    ncell = lat_flat.size
+
+    if cell_center_depths is not None:
+        ccd = np.asarray(cell_center_depths, dtype=np.float64)
+        if ccd.shape[-1] != nlev or ccd.shape[:-1] != spatial:
+            raise ValueError(f"cell_center_depths shape {ccd.shape} != {spatial + (nlev,)}")
+        depths = ccd.reshape(ncell, nlev)
+    else:
+        # Reference level centres, |z_full_ref| on the model's vertical
+        # coordinate classes (the WOA path reads the same attribute).
+        depths = np.broadcast_to(
+            np.abs(np.asarray(z_coord.z_full_ref, dtype=np.float64)), (ncell, nlev))
+
+    # ------------------------------------------------- horizontal KD-tree
+    lon_n, lat_n = geo[:, 0], geo[:, 1]
+    xyz_n = np.stack((np.cos(lat_n) * np.cos(lon_n),
+                      np.cos(lat_n) * np.sin(lon_n),
+                      np.sin(lat_n)), axis=1)
+    xyz_n /= np.linalg.norm(xyz_n, axis=1, keepdims=True)
+    tree = cKDTree(xyz_n)
+
+    T_out = np.empty((ncell, nlev), dtype=np.float64)
+    S_out = np.empty((ncell, nlev), dtype=np.float64)
+    nearest_d = np.empty(ncell, dtype=np.float64)  # chord distance (unit sphere)
+    nearest_i = np.empty(ncell, dtype=np.int64)
+
+    kq = int(min(max(k, 1), nod2))
+    chunk = 200_000  # cells per chunk, keeps transient memory bounded
+
+    for s in range(0, ncell, chunk):
+        e = min(s + chunk, ncell)
+        lat_r = np.deg2rad(lat_flat[s:e])
+        lon_r = np.deg2rad(lon_flat[s:e])
+        clat = np.cos(lat_r)
+        xyz_t = np.stack((clat * np.cos(lon_r), clat * np.sin(lon_r),
+                          np.sin(lat_r)), axis=1)
+
+        d, idx = tree.query(xyz_t, k=kq)
+        if kq == 1:
+            d = d[:, None]
+            idx = idx[:, None]
+
+        # IDW weights (1/d^2, normalised); a coincident donor (d == 0) gets
+        # weight exactly 1, all other donors 0.
+        w = 1.0 / np.maximum(d, 1e-12) ** 2
+        w[~np.isfinite(d)] = 0.0
+        hit = d <= 0.0
+        rows = hit.any(axis=1)
+        if np.any(rows):
+            w[rows] = 0.0
+            w[rows, np.argmax(hit[rows], axis=1)] = 1.0
+        w /= w.sum(axis=1, keepdims=True)
+
+        # deepest wet layer index per donor -> profile extended downward with
+        # its value; the 0.0 padding (indices > nlevels-2) is never touched.
+        m = nlevels[idx] - 2  # (nq, kq)
+
+        nearest_d[s:e] = d[:, 0]
+        nearest_i[s:e] = idx[:, 0]
+
+        for lev in range(nlev):
+            D = depths[s:e, lev]  # (nq,) positive-down target depths
+            i0 = np.searchsorted(z_abs, D, side="right") - 1  # (-1 .. nz-2)
+            i_lo = np.clip(i0[:, None], 0, m)                 # (nq, kq)
+            i_hi = np.minimum(i_lo + 1, m)
+            lo_z = z_abs[i_lo]
+            span = z_abs[i_hi] - lo_z
+            frac = (D[:, None] - lo_z) / np.where(span > 0.0, span, 1.0)
+            np.clip(frac, 0.0, 1.0, out=frac)  # hold top value above z_abs[0]
+            t_lo, t_hi = T_ic[idx, i_lo], T_ic[idx, i_hi]
+            s_lo, s_hi = S_ic[idx, i_lo], S_ic[idx, i_hi]
+            T_out[s:e, lev] = (((1.0 - frac) * t_lo + frac * t_hi) * w).sum(axis=1)
+            S_out[s:e, lev] = (((1.0 - frac) * s_lo + frac * s_hi) * w).sum(axis=1)
+
+    # ------------------------------------------------------ isolated report
+    if mesh_res is None:
+        # fallback resolution: median arc distance to the nearest donor [m]
+        thresh = isolated_factor * np.median(nearest_d) * constants.R_earth
+    else:
+        thresh = isolated_factor * mesh_res[nearest_i]
+    isolated = nearest_d * constants.R_earth > thresh
+    if wet_mask is not None:
+        wm = np.asarray(wet_mask, dtype=bool).reshape(ncell)
+        isolated &= wm
+        nearest_d = np.where(wm, nearest_d, -1.0)
+    n_iso = int(isolated.sum())
+    far = np.argsort(nearest_d)[-5:][::-1]
+    far_str = ", ".join(f"({lat_flat[i]:.4f}, {lon_flat[i]:.4f})" for i in far)
+    log(f"init_ocean_from_fesom_mesh: {n_iso} isolated target cells "
+        f"(nearest donor > {isolated_factor:g} x mesh resolution); "
+        f"5 farthest targets (lat, lon) deg: {far_str}")
+
+    T_out = T_out.reshape(spatial + (nlev,))
+    S_out = S_out.reshape(spatial + (nlev,))
+    return jnp.asarray(T_out, dtype=jnp.float64), jnp.asarray(S_out, dtype=jnp.float64)
