@@ -71,6 +71,16 @@ _OCEAN_ALB_POLY = 0.15
 _OCEAN_ALB_ROOT1 = 0.1
 _ICE_ALBEDO_FALLBACK = 0.75
 
+# --- prescribed (ERA5) radiative surface boundary condition ---------------
+# Minimum downwelling SW for trusting ERA5's implied surface albedo: below
+# this the sw_up/sw_down ratio is undefined (dark-sky noise) and the sun is
+# effectively down, so the model keeps its own albedo in those columns.
+_PRESCRIBED_ALBEDO_MIN_SW_DOWN_W_M2 = 1.0  # coeff-ok: owner-confirmed dark-sky threshold, not a tuned parameter
+# Floor on the prescribed upwelling LW before the fourth root: lw_up <= 0
+# would give a NaN (negative) or an unbounded gradient (zero) for T_rad.
+_PRESCRIBED_LW_UP_FLOOR_W_M2 = 1.0e-6  # coeff-ok: numerical floor far below instrument noise; only bounds the T^(1/4) gradient
+
+
 def _apply_T_sfc_override(T_sfc, override):
     """Apply a per-column ``T_sfc`` override over an arbitrary-shape T_sfc.
 
@@ -2382,12 +2392,34 @@ def _make_spectral_pe_radiation(
         # SST/SIC blend, time-varying without retrace) or the static
         # ``set_T_sfc_override`` closure.  Same precedence as the
         # hydrostatic/MPAS radiation factory.
-        _ovr = None
-        if forcing is not None and forcing.get("T_sfc") is not None:
-            _ovr = forcing["T_sfc"]
+        _lw_up_ovr = forcing.get("sfc_lw_up") if forcing is not None else None
+        if _lw_up_ovr is not None:
+            # Prescribed upwelling LW as the radiative surface boundary
+            # condition: hand the backend the brightness temperature
+            # T_rad = (lw_up / sigma_sb)**0.25 (see the emissivity override
+            # below). NOTE: the turbulence scheme still reads
+            # forcing["T_sfc"] through the physics-state anchor, so the two
+            # consumers deliberately see different surface temperatures when
+            # fluxes are prescribed (the bulk fluxes are prescribed too, so
+            # its T_sfc is inert).
+            _lw_up = jnp.asarray(_lw_up_ovr)
+            if _lw_up.ndim == 1:
+                _lw_up = _lw_up.reshape(n_lat, n_lon)
+            elif _lw_up.ndim != 2:
+                raise ValueError(
+                    "radiation forcing 'sfc_lw_up' must be (ncol,) or "
+                    f"(n_lat, n_lon), got shape {_lw_up.shape}.")
+            # Floor before the fourth root so a zero/negative prescribed
+            # flux cannot produce a NaN gradient.
+            _lw_up = jnp.maximum(_lw_up, _PRESCRIBED_LW_UP_FLOOR_W_M2)
+            T_sfc = (_lw_up / constants.sigma_sb) ** 0.25  # coeff-ok: exact quartic root inverting sigma_sb*T^4
         else:
-            _ovr = _T_sfc_override_cell[0]
-        T_sfc = _apply_T_sfc_override(T[..., -1], _ovr)  # (n_lat, n_lon)
+            _ovr = None
+            if forcing is not None and forcing.get("T_sfc") is not None:
+                _ovr = forcing["T_sfc"]
+            else:
+                _ovr = _T_sfc_override_cell[0]
+            T_sfc = _apply_T_sfc_override(T[..., -1], _ovr)  # (n_lat, n_lon)
 
         # External CMIP6 forcing via the same traced ``forcing`` dict
         # (see _make_hydrostatic_radiation): o3_vmr / aerosol_od are
@@ -2411,6 +2443,18 @@ def _make_spectral_pe_radiation(
         _emis_ovr = forcing.get("sfc_emissivity") if forcing is not None else None
         if _emis_ovr is None:
             _emis_ovr = sfc_emissivity_override
+        # The model's OWN albedo: what _alb_ovr resolves to WITHOUT any
+        # prescribed-flux forcing, i.e. the build-time override if set, else
+        # the active scheme's config scalar. Only used as the fallback in
+        # dark columns when ERA5 prescribes the albedo; resolved separately
+        # from _alb_ovr so the flag-off path still hands the backend a None
+        # override (it then reads its own config scalar internally).
+        _own_alb = sfc_albedo_override
+        if _own_alb is None:
+            if radiation_config.scheme == "rrtmgp":
+                _own_alb = radiation_config.rrtmgp.sfc_albedo
+            else:
+                _own_alb = radiation_config.gray.sfc_albedo
 
         # Effective time-of-day for the diurnal cycle.  ``_time`` holds
         # the *initial* day_of_year + seconds_of_day captured at module
@@ -2486,8 +2530,39 @@ def _make_spectral_pe_radiation(
             if x is not None and hasattr(x, "ndim") and x.ndim >= 2:
                 return x.reshape(ncol)
             return x
+        _sw_up_ovr = forcing.get("sfc_sw_up") if forcing is not None else None
+        _sw_dn_ovr = forcing.get("sfc_sw_down") if forcing is not None else None
+        if (_sw_up_ovr is None) != (_sw_dn_ovr is None):
+            _only = "sfc_sw_up" if _sw_up_ovr is not None else "sfc_sw_down"
+            raise ValueError(
+                "the prescribed surface shortwave boundary condition needs "
+                "BOTH 'sfc_sw_up' and 'sfc_sw_down' in the radiation "
+                f"forcing; got only {_only!r}.")
         _alb_col = _to_col(_alb_ovr)
-        _emis_col = _to_col(_emis_ovr)
+        if _sw_up_ovr is not None:
+            # ERA5-implied effective surface albedo alb = sw_up / sw_down.
+            # Columns with sw_down below the threshold keep the model's own
+            # albedo: there the ratio is undefined and the sun is down.
+            _sw_up_c = _to_col(jnp.asarray(_sw_up_ovr))
+            _sw_dn_c = _to_col(jnp.asarray(_sw_dn_ovr))
+            _own_alb_c = jnp.broadcast_to(jnp.asarray(_own_alb), (ncol,))
+            _alb_era5 = jnp.clip(
+                _sw_up_c / jnp.maximum(_sw_dn_c,
+                                       _PRESCRIBED_ALBEDO_MIN_SW_DOWN_W_M2),
+                0.0, 1.0)  # coeff-ok: albedo is a dimensionless fraction bounded by [0, 1] by definition
+            # nan_to_num on the computed branch: jnp.where propagates NaN
+            # cotangents from the untaken branch.
+            _alb_col = jnp.where(
+                _sw_dn_c >= _PRESCRIBED_ALBEDO_MIN_SW_DOWN_W_M2,
+                jnp.nan_to_num(_alb_era5, nan=0.0),  # coeff-ok: NaN sanitisation only, no physical meaning
+                _own_alb_c)
+        if _lw_up_ovr is not None:
+            # Emissivity exactly 1 => the solver's upward LW is
+            # sigma_sb * T_rad**4, i.e. the prescribed flux (up to RRTMGP's
+            # band truncation).
+            _emis_col = 1.0  # coeff-ok: emissivity exactly 1 by construction
+        else:
+            _emis_col = _to_col(_emis_ovr)
 
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,
