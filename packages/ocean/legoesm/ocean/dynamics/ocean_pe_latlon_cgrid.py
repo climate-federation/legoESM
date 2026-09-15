@@ -3338,26 +3338,38 @@ def _bc_horizontal_viscosity(
     elif (config.lateral_viscosity.B_h > 0
           or getattr(config.lateral_viscosity, "B_h_gamma0", 0.0) > 0):
         _validate_biharmonic_gamma0(config.lateral_viscosity, grid)
-        bilap_u, bilap_v = _biharmonic_op(u, v)
         if getattr(config.lateral_viscosity, "B_h_gamma0", 0.0) > 0:
-            # FESOM2 gamma0*h^3 on the LOCAL face size (2-D metrics).
+            # FESOM2 gamma0*h^3 on the LOCAL face size (2-D metrics), in the
+            # CONSERVATIVE two-stage form -nabla^2( B(x) nabla^2 (u, v) ): the
+            # coefficient sits between the two vector Laplacians as in FESOM's
+            # coefficient-weighted stages, so the term is dissipative
+            # (integral of u . tendency = -integral of B |nabla^2 u|^2 <= 0);
+            # B(x) times the completed bilaplacian is not (codex batch-2 P1).
             coef_u, coef_v = biharmonic_gamma0_coefficients(
                 grid, config.lateral_viscosity.B_h_gamma0)
-            coef_u = coef_u.astype(bilap_u.dtype)
-            coef_v = coef_v.astype(bilap_v.dtype)
-            if bilap_u.ndim == 2:
-                diag_Bh_bilap_u = -coef_u * bilap_u
-                diag_Bh_bilap_v = -coef_v * bilap_v
-            else:
-                diag_Bh_bilap_u = -coef_u[:, :, None] * bilap_u
-                diag_Bh_bilap_v = -coef_v[:, :, None] * bilap_v
+            vlap_u, vlap_v = vector_laplacian_cgrid(
+                u, v, grid, mask=mask, u_mask=u_mask, v_mask=v_mask,
+                vertex_mask=vertex_mask)
+            coef_u = coef_u.astype(vlap_u.dtype)
+            coef_v = coef_v.astype(vlap_v.dtype)
+            if vlap_u.ndim != 2:
+                coef_u = coef_u[:, :, None]
+                coef_v = coef_v[:, :, None]
+            bilap_u, bilap_v = vector_laplacian_cgrid(
+                coef_u * vlap_u, coef_v * vlap_v, grid,
+                mask=mask, u_mask=u_mask, v_mask=v_mask,
+                vertex_mask=vertex_mask)
+            diag_Bh_bilap_u = -bilap_u
+            diag_Bh_bilap_v = -bilap_v
         elif config.lateral_viscosity.B_h_lat_scaling:
+            bilap_u, bilap_v = _biharmonic_op(u, v)
             # Scale biharmonic coefficient with (cos(lat)/cos_max)^4 to prevent
             # CFL violation near poles where dx shrinks (MOM6 convention).
             scale_u, scale_v = biharmonic_scaling_factor(grid)
             diag_Bh_bilap_u = -config.lateral_viscosity.B_h * scale_u[:, None, None] * bilap_u
             diag_Bh_bilap_v = -config.lateral_viscosity.B_h * scale_v[:, None, None] * bilap_v
         else:
+            bilap_u, bilap_v = _biharmonic_op(u, v)
             diag_Bh_bilap_u = -config.lateral_viscosity.B_h * bilap_u
             diag_Bh_bilap_v = -config.lateral_viscosity.B_h * bilap_v
         diag_Bh_bilap_u, diag_Bh_bilap_v = _apply_slope_foot(diag_Bh_bilap_u, diag_Bh_bilap_v)
