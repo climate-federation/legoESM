@@ -86,3 +86,33 @@ Pre-registered for days 91-110: CONFIRM = ocean evaporation ratio to ERA5
 0.84 → ≥ 0.90 and RH1000 bias +11 → ≤ +7 and tropical clt within 10 points of
 ERA5 and |rsut bias| ≤ 15 W/m2; REFUTE = evaporation ratio +< 0.02 or clt/rsut
 overshoot larger than the original bias persisting through days 100-110.
+
+## Sub-cloud total-water ledger (1 day from day 80, production deck, kg/m2/day, tropical OCEAN)
+| band (sigma)  | turbulence | convection | microphysics | dynamics |
+|---------------|-----------:|-----------:|-------------:|---------:|
+| 0.95-1.00     |     +0.75  |    -0.68   |     +0.51    |   -0.58  |
+| 0.90-0.95     |     +1.85  |    -1.89   |     +0.49    |   -0.44  |
+| 0.70-1.00 (led3, Louis deck, day 100) | +3.57 | -6.21 | +3.15 | -0.50 |
+Reading: surface evaporation (3.5) enters the lowest 450 m and 80 % of it is
+mixed UP by the diffusion scheme through sigma 0.95; the convection scheme
+draws only 0.7 from the lowest band and 1.9 from 900-950 hPa — most of its
+6.2 removal is from the 700-900 hPa cloud layer. The sub-cloud layer is
+vented by turbulent mixing, not by the mass flux; the surface humidity is
+then set by the mixed-layer balance, which is where the transfer-law
+equilibrium argument (iteration B) applies.
+
+## Iteration B — ocean surface-layer corrections (commits da7cca173, 2dd03c721)
+Claim (codex: equilibrium sign CONFIRMED, attribution PLAUSIBLE; GLM had
+called the height error "wrong sign" on the fixed-state flux): with
+K = rho*C_E*U ~2x too large, q_a = q_s - E/K sits too close to q_s.
+Arms, 5 days from the day-80 restart vs pa_ctl: wv_qsal (sea-water q_sfc at
+p_s; 27473012), wv_zref (real input height + potential temperature; 27473013),
+wv_sfcboth (both; 27473014).
+Pre-registered (days 81-85, tropical ocean, native lowest level):
+- wv_qsal: q_a falls by ~0.8 g/kg (the q_s correction) with E within 5 %.
+- wv_zref / both: lowest-level RH falls >= 4 points, E changes < 5 %
+  (ventilation-limited) — CONFIRM; E falls > 10 % with RH < 1 point — the
+  transfer law was NOT the maintainer (REFUTE); E rises > 10 % — the BL is
+  not ventilation-limited.
+- Any arm: sensible heat and stress change too (T, wind inputs re-labelled);
+  report them; tas diagnostics still use 10 m + fresh q_s (known, unchanged).
