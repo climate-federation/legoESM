@@ -58,8 +58,8 @@ def write_yaml(canonical: dict[str, float], out: Path,
         grouped[cls][field] = val
     counts = {sc: len(e) for sc, e in by_scheme.items()}
     lines = [
-        "# LES-tuned turbulence parameters (median seed per scheme; "
-        "10-seed sweep for the eight algebraic closures, 5-seed for CLUBB).",
+        "# LES-tuned turbulence parameters: the median-score seed per scheme, "
+        "from " + ", ".join(f"{sc} x{n}" for sc, n in sorted(counts.items())) + ".",
         "# Registry-qualified `scheme_key.field: value`, spec-bounds-validated.",
         "# SCM applies these by DEFAULT (scm_turbulence_config les_tuned=True).",
         "# AMIP opt-in: this file holds ALL schemes; --params aborts on any",
