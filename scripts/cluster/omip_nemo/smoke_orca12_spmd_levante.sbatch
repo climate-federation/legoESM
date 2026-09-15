@@ -32,8 +32,9 @@ TPN=${TPN:-2}
 DIAG_EVERY=${DIAG_EVERY:-20}
 EXTRA=${EXTRA:-}
 # GM/Redi OFF to match the FESOM2 reference (user decision 2026-09-15).
-# Lateral viscosity as FESOM2: no Laplacian, biharmonic B = gamma0*h^3 on the local
-# face size (fesom_jax gamma0 = 0.003; --B-h-gamma0 on the 2-D tripole metrics,
+# Lateral viscosity as FESOM2's FLOOR: no Laplacian, biharmonic B = gamma0*h^3 on
+# the local face size (fesom_jax gamma0 = 0.003 m/s; FESOM's gamma1/gamma2
+# velocity-dependent terms are an open gap; --B-h-gamma0 on the 2-D tripole metrics,
 # explicit limit gamma0*dt/h = 3e-4 at the 1.5 km cells).  The mesh-derived
 # Laplacian + Smagorinsky of the earlier arms is --A-h <auto> --C-smag-lap 0.33.
 [ -n "${MEMPROBE:-}" ] && export LEGOESM_OMIP_MEMPROBE=1

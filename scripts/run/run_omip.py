@@ -699,7 +699,8 @@ def parse_args(argv: list[str] | None = None):
                          "with --water-type; 'sweeney_2band' = FESOM2's chlorophyll "
                          "two-band (needs --chl-clim; 0.54 of the NET shortwave "
                          "penetrates). Explicit schemes hand the forcing the "
-                         "post-albedo shortwave, as FESOM2 does."))
+                         "post-albedo shortwave, as FESOM2 does; sweeney_2band "
+                         "also deposits the surface part on the live top thickness."))
     p.add_argument("--chl-clim", type=str, default=None,
                    help=("Monthly surface chlorophyll climatology (Sweeney 2005 "
                          "NetCDF, variable 'chl', 12 x 180 x 360 on the forcing-cache "
@@ -5637,6 +5638,10 @@ def run_omip_single(grid_type: str, args) -> dict:
     # Restart provenance for THIS run (0 = serial cell order): set for every
     # run so an earlier SPMD run in the same interpreter cannot leak its count.
     _MPAS_SPMD_N_DEVICES[0] = int(_mpas_spmd_nd) if _mpas_spmd_nd > 1 else 0
+    if getattr(args, "B_h_gamma0", None) is not None and grid_type != "tripole":
+        raise SystemExit(
+            f"--B-h-gamma0 is wired for --grid tripole only (2-D face metrics); "
+            f"on --grid {grid_type} it would be silently inert. Use --B-h.")
     grid, z_coord, config, model, coord_kind = _create_setup(
         grid_type, resolution, args.nlev, args.H_max,
         args.physics, args.water_type,

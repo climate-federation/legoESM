@@ -182,3 +182,44 @@ def test_mpas_sweeney_respects_partial_cells(_fp64_policy_restored):
     col = (rho_0_ref * c_sw * h_live * dT).sum(axis=1)
     np.testing.assert_allclose(col[wet], 50.0, rtol=1e-9)
     assert (h_live[wet] <= 0.0).any()          # the fixture really has dry levels
+
+
+def test_tripole_sweeney_column_total_is_q_net_on_partial_cells(tmp_path, _fp64_policy_restored):
+    """Functional tripole twin of the MPAS test (Claude review, batch 2): on a
+    synthetic tripole mesh with a partial-cell coordinate the Sweeney branch
+    deposits exactly q_net per wet column and nothing below the seabed."""
+    import jax.numpy as jnp
+    from scripts.run import run_omip as R
+    from legoesm.core.field import Field
+    from legoesm.ocean.state import OceanSurfaceForcing
+    from legoesm.ocean.vertical import create_partial_cell_coordinate, compute_layer_thickness
+    from legoesm.ocean.eos import rho_0 as rho_0_ref, c_sw
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "grids"))
+    from test_tripole_multifile_mesh import _write_tripole_like_mesh
+    mesh = tmp_path / "mesh.nc"
+    _write_tripole_like_mesh(mesh, 8, 12, dead_north_row=False)
+    common = dict(tripole_mesh=str(mesh), tripole_fold_convention="(n_lon-i)%n_lon",
+                  forcing_mode="jra55_do_tropical")
+    grid, z, config, model, _ = R._create_setup(
+        "tripole", "eorca1", 12, 600.0, "none", "II", sw_scheme="sweeney_2band", **common)
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import LatLonCGridOceanModel
+    state = R._init_rest_state("tripole", grid, z, H_max=600.0)
+    wet2d = np.asarray(state.land_mask.data) > 0.5
+    rng = np.random.default_rng(5)
+    H = jnp.asarray(np.where(wet2d, rng.uniform(40.0, 600.0, wet2d.shape), 0.0))
+    pc = create_partial_cell_coordinate(z, H)
+    model = LatLonCGridOceanModel(grid, pc, config)
+    state = state._replace(H_bathy=Field(data=H, name="H_bathy", dims=state.H_bathy.dims))
+    h_k = np.asarray(compute_layer_thickness(state.eta.data, H, pc))
+    shape2d = state.T.data.shape[:2]
+    sf = OceanSurfaceForcing(sw_down=jnp.full(shape2d, 200.0), q_net=jnp.full(shape2d, 50.0),
+                             tau_x=jnp.zeros(shape2d), tau_y=jnp.zeros(shape2d),
+                             chl=jnp.full(shape2d, 0.3))
+    t_on = model.tendencies(state, surface_forcing=sf)
+    t_zero = model.tendencies(state, surface_forcing=sf._replace(
+        sw_down=jnp.zeros(shape2d), q_net=jnp.zeros(shape2d)))
+    dT = np.asarray(t_on.dT_dt.data) - np.asarray(t_zero.dT_dt.data)
+    assert np.all(dT[h_k <= 0.0] == 0.0)
+    col = (rho_0_ref * c_sw * h_k * dT).sum(axis=-1)
+    np.testing.assert_allclose(col[wet2d], 50.0, rtol=1e-9)
+    assert (h_k[wet2d] <= 0.0).any()

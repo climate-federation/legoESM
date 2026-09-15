@@ -1618,8 +1618,11 @@ class LateralViscosityConfig(NamedTuple):
                                     # Set False to keep full B_h everywhere
                                     # (requires smaller dt for CFL safety).
     # FESOM2 resolution-scaled biharmonic: B(x) = B_h_gamma0 * h(x)^3 per face
-    # with h = sqrt(dx*dy) at that face (fesom_jax momentum.py, coef ~
-    # gamma0*len^3, gamma0 = 0.003 dimensionless; FESOM has no Laplacian).
+    # with h = sqrt(dx*dy) at that face (fesom_jax momentum.py: per-stage
+    # coef^2 = max(gamma0, gamma1|du|, gamma2|du|^2) * len; gamma0 = 0.003 m/s
+    # is the FLOOR of that flow-aware form -- the gamma1/gamma2 velocity terms
+    # are NOT represented here, so eddying regions get less dissipation than
+    # FORCA20; FESOM has no Laplacian).
     # 0 = off.  Applied in the conservative form -lap(B(x) lap u).  Explicit
     # stability, forward Euler on uniform rectangular cells:
     # gamma0*dt/h <= 1 / (8 (dx/dy + dy/dx)^2), i.e. 1/32 on squares (3e-4

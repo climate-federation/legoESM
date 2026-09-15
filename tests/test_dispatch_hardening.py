@@ -333,6 +333,8 @@ BASELINE_DISPATCHERS: frozenset[tuple[str, str]] = frozenset(
         # e3-weighting variant, and when paired with any operator other than
         # nemo_div_curl).
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "_bc_horizontal_viscosity"),
+        # shortwave_scheme guard of the external (JRA55 bulk) surface forcing
+        ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_latlon_cgrid.py", "_bc_external_surface_forcing"),
         ("packages/ocean/legoesm/ocean/dynamics/ocean_pe_mpas.py", "mpas_ocean_baroclinic_tendencies"),
         # (nemo_drag_r_from_speed_sq's internal legacy-rejection raise is not
         # scanner-shaped; the canonical unknown-scheme guard is the validator.)
