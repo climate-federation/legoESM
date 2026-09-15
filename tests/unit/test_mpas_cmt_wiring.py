@@ -149,3 +149,24 @@ def test_cmt_kernel_conserves_column_momentum():
         col = (dp * du).sum(1); scale = np.abs(dp * du).sum(1).max()
         assert np.abs(col).max() < 1e-12 * scale, col
         assert np.abs((dp * dv).sum(1)).max() < 1e-12 * np.abs(dp * dv).sum(1).max()
+
+
+def test_cmt_kernel_is_down_gradient_and_lands_on_the_sheared_interface():
+    """Layer placement and sign (GLM review): a single wind step between
+    layers 11 and 12 (faster below, trade-like) must accelerate the slow
+    layer above and decelerate the fast layer below by the same momentum,
+    and touch no other layer."""
+    from legoesm import constants
+    from legoesm.atmosphere.physics.convection._plume import cmt_gregory_1997
+    nlev = 20
+    p_half = np.linspace(1.0e4, 1.0e5, nlev + 1)[None, :]
+    p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1]); dp = p_half[:, 1:] - p_half[:, :-1]
+    rho = p_full / (constants.R_d * 280.0)
+    u = np.where(np.arange(nlev)[None, :] >= 12, 5.0, 0.0)
+    du, _ = cmt_gregory_1997(jnp.asarray(u), jnp.zeros_like(jnp.asarray(u)), jnp.asarray(np.full((1, nlev), 0.05)),
+                             None, jnp.asarray(p_full), jnp.asarray(p_half), jnp.asarray(rho), c_u=0.7, c_d=0.7)
+    du = np.asarray(du)[0]
+    assert du[11] > 0.0 and du[12] < 0.0
+    np.testing.assert_allclose(du[11] * dp[0, 11], -du[12] * dp[0, 12], rtol=1e-12)
+    others = np.delete(du, [11, 12])
+    assert np.all(others == 0.0)
