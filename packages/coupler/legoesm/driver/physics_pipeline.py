@@ -3368,7 +3368,10 @@ def _resolve_convection(config):
             # #869 campaign levers: mass-flux stability cap + Gregory-1997 CMT
             # coefficients + the quasi-equilibrium heating-ceiling ratio
             # (cape_relaxation_sink lever).  Defaults match BechtoldConfig.
-            M_b_max=getattr(config, 'bechtold_m_b_max', 0.02),
+            # The ExperimentConfig field (2026-09-15); the earlier
+            # getattr(..., 'bechtold_m_b_max', 0.02) read a field that never
+            # existed and silently capped every run at 0.02.
+            M_b_max=config.bechtold_M_b_max,
             # Vertical subsidence solve selector (day-65 blowup bisect,
             # 2026-07-22): fallback matches the BechtoldConfig default.
             subsidence_solve=getattr(

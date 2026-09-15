@@ -4021,3 +4021,27 @@ def test_surface_height_and_saline_flags_round_trip():
     assert surf.z_ref_model_level is True
     assert surf.ocean_q_sfc_saline is True
     assert surf.bulk_scheme == "coare3"
+
+
+def test_bechtold_M_b_max_threads_and_validates():
+    """bechtold_M_b_max (the cloud-base mass-flux cap) threads into the
+    hot-loop BechtoldConfig on BOTH resolvers and through the --params map;
+    the default reproduces the production value (0.02, the value the old
+    getattr fallback imposed because the field did not exist); validate_strict
+    enforces the scheme's declared range (0.02, 0.15).  Before this wiring
+    the cap could not be set from any MIP driver: the pipeline read a field
+    named ``bechtold_m_b_max`` that no config carried."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import (
+        _resolve_convection,
+        convection_config_for,
+    )
+    from legoesm.driver.run_config_yaml import _ATM_SCALAR_PARAM_MAP
+
+    cfg = ExperimentConfig(convection="bechtold", bechtold_M_b_max=0.05)
+    assert _resolve_convection(cfg)[1].M_b_max == 0.05
+    assert convection_config_for(cfg).bechtold.M_b_max == 0.05
+    assert _resolve_convection(ExperimentConfig(convection="bechtold"))[1].M_b_max == 0.02
+    assert _ATM_SCALAR_PARAM_MAP["atm.conv.BechtoldConfig.M_b_max"] == "bechtold_M_b_max"
+    with pytest.raises(ValueError, match="bechtold_M_b_max"):
+        ExperimentConfig(bechtold_M_b_max=0.5).validate_strict()

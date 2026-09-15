@@ -1269,6 +1269,12 @@ class ExperimentConfig(NamedTuple):
     # IFS in-plume conversion constants (anvil-source control, 2026-07-27):
     # more conversion (rprcon up / dnoprc down) = drier detrained outflow.
     bechtold_rprcon: float = 1.4e-3   # BechtoldConfig.rprcon [1/m]
+    # Cloud-base mass-flux cap [kg/m^2/s]. The pipeline used to read a field of
+    # this name that did not exist and fell back to 0.02 (2.5x tighter than the
+    # scheme's own 0.05), which binds in 71 % of tropical-ocean columns
+    # (2026-09-15). 0.02 here reproduces that production behaviour; the
+    # default is a pending user decision.
+    bechtold_M_b_max: float = 0.02   # BechtoldConfig.M_b_max [kg/m^2/s]
     bechtold_dnoprc: float = 3.0e-4   # BechtoldConfig.dnoprc [kg/kg]
     # Deep-plume entrainment / detrainment base rates (IFS cuascn), exposed
     # 2026-08-14. These set the ITCZ WIDTH and tropical rain concentration:
@@ -1819,6 +1825,7 @@ class ExperimentConfig(NamedTuple):
             # Ceiling raised with the scheme spec (see BechtoldConfig
             # __param_spec__): the production value sat on the old bound.
             ("bechtold_rprcon", 3.5e-4, 1.4e-2),
+            ("bechtold_M_b_max", 0.02, 0.15),
             ("bechtold_epsilon_deep", 7.0e-4, 4.2e-3),
             ("bechtold_delta_deep", 3.0e-5, 1.8e-4),
             ("bechtold_dnoprc", 7.5e-5, 1.2e-3),
@@ -3407,6 +3414,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_rhebc_land=getattr(amip_cfg, 'bechtold_rhebc_land', 0.75),
             bechtold_rhebc_land_deep=getattr(amip_cfg, 'bechtold_rhebc_land_deep', 0.70),
             bechtold_rprcon=getattr(amip_cfg, 'bechtold_rprcon', 1.4e-3),
+            bechtold_M_b_max=getattr(amip_cfg, 'bechtold_M_b_max', 0.02),
             bechtold_dnoprc=getattr(amip_cfg, 'bechtold_dnoprc', 3.0e-4),
             bechtold_subsidence_solve=getattr(amip_cfg, 'bechtold_subsidence_solve', "implicit_flux"),
             convective_buoyancy_death_memory=getattr(amip_cfg, 'convective_buoyancy_death_memory', False),
@@ -3584,6 +3592,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_rhebc_land=self.bechtold_rhebc_land,
             bechtold_rhebc_land_deep=self.bechtold_rhebc_land_deep,
             bechtold_rprcon=self.bechtold_rprcon,
+            bechtold_M_b_max=self.bechtold_M_b_max,
             bechtold_dnoprc=self.bechtold_dnoprc,
             bechtold_downdraft_entrain_rate=self.bechtold_downdraft_entrain_rate,
             bechtold_downdraft_detrain_scale_m=self.bechtold_downdraft_detrain_scale_m,
