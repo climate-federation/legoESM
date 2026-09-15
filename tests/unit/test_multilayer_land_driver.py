@@ -1027,6 +1027,9 @@ def test_snow_ageing_override_survives_the_calibration_reapply(monkeypatch, tmp_
     )
 
     # CONTROL: no override => the calibration's own clock, whatever it is.
+    # the CONTROL asks for the calibration's own clock (None); the default
+    # is now the 150-day production value, so it must be set explicitly
+    base = base._replace(land_snow_tau_days=None)
     base.validate_strict()
     ctl = ModelDriver(base, output_dir=tmp_path / "ctl")
     ctl.setup()

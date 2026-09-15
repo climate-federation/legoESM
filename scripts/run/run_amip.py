@@ -847,9 +847,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "while melting snow darkens as before. "
                              "None = 0.0 = off (calendar clock, byte-identical).")
     parser.add_argument("--land-snow-tau-days", dest="land_snow_tau_days",
-                        type=float, default=None,
+                        type=float, default=_EXPERIMENT_DEFAULTS.land_snow_tau_days,
                         help="Snow-albedo age e-folding time [days]. Default: "
-                             "the land calibration's value (3.674 d). A 3.7-day "
+                             "150 (production, 2026-09-15); the land "
+                             "calibration's own value is 3.674 d. A 3.7-day "
                              "clock darkens any snowpack older than a few weeks "
                              "to its minimum albedo regardless of temperature, "
                              "which is why every polar cell measured 0.521 "

@@ -762,7 +762,7 @@ def test_snow_albedo_ageing_flags_flow_to_config():
     cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
     assert cfg_default.snow_age_activation_K is None
-    assert cfg_default.land_snow_tau_days is None
+    assert cfg_default.land_snow_tau_days == 150.0
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical",
