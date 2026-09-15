@@ -1589,6 +1589,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "70-200 hPa, paid for by the mid-troposphere). "
                              "Fixes the unresolved tropical cold point "
                              "without adding levels. Sigma coordinate only.")
+    parser.add_argument("--sigma-top", type=float, default=None, dest="sigma_top",
+                        help="sigma-lane model lid as a fraction of p_s "
+                             "(default 0.01 = 10 hPa)")
     parser.add_argument("--hard-sat-ice-curve",
                         action=argparse.BooleanOptionalAction, default=False,
                         dest="hard_sat_ice_curve",
@@ -1902,6 +1905,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         stretching=args.stretching if args.stretching is not None else 2.0,
         tropopause_refine=(args.tropopause_refine
                            if args.tropopause_refine is not None else 1.0),
+        sigma_top=(args.sigma_top if args.sigma_top is not None else 0.01),
         use_duogrid=getattr(args, "use_duogrid", False),
     )
 
