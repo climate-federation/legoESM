@@ -603,6 +603,74 @@ def _fill_source_levels_nearest_valid(
     return out, n_filled, n_void
 
 
+# A filled level lighter than the level above it by more than this (in-situ
+# density, both evaluated at the lower level's pressure) is a cross-basin
+# donor, not water that could sit there.  Measured on PHC3 winter (1 deg, 102
+# levels, 3.25e6 filled entries): the deficit has two populations -- up to
+# ~0.1 kg/m3 from ordinary column-to-column contrast between a cell and its
+# donor (68k entries at 0.01, 16k at 0.1), and >= 0.5 kg/m3 (10k entries,
+# 7.7k columns: Baltic 19, Caspian 15, Aegean 8, Arctic shelves) from a
+# donor in another basin.  0.1 sits between them.
+_FILL_STABILITY_TOL_KG_M3 = 0.1
+
+
+def _reject_unstable_donors(
+    T: np.ndarray, S: np.ndarray, filled: np.ndarray, depth_m: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Replace a filled (donor) level that is lighter than the level above by
+    that level, top to bottom, so the fill never manufactures a static
+    inversion.  Observed levels are never changed.
+
+    Why: the per-level nearest donor is the nearest source cell with data AT
+    THAT DEPTH, wherever it is.  Where a whole basin has no observation below
+    some depth, that cell lies in another basin -- for the Aegean below
+    ~1000 m it is the Black Sea (8.9 degC / 22 psu), 150 km away across a
+    1-deg land row.  On ORCA12 that put 27 psu water under 39 psu water in
+    the North Aegean trench column (an 8 kg/m3 inversion at 1047 m, measured
+    through this module's own bilinear + vertical sampling), and the
+    velocity there grew from the first step (jobs 27459479 / 27464705).
+    Extending the last credible level downward is what the observational
+    analyses do for such a basin.  A denser wrong-basin donor still passes:
+    this guards the column, not the geography.
+
+    The comparison is against the last FINITE level above, so a source depth
+    with no donor anywhere (left NaN for the vertical bridge) does not hide an
+    inversion across it.  Returns the corrected fields and the number of
+    (cell, level) entries replaced.
+    """
+    from legoesm.ocean.eos import wright_eos
+
+    T = np.array(T, dtype=np.float64, copy=True)
+    S = np.array(S, dtype=np.float64, copy=True)
+    depth_m = np.asarray(depth_m, dtype=np.float64)
+    n_replaced = 0
+    # last finite (T, S) above each column, carried down the walk
+    fin0 = np.isfinite(T[..., 0]) & np.isfinite(S[..., 0])
+    T_ref = np.where(fin0, T[..., 0], np.nan)
+    S_ref = np.where(fin0, S[..., 0], np.nan)
+    for k in range(1, T.shape[-1]):
+        p_pa = jnp.asarray(constants.rho_ocean * constants.g * depth_m[k])
+        Tk = T[..., k]                         # views: masked writes reach T/S
+        Sk = S[..., k]
+        cand = (filled[..., k] & np.isfinite(Tk) & np.isfinite(Sk)
+                & np.isfinite(T_ref) & np.isfinite(S_ref))
+        if cand.any():
+            rho_here = np.asarray(wright_eos(jnp.asarray(Tk[cand]),
+                                             jnp.asarray(Sk[cand]), p_pa))
+            rho_above = np.asarray(wright_eos(jnp.asarray(T_ref[cand]),
+                                              jnp.asarray(S_ref[cand]), p_pa))
+            lighter = np.zeros(cand.shape, dtype=bool)
+            lighter[cand] = rho_here < rho_above - _FILL_STABILITY_TOL_KG_M3
+            if lighter.any():
+                Tk[lighter] = T_ref[lighter]
+                Sk[lighter] = S_ref[lighter]
+                n_replaced += int(lighter.sum())
+        fin = np.isfinite(Tk) & np.isfinite(Sk)
+        T_ref[fin] = Tk[fin]
+        S_ref[fin] = Sk[fin]
+    return T, S, n_replaced
+
+
 def _harmonic_fill_2d(field: np.ndarray, void: np.ndarray,
                       domain: "np.ndarray | None" = None) -> np.ndarray:
     """Replace ``field`` inside ``void`` by the discrete harmonic function with
@@ -997,8 +1065,18 @@ def init_ocean_from_woa(
         # given depth takes it from the nearest source cell that has one at
         # that same depth.  Without this a model column over a shallow source
         # cell inherited that cell's shallowest value all the way down.
+        _filled = ~(np.isfinite(T_woa) & np.isfinite(S_woa))
         (T_woa, S_woa), n_fill, n_void = _fill_source_levels_nearest_valid(
             (T_woa, S_woa), lat_woa, lon_woa, void_fill=void_fill)
+        _src_depths = (np.asarray(depth_woa, dtype=np.float64) if depth_woa is not None
+                       else WOA_DEPTHS[:T_woa.shape[-1]])
+        T_woa, S_woa, n_unstable = _reject_unstable_donors(
+            T_woa, S_woa, _filled & np.isfinite(T_woa), _src_depths)
+        del _filled
+        if n_unstable:
+            print(f"[setup] observed T/S: {n_unstable} filled source cell-levels "
+                  "were lighter than the level above (a cross-basin donor) and "
+                  "were replaced by the level above")
         if n_fill:
             n_src = T_woa.shape[0] * T_woa.shape[1] * T_woa.shape[2]
             print(f"[setup] observed T/S: filled {n_fill} of {n_src} source "
