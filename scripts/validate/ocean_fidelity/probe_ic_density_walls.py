@@ -169,10 +169,70 @@ def probe_fesom(mesh, box, top, keep_min_drho):
     return recs
 
 
+def probe_woa(path, box, top, keep_min_drho, void_fill):
+    """Adjacent-cell |d rho| on the observed SOURCE grid after the per-level
+    fill run_omip applies (``--woa-void-fill`` selects the harmonic void fill),
+    over source OCEAN cells (observed at some depth).  A source-grid wall is a
+    wall the model inherits; the converse does not hold (the model samples
+    bilinearly at partial-cell depths), so the model-grid probe is the verdict.
+    Also counts filled columns that the fill left statically unstable."""
+    from legoesm.ocean.init_woa import _fill_source_levels_nearest_valid, load_woa18
+    T, S, lat, lon, depth = load_woa18(path, path)
+    observed = np.isfinite(T) & np.isfinite(S)
+    ocean = np.isfinite(T).any(axis=-1) & np.isfinite(S).any(axis=-1)
+    (T, S), n_fill, n_void = _fill_source_levels_nearest_valid((T, S), lat, lon, void_fill=void_fill)
+    print(f"WOA source {path}: T {T.shape}, filled {n_fill}, void-filled {n_void} (void_fill={void_fill})")
+    # vertical stability of the filled columns: adjacent levels compared at the
+    # LOWER level's pressure (compressibility removed); an inversion deeper
+    # than 0.01 kg/m3 counts
+    rho_col = np.stack([_rho(T[:, :, k], S[:, :, k], depth[k]) for k in range(T.shape[-1])], axis=-1)
+    rho_upper_at_lower_p = np.stack([_rho(T[:, :, k], S[:, :, k], depth[k + 1]) for k in range(T.shape[-1] - 1)], axis=-1)
+    inv = (rho_col[:, :, 1:] - rho_upper_at_lower_p < -0.01) & ocean[:, :, None]
+    filled_col = ocean & ~observed.all(axis=-1)
+    print(f"columns with a density inversion: {int(inv.any(axis=-1).sum())} of {int(ocean.sum())} ocean "
+          f"({int((inv.any(axis=-1) & filled_col).sum())} of {int(filled_col.sum())} partly filled columns)")
+    lat2, lon2 = np.meshgrid(lat, lon, indexing="ij")
+    dx_e = _gc_dist(lat2, lon2, lat2, np.roll(lon2, -1, axis=1))
+    dx_n = _gc_dist(lat2[:-1], lon2[:-1], lat2[1:], lon2[1:])
+    h = np.diff(np.concatenate([[0.0], np.asarray(depth, dtype=np.float64)]))
+    out, out_filled = [], []
+    for k in range(T.shape[-1]):
+        rho = rho_col[:, :, k]
+        wet = np.isfinite(rho) & ocean
+        obs = observed[:, :, k]
+        for a, b, w, dx, la, lo, anyfill in (
+            (rho, np.roll(rho, -1, axis=1), wet & np.roll(wet, -1, axis=1), dx_e, lat2, lon2,
+             ~obs | ~np.roll(obs, -1, axis=1)),
+            (rho[:-1], rho[1:], wet[:-1] & wet[1:], dx_n, lat2[:-1], lon2[:-1], ~obs[:-1] | ~obs[1:]),
+        ):
+            d = np.abs(a - b)
+            m = w & np.isfinite(d) & (d >= keep_min_drho)
+            if not m.any():
+                continue
+            rec = np.empty(int(m.sum()), dtype=_DT)
+            rec["lat"], rec["lon"], rec["depth"], rec["drho"], rec["dx"] = la[m], lo[m], depth[k], d[m], dx[m]
+            rec["shear"] = _shear(rec["drho"], rec["dx"], max(h[k], 1.0), rec["lat"])
+            out.append(rec)
+            out_filled.append(rec[anyfill[m]])
+    if not out:
+        print("no wet adjacent pair above the threshold")
+        return np.empty(0, dtype=_DT)
+    recs = np.concatenate(out)
+    _report(f"WOA source grid after fill (void_fill={void_fill}, pairs with |d rho| >= {keep_min_drho})",
+            recs, box, top)
+    filled = np.concatenate(out_filled)
+    if filled.size:
+        _report("... of which pairs with at least one FILLED (unobserved) cell -- the fill's own walls",
+                filled, box, top)
+    return recs
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--orca-snapshot")
     p.add_argument("--fesom-mesh")
+    p.add_argument("--woa-source", help="observed T/S file in WOA layout (T and S in one file)")
+    p.add_argument("--void-fill", action="store_true", help="with --woa-source: apply the harmonic void fill")
     p.add_argument("--box", type=float, nargs=4, default=(40.3, 41.2, 26.5, 29.9),
                    metavar=("LAT0", "LAT1", "LON0", "LON1"), help="Sea of Marmara by default")
     p.add_argument("--top", type=int, default=10)
@@ -183,6 +243,8 @@ def main():
         probe_orca(a.orca_snapshot, a.box, a.top, a.min_drho)
     if a.fesom_mesh:
         probe_fesom(a.fesom_mesh, a.box, a.top, a.min_drho)
+    if a.woa_source:
+        probe_woa(a.woa_source, a.box, a.top, a.min_drho, a.void_fill)
 
 
 if __name__ == "__main__":

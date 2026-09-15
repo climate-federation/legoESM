@@ -528,6 +528,15 @@ def parse_args(argv: list[str] | None = None):
     p.add_argument("--woa-init", action="store_true",
                    help="Initialize T/S from WOA18 instead of rest state. "
                         "Requires --woa-t and --woa-s.")
+    p.add_argument("--woa-void-fill", action="store_true",
+                   help=("Harmonic-fill source OCEAN cells the observed T/S "
+                         "never sampled at a depth (nearest donor farther than "
+                         "one source grid step) instead of stitching them from "
+                         "the nearest observed cells, which builds density "
+                         "walls (init_woa._fill_source_levels_nearest_valid). "
+                         "Shapes the same WOA arrays the SSS restoring, "
+                         "--nudge-woa-tau and the sponge targets read, with or "
+                         "without --woa-init. Default: nearest-donor stitch."))
     p.add_argument("--nudge-woa-tau", type=float, default=0.0,
                    help="Nudge T toward WOA18 with this restoring timescale [days]. "
                         "Applied after each block step. 0=disabled. "
@@ -4766,6 +4775,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                     f" @({scalars['lat_maxu']:.0f},"
                     f"{scalars['lon_maxu']:.0f})"
                 )
+            if scalars.get("j_maxu", -1) >= 0:
+                scalar_summary += f" ij=({scalars['j_maxu']},{scalars['i_maxu']})"
             summary = scalar_summary
             if _io_rank:
                 print(
@@ -5931,7 +5942,8 @@ def run_omip_single(grid_type: str, args) -> dict:
         del _live, _off, _zref, _H
     T_woa, S_woa = init_ocean_from_woa(
         grid, _zc_final, _woa_paths[0], _woa_paths[1],
-        cell_center_depths=_cell_depths)
+        cell_center_depths=_cell_depths,
+        void_fill=bool(getattr(args, "woa_void_fill", False)))
     del _cell_depths   # a full-global (nj, ni, nlev) f64 array per rank at ORCA12
 
     if args.woa_init and T_woa is not None and S_woa is not None:
