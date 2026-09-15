@@ -156,3 +156,27 @@ target before discarding the closure).
 Existing Louis / CLUBB-diagnostic pair at day 86 (sc_louis / sc_clubbd):
 lowest-level q 18.50 vs 18.59 g/kg, RH 0.843 vs 0.850 — the turbulence
 scheme choice moves the tropical-ocean surface humidity by 0.1 g/kg only.
+
+## Iteration C result — IFS shallow closure: NULL (5 days vs pa_ctl, tropical ocean)
+hfls +0.3 W/m2, lowest-level q -0.01 g/kg, every other field < 0.1 of its unit.
+The fluxes DO reach the scheme (no inert-closure warning in the log); the
+closure is muted downstream by the mass-flux cap:
+
+## Finding — the cloud-base mass flux is capped in most of the tropics
+dd_ctl day 110, relaxed updraught mass-flux carry (physstate_conv_prog_profile),
+tropical ocean: 86 % of columns active; the median, p75, p90, p95 and p99 of the
+profile maximum are all exactly 0.0200 kg/m2/s; 71 % of active columns within
+5 % of the cap; area mean 0.015. Production M_b_max = 0.02 is the LOWER bound of
+its declared range (0.02-0.15); the scheme's standalone default is 0.05; IFS
+uses the CFL limit dp/(g dt) ~ 2-3 kg/m2/s. Codex: the cap acts on the whole
+profile (closure scale limited to M_b_max/max(profile)), so the pile-up is at
+the profile maximum and the cloud-base flux is bounded through it; the
+relaxation (1/17 per step) cannot create the pile-up. Observed trade-cumulus
+mass flux ~0.02-0.04 (Barbados, Klingebiel 2021), deep regions higher.
+Reviewers: GLM launch 0.05 and 0.10; codex launch 0.05 first — both launched
+in parallel (same wall-clock, stability observed either way).
+Arms wv_mb005 (27478724), wv_mb010 (27478725): 5 days from day 80 vs pa_ctl,
+--params deck = production + M_b_max. Pre-registered (tropical ocean):
+CONFIRM = lowest-level q falls >= 0.5 g/kg AND hfls rises >= 5 W/m2, stable;
+REFUTE = |dq| < 0.1 and |dhfls| < 2; FIX-FIRST = blow-up. Guardrails: RH500
+and prw (detrainment moistening), rain, the overturning.
