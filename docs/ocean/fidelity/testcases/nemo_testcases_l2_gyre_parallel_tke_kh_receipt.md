@@ -76,7 +76,7 @@ WS-RK3 staged tendencies consume the resulting mixing coefficients. The
 manifest header therefore names **kt=1 pre-stage vertical physics/TKE
 closure, feeding stage 1** as the owning stage.
 
-## 3. Held locally-exact candidate and red control
+## 3. Prediction 3 refuted; separate post-hoc aggregate
 
 `scripts/validate/ocean_fidelity/testcases/manifests/nemo_testcase_l2_gyre_parallel_tke_kh.patch`
 contains, but does not apply, the tied candidate:
@@ -88,17 +88,40 @@ contains, but does not apply, the tied candidate:
 3. retain and directly multiply NEMO's inverse-Prandtl `pdlr`, avoiding the
    extra `pdlr -> Pr -> division` round trip (`:394-413,699-702`).
 
-Applied only in scratch commit `3849b99199c6`, the production source-order
-closure with every NEMO entry operand has **0 / 17,400 unequal K_H cells,
-max abs 0**. The diagnostic's individually materialized JAX boundaries still
-show ULP differences (the candidate raw row is `2,098` unequal, max
-`1.4210854715202004e-14`); that is why the claim is narrowly the complete
-source-order K_H row and why this remains a held candidate, not a statement
-that every intermediate is bit-exact.
+**Frozen Prediction 3 — REFUTED.** It required every statement row through
+final K_H to have zero unequal cells. The archived
+`candidate_statement_walk.json` (SHA-256
+`4341cc292ae0889b2a1dfed09ca10e87ec8b2c2cc57f5697e7e9f5dc35aa37d2`)
+instead records
+`model_substitution_walk.kh_statement_walk.all_exact=false`. Its seven
+non-exact statement rows are below. All compiled mappings refer to
+`GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90`.
 
-The required planted violation is red and non-vacuous. Raising recorded
-`en_post_sweep[1,1,0]` by exactly one binary64 ULP changes the source-order
-K_H row to **1 / 17,400 unequal cells** and makes the gate exit nonzero:
+| statement row | compiled mapping | unequal / compared | max abs |
+|---|---|---:|---:|
+| `raw_buoyancy_length` | `:627-630` | **2,098 / 17,400** | `1.4210854715202004e-14` |
+| `bounded_mixing_length` | `:634-683` | **2,052 / 17,400** | `3.552713678800501e-15` |
+| `raw_zav` | `:692` | **558 / 5,723** | `3.469446951953614e-18` |
+| `avm_floor_and_mask` | `:693` | **558 / 17,400** | `3.469446951953614e-18` |
+| `avt_floor_and_mask_before_prandtl` | `:694` | **1,694 / 17,400** | `3.469446951953614e-18` |
+| `dissipation_length_output` | `:695` | **1,844 / 17,400** | `1.734723475976807e-18` |
+| `avt_inverse_prandtl_update` | `:699-702` | **522 / 17,400** | `1.734723475976807e-18` |
+
+**Post-hoc whole-closure aggregate — CONFIRMED, not Prediction 3.** Applied
+only in scratch commit `3849b99199c6`, the later
+`source_order_closure_k_h` aggregate evaluates the whole closure in one
+expression. The distinct
+`model_substitution_walk.kh_statement_walk.local_candidate_row` field in the
+same archived artifact records **0 / 17,400 unequal K_H cells, max abs 0**
+given NEMO's recorded entry operands. This aggregate was not the frozen
+statement-chain prediction and does not fulfil it.
+
+The aggregate's separately archived non-vacuity evidence is
+`candidate_ulp_plant.log` (SHA-256
+`a71febe6df7c7955787351560e1acb665535247e9682464c6a7ac9ed6e3bf278`).
+Raising recorded `en_post_sweep[1,1,0]` by exactly one binary64 ULP changes
+that aggregate to **1 / 17,400 unequal cells** and makes the gate exit
+nonzero:
 
 ```text
 STATUS FAIL: planted one-ULP TKE entry violation detected at (1, 1, 0): source_order_closure_k_h has 1 unequal cell(s)
@@ -196,8 +219,9 @@ oracle-relative values.
 | 10 | `after.vv_b` | 570 | 264 | 306 | `8.631984016e-15` | `38.875` |
 
 The ladder is information only and does not authorize landing. It strengthens
-the Decision-41 hold: the candidate is locally exact at its equal-input K_H
-boundary but is not trajectory-monotone when introduced ahead of its owning
+the Decision-41 hold: the frozen full statement-chain prediction is refuted;
+the separately labelled post-hoc equal-input aggregate is exact, but the
+candidate is not trajectory-monotone when introduced ahead of its owning
 stage.
 
 ## 5. Evidence, validation, and disposition
@@ -215,14 +239,15 @@ Validation: 125 candidate TKE/instrument tests pass in the clean scratch tree;
 28 evidence-tree instrument/citation tests pass; the manifest applies cleanly
 to the current evidence tip; the one-ULP plant exits nonzero; both ten-step
 runs carry clean stamps; and the oracle-relative comparison exits nonzero with
-the expected FAIL verdict. The citation gate passes all 14 mapped citations,
+the expected FAIL verdict. The citation gate passes all 15 mapped citations,
 and shifting
 `GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:627-630` by two lines
 makes it exit nonzero.
 
-Independent review: `codex exec --sandbox read-only` was attempted exactly as
-required, but its in-process app-server client could not initialize on the
-read-only filesystem. **independent review unavailable in-sandbox**.
+Independent review: **DO NOT SHIP** on the prior receipt because it treated
+the exact post-hoc aggregate as fulfilment of the refuted full-chain
+Prediction 3. This fix records the refutation and separates the aggregate and
+its evidence.
 
 Disposition: **HELD, not landed**. Re-evaluate this manifest only when the
 Decision-41 stage walk reaches kt=1 pre-stage vertical physics/TKE closure.

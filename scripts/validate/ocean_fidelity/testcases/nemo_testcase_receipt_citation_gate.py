@@ -543,6 +543,9 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:627-630': [
         ('DO jk =  2,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0)', 10),
         ('END DO   ;   END DO', 14), 4],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:634-683': [
+        'zmxld(:,1) = zmxlm(:,1)   ! surface set to the minimum value',
+        ('END DO   ;   END DO', 21), 50],
     'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:669-683': [
         'CASE ( 3 )           ! lup and ldown, |dk[xml]| bounded by e3t :',
         ('END DO   ;   END DO', 21), 15],

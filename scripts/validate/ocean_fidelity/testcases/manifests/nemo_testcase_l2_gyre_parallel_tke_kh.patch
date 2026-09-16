@@ -1,8 +1,22 @@
 # HELD CANDIDATE — do not apply before Decision 41 reaches its owning stage.
 # Citation: GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:627-630,
 #   :669-683, :690-702; stprk3.f90:154-168.
-# Local proof: round59 oracle_tke_operands kt=2, 0/17,400 unequal K_H cells;
-#   a +1-ULP change to en_post_sweep[1,1,0] makes 1/17,400 cells unequal.
+# Frozen Prediction 3 (every statement row through final K_H exact): REFUTED.
+# candidate_statement_walk.json, SHA-256 4341cc292ae0889b2a1dfed09ca10e87e
+#   c8b2c2cc57f5697e7e9f5dc35aa37d2, records all_exact=false. Non-exact rows:
+#   raw_buoyancy_length: 2,098/17,400, 1.4210854715202004e-14, :627-630;
+#   bounded_mixing_length: 2,052/17,400, 3.552713678800501e-15, :634-683;
+#   raw_zav: 558/5,723, 3.469446951953614e-18, :692;
+#   avm_floor_and_mask: 558/17,400, 3.469446951953614e-18, :693;
+#   avt_floor_and_mask_before_prandtl: 1,694/17,400,
+#     3.469446951953614e-18, :694;
+#   dissipation_length_output: 1,844/17,400, 1.734723475976807e-18, :695;
+#   avt_inverse_prandtl_update: 522/17,400, 1.734723475976807e-18, :699-702.
+# Separate POST-HOC aggregate, not fulfilment of Prediction 3:
+#   source_order_closure_k_h is 0/17,400 unequal, max 0, given NEMO operands.
+# Its separate plant evidence (candidate_ulp_plant.log, SHA-256 a71febe6df7c7
+#   955787351560e1acb665535247e9682464c6a7ac9ed6e3bf278) changes the aggregate
+#   to 1/17,400 unequal after a +1-ULP change to en_post_sweep[1,1,0].
 # Owning stage: kt=1 pre-stage vertical physics/TKE closure, whose coefficients
 #   are consumed by WS-RK3 stage 1. Decision 41 therefore keeps this patch held.
 # Scratch proof commit: 3849b99199c6dc82fb68917ac5408a9193905cbd.
