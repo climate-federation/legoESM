@@ -121,8 +121,10 @@ def test_identity_path_has_one_external_mode_writer_for_carried_pair():
 
             PairWrites().visit(tree)
 
-    # The only dynamics assignments are the standard- and wide-halo forms of
-    # the same external-mode Kaa write.  Fidelity assignments are construction,
+    # The production dynamics assignments are the standard- and wide-halo
+    # forms of the same external-mode Kaa write.  The _step_impl assignment is
+    # reachable only through the private stage-twin output override, whose
+    # production default is None.  Fidelity assignments are construction,
     # restart parsing, or restart bridging; none executes as a second live
     # model writer.
     assert sorted(found) == sorted([
@@ -130,6 +132,7 @@ def test_identity_path_has_one_external_mode_writer_for_carried_pair():
          "barotropic_substeps_latlon_cgrid"),
         ("dynamics/barotropic_latlon_cgrid.py",
          "barotropic_substeps_wide_halo_latlon_cgrid"),
+        ("dynamics/ocean_model_latlon_cgrid.py", "_step_impl"),
         ("fidelity/nemo_io.py", "read_nemo_restart"),
         ("fidelity/nemo_recipe.py", "build_nemo_eady_recipe"),
         ("fidelity/nemo_state_bridge.py", "bridge_nemo_to_legoesm"),
