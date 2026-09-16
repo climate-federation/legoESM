@@ -215,6 +215,7 @@ class NEMOMatchTripoleRecipeConfig:
     C_smag_lap: float = 0.33
     C_smag: float = 0.0  # biharmonic Smagorinsky coefficient; 0 = off, byte-identical default
     C_leith: float = 0.0  # Leith coefficient; 0 = off, byte-identical default
+    B_h_gamma0: float = 0.0  # FESOM2 gamma0*h^3 biharmonic on the 2-D metrics; 0 = off
 
     # vertical mixing (explicit-block coefficients)
     A_v: float = 1.0e-4
@@ -437,6 +438,12 @@ def nemo_match_tripole_model_config(
                 "non-finite; vertex_area_1d broadcasts one column of corner "
                 "areas), so they are refused on the tripole recipe until a "
                 "2-D-metric operator exists; use A_h / C_smag_lap.")
+    if cfg.B_h_gamma0 > 0.0 and (cfg.A_h is None or cfg.A_h > 0.0 or cfg.C_smag_lap > 0.0):
+        raise ValueError(
+            f"NEMOMatchTripoleRecipeConfig.B_h_gamma0={cfg.B_h_gamma0!r} (FESOM2 "
+            "biharmonic) requires A_h = 0 and C_smag_lap = 0: FESOM2 has no "
+            f"Laplacian, and the A_h branches would ignore gamma0 (got A_h="
+            f"{cfg.A_h!r}, C_smag_lap={cfg.C_smag_lap!r}).")
     if physics is None:
         physics = _default_match_physics()
     return LatLonCGridOceanConfig.from_flat(
@@ -448,6 +455,11 @@ def nemo_match_tripole_model_config(
         C_smag=cfg.C_smag,
         C_leith=cfg.C_leith,
         C_leith_modified=(cfg.C_leith > 0),
+        # FESOM2 gamma0*h^3 biharmonic (2-D metrics): lat scaling off when
+        # selected (it already scales with the local face size); default
+        # (gamma0 = 0) keeps B_h_lat_scaling True byte-identically.
+        B_h_gamma0=cfg.B_h_gamma0,
+        B_h_lat_scaling=(cfg.B_h_gamma0 <= 0.0),
         n_barotropic_substeps=cfg.n_barotropic_substeps,
         barotropic_solver=cfg.barotropic_solver,
         barotropic_implicit_pcg_tol=cfg.barotropic_implicit_pcg_tol,
