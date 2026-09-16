@@ -18,9 +18,10 @@
 # damps resolved waves reaching the lid (2000-km amplitude e-folding ~1.6 d
 # at the top) without the Rayleigh drag's direct relaxation of the mean flow,
 # though a vector Laplacian still dissipates mean-flow shear and kinetic
-# energy (no dissipative heating is added; that dissipation sits inside the
-# process ledger's dynamics row together with the baseline del2/del4
-# diffusion, not in a row of its own).  The sponge scales the del2 term
+# energy (no dissipative heating is added; the process ledger excludes
+# kinetic energy, so this sink is untracked exactly like the baseline
+# del2/del4 dissipation; mean-flow damping by the x8 top-layer Laplacian on
+# a 2000-km jet is ~0.06 m/s/day, ~1e-3 W/m2).  The sponge scales the del2 term
 # only (CAM-FV style); the del4 hyperdiffusion keeps its production
 # strength in the top layers, and the e-folding quoted above assumes the
 # inherited A_h (a_h_scale 0.375; a_h_scale 0 would make the sponge inert,
