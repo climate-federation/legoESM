@@ -1501,8 +1501,37 @@ def _fesom_profiles_per_layer(xyz_nodes, nlevels, T_ic, S_ic, xyz_targets, k=4, 
     return T_prof, S_prof, d0, i0, donors_l, trees
 
 
+_FESOM_IC_CACHE_VERSION = 1  # bump when the remap algorithm changes values
+_FESOM_IC_CACHE_POLL_S = 5.0  # poll interval (s) for non-zero ranks waiting on rank 0's cache file
+
+
+def _load_fesom_ic_cache(path, spatial, nlev, log):
+    """Load a FESOM IC cache entry published by rank 0.
+
+    Returns ``(T, S)`` as float64 jax arrays, or ``None`` if the file is
+    corrupt/truncated, missing arrays, or shaped for a different grid.  Never
+    raises: the reason is logged so rank 0 can rebuild and other ranks can
+    fail with a clear message.
+    """
+    expected = tuple(spatial) + (nlev,)
+    try:
+        with np.load(path) as blob:
+            T = np.asarray(blob["T"], dtype=np.float64)
+            S = np.asarray(blob["S"], dtype=np.float64)
+    except Exception as exc:  # missing arrays, bad zip, truncated file, ...
+        log(f"init_ocean_from_fesom_mesh: unusable cache {path}: {exc!r}")
+        return None
+    if T.shape != expected or S.shape != expected:
+        log(f"init_ocean_from_fesom_mesh: unusable cache {path}: "
+            f"T.shape={T.shape}, S.shape={S.shape}, expected {expected}")
+        return None
+    log(f"init_ocean_from_fesom_mesh: cache hit {path}")
+    return (jnp.asarray(T, dtype=jnp.float64), jnp.asarray(S, dtype=jnp.float64))
+
+
 def init_ocean_from_fesom_mesh(grid, z_coord, mesh_dir, *, cell_center_depths=None,
-                               k=4, isolated_factor=3.0, wet_mask=None, log=print):
+                               k=4, isolated_factor=3.0, wet_mask=None, log=print,
+                               cache_dir=None, cache_wait_timeout_s=6 * 3600):
     """Build initial potential temperature and salinity on the model grid from
     a FESOM2-JAX mesh's cached initial field.
 
@@ -1530,9 +1559,108 @@ def init_ocean_from_fesom_mesh(grid, z_coord, mesh_dir, *, cell_center_depths=No
     the isolated-cell report (nearest surface donor farther than
     ``isolated_factor`` x that donor's mesh resolution) to ocean cells.
 
+    ``cache_dir`` (default ``$LEGOESM_MESH_CACHE_DIR``; must be an absolute
+    path on storage shared by every process): rank 0 builds once and publishes
+    an ``.npz`` keyed on the mesh files' identity and the target geometry; the
+    other ranks wait for it and load the same bytes.  A cache hit returns the
+    stored fields without rebuilding, so the isolated-cell and donor-distance
+    diagnostics are skipped; their log lines appear only on a build.
+
     Returns ``(T, S)`` as float64 jax arrays of shape ``spatial + (nlev,)``.
     """
+    import hashlib
     import os
+    import time
+
+    import jax
+
+    if cache_dir is None:
+        # same env-var convention as legoesm/grids/voronoi.py
+        cache_dir = os.environ.get("LEGOESM_MESH_CACHE_DIR") or None
+    nlev = int(z_coord.n_levels)
+    lat_deg, lon_deg = _grid_lat_lon_deg(grid)
+    lat_flat = np.asarray(lat_deg, dtype=np.float64).ravel()
+    lon_flat = np.asarray(lon_deg, dtype=np.float64).ravel()
+    spatial = np.shape(lat_deg)
+    ncell = lat_flat.size
+    if cell_center_depths is not None:
+        ccd = np.asarray(cell_center_depths, dtype=np.float64)
+        if ccd.shape[-1] != nlev or ccd.shape[:-1] != spatial:
+            raise ValueError(f"cell_center_depths shape {ccd.shape} != {spatial + (nlev,)}")
+        depths = ccd.reshape(ncell, nlev)
+    else:
+        depths = np.broadcast_to(
+            np.abs(np.asarray(z_coord.z_full_ref, dtype=np.float64)), (ncell, nlev))
+
+    cache_path = None
+    if cache_dir is not None:
+        # cache_dir is written by rank 0 and polled by every other rank, so it
+        # MUST be an absolute path on storage shared by all jax processes.
+        if not os.path.isabs(cache_dir):
+            raise ValueError(
+                "init_ocean_from_fesom_mesh: cache_dir must be an absolute path on a "
+                f"filesystem shared by all jax processes, got {cache_dir!r}")
+        key = hashlib.sha256()
+        # Key the mesh files by identity (basename, size, mtime_ns) instead of
+        # content -- the staleness criterion make/rsync use -- so no rank hashes
+        # ~16 GB of mesh at every launch.  An in-place edit that preserves size
+        # and mtime_ns is NOT detected; bump _FESOM_IC_CACHE_VERSION for that.
+        for name in ("T_ic.npy", "S_ic.npy", "geo_coord_nod2D.npy", "Z.npy", "nlevels_nod2D.npy"):
+            st = os.stat(os.path.join(mesh_dir, name))
+            key.update(f"{name}|{st.st_size}|{st.st_mtime_ns}\n".encode())
+        key.update(repr(tuple(spatial)).encode())
+        key.update(str(nlev).encode())
+        key.update(hashlib.sha256(lat_flat.tobytes()).hexdigest().encode())
+        key.update(hashlib.sha256(lon_flat.tobytes()).hexdigest().encode())
+        if cell_center_depths is None:
+            # depths is a broadcast of one nlev vector; hash just that vector
+            # (materialising the view is ~8 GB at ORCA12).
+            key.update(b"ref")
+            key.update(hashlib.sha256(
+                np.abs(np.asarray(z_coord.z_full_ref, dtype=np.float64)).tobytes()).hexdigest().encode())
+        else:
+            key.update(b"ccd")
+            key.update(hashlib.sha256(np.ascontiguousarray(ccd).tobytes()).hexdigest().encode())
+        key.update(f"{k!r}|{isolated_factor!r}|{_FESOM_IC_CACHE_VERSION}".encode())
+        cache_path = os.path.join(
+            cache_dir, f"fesom_ic_v{_FESOM_IC_CACHE_VERSION}_{key.hexdigest()[:24]}.npz")
+    if cache_path is not None and os.path.exists(cache_path):
+        cached = _load_fesom_ic_cache(cache_path, spatial, nlev, log)
+        if cached is not None:
+            return cached
+        if jax.process_index() != 0:
+            raise RuntimeError(
+                f"init_ocean_from_fesom_mesh: cache file {cache_path} is corrupt or "
+                f"incompatible (expected T/S of shape {tuple(spatial) + (nlev,)})")
+        log(f"init_ocean_from_fesom_mesh: unusable cache, rebuilding {cache_path}")
+        # Remove the unusable file now, so peers arriving during the (long)
+        # rebuild see no file and enter the wait loop instead of raising.
+        try:
+            os.unlink(cache_path)
+        except FileNotFoundError:
+            pass
+    if cache_path is not None and jax.process_index() != 0:
+        # Never build on a non-zero rank: a per-rank build is 16x the cost, and
+        # every rank must load the very same bytes (byte-mismatch class defect
+        # seen before).  Wait for process 0 to publish the file, then load it.
+        waited = 0.0
+        last_log = 0.0
+        while not os.path.exists(cache_path):
+            if waited >= cache_wait_timeout_s:
+                raise RuntimeError(
+                    f"init_ocean_from_fesom_mesh: timed out after {waited:.0f}s waiting for "
+                    f"{cache_path} from process 0")
+            time.sleep(_FESOM_IC_CACHE_POLL_S)
+            waited += _FESOM_IC_CACHE_POLL_S
+            if waited - last_log >= 600.0:
+                log(f"init_ocean_from_fesom_mesh: still waiting for {cache_path} ({waited:.0f}s)")
+                last_log = waited
+        cached = _load_fesom_ic_cache(cache_path, spatial, nlev, log)
+        if cached is None:
+            raise RuntimeError(
+                f"init_ocean_from_fesom_mesh: cache file {cache_path} is corrupt or "
+                f"incompatible (expected T/S of shape {tuple(spatial) + (nlev,)})")
+        return cached
 
     T_ic = np.asarray(np.load(os.path.join(mesh_dir, "T_ic.npy")), dtype=np.float64)
     S_ic = np.asarray(np.load(os.path.join(mesh_dir, "S_ic.npy")), dtype=np.float64)
@@ -1560,21 +1688,6 @@ def init_ocean_from_fesom_mesh(grid, z_coord, mesh_dir, *, cell_center_depths=No
     if np.any(np.diff(z_abs) <= 0.0):
         raise ValueError("|Z| must be strictly increasing with depth")
     nz = z_abs.size
-
-    nlev = int(z_coord.n_levels)
-    lat_deg, lon_deg = _grid_lat_lon_deg(grid)
-    lat_flat = np.asarray(lat_deg, dtype=np.float64).ravel()
-    lon_flat = np.asarray(lon_deg, dtype=np.float64).ravel()
-    spatial = np.shape(lat_deg)
-    ncell = lat_flat.size
-    if cell_center_depths is not None:
-        ccd = np.asarray(cell_center_depths, dtype=np.float64)
-        if ccd.shape[-1] != nlev or ccd.shape[:-1] != spatial:
-            raise ValueError(f"cell_center_depths shape {ccd.shape} != {spatial + (nlev,)}")
-        depths = ccd.reshape(ncell, nlev)
-    else:
-        depths = np.broadcast_to(
-            np.abs(np.asarray(z_coord.z_full_ref, dtype=np.float64)), (ncell, nlev))
 
     def _xyz(lat_r, lon_r):
         return np.stack((np.cos(lat_r) * np.cos(lon_r), np.cos(lat_r) * np.sin(lon_r),
@@ -1632,4 +1745,31 @@ def init_ocean_from_fesom_mesh(grid, z_coord, mesh_dir, *, cell_center_depths=No
 
     T_out = T_out.reshape(spatial + (nlev,))
     S_out = S_out.reshape(spatial + (nlev,))
+    if cache_path is not None:
+        import tempfile
+        os.makedirs(cache_dir, exist_ok=True)
+        # mkstemp keeps the tmp file inside cache_dir (same filesystem, so the
+        # os.replace below is atomic) and unique across hosts/jobs, unlike a
+        # pid-based name which can collide between rank 0s on different nodes.
+        # Saved arrays are the pre-jnp float64 arrays: a hit is bit-identical.
+        fd, tmp = tempfile.mkstemp(
+            dir=cache_dir, prefix=os.path.basename(cache_path) + ".tmp.")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                np.savez(fh, T=T_out, S=S_out)
+            umask = os.umask(0)   # mkstemp creates 0600; a shared cache dir needs 0644
+            os.umask(umask)
+            os.chmod(tmp, 0o644 & ~umask)
+            os.replace(tmp, cache_path)
+            log(f"init_ocean_from_fesom_mesh: cache written {cache_path}")
+        except Exception as exc:
+            log(f"init_ocean_from_fesom_mesh: WARNING: cache write failed: {exc!r}")
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            # Peers are polling for this publication; swallowing the failure
+            # would hang them until cache_wait_timeout_s.
+            if jax.process_count() > 1:
+                raise
     return jnp.asarray(T_out, dtype=jnp.float64), jnp.asarray(S_out, dtype=jnp.float64)

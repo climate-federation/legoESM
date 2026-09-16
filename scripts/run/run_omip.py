@@ -550,6 +550,10 @@ def parse_args(argv: list[str] | None = None):
                          "source of --woa-init (and of the sponge / restoring "
                          "targets): every lane then starts from the reference "
                          "run's own field (init_woa.init_ocean_from_fesom_mesh)."))
+    p.add_argument("--ic-cache-dir", type=str, default=None,
+                   help=("Absolute directory on SHARED storage where the field built by "
+                         "--ic-from-fesom-mesh is cached (rank 0 builds once, every rank "
+                         "loads the same bytes). Default: $LEGOESM_MESH_CACHE_DIR."))
     p.add_argument("--woa-void-fill", action="store_true",
                    help=("Harmonic-fill source OCEAN cells the observed T/S "
                          "never sampled at a depth (nearest donor farther than "
@@ -6190,7 +6194,8 @@ def run_omip_single(grid_type: str, args) -> dict:
             grid, _zc_final, args.ic_from_fesom_mesh,
             cell_center_depths=_cell_depths,
             wet_mask=np.asarray(state.land_mask.data) > 0.5,
-            log=lambda m: print("  " + m, flush=True))
+            log=lambda m: print("  " + m, flush=True),
+            cache_dir=getattr(args, "ic_cache_dir", None))
     else:
         T_woa, S_woa = init_ocean_from_woa(
             grid, _zc_final, _woa_paths[0], _woa_paths[1],

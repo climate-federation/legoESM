@@ -1061,3 +1061,15 @@ def test_ic_from_fesom_mesh_round_trip():
     a = parse_args(["--grid", "tripole", "--woa-init", "--ic-from-fesom-mesh", "/meshes/forca20"])
     assert a.ic_from_fesom_mesh == "/meshes/forca20"
     assert a.woa_init is True
+    assert a.ic_cache_dir is None
+    a = parse_args(["--grid", "tripole", "--woa-init", "--ic-from-fesom-mesh", "/meshes/forca20",
+                    "--ic-cache-dir", "/work/ic_cache"])
+    assert a.ic_cache_dir == "/work/ic_cache"
+
+
+def test_driver_forwards_ic_cache_dir_to_the_fesom_initializer():
+    import inspect
+    from scripts.run import run_omip
+    src = inspect.getsource(run_omip.run_omip_single)
+    i = src.index("init_ocean_from_fesom_mesh(")
+    assert 'cache_dir=getattr(args, "ic_cache_dir", None)' in src[i:i + 600]

@@ -172,3 +172,123 @@ def test_layers_with_one_or_zero_wet_donors(tmp_path):
     init_ocean_from_fesom_mesh(_grid(lat_deg[5], lon_deg[5]), zc, d,
                                wet_mask=np.array([False]), log=msgs.append)  # all-land: no crash
     assert any("0 isolated" in m for m in msgs)
+
+
+def test_cache_hit_is_bit_identical_miss_on_new_key_and_nonzero_rank_waits(tmp_path, monkeypatch):
+    import jax
+    import legoesm.ocean.init_woa as init_woa
+
+    mesh_dir, lat_deg, lon_deg, T, nlev = _write_mesh(tmp_path)
+    grid = _grid([44.0, 47.5, 50.0], [3.0, 7.5, 12.0])
+    cache_dir = tmp_path / "c"
+    logs = []
+    T1, S1 = init_ocean_from_fesom_mesh(grid, _z_coord(), mesh_dir,
+                                        cache_dir=str(cache_dir), log=logs.append)
+    written = sorted(p.name for p in cache_dir.glob("*.npz"))
+    assert len(written) == 1 and not list(cache_dir.glob("*.tmp.*"))
+    assert any("cache written" in m for m in logs)
+    logs.clear()
+    T2, S2 = init_ocean_from_fesom_mesh(grid, _z_coord(), mesh_dir,
+                                        cache_dir=str(cache_dir), log=logs.append)
+    assert any("cache hit" in m for m in logs)
+    assert np.asarray(T1).tobytes() == np.asarray(T2).tobytes()
+    assert np.asarray(S1).tobytes() == np.asarray(S2).tobytes()
+    # no cache at all -> a fresh build gives the same bytes the cache served
+    monkeypatch.delenv("LEGOESM_MESH_CACHE_DIR", raising=False)
+    T3, _ = init_ocean_from_fesom_mesh(grid, _z_coord(), mesh_dir, cache_dir=None, log=logs.append)
+    assert np.asarray(T1).tobytes() == np.asarray(T3).tobytes()
+    with pytest.raises(ValueError, match="absolute"):
+        init_ocean_from_fesom_mesh(grid, _z_coord(), mesh_dir, cache_dir="rel/c", log=logs.append)
+
+    # a different k hashes to a different filename -> a miss, not a hit
+    logs.clear()
+    init_ocean_from_fesom_mesh(grid, _z_coord(), mesh_dir, k=5,
+                               cache_dir=str(cache_dir), log=logs.append)
+    written2 = sorted(p.name for p in cache_dir.glob("*.npz"))
+    assert len(written2) == 2 and written[0] in written2
+    assert not any("cache hit" in m for m in logs)
+
+    # a non-zero rank never builds: it waits for rank 0's file and times out
+    monkeypatch.setattr(jax, "process_index", lambda: 1)
+    monkeypatch.setattr(init_woa, "_FESOM_IC_CACHE_POLL_S", 0.01)
+    with pytest.raises(RuntimeError, match="timed out"):
+        init_ocean_from_fesom_mesh(grid, _z_coord(), mesh_dir, cache_dir=str(tmp_path / "c2"),
+                                   cache_wait_timeout_s=0.1, log=logs.append)
+    assert not list((tmp_path / "c2").glob("*.npz"))
+
+
+def test_cache_corrupt_file_rebuilds_on_rank0_and_loads_on_rank1(tmp_path, monkeypatch):
+    import glob
+    import os
+    import jax
+
+    cache_dir = str(tmp_path / "cache")
+    mesh_dir, lat_deg, lon_deg, T, nlev = _write_mesh(tmp_path)
+    grid = _grid([44.0, 47.5, 50.0], [3.0, 7.5, 12.0])
+    messages = []
+
+    def run(rank):
+        monkeypatch.setattr(jax, "process_index", lambda: rank)
+        monkeypatch.setattr(jax, "process_count", lambda: 2)
+        messages.clear()
+        Tj, Sj = init_ocean_from_fesom_mesh(grid, _z_coord(), mesh_dir, cache_dir=cache_dir,
+                                            log=messages.append, cache_wait_timeout_s=30.0)
+        return np.asarray(Tj), np.asarray(Sj)
+
+    T0, S0 = run(rank=0)
+    (cache_path,) = glob.glob(os.path.join(cache_dir, "fesom_ic_v*.npz"))
+    assert not glob.glob(os.path.join(cache_dir, "*.tmp.*"))
+
+    # (1) corrupt entry: rank 0 logs why, rebuilds, and leaves a valid file
+    with open(cache_path, "wb") as fh:
+        fh.write(b"definitely not an npz")
+    T0b, S0b = run(rank=0)
+    assert any("rebuild" in m for m in messages)
+    assert T0b.tobytes() == T0.tobytes() and S0b.tobytes() == S0.tobytes()
+    with np.load(cache_path) as blob:
+        assert blob["T"].shape == T0.shape and blob["S"].shape == S0.shape
+
+    # (2) a peer rank loads the valid cache: bit-identical, no rebuild
+    T1, S1 = run(rank=1)
+    assert any("cache hit" in m for m in messages)
+    assert not any("rebuild" in m for m in messages)
+    assert T1.tobytes() == T0.tobytes() and S1.tobytes() == S0.tobytes()
+
+    # (3) peer rank + corrupt entry: fail fast instead of polling
+    with open(cache_path, "wb") as fh:
+        fh.write(b"still not an npz")
+    with pytest.raises(RuntimeError, match="corrupt"):
+        run(rank=1)
+
+
+def test_cache_hit_does_not_rebuild(tmp_path):
+    import os
+    import shutil
+
+    mesh_dir, lat_deg, lon_deg, _T_mesh, _nlev = _write_mesh(tmp_path)
+    grid = _grid([44.0, 47.5, 50.0], [3.0, 7.5, 12.0])
+    cache_dir = tmp_path / "cache"
+    logs = []
+    T_built, S_built = init_ocean_from_fesom_mesh(grid, _z_coord(), mesh_dir,
+                                                  cache_dir=str(cache_dir), log=logs.append)
+    assert any(cache_dir.iterdir())
+
+    # Corrupt the mesh file in place while preserving everything the stat-based
+    # key sees (size, mtime_ns): a second call can succeed only via a hit.
+    t_ic = os.path.join(mesh_dir, "T_ic.npy")
+    st = os.stat(t_ic)
+    n = st.st_size
+    with open(t_ic, "wb") as fh:
+        fh.write(b"CORRUPTED-NOT-AN-NPY" + b"\x00" * (n - 20))
+    os.utime(t_ic, ns=(st.st_atime_ns, st.st_mtime_ns))
+    T_hit, S_hit = init_ocean_from_fesom_mesh(grid, _z_coord(), mesh_dir,
+                                              cache_dir=str(cache_dir), log=logs.append)
+    assert np.asarray(T_hit).tobytes() == np.asarray(T_built).tobytes()
+    assert np.asarray(S_hit).tobytes() == np.asarray(S_built).tobytes()
+
+    # with the cache gone the corrupted mesh must fail on the build path,
+    # proving the call above bypassed the build
+    shutil.rmtree(cache_dir)
+    with pytest.raises(Exception):
+        init_ocean_from_fesom_mesh(grid, _z_coord(), mesh_dir, cache_dir=str(cache_dir),
+                                   log=logs.append)

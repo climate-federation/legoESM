@@ -100,7 +100,7 @@ srun --ntasks=$NGPU --ntasks-per-node=4 --cpus-per-task=16 --gpus-per-node=4 \
     --bathymetry "$F/ETOPO_2022_v1_60s_N90W180_surface.nc" \
     --forcing-mode jra55_do_tropical --jra55-cache "$F/jra55_do_fesom_1958_1958_1deg_noleap.zarr" \
     --jra55-sea-ice --ice-dynamics none --ice-categories 1 --no-gpu-interp \
-    --woa-init --ic-from-fesom-mesh "$FESOM_MESH" --mpas-k-zeta-bih "$K_ZETA" \
+    --woa-init --ic-cache-dir /work/bd1083/b309178/diffESM/legoesm_pg/ocean_hires_runs/ic_cache --ic-from-fesom-mesh "$FESOM_MESH" --mpas-k-zeta-bih "$K_ZETA" \
     --vertical-mixing-scheme "$VMIX" --tke-card "$TKE_CARD" --diag-every "$DIAG" \
     --no-gm-redi --A-h 0 --C-smag-lap 0 --B-h "$B_H" --C-smag "$C_SMAG" \
     --sss-piston-velocity "$SSS_PISTON" --sss-restoring-target "$SSS_TARGET" $SSS_MEAN \

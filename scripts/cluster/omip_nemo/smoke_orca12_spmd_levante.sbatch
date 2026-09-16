@@ -75,7 +75,7 @@ srun --ntasks=$NGPU --ntasks-per-node=$TPN --gpus-per-node=$TPN --gpu-bind=none 
     --vertical-mixing-scheme tke --tke-card fesom2 --tripole-closed-seas marmara,black_sea \
     --no-gm-redi \
     --sss-piston-velocity 1.929e-6 --sss-restoring-target phc2_monthly --sss-restoring-remove-mean \
-    --woa-init --ic-from-fesom-mesh ${FESOM_MESH:-/work/ab0995/a270088/fesom_jax_meshes/mesh_forca20} \
+    --woa-init --ic-cache-dir /work/bd1083/b309178/diffESM/legoesm_pg/ocean_hires_runs/ic_cache --ic-from-fesom-mesh ${FESOM_MESH:-/work/ab0995/a270088/fesom_jax_meshes/mesh_forca20} \
     --enable-latlon-spmd --multicontroller \
     --diag-every $DIAG_EVERY $WRITE $EXTRA --output "$OUT" 2>&1 | tee $OUT/run.log | grep -v "^WARNING\|^I0000\|^E0000" | tail -80
 rc=${PIPESTATUS[0]}
