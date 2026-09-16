@@ -282,6 +282,35 @@ def inventory(
     historical_features = _historical_unmeasured_features(historical_recipe)
     require(historical_features == UNMEASURED_FEATURES, "historical ORCA2 guard drifted")
 
+    configs_root = oracle_root / "cfgs"
+    require(configs_root.is_dir(), f"missing oracle config root {configs_root}")
+    oracle_configs = []
+    for config in sorted(
+        (path for path in configs_root.iterdir() if "ORCA2" in path.name),
+        key=lambda path: path.name,
+    ):
+        config_binary = config / "BLD/bin/nemo.exe"
+        has_binary = config_binary.is_file() and os.access(config_binary, os.X_OK)
+        has_exp00 = (config / "EXP00/namelist_cfg").is_file()
+        has_reference = (config / "EXPREF").is_dir()
+        oracle_configs.append(
+            {
+                "binary_executable": has_binary,
+                "exp00_namelist_present": has_exp00,
+                "name": config.name,
+                "path": str(config),
+                "reference_config_present": has_reference,
+                "status": (
+                    "BUILT"
+                    if has_binary
+                    else "REFERENCE_CONFIG_NOT_BUILT"
+                    if has_reference
+                    else "MISSING_BUILD"
+                ),
+            }
+        )
+    require(oracle_configs, "no ORCA2 oracle configuration found")
+
     target = oracle_root / "cfgs/ORCA2_OMIP_L4"
     cpp = target / "cpp_ORCA2_OMIP_L4.fcm"
     namelist = target / "EXP00/namelist_cfg"
@@ -396,6 +425,7 @@ def inventory(
             "unmeasured_features": list(historical_features),
         },
         "nemo_oracle_build": {
+            "all_orca2_configs": oracle_configs,
             "binary_bytes": binary.stat().st_size,
             "binary_executable": os.access(binary, os.X_OK),
             "binary_path": str(binary),
@@ -452,7 +482,7 @@ def main() -> int:
     try:
         report = inventory(
             args.repo_root.resolve(),
-            args.oracle_root.resolve(),
+            args.oracle_root,
             args.phase3_root.resolve(),
             args.record_a.resolve(),
             args.record_b.resolve(),
