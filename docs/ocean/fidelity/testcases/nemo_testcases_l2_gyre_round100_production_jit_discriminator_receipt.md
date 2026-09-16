@@ -205,13 +205,28 @@ compiled statements, not an isolated JAX expression, define the proof target.
 
 ## Review and verification
 
-The required separate read-only Codex review is pending at this draft commit.
-Its verbatim terminal verdict and artifact digest will be inserted before the
-receipt is final.
+The required separate read-only Codex review was invoked against the clean
+draft receipt, the branch diff, both manifests, both full stage-twin artifacts
+and the immutable Rule-12 table. A reviewer model did not start. Its verbatim
+terminal result is:
 
-The focused final-tree tests and citation gate are also pending at this draft
-commit. The final receipt will record their exact counts, digests and the
-required nonzero shifted-citation plant.
+> Error: failed to initialize in-process app-server client: Read-only file
+> system (os error 30)
+
+Therefore **independent review unavailable in-sandbox**; unavailability is not
+approval. The artifact SHA-256 is
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
+The mechanical Rule-12 verdict already requires HOLD, so no reviewed physics
+diff is being shipped.
+
+The focused final-tree suite passed **61 tests in 14.15 s**, covering the
+consolidated stage twin and its fail-closed reader, the one shared RK3 stage
+helper, the receipt citation machinery and source-rounding primitive. Its log
+SHA-256 is
+`33d18281be2d7051cdea52444f41248de77382ad30e72e36103dea691b6ecd28`.
+The clean-tree receipt citation gate and its shifted-citation plant are pending
+one intermediate receipt commit; their exact verdicts will replace this
+sentence before finalization.
 
 No configuration, coefficient, timestep, carried state, stabilizer, year
 harness, reconciliation gate, freshwater pair, #1484 guard, NEMO source or
