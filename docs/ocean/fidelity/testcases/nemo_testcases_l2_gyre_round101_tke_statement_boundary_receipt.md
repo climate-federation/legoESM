@@ -247,21 +247,21 @@ approval. No physics diff is being shipped, and the round remains stopped for
 the independently produced record. The review log SHA-256 is
 `eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
 
-The focused final-tree suite passed **72 tests in 5.46 s**. It covers the
+The focused final-tree suite passed **72 tests in 5.54 s**. It covers the
 consolidated production-stage gate and new exact-EOF TKE reader, the Round-59
 TKE operand machinery, twin admission, citation extraction/map auditing, and
 all planted unit controls. Its log SHA-256 is
-`19fe1fd87a99dc0ba4f78cdf774d74d850a736462f254309a1ad469630c91975`.
+`83aa5d5f2e23b07ee17ac4b181a75b82ab1c2ccce30e8ec8c6faa37ed46d9064`.
 `bash -n` also passes for the acquisition script; its clean preflight is the
 gfortran proof recorded above.
 
 The clean-tree citation gate finds and maps all 8/8 compiled-source citations,
 with no unmapped citation, failed anchor, global map-audit failure or self-test
 failure. Its JSON SHA-256 is
-`098116141de89fe999f2b776e9731092c4b701cefb1a7b562dfd55ef2007cf22`.
+`92556b1b5cc60d566f536d8fa980bffd13dce15024b7b02fb1d0149a44cd3230`.
 Shifting the Langmuir citation by two lines exits 1 with
 `SYMBOL-NOT-AT-LINE`; the plant JSON SHA-256 is
-`5f4e7864a7aaac425f692208e7328f9cb680c5206fb7c110e2d1056846e5944d`.
+`783182e7c4aa61a5b13000b2175a2472da1c8c03ce4977ccf4a323b6e02e0b16`.
 
 GitHub issue #1455 is unavailable through this clone's local-only remote, so
 no issue-update claim is made. No configuration or carried-state decision is
