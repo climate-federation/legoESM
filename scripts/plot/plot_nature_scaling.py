@@ -113,6 +113,8 @@ def load(dirs):
     best = {}
     for d in dirs:
         for f in glob.glob(os.path.join(d, "**", "*.jsonl"), recursive=True):
+            if f.endswith(".failed.jsonl"):     # quarantined by the ladder
+                continue
             for line in open(f):
                 try:
                     r = json.loads(line)
