@@ -336,3 +336,19 @@ def test_mpas_production_physics_honours_the_anchors_and_the_radiative_bc():
     a = run(ps, {"sfc_lw_up": jnp.full(ncol, constants.sigma_sb * 320.0 ** 4)})
     b = run(ps, {"sfc_lw_up": jnp.full(ncol, constants.sigma_sb * 260.0 ** 4)})
     assert float(jnp.max(jnp.abs(a.dT_dt.data - b.dT_dt.data))) > 0.0
+
+
+def test_prescribed_heat_is_a_convection_surface_source_without_a_turbulence_scheme():
+    """Bechtold's shallow closure needs a surface flux source; a prescribed
+    heat pair is one even on the bulk path (turbulence='none')."""
+    pipe = _pipeline(create_cubed_sphere(4), turbulence="none",
+                     convection="bechtold",
+                     bechtold_use_ifs_shallow_closure=True)
+    _, s2 = _inputs(pipe)
+    out = _step(pipe, sfc_shflx_override=jnp.full(s2, 60.0),
+                sfc_lhflx_override=jnp.full(s2, 90.0))
+    assert bool(jnp.all(jnp.isfinite(out.dT_dt)))
+    # ... and without the prescribed pair the closure still refuses (the
+    # bulk path has no surface config to draw the flux from)
+    with pytest.raises(ValueError):
+        _step(pipe)

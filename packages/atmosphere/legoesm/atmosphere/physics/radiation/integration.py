@@ -110,6 +110,20 @@ def resolve_prescribed_radiative_bc(forcing, radiation_config, ncol,
     """
     if forcing is None:
         return T_sfc_col, alb_col, emis_col
+
+    def _col(x):
+        # scalars broadcast over the columns; (ncol,) / (n_lat, n_lon)
+        # fields flatten; anything else is a caller bug, named here
+        x = jnp.asarray(x)
+        if x.ndim == 0:
+            return jnp.broadcast_to(x, (ncol,))
+        if x.ndim > 2 or x.size != ncol:
+            raise ValueError(
+                "a prescribed radiative surface plane must be a scalar, "
+                f"(ncol,) or (n_lat, n_lon) with ncol={ncol}; got shape "
+                f"{tuple(x.shape)}.")
+        return x.reshape(ncol)
+
     lw_up = forcing.get("sfc_lw_up")
     sw_up = forcing.get("sfc_sw_up")
     sw_dn = forcing.get("sfc_sw_down")
@@ -139,8 +153,7 @@ def resolve_prescribed_radiative_bc(forcing, radiation_config, ncol,
                 "sigma*T_rad^4 (emissivity 1), but the gray radiation config "
                 f"has sfc_emissivity={_gray_e!r} and the gray backend takes "
                 "no per-call emissivity; set it to 1.0 or use rrtmgp.")
-        _lw = jnp.maximum(jnp.asarray(lw_up).reshape(ncol),
-                          _PRESCRIBED_LW_UP_FLOOR_W_M2)
+        _lw = jnp.maximum(_col(lw_up), _PRESCRIBED_LW_UP_FLOOR_W_M2)
         T_sfc_col = (_lw / constants.sigma_sb) ** 0.25  # coeff-ok: exact quartic root inverting sigma_sb*T^4
         emis_col = 1.0  # coeff-ok: emissivity exactly 1 by construction
     if sw_up is not None:
@@ -150,8 +163,8 @@ def resolve_prescribed_radiative_bc(forcing, radiation_config, ncol,
                    if radiation_config.scheme == "rrtmgp"
                    else radiation_config.gray.sfc_albedo)
         own_c = jnp.broadcast_to(jnp.asarray(own).reshape(-1), (ncol,))
-        _up = jnp.asarray(sw_up).reshape(ncol)
-        _dn = jnp.asarray(sw_dn).reshape(ncol)
+        _up = _col(sw_up)
+        _dn = _col(sw_dn)
         alb_era5 = jnp.clip(
             _up / jnp.maximum(_dn, _PRESCRIBED_ALBEDO_MIN_SW_DOWN_W_M2),
             0.0, 1.0)  # coeff-ok: albedo is a dimensionless fraction in [0, 1]
@@ -1525,8 +1538,6 @@ def _make_hydrostatic_radiation(
             # (uniform) albedo has no column axis and stays replicated.
             if _alb_col is not None and _alb_col.ndim > 0:
                 _alb_col = shard_columns(_alb_col, column_mesh)
-            if _emis_col is not None and hasattr(_emis_col, "ndim") and _emis_col.ndim > 0:
-                _emis_col = shard_columns(_emis_col, column_mesh)
             if q_v_col is not None:
                 q_v_col = shard_columns(q_v_col, column_mesh)
             if q_cloud_col is not None:

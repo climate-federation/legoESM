@@ -141,3 +141,17 @@ def test_prescribed_radiative_fluxes_refused_on_a_scheme_that_ignores_them(setup
         RadiationConfig(scheme="simple_lw", diurnal_cycle=False), "spectral_pe")
     with pytest.raises(ValueError, match="only consumed by the rrtmgp and gray"):
         fn(state, grid, sigma, forcing={"sfc_lw_up": jnp.full(ncol, 300.0)})
+
+
+def test_scalar_prescribed_planes_broadcast_over_the_columns(setup):
+    """A scalar sfc_sw_up / sfc_sw_down / sfc_lw_up (the legacy uniform-
+    forcing convention) is accepted and equals the per-column version."""
+    state, grid, sigma, fn, ncol = setup
+    per_col = heating(state, grid, sigma, fn,
+                      {"sfc_sw_up": jnp.full(ncol, 400.0),
+                       "sfc_sw_down": jnp.full(ncol, 500.0),
+                       "sfc_lw_up": jnp.full(ncol, 380.0)})
+    scalar = heating(state, grid, sigma, fn,
+                     {"sfc_sw_up": 400.0, "sfc_sw_down": 500.0,
+                      "sfc_lw_up": 380.0})
+    assert scalar == pytest.approx(per_col, rel=1e-9)

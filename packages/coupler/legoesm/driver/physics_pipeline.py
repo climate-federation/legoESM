@@ -1313,8 +1313,11 @@ class PhysicsPipeline:
                 # path is needed only by the shallow closure / RCAPDCYCL
                 # (codex R2: land-RHEBC-only must not demand a surface
                 # config).
+                _prescribed_heat = (sfc_shflx_override is not None
+                                    and sfc_lhflx_override is not None)
                 _have_sfc_source = (
-                    (self.surface_tiled and self.f_land is not None)
+                    _prescribed_heat
+                    or (self.surface_tiled and self.f_land is not None)
                     or getattr(self.turbulence_config, "surface", None)
                     is not None
                 )
@@ -1376,7 +1379,14 @@ class PhysicsPipeline:
                     # (codex R2 #1 UnboundLocalError).
                     _rho_low = p_full_col[:, -1] / (
                         constants.R_d * jnp.maximum(_T_low, 1.0))
-                    if self.surface_tiled and self.f_land is not None:
+                    if _prescribed_heat:
+                        # A prescribed (coupler / ERA5) heat flux is the
+                        # authoritative surface flux for EVERY consumer: the
+                        # convective closure sees the same boundary the
+                        # turbulence scheme applies, not a bulk estimate.
+                        _shf_c = ad.flatten_2d(sfc_shflx_override)
+                        _lhf_c = ad.flatten_2d(sfc_lhflx_override)
+                    elif self.surface_tiled and self.f_land is not None:
                         # SAME mosaic arguments as the turbulence path
                         # (beta-limited land evaporation + multilayer q_sfc
                         # override — codex R1 #2: omitting them treated land
@@ -1402,14 +1412,6 @@ class PhysicsPipeline:
                             _u_low, _v_low, _T_low, _q_low,
                             _T_sfc_c, _q_sfc_c, _rho_low,
                             self.turbulence_config.surface)
-                    # A prescribed (coupler / ERA5) heat flux is the
-                    # authoritative surface flux for EVERY consumer: the
-                    # convective closure must see the same boundary the
-                    # turbulence scheme applies, not its own bulk estimate.
-                    if sfc_shflx_override is not None:
-                        _shf_c = ad.flatten_2d(sfc_shflx_override)
-                    if sfc_lhflx_override is not None:
-                        _lhf_c = ad.flatten_2d(sfc_lhflx_override)
                     _land_c = (
                         ad.flatten_2d(self.f_land)
                         if self.f_land is not None

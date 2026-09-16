@@ -86,7 +86,8 @@ loss:
 neural_gcm:
   # NeuralGCM-style spatial embedding (Kochkov et al. 2024).  Owner
   # 2026-09-16: OFF here so the lat-lon deck stays like-for-like with the
-  # earlier lat-lon runs; the spectral campaign decks set it true.
+  # earlier lat-lon runs; the spectral campaign decks set it true (the
+  # flux-prescribed deck sets it false).
   spatial_embedding: false
   # #1464: the learned arm here has NO surface stress and cannot be given one.
   # This config runs the lat-lon training core, where the learned arm is built
