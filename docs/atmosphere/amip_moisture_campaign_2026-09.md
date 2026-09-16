@@ -569,3 +569,27 @@ M/M_max > 0.1; prediction 70 % of baseline-active trade-ocean columns (10-30N an
 separately) with p_top > 750 hPa, < 60 % refutes; >= 80 % of baseline-active ITCZ columns
 must keep transport above their frozen LFC; water/enthalpy budgets closed with the terminal
 deposition; eager/JIT parity; finite-difference gradients away from switching levels.
+
+## Iteration H — cubasen port: resolution ladder (2026-09-16 night)
+Module packages/atmosphere/legoesm/atmosphere/physics/convection/_ifs_test_ascent.py (GLM from the local
+source; codex rounds r12/r13 + Claude fixes applied; unwired, no tests yet; jax.grad still non-finite on
+one path). Known-answer sounding (mixed layer theta 300 K / 17 g/kg below 950 hPa; above: undilute
+pseudo-adiabat of that parcel minus 1 K, RH 0.8; isothermal 200 K above 150 hPa), source-literal gate,
+uniform sigma:
+| levels | layer | verdict | departure | base | top | w_base |
+|---|---|---|---|---|---|---|
+| 30 | 33 hPa | shallow | surface | 962 | 895 hPa | 1.5 m/s |
+| 60 | 16 hPa | DEEP | 988 hPa | 954 | 650 hPa | 3.4 |
+| 100 | 10 hPa | DEEP | 998 | 957 | 582 | 3.1 |
+| 137 | 7 hPa | DEEP | 1002 | 958 | 558 | 2.5 |
+The IFS trigger works as designed once the layers resolve the lifting condensation level (<= 16 hPa);
+on 33 hPa layers every elevated parcel dry-lifts a whole layer and dies (kinetic-energy loss ~ h^2).
+The trade sounding stays shallow (top ~802 hPa) at every resolution. On the model's day-110 states
+(uniform 30-level AND the BL-refined grid of Iteration E) the trigger finds 58-87 % shallow columns
+(tops 820-930 hPa) and no deep in the ITCZ: the model's warm 900-800 hPa layer, the product of the
+non-terminating plume, blocks the test parcels — expected for a corrupted state, only a coupled run
+tells whether it relaxes. Codex (r13, HOLD): an in-layer LCL split is a defensible adaptation but not
+L137-equivalent; complete sub-stepping is structurally closer; both change more than the ascent
+(CAPE, base/top bookkeeping, condensate halving). Decision for the user: refined vertical grid
+(<= 16 hPa through the lower troposphere, converging with the UTLS session's grid work) versus a
+sub-stepped trigger on 30 levels.

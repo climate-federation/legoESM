@@ -55,6 +55,7 @@ mass flux is PQHFL [kg m-2 s-1] = -lhf_w_m2 / L_v (cubasen.F90:335).
 
 from typing import NamedTuple
 
+import jax
 import jax.numpy as jnp
 from jax import lax
 
@@ -220,15 +221,21 @@ def _cuadjtq_pair(T, q, p):
     """cuadjtq.F90:324-345, KCALL=3 branch: two successive UNCLIPPED Newton
     corrections ZCOND1 = (q - q_s)/(1 + (L_v/c_pd) dq_s/dT); T += (L_v/c_pd)
     ZCOND1; q -= ZCOND1 (second pass uses the updated T).  Specific-humidity
-    form: q_s = w_s/(1+w_s) of the shared curve (legoesm.thermo
-    .saturation_specific_humidity) with dq_s/dT from _dqsat_dT.
+    form: q_s = saturation_specific_humidity, dq_s/dT from _dqsat_dT (the
+    exact derivative of that same function).
+    AD safety (JAX where-NaN rule): temperatures fed to the saturation curve
+    and its derivative are clamped to the physical range
+    [_T_PHYS_MIN, _T_PHYS_MAX] K on ALL branches (including inactive ones)
+    BEFORE the thermo helpers are evaluated; masking only the results would
+    not protect the cotangents.
     Declared departures (cuadjtq.F90:162-168; suphec.F90:231-240): the shared
     curve's Tetens coefficients differ slightly from IFS FOEEWM, and saturation
     is liquid-only (no FOEALFA/FOEALFCU ice blend)."""
     lvcp = constants.L_v / constants.c_pd
     for _ in range(2):
-        qs = saturation_specific_humidity(T, p)
-        zcond1 = (q - qs) / (1.0 + lvcp * _dqsat_dT(T, p))
+        T_s = jnp.clip(T, _T_PHYS_MIN, _T_PHYS_MAX)
+        qs = saturation_specific_humidity(T_s, p)
+        zcond1 = (q - qs) / (1.0 + lvcp * _dqsat_dT(T_s, p))
         T = T + lvcp * zcond1
         q = q - zcond1
     return T, q
@@ -243,11 +250,29 @@ _Z_FLOOR = 1.0       # [m] floor on the 1/z entrainment height (geo_full - geo_h
                      # at the surface); keeps 1/z finite on inactive surface branches
 
 
+# Physical temperature range used to sanitize operands fed to the saturation
+# helpers on inactive/unphysical branches (JAX where-NaN rule: masking the
+# RESULT is not enough, every evaluated branch must be finite).
+_T_PHYS_MIN = 150.0     # [K] lower physical bound for the Tetens curve
+_T_PHYS_MAX = 350.0     # [K] upper physical bound for the Tetens curve
+
+
 def _dqsat_dT(T, p):
-    """dq_s/dT for the SPECIFIC-humidity saturation curve q_s = w_s/(1+w_s)
-    of the shared mixing-ratio helpers (chain rule, no re-derived curve):
-    dq_s/dT = dw_s/dT / (1 + w_s)**2."""
-    return saturation_mixing_ratio_dT(T, p) / (1.0 + saturation_mixing_ratio(T, p)) ** 2
+    """dq_s/dT of the very saturation function used elsewhere in this module
+    (legoesm.thermo.saturation_specific_humidity), obtained as its EXACT
+    autodifferentiated derivative via jax.vmap(jax.grad(...)) on flattened
+    arrays, instead of a hand-re-derived chain rule on the mixing-ratio
+    helpers (review finding 5): this guarantees the Newton corrections in
+    _cuadjtq_pair / _cuadjtq_condense are consistent with the curve actually
+    evaluated, including its internal floors/caps, and the derivative is
+    itself differentiable.  Declared departures (cuadjtq.F90:162-168;
+    suphec.F90:231-240) are unchanged: the shared curve's Tetens coefficients
+    differ slightly from IFS FOEEWM and saturation is liquid-only."""
+    flat_T = T.reshape(-1)
+    flat_p = p.reshape(-1)
+    grad = jax.vmap(
+        jax.grad(lambda t, pp: saturation_specific_humidity(t, pp)))(flat_T, flat_p)
+    return grad.reshape(T.shape)
 
 
 def _half_level_env(T, q_v, p_full, p_half, geo_full, geo_half, cfg):
@@ -321,19 +346,27 @@ def _cuadjtq_condense(T, q, p):
     form: FIRST correction ZCOND = MAX(0,(q - q_s)/(1 + (L_v/c_pd) dq_s/dT))
     (clipped >= 0), then a SECOND correction ZCOND1 that is UNCLIPPED but zeroed
     where the first ZCOND was zero (cuadjtq.F90:182).  There is NO final
-    q = min(q, q_s) clipping in this source branch.  q_s = w_s/(1+w_s) of the
-    shared curve (saturation_specific_humidity) with dq_s/dT from _dqsat_dT.
+    q = min(q, q_s) clipping in this source branch.  q_s =
+    saturation_specific_humidity with dq_s/dT from _dqsat_dT (the exact
+    derivative of that same function, so the two Newton corrections are
+    consistent with the evaluated curve near its internal modifications).
+    AD safety (JAX where-NaN rule): temperatures fed to the saturation curve
+    and its derivative are clamped to [_T_PHYS_MIN, _T_PHYS_MAX] K on ALL
+    branches (including the inactive branch of the ZCOND1 where) BEFORE the
+    thermo helpers are evaluated.
     Declared departures (cuadjtq.F90:162-168; suphec.F90:231-240): the shared
     curve's coefficients differ slightly from IFS FOEEWM, and saturation is
     liquid-only (ZLGLAC freezing correction therefore zero)."""
     lvcp = constants.L_v / constants.c_pd
-    qs = saturation_specific_humidity(T, p)
-    dqs = _dqsat_dT(T, p)
+    T_s = jnp.clip(T, _T_PHYS_MIN, _T_PHYS_MAX)
+    qs = saturation_specific_humidity(T_s, p)
+    dqs = _dqsat_dT(T_s, p)
     zcond = jnp.maximum(0.0, (q - qs) / (1.0 + lvcp * dqs))   # cuadjtq.F90:171
     T1 = T + lvcp * zcond
     q1 = q - zcond
-    qs1 = saturation_specific_humidity(T1, p)
-    dqs1 = _dqsat_dT(T1, p)
+    T1_s = jnp.clip(T1, _T_PHYS_MIN, _T_PHYS_MAX)
+    qs1 = saturation_specific_humidity(T1_s, p)
+    dqs1 = _dqsat_dT(T1_s, p)
     zcond1 = jnp.where(zcond > 0.0,                            # cuadjtq.F90:182
                        (q1 - qs1) / (1.0 + lvcp * dqs1), 0.0)
     T2 = T1 + lvcp * zcond1
@@ -347,14 +380,32 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
     cubasen.F90:437-600). lax.scan over the k_dep levels above the departure;
     levels with p_full <= cfg.test_top_pa are masked out (NJKT2 ~ 60 hPa).
 
+    The key ``parcel_init["T_dep"]`` IS consumed: when present it is the
+    source's ZTU(JKK) computed by _init_departure_parcel (single excess,
+    literal double excess in the mixed-layer branch, surface formula) and is
+    stored into the scratch T_u at the departure level; the reconstruction
+    ``T = (s - geo_half)/c_pd`` is only a fallback when the key is absent.
+
     Parcel profiles T_u/q_u/l_u/w2h/ilab are HALF-LEVEL quantities of length
-    nlev (IFS half level JK <-> our index JK-1); unvisited levels are
-    initialised/filled from the half-level environment T_h[:, :nlev],
-    q_h[:, :nlev] (cubasen.F90:209-213, 711-713) -- no full-level values are
-    written into the parcel profiles anywhere in this function.  Specific
+    nlev (IFS half level JK <-> our index JK-1).  They are NOT created fresh
+    here: the caller passes the persistent scratch arrays of the previous
+    departure candidate through ``parcel_init`` (review finding 3; the source
+    initialises them once before the outer search, cubasen.F90:263-271), and
+    only the departure level is (re)set from the current parcel state; the
+    label lifecycle at a terminating level leaves the previous label
+    untouched (no forced zero), matching cubasen.F90:615-629.  Specific
     humidity throughout (virtual temperature T(1 + RETV q) directly as in the
     source); saturation on the specific-humidity curve with the FOEEWM /
-    liquid-only departures declared in _cuadjtq_pair / _cuadjtq_condense."""
+    liquid-only departures declared in _cuadjtq_pair / _cuadjtq_condense.
+
+    AD safety (JAX where-NaN rule, review gradient-hazard table): every
+    division on an evaluated branch takes a positive-floored operand --
+    the deep-test saturation ratio floors the surface saturation and is
+    clipped to [0, 1] BEFORE cubing; the buoyancy division floors the
+    environmental virtual temperature; the cloud-base ZDTDP division floors
+    the half-level pressure -- and temperatures fed to the saturation
+    helpers (qsat_j, qsat_sfc, ZQSU/ZDQSDT) are clamped to the physical
+    range [_T_PHYS_MIN, _T_PHYS_MAX] K before evaluation."""
     nlev = T.shape[1]
     T_h, q_h, s_h = env_half
     dt = T_h.dtype
@@ -376,7 +427,10 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
     retv = jnp.asarray(_RETV, dt)
     rcpd_inv = jnp.asarray(_RCPD_INV, dt)
     cg = jnp.asarray(constants.g, dt)
-    lvcp = jnp.asarray(constants.L_v / constants.c_pd, dt)
+    r_d = jnp.asarray(constants.R_d, dt)
+    c_pd_arr = jnp.asarray(constants.c_pd, dt)
+    t_min = jnp.asarray(_T_PHYS_MIN, dt)
+    t_max = jnp.asarray(_T_PHYS_MAX, dt)
     rlmin = jnp.asarray(_RLMIN, dt)
     tiny = jnp.asarray(_TINY, dt)
     z_floor = jnp.asarray(_Z_FLOOR, dt)
@@ -386,22 +440,37 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
     js = jnp.arange(k_dep - 1, -1, -1, dtype=jnp.int32)
 
     # deep-test denominator: PQSEN(JL,KLEV) on the lowest FULL level
-    # (cubasen.F90:472); the shallow 1/z height is the FULL-level geopotential
-    # above the surface (PGEO(JK) - PGEOH(KLEV+1), cubasen.F90:446).
-    qsat_sfc = saturation_specific_humidity(T[:, nlev - 1], p_full[:, nlev - 1])
+    # (cubasen.F90:472); a specific humidity.  AD safety: the temperature is
+    # clamped to the physical range and the denominator floored positive
+    # before the (pre-cube-clipped) ratio is formed.
+    qsat_sfc = saturation_specific_humidity(
+        jnp.clip(T[:, nlev - 1], t_min, t_max), p_full[:, nlev - 1])
+    qsat_sfc = jnp.maximum(qsat_sfc, tiny)
 
-    # half-level parcel profiles: unvisited values from the half-level
-    # environment (cubasen.F90:209-213), departure level from parcel_init
+    # half-level parcel profiles from the PERSISTENT scratch arrays passed by
+    # the caller (review finding 3; cubasen.F90:263-271): no fresh labels or
+    # profiles are created here; only the departure level is set from the
+    # current parcel state (ILAB=1 at :345/:375).
     active = parcel_init["active"]
-    T_dep = (parcel_init["s"] - geo_half[:, k_dep]) * rcpd_inv
-    T_u = T_h[:, :nlev].at[:, k_dep].set(jnp.where(active, T_dep, T_h[:, k_dep]))
-    q_u = q_h[:, :nlev].at[:, k_dep].set(
-        jnp.where(active, parcel_init["q"].astype(dt), q_h[:, k_dep]))
-    l_u = jnp.zeros((ncol, nlev), dt)                    # ZLU(JKK) = 0 (:344/:385)
-    w2h = jnp.zeros((ncol, nlev), dt).at[:, k_dep].set(
-        jnp.where(active, parcel_init["w2"].astype(dt), 0.0))
-    ilab0 = jnp.zeros((ncol, nlev), jnp.int32).at[:, k_dep].set(
-        jnp.where(active, 1, 0).astype(jnp.int32))       # ILAB=1, :345/:375
+    # the source's ZTU(JKK), preserved by _init_departure_parcel (review
+    # finding 1); the (s - geo_half)/c_pd reconstruction is only a fallback
+    if "T_dep" in parcel_init:
+        T_dep = jnp.asarray(parcel_init["T_dep"], dt)
+    else:
+        T_dep = (parcel_init["s"] - geo_half[:, k_dep]) * rcpd_inv
+    T_u = jnp.asarray(parcel_init["T_u"], dt)
+    q_u = jnp.asarray(parcel_init["q_u"], dt)
+    l_u = jnp.asarray(parcel_init["l_u"], dt)
+    w2h = jnp.asarray(parcel_init["w2h"], dt)
+    ilab0 = jnp.asarray(parcel_init["ilab"], jnp.int32)
+    T_u = T_u.at[:, k_dep].set(jnp.where(active, T_dep, T_u[:, k_dep]))
+    q_u = q_u.at[:, k_dep].set(
+        jnp.where(active, parcel_init["q"].astype(dt), q_u[:, k_dep]))
+    l_u = l_u.at[:, k_dep].set(jnp.where(active, 0.0, l_u[:, k_dep]))  # ZLU(JKK)=0 (:344/:385)
+    w2h = w2h.at[:, k_dep].set(
+        jnp.where(active, parcel_init["w2"].astype(dt), w2h[:, k_dep]))
+    ilab0 = ilab0.at[:, k_dep].set(
+        jnp.where(active, jnp.asarray(1, jnp.int32), ilab0[:, k_dep]))  # ILAB=1, :345/:375
 
     carry0 = {
         "q": parcel_init["q"].astype(dt), "s": parcel_init["s"].astype(dt),
@@ -438,10 +507,15 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
             s_new = (s * (1.0 - zmix) + 2.0 * zmix * sf) * tmp  # cubasen.F90:459-461
         else:
             # deep-test mixing 0.4*ENTRORG*dz*min(1,(PQSEN(JK)/PQSEN(KLEV))**3)
-            # (cubasen.F90:472-478); PQSEN is a specific humidity
-            qsat_j = saturation_specific_humidity(T[:, j], p_full[:, j])
+            # (cubasen.F90:472-478); PQSEN is a specific humidity.
+            # AD safety: T clamped to the physical range before the saturation
+            # call; the ratio is divided by a POSITIVE-floored qsat_sfc and
+            # clipped to [0, 1] BEFORE the cube (no overflow, no zero divide).
+            qsat_j = saturation_specific_humidity(
+                jnp.clip(T[:, j], t_min, t_max), p_full[:, j])
+            ratio = jnp.clip(qsat_j / qsat_sfc, 0.0, 1.0)
             zmix = jnp.minimum(1.0, deep_fac * entr_base * dz
-                               * jnp.minimum(1.0, (qsat_j / qsat_sfc) ** _QSAT_RATIO_EXP))
+                               * ratio ** _QSAT_RATIO_EXP)
             q_new = q * (1.0 - zmix) + qf * zmix           # cubasen.F90:483
             s_new = s * (1.0 - zmix) + sf * zmix           # cubasen.F90:484
 
@@ -453,12 +527,15 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
         l_new = ret_frac * (l_u[:, j + 1] + zdq)
         # freezing correction ZLGLAC = 0: liquid-only saturation (FOEALFCU unavailable)
         T_new = T_adj
-        s_new = jnp.asarray(constants.c_pd, dt) * T_new + geo_half[:, j]
+        s_new = c_pd_arr * T_new + geo_half[:, j]
 
-        # buoyancy on half levels (cubasen.F90:499-508)
+        # buoyancy on half levels (cubasen.F90:499-508); AD safety: the
+        # environmental virtual temperature is floored positive before the
+        # division (zero/negative operands on inactive branches must stay
+        # finite under autodiff).
         tvu = (1.0 + retv * q_adj - l_new) * T_new
         tven = (1.0 + retv * q_h[:, j]) * T_h[:, j]
-        buoh_new = (tvu - tven) * cg / tven
+        buoh_new = (tvu - tven) * cg / jnp.maximum(tven, tiny)
         buof = 0.5 * (buoh_new + buoh)
         # kinetic-energy recurrence, ZAW = ZBW = 1 (cubasen.F90:511-513)
         w2_new = (w2 * (1.0 - 2.0 * zmix) + 2.0 * buof * dz) / (1.0 + 2.0 * zmix)
@@ -468,13 +545,16 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
         # Saturation-deficit interpolation on the liquid specific-humidity curve
         # (declared departure: FOEEWM coefficients differ, FOEALFA-R5LES/R5IES
         # blend unavailable, cubasen.F90:527, 532-535).  AD safety: the
-        # denominator is floored away from zero on inactive branches.
+        # temperature is clamped to the physical range before both saturation
+        # calls, the half-level pressure in ZDTDP is floored positive, and the
+        # interpolation denominator is floored away from zero on inactive
+        # branches.
         cond_first = (l_new > 0.0) & (ilab[:, j + 1] == 1)
-        zqsu = saturation_specific_humidity(T_u[:, j + 1], p_half[:, j + 1])
-        zdqsdT = _dqsat_dT(T_u[:, j + 1], p_half[:, j + 1])
+        T_cb = jnp.clip(T_u[:, j + 1], t_min, t_max)
+        zqsu = saturation_specific_humidity(T_cb, p_half[:, j + 1])
+        zdqsdT = _dqsat_dT(T_cb, p_half[:, j + 1])
         zdq_cb = jnp.minimum(0.0, q_u[:, j + 1] - zqsu)
-        zdtdp = jnp.asarray(constants.R_d, dt) * T_u[:, j + 1] / (
-            jnp.asarray(constants.c_pd, dt) * p_half[:, j + 1])
+        zdtdp = r_d * T_u[:, j + 1] / (c_pd_arr * jnp.maximum(p_half[:, j + 1], tiny))
         zcb = p_half[:, j + 1] + zdq_cb / jnp.maximum(zdqsdT * zdtdp, tiny)
         pdtop = zcb - p_half[:, j]
         pdbot = p_half[:, j + 1] - zcb
@@ -486,13 +566,16 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
         # ZLU(JK+1) = RLMIN is set BEFORE the w2 < 0 test reads it
         # (cubasen.F90:601, 615-621) -> the UPDATED value is used below
         l_below = jnp.where(case_top, rlmin, l_u[:, j + 1])      # cubasen.F90:601
-        # scratch label lifecycle (cubasen.F90:265-268): the previous carried
-        # ilab(:, j) is left where the level is not accepted (no zeroing)
+        # scratch label lifecycle (cubasen.F90:265-268, 615-629): the previous
+        # carried ilab(:, j) is left where the level is not accepted (no
+        # zeroing, no fresh creation), so an accepted terminal-level label
+        # from a previous departure survives
         labj = ilab[:, j]
         labj = jnp.where(case_top | case_bot, 2, labj)
 
         # stop at w2 < 0; ICTOP/LLDCUM use the UPDATED l_below
-        # (cubasen.F90:615-621, strict '<')
+        # (cubasen.F90:615-621, strict '<'); the internal ICTOP default is
+        # the caller's (cubasen.F90:323-325) and is not touched here
         stop = w2_new < 0.0
         ictop_new = jnp.where(stop & (l_below > 0.0), j, ictop)
         lldcum_new = jnp.where(stop, l_below > 0.0, lldcum)
@@ -552,22 +635,50 @@ class TestAscent(NamedTuple):
 
 def _init_departure_parcel(k_dep, is_surface, T, q_v, p_full, p_half,
                            geo_full, geo_half, env_half, shf_w_m2, lhf_w_m2,
-                           ustar, land_frac, dq_dt_adv, cfg, elig_active=None):
+                           ustar, land_frac, dq_dt_adv, cfg, elig_active=None,
+                           scratch=None):
     """Initialise the departure-level parcel and scan carry (cubasen.F90:314-435).
 
     q_v here is SPECIFIC HUMIDITY (the repo-convention mixing ratio is
-    converted once at the ifs_departure_search entry).  Internal defaults
-    follow the source: ICBOT = JKK = k_dep, ICTOP = KLEV-1 = nlev-1
-    (cubasen.F90:323-325); these are translated to the public -1 sentinel
-    only in the returned TestAscent for unsuccessful columns
-    (cubasen.F90:664-668).
+    converted once at the ifs_departure_search entry).  dq_dt_adv is a
+    SPECIFIC-humidity tendency [kg/kg/s] (PTENQA); a caller holding a
+    dry-air mixing-ratio tendency w must convert it first via
+    dq = dw/(1+w)^2 before passing it here.
 
-    elig_active carries the pre-ascent eligibility (fix: only ZKHVFL < 0
-    columns are active for the surface departure, cubasen.F90:367; only
-    columns with p_full[:, k_dep] > departure_top_pa and not yet
-    deep-resolved are active for elevated departures, :655/:735), so that
-    inactive columns accumulate no CAPE and MAXVAL(ZCAPE) matches the
-    source (:741).
+    The departure temperature is returned EXPLICITLY as ``"T_dep"`` (review
+    finding 1): it is the source's ZTU(JKK) -- the single ZTEXC excess over
+    the environment temperature on the plain elevated branch
+    (cubasen.F90:397), the literal DOUBLE ZTEXC excess in the mixed-layer
+    branch (:414) and the surface formula (:366).  It is preserved separately
+    from ``"s"`` (the singly perturbed ZSUH) because the source stores both;
+    the departure-level buoyancy ``"buoh"`` is computed from T_dep, and the
+    ascent stores T_dep (not a reconstruction from s) into the scratch T_u at
+    the departure level.
+
+    Internal defaults follow the source: ICBOT = JKK = k_dep,
+    ICTOP = KLEV-1 <-> our nlev-2 (cubasen.F90:323-325; IFS KLEV-1 is the
+    second-lowest half level, our index nlev-2).  These are translated to
+    the public -1 sentinel only in the returned TestAscent for unsuccessful
+    columns (cubasen.F90:664-668).  With the internal ICTOP default nlev-2,
+    the surface-profile copy JK >= JKT (cubasen.F90:673-678) copies the
+    BOTTOM TWO levels when no top was diagnosed, matching the source.
+
+    ``scratch`` carries the PERSISTENT scratch arrays (T_u, q_u, l_u, w2h,
+    ilab) initialised once before the outer search (cubasen.F90:263-271:
+    ILAB=0, ZTU=PTENH, ZQU=PQENH, ZLU=0, ZWU2H=0) and threaded through every
+    departure by ifs_departure_search; the source never resets them between
+    candidates.  They are passed through unchanged here -- only the ascent
+    writes the departure level into them.
+
+    elig_active carries the pre-ascent eligibility (only ZKHVFL < 0 columns
+    are active for the surface departure, cubasen.F90:367; only columns with
+    full-level departure pressure p_full[:, k_dep] > departure_top_pa and not
+    yet deep-resolved are active for elevated departures, :655/:735), so that
+    inactive columns accumulate no CAPE and MAXVAL(ZCAPE) matches the source
+    (:741).  The pressure thresholds departure_top_pa / qadv_land_min_pa are
+    documented approximations of the source's fixed level indices NJKT1 /
+    NJKT6 (C:310, 392 are full-level indices) and use the departure's
+    FULL-level pressure consistently.
 
     The elevated loop calls this with k_dep >= 1, so every k_dep - 1 index
     below is inside the source's index domain (JKK = KLEV-1..2, :302)."""
@@ -612,7 +723,7 @@ def _init_departure_parcel(k_dep, is_surface, T, q_v, p_full, p_half,
         w2 = zws_u ** 2 + cfg.surface_w2_add                # :368
         q_u = q_h[:, nlev - 1] + zqex_s                     # :364
         s_u = s_h[:, nlev - 1] + constants.c_pd * ztex_s    # :365
-        T_u = (s_h[:, nlev - 1] - geo_half[:, nlev - 1]) * _RCPD_INV + ztex_s  # :366
+        T_dep = (s_h[:, nlev - 1] - geo_half[:, nlev - 1]) * _RCPD_INV + ztex_s  # ZTU, :366
         l_u = jnp.zeros(ncol, dt)                           # :367
         active = zkhvfl < 0.0                               # LLGO_ON (:367)
         k_dep = nlev - 1
@@ -624,9 +735,13 @@ def _init_departure_parcel(k_dep, is_surface, T, q_v, p_full, p_half,
         zqexc = jnp.where(inherit, jnp.maximum(zqexc, zqex_s), zqexc)
         ztexc = jnp.where(inherit, jnp.minimum(ztexc, cfg.parcel_dT_excess_max_K), ztexc)  # :408
         zqexc = jnp.where(inherit, jnp.minimum(zqexc, cfg.parcel_dq_excess_max), zqexc)
-        # land-only advective moistening (cubasen.F90:415-417), land_frac-weighted.
+        # land-only advective moistening (cubasen.F90:415-417), land_frac-weighted
+        # DOCUMENTED APPROXIMATION of the source's binary LDLAND mask (exact
+        # fidelity requires the caller's binary land mask).
         # JKK > NJKT6 selects levels at pressures ABOVE ~700 hPa (below it);
-        # the RH gate uses the HALF-level humidity of the departure over the
+        # qadv_land_min_pa is a documented approximation of the fixed level
+        # index NJKT6 and uses the departure's FULL-level pressure; the RH
+        # gate uses the HALF-level humidity of the departure over the
         # FULL-level saturation: ZQENH(JKK)/PQSEN(JKK) (:392).
         qs_dep = saturation_specific_humidity(T[:, k_dep], p_full[:, k_dep])
         adv = jnp.minimum(cfg.land_qadv_cap,
@@ -637,8 +752,11 @@ def _init_departure_parcel(k_dep, is_surface, T, q_v, p_full, p_half,
         q_u = q_h[:, k_dep] + zqexc
         s_u = s_h[:, k_dep] + constants.c_pd * ztexc
         # ZTU = (ZSENH - PGEOH)*ZRCPD + ZTEXC built from the ENVIRONMENT dry
-        # static energy (cubasen.F90:397): single excess
-        T_u = (s_h[:, k_dep] - geo_half[:, k_dep]) * _RCPD_INV + ztexc   # :397
+        # static energy (cubasen.F90:397): single excess; preserved separately
+        # from s_u (which carries the same single excess here, but see the
+        # mixed-layer branch below where the two differ -- the literal double
+        # ZTEXC in ZTU, :414)
+        T_dep = (s_h[:, k_dep] - geo_half[:, k_dep]) * _RCPD_INV + ztexc   # :397
         # mixed layer for parcels within 60 hPa of the surface (cubasen.F90:400,
         # 424-430).  cfg.mixed_layer_gate selects the condition:
         #   "half_above"  : the literal source test
@@ -646,11 +764,14 @@ def _init_departure_parcel(k_dep, is_surface, T, q_v, p_full, p_half,
         #                    i.e. our p_half[:, nlev] - p_half[:, k_dep-1];
         #                    with uniform ~33 hPa layers the first elevated
         #                    candidate tests 3*dp ~ 100 hPa and is never mixed.
-        #   "cell_centre" : the resolution-aware reinterpretation
+        #   "cell_centre" : the resolution-aware DEPARTURE from the source,
         #                    PAPH(KLEV+1) - PAPH(JKK) < 60 hPa using the
         #                    departure's FULL-level (cell-centre) pressure
         #                    p_full[:, k_dep], which enables the lowest
-        #                    elevated candidate on L137-like grids.
+        #                    elevated candidate on L137-like grids.  Note
+        #                    (finding 9) that a "962 hPa departure" named by
+        #                    its full level still LAUNCHES at the half level
+        #                    p_half[k_dep].
         # The three-sample 50 hPa accumulation (cubasen.F90:424-430) is the
         # source's in BOTH modes.  k_dep >= 1 always here, so k_dep-1 is in
         # the source's index domain.
@@ -680,23 +801,43 @@ def _init_departure_parcel(k_dep, is_surface, T, q_v, p_full, p_half,
         take_m = mixed & span_pos
         q_u = jnp.where(take_m, q_m, q_u)
         s_u = jnp.where(take_m, s_m, s_u)
-        T_u = jnp.where(take_m, T_m, T_u)
+        T_dep = jnp.where(take_m, T_m, T_dep)
         l_u = jnp.zeros(ncol, dt)
         w2 = jnp.full(ncol, cfg.elevated_w2, dt)            # :435
         active = jnp.ones(ncol, bool) if elig_active is None else elig_active
-    # buoyancy at the departure half level (cubasen.F90:427-431)
+    # buoyancy at the departure half level (cubasen.F90:427-431), computed
+    # from the PRESERVED departure temperature T_dep (review finding 1)
     tven = (1.0 + _RETV * q_h[:, k_dep]) * (s_h[:, k_dep] - geo_half[:, k_dep]) * _RCPD_INV
-    tvu = (1.0 + _RETV * q_u) * T_u
+    tvu = (1.0 + _RETV * q_u) * T_dep
     buoh = (tvu - tven) * constants.g / tven
+
+    if scratch is None:
+        # standalone use: fresh scratch (cubasen.F90:263-271)
+        scratch = {"T_u": jnp.zeros((ncol, nlev), dt),
+                   "q_u": jnp.zeros((ncol, nlev), dt),
+                   "l_u": jnp.zeros((ncol, nlev), dt),
+                   "w2h": jnp.zeros((ncol, nlev), dt),
+                   "ilab": jnp.zeros((ncol, nlev), jnp.int32)}
 
     carry = {
         "q": q_u.astype(dt), "s": s_u.astype(dt), "w2": w2.astype(dt),
         "buoh": buoh.astype(dt), "active": active,
-        # internal source defaults: ICBOT = JKK, ICTOP = KLEV-1
-        # (cubasen.F90:323-325); translated to -1 on unsuccessful return
+        # the source's ZTU(JKK), preserved separately from s (review finding 1)
+        "T_dep": T_dep.astype(dt),
+        # internal source defaults: ICBOT = JKK, ICTOP = KLEV-1 <-> nlev-2
+        # (cubasen.F90:323-325); translated to -1 on unsuccessful return;
+        # with this default the surface copy JK >= JKT takes the bottom TWO
+        # levels (cubasen.F90:673-678)
         "icbot": jnp.full(ncol, k_dep, jnp.int32),
-        "ictop": jnp.full(ncol, nlev - 1, jnp.int32),
+        "ictop": jnp.full(ncol, nlev - 2, jnp.int32),
         "lldcum": jnp.zeros(ncol, bool),
+        # persistent scratch, passed through untouched (review finding 3);
+        # only the ascent writes the departure level into them
+        "T_u": jnp.asarray(scratch["T_u"], dt),
+        "q_u": jnp.asarray(scratch["q_u"], dt),
+        "l_u": jnp.asarray(scratch["l_u"], dt),
+        "w2h": jnp.asarray(scratch["w2h"], dt),
+        "ilab": jnp.asarray(scratch["ilab"], jnp.int32),
     }
     return carry
 
@@ -708,38 +849,64 @@ def ifs_departure_search(T, q_v, p_full, p_half, geo_full, geo_half,
     API humidity convention (repo convention): the input ``q_v`` is a MIXING
     RATIO; it is converted to specific humidity ``q = q_v/(1 + q_v)`` at
     entry and everything inside (half-level environment, saturation, ascent)
-    works in specific humidity.  The returned ``q_u`` and ``l_u`` profiles are
-    converted back to mixing ratios per unit dry air at the boundary:
-    ``w = q/(1 - q)`` and ``l_w = l/(1 - q - l)``.
+    works in specific humidity.  ``dq_dt_adv`` is a SPECIFIC-humidity
+    tendency [kg/kg/s] (PTENQA); a caller holding a dry-air mixing-ratio
+    tendency w must convert it first via dq = dw/(1+w)^2.  The returned
+    ``q_u`` and ``l_u`` profiles are converted at the boundary to per-unit
+    MOIST-total-mass denominators, consistently for both species:
+    ``w_u = q_u/max(1 - q_u - l_u, 0.5)`` and
+    ``l_w = l_u/max(1 - q_u - l_u, 0.5)`` (the physical floor 0.5 reflects
+    q + l < 0.5 always; review finding 4).
 
     Surface flux sign convention: shf_w_m2 / lhf_w_m2 follow the IFS PAHFS /
     PQHFL convention, NEGATIVE = upward (into the atmosphere); the latent
     mass flux is PQHFL [kg m-2 s-1] = lhf_w_m2 / L_v with NO extra minus
     (cubasen.F90:335).
 
+    Scratch lifecycle (review finding 3; cubasen.F90:263-271, 296-303): the
+    scratch arrays T_u (= T_h), q_u (= q_h), l_u = 0, w2h = 0, ilab = 0
+    (int32) are created ONCE before the candidate loop and threaded through
+    every departure: they are passed to _init_departure_parcel / the ascent
+    in the init dict, and the ascent's returned arrays become the scratch
+    for the NEXT departure.  The source never resets them between candidates
+    (the LLRESET fill C:697-713 writes the OUTPUT arrays klab/PTU/PQU/PLU,
+    not the scratch).
+
     Land perturbation: land_frac weighting is an explicitly chosen
-    approximation of the source's binary LDLAND mask (cubasen.F90:415-417);
-    exact fidelity requires the caller's binary land mask.
+    DOCUMENTED APPROXIMATION of the source's binary LDLAND mask
+    (cubasen.F90:415-417), which applies the full increment wherever LDLAND
+    is true; exact fidelity requires the caller's binary land mask.
 
-    mixed_layer_gate (validated here): "half_above" reproduces the literal
-    source condition PAPH(KLEV+1)-PAPH(JKK-1) < 60 hPa (cubasen.F90:400;
-    never satisfied on ~33 hPa layers, so no elevated departure is ever
-    mixed-layer initialised there); "cell_centre" reinterprets eligibility
-    by the departure cell centre, PAPH(KLEV+1)-PAPH(JKK) < 60 hPa, which
-    enables the lowest elevated candidate on L137-like grids.  The
-    three-sample 50 hPa accumulation (cubasen.F90:424-430) is unchanged in
-    both modes.
+    Pressure thresholds: departure_top_pa (NJKT1 ~ 350 hPa) and
+    qadv_land_min_pa (NJKT6 ~ 700 hPa) are DOCUMENTED APPROXIMATIONS of the
+    source's fixed full-level indices (cubasen.F90:310, 392); both are
+    evaluated on the departure's FULL-level pressure p_full[:, k_dep]
+    consistently (note I:165 / C:310's JKK > NJKT6 EXCLUDES the boundary
+    level itself, unlike a plain above-700 hPa inclusion).
 
-    Outputs beyond the selected ascent: ``w2_surface`` is PWU2H, the
-    SURFACE test's velocity profile, always retained (cubasen.F90:358,
-    559-560); ``ldsc`` / ``k_botsc`` are the LDSC / KBOTSC boundary-layer
-    cloud outputs of the surface test (cubasen.F90:598-607, 639-645), with
-    the surface profiles copied for ALL columns at levels >= ictop
-    (:671-683), not only accepted ones.  ktype is derived from the ACCEPTED
-    cloud depth (depth >= depth_split_pa -> deep, cumastrn.F90:517-521),
-    not from the departure identity.  Internal defaults ICBOT = JKK /
-    ICTOP = KLEV-1 (cubasen.F90:323-325) are translated to the public -1
-    sentinel for unsuccessful columns (:664-668)."""
+    mixed_layer_gate: "half_above" reproduces the literal source condition
+    PAPH(KLEV+1)-PAPH(JKK-1) < 60 hPa (cubasen.F90:400; never satisfied on
+    ~33 hPa layers, so no elevated departure is ever mixed-layer initialised
+    there); "cell_centre" is a DOCUMENTED DEPARTURE that reinterprets
+    eligibility by the departure cell centre,
+    PAPH(KLEV+1)-PAPH(JKK) < 60 hPa, enabling the lowest elevated candidate
+    on L137-like grids.  In both modes the parcel still LAUNCHES at the half
+    level p_half[k_dep] (finding 9: a "962 hPa departure" named by its full
+    level is not the parcel's actual launch pressure).  The three-sample
+    50 hPa accumulation (cubasen.F90:424-430) is unchanged in both modes.
+
+    Outputs beyond the selected ascent: ``w2_surface`` is PWU2H, the SURFACE
+    test's velocity profile, always retained (cubasen.F90:358, 559-560);
+    ``ldsc`` / ``k_botsc`` are the LDSC / KBOTSC boundary-layer cloud
+    outputs of the surface test (cubasen.F90:598-607, 639-645), with the
+    surface profiles copied for ALL columns at levels >= ictop
+    (:671-683) -- with the internal ICTOP default nlev-2 (KLEV-1, :325) the
+    copy takes the BOTTOM TWO levels when no top was diagnosed.  ktype is
+    derived from the ACCEPTED cloud depth (depth >= depth_split_pa -> deep,
+    cumastrn.F90:517-521), not from the departure identity.  Internal
+    defaults ICBOT = JKK / ICTOP = KLEV-1 <-> nlev-2 (cubasen.F90:323-325)
+    are translated to the public -1 sentinel for unsuccessful columns
+    (:664-668)."""
     if cfg.mixed_layer_gate not in ("half_above", "cell_centre"):
         raise ValueError(
             f"IFSTestAscentConfig.mixed_layer_gate must be 'half_above' or "
@@ -764,8 +931,18 @@ def ifs_departure_search(T, q_v, p_full, p_half, geo_full, geo_half,
     kcbot = jnp.full(ncol, -1, jnp.int32)
     kctop = jnp.full(ncol, -1, jnp.int32)
     wbase = jnp.zeros(ncol, T.dtype)
-    # unvisited/reset parcel profiles are HALF-level values: initialise from
-    # T_h[:, :nlev] / q_h[:, :nlev] (cubasen.F90:265-268), never full-level
+    # persistent scratch (review finding 3; cubasen.F90:263-271): created ONCE
+    # before the candidate loop (ILAB=0, ZTU=PTENH, ZQU=PQENH, ZLU=0, ZWU2H=0
+    # -- here initialised from the half-level environment, the first call's
+    # PTU/PQU/PLU/KLAB equivalent) and threaded through every departure; the
+    # ascent's returned arrays become the next departure's scratch, never
+    # reset (the LLRESET fill C:697-713 writes the OUTPUT arrays, not these)
+    scratch = {"T_u": T_h[:, :nlev].copy(),
+               "q_u": q_h[:, :nlev].copy(),
+               "l_u": jnp.zeros((ncol, nlev), T.dtype),
+               "w2h": jnp.zeros((ncol, nlev), T.dtype),
+               "ilab": jnp.zeros((ncol, nlev), jnp.int32)}
+    # OUTPUT profiles (what the source's PTU/PQU/PLU/KLAB hold on exit)
     Tu = T_h[:, :nlev].copy()
     qu = q_h[:, :nlev].copy()
     lu = jnp.zeros((ncol, nlev), T.dtype)
@@ -799,10 +976,13 @@ def ifs_departure_search(T, q_v, p_full, p_half, geo_full, geo_half,
         init = _init_departure_parcel(k_dep, is_surface, T, q, p_full, p_half,
                                       geo_full, geo_half, env_half, shf_w_m2,
                                       lhf_w_m2, ustar, land_frac, dq_dt_adv,
-                                      cfg, elig_active=elig)
+                                      cfg, elig_active=elig, scratch=scratch)
         ilab, ztu, zqu, zlu, w2h, icbot, ictop, lldcum, zcape = \
             _test_ascent_from_departure(k_dep, is_surface, T, q, p_full, p_half,
                                         geo_full, geo_half, env_half, init, cfg)
+        # the ascent's returned arrays are the scratch for the NEXT departure
+        # (the source never resets them; review finding 3)
+        scratch = {"T_u": ztu, "q_u": zqu, "l_u": zlu, "w2h": w2h, "ilab": ilab}
         jkb = jnp.clip(icbot, 0, nlev - 1); jkt = jnp.clip(ictop, 0, nlev - 1)
         depth = p_half[idx, jkb] - p_half[idx, jkt]
         wb = jnp.sqrt(jnp.maximum(w2h[idx, jkb], 0.0))       # :670 / :716
@@ -823,7 +1003,8 @@ def ifs_departure_search(T, q_v, p_full, p_half, geo_full, geo_half,
             w2_sfc_out = w2h
             # copy surface ascent values for JK >= JKT for ALL columns
             # (cubasen.F90:671-683); ictop carries the internal default
-            # nlev-1 (= KLEV-1) when no top was found, so all levels copy
+            # nlev-2 (= KLEV-1, :325) when no top was found, so the BOTTOM
+            # TWO levels copy (C:673-678)
             m = lev >= ictop[:, None]
         else:
             lldeep = depth >= cfg.depth_split_pa             # '>=' (:691)
@@ -836,6 +1017,7 @@ def ifs_departure_search(T, q_v, p_full, p_half, geo_full, geo_half,
             # LLRESET fill: ascent inside [JKT, KDPL], half-level environment
             # (klab 1) outside, klab 0 above JKT (cubasen.F90:697-713) -- the
             # environment fill uses the HALF-level values T_h/q_h (:711-713)
+            # and writes the OUTPUT arrays only, NOT the persistent scratch
             inside = (lev >= jkt[:, None]) & (lev <= k_dep)
             m = sel[:, None] & inside
             env_m = sel[:, None] & ~inside
@@ -862,9 +1044,13 @@ def ifs_departure_search(T, q_v, p_full, p_half, geo_full, geo_half,
         Tu = jnp.where(m, ztu, Tu); qu = jnp.where(m, zqu, qu)
         lu = jnp.where(m, zlu, lu)
 
-    # API boundary: specific humidity -> mixing ratio per unit dry air
-    qu_w = qu / (1.0 - qu)
-    l_w = lu / (1.0 - qu - lu)
+    # API boundary: specific humidity -> per-unit MOIST-total-mass species,
+    # consistently for both outputs (review finding 4): the denominator
+    # 1 - q - l is floored at the physical bound 0.5 (q + l < 0.5 always),
+    # which also keeps the conversion AD-safe
+    den = jnp.maximum(1.0 - qu - lu, 0.5)
+    qu_w = qu / den
+    l_w = lu / den
 
     return TestAscent(ldcum, ktype, kdpl, kcbot, kctop, wbase, Tu, qu_w, l_w,
                       klab, cape_out, w2_out, w2_sfc_out, ldsc, kbotsc)
