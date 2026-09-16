@@ -193,11 +193,15 @@ def test_round102_tke_production_rows_and_ulp_control(tmp_path):
     path, arrays = _write_tke_statement(tmp_path / "tke.bin")
     record = gate.read_tke_statement_walk_record(path)
     production = SimpleNamespace(
-        en_entry=arrays["en_entry"][..., 1:30],
-        en_after_boundaries=arrays["en_after_boundaries"][..., :30],
-        en_after_langmuir=arrays["en_after_langmuir"][..., :30],
-        rhs_pre_sweep=arrays["rhs_pre_sweep"][..., :30],
-        en_post_sweep=arrays["en_post_sweep"][..., :30],
+        en_entry=arrays["en_entry"].swapaxes(0, 1)[..., 1:30],
+        en_after_boundaries=(
+            arrays["en_after_boundaries"].swapaxes(0, 1)[..., :30]),
+        en_after_langmuir=(
+            arrays["en_after_langmuir"].swapaxes(0, 1)[..., :30]),
+        rhs_pre_sweep=(
+            arrays["rhs_pre_sweep"].swapaxes(0, 1)[..., :30]),
+        en_post_sweep=(
+            arrays["en_post_sweep"].swapaxes(0, 1)[..., :30]),
     )
     trace = SimpleNamespace(tke_statement_trace=production)
     clean = gate._tke_production_statement_rows(

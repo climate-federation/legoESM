@@ -2198,7 +2198,10 @@ def _tke_production_statement_rows(
     plant_target = None
     for field in fields:
         candidate = np.asarray(getattr(production, field))
-        reference_full = np.asarray(statement_record["arrays"][field])
+        # The raw Fortran stream is (i,j,k); the model production trace and
+        # every stage-table field use (lat=j, lon=i, k).
+        reference_full = np.asarray(
+            statement_record["arrays"][field]).swapaxes(0, 1)
         # legoESM carries NEMO levels 2:jpkm1 at entry.  Once the compiled
         # boundary assignment has executed, the private trace prepends the
         # separately represented z=0 row and spans levels 1:jpkm1.
