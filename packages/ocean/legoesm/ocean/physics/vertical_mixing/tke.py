@@ -370,6 +370,23 @@ class TKEOutput(NamedTuple):
     l_eps: jnp.ndarray     # (..., nlev-1) dissipation mixing length (diagnostic)
     K_M_surface: jnp.ndarray | None = None  # (...) post-tke_avn surface avm_k
     dissl: jnp.ndarray | None = None  # (...) carried post-tke_avn sqrt(en)/zmxld
+    statement_trace: "TKEStatementTrace | None" = None
+
+
+class TKEStatementTrace(NamedTuple):
+    """WRITE-only production boundaries matching compiled ``tke_tke``.
+
+    ``en_entry`` is the represented prognostic field (NEMO levels
+    2:jpkm1).  Every later value prepends the separately held z=0 surface
+    row and therefore spans NEMO levels 1:jpkm1.  This trace is built only
+    for the private stage-twin path; ordinary model steps request no trace.
+    """
+
+    en_entry: jnp.ndarray
+    en_after_boundaries: jnp.ndarray
+    en_after_langmuir: jnp.ndarray
+    rhs_pre_sweep: jnp.ndarray
+    en_post_sweep: jnp.ndarray
 
 
 class TKEEntryN2Bundle(NamedTuple):
@@ -398,6 +415,7 @@ class TKECarryOutput(NamedTuple):
     K_H: jnp.ndarray
     K_M_surface: jnp.ndarray | None
     dissl: jnp.ndarray | None = None
+    statement_trace: TKEStatementTrace | None = None
 
 
 class TKEPostMixingContext(NamedTuple):
@@ -1115,7 +1133,8 @@ def _solve_tke_backward_euler(
     w_active: jnp.ndarray | None = None,
     nemo_e3t: jnp.ndarray | None = None,
     dissl_old: jnp.ndarray | None = None,
-) -> jnp.ndarray:
+    return_statement_trace: bool = False,
+) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
     """Backward-Euler tridiagonal solve for one TKE time step.
 
     Linearises ``-c_eps * e^{3/2} / l_eps`` as ``-c_eps * sqrt(e_old) / l_eps · e_new``
@@ -1283,6 +1302,11 @@ def _solve_tke_backward_euler(
         raise ValueError(
             "tke_solver_evaluation='nemo_literal' requires "
             "tke_matrix_evaluation='nemo_literal'.")
+    if return_statement_trace and (
+            not literal_solver or surface_bc_level != "nemo_z0"):
+        raise ValueError(
+            "return_statement_trace requires the literal NEMO solver and "
+            "surface_bc_level='nemo_z0' so rhs levels 1:jpkm1 exist.")
     if literal_matrix:
         if nemo_e3t is None or dissl_old is None or w_active is None:
             raise ValueError(
@@ -1789,6 +1813,11 @@ def _solve_tke_backward_euler(
         e_new = _tridiag_thomas(a_diff, diag, c_diff, rhs)
 
     if literal_solver:
+        if return_statement_trace:
+            # Exact model program boundary corresponding to NEMO's
+            # r101_rhs_row call: virtual surface row followed by every
+            # represented solve row, before the first recurrence.
+            return e_new, rhs_ext
         return e_new
 
     if veros_positivity:
@@ -2572,6 +2601,7 @@ def tke_vertical_mixing(
     preclosure_dissl: jnp.ndarray | None = None,
     precomputed_p_sh2: jnp.ndarray | None = None,
     precomputed_n2_bundle: TKEEntryN2Bundle | None = None,
+    return_statement_trace: bool = False,
 ) -> TKEOutput:
     """Advance the TKE closure and return new K_M, K_H, TKE.
 
@@ -2677,6 +2707,27 @@ def tke_vertical_mixing(
             "bottom_level was passed but bottom_dirichlet is None — "
             "bottom_level only selects WHERE the bottom Dirichlet pin lands, "
             "it does not supply one (silent-no-op guard).")
+    if return_statement_trace:
+        _trace_requirements = {
+            "one prognostic iteration": int(n_iterations) == 1,
+            "nemo_literal matrix": (
+                getattr(cfg, "tke_matrix_evaluation", "factored")
+                == "nemo_literal"),
+            "nemo_literal solver": (
+                getattr(cfg, "tke_solver_evaluation", "shared_thomas")
+                == "nemo_literal"),
+            "nemo_literal Langmuir": (
+                getattr(cfg, "tke_langmuir_evaluation", "vectorized")
+                == "nemo_literal"),
+            "active Langmuir": bool(getattr(cfg, "lc", False)),
+            "separate z=0 row": (
+                getattr(cfg, "tke_surface_bc_level", "interior_pinned")
+                == "nemo_z0"),
+        }
+        if not all(_trace_requirements.values()):
+            raise ValueError(
+                "return_statement_trace requires the complete literal "
+                f"NEMO program; got {_trace_requirements}")
     if (getattr(cfg, "buoyancy_timing", "pre_mixing")
             == "post_mixing_veros"):
         # This orchestrator IS the pre-mixing solve (the TKE budget charged
@@ -3163,6 +3214,11 @@ def tke_vertical_mixing(
 
     # Sub-iteration loop (Mode B convergence; Mode A uses n_iterations=1).
     tke_curr = tke_old
+    _statement_entry = tke_curr if return_statement_trace else None
+    _statement_after_boundaries = None
+    _statement_after_langmuir = None
+    _statement_rhs = None
+    _statement_post_sweep = None
     # NEMO ln_mxl0 anchor for nn_mxl=3: l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum)
     _l_anchor = _mxl0_surface_anchor(cfg, taum, rho_0, g, surface_tmask)
     # T3-exact: NEMO's TRUE surface-w-level viscosity avm(jk=1)
@@ -3199,12 +3255,24 @@ def tke_vertical_mixing(
         P_s_curr = (_K_M_pre * shear_sq if _p_sh2_face_fn is None
                     else _p_sh2_face_fn(_K_M_pre))
         _literal_external_rhs = None
+        if return_statement_trace:
+            _surface_row = jnp.asarray(
+                surface_dirichlet, dtype=tke_curr.dtype)[..., None]
+            # The current model program holds the surface row separately and
+            # delays its bottom identity scatter until matrix assembly.  This
+            # is the actual value presented to its Langmuir statement, not a
+            # replay with the NEMO bottom assignment substituted.
+            _statement_after_boundaries = jnp.concatenate(
+                [_surface_row, tke_curr], axis=-1)
         if _lc_on and _lc_eval == "nemo_literal":
             _literal_external_rhs = nemo_literal_langmuir_tke_update(
                 tke_curr, dt, taum, N2b, _depth_w, _surface_e3w, cfg,
                 ice_frac=ice_frac, bottom_level=bottom_level,
                 w_active=w_active)
-        tke_curr = _solve_tke_backward_euler(
+        if return_statement_trace:
+            _statement_after_langmuir = jnp.concatenate(
+                [_surface_row, _literal_external_rhs], axis=-1)
+        _solve_result = _solve_tke_backward_euler(
             e_old=tke_curr,
             K_M_old=_K_M_pre, K_H_old=_K_H_pre,
             P_s=P_s_curr, N2=N2, l_eps=l_eps,
@@ -3228,7 +3296,14 @@ def tke_vertical_mixing(
                       if _matrix_eval == "nemo_literal" else None),
             dissl_old=(preclosure_dissl
                        if _matrix_eval == "nemo_literal" else None),
+            return_statement_trace=return_statement_trace,
         )
+        if return_statement_trace:
+            tke_curr, _statement_rhs = _solve_result
+            _statement_post_sweep = jnp.concatenate(
+                [_surface_row, tke_curr], axis=-1)
+        else:
+            tke_curr = _solve_result
 
     if _etau_on:
         # NEMO step order: the etau injection closes tke_tke (AFTER the
@@ -3257,9 +3332,23 @@ def tke_vertical_mixing(
         # Post-solve tke_avn overwrite, MY_SRC/zdftke.F90:832-837.  Keep the
         # source association: zsqen=SQRT(en), then dissl=zsqen/zmxld.
         dissl_new = jnp.sqrt(tke_curr) / l_eps_final
+    _statement_trace = None
+    if return_statement_trace:
+        if any(value is None for value in (
+                _statement_entry, _statement_after_boundaries,
+                _statement_after_langmuir, _statement_rhs,
+                _statement_post_sweep)):
+            raise ValueError("requested TKE statement trace is incomplete")
+        _statement_trace = TKEStatementTrace(
+            en_entry=_statement_entry,
+            en_after_boundaries=_statement_after_boundaries,
+            en_after_langmuir=_statement_after_langmuir,
+            rhs_pre_sweep=_statement_rhs,
+            en_post_sweep=_statement_post_sweep,
+        )
     return TKEOutput(K_M=K_M, K_H=K_H, tke_new=tke_curr,
                      l_eps=l_eps_final, K_M_surface=_K_M_surface,
-                     dissl=dissl_new)
+                     dissl=dissl_new, statement_trace=_statement_trace)
 
 
 # ---------------------------------------------------------------------------

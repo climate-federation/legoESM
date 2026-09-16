@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import struct
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
@@ -186,6 +187,31 @@ def test_round101_tke_rhs_unconsumed_sentinel_is_reported_not_binding(tmp_path):
     assert not sentinel["admission_binding"]
     assert consumed["classification"] == "BIT"
     assert consumed["admission_binding"]
+
+
+def test_round102_tke_production_rows_and_ulp_control(tmp_path):
+    path, arrays = _write_tke_statement(tmp_path / "tke.bin")
+    record = gate.read_tke_statement_walk_record(path)
+    production = SimpleNamespace(
+        en_entry=arrays["en_entry"][..., 1:30],
+        en_after_boundaries=arrays["en_after_boundaries"][..., :30],
+        en_after_langmuir=arrays["en_after_langmuir"][..., :30],
+        rhs_pre_sweep=arrays["rhs_pre_sweep"][..., :30],
+        en_post_sweep=arrays["en_post_sweep"][..., :30],
+    )
+    trace = SimpleNamespace(tke_statement_trace=production)
+    clean = gate._tke_production_statement_rows(
+        trace, record, "NEMO_RECORDED")
+    assert clean["first_nonbit"] is None
+    assert all(row["classification"] == "BIT" for row in clean["rows"])
+    planted = gate._tke_production_statement_rows(
+        trace, record, "NEMO_RECORDED", "stage-tke-production-ulp")
+    target = next(
+        row for row in planted["rows"]
+        if row["field"] == "en_after_boundaries")
+    assert target["n_unequal"] == 1
+    assert target["clean_n_unequal"] == 0
+    assert planted["plant_target"] == target["name"]
 
 
 def test_round101_tke_writer_is_additive_write_only_and_fixed_layout():

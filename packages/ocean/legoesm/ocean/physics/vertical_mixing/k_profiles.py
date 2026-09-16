@@ -135,6 +135,7 @@ def compute_vertical_K_profiles(
     eta_now=None,
     tke_p_sh2=None,
     tke_n2_bundle=None,
+    return_tke_statement_trace: bool = False,
 ) -> (
     tuple[jnp.ndarray, jnp.ndarray]
     | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
@@ -330,7 +331,8 @@ def compute_vertical_K_profiles(
             n2_tracers_before=n2_tracers_before,
             n2_before_used_by_evd=_evd_uses_before,
             tke_p_sh2=tke_p_sh2,
-            tke_n2_bundle=tke_n2_bundle)
+            tke_n2_bundle=tke_n2_bundle,
+            return_tke_statement_trace=return_tke_statement_trace)
         if _nemo_floor:
             K_v_total = jnp.maximum(K_v_total, K_vmix)
             A_v_total = jnp.maximum(A_v_total, A_vmix)
@@ -554,7 +556,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                      tke_bottom_dirichlet=None, tke_bottom_level=None,
                      n2_tracers_before=None, n2_before_used_by_evd=False,
                      tke_p_sh2=None,
-                     tke_n2_bundle=None):
+                     tke_n2_bundle=None,
+                     return_tke_statement_trace: bool = False):
     """Re-compute K_v, A_v at interfaces for the chosen vmix scheme.
 
     For ``constant`` / ``richardson`` this duplicates only the K
@@ -1010,6 +1013,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     if getattr(state, "tke_dissl", None) is not None else None),
                 precomputed_p_sh2=tke_p_sh2,
                 precomputed_n2_bundle=tke_n2_bundle,
+                return_statement_trace=return_tke_statement_trace,
             )
             if (getattr(tke_cfg, "tke_preclosure_coeff_source",
                         "current_subiteration") == "carried_previous_step"):
@@ -1020,7 +1024,8 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                     tke_new=tke_out.tke_new, tke_entry=_tke_seed,
                     K_M=tke_out.K_M,
                     K_H=tke_out.K_H, K_M_surface=tke_out.K_M_surface,
-                    dissl=tke_out.dissl)
+                    dissl=tke_out.dissl,
+                    statement_trace=tke_out.statement_trace)
                 return tke_out.K_H, tke_out.K_M, _carry
             return tke_out.K_H, tke_out.K_M, tke_out.tke_new
         # Mode B (DIAGNOSTIC / quasi-steady, default): ``tke_old=None`` seeds at

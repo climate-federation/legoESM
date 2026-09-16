@@ -1658,6 +1658,7 @@ class _NEMOWSLiveOperandTrace(NamedTuple):
     stage_qco: object
     stage_coefficients: object
     tke_entry: object
+    tke_statement_trace: object
     barotropic_targets: object
     stage_rhs: object
     stage1_rhs_walk: object
@@ -5304,6 +5305,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_live_stage1_rhs_walk = None
         _nemo_ws_live_stage_qco = None
         _nemo_ws_live_tke_entry = None
+        _nemo_ws_live_tke_statement_trace = None
         _nemo_ws_live_operator_operands = [
             _nemo_ws_stage1_operator_operands, None, None]
         _nemo_ws_tracer_content_rhs = None
@@ -8263,7 +8265,8 @@ class LatLonCGridOceanModel:
                     z_coord=z_coord, config=config, iwm_fields=iwm_fields)
                 if _return_live_stage_operands:
                     (state_new, tke_new,
-                     _nemo_ws_live_tke_entry) = _tke_result
+                     _nemo_ws_live_tke_entry,
+                     _nemo_ws_live_tke_statement_trace) = _tke_result
                 else:
                     state_new, tke_new = _tke_result
             else:
@@ -8452,7 +8455,8 @@ class LatLonCGridOceanModel:
                     or _nemo_ws_live_stage_geometry is None or _nemo_ws_live_stage_raw is None or _nemo_ws_live_stage_rhs is None or _nemo_ws_live_baro_geometry is None  # noqa: E501
                     or _nemo_ws_live_stage_qco is None
                     or _nemo_ws_live_stage1_rhs_walk is None
-                    or _nemo_ws_live_tke_entry is None):
+                    or _nemo_ws_live_tke_entry is None
+                    or _nemo_ws_live_tke_statement_trace is None):
                 raise ValueError("live WS-RK3 operand trace is incomplete")
             return _NEMOWSLiveOperandTrace(
                 state_after=state_new,
@@ -8466,6 +8470,7 @@ class LatLonCGridOceanModel:
                     (dt, 1.0 / dt),
                 ),
                 tke_entry=_nemo_ws_live_tke_entry,
+                tke_statement_trace=_nemo_ws_live_tke_statement_trace,
                 barotropic_targets=(target_u, target_v, Hu_avg, Hv_avg,
                                     state_new.eta.data,
                                     (_eta_live_one_third,
@@ -9822,6 +9827,7 @@ class LatLonCGridOceanModel:
         tke_new = None
         _tke_coeff_new = None
         _tke_entry_used = None
+        _tke_statement_trace_used = None
         _post_mixing = self._tke_post_mixing_active()
         _tke_ctx = None
         from legoesm.ocean.physics.vertical_mixing import (
@@ -9995,12 +10001,15 @@ class LatLonCGridOceanModel:
                     # "nemo_now_before"); ignored by every other selection.
                     eta_now=eta_now,
                     tke_p_sh2=_tke_p_sh2,
+                    return_tke_statement_trace=return_tke_entry,
                 )
                 if (tke_new is not None
                         and hasattr(tke_new, "K_M")
                         and hasattr(tke_new, "tke_new")):
                     _tke_coeff_new = tke_new
                     _tke_entry_used = _tke_coeff_new.tke_entry
+                    _tke_statement_trace_used = (
+                        _tke_coeff_new.statement_trace)
                     tke_new = _tke_coeff_new.tke_new
                 if _post_mixing:
                     # Phase 1 only (Veros set_tke_diffusivities from the
@@ -10819,7 +10828,12 @@ class LatLonCGridOceanModel:
                     raise ValueError(
                         "WRITE-only TKE entry trace requested, but the "
                         "closure did not expose its consumed energy operand")
-                return state_out, tke_new, _tke_entry_used
+                if _tke_statement_trace_used is None:
+                    raise ValueError(
+                        "WRITE-only TKE statement trace requested, but the "
+                        "closure did not expose its production boundaries")
+                return (state_out, tke_new, _tke_entry_used,
+                        _tke_statement_trace_used)
             return state_out, tke_new
         return state_out
 

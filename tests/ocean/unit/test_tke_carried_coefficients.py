@@ -1055,6 +1055,40 @@ def test_nemo_literal_solver_dispatches_through_production_solve(monkeypatch):
     np.testing.assert_array_equal(result, calls[0])
 
 
+def test_nemo_literal_solver_exposes_exact_pre_sweep_rhs_on_request():
+    cfg = TKEConfig(
+        tke_matrix_evaluation="nemo_literal",
+        tke_buoyancy_sink="nemo_explicit",
+        tke_solver_evaluation="nemo_literal",
+        dissipation_discretization="nemo_1p5_split",
+        surface_bc="nemo_dirichlet", tke_surface_bc_level="nemo_z0",
+        tke_background=0.0, tke_surface_min=0.0,
+    )
+    solution, rhs = tke_mod._solve_tke_backward_euler(
+        e_old=jnp.asarray([[1.0, 0.7]]),
+        K_M_old=jnp.asarray([[0.2, 0.3]]),
+        K_H_old=jnp.asarray([[0.1, 0.15]]),
+        P_s=jnp.asarray([[0.01, 0.02]]),
+        N2=jnp.asarray([[1.0e-5, -1.0e-5]]),
+        l_eps=jnp.asarray([[1.0, 1.2]]),
+        dz_half=jnp.asarray([[2.0, 3.0]]),
+        surface_flux=jnp.asarray([0.0]), dt=2.0, cfg=cfg,
+        dz_surface=jnp.asarray([1.0]),
+        surface_dirichlet=jnp.asarray([0.8]),
+        surface_bc_level="nemo_z0",
+        bottom_dirichlet=jnp.asarray([0.2]),
+        K_M_surface=jnp.asarray([0.25]),
+        w_active=jnp.asarray([[1.0, 0.0]]),
+        nemo_e3t=jnp.asarray([[1.0, 2.0, 3.0]]),
+        dissl_old=jnp.asarray([[0.1, 0.2]]),
+        return_statement_trace=True,
+    )
+    assert solution.shape == (1, 2)
+    assert rhs.shape == (1, 3)
+    assert np.asarray(rhs)[0, 0] == np.float64(0.8)
+    assert np.asarray(rhs)[0, -1] == np.float64(0.2)
+
+
 def test_nemo_literal_matrix_matches_hand_computed_source_order(monkeypatch):
     """Nonuniform-e3t case pins every zdftke:499-510 operand and can go red."""
     cfg = TKEConfig(

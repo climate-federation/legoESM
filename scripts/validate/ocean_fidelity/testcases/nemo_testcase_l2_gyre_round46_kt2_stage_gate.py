@@ -2177,10 +2177,108 @@ def _assignment_execution_discriminator(
     }
 
 
+def _tke_production_statement_rows(
+    trace, statement_record: dict, entry_mode: str,
+    plant: str | None = None,
+) -> dict:
+    """Score compiled TKE statement boundaries from the full jitted step."""
+    production = trace.tke_statement_trace
+    fields = (
+        "en_entry", "en_after_boundaries", "en_after_langmuir",
+        "rhs_pre_sweep", "en_post_sweep",
+    )
+    statements = {
+        "en_entry": "zdftke.f90:268",
+        "en_after_boundaries": "zdftke.f90:284-324",
+        "en_after_langmuir": "zdftke.f90:326-395",
+        "rhs_pre_sweep": "zdftke.f90:399-473",
+        "en_post_sweep": "zdftke.f90:475-495",
+    }
+    rows = []
+    plant_target = None
+    for field in fields:
+        candidate = np.asarray(getattr(production, field))
+        reference_full = np.asarray(statement_record["arrays"][field])
+        # legoESM carries NEMO levels 2:jpkm1 at entry.  Once the compiled
+        # boundary assignment has executed, the private trace prepends the
+        # separately represented z=0 row and spans levels 1:jpkm1.
+        reference = (reference_full[..., 1:30]
+                     if field == "en_entry" else reference_full[..., :30])
+        require(candidate.shape == reference.shape,
+                f"production TKE {field} shape {candidate.shape} != "
+                f"oracle {reference.shape}")
+        clean = _classification(score(
+            f"GYRE-zco.kt2.tke_statement.production_step.{field}.clean",
+            reference, candidate, np.ones(reference.shape, dtype=bool)))
+        scored_reference = reference
+        planted_at = None
+        if (plant == "stage-tke-production-ulp"
+                and entry_mode == "NEMO_RECORDED"
+                and field == "en_after_boundaries"):
+            equal = (
+                np.ascontiguousarray(reference).view(np.uint64)
+                == np.ascontiguousarray(candidate).view(np.uint64)
+            ) & np.isfinite(reference)
+            indices = np.argwhere(equal)
+            require(indices.size > 0,
+                    "TKE production plant found no exact boundary cell")
+            planted_at = tuple(int(value) for value in indices[0])
+            scored_reference = reference.copy()
+            scored_reference[planted_at] = np.nextafter(
+                scored_reference[planted_at], np.float64(np.inf))
+        row = _classification(score(
+            f"GYRE-zco.kt2.tke_statement.production_step.{field}",
+            scored_reference, candidate,
+            np.ones(reference.shape, dtype=bool)))
+        row.update({
+            "kt": 2,
+            "stage": 1,
+            "field": field,
+            "entry_mode": entry_mode,
+            "execution": "production step",
+            "domain": ("NEMO levels 2:jpkm1" if field == "en_entry"
+                       else "NEMO levels 1:jpkm1"),
+            "nemo_statement": statements[field],
+            "clean_n_unequal": clean["n_unequal"],
+            "clean_absolute_max": clean["absolute_max"],
+            "plant_index": planted_at,
+        })
+        rows.append(row)
+        if planted_at is not None:
+            require(row["n_unequal"] == clean["n_unequal"] + 1,
+                    "TKE production one-ULP plant did not add exactly one "
+                    "unequal cell")
+            plant_target = row["name"]
+    if (plant == "stage-tke-production-ulp"
+            and entry_mode == "NEMO_RECORDED"):
+        require(plant_target is not None,
+                "TKE production plant did not reach its target")
+    first = next(
+        (row for row in rows if row["classification"] != "BIT"), None)
+    return {
+        "execution": "production step",
+        "entry_mode": entry_mode,
+        "rows": rows,
+        "entry_surface_level1": {
+            "classification": "UNMEASURED_WITH_SPEC",
+            "reason": (
+                "legoesm does not carry NEMO en(jk=1) at entry because "
+                "zdftke.f90:284-289 overwrites it before any later consumer"
+            ),
+        },
+        "first_nonbit": None if first is None else {
+            key: first[key] for key in (
+                "field", "n_unequal", "absolute_max", "classification",
+                "nemo_statement")
+        },
+        "plant_target": plant_target,
+    }
+
+
 def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                 memory_root: Path, btstep_root: Path,
                 stage_closure_root: Path, stage1_w_root: Path,
-                stage1_r3_root: Path,
+                stage1_r3_root: Path, tke_statement_record: dict,
                 plant: str | None, *, walk_only: bool = False) -> dict:
     """Decision-41 stage tables from recorded entries and the shared stage."""
     direct_w_record = read_admitted_stage1_w_walk(
@@ -2363,6 +2461,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
             "NEMO_RECORDED"))
 
     chained = []
+    chained_tke_trace = None
     state = card.recipe.initial_state
     for kt in (1, 2):
         model = LatLonCGridOceanModel(
@@ -2377,6 +2476,8 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
         trace = jax.device_get(model.step(
                     state, dt=card.dt_s, freshwater=freshwater,
                     surface_forcing=surface))
+        if kt == 2:
+            chained_tke_trace = trace
         chained.extend(_external_rows(
             (trace.barotropic_targets[4], trace.barotropic_targets[0],
              trace.barotropic_targets[1], trace.barotropic_targets[2],
@@ -2388,6 +2489,17 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
             np.asarray(card.recipe.grid.area_T), state, kt,
             "LEGO_CHAINED", direct_stage_ww))
         state = trace.state_after
+
+    require(chained_tke_trace is not None,
+            "chained production run did not expose the kt2 TKE boundary")
+    tke_statement_walk = {
+        "format": "nemo-testcase-l2-gyre-tke-production-walk-v1",
+        "given_nemo_entry": _tke_production_statement_rows(
+            given_traces[(2, 1)], statement_record,
+            "NEMO_RECORDED", plant),
+        "chained": _tke_production_statement_rows(
+            chained_tke_trace, statement_record, "LEGO_CHAINED"),
+    }
 
     measured = [row for row in given
                 if row.get("classification") != "UNMEASURED_WITH_SPEC"]
@@ -2422,6 +2534,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
         },
         "stage1_w_walk": stage1_w_walk,
         "assignment_execution_discriminator": assignment_discriminator,
+        "tke_statement_walk": tke_statement_walk,
         "first_owned_nonbit": None if first is None else {
             key: first[key] for key in (
                 "kt", "stage", "field", "n_unequal", "absolute_max",
@@ -2585,9 +2698,26 @@ def run(
         if any(row.get("status") != "PASS" for row in report["trajectory"]):
             report["status"] = "UNMEASURED"
     if mode in {"stage-twin", "stage-w-walk"}:
+        statement_record = {}
+        if mode == "stage-twin":
+            from nemo_testcase_l2_gyre_round54_tke_operands import (
+                read_record as read_tke_operand_record,
+            )
+
+            statement_record = read_admitted_tke_statement_walk(
+                tke_statement_root)
+            legacy_record = read_tke_operand_record(tke_operand_record)
+            duplicate_rows = _tke_statement_duplicate_rows(
+                statement_record, legacy_record)
+            require(all(row["classification"] == "BIT"
+                        for row in duplicate_rows
+                        if row["admission_binding"]),
+                    "Round-101 consumed duplicate boundary moved from "
+                    "Round 59 before production scoring")
         report["stage_twin"] = _stage_twin(
             records, root, advmean_root, memory_root, btstep_root,
-            stage_closure_root, stage1_w_root, stage1_r3_root, plant,
+            stage_closure_root, stage1_w_root, stage1_r3_root,
+            statement_record, plant,
             walk_only=mode == "stage-w-walk")
     if mode == "stage-tke-record":
         from nemo_testcase_l2_gyre_round54_tke_operands import (
@@ -2679,7 +2809,8 @@ def main(argv=None) -> int:
                  "stage-assignment-output-ulp", "stage-w-record-stamp",
                  "stage-r3-record-stamp", "stage-tke-record-header",
                  "stage-tke-record-truncation", "stage-tke-record-stamp",
-                 "stage-tke-record-ulp", "stamp"),
+                 "stage-tke-record-ulp", "stage-tke-production-ulp",
+                 "stamp"),
     )
     p.add_argument("--output", type=Path)
     args = p.parse_args(argv)
