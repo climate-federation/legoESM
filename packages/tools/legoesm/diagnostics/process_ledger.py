@@ -92,7 +92,59 @@ ROW_CLIPS = LEDGER_PROCESSES.index("clips")
 ROW_DYNAMICS = LEDGER_PROCESSES.index("dynamics")
 
 
-def ledger_entry_column(dq_total_dt, dT_dt, p_s, dsigma, dp=None):
+def sigma_band_weight(sigma_half, sigma_lo, sigma_hi):
+    """Per-layer weight (nlev,) for the sigma band ``[sigma_lo, sigma_hi]``.
+
+    A layer straddling a band edge gets the FRACTION of its thickness inside
+    the band, so the band boundary need not land on a layer interface and the
+    weights of two adjacent bands sum to one everywhere. Sigma increases
+    downward, so ``sigma_lo`` is the upper (lower-pressure) edge.
+
+    numpy/jnp arithmetic only; the mesh and coordinate are static, so this is
+    evaluated once at setup and never inside a traced region.
+    """
+    sh = jnp.asarray(sigma_half)
+    if sh.ndim != 1 or sh.shape[0] < 2:
+        raise ValueError(f"sigma_half must be 1-D with >=2 entries, got {sh.shape}")
+    if not (0.0 <= sigma_lo < sigma_hi <= 1.0):
+        raise ValueError(
+            f"need 0 <= sigma_lo < sigma_hi <= 1, got ({sigma_lo}, {sigma_hi})")
+    top, bot = sh[:-1], sh[1:]
+    overlap = jnp.clip(jnp.minimum(bot, sigma_hi) - jnp.maximum(top, sigma_lo),
+                       0.0, None)
+    return overlap / jnp.maximum(bot - top, 1e-30)
+
+
+def apply_level_weight(field, level_weight):
+    """Mask a (..., nlev) tendency to a vertical band before integrating.
+
+    WHY THIS EXISTS: the column ledger integrates over the WHOLE column, which
+    makes it structurally blind to a vertical-REDISTRIBUTION bias. Measured on
+    the production AMIP, convection's column water row is exactly zero — correct
+    for a scheme that moves water up and down without removing it — while the
+    tropical free troposphere is twice as moist as observed. The column budget
+    closes and says nothing about the defect.
+
+    Restricting the integral to a band answers "which process supplies THIS
+    layer" without changing the accumulator's shape, so the hot-loop state that
+    carries it is untouched. ``None`` is the byte-identical full-column default.
+
+    ``level_weight`` is a (nlev,) array of per-layer weights, normally 1 inside
+    the band and 0 outside; fractional values at the band edges are honoured so
+    a band boundary need not fall on a layer interface.
+    """
+    if level_weight is None or field is None:
+        return field
+    w = jnp.asarray(level_weight, dtype=jnp.asarray(field).dtype)
+    if w.shape[-1] != jnp.asarray(field).shape[-1]:
+        raise ValueError(
+            f"level_weight has {w.shape[-1]} levels but the tendency has "
+            f"{jnp.asarray(field).shape[-1]}")
+    return field * w
+
+
+def ledger_entry_column(dq_total_dt, dT_dt, p_s, dsigma, dp=None,
+                        level_weight=None):
     """PER-COLUMN ledger row ``[water, energy]`` — no global reduction.
 
     Same quantity and sign convention as :func:`ledger_entry`, but keeping
@@ -130,15 +182,18 @@ def ledger_entry_column(dq_total_dt, dT_dt, p_s, dsigma, dp=None):
     """
     ref = jnp.asarray(p_s)
     zero = jnp.zeros(ref.shape, dtype=jnp.result_type(ref.dtype, jnp.float32))
-    water = (column_mass_integral(dq_total_dt, p_s, dsigma, dp=dp)
-             if dq_total_dt is not None else zero)
+    _dq = apply_level_weight(dq_total_dt, level_weight)
+    _dT = apply_level_weight(dT_dt, level_weight)
+    water = (column_mass_integral(_dq, p_s, dsigma, dp=dp)
+             if _dq is not None else zero)
     energy = (constants.c_pd
-              * column_mass_integral(dT_dt, p_s, dsigma, dp=dp)
-              if dT_dt is not None else zero)
+              * column_mass_integral(_dT, p_s, dsigma, dp=dp)
+              if _dT is not None else zero)
     return jnp.stack([water, jnp.asarray(energy, dtype=water.dtype)], axis=-1)
 
 
-def column_store_snapshot_column(p_s, dsigma, T, *species, dp=None):
+def column_store_snapshot_column(p_s, dsigma, T, *species, dp=None,
+                                 level_weight=None):
     """PER-COLUMN ``[water_store, enthalpy_store]`` — no global reduction.
 
     Per-column analogue of :func:`column_store_snapshot`; pair two snapshots
@@ -151,11 +206,13 @@ def column_store_snapshot_column(p_s, dsigma, T, *species, dp=None):
             continue
         total_q = s if total_q is None else total_q + s
     ref = jnp.asarray(p_s)
+    total_q = apply_level_weight(total_q, level_weight)
     water = (column_mass_integral(total_q, p_s, dsigma, dp=dp)
              if total_q is not None
              else jnp.zeros(ref.shape,
                             dtype=jnp.result_type(ref.dtype, jnp.float32)))
-    enthalpy = constants.c_pd * column_mass_integral(T, p_s, dsigma, dp=dp)
+    enthalpy = constants.c_pd * column_mass_integral(
+        apply_level_weight(T, level_weight), p_s, dsigma, dp=dp)
     return jnp.stack([water, jnp.asarray(enthalpy, dtype=water.dtype)],
                      axis=-1)
 

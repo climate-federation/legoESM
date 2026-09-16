@@ -169,7 +169,17 @@ def _require_f64_jax(fname: str, arrays: dict) -> None:
     for name, a in arrays.items():
         if a is None:
             continue
-        dt = jnp.asarray(a).dtype
+        _arr = jnp.asarray(a)
+        if _arr.ndim == 0 and getattr(_arr, "weak_type", False):
+            # Skip ONLY a WEAK-typed 0-dim scalar (a python-float
+            # timestep/coeff like dt/kgb): it is weak-promoting and not a
+            # field, so it is not part of the field uniformity invariant.
+            # A STRONG-f64 0-dim (an f64 constant / damping coeff that
+            # "went strong") is NOT skipped -> it still trips this gate
+            # against f32 fields, closing the silent-promotion blind spot
+            # a wholesale 0-dim skip left (codex+GLM+Claude, increment 2).
+            continue
+        dt = _arr.dtype
         if dt not in (jnp.float32, jnp.float64):
             raise TypeError(
                 f"{fname}: {name} must be float32 or float64 (got {dt})")

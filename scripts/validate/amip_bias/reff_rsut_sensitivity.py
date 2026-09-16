@@ -16,6 +16,16 @@ radius are computed ONCE with the production cloud config and held fixed; only
                  saw: the run sets aerosol_ccn, which replaces radiation's
                  droplet number from the external aerosol (codex review), so
                  no claim is made that this row equals the run's 7.84 um.
+    arm in-cloud : the PSD radius with the condensate reconstructed IN-CLOUD
+                 (q_c/cf), which is the pairing an AMBIENT droplet number
+                 requires.  Production sets aerosol_ccn, whose AOD-derived
+                 number is in-cloud but takes the grid-mean branch, so this
+                 arm measures the size of that mismatch on the model's own
+                 cloud-fraction distribution rather than from a global mean.
+                 Reviewed by GLM before it was written; it also warned that
+                 a global-mean cube root OVERSTATES the effect, because
+                 x^(1/3) is concave and real cloud fractions are bimodal --
+                 which is exactly why this is measured per column here.
     arms 8/10/12/14 um : uniform overrides -- THE measurement
 
 READING (pre-registered): the issue needs roughly -15 to -20 W/m2 available
@@ -58,7 +68,7 @@ def main(argv=None) -> int:
     import jax.numpy as jnp
     from legoesm import constants
     from legoesm.atmosphere.physics.clouds.cloud_fraction import (
-        compute_cloud_properties)
+        _CLOUD_R_EFF_MAX_M, _INHOM_CF_FLOOR, compute_cloud_properties)
     from legoesm.atmosphere.physics.clouds.config import CloudConfig
     from legoesm.atmosphere.physics.radiation.rrtmgp.rrtmgp import RRTMGP
     from legoesm.atmosphere.physics.radiation.config import RRTMGPConfig
@@ -111,6 +121,27 @@ def main(argv=None) -> int:
     kw = cp.to_rrtmg_kwargs()
     r_psd = kw["cloud_r_eff_liq"]
 
+    # IN-CLOUD PAIRING ARM (#1521, 2026-09-10).  The PSD radius goes as
+    # (q_c / N_c)^(1/3), so the ratio is meaningful only if BOTH are on the
+    # same footing.  compute_cloud_properties reconstructs in-cloud
+    # condensate ONLY when the droplet number is dead (``n_cloud <= 1.0``,
+    # the specified-constant fallback).  Production instead sets
+    # ``aerosol_ccn``, whose AOD-derived number is ~1e8 and is an AMBIENT --
+    # i.e. IN-CLOUD -- concentration, so it takes the other branch and is
+    # paired with GRID-MEAN condensate.  Reviewed by GLM before this arm was
+    # written: "Using ambient CCN directly as droplet number therefore
+    # carries the in-cloud convention... The branch predicate is wrong:
+    # 'prognostic vs. specified' is a proxy for the real question, is the
+    # source number cf-diluted?"
+    #
+    # Dividing q_c by cf multiplies the radius by cf^(-1/3) EXACTLY (r_eff is
+    # a pure cube root in q_c at fixed N_c), so the corrected field needs no
+    # second cloud-property solve -- but it does need the SAME clamp the PSD
+    # obeys, or the arm manufactures radii the model could never emit.
+    cf_psd = jnp.clip(cp.cloud_fraction, _INHOM_CF_FLOOR, 1.0)
+    r_incloud = jnp.minimum(r_psd * cf_psd ** (-1.0 / 3.0),
+                            _CLOUD_R_EFF_MAX_M)
+
     # Diurnal quadrature: Jan declination, hour angles at n_times local times.
     doy = 1.0 + day
     decl = -23.44 * np.cos(2 * np.pi * (doy + 10.0) / 365.0) * np.pi / 180.0
@@ -151,11 +182,35 @@ def main(argv=None) -> int:
                                       r_psd, jnp.nan)) )
     print(f"model's own PSD r_eff, cloudy-column mean: "
           f"{np.nanmean(np.asarray(jnp.where(kw['cloud_path_liq'] > 1e-4, r_psd, jnp.nan))) * 1e6:.2f} um")
+    _cloudy = np.asarray(kw["cloud_path_liq"]) > 1e-4
+    _cf_np = np.asarray(cf_psd)
+    _r_a = np.asarray(r_psd)
+    _r_b = np.asarray(r_incloud)
+    print(f"cloud fraction over cloudy points: mean {_cf_np[_cloudy].mean():.3f}, "
+          f"median {np.median(_cf_np[_cloudy]):.3f}, "
+          f"5th pct {np.percentile(_cf_np[_cloudy], 5):.3f}")
+    print(f"in-cloud pairing would move r_eff "
+          f"{_r_a[_cloudy].mean() * 1e6:.2f} -> {_r_b[_cloudy].mean() * 1e6:.2f} um "
+          f"(cloudy-point mean; ratio {(_r_b[_cloudy] / _r_a[_cloudy]).mean():.3f}, "
+          f"cap binds on {100.0 * float((_r_b >= _CLOUD_R_EFF_MAX_M)[_cloudy].mean()):.2f}% "
+          f"of cloudy points)")
+    # CONTROL: the correction must be the IDENTITY where the layer is
+    # overcast.  If this prints anything but ~1.000 the arm is measuring its
+    # own arithmetic rather than the pairing.
+    _oc = _cloudy & (_cf_np > 0.999)
+    if _oc.any():
+        print(f"  control, overcast points (cf > 0.999): ratio "
+              f"{(_r_b[_oc] / _r_a[_oc]).mean():.6f} (must be 1.000000)")
+    else:
+        print("  control SKIPPED: no overcast cloudy points in this checkpoint")
     print()
     print(f"{'arm':>10s} {'rsut [W/m2]':>12s} {'delta vs PSD':>13s}")
     base = rsut_mean(r_psd)
     print(f"{'PSD(ckpt)':>10s} {base:12.3f} {0.0:13.3f}")
     prev_r, prev_v = None, None
+    r_ic = rsut_mean(r_incloud)
+    print(f"{'in-cloud':>10s} {r_ic:12.2f} {r_ic - base:13.2f}"
+          f"   <- pairing correction, NOT a uniform radius override")
     for r_um in args.radii_um:
         v = rsut_mean(jnp.full_like(r_psd, r_um * 1e-6))
         print(f"{r_um:8.1f}um {v:12.3f} {v - base:13.3f}")

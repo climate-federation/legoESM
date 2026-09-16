@@ -1319,6 +1319,17 @@ class LatLonCGridGeometry(NamedTuple):
     # other T-point cell-row fields so it stays aligned with band-local
     # ``n_lat`` (``None`` passes through unchanged).
     seam_wall_rows: jax.Array | None = None
+    #: ``(n_lat+1,)`` v-face (cell-edge) latitudes [rad], when the builder
+    #: knows them.  Consumers that need the MERIDIONAL CELL EDGES -- the MOC
+    #: and barotropic streamfunction, and ``spinup``'s ACC-latitude lookup --
+    #: read ``getattr(grid, "lat_v", None)`` and otherwise fall back to
+    #: ``lat +/- 0.5*dlat`` with the SCALAR ``dlat``.  On a stretched grid that
+    #: fallback is wrong: measured 0.326 deg off NEMO's own ``gphiv`` on the
+    #: DINO Mercator mesh, whose true row spacing runs 0.344-1.000 deg against
+    #: a scalar 0.347 -- i.e. a third of a cell, on the axis the ACC transport
+    #: is located along.  ``None`` on builders that genuinely have no face
+    #: array (tripole), which keeps the fallback for them.
+    lat_v: jax.Array | None = None
 
     # Optional native T-point latitude in degrees.  NEMO evaluates a few
     # source profiles from the mesh's stored ``gphit`` values, before any
@@ -1998,6 +2009,7 @@ def create_latlon_geometry(
     fold = _inactive_fold(n_lon)
 
     return LatLonCGridGeometry(
+        lat_v=_c(lat_face),
         n_lat=n_lat,
         n_lon=n_lon,
         radius=float(radius),

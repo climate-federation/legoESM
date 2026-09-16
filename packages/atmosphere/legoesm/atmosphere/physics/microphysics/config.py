@@ -227,7 +227,12 @@ __param_spec__ = {
             "a_v_s": {"units": "m^(1-b)/s", "bounds": (9.0, 90.0), "tunable_tier": 2, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
             "b_v_s": {"units": "1", "bounds": (0.09, 0.9), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
             "fall_a_r": {"units": "m^(1-b)/s", "bounds": (280.0, 2500.0), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
-            "fall_a_i": {"units": "m^(1-b)/s", "bounds": (230.0, 2100.0), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "gSAM M2005 default", "shape": None},
+            # Upper bound widened 2100 -> 6300 (user, 2026-09-09): the production
+            # run sits EXACTLY on the old ceiling, so the ice-fallout /
+            # precipitation-efficiency hypothesis for the tropical moist bias
+            # could not be tested in either direction. A parameter pinned on its
+            # own bound is not a tested parameter.
+            "fall_a_i": {"units": "m^(1-b)/s", "bounds": (230.0, 6300.0), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "gSAM M2005 default", "shape": None},
             "fall_a_s": {"units": "m^(1-b)/s", "bounds": (3.8, 35.0), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
             "fall_a_g": {"units": "m^(1-b)/s", "bounds": (6.3, 58.0), "tunable_tier": 3, "transform": "sigmoid", "category": "fall_speed", "reference": "Morrison et al. (2005)", "shape": None},
             "lamr_max": {"units": "1/m", "bounds": (16500.0, 150000.0), "tunable_tier": 3, "transform": "sigmoid", "category": "size_distribution", "reference": "Morrison et al. (2005)", "shape": None},

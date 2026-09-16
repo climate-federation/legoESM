@@ -2182,6 +2182,44 @@ def nemo_iso_w_kappa_sums(aht, umask, vmask, aht_v=None):
     return ksum_u, cnt_u, ksum_v, cnt_v
 
 
+def nemo_iso_a33_e3w(z_coord, e3t, jacobian, dtype):
+    """NEMO's ``e3w(:,:,:,Kmm)`` in ``traldf_iso_a33``'s "above" convention.
+
+    ``traldf_iso.f90:831-833`` squares ``e3w_3d(ji,jj,jk)*(1+r3t(ji,jj,Kmm))``
+    for ``akz`` and ``:285`` divides the explicit A33 flux by the same object
+    one level down, with (``domzgr_substitute.h90:131``, ``:108``)
+
+        e3w(i,j,k,t) = e3w_0(i,j,k) * (1 + r3t(i,j,t))
+        e3w_0(k)     = gdept_0(k) - gdept_0(k-1)
+
+    the T-POINT DEPTH DIFFERENCE, which on a stretched ladder is NOT the
+    interface midpoint ``0.5*(e3t_k + e3t_{k-1})``.  Resolved through the
+    SINGLE shared resolver the implicit tracer and momentum solves already
+    use; that resolver returns ``None`` only for a coordinate whose T points
+    ARE the midpoints, and raises rather than silently substituting for one
+    where they are not — so the midpoint arm below is reached only where it
+    is the same object.
+
+    ONE implementation, called by BOTH sides of the explicit/implicit A33
+    split (the MSC block of
+    :func:`nemo_iso_lap_tracer_tendency_latlon_cgrid` and
+    :func:`compute_isoneutral_K33_latlon`), so the two ``akz`` can never
+    disagree — the same reason ``nemo_iso_a33`` itself is shared (#1226).
+    """
+    from legoesm.ocean.physics.vertical_mixing import nemo_e3w0_reference
+    raw = nemo_e3w0_reference(z_coord)
+    if raw is None:
+        e3w = 0.5 * (jnp.roll(e3t, +1, 2) + e3t)
+        # surface w-point (unused downstream: wslp(0) = 0)
+        return e3w.at[:, :, 0].set(e3t[:, :, 0])
+    # jacobian is the (1 + r3t) stretch e3t itself already carries.
+    # No trailing-axis slice: nemo_e3w0_reference already REFUSES a field
+    # whose trailing size is not n_levels, so a slice here could only mask a
+    # real mismatch (diff review finding 8).
+    return (jnp.asarray(raw, dtype=dtype)
+            * jnp.asarray(jacobian, dtype=dtype)[:, :, jnp.newaxis])
+
+
 def nemo_iso_a33(aht, umask, vmask, wmask, wslpi, wslpj,
                  e1u_c, e2v_c, e3w2, dt=None, msc: bool = False, aht_v=None,
                  evaluation: str = "normalized_square"):
@@ -2426,6 +2464,19 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         aht_v = jnp.broadcast_to(kappa_Redi_v[:, :, jnp.newaxis], q.shape)
     else:
         aht_v = jnp.broadcast_to(jnp.asarray(kappa_Redi_v, dtype=dtype), q.shape)
+    # NEMO masks the diffusivity ONCE, at build:
+    #   ldftra.f90:433-434   ahtu(:,:,1:jpkm1) = ahtu(:,:,1:jpkm1) * umask(...)
+    #                        ahtv(:,:,1:jpkm1) = ahtv(:,:,1:jpkm1) * vmask(...)
+    # so every consumer sees a face-masked coefficient.  That masking is
+    # LOAD-BEARING on the horizontal flux: NEMO's uslp is a 16-point Shapiro
+    # smear of the umask-ed raw slope (ldfslp.f90:288 masks zwz, :298 smears
+    # it), so uslp is generally NONZERO on a closed u-face, and only
+    # ahtu = 0 stops traldf_iso.f90:242 emitting the zA13 term there.
+    # Applying it here makes the operator's four consumers (zfu, zfv, the
+    # w-point kappa sums and akz_h) read ONE masked field; the latter three
+    # already re-applied the same 0/1 mask, so this is bit-identical for them.
+    aht = aht * umask
+    aht_v = aht_v * vmask
 
     # --- Slope positions.  native_slopes = the ldfslp four-position fields
     # (uslp/vslp at tracer levels, wslpi/wslpj at top-of-cell w-points, NEMO
@@ -2592,9 +2643,9 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         # operand.  Production dispatch remains None until its registered
         # stage-22/23 bracket owns the substitution.
         if msc_e3w_override is None:
-            e3w_ab = 0.5 * (jnp.roll(e3t, +1, ax_z) + e3t)
-            e3w_ab = e3w_ab.at[:, :, 0].set(
-                e3t[:, :, 0])   # surface w (unused: wslp(0)=0)
+            # traldf_iso.f90:285 / :831-833, through the ONE resolver the
+            # implicit K33 side calls too, so the split cannot diverge.
+            e3w_ab = nemo_iso_a33_e3w(z_coord, e3t, jacobian, dtype)
         else:
             e3w_ab = jnp.asarray(msc_e3w_override, dtype=dtype)
             if e3w_ab.shape != q.shape:
@@ -2697,6 +2748,7 @@ def nemo_iso_lap_tracer_tendency_latlon_cgrid(
         }
         if return_operand_diagnostics:
             diagnostics["zfu_operands"] = {
+                # NOTE: face-MASKED, as NEMO's own ahtu is (ldftra.f90:433).
                 "ahtu": aht,
                 "e1u": e1u,
                 "e2u": e2u,
@@ -4543,9 +4595,15 @@ def compute_isoneutral_K33_latlon(
         # z*-scaled thickness with the SAME jacobian as the operator's e3t
         # (from the shared density_jacobian thread).
         _e3t = z_coord.dz_ref[None, None, :] * _J[:, :, jnp.newaxis]
-        _e3w = 0.5 * (jnp.roll(_e3t, +1, 2) + _e3t)
-        _e3w = _e3w.at[:, :, 0].set(_e3t[:, :, 0])
         _msc = bool(getattr(cfg, "msc_stabilize", False))
+        # Same e3w object as the explicit A33 flux (traldf_iso.f90:831-833):
+        # the two sides of the split share one resolver by construction.
+        # Resolved ONLY when ln_traldf_msc is on, matching the explicit side's
+        # own guard: with msc=F, akz = ah_wslp2 and traldf_iso.f90:88-91 never
+        # reads e3w at all, so a coordinate the resolver would REFUSE must not
+        # be refused for a value nothing consumes.
+        _e3w = (nemo_iso_a33_e3w(z_coord, _e3t, _J, T.dtype) if _msc
+                else _e3t)
         _, _akz = nemo_iso_a33(
             _aht, _um3, _vm3, _wm3, _wi, _wj,
             _e1u_c, _e2v_c, _e3w ** 2, dt=dt, msc=_msc, aht_v=_aht_v,

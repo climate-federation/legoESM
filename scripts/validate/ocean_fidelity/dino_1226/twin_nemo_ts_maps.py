@@ -10,12 +10,32 @@ convention: DINO 5.x files are canonical halo-free arrays and 3-D NEMO fields
 move from ``(k,j,i)`` to ``(j,i,k)`` without vertical reversal. Full-frame
 gates remain the authority for boundary-ring claims.
 
-Example, from the repository root::
+Two producers can be scored, through ONE scoring path (``load_candidate``
+picks the reader; everything after it -- masking, statistics, controls,
+figures -- is shared, so the two can never be scored differently):
+
+* ``--arm-npz`` : a climate-battery arm artifact, with its own fp64 stamps.
+* ``--run-dino-dir`` : a ``scripts/run/run_dino.py`` output directory, scored
+  straight from its ``snapshots/``.  This needs the run to be on NEMO's own
+  ``(199, 52)`` frame (``--nemo-faithful-grid``); it replaces the scratch
+  adapter that used to embed a 48x195 standalone run into the middle of NEMO's
+  domain, which the frame fix made unnecessary.  ``run_dino.py`` leaves
+  legoESM's precision policy at its float32 default, so the snapshot's SOURCE
+  dtypes are stamped and printed and the arrays are upcast for the arithmetic
+  -- read any residual against a float32 representation floor (~1.2e-7
+  relative) when the stamp says float32.
+
+Examples, from the repository root::
 
   python scripts/validate/ocean_fidelity/dino_1226/twin_nemo_ts_maps.py \
     --arm-npz /tmp/dino-climate-rebattery-01a04e34/arms/climate_a.npz \
     --day 360 --nemo-kt 17280 \
     --output-dir /tmp/dino-twin-nemo-ts-maps-day360
+
+  python scripts/validate/ocean_fidelity/dino_1226/twin_nemo_ts_maps.py \
+    --run-dino-dir /data/abyssal/.../lego_trueframe \
+    --day 360 --nemo-kt 11520 --nemo-run <NEMO>/cfgs/DINO/RUN_FROMREST_Y1 \
+    --output-dir /data/abyssal/.../maps_trueframe
 
 The JSON sidecar contains every printed statistic and provenance stamp.
 """
@@ -32,15 +52,30 @@ import subprocess
 import sys
 from typing import Any
 
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
-os.environ.setdefault("JAX_PLATFORMS", "cpu")
-os.environ.setdefault("MPLCONFIGDIR", "/tmp/legoesm-matplotlib")
-
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
+
+
+def _set_script_env():
+    """Process-wide defaults for RUNNING this comparator as a script, and the
+    Matplotlib handle it returns.
+
+    Kept out of import so the unit tests -- and any other importer -- do not
+    inherit a CPU-only JAX, a hidden GPU or a redirected Matplotlib cache
+    (review comment: importing a module must not reconfigure the process).
+    Matplotlib is imported HERE rather than at module scope because importing
+    it before ``MPLCONFIGDIR`` is set fails outright on a node whose home is
+    read-only ("No usable temporary directory"), which is exactly the headless
+    case this function exists to configure.
+    """
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+    os.environ.setdefault("JAX_PLATFORMS", "cpu")
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/legoesm-matplotlib")
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    return plt
 
 ROOT = Path(__file__).resolve().parents[4]
 NEMO_ROOT = Path("/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2")
@@ -224,7 +259,7 @@ def plot_row(axes, candidate: np.ndarray, reference: np.ndarray,
     )
     for axis, field, title, kwargs in panels:
         image = axis.pcolormesh(lon, lat, field, shading="auto", **kwargs)
-        plt.colorbar(image, ax=axis, shrink=0.85)
+        axis.figure.colorbar(image, ax=axis, shrink=0.85)
         axis.set_title(title, fontsize=9)
         axis.set_xlabel("longitude [deg E]")
         axis.set_ylabel("latitude [deg N]")
@@ -235,6 +270,7 @@ def save_figures(output_dir: Path, day: int, fields: dict[str, np.ndarray],
                  masks: dict[str, np.ndarray], lon: np.ndarray, lat: np.ndarray,
                  depths: np.ndarray) -> dict[str, str]:
     surface_path = output_dir / f"surface_day{day}.png"
+    plt = _set_script_env()
     fig, axes = plt.subplots(3, 3, figsize=(13, 12), constrained_layout=True)
     plot_row(axes[0], fields["SSH_arm"], fields["SSH_nemo"], masks["surface"],
              lon, lat, f"SSH day {day}", "m", "viridis")
@@ -249,6 +285,7 @@ def save_figures(output_dir: Path, day: int, fields: dict[str, np.ndarray],
     target_depths = (300.0, 1000.0)
     levels = [int(np.argmin(np.abs(depths - target))) for target in target_depths]
     subsurface_path = output_dir / f"subsurface_day{day}.png"
+    plt = _set_script_env()
     fig, axes = plt.subplots(4, 3, figsize=(13, 15), constrained_layout=True)
     rows = (
         ("T", levels[0], "degC", "turbo"),
@@ -274,6 +311,10 @@ def print_report(result: dict[str, Any]) -> None:
           f"dirty_tracked_files={provenance['comparator_repo']['dirty_tracked_files']}")
     print(f"PROVENANCE arm={provenance['arm_path']} "
           f"sha256={provenance['input_sha256'][provenance['arm_path']]}")
+    _st = provenance["arm_stamps"]
+    print(f"PROVENANCE producer={_st.get('producer', 'climate_arm_npz')} "
+          f"source_dtypes={_st['field_dtypes']} "
+          f"control_dtype={_st['control_dtype']}")
     print(f"PROVENANCE mesh={provenance['mesh_path']} "
           f"sha256={provenance['input_sha256'][provenance['mesh_path']]}")
     print(f"PROVENANCE restart_pattern={provenance['restart_pattern']} "
@@ -300,12 +341,157 @@ def print_report(result: dict[str, Any]) -> None:
           f"abs_C={peak['abs_difference']:.12e}")
 
 
+def load_candidate(args: argparse.Namespace):
+    """The candidate state to score, from EITHER producer.
+
+    Returns ``(T, S, ssh, land_mask, stamps)`` with ``T``/``S`` at
+    ``(199, 52, 36)``, ``ssh``/``land_mask`` at ``(199, 52)``, and every scored
+    array float64.  Which producer supplied them is recorded in ``stamps``;
+    everything downstream -- masking, statistics, controls, figures -- is the
+    SAME code for both, so the two producers can never be scored differently.
+    """
+    if args.run_dino_dir is not None:
+        return load_run_dino_snapshot(args.run_dino_dir.resolve(), args.day)
+    return load_arm_npz(args.arm_npz.resolve(), args.day)
+
+
+def load_arm_npz(arm_path: Path, day: int):
+    """The climate-battery arm producer (``*.npz`` with its own stamps)."""
+    with np.load(arm_path, allow_pickle=False) as arm:
+        keys = {name: f"{name}3d_day{day}" for name in ("T", "S", "eta")}
+        for key in keys.values():
+            require(key in arm.files, f"arm is missing requested day field {key}")
+        require(bool(scalar(arm, "stable")), "arm producer marked unstable")
+        require(int(scalar(arm, "producer_dirty_tracked_files")) == 0,
+                "arm records a dirty producer")
+        require(str(scalar(arm, "control_dtype")) == "float64",
+                "arm control is not fp64")
+        field_dtypes = {key: str(np.asarray(arm[key]).dtype)
+                        for key in keys.values()}
+        require(all(dtype == "float64" for dtype in field_dtypes.values()),
+                f"arm scored fields are not all fp64: {field_dtypes}")
+        return (np.asarray(arm[keys["T"]]), np.asarray(arm[keys["S"]]),
+                np.asarray(arm[keys["eta"]]), np.asarray(arm["land_mask"]),
+                {"producer": "climate_arm_npz",
+                 "producer_path": str(arm_path),
+                 "producer_git_sha": str(scalar(arm, "producer_git_sha")),
+                 "producer_dirty_tracked_files": int(
+                     scalar(arm, "producer_dirty_tracked_files")),
+                 "codex_session_id": str(scalar(arm, "codex_session_id")),
+                 "control_dtype": str(scalar(arm, "control_dtype")),
+                 "field_dtypes": field_dtypes})
+
+
+def load_run_dino_snapshot(run_dir: Path, day: int):
+    """A ``scripts/run/run_dino.py`` output directory, scored directly.
+
+    ``run_dino.py`` writes ``snapshots/snapshot_NNNNN.npz`` carrying ``T``,
+    ``S``, ``eta``, ``land_mask`` and ``time_days``; the snapshot whose
+    ``time_days`` matches ``day`` is the one scored.  On the NEMO-faithful
+    grid that state is ALREADY NEMO's full ``(199, 52)`` frame, so there is no
+    embedding step -- the earlier scratch adapter existed only because the
+    standalone path built a 48x195 grid and had to be pasted into the middle
+    of NEMO's domain, which is exactly the defect this frame fix removed.
+
+    Two honest conversions, both stamped rather than silent:
+
+    * the vertical axis is zero-PADDED up to NEMO's 36 levels when legoESM's
+      ladder carries fewer.  NEMO's deepest level is permanently dry
+      (``tmask[...,35]`` is empty everywhere), so the padding is only ever
+      scored against dry cells, which the wet mask removes.
+    * the arrays are UPCAST to float64 for the arithmetic.  That is a change
+      of accumulator, not of information: ``run_dino.py`` leaves legoESM's
+      precision policy at its default, which stores float32 even under
+      JAX_ENABLE_X64 -- so the SOURCE dtypes go into the JSON under
+      ``field_dtypes`` and are printed, and a float32 source carries a ~1.2e-7
+      relative representation floor that any residual must be read against.
+      (The arm producer sets fp64 and is required to; this producer is
+      reported as it is, not asserted to be something it is not.)
+    """
+    require(run_dir.is_dir(), f"missing run directory {run_dir}")
+    paths = sorted((run_dir / "snapshots").glob("snapshot_*.npz"))
+    require(bool(paths), f"no snapshots under {run_dir / 'snapshots'}")
+    chosen, chosen_days, times = None, None, []
+    for path in paths:
+        with np.load(path, allow_pickle=False) as snap:
+            t_days = float(np.asarray(snap["time_days"]))
+        times.append(t_days)
+        if abs(t_days - day) < 0.5:
+            require(chosen is None,
+                    f"two snapshots claim day {day}: {chosen} and {path}")
+            chosen, chosen_days = path, t_days
+    require(chosen is not None,
+            f"no snapshot at day {day} in {run_dir}; have days {times}")
+
+    meta_path = run_dir / "run_metadata.json"
+    meta = json.loads(meta_path.read_text()) if meta_path.is_file() else {}
+    with np.load(chosen, allow_pickle=False) as snap:
+        raw = {k: np.asarray(snap[k]) for k in ("T", "S", "eta", "land_mask")}
+    field_dtypes = {k: str(v.dtype) for k, v in raw.items()}
+    for name in ("T", "S"):
+        value = raw[name]
+        require(value.ndim == 3 and value.shape[:2] == FULL_HORIZONTAL_SHAPE,
+                f"snapshot {name}: expected {FULL_HORIZONTAL_SHAPE}+levels, "
+                f"got {value.shape}. A run on a frame other than NEMO's "
+                "cannot be scored here -- use --nemo-faithful-grid.")
+        require(value.shape[2] <= 36,
+                f"snapshot {name} has {value.shape[2]} levels, more than "
+                "NEMO's 36")
+    for name in ("eta", "land_mask"):
+        require(raw[name].shape == FULL_HORIZONTAL_SHAPE,
+                f"snapshot {name}: expected {FULL_HORIZONTAL_SHAPE}, got "
+                f"{raw[name].shape}")
+
+    def to36(value: np.ndarray) -> np.ndarray:
+        out = np.zeros((*FULL_HORIZONTAL_SHAPE, 36), dtype=np.float64)
+        out[..., :value.shape[2]] = value.astype(np.float64)
+        return out
+
+    # The arm producer carries a `stable` stamp; a run_dino snapshot does not,
+    # so stability is CHECKED here instead of trusted -- finite everywhere wet,
+    # and a temperature inside a range no DINO run can leave while healthy.
+    # (`run_dino.py` writes no git sha into run_metadata.json, so producer_git_sha
+    # can be "unknown"; producer_sha256 pins the exact bytes scored regardless.)
+    wet = raw["land_mask"] > 0.5
+    for name in ("T", "S"):
+        require(np.isfinite(raw[name][wet]).all(),
+                f"snapshot {name} is not finite on wet columns -- the run "
+                "was unstable and must not be scored")
+    require(np.isfinite(raw["eta"][wet]).all(), "snapshot eta is not finite")
+    t_wet = raw["T"][wet]
+    require(float(t_wet.min()) > -5.0 and float(t_wet.max()) < 45.0,
+            f"snapshot T spans [{float(t_wet.min()):.2f}, "
+            f"{float(t_wet.max()):.2f}] degC on wet cells -- outside any "
+            "healthy DINO state; the run was unstable and must not be scored")
+    return (to36(raw["T"]), to36(raw["S"]),
+            raw["eta"].astype(np.float64),
+            raw["land_mask"].astype(np.float64),
+            {"producer": "run_dino_snapshot",
+             "producer_path": str(chosen),
+             "producer_sha256": sha256(chosen),
+             "producer_git_sha": str(meta.get("git_sha", "unknown")),
+             "producer_run_metadata": str(meta_path) if meta else "absent",
+             # The snapshot's OWN clock, not the requested day. --day selects
+             # within +/-0.5 d, and the NEMO side is pinned by --nemo-kt, so
+             # recording the request here would hide a half-day offset between
+             # the two states being differenced.
+             "snapshot_time_days": float(chosen_days),
+             "requested_day": float(day),
+             "snapshot_day_offset_days": float(chosen_days - day),
+             # The dtype the SCORING arithmetic runs in.  This loader upcasts
+             # every field, so reporting the snapshot's float32 source here
+             # would suggest the comparison itself was float32; the source
+             # dtypes are reported separately in field_dtypes.
+             "control_dtype": "float64",
+             "field_dtypes": field_dtypes,
+             "upcast_to_float64_for_scoring": True,
+             "vertical_zero_pad_to_36_levels": int(36 - raw["T"].shape[2])})
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
-    arm_path = args.arm_npz.resolve()
     output_dir = args.output_dir.resolve()
     nemo_run = args.nemo_run.resolve()
     mesh_path = args.mesh_mask.resolve()
-    require(arm_path.is_file(), f"missing arm {arm_path}")
     require(mesh_path.is_file(), f"missing mesh {mesh_path}")
     require(nemo_run.is_dir(), f"missing NEMO run directory {nemo_run}")
     require(not output_dir.exists() or not any(output_dir.iterdir()),
@@ -317,12 +503,29 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     restart_paths = [Path(path).resolve() for path in sorted(glob.glob(restart_pattern))]
     require(restart_paths, f"no restart tiles match {restart_pattern}")
     rebuild = load_rebuilder()
-    raw = rebuild(restart_pattern, ["tn", "sn", "sshn"])
-    require(set(raw) == {"tn", "sn", "sshn"},
+    # WHICH TIME LEVEL (oracle-fidelity Rule 1d).  NEMO's MLF restart carries
+    # both, and comparing against the wrong one silently substitutes
+    # |T_now - T_before| for "error".  "now" (tn/sn/sshn, the default) is the
+    # state AFTER the step the restart is stamped with, and is what a day-N
+    # comparison wants.  "before" (tb/sb/sshb, the Kbb level) is the ONLY
+    # correct reference for a DAY-0 comparison against a from-rest kt=1
+    # record: the Euler first step (l_1st_euler, istate.f90:114-115) advances
+    # Kmm/Kaa only, so Kbb is still the untouched initial condition while
+    # tn/sn/sshn have already moved (sshn reaches 1.17e-1 m by kt=1).
+    level = {"now": ("tn", "sn", "sshn"),
+             "before": ("tb", "sb", "sshb")}[args.nemo_time_level]
+    raw = rebuild(restart_pattern, list(level))
+    require(set(raw) == set(level),
             f"incomplete rebuilt comparator: {sorted(raw)}")
-    nemo_t_full = np.moveaxis(np.asarray(raw["tn"]), 0, -1)
-    nemo_s_full = np.moveaxis(np.asarray(raw["sn"]), 0, -1)
-    nemo_ssh_full = np.asarray(raw["sshn"])
+    if args.day == 0 and args.nemo_time_level == "now":
+        print("WARNING day 0 is being scored against the NOW level. If this "
+              "restart is a from-rest kt=1 record, the initial condition is "
+              "the BEFORE level (tb/sb/sshb) and the now level has already "
+              "taken the Euler step -- its sshn reaches 1.17e-1 m where the "
+              "initial ssh is exactly 0. Pass --nemo-time-level before.")
+    nemo_t_full = np.moveaxis(np.asarray(raw[level[0]]), 0, -1)
+    nemo_s_full = np.moveaxis(np.asarray(raw[level[1]]), 0, -1)
+    nemo_ssh_full = np.asarray(raw[level[2]])
     require(np.isfinite(nemo_t_full).all() and np.isfinite(nemo_s_full).all()
             and np.isfinite(nemo_ssh_full).all(), "stitched NEMO state is incomplete")
 
@@ -332,28 +535,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     require(mesh_full.tmask.shape[:2] == FULL_HORIZONTAL_SHAPE,
             f"mesh full shape is {mesh_full.tmask.shape[:2]}, expected "
             f"{FULL_HORIZONTAL_SHAPE}")
-    with np.load(arm_path, allow_pickle=False) as arm:
-        keys = {name: f"{name}3d_day{args.day}" for name in ("T", "S", "eta")}
-        for key in keys.values():
-            require(key in arm.files, f"arm is missing requested day field {key}")
-        require(bool(scalar(arm, "stable")), "arm producer marked unstable")
-        require(int(scalar(arm, "producer_dirty_tracked_files")) == 0,
-                "arm records a dirty producer")
-        require(str(scalar(arm, "control_dtype")) == "float64",
-                "arm control is not fp64")
-        arm_t_full = np.asarray(arm[keys["T"]])
-        arm_s_full = np.asarray(arm[keys["S"]])
-        arm_ssh_full = np.asarray(arm[keys["eta"]])
-        arm_land_full = np.asarray(arm["land_mask"])
-        arm_stamps = {
-            "producer_git_sha": str(scalar(arm, "producer_git_sha")),
-            "producer_dirty_tracked_files": int(
-                scalar(arm, "producer_dirty_tracked_files")),
-            "codex_session_id": str(scalar(arm, "codex_session_id")),
-            "control_dtype": str(scalar(arm, "control_dtype")),
-            "field_dtypes": {key: str(np.asarray(arm[key]).dtype)
-                             for key in keys.values()},
-        }
+    arm_t_full, arm_s_full, arm_ssh_full, arm_land_full, arm_stamps = (
+        load_candidate(args))
     for name, value in (("arm T", arm_t_full), ("arm S", arm_s_full),
                         ("NEMO T", nemo_t_full), ("NEMO S", nemo_s_full)):
         require(value.shape == (199, 52, 36),
@@ -363,8 +546,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         ("arm land mask", arm_land_full)):
         require(value.shape == FULL_HORIZONTAL_SHAPE,
                 f"{name}: expected {FULL_HORIZONTAL_SHAPE}, got {value.shape}")
-    require(all(dtype == "float64" for dtype in arm_stamps["field_dtypes"].values()),
-            f"arm scored fields are not all fp64: {arm_stamps['field_dtypes']}")
 
     fields = {
         "T_arm": crop_one_ring("arm T", arm_t_full),
@@ -408,13 +589,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         output_dir, args.day, fields, masks, lon, lat,
         np.asarray(mesh_full.gdept_1d))
 
-    input_paths = [arm_path, mesh_path, *restart_paths]
+    input_paths = [Path(arm_stamps["producer_path"]), mesh_path,
+                   *restart_paths]
     input_hashes = {str(path): sha256(path) for path in input_paths}
     script_path = Path(__file__).resolve()
     result = {
         "schema": "dino-twin-nemo-ts-maps-v1",
         "day": args.day,
         "nemo_kt": args.nemo_kt,
+        "nemo_time_level": args.nemo_time_level,
         "alignment": {
             "full_horizontal_shape": list(FULL_HORIZONTAL_SHAPE),
             "one_ring_slice": "[1:-1,1:-1]",
@@ -436,7 +619,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "nemo_repo": nemo_git_stamp(),
             "script_path": str(script_path),
             "script_sha256": sha256(script_path),
-            "arm_path": str(arm_path),
+            "arm_path": arm_stamps["producer_path"],
             "mesh_path": str(mesh_path),
             "nemo_run": str(nemo_run),
             "restart_pattern": restart_pattern,
@@ -463,6 +646,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arm-npz", type=Path,
                         help="current faithful twin artifact (.npz)")
+    parser.add_argument("--run-dino-dir", type=Path,
+                        help="score a scripts/run/run_dino.py output directory "
+                             "directly (its snapshots/ must be on NEMO's "
+                             "(199,52) frame, i.e. --nemo-faithful-grid); "
+                             "mutually exclusive with --arm-npz")
     parser.add_argument("--day", type=int, help="snapshot day key in the arm")
     parser.add_argument("--nemo-kt", type=int,
                         help="NEMO restart timestep, e.g. 17280 for day 360")
@@ -470,18 +658,29 @@ def build_parser() -> argparse.ArgumentParser:
                         help="fresh directory for PNGs and JSON sidecar")
     parser.add_argument("--nemo-run", type=Path, default=DEFAULT_NEMO_RUN)
     parser.add_argument("--mesh-mask", type=Path, default=DEFAULT_MESH)
+    parser.add_argument("--nemo-time-level", choices=("now", "before"),
+                        default="now",
+                        help="which MLF level of the NEMO restart to score "
+                             "against: 'now' (tn/sn/sshn, default) is the "
+                             "state after the stamped step; 'before' "
+                             "(tb/sb/sshb) is the Kbb level, and is the only "
+                             "correct reference for a day-0 comparison "
+                             "against a from-rest kt=1 record")
     parser.add_argument("--self-test", action="store_true",
                         help="run the planted wet-cell violation without inputs")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
+    _set_script_env()
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.self_test:
         print(json.dumps(planted_violation_self_test(), indent=2, sort_keys=True))
         return 0
-    missing = [name for name in ("arm_npz", "day", "nemo_kt", "output_dir")
+    if (args.arm_npz is None) == (args.run_dino_dir is None):
+        parser.error("give exactly one of --arm-npz / --run-dino-dir")
+    missing = [name for name in ("day", "nemo_kt", "output_dir")
                if getattr(args, name) is None]
     if missing:
         parser.error("required unless --self-test: " + ", ".join(missing))

@@ -87,6 +87,75 @@ NR_TRACERS = 2          # ncnst=3, dnats=1 -> nr = 2 (run_out.txt:97)
 # advected+remapped, the dnats tail (rainwat) is INERT -- fv_dynamics.F90
 # :191 `nq = nq_tot - flagstruct%dnats`.
 ADVECTED_TRACERS = ("sphum", "liq_wat")
+# The pinned deck's set.  ``resolve_deck_tracers`` rebinds these module
+# names from the STEP deck's own field_table + dnats at run time (a deck
+# that lists cl/cl2 advects four), and the IC deck must agree.
+
+
+# The terminator pair is scored on its NATURAL scale, qcly = Cl + 2 Cl2,
+# not each face's peak: on the all-daylight tile Cl2 peaks at ~1e-9 and a
+# rounding-level absolute difference reads as 1e-8 "relative" there.
+# Its floor is arithmetic, not tuning: Cl = D - r with D, r ~ 0.25 and
+# Cl ~ qcly, so the definition itself cancels qcly/0.25 = 1.6e-5 of the
+# operands and rounding at 2.2e-16 lands at ~1.4e-11 of qcly; the two
+# sides' libm/pi differ at that level. Measured 2026-09-14: 6.9e-12.
+TRACER_SCALE = {}
+TRACER_IC_MAX_REL = {}
+# ONE-STEP ceiling per tracer, where a tracer has its own measured
+# envelope. cl2 sits on an exactly-flat 2e-6 plateau next to the
+# terminator front, and there the transport (hord_tr=6 / kord_tr=9) is
+# discontinuous: nudging the plateau by ONE ulp (8.5e-22) in the port's
+# own IC moves its one-step output by 3.297e-09 = 4e12 ulp in 524 cells
+# (tracer_ulp_sensitivity.py, job 9767368, C48 km=5 n_split=8 dt=1920),
+# the same value the oracle residual shows to four digits, while the
+# port's eager and compiled arms disagree there by the same amount and
+# sphum/cl are bit-identical. The Fortran's own rounding decides the same
+# branches, so "match the oracle" has no meaning below that envelope.
+# Ceiling = 2 x the envelope over qcly (user call 2026-09-14); a transport
+# bug would have to hide under 1.6e-3 of the tracer's scale, and
+# conservation / range checks below still see it.
+CL2_ULP_ENVELOPE_ABS = 3.297e-09
+TRACER_STEP_MAX_REL = {}
+try:
+    from legoesm.core.fv3_native_dcmip16_ic import TERM_QCLY as _TERM_QCLY
+    TRACER_SCALE.update({"cl": _TERM_QCLY, "cl2": _TERM_QCLY})
+    TRACER_IC_MAX_REL.update({nm: 4.0 * np.finfo(np.float64).eps
+                              / (_TERM_QCLY / 0.25) for nm in ("cl", "cl2")})
+    TRACER_STEP_MAX_REL["cl2"] = 2.0 * CL2_ULP_ENVELOPE_ABS / _TERM_QCLY
+except ImportError:  # the harness imports before the package on some paths
+    pass
+
+
+def read_deck_tracers(run_dir: str) -> tuple:
+    """(advected, inert) tracer names from a deck's field_table order and
+    its (last) dnats -- fv_dynamics.F90:191 ``nq = nq_tot - dnats``."""
+    ft = os.path.join(run_dir, "field_table")
+    names = []
+    for line in open(ft, errors="replace"):
+        m = re.match(r'\s*"TRACER"\s*,\s*"atmos_mod"\s*,\s*"([^"]+)"', line)
+        if m:
+            names.append(m.group(1))
+    if not names:
+        raise SystemExit(f"{ft}: no TRACER entries found")
+    dnats = _nml_int(_nml_text(run_dir), "dnats")
+    if not 0 <= dnats < len(names):
+        raise SystemExit(f"{run_dir}: dnats={dnats} against {len(names)} tracers")
+    cut = len(names) - dnats
+    return tuple(names[:cut]), tuple(names[cut:])
+
+
+def resolve_deck_tracers(ic_run: str, step_run: str) -> None:
+    """Bind ADVECTED_TRACERS / INERT_TRACERS / NR_TRACERS to the decks'."""
+    global ADVECTED_TRACERS, INERT_TRACERS, NR_TRACERS
+    adv, inert = read_deck_tracers(step_run)
+    adv_ic, inert_ic = read_deck_tracers(ic_run)
+    if (adv, inert) != (adv_ic, inert_ic):
+        raise SystemExit(
+            f"IC deck tracers {adv_ic}+{inert_ic} != step deck tracers "
+            f"{adv}+{inert}; refusing to score across tracer sets")
+    if "sphum" not in adv:
+        raise SystemExit(f"step deck advects {adv}: no sphum")
+    ADVECTED_TRACERS, INERT_TRACERS, NR_TRACERS = adv, inert, len(adv)
 # The moist RESPONSE (moist deck minus dry deck) is a first-order
 # quantity, not a residual, so port and oracle should agree on it as a
 # FIELD. The bound is loose because each side carries its own parity
@@ -296,11 +365,27 @@ def _nml_value(text: str, key: str, pattern: str):
     Returns the last match's captured group, or None.
     """
     val = None
-    for raw in text.splitlines():
-        line = raw.split("!", 1)[0]          # `!` starts a comment
-        m = re.search(rf"\b{key}\s*=\s*({pattern})", line, re.IGNORECASE)
-        if m:
-            val = m.group(1)
+    # comments stripped per line, then a line that ENDS in `=` continues
+    # onto the next (`k_split =` newline `2` is legal free-form namelist;
+    # codex 2026-09-14 -- it read as the previous assignment). Arrays,
+    # repeat counts (`3*1`) and quoted text remain out of scope: every key
+    # read here is a scalar and no pinned deck uses those forms.
+    lines = [raw.split("!", 1)[0] for raw in text.splitlines()]
+    joined, buf = [], ""
+    for line in lines:
+        buf = (buf + " " + line) if buf else line
+        if buf.rstrip().endswith("="):
+            continue
+        joined.append(buf)
+        buf = ""
+    if buf:
+        joined.append(buf)
+    for line in joined:
+        # ALL matches on the line, last one wins -- `k_split=1, k_split=2`
+        # on one line is legal Fortran and reads as 2
+        found = re.findall(rf"\b{key}\s*=\s*({pattern})", line, re.IGNORECASE)
+        if found:
+            val = found[-1]
     return val
 
 
@@ -472,8 +557,14 @@ def check_moist_deck(run_dir: str) -> None:
             f"total-energy fixer (fv_mapz.F90:628-747) is not ported.")
 
 
-def build_port_tracer_ic(sphum6) -> list:
+def build_port_tracer_ic(sphum6, ctx=None, second: str = "zero") -> list:
     """[face][iq] padded tracer arrays for the resolved deck.
+
+    ``second="modulated"`` fills ``liq_wat`` with the port's tracer 1,
+    ``sphum * (1 + 0.5 sin(lon))`` (``lon_modulated_tracer``), for a
+    WARM-STARTED oracle deck whose restart carries that same field
+    (``write_tracer_oracle_ic.py``); the IC control below then checks
+    liq_wat under the derived map instead of scoring 0 == 0.
 
     ``sphum`` comes from :func:`build_port_ic`, NOT from a second call:
     on the moist arm the IC's ``pt`` was divided by ``(1 + zvir*q)``
@@ -491,7 +582,42 @@ def build_port_tracer_ic(sphum6) -> list:
             "build_port_tracer_ic got sphum6=None -- build_port_ic was "
             "called with with_sphum=False, so there is no humidity to "
             "advect and none to have divided pt on the moist arm.")
-    return [[q, np.zeros_like(q)] for q in sphum6]
+    if second not in ("zero", "modulated"):
+        raise ValueError(f"unknown second tracer {second!r}: zero | modulated")
+    names = ADVECTED_TRACERS
+    term = None
+    if "cl" in names or "cl2" in names:
+        if ctx is None:
+            raise ValueError("cl/cl2 need the grid ctx")
+        from legoesm.core.fv3_native_dcmip16_ic import (
+            dcmip16_terminator_six_face)
+        term = dcmip16_terminator_six_face(ctx, sphum6[0].shape[-1])
+    out = []
+    for t, q in enumerate(sphum6):
+        face = []
+        for nm in names:
+            if nm == "sphum":
+                face.append(q)
+            elif nm == "liq_wat":
+                if second == "zero":
+                    face.append(np.zeros_like(q))
+                else:
+                    if ctx is None:
+                        raise ValueError("second='modulated' needs the grid ctx")
+                    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (
+                        lon_modulated_tracer)
+                    face.append(lon_modulated_tracer(
+                        q, ctx["gs6"][t]["agrid_lon"], ctx["n"], ctx["ng"], 1))
+            elif nm == "cl":
+                face.append(term[t][0])
+            elif nm == "cl2":
+                face.append(term[t][1])
+            else:
+                raise ValueError(
+                    f"advected tracer {nm!r} has no port IC (known: sphum, "
+                    f"liq_wat, cl, cl2)")
+        out.append(face)
+    return out
 
 def tracer_window(q6, ctx) -> list:
     """Compute-window copies of the advected tracers, (i, j, k)."""
@@ -633,6 +759,8 @@ def score_pair(port, orc) -> tuple:
     to agree under ONE transform is strictly stronger.
     """
     best = (np.inf, None, None, None, None, None)
+    best_select = np.inf
+    selects = []          # every candidate's selection cost, for tie detection
     ws = wind_scale(port, orc)
     for transposed in (False, True):
         ou = oracle_ij(orc["u"], transposed)
@@ -652,10 +780,41 @@ def score_pair(port, orc) -> tuple:
             su, sv = DIHEDRAL_SIGNS[nm]
             r_u = rel(su * fu, pu_o, ws)
             r_v = rel(sv * fv, pv_o, ws)
-            r = max(r_u, r_v, r_pt, r_dp)
-            if r < best[0]:
-                best = (r, transposed, nm, su, sv,
-                        {"u": r_u, "v": r_v, "pt": r_pt, "delp": r_dp})
+            per = {"u": r_u, "v": r_v, "pt": r_pt, "delp": r_dp}
+            # Any further cell-centred scalar present on BOTH sides (a
+            # longitude-dependent tracer such as the terminator cl) is
+            # scored with factor +1 like pt/delp. On the faces without the
+            # baroclinic bump every prognostic field is zonally symmetric,
+            # so u/v/pt/delp cannot tell a face from its zonal mirror and
+            # the search picks one at random -- measured 2026-09-14 on the
+            # terminator decks: faces 0-2 matched cl at 7e-12, faces 3 and
+            # 5 at rel 1.0, face 4's cl2 at 0.97, with u/v/pt/delp all at
+            # the 1e-14 floor. A field that breaks the symmetry pins it.
+            # The extra field SELECTS the transform (its mirror image
+            # scores ~1.0, the right one ~1e-11) but does not enter the
+            # returned cost: the IC floor gate stays on the four
+            # prognostic fields, and the tracer is judged against its
+            # own floor in the tracer IC control.
+            r = max(per.values())
+            for extra in sorted((set(port) & set(orc)) - set(per)
+                                - {"w", "delz"}):
+                per[extra] = rel(f(port[extra]), oracle_ij(orc[extra],
+                                                           transposed),
+                                 TRACER_SCALE.get(extra))
+            r_select = max(per.values())
+            selects.append(r_select)
+            if r_select < best_select:
+                best_select = r_select
+                per["_select"] = float(r_select)
+                best = (r, transposed, nm, su, sv, per)
+    # AMBIGUITY, made visible (codex 2026-09-14): candidates whose selection
+    # cost sits within the IC floor band of the winner are indistinguishable
+    # on the fields scored. Without a lon-dependent extra this is the state
+    # every pre-terminator certificate was in on the bump-free faces; the
+    # caller decides whether that is acceptable for what it scores.
+    if best[5] is not None:
+        band = max(10.0 * IC_CONTROL_MAX_REL, 2.0 * best_select)
+        best[5]["_ties"] = int(sum(1 for x in selects if x <= band))
     return best
 
 
@@ -705,11 +864,36 @@ def derive_face_map(port, orc) -> tuple:
             meta[pf][ot] = (tr, nm, su, sv)
             per_field[pf][ot] = pf_r
             wind_only[pf, ot] = score_pair_winds_only(port[pf], orc[ot])[0]
-    best_perm, best_worst = None, np.inf
+    # The BIJECTION is chosen on the SELECTION cost (prognostic fields plus
+    # any lon-dependent extra), not on the prognostic cost alone: the
+    # zonally symmetric base state makes several tiles identical in
+    # u/v/pt/delp, so on those the pairing used to be decided by
+    # permutation order (measured 2026-09-14 after codex round 2: runner-up
+    # bijection at 1.000x the winner). The REPORTED worst stays the
+    # prognostic cost of the chosen bijection, so the IC floor gate is
+    # unchanged.
+    sel = np.array([[(per_field[pf][ot] or {}).get("_select", cost[pf, ot])
+                     for ot in range(6)] for pf in range(6)])
+    best_perm, best_sel, second_sel = None, np.inf, np.inf
     for perm in itertools.permutations(range(6)):
-        w = max(cost[pf, perm[pf]] for pf in range(6))
-        if w < best_worst:
-            best_worst, best_perm = w, perm
+        w = max(sel[pf, perm[pf]] for pf in range(6))
+        if w < best_sel:
+            second_sel, best_sel, best_perm = best_sel, w, perm
+        elif w < second_sel:
+            second_sel = w
+    best_worst = max(cost[pf, best_perm[pf]] for pf in range(6))
+    # runner-up bijection's selection cost relative to the winner's: a
+    # margin near 1 means the tile pairing is ambiguous on everything
+    # scored, and main reports it (REFUSE with a lon-dependent tracer,
+    # WARN without)
+    if best_sel > 0:
+        margin = second_sel / best_sel
+    else:                       # exact zeros: a tie if the runner-up is 0 too
+        margin = 1.0 if second_sel == 0 else np.inf
+    for pf in range(6):
+        d = per_field[pf][best_perm[pf]]
+        if d is not None:
+            d["_bijection_margin"] = float(margin)
     return cost, meta, best_perm, best_worst, per_field, wind_only
 
 
@@ -976,7 +1160,7 @@ def perturb_boundary_metrics_coherent(ctx, eps: float, n: int, ng: int):
           + "  ".join(f"{k}={v}" for k, v in sorted(stats.items())))
 
 
-def _make_jax_step(ctx, jit=False):
+def _make_jax_step(ctx, jit=False, batched=False):
     """A drop-in for ``fv_dynamics_step`` that steps with the JAX lane.
 
     The scoring below is ~400 lines that read six per-face NumPy dicts
@@ -1042,16 +1226,17 @@ def _make_jax_step(ctx, jit=False):
             # deck and silently invalidate the response gate. Array deck
             # constants (ak/bk/ptop) are invariant across arms, so the scalar
             # kwargs are a sufficient key.
-            _key = tuple(sorted(
+            _key = (("batched", batched),) + tuple(sorted(
                 (k, v) for k, v in kw.items()
                 if isinstance(v, (int, float, bool, str, type(None)))))
             if _key not in _cache:
                 _static = dict(kw)
                 _cache[_key] = _jdyn.make_fv_dynamics_step_jit(
-                    jctx, _static.pop("km"), **_static)
+                    jctx, _static.pop("km"), batched=batched, **_static)
             out = _cache[_key](jstate, jpress, jq, **_dyn)
         else:
-            out = _jdyn.fv_dynamics_step(jctx, jstate, jpress, q=jq, **kw)
+            out = _jdyn.fv_dynamics_step(
+                jctx, jstate, jpress, q=jq, batched=batched, **kw)
 
         # Write back IN PLACE -- see the docstring.
         st = out["state"] if "state" in out else out
@@ -1108,6 +1293,12 @@ def main(argv=None):
     ap.add_argument("--max-rel", type=float, default=None,
                     help="gate: exit 1 if any field's one-step rel exceeds "
                          "this")
+    ap.add_argument("--tracer2", choices=("zero", "modulated"), default="zero",
+                    help="liq_wat IC on the port: 'zero' matches the "
+                         "cold-start oracle deck (vacuous as a transport "
+                         "test); 'modulated' = sphum*(1+0.5 sin lon) for a "
+                         "warm-started deck built by "
+                         "write_tracer_oracle_ic.py")
     ap.add_argument("--tracers", action="store_true",
                     help="score tracer advection (fv_tracer2d port): "
                          "initialise sphum/liq_wat from the analytic "
@@ -1230,7 +1421,13 @@ def main(argv=None):
                          "--backend jax. Compiles the DYNAMICS step only; "
                          "the physics step has no jit path (refused with "
                          "--physics).")
+    ap.add_argument("--batched", action="store_true",
+                    help="run the FACE-BATCHED dynamics arm. JAX backend "
+                         "only; off by default.")
     args = ap.parse_args(argv)
+    if args.batched and args.backend != "jax":
+        raise SystemExit("--batched requires --backend jax because face "
+                         "batching exists only in the JAX dynamics lane")
     if args.jit and args.backend != "jax":
         raise SystemExit("--jit applies to --backend jax only")
     if args.jit and args.physics != "none":
@@ -1355,6 +1552,19 @@ def main(argv=None):
     # split by ROLE, not by pathname equality (codex): the physics gate applies
     # ONLY to the step deck; the IC is checked inert, and for the HS arm the IC
     # is the MOIST cold-start (adiabatic=.false.), so it is checked moist=True.
+    resolve_deck_tracers(args.ic_run, args.step_run)
+    # --k-split / --n-split were taken on faith: the step deck's own
+    # namelist decides what the oracle ran (last assignment wins, as
+    # Fortran reads it), and an arm that disagrees scores nothing.
+    _step_nml = _nml_text(args.step_run)
+    for _key, _val in (("k_split", args.k_split), ("n_split", args.n_split)):
+        _deck = _nml_int(_step_nml, _key)
+        if _deck != _val:
+            raise SystemExit(
+                f"{args.step_run}: deck has {_key}={_deck}, the arm was asked "
+                f"to run {_key}={_val}; refusing to score a different "
+                f"integration than the oracle ran (pass --{_key.replace('_', '-')} "
+                f"{_deck})")
     for _r, _is_step in ((args.ic_run, False), (args.step_run, True)):
         check_deck_matches_the_arm(
             _r, nh=args.nh,
@@ -1377,6 +1587,8 @@ def main(argv=None):
     print(f"port constants: kappa = {FV3_KAPPA!r}  cp_air = {FV3_CP_AIR!r}")
     print(f"                (2/7 = {2/7!r}; rel diff "
           f"{abs(FV3_KAPPA - 2/7)/(2/7):.3e})")
+    print(f"step arm: backend={args.backend} batched={args.batched} "
+          f"compiled={args.jit}")
 
     ctx = build_six_face_duo_context(N, NG, use_ext_bundle=True,
                                      use_ext_metrics=args.ext_metrics,
@@ -1458,8 +1670,40 @@ def main(argv=None):
         zvir=(FV3_RVGAS / FV3_RDGAS - 1.0)
         if (args.moist or args.physics == "held_suarez") else 0.0)
     p_ic = port_window(state, ctx)
+    q = p_tr_ic = None
+    if args.tracers:
+        q = build_port_tracer_ic(sphum6, ctx=ctx, second=args.tracer2)
+        p_tr_ic = tracer_window(q, ctx)
+        for nm in ("cl", "cl2"):
+            if nm in ADVECTED_TRACERS:
+                # a longitude-dependent scalar in the map derivation: see
+                # score_pair -- without it the map is ambiguous up to a
+                # zonal mirror on the bump-free faces
+                for pf in range(6):
+                    p_ic[pf][nm] = p_tr_ic[pf][nm]
+                for ot in range(6):
+                    orc_ic[ot][nm] = orc_tr_ic[ot][nm]
     (cost, meta, perm, worst,
      per_field, wind_only) = derive_face_map(p_ic, orc_ic)
+    ambiguous = [pf for pf in range(6)
+                 if per_field[pf][perm[pf]].get("_ties", 1) > 1]
+    bmargin = per_field[0][perm[0]].get("_bijection_margin", np.inf)
+    print(f"face-map bijection margin: runner-up assignment's worst cost is "
+          f"{bmargin:.3g}x the winner's" + ("  -- AMBIGUOUS TILE PAIRING"
+                                           if bmargin < 10.0 else ""))
+    if bmargin < 10.0:
+        ambiguous = list(range(6))
+    if ambiguous:
+        lon_scored = args.tracers and any(nm in ADVECTED_TRACERS
+                                          for nm in ("cl", "cl2"))
+        msg = (f"face map AMBIGUOUS on port faces {[f + 1 for f in ambiguous]}: "
+               f"more than one transform fits every scored field at the IC "
+               f"floor (the bump-free faces are mirror-symmetric in u/v/pt/delp)")
+        if lon_scored:
+            raise SystemExit("REFUSED: " + msg + " even with a lon-dependent "
+                             "tracer attached -- the map cannot be trusted")
+        print("WARNING: " + msg + "; nothing scored here depends on the "
+              "choice, but a longitude-dependent field would")
 
     print("\nIC cost matrix rel(port face -> oracle tile):")
     for pf in range(6):
@@ -1490,8 +1734,9 @@ def main(argv=None):
                 if min(cost[pf, ot], wind_only[pf, ot]) > 1e-6:
                     continue
                 print(f"  face {pf+1} -> tile {ot+1}: " +
-                      "  ".join(f"{k}={d[k]:9.2e}" for k in
-                               ("u", "v", "pt", "delp")))
+                      "  ".join(f"{k}={d[k]:9.2e}" for k in d
+                                if not k.startswith("_"))
+                      + (f"  ties={d['_ties']}" if d.get("_ties", 1) > 1 else ""))
         print("\nport IC field ranges (compute window):")
         for f in ("u", "v", "pt", "delp"):
             print(f"  {f:5s} " + "  ".join(
@@ -1533,29 +1778,33 @@ def main(argv=None):
           f"{IC_CONTROL_MAX_REL:.0e}; map matches the frozen 2026-08-07 "
           f"bijection). The map below is the one applied to the step.")
 
-    q = None
-    p_tr_ic = None
     if args.tracers:
         # TRACER instrument control, under the SAME derived map: the
         # port's analytic sphum against the zerostep fv_tracer.res.
         # sphum is analytic in (lat, ak, bk) with no quad step beyond
         # the agrid latitudes, so the quad-geometry floor applies.
-        q = build_port_tracer_ic(sphum6)
-        p_tr_ic = tracer_window(q, ctx)
+        # (q / p_tr_ic were built above so cl could constrain the map.)
         worst_tr_ic = 0.0
+        worst_tr_ic_over_floor = 0.0
         for pf in range(6):
             ot = perm[pf]
             for nm in ADVECTED_TRACERS:
                 a, b = map_scalar_pair(p_tr_ic[pf][nm], orc_tr_ic[ot][nm],
                                        meta[pf][ot])
-                worst_tr_ic = max(worst_tr_ic, rel(a, b))
+                r_nm = rel(a, b, TRACER_SCALE.get(nm))
+                worst_tr_ic = max(worst_tr_ic, r_nm)
+                floor = TRACER_IC_MAX_REL.get(nm, IC_CONTROL_MAX_REL)
+                worst_tr_ic_over_floor = max(worst_tr_ic_over_floor,
+                                             r_nm / floor)
         print(f"TRACER IC control: worst rel {worst_tr_ic:.3e} over "
               f"{ADVECTED_TRACERS} (sphum analytic vs zerostep restart; "
-              f"liq_wat 0 == 0, vacuous).")
-        if worst_tr_ic > IC_CONTROL_MAX_REL:
+              f"liq_wat {'0 == 0, vacuous' if args.tracer2 == 'zero' else 'modulated, under the derived map'}).")
+        if worst_tr_ic_over_floor > 1.0:
             raise SystemExit(
                 f"TRACER INSTRUMENT CONTROL FAILED: IC rel "
-                f"{worst_tr_ic:.3e} exceeds {IC_CONTROL_MAX_REL:.0e}; the "
+                f"{worst_tr_ic:.3e} is {worst_tr_ic_over_floor:.2f}x its "
+                f"tracer's floor ({IC_CONTROL_MAX_REL:.0e}, or the "
+                f"cancellation floor {TRACER_IC_MAX_REL} for cl/cl2); the "
                 f"port's tracer IC does not reproduce the oracle's, so "
                 f"the one-step tracer comparison would start from a "
                 f"different field. Refusing to print it.")
@@ -1738,7 +1987,7 @@ def main(argv=None):
     # (pt round-trips K -> theta_v -> K inside each call).
     step_fn = fv_dynamics_step
     if args.backend == "jax":
-        step_fn = _make_jax_step(ctx, jit=args.jit)
+        step_fn = _make_jax_step(ctx, jit=args.jit, batched=args.batched)
     for _step in range(args.n_steps):
         out = step_fn(ctx, state, press, bdt=args.dt, km=KM,
                       k_split=args.k_split, n_split=args.n_split,
@@ -1988,8 +2237,15 @@ def main(argv=None):
             for nm in ADVECTED_TRACERS:
                 a, b = map_scalar_pair(p_tr_1[pf][nm], orc_tr_1[ot][nm],
                                        meta[pf][ot])
-                r = rel(a, b)
+                r = rel(a, b, TRACER_SCALE.get(nm))
                 absd = float(np.abs(a - b).max())
+                if args.save_fields:
+                    saved[f"port_f{pf+1}_{nm}"] = np.asarray(a)
+                    saved[f"oracle_f{pf+1}_{nm}"] = np.asarray(b)
+                    a0, b0 = map_scalar_pair(p_tr_ic[pf][nm],
+                                             orc_tr_ic[ot][nm], meta[pf][ot])
+                    saved[f"port_ic_f{pf+1}_{nm}"] = np.asarray(a0)
+                    saved[f"oracle_ic_f{pf+1}_{nm}"] = np.asarray(b0)
                 tnd = tr_tend[nm][ot]
                 vac = (min(float(orc_tr_ic[t][nm].min()) for t in range(6))
                        == max(float(orc_tr_ic[t][nm].max())
@@ -1999,18 +2255,92 @@ def main(argv=None):
                            "frac_of_tendency": (absd / tnd if tnd
                                                 else float("nan")),
                            "vacuous_constant_ic": bool(vac)}
-                worst_step = max(worst_step, r)
+                if nm in TRACER_STEP_MAX_REL:
+                    # scored against its own ceiling: contributes to the
+                    # gate as (r / ceiling) * max_rel so one --max-rel
+                    # still decides, and the ratio is printed
+                    over = r / TRACER_STEP_MAX_REL[nm]
+                    row[nm]["ceiling"] = TRACER_STEP_MAX_REL[nm]
+                    row[nm]["fraction_of_ceiling"] = over
+                    worst_step = max(worst_step,
+                                     over * (args.max_rel or 1.0))
+                else:
+                    worst_step = max(worst_step, r)
                 print(f"  face {pf+1} -> tile {ot+1}  {nm:8s} "
                       f"rel={r:9.3e}  |d|max={absd:11.5g}  "
                       f"tendency={tnd:11.5g}  "
                       f"|d|/tend={row[nm]['frac_of_tendency']:9.3e}"
-                      + ("  [VACUOUS: constant IC]" if vac else ""))
+                      + ("  [VACUOUS: constant IC]" if vac else "")
+                      + (f"  [{row[nm]['fraction_of_ceiling']:.2f}x its own "
+                         f"ceiling {TRACER_STEP_MAX_REL[nm]:.2e}]"
+                         if nm in TRACER_STEP_MAX_REL else ""))
 
     if args.save_fields:
         saved["fields"] = np.asarray(fields)
         saved["nh"] = np.asarray(bool(args.nh))
         np.savez_compressed(args.save_fields, **saved)
         print(f"\nsaved mapped port/oracle planes -> {args.save_fields}")
+    if args.tracers:
+        # Two checks a ceiling cannot replace (codex 2026-09-14: a
+        # conservative REDISTRIBUTION bug on cl2 hides under 1.6e-3 of
+        # qcly). (1) Tracer MASS on the compute window, port vs oracle,
+        # after the step: both transports are flux-form, so the totals
+        # must agree to rounding whatever the limiter did. (2) For the
+        # terminator pair, Cl + 2 Cl2 - qcly after the step: the DCMIP
+        # diagnostic; the port's deviation must sit within cl2's ceiling
+        # of the oracle's, so cl2 cannot have been redistributed
+        # differently from cl.
+        print("\nTRACER MASS after one step (sum area*delp*q over the window, "
+              "port vs oracle, per tracer; must agree to rounding). AREA-"
+              "weighted: an unweighted sum is not conserved by a flux moving "
+              "tracer between cells of different area (first version, job "
+              "9769480, flagged cl2 at 2.9e-10 for exactly that reason):")
+        for nm in ADVECTED_TRACERS:
+            mp = mo = 0.0
+            for pf in range(6):
+                ot = perm[pf]
+                area = np.asarray(ctx["gs6"][pf]["area"])[
+                    ctx["ng"]:ctx["ng"] + ctx["n"],
+                    ctx["ng"]:ctx["ng"] + ctx["n"]][:, :, None]
+                a, b = map_scalar_pair(p_tr_1[pf][nm], orc_tr_1[ot][nm],
+                                       meta[pf][ot])
+                dp_p, dp_o = map_scalar_pair(p_1[pf]["delp"],
+                                             orc_1[ot]["delp"], meta[pf][ot])
+                # a, b, dp_* are in the port's orientation after the map;
+                # the port's own area applies to both
+                area_m = DIHEDRAL[meta[pf][ot][1]](area)
+                mp += float((area_m * a * dp_p).sum())
+                mo += float((area_m * b * dp_o).sum())
+            r_m = abs(mp - mo) / max(abs(mp), abs(mo), 1e-300)
+            print(f"  {nm:8s} port {mp:.12e}  oracle {mo:.12e}  rel {r_m:.3e}")
+            if r_m > IC_CONTROL_MAX_REL:
+                worst_step = max(worst_step, r_m / IC_CONTROL_MAX_REL
+                                 * (args.max_rel or 1.0))
+                print(f"    MASS MISMATCH beyond rounding for {nm} -- counted "
+                      f"against the gate")
+        if "cl" in ADVECTED_TRACERS and "cl2" in ADVECTED_TRACERS:
+            from legoesm.core.fv3_native_dcmip16_ic import TERM_QCLY as _Q
+            # CELLWISE under the derived map (codex round 2: comparing two
+            # unsigned maxima hid location, sign and integrated loss)
+            dev_p = dev_o = gap = 0.0
+            for pf in range(6):
+                ot = perm[pf]
+                fp_ = p_tr_1[pf]["cl"] + 2.0 * p_tr_1[pf]["cl2"] - _Q
+                fo_ = orc_tr_1[ot]["cl"] + 2.0 * orc_tr_1[ot]["cl2"] - _Q
+                a, b = map_scalar_pair(fp_, fo_, meta[pf][ot])
+                dev_p = max(dev_p, float(np.abs(a).max()) / _Q)
+                dev_o = max(dev_o, float(np.abs(b).max()) / _Q)
+                gap = max(gap, float(np.abs(a - b).max()) / _Q)
+            # RECORD, not a gate: cellwise, Cl + 2 Cl2 - qcly differs
+            # between the codes by 2|dcl2| + |dcl|, i.e. it is implied by
+            # the two cellwise tracer gates above (measured 2026-09-14:
+            # 1.649e-3 = exactly twice cl2's residual, cl at 1e-11). A gate
+            # on it would be the cl2 gate again with a different name.
+            # Printed because it is the DCMIP terminator diagnostic.
+            print(f"\nTERMINATOR Cl + 2 Cl2 - qcly after one step (/ qcly, "
+                  f"RECORD -- implied by the cellwise tracer gates): "
+                  f"max port {dev_p:.3e}  max oracle {dev_o:.3e}  "
+                  f"cellwise max |port - oracle| {gap:.3e}")
     print(f"\nWORST one-step rel over all faces and fields: {worst_step:.4e}")
     print(f"IC control (same harness, same map): {worst:.4e}")
     print(f"amplification over one step: "
@@ -2045,6 +2375,8 @@ def main(argv=None):
     if args.json:
         with open(args.json, "w") as fh:
             json.dump({"ic_worst_rel": worst, "step_worst_rel": worst_step,
+                       "batched": args.batched,
+                       "compiled": args.jit,
                        "n_steps": args.n_steps,
                        "step_run": args.step_run,
                        "face_map": [{"port_face": pf + 1,
