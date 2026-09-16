@@ -2495,10 +2495,10 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
     tke_statement_walk = {
         "format": "nemo-testcase-l2-gyre-tke-production-walk-v1",
         "given_nemo_entry": _tke_production_statement_rows(
-            given_traces[(2, 1)], statement_record,
+            given_traces[(2, 1)], tke_statement_record,
             "NEMO_RECORDED", plant),
         "chained": _tke_production_statement_rows(
-            chained_tke_trace, statement_record, "LEGO_CHAINED"),
+            chained_tke_trace, tke_statement_record, "LEGO_CHAINED"),
     }
 
     measured = [row for row in given
