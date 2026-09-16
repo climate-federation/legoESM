@@ -20,11 +20,13 @@ from pathlib import Path
 import numpy as np
 from legoesm.ocean.fidelity.provenance import worktree_stamp
 from nemo_testcase_l2_gyre_phase3_gate import (
+    SCALAR_MATH_ROOT,
     STAGE_WW_ROOT,
     _surface_forcings,
     expected_masks,
     lego_fields,
     read_entry,
+    read_stage as read_phase3_stage,
     read_stage_ww,
     read_transport,
     require,
@@ -1235,7 +1237,9 @@ def _stage1_transport_w_trace(
     }
 
 
-def _stage1_transport_w_scalar_reference(arrays, transport_u, transport_v):
+def _stage1_transport_w_scalar_reference(
+    arrays, transport_u, transport_v, *, r3_kaa=None, r1_dt=None,
+):
     """Scalar replay of compiled divhor + WZV, calibrated to direct W."""
     shape = (22, 32, 30)
     tmask = _owned3(arrays["tmask"]) > 0.5
@@ -1243,7 +1247,9 @@ def _stage1_transport_w_scalar_reference(arrays, transport_u, transport_v):
     e3t_0 = _owned3(arrays["e3t_0"])
     reciprocal_area = _owned2(arrays["r1_e1e2t"])
     r3_kbb = _owned2(arrays["r3t_Kbb"])
-    r3_kaa = _owned2(arrays["r3t_Kaa"])
+    r3_kaa = (_owned2(arrays["r3t_Kaa"])
+              if r3_kaa is None else np.asarray(r3_kaa))
+    r1_dt = np.float64(arrays["r1_Dt"] if r1_dt is None else r1_dt)
     hdiv = np.zeros(shape, dtype=np.float64)
     e3div = np.zeros(shape, dtype=np.float64)
     zonal = np.zeros(shape, dtype=np.float64)
@@ -1279,7 +1285,7 @@ def _stage1_transport_w_scalar_reference(arrays, transport_u, transport_v):
             for i in range(32):
                 incoming[j, i, level] = carry[j, i]
                 term = np.float64(
-                    np.float64(arrays["r1_Dt"] * e3t_0[j, i, level])
+                    np.float64(r1_dt * e3t_0[j, i, level])
                     * r3_delta[j, i])
                 stretch[j, i, level] = term
                 total = np.float64(e3div[j, i, level] + term)
@@ -1307,7 +1313,10 @@ def _stage1_transport_w_scalar_reference(arrays, transport_u, transport_v):
     }
 
 
-def _stage1_w_walk(records, transports, direct_stage_ww, plant: str | None):
+def _stage1_w_walk(
+    records, transports, direct_stage_ww, direct_stage_state,
+    plant: str | None,
+):
     """Walk kt=1 stage-1 transport W from admitted NEMO operands."""
     import jax
     import jax.numpy as jnp
@@ -1316,9 +1325,16 @@ def _stage1_w_walk(records, transports, direct_stage_ww, plant: str | None):
     transport = transports[(1, 1)]
     transport_u = np.asarray(transport["zFu"])
     transport_v = np.asarray(transport["zFv"])
-    reference = _stage1_transport_w_scalar_reference(
-        arrays, transport_u, transport_v)
     direct_ww = np.asarray(direct_stage_ww[(1, 1)]["ww"])
+    ssh_kbb = _owned2(arrays["ssh_Kbb"])
+    r3_kbb = _owned2(arrays["r3t_Kbb"])
+    require(np.all(ssh_kbb != 0.0),
+            "kt1 stage1 cannot recover reciprocal reference depth")
+    r1_h0 = r3_kbb / ssh_kbb
+    r3_kaa = np.asarray(direct_stage_state[(1, 1)]["ssh"]) * r1_h0
+    r1_dt = np.float64(1.0 / direct_stage_ww[(1, 1)]["rDt_s"])
+    reference = _stage1_transport_w_scalar_reference(
+        arrays, transport_u, transport_v, r3_kaa=r3_kaa, r1_dt=r1_dt)
     wet_w = _owned3(arrays["wmask"], 31) > 0.5
     require(np.array_equal(reference["ww"][wet_w], direct_ww[wet_w]),
             "scalar transport-W replay does not reproduce direct NEMO W")
@@ -1328,8 +1344,8 @@ def _stage1_w_walk(records, transports, direct_stage_ww, plant: str | None):
         jnp.asarray(_owned3(arrays["e3t_Kmm"])),
         jnp.asarray(_owned3(arrays["e3t_0"])),
         jnp.asarray(_owned2(arrays["r3t_Kbb"])),
-        jnp.asarray(_owned2(arrays["r3t_Kaa"])),
-        jnp.asarray(arrays["r1_Dt"]),
+        jnp.asarray(r3_kaa),
+        jnp.asarray(r1_dt),
         jnp.asarray(_owned3(arrays["tmask"])),
     )
     ordinary = jax.device_get(jax.jit(
@@ -1446,7 +1462,7 @@ def _external_rows(outputs, histories, records, advmean_root: Path,
 def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                 memory_root: Path, btstep_root: Path,
                 stage_closure_root: Path,
-                plant: str | None) -> dict:
+                plant: str | None, *, walk_only: bool = False) -> dict:
     """Decision-41 stage tables from recorded entries and the shared stage."""
     import jax
     import jax.numpy as jnp
@@ -1488,9 +1504,11 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
 
     direct_stage_ww = {(1, 1): read_stage_ww(
         STAGE_WW_ROOT / "oracle_rkstage_ww_kt00000001_s1.bin", 1)}
+    direct_stage_state = {(1, 1): read_phase3_stage(
+        SCALAR_MATH_ROOT / "oracle_stage_kt00000001_s1.bin", 1)}
     stage1_w_walk = _stage1_w_walk(
-        records, transports, direct_stage_ww, plant)
-    if plant in {"stage-w-transport-ulp", "stage-w-carry-ulp"}:
+        records, transports, direct_stage_ww, direct_stage_state, plant)
+    if walk_only or plant in {"stage-w-transport-ulp", "stage-w-carry-ulp"}:
         return {
             "format": "nemo-testcase-l2-gyre-stage-twin-v4",
             "given_nemo_entry": [], "chained": [],
@@ -1820,10 +1838,11 @@ def run(
         report["trajectory"] = _trajectory(records, plant)
         if any(row.get("status") != "PASS" for row in report["trajectory"]):
             report["status"] = "UNMEASURED"
-    if mode == "stage-twin":
+    if mode in {"stage-twin", "stage-w-walk"}:
         report["stage_twin"] = _stage_twin(
             records, root, advmean_root, memory_root, btstep_root,
-            stage_closure_root, plant)
+            stage_closure_root, plant, walk_only=mode == "stage-w-walk")
+    if mode == "stage-twin":
         missing = [
             row for table in ("given_nemo_entry", "chained")
             for row in report["stage_twin"][table]
@@ -1848,7 +1867,8 @@ def main(argv=None) -> int:
     p.add_argument("--expect-commit", required=True)
     p.add_argument(
         "--mode",
-        choices=("validate", "given-inputs", "trajectory", "all", "stage-twin"),
+        choices=("validate", "given-inputs", "trajectory", "all", "stage-twin",
+                 "stage-w-walk"),
         default="validate",
     )
     p.add_argument("--round40-kt1", type=Path, required=True)
