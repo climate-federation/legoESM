@@ -1482,7 +1482,7 @@ def _stage1_transport_w_scalar_reference(
 
 def _stage1_w_walk(
     records, transports, direct_stage_ww, direct_stage_state, direct_w_record,
-    plant: str | None,
+    advmean_root: Path, plant: str | None,
 ):
     """Walk kt=1 stage-1 transport W from admitted NEMO operands."""
     import jax
@@ -1500,7 +1500,25 @@ def _stage1_w_walk(
             "kt1 stage1 cannot recover positive reference depth")
     r1_h0 = np.zeros_like(reference_depth)
     r1_h0[wet_surface] = 1.0 / reference_depth[wet_surface]
-    r3_kaa = np.asarray(direct_stage_state[(1, 1)]["ssh"]) * r1_h0
+    # Compiled stprk3_stg does not form the stage-1 ratio from the already
+    # interpolated ssh(Kaa).  Under np_HYB it saves the full external-mode
+    # ssha, forms r3ta from that full-step field, and independently applies
+    # the RK3 interpolation to r3t (stprk3_stg.f90:150-190).  Keep the old
+    # algebraic reconstruction as a scored retraction, but drive the W walk
+    # with the association that NEMO actually executes.
+    legacy_r3_kaa = (
+        np.asarray(direct_stage_state[(1, 1)]["ssh"]) * r1_h0)
+    full_external_ssh = np.asarray(
+        _barotropic_override(records, advmean_root, 1)[0])
+    r3ta = np.multiply(full_external_ssh, r1_h0, dtype=np.float64)
+    r2_3 = np.float64(2.0) / np.float64(3.0)
+    r1_3 = np.float64(1.0) / np.float64(3.0)
+    r3_kbb = _owned2(arrays["r3t_Kbb"])
+    r3_kaa = np.add(
+        np.multiply(r2_3, r3_kbb, dtype=np.float64),
+        np.multiply(r1_3, r3ta, dtype=np.float64),
+        dtype=np.float64,
+    )
     r1_dt = np.float64(1.0 / direct_stage_ww[(1, 1)]["rDt_s"])
     reference = _stage1_transport_w_scalar_reference(
         arrays, transport_u, transport_v, r3_kaa=r3_kaa, r1_dt=r1_dt)
@@ -1559,6 +1577,22 @@ def _stage1_w_walk(
             direct_fields[name], reconstructed_fields[name], direct_masks[name]))
         row["boundary"] = name
         direct_input_rows.append(row)
+    legacy_r3_row = _classification(score(
+        "GYRE-zco.kt1.s1.w_walk.retracted_algebraic_r3_kaa",
+        direct_fields["r3_kaa"], legacy_r3_kaa, wet_2d))
+    legacy_r3_row.update({
+        "boundary": "r3_kaa",
+        "association": "interpolated_ssh_times_static_reciprocal",
+        "interpretation": "RETRACTED_NOT_COMPILED_ORDER",
+    })
+    hyb_r3_row = _classification(score(
+        "GYRE-zco.kt1.s1.w_walk.compiled_hyb_r3_kaa",
+        direct_fields["r3_kaa"], r3_kaa, wet_2d))
+    hyb_r3_row.update({
+        "boundary": "r3_kaa",
+        "association": "r2_3_times_r3_kbb_plus_r1_3_times_full_step_r3ta",
+        "interpretation": "COMPILED_ORDER",
+    })
 
     direct_scalar = _stage1_w_scalar_recurrence(
         direct_fields["e3div"], direct_fields["e3t_0"],
@@ -1681,6 +1715,7 @@ def _stage1_w_walk(
             "header": direct_w_record["header"],
         },
         "direct_input_rows": direct_input_rows,
+        "r3_kaa_association_rows": [legacy_r3_row, hyb_r3_row],
         "direct_input_first_nonbit": (
             None if direct_first is None else {
                 key: direct_first[key] for key in (
@@ -1800,7 +1835,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
         SCALAR_MATH_ROOT / "oracle_stage_kt00000001_s1.bin", 1)}
     stage1_w_walk = _stage1_w_walk(
         records, transports, direct_stage_ww, direct_stage_state,
-        direct_w_record, plant)
+        direct_w_record, advmean_root, plant)
     if walk_only or plant in {
         "stage-w-transport-ulp", "stage-w-carry-ulp",
         "stage-w-direct-r3-ulp",
