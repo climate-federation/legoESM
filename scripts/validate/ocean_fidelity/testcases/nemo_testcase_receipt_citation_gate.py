@@ -1023,8 +1023,14 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfsh2.f90:83-114': [
         'DO jk = 2, jpkm1', ('END DO   ;   END DO', 3), 32],
     # --- round 60: accepted R59 record and source-ordered TKE walk ---
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:190-200': [
+        'IF( nn_pdl == 1 ) ALLOCATE( z_pdlr',
+        'CALL r54_tke_finish( p_avm, p_avt, dissl )', 11],
     'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:277-281': [
         ('DO ji = ntsi-( 0), ntei+( 0 )', 1), 'zd_up(ji,1) = 0._wp', 5],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:292-300': [
+        'IF( .NOT.ln_drg_OFF ) THEN',
+        'en(ji,jj,mbkt(ji,jj)+1) = MAX( zebot, rn_emin )', 9],
     'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:318-380': [
         'IF( ln_lc ) THEN',
         'en(ji,jj,jk) = en(ji,jj,jk) + rn_Dt * zus3(ji)', 63],
