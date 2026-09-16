@@ -487,3 +487,25 @@ cloud-base flux is starved, and a large part of why the free troposphere is
 warm. Next: IFS-faithful termination + organized detrainment designed with
 codex + GLM, coded by GLM, 5-day screen pre-registered on the mass-flux top
 distribution, 850 hPa q, 300-500 hPa vapour, ITCZ rain/prw, rsut/rlut.
+
+### Iteration G — plume buoyancy and IFS kinetic energy captured offline (day 110, 6000 ocean columns 30S-30N, eager call of the production scheme)
+| region | active | cloud base p50 | min B_u 780-920 hPa p10/50/90 [K] | KE at base p50 | min KE in the CIN layer p10/50/90 [m2/s2] | columns whose KE stays > 0 through CIN | LFC p50 | first KE<=0 above the LFC p10/50/90 |
+|---|---:|---:|---|---:|---|---:|---:|---|
+| ITCZ | 0.60 | 882 hPa | -1.30/-0.67/-0.25 | 0.13 | -2.06/-1.09/+0.38 | 0.16 | 782 hPa | 158/323/455 hPa |
+| trades N | 0.65 | 820 hPa | -2.55/-1.63/-0.43 | -1.49 | (floor)/-1.96/+0.79 | 0.14 | 687 hPa | 157/324/789 hPa |
+| trades S | 0.69 | 884 hPa | -2.55/-1.19/-0.15 | 0.23 | (floor)/-0.91/+2.95 | 0.33 | 784 hPa | 226/423/794 hPa |
+Reading: every active plume is negatively buoyant by 0.3-2.5 K between cloud
+base and a level of free convection 100-130 hPa higher (the model's warm
+815-886 hPa layer is a CIN layer even in the ITCZ); the soft local filter
+(sigmoid, 2 K) lets 12-40 % of the flux through and the plume regrows above
+the LFC (max buoyancy +1.8 K ITCZ, +0.8-1.0 K trades) up to 300-450 hPa,
+where the IFS kinetic-energy budget first turns negative — the 150 hPa gate
+(p_conv_top_pa) is what sets today's tops. The IFS termination rule applied
+with the port's cloud-base kinetic energy (~0.1-0.2 m2/s2) would kill 84 %
+of ITCZ plumes inside the CIN layer: the rule needs IFS's cloud-base kinetic
+energy / test-parcel treatment and the shallow test ascent, not the KE gate
+alone. Both reviewers' ordered set (codex r9 pending, GLM): (1) absorbing KE
+termination threaded through closure/carry, (2) shallow/deep from an
+entraining test ascent with the 200 hPa depth criterion, (3) organized
+detrainment + shallow detrainment tie later; offline day-110 gate before any
+arm. Probe outputs: amip_runs/_wv/plume_ke_day110.txt.
