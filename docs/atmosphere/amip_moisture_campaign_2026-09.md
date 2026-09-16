@@ -509,3 +509,12 @@ termination threaded through closure/carry, (2) shallow/deep from an
 entraining test ascent with the 200 hPa depth criterion, (3) organized
 detrainment + shallow detrainment tie later; offline day-110 gate before any
 arm. Probe outputs: amip_runs/_wv/plume_ke_day110.txt.
+
+### H2 kernel (commit 5ee4ef31b) codex review: FIX-FIRST, deferred behind the plume work
+Findings (amip_runs/_wv/codex_h2_kernel.md): the width cap D = min((1-rh_crit) s, q_t) changes
+the advertised PDF (cover 1/6 vs 7/30 at rh_crit 0.25, q_t = 0.6 s; harmless for rh_crit >= 0.5);
+the 1e-12 floor breaks the bracket at s = 0 (reachable in float32) and keeps a finite width as
+rh_crit -> 1; "exact gradient" overstated (exact only at a smooth root with inactive clipping);
+the enthalpy identity needs l_over_cp = L_v/c_pd; wiring must hand Morrison the signed transfer
+as condensation (negative branch included) and not re-apply T_new; six test mutations named that
+the tests would not catch. Not wired; fixes queued for GLM before any wiring.
