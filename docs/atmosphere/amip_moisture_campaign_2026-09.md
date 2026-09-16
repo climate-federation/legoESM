@@ -518,3 +518,54 @@ rh_crit -> 1; "exact gradient" overstated (exact only at a smooth root with inac
 the enthalpy identity needs l_over_cp = L_v/c_pd; wiring must hand Morrison the signed transfer
 as condensation (negative branch included) and not re-apply T_new; six test mutations named that
 the tests would not catch. Not wired; fixes queued for GLM before any wiring.
+
+## Iteration H — oracle receipts (OpenIFS main 8f6f722, local copy under docs/references/openifs_arpifs, uncommitted) and the ship list
+Full audit: amip_runs/_wv/codex_r11_oracle.md (codex xhigh, reading the local
+cubasen/cuascn/cuentr/cumastrn/cubasmcn/sucumf sources; my own reading of
+cubasen.F90:330-735 and cuascn.F90:395-730 agrees). What IFS does that the port does not:
+- cubasen: a DEPARTURE SEARCH — surface test parcel launched with w^2 = (1.2 A^(1/3))^2 + 0.1
+  (A from u_* and the surface buoyancy flux; the convection call passes u_* = 0.1),
+  T/q excess from the surface fluxes clipped to [0.2, 1] K and [1e-4, 5e-4] kg/kg; elevated
+  departures with +0.2 K, +1e-4 and w^2 = 1 (1 m/s); a mixed departure parcel within 60 hPa
+  of the surface; shallow-test mixing eps = 0.8/z + 2e-4 (ENTSTPC1/2), deep-test mixing
+  mu = min(1, 0.4 ENTRORG dz min(1, (q_s/q_s,lowest)^3)); the velocity recurrence
+  w+^2 = [w-^2 (1 - 2 mu) + 2 b dz]/(1 + 2 mu) (cubasen.F90:513-557); cloud base at the first
+  condensation, the test top where w^2 < 0 (:615-628); PWUBASE = sqrt(w^2 at the base)
+  (:657-668); deep iff p_base - p_top >= RDEPTHS = 200 hPa (sucumf.F90:170), KTYPE 1/2
+  from that (cumastrn.F90:513), mid-level (KTYPE 3) from cubasmcn (RH > 0.8, -omega/g launch).
+- cuascn: PKINEU(base) = 0.5 PWUBASE^2 (:401); per layer, in order: turbulent D = DETRPEN M dz
+  (cuentr.F90:147, 7.5e-5), D = min(D, 0.75 M) (:487), E = lagged organized entrainment
+  (:679-691: M min[0.4, ENTRORG (1.3 - min(1,RH)) dz min(1, q_s/q_s,base)^3], zero if
+  B <= -0.2 K), for KTYPE >= 2: E *= ENTSHALP = 2 and D = E (:504-510), D *= (1.6 - min(1,RH))
+  (:514), CFL redistribution with M_max = dp RMFCFL/(g dt) (:499-520), transport + saturation
+  adjustment (cuadjtq), KE recurrence K = max(-1000, [K- (1 - d) + dPhi (1/3) B_mean/T_v]/(1 + d))
+  with d = min(1, 1.94875 (E or D)/max(1e-8, M-)) (:647-668), negative-buoyancy organized
+  detrainment D = max(D, M- (1 - (1.6 - min(1,RH)) sqrt(clip(K/max(1e-3, K-), 0, 1))))
+  (:669-676), then ACCEPT the level iff K > 0 and M > 0 and (B > -2 K or dT_env/dz < -3e-3 K/m)
+  else zero M and K, D = M- (all incoming mass detrained), deposit the condensate, KCTOP stays
+  at the last accepted level, the label 0 prevents any revival (:698-715); KTYPE <= 2 also
+  stop where the adjustment leaves q_u unchanged (:720-726).
+- cumastrn: deep closure ZMFUB1 = ZCAPE ZMFUB/(ZHEAT ZXTAU) with the plume-buoyancy pressure
+  integral, tau = depth/(2 + min(15, w_mean)) x resolution factor, 720-10800 s; one column
+  scale factor against the per-level CFL/RMFLIA = 2 bounds; NO inter-timestep profile
+  relaxation, no per-level cap, no fixed top gate.
+Port departures (one line each): a single undilute parcel with +0.5 K / +1e-3 excess, the
+LNB/height class blend and a fixed KE seed (bechtold.py:2175-2269, _plume.py:608-625); KE
+computed after the plume and never terminating it (bechtold.py:2546, _plume.py:667-874);
+prescribed eps/delta without the lagged organized entrainment, the tie, the redistribution or
+organized detrainment, condensate delivered as delta*M*q_c (bechtold.py:2430-2488, 2853);
+relaxation into a carry (tau 1800 s), per-level cape_weight^2 M_b_max clip, 150 hPa gate
+(bechtold.py:2773-2822).
+Ship list (codex; GLM codes, codex + Claude review): (1) this record + the replay contract;
+(2) departure search / test ascent (cubasen) with the paired-sounding tests; (3) coupled
+main ascent with the ordered E/D, KE, acceptance and terminal deposition (cuascn);
+(4) closure consumers on the diagnosed window, one column scale, no carry/clip/gate on the
+faithful path — (2)-(4) are ONE physics PR, "do not ship the KE gate alone"; (5) mid-level
+branch; (6) the day-110 replay evidence.
+Replay contract (frozen before the replay): active = column max of the carried profile
+> 1e-4 kg/m2/s on the adopted deck's day-110 checkpoint (the baseline-active denominator;
+columns that become inactive count as failures); top = smallest pressure with
+M/M_max > 0.1; prediction 70 % of baseline-active trade-ocean columns (10-30N and 10-30S
+separately) with p_top > 750 hPa, < 60 % refutes; >= 80 % of baseline-active ITCZ columns
+must keep transport above their frozen LFC; water/enthalpy budgets closed with the terminal
+deposition; eager/JIT parity; finite-difference gradients away from switching levels.
