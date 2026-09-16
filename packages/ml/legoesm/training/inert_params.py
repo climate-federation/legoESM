@@ -75,6 +75,14 @@ PRESCRIBED_SURFACE_LEAF_MARKERS = (
     "gray_sfc_albedo",
     "gray_sfc_emissivity",
     "spatial_surface",
+    # Lat-lon classical model's TrainablePhysicsParams.raw_values leaves:
+    # the bulk-transfer coefficients / surface albedos parameterize the same
+    # prescribed air-sea coupling.  Brackets included so e.g. C_E cannot
+    # match an unrelated key.
+    "['C_H']",
+    "['C_E']",
+    "['albedo_ice']",
+    "['albedo_ocean']",
 )
 
 

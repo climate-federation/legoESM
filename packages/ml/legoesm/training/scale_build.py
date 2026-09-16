@@ -784,21 +784,6 @@ def build_mode_components(cfg, yml):
             f"unknown training_core {core!r}; choose 'latlon' (explicit "
             f"C-grid production core) or 'spectral' (Gaussian semi-implicit "
             f"training core, #817)")
-    # The prescribed-flux and spatial-embedding options are built on the
-    # spectral core only; on the lat-lon core the keys would be read by the
-    # loader and then silently dropped by the forcing/model builders.
-    _unsupported = []
-    if bool(yml.get("era5_surface_fluxes", False)):
-        _unsupported.append("era5_surface_fluxes")
-    _mode = getattr(cfg, "mode", None)
-    if _mode in ("neural_gcm", "sfno") and bool(
-            (yml.get(_mode, {}) or {}).get("spatial_embedding", False)):
-        _unsupported.append(f"{_mode}.spatial_embedding")
-    if _unsupported:
-        raise SystemExit(
-            f"{_unsupported} are only wired on --training-core spectral; the "
-            "lat-lon core would load the data and silently run without it.")
-
     config = build_latlon_config(cfg, yml)
     driver = ModelDriver(config)
     driver.setup()
@@ -835,10 +820,17 @@ def build_mode_components(cfg, yml):
         )
         from legoesm.core.grid_adapters import make_adapter
         ov = yml.get("neural_gcm", {})
+        adapter = make_adapter(grid)
+        # Prescribed-input options: spatial_embedding is a per-model-block
+        # key, era5_surface_fluxes is deck-global (the same key the loader
+        # reads); the pos-embed table needs the column count.
+        spatial_embedding = bool(ov.get("spatial_embedding", False))
         params = NeuralPhysics(
             nlev=int(yml["nlev"]), hidden_dim=int(ov.get("nn_hidden", 256)),
-            n_layers=int(ov.get("nn_layers", 4)), key=jax.random.PRNGKey(0))
-        adapter = make_adapter(grid)
+            n_layers=int(ov.get("nn_layers", 4)), key=jax.random.PRNGKey(0),
+            spatial_embedding=spatial_embedding,
+            era5_surface_fluxes=bool(yml.get("era5_surface_fluxes", False)),
+            n_columns=adapter.ncol if spatial_embedding else None)
 
         def make_run_seg(nn_phys):
             return build_training_segment(
@@ -851,6 +843,7 @@ def build_mode_components(cfg, yml):
 
         from legoesm.grids.gaussian import create_gaussian_grid
         from legoesm.grids.regridding import compute_latlon_to_voronoi_weights
+        from legoesm.training.model_registry import sfno_extra_input_channels
         from legoesm.training.sfno_dycore_coupling import (
             SFNOPhysics, make_sfno_step_unified_latlon,
         )
@@ -858,12 +851,20 @@ def build_mode_components(cfg, yml):
 
         ov = yml.get("sfno", {})
         nlev = int(yml["nlev"])
+        spatial_embedding = bool(ov.get("spatial_embedding", False))
+        era5_surface_fluxes = bool(yml.get("era5_surface_fluxes", False))
         n_ch = 4 * nlev + 2   # SFNOPhysics packs [u, v, T, q_v, lnps, phis]
+        # Prescribed input channels appended by SFNOPhysics (land fraction,
+        # then the six ERA5 surface-flux planes); the decoder still predicts
+        # only the n_ch tendency channels.
         n_max = int(ov.get("gauss_n_max", max(21, int(yml["n_lat"]) // 3)))
         gauss = create_gaussian_grid(n_max)
         sfno = SFNO(
             SFNOConfig(
-                in_channels=n_ch, out_channels=n_ch,
+                in_channels=n_ch + sfno_extra_input_channels(
+                    spatial_embedding=spatial_embedding,
+                    era5_surface_fluxes=era5_surface_fluxes),
+                out_channels=n_ch,
                 embed_dim=int(ov.get("sfno_embed_dim", 256)),
                 n_blocks=int(ov.get("sfno_n_blocks", 8)),
                 # tendencies, NOT state residuals: with the default
@@ -879,7 +880,10 @@ def build_mode_components(cfg, yml):
             lambda m: (m.decoder.weight, m.decoder.bias), sfno,
             (jnp.zeros_like(sfno.decoder.weight),
              jnp.zeros_like(sfno.decoder.bias)))
-        params = SFNOPhysics(sfno=sfno, grid=gauss, nlev=nlev)
+        params = SFNOPhysics(
+            sfno=sfno, grid=gauss, nlev=nlev,
+            spatial_embedding=spatial_embedding,
+            era5_surface_fluxes=era5_surface_fluxes)
 
         def _flat_points(lat_1d, lon_1d):
             lon2d, lat2d = np.meshgrid(np.asarray(lon_1d), np.asarray(lat_1d))
@@ -983,6 +987,34 @@ def _era5_config(cfg, yml):
     return c
 
 
+def prescribed_surface_planes(sl, grid):
+    """Regridded prescribed surface planes the slice carries -> dict.
+
+    ONE plane builder shared by the spectral forcing dict and the lat-lon
+    ``pack_forcing`` loader, so a model is fed exactly the same planes
+    whenever the slice carries them (i.e. whenever its
+    ``TrainingERA5Config`` asked for them).  Keys are the SPECTRAL forcing
+    names; signs are already the model's (``era5_to_state`` did the ERA5
+    flips).  Planes stay grid-shaped (n_lat, n_lon) — the spectral caller
+    flattens them to columns.
+    """
+    import jax.numpy as jnp
+
+    from legoesm.training.era5_to_state import regrid_2d_to_gaussian
+
+    planes = {}
+    if sl.sfc_shf is not None:
+        for _key in ("sfc_shf", "sfc_lhf", "sfc_tau_x", "sfc_tau_y",
+                     "sfc_sw_up", "sfc_sw_down", "sfc_lw_up"):
+            planes[_key] = jnp.asarray(regrid_2d_to_gaussian(
+                getattr(sl, _key), sl.lat, sl.lon, grid))
+    if sl.land_frac is not None:
+        # Static 0..1 mask; interpolation can overshoot, clip back.
+        planes["land_frac"] = jnp.asarray(np.clip(regrid_2d_to_gaussian(
+            sl.land_frac, sl.lat, sl.lon, grid), 0.0, 1.0))
+    return planes
+
+
 def build_spectral_forcing(sl, grid, time_ns, year):
     """The traced per-sample forcing dict of the spectral core, from a slice.
 
@@ -1009,14 +1041,10 @@ def build_spectral_forcing(sl, grid, time_ns, year):
         "day_of_year": jnp.asarray(doy_1based),
         "seconds_of_day": jnp.asarray(sod),
     }
-    if sl.sfc_shf is not None:
-        for _key in ("sfc_shf", "sfc_lhf", "sfc_tau_x", "sfc_tau_y",
-                     "sfc_sw_up", "sfc_sw_down", "sfc_lw_up"):
-            forcing[_key] = _plane(getattr(sl, _key))
-    if sl.land_frac is not None:
-        # Static 0..1 mask; interpolation can overshoot, clip back.
-        forcing["land_frac"] = jnp.asarray(np.clip(regrid_2d_to_gaussian(
-            sl.land_frac, sl.lat, sl.lon, grid), 0.0, 1.0)).reshape(-1)
+    # Shared plane builder (grid-shaped there), flattened to columns here so
+    # the output dict is identical to the pre-helper version.
+    for _key, _plane_2d in prescribed_surface_planes(sl, grid).items():
+        forcing[_key] = _plane_2d.reshape(-1)
     return forcing
 
 
@@ -1134,6 +1162,8 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
             cfg, yml, grid, sigma,
             rank=rank, nproc=nproc, host_resident=host_resident)
 
+    global _WARNED_ERA5_FLUX_HOLD_FIXED
+
     era5_cfg = _era5_config(cfg, yml)
     ds = open_era5_zarr(era5_cfg.zarr_store)
     times = np.asarray(ds.time.values, dtype="datetime64[ns]")
@@ -1145,13 +1175,30 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
     # dominate the load (see the spectral loader).
     cloud_ds = (open_era5_zarr(era5_cfg.cloud_zarr)
                 if era5_cfg.load_cloud_condensate else None)
-    sst_cfg = era5_cfg._replace(load_cloud_condensate=False)   # 2-D only
+    # 2-D only, but keeps load_surface_fluxes / load_land_frac so the
+    # sample-start slice carries the prescribed planes.
+    sst_cfg = era5_cfg._replace(load_cloud_condensate=False)
+    # Flux store opened once, only when fluxes are prescribed ("" = the
+    # state store); a land fraction alone comes from the state store.
+    flux_ds = None
+    if sst_cfg.load_surface_fluxes:
+        flux_ds = open_era5_zarr(sst_cfg.flux_zarr) if sst_cfg.flux_zarr else ds
     _cl = dict(yml.get("classical", {})) if cfg.mode == "physics" else {}
     _micro = str(_cl.get("microphysics", "none"))
 
     config = build_latlon_config(cfg, yml)
     driver = _driver_for_ctx(config)
     ctx = driver._prepare_run_context(0, config.start_day, restore_carry=False)
+
+    # Spectral forcing-dict name -> driver-path (pack_forcing) name for the
+    # planes the two lanes name differently; the radiative planes and the
+    # land fraction already share their names.
+    _spec_to_driver = {
+        "sfc_shf": "sfc_shflx_override",
+        "sfc_lhf": "sfc_lhflx_override",
+        "sfc_tau_x": "sfc_taux_override",
+        "sfc_tau_y": "sfc_tauy_override",
+    }
 
     samples = []
     for year, i_ic, i_tg in _sharded_indices(
@@ -1162,15 +1209,30 @@ def load_era5_samples(cfg, yml, grid, sigma, *,
         target = era5_to_latlon_carry(
             load_era5_slice(era5_cfg, i_tg, ds=ds, cloud_ds=cloud_ds),
             grid, sigma, microphysics=_micro)
-        sst_src = load_era5_slice(sst_cfg, i_ic, ds=ds)
+        sst_src = load_era5_slice(sst_cfg, i_ic, ds=ds, flux_ds=flux_ds)
         sst = regrid_2d_to_gaussian(sst_src.sst, sst_src.lat, sst_src.lon, grid)
+        # Prescribed surface planes the slice carries (spectral names),
+        # regridded exactly like sst, then renamed to the driver-path
+        # override names for pack_forcing.
+        planes = prescribed_surface_planes(sst_src, grid)
+        if "sfc_shf" in planes and not _WARNED_ERA5_FLUX_HOLD_FIXED:
+            _WARNED_ERA5_FLUX_HOLD_FIXED = True
+            logger.warning(
+                "era5_surface_fluxes: hourly interpolation of the ERA5 surface "
+                "fluxes is not implemented — every flux plane is HELD FIXED at "
+                "its sample-start value for the whole training window "
+                "(owner decision 2026-09-15).")
+        plane_kwargs = {
+            _spec_to_driver.get(_key, _key): _plane
+            for _key, _plane in planes.items()}
         doy = float((times[i_ic] - np.datetime64(f"{year}-01-01"))
                     / np.timedelta64(1, "D"))
         forcing = pack_forcing(
             sst=sst, sic=jnp.zeros_like(sst),
             day_of_year=jnp.asarray(doy), seconds_of_day=jnp.asarray(0.0),
             solar_weights=ctx["solar_weights"], s_0=ctx["current_s_0"],
-            o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"])
+            o3_vmr=ctx["o3_vmr"], aerosol_od=ctx["aerosol_od"],
+            **plane_kwargs)
         sample = (ic, target, forcing)
         samples.append(_sample_to_host(sample) if host_resident else sample)
     return samples

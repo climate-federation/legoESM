@@ -153,29 +153,6 @@ def test_apply_forced_freeze_unions_with_the_measured_list():
     assert len(_leaf_names(arr)) == len(names) - len(merged)
 
 
-# ---------------------------------------------------------------- core gate
-
-@pytest.mark.parametrize("mode,yml_extra", [
-    ("physics", {"era5_surface_fluxes": True}),
-    ("neural_gcm", {"neural_gcm": {"spatial_embedding": True}}),
-    ("sfno", {"sfno": {"spatial_embedding": True}}),
-])
-def test_latlon_core_refuses_the_spectral_only_options(mode, yml_extra):
-    from types import SimpleNamespace
-
-    yml = yaml.safe_load(DECKS[0].read_text())
-    yml["neural_gcm"]["spatial_embedding"] = False
-    yml["sfno"]["spatial_embedding"] = False
-    for k, v in yml_extra.items():
-        if isinstance(v, dict):
-            yml[k].update(v)
-        else:
-            yml[k] = v
-    cfg = SimpleNamespace(mode=mode, training_core="latlon")
-    with pytest.raises(SystemExit, match="spectral"):
-        scale_build.build_mode_components(cfg, yml)
-
-
 # ---------------------------------------------------------------- shared forcing
 
 def test_build_spectral_forcing_carries_exactly_what_the_slice_carries():

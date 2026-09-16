@@ -103,6 +103,15 @@ N_SFNO_LAND_FRAC_CHANNELS = 1
 N_SFC_FLUX_INPUT_CHANNELS = 6
 SFC_FLUX_FORCING_KEYS = ("sfc_tau_x", "sfc_tau_y", "sfc_shf", "sfc_lhf",
                          "sfc_sw_up", "sfc_lw_up")
+# step_unified (driver-path) keyword names of the six prescribed surface
+# flux planes, position-for-position onto SFC_FLUX_FORCING_KEYS above: the
+# stress names differ (sfc_tau_x -> sfc_taux_override) and shf/lhf carry
+# the _override suffix; the radiative plane names coincide.
+SFC_FLUX_STEP_UNIFIED_KEYS = (
+    "sfc_taux_override", "sfc_tauy_override",
+    "sfc_shflx_override", "sfc_lhflx_override",
+    "sfc_sw_up", "sfc_lw_up",
+)
 _NORM_SFC_FLUX_W_M2 = 100.0  # coeff-ok: input normalisation to O(1)
 _NORM_SFC_STRESS_PA = 0.1  # coeff-ok: input normalisation to O(1)
 _M_PER_KM = 1000.0  # coeff-ok: unit conversion, metres per kilometre
@@ -586,7 +595,52 @@ def make_neural_step_unified(
             held_sw_down_toa,
         ) = tail
         del need_rad, dt
-        del solar_weights, o3_vmr, aerosol_od, kwargs
+        del solar_weights, o3_vmr, aerosol_od
+        # Optional prescribed-input columns, built from the driver-path
+        # kwargs EXACTLY like the spectral wrapper builds them from the
+        # spectral forcing dict: static [sin(lat), cos(lat), land_frac,
+        # orography in km] then the six surface fluxes in
+        # SFC_FLUX_FORCING_KEYS order divided by SFC_FLUX_INPUT_NORMS (the
+        # driver-path key names differ -- SFC_FLUX_STEP_UNIFIED_KEYS).
+        # Every plane is flattened with the adapter, so this is
+        # grid-agnostic (lat-lon, cubed sphere, MPAS).  A flag on with its
+        # keyword missing is an error naming it, never silent zeros.
+        # Flags off -> no extras, legacy path unchanged.
+        if neural_physics.n_extra_dyn > 0:
+            planes = []
+            if neural_physics.n_static > 0:
+                land_frac = kwargs.get("land_frac")
+                phis = kwargs.get("phis")
+                if land_frac is None:
+                    raise ValueError(
+                        "NeuralPhysics(spatial_embedding=True) requires "
+                        "'land_frac' in the step_unified kwargs, got None")
+                if phis is None:
+                    raise ValueError(
+                        "NeuralPhysics(spatial_embedding=True) requires "
+                        "'phis' in the step_unified kwargs, got None")
+                lat_flat = adapter.flatten_2d(lat)
+                planes += [
+                    jnp.sin(lat_flat),
+                    jnp.cos(lat_flat),
+                    adapter.flatten_2d(land_frac),
+                    adapter.flatten_2d(phis) / constants.g / _M_PER_KM,
+                ]
+            if neural_physics.n_flux > 0:
+                for key, norm in zip(
+                        SFC_FLUX_STEP_UNIFIED_KEYS, SFC_FLUX_INPUT_NORMS):
+                    plane = kwargs.get(key)
+                    if plane is None:
+                        raise ValueError(
+                            f"NeuralPhysics(era5_surface_fluxes=True) "
+                            f"requires {key!r} in the step_unified kwargs, "
+                            "got None")
+                    planes.append(adapter.flatten_2d(plane) / norm)
+            extra_col = jnp.stack(planes, axis=-1)  # (ncol, n_extra_dyn)
+        else:
+            del kwargs
+            extra_col = None
+
         # Flatten to columns
         T_col = adapter.flatten_3d(T)           # (ncol, nlev)
         u_col = adapter.flatten_3d(u)           # (ncol, nlev)
@@ -610,6 +664,7 @@ def make_neural_step_unified(
         y = neural_column_forward(
             neural_physics, T_col, u_col, v_col, q_v_col, p_s_flat,
             solar_flat, adapter.flatten_2d(sst), adapter.flatten_2d(sic),
+            extra_col=extra_col,
         )
 
         # Unpack into per-column PhysicsOutput, then unflatten
