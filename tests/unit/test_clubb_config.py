@@ -123,7 +123,35 @@ def test_is_pytree_round_trip():
     ],
 )
 def test_cam_default_param_overrides(field, expected):
-    assert getattr(CLUBBParams(), field) == expected
+    """The CAM coefficient set must stay exactly retrievable.
+
+    The class defaults are no longer CAM's namelist values -- they are the
+    eight-case LES fit. The scheme still implements CAM's FLAG tree; only the
+    tunable coefficients were refitted. So this asserts against the preserved
+    CAM set rather than the live defaults, which keeps the CAM-fidelity claim
+    checkable instead of quietly dropping it with the retune.
+    """
+    from legoesm.atmosphere.physics.turbulence.clubb import _CAM_DEFAULT_PARAMS
+
+    live = getattr(CLUBBParams(), field)
+    cam = _CAM_DEFAULT_PARAMS.get(field, live)   # untrained fields keep CAM's value
+    assert cam == expected
+
+
+def test_live_defaults_are_the_les_fit_not_cam():
+    """...and the live defaults really are the retuned ones.
+
+    Without this, reverting the defaults to CAM would leave every assertion above
+    still passing, so the test file would no longer say which set is in force.
+    """
+    from legoesm.atmosphere.physics.turbulence.clubb import _CAM_DEFAULT_PARAMS
+
+    assert _CAM_DEFAULT_PARAMS, "the CAM coefficient set must stay recorded"
+    differing = [k for k, v in _CAM_DEFAULT_PARAMS.items()
+                 if getattr(CLUBBParams(), k) != v]
+    assert len(differing) > 20, (
+        f"only {len(differing)} coefficients differ from CAM; the LES fit "
+        "does not look like it is in force")
 
 
 @pytest.mark.parametrize(
@@ -233,7 +261,7 @@ def test_overrides_compose():
     cfg = CLUBBConfig()
     cfg2 = cfg._replace(params=cfg.params._replace(C8=9.9))
     assert cfg2.params.C8 == 9.9
-    assert cfg2.params.C4 == 5.2          # untouched
+    assert cfg2.params.C4 == CLUBBParams().C4   # untouched
     assert cfg2.surface is cfg.surface     # untouched
 
 

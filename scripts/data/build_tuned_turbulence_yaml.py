@@ -32,6 +32,21 @@ def collect(seed_dirs: list[str]) -> dict[str, list]:
     return by_scheme
 
 
+# Coefficients held back at their library/CAM value despite having been trained,
+# because the fitted value is unstable outside the LES cases it was fit on. Each
+# entry needs a measured reason, because holding one back costs fit quality.
+#
+#   CLUBBParams.lmin_coef -- the fit moved it 0.1 -> 0.06967, lowering the
+#   minimum mixing length from 4.0 m to 2.79 m. Lscale is floored at that length
+#   and sets the dissipation time, and the smaller floor drove a 24-level column
+#   at a 75 s step entirely to NaN in one step. Legal under its spec bounds
+#   [0.02, 0.5], so the lower bound is more permissive than stability allows;
+#   tightening it and refitting is the real fix.
+HELD_AT_LIBRARY_VALUE = {
+    "atm.turb.CLUBBParams.lmin_coef": 0.1,
+}
+
+
 def median_params(by_scheme: dict[str, list], min_seeds: int) -> dict[str, float]:
     """Lower-median seed per scheme -> a REAL seed, never an average.
 
@@ -47,6 +62,11 @@ def median_params(by_scheme: dict[str, list], min_seeds: int) -> dict[str, float
         entries.sort(key=lambda e: e[0])
         mi = (len(entries) - 1) // 2
         canonical.update(entries[mi][1])
+    for qual, value in HELD_AT_LIBRARY_VALUE.items():
+        if qual in canonical and canonical[qual] != value:
+            print(f"  HELD {qual}: {canonical[qual]} -> {value} (see "
+                  f"HELD_AT_LIBRARY_VALUE)")
+            canonical[qual] = value
     return canonical
 
 

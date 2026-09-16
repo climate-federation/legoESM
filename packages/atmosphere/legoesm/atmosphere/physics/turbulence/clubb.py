@@ -8,49 +8,49 @@ one-file-per-scheme convention, the remaining ``clubb_*.py`` helper modules are
 being absorbed here section by section (see the table of contents below); the
 CAM-default model-flag values are recorded as comments at the end of the file.
 
-Table of contents (sections, in order; flag reference table at line 6518)
+Table of contents (sections, in order; flag reference table at line 6577)
 -----------------------------------------------------------------------------
   1. [line   335] Diagnostic ADG1-PDF closure (``diagnose_cloud_and_buoyancy``)
   2. [line   452] Configuration (``CLUBBParams`` / ``CLUBBConfig`` + derived params;
       model flags fixed at CAM defaults — reference table at file end)
-  3. [line   728] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
+  3. [line   783] Staggered CLUBB grid (``CLUBBGrid`` / zm-zt operators /
       ``make_clubb_grid[_from_levels]`` / ``flip_vertical``)
-  4. [line  1059] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
+  4. [line  1114] Flatau saturation adapters (``sat_mixrat_liq``/``sat_mixrat_ice`` over
       the canonical ``legoesm.thermo`` curves)
-  5. [line  1113] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
+  5. [line  1168] Closure helpers (``safe_sqrt`` / ``compute_sigma_sqd_w`` /
       ``calc_brunt_vaisala_freq_sqd``)
-  6. [line  1287] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
+  6. [line  1342] Parcel buoyant-sorting mixing length (``compute_mixing_length`` /
       ``set_Lscale_max``)
-  7. [line  1722] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
-  8. [line  1850] Mass-conserving hole filling (``fill_holes_vertical`` /
+  7. [line  1777] Implicit band solvers (``tridiag_solve`` / ``penta_solve``)
+  8. [line  1905] Mass-conserving hole filling (``fill_holes_vertical`` /
       ``fill_holes_wp2_from_horz_tke``)
-  9. [line  2031] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
+  9. [line  2086] Skewness diagnostics (``Skx_func`` / ``compute_gamma_Skw`` / LG05 /
       ``compute_skewness_diagnostics``)
-  10. [line  2217] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
-  11. [line  2298] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
+  10. [line  2272] Dissipation time-scale family (``compute_tke`` / ``compute_tau_family``)
+  11. [line  2353] ADG1 assumed-PDF parameter closure (``ADG1_pdf_driver`` + the liquid
       cloud-fraction closure)
-  12. [line  2620] ADG1 PDF moment integrals + buoyancy-flux assembly
+  12. [line  2675] ADG1 PDF moment integrals + buoyancy-flux assembly
       (``calc_pdf_higher_order_moments`` / ``calc_pdf_xprcp_fluxes`` /
       ``calc_xpthvp_terms``) + the two-level-set reconciliation
       (``calc_trapezoid_zt`` / ``calc_trapezoid_zm`` / ``clip_rcm`` /
       ``compute_cloud_cover``). Every routine in this section is
       grid-agnostic: CAM evaluates the closure once per level set, so all
       regridding is the caller's.
-  13. [line  2981] Moment-advance building blocks + the xp2_xpyp / windm advances
+  13. [line  3036] Moment-advance building blocks + the xp2_xpyp / windm advances
       (diffusion/mean-advection LHS builders, Cauchy-Schwarz clips,
       ``advance_xp2_xpyp`` / ``advance_windm_edsclrm``)
-  14. [line  3842] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
+  14. [line  3897] Skewness-dependent C-coefficient family (``compute_skw_fnc`` users:
       ``damp_coefficient`` / ``compute_C6_C7_Skw_fnc``)
-  15. [line  3903] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
+  15. [line  3958] Coupled wp2/wp3 advance (``advance_wp2_wp3`` + penta LHS/RHS builders +
       ``clip_skewness``)
-  16. [line  4573] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
+  16. [line  4628] Monotonic turbulent-flux limiter (``monotonic_turbulent_flux_limit`` +
       ``calc_turb_adv_range``)
-  17. [line  4853] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
+  17. [line  4908] Coupled xm/wpxp advance (``advance_xm_wpxp`` + the monotonic-flux-limiter
       coupling + ``solve_xm_wpxp_with_single_lhs``)
-  18. [line  5227] Core orchestration (``compute_clubb_diagnostics`` /
+  18. [line  5282] Core orchestration (``compute_clubb_diagnostics`` /
       ``compute_pdf_closure`` / ``calc_sfc_varnce`` / ``advance_clubb_core`` +
       the ``CLUBBMomentState``/``CLUBBForcing`` carry types and pack/unpack)
-  19. [line  5831] Scheme entries (``clubb_turbulence`` diagnostic default /
+  19. [line  5890] Scheme entries (``clubb_turbulence`` diagnostic default /
       ``clubb_turbulence_prognostic`` opt-in / ``clubb_step`` bridge /
       ``integrate_clubb_column`` SCM driver)
 
@@ -462,7 +462,14 @@ def diagnose_cloud_and_buoyancy(thlm, rtm, wp2, exner, p_in_Pa, thv_ds, Kh, Lsca
 
 
 class CLUBBParams(NamedTuple):
-    """CLUBB tunable closure coefficients (CAM-effective defaults).
+    """CLUBB tunable closure coefficients (LES-tuned defaults).
+
+    The 33 trained coefficients default to the eight-case LES fit: one parameter
+    set calibrated jointly against four dry and four wet LES references on the
+    scheme as it now stands. The CAM namelist values they replaced are kept in
+    ``_CAM_DEFAULT_PARAMS`` below, because the scheme still implements CAM's FLAG
+    tree -- only the coefficients were refitted -- and that claim has to stay
+    checkable. Untrained fields are unchanged and remain CAM's.
 
     Library defaults from ``parameters_tunable.F90:set_default_parameters``
     (the ``_DEFAULTS`` dict in the CLUBB-JAX port), with CAM namelist overrides
@@ -473,33 +480,33 @@ class CLUBBParams(NamedTuple):
     C1: float = 1.0
     C1b: float = 1.0
     C1c: float = 1.0
-    C2rt: float = 1.0          # lib 2.0 -> 1.0
-    C2thl: float = 1.0         # lib 2.0 -> 1.0
-    C2rtthl: float = 1.3       # lib 2.0 -> 1.3
-    C4: float = 5.2            # lib 2.0 -> 5.2
-    C_uu_shr: float = 0.3      # lib 0.4 -> 0.3   (cam7: 0.1)
-    C_uu_buoy: float = 0.3
-    C6rt: float = 4.0          # lib 2.0 -> 4.0
-    C6rtb: float = 6.0         # lib 2.0 -> 6.0
+    C2rt: float = 0.9034462252  # CAM 1.0; LES-tuned
+    C2thl: float = 1.453698419  # CAM 1.0; LES-tuned
+    C2rtthl: float = 1.662355531  # CAM 1.3; LES-tuned
+    C4: float = 6.011279696  # CAM 5.2; LES-tuned
+    C_uu_shr: float = 0.3261592258  # CAM 0.3; LES-tuned
+    C_uu_buoy: float = 0.3749618831  # CAM 0.3; LES-tuned
+    C6rt: float = 4.650472128  # CAM 4.0; LES-tuned
+    C6rtb: float = 6.282899157  # CAM 6.0; LES-tuned
     C6rtc: float = 1.0
-    C6thl: float = 4.0         # lib 2.0 -> 4.0
-    C6thlb: float = 6.0        # lib 2.0 -> 6.0
+    C6thl: float = 4.436034598  # CAM 4.0; LES-tuned
+    C6thlb: float = 5.610878375  # CAM 6.0; LES-tuned
     C6thlc: float = 1.0
     C7: float = 0.5            # (cam7: 0.1)
     C7b: float = 0.5
     C7c: float = 0.5
-    C8: float = 4.2            # lib 0.5 -> 4.2   (cam7: 4.6)
+    C8: float = 3.522841681  # CAM 4.2; LES-tuned
     C8b: float = 0.0           # lib 0.02 -> 0.0
     C10: float = 3.3
-    C11: float = 0.7           # lib 0.4 -> 0.7
+    C11: float = 0.6114149647  # CAM 0.7; LES-tuned
     C11b: float = 0.35         # lib 0.4 -> 0.35
     C11c: float = 0.5
-    C12: float = 1.0
+    C12: float = 0.8562333566  # CAM 1.0; LES-tuned
     C13: float = 0.1
-    C14: float = 2.2           # lib 1.0 -> 2.2
+    C14: float = 2.161051154  # CAM 2.2; LES-tuned
     C_wp2_pr_dfsn: float = 0.0
     C_wp3_pr_tp: float = 0.0
-    C_wp3_pr_turb: float = 0.4    # lib 0.0 -> 0.4
+    C_wp3_pr_turb: float = 0.5361331048  # CAM 0.4; LES-tuned
     C_wp3_pr_dfsn: float = 0.0
     C_wp2_splat: float = 0.0      # lib 2.0 -> 0.0
 
@@ -510,19 +517,19 @@ class CLUBBParams(NamedTuple):
     wpxp_L_thresh: float = 60.0
 
     # ── Eddy-diffusion (c_K*) and background-diffusion (nu*) coefficients ──
-    c_K: float = 0.2
-    c_K1: float = 0.75         # lib 0.2 -> 0.75
-    nu1: float = 20.0
-    c_K2: float = 0.125        # lib 0.025 -> 0.125
-    nu2: float = 5.0           # lib 1.0 -> 5.0
-    c_K6: float = 0.375
-    nu6: float = 5.0
-    c_K8: float = 1.25         # lib 5.0 -> 1.25
-    nu8: float = 20.0
-    c_K9: float = 0.25         # lib 0.1 -> 0.25
-    nu9: float = 20.0          # lib 10.0 -> 20.0
+    c_K: float = 0.17330229  # CAM 0.2; LES-tuned
+    c_K1: float = 0.7042108707  # CAM 0.75; LES-tuned
+    nu1: float = 25.18514559  # CAM 20.0; LES-tuned
+    c_K2: float = 0.1420643211  # CAM 0.125; LES-tuned
+    nu2: float = 4.386078452  # CAM 5.0; LES-tuned
+    c_K6: float = 0.2862530621  # CAM 0.375; LES-tuned
+    nu6: float = 3.665164014  # CAM 5.0; LES-tuned
+    c_K8: float = 0.9897275729  # CAM 1.25; LES-tuned
+    nu8: float = 15.86808079  # CAM 20.0; LES-tuned
+    c_K9: float = 0.2225234306  # CAM 0.25; LES-tuned
+    nu9: float = 19.55427162  # CAM 20.0; LES-tuned
     nu10: float = 0.0
-    c_K10: float = 0.5         # lib 1.0 -> 0.5
+    c_K10: float = 0.3946254038  # CAM 0.5; LES-tuned
     c_K10h: float = 0.3        # lib 1.0 -> 0.3  (cam7: 0.280)
 
     # ── Hydrometeor-diffusion (OFF in CAM default; kept for completeness) ──
@@ -536,19 +543,19 @@ class CLUBBParams(NamedTuple):
     pdf_component_stdev_factor_w: float = 1.0
     coef_spread_DG_means_rt: float = 0.8
     coef_spread_DG_means_thl: float = 0.8
-    gamma_coef: float = 0.308       # lib 0.25 -> 0.308 (cam7: 0.3)
-    gamma_coefb: float = 0.32       # lib 0.25 -> 0.32  (cam7: 0.3)
+    gamma_coef: float = 0.3441439682  # CAM 0.308; LES-tuned
+    gamma_coefb: float = 0.3166490279  # CAM 0.32; LES-tuned
     gamma_coefc: float = 5.0
     Skw_denom_coef: float = 0.0     # lib 4.0 -> 0.0
     Skw_max_mag: float = 4.5        # lib 10.0 -> 4.5
 
     # ── Mixing length / time scale ────────────────────────────────────────
-    mu: float = 1.0e-3
-    beta: float = 2.4               # lib 1.0 -> 2.4
-    lmin_coef: float = 0.1          # lib 0.5 -> 0.1
+    mu: float = 0.0007580104464  # CAM 1.0e-3; LES-tuned
+    beta: float = 2.459876677  # CAM 2.4; LES-tuned
+    lmin_coef: float = 0.1  # CAM; the LES fit's 0.06967 is UNSTABLE (see below)
     Lscale_mu_coef: float = 2.0
     Lscale_pert_coef: float = 0.1
-    lambda0_stability_coef: float = 0.04   # lib 0.03 -> 0.04
+    lambda0_stability_coef: float = 0.03474669804  # CAM 0.04; LES-tuned
     mult_coef: float = 1.0          # lib 0.5 -> 1.0
     taumin: float = 90.0
     taumax: float = 3600.0
@@ -587,6 +594,54 @@ class CLUBBParams(NamedTuple):
     wpxp_Ri_exp: float = 0.5
     z_displace: float = 25.0
 
+
+
+# The CAM namelist values these defaults replaced. The scheme still implements
+# CAM's flag tree; only the tunable coefficients were refitted, so keeping the
+# CAM coefficient set addressable is what lets that claim stay checkable.
+# `lmin_coef` is the one trained coefficient held BACK at its CAM value. The
+# eight-case LES fit moved it 0.1 -> 0.06967, lowering the minimum mixing length
+# from 4.0 m to 2.79 m; `Lscale` is floored at that length and sets the
+# dissipation time, so the smaller floor drove a 24-level column at a 75 s step
+# entirely to NaN in ONE step. Every other tuned coefficient is individually safe
+# on that column. The value is legal under the spec bounds [0.02, 0.5], so the
+# lower bound is more permissive than stability allows -- tightening it and
+# refitting is the real fix; this pin is the interim.
+_CAM_DEFAULT_PARAMS = {
+    'C11': 0.7,
+    'C12': 1.0,
+    'C14': 2.2,
+    'C2rt': 1.0,
+    'C2rtthl': 1.3,
+    'C2thl': 1.0,
+    'C4': 5.2,
+    'C6rt': 4.0,
+    'C6rtb': 6.0,
+    'C6thl': 4.0,
+    'C6thlb': 6.0,
+    'C8': 4.2,
+    'C_uu_buoy': 0.3,
+    'C_uu_shr': 0.3,
+    'C_wp3_pr_turb': 0.4,
+    'beta': 2.4,
+    'c_K': 0.2,
+    'c_K1': 0.75,
+    'c_K10': 0.5,
+    'c_K2': 0.125,
+    'c_K6': 0.375,
+    'c_K8': 1.25,
+    'c_K9': 0.25,
+    'gamma_coef': 0.308,
+    'gamma_coefb': 0.32,
+    'lambda0_stability_coef': 0.04,
+    'lmin_coef': 0.1,
+    'mu': 0.001,
+    'nu1': 20.0,
+    'nu2': 5.0,
+    'nu6': 5.0,
+    'nu8': 20.0,
+    'nu9': 20.0,
+}
 
 class CLUBBConfig(NamedTuple):
     """Top-level configuration for the fuller CLUBB turbulence scheme.

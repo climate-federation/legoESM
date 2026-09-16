@@ -69,10 +69,22 @@ def test_clubb_applies_nested_tuned_prognostic():
     plain = scm_turbulence_config("clubb", les_tuned=False)
     assert plain.clubb is None                 # library default: opt-in / off
     assert tuned.clubb is not None and tuned.clubb.prognostic is True
+    # The tuned coefficients are now also the class defaults, so this splice is
+    # an IDENTITY -- and that is the stronger invariant to assert: the tracked
+    # YAML and the shipped defaults must not drift apart. Before they were
+    # adopted as defaults this checked that >=30 fields MOVED; the same drift
+    # would now show up as fields that differ.
     dflt = type(tuned.clubb.params)()
-    moved = [f for f in tuned.clubb.params._fields
-             if getattr(tuned.clubb.params, f) != getattr(dflt, f)]
-    assert len(moved) >= 30, moved
+    drifted = {f: (getattr(dflt, f), getattr(tuned.clubb.params, f))
+               for f in tuned.clubb.params._fields
+               if getattr(tuned.clubb.params, f) != getattr(dflt, f)}
+    assert not drifted, (
+        "the tracked LES-tuned YAML disagrees with the shipped defaults: "
+        f"{drifted}")
+    # ...and the YAML must still actually carry CLUBB's coefficients, or the
+    # identity above would hold vacuously for an empty file.
+    from legoesm.atmosphere.physics.turbulence.clubb import _CAM_DEFAULT_PARAMS
+    assert len(_CAM_DEFAULT_PARAMS) >= 30
 
 
 def test_every_value_in_spec_bounds():

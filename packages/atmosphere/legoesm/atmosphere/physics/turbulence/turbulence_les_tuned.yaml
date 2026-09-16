@@ -39,7 +39,7 @@ atm.turb.CLUBBParams.c_K9: 0.2225234306
 atm.turb.CLUBBParams.gamma_coef: 0.3441439682
 atm.turb.CLUBBParams.gamma_coefb: 0.3166490279
 atm.turb.CLUBBParams.lambda0_stability_coef: 0.03474669804
-atm.turb.CLUBBParams.lmin_coef: 0.06967004128
+atm.turb.CLUBBParams.lmin_coef: 0.1
 atm.turb.CLUBBParams.mu: 0.0007580104464
 atm.turb.CLUBBParams.nu1: 25.18514559
 atm.turb.CLUBBParams.nu2: 4.386078452
