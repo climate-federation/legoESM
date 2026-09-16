@@ -50,6 +50,7 @@ from legoesm.ocean.vertical import (
     nemo_qco_live_face_geometry_cgrid,
     nemo_qco_live_face_geometry_from_operands,
     nemo_qco_live_t_thickness,
+    nemo_qco_reference_t_reciprocal,
     nemo_qco_card_mesh_operands,
     nemo_qco_mesh_operands,
     nemo_up3_vertical_momentum_advection,
@@ -1594,6 +1595,28 @@ def _nemo_ws_stage_transport(
             z_coord.is_active.astype(h_stage.dtype)
             if isinstance(z_coord, OceanPartialCellCoordinate)
             else jnp.ones_like(h_stage))
+        # stprk3_stg.f90:180-234 forms the full-step QCO ratio first, then
+        # interpolates r3t independently from ssh for HYB stages.  Computing
+        # eta_stage*r1_ht_0 is algebraically equal but is not this program's
+        # binary64 association (the direct kt=1 stage-1 record distinguishes
+        # 201 wet cells).
+        if eta_before is None or eta_after is None:
+            raise ValueError(
+                "literal stage WZV requires Kbb and full-step Kaa SSH")
+        _r1_ht0 = nemo_qco_reference_t_reciprocal(h_ref, _tmask3)
+        _r3_kbb = nemo_source_round(eta_before * _r1_ht0)
+        _r3_full = nemo_source_round(eta_after * _r1_ht0)
+        if stage_index == 0:
+            _r3_kaa = nemo_source_round(
+                nemo_source_round((2.0 / 3.0) * _r3_kbb)
+                + nemo_source_round((1.0 / 3.0) * _r3_full))
+        elif stage_index == 1:
+            _r3_kaa = nemo_source_round(
+                0.5 * nemo_source_round(_r3_kbb + _r3_full))
+        elif stage_index == 2:
+            _r3_kaa = _r3_full
+        else:
+            raise ValueError(f"unsupported NEMO RK3 stage index {stage_index}")
         w_stage, _, _ = nemo_qco_wzv_operands(
             eta_stage, eta_before, u_stage, v_stage, grid, z_coord,
             u_mask_3d, v_mask_3d, _tmask3, dt,
@@ -1606,7 +1629,9 @@ def _nemo_ws_stage_transport(
                 None if legacy_wzv_rederived_transport else (
                     zfu_stage,
                     zfv_stage,
-                )))
+                )),
+            r3_before_override=_r3_kbb,
+            r3_after_override=_r3_kaa)
     else:
         w_stage = diagnose_w_from_flux_div(
             stage_div, z_coord, thickness_weighted=True)
@@ -6420,7 +6445,11 @@ class LatLonCGridOceanModel:
             # the zub advection survives (isomorphism row S-21; measured
             # 3.136e-07 m/s^2 at the OVERFLOW kt=2 entry, exactly zero from
             # rest).
-            _du1_rhs, _dv1_rhs = du_dt_pert, dv_dt_pert
+            # stp2d.f90:141-176 accumulates the full 3-D Krhs, then
+            # :202-213 diagnoses its depth mean into separate Ue_rhs/Ve_rhs
+            # without projecting Krhs.  Stage 1 consumes that full source at
+            # compiled stprk3_stg.f90:664-673.
+            _du1_rhs, _dv1_rhs = du_dt, dv_dt
             _stage1_rhs_base = (_du1_rhs, _dv1_rhs)
             # The stage's NEMO e3u/e3v(Kmm) pair for the flux-form momentum
             # advection, from the ONE kernel (_nemo_ws_qco_stage_faces) keyed
