@@ -72,11 +72,23 @@ def thomas_solve(
         exact derivative of the clamped map — that is the whole point (the exact
         derivative is the NaN we are avoiding), and on a well-conditioned system
         it equals the raw element-wise autodiff to machine precision.
-      * Reverse-only: ``jax.jvp``/``jacfwd`` through ``thomas_solve`` now raise
-        (a ``custom_vjp`` defines no JVP).  No production/test path forward-diffs
-        this solver; the LAPACK ``thomas_solve_batched`` keeps both modes.
-      * Higher-order reverse mode recurses through this same rule (the bwd's
-        ``λ`` solve uses the wrapper), so grad-of-grad stays clamp-protected too.
+      * Reverse-only: ``jax.jvp``/``jacfwd`` through ``thomas_solve`` raise
+        (a ``custom_vjp`` defines no JVP).  Pinned by
+        ``test_thomas_solve_custom_vjp.py``.
+      * FORWARD-OVER-REVERSE (``jax.jvp`` of ``jax.grad``) DOES work, because
+        this rule's ``λ`` solve calls the undecorated impl rather than
+        re-entering the wrapper (#1736).  An earlier version of this docstring
+        claimed "no production/test path forward-diffs this solver"; that was
+        false -- ``da/curvature.py``'s ``hvp``, ``gauss_newton_hvp`` and
+        ``dense_hessian`` are all forward-over-reverse, and all three raised
+        here.  It also claimed the LAPACK ``thomas_solve_batched`` "keeps both
+        modes"; its CPU default is ``vmap(thomas_solve)``, so that is only true
+        under ``LEGOESM_TRIDIAG=lapack|pcr``.
+      * The price of the line above: higher-order reverse mode no longer
+        recurses through this rule, so a SECOND derivative taken where a pivot
+        is clamped differentiates the raw ``1/denom**2`` and can overflow in
+        float32.  float64 is unaffected, and the measured pivot margin on the
+        production soil column is ~7e33 above the clamp.  Pinned by test.
     """
     return _thomas_solve_impl(a, b, c, d)
 
@@ -176,12 +188,29 @@ def _thomas_solve_bwd(res, x_bar):
     xw = jnp.asarray(x, work); xbar = jnp.asarray(x_bar, work)
 
     # Transposed system Aᵀ λ = x̄.  Aᵀ has sub-diag aT[k]=c[k-1], super-diag
-    # cT[k]=a[k+1], same main diag b.  Solve with the SAME stable forward sweep
-    # (custom_vjp wrapper -> stable higher-order too).
+    # cT[k]=a[k+1], same main diag b.  Solve with the SAME stable forward sweep,
+    # calling the UNDECORATED impl rather than re-entering the wrapper (#1736).
+    #
+    # WHY NOT THE WRAPPER: re-entering it makes this rule's own body contain a
+    # custom_vjp call, and forward-differentiating a custom_vjp is undefined in
+    # JAX.  That made ``jax.jvp(jax.grad(f))`` -- i.e. every forward-over-reverse
+    # second-order operator in da/curvature.py -- raise on any objective
+    # containing this solve.  Measured: the refusal is raised HERE, at this
+    # line, not at the primal call; routing this one solve to the impl makes
+    # the land-column HVP finite and match a central finite difference to
+    # rel 3.6e-09 against the test's 5e-3 bar, with the first-order gradient
+    # bit-unchanged.
+    #
+    # WHAT IT COSTS: higher-order reverse mode no longer recurses through this
+    # rule, so a SECOND derivative taken where a pivot is clamped differentiates
+    # the raw recursion's 1/denom**2 and can overflow in float32 (float64 is
+    # fine).  That trade is pinned by a test rather than left to prose; see
+    # tests/unit/test_thomas_solve_custom_vjp.py.  The first-order adjoint
+    # below is unaffected -- it never forms 1/denom**2.
     zc = jnp.zeros_like(cw[..., :1])
     aT = jnp.concatenate([zc, cw[..., :-1]], axis=-1)
     cT = jnp.concatenate([aw[..., 1:], jnp.zeros_like(aw[..., :1])], axis=-1)
-    lam = thomas_solve(aT, bw, cT, xbar)
+    lam = _thomas_solve_impl(aT, bw, cT, xbar)
 
     x_km1 = jnp.concatenate([jnp.zeros_like(xw[..., :1]), xw[..., :-1]], axis=-1)
     x_kp1 = jnp.concatenate([xw[..., 1:], jnp.zeros_like(xw[..., :1])], axis=-1)

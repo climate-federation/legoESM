@@ -82,12 +82,26 @@ class TestStaticGate:
         with pytest.raises(ValueError, match="cloud-fraction-producing"):
             make_physics(_cfg(turbulence="louis"), model_type="hydrostatic")
 
-    def test_flag_with_prognostic_clubb_raises(self):
-        """Prognostic CLUBB carries packed moments, not a diagnosed cloud
-        fraction => still refuse."""
+    def test_flag_with_prognostic_clubb_is_accepted(self):
+        """Prognostic CLUBB is now a LEGAL cloud-fraction source.
+
+        This used to refuse, on the grounds that the prognostic path carried
+        "packed moments, not a diagnosed cloud fraction". That was true of its
+        OUTPUT and never of the closure: the moment advance computes the
+        post-advance PDF cloud fraction and simply did not publish it. It does
+        now, and its variance is carried state rather than a mixing-length
+        estimate re-derived each step, which makes it the better source of the
+        two rather than an unsupported one.
+        """
+        make_physics(_cfg(clubb=CLUBBConfig(prognostic=True)),
+                     model_type="hydrostatic")
+
+    def test_flag_without_clubb_still_raises(self):
+        """The guard must still bite for a closure that produces no cloud
+        fraction at all -- otherwise the relaxation above would have removed
+        the check rather than widened it."""
         with pytest.raises(ValueError, match="cloud-fraction-producing"):
-            make_physics(_cfg(clubb=CLUBBConfig(prognostic=True)),
-                         model_type="hydrostatic")
+            make_physics(_cfg(turbulence="louis"), model_type="hydrostatic")
 
     def test_non_hydrostatic_raises(self):
         """READ side is wired for hydrostatic only; a request on another dycore

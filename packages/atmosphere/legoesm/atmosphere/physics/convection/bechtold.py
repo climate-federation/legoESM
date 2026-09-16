@@ -205,6 +205,24 @@ _DD_ORIGIN_SHARP_PER_M = 3.0e-3
 _DD_CFL_FRAC = 0.5
 
 
+
+def _downdraft_cfl_cap(dp_full: jax.Array, dt: float) -> jax.Array:
+    """Largest downdraft mass flux [kg m^-2 s^-1] a level may carry in one
+    step: ``_DD_CFL_FRAC`` of the thinner of the level and its two neighbours
+    over ``g dt`` (IFS: ZMFMAX = dp/(g dt), RMFCFL = 1).  The neighbour
+    minimum is what the 0.5-averaged interface flux needs -- a thick
+    neighbour must not lift a thin layer past its own limit -- and the
+    fraction is the safety margin for that centred, non-monotone average,
+    which can hand a level up to twice one cell's flux (GLM review)."""
+    dp_nb = jnp.minimum(
+        dp_full,
+        jnp.minimum(
+            jnp.concatenate([dp_full[:, :1], dp_full[:, :-1]], axis=1),
+            jnp.concatenate([dp_full[:, 1:], dp_full[:, -1:]], axis=1),
+        ),
+    )
+    return _DD_CFL_FRAC * dp_nb / (constants.g * dt)
+
 def _penetrative_downdraft_transport(
     T: jax.Array,
     q_v: jax.Array,
@@ -295,7 +313,18 @@ def _penetrative_downdraft_transport(
         -jnp.clip(z - z_sfc, 0.0, None) / jnp.maximum(detrain_scale_m, 1.0)
     )
     shape = below_origin * surface_taper * source_valid
-    m_d = -M_d_mag[:, None] * shape                      # [ncol, nlev], <=0
+    # CFL cap on the downdraft mass flux: the bound the shallow closure puts
+    # on its cloud-base flux (ZMFMAX = dp/(g*dt), RMFCFL = 1 for explicit T/q
+    # coupling), applied per LEVEL because the flux-divergence stencil below
+    # divides by the LOCAL dp.  Uncapped, a thin layer under a large
+    # cloud-base flux blew the model up on day 4 of a restart at both the
+    # default flux and a third of it.  The interface flux is the 0.5-average
+    # of the two adjacent cells, so the cap uses the thinner of a cell and its
+    # neighbours: a thick neighbour must not lift a thin layer past its own
+    # limit (codex).
+    m_cfl = _downdraft_cfl_cap(dp_full, dt)              # [ncol, nlev] >= 0
+    m_mag = jnp.minimum(M_d_mag[:, None] * shape, m_cfl)
+    m_d = -m_mag                                         # [ncol, nlev], <=0
 
     # Interface support: only interfaces with BOTH adjacent cells below the
     # origin carry flux.  This zeros the origin-STRADDLING interface so NO
@@ -335,12 +364,19 @@ def _penetrative_downdraft_transport(
     drying = jnp.maximum(-dq_v_dd, 0.0)                  # >0 only where drying
     # Only DRYING levels constrain the vapor limiter; a non-drying level (incl.
     # q_v==0 with drying==0) returns a huge value so it never disables a column.
+    # Defensive against a negative caller input (the MPAS and spectral
+    # dynamics floor their tracers before physics, so none is expected): a
+    # negative ratio here would flip and amplify the whole column's transport
+    # (r << 0), so the limiter reads max(q_v, 0) and clips r to [0, 1]; such a
+    # level shuts the column's transport off, conservatively.
     r_q = jnp.where(
-        drying > 0.0, _DD_CFL_FRAC * q_v / (drying * dt + tiny), 1.0e30
+        drying > 0.0,
+        _DD_CFL_FRAC * jnp.maximum(q_v, 0.0) / (drying * dt + tiny),
+        1.0e30,
     )
     r_t = _BECHTOLD_DTDT_MAX / (jnp.abs(dt_dd) + tiny)
-    r = jnp.minimum(
-        jnp.min(jnp.minimum(r_q, r_t), axis=1, keepdims=True), 1.0
+    r = jnp.clip(
+        jnp.min(jnp.minimum(r_q, r_t), axis=1, keepdims=True), 0.0, 1.0
     )
     return dt_dd * r, dq_v_dd * r
 

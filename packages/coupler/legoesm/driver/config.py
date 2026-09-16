@@ -333,6 +333,15 @@ class OutputConfig(NamedTuple):
     # Static diagnostic gate (default OFF = byte-identical model);
     # single-rank only.
     budget_ledger: bool = False
+    # Restrict every ledger row to a sigma band (lo, hi), lo < hi in [0, 1] and
+    # sigma increasing downward.  None = the whole column.  WHY: the column
+    # ledger is structurally blind to a vertical-REDISTRIBUTION bias, because a
+    # mass-flux convection scheme's column water row is exactly zero (measured:
+    # 0.0000 kg/m2/day on the production AMIP) while the tropical free
+    # troposphere is twice as moist as observed.  Banding is what makes the
+    # table answer "which process supplies THIS layer", without changing the
+    # shape of the accumulator carried through the jitted step.
+    budget_ledger_sigma_band: tuple | None = None
     checkpoint_format: str = "npz"  # npz, zarr
     diagnostics_perf_mode: str = "auto"  # auto, always, never
     cmip_resolution_deg: float = 5.0  # lat-lon grid spacing for CMIP output [degrees]
@@ -557,7 +566,23 @@ class ExperimentConfig(NamedTuple):
     # ``RadiationConfig.use_clubb_cloud_fraction``; requires diagnostic CLUBB
     # turbulence (turbulence='clubb').  False (default) is byte-identical.
     use_clubb_cloud_fraction: bool = False
-    # Opt-in convective (cumulus) cloud-fraction source (Slingo 1987).  The
+    # Run CLUBB as a PROGNOSTIC higher-order closure rather than a diagnostic
+    # one: the scheme then carries 15 higher-order moments as real state,
+    # including the total-water variance, the liquid-water-potential-temperature
+    # variance and their covariance.  Diagnostic CLUBB instead estimates those
+    # variances each step from a mixing length times a local gradient, so the
+    # cloud PDF is handed an equilibrium guess rather than a quantity with
+    # memory.  Requires turbulence='clubb'; ``init_physics_state`` seeds the
+    # packed (ncol, 15, nlev+1) carry when this is on, and the turbulence
+    # dispatch refuses to run prognostic CLUBB against an unseeded carry rather
+    # than silently re-seeding it every step.  False (default) is the
+    # byte-identical diagnostic path.
+    clubb_prognostic: bool = False
+    # CLUBB's upper domain limit [Pa] (CAM ``trop_cloud_top_press``): the
+    # scheme's mixing is tapered to zero above this pressure.  None (default)
+    # keeps the scheme's own 0.0 = no limit, byte-identical.
+    clubb_trop_cloud_top_press: float | None = None
+    # Opt-in convective (cumulus) cloud-fraction source (Slingo-1987-inspired surrogate).  The
     # RH-based stratiform cloud schemes give ~0 cloud where an adjustment
     # convection scheme (sbm) holds the column subsaturated, so the convecting
     # tropics radiate surface LW to space (~4.5 K coupled cold bias).  When
@@ -575,7 +600,7 @@ class ExperimentConfig(NamedTuple):
     #                          optically THINNER cloud (lower albedo, still
     #                          LW-active).  Bounds (1e-6, 1e-3) — the lower end
     #                          was widened from 5e-5; see validate_strict.
-    #   cloud_conv_cloud_max — convective (Slingo) cover cap.  Bounds (0.1, 1.0).
+    #   cloud_conv_cloud_max — convective (Slingo-1987-inspired surrogate) cover cap.  Bounds (0.1, 1.0).
     #   cloud_conv_cloud_condensate — convective anvil in-cloud condensate
     #                          [kg/kg]; LOWER => optically THINNER / more realistic
     #                          anvil (lower albedo, still LW-active).  Bounds
@@ -618,6 +643,34 @@ class ExperimentConfig(NamedTuple):
     #   moisture rises (flattens the overcast runaway).
     cloud_p_xr: float | None = None
     cloud_alpha_xr: float | None = None
+    # Condensate-aware cover floor cf >= q_cond/(q_cond + q_ref) [kg/kg] for the
+    # RH-diagnosed schemes (CloudConfig.cover_condensate_q_ref).  None => scheme
+    # default (0.0 = off).  Paired-arm lever for the invisible-ice defect.
+    cloud_cover_condensate_q_ref: float | None = None
+    # Snow grain-growth activation temperature [K] (BATS ~5000): the snow-age
+    # clock accumulates dt*exp(A*(1/T_freeze - 1/T_snow)) so cold dry snow keeps
+    # its fresh albedo. None => LandAlbedoConfig default (0.0 = off, the
+    # calendar clock, byte-identical).
+    snow_age_activation_K: float | None = None
+    # Snow-albedo age e-folding time [days].  None => the calibration's value
+    # (3.674 d under land_calibrated_physics, 11.64 d otherwise).
+    # WHY THIS IS A KNOB AT ALL: measured 2026-09-11 on the production AMIP,
+    # every snow-covered polar cell sat at the fully-aged albedo 0.521 against
+    # an observed 0.70 (Arctic tundra) to 0.82 (Antarctic plateau), because a
+    # 3.7-day clock darkens anything older than a few weeks regardless of how
+    # cold it is.  Turning on the temperature dependence alone does NOT fix it:
+    # an arm at the BATS activation of 5000 K slowed the clock by only 5-12% in
+    # ten days and left the albedo unchanged at 0.521.  The e-folding time is
+    # the binding parameter, and it was previously a hardcoded calibrated
+    # constant no run could select.  NOTE the calibration fitted 3.674 d with
+    # the temperature dependence OFF, so the two should eventually be refitted
+    # together; an arm moving this alone trades against that land-surface
+    # temperature calibration and must be scored on both.
+    # DEFAULT 150 d (user 2026-09-15) once the canopy's absorbed shortwave and
+    # the exported albedo were reconciled: measured on a 30-day pair together
+    # with albedo_ice 0.80, polar clear-sky reflected SW bias -15.7 -> -2.7
+    # W/m2. None restores the calibration's 3.674 d.
+    land_snow_tau_days: float | None = 150.0
     # Marine-Sc albedo lever: blend strength [0,1] toward diagnostic-CLUBB cf in
     # the BL when --use-clubb-cloud-fraction is on (1.0 = full replacement, which
     # drove a real-SST surface-heating runaway; ~0.3-0.5 is gentler + stable).
@@ -1067,7 +1120,11 @@ class ExperimentConfig(NamedTuple):
     # SIC ramp threshold — NOT the ice surface temperature.  Legacy
     # name kept for AMIP config compatibility.
     T_ice: float = constants.T_freeze_ocean
-    albedo_ice: float = 0.65
+    # Flat over the prescribed ice fraction (no snow-on-ice / pond / temperature
+    # dependence on the MPAS lane). 0.80 = snow-covered late-winter ice
+    # (CICE/CCSM3 dry snow-on-ice broadband); 0.65 was a bare/melting value.
+    # DEFAULT moved 0.65 -> 0.80 (user 2026-09-15), see land_snow_tau_days.
+    albedo_ice: float = 0.80
     albedo_ocean: float = 0.06
     sfc_emissivity: float = constants.emissivity_ocean
     emissivity_ice: float = constants.emissivity_ice
@@ -1428,6 +1485,22 @@ class ExperimentConfig(NamedTuple):
     # but damps resolved gradients more broadly — use a gentle coefficient.
     # MPAS-only: refused on other discretizations (validate_strict).
     mpas_qv_smooth_del2_m2s: float = 0.0   # del2 diffusivity [m^2/s]; ~1e5-1e6 typical at 240 km
+    # Scale-SELECTIVE companion to the del2 above, added 2026-09-11 after the
+    # del2's cost was measured: across thirteen arms differing only in
+    # mpas_qv_smooth_del2_m2s, the humidity field's structure-function growth
+    # exponent falls monotonically from 1.56 at 2e5 to 0.46 at 1.1e4 — i.e. the
+    # del2 IS holding grid-scale noise down, but it has to be strong enough to
+    # flatten the resolved gradients that set tropical cloud cover along with
+    # it.  A biharmonic's eigenvalue is exactly minus the SQUARE of the del2's
+    # on every mesh mode, so its damping ratio between any two scales is the
+    # del2's squared: measured on the subdivision-6 mesh, 2.47x between 240 and
+    # 479 km becomes 6.08x.  (The continuum figures 4 and 16 do not apply to
+    # the discrete operator.)  It is NOT monotone, so the q>=0 floor is
+    # load-bearing when it is on and the per-level integral is conserved only
+    # up to what that floor clips; the driver enforces nu4*dt*g_max^2 <= 0.5 at
+    # setup.  MPAS-only, same as the del2.  Default 0.0 pending the controlled
+    # pair that picks the coefficient — see the arm before changing it.
+    mpas_qv_smooth_del4_m4s: float = 0.0   # del4 diffusivity [m^4/s]
     # Prognostic sea-ice skin temperature on the MPAS lane (Semtner 1976
     # zero-layer conduction + slab thermal inertia; forcing/surface_utils
     # helper).  The prescribed-SST anchor otherwise pins ice-covered cells
@@ -1746,7 +1819,9 @@ class ExperimentConfig(NamedTuple):
                 f"cutoff), got {self.bechtold_conv_top_pa}"
             )
         for _f, _lo, _hi in (
-            ("bechtold_rprcon", 3.5e-4, 5.6e-3),
+            # Ceiling raised with the scheme spec (see BechtoldConfig
+            # __param_spec__): the production value sat on the old bound.
+            ("bechtold_rprcon", 3.5e-4, 1.4e-2),
             ("bechtold_epsilon_deep", 7.0e-4, 4.2e-3),
             ("bechtold_delta_deep", 3.0e-5, 1.8e-4),
             ("bechtold_dnoprc", 7.5e-5, 1.2e-3),
@@ -1994,6 +2069,13 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 f"turbulence must be one of {_valid_turbulence}, "
                 f"got {self.turbulence!r}"
+            )
+        if (self.clubb_trop_cloud_top_press is not None
+                and self.turbulence != "clubb"):
+            errors.append(
+                "clubb_trop_cloud_top_press is a CLUBB field; got "
+                f"turbulence={self.turbulence!r} (also refused with a "
+                "turbulence_override, which bypasses the CLUBB branch)"
             )
         _valid_surface_bulk = VALID_SURFACE_BULK
         if self.surface_bulk_scheme not in _valid_surface_bulk:
@@ -2381,6 +2463,13 @@ class ExperimentConfig(NamedTuple):
                     "in its step factories (qv_smooth_coeff) and would "
                     "silently ignore it."
                 )
+            if self.mpas_qv_smooth_del4_m4s != 0.0:
+                errors.append(
+                    "mpas_qv_smooth_del4_m4s is an MPAS-lane knob; "
+                    f"discretization={d.discretization!r} already smooths q_v "
+                    "in its step factories (qv_smooth_coeff) and would "
+                    "silently ignore it."
+                )
             if self.mpas_ice_skin_prognostic:
                 errors.append(
                     "mpas_ice_skin_prognostic is an MPAS-lane knob; "
@@ -2410,6 +2499,16 @@ class ExperimentConfig(NamedTuple):
                 f"mpas_qv_smooth_del2_m2s (horizontal q_v del2 diffusivity "
                 f"[m^2/s]) must be finite in [0, 1e8]; got "
                 f"{self.mpas_qv_smooth_del2_m2s!r}."
+            )
+        # Same shape one order up: 0 = off, and the ceiling is far above any
+        # biharmonic a stable explicit step admits (the driver enforces the
+        # mesh-specific bound nu4*dt*g_max^2 <= 0.5 at setup).
+        if not (math.isfinite(self.mpas_qv_smooth_del4_m4s)
+                and 0.0 <= self.mpas_qv_smooth_del4_m4s <= 1.0e18):
+            errors.append(
+                f"mpas_qv_smooth_del4_m4s (horizontal q_v del4 diffusivity "
+                f"[m^4/s]) must be finite in [0, 1e18]; got "
+                f"{self.mpas_qv_smooth_del4_m4s!r}."
             )
         # Ice-skin inert corners: the skin integrates the physics' exported
         # surface fluxes (radiation channel), so radiation="none" would leave
@@ -2735,7 +2834,7 @@ class ExperimentConfig(NamedTuple):
             ("morrison_dep_coeff", 1.0e-4, 1.0e-2),
             ("morrison_agg_coeff", 1.0e-4, 1.0e-2),
             ("morrison_k_au", 50.0, 5000.0),
-            ("morrison_fall_a_i", 230.0, 2100.0),
+            ("morrison_fall_a_i", 230.0, 6300.0),
             ("morrison_ice_snow_d_auto", 8.0e-5, 8.0e-4),
             ("morrison_hom_ice_nuc_N", 1.0e4, 1.0e7),
         ):
@@ -2818,7 +2917,16 @@ class ExperimentConfig(NamedTuple):
             ("cloud_fsd", 0.0, 1.0),
             ("cloud_p_xr", 0.05, 1.0),
             ("cloud_alpha_xr", 10.0, 1000.0),
+            ("cloud_cover_condensate_q_ref", 1.0e-6, 1.0e-3),
+            ("snow_age_activation_K", 0.0, 20000.0),
+            # 0.5 d = melting spring snow; 400 d spans the cold-plateau
+            # timescale the literature supports (Warren & Wiscombe 1980).
+            ("land_snow_tau_days", 0.5, 400.0),
             ("cloud_adiabatic_lwc_rate", 5.0e-7, 3.0e-6),
+            # 0 = the scheme's own "no limit"; 1e3 Pa is above any tropopause,
+            # 5e4 Pa would switch the boundary-layer scheme off in the free
+            # troposphere, which is not what a taper is for.
+            ("clubb_trop_cloud_top_press", 0.0, 5.0e4),
         ):
             _v = getattr(self, _f)
             if _v is not None and not (_lo <= _v <= _hi):
@@ -3157,6 +3265,8 @@ class ExperimentConfig(NamedTuple):
             cmip_output=getattr(amip_cfg, 'cmip_output', False),
             clear_sky_diag=getattr(amip_cfg, 'clear_sky_diag', False),
             budget_ledger=getattr(amip_cfg, 'budget_ledger', False),
+            budget_ledger_sigma_band=getattr(
+                amip_cfg, 'budget_ledger_sigma_band', None),
         )
         return ExperimentConfig(
             grid=grid,

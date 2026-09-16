@@ -75,6 +75,18 @@ class LandAlbedoConfig(NamedTuple):
     # f(mu) = max((1/b) * ((1 + b) / (1 + 2 b mu) - 1), 0) and mu = cos(zenith).
     snow_zenith_factor: float = 0.2   # brightening weight (0 = no zenith dependence)
     snow_zenith_b: float = 2.0        # BATS shape parameter
+    # Temperature dependence of snow grain growth (BATS/CLM, Dickinson et al.
+    # 1993): the age clock accumulates dt * exp(A*(1/T_freeze - 1/T_snow))
+    # instead of dt, so cold dry snow ages far more slowly than melting snow.
+    # WHY: with a temperature-independent clock every lying snowpack older than
+    # a few decay times sits at ``alpha_snow_min`` -- measured 2026-09-09 on the
+    # production AMIP, where EVERY snow-covered cell on Earth had albedo
+    # 0.5207 (10th, 50th and 90th percentiles identical) against an observed
+    # 0.80-0.85 on the Antarctic plateau and 0.6-0.75 on Arctic tundra. One
+    # parameter cannot be right for melting spring snow and for the polar
+    # plateau: the missing dependence is temperature, not the value.
+    # 0.0 = OFF (calendar-time clock, byte-identical); BATS uses 5000 K.
+    snow_age_activation_K: float = 0.0
     # Dry-soil brightening (Oleson et al. 2013, CLM): exposed soil brightens as the
     # top layer dries, so a DESERT (low soil moisture) is far brighter than moist bare
     # soil / tundra — a contrast a single per-PFT albedo cannot represent.  The
@@ -346,6 +358,12 @@ def land_albedo(
         # albedo; the aggregate snow contribution replaces alpha_snow * f_snow.
         return alpha_veg * (1.0 - f_snow) + snow_contrib_override
     alpha_snow = snow_albedo(snow_age, config, cos_zenith=cos_zenith)
+    # Snow cannot darken a surface below its own snow-free albedo: the aged
+    # value is a melting/dirty-snow asymptote, and on an ice sheet (band base
+    # 0.82 VIS / 0.62 NIR) the snow IS the surface.  No-op wherever the base
+    # is darker than aged snow (soil, vegetation), i.e. everywhere but
+    # glacier and other bright bases.
+    alpha_snow = jnp.maximum(alpha_snow, alpha_veg)
     return alpha_veg * (1.0 - f_snow) + alpha_snow * f_snow
 
 

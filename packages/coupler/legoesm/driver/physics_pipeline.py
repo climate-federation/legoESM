@@ -333,6 +333,7 @@ class PhysicsPipeline:
         self._cloud_diagnostic_condensate_scheme = None
         self._cloud_adiabatic_lwc_rate = None
         self._cloud_saturation_scheme = None
+        self._cloud_cover_condensate_q_ref = None
         # Convection scheme name + grid/vertical-coordinate objects for
         # grid-operator-backed convection inputs (moisture convergence,
         # resolved w, CMT winds).  Set by build_physics_pipeline; with
@@ -2147,15 +2148,14 @@ class PhysicsPipeline:
         """Prescribed TOA incident shortwave [W/m^2] — the incoming solar the
         radiation solver is GIVEN, used for the ``rsdt`` diagnostic.
 
-        ``rsdt`` previously read ``sw_flux_down`` at the top halo, whose value
-        comes from the quadratic top-boundary extrapolation in
-        ``rte/two_stream._replace_top_flux``.  For downwelling SW the true TOA
-        value exceeds every interior level (the column only attenuates
-        downward), so the extrapolation's range-limit (kept deliberately to
-        bound the BUG-B drifted-state overshoot, ``sw_down`` 1121 W/m^2) caps
-        the diagnostic ~15 % below ``S_0 cos(SZA)`` (≈330 vs ≈340 W/m^2,
-        C48).  The physical TOA incident flux is not an extrapolation at all —
-        it is the prescribed insolation boundary condition.  This returns that
+        ``rsdt`` previously read ``sw_flux_down`` at the top halo, which at
+        the time was a range-limited quadratic extrapolation of interior faces
+        (``rte/two_stream._replace_top_flux``, since removed: it zeroed the
+        top layer's radiation) and sat ~15 % below ``S_0 cos(SZA)``.  The
+        solver now keeps the physical boundary value there, but the TOA
+        incident flux is still best reported from its own definition — the
+        prescribed insolation boundary condition (the solver clamps a tiny
+        cos(SZA) to 0.01 before applying it).  This returns that
         insolation with the EXACT convention the solver uses (the column
         ``insol`` in the radiation builders): instantaneous ``S_0 cos(SZA)``
         under a diurnal cycle, else the daily-mean insolation.  Computed on the
@@ -2429,6 +2429,8 @@ class PhysicsPipeline:
                     self, "_clubb_cf_override_floor", None),
                 saturation_scheme=getattr(
                     self, "_cloud_saturation_scheme", None),
+                cover_condensate_q_ref=getattr(
+                    self, "_cloud_cover_condensate_q_ref", None),
             )
             # Column convective precip [kg/m²/s] for the convective cloud cover;
             # flattened to the (ncol,) column layout like the other inputs.
@@ -2452,10 +2454,41 @@ class PhysicsPipeline:
             # Cloud ice + double-moment NUMBER columns (None for warm-rain /
             # diagnostic-cloud runs ⇒ constant r_eff, legacy behaviour). When a
             # double-moment scheme supplies them, they drive the M2005 PSD
-            # liquid/ice effective radii — N_c per-VOLUME [#/m³], N_i per-MASS
-            # [#/kg], passed raw (same convention as the dynamical-core paths).
+            # liquid/ice effective radii.  The N_c CARRY is stored per MASS
+            # [#/kg] (checkpoint stamp ``number_convention = per_mass``); the
+            # PSD wants N_c per VOLUME [#/m³], so bridge with the MOIST air
+            # density — the SAME conversion the radiation physics_fn entry does
+            # (radiation/integration.py ``_extract_tracer_columns``).  #1715:
+            # this site passed the carry RAW, so a prognostic droplet number
+            # reached the liquid r_eff a factor rho too small, i.e. r_eff too
+            # large by rho^(-1/3).  Realistic envelope 0-20%: typical liquid at
+            # 700-900 hPa sees 0-8%, and the coldest supercooled tops ~19-22%.
+            # (An earlier version of this comment said ~26% by pairing rho=0.5
+            # with 500 hPa; rho at 500 hPa is ~0.68, and rho=0.5 is ~340 hPa,
+            # which is too cold to carry liquid at all -- GLM review on #1730.)
+            # Inert in production only because
+            # the specified-Nc+CCN path overrides the (dead-zeros) carry below;
+            # live the moment predict_Nc feeds it.  N_i is used per-mass and
+            # passes through raw, matching the reference entry.
             q_i_col = None if q_i is None else ad.flatten_3d(q_i)
-            n_cloud_col = None if N_c is None else ad.flatten_3d(N_c)
+            if N_c is None:
+                n_cloud_col = None
+            else:
+                from legoesm.atmosphere.physics._shared import compute_rho
+                # MOIST density, with no floor on T at this site because
+                # ``compute_rho`` already applies one internally
+                # (``jnp.clip(T_v, 1.0, None)``).  An earlier version of this
+                # comment argued the floor mattered -- that an unfloored T = 0
+                # gives rho = inf and 0 * inf = NaN.  MEASURED, and it is
+                # false: there is no infinity and no NaN on either path, and
+                # over 20000 sampled columns the floored and unfloored forms
+                # are bit-identical everywhere above 100 K, differing only at
+                # temperatures below 1 K that no column can hold.  Flooring
+                # here is simply redundant, which is the real reason not to do
+                # it.  Pinned by ``test_rho_helper_floors_temperature_itself``.
+                _rho_nc = compute_rho(T_col, p_full_col, q_v_col)
+                n_cloud_col = jnp.maximum(
+                    ad.flatten_3d(N_c) * _rho_nc, 0.0)
             n_ice_col = None if N_i is None else ad.flatten_3d(N_i)
             # Aerosol-CCN droplet number for the radiation PSD: under
             # specified-Nc with aerosol coupling, feed the SAME
@@ -3821,6 +3854,46 @@ def turbulence_config_for(config):
         # (louis_Ck / louis_z0 / louis_Ch_neutral / louis_Cd_neutral have no
         # LouisConfig field and are NOT threaded here — still inert, see the
         # upstream note in the calibration repo.)
+        # Prognostic CLUBB: thread the experiment-level switch into the ACTIVE
+        # scheme's nested config here, for the same reason the marine-Sc flag
+        # above is threaded here -- this function is the single source every
+        # dycore's kernel consumes, so a knob set anywhere else is inert on the
+        # backends that do not read it.  Only meaningful for clubb; a run that
+        # asks for it under a different closure is refused rather than silently
+        # ignored, because "the flag did nothing" is the failure mode this
+        # placement exists to prevent.
+        if getattr(config, "clubb_prognostic", False):
+            if tc.scheme != "clubb":
+                raise ValueError(
+                    f"clubb_prognostic=True requires turbulence='clubb', got "
+                    f"{tc.scheme!r}. Prognostic higher-order moments are a "
+                    f"CLUBB feature; no other closure carries them.")
+            # ``TurbulenceConfig.clubb`` defaults to None and dispatch
+            # substitutes a fresh CLUBBConfig(), so _replace on the None here
+            # would crash -- and skipping it would drop the request silently,
+            # which is the same defect the surface-layer injection below was
+            # fixed for.  Materialize exactly what dispatch will, via the
+            # shared helper.
+            from legoesm.atmosphere.physics.turbulence.integration import (
+                materialize_sub_config,
+            )
+            tc = materialize_sub_config(tc)
+            tc = tc._replace(clubb=tc.clubb._replace(prognostic=True))
+        # CLUBB's upper domain limit (CAM ``trop_cloud_top_press``), same
+        # threading and the same refusal as the prognostic flag.  None (default)
+        # => byte-identical: the scheme's own 0.0 (off) stands.
+        _ctp = getattr(config, "clubb_trop_cloud_top_press", None)
+        if _ctp is not None:
+            if tc.scheme != "clubb":
+                raise ValueError(
+                    f"clubb_trop_cloud_top_press requires turbulence='clubb', "
+                    f"got {tc.scheme!r}.")
+            from legoesm.atmosphere.physics.turbulence.integration import (
+                materialize_sub_config,
+            )
+            tc = materialize_sub_config(tc)
+            tc = tc._replace(clubb=tc.clubb._replace(
+                trop_cloud_top_press=float(_ctp)))
         if tc.scheme == "louis" and tc.louis is not None:
             _louis_updates = {}
             for exp_name, leaf_name in (
@@ -3859,6 +3932,21 @@ def turbulence_config_for(config):
     layout = active_column_layout()
     tc = override if layout is None else localize_turbulence_override(
         override, layout)
+    # An explicit override is authoritative and is NOT rewritten here -- but it
+    # must not silently swallow the prognostic-CLUBB request either, which is
+    # what "authoritative" would otherwise mean in practice: the run would ask
+    # for prognostic moments, be told nothing, and quietly get the diagnostic
+    # closure.  Refuse instead, and say where to set it.
+    if getattr(config, "clubb_prognostic", False):
+        _sub = getattr(tc, "clubb", None)
+        if tc.scheme != "clubb" or _sub is None or not _sub.prognostic:
+            raise ValueError(
+                "clubb_prognostic=True but an explicit turbulence_override is "
+                "in force and does not select prognostic CLUBB (override "
+                f"scheme={tc.scheme!r}, prognostic="
+                f"{getattr(_sub, 'prognostic', None)!r}). The override is "
+                "authoritative, so set CLUBBConfig(prognostic=True) inside it "
+                "rather than relying on the experiment-level flag.")
     return apply_surface_flux_config(tc, config)
 
 
@@ -4278,6 +4366,8 @@ def build_physics_pipeline(grid, sigma, config):
         config, 'cloud_adiabatic_lwc_rate', None)
     pipeline._cloud_saturation_scheme = getattr(
         config, 'cloud_saturation_scheme', None)
+    pipeline._cloud_cover_condensate_q_ref = getattr(
+        config, 'cloud_cover_condensate_q_ref', None)
     # Marine-Sc albedo lever: blend strength toward diagnostic-CLUBB cf in the BL
     # (partial replacement — full replacement drove a real-SST surface-heating
     # runaway).  None => CloudConfig default (1.0 = full replacement).
