@@ -134,3 +134,18 @@ def test_operand_score_is_bit_exact_and_masked():
     assert score["unequal"] == 1
     assert score["max_abs"] == np.spacing(1.0)
     assert not score["exact"]
+
+
+def test_kh_entry_ulp_plant_changes_one_consumed_raw_mxl_value():
+    energy = np.linspace(1.0e-6, 1.0e-2, 256, dtype=np.float64)
+    n2 = np.linspace(1.0e-8, 1.0e-4, 256, dtype=np.float64)
+    mask = np.ones_like(energy, dtype=bool)
+    planted, index = MODULE._plant_raw_mixing_length_entry_ulp(
+        energy, n2, np.float64(0.01), mask)
+
+    assert np.count_nonzero(planted.view(np.uint64)
+                            != energy.view(np.uint64)) == 1
+    assert planted[index] == np.nextafter(energy[index], np.inf)
+    before = MODULE._nemo_raw_mixing_length(energy, n2, np.float64(0.01))
+    after = MODULE._nemo_raw_mixing_length(planted, n2, np.float64(0.01))
+    assert before[index].view(np.uint64) != after[index].view(np.uint64)

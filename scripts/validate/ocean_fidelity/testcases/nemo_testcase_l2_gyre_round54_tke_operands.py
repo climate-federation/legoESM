@@ -335,6 +335,42 @@ def _operand_score(actual: np.ndarray, expected: np.ndarray,
     }
 
 
+def _nemo_raw_mixing_length(
+    energy: np.ndarray, n2: np.ndarray, floor: np.float64,
+) -> np.ndarray:
+    """Evaluate compiled ``zdftke.f90:627-630`` in binary64 order."""
+    energy = np.asarray(energy, dtype=np.float64)
+    n2 = np.asarray(n2, dtype=np.float64)
+    rsmall = np.float64(0.5) * np.finfo(np.float64).eps
+    zrn2 = np.maximum(n2, rsmall)
+    return np.maximum(
+        np.sqrt((np.float64(2.0) * energy) / zrn2),
+        np.float64(floor),
+    )
+
+
+def _plant_raw_mixing_length_entry_ulp(
+    energy: np.ndarray, n2: np.ndarray, floor: np.float64,
+    mask: np.ndarray,
+) -> tuple[np.ndarray, tuple[int, ...]]:
+    """Raise one consumed ``en`` value by one ULP where line 629 responds."""
+    energy = np.asarray(energy, dtype=np.float64)
+    mask = np.asarray(mask, dtype=bool)
+    require(energy.shape == np.shape(n2) == mask.shape,
+            "K_H entry plant shapes disagree")
+    bumped = np.nextafter(energy, np.float64(np.inf))
+    baseline = _nemo_raw_mixing_length(energy, n2, floor)
+    changed = _nemo_raw_mixing_length(bumped, n2, floor)
+    mobile = mask & (baseline.view(np.uint64) != changed.view(np.uint64))
+    require(np.any(mobile),
+            "no consumed TKE entry cell moves the raw mixing-length row by "
+            "one input ULP")
+    index = tuple(int(value) for value in np.argwhere(mobile)[0])
+    planted = energy.copy()
+    planted[index] = bumped[index]
+    return planted, index
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--record", type=Path, required=True)
@@ -349,7 +385,7 @@ def main(argv=None) -> int:
         help="run the preregistered source-ordered legoESM closure walk")
     parser.add_argument("--plant", choices=(
         "header", "truncation", "nan", "config", "copy", "shape",
-        "sweep", "prandtl", "stamp", "walk", "operand"))
+        "sweep", "prandtl", "stamp", "walk", "operand", "kh-entry-ulp"))
     args = parser.parse_args(argv)
     producer = None
     try:
@@ -373,9 +409,12 @@ def main(argv=None) -> int:
             rec["arrays"]["avt_closure"] = planted
         if args.plant == "operand":
             require(args.walk, "operand plant requires --walk")
+        if args.plant == "kh-entry-ulp":
+            require(args.walk, "K_H entry-ULP plant requires --walk")
         walk = (_model_substitution_walk(
                     rec["arrays"], rec["header"],
                     plant_operand=args.plant == "operand",
+                    plant_kh_entry=args.plant == "kh-entry-ulp",
                     stage_root=args.stage_root)
                 if args.walk else None)
         summary = {}
@@ -420,6 +459,7 @@ def main(argv=None) -> int:
 
 def _model_substitution_walk(
     arrays: dict, head: dict, *, plant_operand: bool = False,
+    plant_kh_entry: bool = False,
     stage_root: Path | None = None,
 ) -> dict:
     """Run the frozen source-ordered closure walk through production code.
@@ -446,6 +486,7 @@ def _model_substitution_walk(
         TKEEntryN2Bundle,
         _mxl0_surface_anchor,
         _safe_stress_modulus,
+        _tke_raw_mixing_length,
         compute_K_from_tke,
         compute_mixing_lengths,
         tke_vertical_mixing,
@@ -703,6 +744,141 @@ def _model_substitution_walk(
             en_value, l_value, cfg, N2=rn2, shear_sq=jnp.zeros_like(sh2),
             N2_prandtl=rn2b, p_sh2_override=lambda _: sh2,
             prandtl_K_M=avm_entry)[1]
+
+    oracle_mxl = np.asarray(yx("mxl_momentum")[..., 1:jpkm1])
+    oracle_mxld = np.asarray(yx("mxl_dissipation")[..., 1:jpkm1])
+    oracle_avm = np.asarray(yx("avm_closure")[..., 1:jpkm1])
+    oracle_dissl = np.asarray(yx("dissl_output")[..., 1:jpkm1])
+    oracle_floor_m = np.asarray(yx("avm_floor")[..., 1:jpkm1])
+    oracle_floor_h = np.asarray(yx("avt_floor")[..., 1:jpkm1])
+    source_raw_mxl = _nemo_raw_mixing_length(
+        np.asarray(e_post), np.asarray(rn2),
+        np.float64(arrays["rmxl_min"]))
+    source_sqrt_en = np.sqrt(np.asarray(e_post))
+    source_zav = ((np.float64(arrays["rn_ediff"]) * oracle_mxl)
+                  * source_sqrt_en)
+    source_raw_avt = (np.maximum(source_zav, oracle_floor_h)
+                      * np.asarray(wmask))
+    active_zav = wet & (oracle_avm > oracle_floor_m)
+
+    def kh_statement_walk(energy_value):
+        """Walk executing ``tke_avn`` boundaries from NEMO's entry state."""
+        energy_value = jnp.asarray(energy_value)
+        raw_mxl = jax.jit(
+            lambda ee: _tke_raw_mixing_length(ee, rn2, cfg))(energy_value)
+        bounded_mxl, bounded_mxld = jax.jit(
+            lambda ee: compute_mixing_lengths(
+                ee, rn2, e3w, cfg, signed_n2=True,
+                dz_cell=e3t_full, l_surface_anchor=anchor))(energy_value)
+        sqrt_en = jax.jit(jnp.sqrt)(energy_value)
+        raw_zav = jax.jit(
+            lambda ee, ll: (jnp.asarray(cfg.c_k, dtype=ee.dtype) * ll)
+            * jnp.where(ee > 0.0,
+                        jnp.sqrt(jnp.where(ee > 0.0, ee, 1.0)), 0.0))(
+                            energy_value, bounded_mxl)
+        raw_avt = (jnp.maximum(raw_zav, jnp.asarray(
+            cfg.kappaH_min, dtype=raw_zav.dtype)) * wmask)
+        k_m, k_h = jax.jit(
+            lambda ee, ll: compute_K_from_tke(
+                ee, ll, cfg, N2=rn2, shear_sq=jnp.zeros_like(sh2),
+                N2_prandtl=rn2b, p_sh2_override=lambda _: sh2,
+                prandtl_K_M=avm_entry))(energy_value, bounded_mxl)
+        dissl = sqrt_en / bounded_mxld
+        isolated_k_h = jax.jit(
+            lambda ee: close_from_en(ee, jnp.asarray(oracle_mxl)))(
+                energy_value)
+        rows = [
+            {
+                "name": "surface_mixing_length",
+                "citation": "zdftke.f90:589,612-620",
+                **_operand_score(
+                    np.asarray(anchor),
+                    np.asarray(yx("mxl_momentum")[..., 0]),
+                    np.asarray(yx("wmask")[..., 0]) != 0.0),
+            },
+            {
+                "name": "raw_buoyancy_length",
+                "citation": "zdftke.f90:627-630",
+                **_operand_score(np.asarray(raw_mxl), source_raw_mxl, wet),
+            },
+            {
+                "name": "bounded_mixing_length",
+                "citation": "zdftke.f90:634-683",
+                **_operand_score(
+                    np.asarray(bounded_mxl), oracle_mxl, wet),
+            },
+            {
+                "name": "sqrt_en",
+                "citation": "zdftke.f90:691",
+                **_operand_score(
+                    np.asarray(sqrt_en), source_sqrt_en, wet),
+            },
+            {
+                "name": "raw_zav",
+                "citation": "zdftke.f90:692",
+                **_operand_score(
+                    np.asarray(raw_zav), oracle_avm, active_zav),
+            },
+            {
+                "name": "avm_floor_and_mask",
+                "citation": "zdftke.f90:693",
+                **_operand_score(np.asarray(k_m), oracle_avm, wet),
+            },
+            {
+                "name": "avt_floor_and_mask_before_prandtl",
+                "citation": "zdftke.f90:694",
+                **_operand_score(
+                    np.asarray(raw_avt), source_raw_avt, wet),
+            },
+            {
+                "name": "dissipation_length_output",
+                "citation": "zdftke.f90:695",
+                **_operand_score(
+                    np.asarray(dissl), oracle_dissl, wet),
+            },
+            {
+                "name": "avt_inverse_prandtl_update",
+                "citation": "zdftke.f90:699-702",
+                **_operand_score(np.asarray(k_h), oracle_avt, wet),
+            },
+        ]
+        isolated = {
+            "name": "avt_inverse_prandtl_update_with_recorded_prior_rows",
+            "citation": "zdftke.f90:699-702",
+            **_operand_score(np.asarray(isolated_k_h), oracle_avt, wet),
+        }
+        first = next((row for row in rows if not row["exact"]), None)
+        return {
+            "entry": "NEMO en_post_sweep/rn2/e3t/taum and carried coefficients",
+            "rows": rows,
+            "first_non_bit": (None if first is None else {
+                "name": first["name"],
+                "citation": first["citation"],
+                "unequal": first["unequal"],
+                "max_abs": first["max_abs"],
+            }),
+            "isolated_downstream": isolated,
+            "all_exact": all(row["exact"] for row in rows),
+        }
+
+    kh_walk = kh_statement_walk(e_post)
+    if plant_kh_entry:
+        require(kh_walk["all_exact"],
+                "K_H entry-ULP plant requires a locally exact baseline; "
+                f"first non-bit row is {kh_walk['first_non_bit']}")
+        planted_energy, planted_index = _plant_raw_mixing_length_entry_ulp(
+            np.asarray(e_post), np.asarray(rn2),
+            np.float64(arrays["rmxl_min"]), wet)
+        planted_walk = kh_statement_walk(jnp.asarray(planted_energy))
+        planted_raw = next(
+            row for row in planted_walk["rows"]
+            if row["name"] == "raw_buoyancy_length")
+        require(not planted_raw["exact"] and planted_raw["unequal"] >= 1,
+                "one-ULP TKE entry plant did not flip the raw mixing-length row")
+        raise GateError(
+            "planted one-ULP TKE entry violation detected at "
+            f"{planted_index}: raw_buoyancy_length has "
+            f"{planted_raw['unequal']} unequal cell(s)")
 
     # Rule 10: invoke the public production orchestrator with the printed card
     # configuration.  The record supplies every carried closure operand; only
@@ -1012,6 +1188,7 @@ def _model_substitution_walk(
         "production_single_operand_substitutions": production_single_rows,
         "production_all_nemo_operands": production_oracle,
         "production_solver_inputs_all_nemo_operands": production_solver_inputs,
+        "kh_statement_walk": kh_walk,
         "single_exact": single_exact,
         "cumulative_first_exact": (
             cumulative_exact[0] if cumulative_exact else None),
