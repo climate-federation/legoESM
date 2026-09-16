@@ -220,8 +220,15 @@ def read_record(path: Path, *, plant: str | None = None) -> dict:
     keys = ("version", "kt", "Kbb", "Kmm", "jpi", "jpj", "jpk", "jpkm1",
             "ntsi", "ntei", "ntsj", "ntej", "real_bits")
     head = dict(zip(keys, header, strict=True))
-    require(head["version"] == 2 and head["kt"] == 2,
-            f"unexpected version/kt {head['version']}/{head['kt']}")
+    if plant == "slot":
+        head["Kbb"] = 1
+    require(
+        (head["version"], head["kt"], head["Kbb"], head["Kmm"])
+        == (2, 2, 3, 3),
+        "TKE record slot mismatch: expected version=2/kt=2/Kbb=3/Kmm=3, "
+        f"got version={head['version']}/kt={head['kt']}/"
+        f"Kbb={head['Kbb']}/Kmm={head['Kmm']}",
+    )
     require((head["jpi"], head["jpj"], head["jpk"], head["jpkm1"])
             == (32, 22, 31, 30), f"unexpected GYRE shape {head}")
     require(head["real_bits"] == 64, "record is not fp64")
@@ -397,6 +404,10 @@ def _plant_entry_ulp_at_changed_output(
 ISOLATED_EAGER_LABEL = "isolated-closure eager"
 ISOLATED_JIT_LABEL = "isolated-closure JIT"
 PRODUCTION_STEP_LABEL = "recorded-entry production step (_step_jitted)"
+PRODUCTION_INJECTION_LABEL = (
+    "recorded-entry production step with NEMO en_post_sweep injection "
+    "(_step_jitted)"
+)
 
 
 def main(argv=None) -> int:
@@ -414,7 +425,8 @@ def main(argv=None) -> int:
         help="run the preregistered source-ordered legoESM closure walk")
     parser.add_argument("--plant", choices=(
         "header", "truncation", "nan", "config", "copy", "shape",
-        "sweep", "prandtl", "stamp", "walk", "operand", "kh-entry-ulp"))
+        "sweep", "prandtl", "stamp", "walk", "operand", "kh-entry-ulp",
+        "slot"))
     args = parser.parse_args(argv)
     producer = None
     try:
@@ -440,10 +452,13 @@ def main(argv=None) -> int:
             require(args.walk, "operand plant requires --walk")
         if args.plant == "kh-entry-ulp":
             require(args.walk, "K_H entry-ULP plant requires --walk")
+        if args.plant == "slot":
+            require(args.walk, "slot plant requires --walk")
         walk = (_model_substitution_walk(
                     rec["arrays"], rec["header"],
                     plant_operand=args.plant == "operand",
                     plant_kh_entry=args.plant == "kh-entry-ulp",
+                    plant_slot=args.plant == "slot",
                     stage_root=args.stage_root)
                 if args.walk else None)
         summary = {}
@@ -455,7 +470,7 @@ def main(argv=None) -> int:
                 "max": float(np.max(arr)),
             }
         report = {
-            "format": "gyre-round56-tke-operands-v4",
+            "format": "gyre-round56-tke-operands-v5",
             "worktree": worktree_stamp(),
             "producer_commit": producer,
             "record": str(args.record),
@@ -471,7 +486,8 @@ def main(argv=None) -> int:
             args.output.write_text(payload)
         print(payload, end="")
         return 0
-    except (GateError, OSError, UnicodeDecodeError, struct.error, ValueError) as exc:
+    except (GateError, RuntimeError, OSError, UnicodeDecodeError,
+            struct.error, ValueError) as exc:
         if args.output is not None and args.plant is None:
             failure = {
                 "error": str(exc),
@@ -489,6 +505,7 @@ def main(argv=None) -> int:
 def _model_substitution_walk(
     arrays: dict, head: dict, *, plant_operand: bool = False,
     plant_kh_entry: bool = False,
+    plant_slot: bool = False,
     stage_root: Path | None = None,
 ) -> dict:
     """Run the frozen source-ordered closure walk through production code.
@@ -695,7 +712,8 @@ def _model_substitution_walk(
 
         reader_module = stage_twin_gate()
         stage_path = stage_root / "oracle_momstage_kt00000002_s1.bin"
-        stage = reader_module.read_stage(stage_path)["arrays"]
+        stage = reader_module.read_stage(
+            stage_path, expected_kt=2, expected_stage=1)["arrays"]
 
         def owned3(name):
             return np.asarray(stage[name])[2:-2, 2:-2, :jpkm1]
@@ -942,7 +960,7 @@ def _model_substitution_walk(
 
     production_records = None
 
-    def production_step_k_h(entry_ulp=None):
+    def production_step_k_h(entry_ulp=None, post_sweep=None):
         """Extract K_H from the existing recorded-entry production-step twin."""
         nonlocal production_records
         gate = stage_twin_gate()
@@ -950,7 +968,10 @@ def _model_substitution_walk(
         if production_records is None:
             production_records = {
                 (kt, stage): gate.read_stage(
-                    root / f"oracle_momstage_kt{kt:08d}_s{stage}.bin")
+                    root / f"oracle_momstage_kt{kt:08d}_s{stage}.bin",
+                    expected_kt=kt, expected_stage=stage,
+                    plant=("slot" if plant_slot and (kt, stage) == (2, 1)
+                           else None))
                 for kt, stage in gate.STAGES
             }
         return gate._stage_twin(
@@ -959,6 +980,7 @@ def _model_substitution_walk(
             production_tke_only=True,
             production_tke_entry_ulp=entry_ulp,
             production_tke_taum=jnp.asarray(yx("taum_entry")),
+            production_tke_post_sweep=post_sweep,
         )
 
     production_result = production_step_k_h()
@@ -1038,6 +1060,62 @@ def _model_substitution_walk(
     production_kh_score = _operand_score(production_candidate, oracle_avt, wet)
     oracle_scale_ulp = float(np.max(np.abs(np.spacing(oracle_avt[wet]))))
     ulp_scale_bound = 8.0 * oracle_scale_ulp
+    injected_result = production_step_k_h(
+        post_sweep=np.asarray(e_post, dtype=np.float64))
+    require(injected_result["post_sweep_injection"] is not None,
+            "production NEMO en_post_sweep intervention was not installed")
+    require(injected_result["entry_slots"] == {"Nbb": 3, "Kbb": 3, "Kmm": 3},
+            "production NEMO en_post_sweep intervention moved time slots")
+    require(injected_result["entry_state_identity"]["all_exact"],
+            "production NEMO en_post_sweep intervention moved the entry bridge")
+    require(
+        injected_result["entry_record"] == production_result["entry_record"]
+        and injected_result["entry_state_identity"]["entry_sha256"]
+        == production_result["entry_state_identity"]["entry_sha256"],
+        "production NEMO en_post_sweep intervention changed the entry record",
+    )
+    injected_forcing_score = _operand_score(
+        np.asarray(injected_result["forcing_entry"]["taum"]),
+        np.asarray(yx("taum_entry")),
+        np.asarray(yx("tmask")[..., 0]) != 0.0,
+    )
+    require(injected_forcing_score["exact"],
+            "production NEMO en_post_sweep intervention changed kt=2 forcing")
+    injected_energy_score = _operand_score(
+        np.asarray(injected_result["candidate_tke_post_sweep"]),
+        np.asarray(e_post), wet)
+    require(injected_energy_score["exact"],
+            "NEMO en_post_sweep intervention did not reach the returned "
+            f"production TKE slot: {injected_energy_score}")
+    injected_candidate = np.asarray(injected_result["candidate_k_h"])
+    injected_kh_score = _operand_score(injected_candidate, oracle_avt, wet)
+    intervention_effect = _operand_score(
+        injected_candidate, production_candidate, wet)
+    injection_is_ulp_scale = injected_kh_score["max_abs"] <= ulp_scale_bound
+    attribution_status = (
+        "MEASURED" if injection_is_ulp_scale else "UNMEASURED")
+    remaining_candidate_inputs = ([] if attribution_status == "MEASURED" else [
+        "downstream rn2/rn2b consumption (entry snapshots audit exact)",
+        "downstream e3t_Kmm/e3w_Kmm and tmask/wmask consumption "
+        "(entry snapshots audit exact)",
+        "taum surface anchor and surface-boundary inputs "
+        "(recorded forcing audits exact)",
+        "downstream sh2/p_sh2 and carried tke_avm used by inverse Prandtl "
+        "(entry snapshots audit exact)",
+        "production mixing-length and inverse-Prandtl source-order arithmetic",
+    ])
+    causal_attribution = {
+        "status": attribution_status,
+        "claim": (
+            "the production en_post_sweep difference causes the non-ULP "
+            "K_H residual" if attribution_status == "MEASURED" else
+            "cause unmeasured"),
+        "preregistered_decider": (
+            "MEASURED iff the same-bridge NEMO en_post_sweep injection makes "
+            "the production K_H residual binary64-ULP scale"),
+        "ulp_scale_bound": ulp_scale_bound,
+        "remaining_candidate_inputs": remaining_candidate_inputs,
+    }
     literal_candidate = cfg.tke_mxl_raw_evaluation == "nemo_literal"
     upstream_nonexact = [
         row["name"] for row in full_entry_rows if not row["exact"]
@@ -1082,8 +1160,9 @@ def _model_substitution_walk(
         "literal_candidate_expected_ulp_scale": literal_candidate,
         "classification": (
             "ULP_SCALE" if production_kh_score["max_abs"] <= ulp_scale_bound
-            else "UPSTREAM_INPUT_DIFFERS" if upstream_unequal
-            else "NON_ULP_PHYSICS_MISMATCH"),
+            else "MEASURED_EN_POST_SWEEP_CAUSE"
+            if attribution_status == "MEASURED"
+            else "CAUSE_UNMEASURED"),
     }
     production_row = {
         "name": PRODUCTION_STEP_LABEL,
@@ -1092,6 +1171,7 @@ def _model_substitution_walk(
         "kt": production_result["kt"],
         "stage": production_result["stage"],
         "entry": production_result["entry"],
+        "entry_slots": production_result["entry_slots"],
         "entry_record": production_result["entry_record"],
         "forcing_kt": production_result["forcing_kt"],
         "stage_barotropic_handoff_kt": production_result[
@@ -1108,9 +1188,41 @@ def _model_substitution_walk(
         "k_h_upstream_identity": production_kh_upstream,
         "full_entry_state_identity": full_entry_audit,
         "physical_range_sanity": physical_range_sanity,
+        "causal_attribution": causal_attribution,
         "bridge_citation": production_result["bridge_citation"],
         "existing_stage_twin_citation": production_result[
             "existing_stage_twin_citation"],
+    }
+    production_injection_row = {
+        "name": PRODUCTION_INJECTION_LABEL,
+        **injected_kh_score,
+        "target": "NEMO avt_pre_evd",
+        "kt": injected_result["kt"],
+        "stage": injected_result["stage"],
+        "entry_slots": injected_result["entry_slots"],
+        "same_bridge_identity": {
+            "bridge_citation": injected_result["bridge_citation"],
+            "entry_record": injected_result["entry_record"],
+            "entry_sha256": injected_result["entry_state_identity"][
+                "entry_sha256"],
+            "entry_state_all_exact": injected_result[
+                "entry_state_identity"]["all_exact"],
+            "forcing_kt": injected_result["forcing_kt"],
+            "forcing_identity": injected_forcing_score,
+            "stage_barotropic_handoff_kt": injected_result[
+                "stage_barotropic_handoff_kt"],
+        },
+        "injected_input": "NEMO en_post_sweep",
+        "injected_input_identity": injected_energy_score,
+        "intervention_vs_baseline": intervention_effect,
+        "max_cell_ulp_distance": _positive_ulp_distance(
+            injected_candidate, oracle_avt, wet),
+        "ulp_scale_bound": ulp_scale_bound,
+        "classification": (
+            "ULP_SCALE" if injection_is_ulp_scale else "NON_ULP_RESIDUAL"),
+        "injection": injected_result["post_sweep_injection"],
+        "step_citation": injected_result["step_citation"],
+        "output_carry": injected_result["output_carry"],
     }
     isolated_eager = score_kh_execution(
         eager_statement_outputs, eager_whole_closure)
@@ -1127,6 +1239,8 @@ def _model_substitution_walk(
         ISOLATED_EAGER_LABEL: isolated_eager,
         ISOLATED_JIT_LABEL: isolated_jit,
         PRODUCTION_STEP_LABEL: production_row,
+        PRODUCTION_INJECTION_LABEL: production_injection_row,
+        "causal_attribution": causal_attribution,
     }
     if plant_kh_entry:
         baseline_k_h = {

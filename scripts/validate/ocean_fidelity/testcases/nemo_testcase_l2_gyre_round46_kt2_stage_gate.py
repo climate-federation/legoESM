@@ -92,6 +92,14 @@ HEADER_FIELDS = (
     "bits",
 )
 STAGES = tuple((kt, stage) for kt in (1, 2) for stage in (1, 2, 3))
+STAGE_SLOTS = {
+    (1, 1): (1, 1),
+    (1, 2): (1, 3),
+    (1, 3): (1, 2),
+    (2, 1): (3, 3),
+    (2, 2): (3, 1),
+    (2, 3): (3, 2),
+}
 PRESENCE = {
     1: {"hpg": 1, "vor": 1, "keg": 1, "zad": 1, "ldf": 1, "zdf": 0},
     2: {"hpg": 1, "vor": 1, "keg": 1, "zad": 1, "ldf": 0, "zdf": 0},
@@ -470,7 +478,13 @@ def read_admitted_stage1_r3_operands(
     return record
 
 
-def read_stage(path: Path, *, plant: str | None = None) -> dict:
+def read_stage(
+    path: Path,
+    *,
+    expected_kt: int | None = None,
+    expected_stage: int | None = None,
+    plant: str | None = None,
+) -> dict:
     """Fail-closed named/ranked reader; duplicate, extra and short fields fail."""
     with path.open("rb") as f:
         raw_magic = f.read(16)
@@ -481,6 +495,8 @@ def read_stage(path: Path, *, plant: str | None = None) -> dict:
         values = list(struct.unpack("=16i", raw_header))
         if plant == "header":
             values[2] = 9
+        elif plant == "slot":
+            values[3] = 1 if values[3] == 3 else 3
         header = dict(zip(HEADER_FIELDS, values, strict=True))
         require(magic == MAGIC, f"{path}: bad magic {magic!r}")
         require(
@@ -494,7 +510,25 @@ def read_stage(path: Path, *, plant: str | None = None) -> dict:
             (header["ntsi"], header["ntei"], header["ntsj"], header["ntej"]) == (3, 34, 3, 24),
             f"{path}: wrong owned bounds {header}",
         )
-        require((header["kt"], header["stage"]) in STAGES, f"{path}: wrong kt/stage {header}")
+        observed_step = (header["kt"], header["stage"])
+        require(observed_step in STAGES, f"{path}: wrong kt/stage {header}")
+        require((expected_kt is None) == (expected_stage is None),
+                "read_stage requires expected_kt and expected_stage together")
+        if expected_kt is not None:
+            require(
+                observed_step == (expected_kt, expected_stage),
+                f"{path}: record identity mismatch: expected "
+                f"kt={expected_kt}/stage={expected_stage}, got "
+                f"kt={header['kt']}/stage={header['stage']}",
+            )
+        expected_kbb, expected_kmm = STAGE_SLOTS[observed_step]
+        require(
+            (header["Kbb"], header["Kmm"]) == (expected_kbb, expected_kmm),
+            f"{path}: stage-slot mismatch: kt={header['kt']}/"
+            f"stage={header['stage']} requires Kbb={expected_kbb}/"
+            f"Kmm={expected_kmm}, got Kbb={header['Kbb']}/"
+            f"Kmm={header['Kmm']}",
+        )
         arrays: dict[str, np.ndarray | float] = {}
         while True:
             raw_name = f.read(16)
@@ -1193,8 +1227,11 @@ def _bridge_kt2_production_entry(
     require(stage_sha == year_sha,
             "round-46 and year-owner kt=2 step entries are not bit-identical")
     step_entry = read_entry(year_entry_path)
-    require(step_entry["kt"] == kt,
-            f"year-owner entry is kt={step_entry['kt']}, expected kt=2")
+    require(
+        (step_entry["kt"], step_entry["Nbb"]) == (kt, 3),
+        f"{year_entry_path}: production-entry slot mismatch: expected "
+        f"kt=2/Nbb=3, got kt={step_entry['kt']}/Nbb={step_entry['Nbb']}",
+    )
 
     # This is the exact bridge used by the established stage twins.  Its
     # kt=2 Kbb physical state and prognostic barotropic pair are recorded
@@ -1239,7 +1276,14 @@ def _bridge_kt2_production_entry(
         physical[name] = _exact_identity(
             f"kt2.entry.{name}", fields[name], reference, masks[name])
 
-    a = records[(2, 1)]["arrays"]
+    stage_record = records[(2, 1)]
+    stage_header = stage_record["header"]
+    require(
+        (stage_header["kt"], stage_header["stage"],
+         stage_header["Kbb"], stage_header["Kmm"]) == (2, 1, 3, 3),
+        "kt=2 production-stage slot mismatch after record admission",
+    )
+    a = stage_record["arrays"]
     barotropic = {
         "uu_b": _exact_identity(
             "kt2.entry.uu_b", np.asarray(state.uu_b.data)[:, 1:],
@@ -1324,6 +1368,11 @@ def _bridge_kt2_production_entry(
     audit = {
         "kt": kt,
         "stage": "before zdf_phy; Kbb=Kmm=3; before WS-RK3 stage 1",
+        "slots": {
+            "Nbb": step_entry["Nbb"],
+            "Kbb": stage_header["Kbb"],
+            "Kmm": stage_header["Kmm"],
+        },
         "round46_entry": str(stage_entry_path),
         "year_owner_entry": str(year_entry_path),
         "entry_sha256": stage_sha,
@@ -2790,6 +2839,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                 production_tke_only: bool = False,
                 production_tke_entry_ulp: tuple[str, tuple[int, ...]] | None = None,
                 production_tke_taum=None,
+                production_tke_post_sweep=None,
                 production_entry_root: Path = YEAR_ENTRY_ROOT,
                 ) -> dict:
     """Decision-41 stage tables from recorded entries and the shared stage."""
@@ -2868,19 +2918,67 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
         entry_sh2 = model._tke_step_entry_p_sh2(state)
         require(entry_n2 is not None and entry_sh2 is not None,
                 "kt=2 production step did not materialize TKE entry operands")
-        state_after = jax.device_get(model.step(
-                state, dt=card.dt_s, freshwater=freshwater,
-                surface_forcing=surface))
+        injection = None
+        solve_calls = []
+        real_tke_solve = None
+        if production_tke_post_sweep is not None:
+            import legoesm.ocean.physics.vertical_mixing.tke as tke_module
+
+            injected_array = np.asarray(
+                production_tke_post_sweep, dtype=np.float64)
+            require(injected_array.shape == state.tke.data.shape,
+                    "NEMO en_post_sweep injection shape does not match the "
+                    "production TKE solver output slot")
+            require(np.all(np.isfinite(injected_array)),
+                    "NEMO en_post_sweep injection contains NaN/Inf")
+            injected_energy = jnp.asarray(injected_array)
+            real_tke_solve = tke_module._solve_tke_backward_euler
+
+            def inject_recorded_post_sweep(*args, **kwargs):
+                solved = real_tke_solve(*args, **kwargs)
+                require(solved.shape == injected_energy.shape,
+                        "production TKE solver output shape moved before "
+                        "the NEMO en_post_sweep injection")
+                solve_calls.append(1)
+                return jnp.asarray(injected_energy, dtype=solved.dtype)
+
+            tke_module._solve_tke_backward_euler = inject_recorded_post_sweep
+            injection = {
+                "source": "NEMO recorded en_post_sweep",
+                "target": (
+                    "_solve_tke_backward_euler return consumed by final "
+                    "compute_mixing_lengths/compute_K_from_tke"),
+            }
+        # The intervention changes a Python global read while JAX traces the
+        # production step.  Clear staging/executable caches so the baseline,
+        # injection, and one-ULP control each trace the function installed for
+        # that arm instead of reusing another arm's executable.
+        jax.clear_caches()
+        try:
+            state_after = jax.device_get(model.step(
+                    state, dt=card.dt_s, freshwater=freshwater,
+                    surface_forcing=surface))
+        finally:
+            if real_tke_solve is not None:
+                tke_module._solve_tke_backward_euler = real_tke_solve
+        if injection is not None:
+            require(len(solve_calls) == 1,
+                    "NEMO en_post_sweep injection did not intercept exactly "
+                    f"one production TKE solve: {len(solve_calls)}")
+            injection["solve_call_count"] = len(solve_calls)
+            injection["injection_citation"] = (
+                "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1839-1860")
         require(getattr(state_after, "tke_avt", None) is not None,
                 "production _step_jitted result has no tke_avt K_H carry")
         return {
-            "format": "nemo-testcase-l2-gyre-stage-twin-production-tke-v2",
+            "format": "nemo-testcase-l2-gyre-stage-twin-production-tke-v3",
             "label": "recorded-entry production step (_step_jitted)",
             "kt": 2,
             "stage": "pre-zdf_phy closure feeding WS-RK3 stage 1",
             "entry": (
                 "NEMO kt=2 before-level entry; Kbb=Kmm=3; forcing kt=2"),
             "entry_record": entry_audit["year_owner_entry"],
+            "entry_slots": entry_audit["slots"],
             "entry_state_identity": entry_audit,
             "forcing_kt": 2,
             "forcing_entry": {"taum": np.asarray(recorded_taum)},
@@ -2893,15 +2991,16 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
             },
             "stage_barotropic_handoff_kt": 2,
             "bridge_citation": (
-                "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:926-1098"),
+                "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:960-1147"),
             "existing_stage_twin_citation": (
-                "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1889-1919"),
+                "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1988-2018"),
             "output_carry": "LatLonCGridOceanState.tke_avt",
             "extraction_citation": (
                 "ocean_model_latlon_cgrid.py:10797-10802"),
             "step_citation": "ocean_model_latlon_cgrid.py:10982-10995",
             "carry_declaration_citation": "state.py:577-581",
             "entry_plant": entry_plant,
+            "post_sweep_injection": injection,
             # Private in-process payload consumed by round 54.  This focused
             # mode is not serialized by the round-46 CLI.
             "entry_carry": {
@@ -3194,8 +3293,10 @@ def run(
     hashes = {}
     for kt, stage in STAGES:
         path = root / f"oracle_momstage_kt{kt:08d}_s{stage}.bin"
-        p = plant if (kt, stage) == (2, 1) and plant in {"header", "truncation"} else None
-        records[(kt, stage)] = read_stage(path, plant=p)
+        p = (plant if (kt, stage) == (2, 1)
+             and plant in {"header", "slot", "truncation"} else None)
+        records[(kt, stage)] = read_stage(
+            path, expected_kt=kt, expected_stage=stage, plant=p)
         hashes[path.name] = sha256(path)
     calibration = _calibrate(records, plant)
     new40 = root / "oracle_rkstage3_terms_kt00000001.bin"
@@ -3407,7 +3508,7 @@ def main(argv=None) -> int:
         "--tke-operand-record", type=Path, default=TKE_OPERAND_RECORD)
     p.add_argument(
         "--plant",
-        choices=("header", "truncation", "calibration", "given", "trajectory",
+        choices=("header", "slot", "truncation", "calibration", "given", "trajectory",
                  "twin", "stage-entry-ulp", "stage-context-ulp",
                  "stage-rhs-ulp", "stage-w-transport-ulp",
                  "stage-w-carry-ulp", "stage-w-direct-r3-ulp",

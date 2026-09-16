@@ -61,9 +61,11 @@ def _write(path: Path, *, stage=1, truncate=False) -> Path:
         "after_ldf_v",
     }
     names -= {"post_zdf_u", "post_zdf_v", "pre_zdf_rhs_u", "pre_zdf_rhs_v"}
+    kbb, kmm = gate.STAGE_SLOTS[(2, stage)]
     with path.open("wb") as f:
         f.write(gate.MAGIC.ljust(16).encode())
-        f.write(struct.pack("=16i", 1, 2, stage, 1, 1, 2, 3, NX, NY, NZ, 30, 3, 34, 3, 24, 64))
+        f.write(struct.pack("=16i", 1, 2, stage, kbb, kmm, 2, 3,
+                            NX, NY, NZ, 30, 3, 34, 3, 24, 64))
         for index, name in enumerate(sorted(names)):
             f.write(name.ljust(16).encode())
             if name in SCALARS:
@@ -105,7 +107,8 @@ def _write_tke_statement(path: Path, *, trailing=False) -> tuple[Path, dict]:
 
 
 def test_reader_and_zero_source_replays(tmp_path):
-    rec = gate.read_stage(_write(tmp_path / "stage.bin"))
+    rec = gate.read_stage(
+        _write(tmp_path / "stage.bin"), expected_kt=2, expected_stage=1)
     records = {key: rec for key in gate.STAGES}
     assert all(value == 0 for value in gate._calibrate(records, None).values())
 
@@ -113,9 +116,15 @@ def test_reader_and_zero_source_replays(tmp_path):
 def test_header_and_truncation_plants_are_red(tmp_path):
     path = _write(tmp_path / "stage.bin")
     with pytest.raises(Exception, match="wrong kt/stage"):
-        gate.read_stage(path, plant="header")
+        gate.read_stage(
+            path, expected_kt=2, expected_stage=1, plant="header")
+    with pytest.raises(Exception, match="stage-slot mismatch"):
+        gate.read_stage(
+            path, expected_kt=2, expected_stage=1, plant="slot")
     with pytest.raises(Exception, match="short payload"):
-        gate.read_stage(_write(tmp_path / "short.bin", truncate=True))
+        gate.read_stage(
+            _write(tmp_path / "short.bin", truncate=True),
+            expected_kt=2, expected_stage=1)
 
 
 def test_round101_tke_statement_reader_closes_layout_and_eof(tmp_path):
@@ -297,7 +306,7 @@ def test_instrument_contract_is_zero_first_write_only_and_widened():
 def test_every_declared_plant_has_a_nonzero_exit_contract():
     source = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py").read_text()
     run = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage/run.sh").read_text()
-    for plant in ("header", "truncation", "calibration", "given", "trajectory",
+    for plant in ("header", "slot", "truncation", "calibration", "given", "trajectory",
                   "twin", "stage-entry-ulp", "stage-context-ulp",
                   "stage-rhs-ulp", "stage-w-transport-ulp",
                   "stage-w-carry-ulp", "stage-tke-record-header",
@@ -371,6 +380,9 @@ def test_stage_twin_production_tke_uses_the_ordinary_step_result():
     assert "records, advmean_root, 2" in branch
     assert '"forcing_kt": 2' in branch
     assert '"entry_state_identity": entry_audit' in branch
+    assert "production_tke_post_sweep" in branch
+    assert "inject_recorded_post_sweep" in branch
+    assert '"post_sweep_injection": injection' in branch
 
 
 def test_production_entry_bridge_installs_every_recorded_kt2_carry():
@@ -388,7 +400,25 @@ def test_production_entry_bridge_installs_every_recorded_kt2_carry():
                  "tke_avm_surface"):
         assert f'"{name}"' in bridge
     assert "round-46 and year-owner kt=2 step entries" in bridge
+    assert 'step_entry["Nbb"]' in bridge
+    assert '"slots": {' in bridge
     assert '"all_exact": True' in bridge
+
+
+def test_production_entry_bridge_rejects_shifted_nbb(tmp_path, monkeypatch):
+    stage_root = tmp_path / "stage"
+    year_root = tmp_path / "year"
+    stage_root.mkdir()
+    year_root.mkdir()
+    name = "oracle_step_entry_kt00000002.bin"
+    (stage_root / name).write_bytes(b"same-record")
+    (year_root / name).write_bytes(b"same-record")
+    monkeypatch.setattr(
+        gate, "read_entry", lambda _path: {"kt": 2, "Nbb": 1})
+
+    with pytest.raises(Exception, match="production-entry slot mismatch"):
+        gate._bridge_kt2_production_entry(
+            None, None, {}, stage_root, tmp_path, year_root)
 
 
 def test_stage_twin_refuses_unmeasured_required_rows():

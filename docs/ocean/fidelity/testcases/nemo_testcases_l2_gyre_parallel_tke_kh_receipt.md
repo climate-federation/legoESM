@@ -7,10 +7,10 @@ Date: 2026-09-16. Production parent: `3e7a15c1e64e`; evidence branch
 **LANE_DEFECT: no.** The existing round-93--99 stage-twin lane does not share
 the rejected production-row defect. Its kt=2 bridge overlays recorded
 T/S/u/v/ssh, the prognostic barotropic pair, and all five TKE closure carries
-(`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:862-896`); the lane then
+(`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:896-930`); the lane then
 installs the six raw barotropic histories, uses forcing for the same `kt`, and
 selects the matching barotropic and stage-entry overrides before calling the
-model step (`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1889-1919`). The
+model step (`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1988-2018`). The
 preliminary kt=1 step in the bridge supplies only the otherwise unrecorded
 static/inactive pytree structure, so the stage-twin claims are not a
 mixed-time-state measurement.
@@ -109,11 +109,13 @@ initial state and forcing with a kt=2 target record. It is not evidence about
 the candidate and is replaced below. The historical artifact is retained
 only as the invalid instrument output that prompted this correction.
 
-The corrected fix-round-4 rerun `candidate_statement_walk_fix4.json`
-(SHA-256
-`ce890b44889bdfd8ba6d09ba3eb34716dec80c49883cbca939f6a07eff5e0865`)
-keeps two deliberately local diagnostics and rebuilds the full production row
-at one matching time level. The
+The fix-round-5 rerun `candidate_statement_walk_fix5.json` (SHA-256
+`6cfdd5cc016c7f74321a9c7a41eacb59f77a7538cbf3a05029e0938c4449fb91`)
+keeps two deliberately local diagnostics and rebuilds the full production
+row at one matching time level. It also adds the required same-bridge
+intervention that replaces the production TKE solver's returned energy with
+NEMO's recorded `en_post_sweep` before the final mixing-length and K_H
+calculations. The
 `isolated-closure eager` statement walk records
 `all_statement_rows_exact=true` (every row has 0 unequal cells and max abs 0),
 while `isolated-closure JIT` records `all_statement_rows_exact=false`; its
@@ -141,11 +143,17 @@ The bridge installs T/S/u/v/ssh, the barotropic pair, all six AB3/AM4
 histories, and all five closure carries; it rebuilds all four consumed
 thickness staggerings through the production helpers and fails unless every
 audited value is bit-exact
-(`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:926-1098`). The recorded
+(`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:960-1147`). The recorded
 round-59 `taum_entry` is installed as the kt=2 TKE forcing as well.
 
-The row is therefore **kt=2 by construction**: NEMO before-level
-`Kbb=Kmm=3`, before `zdf_phy`, feeding WS-RK3 stage 1, with forcing kt=2 and
+The row is therefore **kt=2 by record-validated construction**, not by a
+label alone. The TKE record reader requires `kt=2, Kbb=Kmm=3`
+(`nemo_testcase_l2_gyre_round54_tke_operands.py:219-230`); the stage reader
+checks each record's Kbb/Kmm against its kt/stage schedule
+(`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:275-292`); and the production
+bridge separately requires the step-entry record's `Nbb=3`
+(`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:991-995`). This is the NEMO
+before-level before `zdf_phy`, feeding WS-RK3 stage 1, with forcing kt=2 and
 the kt=2 barotropic handoff. The ordinary public model step enters
 `_step_jitted` at `ocean_model_latlon_cgrid.py:10982-10995`; no live operand
 observer is enabled.
@@ -157,31 +165,48 @@ instrument must be binary64-ULP-scale (eight-reference-ULP bound
 `1.1102230246251565e-16`), but the production TKE solve's direct K_H input
 `en_post_sweep` differs in 979 / 17,400 cells with maximum
 `6.809688013129089e-12` while every recorded entry, derived entry operand,
-and forcing audit is exact.
+and forcing audit is exact. That is an observed co-difference only; it is not
+used as a causal attribution.
 
 | execution | unequal / compared | max abs | status |
 |---|---:|---:|---|
 | isolated-closure eager | **0 / 17,400** | **0** | diagnostic-only exactness |
 | isolated-closure JIT | **522 / 17,400** | **1.734723475976807e-18** | isolated compiled closure, non-exact |
-| recorded-entry production step (`_step_jitted`) | **4,578 / 17,400** | **7.506010254315632e-09** | full kt=2 production step; upstream input differs |
+| recorded-entry production step (`_step_jitted`) | **4,578 / 17,400** | **7.506010254315632e-09** | full kt=2 production step; cause unmeasured |
+| same production step with NEMO `en_post_sweep` injected | **4,168 / 17,400** | **7.498841797515254e-09** | non-ULP residual; cause unmeasured |
+
+The intervention is installed at the return of
+`_solve_tke_backward_euler`, immediately before the production final
+`compute_mixing_lengths` / `compute_K_from_tke` consumption
+(`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1839-1860`). It intercepts
+exactly one solve, returns NEMO's energy bit-exactly (0 / 17,400 unequal), and
+uses the same entry SHA, `Nbb/Kbb/Kmm=3/3/3`, forcing kt=2, and kt=2
+barotropic handoff as the baseline. It is non-vacuous: injected versus
+baseline K_H differs in 923 / 17,400 cells with maximum absolute change
+`1.1786111669964683e-10`. Yet its NEMO K_H residual is about 67.5 million
+times the eight-reference-ULP bound, so the preregistered MEASURED decider
+does not pass.
 
 The full-state audit is exact for physical T/S/u/v/ssh, e3t/e3u/e3v/e3w,
 uu_b/vv_b, all six histories, and tke/tke_avm/tke_avt/tke_dissl plus the
 surface tke_avm carry. Independently derived rn2/rn2b/sh2/e3t/e3w and the
-600-cell recorded `taum` forcing are also exact. The only named direct K_H
-upstream miss is the returned production `en_post_sweep` row above. The
+600-cell recorded `taum` forcing are also exact. The only observed direct K_H
+upstream miss is the returned production `en_post_sweep` row above, but the
+intervention proves it is not a sufficient explanation for the production
+K_H residual. The
 extracted object is the ordinary returned `LatLonCGridOceanState.tke_avt`
 carry, declared at `state.py:577-581` and assigned from
 `_tke_coeff_new.K_H` at `ocean_model_latlon_cgrid.py:10797-10802`.
 
-The fix-round-4 artifact was produced at candidate commit `3849b99199c6` with
+The fix-round-5 artifact was produced at candidate commit `3849b99199c6` with
 only the two evidence probes modified and the dirty-tree escape stamped in
 the artifact. Neither isolated exactness nor the isolated JIT score certifies
 the full step. The corrected production row independently refutes local
 exactness, so this held patch has no Rule-12 basis for landing.
 
-The non-vacuity evidence is `candidate_ulp_plant_fix4.log` (SHA-256
-`db50f1e67d49a25f1e4eadf953fe1d3887d4284a09ebad4109732e1eb6b62ff8`).
+The pre-existing one-ULP non-vacuity evidence was rerun as
+`candidate_ulp_plant_fix5.log` (SHA-256
+`6d81d7e22c6e4d2e88cac49401e05c6cafeba20f92e5cec750bf0ed770b81d0b`).
 The control changes one isolated `en_post_sweep` entry and one real production
 `tke_avm` state carry by exactly one binary64 ULP. Each isolated execution and
 the returned production-step K_H changes, and the gate exits nonzero:
@@ -190,14 +215,18 @@ the returned production-step K_H changes, and the gate exits nonzero:
 STATUS FAIL: planted one-ULP closure-entry violations detected: isolated TKE at (15, 16, 0) changed 1 isolated-closure eager, 1 isolated-closure JIT; production tke_avm at (1, 10, 0) changed 1 recorded-entry production step (_step_jitted) cell(s)
 ```
 
-## OPEN
+## ATTRIBUTION: UNMEASURED
 
-The full-step miss is now measured from a time-matched entry, not inferred
-from a locally jitted closure. The next owner is the production TKE solve that
-creates `en_post_sweep`: it is the sole non-exact direct K_H input after all
-recorded and derived entry operands pass. Until that upstream 979-cell row is
-resolved, the held patch remains diagnostic evidence, not a Rule-12
-candidate.
+The NEMO-energy intervention does not make production K_H ULP-scale, so the
+prior production-TKE-solve owner assignment is withdrawn. Remaining candidate
+input/consumer boundaries are downstream rn2/rn2b use; e3t/e3w and tmask/wmask
+use; the taum-driven surface anchor and other surface-boundary inputs;
+sh2/p_sh2 together with the carried tke_avm used by inverse Prandtl; and the
+production mixing-length / inverse-Prandtl source-order arithmetic. The
+recorded snapshots of rn2/rn2b/sh2/e3t/e3w/taum/tke_avm all audit exact, so
+these are candidates for a future discriminating substitution, not measured
+mismatches or assigned owners. The held patch remains diagnostic evidence,
+not a Rule-12 candidate.
 
 ## 4. Information-only kt=1..10 ladder against tip
 
@@ -302,23 +331,27 @@ introduced ahead of its owning stage.
 | artifact | SHA-256 |
 |---|---|
 | `tip_statement_walk.json` | `b404179c3c03163ed48726312636f319e0aeb28f827b3b5566b900eb046aa0d6` |
-| `candidate_statement_walk_fix4.json` | `ce890b44889bdfd8ba6d09ba3eb34716dec80c49883cbca939f6a07eff5e0865` |
-| `candidate_ulp_plant_fix4.log` | `db50f1e67d49a25f1e4eadf953fe1d3887d4284a09ebad4109732e1eb6b62ff8` |
-| `citation_gate_fix4.json` | `dc4bdf7665a1a737fe7027ca1cb0677e67f34890cea5c1ddb82849e22ddd4780` |
-| `citation_gate_fix4_shift_plant.json` | `e922902ccae614073b158705875a0ec0eed506fc9f544150b0ff665c7f873eba` |
+| `candidate_statement_walk_fix5.json` | `6cfdd5cc016c7f74321a9c7a41eacb59f77a7538cbf3a05029e0938c4449fb91` |
+| `candidate_ulp_plant_fix5.log` | `6d81d7e22c6e4d2e88cac49401e05c6cafeba20f92e5cec750bf0ed770b81d0b` |
+| `candidate_slot_plant_fix5.log` | `e150afbdc4285c90ee33971cf7722294a6ed83d83945f6c21db9478f62db367d` |
+| `citation_gate_fix5.json` | `621771d65f8acea1588bd755f23662f441b5146133dafb71ba0191b4b19433ad` |
+| `citation_gate_fix5_shift_plant.json` | `3a2d6d349c1823e90ecb0d60f9d87c9a5a5461f595c25db58102de1c7af9d4bf` |
 | `tip_kt1_10.json` | `51dfbcc65b9481e429cc319f61f9f73af4f77bb50e1da6bb8260bf9efe7f8cfd` |
 | `candidate_kt1_10.json` | `b07ef59f5bca56aa573c474d7d9ab28cd7810add7fa05016c0dec572a2badc2b` |
 | `ladder_comparison.json` | `400089614cf950578bcbf21ad8a39101e4b3c9847f36f82007ede95eb68cf54e` |
 
 Validation: the historical 125 candidate TKE/instrument tests remain recorded.
-The fix-round-4 focused evidence/citation suite passes **49 tests**, and the
-manifest remains held with no package file changed. The one-ULP control exits
-nonzero after changing one cell in each isolated closure and one returned K_H
-cell after perturbing the real production `tke_avm` carry. Both
-ten-step runs retain their clean stamps, and the oracle-relative comparison
-retains its expected FAIL verdict. The citation gate passes all **21** receipt
-citations with no map-audit failure; shifting the new full-entry bridge
-`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:926-1098` by two lines makes
+The fix-round-5 focused evidence/citation suite passes **51 tests**, and the
+manifest remains held with no package file changed. The shifted-slot record
+plant exits 1 with the named `TKE record slot mismatch`; unit controls also
+fire for a shifted stage Kbb/Kmm and a shifted production-entry Nbb. The
+one-ULP control exits nonzero after changing one cell in each isolated
+closure and one returned K_H cell after perturbing the real production
+`tke_avm` carry. Both ten-step runs retain their clean stamps, and the
+oracle-relative comparison retains its expected FAIL verdict. The citation
+gate passes all **25** receipt citations with no map-audit failure; shifting
+the new full-entry bridge
+`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:960-1147` by two lines makes
 it exit nonzero.
 
 Coordination: GitHub issue #1455 could not be read or updated from this
@@ -326,13 +359,13 @@ sandbox. The clone's only remote is a local filesystem path, and an explicit
 `gh issue view --repo climate-federation/legoESM` attempt could not reach
 `api.github.com`; no external state was mutated.
 
-Independent review round 4: **DO NOT SHIP** because the row called production
-mixed a kt=1 state and forcing with a kt=2 target. This fix retracts that row,
-installs and audits the full kt=2 entry plus kt=2 forcing, and replaces it with
-the actual `_step_jitted` state-carry measurement; it does not alter the held
-production patch.
+Independent review round 5: **DO NOT SHIP** because `en_post_sweep` was only
+an observed co-difference and the slot claim did not fail closed. This fix
+runs the same-bridge NEMO-energy intervention, relabels the surviving residual
+`UNMEASURED`, validates Nbb/Kbb/Kmm, and adds a red shifted-slot record plant;
+it does not alter the held production patch.
 
 Disposition: **HELD PATCH, NOT A RULE-12 CANDIDATE, not landed**. Re-evaluate
-only after the returned production-step K_H is reconciled with NEMO and when
-the Decision-41 stage walk reaches kt=1 pre-stage vertical physics/TKE
+only after a discriminating arm identifies the production-step K_H owner and
+when the Decision-41 stage walk reaches kt=1 pre-stage vertical physics/TKE
 closure. There is no user decision needed now.

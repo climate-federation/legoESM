@@ -2,12 +2,12 @@
 # Citation: GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:627-630,
 #   :669-683, :690-702; stprk3.f90:154-168.
 # LANE_DEFECT: no. The existing round-93+ stage twin installs the kt-matched
-#   physical/barotropic/TKE state at round46_kt2_stage_gate.py:862-896, then
+#   physical/barotropic/TKE state at round46_kt2_stage_gate.py:896-930, then
 #   installs raw histories, kt-matched forcing, barotropic handoff, and stage
-#   entries at :1889-1919. It does not share the rejected mixed-time defect.
+#   entries at :1988-2018. It does not share the rejected mixed-time defect.
 # Frozen Prediction 3 (every statement row through final K_H exact): REFUTED.
-# candidate_statement_walk_fix4.json, SHA-256 ce890b44889bdfd8ba6d09ba3eb34716d
-#   ec80c49883cbca939f6a07eff5e0865. The
+# candidate_statement_walk_fix5.json, SHA-256 6cfdd5cc016c7f74321a9c7a41eacb59
+#   f77a7538cbf3a05029e0938c4449fb91. The
 #   isolated-closure eager
 #   statement walk has all_statement_rows_exact=true (every row 0/max 0); the
 #   isolated-closure JIT walk has all_statement_rows_exact=false. Its non-exact
@@ -20,25 +20,36 @@
 #     3.469446951953614e-18, :694;
 #   dissipation_length_output: 1,844/17,400, 1.734723475976807e-18, :695;
 #   avt_inverse_prandtl_update: 522/17,400, 1.734723475976807e-18, :699-702.
-# Three K_H rows against NEMO avt_pre_evd:
+# Four K_H rows against NEMO avt_pre_evd:
 #   isolated-closure eager: 0/17,400 unequal, max 0;
 #   isolated-closure JIT: 522/17,400, max 1.734723475976807e-18;
 #   recorded-entry production step (_step_jitted): 4,578/17,400,
-#     max 7.506010254315632e-09.
+#     max 7.506010254315632e-09;
+#   same production step with NEMO en_post_sweep injected: 4,168/17,400,
+#     max 7.498841797515254e-09 (not ULP-scale).
 # The old 5,723/17,400, max 0.05926217077024117 row is RETRACTED: it combined
 #   kt=1 state/forcing with the kt=2 target. The replacement installs the full
-#   kt=2 Kbb=Kmm=3 before-zdf_phy entry and kt=2 forcing, then extracts returned
-#   state.tke_avt through ocean_model_latlon_cgrid.py:10982-10995 (assigned
-#   from _tke_coeff_new.K_H at :10797-10802).
+#   kt=2 Nbb=Kbb=Kmm=3 before-zdf_phy entry and kt=2 forcing, then extracts
+#   returned state.tke_avt through ocean_model_latlon_cgrid.py:10982-10995
+#   (assigned from _tke_coeff_new.K_H at :10797-10802). The TKE, stage, and
+#   entry readers now validate those slots fail-closed.
 # Physical-range check before scoring: candidate wet K_H is
 #   [1.2e-05,0.0657684768931864] vs NEMO [1.2e-05,0.06576847685222414].
 #   Equal-input mismatch should be ULP-scale (8-ULP bound 1.1102230246251565e-16);
-#   the named upstream difference is en_post_sweep, 979/17,400,
-#   max 6.809688013129089e-12. All entry/derived/forcing audits are exact.
-# Plant evidence: candidate_ulp_plant_fix4.log, SHA-256 db50f1e67d49a25f1e4eadf
-#   953fe1d3887d4284a09ebad4109732e1eb6b62ff8. +1 ULP at isolated TKE
+#   en_post_sweep co-differs in 979/17,400 cells, max 6.809688013129089e-12,
+#   but injecting NEMO's value still leaves the non-ULP K_H row above.
+# ATTRIBUTION: UNMEASURED. Remaining candidates are downstream rn2/rn2b,
+#   e3t/e3w/mask, taum/surface, sh2/p_sh2/carried-avm consumption and the
+#   production mixing-length/inverse-Prandtl source-order arithmetic. Their
+#   recorded entry snapshots audit exact; none is assigned as owner.
+# Plant evidence: candidate_ulp_plant_fix5.log, SHA-256 6d81d7e22c6e4d2e88ca
+#   c49401e05c6cafeba20f92e5cec750bf0ed770b81d0b.
+#   +1 ULP at isolated TKE
 #   (15,16,0) changes one cell in each isolated row; +1 ULP at production
 #   tke_avm (1,10,0) changes one returned production K_H cell.
+# Slot evidence: candidate_slot_plant_fix5.log, SHA-256 e150afbdc4285c90ee339
+#   71cf7722294a6ed83d83945f6c21db9478f62db367d;
+#   shifted Kbb exits 1 with the named TKE record slot mismatch.
 # Owning stage: kt=1 pre-stage vertical physics/TKE closure, whose coefficients
 #   are consumed by WS-RK3 stage 1. Decision 41 keeps this patch held.
 # Scratch proof commit: 3849b99199c6dc82fb68917ac5408a9193905cbd.

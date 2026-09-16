@@ -16,7 +16,7 @@ SPEC.loader.exec_module(MODULE)
 
 
 def _record(path: Path) -> None:
-    parts = [MODULE.MAGIC, struct.pack("=13i", 2, 2, 1, 2, 32, 22, 31, 30,
+    parts = [MODULE.MAGIC, struct.pack("=13i", 2, 2, 3, 3, 32, 22, 31, 30,
                                       1, 32, 1, 22, 64)]
     shape = (32, 22, 31)
     for name in MODULE.FIELDS:
@@ -101,8 +101,8 @@ def test_reader_accepts_complete_schema(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "plant", ["header", "truncation", "nan", "config", "copy", "shape",
-              "sweep", "prandtl"])
+    "plant", ["header", "slot", "truncation", "nan", "config", "copy",
+              "shape", "sweep", "prandtl"])
 def test_reader_plants_fail(tmp_path, plant):
     path = tmp_path / "record.bin"
     _record(path)
@@ -157,6 +157,9 @@ def test_kh_execution_labels_do_not_call_an_isolated_jit_production():
     assert MODULE.ISOLATED_JIT_LABEL == "isolated-closure JIT"
     assert MODULE.PRODUCTION_STEP_LABEL == (
         "recorded-entry production step (_step_jitted)")
+    assert MODULE.PRODUCTION_INJECTION_LABEL == (
+        "recorded-entry production step with NEMO en_post_sweep injection "
+        "(_step_jitted)")
 
     source = SCRIPT.read_text()
     assert '"production_jit_call_site"' not in source
@@ -166,6 +169,9 @@ def test_kh_execution_labels_do_not_call_an_isolated_jit_production():
     assert '"physical_range_sanity": physical_range_sanity' in source
     assert 'production_result["forcing_kt"]' in source
     assert 'production_tke_taum=jnp.asarray(yx("taum_entry"))' in source
+    assert "production_tke_post_sweep=post_sweep" in source
+    assert '"causal_attribution": causal_attribution' in source
+    assert "PRODUCTION_INJECTION_LABEL: production_injection_row" in source
     assert 'production_plant_field = "tke_avm"' in source
 
 
