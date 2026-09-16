@@ -335,6 +335,26 @@ def _operand_score(actual: np.ndarray, expected: np.ndarray,
     }
 
 
+def _positive_ulp_distance(actual: np.ndarray, expected: np.ndarray,
+                           mask: np.ndarray) -> int:
+    """Maximum binary64 encoding distance for finite non-negative K_H."""
+    actual = np.asarray(actual, dtype=np.float64)
+    expected = np.asarray(expected, dtype=np.float64)
+    mask = np.asarray(mask, dtype=bool)
+    require(actual.shape == expected.shape == mask.shape,
+            "K_H ULP-distance shapes disagree")
+    require(np.all(np.isfinite(actual[mask]))
+            and np.all(np.isfinite(expected[mask]))
+            and np.all(actual[mask] >= 0.0)
+            and np.all(expected[mask] >= 0.0),
+            "K_H ULP distance requires finite non-negative values")
+    actual_bits = actual[mask].view(np.uint64)
+    expected_bits = expected[mask].view(np.uint64)
+    distance = np.maximum(actual_bits, expected_bits) - np.minimum(
+        actual_bits, expected_bits)
+    return int(np.max(distance)) if distance.size else 0
+
+
 def _nemo_raw_mixing_length(
     energy: np.ndarray, n2: np.ndarray, floor: np.float64,
 ) -> np.ndarray:
@@ -364,7 +384,11 @@ def _plant_entry_ulp_at_changed_output(
     require(np.any(mobile),
             "no consumed K_H output responds when every TKE entry cell is "
             "raised by one input ULP")
-    index = tuple(int(value) for value in np.argwhere(mobile)[0])
+    # Prefer the largest responsive carry.  This maximizes the absolute size
+    # of a one-ULP input violation while remaining exactly one binary64 ULP.
+    selected = int(np.argmax(np.where(mobile, entry, -np.inf)))
+    index = tuple(int(value) for value in np.unravel_index(
+        selected, entry.shape))
     planted = entry.copy()
     planted[index] = np.nextafter(entry[index], np.float64(np.inf))
     return planted, index
@@ -372,7 +396,7 @@ def _plant_entry_ulp_at_changed_output(
 
 ISOLATED_EAGER_LABEL = "isolated-closure eager"
 ISOLATED_JIT_LABEL = "isolated-closure JIT"
-PRODUCTION_STEP_LABEL = "production step (_step_jitted)"
+PRODUCTION_STEP_LABEL = "recorded-entry production step (_step_jitted)"
 
 
 def main(argv=None) -> int:
@@ -934,6 +958,7 @@ def _model_substitution_walk(
             gate.BTSTEP_ROOT, gate.STAGE_CLOSURE_ROOT, None,
             production_tke_only=True,
             production_tke_entry_ulp=entry_ulp,
+            production_tke_taum=jnp.asarray(yx("taum_entry")),
         )
 
     production_result = production_step_k_h()
@@ -943,21 +968,134 @@ def _model_substitution_walk(
         "tke_avm": np.asarray(yx("avm_entry")[..., 1:jpkm1]),
         "tke_avt": np.asarray(yx("avt_entry")[..., 1:jpkm1]),
         "tke_dissl": np.asarray(yx("dissl_entry")[..., 1:jpkm1]),
+        "tke_avm_surface": np.asarray(yx("avm_entry")[..., 0]),
+    }
+    entry_masks = {
+        name: (np.asarray(yx("wmask")[..., 0]) != 0.0
+               if name == "tke_avm_surface" else wet)
+        for name in entry_references
     }
     production_entry_identity = {
         name: _operand_score(
-            np.asarray(production_result["entry_carry"][name]), reference, wet)
+            np.asarray(production_result["entry_carry"][name]), reference,
+            entry_masks[name])
         for name, reference in entry_references.items()
     }
     require(all(row["exact"] for row in production_entry_identity.values()),
             "round-93+ stage twin does not carry the round-59 NEMO TKE entry "
             f"bit for bit: {production_entry_identity}")
+    production_forcing_identity = {
+        "taum": _operand_score(
+            np.asarray(production_result["forcing_entry"]["taum"]),
+            np.asarray(yx("taum_entry")),
+            np.asarray(yx("tmask")[..., 0]) != 0.0),
+    }
+    require(all(row["exact"] for row in production_forcing_identity.values()),
+            "recorded-entry production step does not carry kt=2 forcing "
+            f"bit for bit: {production_forcing_identity}")
+    derived = production_result["derived_entry_operands"]
+    production_derived_entry_identity = {
+        "rn2": _operand_score(
+            np.asarray(derived["rn2"]), np.asarray(yx("rn2")[..., 1:jpkm1]),
+            wet),
+        "rn2b": _operand_score(
+            np.asarray(derived["rn2b"]),
+            np.asarray(yx("rn2b")[..., 1:jpkm1]), wet),
+        "sh2": _operand_score(
+            np.asarray(derived["sh2"]), np.asarray(yx("sh2")[..., 1:jpkm1]),
+            wet),
+        "e3t_Kmm": _operand_score(
+            np.asarray(derived["e3t_Kmm"]),
+            np.asarray(yx("e3t_Kmm")[..., :jpkm1]),
+            np.asarray(yx("tmask")[..., :jpkm1]) != 0.0),
+        "e3w_Kmm": _operand_score(
+            np.asarray(derived["e3w_Kmm"]),
+            np.asarray(yx("e3w_Kmm")[..., 1:jpkm1]), wet),
+    }
+    require(all(row["exact"]
+                for row in production_derived_entry_identity.values()),
+            "derived kt=2 production entry operands are not bit-exact: "
+            f"{production_derived_entry_identity}")
+    production_kh_upstream = {
+        "en_post_sweep": _operand_score(
+            np.asarray(production_result["candidate_tke_post_sweep"]),
+            np.asarray(e_post), wet),
+    }
+    full_entry_audit = production_result["entry_state_identity"]
+    require(full_entry_audit["all_exact"],
+            "kt=2 full recorded-entry audit is not exact")
+    full_entry_rows = [
+        row for group in full_entry_audit["groups"].values()
+        for row in group.values()
+    ]
+    upstream_unequal = (
+        sum(row["unequal"] for row in full_entry_rows)
+        + sum(row["unequal"] for row in production_entry_identity.values())
+        + sum(row["unequal"] for row in production_forcing_identity.values())
+        + sum(row["unequal"]
+              for row in production_derived_entry_identity.values())
+        + sum(row["unequal"] for row in production_kh_upstream.values()))
+    production_kh_score = _operand_score(production_candidate, oracle_avt, wet)
+    oracle_scale_ulp = float(np.max(np.abs(np.spacing(oracle_avt[wet]))))
+    ulp_scale_bound = 8.0 * oracle_scale_ulp
+    literal_candidate = cfg.tke_mxl_raw_evaluation == "nemo_literal"
+    upstream_nonexact = [
+        row["name"] for row in full_entry_rows if not row["exact"]
+    ] + [
+        f"round59.{name}" for name, row in production_entry_identity.items()
+        if not row["exact"]
+    ] + [
+        f"round59.forcing.{name}"
+        for name, row in production_forcing_identity.items()
+        if not row["exact"]
+    ] + [
+        f"round59.derived_entry.{name}"
+        for name, row in production_derived_entry_identity.items()
+        if not row["exact"]
+    ] + [
+        f"round59.{name}" for name, row in production_kh_upstream.items()
+        if not row["exact"]
+    ]
+    # A correctly aligned binary64 K_H comparison can move at source/JIT
+    # rounding scale.  A physical-size residual with no recorded upstream
+    # difference is an instrument failure (the fix-round-3 0.059 row).
+    if literal_candidate and upstream_unequal == 0:
+        require(production_kh_score["max_abs"] <= ulp_scale_bound,
+                "physical-range sanity failed: exact kt=2 upstream entry but "
+                f"K_H max_abs={production_kh_score['max_abs']} exceeds the "
+                f"8-ULP-scale bound {ulp_scale_bound}")
+    physical_range_sanity = {
+        "expectation": (
+            "with an exact recorded kt=2 entry, K_H mismatch must be "
+            "binary64-ULP scale; otherwise name the differing upstream input"),
+        "oracle_wet_min": float(np.min(oracle_avt[wet])),
+        "oracle_wet_max": float(np.max(oracle_avt[wet])),
+        "candidate_wet_min": float(np.min(production_candidate[wet])),
+        "candidate_wet_max": float(np.max(production_candidate[wet])),
+        "max_abs": production_kh_score["max_abs"],
+        "max_cell_ulp_distance": _positive_ulp_distance(
+            production_candidate, oracle_avt, wet),
+        "max_reference_scale_ulp": oracle_scale_ulp,
+        "ulp_scale_bound": ulp_scale_bound,
+        "upstream_unequal": upstream_unequal,
+        "upstream_nonexact": upstream_nonexact,
+        "literal_candidate_expected_ulp_scale": literal_candidate,
+        "classification": (
+            "ULP_SCALE" if production_kh_score["max_abs"] <= ulp_scale_bound
+            else "UPSTREAM_INPUT_DIFFERS" if upstream_unequal
+            else "NON_ULP_PHYSICS_MISMATCH"),
+    }
     production_row = {
         "name": PRODUCTION_STEP_LABEL,
-        **_operand_score(production_candidate, oracle_avt, wet),
+        **production_kh_score,
         "target": "NEMO avt_pre_evd",
+        "kt": production_result["kt"],
+        "stage": production_result["stage"],
         "entry": production_result["entry"],
         "entry_record": production_result["entry_record"],
+        "forcing_kt": production_result["forcing_kt"],
+        "stage_barotropic_handoff_kt": production_result[
+            "stage_barotropic_handoff_kt"],
         "output_carry": production_result["output_carry"],
         "extraction_citation": production_result["extraction_citation"],
         "step_citation": production_result["step_citation"],
@@ -965,6 +1103,14 @@ def _model_substitution_walk(
             "carry_declaration_citation"],
         "stage_twin_format": production_result["format"],
         "recorded_entry_identity": production_entry_identity,
+        "recorded_forcing_identity": production_forcing_identity,
+        "derived_entry_identity": production_derived_entry_identity,
+        "k_h_upstream_identity": production_kh_upstream,
+        "full_entry_state_identity": full_entry_audit,
+        "physical_range_sanity": physical_range_sanity,
+        "bridge_citation": production_result["bridge_citation"],
+        "existing_stage_twin_citation": production_result[
+            "existing_stage_twin_citation"],
     }
     isolated_eager = score_kh_execution(
         eager_statement_outputs, eager_whole_closure)
@@ -1014,8 +1160,16 @@ def _model_substitution_walk(
                 planted_k_h[mode], baseline_k_h[mode], wet)
             for mode in (ISOLATED_EAGER_LABEL, ISOLATED_JIT_LABEL)
         }
+        production_plant_field = "tke_avm"
+        production_plant_entry = np.asarray(
+            production_result["entry_carry"][production_plant_field])
+        require(production_plant_entry.shape == wet.shape,
+                "production K_M entry plant shape does not match wet mask")
+        production_plant_index = tuple(int(value) for value in np.unravel_index(
+            int(np.argmax(np.where(wet, production_plant_entry, -np.inf))),
+            production_plant_entry.shape))
         planted_production = production_step_k_h(
-            ("tke", planted_index))
+            (production_plant_field, production_plant_index))
         response_rows[PRODUCTION_STEP_LABEL] = _operand_score(
             np.asarray(planted_production["candidate_k_h"]),
             production_candidate, wet)
@@ -1024,12 +1178,13 @@ def _model_substitution_walk(
                 "one-ULP TKE entry plant did not change all three K_H rows: "
                 f"{response_rows}")
         raise GateError(
-            "planted one-ULP TKE entry violation detected at "
-            f"{planted_index}: source_order_closure_k_h changed "
+            "planted one-ULP closure-entry violations detected: isolated "
+            f"TKE at {planted_index} changed "
             f"{response_rows[ISOLATED_EAGER_LABEL]['unequal']} "
             f"{ISOLATED_EAGER_LABEL}, "
             f"{response_rows[ISOLATED_JIT_LABEL]['unequal']} "
-            f"{ISOLATED_JIT_LABEL}, and "
+            f"{ISOLATED_JIT_LABEL}; production {production_plant_field} at "
+            f"{production_plant_index} changed "
             f"{response_rows[PRODUCTION_STEP_LABEL]['unequal']} "
             f"{PRODUCTION_STEP_LABEL} cell(s)")
 

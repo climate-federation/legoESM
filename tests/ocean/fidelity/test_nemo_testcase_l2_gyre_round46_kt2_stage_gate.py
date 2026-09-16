@@ -362,10 +362,33 @@ def test_stage_twin_production_tke_uses_the_ordinary_step_result():
 
     assert "expose_live_stage_operands" not in branch
     assert "LatLonCGridOceanModel(" in branch
-    assert ").step(" in branch
+    assert "model.step(" in branch
     assert '"candidate_k_h": np.asarray(state_after.tke_avt.data)' in branch
     assert '"output_carry": "LatLonCGridOceanState.tke_avt"' in branch
-    assert "records[(1, 1)]" in branch
+    assert "_bridge_kt2_production_entry(" in branch
+    assert "_surface_forcings(card, state, 2)" in branch
+    assert "surface = surface._replace(taum=recorded_taum)" in branch
+    assert "records, advmean_root, 2" in branch
+    assert '"forcing_kt": 2' in branch
+    assert '"entry_state_identity": entry_audit' in branch
+
+
+def test_production_entry_bridge_installs_every_recorded_kt2_carry():
+    source = (
+        TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py"
+    ).read_text()
+    bridge = source.split("def _bridge_kt2_production_entry(", 1)[1].split(
+        "def _stage_reference", 1)[0]
+
+    assert "_bridge_kt2_state(card, cfg, records)" in bridge
+    assert "records[(1, 1)]" in bridge
+    assert "state._replace(bt_hist=raw_history)" in bridge
+    for name in ("T", "S", "u", "v", "ssh", "uu_b", "vv_b",
+                 "e3t_Kbb", "e3u_Kbb", "e3v_Kbb", "e3w_Kbb",
+                 "tke_avm_surface"):
+        assert f'"{name}"' in bridge
+    assert "round-46 and year-owner kt=2 step entries" in bridge
+    assert '"all_exact": True' in bridge
 
 
 def test_stage_twin_refuses_unmeasured_required_rows():

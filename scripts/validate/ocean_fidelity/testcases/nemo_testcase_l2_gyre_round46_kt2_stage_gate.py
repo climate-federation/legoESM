@@ -62,6 +62,8 @@ TKE_STATEMENT_ROOT = Path(
 TKE_OPERAND_RECORD = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round59/"
     "oracle_tke_operands/oracle_tke_operands_kt00000002.bin")
+YEAR_ENTRY_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_owners/nemo_seed0")
 MAGIC = "NEMO_L2_R46STG1"
 DIMS = (36, 26, 31)
 OWNED_DIMS = (32, 22, 31)
@@ -1046,6 +1048,29 @@ def _classification(row: dict) -> dict:
     return row
 
 
+def _exact_identity(name: str, candidate, reference, mask) -> dict:
+    """Bit census for one installed production-entry operand."""
+    candidate = np.asarray(candidate, dtype=np.float64)
+    reference = np.asarray(reference, dtype=np.float64)
+    mask = np.asarray(mask, dtype=bool)
+    require(candidate.shape == reference.shape == mask.shape,
+            f"{name}: entry identity shapes disagree: {candidate.shape}, "
+            f"{reference.shape}, {mask.shape}")
+    require(bool(np.any(mask)), f"{name}: entry identity mask is empty")
+    require(np.all(np.isfinite(candidate[mask]))
+            and np.all(np.isfinite(reference[mask])),
+            f"{name}: entry identity contains NaN/Inf")
+    unequal = int(np.count_nonzero(
+        candidate[mask].view(np.uint64) != reference[mask].view(np.uint64)))
+    return {
+        "name": name,
+        "compared_cells": int(np.count_nonzero(mask)),
+        "unequal": unequal,
+        "max_abs": float(np.max(np.abs(candidate[mask] - reference[mask]))),
+        "exact": unequal == 0,
+    }
+
+
 def _unmeasured(kt: int, stage: int | str, field: str, reason: str) -> dict:
     return {
         "name": f"GYRE-zco.kt{kt}.s{stage}.{field}",
@@ -1134,6 +1159,181 @@ def _bridge_stage_context(state, arrays, *, plant: bool = False):
         tke_avm_surface=field(_owned3(arrays["tke_avm_k"], 31)[..., 0],
                               "tke_avm_surface", ("lat", "lon")),
     )
+
+
+def _bridge_kt2_production_entry(
+    card, cfg, records, stage_root: Path, memory_root: Path,
+    year_entry_root: Path,
+):
+    """Install and prove the complete NEMO kt=2 production-step entry.
+
+    This deliberately starts with the same ``_bridge_kt2_state`` used by the
+    established round-93+ stage twins.  It then replaces that lane's
+    post-``zdf_phy`` closure context with the raw closure carries consumed at
+    kt=2 and installs the six recorded AB3/AM4 histories as real state, rather
+    than combining kt=1 state/forcing with a kt=2 closure record.
+    """
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        compute_face_masks_3d,
+    )
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+        _nemo_ws_qco_stage_faces,
+    )
+    from legoesm.ocean.vertical import compute_layer_thickness
+
+    kt = 2
+    stage_entry_path = stage_root / "oracle_step_entry_kt00000002.bin"
+    year_entry_path = year_entry_root / "oracle_step_entry_kt00000002.bin"
+    require(stage_entry_path.is_file() and year_entry_path.is_file(),
+            "kt=2 production bridge is missing a step-entry dump")
+    stage_sha = sha256(stage_entry_path)
+    year_sha = sha256(year_entry_path)
+    require(stage_sha == year_sha,
+            "round-46 and year-owner kt=2 step entries are not bit-identical")
+    step_entry = read_entry(year_entry_path)
+    require(step_entry["kt"] == kt,
+            f"year-owner entry is kt={step_entry['kt']}, expected kt=2")
+
+    # This is the exact bridge used by the established stage twins.  Its
+    # kt=2 Kbb physical state and prognostic barotropic pair are recorded
+    # values; the one preliminary card step only supplies static/inactive
+    # pytree structure.
+    state = _bridge_kt2_state(card, cfg, records)
+    # Round 59 records kt=2 closure ENTRY memory.  NEMO produced that memory at
+    # kt=1, so it is the kt=1 stage record bit for bit; records[(2, 1)] instead
+    # holds the closure OUTPUT produced during kt=2.
+    state = _bridge_stage_context(state, records[(1, 1)]["arrays"])
+    raw_history = tuple(
+        jnp.asarray(value) for value in _raw_history_override(memory_root))
+    state = state._replace(bt_hist=raw_history)
+
+    present = {name for name, value in zip(state._fields, state)
+               if value is not None}
+    active = {
+        "u", "v", "T", "S", "eta", "uu_b", "vv_b", "bt_hist",
+        "tke", "tke_avm", "tke_avt", "tke_dissl", "tke_avm_surface",
+    }
+    static = {"H_bathy", "land_mask", "u_mask", "v_mask"}
+    diagnostic = {"w"}
+    require(present == active | static | diagnostic,
+            "kt=2 bridge has an unaccounted active/inactive state carry: "
+            f"present={sorted(present)}, expected={sorted(active | static | diagnostic)}")
+    require(cfg.outer_integrator == "forward_euler"
+            and cfg.tracer_time_integrator == "rk3_ws"
+            and not cfg.barotropic_forcing_centred,
+            "kt=2 active-carry inventory no longer matches the resolved card")
+    tke_cfg = cfg.physics.vertical_mixing.tke
+    require(tke_cfg.advection_scheme == "none"
+            and not tke_cfg.source_eke_diss,
+            "kt=2 bridge needs an additional TKE/EKE carry")
+
+    masks = expected_masks(card)
+    fields = lego_fields(state)
+    physical = {}
+    for name in ("T", "S", "u", "v", "ssh"):
+        reference = np.asarray(step_entry[name])
+        if reference.ndim == 3:
+            reference = reference[..., :fields[name].shape[-1]]
+        physical[name] = _exact_identity(
+            f"kt2.entry.{name}", fields[name], reference, masks[name])
+
+    a = records[(2, 1)]["arrays"]
+    barotropic = {
+        "uu_b": _exact_identity(
+            "kt2.entry.uu_b", np.asarray(state.uu_b.data)[:, 1:],
+            _owned2(a["uu_b_Kbb"]), masks["u"][..., 0]),
+        "vv_b": _exact_identity(
+            "kt2.entry.vv_b", np.asarray(state.vv_b.data)[1:, :],
+            _owned2(a["vv_b_Kbb"]), masks["v"][..., 0]),
+    }
+    history_reference = _raw_history_override(memory_root)
+    history_names = ("ub_e", "ubb_e", "vb_e", "vbb_e", "sshb_e", "sshbb_e")
+    histories = {
+        name: _exact_identity(
+            f"kt2.entry.{name}", candidate, reference,
+            np.ones(np.shape(reference), dtype=bool))
+        for name, candidate, reference in zip(
+            history_names, state.bt_hist, history_reference, strict=True)
+    }
+
+    closure_reference = records[(1, 1)]["arrays"]
+    wet_w = _owned3(closure_reference["wmask"], 31)[..., 1:30] > 0.5
+    closure = {
+        "tke": _exact_identity(
+            "kt2.entry.tke", state.tke.data,
+            closure_reference["tke_en"][..., 1:30], wet_w),
+        "tke_avm": _exact_identity(
+            "kt2.entry.tke_avm", state.tke_avm.data,
+            _owned3(closure_reference["tke_avm_k"], 31)[..., 1:30], wet_w),
+        "tke_avt": _exact_identity(
+            "kt2.entry.tke_avt", state.tke_avt.data,
+            closure_reference["tke_avt_k"][..., 1:30], wet_w),
+        "tke_dissl": _exact_identity(
+            "kt2.entry.tke_dissl", state.tke_dissl.data,
+            closure_reference["tke_dissl"][..., 1:30], wet_w),
+        "tke_avm_surface": _exact_identity(
+            "kt2.entry.tke_avm_surface", state.tke_avm_surface.data,
+            _owned3(closure_reference["tke_avm_k"], 31)[..., 0],
+            masks["ssh"]),
+    }
+
+    # Thickness is derived state, not a NamedTuple carry.  Rebuild it through
+    # the exact production helpers and score all four consumed staggerings.
+    model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, cfg)
+    bundle = model._tke_step_entry_n2_bundle(state)
+    require(bundle is not None, "kt=2 entry did not materialize TKE thickness")
+    u_mask, v_mask = compute_face_masks_3d(
+        card.recipe.z_coord.is_active, card.recipe.grid)
+    h_ref = compute_layer_thickness(
+        jnp.zeros_like(state.eta.data), state.H_bathy.data,
+        card.recipe.z_coord, min_water_column_m=cfg.min_water_column_m)
+    h_u, h_v, _, _ = _nemo_ws_qco_stage_faces(
+        state.eta.data, h_ref, u_mask.astype(state.eta.data.dtype),
+        v_mask.astype(state.eta.data.dtype), card.recipe.grid)
+    thickness = {
+        "e3t_Kbb": _exact_identity(
+            "kt2.entry.e3t_Kbb", bundle.e3t_Kmm,
+            _owned3(a["e3t_Kbb"])[..., :30],
+            _owned3(a["tmask"])[..., :30] > 0.5),
+        "e3u_Kbb": _exact_identity(
+            "kt2.entry.e3u_Kbb", np.asarray(h_u)[:, 1:, :],
+            _owned3(a["e3u_Kbb"])[..., :30],
+            _owned3(a["umask"])[..., :30] > 0.5),
+        "e3v_Kbb": _exact_identity(
+            "kt2.entry.e3v_Kbb", np.asarray(h_v)[1:, :, :],
+            _owned3(a["e3v_Kbb"])[..., :30],
+            _owned3(a["vmask"])[..., :30] > 0.5),
+        "e3w_Kbb": _exact_identity(
+            "kt2.entry.e3w_Kbb", bundle.e3w_Kmm,
+            _owned3(a["e3w_Kbb"])[..., 1:30],
+            _owned3(a["wmask"])[..., 1:30] > 0.5),
+    }
+    groups = {
+        "physical": physical,
+        "thickness": thickness,
+        "barotropic": barotropic,
+        "barotropic_history": histories,
+        "tke_carry": closure,
+    }
+    rows = [row for group in groups.values() for row in group.values()]
+    require(all(row["exact"] for row in rows),
+            "kt=2 production entry is not bit-identical to its NEMO records: "
+            + ", ".join(row["name"] for row in rows if not row["exact"]))
+    audit = {
+        "kt": kt,
+        "stage": "before zdf_phy; Kbb=Kmm=3; before WS-RK3 stage 1",
+        "round46_entry": str(stage_entry_path),
+        "year_owner_entry": str(year_entry_path),
+        "entry_sha256": stage_sha,
+        "round46_year_owner_bit_identical": True,
+        "groups": groups,
+        "all_exact": True,
+        "active_state_carries": sorted(active),
+        "inactive_or_diagnostic_state": sorted(static | diagnostic),
+    }
+    return state, audit
 
 
 def _stage_reference(records, next_entries, kt: int, stage: int) -> dict:
@@ -2589,6 +2789,8 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                 plant: str | None, *, walk_only: bool = False,
                 production_tke_only: bool = False,
                 production_tke_entry_ulp: tuple[str, tuple[int, ...]] | None = None,
+                production_tke_taum=None,
+                production_entry_root: Path = YEAR_ENTRY_ROOT,
                 ) -> dict:
     """Decision-41 stage tables from recorded entries and the shared stage."""
     direct_w_record = read_admitted_stage1_w_walk(
@@ -2615,13 +2817,9 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
         # operand observer disabled: ``step`` then returns _step_jitted's
         # ordinary production state, rather than an observer-shaped trace.
         require(plant is None, "production TKE-only mode does not accept a legacy plant")
-        # The round-59 record's ``kt=2`` closure entry is the closure memory
-        # consumed by NEMO's first recorded production step: it is bitwise the
-        # kt=1 stage record, while the kt=2 stage record is that closure's
-        # output.  Use the stage twin's kt=1 recorded context so the full step
-        # produces the exact record being scored.
-        state = _bridge_stage_context(
-            card.recipe.initial_state, records[(1, 1)]["arrays"])
+        state, entry_audit = _bridge_kt2_production_entry(
+            card, cfg, records, stage_root, memory_root,
+            Path(production_entry_root))
         entry_plant = None
         if production_tke_entry_ulp is not None:
             field_name, index = production_tke_entry_ulp
@@ -2648,24 +2846,56 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                 "after": float(after),
                 "changed_entry_cells": 1,
             }
-        freshwater, surface = _surface_forcings(card, state, 1)
+        # This is kt=2 by construction: the full before-level state above and
+        # this forcing call have the same step index as the round-59 record.
+        freshwater, surface = _surface_forcings(card, state, 2)
+        require(production_tke_taum is not None,
+                "recorded-entry production TKE mode requires kt=2 taum")
+        recorded_taum = jnp.asarray(production_tke_taum)
+        require(recorded_taum.shape == state.eta.data.shape,
+                "recorded kt=2 taum shape does not match the entry state")
+        require(bool(jnp.all(jnp.isfinite(recorded_taum))),
+                "recorded kt=2 taum contains NaN/Inf")
+        surface = surface._replace(taum=recorded_taum)
         hooks = _NEMOWSRK3TestHooks(
             stage_barotropic_output_override=_barotropic_override(
-                records, advmean_root, 1),
+                records, advmean_root, 2),
         )
-        state_after = jax.device_get(LatLonCGridOceanModel(
+        model = LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord, cfg,
-            _nemo_ws_test_hooks=hooks).step(
+            _nemo_ws_test_hooks=hooks)
+        entry_n2 = model._tke_step_entry_n2_bundle(state)
+        entry_sh2 = model._tke_step_entry_p_sh2(state)
+        require(entry_n2 is not None and entry_sh2 is not None,
+                "kt=2 production step did not materialize TKE entry operands")
+        state_after = jax.device_get(model.step(
                 state, dt=card.dt_s, freshwater=freshwater,
                 surface_forcing=surface))
         require(getattr(state_after, "tke_avt", None) is not None,
                 "production _step_jitted result has no tke_avt K_H carry")
         return {
-            "format": "nemo-testcase-l2-gyre-stage-twin-production-tke-v1",
-            "label": "production step (_step_jitted)",
-            "entry": "NEMO-recorded kt=1 Kbb/TKE entry",
-            "entry_record": str(
-                stage_root / "oracle_momstage_kt00000001_s1.bin"),
+            "format": "nemo-testcase-l2-gyre-stage-twin-production-tke-v2",
+            "label": "recorded-entry production step (_step_jitted)",
+            "kt": 2,
+            "stage": "pre-zdf_phy closure feeding WS-RK3 stage 1",
+            "entry": (
+                "NEMO kt=2 before-level entry; Kbb=Kmm=3; forcing kt=2"),
+            "entry_record": entry_audit["year_owner_entry"],
+            "entry_state_identity": entry_audit,
+            "forcing_kt": 2,
+            "forcing_entry": {"taum": np.asarray(recorded_taum)},
+            "derived_entry_operands": {
+                "rn2": np.asarray(entry_n2.rn2),
+                "rn2b": np.asarray(entry_n2.rn2b),
+                "sh2": np.asarray(entry_sh2),
+                "e3t_Kmm": np.asarray(entry_n2.e3t_Kmm),
+                "e3w_Kmm": np.asarray(entry_n2.e3w_Kmm),
+            },
+            "stage_barotropic_handoff_kt": 2,
+            "bridge_citation": (
+                "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:926-1098"),
+            "existing_stage_twin_citation": (
+                "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1889-1919"),
             "output_carry": "LatLonCGridOceanState.tke_avt",
             "extraction_citation": (
                 "ocean_model_latlon_cgrid.py:10797-10802"),
@@ -2676,9 +2906,14 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
             # mode is not serialized by the round-46 CLI.
             "entry_carry": {
                 name: np.asarray(getattr(state, name).data)
-                for name in ("tke", "tke_avm", "tke_avt", "tke_dissl")
+                for name in (
+                    "tke", "tke_avm", "tke_avt", "tke_dissl",
+                    "tke_avm_surface")
             },
             "candidate_k_h": np.asarray(state_after.tke_avt.data),
+            "candidate_tke_post_sweep": np.asarray(state_after.tke.data),
+            "candidate_k_m": np.asarray(state_after.tke_avm.data),
+            "candidate_dissl": np.asarray(state_after.tke_dissl.data),
         }
 
     next_entries = {

@@ -141,6 +141,7 @@ def test_kh_entry_ulp_plant_selects_a_consumed_output_response():
     baseline = np.linspace(1.0, 2.0, 256, dtype=np.float64)
     bumped = baseline.copy()
     bumped[17] = np.nextafter(bumped[17], np.inf)
+    bumped[200] = np.nextafter(bumped[200], np.inf)
     mask = np.ones_like(energy, dtype=bool)
     planted, index = MODULE._plant_entry_ulp_at_changed_output(
         energy, baseline, bumped, mask)
@@ -148,16 +149,30 @@ def test_kh_entry_ulp_plant_selects_a_consumed_output_response():
     assert np.count_nonzero(planted.view(np.uint64)
                             != energy.view(np.uint64)) == 1
     assert planted[index] == np.nextafter(energy[index], np.inf)
-    assert index == (17,)
+    assert index == (200,)
 
 
 def test_kh_execution_labels_do_not_call_an_isolated_jit_production():
     assert MODULE.ISOLATED_EAGER_LABEL == "isolated-closure eager"
     assert MODULE.ISOLATED_JIT_LABEL == "isolated-closure JIT"
-    assert MODULE.PRODUCTION_STEP_LABEL == "production step (_step_jitted)"
+    assert MODULE.PRODUCTION_STEP_LABEL == (
+        "recorded-entry production step (_step_jitted)")
 
     source = SCRIPT.read_text()
     assert '"production_jit_call_site"' not in source
     assert '"production-JIT source-order K_H rows' not in source
     assert "production_tke_only=True" in source
     assert 'response_rows[PRODUCTION_STEP_LABEL]' in source
+    assert '"physical_range_sanity": physical_range_sanity' in source
+    assert 'production_result["forcing_kt"]' in source
+    assert 'production_tke_taum=jnp.asarray(yx("taum_entry"))' in source
+    assert 'production_plant_field = "tke_avm"' in source
+
+
+def test_positive_ulp_distance_counts_binary64_steps():
+    expected = np.asarray([0.01, 0.02, 0.03], dtype=np.float64)
+    actual = expected.copy()
+    actual[1] = np.nextafter(np.nextafter(actual[1], np.inf), np.inf)
+    mask = np.asarray([True, True, False])
+
+    assert MODULE._positive_ulp_distance(actual, expected, mask) == 2

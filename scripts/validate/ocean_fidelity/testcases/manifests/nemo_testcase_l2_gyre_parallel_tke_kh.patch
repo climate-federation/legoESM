@@ -1,9 +1,14 @@
 # HELD PATCH — NOT A RULE-12 CANDIDATE. Do not apply.
 # Citation: GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:627-630,
 #   :669-683, :690-702; stprk3.f90:154-168.
+# LANE_DEFECT: no. The existing round-93+ stage twin installs the kt-matched
+#   physical/barotropic/TKE state at round46_kt2_stage_gate.py:862-896, then
+#   installs raw histories, kt-matched forcing, barotropic handoff, and stage
+#   entries at :1889-1919. It does not share the rejected mixed-time defect.
 # Frozen Prediction 3 (every statement row through final K_H exact): REFUTED.
-# candidate_statement_walk_fix3.json, SHA-256 ec26b17f8c8a9d9366aa6497
-#   3b7fb96acb6dccb6a9edc665942513a02836c8bb. The isolated-closure eager
+# candidate_statement_walk_fix4.json, SHA-256 ce890b44889bdfd8ba6d09ba3eb34716d
+#   ec80c49883cbca939f6a07eff5e0865. The
+#   isolated-closure eager
 #   statement walk has all_statement_rows_exact=true (every row 0/max 0); the
 #   isolated-closure JIT walk has all_statement_rows_exact=false. Its non-exact
 #   rows are:
@@ -18,15 +23,22 @@
 # Three K_H rows against NEMO avt_pre_evd:
 #   isolated-closure eager: 0/17,400 unequal, max 0;
 #   isolated-closure JIT: 522/17,400, max 1.734723475976807e-18;
-#   production step (_step_jitted): 5,723/17,400, max 0.05926217077024117.
-# The production row drives the existing recorded-entry stage twin through
-# ocean_model_latlon_cgrid.py:10982-10995 and extracts returned state.tke_avt,
-# assigned from _tke_coeff_new.K_H at :10797-10802. Isolated exactness does not
-# qualify this patch under Rule 12.
-# Plant evidence: candidate_ulp_plant_fix3.log, SHA-256 eab66a436cb74f740765e31
-#   b452cdab434401abfd06f77f17fb5c3fedb2cab7f. A +1-ULP change to the selected
-#   recorded TKE entry cell changes 1 cell in each of isolated-closure eager,
-#   isolated-closure JIT, and production step (_step_jitted).
+#   recorded-entry production step (_step_jitted): 4,578/17,400,
+#     max 7.506010254315632e-09.
+# The old 5,723/17,400, max 0.05926217077024117 row is RETRACTED: it combined
+#   kt=1 state/forcing with the kt=2 target. The replacement installs the full
+#   kt=2 Kbb=Kmm=3 before-zdf_phy entry and kt=2 forcing, then extracts returned
+#   state.tke_avt through ocean_model_latlon_cgrid.py:10982-10995 (assigned
+#   from _tke_coeff_new.K_H at :10797-10802).
+# Physical-range check before scoring: candidate wet K_H is
+#   [1.2e-05,0.0657684768931864] vs NEMO [1.2e-05,0.06576847685222414].
+#   Equal-input mismatch should be ULP-scale (8-ULP bound 1.1102230246251565e-16);
+#   the named upstream difference is en_post_sweep, 979/17,400,
+#   max 6.809688013129089e-12. All entry/derived/forcing audits are exact.
+# Plant evidence: candidate_ulp_plant_fix4.log, SHA-256 db50f1e67d49a25f1e4eadf
+#   953fe1d3887d4284a09ebad4109732e1eb6b62ff8. +1 ULP at isolated TKE
+#   (15,16,0) changes one cell in each isolated row; +1 ULP at production
+#   tke_avm (1,10,0) changes one returned production K_H cell.
 # Owning stage: kt=1 pre-stage vertical physics/TKE closure, whose coefficients
 #   are consumed by WS-RK3 stage 1. Decision 41 keeps this patch held.
 # Scratch proof commit: 3849b99199c6dc82fb68917ac5408a9193905cbd.

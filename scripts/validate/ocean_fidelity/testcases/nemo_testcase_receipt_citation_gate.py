@@ -341,6 +341,9 @@ FILES = {
     "nemo_testcase_l2_gyre_round54_tke_operands.py": (
         REPO / "scripts/validate/ocean_fidelity/testcases"
         "/nemo_testcase_l2_gyre_round54_tke_operands.py"),
+    "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py": (
+        REPO / "scripts/validate/ocean_fidelity/testcases"
+        "/nemo_testcase_l2_gyre_round46_kt2_stage_gate.py"),
     "GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/zdfmxl.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/zdfmxl.f90"),
     "GYRE_OMIP_L2_P3_SM_R41ADVSP/BLD/ppsrc/nemo/ldfslp.f90": (
@@ -1066,10 +1069,18 @@ CITATION_MAP = {
     'packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py:384-454': [
         ('wumask = u_mask[..., :-1] * u_mask[..., 1:]', 2),
         ('+ (zsh2v[:-1, :, :] + zsh2v[1:, :, :]) * coast_v', 2), 71],
-    'nemo_testcase_l2_gyre_round54_tke_operands.py:465-502': [
+    'nemo_testcase_l2_gyre_round54_tke_operands.py:489-526': [
         'def _model_substitution_walk(',
         'require(jax.config.x64_enabled, "model substitution walk requires JAX fp64")',
         38],
+    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:926-1098': [
+        'def _bridge_kt2_production_entry(',
+        'return state, audit', 173],
+    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:862-896': [
+        'def _bridge_kt2_state(', ('return state', 1), 35],
+    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1889-1919': [
+        'states = {1: _bridge_stage_context(',
+        ('surface_forcing=surface))', 2), 31],
     'ocean_model_latlon_cgrid.py:10797-10802': [
         'if _tke_coeff_new is not None:',
         'tke_avt=Field(data=_tke_coeff_new.K_H', 6],
