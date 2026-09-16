@@ -1,7 +1,7 @@
 # NEMO testcase L2 GYRE round 98: kt=1 stage-1 W walk
 
 Date: 2026-09-16  
-Status: **HELD; direct stage-output proof did not close**  
+Status: **STOPPED_FOR_RECORD; direct stage-output proof did not close**
 Writable clone: `/tmp/autopilot-work-f6Sj77YL`  
 Evidence: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round98`
 
@@ -143,8 +143,11 @@ does not execute.  No stabilizer absent from NEMO was added.
 
 ## Review and focused validation
 
-The separate read-only Codex review is recorded at `codex_review.log`; its
-verdict is quoted verbatim here after the review run.  `REVIEW_VERDICT_PENDING`
+The separate read-only Codex review attempt is recorded at
+`codex_review.log`.  Its verbatim result was: **"independent review unavailable
+in-sandbox"**.  The CLI could not initialize its in-process app-server client
+because the sandbox made its setup path read-only; per the operator's note this
+does not block the round.
 
 Focused validation completed:
 
