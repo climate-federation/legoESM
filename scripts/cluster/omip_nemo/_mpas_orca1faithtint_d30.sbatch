@@ -29,7 +29,7 @@
 #   --ice-freeze-scheme unesco, --ice-exchange nemo_si3, --ice-snow bulk,
 #   --ice-snow-flooding on the adopted SI3 exchange set (resolved grid-agnostically
 #                          in main() and applied to the ice config both lanes use).
-#   --forcing-time-interp linear, --chl-remap nemo_scrip  (host forcing loop).
+#   --forcing-time-interp linear  (host forcing loop).
 #   --ew-cyclic-overlap    codex 9815604 caught this one: it is NOT a structured-
 #                          grid seam flag. It runs the tripole's own
 #                          _ew_overlap_fill on the eORCA1 SOURCE mask and
@@ -57,6 +57,14 @@
 #   * --min-levels, --momentum-rk3, --adaptive-implicit-vertadv: accepted by
 #     argparse but never passed to build_mpas_ocean -> silent drops. Omitted
 #     deliberately.
+#   * --chl-remap nemo_scrip. Carried in the first version of this card and it
+#     killed the run at 4 minutes (job 9815673): the oracle's SCRIP weights
+#     encode the eORCA1 DESTINATION grid, so the loader refuses any target that
+#     is not (332, 362) -- it is tripole-only in effect, whatever the flag gate
+#     accepts. Neither reviewer caught it; the driver's own guard did. The
+#     chlorophyll field therefore reaches MPAS through the inverse-distance
+#     remap, which is a real and unclosable difference from the tripole until
+#     weights are generated for the Voronoi mesh.
 #
 # PRE-REGISTERED (day 30 vs GATEWAY record 5, against mpas_base2_d30's
 # SST 0.4523 / SSS 0.3246 / MLD 23.4561 on the three-grid cell set):
@@ -115,7 +123,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas \
   `# ---- the adopted sets the MPAS lane threads ----` \
   --ice-freeze-scheme unesco \
   --ice-exchange nemo_si3 --ice-snow bulk --ice-snow-flooding on \
-  --forcing-time-interp linear --chl-remap nemo_scrip \
+  --forcing-time-interp linear \
   --nemo-domain-mask \
   --output $OUT 2>&1 | tail -30
 run_rc=${PIPESTATUS[0]}

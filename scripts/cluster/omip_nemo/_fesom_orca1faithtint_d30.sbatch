@@ -26,7 +26,6 @@
 #                         tripole's day-30 MLD rmse from 21.0 to 16.4 m.
 #   --ice-exchange nemo_si3          the adopted SI3 exchange set.
 #   --forcing-time-interp linear     NEMO's fldread ln_tint on the forcing too.
-#   --chl-remap nemo_scrip           NEMO's SCRIP weights for the chlorophyll map.
 #   --woa-t/--woa-s                  the production card's WOCE files, explicitly.
 #   --snapshot-every-days 5          the tripole's cadence, so the runs pair
 #                                    day-for-day.
@@ -39,7 +38,17 @@
 #   --bottom-drag-scheme, --tracer-advection, --runoff-depth-nemo-ini,
 #   --mle, --min-levels, --pgf-scheme, --momentum-rk3,
 #   --adaptive-implicit-vertadv, the lateral-viscosity set.
-# Two further differences are structural rather than missing:
+# And one more that the ALLOWLIST LETS THROUGH but the code refuses at use:
+#   --chl-remap nemo_scrip. It is in _FESOM_WIRED_DESTS, so the stage gate
+#   accepts it, and the first version of this card carried it -- the run died
+#   at 4 minutes (job 9815674, and MPAS the same way in 9815673) because the
+#   oracle's SCRIP weights encode the eORCA1 DESTINATION grid and the loader
+#   refuses any target that is not (332, 362). It is tripole-only in effect.
+#   Neither reviewer caught it; the driver's own guard did, which is the
+#   argument for guards that name the shape they need. Chlorophyll therefore
+#   reaches FESOM through the inverse-distance remap.
+#
+# Three further differences are structural rather than missing:
 #   * dt stays 1800 s (tripole and MPAS run 150 s).  --dt IS allowlisted, so
 #     this is a COST choice, not a wiring limit: 150 s would be a 12x longer
 #     run and does not fit the partition.
@@ -90,7 +99,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid fesom \
   --forcing-ramp-days 5 \
   `# ---- the adopted sets the FESOM lane wires ----` \
   --ice-exchange nemo_si3 \
-  --forcing-time-interp linear --chl-remap nemo_scrip \
+  --forcing-time-interp linear \
   --dt 1800 --years 0.0822 --snapshot-every-days 5 \
   --output $OUT 2>&1 | tail -20
 run_rc=${PIPESTATUS[0]}
