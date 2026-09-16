@@ -70,10 +70,13 @@ It contains one row for each kt=1/kt=2, stage-1/2/3 and U/V combination.
 | isolated-closure eager | 12 / 12 | 0 | 0 |
 | isolated-closure JIT | 12 / 12 | 0 | 0 |
 | production step, scalar replay from captured live operands | 12 / 12 | 0 | 0 |
-| production step versus NEMO | 0 / 12 BIT; 2 AT-BAR, 10 DEBT | 180,305 | `2.3065088442784468e-4` |
+| production step versus NEMO output/transcription | 0 / 12 BIT; 2 AT-BAR, 10 DEBT | 180,305 | `2.3065088442784468e-4` |
 
 The last row group deliberately includes upstream live-operand error and is not
-a fusion test. For example, kt=2 stage-1 production versus NEMO reaches
+a fusion test. Stages 1 and 2 use NEMO's direct post-assignment outputs;
+stage 3 is explicitly a compiled-statement transcription because no NEMO dump
+exists between its explicit assignment and implicit solve. For example,
+kt=2 stage-1 production versus NEMO reaches
 `1.1405100346439196e-4` U and `2.3065088442784468e-4` V, consistent with the
 existing Round-92 finding that Krhs is already non-bit. The discriminating
 condition—isolated BIT but captured-operand production transcription

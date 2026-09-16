@@ -28,6 +28,9 @@ assignment hunk applied, every U/V row for kt=1 and kt=2 stages 1--3 was BIT
 in isolated-closure eager, isolated-closure JIT, and a scalar replay from the
 operands captured inside the full production step. The production assignment
 therefore preserves the compiled multiply/add/mask statement boundaries.
+Stages 1/2 use direct NEMO post-assignment output; stage 3 remains the
+registered compiled-statement transcription because NEMO has no dump between
+that explicit assignment and its implicit solve.
 Production versus NEMO is still non-bit because the live upstream Krhs is
 already different (for example kt=2 stage 1 maxima 1.1405100346439196e-4 U
 and 2.3065088442784468e-4 V after the assignment). This strengthens, rather
