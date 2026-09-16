@@ -283,6 +283,10 @@ class DycoreConfig(NamedTuple):
     # Appended at the tuple END: preserves POSITIONAL CONSTRUCTION by existing
     # callers, not full tuple ABI (exact unpacking / len() still break).
     mpas_vert_advection_scheme: str = "upwind"
+    # MPAS lane, CAM-style top diffusion sponge: del2 viscosity x factor**((n-k)/n)
+    # in the top n layers (raised-lid experiment); 0 / 1.0 = off.
+    mpas_sponge_del2_top_layers: int = 0
+    mpas_sponge_del2_top_factor: float = 1.0
 
 
 class EvaluationConfig(NamedTuple):
@@ -2701,6 +2705,17 @@ class ExperimentConfig(NamedTuple):
         # Vertical advection scheme: membership first, then the same
         # silently-inert refusal as k_h_scale (MPAS + sigma only).
         _vert_adv_options = ("upwind", "van_leer")
+        _spl, _spf = d.mpas_sponge_del2_top_layers, d.mpas_sponge_del2_top_factor
+        if isinstance(_spl, bool) or not isinstance(_spl, int) or _spl < 0 or _spl >= g.nlev:
+            errors.append(
+                f"dycore.mpas_sponge_del2_top_layers must be an int in [0, grid.nlev) (got {_spl!r})")
+        if not (isinstance(_spf, (int, float)) and not isinstance(_spf, bool) and _spf >= 1.0):
+            errors.append(
+                f"dycore.mpas_sponge_del2_top_factor must be a number >= 1.0 (got {_spf!r})")
+        if isinstance(_spl, int) and _spl > 0 and d.discretization != "mpas":
+            errors.append(
+                "dycore.mpas_sponge_del2_top_layers is wired into the MPAS dycore only; "
+                f"on discretization={d.discretization!r} it would be silently inert")
         if d.mpas_vert_advection_scheme not in _vert_adv_options:
             errors.append(
                 f"dycore.mpas_vert_advection_scheme must be one of "

@@ -193,6 +193,11 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # existing callers, not full tuple ABI (exact unpacking / len() / _make
     # with a short tuple still break; no such caller exists in-repo).
     vert_advection_scheme: str = "upwind"
+    # CAM-style top diffusion sponge: the del2 viscosity in the top n layers
+    # is multiplied by factor**((n-k)/n) (k = 0 the model top, so the top
+    # layer gets the full factor), 1 below.  0 / 1.0 = off, byte-identical.
+    sponge_del2_top_layers: int = 0
+    sponge_del2_top_factor: float = 1.0
 
 
 # ============================================================================
@@ -295,6 +300,19 @@ def vertical_del4_T_tendency(
     _w = layer_mass.astype(tend.dtype)
     return tend - ((tend * _w).sum(axis=-1, keepdims=True)
                    / _w.sum(axis=-1, keepdims=True))
+
+
+def sponge_del2_profile(nlev: int, n_layers: int, factor: float) -> jnp.ndarray:
+    """Per-level del2 viscosity multiplier of a CAM-style top diffusion sponge:
+    factor**((n_layers - k)/n_layers) for level k < n_layers (k = 0 is the
+    model top, so the top layer gets the full factor), 1.0 below; all ones when
+    n_layers <= 0 or factor == 1.0 (byte-identical off state)."""
+    if n_layers <= 0 or factor == 1.0:
+        return jnp.ones(nlev)
+    fac = jnp.asarray(float(factor))
+    k = jnp.arange(nlev)
+    exponent = jnp.maximum(n_layers - k, 0) / n_layers     # exactly 0 below the sponge
+    return fac ** exponent
 
 
 def mpas_hydrostatic_tendencies(
@@ -498,12 +516,15 @@ def mpas_hydrostatic_tendencies(
     # ``vector_laplacian_del2_3d`` call (1 div + 1 curl + 1 grad +
     # 1 tangential-curl difference) per RHS evaluation.  Same exploit
     # as Loop 135 for the latlon ocean K_h+K_bih sharing.
+    _nu2 = config.nu_del2 * sponge_del2_profile(
+        u_3d.shape[-1], config.sponge_del2_top_layers,
+        config.sponge_del2_top_factor).astype(u_3d.dtype)
     if config.nu_del2 > 0 and config.nu_del4 > 0:
         _del2_u = vector_laplacian_del2_3d(u_3d, mesh)
-        du_dt_3d = du_dt_3d + config.nu_del2 * _del2_u
+        du_dt_3d = du_dt_3d + _nu2[None, :] * _del2_u
         du_dt_3d = du_dt_3d - config.nu_del4 * vector_laplacian_del2_3d(_del2_u, mesh)
     elif config.nu_del2 > 0:
-        du_dt_3d = du_dt_3d + config.nu_del2 * vector_laplacian_del2_3d(u_3d, mesh)
+        du_dt_3d = du_dt_3d + _nu2[None, :] * vector_laplacian_del2_3d(u_3d, mesh)
     elif config.nu_del4 > 0:
         du_dt_3d = du_dt_3d + config.nu_del4 * vector_laplacian_del4_3d(u_3d, mesh)
 

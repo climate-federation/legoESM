@@ -380,6 +380,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "derived for a UNIFORM grid -- measured max "
                              "0.0642 on that run, 15.6x inside it; needs "
                              "nlev>=4).  Default = bit-identical.")
+    parser.add_argument("--mpas-sponge-del2-top-layers", type=int, default=None,
+                        dest="mpas_sponge_del2_top_layers",
+                        help="CAM-style top diffusion sponge: number of top layers whose "
+                             "del2 viscosity is enhanced (MPAS; 0 = off)")
+    parser.add_argument("--mpas-sponge-del2-top-factor", type=float, default=None,
+                        dest="mpas_sponge_del2_top_factor",
+                        help="top-layer del2 viscosity multiplier of the sponge, ramping "
+                             "geometrically to 1 below the sponge layers (1.0 = off)")
     parser.add_argument("--div-damp-scale", type=float,
                         default=_DYCORE_DEFAULTS.div_damp_scale,
                         help="Dycore divergence-damping multiplier")
@@ -1906,6 +1914,10 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         mpas_nu_vert4_T=args.mpas_nu_vert4_t,
         mpas_conservative_tracer_clamp=args.mpas_conservative_tracer_clamp,
         mpas_vert_advection_scheme=args.mpas_vert_advection_scheme,
+        mpas_sponge_del2_top_layers=(args.mpas_sponge_del2_top_layers
+                                     if args.mpas_sponge_del2_top_layers is not None else 0),
+        mpas_sponge_del2_top_factor=(args.mpas_sponge_del2_top_factor
+                                     if args.mpas_sponge_del2_top_factor is not None else 1.0),
         conservation_fixer=args.conservation_fixer,
         fix_mass=args.fix_mass,
         implicit_grav_wave_use_pcg=args.implicit_grav_wave_use_pcg,
