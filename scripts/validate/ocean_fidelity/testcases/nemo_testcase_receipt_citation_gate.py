@@ -281,6 +281,26 @@ FILES = {
     "GYRE_OMIP_L2_P3_SM_R94STGCLS/BLD/ppsrc/nemo/sshwzv.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R94STGCLS/BLD/ppsrc/nemo"
         "/sshwzv.f90"),
+    # Round 99 consumes the admitted Round-98 direct-W record and binds every
+    # statement to that record producer's exact compiled branch.
+    "GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/oce.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/oce.f90"),
+    "GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/mppini.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/mppini.f90"),
+    "GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/domqco.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/domqco.f90"),
+    "GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/domain.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/domain.f90"),
+    "GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/divhor.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/divhor.f90"),
+    "GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/sshwzv.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/sshwzv.f90"),
+    "GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/traadv.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/traadv.f90"),
+    "GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/stp2d.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/stp2d.f90"),
     "GYRE_OMIP_L2_P3_SM_R21W/BLD/ppsrc/nemo/traadv.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R21W/BLD/ppsrc/nemo/traadv.f90"),
     "round33_lock_zdf_matrix/namelist_cfg": (
@@ -413,6 +433,54 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 99: admitted direct-W layout and paired stage program ---
+    'GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/oce.f90:99-104': [
+        ('ALLOCATE( uu', 1), '&      rhd  (jpi,jpj,jpk)', 6],
+    'GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/sshwzv.f90:258-260': [
+        ('INTEGER  ::   ji, jj, jk', 3),
+        ('REAL(wp), DIMENSION(ntsi-(1):ntei+(1)', 1), 3],
+    'GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/mppini.f90:1501-1516': [
+        'Nis0 =   1+nn_hls', 'ntej = Nje0', 16],
+    'GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/sshwzv.f90:283-291': [
+        ('IF( lwp .AND. kt == nit000 .AND. PRESENT(k_ind) ) THEN', 1),
+        'WRITE(l98_unit) e3t_3d, r1_Dt', 9],
+    'GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/sshwzv.f90:305-317': [
+        ("ELSE                                            !==  Quasi-Eulerian vertical coordinate  ==!   ('key_qco')", 2),
+        'CLOSE(l98_unit)', 13],
+    'GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/stprk3_stg.f90:140-150': [
+        ('SELECT CASE( kstg )', 1),
+        'ssha(:,:) = ssh (:,:,Kaa)', 11],
+    'GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/stprk3_stg.f90:150-192': [
+        'ssha(:,:) = ssh (:,:,Kaa)',
+        'r3v(:,:,Kaa) = r2_3 * r3v(:,:,Kbb) + r1_3 * r3va(:,:)', 43],
+    'GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/stprk3_stg.f90:198-202': [
+        'CASE ( 2 )           !==  Stage 2',
+        ('r1_Dt = 1._wp / rDt', 2), 5],
+    'GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/stprk3_stg.f90:242-246': [
+        'CASE ( 3 )           !==  Stage 3',
+        ('r1_Dt = 1._wp / rDt', 3), 5],
+    'GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/domqco.f90:256-258': [
+        ('DO jj = ntsj-( nn_hls)', 4), ('END DO   ;   END DO', 4), 3],
+    'GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/domain.f90:198-212': [
+        'ht_0(:,:) = ht_0(:,:) + e3t_3d(:,:,jk) * tmask(:,:,jk)',
+        'r1_ht_0(:,:) = ssmask (:,:) / ( ht_0(:,:)', 15],
+    'GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/divhor.f90:132-139': [
+        'CASE ( np_transport )', ('END DO   ;   END DO   ;   END DO', 2), 8],
+    'GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/divhor.f90:152-154': [
+        ('DO jk =  1,  jpkm1', 4),
+        ('END DO   ;   END DO   ;   END DO', 4), 3],
+    'GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/traadv.f90:266-280': [
+        'IF( ll_Fw ) THEN', 'pFw(ji,jj,jk) = e1e2t(ji,jj) * ww', 15],
+    'GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/stp2d.f90:141-176': [
+        '!*  hydrostatic pressure gradient (HPG))  *!   always called FIRST',
+        "CALL r46_rhs( 'after_adv', uu, vv, Krhs )", 36],
+    'GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/stp2d.f90:202-213': [
+        '!*  vertical averaging  *!',
+        ('END DO   ;   END DO', 3), 12],
+    'GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/stprk3_stg.f90:668-674': [
+        ('CASE ( 1 , 2 )    !==  Stage 1 & 2', 1),
+        'vv(ji,jj,jk,Kaa) = ( vv(ji,jj,jk,Kbb) + rDt * vv(ji,jj,jk,Krhs) )',
+        7],
     # --- round 98: kt=1 stage-1 tracer-W compiled-order walk ---
     'GYRE_OMIP_L2_P3_SM_R94STGCLS/BLD/ppsrc/nemo/stprk3_stg.f90:331-339': [
         ('IF( ln_dynadv_vec ) THEN', 1), ('ENDIF', 8), 9],
