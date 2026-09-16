@@ -1,0 +1,225 @@
+"""Nature-figure scaling panels from JSONL receipts: strong + weak, CPU + GPU.
+
+Two figures (``--mode strong`` / ``--mode weak``), each 2 rows (atmosphere,
+ocean) x 3 grids (lat-lon / MPAS / cubed-sphere; tripole / MPAS / FESOM2).
+Every point is a measured receipt row (``steady_median_ms``); the loader keys
+rows by (component, grid, backend, precision, mode, resolution, n_devices) and
+keeps the FASTEST receipt per key, writing a provenance CSV (job id + file)
+next to the figure so any point can be traced.
+
+Encoding (fixed across panels): GPU = blue, CPU = orange; float32 = thick
+line, float64 = thin line; resolution = marker.  Ideal (dashed, grey) is
+anchored at each series' first measured point: t0*n0/n for strong, flat for
+weak.  Cube counts are 6*kt^2 and are ticked at their real values.
+
+    python scripts/plot/plot_nature_scaling.py --mode strong \
+        --receipts /work/bd1083/b309178/diffESM/scaling_receipts \
+        /scratch/b/b381103/legoesm_scaling/nature_* --out fig_scaling_strong.pdf
+"""
+from __future__ import annotations
+
+import argparse
+import csv
+import glob
+import json
+import os
+from collections import defaultdict
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+
+# (row, col) -> (component, grid, title, sub)
+PANELS = [
+    ("atmosphere", "latlon", "lat–lon", "4096×8192 L26 (strong) · 32 / 8 rows per device (weak)"),
+    ("atmosphere", "icosahedral", "MPAS icosahedral", "subdiv-9/10 L26 · 81k / 5k cells per device (weak)"),
+    ("atmosphere", "cubed-sphere", "cubed-sphere", "C768 L26 · 6·kt² tiles"),
+    ("ocean", "tripole", "tripole (ORCA fold)", "3072×4352 L75 (ORCA12-class) · 24 / 6 rows per device (weak)"),
+    ("ocean", "mpas", "MPAS Voronoi", "subdiv-9 L40 (2.6M cells) · 20k / 5k cells per device (weak)"),
+    ("ocean", "fesom", "FESOM2 (fesom_jax)", "forca20 2.1M nodes L70 · float64 only"),
+]
+BACKEND_COLOR = {"gpu": "#0072B2", "cpu": "#D55E00"}
+PREC_LW = {"float32": 1.7, "float64": 0.8}
+MARKERS = ["o", "s", "^", "D", "v", "P"]
+# canonical vertical levels per lane: receipts at other level counts are a
+# different problem and are dropped (e.g. the 32-level MPAS probe rows)
+NLEV = {("atmosphere", "latlon"): 26, ("atmosphere", "icosahedral"): 26,
+        ("atmosphere", "cubed-sphere"): 26, ("ocean", "tripole"): 75, ("ocean", "mpas"): 40}
+
+
+def _component(r):
+    c = r.get("component") or r.get("metadata", {}).get("component") or ""
+    if c in ("mpas_atm", "atmosphere") or r.get("metadata", {}).get("component") == "atmosphere":
+        return "atmosphere"
+    return "ocean"
+
+
+def _grid(r, comp):
+    g = r.get("grid_type") or r.get("metadata", {}).get("grid") or ""
+    if comp == "ocean" and g in ("icosahedral", "mpas"):
+        return "mpas"
+    if comp == "atmosphere" and g in ("icosahedral", "mpas"):
+        return "icosahedral"
+    return g
+
+
+def _backend(r):
+    b = (r.get("platform") or r.get("backend") or r.get("metadata", {}).get("backend") or "").lower()
+    return "gpu" if b in ("gpu", "cuda", "rocm") else "cpu"
+
+
+def _res(r, grid):
+    if grid in ("latlon", "tripole"):
+        return f"LL{r.get('n_lat')}"
+    if grid in ("icosahedral", "mpas"):
+        return f"s{r.get('subdivision', r.get('resolution'))}"
+    if grid == "cubed-sphere":
+        return f"C{r.get('resolution')}"
+    return str(r.get("resolution", ""))
+
+
+def load(dirs):
+    best = {}
+    for d in dirs:
+        for f in glob.glob(os.path.join(d, "**", "*.jsonl"), recursive=True):
+            for line in open(f):
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ms = r.get("steady_median_ms")
+                if ms is None or not r.get("valid", True) or r.get("finite_ok") is False:
+                    continue
+                if r.get("metadata", {}).get("virtual_cpu_devices"):
+                    continue
+                comp = _component(r)
+                grid = _grid(r, comp)
+                prec = r.get("precision") or r.get("metadata", {}).get("precision")
+                if prec not in PREC_LW:
+                    continue
+                nlev = r.get("nlev", r.get("n_levels"))
+                if (comp, grid) in NLEV and nlev != NLEV[(comp, grid)]:
+                    continue
+                key = (comp, grid, _backend(r), prec, r.get("mode", "strong"),
+                       _res(r, grid), int(r["n_devices"]))
+                job = r.get("slurm_job_id") or r.get("metadata", {}).get("slurm_job_id")
+                if key not in best or ms < best[key][0]:
+                    best[key] = (float(ms), job, f)
+    return best
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--mode", choices=["strong", "weak"], default="strong")
+    ap.add_argument("--receipts", nargs="+", required=True)
+    ap.add_argument("--out", default="fig_scaling.pdf")
+    ap.add_argument("--png", default=None)
+    ap.add_argument("--max-res", type=int, default=2,
+                    help="resolutions per panel (highest first)")
+    args = ap.parse_args()
+
+    best = load(args.receipts)
+    series = defaultdict(list)     # (comp,grid,backend,prec,res) -> [(nd, ms, job, file)]
+    for (comp, grid, be, prec, mode, res, nd), (ms, job, f) in best.items():
+        if mode == args.mode:
+            series[(comp, grid, be, prec, res)].append((nd, ms, job, f))
+
+    plt.rcParams.update({
+        "font.family": "sans-serif", "font.size": 7, "axes.labelsize": 7.5,
+        "axes.titlesize": 8, "xtick.labelsize": 6.5, "ytick.labelsize": 6.5,
+        "legend.fontsize": 5.8, "axes.linewidth": 0.6, "lines.markersize": 3.2,
+        "figure.dpi": 300, "savefig.dpi": 300, "pdf.fonttype": 42, "ps.fonttype": 42,
+    })
+    fig, axs = plt.subplots(2, 3, figsize=(180 / 25.4, 105 / 25.4))
+    prov = []
+    summary = []
+    for i, (comp, grid, title, sub) in enumerate(PANELS):
+        ax = axs.ravel()[i]
+        keys = [k for k in series if k[0] == comp and k[1] == grid]
+        # highest resolutions first, capped per panel
+        ress = sorted({k[4] for k in keys},
+                      key=lambda s: -int("".join(ch for ch in s if ch.isdigit()) or 0))[:args.max_res]
+        allx = set()
+        for k in sorted(keys, key=lambda k: (k[2], k[3], k[4])):
+            _, _, be, prec, res = k
+            if res not in ress:
+                continue
+            pts = sorted(series[k])
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            allx |= set(xs)
+            m = MARKERS[ress.index(res) % len(MARKERS)]
+            c = BACKEND_COLOR[be]
+            ax.plot(xs, ys, m + "-", color=c, lw=PREC_LW[prec], markerfacecolor="white",
+                    markeredgewidth=0.8, clip_on=False, zorder=3,
+                    label=f"{be.upper()} {prec[:1]}{prec[-2:]} {res}")
+            n0, t0 = xs[0], ys[0]
+            ideal = [t0 * n0 / n for n in xs] if args.mode == "strong" else [t0] * len(xs)
+            ax.plot(xs, ideal, "--", color=c, lw=0.6, alpha=0.5, zorder=2)
+            eff = (t0 * n0 / (xs[-1] * ys[-1]) if args.mode == "strong" else t0 / ys[-1])
+            summary.append((comp, grid, be, prec, res, xs[0], xs[-1], ys[0], ys[-1], eff))
+            for nd, ms, job, f in pts:
+                prov.append((comp, grid, be, prec, res, args.mode, nd, ms, job, f))
+        ax.set_xscale("log", base=2)
+        ax.set_yscale("log")
+        if allx:
+            ticks = sorted(allx)
+            if len(ticks) > 8:
+                ticks = [x for j, x in enumerate(ticks) if j % 2 == 0 or x == ticks[-1]]
+            ax.set_xticks(ticks)
+            ax.set_xticklabels([str(x) for x in ticks])
+        ax.minorticks_off()
+        ax.set_title(title, pad=8, loc="left", fontweight="bold")
+        ax.text(0, 1.01, sub, transform=ax.transAxes, fontsize=5.2, color="#555555", va="bottom")
+        ax.tick_params(direction="out", length=2.5)
+        for s in ("top", "right"):
+            ax.spines[s].set_visible(False)
+        if keys:
+            ax.legend(frameon=False, loc="lower left" if args.mode == "strong" else "upper left",
+                      handlelength=1.6, borderpad=0.2, labelspacing=0.25)
+        else:
+            ax.text(0.5, 0.5, "no receipts yet", transform=ax.transAxes, ha="center",
+                    color="#999999", fontsize=7)
+        if i % 3 == 0:
+            ax.set_ylabel("time per step (ms)")
+        if i >= 3:
+            ax.set_xlabel("devices (GPUs or CPU ranks)")
+        ax.text(-0.22, 1.18, chr(ord("a") + i), transform=ax.transAxes, fontsize=9,
+                fontweight="bold", va="top")
+
+    handles = [
+        Line2D([], [], color=BACKEND_COLOR["gpu"], lw=1.7, label="A100 GPU (NCCL)"),
+        Line2D([], [], color=BACKEND_COLOR["cpu"], lw=1.7, label="Milan CPU (gloo)"),
+        Line2D([], [], color="#444444", lw=1.7, label="float32"),
+        Line2D([], [], color="#444444", lw=0.8, label="float64"),
+        Line2D([], [], color="#666666", ls="--", lw=0.6, label="ideal (anchored at first point)"),
+    ]
+    fig.legend(handles=handles, frameon=False, loc="lower center", ncol=5,
+               bbox_to_anchor=(0.5, -0.01), handlelength=1.8)
+    for row, name in ((0, "ATMOSPHERE"), (1, "OCEAN")):
+        fig.text(0.008, 0.93 if row == 0 else 0.46, name, fontsize=7.5, fontweight="bold",
+                 rotation=90, va="top", ha="left")
+    fig.suptitle(f"{args.mode.capitalize()} scaling — Levante (4×A100-80/node, 2×AMD Milan 7763/node)",
+                 fontsize=7.5, y=0.995)
+    fig.subplots_adjust(left=0.08, right=0.99, top=0.88, bottom=0.14, wspace=0.42, hspace=0.62)
+    fig.savefig(args.out, bbox_inches="tight")
+    if args.png:
+        fig.savefig(args.png, bbox_inches="tight")
+
+    base = os.path.splitext(args.out)[0]
+    with open(base + "_provenance.csv", "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["component", "grid", "backend", "precision", "resolution", "mode",
+                    "n_devices", "ms_per_step", "slurm_job_id", "receipt"])
+        w.writerows(sorted(prov))
+    print(f"{args.out}  ({len(prov)} points)")
+    print("component grid backend prec res  n0->n1   ms0->ms1   efficiency")
+    for s in sorted(summary):
+        print(f"{s[0][:3]} {s[1]:12s} {s[2]} {s[3]} {s[4]:7s} {s[5]:4d}->{s[6]:<4d} "
+              f"{s[7]:9.2f}->{s[8]:<9.2f} {s[9]:5.2f}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
