@@ -58,7 +58,41 @@ if missing:
     print("FATAL: GATEWAY grid_T lacks", missing); raise SystemExit(1)
 PY
 
+# COMBINED FIGURES (default): tripole and MPAS drawn in the SAME panels --
+# model1 | model2 | NEMO | delta1 | delta2 for T/S depth snapshots and the
+# zonal sections, both models in one SSH figure, and the three-way scorer's
+# *_maps3.png / zonal_3way.png for SST/SSS/MLD (it already draws two models
+# plus NEMO on one shared cell set, with FESOM2 passed as --also-mask so the
+# cell set matches the three-grid scorecard).
+if [ "${COMBINE:-1}" = 1 ]; then
+  TRP=$R/trp_orca1faithtint_d30/snapshot_final.npz
+  MPS=$R/mpas_base2_d30/snapshot_day0030.npz
+  FES=$R/fesom_base2_d30/snapshot_day0030.npz
+  C=$OUT/tripole_MPAS; mkdir -p "$C"
+  echo; echo "########## COMBINED tripole + MPAS ##########"
+  ls -l --time-style=+%Y-%m-%d_%H:%M "$TRP" "$MPS"
+
+  $PY -u scripts/validate/diag_omip_nemo_battery.py \
+    --legoesm-snapshot "$TRP" --grid-label tripole \
+    --legoesm-snapshot-2 "$MPS" --grid-label-2 MPAS \
+    --nemo-gridt "$GW" --nemo-time-idx "$REC" --output-dir "$C" 2>&1 \
+    | grep -vE "Warning|warn" | tail -20
+  echo "  combined battery rc=$?"
+
+  $PY -u scripts/tmp/_diag_ssh_rec.py "$TRP" "$GW" "$REC" tripole "$C/ssh.png" \
+    rec "$MPS" MPAS 2>&1 | tail -4
+  echo "  combined ssh rc=$?"
+
+  $PY -u scripts/validate/ocean_fidelity/compare_three_way_nemo.py \
+    --tripole "$TRP" --label-tripole tripole \
+    --mpas "$MPS" --label-mpas MPAS --also-mask "$FES" --expect-day "$DAY" \
+    --nemo-gridt "$GW" --nemo-time-idx "$REC" --res-deg 1.0 \
+    --out-dir "$C" 2>&1 | grep -vE "Warning|warn" | tail -12
+  echo "  three-way maps rc=$?"
+fi
+
 for a in "${ARMS[@]}"; do
+  [ "${PERGRID:-0}" = 1 ] || break
   LAB=${a%%:*}; rest=${a#*:}; DIR=${rest%%:*}; SNAPNAME=${rest#*:}
   SNAP=$R/$DIR/$SNAPNAME
   [ -r "$SNAP" ] || { echo "FATAL: missing $SNAP"; exit 1; }
