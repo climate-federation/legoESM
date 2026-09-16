@@ -136,3 +136,31 @@ ratio cell refutes that prediction and triggers the same-call operand
 acquisition. If it is BIT, the only candidate remains the same-stage W
 materialization plus Round 97's full-RHS member; it must make given-entry
 stage-1 U, V, and W BIT before the already-frozen Rule-12 and 30-day tests.
+
+## Pre-measurement addendum: the stage-local W clock
+
+Frozen after candidate `cdddd17dce3a` was measured, and before changing or
+measuring the stage clock. That first candidate is **REFUTED** and remains in
+the receipt: it made given-entry kt=1 stage-1 U/V BIT, but W stayed unequal in
+18,000 wet cells at `1.318522148478393e-7 m s-1`; zFw, T, and S consequently
+remained DEBT. Its direct operand replay nevertheless made the compiled HYB
+ratio, every W recurrence boundary, and final W BIT. The shared call therefore
+still differed from the proven direct program.
+
+The first differing shared-call statement is now the clock. The card's full
+step is 14,400 s, while the admitted direct record carries `rDt = 4,800 s`.
+The compiled stage program sets `rDt = r1_3*rn_Dt` and then
+`r1_Dt = 1/rDt` before stage 1
+(`GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/stprk3_stg.f90:140-150`). The
+vector-invariant tracer path subsequently calls the same transport-form W
+routine (`.../traadv.f90:266-280`), whose compiled recurrence consumes that
+module `r1_Dt` (`.../sshwzv.f90:305-311`). legoESM's public path instead passes
+the 14,400-s full-step clock unless a private diagnostic arm is selected.
+
+The newly frozen candidate removes that model-only choice: the one shared
+stage program always passes `(rn_Dt/3, rn_Dt/2, rn_Dt)` at stages 1--3, exactly
+where the compiled program assigns those values. Prediction: given-NEMO-entry
+kt=1 stage-1 W and zFw become BIT; the already-BIT U/V remain BIT; T/S become
+BIT because they consume that exact transport. Any unequal required stage-1
+output refutes the candidate. Only if the complete stage row closes may the
+unchanged 954-row Rule-12 and days 1--30 falsifiers run.
