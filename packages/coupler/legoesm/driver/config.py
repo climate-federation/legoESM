@@ -1640,10 +1640,10 @@ class ExperimentConfig(NamedTuple):
                 if g.nlev < 28:
                     errors.append(
                         f"grid.sigma_layout 'l30_trop_logstrat' needs nlev >= 28 (got {g.nlev})")
-                if not (0.0 < g.sigma_top < 0.109):
+                if not (0.0 < g.sigma_top <= 0.05):
                     errors.append(
-                        "grid.sigma_layout 'l30_trop_logstrat' needs 0 < sigma_top < 0.109 "
-                        f"(the L30 join; got {g.sigma_top})")
+                        "grid.sigma_layout 'l30_trop_logstrat' needs 0 < sigma_top <= 0.05 "
+                        f"(grids.vertical.L30_LOGSTRAT_SIGMA_TOP_MAX; got {g.sigma_top})")
                 if g.tropopause_refine != 1.0:
                     errors.append(
                         "grid.sigma_layout 'l30_trop_logstrat' keeps the L30 troposphere and "

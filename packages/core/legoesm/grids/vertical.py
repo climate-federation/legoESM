@@ -210,6 +210,12 @@ def warn_if_unaligned_levels(n_levels: int, dtype=None, *, where: str) -> None:
 
 
 SIGMA_LAYOUTS = ("standard", "l30_trop_logstrat")
+# The L30 grid's fourth interface (0.01 + 3 * 0.033) is where the log-spaced
+# stratosphere joins the retained troposphere; a lid above 0.05 would leave
+# the new layers too thin to resolve in float32 (interfaces collapse near the
+# join), so the layout accepts sigma_top in (0, 0.05].
+L30_LOGSTRAT_JOIN = 0.109
+L30_LOGSTRAT_SIGMA_TOP_MAX = 0.05
 
 
 def l30_trop_logstrat_sigma_half(n_levels: int, sigma_top: float, dtype) -> jnp.ndarray:
@@ -226,10 +232,14 @@ def l30_trop_logstrat_sigma_half(n_levels: int, sigma_top: float, dtype) -> jnp.
     if n_levels < 28:
         raise ValueError(
             f"n_levels must be >= 28 for the l30_trop_logstrat layout, got {n_levels}")
-    join_f = float(jnp.linspace(0.01, 1.0, 31)[3])
-    if not 0.0 < sigma_top < join_f:
+    # Validation on Python floats (no traced values): the join is the fourth
+    # L30 interface, 0.01 + 3*0.033; the top must leave every new layer a
+    # thickness resolvable in the working dtype, hence the margin.
+    join_f = L30_LOGSTRAT_JOIN
+    if not 0.0 < sigma_top <= L30_LOGSTRAT_SIGMA_TOP_MAX:
         raise ValueError(
-            f"sigma_top must satisfy 0 < sigma_top < {join_f:.4g}, got {sigma_top}")
+            "sigma_top must satisfy 0 < sigma_top <= "
+            f"{L30_LOGSTRAT_SIGMA_TOP_MAX} (below the L30 join {join_f:.4g}), got {sigma_top}")
     old_half = jnp.linspace(0.01, 1.0, 31, dtype=dtype)
     join = old_half[3]
     n = n_levels - 27

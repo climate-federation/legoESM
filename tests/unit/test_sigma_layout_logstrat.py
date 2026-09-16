@@ -23,11 +23,29 @@ from run_amip import build_arg_parser, build_config_from_args  # noqa: E402
 EXPECTED_DP_HPA = [1.119, 1.744, 2.720, 4.241, 6.613, 10.312, 16.080, 25.073, 39.097]
 
 
-def test_default_layout_is_byte_identical():
-    a = create_sigma_coordinate(30, dtype=jnp.float64).sigma_half
-    b = create_sigma_coordinate(30, layout="standard", dtype=jnp.float64).sigma_half
-    assert np.array_equal(np.asarray(a), np.asarray(b))
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+def test_default_layout_is_the_legacy_linspace(dtype):
+    legacy = jnp.linspace(0.01, 1.0, 31, dtype=dtype)          # the pre-layout construction
+    for kw in ({}, {"layout": "standard"}):
+        sh = create_sigma_coordinate(30, dtype=dtype, **kw).sigma_half
+        assert sh.dtype == dtype and np.array_equal(np.asarray(sh), np.asarray(legacy))
     assert SIGMA_LAYOUTS == ("standard", "l30_trop_logstrat")
+
+
+@pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+def test_l36_retained_interfaces_bit_identical_in_each_dtype(dtype):
+    c = create_sigma_coordinate(36, sigma_top=0.002, layout="l30_trop_logstrat", dtype=dtype)
+    ref = np.asarray(jnp.linspace(0.01, 1.0, 31, dtype=dtype))[3:]
+    assert c.sigma_half.dtype == dtype
+    assert np.array_equal(np.asarray(c.sigma_half)[9:], ref)
+    assert np.all(np.diff(np.asarray(c.sigma_half)) > 0)
+    assert bool(jnp.all(jnp.isfinite(c.alpha)))
+
+
+def test_layout_builds_under_jit():
+    f = jax.jit(lambda: create_sigma_coordinate(36, sigma_top=0.002, layout="l30_trop_logstrat",
+                                                dtype=jnp.float64).sigma_half)
+    assert np.asarray(f()).shape == (37,)
 
 
 def test_l36_keeps_the_l30_troposphere_and_logs_the_stratosphere():
@@ -46,6 +64,7 @@ def test_l36_keeps_the_l30_troposphere_and_logs_the_stratosphere():
 @pytest.mark.parametrize("kw", [dict(layout="bogus"),
                                 dict(n_levels=27, layout="l30_trop_logstrat"),
                                 dict(sigma_top=0.2, layout="l30_trop_logstrat"),
+                                dict(sigma_top=0.108999, layout="l30_trop_logstrat"),
                                 dict(layout="l30_trop_logstrat", tropopause_refine=3.0)])
 def test_invalid_layout_requests_raise(kw):
     n = kw.pop("n_levels", 36)
@@ -58,7 +77,8 @@ def test_config_gates_and_wiring():
     assert GridConfig().sigma_layout == "standard"
     ExperimentConfig(grid=GridConfig(vertical_coord="sigma", nlev=36, sigma_top=0.002,
                                      sigma_layout="l30_trop_logstrat")).validate_strict()
-    for bad in (dict(nlev=27), dict(nlev=36, tropopause_refine=3.0), dict(nlev=36, sigma_top=0.2)):
+    for bad in (dict(nlev=27), dict(nlev=36, tropopause_refine=3.0), dict(nlev=36, sigma_top=0.2),
+                dict(nlev=36, sigma_top=0.108)):
         with pytest.raises(ValueError, match="sigma_layout"):
             ExperimentConfig(grid=GridConfig(vertical_coord="sigma", sigma_layout="l30_trop_logstrat",
                                              **{"sigma_top": 0.002, **bad})).validate_strict()
