@@ -377,3 +377,29 @@ pair. Gates (codex): 5-day P(RH>0.98) −25 % rel., 500-700 hPa vapour bias
 pts, |rsut|,|rlut| ≤ 15. Refutation: RH falls by warming, or vapour becomes
 condensate that re-evaporates, or the excess persists with credible
 sub-saturated clouds.
+
+## Adopted deck scored against the references (wv_ctl30b, April = days 90-110)
+| region        | prw bias old → new | rsut old → new | rlut old → new | clt old → new |
+|---------------|-------------------:|---------------:|---------------:|--------------:|
+| ITCZ 10S-10N  | +14.1 → −0.7  | +32.6 → −12.6 | −5.8 → +25.7 | +20.9 → −17.2 |
+| trades 10-30N | +12.2 → +4.1  | +24.4 → +12.0 | −10.5 → +5.9 | +19.6 → +6.7 |
+| trades 10-30S | +13.4 → +4.6  | +22.5 → −0.4  | −14.2 → +5.1 | +26.7 → +6.2 |
+Day-110 tropical RH at 600 hPa: old deck 0.858 (P(RH>0.9) 66 %) → adopted
+0.524 (8 %) vs ERA5 0.446; 700 hPa 0.466 vs 0.495 (now slightly dry).
+Vapour ratio to ERA5 (ITCZ): 850 0.76, 700 0.89, 600 1.18, 500 1.61, 400
+2.49, 300 3.13; 1000 hPa 1.12 (trades 1.18-1.23). Temperature bias grew with
+the drying: +3 K at 850, +4-5 at 500, +6.5-7.5 K at 300-250 (the UTLS
+session's item; at fixed RH the upper-troposphere vapour excess is largely
+that warm bias).
+Refined-grid run (wv_bl30) vs references: ITCZ prw −1.6, 600 hPa RH 0.425
+(slightly dry), but trades rsut +31 / clt +15 — the resolved boundary layer
+over-produces trade cloud; not adopted.
+Offline capacity of the uniform-PDF condensation on the adopted deck's
+day-110 state: the 550-650 hPa cells above rh_crit are 8-20 %; one
+adjustment moves ~0.025 g/kg there. The remaining mid-level excess sits
+BELOW the condensation threshold (RH 0.5-0.85), where partial condensation
+cannot act; H2's value is now cover/condensate consistency and the 500 hPa
+band, not the bulk vapour bias.
+Remaining moisture biases on the adopted deck: upper troposphere (≥ 500 hPa,
+riding the warm bias), trades prw +4, surface layer +12-23 % q (RH +5 pts),
+evaporation ~0.87 of ERA5.
