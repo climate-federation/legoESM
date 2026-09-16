@@ -258,3 +258,28 @@ def test_gpu_peak_ceiling_is_refused_outside_rounding_and_wired_in_the_launcher(
     cpu = (root / "tiled_m6_model_gate.sbatch").read_text()
     assert "--gpu-max-rel-peak" in gpu and 'GPU_MAX_REL_PEAK:-1e-13' in gpu
     assert "--gpu-max-rel-peak" not in cpu
+
+
+def test_timed_steps_are_checked_for_divergence_and_agree_across_ranks():
+    """codex 2026-09-16: the scored steps refuse a non-finite state, the
+    timed ones did not -- a deck that blew up after the last scored step
+    still printed a p50. The check must also be agreed across ranks before
+    any rank leaves the loop, or they desynchronise on the next collective."""
+    import ast
+    import inspect
+    src = inspect.getsource(gate)
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "main")
+    # the WINDOW arm's timed loop: `for it in range(args.timing)`, not the
+    # flat-reference loop `range(args.steps + args.timing)`
+    loops = [n for n in ast.walk(fn)
+             if isinstance(n, ast.For)
+             and ast.unparse(n.iter).strip() == "range(args.timing)"]
+    assert loops, "no window timed-step loop found"
+    body = ast.unparse(loops[0])
+    assert "isfinite" in body, "timed steps are not checked for divergence"
+    assert "process_allgather" in body, "the check is not agreed across ranks"
+    assert "break" in body and "timing_ok" in body
+    # and the report is skipped when it was refused
+    assert "if timing_ok:" in src

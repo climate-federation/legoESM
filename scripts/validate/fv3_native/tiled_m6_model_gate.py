@@ -584,12 +584,41 @@ def main(argv=None):
                   "every rank -- a rank-count row on a wrong exchange is not "
                   "reported")
         else:
+            timing_ok = True
             for it in range(args.timing):
                 t0 = time.perf_counter()
                 win = win_model.step(win, args.dt)
                 jax.block_until_ready(win)
                 times.append(time.perf_counter() - t0)
-            if args.profile:
+                # A TIMED STEP IS STILL A STEP (codex 2026-09-16): the
+                # scored steps refuse a non-finite state, the timed ones did
+                # not, so a deck that blew up AFTER the last scored step
+                # still printed a p50 -- timing a diverged model. Every rank
+                # must reach the SAME verdict before any of them leaves the
+                # loop, or the ranks desynchronise on the next collective.
+                bad = int(sum(
+                    int((~np.isfinite(np.asarray(sh.data))).sum())
+                    for _p, v in leaves(win)
+                    if getattr(v, "dtype", None) is not None
+                    and v.dtype.kind == "f"
+                    for sh in getattr(v, "addressable_shards", [])))
+                ns_t = np.asarray(win_model.last_nsplt)
+                local_bad = int(bad > 0 or (ns_t < 1).any())
+                if jax.process_count() > 1:
+                    import jax.numpy as jnp
+                    from jax.experimental import multihost_utils as mhu
+                    local_bad = int(np.asarray(mhu.process_allgather(
+                        jnp.asarray(local_bad, dtype=jnp.int32))).max())
+                if local_bad:
+                    print(f"[m6] TIMING REFUSED: timed step {it + 1} left a "
+                          f"non-finite state on some rank (this rank: {bad} "
+                          f"values, nsplt {ns_t.tolist()}) -- the deck is not "
+                          f"stable at dt={args.dt}, so the timing would be of "
+                          f"a diverged model")
+                    rc = 1
+                    timing_ok = False
+                    break
+            if args.profile and timing_ok:
                 # 2 EXTRA steps after the timed ones (codex 2026-09-05:
                 # profiled steps must not enter the timing distribution)
                 if rank0:
@@ -602,11 +631,12 @@ def main(argv=None):
                     jax.profiler.stop_trace()
                     print(f"[m6] profile trace (2 extra steps after the "
                           f"timed ones, rank 0) -> {args.profile}")
-            _report_timing(args, times, jax,
-                           f"windows kt={args.kt} pad={args.pad}"
-                           + (" DIAGNOSTIC no-per-firing-refresh (NOT a "
-                              "ladder row)" if diag_arm
-                              else ""))
+            if timing_ok:
+                _report_timing(args, times, jax,
+                               f"windows kt={args.kt} pad={args.pad}"
+                               + (" DIAGNOSTIC no-per-firing-refresh (NOT a "
+                                  "ladder row)" if diag_arm
+                                  else ""))
     if rc == 0 and args.gpu_max_rel_peak is not None:
         verdict = f"WITHIN {args.gpu_max_rel_peak:g} OF PEAK (GPU ceiling)"
     else:
