@@ -195,6 +195,41 @@ def _owned2(value) -> np.ndarray:
     return np.asarray(value)[2:-2, 2:-2]
 
 
+def read_stage1_w_walk_record(path: Path) -> dict:
+    """Read the direct kt=1 stage-1 transport-W operand acquisition."""
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        header = struct.unpack("=9i", handle.read(36))
+        values = np.fromfile(handle, dtype=np.float64)
+    version, kt, kbb, kmm, kaa, nx, ny, nz, bits = header
+    require(magic == "NEMO_L2_R98W_1", f"{path}: bad magic {magic!r}")
+    require((version, kt, kbb, kmm, kaa) == (1, 1, 1, 1, 3),
+            f"{path}: wrong clock/slots {header}")
+    require((nx, ny, nz, bits) == (*DIMS, 64),
+            f"{path}: wrong dimensions/dtype {header}")
+    n2, n3 = nx * ny, nx * ny * nz
+    require(values.size == 4 * n3 + 2 * n2 + 1,
+            f"{path}: wrong payload size {values.size}")
+    offset = 0
+    result = {}
+    for name in ("hdiv", "e3div"):
+        result[name] = _xyz(values[offset:offset + n3], nx, ny, nz)
+        offset += n3
+    for name in ("r3_kaa", "r3_kbb"):
+        result[name] = _xy(values[offset:offset + n2], nx, ny)
+        offset += n2
+    result["e3t_0"] = _xyz(values[offset:offset + n3], nx, ny, nz)
+    offset += n3
+    result["r1_dt"] = float(values[offset])
+    offset += 1
+    result["ww"] = _xyz(values[offset:offset + n3], nx, ny, nz)
+    result["header"] = {
+        "version": version, "kt": kt, "Kbb": kbb, "Kmm": kmm,
+        "Kaa": kaa, "jpi": nx, "jpj": ny, "jpk": nz, "bits": bits,
+    }
+    return result
+
+
 def read_stage(path: Path, *, plant: str | None = None) -> dict:
     """Fail-closed named/ranked reader; duplicate, extra and short fields fail."""
     with path.open("rb") as f:

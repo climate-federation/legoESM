@@ -275,6 +275,14 @@ FILES = {
     "GYRE_OMIP_L2_P3_SM_R94STGCLS/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R94STGCLS/BLD/ppsrc/nemo"
         "/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R94STGCLS/BLD/ppsrc/nemo/divhor.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R94STGCLS/BLD/ppsrc/nemo"
+        "/divhor.f90"),
+    "GYRE_OMIP_L2_P3_SM_R94STGCLS/BLD/ppsrc/nemo/sshwzv.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R94STGCLS/BLD/ppsrc/nemo"
+        "/sshwzv.f90"),
+    "GYRE_OMIP_L2_P3_SM_R21W/BLD/ppsrc/nemo/traadv.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R21W/BLD/ppsrc/nemo/traadv.f90"),
     "round33_lock_zdf_matrix/namelist_cfg": (
         Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/"
              "round33_lock_zdf_matrix/namelist_cfg")),
@@ -405,6 +413,19 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 98: kt=1 stage-1 tracer-W compiled-order walk ---
+    'GYRE_OMIP_L2_P3_SM_R94STGCLS/BLD/ppsrc/nemo/stprk3_stg.f90:331-339': [
+        ('IF( ln_dynadv_vec ) THEN', 1), ('ENDIF', 8), 9],
+    'GYRE_OMIP_L2_P3_SM_R94STGCLS/BLD/ppsrc/nemo/divhor.f90:132-139': [
+        'CASE ( np_transport )', ('END DO   ;   END DO   ;   END DO', 2), 8],
+    'GYRE_OMIP_L2_P3_SM_R94STGCLS/BLD/ppsrc/nemo/divhor.f90:152-154': [
+        ('DO jk =  1,  jpkm1', 4),
+        ('END DO   ;   END DO   ;   END DO', 4), 3],
+    'GYRE_OMIP_L2_P3_SM_R94STGCLS/BLD/ppsrc/nemo/sshwzv.f90:293-300': [
+        ("ELSE                                            !==  Quasi-Eulerian vertical coordinate  ==!   ('key_qco')", 2),
+        ('ENDIF', 11), 8],
+    'GYRE_OMIP_L2_P3_SM_R21W/BLD/ppsrc/nemo/traadv.f90:267-295': [
+        'IF( ll_Fw ) THEN', ('ENDIF', 7), 29],
     # --- round 92: acquired correction record and live operand split ---
     'GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/stprk3_stg.f90:668-687': [
         ('SELECT CASE( kstg )', 3),

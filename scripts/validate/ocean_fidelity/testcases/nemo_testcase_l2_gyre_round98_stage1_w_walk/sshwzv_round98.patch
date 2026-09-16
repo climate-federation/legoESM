@@ -1,0 +1,40 @@
+--- sshwzv.F90
++++ sshwzv.F90
+@@ -296,5 +296,6 @@
+       !
+       INTEGER  ::   ji, jj, jk   ! dummy loop indices
++      INTEGER  ::   l98_unit     ! write-only stage-1 W operand record
+       REAL(wp), DIMENSION(T2D(1),jpk) ::   ze3div
+       !!----------------------------------------------------------------------
+       !
+@@ -318,6 +319,17 @@
+       ELSE
+          CALL div_hor( kt, Kbb, Kmm, pu, pv, ze3div, k_ind )
+       ENDIF
++      IF( lwp .AND. kt == nit000 .AND. PRESENT(k_ind) ) THEN
++         IF( k_ind == np_transport .AND. Kbb == 1 .AND. Kmm == 1 .AND. Kaa == 3 ) THEN
++            OPEN( NEWUNIT=l98_unit, FILE='oracle_stage1_w_walk_kt00000001.bin', ACCESS='STREAM', &
++               &  FORM='UNFORMATTED', STATUS='REPLACE', ACTION='WRITE' )
++            WRITE(l98_unit) 'NEMO_L2_R98W_1  '
++            WRITE(l98_unit) 1, kt, Kbb, Kmm, Kaa, jpi, jpj, jpk, STORAGE_SIZE(1._wp)
++            WRITE(l98_unit) hdiv, ze3div
++            WRITE(l98_unit) r3t(:,:,Kaa), r3t(:,:,Kbb)
++            WRITE(l98_unit) e3t_3d, r1_Dt
++         ENDIF
++      ENDIF
+       !                                           !------------------------------!
+       !                                           !     Now Vertical Velocity    !
+       !                                           !------------------------------!
+@@ -338,6 +350,12 @@
+          END_3D
+       ENDIF
+ 
++      IF( lwp .AND. kt == nit000 .AND. PRESENT(k_ind) ) THEN
++         IF( k_ind == np_transport .AND. Kbb == 1 .AND. Kmm == 1 .AND. Kaa == 3 ) THEN
++            WRITE(l98_unit) pww
++            CLOSE(l98_unit)
++         ENDIF
++      ENDIF
+       IF( ln_bdy ) THEN
+          DO_3D( 1, 1, 1, 1, 1, jpkm1 )
+             pww(ji,jj,jk) = pww(ji,jj,jk) * bdytmask(ji,jj)
