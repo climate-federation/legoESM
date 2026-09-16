@@ -169,51 +169,6 @@ def _reindex_vmr_fields(
   return {gas_optics_lib.idx_gases[k]: v for k, v in vmr_fields.items()}
 
 
-def _replace_top_flux(f: Array) -> Array:
-  """Modify problematic value for the fluxes at the top boundary (top halo).
-
-  Use quadratic polynomials to evaluate the flux at the top boundary making use
-  of the points just below the top boundary.
-
-  The quadratic Lagrange stencil ``3*f[-2] - 3*f[-3] + f[-4]`` has
-  coefficient-sum 1, so a flat/linear near-TOA flux profile is reproduced
-  exactly.  But its gain on the near-TOA flux CURVATURE (second difference) is
-  unbounded and unsigned, so a drifted coupled state that develops a sharp
-  near-TOA reflectance/emission gradient (cloud) makes the raw extrapolation
-  OVERSHOOT — producing super-physical TOA shortwave (the ``[:, 0]`` face is
-  read straight into ``rsdt``/``rsut``) or driving the upwelling longwave below
-  zero (negative OLR).  This was BUG B: a 30-day rrtmgp coupled run inflated
-  ``rsdt`` ~2x and turned ``rlut`` negative at day ~15-20 (cells to 1121 W/m2 /
-  -52 W/m2), confirmed by replaying the dumped day-20 state through this
-  function (range-limit -> sw_down max 449, lw_up min +176; raw -> 1121 / -50).
-
-  Fix: RANGE-LIMIT the extrapolated top-halo face to the local range of the
-  three interior faces the stencil reads.  When the quadratic lands inside
-  ``[lo, hi]`` -- the low-curvature, near-flat near-TOA regime that radiative
-  flux profiles physically occupy (the flux asymptotes to a constant toward the
-  model top) -- this is a no-op (bit-identical to the historical behaviour on
-  the cases that were never pathological); only a strongly curved/drifted
-  profile whose quadratic overshoots the interior range is capped, at the
-  nearest interior flux.  Applied by the caller to the non-negative
-  ``flux_up``/``flux_down`` components only (so ``lo >= 0`` automatically); the
-  caller then RECOMPUTES ``flux_net = flux_up - flux_down`` at the top face --
-  this range-limit is nonlinear, so clipping ``flux_net`` independently would
-  break the ``net = up - down`` identity that the raw linear quadratic kept.
-
-  Args:
-    f: The array to fix the top boundary of.
-
-  Returns:
-    The array with the top boundary value fixed.
-  """
-  quad = 3 * f[:, :, -2] - 3 * f[:, :, -3] + f[:, :, -4]
-  lo = jnp.minimum(jnp.minimum(f[:, :, -2], f[:, :, -3]), f[:, :, -4])
-  hi = jnp.maximum(jnp.maximum(f[:, :, -2], f[:, :, -3]), f[:, :, -4])
-  top_bdy_f = jnp.clip(quad, lo, hi)
-  f = f.at[:, :, -1].set(top_bdy_f)
-  return f
-
-
 def _compute_optimal_lw_secant(
     optical_depth: Array,
     band_idx: Array,
@@ -578,17 +533,10 @@ def solve_lw(
       step_fn, optics_lib.n_gpt_lw, init_val, gpoint_batch_size,
       checkpoint=gpoint_checkpoint,
   )
-  # There are problematic values for the fluxes at the top boundary (the top
-  # halo), so range-limit the quadratic top-flux extrapolation (BUG B).  The
-  # raw quadratic is LINEAR in the flux so flux_net = flux_up - flux_down held
-  # at the top face automatically; the range-limit is nonlinear, so clip only
-  # the physical up/down components and RECOMPUTE flux_net = up - down at the
-  # top face to keep the TOA energy budget consistent.
-  fluxes['flux_up'] = _replace_top_flux(fluxes['flux_up'])
-  fluxes['flux_down'] = _replace_top_flux(fluxes['flux_down'])
-  fluxes['flux_net'] = fluxes['flux_net'].at[:, :, -1].set(
-      fluxes['flux_up'][:, :, -1] - fluxes['flux_down'][:, :, -1])
-
+  # Index -1 (the top halo position) carries the PHYSICAL boundary fluxes the
+  # recurrence placed there (down = the TOA incident init, up = down*albedo +
+  # emission at the same face); the top model layer is heated by their
+  # divergence against index -2.  They must not be overwritten.
   return fluxes
 
 
@@ -965,15 +913,8 @@ def solve_sw(
         step_fn, optics_lib.n_gpt_sw, fluxes_0, gpoint_batch_size,
         checkpoint=gpoint_checkpoint,
     )
-    # There are problematic values for the fluxes at the top boundary (the top
-    # halo), so range-limit the quadratic top-flux extrapolation (BUG B).  Clip
-    # only the physical up/down components and RECOMPUTE flux_net = up - down at
-    # the top face (the nonlinear range-limit would otherwise break the
-    # flux_net = flux_up - flux_down identity the raw linear quadratic kept).
-    fluxes['flux_up'] = _replace_top_flux(fluxes['flux_up'])
-    fluxes['flux_down'] = _replace_top_flux(fluxes['flux_down'])
-    fluxes['flux_net'] = fluxes['flux_net'].at[:, :, -1].set(
-        fluxes['flux_up'][:, :, -1] - fluxes['flux_down'][:, :, -1])
+    # Index -1 holds the physical TOA fluxes from the recurrence (see solve_lw);
+    # an earlier clipped extrapolation here zeroed the top layer's SW heating.
 
     # Zero out nighttime columns.  ``is_day_col`` broadcasts from
     # shape ``()`` or ``(ncol, 1)`` against ``(ncol, 1, nlev+2)``.

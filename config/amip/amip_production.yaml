@@ -77,6 +77,15 @@ a_h_scale: 0.375            # Laplacian viscosity multiplier (A_h = a_h_scale
                             # go below 0.25 until #1354 is fixed).  MESH-
                             # SPECIFIC: the dx^2/dt scaling is resolution-
                             # blind (see the a_h follow-up issue).
+# Production default 2026-09-16 (user decision): the first-order upwind vertical
+# advection carried an implicit vertical diffusion measured at +0.8 K/day of
+# warming at the tropical tropopause; with van Leer (2nd-order monotone) and the
+# physical top-layer radiation + filter-ghost fixes of the same PR, 60-day
+# restart arms from dd_ctl day 90 moved the UTLS bias vs ERA5 from +5..+7 K to
+# -1..+2.5 K at 100-290 hPa (tropics +9 -> +1.5 K at 100 hPa), no drift after
+# day 20; byte-identical elsewhere; sigma lane only (validate_strict refuses it
+# on other coordinates).
+mpas_vert_advection_scheme: van_leer
 
 # --- Atmospheric physics (Bechtold mass-flux convection, directive 2026-07-06)
 radiation: rrtmg            # rrtmg = the rrtmgp builder alias (true CMIP6 RT)
