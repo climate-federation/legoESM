@@ -38,14 +38,23 @@ GW=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GA
 DAY=$(( 10#${DAY:-30} ))
 [ $(( DAY % 5 )) -eq 0 ] && [ "$DAY" -ge 5 ] || { echo "FATAL: DAY=$DAY is not a positive multiple of 5"; exit 1; }
 REC=$(( DAY / 5 - 1 ))
-OUT=$R/figs_grids_d${DAY}
+OUT=$R/figs_grids_d${DAY}_${TAG:-harmonized}
 echo "=== oracle record $REC (0-based) = days $((DAY-5))-$DAY ==="
+
+# Run directories, overridable so this card follows the campaign instead of
+# naming one generation of arms.  The defaults are the HARMONIZED runs (each
+# lane carrying every production flag it threads); the pre-adoption base2 dirs
+# are still scorable by passing them in.
+TRPDIR=${TRPDIR:-trp_orca1faithtint_d30}
+MPASDIR=${MPASDIR:-mpas_orca1faithtint_d30}
+FESDIR=${FESDIR:-fesom_orca1faithtint_d30}
+SNAP=snapshot_day$(printf %04d $DAY).npz
 
 # label : run directory : snapshot file
 ARMS=(
-  "tripole:trp_orca1faithtint_d30:snapshot_final.npz"
-  "MPAS:mpas_base2_d30:snapshot_day0030.npz"
-  "FESOM2:fesom_base2_d30:snapshot_day0030.npz"
+  "tripole:$TRPDIR:$SNAP"
+  "MPAS:$MPASDIR:$SNAP"
+  "FESOM2:$FESDIR:$SNAP"
 )
 
 $PY - <<PY || exit 1
@@ -65,9 +74,12 @@ PY
 # plus NEMO on one shared cell set, with FESOM2 passed as --also-mask so the
 # cell set matches the three-grid scorecard).
 if [ "${COMBINE:-1}" = 1 ]; then
-  TRP=$R/trp_orca1faithtint_d30/snapshot_final.npz
-  MPS=$R/mpas_base2_d30/snapshot_day0030.npz
-  FES=$R/fesom_base2_d30/snapshot_day0030.npz
+  TRP=$R/$TRPDIR/$SNAP
+  MPS=$R/$MPASDIR/$SNAP
+  FES=$R/$FESDIR/$SNAP
+  for f in "$TRP" "$MPS" "$FES"; do
+    [ -r "$f" ] || { echo "FATAL: missing $f"; exit 1; }
+  done
   C=$OUT/tripole_MPAS; mkdir -p "$C"
   echo; echo "########## COMBINED tripole + MPAS ##########"
   ls -l --time-style=+%Y-%m-%d_%H:%M "$TRP" "$MPS"
