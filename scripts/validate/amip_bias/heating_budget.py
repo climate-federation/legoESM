@@ -221,6 +221,8 @@ def main(argv=None):
         lw_m, sw_m = rad_on(T0)
         lw_e, sw_e = rad_on(Te)
         o3 = np.asarray(forcing["o3_vmr"], dtype=np.float64).reshape(T0.shape) * 1e6
+        rad_bands = {"lw_model": lw_m, "sw_model": sw_m, "lw_era5": lw_e, "sw_era5": sw_e,
+                     "o3_ppmv": o3}
         gmp = (p_full * w[:, None]).sum(0) / 100.0
         print("\nradiation detail, global mean, K/day (model T | ERA5 T in the same columns), o3 ppmv given to radiation")
         print("  p[hPa]  T_mod  T_era   LW_m   SW_m  net_m |  LW_e   SW_e  net_e | o3")
@@ -236,6 +238,8 @@ def main(argv=None):
     zm["T_model"] = band_mean(T0, lat_deg, area)
     zm["T_era5"] = band_mean(Te, lat_deg, area)
     zm["p_hpa"] = band_mean(p_full, lat_deg, area) / 100.0
+    if args.rad_detail:
+        zm.update({k: band_mean(v, lat_deg, area) for k, v in rad_bands.items()})
     gm = {k: (v * w[:, None]).sum(0) for k, v in rows.items()}
     gm_p = (p_full * w[:, None]).sum(0) / 100.0
     gm_bias = ((T0 - Te) * w[:, None]).sum(0)

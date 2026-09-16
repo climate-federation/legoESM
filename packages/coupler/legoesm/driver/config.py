@@ -2726,6 +2726,12 @@ class ExperimentConfig(NamedTuple):
                 "dycore.mpas_sponge_del2_top_layers is wired into the hydrostatic MPAS dycore "
                 f"only; on discretization={d.discretization!r}/model_type={d.model_type!r} "
                 "it would be silently inert")
+        if (isinstance(_spl, int) and _spl > 0
+                and isinstance(d.a_h_scale, (int, float)) and d.a_h_scale <= 0):
+            errors.append(
+                "dycore.mpas_sponge_del2_top_layers > 0 is silently inert when "
+                f"a_h_scale={d.a_h_scale!r} turns the del2 viscosity off; use a_h_scale > 0 "
+                "or set mpas_sponge_del2_top_layers=0")
         if d.mpas_vert_advection_scheme not in _vert_adv_options:
             errors.append(
                 f"dycore.mpas_vert_advection_scheme must be one of "

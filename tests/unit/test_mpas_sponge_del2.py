@@ -47,9 +47,13 @@ def test_config_defaults_gates_and_wiring():
     for bad in (dict(mpas_sponge_del2_top_layers=-1), dict(mpas_sponge_del2_top_layers=36),
                 dict(mpas_sponge_del2_top_factor=0.5),
                 dict(mpas_sponge_del2_top_factor=float("inf")),
-                dict(mpas_sponge_del2_top_layers=2, model_type="nonhydrostatic")):
+                dict(mpas_sponge_del2_top_layers=2, model_type="nonhydrostatic"),
+                dict(mpas_sponge_del2_top_layers=2, a_h_scale=0.0)):
         with pytest.raises(ValueError, match="mpas_sponge_del2"):
             ExperimentConfig(dycore=DycoreConfig(**mpas, **bad), grid=grid).validate_strict()
+    ExperimentConfig(dycore=DycoreConfig(mpas_sponge_del2_top_layers=0,
+                                         a_h_scale=0.0, **mpas),
+                     grid=grid).validate_strict()
     with pytest.raises(ValueError, match="mpas_sponge_del2"):
         ExperimentConfig(dycore=DycoreConfig(discretization="cdgrid",
                                              mpas_sponge_del2_top_layers=2)).validate_strict()

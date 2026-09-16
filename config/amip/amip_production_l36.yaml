@@ -18,8 +18,19 @@
 # damps resolved waves reaching the lid (2000-km amplitude e-folding ~1.6 d
 # at the top) without the Rayleigh drag's direct relaxation of the mean flow,
 # though a vector Laplacian still dissipates mean-flow shear and kinetic
-# energy (no dissipative heating is added).  First setting, not a tuned one.
-# Gravity-wave drag, radiation, physics: unchanged.
+# energy (no dissipative heating is added; that dissipation sits inside the
+# process ledger's dynamics row together with the baseline del2/del4
+# diffusion, not in a row of its own).  The sponge scales the del2 term
+# only (CAM-FV style); the del4 hyperdiffusion keeps its production
+# strength in the top layers, and the e-folding quoted above assumes the
+# inherited A_h (a_h_scale 0.375; a_h_scale 0 would make the sponge inert,
+# which validate_strict refuses).  First setting, not a tuned one.
+# Gravity-wave drag, radiation, physics: unchanged -- which means the
+# Hines/McFarlane settings calibrated against the 10 hPa lid (where the
+# top layer absorbed the momentum that now reaches 2-10 hPa) are
+# UNVALIDATED on this grid: the 30-day pair shows the NH winter polar
+# stratosphere +7-10 K and the SH summer pole -5..-8 K at 5-30 hPa
+# against the February climatology, under diagnosis.
 include: amip_production.yaml
 nlev: 36
 sigma_top: 0.002
