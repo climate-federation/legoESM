@@ -93,6 +93,7 @@ run_arm() {
       if (( ${res%:*} % ${res#*:} != 0 )); then echo "[skip] $tag: kt does not divide N"; return 0; fi
       export NCCL_MIN_NCHANNELS=16 NCCL_MAX_NCHANNELS=16
       bench=scripts/bench/bench_cube_tiled_step_scaling.py
+      # the tiled bench has no --n-devices: the count is 6*kt^2 by construction
       args=(--multicontroller --kt "${res#*:}" --resolution "${res%:*}" --nlev 26
             --steps "$STEPS" --warmup "$WARMUP") ;;
     tripole)
@@ -120,6 +121,7 @@ run_arm() {
          --ntasks-per-node="$PPN" "${SRUN_DEV[@]}" --kill-on-bad-exit=1 \
          "$PY" "$bench" "${args[@]}" < /dev/null; then
     echo "!!! FAILED $tag (continuing)"; rc=1
+    [[ -e "$OUTDIR/${tag}.jsonl" ]] && mv -f "$OUTDIR/${tag}.jsonl" "$OUTDIR/${tag}.failed.jsonl"
   fi
   sleep 5
 }

@@ -84,14 +84,21 @@ def _res(r, grid, mode):
         n_lat = r.get("n_lat")
         if n_lat is None:
             raise KeyError(f"receipt without n_lat: {r.get('resolution')}")
-        return f"LL{n_lat}" if mode == "strong" else f"{int(n_lat) // nd} rows/dev"
+        n_lon = r.get("n_lon")
+        if n_lon is None:
+            raise KeyError(f"receipt without n_lon: {r.get('resolution')}")
+        return (f"LL{n_lat}x{n_lon}" if mode == "strong"
+                else f"{int(n_lat) // nd} rows/dev x{n_lon}")
     if grid in ("icosahedral", "mpas"):
         if mode == "strong":
             return f"s{r.get('subdivision', r.get('resolution'))}"
         return f"{round(int(r['n_cells']) / nd / 1e3)}k cells/dev"
     if grid == "cubed-sphere":
         n = int(r["resolution"])
-        return f"C{n}" if mode == "strong" else f"C{n // int(r['kt'])}/tile"
+        kt = r.get("kt")
+        if mode == "weak" and kt is None:
+            raise KeyError("cube receipt without kt")
+        return f"C{n}" if mode == "strong" else f"C{n // int(kt)}/tile"
     return str(r.get("resolution", ""))
 
 
@@ -112,7 +119,11 @@ def load(dirs):
                 except json.JSONDecodeError:
                     continue
                 ms = r.get("steady_median_ms")
-                if ms is None or not r.get("valid", True) or r.get("finite_ok") is False:
+                # legacy receipts (pre-2026-09 benches) carry neither valid nor
+                # finite_ok; an explicit False on either, or a non-positive /
+                # non-finite timing, is refused.
+                if (ms is None or not (0.0 < float(ms) < float("inf"))
+                        or r.get("valid") is False or r.get("finite_ok") is False):
                     continue
                 if r.get("metadata", {}).get("virtual_cpu_devices"):
                     continue

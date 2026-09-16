@@ -37,7 +37,7 @@ for NPES in ${NPES_LIST:-16 32 64 128}; do
     RAGGED=0   # ragged_all_to_all is GPU-only
   fi
   if (( nn > NODES )); then echo "[skip] npes=$NPES needs $nn nodes"; continue; fi
-  log="$OUTDIR/forca20_d${NPES}.log"
+  log="$OUTDIR/forca20_d${NPES}.log"; rm -f "$OUTDIR/forca20_d${NPES}.jsonl"
   echo "=== forca20 npes=$NPES nn=$nn $(date '+%F %T')"
   if ! timeout --kill-after=30 2400 srun --export=ALL "${SR[@]}" --kill-on-bad-exit=1 \
        "$PY" scripts/bench/bench_forward_scaling.py --name forca20 --mesh-dir "$M" --dist-dir "$D" \
