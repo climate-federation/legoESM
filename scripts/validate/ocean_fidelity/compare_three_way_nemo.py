@@ -140,6 +140,13 @@ def _manifest_summary(snapshot_path):
     The caveats on these numbers ("this arm dropped --iwm", "this arm ran a
     dirty tree") live in the run manifest, and a scorecard that only records
     the snapshot PATH loses them the moment the directory is renamed.
+
+    TWO LAYOUTS.  The tripole/MPAS writer nests everything under ``run`` and
+    ``reproducibility``; the FESOM lane writes a FLAT manifest whose command
+    line is ``argv`` and whose SHA is top-level ``git_sha``.  Reading only the
+    nested one returned all-None for every FESOM arm (measured 2026-09-16) --
+    the provenance silently vanished for exactly the grid whose configuration
+    differs most from the others, which is the case this caveat exists for.
     """
     mf = Path(snapshot_path).parent / "run_manifest.json"
     if not mf.exists():
@@ -148,12 +155,23 @@ def _manifest_summary(snapshot_path):
         m = json.loads(mf.read_text())
     except (OSError, json.JSONDecodeError) as exc:
         return {"run_manifest": str(mf), "error": f"unreadable: {exc}"}
+    run = m.get("run", {})
     repro = m.get("reproducibility", {})
-    return {"run_manifest": str(mf),
-            "command_line": m.get("run", {}).get("command_line"),
-            "git_dirty": repro.get("git_dirty"),
-            "legoesm_version": repro.get("legoesm_version"),
-            "creation_time": m.get("run", {}).get("creation_time")}
+    argv = m.get("argv")
+    cmd = run.get("command_line")
+    if cmd is None and isinstance(argv, list):
+        cmd = " ".join(str(a) for a in argv)
+    out = {"run_manifest": str(mf),
+           "manifest_layout": "nested" if run else ("flat" if argv else "unknown"),
+           "command_line": cmd,
+           "git_dirty": repro.get("git_dirty"),
+           "git_sha": repro.get("git_sha", m.get("git_sha")),
+           "legoesm_version": repro.get("legoesm_version"),
+           "creation_time": run.get("creation_time", m.get("creation_time"))}
+    if out["command_line"] is None:
+        out["note"] = ("manifest carries no command line under run.command_line "
+                       "or argv; the run's flags are NOT recorded with these numbers")
+    return out
 
 
 def snapshot_day(path):

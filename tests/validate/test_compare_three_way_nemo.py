@@ -437,3 +437,51 @@ def test_finite_gate_and_digest_include_mask_only_sources():
     src = inspect.getsource(m.main)
     assert "for xf in xs:\n            finite3 &= np.isfinite(xf)" in src
     assert 'report.setdefault("scored_mask_sha1", {})[name]' in src
+
+
+# --------------------------------------------------------------------------
+# _manifest_summary — the caveat must travel for BOTH manifest layouts
+# --------------------------------------------------------------------------
+def _write_manifest(dirpath, payload):
+    import json
+    dirpath.mkdir(parents=True, exist_ok=True)
+    (dirpath / "run_manifest.json").write_text(json.dumps(payload))
+    snap = dirpath / "snapshot_day0030.npz"
+    np.savez(snap, T=np.zeros(1))
+    return snap
+
+
+def test_manifest_summary_reads_the_nested_layout(tmp_path):
+    snap = _write_manifest(tmp_path / "trp", {
+        "run": {"command_line": "scripts/run/run_omip_core2.py --grid tripole",
+                "creation_time": "2026-09-06T16:21:00"},
+        "reproducibility": {"git_dirty": False, "legoesm_version": "0.1",
+                            "git_sha": "abc123"}})
+    s = m._manifest_summary(snap)
+    assert s["manifest_layout"] == "nested"
+    assert s["command_line"].endswith("--grid tripole")
+    assert s["git_sha"] == "abc123" and s["git_dirty"] is False
+    assert "note" not in s
+
+
+def test_manifest_summary_reads_the_flat_fesom_layout(tmp_path):
+    """REGRESSION: the FESOM lane writes argv + top-level git_sha and no
+    'run' block, so reading only run.command_line returned all-None for every
+    FESOM arm -- the provenance vanished for the grid it matters most for."""
+    snap = _write_manifest(tmp_path / "fesom", {
+        "lane": "fesom", "git_sha": "def456",
+        "argv": ["scripts/run/run_omip_core2.py", "--grid", "fesom",
+                 "--fesom-vmix", "legoesm_tke"]})
+    s = m._manifest_summary(snap)
+    assert s["manifest_layout"] == "flat"
+    assert s["command_line"] == ("scripts/run/run_omip_core2.py --grid fesom "
+                                 "--fesom-vmix legoesm_tke")
+    assert s["git_sha"] == "def456"
+    assert "note" not in s
+
+
+def test_manifest_summary_says_so_when_no_command_line_is_recorded(tmp_path):
+    snap = _write_manifest(tmp_path / "bare", {"lane": "mystery"})
+    s = m._manifest_summary(snap)
+    assert s["command_line"] is None
+    assert "NOT recorded" in s["note"]
