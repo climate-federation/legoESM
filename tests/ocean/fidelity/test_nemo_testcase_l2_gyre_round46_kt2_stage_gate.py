@@ -235,6 +235,32 @@ def test_stage1_w_acquisition_reader_is_exact_and_fail_closed(tmp_path):
         gate.read_stage1_w_walk_record(path)
 
 
+def test_stage1_r3_operand_reader_is_exact_and_fail_closed(tmp_path):
+    path = tmp_path / "oracle_stage1_r3_operands_kt00000001.bin"
+    values = np.arange(6 * NX * NY, dtype=np.float64)
+    payload = (
+        b"NEMO_L2_R99R3_1 "
+        + struct.pack("=9i", 1, 1, 1, 1, 3, NX, NY, NZ, 64)
+        + values.tobytes()
+    )
+    path.write_bytes(payload)
+    record = gate.read_stage1_r3_operand_record(path)
+    assert record["header"]["Kaa"] == 3
+    assert tuple(record) == (
+        "ssh_kaa", "r1_ht_0", "r3_kaa", "ssh_kbb", "r3_kbb", "ht_0",
+        "header",
+    )
+    assert all(record[name].shape == (NY, NX) for name in (
+        "ssh_kaa", "r1_ht_0", "r3_kaa", "ssh_kbb", "r3_kbb", "ht_0",
+    ))
+    path.write_bytes(payload[:-8])
+    with pytest.raises(Exception, match="wrong payload size"):
+        gate.read_stage1_r3_operand_record(path)
+    path.write_bytes(payload + np.float64(0.0).tobytes())
+    with pytest.raises(Exception, match="wrong payload size"):
+        gate.read_stage1_r3_operand_record(path)
+
+
 def test_transport_w_scalar_replay_preserves_zero_state():
     import jax
     import jax.numpy as jnp

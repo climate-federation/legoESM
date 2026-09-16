@@ -241,6 +241,35 @@ def read_stage1_w_walk_record(path: Path) -> dict:
     return result
 
 
+def read_stage1_r3_operand_record(path: Path) -> dict:
+    """Read the same-call inputs and output of ``dom_qco_r3c_RK3``."""
+    with path.open("rb") as handle:
+        magic = handle.read(16).decode("ascii").rstrip()
+        header = struct.unpack("=9i", handle.read(36))
+        values = np.fromfile(handle, dtype=np.float64)
+    version, kt, kbb, kmm, kaa, nx, ny, nz, bits = header
+    require(magic == "NEMO_L2_R99R3_1", f"{path}: bad magic {magic!r}")
+    require((version, kt, kbb, kmm, kaa) == (1, 1, 1, 1, 3),
+            f"{path}: wrong clock/slots {header}")
+    require((nx, ny, nz, bits) == (*DIMS, 64),
+            f"{path}: wrong dimensions/dtype {header}")
+    n2 = nx * ny
+    require(values.size == 6 * n2, f"{path}: wrong payload size {values.size}")
+    result = {}
+    offset = 0
+    for name in (
+        "ssh_kaa", "r1_ht_0", "r3_kaa", "ssh_kbb", "r3_kbb", "ht_0",
+    ):
+        result[name] = _xy(values[offset:offset + n2], nx, ny)
+        offset += n2
+    require(offset == values.size, f"{path}: reader did not consume physical EOF")
+    result["header"] = {
+        "version": version, "kt": kt, "Kbb": kbb, "Kmm": kmm,
+        "Kaa": kaa, "jpi": nx, "jpj": ny, "jpk": nz, "bits": bits,
+    }
+    return result
+
+
 def read_admitted_stage1_w_walk(root: Path, *, plant_stamp: bool = False) -> dict:
     """Read the direct W record only after its digest/producer stamp closes."""
     path = root / "oracle_stage1_w_walk_kt00000001.bin"
