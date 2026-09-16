@@ -781,8 +781,11 @@ class ExperimentConfig(NamedTuple):
     convective_precip_split: str = "constant"
     # True: the in-updraught convective rain surviving the scheme's own sub-cloud
     # evaporation leaves the column as surface precipitation (IFS); False: it is
-    # handed to the microphysics rain tracer (legacy). Default pending user decision.
-    convective_rain_to_surface: bool = False
+    # handed to the microphysics rain tracer, which re-evaporated it at grid-mean
+    # humidity (4.1 kg/m2/day below 700 hPa in the tropics).  DEFAULT True
+    # (user 2026-09-16, with the cloud-cover threshold re-tuned on the drier
+    # column): 30-day pair tropical-ocean prw -9 kg/m2, evaporation +4 %.
+    convective_rain_to_surface: bool = True
     autoconv_q_c_crit: float = 5.0e-4   # [kg/kg] Sundqvist critical updraft cloud water
     autoconv_pe_max: float = 0.9        # [1] ceiling on the emergent precip fraction
 
@@ -1279,10 +1282,10 @@ class ExperimentConfig(NamedTuple):
     bechtold_rprcon: float = 1.4e-3   # BechtoldConfig.rprcon [1/m]
     # Cloud-base mass-flux cap [kg/m^2/s]. The pipeline used to read a field of
     # this name that did not exist and fell back to 0.02 (2.5x tighter than the
-    # scheme's own 0.05), which binds in 71 % of tropical-ocean columns
-    # (2026-09-15). 0.02 here reproduces that production behaviour; the
-    # default is a pending user decision.
-    bechtold_M_b_max: float = 0.02   # BechtoldConfig.M_b_max [kg/m^2/s]
+    # scheme's own 0.05), which bound in 71 % of tropical-ocean columns.
+    # DEFAULT 0.05 = the scheme's own value (user 2026-09-16); 5-day arms at
+    # 0.05/0.10 were stable with small effects (cover -2/-5 pts).
+    bechtold_M_b_max: float = 0.05   # BechtoldConfig.M_b_max [kg/m^2/s]
     # Gregory-1997 convective momentum transport, applied to MPAS edge winds
     # through the shared cell->edge projection (2026-09-15).  None preserves
     # each lane's earlier behaviour: OFF on MPAS (where the bridge handed the
@@ -3428,7 +3431,7 @@ class ExperimentConfig(NamedTuple):
             bechtold_rhebc_land=getattr(amip_cfg, 'bechtold_rhebc_land', 0.75),
             bechtold_rhebc_land_deep=getattr(amip_cfg, 'bechtold_rhebc_land_deep', 0.70),
             bechtold_rprcon=getattr(amip_cfg, 'bechtold_rprcon', 1.4e-3),
-            bechtold_M_b_max=getattr(amip_cfg, 'bechtold_M_b_max', 0.02),
+            bechtold_M_b_max=getattr(amip_cfg, 'bechtold_M_b_max', 0.05),
             bechtold_enable_cmt=getattr(amip_cfg, 'bechtold_enable_cmt', None),
             bechtold_dnoprc=getattr(amip_cfg, 'bechtold_dnoprc', 3.0e-4),
             bechtold_subsidence_solve=getattr(amip_cfg, 'bechtold_subsidence_solve', "implicit_flux"),

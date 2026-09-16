@@ -1884,7 +1884,9 @@ class ConvectionConfig(NamedTuple):
     # downdraft + sub-cloud evaporation leaves the column as SURFACE precipitation
     # (IFS cuflxn convention); False: it is handed to the microphysics rain
     # tracer q_r at its formation levels, where the microphysics evaporates it
-    # again at grid-mean humidity.  Default pending a user decision (2026-09-15).
+    # again at grid-mean humidity.  The driver sets this from
+    # ExperimentConfig.convective_rain_to_surface (default True, user 2026-09-16);
+    # the bare scheme default stays False for the standalone / idealized callers.
     rain_to_surface: bool = False
     # MPAS only: hand a CMT-capable scheme the Perot-reconstructed cell winds
     # and project its (du, dv) onto the edge normals.  False = every scheme

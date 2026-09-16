@@ -1035,6 +1035,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "evaporation (cuflxn.F90 0.70/0.75 land vs "
                              "0.85/0.92 ocean). Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_land_rhebc}.")
+    parser.add_argument("--bechtold-m-b-max", dest="bechtold_M_b_max", type=float,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_M_b_max,
+                        help="Bechtold cloud-base mass-flux cap [kg/m^2/s], range "
+                             "0.02-0.15 (production 0.05 since 2026-09-16; the "
+                             "old 0.02 fallback bound 71 %% of tropical columns).")
     parser.add_argument("--bechtold-enable-cmt", dest="bechtold_enable_cmt",
                         action=argparse.BooleanOptionalAction, default=None,
                         help="Gregory-1997 convective momentum transport in Bechtold "
@@ -1167,7 +1172,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "Bechtold 0.7=on, the #929 fix); pass 0.0 to force "
                              "the legacy no-split path.")
     parser.add_argument("--convective-rain-to-surface",
-                        action=argparse.BooleanOptionalAction, default=False,
+                        action=argparse.BooleanOptionalAction, default=True,
                         dest="convective_rain_to_surface",
                         help="Route the in-updraught convective rain that survives "
                              "the scheme's own sub-cloud evaporation straight to "
@@ -2184,6 +2189,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_use_ifs_downdraft=args.bechtold_use_ifs_downdraft,
         bechtold_use_ifs_shallow_closure=args.bechtold_use_ifs_shallow_closure,
         bechtold_enable_cmt=args.bechtold_enable_cmt,
+        bechtold_M_b_max=args.bechtold_M_b_max,
         bechtold_use_ifs_capdcycl=args.bechtold_use_ifs_capdcycl,
         bechtold_use_ifs_land_rhebc=args.bechtold_use_ifs_land_rhebc,
         bechtold_use_ifs_snow_melt=args.bechtold_use_ifs_snow_melt,

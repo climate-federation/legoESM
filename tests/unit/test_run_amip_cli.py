@@ -3988,15 +3988,15 @@ def test_convective_rain_to_surface_round_trips():
     cfg_default = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical", "--convection", "bechtold"]),
         parser))
-    assert cfg_default.convective_rain_to_surface is False
-    assert convection_config_for(cfg_default).rain_to_surface is False
+    assert cfg_default.convective_rain_to_surface is True      # default since 2026-09-16
+    assert convection_config_for(cfg_default).rain_to_surface is True
 
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
         "--dataset", "analytical", "--convection", "bechtold",
-        "--convective-rain-to-surface",
+        "--no-convective-rain-to-surface",
     ]), parser))
-    assert cfg.convective_rain_to_surface is True
-    assert convection_config_for(cfg).rain_to_surface is True
+    assert cfg.convective_rain_to_surface is False
+    assert convection_config_for(cfg).rain_to_surface is False
 
 
 def test_surface_height_and_saline_flags_round_trip():
@@ -4042,10 +4042,10 @@ def test_bechtold_M_b_max_threads_and_validates():
     )
     from legoesm.driver.run_config_yaml import _ATM_SCALAR_PARAM_MAP
 
-    cfg = ExperimentConfig(convection="bechtold", bechtold_M_b_max=0.05)
-    assert _resolve_convection(cfg)[1].M_b_max == 0.05
-    assert convection_config_for(cfg).bechtold.M_b_max == 0.05
-    assert _resolve_convection(ExperimentConfig(convection="bechtold"))[1].M_b_max == 0.02
+    cfg = ExperimentConfig(convection="bechtold", bechtold_M_b_max=0.08)
+    assert _resolve_convection(cfg)[1].M_b_max == 0.08
+    assert convection_config_for(cfg).bechtold.M_b_max == 0.08
+    assert _resolve_convection(ExperimentConfig(convection="bechtold"))[1].M_b_max == 0.05   # default since 2026-09-16
     assert _ATM_SCALAR_PARAM_MAP["atm.conv.BechtoldConfig.M_b_max"] == "bechtold_M_b_max"
     with pytest.raises(ValueError, match="bechtold_M_b_max"):
         ExperimentConfig(bechtold_M_b_max=0.5).validate_strict()
