@@ -452,8 +452,23 @@ def _fill_source_levels_nearest_valid(
     fields: "list[np.ndarray] | tuple[np.ndarray, ...]",
     src_lat_deg: np.ndarray,
     src_lon_deg: np.ndarray,
-) -> tuple[list[np.ndarray], int]:
+    *,
+    void_fill: bool = False,
+) -> tuple[list[np.ndarray], int, int]:
     """Give every source cell an observation at every depth it is missing one.
+
+    ``void_fill=True`` additionally treats a missing cell whose nearest donor
+    is NOT one of its eight grid neighbours as lying in a DATA VOID (a basin or
+    channel the climatology never observed: the Marmara, the Black Sea, the
+    Canadian Archipelago channels).  Nearest-donor filling stitches such a
+    region from whichever observed cells happen to be closest, so adjacent
+    void cells take water from different seas and the seam is a density wall
+    (3.7 kg/m3 across 6 km in the Marmara on ORCA12; 10 kg/m3 at 73N 107W).
+    Void cells are instead filled with the harmonic (Laplace) field bounded by
+    the surrounding non-void cells, per level and per field: horizontally
+    smooth, and by the maximum principle never outside the range of the
+    surrounding data.  A cell within one grid step of an observation keeps its
+    nearest donor as before.
 
     For each depth level independently, a source cell with no observation takes
     the value of the NEAREST source cell that does have one AT THAT SAME DEPTH.
@@ -496,6 +511,9 @@ def _fill_source_levels_nearest_valid(
     filled : list of arrays, same shapes as ``fields``
     n_filled : int
         Number of (cell, level) entries per field that were given a donor.
+    n_void : int
+        Number of those entries that were harmonic-filled as data void
+        (always 0 unless ``void_fill``).
     """
     from legoesm.grids.regridding import fill_missing_nearest_valid
 
@@ -527,11 +545,17 @@ def _fill_source_levels_nearest_valid(
     n_points = arr.shape[0] * arr.shape[1]
     missing = np.zeros((n_depth, n_points), dtype=bool)
     for a in arrs:
-        missing |= np.isnan(a.reshape(-1, n_depth).T)
+        missing |= ~np.isfinite(a.reshape(-1, n_depth).T)
     has_donor = ~np.all(missing, axis=1)
+    # A level with no donor anywhere: every field is set to NaN wherever ANY
+    # field is missing, so T and S still describe the same water when the
+    # vertical bridge later interpolates across that level.
+    for a in arrs:
+        lv = a.reshape(-1, n_depth).T
+        lv[~has_donor, :] = np.nan   # every point on such a level misses SOME field
     n_filled = int(missing[has_donor].sum())
     if n_filled == 0:
-        return arrs, 0
+        return arrs, 0, 0
 
     # Find the donor ONCE, as a point index, and gather every field through it.
     # A point index is exact in float64 well past any plausible source grid.
@@ -540,12 +564,109 @@ def _fill_source_levels_nearest_valid(
     donor = fill_missing_nearest_valid(donor[has_donor], coords)
     donor = np.rint(donor).astype(np.intp)             # (n_donor_levels, n_pts)
 
+    n_lat, n_lon = arr.shape[0], arr.shape[1]
+    void = np.zeros_like(donor, dtype=bool)
+    # Source OCEAN cells = observed at some depth in every field (each field
+    # reduced over depth on its own, then intersected).  The
+    # harmonic fill works on this set only: land cells are not part of the
+    # stencil, so a void cannot be bridged across an isthmus (Suez, Panama,
+    # the archipelago land) the way a plain lat-lon Laplacian would.  A basin
+    # the climatology never sampled at ANY depth is indistinguishable from
+    # land here and is therefore not a void (it stays nearest-stitched, or is
+    # masked with --tripole-closed-seas); a bathymetry-derived source mask
+    # would be the next step if such basins must be filled.
+    ocean = np.ones(n_points, dtype=bool)
+    for a in arrs:
+        ocean &= np.isfinite(a.reshape(-1, n_depth)).any(axis=1)
+    if void_fill:
+        p = np.arange(n_points)
+        dj = np.abs(donor // n_lon - (p // n_lon)[None, :])
+        di = np.abs(donor % n_lon - (p % n_lon)[None, :])
+        di = np.minimum(di, n_lon - di)                 # periodic longitude
+        void = missing[has_donor] & ocean[None, :] & (np.maximum(dj, di) > 1)
+    n_void = int(void.sum())
+
     out = []
     for a in arrs:
         levels = a.reshape(-1, n_depth).T.copy()       # (n_depth, n_points)
         levels[has_donor] = np.take_along_axis(levels[has_donor], donor, axis=1)
+        if n_void:
+            lv = levels[has_donor]
+            for k in range(lv.shape[0]):
+                if void[k].any():
+                    lv[k] = _harmonic_fill_2d(
+                        lv[k].reshape(n_lat, n_lon),
+                        void[k].reshape(n_lat, n_lon),
+                        domain=ocean.reshape(n_lat, n_lon)).ravel()
+            levels[has_donor] = lv
         out.append(levels.T.reshape(a.shape))
-    return out, n_filled
+    return out, n_filled, n_void
+
+
+def _harmonic_fill_2d(field: np.ndarray, void: np.ndarray,
+                      domain: "np.ndarray | None" = None) -> np.ndarray:
+    """Replace ``field`` inside ``void`` by the discrete harmonic function with
+    the non-void ``domain`` cells as boundary values: 4-point Laplacian,
+    periodic in longitude (axis 1), clamped at the latitude edges; a neighbour
+    outside ``domain`` (land) is simply not a neighbour, so the fill never
+    crosses it.  Plain grid Laplacian, no spherical metric: the fill is a
+    smooth blend, not a physical diffusion.  One sparse direct solve per call.
+    A connected void region with no non-void domain neighbour at all (a basin
+    missing at this level in every cell) has no boundary to be harmonic with
+    respect to; it is set to the mean of the values it arrived with (the
+    nearest donors), which removes the wall inside it without inventing a
+    gradient."""
+    import scipy.sparse as sp
+    import scipy.sparse.csgraph as csg
+    import scipy.sparse.linalg as spla
+
+    f = np.array(field, dtype=np.float64)
+    n_lat, n_lon = f.shape
+    dom = np.ones(f.shape, dtype=bool) if domain is None else np.asarray(domain, dtype=bool)
+    void = np.asarray(void, dtype=bool) & dom
+    idx = -np.ones(f.shape, dtype=np.int64)
+    vj, vi = np.nonzero(void)
+    n_void = vj.size
+    if n_void == 0:
+        return f
+    idx[vj, vi] = np.arange(n_void)
+    rows, cols, vals = [], [], []
+    rhs = np.zeros(n_void)
+    deg = np.zeros(n_void)
+    n_fixed = np.zeros(n_void)
+    for dj, di in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+        nj, ni = vj + dj, (vi + di) % n_lon
+        ok = (nj >= 0) & (nj < n_lat)
+        ok[ok] &= dom[nj[ok], ni[ok]]
+        deg[ok] += 1
+        nb = idx[nj[ok], ni[ok]]
+        r = np.arange(n_void)[ok]
+        is_void = nb >= 0
+        rows.append(r[is_void]); cols.append(nb[is_void]); vals.append(-np.ones(int(is_void.sum())))
+        np.add.at(rhs, r[~is_void], f[nj[ok][~is_void], ni[ok][~is_void]])
+        np.add.at(n_fixed, r[~is_void], 1.0)
+    adj = sp.csr_matrix((np.ones(sum(len(c) for c in cols)), (np.concatenate(rows), np.concatenate(cols))),
+                        shape=(n_void, n_void))
+    _, comp = csg.connected_components(adj, directed=False)
+    bounded = np.bincount(comp, weights=n_fixed) > 0
+    solve = bounded[comp]
+    for c in np.nonzero(~bounded)[0]:
+        m = comp == c
+        f[vj[m], vi[m]] = f[vj[m], vi[m]].mean()
+    if solve.any():
+        sub = np.cumsum(solve) - 1                      # void index -> solved index
+        keep_r = solve[np.concatenate(rows)] & solve[np.concatenate(cols)]
+        rr = sub[np.concatenate(rows)[keep_r]]; cc = sub[np.concatenate(cols)[keep_r]]
+        vv = np.concatenate(vals)[keep_r]
+        n_s = int(solve.sum())
+        A = sp.csr_matrix((np.concatenate([vv, deg[solve]]),
+                           (np.concatenate([rr, np.arange(n_s)]), np.concatenate([cc, np.arange(n_s)]))),
+                          shape=(n_s, n_s))
+        x = spla.spsolve(A.tocsc(), rhs[solve])
+        if not np.all(np.isfinite(x)):
+            raise ValueError("harmonic void fill did not converge to finite values")
+        f[vj[solve], vi[solve]] = x
+    return f
 
 
 def _nearest_neighbor_2d(
@@ -728,8 +849,13 @@ def init_ocean_from_woa(
     T_var: str | None = None,
     S_var: str | None = None,
     monthly_layout: str = "concatenated",
+    void_fill: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Initialize ocean T and S from WOA18 climatology.
+
+    ``void_fill`` harmonic-fills unobserved basins/channels on the source grid
+    instead of stitching them from the nearest observed cells (see
+    :func:`_fill_source_levels_nearest_valid`).
 
     If ``T_path`` and ``S_path`` are provided, loads WOA18 NetCDF files
     and interpolates to the model grid.  Otherwise, uses analytical
@@ -865,13 +991,15 @@ def init_ocean_from_woa(
         # given depth takes it from the nearest source cell that has one at
         # that same depth.  Without this a model column over a shallow source
         # cell inherited that cell's shallowest value all the way down.
-        (T_woa, S_woa), n_fill = _fill_source_levels_nearest_valid(
-            (T_woa, S_woa), lat_woa, lon_woa)
+        (T_woa, S_woa), n_fill, n_void = _fill_source_levels_nearest_valid(
+            (T_woa, S_woa), lat_woa, lon_woa, void_fill=void_fill)
         if n_fill:
             n_src = T_woa.shape[0] * T_woa.shape[1] * T_woa.shape[2]
             print(f"[setup] observed T/S: filled {n_fill} of {n_src} source "
                   "cell-levels from the nearest source column holding an "
-                  "observation at the same depth (one donor for T and S)")
+                  "observation at the same depth (one donor for T and S); "
+                  f"{n_void} of them harmonic-filled as data void "
+                  f"(void_fill={void_fill})")
 
         if interp == "bilinear":
             T_woa_horiz = _bilinear_2d(
@@ -969,7 +1097,11 @@ def init_ocean_from_woa(
                     "or set to a small wet-cell depth); got values "
                     f"with min={float(bath_arr.min())}."
                 )
-            model_depths = np.abs(np.asarray(z_coord.z_full_ref))
+            # Partial cells: mask on the TRUE centre depths the profile was
+            # sampled at, not the reference centres, or a cut bottom cell whose
+            # reference centre lies below the floor loses its valid sample.
+            model_depths = (np.abs(np.asarray(z_coord.z_full_ref)) if _cd is None
+                            else _cd.reshape(T_out.shape))
             nlev = T_out.shape[-1]
             # Only 1-D z_full_ref of length nlev is supported here.
             # Shaped model depths (e.g. spatially varying interfaces

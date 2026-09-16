@@ -121,3 +121,26 @@ def test_bad_depths_are_refused():
     flat_tail = np.array([5.0, 20.0, 60.0, 100.0, 100.0, 100.0])
     assert _interp_profile_to_z_coord(PROF, WOA_D, z, flat_tail) == pytest.approx(
         np.interp(flat_tail, WOA_D, PROF))
+
+
+def test_driver_forwards_true_cell_depths_to_the_initializer():
+    """The leaf helper above is exercised directly; this pins the DRIVER wiring
+    (codex review: removing the centroid argument left every test green).
+    ``run_omip_single`` is the function that runs the initialisation.  This is a
+    source check: it catches the argument being dropped, not ``_cell_depths``
+    being reset to ``None`` upstream (executing the driver's placement block in
+    a unit test would need the whole grid/bathymetry setup)."""
+    import importlib.util
+    import inspect
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    spec = importlib.util.spec_from_file_location("run_omip", root / "scripts/run/run_omip.py")
+    mod = sys.modules.get("run_omip") or importlib.util.module_from_spec(spec)
+    if "run_omip" not in sys.modules:
+        sys.modules["run_omip"] = mod
+        spec.loader.exec_module(mod)
+    src = inspect.getsource(mod.run_omip_single)
+    assert "compute_centroid_depth(" in src
+    assert "cell_center_depths=_cell_depths" in src
