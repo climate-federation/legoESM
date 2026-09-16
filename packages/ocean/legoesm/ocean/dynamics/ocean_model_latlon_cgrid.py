@@ -1384,18 +1384,14 @@ def rk3_stage_velocity_update(
             f"rhs {rhs.shape} must match velocity_before "
             f"{velocity_before.shape}")
     if vector_form:
-        # Compiled GYRE dynzdf.f90:166-170 and stprk3_stg.f90:671-674, in
-        # NEMO's own statement order: multiply, add, then mask.  Materialize
-        # each binary64 source operation so this assignment remains the same
-        # operator when the surrounding JAX graph changes.
+        # dynzdf.F90:121-122 and stprk3_stg.F90:367-368, in NEMO's own
+        # association order: add, then mask.
         if face_mask.shape not in (velocity_before.shape,
                                    velocity_before.shape[:-1] + (1,)):
             raise ValueError(
                 f"face_mask {face_mask.shape} must match velocity_before "
                 f"{velocity_before.shape} or be its level-broadcast form")
-        scaled_rhs = nemo_source_round(dt_stage * rhs)
-        stage_sum = nemo_source_round(velocity_before + scaled_rhs)
-        return nemo_source_round(stage_sum * face_mask)
+        return (velocity_before + dt_stage * rhs) * face_mask
     # dynzdf.F90:127-132 and stprk3_stg.F90:373-378, key_qco form.
     return (qco_before * velocity_before
             + dt_stage * qco_now * rhs) / qco_after
