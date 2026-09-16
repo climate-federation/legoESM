@@ -353,6 +353,21 @@ def test_stage_twin_private_overrides_are_off_by_default():
     assert hooks.stage_entry_override is None
 
 
+def test_stage_twin_production_tke_uses_the_ordinary_step_result():
+    source = (
+        TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py"
+    ).read_text()
+    branch = source.split("if production_tke_only:", 1)[1].split(
+        "next_entries =", 1)[0]
+
+    assert "expose_live_stage_operands" not in branch
+    assert "LatLonCGridOceanModel(" in branch
+    assert ").step(" in branch
+    assert '"candidate_k_h": np.asarray(state_after.tke_avt.data)' in branch
+    assert '"output_carry": "LatLonCGridOceanState.tke_avt"' in branch
+    assert "records[(1, 1)]" in branch
+
+
 def test_stage_twin_refuses_unmeasured_required_rows():
     source = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py").read_text()
     assert 'report["status"] = "UNMEASURED"' in source

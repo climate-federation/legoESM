@@ -149,3 +149,15 @@ def test_kh_entry_ulp_plant_selects_a_consumed_output_response():
                             != energy.view(np.uint64)) == 1
     assert planted[index] == np.nextafter(energy[index], np.inf)
     assert index == (17,)
+
+
+def test_kh_execution_labels_do_not_call_an_isolated_jit_production():
+    assert MODULE.ISOLATED_EAGER_LABEL == "isolated-closure eager"
+    assert MODULE.ISOLATED_JIT_LABEL == "isolated-closure JIT"
+    assert MODULE.PRODUCTION_STEP_LABEL == "production step (_step_jitted)"
+
+    source = SCRIPT.read_text()
+    assert '"production_jit_call_site"' not in source
+    assert '"production-JIT source-order K_H rows' not in source
+    assert "production_tke_only=True" in source
+    assert 'response_rows[PRODUCTION_STEP_LABEL]' in source

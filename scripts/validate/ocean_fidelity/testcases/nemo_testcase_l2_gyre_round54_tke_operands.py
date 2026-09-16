@@ -370,6 +370,11 @@ def _plant_entry_ulp_at_changed_output(
     return planted, index
 
 
+ISOLATED_EAGER_LABEL = "isolated-closure eager"
+ISOLATED_JIT_LABEL = "isolated-closure JIT"
+PRODUCTION_STEP_LABEL = "production step (_step_jitted)"
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--record", type=Path, required=True)
@@ -378,7 +383,8 @@ def main(argv=None) -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument(
         "--stage-root", type=Path,
-        help="round-46 root carrying kt=2 Kbb/Kmm velocities and face metrics")
+        help=("round-46/93+ stage-twin root carrying the NEMO-recorded "
+              "production entry, velocities, and face metrics"))
     parser.add_argument(
         "--walk", action="store_true",
         help="run the preregistered source-ordered legoESM closure walk")
@@ -425,7 +431,7 @@ def main(argv=None) -> int:
                 "max": float(np.max(arr)),
             }
         report = {
-            "format": "gyre-round56-tke-operands-v3",
+            "format": "gyre-round56-tke-operands-v4",
             "worktree": worktree_stamp(),
             "producer_commit": producer,
             "record": str(args.record),
@@ -498,6 +504,21 @@ def _model_substitution_walk(
     require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
             "model substitution walk did not resolve fp64/libm")
     jpkm1 = head["jpkm1"]
+    stage_gate_module = None
+
+    def stage_twin_gate():
+        """Load the existing round-93+ recorded-entry stage-twin gate."""
+        nonlocal stage_gate_module
+        if stage_gate_module is None:
+            reader_path = Path(__file__).with_name(
+                "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py")
+            reader_spec = importlib.util.spec_from_file_location(
+                "round54_round46_stage_twin", reader_path)
+            require(reader_spec is not None and reader_spec.loader is not None,
+                    f"cannot load stamped stage twin {reader_path}")
+            stage_gate_module = importlib.util.module_from_spec(reader_spec)
+            reader_spec.loader.exec_module(stage_gate_module)
+        return stage_gate_module
 
     def yx(name: str) -> np.ndarray:
         value = np.asarray(arrays[name], dtype=np.float64)
@@ -648,14 +669,7 @@ def _model_substitution_walk(
             avm_weighted_shear_production,
         )
 
-        reader_path = Path(__file__).with_name(
-            "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py")
-        reader_spec = importlib.util.spec_from_file_location(
-            "round61_round46_stage_reader", reader_path)
-        require(reader_spec is not None and reader_spec.loader is not None,
-                f"cannot load stamped stage reader {reader_path}")
-        reader_module = importlib.util.module_from_spec(reader_spec)
-        reader_spec.loader.exec_module(reader_module)
+        reader_module = stage_twin_gate()
         stage_path = stage_root / "oracle_momstage_kt00000002_s1.bin"
         stage = reader_module.read_stage(stage_path)["arrays"]
 
@@ -744,11 +758,9 @@ def _model_substitution_walk(
             N2_prandtl=rn2b, p_sh2_override=lambda _: sh2,
             prandtl_K_M=avm_entry)[1]
 
-    # Production always crosses the explicit JIT boundary at
-    # ocean_model_latlon_cgrid.py:10982-10995.  Keep one callable per measured
-    # expression and evaluate that SAME callable directly and through jax.jit;
-    # otherwise the diagnostic can certify an eager arithmetic graph that the
-    # model never executes.
+    # These two rows intentionally remain isolated-closure diagnostics.  The
+    # separate production row below drives the recorded-entry stage twin all
+    # the way through ``LatLonCGridOceanModel.step`` / ``_step_jitted``.
     jitted_close_from_en = jax.jit(close_from_en)
     oracle_mxl = np.asarray(yx("mxl_momentum")[..., 1:jpkm1])
     oracle_mxld = np.asarray(yx("mxl_dissipation")[..., 1:jpkm1])
@@ -903,56 +915,123 @@ def _model_substitution_walk(
     jit_statement_outputs = jitted_kh_statement_outputs(e_post)
     eager_whole_closure = close_from_en(e_post)
     jit_whole_closure = jitted_close_from_en(e_post)
+
+    production_records = None
+
+    def production_step_k_h(entry_ulp=None):
+        """Extract K_H from the existing recorded-entry production-step twin."""
+        nonlocal production_records
+        gate = stage_twin_gate()
+        root = Path(stage_root) if stage_root is not None else gate.ROOT
+        if production_records is None:
+            production_records = {
+                (kt, stage): gate.read_stage(
+                    root / f"oracle_momstage_kt{kt:08d}_s{stage}.bin")
+                for kt, stage in gate.STAGES
+            }
+        return gate._stage_twin(
+            production_records, root, gate.ADVMEAN_ROOT, gate.MEMORY_ROOT,
+            gate.BTSTEP_ROOT, gate.STAGE_CLOSURE_ROOT, None,
+            production_tke_only=True,
+            production_tke_entry_ulp=entry_ulp,
+        )
+
+    production_result = production_step_k_h()
+    production_candidate = np.asarray(production_result["candidate_k_h"])
+    entry_references = {
+        "tke": np.asarray(yx("en_entry")[..., 1:jpkm1]),
+        "tke_avm": np.asarray(yx("avm_entry")[..., 1:jpkm1]),
+        "tke_avt": np.asarray(yx("avt_entry")[..., 1:jpkm1]),
+        "tke_dissl": np.asarray(yx("dissl_entry")[..., 1:jpkm1]),
+    }
+    production_entry_identity = {
+        name: _operand_score(
+            np.asarray(production_result["entry_carry"][name]), reference, wet)
+        for name, reference in entry_references.items()
+    }
+    require(all(row["exact"] for row in production_entry_identity.values()),
+            "round-93+ stage twin does not carry the round-59 NEMO TKE entry "
+            f"bit for bit: {production_entry_identity}")
+    production_row = {
+        "name": PRODUCTION_STEP_LABEL,
+        **_operand_score(production_candidate, oracle_avt, wet),
+        "target": "NEMO avt_pre_evd",
+        "entry": production_result["entry"],
+        "entry_record": production_result["entry_record"],
+        "output_carry": production_result["output_carry"],
+        "extraction_citation": production_result["extraction_citation"],
+        "step_citation": production_result["step_citation"],
+        "carry_declaration_citation": production_result[
+            "carry_declaration_citation"],
+        "stage_twin_format": production_result["format"],
+        "recorded_entry_identity": production_entry_identity,
+    }
+    isolated_eager = score_kh_execution(
+        eager_statement_outputs, eager_whole_closure)
+    isolated_eager["execution"] = ISOLATED_EAGER_LABEL
+    isolated_jit = score_kh_execution(
+        jit_statement_outputs, jit_whole_closure)
+    isolated_jit["execution"] = ISOLATED_JIT_LABEL
     kh_walk = {
-        "entry": "NEMO en_post_sweep/rn2/e3t/taum and carried coefficients",
-        "production_jit_call_site": (
+        "isolated_entry": (
+            "NEMO en_post_sweep/rn2/e3t/taum and carried coefficients"),
+        "production_step_call_site": (
             "packages/ocean/legoesm/ocean/dynamics/"
             "ocean_model_latlon_cgrid.py:10982-10995"),
-        "eager": score_kh_execution(
-            eager_statement_outputs, eager_whole_closure),
-        "jit": score_kh_execution(
-            jit_statement_outputs, jit_whole_closure),
+        ISOLATED_EAGER_LABEL: isolated_eager,
+        ISOLATED_JIT_LABEL: isolated_jit,
+        PRODUCTION_STEP_LABEL: production_row,
     }
     if plant_kh_entry:
         baseline_k_h = {
-            "eager": np.asarray(eager_whole_closure),
-            "jit": np.asarray(jit_whole_closure),
+            ISOLATED_EAGER_LABEL: np.asarray(eager_whole_closure),
+            ISOLATED_JIT_LABEL: np.asarray(jit_whole_closure),
         }
         bumped_entry = np.nextafter(
             np.asarray(e_post), np.float64(np.inf))
         bumped_k_h = {
-            "eager": np.asarray(close_from_en(jnp.asarray(bumped_entry))),
-            "jit": np.asarray(
+            ISOLATED_EAGER_LABEL: np.asarray(
+                close_from_en(jnp.asarray(bumped_entry))),
+            ISOLATED_JIT_LABEL: np.asarray(
                 jitted_close_from_en(jnp.asarray(bumped_entry))),
         }
         common_response = np.asarray(wet, dtype=bool).copy()
-        for mode in ("eager", "jit"):
+        for mode in (ISOLATED_EAGER_LABEL, ISOLATED_JIT_LABEL):
             common_response &= (
                 baseline_k_h[mode].view(np.uint64)
                 != bumped_k_h[mode].view(np.uint64))
         planted_energy, planted_index = _plant_entry_ulp_at_changed_output(
-            np.asarray(e_post), baseline_k_h["eager"],
-            bumped_k_h["eager"], common_response)
+            np.asarray(e_post), baseline_k_h[ISOLATED_EAGER_LABEL],
+            bumped_k_h[ISOLATED_EAGER_LABEL], common_response)
         planted_k_h = {
-            "eager": np.asarray(
+            ISOLATED_EAGER_LABEL: np.asarray(
                 close_from_en(jnp.asarray(planted_energy))),
-            "jit": np.asarray(
+            ISOLATED_JIT_LABEL: np.asarray(
                 jitted_close_from_en(jnp.asarray(planted_energy))),
         }
         response_rows = {
             mode: _operand_score(
                 planted_k_h[mode], baseline_k_h[mode], wet)
-            for mode in ("eager", "jit")
+            for mode in (ISOLATED_EAGER_LABEL, ISOLATED_JIT_LABEL)
         }
+        planted_production = production_step_k_h(
+            ("tke", planted_index))
+        response_rows[PRODUCTION_STEP_LABEL] = _operand_score(
+            np.asarray(planted_production["candidate_k_h"]),
+            production_candidate, wet)
         require(all(not row["exact"] and row["unequal"] >= 1
                     for row in response_rows.values()),
-                "one-ULP TKE entry plant did not change both eager and "
-                f"production-JIT source-order K_H rows: {response_rows}")
+                "one-ULP TKE entry plant did not change all three K_H rows: "
+                f"{response_rows}")
         raise GateError(
             "planted one-ULP TKE entry violation detected at "
             f"{planted_index}: source_order_closure_k_h changed "
-            f"{response_rows['eager']['unequal']} eager and "
-            f"{response_rows['jit']['unequal']} production-JIT cell(s)")
+            f"{response_rows[ISOLATED_EAGER_LABEL]['unequal']} "
+            f"{ISOLATED_EAGER_LABEL}, "
+            f"{response_rows[ISOLATED_JIT_LABEL]['unequal']} "
+            f"{ISOLATED_JIT_LABEL}, and "
+            f"{response_rows[PRODUCTION_STEP_LABEL]['unequal']} "
+            f"{PRODUCTION_STEP_LABEL} cell(s)")
 
     # Rule 10: invoke the public production orchestrator with the printed card
     # configuration.  The record supplies every carried closure operand; only

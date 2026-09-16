@@ -2,10 +2,11 @@
 # Citation: GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:627-630,
 #   :669-683, :690-702; stprk3.f90:154-168.
 # Frozen Prediction 3 (every statement row through final K_H exact): REFUTED.
-# candidate_statement_walk_fix2.json, SHA-256 e4253dd0f62b7d13c9e982
-#   f71845e4ff7d845467036acfe0d7ddf5a9697aabb3. The eager statement walk has
-#   all_statement_rows_exact=true (every row 0/max 0); the production-JIT
-#   statement walk has all_statement_rows_exact=false. Non-exact JIT rows:
+# candidate_statement_walk_fix3.json, SHA-256 ec26b17f8c8a9d9366aa6497
+#   3b7fb96acb6dccb6a9edc665942513a02836c8bb. The isolated-closure eager
+#   statement walk has all_statement_rows_exact=true (every row 0/max 0); the
+#   isolated-closure JIT walk has all_statement_rows_exact=false. Its non-exact
+#   rows are:
 #   raw_buoyancy_length: 2,098/17,400, 1.4210854715202004e-14, :627-630;
 #   bounded_mixing_length: 2,052/17,400, 3.552713678800501e-15, :634-683;
 #   raw_zav: 558/5,723, 3.469446951953614e-18, :692;
@@ -14,15 +15,18 @@
 #     3.469446951953614e-18, :694;
 #   dissipation_length_output: 1,844/17,400, 1.734723475976807e-18, :695;
 #   avt_inverse_prandtl_update: 522/17,400, 1.734723475976807e-18, :699-702.
-# Whole-closure rows from the SAME callable and NEMO entry operands:
-#   eager: 0/17,400 unequal, max 0;
-#   jax.jit: 522/17,400 unequal, max 1.734723475976807e-18.
-# Production call site: ocean_model_latlon_cgrid.py:10982-10995 (_step_jitted).
-# The compiled closure's fusion/rounding differs from NEMO statement order;
-# eager-only exactness does not qualify this patch under Rule 12.
-# Plant evidence: candidate_ulp_plant_fix2.log, SHA-256 d62d644a3e87b8e3510a
-#   a05e693f187eca2dcb6e5417cdb16e2b659c37488672. A +1-ULP change to
-#   en_post_sweep[1,1,0] changes 1 eager and 1 production-JIT output cell.
+# Three K_H rows against NEMO avt_pre_evd:
+#   isolated-closure eager: 0/17,400 unequal, max 0;
+#   isolated-closure JIT: 522/17,400, max 1.734723475976807e-18;
+#   production step (_step_jitted): 5,723/17,400, max 0.05926217077024117.
+# The production row drives the existing recorded-entry stage twin through
+# ocean_model_latlon_cgrid.py:10982-10995 and extracts returned state.tke_avt,
+# assigned from _tke_coeff_new.K_H at :10797-10802. Isolated exactness does not
+# qualify this patch under Rule 12.
+# Plant evidence: candidate_ulp_plant_fix3.log, SHA-256 eab66a436cb74f740765e31
+#   b452cdab434401abfd06f77f17fb5c3fedb2cab7f. A +1-ULP change to the selected
+#   recorded TKE entry cell changes 1 cell in each of isolated-closure eager,
+#   isolated-closure JIT, and production step (_step_jitted).
 # Owning stage: kt=1 pre-stage vertical physics/TKE closure, whose coefficients
 #   are consumed by WS-RK3 stage 1. Decision 41 keeps this patch held.
 # Scratch proof commit: 3849b99199c6dc82fb68917ac5408a9193905cbd.

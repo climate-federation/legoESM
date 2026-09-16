@@ -2586,7 +2586,10 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                 memory_root: Path, btstep_root: Path,
                 stage_closure_root: Path, stage1_w_root: Path,
                 stage1_r3_root: Path,
-                plant: str | None, *, walk_only: bool = False) -> dict:
+                plant: str | None, *, walk_only: bool = False,
+                production_tke_only: bool = False,
+                production_tke_entry_ulp: tuple[str, tuple[int, ...]] | None = None,
+                ) -> dict:
     """Decision-41 stage tables from recorded entries and the shared stage."""
     direct_w_record = read_admitted_stage1_w_walk(
         stage1_w_root, plant_stamp=plant == "stage-w-record-stamp")
@@ -2605,6 +2608,79 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
     cfg = card.recipe.model_config._replace(
         freshwater_closure="real_freshwater", fix_eta_drift=True)
     masks = expected_masks(card)
+
+    if production_tke_only:
+        # Round 93+ already established this recorded-entry stage twin.  Keep
+        # the focused K_H measurement on that same driver, but leave the live
+        # operand observer disabled: ``step`` then returns _step_jitted's
+        # ordinary production state, rather than an observer-shaped trace.
+        require(plant is None, "production TKE-only mode does not accept a legacy plant")
+        # The round-59 record's ``kt=2`` closure entry is the closure memory
+        # consumed by NEMO's first recorded production step: it is bitwise the
+        # kt=1 stage record, while the kt=2 stage record is that closure's
+        # output.  Use the stage twin's kt=1 recorded context so the full step
+        # produces the exact record being scored.
+        state = _bridge_stage_context(
+            card.recipe.initial_state, records[(1, 1)]["arrays"])
+        entry_plant = None
+        if production_tke_entry_ulp is not None:
+            field_name, index = production_tke_entry_ulp
+            require(field_name in {"tke", "tke_avm", "tke_avt", "tke_dissl"},
+                    f"unsupported production TKE entry plant {field_name!r}")
+            field = getattr(state, field_name)
+            data = np.array(field.data, dtype=np.float64, copy=True)
+            require(len(index) == data.ndim
+                    and all(0 <= value < size
+                            for value, size in zip(index, data.shape)),
+                    f"production TKE entry plant index {index} is out of bounds")
+            before = np.float64(data[index])
+            after = np.nextafter(before, np.float64(np.inf))
+            require(before.view(np.uint64) != after.view(np.uint64),
+                    "production TKE entry plant did not move one binary64 ULP")
+            data[index] = after
+            state = state._replace(**{
+                field_name: field.replace(data=jnp.asarray(data)),
+            })
+            entry_plant = {
+                "field": field_name,
+                "index": list(index),
+                "before": float(before),
+                "after": float(after),
+                "changed_entry_cells": 1,
+            }
+        freshwater, surface = _surface_forcings(card, state, 1)
+        hooks = _NEMOWSRK3TestHooks(
+            stage_barotropic_output_override=_barotropic_override(
+                records, advmean_root, 1),
+        )
+        state_after = jax.device_get(LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, cfg,
+            _nemo_ws_test_hooks=hooks).step(
+                state, dt=card.dt_s, freshwater=freshwater,
+                surface_forcing=surface))
+        require(getattr(state_after, "tke_avt", None) is not None,
+                "production _step_jitted result has no tke_avt K_H carry")
+        return {
+            "format": "nemo-testcase-l2-gyre-stage-twin-production-tke-v1",
+            "label": "production step (_step_jitted)",
+            "entry": "NEMO-recorded kt=1 Kbb/TKE entry",
+            "entry_record": str(
+                stage_root / "oracle_momstage_kt00000001_s1.bin"),
+            "output_carry": "LatLonCGridOceanState.tke_avt",
+            "extraction_citation": (
+                "ocean_model_latlon_cgrid.py:10797-10802"),
+            "step_citation": "ocean_model_latlon_cgrid.py:10982-10995",
+            "carry_declaration_citation": "state.py:577-581",
+            "entry_plant": entry_plant,
+            # Private in-process payload consumed by round 54.  This focused
+            # mode is not serialized by the round-46 CLI.
+            "entry_carry": {
+                name: np.asarray(getattr(state, name).data)
+                for name in ("tke", "tke_avm", "tke_avt", "tke_dissl")
+            },
+            "candidate_k_h": np.asarray(state_after.tke_avt.data),
+        }
+
     next_entries = {
         kt: read_entry(stage_root / f"oracle_step_entry_kt{kt:08d}.bin")
         for kt in (2, 3)
