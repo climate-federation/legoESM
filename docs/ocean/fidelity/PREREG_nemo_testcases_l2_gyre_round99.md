@@ -109,3 +109,30 @@ restored and retained only as a held manifest patch.
 No production configuration, carried-state policy, coefficient, timestep,
 stabilizer, year harness, reconciliation gate, freshwater pair, #1484 guard,
 NEMO source, or NEMO executable may change.
+
+## Pre-measurement addendum: the compiled HYB ratio interpolation
+
+Frozen after the direct record confirmed the first non-bit input at
+`r3t(Kaa)`, but before replaying the following newly read statement or changing
+production. The initial prediction that a re-reduced static column owned that
+row is **REFUTED**: rebuilding NEMO's stored reciprocal expression leaves the
+same 201 unequal cells. Reading forward in the compiled stage program exposes
+an earlier association the initial walk omitted.
+
+GYRE resolves the compiled `n_baro_upd` default to `np_HYB`. Stage 1 first
+saves the full external-mode `ssha`, independently interpolates `ssh(Kaa)` as
+`r2_3*ssh(Kbb) + r1_3*ssha`, forms `r3ta = ssha*r1_ht_0`, and then independently
+interpolates `r3t(Kaa) = r2_3*r3t(Kbb) + r1_3*r3ta`
+(`GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/stprk3_stg.f90:150-190` and
+`GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/domqco.f90:256-258`). Multiplying
+the already-interpolated `ssh(Kaa)` by a reciprocal is algebraically equal but
+not the statement NEMO executes.
+
+The existing admitted full external SSH, Kbb `r3t`, and static geometry are
+sufficient for a registered replay. The frozen prediction is that this
+source-ordered HYB ratio interpolation makes direct `r3t(Kaa)` BIT, after
+which every direct W recurrence row and final W remain BIT. Any unequal HYB
+ratio cell refutes that prediction and triggers the same-call operand
+acquisition. If it is BIT, the only candidate remains the same-stage W
+materialization plus Round 97's full-RHS member; it must make given-entry
+stage-1 U, V, and W BIT before the already-frozen Rule-12 and 30-day tests.
