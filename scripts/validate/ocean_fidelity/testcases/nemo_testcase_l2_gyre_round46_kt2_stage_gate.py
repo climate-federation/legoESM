@@ -1189,7 +1189,9 @@ def _stage1_transport_w_trace(
     import jax.numpy as jnp
     from legoesm.core.source_rounding import nemo_source_round
 
-    materialize = nemo_source_round if source_round else jax.lax.optimization_barrier
+    materialize = (
+        (lambda value: jax.lax.reduce_precision(value, 11, 52))
+        if source_round else jax.lax.optimization_barrier)
     transport_u = jnp.asarray(transport_u)[..., :30]
     transport_v = jnp.asarray(transport_v)[..., :30]
     tmask = jnp.asarray(tmask)[..., :30]
