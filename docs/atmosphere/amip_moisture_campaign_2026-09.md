@@ -329,3 +329,28 @@ offline ladder). The +11-13 W/m2 rlut excess is not an rh_crit matter (high
 cloud ~0 on the dried column): a high-cloud lever follows. User decision:
 wait for that lever and re-tune once; PR #1756 carries the rain route and
 M_b_max 0.05 only.
+
+## Iteration E result — refined BL grid (wv_bl30 − wv_ctl30b, adopted deck, days 90-110)
+| quantity (tropical ocean)     | uniform | refined − uniform |
+|-------------------------------|--------:|------------------:|
+| hfls [W/m2]                   | 101.1   | +3.4  |
+| evspsbl [mm/day]              | 3.49    | +0.12 |
+| prw [kg/m2]                   | 44.6    | −1.5  |
+| pr [mm/day]                   | 4.06    | +0.34 |
+| clt [%]                       | 55.3    | +11.1 |
+| rsut [W/m2]                   | 83.3    | +10.9 |
+| rlut [W/m2]                   | 273.6   | +2.3  |
+| day 110, lowest 100 hPa q / RH / T | 16.31 / 0.837 / 296.49 | −0.08 / +0.019 / −0.36 |
+| day 110, 925-1000 hPa q / RH / T   | 17.51 / 0.859 / 295.88 | −0.19 / +0.022 / −0.20 |
+Surface-layer gate: REFUTED (q −0.1 to −0.2 g/kg, RH +2 points: the resolved
+layers are cooler, not drier). Side result: the resolved boundary-layer top
+restores +11 points of tropical low cloud, which offsets the cover collapse
+of the rain route (rsut bias −8 → +3, clt 55 → 66 vs ESACCI ~65) — a
+cloud/radiation win to weigh with the cloud-cover session's re-tune, and the
+UTLS session must judge the coarsened upper levels (33 → 40 hPa).
+Adopted-deck effect (wv_ctl30b vs wv_sfcrain30, i.e. M_b_max 0.05 vs 0.02 on
+the rain route): lowest 100 hPa q 16.82 → 16.31 (−0.5 g/kg), RH 0.849 →
+0.837 at day 110 — the cap change dries the surface layer over 30 days
+where the 5-day arm showed nothing.
+Per the user's order: 3a did not move the surface layer → 3b, partial-cloud
+condensation, next.
