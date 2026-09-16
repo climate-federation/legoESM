@@ -15,6 +15,14 @@ import logging
 import jax
 import jax.numpy as jnp
 
+# Phase-2 prescribed radiative surface BC thresholds
+# (PhysicsPipeline.compute_radiation_core).
+_PRESCRIBED_LW_UP_FLOOR_W_M2 = 1.0e-6  # coeff-ok: numerical floor keeping (LW_up/sigma_sb)**0.25 finite/real for near-zero (polar-night, thick-ice) upwelling LW; not a tuned physical coefficient
+# Minimum downwelling SW for the SW_up/SW_down albedo ratio to be meaningful;
+# below it (night side / polar winter) the ratio is 0/0 noise and the run
+# keeps its own albedo (after the coupler overrides).
+_PRESCRIBED_ALBEDO_MIN_SW_DOWN_W_M2 = 1.0  # coeff-ok: owner-confirmed dark-sky threshold
+
 logger = logging.getLogger(__name__)
 
 # Ambient CO2 handed to the land tile's photosynthesis [ppmv].  One definition,
@@ -1046,6 +1054,7 @@ class PhysicsPipeline:
                             N_c=None, N_r=None, N_i=None,
                             T_land=None, aerosol_od=None,
                             sfc_shflx_override=None, sfc_lhflx_override=None,
+                            sfc_taux_override=None, sfc_tauy_override=None,
                             tke=None, qke=None, gwd_spectrum=None,
                             w_land=None, snow=None, land_ml=None,
                             land_ml_params=None):
@@ -1304,8 +1313,11 @@ class PhysicsPipeline:
                 # path is needed only by the shallow closure / RCAPDCYCL
                 # (codex R2: land-RHEBC-only must not demand a surface
                 # config).
+                _prescribed_heat = (sfc_shflx_override is not None
+                                    and sfc_lhflx_override is not None)
                 _have_sfc_source = (
-                    (self.surface_tiled and self.f_land is not None)
+                    _prescribed_heat
+                    or (self.surface_tiled and self.f_land is not None)
                     or getattr(self.turbulence_config, "surface", None)
                     is not None
                 )
@@ -1367,7 +1379,14 @@ class PhysicsPipeline:
                     # (codex R2 #1 UnboundLocalError).
                     _rho_low = p_full_col[:, -1] / (
                         constants.R_d * jnp.maximum(_T_low, 1.0))
-                    if self.surface_tiled and self.f_land is not None:
+                    if _prescribed_heat:
+                        # A prescribed (coupler / ERA5) heat flux is the
+                        # authoritative surface flux for EVERY consumer: the
+                        # convective closure sees the same boundary the
+                        # turbulence scheme applies, not a bulk estimate.
+                        _shf_c = ad.flatten_2d(sfc_shflx_override)
+                        _lhf_c = ad.flatten_2d(sfc_lhflx_override)
+                    elif self.surface_tiled and self.f_land is not None:
                         # SAME mosaic arguments as the turbulence path
                         # (beta-limited land evaporation + multilayer q_sfc
                         # override — codex R1 #2: omitting them treated land
@@ -1745,7 +1764,7 @@ class PhysicsPipeline:
             or self.physics_parameterization is not None
         )
 
-        # --- SHARED air-sea surface fluxes (coupler-authoritative) -----------
+        # --- SHARED / PRESCRIBED surface fluxes (coupler-authoritative) ------
         # When the coupled driver supplies the tile-blended surface SH/LH (its
         # bulk scheme, q_sfc = 0.98*q_sat mixing ratio, ocean-tile C_H/C_E),
         # the atmosphere DISCARDS its own bulk estimate and uses the coupler's
@@ -1754,35 +1773,66 @@ class PhysicsPipeline:
         # array is a STATIC structural choice (set once by the driver closure
         # for the whole run), so a Python ``if`` is correct here -- the JAX
         # feature-gating exception (NOT a data-dependent jnp.where, which would
-        # trace both branches).  Sign convention: both override fields are
+        # trace both branches).  Sign convention: the heat-flux overrides are
         # [W/m2, positive UP = surface->atmosphere], identical to the bulk
-        # ``shflx``/``lhflx`` they replace, so the downstream bottom-level T/q
-        # kick (positive shflx warms the surface air; positive lhflx moistens
-        # it) and the returned PhysicsOutput diagnostics are sign-consistent
-        # with the ocean side (which applies q_net = ... - shflx - lhflx, i.e.
-        # the SAME positive-up fluxes as a heat SINK on the ocean).
+        # ``shflx``/``lhflx`` they replace, and the stress overrides are [Pa,
+        # stress ON THE ATMOSPHERE] (positive stress accelerates the air), so
+        # the bottom-level T/q/momentum kicks and the returned PhysicsOutput
+        # diagnostics are sign-consistent with the ocean side (which applies
+        # q_net = ... - shflx - lhflx, i.e. the SAME positive-up fluxes as a
+        # heat SINK on the ocean).
+        #
+        # Phase 2: a prescribed flux (heat AND momentum, coupler or ERA5) is
+        # now ALSO the lower boundary condition of a running turbulence
+        # scheme — folded into the kernel config below via
+        # fold_prescribed_surface_fluxes (the kernels apply
+        # config.surface.prescribed_* through
+        # surface_layer.compute_surface_fluxes -> _apply_prescribed_scalar_
+        # fluxes: heat replaced, stress replaced and ustar rebuilt) — so the
+        # former "incompatible with a turbulence scheme" ValueError is gone:
+        # the prescribed flux REPLACES the scheme's own bulk flux instead of
+        # double-counting it.
         _flux_override = (
             sfc_shflx_override is not None and sfc_lhflx_override is not None
         )
-        if _flux_override:
-            if turb_owns_surface:
-                # A turbulence / unified-physics scheme applies the surface
-                # flux as the IMPLICIT bottom BC of its vertical-diffusion
-                # solve; overlaying the coupler flux on top would double-count
-                # (or silently disagree with) the surface exchange.  The
-                # shared-flux air-sea coupling is only well-posed against the
-                # explicit bulk-BL surface path -- fail LOUDLY rather than
-                # corrupt the budget (CLAUDE.md: no silent degradation).
-                raise ValueError(
-                    "Coupler shared surface-flux override (couple_surface_"
-                    "fluxes) is incompatible with a turbulence / unified-"
-                    "physics scheme that owns surface exchange: the turbulence "
-                    "scheme already applies the surface flux as its implicit "
-                    "bottom boundary condition, so the override would double-"
-                    "count it.  Use the bulk-BL surface path (no turbulence "
-                    "scheme) when enabling shared air-sea fluxes, or extend the "
-                    "turbulence surface BC to ingest the coupler flux first."
-                )
+        _prescribed_sfc_flux = (
+            _flux_override
+            or sfc_taux_override is not None
+            or sfc_tauy_override is not None
+        )
+        if _prescribed_sfc_flux and self.physics_parameterization is not None:
+            # The joint learned parameterization owns its surface exchange
+            # inside the learned kernel; there is no hook to inject a
+            # prescribed lower BC — fail LOUDLY rather than silently drop the
+            # coupler/ERA5 flux (CLAUDE.md: no silent degradation).
+            raise ValueError(
+                "Prescribed surface fluxes (sfc_shflx_override / "
+                "sfc_lhflx_override / sfc_taux_override / sfc_tauy_override) "
+                "have no hook into the joint learned physics_parameterization: "
+                "its surface exchange lives inside the learned kernel and "
+                "cannot yet ingest a prescribed lower boundary condition."
+            )
+        if (sfc_shflx_override is None) != (sfc_lhflx_override is None):
+            # Heat is prescribed as a pair too: half of it would fold into a
+            # turbulence kernel but be ignored on the bulk path.
+            raise ValueError(
+                "physics_step_no_rad: surface heat-flux overrides must be "
+                "prescribed as a pair (sfc_shflx_override AND "
+                "sfc_lhflx_override) — only one was given."
+            )
+        if (sfc_taux_override is None) != (sfc_tauy_override is None):
+            # Stress is a vector: prescribing only one component would leave
+            # the other at the scheme's own estimate — a caller bug.
+            raise ValueError(
+                "physics_step_no_rad: surface stress overrides must be "
+                "prescribed as a pair (sfc_taux_override AND "
+                "sfc_tauy_override) — only one component was given."
+            )
+        if _flux_override and not turb_owns_surface:
+            # Bulk path only.  With a turbulence scheme the config fold below
+            # makes the prescribed flux the kernel's lower BC, and the
+            # kernel's own TurbulenceOutput.shflx/lhflx (the prescribed
+            # values) take over the diagnostics further below.
             shflx = sfc_shflx_override
             lhflx = sfc_lhflx_override
 
@@ -1790,8 +1840,10 @@ class PhysicsPipeline:
         dq_v_dt = dq_v_dt_conv + dq_v_dt_micro
 
         # Apply the explicit bottom-level surface kick from the bulk path OR
-        # the coupler override (``_flux_override`` implies ``not
-        # turb_owns_surface`` here -- the turbulence case raised above).
+        # the coupler override — only when NO scheme owns surface exchange
+        # (``not turb_owns_surface``); a turbulence scheme instead receives
+        # the prescribed flux as its diffusion bottom BC via the config fold
+        # below, never both (that would double-count the flux).
         if not turb_owns_surface:
             evap_rate = lhflx / constants.L_v
             dT_BL = constants.g * shflx / (constants.c_pd * dp_low)
@@ -1802,6 +1854,19 @@ class PhysicsPipeline:
         # Momentum tendencies from turbulence and GWD
         du_dt = jnp.zeros(shape_3d, dtype=_sd)
         dv_dt = jnp.zeros(shape_3d, dtype=_sd)
+
+        # Prescribed surface MOMENTUM flux, bulk path: the coupler/ERA5 stress
+        # ON THE ATMOSPHERE [Pa] accelerates the lowest layer — the sign
+        # convention of implicit_vertical_diffusion's positive-up surface flux
+        # (positive stress on the atmosphere accelerates the air).  When a
+        # turbulence scheme runs this kick is NOT applied: the stress is
+        # folded into the kernel config below and applied as the diffusion's
+        # lower BC (both would double-count the surface drag).
+        if sfc_taux_override is not None and not turb_owns_surface:
+            du_dt = du_dt.at[..., -1].add(
+                constants.g * sfc_taux_override / dp_low)
+            dv_dt = dv_dt.at[..., -1].add(
+                constants.g * sfc_tauy_override / dp_low)
 
         if (self.turbulence_fn is not None and turb_out is None) or self.gwd_fn is not None:
             u_col = ad.flatten_3d(u)
@@ -1857,6 +1922,58 @@ class PhysicsPipeline:
                     u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
                     rho_col_phys[:, -1], sst, sic, T_land, p_s,
                     beta_land=beta_land, q_sfc_land_override=_q_sfc_land_ml,
+                )
+            # --- prescribed surface flux = the scheme's lower BC -------------
+            # Fold the coupler/ERA5 overrides (grid-shaped; flattened to
+            # (ncol,) here with the adapter) into the kernel config for THIS
+            # call only — the stored ``self.turbulence_config`` is never
+            # mutated (NamedTuple._replace copy).  The kernels apply
+            # config.surface.prescribed_* as the diffusion's lower boundary
+            # condition, so the prescribed flux REPLACES the scheme's own bulk
+            # surface flux.  A tiled-surface bulk ``surface_flux`` tuple formed
+            # above is exactly what the prescribed flux replaces — drop it
+            # (injecting both would double-count / silently disagree).
+            if _prescribed_sfc_flux:
+                from legoesm.atmosphere.physics.turbulence.integration import (
+                    fold_prescribed_surface_fluxes
+                )
+                from legoesm.atmosphere.physics.turbulence.surface_layer import (
+                    prescribed_into_surface_flux,
+                )
+                if "surface_flux" in _turb_kwargs:
+                    # The tiled tuple is what the kernel will read, so the
+                    # prescribed components replace THEIR slots in it and
+                    # the unprescribed ones (e.g. the tiled stress when the
+                    # coupler prescribes heat only) survive.
+                    _turb_kwargs["surface_flux"] = prescribed_into_surface_flux(
+                        _turb_kwargs["surface_flux"], rho_col_phys[:, -1],
+                        shflx=(None if sfc_shflx_override is None
+                               else ad.flatten_2d(sfc_shflx_override)),
+                        lhflx=(None if sfc_lhflx_override is None
+                               else ad.flatten_2d(sfc_lhflx_override)),
+                        tau_x=(None if sfc_taux_override is None
+                               else ad.flatten_2d(sfc_taux_override)),
+                        tau_y=(None if sfc_tauy_override is None
+                               else ad.flatten_2d(sfc_tauy_override)),
+                    )
+                _turb_kwargs["config"] = fold_prescribed_surface_fluxes(
+                    self.turbulence_config,
+                    shflx_w_m2=(
+                        None if sfc_shflx_override is None
+                        else ad.flatten_2d(sfc_shflx_override)
+                    ),
+                    lhflx_w_m2=(
+                        None if sfc_lhflx_override is None
+                        else ad.flatten_2d(sfc_lhflx_override)
+                    ),
+                    tau_x_pa=(
+                        None if sfc_taux_override is None
+                        else ad.flatten_2d(sfc_taux_override)
+                    ),
+                    tau_y_pa=(
+                        None if sfc_tauy_override is None
+                        else ad.flatten_2d(sfc_tauy_override)
+                    ),
                 )
             if self._turb_energy_field is not None:
                 # Stateful scheme (issue #413): kernel takes the
@@ -2219,6 +2336,8 @@ class PhysicsPipeline:
                                sfc_albedo_override=None,
                                sfc_T_override=None,
                                sfc_emissivity_override=None,
+                               sfc_lw_up=None,
+                               sfc_sw_up=None, sfc_sw_down=None,
                                conv_precip=None, land_ml=None, w_land=None,
                                snow=None, land_ml_params=None,
                                cloud_fraction=None):
@@ -2348,6 +2467,39 @@ class PhysicsPipeline:
         # uncoupled), byte-identical.
         if sfc_emissivity_override is not None:
             emissivity = sfc_emissivity_override
+
+        # --- Prescribed surface RADIATIVE BC (coupler / ERA5 fluxes) --------
+        # Phase 2: when the driver threads measured/prescribed surface
+        # radiative fluxes, the radiative boundary itself is formed from them
+        # (it wins over the coupler overrides above): T_rad =
+        # (LW_up / sigma_sb)**0.25 with emissivity 1 — LW_up is an actual
+        # upwelling radiance, not a grey-body eps*sigma*T_sfc^4 — and
+        # albedo = SW_up / SW_down wherever SW_down is large enough for the
+        # ratio to be meaningful; below the threshold (night side / polar
+        # winter, where the ratio is 0/0 noise) keep the albedo the run would
+        # otherwise use (the static blend AFTER any coupler override above).
+        # The TURBULENT surface temperature (the sst/sic/T_land blend feeding
+        # the BL fluxes in physics_step_no_rad) is deliberately NOT replaced:
+        # when a radiative BC is prescribed the turbulent fluxes are
+        # prescribed too (phase-2 doctrine: one authoritative flux set), so no
+        # consumer of the turbulent T_sfc keeps running on a stale blend.
+        if (sfc_sw_up is None) != (sfc_sw_down is None):
+            raise ValueError(
+                "compute_radiation_core: sfc_sw_up and sfc_sw_down must be "
+                "prescribed together — the albedo = SW_up/SW_down boundary "
+                "condition needs both (caller bug).")
+        if sfc_lw_up is not None:
+            T_sfc = (jnp.maximum(sfc_lw_up, _PRESCRIBED_LW_UP_FLOOR_W_M2)
+                     / constants.sigma_sb) ** 0.25  # coeff-ok: exact fourth root of the Stefan-Boltzmann inversion
+            emissivity = jnp.ones_like(T_sfc)
+        if sfc_sw_up is not None:
+            _alb = jnp.clip(
+                sfc_sw_up / jnp.maximum(
+                    sfc_sw_down, _PRESCRIBED_ALBEDO_MIN_SW_DOWN_W_M2),
+                0.0, 1.0)  # coeff-ok: physical albedo bounds [0,1], not tuned
+            albedo = jnp.where(
+                sfc_sw_down >= _PRESCRIBED_ALBEDO_MIN_SW_DOWN_W_M2,
+                jnp.nan_to_num(_alb), albedo)
 
         p_full = p_s[..., None] * self.sigma_full
         p_half = p_s[..., None] * self.sigma_half
@@ -2780,6 +2932,9 @@ class PhysicsPipeline:
                          sfc_emissivity_override=None,
                          sfc_shflx_override=None,
                          sfc_lhflx_override=None,
+                         sfc_taux_override=None, sfc_tauy_override=None,
+                         sfc_lw_up=None, sfc_sw_up=None, sfc_sw_down=None,
+                         land_frac=None, phis=None,
                          tke=None, qke=None, gwd_spectrum=None,
                          conv_precip=None, land_ml=None, w_land=None,
                          snow=None, land_ml_params=None, cloud_fraction=None):
@@ -2796,9 +2951,16 @@ class PhysicsPipeline:
                  q_i, q_s, q_g, N_c, N_r, N_i,
                  sfc_albedo_override, sfc_T_override, sfc_emissivity_override,
                  sfc_shflx_override, sfc_lhflx_override,
+                 sfc_taux_override, sfc_tauy_override,
+                 sfc_lw_up, sfc_sw_up, sfc_sw_down,
+                 land_frac, phis,
                  tke, qke, gwd_spectrum,
                  conv_precip, land_ml, w_land, snow, land_ml_params,
                  cloud_fraction) = args
+                # land_frac / phis exist for the LEARNED wrappers that share
+                # this step signature (phase 2, part 2); the classical
+                # pipeline does not consume them.
+                del land_frac, phis
 
                 (dT_dt_rad, sw_net_sfc, lw_net_sfc,
                  sw_up_toa, lw_up_toa, sw_down_toa, T_land_new, land_ml_new) = \
@@ -2816,6 +2978,8 @@ class PhysicsPipeline:
                         sfc_albedo_override=sfc_albedo_override,
                         sfc_T_override=sfc_T_override,
                         sfc_emissivity_override=sfc_emissivity_override,
+                        sfc_lw_up=sfc_lw_up,
+                        sfc_sw_up=sfc_sw_up, sfc_sw_down=sfc_sw_down,
                         conv_precip=conv_precip, land_ml=land_ml, w_land=w_land,
                         snow=snow, land_ml_params=land_ml_params,
                         cloud_fraction=cloud_fraction,
@@ -2844,6 +3008,8 @@ class PhysicsPipeline:
                     aerosol_od=aerosol_od,
                     sfc_shflx_override=sfc_shflx_override,
                     sfc_lhflx_override=sfc_lhflx_override,
+                    sfc_taux_override=sfc_taux_override,
+                    sfc_tauy_override=sfc_tauy_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
                     w_land=w_land, snow=snow, land_ml=land_ml,
                     land_ml_params=land_ml_params,
@@ -2884,10 +3050,17 @@ class PhysicsPipeline:
                  q_i, q_s, q_g, N_c, N_r, N_i,
                  sfc_albedo_override, sfc_T_override, sfc_emissivity_override,
                  sfc_shflx_override, sfc_lhflx_override,
+                 sfc_taux_override, sfc_tauy_override,
+                 sfc_lw_up, sfc_sw_up, sfc_sw_down,
+                 land_frac, phis,
                  tke, qke, gwd_spectrum,
                  conv_precip, land_ml, w_land, snow, land_ml_params,
                  cloud_fraction) = args
-                del conv_precip  # radiation-only input; unused on the no-rad path
+                del conv_precip, sfc_lw_up, sfc_sw_up, sfc_sw_down  # radiation-only inputs; unused on the no-rad path
+                # land_frac / phis exist for the LEARNED wrappers that share
+                # this step signature (phase 2, part 2); the classical
+                # pipeline does not consume them.
+                del land_frac, phis
 
                 physics_out = pipeline.physics_step_no_rad(
                     T, p_s, q_v, q_c, q_r, conv_prog, u, v, sst, sic, lat, dt,
@@ -2899,6 +3072,8 @@ class PhysicsPipeline:
                     aerosol_od=aerosol_od,
                     sfc_shflx_override=sfc_shflx_override,
                     sfc_lhflx_override=sfc_lhflx_override,
+                    sfc_taux_override=sfc_taux_override,
+                    sfc_tauy_override=sfc_tauy_override,
                     tke=tke, qke=qke, gwd_spectrum=gwd_spectrum,
                     w_land=w_land, snow=snow, land_ml=land_ml,
                     land_ml_params=land_ml_params,
@@ -2937,6 +3112,9 @@ class PhysicsPipeline:
                     q_i, q_s, q_g, N_c, N_r, N_i,
                     sfc_albedo_override, sfc_T_override, sfc_emissivity_override,
                     sfc_shflx_override, sfc_lhflx_override,
+                    sfc_taux_override, sfc_tauy_override,
+                    sfc_lw_up, sfc_sw_up, sfc_sw_down,
+                    land_frac, phis,
                     tke, qke, gwd_spectrum,
                     conv_precip, land_ml, w_land, snow, land_ml_params,
                     cloud_fraction)

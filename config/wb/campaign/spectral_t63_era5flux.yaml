@@ -1,4 +1,11 @@
-# WeatherBench 3-family forecast campaign — spectral T63 core (Ginsburg-quick tier).
+# WeatherBench spectral T63 campaign with the ERA5 SURFACE FLUXES PRESCRIBED.
+#
+# Identical to spectral_t63.yaml in every row except ``era5_surface_fluxes``
+# (below): the atmosphere's lower boundary condition is ERA5's own surface
+# stress, sensible and latent heat flux and upwelling SW/LW, held fixed over
+# each 6 h window, instead of the interactive bulk surface.  Diff this deck
+# against spectral_t63.yaml before quoting a number from it: the ONE row that
+# differs is the variable under test.
 #
 # One config drives all three families through the SHARED AIMIP spectral stack
 # (``legoesm.training.neural_gcm_spectral`` builders via ``scale_build``):
@@ -78,7 +85,10 @@ train_years: [2015, 2016, 2017, 2018, 2019]
 # emission and reflection replaced; its surface leaves are then frozen), the
 # learned arms receive the six planes as extra inputs.  Off = the historical
 # interactive surface.
-era5_surface_fluxes: false
+# NOTE: the atmosphere's turbulent and radiative surface exchange is the ERA5
+# one; a land tile (slab or multilayer), if active, still integrates its own
+# energy balance from its own bulk fluxes and is not fed back.
+era5_surface_fluxes: true
 train_windows:  # 60 windows = 12 month-start 1-day windows x 5 train-years (~240 6-hourly pairs);
                 # all-season + low-autocorrelation so the NN arms avoid the #1047 60-sample null
                 # result; day_offset = leap-aware month-start day-of-year, fits the eager loader (#1160).
@@ -189,7 +199,9 @@ neural_gcm:
   # NeuralGCM-style spatial embedding: sin/cos lat, land fraction, orography
   # and a learned 8-channel per-column embedding (Kochkov et al. 2024).  Set
   # false for a like-for-like comparison against a run without it.
-  spatial_embedding: true
+  # owner 2026-09-16: spatial embedding OFF by default when the surface
+  # fluxes are prescribed.
+  spatial_embedding: false
   # #1464: the learned column has NO momentum head, so without this it runs
   # with no physical surface stress at all, while the classical arm it is
   # scored against carries `classical.turbulence` below. The scheme here MUST
@@ -208,7 +220,9 @@ sfno:
   # ACE2-style static land-fraction input plane (Watt-Meyer et al. 2024;
   # orography is already a state channel).  Set false for a like-for-like
   # comparison against a run without it.
-  spatial_embedding: true
+  # owner 2026-09-16: spatial embedding OFF by default when the surface
+  # fluxes are prescribed.
+  spatial_embedding: false
   # The spectral-convolution weights are two float64 (n_sh, embed, embed)
   # arrays per block, so they grow as embed^2 * n_blocks. Measured at T63
   # (n_sh = 2080) by building the module under jax.eval_shape:
