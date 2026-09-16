@@ -1326,13 +1326,13 @@ def _stage1_w_walk(
     transport_u = np.asarray(transport["zFu"])
     transport_v = np.asarray(transport["zFv"])
     direct_ww = np.asarray(direct_stage_ww[(1, 1)]["ww"])
-    ssh_kbb = _owned2(arrays["ssh_Kbb"])
-    r3_kbb = _owned2(arrays["r3t_Kbb"])
     wet_surface = _owned3(arrays["tmask"])[..., 0] > 0.5
-    require(np.all(ssh_kbb[wet_surface] != 0.0),
-            "kt1 stage1 cannot recover reciprocal reference depth")
-    r1_h0 = np.zeros_like(ssh_kbb)
-    r1_h0[wet_surface] = r3_kbb[wet_surface] / ssh_kbb[wet_surface]
+    reference_depth = np.sum(
+        _owned3(arrays["e3t_0"]) * _owned3(arrays["tmask"]), axis=-1)
+    require(np.all(reference_depth[wet_surface] > 0.0),
+            "kt1 stage1 cannot recover positive reference depth")
+    r1_h0 = np.zeros_like(reference_depth)
+    r1_h0[wet_surface] = 1.0 / reference_depth[wet_surface]
     r3_kaa = np.asarray(direct_stage_state[(1, 1)]["ssh"]) * r1_h0
     r1_dt = np.float64(1.0 / direct_stage_ww[(1, 1)]["rDt_s"])
     reference = _stage1_transport_w_scalar_reference(
