@@ -96,6 +96,12 @@ def test_mpas_lloyd_flag_round_trip():
     assert parse_args(["--grid", "mpas", "--mpas-lloyd", "0"]).mpas_lloyd == 0
 
 
+def test_no_final_snapshot_flag_round_trip():
+    """--no-final-snapshot is off by default; probe arms select it."""
+    assert parse_args(["--grid", "mpas"]).no_final_snapshot is False
+    assert parse_args(["--grid", "tripole", "--no-final-snapshot"]).no_final_snapshot is True
+
+
 def test_multicontroller_flags_round_trip():
     """--multicontroller / --coordinator parse and reach OMIPRunConfig
     (the route-B cross-process lane, part 2c of the ocean-SPMD promotion)."""
@@ -1047,3 +1053,23 @@ def test_tke_card_round_trip_and_rejection():
     ns = argparse.Namespace(**{**vars(ns), "tke_card": "bogus"})
     with pytest.raises(ValueError, match="unknown --tke-card"):
         run_omip.build_vertical_mixing_config_from_args(ns)
+
+
+def test_ic_from_fesom_mesh_round_trip():
+    a = parse_args(["--grid", "mpas"])
+    assert a.ic_from_fesom_mesh is None
+    a = parse_args(["--grid", "tripole", "--woa-init", "--ic-from-fesom-mesh", "/meshes/forca20"])
+    assert a.ic_from_fesom_mesh == "/meshes/forca20"
+    assert a.woa_init is True
+    assert a.ic_cache_dir is None
+    a = parse_args(["--grid", "tripole", "--woa-init", "--ic-from-fesom-mesh", "/meshes/forca20",
+                    "--ic-cache-dir", "/work/ic_cache"])
+    assert a.ic_cache_dir == "/work/ic_cache"
+
+
+def test_driver_forwards_ic_cache_dir_to_the_fesom_initializer():
+    import inspect
+    from scripts.run import run_omip
+    src = inspect.getsource(run_omip.run_omip_single)
+    i = src.index("init_ocean_from_fesom_mesh(")
+    assert 'cache_dir=getattr(args, "ic_cache_dir", None)' in src[i:i + 600]

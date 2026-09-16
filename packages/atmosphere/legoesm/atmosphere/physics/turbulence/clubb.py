@@ -31,7 +31,11 @@ Table of contents (sections, in order; flag reference table at line 6131)
       cloud-fraction closure)
   12. [line  2533] ADG1 PDF moment integrals + buoyancy-flux assembly
       (``calc_pdf_higher_order_moments`` / ``calc_pdf_xprcp_fluxes`` /
-      ``calc_xpthvp_terms``)
+      ``calc_xpthvp_terms``) + the two-level-set reconciliation
+      (``calc_trapezoid_zt`` / ``calc_trapezoid_zm`` / ``clip_rcm`` /
+      ``compute_cloud_cover``). Every routine in this section is
+      grid-agnostic: CAM evaluates the closure once per level set, so all
+      regridding is the caller's.
   13. [line  2777] Moment-advance building blocks + the xp2_xpyp / windm advances
       (diffusion/mean-advection LHS builders, Cauchy-Schwarz clips,
       ``advance_xp2_xpyp`` / ``advance_windm_edsclrm``)
@@ -113,6 +117,7 @@ the modules.)
 from __future__ import annotations
 
 import math
+import sys
 from typing import NamedTuple
 
 import jax
@@ -313,7 +318,9 @@ __param_spec__ = {
             "w_tol": "numerics: w-moment tolerance/floor [m/s]",
             "wp2_max": "numerics: wp2 upper clip [m^2/s^2]",
         },
-        "params": {},
+        "params": {
+            "pdf_variance_scale": {"units": "1", "bounds": (0.25, 8.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_pdf", "reference": "multiplier on the DIAGNOSED sub-grid variance entering the PDF closure; 1.0 is the closure's own mixing-length estimate", "shape": None},
+        },
     },
 }
 
@@ -382,9 +389,13 @@ def diagnose_cloud_and_buoyancy(thlm, rtm, wp2, exner, p_in_Pa, thv_ds, Kh, Lsca
     # Down-gradient second-order fluxes and mixing-length variances.
     wpthlp = -Kh * ddz_thl
     wprtp = -Kh * ddz_rt
-    thlp2 = jnp.maximum((Lscale * ddz_thl) ** 2, config.thl_tol ** 2)
-    rtp2 = jnp.maximum((Lscale * ddz_rt) ** 2, config.rt_tol ** 2)
-    rtpthlp = Lscale ** 2 * ddz_thl * ddz_rt
+    # Scaled BEFORE the tolerance floors so the floors stay what they are --
+    # tolerances, not a scaled quantity -- and the covariance takes the same
+    # factor as the variances so the correlation the PDF sees is unchanged.
+    _vs = config.pdf_variance_scale
+    thlp2 = jnp.maximum(_vs * (Lscale * ddz_thl) ** 2, config.thl_tol ** 2)
+    rtp2 = jnp.maximum(_vs * (Lscale * ddz_rt) ** 2, config.rt_tol ** 2)
+    rtpthlp = _vs * Lscale ** 2 * ddz_thl * ddz_rt
     up2 = vp2 = jnp.maximum(wp2, config.w_tol ** 2)
 
     # sigma_sqd_w (Skw = 0 -> gamma = gamma_coef), computed directly on zt.
@@ -681,6 +692,19 @@ class CLUBBConfig(NamedTuple):
     cloud_source: str = "native"
     trop_cloud_top_press: float = 0.0
     trop_cloud_taper_lnp_width: float = 0.15
+    # Multiplier on the DIAGNOSED sub-grid variances entering the PDF closure
+    # (both variances and their covariance, so the correlation is preserved).
+    # 1.0 = the closure's own estimate, byte-identical.  This exists to answer
+    # one question cheaply before paying for a prognostic-closure campaign: the
+    # diagnostic variance is a local-equilibrium estimate, mixing length times
+    # local gradient, and is suspected of being far too small in the tropical
+    # mid-troposphere, where the real variance comes from detrained saturated
+    # air sitting beside dry environmental air -- nonlocal, with memory, and
+    # invisible to a vertical-gradient formula.  Scaling it is the one-line
+    # stand-in for carrying it prognostically: if the humidity distribution
+    # does not respond to 2x and 4x here, it will not respond to a prognostic
+    # variance either, and the campaign should look elsewhere.
+    pdf_variance_scale: float = 1.0
 
 
 # Derived parameters (recomputed from base config, never stored as magic
@@ -2696,21 +2720,21 @@ def calc_wpxpyp_pdf(wm, xm, ym, w_1, w_2, x_1, x_2, y_1, y_2,
 # ---------------------------------------------------------------------------
 
 def calc_pdf_higher_order_moments(adg1, wm_zt, rtm, thlm, um, vm,
-                                  corr_rt_thl_1, corr_rt_thl_2, gr: CLUBBGrid):
+                                  corr_rt_thl_1, corr_rt_thl_2):
     """Integrate the ADG1 PDF for the velocity-scalar higher-order moments.
 
     Returns a dict with the Fortran moment names (``wp2rtp``, ``wp2thlp``,
-    ``wp2up``, ``wpup2``, ``wpvp2``, ``wp2up2_zm``, ``wp2vp2_zm``, ``wp4_zm``,
+    ``wp2up``, ``wpup2``, ``wpvp2``, ``wp2up2``, ``wp2vp2``, ``wp4``,
     ``wprtp2``, ``wpthlp2``, ``wprtpthlp``). For ADG1 the w-scalar correlations
     are zero; only ``corr_rt_thl`` (per component) is nonzero.
+
+    Every output is on the SAME grid as the inputs; the CAM tree runs this once
+    per level set, so the caller owns any regridding.
     """
     mf = adg1["mixt_frac"]
     z = jnp.zeros_like(mf)
     w1, w2 = adg1["w_1"], adg1["w_2"]
     vw1, vw2 = adg1["varnce_w_1"], adg1["varnce_w_2"]
-    nzm = gr.zm.shape[1]
-    k_ub = nzm - 1
-    k_lb = 0
 
     def _wp2xp(xm, x1, x2, vx1, vx2):
         return calc_wp2xp_pdf(wm_zt, xm, w1, w2, x1, x2, vw1, vw2, vx1, vx2, z, z, mf)
@@ -2727,13 +2751,10 @@ def calc_pdf_higher_order_moments(adg1, wm_zt, rtm, thlm, um, vm,
     wpup2 = _wpxp2(um, adg1["u_1"], adg1["u_2"], adg1["varnce_u_1"], adg1["varnce_u_2"])
     wpvp2 = _wpxp2(vm, adg1["v_1"], adg1["v_2"], adg1["varnce_v_1"], adg1["varnce_v_2"])
 
-    wp2up2_zt = _wp2xp2(um, adg1["u_1"], adg1["u_2"], adg1["varnce_u_1"], adg1["varnce_u_2"])
-    wp2vp2_zt = _wp2xp2(vm, adg1["v_1"], adg1["v_2"], adg1["varnce_v_1"], adg1["varnce_v_2"])
-    wp2up2_zm = zt2zm(wp2up2_zt, gr).at[:, k_ub].set(0.0)
-    wp2vp2_zm = zt2zm(wp2vp2_zt, gr).at[:, k_ub].set(0.0)
+    wp2up2 = _wp2xp2(um, adg1["u_1"], adg1["u_2"], adg1["varnce_u_1"], adg1["varnce_u_2"])
+    wp2vp2 = _wp2xp2(vm, adg1["v_1"], adg1["v_2"], adg1["varnce_v_1"], adg1["varnce_v_2"])
 
-    wp4_zt = calc_wp4_pdf(wm_zt, w1, w2, vw1, vw2, mf)
-    wp4_zm = zt2zm(wp4_zt, gr, zm_min=0.0).at[:, k_lb].set(0.0).at[:, k_ub].set(0.0)
+    wp4 = calc_wp4_pdf(wm_zt, w1, w2, vw1, vw2, mf)
 
     wprtp2 = _wpxp2(rtm, adg1["rt_1"], adg1["rt_2"], adg1["varnce_rt_1"], adg1["varnce_rt_2"])
     wpthlp2 = _wpxp2(thlm, adg1["thl_1"], adg1["thl_2"], adg1["varnce_thl_1"], adg1["varnce_thl_2"])
@@ -2747,7 +2768,7 @@ def calc_pdf_higher_order_moments(adg1, wm_zt, rtm, thlm, um, vm,
     return {
         "wp2rtp": wp2rtp, "wp2thlp": wp2thlp, "wp2up": wp2up,
         "wpup2": wpup2, "wpvp2": wpvp2,
-        "wp2up2_zm": wp2up2_zm, "wp2vp2_zm": wp2vp2_zm, "wp4_zm": wp4_zm,
+        "wp2up2": wp2up2, "wp2vp2": wp2vp2, "wp4": wp4,
         "wprtp2": wprtp2, "wpthlp2": wpthlp2, "wprtpthlp": wprtpthlp,
     }
 
@@ -2782,21 +2803,19 @@ def calc_xprcp_component(wm, rtm, thlm, um, vm, rcm,
     return wprcp, wp2rcp, rtprcp, thlprcp, uprcp, vprcp
 
 
-def calc_pdf_xprcp_fluxes(adg1, comp, wm_zt, rtm, thlm, um, vm, rcm_zt, gr: CLUBBGrid):
+def calc_pdf_xprcp_fluxes(adg1, comp, wm_zt, rtm, thlm, um, vm, rcm_zt):
     """Mixed cloud-water turbulent fluxes from the ADG1 PDF (``calc_pdf_xprcp_fluxes``).
 
-    Calls :func:`calc_xprcp_component` for each PDF component, mixes the six
+    Calls :func:`calc_xprcp_component` for each PDF component and mixes the six
     fluxes (``w'rc'``, ``w'^2 rc'``, ``rt'rc'``, ``thl'rc'``, ``u'rc'``,
-    ``v'rc'``) by ``mixt_frac`` on zt, then regrids the five zm-output fluxes
-    zt->zm with the top momentum level (``k_ub_zm``) zeroed (corr_w_chi = 0 for
-    ADG1). ``comp`` is the per-component dict from
+    ``v'rc'``) by ``mixt_frac``. ``comp`` is the per-component dict from
     :func:`calc_pdf_liquid_cloud_frac_components`.
 
-    Returns a dict with the zt-grid fluxes (consumed by the buoyancy-flux
-    assembly, which wants the native pdf-grid values) and the regridded zm fluxes.
+    Every output is on the SAME grid as the inputs: the closure is invoked once
+    per level set (thermodynamic and momentum) in the CAM tree, so regridding
+    belongs to the caller, not here.
     """
     mf = comp["mixt_frac"]
-    k_ub = gr.zm.shape[1] - 1
 
     c1 = calc_xprcp_component(
         wm_zt, rtm, thlm, um, vm, rcm_zt,
@@ -2809,18 +2828,12 @@ def calc_pdf_xprcp_fluxes(adg1, comp, wm_zt, rtm, thlm, um, vm, rcm_zt, gr: CLUB
         adg1["varnce_w_2"], comp["stdev_chi_2"], comp["stdev_eta_2"],
         comp["corr_ce_2"], comp["crt_2"], comp["cthl_2"], comp["rc_2"], comp["cf_2"])
 
-    wprcp_zt, wp2rcp_zt, rtprcp_zt, thlprcp_zt, uprcp_zt, vprcp_zt = (
+    wprcp, wp2rcp, rtprcp, thlprcp, uprcp, vprcp = (
         mf * a + (1.0 - mf) * b for a, b in zip(c1, c2))
 
-    def _to_zm(field_zt):
-        return zt2zm(field_zt, gr).at[:, k_ub].set(0.0)
-
     return {
-        "wprcp_zt": wprcp_zt, "wp2rcp_zt": wp2rcp_zt, "rtprcp_zt": rtprcp_zt,
-        "thlprcp_zt": thlprcp_zt, "uprcp_zt": uprcp_zt, "vprcp_zt": vprcp_zt,
-        "wprcp_zm": _to_zm(wprcp_zt), "rtprcp_zm": _to_zm(rtprcp_zt),
-        "thlprcp_zm": _to_zm(thlprcp_zt), "uprcp_zm": _to_zm(uprcp_zt),
-        "vprcp_zm": _to_zm(vprcp_zt),
+        "wprcp": wprcp, "wp2rcp": wp2rcp, "rtprcp": rtprcp,
+        "thlprcp": thlprcp, "uprcp": uprcp, "vprcp": vprcp,
     }
 
 
@@ -2828,31 +2841,159 @@ def calc_pdf_xprcp_fluxes(adg1, comp, wm_zt, rtm, thlm, um, vm, rcm_zt, gr: CLUB
 # Buoyancy fluxes x'thv' (uses legoesm.constants)
 # ---------------------------------------------------------------------------
 
-def calc_xpthvp_terms(exner, thv_ds_zt, wprcp_zt, wp2rcp_zt, rtprcp_zt, thlprcp_zt,
-                      wpthlp_zt, wprtp_zt, wp2thlp_zt, wp2rtp_zt,
-                      rtpthlp_zt, rtp2_zt, thlp2_zt, gr: CLUBBGrid):
+def calc_xpthvp_terms(exner, thv_ds, wprcp, wp2rcp, rtprcp, thlprcp,
+                      wpthlp, wprtp, wp2thlp, wp2rtp,
+                      rtpthlp, rtp2, thlp2):
     """Virtual-potential-temperature (buoyancy) fluxes (``calc_xpthvp_terms``).
 
     ``rc_coef = L_v/(exner*c_pd) - ep2*thv_ds`` and
     ``x'thv' = x'thl' + ep1*thv_ds*x'rt' + rc_coef*x'rc'`` for ``x in {w, w^2,
-    rt, thl}``. The three zm-output fluxes (and ``rc_coef``) are regridded zt->zm
-    with the top momentum level zeroed; ``wp2thvp`` stays on zt.
+    rt, thl}``.
 
-    Returns ``(wpthvp_zm, wp2thvp_zt, rtpthvp_zm, thlpthvp_zm, rc_coef_zt,
-    rc_coef_zm)``.
+    Every output is on the SAME grid as the inputs; the CAM tree runs this once
+    per level set, so the caller owns any regridding.
+
+    Returns ``(wpthvp, wp2thvp, rtpthvp, thlpthvp, rc_coef)``.
     """
     lv, cp = constants.L_v, constants.c_pd
-    rc_coef_zt = lv / (exner * cp) - _EP2 * thv_ds_zt
-    wpthvp_zt = wpthlp_zt + _EP1 * thv_ds_zt * wprtp_zt + rc_coef_zt * wprcp_zt
-    wp2thvp_zt = wp2thlp_zt + _EP1 * thv_ds_zt * wp2rtp_zt + rc_coef_zt * wp2rcp_zt
-    rtpthvp_zt = rtpthlp_zt + _EP1 * thv_ds_zt * rtp2_zt + rc_coef_zt * rtprcp_zt
-    thlpthvp_zt = thlp2_zt + _EP1 * thv_ds_zt * rtpthlp_zt + rc_coef_zt * thlprcp_zt
-    k_ub = gr.zm.shape[1] - 1
-    wpthvp_zm = zt2zm(wpthvp_zt, gr).at[:, k_ub].set(0.0)
-    rtpthvp_zm = zt2zm(rtpthvp_zt, gr).at[:, k_ub].set(0.0)
-    thlpthvp_zm = zt2zm(thlpthvp_zt, gr).at[:, k_ub].set(0.0)
-    rc_coef_zm = zt2zm(rc_coef_zt, gr).at[:, k_ub].set(0.0)
-    return wpthvp_zm, wp2thvp_zt, rtpthvp_zm, thlpthvp_zm, rc_coef_zt, rc_coef_zm
+    rc_coef = lv / (exner * cp) - _EP2 * thv_ds
+    wpthvp = wpthlp + _EP1 * thv_ds * wprtp + rc_coef * wprcp
+    wp2thvp = wp2thlp + _EP1 * thv_ds * wp2rtp + rc_coef * wp2rcp
+    rtpthvp = rtpthlp + _EP1 * thv_ds * rtp2 + rc_coef * rtprcp
+    thlpthvp = thlp2 + _EP1 * thv_ds * rtpthlp + rc_coef * thlprcp
+    return wpthvp, wp2thvp, rtpthvp, thlpthvp, rc_coef
+
+
+# ---------------------------------------------------------------------------
+# Reconciling the two PDF-closure level sets (CAM l_trapezoidal_rule_zt/zm)
+# ---------------------------------------------------------------------------
+# Tolerance value for r_c [kg/kg] (``constants_clubb.F90:rc_tol``). Below this
+# a level counts as cloud-free for the cloud-cover geometry.
+_RC_TOL = 1.0e-6
+# Double-precision machine epsilon, matching the reference's fixed-precision
+# nudge in ``clip_rcm`` (which is dtype-independent there).
+_F64_EPS = sys.float_info.epsilon
+
+
+def calc_trapezoid_zt(variable_zm, variable_zt, gr: CLUBBGrid):
+    """Recompute a thermodynamic-level field as the trapezoidal layer average.
+
+    ``pdf_closure_module.F90:calc_trapezoid_zt``. Each thermodynamic level is
+    replaced by the depth-weighted trapezoidal average of the two half-layers
+    that meet at it — ``(zt[k], zm[k+1])`` above and ``(zm[k], zt[k])`` below —
+    using the momentum-level values of the SAME quantity from the companion
+    closure call. Ascending grid, every thermodynamic level.
+    """
+    zm, zt = gr.zm, gr.zt
+    # The layer inverse depth multiplies each half-term separately, as in the
+    # reference: factoring it out changes the floating-point association and
+    # costs bit-for-bit agreement with it.
+    upper = 0.5 * (variable_zm[:, 1:] + variable_zt) * (zm[:, 1:] - zt) * gr.invrs_dzt
+    lower = 0.5 * (variable_zt + variable_zm[:, :-1]) * (zt - zm[:, :-1]) * gr.invrs_dzt
+    return upper + lower
+
+
+def calc_trapezoid_zm(variable_zt, variable_zm, gr: CLUBBGrid):
+    """Recompute a momentum-level field as the trapezoidal layer average.
+
+    ``pdf_closure_module.F90:calc_trapezoid_zm``, the mirror of
+    :func:`calc_trapezoid_zt`. The trapezoidal rule is not valid at either
+    momentum boundary, so levels ``0`` and ``nzm-1`` keep their incoming values.
+    """
+    zm, zt = gr.zm, gr.zt
+    # Interior momentum levels k = 1 .. nzm-2 straddle zt[k-1] and zt[k].
+    invrs_dzm = gr.invrs_dzm[:, 1:-1]
+    upper = (0.5 * (variable_zt[:, 1:] + variable_zm[:, 1:-1])
+             * (zt[:, 1:] - zm[:, 1:-1]) * invrs_dzm)
+    lower = (0.5 * (variable_zm[:, 1:-1] + variable_zt[:, :-1])
+             * (zm[:, 1:-1] - zt[:, :-1]) * invrs_dzm)
+    return variable_zm.at[:, 1:-1].set(upper + lower)
+
+
+def clip_rcm(rtm, rcm):
+    """Reduce cloud water wherever it exceeds total water.
+
+    ``clip_explicit.F90:clip_rcm``. Prevents a negative diagnosed vapour
+    mixing ratio ``rvm = rtm - rcm``. Cannot enforce ``rcm <= rtm`` when
+    ``rtm`` is itself negative, which is the reference's documented limit too.
+
+    The nudge below the cap is the reference's fixed DOUBLE-precision epsilon,
+    not the working dtype's. In float32 the dtype epsilon is 1.2e-7 kg/kg — a
+    tenth of the cloud-water tolerance — so subtracting it from a marginally
+    cloudy capped layer would drop that layer below the tolerance and delete its
+    cloud outright. At double precision the two choices agree.
+    """
+    return jnp.where(rtm < rcm,
+                     jnp.maximum(_ZERO_THRESHOLD, rtm - _F64_EPS), rcm)
+
+
+def compute_cloud_cover(chi_mean, cloud_frac, rcm, gr: CLUBBGrid):
+    """Cloud cover (sky fraction) and the in-cloud liquid water.
+
+    ``pdf_closure_module.F90:compute_cloud_cover`` (Mellor 1977). A grid box
+    whose neighbours above and below are both cloudy is taken as vertically
+    filled, so its cloud cover equals its cloud fraction. At a cloud top, a
+    cloud base, or an isolated cloudy level the cloud occupies only part of the
+    layer depth; that vertical fraction divides the cloud fraction (giving a
+    larger sky cover) and the mean liquid water (giving the in-cloud value).
+
+    The reference's sharp ``min`` on the partial fraction is softened by the
+    same ``rcm/rc_tol`` blend it uses, so the transition into a cloudy layer is
+    gradual. The topmost thermodynamic level has no level above it and keeps
+    its incoming values, as in the reference.
+
+    Parameters
+    ----------
+    chi_mean : jax.Array
+        PDF-mean extended liquid water ``chi``, ``(ngrdcol, nzt)``.
+    cloud_frac, rcm : jax.Array
+        Cloud fraction and mean cloud water on zt, ``(ngrdcol, nzt)``.
+
+    Returns
+    -------
+    tuple of jax.Array
+        ``(cloud_cover, rcm_in_layer)``, both ``(ngrdcol, nzt)``.
+    """
+    nzt = rcm.shape[1]
+    k = jnp.arange(nzt - 1)                     # levels 0 .. nzt-2
+    km1 = jnp.maximum(k - 1, 0)
+    kp1 = jnp.minimum(k + 1, nzt - 1)
+
+    rcm_k, rcm_up, rcm_dn = rcm[:, k], rcm[:, kp1], rcm[:, km1]
+    # The partial-layer fractions divide by (rcm + |chi|), which is exactly zero
+    # only on the cloud-free levels this routine leaves alone. Both branches of
+    # a `where` are evaluated (and differentiated), so the denominator is
+    # floored rather than guarded, keeping the gradient finite there.
+    def _frac(scale, chi_nbr, rcm_nbr):
+        denom = jnp.maximum(rcm_k + jnp.abs(chi_nbr), _RC_TOL)
+        part = jnp.minimum(0.5, scale * rcm_k / denom)
+        return part + (rcm_nbr / _RC_TOL) * (0.5 - part)
+
+    half = jnp.full_like(rcm_k, 0.5)
+    # Cloud top: half the layer above zt[k] reaches up to zm[k+1].
+    top_scale = 0.5 * gr.dzm[:, k + 1] / (gr.zm[:, k + 1] - gr.zt[:, k])
+    upper = jnp.where(rcm_up < _RC_TOL,
+                      _frac(top_scale, chi_mean[:, kp1], rcm_up), half)
+    # Cloud base: half the layer below zt[k] reaches down to zm[k].
+    base_scale = 0.5 * gr.dzm[:, k] / (gr.zt[:, k] - gr.zm[:, k])
+    lower = jnp.where(rcm_dn < _RC_TOL,
+                      _frac(base_scale, chi_mean[:, km1], rcm_dn), half)
+
+    vert_cloud_frac = jnp.maximum(cloud_frac[:, k],
+                                  jnp.minimum(1.0, upper + lower))
+    use_layer = (rcm_k >= _RC_TOL) & ~((rcm_up >= _RC_TOL) & (rcm_dn >= _RC_TOL))
+    # On a level this routine actually rewrites, the vertical fraction is
+    # strictly positive: at least one neighbour is cloudy (giving that side the
+    # full half) or, for an isolated cloudy level, both partial fractions are
+    # positive because rcm >= rc_tol there. It CAN be zero on the cloud-free
+    # levels that are masked out — and `where` evaluates both branches, so the
+    # division would hand reverse-mode AD a 0/0. The floor binds only where the
+    # result is discarded, so no value this routine returns is changed by it.
+    vert_cloud_frac = jnp.where(use_layer, vert_cloud_frac, 1.0)
+    cover = jnp.where(use_layer, cloud_frac[:, k] / vert_cloud_frac,
+                      cloud_frac[:, k])
+    rc_in = jnp.where(use_layer, rcm_k / vert_cloud_frac, rcm_k)
+    return (cloud_frac.at[:, k].set(cover), rcm.at[:, k].set(rc_in))
 
 
 # ===========================================================================
@@ -5147,7 +5288,8 @@ def compute_clubb_diagnostics(wp2, wp3, up2, vp2, thlp2, rtp2, wpthlp, wprtp,
 
 def compute_pdf_closure(diag, wp2, wp3, rtp2, thlp2, rtpthlp, up2, vp2,
                         wprtp, wpthlp, upwp, vpwp,
-                        wm_zt, rtm, thlm, um, vm, exner_zt, p_in_Pa_zt, thv_ds_zt,
+                        wm_zt, wm_zm, rtm, thlm, um, vm, exner_zt, p_in_Pa_zt,
+                        p_sfc, thv_ds_zt, thv_ds_zm,
                         gr: CLUBBGrid, config):
     """ADG1 assumed-PDF closure (CAM-default tree, post-advance placement).
 
@@ -5163,82 +5305,153 @@ def compute_pdf_closure(diag, wp2, wp3, rtp2, thlp2, rtpthlp, up2, vp2,
     stats writer, the non-ADG1 PDF branches, ice-supersat) are omitted; the
     stats-only intermediates are not returned.
 
-    Inputs: ``diag`` is the :func:`compute_clubb_diagnostics` bundle for the SAME
-    (post-advance) state — its ``Skw_zt``/``wp2_zt``/``sigma_sqd_w`` are reused
-    rather than re-derived. Prognostic moments ``wp2``/``rtp2``/``thlp2``/
-    ``rtpthlp``/``up2``/``vp2`` and fluxes ``wprtp``/``wpthlp``/``upwp``/``vpwp``
-    are on zm; ``wp3`` is on zt. Means ``wm_zt``/``rtm``/``thlm``/``um``/``vm`` and
-    the thermo fields ``exner_zt``/``p_in_Pa_zt``/``thv_ds_zt`` are on zt.
+    **The closure runs on BOTH level sets** (CAM ``l_call_pdf_closure_twice =
+    .true.``): once on thermodynamic levels and once on momentum levels, so the
+    momentum-level buoyancy fluxes that drive the vertical-velocity variance are
+    a closure evaluated there rather than an interpolation of the
+    thermodynamic-level ones. The two are then reconciled by the trapezoidal
+    layer average in both directions (CAM ``l_trapezoidal_rule_zt`` and
+    ``l_trapezoidal_rule_zm``), the cloud water is capped at the total water,
+    and the layer cloud geometry replaces cloud fraction by sky cover and mean
+    by in-cloud liquid water (CAM ``l_use_cloud_cover = .true.``).
 
-    Returns a dict (buoyancy/HOM on the levels the advances want: ``wpthvp_zm``
-    etc. on zm, ``wp2thvp_zt`` on zt).
+    Inputs: ``diag`` is the :func:`compute_clubb_diagnostics` bundle for the SAME
+    (post-advance) state — its ``Skw_zt``/``Skw_zm``/``wp2_zt``/``sigma_sqd_w``
+    are reused rather than re-derived. Prognostic moments ``wp2``/``rtp2``/
+    ``thlp2``/``rtpthlp``/``up2``/``vp2`` and fluxes ``wprtp``/``wpthlp``/
+    ``upwp``/``vpwp`` are on zm; ``wp3`` is on zt. Means ``rtm``/``thlm``/``um``/
+    ``vm`` and the thermo fields ``exner_zt``/``p_in_Pa_zt``/``thv_ds_zt`` are on
+    zt; ``thv_ds_zm`` and the mean vertical wind are supplied on both grids.
+    ``p_sfc`` ``(ngrdcol,)`` is the surface pressure, which pins the momentum-grid
+    pressure at the ground.
+
+    Returns a dict (buoyancy/HOM on the levels the advances want: ``wpthvp``
+    etc. on zm, ``wp2thvp`` on zt).
     """
     p = config.params
     w_tol_sqd = config.w_tol ** 2
+    mixt_frac_max_mag = derive_mixt_frac_max_mag(p.Skw_max_mag)
 
-    # --- zt-level fields for the ADG1 driver (adg1_pdf_driver_zt_jax) ---
-    Skw_zt = diag["Skw_zt"]
-    wp2_zt = diag["wp2_zt"]
-    sigma_sqd_w_zt = jnp.maximum(zm2zt(diag["sigma_sqd_w"], gr), 0.0)
+    # === Call 1: the closure on THERMODYNAMIC levels ===========================
     # Raw zt regrids feed the buoyancy assembly (calc_xpthvp_terms); the
     # tolerance-floored ``*_adg`` versions feed ONLY the ADG1 driver. CLUBB-JAX
     # pdf_closure_driver keeps these paths separate (the floor must not leak a
     # tolerance-level variance into rtpthvp/thlpthvp in low-variance columns).
     rtp2_zt = zm2zt(rtp2, gr)
     thlp2_zt = zm2zt(thlp2, gr)
-    rtp2_zt_adg = jnp.maximum(rtp2_zt, config.rt_tol ** 2)
-    thlp2_zt_adg = jnp.maximum(thlp2_zt, config.thl_tol ** 2)
-    up2_zt = jnp.maximum(zm2zt(up2, gr), w_tol_sqd)
-    vp2_zt = jnp.maximum(zm2zt(vp2, gr), w_tol_sqd)
-    wprtp_zt = zm2zt(wprtp, gr)
-    wpthlp_zt = zm2zt(wpthlp, gr)
-    upwp_zt = zm2zt(upwp, gr)
-    vpwp_zt = zm2zt(vpwp, gr)
-    rtpthlp_zt = zm2zt(rtpthlp, gr)
+    zt_out = _pdf_closure_on_grid(
+        wm_zt, rtm, thlm, um, vm, diag["wp2_zt"],
+        rtp2_zt, thlp2_zt,
+        jnp.maximum(rtp2_zt, config.rt_tol ** 2),
+        jnp.maximum(thlp2_zt, config.thl_tol ** 2),
+        jnp.maximum(zm2zt(up2, gr), w_tol_sqd),
+        jnp.maximum(zm2zt(vp2, gr), w_tol_sqd),
+        diag["Skw_zt"], zm2zt(wprtp, gr), zm2zt(wpthlp, gr),
+        zm2zt(upwp, gr), zm2zt(vpwp, gr), zm2zt(rtpthlp, gr),
+        jnp.maximum(zm2zt(diag["sigma_sqd_w"], gr), 0.0),
+        exner_zt, p_in_Pa_zt, thv_ds_zt, mixt_frac_max_mag, config)
 
-    mixt_frac_max_mag = derive_mixt_frac_max_mag(p.Skw_max_mag)
+    # === Call 2: the closure on MOMENTUM levels ================================
+    # CAM ``l_call_pdf_closure_twice = .true.``: the momentum-level buoyancy
+    # fluxes come from a PDF closure evaluated AT those levels, not from
+    # interpolating the thermodynamic-level ones. Pressure is interpolated and
+    # then pinned to the surface value at the ground and floored at the lid
+    # (``pdf_closure_driver_zm``).
+    k_ub = gr.zm.shape[1] - 1
+    p_in_Pa_zm = zt2zm(p_in_Pa_zt, gr).at[:, 0].set(p_sfc)
+    p_in_Pa_zm = p_in_Pa_zm.at[:, k_ub].set(
+        jnp.maximum(p_in_Pa_zm[:, k_ub], 0.5 * p_in_Pa_zt[:, -1]))
+    exner_zm = exner_function(p_in_Pa_zm)
+    zm_out = _pdf_closure_on_grid(
+        wm_zm, zt2zm(rtm, gr, zm_min=config.rt_tol),
+        zt2zm(thlm, gr, zm_min=config.thl_tol),
+        zt2zm(um, gr), zt2zm(vm, gr), wp2,
+        rtp2, thlp2,
+        jnp.maximum(rtp2, config.rt_tol ** 2),
+        jnp.maximum(thlp2, config.thl_tol ** 2),
+        jnp.maximum(up2, w_tol_sqd), jnp.maximum(vp2, w_tol_sqd),
+        diag["Skw_zm"], wprtp, wpthlp, upwp, vpwp, rtpthlp,
+        jnp.maximum(diag["sigma_sqd_w"], 0.0),
+        exner_zm, p_in_Pa_zm, thv_ds_zm, mixt_frac_max_mag, config)
+
+    # === Reconcile the two level sets (CAM l_trapezoidal_rule_zt/zm) ==========
+    # Each level set is replaced by the trapezoidal layer average of itself and
+    # the companion values that bracket it, so the two closures agree on the
+    # layer-integrated quantity instead of drifting apart between calls.
+    zt_trap = {name: calc_trapezoid_zt(zm_out[name], zt_out[name], gr)
+               for name in ("wprtp2", "wpthlp2", "wprtpthlp", "cloud_frac",
+                            "rcm", "wp2thvp", "wp2up")}
+    zm_trap = {name: calc_trapezoid_zm(zt_out[name], zm_out[name], gr)
+               for name in ("wpthvp", "thlpthvp", "rtpthvp")}
+
+    # Cloud water may not exceed total water, and the layer cloud geometry
+    # converts the grid-mean cloud into sky cover + in-cloud water
+    # (CAM ``l_use_cloud_cover = .true.``).
+    rcm = clip_rcm(rtm, zt_trap["rcm"])
+    chi_mean = (zt_out["mixt_frac"] * zt_out["chi_1"]
+                + (1.0 - zt_out["mixt_frac"]) * zt_out["chi_2"])
+    cloud_frac, rcm = compute_cloud_cover(chi_mean, zt_trap["cloud_frac"], rcm, gr)
+    cloud_frac = jnp.minimum(1.0, cloud_frac)
+
+    hom = {k: zt_out[k] for k in ("wp2rtp", "wp2thlp", "wpup2", "wpvp2")}
+    hom.update(wprtp2=zt_trap["wprtp2"], wpthlp2=zt_trap["wpthlp2"],
+               wprtpthlp=zt_trap["wprtpthlp"], wp2up=zt_trap["wp2up"],
+               wp2up2_zm=zm_out["wp2up2"], wp2vp2_zm=zm_out["wp2vp2"],
+               wp4_zm=zm_out["wp4"])
+
+    return dict(
+        wpthvp=zm_trap["wpthvp"], wp2thvp=zt_trap["wp2thvp"],
+        rtpthvp=zm_trap["rtpthvp"], thlpthvp=zm_trap["thlpthvp"],
+        rc_coef_zm=zm_out["rc_coef"],
+        cloud_frac=cloud_frac, rcm=rcm,
+        wprcp=zm_out["wprcp"], rtprcp=zm_out["rtprcp"],
+        thlprcp=zm_out["thlprcp"], uprcp=zm_out["uprcp"],
+        vprcp=zm_out["vprcp"],
+        w_1_zm=zm_out["w_1"], w_2_zm=zm_out["w_2"],
+        varnce_w_1_zm=zm_out["varnce_w_1"], varnce_w_2_zm=zm_out["varnce_w_2"],
+        mixt_frac_zm=zm_out["mixt_frac"], **hom,
+    )
+
+
+def _pdf_closure_on_grid(wm, rtm, thlm, um, vm, wp2, rtp2, thlp2,
+                         rtp2_adg, thlp2_adg, up2, vp2, Skw,
+                         wprtp, wpthlp, upwp, vpwp, rtpthlp, sigma_sqd_w,
+                         exner, p_in_Pa, thv_ds, mixt_frac_max_mag, config):
+    """One ADG1 assumed-PDF closure evaluation, entirely on one level set.
+
+    Every input and every output lives on the same grid; :func:`compute_pdf_closure`
+    runs this once per level set and owns all regridding between them. Mirrors
+    ``pdf_closure_module.F90:pdf_closure`` (its ``_zt`` and ``_zm`` drivers differ
+    only in which fields they hand in).
+    """
     adg1 = ADG1_pdf_driver(
-        wm_zt, rtm, thlm, um, vm, wp2_zt, rtp2_zt_adg, thlp2_zt_adg, up2_zt, vp2_zt,
-        Skw_zt, wprtp_zt, wpthlp_zt, upwp_zt, vpwp_zt, jnp.sqrt(wp2_zt),
-        sigma_sqd_w_zt, p.beta, mixt_frac_max_mag)
+        wm, rtm, thlm, um, vm, wp2, rtp2_adg, thlp2_adg, up2, vp2,
+        Skw, wprtp, wpthlp, upwp, vpwp, jnp.sqrt(wp2),
+        sigma_sqd_w, config.params.beta, mixt_frac_max_mag)
 
-    # --- per-component rt-thl correlation + liquid cloud-fraction closure ---
     corr_rt_thl_1, corr_rt_thl_2 = calc_comp_corrs_binormal(
-        rtpthlp_zt, rtm, thlm, adg1["rt_1"], adg1["rt_2"], adg1["thl_1"],
+        rtpthlp, rtm, thlm, adg1["rt_1"], adg1["rt_2"], adg1["thl_1"],
         adg1["thl_2"], adg1["varnce_rt_1"], adg1["varnce_rt_2"],
         adg1["varnce_thl_1"], adg1["varnce_thl_2"], adg1["mixt_frac"])
     comp = calc_pdf_liquid_cloud_frac_components(
-        adg1, rtpthlp_zt, rtm, thlm, exner_zt, p_in_Pa_zt)
-    rcm_zt = comp["rcm"]
+        adg1, rtpthlp, rtm, thlm, exner, p_in_Pa)
 
-    # --- cloud-water fluxes, higher-order velocity moments, buoyancy fluxes ---
-    xprcp = calc_pdf_xprcp_fluxes(adg1, comp, wm_zt, rtm, thlm, um, vm, rcm_zt, gr)
+    xprcp = calc_pdf_xprcp_fluxes(adg1, comp, wm, rtm, thlm, um, vm, comp["rcm"])
     hom = calc_pdf_higher_order_moments(
-        adg1, wm_zt, rtm, thlm, um, vm, corr_rt_thl_1, corr_rt_thl_2, gr)
-    (wpthvp_zm, wp2thvp_zt, rtpthvp_zm, thlpthvp_zm,
-     _rc_coef_zt, rc_coef_zm) = calc_xpthvp_terms(
-        exner_zt, thv_ds_zt, xprcp["wprcp_zt"], xprcp["wp2rcp_zt"],
-        xprcp["rtprcp_zt"], xprcp["thlprcp_zt"], wpthlp_zt, wprtp_zt,
-        hom["wp2thlp"], hom["wp2rtp"], rtpthlp_zt, rtp2_zt, thlp2_zt, gr)
+        adg1, wm, rtm, thlm, um, vm, corr_rt_thl_1, corr_rt_thl_2)
+    wpthvp, wp2thvp, rtpthvp, thlpthvp, rc_coef = calc_xpthvp_terms(
+        exner, thv_ds, xprcp["wprcp"], xprcp["wp2rcp"], xprcp["rtprcp"],
+        xprcp["thlprcp"], wpthlp, wprtp, hom["wp2thlp"], hom["wp2rtp"],
+        rtpthlp, rtp2, thlp2)
 
-    # ADG1 w-component PDF params regridded zt->zm (the MFL turbulent-advection
-    # range in advance_xm_wpxp reads these on zm; advance_clubb_core_module.F90).
-    w_1_zm = zt2zm(adg1["w_1"], gr)
-    w_2_zm = zt2zm(adg1["w_2"], gr)
-    varnce_w_1_zm = zt2zm(adg1["varnce_w_1"], gr)
-    varnce_w_2_zm = zt2zm(adg1["varnce_w_2"], gr)
-    mixt_frac_zm = zt2zm(adg1["mixt_frac"], gr)
-
-    return dict(
-        wpthvp=wpthvp_zm, wp2thvp=wp2thvp_zt, rtpthvp=rtpthvp_zm,
-        thlpthvp=thlpthvp_zm, rc_coef_zm=rc_coef_zm,
-        cloud_frac=comp["cloud_frac"], rcm=comp["rcm"],
-        wprcp=xprcp["wprcp_zm"], rtprcp=xprcp["rtprcp_zm"],
-        thlprcp=xprcp["thlprcp_zm"], uprcp=xprcp["uprcp_zm"],
-        vprcp=xprcp["vprcp_zm"], w_1_zm=w_1_zm, w_2_zm=w_2_zm,
-        varnce_w_1_zm=varnce_w_1_zm, varnce_w_2_zm=varnce_w_2_zm,
-        mixt_frac_zm=mixt_frac_zm, **hom,
-    )
+    out = dict(adg1)
+    out.update(hom)
+    out.update(xprcp)
+    out.update(cloud_frac=comp["cloud_frac"], rcm=comp["rcm"],
+               chi_1=comp["chi_1"], chi_2=comp["chi_2"],
+               wpthvp=wpthvp, wp2thvp=wp2thvp, rtpthvp=rtpthvp,
+               thlpthvp=thlpthvp, rc_coef=rc_coef)
+    return out
 
 
 class CLUBBMomentState(NamedTuple):
@@ -5394,7 +5607,7 @@ def calc_sfc_varnce(wp2, up2, vp2, thlp2, rtp2, rtpthlp,
 
 def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
                        Lscale, brunt_vaisala_freq_sqd, exner_zt, p_in_Pa_zt,
-                       thv_ds_zt, thv_ds_zm, rho_ds_zm, rho_ds_zt,
+                       p_sfc, thv_ds_zt, thv_ds_zm, rho_ds_zm, rho_ds_zt,
                        invrs_rho_ds_zm, invrs_rho_ds_zt, wm_zt, wm_zm,
                        sfc_elevation, fcor, ug, vg, dt, gr: CLUBBGrid, config):
     """One prognostic CLUBB step (the CAM-default ``advance_clubb_core`` core).
@@ -5419,10 +5632,12 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
         Parcel buoyant-sorting mixing length (zt) from ``compute_mixing_length``.
     brunt_vaisala_freq_sqd : jax.Array
         ``N^2`` (zm).
-    exner_zt, p_in_Pa_zt, thv_ds_zt, thv_ds_zm, rho_ds_zm, rho_ds_zt,
+    exner_zt, p_in_Pa_zt, p_sfc, thv_ds_zt, thv_ds_zm, rho_ds_zm, rho_ds_zt,
     invrs_rho_ds_zm, invrs_rho_ds_zt, wm_zt, wm_zm, sfc_elevation, fcor, ug, vg :
         Host thermodynamic / dry-static-density / geometry / Coriolis-geostrophic
-        fields on their noted grids (``fcor``/``sfc_elevation`` are ``(ngrdcol,)``).
+        fields on their noted grids (``fcor``/``sfc_elevation``/``p_sfc`` are
+        ``(ngrdcol,)``; ``p_sfc`` pins the momentum-grid pressure at the ground
+        for the momentum-level PDF closure).
     dt : float
         Time step [s].
 
@@ -5452,8 +5667,8 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
     pdf = compute_pdf_closure(
         diag, state.wp2, state.wp3, state.rtp2, state.thlp2, state.rtpthlp,
         state.up2, state.vp2, state.wprtp, state.wpthlp, state.upwp, state.vpwp,
-        wm_zt, state.rtm, state.thlm, state.um, state.vm, exner_zt, p_in_Pa_zt,
-        thv_ds_zt, gr, config)
+        wm_zt, wm_zm, state.rtm, state.thlm, state.um, state.vm, exner_zt,
+        p_in_Pa_zt, p_sfc, thv_ds_zt, thv_ds_zm, gr, config)
 
     # ---- (2b) surface second-moment BC, in the CAM order: after the
     # pre-advance PDF closure and before every moment advance ----
@@ -5528,8 +5743,8 @@ def advance_clubb_core(state: CLUBBMomentState, forcing: CLUBBForcing, *,
         brunt_vaisala_freq_sqd, gr, config)
     pdf_post = compute_pdf_closure(
         diag_post, wp2, wp3, rtp2, thlp2, rtpthlp, up2, vp2, wprtp, wpthlp,
-        upwp, vpwp, wm_zt, rtm, thlm, um, vm, exner_zt, p_in_Pa_zt, thv_ds_zt,
-        gr, config)
+        upwp, vpwp, wm_zt, wm_zm, rtm, thlm, um, vm, exner_zt, p_in_Pa_zt,
+        p_sfc, thv_ds_zt, thv_ds_zm, gr, config)
 
     diagnostics = dict(
         cloud_frac=pdf_post["cloud_frac"], rcm=pdf_post["rcm"],
@@ -6007,7 +6222,8 @@ def clubb_step(
     sfc_elevation = flip_vertical(z_half)[:, 0]
     new_state, diags = advance_clubb_core(
         state, forcing, Lscale=Lscale, brunt_vaisala_freq_sqd=brunt,
-        exner_zt=exner_zt, p_in_Pa_zt=p_zt, thv_ds_zt=thv_ds_zt,
+        exner_zt=exner_zt, p_in_Pa_zt=p_zt, p_sfc=flip_vertical(p_half)[:, 0],
+        thv_ds_zt=thv_ds_zt,
         thv_ds_zm=thv_ds_zm, rho_ds_zm=rho_ds_zm, rho_ds_zt=rho_ds_zt,
         invrs_rho_ds_zm=invrs_rho_ds_zm, invrs_rho_ds_zt=invrs_rho_ds_zt,
         wm_zt=zeros_zt, wm_zm=zeros_zm, sfc_elevation=sfc_elevation,
@@ -6138,6 +6354,7 @@ def clubb_turbulence_prognostic(
             T_sfc, q_sfc, rho, dt, config, *_sfc_bcs(rho))
         shflx, lhflx, ustar = diags["shflx"], diags["lhflx"], diags["ustar"]
         Kh_full = flip_vertical(diags["Kh_zt"])
+        cloud_frac_a = diags["cloud_frac"]
     else:
         dt_sub = dt / n_sub
         tv_floor = config.T0 * 0.5
@@ -6172,6 +6389,10 @@ def clubb_turbulence_prognostic(
         lhflx = jnp.mean(diag_stk["lhflx"], axis=0)
         ustar = jnp.mean(diag_stk["ustar"], axis=0)
         Kh_full = flip_vertical(diag_stk["Kh_zt"][-1])
+        # Final sub-step, like Kh: the cloud fraction must correspond to the
+        # moments being returned as the carry, not to a sub-cycle average of
+        # states the host never sees.
+        cloud_frac_a = diag_stk["cloud_frac"][-1]
 
     # With an injected tiled flux, report the surface diagnostics as the INJECTED
     # dynamic values directly (Louis-equivalent), rather than clubb_step's
@@ -6181,9 +6402,27 @@ def clubb_turbulence_prognostic(
     if surface_flux is not None:
         _, _, shflx, lhflx, ustar = surface_flux
     h_pbl = diagnose_pbl_height(T, q_v, u, v, p_full, z_full)
+    # PUBLISH the PDF cloud fraction the moment advance already produced.
+    # Without this the prognostic path advances a real total-water variance and
+    # then throws away the only thing the cloud scheme could use it for: the
+    # radiation route refused prognostic CLUBB outright ("packed moments, no
+    # diagnosed cloud fraction"), so turning the closure on changed the boundary
+    # layer and left clouds on the humidity-based scheme.
+    # TOP-DOWN for the host, and tapered above the troposphere top by the SAME
+    # sigmoid the diagnostic entry uses and for the same reason -- CAM slices
+    # the column so CLUBB emits nothing above that reference pressure, and a
+    # consumer must not be handed stratospheric PDF cloud from a region the
+    # mixing no longer maintains.  Porting the exclusion, not just the formula.
+    cloud_fraction_td = flip_vertical(cloud_frac_a)
+    if config.trop_cloud_top_press > 0.0:
+        cloud_fraction_td = cloud_fraction_td * jax.nn.sigmoid(
+            (jnp.log(jnp.clip(p_full, 1.0, None))
+             - jnp.log(config.trop_cloud_top_press))
+            / config.trop_cloud_taper_lnp_width)
     output = TurbulenceOutput(
         du_dt=du_dt, dv_dt=dv_dt, dT_dt=dT_dt, dq_v_dt=dq_v_dt,
-        Km=Kh_full, Kh=Kh_full, shflx=shflx, lhflx=lhflx, ustar=ustar, h_pbl=h_pbl)
+        Km=Kh_full, Kh=Kh_full, shflx=shflx, lhflx=lhflx, ustar=ustar,
+        h_pbl=h_pbl, cloud_fraction=cloud_fraction_td)
     return output, pack_clubb_moments(new_moments)
 
 

@@ -126,7 +126,7 @@ _XU_RANDALL_TRAINABLE: list[ParamConstraint] = [
     ParamConstraint("cloud_rh_crit", 0.5, 0.95, "sigmoid"),
     ParamConstraint("cloud_alpha_xr", 25.0, 400.0, "sigmoid"),
     ParamConstraint("cloud_p_xr", 0.1, 1.0, "sigmoid"),
-    ParamConstraint("cloud_q_c_diagnostic", 5.0e-5, 5.0e-4, "sigmoid"),
+    ParamConstraint("cloud_q_c_diagnostic", 1.0e-6, 5.0e-4, "sigmoid"),  # lower bound = spec/driver (1e-6)
     # Cloud particle effective radii (drive RRTMGP cloud optics).
     ParamConstraint("cloud_r_eff_liq", 5.0e-6, 30.0e-6, "sigmoid"),
     ParamConstraint("cloud_r_eff_ice", 10.0e-6, 100.0e-6, "sigmoid"),

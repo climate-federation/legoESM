@@ -127,3 +127,15 @@ def test_vertical_interp_degenerate_is_nan():
     col = np.array([np.nan, np.nan, 4.0])            # <2 valid
     out = interp_column_to_depths(col, src_z, np.array([0.0, 50.0]))
     assert np.isnan(out).all()
+
+
+def test_a_non_finite_source_depth_is_dropped_with_its_value():
+    # A NaN DEPTH used to reach numpy's interpolation as an x-coordinate
+    # (undefined) and made the deep cutoff's max() NaN, so the cutoff silently
+    # did nothing and the deepest value was held down again.
+    src_z = np.array([0.0, np.nan, 500.0])
+    col = np.array([18.0, 12.0, 6.0])
+    out = interp_column_to_depths(col, src_z, np.array([0.0, 250.0, 5000.0]))
+    assert np.isclose(out[0], 18.0)
+    assert np.isclose(out[1], 12.0)     # midway 0-500 m on the two real levels
+    assert np.isnan(out[2])             # the cutoff still fires

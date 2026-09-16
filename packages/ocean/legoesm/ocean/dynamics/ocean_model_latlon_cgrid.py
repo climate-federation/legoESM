@@ -10018,77 +10018,14 @@ class LatLonCGridOceanModel:
                               dims=state.v.dims, units=state.v.units),
         )
 
-    _WARNED_EULER_SKIP: set = set()
-
-    def _warn_euler_start_skips_after_reconcile(self):
-        """Say out loud that NEMO's SECOND reconciliation is skipped here.
-
-        #1640 finding 3.  The forward-Euler start (``state.u_before is None``)
-        returns from ``_step_impl`` before ``_apply_after_level_reconcile``
-        ever runs, so on THAT step the implicit vertical solve's depth-mean
-        deposit is COMMITTED, where NEMO removes it: NEMO runs
-        ``mlf_baro_corr`` on its ``l_1st_euler`` step too.  One step in the
-        run, but the card claims the reference's second-site behaviour on
-        every step, and it was silent.
-
-        WHY A WARNING AND NOT A RAISE, stated so the next reader does not
-        "harden" it into one.  Two live callers legitimately take this branch:
-        a genuine FROM-REST run of a card that ships the option (there is no
-        before level to bridge — the run has to start somewhere), and the DINO
-        twin's ``--legacy-euler-start``, which exists precisely to reproduce
-        artifacts recorded before 2026-08-24.  A raise would refuse both.
-        Closing the gap for real means surfacing the barotropic depth mean
-        (``btu_exp``/``btv_exp``) from the ``_apply_implicit_vmix=True`` path,
-        which changes ``_step_impl``'s return contract at ~8 call sites —
-        named, costed, NOT done here.
-
-        WHAT CHANGED ON 2026-08-24 (#1455), and a RETRACTION with it.  This
-        docstring used to justify "warning, not raise" by asserting that the
-        campaign's own 90-day production twin took this branch, because
-        ``kamm_twin_90d.py`` defaulted ``bridge_before=False``.  The DEFAULT
-        was as described; the CONCLUSION was wrong.  Audited against the
-        recorded run logs: every twin build on record (18 of 18, all four
-        acceptance-gate arms included) passed the before-level bridge
-        explicitly, and the acceptance gate has defaulted it ON since
-        2026-08-09.  No recorded 90-day twin ever took this branch.  The twin
-        default is now the bridged start as well, so the shipped invocation
-        cannot; ``--legacy-euler-start`` still can.  The "warning, not raise"
-        justification above stands on the two callers, not on any default.
-
-        RETRACTED, still (``state.py`` barotropic_after_reconcile note, which
-        said the gap "is empty for a bridged/restart twin (u_before arrives
-        populated, so that branch is never taken)"): that was asserted of every
-        run when it was only true of a bridged one.  It is true of the twin's
-        default again — but as a consequence of the flipped default, not as a
-        property of being a twin.
-
-        Emitted once per process: this fires on step 1, and a per-step warning
-        inside a scan-driven run would be noise, not signal.
-        """
-        if self.config.barotropic.barotropic_after_reconcile == "off":
-            return
-        # keyed by CALL SITE, not a single process-wide bool: the two outer
-        # steps have separate early-return branches, and a single flag let
-        # whichever ran first consume the warning forever -- the second site
-        # was then unobservable, which is the silent degradation this exists
-        # to remove (review finding).
-        import sys
-        site = sys._getframe(1).f_code.co_name
-        if site in type(self)._WARNED_EULER_SKIP:
-            return
-        type(self)._WARNED_EULER_SKIP.add(site)
-        import warnings
-        warnings.warn(
-            f"[{site}] barotropic_after_reconcile="
-            f"{self.config.barotropic.barotropic_after_reconcile!r} is ON, but "
-            "this step is the forward-Euler start (no before-level), which "
-            "returns before the reconciliation site. NEMO DOES run "
-            "mlf_baro_corr on its l_1st_euler step, so this step alone commits "
-            "a depth-mean deposit NEMO removes. Bridge the before-level "
-            "(the DINO twin's default; --legacy-euler-start turns it off) "
-            "to avoid the Euler start entirely, or treat step 1 as "
-            "off-reference.",
-            RuntimeWarning, stacklevel=3)
+    # HISTORICAL NOTE, kept because the gap it named was real for months.
+    # A ``_warn_euler_start_skips_after_reconcile`` method used to live here
+    # and fire a RuntimeWarning saying that the forward-Euler start returned
+    # before the reconciliation site while "NEMO DOES run mlf_baro_corr on its
+    # l_1st_euler step".  That was true, and it is now FIXED rather than
+    # announced: there is no early return any more (#1729), so the Euler start
+    # reaches this method like every other step.  Nothing warns because
+    # nothing is skipped.
 
     def _apply_after_level_reconcile(self, naa, state, btu_exp, btv_exp,
                                      u_mask3, v_mask3, grid, kaa_eta_raw=None,
@@ -10395,47 +10332,73 @@ class LatLonCGridOceanModel:
         from legoesm.ocean.state import Field
         _grid = grid if grid is not None else self.grid
 
-        # --- FIRST step: forward-Euler start (NEMO l_1st_euler), no RA filter.
-        #     Populate Nbb with the pre-step now-fields for the next step.
-        if state.u_before is None:
-            self._warn_euler_start_skips_after_reconcile()
-            # NEMO's cold-start Euler step does NOT run with an undefined
-            # before-level: istate.F90:97-99/135-137 sets Kmm := Kbb (ts/uu/vv
-            # copied onto BOTH time-level array slots) before stp_MLF is ever
-            # called, so Nbb==Nnn identically on this very first step; combined
-            # with stpmlf.F90:114-117 (l_1st_euler -> rDt=rn_Dt) this makes the
-            # leap-frog combine degenerate exactly to forward-Euler. The
-            # rn2b/Burchard-shear consumers inside _step_impl (nemo_before N²,
-            # nemo_burchard shear production) read entry_state.T_before/
-            # S_before/u_before/v_before unconditionally, so they need this same
-            # before==now seed on THIS call only -- a LOCAL copy, not written
-            # back onto ``state``/``naa`` below, which must keep the ``None``
-            # sentinel so this branch still fires (single-dt, no RA filter) and
-            # the real Nbb seed at :6656 still runs from the true pre-step now-
-            # fields. A bridged/restart state never reaches this branch (its
-            # u_before is already populated), so this seed only ever applies to
-            # a genuine from-rest / no-history state -- exactly NEMO's case.
-            _entry = state._replace(
+        # --- FIRST step: NEMO's l_1st_euler start.
+        #
+        # THIS IS THE SAME PROGRAM, NOT A SECOND PATH.  ``stp_MLF`` has no
+        # first-step variant: on ``l_1st_euler`` it sets ``rDt = rn_Dt``
+        # (stpmlf.f90:131-133) and runs statement for statement as on any
+        # other step, and ``istate.F90:97-99/135-137`` has already copied the
+        # initial T/S/u/v onto BOTH time-level slots so ``Kbb == Kmm``, which
+        # makes the leap-frog combine degenerate to forward Euler on its own.
+        # Only three statements behave differently, and each is guarded INSIDE
+        # its own routine, not at the call: the ssh, tracer and momentum
+        # Asselin filters (sshwzv.f90:443, traatf_qco.f90:152,
+        # dynatf_qco.f90:164).
+        #
+        # WHAT THIS REPLACED, and why (#1729).  Until now this branch called
+        # ``_step_impl`` once and RETURNED, skipping everything the body below
+        # does.  Three consequences, ordered by MEASURED size against NEMO's
+        # own one-step-from-rest record (scripts/validate/ocean_fidelity/
+        # dino_1226/step1_euler_term_attribution.py):
+        #
+        #  1. THE WHOLE SURFACE TRACER TENDENCY WAS DROPPED, and this is the
+        #     one that mattered.  The early return did not forward
+        #     ``external_tracer_rate``, which is how the card delivers surface
+        #     heat and salt under ``surface_tendency_placement="leapfrog_rhs"``
+        #     (NEMO's ``tra_sbc`` at Nnn, stpmlf.f90:460).  The first step of
+        #     every from-rest run therefore had NO surface forcing at all.
+        #     Withholding the rate again reproduces the old residual exactly:
+        #     T 1.55e-3 K rms, vs 5.00e-6 K with it -- 310x, and 12% of the
+        #     size of NEMO's own first step.
+        #  2. ``mlf_baro_corr`` never ran (stpmlf.f90:534, guarded on
+        #     ``ln_dynspg_ts`` ALONE, so NEMO runs it on l_1st_euler too), nor
+        #     did the Kmm velocity cycle (dynspg_ts.f90:1003 installs,
+        #     stpmlf.f90:720 removes).  This is what the deleted RuntimeWarning
+        #     named.  Measured, it moves ONLY velocity -- T/S/eta by exactly
+        #     0.0, because it is called after ``tra_zdf`` (:507) and writes
+        #     only puu/pvv -- and it moves u AWAY from NEMO by ~3% of the
+        #     residual.  Faithful and slightly worse is a signal, not a reason
+        #     to revert.
+        #  3. The rest of the body: the leap-frog combine, the Nbb dissipative
+        #     pass, the before-level barotropic seed, the Kbb-based FCT
+        #     bounds.  On this step Nbb == Nnn so these are algebraically
+        #     degenerate, but not bitwise; they own the small eta/u movement
+        #     that neither 1 nor 2 accounts for.
+        #
+        # Making the start a PARAMETERISATION of the body -- rDt, the
+        # barotropic window scale, and whether the filters run -- closes all
+        # three at once and, more importantly, removes the second path that
+        # could drift from the first.  There is no knob: the old behaviour is
+        # gone.
+        #
+        # The before==now seed is written onto ``state`` here (c0dd53736's
+        # seed, now non-local) because the whole body reads the before level:
+        # the leap-frog combine, the Nbb dissipative pass, the barotropic
+        # before-seed, the FCT bounds, and the rn2b/Burchard-shear consumers
+        # inside ``_step_impl``.  A bridged/restart state never reaches this
+        # branch -- its ``u_before`` is already populated -- so the seed only
+        # ever applies to a genuine from-rest state, which is exactly NEMO's
+        # own cold start.
+        _euler_start = state.u_before is None
+        if _euler_start:
+            state = state._replace(
                 u_before=state.u, v_before=state.v, T_before=state.T,
                 S_before=state.S, eta_before=state.eta,
             )
-            naa = self._step_impl(
-                _entry, dt, freshwater=freshwater,
-                surface_forcing=surface_forcing, sponge=sponge, grid=_grid,
-                vertex_mask=vertex_mask, t_seconds=t_seconds, z_coord=z_coord, config=config, iwm_fields=iwm_fields)
-            naa = naa._replace(
-                u_before=state.u, v_before=state.v, T_before=state.T,
-                S_before=state.S, eta_before=state.eta,
-            )
-            if getattr(_cfg_b, "barotropic_forcing_centred", False):
-                naa = naa._replace(
-                    **_seed_centred_forcing_carry(
-                        surface_forcing, freshwater, _cfg_b.rho_0,
-                        state.land_mask.data))
-            return naa
 
         # --- LEAP-FROG + Asselin.
-        rdt = 2.0 * dt
+        # rDt = rn_Dt on the Euler start, 2*rn_Dt otherwise (stpmlf.f90:131).
+        rdt = (1.0 if _euler_start else 2.0) * dt
         gamma = _cfg_b.asselin_gamma
         _tke_n2_bundle = self._tke_step_entry_n2_bundle(
             state, z_coord=_zc, config=_cfg_b)
@@ -10469,10 +10432,16 @@ class LatLonCGridOceanModel:
         #    increment, the barotropic/eta solve, and the Nnn diffusivity profiles
         #    (K_v/A_v/K33 for the single implicit vertical solve — NEMO avm/avt are
         #    the "now" vertical mixing, correctly at Nnn).
-        # The barotropic mode integrates over rDt=2dt, so its substep count is
-        # scaled ×(rDt/dt)=2 to hold the substep length (barotropic CFL) at the
+        # The barotropic mode integrates over rDt, so its substep count is
+        # scaled ×(rDt/dt) to hold the substep length (barotropic CFL) at the
         # FE-path value — see ``_barotropic_substep_scale`` in ``_step_impl``.
-        _baro_scale = 2
+        # rDt scale: 1 on the Euler start (rDt=dt), 2 on a leap-frog step.
+        # On the Euler start this ALSO reproduces NEMO's own averaging window:
+        # ``ll_fw_start`` is forced .TRUE. on the l_1st_euler step
+        # (dynspg_ts.f90:230-232), moving the boxcar centre from 2*nn_e to
+        # nn_e. VERIFIED against NEMO's ts_wgt at DINO's resolved nn_e=23:
+        # weights agree to 0.0, transport weights to 1.4e-17, both windows.
+        _baro_scale = 1 if _euler_start else 2
         # Seed the split-explicit barotropic INTEGRATION from the BEFORE level
         # (Nbb ssh + transport) so the fast free-surface mode leap-frogs
         # n-1 → n+1 (NEMO ln_bt_fw=.FALSE. centred barotropic, dynspg_ts.F90:
@@ -10739,39 +10708,69 @@ class LatLonCGridOceanModel:
             "nemo_e3t_0", "nemo_hu_0", "nemo_hv_0", "nemo_e1e2t",
             "nemo_e1e2u", "nemo_e1e2v",
         )
-        if (_cfg_b.barotropic.barotropic_after_reconcile
-                == "nemo_mlf_baro_corr"
-                and all(getattr(_zc, name, None) is not None
-                        for name in _raw_cycle_refs)):
+        _kmm_cycle = (
+            _cfg_b.barotropic.barotropic_after_reconcile
+            == "nemo_mlf_baro_corr"
+            and all(getattr(_zc, name, None) is not None
+                    for name in _raw_cycle_refs))
+        if _kmm_cycle:
             _, _, kmm_u, kmm_v = nemo_qco_kmm_velocity_cycle(
                 state.eta.data, state.u.data, state.v.data,
                 kaa_hu_avg, kaa_hv_avg, _zc, u_mask3, v_mask3, _grid)
-        u_f = _asselin(kmm_u, state.u_before.data, naa.u.data, u_mask3)
-        u_f = u_f.at[:, -1].set(u_f[:, 0])
-        v_f = _asselin(kmm_v, state.v_before.data, naa.v.data, v_mask3)
-        eta_f = _asselin(state.eta.data, state.eta_before.data,
-                         naa.eta.data, cmask)
-        # Thickness at the three tracer time levels + the Asselin-filtered ssh.
-        # e3t_now == h_k (already computed from state.eta above).  e3t_f is built
-        # from the filtered eta (eta_f == NEMO r3t_f) so numerator & denominator
-        # stay consistent (dynatf/tra_atf use the ssh_atf-filtered scale factor).
-        _mwc = _cfg_b.min_water_column_m
-        e3t_now = h_k
-        e3t_bef = compute_layer_thickness(
-            state.eta_before.data, state.H_bathy.data, _zc,
-            min_water_column_m=_mwc)
-        e3t_aft = compute_layer_thickness(
-            naa.eta.data, state.H_bathy.data, _zc,
-            min_water_column_m=_mwc)
-        e3t_flt = compute_layer_thickness(
-            eta_f, state.H_bathy.data, _zc, min_water_column_m=_mwc)
-        T_f = _thickness_weighted_asselin(
-            state.T.data, state.T_before.data, naa.T.data,
-            e3t_now, e3t_bef, e3t_aft, e3t_flt, gamma, mask3)
-        S_f = _thickness_weighted_asselin(
-            state.S.data, state.S_before.data, naa.S.data,
-            e3t_now, e3t_bef, e3t_aft, e3t_flt, gamma, mask3)
-
+        if _euler_start:
+            # NEMO skips ALL THREE Asselin filters on the l_1st_euler step --
+            # ssh (sshwzv.f90:443), tracers (traatf_qco.f90:152) and momentum
+            # (dynatf_qco.f90:164), each by its own internal guard -- so the
+            # next step's before level is the UNFILTERED now level.
+            #
+            # Momentum is not simply ``state.u`` though: ``mlf_baro_corr``'s
+            # second block (stpmlf.f90:716-723, taken because DINO sets
+            # ln_bt_fw=.FALSE.) rewrites puu(Kmm) BEFORE the index swap, and
+            # that block carries no filter guard either.  ``kmm_u``/``kmm_v``
+            # above already hold exactly that value -- the install at
+            # dynspg_ts.f90:1003 undone at stpmlf.f90:720, a pair that cancels
+            # algebraically and not bitwise.  The ``* umask`` is NEMO's own,
+            # on the same statement.
+            # ``kmm_u``/``kmm_v`` are the now-level velocity as NEMO leaves
+            # it -- the mlf_baro_corr Kmm round trip when this card runs it,
+            # the untouched now level otherwise.  The mask and the periodic
+            # wrap apply either way: NEMO's own statement carries ``* umask``
+            # (stpmlf.f90:720-721) and its lbc_lnk closes the zonal seam, and
+            # the leap-frog arm below does both.  The early return this
+            # replaced did NEITHER, which let a dry-face value survive into
+            # the next step's depth mean -- inert from rest, a leak from any
+            # other no-history state (review finding).
+            u_f = kmm_u * u_mask3
+            u_f = u_f.at[:, -1].set(u_f[:, 0])
+            v_f = kmm_v * v_mask3
+            eta_f = state.eta.data
+            T_f, S_f = state.T.data, state.S.data
+        else:
+            u_f = _asselin(kmm_u, state.u_before.data, naa.u.data, u_mask3)
+            u_f = u_f.at[:, -1].set(u_f[:, 0])
+            v_f = _asselin(kmm_v, state.v_before.data, naa.v.data, v_mask3)
+            eta_f = _asselin(state.eta.data, state.eta_before.data,
+                             naa.eta.data, cmask)
+            # Thickness at the three tracer time levels + the Asselin-filtered ssh.
+            # e3t_now == h_k (already computed from state.eta above).  e3t_f is built
+            # from the filtered eta (eta_f == NEMO r3t_f) so numerator & denominator
+            # stay consistent (dynatf/tra_atf use the ssh_atf-filtered scale factor).
+            _mwc = _cfg_b.min_water_column_m
+            e3t_now = h_k
+            e3t_bef = compute_layer_thickness(
+                state.eta_before.data, state.H_bathy.data, _zc,
+                min_water_column_m=_mwc)
+            e3t_aft = compute_layer_thickness(
+                naa.eta.data, state.H_bathy.data, _zc,
+                min_water_column_m=_mwc)
+            e3t_flt = compute_layer_thickness(
+                eta_f, state.H_bathy.data, _zc, min_water_column_m=_mwc)
+            T_f = _thickness_weighted_asselin(
+                state.T.data, state.T_before.data, naa.T.data,
+                e3t_now, e3t_bef, e3t_aft, e3t_flt, gamma, mask3)
+            S_f = _thickness_weighted_asselin(
+                state.S.data, state.S_before.data, naa.S.data,
+                e3t_now, e3t_bef, e3t_aft, e3t_flt, gamma, mask3)
         naa = naa._replace(
             u_before=state.u.replace(data=u_f),
             v_before=state.v.replace(data=v_f),
@@ -10782,8 +10781,11 @@ class LatLonCGridOceanModel:
         # barotropic_forcing_centred (#1226 item 3): swap THIS step's
         # now-forcing into the carry for the NEXT step's before-value —
         # mirrors NEMO's sbcmod.F90:382-386 ``utau_b(:,:) = utauU(:,:)``
-        # end-of-step swap (done every step except nit000, which this
-        # function's forward-Euler-start branch above handles separately).
+        # end-of-step swap.  CORRECTED (#1729): this used to say nit000 was
+        # "handled separately" by a forward-Euler-start branch above. That
+        # branch is gone; the Euler start falls through to here and seeds the
+        # carry on the same line as every other step, which is what NEMO does
+        # (the swap is unconditional at sbcmod.F90:382-386).
         if getattr(_cfg_b, "barotropic_forcing_centred", False):
             naa = naa._replace(
                 **_seed_centred_forcing_carry(
@@ -10875,35 +10877,24 @@ class LatLonCGridOceanModel:
         from legoesm.ocean.state import Field
         _grid = grid if grid is not None else self.grid
 
-        # --- FIRST step: forward-Euler start (NEMO l_1st_euler), no RA filter.
-        #     Identical to ``_leapfrog_step`` -- see its docstring/comments for
-        #     the full NEMO citation (istate.F90:97-99/135-137, stpmlf.F90:
-        #     114-117).  A from-rest state's Nbb==Nnn seed makes the leap-frog
-        #     combine degenerate to forward-Euler regardless of which method
-        #     performs it, so there is nothing MLF-specific to transcribe here.
-        if state.u_before is None:
-            self._warn_euler_start_skips_after_reconcile()
-            _entry = state._replace(
+        # --- FIRST step: NEMO's l_1st_euler start.  Handled exactly as in
+        #     ``_leapfrog_step`` -- read that method's block for the full
+        #     citation.  ``stp_MLF`` has no first-step variant: it sets
+        #     rDt = rn_Dt (stpmlf.f90:131-133) and runs every statement,
+        #     ``mlf_baro_corr`` (:534, guarded on ln_dynspg_ts alone)
+        #     included; only the three Asselin filters step aside, each by its
+        #     own internal guard.  So the start is a PARAMETERISATION of the
+        #     body below -- rDt, the barotropic window scale, and whether the
+        #     filters run -- not the early return this replaced (#1729).
+        _euler_start = state.u_before is None
+        if _euler_start:
+            state = state._replace(
                 u_before=state.u, v_before=state.v, T_before=state.T,
                 S_before=state.S, eta_before=state.eta,
             )
-            naa = self._step_impl(
-                _entry, dt, freshwater=freshwater,
-                surface_forcing=surface_forcing, sponge=sponge, grid=_grid,
-                vertex_mask=vertex_mask, t_seconds=t_seconds, z_coord=z_coord, config=config, iwm_fields=iwm_fields)
-            naa = naa._replace(
-                u_before=state.u, v_before=state.v, T_before=state.T,
-                S_before=state.S, eta_before=state.eta,
-            )
-            if getattr(_cfg_b, "barotropic_forcing_centred", False):
-                naa = naa._replace(
-                    **_seed_centred_forcing_carry(
-                        surface_forcing, freshwater, _cfg_b.rho_0,
-                        state.land_mask.data))
-            return naa
 
         # --- LEAP-FROG + Asselin.
-        rdt = 2.0 * dt
+        rdt = (1.0 if _euler_start else 2.0) * dt
         gamma = _cfg_b.asselin_gamma
         _tke_n2_bundle = self._tke_step_entry_n2_bundle(
             state, z_coord=_zc, config=_cfg_b)
@@ -10926,7 +10917,13 @@ class LatLonCGridOceanModel:
         #    difference is WHAT that increment is evaluated on -- now the Nbb
         #    tracers/velocity read as a LOCAL ARGUMENT by dyn_ldf/tra_ldf only,
         #    not a second whole-state pass (stpmlf.F90:275/437).
-        _baro_scale = 2
+        # rDt scale: 1 on the Euler start (rDt=dt), 2 on a leap-frog step.
+        # On the Euler start this ALSO reproduces NEMO's own averaging window:
+        # ``ll_fw_start`` is forced .TRUE. on the l_1st_euler step
+        # (dynspg_ts.f90:230-232), moving the boxcar centre from 2*nn_e to
+        # nn_e. VERIFIED against NEMO's ts_wgt at DINO's resolved nn_e=23:
+        # weights agree to 0.0, transport weights to 1.4e-17, both windows.
+        _baro_scale = 1 if _euler_start else 2
         state_expl, (K_v_phys, A_v_phys, k33_implicit, surface_tracer_forcing,
                      tke_source, diss_incr, tracer_source,
                      kaa_eta_raw, kaa_hu_avg, kaa_hv_avg) = self._step_impl(
@@ -11079,35 +11076,65 @@ class LatLonCGridOceanModel:
             "nemo_e3t_0", "nemo_hu_0", "nemo_hv_0", "nemo_e1e2t",
             "nemo_e1e2u", "nemo_e1e2v",
         )
-        if (_cfg_b.barotropic.barotropic_after_reconcile
-                == "nemo_mlf_baro_corr"
-                and all(getattr(_zc, name, None) is not None
-                        for name in _raw_cycle_refs)):
+        _kmm_cycle = (
+            _cfg_b.barotropic.barotropic_after_reconcile
+            == "nemo_mlf_baro_corr"
+            and all(getattr(_zc, name, None) is not None
+                    for name in _raw_cycle_refs))
+        if _kmm_cycle:
             _, _, kmm_u, kmm_v = nemo_qco_kmm_velocity_cycle(
                 state.eta.data, state.u.data, state.v.data,
                 kaa_hu_avg, kaa_hv_avg, _zc, u_mask3, v_mask3, _grid)
-        u_f = _asselin(kmm_u, state.u_before.data, naa.u.data, u_mask3)
-        u_f = u_f.at[:, -1].set(u_f[:, 0])
-        v_f = _asselin(kmm_v, state.v_before.data, naa.v.data, v_mask3)
-        eta_f = _asselin(state.eta.data, state.eta_before.data,
-                         naa.eta.data, cmask)
-        _mwc = _cfg_b.min_water_column_m
-        e3t_now = h_k
-        e3t_bef = compute_layer_thickness(
-            state.eta_before.data, state.H_bathy.data, _zc,
-            min_water_column_m=_mwc)
-        e3t_aft = compute_layer_thickness(
-            naa.eta.data, state.H_bathy.data, _zc,
-            min_water_column_m=_mwc)
-        e3t_flt = compute_layer_thickness(
-            eta_f, state.H_bathy.data, _zc, min_water_column_m=_mwc)
-        T_f = _thickness_weighted_asselin(
-            state.T.data, state.T_before.data, naa.T.data,
-            e3t_now, e3t_bef, e3t_aft, e3t_flt, gamma, mask3)
-        S_f = _thickness_weighted_asselin(
-            state.S.data, state.S_before.data, naa.S.data,
-            e3t_now, e3t_bef, e3t_aft, e3t_flt, gamma, mask3)
-
+        if _euler_start:
+            # NEMO skips ALL THREE Asselin filters on the l_1st_euler step --
+            # ssh (sshwzv.f90:443), tracers (traatf_qco.f90:152) and momentum
+            # (dynatf_qco.f90:164), each by its own internal guard -- so the
+            # next step's before level is the UNFILTERED now level.
+            #
+            # Momentum is not simply ``state.u`` though: ``mlf_baro_corr``'s
+            # second block (stpmlf.f90:716-723, taken because DINO sets
+            # ln_bt_fw=.FALSE.) rewrites puu(Kmm) BEFORE the index swap, and
+            # that block carries no filter guard either.  ``kmm_u``/``kmm_v``
+            # above already hold exactly that value -- the install at
+            # dynspg_ts.f90:1003 undone at stpmlf.f90:720, a pair that cancels
+            # algebraically and not bitwise.  The ``* umask`` is NEMO's own,
+            # on the same statement.
+            # ``kmm_u``/``kmm_v`` are the now-level velocity as NEMO leaves
+            # it -- the mlf_baro_corr Kmm round trip when this card runs it,
+            # the untouched now level otherwise.  The mask and the periodic
+            # wrap apply either way: NEMO's own statement carries ``* umask``
+            # (stpmlf.f90:720-721) and its lbc_lnk closes the zonal seam, and
+            # the leap-frog arm below does both.  The early return this
+            # replaced did NEITHER, which let a dry-face value survive into
+            # the next step's depth mean -- inert from rest, a leak from any
+            # other no-history state (review finding).
+            u_f = kmm_u * u_mask3
+            u_f = u_f.at[:, -1].set(u_f[:, 0])
+            v_f = kmm_v * v_mask3
+            eta_f = state.eta.data
+            T_f, S_f = state.T.data, state.S.data
+        else:
+            u_f = _asselin(kmm_u, state.u_before.data, naa.u.data, u_mask3)
+            u_f = u_f.at[:, -1].set(u_f[:, 0])
+            v_f = _asselin(kmm_v, state.v_before.data, naa.v.data, v_mask3)
+            eta_f = _asselin(state.eta.data, state.eta_before.data,
+                             naa.eta.data, cmask)
+            _mwc = _cfg_b.min_water_column_m
+            e3t_now = h_k
+            e3t_bef = compute_layer_thickness(
+                state.eta_before.data, state.H_bathy.data, _zc,
+                min_water_column_m=_mwc)
+            e3t_aft = compute_layer_thickness(
+                naa.eta.data, state.H_bathy.data, _zc,
+                min_water_column_m=_mwc)
+            e3t_flt = compute_layer_thickness(
+                eta_f, state.H_bathy.data, _zc, min_water_column_m=_mwc)
+            T_f = _thickness_weighted_asselin(
+                state.T.data, state.T_before.data, naa.T.data,
+                e3t_now, e3t_bef, e3t_aft, e3t_flt, gamma, mask3)
+            S_f = _thickness_weighted_asselin(
+                state.S.data, state.S_before.data, naa.S.data,
+                e3t_now, e3t_bef, e3t_aft, e3t_flt, gamma, mask3)
         naa = naa._replace(
             u_before=state.u.replace(data=u_f),
             v_before=state.v.replace(data=v_f),
@@ -11566,13 +11593,26 @@ class LatLonCGridOceanModel:
                 u_before=state.u, v_before=state.v, T_before=state.T,
                 S_before=state.S, eta_before=state.eta,
             )
+            # KNOWN, NAMED, NOT FIXED HERE (#1729, review finding). Seeding
+            # before:=now makes ``_euler_start`` False, so a scan-driven run
+            # from rest takes a 2dt FILTERED leap-frog first step, where NEMO
+            # takes a 1dt unfiltered Euler one (stpmlf.f90:131-133 plus the
+            # three filter guards). The seed is required -- lax.scan needs a
+            # constant carry treedef, and the None -> Field transition breaks
+            # it -- so closing this needs a traced first-step flag, not a
+            # different seed. It predates #1729 and is unchanged by it.
+            # SCOPE: only a driver that calls this reaches it, i.e.
+            # barotropic_solver="rigid_lid" or barotropic_slow_forcing_ab2
+            # (run_dino.py). The NEMO-faithful DINO card is neither
+            # (explicit_substep, slow_forcing_ab2 False) and runs the eager
+            # loop, so its first step is the Euler start.
 
         # barotropic_forcing_centred (#1226 item 3): seed tau_x_prev/
         # tau_y_prev/freshwater_eta_prev from THIS step's forcing (NEMO
         # nit000 rule, sbcmod.F90:568-573 -- "before" set equal to "now" on
         # the very first call, no restart) so a scan driver's first
         # centred step degenerates to plain NOW exactly like the eager
-        # ``_leapfrog_step`` forward-Euler-start branch. Reads
+        # ``_leapfrog_step`` Euler start. Reads
         # ``surface_forcing``/``freshwater`` out of ``step_kwargs`` (the
         # SAME forcing the scan will pass to ``step()``); a driver that
         # varies forcing per scan iteration (xs=...) rather than a fixed

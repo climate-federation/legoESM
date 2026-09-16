@@ -86,6 +86,37 @@ __physics_contract__ = {
 _NORM_T_K = 300.0
 _NORM_WIND_M_S = 30.0
 _NORM_SOLAR_W_M2 = 1400.0
+# Optional per-column input groups (both OFF unless the network is built with
+# the matching flag; the counts are the single source of truth for the SFNO
+# arm too — ``training.model_registry`` reads them from here).
+# Spatial embedding, NeuralGCM-style (Kochkov et al. 2024, Methods): sin(lat),
+# cos(lat), land-sea fraction, orography [km], plus a LEARNED per-grid-point
+# embedding of 8 channels (their 2.8-degree setting; zero-initialised as in
+# their ``LearnedPositionalFeatures``, then trained).
+N_COLUMN_STATIC_FEATURES = 4
+N_COLUMN_POS_EMBED = 8
+# ACE2-style static land-fraction input plane for the SFNO arm (orography is
+# already one of its state channels).
+N_SFNO_LAND_FRAC_CHANNELS = 1
+# Prescribed ERA5 surface fluxes as extra inputs: stress x/y, sensible, latent,
+# upwelling SW, upwelling LW — the order of ``SFC_FLUX_FORCING_KEYS``.
+N_SFC_FLUX_INPUT_CHANNELS = 6
+SFC_FLUX_FORCING_KEYS = ("sfc_tau_x", "sfc_tau_y", "sfc_shf", "sfc_lhf",
+                         "sfc_sw_up", "sfc_lw_up")
+# step_unified (driver-path) keyword names of the six prescribed surface
+# flux planes, position-for-position onto SFC_FLUX_FORCING_KEYS above: the
+# stress names differ (sfc_tau_x -> sfc_taux_override) and shf/lhf carry
+# the _override suffix; the radiative plane names coincide.
+SFC_FLUX_STEP_UNIFIED_KEYS = (
+    "sfc_taux_override", "sfc_tauy_override",
+    "sfc_shflx_override", "sfc_lhflx_override",
+    "sfc_sw_up", "sfc_lw_up",
+)
+_NORM_SFC_FLUX_W_M2 = 100.0  # coeff-ok: input normalisation to O(1)
+_NORM_SFC_STRESS_PA = 0.1  # coeff-ok: input normalisation to O(1)
+_M_PER_KM = 1000.0  # coeff-ok: unit conversion, metres per kilometre
+SFC_FLUX_INPUT_NORMS = ((_NORM_SFC_STRESS_PA, _NORM_SFC_STRESS_PA)
+                        + (_NORM_SFC_FLUX_W_M2,) * 4)
 _DEFAULT_HIDDEN_DIM = 256
 _DEFAULT_RESIDUAL_SCALE = 0.01
 # Radiation fluxes are O(100 W/m^2), not per-second tendencies, so the flux
@@ -213,6 +244,17 @@ class NeuralPhysics(eqx.Module):
         Separate scale for the 5 radiation-flux outputs (W/m^2), which are
         O(100), not per-second rates.  Defaults to 100 so the flux head can
         reach observed magnitudes while untrained output stays ~0.
+    spatial_embedding : bool
+        Append ``N_COLUMN_STATIC_FEATURES`` static features (sin lat, cos
+        lat, land-sea fraction, orography [km]) plus a learned per-grid-point
+        embedding of ``N_COLUMN_POS_EMBED`` channels (zero-initialised,
+        trained) — the NeuralGCM recipe.  Off by default.
+    era5_surface_fluxes : bool
+        Append the ``N_SFC_FLUX_INPUT_CHANNELS`` normalised ERA5 surface-flux
+        / stress planes as extra per-column inputs.  Off by default.
+    n_columns : int | None
+        Grid column count (n_lat * n_lon), sizes the embedding table;
+        required iff ``spatial_embedding``.
     """
 
     layers: list
@@ -222,6 +264,17 @@ class NeuralPhysics(eqx.Module):
     residual_scale: float = eqx.field(static=True)
     flux_output_scale: float = eqx.field(static=True)
     tendency_cap: float = eqx.field(static=True)
+    n_static: int = eqx.field(static=True)
+    n_embed: int = eqx.field(static=True)
+    n_flux: int = eqx.field(static=True)
+    # Learned per-grid-point embedding table, (n_columns, n_embed); None
+    # unless ``spatial_embedding``.
+    pos_embed: jax.Array | None
+
+    @property
+    def n_extra_dyn(self) -> int:
+        """Per-column dynamic extras (static + flux features) a caller supplies."""
+        return self.n_static + self.n_flux
 
     def __init__(
         self,
@@ -233,11 +286,23 @@ class NeuralPhysics(eqx.Module):
         residual_scale: float = _DEFAULT_RESIDUAL_SCALE,
         flux_output_scale: float = _DEFAULT_FLUX_OUTPUT_SCALE,
         tendency_cap: float = _DEFAULT_TENDENCY_CAP,
+        spatial_embedding: bool = False,
+        era5_surface_fluxes: bool = False,
+        n_columns: int | None = None,
     ):
         self.nlev = nlev
+        self.n_static = N_COLUMN_STATIC_FEATURES if spatial_embedding else 0
+        self.n_embed = N_COLUMN_POS_EMBED if spatial_embedding else 0
+        self.n_flux = N_SFC_FLUX_INPUT_CHANNELS if era5_surface_fluxes else 0
+        if spatial_embedding and n_columns is None:
+            raise ValueError(
+                "spatial_embedding=True requires n_columns = n_lat * n_lon of "
+                "the grid (it sizes the learned per-grid-point embedding)")
         # T, u, v, q_v per level + p_s + solar + T_sfc + sea-ice fraction.
         # The last two are prescribed surface forcings (AMIP SST pathway).
-        self.n_input = nlev * 4 + 4
+        # Then the optional groups, in pack order: static spatial features,
+        # ERA5 surface-flux planes, learned embedding.
+        self.n_input = nlev * 4 + 4 + self.n_static + self.n_flux + self.n_embed
         self.n_output = nlev * 4 + 6   # tendencies per level + 6 surface fluxes
         self.residual_scale = residual_scale
         self.flux_output_scale = flux_output_scale
@@ -262,6 +327,12 @@ class NeuralPhysics(eqx.Module):
             lambda l: (l.weight, l.bias), last,
             (jnp.zeros_like(last.weight), jnp.zeros_like(last.bias)),
         )
+        # NeuralGCM-style learned per-grid-point embedding: zero-init, trained
+        # (its gradient is W^T delta on the first layer, non-zero from step 1).
+        self.pos_embed = (
+            jnp.zeros((int(n_columns), self.n_embed),
+                      dtype=self.layers[0].weight.dtype)
+            if spatial_embedding else None)
 
     def __call__(self, x: jax.Array) -> jax.Array:
         """Forward pass for a single column.
@@ -304,6 +375,8 @@ def pack_column_features(
     solar: jax.Array,
     t_sfc: jax.Array,
     sic: jax.Array,
+    extra: jax.Array | None = None,
+    pos_embed: jax.Array | None = None,
 ) -> jax.Array:
     """Pack column state + surface forcing into a flat feature vector.
 
@@ -317,10 +390,14 @@ def pack_column_features(
     These give the learned physics its prescribed-SST response — the
     interannual-variability pathway.
 
-    Returns shape (nlev * 4 + 4,).
+    ``extra`` (shape ``(n_extra_dyn,)``, already normalised: static spatial
+    features then ERA5 surface-flux planes) and ``pos_embed`` (the column's
+    learned embedding row, ``(n_embed,)``) are appended when given.
+
+    Returns shape (nlev * 4 + 4 [+ n_extra_dyn] [+ n_embed],).
     """
     # Normalize to O(1) for stable training
-    return jnp.concatenate([
+    feats = jnp.concatenate([
         T / _NORM_T_K,
         u / _NORM_WIND_M_S,
         v / _NORM_WIND_M_S,
@@ -330,6 +407,11 @@ def pack_column_features(
         jnp.atleast_1d(t_sfc / _NORM_T_K),
         jnp.atleast_1d(sic),
     ])
+    if extra is not None:
+        feats = jnp.concatenate([feats, extra])
+    if pos_embed is not None:
+        feats = jnp.concatenate([feats, pos_embed])
+    return feats
 
 
 def _unpack_column_output(
@@ -386,6 +468,7 @@ def neural_column_forward(
     sst_col: jax.Array,
     sic_col: jax.Array,
     treat_nonpositive_sst_as_missing: bool = True,
+    extra_col: jax.Array | None = None,
 ) -> jax.Array:
     """Select surface T, sanitize sea-ice, pack features, vmap the network.
 
@@ -408,6 +491,14 @@ def neural_column_forward(
     because ``jnp.where`` propagates NaN cotangents from the untaken branch in
     reverse mode (codex HIGH).  ``sic_col`` -> nan->0, clipped to [0, 1].
 
+    ``extra_col`` (``(ncol, n_extra_dyn)``, already normalised) is REQUIRED
+    iff the network was built with ``spatial_embedding`` and/or
+    ``era5_surface_fluxes``: a missing or wrong-width array is a ValueError
+    at trace time naming the expected count, so a flag-on network can never
+    be fed the flag-off feature vector silently (or vice versa).  The learned
+    embedding table, when present, is vmapped over its leading axis so the
+    embedding leaf receives a gradient.
+
     Returns raw network output (ncol, n_output).
     """
     valid = jnp.isfinite(sst_col)
@@ -417,9 +508,36 @@ def neural_column_forward(
         valid, jnp.nan_to_num(sst_col, nan=0.0), T_col[:, -1],
     )
     sic_flat = jnp.clip(jnp.nan_to_num(sic_col, nan=0.0), 0.0, 1.0)
-    features = jax.vmap(pack_column_features)(
-        T_col, u_col, v_col, q_col, p_s_col, solar_col, t_sfc_col, sic_flat,
-    )
+    n_extra = int(neural_physics.n_extra_dyn)
+    ncol = T_col.shape[0]
+    if extra_col is None:
+        if n_extra != 0:
+            raise ValueError(
+                f"neural_physics expects {n_extra} per-column extra feature(s) "
+                f"(n_static={neural_physics.n_static}, "
+                f"n_flux={neural_physics.n_flux}); pass extra_col of shape "
+                f"(ncol, {n_extra})")
+    else:
+        extra_col = jnp.asarray(extra_col)
+        if extra_col.shape != (ncol, n_extra):
+            raise ValueError(
+                f"extra_col must have shape (ncol, n_extra_dyn) = "
+                f"({ncol}, {n_extra}); got {tuple(extra_col.shape)} "
+                f"(n_static={neural_physics.n_static}, "
+                f"n_flux={neural_physics.n_flux})")
+    pos_embed = neural_physics.pos_embed
+    if pos_embed is not None and pos_embed.shape[0] != ncol:
+        raise ValueError(
+            f"the learned embedding table has {pos_embed.shape[0]} rows but "
+            f"this grid has {ncol} columns; the network was built for a "
+            "different grid")
+    features = jax.vmap(
+        pack_column_features,
+        in_axes=(0, 0, 0, 0, 0, 0, 0, 0,
+                 None if extra_col is None else 0,
+                 None if pos_embed is None else 0),
+    )(T_col, u_col, v_col, q_col, p_s_col, solar_col, t_sfc_col, sic_flat,
+      extra_col, pos_embed)
     return jax.vmap(neural_physics)(features)
 
 
@@ -477,7 +595,52 @@ def make_neural_step_unified(
             held_sw_down_toa,
         ) = tail
         del need_rad, dt
-        del solar_weights, o3_vmr, aerosol_od, kwargs
+        del solar_weights, o3_vmr, aerosol_od
+        # Optional prescribed-input columns, built from the driver-path
+        # kwargs EXACTLY like the spectral wrapper builds them from the
+        # spectral forcing dict: static [sin(lat), cos(lat), land_frac,
+        # orography in km] then the six surface fluxes in
+        # SFC_FLUX_FORCING_KEYS order divided by SFC_FLUX_INPUT_NORMS (the
+        # driver-path key names differ -- SFC_FLUX_STEP_UNIFIED_KEYS).
+        # Every plane is flattened with the adapter, so this is
+        # grid-agnostic (lat-lon, cubed sphere, MPAS).  A flag on with its
+        # keyword missing is an error naming it, never silent zeros.
+        # Flags off -> no extras, legacy path unchanged.
+        if neural_physics.n_extra_dyn > 0:
+            planes = []
+            if neural_physics.n_static > 0:
+                land_frac = kwargs.get("land_frac")
+                phis = kwargs.get("phis")
+                if land_frac is None:
+                    raise ValueError(
+                        "NeuralPhysics(spatial_embedding=True) requires "
+                        "'land_frac' in the step_unified kwargs, got None")
+                if phis is None:
+                    raise ValueError(
+                        "NeuralPhysics(spatial_embedding=True) requires "
+                        "'phis' in the step_unified kwargs, got None")
+                lat_flat = adapter.flatten_2d(lat)
+                planes += [
+                    jnp.sin(lat_flat),
+                    jnp.cos(lat_flat),
+                    adapter.flatten_2d(land_frac),
+                    adapter.flatten_2d(phis) / constants.g / _M_PER_KM,
+                ]
+            if neural_physics.n_flux > 0:
+                for key, norm in zip(
+                        SFC_FLUX_STEP_UNIFIED_KEYS, SFC_FLUX_INPUT_NORMS):
+                    plane = kwargs.get(key)
+                    if plane is None:
+                        raise ValueError(
+                            f"NeuralPhysics(era5_surface_fluxes=True) "
+                            f"requires {key!r} in the step_unified kwargs, "
+                            "got None")
+                    planes.append(adapter.flatten_2d(plane) / norm)
+            extra_col = jnp.stack(planes, axis=-1)  # (ncol, n_extra_dyn)
+        else:
+            del kwargs
+            extra_col = None
+
         # Flatten to columns
         T_col = adapter.flatten_3d(T)           # (ncol, nlev)
         u_col = adapter.flatten_3d(u)           # (ncol, nlev)
@@ -501,6 +664,7 @@ def make_neural_step_unified(
         y = neural_column_forward(
             neural_physics, T_col, u_col, v_col, q_v_col, p_s_flat,
             solar_flat, adapter.flatten_2d(sst), adapter.flatten_2d(sic),
+            extra_col=extra_col,
         )
 
         # Unpack into per-column PhysicsOutput, then unflatten
@@ -623,8 +787,9 @@ def make_hybrid_step_unified(
         # Older 2-tuple traditional steps leave it None (land inert).
         _trad_T_land = _trad[2] if len(_trad) > 2 else None
 
-        # Neural correction
-        neural_out, _ = neural_step(*trad_args)
+        # Neural correction (the step keywords carry the prescribed planes a
+        # flag-on network needs; a flag-off network ignores them).
+        neural_out, _ = neural_step(*trad_args, **kwargs)
 
         # Blend: traditional + alpha * neural correction
         _alpha = jnp.asarray(alpha)
@@ -669,6 +834,9 @@ def build_column_physics(
     residual_scale: float = _DEFAULT_RESIDUAL_SCALE,
     *,
     key: jax.Array,
+    spatial_embedding: bool = False,
+    era5_surface_fluxes: bool = False,
+    n_columns: int | None = None,
 ) -> NeuralPhysics:
     """Create a column MLP physics model for the spectral PE dycore.
 
@@ -686,6 +854,9 @@ def build_column_physics(
         Output scaling for stable init (untrained -> near-zero tendencies).
     key : jax.Array
         PRNG key for weight initialization.
+    spatial_embedding, era5_surface_fluxes, n_columns
+        See :class:`NeuralPhysics`; ``n_columns`` is required iff
+        ``spatial_embedding``.
     """
     return NeuralPhysics(
         nlev=nlev,
@@ -693,6 +864,9 @@ def build_column_physics(
         n_layers=n_layers,
         key=key,
         residual_scale=residual_scale,
+        spatial_embedding=spatial_embedding,
+        era5_surface_fluxes=era5_surface_fluxes,
+        n_columns=n_columns,
     )
 
 
@@ -751,6 +925,15 @@ def make_column_physics_fn(
     different parameterisation".  The alternative — importing the scheme's
     ``dT/dt`` too — would put a second thermodynamic parameterisation next to
     the network, which is the confound this exists to remove.
+
+    SPATIAL EMBEDDING / ERA5 SURFACE FLUXES.  When the network was built with
+    ``spatial_embedding`` and/or ``era5_surface_fluxes``, the per-column extras
+    are assembled here from the grid, the state and the forcing dict: static
+    features ``[sin lat, cos lat, land fraction, orography in km]`` (the
+    NeuralGCM set; ``forcing["land_frac"]`` required) then the six normalised
+    ERA5 surface-flux planes (``SFC_FLUX_FORCING_KEYS``).  Such a network
+    rejects ``forcing=None``.  ``momentum_physics_fn`` is called with
+    ``forcing=forcing`` so a prescribed ERA5 stress reaches the drag scheme.
     """
     # Deferred imports (spectral dycore + Gaussian grid) to avoid a physics <->
     # dynamics package import cycle at module load; run once at adapter build.
@@ -763,6 +946,19 @@ def make_column_physics_fn(
     from legoesm.atmosphere.physics._shared import zero_like_tracers
 
     nlev = neural_physics.nlev
+    use_static = neural_physics.n_static > 0
+    use_flux = neural_physics.n_flux > 0
+    # A momentum source is handed the forcing only if it declares the kwarg:
+    # the historical ``(state, grid, sigma)`` callables keep working, the
+    # turbulence-only builder (which reads the ERA5 stress) declares it.
+    _mom_wants_forcing = False
+    if momentum_physics_fn is not None:
+        import inspect
+        try:
+            _mom_wants_forcing = "forcing" in inspect.signature(
+                momentum_physics_fn).parameters
+        except (TypeError, ValueError):
+            _mom_wants_forcing = False
 
     def physics_fn(state, grid_, sigma_coord, forcing=None):
         # Spectral -> grid-space fields
@@ -803,11 +999,49 @@ def make_column_physics_fn(
             sst_col = forcing["T_sfc"]
             sic_col = forcing["sic"]
         else:
+            if use_static or use_flux:
+                raise ValueError(
+                    "a column network built with spatial_embedding and/or "
+                    "era5_surface_fluxes needs a forcing dict (land fraction "
+                    "/ ERA5 surface-flux planes); forcing=None callers cannot "
+                    "use it")
             solar_col = jnp.full_like(p_s_col, constants.S_0)
             # NaN (not zero): finite-only select below -> lowest-air proxy,
             # exactly the pre-refactor unforced branch (t_sfc = T_col[:, -1]).
             sst_col = jnp.full_like(p_s_col, jnp.nan)
             sic_col = jnp.zeros_like(p_s_col)
+
+        # Per-column extras, already normalised, in pack order: static then
+        # flux.  None on the legacy path so the feature vector is unchanged.
+        extra_col = None
+        if use_static or use_flux:
+            parts = []
+            if use_static:
+                if "land_frac" not in forcing:
+                    raise KeyError(
+                        "spatial_embedding=True requires forcing['land_frac'] "
+                        "(land-sea fraction in [0, 1] per column)")
+                lat_col = jnp.broadcast_to(
+                    grid_.lat[:, None], (n_lat, n_lon)).reshape(-1)
+                land_col = jnp.clip(jnp.asarray(forcing["land_frac"]),
+                                    0.0, 1.0).reshape(-1)
+                parts += [
+                    jnp.sin(lat_col),
+                    jnp.cos(lat_col),
+                    land_col,
+                    # orography as geopotential height [km]
+                    jnp.asarray(fields['phis']).reshape(-1)
+                    / constants.g / _M_PER_KM,
+                ]
+            if use_flux:
+                for _k, _norm in zip(SFC_FLUX_FORCING_KEYS,
+                                     SFC_FLUX_INPUT_NORMS):
+                    if _k not in forcing:
+                        raise KeyError(
+                            f"era5_surface_fluxes=True requires "
+                            f"forcing[{_k!r}]")
+                    parts.append(jnp.asarray(forcing[_k]).reshape(-1) / _norm)
+            extra_col = jnp.stack(parts, axis=-1).astype(T_col.dtype)
 
         # Spectral convention: T_sfc is NaN over land, real Kelvin over ocean;
         # a finite value is always valid (finite-only select, no >0 gate) to
@@ -816,6 +1050,7 @@ def make_column_physics_fn(
             neural_physics, T_col, u_col, v_col, q_col, p_s_col,
             solar_col, sst_col, sic_col,
             treat_nonpositive_sst_as_missing=False,
+            extra_col=extra_col,
         )  # (ncol, n_output)
 
         # dT/dt (first nlev outputs) -> spectral temperature tendency
@@ -835,7 +1070,10 @@ def make_column_physics_fn(
         if momentum_physics_fn is None:
             vor_t, div_t = zero_3d, zero_3d
         else:
-            _mom = momentum_physics_fn(state, grid_, sigma_coord)
+            _mom = (momentum_physics_fn(state, grid_, sigma_coord,
+                                        forcing=forcing)
+                    if _mom_wants_forcing else
+                    momentum_physics_fn(state, grid_, sigma_coord))
             vor_t = _mom.vor_hat.data
             div_t = _mom.div_hat.data
         # lnps stays ZERO regardless of the source — see the factory docstring

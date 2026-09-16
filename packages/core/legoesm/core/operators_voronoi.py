@@ -1290,6 +1290,67 @@ def scalar_del2_cell_3d(q_cell_3d, mesh):
     return divergence_cell_3d(grad, mesh)
 
 
+def scalar_del4_cell_3d(q_cell_3d, mesh, *, mid_refresh=None):
+    """Biharmonic (``-del2(del2)``) of a cell scalar, all levels.
+
+    Sign convention matches :func:`vector_laplacian_del4_3d`: the returned
+    tendency DAMPS when added as ``q + dt * nu4 * scalar_del4_cell_3d(q)``,
+    because ``del2(del2)`` of a wave carries ``+k^4``.
+
+    Why a scalar biharmonic exists alongside the Laplacian: a coefficient
+    strong enough to hold grid-scale noise down with a Laplacian also flattens
+    the resolved gradients, because the Laplacian's damping falls off slowly
+    with scale.  The biharmonic's selectivity follows exactly, with no
+    continuum approximation: since it is ``-del2(del2)``, its eigenvalue on
+    every mesh eigenmode is exactly MINUS THE SQUARE of the Laplacian's, so the
+    ratio of damping between any two scales is SQUARED.  Measured on the
+    40962-cell SCVT at subdivision 6 (Rayleigh quotients on degree-166 and
+    degree-83 zonal harmonics, i.e. 240 km and 479 km wavelengths): the
+    Laplacian damps the shorter scale 2.47x faster than the longer one, the
+    biharmonic 6.08x.  The textbook continuum figures for those two scales are
+    4 and 16 — do NOT quote them for this operator; the discrete values are
+    smaller and are what the filter actually delivers.
+
+    Each pass conserves ``sum_c A_c q_c`` per level exactly (in exact
+    arithmetic), so the composition does too.  Note this is the MIXING-RATIO
+    integral, not water: with varying layer mass it does not conserve column
+    water vapour, exactly as for the Laplacian.
+
+    NOT monotone: unlike the Laplacian this has no discrete maximum principle,
+    so an explicit update can overshoot and undershoot near sharp gradients and
+    the caller's positivity floor is load-bearing rather than a no-op.  The
+    explicit stability bound is ``nu4 * dt * g_max^2 <= 1/2`` with ``g_max``
+    from :func:`scalar_del2_cell_cfl_factor`.  Gershgorin on the Laplacian
+    gives ``|lambda| <= 2*g_max`` (diagonal ``-g_c``, off-diagonal row sum
+    ``g_c``) — NOT ``g_max``; the biharmonic's spectral radius is therefore at
+    most ``4*g_max^2``, and forward-Euler stability ``nu4*|lambda|*dt <= 2``
+    reduces to the bound above.  Measured on the 40962-cell SCVT at
+    subdivision 6 the Laplacian's spectral radius is ``1.364 * g_max``, inside
+    the factor-two bound, so the guard is conservative by about a factor two.
+
+    Parameters
+    ----------
+    q_cell_3d : jax.Array, shape (nCells, nlev)
+    mesh : VoronoiMesh
+    mid_refresh : Callable(array) -> array, optional
+        Distributed-only halo refresh applied to the INTERMEDIATE Laplacian,
+        for a partition whose halo is only one cell deep — the two-pass stencil
+        reaches two.  MEASURED: at this partitioner's default halo depth the
+        local mesh already carries the second ring, so owned cells match serial
+        to 1e-13 WITHOUT this argument (test_biharmonic_owned_cells_match_
+        serial).  It is therefore redundant in the default configuration and is
+        kept for a shallower one.  ``None`` is the byte-identical default.
+
+    Returns
+    -------
+    jax.Array, shape (nCells, nlev) — ``-del2(del2(q))``, units [q]/m^4.
+    """
+    lap = scalar_del2_cell_3d(q_cell_3d, mesh)
+    if mid_refresh is not None:
+        lap = mid_refresh(lap)
+    return -scalar_del2_cell_3d(lap, mesh)
+
+
 def scalar_del2_cell_cfl_factor(mesh):
     """Geometry factor ``g_max`` for the explicit plain-del2 stability bound.
 

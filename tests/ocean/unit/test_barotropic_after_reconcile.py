@@ -276,11 +276,26 @@ def _channel(outer="leapfrog", after="off", partial=True, dino_drag=False,
 
 
 def _second_step(method, **kw):
-    """One production step to populate Nbb (the forward-Euler start), then the
-    real leap-frog step -- the option's site is in the leap-frog branch, and a
-    call on a fresh from-rest state would only exercise the Euler start."""
+    """One production step to populate Nbb (the Euler start), then the real
+    leap-frog step -- so the measurement lands on the LEAP-FROG site."""
     state, model = _channel(**kw)
     s1 = model._leapfrog_step(state, _DT)
+    return getattr(model, method)(s1, _DT)
+
+
+def _second_step_one_variable(method, outer, after, **kw):
+    """Step 2 with BOTH arms sharing a BIT-IDENTICAL step 1.
+
+    Since #1729 the option's site also runs on the Euler start, so stepping
+    each arm twice under its own setting compares TWO applications plus a
+    step of divergence -- a confound, not a result (oracle-fidelity Rule 7).
+    Take step 1 with the option OFF in both arms, then step 2 under the arm's
+    own setting, and the sole difference is one leap-frog-site
+    reconciliation.
+    """
+    _, model_off = _channel(outer=outer, after="off", **kw)
+    state, model = _channel(outer=outer, after=after, **kw)
+    s1 = model_off._leapfrog_step(state, _DT)
     return getattr(model, method)(s1, _DT)
 
 
@@ -289,9 +304,9 @@ _PATHS = [("_leapfrog_step", "leapfrog"), ("_nemo_mlf_step", "nemo_mlf")]
 
 @pytest.mark.parametrize("method,outer", _PATHS)
 def test_option_changes_the_after_state_on_both_step_paths(method, outer):
-    off = _second_step(method, outer=outer, after="off", dino_drag=True)
-    on = _second_step(method, outer=outer, after="nemo_mlf_baro_corr",
-                      dino_drag=True)
+    off = _second_step_one_variable(method, outer, "off", dino_drag=True)
+    on = _second_step_one_variable(method, outer, "nemo_mlf_baro_corr",
+                                   dino_drag=True)
     du = np.asarray(on.u.data - off.u.data)
     dv = np.asarray(on.v.data - off.v.data)
     assert np.max(np.abs(du)) > 1e-6, "the option is inert -- its site never ran"
@@ -302,9 +317,9 @@ def test_option_changes_the_after_state_on_both_step_paths(method, outer):
 def test_the_change_is_a_column_mean_replacement_and_nothing_else(method, outer):
     """On every wet column the option shifts EVERY level by the SAME number.
     Anything that touched the vertical structure would fail here."""
-    off = _second_step(method, outer=outer, after="off", dino_drag=True)
-    on = _second_step(method, outer=outer, after="nemo_mlf_baro_corr",
-                      dino_drag=True)
+    off = _second_step_one_variable(method, outer, "off", dino_drag=True)
+    on = _second_step_one_variable(method, outer, "nemo_mlf_baro_corr",
+                                   dino_drag=True)
     du = np.asarray(on.u.data - off.u.data)
     # WITHOUT this line the test passes on du == 0 -- i.e. it would survive the
     # option being removed entirely, proving nothing. ``checked > 10`` below
@@ -342,9 +357,11 @@ def test_unknown_scheme_raises_from_inside_each_step_path(method, outer):
     reachability proof for both call sites: a path that never reached the
     dispatch would return a state instead."""
     state, model = _channel(outer=outer, after="not_a_scheme", dino_drag=True)
-    s1 = model._leapfrog_step(state, _DT)   # Euler start: site not reached yet
+    # #1729: the Euler start reaches the site too, so the raise fires on the
+    # FIRST step. Both sites are still proved reachable -- the parametrisation
+    # runs each method, and each method's own first step is what raises here.
     with pytest.raises(ValueError, match="barotropic_after_reconcile"):
-        getattr(model, method)(s1, _DT)
+        getattr(model, method)(state, _DT)
 
 def test_zstar_makes_the_after_thickness_half_a_no_op():
     """A MEASURED BOUND on what this option can own -- asserted DIRECTLY.
@@ -585,102 +602,110 @@ def test_call_site_carries_raw_kaa_and_executes_literal_kernel(method, outer):
     assert np.all(np.isfinite(np.asarray(naa.v.data)))
 
 
-# ---------------------------------- the Euler-start gap is no longer SILENT --
+# ------------------------------------------- the Euler start reconciles too --
+def _first_step(method, **kw):
+    """The FROM-REST first step -- NEMO's ``l_1st_euler``.
+
+    The companion ``_second_step`` deliberately steps once before measuring,
+    so nothing in this file used to score step one.  That is how #1729's gap
+    survived: the Euler start returned before the reconciliation site and
+    every test here stayed green.
+    """
+    state, model = _channel(**kw)
+    assert state.u_before is None, (
+        "fixture must start from rest, or this measures a leap-frog step")
+    return getattr(model, method)(state, _DT)
+
+
 @pytest.mark.parametrize("method,outer", _PATHS)
-def test_euler_start_warns_that_it_skips_the_reconciliation(method, outer):
-    """#1640 finding 3.  The forward-Euler start returns before the
-    reconciliation site, so on that one step legoESM COMMITS a depth-mean
-    deposit NEMO removes (NEMO runs mlf_baro_corr on l_1st_euler too).  That
-    was silent while the card claimed the reference's second-site behaviour on
-    every step.
+def test_the_euler_start_runs_the_reconciliation_too(method, outer):
+    """#1729.  ``mlf_baro_corr`` is guarded on ``ln_dynspg_ts`` ALONE
+    (stpmlf.f90:534), so NEMO runs it on its ``l_1st_euler`` step like any
+    other.  legoESM used to return before the site and merely WARN about it.
 
-    PARAMETRIZED OVER BOTH OUTER STEPS deliberately.  There are two separate
-    early-return branches, and an earlier version keyed the once-only flag on a
-    single process-wide bool -- so whichever path ran first consumed the
-    warning and the OTHER site was never observed to warn at all.  Review
-    caught it; this is the gate that keeps it caught.
-
-    Not a raise: a genuine FROM-REST run of a card that ships this option has
-    no before level to bridge, and the DINO twin's ``--legacy-euler-start``
-    exists to reproduce artifacts recorded before 2026-08-24.  (An earlier
-    version of this docstring justified that by the twin's default being
-    ``bridge_before=False`` -- RETRACTED, the default is the bridged start
-    since #1455; see the companion test below.)"""
-    import warnings
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel)
-
-    LatLonCGridOceanModel._WARNED_EULER_SKIP = set()
-    state, model = _channel(outer=outer, after="nemo_mlf_baro_corr",
-                            dino_drag=True)
-    assert state.u_before is None, "fixture must start on the Euler path"
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        getattr(model, method)(state, _DT)
-    msgs = [str(x.message) for x in w if issubclass(x.category, RuntimeWarning)]
-    assert any("forward-Euler start" in m and method in m for m in msgs), (
-        f"the Euler-start skip must announce itself from {method}, got {msgs}")
-
-    # once per site, not once per step
-    with warnings.catch_warnings(record=True) as w2:
-        warnings.simplefilter("always")
-        getattr(model, method)(state, _DT)
-    assert not [x for x in w2 if "forward-Euler start" in str(x.message)], (
-        "the warning must be emitted once per site, not on every Euler step")
+    This is the gate on the fix: on the very first step from rest, selecting
+    the option must move the velocity.  Restoring the early return makes it
+    red on both paths.
+    """
+    off = _first_step(method, outer=outer, after="off", dino_drag=True)
+    on = _first_step(method, outer=outer, after="nemo_mlf_baro_corr",
+                     dino_drag=True)
+    du = np.asarray(on.u.data - off.u.data)
+    dv = np.asarray(on.v.data - off.v.data)
+    assert np.max(np.abs(du)) > 1e-6, (
+        "the Euler start never reached the reconciliation site")
+    assert np.max(np.abs(dv)) > 1e-6
 
 
-def test_no_euler_warning_once_the_before_level_is_populated():
-    """#1455 (2026-08-24): under the twin's NEW default the warning must NOT
-    fire -- and that is a property of the model, not of the harness.
+@pytest.mark.parametrize("method,outer", _PATHS)
+def test_the_euler_start_change_is_a_column_mean_replacement(method, outer):
+    """Same claim the leap-frog step is held to: every level of a wet column
+    moves by the SAME number.  If the Euler start had grown its own kernel
+    instead of reaching the shared one, this is where it would show."""
+    off = _first_step(method, outer=outer, after="off", dino_drag=True)
+    on = _first_step(method, outer=outer, after="nemo_mlf_baro_corr",
+                     dino_drag=True)
+    du = np.asarray(on.u.data - off.u.data)
+    assert np.max(np.abs(du)) > 1e-6, "nothing moved -- this test is vacuous"
+    wet = (np.abs(np.asarray(off.u.data)) + np.abs(np.asarray(on.u.data))) > 0
+    checked = 0
+    for j in range(du.shape[0]):
+        for i in range(du.shape[1]):
+            col = du[j, i][wet[j, i]]
+            if col.size > 1:
+                assert np.max(np.abs(col - col[0])) < 1e-11
+                checked += 1
+    assert checked > 10, "no multi-level wet column was actually checked"
 
-    The bridged start hands ``model.step`` a populated ``u_before``, so the
-    early-return branch the warning lives on is never taken.  The fixture gets
-    there the same way the model does: step 1 is the Euler start (and warns),
-    step 2 runs with the before level populated and must be silent.  Without
-    this, "the default no longer warns" would be an assertion about a flag
-    default rather than about the code path it selects.
+
+@pytest.mark.parametrize("method,outer", _PATHS)
+def test_the_euler_start_reconciliation_moves_ONLY_velocity(method, outer):
+    """The claim the campaign actually relies on, asserted rather than argued.
+
+    ``mlf_baro_corr`` is called after ``tra_zdf`` (stpmlf.f90:534 vs :507) and
+    writes only puu/pvv, so on this step it can move NO tracer and NO sea
+    level. That is what lets the temperature row be attributed elsewhere; if
+    it were false, the whole #1729 attribution would be.
+
+    (This replaces a test that compared the option OFF against the unset
+    DEFAULT -- which IS off, so it compared a config with itself and could
+    not fail. Review caught it; the version here is the claim that test was
+    reaching for.)
+    """
+    off = _first_step(method, outer=outer, after="off", dino_drag=True)
+    on = _first_step(method, outer=outer, after="nemo_mlf_baro_corr",
+                     dino_drag=True)
+    for name in ("T", "S", "eta"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(on, name).data),
+            np.asarray(getattr(off, name).data),
+            err_msg=f"the reconciliation moved {name}, which it cannot touch")
+    # anti-vacuity: it DID run, it just did not reach the tracers
+    assert np.max(np.abs(np.asarray(on.u.data - off.u.data))) > 1e-6
+    assert np.max(np.abs(np.asarray(on.v.data - off.v.data))) > 1e-6
+
+
+@pytest.mark.parametrize("method,outer", _PATHS)
+def test_the_euler_start_no_longer_warns_because_it_no_longer_skips(
+        method, outer):
+    """The RuntimeWarning that used to announce this gap is DELETED, and this
+    test refuses to let that deletion be the whole change.
+
+    A test that only asserted silence would pass if someone removed the
+    warning and left the gap.  So it asserts silence AND, on the same step,
+    that the reconciliation moved the velocity.
     """
     import warnings
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel)
 
-    LatLonCGridOceanModel._WARNED_EULER_SKIP = set()
-    state, model = _channel(after="nemo_mlf_baro_corr", dino_drag=True)
-    s1 = model._leapfrog_step(state, _DT)          # the Euler start itself
-    assert s1.u_before is not None, (
-        "fixture must reach a populated before level, or this test passes "
-        "vacuously by staying on the Euler path")
-    # non-vacuity: the warning DID fire on the step that took the Euler branch
-    assert "_leapfrog_step" in LatLonCGridOceanModel._WARNED_EULER_SKIP
-
-    # ...and must not fire again now that the before level exists. Cleared, so
-    # a silent result cannot be the once-per-site latch instead of the branch.
-    LatLonCGridOceanModel._WARNED_EULER_SKIP = set()
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        model._leapfrog_step(s1, _DT)
+        on = _first_step(method, outer=outer, after="nemo_mlf_baro_corr",
+                         dino_drag=True)
     assert not [x for x in w if "forward-Euler start" in str(x.message)], (
-        "a leap-frog step with a populated before level must never claim to "
-        "be the Euler start")
-
-
-def test_no_euler_warning_when_the_option_is_off():
-    """Non-vacuity for the test above: a warning that fires unconditionally
-    would pass it while telling the operator nothing."""
-    import warnings
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel)
-
-    LatLonCGridOceanModel._WARNED_EULER_SKIP = set()
-    state, model = _channel(after="off", dino_drag=True)
-    assert state.u_before is None, (
-        "fixture must start on the Euler path, or this test passes vacuously "
-        "by never reaching the branch it is about")
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        model._leapfrog_step(state, _DT)
-    assert not [x for x in w if "forward-Euler start" in str(x.message)], (
-        "the default (option off) must stay silent")
+        "the Euler start still claims to skip the reconciliation")
+    off = _first_step(method, outer=outer, after="off", dino_drag=True)
+    assert np.max(np.abs(np.asarray(on.u.data - off.u.data))) > 1e-6, (
+        "silent AND inert: the warning went away but the gap did not")
 
 
 def test_the_weighting_fix_is_bit_identical_on_the_SHIPPED_DINO_geometry():

@@ -240,6 +240,29 @@ def concentration(pr, lat, lon):
                 mean=float((xs * ws).sum()))
 
 
+def _model_wap(run, plev, lat, lon):
+    """The run's OWN published omega [Pa/s] on ``plev``, or None if absent.
+
+    Returned on the probe's own (plev, lat, lon) axes so it drops straight into
+    the slot the continuity estimate used to fill. None when the run does not
+    publish ``wap`` -- the caller then falls back to the estimate and says so.
+    """
+    try:
+        d = rb._load_model(run, "wap")
+    except SystemExit:
+        return None
+    if d is None or "wap" not in getattr(d, "variables", {}):
+        return None
+    w = np.asarray(d["wap"]).mean(axis=0)
+    wp = np.asarray(d.plev, dtype=np.float64)
+    if not np.array_equal(wp, plev):
+        idx = [int(np.argmin(np.abs(wp - p))) for p in plev]
+        if max(abs(wp[i] - p) for i, p in zip(idx, plev)) > 1.0:
+            return None            # level axes disagree: refuse rather than interpolate
+        w = w[idx]
+    return w if w.shape[1:] == (lat.size, lon.size) else None
+
+
 def omega_from_divergence(u, v, plev, lat, lon):
     """omega [Pa/s] on ``plev`` from mass continuity, using the SAME operator on
     whatever winds it is handed.
@@ -381,7 +404,18 @@ def main(argv=None):
     um = np.asarray(mu["ua"]).mean(axis=0)[keep]
     vm = np.asarray(mv["va"]).mean(axis=0)[keep]
     oo_true, ue, ve, ref_year = era5_omega(months, plev)
-    om = omega_from_divergence(um, vm, plev, lat, lon)
+    om_est = omega_from_divergence(um, vm, plev, lat, lon)
+    # PREFER THE MODEL'S OWN wap when the run publishes it. This probe used to
+    # assume it never does and substitute the continuity estimate
+    # unconditionally -- while warning, correctly, that the estimate overstates
+    # the amplitude ~30x. The run DOES publish wap now, and using the estimate
+    # instead changed the answer: the estimator put the tropical ascending area
+    # fraction at 0.597 against ERA5's 0.474, while the real field gives 0.574
+    # against 0.468 at 500 hPa and LESS ascent than ERA5 at 700. A stale
+    # assumption in an instrument is a wrong number with a confident label.
+    om_native = _model_wap(run, plev, lat, lon)
+    om = om_est if om_native is None else om_native
+    _omega_is_native = om_native is not None
     oo_der = omega_from_divergence(ue, ve, plev, lat, lon)
     k500 = int(np.argmin(np.abs(plev - 50000.0)))
     HPA_DAY = 864.0                      # Pa/s -> hPa/day
@@ -391,6 +425,7 @@ def main(argv=None):
     # reference has both.  Applying the estimator to ERA5's own winds and
     # scoring it against ERA5's own omega says how much of a model-minus-
     # reference difference could be the estimator rather than the model.
+    oo_der = oo_der  # (estimator applied to ERA5's winds, the control below)
     a, b = oo_der[k500] * HPA_DAY, oo_true[k500] * HPA_DAY
     trop_m = np.abs(lat) <= TROPICS
     r = float(np.corrcoef(a[trop_m].ravel(), b[trop_m].ravel())[0, 1])
@@ -408,12 +443,19 @@ def main(argv=None):
     w_m, w_o = om[k500] * HPA_DAY, oo_true[k500] * HPA_DAY
     trop = np.abs(lat) <= TROPICS
     aw = _area_weights(lat, lon)
-    print(f"\n=== {run}: 500 hPa omega [hPa/day] -- AMPLITUDES NOT QUOTABLE ===")
-    print("  The model publishes no wap, so its omega is a continuity estimate "
-          "from monthly-mean\n  winds; the control above shows that estimator "
-          "reproduces the PATTERN (r=0.67) but\n  overstates the amplitude by "
-          "~30x.  Only the pattern statements below are usable.\n  FIX: add "
-          "wap to the CMOR output.")
+    if _omega_is_native:
+        print(f"\n=== {run}: 500 hPa omega [hPa/day] -- from the model's OWN wap ===")
+        print("  Both sides are real omega (the model's published wap against "
+              "ERA5's own), so\n  AMPLITUDES ARE QUOTABLE here. The continuity "
+              "control above stands as a check on\n  the estimator, not on "
+              "these numbers.")
+    else:
+        print(f"\n=== {run}: 500 hPa omega [hPa/day] -- AMPLITUDES NOT QUOTABLE ===")
+        print("  This run publishes no wap, so its omega is a continuity "
+              "estimate from monthly-mean\n  winds; the control above shows "
+              "that estimator reproduces the PATTERN but overstates\n  the "
+              "amplitude by ~30x. Only the pattern statements below are "
+              "usable.\n  FIX: publish wap from this run.")
     print(f"  tropical ascending area fraction   model {float((w_m[trop] < 0).mean()):.3f}"
           f"   ERA5 {float((w_o[trop] < 0).mean()):.3f}")
     print(f"  tropical mean ascent (where <0)    model "

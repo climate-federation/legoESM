@@ -228,6 +228,94 @@ class TestFV3DuoDynamicsModel:
         q1 = np.asarray(out["q"][0])
         assert np.isfinite(q1).all()
 
+    def test_extra_tracers_are_nonzero_distinct_and_lon_modulated(
+            self, model):
+        """n_tracers appends sphum*(1+0.5 sin(iq*lon)) passengers: tracer 0
+        untouched, every extra one nonzero, distinct from the others, and
+        zero in the halos like sphum. A zonally-shifted copy of the
+        zonally-symmetric sphum would be the SAME field -- this is what
+        makes a swapped or dropped tracer visible."""
+        one = model.dcmip16_initial_state(n_tracers=1)
+        ic = model.dcmip16_initial_state(n_tracers=3)
+        assert len(one["q"]) == 1 and len(ic["q"]) == 3
+        q0, q1, q2 = (np.asarray(q) for q in ic["q"])
+        assert np.array_equal(q0, np.asarray(one["q"][0]))
+        cs = slice(NG, NG + N)
+        halo = np.ones(q0.shape[1:3], bool)
+        halo[cs, cs] = False
+        gs6 = model.grid.ctx_np["gs6"]
+        win0 = q0[:, cs, cs, :]
+        assert (win0 > 0).all(), "sphum is not positive on the window"
+        for iq, q in ((1, q1), (2, q2)):
+            assert not q[:, halo, :].any(), f"tracer {iq} halo not zero"
+            assert (q[:, cs, cs, :] > 0).all(), f"tracer {iq} not positive"
+            for t in range(6):
+                lon = np.asarray(gs6[t]["agrid_lon"])[cs, cs]
+                want = q0[t, cs, cs, :] * (1.0 + 0.5 * np.sin(iq * lon))[
+                    :, :, None]
+                # same float64 expression -> bit-equal, not "close" (GLM)
+                np.testing.assert_array_equal(q[t, cs, cs, :], want)
+        assert not np.array_equal(q1, q2)
+        assert not np.array_equal(q1, q0)
+
+    def test_agrid_lon_is_radians_on_the_axes_the_ic_assumes(self, bundle):
+        """Independent pin of what lon_modulated_tracer reads (GLM
+        2026-09-13: the tracer test re-reads the same agrid_lon the helper
+        consumed, so a degrees-valued or transposed longitude would pass
+        it). Radians: lon in [0, 2pi], lat in [-pi/2, pi/2] -- a lon<->lat
+        swap or degrees (~90 vs ~1.57) fails here. Axes: on the equatorial
+        faces the cell-centre longitude is NEARLY constant along one index
+        (the grid lines are meridians; the centres sit ~1e-4 rad off them,
+        measured 2026-09-13 at C12: max 2.6e-4 vs 1.2e-1 across) and varies
+        along the other; which index differs between faces 0/1 and 3/4. A
+        transposition swaps the two, three orders apart. sphum is built
+        from agrid_lat on the same [cs, cs] slice, so this is the
+        convention both share."""
+        n, ng = bundle.n, bundle.ng
+        cs = slice(ng, ng + n)
+        gs6 = bundle.ctx_np["gs6"]
+        for t in range(6):
+            lon = np.asarray(gs6[t]["agrid_lon"])[cs, cs]
+            lat = np.asarray(gs6[t]["agrid_lat"])[cs, cs]
+            assert lon.shape == lat.shape == (n, n)
+            assert 0.0 <= lon.min() and lon.max() <= 2 * np.pi, f"face {t}"
+            assert np.abs(lat).max() <= np.pi / 2, f"face {t}"
+        for t, const_axis in ((0, 1), (1, 1), (3, 0), (4, 0)):
+            lon = np.asarray(gs6[t]["agrid_lon"])[cs, cs]
+            along = np.abs(np.diff(lon, axis=const_axis)).max()
+            across = np.abs(np.diff(lon, axis=1 - const_axis)).min()
+            assert along < 1e-2 * across, (
+                f"face {t}: lon changes {along:.2e} along axis {const_axis} "
+                f"vs {across:.2e} across -- not the assumed axis convention")
+
+    def test_n_tracers_below_one_is_refused(self, model):
+        with pytest.raises(ValueError, match="n_tracers"):
+            model.dcmip16_initial_state(n_tracers=0)
+
+    def test_one_step_advects_every_tracer(self, model):
+        """Two passengers through one step: both come back, both finite,
+        both moved, and they did not collapse onto each other."""
+        ic = model.dcmip16_initial_state(n_tracers=2)
+        out = model.step(ic, BDT)
+        assert len(out["q"]) == 2
+        # codex 2026-09-13: scored on the COMPUTE WINDOW only -- a halo fill
+        # alone satisfied "moved", and a zeroed tracer passed every check.
+        cs = slice(NG, NG + N)
+        for iq in range(2):
+            a = np.asarray(ic["q"][iq])[:, cs, cs, :]
+            b = np.asarray(out["q"][iq])[:, cs, cs, :]
+            assert np.isfinite(b).all(), f"tracer {iq} went non-finite"
+            assert (b > 0).any(), f"tracer {iq} is zero after the step"
+            assert float(np.abs(b - a).max()) > 0.0, (
+                f"tracer {iq} did not move on the compute window")
+        b0 = np.asarray(out["q"][0])[:, cs, cs, :]
+        b1 = np.asarray(out["q"][1])[:, cs, cs, :]
+        assert not np.array_equal(b0, b1)
+        # the modulation must SURVIVE transport: tracer 1 is not a constant
+        # multiple of tracer 0 after the step (a copy or an index swap is)
+        ratio = b1[b0 > 0] / b0[b0 > 0]
+        assert ratio.max() - ratio.min() > 0.1
+
     def test_validate_dycore_contract(self, model):
         from legoesm.components.protocol import validate_dycore
         validate_dycore(model)
@@ -1006,3 +1094,55 @@ class TestFV3DuoSpmdDriver:
         drv = ModelDriver(self._cfg(tmp_path), output_dir=tmp_path)
         drv.setup()
         assert drv.run() == "COMPLETED"
+
+
+class TestTerminatorTracers:
+    """The oracle's DCMIP16 terminator pair, ported from test_cases.F90:
+    4136-4205 -- passive on an adiabatic deck, longitude-dependent, and
+    Cl + 2 Cl2 == qcly EXACTLY by construction."""
+
+    def test_pair_is_nonzero_lon_dependent_and_conserves_qcly(self):
+        from legoesm.core.fv3_native_dcmip16_ic import (
+            TERM_QCLY, dcmip16_terminator_cl_cl2)
+        lon = np.linspace(0.0, 2 * np.pi, 73)[None, :] * np.ones((5, 1))
+        lat = np.linspace(-1.2, 1.2, 5)[:, None] * np.ones((1, 73))
+        cl, cl2 = dcmip16_terminator_cl_cl2(lon, lat)
+        assert (cl >= 0).all() and (cl2 >= 0).all()
+        assert cl.max() > 0 and cl2.max() > 0
+        np.testing.assert_allclose(cl + 2 * cl2, TERM_QCLY, rtol=0, atol=4e-21)
+        # longitude dependence: along one latitude cl is not constant
+        assert cl[2].max() - cl[2].min() > 1e-7
+        # the night side (k1 = 0) is the pure Cl2 state: cl = 0, cl2 = qcly/2
+        night = cl == 0.0
+        assert night.any()
+        np.testing.assert_array_equal(cl2[night], TERM_QCLY / 2)
+
+    def test_six_face_pair_is_window_filled_and_level_independent(self, bundle):
+        from legoesm.core.fv3_native_dcmip16_ic import (
+            TERM_QCLY, dcmip16_terminator_six_face)
+        pairs = dcmip16_terminator_six_face(bundle.ctx_np, KM)
+        cs = slice(NG, NG + N)
+        halo = np.ones((MA, MA), bool); halo[cs, cs] = False
+        for cl, cl2 in pairs:
+            assert cl.shape == cl2.shape == (MA, MA, KM)
+            assert not cl[halo].any() and not cl2[halo].any()
+            for k in range(1, KM):
+                np.testing.assert_array_equal(cl[..., k], cl[..., 0])
+            np.testing.assert_allclose(
+                cl[cs, cs, :] + 2 * cl2[cs, cs, :], TERM_QCLY, rtol=0, atol=4e-21)
+        assert not np.array_equal(pairs[0][0], pairs[3][0])
+
+    def test_model_appends_the_pair_after_the_passengers(self, model):
+        from legoesm.core.fv3_native_dcmip16_ic import (
+            dcmip16_terminator_six_face)
+        ic = model.dcmip16_initial_state(n_tracers=2, terminator=True)
+        assert len(ic["q"]) == 4
+        pairs = dcmip16_terminator_six_face(model.grid.ctx_np, KM)
+        for iq in range(2):
+            np.testing.assert_array_equal(
+                np.asarray(ic["q"][2 + iq]),
+                np.stack([pairs[t][iq] for t in range(6)]))
+        plain = model.dcmip16_initial_state(n_tracers=2)
+        for iq in range(2):
+            np.testing.assert_array_equal(np.asarray(ic["q"][iq]),
+                                          np.asarray(plain["q"][iq]))

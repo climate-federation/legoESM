@@ -343,6 +343,12 @@ def main() -> int:
             f"--reorder-for ({reorder_for}) must be >= --n-devices ({nd}): "
             f"the ghost padding only guarantees divisibility for the "
             f"partition target.")
+    # Precision: the state dtype comes from the precision POLICY (default
+    # fp32), NOT JAX_ENABLE_X64 — set it to match the x64 flag or the
+    # "float64" arm silently runs fp32 state.
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    set_policy(PrecisionPolicy.fp64() if jax.config.jax_enable_x64
+               else PrecisionPolicy.fp32())
     mesh, model, s0, dev_config = build_model_and_state(
         args.subdivision, args.nlev, reorder_for, nd, args.partition_method,
         moist=(args.physics == "kessler"), lloyd_iterations=args.lloyd,

@@ -515,6 +515,11 @@ def parse_args(argv: list[str] | None = None):
                    help="Short 30-day run for CI")
     p.add_argument("--output", type=str, default="results/omip")
     p.add_argument("--checkpoint-days", type=float, default=30.0)
+    p.add_argument("--no-final-snapshot", action="store_true",
+                   help="Skip the end-of-run MLD snapshot (snapshot_final.npz). "
+                        "For probe arms at ORCA12 the 14 GB compressed write "
+                        "outlasts the walltime; with --checkpoint-days 0 the "
+                        "arm then writes only its csv/json diagnostics.")
     p.add_argument("--max-wallclock-seconds", type=float, default=0.0,
                    help="Wallclock budget [s] for clean checkpoint+exit")
     p.add_argument("--restart-buffer-seconds", type=float, default=600.0,
@@ -538,6 +543,17 @@ def parse_args(argv: list[str] | None = None):
     p.add_argument("--woa-init", action="store_true",
                    help="Initialize T/S from WOA18 instead of rest state. "
                         "Requires --woa-t and --woa-s.")
+    p.add_argument("--ic-from-fesom-mesh", type=str, default=None,
+                   help=("Directory of a FESOM2-JAX mesh with a cached initial "
+                         "field (T_ic.npy/S_ic.npy, geo_coord_nod2D.npy, Z.npy, "
+                         "nlevels_nod2D.npy). Replaces the WOA/PHC files as the "
+                         "source of --woa-init (and of the sponge / restoring "
+                         "targets): every lane then starts from the reference "
+                         "run's own field (init_woa.init_ocean_from_fesom_mesh)."))
+    p.add_argument("--ic-cache-dir", type=str, default=None,
+                   help=("Absolute directory on SHARED storage where the field built by "
+                         "--ic-from-fesom-mesh is cached (rank 0 builds once, every rank "
+                         "loads the same bytes). Default: $LEGOESM_MESH_CACHE_DIR."))
     p.add_argument("--woa-void-fill", action="store_true",
                    help=("Harmonic-fill source OCEAN cells the observed T/S "
                          "never sampled at a depth (nearest donor farther than "
@@ -6310,10 +6326,19 @@ def run_omip_single(grid_type: str, args) -> dict:
               f"{float(np.median(_off)):.1f} m median, "
               f"{float(np.max(_off)):.1f} m max")
         del _live, _off, _zref, _H
-    T_woa, S_woa = init_ocean_from_woa(
-        grid, _zc_final, _woa_paths[0], _woa_paths[1],
-        cell_center_depths=_cell_depths,
-        void_fill=bool(getattr(args, "woa_void_fill", False)))
+    if getattr(args, "ic_from_fesom_mesh", None):
+        from legoesm.ocean.init_woa import init_ocean_from_fesom_mesh
+        T_woa, S_woa = init_ocean_from_fesom_mesh(
+            grid, _zc_final, args.ic_from_fesom_mesh,
+            cell_center_depths=_cell_depths,
+            wet_mask=np.asarray(state.land_mask.data) > 0.5,
+            log=lambda m: print("  " + m, flush=True),
+            cache_dir=getattr(args, "ic_cache_dir", None))
+    else:
+        T_woa, S_woa = init_ocean_from_woa(
+            grid, _zc_final, _woa_paths[0], _woa_paths[1],
+            cell_center_depths=_cell_depths,
+            void_fill=bool(getattr(args, "woa_void_fill", False)))
     del _cell_depths   # a full-global (nj, ni, nlev) f64 array per rank at ORCA12
 
     if args.woa_init and T_woa is not None and S_woa is not None:
@@ -6510,7 +6535,9 @@ def run_omip_single(grid_type: str, args) -> dict:
         "days": float(args.days),
         "seed": int(run_config.seed),
         "forcing_mode": getattr(args, "forcing_mode", "restoring"),
-        "initial_condition": "woa18" if args.woa_init else "rest_state",
+        "initial_condition": (("fesom_mesh:" + str(args.ic_from_fesom_mesh))
+                              if (args.woa_init and getattr(args, "ic_from_fesom_mesh", None))
+                              else "woa18" if args.woa_init else "rest_state"),
         "ocean_config": _namedtuple_to_dict(config),
         "cli_args": vars(args),
     }
@@ -6868,7 +6895,10 @@ def run_omip_single(grid_type: str, args) -> dict:
         except Exception as e:  # diagnostic snapshot must never crash the run
             print(f"  Warning: MLD snapshot skipped: {type(e).__name__}: {e}")
 
-    if _coordinate_io:
+    if args.no_final_snapshot:
+        if _io_rank:
+            print("  MLD snapshot skipped (--no-final-snapshot)")
+    elif _coordinate_io:
         _collective_root_io(write_final_snapshot)
     elif _io_rank:
         write_final_snapshot()

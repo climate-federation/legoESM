@@ -1352,36 +1352,35 @@ class BarotropicConfig(NamedTuple):
     # final few ULPs through multiplication/reduction/division association.
     #
     # SCOPE, named rather than left to be discovered: the site is in the
-    # leap-frog branch of each outer step, so it is NOT applied on the
-    # forward-Euler first step (``state.u_before is None``), which returns
-    # straight out of ``_step_impl`` with no barotropic-mean slot to reconcile
-    # onto. NEMO DOES run mlf_baro_corr on its l_1st_euler step, so that is a
-    # real one-step gap. Whether a bridged/restart twin takes it is a
-    # property of the RUNNER'S DEFAULT, not of being a twin -- the correction
-    # #1640 forced. ``u_before`` arrives populated only when the before level
-    # is bridged; ``kamm_twin_90d.py`` defaulted that OFF until 2026-08-24, so
-    # a twin COULD enter step 1 with ``u_before is None`` and take this branch.
-    # RETRACTED (#1455, 2026-08-24): the note here previously said the
-    # campaign's own 90-day twin DID. Audited against the recorded run logs, it
-    # did not -- 18 of 18 recorded twin builds passed the bridge explicitly,
-    # and the acceptance gate has defaulted it ON since 2026-08-09. Since #1455
-    # the twin runner defaults to the bridged start too, so the shipped twin
-    # cannot take it; ``--legacy-euler-start`` still can. (The
-    # original wording here, "It is empty for a bridged/restart twin (u_before
-    # arrives populated, so that branch is never taken)", stays RETRACTED: it
-    # was asserted of every run when it was only ever true of a bridged one.)
-    # The same applies to a genuine FROM-REST run of a card that ships this
-    # option,
-    # which since #1455 R6 includes nemo_dino_kamm_mlf and therefore its
-    # from-rest drivers
+    # leap-frog family of outer steps only. Selecting it on forward_euler or
+    # ab2 is rejected at model construction, not ignored.
+    #
+    # IT NOW RUNS ON THE FIRST STEP TOO (#1729, 2026-09-10). Everything below
+    # this line used to describe a one-step gap: the forward-Euler start
+    # returned out of ``_step_impl`` before reaching the site, and the model
+    # emitted a one-time RuntimeWarning about it. NEMO runs mlf_baro_corr on
+    # its l_1st_euler step (stpmlf.f90:534 is guarded on ln_dynspg_ts alone),
+    # so the gap was real -- and it is now CLOSED rather than announced. The
+    # Euler start is a parameterisation of the same body, so it reaches this
+    # site like every other step, and the warning is deleted. The from-rest
+    # drivers that carried the gap
     # (scripts/validate/ocean_fidelity/dino_1226/box_budget_run.py and
-    # acc_momentum_budget.py). All of those miss NEMO's reconciliation on step
-    # 1 only. The step is no longer SILENT: the model emits a one-time
-    # RuntimeWarning (``_warn_euler_start_skips_after_reconcile``) whenever the
-    # Euler start is taken with the option on. Not a raise, deliberately --
-    # refusing it would break the shipped twin's default invocation; closing
-    # the gap needs ``_step_impl`` to surface the barotropic depth mean on its
-    # implicit-vmix path (named and costed at that helper, not done).
+    # acc_momentum_budget.py, plus any from-rest run of the
+    # nemo_dino_kamm_mlf card) no longer do; their step-1 numbers moved, so
+    # baselines recorded before that commit are not comparable.
+    #
+    # MEASURED, so that the name of this option is not read for more than it
+    # does: on the first step from rest it moves temperature, salinity and
+    # sea level by EXACTLY 0.0 -- it is called after tra_zdf (stpmlf.f90:507)
+    # and writes only the velocity arrays -- and it moves the velocity about
+    # 3% FURTHER from NEMO's own kt=1 record. Faithful and slightly worse is
+    # registered, not reverted.
+    #
+    # RETAINED RETRACTION (#1455): a previous version of this note said the
+    # campaign's 90-day twin took the Euler branch. It did not -- 18 of 18
+    # recorded twin builds bridged the before level explicitly. An earlier
+    # wording, "empty for a bridged/restart twin", also stays retracted: it
+    # was asserted of every run when it was only true of a bridged one.
     # Selecting this on an outer_integrator that has no such site
     # (forward_euler, ab2) is rejected at model construction, not ignored.
     #

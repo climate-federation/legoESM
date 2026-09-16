@@ -603,6 +603,74 @@ def _fill_source_levels_nearest_valid(
     return out, n_filled, n_void
 
 
+# A filled level lighter than the level above it by more than this (in-situ
+# density, both evaluated at the lower level's pressure) is a cross-basin
+# donor, not water that could sit there.  Measured on PHC3 winter (1 deg, 102
+# levels, 3.25e6 filled entries): the deficit has two populations -- up to
+# ~0.1 kg/m3 from ordinary column-to-column contrast between a cell and its
+# donor (68k entries at 0.01, 16k at 0.1), and >= 0.5 kg/m3 (10k entries,
+# 7.7k columns: Baltic 19, Caspian 15, Aegean 8, Arctic shelves) from a
+# donor in another basin.  0.1 sits between them.
+_FILL_STABILITY_TOL_KG_M3 = 0.1
+
+
+def _reject_unstable_donors(
+    T: np.ndarray, S: np.ndarray, filled: np.ndarray, depth_m: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Replace a filled (donor) level that is lighter than the level above by
+    that level, top to bottom, so the fill never manufactures a static
+    inversion.  Observed levels are never changed.
+
+    Why: the per-level nearest donor is the nearest source cell with data AT
+    THAT DEPTH, wherever it is.  Where a whole basin has no observation below
+    some depth, that cell lies in another basin -- for the Aegean below
+    ~1000 m it is the Black Sea (8.9 degC / 22 psu), 150 km away across a
+    1-deg land row.  On ORCA12 that put 27 psu water under 39 psu water in
+    the North Aegean trench column (an 8 kg/m3 inversion at 1047 m, measured
+    through this module's own bilinear + vertical sampling), and the
+    velocity there grew from the first step (jobs 27459479 / 27464705).
+    Extending the last credible level downward is what the observational
+    analyses do for such a basin.  A denser wrong-basin donor still passes:
+    this guards the column, not the geography.
+
+    The comparison is against the last FINITE level above, so a source depth
+    with no donor anywhere (left NaN for the vertical bridge) does not hide an
+    inversion across it.  Returns the corrected fields and the number of
+    (cell, level) entries replaced.
+    """
+    from legoesm.ocean.eos import wright_eos
+
+    T = np.array(T, dtype=np.float64, copy=True)
+    S = np.array(S, dtype=np.float64, copy=True)
+    depth_m = np.asarray(depth_m, dtype=np.float64)
+    n_replaced = 0
+    # last finite (T, S) above each column, carried down the walk
+    fin0 = np.isfinite(T[..., 0]) & np.isfinite(S[..., 0])
+    T_ref = np.where(fin0, T[..., 0], np.nan)
+    S_ref = np.where(fin0, S[..., 0], np.nan)
+    for k in range(1, T.shape[-1]):
+        p_pa = jnp.asarray(constants.rho_ocean * constants.g * depth_m[k])
+        Tk = T[..., k]                         # views: masked writes reach T/S
+        Sk = S[..., k]
+        cand = (filled[..., k] & np.isfinite(Tk) & np.isfinite(Sk)
+                & np.isfinite(T_ref) & np.isfinite(S_ref))
+        if cand.any():
+            rho_here = np.asarray(wright_eos(jnp.asarray(Tk[cand]),
+                                             jnp.asarray(Sk[cand]), p_pa))
+            rho_above = np.asarray(wright_eos(jnp.asarray(T_ref[cand]),
+                                              jnp.asarray(S_ref[cand]), p_pa))
+            lighter = np.zeros(cand.shape, dtype=bool)
+            lighter[cand] = rho_here < rho_above - _FILL_STABILITY_TOL_KG_M3
+            if lighter.any():
+                Tk[lighter] = T_ref[lighter]
+                Sk[lighter] = S_ref[lighter]
+                n_replaced += int(lighter.sum())
+        fin = np.isfinite(Tk) & np.isfinite(Sk)
+        T_ref[fin] = Tk[fin]
+        S_ref[fin] = Sk[fin]
+    return T, S, n_replaced
+
+
 def _harmonic_fill_2d(field: np.ndarray, void: np.ndarray,
                       domain: "np.ndarray | None" = None) -> np.ndarray:
     """Replace ``field`` inside ``void`` by the discrete harmonic function with
@@ -834,6 +902,41 @@ def _bilinear_2d(
     return result.reshape(out_shape)
 
 
+def _grid_lat_lon_deg(grid):
+    """Target-cell (lat_deg, lon_deg) for any ocean grid, shape = spatial layout."""
+    # Extract latitude in degrees from the grid.
+    # Dispatch order matters: GaussianGrid has both 'lat' and 'lat2d',
+    # while CubedSphereGrid has 'lat' (3D) but no 'lat2d'.
+    if hasattr(grid, 'lat2d'):
+        # Grids exposing a 2-D lat2d (GaussianGrid, LatLonGrid, and the
+        # orthogonal-curvilinear tripole LatLonCGridGeometry). Use the grid's
+        # TRUE 2-D longitude (lon2d) -- on the tripole grid longitude varies
+        # down every i-column, and grid.lon is only the 1-D SOUTHERNMOST row
+        # (lon_T[0, :]); pairing it with the 2-D lat_T mis-sampled WOA by a
+        # median ~9 deg (up to ~155 deg in the bipolar cap) at every cell. For
+        # regular lat-lon / Gaussian grids lon2d is the meshgrid of the 1-D lon,
+        # so this is identical there (no regression); fall back to the broadcast
+        # 1-D lon only for a grid that lacks lon2d.
+        lat_deg = np.asarray(grid.lat2d) * (180.0 / np.pi)
+        lon2d = getattr(grid, 'lon2d', None)
+        if lon2d is not None:
+            lon_deg = np.asarray(lon2d) * (180.0 / np.pi)
+        else:
+            lon_1d = np.asarray(grid.lon) * (180.0 / np.pi)
+            lon_deg = np.broadcast_to(lon_1d[np.newaxis, :], lat_deg.shape)
+    elif hasattr(grid, 'latCell'):
+        # VoronoiMesh: latCell in radians, shape (nCells,)
+        lat_deg = np.asarray(grid.latCell) * (180.0 / np.pi)
+        lon_deg = np.asarray(grid.lonCell) * (180.0 / np.pi)
+    elif hasattr(grid, 'lat') and hasattr(grid, 'lon'):
+        # CubedSphereGrid or LatLonGrid: lat/lon in radians
+        lat_deg = np.asarray(grid.lat) * (180.0 / np.pi)
+        lon_deg = np.asarray(grid.lon) * (180.0 / np.pi)
+    else:
+        raise TypeError(f"Unsupported grid type: {type(grid)}")
+    return lat_deg, lon_deg
+
+
 def init_ocean_from_woa(
     grid,
     z_coord: OceanZStarCoordinate,
@@ -945,36 +1048,7 @@ def init_ocean_from_woa(
             f"S_fill_psu must be finite; got {S_fill}."
         )
 
-    # Extract latitude in degrees from the grid.
-    # Dispatch order matters: GaussianGrid has both 'lat' and 'lat2d',
-    # while CubedSphereGrid has 'lat' (3D) but no 'lat2d'.
-    if hasattr(grid, 'lat2d'):
-        # Grids exposing a 2-D lat2d (GaussianGrid, LatLonGrid, and the
-        # orthogonal-curvilinear tripole LatLonCGridGeometry). Use the grid's
-        # TRUE 2-D longitude (lon2d) -- on the tripole grid longitude varies
-        # down every i-column, and grid.lon is only the 1-D SOUTHERNMOST row
-        # (lon_T[0, :]); pairing it with the 2-D lat_T mis-sampled WOA by a
-        # median ~9 deg (up to ~155 deg in the bipolar cap) at every cell. For
-        # regular lat-lon / Gaussian grids lon2d is the meshgrid of the 1-D lon,
-        # so this is identical there (no regression); fall back to the broadcast
-        # 1-D lon only for a grid that lacks lon2d.
-        lat_deg = np.asarray(grid.lat2d) * (180.0 / np.pi)
-        lon2d = getattr(grid, 'lon2d', None)
-        if lon2d is not None:
-            lon_deg = np.asarray(lon2d) * (180.0 / np.pi)
-        else:
-            lon_1d = np.asarray(grid.lon) * (180.0 / np.pi)
-            lon_deg = np.broadcast_to(lon_1d[np.newaxis, :], lat_deg.shape)
-    elif hasattr(grid, 'latCell'):
-        # VoronoiMesh: latCell in radians, shape (nCells,)
-        lat_deg = np.asarray(grid.latCell) * (180.0 / np.pi)
-        lon_deg = np.asarray(grid.lonCell) * (180.0 / np.pi)
-    elif hasattr(grid, 'lat') and hasattr(grid, 'lon'):
-        # CubedSphereGrid or LatLonGrid: lat/lon in radians
-        lat_deg = np.asarray(grid.lat) * (180.0 / np.pi)
-        lon_deg = np.asarray(grid.lon) * (180.0 / np.pi)
-    else:
-        raise TypeError(f"Unsupported grid type: {type(grid)}")
+    lat_deg, lon_deg = _grid_lat_lon_deg(grid)
 
     if T_path is not None and S_path is not None:
         # Load from WOA18 NetCDF files.  The guard above ensures that
@@ -991,8 +1065,18 @@ def init_ocean_from_woa(
         # given depth takes it from the nearest source cell that has one at
         # that same depth.  Without this a model column over a shallow source
         # cell inherited that cell's shallowest value all the way down.
+        _filled = ~(np.isfinite(T_woa) & np.isfinite(S_woa))
         (T_woa, S_woa), n_fill, n_void = _fill_source_levels_nearest_valid(
             (T_woa, S_woa), lat_woa, lon_woa, void_fill=void_fill)
+        _src_depths = (np.asarray(depth_woa, dtype=np.float64) if depth_woa is not None
+                       else WOA_DEPTHS[:T_woa.shape[-1]])
+        T_woa, S_woa, n_unstable = _reject_unstable_donors(
+            T_woa, S_woa, _filled & np.isfinite(T_woa), _src_depths)
+        del _filled
+        if n_unstable:
+            print(f"[setup] observed T/S: {n_unstable} filled source cell-levels "
+                  "were lighter than the level above (a cross-basin donor) and "
+                  "were replaced by the level above")
         if n_fill:
             n_src = T_woa.shape[0] * T_woa.shape[1] * T_woa.shape[2]
             print(f"[setup] observed T/S: filled {n_fill} of {n_src} source "
@@ -1345,3 +1429,348 @@ def woa_ocean_bathymetry(
     wet = H > 0.0
     H = np.where(wet, np.clip(H, min_depth_m, H_max), 0.0)
     return H.astype(np.float64)
+
+
+def _fesom_profiles_per_layer(xyz_nodes, nlevels, T_ic, S_ic, xyz_targets, k=4, chunk=200_000):
+    """T_prof, S_prof (ntarget, nz) on the FESOM layer mid-depths; for layer kk the donors are the nodes wet at kk (nlevels-2 >= kk)."""
+    from scipy.spatial import cKDTree
+
+    xyz_nodes = np.ascontiguousarray(xyz_nodes, dtype=np.float64)
+    xyz_targets = np.ascontiguousarray(xyz_targets, dtype=np.float64)
+    nlevels = np.asarray(nlevels)
+    T_ic = np.asarray(T_ic, dtype=np.float64)
+    S_ic = np.asarray(S_ic, dtype=np.float64)
+
+    nz = T_ic.shape[1] - 1
+    nt = xyz_targets.shape[0]
+
+    T_prof = np.empty((nt, nz), dtype=np.float64)
+    S_prof = np.empty((nt, nz), dtype=np.float64)
+    d0 = np.empty(nt, dtype=np.float64)
+    i0 = np.empty(nt, dtype=np.int64)
+
+    # Build one KD-tree per layer, up front; identical donor sets share a single tree.
+    # Donor sets are nested (threshold kk grows), so (size, first, last) uniquely identifies a set.
+    nlim = nlevels - 2
+    donors_l = [None] * nz
+    trees = [None] * nz
+    memo = {}
+    for kk in range(nz):
+        donors = np.flatnonzero(nlim >= kk)
+        if donors.size == 0:
+            # no node is wet at this layer: the profile holds the layer above
+            # (a shallower donor set must never be reused here -- its padded
+            # 0.0 values would enter the average)
+            donors_l[kk] = None
+            trees[kk] = None
+            continue
+        key = (int(donors.size), int(donors[0]), int(donors[-1]))
+        hit = memo.get(key)
+        if hit is None:
+            hit = (donors, cKDTree(xyz_nodes[donors]))
+            memo[key] = hit
+        donors_l[kk], trees[kk] = hit
+
+    for s in range(0, nt, chunk):
+        e = min(s + chunk, nt)
+        pts = xyz_targets[s:e]
+        m = e - s
+        for kk in range(nz):
+            donors = donors_l[kk]
+            tree = trees[kk]
+            if donors is None:
+                T_prof[s:e, kk] = T_prof[s:e, kk - 1]
+                S_prof[s:e, kk] = S_prof[s:e, kk - 1]
+                continue
+            d, j = tree.query(pts, k=min(k, donors.size))
+            d = d.reshape(m, -1)
+            j = j.reshape(m, -1)
+            if kk == 0:
+                d0[s:e] = d[:, 0]
+                i0[s:e] = donors[j[:, 0]]
+            zero = d == 0.0
+            w = 1.0 / np.maximum(d, 1e-12) ** 2
+            zr = zero.any(axis=1)
+            if zr.any():
+                w[zr] = zero[zr]
+            w /= w.sum(axis=1, keepdims=True)
+            idx = donors[j]
+            T_prof[s:e, kk] = np.einsum('ij,ij->i', w, T_ic[idx, kk])
+            S_prof[s:e, kk] = np.einsum('ij,ij->i', w, S_ic[idx, kk])
+
+    return T_prof, S_prof, d0, i0, donors_l, trees
+
+
+_FESOM_IC_CACHE_VERSION = 1  # bump when the remap algorithm changes values
+_FESOM_IC_CACHE_POLL_S = 5.0  # poll interval (s) for non-zero ranks waiting on rank 0's cache file
+
+
+def _load_fesom_ic_cache(path, spatial, nlev, log):
+    """Load a FESOM IC cache entry published by rank 0.
+
+    Returns ``(T, S)`` as float64 jax arrays, or ``None`` if the file is
+    corrupt/truncated, missing arrays, or shaped for a different grid.  Never
+    raises: the reason is logged so rank 0 can rebuild and other ranks can
+    fail with a clear message.
+    """
+    expected = tuple(spatial) + (nlev,)
+    try:
+        with np.load(path) as blob:
+            T = np.asarray(blob["T"], dtype=np.float64)
+            S = np.asarray(blob["S"], dtype=np.float64)
+    except Exception as exc:  # missing arrays, bad zip, truncated file, ...
+        log(f"init_ocean_from_fesom_mesh: unusable cache {path}: {exc!r}")
+        return None
+    if T.shape != expected or S.shape != expected:
+        log(f"init_ocean_from_fesom_mesh: unusable cache {path}: "
+            f"T.shape={T.shape}, S.shape={S.shape}, expected {expected}")
+        return None
+    log(f"init_ocean_from_fesom_mesh: cache hit {path}")
+    return (jnp.asarray(T, dtype=jnp.float64), jnp.asarray(S, dtype=jnp.float64))
+
+
+def init_ocean_from_fesom_mesh(grid, z_coord, mesh_dir, *, cell_center_depths=None,
+                               k=4, isolated_factor=3.0, wet_mask=None, log=print,
+                               cache_dir=None, cache_wait_timeout_s=6 * 3600):
+    """Build initial potential temperature and salinity on the model grid from
+    a FESOM2-JAX mesh's cached initial field.
+
+    Horizontal: for each FESOM LAYER, inverse-distance-squared weighting of the
+    ``k`` nearest nodes that are WET at that layer (chord distances on the unit
+    sphere; a coincident node gets weight 1).  A target deeper than its
+    neighbouring nodes' bottoms therefore takes the nearest nodes that ARE that
+    deep -- real water of that depth -- never a shallow profile extended
+    downward (that extension wrote 15 degC water to 2800 m in the Bismarck Sea
+    next to cells fed by deep nodes, a 2.4 kg/m3 wall).  The log line reports
+    the median and 99th-percentile donor distance at the deepest layer any wet
+    target uses, so distant-donor filling is visible.
+    Vertical: linear interpolation in depth from the 69 layer mid-depths |Z| to
+    each target level's depth (``cell_center_depths`` when given, else the
+    reference |z_full_ref|); the top value is held above |Z[0]| and the deepest
+    layer value below |Z[-1]|.
+
+    Units: T_ic/S_ic potential temperature [degC] / salinity [psu] (nod2D, 70),
+    padded with 0.0 below each node's bottom (layers 0..nlevels_nod2D-2 are
+    wet); Z [m] negative; target depths [m] positive-down; distances on the
+    unit sphere, converted with ``constants.R_earth`` for the diagnostics.
+
+    Closed seas: every target cell is filled; masking of closed seas (and land)
+    is the caller's job.  ``wet_mask`` (spatial, True = ocean) only restricts
+    the isolated-cell report (nearest surface donor farther than
+    ``isolated_factor`` x that donor's mesh resolution) to ocean cells.
+
+    ``cache_dir`` (default ``$LEGOESM_MESH_CACHE_DIR``; must be an absolute
+    path on storage shared by every process): rank 0 builds once and publishes
+    an ``.npz`` keyed on the mesh files' identity and the target geometry; the
+    other ranks wait for it and load the same bytes.  A cache hit returns the
+    stored fields without rebuilding, so the isolated-cell and donor-distance
+    diagnostics are skipped; their log lines appear only on a build.
+
+    Returns ``(T, S)`` as float64 jax arrays of shape ``spatial + (nlev,)``.
+    """
+    import hashlib
+    import os
+    import time
+
+    import jax
+
+    if cache_dir is None:
+        # same env-var convention as legoesm/grids/voronoi.py
+        cache_dir = os.environ.get("LEGOESM_MESH_CACHE_DIR") or None
+    nlev = int(z_coord.n_levels)
+    lat_deg, lon_deg = _grid_lat_lon_deg(grid)
+    lat_flat = np.asarray(lat_deg, dtype=np.float64).ravel()
+    lon_flat = np.asarray(lon_deg, dtype=np.float64).ravel()
+    spatial = np.shape(lat_deg)
+    ncell = lat_flat.size
+    if cell_center_depths is not None:
+        ccd = np.asarray(cell_center_depths, dtype=np.float64)
+        if ccd.shape[-1] != nlev or ccd.shape[:-1] != spatial:
+            raise ValueError(f"cell_center_depths shape {ccd.shape} != {spatial + (nlev,)}")
+        depths = ccd.reshape(ncell, nlev)
+    else:
+        depths = np.broadcast_to(
+            np.abs(np.asarray(z_coord.z_full_ref, dtype=np.float64)), (ncell, nlev))
+
+    cache_path = None
+    if cache_dir is not None:
+        # cache_dir is written by rank 0 and polled by every other rank, so it
+        # MUST be an absolute path on storage shared by all jax processes.
+        if not os.path.isabs(cache_dir):
+            raise ValueError(
+                "init_ocean_from_fesom_mesh: cache_dir must be an absolute path on a "
+                f"filesystem shared by all jax processes, got {cache_dir!r}")
+        key = hashlib.sha256()
+        # Key the mesh files by identity (basename, size, mtime_ns) instead of
+        # content -- the staleness criterion make/rsync use -- so no rank hashes
+        # ~16 GB of mesh at every launch.  An in-place edit that preserves size
+        # and mtime_ns is NOT detected; bump _FESOM_IC_CACHE_VERSION for that.
+        for name in ("T_ic.npy", "S_ic.npy", "geo_coord_nod2D.npy", "Z.npy", "nlevels_nod2D.npy"):
+            st = os.stat(os.path.join(mesh_dir, name))
+            key.update(f"{name}|{st.st_size}|{st.st_mtime_ns}\n".encode())
+        key.update(repr(tuple(spatial)).encode())
+        key.update(str(nlev).encode())
+        key.update(hashlib.sha256(np.ascontiguousarray(lat_flat)).hexdigest().encode())
+        key.update(hashlib.sha256(np.ascontiguousarray(lon_flat)).hexdigest().encode())
+        if cell_center_depths is None:
+            # depths is a broadcast of one nlev vector; hash just that vector
+            # (materialising the view is ~8 GB at ORCA12).
+            key.update(b"ref")
+            key.update(hashlib.sha256(
+                np.abs(np.asarray(z_coord.z_full_ref, dtype=np.float64)).tobytes()).hexdigest().encode())
+        else:
+            key.update(b"ccd")
+            # buffer protocol, no .tobytes() copy of the (ncell, nlev) array (8 GB at ORCA12)
+            key.update(hashlib.sha256(np.ascontiguousarray(ccd)).hexdigest().encode())
+        key.update(f"{k!r}|{isolated_factor!r}|{_FESOM_IC_CACHE_VERSION}".encode())
+        cache_path = os.path.join(
+            cache_dir, f"fesom_ic_v{_FESOM_IC_CACHE_VERSION}_{key.hexdigest()[:24]}.npz")
+    if cache_path is not None and os.path.exists(cache_path):
+        cached = _load_fesom_ic_cache(cache_path, spatial, nlev, log)
+        if cached is not None:
+            return cached
+        if jax.process_index() != 0:
+            raise RuntimeError(
+                f"init_ocean_from_fesom_mesh: cache file {cache_path} is corrupt or "
+                f"incompatible (expected T/S of shape {tuple(spatial) + (nlev,)})")
+        log(f"init_ocean_from_fesom_mesh: unusable cache, rebuilding {cache_path}")
+        # Remove the unusable file now, so peers arriving during the (long)
+        # rebuild see no file and enter the wait loop instead of raising.
+        try:
+            os.unlink(cache_path)
+        except FileNotFoundError:
+            pass
+    if cache_path is not None and jax.process_index() != 0:
+        # Never build on a non-zero rank: a per-rank build is 16x the cost, and
+        # every rank must load the very same bytes (byte-mismatch class defect
+        # seen before).  Wait for process 0 to publish the file, then load it.
+        waited = 0.0
+        last_log = 0.0
+        while not os.path.exists(cache_path):
+            if waited >= cache_wait_timeout_s:
+                raise RuntimeError(
+                    f"init_ocean_from_fesom_mesh: timed out after {waited:.0f}s waiting for "
+                    f"{cache_path} from process 0")
+            time.sleep(_FESOM_IC_CACHE_POLL_S)
+            waited += _FESOM_IC_CACHE_POLL_S
+            if waited - last_log >= 600.0:
+                log(f"init_ocean_from_fesom_mesh: still waiting for {cache_path} ({waited:.0f}s)")
+                last_log = waited
+        cached = _load_fesom_ic_cache(cache_path, spatial, nlev, log)
+        if cached is None:
+            raise RuntimeError(
+                f"init_ocean_from_fesom_mesh: cache file {cache_path} is corrupt or "
+                f"incompatible (expected T/S of shape {tuple(spatial) + (nlev,)})")
+        return cached
+
+    T_ic = np.asarray(np.load(os.path.join(mesh_dir, "T_ic.npy")), dtype=np.float64)
+    S_ic = np.asarray(np.load(os.path.join(mesh_dir, "S_ic.npy")), dtype=np.float64)
+    geo = np.asarray(np.load(os.path.join(mesh_dir, "geo_coord_nod2D.npy")), dtype=np.float64)
+    Z = np.asarray(np.load(os.path.join(mesh_dir, "Z.npy")), dtype=np.float64)
+    nlevels = np.asarray(np.load(os.path.join(mesh_dir, "nlevels_nod2D.npy")), dtype=np.int64)
+    res_path = os.path.join(mesh_dir, "mesh_resolution.npy")
+    mesh_res = (np.asarray(np.load(res_path), dtype=np.float64)
+                if os.path.exists(res_path) else None)
+
+    if T_ic.ndim != 2 or T_ic.shape != S_ic.shape:
+        raise ValueError(f"T_ic/S_ic shape mismatch: {T_ic.shape} vs {S_ic.shape}")
+    nod2, nz_full = T_ic.shape
+    if geo.shape != (nod2, 2):
+        raise ValueError(f"geo_coord_nod2D shape {geo.shape} != {(nod2, 2)}")
+    if nlevels.shape != (nod2,):
+        raise ValueError(f"nlevels_nod2D shape {nlevels.shape} != {(nod2,)}")
+    if Z.ndim != 1 or Z.shape[0] != nz_full - 1:
+        raise ValueError(f"Z shape {Z.shape} incompatible with {nz_full} profile layers")
+    if np.any(nlevels < 2) or np.any(nlevels > nz_full):
+        raise ValueError("nlevels_nod2D out of range [2, n_layers]")
+    if mesh_res is not None and mesh_res.shape != (nod2,):
+        raise ValueError(f"mesh_resolution shape {mesh_res.shape} != {(nod2,)}")
+    z_abs = np.abs(Z)
+    if np.any(np.diff(z_abs) <= 0.0):
+        raise ValueError("|Z| must be strictly increasing with depth")
+    nz = z_abs.size
+
+    def _xyz(lat_r, lon_r):
+        return np.stack((np.cos(lat_r) * np.cos(lon_r), np.cos(lat_r) * np.sin(lon_r),
+                         np.sin(lat_r)), axis=1)
+    xyz_n = _xyz(geo[:, 1], geo[:, 0])
+    xyz_t = _xyz(np.deg2rad(lat_flat), np.deg2rad(lon_flat))
+
+    T_prof, S_prof, d0, i0, donors_l, trees = _fesom_profiles_per_layer(
+        xyz_n, nlevels, T_ic, S_ic, xyz_t, k=k)
+
+    # vertical: |Z| -> target depths, top held above z_abs[0], bottom held below z_abs[-1]
+    T_out = np.empty((ncell, nlev), dtype=np.float64)
+    S_out = np.empty((ncell, nlev), dtype=np.float64)
+    chunk = 200_000
+    for s in range(0, ncell, chunk):
+        e = min(s + chunk, ncell)
+        D = depths[s:e]                                             # (m, nlev)
+        i0v = np.searchsorted(z_abs, D, side="right") - 1
+        i_lo = np.clip(i0v, 0, nz - 1)
+        i_hi = np.minimum(i_lo + 1, nz - 1)
+        lo_z = z_abs[i_lo]
+        span = z_abs[i_hi] - lo_z
+        frac = np.clip((D - lo_z) / np.where(span > 0.0, span, 1.0), 0.0, 1.0)
+        rows = np.arange(s, e)[:, None]
+        T_out[s:e] = (1.0 - frac) * T_prof[rows, i_lo] + frac * T_prof[rows, i_hi]
+        S_out[s:e] = (1.0 - frac) * S_prof[rows, i_lo] + frac * S_prof[rows, i_hi]
+    del T_prof, S_prof
+
+    # diagnostics: isolated cells (surface donor), donor distance at the deepest layer used
+    wm = (np.asarray(wet_mask, dtype=bool).reshape(ncell) if wet_mask is not None
+          else np.ones(ncell, dtype=bool))
+    if mesh_res is None:
+        thresh = isolated_factor * np.median(d0[wm]) * constants.R_earth
+    else:
+        thresh = isolated_factor * mesh_res[i0]
+    isolated = (d0 * constants.R_earth > thresh) & wm
+    n_iso = int(isolated.sum())
+    far = np.argsort(np.where(wm, d0, -1.0))[-5:][::-1]
+    far_str = ", ".join(f"({lat_flat[i]:.4f}, {lon_flat[i]:.4f})" for i in far)
+    log(f"init_ocean_from_fesom_mesh: {n_iso} isolated wet target cells "
+        f"(nearest surface donor > {isolated_factor:g} x mesh resolution); "
+        f"5 farthest (lat, lon) deg: {far_str}")
+    if wm.any():
+        # deepest layer actually read by any wet target: the UPPER bracket of
+        # the deepest target depth (the lower bracket omits the deeper donor)
+        d_max = float(np.max(depths[wm]))
+        kk_max = int(min(nz - 1, max(0, np.searchsorted(z_abs, d_max, side="right"))))
+        while trees[kk_max] is None:
+            kk_max -= 1
+        dd, _ = trees[kk_max].query(xyz_t[wm], k=1)
+        dd_km = np.asarray(dd) * constants.R_earth / 1e3
+        log(f"init_ocean_from_fesom_mesh: deepest layer used {kk_max} (|Z| {z_abs[kk_max]:.0f} m) "
+            f"has {donors_l[kk_max].size} wet donor nodes; nearest-donor distance over wet targets "
+            f"median {np.median(dd_km):.1f} km, p99 {np.percentile(dd_km, 99):.1f} km, max {dd_km.max():.1f} km")
+
+    T_out = T_out.reshape(spatial + (nlev,))
+    S_out = S_out.reshape(spatial + (nlev,))
+    if cache_path is not None:
+        import tempfile
+        os.makedirs(cache_dir, exist_ok=True)
+        # mkstemp keeps the tmp file inside cache_dir (same filesystem, so the
+        # os.replace below is atomic) and unique across hosts/jobs, unlike a
+        # pid-based name which can collide between rank 0s on different nodes.
+        # Saved arrays are the pre-jnp float64 arrays: a hit is bit-identical.
+        fd, tmp = tempfile.mkstemp(
+            dir=cache_dir, prefix=os.path.basename(cache_path) + ".tmp.")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                np.savez(fh, T=T_out, S=S_out)
+            umask = os.umask(0)   # mkstemp creates 0600; a shared cache dir needs 0644
+            os.umask(umask)
+            os.chmod(tmp, 0o644 & ~umask)
+            os.replace(tmp, cache_path)
+            log(f"init_ocean_from_fesom_mesh: cache written {cache_path}")
+        except Exception as exc:
+            log(f"init_ocean_from_fesom_mesh: WARNING: cache write failed: {exc!r}")
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            # Peers are polling for this publication; swallowing the failure
+            # would hang them until cache_wait_timeout_s.
+            if jax.process_count() > 1:
+                raise
+    return jnp.asarray(T_out, dtype=jnp.float64), jnp.asarray(S_out, dtype=jnp.float64)

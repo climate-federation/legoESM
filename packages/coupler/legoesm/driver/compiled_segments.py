@@ -713,6 +713,36 @@ class SegmentForcing(NamedTuple):
     # pytree carries no spurious empty leaf.
     sfc_shflx_override: jax.Array | None = None
     sfc_lhflx_override: jax.Array | None = None
+    # Prescribed ERA5 / coupler surface MOMENTUM fluxes — the surface stress
+    # [Pa, stress ON THE ATMOSPHERE, opposite in sign to the wind — the
+    # convention of surface_layer.compute_surface_fluxes] for this segment.
+    # When present the stress becomes the LOWER BOUNDARY CONDITION of
+    # whatever turbulence scheme runs (folded into the kernel config via
+    # fold_prescribed_surface_fluxes -> config.surface.prescribed_tau_*_pa),
+    # or, on the bulk-BL path, an explicit lowest-layer momentum kick in
+    # physics_step_no_rad.  ``None`` (default) keeps the scheme's own / bulk
+    # drag — byte-identical.  Grid-shaped, like sst/sic; kept None (not a
+    # (0,) placeholder) so no module-scope device op is created at import.
+    sfc_taux_override: jax.Array | None = None
+    sfc_tauy_override: jax.Array | None = None
+    # Prescribed ERA5 / coupler surface RADIATIVE fluxes [W/m2] — upwelling
+    # LW, upwelling SW, downwelling SW at the surface.  When present,
+    # PhysicsPipeline.compute_radiation_core forms the radiative surface BC
+    # from them: T_rad = (LW_up / sigma_sb)**0.25 with emissivity 1, and
+    # albedo = SW_up / SW_down where SW_down >= 1 W/m2 (else the run's own
+    # albedo after the coupler overrides).  The TURBULENT surface temperature
+    # (sst/sic/T_land blend) is deliberately NOT replaced — the turbulent
+    # fluxes are prescribed too when this is used (phase-2 doctrine: one
+    # authoritative flux set).  ``None`` (default) keeps the internal
+    # radiative surface — byte-identical.  Grid-shaped, like sst/sic.
+    sfc_lw_up: jax.Array | None = None
+    sfc_sw_up: jax.Array | None = None
+    sfc_sw_down: jax.Array | None = None
+    # Static land fraction [0..1], grid-shaped like sst/sic.  Consumed by the
+    # learned physics wrappers (phase 2, part 2) that share the step_unified
+    # signature; the classical pipeline accepts and ignores it.  ``None``
+    # (default) — byte-identical.
+    land_frac: jax.Array | None = None
     # Transient land-use cover — the per-segment multilayer land surface params
     # (``LandSurfaceParams`` pytree: per-column albedo_veg / emissivity / LAI /
     # canopy-structure) a coupled or AMIP driver re-materialises each segment as
@@ -771,6 +801,12 @@ def pack_forcing(
     sfc_emissivity_override=None,
     sfc_shflx_override=None,
     sfc_lhflx_override=None,
+    sfc_taux_override=None,
+    sfc_tauy_override=None,
+    sfc_lw_up=None,
+    sfc_sw_up=None,
+    sfc_sw_down=None,
+    land_frac=None,
     land_ml_params=None,
 ) -> SegmentForcing:
     """Pack per-segment forcing into a SegmentForcing pytree.
@@ -798,6 +834,26 @@ def pack_forcing(
         (default) leaves the atmosphere computing its own bulk surface fluxes —
         byte-identical for AMIP / standalone runs.  When present the atmosphere
         surface tendency consumes these instead, closing the air-sea budget.
+    sfc_taux_override, sfc_tauy_override : jax.Array or None
+        Prescribed surface momentum flux [Pa, stress ON THE ATMOSPHERE,
+        opposite in sign to the wind] for this segment (grid-shaped, like
+        sst/sic).  ``None`` (default) keeps the scheme's own / bulk surface
+        drag.  When present the stress is the lower boundary condition of
+        whatever turbulence scheme runs (folded into the kernel config), or
+        the explicit lowest-layer momentum kick on the bulk-BL path.
+    sfc_lw_up, sfc_sw_up, sfc_sw_down : jax.Array or None
+        Prescribed surface radiative fluxes [W/m2] for this segment
+        (grid-shaped, like sst/sic): upwelling LW, upwelling SW, downwelling
+        SW.  ``None`` (default) keeps the internal radiative surface —
+        byte-identical.  When present compute_radiation_core forms the
+        radiative BC T_rad = (LW_up / sigma_sb)**0.25 (emissivity 1) and
+        albedo = SW_up / SW_down where SW_down >= 1 W/m2 (else the run's own
+        albedo, after the coupler overrides).
+    land_frac : jax.Array or None
+        Static land fraction [0..1] (grid-shaped, like sst/sic).  Consumed by
+        the learned physics wrappers (phase 2, part 2) that share the
+        ``step_unified`` signature; the classical pipeline accepts and
+        ignores it.  ``None`` (default).
     """
     if ghg_vmr is None:
         _ghg = jnp.zeros(0)
@@ -845,6 +901,26 @@ def pack_forcing(
             None if sfc_lhflx_override is None
             else jnp.asarray(sfc_lhflx_override)
         ),
+        sfc_taux_override=(
+            None if sfc_taux_override is None
+            else jnp.asarray(sfc_taux_override)
+        ),
+        sfc_tauy_override=(
+            None if sfc_tauy_override is None
+            else jnp.asarray(sfc_tauy_override)
+        ),
+        sfc_lw_up=(
+            None if sfc_lw_up is None else jnp.asarray(sfc_lw_up)
+        ),
+        sfc_sw_up=(
+            None if sfc_sw_up is None else jnp.asarray(sfc_sw_up)
+        ),
+        sfc_sw_down=(
+            None if sfc_sw_down is None else jnp.asarray(sfc_sw_down)
+        ),
+        land_frac=(
+            None if land_frac is None else jnp.asarray(land_frac)
+        ),
         # LandSurfaceParams pytree (or None) — passed through as-is; its leaves
         # are already jax arrays from the provider rebuild, no jnp.asarray coerce.
         land_ml_params=land_ml_params,
@@ -861,6 +937,8 @@ GRID_SHAPED_FORCING_FIELDS = (
     "sst", "sic", "solar_weights", "o3_vmr", "aerosol_od", "aerosol_lw_od",
     "sfc_albedo_override", "sfc_T_override", "sfc_emissivity_override",
     "sfc_shflx_override", "sfc_lhflx_override",
+    "sfc_taux_override", "sfc_tauy_override",
+    "sfc_lw_up", "sfc_sw_up", "sfc_sw_down", "land_frac",
 )
 
 
@@ -1176,6 +1254,13 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
         sfc_emissivity_override=statics.forcing.sfc_emissivity_override,
         sfc_shflx_override=statics.forcing.sfc_shflx_override,
         sfc_lhflx_override=statics.forcing.sfc_lhflx_override,
+        sfc_taux_override=statics.forcing.sfc_taux_override,
+        sfc_tauy_override=statics.forcing.sfc_tauy_override,
+        sfc_lw_up=statics.forcing.sfc_lw_up,
+        sfc_sw_up=statics.forcing.sfc_sw_up,
+        sfc_sw_down=statics.forcing.sfc_sw_down,
+        land_frac=statics.forcing.land_frac,
+        phis=carry.phis,
         T_land=carry.T_land, land_ml=carry.land_ml,
         land_ml_params=statics.forcing.land_ml_params,
         conv_precip=carry.conv_precip_prev,
@@ -1225,6 +1310,9 @@ def split_physics_single_rank(carry, T_new, u_new, v_new, p_s_new,
                 sfc_albedo_override=statics.forcing.sfc_albedo_override,
                 sfc_T_override=statics.forcing.sfc_T_override,
                 sfc_emissivity_override=statics.forcing.sfc_emissivity_override,
+                sfc_lw_up=statics.forcing.sfc_lw_up,
+                sfc_sw_up=statics.forcing.sfc_sw_up,
+                sfc_sw_down=statics.forcing.sfc_sw_down,
                 conv_precip=carry.conv_precip_prev,
                 w_land=carry.w_land, snow=carry.snow,
             )
@@ -2025,6 +2113,13 @@ def build_segment_fn(
                     sfc_emissivity_override=forcing.sfc_emissivity_override,
                     sfc_shflx_override=forcing.sfc_shflx_override,
                     sfc_lhflx_override=forcing.sfc_lhflx_override,
+                    sfc_taux_override=forcing.sfc_taux_override,
+                    sfc_tauy_override=forcing.sfc_tauy_override,
+                    sfc_lw_up=forcing.sfc_lw_up,
+                    sfc_sw_up=forcing.sfc_sw_up,
+                    sfc_sw_down=forcing.sfc_sw_down,
+                    land_frac=forcing.land_frac,
+                    phis=carry.phis[_ofi],
                     T_land=_T_land_in, land_ml=carry.land_ml,
                     land_ml_params=forcing.land_ml_params,
                     conv_precip=carry.conv_precip_prev[_ofi],
@@ -2060,6 +2155,9 @@ def build_segment_fn(
                             sfc_albedo_override=forcing.sfc_albedo_override,
                             sfc_T_override=forcing.sfc_T_override,
                             sfc_emissivity_override=forcing.sfc_emissivity_override,
+                            sfc_lw_up=forcing.sfc_lw_up,
+                            sfc_sw_up=forcing.sfc_sw_up,
+                            sfc_sw_down=forcing.sfc_sw_down,
                             conv_precip=carry.conv_precip_prev[_ofi],
                             w_land=_w_land_in, snow=_snow_in,
                         )
@@ -2462,6 +2560,10 @@ def build_segment_fn(
                     land_ml_params=forcing.land_ml_params,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
+                    sfc_emissivity_override=forcing.sfc_emissivity_override,
+                    sfc_lw_up=forcing.sfc_lw_up,
+                    sfc_sw_up=forcing.sfc_sw_up,
+                    sfc_sw_down=forcing.sfc_sw_down,
                     conv_precip=_own(carry.conv_precip_prev),
                     w_land=_w_land_in, snow=_snow_in,
                 )
@@ -2485,6 +2587,10 @@ def build_segment_fn(
                         land_ml_params=forcing.land_ml_params,
                         sfc_albedo_override=forcing.sfc_albedo_override,
                         sfc_T_override=forcing.sfc_T_override,
+                        sfc_emissivity_override=forcing.sfc_emissivity_override,
+                        sfc_lw_up=forcing.sfc_lw_up,
+                        sfc_sw_up=forcing.sfc_sw_up,
+                        sfc_sw_down=forcing.sfc_sw_down,
                         conv_precip=_own(carry.conv_precip_prev),
                         w_land=_w_land_in, snow=_snow_in,
                     )
@@ -2531,6 +2637,10 @@ def build_segment_fn(
                     land_ml_params=forcing.land_ml_params,
                     sfc_albedo_override=forcing.sfc_albedo_override,
                     sfc_T_override=forcing.sfc_T_override,
+                    sfc_emissivity_override=forcing.sfc_emissivity_override,
+                    sfc_lw_up=forcing.sfc_lw_up,
+                    sfc_sw_up=forcing.sfc_sw_up,
+                    sfc_sw_down=forcing.sfc_sw_down,
                     conv_precip=carry.conv_precip_prev,
                     w_land=carry.w_land, snow=carry.snow,
                 )
@@ -2554,6 +2664,10 @@ def build_segment_fn(
                         land_ml_params=forcing.land_ml_params,
                         sfc_albedo_override=forcing.sfc_albedo_override,
                         sfc_T_override=forcing.sfc_T_override,
+                        sfc_emissivity_override=forcing.sfc_emissivity_override,
+                        sfc_lw_up=forcing.sfc_lw_up,
+                        sfc_sw_up=forcing.sfc_sw_up,
+                        sfc_sw_down=forcing.sfc_sw_down,
                         conv_precip=carry.conv_precip_prev,
                         w_land=carry.w_land, snow=carry.snow,
                     )
