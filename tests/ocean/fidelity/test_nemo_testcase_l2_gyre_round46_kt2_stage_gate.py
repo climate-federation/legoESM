@@ -120,7 +120,8 @@ def test_every_declared_plant_has_a_nonzero_exit_contract():
     run = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage/run.sh").read_text()
     for plant in ("header", "truncation", "calibration", "given", "trajectory",
                   "twin", "stage-entry-ulp", "stage-context-ulp",
-                  "stage-rhs-ulp", "stamp"):
+                  "stage-rhs-ulp", "stage-w-transport-ulp",
+                  "stage-w-carry-ulp", "stamp"):
         assert f'"{plant}"' in source
     assert 'return 1 if args.plant or report["status"] != "PASS" else 0' in source
     for plant in ("header", "truncation", "calibration", "twin", "stamp"):
@@ -187,6 +188,32 @@ def test_stage_twin_scores_consumed_rhs_and_reuses_operator_walk():
     assert '"compiled_order": ("hpg", "ldf", "vor", "adv")' in source
     assert "stage1_operator_rows" in source
     assert '"first_nonbit_model_statement"' in source
+
+
+def test_stage_twin_uses_the_direct_post_transport_w_reference():
+    source = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py").read_text()
+    assert 'read_stage_ww(' in source
+    assert '"post_tra_adv_trp_transport_form"' in source
+    assert '"pre_external_zad_operand_w"' in source
+    assert '"stage1_w_walk"' in source
+
+
+def test_transport_w_scalar_replay_preserves_zero_state():
+    shape3 = (NY, NX, NZ)
+    arrays = {
+        "tmask": np.ones(shape3),
+        "e3t_Kmm": np.ones(shape3),
+        "e3t_0": np.ones(shape3),
+        "r1_e1e2t": np.ones((NY, NX)),
+        "r3t_Kbb": np.zeros((NY, NX)),
+        "r3t_Kaa": np.zeros((NY, NX)),
+        "r1_Dt": np.float64(1.0),
+    }
+    transport = np.zeros((NY - 4, NX - 4, NZ))
+    got = gate._stage1_transport_w_scalar_reference(
+        arrays, transport, transport)
+    assert all(np.count_nonzero(got[name]) == 0
+               for name in gate._STAGE1_W_ORDER)
 
 
 def test_final_external_history_uses_last_pre_swap_current_and_before():

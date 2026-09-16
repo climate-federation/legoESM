@@ -20,10 +20,12 @@ from pathlib import Path
 import numpy as np
 from legoesm.ocean.fidelity.provenance import worktree_stamp
 from nemo_testcase_l2_gyre_phase3_gate import (
+    STAGE_WW_ROOT,
     _surface_forcings,
     expected_masks,
     lego_fields,
     read_entry,
+    read_stage_ww,
     read_transport,
     require,
     score,
@@ -988,7 +990,8 @@ def _closure_rows(context, tke_entry, arrays, masks, kt: int, stage: int,
 
 
 def _output_rows(trace, records, next_entries, transports, masks, area_t,
-                 context, kt: int, mode: str) -> list[dict]:
+                 context, kt: int, mode: str,
+                 direct_stage_ww: dict | None = None) -> list[dict]:
     rows = []
     for stage, output in enumerate(trace.stage_outputs, start=1):
         u, v, T, S, eta = (np.asarray(value) for value in output)
@@ -1007,6 +1010,12 @@ def _output_rows(trace, records, next_entries, transports, masks, area_t,
         geom = trace.stage_geometry[stage - 1]
         ww = np.asarray(geom[2])
         ww_nlev = ww.shape[-1]
+        ww_reference = _owned3(a["ww"], ww_nlev)
+        ww_boundary = "pre_external_velocity_form"
+        if direct_stage_ww is not None and (kt, stage) in direct_stage_ww:
+            ww_reference = np.asarray(
+                direct_stage_ww[(kt, stage)]["ww"])[..., :ww_nlev]
+            ww_boundary = "post_tra_adv_trp_transport_form"
         geom_rows = (
             ("e3t_Kmm", _owned3(a["e3t_Kmm"]), np.asarray(geom[3]),
              _owned3(a["tmask"]) > 0.5),
@@ -1014,7 +1023,7 @@ def _output_rows(trace, records, next_entries, transports, masks, area_t,
              _owned3(a["umask"]) > 0.5),
             ("e3v_Kmm", _owned3(a["e3v_Kmm"]), np.asarray(geom[5])[1:, :, :],
              _owned3(a["vmask"]) > 0.5),
-            ("ww", _owned3(a["ww"], ww_nlev), ww,
+            ("ww", ww_reference, ww,
              _owned3(a["wmask"], ww_nlev) > 0.5),
         )
         for field, ref, candidate, mask in geom_rows:
@@ -1023,6 +1032,8 @@ def _output_rows(trace, records, next_entries, transports, masks, area_t,
                 ref, candidate, mask))
             row.update({"kt": kt, "stage": stage, "field": field,
                         "entry_mode": mode})
+            if field == "ww":
+                row["reference_boundary"] = ww_boundary
             rows.append(row)
 
         rows.extend(_closure_rows(
@@ -1159,6 +1170,234 @@ def _entry_rows(trace, records, masks, context, kt: int, stage: int,
     return rows
 
 
+_STAGE1_W_ORDER = (
+    "transport_u", "transport_v", "zonal_difference",
+    "meridional_difference", "numerator", "scaled", "hdiv", "e3div",
+    "r3_delta", "stretch", "bracket", "incoming_carry",
+    "outgoing_carry", "ww",
+)
+
+
+def _stage1_transport_w_trace(
+    transport_u, transport_v, reciprocal_area, thickness_t, e3t_0,
+    r3_kbb, r3_kaa, r1_dt, tmask, *, source_round: bool,
+):
+    """Trace the existing shared transport-form W arithmetic."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.core.source_rounding import nemo_source_round
+
+    materialize = nemo_source_round if source_round else jax.lax.optimization_barrier
+    transport_u = jnp.asarray(transport_u)[..., :30]
+    transport_v = jnp.asarray(transport_v)[..., :30]
+    tmask = jnp.asarray(tmask)[..., :30]
+    west = jnp.roll(transport_u, 1, axis=1)
+    south = jnp.concatenate(
+        [jnp.zeros_like(transport_v[:1]), transport_v[:-1]], axis=0)
+    zonal = materialize(transport_u - west)
+    meridional = materialize(transport_v - south)
+    numerator = materialize(zonal + meridional)
+    scaled = materialize(numerator * reciprocal_area[..., None]) * tmask
+    safe_thickness = jnp.where(tmask > 0.5, thickness_t[..., :30], 1.0)
+    hdiv = materialize(scaled / safe_thickness) * tmask
+    e3div = materialize(hdiv * thickness_t[..., :30]) * tmask
+    r3_delta = materialize(r3_kaa - r3_kbb)
+    stretch = materialize(
+        materialize(r1_dt * e3t_0[..., :30]) * r3_delta[..., None])
+    incoming = []
+    outgoing = [None] * 30
+    brackets = [None] * 30
+    carry = jnp.zeros_like(r3_kbb)
+    for level in range(29, -1, -1):
+        incoming.append(carry)
+        bracket = materialize(e3div[..., level] + stretch[..., level])
+        carry = materialize(
+            carry - materialize(bracket * tmask[..., level]))
+        brackets[level] = bracket
+        outgoing[level] = carry
+    incoming = list(reversed(incoming))
+    ww = jnp.stack(outgoing + [jnp.zeros_like(carry)], axis=-1)
+    return {
+        "transport_u": transport_u,
+        "transport_v": transport_v,
+        "zonal_difference": zonal,
+        "meridional_difference": meridional,
+        "numerator": numerator,
+        "scaled": scaled,
+        "hdiv": hdiv,
+        "e3div": e3div,
+        "r3_delta": r3_delta,
+        "stretch": stretch,
+        "bracket": jnp.stack(brackets, axis=-1),
+        "incoming_carry": jnp.stack(incoming, axis=-1),
+        "outgoing_carry": jnp.stack(outgoing, axis=-1),
+        "ww": ww,
+    }
+
+
+def _stage1_transport_w_scalar_reference(arrays, transport_u, transport_v):
+    """Scalar replay of compiled divhor + WZV, calibrated to direct W."""
+    shape = (22, 32, 30)
+    tmask = _owned3(arrays["tmask"]) > 0.5
+    thickness = _owned3(arrays["e3t_Kmm"])
+    e3t_0 = _owned3(arrays["e3t_0"])
+    reciprocal_area = _owned2(arrays["r1_e1e2t"])
+    r3_kbb = _owned2(arrays["r3t_Kbb"])
+    r3_kaa = _owned2(arrays["r3t_Kaa"])
+    hdiv = np.zeros(shape, dtype=np.float64)
+    e3div = np.zeros(shape, dtype=np.float64)
+    zonal = np.zeros(shape, dtype=np.float64)
+    meridional = np.zeros(shape, dtype=np.float64)
+    numerator = np.zeros(shape, dtype=np.float64)
+    scaled = np.zeros(shape, dtype=np.float64)
+    stretch = np.zeros(shape, dtype=np.float64)
+    bracket = np.zeros(shape, dtype=np.float64)
+    incoming = np.zeros(shape, dtype=np.float64)
+    outgoing = np.zeros(shape, dtype=np.float64)
+    for level in range(30):
+        for j in range(22):
+            for i in range(32):
+                west = transport_u[j, i - 1, level]
+                south = (np.float64(0.0) if j == 0
+                         else transport_v[j - 1, i, level])
+                zu = np.float64(transport_u[j, i, level] - west)
+                zv = np.float64(transport_v[j, i, level] - south)
+                total = np.float64(zu + zv)
+                area_scaled = np.float64(total * reciprocal_area[j, i])
+                value = np.float64(area_scaled / thickness[j, i, level])
+                zonal[j, i, level] = zu
+                meridional[j, i, level] = zv
+                numerator[j, i, level] = total
+                scaled[j, i, level] = area_scaled * tmask[j, i, level]
+                hdiv[j, i, level] = value * tmask[j, i, level]
+                e3div[j, i, level] = np.float64(
+                    value * thickness[j, i, level]) * tmask[j, i, level]
+    carry = np.zeros((22, 32), dtype=np.float64)
+    r3_delta = np.asarray(r3_kaa - r3_kbb, dtype=np.float64)
+    for level in range(29, -1, -1):
+        for j in range(22):
+            for i in range(32):
+                incoming[j, i, level] = carry[j, i]
+                term = np.float64(
+                    np.float64(arrays["r1_Dt"] * e3t_0[j, i, level])
+                    * r3_delta[j, i])
+                stretch[j, i, level] = term
+                total = np.float64(e3div[j, i, level] + term)
+                bracket[j, i, level] = total
+                carry[j, i] = np.float64(
+                    carry[j, i] - np.float64(total * tmask[j, i, level]))
+                outgoing[j, i, level] = carry[j, i]
+    ww = np.concatenate(
+        [outgoing, np.zeros((22, 32, 1), dtype=np.float64)], axis=-1)
+    return {
+        "transport_u": np.asarray(transport_u)[..., :30],
+        "transport_v": np.asarray(transport_v)[..., :30],
+        "zonal_difference": zonal,
+        "meridional_difference": meridional,
+        "numerator": numerator,
+        "scaled": scaled,
+        "hdiv": hdiv,
+        "e3div": e3div,
+        "r3_delta": r3_delta,
+        "stretch": stretch,
+        "bracket": bracket,
+        "incoming_carry": incoming,
+        "outgoing_carry": outgoing,
+        "ww": ww,
+    }
+
+
+def _stage1_w_walk(records, transports, direct_stage_ww, plant: str | None):
+    """Walk kt=1 stage-1 transport W from admitted NEMO operands."""
+    import jax
+    import jax.numpy as jnp
+
+    arrays = records[(1, 1)]["arrays"]
+    transport = transports[(1, 1)]
+    transport_u = np.asarray(transport["zFu"])
+    transport_v = np.asarray(transport["zFv"])
+    reference = _stage1_transport_w_scalar_reference(
+        arrays, transport_u, transport_v)
+    direct_ww = np.asarray(direct_stage_ww[(1, 1)]["ww"])
+    wet_w = _owned3(arrays["wmask"], 31) > 0.5
+    require(np.array_equal(reference["ww"][wet_w], direct_ww[wet_w]),
+            "scalar transport-W replay does not reproduce direct NEMO W")
+    operands = (
+        jnp.asarray(transport_u), jnp.asarray(transport_v),
+        jnp.asarray(_owned2(arrays["r1_e1e2t"])),
+        jnp.asarray(_owned3(arrays["e3t_Kmm"])),
+        jnp.asarray(_owned3(arrays["e3t_0"])),
+        jnp.asarray(_owned2(arrays["r3t_Kbb"])),
+        jnp.asarray(_owned2(arrays["r3t_Kaa"])),
+        jnp.asarray(arrays["r1_Dt"]),
+        jnp.asarray(_owned3(arrays["tmask"])),
+    )
+    ordinary = jax.device_get(jax.jit(
+        lambda: _stage1_transport_w_trace(*operands, source_round=False))())
+    source_rounded = jax.device_get(jax.jit(
+        lambda: _stage1_transport_w_trace(*operands, source_round=True))())
+    wet_t = _owned3(arrays["tmask"]) > 0.5
+    wet_2d = wet_t[..., 0]
+
+    def active(name):
+        if name == "ww":
+            return wet_w
+        if name == "r3_delta":
+            return wet_2d
+        return wet_t
+
+    ordinary_rows = []
+    candidate_rows = []
+    for name in _STAGE1_W_ORDER:
+        oracle = np.asarray(reference[name]).copy()
+        planted_at = None
+        if plant == "stage-w-transport-ulp" and name == "transport_u":
+            planted_at = tuple(int(value) for value in np.argwhere(wet_t)[0])
+            oracle[planted_at] = np.nextafter(
+                oracle[planted_at], np.float64(np.inf))
+        if plant == "stage-w-carry-ulp" and name == "outgoing_carry":
+            planted_at = tuple(int(value) for value in np.argwhere(wet_t)[0])
+            oracle[planted_at] = np.nextafter(
+                oracle[planted_at], np.float64(np.inf))
+        for destination, values, label in (
+            (ordinary_rows, ordinary, "production_association"),
+            (candidate_rows, source_rounded, "source_rounded_candidate"),
+        ):
+            row = _classification(score(
+                f"GYRE-zco.kt1.s1.w_walk.{label}.{name}",
+                oracle, np.asarray(values[name]), active(name)))
+            row.update({"boundary": name, "association": label,
+                        "plant_index": planted_at})
+            destination.append(row)
+    first = next((row for row in ordinary_rows
+                  if row["classification"] != "BIT"), None)
+    candidate_first = next((row for row in candidate_rows
+                            if row["classification"] != "BIT"), None)
+    if plant:
+        target = "transport_u" if plant == "stage-w-transport-ulp" else "outgoing_carry"
+        row = next(value for value in ordinary_rows if value["boundary"] == target)
+        require(row["n_unequal"] == 1,
+                f"{plant} did not flip exactly one named row cell")
+    return {
+        "compiled_order": list(_STAGE1_W_ORDER),
+        "direct_record_clock_seconds": direct_stage_ww[(1, 1)]["rDt_s"],
+        "pre_external_zad_operand_w": _classification(score(
+            "GYRE-zco.kt1.s1.w_walk.pre_external_zad_operand_w",
+            _owned3(arrays["ww"], 31), direct_ww, wet_w)),
+        "production_rows": ordinary_rows,
+        "first_nonbit": (None if first is None else {
+            key: first[key] for key in (
+                "boundary", "n_unequal", "absolute_max", "classification")}),
+        "source_rounded_candidate_rows": candidate_rows,
+        "source_rounded_first_nonbit": (
+            None if candidate_first is None else {
+                key: candidate_first[key] for key in (
+                    "boundary", "n_unequal", "absolute_max", "classification")}),
+        "scalar_replay_direct_w_bit_exact": True,
+        "plant": plant,
+    }
+
+
 def _external_rows(outputs, histories, records, advmean_root: Path,
                    memory_root: Path, btstep_root: Path, masks, kt: int,
                    mode: str) -> list[dict]:
@@ -1247,6 +1486,18 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
             expected_slots=tuple(
                 header[name] for name in ("Kbb", "Kmm", "Kaa", "Krhs")))
 
+    direct_stage_ww = {(1, 1): read_stage_ww(
+        STAGE_WW_ROOT / "oracle_rkstage_ww_kt00000001_s1.bin", 1)}
+    stage1_w_walk = _stage1_w_walk(
+        records, transports, direct_stage_ww, plant)
+    if plant in {"stage-w-transport-ulp", "stage-w-carry-ulp"}:
+        return {
+            "format": "nemo-testcase-l2-gyre-stage-twin-v4",
+            "given_nemo_entry": [], "chained": [],
+            "stage_entry_identity": [], "first_owned_nonbit": None,
+            "stage1_w_walk": stage1_w_walk,
+        }
+
     if plant == "stage-rhs-ulp":
         planted_rows, _ = _given_inputs(
             records, "stage-rhs-ulp", kt=1, stages=(1,))
@@ -1327,7 +1578,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
             rows = _output_rows(
                 trace, records, next_entries, transports, masks,
                 np.asarray(card.recipe.grid.area_T), state, kt,
-                "NEMO_RECORDED")
+                "NEMO_RECORDED", direct_stage_ww)
             given.extend(row for row in rows if row.get("stage") == stage)
 
     for kt in (1, 2):
@@ -1377,7 +1628,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
         chained.extend(_output_rows(
             trace, records, next_entries, transports, masks,
             np.asarray(card.recipe.grid.area_T), state, kt,
-            "LEGO_CHAINED"))
+            "LEGO_CHAINED", direct_stage_ww))
         state = trace.state_after
 
     measured = [row for row in given
@@ -1394,7 +1645,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
         (row for row in stage1_rhs_rows
          if row.get("classification") != "BIT"), None)
     return {
-        "format": "nemo-testcase-l2-gyre-stage-twin-v3",
+        "format": "nemo-testcase-l2-gyre-stage-twin-v4",
         "given_nemo_entry": given,
         "chained": chained,
         "stage_entry_identity": given_entries,
@@ -1411,6 +1662,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                 }
             ),
         },
+        "stage1_w_walk": stage1_w_walk,
         "first_owned_nonbit": None if first is None else {
             key: first[key] for key in (
                 "kt", "stage", "field", "n_unequal", "absolute_max",
@@ -1612,7 +1864,8 @@ def main(argv=None) -> int:
         "--plant",
         choices=("header", "truncation", "calibration", "given", "trajectory",
                  "twin", "stage-entry-ulp", "stage-context-ulp",
-                 "stage-rhs-ulp", "stamp"),
+                 "stage-rhs-ulp", "stage-w-transport-ulp",
+                 "stage-w-carry-ulp", "stamp"),
     )
     p.add_argument("--output", type=Path)
     args = p.parse_args(argv)
