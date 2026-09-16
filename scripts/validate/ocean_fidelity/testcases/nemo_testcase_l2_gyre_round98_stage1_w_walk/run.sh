@@ -199,8 +199,9 @@ admit_existing() {
   }
   verify_git_tool() {
     local relative=$1
+    local suffix=${2:-/$relative}
     local expected actual
-    expected=$(manifest_hash "/$relative") || {
+    expected=$(manifest_hash "$suffix") || {
       printf 'REFUSE: toolchain manifest lacks unique %s\n' "$relative" >&2
       exit 66
     }
@@ -235,9 +236,11 @@ admit_existing() {
     verify_git_tool \
       'scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round98_stage1_w_walk/sshwzv_round98.patch'
     verify_git_tool \
-      'scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round46_kt2_stage_gate.py'
+      'scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round46_kt2_stage_gate.py' \
+      '/nemo_testcase_l2_gyre_round98_stage1_w_walk/../nemo_testcase_l2_gyre_round46_kt2_stage_gate.py'
     verify_git_tool \
-      'scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round21_admission.py'
+      'scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round21_admission.py' \
+      '/nemo_testcase_l2_gyre_round98_stage1_w_walk/../nemo_testcase_l2_gyre_round21_admission.py'
     verify_git_tool \
       'docs/ocean/fidelity/PREREG_nemo_testcases_l2_gyre_round98.md'
     verify_live_tool "$SOURCE_RUN/ocean.output" \
