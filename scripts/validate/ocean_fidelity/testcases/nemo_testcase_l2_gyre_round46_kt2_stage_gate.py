@@ -53,6 +53,9 @@ STAGE_CLOSURE_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round94/oracle_stage_closure")
 STAGE1_W_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round98/oracle_stage1_w_walk")
+STAGE1_R3_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round99/"
+    "oracle_stage1_r3_operands")
 MAGIC = "NEMO_L2_R46STG1"
 DIMS = (36, 26, 31)
 OWNED_DIMS = (32, 22, 31)
@@ -286,6 +289,29 @@ def read_admitted_stage1_w_walk(root: Path, *, plant_stamp: bool = False) -> dic
     require(parts[1] == expected, f"{stamp_path}: producer commit mismatch")
     require(parts[2] == path.name, f"{stamp_path}: record name mismatch")
     record = read_stage1_w_walk_record(path)
+    record["sha256"] = parts[0]
+    record["producer_commit"] = producer
+    return record
+
+
+def read_admitted_stage1_r3_operands(
+    root: Path, *, plant_stamp: bool = False,
+) -> dict:
+    """Read the same-call ratio record only after its producer stamp closes."""
+    path = root / "oracle_stage1_r3_operands_kt00000001.bin"
+    producer_path = root / "producer_commit.txt"
+    stamp_path = path.with_name(path.name + ".stamp")
+    require(producer_path.is_file(), f"missing {producer_path}")
+    require(stamp_path.is_file(), f"missing {stamp_path}")
+    producer = producer_path.read_text(encoding="utf-8").strip()
+    require(len(producer) == 40, f"{producer_path}: malformed producer commit")
+    parts = stamp_path.read_text(encoding="utf-8").strip().split()
+    require(len(parts) == 3, f"{stamp_path}: malformed stamp")
+    expected = "0" * 40 if plant_stamp else producer
+    require(parts[0] == sha256(path), f"{stamp_path}: digest mismatch")
+    require(parts[1] == expected, f"{stamp_path}: producer commit mismatch")
+    require(parts[2] == path.name, f"{stamp_path}: record name mismatch")
+    record = read_stage1_r3_operand_record(path)
     record["sha256"] = parts[0]
     record["producer_commit"] = producer
     return record
@@ -1482,7 +1508,7 @@ def _stage1_transport_w_scalar_reference(
 
 def _stage1_w_walk(
     records, transports, direct_stage_ww, direct_stage_state, direct_w_record,
-    advmean_root: Path, plant: str | None,
+    direct_r3_record, advmean_root: Path, plant: str | None,
 ):
     """Walk kt=1 stage-1 transport W from admitted NEMO operands."""
     import jax
@@ -1519,6 +1545,52 @@ def _stage1_w_walk(
         np.multiply(r1_3, r3ta, dtype=np.float64),
         dtype=np.float64,
     )
+    same_call = {
+        name: _owned2(direct_r3_record[name])
+        for name in (
+            "ssh_kaa", "r1_ht_0", "r3_kaa", "ssh_kbb", "r3_kbb", "ht_0"
+        )
+    }
+    same_call_kbb_product = np.multiply(
+        same_call["ssh_kbb"], same_call["r1_ht_0"], dtype=np.float64)
+    same_call_kaa_product = np.multiply(
+        same_call["ssh_kaa"], same_call["r1_ht_0"], dtype=np.float64)
+    same_call_full_ratio = np.multiply(
+        full_external_ssh, same_call["r1_ht_0"], dtype=np.float64)
+    same_call_hyb_ratio = np.add(
+        np.multiply(r2_3, same_call["r3_kbb"], dtype=np.float64),
+        np.multiply(r1_3, same_call_full_ratio, dtype=np.float64),
+        dtype=np.float64,
+    )
+    same_call_ratio_rows = []
+    for name, candidate, interpretation in (
+        (
+            "recorded_kbb_vs_stage_record",
+            _owned2(arrays["r3t_Kbb"]),
+            "independent_record_identity",
+        ),
+        (
+            "ssh_kbb_times_stored_reciprocal",
+            same_call_kbb_product,
+            "compiled_dom_qco_r3c_RK3_product",
+        ),
+        (
+            "ssh_kaa_times_stored_reciprocal",
+            same_call_kaa_product,
+            "retracted_algebraic_stage_ratio",
+        ),
+        (
+            "independently_interpolated_hyb_ratio",
+            same_call_hyb_ratio,
+            "compiled_stprk3_stg_HYB_association",
+        ),
+    ):
+        reference_name = "r3_kbb" if "kbb" in name else "r3_kaa"
+        row = _classification(score(
+            f"GYRE-zco.kt1.s1.r3_same_call.{name}",
+            same_call[reference_name], candidate, wet_surface))
+        row.update({"boundary": name, "interpretation": interpretation})
+        same_call_ratio_rows.append(row)
     r1_dt = np.float64(1.0 / direct_stage_ww[(1, 1)]["rDt_s"])
     reference = _stage1_transport_w_scalar_reference(
         arrays, transport_u, transport_v, r3_kaa=r3_kaa, r1_dt=r1_dt)
@@ -1714,6 +1786,12 @@ def _stage1_w_walk(
             "producer_commit": direct_w_record["producer_commit"],
             "header": direct_w_record["header"],
         },
+        "same_call_ratio_record": {
+            "sha256": direct_r3_record["sha256"],
+            "producer_commit": direct_r3_record["producer_commit"],
+            "header": direct_r3_record["header"],
+        },
+        "same_call_ratio_rows": same_call_ratio_rows,
         "direct_input_rows": direct_input_rows,
         "r3_kaa_association_rows": [legacy_r3_row, hyb_r3_row],
         "direct_input_first_nonbit": (
@@ -1784,13 +1862,180 @@ def _external_rows(outputs, histories, records, advmean_root: Path,
     return rows
 
 
+def _rk3_vector_assignment_scalar(before, rhs, dt_stage, face_mask):
+    """Replay the three binary64 operations in the compiled vector write."""
+    before = np.asarray(before, dtype=np.float64)
+    rhs = np.asarray(rhs, dtype=np.float64)
+    face_mask = np.asarray(face_mask, dtype=np.float64)
+    scaled = np.multiply(np.float64(dt_stage), rhs, dtype=np.float64)
+    summed = np.add(before, scaled, dtype=np.float64)
+    return np.multiply(summed, face_mask, dtype=np.float64)
+
+
+def _assignment_execution_discriminator(
+    traces: dict, records: dict, plant: str | None,
+) -> dict:
+    """Separate isolated eager/JIT proof from the full production step."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        rk3_stage_velocity_update,
+    )
+
+    def isolated(before, rhs, dt_stage, mask):
+        return rk3_stage_velocity_update(
+            before, rhs, dt_stage, mask, vector_form=True)
+
+    isolated_jit = jax.jit(isolated)
+    rows = []
+    plant_target = None
+    for kt, stage in sorted(traces):
+        trace = traces[(kt, stage)]
+        arrays = records[(kt, stage)]["arrays"]
+        rhs_boundary = "pre_zdf_rhs" if stage == 3 else "after_adv"
+        dt_stage = np.float64(trace.stage_coefficients[stage - 1][0])
+        for face, face_index in (("u", 0), ("v", 1)):
+            before = _owned3(arrays[f"{face}_Kbb"])
+            rhs = _owned3(arrays[f"{rhs_boundary}_{face}"])
+            active = _owned3(arrays[f"{face}mask"]) > 0.5
+            mask = active.astype(np.float64)
+            reference_kind = "direct_nemo_output"
+            if stage < 3:
+                oracle = _owned3(arrays[f"post_update_{face}"])
+            else:
+                oracle = _rk3_vector_assignment_scalar(
+                    before, rhs, dt_stage, mask)
+                reference_kind = "compiled_statement_transcription"
+
+            eager = np.asarray(isolated(
+                jnp.asarray(before), jnp.asarray(rhs), jnp.asarray(dt_stage),
+                jnp.asarray(mask)))
+            compiled = np.asarray(jax.device_get(isolated_jit(
+                jnp.asarray(before), jnp.asarray(rhs), jnp.asarray(dt_stage),
+                jnp.asarray(mask))))
+            for execution, candidate in (
+                ("isolated-closure eager", eager),
+                ("isolated-closure JIT", compiled),
+            ):
+                row = _classification(score(
+                    f"GYRE-zco.kt{kt}.s{stage}.rk3_assignment.{face}."
+                    f"{execution.replace(' ', '_')}",
+                    oracle, candidate, active))
+                row.update({
+                    "kt": kt, "stage": stage, "face": face,
+                    "execution": execution,
+                    "reference_kind": reference_kind,
+                    "nemo_statement": (
+                        "stprk3_stg.f90:671-674" if stage < 3
+                        else "dynzdf.f90:166-170"),
+                })
+                rows.append(row)
+
+            raw_full = np.asarray(trace.stage_raw_velocities[stage - 1][face_index])
+            rhs_full = np.asarray(trace.stage_rhs[stage - 1][face_index])
+            before_full = np.asarray(trace.stage_states[0][face_index])
+            if face == "u":
+                production_raw = raw_full[:, 1:, :]
+                production_rhs = rhs_full[:, 1:, :]
+                production_before = before_full[:, 1:, :]
+            else:
+                production_raw = raw_full[1:, :, :]
+                production_rhs = rhs_full[1:, :, :]
+                production_before = before_full[1:, :, :]
+            production_replay = _rk3_vector_assignment_scalar(
+                production_before, production_rhs, dt_stage, mask)
+            clean = _classification(score(
+                f"GYRE-zco.kt{kt}.s{stage}.rk3_assignment.{face}."
+                "production_step_transcription",
+                production_replay, production_raw, active))
+            scored_reference = production_replay
+            planted_at = None
+            if (plant == "stage-assignment-output-ulp"
+                    and kt == 1 and stage == 1 and face == "u"):
+                equal = (
+                    np.ascontiguousarray(production_replay).view(np.uint64)
+                    == np.ascontiguousarray(production_raw).view(np.uint64)
+                ) & active & np.isfinite(production_replay)
+                indices = np.argwhere(equal)
+                require(indices.size > 0,
+                        "production assignment plant found no exact wet cell")
+                planted_at = tuple(int(value) for value in indices[0])
+                scored_reference = production_replay.copy()
+                scored_reference[planted_at] = np.nextafter(
+                    scored_reference[planted_at], np.float64(np.inf))
+            production_row = _classification(score(
+                f"GYRE-zco.kt{kt}.s{stage}.rk3_assignment.{face}.production_step",
+                scored_reference, production_raw, active))
+            production_row.update({
+                "kt": kt, "stage": stage, "face": face,
+                "execution": "production step",
+                "reference_kind": "scalar_replay_from_captured_live_operands",
+                "clean_n_unequal": clean["n_unequal"],
+                "clean_absolute_max": clean["absolute_max"],
+                "plant_index": planted_at,
+                "nemo_statement": (
+                    "stprk3_stg.f90:671-674" if stage < 3
+                    else "dynzdf.f90:166-170"),
+            })
+            rows.append(production_row)
+            if planted_at is not None:
+                require(
+                    production_row["n_unequal"] == clean["n_unequal"] + 1,
+                    "production assignment one-ULP plant did not add exactly "
+                    "one unequal cell")
+                plant_target = production_row["name"]
+
+            production_nemo = _classification(score(
+                f"GYRE-zco.kt{kt}.s{stage}.rk3_assignment.{face}."
+                "production_step_vs_nemo",
+                oracle, production_raw, active))
+            production_nemo.update({
+                "kt": kt, "stage": stage, "face": face,
+                "execution": "production step",
+                "reference_kind": reference_kind,
+                "interpretation": "includes_live_operand_error",
+                "nemo_statement": (
+                    "stprk3_stg.f90:671-674" if stage < 3
+                    else "dynzdf.f90:166-170"),
+            })
+            rows.append(production_nemo)
+
+    isolated_rows = [
+        row for row in rows if row["execution"].startswith("isolated-")]
+    production_rows = [
+        row for row in rows
+        if row["execution"] == "production step"
+        and row["reference_kind"]
+        == "scalar_replay_from_captured_live_operands"]
+    discriminator_fired = (
+        all(row["classification"] == "BIT" for row in isolated_rows)
+        and any(row["classification"] != "BIT" for row in production_rows)
+    )
+    if plant == "stage-assignment-output-ulp":
+        require(plant_target is not None,
+                "production assignment plant did not reach its target")
+    return {
+        "rows": rows,
+        "isolated_rows_all_bit": all(
+            row["classification"] == "BIT" for row in isolated_rows),
+        "production_transcription_rows_all_bit": all(
+            row["classification"] == "BIT" for row in production_rows),
+        "production_fusion_discriminator_fired": discriminator_fired,
+        "plant_target": plant_target,
+        "plant": plant == "stage-assignment-output-ulp",
+    }
+
+
 def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                 memory_root: Path, btstep_root: Path,
                 stage_closure_root: Path, stage1_w_root: Path,
+                stage1_r3_root: Path,
                 plant: str | None, *, walk_only: bool = False) -> dict:
     """Decision-41 stage tables from recorded entries and the shared stage."""
     direct_w_record = read_admitted_stage1_w_walk(
         stage1_w_root, plant_stamp=plant == "stage-w-record-stamp")
+    direct_r3_record = read_admitted_stage1_r3_operands(
+        stage1_r3_root, plant_stamp=plant == "stage-r3-record-stamp")
     import jax
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, set_policy
@@ -1835,7 +2080,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
         SCALAR_MATH_ROOT / "oracle_stage_kt00000001_s1.bin", 1)}
     stage1_w_walk = _stage1_w_walk(
         records, transports, direct_stage_ww, direct_stage_state,
-        direct_w_record, advmean_root, plant)
+        direct_w_record, direct_r3_record, advmean_root, plant)
     if walk_only or plant in {
         "stage-w-transport-ulp", "stage-w-carry-ulp",
         "stage-w-direct-r3-ulp",
@@ -1863,17 +2108,18 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
 
     given = []
     given_entries = []
+    given_traces = {}
     states = {1: _bridge_stage_context(
                   card.recipe.initial_state, records[(1, 1)]["arrays"],
                   plant=plant == "stage-context-ulp"),
               2: _bridge_kt2_state(card, cfg, records)}
     raw_history = tuple(jnp.asarray(value) for value in _raw_history_override(memory_root))
     kt_values = ((1,) if plant in {
-        "stage-entry-ulp", "stage-context-ulp"
+        "stage-entry-ulp", "stage-context-ulp", "stage-assignment-output-ulp"
     } else (1, 2))
     stage_values = ((2,) if plant == "stage-entry-ulp" else
                     (1,) if plant in {
-                        "stage-context-ulp"
+                        "stage-context-ulp", "stage-assignment-output-ulp"
                     } else (1, 2, 3))
     for kt in kt_values:
         state = states[kt]
@@ -1894,6 +2140,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                 _nemo_ws_test_hooks=hooks).step(
                     state, dt=card.dt_s, freshwater=freshwater,
                     surface_forcing=surface))
+            given_traces[(kt, stage)] = trace
             entry_rows = _entry_rows(
                 trace, records, masks, state, kt, stage, "NEMO_RECORDED",
                 plant_rhs=False)
@@ -1929,6 +2176,17 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                 np.asarray(card.recipe.grid.area_T), state, kt,
                 "NEMO_RECORDED", direct_stage_ww)
             given.extend(row for row in rows if row.get("stage") == stage)
+
+    assignment_discriminator = _assignment_execution_discriminator(
+        given_traces, records, plant)
+    if plant == "stage-assignment-output-ulp":
+        return {
+            "format": "nemo-testcase-l2-gyre-stage-twin-v5",
+            "given_nemo_entry": [], "chained": [],
+            "stage_entry_identity": [], "first_owned_nonbit": None,
+            "stage1_w_walk": stage1_w_walk,
+            "assignment_execution_discriminator": assignment_discriminator,
+        }
 
     for kt in (1, 2):
         state = states[kt]
@@ -1994,7 +2252,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
         (row for row in stage1_rhs_rows
          if row.get("classification") != "BIT"), None)
     return {
-        "format": "nemo-testcase-l2-gyre-stage-twin-v4",
+        "format": "nemo-testcase-l2-gyre-stage-twin-v5",
         "given_nemo_entry": given,
         "chained": chained,
         "stage_entry_identity": given_entries,
@@ -2012,6 +2270,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
             ),
         },
         "stage1_w_walk": stage1_w_walk,
+        "assignment_execution_discriminator": assignment_discriminator,
         "first_owned_nonbit": None if first is None else {
             key: first[key] for key in (
                 "kt", "stage", "field", "n_unequal", "absolute_max",
@@ -2054,6 +2313,7 @@ def run(
     btstep_root: Path = BTSTEP_ROOT,
     stage_closure_root: Path = STAGE_CLOSURE_ROOT,
     stage1_w_root: Path = STAGE1_W_ROOT,
+    stage1_r3_root: Path = STAGE1_R3_ROOT,
 ) -> dict:
     stamp = worktree_stamp()
     expected = "0" * 40 if plant == "stamp" else expect_commit.lower()
@@ -2173,7 +2433,7 @@ def run(
     if mode in {"stage-twin", "stage-w-walk"}:
         report["stage_twin"] = _stage_twin(
             records, root, advmean_root, memory_root, btstep_root,
-            stage_closure_root, stage1_w_root, plant,
+            stage_closure_root, stage1_w_root, stage1_r3_root, plant,
             walk_only=mode == "stage-w-walk")
     if mode == "stage-twin":
         missing = [
@@ -2214,13 +2474,15 @@ def main(argv=None) -> int:
     p.add_argument(
         "--stage-closure-root", type=Path, default=STAGE_CLOSURE_ROOT)
     p.add_argument("--stage1-w-root", type=Path, default=STAGE1_W_ROOT)
+    p.add_argument("--stage1-r3-root", type=Path, default=STAGE1_R3_ROOT)
     p.add_argument(
         "--plant",
         choices=("header", "truncation", "calibration", "given", "trajectory",
                  "twin", "stage-entry-ulp", "stage-context-ulp",
                  "stage-rhs-ulp", "stage-w-transport-ulp",
                  "stage-w-carry-ulp", "stage-w-direct-r3-ulp",
-                 "stage-w-record-stamp", "stamp"),
+                 "stage-assignment-output-ulp", "stage-w-record-stamp",
+                 "stage-r3-record-stamp", "stamp"),
     )
     p.add_argument("--output", type=Path)
     args = p.parse_args(argv)
@@ -2236,6 +2498,7 @@ def main(argv=None) -> int:
         btstep_root=args.btstep_root,
         stage_closure_root=args.stage_closure_root,
         stage1_w_root=args.stage1_w_root,
+        stage1_r3_root=args.stage1_r3_root,
     )
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.output:

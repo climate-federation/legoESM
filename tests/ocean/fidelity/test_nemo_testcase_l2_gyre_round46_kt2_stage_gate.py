@@ -190,6 +190,17 @@ def test_stage_twin_scores_consumed_rhs_and_reuses_operator_walk():
     assert '"first_nonbit_model_statement"' in source
 
 
+def test_stage_twin_separates_isolated_jit_from_the_production_step():
+    source = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py").read_text()
+    assert '"isolated-closure eager"' in source
+    assert '"isolated-closure JIT"' in source
+    assert '"production step"' in source
+    assert "trace.stage_raw_velocities" in source
+    assert "trace.stage_rhs" in source
+    assert '"production_fusion_discriminator_fired"' in source
+    assert '"stage-assignment-output-ulp"' in source
+
+
 def test_stage_twin_uses_the_direct_post_transport_w_reference():
     source = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py").read_text()
     assert 'read_stage_ww(' in source
@@ -253,12 +264,32 @@ def test_stage1_r3_operand_reader_is_exact_and_fail_closed(tmp_path):
     assert all(record[name].shape == (NY, NX) for name in (
         "ssh_kaa", "r1_ht_0", "r3_kaa", "ssh_kbb", "r3_kbb", "ht_0",
     ))
+    producer = "b" * 40
+    (tmp_path / "producer_commit.txt").write_text(producer + "\n")
+    digest = gate.sha256(path)
+    (tmp_path / (path.name + ".stamp")).write_text(
+        f"{digest} {producer} {path.name}\n")
+    admitted = gate.read_admitted_stage1_r3_operands(tmp_path)
+    assert admitted["sha256"] == digest
+    assert admitted["producer_commit"] == producer
+    with pytest.raises(Exception, match="producer commit mismatch"):
+        gate.read_admitted_stage1_r3_operands(tmp_path, plant_stamp=True)
     path.write_bytes(payload[:-8])
     with pytest.raises(Exception, match="wrong payload size"):
         gate.read_stage1_r3_operand_record(path)
     path.write_bytes(payload + np.float64(0.0).tobytes())
     with pytest.raises(Exception, match="wrong payload size"):
         gate.read_stage1_r3_operand_record(path)
+
+
+def test_rk3_vector_assignment_scalar_preserves_source_order():
+    before = np.asarray([1.0, -2.0], dtype=np.float64)
+    rhs = np.asarray([0.25, 0.5], dtype=np.float64)
+    mask = np.asarray([1.0, 0.0], dtype=np.float64)
+    got = gate._rk3_vector_assignment_scalar(before, rhs, 2.0, mask)
+    expected = np.multiply(
+        np.add(before, np.multiply(np.float64(2.0), rhs)), mask)
+    assert np.array_equal(got.view(np.uint64), expected.view(np.uint64))
 
 
 def test_transport_w_scalar_replay_preserves_zero_state():
