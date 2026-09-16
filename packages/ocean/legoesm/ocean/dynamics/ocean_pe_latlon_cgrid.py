@@ -62,7 +62,6 @@ from legoesm.ocean.vertical import (
     compute_layer_thickness,
     compute_ocean_jacobian,
     nemo_qco_live_face_geometry_from_operands,
-    nemo_qco_reference_t_reciprocal,
     nemo_qco_resolved_mesh_operands,
 )
 from legoesm.ocean.state import (
@@ -1613,22 +1612,26 @@ def nemo_qco_wzv_operands(
     # barotropic column-continuity helper: that helper intentionally collapses
     # e3t*hdiv and loses the divide/multiply boundary required by wzv.
     tmask = jnp.asarray(mask_3d, dtype=eta_now.dtype)
-    sr = nemo_source_round
-    r1_h0 = nemo_qco_reference_t_reciprocal(e3t0, tmask)
-    r3_now = sr(eta_now * r1_h0)
-    one = jnp.asarray(1.0, dtype=eta_now.dtype)
-    live_factor = sr(one + sr(r3_now[..., None] * tmask))
-    live_t = sr(e3t0 * live_factor) * tmask
+    h0 = jnp.zeros_like(eta_now)
+    for jk in range(nlev):
+        h0 = jax.lax.optimization_barrier(
+            h0 + e3t0[..., jk] * tmask[..., jk])
+    h0_safe = jnp.where(h0 > 0.0, h0, 1.0)
+    r1_h0 = jax.lax.optimization_barrier(1.0 / h0_safe)
+    r3_now = jax.lax.optimization_barrier(eta_now * r1_h0)
+    live_t = e3t0 * (1.0 + r3_now[..., None] * tmask) * tmask
     e2u, e1v = ops.e2u, ops.e1v
-    r1_area_t = sr(one / area_t)
+    r1_area_t = jax.lax.optimization_barrier(1.0 / area_t)
     flux_levels = []
     barotropic_div = jnp.zeros_like(eta_now)
     for jk in range(nlev):
         if volume_transport_override is None:
-            flux_u = sr(sr(e2u * live_u_raw[..., jk])
-                        * u[:, 1:, jk]) * raw_umask[..., jk]
-            flux_v = sr(sr(e1v * live_v_raw[..., jk])
-                        * v[1:, :, jk]) * raw_vmask[..., jk]
+            flux_u = jax.lax.optimization_barrier(
+                jax.lax.optimization_barrier(e2u * live_u_raw[..., jk])
+                * u[:, 1:, jk]) * raw_umask[..., jk]
+            flux_v = jax.lax.optimization_barrier(
+                jax.lax.optimization_barrier(e1v * live_v_raw[..., jk])
+                * v[1:, :, jk]) * raw_vmask[..., jk]
         else:
             # traadv.F90:220-226 passes the already materialized pFu/pFv
             # from stprk3_stg.F90:276-278 into wzv(np_transport).  Consume
@@ -1639,42 +1642,50 @@ def nemo_qco_wzv_operands(
         west = jnp.roll(flux_u, 1, axis=1)
         south = jnp.concatenate(
             [jnp.zeros_like(flux_v[:1]), flux_v[:-1]], axis=0)
-        zonal = sr(flux_u - west)
-        meridional = sr(flux_v - south)
-        numerator = sr(zonal + meridional)
-        transport_div = sr(numerator * r1_area_t) * tmask[..., jk]
+        zonal = jax.lax.optimization_barrier(flux_u - west)
+        meridional = jax.lax.optimization_barrier(flux_v - south)
+        numerator = jax.lax.optimization_barrier(zonal + meridional)
+        transport_div = jax.lax.optimization_barrier(
+            numerator * r1_area_t) * tmask[..., jk]
         # divhor.F90:180-184 divides the transport divergence by live e3t;
         # ssh_nxt/wzv then multiply by that same e3t.  Preserve the executed
         # divide/multiply instead of algebraically cancelling it -- row 4 is
         # sensitive to those last bits through the vertical recurrence.
         safe_e3t = jnp.where(tmask[..., jk] > 0.5, live_t[..., jk], 1.0)
-        hdiv = sr(transport_div / safe_e3t)
-        level = sr(live_t[..., jk] * hdiv) * tmask[..., jk]
+        hdiv = jax.lax.optimization_barrier(transport_div / safe_e3t)
+        level = jax.lax.optimization_barrier(
+            live_t[..., jk] * hdiv) * tmask[..., jk]
         flux_levels.append(level)
-        barotropic_div = sr(barotropic_div + level)
+        barotropic_div = jax.lax.optimization_barrier(barotropic_div + level)
     flux_div = jnp.stack(flux_levels, axis=-1)
 
     fw = (jnp.zeros_like(eta_now) if freshwater_eta_tendency is None
           else jnp.asarray(freshwater_eta_tendency, dtype=eta_now.dtype))
     if eta_after_override is None:
-        eta_after = sr(eta_before - sr(dt * barotropic_div))
-        eta_after = sr(eta_after + sr(dt * fw)) * tmask[..., 0]
+        eta_after = jax.lax.optimization_barrier(
+            eta_before - jax.lax.optimization_barrier(dt * barotropic_div))
+        eta_after = jax.lax.optimization_barrier(
+            eta_after + jax.lax.optimization_barrier(dt * fw)) * tmask[..., 0]
     else:
-        eta_after = sr(
+        eta_after = jax.lax.optimization_barrier(
             jnp.asarray(eta_after_override, dtype=eta_now.dtype)) * tmask[..., 0]
-    r3_after = sr(eta_after * r1_h0)
-    r3_before = sr(eta_before * r1_h0)
-    r3_delta = sr(r3_after - r3_before)
-    r1_dt = sr(one / dt)
-    stretch_rate = sr(sr(r1_dt * e3t0) * r3_delta[..., None])
+    r3_after = jax.lax.optimization_barrier(eta_after * r1_h0)
+    r3_before = jax.lax.optimization_barrier(eta_before * r1_h0)
+    r3_delta = jax.lax.optimization_barrier(r3_after - r3_before)
+    r1_dt = jax.lax.optimization_barrier(
+        jnp.asarray(1.0, dtype=eta_now.dtype) / dt)
+    stretch_rate = jax.lax.optimization_barrier(
+        (r1_dt * e3t0) * r3_delta[..., None])
 
     # sshwzv.F90 bottom-up left recurrence.  A static Python loop preserves
     # source ordering under JIT and remains differentiable.
     carry = jnp.zeros_like(eta_now)
     levels = [None] * nlev
     for jk in range(nlev - 1, -1, -1):
-        bracket = sr(flux_div[..., jk] + stretch_rate[..., jk])
-        carry = sr(carry - sr(bracket * tmask[..., jk]))
+        bracket = jax.lax.optimization_barrier(
+            flux_div[..., jk] + stretch_rate[..., jk])
+        carry = jax.lax.optimization_barrier(
+            carry - bracket * tmask[..., jk])
         levels[jk] = carry
     ww = jnp.stack(levels + [jnp.zeros_like(carry)], axis=-1)
     return ww, live_u, live_v

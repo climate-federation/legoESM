@@ -1458,8 +1458,6 @@ def _stage1_w_walk(
     """Walk kt=1 stage-1 transport W from admitted NEMO operands."""
     import jax
     import jax.numpy as jnp
-    from legoesm.core.source_rounding import nemo_source_round
-    from legoesm.ocean.vertical import nemo_qco_reference_t_reciprocal
 
     arrays = records[(1, 1)]["arrays"]
     transport = transports[(1, 1)]
@@ -1467,21 +1465,13 @@ def _stage1_w_walk(
     transport_v = np.asarray(transport["zFv"])
     direct_ww = np.asarray(direct_stage_ww[(1, 1)]["ww"])
     wet_surface = _owned3(arrays["tmask"])[..., 0] > 0.5
-    e3t_0_owned = _owned3(arrays["e3t_0"])
-    tmask_owned = _owned3(arrays["tmask"])
-    reference_depth = np.sum(e3t_0_owned * tmask_owned, axis=-1)
+    reference_depth = np.sum(
+        _owned3(arrays["e3t_0"]) * _owned3(arrays["tmask"]), axis=-1)
     require(np.all(reference_depth[wet_surface] > 0.0),
             "kt1 stage1 cannot recover positive reference depth")
-    legacy_r1_h0 = np.zeros_like(reference_depth)
-    legacy_r1_h0[wet_surface] = 1.0 / reference_depth[wet_surface]
-    ssh_kaa = np.asarray(direct_stage_state[(1, 1)]["ssh"])
-    legacy_r3_kaa = ssh_kaa * legacy_r1_h0
-    r1_h0 = np.asarray(jax.device_get(jax.jit(
-        nemo_qco_reference_t_reciprocal)(
-            jnp.asarray(e3t_0_owned), jnp.asarray(tmask_owned))))
-    r3_kaa = np.asarray(jax.device_get(jax.jit(
-        lambda ssh, reciprocal: nemo_source_round(ssh * reciprocal))(
-            jnp.asarray(ssh_kaa), jnp.asarray(r1_h0))))
+    r1_h0 = np.zeros_like(reference_depth)
+    r1_h0[wet_surface] = 1.0 / reference_depth[wet_surface]
+    r3_kaa = np.asarray(direct_stage_state[(1, 1)]["ssh"]) * r1_h0
     r1_dt = np.float64(1.0 / direct_stage_ww[(1, 1)]["rDt_s"])
     reference = _stage1_transport_w_scalar_reference(
         arrays, transport_u, transport_v, r3_kaa=r3_kaa, r1_dt=r1_dt)
@@ -1540,9 +1530,6 @@ def _stage1_w_walk(
             direct_fields[name], reconstructed_fields[name], direct_masks[name]))
         row["boundary"] = name
         direct_input_rows.append(row)
-    legacy_r3_kaa_row = _classification(score(
-        "GYRE-zco.kt1.s1.w_walk.legacy_reconstructed_r3_kaa",
-        direct_fields["r3_kaa"], legacy_r3_kaa, wet_2d))
 
     direct_scalar = _stage1_w_scalar_recurrence(
         direct_fields["e3div"], direct_fields["e3t_0"],
@@ -1665,7 +1652,6 @@ def _stage1_w_walk(
             "header": direct_w_record["header"],
         },
         "direct_input_rows": direct_input_rows,
-        "legacy_reconstructed_r3_kaa": legacy_r3_kaa_row,
         "direct_input_first_nonbit": (
             None if direct_first is None else {
                 key: direct_first[key] for key in (
