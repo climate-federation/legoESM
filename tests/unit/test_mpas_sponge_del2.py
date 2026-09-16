@@ -41,7 +41,9 @@ def test_config_defaults_gates_and_wiring():
                                          mpas_sponge_del2_top_factor=8.0, **mpas),
                      grid=grid).validate_strict()
     for bad in (dict(mpas_sponge_del2_top_layers=-1), dict(mpas_sponge_del2_top_layers=36),
-                dict(mpas_sponge_del2_top_factor=0.5)):
+                dict(mpas_sponge_del2_top_factor=0.5),
+                dict(mpas_sponge_del2_top_factor=float("inf")),
+                dict(mpas_sponge_del2_top_layers=2, model_type="nonhydrostatic")):
         with pytest.raises(ValueError, match="mpas_sponge_del2"):
             ExperimentConfig(dycore=DycoreConfig(**mpas, **bad), grid=grid).validate_strict()
     with pytest.raises(ValueError, match="mpas_sponge_del2"):
@@ -52,3 +54,37 @@ def test_config_defaults_gates_and_wiring():
     cfg = build_config_from_args(args)
     assert cfg.dycore.mpas_sponge_del2_top_layers == 3
     assert cfg.dycore.mpas_sponge_del2_top_factor == 8.0
+
+
+def test_tendency_applies_the_profile_only_to_the_top_layers():
+    """The enabled sponge changes the del2 momentum tendency by exactly the
+    per-level factor in the top layers and nowhere else; the off state is
+    identical to the pre-sponge configuration."""
+    import importlib.util
+    import pathlib
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import mpas_hydrostatic_tendencies
+    from legoesm.grids.vertical import create_sigma_coordinate
+    helpers_path = pathlib.Path(__file__).with_name("test_mpas_atmosphere.py")
+    spec = importlib.util.spec_from_file_location("_mpas_atm_helpers", helpers_path)
+    helpers = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helpers)
+    nlev = 8
+    mesh = helpers._make_mesh(level=2)
+    sig = create_sigma_coordinate(nlev, dtype=jnp.float64)
+    state = helpers._add_perturbation_hydro(helpers._make_hydrostatic_state(mesh, nlev), mesh, nlev)
+    on = MPASPrimitiveEquationConfig(nu_del2=1.0e5, sponge_del2_top_layers=2,
+                                     sponge_del2_top_factor=4.0)
+    off = MPASPrimitiveEquationConfig(nu_del2=1.0e5)
+    legacy = MPASPrimitiveEquationConfig(nu_del2=1.0e5, sponge_del2_top_layers=0,
+                                         sponge_del2_top_factor=1.0)
+
+    def du(cfg):
+        return np.asarray(mpas_hydrostatic_tendencies(state, mesh, sig, cfg).du_dt.data)
+
+    assert np.array_equal(du(off), du(legacy))                  # off state identical
+    zero = du(off._replace(nu_del2=0.0))
+    visc_on, visc_off = du(on) - zero, du(off) - zero           # isolate the del2 term
+    assert np.abs(visc_off).max() > 0.0                          # non-vacuous
+    np.testing.assert_allclose(visc_on[:, 0], 4.0 * visc_off[:, 0], rtol=1e-9, atol=1e-14)
+    np.testing.assert_allclose(visc_on[:, 1], 2.0 * visc_off[:, 1], rtol=1e-9, atol=1e-14)
+    assert np.array_equal(visc_on[:, 2:], visc_off[:, 2:])

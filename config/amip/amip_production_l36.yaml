@@ -14,9 +14,12 @@
 # the structural fix, relaxing to reanalysis is not an option for CMIP runs.
 #
 # The sponge is CAM's "del2 sponge": the horizontal momentum viscosity is
-# raised x8 in the top layer, x4 and x2 in the next two (geometric ramp), so
-# resolved waves reaching the lid are absorbed without a Rayleigh torque on
-# the mean flow.  Gravity-wave drag, radiation, physics: unchanged.
+# raised x8 in the top layer, x4 and x2 in the next two (geometric ramp); it
+# damps resolved waves reaching the lid (2000-km amplitude e-folding ~1.6 d
+# at the top) without the Rayleigh drag's direct relaxation of the mean flow,
+# though a vector Laplacian still dissipates mean-flow shear and kinetic
+# energy (no dissipative heating is added).  First setting, not a tuned one.
+# Gravity-wave drag, radiation, physics: unchanged.
 include: amip_production.yaml
 nlev: 36
 sigma_top: 0.002

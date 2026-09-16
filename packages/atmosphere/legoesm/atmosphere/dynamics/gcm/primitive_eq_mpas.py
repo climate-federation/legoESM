@@ -306,7 +306,8 @@ def sponge_del2_profile(nlev: int, n_layers: int, factor: float) -> jnp.ndarray:
     """Per-level del2 viscosity multiplier of a CAM-style top diffusion sponge:
     factor**((n_layers - k)/n_layers) for level k < n_layers (k = 0 is the
     model top, so the top layer gets the full factor), 1.0 below; all ones when
-    n_layers <= 0 or factor == 1.0 (byte-identical off state)."""
+    n_layers <= 0 or factor == 1.0 (byte-identical off state).  ``n_layers`` and
+    ``factor`` are STATIC config values (Python numbers), not traced."""
     if n_layers <= 0 or factor == 1.0:
         return jnp.ones(nlev)
     fac = jnp.asarray(float(factor))

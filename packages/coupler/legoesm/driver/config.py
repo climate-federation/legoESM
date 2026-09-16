@@ -2709,13 +2709,16 @@ class ExperimentConfig(NamedTuple):
         if isinstance(_spl, bool) or not isinstance(_spl, int) or _spl < 0 or _spl >= g.nlev:
             errors.append(
                 f"dycore.mpas_sponge_del2_top_layers must be an int in [0, grid.nlev) (got {_spl!r})")
-        if not (isinstance(_spf, (int, float)) and not isinstance(_spf, bool) and _spf >= 1.0):
+        if not (isinstance(_spf, (int, float)) and not isinstance(_spf, bool)
+                and math.isfinite(_spf) and _spf >= 1.0):
             errors.append(
-                f"dycore.mpas_sponge_del2_top_factor must be a number >= 1.0 (got {_spf!r})")
-        if isinstance(_spl, int) and _spl > 0 and d.discretization != "mpas":
+                f"dycore.mpas_sponge_del2_top_factor must be a finite number >= 1.0 (got {_spf!r})")
+        if (isinstance(_spl, int) and _spl > 0
+                and (d.discretization != "mpas" or d.model_type != "hydrostatic")):
             errors.append(
-                "dycore.mpas_sponge_del2_top_layers is wired into the MPAS dycore only; "
-                f"on discretization={d.discretization!r} it would be silently inert")
+                "dycore.mpas_sponge_del2_top_layers is wired into the hydrostatic MPAS dycore "
+                f"only; on discretization={d.discretization!r}/model_type={d.model_type!r} "
+                "it would be silently inert")
         if d.mpas_vert_advection_scheme not in _vert_adv_options:
             errors.append(
                 f"dycore.mpas_vert_advection_scheme must be one of "
