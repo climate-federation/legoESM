@@ -41,6 +41,26 @@ def _z_coord():
     return SimpleNamespace(n_levels=12, z_full_ref=-_Z_CENTER.copy())
 
 
+def _expected(lat_t, lon_t, z, lat_deg, lon_deg, T, nlev, k=4):
+    """Independent per-layer wet-donor IDW + vertical linear interpolation."""
+    def unit(la, lo):
+        la, lo = np.deg2rad(la), np.deg2rad(lo)
+        return np.stack([np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo), np.sin(la)], axis=-1)
+    d = np.linalg.norm(unit(lat_deg, lon_deg) - unit(lat_t, lon_t), axis=1)
+    zs = 5.0 * np.arange(69) + 2.5
+
+    def idw(kk):
+        wet = np.flatnonzero(nlev - 2 >= kk)
+        assert wet.size > 0
+        j = wet[np.argsort(d[wet])[:min(k, wet.size)]]
+        w = np.where(d[j] == 0.0, 1.0, 0.0) if (d[j] == 0.0).any() else d[j] ** -2.0
+        return (w * T[j, kk]).sum() / w.sum()
+    lo = int(np.clip(np.searchsorted(zs, z, side="right") - 1, 0, 68))
+    hi = min(lo + 1, 68)
+    f = 0.0 if hi == lo else np.clip((z - zs[lo]) / (zs[hi] - zs[lo]), 0.0, 1.0)
+    return (1.0 - f) * idw(lo) + f * idw(hi)
+
+
 def test_coincident_deep_node_matches_layer_mids(tmp_path):
     d, lat_deg, lon_deg, T, nlev = _write_mesh(tmp_path)
     i = int(np.argmax(nlev == 70))
@@ -54,13 +74,16 @@ def test_coincident_deep_node_matches_layer_mids(tmp_path):
     np.testing.assert_allclose(np.asarray(Ts)[0], T[i, 0], rtol=0.0, atol=1e-9)
 
 
-def test_shallow_node_profile_extended_downward(tmp_path):
+def test_shallow_node_takes_deep_wet_donors_below_its_bottom(tmp_path):
     d, lat_deg, lon_deg, T, nlev = _write_mesh(tmp_path)
-    i = int(np.argmax(nlev == 5))                        # deepest wet mid-depth 17.5 m
+    i = int(np.argmax(nlev == 5))                        # 4 wet layers, bottom mid 17.5 m
     Ti, _ = init_ocean_from_fesom_mesh(_grid(lat_deg[i], lon_deg[i]), _z_coord(), d)
-    v = float(np.asarray(Ti)[0, 11])                     # target depth 3000 m
-    np.testing.assert_allclose(v, T[i, 3], rtol=0.0, atol=1e-9)
-    assert v != 0.0
+    Ti = np.asarray(Ti)
+    np.testing.assert_allclose(Ti[0, 0], T[i, 0], rtol=0.0, atol=1e-9)      # surface: itself
+    exp = _expected(lat_deg[i], lon_deg[i], 3000.0, lat_deg, lon_deg, T, nlev)
+    np.testing.assert_allclose(Ti[0, 11], exp, rtol=0.0, atol=1e-9)         # 3000 m: deep donors
+    assert abs(exp - T[i, 3]) > 1e-3                     # not the shallow bottom value extended
+    assert exp != 0.0
 
 
 def test_deep_node_interpolated_between_layers(tmp_path):
@@ -88,15 +111,15 @@ def test_isolated_target_count_in_log(tmp_path):
     lat, lon = [lat_deg[i], 45.0], [lon_deg[i], 100.0]
     msgs = []
     init_ocean_from_fesom_mesh(_grid(lat, lon), _z_coord(), d, log=msgs.append)
-    assert any("1 isolated target cells" in m for m in msgs)
+    assert any("1 isolated wet target cells" in m for m in msgs)
     msgs = []
     init_ocean_from_fesom_mesh(_grid(lat, lon), _z_coord(), d,
                                isolated_factor=1e9, log=msgs.append)
-    assert any("0 isolated target cells" in m for m in msgs)
+    assert any("0 isolated wet target cells" in m for m in msgs)
     msgs = []
     init_ocean_from_fesom_mesh(_grid(lat, lon), _z_coord(), d,
                                wet_mask=np.array([True, False]), log=msgs.append)
-    assert any("0 isolated target cells" in m for m in msgs)   # the far cell is land
+    assert any("0 isolated wet target cells" in m for m in msgs)   # the far cell is land
 
 
 def test_wrong_nlevels_length_raises(tmp_path):
@@ -113,27 +136,39 @@ def test_idw_over_four_nearest_donors_with_different_bottoms(tmp_path):
     T_res, S_res = init_ocean_from_fesom_mesh(grid, _z_coord(), mesh_dir, k=4)
     T_res, S_res = np.asarray(T_res), np.asarray(S_res)
     assert T_res.shape == S_res.shape == (1, 12)
+    S = np.where(T != 0.0, 35.0 + 0.01 * lon_deg[:, None], 0.0)
+    for col, z in ((0, 2.5), (3, 20.0), (11, 3000.0)):
+        np.testing.assert_allclose(T_res[0, col], _expected(45.3, 7.6, z, lat_deg, lon_deg, T, nlev), atol=1e-9)
+        np.testing.assert_allclose(S_res[0, col], _expected(45.3, 7.6, z, lat_deg, lon_deg, S, nlev), atol=1e-9)
+    # discriminates against a nearest-only remap and against a column-extension remap
+    def unit(la, lo):
+        la, lo = np.deg2rad(la), np.deg2rad(lo)
+        return np.stack([np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo), np.sin(la)], axis=-1)
+    dist = np.linalg.norm(unit(lat_deg, lon_deg) - unit(45.3, 7.6), axis=1)
+    near = int(np.argmin(dist))
+    zs = 5.0 * np.arange(69) + 2.5
+    assert abs(T_res[0, 11] - np.interp(3000.0, zs[:nlev[near] - 1], T[near, :nlev[near] - 1])) > 1e-6
 
-    la, lo = np.deg2rad(lat_deg), np.deg2rad(lon_deg)
-    nodes = np.stack([np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo), np.sin(la)], axis=1)
-    tla, tlo = np.deg2rad(45.3), np.deg2rad(7.6)
-    tgt = np.array([np.cos(tla) * np.cos(tlo), np.cos(tla) * np.sin(tlo), np.sin(tla)])
-    d = np.linalg.norm(nodes - tgt, axis=1)   # chord distances on the unit sphere
-    idx = np.argsort(d)[:4]                   # 4 nearest donors (distinct nlev/bottoms)
-    assert len(set(nlev[idx])) > 1
-    w = d[idx] ** -2.0
-    w /= w.sum()
-    zs = 5.0 * np.arange(69) + 2.5            # donor mid-depths |Z_k|
 
-    def expected(z):
-        return sum(w[j] * np.interp(z, zs[:nlev[n] - 1], T[n, :nlev[n] - 1])
-                   for j, n in enumerate(idx))
-
-    exp = np.array([expected(2.5), expected(20.0), expected(3000.0)])
-    cols = [0, 3, 11]
-    np.testing.assert_allclose(T_res[0, cols], exp, atol=1e-9)
-    exp_s = sum(w[j] * (35.0 + 0.01 * lon_deg[n]) for j, n in enumerate(idx))
-    np.testing.assert_allclose(S_res[0, cols], exp_s, atol=1e-9)
-    near = idx[0]
-    near_3000 = np.interp(3000.0, zs[:nlev[near] - 1], T[near, :nlev[near] - 1])
-    assert abs(exp[2] - near_3000) > 1e-6  # weighted value differs from nearest donor alone
+def test_layers_with_one_or_zero_wet_donors(tmp_path):
+    """Single-donor layers query k=1 (1-D result), empty layers hold the layer above;
+    a padded 0.0 must never enter the average."""
+    d, lat_deg, lon_deg, T, nlev = _write_mesh(tmp_path)
+    nlev2 = np.minimum(nlev, 60)                   # nobody wet beyond layer 58 ...
+    nlev2[0] = 66                                  # ... except node 0, wet through layer 64
+    zabs = 5.0 * np.arange(70) + 2.5
+    T2 = np.where(np.arange(70)[None, :] <= (nlev2[:, None] - 2),
+                  10.0 - 0.002 * zabs + 0.1 * lat_deg[:, None], 0.0)
+    np.save(d / "nlevels_nod2D.npy", nlev2.astype(np.int32))
+    np.save(d / "T_ic.npy", T2)
+    zc = SimpleNamespace(n_levels=3, z_full_ref=-np.array([5.0 * 60 + 2.5, 5.0 * 64 + 2.5, 3000.0]))
+    Ti, _ = init_ocean_from_fesom_mesh(_grid(lat_deg[5], lon_deg[5]), zc, d)
+    Ti = np.asarray(Ti)[0]
+    np.testing.assert_allclose(Ti[0], T2[0, 60], atol=1e-9)   # layer 60: only node 0 is wet
+    np.testing.assert_allclose(Ti[1], T2[0, 64], atol=1e-9)   # layer 64: only node 0 is wet
+    np.testing.assert_allclose(Ti[2], T2[0, 64], atol=1e-9)   # layers 65..68 empty: hold 64
+    assert Ti[2] != 0.0
+    msgs = []
+    init_ocean_from_fesom_mesh(_grid(lat_deg[5], lon_deg[5]), zc, d,
+                               wet_mask=np.array([False]), log=msgs.append)  # all-land: no crash
+    assert any("0 isolated" in m for m in msgs)

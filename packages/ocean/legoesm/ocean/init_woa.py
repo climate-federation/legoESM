@@ -1431,44 +1431,109 @@ def woa_ocean_bathymetry(
     return H.astype(np.float64)
 
 
+def _fesom_profiles_per_layer(xyz_nodes, nlevels, T_ic, S_ic, xyz_targets, k=4, chunk=200_000):
+    """T_prof, S_prof (ntarget, nz) on the FESOM layer mid-depths; for layer kk the donors are the nodes wet at kk (nlevels-2 >= kk)."""
+    from scipy.spatial import cKDTree
+
+    xyz_nodes = np.ascontiguousarray(xyz_nodes, dtype=np.float64)
+    xyz_targets = np.ascontiguousarray(xyz_targets, dtype=np.float64)
+    nlevels = np.asarray(nlevels)
+    T_ic = np.asarray(T_ic, dtype=np.float64)
+    S_ic = np.asarray(S_ic, dtype=np.float64)
+
+    nz = T_ic.shape[1] - 1
+    nt = xyz_targets.shape[0]
+
+    T_prof = np.empty((nt, nz), dtype=np.float64)
+    S_prof = np.empty((nt, nz), dtype=np.float64)
+    d0 = np.empty(nt, dtype=np.float64)
+    i0 = np.empty(nt, dtype=np.int64)
+
+    # Build one KD-tree per layer, up front; identical donor sets share a single tree.
+    # Donor sets are nested (threshold kk grows), so (size, first, last) uniquely identifies a set.
+    nlim = nlevels - 2
+    donors_l = [None] * nz
+    trees = [None] * nz
+    memo = {}
+    for kk in range(nz):
+        donors = np.flatnonzero(nlim >= kk)
+        if donors.size == 0:
+            # no node is wet at this layer: the profile holds the layer above
+            # (a shallower donor set must never be reused here -- its padded
+            # 0.0 values would enter the average)
+            donors_l[kk] = None
+            trees[kk] = None
+            continue
+        key = (int(donors.size), int(donors[0]), int(donors[-1]))
+        hit = memo.get(key)
+        if hit is None:
+            hit = (donors, cKDTree(xyz_nodes[donors]))
+            memo[key] = hit
+        donors_l[kk], trees[kk] = hit
+
+    for s in range(0, nt, chunk):
+        e = min(s + chunk, nt)
+        pts = xyz_targets[s:e]
+        m = e - s
+        for kk in range(nz):
+            donors = donors_l[kk]
+            tree = trees[kk]
+            if donors is None:
+                T_prof[s:e, kk] = T_prof[s:e, kk - 1]
+                S_prof[s:e, kk] = S_prof[s:e, kk - 1]
+                continue
+            d, j = tree.query(pts, k=min(k, donors.size))
+            d = d.reshape(m, -1)
+            j = j.reshape(m, -1)
+            if kk == 0:
+                d0[s:e] = d[:, 0]
+                i0[s:e] = donors[j[:, 0]]
+            zero = d == 0.0
+            w = 1.0 / np.maximum(d, 1e-12) ** 2
+            zr = zero.any(axis=1)
+            if zr.any():
+                w[zr] = zero[zr]
+            w /= w.sum(axis=1, keepdims=True)
+            idx = donors[j]
+            T_prof[s:e, kk] = np.einsum('ij,ij->i', w, T_ic[idx, kk])
+            S_prof[s:e, kk] = np.einsum('ij,ij->i', w, S_ic[idx, kk])
+
+    return T_prof, S_prof, d0, i0, donors_l, trees
+
+
 def init_ocean_from_fesom_mesh(grid, z_coord, mesh_dir, *, cell_center_depths=None,
                                k=4, isolated_factor=3.0, wet_mask=None, log=print):
-    """Build initial potential temperature and salinity on the model grid.
+    """Build initial potential temperature and salinity on the model grid from
+    a FESOM2-JAX mesh's cached initial field.
 
-    Horizontally interpolates the cached FESOM2-JAX nodal initial-state fields
-    (inverse-distance-squared weighting of the ``k`` nearest mesh nodes, chord
-    distances on the unit sphere) and vertically interpolates linearly in depth
-    onto the target cell-centre depths.
+    Horizontal: for each FESOM LAYER, inverse-distance-squared weighting of the
+    ``k`` nearest nodes that are WET at that layer (chord distances on the unit
+    sphere; a coincident node gets weight 1).  A target deeper than its
+    neighbouring nodes' bottoms therefore takes the nearest nodes that ARE that
+    deep -- real water of that depth -- never a shallow profile extended
+    downward (that extension wrote 15 degC water to 2800 m in the Bismarck Sea
+    next to cells fed by deep nodes, a 2.4 kg/m3 wall).  The log line reports
+    the median and 99th-percentile donor distance at the deepest layer any wet
+    target uses, so distant-donor filling is visible.
+    Vertical: linear interpolation in depth from the 69 layer mid-depths |Z| to
+    each target level's depth (``cell_center_depths`` when given, else the
+    reference |z_full_ref|); the top value is held above |Z[0]| and the deepest
+    layer value below |Z[-1]|.
 
-    Units
-    -----
-    T_ic / S_ic : potential temperature [degC] and salinity [psu], (nod2D, 70);
-                  layer values padded with 0.0 below each node's bottom.
-    Z           : source layer mid-depths [m], negative (|Z| is positive-down).
-    depths      : target cell-centre depths [m], positive-down.
-    distances   : chord distances on the unit sphere, converted to metres with
-                  ``constants.R_earth`` [m] for the isolation diagnostic.
+    Units: T_ic/S_ic potential temperature [degC] / salinity [psu] (nod2D, 70),
+    padded with 0.0 below each node's bottom (layers 0..nlevels_nod2D-2 are
+    wet); Z [m] negative; target depths [m] positive-down; distances on the
+    unit sphere, converted with ``constants.R_earth`` for the diagnostics.
 
-    Vertical convention
-    -------------------
-    Each nodal profile is extended downward with its deepest *wet* layer value
-    (layer index ``nlevels_nod2D - 2``); the 0.0 padding below a node's bottom
-    is never used.  Above the shallowest source layer the top value is held
-    constant; below the deepest wet layer the extended value is held constant.
-
-    Closed seas
-    -----------
-    This function fills every target cell; masking of closed seas (and land)
-    in the returned fields is the responsibility of the caller.  ``wet_mask``
-    (spatial shape, True = ocean) only restricts the isolated-cell report to
-    ocean cells, so land does not swamp the count.
+    Closed seas: every target cell is filled; masking of closed seas (and land)
+    is the caller's job.  ``wet_mask`` (spatial, True = ocean) only restricts
+    the isolated-cell report (nearest surface donor farther than
+    ``isolated_factor`` x that donor's mesh resolution) to ocean cells.
 
     Returns ``(T, S)`` as float64 jax arrays of shape ``spatial + (nlev,)``.
     """
     import os
-    from scipy.spatial import cKDTree
 
-    # ------------------------------------------------------------------ load
     T_ic = np.asarray(np.load(os.path.join(mesh_dir, "T_ic.npy")), dtype=np.float64)
     S_ic = np.asarray(np.load(os.path.join(mesh_dir, "S_ic.npy")), dtype=np.float64)
     geo = np.asarray(np.load(os.path.join(mesh_dir, "geo_coord_nod2D.npy")), dtype=np.float64)
@@ -1478,7 +1543,6 @@ def init_ocean_from_fesom_mesh(grid, z_coord, mesh_dir, *, cell_center_depths=No
     mesh_res = (np.asarray(np.load(res_path), dtype=np.float64)
                 if os.path.exists(res_path) else None)
 
-    # -------------------------------------------------------------- validate
     if T_ic.ndim != 2 or T_ic.shape != S_ic.shape:
         raise ValueError(f"T_ic/S_ic shape mismatch: {T_ic.shape} vs {S_ic.shape}")
     nod2, nz_full = T_ic.shape
@@ -1492,108 +1556,79 @@ def init_ocean_from_fesom_mesh(grid, z_coord, mesh_dir, *, cell_center_depths=No
         raise ValueError("nlevels_nod2D out of range [2, n_layers]")
     if mesh_res is not None and mesh_res.shape != (nod2,):
         raise ValueError(f"mesh_resolution shape {mesh_res.shape} != {(nod2,)}")
-
-    z_abs = np.abs(Z)  # positive-down source mid-depths, strictly increasing
+    z_abs = np.abs(Z)
     if np.any(np.diff(z_abs) <= 0.0):
         raise ValueError("|Z| must be strictly increasing with depth")
+    nz = z_abs.size
 
     nlev = int(z_coord.n_levels)
-
     lat_deg, lon_deg = _grid_lat_lon_deg(grid)
     lat_flat = np.asarray(lat_deg, dtype=np.float64).ravel()
     lon_flat = np.asarray(lon_deg, dtype=np.float64).ravel()
     spatial = np.shape(lat_deg)
     ncell = lat_flat.size
-
     if cell_center_depths is not None:
         ccd = np.asarray(cell_center_depths, dtype=np.float64)
         if ccd.shape[-1] != nlev or ccd.shape[:-1] != spatial:
             raise ValueError(f"cell_center_depths shape {ccd.shape} != {spatial + (nlev,)}")
         depths = ccd.reshape(ncell, nlev)
     else:
-        # Reference level centres, |z_full_ref| on the model's vertical
-        # coordinate classes (the WOA path reads the same attribute).
         depths = np.broadcast_to(
             np.abs(np.asarray(z_coord.z_full_ref, dtype=np.float64)), (ncell, nlev))
 
-    # ------------------------------------------------- horizontal KD-tree
-    lon_n, lat_n = geo[:, 0], geo[:, 1]
-    xyz_n = np.stack((np.cos(lat_n) * np.cos(lon_n),
-                      np.cos(lat_n) * np.sin(lon_n),
-                      np.sin(lat_n)), axis=1)
-    xyz_n /= np.linalg.norm(xyz_n, axis=1, keepdims=True)
-    tree = cKDTree(xyz_n)
+    def _xyz(lat_r, lon_r):
+        return np.stack((np.cos(lat_r) * np.cos(lon_r), np.cos(lat_r) * np.sin(lon_r),
+                         np.sin(lat_r)), axis=1)
+    xyz_n = _xyz(geo[:, 1], geo[:, 0])
+    xyz_t = _xyz(np.deg2rad(lat_flat), np.deg2rad(lon_flat))
 
+    T_prof, S_prof, d0, i0, donors_l, trees = _fesom_profiles_per_layer(
+        xyz_n, nlevels, T_ic, S_ic, xyz_t, k=k)
+
+    # vertical: |Z| -> target depths, top held above z_abs[0], bottom held below z_abs[-1]
     T_out = np.empty((ncell, nlev), dtype=np.float64)
     S_out = np.empty((ncell, nlev), dtype=np.float64)
-    nearest_d = np.empty(ncell, dtype=np.float64)  # chord distance (unit sphere)
-    nearest_i = np.empty(ncell, dtype=np.int64)
-
-    kq = int(min(max(k, 1), nod2))
-    chunk = 200_000  # cells per chunk, keeps transient memory bounded
-
+    chunk = 200_000
     for s in range(0, ncell, chunk):
         e = min(s + chunk, ncell)
-        lat_r = np.deg2rad(lat_flat[s:e])
-        lon_r = np.deg2rad(lon_flat[s:e])
-        clat = np.cos(lat_r)
-        xyz_t = np.stack((clat * np.cos(lon_r), clat * np.sin(lon_r),
-                          np.sin(lat_r)), axis=1)
+        D = depths[s:e]                                             # (m, nlev)
+        i0v = np.searchsorted(z_abs, D, side="right") - 1
+        i_lo = np.clip(i0v, 0, nz - 1)
+        i_hi = np.minimum(i_lo + 1, nz - 1)
+        lo_z = z_abs[i_lo]
+        span = z_abs[i_hi] - lo_z
+        frac = np.clip((D - lo_z) / np.where(span > 0.0, span, 1.0), 0.0, 1.0)
+        rows = np.arange(s, e)[:, None]
+        T_out[s:e] = (1.0 - frac) * T_prof[rows, i_lo] + frac * T_prof[rows, i_hi]
+        S_out[s:e] = (1.0 - frac) * S_prof[rows, i_lo] + frac * S_prof[rows, i_hi]
+    del T_prof, S_prof
 
-        d, idx = tree.query(xyz_t, k=kq)
-        if kq == 1:
-            d = d[:, None]
-            idx = idx[:, None]
-
-        # IDW weights (1/d^2, normalised); a coincident donor (d == 0) gets
-        # weight exactly 1, all other donors 0.
-        w = 1.0 / np.maximum(d, 1e-12) ** 2
-        w[~np.isfinite(d)] = 0.0
-        hit = d <= 0.0
-        rows = hit.any(axis=1)
-        if np.any(rows):
-            w[rows] = 0.0
-            w[rows, np.argmax(hit[rows], axis=1)] = 1.0
-        w /= w.sum(axis=1, keepdims=True)
-
-        # deepest wet layer index per donor -> profile extended downward with
-        # its value; the 0.0 padding (indices > nlevels-2) is never touched.
-        m = nlevels[idx] - 2  # (nq, kq)
-
-        nearest_d[s:e] = d[:, 0]
-        nearest_i[s:e] = idx[:, 0]
-
-        for lev in range(nlev):
-            D = depths[s:e, lev]  # (nq,) positive-down target depths
-            i0 = np.searchsorted(z_abs, D, side="right") - 1  # (-1 .. nz-2)
-            i_lo = np.clip(i0[:, None], 0, m)                 # (nq, kq)
-            i_hi = np.minimum(i_lo + 1, m)
-            lo_z = z_abs[i_lo]
-            span = z_abs[i_hi] - lo_z
-            frac = (D[:, None] - lo_z) / np.where(span > 0.0, span, 1.0)
-            np.clip(frac, 0.0, 1.0, out=frac)  # hold top value above z_abs[0]
-            t_lo, t_hi = T_ic[idx, i_lo], T_ic[idx, i_hi]
-            s_lo, s_hi = S_ic[idx, i_lo], S_ic[idx, i_hi]
-            T_out[s:e, lev] = (((1.0 - frac) * t_lo + frac * t_hi) * w).sum(axis=1)
-            S_out[s:e, lev] = (((1.0 - frac) * s_lo + frac * s_hi) * w).sum(axis=1)
-
-    # ------------------------------------------------------ isolated report
+    # diagnostics: isolated cells (surface donor), donor distance at the deepest layer used
+    wm = (np.asarray(wet_mask, dtype=bool).reshape(ncell) if wet_mask is not None
+          else np.ones(ncell, dtype=bool))
     if mesh_res is None:
-        # fallback resolution: median arc distance to the nearest donor [m]
-        thresh = isolated_factor * np.median(nearest_d) * constants.R_earth
+        thresh = isolated_factor * np.median(d0[wm]) * constants.R_earth
     else:
-        thresh = isolated_factor * mesh_res[nearest_i]
-    isolated = nearest_d * constants.R_earth > thresh
-    if wet_mask is not None:
-        wm = np.asarray(wet_mask, dtype=bool).reshape(ncell)
-        isolated &= wm
-        nearest_d = np.where(wm, nearest_d, -1.0)
+        thresh = isolated_factor * mesh_res[i0]
+    isolated = (d0 * constants.R_earth > thresh) & wm
     n_iso = int(isolated.sum())
-    far = np.argsort(nearest_d)[-5:][::-1]
+    far = np.argsort(np.where(wm, d0, -1.0))[-5:][::-1]
     far_str = ", ".join(f"({lat_flat[i]:.4f}, {lon_flat[i]:.4f})" for i in far)
-    log(f"init_ocean_from_fesom_mesh: {n_iso} isolated target cells "
-        f"(nearest donor > {isolated_factor:g} x mesh resolution); "
-        f"5 farthest targets (lat, lon) deg: {far_str}")
+    log(f"init_ocean_from_fesom_mesh: {n_iso} isolated wet target cells "
+        f"(nearest surface donor > {isolated_factor:g} x mesh resolution); "
+        f"5 farthest (lat, lon) deg: {far_str}")
+    if wm.any():
+        # deepest layer actually read by any wet target: the UPPER bracket of
+        # the deepest target depth (the lower bracket omits the deeper donor)
+        d_max = float(np.max(depths[wm]))
+        kk_max = int(min(nz - 1, max(0, np.searchsorted(z_abs, d_max, side="right"))))
+        while trees[kk_max] is None:
+            kk_max -= 1
+        dd, _ = trees[kk_max].query(xyz_t[wm], k=1)
+        dd_km = np.asarray(dd) * constants.R_earth / 1e3
+        log(f"init_ocean_from_fesom_mesh: deepest layer used {kk_max} (|Z| {z_abs[kk_max]:.0f} m) "
+            f"has {donors_l[kk_max].size} wet donor nodes; nearest-donor distance over wet targets "
+            f"median {np.median(dd_km):.1f} km, p99 {np.percentile(dd_km, 99):.1f} km, max {dd_km.max():.1f} km")
 
     T_out = T_out.reshape(spatial + (nlev,))
     S_out = S_out.reshape(spatial + (nlev,))
