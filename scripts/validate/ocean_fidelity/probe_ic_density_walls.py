@@ -176,12 +176,23 @@ def probe_woa(path, box, top, keep_min_drho, void_fill):
     wall the model inherits; the converse does not hold (the model samples
     bilinearly at partial-cell depths), so the model-grid probe is the verdict.
     Also counts filled columns that the fill left statically unstable."""
-    from legoesm.ocean.init_woa import _fill_source_levels_nearest_valid, load_woa18
+    from legoesm.ocean.init_woa import (_fill_source_levels_nearest_valid, _reject_unstable_donors,
+                                        load_woa18)
     T, S, lat, lon, depth = load_woa18(path, path)
     observed = np.isfinite(T) & np.isfinite(S)
-    ocean = np.isfinite(T).any(axis=-1) & np.isfinite(S).any(axis=-1)
     (T, S), n_fill, n_void = _fill_source_levels_nearest_valid((T, S), lat, lon, void_fill=void_fill)
-    print(f"WOA source {path}: T {T.shape}, filled {n_fill}, void-filled {n_void} (void_fill={void_fill})")
+    # Donor-relevant columns: observed at some depth, or an 8-neighbour of one
+    # (a never-observed 1-deg row next to the ocean is still a bilinear donor
+    # for the model cells beside it -- the Aegean's 40.5N row on ORCA12).
+    # Continental interiors are excluded; a source depth with no donor
+    # anywhere stays NaN and is skipped level by level below.
+    ocean = observed.any(axis=-1)
+    for dj in (-1, 0, 1):
+        for di in (-1, 0, 1):
+            ocean = ocean | np.roll(np.roll(observed.any(axis=-1), dj, axis=0), di, axis=1)
+    T, S, n_unstable = _reject_unstable_donors(T, S, ~observed & np.isfinite(T), depth)
+    print(f"WOA source {path}: T {T.shape}, filled {n_fill}, void-filled {n_void} (void_fill={void_fill}), "
+          f"{n_unstable} lighter-than-above donors replaced by the level above")
     # vertical stability of the filled columns: adjacent levels compared at the
     # LOWER level's pressure (compressibility removed); an inversion deeper
     # than 0.01 kg/m3 counts

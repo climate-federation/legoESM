@@ -63,7 +63,10 @@ SSS_MEAN=${SSS_MEAN:---sss-restoring-remove-mean}
 # = sqrt(0.1) = 0.316, the coefficient FESOM's flow-aware term gamma1*|du|*len*h^2
 # reduces to under legoESM's B = C^2 * Delta^4 * |D| convention.  FESOM's
 # quadratic gamma2 term has no legoESM analogue and is dropped.  The dx^3-scaled
-# biharmonic vorticity damping K_zeta stays (derived by the model per mesh).
+# biharmonic vorticity damping K_zeta is OFF (user decision 2026-09-15): the
+# model-derived dx^3 value is ~2e11 m^4/s at ico9, 20x the FESOM-scaled B_h, so
+# leaving it on would make the lane's biharmonic dissipation non-FESOM.
+K_ZETA=${K_ZETA:-0}
 B_H=${B_H:-1.0e10}
 C_SMAG=${C_SMAG:-0.316}
 # Diagnostic cadence held at a fixed MODEL time (2880 s) so runs at different
@@ -81,7 +84,10 @@ F=/work/bd1083/b309178/diffESM/legoesm_pg/ocean_hires_runs/forcing
 # Observed initial condition with the fabricated deep tails removed: the builder
 # fills each depth from the nearest column measured AT that depth instead of
 # holding a column's deepest observation down to the sea floor.
-IC=$F/phc3_winter_woa_format_nofabricated.nc
+# Initial state: FESOM2-JAX's own cached FORCA20 field (user decision 2026-09-15),
+# so every lane starts from the reference run's state; the PHC3 per-level donor
+# fill fabricated water in isolated deep basins on the 1/12-degree mesh.
+FESOM_MESH=${FESOM_MESH:-/work/ab0995/a270088/fesom_jax_meshes/mesh_forca20}
 OUT=${OUT:-/work/bd1083/b309178/diffESM/legoesm_pg/ocean_hires_runs/mpas_${RES:-ico9}/j$SLURM_JOB_ID}
 mkdir -p "$OUT"; cd "$WT"
 NGPU=$(( SLURM_JOB_NUM_NODES * 4 ))
@@ -94,7 +100,7 @@ srun --ntasks=$NGPU --ntasks-per-node=4 --cpus-per-task=16 --gpus-per-node=4 \
     --bathymetry "$F/ETOPO_2022_v1_60s_N90W180_surface.nc" \
     --forcing-mode jra55_do_tropical --jra55-cache "$F/jra55_do_fesom_1958_1958_1deg_noleap.zarr" \
     --jra55-sea-ice --ice-dynamics none --ice-categories 1 --no-gpu-interp \
-    --woa-init --woa-t "$IC" --woa-s "$IC" \
+    --woa-init --ic-cache-dir /work/bd1083/b309178/diffESM/legoesm_pg/ocean_hires_runs/ic_cache --ic-from-fesom-mesh "$FESOM_MESH" --mpas-k-zeta-bih "$K_ZETA" \
     --vertical-mixing-scheme "$VMIX" --tke-card "$TKE_CARD" --diag-every "$DIAG" \
     --no-gm-redi --A-h 0 --C-smag-lap 0 --B-h "$B_H" --C-smag "$C_SMAG" \
     --sss-piston-velocity "$SSS_PISTON" --sss-restoring-target "$SSS_TARGET" $SSS_MEAN \

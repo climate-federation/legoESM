@@ -177,7 +177,9 @@ def test_large_tripole_io_driver_routing():
 
     events.clear()
     driver = ast.parse(inspect.getsource(run_omip.run_omip_single))
-    final_routes = [n for n in driver.body[0].body
+    # ast.walk, not the top-level body: the final-snapshot route sits in the
+    # ``elif`` of ``if args.no_final_snapshot`` (a nested If node).
+    final_routes = [n for n in ast.walk(driver.body[0])
                     if isinstance(n, ast.If) and isinstance(n.test, ast.Name)
                     and n.test.id == "_coordinate_io"]
     for route in final_routes:
