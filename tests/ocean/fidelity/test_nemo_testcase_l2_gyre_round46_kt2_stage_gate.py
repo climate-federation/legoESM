@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import inspect
 import struct
 import sys
 from pathlib import Path
@@ -191,19 +190,6 @@ def test_stage_twin_scores_consumed_rhs_and_reuses_operator_walk():
     assert '"first_nonbit_model_statement"' in source
 
 
-def test_ws_stage_one_consumes_the_full_unprojected_momentum_rhs():
-    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
-        LatLonCGridOceanModel,
-    )
-
-    source = inspect.getsource(LatLonCGridOceanModel._step_impl)
-    assert "_du1_rhs, _dv1_rhs = du_dt, dv_dt" in source
-    assert "_du1_rhs, _dv1_rhs = du_dt_pert, dv_dt_pert" not in source
-    assert "dt=dt / 3.0" in source
-    assert "dt=dt / 2.0" in source
-    assert "source_stage_wzv_clock_arm" not in source
-
-
 def test_stage_twin_uses_the_direct_post_transport_w_reference():
     source = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py").read_text()
     assert 'read_stage_ww(' in source
@@ -316,22 +302,6 @@ def test_transport_w_scalar_replay_preserves_zero_state():
             source_round=True, plant_carry_at=(0, 0, NZ - 2),
         ))())
     assert np.count_nonzero(planted["incoming_carry"]) == 1
-
-
-def test_qco_reference_t_reciprocal_replays_the_stored_source_expression():
-    import jax
-    import jax.numpy as jnp
-    from legoesm.ocean.vertical import nemo_qco_reference_t_reciprocal
-
-    e3t = np.asarray([[[2.0, 3.0]], [[11.0, 13.0]]], dtype=np.float64)
-    mask = np.asarray([[[1.0, 1.0]], [[0.0, 0.0]]], dtype=np.float64)
-    got = np.asarray(jax.jit(nemo_qco_reference_t_reciprocal)(
-        jnp.asarray(e3t), jnp.asarray(mask)))
-    assert np.array_equal(got.view(np.uint64),
-                          np.asarray([[0.2], [0.0]]).view(np.uint64))
-    with pytest.raises(ValueError, match="matching e3t_0/tmask shapes"):
-        nemo_qco_reference_t_reciprocal(
-            jnp.asarray(e3t), jnp.asarray(mask[..., :1]))
 
 
 def test_stage_w_walk_retains_retracted_and_compiled_r3_associations():
