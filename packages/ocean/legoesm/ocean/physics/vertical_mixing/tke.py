@@ -1134,7 +1134,7 @@ def _solve_tke_backward_euler(
     nemo_e3t: jnp.ndarray | None = None,
     dissl_old: jnp.ndarray | None = None,
     return_statement_trace: bool = False,
-) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
+) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Backward-Euler tridiagonal solve for one TKE time step.
 
     Linearises ``-c_eps * e^{3/2} / l_eps`` as ``-c_eps * sqrt(e_old) / l_eps · e_new``
@@ -1814,10 +1814,11 @@ def _solve_tke_backward_euler(
 
     if literal_solver:
         if return_statement_trace:
-            # Exact model program boundary corresponding to NEMO's
-            # r101_rhs_row call: virtual surface row followed by every
-            # represented solve row, before the first recurrence.
-            return e_new, rhs_ext
+            # Exact model program boundaries corresponding to NEMO's
+            # post-Langmuir and r101_rhs_row calls. ``rhs_base`` is captured
+            # from the selected production association (literal or
+            # vectorized), not reconstructed by the diagnostic caller.
+            return e_new, rhs_base, rhs_ext
         return e_new
 
     if veros_positivity:
@@ -2716,9 +2717,6 @@ def tke_vertical_mixing(
             "nemo_literal solver": (
                 getattr(cfg, "tke_solver_evaluation", "shared_thomas")
                 == "nemo_literal"),
-            "nemo_literal Langmuir": (
-                getattr(cfg, "tke_langmuir_evaluation", "vectorized")
-                == "nemo_literal"),
             "active Langmuir": bool(getattr(cfg, "lc", False)),
             "separate z=0 row": (
                 getattr(cfg, "tke_surface_bc_level", "interior_pinned")
@@ -3269,9 +3267,6 @@ def tke_vertical_mixing(
                 tke_curr, dt, taum, N2b, _depth_w, _surface_e3w, cfg,
                 ice_frac=ice_frac, bottom_level=bottom_level,
                 w_active=w_active)
-        if return_statement_trace:
-            _statement_after_langmuir = jnp.concatenate(
-                [_surface_row, _literal_external_rhs], axis=-1)
         _solve_result = _solve_tke_backward_euler(
             e_old=tke_curr,
             K_M_old=_K_M_pre, K_H_old=_K_H_pre,
@@ -3299,7 +3294,10 @@ def tke_vertical_mixing(
             return_statement_trace=return_statement_trace,
         )
         if return_statement_trace:
-            tke_curr, _statement_rhs = _solve_result
+            tke_curr, _statement_langmuir_interior, _statement_rhs = (
+                _solve_result)
+            _statement_after_langmuir = jnp.concatenate(
+                [_surface_row, _statement_langmuir_interior], axis=-1)
             _statement_post_sweep = jnp.concatenate(
                 [_surface_row, tke_curr], axis=-1)
         else:
