@@ -30,6 +30,13 @@ model chain whose closure state is already non-bit. The immutable trajectory
 veto remains binding, both held patches were removed, and the three affected
 production files are byte-identical to preregistration parent `b87ac0edbc9b`.
 
+A post-hoc cross-round attribution sharpens that result without changing the
+acceptance statistic: Round 97's full-RHS-only arm already produced the same
+aggregate 85/954 moved rows and 56 violating rows, with no class change and
+the same kt2 U/V first-over-bar. Thus the full-RHS correction is sufficient
+for the row-count veto; no W fusion or time-level defect is needed to explain
+it, and adding the locally exact W/ratio/clock members did not cure it.
+
 The first owned stage on restored production therefore remains kt=1 stage 1,
 at W. The first named non-bit statement remains legoESM's algebraic stage-ratio
 association in place of NEMO's independently interpolated HYB ratio. Nothing
@@ -150,6 +157,13 @@ it compares all 954 rows, registers all 85 moved rows, finds 56 violating rows
 and 131,713 violating cells, preserves every class, and keeps first-over-bar at
 kt2 U/V.
 
+For attribution only, the independently preregistered Round-97 full-RHS arm's
+canonical `round97/ladder_rule12.json` (SHA-256
+`1d2bdd640ffcdf5e12b056913ad8d9a972910376736dfc419de28ab8e66c45d8`)
+already reports 85 moved rows, 56 violating rows, no class change and the same
+first-over-bar. This is post-hoc evidence that full RHS alone is sufficient
+for the row-count failure, not a replacement for the Round-99 gate.
+
 | headline | immutable before | held candidate | disposition |
 |---|---:|---:|---|
 | kt2 T | `1.4210854715202004e-14` | `1.4210854715202004e-14` | AT-BAR retained |
@@ -163,7 +177,7 @@ kt2 U/V.
 The day score remains the fresh Round-99 artifact
 `round99/day_gap_b01e550a.json`, SHA-256
 `81896fb17b24e04b5a5dcb742ae770f1623837cfbc3cb6ad7f4da33678218f17`.
-No post-hoc trajectory claim is made.
+The post-hoc attribution above is not promoted to an acceptance claim.
 
 ## Testcase dispositions
 
@@ -249,12 +263,12 @@ clone's local-only remote, so no issue-update claim is made.
    Round-89 source-rounded assignment. Do not promote this negative result to
    TKE K_H or to a general rule; retain the three execution labels in every
    future discriminator.
-3. Within kt=1 stage 1, split the Round-99 candidate into production-stage
-   subprograms that can be scored on the model's own chained operands: full
-   momentum source, independently interpolated ratio, stage-local clock, and W
-   recurrence. Name the earliest subprogram whose locally exact correction
-   creates the first Rule-12 cellwise violation; do not infer it from an
-   unchanged headline maximum.
+3. Do not repeat the generic Round-99 split: the independent Round-97 arm
+   already proves that full RHS alone is sufficient for the 85-row/56-row
+   Rule-12 veto. Compare the Round-97 and Round-99 per-row movement tables,
+   then walk only same-stage statements that could compensate the full-RHS
+   cellwise damage while preserving all 17 BIT stage outputs. Keep this
+   comparison explicitly post-hoc until a new candidate is preregistered.
 4. Preserve the admitted same-call record and its field/stamp plants. No new
    NEMO acquisition is needed unless the next split requires an operand not
    present in the Round-46/64/75/98/99 records.
