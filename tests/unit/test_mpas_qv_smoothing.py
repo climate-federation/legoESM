@@ -494,3 +494,73 @@ class TestBiharmonic:
         assert ratio < 1e-8, (
             f"clipped deficit is {ratio:.2e} of the field; the conserving "
             "borrow decision must be revisited")
+
+
+class TestConservingFloor:
+    """The biharmonic branch's positivity floor must not create water: clip,
+    then rescale each level's positives so ``sum_c A_c q_c`` is unchanged."""
+
+    def _negative_field(self, mesh):
+        # a checkerboard-ish field with a few cells driven well below zero,
+        # the state the del4 step can hand the floor
+        q = _rand_q(mesh, seed=3, lo=0.005, hi=0.02)
+        q = q.at[jnp.array([3, 10, 17, 40]), :].set(-0.01)
+        return q
+
+    def test_floor_conserves_per_level_integral_and_is_nonnegative(self, mesh):
+        from legoesm.driver.model_driver import _qv_level_conserving_floor
+        q = self._negative_field(mesh)
+        area = jnp.asarray(mesh.areaCell, dtype=jnp.float64)
+        out = _qv_level_conserving_floor(q, area)
+        assert float(jnp.min(out)) >= 0.0
+        before = jnp.sum(area[:, None] * q, axis=0)
+        after = jnp.sum(area[:, None] * out, axis=0)
+        np.testing.assert_allclose(np.asarray(after), np.asarray(before),
+                                   rtol=1e-12, atol=0.0)
+        # non-vacuity: the old floor created water on every level
+        created = jnp.sum(area[:, None] * jnp.maximum(q, 0.0), axis=0) - before
+        assert bool(jnp.all(created > 0.0))
+        # a positive field passes through untouched (factor exactly 1)
+        qp = _rand_q(mesh, seed=4, lo=0.001, hi=0.02)
+        np.testing.assert_array_equal(np.asarray(_qv_level_conserving_floor(qp, area)),
+                                      np.asarray(qp))
+
+    def test_owned_mask_excludes_halo_from_the_sums(self, mesh):
+        from legoesm.driver.model_driver import _qv_level_conserving_floor
+        q = self._negative_field(mesh)
+        area = jnp.asarray(mesh.areaCell, dtype=jnp.float64)
+        owned = jnp.arange(mesh.nCells) < mesh.nCells // 2
+        out = _qv_level_conserving_floor(q, area, owned_mask=owned)
+        w = jnp.where(owned, area, 0.0)
+        np.testing.assert_allclose(
+            np.asarray(jnp.sum(w[:, None] * out, axis=0)),
+            np.asarray(jnp.sum(w[:, None] * q, axis=0)), rtol=1e-12, atol=0.0)
+
+    def test_del4_step_uses_the_conserving_floor(self, mesh):
+        from legoesm.driver.model_driver import _mpas_qv_smooth_step
+        # a two-cell spike the biharmonic overshoots below zero around
+        q = jnp.full((mesh.nCells, NLEV), 1.0e-6).at[7, :].set(0.02)
+        area = jnp.asarray(mesh.areaCell, dtype=jnp.float64)
+        dt = 100.0
+        nu4 = 0.45 / (dt * scalar_del2_cell_cfl_factor(mesh) ** 2)
+        out = _mpas_qv_smooth_step(q, mesh, 0.0, dt, nu4=nu4)
+        assert float(jnp.min(out)) >= 0.0
+        # the unfloored step really goes negative here, so the floor binds
+        from legoesm.core.operators_voronoi import scalar_del4_cell_3d
+        raw = q + dt * (nu4 * scalar_del4_cell_3d(q, mesh)).astype(q.dtype)
+        assert float(jnp.min(raw)) < 0.0
+        # the floor conserves the STEP's integral exactly; the fp32 mesh
+        # operator itself conserves the input integral only to ~1e-7
+        np.testing.assert_allclose(
+            np.asarray(jnp.sum(area[:, None] * out, axis=0)),
+            np.asarray(jnp.sum(area[:, None] * raw, axis=0)), rtol=1e-12, atol=0.0)
+        np.testing.assert_allclose(
+            np.asarray(jnp.sum(area[:, None] * out, axis=0)),
+            np.asarray(jnp.sum(area[:, None] * q, axis=0)), rtol=1e-6, atol=0.0)
+
+    def test_floor_is_differentiable(self, mesh):
+        from legoesm.driver.model_driver import _qv_level_conserving_floor
+        q = self._negative_field(mesh)
+        area = jnp.asarray(mesh.areaCell, dtype=jnp.float64)
+        g = jax.grad(lambda x: jnp.sum(_qv_level_conserving_floor(x, area) ** 2))(q)
+        assert bool(jnp.all(jnp.isfinite(g))) and float(jnp.max(jnp.abs(g))) > 0.0

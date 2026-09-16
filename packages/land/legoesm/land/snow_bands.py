@@ -497,7 +497,9 @@ def band_albedo(
         ground = base * (1.0 - ice_frac) + cfg.alpha_glacier_ice * ice_frac
     else:
         ground = base
-    return ground * (1.0 - cover) + snow_albedo_fn(snow_age_bands) * cover
+    # same floor as surface_albedo.land_albedo: snow cannot darken a surface
+    # below its own snow-free albedo (bare ice / ice-sheet bands)
+    return ground * (1.0 - cover) + jnp.maximum(snow_albedo_fn(snow_age_bands), ground) * cover
 
 
 class BandRadiation(NamedTuple):

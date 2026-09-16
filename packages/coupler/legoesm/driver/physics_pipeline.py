@@ -4058,6 +4058,21 @@ def turbulence_config_for(config):
             )
             tc = materialize_sub_config(tc)
             tc = tc._replace(clubb=tc.clubb._replace(prognostic=True))
+        # CLUBB's upper domain limit (CAM ``trop_cloud_top_press``), same
+        # threading and the same refusal as the prognostic flag.  None (default)
+        # => byte-identical: the scheme's own 0.0 (off) stands.
+        _ctp = getattr(config, "clubb_trop_cloud_top_press", None)
+        if _ctp is not None:
+            if tc.scheme != "clubb":
+                raise ValueError(
+                    f"clubb_trop_cloud_top_press requires turbulence='clubb', "
+                    f"got {tc.scheme!r}.")
+            from legoesm.atmosphere.physics.turbulence.integration import (
+                materialize_sub_config,
+            )
+            tc = materialize_sub_config(tc)
+            tc = tc._replace(clubb=tc.clubb._replace(
+                trop_cloud_top_press=float(_ctp)))
         if tc.scheme == "louis" and tc.louis is not None:
             _louis_updates = {}
             for exp_name, leaf_name in (
