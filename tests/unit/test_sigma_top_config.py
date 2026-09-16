@@ -59,3 +59,25 @@ def test_driver_passes_the_lid_to_the_coordinate():
     from legoesm.driver.model_driver import ModelDriver
     src = inspect.getsource(ModelDriver._create_grid)
     assert "sigma_top=gc.sigma_top" in src
+
+
+def test_sigma_refine_centre_and_width_thread_and_put_layers_in_the_boundary_layer():
+    """--sigma-refine / --sigma-refine-width (2026-09-16) reach GridConfig and the
+    coordinate the driver builds; a bump centred at sigma 0.95 with width 0.06
+    and refine 3 puts >= 5 of 30 layers above sigma 0.9 (uniform: 3), while
+    the defaults reproduce the uniform grid bit for bit at refine 1."""
+    parser = build_arg_parser()
+    cfg = build_config_from_args(parser.parse_args([
+        "--dataset", "analytical", "--vertical-coord", "sigma", "--nlev", "30",
+        "--tropopause-refine", "3", "--sigma-refine", "0.95", "--sigma-refine-width", "0.06"]))
+    assert cfg.grid.sigma_refine == 0.95 and cfg.grid.sigma_refine_width == 0.06
+    cfg.validate_strict()
+    with pytest.raises(ValueError, match="sigma_refine"):
+        cfg._replace(grid=cfg.grid._replace(sigma_refine=1.5)).validate_strict()
+    bl = create_sigma_coordinate(30, tropopause_refine=3.0, sigma_refine=0.95, refine_width=0.06)
+    uni = create_sigma_coordinate(30)
+    n_bl = int(jnp.sum(jnp.asarray(bl.sigma_full) > 0.9))
+    n_uni = int(jnp.sum(jnp.asarray(uni.sigma_full) > 0.9))
+    assert n_uni == 3 and n_bl >= 5, (n_uni, n_bl)
+    same = create_sigma_coordinate(30, tropopause_refine=1.0, sigma_refine=0.95, refine_width=0.06)
+    assert jnp.array_equal(same.sigma_half, uni.sigma_half)

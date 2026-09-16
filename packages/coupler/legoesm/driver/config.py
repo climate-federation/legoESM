@@ -76,6 +76,13 @@ class GridConfig(NamedTuple):
     # 1000 hPa); ignored by the hybrid coordinate, which uses
     # p_top_Pa/stretching.  Recorded here so the resolved config is truthful.
     sigma_top: float = 0.01
+    # Centre (sigma) and log-sigma half-width of the tropopause_refine density
+    # bump (grids/vertical.tropopause_refined_sigma_half).  Defaults are the
+    # function's own (0.12 / 0.45 = the tropical cold point); a boundary-layer
+    # refinement sets e.g. 0.95 / 0.06 (2026-09-16 arm).  Inert at
+    # tropopause_refine = 1.0.
+    sigma_refine: float = 0.12
+    sigma_refine_width: float = 0.45
     use_duogrid: bool = False        # enable FV3 Duo-Grid halo (required for MPI multi-node)
 
 
@@ -1647,6 +1654,12 @@ class ExperimentConfig(NamedTuple):
             if not (0.0 < g.sigma_top < 1.0):
                 errors.append(
                     f"grid.sigma_top must be in (0, 1) on the sigma lane (got {g.sigma_top})")
+            if not (g.sigma_top < g.sigma_refine < 1.0):
+                errors.append(
+                    f"grid.sigma_refine must lie in (sigma_top, 1) (got {g.sigma_refine})")
+            if not (g.sigma_refine_width > 0.0 and math.isfinite(g.sigma_refine_width)):
+                errors.append(
+                    f"grid.sigma_refine_width must be > 0 (got {g.sigma_refine_width})")
             if g.p_top_Pa != 200.0 or g.stretching != 2.0:
                 errors.append(
                     "grid.p_top_Pa and grid.stretching are hybrid-only fields and are inert "

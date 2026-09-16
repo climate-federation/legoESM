@@ -1589,6 +1589,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "70-200 hPa, paid for by the mid-troposphere). "
                              "Fixes the unresolved tropical cold point "
                              "without adding levels. Sigma coordinate only.")
+    parser.add_argument("--sigma-refine", type=float, default=None, dest="sigma_refine",
+                        help="Centre (sigma) of the --tropopause-refine density bump; "
+                             "0.12 = tropical cold point (default), ~0.95 = boundary layer.")
+    parser.add_argument("--sigma-refine-width", type=float, default=None,
+                        dest="sigma_refine_width",
+                        help="Log-sigma half-width of the --tropopause-refine bump "
+                             "(default 0.45; ~0.06 for a boundary-layer bump).")
     parser.add_argument("--sigma-top", type=float, default=None, dest="sigma_top",
                         help="sigma-lane model lid as a fraction of p_s "
                              "(default 0.01 = 10 hPa)")
@@ -1906,6 +1913,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         tropopause_refine=(args.tropopause_refine
                            if args.tropopause_refine is not None else 1.0),
         sigma_top=(args.sigma_top if args.sigma_top is not None else 0.01),
+        sigma_refine=(args.sigma_refine if args.sigma_refine is not None else 0.12),
+        sigma_refine_width=(args.sigma_refine_width
+                            if args.sigma_refine_width is not None else 0.45),
         use_duogrid=getattr(args, "use_duogrid", False),
     )
 

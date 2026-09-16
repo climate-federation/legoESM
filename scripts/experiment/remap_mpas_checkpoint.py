@@ -91,6 +91,10 @@ def main(argv=None):
     ap.add_argument("--src", required=True)
     ap.add_argument("--dst", required=True)
     ap.add_argument("--tropopause-refine", required=True, type=float)
+    ap.add_argument("--sigma-refine", type=float, default=0.12,
+                    help="centre (sigma) of the density bump; 0.95 for a boundary-layer refinement")
+    ap.add_argument("--sigma-refine-width", type=float, default=0.45,
+                    help="log-sigma half-width of the bump")
     ap.add_argument("--kord", type=int, default=9)
     args = ap.parse_args(argv)
     if not args.dst.endswith(".npz"):
@@ -121,6 +125,8 @@ def main(argv=None):
         if name in d and np.asarray(d[name]).shape[-1] in (nlev, nlev + 1):
             return err(f"{name} carries a level-resolved state this tool does not remap")
     coord = create_sigma_coordinate(nlev, tropopause_refine=args.tropopause_refine,
+                                    sigma_refine=args.sigma_refine,
+                                    refine_width=args.sigma_refine_width,
                                     dtype=jnp.float64)
     s_new = np.asarray(coord.sigma_half, dtype=np.float64)
     sf_old = 0.5 * (s_old[:-1] + s_old[1:])
@@ -129,6 +135,7 @@ def main(argv=None):
         "src": str(args.src),
         "sha256": hashlib.sha256(open(args.src, "rb").read()).hexdigest(),
         "tropopause_refine": args.tropopause_refine, "kord": args.kord,
+        "sigma_refine": args.sigma_refine, "sigma_refine_width": args.sigma_refine_width,
         "sigma_half_old": s_old.tolist(), "sigma_half_new": s_new.tolist()}))
     if np.all(np.abs(s_new - s_old) <= 1e-12):
         print("new sigma_half equals old within 1e-12: copying every field unchanged")
