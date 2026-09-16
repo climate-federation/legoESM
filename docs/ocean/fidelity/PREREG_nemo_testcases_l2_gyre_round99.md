@@ -164,3 +164,15 @@ kt=1 stage-1 W and zFw become BIT; the already-BIT U/V remain BIT; T/S become
 BIT because they consume that exact transport. Any unequal required stage-1
 output refutes the candidate. Only if the complete stage row closes may the
 unchanged 954-row Rule-12 and days 1--30 falsifiers run.
+
+This is explicitly a cancelling-pair candidate, not a revival of the
+Round-21 single-clock arm. Round 21 measured stage-local clock with the old
+full-step `r3_after-r3_before` and correctly found it DEBT; production's
+full-step delta/full-step clock pair was AT-BAR. Candidate `cdddd17dce3a`
+replaced the first half with NEMO's independently interpolated stage-local
+`r3t(Kaa)-r3t(Kbb)` while retaining the full-step clock, and the stage table
+proved that opposite half-state DEBT. NEMO executes neither half-state: it
+pairs the stage-local ratio delta at `stprk3_stg.f90:175-193` with the
+stage-local reciprocal clock assigned at `:147-148`. The frozen prediction
+above therefore applies only to that two-statement pair; either half by itself
+remains refuted evidence.
