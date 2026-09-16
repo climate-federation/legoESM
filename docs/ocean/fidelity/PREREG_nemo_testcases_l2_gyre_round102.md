@@ -146,3 +146,24 @@ No production configuration, carried state, coefficient, stabilizer, year
 harness, reconciliation gate, freshwater pair, #1484 guard, NEMO source, or
 NEMO executable may change without a new preregistered and user-authorized
 decision.
+
+## Pre-measurement addendum: represented entry domain
+
+Frozen after the duplicate/admission audit above confirmed the record, but
+before reading or comparing either new scientific boundary. The model carries
+NEMO TKE levels `2:jpkm1` as its 29-level prognostic field. It does not carry
+level 1 because the compiled program overwrites that level unconditionally at
+the first surface-boundary statement (`zdftke.f90:280-289`) before any later
+consumer. Calling a reconstructed current-forcing surface value the model's
+*entry* would therefore be false.
+
+The entry row binds, without a wet mask or tolerance, over all 32 x 22 x 29
+represented cells corresponding to NEMO `2:jpkm1`. Starting at
+`en_after_boundaries`, the trace prepends the model's actual virtual-surface
+Dirichlet operand, so every later row binds over all 32 x 22 x 30 NEMO levels
+`1:jpkm1` as frozen above. The omitted entry level is reported
+`UNMEASURED_WITH_SPEC` with this exact overwrite specification; it cannot hide
+or excuse an interior entry mismatch. The production trace must capture the
+actual values used by the full jitted step: it may assemble the model's split
+surface/interior representation for scoring, but may not substitute a NEMO
+value or an isolated replay.
