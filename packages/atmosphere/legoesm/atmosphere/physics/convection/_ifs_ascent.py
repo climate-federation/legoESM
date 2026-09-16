@@ -738,11 +738,13 @@ def ifs_updraught_ascent(T, q, qs, p_full, p_half, geo_full, geo_half,
 
     qs_base = jnp.take_along_axis(qs, k_cbot[:, None], axis=1)[:, 0]
 
-    M = zeros().at[ar, k_cbot].set(M_b)
+    # base initialisation only where LDCUM (cuascn.F90:397-405)
+    ld = jnp.asarray(ldcum, bool)
+    M = zeros().at[ar, k_cbot].set(jnp.where(ld, M_b, 0.0))
     PMFUS = zeros()
     PMFUQ = zeros()
     PMFUL = zeros()
-    K = zeros().at[ar, k_cbot].set(0.5 * w_base**2)
+    K = zeros().at[ar, k_cbot].set(jnp.where(ld, 0.5 * w_base**2, 0.0))
     PLRAIN = zeros()
     PDMFUP = zeros()
     PLUDE = zeros()
@@ -753,13 +755,14 @@ def ifs_updraught_ascent(T, q, qs, p_full, p_half, geo_full, geo_half,
 
     # base fluxes from the test-ascent cloud-base values
     geo_h_b = jnp.take_along_axis(geo_half, k_cbot[:, None], axis=1)[:, 0]
+    M_b_ld = jnp.where(ld, M_b, 0.0)
     PMFUS = PMFUS.at[ar, k_cbot].set(
-        M_b * (c_pd * jnp.take_along_axis(T_u0, k_cbot[:, None], 1)[:, 0]
-               + geo_h_b))
+        M_b_ld * (c_pd * jnp.take_along_axis(T_u0, k_cbot[:, None], 1)[:, 0]
+                  + geo_h_b))
     PMFUQ = PMFUQ.at[ar, k_cbot].set(
-        M_b * jnp.take_along_axis(q_u0, k_cbot[:, None], 1)[:, 0])
+        M_b_ld * jnp.take_along_axis(q_u0, k_cbot[:, None], 1)[:, 0])
     PMFUL = PMFUL.at[ar, k_cbot].set(
-        M_b * jnp.take_along_axis(l_u0, k_cbot[:, None], 1)[:, 0])
+        M_b_ld * jnp.take_along_axis(l_u0, k_cbot[:, None], 1)[:, 0])
 
     carry = _AscentCarry(
         M=M, PMFUS=PMFUS, PMFUQ=PMFUQ, PMFUL=PMFUL,
