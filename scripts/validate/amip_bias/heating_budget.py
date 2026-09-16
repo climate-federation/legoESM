@@ -94,7 +94,7 @@ def main(argv=None):
     ap.add_argument("--out", default=None)
     ap.add_argument("--rad-detail", action="store_true",
                     help="LW/SW split of the top layers on the model T and on ERA5 T, "
-                         "plus the ozone the radiation was given")
+                         "plus the ozone the radiation was given and the TOA fluxes")
     args = ap.parse_args(argv)
     t0 = time.time()
     out_dir = Path(args.out or (H.ROOT / "_tools" / "heating_budget"))
@@ -220,22 +220,14 @@ def main(argv=None):
             return lw.reshape(T0.shape) * 86400.0, sw.reshape(T0.shape) * 86400.0
         lw_m, sw_m = rad_on(T0)
         lw_e, sw_e = rad_on(Te)
-        import legoesm.atmosphere.physics.radiation.rrtmgp.rte.two_stream as ts
-        real_top = ts._replace_top_flux
-        ts._replace_top_flux = lambda f: f          # physical top-face fluxes
-        jax.clear_caches()                          # the solve is jitted: force a retrace
-        lw_p, sw_p = rad_on(T0)
-        ts._replace_top_flux = real_top
-        jax.clear_caches()
         o3 = np.asarray(forcing["o3_vmr"], dtype=np.float64).reshape(T0.shape) * 1e6
         gmp = (p_full * w[:, None]).sum(0) / 100.0
         print("\nradiation detail, global mean, K/day (model T | ERA5 T in the same columns), o3 ppmv given to radiation")
-        print("  p[hPa]  T_mod  T_era   LW_m   SW_m  net_m |  LW_e   SW_e  net_e | LW_p   SW_p  net_p (no top-flux replace) | o3")
+        print("  p[hPa]  T_mod  T_era   LW_m   SW_m  net_m |  LW_e   SW_e  net_e | o3")
         for k in list(range(0, 5)) + [int(np.argmin(np.abs(gmp - x))) for x in (150, 250)]:
             g = lambda f: float((f[:, k] * w).sum())  # noqa: E731
             print(f"  {gmp[k]:6.1f} {g(T0):6.1f} {g(Te):6.1f} {g(lw_m):+6.2f} {g(sw_m):+6.2f} {g(lw_m + sw_m):+6.2f} |"
-                  f" {g(lw_e):+6.2f} {g(sw_e):+6.2f} {g(lw_e + sw_e):+6.2f} |"
-                  f" {g(lw_p):+6.2f} {g(sw_p):+6.2f} {g(lw_p + sw_p):+6.2f} | {g(o3):5.2f}")
+                  f" {g(lw_e):+6.2f} {g(sw_e):+6.2f} {g(lw_e + sw_e):+6.2f} | {g(o3):5.2f}")
 
     rows = {**{k: v * 86400.0 for k, v in phys.items()},
             "vert_del4": vfilt * 86400.0, "dynamics": dyn * 86400.0,
