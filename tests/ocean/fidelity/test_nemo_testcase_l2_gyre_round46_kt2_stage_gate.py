@@ -236,6 +236,9 @@ def test_stage1_w_acquisition_reader_is_exact_and_fail_closed(tmp_path):
 
 
 def test_transport_w_scalar_replay_preserves_zero_state():
+    import jax
+    import jax.numpy as jnp
+
     shape3 = (NY, NX, NZ)
     arrays = {
         "tmask": np.ones(shape3),
@@ -261,6 +264,18 @@ def test_transport_w_scalar_replay_preserves_zero_state():
         np.ones((NY - 4, NX - 4, NZ - 1)),
     )
     assert all(np.count_nonzero(value) == 0 for value in recurrence.values())
+
+    planted = jax.device_get(jax.jit(
+        lambda: gate._stage1_w_recurrence_trace(
+            jnp.zeros((NY - 4, NX - 4, NZ - 1)),
+            jnp.ones((NY - 4, NX - 4, NZ - 1)),
+            jnp.zeros((NY - 4, NX - 4)),
+            jnp.zeros((NY - 4, NX - 4)),
+            jnp.asarray(1.0),
+            jnp.ones((NY - 4, NX - 4, NZ - 1)),
+            source_round=True, plant_carry_at=(0, 0, NZ - 2),
+        ))())
+    assert np.count_nonzero(planted["incoming_carry"]) == 1
 
 
 def test_final_external_history_uses_last_pre_swap_current_and_before():

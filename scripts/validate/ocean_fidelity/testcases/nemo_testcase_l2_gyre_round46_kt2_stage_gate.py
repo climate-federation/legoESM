@@ -1249,6 +1249,7 @@ _STAGE1_W_ORDER = (
 
 def _stage1_w_recurrence_trace(
     e3div, e3t_0, r3_kbb, r3_kaa, r1_dt, tmask, *, source_round: bool,
+    plant_carry_at: tuple[int, int, int] | None = None,
 ):
     """Trace the compiled QCO stretch and bottom-up W recurrence."""
     import jax
@@ -1270,6 +1271,10 @@ def _stage1_w_recurrence_trace(
     brackets = [None] * e3div.shape[-1]
     carry = jnp.zeros_like(r3_kbb)
     for level in range(e3div.shape[-1] - 1, -1, -1):
+        if plant_carry_at is not None and level == plant_carry_at[2]:
+            j, i, _ = plant_carry_at
+            carry = carry.at[j, i].set(jnp.nextafter(
+                carry[j, i], jnp.asarray(jnp.inf, dtype=carry.dtype)))
         incoming.append(carry)
         bracket = materialize(e3div[..., level] + stretch[..., level])
         carry = materialize(
@@ -1530,6 +1535,10 @@ def _stage1_w_walk(
         direct_fields["e3div"], direct_fields["e3t_0"],
         direct_fields["r3_kbb"], direct_fields["r3_kaa"],
         direct_fields["r1_dt"][0], wet_t.astype(np.float64))
+    carry_plant_at = None
+    if plant == "stage-w-carry-ulp":
+        j, i = (int(value) for value in np.argwhere(wet_2d)[0])
+        carry_plant_at = (j, i, direct_fields["e3div"].shape[-1] - 1)
     direct_source = jax.device_get(jax.jit(
         lambda: _stage1_w_recurrence_trace(
             jnp.asarray(direct_fields["e3div"]),
@@ -1537,7 +1546,8 @@ def _stage1_w_walk(
             jnp.asarray(direct_fields["r3_kbb"]),
             jnp.asarray(direct_fields["r3_kaa"]),
             jnp.asarray(direct_fields["r1_dt"][0]),
-            jnp.asarray(wet_t.astype(np.float64)), source_round=True))())
+            jnp.asarray(wet_t.astype(np.float64)), source_round=True,
+            plant_carry_at=carry_plant_at))())
     recurrence_rows = []
     for name in (
         "r3_delta", "stretch", "bracket", "incoming_carry",
@@ -1551,6 +1561,13 @@ def _stage1_w_walk(
             oracle, np.asarray(direct_source[name]), mask))
         row["boundary"] = name
         recurrence_rows.append(row)
+    if plant == "stage-w-carry-ulp":
+        incoming_row = next(
+            row for row in recurrence_rows
+            if row["boundary"] == "incoming_carry")
+        require(incoming_row["n_unequal"] == 1,
+                "stage-w-carry-ulp did not flip exactly one direct incoming "
+                "carry cell")
 
     direct_scalar_vs_w = _classification(score(
         "GYRE-zco.kt1.s1.w_walk.direct_scalar_replay_vs_recorded_w",
@@ -1586,10 +1603,6 @@ def _stage1_w_walk(
             planted_at = tuple(int(value) for value in np.argwhere(wet_t)[0])
             oracle[planted_at] = np.nextafter(
                 oracle[planted_at], np.float64(np.inf))
-        if plant == "stage-w-carry-ulp" and name == "outgoing_carry":
-            planted_at = tuple(int(value) for value in np.argwhere(wet_t)[0])
-            oracle[planted_at] = np.nextafter(
-                oracle[planted_at], np.float64(np.inf))
         for destination, values, label in (
             (ordinary_rows, ordinary, "production_association"),
             (candidate_rows, source_rounded, "source_rounded_candidate"),
@@ -1605,9 +1618,8 @@ def _stage1_w_walk(
     candidate_first = next((row for row in candidate_rows
                             if row["classification"] != "BIT"), None)
     if plant:
-        if plant in {"stage-w-transport-ulp", "stage-w-carry-ulp"}:
-            target = ("transport_u" if plant == "stage-w-transport-ulp"
-                      else "outgoing_carry")
+        if plant == "stage-w-transport-ulp":
+            target = "transport_u"
             row = next(
                 value for value in ordinary_rows if value["boundary"] == target)
             require(row["n_unequal"] == 1,
