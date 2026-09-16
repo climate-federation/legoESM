@@ -24,6 +24,20 @@ improvement of only 3.66062562207059e-12 K. Rule 12 therefore refuses landing.
 The diff below contains only the held shared-implementation candidate. The
 Round-99 direct gate and its controls are separate landed instrumentation.
 
+ROUND 100 PRODUCTION-STAGE REPROOF (2026-09-16): HELD. The exact manifest
+was reapplied and driven through the full production step from every recorded
+stage entry. All 17 kt=1 stage-1 output rows were BIT, including U/V, W/zFw,
+T/S, SSH, zFu/zFv, the three Kmm thicknesses, and all five closure fields.
+The raw production U/V assignment also matched NEMO and the candidate's W
+walk had no first non-bit statement. In the model's own chained table the
+candidate made U/V/W/zFw BIT, while the inherited TKE closure fields remained
+non-bit. No production-fusion operand or wrong time level explains the 85
+trajectory-row movements: the local proof survives production, and Rule 12's
+56-row/131,713-cell veto remains the reason this source-exact correction is
+held. The newly admitted same-call record independently confirms the source-
+ordered HYB ratio and refutes the algebraic ssh(Kaa)*r1_ht_0 association in
+201 wet cells at 2.6469779601696886e-23.
+
 diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
 index 3c1d99ba85ed..7a5ba3b026d3 100644
 --- a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
@@ -300,4 +314,3 @@ index 47ec0caf331f..47c8fdc6bd23 100644
  def nemo_qco_live_t_thickness(
      eta: jnp.ndarray,
      H_bathy: jnp.ndarray,
-

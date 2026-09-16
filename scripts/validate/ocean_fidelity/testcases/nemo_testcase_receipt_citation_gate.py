@@ -301,6 +301,23 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/traadv.f90"),
     "GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/stp2d.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/stp2d.f90"),
+    # Round 100 consumes the operator-admitted Round-99 same-call ratio
+    # record, so its claims bind to that exact instrumented compiled target.
+    "GYRE_OMIP_L2_P3_SM_R99R3OP/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R99R3OP/BLD/ppsrc/nemo"
+        "/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R99R3OP/BLD/ppsrc/nemo/sshwzv.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R99R3OP/BLD/ppsrc/nemo"
+        "/sshwzv.f90"),
+    "GYRE_OMIP_L2_P3_SM_R99R3OP/BLD/ppsrc/nemo/traadv.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R99R3OP/BLD/ppsrc/nemo"
+        "/traadv.f90"),
+    "GYRE_OMIP_L2_P3_SM_R99R3OP/BLD/ppsrc/nemo/domqco.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R99R3OP/BLD/ppsrc/nemo"
+        "/domqco.f90"),
+    "GYRE_OMIP_L2_P3_SM_R99R3OP/BLD/ppsrc/nemo/dynzdf.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R99R3OP/BLD/ppsrc/nemo"
+        "/dynzdf.f90"),
     "GYRE_OMIP_L2_P3_SM_R21W/BLD/ppsrc/nemo/traadv.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R21W/BLD/ppsrc/nemo/traadv.f90"),
     "round33_lock_zdf_matrix/namelist_cfg": (
@@ -433,6 +450,32 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 100: admitted same-call ratio and production discriminator ---
+    'GYRE_OMIP_L2_P3_SM_R99R3OP/BLD/ppsrc/nemo/stprk3_stg.f90:140-150': [
+        ('SELECT CASE( kstg )', 1),
+        'ssha(:,:) = ssh (:,:,Kaa)', 11],
+    'GYRE_OMIP_L2_P3_SM_R99R3OP/BLD/ppsrc/nemo/stprk3_stg.f90:150-192': [
+        'ssha(:,:) = ssh (:,:,Kaa)',
+        'r3v(:,:,Kaa) = r2_3 * r3v(:,:,Kbb) + r1_3 * r3va(:,:)', 43],
+    'GYRE_OMIP_L2_P3_SM_R99R3OP/BLD/ppsrc/nemo/stprk3_stg.f90:666-674': [
+        ('SELECT CASE( kstg )', 3),
+        'vv(ji,jj,jk,Kaa) = ( vv(ji,jj,jk,Kbb) + rDt * vv(ji,jj,jk,Krhs) )',
+        9],
+    'GYRE_OMIP_L2_P3_SM_R99R3OP/BLD/ppsrc/nemo/sshwzv.f90:283-291': [
+        ('IF( lwp .AND. kt == nit000 .AND. PRESENT(k_ind) ) THEN', 1),
+        'CLOSE(l99_unit)', 9],
+    'GYRE_OMIP_L2_P3_SM_R99R3OP/BLD/ppsrc/nemo/sshwzv.f90:305-310': [
+        ("ELSE                                            !==  Quasi-Eulerian vertical coordinate  ==!   ('key_qco')", 2),
+        ('+ r1_Dt * e3t_3d(ji,jj,jk) * ( r3t(ji,jj,Kaa) - r3t(ji,jj,Kbb) )', 2),
+        6],
+    'GYRE_OMIP_L2_P3_SM_R99R3OP/BLD/ppsrc/nemo/traadv.f90:266-280': [
+        'IF( ll_Fw ) THEN', 'pFw(ji,jj,jk) = e1e2t(ji,jj) * ww', 15],
+    'GYRE_OMIP_L2_P3_SM_R99R3OP/BLD/ppsrc/nemo/domqco.f90:256-258': [
+        ('DO jj = ntsj-( nn_hls)', 4), ('END DO   ;   END DO', 4), 3],
+    'GYRE_OMIP_L2_P3_SM_R99R3OP/BLD/ppsrc/nemo/dynzdf.f90:166-169': [
+        'IF( ln_dynadv_vec .OR. lk_linssh ) THEN',
+        'pvv(ji,jj,jk,Kaa) = ( pvv(ji,jj,jk,Kbb) + rDt * pvv(ji,jj,jk,Krhs) )',
+        4],
     # --- round 99: admitted direct-W layout and paired stage program ---
     'GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/oce.f90:99-104': [
         ('ALLOCATE( uu', 1), '&      rhd  (jpi,jpj,jpk)', 6],
