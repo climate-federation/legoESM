@@ -307,3 +307,16 @@ evaporation rises >= 3 W/m2 with the 925 hPa RH excess halved; REFUTE =
 |dq| < 0.15 g/kg; FIX-FIRST = blow-up. Caveat: the control's lowest level is
 150 m, the arm's ~65 m — score on the same PRESSURE (ERA5 1000 hPa) and on
 the lowest 100 hPa mean, not the lowest model level alone.
+
+## Iteration E — stability screen (wv_bl5, 5 days, new deck, dt 112.5): STABLE
+Max wind 57.8 m/s, hard-saturation drains 4-5 points/step (same as the
+uniform grid). Day 85, tropical ocean, matched PRESSURE layers:
+| run (deck)                    | lowest 100 hPa q / RH | 925-1000 hPa q / RH |
+|-------------------------------|----------------------:|--------------------:|
+| pa_ctl (legacy)               | 16.58 / 0.849 | 17.47 / 0.849 |
+| wv_sfcrain (rain route)       | 16.53 / 0.845 | 17.48 / 0.849 |
+| wv_bl5 (refined + new deck)   | 16.34 / 0.858 | 17.38 / 0.881 |
+q slightly lower, RH higher (cooler lowest layers) after 5 days from the
+remapped state — adjustment, not a verdict. 30-day pair launched on the SAME
+new deck: wv_bl30 (27486649, refined) vs wv_ctl30b (27486650, uniform L30),
+both from dd_ctl day 80 (remapped / native), checkpoints every 5 days.
