@@ -95,6 +95,9 @@ def main(argv=None):
     ap.add_argument("--rad-detail", action="store_true",
                     help="LW/SW split of the top layers on the model T and on ERA5 T, "
                          "plus the ozone the radiation was given and the TOA fluxes")
+    ap.add_argument("--gwd-only", action="store_true",
+                    help="only the gravity-wave-drag momentum tendency: deposition per layer, "
+                         "global shares and the 5-degree-band profiles (saved to npz)")
     args = ap.parse_args(argv)
     t0 = time.time()
     out_dir = Path(args.out or (H.ROOT / "_tools" / "heating_budget"))
@@ -174,6 +177,49 @@ def main(argv=None):
 
     pf_full = real_make_physics(phys_cfg, *pargs, **pkw)
     T0 = np.asarray(state.T.data, dtype=np.float64)
+    if args.gwd_only:
+        from legoesm import constants
+        fn = fns["gwd"]
+        kw = {"phys_state": phys_state}
+        if getattr(fn, "_wants_forcing", False):
+            kw["forcing"] = forcing
+        res = fn(state, mesh, sig, **kw)
+        t = res if hasattr(res, "dT_dt") else res[0]
+        du = np.asarray(t.du_dt.data, dtype=np.float64).reshape(-1, T0.shape[1]) * 86400.0
+        p_s = np.asarray(state.p_s.data, dtype=np.float64)
+        dsig = np.asarray(sig.dsigma, dtype=np.float64)[None, :]
+        on_edges = du.shape[0] != T0.shape[0]
+        print(f"GWD tendency on {'edges' if on_edges else 'cells'}: {du.shape}")
+        if on_edges:                                        # edge-normal tendency (MPAS bridge)
+            from legoesm.grids.voronoi import reconstruct_cell_velocity
+            ue, vn = reconstruct_cell_velocity(jnp.asarray(du), mesh)
+            du_east, dv_north = np.asarray(ue, dtype=np.float64), np.asarray(vn, dtype=np.float64)
+        else:
+            du_east, dv_north = du, np.zeros_like(du)
+        lat_deg = np.rad2deg(np.asarray(mesh.latCell, dtype=np.float64))
+        area = np.asarray(mesh.areaCell, dtype=np.float64)
+        dp = p_s[:, None] * dsig
+        du = du_east                                        # zonal force from here on
+        dep = np.hypot(du_east, dv_north) * dp / constants.g / 86400.0   # |momentum sink| per layer [Pa]
+        w = area / area.sum()
+        tot = dep.sum(1)
+        share_top1 = (dep[:, 0] * w).sum() / max((tot * w).sum(), 1e-30)
+        share_top2 = (dep[:, :2].sum(1) * w).sum() / max((tot * w).sum(), 1e-30)
+        print(f"\nGWD deposition: global-mean column sink {(tot * w).sum() * 1e3:.4f} mPa; "
+              f"share in top layer {share_top1:.3f}, top two {share_top2:.3f}")
+        zdu, zdep = band_mean(du, lat_deg, area), band_mean(dep, lat_deg, area)
+        p_mid = band_mean(p_s[:, None] * np.asarray(sig.sigma_full, dtype=np.float64)[None, :],
+                          lat_deg, area) / 100.0
+        np.savez(out_dir / f"gwd_{args.run}_d{args.day:04d}.npz", bands=BANDS,
+                 du_dt=zdu, deposition=zdep, p_hpa=p_mid, dt=DT)
+        for lo, hi, name in ((-90, -60, "60-90S"), (60, 90, "60-90N")):
+            sel = (BANDS[:-1] >= lo) & (BANDS[:-1] < hi)
+            cw = np.cos(np.deg2rad(0.5 * (BANDS[:-1] + BANDS[1:])))[sel]
+            cw = cw / cw.sum()
+            prof, pp = (zdu[sel] * cw[:, None]).sum(0), (p_mid[sel] * cw[:, None]).sum(0)
+            print(f"\n{name} GWD zonal du/dt [m/s/day] by level (p hPa):")
+            print("  " + " ".join(f"{pp[k]:6.1f}:{prof[k]:+6.2f}" for k in range(min(14, prof.size))))
+        return 0
     rec.clear()
     pf_full(state, mesh, sig, phys_state=phys_state, forcing=forcing)
     missing = [m for m in MODULES if m not in rec]
