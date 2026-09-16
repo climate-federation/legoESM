@@ -1173,11 +1173,6 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # has no such switch -- it is one routine -- so this exists only to
     # measure the two arms against each other on the certified cards.
     literal_stage_wzv: bool = False
-    # Private one-variable discriminator for the WS-RK3 stage clock consumed
-    # only by sshwzv.F90:334-335.  Production currently passes rn_Dt to all
-    # three stages; this arm passes (rn_Dt/3,rn_Dt/2,rn_Dt), matching
-    # stprk3_stg.F90:123-124,177-178,221-222.  It is not a public selector.
-    source_stage_wzv_clock_arm: bool = False
     # WRITE-only diagnostic companion to expose_tracer_transport_stage: place
     # the raw stage ww in the returned T slot instead of area*ww (pFw).
     expose_tracer_transport_as_ww: bool = False
@@ -6405,8 +6400,10 @@ class LatLonCGridOceanModel:
             # stage 1 (dt/3): Kmm = Kbb transport, full RHS incl. vertical UP3
             _g0 = _nemo_ws_stage_transport(
                 (u0, v0), h_k_old, 0, eta_stage=state.eta.data,
-                dt=(dt / 3.0 if self._nemo_ws_test_hooks.source_stage_wzv_clock_arm
-                    else dt),
+                # stprk3_stg.f90:147-148 sets rDt=rn_Dt/3 and r1_Dt=1/rDt
+                # before stage 1's transport-form W call.  This is the clock
+                # the recurrence consumes, not the full-step rn_Dt.
+                dt=dt / 3.0,
                 barotropic_velocity=(
                     None if _legacy_reduced_transport_mean_arm else
                     _nemo_ws_stage_barotropic_velocity(
@@ -6541,8 +6538,9 @@ class LatLonCGridOceanModel:
             _g1 = _nemo_ws_stage_transport(
                 (u1_corr, v1_corr), _h_live_one_third, 1,
                 eta_stage=_eta_live_one_third,
-                dt=(dt / 2.0 if self._nemo_ws_test_hooks.source_stage_wzv_clock_arm
-                    else dt),
+                # stprk3_stg.f90:201-202 assigns the stage-2 half-step clock
+                # before the same shared W recurrence.
+                dt=dt / 2.0,
                 barotropic_velocity=(
                     None if _legacy_reduced_transport_mean_arm else
                     _nemo_ws_stage_barotropic_velocity(

@@ -199,6 +199,9 @@ def test_ws_stage_one_consumes_the_full_unprojected_momentum_rhs():
     source = inspect.getsource(LatLonCGridOceanModel._step_impl)
     assert "_du1_rhs, _dv1_rhs = du_dt, dv_dt" in source
     assert "_du1_rhs, _dv1_rhs = du_dt_pert, dv_dt_pert" not in source
+    assert "dt=dt / 3.0" in source
+    assert "dt=dt / 2.0" in source
+    assert "source_stage_wzv_clock_arm" not in source
 
 
 def test_stage_twin_uses_the_direct_post_transport_w_reference():
