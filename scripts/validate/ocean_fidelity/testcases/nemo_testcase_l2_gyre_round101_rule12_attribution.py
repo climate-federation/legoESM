@@ -183,6 +183,7 @@ def main(argv=None) -> int:
             "plant": args.plant,
             "status": "FAIL",
             "error": str(error),
+            "worktree": worktree_stamp(),
         }
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
