@@ -208,13 +208,19 @@ def read_stage1_w_walk_record(path: Path) -> dict:
     require((nx, ny, nz, bits) == (*DIMS, 64),
             f"{path}: wrong dimensions/dtype {header}")
     n2, n3 = nx * ny, nx * ny * nz
-    require(values.size == 4 * n3 + 2 * n2 + 1,
+    # The compiled record writes hdiv and ze3div at their declared local
+    # one-halo extent (Nis0-1:Nie0+1,Njs0-1:Nje0+1,jpk).  GYRE has nn_hls=2,
+    # hence 34x24x31 rather than the full 36x26x31 used by e3t_3d and pww.
+    local_nx, local_ny = nx - 2, ny - 2
+    local_n3 = local_nx * local_ny * nz
+    require(values.size == 2 * local_n3 + 2 * n3 + 2 * n2 + 1,
             f"{path}: wrong payload size {values.size}")
     offset = 0
     result = {}
     for name in ("hdiv", "e3div"):
-        result[name] = _xyz(values[offset:offset + n3], nx, ny, nz)
-        offset += n3
+        result[name] = _xyz(
+            values[offset:offset + local_n3], local_nx, local_ny, nz)
+        offset += local_n3
     for name in ("r3_kaa", "r3_kbb"):
         result[name] = _xy(values[offset:offset + n2], nx, ny)
         offset += n2
@@ -223,9 +229,12 @@ def read_stage1_w_walk_record(path: Path) -> dict:
     result["r1_dt"] = float(values[offset])
     offset += 1
     result["ww"] = _xyz(values[offset:offset + n3], nx, ny, nz)
+    offset += n3
+    require(offset == values.size, f"{path}: reader did not consume physical EOF")
     result["header"] = {
         "version": version, "kt": kt, "Kbb": kbb, "Kmm": kmm,
         "Kaa": kaa, "jpi": nx, "jpj": ny, "jpk": nz, "bits": bits,
+        "local_jpi": local_nx, "local_jpj": local_ny,
     }
     return result
 

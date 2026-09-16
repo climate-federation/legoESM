@@ -27,9 +27,17 @@ both `hdiv` and local `ze3div` on
 (`GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/mppini.f90:1501-1516`). Thus each
 local divergence field is `34*24*31`, while the two `r3t` slots, `e3t_3d`, and
 `pww` retain their compiled full extents. The exact registered size is
-`16 + 9*4 + (2*34*24*31 + 2*36*26 + 2*36*26*31 + 36*26*31 + 1)*8 = 884028`
+`16 + 9*4 + (2*34*24*31 + 2*36*26 + 2*36*26*31 + 1)*8 = 884028`
 bytes, matching the compiled writes at
 `GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/sshwzv.f90:283-291,314-317`.
+
+**Pre-measurement control retraction (2026-09-16):** the first committed
+version incorrectly included one additional `36*26*31` term while printing the
+same 884,028-byte result. The synthetic exact-EOF reader test rejected that
+formula before the oracle payload was parsed. The corrected expression above
+counts the two local divergence fields, two full 2-D `r3t` fields, two full
+3-D fields (`e3t_3d` and `pww`), and one scalar. The failed arithmetic claim
+remains visible here rather than being silently replaced.
 
 The existing Round-98 acquisition script and the existing Decision-41 stage
 gate will be extended in place. Admission mode must verify the recorded

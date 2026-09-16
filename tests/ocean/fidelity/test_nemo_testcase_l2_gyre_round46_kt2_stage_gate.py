@@ -201,15 +201,26 @@ def test_stage_twin_uses_the_direct_post_transport_w_reference():
 def test_stage1_w_acquisition_reader_is_exact_and_fail_closed(tmp_path):
     path = tmp_path / "oracle_stage1_w_walk_kt00000001.bin"
     n2, n3 = NX * NY, NX * NY * NZ
-    values = np.arange(4 * n3 + 2 * n2 + 1, dtype=np.float64)
+    local_n3 = (NX - 2) * (NY - 2) * NZ
+    values = np.arange(2 * local_n3 + 2 * n3 + 2 * n2 + 1,
+                       dtype=np.float64)
     path.write_bytes(
         b"NEMO_L2_R98W_1  "
         + struct.pack("=9i", 1, 1, 1, 1, 3, NX, NY, NZ, 64)
         + values.tobytes())
     record = gate.read_stage1_w_walk_record(path)
     assert record["header"]["Kaa"] == 3
+    assert record["hdiv"].shape == (NY - 2, NX - 2, NZ)
+    assert record["e3div"].shape == (NY - 2, NX - 2, NZ)
+    assert record["r3_kaa"].shape == (NY, NX)
     assert record["ww"].shape == (NY, NX, NZ)
     path.write_bytes(path.read_bytes()[:-8])
+    with pytest.raises(Exception, match="wrong payload size"):
+        gate.read_stage1_w_walk_record(path)
+    path.write_bytes(
+        b"NEMO_L2_R98W_1  "
+        + struct.pack("=9i", 1, 1, 1, 1, 3, NX, NY, NZ, 64)
+        + np.append(values, np.float64(0.0)).tobytes())
     with pytest.raises(Exception, match="wrong payload size"):
         gate.read_stage1_w_walk_record(path)
 
