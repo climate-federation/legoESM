@@ -598,3 +598,23 @@ sub-stepped trigger on 30 levels.
 Sub-stepped test ascent on the 30-level grid as the stopgap AND a refined vertical grid
 (<= 16 hPa layers through the lower troposphere) as the target; the faithful main ascent
 (cuascn) port proceeds in parallel. Grid work to be coordinated with the UTLS session.
+
+### Iteration H — sub-stepped trigger, first results (2026-09-16 late)
+GLM added in-layer sub-stepping to the test ascent (cfg.test_ascent_substeps, cfg.test_substep_condensate;
+n = 1 reproduces the source path exactly). Claude review fix: the sub-interface buoyancy was compared
+against the mid-cell environment (spurious -0.4 K). Result on the known-answer deep sounding (L30):
+n = 1, 2, 4, 8 -> never deep (the trade sounding stays shallow, top 827, at every n). Level-by-level
+comparison with the native L60 run (which triggers deep from its 971 hPa departure): the L60 parcel
+launches from a half level whose cuinin humidity is the MIXED-LAYER air (16.9 g/kg) and enters the cloud
+layer 3.8 g/kg moister than the environment; on L30 the first elevated departure (962 hPa) launches from
+half level 945 whose cuinin humidity is already the cloud-layer air (12.8 g/kg; the rule takes the level
+above), so the parcel is 2-4 g/kg drier and dies within 300 m. Sub-stepping the ascent cannot repair the
+departure sampling. Candidate stopgap (to be validated by codex): run the SOURCE-LITERAL departure
+search on a vertically refined copy of the column (environment interpolated between parent levels,
+2-4 sub-layers), map base/top/type back to the parent levels — equivalent to the fine-grid oracle up to
+the interpolation; requires the departure loop as a lax.scan (the unrolled loop at 120+ levels exhausts
+compile memory) and a 2x test showed the interpolation itself must be done in the right variables (a
+first attempt with piecewise-linear T/q in pressure gave no convection at all — under investigation).
+Peer (UTLS session) drafted the target grid L45 (9 log layers 2-109 hPa, 18 x 33 hPa to 703 hPa,
+18 x 16.5 hPa to the surface): the ported trigger classifies the deep sounding deep on it (top 662 hPa)
+and the trade sounding shallow — sufficient for the trigger; awaiting the user's approval of the grid.

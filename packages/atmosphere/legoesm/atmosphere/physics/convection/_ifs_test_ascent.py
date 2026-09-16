@@ -119,6 +119,30 @@ class IFSTestAscentConfig(NamedTuple):
                                           # (cell-centre) pressure, which
                                           # enables the lowest elevated
                                           # candidate on L137-like grids
+    test_ascent_substeps: int = 1         # static Python int: number of
+                                          # in-layer sub-steps of the test
+                                          # ascent on the PARENT grid
+                                          # (cubasen.F90:437-560 loop body);
+                                          # 1 = the source's per-layer
+                                          # operations exactly (regression
+                                          # anchor); n > 1 splits each parent
+                                          # layer evenly in pressure and
+                                          # repeats mixing -> transport ->
+                                          # dry lift -> CUADJTQ -> buoyancy ->
+                                          # w2 recurrence per sub-layer
+    test_substep_condensate: str = "per_layer"
+                                          # where the source's 0.5 condensate
+                                          # factor (cubasen.F90:493) is applied
+                                          # under substepping: "per_layer" =
+                                          # ONCE at the parent half level
+                                          # after the last sub-step (the
+                                          # source's fine-grid treatment of
+                                          # L137); "per_substep" =
+                                          # 0.5**(1/n) after EVERY sub-step
+                                          # (preserves parent-layer survival
+                                          # of pre-existing condensate; the
+                                          # adaptation case of the codex
+                                          # design notes r13)
 
 
 __param_spec__ = {
@@ -132,6 +156,8 @@ __param_spec__ = {
             "mixed_layer_span_pa": "fixed IFS pressure convention (50 hPa, cubasen.F90:424)",
             "ustar_min": "numerical floor on the friction velocity (cumastrn passes 0.1)",
             "mixed_layer_gate": "str mode selector ('half_above' | 'cell_centre'), not a tunable float",
+            "test_ascent_substeps": "static int discretisation control (1 = source per-layer ascent, cubasen.F90:437-560), not a tunable float",
+            "test_substep_condensate": "str mode selector ('per_layer' | 'per_substep') for the sub-step condensate factor (cubasen.F90:493), not a tunable float",
         },
         "params": {
             "entr_test_c1": {"units": "1", "bounds": (0.2, 2.0), "tunable_tier": 2,
@@ -380,6 +406,36 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
     cubasen.F90:437-600). lax.scan over the k_dep levels above the departure;
     levels with p_full <= cfg.test_top_pa are masked out (NJKT2 ~ 60 hPa).
 
+    IN-LAYER SUB-STEPPING (stopgap, decision 2026-09-16): when
+    cfg.test_ascent_substeps = n > 1, each parent layer j is split evenly in
+    pressure into n sub-layers (sub-level pressures
+    p_s(i) = p_half[j+1] - i*(p_half[j+1]-p_half[j])/n, geopotential
+    interpolated linearly in pressure between geo_half[j+1] and geo_half[j]),
+    and the SOURCE ORDER of cubasen.F90:445-560 -- mixing with the sub-layer
+    thickness, transport of q and s, dry lift to the sub-level, CUADJTQ at
+    the sub-level pressure, condensate addition, pseudo-microphysics,
+    buoyancy, the w2 recurrence with the SUB-layer mixing fraction and
+    CAPE += max(0, ZBUOF*dz_sub) -- is repeated per sub-step ("complete
+    substepping", structurally closer to a fine-grid source ascent, codex
+    design notes r13).  The ascent stops at the FIRST failing sub-step
+    (w2 < 0); the parent layer is the stopping level and the stored w2h is
+    the FAILING sub-step's value (so the sign is visible).  The deep-test
+    saturation factor min(1,(q_s/q_s,surface)**3) is evaluated at the
+    sub-level's interpolated (T, p); the 1/z (surface) mixing uses
+    dz_sub/z_sub with z_sub from the interpolated geopotential above the
+    surface.  Cloud base under substepping: the first sub-step where
+    condensate appears defines p_cb directly as that sub-level's pressure
+    (the saturation-deficit interpolation of cubasen.F90:572-583 becomes
+    unnecessary), snapped to the nearest PARENT half level with the source's
+    w2 > 0 requirement (cubasen.F90:586-608).  Condensate removal is
+    cfg.test_substep_condensate: "per_layer" applies the source's 0.5 ONCE
+    at the parent half level after the last sub-step (cubasen.F90:493;
+    L137 applies the factor at every actual layer, C:536); "per_substep"
+    applies 0.5**(1/n) after every sub-step (the adaptation case, r13).
+    n = 1 reproduces the current per-layer code exactly (same operations,
+    same order) -- the regression anchor: the n == 1 branch below is the
+    verbatim per-layer implementation.
+
     The key ``parcel_init["T_dep"]`` IS consumed: when present it is the
     source's ZTU(JKK) computed by _init_departure_parcel (single excess,
     literal double excess in the mixed-layer branch, surface formula) and is
@@ -406,6 +462,20 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
     the half-level pressure -- and temperatures fed to the saturation
     helpers (qsat_j, qsat_sfc, ZQSU/ZDQSDT) are clamped to the physical
     range [_T_PHYS_MIN, _T_PHYS_MAX] K before evaluation."""
+    # validation of the static substepping controls (like mixed_layer_gate,
+    # but kept local to this function so ifs_departure_search is unchanged)
+    if not isinstance(cfg.test_ascent_substeps, int) or isinstance(cfg.test_ascent_substeps, bool) \
+            or cfg.test_ascent_substeps < 1:
+        raise ValueError(
+            f"IFSTestAscentConfig.test_ascent_substeps must be a static int >= 1, "
+            f"got {cfg.test_ascent_substeps!r}")
+    if cfg.test_substep_condensate not in ("per_layer", "per_substep"):
+        raise ValueError(
+            f"IFSTestAscentConfig.test_substep_condensate must be 'per_layer' or "
+            f"'per_substep', got {cfg.test_substep_condensate!r}")
+    n = cfg.test_ascent_substeps
+    per_substep = cfg.test_substep_condensate == "per_substep"
+
     nlev = T.shape[1]
     T_h, q_h, s_h = env_half
     dt = T_h.dtype
@@ -422,6 +492,9 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
     deep_fac = jnp.asarray(cfg.deep_test_mix_factor, dt)
     entr_base = jnp.asarray(cfg.entr_deep_base, dt)
     ret_frac = jnp.asarray(cfg.test_condensate_retained, dt)
+    # 0.5**(1/n) for "per_substep" removal (applied after EVERY sub-step);
+    # under "per_layer" only ret_frac is used, once at the parent half level
+    ret_sub = jnp.asarray(cfg.test_condensate_retained ** (1.0 / n), dt)
     top_pa = jnp.asarray(cfg.test_top_pa, dt)
     g_inv = jnp.asarray(_G_INV, dt)
     retv = jnp.asarray(_RETV, dt)
@@ -434,6 +507,7 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
     rlmin = jnp.asarray(_RLMIN, dt)
     tiny = jnp.asarray(_TINY, dt)
     z_floor = jnp.asarray(_Z_FLOOR, dt)
+    qexp = jnp.asarray(_QSAT_RATIO_EXP, dt)
 
     # candidate ascent levels: our indices k_dep-1 .. 0 (surface-last: upward),
     # int32 so all index carries keep a single dtype under lax.scan
@@ -480,6 +554,9 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
         "ictop": parcel_init["ictop"].astype(jnp.int32),
         "lldcum": parcel_init["lldcum"], "cape": jnp.zeros(ncol, dt),
         "T_u": T_u, "q_u": q_u, "l_u": l_u, "w2h": w2h, "ilab": ilab0,
+        # substepping: has the (first) cloud base of this departure already
+        # been diagnosed (condensate seen at least once)
+        "cb_done": jnp.zeros(ncol, bool),
     }
 
     def body(carry, j):
@@ -492,117 +569,299 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
                                     carry["w2h"], carry["ilab"])
         work = active & (p_full[:, j] > top_pa)            # NJKT2 bound
 
-        dz = (geo_half[:, j] - geo_half[:, j + 1]) * g_inv
-        qf = 0.5 * (q_h[:, j + 1] + q_h[:, j])
-        sf = 0.5 * (s_h[:, j + 1] + s_h[:, j])
-        if is_surface:
-            # 1/z mixing for the shallow/surface departure (cubasen.F90:437, 446-451);
-            # KINDEX==KLEV-1 branches are dead on Earth (NJKT1 < KLEV-1).
-            # AD safety: the 1/z height is floored away from zero.
-            z_h = jnp.maximum((geo_full[:, j] - geo_half[:, nlev]) * g_inv, z_floor)
-            zeps = c1 / z_h + c2
-            zmix = jnp.minimum(1.0, 0.5 * dz * zeps)       # cubasen.F90:450-452
-            tmp = 1.0 / (1.0 + zmix)
-            q_new = (q * (1.0 - zmix) + 2.0 * zmix * qf) * tmp  # cubasen.F90:456-458
-            s_new = (s * (1.0 - zmix) + 2.0 * zmix * sf) * tmp  # cubasen.F90:459-461
-        else:
-            # deep-test mixing 0.4*ENTRORG*dz*min(1,(PQSEN(JK)/PQSEN(KLEV))**3)
-            # (cubasen.F90:472-478); PQSEN is a specific humidity.
-            # AD safety: T clamped to the physical range before the saturation
-            # call; the ratio is divided by a POSITIVE-floored qsat_sfc and
-            # clipped to [0, 1] BEFORE the cube (no overflow, no zero divide).
-            qsat_j = saturation_specific_humidity(
-                jnp.clip(T[:, j], t_min, t_max), p_full[:, j])
-            ratio = jnp.clip(qsat_j / qsat_sfc, 0.0, 1.0)
-            zmix = jnp.minimum(1.0, deep_fac * entr_base * dz
-                               * ratio ** _QSAT_RATIO_EXP)
-            q_new = q * (1.0 - zmix) + qf * zmix           # cubasen.F90:483
-            s_new = s * (1.0 - zmix) + sf * zmix           # cubasen.F90:484
+        if n == 1:
+            # ===== REGRESSION ANCHOR: the source's per-layer operations,
+            # verbatim (cubasen.F90:437-560); n = 1 must reproduce the
+            # per-layer code exactly (same operations, same order). =====
+            dz = (geo_half[:, j] - geo_half[:, j + 1]) * g_inv
+            qf = 0.5 * (q_h[:, j + 1] + q_h[:, j])
+            sf = 0.5 * (s_h[:, j + 1] + s_h[:, j])
+            if is_surface:
+                # 1/z mixing for the shallow/surface departure (cubasen.F90:437, 446-451);
+                # KINDEX==KLEV-1 branches are dead on Earth (NJKT1 < KLEV-1).
+                # AD safety: the 1/z height is floored away from zero.
+                z_h = jnp.maximum((geo_full[:, j] - geo_half[:, nlev]) * g_inv, z_floor)
+                zeps = c1 / z_h + c2
+                zmix = jnp.minimum(1.0, 0.5 * dz * zeps)       # cubasen.F90:450-452
+                tmp = 1.0 / (1.0 + zmix)
+                q_new = (q * (1.0 - zmix) + 2.0 * zmix * qf) * tmp  # cubasen.F90:456-458
+                s_new = (s * (1.0 - zmix) + 2.0 * zmix * sf) * tmp  # cubasen.F90:459-461
+            else:
+                # deep-test mixing 0.4*ENTRORG*dz*min(1,(PQSEN(JK)/PQSEN(KLEV))**3)
+                # (cubasen.F90:472-478); PQSEN is a specific humidity.
+                # AD safety: T clamped to the physical range before the saturation
+                # call; the ratio is divided by a POSITIVE-floored qsat_sfc and
+                # clipped to [0, 1] BEFORE the cube (no overflow, no zero divide).
+                qsat_j = saturation_specific_humidity(
+                    jnp.clip(T[:, j], t_min, t_max), p_full[:, j])
+                ratio = jnp.clip(qsat_j / qsat_sfc, 0.0, 1.0)
+                zmix = jnp.minimum(1.0, deep_fac * entr_base * dz
+                                   * ratio ** qexp)
+                q_new = q * (1.0 - zmix) + qf * zmix           # cubasen.F90:483
+                s_new = s * (1.0 - zmix) + sf * zmix           # cubasen.F90:484
 
-        # condensation (CUADJTQ), condensate added, half retained (cubasen.F90:466-493)
-        q_old = q_new
-        T_new0 = (s_new - geo_half[:, j]) * rcpd_inv
-        T_adj, q_adj = _cuadjtq_condense(T_new0, q_new, p_half[:, j])
-        zdq = jnp.maximum(q_old - q_adj, 0.0)
-        l_new = ret_frac * (l_u[:, j + 1] + zdq)
-        # freezing correction ZLGLAC = 0: liquid-only saturation (FOEALFCU unavailable)
-        T_new = T_adj
-        s_new = c_pd_arr * T_new + geo_half[:, j]
+            # condensation (CUADJTQ), condensate added, half retained (cubasen.F90:466-493)
+            q_old = q_new
+            T_new0 = (s_new - geo_half[:, j]) * rcpd_inv
+            T_adj, q_adj = _cuadjtq_condense(T_new0, q_new, p_half[:, j])
+            zdq = jnp.maximum(q_old - q_adj, 0.0)
+            l_new = ret_frac * (l_u[:, j + 1] + zdq)
+            # freezing correction ZLGLAC = 0: liquid-only saturation (FOEALFCU unavailable)
+            T_new = T_adj
+            s_new = c_pd_arr * T_new + geo_half[:, j]
 
-        # buoyancy on half levels (cubasen.F90:499-508); AD safety: the
-        # environmental virtual temperature is floored positive before the
-        # division (zero/negative operands on inactive branches must stay
-        # finite under autodiff).
-        tvu = (1.0 + retv * q_adj - l_new) * T_new
-        tven = (1.0 + retv * q_h[:, j]) * T_h[:, j]
-        buoh_new = (tvu - tven) * cg / jnp.maximum(tven, tiny)
-        buof = 0.5 * (buoh_new + buoh)
-        # kinetic-energy recurrence, ZAW = ZBW = 1 (cubasen.F90:511-513)
-        w2_new = (w2 * (1.0 - 2.0 * zmix) + 2.0 * buof * dz) / (1.0 + 2.0 * zmix)
-        cape_new = cape + jnp.maximum(0.0, buof * dz)      # cubasen.F90:521
+            # buoyancy on half levels (cubasen.F90:499-508); AD safety: the
+            # environmental virtual temperature is floored positive before the
+            # division (zero/negative operands on inactive branches must stay
+            # finite under autodiff).
+            tvu = (1.0 + retv * q_adj - l_new) * T_new
+            tven = (1.0 + retv * q_h[:, j]) * T_h[:, j]
+            buoh_new = (tvu - tven) * cg / jnp.maximum(tven, tiny)
+            buof = 0.5 * (buoh_new + buoh)
+            # kinetic-energy recurrence, ZAW = ZBW = 1 (cubasen.F90:511-513)
+            w2_new = (w2 * (1.0 - 2.0 * zmix) + 2.0 * buof * dz) / (1.0 + 2.0 * zmix)
+            cape_new = cape + jnp.maximum(0.0, buof * dz)      # cubasen.F90:521
 
-        # first layer with liquid water: exact cloud base (cubasen.F90:524-551).
-        # Saturation-deficit interpolation on the liquid specific-humidity curve
-        # (declared departure: FOEEWM coefficients differ, FOEALFA-R5LES/R5IES
-        # blend unavailable, cubasen.F90:527, 532-535).  AD safety: the
-        # temperature is clamped to the physical range before both saturation
-        # calls, the half-level pressure in ZDTDP is floored positive, and the
-        # interpolation denominator is floored away from zero on inactive
-        # branches.
-        cond_first = (l_new > 0.0) & (ilab[:, j + 1] == 1)
-        T_cb = jnp.clip(T_u[:, j + 1], t_min, t_max)
-        zqsu = saturation_specific_humidity(T_cb, p_half[:, j + 1])
-        zdqsdT = _dqsat_dT(T_cb, p_half[:, j + 1])
-        zdq_cb = jnp.minimum(0.0, q_u[:, j + 1] - zqsu)
-        zdtdp = r_d * T_u[:, j + 1] / (c_pd_arr * jnp.maximum(p_half[:, j + 1], tiny))
-        zcb = p_half[:, j + 1] + zdq_cb / jnp.maximum(zdqsdT * zdtdp, tiny)
-        pdtop = zcb - p_half[:, j]
-        pdbot = p_half[:, j + 1] - zcb
-        case_top = cond_first & (pdtop > pdbot) & (w2 > 0.0)     # cubasen.F90:548
-        case_bot = cond_first & (pdtop <= pdbot) & (w2_new > 0.0)  # cubasen.F90:555
-        jkb = jnp.minimum(nlev - 2, j + 1).astype(jnp.int32)     # MIN(KLEV-1,JK+1)
-        icbot_new = jnp.where(case_top, jkb, icbot)
-        icbot_new = jnp.where(case_bot, j, icbot_new)
-        # ZLU(JK+1) = RLMIN is set BEFORE the w2 < 0 test reads it
-        # (cubasen.F90:601, 615-621) -> the UPDATED value is used below
-        l_below = jnp.where(case_top, rlmin, l_u[:, j + 1])      # cubasen.F90:601
-        # scratch label lifecycle (cubasen.F90:265-268, 615-629): the previous
-        # carried ilab(:, j) is left where the level is not accepted (no
-        # zeroing, no fresh creation), so an accepted terminal-level label
-        # from a previous departure survives
+            # first layer with liquid water: exact cloud base (cubasen.F90:524-551).
+            # Saturation-deficit interpolation on the liquid specific-humidity curve
+            # (declared departure: FOEEWM coefficients differ, FOEALFA-R5LES/R5IES
+            # blend unavailable, cubasen.F90:527, 532-535).  AD safety: the
+            # temperature is clamped to the physical range before both saturation
+            # calls, the half-level pressure in ZDTDP is floored positive, and the
+            # interpolation denominator is floored away from zero on inactive
+            # branches.
+            cond_first = (l_new > 0.0) & (ilab[:, j + 1] == 1)
+            T_cb = jnp.clip(T_u[:, j + 1], t_min, t_max)
+            zqsu = saturation_specific_humidity(T_cb, p_half[:, j + 1])
+            zdqsdT = _dqsat_dT(T_cb, p_half[:, j + 1])
+            zdq_cb = jnp.minimum(0.0, q_u[:, j + 1] - zqsu)
+            zdtdp = r_d * T_u[:, j + 1] / (c_pd_arr * jnp.maximum(p_half[:, j + 1], tiny))
+            zcb = p_half[:, j + 1] + zdq_cb / jnp.maximum(zdqsdT * zdtdp, tiny)
+            pdtop = zcb - p_half[:, j]
+            pdbot = p_half[:, j + 1] - zcb
+            case_top = cond_first & (pdtop > pdbot) & (w2 > 0.0)     # cubasen.F90:548
+            case_bot = cond_first & (pdtop <= pdbot) & (w2_new > 0.0)  # cubasen.F90:555
+            jkb = jnp.minimum(nlev - 2, j + 1).astype(jnp.int32)     # MIN(KLEV-1,JK+1)
+            icbot_new = jnp.where(case_top, jkb, icbot)
+            icbot_new = jnp.where(case_bot, j, icbot_new)
+            # ZLU(JK+1) = RLMIN is set BEFORE the w2 < 0 test reads it
+            # (cubasen.F90:601, 615-621) -> the UPDATED value is used below
+            l_below = jnp.where(case_top, rlmin, l_u[:, j + 1])      # cubasen.F90:601
+            # scratch label lifecycle (cubasen.F90:265-268, 615-629): the previous
+            # carried ilab(:, j) is left where the level is not accepted (no
+            # zeroing, no fresh creation), so an accepted terminal-level label
+            # from a previous departure survives
+            labj = ilab[:, j]
+            labj = jnp.where(case_top | case_bot, 2, labj)
+
+            # stop at w2 < 0; ICTOP/LLDCUM use the UPDATED l_below
+            # (cubasen.F90:615-621, strict '<'); the internal ICTOP default is
+            # the caller's (cubasen.F90:323-325) and is not touched here
+            stop = w2_new < 0.0
+            ictop_new = jnp.where(stop & (l_below > 0.0), j, ictop)
+            lldcum_new = jnp.where(stop, l_below > 0.0, lldcum)
+            # carry state changes ONLY on executed (work) iterations
+            active_new = active & ~(work & stop)
+            labj = jnp.where(work & ~stop, jnp.where(l_new > 0.0, 2, 1), labj)  # 588-592
+
+            # store this level (masked by 'work'); every field preserved exactly
+            # on masked iterations
+            def put(arr, val):
+                return arr.at[:, j].set(jnp.where(work, val, arr[:, j]))
+            T_u = put(T_u, T_new); q_u = put(q_u, q_adj)
+            l_u = put(l_u, l_new); w2h = put(w2h, w2_new)
+            ilab = put(ilab, labj.astype(ilab.dtype))
+            l_u = l_u.at[:, j + 1].set(jnp.where(work, l_below, l_u[:, j + 1]))
+            ilab = ilab.at[:, jkb].set(
+                jnp.where(work & case_top, jnp.asarray(2, ilab.dtype), ilab[:, jkb]))
+
+            new = {"q": jnp.where(work, q_adj, q), "s": jnp.where(work, s_new, s),
+                   "w2": jnp.where(work, w2_new, w2),
+                   "buoh": jnp.where(work, buoh_new, buoh),
+                   "active": active_new,
+                   "icbot": jnp.where(work, icbot_new, icbot),
+                   "ictop": jnp.where(work, ictop_new, ictop),
+                   "lldcum": jnp.where(work, lldcum_new, lldcum),
+                   "cape": jnp.where(work, cape_new, cape),
+                   "T_u": T_u, "q_u": q_u, "l_u": l_u, "w2h": w2h, "ilab": ilab,
+                   "cb_done": carry["cb_done"] | (work & (l_new > 0.0))}
+            return new, ()
+
+        # ===== n > 1: complete in-layer substepping (cubasen.F90:445-560
+        # repeated per sub-layer in the SOURCE ORDER; codex r13).  Static
+        # Python loop over the n sub-layers of parent layer j, from its lower
+        # half level p_half[j+1] up to p_half[j]. =====
+        p_lo = p_half[:, j + 1]
+        p_hi = p_half[:, j]
+        g_lo = geo_half[:, j + 1]
+        g_hi = geo_half[:, j]
+        dp_layer = p_lo - p_hi
+        dz_tot = (g_hi - g_lo) * g_inv
+        dz_sub = dz_tot / n                       # sub-layer thickness (dphi_sub/g)
+        f_last = jnp.asarray(1.0, dt)             # traced selector: last sub-step
+
+        # per-sub-step running state; every update is masked by
+        # cont = work & ~stop so state changes ONLY on executed sub-steps
+        q_c, s_c, w2_c, buoh_c = q, s, w2, buoh
+        l_c = l_u[:, j + 1]                       # ZLU below the parent layer
+        cape_c = cape
+        stop = jnp.zeros(ncol, bool)
+        cb_done = carry["cb_done"]
+        case_top_any = jnp.zeros(ncol, bool)
+        case_bot_any = jnp.zeros(ncol, bool)
+        icbot_acc = icbot
+        # sampled-at-parent-j profile values (last EXECUTED sub-step; for w2h
+        # the FAILING sub-step so the sign is visible -- with the masking
+        # below the failing sub-step is executed, hence its value is stored)
+        T_f = T_u[:, j]
+        q_f = q_u[:, j]
+        l_f = l_u[:, j]
+        w2_f = w2_c
+        buoh_f = buoh_c
+        l_pre = l_c                               # condensate BEFORE the failing sub-step
+
+        jkb = jnp.minimum(nlev - 2, j + 1).astype(jnp.int32)   # MIN(KLEV-1,JK+1)
+
+        for i in range(1, n + 1):
+            fi = jnp.asarray(i / n, dt)           # sub-interface fraction (top)
+            fm = jnp.asarray((i - 0.5) / n, dt)   # sub-cell mid fraction (env means)
+            p_sub = p_lo - fi * dp_layer          # sub-level pressure
+            geo_sub = g_lo + fi * (g_hi - g_lo)   # interpolated geopotential
+            # environment interpolated linearly in pressure between the parent
+            # half levels j+1 and j; at midpoints of the sub-cells these are
+            # the sub-cell means (the source's 0.5*(below+above) ZQF/ZSF)
+            q_env = q_h[:, j + 1] + fm * (q_h[:, j] - q_h[:, j + 1])
+            s_env = s_h[:, j + 1] + fm * (s_h[:, j] - s_h[:, j + 1])
+            T_env = T_h[:, j + 1] + fm * (T_h[:, j] - T_h[:, j + 1])
+            # buoyancy is evaluated at the sub-INTERFACE (fi), against the
+            # environment interpolated there (the source compares the parcel
+            # at half level JK with PTENH/PQENH at that same half level,
+            # cubasen.F90:541-545); the mid-cell values above are only for the
+            # mixing (ZQF/ZSF, cubasen.F90:454-455)
+            q_env_i = q_h[:, j + 1] + fi * (q_h[:, j] - q_h[:, j + 1])
+            T_env_i = T_h[:, j + 1] + fi * (T_h[:, j] - T_h[:, j + 1])
+            cont = work & ~stop
+
+            if is_surface:
+                # 1/z mixing with dz_sub/z_sub (cubasen.F90:437, 446-451);
+                # z_sub from the interpolated geopotential above the surface.
+                # AD safety: the 1/z height is floored away from zero.
+                z_sub = jnp.maximum((geo_sub - geo_half[:, nlev]) * g_inv, z_floor)
+                zeps = c1 / z_sub + c2
+                zmix = jnp.minimum(1.0, 0.5 * dz_sub * zeps)   # cubasen.F90:450-452
+                tmp = 1.0 / (1.0 + zmix)
+                q_new = (q_c * (1.0 - zmix) + 2.0 * zmix * q_env) * tmp  # :456-458
+                s_new = (s_c * (1.0 - zmix) + 2.0 * zmix * s_env) * tmp  # :459-461
+            else:
+                # deep-test mixing with the sub-layer thickness and the
+                # sub-level saturation factor min(1,(q_s/q_s,surface)**3)
+                # evaluated at the interpolated (T_env, p_sub)
+                # (cubasen.F90:472-478).  AD safety as in the n = 1 branch.
+                qsat_j = saturation_specific_humidity(
+                    jnp.clip(T_env_i, t_min, t_max), p_sub)
+                ratio = jnp.clip(qsat_j / qsat_sfc, 0.0, 1.0)
+                zmix = jnp.minimum(1.0, deep_fac * entr_base * dz_sub
+                                   * ratio ** qexp)
+                q_new = q_c * (1.0 - zmix) + q_env * zmix       # cubasen.F90:483
+                s_new = s_c * (1.0 - zmix) + s_env * zmix       # cubasen.F90:484
+
+            # dry lift to the sub-level, CUADJTQ at the sub-level pressure
+            # (cubasen.F90:462-464, 485-493)
+            q_old = q_new
+            T_new0 = (s_new - geo_sub) * rcpd_inv
+            T_adj, q_adj = _cuadjtq_condense(T_new0, q_new, p_sub)
+            zdq = jnp.maximum(q_old - q_adj, 0.0)
+            l_un = l_c + zdq
+            if per_substep:
+                l_new = ret_sub * l_un              # 0.5**(1/n) every sub-step
+            else:
+                l_new = jnp.where(jnp.asarray(float(i == n), dt),
+                                  ret_frac * l_un, l_un)   # 0.5 ONCE at parent half level
+            # freezing correction ZLGLAC = 0: liquid-only saturation
+            T_new = T_adj
+            s_new = c_pd_arr * T_new + geo_sub
+
+            # buoyancy at the sub-level (virtual temperature with the
+            # condensate loading), interpolated environment (cubasen.F90:499-508)
+            tvu = (1.0 + retv * q_adj - l_new) * T_new
+            tven = (1.0 + retv * q_env_i) * T_env_i
+            buoh_new = (tvu - tven) * cg / jnp.maximum(tven, tiny)
+            buof = 0.5 * (buoh_new + buoh_c)        # ZBUOF mean of sub-level & previous
+            # kinetic-energy recurrence with the SUB-layer mixing fraction and
+            # dz_sub, ZAW = ZBW = 1 (cubasen.F90:511-513)
+            w2_new = (w2_c * (1.0 - 2.0 * zmix) + 2.0 * buof * dz_sub) / (1.0 + 2.0 * zmix)
+            cape_step = cape_c + jnp.maximum(0.0, buof * dz_sub)   # cubasen.F90:521
+            stop_sub = w2_new < 0.0                 # first failing sub-step
+
+            # cloud base: the FIRST sub-step where condensate appears defines
+            # p_cb = p_sub directly (the interpolation of cubasen.F90:572-583
+            # becomes unnecessary), snapped to the nearest PARENT half level
+            # with the source's w2 > 0 requirement (cubasen.F90:586-608)
+            cond_first = (l_new > 0.0) & (~cb_done) & (ilab[:, j + 1] == 1)
+            pdtop = p_sub - p_hi
+            pdbot = p_lo - p_sub
+            case_top = cont & cond_first & (pdtop > pdbot) & (w2_c > 0.0)    # :548
+            case_bot = cont & cond_first & (pdtop <= pdbot) & (w2_new > 0.0)  # :555
+            icbot_acc = jnp.where(case_top, jkb, icbot_acc)
+            icbot_acc = jnp.where(case_bot, j, icbot_acc)
+            case_top_any = case_top_any | case_top
+            case_bot_any = case_bot_any | case_bot
+
+            # condensate carried INTO the failing sub-step (ZLU below, for
+            # ICTOP/LLDCUM at the stop, cubasen.F90:615-621)
+            l_pre = jnp.where(cont & stop_sub, l_c, l_pre)
+
+            # commit the sub-step (only on executed, non-stopped sub-steps)
+            q_c = jnp.where(cont, q_adj, q_c)
+            s_c = jnp.where(cont, s_new, s_c)
+            w2_c = jnp.where(cont, w2_new, w2_c)
+            buoh_c = jnp.where(cont, buoh_new, buoh_c)
+            l_c = jnp.where(cont, l_new, l_c)
+            cape_c = jnp.where(cont, cape_step, cape_c)
+            # sampled-at-parent-j values: last EXECUTED sub-step (the failing
+            # one when the ascent stops mid-layer, so w2h's sign is visible)
+            T_f = jnp.where(cont, T_new, T_f)
+            q_f = jnp.where(cont, q_adj, q_f)
+            l_f = jnp.where(cont, l_new, l_f)
+            w2_f = jnp.where(cont, w2_new, w2_f)
+            buoh_f = jnp.where(cont, buoh_new, buoh_f)
+            cb_done = cb_done | (cont & (l_new > 0.0))
+            stop = stop | (cont & stop_sub)
+
+        # parent-level bookkeeping after the sub-steps
+        # ZLU(JK+1) = RLMIN is set where the snapped cloud base is the half
+        # level below (cubasen.F90:601), read by the next layer's l_c start
+        l_below = jnp.where(case_top_any, rlmin, l_u[:, j + 1])   # cubasen.F90:601
+        # scratch label lifecycle (cubasen.F90:265-268, 588-592, 615-629)
         labj = ilab[:, j]
-        labj = jnp.where(case_top | case_bot, 2, labj)
-
-        # stop at w2 < 0; ICTOP/LLDCUM use the UPDATED l_below
-        # (cubasen.F90:615-621, strict '<'); the internal ICTOP default is
-        # the caller's (cubasen.F90:323-325) and is not touched here
-        stop = w2_new < 0.0
-        ictop_new = jnp.where(stop & (l_below > 0.0), j, ictop)
-        lldcum_new = jnp.where(stop, l_below > 0.0, lldcum)
-        # carry state changes ONLY on executed (work) iterations
+        labj = jnp.where(case_top_any | case_bot_any, 2, labj)
+        # stop at the FIRST failing sub-step; ICTOP/LLDCUM use the condensate
+        # carried BEFORE that sub-step (cubasen.F90:615-621, strict '<')
+        ictop_new = jnp.where(stop & (l_pre > 0.0), j, ictop)
+        lldcum_new = jnp.where(stop, l_pre > 0.0, lldcum)
         active_new = active & ~(work & stop)
-        labj = jnp.where(work & ~stop, jnp.where(l_new > 0.0, 2, 1), labj)  # 588-592
+        labj = jnp.where(work & ~stop, jnp.where(l_f > 0.0, 2, 1), labj)  # 588-592
 
-        # store this level (masked by 'work'); every field preserved exactly
-        # on masked iterations
+        # store at the PARENT half level j only (masked by 'work')
         def put(arr, val):
             return arr.at[:, j].set(jnp.where(work, val, arr[:, j]))
-        T_u = put(T_u, T_new); q_u = put(q_u, q_adj)
-        l_u = put(l_u, l_new); w2h = put(w2h, w2_new)
+        T_u = put(T_u, T_f); q_u = put(q_u, q_f)
+        l_u = put(l_u, l_f); w2h = put(w2h, w2_f)
         ilab = put(ilab, labj.astype(ilab.dtype))
         l_u = l_u.at[:, j + 1].set(jnp.where(work, l_below, l_u[:, j + 1]))
         ilab = ilab.at[:, jkb].set(
-            jnp.where(work & case_top, jnp.asarray(2, ilab.dtype), ilab[:, jkb]))
+            jnp.where(work & case_top_any, jnp.asarray(2, ilab.dtype), ilab[:, jkb]))
 
-        new = {"q": jnp.where(work, q_adj, q), "s": jnp.where(work, s_new, s),
-               "w2": jnp.where(work, w2_new, w2),
-               "buoh": jnp.where(work, buoh_new, buoh),
+        new = {"q": jnp.where(work, q_c, q), "s": jnp.where(work, s_c, s),
+               "w2": jnp.where(work, w2_f, w2),
+               "buoh": jnp.where(work, buoh_f, buoh),
                "active": active_new,
-               "icbot": jnp.where(work, icbot_new, icbot),
+               "icbot": jnp.where(work, icbot_acc, icbot),
                "ictop": jnp.where(work, ictop_new, ictop),
                "lldcum": jnp.where(work, lldcum_new, lldcum),
-               "cape": jnp.where(work, cape_new, cape),
-               "T_u": T_u, "q_u": q_u, "l_u": l_u, "w2h": w2h, "ilab": ilab}
+               "cape": jnp.where(work, cape_c, cape),
+               "T_u": T_u, "q_u": q_u, "l_u": l_u, "w2h": w2h, "ilab": ilab,
+               "cb_done": jnp.where(work, cb_done, carry["cb_done"])}
         return new, ()
 
     final, _ = lax.scan(body, carry0, js)
