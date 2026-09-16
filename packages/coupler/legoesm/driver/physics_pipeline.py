@@ -4028,7 +4028,22 @@ def gwd_config_for(config):
         launch_p=(None if getattr(config, "hines_launch_p", 0.0) in (0.0, None)
                   else float(config.hines_launch_p)),
     )
-    return gc._replace(mcfarlane=mc, hines=hn)
+    fr = gc.e3sm_cam.frontal._replace(
+        taubgnd=float(getattr(config, "e3sm_cam_taubgnd",
+                              gc.e3sm_cam.frontal.taubgnd)),
+        c0=float(getattr(config, "e3sm_cam_c0", gc.e3sm_cam.frontal.c0)),
+        launch_p=float(getattr(config, "e3sm_cam_launch_p",
+                               gc.e3sm_cam.frontal.launch_p)),
+        latitude_taper=bool(getattr(config, "e3sm_cam_latitude_taper",
+                                    gc.e3sm_cam.frontal.latitude_taper)),
+    )
+    ec = gc.e3sm_cam._replace(
+        source=str(getattr(config, "e3sm_cam_source", gc.e3sm_cam.source)),
+        pgwv=int(getattr(config, "e3sm_cam_pgwv", gc.e3sm_cam.pgwv)),
+        effgw=float(getattr(config, "e3sm_cam_effgw", gc.e3sm_cam.effgw)),
+        frontal=fr,
+    )
+    return gc._replace(mcfarlane=mc, hines=hn, e3sm_cam=ec)
 
 
 def _resolve_gwd(config):

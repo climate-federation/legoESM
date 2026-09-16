@@ -1539,6 +1539,34 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         dest="hines_Fmax",
                         help="Hines saturation momentum-flux cap [Pa] "
                              "(default 0.1).")
+    parser.add_argument("--e3sm-cam-source", type=str, default=None,
+                        choices=["orographic", "frontal", "convective",
+                                 "background"],
+                        dest="e3sm_cam_source",
+                        help="E3SM CAM gravity-wave source spectrum.")
+    parser.add_argument("--e3sm-cam-pgwv", type=int, default=None,
+                        dest="e3sm_cam_pgwv",
+                        help="Number of gravity-wave phase-speed bins.")
+    parser.add_argument("--e3sm-cam-effgw", type=float, default=None,
+                        dest="e3sm_cam_effgw",
+                        help="Gravity-wave efficiency factor (dimensionless).")
+    parser.add_argument("--e3sm-cam-taubgnd", type=float, default=None,
+                        dest="e3sm_cam_taubgnd",
+                        help="Uniform background spectrum amplitude; total "
+                             "absolute launch flux ~ taubgnd*sqrt(pi)*c0/dc "
+                             "[Pa].")
+    parser.add_argument("--e3sm-cam-c0", type=float, default=None,
+                        dest="e3sm_cam_c0",
+                        help="Width of source spectrum in phase speed [m/s].")
+    parser.add_argument("--e3sm-cam-launch-p", type=float, default=None,
+                        dest="e3sm_cam_launch_p",
+                        help="Launch pressure level for the spectrum [Pa].")
+    parser.add_argument("--e3sm-cam-latitude-taper",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        dest="e3sm_cam_latitude_taper",
+                        help="cos(lat) taper of the E3SM frontal/background drag "
+                             "toward the poles (E3SM structured-dycore branch); "
+                             "--no-... is the unstructured/MPAS branch.")
     parser.add_argument("--mcfarlane-tau-max", type=float, default=None,
                         dest="mcfarlane_tau_max",
                         help="McFarlane orographic GWD surface stress cap [Pa] "
@@ -2143,6 +2171,28 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             if args.hines_launch_p is not None else 0.0),
         hines_Fmax=(args.hines_Fmax if args.hines_Fmax is not None
                     else _EXPERIMENT_DEFAULTS.hines_Fmax),
+        e3sm_cam_source=(args.e3sm_cam_source
+                         if args.e3sm_cam_source is not None
+                         else _EXPERIMENT_DEFAULTS.e3sm_cam_source),
+        e3sm_cam_pgwv=(args.e3sm_cam_pgwv
+                       if args.e3sm_cam_pgwv is not None
+                       else _EXPERIMENT_DEFAULTS.e3sm_cam_pgwv),
+        e3sm_cam_effgw=(args.e3sm_cam_effgw
+                        if args.e3sm_cam_effgw is not None
+                        else _EXPERIMENT_DEFAULTS.e3sm_cam_effgw),
+        e3sm_cam_taubgnd=(args.e3sm_cam_taubgnd
+                          if args.e3sm_cam_taubgnd is not None
+                          else _EXPERIMENT_DEFAULTS.e3sm_cam_taubgnd),
+        e3sm_cam_c0=(args.e3sm_cam_c0
+                     if args.e3sm_cam_c0 is not None
+                     else _EXPERIMENT_DEFAULTS.e3sm_cam_c0),
+        e3sm_cam_launch_p=(args.e3sm_cam_launch_p
+                           if args.e3sm_cam_launch_p is not None
+                           else _EXPERIMENT_DEFAULTS.e3sm_cam_launch_p),
+        e3sm_cam_latitude_taper=(
+            args.e3sm_cam_latitude_taper
+            if args.e3sm_cam_latitude_taper is not None
+            else _EXPERIMENT_DEFAULTS.e3sm_cam_latitude_taper),
         mcfarlane_tau_max=(
             args.mcfarlane_tau_max if args.mcfarlane_tau_max is not None
             else _EXPERIMENT_DEFAULTS.mcfarlane_tau_max),

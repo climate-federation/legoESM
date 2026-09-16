@@ -1529,9 +1529,14 @@ def e3sm_cam_gwd(
         )
         orographic_only = True
         do_taper = False
-    elif config.source == "frontal":
-        if frontgf_col is None:
+    elif config.source in ("frontal", "background"):
+        if config.source == "background":
             frontgf_col = jnp.zeros((ncol, nlev), dtype=u.dtype)
+            frontgfc = -jnp.inf
+        else:
+            if frontgf_col is None:
+                frontgf_col = jnp.zeros((ncol, nlev), dtype=u.dtype)
+            frontgfc = config.frontal.frontgfc
         # E3SM picks kbot (launch, ~500 hPa) and kfront (trigger, ~600 hPa)
         # from the reference pressure grid — NOT a fixed fraction of nlev
         # (codex iter-1 #1/#2).  We locate the level whose column-mean
@@ -1550,7 +1555,7 @@ def e3sm_cam_gwd(
         tau0, src_level, tend_level, xv, yv, c, ubm, ubi = gw_cm_src(
             u, v, frontgf_col, config.pgwv, config.dc,
             config.frontal.c0, config.frontal.taubgnd,
-            config.frontal.frontgfc, kbot, kfront,
+            frontgfc, kbot, kfront,
             config.frontal.front_spectrum_dc_resolution,
         )
         orographic_only = False
@@ -1596,7 +1601,7 @@ def e3sm_cam_gwd(
     else:
         raise ValueError(
             f"Unknown E3SM GWD source: {config.source!r}. "
-            "Choose 'orographic', 'frontal', or 'convective'."
+            "Choose 'orographic', 'frontal', 'background', or 'convective'."
         )
 
     # Newtonian-cooling profile (spectral path only; orographic uses uniform).

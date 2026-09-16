@@ -432,7 +432,13 @@ def parse_gwd_spec(value: str) -> str:
                 f"them (e.g. 'hines+mcfarlane')"
             )
     try:
-        ExperimentConfig(gravity_wave_drag=value).validate_strict()
+        # The e3sm_cam-in-composite rule depends on --e3sm-cam-source, parsed
+        # separately; probe with the one source that composes so the real
+        # gate fires at build time with the actual value, not here.
+        _parts = value.split("+")
+        _probe = ({"e3sm_cam_source": "background", "e3sm_cam_pgwv": 1}
+                  if "e3sm_cam" in _parts and len(_parts) > 1 else {})
+        ExperimentConfig(gravity_wave_drag=value, **_probe).validate_strict()
     except ValueError as exc:
         # Report ONLY a genuine gravity_wave_drag complaint. validate_strict
         # reports every error for the whole config, so falling back to the full
@@ -1538,6 +1544,13 @@ class ExperimentConfig(NamedTuple):
     # in the weakly stratified BL and breaks at its own launch level
     # (measured: 55% of its momentum deposited below 1 km).
     hines_launch_p: float = 0.0
+    e3sm_cam_source: str = "orographic"         # E3SMCAMConfig.source
+    e3sm_cam_pgwv: int = 0                      # phase-speed half-width (waves either side of c0)
+    e3sm_cam_effgw: float = 0.125               # E3SMCAMConfig.effgw [dimensionless]
+    e3sm_cam_taubgnd: float = 1.5e-3            # E3SMFrontalConfig.taubgnd [Pa]
+    e3sm_cam_c0: float = 30.0                   # E3SMFrontalConfig.c0 [m/s]
+    e3sm_cam_launch_p: float = 5.0e4            # E3SMFrontalConfig.launch_p [Pa]
+    e3sm_cam_latitude_taper: bool = True        # E3SMFrontalConfig.latitude_taper
     # Appended at the tuple END to preserve the positional ABI (codex
     # 2026-07-27 flavor review, Major 1).
     morrison_flavor: str = "mg"                 # MorrisonConfig.morrison_flavor:
@@ -3052,13 +3065,53 @@ class ExperimentConfig(NamedTuple):
         # Positivity + finiteness only — the calibratable RANGE stays in
         # ``__param_spec__`` so it is not maintained twice.
         for _f in ("mcfarlane_k_wave", "mcfarlane_directional_spread",
-                   "mcfarlane_tau_max", "hines_total_rms_wind", "hines_Fmax"):
+                   "mcfarlane_tau_max", "hines_total_rms_wind", "hines_Fmax",
+                   "e3sm_cam_taubgnd", "e3sm_cam_c0", "e3sm_cam_launch_p",
+                   "e3sm_cam_effgw"):
             _v = getattr(self, _f)
             if not math.isfinite(_v) or _v <= 0.0:
                 errors.append(
                     f"{_f} must be a positive, finite gravity-wave-drag "
                     f"parameter, got {_v!r}"
                 )
+        if self.e3sm_cam_source not in (
+                "orographic", "frontal", "convective", "background"):
+            errors.append(
+                f"e3sm_cam_source must be one of "
+                f"('orographic', 'frontal', 'convective', 'background'), "
+                f"got {self.e3sm_cam_source!r}"
+            )
+        if isinstance(self.e3sm_cam_pgwv, bool) or \
+                not isinstance(self.e3sm_cam_pgwv, int) or \
+                self.e3sm_cam_pgwv < 0:
+            errors.append(
+                f"e3sm_cam_pgwv must be an int >= 0, "
+                f"got {self.e3sm_cam_pgwv!r}"
+            )
+        if self.e3sm_cam_source in ("frontal", "background") and \
+                self.e3sm_cam_pgwv < 1:
+            errors.append(
+                f"e3sm_cam_pgwv must be >= 1 for a launch-everywhere "
+                f"spectrum; pgwv 0 is the single c=0 wave, got "
+                f"{self.e3sm_cam_pgwv!r}"
+            )
+        if not math.isfinite(self.e3sm_cam_effgw) or \
+                self.e3sm_cam_effgw > 1.0:
+            errors.append(
+                f"e3sm_cam_effgw must be a finite efficiency <= 1.0, "
+                f"got {self.e3sm_cam_effgw!r}"
+            )
+        if not math.isfinite(self.e3sm_cam_taubgnd) or \
+                self.e3sm_cam_taubgnd > 1.0e-2:
+            errors.append(
+                f"e3sm_cam_taubgnd must be a finite base stress <= 1.0e-2 Pa, "
+                f"got {self.e3sm_cam_taubgnd!r}"
+            )
+        if not isinstance(self.e3sm_cam_latitude_taper, bool):
+            errors.append(
+                f"e3sm_cam_latitude_taper must be a bool, "
+                f"got {self.e3sm_cam_latitude_taper!r}"
+            )
         _valid_gwd = VALID_GWD
         # A ``+``-joined string composes multiple GWD sources whose tendencies
         # are summed — orographic (mcfarlane/lindzen) and non-orographic
@@ -3070,7 +3123,8 @@ class ExperimentConfig(NamedTuple):
         # so at most one stateful source may appear.  ``e3sm_cam`` /
         # ``ml_emulator`` need extra per-column source fields / a network
         # module the composite path does not carry and are NOT composable.
-        _composable_stateless = ("rayleigh", "lindzen", "mcfarlane", "hines")
+        _composable_stateless = ("rayleigh", "lindzen", "mcfarlane", "hines",
+                                 "e3sm_cam")
         _composable_stateful = ("prognostic_spectral",)
         _composable = _composable_stateless + _composable_stateful
         _gwd_parts = self.gravity_wave_drag.split("+")
@@ -3081,6 +3135,16 @@ class ExperimentConfig(NamedTuple):
                     f"composite gravity_wave_drag parts must each be one of "
                     f"{_composable}, got invalid {bad} in "
                     f"{self.gravity_wave_drag!r}"
+                )
+            if "e3sm_cam" in _gwd_parts and \
+                    self.e3sm_cam_source != "background":
+                errors.append(
+                    f"gravity_wave_drag {self.gravity_wave_drag!r} may only "
+                    f"composite e3sm_cam with e3sm_cam_source='background'; "
+                    f"got e3sm_cam_source={self.e3sm_cam_source!r} "
+                    f"(orographic double-counts topographic drag against "
+                    f"lindzen/mcfarlane; frontal/convective need per-column "
+                    f"source fields the composite does not carry)"
                 )
             # Mirror get_gwd_fn's runtime rule so a duplicate composite
             # fails HERE, not later during physics construction.
