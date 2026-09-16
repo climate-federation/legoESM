@@ -101,6 +101,12 @@ KNOWN_UNVALIDATED: frozenset[str] = frozenset(
         # typo a silent channel-off, not a loud loader error.)
         "topography",
         # nested GridConfig / DycoreConfig selectors (validated at factory)
+        # grid_type: validated at grids.factory.create_grid, NOT fail-early.
+        # validate_strict does contain ``grid.grid_type not in ("mpas",
+        # "voronoi")`` but that is an incidental FEATURE gate (a continuation
+        # line of a compound condition), not a legal-set check -- which is why
+        # _has_membership below only counts a membership test that HEADS an
+        # if/elif.
         "grid_type",        # grids.factory.create_grid (C3)
         "vertical_coord",   # consumed by the vertical-coordinate builder
         "time_integrator",  # timestepping.dispatch.dispatch_integrator (C3)
@@ -174,8 +180,18 @@ def _validate_strict_source() -> str:
 
 def _has_membership(field: str, vsrc: str) -> bool:
     """``<accessor>.<field> (not) in ...`` — the real fail-early guard. Word
-    boundary around ``in`` so it doesn't match ``index``."""
-    return bool(re.search(rf"\.{field}\b\s*(?:not\s+in\b|in\b)", vsrc))
+    boundary around ``in`` so it doesn't match ``index``.
+
+    The membership test must HEAD an ``if``/``elif``: a membership that only
+    appears on a continuation line of a compound condition (``... and
+    self.grid.grid_type not in ("mpas", "voronoi")``) is a feature gate for
+    some other switch, not a validation of this field's legal set, and
+    counting it marked a real KNOWN_UNVALIDATED entry stale."""
+    return any(
+        re.search(rf"\.{field}\b\s*(?:not\s+in\b|in\b)", line)
+        for line in vsrc.splitlines()
+        if re.match(r"\s*(?:el)?if\s", line)
+    )
 
 
 def _has_equality_reject(field: str, vsrc: str) -> bool:
@@ -213,18 +229,25 @@ def test_every_scheme_like_field_is_classified() -> None:
 
 def test_known_unvalidated_is_shrink_only_and_real() -> None:
     """Allow-list hygiene: each KNOWN_UNVALIDATED entry must still be a real
-    scheme-like field that genuinely lacks a *membership* check (else remove it).
-    Uses the strict membership detector so a future ``!= "off"`` compatibility
-    check does not spuriously mark an entry stale."""
+    scheme-like field that genuinely lacks a fail-early check (else remove it).
+
+    Asks the QUESTION DIRECTLY — does ``validate_strict`` reject a bogus value
+    for this field? — instead of pattern-matching its source. That matters
+    because the completeness test above already uses the source detector: if
+    both tests shared one detector, a single detector blind spot would satisfy
+    BOTH at once and the pair would enforce nothing for that field (GLM review).
+    A behavioural probe also cannot be fooled by a compound feature gate such as
+    ``... and self.grid.grid_type not in ("mpas", "voronoi")``, which rejects
+    nothing about grid_type's own legal set."""
     detected = _scheme_like_fields()
-    vsrc = _validate_strict_source()
     stale = sorted(
         f for f in KNOWN_UNVALIDATED
-        if f not in detected or _has_membership(f, vsrc)
+        if f not in detected or _bogus_is_rejected(f)
     )
     assert not stale, (
-        f"KNOWN_UNVALIDATED entries are stale (now membership-validated or no "
-        f"longer scheme-like) — remove them: {stale}"
+        f"KNOWN_UNVALIDATED entries are stale (validate_strict now REJECTS a "
+        f"bogus value, or the field is no longer scheme-like) — remove them "
+        f"and add the field to EXPECTED_VALIDATED: {stale}"
     )
 
 
@@ -253,6 +276,38 @@ def _bogus_raises(**kwargs) -> bool:
     except ValueError:
         return True
     return False
+
+
+def _bogus_is_rejected(field: str) -> bool:
+    """Does ``validate_strict`` reject a bogus value for *field*, with every
+    other field left at its valid default?
+
+    Nested selectors are routed into the sub-config that owns them, so a nested
+    field is probed as honestly as a top-level one. A field whose owner cannot
+    be determined returns False (treated as NOT validated), which is the safe
+    direction: it keeps the allow-list entry rather than silently dropping a
+    field out of both tests.
+    """
+    from legoesm.driver.config import DycoreConfig, GridConfig, OutputConfig
+
+    _NESTED = {
+        "grid": (GridConfig, ("grid_type", "vertical_coord")),
+        "dycore": (DycoreConfig, ("model_type", "discretization",
+                                  "time_integrator", "mpas_vert_advection_scheme")),
+        "output": (OutputConfig, ("checkpoint_format",)),
+    }
+    for kw, (cls, fields) in _NESTED.items():
+        if field in fields:
+            try:
+                return _bogus_raises(**{kw: cls(**{field: _BOGUS})})
+            except (TypeError, ValueError):
+                # The sub-config itself rejected the bogus value at construction
+                # (a Literal/enum type), which is still a fail-early rejection.
+                return True
+    try:
+        return _bogus_raises(**{field: _BOGUS})
+    except TypeError:
+        return False
 
 
 def test_default_config_is_valid() -> None:

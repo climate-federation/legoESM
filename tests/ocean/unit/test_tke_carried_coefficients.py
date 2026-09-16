@@ -132,6 +132,7 @@ def test_carried_coefficients_feed_matched_step_and_postsolve_prandtl(monkeypatc
     monkeypatch.setattr(tke_mod, "_solve_tke_backward_euler", fake_solve)
     out = tke_mod.tke_vertical_mixing(
         **_column_kwargs(cfg), dz_surface=jnp.asarray([0.5]),
+        dz_ref=jnp.asarray([1.0, 2.0, 3.0]), jacobian=jnp.ones((1,)),
         preclosure_K_M=avm, preclosure_K_H=avt,
         preclosure_K_M_surface=jnp.asarray([13.0]))
 

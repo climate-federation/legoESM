@@ -869,13 +869,13 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
         # scaled by the z-star Jacobian like every other thickness. On a
         # Veros u_centered coordinate -z_full_ref[0] IS 0.5·dzw_top exactly
         # (dzw_top = 2·dzt_top - dzw[-2] = -2·zt_top, numerics.py:21).
-        # Also required (Phase-2 #1317 T3) by tke_surface_bc_level="nemo_z0"
-        # — the virtual z=0 surface row's face distance to interior
-        # interface 0 uses the SAME slot.
+        # This slot is the VEROS injection volume ONLY.  The nemo_z0
+        # virtual-surface FACE distance is NEMO's e3t(1) = dz_ref[0]*J (a
+        # different metric — twice this one on a midpoint grid), derived
+        # inside tke_vertical_mixing from the dz_ref/jacobian passed below
+        # so it has a single owner (#1690).
         dz_surface = None
-        if (getattr(tke_cfg, "veros_dz_slots", False)
-                or getattr(tke_cfg, "tke_surface_bc_level",
-                           "interior_pinned") == "nemo_z0"):
+        if getattr(tke_cfg, "veros_dz_slots", False):
             dz_surface = (-z_coord.z_full_ref[0]) * J
         # Veros tke_mxl_choice=1 distance-to-boundary cap (tke.py:43-47):
         # the buoyancy mixing length may not exceed the distance to the

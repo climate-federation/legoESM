@@ -101,6 +101,12 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # decision: "conserving form always"); False restores the legacy clamp
     # for bit-comparison against older runs.
     conservative_tracer_clamp: bool = True
+    # Optional (nlev,) per-layer weight restricting the budget ledger's
+    # SNAPSHOT-derived rows (dynamics, clips) to a vertical band, matching the
+    # weight the physics rows use. Both sides must carry the same weight or the
+    # rows no longer sum to the column-store change and the table is silently
+    # inconsistent. None = full column, byte-identical.
+    budget_ledger_level_weight: object = None
     # #1354/#1515: applies ONLY to the plain-max hard-floor path (i.e. when
     # conservative_tracer_clamp=False).  Then the q_v floor removes the latent
     # heat tied to the clipped vapour (energy_consistent_moisture_floor) so
@@ -155,9 +161,9 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # ½ half→full average).  A 2Δσ mode grows until the silent ``T_min`` floor
     # pins its cold levels and rectifies it into an even/odd checkerboard (#915
     # autopsy: even levels pinned at 50 K, odd exploding to 8e8 K).  Damping
-    # rate is 16·ν interior / 8·ν at the top+bottom boundary (τ = 1/(16ν),
-    # 1/(8ν); e.g. ν=2e-6 ⇒ ~8.7 h interior, ~17 h boundary — fast vs the
-    # day-20 blowup).  del4 damps 2Δσ ~47× faster than an 8Δσ resolved wave, so
+    # rate is 16·ν interior / 12·ν next-to-boundary / 4·ν at the top+bottom
+    # level (τ = 1/(16ν); e.g. ν=2e-6 ⇒ ~8.7 h interior, ~35 h boundary — fast
+    # vs the day-20 blowup); a linear profile is untouched (zero tendency).  del4 damps 2Δσ ~47× faster than an 8Δσ resolved wave, so
     # resolved vertical structure is essentially untouched, and it conserves
     # column-integrated T to machine precision (flux form).  0.0 (default)
     # reproduces the pre-fix dycore bit-for-bit (matches the ``nu_del2``/
@@ -206,9 +212,11 @@ def vertical_del4_T_tendency(
     ``nu_del4`` biharmonic hyperdiffusion.
 
     Implemented as del2∘del2 (Laplacian of the Laplacian).  Boundary treatment:
-    the INNER Laplacian is ``reflect``-padded (so a 2Δσ mode keeps its full
-    ``-4`` Laplacian at the top/bottom levels — where the #930 checkerboard is
-    worst, at the low-pressure top), while the OUTER Laplacian is ``edge``
+    the INNER Laplacian uses linearly EXTRAPOLATED ghost levels (a boundary
+    gradient is not a mode: linear profiles give exactly zero; a 2Δσ mode is
+    still damped at 4ν on the boundary level and 12ν on the next — where the
+    #930 checkerboard is worst, at the low-pressure top), while the OUTER
+    Laplacian is ``edge``
     (zero-gradient) padded (a no-flux boundary → the INDEX-space sum
     ``Σ_k tendency_k`` is ZERO to machine precision for ANY profile).
     That is NOT the same as column conservation: the conserved quantity is the
@@ -225,9 +233,9 @@ def vertical_del4_T_tendency(
     On a uniform grid the correction is identically zero to round-off
     (measured ≤1.4e-20 K/s, far below the float32 ULP of the tendency), so the
     uniform and ``dsigma=None`` paths stay bit-identical.  Discrete 2Δσ
-    ``(-1)^k`` response: ``-16·nu`` in the interior, ``-8·nu`` at the top/bottom
-    (½ the interior rate — a boundary no-flux constraint of any conservative
-    biharmonic; still strong).  An 8Δσ resolved wave sees ``≈-0.34·nu``
+    ``(-1)^k`` response: ``-16·nu`` in the interior, ``-12·nu`` next to the
+    boundary and ``-4·nu`` on the top/bottom level (the extrapolated ghost
+    sees no gradient; still strong).  An 8Δσ resolved wave sees ``≈-0.34·nu``
     (≈47× weaker than 2Δσ), so the filter is grid-scale-selective.
 
     Parameters
@@ -253,10 +261,16 @@ def vertical_del4_T_tendency(
         Vertical-hyperdiffusion tendency of T, same shape as ``T_3d``.
     """
     pad_axes = ((0, 0),) * (T_3d.ndim - 1)
-    # Inner Laplacian: reflect BC keeps the FULL 2Δσ response at the boundary
-    # levels (a plain edge/no-flux inner BC halves it again and leaves a slowly
-    # decaying top boundary mode).
-    Tp = jnp.pad(T_3d, (*pad_axes, (1, 1)), mode="reflect")
+    # Inner Laplacian: ghost levels by LINEAR EXTRAPOLATION
+    # (ghost_top = 2*T[0] - T[1], ghost_bot = 2*T[-1] - T[-2]), so a boundary
+    # GRADIENT is invisible to the filter: linear profiles give exactly zero,
+    # a quadratic 1·nu at the boundary; 2Δσ damping is 4·nu at the boundary
+    # level, 12·nu at the next, 16·nu interior.  A reflect pad turned any
+    # boundary gradient into a fake 2Δσ mode (measured -2.77/+2.77 K/day on
+    # the top two layers of a linear 8 K/layer profile at nu=2e-6).
+    ghost_top = 2.0 * T_3d[..., 0:1] - T_3d[..., 1:2]
+    ghost_bot = 2.0 * T_3d[..., -1:] - T_3d[..., -2:-1]
+    Tp = jnp.concatenate([ghost_top, T_3d, ghost_bot], axis=-1)
     lap = Tp[..., :-2] - 2.0 * Tp[..., 1:-1] + Tp[..., 2:]      # ∂²/∂σ²
     # Outer Laplacian: edge (zero-gradient / no-flux) BC ⇒ Σ_k tendency = 0
     # exactly (flux form), so the filter conserves column-integrated T.
@@ -1166,11 +1180,14 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 column_store_snapshot_column,
             )
 
+            _led_w = self.config.budget_ledger_level_weight
+
             def _snap(s):
                 water = [s.tracers[k].data for k in LEDGER_WATER_SPECIES
                          if s.tracers is not None and k in s.tracers]
                 return column_store_snapshot_column(
-                    s.p_s.data, self.sigma_coord.dsigma, s.T.data, *water)
+                    s.p_s.data, self.sigma_coord.dsigma, s.T.data, *water,
+                    level_weight=_led_w)
 
             _s_pre = _snap(state)
             _s_dyn = _snap(_state_postdyn)

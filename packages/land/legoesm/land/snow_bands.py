@@ -276,6 +276,7 @@ def step_snow_bands(
     Q_net: jnp.ndarray,
     cfg: ElevationSnowBandConfig,
     T_snow_melt: float = constants.T_freeze,
+    snow_age_activation_K: float = 0.0,
     precip_rain_bands: jnp.ndarray | None = None,
     wind: jnp.ndarray | None = None,
 ) -> SnowBandStep:
@@ -331,6 +332,7 @@ def step_snow_bands(
     swe_after_melt, age_new_bands, snow_melt = update_snow(
         swe_bands, snow_age_bands, T_sfc_band, snowfall_bands, dt,
         Q_net=Q_net_bands, T_snow_melt=T_snow_melt,
+        snow_age_activation_K=snow_age_activation_K,
     )
     # 1b. Rain-on-snow refreezing (gap 6 cold content): rain onto a sub-freezing band
     #     with snow freezes into the pack, releasing L_f (the caller adds it to G) and
@@ -495,7 +497,9 @@ def band_albedo(
         ground = base * (1.0 - ice_frac) + cfg.alpha_glacier_ice * ice_frac
     else:
         ground = base
-    return ground * (1.0 - cover) + snow_albedo_fn(snow_age_bands) * cover
+    # same floor as surface_albedo.land_albedo: snow cannot darken a surface
+    # below its own snow-free albedo (bare ice / ice-sheet bands)
+    return ground * (1.0 - cover) + jnp.maximum(snow_albedo_fn(snow_age_bands), ground) * cover
 
 
 class BandRadiation(NamedTuple):

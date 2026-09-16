@@ -244,7 +244,7 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
     if _conv_cloud and allow_convective_cloud:
         logger.info(
             "convective_cloud=True ACTIVE on the MPAS standalone path: "
-            "Slingo cumulus fraction driven by the one-step-lagged "
+            "Slingo-1987-inspired surrogate cumulus fraction driven by the one-step-lagged "
             "PhysicsState.conv_precip carry (the convection module's "
             "column-integrated in-updraft rain production). Schemes with "
             "no rain split publish zero — their cumulus fraction is zero."
@@ -256,7 +256,7 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
         logger.warning(
             "convective_cloud=True is FORCED OFF on the spectral "
             "standalone radiation path: its lean loop carries no "
-            "PhysicsState, so there is no conv_precip for the Slingo "
+            "PhysicsState, so there is no conv_precip for the Slingo-1987-inspired surrogate "
             "fraction. The FV pipeline and the MPAS lane honour the "
             "setting."
         )
@@ -297,6 +297,7 @@ def _standalone_cloud_config(cfg, cloud_scheme: str,
         clubb_cf_override_floor=getattr(
             cfg, "cloud_clubb_cf_override_floor", None),
         saturation_scheme=getattr(cfg, "cloud_saturation_scheme", None),
+        cover_condensate_q_ref=getattr(cfg, "cloud_cover_condensate_q_ref", None),
     )
 
 
@@ -307,7 +308,66 @@ _HARD_SAT_LOG_CADENCE_STEPS = 432
 _HARD_SAT_LOG_QV_EPS = 1.0e-9        # [kg/kg] count a point as "drained" above this
 
 
-def _mpas_qv_smooth_step(q_v, mesh, nu, dt):
+def _mpas_zenith_ocean_albedo(lat, day, orbit=None):
+    """Briegleb (1992) open-ocean albedo at the daytime-effective daily-mean
+    solar cosine, per cell.
+
+    ``mu = Q_day / (S_0 * f_day)`` is the cosine a column sees AVERAGED OVER
+    ITS SUNLIT HOURS, which is the right weighting for an albedo that is held
+    fixed for the whole day.  The eccentricity factor is divided out because
+    ``mu`` is a geometric cosine, not a flux.  ``S_0`` cancels from the ratio,
+    so the value passed is immaterial and a fixed reference is used.
+
+    Polar night gives ``f_day -> 0``; the floor keeps ``mu`` finite there and
+    the albedo is irrelevant because there is no sunlight to reflect.
+    """
+    from legoesm.atmosphere.physics.radiation.solar import (
+        daily_mean_insolation, daylight_fraction, earth_sun_distance_factor,
+    )
+    from legoesm.surface_albedo import OceanAlbedoConfig, ocean_albedo
+
+    s_0 = constants.S_0
+    eccf = (earth_sun_distance_factor(day, orbit) if orbit is not None else 1.0)
+    q_day = daily_mean_insolation(lat, day, s_0, orbit=orbit) / eccf
+    f_day = daylight_fraction(lat, day, orbit=orbit)
+    mu = jnp.clip(q_day / (s_0 * jnp.maximum(f_day, 1.0e-6)), 0.0, 1.0)
+    return ocean_albedo(mu, OceanAlbedoConfig(method="zenith"))
+
+
+
+def _qv_level_conserving_floor(q_new, area, owned_mask=None):
+    """Positivity floor that conserves the per-level area integral.
+
+    The biharmonic branch of the smoother has no maximum principle, so a bare
+    ``max(q, 0)`` CREATES water wherever it clips (measured: it seeded the
+    cold-start ice explosion, 2026-09-15).  Clip the negatives, then rescale
+    the positive cells of each level by
+
+        factor_l = sum_c A_c q_l / sum_c A_c max(q_l, 0)   in [0, 1]
+
+    so ``sum_c A_c q_out`` equals ``sum_c A_c q_new`` per level to roundoff;
+    clipping only adds mass, so the factor removes exactly what it added.
+    Under MPI the partial sums are OWNED-masked (halo cells are duplicates)
+    and combined with a differentiable allreduce, so every rank scales by the
+    same factor; halo cells are clipped and scaled pointwise like the rest.
+    Pure jnp: no Python branch on a traced value, and the tiny-denominator
+    guard divides a sanitised denominator so neither pass sees NaN.
+    (Drafted by GLM-5.2, 2026-09-16.)
+    """
+    from legoesm.parallel.reductions import global_sum_if_distributed
+    area = jnp.asarray(area)
+    w = area if owned_mask is None else jnp.where(owned_mask, area, 0.0)
+    q_clip = jnp.maximum(q_new, 0.0)
+    num = global_sum_if_distributed(jnp.sum(w[:, None] * q_new, axis=0))
+    den = global_sum_if_distributed(jnp.sum(w[:, None] * q_clip, axis=0))
+    tiny = jnp.finfo(q_new.dtype).tiny
+    safe_den = jnp.where(den > tiny, den, jnp.ones_like(den))
+    factor = jnp.where(den > tiny, jnp.clip(num / safe_den, 0.0, 1.0), 0.0)
+    return q_clip * factor[None, :]
+
+
+def _mpas_qv_smooth_step(q_v, mesh, nu, dt, nu4=0.0, mid_refresh=None,
+                         owned_mask=None):
     """MPAS post-step horizontal q_v smoothing (array-level, testable).
 
     UNWEIGHTED SCVT del2 (``scalar_del2_cell_3d``) + a q>=0 floor, mirroring
@@ -328,14 +388,37 @@ def _mpas_qv_smooth_step(q_v, mesh, nu, dt):
     mesh : VoronoiMesh
     nu : float — del2 diffusivity [m^2/s].
     dt : float — step [s].
+    nu4 : float — del4 (biharmonic) diffusivity [m^4/s]; 0 disables the term.
+        The biharmonic is SCALE-SELECTIVE: it separates two-cell from four-cell
+        structure by a factor sixteen where the Laplacian separates them by
+        four, so it can hold grid-scale noise down without flattening the
+        resolved humidity gradients.  It has NO maximum principle, so with it
+        on the positivity floor is load-bearing; it is the per-level
+        conserving borrow ``_qv_level_conserving_floor`` (clip, then rescale
+        the level's positives), so ``sum_c A_c q_c`` is conserved to roundoff
+        and no water is created.  The driver's setup guard enforces
+        ``nu4*dt*g_max^2 <= 0.5``.
+    mid_refresh : Callable(array) -> array, optional — distributed-only halo
+        refresh for the biharmonic's intermediate Laplacian.
 
     Returns
     -------
     jax.Array, shape (nCells, nlev) — smoothed, floored q_v (q_v dtype).
     """
-    from legoesm.core.operators_voronoi import scalar_del2_cell_3d
+    from legoesm.core.operators_voronoi import (
+        scalar_del2_cell_3d,
+        scalar_del4_cell_3d,
+    )
     lap = scalar_del2_cell_3d(q_v, mesh)
-    return jnp.maximum(q_v + dt * nu * lap.astype(q_v.dtype), 0.0)
+    if nu4 <= 0.0:
+        # BIT-IDENTICAL to the pre-biharmonic path, including the association
+        # order of ``dt * nu * lap`` -- the existing bit-exactness test holds
+        # the del2-only lane to equality, not to a tolerance.
+        return jnp.maximum(q_v + dt * nu * lap.astype(q_v.dtype), 0.0)
+    del4 = scalar_del4_cell_3d(q_v, mesh, mid_refresh=mid_refresh)
+    tend = (nu * lap + nu4 * del4).astype(q_v.dtype)
+    return _qv_level_conserving_floor(q_v + dt * tend, mesh.areaCell,
+                                      owned_mask=owned_mask)
 
 
 def clear_sky_pass_effective(
@@ -404,7 +487,8 @@ class _MPASSfcFluxAccum:
     the "monthly mean" of a day/night field like rsut kept the full
     instantaneous diurnal pattern while labeled ``time: mean``).
 
-    Covers slots 2..7 of the ``_sfc_diag`` contract (2 precip, 3 rlut,
+    Covers slots 0..7 of the ``_sfc_diag`` contract (0 sw_net_sfc and
+    1 lw_net_sfc, read only by the energy tracker; 2 precip, 3 rlut,
     4 rsut, 5 rsdt, 6 hfss, 7 hfls) — the strongly diurnal flux fields —
     plus the clear-sky TOA pair (10 rsutcs, 11 rlutcs; #843 lean-lane
     port), which is only ever non-None when ``--clear-sky-diag`` is on
@@ -435,7 +519,22 @@ class _MPASSfcFluxAccum:
     reporting precision, documented rather than engineered around.
     """
 
-    SLOTS = (2, 3, 4, 5, 6, 7, 10, 11)
+    # Slots 0 and 1 (sw_net_sfc, lw_net_sfc, both +into surface) were added
+    # 2026-09-05 for the #1354 energy budget.  They are NOT part of the CMOR
+    # feed -- there is no surface-radiation table entry -- but they are the
+    # LARGEST term in the column energy budget (~77 W/m^2 against a ~20 W/m^2
+    # signal), and the energy tracker was reading them as fixed-clock-time
+    # snapshots.  Measured on job 9632045: sampled sensible heat 8.0 W/m^2
+    # against an accumulated 20.5, and an apparent leak of +34.7 W/m^2 where
+    # accumulated channels gave ~11.  Accumulating costs one device-side add
+    # per step per slot and is what makes the budget answerable at all.
+    SLOTS = (0, 1, 2, 3, 4, 5, 6, 7, 10, 11)
+    #: The slots the column energy budget reads (sw/lw net sfc, lw_up, sw_up,
+    #: sw_dn, hfss, hfls).  After the first radiation call every one of them
+    #: is non-None on EVERY step (the MPAS model holds the last radiation
+    #: value across held-radiation sub-steps, primitive_eq_mpas.step), which
+    #: is what lets ``window_ready`` demand equal per-slot counts.
+    ENERGY_SLOTS = (0, 1, 3, 4, 5, 6, 7)
 
     def __init__(self, expected_steps: int = 0, window_start_day: float = 0.0,
                  dt_s: float = 0.0):
@@ -490,6 +589,16 @@ class _MPASSfcFluxAccum:
     def has_samples(self) -> bool:
         """True if any slot accumulated at least one sample this interval."""
         return bool(self._n)
+
+    def window_ready(self, slots) -> bool:
+        """True iff the window is complete AND every slot in *slots* was
+        accumulated over the SAME number of samples.  A checkpoint written
+        before a slot existed restores the others with a full count while
+        the new slot only sees the post-restart remainder; ``is_complete()``
+        passes (it counts steps, not per-slot samples) and the short slot
+        would be published as a full interval mean (codex, #1354)."""
+        counts = {self._n.get(i, 0) for i in slots}
+        return self.is_complete() and len(counts) == 1 and counts != {0}
 
     def is_complete(self) -> bool:
         """True iff this interval saw EXACTLY the step count a complete
@@ -754,6 +863,11 @@ def _mpas_hard_saturation_poststep(T, q_v, q_c, p_s, sigma_full, dt,
 # seed ceiling is Morrison-consistent at low density (without floors the p/(R_dT)
 # ceiling loosens as 0.1/rho aloft — ~4x at 15 hPa, far more near the top).
 _ICE_SEED_RHO_FLOOR = 0.1        # [kg/m^3]
+
+# MultiLayerLandState fields that are numerical CACHES, not prognostic state:
+# never written to a checkpoint and never required by one, so a checkpoint
+# written before the field existed still restarts (the cache cold-starts).
+_LAND_ML_CACHE_FIELDS = ("canopy_x",)
 
 
 def _seed_nucleated_ice_number(N_i, dq_i, ice_nuc_mass, n_i_nuc_max, p_full, T):
@@ -1161,7 +1275,9 @@ class ModelDriver:
                 # Optional fields (TgC, surface_water) may be None — np.asarray
                 # would pickle a 0-d object array into the npz and crash the
                 # load-side jnp.asarray. Skip; restore only replaces saved keys.
-                if _v is not None:
+                # Cache fields (the canopy warm start) are skipped too: they
+                # carry no physics and an older reader would refuse the key.
+                if _v is not None and _f not in _LAND_ML_CACHE_FIELDS:
                     base[f"land_ml_{_f}"] = np.asarray(_v)
         return base if base else None
 
@@ -1296,8 +1412,9 @@ class ModelDriver:
                 f"land_ml checkpoint has unknown field(s) {sorted(unknown)}; "
                 f"current MultiLayerLandState fields are {sorted(valid)}")
         expected = {f for f in template._fields
-                    if getattr(template, f) is not None}
-        got = set(popped)
+                    if getattr(template, f) is not None
+                    and f not in _LAND_ML_CACHE_FIELDS}
+        got = set(popped) - set(_LAND_ML_CACHE_FIELDS)
         if got != expected:
             raise ValueError(
                 "land_ml checkpoint field set does not match the current "
@@ -2901,6 +3018,26 @@ class ModelDriver:
                 land_albedo=cfg.land_albedo._replace(
                     **biophysics_lmip_albedo_scalars()))
 
+        # Temperature-dependent snow ageing (opt-in): applied LAST, so it
+        # survives both the bake and the calibration re-apply above. The
+        # calibration fitted only the calendar-clock scalars and never saw this
+        # field, so it cannot be overwritten by it.
+        _act = getattr(self.config, "snow_age_activation_K", None)
+        if _act is not None:
+            cfg = cfg._replace(
+                land_albedo=cfg.land_albedo._replace(
+                    snow_age_activation_K=float(_act)))
+        # Snow-age e-folding time, same placement and for the same reason: the
+        # calibration re-apply above sets tau_snow_decay, so an override has to
+        # land after it or it is silently discarded.
+        _tau_d = getattr(self.config, "land_snow_tau_days", None)
+        if _tau_d is not None:
+            cfg = cfg._replace(
+                land_albedo=cfg.land_albedo._replace(
+                    tau_snow_decay=float(_tau_d) * 86400.0))
+            logger.info("  land snow-albedo age e-folding: %.3g days "
+                        "(overrides the calibration)", float(_tau_d))
+
         # A CANOPY SCHEME GETS CANOPY PARAMETERS.
         #
         # ``clm_multilayer_setup`` returns ``LandSurfaceParams`` — per-PFT
@@ -3711,6 +3848,8 @@ class ModelDriver:
                 # miss exactly the cold cirrus the switch adds (#1521).
                 saturation_scheme=getattr(
                     self.config, "cloud_saturation_scheme", None),
+                cover_condensate_q_ref=getattr(
+                    self.config, "cloud_cover_condensate_q_ref", None),
             )
         self.diagnostics = DiagnosticCollector(
             nlev=self.config.grid.nlev,
@@ -9156,7 +9295,42 @@ class ModelDriver:
                 float(jnp.mean(_f_land_cells)),
             )
         _budget_ledger_on = bool(getattr(cfg.output, "budget_ledger", False))
+        # Optional vertical band for the ledger.  A column budget cannot see a
+        # vertical-REDISTRIBUTION bias -- convection's column water row is
+        # exactly zero by construction -- so a band is what lets the table say
+        # which process supplies a LAYER.  The SAME weight goes to the physics
+        # rows and to the dycore's snapshot-derived rows, or the table stops
+        # summing to the column-store change.
+        _ledger_band = getattr(cfg.output, "budget_ledger_sigma_band", None)
+        _ledger_weight = None
+        if _ledger_band is not None:
+            if not _budget_ledger_on:
+                raise ValueError(
+                    "budget_ledger_sigma_band is set but budget_ledger is off; "
+                    "the band would select levels of a ledger that is never "
+                    "computed.")
+            from legoesm.diagnostics.process_ledger import sigma_band_weight
+            # HYBRID columns have no single sigma_half: the band would select
+            # different pressures under different surface pressures, so the
+            # weight would not mean one thing. Refused rather than silently
+            # computed on an approximate coordinate.
+            if not hasattr(self.sigma, "sigma_half"):
+                raise ValueError(
+                    "budget_ledger_sigma_band needs a sigma vertical "
+                    f"coordinate; this run uses {cfg.grid.vertical_coord!r}, "
+                    "whose layer pressures depend on the surface pressure so a "
+                    "single sigma band does not select one pressure range.")
+            _ledger_weight = sigma_band_weight(
+                self.sigma.sigma_half, float(_ledger_band[0]),
+                float(_ledger_band[1]))
+            logger.info(
+                "  budget ledger restricted to sigma band [%.3f, %.3f] "
+                "(%.1f%% of the column mass by layer weight)",
+                float(_ledger_band[0]), float(_ledger_band[1]),
+                100.0 * float(jnp.sum(_ledger_weight * self.sigma.dsigma)
+                              / jnp.sum(self.sigma.dsigma)))
         physics_fn = make_physics(phys_cfg, model_type="mpas", dt=DT,
+                                  budget_ledger_level_weight=_ledger_weight,
                                   column_mesh=_column_mesh,
                                   f_land=(_f_land_cells
                                           if (_land_beta != 1.0
@@ -9189,7 +9363,8 @@ class ModelDriver:
                                      or _land_beta_soil_on)
                                  else None),
                          land_beta=_land_beta,
-                         budget_ledger=_budget_ledger_on)
+                         budget_ledger=_budget_ledger_on,
+                         budget_ledger_level_weight=_ledger_weight)
             if _subcycle_rad else None
         )
         if _subcycle_rad:
@@ -9277,8 +9452,9 @@ class ModelDriver:
         # monotonicity factor is
         # geometry-only, so the CFL guard below is EXACT for the applied op.
         _qv_smooth_nu = float(getattr(cfg, "mpas_qv_smooth_del2_m2s", 0.0))
+        _qv_smooth_nu4 = float(getattr(cfg, "mpas_qv_smooth_del4_m4s", 0.0))
         _qv_halo_refresh = None
-        if _qv_smooth_nu > 0.0:
+        if _qv_smooth_nu > 0.0 or _qv_smooth_nu4 > 0.0:
             from legoesm.core.operators_voronoi import (
                 scalar_del2_cell_cfl_factor,
             )
@@ -9327,11 +9503,54 @@ class ModelDriver:
                     f"1/m^2). Max stable coefficient here: "
                     f"{0.5 / (DT * _g_max):.3e} m^2/s."
                 )
-            logger.info(
-                "  MPAS q_v del2 smoothing ON: nu=%.3g m^2/s "
-                "(nu*dt*g_max=%.4f of 0.5 monotone bound)",
-                _qv_smooth_nu, _cfl,
-            )
+            if _qv_smooth_nu > 0.0:
+                logger.info(
+                    "  MPAS q_v del2 smoothing ON: nu=%.3g m^2/s "
+                    "(nu*dt*g_max=%.4f of 0.5 monotone bound)",
+                    _qv_smooth_nu, _cfl,
+                )
+            if _qv_smooth_nu4 > 0.0:
+                # Gershgorin on the Laplacian gives |lambda| <= 2*g_max
+                # (diagonal -g_c, off-diagonal row sum g_c), so the
+                # biharmonic's spectral radius is at most 4*g_max^2 and
+                # forward-Euler stability nu4*|lambda|*dt <= 2 reduces to
+                # nu4*dt*g_max^2 <= 0.5.  Measured on the subdivision-6 mesh
+                # the Laplacian's radius is 1.364*g_max, so this is
+                # conservative by ~2x.  The biharmonic has NO maximum
+                # principle, so unlike the del2 case the bound buys STABILITY
+                # only; the q>=0 floor can still fire.
+                _cfl4 = _qv_smooth_nu4 * DT * _g_max ** 2
+                if _cfl4 > 0.5:
+                    raise ValueError(
+                        f"mpas_qv_smooth_del4_m4s={_qv_smooth_nu4:g} violates "
+                        f"the explicit-biharmonic stability bound: "
+                        f"nu4*dt*g_max^2 = {_cfl4:.3f} > 0.5 (dt={DT:g}s, mesh "
+                        f"g_max={_g_max:.3e} 1/m^2). Max coefficient here: "
+                        f"{0.5 / (DT * _g_max ** 2):.3e} m^4/s."
+                    )
+                logger.info(
+                    "  MPAS q_v del4 smoothing ON: nu4=%.3g m^4/s "
+                    "(nu4*dt*g_max^2=%.4f of 0.5 stability bound)",
+                    _qv_smooth_nu4, _cfl4,
+                )
+            if _qv_smooth_nu > 0.0 and _qv_smooth_nu4 > 0.0:
+                # The two guards above are each sufficient ALONE.  Applied in
+                # one explicit update they add, and the two separate budgets
+                # would admit a combined forward-Euler amplification of up to
+                # 3 (1 from the del2 branch, 2 from the del4 branch) where 2
+                # is the limit -- so the sum is bounded here as well (codex
+                # review, 2026-09-11).
+                _cfl_sum = DT * (2.0 * _qv_smooth_nu * _g_max
+                                 + 4.0 * _qv_smooth_nu4 * _g_max ** 2)
+                if _cfl_sum > 2.0:
+                    raise ValueError(
+                        f"the del2 and del4 q_v filters are individually "
+                        f"stable but jointly are not: dt*(2*nu*g_max + "
+                        f"4*nu4*g_max^2) = {_cfl_sum:.3f} > 2 "
+                        f"(nu={_qv_smooth_nu:g} m^2/s, "
+                        f"nu4={_qv_smooth_nu4:g} m^4/s, dt={DT:g}s, "
+                        f"g_max={_g_max:.3e} 1/m^2)."
+                    )
         _sst_forcing = (cfg.radiation != "none" and self.get_sst_sic is not None)
         _sic_day = None            # (nCells,) ice fraction of the last forcing day
         _ice_skin_on = bool(getattr(cfg, "mpas_ice_skin_prognostic", False))
@@ -9500,13 +9719,27 @@ class ModelDriver:
         # do nothing, silently — the "unknown/unimplemented selection quietly
         # does something else" failure the dispatch-hardening rule exists to
         # stop. Raise until the zenith curve is shared with this lane.
-        if bool(getattr(cfg, "dynamic_albedo", False)):
-            raise NotImplementedError(
-                "dynamic_albedo=True is not implemented on the MPAS lane: "
-                "the surface albedo handed to radiation here is the static "
-                "tile blend (ocean/ice/land), so the zenith-angle-dependent "
-                "ocean curve the FV lane applies would be silently ignored. "
-                "Run the FV lane, or leave dynamic_albedo=False.")
+        # Zenith-angle-dependent open-ocean albedo (Briegleb 1992), the same
+        # curve the FV lane applies.  A FIXED 0.06 is roughly right for an
+        # overhead sun and badly wrong where the sun never rises far: measured
+        # on this configuration the poles carry a -20.3 W/m^2 CLEAR-SKY
+        # shortwave bias, i.e. the surface reflects too little, and a flat
+        # ocean albedo is one of three candidate causes.
+        #
+        # Cadence: the MPAS surface albedo is assembled ONCE PER FORCING DAY
+        # (with the SST/sea-ice sample), not per radiation call, so the cosine
+        # used here is the DAYTIME-EFFECTIVE daily mean
+        # ``mu = Q_day / (S_0 * f_day)`` -- exactly the quantity the FV lane
+        # uses on its non-diurnal path, and consistent with the daily cadence
+        # of the field it feeds.  Under a diurnal cycle this is an average over
+        # the sunlit day rather than the instantaneous value; that is an
+        # approximation of the ALBEDO, not of the insolation, and it is stated
+        # rather than hidden.
+        _zenith_ocean_alb = bool(getattr(cfg, "dynamic_albedo", False))
+        _alb_lat = None
+        if _zenith_ocean_alb:
+            _, _alb_lat_np = self._owned_p_s_and_lat()
+            _alb_lat = jnp.asarray(_alb_lat_np).reshape(-1)
         _albedo_ocean = float(cfg.albedo_ocean)
         _albedo_ice = float(cfg.albedo_ice)
         _albedo_land_static = None
@@ -9998,6 +10231,10 @@ class ModelDriver:
             # EnergyBudgetTracker per diag step from self.model._sfc_diag.
             "energy_toa_net": [], "energy_dE_dt": [], "energy_residual": [],
             "sw_net_sfc": [], "lw_net_sfc": [], "hfss": [], "hfls": [],
+            # 1.0 = the seven energy channels above are diagnostic-INTERVAL
+            # MEANS; 0.0 = end-of-interval snapshots, which alias the diurnal
+            # cycle of the land-dominated turbulent fluxes (#1354/#1353).
+            "energy_flux_interval_mean": [],
         }
 
         t_start = time.time()
@@ -10175,7 +10412,7 @@ class ModelDriver:
             # carry and must fail loudly (issue #405/#413).
             _NEW_OPTIONAL_PS_FIELDS = frozenset({
                 "aerosol_number",
-                # conv_precip (2026-07-24): the Slingo lag carry; zero-seed
+                # conv_precip (2026-07-24): the Slingo-1987-inspired surrogate lag carry; zero-seed
                 # is the correct pre-feature state (no convective cloud was
                 # diagnosed before it existed).
                 "conv_precip",
@@ -10453,12 +10690,17 @@ class ModelDriver:
                         # to the scalar config albedo (0.06 = open ocean) for
                         # EVERY column, land included.
                         if _sfc_albedo_on:
+                            _alb_ocean_day = _albedo_ocean
+                            if _zenith_ocean_alb:
+                                _alb_ocean_day = _mpas_zenith_ocean_albedo(
+                                    _alb_lat, _force_day_canonical,
+                                    getattr(self, "orbit", None))
                             _sea_albedo_day = blend_surface_property(
-                                _sic_day, _albedo_ice, _albedo_ocean)
+                                _sic_day, _albedo_ice, _alb_ocean_day)
                             _forcing_daily["sfc_albedo"] = (
                                 blended_surface_albedo(
                                     _sic_day, _alb_f_land, _albedo_ice,
-                                    _albedo_ocean, _albedo_land_static))
+                                    _alb_ocean_day, _albedo_land_static))
                     if _ext_forcing:
                         _ext_p_s, _ext_lat = self._owned_p_s_and_lat()
                         _o3, _aer, _ghg = self._precompute_external_forcing(
@@ -10754,7 +10996,7 @@ class ModelDriver:
             # the per-level sum_c A_c q_c integral, NOT column water vapour —
             # an explicitly non-conservative filter (see the config field note).
             # Eager like the drain below (outside jit).
-            if _qv_smooth_nu > 0.0:
+            if _qv_smooth_nu > 0.0 or _qv_smooth_nu4 > 0.0:
                 _trc_sm = self.state.tracers
                 _qv_sm_in = _trc_sm["q_v"].data
                 if _qv_halo_refresh is not None:
@@ -10762,7 +11004,10 @@ class ModelDriver:
                     # read owner values (see the setup note, #1321).
                     _qv_sm_in = _qv_halo_refresh(_qv_sm_in)
                 _qv_new_sm = _mpas_qv_smooth_step(
-                    _qv_sm_in, self.grid, _qv_smooth_nu, DT)
+                    _qv_sm_in, self.grid, _qv_smooth_nu, DT,
+                    nu4=_qv_smooth_nu4, mid_refresh=_qv_halo_refresh,
+                    owned_mask=(None if self._voronoi_layout is None
+                                else self._voronoi_layout.owned_mask_cells))
                 _new_trc_sm = dict(_trc_sm)
                 _new_trc_sm["q_v"] = _trc_sm["q_v"].replace(data=_qv_new_sm)
                 self.state = self.state._replace(tracers=_new_trc_sm)
@@ -10927,15 +11172,26 @@ class ModelDriver:
                 # toa_net = rsdt - rsut - rlut; the tracker's residual =
                 # toa_net - dE/dt.  hfss/hfls are recorded for the closure
                 # probe (LEAK = sfc_net_rad - hfss - hfls - residual).
-                # FLUX TIMING: these are the last radiation step's INSTANTANEOUS
-                # fluxes (a daily snapshot), not the diagnostic-interval mean.
-                # GLM review: for the GLOBAL mean this is adequate to catch the
-                # ~20 W/m^2 leak we hunt -- a fixed-time global snapshot
-                # integrates over all longitudes == all local times, so rsdt is
-                # S_0/4 exactly and rsut/rlut carry only ~1-5 W/m^2 of day-to-day
-                # noise (SNR ~10 sigma/day).  A REGIONAL/map budget would need
-                # the interval-mean (self._mpas_sfc_accum, CMOR-gated) instead
-                # (codex review); global localisation is deferred.
+                # FLUX TIMING: INTERVAL MEANS when the accumulator is running,
+                # snapshots otherwise, and the series records WHICH.
+                #
+                # This comment used to argue the snapshot was adequate: a
+                # fixed-time global sample spans all longitudes hence all local
+                # times, so rsdt is S_0/4 and TOA carries only ~1-5 W/m^2 of
+                # noise.  MEASURED 2026-09-04 (job 9632045) that argument holds
+                # for solar geometry and FAILS for the turbulent fluxes: the
+                # sampled sensible heat flux was 8.0 W/m^2 against the
+                # accumulated 20.5 -- 2.5x -- because sensible heat is dominated
+                # by LAND, which occupies limited longitudes with a sharply
+                # asymmetric diurnal cycle that one local time per longitude
+                # does not average.  The apparent leak came out +34.7 W/m^2
+                # against a ~20 W/m^2 hypothesis; substituting accumulated
+                # channels gave ~11.  A plausible wrong answer, the dangerous
+                # kind.  So prefer self._mpas_sfc_accum (#1353's interval means,
+                # widened to slots 0/1 above).  It is CMOR-gated, so with the
+                # feed off the tracker falls back to snapshots and stamps
+                # energy_flux_interval_mean = 0; the closure probe then REFUSES
+                # to report a leak rather than quoting a contaminated one.
                 # MPI-partitioned MPAS is skipped: the tracker uses local area
                 # weights + local state with no owned-cell mask or allreduce
                 # (halo double-count), exactly as the moisture tracker is
@@ -10943,6 +11199,23 @@ class ModelDriver:
                 # only, which is the #1354 L5 lane.
                 _ebd = getattr(self.diagnostics, "energy_tracker", None)
                 _sd = getattr(self.model, "_sfc_diag", None)
+                # GATE (codex review): `has_samples()` alone is not enough. A
+                # window can be SHORT -- the first interval after a
+                # feed-off->feed-on restart, or a checkpoint written before
+                # slots 0/1 existed -- and its mean is then over the wrong
+                # number of steps, or missing the surface-radiation pair
+                # entirely. Either way it would be stamped "interval mean" and
+                # sail past the probe, which is worse than the snapshot it
+                # replaced because it looks trustworthy. Require a COMPLETE
+                # window AND every slot the energy budget reads.
+                _facc_e = getattr(self, "_mpas_sfc_accum", None)
+                _use_accum = (_facc_e is not None
+                              and _facc_e.window_ready(_facc_e.ENERGY_SLOTS))
+                if (_facc_e is not None and _facc_e.is_complete()
+                        and not _use_accum):
+                    print("  energy tracker: complete window but energy "
+                          "slots have unequal sample counts -- this sample "
+                          "falls back to SNAPSHOT fluxes (stamped 0)")
                 _qv_e = (self.state.tracers["q_v"].data
                          if (self.state.tracers is not None
                              and "q_v" in self.state.tracers) else None)
@@ -10958,6 +11231,16 @@ class ModelDriver:
                             _qfrz_e = _fd if _qfrz_e is None else _qfrz_e + _fd
 
                 def _slot(i):
+                    # Interval mean first (the APPLIED quantity); the
+                    # end-of-interval snapshot only when no accumulator ran.
+                    # `mean()` returns a host array, so this round-trips
+                    # device->host->device. That is 7 small transfers per
+                    # DIAGNOSTIC step (12 in a 12-day run at --diag-days 1),
+                    # not per model step, so it is not on the hot path
+                    # (codex review, accepted rather than restructured --
+                    # `mean()` is shared with the CMOR feed).
+                    if _use_accum:   # window_ready() => every slot has a mean
+                        return jnp.asarray(_facc_e.mean(i))
                     return (_sd[i].data if (_sd is not None and len(_sd) > i
                                             and _sd[i] is not None) else None)
                 _sw_dn, _sw_up, _lw_up = _slot(5), _slot(4), _slot(3)
@@ -10992,6 +11275,12 @@ class ModelDriver:
                     _ts["energy_residual"].append(float(_eb.residual))
                     _ts["sw_net_sfc"].append(float(_eb.sfc_sw_net))
                     _ts["lw_net_sfc"].append(float(_eb.sfc_lw_net))
+                    # Which flux timing produced this sample.  The closure
+                    # probe refuses to report a leak from snapshots, because a
+                    # contaminated leak is plausible rather than obviously
+                    # broken (#1354).
+                    _ts["energy_flux_interval_mean"].append(
+                        1.0 if _use_accum else 0.0)
                     _ts["hfss"].append(float(_awm(_shf, _awt))
                                        if _shf is not None else float("nan"))
                     _ts["hfls"].append(float(_awm(_lhf, _awt))
@@ -11049,7 +11338,18 @@ class ModelDriver:
                     from legoesm.diagnostics.process_ledger import (
                         LEDGER_PROCESSES,
                     )
+                    from legoesm.parallel.geometry_consistency import (
+                        content_hash48 as _content_hash48,
+                    )
                     _led_rates = np.asarray(_led_accum) / max(_led_nsteps, 1)
+                    # Snapshot the SAME weights the energy tracker used for
+                    # dE/dt earlier in this block, copied so a later mask or
+                    # regrid cannot make the artifact disagree with the
+                    # number it will be differenced against (GLM: aliasing).
+                    _area_w_led = self.diagnostics._area_w
+                    if _area_w_led is not None:
+                        _area_w_led = np.asarray(
+                            _area_w_led, dtype=np.float64).ravel().copy()
                     _tot_e = _led_rates.sum(axis=1)[:, 1]     # (ncol,) W/m^2
                     _hot = int(np.argmax(np.abs(_tot_e)))
                     _hot_rows = _led_rates[_hot, :, 1]
@@ -11065,6 +11365,34 @@ class ModelDriver:
                     # must never silently get the other.  Overwritten each
                     # interval — on a blow-up the surviving file is the last
                     # pre-detonation interval, which is the one that matters.
+                    _led_area_kw = {}
+                    if _area_w_led is not None:
+                        # One line that makes a shape/rank/reorder mistake
+                        # fail HERE instead of silently downstream (GLM's
+                        # "missing invariant").
+                        if _area_w_led.size != _led_rates.shape[0]:
+                            raise ValueError(
+                                "budget ledger has "
+                                f"{_led_rates.shape[0]} columns but the area "
+                                f"weights have {_area_w_led.size}; the "
+                                "artifact would carry a reduction that does "
+                                "not match its own rows.")
+                        _led_area_kw = {
+                            "area_cell": _area_w_led,
+                            # Fingerprint so a reader supplying its own
+                            # weights can prove they are THESE weights, in
+                            # THIS order.  A length check cannot see a
+                            # permutation, and a permuted weight vector is
+                            # quietly wrong rather than loudly wrong.
+                            # ``content_hash48`` is the repo's existing
+                            # positional byte digest (parallel/
+                            # geometry_consistency.py), written for exactly
+                            # this "a permutation must not cancel" property
+                            # and float64-exact, so it stores in the npz as a
+                            # plain scalar.
+                            "area_hash48": np.asarray(
+                                _content_hash48(_area_w_led)),
+                        }
                     if self.output_dir is not None:
                         np.savez(
                             str(self.output_dir
@@ -11075,6 +11403,37 @@ class ModelDriver:
                                 ("water_kg_m2_s", "energy_W_m2")),
                             n_steps=_led_nsteps,
                             day=elapsed_day + START_DAY,
+                            # Rank locality is part of the reduction: under
+                            # cell partitioning these rows would be ONE rank's
+                            # columns, and no weighting makes that a global
+                            # budget.  Today this is always False -- setup
+                            # already REFUSES --budget-ledger whenever the
+                            # world size exceeds one or a Voronoi layout
+                            # exists, which is strictly broader than this
+                            # predicate.  It is stamped anyway because that
+                            # refusal is documented as "serial-only FOR NOW":
+                            # when the ledger gather is wired the artifact
+                            # becomes rank-local, and the reader should refuse
+                            # at that moment rather than print a per-rank
+                            # table as a global one.
+                            cell_partitioned=bool(
+                                _is_mpas_cell_partitioned(self)),
+                            # The reduction the reader MUST use (#1354).  The
+                            # rows are per-column, so a consumer picks the
+                            # weighting -- and an unweighted mean is not a
+                            # global mean on the SCVT mesh (areaCell max/min
+                            # 1.471).  Worse, the energy-budget tracker this
+                            # ledger gets differenced against is already
+                            # area-weighted, so an unweighted row and its
+                            # store tendency are different global operators
+                            # and their difference means nothing.  Shipping
+                            # the SAME weights the tracker used removes the
+                            # reader's opportunity to get it wrong.  The key
+                            # is OMITTED, not zero-filled, when there are no
+                            # weights: an empty float array is a valid array
+                            # that a third consumer can misread as a mesh,
+                            # while a missing key raises (GLM).
+                            **_led_area_kw,
                         )
                     _led_accum = None
                     _led_nsteps = 0
@@ -11975,6 +12334,13 @@ class ModelDriver:
             energy_dE_dt=_arr("energy_dE_dt") if "energy_dE_dt" in ts else nan,
             hfss=_arr("hfss") if "hfss" in ts else nan,
             hfls=_arr("hfls") if "hfls" in ts else nan,
+            # Flux-timing provenance for the seven channels above. WITHOUT
+            # this the closure probe refuses every real series as "timing
+            # unknown" -- which is the correct refusal, and exactly what
+            # happens when a collected channel is never persisted.
+            energy_flux_interval_mean=(
+                _arr("energy_flux_interval_mean")
+                if "energy_flux_interval_mean" in ts else nan),
         )
         # Persist the run summary in the same place run_amip's main path
         # writes it, so `validate_amip_run.py` can read the status line.

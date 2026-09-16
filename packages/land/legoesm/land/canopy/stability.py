@@ -91,6 +91,10 @@ _MOST_HEAT_CONV_COEF = 0.8    # very-unstable heat convective correction
 # flux.  Flooring keeps the discarded branch finite without touching the
 # selected value.  (<=1e-6 grad-safety floor.)
 _MOST_ARG_FLOOR = 1e-12
+# Per-leaf-class area floor in the boundary-layer resistance rb / LAI_class.
+# At or below it a leaf class is bare ground for the canopy closure, which
+# pins that column's leaf state instead of solving it (see canopy/solver.py).
+LEAF_AREA_FLOOR = 1e-6        # [m2/m2]
 _VIRT_T_COEF = 0.61           # virtual-temperature coefficient (≈ 1/ε − 1, rounded)
 _RIB_MAX = 0.19               # bulk Richardson-number cap (Zeng et al. 1998 init)
 
@@ -433,8 +437,8 @@ def compute_boundary_layer_resistance(
     """
     rb     = 1.0 / (cv * jnp.sqrt(jnp.maximum(uav / d_leaf, 1e-9)))
 
-    LAI_Sun = jnp.maximum(LAI * fSun,         1e-6)
-    LAI_Sh  = jnp.maximum(LAI * (1.0 - fSun), 1e-6)
+    LAI_Sun = jnp.maximum(LAI * fSun,         LEAF_AREA_FLOOR)
+    LAI_Sh  = jnp.maximum(LAI * (1.0 - fSun), LEAF_AREA_FLOOR)
 
     Rb_Sun = rb / LAI_Sun
     Rb_Sh  = rb / LAI_Sh

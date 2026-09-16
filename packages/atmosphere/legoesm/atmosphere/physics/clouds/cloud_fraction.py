@@ -73,7 +73,7 @@ __physics_contract__ = {
         "Diagnostic cloud fraction and cloud optical properties (grid-mean "
         "liquid/ice water paths + effective radii) from the column state: "
         "RH-based Sundqvist, RH+condensate Xu-Randall, or resolved-condensate "
-        "schemes, with an optional Slingo convective (cumulus) cover."
+        "schemes, with an optional precip-based convective cover surrogate."
     ),
     "inputs": {
         "T": "K", "p_full": "Pa", "q_v": "kg/kg", "dp": "Pa",
@@ -98,7 +98,7 @@ __physics_contract__ = {
     "differentiable": True,
     "reference": (
         "Sundqvist (1988), NATO ASI Ser. 243, 433-461; Xu & Randall (1996), "
-        "JAS 53, 3084-3102; Slingo (1987) convective cloud cover"
+        "JAS 53, 3084-3102; convective cover = own log-precip surrogate"
     ),
     "idealized_test": (
         "tests/unit/test_resolved_cloud_fraction.py; sub-saturated column "
@@ -239,6 +239,33 @@ def _ice_fraction(T: jnp.ndarray, config: CloudConfig) -> jnp.ndarray:
     return jnp.clip(frac, 0.0, 1.0)
 
 
+def cover_saturation_mixing_ratio(
+    T: jnp.ndarray, p_full: jnp.ndarray, config: CloudConfig,
+) -> jnp.ndarray:
+    """Saturation mixing ratio [kg/kg] the cloud-COVER schemes measure RH
+    against, per ``config.saturation_scheme`` (the single dispatch point; the
+    diagnostics that rebuild the cover's RH call this, never a copy).
+
+    * ``"liquid"``: liquid saturation at all temperatures.
+    * ``"mixed_phase"``: liquid/ice saturation blended with the SAME
+      ``_ice_fraction`` ramp (T_freeze -> T_ice_only) that partitions this
+      scheme's condensate, so the RH criterion and the diagnosed phase agree.
+      Bit-identical to the liquid curve at and above T_freeze (ice weight 0).
+    Unknown scheme raises (dispatch-hardening; never a silent default).
+    """
+    if config.saturation_scheme == "liquid":
+        return saturation_mixing_ratio(T, p_full)
+    if config.saturation_scheme == "mixed_phase":
+        f_ice = _ice_fraction(T, config)
+        return ((1.0 - f_ice) * saturation_mixing_ratio(T, p_full)
+                + f_ice * saturation_mixing_ratio_ice(T, p_full))
+    raise ValueError(
+        f"Unknown cloud saturation_scheme: {config.saturation_scheme!r}. "
+        f"Valid schemes: 'liquid' (legacy, liquid saturation at all T), "
+        f"'mixed_phase' (ice-fraction-blended liquid/ice saturation)."
+    )
+
+
 def sundqvist_cloud_fraction(
     RH: jnp.ndarray,
     config: CloudConfig,
@@ -288,6 +315,13 @@ def xu_randall_cloud_fraction(
 ) -> jnp.ndarray:
     """Xu-Randall (1996) cloud fraction from RH and condensate.
 
+    Units: ``q_condensate`` and ``q_sat`` in kg/kg with ``alpha_xr = 100`` —
+    the WRF ``cal_cldfra1`` / GFS ``cld_frac_XuRandall`` convention (alpha
+    carries (kg/kg)^(gamma-1)).  Differentiable CORE only: none of WRF's
+    cutoffs (q_cond < 1e-12 -> 0, cf < 0.01 -> 0, RH >= 1 -> 1, exponent cap)
+    nor GFS's pressure-dependent condensate threshold are applied; the only
+    departures are the AD floors below.
+
     Parameters
     ----------
     RH : jnp.ndarray
@@ -326,14 +360,19 @@ def convective_cloud_fraction(
     p_full: jnp.ndarray,
     config: CloudConfig,
 ) -> jnp.ndarray:
-    """Slingo (1987)-style convective (cumulus) cloud fraction.
+    """Precipitation-based convective (cumulus) cloud-cover SURROGATE.
+
+    NOT Slingo (1987): Slingo's relation is ``a = 0.245 + 0.125 ln(P[mm/day])``
+    capped at 0.8; this scheme keeps only the log-of-precip *form* with its own
+    constants (``conv_cloud_coeff``, ``conv_cloud_max``, ``conv_precip_scale``)
+    and a custom sigma deck.  Label corrected 2026-09-08 (codex audit).
 
     Adjustment convection schemes (sbm Betts-Miller) hold the grid-mean column
     near ``RH_ref`` (~0.7) and detrain no ``q_c``, so the RH/condensate
     stratiform schemes diagnose ~0 cloud in the convecting tropics — the
     surface then radiates LW straight to space (the measured ~4.5 K coupled
     cold bias: tropical ``LW_net_sfc`` ~−137 W/m², precip ~1 mm/day).
-    Following Slingo (1987), tie a *bounded* cumulus cloud cover to the
+    Inspired by Slingo-1987-inspired surrogate (own constants, not Slingo-1987-inspired surrogate's), tie a *bounded* cumulus cloud cover to the
     convective precipitation rate:
 
         ``cf_conv = clip(conv_cloud_coeff · ln(1 + P_conv/P0), 0, conv_cloud_max)``
@@ -791,18 +830,7 @@ def compute_cloud_properties(
     #     blend collapses to ``1.0*q_sat_liq + 0.0*q_sat_ice`` = q_sat_liq
     #     BIT-identically (the ice curve is bounded, never inf/NaN, so the
     #     0.0*x term is exactly 0.0) => warm cloud is unchanged.
-    if config.saturation_scheme == "liquid":
-        q_sat = saturation_mixing_ratio(T, p_full)
-    elif config.saturation_scheme == "mixed_phase":
-        _f_ice_sat = _ice_fraction(T, config)
-        q_sat = ((1.0 - _f_ice_sat) * saturation_mixing_ratio(T, p_full)
-                 + _f_ice_sat * saturation_mixing_ratio_ice(T, p_full))
-    else:
-        raise ValueError(
-            f"Unknown cloud saturation_scheme: {config.saturation_scheme!r}. "
-            f"Valid schemes: 'liquid' (legacy, liquid saturation at all T), "
-            f"'mixed_phase' (ice-fraction-blended liquid/ice saturation)."
-        )
+    q_sat = cover_saturation_mixing_ratio(T, p_full, config)
     RH = q_v / jnp.maximum(q_sat, 1.0e-10)
 
     # --- Cloud fraction ---
@@ -892,11 +920,30 @@ def compute_cloud_properties(
         else:
             cf = _cf_clubb
 
+    # --- Opt-in condensate-aware cover floor (RH-diagnosed schemes only) ---
+    # A layer holding prognostic condensate is never "clear": cf >= q/(q+q_ref)
+    # (bounded, monotone, AD-safe; 0 where q_cond = 0).  Static config branch
+    # so 0.0 is byte-identical to the RH-only cover.  See CloudConfig.
+    if config.cover_condensate_q_ref > 0.0:
+        if config.scheme not in ("sundqvist", "xu_randall"):
+            raise ValueError(
+                "CloudConfig.cover_condensate_q_ref applies to the RH-diagnosed "
+                f"schemes ('sundqvist', 'xu_randall'); got {config.scheme!r}.")
+        if q_cloud is None and q_ice is None:
+            raise ValueError(
+                "CloudConfig.cover_condensate_q_ref > 0 requires explicit "
+                "q_cloud/q_ice from microphysics; got None.")
+        _q_cond_floor = (
+            (jnp.zeros_like(T) if q_cloud is None else jnp.maximum(q_cloud, 0.0))
+            + (jnp.zeros_like(T) if q_ice is None else jnp.maximum(q_ice, 0.0)))
+        cf = jnp.maximum(
+            cf, _q_cond_floor / (_q_cond_floor + config.cover_condensate_q_ref))
+
     # --- Opt-in convective (cumulus) cloud, MAXIMUM-overlap combined ---
     # The stratiform RH/condensate fractions above miss convective cloud when an
     # adjustment scheme (sbm) holds the column subsaturated, so the convecting
     # tropics get cf≈0 and leak surface LW.  When enabled, add a bounded
-    # Slingo(1987) cumulus cover tied to the convective precip rate; the
+    # Slingo-1987-inspired surrogate cumulus cover tied to the convective precip rate; the
     # condensate floor below makes it radiatively active.  Default-off /
     # ``conv_precip=None`` ⇒ ``cf`` unchanged.  ``cf_strat`` is the stratiform
     # fraction BEFORE the convective overlap; the convective EXCESS

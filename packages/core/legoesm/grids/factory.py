@@ -119,13 +119,13 @@ def create_grid(grid_type: str, resolution: int | None = None, **kwargs: Any):
         # ocean package or fesom_jax at module scope.
         from legoesm.ocean.dynamics.ocean_model_fesom import (
             FesomOceanGrid,
-            _require_fesom_jax,
+            require_fesom_jax,
             build_flat_bottom_mesh,
         )
 
         # Raise a clear ImportError naming the package + install command
         # rather than a raw ModuleNotFoundError from the line below.
-        _require_fesom_jax()
+        require_fesom_jax()
         from fesom_jax.mesh import DEFAULT_PI_MESH_DIR, load_mesh
 
         mesh = load_mesh(DEFAULT_PI_MESH_DIR if mesh_dir is None else mesh_dir)

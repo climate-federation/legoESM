@@ -32,19 +32,25 @@ __param_spec__ = {
             # default. Same class as land.canopy.interception_fraction.
             "clubb_cf_override_strength": "opt-in marine-Sc lever, default 1.0 (full) = the physical ceiling; not a well-posed sigmoid tunable (default on the bound)",
             "clubb_cf_override_floor": "opt-in marine-Sc cloud-collapse floor, default 0.0 (off) = the physical floor; not a well-posed sigmoid tunable (default on the bound)",
+            "cover_condensate_q_ref": "opt-in condensate-aware cover floor, default 0.0 (off) = the physical floor; production value pending the 2026-09 cc_cond paired arms",
             "cloud_inhomogeneity_factor": "Cahalan plane-parallel-bias reduction, default 1.0 (homogeneous, no reduction) = the physical ceiling; not a well-posed sigmoid tunable (default on the bound)",
         },
         "params": {
             # --- critical_rh: primary cloud-onset RH (Sundqvist + Xu-Randall lower bound) ---
             "rh_crit": {"units": "1", "bounds": (0.5, 0.99), "tunable_tier": 1, "transform": "sigmoid", "category": "critical_rh", "reference": "Sundqvist, Berge & Kristjansson (1989)", "shape": None},
             # --- cloud_fraction: Xu-Randall (1996) cf = RH^p_xr * (1 - exp(-alpha*q_c/((1-RH)q_sat)^gamma)) ---
-            "alpha_xr": {"units": "1", "bounds": (10.0, 1000.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
+            # alpha carries the unit (kg/kg)^(gamma-1) because gamma != 1: the
+            # value 100 is the WRF (cal_cldfra1) / GFS (cld_frac_XuRandall)
+            # convention with q in kg/kg.  If the 1996 fit was made in g/kg the
+            # paper-equivalent value would be 100*1000^(1-gamma) ~ 3.4e3
+            # (unverified against the paper text, 2026-09-08).
+            "alpha_xr": {"units": "(kg/kg)^(gamma_xr-1)", "bounds": (10.0, 1000.0), "tunable_tier": 1, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
             "p_xr": {"units": "1", "bounds": (0.05, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
             "gamma_xr": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "cloud_fraction", "reference": "Xu & Randall (1996)", "shape": None},
             # (clubb_cf_override_strength / clubb_cf_override_floor: excluded —
             #  opt-in marine-Sc levers whose defaults sit on a hard bound.)
             # --- condensate: diagnostic in-cloud water + resolved-cf condensate scale [kg/kg] ---
-            "q_c_diagnostic": {"units": "kg/kg", "bounds": (5.0e-5, 1.5e-3), "tunable_tier": 1, "transform": "sigmoid", "category": "condensate", "reference": "diagnostic-cloud scheme default", "shape": None},
+            "q_c_diagnostic": {"units": "kg/kg", "bounds": (1.0e-6, 1.0e-3), "tunable_tier": 1, "transform": "sigmoid", "category": "condensate", "reference": "diagnostic-cloud scheme default", "shape": None},
             "q_cloud_resolved_ref": {"units": "kg/kg", "bounds": (1.0e-7, 1.0e-5), "tunable_tier": 2, "transform": "sigmoid", "category": "condensate", "reference": "resolved (CRM/SAM) cloud-fraction scheme default", "shape": None},
             # --- ice_fraction: temperature below which all condensate is ice [K] ---
             "T_ice_only": {"units": "K", "bounds": (220.0, 268.0), "tunable_tier": 2, "transform": "sigmoid", "category": "ice_fraction", "reference": "linear ice-fraction ramp scheme default", "shape": None},
@@ -60,9 +66,9 @@ __param_spec__ = {
             "pgam_max": {"units": "1", "bounds": (4.0, 30.0), "tunable_tier": 3, "transform": "sigmoid", "category": "droplet_psd", "reference": "Morrison module_mp_mg.F90 (gamma-PSD shape cap)", "shape": None},
             # --- microphysics_density: M2005 cloud-ice bulk density [kg/m^3] for ice r_eff PSD ---
             "rho_cloud_ice": {"units": "kg/m^3", "bounds": (100.0, 917.0), "tunable_tier": 3, "transform": "sigmoid", "category": "microphysics_density", "reference": "Morrison et al. (2005) M2005 (RHOI)", "shape": None},
-            # --- convective_cloud: Slingo(1987)-style cumulus cloud-fraction from convective precip (opt-in) ---
-            "conv_cloud_coeff": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "convective_cloud", "reference": "Slingo (1987) convective cloud-amount vs ln(precip)", "shape": None},
-            "conv_cloud_max": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "convective_cloud", "reference": "Slingo (1987) convective cloud-amount cap", "shape": None},
+            # --- convective_cloud: precipitation-based cumulus-cover SURROGATE (log form inspired by Slingo 1987; NOT Slingo's constants a=0.245+0.125 ln P[mm/day], cap 0.8), opt-in ---
+            "conv_cloud_coeff": {"units": "1", "bounds": (0.0, 0.5), "tunable_tier": 2, "transform": "sigmoid", "category": "convective_cloud", "reference": "legoESM surrogate: coeff*ln1p(P/P0) (Slingo-1987-inspired form, own constants)", "shape": None},
+            "conv_cloud_max": {"units": "1", "bounds": (0.1, 1.0), "tunable_tier": 2, "transform": "sigmoid", "category": "convective_cloud", "reference": "legoESM surrogate cap (Slingo 1987 caps at 0.8)", "shape": None},
             "conv_precip_scale": {"units": "kg/m^2/s", "bounds": (1.0e-6, 1.0e-4), "tunable_tier": 2, "transform": "sigmoid", "category": "convective_cloud", "reference": "convective-cloud reference precip rate (~1 mm/day)", "shape": None},
             "conv_cloud_sigma_top": {"units": "1", "bounds": (0.05, 0.4), "tunable_tier": 0, "transform": "sigmoid", "category": "convective_cloud", "reference": "convective cloud-deck top (sigma); numerics layer-bound", "shape": None},
             "conv_cloud_sigma_base": {"units": "1", "bounds": (0.35, 0.98), "tunable_tier": 0, "transform": "sigmoid", "category": "convective_cloud", "reference": "convective anvil-deck base (sigma); numerics layer-bound", "shape": None},
@@ -98,10 +104,11 @@ class CloudConfig(NamedTuple):
           Requires explicit q_cloud/q_ice.
         - ``"none"``: No clouds (clear-sky radiation).
     rh_crit : float
-        Critical relative humidity for cloud onset (default 0.7).
-        Used by Sundqvist scheme and as lower bound in Xu-Randall.
+        Critical relative humidity for Sundqvist cloud onset (default 0.77,
+        a tuned model choice).  Not read by Xu-Randall.
     alpha_xr : float
-        Condensate scaling in Xu-Randall formula (default 100.0).
+        Condensate scaling in the Xu-Randall formula, unit (kg/kg)^(gamma_xr-1)
+        (default 100.0 = WRF/GFS convention with q in kg/kg).
     p_xr : float
         RH exponent in Xu-Randall formula (default 0.25).
     gamma_xr : float
@@ -162,8 +169,20 @@ class CloudConfig(NamedTuple):
     # raises BOTH cloud albedo (SW) and cloud LW emissivity (LW_down), running
     # the cold/dry feedback in reverse.  Upper bound of the __param_spec__ range.
     T_freeze: float = constants.T_freeze
-    T_ice_only: float = 233.15
+    T_ice_only: float = constants.T_hom_freeze
     q_cloud_resolved_ref: float = 1.0e-6
+    # Condensate-aware cover floor for the RH-diagnosed schemes (sundqvist /
+    # xu_randall): cf = max(cf_RH, q_cond / (q_cond + cover_condensate_q_ref))
+    # with q_cond = q_cloud + q_ice [kg/kg], so a layer carrying prognostic
+    # condensate is never handed to radiation as clear.  Motivation: with RH
+    # measured against liquid saturation, 90 % of the prognostic cloud ice in
+    # the production AMIP sat in cf = 0 layers and never reached radiation
+    # (2026-09-08 anatomy); the ice-aware saturation curve instead saturates
+    # the tropical upper troposphere (ITCZ high cover 99 %), because the
+    # column is too moist there.  0.0 = floor OFF (RH-only cover, byte-
+    # identical).  The production default is decided by the paired arms
+    # cc_cond* (2026-09), not here.
+    cover_condensate_q_ref: float = 0.0
     # M2005 cloud-ice bulk density [kg/m³] (RHOI) for the PSD ice effective
     # radius EFFI=1.5/LAMI, LAMI=(ρ_ci·π·N_i/q_i)^(1/3) (RAD-1-ice). Only
     # used when ``compute_cloud_properties`` is given explicit ``n_ice``.
@@ -207,7 +226,7 @@ class CloudConfig(NamedTuple):
     # still allowing a (bounded) low-cloud reduction, so a LARGER albedo fix can
     # run STABLY than the strength knob alone allows.  0.0 => no floor (original).
     clubb_cf_override_floor: float = 0.0
-    # --- Convective cloud fraction (Slingo 1987), OPT-IN (default OFF) ---
+    # --- Convective cloud fraction (precip-based surrogate, Slingo-1987-inspired), OPT-IN (default OFF) ---
     # The RH-based stratiform schemes (sundqvist/xu_randall) give cloud only
     # near saturation, so an adjustment convection scheme (sbm) that holds the
     # tropical column at RH~0.7 produces NO radiative cloud => the convecting
@@ -338,6 +357,9 @@ def build_cloud_config(
     clubb_cf_override_strength: float | None = None,
     clubb_cf_override_floor: float | None = None,
     saturation_scheme: str | None = None,
+    cover_condensate_q_ref: float | None = None,
+    conv_cloud_coeff: float | None = None,
+    Nc_default: float | None = None,
 ) -> "CloudConfig":
     """Assemble a ``CloudConfig`` from the ``ExperimentConfig``-level cloud
     fields (``cloud_scheme`` + the optional ``cloud_rh_crit`` /
@@ -384,6 +406,12 @@ def build_cloud_config(
         overrides["clubb_cf_override_floor"] = clubb_cf_override_floor
     if saturation_scheme is not None:
         overrides["saturation_scheme"] = saturation_scheme
+    if cover_condensate_q_ref is not None:
+        overrides["cover_condensate_q_ref"] = cover_condensate_q_ref
+    if conv_cloud_coeff is not None:
+        overrides["conv_cloud_coeff"] = conv_cloud_coeff
+    if Nc_default is not None:
+        overrides["Nc_default"] = Nc_default
     return CloudConfig(
         scheme=scheme, convective_cloud=convective_cloud, **overrides
     )

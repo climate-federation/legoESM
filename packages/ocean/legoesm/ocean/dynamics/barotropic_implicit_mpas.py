@@ -435,7 +435,11 @@ def barotropic_implicit_mpas(
     # Mesh-matched accessor (codex MAJOR): a stale layout from another
     # mesh must not hijack this solve into the distributed branch.
     _vlayout = get_matching_voronoi_layout(mesh)
-    if _vlayout is None and _world() > 1:
+    # SPMD (shard_map) lane: no MPI layout, but the refresh object carries
+    # the owned mask + psum reducer + cell exchange (voronoi_spmd_ocean).
+    _hr_owned = getattr(halo_refresh, "owned_mask_cells", None)
+    _dist = _vlayout is not None or _hr_owned is not None
+    if _vlayout is None and _hr_owned is None and _world() > 1:
         raise NotImplementedError(
             "MPAS barotropic_solver='implicit_cn' under MPI requires the "
             "Voronoi partition layout (call initialize_voronoi_mpi and "
@@ -575,7 +579,7 @@ def barotropic_implicit_mpas(
     # argument — closure-captured tracers fail at scan lowering).
     inv_diag = _helmholtz_inv_diag_mpas(H_e_old, coeff, mesh, mask, edge_mask)
 
-    if _vlayout is not None:
+    if _dist:
         # ---- Distributed fixed-M PCG (shared solver) ----------------
         # The local TRiSK A_op is correct on OWNED cells provided its
         # input carries fresh ghost values — compose one cell-halo
@@ -590,22 +594,28 @@ def barotropic_implicit_mpas(
         # weighted-transpose concern the single-rank custom-VJP solver
         # addresses does not arise here — the unrolled adjoint is exact
         # by construction.
-        from legoesm.parallel.halo_exchange_voronoi import (
-            VoronoiHaloExchange,
-        )
         from legoesm.ocean.dynamics.barotropic_common import (
             precision_aware_rel_tol,
             solve_helmholtz_implicit,
         )
-        _exchanger = VoronoiHaloExchange(_vlayout.partition, backend="mpi")
+        if _vlayout is not None:
+            from legoesm.parallel.halo_exchange_voronoi import (
+                VoronoiHaloExchange,
+            )
+            _exchanger = VoronoiHaloExchange(_vlayout.partition, backend="mpi")
+            _exchange_cells = _exchanger.exchange_cell_field
+            _owned = _vlayout.owned_mask_cells.astype(eta_dtype)
+        else:
+            def _exchange_cells(f):
+                return halo_refresh.cells(f)[0]
+            _owned = _hr_owned.astype(eta_dtype)
 
         def A_op_dist(eta_in: jnp.ndarray) -> jnp.ndarray:
-            return A_op(_exchanger.exchange_cell_field(eta_in))
+            return A_op(_exchange_cells(eta_in))
 
         def _M_inv_dist(r: jnp.ndarray) -> jnp.ndarray:
             return r * inv_diag
 
-        _owned = _vlayout.owned_mask_cells.astype(eta_dtype)
         _w_dots = _owned * mesh.areaCell.astype(eta_dtype) * mask
         eta_new, _solve_diag = solve_helmholtz_implicit(
             A_op_dist, rhs, _M_inv_dist, eta_old,
@@ -624,7 +634,7 @@ def barotropic_implicit_mpas(
         )
         # Refresh the halo ring of the solution before downstream
         # stencils consume it.
-        eta_new = _exchanger.exchange_cell_field(eta_new) * mask
+        eta_new = _exchange_cells(eta_new) * mask
     else:
         # f32: floor the 1e-10 rel-tol to the f32-reachable value so stock CG
         # stops at convergence rather than maxiter (f64 unchanged).
@@ -655,7 +665,7 @@ def barotropic_implicit_mpas(
     _area_cell = mesh.areaCell.astype(eta_dtype)
     _area_acc = _cast(_area_cell, _M, "accumulate")
     _wa = _area_acc * _cast(mask, _M, "accumulate")
-    if _vlayout is not None:
+    if _dist:
         _owned_acc = _cast(_owned, _M, "accumulate")
         _wa = _wa * _owned_acc
         _area_proj = _area_acc * _owned_acc
@@ -664,9 +674,12 @@ def barotropic_implicit_mpas(
     _ocean_area_l = jnp.sum(_wa)
     _target_mass_l = jnp.sum(_cast(rhs, _M, "accumulate") * _area_proj)
     _actual_mass_l = jnp.sum(_cast(eta_new, _M, "accumulate") * _area_proj)
-    if _vlayout is not None:
-        from legoesm.parallel.reductions import batch_allreduce_mpi
-        _ocean_area, _target_mass, _actual_mass = batch_allreduce_mpi(
+    if _dist:
+        _gsum = getattr(halo_refresh, "global_sum", None)
+        if _gsum is None:
+            from legoesm.parallel.reductions import batch_allreduce_mpi
+            _gsum = batch_allreduce_mpi
+        _ocean_area, _target_mass, _actual_mass = _gsum(
             [_ocean_area_l, _target_mass_l, _actual_mass_l],
         )
     else:
@@ -685,7 +698,7 @@ def barotropic_implicit_mpas(
     # Mass-conserving floor clamp (safety net for extreme transients;
     # in normal operation this is a no-op since the PCG converges to
     # well-resolved η).
-    if _vlayout is not None:
+    if _dist:
         eta_new = _clamp_redistribute(
             eta_new, eta_floor, mask, mesh.areaCell,
             owned_weight=_owned, force_global=True,
@@ -699,17 +712,14 @@ def barotropic_implicit_mpas(
     # Rank-local (single-rank path); ``stop_gradient`` keeps it out of
     # reverse mode.
     _res_vec = rhs - A_op(eta_new)
-    if _vlayout is not None:
+    if _dist:
         # Owned-masked global residual (eta_new's halo ring was
         # refreshed above, so the local A_op is exact on owned cells;
         # halo rows are excluded from the sums and the two squared
         # norms ride one batched allreduce).
         _rr_l = jnp.sum(_owned * _res_vec**2)
         _bb_l = jnp.sum(_owned * rhs**2)
-        from legoesm.parallel.reductions import (
-            batch_allreduce_mpi as _bar,
-        )
-        _rr, _bb = _bar([_rr_l, _bb_l])
+        _rr, _bb = _gsum([_rr_l, _bb_l])
     else:
         _rr = jnp.sum(_res_vec**2)
         _bb = jnp.sum(rhs**2)

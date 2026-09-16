@@ -97,6 +97,32 @@ _KB_BEAM      = 0.5        # direct-beam extinction numerator = G-function for a
                            # spherical (uniform) leaf-angle distribution (Ryu 2011)
 
 
+def broadband_albedo(ALB_VIS: jax.Array, ALB_NIR: jax.Array) -> jax.Array:
+    """Broadband reflectance the two-leaf RT realises for these band albedos:
+    the band albedo weights PAR and NIR, the UV band reflects ``_RHO_UV``
+    regardless.  ``1 - sum(absorbed)/sw_down`` of :func:`canopy_shortwave_rt`
+    equals this exactly (the soil-reflection terms cancel in the sum)."""
+    return (_PAR_FRACTION * ALB_VIS + _NIR_FRACTION * ALB_NIR
+            + _UV_FRACTION * _RHO_UV)
+
+
+def _floor_soil_absorption(total: jax.Array, q_sun: jax.Array, q_sh: jax.Array):
+    """Return ``(I_soil, q_sun, q_sh)`` with the ground's share of ``total``
+    floored at zero and the leaf shares scaled to keep the sum exact.
+
+    The two-leaf closure derives the sunlit-leaf beam term from the LEAF
+    scattering coefficient while the column total is set by the band albedo
+    supplied to it; under a bright band (snow at 0.7-0.8 beneath leaves) the
+    leaf terms can exceed the whole column's absorption and the remainder
+    handed to the ground goes negative.  A snow surface under a canopy absorbs
+    little and the leaves absorb most, so the excess belongs to the leaves:
+    scale both leaf classes down to the column total and give the ground
+    nothing.  Untouched wherever the ground share is already positive."""
+    q_can = q_sun + q_sh
+    i_soil = jnp.maximum(total - q_can, 0.0)
+    scale = jnp.where(q_can > 0.0, (total - i_soil) / jnp.maximum(q_can, 1e-30), 1.0)
+    return i_soil, q_sun * scale, q_sh * scale
+
 def canopy_cover(LAI: jax.Array, CI: jax.Array) -> jax.Array:
     """Fraction of the ground shaded by foliage, ``1 - exp(-G CI LAI)``.
 
@@ -334,10 +360,9 @@ def canopy_shortwave_rt(
     )
     Q_PSunDn   = Q_PbSunDn + Q_PdSunDn + Q_PsSunDn
     Q_PShDn    = jnp.maximum(Q_PDn - Q_PSunDn, 0.0)
-    # Soil
-    I_PSoil    = ((1.0 - ALB_VIS) * PAR_dir
-                + (1.0 - ALB_VIS) * PAR_diff
-                - (Q_PSunDn + Q_PShDn))
+    # Soil: the column total minus the leaves, floored at zero
+    I_PSoil, Q_PSunDn, Q_PShDn = _floor_soil_absorption(
+        (1.0 - ALB_VIS) * (PAR_dir + PAR_diff), Q_PSunDn, Q_PShDn)
     APAR_Soil  = (1.0 - rho_PSoil) * I_PSoil
     # Reflected soil PAR absorbed by leaves
     Q_PSunUp   = I_PSoil * rho_PSoil * exp_kk_Pd
@@ -357,9 +382,8 @@ def canopy_shortwave_rt(
     Q_NShDn  = ((1.0 - ALB_NIR) * NIR_dir  * (1.0 - jnp.exp(-kk_Nb * L_CI))
                + (1.0 - ALB_NIR) * NIR_diff * (1.0 - exp_kk_Nd)
                - Q_NSunDn)
-    I_NSoil  = ((1.0 - ALB_NIR) * NIR_dir
-              + (1.0 - ALB_NIR) * NIR_diff
-              - (Q_NSunDn + Q_NShDn))
+    I_NSoil, Q_NSunDn, Q_NShDn = _floor_soil_absorption(
+        (1.0 - ALB_NIR) * (NIR_dir + NIR_diff), Q_NSunDn, Q_NShDn)
     ANIR_Soil = (1.0 - rho_NSoil) * I_NSoil
     Q_NSunUp  = I_NSoil * rho_NSoil * exp_kk_Nd
     Q_NShUp   = I_NSoil * rho_NSoil * (1.0 - exp_kk_Nd)

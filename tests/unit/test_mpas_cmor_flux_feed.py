@@ -1070,6 +1070,36 @@ class TestWindowIdentity:
             acc.add((None, None, self._field(2.0)))
         assert acc.is_complete()           # 8 steps == one full day
 
+    def test_full_window_with_every_energy_slot_fed_is_ready(self):
+        from legoesm.driver.model_driver import _MPASSfcFluxAccum
+        acc = _MPASSfcFluxAccum(expected_steps=8, window_start_day=0.0,
+                                dt_s=10800.0)
+        for _ in range(8):
+            acc.add(tuple(self._field(1.0) for _ in range(8)))
+        assert acc.window_ready(acc.ENERGY_SLOTS)
+        acc.add(tuple(self._field(1.0) for _ in range(8)))   # overlong
+        assert not acc.window_ready(acc.ENERGY_SLOTS)
+
+    def test_legacy_checkpoint_leaves_new_slots_short_and_not_ready(self):
+        """A checkpoint written before slots 0/1 existed restores slot 2 with
+        the pre-restart count; slots 0/1 then see only the remainder.  The
+        window completes (step count matches) but the energy slots are NOT
+        interval means over it -- ``window_ready`` must refuse (#1354)."""
+        from legoesm.driver.model_driver import _MPASSfcFluxAccum
+        dt = 10800.0
+        staged = self._payload(expected=8, steps=3, day0=10.0)   # slot 2 only
+        resume = 10.0 + 3 * dt / 86400.0
+        acc = _MPASSfcFluxAccum(expected_steps=8, window_start_day=resume,
+                                dt_s=dt)
+        assert acc.restore(dict(staged), resume_day=resume, dt_s=dt) == 1
+        for _ in range(5):
+            acc.add((self._field(1.0), self._field(1.0), self._field(2.0)))
+        assert acc.is_complete()
+        assert acc.mean(0) is not None and acc.mean(2) is not None
+        assert acc.window_ready((2,))
+        assert not acc.window_ready((0, 1, 2)), (
+            "slots 0/1 cover 5 of 8 steps; must not be stamped interval mean")
+
     def test_staged_keys_always_popped_on_discard(self):
         from legoesm.driver.model_driver import _MPASSfcFluxAccum
         staged = self._payload(expected=6, steps=4, day0=10.0)
