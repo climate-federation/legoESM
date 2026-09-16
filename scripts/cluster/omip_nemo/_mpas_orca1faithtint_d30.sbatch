@@ -73,7 +73,7 @@
 #   1 m of 23.5 or any field degrades by more than its own 0.05.
 set -uo pipefail
 PIN=${1:?usage: sbatch _mpas_orca1faithtint_d30.sbatch <pinned-sha>}
-ROOT=/burg-archive/glab/users/pg2328/_omip_run3; cd $ROOT || exit 1
+ROOT=${ROOT:-/burg-archive/glab/users/pg2328/_omip_run3}; cd $ROOT || exit 1
 HEAD=$(git rev-parse HEAD)
 [ "$HEAD" = "$PIN" ] || { echo "FATAL: HEAD $HEAD != pinned $PIN"; exit 1; }
 echo "HEAD: $(git log --oneline -1)"
