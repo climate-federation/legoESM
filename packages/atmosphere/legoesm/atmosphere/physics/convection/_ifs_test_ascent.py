@@ -377,8 +377,17 @@ def _cuadjtq_condense(T, q, p):
 def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
                                 geo_full, geo_half, env_half, parcel_init, cfg):
     """One test ascent from departure level k_dep upward (IFS DO JK=JKK-1,JKT2,-1,
-    cubasen.F90:437-600). lax.scan over the k_dep levels above the departure;
-    levels with p_full <= cfg.test_top_pa are masked out (NJKT2 ~ 60 hPa).
+    cubasen.F90:437-600).  FIXED-LENGTH masked lax.scan (codex r14 item 2):
+    ``k_dep`` is a TRACED int32 scalar (or (ncol,) array) and ``is_surface``
+    a TRACED bool (the surface departure is the first step of the departure
+    scan; the 1/z vs deep mixing is selected with jnp.where on it, both
+    branches being cheap).  The scan runs the FIXED levels j = N-2 ... 0
+    (starting at N-1 would make the profile gather at j+1 out of bounds);
+    the departure-sized arange of the previous unrolled implementation is
+    replaced by applying work = (j < k_dep) & active & top_mask to every
+    carry and write, so levels at or above the departure (and above NJKT2)
+    are no-ops that preserve the carry bit-for-bit.  Levels with
+    p_full <= cfg.test_top_pa are masked out (NJKT2 ~ 60 hPa).
 
     The key ``parcel_init["T_dep"]`` IS consumed: when present it is the
     source's ZTU(JKK) computed by _init_departure_parcel (single excess,
@@ -391,12 +400,15 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
     here: the caller passes the persistent scratch arrays of the previous
     departure candidate through ``parcel_init`` (review finding 3; the source
     initialises them once before the outer search, cubasen.F90:263-271), and
-    only the departure level is (re)set from the current parcel state; the
-    label lifecycle at a terminating level leaves the previous label
-    untouched (no forced zero), matching cubasen.F90:615-629.  Specific
-    humidity throughout (virtual temperature T(1 + RETV q) directly as in the
-    source); saturation on the specific-humidity curve with the FOEEWM /
-    liquid-only departures declared in _cuadjtq_pair / _cuadjtq_condense.
+    only the departure level is (re)set from the current parcel state via a
+    DYNAMIC scatter ``.at[idx, k_dep].set`` (idx = arange(ncol)), keeping the
+    exact values of the unrolled version; the label lifecycle at a
+    terminating level leaves the previous label untouched (no forced zero),
+    matching cubasen.F90:615-629.  Specific humidity throughout (virtual
+    temperature T(1 + RETV q) directly as in the source); saturation on the
+    specific-humidity curve with the FOEEWM / liquid-only departures declared
+    in _cuadjtq_pair / _cuadjtq_condense.  The masked-scan version is
+    checked bit-for-bit against the previous unrolled implementation.
 
     AD safety (JAX where-NaN rule, review gradient-hazard table): every
     division on an evaluated branch takes a positive-floored operand --
@@ -410,6 +422,9 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
     T_h, q_h, s_h = env_half
     dt = T_h.dtype
     ncol = T_h.shape[0]
+    idx = jnp.arange(ncol)
+    k_dep = jnp.asarray(k_dep, jnp.int32)
+    is_surface = jnp.asarray(is_surface, bool)
 
     # dtype pinning (x64-safe carries): every array input and every cfg float
     # used inside the scan body is cast once, before the scan.
@@ -435,9 +450,13 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
     tiny = jnp.asarray(_TINY, dt)
     z_floor = jnp.asarray(_Z_FLOOR, dt)
 
-    # candidate ascent levels: our indices k_dep-1 .. 0 (surface-last: upward),
-    # int32 so all index carries keep a single dtype under lax.scan
-    js = jnp.arange(k_dep - 1, -1, -1, dtype=jnp.int32)
+    # FIXED-LENGTH candidate ascent levels j = nlev-2 ... 0 (surface-last:
+    # upward), int32 so all index carries keep a single dtype under
+    # lax.scan; the departure-dependent length of the previous
+    # ``jnp.arange(k_dep-1, -1, -1)`` is replaced by the (j < k_dep) work
+    # gate below.  j starts at nlev-2 (NOT nlev-1) so every profile gather
+    # at j+1 stays inside the arrays on all masked iterations.
+    js = jnp.arange(nlev - 2, -1, -1, dtype=jnp.int32)
 
     # deep-test denominator: PQSEN(JL,KLEV) on the lowest FULL level
     # (cubasen.F90:472); a specific humidity.  AD safety: the temperature is
@@ -450,27 +469,29 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
     # half-level parcel profiles from the PERSISTENT scratch arrays passed by
     # the caller (review finding 3; cubasen.F90:263-271): no fresh labels or
     # profiles are created here; only the departure level is set from the
-    # current parcel state (ILAB=1 at :345/:375).
+    # current parcel state (ILAB=1 at :345/:375), via a DYNAMIC scatter at
+    # the TRACED k_dep with idx = arange(ncol) -- the exact values of the
+    # unrolled version.
     active = parcel_init["active"]
     # the source's ZTU(JKK), preserved by _init_departure_parcel (review
     # finding 1); the (s - geo_half)/c_pd reconstruction is only a fallback
     if "T_dep" in parcel_init:
         T_dep = jnp.asarray(parcel_init["T_dep"], dt)
     else:
-        T_dep = (parcel_init["s"] - geo_half[:, k_dep]) * rcpd_inv
+        T_dep = (parcel_init["s"] - geo_half[idx, k_dep]) * rcpd_inv
     T_u = jnp.asarray(parcel_init["T_u"], dt)
     q_u = jnp.asarray(parcel_init["q_u"], dt)
     l_u = jnp.asarray(parcel_init["l_u"], dt)
     w2h = jnp.asarray(parcel_init["w2h"], dt)
     ilab0 = jnp.asarray(parcel_init["ilab"], jnp.int32)
-    T_u = T_u.at[:, k_dep].set(jnp.where(active, T_dep, T_u[:, k_dep]))
-    q_u = q_u.at[:, k_dep].set(
-        jnp.where(active, parcel_init["q"].astype(dt), q_u[:, k_dep]))
-    l_u = l_u.at[:, k_dep].set(jnp.where(active, 0.0, l_u[:, k_dep]))  # ZLU(JKK)=0 (:344/:385)
-    w2h = w2h.at[:, k_dep].set(
-        jnp.where(active, parcel_init["w2"].astype(dt), w2h[:, k_dep]))
-    ilab0 = ilab0.at[:, k_dep].set(
-        jnp.where(active, jnp.asarray(1, jnp.int32), ilab0[:, k_dep]))  # ILAB=1, :345/:375
+    T_u = T_u.at[idx, k_dep].set(jnp.where(active, T_dep, T_u[idx, k_dep]))
+    q_u = q_u.at[idx, k_dep].set(
+        jnp.where(active, parcel_init["q"].astype(dt), q_u[idx, k_dep]))
+    l_u = l_u.at[idx, k_dep].set(jnp.where(active, 0.0, l_u[idx, k_dep]))  # ZLU(JKK)=0 (:344/:385)
+    w2h = w2h.at[idx, k_dep].set(
+        jnp.where(active, parcel_init["w2"].astype(dt), w2h[idx, k_dep]))
+    ilab0 = ilab0.at[idx, k_dep].set(
+        jnp.where(active, jnp.asarray(1, jnp.int32), ilab0[idx, k_dep]))  # ILAB=1, :345/:375
 
     carry0 = {
         "q": parcel_init["q"].astype(dt), "s": parcel_init["s"].astype(dt),
@@ -490,34 +511,39 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
         lldcum, cape = carry["lldcum"], carry["cape"]
         T_u, q_u, l_u, w2h, ilab = (carry["T_u"], carry["q_u"], carry["l_u"],
                                     carry["w2h"], carry["ilab"])
-        work = active & (p_full[:, j] > top_pa)            # NJKT2 bound
+        # FIXED-LENGTH work gate: NJKT2 bound AND the traced departure
+        # (levels j >= k_dep are the no-ops the unrolled loop never ran)
+        work = (j < k_dep) & active & (p_full[:, j] > top_pa)  # NJKT2 bound
 
         dz = (geo_half[:, j] - geo_half[:, j + 1]) * g_inv
         qf = 0.5 * (q_h[:, j + 1] + q_h[:, j])
         sf = 0.5 * (s_h[:, j + 1] + s_h[:, j])
-        if is_surface:
-            # 1/z mixing for the shallow/surface departure (cubasen.F90:437, 446-451);
-            # KINDEX==KLEV-1 branches are dead on Earth (NJKT1 < KLEV-1).
-            # AD safety: the 1/z height is floored away from zero.
-            z_h = jnp.maximum((geo_full[:, j] - geo_half[:, nlev]) * g_inv, z_floor)
-            zeps = c1 / z_h + c2
-            zmix = jnp.minimum(1.0, 0.5 * dz * zeps)       # cubasen.F90:450-452
-            tmp = 1.0 / (1.0 + zmix)
-            q_new = (q * (1.0 - zmix) + 2.0 * zmix * qf) * tmp  # cubasen.F90:456-458
-            s_new = (s * (1.0 - zmix) + 2.0 * zmix * sf) * tmp  # cubasen.F90:459-461
-        else:
-            # deep-test mixing 0.4*ENTRORG*dz*min(1,(PQSEN(JK)/PQSEN(KLEV))**3)
-            # (cubasen.F90:472-478); PQSEN is a specific humidity.
-            # AD safety: T clamped to the physical range before the saturation
-            # call; the ratio is divided by a POSITIVE-floored qsat_sfc and
-            # clipped to [0, 1] BEFORE the cube (no overflow, no zero divide).
-            qsat_j = saturation_specific_humidity(
-                jnp.clip(T[:, j], t_min, t_max), p_full[:, j])
-            ratio = jnp.clip(qsat_j / qsat_sfc, 0.0, 1.0)
-            zmix = jnp.minimum(1.0, deep_fac * entr_base * dz
-                               * ratio ** _QSAT_RATIO_EXP)
-            q_new = q * (1.0 - zmix) + qf * zmix           # cubasen.F90:483
-            s_new = s * (1.0 - zmix) + sf * zmix           # cubasen.F90:484
+        # BOTH mixing forms are evaluated and selected with jnp.where on the
+        # TRACED is_surface (both are cheap; KINDEX==KLEV-1 branches are dead
+        # on Earth, NJKT1 < KLEV-1).
+        # 1/z mixing for the shallow/surface departure (cubasen.F90:437, 446-451).
+        # AD safety: the 1/z height is floored away from zero.
+        z_h = jnp.maximum((geo_full[:, j] - geo_half[:, nlev]) * g_inv, z_floor)
+        zeps = c1 / z_h + c2
+        zmix_s = jnp.minimum(1.0, 0.5 * dz * zeps)          # cubasen.F90:450-452
+        tmp = 1.0 / (1.0 + zmix_s)
+        q_new_s = (q * (1.0 - zmix_s) + 2.0 * zmix_s * qf) * tmp  # cubasen.F90:456-458
+        s_new_s = (s * (1.0 - zmix_s) + 2.0 * zmix_s * sf) * tmp  # cubasen.F90:459-461
+        # deep-test mixing 0.4*ENTRORG*dz*min(1,(PQSEN(JK)/PQSEN(KLEV))**3)
+        # (cubasen.F90:472-478); PQSEN is a specific humidity.
+        # AD safety: T clamped to the physical range before the saturation
+        # call; the ratio is divided by a POSITIVE-floored qsat_sfc and
+        # clipped to [0, 1] BEFORE the cube (no overflow, no zero divide).
+        qsat_j = saturation_specific_humidity(
+            jnp.clip(T[:, j], t_min, t_max), p_full[:, j])
+        ratio = jnp.clip(qsat_j / qsat_sfc, 0.0, 1.0)
+        zmix_d = jnp.minimum(1.0, deep_fac * entr_base * dz
+                             * ratio ** _QSAT_RATIO_EXP)
+        q_new_d = q * (1.0 - zmix_d) + qf * zmix_d         # cubasen.F90:483
+        s_new_d = s * (1.0 - zmix_d) + sf * zmix_d         # cubasen.F90:484
+        zmix = jnp.where(is_surface, zmix_s, zmix_d)
+        q_new = jnp.where(is_surface, q_new_s, q_new_d)
+        s_new = jnp.where(is_surface, s_new_s, s_new_d)
 
         # condensation (CUADJTQ), condensate added, half retained (cubasen.F90:466-493)
         q_old = q_new
@@ -639,6 +665,16 @@ def _init_departure_parcel(k_dep, is_surface, T, q_v, p_full, p_half,
                            scratch=None):
     """Initialise the departure-level parcel and scan carry (cubasen.F90:314-435).
 
+    Nested-scan form (codex r14 item 2): ``k_dep`` is a TRACED int32 scalar
+    (or (ncol,) array) and ``is_surface`` a TRACED bool; both the surface and
+    the elevated branch are evaluated (both are cheap) and selected with
+    jnp.where, so this function is the first step of the departure lax.scan
+    in ifs_departure_search.  All ``arr[:, k_dep]``-style static slices are
+    dynamic gathers ``arr[idx, k_dep]`` with indices clipped to the valid
+    range; the gathered results only matter on the branch (and columns) where
+    they are selected, so clipped-index gathers on the discarded branch are
+    harmless (k_dep = 0 never occurs: the departure scan runs N-1 ... 1).
+
     q_v here is SPECIFIC HUMIDITY (the repo-convention mixing ratio is
     converted once at the ifs_departure_search entry).  dq_dt_adv is a
     SPECIFIC-humidity tendency [kg/kg/s] (PTENQA); a caller holding a
@@ -668,7 +704,8 @@ def _init_departure_parcel(k_dep, is_surface, T, q_v, p_full, p_half,
     ILAB=0, ZTU=PTENH, ZQU=PQENH, ZLU=0, ZWU2H=0) and threaded through every
     departure by ifs_departure_search; the source never resets them between
     candidates.  They are passed through unchanged here -- only the ascent
-    writes the departure level into them.
+    writes the departure level into them (dynamic scatter ``.at[idx,
+    k_dep].set``).
 
     elig_active carries the pre-ascent eligibility (only ZKHVFL < 0 columns
     are active for the surface departure, cubasen.F90:367; only columns with
@@ -680,12 +717,25 @@ def _init_departure_parcel(k_dep, is_surface, T, q_v, p_full, p_half,
     NJKT6 (C:310, 392 are full-level indices) and use the departure's
     FULL-level pressure consistently.
 
-    The elevated loop calls this with k_dep >= 1, so every k_dep - 1 index
-    below is inside the source's index domain (JKK = KLEV-1..2, :302)."""
+    The elevated loop runs with k_dep >= 1 (the departure scan runs
+    N-1 ... 1), so every k_dep - 1 gather below is inside the source's index
+    domain (JKK = KLEV-1..2, :302); the k_dep == N-2 excess inheritance
+    (cubasen.F90:380-391, 396-397, 408-409) and the ordered mixed-layer
+    offsets (+1, 0, -1) with the pre-add < 50 hPa test (cubasen.F90:400,
+    424-430) and the literal double temperature excess (:380-414) are
+    preserved exactly.  The nested-scan version of this routine is checked
+    bit-for-bit against the previous unrolled implementation."""
     nlev = T.shape[1]
     T_h, q_h, s_h = env_half
     ncol = T.shape[0]
     dt = T.dtype
+    idx = jnp.arange(ncol)
+    k_dep = jnp.asarray(k_dep, jnp.int32)
+    is_surface = jnp.asarray(is_surface, bool)
+    # clipped dynamic level indices (k_dep in 1..nlev-1, so k_dep-1 >= 0;
+    # k_dep+1 <= nlev is inside the half arrays of length nlev+1)
+    k0 = jnp.clip(k_dep, 0, nlev)
+    km1 = jnp.clip(k_dep - 1, 0, nlev)
 
     def _surface_fluxes():
         # ZRHO from the surface half level (cubasen.F90:333)
@@ -717,97 +767,115 @@ def _init_departure_parcel(k_dep, is_surface, T, q_v, p_full, p_half,
     ztex_s = jnp.where(zkhvfl < 0.0, ztex_s, 0.0)
     zqex_s = jnp.where(zkhvfl < 0.0, zqex_s, 0.0)
 
-    if is_surface:
-        # surface departure (cubasen.F90:346-370); inactive where ZKHVFL >= 0 (:367,370)
-        zws_u = zws_f
-        w2 = zws_u ** 2 + cfg.surface_w2_add                # :368
-        q_u = q_h[:, nlev - 1] + zqex_s                     # :364
-        s_u = s_h[:, nlev - 1] + constants.c_pd * ztex_s    # :365
-        T_dep = (s_h[:, nlev - 1] - geo_half[:, nlev - 1]) * _RCPD_INV + ztex_s  # ZTU, :366
-        l_u = jnp.zeros(ncol, dt)                           # :367
-        active = zkhvfl < 0.0                               # LLGO_ON (:367)
-        k_dep = nlev - 1
-    else:
-        ztexc = cfg.parcel_dT_excess_min_K                  # :373-374
-        zqexc = cfg.parcel_dq_excess_min
-        inherit = k_dep == nlev - 2
-        ztexc = jnp.where(inherit, jnp.maximum(ztexc, ztex_s), ztexc)  # :396-397
-        zqexc = jnp.where(inherit, jnp.maximum(zqexc, zqex_s), zqexc)
-        ztexc = jnp.where(inherit, jnp.minimum(ztexc, cfg.parcel_dT_excess_max_K), ztexc)  # :408
-        zqexc = jnp.where(inherit, jnp.minimum(zqexc, cfg.parcel_dq_excess_max), zqexc)
-        # land-only advective moistening (cubasen.F90:415-417), land_frac-weighted
-        # DOCUMENTED APPROXIMATION of the source's binary LDLAND mask (exact
-        # fidelity requires the caller's binary land mask).
-        # JKK > NJKT6 selects levels at pressures ABOVE ~700 hPa (below it);
-        # qadv_land_min_pa is a documented approximation of the fixed level
-        # index NJKT6 and uses the departure's FULL-level pressure; the RH
-        # gate uses the HALF-level humidity of the departure over the
-        # FULL-level saturation: ZQENH(JKK)/PQSEN(JKK) (:392).
-        qs_dep = saturation_specific_humidity(T[:, k_dep], p_full[:, k_dep])
-        adv = jnp.minimum(cfg.land_qadv_cap,
-                          jnp.maximum(0.0, dq_dt_adv[:, k_dep] * cfg.land_qadv_timescale_s))
-        gate = ((k_dep < nlev - 2) & (p_full[:, k_dep] > cfg.qadv_land_min_pa)
-                & (q_h[:, k_dep] / qs_dep < cfg.land_qadv_rh_max))       # :415
-        zqexc = zqexc + land_frac * jnp.where(gate, adv, 0.0)            # :416
-        q_u = q_h[:, k_dep] + zqexc
-        s_u = s_h[:, k_dep] + constants.c_pd * ztexc
-        # ZTU = (ZSENH - PGEOH)*ZRCPD + ZTEXC built from the ENVIRONMENT dry
-        # static energy (cubasen.F90:397): single excess; preserved separately
-        # from s_u (which carries the same single excess here, but see the
-        # mixed-layer branch below where the two differ -- the literal double
-        # ZTEXC in ZTU, :414)
-        T_dep = (s_h[:, k_dep] - geo_half[:, k_dep]) * _RCPD_INV + ztexc   # :397
-        # mixed layer for parcels within 60 hPa of the surface (cubasen.F90:400,
-        # 424-430).  cfg.mixed_layer_gate selects the condition:
-        #   "half_above"  : the literal source test
-        #                    PAPH(KLEV+1) - PAPH(JKK-1) < 60 hPa (:400),
-        #                    i.e. our p_half[:, nlev] - p_half[:, k_dep-1];
-        #                    with uniform ~33 hPa layers the first elevated
-        #                    candidate tests 3*dp ~ 100 hPa and is never mixed.
-        #   "cell_centre" : the resolution-aware DEPARTURE from the source,
-        #                    PAPH(KLEV+1) - PAPH(JKK) < 60 hPa using the
-        #                    departure's FULL-level (cell-centre) pressure
-        #                    p_full[:, k_dep], which enables the lowest
-        #                    elevated candidate on L137-like grids.  Note
-        #                    (finding 9) that a "962 hPa departure" named by
-        #                    its full level still LAUNCHES at the half level
-        #                    p_half[k_dep].
-        # The three-sample 50 hPa accumulation (cubasen.F90:424-430) is the
-        # source's in BOTH modes.  k_dep >= 1 always here, so k_dep-1 is in
-        # the source's index domain.
-        if cfg.mixed_layer_gate == "half_above":
-            mixed = p_half[:, nlev] - p_half[:, k_dep - 1] < cfg.mixed_layer_depth_pa  # :400
-        else:  # "cell_centre"
-            mixed = p_half[:, nlev] - p_full[:, k_dep] < cfg.mixed_layer_depth_pa
-        # accumulate over exactly the three IFS half levels JK = JKK+1, JKK,
-        # JKK-1 (our half indices k_dep+1, k_dep, k_dep-1), each weighted by
-        # ZWORK2 = PAPH(JK) - PAPH(JK-1), while the accumulated span ZWORK1
-        # < 50 hPa; divide by ZWORK1 (the span actually accumulated).
-        # AD safety: the division by the accumulated span is floored and the
-        # mixed values are selected only where the span is positive.
-        qw = jnp.zeros(ncol, dt); sw = jnp.zeros(ncol, dt)
-        span = jnp.zeros(ncol, dt)
-        for l in (k_dep + 1, k_dep, k_dep - 1):             # :424-430
-            dp = p_half[:, l] - p_half[:, l - 1]            # ZWORK2 (:426)
-            inc = span < cfg.mixed_layer_span_pa             # ZWORK1 < 50 hPa (:425)
-            w = jnp.where(inc, dp, 0.0)
-            qw = qw + q_h[:, l] * w
-            sw = sw + s_h[:, l] * w
-            span = span + w
-        span_pos = span > 0.0
-        q_m = qw / jnp.maximum(span, _TINY) + zqexc
-        s_m = sw / jnp.maximum(span, _TINY) + constants.c_pd * ztexc
-        T_m = (s_m - geo_half[:, k_dep]) * _RCPD_INV + ztexc  # literal double ZTEXC, :412-414
-        take_m = mixed & span_pos
-        q_u = jnp.where(take_m, q_m, q_u)
-        s_u = jnp.where(take_m, s_m, s_u)
-        T_dep = jnp.where(take_m, T_m, T_dep)
-        l_u = jnp.zeros(ncol, dt)
-        w2 = jnp.full(ncol, cfg.elevated_w2, dt)            # :435
-        active = jnp.ones(ncol, bool) if elig_active is None else elig_active
+    # ---- surface branch (cubasen.F90:346-370); inactive where ZKHVFL >= 0
+    # (:367,370).  All indices are the static surface level nlev-1 (JKK = KLEV).
+    zws_u = zws_f
+    w2_sfc = zws_u ** 2 + cfg.surface_w2_add                # :368
+    q_u_s = q_h[:, nlev - 1] + zqex_s                       # :364
+    s_u_s = s_h[:, nlev - 1] + constants.c_pd * ztex_s      # :365
+    T_dep_s = (s_h[:, nlev - 1] - geo_half[:, nlev - 1]) * _RCPD_INV + ztex_s  # ZTU, :366
+    l_u_s = jnp.zeros(ncol, dt)                             # :367
+    active_s = zkhvfl < 0.0                                 # LLGO_ON (:367)
+    # the surface departure level is nlev-1 (the first scan step passes it
+    # as k_dep already; no override needed, only the traced is_surface
+    # selects this branch)
+
+    # ---- elevated branch (cubasen.F90:372-435), dynamic gathers at k_dep
+    ztexc = jnp.asarray(cfg.parcel_dT_excess_min_K, dt)     # :373-374
+    zqexc = jnp.asarray(cfg.parcel_dq_excess_min, dt)
+    inherit = k_dep == nlev - 2                             # JKK == KLEV-1 (:380)
+    ztexc = jnp.where(inherit, jnp.maximum(ztexc, ztex_s), ztexc)  # :396-397
+    zqexc = jnp.where(inherit, jnp.maximum(zqexc, zqex_s), zqexc)
+    ztexc = jnp.where(inherit, jnp.minimum(ztexc, cfg.parcel_dT_excess_max_K), ztexc)  # :408
+    zqexc = jnp.where(inherit, jnp.minimum(zqexc, cfg.parcel_dq_excess_max), zqexc)
+    # land-only advective moistening (cubasen.F90:415-417), land_frac-weighted
+    # DOCUMENTED APPROXIMATION of the source's binary LDLAND mask (exact
+    # fidelity requires the caller's binary land mask).
+    # JKK > NJKT6 selects levels at pressures ABOVE ~700 hPa (below it);
+    # qadv_land_min_pa is a documented approximation of the fixed level
+    # index NJKT6 and uses the departure's FULL-level pressure; the RH
+    # gate uses the HALF-level humidity of the departure over the
+    # FULL-level saturation: ZQENH(JKK)/PQSEN(JKK) (:392).
+    qs_dep = saturation_specific_humidity(T[idx, k0], p_full[idx, k0])
+    adv = jnp.minimum(cfg.land_qadv_cap,
+                      jnp.maximum(0.0, dq_dt_adv[idx, k0] * cfg.land_qadv_timescale_s))
+    gate = ((k_dep < nlev - 2) & (p_full[idx, k0] > cfg.qadv_land_min_pa)
+            & (q_h[idx, k0] / qs_dep < cfg.land_qadv_rh_max))           # :415
+    zqexc = zqexc + land_frac * jnp.where(gate, adv, 0.0)                # :416
+    q_u_e = q_h[idx, k0] + zqexc
+    s_u_e = s_h[idx, k0] + constants.c_pd * ztexc
+    # ZTU = (ZSENH - PGEOH)*ZRCPD + ZTEXC built from the ENVIRONMENT dry
+    # static energy (cubasen.F90:397): single excess; preserved separately
+    # from s_u_e (which carries the same single excess here, but see the
+    # mixed-layer branch below where the two differ -- the literal double
+    # ZTEXC in ZTU, :414)
+    T_dep_e = (s_h[idx, k0] - geo_half[idx, k0]) * _RCPD_INV + ztexc      # :397
+    # mixed layer for parcels within 60 hPa of the surface (cubasen.F90:400,
+    # 424-430).  cfg.mixed_layer_gate selects the condition:
+    #   "half_above"  : the literal source test
+    #                    PAPH(KLEV+1) - PAPH(JKK-1) < 60 hPa (:400),
+    #                    i.e. our p_half[:, nlev] - p_half[idx, k_dep-1];
+    #                    with uniform ~33 hPa layers the first elevated
+    #                    candidate tests 3*dp ~ 100 hPa and is never mixed.
+    #   "cell_centre" : the resolution-aware DEPARTURE from the source,
+    #                    PAPH(KLEV+1) - PAPH(JKK) < 60 hPa using the
+    #                    departure's FULL-level (cell-centre) pressure
+    #                    p_full[idx, k_dep], which enables the lowest
+    #                    elevated candidate on L137-like grids.  Note
+    #                    (finding 9) that a "962 hPa departure" named by
+    #                    its full level still LAUNCHES at the half level
+    #                    p_half[k_dep].
+    # The three-sample 50 hPa accumulation (cubasen.F90:424-430) is the
+    # source's in BOTH modes.  k_dep >= 1 always here (the departure scan
+    # runs N-1 ... 1), so k_dep-1 is in the source's index domain.
+    if cfg.mixed_layer_gate == "half_above":
+        mixed = p_half[:, nlev] - p_half[idx, km1] < cfg.mixed_layer_depth_pa  # :400
+    else:  # "cell_centre"
+        mixed = p_half[:, nlev] - p_full[idx, k0] < cfg.mixed_layer_depth_pa
+    # accumulate over exactly the three IFS half levels JK = JKK+1, JKK,
+    # JKK-1 (our half indices k_dep+1, k_dep, k_dep-1) IN THAT ORDER, each
+    # weighted by ZWORK2 = PAPH(JK) - PAPH(JK-1), while the accumulated span
+    # ZWORK1 < 50 hPa (the pre-add test, cubasen.F90:425); divide by ZWORK1
+    # (the span actually accumulated).
+    # AD safety: the division by the accumulated span is floored and the
+    # mixed values are selected only where the span is positive.
+    qw = jnp.zeros(ncol, dt); sw = jnp.zeros(ncol, dt)
+    span = jnp.zeros(ncol, dt)
+    for off in (1, 0, -1):                                 # :424-430
+        l = jnp.clip(k_dep + off, 0, nlev)                 # k_dep+1, k_dep, k_dep-1
+        lm1 = jnp.clip(k_dep + off - 1, 0, nlev)
+        dp = p_half[idx, l] - p_half[idx, lm1]             # ZWORK2 (:426)
+        inc = span < cfg.mixed_layer_span_pa               # ZWORK1 < 50 hPa (:425)
+        w = jnp.where(inc, dp, 0.0)
+        qw = qw + q_h[idx, l] * w
+        sw = sw + s_h[idx, l] * w
+        span = span + w
+    span_pos = span > 0.0
+    q_m = qw / jnp.maximum(span, _TINY) + zqexc
+    s_m = sw / jnp.maximum(span, _TINY) + constants.c_pd * ztexc
+    T_m = (s_m - geo_half[idx, k0]) * _RCPD_INV + ztexc    # literal double ZTEXC, :412-414
+    take_m = mixed & span_pos
+    q_u_e = jnp.where(take_m, q_m, q_u_e)
+    s_u_e = jnp.where(take_m, s_m, s_u_e)
+    T_dep_e = jnp.where(take_m, T_m, T_dep_e)
+    l_u_e = jnp.zeros(ncol, dt)
+    w2_e = jnp.full(ncol, cfg.elevated_w2, dt)             # :435
+    active_e = jnp.ones(ncol, bool) if elig_active is None else elig_active
+
+    # ---- branch selection on the TRACED is_surface (both branches are
+    # cheap; jnp.where over both, as allowed by the codex spec)
+    q_u = jnp.where(is_surface, q_u_s, q_u_e)
+    s_u = jnp.where(is_surface, s_u_s, s_u_e)
+    T_dep = jnp.where(is_surface, T_dep_s, T_dep_e)
+    l_u = jnp.where(is_surface, l_u_s, l_u_e)
+    w2 = jnp.where(is_surface, w2_sfc, w2_e)
+    active = jnp.where(is_surface, active_s, active_e)
+
     # buoyancy at the departure half level (cubasen.F90:427-431), computed
-    # from the PRESERVED departure temperature T_dep (review finding 1)
-    tven = (1.0 + _RETV * q_h[:, k_dep]) * (s_h[:, k_dep] - geo_half[:, k_dep]) * _RCPD_INV
+    # from the PRESERVED departure temperature T_dep (review finding 1);
+    # dynamic gathers at the traced k_dep (for the surface departure
+    # k_dep = nlev-1, exactly the source's static surface level)
+    tven = (1.0 + _RETV * q_h[idx, k0]) * (s_h[idx, k0] - geo_half[idx, k0]) * _RCPD_INV
     tvu = (1.0 + _RETV * q_u) * T_dep
     buoh = (tvu - tven) * constants.g / tven
 
@@ -846,6 +914,23 @@ def ifs_departure_search(T, q_v, p_full, p_half, geo_full, geo_half,
                          shf_w_m2, lhf_w_m2, ustar, land_frac, dq_dt_adv, cfg):
     """Full departure search (cubasen.F90:314-735).
 
+    Nested-scan structure (codex r14 item 2): the candidate-departure loop is
+    a single ``lax.scan`` over the departures N-1 ... 1 (JKK = KLEV..2 of the
+    source's KLEV..NJKT1 loop, cubasen.F90:314) with a TRACED k_dep
+    (k_dep = N-1-step; the first step is the surface departure with the
+    traced is_surface flag), carrying the persistent scratch (T_u, q_u, l_u,
+    w2h, ilab), the selected outputs (ldcum, ktype, k_dpl, k_cbot, k_ctop,
+    w_base, the output profiles Tu/qu/lu, klab, w2, w2_surface, ldsc,
+    k_botsc), the first-deep/resolved flags, the surface diagnostics and the
+    maximum CAPE; no stacked candidate history is returned (ys = None,
+    unroll = 1).  The per-departure ascent is a fixed-length masked scan
+    (see _test_ascent_from_departure).  REGRESSION ANCHOR: the nested-scan
+    version is checked bit-for-bit against the previous unrolled
+    implementation (Python loop over static k_dep), including the ``n = 1``
+    behaviour.  Cost note: the arithmetic is O(N^2) per column (N-1
+    departures x N-1 masked ascent levels); reverse-mode AD memory over the
+    nested scans is to be measured.
+
     API humidity convention (repo convention): the input ``q_v`` is a MIXING
     RATIO; it is converted to specific humidity ``q = q_v/(1 + q_v)`` at
     entry and everything inside (half-level environment, saturation, ascent)
@@ -865,12 +950,12 @@ def ifs_departure_search(T, q_v, p_full, p_half, geo_full, geo_half,
 
     Scratch lifecycle (review finding 3; cubasen.F90:263-271, 296-303): the
     scratch arrays T_u (= T_h), q_u (= q_h), l_u = 0, w2h = 0, ilab = 0
-    (int32) are created ONCE before the candidate loop and threaded through
+    (int32) are created ONCE before the candidate scan and carried through
     every departure: they are passed to _init_departure_parcel / the ascent
     in the init dict, and the ascent's returned arrays become the scratch
-    for the NEXT departure.  The source never resets them between candidates
-    (the LLRESET fill C:697-713 writes the OUTPUT arrays klab/PTU/PQU/PLU,
-    not the scratch).
+    for the NEXT departure (scan carry).  The source never resets them
+    between candidates (the LLRESET fill C:697-713 writes the OUTPUT arrays
+    klab/PTU/PQU/PLU, not the scratch).
 
     Land perturbation: land_frac weighting is an explicitly chosen
     DOCUMENTED APPROXIMATION of the source's binary LDLAND mask
@@ -925,124 +1010,161 @@ def ifs_departure_search(T, q_v, p_full, p_half, geo_full, geo_half,
     zkhvfl = (shf_w_m2 * _RCPD_INV + _RETV * T[:, nlev - 1] * (lhf_w_m2 / constants.L_v)) / zrho
     col_go = zkhvfl < 0.0                                   # :367
 
-    ldcum = jnp.zeros(ncol, T.dtype)
-    ktype = jnp.zeros(ncol, jnp.int32)
-    kdpl = jnp.full(ncol, -1, jnp.int32)                    # public sentinel
-    kcbot = jnp.full(ncol, -1, jnp.int32)
-    kctop = jnp.full(ncol, -1, jnp.int32)
-    wbase = jnp.zeros(ncol, T.dtype)
+    lev = jnp.arange(nlev)[None, :]
+    ones_ncol = jnp.ones(ncol, bool)
     # persistent scratch (review finding 3; cubasen.F90:263-271): created ONCE
-    # before the candidate loop (ILAB=0, ZTU=PTENH, ZQU=PQENH, ZLU=0, ZWU2H=0
+    # before the candidate scan (ILAB=0, ZTU=PTENH, ZQU=PQENH, ZLU=0, ZWU2H=0
     # -- here initialised from the half-level environment, the first call's
-    # PTU/PQU/PLU/KLAB equivalent) and threaded through every departure; the
+    # PTU/PQU/PLU/KLAB equivalent) and carried through every departure; the
     # ascent's returned arrays become the next departure's scratch, never
     # reset (the LLRESET fill C:697-713 writes the OUTPUT arrays, not these)
-    scratch = {"T_u": T_h[:, :nlev].copy(),
-               "q_u": q_h[:, :nlev].copy(),
-               "l_u": jnp.zeros((ncol, nlev), T.dtype),
-               "w2h": jnp.zeros((ncol, nlev), T.dtype),
-               "ilab": jnp.zeros((ncol, nlev), jnp.int32)}
     # OUTPUT profiles (what the source's PTU/PQU/PLU/KLAB hold on exit)
-    Tu = T_h[:, :nlev].copy()
-    qu = q_h[:, :nlev].copy()
-    lu = jnp.zeros((ncol, nlev), T.dtype)
-    klab = jnp.zeros((ncol, nlev), jnp.int32)
-    cape_out = jnp.zeros(ncol, T.dtype)
-    w2_out = jnp.zeros((ncol, nlev), T.dtype)
-    w2_sfc_out = jnp.zeros((ncol, nlev), T.dtype)
-    ldsc = jnp.zeros(ncol, bool)
-    kbotsc = jnp.full(ncol, -1, jnp.int32)
     # resolved tracks only DEEP-resolved columns (LLFIRST at :695-717, 733);
     # a shallow surface result does NOT stop the search
-    resolved = jnp.zeros(ncol, bool)
+    carry0 = {
+        "ldcum": jnp.zeros(ncol, T.dtype),
+        "ktype": jnp.zeros(ncol, jnp.int32),
+        "kdpl": jnp.full(ncol, -1, jnp.int32),              # public sentinel
+        "kcbot": jnp.full(ncol, -1, jnp.int32),
+        "kctop": jnp.full(ncol, -1, jnp.int32),
+        "wbase": jnp.zeros(ncol, T.dtype),
+        "T_u": T_h[:, :nlev].copy(),
+        "q_u": q_h[:, :nlev].copy(),
+        "l_u": jnp.zeros((ncol, nlev), T.dtype),
+        "ilab": jnp.zeros((ncol, nlev), jnp.int32),
+        "w2h": jnp.zeros((ncol, nlev), T.dtype),
+        "Tu": T_h[:, :nlev].copy(),
+        "qu": q_h[:, :nlev].copy(),
+        "lu": jnp.zeros((ncol, nlev), T.dtype),
+        "klab": jnp.zeros((ncol, nlev), jnp.int32),
+        "cape_out": jnp.zeros(ncol, T.dtype),
+        "w2_out": jnp.zeros((ncol, nlev), T.dtype),
+        "w2_sfc_out": jnp.zeros((ncol, nlev), T.dtype),
+        "ldsc": jnp.zeros(ncol, bool),
+        "kbotsc": jnp.full(ncol, -1, jnp.int32),
+        "resolved": jnp.zeros(ncol, bool),
+    }
 
-    lev = jnp.arange(nlev)[None, :]
-    # candidate loop: surface level, then elevated k_dep = nlev-2 .. 1
-    # (JKK = KLEV..2 of the source's KLEV..NJKT1 loop, cubasen.F90:314);
-    # k_dep = 0 is never a departure, so every k_dep - 1 index below is valid
-    for k_dep in range(nlev - 1, 0, -1):
-        is_surface = k_dep == nlev - 1
-        if is_surface:
-            # eligibility BEFORE the ascent: only ZKHVFL < 0 columns are
-            # active for the surface departure (cubasen.F90:367)
-            elig = col_go
-            cand = jnp.ones(ncol, bool)
-        else:
-            # elevated eligibility: NJKT1 pressure floor (:314/:655) AND not
-            # yet deep-resolved (LLGO_ON = .NOT.LLDEEP, :655/:735); passed as
-            # the initial `active` carry so inactive columns accumulate no CAPE
-            cand = p_full[:, k_dep] > cfg.departure_top_pa   # NJKT1 (:314)
-            elig = cand & ~resolved
+    def step(carry, t):
+        # candidate loop: surface level, then elevated k_dep = nlev-2 .. 1
+        # (JKK = KLEV..2 of the source's KLEV..NJKT1 loop, cubasen.F90:314);
+        # k_dep = 0 is never a departure, so every k_dep - 1 index below is
+        # valid.  DYNAMIC (traced) k_dep and is_surface.
+        k_dep = jnp.asarray(nlev - 1 - t, jnp.int32)
+        is_surface = t == 0
+        # eligibility BEFORE the ascent: only ZKHVFL < 0 columns are active
+        # for the surface departure (cubasen.F90:367); elevated eligibility:
+        # NJKT1 pressure floor (:314/:655) AND not yet deep-resolved
+        # (LLGO_ON = .NOT.LLDEEP, :655/:735); passed as the initial `active`
+        # carry so inactive columns accumulate no CAPE
+        cand = p_full[:, k_dep] > cfg.departure_top_pa        # NJKT1 (:314)
+        cand = jnp.where(is_surface, ones_ncol, cand)
+        elig = jnp.where(is_surface, col_go, cand & carry["resolved"].__xor__(True) & cand)
+        elig = jnp.where(is_surface, col_go, cand & ~carry["resolved"])
         init = _init_departure_parcel(k_dep, is_surface, T, q, p_full, p_half,
                                       geo_full, geo_half, env_half, shf_w_m2,
                                       lhf_w_m2, ustar, land_frac, dq_dt_adv,
-                                      cfg, elig_active=elig, scratch=scratch)
+                                      cfg, elig_active=elig,
+                                      scratch={"T_u": carry["T_u"],
+                                               "q_u": carry["q_u"],
+                                               "l_u": carry["l_u"],
+                                               "w2h": carry["w2h"],
+                                               "ilab": carry["ilab"]})
         ilab, ztu, zqu, zlu, w2h, icbot, ictop, lldcum, zcape = \
             _test_ascent_from_departure(k_dep, is_surface, T, q, p_full, p_half,
                                         geo_full, geo_half, env_half, init, cfg)
         # the ascent's returned arrays are the scratch for the NEXT departure
         # (the source never resets them; review finding 3)
-        scratch = {"T_u": ztu, "q_u": zqu, "l_u": zlu, "w2h": w2h, "ilab": ilab}
         jkb = jnp.clip(icbot, 0, nlev - 1); jkt = jnp.clip(ictop, 0, nlev - 1)
         depth = p_half[idx, jkb] - p_half[idx, jkt]
         wb = jnp.sqrt(jnp.maximum(w2h[idx, jkb], 0.0))       # :670 / :716
         # PCAPE = MAXVAL(ZCAPE(JL,:)) over ALL departures (cubasen.F90:741)
-        cape_out = jnp.maximum(cape_out, zcape)
-        if is_surface:
-            lldeep = depth > cfg.depth_split_pa              # '>' (:666)
-            sel = lldcum & ~lldeep & col_go                  # :666-667, gated by ZKHVFL<0 (:367)
-            # LDSC / KBOTSC from the surface test for ALL columns
-            # (cubasen.F90:598-607, 639-645): LLDSC/LL_LDBASE are set when the
-            # surface ascent found a cloud base, i.e. ICBOT was updated from
-            # its internal default JKK = nlev-1 (base levels are <= nlev-2)
-            lldsc = icbot < (nlev - 1)
-            ldsc = jnp.where(lldsc, jnp.ones(ncol, bool), ldsc)
-            kbotsc = jnp.where(lldsc, icbot, jnp.full(ncol, -1, jnp.int32))
-            # PWU2H: the SURFACE test's velocity profile, always retained
-            # (cubasen.F90:358, 559-560)
-            w2_sfc_out = w2h
-            # copy surface ascent values for JK >= JKT for ALL columns
-            # (cubasen.F90:671-683); ictop carries the internal default
-            # nlev-2 (= KLEV-1, :325) when no top was found, so the BOTTOM
-            # TWO levels copy (C:673-678)
-            m = lev >= ictop[:, None]
-        else:
-            lldeep = depth >= cfg.depth_split_pa             # '>=' (:691)
-            # only the FIRST deep elevated departure resets (LLRESET :693-713,
-            # LLFIRST=.FALSE. at :733) and REPLACES any shallow surface result;
-            # on LLDEEP & LLFIRST the source copies LDCUM = LLDCUM (:722-726),
-            # which `sel` (containing lldcum) reproduces without forcing it
-            sel = lldcum & lldeep & cand & ~resolved         # :695-717
-            resolved = resolved | sel                        # :733
-            # LLRESET fill: ascent inside [JKT, KDPL], half-level environment
-            # (klab 1) outside, klab 0 above JKT (cubasen.F90:697-713) -- the
-            # environment fill uses the HALF-level values T_h/q_h (:711-713)
-            # and writes the OUTPUT arrays only, NOT the persistent scratch
-            inside = (lev >= jkt[:, None]) & (lev <= k_dep)
-            m = sel[:, None] & inside
-            env_m = sel[:, None] & ~inside
-            klab = jnp.where(env_m, 1, klab)
-            Tu = jnp.where(env_m, T_h[:, :nlev], Tu)
-            qu = jnp.where(env_m, q_h[:, :nlev], qu)
-            lu = jnp.where(env_m, 0.0, lu)
-            klab = jnp.where(sel[:, None] & (lev < jkt[:, None]), 0, klab)
-            # deep acceptance clears the Sc outputs (cubasen.F90:727-728)
-            ldsc = jnp.where(sel, jnp.zeros(ncol, bool), ldsc)
-            kbotsc = jnp.where(sel, jnp.full(ncol, -1, jnp.int32), kbotsc)
+        cape_out = jnp.maximum(carry["cape_out"], zcape)
+
+        # ---- surface step: shallow acceptance, Sc diagnostics, PWU2H
+        lldeep_s = depth > cfg.depth_split_pa                # '>' (:666)
+        sel_s = lldcum & ~lldeep_s & col_go                  # :666-667, gated by ZKHVFL<0 (:367)
+        # LDSC / KBOTSC from the surface test for ALL columns
+        # (cubasen.F90:598-607, 639-645): LLDSC/LL_LDBASE are set when the
+        # surface ascent found a cloud base, i.e. ICBOT was updated from
+        # its internal default JKK = nlev-1 (base levels are <= nlev-2)
+        lldsc_flag = icbot < (nlev - 1)
+        ldsc_s = jnp.where(lldsc_flag, jnp.ones(ncol, bool), carry["ldsc"])
+        kbotsc_s = jnp.where(lldsc_flag, icbot, jnp.full(ncol, -1, jnp.int32))
+        # PWU2H: the SURFACE test's velocity profile, always retained
+        # (cubasen.F90:358, 559-560)
+        w2_sfc_out = jnp.where(is_surface, w2h, carry["w2_sfc_out"])
+        # copy surface ascent values for JK >= JKT for ALL columns
+        # (cubasen.F90:671-683); ictop carries the internal default
+        # nlev-2 (= KLEV-1, :325) when no top was found, so the BOTTOM
+        # TWO levels copy (C:673-678)
+        m_s = lev >= ictop[:, None]
+
+        # ---- elevated step: first-deep reset (LLRESET :693-713, LLFIRST at :733)
+        lldeep_e = depth >= cfg.depth_split_pa               # '>=' (:691)
+        # only the FIRST deep elevated departure resets and REPLACES any
+        # shallow surface result; on LLDEEP & LLFIRST the source copies
+        # LDCUM = LLDCUM (:722-726), which `sel` (containing lldcum)
+        # reproduces without forcing it
+        sel_e = lldcum & lldeep_e & cand & ~carry["resolved"]  # :695-717
+        resolved = carry["resolved"] | (sel_e & ~is_surface)   # :733
+        # LLRESET fill: ascent inside [JKT, KDPL], half-level environment
+        # (klab 1) outside, klab 0 above JKT (cubasen.F90:697-713) -- the
+        # environment fill uses the HALF-level values T_h/q_h (:711-713)
+        # and writes the OUTPUT arrays only, NOT the persistent scratch
+        inside = (lev >= jkt[:, None]) & (lev <= k_dep)
+        m_e = sel_e[:, None] & inside
+        env_m = (~is_surface) & sel_e[:, None] & ~inside
+        zero_above = (~is_surface) & sel_e[:, None] & (lev < jkt[:, None])
+        # deep acceptance clears the Sc outputs (cubasen.F90:727-728)
+        ldsc_e = jnp.where(sel_e, jnp.zeros(ncol, bool), carry["ldsc"])
+        kbotsc_e = jnp.where(sel_e, jnp.full(ncol, -1, jnp.int32), carry["kbotsc"])
+
+        # ---- branch selection on the traced is_surface
+        sel = jnp.where(is_surface, sel_s, sel_e)
+        m = jnp.where(is_surface, m_s, m_e)
+        ldsc = jnp.where(is_surface, ldsc_s, ldsc_e)
+        kbotsc = jnp.where(is_surface, kbotsc_s, kbotsc_e)
+
         # ktype from the ACCEPTED cloud depth, not the departure identity:
         # a selected surface parcel with depth exactly == depth_split_pa is
         # deep by cumastrn's '>=' (cumastrn.F90:517-521)
         kt = jnp.where(depth >= cfg.depth_split_pa, 1, 2)
-        ldcum = jnp.where(sel, 1.0, ldcum)                   # = LLDCUM via sel
-        ktype = jnp.where(sel, kt, ktype)
-        kdpl = jnp.where(sel, jnp.full(ncol, k_dep, jnp.int32), kdpl)
-        kcbot = jnp.where(sel, icbot, kcbot)
-        kctop = jnp.where(sel, ictop, kctop)
-        wbase = jnp.where(sel, wb, wbase)
-        w2_out = jnp.where(sel[:, None], w2h, w2_out)
+        klab = carry["klab"]
+        Tu, qu, lu = carry["Tu"], carry["qu"], carry["lu"]
+        klab = jnp.where(env_m, 1, klab)
+        Tu = jnp.where(env_m, T_h[:, :nlev], Tu)
+        qu = jnp.where(env_m, q_h[:, :nlev], qu)
+        lu = jnp.where(env_m, 0.0, lu)
+        klab = jnp.where(zero_above, 0, klab)
+        ldcum = jnp.where(sel, 1.0, carry["ldcum"])          # = LLDCUM via sel
+        ktype = jnp.where(sel, kt, carry["ktype"])
+        kdpl = jnp.where(sel, k_dep, carry["kdpl"])
+        kcbot = jnp.where(sel, icbot, carry["kcbot"])
+        kctop = jnp.where(sel, ictop, carry["kctop"])
+        wbase = jnp.where(sel, wb, carry["wbase"])
+        w2_out = jnp.where(sel[:, None], w2h, carry["w2_out"])
         klab = jnp.where(m, ilab, klab)
         Tu = jnp.where(m, ztu, Tu); qu = jnp.where(m, zqu, qu)
         lu = jnp.where(m, zlu, lu)
+
+        return {"ldcum": ldcum, "ktype": ktype, "kdpl": kdpl,
+                "kcbot": kcbot, "kctop": kctop, "wbase": wbase,
+                "T_u": ztu, "q_u": zqu, "l_u": zlu, "w2h": w2h, "ilab": ilab,
+                "Tu": Tu, "qu": qu, "lu": lu, "klab": klab,
+                "cape_out": cape_out, "w2_out": w2_out,
+                "w2_sfc_out": w2_sfc_out, "ldsc": ldsc, "kbotsc": kbotsc,
+                "resolved": resolved}, ()
+
+    final, _ = lax.scan(step, carry0, jnp.arange(nlev - 1, dtype=jnp.int32),
+                        unroll=1)
+
+    ldcum = final["ldcum"]; ktype = final["ktype"]
+    kdpl = final["kdpl"]; kcbot = final["kcbot"]; kctop = final["kctop"]
+    wbase = final["wbase"]; Tu = final["Tu"]; qu = final["qu"]
+    lu = final["lu"]; klab = final["klab"]; cape_out = final["cape_out"]
+    w2_out = final["w2_out"]; w2_sfc_out = final["w2_sfc_out"]
+    ldsc = final["ldsc"]; kbotsc = final["kbotsc"]
 
     # API boundary: specific humidity -> per-unit MOIST-total-mass species,
     # consistently for both outputs (review finding 4): the denominator
