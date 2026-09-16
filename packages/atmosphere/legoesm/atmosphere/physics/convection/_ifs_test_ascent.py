@@ -1003,6 +1003,10 @@ def ifs_departure_search(T, q_v, p_full, p_half, geo_full, geo_half,
     defaults ICBOT = JKK / ICTOP = KLEV-1 <-> nlev-2 (cubasen.F90:323-325)
     are translated to the public -1 sentinel for unsuccessful columns
     (:664-668)."""
+    # public entry: accept array-likes (numpy inputs would otherwise meet
+    # traced indices inside the scans and fail with a tracer conversion)
+    T, q_v, p_full, p_half, geo_full, geo_half = (jnp.asarray(a) for a in (T, q_v, p_full, p_half, geo_full, geo_half))
+    shf_w_m2, lhf_w_m2, ustar, land_frac, dq_dt_adv = (jnp.asarray(a) for a in (shf_w_m2, lhf_w_m2, ustar, land_frac, dq_dt_adv))
     if cfg.mixed_layer_gate not in ("half_above", "cell_centre"):
         raise ValueError(
             f"IFSTestAscentConfig.mixed_layer_gate must be 'half_above' or "
