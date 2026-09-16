@@ -224,9 +224,13 @@ consolidated stage twin and its fail-closed reader, the one shared RK3 stage
 helper, the receipt citation machinery and source-rounding primitive. Its log
 SHA-256 is
 `33d18281be2d7051cdea52444f41248de77382ad30e72e36103dea691b6ecd28`.
-The clean-tree receipt citation gate and its shifted-citation plant are pending
-one intermediate receipt commit; their exact verdicts will replace this
-sentence before finalization.
+The clean-tree receipt citation gate maps all 8/8 compiled-source citations,
+finds no failure or unmapped citation, audits every map entry and passes every
+self-control. Its JSON SHA-256 is
+`d3eec2be1e9e233ee956cad57a057d45f0d1d817bec927dd40764a2f555e405d`.
+Shifting the stage-1 clock citation by two lines exits 1 with
+`SYMBOL-NOT-AT-LINE`; the plant JSON SHA-256 is
+`67781a23c4e954a52a713feba5acb67ce87ad551c2fa37720dfd8f06eca320b3`.
 
 No configuration, coefficient, timestep, carried state, stabilizer, year
 harness, reconciliation gate, freshwater pair, #1484 guard, NEMO source or
