@@ -4017,10 +4017,14 @@ def test_surface_height_and_saline_flags_round_trip():
     ]), parser))
     assert cfg.surface_z_ref_model_level is True
     assert cfg.surface_ocean_q_sfc_saline is True
+    cfg = cfg._replace(grid=cfg.grid._replace(grid_type="mpas"))
     surf = turbulence_config_for(cfg).louis.surface
     assert surf.z_ref_model_level is True
     assert surf.ocean_q_sfc_saline is True
     assert surf.bulk_scheme == "coare3"
+    # any other lane resolves its kernel past the bridge guard: refuse there
+    with pytest.raises(ValueError, match="MPAS lane only"):
+        turbulence_config_for(cfg._replace(grid=cfg.grid._replace(grid_type="cubed_sphere")))
 
 
 def test_bechtold_M_b_max_threads_and_validates():

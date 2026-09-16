@@ -3810,6 +3810,14 @@ def apply_surface_flux_config(tc, config):
     sss = getattr(config, "surface_stability_scheme", "dyer1974")
     zml = bool(getattr(config, "surface_z_ref_model_level", False))
     qsal = bool(getattr(config, "surface_ocean_q_sfc_saline", False))
+    if (zml or qsal) and not _is_mpas_grid(config):
+        # Implemented on the MPAS turbulence bridge only; the FV pipeline
+        # resolves its kernel through get_turbulence_fn and would run with
+        # the switches silently inert (codex whole-branch re-review).
+        raise ValueError(
+            "surface_z_ref_model_level / surface_ocean_q_sfc_saline are "
+            "implemented on the MPAS lane only; this run's grid is "
+            f"{getattr(getattr(config, 'grid', None), 'grid_type', '?')!r}")
     if (sbs == "constant" and gzi is None and stc == "legoesm"
             and sss == "dyer1974" and not zml and not qsal):
         return tc
