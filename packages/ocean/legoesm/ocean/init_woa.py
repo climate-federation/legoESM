@@ -1610,8 +1610,8 @@ def init_ocean_from_fesom_mesh(grid, z_coord, mesh_dir, *, cell_center_depths=No
             key.update(f"{name}|{st.st_size}|{st.st_mtime_ns}\n".encode())
         key.update(repr(tuple(spatial)).encode())
         key.update(str(nlev).encode())
-        key.update(hashlib.sha256(lat_flat.tobytes()).hexdigest().encode())
-        key.update(hashlib.sha256(lon_flat.tobytes()).hexdigest().encode())
+        key.update(hashlib.sha256(np.ascontiguousarray(lat_flat)).hexdigest().encode())
+        key.update(hashlib.sha256(np.ascontiguousarray(lon_flat)).hexdigest().encode())
         if cell_center_depths is None:
             # depths is a broadcast of one nlev vector; hash just that vector
             # (materialising the view is ~8 GB at ORCA12).
@@ -1620,7 +1620,8 @@ def init_ocean_from_fesom_mesh(grid, z_coord, mesh_dir, *, cell_center_depths=No
                 np.abs(np.asarray(z_coord.z_full_ref, dtype=np.float64)).tobytes()).hexdigest().encode())
         else:
             key.update(b"ccd")
-            key.update(hashlib.sha256(np.ascontiguousarray(ccd).tobytes()).hexdigest().encode())
+            # buffer protocol, no .tobytes() copy of the (ncell, nlev) array (8 GB at ORCA12)
+            key.update(hashlib.sha256(np.ascontiguousarray(ccd)).hexdigest().encode())
         key.update(f"{k!r}|{isolated_factor!r}|{_FESOM_IC_CACHE_VERSION}".encode())
         cache_path = os.path.join(
             cache_dir, f"fesom_ic_v{_FESOM_IC_CACHE_VERSION}_{key.hexdigest()[:24]}.npz")
