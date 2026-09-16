@@ -56,15 +56,43 @@ def _write_synthetic_mesh_mask(path, ny=4, nx=5, nz=3):
     # H_bathy[j,i] = 100 * kbot[j,i].
     e3t0 = np.full((nz, ny, nx), 100.0, dtype=np.float64)
 
+    # T-point coordinates: rows 40.0..41.5N, columns 26.0..30.0E, so that
+    # exactly the cells (j=1..2, i=2..4) fall inside CLOSED_SEAS["marmara"].
+    gphit = np.repeat(np.array([[40.0], [40.5], [41.0], [41.5]]), nx, axis=1)
+    glamt = np.repeat(np.array([[26.0, 26.5, 27.0, 28.0, 30.0]]), ny, axis=0)
     ds = xr.Dataset(
         {
             "tmaskutil": (("y", "x"), tmaskutil),
             "tmask": (("z", "y", "x"), tmask),
             "e3t_0": (("z", "y", "x"), e3t0),
+            "gphit": (("y", "x"), gphit),
+            "glamt": (("y", "x"), glamt),
         }
     )
     ds.to_netcdf(path, engine="scipy")  # NETCDF3 via scipy (no netcdf4 dep)
     return tmaskutil, kbot
+
+
+def test_read_mesh_mask_bathy_closed_seas_become_land(tmp_path):
+    import pytest
+    from legoesm.ocean.init_tripole import CLOSED_SEAS, read_mesh_mask_bathy
+
+    mesh = tmp_path / "synthetic_mesh_mask.nc"
+    tmaskutil, kbot = _write_synthetic_mesh_mask(mesh)
+    lm0, hb0 = read_mesh_mask_bathy(str(mesh))
+    lm, hb = read_mesh_mask_bathy(str(mesh), closed_seas=("marmara",))
+    inside = np.zeros_like(tmaskutil, dtype=bool)
+    inside[1:3, 2:5] = True                       # 40.5-41.0N x 27-30E
+    assert CLOSED_SEAS["marmara"] == (40.3, 41.1, 26.9, 30.0)
+    assert np.all(lm[inside] == 0.0) and np.all(hb[inside] == 0.0)
+    np.testing.assert_array_equal(lm[~inside], lm0[~inside])
+    np.testing.assert_array_equal(hb[~inside], hb0[~inside])
+    # the wet count drops by exactly the wet cells inside the box (one of the
+    # six is already land: (2,3)); with the knob off nothing changes
+    assert int((lm0 > 0.5).sum()) - int((lm > 0.5).sum()) == 5
+    np.testing.assert_array_equal(read_mesh_mask_bathy(str(mesh), closed_seas=())[0], lm0)
+    with pytest.raises(ValueError, match="unknown closed_seas"):
+        read_mesh_mask_bathy(str(mesh), closed_seas=("caspian",))
 
 
 def test_read_mesh_mask_bathy(tmp_path):

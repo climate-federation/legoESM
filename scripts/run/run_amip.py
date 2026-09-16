@@ -824,6 +824,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "marine BL => lower LWP floor => lower albedo). "
                              "Requires --turbulence clubb (diagnostic). Default "
                              "off = RH grid-scale cloud fraction (byte-identical).")
+    parser.add_argument("--clubb-trop-cloud-top-press", type=float, default=None,
+                        dest="clubb_trop_cloud_top_press",
+                        help="CLUBB upper domain limit [Pa] (CAM "
+                             "trop_cloud_top_press): mixing tapered to zero "
+                             "above it. Default: the scheme's own 0 = no limit.")
     parser.add_argument("--clubb-prognostic", dest="clubb_prognostic",
                         action=argparse.BooleanOptionalAction, default=False,
                         help="Run CLUBB as a PROGNOSTIC higher-order closure: "
@@ -2042,6 +2047,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         cloud_scheme=args.clouds,
         use_clubb_cloud_fraction=args.use_clubb_cloud_fraction,
         clubb_prognostic=args.clubb_prognostic,
+        clubb_trop_cloud_top_press=args.clubb_trop_cloud_top_press,
         microphysics=args.microphysics,
         nc_from_aerosol=args.aerosol_ccn,
         subgrid_autoconversion=args.subgrid_autoconversion,

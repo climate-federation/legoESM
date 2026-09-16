@@ -38,6 +38,73 @@ _RUN_OMIP = _ROOT / "scripts" / "run" / "run_omip.py"
 N_PROC = 2
 
 
+@pytest.mark.timeout(180)
+@pytest.mark.parametrize("coordinate", [True, False])
+def test_slow_root_io_shutdown_selfspawn(tmp_path, coordinate):
+    """A write longer than shutdown's deadline succeeds only with coordination.
+
+    Exercise the production helper with real JAX hosts. The uncoordinated
+    arm is a planted violation and MUST fail, proving this gate can detect
+    the reported premature-shutdown failure without a multi-GB fixture.
+    """
+    from multihost_harness import run_federated
+
+    worker = tmp_path / "slow_io_worker.py"
+    worker.write_text('''
+import ast
+import sys
+import threading
+import time
+from pathlib import Path
+import jax
+import numpy as np
+from jax.experimental import multihost_utils
+
+rank, port, source, output, coordinate = sys.argv[1:]
+rank = int(rank)
+jax.distributed.initialize(
+    coordinator_address=f"127.0.0.1:{port}", num_processes=2,
+    process_id=rank, heartbeat_timeout_seconds=10, shutdown_timeout_seconds=2)
+# Extract and EXECUTE the production helper, without importing the model and
+# its unrelated physics dependencies in this I/O-only test.
+tree = ast.parse(Path(source).read_text())
+node = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
+            and n.name == "_collective_root_io")
+exec(compile(ast.Module(body=[node], type_ignores=[]), source, "exec"))
+multihost_utils.broadcast_one_to_all(np.asarray(0, dtype=np.int32))
+
+def write():
+    time.sleep(5)  # intentionally exceeds the two-second shutdown deadline
+    target = Path(output)
+    with target.with_suffix(".tmp").open("wb") as fh:
+        np.savez_compressed(fh, T=np.arange(24).reshape(2, 3, 4))
+    target.with_suffix(".tmp").replace(target)
+
+if coordinate == "True":
+    _collective_root_io(write)
+    with np.load(output) as archive:
+        np.testing.assert_array_equal(archive["T"], np.arange(24).reshape(2, 3, 4))
+elif rank == 0:
+    write()
+jax.distributed.shutdown()
+print("CLEAN_SHUTDOWN", flush=True)
+''')
+    env = dict(os.environ, JAX_PLATFORMS="cpu", JAX_ENABLE_X64="1")
+    env.pop("XLA_FLAGS", None)
+
+    def command(rank, port):
+        return [sys.executable, str(worker), str(rank), str(port),
+                str(_RUN_OMIP), str(tmp_path / "state.npz"), str(coordinate)]
+
+    rcs, outs = run_federated(command, N_PROC, env, timeout_s=50)
+    if coordinate:
+        assert rcs == [0, 0], "\n".join(outs)
+        assert all("CLEAN_SHUTDOWN" in out for out in outs)
+    else:
+        assert any(rc != 0 for rc in rcs), "uncoordinated control did not fail"
+        assert any("Shutdown" in out and "barrier" in out.lower() for out in outs), outs
+
+
 def _load_day23():
     """Load the JRA55 dispatch harness (synthetic-cache builder) by path."""
     day23 = _ROOT / "tests" / "unit" / "test_run_omip_jra55_dispatch.py"

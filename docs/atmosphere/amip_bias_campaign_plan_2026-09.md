@@ -198,3 +198,18 @@ polar clt bias -46 -> -50 points (the remaining all-sky deficit is CLOUD);
 global rsut bias +10.2 -> +12.6; polar tas -0.5 K. Iteration 3 CONFIRMED for
 the surface term. Production change (tau 150 d, ice 0.80) put to the user.
 Next polar lever is cloud cover, not albedo.
+
+## Cold-start instability: diagnosed (2026-09-15/16)
+Mechanism (CONFIRMED by a discriminating restart arm): diagnostic CLUBB's
+explicit TKE production runs away in one warm-pool anvil column (7-9N 163E,
+110-270 hPa) on day 2 of the cold start, seeded by a vapour spike the old
+Laplacian used to damp; the dynamics blows the winds up on day 2.8-3.4 and the
+uncompensated post-step vapour floor manufactures ice (N_i 4e11/kg). Tapering
+CLUBB to zero above 150 hPa (scheme field, now reachable as
+clubb_trop_cloud_top_press) from the day-2 state runs clean to day 5 (peak
+wind 65 vs 357 m/s). Restart twin at day 80 (tp_ctl / tp_taper150, days
+82-84): the taper is climate-neutral to within 0.3 W/m2 in every region
+(global rsut +0.01, ITCZ -0.3, cloud +0.06 points). Reviewer caveat (GLM):
+150 hPa is inside the anvil layer; a production-term limiter would be the
+targeted fix. Decision pending: production clubb_trop_cloud_top_press
+None -> 15000 Pa (restores cold starts, neutral on restarts).

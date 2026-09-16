@@ -21,7 +21,12 @@ PY=/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/.venv/bin/python
 R=/work/bd1083/b309178/diffESM/legoesm_pg/ocean_hires_runs
 M=$R/meshes/ORCA0083-N06
 DT=${DT:-150}
-STEPS=${STEPS:-200}
+# 40 steps: setup (~16 min at 16 GPUs) + 40 x 0.65 s fits the 1:30 walltime
+# with the state write skipped (--checkpoint-days 0 --no-final-snapshot below:
+# a 14 GB compressed write outlasted 2 h and 3 h walltimes, jobs 27459479 /
+# 27464705).  Set WRITE_STATE=1 to restore the restart + snapshot writes.
+STEPS=${STEPS:-40}
+WRITE=${WRITE_STATE:+}; [ -n "${WRITE_STATE:-}" ] || WRITE="--checkpoint-days 0 --no-final-snapshot"
 # Tasks per node: each process builds the GLOBAL setup in HOST RAM (#1370) --
 # ~130 GB RSS per process at ORCA12 (job 27326645: 4/node = OUT_OF_MEMORY on a
 # 512 GB node). 2 per node fits; the other two GPUs of the node stay idle.
@@ -31,6 +36,11 @@ TPN=${TPN:-2}
 # "--jra55-zero-surface-fluxes"), MEMPROBE=1 (per-device live-array report).
 DIAG_EVERY=${DIAG_EVERY:-20}
 EXTRA=${EXTRA:-}
+# GM/Redi OFF to match the FESOM2 reference (user decision 2026-09-15).  The
+# lateral viscosity stays the mesh-derived Laplacian A_h + Laplacian Smagorinsky
+# 0.33: the biharmonic / biharmonic-Smagorinsky / Leith operators of this lane
+# use the regular lat-lon 1-D metrics (they divide by dlon = 0 on a tripolar
+# mesh), so run_omip refuses --B-h/--C-smag/--C-leith here -- open gap.
 [ -n "${MEMPROBE:-}" ] && export LEGOESM_OMIP_MEMPROBE=1
 NGPU=$(( SLURM_JOB_NUM_NODES * TPN ))
 DAYS=$(awk -v s="$STEPS" -v d="$DT" 'BEGIN {printf "%.10f", s*d/86400.0}')
@@ -45,7 +55,8 @@ export PYTHONPATH="$WT/packages/atmosphere:$WT/packages/core:$WT/packages/couple
 export JAX_PLATFORMS=cuda,cpu JAX_ENABLE_X64=1
 export XLA_PYTHON_CLIENT_PREALLOCATE=false XLA_PYTHON_CLIENT_MEM_FRACTION=0.92
 export LEGOESM_LATLON_SPMD_FUSED_HALO=1
-echo "=== ORCA12 smoke: nodes=$SLURM_JOB_NUM_NODES gpus=$NGPU dt=$DT steps=$STEPS days=$DAYS diag_every=$DIAG_EVERY extra=[$EXTRA] memprobe=${MEMPROBE:-0} $(date) ==="
+echo "=== ORCA12 smoke: nodes=$SLURM_JOB_NUM_NODES gpus=$NGPU dt=$DT steps=$STEPS days=$DAYS diag_every=$DIAG_EVERY write=[$WRITE] extra=[$EXTRA] memprobe=${MEMPROBE:-0} $(date) ==="
+echo "PRE-REGISTRATION (FESOM-IC arm, 2026-09-16): CONFIRMED = max|u| < 1 m/s at step 40 and no monotone growth anywhere; REFUTED = growth continues (then the next test is the partial-cell/Adcroft PGF, not the IC). "; echo "PRE-REGISTRATION (IC stability guard arm): number = max|u| and its ij every $DIAG_EVERY steps; CONFIRMED = max|u| < 1 m/s at step $STEPS and no exponential growth anywhere; REFUTED = growth continues at (2056,3744) or elsewhere; a $STEPS-step ORCA12 integration cannot be done offline."
 echo "mesh: $M (sha256 in $M/SHA256SUMS)"; cat $M/PROVENANCE.txt
 ( while true; do nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits | tr '\n' ' '; echo; sleep 15; done ) > $OUT/gpumem_node0.txt &
 MON=$!
@@ -61,9 +72,12 @@ srun --ntasks=$NGPU --ntasks-per-node=$TPN --gpus-per-node=$TPN --gpu-bind=none 
     --dt $DT --days $DAYS --precision fp64 \
     --forcing-mode jra55_do_tropical --jra55-cache $R/forcing/jra55_do_fesom_1958_1958_1deg_noleap.zarr \
     --jra55-sea-ice --ice-dynamics none --ice-categories 1 \
-    --vertical-mixing-scheme kpp \
+    --vertical-mixing-scheme tke --tke-card fesom2 --tripole-closed-seas marmara,black_sea \
+    --no-gm-redi \
+    --sss-piston-velocity 1.929e-6 --sss-restoring-target phc2_monthly --sss-restoring-remove-mean \
+    --woa-init --ic-cache-dir /work/bd1083/b309178/diffESM/legoesm_pg/ocean_hires_runs/ic_cache --ic-from-fesom-mesh ${FESOM_MESH:-/work/ab0995/a270088/fesom_jax_meshes/mesh_forca20} \
     --enable-latlon-spmd --multicontroller \
-    --diag-every $DIAG_EVERY $EXTRA --output "$OUT" 2>&1 | tee $OUT/run.log | grep -v "^WARNING\|^I0000\|^E0000" | tail -80
+    --diag-every $DIAG_EVERY $WRITE $EXTRA --output "$OUT" 2>&1 | tee $OUT/run.log | grep -v "^WARNING\|^I0000\|^E0000" | tail -80
 rc=${PIPESTATUS[0]}
 kill $MON 2>/dev/null
 echo "run_rc=$rc wall_s=$(( $(date +%s) - t0 ))"

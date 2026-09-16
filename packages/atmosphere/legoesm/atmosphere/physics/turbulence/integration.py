@@ -298,55 +298,142 @@ def _resolve_T_sfc(T_col, phys_state):
     return jnp.where(override > SFC_T_OVERRIDE_VALID_MIN, override, fallback)
 
 
+def fold_prescribed_surface_fluxes(scheme_config, *, shflx_w_m2=None,
+                                   lhflx_w_m2=None, tau_x_pa=None,
+                                   tau_y_pa=None):
+    """Fold prescribed energetic/stress surface fluxes into a scheme config.
+
+    Writes the given ALREADY-energetic / ALREADY-stress (ncol,) arrays into
+    ``scheme_config.surface.prescribed_shflx_w_m2 /
+    prescribed_lhflx_w_m2 / prescribed_tau_x_pa / prescribed_tau_y_pa`` so
+    the scheme kernel applies them as the diffusion's lower boundary
+    condition via ``surface_layer.compute_surface_fluxes`` ->
+    ``_apply_prescribed_scalar_fluxes`` (heat replaced, stress replaced and
+    ustar rebuilt) — never additionally as a forcing tendency (that would
+    count the flux twice).  This is the shared fold behind BOTH the training
+    path (``_resolve_prescribed_surface_fluxes``) and the production driver
+    path (``PhysicsPipeline.physics_step_no_rad`` folding coupler/ERA5
+    per-segment overrides into the kernel config for a single call).
+
+    Parameters
+    ----------
+    scheme_config : object
+        Scheme configuration NamedTuple with a ``surface`` field
+        (SurfaceLayerConfig).  Not mutated; a replaced copy is returned.
+    shflx_w_m2, lhflx_w_m2 : jnp.ndarray or None
+        Prescribed sensible / latent heat flux [W/m^2, positive UP], (ncol,).
+        No density conversion is applied.
+    tau_x_pa, tau_y_pa : jnp.ndarray or None
+        Prescribed surface stress [Pa, ON THE ATMOSPHERE], (ncol,).
+        No conversion is applied.
+
+    Returns
+    -------
+    object
+        ``scheme_config`` with ``surface.prescribed_*`` set for every present
+        flux; the input object unchanged (identity) when all are None.
+    """
+    if (shflx_w_m2 is None and lhflx_w_m2 is None
+            and tau_x_pa is None and tau_y_pa is None):
+        return scheme_config
+    surface = scheme_config.surface
+    if shflx_w_m2 is not None:
+        # Already W/m^2 (positive up): no rho conversion.
+        surface = surface._replace(prescribed_shflx_w_m2=shflx_w_m2)
+    if lhflx_w_m2 is not None:
+        # Already W/m^2 (positive up): no rho conversion.
+        surface = surface._replace(prescribed_lhflx_w_m2=lhflx_w_m2)
+    if tau_x_pa is not None:
+        # Already Pa, stress ON THE ATMOSPHERE: no conversion.
+        surface = surface._replace(prescribed_tau_x_pa=tau_x_pa)
+    if tau_y_pa is not None:
+        # Already Pa, stress ON THE ATMOSPHERE: no conversion.
+        surface = surface._replace(prescribed_tau_y_pa=tau_y_pa)
+    return scheme_config._replace(surface=surface)
+
+
 def _resolve_prescribed_surface_fluxes(scheme_config, phys_state, rho):
-    """Fold a per-step PRESCRIBED surface kinematic flux into the scheme config.
+    """Fold prescribed surface fluxes from the physics state into the config.
 
-    The sibling of :func:`_resolve_T_sfc`, and it exists for the same reason:
-    the nine closures share one signature that carries no clock, so a case
-    whose surface flux VARIES IN TIME (a diurnal cycle -- Wangara Day 33) has
-    no way to reach them through ``SurfaceLayerConfig``, which holds a single
-    run-constant scalar.  The SCM writes the current value into
-    ``phys_state.surface_wth_override`` / ``surface_wqv_override`` before every
-    tendency evaluation and this rewrites the config leaf the closure already
-    reads, so no closure signature changes and no scheme learns about time.
+    Two override families may ride on the physics state:
 
-    Units and the round trip: the overrides are KINEMATIC ([K m/s] and
-    [(kg/kg) m/s], positive UPWARD, the ``SCMForcing.w_th_s``/``w_qv_s``
-    convention) and are converted here with the SAME ``rho`` handed to the
-    closure, so a scheme that divides straight back out recovers exactly the
-    prescribed value -- ``ysu.py``'s ``wtheta_sfc = shflx / (rho[:, -1] *
-    c_pd)`` is the exact inverse of the line below.  NOT every consumer: HB
-    rebuilds its kinematic flux with a DRY-air ``rrho = R_d*T/p`` on purpose
-    (oracle fidelity, holtslag_boville.py), so it recovers ``wth`` times
-    ``rho_moist/rho_dry`` -- ~0.5 % at 8 g/kg, exactly 1 on a dry case. That
-    offset is the pre-existing convention gap the run-constant config scalar
-    already had; this route does not add to it.
+    * per-step KINEMATIC overrides, ``surface_wth_override`` [K m/s] and
+      ``surface_wqv_override`` [kg/kg m/s], converted to energetic fluxes
+      with the lowest-level density (``rho_sfc * c_pd * wth`` and
+      ``rho_sfc * L_v * wqv``); ``update_physics_state`` RESETS these to
+      None each step, so the caller re-injects them per step;
+    * window-constant ENERGETIC/STRESS overrides,
+      ``surface_shflx_override_w_m2`` / ``surface_lhflx_override_w_m2``
+      [W/m^2, positive UP] and ``surface_tau_x_override_pa`` /
+      ``surface_tau_y_override_pa`` [Pa, stress ON THE ATMOSPHERE], CARRIED
+      unchanged by ``update_physics_state``; the training rollout anchors
+      them once per window from ERA5, and NO density conversion is applied.
 
-    PRECEDENCE: an override present replaces the config scalar, because it is
-    the value for THIS step and the config's is the value for the whole run.
-    Absent (``None``, the default) the config passes through untouched, so
-    every existing run is byte-identical.
+    The overrides land in ``scheme_config.surface.prescribed_*`` so the
+    scheme kernel applies them as the diffusion's lower boundary condition
+    (never additionally as a forcing tendency -- that would count the flux
+    twice).  Scalars and momentum are independent; specifying both the
+    kinematic and the energetic override of the same scalar flux is a caller
+    bug, not a choice to make silently, and raises ValueError.  The final
+    write is delegated to :func:`fold_prescribed_surface_fluxes` (the shared
+    fold also used by the production driver path).
 
-    Static Python ``is None`` tests on pytree leaves -- the feature-gating
-    pattern, not a traced selection.
+    Parameters
+    ----------
+    scheme_config : object
+        Scheme configuration NamedTuple with a ``surface`` field
+        (SurfaceLayerConfig).
+    phys_state : PhysicsState or None
+        Threaded physics state carrying the override leaves; None disables
+        all overrides.
+    rho : jnp.ndarray
+        Full-column density (ncol, nlev); only the lowest level is used for
+        the kinematic conversions.
+
+    Returns
+    -------
+    object
+        ``scheme_config`` with ``surface.prescribed_*`` set for every
+        present override, unchanged when none is present.
     """
     if phys_state is None:
         return scheme_config
     wth = getattr(phys_state, "surface_wth_override", None)
     wqv = getattr(phys_state, "surface_wqv_override", None)
-    if wth is None and wqv is None:
+    shf = getattr(phys_state, "surface_shflx_override_w_m2", None)
+    lhf = getattr(phys_state, "surface_lhflx_override_w_m2", None)
+    tux = getattr(phys_state, "surface_tau_x_override_pa", None)
+    tuy = getattr(phys_state, "surface_tau_y_override_pa", None)
+    if (wth is None and wqv is None and shf is None and lhf is None
+            and tux is None and tuy is None):
         return scheme_config
-    surface = scheme_config.surface
-    # rho[:, -1] is the LOWEST FULL level, the same one whose wind and
-    # temperature compute_surface_fluxes is handed.
     rho_sfc = rho[:, -1]
     if wth is not None:
-        surface = surface._replace(
-            prescribed_shflx_w_m2=rho_sfc * constants.c_pd * wth)
+        if shf is not None:
+            raise ValueError(
+                "_resolve_prescribed_surface_fluxes: the physics state "
+                "carries BOTH the kinematic override "
+                "'surface_wth_override' and the energetic override "
+                "'surface_shflx_override_w_m2' for the sensible heat flux; "
+                "prescribe exactly one form (caller bug).")
+        # Kinematic [K m/s] -> energetic [W/m^2] with the lowest-level density.
+        shf = rho_sfc * constants.c_pd * wth
     if wqv is not None:
-        surface = surface._replace(
-            prescribed_lhflx_w_m2=rho_sfc * constants.L_v * wqv)
-    return scheme_config._replace(surface=surface)
+        if lhf is not None:
+            raise ValueError(
+                "_resolve_prescribed_surface_fluxes: the physics state "
+                "carries BOTH the kinematic override "
+                "'surface_wqv_override' and the energetic override "
+                "'surface_lhflx_override_w_m2' for the latent heat flux; "
+                "prescribe exactly one form (caller bug).")
+        # Kinematic [kg/kg m/s] -> energetic [W/m^2] with the lowest-level
+        # density.
+        lhf = rho_sfc * constants.L_v * wqv
+    # Energetic fluxes / stresses pass through unchanged (no rho conversion)
+    # into the shared fold.
+    return fold_prescribed_surface_fluxes(
+        scheme_config, shflx_w_m2=shf, lhflx_w_m2=lhf,
+        tau_x_pa=tux, tau_y_pa=tuy)
 
 
 def _carry_update_with_cloud_fraction(carry_field, carry_val, turb_out):

@@ -4073,3 +4073,41 @@ def test_bechtold_enable_cmt_round_trips_and_default_preserves_each_lane():
     assert dflt.bechtold_enable_cmt is None
     assert convection_config_for(dflt._replace(grid=dflt.grid._replace(grid_type="mpas"))).bechtold.enable_cmt is False
     assert convection_config_for(dflt._replace(grid=dflt.grid._replace(grid_type="gaussian"))).bechtold.enable_cmt is True
+
+
+def test_clubb_trop_cloud_top_press_reaches_the_turbulence_kernel():
+    """The CLUBB upper domain limit (CAM trop_cloud_top_press) was a scheme
+    field no run could set; the flag threads it through the same single source
+    the prognostic flag uses, and None keeps the scheme's own 0 (off)."""
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+    parser = build_arg_parser()
+    cfg_off = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--turbulence", "clubb"]), parser))
+    assert cfg_off.clubb_trop_cloud_top_press is None
+    tc_off = turbulence_config_for(cfg_off)
+    assert tc_off.clubb is None or tc_off.clubb.trop_cloud_top_press == 0.0
+    cfg_on = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--turbulence", "clubb",
+         "--clubb-trop-cloud-top-press", "15000"]), parser))
+    assert turbulence_config_for(cfg_on).clubb.trop_cloud_top_press == 15000.0
+    cfg_bad = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--turbulence", "louis",
+         "--clubb-trop-cloud-top-press", "15000"]), parser))
+    with pytest.raises(ValueError, match="requires turbulence='clubb'"):
+        turbulence_config_for(cfg_bad)
+
+
+def test_clubb_trop_cloud_top_press_validate_strict_bounds_and_scheme():
+    """validate_strict refuses the taper under a non-CLUBB scheme (which the
+    pipeline's late check cannot see behind a turbulence_override or the
+    FV 'none' early return) and refuses non-physical pressures."""
+    parser = build_arg_parser()
+    base = build_config_from_args(_postprocess_args(parser.parse_args(
+        ["--dataset", "analytical", "--turbulence", "clubb"]), parser))
+    base._replace(clubb_trop_cloud_top_press=15000.0).validate_strict()
+    for bad in (-1.0, float("nan"), float("inf"), 1.0e9):
+        with pytest.raises(ValueError, match="clubb_trop_cloud_top_press"):
+            base._replace(clubb_trop_cloud_top_press=bad).validate_strict()
+    with pytest.raises(ValueError, match="CLUBB field"):
+        base._replace(turbulence="louis",
+                      clubb_trop_cloud_top_press=15000.0).validate_strict()

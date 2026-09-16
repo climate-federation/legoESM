@@ -334,7 +334,40 @@ def _mpas_zenith_ocean_albedo(lat, day, orbit=None):
     return ocean_albedo(mu, OceanAlbedoConfig(method="zenith"))
 
 
-def _mpas_qv_smooth_step(q_v, mesh, nu, dt, nu4=0.0, mid_refresh=None):
+
+def _qv_level_conserving_floor(q_new, area, owned_mask=None):
+    """Positivity floor that conserves the per-level area integral.
+
+    The biharmonic branch of the smoother has no maximum principle, so a bare
+    ``max(q, 0)`` CREATES water wherever it clips (measured: it seeded the
+    cold-start ice explosion, 2026-09-15).  Clip the negatives, then rescale
+    the positive cells of each level by
+
+        factor_l = sum_c A_c q_l / sum_c A_c max(q_l, 0)   in [0, 1]
+
+    so ``sum_c A_c q_out`` equals ``sum_c A_c q_new`` per level to roundoff;
+    clipping only adds mass, so the factor removes exactly what it added.
+    Under MPI the partial sums are OWNED-masked (halo cells are duplicates)
+    and combined with a differentiable allreduce, so every rank scales by the
+    same factor; halo cells are clipped and scaled pointwise like the rest.
+    Pure jnp: no Python branch on a traced value, and the tiny-denominator
+    guard divides a sanitised denominator so neither pass sees NaN.
+    (Drafted by GLM-5.2, 2026-09-16.)
+    """
+    from legoesm.parallel.reductions import global_sum_if_distributed
+    area = jnp.asarray(area)
+    w = area if owned_mask is None else jnp.where(owned_mask, area, 0.0)
+    q_clip = jnp.maximum(q_new, 0.0)
+    num = global_sum_if_distributed(jnp.sum(w[:, None] * q_new, axis=0))
+    den = global_sum_if_distributed(jnp.sum(w[:, None] * q_clip, axis=0))
+    tiny = jnp.finfo(q_new.dtype).tiny
+    safe_den = jnp.where(den > tiny, den, jnp.ones_like(den))
+    factor = jnp.where(den > tiny, jnp.clip(num / safe_den, 0.0, 1.0), 0.0)
+    return q_clip * factor[None, :]
+
+
+def _mpas_qv_smooth_step(q_v, mesh, nu, dt, nu4=0.0, mid_refresh=None,
+                         owned_mask=None):
     """MPAS post-step horizontal q_v smoothing (array-level, testable).
 
     UNWEIGHTED SCVT del2 (``scalar_del2_cell_3d``) + a q>=0 floor, mirroring
@@ -360,9 +393,11 @@ def _mpas_qv_smooth_step(q_v, mesh, nu, dt, nu4=0.0, mid_refresh=None):
         structure by a factor sixteen where the Laplacian separates them by
         four, so it can hold grid-scale noise down without flattening the
         resolved humidity gradients.  It has NO maximum principle, so with it
-        on the q>=0 floor is load-bearing rather than a no-op and the per-level
-        ``sum_c A_c q_c`` integral is conserved only up to what that floor
-        clips.  The driver's setup guard enforces ``nu4*dt*g_max^2 <= 0.5``.
+        on the positivity floor is load-bearing; it is the per-level
+        conserving borrow ``_qv_level_conserving_floor`` (clip, then rescale
+        the level's positives), so ``sum_c A_c q_c`` is conserved to roundoff
+        and no water is created.  The driver's setup guard enforces
+        ``nu4*dt*g_max^2 <= 0.5``.
     mid_refresh : Callable(array) -> array, optional — distributed-only halo
         refresh for the biharmonic's intermediate Laplacian.
 
@@ -382,7 +417,8 @@ def _mpas_qv_smooth_step(q_v, mesh, nu, dt, nu4=0.0, mid_refresh=None):
         return jnp.maximum(q_v + dt * nu * lap.astype(q_v.dtype), 0.0)
     del4 = scalar_del4_cell_3d(q_v, mesh, mid_refresh=mid_refresh)
     tend = (nu * lap + nu4 * del4).astype(q_v.dtype)
-    return jnp.maximum(q_v + dt * tend, 0.0)
+    return _qv_level_conserving_floor(q_v + dt * tend, mesh.areaCell,
+                                      owned_mask=owned_mask)
 
 
 def clear_sky_pass_effective(
@@ -10972,7 +11008,9 @@ class ModelDriver:
                     _qv_sm_in = _qv_halo_refresh(_qv_sm_in)
                 _qv_new_sm = _mpas_qv_smooth_step(
                     _qv_sm_in, self.grid, _qv_smooth_nu, DT,
-                    nu4=_qv_smooth_nu4, mid_refresh=_qv_halo_refresh)
+                    nu4=_qv_smooth_nu4, mid_refresh=_qv_halo_refresh,
+                    owned_mask=(None if self._voronoi_layout is None
+                                else self._voronoi_layout.owned_mask_cells))
                 _new_trc_sm = dict(_trc_sm)
                 _new_trc_sm["q_v"] = _trc_sm["q_v"].replace(data=_qv_new_sm)
                 self.state = self.state._replace(tracers=_new_trc_sm)
