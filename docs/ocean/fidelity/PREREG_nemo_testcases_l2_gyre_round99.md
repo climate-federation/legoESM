@@ -1,0 +1,103 @@
+# Preregistration: NEMO-testcases L2 GYRE round 99 direct stage-one W operands
+
+Date: 2026-09-16. Frozen at incoming tip
+`3e7a15c1e64e036e2e066dcfceaa663f25406f24` before parsing the Round-98
+scientific payload or changing the shared implementation. Evidence belongs
+under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round99/`.
+
+## Question, magnitude, and acquisition repair
+
+Decision 41 keeps the walk at kt=1 stage 1. Round 98 corrected the W reference
+boundary and found 5,289 cells still unequal at
+`2.6469779601696886e-23 m s-1` after its source-ordered scalar replay, but it
+could not distinguish an inherited stretch operand from the W recurrence
+because the direct-intermediate record was not admitted. The magnitude targets
+remain kt3 T `1.627497246303733e-4 K` and day-30 T RMS
+`1.2397011295506804e-2 K`.
+
+The operator completed the requested NEMO run. Its wrapper stopped only at an
+incorrect byte-count assertion: the record exists at 884,028 bytes and the
+recorded executable matches the built executable. The compiled source declares
+both `hdiv` and local `ze3div` on
+`Nis0-1:Nie0+1,Njs0-1:Nje0+1,jpk`, not on `jpi,jpj,jpk`
+(`GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/oce.f90:98-104` and
+`GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/sshwzv.f90:258-260`). With
+`jpi,jpj,jpk = 36,26,31` and `nn_hls = 2`, the compiled loop bounds set
+`Nis0,Njs0 = 3,3` and `Nie0,Nje0 = 34,24`
+(`GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/mppini.f90:1501-1516`). Thus each
+local divergence field is `34*24*31`, while the two `r3t` slots, `e3t_3d`, and
+`pww` retain their compiled full extents. The exact registered size is
+`16 + 9*4 + (2*34*24*31 + 2*36*26 + 2*36*26*31 + 36*26*31 + 1)*8 = 884028`
+bytes, matching the compiled writes at
+`GYRE_OMIP_L2_P3_SM_R98WWALK/BLD/ppsrc/nemo/sshwzv.f90:283-291,314-317`.
+
+The existing Round-98 acquisition script and the existing Decision-41 stage
+gate will be extended in place. Admission mode must verify the recorded
+`binary.sha256`, record size, STOP 0, source/toolchain manifests, record digest,
+and restart/mesh identity, then create the missing stamp and admission outputs
+without invoking `makenemo` or `mpirun`. Every possible nonzero exit prints a
+named `REFUSE:` line first. The wrong-size plant and consumed-field admission
+plant must both exit nonzero.
+
+## Frozen direct-walk predictions and falsifiers
+
+1. The repaired reader must consume physical EOF exactly. It must expose local
+   `hdiv/e3div` as `(24,34,31)`, full `r3_kaa/r3_kbb` as `(26,36)`, full
+   `e3t_0/ww` as `(26,36,31)`, and the scalar `r1_dt`. A truncated or one-value
+   extended record must exit nonzero.
+2. On the owned `22*32*30` wet cells, the direct `hdiv` and `e3div` fields are
+   predicted bit-identical to the source-rounded Round-98 trace. Direct
+   `r3_kbb`, `e3t_0`, and `r1_dt` are predicted bit-identical to the already
+   admitted stage operands. Any unequal cell moves the first statement to that
+   earlier boundary and refutes this prediction.
+3. The first predicted non-bit boundary is the Round-98 reconstructed
+   `r3_kaa`: the direct compiled value is predicted to differ because the
+   former replay re-reduced the static column before multiplying SSH, whereas
+   NEMO consumes its already materialized `r1_ht_0`. Replacing only that replay
+   operand with the direct `r3_kaa` is predicted to make the source-ordered
+   bottom-up recurrence and final W bit-identical. Exact reconstructed
+   `r3_kaa`, or any remaining final-W unequal cell with all direct operands,
+   refutes this prediction.
+4. A one-ULP change to direct `r3_kaa` and a one-ULP change to an exact incoming
+   carry must each flip their named row and exit nonzero. The existing wrong
+   commit-stamp plant must fail before record consumption.
+
+If the direct record instead names an earlier non-bit input, ownership remains
+there and no downstream W patch is eligible. If the prediction is confirmed,
+the only eligible W candidate is the one shared NEMO-identity implementation
+of the compiled `r3t = ssh*r1_ht_0`, `e3t*hdiv`, and left-associated recurrence
+statements; it may be composed only with Round 97's held same-stage full-RHS
+member. The given-NEMO-entry kt=1 stage-1 U, V, W, and every affected output
+must then be BIT before trajectory measurement.
+
+## Frozen trajectory predictions and Rule-12 falsifiers
+
+For an eligible same-stage composition, the frozen prediction is no headline
+movement from the immutable Round-85 / Round-96--98 before arm: kt2 T/S
+`1.4210854715202004e-14` / `2.1316282072803006e-14`, kt2 U/V
+`2.7377110452773967e-12` / `3.284922138989399e-12`, kt3 T/S
+`1.627497246303733e-4` / `6.327735185607253e-6`, and day-30 T RMS
+`1.2397011295506804e-2 K`. Any movement refutes bitwise invariance and is
+retained in the receipt.
+
+Landing is refused if any of the 954 registered rows that was AT-BAR leaves
+the bar, if first-over-bar moves earlier than kt2 U/V, or if any moved row is
+absent from the full Rule-12 table. The 30-day member is required for a locally
+exact trajectory candidate even if Rule 12 rejects it. A failed candidate is
+restored and retained only as a held manifest patch.
+
+## Testcase dispositions
+
+| lane | frozen disposition |
+|---|---|
+| GYRE stage twin | Admit direct fields; require exact EOF, binary identity, red layout/admission/ULP/stamp plants, and BIT U/V/W for any candidate |
+| GYRE kt=1--10 | Run only for a locally exact same-stage composition; compare all 954 rows with the immutable before arm |
+| GYRE days 1--30 | Run a fresh member for any locally exact trajectory candidate and score every day against `year_owners` |
+| LOCK_EXCHANGE-zco | The shared WS-RK3/W statements execute; run focused shared-path and tank gates only for an eligible candidate |
+| OVERFLOW-zps | Preserve partial-cell construction and run focused shared-path and tank gates only for an eligible candidate |
+| DINO | **SHARED-STATEMENT RISK:** the shared QCO W helper executes; no neutrality claim, and the 96--98% regional-cancellation warning remains explicit |
+| ORCA2 | **UNMEASURED-WITH-SPEC:** prove the resolved integrator, then record native stage-entry transports, direct W intermediates/carries, stage outputs, histories, and closure state with red plants |
+
+No production configuration, carried-state policy, coefficient, timestep,
+stabilizer, year harness, reconciliation gate, freshwater pair, #1484 guard,
+NEMO source, or NEMO executable may change.
