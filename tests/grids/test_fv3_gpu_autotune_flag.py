@@ -37,6 +37,6 @@ def test_gpu_launcher_excludes_the_nodes_that_hang_and_says_why():
     The exclusion must name the evidence and say it is a workaround, so it
     is not mistaken for a model property and is removable."""
     text = _SCRIPT.read_text()
-    assert "#SBATCH --exclude=g[045-054],g[185-193]" in text
+    assert "#SBATCH --exclude=g[045-051],g[053-054],g[185-193]" in text  # g052 does not exist
     assert "9777265" in text and "9777266" in text      # the A/B that proved it
     assert "DELETE THIS LINE" in text
