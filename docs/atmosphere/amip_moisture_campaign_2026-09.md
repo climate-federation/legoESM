@@ -633,3 +633,19 @@ Departure within one parent layer, top within 50 hPa of native: PASSED. Model da
 ITCZ none 44/34 % shallow 49/55 % deep 7/11 % (deep tops 190-490 hPa); trades N deep 7/12 %, S 23/36 %
 (mostly congestus depth, tops 390-760 hPa). Open: eager/jit parity 17.8 at x2 on one output (a
 switching column), non-finite gradient path, no unit tests yet, codex review of the wrapper pending.
+
+### Status 2026-09-17 01:00 (codex out of credits until 2026-09-21 10:18 — Claude-only review meanwhile)
+Landed on the branch (unwired, tests for the trigger only): `_ifs_test_ascent.py` (cubasen port, nested
+scans, refined-column stopgap, 10 tests passing + 1 strict xfail for the gradient hazard) and
+`_ifs_ascent.py` (cuascn/cuentr port: ordered increments, KE, organized detrainment, termination with
+terminal deposition, in-plume precipitation and rain fallout; liquid-only; four Claude fixes on GLM's
+draft: scan xs, cuadjtq call, unflagged-column writes, KLAB lifecycle). Smoke: deep sounding plume
+962 -> 794 hPa, M peaks 1.5x base, rain forms; trade plume 962 -> 861 hPa.
+Next (GLM codes, Claude reviews, codex when back): (1) tests for the main ascent (frozen soundings,
+mass/energy flux consistency, termination, no-condensation stop); (2) the wiring design: IFS closure
+consumers on the diagnosed window (cumastrn ZMFUB1 = ZCAPE ZMFUB/(ZHEAT ZXTAU), one column scale
+against the CFL/RMFLIA bounds, no profile relaxation/clip/gate on the faithful path), the flux-form
+tendencies from the ascent's fluxes + terminal deposition, the existing IFS downdraft and sub-cloud
+evaporation kept, behind `BechtoldConfig.use_ifs_ascent` (default False until the arm decides);
+(3) the day-110 replay contract (Iteration H) and the 5-day screen on the adopted deck; (4) the L45
+grid arm once the user approves the grid (UTLS session drafts the layout).
