@@ -99,6 +99,12 @@ export CUDA_VISIBLE_DEVICES=$(
   nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits \
   | sort -t, -k2 -nr | head -1 | cut -d, -f1 | tr -d ' ')
 echo "[gpu] using CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+# One MPAS step at ico7 x 75 levels peaks at 38 GiB after rematerialization, and
+# JAX claims only 75% of the 45 GiB card by default, so the step cannot fit in
+# the pool even on an EMPTY GPU (job 9815772: both devices idle, still out of
+# memory asking for 33.34 GiB). This raises the pool; it changes no physics.
+export XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_MEM_FRACTION:-0.95}
+echo "[gpu] XLA_PYTHON_CLIENT_MEM_FRACTION=$XLA_PYTHON_CLIENT_MEM_FRACTION"
 
 echo "=== gate: corrected forcing is the default ==="
 JAX_PLATFORMS=cpu $PY -m pytest -q tests/ocean/unit/test_core2_corrected_cache_default.py 2>&1 | tail -2
