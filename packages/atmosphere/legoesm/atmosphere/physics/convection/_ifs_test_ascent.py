@@ -119,6 +119,16 @@ class IFSTestAscentConfig(NamedTuple):
                                           # (cell-centre) pressure, which
                                           # enables the lowest elevated
                                           # candidate on L137-like grids
+    column_refine: int = 1                # REFINED-COLUMN trigger stopgap
+                                          # (codex design r14, item 3): r
+                                          # sub-layers per parent layer for
+                                          # ifs_departure_search_refined.
+                                          # STATIC (Python int; must be a
+                                          # compile-time constant because the
+                                          # refined level count shapes every
+                                          # refined array).  1 = no
+                                          # refinement (the wrapper calls
+                                          # ifs_departure_search directly).
 
 
 __param_spec__ = {
@@ -132,6 +142,7 @@ __param_spec__ = {
             "mixed_layer_span_pa": "fixed IFS pressure convention (50 hPa, cubasen.F90:424)",
             "ustar_min": "numerical floor on the friction velocity (cumastrn passes 0.1)",
             "mixed_layer_gate": "str mode selector ('half_above' | 'cell_centre'), not a tunable float",
+            "column_refine": "static vertical refinement factor for the refined-column trigger wrapper (1 = no refinement); it shapes the traced arrays, not a tunable float",
         },
         "params": {
             "entr_test_c1": {"units": "1", "bounds": (0.2, 2.0), "tunable_tier": 2,
@@ -1178,3 +1189,177 @@ def ifs_departure_search(T, q_v, p_full, p_half, geo_full, geo_half,
                       klab, cape_out, w2_out, w2_sfc_out, ldsc, kbotsc)
 
 
+def _hydrostatic_geopotential(T, q, p_half):
+    """Hydrostatic geopotential (surface-relative, Phi_half[:, -1] = 0) from
+    full-level temperature T and SPECIFIC humidity q on the half-level grid
+    p_half (ncol, nlev+1), surface-last: Phi_half[:, k+1] = Phi_half[:, k] +
+    R_d*T_v[:, k]*ln(p_half[:, k+1]/p_half[:, k]) integrated downward from
+    the surface (Phi_half[:, nlev] = 0); Phi_full[:, k] is the arithmetic
+    mean of the adjacent half values.  Used only by
+    ifs_departure_search_refined to build the geopotential of the refined
+    grid; the input T_v uses the shared virtual_temperature helper."""
+    dphi = constants.R_d * virtual_temperature(T, q) \
+        * jnp.log(p_half[:, 1:] / p_half[:, :-1])         # positive, dp>0
+    phi_int = jnp.flip(jnp.cumsum(jnp.flip(dphi, axis=1), axis=1), axis=1)
+    phi_half = jnp.concatenate(
+        [phi_int, jnp.zeros_like(phi_int[:, :1])], axis=1)  # [:, nlev] = 0
+    phi_full = 0.5 * (phi_half[:, :-1] + phi_half[:, 1:])
+    return phi_half, phi_full
+
+
+def ifs_departure_search_refined(T, q_v, p_full, p_half, geo_full, geo_half,
+                                 shf_w_m2, lhf_w_m2, ustar, land_frac,
+                                 dq_dt_adv, cfg):
+    """REFINED-COLUMN trigger (codex design r14, item 3): run the UNCHANGED
+    source-literal ``ifs_departure_search`` on a vertically refined copy of
+    each column and map the results back to the parent levels.
+
+    PURPOSE: the coarse-grid departure sampling defect.  On ~33 hPa
+    layers (L60-like grids) the first elevated departure launches with
+    cloud-layer air: the cuinin half-level rules hand the parcel the
+    humidity of the full level ABOVE the departure and the MAX(s_above,
+    s_below) of the adjacent (33 hPa-thick) neighbours, so the test
+    parcel starts already mixed through the whole subcloud layer and the
+    literal cubasen trigger misclassifies the boundary layer.  Refining
+    the column by r sub-layers lets the same UNCHANGED code resolve the
+    lowest levels: at parent interfaces the humidity now comes from the
+    adjacent refined full level above, and MAX(s_above, s_below) uses
+    refined neighbours.
+
+    GATE TEST (to be written): native L60 vs L30 refined x2 on a frozen
+    sounding -- identical ktype, departure pressure within one parent
+    layer, cloud top within 50 hPa.  If the gate fails, the follow-up is
+    a Delta-p-CONSERVATIVE limited reconstruction, because plain
+    interpolation between full-level points is NOT conservative (the
+    piecewise-linear interpolant reproduces the parent POINT values but
+    not their layer means, so column mass/energy integrals drift by
+    O(1/r) of the vertical curvature).
+
+    COST: O((rN)^2) per column (the nested departure x ascent scans run
+    on the refined grid), plus O(rN) reconstruction.
+
+    RECONSTRUCTION (r = cfg.column_refine, static; r = 1 is the identity
+    and calls ifs_departure_search directly): refined half levels split
+    each parent layer evenly in PRESSURE; refined full levels are the
+    midpoints of the refined half intervals.  Dry static energy
+    s = c_p T + Phi and SPECIFIC humidity q are reconstructed
+    LINEARLY IN PRESSURE between the parent FULL levels (piecewise
+    linear, edge values held constant beyond the first/last parent full
+    level by clamping the interpolation weight to [0, 1]); dq_dt_adv is
+    interpolated like q.  Temperature is DERIVED from s,
+    T = (s - Phi_refined)/c_p, and nothing else is recomputed.  The
+    refined geopotential is hydrostatic from the refined T and q
+    (_hydrostatic_geopotential, cumulative R_d T_v ln(p) from the
+    surface); the circularity T(s, Phi(T)) is broken with a single
+    provisional pass that interpolates the parent T with the same
+    weights purely to seed Phi (the final s-derived T then closes the
+    consistency to within the reconstruction error).
+
+    RESTRICTION (map back to the parent levels): refined half indices
+    snap via round(h_r / r) (refined half levels at multiples of r
+    coincide with parent interfaces); the full-level indices k_dpl /
+    k_cbot / k_ctop / k_botsc (surface-last FULL-level indices in this
+    module) snap via k_r // r (a refined full index lies in parent layer
+    k_r // r), preserving the -1 sentinel.  The profile and integer
+    outputs (T_u/q_u/l_u/klab/w2/w2_surface) are SAMPLED at the refined
+    level whose half level coincides with the parent half level, i.e.
+    refined index k*r for parent k.  The refined ktype, w_base,
+    cape_test, ldcum and ldsc are preserved; NO reclassification is done
+    after snapping.
+
+    The per-column surface fluxes, ustar and land_frac are unchanged
+    (they are level-independent).  All refinement arithmetic is
+    vectorised across columns (no Python loop over columns); the static
+    refinement index arrays (parent-layer indices, sub-layer fractions,
+    snap tables) are built once from cfg.column_refine, and the
+    interpolation WEIGHTS are traced functions of the pressures
+    computed per column.  Output dtype = input dtype throughout."""
+    r = int(cfg.column_refine)
+    if r < 1:
+        raise ValueError(
+            f"IFSTestAscentConfig.column_refine must be >= 1, got {r}")
+    if r == 1:
+        return ifs_departure_search(T, q_v, p_full, p_half, geo_full,
+                                    geo_half, shf_w_m2, lhf_w_m2, ustar,
+                                    land_frac, dq_dt_adv, cfg)
+
+    ncol, nlev = T.shape
+    dt = T.dtype
+    c_pd = constants.c_pd
+    # API boundary: mixing ratio -> specific humidity (as in
+    # ifs_departure_search); q_v_r is converted back at the end
+    q = q_v / (1.0 + q_v)
+
+    # ---- refined grids (static index arithmetic, traced pressures)
+    # half levels: r sub-layers per parent layer, even in pressure; the
+    # refined half levels at multiples of r COINCIDE with the parent
+    # interfaces (frac = j/r, j = 1..r), and the surface half level
+    # p_half[:, nlev] is appended unchanged
+    h_par = jnp.repeat(jnp.arange(nlev), r)              # (nlev*r,) static
+    frac = jnp.tile(jnp.arange(1, r + 1), nlev).astype(dt) / r
+    lo_h = p_half[:, h_par]
+    dp_h = p_half[:, h_par + 1] - lo_h
+    p_half_r = jnp.concatenate(
+        [lo_h + frac * dp_h, p_half[:, nlev:nlev + 1]], axis=1)
+    # full levels: midpoints of the refined half intervals
+    p_full_r = 0.5 * (p_half_r[:, :-1] + p_half_r[:, 1:])
+
+    # ---- reconstruction weights (traced, computed once per column):
+    # refined full index k_r lies in parent layer k_par = k_r // r; the
+    # piecewise-linear-in-pressure weight between the parent FULL levels
+    # k_par and k_par+1, clamped to [0, 1] (edge values held constant
+    # beyond the first/last parent full level -- the refined full level
+    # midpoints near the domain edges can fall outside the parent full
+    # levels' pressure range).  NOTE: plain interpolation between
+    # full-level points is NOT conservative (see docstring); the
+    # Delta-p-conservative limited reconstruction is the follow-up if
+    # the gate test fails.
+    k_par = (jnp.arange(nlev * r) // r)                  # static
+    p_lo = p_full[:, k_par]
+    p_hi = p_full[:, k_par + 1]
+    w = jnp.clip((p_full_r - p_lo) / (p_hi - p_lo), 0.0, 1.0)
+
+    def _lin(x):
+        return x[:, k_par] + w * (x[:, k_par + 1] - x[:, k_par])
+
+    s_r = _lin(c_pd * T + geo_full)                      # dry static energy
+    q_r = _lin(q)                                        # specific humidity
+    dq_r = _lin(dq_dt_adv)                               # interpolated like q
+    # provisional T (same weights) only to SEED the hydrostatic Phi;
+    # the final T below is derived from s (T = (s - Phi_refined)/c_p)
+    T_prov = _lin(T)
+    phi_half_r, phi_full_r = _hydrostatic_geopotential(T_prov, q_r, p_half_r)
+    T_r = (s_r - phi_full_r) / c_pd                      # derive temperature
+
+    # ---- run the UNCHANGED source-literal search on the refined column
+    q_v_r = q_r / (1.0 - q_r)                            # back to mixing ratio
+    res = ifs_departure_search(T_r, q_v_r, p_full_r, p_half_r,
+                               phi_full_r, phi_half_r, shf_w_m2,
+                               lhf_w_m2, ustar, land_frac, dq_r, cfg)
+
+    # ---- restriction: snap indices to valid parent levels, preserving -1
+    def snap_full(k):
+        k = jnp.asarray(k, jnp.int32)
+        return jnp.where(k >= 0, k // r, jnp.asarray(-1, jnp.int32))
+
+    # half-level-profile sampling: refined index k*r has its half level
+    # coincident with the parent half level k
+    kk = jnp.arange(nlev) * r                            # static
+
+    return TestAscent(
+        ldcum=res.ldcum,
+        ktype=res.ktype,                                 # preserved, not reclassified
+        k_dpl=snap_full(res.k_dpl),
+        k_cbot=snap_full(res.k_cbot),
+        k_ctop=snap_full(res.k_ctop),
+        w_base=res.w_base,                               # preserved
+        T_u=res.T_u[:, kk],
+        q_u=res.q_u[:, kk],
+        l_u=res.l_u[:, kk],
+        klab=res.klab[:, kk],
+        cape_test=res.cape_test,                         # preserved
+        w2=res.w2[:, kk],
+        w2_surface=res.w2_surface[:, kk],
+        ldsc=res.ldsc,                                   # preserved
+        k_botsc=snap_full(res.k_botsc),
+    )

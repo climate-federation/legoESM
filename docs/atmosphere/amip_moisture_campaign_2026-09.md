@@ -618,3 +618,18 @@ first attempt with piecewise-linear T/q in pressure gave no convection at all �
 Peer (UTLS session) drafted the target grid L45 (9 log layers 2-109 hPa, 18 x 33 hPa to 703 hPa,
 18 x 16.5 hPa to the surface): the ported trigger classifies the deep sounding deep on it (top 662 hPa)
 and the trade sounding shallow — sufficient for the trigger; awaiting the user's approval of the grid.
+
+### Iteration H — refined-column trigger (the stopgap) passes its gate (2026-09-16, 23:00)
+Codex r14: prefer the refined column over in-layer sub-stepping (deleted); departure loop as nested
+lax.scans (GLM; bit-identical; 120-level compile 10 s / 1 GB, model-state jit 2 s). Wrapper
+`ifs_departure_search_refined` (GLM): s and q reconstructed linearly in pressure between parent full
+levels, hydrostatic geopotential, the unchanged source search on the refined column, indices snapped
+back to parent levels; `column_refine` = 1 is the identity. Gate on the frozen soundings:
+| case | native L60 | L30 x1 | L30 x2 | L30 x4 | native L100 |
+|---|---|---|---|---|---|
+| deep: ktype / top | 1 / 650 hPa | 2 / 895 | 1 / 625 | 1 / 591 | 1 / 582 |
+| trade: ktype / top | 2 / 802 | 2 / 827 | 2 / 794 | 2 / 794 | 2 / 805 |
+Departure within one parent layer, top within 50 hPa of native: PASSED. Model day-110 state (x2 / x4):
+ITCZ none 44/34 % shallow 49/55 % deep 7/11 % (deep tops 190-490 hPa); trades N deep 7/12 %, S 23/36 %
+(mostly congestus depth, tops 390-760 hPa). Open: eager/jit parity 17.8 at x2 on one output (a
+switching column), non-finite gradient path, no unit tests yet, codex review of the wrapper pending.
