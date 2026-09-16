@@ -354,3 +354,26 @@ the rain route): lowest 100 hPa q 16.82 → 16.31 (−0.5 g/kg), RH 0.849 →
 where the 5-day arm showed nothing.
 Per the user's order: 3a did not move the surface layer → 3b, partial-cloud
 condensation, next.
+
+## Iteration F — partial-cloud condensation (H2), design 2026-09-16
+Both reviewers converge on the same family: a prescribed UNIFORM total-water
+PDF equilibrium adjustment (codex, xhigh; exactly Sundqvist's cover relation
+c = 1 − sqrt((1−RH)/(1−rh_crit)) with a condensate budget) — GLM's "(a)
+Sundqvist partial condensation". Codex corrections adopted over GLM's sketch:
+no separate clear-fraction evaporation sink (it would evaporate an exact
+equilibrium), no detrainment cloud-fraction source for a diagnostic PDF
+(detrained q_c enters q_t), radiation consumes the same PDF diagnosis at its
+own state and bypasses the diagnostic condensate floor, the post-step hard
+drain stays. Ranking: uniform-PDF > complete Sundqvist tendency > CLUBB ADG1
+macrophysics > prognostic Tiedtke fraction.
+Order: liquid kernel + AD/conservation tests (GLM coding now) → offline
+capacity check on the day-110 state at 700/600/500 hPa → mixed-phase
+ownership (single owner of vapour ↔ cloud transfer; note constants have
+L_s ≠ L_v + L_f, a pre-existing enthalpy inconsistency) → Morrison wiring
+under a static switch → shared radiation diagnosis → 5-day pair → 30-day
+pair. Gates (codex): 5-day P(RH>0.98) −25 % rel., 500-700 hPa vapour bias
+−10 %, prw −0.5, cover displaced < 10 pts, rsut/rlut not worse by > 5;
+30-day: vapour bias −25 %, prw bias −25 % and ≥ 1 kg/m2, cover within 10
+pts, |rsut|,|rlut| ≤ 15. Refutation: RH falls by warming, or vapour becomes
+condensate that re-evaporates, or the excess persists with credible
+sub-saturated clouds.
