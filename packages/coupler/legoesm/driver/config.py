@@ -1710,6 +1710,13 @@ class ExperimentConfig(NamedTuple):
                 f"dycore.model_type must be one of {DYNAMICS_OPTIONS}, "
                 f"got {d.model_type!r}"
             )
+        elif d.model_type == "nonhydrostatic" and (g.sigma_top != 0.01
+                                                   or g.sigma_layout != "standard"):
+            errors.append(
+                "grid.sigma_top and grid.sigma_layout are inert on the "
+                "nonhydrostatic lane, which uses a height coordinate; leave "
+                f"them at their defaults 0.01/'standard' (got sigma_top="
+                f"{g.sigma_top}, sigma_layout={g.sigma_layout!r})")
         if d.discretization not in DISCRETIZATION_OPTIONS:
             errors.append(
                 f"dycore.discretization must be one of {DISCRETIZATION_OPTIONS}, "

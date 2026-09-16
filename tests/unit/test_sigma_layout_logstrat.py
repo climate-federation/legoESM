@@ -85,6 +85,15 @@ def test_config_gates_and_wiring():
     with pytest.raises(ValueError, match="sigma_layout"):
         ExperimentConfig(grid=GridConfig(vertical_coord="hybrid",
                                          sigma_layout="l30_trop_logstrat")).validate_strict()
+    from legoesm.driver.config import DycoreConfig
+    with pytest.raises(ValueError, match="sigma_top"):
+        ExperimentConfig(dycore=DycoreConfig(model_type="nonhydrostatic"),
+                         grid=GridConfig(vertical_coord="sigma", sigma_top=0.002)).validate_strict()
+    with pytest.raises(ValueError, match="sigma_layout"):
+        ExperimentConfig(dycore=DycoreConfig(model_type="nonhydrostatic"),
+                         grid=GridConfig(vertical_coord="sigma", nlev=36, sigma_top=0.002,
+                                         sigma_layout="l30_trop_logstrat")).validate_strict()
+    ExperimentConfig(dycore=DycoreConfig(model_type="nonhydrostatic")).validate_strict()
     args = build_arg_parser().parse_args(["--sigma-layout", "l30_trop_logstrat",
                                           "--sigma-top", "0.002", "--nlev", "36"])
     assert build_config_from_args(args).grid.sigma_layout == "l30_trop_logstrat"
