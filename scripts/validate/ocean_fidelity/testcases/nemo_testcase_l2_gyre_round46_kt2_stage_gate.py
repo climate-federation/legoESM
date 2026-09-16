@@ -362,7 +362,14 @@ def read_admitted_tke_statement_walk(
 
 def _tke_statement_duplicate_rows(record: dict, legacy: dict, *,
                                   plant_ulp: bool = False) -> list[dict]:
-    """Bit-test the three boundaries duplicated by the Round-59 stream."""
+    """Bit-test Round-59 duplicates on their compiled-consumed domains.
+
+    The Round-59 matrix writer deliberately zero-fills ``jpk`` because NEMO's
+    TKE solve consumes only ``1:jpkm1``.  The Round-101 statement writer
+    captures the live ``en`` image at every level.  Preserve the complete
+    stored-array comparison as a diagnostic, but do not mistake the two
+    different sentinel policies for a moved statement.
+    """
     pairs = {
         "en_entry": "en_entry",
         "rhs_pre_sweep": "rhs_pre_sweep",
@@ -375,22 +382,43 @@ def _tke_statement_duplicate_rows(record: dict, legacy: dict, *,
         require(candidate.shape == reference.shape,
                 f"TKE duplicate {name} shape mismatch: "
                 f"{candidate.shape} != {reference.shape}")
-        if plant_ulp and name == "en_entry":
+        if plant_ulp and name == "rhs_pre_sweep":
             candidate = candidate.copy()
-            candidate.flat[0] = np.nextafter(
-                candidate.flat[0], np.float64(np.inf))
-        unequal = int(np.count_nonzero(
-            candidate.view(np.uint64) != reference.view(np.uint64)))
-        rows.append({
-            "name": f"GYRE-zco.kt2.tke_statement_record.{name}",
-            "field": name,
-            "compared_cells": int(candidate.size),
-            "n_unequal": unequal,
-            "absolute_max": float(np.max(np.abs(candidate - reference))),
-            "classification": "BIT" if unequal == 0 else "DEBT",
-        })
+            candidate[0, 0, 1] = np.nextafter(
+                candidate[0, 0, 1], np.float64(np.inf))
+        domains = {
+            "complete_stored_array": (...,),
+            "compiled_consumed_1_jpkm1": (..., slice(0, 30)),
+            "unconsumed_jpk_sentinel": (..., slice(30, 31)),
+        }
+        for domain, selector in domains.items():
+            left = np.ascontiguousarray(candidate[selector])
+            right = np.ascontiguousarray(reference[selector])
+            unequal = int(np.count_nonzero(
+                left.view(np.uint64) != right.view(np.uint64)))
+            binding = (
+                domain == "complete_stored_array"
+                if name in {"en_entry", "en_post_sweep"}
+                else domain == "compiled_consumed_1_jpkm1"
+            )
+            rows.append({
+                "name": (
+                    f"GYRE-zco.kt2.tke_statement_record.{name}.{domain}"
+                ),
+                "field": name,
+                "domain": domain,
+                "admission_binding": binding,
+                "compared_cells": int(left.size),
+                "n_unequal": unequal,
+                "absolute_max": float(np.max(np.abs(left - right))),
+                "classification": "BIT" if unequal == 0 else "DEBT",
+            })
     if plant_ulp:
-        target = next(row for row in rows if row["field"] == "en_entry")
+        target = next(
+            row for row in rows
+            if row["field"] == "rhs_pre_sweep"
+            and row["domain"] == "compiled_consumed_1_jpkm1"
+        )
         require(target["n_unequal"] == 1,
                 "TKE statement one-ULP plant did not flip exactly one cell")
     return rows
@@ -2579,8 +2607,9 @@ def run(
             plant_ulp=plant == "stage-tke-record-ulp")
         if plant != "stage-tke-record-ulp":
             require(all(row["classification"] == "BIT"
-                        for row in duplicate_rows),
-                    "Round-101 duplicate boundary moved from Round 59")
+                        for row in duplicate_rows
+                        if row["admission_binding"]),
+                    "Round-101 consumed duplicate boundary moved from Round 59")
         report["tke_statement_walk"] = {
             "format": "nemo-testcase-l2-gyre-tke-statement-record-v1",
             "record": str(

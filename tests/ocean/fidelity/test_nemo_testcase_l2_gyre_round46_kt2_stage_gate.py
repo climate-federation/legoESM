@@ -142,12 +142,50 @@ def test_round101_tke_duplicate_rows_and_one_ulp_plant(tmp_path):
         for name in ("en_entry", "rhs_pre_sweep", "en_post_sweep")
     }}
     clean = gate._tke_statement_duplicate_rows(record, legacy)
+    assert len(clean) == 9
     assert all(row["classification"] == "BIT" for row in clean)
     planted = gate._tke_statement_duplicate_rows(
         record, legacy, plant_ulp=True)
-    target = next(row for row in planted if row["field"] == "en_entry")
+    target = next(
+        row for row in planted
+        if row["field"] == "rhs_pre_sweep"
+        and row["domain"] == "compiled_consumed_1_jpkm1"
+    )
     assert target["classification"] == "DEBT"
     assert target["n_unequal"] == 1
+
+
+def test_round101_tke_rhs_unconsumed_sentinel_is_reported_not_binding(tmp_path):
+    path, arrays = _write_tke_statement(tmp_path / "tke.bin")
+    record = gate.read_tke_statement_walk_record(path)
+    legacy_arrays = {
+        name: np.array(arrays[name], copy=True)
+        for name in ("en_entry", "rhs_pre_sweep", "en_post_sweep")
+    }
+    legacy_arrays["rhs_pre_sweep"][:, :, -1] = 0.0
+    rows = gate._tke_statement_duplicate_rows(
+        record, {"arrays": legacy_arrays})
+    full = next(
+        row for row in rows
+        if row["field"] == "rhs_pre_sweep"
+        and row["domain"] == "complete_stored_array"
+    )
+    consumed = next(
+        row for row in rows
+        if row["field"] == "rhs_pre_sweep"
+        and row["domain"] == "compiled_consumed_1_jpkm1"
+    )
+    sentinel = next(
+        row for row in rows
+        if row["field"] == "rhs_pre_sweep"
+        and row["domain"] == "unconsumed_jpk_sentinel"
+    )
+    assert full["classification"] == "DEBT"
+    assert sentinel["classification"] == "DEBT"
+    assert not full["admission_binding"]
+    assert not sentinel["admission_binding"]
+    assert consumed["classification"] == "BIT"
+    assert consumed["admission_binding"]
 
 
 def test_round101_tke_writer_is_additive_write_only_and_fixed_layout():
