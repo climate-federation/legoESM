@@ -824,7 +824,7 @@ def rotated_to_geographic_node_vector(mesh: "Mesh", u_rot, v_rot):
     ``FesomOceanState.uv_node`` lives in the ROTATED frame, while
     ``step_sea_ice``'s ocean-current contract is geographic east/north.
     """
-    _require_fesom_jax()
+    require_fesom_jax()
     from fesom_jax import jra55 as _jra55
 
     geo = jnp.asarray(mesh.geo_coord_nod2D, dtype=jnp.float64)
@@ -1280,7 +1280,7 @@ def omip_to_surface_fluxes(mesh, state, sf, fw, dt, *, rho_w, vcpw,
         ``fesom_jax.config.VCPW`` — the value fesom's tracer forcing is built
         on; NOT overridden by ``use_legoesm_constants``).
     """
-    _require_fesom_jax()
+    require_fesom_jax()
     from fesom_jax import ale as _ale
     from fesom_jax import jra55 as _jra55
     from fesom_jax.forcing import BULK_ALBW, cal_shortwave_rad

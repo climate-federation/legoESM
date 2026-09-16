@@ -75,6 +75,16 @@ NEMOIN=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS
 OUT=${OUT:-/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/fesom_orca1faithtint_d30}
 echo "OUT=$OUT"
 
+# Ginsburg's cgroup does not hide the other GPUs on a shared node, so JAX takes
+# device 0 whether or not another job is already on it (this is how the MPAS arm
+# 9815701 ran out of memory beside another tenant). Pick the emptiest one first.
+nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits \
+  | tr '\n' ' ' | sed 's/^/[gpu] free MiB by index: /'; echo
+export CUDA_VISIBLE_DEVICES=$(
+  nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits \
+  | sort -t, -k2 -nr | head -1 | cut -d, -f1 | tr -d ' ')
+echo "[gpu] using CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid fesom \
   --fesom-mesh-dir "$ROOT/data/fesom2_core2/mesh_nemo75_30m" \
   --woa-init \

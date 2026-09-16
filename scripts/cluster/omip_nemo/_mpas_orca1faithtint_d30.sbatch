@@ -89,6 +89,17 @@ YEARS=$($PY -c "print(${DAYS}/365.0)")
 OUT=${OUT:-/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/mpas_orca1faithtint_d${DAYS}}
 echo "DAYS=$DAYS LEG=$LEG YEARS=$YEARS OUT=$OUT"
 
+# Ginsburg's cgroup does not hide the other GPUs on a shared node, so JAX takes
+# device 0 whether or not another job is already on it. Job 9815701 died that
+# way: it compiled beside a 2-hour tenant on g098 and asked for 33 GiB that were
+# not there. Pick the emptiest visible GPU before JAX initialises.
+nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits \
+  | tr '\n' ' ' | sed 's/^/[gpu] free MiB by index: /'; echo
+export CUDA_VISIBLE_DEVICES=$(
+  nvidia-smi --query-gpu=index,memory.free --format=csv,noheader,nounits \
+  | sort -t, -k2 -nr | head -1 | cut -d, -f1 | tr -d ' ')
+echo "[gpu] using CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+
 echo "=== gate: corrected forcing is the default ==="
 JAX_PLATFORMS=cpu $PY -m pytest -q tests/ocean/unit/test_core2_corrected_cache_default.py 2>&1 | tail -2
 rc=${PIPESTATUS[0]}; [ $rc -eq 0 ] || { echo "FATAL: gate rc=$rc"; exit 1; }
