@@ -56,9 +56,20 @@ STAGE1_W_ROOT = Path(
 STAGE1_R3_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round99/"
     "oracle_stage1_r3_operands")
+TKE_STATEMENT_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round101/"
+    "oracle_tke_statement_walk")
+TKE_OPERAND_RECORD = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round59/"
+    "oracle_tke_operands/oracle_tke_operands_kt00000002.bin")
 MAGIC = "NEMO_L2_R46STG1"
 DIMS = (36, 26, 31)
 OWNED_DIMS = (32, 22, 31)
+TKE_STATEMENT_MAGIC = b"NEMO_L2_R101TKE "
+TKE_STATEMENT_FIELDS = (
+    "en_entry", "en_after_boundaries", "en_after_langmuir",
+    "rhs_pre_sweep", "en_post_sweep",
+)
 OWNED_3D_FIELDS = {"tke_en", "tke_avt_k", "tke_dissl"}
 HEADER_FIELDS = (
     "version",
@@ -271,6 +282,118 @@ def read_stage1_r3_operand_record(path: Path) -> dict:
         "Kaa": kaa, "jpi": nx, "jpj": ny, "jpk": nz, "bits": bits,
     }
     return result
+
+
+def read_tke_statement_walk_record(
+    path: Path, *, plant: str | None = None,
+) -> dict:
+    """Read the fixed kt=2 TKE statement-boundary stream through EOF."""
+    raw = path.read_bytes()
+    if plant == "truncation":
+        raw = raw[:-8]
+    offset = 0
+
+    def take(count: int) -> bytes:
+        nonlocal offset
+        require(offset + count <= len(raw), f"{path}: record is truncated")
+        value = raw[offset:offset + count]
+        offset += count
+        return value
+
+    magic = take(16)
+    if plant == "header":
+        magic = b"X" + magic[1:]
+    require(magic == TKE_STATEMENT_MAGIC, f"{path}: bad magic {magic!r}")
+    values = list(struct.unpack("=13i", take(13 * 4)))
+    keys = (
+        "version", "kt", "Kbb", "Kmm", "jpi", "jpj", "jpk", "jpkm1",
+        "ntsi", "ntei", "ntsj", "ntej", "bits",
+    )
+    header = dict(zip(keys, values, strict=True))
+    require((header["version"], header["kt"], header["Kbb"],
+             header["Kmm"]) == (1, 2, 3, 3),
+            f"{path}: wrong version/clock/slots {header}")
+    require((header["jpi"], header["jpj"], header["jpk"],
+             header["jpkm1"]) == (*DIMS, 30),
+            f"{path}: wrong global dimensions {header}")
+    require((header["ntsi"], header["ntei"], header["ntsj"],
+             header["ntej"], header["bits"]) == (3, 34, 3, 24, 64),
+            f"{path}: wrong owned bounds/dtype {header}")
+    nx = header["ntei"] - header["ntsi"] + 1
+    ny = header["ntej"] - header["ntsj"] + 1
+    nz = header["jpk"]
+    count = nx * ny * nz
+    arrays = {}
+    for name in TKE_STATEMENT_FIELDS:
+        values = np.frombuffer(take(count * 8), dtype="=f8").copy()
+        arrays[name] = values.reshape((nx, ny, nz), order="F")
+        require(np.all(np.isfinite(arrays[name])),
+                f"{path}: {name} contains NaN/Inf")
+    require(offset == len(raw),
+            f"{path}: record has {len(raw) - offset} trailing bytes")
+    require(len(raw) == 873028,
+            f"{path}: physical EOF {len(raw)} != registered 873028")
+    return {"header": header, "arrays": arrays, "sha256": sha256(path)}
+
+
+def read_admitted_tke_statement_walk(
+    root: Path, *, plant: str | None = None,
+) -> dict:
+    """Admit the Round-101 stream only after digest and producer checks."""
+    path = root / "oracle_tke_statement_walk_kt00000002.bin"
+    producer_path = root / "producer_commit.txt"
+    stamp_path = path.with_name(path.name + ".stamp")
+    require(path.is_file(), f"missing {path}")
+    require(producer_path.is_file(), f"missing {producer_path}")
+    require(stamp_path.is_file(), f"missing {stamp_path}")
+    producer = producer_path.read_text(encoding="utf-8").strip()
+    require(len(producer) == 40, f"{producer_path}: malformed producer commit")
+    parts = stamp_path.read_text(encoding="utf-8").strip().split()
+    require(len(parts) == 3, f"{stamp_path}: malformed stamp")
+    expected = "0" * 40 if plant == "stamp" else producer
+    require(parts[0] == sha256(path), f"{stamp_path}: digest mismatch")
+    require(parts[1] == expected, f"{stamp_path}: producer commit mismatch")
+    require(parts[2] == path.name, f"{stamp_path}: record name mismatch")
+    record = read_tke_statement_walk_record(
+        path, plant=plant if plant in {"header", "truncation"} else None)
+    record["producer_commit"] = producer
+    return record
+
+
+def _tke_statement_duplicate_rows(record: dict, legacy: dict, *,
+                                  plant_ulp: bool = False) -> list[dict]:
+    """Bit-test the three boundaries duplicated by the Round-59 stream."""
+    pairs = {
+        "en_entry": "en_entry",
+        "rhs_pre_sweep": "rhs_pre_sweep",
+        "en_post_sweep": "en_post_sweep",
+    }
+    rows = []
+    for name, legacy_name in pairs.items():
+        candidate = np.asarray(record["arrays"][name], dtype=np.float64)
+        reference = np.asarray(legacy["arrays"][legacy_name], dtype=np.float64)
+        require(candidate.shape == reference.shape,
+                f"TKE duplicate {name} shape mismatch: "
+                f"{candidate.shape} != {reference.shape}")
+        if plant_ulp and name == "en_entry":
+            candidate = candidate.copy()
+            candidate.flat[0] = np.nextafter(
+                candidate.flat[0], np.float64(np.inf))
+        unequal = int(np.count_nonzero(
+            candidate.view(np.uint64) != reference.view(np.uint64)))
+        rows.append({
+            "name": f"GYRE-zco.kt2.tke_statement_record.{name}",
+            "field": name,
+            "compared_cells": int(candidate.size),
+            "n_unequal": unequal,
+            "absolute_max": float(np.max(np.abs(candidate - reference))),
+            "classification": "BIT" if unequal == 0 else "DEBT",
+        })
+    if plant_ulp:
+        target = next(row for row in rows if row["field"] == "en_entry")
+        require(target["n_unequal"] == 1,
+                "TKE statement one-ULP plant did not flip exactly one cell")
+    return rows
 
 
 def read_admitted_stage1_w_walk(root: Path, *, plant_stamp: bool = False) -> dict:
@@ -2314,6 +2437,8 @@ def run(
     stage_closure_root: Path = STAGE_CLOSURE_ROOT,
     stage1_w_root: Path = STAGE1_W_ROOT,
     stage1_r3_root: Path = STAGE1_R3_ROOT,
+    tke_statement_root: Path = TKE_STATEMENT_ROOT,
+    tke_operand_record: Path = TKE_OPERAND_RECORD,
 ) -> dict:
     stamp = worktree_stamp()
     expected = "0" * 40 if plant == "stamp" else expect_commit.lower()
@@ -2420,6 +2545,7 @@ def run(
         "model_path_first_nonbit": {},
         "trajectory": [],
         "stage_twin": None,
+        "tke_statement_walk": None,
         "status": "PASS",
     }
     if mode in {"given-inputs", "all"}:
@@ -2435,6 +2561,42 @@ def run(
             records, root, advmean_root, memory_root, btstep_root,
             stage_closure_root, stage1_w_root, stage1_r3_root, plant,
             walk_only=mode == "stage-w-walk")
+    if mode == "stage-tke-record":
+        from nemo_testcase_l2_gyre_round54_tke_operands import (
+            read_record as read_tke_operand_record,
+        )
+
+        record_plant = {
+            "stage-tke-record-header": "header",
+            "stage-tke-record-truncation": "truncation",
+            "stage-tke-record-stamp": "stamp",
+        }.get(plant)
+        statement_record = read_admitted_tke_statement_walk(
+            tke_statement_root, plant=record_plant)
+        legacy_record = read_tke_operand_record(tke_operand_record)
+        duplicate_rows = _tke_statement_duplicate_rows(
+            statement_record, legacy_record,
+            plant_ulp=plant == "stage-tke-record-ulp")
+        if plant != "stage-tke-record-ulp":
+            require(all(row["classification"] == "BIT"
+                        for row in duplicate_rows),
+                    "Round-101 duplicate boundary moved from Round 59")
+        report["tke_statement_walk"] = {
+            "format": "nemo-testcase-l2-gyre-tke-statement-record-v1",
+            "record": str(
+                tke_statement_root
+                / "oracle_tke_statement_walk_kt00000002.bin"),
+            "record_sha256": statement_record["sha256"],
+            "producer_commit": statement_record["producer_commit"],
+            "header": statement_record["header"],
+            "fields": list(TKE_STATEMENT_FIELDS),
+            "physical_eof_bytes": 873028,
+            "round59_record": str(tke_operand_record),
+            "round59_sha256": sha256(tke_operand_record),
+            "duplicate_rows": duplicate_rows,
+            "new_boundaries": [
+                "en_after_boundaries", "en_after_langmuir"],
+        }
     if mode == "stage-twin":
         missing = [
             row for table in ("given_nemo_entry", "chained")
@@ -2461,7 +2623,7 @@ def main(argv=None) -> int:
     p.add_argument(
         "--mode",
         choices=("validate", "given-inputs", "trajectory", "all", "stage-twin",
-                 "stage-w-walk"),
+                 "stage-w-walk", "stage-tke-record"),
         default="validate",
     )
     p.add_argument("--round40-kt1", type=Path, required=True)
@@ -2476,13 +2638,19 @@ def main(argv=None) -> int:
     p.add_argument("--stage1-w-root", type=Path, default=STAGE1_W_ROOT)
     p.add_argument("--stage1-r3-root", type=Path, default=STAGE1_R3_ROOT)
     p.add_argument(
+        "--tke-statement-root", type=Path, default=TKE_STATEMENT_ROOT)
+    p.add_argument(
+        "--tke-operand-record", type=Path, default=TKE_OPERAND_RECORD)
+    p.add_argument(
         "--plant",
         choices=("header", "truncation", "calibration", "given", "trajectory",
                  "twin", "stage-entry-ulp", "stage-context-ulp",
                  "stage-rhs-ulp", "stage-w-transport-ulp",
                  "stage-w-carry-ulp", "stage-w-direct-r3-ulp",
                  "stage-assignment-output-ulp", "stage-w-record-stamp",
-                 "stage-r3-record-stamp", "stamp"),
+                 "stage-r3-record-stamp", "stage-tke-record-header",
+                 "stage-tke-record-truncation", "stage-tke-record-stamp",
+                 "stage-tke-record-ulp", "stamp"),
     )
     p.add_argument("--output", type=Path)
     args = p.parse_args(argv)
@@ -2499,6 +2667,8 @@ def main(argv=None) -> int:
         stage_closure_root=args.stage_closure_root,
         stage1_w_root=args.stage1_w_root,
         stage1_r3_root=args.stage1_r3_root,
+        tke_statement_root=args.tke_statement_root,
+        tke_operand_record=args.tke_operand_record,
     )
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.output:

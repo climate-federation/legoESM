@@ -85,6 +85,24 @@ def _write(path: Path, *, stage=1, truncate=False) -> Path:
     return path
 
 
+def _write_tke_statement(path: Path, *, trailing=False) -> tuple[Path, dict]:
+    nx, ny, nz = gate.OWNED_DIMS
+    arrays = {
+        name: (np.arange(nx * ny * nz, dtype=np.float64)
+               .reshape((nx, ny, nz), order="F") + index)
+        for index, name in enumerate(gate.TKE_STATEMENT_FIELDS)
+    }
+    payload = bytearray(gate.TKE_STATEMENT_MAGIC)
+    payload.extend(struct.pack(
+        "=13i", 1, 2, 3, 3, NX, NY, NZ, 30, 3, 34, 3, 24, 64))
+    for name in gate.TKE_STATEMENT_FIELDS:
+        payload.extend(arrays[name].ravel(order="F").tobytes())
+    if trailing:
+        payload.extend(np.float64(1.0).tobytes())
+    path.write_bytes(payload)
+    return path, arrays
+
+
 def test_reader_and_zero_source_replays(tmp_path):
     rec = gate.read_stage(_write(tmp_path / "stage.bin"))
     records = {key: rec for key in gate.STAGES}
@@ -97,6 +115,58 @@ def test_header_and_truncation_plants_are_red(tmp_path):
         gate.read_stage(path, plant="header")
     with pytest.raises(Exception, match="short payload"):
         gate.read_stage(_write(tmp_path / "short.bin", truncate=True))
+
+
+def test_round101_tke_statement_reader_closes_layout_and_eof(tmp_path):
+    path, expected = _write_tke_statement(tmp_path / "tke.bin")
+    record = gate.read_tke_statement_walk_record(path)
+    assert path.stat().st_size == 873028
+    assert record["header"]["kt"] == 2
+    assert record["header"]["bits"] == 64
+    for name in gate.TKE_STATEMENT_FIELDS:
+        np.testing.assert_array_equal(record["arrays"][name], expected[name])
+    with pytest.raises(Exception, match="bad magic"):
+        gate.read_tke_statement_walk_record(path, plant="header")
+    with pytest.raises(Exception, match="truncated"):
+        gate.read_tke_statement_walk_record(path, plant="truncation")
+    trailing, _ = _write_tke_statement(tmp_path / "trailing.bin", trailing=True)
+    with pytest.raises(Exception, match="trailing bytes"):
+        gate.read_tke_statement_walk_record(trailing)
+
+
+def test_round101_tke_duplicate_rows_and_one_ulp_plant(tmp_path):
+    path, arrays = _write_tke_statement(tmp_path / "tke.bin")
+    record = gate.read_tke_statement_walk_record(path)
+    legacy = {"arrays": {
+        name: np.array(arrays[name], copy=True)
+        for name in ("en_entry", "rhs_pre_sweep", "en_post_sweep")
+    }}
+    clean = gate._tke_statement_duplicate_rows(record, legacy)
+    assert all(row["classification"] == "BIT" for row in clean)
+    planted = gate._tke_statement_duplicate_rows(
+        record, legacy, plant_ulp=True)
+    target = next(row for row in planted if row["field"] == "en_entry")
+    assert target["classification"] == "DEBT"
+    assert target["n_unequal"] == 1
+
+
+def test_round101_tke_writer_is_additive_write_only_and_fixed_layout():
+    package = TESTCASES / "nemo_testcase_l2_gyre_round101_tke_walk"
+    writer = (package / "l2_r101_tke_walk.F90").read_text()
+    patch = (package / "zdftke_round101.patch").read_text()
+    assert "ACTION='WRITE'" in writer
+    assert "STATUS='REPLACE'" in writer
+    assert "kt == nit000+1" in writer
+    assert "STORAGE_SIZE(1._wp) /= 64" in writer
+    assert "r101_counts /= expected_rows" in writer
+    assert "r101_entry_field, r101_boundaries, r101_langmuir" in writer
+    assert "r101_rhs, r101_post_sweep" in writer
+    assert not any(line.startswith("-") and not line.startswith("---")
+                   for line in patch.splitlines())
+    assert "CALL r101_after_boundaries_row" in patch
+    assert "CALL r101_after_langmuir_row" in patch
+    assert "CALL r101_rhs_row" in patch
+    assert "CALL r101_post_sweep_row" in patch
 
 
 def test_instrument_contract_is_zero_first_write_only_and_widened():
@@ -121,7 +191,9 @@ def test_every_declared_plant_has_a_nonzero_exit_contract():
     for plant in ("header", "truncation", "calibration", "given", "trajectory",
                   "twin", "stage-entry-ulp", "stage-context-ulp",
                   "stage-rhs-ulp", "stage-w-transport-ulp",
-                  "stage-w-carry-ulp", "stamp"):
+                  "stage-w-carry-ulp", "stage-tke-record-header",
+                  "stage-tke-record-truncation", "stage-tke-record-stamp",
+                  "stage-tke-record-ulp", "stamp"):
         assert f'"{plant}"' in source
     assert 'return 1 if args.plant or report["status"] != "PASS" else 0' in source
     for plant in ("header", "truncation", "calibration", "twin", "stamp"):
