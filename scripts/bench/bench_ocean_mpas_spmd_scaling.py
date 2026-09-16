@@ -25,13 +25,14 @@ import sys
 import time
 from pathlib import Path
 
+import jax.numpy as jnp
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from bench_ocean_mpas_scaling import (  # noqa: E402
     _ncells,
-    build_global_problem,
-    weak_level_for,
+    build_problem_config,
+    perturbed_rest_state,
 )
 from metadata import (  # noqa: E402
     annotate_incomplete,
@@ -39,6 +40,19 @@ from metadata import (  # noqa: E402
     tidy_throughput_fields,
     timed_scan_blocks,
 )
+
+
+def weak_level_for(cells_per_device: int, n_devices: int, levels=range(2, 11)) -> int:
+    """Icosahedral level whose cells/device is nearest the target (4x per
+    level, so the campaign's targets are hit exactly at s5..s10); refuses a
+    target more than 2x off every level so a capped ladder cannot pass as
+    weak scaling."""
+    best = min(levels, key=lambda lv: abs(_ncells(lv) / n_devices - cells_per_device))
+    ratio = _ncells(best) / n_devices / cells_per_device
+    if not 0.5 <= ratio <= 2.0:
+        raise SystemExit(f"weak target {cells_per_device} cells/device at {n_devices} "
+                         f"devices: nearest level {best} gives ratio {ratio:.2f}")
+    return best
 
 
 def main() -> int:
@@ -85,40 +99,27 @@ def main() -> int:
 
     from legoesm.grids.voronoi import create_voronoi_mesh
     from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
-    from legoesm.ocean.init_mpas import rest_state_mpas_ocean
     from legoesm.parallel.voronoi_partition import reorder_voronoi_for_sharding
     from legoesm.parallel.voronoi_spmd_ocean import (
         build_mpas_ocean_spmd_layout,
         disarm_mpas_ocean_spmd,
         make_sharded_mpas_ocean_step,
-        mask_padded_cells,
         n_real_cells,
         shard_state_mpas_ocean_spmd,
     )
 
     t0 = time.perf_counter()
     # Same config/perturbation as the mpi4jax sibling (implicit-CN production
-    # barotropic path); the mesh is rebuilt reordered+padded for nd devices,
-    # exactly as run_omip._create_setup does under --enable-mpas-spmd.
-    _, z_coord, config, _ = build_global_problem(
-        subdivision, args.nlev, barotropic_solver="implicit_cn")
+    # barotropic path) on the ONE requested mesh, reordered+padded for nd
+    # devices exactly as run_omip._create_setup does under --enable-mpas-spmd.
+    z_coord, config = build_problem_config(args.nlev, barotropic_solver="implicit_cn")
     mesh = create_voronoi_mesh(subdivision_level=subdivision,
                                lloyd_iterations=args.lloyd)
     n_cells_orig = int(mesh.nCells)
     if nd > 1:
         mesh = reorder_voronoi_for_sharding(mesh, nd, method=args.partition_method)
-    state = rest_state_mpas_ocean(
-        mesh, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
-        H_max=4000.0, land_lat_threshold=85.0)
     n_real = n_real_cells(mesh)
-    state = mask_padded_cells(state, n_real)
-    import jax.numpy as jnp
-    mask = state.land_mask.data
-    state = state._replace(
-        T=state.T.replace(data=state.T.data + 0.5 * jnp.sin(
-            4 * mesh.latCell)[:, None] * mask[:, None]),
-        eta=state.eta.replace(data=state.eta.data + 0.01 * jnp.sin(
-            3 * mesh.lonCell) * mask))
+    state = perturbed_rest_state(mesh, z_coord, n_cells_real=n_real)
     model = MPASOceanModel(mesh, z_coord, config)
     setup_s = time.perf_counter() - t0
 
@@ -130,23 +131,35 @@ def main() -> int:
         state = shard_state_mpas_ocean_spmd(state, layout)
         rounds = len(layout.ppermute_perms)
         cells_per = int(layout.cells_per)
+        # The sharded geometry stacks cross the timing helper's jit as an
+        # ARGUMENT: closed over, they are outer-trace constants jax cannot
+        # fetch for non-addressable arrays under multicontroller.
+        aux = spmd_step.aux
 
-        def advance(st):
-            return spmd_step(st, args.dt)
+        def advance(st, aux):
+            return spmd_step(st, args.dt, aux=aux)
     else:
-        rounds, cells_per = 0, n_cells_orig
+        rounds, cells_per, aux = 0, n_cells_orig, None
 
-        def advance(st):
+        def advance(st, aux=None):   # timed_scan_blocks calls 1-arg when aux is None
             return model.step(st, args.dt)
+
+    @jax.jit
+    def _all_finite(st):
+        return jnp.all(jnp.array([jnp.isfinite(l).all()
+                                  for l in jax.tree.leaves(st)]))
 
     try:
         t0 = time.perf_counter()
-        jax.block_until_ready(jax.tree.leaves(advance(state)))
+        jax.block_until_ready(jax.tree.leaves(advance(state, aux)))
         compile_ms = (time.perf_counter() - t0) * 1e3
         state, t = timed_scan_blocks(
             advance, state, block_steps=args.block_steps, n_blocks=args.blocks,
-            probe_steps=args.probe_steps, sync_label="ocean_mpas_spmd_bench")
-        finite = bool(np.isfinite(np.asarray(state.eta.data)).all())
+            probe_steps=args.probe_steps, sync_label="ocean_mpas_spmd_bench",
+            aux=aux)
+        # jitted global reduction -> replicated scalar (fully addressable) over
+        # EVERY prognostic leaf, not a host fetch of one sharded field.
+        finite = bool(_all_finite(state))
     finally:
         if nd > 1:
             disarm_mpas_ocean_spmd()
@@ -166,7 +179,8 @@ def main() -> int:
         compile_ms=round(compile_ms, 1), setup_s=round(setup_s, 1),
         steady_median_ms=round(med, 4), finite_ok=finite, valid=finite,
         cells=total_cells, ppermute_rounds=rounds,
-        cells_per_device=cells_per,
+        cells_per_device=cells_per,                 # padded shard size
+        cells_per_device_real=n_cells_orig // nd,
         **{k: t[k] for k in ("block_ms", "parallel_block_ms",
                              "step_latency_ms", "rank_imbalance") if k in t},
         **tidy_throughput_fields(dt_seconds=args.dt, time_per_step_ms=med,

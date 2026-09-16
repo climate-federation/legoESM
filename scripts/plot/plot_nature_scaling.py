@@ -4,8 +4,11 @@ Two figures (``--mode strong`` / ``--mode weak``), each 2 rows (atmosphere,
 ocean) x 3 grids (lat-lon / MPAS / cubed-sphere; tripole / MPAS / FESOM2).
 Every point is a measured receipt row (``steady_median_ms``); the loader keys
 rows by (component, grid, backend, precision, mode, resolution, n_devices) and
-keeps the FASTEST receipt per key, writing a provenance CSV (job id + file)
-next to the figure so any point can be traced.
+keeps the FASTEST receipt per key (across partitionings / comm env — a
+"best measured" figure), writing a provenance CSV (job id, timed steps, file)
+next to the figure so any point can be traced.  Weak series are keyed by the
+PER-DEVICE size (rows, cells or tile edge per device); mixed-precision rows
+are not plotted.
 
 Encoding (fixed across panels): GPU = blue, CPU = orange; float32 = thick
 line, float64 = thin line; resolution = marker.  Ideal (dashed, grey) is
@@ -42,6 +45,10 @@ PANELS = [
 BACKEND_COLOR = {"gpu": "#0072B2", "cpu": "#D55E00"}
 PREC_LW = {"float32": 1.7, "float64": 0.8}
 MARKERS = ["o", "s", "^", "D", "v", "P"]
+# The SPMD benches labelled precision from JAX_ENABLE_X64 but built fp32 state
+# until commit 4b763579a (2026-08-26); every float64 receipt from a job older
+# than the first post-fix ladder is a mislabelled fp32 run and is refused.
+FIRST_REAL_F64_JOB = 27253192
 # canonical vertical levels per lane: receipts at other level counts are a
 # different problem and are dropped (e.g. the 32-level MPAS probe rows)
 NLEV = {("atmosphere", "latlon"): 26, ("atmosphere", "icosahedral"): 26,
@@ -69,14 +76,30 @@ def _backend(r):
     return "gpu" if b in ("gpu", "cuda", "rocm") else "cpu"
 
 
-def _res(r, grid):
+def _res(r, grid, mode):
+    """Series label: global size for strong, PER-DEVICE size for weak (the
+    global size grows with the device count there, so it cannot be the key)."""
+    nd = int(r["n_devices"])
     if grid in ("latlon", "tripole"):
-        return f"LL{r.get('n_lat')}"
+        n_lat = r.get("n_lat")
+        if n_lat is None:
+            raise KeyError(f"receipt without n_lat: {r.get('resolution')}")
+        return f"LL{n_lat}" if mode == "strong" else f"{int(n_lat) // nd} rows/dev"
     if grid in ("icosahedral", "mpas"):
-        return f"s{r.get('subdivision', r.get('resolution'))}"
+        if mode == "strong":
+            return f"s{r.get('subdivision', r.get('resolution'))}"
+        return f"{round(int(r['n_cells']) / nd / 1e3)}k cells/dev"
     if grid == "cubed-sphere":
-        return f"C{r.get('resolution')}"
+        n = int(r["resolution"])
+        return f"C{n}" if mode == "strong" else f"C{n // int(r['kt'])}/tile"
     return str(r.get("resolution", ""))
+
+
+def _mode(r, path):
+    """The MPAS-atm and cube benches have no --mode: their weak arms are
+    strong-bench runs at a larger mesh per device count, tagged only by the
+    ladder's FILENAME (nature_ladder.sbatch)."""
+    return "weak" if "_weak_" in os.path.basename(path) else r.get("mode", "strong")
 
 
 def load(dirs):
@@ -98,14 +121,19 @@ def load(dirs):
                 prec = r.get("precision") or r.get("metadata", {}).get("precision")
                 if prec not in PREC_LW:
                     continue
+                job = r.get("slurm_job_id") or r.get("metadata", {}).get("slurm_job_id")
+                if prec == "float64" and grid != "fesom" and (
+                        job is None or int(job) < FIRST_REAL_F64_JOB):
+                    continue
                 nlev = r.get("nlev", r.get("n_levels"))
                 if (comp, grid) in NLEV and nlev != NLEV[(comp, grid)]:
                     continue
-                key = (comp, grid, _backend(r), prec, r.get("mode", "strong"),
-                       _res(r, grid), int(r["n_devices"]))
-                job = r.get("slurm_job_id") or r.get("metadata", {}).get("slurm_job_id")
+                mode = _mode(r, f)
+                key = (comp, grid, _backend(r), prec, mode, _res(r, grid, mode),
+                       int(r["n_devices"]))
+                steps = r.get("steps") or r.get("metadata", {}).get("extra", {}).get("steps")
                 if key not in best or ms < best[key][0]:
-                    best[key] = (float(ms), job, f)
+                    best[key] = (float(ms), job, f, steps)
     return best
 
 
@@ -120,10 +148,10 @@ def main() -> int:
     args = ap.parse_args()
 
     best = load(args.receipts)
-    series = defaultdict(list)     # (comp,grid,backend,prec,res) -> [(nd, ms, job, file)]
-    for (comp, grid, be, prec, mode, res, nd), (ms, job, f) in best.items():
+    series = defaultdict(list)     # (comp,grid,backend,prec,res) -> [(nd, ms, job, file, steps)]
+    for (comp, grid, be, prec, mode, res, nd), (ms, job, f, steps) in best.items():
         if mode == args.mode:
-            series[(comp, grid, be, prec, res)].append((nd, ms, job, f))
+            series[(comp, grid, be, prec, res)].append((nd, ms, job, f, steps))
 
     plt.rcParams.update({
         "font.family": "sans-serif", "font.size": 7, "axes.labelsize": 7.5,
@@ -159,8 +187,8 @@ def main() -> int:
             ax.plot(xs, ideal, "--", color=c, lw=0.6, alpha=0.5, zorder=2)
             eff = (t0 * n0 / (xs[-1] * ys[-1]) if args.mode == "strong" else t0 / ys[-1])
             summary.append((comp, grid, be, prec, res, xs[0], xs[-1], ys[0], ys[-1], eff))
-            for nd, ms, job, f in pts:
-                prov.append((comp, grid, be, prec, res, args.mode, nd, ms, job, f))
+            for nd, ms, job, f, steps in pts:
+                prov.append((comp, grid, be, prec, res, args.mode, nd, ms, steps, job, f))
         ax.set_xscale("log", base=2)
         ax.set_yscale("log")
         if allx:
@@ -211,7 +239,7 @@ def main() -> int:
     with open(base + "_provenance.csv", "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(["component", "grid", "backend", "precision", "resolution", "mode",
-                    "n_devices", "ms_per_step", "slurm_job_id", "receipt"])
+                    "n_devices", "ms_per_step", "timed_steps", "slurm_job_id", "receipt"])
         w.writerows(sorted(prov))
     print(f"{args.out}  ({len(prov)} points)")
     print("component grid backend prec res  n0->n1   ms0->ms1   efficiency")

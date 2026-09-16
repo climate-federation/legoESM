@@ -43,7 +43,7 @@ for NPES in ${NPES_LIST:-16 32 64 128}; do
        "$PY" scripts/bench/bench_forward_scaling.py --name forca20 --mesh-dir "$M" --dist-dir "$D" \
          --npes "$NPES" --steps "${STEPS:-40}" --warmup 5 --dt 240 --full 1 --ic-dir "$M" \
          --year 1958 --ragged "$RAGGED" < /dev/null > "$log" 2>&1; then
-    echo "!!! FAILED npes=$NPES"; rc=1
+    echo "!!! FAILED npes=$NPES"; rc=1; continue
   fi
   # receipt row: the bench prints one summary line; keep it machine-readable
   python3 - "$log" "$OUTDIR/forca20_d${NPES}.jsonl" "$NPES" "$BACKEND" "$SLURM_JOB_ID" <<'EOF'
@@ -51,14 +51,19 @@ import json, re, sys
 log, out, npes, backend, job = sys.argv[1:]
 txt = open(log).read()
 m = re.search(r"nod2D=(\d+) nl=(\d+) npes=(\d+).*?per_step=\s*([\d.]+) ms.*?throughput=\s*([\d.]+)", txt)
-if not m:
-    print("no summary line in", log); sys.exit(0)
+fin = re.search(r"\[bench-finite\].*?nonfinite_T=(\d+) nonfinite_uv=(\d+)", txt)
+if not m or not fin or int(m.group(3)) != int(npes):
+    print("no valid summary/finite line in", log); sys.exit(1)
+if int(fin.group(1)) or int(fin.group(2)):
+    print("NONFINITE state in", log, fin.group(0)); sys.exit(1)
 row = dict(component="fesom_ocean", grid_type="fesom", resolution="forca20", mode="strong",
-           n_devices=int(npes), n_nodes=int(m.group(1)), n_levels=int(m.group(2)),
+           n_devices=int(npes), nod2d=int(m.group(1)), n_levels=int(m.group(2)),
            precision="float64", backend=backend, steady_median_ms=float(m.group(4)),
-           mnodlev_per_s=float(m.group(5)), dt=240.0, slurm_job_id=job, log=log)
+           mnodlev_per_s=float(m.group(5)), dt=240.0, slurm_job_id=job, log=log,
+           valid=True, finite_ok=True)
 open(out, "w").write(json.dumps(row) + "\n"); print(row)
 EOF
+  [[ $? -ne 0 ]] && { echo "!!! no receipt for npes=$NPES"; rc=1; }
   sleep 5
 done
 echo "=== DONE rc=$rc outdir=$OUTDIR ==="; exit "$rc"

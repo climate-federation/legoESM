@@ -18,6 +18,11 @@
 # atm lat-lon LL2048/LL4096 + MPAS s9/s10 GPU strong f32/f64 1-128 (Aug 2026,
 # /work/bd1083/b309178/diffESM/scaling_receipts/ladder2n).
 #
+# Weak arms of the MPAS-atm and cube lanes are strong-bench runs at a larger
+# mesh per device count (those benches have no --mode); the receipt then says
+# mode=strong and the "_weak_" tag in the FILENAME is what marks them — the
+# plotter (plot_nature_scaling.py) reads the mode from the filename first.
+#
 # Per-lane env is pinned per arm (the adopted production comm recipe), never
 # inherited between arms.  Precision = JAX_ENABLE_X64; every bench
 # set_policy()s from it so the f64 arm carries real f64 state.
@@ -60,10 +65,12 @@ run_arm() {
     return 0
   fi
   local tag="${lane}_${mode}_${res//:/k}_d${nd}_x${x64}"
-  if [[ -s "$OUTDIR/${tag}.jsonl" ]]; then echo "[have] $tag"; return 0; fi
+  if grep -q '"valid": true' "$OUTDIR/${tag}.jsonl" 2>/dev/null; then echo "[have] $tag"; return 0; fi
+  rm -f "$OUTDIR/${tag}.jsonl"
   export JAX_ENABLE_X64="$x64"
   unset NCCL_P2P_NET_CHUNKSIZE NCCL_MIN_NCHANNELS NCCL_MAX_NCHANNELS \
-        LEGOESM_LATLON_PACKED_EXCHANGE LEGOESM_LATLON_SPMD_FUSED_HALO LEGOESM_MESH_CACHE_DIR
+        LEGOESM_LATLON_PACKED_EXCHANGE LEGOESM_LATLON_SPMD_FUSED_HALO LEGOESM_MESH_CACHE_DIR \
+        LEGOESM_OCEAN_MIXED LEGOESM_VMIX_F32_SOLVE LEGOESM_BAROCLINIC_F32 LEGOESM_ENABLE_TF32
   local bench args=(--multicontroller --n-devices "$nd")
   case "$lane" in
     latlon)
@@ -83,6 +90,7 @@ run_arm() {
       args+=(--subdivision "$res" --nlev 26 --lloyd 0 --wide-halo --partition-method sfc
              --steps "$STEPS" --warmup "$WARMUP") ;;
     cube)
+      if (( ${res%:*} % ${res#*:} != 0 )); then echo "[skip] $tag: kt does not divide N"; return 0; fi
       export NCCL_MIN_NCHANNELS=16 NCCL_MAX_NCHANNELS=16
       bench=scripts/bench/bench_cube_tiled_step_scaling.py
       args=(--multicontroller --kt "${res#*:}" --resolution "${res%:*}" --nlev 26
@@ -131,7 +139,7 @@ case "$MATRIX" in
     add mpas   strong 10   192
     add mpas   weak 7 2;  add mpas weak 8 8;  add mpas weak 9 32;  add mpas weak 10 128   # ~81k cells/GPU
     add cube   strong 768:2 24; add cube strong 768:3 54
-    add cube   strong 768:4 96; add cube strong 768:5 150
+    add cube   strong 768:4 96                    # kt must divide 768: {2,3,4,6,8}; 216 > GPU cap
     add cube   weak 192:2 24; add cube weak 288:3 54; add cube weak 384:4 96
     ;;
   atm_cpu)
@@ -141,8 +149,7 @@ case "$MATRIX" in
     add mpas   strong 9    16 32 64 128 256 512
     add mpas   weak 5 2; add mpas weak 6 8; add mpas weak 7 32; add mpas weak 8 128; add mpas weak 9 512
     add cube   strong 768:2 24; add cube strong 768:3 54; add cube strong 768:4 96
-    add cube   strong 768:5 150; add cube strong 768:6 216; add cube strong 768:7 294
-    add cube   strong 768:8 384; add cube strong 768:9 486
+    add cube   strong 768:6 216; add cube strong 768:8 384   # kt must divide 768
     add cube   weak 192:2 24; add cube weak 288:3 54; add cube weak 384:4 96; add cube weak 768:8 384
     ;;
   ocean_gpu)
