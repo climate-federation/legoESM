@@ -403,3 +403,87 @@ band, not the bulk vapour bias.
 Remaining moisture biases on the adopted deck: upper troposphere (≥ 500 hPa,
 riding the warm bias), trades prw +4, surface layer +12-23 % q (RH +5 pts),
 evaporation ~0.87 of ERA5.
+
+## Iteration G — the plume never terminates (2026-09-16 evening)
+Main merged into the branch (acb1203a4; one additive test conflict; gates 325 +
+5220 passed). NOTE for every later pair: main brought three peer-session
+AMIP changes (van Leer vertical advection default, cold-start fix + Antarctic
+snow, CLUBB upper limit); arms launched from this worktree are no longer on
+the adopted deck's physics. The adopted deck is pinned in the worktree
+`wt_wv_ledger` at 196af6b6d (physics-identical to wv_ctl30b's b26e5d8dc).
+Codex on the earlier "cap dries the surface layer over 30 days" attribution:
+CONFOUNDED — the wv_ctl30b / wv_sfcrain30 pair also differed in the ice
+albedo and land-snow ageing merged from main between the two launches.
+
+Lowest 3 km, day-110 snapshot on native levels vs ERA5 April climatology,
+ocean only (q g/kg / RH / T K); figure maps/bl_profiles_adopted_deck.png:
+ERA5 trades 10-30N: 1000:13.6/0.76/295.9 975:13.2/0.81/293.9 950:12.1/0.80/292.4 925:10.6/0.74/291.3 900:9.3/0.68/290.4 875:8.2/0.61/289.6 850:7.2/0.54/288.8
+model  trades 10-30N: 985:16.2/0.88/296.3 952:13.8/0.84/293.8 919:11.5/0.77/292.0 886:8.5/0.60/291.2 853:6.0/0.41/291.3 820:4.5/0.28/291.4
+ERA5 ITCZ:  1000:17.5/0.80/299.2 975:17.2/0.88/297.2 950:16.5/0.90/295.5 925:15.1/0.86/294.4 900:13.8/0.82/293.3 875:12.7/0.78/292.3 850:11.6/0.75/291.2
+model ITCZ: 981:19.5/0.88/299.3 948:16.7/0.84/296.8 915:14.1/0.78/294.9 882:10.3/0.55/294.6 849:8.0/0.43/294.2 816:7.0/0.39/292.8
+Reading (codex: pattern PLAUSIBLE, my percentages overstated by the level
+matching; GLM: structure CONFIRMED): surface layer too moist, 815-886 hPa
+cloud layer too dry and 2-3 K too warm, near-isothermal 886-820 hPa in the
+trades. Undilute parcel from the model's ITCZ level-1 state is +1.65 K at
+850, +2.5 at 500, +3.8 at 300 hPa above the parcel from ERA5's 1000 hPa
+state (measured bias +3.1/+3.8/+6.5) — the boundary-layer theta_e excess is a
+large part of the free-tropospheric warm bias (both reviewers: PLAUSIBLE, not
+attribution; entraining plumes and ERA5's own sub-adiabatic profile cut it).
+
+1-day total-water ledger on the adopted deck (day 110-111, kg/m2/day, ocean;
+arms wv_led2_080_090 / 090_095 / 095_100, pinned worktree):
+| region, band | turbulence | convection | microphysics | dynamics |
+|---|---:|---:|---:|---:|
+| ITCZ 0.80-0.90 | +0.59 | -2.54 | +0.27 | +1.69 |
+| ITCZ 0.90-0.95 | +1.65 | -0.79 | +0.03 | -0.87 |
+| ITCZ 0.95-1.00 | +1.13 | -0.41 | -0.05 | -0.66 |
+| trades N 0.80-0.90 | +1.13 | -0.99 | -0.00 | -0.05 |
+| trades N 0.90-0.95 | +1.42 | -0.32 | -0.13 | -0.93 |
+| trades N 0.95-1.00 | +0.97 | -0.15 | +0.01 | -0.81 |
+| trades S 0.80-0.90 | +1.20 | -1.90 | +0.02 | +0.65 |
+Active convective columns only (trades N, 0.80-0.90): turbulence +1.68,
+convection -1.73. The convection scheme is a net total-water SINK of the
+810-910 hPa cloud layer everywhere in the tropics; the diffusion scheme
+supplies it; convection vents almost nothing from the surface layer
+(-0.15 to -0.4). (Codex: the ledger sums all phases, so the convection term
+includes rain export; a vapour-only split is a follow-up.)
+
+The carried updraught mass-flux profile (day 110, active ocean columns,
+normalized by the column maximum; "p: fraction of columns with M/Mmax>0.1 /
+mean normalized M"):
+trades 10-30N: 887:0.08/0.04 854:0.22/0.08 788:0.60/0.26 688:1.00/0.92 589:1.00/0.99 490:1.00/0.97 391:1.00/0.92 291:1.00/0.84 192:0.97/0.70
+ITCZ:          915:0.00/0.01 849:0.58/0.23 816:0.93/0.36 685:1.00/0.90 586:1.00/0.99 487:1.00/0.84 388:1.00/0.68 290:1.00/0.54 191:0.98/0.37
+The mass flux grows 15-50x from cloud base to a maximum at ~590 hPa, stays
+within 30 % of it up to 300 hPa and reaches 190 hPa in 96-99 % of active
+columns — in the trades as in the ITCZ; no trade column has a top below
+750 hPa (53-68 % of trade columns active). With the closure/cap acting on
+the profile maximum, the cloud-base flux is 0.002-0.012 kg/m2/s (observed
+trade cumulus 0.02-0.04).
+Offline call of the production scheme on the same state (scratch probe,
+zero carry => instantaneous profile): SAME shape (trades N 886:0.06/0.02
+688:1.00/0.67 588:1.00/0.95 192:0.92/0.50), so it is not the carry averaging
+intermittent deep events. `buoyancy_death_memory=True` (the P2 "plume revives
+above an inversion" switch, unreachable for Bechtold from any run) changes
+nothing (192 hPa: 0.92/0.50 -> 1.00/0.71): the plume is never killed at the
+inversion in the first place — REFUTED as the mechanism.
+Undilute parcel from level 1 (the scheme's own LCL/LNB routines): FIRST level
+of neutral buoyancy at the trade inversion, median depth 1.7 km in 10-30N
+(39 % below 1.5 km, 84 % below 3 km), 2.9 km in the ITCZ.
+
+CODE (read): the plume kernel has no updraught termination (the IFS
+kinetic-energy profile `_ifs_updraft_ke_profile` is computed but used only for
+in-plume precipitation conversion and the closure's mean velocity), no
+organized detrainment where buoyancy is negative (the port's own comment lists
+the missing cuascn pieces: the 0.75·M per-layer detrainment limiter, the ZMFMAX
+redistribution, the negative-buoyancy ZOCUDET detrainment, the shallow/mid
+"detrainment = entrainment" tie), and a soft local buoyancy filter
+(sigmoid, 2 K width) that lets a plume pass a 1-2 K inversion at 12-38 %
+strength and regrow above it by entrainment (epsilon 1.75e-3 (1.3-RH) f_scale,
+larger in the model's dry cloud layer) against a turbulent detrainment of only
+7.5e-5 /m. Claim (PLAUSIBLE, code-read + profile fingerprint): this is why no
+shallow-cumulus regime exists over the tropical ocean, why the cloud layer is
+dried and the upper troposphere moistened by convection everywhere, why the
+cloud-base flux is starved, and a large part of why the free troposphere is
+warm. Next: IFS-faithful termination + organized detrainment designed with
+codex + GLM, coded by GLM, 5-day screen pre-registered on the mass-flux top
+distribution, 850 hPa q, 300-500 hPa vapour, ITCZ rain/prw, rsut/rlut.

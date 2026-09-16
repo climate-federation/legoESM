@@ -25,7 +25,8 @@ import regional_bias as rb  # noqa: E402
 from cloud_layers import mesh_coords  # noqa: E402
 
 SEC_PER_DAY = 86400.0
-BOXES = {"tropics 20S-20N": (-20.0, 20.0), "global": (-90.0, 90.0)}
+BOXES = {"tropics 20S-20N": (-20.0, 20.0), "ITCZ 10S-10N": (-10.0, 10.0),
+         "trades 10-30N": (10.0, 30.0), "trades 10-30S": (-30.0, -10.0), "global": (-90.0, 90.0)}
 
 
 def _sftlf_on_mesh(run, lat, lon):
