@@ -578,6 +578,10 @@ class ExperimentConfig(NamedTuple):
     # than silently re-seeding it every step.  False (default) is the
     # byte-identical diagnostic path.
     clubb_prognostic: bool = False
+    # CLUBB's upper domain limit [Pa] (CAM ``trop_cloud_top_press``): the
+    # scheme's mixing is tapered to zero above this pressure.  None (default)
+    # keeps the scheme's own 0.0 = no limit, byte-identical.
+    clubb_trop_cloud_top_press: float | None = None
     # Opt-in convective (cumulus) cloud-fraction source (Slingo-1987-inspired surrogate).  The
     # RH-based stratiform cloud schemes give ~0 cloud where an adjustment
     # convection scheme (sbm) holds the column subsaturated, so the convecting
@@ -2066,6 +2070,13 @@ class ExperimentConfig(NamedTuple):
                 f"turbulence must be one of {_valid_turbulence}, "
                 f"got {self.turbulence!r}"
             )
+        if (self.clubb_trop_cloud_top_press is not None
+                and self.turbulence != "clubb"):
+            errors.append(
+                "clubb_trop_cloud_top_press is a CLUBB field; got "
+                f"turbulence={self.turbulence!r} (also refused with a "
+                "turbulence_override, which bypasses the CLUBB branch)"
+            )
         _valid_surface_bulk = VALID_SURFACE_BULK
         if self.surface_bulk_scheme not in _valid_surface_bulk:
             errors.append(
@@ -2912,6 +2923,10 @@ class ExperimentConfig(NamedTuple):
             # timescale the literature supports (Warren & Wiscombe 1980).
             ("land_snow_tau_days", 0.5, 400.0),
             ("cloud_adiabatic_lwc_rate", 5.0e-7, 3.0e-6),
+            # 0 = the scheme's own "no limit"; 1e3 Pa is above any tropopause,
+            # 5e4 Pa would switch the boundary-layer scheme off in the free
+            # troposphere, which is not what a taper is for.
+            ("clubb_trop_cloud_top_press", 0.0, 5.0e4),
         ):
             _v = getattr(self, _f)
             if _v is not None and not (_lo <= _v <= _hi):
