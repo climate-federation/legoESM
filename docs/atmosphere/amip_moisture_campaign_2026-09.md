@@ -593,3 +593,8 @@ L137-equivalent; complete sub-stepping is structurally closer; both change more 
 (CAPE, base/top bookkeeping, condensate halving). Decision for the user: refined vertical grid
 (<= 16 hPa through the lower troposphere, converging with the UTLS session's grid work) versus a
 sub-stepped trigger on 30 levels.
+
+## Decision 2026-09-16 (user): "3 both — code with GLM, codex and Claude review"
+Sub-stepped test ascent on the 30-level grid as the stopgap AND a refined vertical grid
+(<= 16 hPa layers through the lower troposphere) as the target; the faithful main ascent
+(cuascn) port proceeds in parallel. Grid work to be coordinated with the UTLS session.
