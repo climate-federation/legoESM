@@ -320,3 +320,12 @@ q slightly lower, RH higher (cooler lowest layers) after 5 days from the
 remapped state — adjustment, not a verdict. 30-day pair launched on the SAME
 new deck: wv_bl30 (27486649, refined) vs wv_ctl30b (27486650, uniform L30),
 both from dd_ctl day 80 (remapped / native), checkpoints every 5 days.
+
+## Cover re-tune (cloud-cover session, 2026-09-16) — PROVISIONAL, not in config
+cloud_rh_crit 0.85 → 0.80 closes ~+5 of the −8 W/m2 tropical rsut overshoot
+of the dried column (offline RRTMGP ladder + coupled 5-day pair at 0.82:
+ITCZ rsut +3.2, clt +4.5, rain/prw unchanged; coupled response ~40 % of the
+offline ladder). The +11-13 W/m2 rlut excess is not an rh_crit matter (high
+cloud ~0 on the dried column): a high-cloud lever follows. User decision:
+wait for that lever and re-tune once; PR #1756 carries the rain route and
+M_b_max 0.05 only.
