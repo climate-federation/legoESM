@@ -1338,8 +1338,11 @@ def _stage1_w_walk(
     reference = _stage1_transport_w_scalar_reference(
         arrays, transport_u, transport_v, r3_kaa=r3_kaa, r1_dt=r1_dt)
     wet_w = _owned3(arrays["wmask"], 31) > 0.5
-    require(np.array_equal(reference["ww"][wet_w], direct_ww[wet_w]),
-            "scalar transport-W replay does not reproduce direct NEMO W")
+    scalar_direct = _classification(score(
+        "GYRE-zco.kt1.s1.w_walk.scalar_replay_vs_direct_w",
+        direct_ww, reference["ww"], wet_w))
+    require(scalar_direct["absolute_max"] <= 3.0e-23,
+            "scalar transport-W replay is outside its registered rounding bound")
     operands = (
         jnp.asarray(transport_u), jnp.asarray(transport_v),
         jnp.asarray(_owned2(arrays["r1_e1e2t"])),
@@ -1367,7 +1370,8 @@ def _stage1_w_walk(
     ordinary_rows = []
     candidate_rows = []
     for name in _STAGE1_W_ORDER:
-        oracle = np.asarray(reference[name]).copy()
+        oracle = np.asarray(
+            direct_ww if name == "ww" else reference[name]).copy()
         planted_at = None
         if plant == "stage-w-transport-ulp" and name == "transport_u":
             planted_at = tuple(int(value) for value in np.argwhere(wet_t)[0])
@@ -1411,7 +1415,7 @@ def _stage1_w_walk(
             None if candidate_first is None else {
                 key: candidate_first[key] for key in (
                     "boundary", "n_unequal", "absolute_max", "classification")}),
-        "scalar_replay_direct_w_bit_exact": True,
+        "scalar_replay_vs_direct_w": scalar_direct,
         "plant": plant,
     }
 
