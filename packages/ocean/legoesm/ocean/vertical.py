@@ -40,33 +40,6 @@ _AIMP_CU_MAX = 0.30
 _H_FLOOR = 1.0e-10
 
 
-def nemo_qco_reference_t_reciprocal(
-    e3t_0: jnp.ndarray,
-    tmask: jnp.ndarray,
-) -> jnp.ndarray:
-    """Build NEMO's stored ``r1_ht_0`` in compiled source order.
-
-    The active branch accumulates ``ht_0 = ht_0 + e3t_0*tmask`` from surface
-    to bottom, then stores ``ssmask / (ht_0 + 1 - ssmask)`` (compiled GYRE
-    ``domain.f90:200-212``).  This shared expression is consumed by the QCO
-    RK3 ratio program and remains differentiable and JIT-safe.
-    """
-    e3t_0 = jnp.asarray(e3t_0)
-    tmask = jnp.asarray(tmask, dtype=e3t_0.dtype)
-    if e3t_0.shape != tmask.shape:
-        raise ValueError(
-            "NEMO r1_ht_0 requires matching e3t_0/tmask shapes; got "
-            f"{e3t_0.shape}/{tmask.shape}")
-    sr = nemo_source_round
-    ht_0 = jnp.zeros(e3t_0.shape[:-1], dtype=e3t_0.dtype)
-    for jk in range(e3t_0.shape[-1]):
-        ht_0 = sr(ht_0 + sr(e3t_0[..., jk] * tmask[..., jk]))
-    one = jnp.asarray(1.0, dtype=e3t_0.dtype)
-    ssmask = tmask[..., 0]
-    denominator = sr(sr(ht_0 + one) - ssmask)
-    return sr(ssmask / denominator)
-
-
 def nemo_qco_live_t_thickness(
     eta: jnp.ndarray,
     H_bathy: jnp.ndarray,

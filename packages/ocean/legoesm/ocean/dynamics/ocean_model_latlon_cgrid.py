@@ -50,7 +50,6 @@ from legoesm.ocean.vertical import (
     nemo_qco_live_face_geometry_cgrid,
     nemo_qco_live_face_geometry_from_operands,
     nemo_qco_live_t_thickness,
-    nemo_qco_reference_t_reciprocal,
     nemo_qco_card_mesh_operands,
     nemo_qco_mesh_operands,
     nemo_up3_vertical_momentum_advection,
@@ -1173,6 +1172,11 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # has no such switch -- it is one routine -- so this exists only to
     # measure the two arms against each other on the certified cards.
     literal_stage_wzv: bool = False
+    # Private one-variable discriminator for the WS-RK3 stage clock consumed
+    # only by sshwzv.F90:334-335.  Production currently passes rn_Dt to all
+    # three stages; this arm passes (rn_Dt/3,rn_Dt/2,rn_Dt), matching
+    # stprk3_stg.F90:123-124,177-178,221-222.  It is not a public selector.
+    source_stage_wzv_clock_arm: bool = False
     # WRITE-only diagnostic companion to expose_tracer_transport_stage: place
     # the raw stage ww in the returned T slot instead of area*ww (pFw).
     expose_tracer_transport_as_ww: bool = False
@@ -1590,28 +1594,6 @@ def _nemo_ws_stage_transport(
             z_coord.is_active.astype(h_stage.dtype)
             if isinstance(z_coord, OceanPartialCellCoordinate)
             else jnp.ones_like(h_stage))
-        # stprk3_stg.f90:180-234 forms the full-step QCO ratio first, then
-        # interpolates r3t independently from ssh for HYB stages.  Computing
-        # eta_stage*r1_ht_0 is algebraically equal but is not this program's
-        # binary64 association (the direct kt=1 stage-1 record distinguishes
-        # 201 wet cells).
-        if eta_before is None or eta_after is None:
-            raise ValueError(
-                "literal stage WZV requires Kbb and full-step Kaa SSH")
-        _r1_ht0 = nemo_qco_reference_t_reciprocal(h_ref, _tmask3)
-        _r3_kbb = nemo_source_round(eta_before * _r1_ht0)
-        _r3_full = nemo_source_round(eta_after * _r1_ht0)
-        if stage_index == 0:
-            _r3_kaa = nemo_source_round(
-                nemo_source_round((2.0 / 3.0) * _r3_kbb)
-                + nemo_source_round((1.0 / 3.0) * _r3_full))
-        elif stage_index == 1:
-            _r3_kaa = nemo_source_round(
-                0.5 * nemo_source_round(_r3_kbb + _r3_full))
-        elif stage_index == 2:
-            _r3_kaa = _r3_full
-        else:
-            raise ValueError(f"unsupported NEMO RK3 stage index {stage_index}")
         w_stage, _, _ = nemo_qco_wzv_operands(
             eta_stage, eta_before, u_stage, v_stage, grid, z_coord,
             u_mask_3d, v_mask_3d, _tmask3, dt,
@@ -1624,9 +1606,7 @@ def _nemo_ws_stage_transport(
                 None if legacy_wzv_rederived_transport else (
                     zfu_stage,
                     zfv_stage,
-                )),
-            r3_before_override=_r3_kbb,
-            r3_after_override=_r3_kaa)
+                )))
     else:
         w_stage = diagnose_w_from_flux_div(
             stage_div, z_coord, thickness_weighted=True)
@@ -6400,10 +6380,8 @@ class LatLonCGridOceanModel:
             # stage 1 (dt/3): Kmm = Kbb transport, full RHS incl. vertical UP3
             _g0 = _nemo_ws_stage_transport(
                 (u0, v0), h_k_old, 0, eta_stage=state.eta.data,
-                # stprk3_stg.f90:147-148 sets rDt=rn_Dt/3 and r1_Dt=1/rDt
-                # before stage 1's transport-form W call.  This is the clock
-                # the recurrence consumes, not the full-step rn_Dt.
-                dt=dt / 3.0,
+                dt=(dt / 3.0 if self._nemo_ws_test_hooks.source_stage_wzv_clock_arm
+                    else dt),
                 barotropic_velocity=(
                     None if _legacy_reduced_transport_mean_arm else
                     _nemo_ws_stage_barotropic_velocity(
@@ -6442,11 +6420,7 @@ class LatLonCGridOceanModel:
             # the zub advection survives (isomorphism row S-21; measured
             # 3.136e-07 m/s^2 at the OVERFLOW kt=2 entry, exactly zero from
             # rest).
-            # stp2d.f90:141-176 accumulates the full 3-D Krhs, then
-            # :202-213 diagnoses its depth mean into separate Ue_rhs/Ve_rhs
-            # without projecting Krhs.  Stage 1 consumes that full source at
-            # compiled stprk3_stg.f90:664-673.
-            _du1_rhs, _dv1_rhs = du_dt, dv_dt
+            _du1_rhs, _dv1_rhs = du_dt_pert, dv_dt_pert
             _stage1_rhs_base = (_du1_rhs, _dv1_rhs)
             # The stage's NEMO e3u/e3v(Kmm) pair for the flux-form momentum
             # advection, from the ONE kernel (_nemo_ws_qco_stage_faces) keyed
@@ -6538,9 +6512,8 @@ class LatLonCGridOceanModel:
             _g1 = _nemo_ws_stage_transport(
                 (u1_corr, v1_corr), _h_live_one_third, 1,
                 eta_stage=_eta_live_one_third,
-                # stprk3_stg.f90:201-202 assigns the stage-2 half-step clock
-                # before the same shared W recurrence.
-                dt=dt / 2.0,
+                dt=(dt / 2.0 if self._nemo_ws_test_hooks.source_stage_wzv_clock_arm
+                    else dt),
                 barotropic_velocity=(
                     None if _legacy_reduced_transport_mean_arm else
                     _nemo_ws_stage_barotropic_velocity(
