@@ -284,3 +284,26 @@ trade-wind fix at the production mass flux (cap 0.02): the momentum flux is
 proportional to a capped M_u and the shear-only Gregory closure; the 31 %
 wind excess is dynamical. (A CMT arm with the cap at 0.10 would be ~2-5x
 stronger; not launched — the cap arm itself moved nothing at the surface.)
+
+## Decisions 2026-09-16 (user)
+1. Convective rain to the surface ADOPTED (production default true) with the
+   cover threshold re-tuned by the cloud-cover session on the wv_ctl30 /
+   wv_sfcrain30 pair (day-110 state). 2. bechtold_M_b_max 0.05 ADOPTED.
+3. Boundary-layer-refined vertical grid: GO (then partial-cloud condensation
+   if it does not move the surface layer).
+
+## Iteration E — boundary-layer-refined sigma grid (commit 2e35f7dad)
+Grid: 30 levels, density bump refine 3 at sigma 0.95, width 0.06: 7 layers
+above sigma 0.9 (~14 hPa, ~130 m) vs 3 uniform; the rest 33 → 40 hPa (the UTLS
+coarsens, the opposite of the thin-UTLS grid that blew up for the UTLS
+session). State: dd_ctl day 80 remapped with the conservative PPM tool
+(remap_mpas_checkpoint.py, inventories conserved; carries interpolated).
+Arm wv_bl5 (27485700): 5 days, dt 112.5, production deck + new defaults, from
+the remapped state — STABILITY screen first (the deck's refined-UTLS restart
+blew up on day 1-3). If stable: wv_bl30 (30 days) vs wv_ctl30 (uniform L30,
+same restart, same days). Pre-registered (tropical ocean, days 91-110):
+CONFIRM = lowest-level q falls >= 0.5 g/kg AND RH falls >= 2 points AND
+evaporation rises >= 3 W/m2 with the 925 hPa RH excess halved; REFUTE =
+|dq| < 0.15 g/kg; FIX-FIRST = blow-up. Caveat: the control's lowest level is
+150 m, the arm's ~65 m — score on the same PRESSURE (ERA5 1000 hPa) and on
+the lowest 100 hPa mean, not the lowest model level alone.
