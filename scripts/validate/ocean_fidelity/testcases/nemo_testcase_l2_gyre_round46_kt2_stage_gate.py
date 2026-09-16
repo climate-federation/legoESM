@@ -51,6 +51,8 @@ BTSTEP_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round81/oracle_btstep_kt2")
 STAGE_CLOSURE_ROOT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round94/oracle_stage_closure")
+STAGE1_W_ROOT = Path(
+    "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round98/oracle_stage1_w_walk")
 MAGIC = "NEMO_L2_R46STG1"
 DIMS = (36, 26, 31)
 OWNED_DIMS = (32, 22, 31)
@@ -237,6 +239,27 @@ def read_stage1_w_walk_record(path: Path) -> dict:
         "local_jpi": local_nx, "local_jpj": local_ny,
     }
     return result
+
+
+def read_admitted_stage1_w_walk(root: Path, *, plant_stamp: bool = False) -> dict:
+    """Read the direct W record only after its digest/producer stamp closes."""
+    path = root / "oracle_stage1_w_walk_kt00000001.bin"
+    producer_path = root / "producer_commit.txt"
+    stamp_path = path.with_name(path.name + ".stamp")
+    require(producer_path.is_file(), f"missing {producer_path}")
+    require(stamp_path.is_file(), f"missing {stamp_path}")
+    producer = producer_path.read_text(encoding="utf-8").strip()
+    require(len(producer) == 40, f"{producer_path}: malformed producer commit")
+    parts = stamp_path.read_text(encoding="utf-8").strip().split()
+    require(len(parts) == 3, f"{stamp_path}: malformed stamp")
+    expected = "0" * 40 if plant_stamp else producer
+    require(parts[0] == sha256(path), f"{stamp_path}: digest mismatch")
+    require(parts[1] == expected, f"{stamp_path}: producer commit mismatch")
+    require(parts[2] == path.name, f"{stamp_path}: record name mismatch")
+    record = read_stage1_w_walk_record(path)
+    record["sha256"] = parts[0]
+    record["producer_commit"] = producer
+    return record
 
 
 def read_stage(path: Path, *, plant: str | None = None) -> dict:
@@ -1224,6 +1247,46 @@ _STAGE1_W_ORDER = (
 )
 
 
+def _stage1_w_recurrence_trace(
+    e3div, e3t_0, r3_kbb, r3_kaa, r1_dt, tmask, *, source_round: bool,
+):
+    """Trace the compiled QCO stretch and bottom-up W recurrence."""
+    import jax
+    import jax.numpy as jnp
+
+    materialize = (
+        (lambda value: jax.lax.reduce_precision(value, 11, 52))
+        if source_round else jax.lax.optimization_barrier)
+    e3div = jnp.asarray(e3div)
+    e3t_0 = jnp.asarray(e3t_0)
+    r3_kbb = jnp.asarray(r3_kbb)
+    r3_kaa = jnp.asarray(r3_kaa)
+    tmask = jnp.asarray(tmask)
+    r3_delta = materialize(r3_kaa - r3_kbb)
+    stretch = materialize(
+        materialize(r1_dt * e3t_0) * r3_delta[..., None])
+    incoming = []
+    outgoing = [None] * e3div.shape[-1]
+    brackets = [None] * e3div.shape[-1]
+    carry = jnp.zeros_like(r3_kbb)
+    for level in range(e3div.shape[-1] - 1, -1, -1):
+        incoming.append(carry)
+        bracket = materialize(e3div[..., level] + stretch[..., level])
+        carry = materialize(
+            carry - materialize(bracket * tmask[..., level]))
+        brackets[level] = bracket
+        outgoing[level] = carry
+    incoming = list(reversed(incoming))
+    return {
+        "r3_delta": r3_delta,
+        "stretch": stretch,
+        "bracket": jnp.stack(brackets, axis=-1),
+        "incoming_carry": jnp.stack(incoming, axis=-1),
+        "outgoing_carry": jnp.stack(outgoing, axis=-1),
+        "ww": jnp.stack(outgoing + [jnp.zeros_like(carry)], axis=-1),
+    }
+
+
 def _stage1_transport_w_trace(
     transport_u, transport_v, reciprocal_area, thickness_t, e3t_0,
     r3_kbb, r3_kaa, r1_dt, tmask, *, source_round: bool,
@@ -1249,22 +1312,9 @@ def _stage1_transport_w_trace(
     safe_thickness = jnp.where(tmask > 0.5, thickness_t[..., :30], 1.0)
     hdiv = materialize(scaled / safe_thickness) * tmask
     e3div = materialize(hdiv * thickness_t[..., :30]) * tmask
-    r3_delta = materialize(r3_kaa - r3_kbb)
-    stretch = materialize(
-        materialize(r1_dt * e3t_0[..., :30]) * r3_delta[..., None])
-    incoming = []
-    outgoing = [None] * 30
-    brackets = [None] * 30
-    carry = jnp.zeros_like(r3_kbb)
-    for level in range(29, -1, -1):
-        incoming.append(carry)
-        bracket = materialize(e3div[..., level] + stretch[..., level])
-        carry = materialize(
-            carry - materialize(bracket * tmask[..., level]))
-        brackets[level] = bracket
-        outgoing[level] = carry
-    incoming = list(reversed(incoming))
-    ww = jnp.stack(outgoing + [jnp.zeros_like(carry)], axis=-1)
+    recurrence = _stage1_w_recurrence_trace(
+        e3div, e3t_0[..., :30], r3_kbb, r3_kaa, r1_dt, tmask,
+        source_round=source_round)
     return {
         "transport_u": transport_u,
         "transport_v": transport_v,
@@ -1274,12 +1324,49 @@ def _stage1_transport_w_trace(
         "scaled": scaled,
         "hdiv": hdiv,
         "e3div": e3div,
+    } | recurrence
+
+
+def _stage1_w_scalar_recurrence(
+    e3div, e3t_0, r3_kbb, r3_kaa, r1_dt, tmask,
+):
+    """Scalar binary64 replay of the compiled QCO recurrence statements."""
+    e3div = np.asarray(e3div, dtype=np.float64)
+    e3t_0 = np.asarray(e3t_0, dtype=np.float64)
+    r3_kbb = np.asarray(r3_kbb, dtype=np.float64)
+    r3_kaa = np.asarray(r3_kaa, dtype=np.float64)
+    tmask = np.asarray(tmask, dtype=np.float64)
+    shape = e3div.shape
+    r3_delta = np.zeros(shape[:2], dtype=np.float64)
+    stretch = np.zeros(shape, dtype=np.float64)
+    bracket = np.zeros(shape, dtype=np.float64)
+    incoming = np.zeros(shape, dtype=np.float64)
+    outgoing = np.zeros(shape, dtype=np.float64)
+    carry = np.zeros(shape[:2], dtype=np.float64)
+    for j in range(shape[0]):
+        for i in range(shape[1]):
+            r3_delta[j, i] = np.float64(r3_kaa[j, i] - r3_kbb[j, i])
+    for level in range(shape[-1] - 1, -1, -1):
+        for j in range(shape[0]):
+            for i in range(shape[1]):
+                incoming[j, i, level] = carry[j, i]
+                first = np.float64(np.float64(r1_dt) * e3t_0[j, i, level])
+                stretch[j, i, level] = np.float64(
+                    first * r3_delta[j, i])
+                bracket[j, i, level] = np.float64(
+                    e3div[j, i, level] + stretch[j, i, level])
+                masked = np.float64(
+                    bracket[j, i, level] * tmask[j, i, level])
+                carry[j, i] = np.float64(carry[j, i] - masked)
+                outgoing[j, i, level] = carry[j, i]
+    return {
         "r3_delta": r3_delta,
         "stretch": stretch,
-        "bracket": jnp.stack(brackets, axis=-1),
-        "incoming_carry": jnp.stack(incoming, axis=-1),
-        "outgoing_carry": jnp.stack(outgoing, axis=-1),
-        "ww": ww,
+        "bracket": bracket,
+        "incoming_carry": incoming,
+        "outgoing_carry": outgoing,
+        "ww": np.concatenate(
+            [outgoing, np.zeros((*shape[:2], 1), dtype=np.float64)], axis=-1),
     }
 
 
@@ -1360,7 +1447,7 @@ def _stage1_transport_w_scalar_reference(
 
 
 def _stage1_w_walk(
-    records, transports, direct_stage_ww, direct_stage_state,
+    records, transports, direct_stage_ww, direct_stage_state, direct_w_record,
     plant: str | None,
 ):
     """Walk kt=1 stage-1 transport W from admitted NEMO operands."""
@@ -1406,6 +1493,82 @@ def _stage1_w_walk(
     wet_t = _owned3(arrays["tmask"]) > 0.5
     wet_2d = wet_t[..., 0]
 
+    direct_fields = {
+        "hdiv": np.asarray(direct_w_record["hdiv"])[1:-1, 1:-1, :30],
+        "e3div": np.asarray(direct_w_record["e3div"])[1:-1, 1:-1, :30],
+        "r3_kaa": _owned2(direct_w_record["r3_kaa"]),
+        "r3_kbb": _owned2(direct_w_record["r3_kbb"]),
+        "e3t_0": _owned3(direct_w_record["e3t_0"]),
+        "r1_dt": np.asarray([direct_w_record["r1_dt"]], dtype=np.float64),
+        "ww": _owned3(direct_w_record["ww"], 31),
+    }
+    reconstructed_fields = {
+        "hdiv": np.asarray(source_rounded["hdiv"]),
+        "e3div": np.asarray(source_rounded["e3div"]),
+        "r3_kaa": np.asarray(r3_kaa),
+        "r3_kbb": _owned2(arrays["r3t_Kbb"]),
+        "e3t_0": _owned3(arrays["e3t_0"]),
+        "r1_dt": np.asarray([r1_dt], dtype=np.float64),
+        "ww": np.asarray(source_rounded["ww"]),
+    }
+    direct_masks = {
+        "hdiv": wet_t, "e3div": wet_t,
+        "r3_kaa": wet_2d, "r3_kbb": wet_2d,
+        "e3t_0": wet_t, "r1_dt": np.asarray([True]), "ww": wet_w,
+    }
+    direct_input_order = (
+        "hdiv", "e3div", "r3_kaa", "r3_kbb", "e3t_0", "r1_dt")
+    direct_input_rows = []
+    for name in direct_input_order:
+        row = _classification(score(
+            f"GYRE-zco.kt1.s1.w_walk.direct_input.{name}",
+            direct_fields[name], reconstructed_fields[name], direct_masks[name]))
+        row["boundary"] = name
+        direct_input_rows.append(row)
+
+    direct_scalar = _stage1_w_scalar_recurrence(
+        direct_fields["e3div"], direct_fields["e3t_0"],
+        direct_fields["r3_kbb"], direct_fields["r3_kaa"],
+        direct_fields["r1_dt"][0], wet_t.astype(np.float64))
+    direct_source = jax.device_get(jax.jit(
+        lambda: _stage1_w_recurrence_trace(
+            jnp.asarray(direct_fields["e3div"]),
+            jnp.asarray(direct_fields["e3t_0"]),
+            jnp.asarray(direct_fields["r3_kbb"]),
+            jnp.asarray(direct_fields["r3_kaa"]),
+            jnp.asarray(direct_fields["r1_dt"][0]),
+            jnp.asarray(wet_t.astype(np.float64)), source_round=True))())
+    recurrence_rows = []
+    for name in (
+        "r3_delta", "stretch", "bracket", "incoming_carry",
+        "outgoing_carry", "ww",
+    ):
+        oracle = (direct_fields["ww"] if name == "ww"
+                  else np.asarray(direct_scalar[name]))
+        mask = wet_2d if name == "r3_delta" else wet_w if name == "ww" else wet_t
+        row = _classification(score(
+            f"GYRE-zco.kt1.s1.w_walk.direct_recurrence.{name}",
+            oracle, np.asarray(direct_source[name]), mask))
+        row["boundary"] = name
+        recurrence_rows.append(row)
+
+    direct_scalar_vs_w = _classification(score(
+        "GYRE-zco.kt1.s1.w_walk.direct_scalar_replay_vs_recorded_w",
+        direct_fields["ww"], direct_scalar["ww"], wet_w))
+    round21_vs_round98 = _classification(score(
+        "GYRE-zco.kt1.s1.w_walk.round21_w_vs_round98_direct_w",
+        direct_fields["ww"], direct_ww, wet_w))
+    r3_ulp_control = None
+    if plant == "stage-w-direct-r3-ulp":
+        planted_r3 = direct_fields["r3_kaa"].copy()
+        at = tuple(np.argwhere(wet_2d)[0])
+        planted_r3[at] = np.nextafter(planted_r3[at], np.float64(np.inf))
+        r3_ulp_control = _classification(score(
+            "GYRE-zco.kt1.s1.w_walk.control.direct_r3_kaa_ulp",
+            direct_fields["r3_kaa"], planted_r3, wet_2d))
+        require(r3_ulp_control["n_unequal"] == 1,
+                "direct r3_kaa one-ULP plant did not flip exactly one cell")
+
     def active(name):
         if name == "ww":
             return wet_w
@@ -1442,10 +1605,19 @@ def _stage1_w_walk(
     candidate_first = next((row for row in candidate_rows
                             if row["classification"] != "BIT"), None)
     if plant:
-        target = "transport_u" if plant == "stage-w-transport-ulp" else "outgoing_carry"
-        row = next(value for value in ordinary_rows if value["boundary"] == target)
-        require(row["n_unequal"] == 1,
-                f"{plant} did not flip exactly one named row cell")
+        if plant in {"stage-w-transport-ulp", "stage-w-carry-ulp"}:
+            target = ("transport_u" if plant == "stage-w-transport-ulp"
+                      else "outgoing_carry")
+            row = next(
+                value for value in ordinary_rows if value["boundary"] == target)
+            require(row["n_unequal"] == 1,
+                    f"{plant} did not flip exactly one named row cell")
+    direct_first = next(
+        (row for row in direct_input_rows if row["classification"] != "BIT"),
+        None)
+    recurrence_first = next(
+        (row for row in recurrence_rows if row["classification"] != "BIT"),
+        None)
     return {
         "compiled_order": list(_STAGE1_W_ORDER),
         "direct_record_clock_seconds": direct_stage_ww[(1, 1)]["rDt_s"],
@@ -1462,6 +1634,31 @@ def _stage1_w_walk(
                 key: candidate_first[key] for key in (
                     "boundary", "n_unequal", "absolute_max", "classification")}),
         "scalar_replay_vs_direct_w": scalar_direct,
+        "direct_record": {
+            "sha256": direct_w_record["sha256"],
+            "producer_commit": direct_w_record["producer_commit"],
+            "header": direct_w_record["header"],
+        },
+        "direct_input_rows": direct_input_rows,
+        "direct_input_first_nonbit": (
+            None if direct_first is None else {
+                key: direct_first[key] for key in (
+                    "boundary", "n_unequal", "absolute_max", "classification")
+            }),
+        "direct_recurrence_rows": recurrence_rows,
+        "direct_recurrence_first_nonbit": (
+            None if recurrence_first is None else {
+                key: recurrence_first[key] for key in (
+                    "boundary", "n_unequal", "absolute_max", "classification")
+            }),
+        "direct_scalar_replay_vs_recorded_w": direct_scalar_vs_w,
+        "round21_w_vs_round98_direct_w": round21_vs_round98,
+        "direct_r3_ulp_control": r3_ulp_control,
+        "first_direct_nonbit_statement": (
+            None if direct_first is None and recurrence_first is None else
+            {key: (direct_first or recurrence_first)[key] for key in (
+                "boundary", "n_unequal", "absolute_max", "classification")}
+        ),
         "plant": plant,
     }
 
@@ -1513,9 +1710,11 @@ def _external_rows(outputs, histories, records, advmean_root: Path,
 
 def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                 memory_root: Path, btstep_root: Path,
-                stage_closure_root: Path,
+                stage_closure_root: Path, stage1_w_root: Path,
                 plant: str | None, *, walk_only: bool = False) -> dict:
     """Decision-41 stage tables from recorded entries and the shared stage."""
+    direct_w_record = read_admitted_stage1_w_walk(
+        stage1_w_root, plant_stamp=plant == "stage-w-record-stamp")
     import jax
     import jax.numpy as jnp
     from legoesm.core.precision import PrecisionPolicy, set_policy
@@ -1559,8 +1758,12 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
     direct_stage_state = {(1, 1): read_phase3_stage(
         SCALAR_MATH_ROOT / "oracle_stage_kt00000001_s1.bin", 1)}
     stage1_w_walk = _stage1_w_walk(
-        records, transports, direct_stage_ww, direct_stage_state, plant)
-    if walk_only or plant in {"stage-w-transport-ulp", "stage-w-carry-ulp"}:
+        records, transports, direct_stage_ww, direct_stage_state,
+        direct_w_record, plant)
+    if walk_only or plant in {
+        "stage-w-transport-ulp", "stage-w-carry-ulp",
+        "stage-w-direct-r3-ulp",
+    }:
         return {
             "format": "nemo-testcase-l2-gyre-stage-twin-v4",
             "given_nemo_entry": [], "chained": [],
@@ -1774,6 +1977,7 @@ def run(
     memory_root: Path = MEMORY_ROOT,
     btstep_root: Path = BTSTEP_ROOT,
     stage_closure_root: Path = STAGE_CLOSURE_ROOT,
+    stage1_w_root: Path = STAGE1_W_ROOT,
 ) -> dict:
     stamp = worktree_stamp()
     expected = "0" * 40 if plant == "stamp" else expect_commit.lower()
@@ -1893,7 +2097,8 @@ def run(
     if mode in {"stage-twin", "stage-w-walk"}:
         report["stage_twin"] = _stage_twin(
             records, root, advmean_root, memory_root, btstep_root,
-            stage_closure_root, plant, walk_only=mode == "stage-w-walk")
+            stage_closure_root, stage1_w_root, plant,
+            walk_only=mode == "stage-w-walk")
     if mode == "stage-twin":
         missing = [
             row for table in ("given_nemo_entry", "chained")
@@ -1932,12 +2137,14 @@ def main(argv=None) -> int:
     p.add_argument("--btstep-root", type=Path, default=BTSTEP_ROOT)
     p.add_argument(
         "--stage-closure-root", type=Path, default=STAGE_CLOSURE_ROOT)
+    p.add_argument("--stage1-w-root", type=Path, default=STAGE1_W_ROOT)
     p.add_argument(
         "--plant",
         choices=("header", "truncation", "calibration", "given", "trajectory",
                  "twin", "stage-entry-ulp", "stage-context-ulp",
                  "stage-rhs-ulp", "stage-w-transport-ulp",
-                 "stage-w-carry-ulp", "stamp"),
+                 "stage-w-carry-ulp", "stage-w-direct-r3-ulp",
+                 "stage-w-record-stamp", "stamp"),
     )
     p.add_argument("--output", type=Path)
     args = p.parse_args(argv)
@@ -1952,6 +2159,7 @@ def main(argv=None) -> int:
         memory_root=args.memory_root,
         btstep_root=args.btstep_root,
         stage_closure_root=args.stage_closure_root,
+        stage1_w_root=args.stage1_w_root,
     )
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.output:

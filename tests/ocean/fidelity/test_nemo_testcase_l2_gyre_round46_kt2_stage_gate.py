@@ -214,6 +214,16 @@ def test_stage1_w_acquisition_reader_is_exact_and_fail_closed(tmp_path):
     assert record["e3div"].shape == (NY - 2, NX - 2, NZ)
     assert record["r3_kaa"].shape == (NY, NX)
     assert record["ww"].shape == (NY, NX, NZ)
+    producer = "a" * 40
+    (tmp_path / "producer_commit.txt").write_text(producer + "\n")
+    digest = gate.sha256(path)
+    (tmp_path / (path.name + ".stamp")).write_text(
+        f"{digest} {producer} {path.name}\n")
+    admitted = gate.read_admitted_stage1_w_walk(tmp_path)
+    assert admitted["sha256"] == digest
+    assert admitted["producer_commit"] == producer
+    with pytest.raises(Exception, match="producer commit mismatch"):
+        gate.read_admitted_stage1_w_walk(tmp_path, plant_stamp=True)
     path.write_bytes(path.read_bytes()[:-8])
     with pytest.raises(Exception, match="wrong payload size"):
         gate.read_stage1_w_walk_record(path)
@@ -241,6 +251,16 @@ def test_transport_w_scalar_replay_preserves_zero_state():
         arrays, transport, transport)
     assert all(np.count_nonzero(got[name]) == 0
                for name in gate._STAGE1_W_ORDER)
+
+    recurrence = gate._stage1_w_scalar_recurrence(
+        np.zeros((NY - 4, NX - 4, NZ - 1)),
+        np.ones((NY - 4, NX - 4, NZ - 1)),
+        np.zeros((NY - 4, NX - 4)),
+        np.zeros((NY - 4, NX - 4)),
+        np.float64(1.0),
+        np.ones((NY - 4, NX - 4, NZ - 1)),
+    )
+    assert all(np.count_nonzero(value) == 0 for value in recurrence.values())
 
 
 def test_final_external_history_uses_last_pre_swap_current_and_before():
