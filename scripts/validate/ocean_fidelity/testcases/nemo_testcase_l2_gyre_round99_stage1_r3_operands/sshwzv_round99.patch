@@ -7,7 +7,7 @@
        REAL(wp), DIMENSION(T2D(1),jpk) ::   ze3div
        !!----------------------------------------------------------------------
        !
-@@ -318,6 +319,18 @@
+@@ -318,6 +319,17 @@
        ELSE
           CALL div_hor( kt, Kbb, Kmm, pu, pv, ze3div, k_ind )
        ENDIF
