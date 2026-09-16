@@ -99,3 +99,30 @@ kt=1..10 ladder, and the immutable current-tip day-30 T RMS reference remains
 `1.2397011295506804e-2 K` without a candidate measurement. DINO, ORCA2,
 LOCK_EXCHANGE, and OVERFLOW receive no new numerical claim. NEMO source,
 records, executables, and the concurrent autopilot lane are read-only.
+
+## Addendum after the frozen Round-69 target was refuted
+
+The first clean candidate run at `6e0386627c29b1eab2e284fcee673a5523712df4`
+completed after the preregistration above. Artifact
+`parallel/ldfstep3/candidate/local_proof.json`, SHA-256
+`c51ad1e7a3aed0821997193e3d6a6076ce0747283883f9efbe5cde849846a60f`,
+is **REFUTED** against the old Round-69 dictionaries. Its current T/S content
+maxima are `5.743498263655056e-5` and `7.387909136014059e-6`; its current T/S
+kt3 maxima are `8.600420500215478e-7` and `6.979443156751586e-8`. Thus the
+old absolute metrics are not a valid current-tip exactness target after the
+Round-85 upstream momentum landing. This failed prediction remains part of
+the evidence.
+
+Before running another causal arm, freeze the discriminator that answers the
+narrow implementation question without reusing the stale absolute target.
+Use the existing Round-70 mode of the same Round-67 LDF-order gate on the
+clean tip, with its private `ldf_only` arm and the same Round-64/Round-46
+records. Compare that arm to the already measured clean candidate artifact.
+For both T and S, require exact equality of the complete
+`content_vs_oracle` and `kt3_vs_oracle` metric dictionaries, not rounded
+maxima. Also require zero unequal cells in the candidate's live source
+injection row. Equality confirms that production is bit-exact to the
+current-tip private route given the recorded operands; any dictionary member
+different refutes that local implementation proof. The stale Round-69
+absolute-target refutation is not reclassified if this same-tip comparison
+confirms.
