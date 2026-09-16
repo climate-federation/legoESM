@@ -1886,3 +1886,7 @@ class ConvectionConfig(NamedTuple):
     # tracer q_r at its formation levels, where the microphysics evaporates it
     # again at grid-mean humidity.  Default pending a user decision (2026-09-15).
     rain_to_surface: bool = False
+    # MPAS only: hand a CMT-capable scheme the Perot-reconstructed cell winds
+    # and project its (du, dv) onto the edge normals.  False = every scheme
+    # keeps the zero winds the bridge always gave it on this mesh (CMT inert).
+    mpas_cmt: bool = False

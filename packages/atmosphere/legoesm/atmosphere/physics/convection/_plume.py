@@ -1016,5 +1016,8 @@ def cmt_gregory_1997(
     _peak = jnp.maximum(
         jnp.max(jnp.abs(du_dt), axis=-1, keepdims=True),
         jnp.max(jnp.abs(dv_dt), axis=-1, keepdims=True))
-    _scale = jnp.minimum(1.0, _CMT_DUDT_MAX / jnp.maximum(_peak, 1.0e-30))
+    # Denominator floored at the cap itself: below the cap the ratio is >= 1
+    # and the min picks 1.0 with a finite float32 derivative (a 1e-30 floor
+    # overflowed the reciprocal's gradient in float32 at zero tendency).
+    _scale = jnp.minimum(1.0, _CMT_DUDT_MAX / jnp.maximum(_peak, _CMT_DUDT_MAX))
     return du_dt * _scale, dv_dt * _scale

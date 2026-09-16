@@ -62,7 +62,8 @@ def main(argv=None):
             print(f"  {var}: missing in one run -- skipped")
             continue
         (cv, lat, lon, months), (av, alat, alon, amonths) = c, a
-        if cv.shape != av.shape or months != amonths:
+        if (cv.shape != av.shape or months != amonths
+                or not np.allclose(lat, alat) or not np.allclose(lon, alon)):
             raise SystemExit(f"{var}: runs differ in grid or months ({months} vs {amonths})")
         scale, units, cmap, blim, name = SPEC[var]
         ref = bm._ref_clim(var, months, lat, lon, bm.SPEC[var][0]) if var in bm.SPEC else None

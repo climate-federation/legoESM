@@ -3307,7 +3307,12 @@ def convection_config_for(config, grid_dx_m=None):
     if (scheme == "bechtold" and grid_dx_m is not None
             and float(grid_dx_m) > 0.0 and leaf.dx_m == 0.0):
         leaf = leaf._replace(dx_m=float(grid_dx_m))
-    return cc._replace(**{scheme: leaf})
+    cc = cc._replace(**{scheme: leaf})
+    if scheme == "bechtold" and leaf.enable_cmt and _is_mpas_grid(config):
+        # The MPAS bridge reconstructs winds only on this explicit switch;
+        # Bechtold's CMT resolved ON for an MPAS run is what asks for it.
+        cc = cc._replace(mpas_cmt=True)
+    return cc
 
 
 def _resolve_convection(config):
@@ -3496,11 +3501,18 @@ def _resolve_enable_cmt(config) -> bool:
     val = getattr(config, "bechtold_enable_cmt", None)
     if val is not None:
         return bool(val)
-    _grid = getattr(config, "grid", None)
-    _gt = getattr(_grid, "grid_type", None) if _grid is not None else getattr(config, "grid_type", "cubed_sphere")
-    if normalize_grid_type(_gt) in ("mpas", "voronoi"):
+    if _is_mpas_grid(config):
         return False
     return bool(BechtoldConfig().enable_cmt)
+
+
+def _is_mpas_grid(config) -> bool:
+    from legoesm.driver.config import normalize_grid_type
+
+    _grid = getattr(config, "grid", None)
+    _gt = (getattr(_grid, "grid_type", None) if _grid is not None
+           else getattr(config, "grid_type", "cubed_sphere"))
+    return normalize_grid_type(_gt) in ("mpas", "voronoi")
 
 
 def _check_pipeline_convection_supported(scheme, conv_config):

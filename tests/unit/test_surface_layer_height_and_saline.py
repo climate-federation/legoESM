@@ -76,6 +76,7 @@ def test_mpas_bridge_applies_both_switches():
         u=Field(jnp.full((mesh.nEdges, nlev), 4.0)), T=Field(T), p_s=Field(p_s),
         phis=Field(jnp.zeros((ncol,))), tracers={"q_v": Field(q)})
     sst = jnp.full((ncol,), 301.0)
+    f_land = np.zeros(ncol); f_land[:3] = 1.0     # three land cells
     forcing = {"T_sfc": sst, "lhflx_land": jnp.zeros((ncol,)), "shflx_land": jnp.zeros((ncol,))}
     seen = {}
     real = sl.compute_surface_fluxes   # the bridge imports it at call time
@@ -92,7 +93,7 @@ def test_mpas_bridge_applies_both_switches():
         sl.compute_surface_fluxes = spy
         try:
             fn = ti.make_turbulence_physics(tc, model_type="mpas", dt=600.0,
-                                            f_land=np.zeros(ncol))
+                                            f_land=f_land)
             fn(state, mesh, sigma, forcing=forcing)
         finally:
             sl.compute_surface_fluxes = real
@@ -103,8 +104,11 @@ def test_mpas_bridge_applies_both_switches():
     np.testing.assert_allclose(off["q_sfc"], np.asarray(
         saturation_mixing_ratio(sst, sigma.pressure_at_full(p_s)[:, -1])), rtol=1e-12)
     sal = run(False, True)
-    np.testing.assert_allclose(sal["q_sfc"], 0.98 * np.asarray(
-        saturation_mixing_ratio(sst, p_s)), rtol=1e-12)
+    ocean = f_land < 0.5
+    np.testing.assert_allclose(sal["q_sfc"][ocean], 0.98 * np.asarray(
+        saturation_mixing_ratio(sst, p_s))[ocean], rtol=1e-6)   # blend round-off
+    # the LAND cells' humidity is untouched by the ocean switch (codex P1)
+    np.testing.assert_array_equal(sal["q_sfc"][~ocean], off["q_sfc"][~ocean])
     hgt = run(True, False)
     z = np.asarray(hgt["z_ref"])
     assert z.shape == (ncol,) and np.all(z > 50.0) and np.all(z < 400.0), z
@@ -112,3 +116,18 @@ def test_mpas_bridge_applies_both_switches():
     # potential temperature at the input height: T + g/c_p * z (COARE)
     from legoesm import constants
     np.testing.assert_allclose(hgt["T_in"] - off["T_in"], constants.g / constants.c_pd * z, rtol=1e-12)
+
+
+def test_switches_are_refused_where_they_would_be_inert():
+    """codex whole-branch review P2: the two switches are MPAS-bridge
+    implementations; other bridges and the MPAS path without supplied land
+    fluxes must refuse them instead of silently ignoring them."""
+    import pytest
+    from legoesm.atmosphere.physics.turbulence import integration as ti
+    from legoesm.atmosphere.physics.turbulence.config import TurbulenceConfig
+
+    tc = ti.materialize_sub_config(TurbulenceConfig(scheme="louis"))
+    surf = tc.louis.surface._replace(bulk_scheme="coare3", z_ref_model_level=True)
+    tc = tc._replace(louis=tc.louis._replace(surface=surf))
+    with pytest.raises(NotImplementedError, match="MPAS"):
+        ti.make_turbulence_physics(tc, model_type="hydrostatic", dt=600.0)

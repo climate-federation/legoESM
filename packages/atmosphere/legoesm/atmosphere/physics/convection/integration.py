@@ -433,7 +433,7 @@ def _make_hydrostatic_convection(
                     else jnp.zeros_like(u_col)
                 )
             elif hasattr(grid, "cellsOnEdge") and hasattr(grid, "angleEdge"):
-                if bool(getattr(scheme_config, "enable_cmt", False)):
+                if bool(getattr(convection_config, "mpas_cmt", False)):
                     # MPAS: the prognostic wind is the edge-normal velocity
                     # (nEdges, nlev); rebuild cell-centred (u, v) for CMT.
                     from legoesm.grids.voronoi import reconstruct_cell_velocity
@@ -442,9 +442,10 @@ def _make_hydrostatic_convection(
                     u_col = u_col.astype(_state_dtype)
                     v_col = v_col.astype(_state_dtype)
                 else:
-                    # CMT off: keep the pre-2026-09-15 zero winds bit for bit
-                    # (the diurnal-CAPE wind term stays inert on this lane —
-                    # a separate decision, see the campaign doc).
+                    # mpas_cmt off: keep the pre-2026-09-15 zero winds bit for
+                    # bit for EVERY scheme (Tiedtke / ZM keep enable_cmt=True
+                    # but received zero winds here; the diurnal-CAPE wind term
+                    # stays inert on this lane — separate decisions).
                     u_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
                     v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
             else:
@@ -859,7 +860,9 @@ def _make_hydrostatic_convection(
         # elsewhere), zeroed since CMT was disabled by the column-
         # extraction step above.
         u_target_shape = state.u.data.shape
-        if conv_fn is not None and conv_out.du_dt_conv is not None:
+        if (conv_fn is not None and conv_out.du_dt_conv is not None
+                and (state.v is not None or not hasattr(grid, "cellsOnEdge")
+                     or bool(getattr(convection_config, "mpas_cmt", False)))):
             if state.v is None and hasattr(grid, "cellsOnEdge"):
                 # MPAS: project the cell-centred (du, dv) onto the edge
                 # normals (the turbulence bridge's projection, shared).

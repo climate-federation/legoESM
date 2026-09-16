@@ -74,7 +74,8 @@ def _run(enable_cmt, n_calls=8):
     mesh = create_voronoi_mesh(3, lloyd_iterations=3)
     state, sigma = _state(mesh)
     fn = make_convection_physics(
-        ConvectionConfig(scheme="bechtold", bechtold=BechtoldConfig(enable_cmt=enable_cmt)),
+        ConvectionConfig(scheme="bechtold", bechtold=BechtoldConfig(enable_cmt=enable_cmt),
+                         mpas_cmt=enable_cmt),
         model_type="mpas", dt=600.0)
     prog, tend = None, None
     for _ in range(n_calls):
@@ -170,3 +171,43 @@ def test_cmt_kernel_is_down_gradient_and_lands_on_the_sheared_interface():
     np.testing.assert_allclose(du[11] * dp[0, 11], -du[12] * dp[0, 12], rtol=1e-12)
     others = np.delete(du, [11, 12])
     assert np.all(others == 0.0)
+
+
+def test_cmt_cap_binds_and_float32_gradient_is_finite_at_zero_tendency():
+    """codex whole-branch review: the cap test passed with the cap removed,
+    and the 1e-30 floor overflowed the float32 gradient in an inactive
+    column.  The 200x column must land exactly on the cap; a zero-shear
+    column must have a finite float32 gradient w.r.t. the wind."""
+    from legoesm import constants
+    from legoesm.atmosphere.physics.convection._plume import _CMT_DUDT_MAX, cmt_gregory_1997
+    nlev = 20
+    p_half = np.linspace(1.0e4, 1.0e5, nlev + 1)[None, :]
+    p_full = 0.5 * (p_half[:, 1:] + p_half[:, :-1])
+    rho = p_full / (constants.R_d * 280.0)
+    M_u = np.full((1, nlev), 0.05)
+    u = 5000.0 * 10.0 * np.linspace(1.0, 0.0, nlev)[None, :]   # far past the cap
+    du, _ = cmt_gregory_1997(jnp.asarray(u), jnp.zeros_like(jnp.asarray(u)), jnp.asarray(M_u), None,
+                             jnp.asarray(p_full), jnp.asarray(p_half), jnp.asarray(rho), c_u=0.7, c_d=0.7)
+    peak = np.abs(np.asarray(du)).max()
+    assert np.isclose(peak, _CMT_DUDT_MAX, rtol=1e-12), peak
+    f32 = lambda a: jnp.asarray(a, dtype=jnp.float32)
+
+    def loss(u32):
+        d, _ = cmt_gregory_1997(u32, jnp.zeros_like(u32), f32(M_u), None, f32(p_full), f32(p_half), f32(rho), c_u=0.7, c_d=0.7)
+        return jnp.sum(d ** 2)
+    g = jax.grad(loss)(f32(np.zeros((1, nlev))))
+    assert np.all(np.isfinite(np.asarray(g))), "float32 gradient must be finite in a zero-tendency column"
+
+
+def test_other_cmt_schemes_keep_zero_edge_winds_on_mpas_with_switches_off():
+    """codex whole-branch review: Tiedtke / Zhang-McFarlane keep
+    enable_cmt=True in their configs, so the reconstruction must be gated by
+    the explicit ConvectionConfig.mpas_cmt, not by the scheme's own flag."""
+    mesh = create_voronoi_mesh(3, lloyd_iterations=3)
+    state, sigma = _state(mesh)
+    for scheme in ("tiedtke", "zhang_mcfarlane"):
+        fn = make_convection_physics(ConvectionConfig(scheme=scheme), model_type="mpas", dt=600.0)
+        tend, _ = fn(state, mesh, sigma)
+        du = np.asarray(tend.du_dt.data)
+        assert du.shape == (mesh.nEdges, NLEV)
+        assert np.all(du == 0.0), scheme
