@@ -100,11 +100,14 @@ export CUDA_VISIBLE_DEVICES=$(
   | sort -t, -k2 -nr | head -1 | cut -d, -f1 | tr -d ' ')
 echo "[gpu] using CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
 # One MPAS step at ico7 x 75 levels peaks at 38 GiB after rematerialization, and
-# JAX claims only 75% of the 45 GiB card by default, so the step cannot fit in
+# JAX claims only 75% of the 45 GiB card by default, so the step does not fit in
 # the pool even on an EMPTY GPU (job 9815772: both devices idle, still out of
-# memory asking for 33.34 GiB). This raises the pool; it changes no physics.
-export XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_MEM_FRACTION:-0.95}
-echo "[gpu] XLA_PYTHON_CLIENT_MEM_FRACTION=$XLA_PYTHON_CLIENT_MEM_FRACTION"
+# memory asking for 33.34 GiB). Raising the fraction to 0.95 made it WORSE
+# (9815918): the pool then leaves nothing outside itself and CUDA cannot even
+# load the compiled kernel ("Failed to load in-memory CUBIN"). On-demand
+# allocation avoids both walls. Neither setting changes any physics.
+export XLA_PYTHON_CLIENT_PREALLOCATE=${XLA_PREALLOCATE:-false}
+echo "[gpu] XLA_PYTHON_CLIENT_PREALLOCATE=$XLA_PYTHON_CLIENT_PREALLOCATE"
 
 echo "=== gate: corrected forcing is the default ==="
 JAX_PLATFORMS=cpu $PY -m pytest -q tests/ocean/unit/test_core2_corrected_cache_default.py 2>&1 | tail -2
@@ -114,7 +117,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid mpas \
   --mpas-level 7 --mpas-lloyd 20 --mpas-vmix tke --K-zeta-bih 0 \
   --tke-surface-bc nemo_dirichlet --tke-mxl-choice 3 --tke-prognostic \
   --tke-kappa-convention veros_sqrte \
-  --dt 150 --nemo-vertical --partial-cell --pgf-scheme smc03 \
+  --dt 150 --nemo-vertical --partial-cell --pgf-scheme ${PGF:-smc03} \
   --ew-cyclic-overlap \
   --mle --mle-ce 0.06 \
   --dm2dc --sw-rgb-chl \
