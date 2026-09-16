@@ -39,14 +39,16 @@ The frozen preregistration is
 or instrument implementation. The fixed recorder, exact-EOF reader, admission
 controls, and tests were committed as
 `09f940520763962ce5f1202db49066e0ba2c0068`. The digest-pinned post-hoc
-attribution probe was committed before execution as
-`37c5ef5585adf335f07c2185c051da2666d9a72b`. Evidence is under
+attribution probe was committed before its first execution as
+`37c5ef5585adf335f07c2185c051da2666d9a72b`; its final clean-worktree stamp
+for both clean and planted reports is commit
+`3c94d68c38deacc04e00f8d16004069590157bdb`. Evidence is under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round101/`.
 
 ## Registered Round-97 versus Round-99 attribution
 
 The canonical artifact is `rule12_r97_r99_attribution.json`, SHA-256
-`a1176b43c17281a65a1967e44df6541f2852cf074ee7f1584bd151781922a5f8`.
+`71723bd13364b3630413173bab5da4e45ba622ecad8dea87fca1ed741ab5ff35`.
 The probe digest-pins both independent input reports, requires the same unique
 ordered set of 954 rows, and emits every differing metric for every differing
 row.
@@ -67,8 +69,8 @@ seven at kt10. By field they are S 3, T 3, SSH 3, U 2, V 3, `uu_b` 3 and
 not a substitute for either arm's preregistered Rule-12 verdict.
 
 The row-drop and emptied-metric plants both exit 1. Their SHA-256 values are
-`da0b4def26f9cef0e10529247975c181917b61999ac3a9468ab7c38a39514bf2`
-and `64e3550243634dc5bf414c7fc8bb70331de30ae284fd2b45ee2fece186d4fa27`.
+`2aab5af9f6215158c5d2af26adefc0183e3e7ea1fd22df2628ea98b48a6d192d`
+and `a73d0b50f5e9465c04429a7d633277e95e47c2bab18aed71a1822d70e6f813df`.
 
 ## Production stage-twin tables
 
@@ -140,6 +142,12 @@ consolidated gate refuses bad magic, clock/slot/domain/bounds/dtype headers,
 truncation, trailing bytes, NaN/Inf, wrong producer/digest/name stamps, or a
 one-ULP change in a duplicated consumed field. Entry, RHS and output must be
 BIT against the independent Round-59 record.
+
+The record is deliberately kt2 because that is the only accepted TKE operand
+stream with independent entry/RHS/output duplicates and it directly precedes
+the kt3 magnitude target. It is a discriminator only: it cannot authorize a
+kt2 landing, relabel an inherited closure row as owned, or advance the ordered
+stage campaign past the still-held kt1-stage1 W boundary.
 
 The user-executed `run.sh` uses new target
 `GYRE_OMIP_L2_P3_SM_R101TKEW`, clones `GYRE_PISCES`, copies the complete
