@@ -787,8 +787,9 @@ def make_hybrid_step_unified(
         # Older 2-tuple traditional steps leave it None (land inert).
         _trad_T_land = _trad[2] if len(_trad) > 2 else None
 
-        # Neural correction
-        neural_out, _ = neural_step(*trad_args)
+        # Neural correction (the step keywords carry the prescribed planes a
+        # flag-on network needs; a flag-off network ignores them).
+        neural_out, _ = neural_step(*trad_args, **kwargs)
 
         # Blend: traditional + alpha * neural correction
         _alpha = jnp.asarray(alpha)

@@ -21,8 +21,9 @@ fix works (norms alone do not certify it):
      heat/water into the ocean for an all-ocean (aquaplanet) cell -- the air-sea
      energy AND water budgets close;
   3. override = None is byte-identical to the old self-flux path;
-  4. the override is incompatible with a turbulence scheme that owns surface
-     exchange -> the pipeline raises (no silent double-count).
+  4. with a turbulence scheme that owns surface exchange the override is
+     folded into the kernel's lower boundary condition (it replaces the
+     scheme's bulk flux; no double-count).
 """
 from __future__ import annotations
 

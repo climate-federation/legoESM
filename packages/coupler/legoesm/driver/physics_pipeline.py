@@ -1402,6 +1402,14 @@ class PhysicsPipeline:
                             _u_low, _v_low, _T_low, _q_low,
                             _T_sfc_c, _q_sfc_c, _rho_low,
                             self.turbulence_config.surface)
+                    # A prescribed (coupler / ERA5) heat flux is the
+                    # authoritative surface flux for EVERY consumer: the
+                    # convective closure must see the same boundary the
+                    # turbulence scheme applies, not its own bulk estimate.
+                    if sfc_shflx_override is not None:
+                        _shf_c = ad.flatten_2d(sfc_shflx_override)
+                    if sfc_lhflx_override is not None:
+                        _lhf_c = ad.flatten_2d(sfc_lhflx_override)
                     _land_c = (
                         ad.flatten_2d(self.f_land)
                         if self.f_land is not None
@@ -1802,6 +1810,14 @@ class PhysicsPipeline:
                 "its surface exchange lives inside the learned kernel and "
                 "cannot yet ingest a prescribed lower boundary condition."
             )
+        if (sfc_shflx_override is None) != (sfc_lhflx_override is None):
+            # Heat is prescribed as a pair too: half of it would fold into a
+            # turbulence kernel but be ignored on the bulk path.
+            raise ValueError(
+                "physics_step_no_rad: surface heat-flux overrides must be "
+                "prescribed as a pair (sfc_shflx_override AND "
+                "sfc_lhflx_override) — only one was given."
+            )
         if (sfc_taux_override is None) != (sfc_tauy_override is None):
             # Stress is a vector: prescribing only one component would leave
             # the other at the scheme's own estimate — a caller bug.
@@ -1916,13 +1932,28 @@ class PhysicsPipeline:
             # above is exactly what the prescribed flux replaces — drop it
             # (injecting both would double-count / silently disagree).
             if _prescribed_sfc_flux:
-                if "surface_flux" in _turb_kwargs:
-                    # The prescribed flux IS the lower boundary condition; the
-                    # tiled bulk estimate is what it replaces.
-                    del _turb_kwargs["surface_flux"]
                 from legoesm.atmosphere.physics.turbulence.integration import (
                     fold_prescribed_surface_fluxes
                 )
+                from legoesm.atmosphere.physics.turbulence.surface_layer import (
+                    prescribed_into_surface_flux,
+                )
+                if "surface_flux" in _turb_kwargs:
+                    # The tiled tuple is what the kernel will read, so the
+                    # prescribed components replace THEIR slots in it and
+                    # the unprescribed ones (e.g. the tiled stress when the
+                    # coupler prescribes heat only) survive.
+                    _turb_kwargs["surface_flux"] = prescribed_into_surface_flux(
+                        _turb_kwargs["surface_flux"], rho_col_phys[:, -1],
+                        shflx=(None if sfc_shflx_override is None
+                               else ad.flatten_2d(sfc_shflx_override)),
+                        lhflx=(None if sfc_lhflx_override is None
+                               else ad.flatten_2d(sfc_lhflx_override)),
+                        tau_x=(None if sfc_taux_override is None
+                               else ad.flatten_2d(sfc_taux_override)),
+                        tau_y=(None if sfc_tauy_override is None
+                               else ad.flatten_2d(sfc_tauy_override)),
+                    )
                 _turb_kwargs["config"] = fold_prescribed_surface_fluxes(
                     self.turbulence_config,
                     shflx_w_m2=(

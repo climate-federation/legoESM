@@ -224,7 +224,29 @@ def make_sfno_step_unified(
         ) = tail
         # SFNO tendency prediction from prognostic fields
         phis = kwargs.get("phis", jnp.zeros_like(p_s))
-        sfno_out = sfno_physics(T, u, v, q_v, p_s, phis, dt)
+        # Prescribed planes (grid-shaped, already on the SFNO's own Gaussian
+        # grid on this lane); a flag-on network names a missing one.
+        land_frac = kwargs.get("land_frac")
+        if sfno_physics.spatial_embedding and land_frac is None:
+            raise ValueError(
+                "SFNOPhysics(spatial_embedding=True) requires 'land_frac' in "
+                "the step_unified kwargs, got None")
+        sfc_fluxes = None
+        if sfno_physics.era5_surface_fluxes:
+            from legoesm.atmosphere.physics.neural_physics import (
+                SFC_FLUX_STEP_UNIFIED_KEYS,
+            )
+            sfc_fluxes = []
+            for key in SFC_FLUX_STEP_UNIFIED_KEYS:
+                plane = kwargs.get(key)
+                if plane is None:
+                    raise ValueError(
+                        f"SFNOPhysics(era5_surface_fluxes=True) requires "
+                        f"{key!r} in the step_unified kwargs, got None")
+                sfc_fluxes.append(plane)
+            sfc_fluxes = tuple(sfc_fluxes)
+        sfno_out = sfno_physics(T, u, v, q_v, p_s, phis, dt,
+                                land_frac=land_frac, sfc_fluxes=sfc_fluxes)
         if "conv_prog" in _PHYSICS_OUTPUT_FIELDS and conv_prog is not None:
             sfno_out = sfno_out._replace(conv_prog=conv_prog)
 

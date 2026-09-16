@@ -170,6 +170,35 @@ def compute_surface_fluxes(
 _PRESCRIBED_TAU_FLOOR_PA = 1.0e-12  # coeff-ok: numerical floor for a 0/0 gradient
 
 
+def prescribed_into_surface_flux(surface_flux, rho_sfc, *, shflx=None,
+                                 lhflx=None, tau_x=None, tau_y=None):
+    """Replace the prescribed components of a ``(tau_x, tau_y, shflx, lhflx,
+    ustar)`` surface-flux tuple, keeping the others.
+
+    The tiled (mosaic) surface path hands a kernel this tuple instead of
+    letting it call :func:`compute_surface_fluxes`; a prescribed coupler /
+    ERA5 flux must therefore land IN the tuple, component by component, so
+    the unprescribed components (the tiled stress when only heat is given,
+    the tiled heat when only the stress is) survive.  ``ustar`` is rebuilt
+    from the stress whenever a stress component is replaced, with the same
+    floor as :func:`_apply_prescribed_scalar_fluxes`.
+    """
+    tx, ty, sh, lh, us = surface_flux
+    if shflx is not None:
+        sh = jnp.broadcast_to(jnp.asarray(shflx), sh.shape)
+    if lhflx is not None:
+        lh = jnp.broadcast_to(jnp.asarray(lhflx), lh.shape)
+    if tau_x is not None or tau_y is not None:
+        if tau_x is not None:
+            tx = jnp.broadcast_to(jnp.asarray(tau_x), tx.shape)
+        if tau_y is not None:
+            ty = jnp.broadcast_to(jnp.asarray(tau_y), ty.shape)
+        us = jnp.sqrt(
+            jnp.sqrt(tx ** 2 + ty ** 2 + _PRESCRIBED_TAU_FLOOR_PA ** 2)
+            / rho_sfc)
+    return tx, ty, sh, lh, us
+
+
 def _apply_prescribed_scalar_fluxes(config, tau_x, tau_y, shflx, lhflx, ustar, rho):
     """Override the turbulent surface fluxes with prescribed values.
 
