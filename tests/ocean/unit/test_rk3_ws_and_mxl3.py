@@ -82,7 +82,8 @@ def test_rk3_ws_differs_from_rk3_and_is_finite():
 
     r, m_ws = _gyre_model()
     assert r.model_config.momentum_time_integrator == "rk3_ws"
-    _, m_ssp = _gyre_model(momentum_time_integrator="rk3")
+    _, m_ssp = _gyre_model(
+        momentum_time_integrator="rk3", tracer_time_integrator="rk3")
     st = r.initial_state
     n_lat, n_lon = st.T.data.shape[0], st.T.data.shape[1]
     sf = nemo_gyre_wind_forcing(n_lat, n_lon, 0.0)
