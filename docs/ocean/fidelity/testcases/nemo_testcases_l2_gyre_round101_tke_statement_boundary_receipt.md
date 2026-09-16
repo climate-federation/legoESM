@@ -220,11 +220,40 @@ boundaries surround these executing statements; no dead source arm is cited.
 
 ## Review and verification
 
-REVIEW_PLACEHOLDER
+The required separate read-only Codex review was invoked against every change
+since incoming commit `569599e61db0`, the receipt, the stage table and the
+Rule-12 attribution, with an explicit request to return SHIP, HOLD or DO NOT
+SHIP and to challenge the kt2-record scope. No reviewer model started. Its
+verbatim terminal result is:
 
-TEST_PLACEHOLDER
+> WARNING: proceeding, even though we could not create PATH aliases: Read-only
+> file system (os error 30)
+>
+> Reading additional input from stdin...
+>
+> Error: failed to initialize in-process app-server client: Read-only file
+> system (os error 30)
 
-CITATION_PLACEHOLDER
+Therefore **independent review unavailable in-sandbox**; unavailability is not
+approval. No physics diff is being shipped, and the round remains stopped for
+the independently produced record. The review log SHA-256 is
+`eae080369e91b8869ecdd955b8e2a9840b501bc2c8dfb0889bae645cc549d4b5`.
+
+The focused final-tree suite passed **72 tests in 5.46 s**. It covers the
+consolidated production-stage gate and new exact-EOF TKE reader, the Round-59
+TKE operand machinery, twin admission, citation extraction/map auditing, and
+all planted unit controls. Its log SHA-256 is
+`19fe1fd87a99dc0ba4f78cdf774d74d850a736462f254309a1ad469630c91975`.
+`bash -n` also passes for the acquisition script; its clean preflight is the
+gfortran proof recorded above.
+
+The clean-tree citation gate finds and maps all 8/8 compiled-source citations,
+with no unmapped citation, failed anchor, global map-audit failure or self-test
+failure. Its JSON SHA-256 is
+`098116141de89fe999f2b776e9731092c4b701cefb1a7b562dfd55ef2007cf22`.
+Shifting the Langmuir citation by two lines exits 1 with
+`SYMBOL-NOT-AT-LINE`; the plant JSON SHA-256 is
+`5f4e7864a7aaac425f692208e7328f9cb680c5206fb7c110e2d1056846e5944d`.
 
 GitHub issue #1455 is unavailable through this clone's local-only remote, so
 no issue-update claim is made. No configuration or carried-state decision is

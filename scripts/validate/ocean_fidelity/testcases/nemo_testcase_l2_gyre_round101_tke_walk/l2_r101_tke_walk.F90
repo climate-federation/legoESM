@@ -31,6 +31,7 @@ CONTAINS
       IF(.NOT.r101_active) RETURN
       IF(r101_unit /= -1) CALL ctl_stop('round101: nested TKE statement record')
       IF(l_istiled) CALL ctl_stop('round101: whole-array writer refuses tiling')
+      IF(STORAGE_SIZE(1) /= 32) CALL ctl_stop('round101: writer requires 32-bit default integer')
       IF(STORAGE_SIZE(1._wp) /= 64) CALL ctl_stop('round101: writer requires binary64 wp')
       OPEN(NEWUNIT=r101_unit,FILE='oracle_tke_statement_walk_kt00000002.bin', &
          & ACCESS='STREAM',FORM='UNFORMATTED',STATUS='REPLACE',ACTION='WRITE',IOSTAT=ios)
@@ -61,6 +62,8 @@ CONTAINS
       INTEGER, INTENT(in) :: jj
       REAL(wp), DIMENSION(A2D(0),jpk), INTENT(in) :: p_en
       IF(.NOT.r101_active) RETURN
+      IF(jj /= ntsj+r101_counts(1)) &
+         & CALL ctl_stop('round101: boundary rows are missing, duplicated, or out of order')
       r101_boundaries(:,jj,:) = p_en(ntsi:ntei,jj,:)
       r101_counts(1) = r101_counts(1) + 1
    END SUBROUTINE r101_after_boundaries_row
@@ -69,6 +72,8 @@ CONTAINS
       INTEGER, INTENT(in) :: jj
       REAL(wp), DIMENSION(A2D(0),jpk), INTENT(in) :: p_en
       IF(.NOT.r101_active) RETURN
+      IF(jj /= ntsj+r101_counts(2)) &
+         & CALL ctl_stop('round101: Langmuir rows are missing, duplicated, or out of order')
       r101_langmuir(:,jj,:) = p_en(ntsi:ntei,jj,:)
       r101_counts(2) = r101_counts(2) + 1
    END SUBROUTINE r101_after_langmuir_row
@@ -77,6 +82,8 @@ CONTAINS
       INTEGER, INTENT(in) :: jj
       REAL(wp), DIMENSION(A2D(0),jpk), INTENT(in) :: p_en
       IF(.NOT.r101_active) RETURN
+      IF(jj /= ntsj+r101_counts(3)) &
+         & CALL ctl_stop('round101: RHS rows are missing, duplicated, or out of order')
       r101_rhs(:,jj,:) = p_en(ntsi:ntei,jj,:)
       r101_counts(3) = r101_counts(3) + 1
    END SUBROUTINE r101_rhs_row
@@ -85,6 +92,8 @@ CONTAINS
       INTEGER, INTENT(in) :: jj
       REAL(wp), DIMENSION(A2D(0),jpk), INTENT(in) :: p_en
       IF(.NOT.r101_active) RETURN
+      IF(jj /= ntsj+r101_counts(4)) &
+         & CALL ctl_stop('round101: post-sweep rows are missing, duplicated, or out of order')
       r101_post_sweep(:,jj,:) = p_en(ntsi:ntei,jj,:)
       r101_counts(4) = r101_counts(4) + 1
    END SUBROUTINE r101_post_sweep_row

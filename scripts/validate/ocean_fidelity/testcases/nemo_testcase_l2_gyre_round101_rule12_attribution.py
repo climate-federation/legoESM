@@ -15,6 +15,8 @@ import json
 import re
 from pathlib import Path
 
+from legoesm.ocean.fidelity.provenance import worktree_stamp
+
 
 LEFT = Path(
     "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round97/"
@@ -163,6 +165,7 @@ def run(*, plant: str | None = None) -> dict:
         "left": {"path": str(LEFT), "sha256": LEFT_SHA256},
         "right": {"path": str(RIGHT), "sha256": RIGHT_SHA256},
     }
+    report["worktree"] = worktree_stamp()
     report["plant"] = plant
     return report
 

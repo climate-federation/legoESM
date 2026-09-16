@@ -157,8 +157,10 @@ def test_round101_tke_writer_is_additive_write_only_and_fixed_layout():
     assert "ACTION='WRITE'" in writer
     assert "STATUS='REPLACE'" in writer
     assert "kt == nit000+1" in writer
+    assert "STORAGE_SIZE(1) /= 32" in writer
     assert "STORAGE_SIZE(1._wp) /= 64" in writer
     assert "r101_counts /= expected_rows" in writer
+    assert writer.count("missing, duplicated, or out of order") == 4
     assert "r101_entry_field, r101_boundaries, r101_langmuir" in writer
     assert "r101_rhs, r101_post_sweep" in writer
     assert not any(line.startswith("-") and not line.startswith("---")
