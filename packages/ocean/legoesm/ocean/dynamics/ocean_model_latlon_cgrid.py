@@ -6420,7 +6420,11 @@ class LatLonCGridOceanModel:
             # the zub advection survives (isomorphism row S-21; measured
             # 3.136e-07 m/s^2 at the OVERFLOW kt=2 entry, exactly zero from
             # rest).
-            _du1_rhs, _dv1_rhs = du_dt_pert, dv_dt_pert
+            # stp2d.f90:141-176 accumulates the full 3-D Krhs, then
+            # :202-213 diagnoses its depth mean into separate Ue_rhs/Ve_rhs
+            # arrays without projecting Krhs.  Stage 1 consumes that full
+            # source at compiled stprk3_stg.f90:664-673.
+            _du1_rhs, _dv1_rhs = du_dt, dv_dt
             _stage1_rhs_base = (_du1_rhs, _dv1_rhs)
             # The stage's NEMO e3u/e3v(Kmm) pair for the flux-form momentum
             # advection, from the ONE kernel (_nemo_ws_qco_stage_faces) keyed
