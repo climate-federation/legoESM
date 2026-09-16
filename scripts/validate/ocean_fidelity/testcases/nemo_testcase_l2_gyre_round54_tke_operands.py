@@ -425,7 +425,7 @@ def main(argv=None) -> int:
                 "max": float(np.max(arr)),
             }
         report = {
-            "format": "gyre-round56-tke-operands-v2",
+            "format": "gyre-round56-tke-operands-v3",
             "worktree": worktree_stamp(),
             "producer_commit": producer,
             "record": str(args.record),
@@ -744,7 +744,12 @@ def _model_substitution_walk(
             N2_prandtl=rn2b, p_sh2_override=lambda _: sh2,
             prandtl_K_M=avm_entry)[1]
 
-    source_order_close_from_en = close_from_en
+    # Production always crosses the explicit JIT boundary at
+    # ocean_model_latlon_cgrid.py:10982-10995.  Keep one callable per measured
+    # expression and evaluate that SAME callable directly and through jax.jit;
+    # otherwise the diagnostic can certify an eager arithmetic graph that the
+    # model never executes.
+    jitted_close_from_en = jax.jit(close_from_en)
     oracle_mxl = np.asarray(yx("mxl_momentum")[..., 1:jpkm1])
     oracle_mxld = np.asarray(yx("mxl_dissipation")[..., 1:jpkm1])
     oracle_avm = np.asarray(yx("avm_closure")[..., 1:jpkm1])
@@ -761,33 +766,46 @@ def _model_substitution_walk(
                       * np.asarray(wmask))
     active_zav = wet & (oracle_avm > oracle_floor_m)
 
-    def kh_statement_walk(energy_value):
-        """Walk executing ``tke_avn`` boundaries from NEMO's entry state."""
+    def kh_statement_outputs(energy_value):
+        """Materialize the executing ``tke_avn`` statement boundaries."""
         energy_value = jnp.asarray(energy_value)
-        raw_mxl = jax.jit(
-            lambda ee: _tke_raw_mixing_length(ee, rn2, cfg))(energy_value)
-        bounded_mxl, bounded_mxld = jax.jit(
-            lambda ee: compute_mixing_lengths(
-                ee, rn2, e3w, cfg, signed_n2=True,
-                dz_cell=e3t_full, l_surface_anchor=anchor))(energy_value)
-        sqrt_en = jax.jit(jnp.sqrt)(energy_value)
-        raw_zav = jax.jit(
-            lambda ee, ll: (jnp.asarray(cfg.c_k, dtype=ee.dtype) * ll)
-            * jnp.where(ee > 0.0,
-                        jnp.sqrt(jnp.where(ee > 0.0, ee, 1.0)), 0.0))(
-                            energy_value, bounded_mxl)
+        raw_mxl = _tke_raw_mixing_length(energy_value, rn2, cfg)
+        bounded_mxl, bounded_mxld = compute_mixing_lengths(
+            energy_value, rn2, e3w, cfg, signed_n2=True,
+            dz_cell=e3t_full, l_surface_anchor=anchor)
+        sqrt_en = jnp.sqrt(energy_value)
+        raw_zav = ((jnp.asarray(cfg.c_k, dtype=energy_value.dtype)
+                    * bounded_mxl)
+                   * jnp.where(
+                       energy_value > 0.0,
+                       jnp.sqrt(jnp.where(
+                           energy_value > 0.0, energy_value, 1.0)),
+                       0.0))
         raw_avt = (jnp.maximum(raw_zav, jnp.asarray(
             cfg.kappaH_min, dtype=raw_zav.dtype)) * wmask)
-        k_m, k_h = jax.jit(
-            lambda ee, ll: compute_K_from_tke(
-                ee, ll, cfg, N2=rn2, shear_sq=jnp.zeros_like(sh2),
-                N2_prandtl=rn2b, p_sh2_override=lambda _: sh2,
-                prandtl_K_M=avm_entry))(energy_value, bounded_mxl)
+        k_m, k_h = compute_K_from_tke(
+            energy_value, bounded_mxl, cfg, N2=rn2,
+            shear_sq=jnp.zeros_like(sh2), N2_prandtl=rn2b,
+            p_sh2_override=lambda _: sh2, prandtl_K_M=avm_entry)
         dissl = sqrt_en / bounded_mxld
-        isolated_k_h = jax.jit(
-            lambda ee: close_from_en(ee, jnp.asarray(oracle_mxl)))(
-                energy_value)
-        source_order_k_h = source_order_close_from_en(energy_value)
+        isolated_k_h = close_from_en(
+            energy_value, jnp.asarray(oracle_mxl))
+        return {
+            "raw_buoyancy_length": raw_mxl,
+            "bounded_mixing_length": bounded_mxl,
+            "sqrt_en": sqrt_en,
+            "raw_zav": raw_zav,
+            "avm_floor_and_mask": k_m,
+            "avt_floor_and_mask_before_prandtl": raw_avt,
+            "dissipation_length_output": dissl,
+            "avt_inverse_prandtl_update": k_h,
+            "isolated_downstream": isolated_k_h,
+        }
+
+    jitted_kh_statement_outputs = jax.jit(kh_statement_outputs)
+
+    def score_kh_execution(outputs, whole_closure_k_h):
+        """Score one execution mode without changing its arithmetic graph."""
         rows = [
             {
                 "name": "surface_mixing_length",
@@ -800,62 +818,75 @@ def _model_substitution_walk(
             {
                 "name": "raw_buoyancy_length",
                 "citation": "zdftke.f90:627-630",
-                **_operand_score(np.asarray(raw_mxl), source_raw_mxl, wet),
+                **_operand_score(
+                    np.asarray(outputs["raw_buoyancy_length"]),
+                    source_raw_mxl, wet),
             },
             {
                 "name": "bounded_mixing_length",
                 "citation": "zdftke.f90:634-683",
                 **_operand_score(
-                    np.asarray(bounded_mxl), oracle_mxl, wet),
+                    np.asarray(outputs["bounded_mixing_length"]),
+                    oracle_mxl, wet),
             },
             {
                 "name": "sqrt_en",
                 "citation": "zdftke.f90:691",
                 **_operand_score(
-                    np.asarray(sqrt_en), source_sqrt_en, wet),
+                    np.asarray(outputs["sqrt_en"]), source_sqrt_en, wet),
             },
             {
                 "name": "raw_zav",
                 "citation": "zdftke.f90:692",
                 **_operand_score(
-                    np.asarray(raw_zav), oracle_avm, active_zav),
+                    np.asarray(outputs["raw_zav"]),
+                    oracle_avm, active_zav),
             },
             {
                 "name": "avm_floor_and_mask",
                 "citation": "zdftke.f90:693",
-                **_operand_score(np.asarray(k_m), oracle_avm, wet),
+                **_operand_score(
+                    np.asarray(outputs["avm_floor_and_mask"]),
+                    oracle_avm, wet),
             },
             {
                 "name": "avt_floor_and_mask_before_prandtl",
                 "citation": "zdftke.f90:694",
                 **_operand_score(
-                    np.asarray(raw_avt), source_raw_avt, wet),
+                    np.asarray(outputs[
+                        "avt_floor_and_mask_before_prandtl"]),
+                    source_raw_avt, wet),
             },
             {
                 "name": "dissipation_length_output",
                 "citation": "zdftke.f90:695",
                 **_operand_score(
-                    np.asarray(dissl), oracle_dissl, wet),
+                    np.asarray(outputs["dissipation_length_output"]),
+                    oracle_dissl, wet),
             },
             {
                 "name": "avt_inverse_prandtl_update",
                 "citation": "zdftke.f90:699-702",
-                **_operand_score(np.asarray(k_h), oracle_avt, wet),
+                **_operand_score(
+                    np.asarray(outputs["avt_inverse_prandtl_update"]),
+                    oracle_avt, wet),
             },
         ]
         isolated = {
             "name": "avt_inverse_prandtl_update_with_recorded_prior_rows",
             "citation": "zdftke.f90:699-702",
-            **_operand_score(np.asarray(isolated_k_h), oracle_avt, wet),
+            **_operand_score(
+                np.asarray(outputs["isolated_downstream"]),
+                oracle_avt, wet),
         }
         source_order = {
             "name": "source_order_closure_k_h",
             "citation": "zdftke.f90:627-702",
-            **_operand_score(np.asarray(source_order_k_h), oracle_avt, wet),
+            **_operand_score(
+                np.asarray(whole_closure_k_h), oracle_avt, wet),
         }
         first = next((row for row in rows if not row["exact"]), None)
         return {
-            "entry": "NEMO en_post_sweep/rn2/e3t/taum and carried coefficients",
             "rows": rows,
             "first_non_bit": (None if first is None else {
                 "name": first["name"],
@@ -864,37 +895,64 @@ def _model_substitution_walk(
                 "max_abs": first["max_abs"],
             }),
             "isolated_downstream": isolated,
-            "local_candidate_row": source_order,
-            "all_exact": all(row["exact"] for row in rows),
+            "whole_closure_row": source_order,
+            "all_statement_rows_exact": all(row["exact"] for row in rows),
         }
 
-    kh_walk = kh_statement_walk(e_post)
+    eager_statement_outputs = kh_statement_outputs(e_post)
+    jit_statement_outputs = jitted_kh_statement_outputs(e_post)
+    eager_whole_closure = close_from_en(e_post)
+    jit_whole_closure = jitted_close_from_en(e_post)
+    kh_walk = {
+        "entry": "NEMO en_post_sweep/rn2/e3t/taum and carried coefficients",
+        "production_jit_call_site": (
+            "packages/ocean/legoesm/ocean/dynamics/"
+            "ocean_model_latlon_cgrid.py:10982-10995"),
+        "eager": score_kh_execution(
+            eager_statement_outputs, eager_whole_closure),
+        "jit": score_kh_execution(
+            jit_statement_outputs, jit_whole_closure),
+    }
     if plant_kh_entry:
-        baseline_row = kh_walk["local_candidate_row"]
-        require(baseline_row["exact"],
-                "K_H entry-ULP plant requires a locally exact source-order "
-                "closure "
-                f"baseline; got {baseline_row}")
-        baseline_k_h = np.asarray(source_order_close_from_en(e_post))
+        baseline_k_h = {
+            "eager": np.asarray(eager_whole_closure),
+            "jit": np.asarray(jit_whole_closure),
+        }
         bumped_entry = np.nextafter(
             np.asarray(e_post), np.float64(np.inf))
-        bumped_k_h = np.asarray(
-            source_order_close_from_en(jnp.asarray(bumped_entry)))
-        planted_energy, planted_index = _plant_entry_ulp_at_changed_output(
-            np.asarray(e_post), baseline_k_h, bumped_k_h, wet)
-        planted_k_h = np.asarray(
-            source_order_close_from_en(jnp.asarray(planted_energy)))
-        planted_row = {
-            "name": "source_order_closure_k_h",
-            **_operand_score(planted_k_h, oracle_avt, wet),
+        bumped_k_h = {
+            "eager": np.asarray(close_from_en(jnp.asarray(bumped_entry))),
+            "jit": np.asarray(
+                jitted_close_from_en(jnp.asarray(bumped_entry))),
         }
-        require(not planted_row["exact"] and planted_row["unequal"] >= 1,
-                "one-ULP TKE entry plant did not flip the source-order K_H "
-                "row")
+        common_response = np.asarray(wet, dtype=bool).copy()
+        for mode in ("eager", "jit"):
+            common_response &= (
+                baseline_k_h[mode].view(np.uint64)
+                != bumped_k_h[mode].view(np.uint64))
+        planted_energy, planted_index = _plant_entry_ulp_at_changed_output(
+            np.asarray(e_post), baseline_k_h["eager"],
+            bumped_k_h["eager"], common_response)
+        planted_k_h = {
+            "eager": np.asarray(
+                close_from_en(jnp.asarray(planted_energy))),
+            "jit": np.asarray(
+                jitted_close_from_en(jnp.asarray(planted_energy))),
+        }
+        response_rows = {
+            mode: _operand_score(
+                planted_k_h[mode], baseline_k_h[mode], wet)
+            for mode in ("eager", "jit")
+        }
+        require(all(not row["exact"] and row["unequal"] >= 1
+                    for row in response_rows.values()),
+                "one-ULP TKE entry plant did not change both eager and "
+                f"production-JIT source-order K_H rows: {response_rows}")
         raise GateError(
             "planted one-ULP TKE entry violation detected at "
-            f"{planted_index}: source_order_closure_k_h has "
-            f"{planted_row['unequal']} unequal cell(s)")
+            f"{planted_index}: source_order_closure_k_h changed "
+            f"{response_rows['eager']['unequal']} eager and "
+            f"{response_rows['jit']['unequal']} production-JIT cell(s)")
 
     # Rule 10: invoke the public production orchestrator with the printed card
     # configuration.  The record supplies every carried closure operand; only

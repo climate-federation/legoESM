@@ -1070,6 +1070,9 @@ CITATION_MAP = {
         'def _model_substitution_walk(',
         'require(jax.config.x64_enabled, "model substitution walk requires JAX fp64")',
         38],
+    'ocean_model_latlon_cgrid.py:10982-10995': [
+        '# ``step`` is the production-compiled entry point even when a caller',
+        ('_vertical_K_test_override=_vertical_K_test_override)', 1), 14],
     'tests/ocean/fidelity/test_nemo_testcase_l2_gyre_card_reconciliation.py:193-216': [
         'def test_rk3_card_steps_with_nemo_face_shear_and_live_face_metric(gate):',
         'assert all(np.all(np.isfinite(np.asarray(fields[k]))) for k in ("T", "S", "u", "v", "ssh"))',
