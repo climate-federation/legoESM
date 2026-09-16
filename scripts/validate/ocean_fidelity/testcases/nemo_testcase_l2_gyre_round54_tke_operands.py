@@ -744,7 +744,7 @@ def _model_substitution_walk(
             N2_prandtl=rn2b, p_sh2_override=lambda _: sh2,
             prandtl_K_M=avm_entry)[1]
 
-    fused_close_from_en = jax.jit(lambda ee: close_from_en(ee))
+    source_order_close_from_en = close_from_en
     oracle_mxl = np.asarray(yx("mxl_momentum")[..., 1:jpkm1])
     oracle_mxld = np.asarray(yx("mxl_dissipation")[..., 1:jpkm1])
     oracle_avm = np.asarray(yx("avm_closure")[..., 1:jpkm1])
@@ -787,7 +787,7 @@ def _model_substitution_walk(
         isolated_k_h = jax.jit(
             lambda ee: close_from_en(ee, jnp.asarray(oracle_mxl)))(
                 energy_value)
-        fused_k_h = fused_close_from_en(energy_value)
+        source_order_k_h = source_order_close_from_en(energy_value)
         rows = [
             {
                 "name": "surface_mixing_length",
@@ -848,10 +848,10 @@ def _model_substitution_walk(
             "citation": "zdftke.f90:699-702",
             **_operand_score(np.asarray(isolated_k_h), oracle_avt, wet),
         }
-        fused = {
-            "name": "fused_closure_k_h",
+        source_order = {
+            "name": "source_order_closure_k_h",
             "citation": "zdftke.f90:627-702",
-            **_operand_score(np.asarray(fused_k_h), oracle_avt, wet),
+            **_operand_score(np.asarray(source_order_k_h), oracle_avt, wet),
         }
         first = next((row for row in rows if not row["exact"]), None)
         return {
@@ -864,7 +864,7 @@ def _model_substitution_walk(
                 "max_abs": first["max_abs"],
             }),
             "isolated_downstream": isolated,
-            "local_candidate_row": fused,
+            "local_candidate_row": source_order,
             "all_exact": all(row["exact"] for row in rows),
         }
 
@@ -872,25 +872,28 @@ def _model_substitution_walk(
     if plant_kh_entry:
         baseline_row = kh_walk["local_candidate_row"]
         require(baseline_row["exact"],
-                "K_H entry-ULP plant requires a locally exact fused closure "
+                "K_H entry-ULP plant requires a locally exact source-order "
+                "closure "
                 f"baseline; got {baseline_row}")
-        baseline_k_h = np.asarray(fused_close_from_en(e_post))
+        baseline_k_h = np.asarray(source_order_close_from_en(e_post))
         bumped_entry = np.nextafter(
             np.asarray(e_post), np.float64(np.inf))
-        bumped_k_h = np.asarray(fused_close_from_en(jnp.asarray(bumped_entry)))
+        bumped_k_h = np.asarray(
+            source_order_close_from_en(jnp.asarray(bumped_entry)))
         planted_energy, planted_index = _plant_entry_ulp_at_changed_output(
             np.asarray(e_post), baseline_k_h, bumped_k_h, wet)
         planted_k_h = np.asarray(
-            fused_close_from_en(jnp.asarray(planted_energy)))
+            source_order_close_from_en(jnp.asarray(planted_energy)))
         planted_row = {
-            "name": "fused_closure_k_h",
+            "name": "source_order_closure_k_h",
             **_operand_score(planted_k_h, oracle_avt, wet),
         }
         require(not planted_row["exact"] and planted_row["unequal"] >= 1,
-                "one-ULP TKE entry plant did not flip the fused K_H row")
+                "one-ULP TKE entry plant did not flip the source-order K_H "
+                "row")
         raise GateError(
             "planted one-ULP TKE entry violation detected at "
-            f"{planted_index}: fused_closure_k_h has "
+            f"{planted_index}: source_order_closure_k_h has "
             f"{planted_row['unequal']} unequal cell(s)")
 
     # Rule 10: invoke the public production orchestrator with the printed card
