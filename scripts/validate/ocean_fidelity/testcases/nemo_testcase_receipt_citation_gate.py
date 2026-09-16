@@ -533,6 +533,46 @@ CITATION_MAP = {
         ('CASE ( 1 , 2 )    !==  Stage 1 & 2', 1),
         'vv(ji,jj,jk,Kaa) = ( vv(ji,jj,jk,Kbb) + rDt * vv(ji,jj,jk,Krhs) )',
         7],
+    # --- parallel held candidate: source-ordered GYRE TKE K_H walk ---
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:190-201': [
+        'IF( nn_pdl == 1 ) ALLOCATE( z_pdlr',
+        'IF( nn_pdl == 1 ) DEALLOCATE( z_pdlr )', 12],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:589,612-620': [
+        'IF( ln_mxl0 ) zraug = vkarmn * 2.e5_wp / ( rho0 * grav )',
+        ('IF( ln_mxl0 ) THEN', 1), ('END DO', 30), 10],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:627-630': [
+        ('DO jk =  2,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0)', 10),
+        ('END DO   ;   END DO', 14), 4],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:669-683': [
+        'CASE ( 3 )           ! lup and ldown, |dk[xml]| bounded by e3t :',
+        ('END DO   ;   END DO', 21), 15],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:690-695': [
+        'DO jk =  1,  jpkm1,  1  ; DO ji = ntsi-( 0), ntei+(  0)   !* vertical eddy viscosity & diffivity at w-points',
+        'dissl(ji,jj,jk) = zsqen / zmxld(ji,jk)', 6],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:699-702': [
+        'IF( nn_pdl == 1 ) THEN          !* Prandtl number case: update avt',
+        ('END DO   ;   END DO', 23), 4],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:691': (
+        'zsqen = SQRT( en(ji,jj,jk) )', 1),
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:692': (
+        'zav   = rn_ediff * zmxlm(ji,jk) * zsqen', 1),
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:693': (
+        'p_avm(ji,jj,jk) = MAX( zav,                  avmb(jk) )', 1),
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:694': (
+        'p_avt(ji,jj,jk) = MAX( zav, avtb_2d(ji,jj) * avtb(jk) )', 1),
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:695': (
+        'dissl(ji,jj,jk) = zsqen / zmxld(ji,jk)', 1),
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:674-676': [
+        'DO jk =  jpkm1,  2,  -1  ; DO ji = ntsi-( 0), ntei+(  0)   ! from the bottom to the surface : ldown',
+        '&    MIN( zmxlm(ji,jk+1) + (e3t_3d(ji,jj,jk+1)', 3],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:394-413,699-702': [
+        'IF( nn_pdl == 1 ) THEN          !* Prandtl number = F( Ri )',
+        ('END DO   ;   END DO', 4),
+        'IF( nn_pdl == 1 ) THEN          !* Prandtl number case: update avt',
+        ('END DO   ;   END DO', 23), 24],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90:154-168': [
+        '! Ocean physics update',
+        'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 15],
     # --- round 98: kt=1 stage-1 tracer-W compiled-order walk ---
     'GYRE_OMIP_L2_P3_SM_R94STGCLS/BLD/ppsrc/nemo/stprk3_stg.f90:331-339': [
         ('IF( ln_dynadv_vec ) THEN', 1), ('ENDIF', 8), 9],
@@ -1023,10 +1063,10 @@ CITATION_MAP = {
     'packages/ocean/legoesm/ocean/physics/vertical_mixing/_shared.py:384-454': [
         ('wumask = u_mask[..., :-1] * u_mask[..., 1:]', 2),
         ('+ (zsh2v[:-1, :, :] + zsh2v[1:, :, :]) * coast_v', 2), 71],
-    'nemo_testcase_l2_gyre_round54_tke_operands.py:421-456': [
+    'nemo_testcase_l2_gyre_round54_tke_operands.py:459-496': [
         'def _model_substitution_walk(',
         'require(jax.config.x64_enabled, "model substitution walk requires JAX fp64")',
-        36],
+        38],
     'tests/ocean/fidelity/test_nemo_testcase_l2_gyre_card_reconciliation.py:193-216': [
         'def test_rk3_card_steps_with_nemo_face_shear_and_live_face_metric(gate):',
         'assert all(np.all(np.isfinite(np.asarray(fields[k]))) for k in ("T", "S", "u", "v", "ssh"))',
