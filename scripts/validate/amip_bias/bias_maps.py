@@ -73,9 +73,11 @@ _DISPLAY_SCALE = {"evspsbl": 86400.0, "pr": 86400.0}
 # floored the denominator at 1.0 W m-2 instead of masking, so polar-night cells
 # came back as a finite near-zero albedo rather than missing — which draws a
 # zonal STRIPE at the edge of the sunlit region that is a property of the
-# denominator, not of the model.  20 W m-2 of time-mean insolation is about 1.5 %
-# of the solar constant; below it the monthly-mean albedo is not observable
-# either, so CERES carries no usable signal to compare against.
+# denominator, not of the model.  The 20 W m-2 cutoff (about 1.5 % of the solar
+# constant) is OUR analysis choice of a conservative floor, not a published
+# observability limit: CERES documents twilight contamination near the
+# terminator, but sets no such threshold.  Any value that removes the
+# terminator ring serves; this one is round and errs towards discarding cells.
 TOA_ALBEDO_MIN_RSDT = 20.0
 
 
@@ -177,6 +179,17 @@ def _panel(ax, lon, lat, field, title, cmap, vmin, vmax, units):
     return m
 
 
+def _common_mask(field, ref):
+    """Both sides restricted to the cells where BOTH carry a value.
+
+    Any statistic taken separately on the two fields — a global mean, a colour
+    percentile, a grid-scale roughness ratio — otherwise describes a different
+    region on each side, and only their difference sees the intersection.
+    """
+    both = np.isfinite(field) & np.isfinite(ref)
+    return np.where(both, field, np.nan), np.where(both, ref, np.nan)
+
+
 def maps(run, variables, out_dir):
     import cartopy.crs as ccrs
     import matplotlib
@@ -196,8 +209,14 @@ def maps(run, variables, out_dir):
             print(f"  {var}: no {label} reference -- skipped")
             continue
         scale = _DISPLAY_SCALE.get(var, 1.0)
-        rows.append((var, field * scale, ref * scale, mlat, mlon, label, cmap,
-                     blim, units))
+        # Both sides describe the SAME cells or neither number is comparable:
+        # the TOA albedo is masked where the sun does not rise, and that mask is
+        # not identical on the two sides.  Intersect ONCE here, so the panel
+        # means, the colour percentiles and the grid-scale ratio below all speak
+        # about the region the bias is computed over.
+        _f, _r = _common_mask(np.asarray(field, dtype=float) * scale,
+                              np.asarray(ref, dtype=float) * scale)
+        rows.append((var, _f, _r, mlat, mlon, label, cmap, blim, units))
     if not rows:
         raise SystemExit(f"{run}: nothing to plot")
 

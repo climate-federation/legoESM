@@ -284,6 +284,16 @@ def main(argv=None):
     ap.add_argument("--days", default=None,
                     help="comma-separated checkpoint days (default: all)")
     ap.add_argument("--profile-levels", type=int, default=12)
+    ap.add_argument("--override-scheme", default=None,
+                    choices=("sundqvist", "xu_randall"),
+                    help="replay the SAME checkpoint under a different cover "
+                         "closure, every other resolved field held fixed. The "
+                         "output then describes a counterfactual, not the run.")
+    ap.add_argument("--override-saturation", default=None,
+                    choices=("liquid", "mixed_phase"),
+                    help="likewise for the saturation curve the cover is "
+                         "diagnosed against, so a pair can be scored on the "
+                         "curve a LATER deck uses rather than the run's own.")
     args = ap.parse_args(argv)
 
     import jax
@@ -292,6 +302,14 @@ def main(argv=None):
     rundir = f"{rb.ROOT}/{args.run}"
     exp = json.load(open(f"{rundir}/experiment_config.json"))
     cloud_cfg = resolved_cloud_config(exp)
+    for _fld, _new in (("scheme", args.override_scheme),
+                       ("saturation_scheme", args.override_saturation)):
+        if _new and _new != getattr(cloud_cfg, _fld):
+            print(f"!!! COUNTERFACTUAL: {_fld} overridden "
+                  f"{getattr(cloud_cfg, _fld)!r} -> {_new!r}; the run itself "
+                  f"used {getattr(cloud_cfg, _fld)!r}. Every other field is "
+                  f"the run's.")
+            cloud_cfg = cloud_cfg._replace(**{_fld: _new})
     print(f"=== {args.run}: cloud config RESOLVED from experiment_config.json ===")
     for k in ("scheme", "rh_crit", "saturation_scheme", "cover_condensate_q_ref", "q_c_diagnostic",
               "cloud_vertical_overlap_optics", "cloud_n_subcolumns", "convective_cloud"):

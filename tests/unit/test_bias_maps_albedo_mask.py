@@ -49,3 +49,22 @@ def test_dark_cells_are_not_zero_which_is_what_the_floor_produced():
     new, valid = bm._toa_albedo(rsut, rsdt)
     assert np.isnan(new[0, 0]) and not valid[0, 0]
     np.testing.assert_allclose(new[0, 1], 0.4, rtol=1e-12)
+
+
+def test_statistics_describe_the_same_cells_on_both_sides():
+    """A one-sided gap must remove the cell from BOTH fields.
+
+    Without this, the model panel's global mean and the reference panel's are
+    averages over different regions while the bias panel uses the intersection,
+    so the three printed numbers do not add up.
+    """
+    bm = _load()
+    field = np.array([[1.0, 2.0, np.nan, 4.0]])
+    ref = np.array([[1.0, np.nan, 3.0, 4.0]])
+    f2, r2 = bm._common_mask(field, ref)
+    keep = np.isfinite(f2)
+    assert keep.tolist() == [[True, False, False, True]]
+    np.testing.assert_array_equal(np.isfinite(f2), np.isfinite(r2))
+    # the control: the unmasked means genuinely disagree, so the test can fail
+    assert not np.isclose(np.nanmean(field), np.nanmean(ref))
+    assert np.isclose(np.nanmean(f2), np.nanmean(r2))

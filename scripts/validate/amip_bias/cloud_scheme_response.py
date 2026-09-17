@@ -46,3 +46,16 @@ for name, T, p, q_i in CASES:
     b0 = cover("xu_randall", T, p, dry, 0.0)
     print(f"  at RH {dry}: sundqvist {a:.3f} | xu_randall {b:.3f} "
           f"(with no ice: {b0:.3f})")
+
+# The CONDENSATE-FREE column, which is the other end of the same question:
+# Xu-Randall is a PRODUCT of an RH term and a condensate term, so zero
+# condensate gives zero cover at EVERY RH including saturation, where
+# Sundqvist gives full cover.  WRF's cal_cldfra1 carries an explicit
+# "RH >= 1 -> 1" cutoff that this differentiable core deliberately drops, so
+# the saturated-but-condensate-free layer is the case to size.
+print("\ncondensate-free columns (q_c = q_i = 0)")
+print("   RH   " + "".join(f"{r:8.2f}" for r in RH_GRID))
+for name, T, p, _q in CASES:
+    for scheme in ("sundqvist", "xu_randall"):
+        row = [cover(scheme, T, p, r, 0.0) for r in RH_GRID]
+        print(f"  {name[:12]:12s} {scheme:11s}" + "".join(f"{v:8.3f}" for v in row))

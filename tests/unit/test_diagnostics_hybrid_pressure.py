@@ -357,8 +357,15 @@ def test_tas_2m_over_land_ignores_the_sea_surface():
     np.testing.assert_allclose(a, b, rtol=0.0, atol=0.0)
 
 
-def test_tas_2m_without_land_arguments_is_bit_identical():
-    """Every existing caller must get exactly the old number."""
+def test_tas_2m_zero_land_fraction_collapses_to_the_ocean_branch():
+    """A land fraction of zero must reproduce the no-land-arguments answer.
+
+    This pins the BLEND, not history: both sides run the current code, so it
+    cannot certify equality with the pre-land implementation.  That parity was
+    checked separately by executing the parent commit's ``_tas_2m`` beside this
+    one over stable, neutral and unstable fixtures (exact equality); the two
+    land tests above are what make this one able to fail.
+    """
     import jax.numpy as jnp
     legacy = _tas_land_for()
     zero_land = _tas_land_for(T_land=jnp.full((2,), 240.0),
