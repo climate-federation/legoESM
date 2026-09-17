@@ -82,7 +82,13 @@ run during this inventory fix. (`orca2_inventory.json:90-126`)
 ## 3. Required WRITE-only acquisition
 
 **ACQUISITION_NEEDED:**
-`/tmp/orca2-inventory-work.qN999s/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_orca2_tke_boundary_acquisition/run.sh`
+`COMMIT cf192ae78270:scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_orca2_tke_boundary_acquisition/run.sh`
+
+The committed evidence chain is `COMMIT 0204649679d9`, `COMMIT f507cf48230e`,
+and the operator follow-up `COMMIT cf192ae78270`. Its external evidence files
+are under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/parallel/orca2/`,
+including `orca2_inventory.json`, `acq2_preflight.log`, and
+`acquisition2.log`; no temporary checkout is an evidence pointer.
 
 The user-executed acquisition clones the same `ORCA2_ICE_PISCES` reference and
 copies the `ORCA2_OMIP_L4` Phase-2v source card file by file into the new target
@@ -132,3 +138,9 @@ The inventory's held conclusion has two independent parts:
    borrow bottom values from a later frame.
 
 No file under `packages/ocean/legoesm` was changed by this fix round.
+
+## 5. OPEN
+
+1. The operator re-ran the acquisition with target
+   `ORCA2_OMIP_L4_P2VBND_R2`; status remains **TBD** pending the run's final
+   admission result. (`acquisition2.log:4`)

@@ -1,4 +1,5 @@
 {
+  "acquisition2.log:4": "df512ad1682aab452f54127f3444ffca1936b6fd7c1547470dff8c8b83313a46",
   "build_core2_nyf_zarr.py:1-37": "211a604cf7e7bb70de8267b46c1ea9d07ff672a582840f1860cfcd8b30b78842",
   "core2.py:106-147": "250fdb5e3c764e691b8eb2dc7743d2bcd9519fdacd26c365455cf0156733d4a6",
   "nemo_native_fields.py:1-20": "b279cde0863e73449a2c465ac3bd141ce8ca0eba0e0128e258ce4465e2f9ea0b",
@@ -32,10 +33,10 @@
   "orca2_inventory.json:141-193": "a701c9e6dbecc2f087fe5bfb3523715a254e0a915913b88b07e2d38c550f21fc",
   "orca2_inventory.json:17-40": "e28d7adf6c06bb498ecaf84099a67965e323c45bcfabeac37d4492c648430298",
   "orca2_inventory.json:195-202": "8cf8d3e14227a1d4c54addf617f6cfa0870201752b266e9ae04ca251927fa60a",
-  "orca2_inventory.json:2-5": "349be5558eb0bd07f7c8a1b5e348dfabb8a26b800122061855152995eac24689",
+  "orca2_inventory.json:2-5": "2c3efe705c695f06bf3af52e28e3e6624545268f18d2c1375302da09eba2297a",
   "orca2_inventory.json:203-230": "a4a8da251265d4ed24f11325741e433e3017a31e752f003e4352e0f486335ccb",
   "orca2_inventory.json:31-40": "51082b9f29b33ab3d52a4f2fcd040ad2edd6e69ff8e43d5571914c90f3a45d0e",
-  "orca2_inventory.json:8-16": "5face72dcc5a510cf8cf2ffc99848e77a36be146956ed1c10b3710e539ea6c4d",
+  "orca2_inventory.json:8-16": "aaa9293d7801c15d12340fe2ef1454167ce553e26edde527c574708da3a5c6af",
   "orca2_inventory.json:90-126": "a164909cb8ae6635b2d5c293ee628ba815311e856c335f513a40b996e1d73a0c",
   "orca2_inventory_missing_boundary_plant.txt:1-4": "9e2375b98f9e8b12aadfed4c41761d546a98423041b955434b2d49d5bec354ad",
   "orca2_inventory_provenance_mismatch_plant.txt:1-4": "eaadce76376e6b91d2b50a79b3522810875c31ef96f5417d282666cc22722a77",
