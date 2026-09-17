@@ -38,7 +38,10 @@ from legoesm.atmosphere.physics.convection._ifs_test_ascent import (
 )
 from legoesm.atmosphere.physics.convection._ifs_ascent import IFSAscentConfig
 from legoesm.atmosphere.physics.convection._ifs_tendencies import IFSTendencyConfig
-from legoesm.constants import R_d
+from legoesm.atmosphere.physics.convection._ifs_flux import (
+    ifs_convective_fluxes,
+)
+from legoesm.constants import R_d, c_pd as C_cpd
 
 from ._ifs_test_ascent import ifs_departure_search_refined
 from ._ifs_ascent import ifs_updraught_ascent
@@ -213,17 +216,49 @@ def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, conv_prog_profile,
         dT_dt_other, dq_dt_other, dT_dt_adv, dq_dt_adv,
         land_frac, config.dx_m, dt, clo_cfg)
 
+    # --- 3b. CUFLXN: cumastrn runs this BETWEEN the closure and the
+    # tendencies (cumastrn.F90:1104, CUDTDQN at :1226).  It subtracts the
+    # environmental transport from the plume fluxes and builds the
+    # below-cloud-base fluxes that go with the tapered mass flux; without it
+    # cudtdqn receives absolute fluxes and produces a huge bottom-level dipole.
+    nlev = T.shape[1]
+    (M_uf, PMFUSf, PMFUQf, PMFULf, PLUDEf, PDMFUPf) = ifs_convective_fluxes(
+        clo["M_u"], clo["PMFUS"], clo["PMFUQ"], clo["PMFUL"],
+        clo["PLUDE"], clo["PDMFUP"],
+        T_h[:, :nlev], q_h[:, :nlev], geo_half[:, :nlev], p_half,
+        clo["ldcum"], ktype, k_cbot, asc.k_ctop)
+
+    # cumastrn.F90:1194-1216: with RMFSOLTQ > 0 the source DERIVES THE DRAUGHT
+    # PROPERTIES BACK from the difference fluxes and rebuilds the ABSOLUTE
+    # fluxes before calling CUDTDQN, which then does its own (implicit) ZS/ZQ
+    # subtraction.  Feeding CUDTDQN the difference fluxes subtracts the
+    # environment twice; measured as a +-10^4 K/day dipole at the cloud edges.
+    jj = jnp.arange(nlev)[None, :]
+    _act = clo["ldcum"][:, None] & (jj >= 1)
+    _below = _act & (jj > k_cbot[:, None])                     # JK > KCBOT
+    _cloud = (_act & (jj >= asc.k_ctop[:, None])
+              & (jj <= k_cbot[:, None]))                       # KCTOP..KCBOT
+    _inv_m = 1.0 / jnp.maximum(1.0e-15, M_uf)                  # ZMFA, :1191
+    _T_sub = T_h[:, :nlev] + PMFUSf * _inv_m / C_cpd           # PTU, :1194
+    _q_sub = q_h[:, :nlev] + PMFUQf * _inv_m                   # PQU, :1193
+    PMFUS_abs = jnp.where(
+        _below, M_uf * (C_cpd * _T_sub + geo_half[:, :nlev]),
+        jnp.where(_cloud,
+                  M_uf * (C_cpd * asc.T_u + geo_half[:, :nlev]), PMFUSf))
+    PMFUQ_abs = jnp.where(_below, M_uf * _q_sub,
+                          jnp.where(_cloud, M_uf * asc.q_u, PMFUQf))
+
     # --- 4. tendencies.  DECLARED GAP: the downdraught is not part of this
     # chain yet, so M_d = 0, lddraf = False and the PMFD* fluxes are zero.
-    zero = jnp.zeros_like(clo["M_u"])
+    zero = jnp.zeros_like(M_uf)
     dT_dt, dq_dt, _penth = ifs_convective_tendencies(
         T, q_v, qs, p_full, p_half, geo_full, geo_half, T_h, q_h,
         clo["ldcum"], ktype, asc.k_ctop,
         jnp.zeros_like(asc.k_ctop),                 # k_dtop (no downdraught)
         jnp.zeros_like(clo["ldcum"], dtype=bool),   # lddraf
-        clo["M_u"], zero,
-        clo["PMFUS"], zero, clo["PMFUQ"], zero,
-        clo["PMFUL"], clo["PLUDE"], clo["PDMFUP"],
+        M_uf, zero,
+        PMFUS_abs, zero, PMFUQ_abs, zero,
+        PMFULf, PLUDEf, PDMFUPf,
         dt, IFSTendencyConfig())
 
     out = out_ctor(
@@ -236,4 +271,4 @@ def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, conv_prog_profile,
         dv_dt_conv=None,
         dq_r_conv_dt=None,                   # tendency module returns no precip rate
     )
-    return out, clo["M_u"]
+    return out, M_uf

@@ -121,3 +121,33 @@ def test_shallow_supply_gap_is_declared():
             "shallow column with no total-physics tendency must be inert "
             "(cumastrn:578); if this fires, the PTENT/PTENQ plumbing landed "
             "and this test needs replacing")
+
+
+def test_no_cloud_edge_dipole():
+    """REGRESSION for the +-11000 K/day dipole (2026-09-17).
+
+    Two stages were missing between the closure and the tendencies: CUFLXN's
+    environmental subtraction (cuflxn.F90:250-251) and the absolute-flux
+    reconstruction cumastrn does before CUDTDQN when RMFSOLTQ > 0
+    (cumastrn.F90:1194-1216). Without them the environment is subtracted twice
+    and the two lowest levels exchange ~1e4 K/day.  Convective heating on a
+    single column cannot physically reach that; bound it well below, and check
+    the bottom pair is not an equal-and-opposite pair.
+    """
+    T, q, p_full, p_half = _deep_column()
+    ncol, nlev = T.shape
+    kw = _kwargs(ncol, nlev)
+    kw["dq_dt_dyn"] = jnp.full((ncol, nlev), 1e-8)      # a real sub-cloud supply
+    out, _, _ = bechtold_convection(
+        T, q, p_full, p_half, config=BechtoldConfig(use_ifs_ascent=True),
+        dT_dt_rad=jnp.full((ncol, nlev), -1.5 / 86400.0), **kw)
+    dT_day = np.asarray(out.dT_dt[0]) * 86400.0
+    assert np.all(np.abs(dT_day) < 500.0), (
+        "cloud-edge dipole is back", dT_day[np.abs(dT_day) > 500.0])
+    # the failure mode was specifically equal-and-opposite at the bottom pair
+    bottom_pair = abs(dT_day[-1] + dT_day[-2])
+    bottom_size = abs(dT_day[-1]) + abs(dT_day[-2])
+    assert not (bottom_size > 100.0 and bottom_pair < 0.05 * bottom_size), (
+        dT_day[-2], dT_day[-1])
+    # not vacuous: the chain must actually be convecting here
+    assert float(np.max(np.abs(dT_day))) > 1.0
