@@ -1550,7 +1550,9 @@ class ExperimentConfig(NamedTuple):
     e3sm_cam_taubgnd: float = 1.5e-3            # E3SMFrontalConfig.taubgnd [Pa]
     e3sm_cam_c0: float = 30.0                   # E3SMFrontalConfig.c0 [m/s]
     e3sm_cam_launch_p: float = 5.0e4            # E3SMFrontalConfig.launch_p [Pa]
-    e3sm_cam_latitude_taper: bool = True        # E3SMFrontalConfig.latitude_taper
+    e3sm_cam_latitude_taper: bool = False       # E3SMFrontalConfig.latitude_taper:
+                                                # OFF, E3SM's unstructured branch
+                                                # (our grids); see that field's docs
     # Appended at the tuple END to preserve the positional ABI (codex
     # 2026-07-27 flavor review, Major 1).
     morrison_flavor: str = "mg"                 # MorrisonConfig.morrison_flavor:

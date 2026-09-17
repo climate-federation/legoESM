@@ -393,7 +393,8 @@ def test_driver_frontal_dissipative():
 
 
 def test_frontal_cos_lat_taper():
-    """STRUCTURED-dycore branch (the default ``frontal.latitude_taper=True``):
+    """STRUCTURED-dycore branch (``frontal.latitude_taper=True``, which since
+    2026-09-17 is NOT the default — our grids are E3SM's unstructured branch):
     the E3SM cos(lat) polar taper halves a 60N column's drag vs the equator.
     NOTE this pins the taper MATH, not that tapering is E3SM-production
     behavior — E3SM sets the taper BY DYCORE (gw_drag.F90:829-833) and its
@@ -405,7 +406,8 @@ def test_frontal_cos_lat_taper():
     frontgf = jnp.full((ncol, nlev), 1e-9)
     cfg = E3SMCAMConfig(
         source="frontal", pgwv=8, dc=5.0,
-        frontal=E3SMFrontalConfig(taubgnd=1.5e-3, frontgfc=1e-10),
+        frontal=E3SMFrontalConfig(taubgnd=1.5e-3, frontgfc=1e-10,
+                                  latitude_taper=True),
     )
     out = e3sm_cam_gwd(u, v, T, pf, ph, zf, zh, rho, lat, 1800.0, cfg,
                        frontgf_col=frontgf)
@@ -572,7 +574,8 @@ def test_frontal_taper_off_is_e3sm_unstructured_branch():
     frontgf = jnp.full((ncol, nlev), 1e-9)
     base = dict(source="frontal", pgwv=8, dc=5.0)
     fr = dict(taubgnd=1.5e-3, frontgfc=1e-10)
-    cfg_on = E3SMCAMConfig(**base, frontal=E3SMFrontalConfig(**fr))
+    cfg_on = E3SMCAMConfig(
+        **base, frontal=E3SMFrontalConfig(**fr, latitude_taper=True))
     cfg_off = E3SMCAMConfig(
         **base, frontal=E3SMFrontalConfig(**fr, latitude_taper=False))
     out_on = e3sm_cam_gwd(u, v, T, pf, ph, zf, zh, rho, lat, 1800.0, cfg_on,
@@ -586,5 +589,7 @@ def test_frontal_taper_off_is_e3sm_unstructured_branch():
     # cos(0) = 1: the equatorial column is identical under both settings.
     np.testing.assert_allclose(
         np.array(out_on.du_dt[0]), du_off[0], rtol=0, atol=0)
-    # And the default remains the tapered legacy branch (canary).
-    assert E3SMFrontalConfig().latitude_taper is True
+    # Canary on the DEFAULT: untapered since 2026-09-17, because legoESM's
+    # grids are E3SM's unstructured branch and the tapered default was
+    # suppressing the drag exactly where the polar-night jet needs it.
+    assert E3SMFrontalConfig().latitude_taper is False
