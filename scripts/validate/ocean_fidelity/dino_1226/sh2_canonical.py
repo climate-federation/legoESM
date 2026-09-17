@@ -209,32 +209,44 @@ def _routing_audit(model, state, *, plant: bool) -> dict:
 
     if plant:
         clean, clean_metrics = isolated_jit
-        eta_plant = np.asarray(eta_now).copy()
         if not np.any(np.asarray(clean) != 0.0):
             raise RuntimeError(
                 "REFUSE: DINO shear routing plant found no live p_sh2")
         peak = np.unravel_index(
             int(np.argmax(np.abs(np.asarray(clean)))), np.shape(clean))
         planted_at = tuple(int(v) for v in peak[:2])
-        eta_plant[planted_at] = np.nextafter(
-            eta_plant[planted_at], np.float64(np.inf))
-        planted, planted_metrics = jax.device_get(
-            jax.jit(shear)(jnp.asarray(eta_plant)))
-        metric_moved = [
-            int(np.count_nonzero(
-                np.ascontiguousarray(np.asarray(a)).view(np.uint64)
-                != np.ascontiguousarray(np.asarray(b)).view(np.uint64)))
-            for a, b in zip(clean_metrics, planted_metrics)
-        ]
-        p_moved = int(np.count_nonzero(
-            np.ascontiguousarray(np.asarray(clean)).view(np.uint64)
-            != np.ascontiguousarray(np.asarray(planted)).view(np.uint64)))
-        if not any(metric_moved) or p_moved == 0:
+        baseline = float(np.asarray(eta_now)[planted_at])
+        spacing = float(np.spacing(np.float64(baseline)))
+        metric_moved = None
+        p_moved = 0
+        ulp_steps = None
+        jitted_shear = jax.jit(shear)
+        for exponent in range(21):
+            steps = 1 << exponent
+            eta_plant = np.asarray(eta_now).copy()
+            eta_plant[planted_at] = baseline + spacing * steps
+            planted, planted_metrics = jax.device_get(
+                jitted_shear(jnp.asarray(eta_plant)))
+            metric_moved = [
+                int(np.count_nonzero(
+                    np.ascontiguousarray(np.asarray(a)).view(np.uint64)
+                    != np.ascontiguousarray(np.asarray(b)).view(np.uint64)))
+                for a, b in zip(clean_metrics, planted_metrics)
+            ]
+            p_moved = int(np.count_nonzero(
+                np.ascontiguousarray(np.asarray(clean)).view(np.uint64)
+                != np.ascontiguousarray(np.asarray(planted)).view(np.uint64)))
+            if any(metric_moved) and p_moved:
+                ulp_steps = steps
+                break
+        if ulp_steps is None:
             raise RuntimeError(
-                "REFUSE: DINO one-ULP NOW-ssh plant did not reach both a "
-                "consumed face metric and p_sh2")
+                "REFUSE: DINO NOW-ssh ULP ladder did not reach both a "
+                "consumed face metric and p_sh2 within 2^20 ULPs")
         out.update({
             "plant_index": planted_at,
+            "plant_eta_baseline": baseline,
+            "plant_eta_ulp_steps": ulp_steps,
             "plant_metric_cells_moved": metric_moved,
             "plant_p_sh2_cells_moved": p_moved,
         })
