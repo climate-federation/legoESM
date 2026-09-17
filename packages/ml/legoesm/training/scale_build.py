@@ -275,11 +275,12 @@ _WB_NEURAL_KEYS = frozenset({
 def wb_needs_land_frac(mode: str, yml: dict) -> bool:
     """Whether the WB sample loader must carry an ERA5 land fraction.
 
-    True when the top-level ``era5_surface_fluxes`` flag is on (the flux planes
+    True for the classical ``physics`` arm (convection's land branch),
+    when the top-level ``era5_surface_fluxes`` flag is on (the flux planes
     ship with the mask) or when the selected learned arm's block enables
     ``spatial_embedding`` (the land fraction is one of its static inputs).
     """
-    if bool(yml.get("era5_surface_fluxes", False)):
+    if mode == "physics" or bool(yml.get("era5_surface_fluxes", False)):
         return True
     if mode in ("neural_gcm", "sfno"):
         ov = yml.get(mode, {}) or {}
@@ -686,11 +687,21 @@ def _build_mode_components_spectral(cfg, yml):
         def raw(self, ic_carry, n_steps, forcing):
             state0 = carry_to_spectral_state(ic_carry, grid)
             forcing_base = forcing if uses_forcing else None
+            # Classical convection reads the grid's mask, not PhysicsState.
+            # Keep the per-sample plane traced and the shared grid immutable.
+            physics_grid = grid
+            if cfg.mode == "physics":
+                if forcing is None or forcing.get("land_frac") is None:
+                    raise ValueError(
+                        "physics mode requires land_frac from "
+                        "_load_era5_samples_spectral (via build_spectral_forcing)")
+                physics_grid = grid._replace(land_frac=forcing["land_frac"])
+            # Spectral radiation does not read land_frac; surface BCs come from forcing.
             gated = ({} if self._rad_fn is None else
                      {"rad_physics_fn": self._rad_fn,
                       "rad_update_interval": split_rad_interval})
             final = spectral_rollout(
-                state0, self._physics_fn, grid, sigma, pe_config,
+                state0, self._physics_fn, physics_grid, sigma, pe_config,
                 dt, int(n_steps),
                 sponge_factor, spectral_filter,
                 forcing_base=forcing_base,

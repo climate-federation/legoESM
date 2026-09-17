@@ -1803,12 +1803,11 @@ class ModelDriver:
                 f"(land fraction mean={float(jnp.mean(self._f_land)):.3f})"
             )
 
-        # Per-cell land fraction on the grid pytree (canonical name
-        # ``land_frac``) so the GWD integration's ``_extract_land_frac``
-        # finds it (e3sm_cam's driver-level oro landfrac scaling).  Reuses
-        # the ``self._f_land`` computed above — no new loader.  Attached
-        # only where the grid type carries the field (VoronoiMesh since
-        # 2026-07-30); other grids keep legacy behaviour.
+        # Attach land_frac for convection and orographic GWD on grids carrying
+        # the field (VoronoiMesh and GaussianGrid): flat -> zeros, gaussian ->
+        # binary elevation-derived mask (z_s > 0), file -> fraction from loaded
+        # elevation (subgrid sampling);
+        # land_mask_path overrides all of these topography settings.
         if (getattr(self.grid, "land_frac", "no-field") is None
                 and self._f_land is not None):
             self.grid = self.grid._replace(
