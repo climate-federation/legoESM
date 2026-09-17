@@ -727,11 +727,21 @@ class DiagnosticCollector:
         alpha = np.clip((log_pt - lp_lo) / denom, 0.0, 1.0)
         return f_lo + alpha * (f_hi - f_lo)
 
-    def _tas_2m(self, state, q_v, sst, sic, T_ice, u_low=None, v_low=None):
+    def _tas_2m(self, state, q_v, sst, sic, T_ice, u_low=None, v_low=None,
+                *, T_land=None, q_land=None, land_fraction=None):
         """2 m air temperature for CMIP ``tas`` from the MOST surface-layer
         similarity profile (interpolate the lowest model level down to 2 m).
         Returns the lowest-level T when the surface inputs (SST / sigma) are
         unavailable — e.g. a prescribed-SST run that does not pass SST here.
+
+        ``T_land`` / ``land_fraction`` (keyword-only) make the diagnostic
+        LAND-AWARE.  Without them the surface is the blended SST/sea-ice skin
+        with a saturated humidity EVERYWHERE, so the published ``tas`` over
+        land is the neighbouring ocean's temperature rather than the model's
+        land — the reason a February Arctic land bias could not be read from
+        this field.  There is no below-canopy 2 m profile in this code, so the
+        land branch uses the same MOST profile anchored on the land skin; do
+        not read the result as a sub-canopy screen temperature.
 
         ``u_low`` / ``v_low`` override the lowest-level winds (lets the MPAS
         path pass the reconstructed CELL winds from
@@ -750,20 +760,44 @@ class DiagnosticCollector:
         p_s = state.p_s.data
         p_low = jnp.asarray(self._p_full(p_s))[..., -1]
         rho_low = p_low / (constants.R_d * T_low)
-        T_sfc = blend_surface_temperature(sst, sic, T_ice)
-        q_sfc = saturation_mixing_ratio(T_sfc, p_s)
         # Similarity profile matched to the experiment's surface fluxes:
         # SAME bulk scheme (constant -> the historical coare3 stand-in, see
         # __init__) and SAME stable-branch selector (codex 2026-08-02: a
         # large_yeager or grachev/gryanik run otherwise published a
         # coare3-native-default tas).  The 2 m value is set by stability, so
         # gustiness is left scheme-native here (pre-existing choice).
-        *_, T_2m = compute_most_fluxes(
-            u_low, v_low, T_low, q_low, T_sfc, q_sfc, rho_low,
-            scheme=self.tas_profile_scheme, return_2m=True,
-            stability_scheme=self.surface_stability_scheme,
-        )
-        return T_2m
+        def _profile_to_2m(T_sfc, q_sfc):
+            *_, T_2m = compute_most_fluxes(
+                u_low, v_low, T_low, q_low, T_sfc, q_sfc, rho_low,
+                scheme=self.tas_profile_scheme, return_2m=True,
+                stability_scheme=self.surface_stability_scheme,
+            )
+            return T_2m
+
+        T_sfc_sea = blend_surface_temperature(sst, sic, T_ice)
+        q_sfc_sea = saturation_mixing_ratio(T_sfc_sea, p_s)
+        if T_land is None or land_fraction is None:
+            # Legacy path, bit-identical: ONE profile anchored on the
+            # ocean/sea-ice skin with a saturated surface.  Over land that is
+            # the neighbouring ocean's temperature and a saturated surface the
+            # land does not have, so a caller that owns a land skin should pass
+            # it — see the land branch below.
+            return _profile_to_2m(T_sfc_sea, q_sfc_sea)
+
+        # Land and sea get their OWN surface, then combine by land fraction.
+        # Both branches keep the same bulk scheme and stability selector, so
+        # this introduces no second convention — only the missing surface.
+        # ``q_land`` is a surface mixing ratio; without one the land surface is
+        # treated as saturated, which is what the legacy path assumed
+        # everywhere and is an OVERESTIMATE of surface humidity over dry or
+        # frozen ground.
+        q_sfc_land = (saturation_mixing_ratio(T_land, p_s) if q_land is None
+                      else q_land)
+        T_2m_land = _profile_to_2m(T_land, q_sfc_land)
+        T_2m_sea = _profile_to_2m(T_sfc_sea, q_sfc_sea)
+        f_land = jnp.clip(jnp.asarray(land_fraction, dtype=T_2m_land.dtype),
+                          0.0, 1.0)
+        return f_land * T_2m_land + (1.0 - f_land) * T_2m_sea
 
     def _clt_percent(self, T, p_s, q_v, q_c, q_i=None):
         """Total cloud cover [%] under MAXIMUM-RANDOM overlap, or ``None``.

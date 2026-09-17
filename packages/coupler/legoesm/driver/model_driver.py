@@ -7465,9 +7465,23 @@ class ModelDriver:
                 if (getattr(self.config, "mpas_ice_skin_prognostic", False)
                         and getattr(self, "_ice_T_skin", None) is not None):
                     _tas_ice = self._ice_T_skin
+                # Give the diagnostic the LAND surface too where the
+                # interactive tile has produced one, else its profile is
+                # anchored on the ocean/ice skin over land as well and the
+                # published land tas is not the model's land at all.
+                _tas_land_T = getattr(self, "_land_T_skin_last", None)
+                _tas_land_q = getattr(self, "_land_qsfc_last", None)
+                _tas_f_land = getattr(self, "_f_land", None)
+                _tas_kw = {}
+                if _tas_land_T is not None and _tas_f_land is not None:
+                    _tas_kw = dict(
+                        T_land=jnp.asarray(_tas_land_T).reshape(-1),
+                        q_land=(None if _tas_land_q is None
+                                else jnp.asarray(_tas_land_q).reshape(-1)),
+                        land_fraction=jnp.asarray(_tas_f_land).reshape(-1))
                 tas = diag._tas_2m(
                     state, q_v, _sst, _sic, _tas_ice,
-                    u_low=u_east[..., -1], v_low=v_north[..., -1])
+                    u_low=u_east[..., -1], v_low=v_north[..., -1], **_tas_kw)
             except Exception as exc:
                 if not getattr(self, "_logged_tas2m_fallback", False):
                     logger.warning(
@@ -10931,6 +10945,14 @@ class ModelDriver:
                      _land_n_held_step, _land_n_held_land_step) = _land_fn(
                         self._land_ml_state, _a2s_mean,
                         jnp.asarray(_doy, dtype=jnp.float64))
+                    # Mirror the land tile's skin and surface humidity onto
+                    # the driver, the same way the ice skin above is mirrored:
+                    # the CMOR ``tas`` diagnostic runs in a different method and
+                    # cannot see these closure locals, and without them it
+                    # anchors its profile on the neighbouring OCEAN skin over
+                    # land and publishes a land temperature the model never had.
+                    self._land_T_skin_last = _land_T_skin
+                    self._land_qsfc_last = _land_qsfc_step
                     # Accumulate ON DEVICE and read at the same cadence the
                     # other post-step warnings use: reading it every step
                     # would stall the accelerator once per step for a number
