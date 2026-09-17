@@ -425,8 +425,10 @@ def test_gyre_teos_surface_operand_and_full_two_band_identity():
     assert float(pt) == pytest.approx(20.02391895, abs=5.0e-7)
     gyre = build_gyre_zco_card().recipe.model_config
     lane1 = build_lock_exchange_zco_card().recipe.model_config
+    overflow = build_overflow_zps_card().recipe.model_config
     assert gyre.physics.shortwave_penetration.scheme == "nemo_qsr_2bd"
     assert lane1.physics is None
+    assert overflow.physics is None
     assert "nemo_two_band_full_shortwave" not in gyre._fields
 
 
