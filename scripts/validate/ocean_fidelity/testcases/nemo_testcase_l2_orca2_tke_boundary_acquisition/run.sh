@@ -144,12 +144,16 @@ stream_is_expected_absent() {
 # cmp's own status: 0 identical, 1 differing, greater than 1 unreadable.  Only
 # the stage-1 transport stream is handled specially, and only by stopping the
 # comparison before its uninitialised third field; see the EXCLUSION note above.
+# A stage-1 transport stream of the wrong length returns the distinct status 3
+# so that the length requirement -- the check that stops a short or padded file
+# hiding bytes in the excluded tail -- reports as its own named condition rather
+# than as an ordinary differing stream.
 compare_inherited_stream() {
   local name=$1 status=0
   if [[ "$name" == "$PARTIAL_STREAM" ]]; then
     if [[ "$(stat -c %s "$BASELINE_RUN/$name")" -ne "$PARTIAL_STREAM_BYTES" ]] \
         || [[ "$(stat -c %s "$TARGET_RUN/$name")" -ne "$PARTIAL_STREAM_BYTES" ]]; then
-      return 1
+      return 3
     fi
     cmp -s -n "$PARTIAL_COMPARED_BYTES" \
       "$BASELINE_RUN/$name" "$TARGET_RUN/$name" || status=$?
@@ -196,7 +200,7 @@ finalize_existing() {
   local audit_tmp admission_tmp digest_tmp reference_output_tmp
   local -a ocean_outputs=() baseline_streams=() target_streams=()
   local -a marker_outputs=() missing_streams=() differing_streams=()
-  local -a extra_streams=() absent_streams=()
+  local -a extra_streams=() absent_streams=() sized_streams=()
 
   [[ -d "$TARGET_RUN" && ! -L "$TARGET_RUN" ]] || {
     printf 'REFUSE: finalization run directory does not match registered target: %s\n' \
@@ -352,6 +356,8 @@ finalize_existing() {
     compare_inherited_stream "$name" || cmp_status=$?
     if [[ "$cmp_status" -eq 0 ]]; then
       identical=$((identical + 1))
+    elif [[ "$cmp_status" -eq 3 ]]; then
+      sized_streams+=("$name")
     else
       [[ "$cmp_status" -eq 1 ]] || {
         rm -rf -- "$audit_tmp"
@@ -374,6 +380,7 @@ finalize_existing() {
       || "${#missing_streams[@]}" -ne 0 \
       || "${#absent_streams[@]}" -ne "$EXPECTED_ABSENT_STREAM_COUNT" \
       || "${#differing_streams[@]}" -ne 0 \
+      || "${#sized_streams[@]}" -ne 0 \
       || "${#extra_streams[@]}" -ne 0 \
       || "$compared" -ne "$EXPECTED_COMPARED_STREAMS" \
       || "$identical" -ne "$EXPECTED_COMPARED_STREAMS" ]]; then
@@ -398,6 +405,7 @@ finalize_existing() {
   printf '%s\n' "${missing_streams[@]:-}" >"$audit_tmp/missing"
   printf '%s\n' "${absent_streams[@]:-}" >"$audit_tmp/absent"
   printf '%s\n' "${differing_streams[@]:-}" >"$audit_tmp/differing"
+  printf '%s\n' "${sized_streams[@]:-}" >"$audit_tmp/sized"
   printf '%s\n' "${extra_streams[@]:-}" >"$audit_tmp/extra"
   printf '%s\n' "${marker_outputs[@]:-}" >"$audit_tmp/marker_outputs"
   admission_tmp=$(mktemp "$TARGET_RUN/.orca2-tke-boundary-admission.XXXXXXXX")
@@ -464,6 +472,7 @@ report = {
         "byte_identical": int(identical),
         "missing": lines("missing"),
         "differing": lines("differing"),
+        "wrong_length": lines("sized"),
         "unregistered_extra": lines("extra"),
         "expected_absent": {
             "count": int(expected_absent_count),
@@ -512,10 +521,11 @@ PY
     "$EXPECTED_KT" "${#ocean_outputs[@]}" "$marker_count"
   printf 'ORCA2_TKE_BOUNDARY_RECORD PASS bytes=%s sha256=%s\n' \
     "$record_size" "$record_digest"
-  printf 'ORCA2_TKE_BOUNDARY_PASSIVITY %s expected=%s compared=%s identical=%s missing=%s absent=%s/%s differing=%s extra=%s target=%s/%s\n' \
+  printf 'ORCA2_TKE_BOUNDARY_PASSIVITY %s expected=%s compared=%s identical=%s missing=%s absent=%s/%s differing=%s wrong_length=%s extra=%s target=%s/%s\n' \
     "$verdict" "$EXPECTED_COMPARED_STREAMS" "$compared" "$identical" \
     "${#missing_streams[@]}" "${#absent_streams[@]}" \
     "$EXPECTED_ABSENT_STREAM_COUNT" "${#differing_streams[@]}" \
+    "${#sized_streams[@]}" \
     "${#extra_streams[@]}" "${#target_streams[@]}" \
     "$EXPECTED_TARGET_STREAMS"
   printf 'ORCA2_TKE_BOUNDARY_PARTIAL %s compared_bytes=%s of %s excluded_field=zFw\n' \
@@ -529,6 +539,9 @@ PY
   for name in "${differing_streams[@]}"; do
     printf 'ORCA2_TKE_BOUNDARY_DIFFERS %s\n' "$name"
   done
+  for name in "${sized_streams[@]}"; do
+    printf 'ORCA2_TKE_BOUNDARY_WRONG_LENGTH %s\n' "$name"
+  done
   for name in "${extra_streams[@]}"; do
     printf 'ORCA2_TKE_BOUNDARY_EXTRA %s\n' "$name"
   done
@@ -538,6 +551,10 @@ PY
     "$TARGET_RUN/$DIGEST_MANIFEST"
   rm -rf -- "$audit_tmp"
   if [[ "$verdict" != PASS ]]; then
+    for name in "${sized_streams[@]}"; do
+      printf 'REFUSE: inherited stream %s is not the registered %s bytes\n' \
+        "$name" "$PARTIAL_STREAM_BYTES" >&2
+    done
     printf 'REFUSE: write-only passivity failed; expected=%s compared=%s identical=%s missing=%s absent=%s/%s differing=%s extra=%s\n' \
       "$EXPECTED_COMPARED_STREAMS" "$compared" "$identical" \
       "${#missing_streams[@]}" "${#absent_streams[@]}" \
