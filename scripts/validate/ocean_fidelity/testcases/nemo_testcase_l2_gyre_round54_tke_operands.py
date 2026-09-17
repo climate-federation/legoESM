@@ -1235,7 +1235,7 @@ def _model_substitution_walk(
             "NEMO en_post_sweep/rn2/e3t/taum and carried coefficients"),
         "production_step_call_site": (
             "packages/ocean/legoesm/ocean/dynamics/"
-            "ocean_model_latlon_cgrid.py:10982-10995"),
+            "ocean_model_latlon_cgrid.py:10998-11011"),
         ISOLATED_EAGER_LABEL: isolated_eager,
         ISOLATED_JIT_LABEL: isolated_jit,
         PRODUCTION_STEP_LABEL: production_row,

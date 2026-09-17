@@ -7,10 +7,10 @@ Date: 2026-09-16. Production parent: `3e7a15c1e64e`; evidence branch
 **LANE_DEFECT: no.** The existing round-93--99 stage-twin lane does not share
 the rejected production-row defect. Its kt=2 bridge overlays recorded
 T/S/u/v/ssh, the prognostic barotropic pair, and all five TKE closure carries
-(`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:896-930`); the lane then
+(`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1134-1168`); the lane then
 installs the six raw barotropic histories, uses forcing for the same `kt`, and
 selects the matching barotropic and stage-entry overrides before calling the
-model step (`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1988-2018`). The
+model step (`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:3078-3108`). The
 preliminary kt=1 step in the bridge supplies only the otherwise unrecorded
 static/inactive pytree structure, so the stage-twin claims are not a
 mixed-time-state measurement.
@@ -143,19 +143,19 @@ The bridge installs T/S/u/v/ssh, the barotropic pair, all six AB3/AM4
 histories, and all five closure carries; it rebuilds all four consumed
 thickness staggerings through the production helpers and fails unless every
 audited value is bit-exact
-(`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:960-1147`). The recorded
+(`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1198-1385`). The recorded
 round-59 `taum_entry` is installed as the kt=2 TKE forcing as well.
 
 The row is therefore **kt=2 by record-validated construction**, not by a
 label alone. The TKE record reader requires `kt=2, Kbb=Kmm=3`
 (`nemo_testcase_l2_gyre_round54_tke_operands.py:219-230`); the stage reader
 checks each record's Kbb/Kmm against its kt/stage schedule
-(`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:275-292`); and the production
+(`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:513-530`); and the production
 bridge separately requires the step-entry record's `Nbb=3`
-(`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:991-995`). This is the NEMO
+(`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1229-1233`). This is the NEMO
 before-level before `zdf_phy`, feeding WS-RK3 stage 1, with forcing kt=2 and
 the kt=2 barotropic handoff. The ordinary public model step enters
-`_step_jitted` at `ocean_model_latlon_cgrid.py:10982-10995`; no live operand
+`_step_jitted` at `ocean_model_latlon_cgrid.py:10998-11011`; no live operand
 observer is enabled.
 
 **Physical-range sanity, before accepting the score:** wet candidate K_H is
@@ -178,7 +178,7 @@ used as a causal attribution.
 The intervention is installed at the return of
 `_solve_tke_backward_euler`, immediately before the production final
 `compute_mixing_lengths` / `compute_K_from_tke` consumption
-(`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1839-1860`). It intercepts
+(`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:2924-2945`). It intercepts
 exactly one solve, returns NEMO's energy bit-exactly (0 / 17,400 unequal), and
 uses the same entry SHA, `Nbb/Kbb/Kmm=3/3/3`, forcing kt=2, and kt=2
 barotropic handoff as the baseline. It is non-vacuous: injected versus
@@ -196,7 +196,7 @@ intervention proves it is not a sufficient explanation for the production
 K_H residual. The
 extracted object is the ordinary returned `LatLonCGridOceanState.tke_avt`
 carry, declared at `state.py:577-581` and assigned from
-`_tke_coeff_new.K_H` at `ocean_model_latlon_cgrid.py:10797-10802`.
+`_tke_coeff_new.K_H` at `ocean_model_latlon_cgrid.py:10808-10813`.
 
 The fix-round-5 artifact was produced at candidate commit `3849b99199c6` with
 only the two evidence probes modified and the dirty-tree escape stamped in
@@ -351,7 +351,7 @@ closure and one returned K_H cell after perturbing the real production
 oracle-relative comparison retains its expected FAIL verdict. The citation
 gate passes all **25** receipt citations with no map-audit failure; shifting
 the new full-entry bridge
-`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:960-1147` by two lines makes
+`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1198-1385` by two lines makes
 it exit nonzero.
 
 Coordination: GitHub issue #1455 could not be read or updated from this

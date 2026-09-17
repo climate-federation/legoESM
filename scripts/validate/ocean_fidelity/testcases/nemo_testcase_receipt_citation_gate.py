@@ -1073,32 +1073,32 @@ CITATION_MAP = {
         'def _model_substitution_walk(',
         'require(jax.config.x64_enabled, "model substitution walk requires JAX fp64")',
         39],
-    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:960-1147': [
+    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1198-1385': [
         'def _bridge_kt2_production_entry(',
         'return state, audit', 188],
-    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:896-930': [
+    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1134-1168': [
         'def _bridge_kt2_state(', ('return state', 1), 35],
-    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1988-2018': [
+    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:3078-3108': [
         'states = {1: _bridge_stage_context(',
-        ('surface_forcing=surface))', 2), 31],
-    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:275-292': [
+        ('surface_forcing=surface))', 4), 31],
+    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:513-530': [
         'observed_step = (header["kt"], header["stage"])',
         'f"Kmm={header[\'Kmm\']}",', 18],
-    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:991-995': [
+    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1229-1233': [
         'step_entry = read_entry(year_entry_path)',
         'f"kt=2/Nbb=3, got kt={step_entry[\'kt\']}/Nbb={step_entry[\'Nbb\']}",',
         5],
-    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1839-1860': [
+    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:2924-2945': [
         'if production_tke_post_sweep is not None:',
         'tke_module._solve_tke_backward_euler = inject_recorded_post_sweep',
         22],
     'nemo_testcase_l2_gyre_round54_tke_operands.py:219-230': [
         'header = struct.unpack("=13i", take(13 * 4))',
         'f"Kbb={head[\'Kbb\']}/Kmm={head[\'Kmm\']}",', 12],
-    'ocean_model_latlon_cgrid.py:10797-10802': [
+    'ocean_model_latlon_cgrid.py:10808-10813': [
         'if _tke_coeff_new is not None:',
         'tke_avt=Field(data=_tke_coeff_new.K_H', 6],
-    'ocean_model_latlon_cgrid.py:10982-10995': [
+    'ocean_model_latlon_cgrid.py:10998-11011': [
         '# ``step`` is the production-compiled entry point even when a caller',
         ('_vertical_K_test_override=_vertical_K_test_override)', 1), 14],
     'state.py:577-581': [

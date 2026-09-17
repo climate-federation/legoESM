@@ -2967,7 +2967,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                     f"one production TKE solve: {len(solve_calls)}")
             injection["solve_call_count"] = len(solve_calls)
             injection["injection_citation"] = (
-                "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1839-1860")
+                "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:2924-2945")
         require(getattr(state_after, "tke_avt", None) is not None,
                 "production _step_jitted result has no tke_avt K_H carry")
         return {
@@ -2991,13 +2991,13 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
             },
             "stage_barotropic_handoff_kt": 2,
             "bridge_citation": (
-                "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:960-1147"),
+                "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1198-1385"),
             "existing_stage_twin_citation": (
-                "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1988-2018"),
+                "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:3078-3108"),
             "output_carry": "LatLonCGridOceanState.tke_avt",
             "extraction_citation": (
-                "ocean_model_latlon_cgrid.py:10797-10802"),
-            "step_citation": "ocean_model_latlon_cgrid.py:10982-10995",
+                "ocean_model_latlon_cgrid.py:10808-10813"),
+            "step_citation": "ocean_model_latlon_cgrid.py:10998-11011",
             "carry_declaration_citation": "state.py:577-581",
             "entry_plant": entry_plant,
             "post_sweep_injection": injection,
