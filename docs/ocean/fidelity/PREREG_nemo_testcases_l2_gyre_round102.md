@@ -196,3 +196,38 @@ surface assignment at `:285`; a non-bit unchanged-interior row refutes the
 two-statement mapping and forbids an ownership claim. The three masks must
 partition every binding cell exactly, and the production ULP plant must still
 add exactly one inequality to its named full boundary row.
+
+## Post-decomposition operand attribution
+
+Frozen after the decomposition reported that the surface assignment alone
+contains all 260 boundary inequalities (maximum absolute difference
+`1.734723475976807e-18`), while the NEMO-changed bottom set is empty and the
+unchanged interior is BIT, but before exposing or comparing the production
+stress modulus. The bottom-first prediction above is therefore **REFUTED**
+and remains in this preregistration.
+
+The compiled statement first evaluates
+`zbbrau = rn_ebb / rho0` at
+`GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/zdftke.f90:257` and then writes
+`en(ji,jj,1) = MAX(rn_emin0,zbbrau*taum(ji,jj))` at `:284-289`.
+The shared implementation evaluates the same source association. The frozen
+hypothesis is therefore that the observed surface image is inherited from
+the production forcing's reconstructed stress modulus, not owned by this TKE
+assignment: the production `taum` will be non-BIT against Round 59's recorded
+`taum_entry`, a scalar replay from NEMO's recorded `rn_ebb`, `rho0`,
+`rn_emin0`, and `taum_entry` will reproduce the Round-101 surface image with
+zero unequal cells, and replacing only `OceanSurfaceForcing.taum` by the
+recorded modulus before calling the full production `step` will make the
+surface-assignment row BIT.
+
+This is confirmed only if all three clauses hold in the production-step
+instrument. It is refuted if the recorded-operand scalar replay is non-BIT,
+if the production modulus is already BIT, or if the one-operand production
+substitution leaves any surface cell unequal. The comparison domain is all
+32 x 22 owned surface cells without tolerance or mask. The existing model-
+forcing arm must remain reported separately and may not be relabelled as
+NEMO-entry. If confirmed, the first non-bit TKE statement must be sought
+after the boundary block using the NEMO-`taum` production arm; the surface
+statement is inherited and is not an eligible patch. If refuted, no TKE
+candidate is eligible until the exact constant/evaluation owner inside this
+same compiled statement is decomposed in a new committed addendum.
