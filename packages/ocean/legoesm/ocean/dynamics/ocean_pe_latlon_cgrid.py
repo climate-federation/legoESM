@@ -4370,7 +4370,7 @@ def _bc_external_surface_forcing(
                 # cells), so the column integrates to q_net.
                 _inv_rho_csw_h0 = 1.0 / (
                     jnp.asarray(rho_0, dtype=T.dtype)
-                    * jnp.asarray(_heat_capacity, dtype=T.dtype)
+                    * jnp.asarray(_c_sw, dtype=T.dtype)
                     * jnp.maximum(jnp.asarray(h_k[..., 0], dtype=T.dtype), 1e-10))
                 dT_target = dT_target.at[..., 0].add(
                     q_nonsolar * _inv_rho_csw_h0 * mask
