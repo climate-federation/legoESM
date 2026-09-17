@@ -120,6 +120,10 @@ rad_update_steps: 32        # exactly hourly at dt 112.5 (48 was hourly at dt 75
 # cases - while a layer with no condensate still returns 0.000, so it does not
 # manufacture cover out of dry air.  That is the mixed/ice-phase behaviour this
 # model needs; see cloud_alpha_xr / cloud_p_xr below for its sensitivity.
+# The condensate it reads is the PROGNOSTIC one: this deck runs Morrison, so
+# physics_pipeline passes q_c/q_i from the microphysics and the constant
+# cloud_q_c_diagnostic is only the fallback for runs with no microphysics wired
+# (it would otherwise give a near-uniform cover wherever cloud exists).
 clouds: xu_randall
 microphysics: morrison
 convection: bechtold        # mass-flux (IFS lineage), water-conserving by
