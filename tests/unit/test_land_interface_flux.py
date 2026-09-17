@@ -601,14 +601,18 @@ class TestConfigValidation:
                 land_mask_path="x.nc",
             ).validate_strict()
 
-    def test_validate_strict_rejects_unified_without_active_land_tile(self):
-        """Without slab_land_active/land_mask_path the slab SEB never steps —
-        'unified' would be a silent no-op (codex R1 finding 5)."""
-        with pytest.raises(ValueError, match="land_interface_flux"):
-            ExperimentConfig(
-                turbulence="holtslag_boville",
-                land_interface_flux="unified",
-            ).validate_strict()
+    @pytest.mark.parametrize("topography", ["flat", "gaussian"])
+    @pytest.mark.parametrize("slab_land_active", [False, True])
+    def test_validate_strict_rejects_unified_without_active_land_tile(
+            self, topography, slab_land_active):
+        """Idealized terrain cannot activate the requested slab without a mask."""
+        cfg = ExperimentConfig(
+            turbulence="holtslag_boville", land_interface_flux="unified",
+            slab_land_active=slab_land_active, topography=topography,
+        )
+        with pytest.raises(ValueError, match=f"topography={topography!r}"):
+            cfg.validate_strict()
+        cfg._replace(land_mask_path="land_mask.nc").validate_strict()
 
     def test_validate_strict_rejects_unified_on_mpas_and_spectral(self):
         """The MPAS/spectral lanes run combined.make_physics — the driver

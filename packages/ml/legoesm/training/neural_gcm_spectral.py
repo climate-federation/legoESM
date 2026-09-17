@@ -645,6 +645,11 @@ N_SFNO_FORCING_CHANNELS = 3
 # site below, cast to ``in_scale``'s dtype so the concatenate result dtype is
 # identical to the former module-top ``jnp.array`` (in both x32 and x64).
 _SFNO_FORCING_INPUT_SCALE = (300.0, 1.0, 1400.0)
+# Optional extra input plane (see ``make_sfno_spectral_physics``): the
+# ACE2-style land fraction.  The six ERA5 surface-flux planes take their
+# scales from ``neural_physics.SFC_FLUX_INPUT_NORMS`` (one source for both
+# learned arms).  Plain tuple for the same reason as above.
+_SFNO_LAND_FRAC_INPUT_SCALE = (1.0,)
 
 
 def _channel_input_scale(nlev: int) -> jnp.ndarray:
@@ -678,7 +683,9 @@ def _channel_tendency_scale(nlev: int) -> jnp.ndarray:
     ])
 
 
-def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid):
+def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid, *,
+                               spatial_embedding: bool = False,
+                               era5_surface_fluxes: bool = False):
     """Create a physics_fn compatible with SpectralPEModel.step().
 
     The returned function has signature::
@@ -710,12 +717,23 @@ def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid):
     (idealized / legacy tests): T_sfc proxy = lowest model level,
     sic = 0, insolation = S_0 (the historical constant input).
 
+    Optional extra input planes, appended AFTER the three forcing planes and
+    counted by ``model_registry.sfno_extra_input_channels`` (the network must
+    have been built with the same flags): ``spatial_embedding`` adds the
+    ACE2-style static land-fraction plane (``forcing["land_frac"]``; orography
+    is already a state channel), ``era5_surface_fluxes`` adds the six ERA5
+    surface-flux planes (``SFC_FLUX_FORCING_KEYS`` order).  Either flag
+    rejects ``forcing=None``.
+
     Parameters
     ----------
     sfno : SFNO
         Spherical Fourier Neural Operator (eqx.Module).
     grid : GaussianGrid
         Grid for SH transforms inside pack/unpack.
+    spatial_embedding, era5_surface_fluxes : bool
+        Which extra input planes to append; must match the SFNO's
+        ``in_channels``.
 
     Returns
     -------
@@ -723,20 +741,34 @@ def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid):
         Physics function for the spectral PE dycore.
     """
     from legoesm.atmosphere.physics.radiation.solar import cos_zenith_angle
+    from legoesm.atmosphere.physics.neural_physics import (
+        SFC_FLUX_FORCING_KEYS,
+        SFC_FLUX_INPUT_NORMS,
+    )
+    from legoesm.training.model_registry import sfno_extra_input_channels
 
+    n_extra = sfno_extra_input_channels(
+        spatial_embedding=spatial_embedding,
+        era5_surface_fluxes=era5_surface_fluxes)
     # nlev from the OUTPUT channels (pure state tendencies, 4*nlev+2);
     # in_channels additionally carries the N_SFNO_FORCING_CHANNELS
-    # forcing planes.
+    # forcing planes plus the optional extras.
     nlev = (sfno.config.out_channels - 2) // 4
-    if (sfno.config.in_channels != sfno.config.out_channels + N_SFNO_FORCING_CHANNELS
+    if (sfno.config.in_channels
+            != sfno.config.out_channels + N_SFNO_FORCING_CHANNELS + n_extra
             or (sfno.config.out_channels - 2) % 4 != 0
             or nlev < 1):
         raise ValueError(
             f"SFNO physics expects out_channels = 4*nlev + 2 (PE state "
             f"layout) and in_channels = out_channels + "
-            f"{N_SFNO_FORCING_CHANNELS} (forcing planes); got "
+            f"{N_SFNO_FORCING_CHANNELS} (forcing planes) + {n_extra} "
+            f"(spatial_embedding={spatial_embedding}, "
+            f"era5_surface_fluxes={era5_surface_fluxes}); got "
             f"in={sfno.config.in_channels}, out={sfno.config.out_channels}."
         )
+    extra_scale = tuple(
+        (_SFNO_LAND_FRAC_INPUT_SCALE if spatial_embedding else ())
+        + (tuple(SFC_FLUX_INPUT_NORMS) if era5_surface_fluxes else ()))
     in_scale = _channel_input_scale(nlev)
     out_scale = _channel_tendency_scale(nlev)
     spec = PE3DChannelSpec(nlev=nlev)
@@ -771,19 +803,38 @@ def make_sfno_spectral_physics(sfno: SFNO, grid: GaussianGrid):
             )
             insol = constants.S_0 * jnp.maximum(mu0, 0.0)
         else:
+            if spatial_embedding or era5_surface_fluxes:
+                raise ValueError(
+                    "an SFNO built with spatial_embedding and/or "
+                    "era5_surface_fluxes needs a forcing dict (land fraction "
+                    "/ ERA5 surface-flux planes); forcing=None callers "
+                    "cannot use it")
             t_sfc = t_lowest
             sic = jnp.zeros((n_lat, n_lon), dtype=packed.dtype)
             insol = jnp.full((n_lat, n_lon), constants.S_0, dtype=packed.dtype)
-        packed_in = jnp.concatenate(
-            [packed,
-             t_sfc[..., None], sic[..., None], insol[..., None]],
-            axis=-1,
-        )
+        planes = [packed, t_sfc[..., None], sic[..., None], insol[..., None]]
+        if spatial_embedding:
+            if "land_frac" not in forcing:
+                raise KeyError(
+                    "spatial_embedding=True requires forcing['land_frac'] "
+                    "(ACE2-style static land-fraction plane)")
+            planes.append(jnp.clip(
+                jnp.asarray(forcing["land_frac"]).reshape(n_lat, n_lon),
+                0.0, 1.0)[..., None])
+        if era5_surface_fluxes:
+            for _k in SFC_FLUX_FORCING_KEYS:
+                if _k not in forcing:
+                    raise KeyError(
+                        f"era5_surface_fluxes=True requires forcing[{_k!r}]")
+                planes.append(
+                    jnp.asarray(forcing[_k]).reshape(n_lat, n_lon)[..., None])
+        packed_in = jnp.concatenate(planes, axis=-1)
         # Normalize inputs to O(1)
         packed_norm = packed_in / jnp.maximum(
             jnp.concatenate([
                 in_scale,
-                jnp.asarray(_SFNO_FORCING_INPUT_SCALE, dtype=in_scale.dtype),
+                jnp.asarray(_SFNO_FORCING_INPUT_SCALE + extra_scale,
+                            dtype=in_scale.dtype),
             ]), 1e-10,
         )
         # SFNO forward: O(1) in, O(1) out
@@ -896,8 +947,45 @@ def make_turbulence_only_spectral_physics(dt,
     )
     raw_fn = make_physics(cfg, model_type="spectral_pe", dt=dt)
 
-    def physics_fn(state, grid_, sigma_coord):
-        result = raw_fn(state, grid_, sigma_coord)
+    from legoesm.atmosphere.physics.physics_state import (
+        NO_SFC_T_OVERRIDE,
+        init_physics_state,
+    )
+
+    def physics_fn(state, grid_, sigma_coord, forcing=None):
+        # PRESCRIBED ERA5 STRESS: when the forcing carries the surface stress
+        # planes, hand them to the scheme through a physics state built for
+        # this call — the same override slots the classical arm's threaded
+        # state uses — so the drag is the analysed stress, not the bulk
+        # formula's.  The surface temperature is anchored alongside, exactly
+        # as the classical rollout does, else the bulk sensible flux would be
+        # evaluated against the air temperature.  Without the stress keys the
+        # historical call runs byte-identically.
+        _has_x = forcing is not None and forcing.get("sfc_tau_x") is not None
+        _has_y = forcing is not None and forcing.get("sfc_tau_y") is not None
+        if _has_x != _has_y:
+            raise ValueError(
+                "a prescribed surface stress needs BOTH forcing['sfc_tau_x'] "
+                "and forcing['sfc_tau_y'] (stress on the atmosphere [Pa]); "
+                "got only one")
+        if not _has_x:
+            result = raw_fn(state, grid_, sigma_coord)
+            return result[0] if isinstance(result, tuple) else result
+        ncol = int(grid_.n_lat) * int(grid_.n_lon)
+        ps = init_physics_state(ncol, int(sigma_coord.n_levels), cfg)
+        _dt = ps.surface_T_sfc_override.dtype
+        # Verbatim (the loader refuses non-finite planes; see spectral_rollout).
+        tau_x = jnp.asarray(forcing["sfc_tau_x"]).reshape(ncol).astype(_dt)
+        tau_y = jnp.asarray(forcing["sfc_tau_y"]).reshape(ncol).astype(_dt)
+        _t_raw = jnp.asarray(forcing["T_sfc"]).reshape(ncol).astype(_dt)
+        t_sfc = jnp.where(jnp.isfinite(_t_raw), _t_raw, NO_SFC_T_OVERRIDE)
+        ps = ps._replace(
+            surface_tau_x_override_pa=tau_x,
+            surface_tau_y_override_pa=tau_y,
+            surface_T_sfc_override=t_sfc,
+        )
+        result = raw_fn(state, grid_, sigma_coord, phys_state=ps,
+                        forcing=forcing)
         return result[0] if isinstance(result, tuple) else result
 
     return physics_fn
@@ -1332,9 +1420,37 @@ def spectral_rollout(
                 f"shape {_raw.shape}, expected ({_ncol_grid},) — one value "
                 "per column of the physics grid.")
         _sfc_override = jnp.where(jnp.isfinite(_raw), _raw, NO_SFC_T_OVERRIDE)
+    # Prescribed turbulent surface fluxes: they must come as the full set,
+    # one value per column, and NaN-free.
+    _FLUX_OVERRIDE_KEYS = ("sfc_shf", "sfc_lhf", "sfc_tau_x", "sfc_tau_y")
+    _flux_override = None
+    _have_flux = [k for k in _FLUX_OVERRIDE_KEYS
+                  if forcing_base is not None and forcing_base.get(k) is not None]
+    if _have_flux:
+        _lack_flux = [k for k in _FLUX_OVERRIDE_KEYS if k not in _have_flux]
+        if _lack_flux:
+            raise KeyError(
+                "spectral_rollout: forcing_base carries prescribed surface "
+                f"flux keys {_have_flux} but is missing {_lack_flux} — the "
+                "turbulent lower boundary condition is prescribed as the "
+                "full set (shf, lhf, tau_x, tau_y).")
+        _ncol_grid = int(grid.n_lat) * int(grid.n_lon)
+        _flux_override = []
+        for _k in _FLUX_OVERRIDE_KEYS:
+            _raw_f = jnp.asarray(forcing_base[_k]).reshape(-1)
+            if _raw_f.shape != (_ncol_grid,):
+                raise ValueError(
+                    "spectral_rollout: the prescribed surface flux "
+                    f"{_k!r} has shape {_raw_f.shape}, expected "
+                    f"({_ncol_grid},) — one value per column of the physics "
+                    "grid.")
+            # Taken VERBATIM: the loader refuses non-finite planes, and a
+            # silent NaN->0 here would turn a broken sample into "no flux"
+            # for the classical arm while the learned arms saw the NaN.
+            _flux_override.append(_raw_f)
+        _flux_override = tuple(_flux_override)
     if forcing_base is not None:
-        _missing = [k for k in ("T_sfc", "sic", "day_of_year",
-                                "seconds_of_day") if k not in forcing_base]
+        _missing = [k for k in ("T_sfc", "sic", "day_of_year", "seconds_of_day") if k not in forcing_base]
         if _missing:
             raise KeyError(
                 "spectral_rollout: forcing_base is missing "
@@ -1355,17 +1471,23 @@ def spectral_rollout(
             jnp.asarray(forcing_base["day_of_year"], jnp.float64)
             + t / 86400.0
         )
+        # Everything else in forcing_base — the prescribed surface flux
+        # planes, the land fraction, anything a later part adds — passes
+        # through UNCHANGED: the fluxes are held fixed at their sample-start
+        # value for the whole window by construction.
+        #
+        # The RAW field, NaN over land preserved.  It is tempting to
+        # publish the sanitised copy here so every consumer sees one
+        # value, but the consumers disagree ON PURPOSE: the learned
+        # arms (SFNO, column MLP) read NaN as "no prescribed surface
+        # here" and substitute the lowest-level air temperature, and
+        # handing them the finite -1e4 sentinel instead would feed
+        # -10000 K into every land column (codex, overruling an earlier
+        # GLM suggestion).  The sentinel belongs only in the physics
+        # state's override slot, which is where its contract is defined.
+        # This is exactly what spectral_amip_rollout has always done.
         return {
-            # The RAW field, NaN over land preserved.  It is tempting to
-            # publish the sanitised copy here so every consumer sees one
-            # value, but the consumers disagree ON PURPOSE: the learned
-            # arms (SFNO, column MLP) read NaN as "no prescribed surface
-            # here" and substitute the lowest-level air temperature, and
-            # handing them the finite -1e4 sentinel instead would feed
-            # -10000 K into every land column (codex, overruling an earlier
-            # GLM suggestion).  The sentinel belongs only in the physics
-            # state's override slot, which is where its contract is defined.
-            # This is exactly what spectral_amip_rollout has always done.
+            **forcing_base,
             "T_sfc": forcing_base["T_sfc"],
             "sic": forcing_base["sic"],
             "day_of_year": jnp.mod(doy - 1.0, 365.0) + 1.0,
@@ -1699,28 +1821,58 @@ def spectral_rollout(
         return (new_state, new_rad_tendency, phys_state_new), None
 
     def _with_prescribed_sfc(ps):
-        """Anchor the bulk-flux surface temperature to the prescribed field.
+        """Anchor the prescribed surface boundary data on the physics state.
 
-        Without this the turbulence/surface scheme resolves its surface
-        temperature to the lowest model level's air temperature, so the
-        sensible heat flux is identically zero and the latent flux is
-        evaluated against a surface that is by construction at the air
-        temperature — i.e. the run has no surface energy exchange at all.
-        ``spectral_amip_rollout`` has always done this; the training rollout
-        could not, because a forcing dict was refused whenever radiation was
-        sub-cycled.
+        Called once on the initial physics state of the scan carry (the
+        classical arm): the prescribed surface temperature and the four
+        prescribed turbulent fluxes are window-constant, so they are set
+        here and then CARRIED unchanged by ``update_physics_state`` for the
+        whole rollout. Raises TypeError when the threaded state type lacks
+        the matching override slot, so an anchor can never be silently
+        dropped.
+
+        Parameters
+        ----------
+        ps : PhysicsState
+            Initial physics state of the scan carry.
+
+        Returns
+        -------
+        PhysicsState
+            ``ps`` with the prescribed anchors set (cast to the anchor
+            dtype); ``ps`` itself when nothing is prescribed.
         """
-        if _sfc_override is None:
+        if _sfc_override is None and _flux_override is None:
             return ps
         _cur = getattr(ps, "surface_T_sfc_override", None)
-        if _cur is None:
-            raise TypeError(
-                "spectral_rollout: forcing_base carries a prescribed surface "
-                "temperature but the threaded physics state has no "
-                "surface_T_sfc_override slot, so the anchor would be silently "
-                f"dropped (state type {type(ps).__name__}).")
-        return ps._replace(
-            surface_T_sfc_override=_sfc_override.astype(_cur.dtype))
+        if _sfc_override is not None:
+            if _cur is None:
+                raise TypeError(
+                    "spectral_rollout: forcing_base carries a prescribed surface "
+                    "temperature but the threaded physics state has no "
+                    "surface_T_sfc_override slot, so the anchor would be silently "
+                    f"dropped (state type {type(ps).__name__}).")
+            ps = ps._replace(
+                surface_T_sfc_override=_sfc_override.astype(_cur.dtype))
+        if _flux_override is not None:
+            _slots = ("surface_shflx_override_w_m2",
+                      "surface_lhflx_override_w_m2",
+                      "surface_tau_x_override_pa",
+                      "surface_tau_y_override_pa")
+            _fields = getattr(ps, "_fields", ())
+            for _slot in _slots:
+                if _slot not in _fields:
+                    raise TypeError(
+                        "spectral_rollout: forcing_base carries prescribed "
+                        "surface fluxes but the threaded physics state has "
+                        f"no {_slot} slot, so the anchor would be silently "
+                        f"dropped (state type {type(ps).__name__}).")
+            # Cast to the T_sfc anchor slot's dtype (all anchors share it);
+            # fall back to the planes' own dtype when no T_sfc anchor exists.
+            _dt = _cur.dtype if _cur is not None else _flux_override[0].dtype
+            for _slot, _val in zip(_slots, _flux_override):
+                ps = ps._replace(**{_slot: _val.astype(_dt)})
+        return ps
 
     if _thread_phys:
         if phys_state_in is not None:

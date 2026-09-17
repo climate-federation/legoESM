@@ -163,10 +163,11 @@ class CoupledConfig(NamedTuple):
     # SST-coupled, and the air-sea budget closes.  Default False keeps existing
     # coupled runs byte-identical (the atmosphere computes its own bulk surface
     # fluxes, independent of the ocean-driving fluxes); recommended ON after a
-    # coupled validation run.  Incompatible with a turbulence / unified-physics
-    # scheme that owns surface exchange (the pipeline raises) -- use the bulk-BL
-    # surface path.  Lagged one coupling segment (explicit coupling), exactly
-    # like ``couple_surface_radiation``.
+    # coupled validation run.  With a turbulence scheme the shared flux is
+    # folded into the scheme's lower boundary condition (it replaces the
+    # scheme's own bulk flux); the joint learned physics_parameterization has
+    # no such hook and the pipeline raises.  Lagged one coupling segment
+    # (explicit coupling), exactly like ``couple_surface_radiation``.
     couple_surface_fluxes: bool = False
 
     # Warm-start the land soil at the atmosphere's lat-structured near-surface

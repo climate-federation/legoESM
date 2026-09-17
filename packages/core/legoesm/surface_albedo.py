@@ -358,6 +358,12 @@ def land_albedo(
         # albedo; the aggregate snow contribution replaces alpha_snow * f_snow.
         return alpha_veg * (1.0 - f_snow) + snow_contrib_override
     alpha_snow = snow_albedo(snow_age, config, cos_zenith=cos_zenith)
+    # Snow cannot darken a surface below its own snow-free albedo: the aged
+    # value is a melting/dirty-snow asymptote, and on an ice sheet (band base
+    # 0.82 VIS / 0.62 NIR) the snow IS the surface.  No-op wherever the base
+    # is darker than aged snow (soil, vegetation), i.e. everywhere but
+    # glacier and other bright bases.
+    alpha_snow = jnp.maximum(alpha_snow, alpha_veg)
     return alpha_veg * (1.0 - f_snow) + alpha_snow * f_snow
 
 

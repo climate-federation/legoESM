@@ -48,8 +48,8 @@ def land_fraction_for_columns(grid, ncol, scheme_config=None):
     bridge did not pass an argument the other one did.  A single helper is
     harder to omit from a new bridge than a block of inline code.
 
-    Only ``VoronoiMesh`` carries the field today, so a structured grid returns
-    None and the leaf keeps its previous ocean branch unchanged.
+    ``VoronoiMesh`` and ``GaussianGrid`` can carry the field. If absent,
+    the leaf keeps its previous ocean branch unchanged.
     """
     lf = getattr(grid, "land_frac", None)
     if lf is not None:

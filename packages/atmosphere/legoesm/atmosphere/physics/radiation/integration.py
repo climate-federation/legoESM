@@ -17,6 +17,7 @@ from typing import Callable
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from legoesm.core.field import Field
 from legoesm.core.state import (
@@ -70,6 +71,109 @@ _OCEAN_ALB_MU_EXP = 1.7
 _OCEAN_ALB_POLY = 0.15
 _OCEAN_ALB_ROOT1 = 0.1
 _ICE_ALBEDO_FALLBACK = 0.75
+
+# --- prescribed (ERA5) radiative surface boundary condition ---------------
+# Minimum downwelling SW for trusting ERA5's implied surface albedo: below
+# this the sw_up/sw_down ratio is undefined (dark-sky noise) and the sun is
+# effectively down, so the model keeps its own albedo in those columns.
+_PRESCRIBED_ALBEDO_MIN_SW_DOWN_W_M2 = 1.0  # coeff-ok: owner-confirmed dark-sky threshold, not a tuned parameter
+# Floor on the prescribed upwelling LW before the fourth root: lw_up <= 0
+# would give a NaN (negative) or an unbounded gradient (zero) for T_rad.
+_PRESCRIBED_LW_UP_FLOOR_W_M2 = 1.0e-6  # coeff-ok: numerical floor far below instrument noise; only bounds the T^(1/4) gradient
+
+
+def resolve_prescribed_radiative_bc(forcing, radiation_config, ncol,
+                                    T_sfc_col, alb_col, emis_col):
+    """Apply a PRESCRIBED radiative surface boundary condition, per column.
+
+    Reads the optional traced forcing keys ``sfc_lw_up`` [W/m^2, up],
+    ``sfc_sw_up`` and ``sfc_sw_down`` [W/m^2] and returns
+    ``(T_sfc_col, alb_col, emis_col)`` — the surface temperature, albedo and
+    emissivity the radiation backend is handed — with:
+
+    * ``sfc_lw_up`` -> ``T_sfc_col = (max(LW_up, floor) / sigma_sb)**0.25``
+      and ``emis_col = 1.0``: with emissivity 1 the solver's upward LW is
+      sigma*T_rad^4, i.e. the prescribed flux (up to RRTMGP's band
+      truncation).  The TURBULENCE surface temperature is not touched: when
+      the radiative BC is prescribed the turbulent fluxes are prescribed too.
+    * ``sfc_sw_up`` + ``sfc_sw_down`` -> ``alb = clip(SW_up / SW_down, 0, 1)``
+      where ``SW_down >= _PRESCRIBED_ALBEDO_MIN_SW_DOWN_W_M2``; below it the
+      column keeps the albedo it would otherwise use (``alb_col`` — the
+      per-step or trained override — else the scheme's config scalar).
+
+    One shared resolver for every dycore's radiation factory, so the
+    boundary condition means the same thing on the spectral, hydrostatic
+    (lat-lon / cubed-sphere) and MPAS lanes.  Identity when the keys are
+    absent (``None`` values included).  Only rrtmgp and gray consume a
+    surface temperature / albedo; the gray backend takes no per-call
+    emissivity, so a gray emissivity != 1 with a prescribed LW is refused.
+    """
+    if forcing is None:
+        return T_sfc_col, alb_col, emis_col
+
+    def _col(x):
+        # scalars broadcast over the columns; (ncol,) / (n_lat, n_lon)
+        # fields flatten; anything else is a caller bug, named here
+        x = jnp.asarray(x)
+        if x.ndim == 0:
+            return jnp.broadcast_to(x, (ncol,))
+        if x.ndim > 2 or x.size != ncol:
+            raise ValueError(
+                "a prescribed radiative surface plane must be a scalar, "
+                f"(ncol,) or (n_lat, n_lon) with ncol={ncol}; got shape "
+                f"{tuple(x.shape)}.")
+        return x.reshape(ncol)
+
+    lw_up = forcing.get("sfc_lw_up")
+    sw_up = forcing.get("sfc_sw_up")
+    sw_dn = forcing.get("sfc_sw_down")
+    if lw_up is None and sw_up is None and sw_dn is None:
+        return T_sfc_col, alb_col, emis_col
+    if radiation_config.scheme not in ("rrtmgp", "gray"):
+        # simple_lw / mc3d take no surface temperature or albedo override,
+        # so the prescribed boundary condition would be silently ignored.
+        raise ValueError(
+            "prescribed radiative surface fluxes (sfc_lw_up / sfc_sw_up "
+            "/ sfc_sw_down) are only consumed by the rrtmgp and gray "
+            f"schemes; radiation scheme is {radiation_config.scheme!r}.")
+    if (sw_up is None) != (sw_dn is None):
+        raise ValueError(
+            "the prescribed surface shortwave boundary condition needs BOTH "
+            "'sfc_sw_up' and 'sfc_sw_down' in the radiation forcing; got "
+            f"only {'sfc_sw_up' if sw_up is not None else 'sfc_sw_down'!r}.")
+    if lw_up is not None:
+        _gray_e = radiation_config.gray.sfc_emissivity
+        try:
+            _gray_e_is_one = bool(np.all(np.asarray(_gray_e) == 1.0))
+        except (TypeError, jax.errors.TracerArrayConversionError):
+            _gray_e_is_one = False   # traced: cannot be shown to be 1
+        if radiation_config.scheme != "rrtmgp" and not _gray_e_is_one:
+            raise ValueError(
+                "forcing['sfc_lw_up'] prescribes the upwelling LW as "
+                "sigma*T_rad^4 (emissivity 1), but the gray radiation config "
+                f"has sfc_emissivity={_gray_e!r} and the gray backend takes "
+                "no per-call emissivity; set it to 1.0 or use rrtmgp.")
+        _lw = jnp.maximum(_col(lw_up), _PRESCRIBED_LW_UP_FLOOR_W_M2)
+        T_sfc_col = (_lw / constants.sigma_sb) ** 0.25  # coeff-ok: exact quartic root inverting sigma_sb*T^4
+        emis_col = 1.0  # coeff-ok: emissivity exactly 1 by construction
+    if sw_up is not None:
+        own = alb_col
+        if own is None:
+            own = (radiation_config.rrtmgp.sfc_albedo
+                   if radiation_config.scheme == "rrtmgp"
+                   else radiation_config.gray.sfc_albedo)
+        own_c = jnp.broadcast_to(jnp.asarray(own).reshape(-1), (ncol,))
+        _up = _col(sw_up)
+        _dn = _col(sw_dn)
+        alb_era5 = jnp.clip(
+            _up / jnp.maximum(_dn, _PRESCRIBED_ALBEDO_MIN_SW_DOWN_W_M2),
+            0.0, 1.0)  # coeff-ok: albedo is a dimensionless fraction in [0, 1]
+        # nan_to_num on the computed branch: jnp.where propagates NaN
+        # cotangents from the untaken branch.
+        alb_col = jnp.where(_dn >= _PRESCRIBED_ALBEDO_MIN_SW_DOWN_W_M2,
+                            jnp.nan_to_num(alb_era5, nan=0.0), own_c)
+    return T_sfc_col, alb_col, emis_col
+
 
 def _apply_T_sfc_override(T_sfc, override):
     """Apply a per-column ``T_sfc`` override over an arbitrary-shape T_sfc.
@@ -1315,6 +1419,14 @@ def _make_hydrostatic_radiation(
                         f"radiation solve."
                     )
                 _alb_col = _alb_col.reshape(ncol)
+        # Prescribed radiative surface BC (ERA5 LW_up / SW_up / SW_down) —
+        # the same resolver every dycore's radiation factory uses.  The
+        # hydrostatic / MPAS backend call carried no per-call emissivity
+        # before; ``_emis_col`` stays None (the config value) unless a
+        # prescribed LW sets it to 1.
+        _emis_col = None
+        T_sfc_col, _alb_col, _emis_col = resolve_prescribed_radiative_bc(
+            forcing, radiation_config, ncol, T_sfc_col, _alb_col, _emis_col)
 
         q_v_col, q_cloud_col, q_ice_col, n_cloud_col, n_ice_col = (
             _extract_tracer_columns(
@@ -1461,6 +1573,7 @@ def _make_hydrostatic_radiation(
             insolation=insol_col,
             cos_sza=cos_sza_col,
             sfc_albedo_override=_alb_col,
+            sfc_emissivity_override=_emis_col,
             q_cloud=q_cloud_col,
             q_ice=q_ice_col,
             n_cloud=n_cloud_col,
@@ -1503,6 +1616,7 @@ def _make_hydrostatic_radiation(
                 # SAME surface as the all-sky solve: CMIP6 clear-sky removes
                 # CLOUDS only, never the surface boundary condition.
                 sfc_albedo_override=_alb_col,
+                sfc_emissivity_override=_emis_col,
                 q_cloud=None,
                 q_ice=None,
                 n_cloud=None,
@@ -1532,14 +1646,14 @@ def _make_hydrostatic_radiation(
         _swn = rad_out.sw_flux_down[:, -1] - rad_out.sw_flux_up[:, -1]
         _lwn = rad_out.lw_flux_down[:, -1] - rad_out.lw_flux_up[:, -1]
         # TOA is the FIRST half-level (surface is the last, see above):
-        # rlut = lw_flux_up[:, 0], rsut = sw_flux_up[:, 0] — the range-limited
-        # top-halo up-faces, exactly what the compiled path reads
-        # (physics_pipeline.py:2219-2220), already in CMOR sign conventions.
-        # rsdt = PRESCRIBED toa_insolation (#620), NOT the quadratically clamped
-        # top-halo down-flux rad_out.sw_flux_down[:, 0] (~15% low; historically
-        # ~2x high before the range-limit) — matches the compiled path
-        # (physics_pipeline.py:2225-2228). Halo fallback keeps a value for any
-        # path that leaves toa_insolation=None (e.g. the zero-radiation stub).
+        # rlut = lw_flux_up[:, 0], rsut = sw_flux_up[:, 0] — the physical
+        # top-face fluxes of the two-stream recurrence (an earlier clipped
+        # extrapolation there is gone), exactly what the compiled path reads
+        # (physics_pipeline.py), already in CMOR sign conventions.
+        # rsdt = PRESCRIBED toa_insolation (#620), the boundary condition
+        # itself, matching the compiled path. Halo fallback keeps a value for
+        # any path that leaves toa_insolation=None (e.g. the zero-radiation
+        # stub).
         return _pack_hydrostatic_tendencies(
             dT_dt, state, shape_3d, shape_2d,
             sw_net_sfc=_swn, lw_net_sfc=_lwn,
@@ -2411,7 +2525,6 @@ def _make_spectral_pe_radiation(
         _emis_ovr = forcing.get("sfc_emissivity") if forcing is not None else None
         if _emis_ovr is None:
             _emis_ovr = sfc_emissivity_override
-
         # Effective time-of-day for the diurnal cycle.  ``_time`` holds
         # the *initial* day_of_year + seconds_of_day captured at module
         # import (or set via ``set_time`` between epochs); the scan
@@ -2488,6 +2601,10 @@ def _make_spectral_pe_radiation(
             return x
         _alb_col = _to_col(_alb_ovr)
         _emis_col = _to_col(_emis_ovr)
+        # Prescribed radiative surface BC (ERA5 LW_up / SW_up / SW_down),
+        # shared with every other dycore's radiation factory.
+        T_sfc_col, _alb_col, _emis_col = resolve_prescribed_radiative_bc(
+            forcing, radiation_config, ncol, T_sfc_col, _alb_col, _emis_col)
 
         rad_out = _call_radiation_backend(
             radiation_config=radiation_config,

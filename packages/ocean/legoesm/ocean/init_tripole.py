@@ -30,7 +30,21 @@ def squeeze_nemo_field_2d(a: np.ndarray) -> np.ndarray:
 _squeeze2d = squeeze_nemo_field_2d
 
 
-def read_mesh_mask_bathy(mesh_path, *, strip_north_rows: int = 0):
+# Enclosed seas the observed IC cannot fill (PHC3 has no profile at any depth
+# in the Marmara or the Black Sea, so every column there is stitched from
+# Aegean and Black-Sea donors and the stitch is a density wall); masked as
+# land, as the FESOM FORCA20 mesh does.  (lat_min, lat_max, lon_min, lon_max)
+# in degrees, lon in [-180, 180).
+# ponytail: the Dardanelles west of 26.9E stay ocean as a dead-end channel;
+# a flood fill from the Bosporus replaces the boxes if that ever matters.
+CLOSED_SEAS = {
+    "marmara": (40.3, 41.1, 26.9, 30.0),
+    "black_sea": (40.9, 47.5, 27.3, 42.0),   # includes the Bosporus and the Azov
+}
+
+
+def read_mesh_mask_bathy(mesh_path, *, strip_north_rows: int = 0,
+                         closed_seas=()):
     """Derive the 2-D ocean land mask and total bathymetric depth from NEMO's
     own mesh files (eORCA1 ``mesh_mask.nc``, or the split ``mesh_hgr.nc`` +
     ``mesh_zgr.nc`` + ``mask.nc`` of older runs such as NOC ORCA0083) -- the most
@@ -80,6 +94,20 @@ def read_mesh_mask_bathy(mesh_path, *, strip_north_rows: int = 0):
     if not np.all(np.isfinite(H_bathy[land_mask > 0.5])):
         raise ValueError(
             f"non-finite wet-column depth in mesh {mesh_file_list(mesh_path)}")
+    unknown = sorted(set(closed_seas) - set(CLOSED_SEAS))
+    if unknown:
+        raise ValueError(f"unknown closed_seas {unknown}; known: {sorted(CLOSED_SEAS)}")
+    if closed_seas:
+        lat = _squeeze2d(_var("gphit", "nav_lat"))
+        lon = _squeeze2d(_var("glamt", "nav_lon"))
+        lon = np.mod(lon + 180.0, 360.0) - 180.0
+        closed = np.zeros(land_mask.shape, dtype=bool)
+        for name in closed_seas:
+            lat_min, lat_max, lon_min, lon_max = CLOSED_SEAS[name]
+            closed |= ((lat >= lat_min) & (lat <= lat_max)
+                       & (lon >= lon_min) & (lon <= lon_max))
+        land_mask = np.where(closed, 0.0, land_mask)
+        H_bathy = np.where(closed, 0.0, H_bathy)
     if strip_north_rows < 0:
         raise ValueError(f"strip_north_rows must be >= 0, got {strip_north_rows}")
     if strip_north_rows >= land_mask.shape[0]:

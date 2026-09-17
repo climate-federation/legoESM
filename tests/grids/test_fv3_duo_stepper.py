@@ -70,6 +70,9 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
+from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import (  # noqa: E402
+    FV3DuoDynamicsModel,
+)
 from legoesm.core import fv3_duo_stepper as jstep_mod  # noqa: E402
 from legoesm.core import fv3_native_duo_stepper as npstep  # noqa: E402
 from legoesm.grids import fv3_duo_halos as jhalo  # noqa: E402
@@ -214,6 +217,8 @@ def _cmp(got, ref, name, tol):
     assert np.array_equal(na, nb), (
         f"{name}: non-finite masks differ (jax {int(na.sum())} vs numpy "
         f"{int(nb.sum())} cells of {a.size})")
+    assert np.array_equal(a[na], b[nb], equal_nan=True), (
+        f"{name}: non-finite VALUES differ")
 
     sa = np.isfinite(a) & (np.abs(a) >= _SENTINEL_FLOOR)
     sb = np.isfinite(b) & (np.abs(b) >= _SENTINEL_FLOOR)
@@ -578,20 +583,41 @@ def test_env_diagnostic_modes_are_refused(ctx, monkeypatch, var, val,
     assert jstep_mod.build_jax_duo_stepper_context(ctx) is not None
 
 
-def test_f64_gate_on_the_step(jctx, jstates0):
-    """Tier 0 -- an f32 operand raises at ENTRY.
+def test_dtype_uniformity_and_model_boundary_guards(jctx, jstates0):
+    """Uniform f32 is legal within a phase; mixed state is not.
 
-    With ``jax_enable_x64`` off, ``jnp.asarray(x, float64)`` truncates at
-    ARRAY CREATION and no downstream check recovers the bits, so the
-    gate has to be a hard entry raise, not a warning.
+    The model boundary separately refuses a uniform f32 state when the
+    configured storage dtype is f64, before calling the compiled step.
     """
-    f32 = {**jstates0, "delp": jstates0["delp"].astype(jnp.float32)}
-    with pytest.raises(TypeError, match="float64"):
-        jstep_mod.full_acoustic_step_sixface(jctx, f32, DT,
+    f32_faces = [
+        {k: np.zeros((MA, MA), np.float32) for k in _STATE_KEYS}
+        for _ in range(6)
+    ]
+    uniform_f32 = jstep_mod.states_to_jax(f32_faces)
+    assert all(a.dtype == jnp.float32 for a in uniform_f32.values())
+
+    mixed = {**jstates0, "delp": jstates0["delp"].astype(jnp.float32)}
+    with pytest.raises(TypeError, match="MIXED float dtypes"):
+        jstep_mod.full_acoustic_step_sixface(jctx, mixed, DT,
                                              d_ext=D_EXT_OFF)
-    with pytest.raises(TypeError, match="float64"):
-        jstep_mod.states_to_jax(
-            [{k: np.zeros((MA, MA), np.float32) for k in _STATE_KEYS}] * 6)
+
+    # BOTH DIRECTIONS, on a REALLY CONSTRUCTED model (codex's version
+    # used object.__new__ with _step_fn None, which cannot drift-check
+    # against the constructor; GLM + Claude 2026-09-10).  The guard has
+    # to refuse an f32 carry under f64 storage AND an f64 carry under
+    # f32 storage -- the second is the silent-downcast direction.
+    from legoesm.atmosphere.dynamics.gcm.fv3_duo_dynamics import FV3DuoConfig
+    from legoesm.grids.factory import create_fv3_duo_grid
+    grid24 = create_fv3_duo_grid(24)
+    for storage, carry, other in (("float64", uniform_f32, jnp.float64),
+                                  ("float32", jstates0, jnp.float32)):
+        m = FV3DuoDynamicsModel(grid24, FV3DuoConfig(km=5, hydrostatic=True,
+                                                     n_split=1,
+                                                     storage_dtype=storage))
+        assert m._storage_dtype == np.dtype(other)
+        with pytest.raises(TypeError, match="storage_dtype"):
+            m.step({"state": carry, "press": None, "q": [], "omga": None,
+                    "nh": None}, DT)
 
 
 def test_sw_cfg_must_be_hashable(jctx, jstates0):

@@ -324,14 +324,21 @@ class SurfaceLayerConfig(NamedTuple):
     #
     # Set these INSTEAD of injecting the flux as a forcing tendency, never as
     # well: the closure applies them as the diffusion's lower boundary
-    # condition, so doing both counts the flux twice. MOMENTUM is untouched --
-    # the decks that fix scalar fluxes leave the stress interactive
-    # (SFC_TAU_FXD = .false.), so tau still comes from Cd.
+    # condition, so doing both counts the flux twice. MOMENTUM is now
+    # prescribable too (prescribed_tau_*_pa): the ERA5 training lane fixes
+    # the stress as well as the scalar fluxes, so tau no longer always comes
+    # from Cd; ustar is rebuilt from the prescribed stress inside
+    # _apply_prescribed_scalar_fluxes so mixing-length schemes feel it.
     #
     # Annotated ``float | None`` => not spec-eligible: a prescribed boundary
-    # condition read off a case deck is a measurement, not a tunable closure.
+    # condition read off a case deck or an analysis (ERA5) is a measurement,
+    # not a tunable closure.
     prescribed_shflx_w_m2: float | None = None
     prescribed_lhflx_w_m2: float | None = None
+    # Stress ON THE ATMOSPHERE (opposite sign to the wind), matching
+    # tau_x/tau_y in compute_surface_fluxes. [Pa]
+    prescribed_tau_x_pa: float | None = None
+    prescribed_tau_y_pa: float | None = None
 
 
 class SmagorinskyConfig(NamedTuple):

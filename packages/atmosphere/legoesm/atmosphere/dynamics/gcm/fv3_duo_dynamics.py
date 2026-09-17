@@ -52,7 +52,10 @@ from legoesm.core.fv3_dynamics import (
     p_var_hydrostatic,
     p_var_nonhydrostatic,
 )
-from legoesm.core.fv3_native_dcmip16_ic import dcmip16_bc_six_face_state
+from legoesm.core.fv3_native_dcmip16_ic import (
+    dcmip16_bc_six_face_state,
+    dcmip16_terminator_six_face,
+)
 from legoesm.core.fv3_native_eta import set_eta_analytic
 from legoesm.core.fv3_native_state_3d import field_shape
 from legoesm.core.fv3_tracer2d import check_nsplt_schedule
@@ -93,6 +96,16 @@ class FV3DuoConfig(NamedTuple):
     storage_dtype: str = "float64"
 
 
+def lon_modulated_tracer(sphum, agrid_lon, n: int, ng: int, iq: int):
+    """``sphum * (1 + 0.5 sin(iq * lon))`` on the compute window of one
+    padded face array; halos untouched (zero, as sphum's are)."""
+    cs = slice(ng, ng + n)
+    q = np.array(sphum, dtype=np.float64)
+    lon = np.asarray(agrid_lon, dtype=np.float64)[cs, cs]
+    q[cs, cs, :] *= (1.0 + 0.5 * np.sin(iq * lon))[:, :, None]
+    return q
+
+
 class FV3DuoDynamicsModel:
     """One ``fv_dynamics`` outer step per ``step(state, dt)`` call.
 
@@ -105,7 +118,19 @@ class FV3DuoDynamicsModel:
 
     def __init__(self, grid, config: FV3DuoConfig | None = None, *,
                  step_out_shardings=None, step_spmd_mesh=None,
-                 step_face_batched: bool = False):
+                 step_face_batched: bool = False,
+                 step_windows=None):
+        # step_windows: ENGINEERING knob (M6, the tiled port) -- (kt, pad)
+        # runs the step on 6*kt*kt sub-face WINDOWS (fv3_duo_windows,
+        # padded partition, kt | m_a) instead of six faces: with
+        # step_spmd_mesh a (6, kt, kt) tile mesh, one window per device
+        # (fv3_duo_window_spmd); without a mesh, the single-device window
+        # arm (every exchange through the flat impl).  The kernels are
+        # the certified ones vmapped over the windows (batched arm
+        # forced); the state bundle is WINDOW-stacked (to_windows /
+        # to_flat convert).  Selects no scientific configuration: bitwise
+        # against the face-sharded flat step (jobs 9632470-3).  None keeps
+        # the certified six-face path byte-identical.
         # step_face_batched: ENGINEERING knob (face-batching ladder) --
         # routes the 3-D phases' per-face loops through their vmapped
         # arms (batched==loop gated at rtol 1e-13 per phase). Selects no
@@ -154,18 +179,12 @@ class FV3DuoDynamicsModel:
         # single source of truth the per-step boundary guard checks the
         # incoming carry against.
         self._storage_dtype = np.dtype(config.storage_dtype)
-        if self._storage_dtype != np.float64:
+        if self._storage_dtype not in (np.float32, np.float64):
             raise NotImplementedError(
-                f"fv3_duo storage_dtype={config.storage_dtype!r}: the "
-                f"coarse fp32/mixed precision FOUNDATION is in place (dtype-"
-                f"uniformity gates + this config field + factory "
-                f"acceptance), but the RUNTIME is not yet wired -- the "
-                f"in-phase fp64 workspace allocations and the fp64 grid "
-                f"metrics/halo tables must be threaded to storage_dtype "
-                f"(and the pressure column / energy fixer kept fp64 for a "
-                f"true mixed mode) before an fp32 step passes the "
-                f"uniformity gates. Use storage_dtype='float64' (the "
-                f"certified default). Tracked: fv3 fp32/mixed increment 2.")
+                f"fv3_duo storage_dtype={config.storage_dtype!r}: only "
+                f"'float32' (coarse fp32) and 'float64' (certified default) "
+                f"are wired. A true per-op MIXED mode (fp64 pressure column "
+                f"/ energy fixer, fp32 elsewhere) is a later increment.")
         for attr in ("ctx_np", "ctx_jax", "n", "ng"):
             if not hasattr(grid, attr):
                 raise TypeError(
@@ -201,23 +220,82 @@ class FV3DuoDynamicsModel:
         # object the compiled step uses, instead of an independently
         # rebuilt "similar" one that could drift in mesh/device order
         # (codex MAJOR, mp-driver-io design review 2026-08-27).
-        self.step_out_shardings = step_out_shardings
         self.step_spmd_mesh = step_spmd_mesh
         # The grid bundle's ctx_jax was built WITHOUT a mesh; a ring-
         # enabled context is rebuilt here from ctx_np rather than
         # mutating the shared bundle's tables in place (the tables hash
         # by identity as a STATIC jit arg, so mutating them under an
         # already-traced certified step would leave a stale cache).
-        if step_spmd_mesh is None:
+        # Context dtype (fp32/mixed increment 2): the grid metrics are fp64
+        # host constants; for a coarse fp32 run they must be cast to the
+        # storage dtype or they promote the f32 state back to f64 (and trip
+        # the uniformity gates). Rebuild the context at storage_dtype when
+        # it is not fp64. For the certified fp64 default we keep the shared
+        # grid.ctx_jax verbatim (no rebuild -> byte-identical). A ring
+        # (spmd_mesh) run already rebuilds; it now also carries the dtype.
+        _fp32 = self._storage_dtype == np.float32
+        _ctx_dtype = jnp.float32 if _fp32 else None   # None = uncast f64
+        self.window_layout = None
+        self._window_comm = None
+        self._window_sharding = None
+        if step_windows is not None:
+            from legoesm.core.fv3_duo_stepper import (
+                build_jax_duo_stepper_context,
+            )
+            if _fp32:
+                raise NotImplementedError(
+                    "step_windows with storage_dtype float32: the tiled "
+                    "lane is fp64-only (scope: fp32 on the tiled lane is "
+                    "out of scope)")
+            kt, pad = (int(v) for v in step_windows)
+            # a FRESH context: the window comm rides on its tables, and
+            # the shared grid bundle's tables must not be mutated
+            flat_ctx = build_jax_duo_stepper_context(grid.ctx_np)
+            if step_spmd_mesh is not None:
+                from legoesm.grids.fv3_duo_window_spmd import (
+                    attach_window_spmd_comm)
+                if tuple(step_spmd_mesh.devices.shape) != (6, kt, kt):
+                    raise ValueError(
+                        f"step_windows kt={kt} needs a (6, {kt}, {kt}) "
+                        f"mesh, got {tuple(step_spmd_mesh.devices.shape)}")
+                self._ctx_jax, self._window_comm = attach_window_spmd_comm(
+                    flat_ctx, step_spmd_mesh, pad)
+                self._window_sharding = self._window_comm.sharding
+                if step_out_shardings is None:
+                    step_out_shardings = self._window_sharding
+            else:
+                from legoesm.grids.fv3_duo_windows import attach_window_comm
+                self._ctx_jax, self._window_comm = attach_window_comm(
+                    flat_ctx, kt, pad, "padded")
+            self._flat_ctx_jax = flat_ctx
+            self.window_layout = self._window_comm.lay
+            step_face_batched = True
+            # the window ctx's n_w and the vertical extent must not
+            # collide: to_windows/to_flat classify horizontal axes by
+            # extent (fv3_duo_windows.horizontal_axes) and a km+1 inside
+            # [n, m_a+1] would be ambiguous -- refuse HERE, not deep in
+            # the IC (codex 2026-09-05; only toy grids can trigger it)
+            if grid.n <= config.km + 1 <= grid.n + 2 * grid.ng + 1:
+                raise NotImplementedError(
+                    f"step_windows: km+1 = {config.km + 1} lies inside the "
+                    f"horizontal extent range [{grid.n}, "
+                    f"{grid.n + 2 * grid.ng + 1}] of C{grid.n}; the window "
+                    f"layout cannot tell levels from a horizontal axis")
+        elif step_spmd_mesh is None and not _fp32:
             self._ctx_jax = grid.ctx_jax
         else:
             from legoesm.core.fv3_duo_stepper import (
                 build_jax_duo_stepper_context,
             )
             self._ctx_jax = build_jax_duo_stepper_context(
-                grid.ctx_np, spmd_mesh=step_spmd_mesh)
-        self._ak = np.asarray(ak, dtype=np.float64)
-        self._bk = np.asarray(bk, dtype=np.float64)
+                grid.ctx_np, spmd_mesh=step_spmd_mesh, dtype=_ctx_dtype)
+        # recorded AFTER the window default so a caller (the multiprocess
+        # driver) reads the sharding the step was actually built with
+        self.step_out_shardings = step_out_shardings
+        # ak/bk (eta coefficients) enter p_var alongside delp -> they must
+        # be the storage dtype too. fp64 default is byte-identical.
+        self._ak = np.asarray(ak, dtype=self._storage_dtype)
+        self._bk = np.asarray(bk, dtype=self._storage_dtype)
         self._ptop = float(ptop)
         # The resolved NH deck runs W_LIMITER=T (fv_mapz.F90:368); the core
         # refuses hydrostatic=False without an explicit choice.
@@ -288,6 +366,10 @@ class FV3DuoDynamicsModel:
         # C5, on concrete outputs OUTSIDE jit: an nsplt above NSPLT_MAX
         # would otherwise under-advect the tracers silently.
         check_nsplt_schedule(out)
+        # the resolved per-level sub-cycle schedule of this step, kept for
+        # instruments (the rank ladder prints it per rank: under
+        # jax.distributed it must be identical on every process)
+        self.last_nsplt = np.asarray(out["nsplt"])
         if out["pt_units"] != "K":
             # unreachable while km in {5,10} (> REMAP_MIN_NPZ = 4), but a
             # future km table below 5 would hand back theta_v — fail loudly.
@@ -301,8 +383,25 @@ class FV3DuoDynamicsModel:
     # Initial condition (slice 1: DCMIP16 baroclinic wave only)
     # ------------------------------------------------------------------
 
-    def dcmip16_initial_state(self, *, do_pert: bool = True) -> dict:
+    def dcmip16_initial_state(self, *, do_pert: bool = True,
+                              n_tracers: int = 1,
+                              terminator: bool = False) -> dict:
         """The DCMIP16_BC (test_case = -13 / -12) bundle on this grid.
+
+        ``terminator=True`` appends the oracle's own DCMIP16 terminator
+        pair ``cl, cl2`` (``dcmip16_terminator_six_face``) AFTER the
+        ``n_tracers`` list -- the same nonzero, longitude-dependent
+        passengers the Fortran cold start fills when its field_table lists
+        them, so a run can be scored tracer-for-tracer against that deck.
+
+        ``n_tracers > 1`` appends passenger tracers ``iq = 1..n-1`` built
+        as ``sphum * (1 + 0.5 sin(iq * lon))`` on the compute window (halos
+        stay zero, like sphum's).  sphum itself is zonally symmetric, so a
+        longitude-shifted copy would be the SAME field; the modulation is
+        what makes tracer ``iq`` distinguishable from tracer 0 and from
+        every other ``iq`` -- an index swap or a dropped tracer in the
+        sharded transport shows up, a copy would not.  Every extra tracer
+        is strictly positive where sphum is.
 
         ``sphum`` rides as a PASSENGER tracer (the lane advects it;
         ``zvir`` stays 0 so it never feeds back).  Pressures come from
@@ -318,6 +417,8 @@ class FV3DuoDynamicsModel:
             hydrostatic=cfg.hydrostatic, do_pert=do_pert)
         jstate = state_3d_to_jax(st6)
         n, ng = self.grid.n, self.grid.ng
+        flat_ctx = (self._flat_ctx_jax if self.window_layout is not None
+                    else self._ctx_jax)
         if cfg.hydrostatic:
             press = p_var_hydrostatic(
                 jstate["delp"], ptop=self._ptop, akap=FV3_KAPPA,
@@ -327,9 +428,21 @@ class FV3DuoDynamicsModel:
             press = p_var_nonhydrostatic(
                 jstate["delp"], jstate["delz"], jstate["pt"],
                 ptop=self._ptop, akap=FV3_KAPPA, n=n, ng=ng, km=cfg.km)
-            nh = build_nh_carry(self._ctx_jax, cfg.km,
-                                self._ctx_jax.hs6)
+            nh = build_nh_carry(flat_ctx, cfg.km, flat_ctx.hs6)
         q = [jnp.asarray(np.stack(sphum6))]
+        if n_tracers < 1:
+            raise ValueError(f"n_tracers must be >= 1, got {n_tracers}")
+        for iq in range(1, n_tracers):
+            q.append(jnp.asarray(np.stack([
+                lon_modulated_tracer(
+                    sphum6[t], self.grid.ctx_np["gs6"][t]["agrid_lon"],
+                    n, ng, iq)
+                for t in range(6)])))
+        if terminator:
+            pairs = dcmip16_terminator_six_face(self.grid.ctx_np, cfg.km)
+            for iq in range(2):
+                q.append(jnp.asarray(np.stack([pairs[t][iq]
+                                               for t in range(6)])))
         omga = jnp.zeros(
             (6,) + tuple(field_shape("delp", n, ng, cfg.km)),
             dtype=jnp.float64)
@@ -343,8 +456,66 @@ class FV3DuoDynamicsModel:
         # run it is the one place the IC is downcast; every OTHER
         # provenance (restart reads, external ICs) is caught by step()'s
         # boundary guard instead.
-        return jax.tree_util.tree_map(
+        bundle = jax.tree_util.tree_map(
             lambda a: (a.astype(self._storage_dtype)
                        if jnp.issubdtype(getattr(a, "dtype", np.int64),
                                          jnp.inexact) else a),
             bundle)
+        return self.to_windows(bundle) if self.window_layout else bundle
+
+    # ------------------------------------------------------------------
+    # window layout conversions (M6)
+    # ------------------------------------------------------------------
+
+    def to_windows(self, bundle):
+        """Six-face bundle -> window-stacked bundle (every horizontal array
+        gathered into its 6*kt*kt windows, placed on the window sharding
+        when the step is SPMD).  Identity when the model runs on faces."""
+        if self.window_layout is None:
+            return bundle
+        if self.window_layout.kt == 1 and self._window_sharding is None:
+            return bundle                      # W == m_a: the flat layout
+        from legoesm.grids.fv3_duo_windows import (gather_windows,
+                                                   horizontal_axes)
+        lay, sh = self.window_layout, self._window_sharding
+
+        def conv(a):
+            if (hasattr(a, "ndim")
+                    and horizontal_axes(lay, a.shape, 6) is not None):
+                # host-side gather: on device every one of the nb window
+                # slices is its own eagerly compiled XLA program per leaf
+                # (nb*leaves executables cached per process -- ~1.9 GB at
+                # C96 kt=3, growing with kt^2; 216-rank C192 OOM 2026-09-05)
+                w = gather_windows(lay, np.asarray(a), np)
+                if sh is None:
+                    return jnp.asarray(w)
+                # NOT device_put: for a multi-process sharding device_put
+                # first asserts the host array is identical on every process
+                # by gathering the WHOLE array across all ranks, per leaf
+                # (jax dispatch._device_put_sharding_impl) -- 27 GB/rank and
+                # 5 h for the 216-rank C192 IC (job 9654155).  The callback
+                # form transfers only this process's shards.
+                return jax.make_array_from_callback(
+                    w.shape, sh, lambda idx, w=w: w[idx])
+            return a
+        return jax.tree_util.tree_map(conv, bundle)
+
+    def to_flat(self, bundle):
+        """Window-stacked bundle -> six-face bundle: each window's OWNED
+        cells (host-side scatter, no device collective).  Identity when
+        the model runs on faces."""
+        if self.window_layout is None:
+            return bundle
+        if self.window_layout.kt == 1:
+            return jax.tree_util.tree_map(
+                lambda a: np.asarray(a) if hasattr(a, "ndim") else a, bundle)
+        from legoesm.grids.fv3_duo_windows import (scatter_owned,
+                                                   horizontal_axes)
+        lay = self.window_layout
+
+        def conv(a):
+            if (hasattr(a, "ndim")
+                    and horizontal_axes(lay, a.shape, lay.nb) is not None):
+                return scatter_owned(lay, np.asarray(a), np)
+            return a
+        return jax.tree_util.tree_map(conv, bundle)
