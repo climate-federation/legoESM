@@ -2608,7 +2608,7 @@ def _tke_production_statement_rows(
 
 
 def _tke_matrix_statement_rows(
-    trace, operand_record: dict, entry_mode: str,
+    trace, operand_record: dict, statement_record: dict, entry_mode: str,
     plant: str | None = None,
 ) -> dict:
     """Subdivide the compiled matrix/RHS block into its recorded outputs.
@@ -3001,7 +3001,8 @@ def _tke_program_twin(
         given_trace, tke_statement_record, tke_operand_record,
         "NEMO_TKE_RECORDED", rho0)
     given_matrix = _tke_matrix_statement_rows(
-        given_trace, tke_operand_record, "NEMO_TKE_RECORDED", plant)
+        given_trace, tke_operand_record, tke_statement_record,
+        "NEMO_TKE_RECORDED", plant)
     literal_counterfactual = None
     if plant not in ("stage-tke-production-ulp", "stage-tke-matrix-ulp"):
         vmix = cfg.physics.vertical_mixing
@@ -3217,7 +3218,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                     f"one production TKE solve: {len(solve_calls)}")
             injection["solve_call_count"] = len(solve_calls)
             injection["injection_citation"] = (
-                "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:3174-3195")
+                "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:3175-3196")
         require(getattr(state_after, "tke_avt", None) is not None,
                 "production _step_jitted result has no tke_avt K_H carry")
         return {
@@ -3243,7 +3244,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
             "bridge_citation": (
                 "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1198-1385"),
             "existing_stage_twin_citation": (
-                "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:3328-3358"),
+                "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:3329-3359"),
             "output_carry": "LatLonCGridOceanState.tke_avt",
             "extraction_citation": (
                 "ocean_model_latlon_cgrid.py:10808-10813"),

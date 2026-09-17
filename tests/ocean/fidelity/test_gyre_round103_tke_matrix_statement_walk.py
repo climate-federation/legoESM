@@ -172,7 +172,8 @@ def test_gate_scores_the_block_over_every_solved_level():
     assert "[..., 1:30]" in body
 
 
-def test_the_block_replay_is_committed_and_reproduces_nemo_from_nemo():
+def test_the_block_replay_is_committed_and_reproduces_nemo_from_nemo(
+        monkeypatch):
     """Codex review, round 103 finding 2: a cited number needs a shipped probe.
 
     The replay rebuilds NEMO's four block outputs from NEMO's OWN recorded
@@ -180,12 +181,16 @@ def test_the_block_replay_is_committed_and_reproduces_nemo_from_nemo():
     this fails, the reference side of every production row is already wrong.
     """
     import numpy as np
+    from legoesm.ocean.fidelity.provenance import ALLOW_DIRTY_ENV
     from nemo_testcase_l2_gyre_round103_tke_block_replay import (
         R101, R59, replay, rebuild_block,
     )
 
     if not R59.exists() or not R101.exists():
         pytest.skip("acquisition records are not present in this tree")
+    # The report stamps the tree and fails closed on tracked dirt, which is
+    # right for a gate run and wrong for a test run in a working copy.
+    monkeypatch.setenv(ALLOW_DIRTY_ENV, "1")
     report = replay(R59, R101, None)
     assert report["status"] == "PASS", report["rows"]
     assert [row["n_unequal"] for row in report["rows"]] == [0, 0, 0, 0]
@@ -241,3 +246,65 @@ def test_the_swap_helper_changes_only_the_shear_operand():
     assert not np.array_equal(
         np.ascontiguousarray(held["en_rhs"]).view(np.uint64),
         np.ascontiguousarray(swapped["en_rhs"]).view(np.uint64))
+
+
+def _fake_trace_from_nemo(arrays, langmuir):
+    """A trace whose every field is NEMO's own recorded value."""
+    import numpy as np
+    from types import SimpleNamespace
+
+    yx = lambda a: np.asarray(a).swapaxes(0, 1)  # noqa: E731
+    rhs30 = np.concatenate(
+        [yx(langmuir)[..., :1], yx(arrays["rhs_pre_sweep"])[..., 1:30]],
+        axis=-1)
+    return SimpleNamespace(tke_statement_trace=SimpleNamespace(
+        matrix_upper=yx(arrays["matrix_upper"])[..., 1:30],
+        matrix_lower=yx(arrays["matrix_lower"])[..., 1:30],
+        matrix_diag=yx(arrays["matrix_diag"])[..., 1:30],
+        rhs_pre_sweep=rhs30,
+        rhs_shear=yx(arrays["sh2"])[..., 1:30],
+        en_after_langmuir=yx(langmuir)[..., :30],
+    ))
+
+
+def test_the_gate_rows_are_all_bit_when_fed_nemos_own_values():
+    """Feed NEMO back to itself: every row BIT, and the swap verdict holds.
+
+    This exercises the real row builder end to end without the twelve-minute
+    production step, so a shape or orientation defect cannot hide until the
+    long run's last second (it already did once, as a NameError).
+    """
+    import numpy as np
+    from nemo_testcase_l2_gyre_round103_tke_block_replay import R101, R59
+    from nemo_testcase_l2_gyre_round54_tke_operands import read_record
+
+    if not R59.exists() or not R101.exists():
+        pytest.skip("acquisition records are not present in this tree")
+    operand_record = read_record(R59)
+    statement_record = gate.read_admitted_tke_statement_walk(R101)
+    langmuir = statement_record["arrays"]["en_after_langmuir"]
+    trace = _fake_trace_from_nemo(operand_record["arrays"], langmuir)
+
+    out = gate._tke_matrix_statement_rows(
+        trace, operand_record, statement_record, "SELF_TEST")
+    assert [row["n_unequal"] for row in out["rows"]] == [0, 0, 0, 0]
+    assert out["first_nonbit"] is None
+    attribution = out["p_sh2_attribution"]
+    assert attribution["p_sh2_row"]["n_unequal"] == 0
+    # With NEMO's own shear there is nothing to attribute, so the verdict must
+    # NOT claim an owner.
+    assert attribution["verdict"] == "REFUTED"
+    swap = {row["field"]: row for row in attribution["one_variable_swap"]}
+    assert swap["all_operands_recorded"]["n_unequal"] == 0
+    assert swap["p_sh2_swapped_vs_production"]["n_unequal"] == 0
+    assert swap["p_sh2_swapped_vs_nemo"]["n_unequal"] == 0
+
+    # Synthetic violation: corrupt one traced diagonal cell and the row moves.
+    trace.tke_statement_trace.matrix_diag = np.array(
+        trace.tke_statement_trace.matrix_diag, copy=True)
+    trace.tke_statement_trace.matrix_diag[0, 0, 0] = np.nextafter(
+        trace.tke_statement_trace.matrix_diag[0, 0, 0], np.float64(np.inf))
+    broken = gate._tke_matrix_statement_rows(
+        trace, operand_record, statement_record, "SELF_TEST")
+    assert broken["first_nonbit"]["field"] == "zdiag"
+    assert broken["first_nonbit"]["n_unequal"] == 1
