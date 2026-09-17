@@ -699,3 +699,40 @@ faithful path is wired.
 Next: the wiring design (closure + tendencies behind `BechtoldConfig.use_ifs_ascent`, default
 False), with the first-guess contract above respected, then the day-110 replay and the 5-day
 screen.
+
+### Iteration I.2 — codex's oracle review finds two wrong numbers in the closure (2026-09-17)
+Codex came back from its usage limit and reviewed the closure against the ACTUAL OpenIFS source,
+which is vendored in this repo at `docs/references/openifs_arpifs/phys_ec` (gitignored; per
+worktree). Every finding below was re-read at the quoted line before acting.
+
+| item | source | port had | effect |
+|---|---|---|---|
+| ZORCPD | cumastrn:411 `1.0/RCPD` | `g/RCPD` | environmental stability in ZHEAT inflated by g; ZHEAT is the closure denominator, so deep mass flux suppressed ~10x |
+| tendency pairs | :494-496 use PTENT/PTENQ, :757-767 use PTENTA/PTENQA | one pair for both | sub-cloud supply and the CAPE correction cannot both be right when other physics is active |
+| NJKT2 | `DO JK=NJKT2,KLEV` (:490, :732), 60 hPa (sucumf:280-285) | whole column | stratospheric advection reaches ZDQCV |
+| PWMEAN | cuascn:863 `MAX(1e-2, PWMEAN/MAX(1,ZDPMEAN))` | neither floor | wrong turnover time on weak columns, and sqrt at zero = infinite derivative |
+| ZMFS floor | :975-979, inside the binding branch | every active column | a legitimately tiny ratio is raised to 1e-10 |
+
+Two process notes. (1) The green gate run of Iteration I proved nothing for this module: codex
+found the param-spec gate SKIPS it, because its float defaults are names rather than literals.
+The spec is now keyed by the config class as the schema requires. (2) GLM's first NJKT2
+implementation took the cutoff at the SURFACE end of the column, which collapsed every integral
+onto the bottom layer and drove ZHEAT to its floor; caught by the new tests, fixed, and the
+direction is now spelled out in a comment at both sites.
+
+Tests: 15, all passing under `JAX_ENABLE_X64=1`, on a stretched grid (the uniform fixture could
+not distinguish the two cloud-base interface pairs). Four of the new expectations were themselves
+wrong and are corrected: the module lowers one global ZMFS instead of clamping per level; the
+below-base taper is built from the UNSCALED input flux; and sum(M_u) is legitimately flat in T
+whenever the RMFLIA bound rather than the CAPE closure sets ZMFS.
+
+Retraction from Iteration I: the claim that violating the first-guess caller contract makes the
+closure "saturate at ZMFMAX" is too strong. Codex's algebra: for a purely amplitude-scaled ascent
+the factor cancels between ZHEAT and the final rescaling, so saturation only follows once a cap
+binds or the ascent SHAPE changes. The contract still holds — the ascent must be launched at the
+first guess — but for that reason, not this one.
+
+Also settled today: `tests/unit/test_bechtold.py` is 98-passed under `JAX_ENABLE_X64=1` and
+17-failed without it, identically on main. Those 17 are a precision-mode artefact of running a
+numerics suite in float32, not branch damage. The residual question is real though: those
+gradients are non-finite in float32, which matters if this scheme is ever trained there.
