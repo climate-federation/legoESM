@@ -649,3 +649,11 @@ tendencies from the ascent's fluxes + terminal deposition, the existing IFS down
 evaporation kept, behind `BechtoldConfig.use_ifs_ascent` (default False until the arm decides);
 (3) the day-110 replay contract (Iteration H) and the 5-day screen on the adopted deck; (4) the L45
 grid arm once the user approves the grid (UTLS session drafts the layout).
+
+### Cover re-tune status (cloud session, 2026-09-17 ~02:00) — still PROVISIONAL, nothing in config
+High-cloud lever (condensate-aware cover floor) on the wv_sfcrain30 day-105 restart: q_ref 1e-4
+overshoots (ITCZ rsut +28 / rlut -24); q_ref 3e-4 gives rsut +17 / rlut -12 (ITCZ), SW-heavy; their
+interim recommendation if the PR must close: q_ref 3e-4 with rh_crit 0.85 (tropics ~rsut +9 / rlut -7);
+a cold-only (T < ~235 K) variant is being tested for a LW-heavy lever (~half a day). Per the user's
+decision the joint rh_crit re-tune waits for that; note the new convection path will move the
+cloud-layer humidity again, so the re-tune should follow the 5-day screen of the faithful scheme.
