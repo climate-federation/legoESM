@@ -30,7 +30,7 @@
 # The old 5,723/17,400, max 0.05926217077024117 row is RETRACTED: it combined
 #   kt=1 state/forcing with the kt=2 target. The replacement installs the full
 #   kt=2 Nbb=Kbb=Kmm=3 before-zdf_phy entry and kt=2 forcing, then extracts
-#   returned state.tke_avt through ocean_model_latlon_cgrid.py:10998-11011
+#   returned state.tke_avt through ocean_model_latlon_cgrid.py:11012-11025
 #   (assigned from _tke_coeff_new.K_H at :10797-10802). The TKE, stage, and
 #   entry readers now validate those slots fail-closed.
 # Physical-range check before scoring: candidate wet K_H is
