@@ -148,10 +148,12 @@ def test_vertical_del4_boundary_damped_and_column_conservative():
     nu = 1.0e-3
     T2 = jnp.asarray((-1.0) ** k)
     t2 = vertical_del4_T_tendency(T2, nu)
-    # Boundary 2Δσ response is -8·nu (½ the interior -16·nu) — reduced but
-    # strong, and NOT in the null space (would be 0 without the reflect inner BC).
-    assert float(jnp.abs(t2[0] / T2[0])) == pytest.approx(8.0 * nu, rel=1e-6)
-    assert float(jnp.abs(t2[-1] / T2[-1])) == pytest.approx(8.0 * nu, rel=1e-6)
+    # Boundary 2Δσ response is -4·nu at the boundary level and -12·nu at the
+    # next (interior -16·nu) — reduced but strong, and NOT in the null space.
+    assert float(jnp.abs(t2[0] / T2[0])) == pytest.approx(4.0 * nu, rel=1e-6)
+    assert float(jnp.abs(t2[-1] / T2[-1])) == pytest.approx(4.0 * nu, rel=1e-6)
+    assert float(jnp.abs(t2[1] / T2[1])) == pytest.approx(12.0 * nu, rel=1e-6)
+    assert float(jnp.abs(t2[-2] / T2[-2])) == pytest.approx(12.0 * nu, rel=1e-6)
 
     # Column-integrated-T conservation for arbitrary profiles (even + odd nlev,
     # random amplitudes) — refutes the "only accidental for symmetric fields"
@@ -162,6 +164,29 @@ def test_vertical_del4_boundary_damped_and_column_conservative():
         col_sum = float(jnp.sum(vertical_del4_T_tendency(Tr, nu)))
         scale = float(jnp.abs(vertical_del4_T_tendency(Tr, nu)).max())
         assert abs(col_sum) < 1e-10 * max(scale, 1.0)
+
+
+def test_vertical_del4_annihilates_linear_profiles():
+    """A boundary GRADIENT is not a 2Δσ mode: linear profiles get zero tendency
+    (with and without the mass projection).  The old reflect-padded operator
+    did not (measured ±2.77 K/day on the top two layers of a production-like
+    8 K/layer profile), which is what pinned the model top."""
+    nlev = 30
+    k = np.arange(nlev)
+    nu = 2.0e-6
+    T_lin = jnp.asarray(300.0 - 8.0 * k)
+    tend = vertical_del4_T_tendency(T_lin, nu)
+    assert float(jnp.max(jnp.abs(tend))) <= 1e-12 * nu * 300.0
+    tend_mass = vertical_del4_T_tendency(
+        T_lin, nu, layer_mass=jnp.full((nlev,), 1.0 / nlev))
+    assert float(jnp.max(jnp.abs(tend_mass))) <= 1e-12 * nu * 300.0
+    # Non-vacuity guard: the OLD reflect-padded operator does NOT annihilate
+    # boundary gradients (max |tend| = 2*nu*8 = 3.2e-5 at the boundary levels).
+    pad = jnp.pad(T_lin, (1, 1), mode="reflect")
+    lap = pad[:-2] - 2.0 * pad[1:-1] + pad[2:]
+    lap_p = jnp.pad(lap, (1, 1), mode="edge")
+    tend_old = -nu * (lap_p[:-2] - 2.0 * lap_p[1:-1] + lap_p[2:])
+    assert float(jnp.max(jnp.abs(tend_old))) > 1e-6
 
 
 def test_vertical_del4_is_differentiable():

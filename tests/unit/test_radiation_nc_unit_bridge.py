@@ -114,3 +114,32 @@ def test_missing_bridge_biases_r_eff_by_rho_to_the_third():
     np.testing.assert_allclose(ratio, expect, rtol=2e-2)
     # Non-vacuity: the two levels' densities genuinely differ.
     assert float(rho[0, 0]) / float(rho[0, 1]) > 1.4
+
+
+def test_rho_helper_floors_temperature_itself():
+    """The pipeline hands ``compute_rho`` an UNFLOORED temperature.
+
+    That was a merge decision, argued on both sides from a mechanism that does
+    not exist: an unfloored T = 0 was said to give rho = inf, so that a padded
+    column would multiply 0 by inf and poison the run with a NaN. The helper
+    clips the virtual temperature to 1 K internally, so no such value is
+    reachable, and flooring at the call site is redundant rather than
+    protective. Pinning it here because the claim outlived two reviews.
+    """
+    import jax.numpy as jnp
+    from legoesm.atmosphere.physics._shared import compute_rho
+
+    degenerate_T = jnp.array([0.0, 0.0, 0.5, 1.0, 1.0e-30])
+    p = jnp.array([0.0, 5.0e4, 1.0e5, 0.0, 1.0e5])
+    q_v = jnp.array([0.0, 0.0, 0.02, 0.0, 0.0])
+    rho = compute_rho(degenerate_T, p, q_v)
+    assert bool(jnp.all(jnp.isfinite(rho))), f"non-finite density: {rho}"
+
+    # And over real columns the floored and unfloored calls agree exactly, so
+    # the merge choice moved no number a simulation can produce.
+    T = jnp.linspace(150.0, 320.0, 512)
+    p_real = jnp.linspace(1.0e3, 1.05e5, 512)
+    q_real = jnp.linspace(0.0, 0.03, 512)
+    floored = compute_rho(jnp.maximum(T, 1.0), p_real, q_real)
+    unfloored = compute_rho(T, p_real, q_real)
+    np.testing.assert_array_equal(np.asarray(floored), np.asarray(unfloored))

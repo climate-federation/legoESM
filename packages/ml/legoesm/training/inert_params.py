@@ -58,6 +58,63 @@ def _leaf_names(tree):
             for p, _ in jax.tree.leaves_with_path(tree)]
 
 
+# Leaf-name markers of the classical SURFACE parameters.  With ERA5 surface
+# fluxes prescribed as the lower boundary condition (WB ``era5_surface_fluxes``)
+# these get no gradient — the bulk formula's output is replaced and the
+# radiative surface is pinned — so they are frozen by POLICY, not only by
+# measurement (no-inert-parameters rule).
+PRESCRIBED_SURFACE_LEAF_MARKERS = (
+    "surface_Cd_neutral",
+    "surface_Ch_neutral",
+    "surface_z0",
+    "surface_z0h_z0_ratio",
+    "surface_most_unstable_gamma",
+    "surface_most_stable_beta",
+    "rrtmgp_sfc_albedo",
+    "rrtmgp_sfc_emissivity",
+    "gray_sfc_albedo",
+    "gray_sfc_emissivity",
+    "spatial_surface",
+    # Lat-lon classical model's TrainablePhysicsParams.raw_values leaves:
+    # the bulk-transfer coefficients / surface albedos parameterize the same
+    # prescribed air-sea coupling.  Brackets included so e.g. C_E cannot
+    # match an unrelated key.
+    "['C_H']",
+    "['C_E']",
+    "['albedo_ice']",
+    "['albedo_ocean']",
+)
+
+
+def prescribed_surface_frozen_names(params) -> list:
+    """Sorted keystr names of the classical-surface leaves in ``params``.
+
+    Every inexact-array leaf whose path contains one of
+    :data:`PRESCRIBED_SURFACE_LEAF_MARKERS`; empty when none match (a neural
+    pytree, or a classical one without those knobs).
+    """
+    arrays = eqx.partition(params, eqx.is_inexact_array)[0]
+    return sorted(
+        nm for nm in _leaf_names(arrays)
+        if any(m in nm for m in PRESCRIBED_SURFACE_LEAF_MARKERS))
+
+
+def apply_forced_freeze(params, frozen_names, forced_names):
+    """Re-partition ``params`` so the union of both name lists is frozen.
+
+    Returns ``(arr, static, frozen_names)`` with ``frozen_names`` the sorted,
+    de-duplicated union — the same triple ``freeze_unreachable`` hands back,
+    so a caller can substitute it in place.
+    """
+    merged = sorted(set(frozen_names) | set(forced_names))
+    arrays = eqx.partition(params, eqx.is_inexact_array)[0]
+    names = _leaf_names(arrays)
+    absmax = [0.0 if nm in merged else 1.0 for nm in names]
+    arr, static = eqx.partition(
+        params, trainable_filter_spec(params, absmax, names))
+    return arr, static, merged
+
+
 def measure_leaf_reachability(value_and_grad_fn, params, samples, *,
                               n_probe=4, reduce=None, device_put=True):
     """Largest |gradient| each leaf reaches over ``n_probe`` samples.
