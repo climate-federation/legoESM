@@ -40,7 +40,7 @@ if [[ "$BACKEND" == gpu ]]; then
   SRUN_DEV=(--gpus-per-node=4 --gpu-bind=none)
 else
   export JAX_PLATFORMS=cpu
-  PPN="${PPN:-32}"; ARM_TIMEOUT=2400
+  PPN="${PPN:-8}"; ARM_TIMEOUT=2400
   SRUN_DEV=(--cpu-bind=cores --distribution=block:cyclic)
 fi
 source "${SUBMIT_DIR}/scripts/cluster/scaling_levante/_env.sh"   # $REPO, $PY, PYTHONPATH

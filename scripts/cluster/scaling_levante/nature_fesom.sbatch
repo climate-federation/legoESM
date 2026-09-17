@@ -32,7 +32,7 @@ for NPES in ${NPES_LIST:-16 32 64 128}; do
     SR=(--nodes="$nn" --ntasks="$nn" --ntasks-per-node=1 --gpus-per-node=4 --cpu-bind=none)
     RAGGED=1
   else
-    PPN="${PPN:-32}"; nn=$(( (NPES + PPN - 1) / PPN )); export JDIST_CPU=1 JAX_PLATFORMS=cpu; unset JDIST
+    PPN="${PPN:-2}"; nn=$(( (NPES + PPN - 1) / PPN )); export JDIST_CPU=1 JAX_PLATFORMS=cpu; unset JDIST
     SR=(--nodes="$nn" --ntasks="$NPES" --ntasks-per-node="$PPN" --cpu-bind=cores --distribution=block:cyclic)
     RAGGED=0   # ragged_all_to_all is GPU-only
   fi
