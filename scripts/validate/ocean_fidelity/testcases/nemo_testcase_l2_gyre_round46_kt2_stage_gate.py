@@ -2256,12 +2256,92 @@ def _tke_production_statement_rows(
             and entry_mode == "NEMO_RECORDED"):
         require(plant_target is not None,
                 "TKE production plant did not reach its target")
+    # Decompose the first moved block in compiled order.  The NEMO-changed
+    # interior mask is defined by the two independently written oracle
+    # boundaries, never by legoESM's output, so a candidate cannot choose the
+    # cells on which it is judged.
+    oracle_entry = np.asarray(
+        statement_record["arrays"]["en_entry"]).swapaxes(0, 1)[..., 1:30]
+    oracle_boundary = np.asarray(
+        statement_record["arrays"]["en_after_boundaries"]
+    ).swapaxes(0, 1)[..., :30]
+    candidate_boundary = np.asarray(production.en_after_boundaries)
+    changed_interior = (
+        np.ascontiguousarray(oracle_boundary[..., 1:30]).view(np.uint64)
+        != np.ascontiguousarray(oracle_entry).view(np.uint64)
+    )
+    unchanged_interior = ~changed_interior
+    require(
+        oracle_boundary[..., :1].size
+        + int(np.count_nonzero(changed_interior))
+        + int(np.count_nonzero(unchanged_interior))
+        == oracle_boundary.size,
+        "TKE boundary decomposition does not partition the binding domain")
+    boundary_block_rows = []
+    for name, reference, candidate, mask, statement in (
+        ("surface_assignment", oracle_boundary[..., :1],
+         candidate_boundary[..., :1],
+         np.ones(oracle_boundary[..., :1].shape, dtype=bool),
+         "zdftke.f90:284-289"),
+        ("bottom_assignment_changed_cells", oracle_boundary[..., 1:30],
+         candidate_boundary[..., 1:30], changed_interior,
+         "zdftke.f90:299-308"),
+        ("unchanged_interior", oracle_boundary[..., 1:30],
+         candidate_boundary[..., 1:30], unchanged_interior,
+         "no compiled boundary write"),
+    ):
+        selected = int(np.count_nonzero(mask))
+        if selected:
+            row = _classification(score(
+                f"GYRE-zco.kt2.tke_statement.production_step.boundary.{name}",
+                reference, candidate, mask))
+        else:
+            row = {
+                "name": (
+                    "GYRE-zco.kt2.tke_statement.production_step.boundary."
+                    f"{name}"),
+                "n_unequal": 0,
+                "absolute_max": 0.0,
+                "classification": "BIT",
+            }
+        row.update({
+            "field": name,
+            "entry_mode": entry_mode,
+            "execution": "production step",
+            "selected_cells": selected,
+            "nemo_statement": statement,
+        })
+        boundary_block_rows.append(row)
+    surface_row, bottom_row, unchanged_row = boundary_block_rows
+    if surface_row["classification"] != "BIT":
+        first_boundary_statement = {
+            "field": surface_row["field"],
+            "nemo_statement": surface_row["nemo_statement"],
+            "n_unequal": surface_row["n_unequal"],
+            "absolute_max": surface_row["absolute_max"],
+            "classification": surface_row["classification"],
+        }
+    elif unchanged_row["classification"] != "BIT":
+        first_boundary_statement = None
+    elif bottom_row["classification"] != "BIT":
+        first_boundary_statement = {
+            "field": bottom_row["field"],
+            "nemo_statement": bottom_row["nemo_statement"],
+            "n_unequal": bottom_row["n_unequal"],
+            "absolute_max": bottom_row["absolute_max"],
+            "classification": bottom_row["classification"],
+        }
+    else:
+        first_boundary_statement = None
+
     first = next(
         (row for row in rows if row["classification"] != "BIT"), None)
     return {
         "execution": "production step",
         "entry_mode": entry_mode,
         "rows": rows,
+        "boundary_block_rows": boundary_block_rows,
+        "first_nonbit_boundary_statement": first_boundary_statement,
         "entry_surface_level1": {
             "classification": "UNMEASURED_WITH_SPEC",
             "reason": (

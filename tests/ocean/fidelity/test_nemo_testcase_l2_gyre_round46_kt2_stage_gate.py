@@ -208,6 +208,10 @@ def test_round102_tke_production_rows_and_ulp_control(tmp_path):
         trace, record, "NEMO_RECORDED")
     assert clean["first_nonbit"] is None
     assert all(row["classification"] == "BIT" for row in clean["rows"])
+    assert all(row["classification"] == "BIT"
+               for row in clean["boundary_block_rows"])
+    assert sum(row["selected_cells"]
+               for row in clean["boundary_block_rows"]) == 22 * 32 * 30
     planted = gate._tke_production_statement_rows(
         trace, record, "NEMO_RECORDED", "stage-tke-production-ulp")
     target = next(
