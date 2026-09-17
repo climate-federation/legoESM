@@ -63,6 +63,11 @@ def test_terms_sum_to_the_thermodynamic_tendency():
     for f in ("horiz_adv", "vert_adv", "adiabatic_ps"):
         assert float(jnp.max(jnp.abs(getattr(terms, f)))) > 0.0, f
     assert float(jnp.max(jnp.abs(terms.horiz_diff))) == 0.0   # K_h = 0 here
+    # the coordinate vertical velocity comes back too, at interfaces
+    assert terms.sigma_dot.shape[1] in (tend.dT_dt.data.shape[1],
+                                        tend.dT_dt.data.shape[1] + 1)
+    assert bool(jnp.all(jnp.isfinite(terms.sigma_dot)))
+    assert float(jnp.max(jnp.abs(terms.sigma_dot))) > 0.0
 
 
 def test_horizontal_diffusion_is_reported_separately():

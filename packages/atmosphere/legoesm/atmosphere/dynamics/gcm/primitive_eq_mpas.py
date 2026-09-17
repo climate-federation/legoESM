@@ -223,6 +223,9 @@ class ThermoTerms(NamedTuple):
     vert_adv: jax.Array       # theta-form vertical term, carries the sigma-dot
                               # part of the adiabatic heating [K/s]
     adiabatic_ps: jax.Array   # kappa*T*(omega_ps/p + v.grad ln p_s) [K/s]
+    sigma_dot: jax.Array      # the coordinate vertical velocity the vertical
+                              # term was built from, at interfaces [1/s]; it is
+                              # what turns a tendency into a rate of descent
 
 
 def vertical_del4_T_tendency(
@@ -633,6 +636,10 @@ def mpas_hydrostatic_tendencies(
         # amplified at the stretched top levels.  See the σ branch below.
         vert_thermo_T = vertical_advection_theta_hybrid(
             T_3d, mass_flux, p_s, sigma_coord)
+        # Hybrid carries a mass flux, not a coordinate velocity; the
+        # diagnostic reports the equivalent dsigma/dt so the two branches are
+        # comparable (dp/dt per unit layer mass).
+        _sigma_dot_diag = mass_flux / jnp.maximum(p_s[:, None], 1.0)
         # Only the surface-pressure-tendency part of ω stays in ``adiabatic``:
         #   ω = B·dp_s/dt + F  ⇒  ω_ps = B·dp_s/dt.  The F (mass-flux) part
         # κ·T·F/p is now folded into ``vert_thermo_T`` above — NO double-count.
@@ -651,6 +658,7 @@ def mpas_hydrostatic_tendencies(
         sigma_dot = compute_sigma_dot_from_cumsum(
             _cumsum_dp, _D_total_p, p_s, sigma_coord,
         )
+        _sigma_dot_diag = sigma_dot
 
         # θ-form vertical thermodynamic transport (cancellation-free, #930):
         #   -σ̇·∂T/∂σ + κ·T·σ̇/σ  ==  -exner·σ̇·∂θ/∂σ   (θ = T·(p₀/p)^κ).
@@ -712,7 +720,8 @@ def mpas_hydrostatic_tendencies(
     _thermo_terms = (ThermoTerms(horiz_adv=_horiz_adv_only,
                                  horiz_diff=_horiz_diff_T,
                                  vert_adv=vert_thermo_T,
-                                 adiabatic_ps=adiabatic)
+                                 adiabatic_ps=adiabatic,
+                                 sigma_dot=_sigma_dot_diag)
                      if return_thermo_terms else None)
 
     # Vertical biharmonic hyperdiffusion of T (#930 cure): damp the grid-scale

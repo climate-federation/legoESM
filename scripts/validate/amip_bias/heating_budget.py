@@ -259,6 +259,19 @@ def main(argv=None):
         "dyn_vert_adv": np.asarray(_terms.vert_adv, dtype=np.float64),
         "dyn_adiabatic": np.asarray(_terms.adiabatic_ps, dtype=np.float64),
     }
+    # Coordinate vertical velocity as a descent rate in pressure units, so the
+    # cap mean can be read against the winter residual circulation's ~0.5-1
+    # hPa/day (GLM's closure test): if the model descends several times faster
+    # than that, the vertical warming is a circulation problem; if it descends
+    # at a physical rate while the tendency is 1-2 K/day, the vertical operator
+    # itself is.  sigma_dot is at interfaces; average to full levels.
+    _sd = np.asarray(_terms.sigma_dot, dtype=np.float64)
+    if _sd.shape[1] == T0.shape[1] + 1:
+        _sd = 0.5 * (_sd[:, :-1] + _sd[:, 1:])
+    extra_rows = {"omega_hpa_day": (
+        _sd * np.asarray(state.p_s.data, dtype=np.float64)[:, None]
+        * 86400.0 / 100.0)}      # NOT in dyn_terms: it is not a K/day tendency
+                                 # and must not enter the closure sum below
     print(f"horizontal T diffusion K_h = {float(model.config.K_h):.3e} m2/s "
           f"({'ACTIVE' if float(model.config.K_h) > 0 else 'off'})", flush=True)
     _closure = dyn - sum(dyn_terms.values())
@@ -321,6 +334,7 @@ def main(argv=None):
     rows = {**{k: v * 86400.0 for k, v in phys.items()},
             "vert_del4": vfilt * 86400.0, "dynamics": dyn * 86400.0,
             **{k: v * 86400.0 for k, v in dyn_terms.items()},
+            **extra_rows,
             "total": total * 86400.0}
     zm = {k: band_mean(v, lat_deg, area) for k, v in rows.items()}
     zm["T_model"] = band_mean(T0, lat_deg, area)
