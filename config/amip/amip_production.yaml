@@ -111,7 +111,16 @@ mpas_vert_advection_scheme: van_leer
 # --- Atmospheric physics (Bechtold mass-flux convection, directive 2026-07-06)
 radiation: rrtmg            # rrtmg = the rrtmgp builder alias (true CMIP6 RT)
 rad_update_steps: 32        # exactly hourly at dt 112.5 (48 was hourly at dt 75)
-clouds: sundqvist
+# Cloud fraction: Xu-Randall (1996), owner decision 2026-09-17, replacing
+# Sundqvist.  Sundqvist is a pure RH closure with a HARD onset at rh_crit, and
+# it sees only the humidity: measured on this configuration, an Arctic layer at
+# 230 K holding 20 mg/kg of ice at RH 0.70 reports cover 0.000, and so does the
+# same layer in an anvil at 215 K.  Xu-Randall reads the CONDENSATE as well, so
+# an ice-bearing layer below rh_crit is cloudy - 0.311 and 0.357 in those two
+# cases - while a layer with no condensate still returns 0.000, so it does not
+# manufacture cover out of dry air.  That is the mixed/ice-phase behaviour this
+# model needs; see cloud_alpha_xr / cloud_p_xr below for its sensitivity.
+clouds: xu_randall
 microphysics: morrison
 convection: bechtold        # mass-flux (IFS lineage), water-conserving by
                             # construction; C24 screen = revalidation gate
