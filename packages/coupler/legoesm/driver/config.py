@@ -3136,12 +3136,17 @@ class ExperimentConfig(NamedTuple):
                     f"{_composable}, got invalid {bad} in "
                     f"{self.gravity_wave_drag!r}"
                 )
-            if "e3sm_cam" in _gwd_parts and \
-                    self.e3sm_cam_source != "background":
+            # The EFFECTIVE source is the override's when one is supplied:
+            # gwd_config_for returns gravity_wave_drag_override untouched, so
+            # gating on the scalar would reject a valid override (codex #5).
+            _ov = getattr(self, "gravity_wave_drag_override", None)
+            _e3sm_src = (getattr(getattr(_ov, "e3sm_cam", None), "source", None)
+                         if _ov is not None else None) or self.e3sm_cam_source
+            if "e3sm_cam" in _gwd_parts and _e3sm_src != "background":
                 errors.append(
                     f"gravity_wave_drag {self.gravity_wave_drag!r} may only "
                     f"composite e3sm_cam with e3sm_cam_source='background'; "
-                    f"got e3sm_cam_source={self.e3sm_cam_source!r} "
+                    f"got e3sm_cam_source={_e3sm_src!r} "
                     f"(orographic double-counts topographic drag against "
                     f"lindzen/mcfarlane; frontal/convective need per-column "
                     f"source fields the composite does not carry)"

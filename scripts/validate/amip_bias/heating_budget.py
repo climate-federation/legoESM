@@ -244,6 +244,27 @@ def main(argv=None):
     dyn = dyn - vfilt          # dynamics row = advection + adiabatic + horizontal mixing
     print(f"one step eager ({time.time() - t0:.0f}s), nu_vert4_T={nu4:g}", flush=True)
 
+    # Split the dynamics row into the three terms the dycore itself assembles
+    # (horizontal advection, the theta-form vertical term, the surface-pressure
+    # adiabatic term).  These are the dycore's own arrays, not a re-derivation:
+    # mpas_hydrostatic_tendencies returns them on request, which no production
+    # path does.  Called WITHOUT physics so the terms are the dry dynamics only.
+    from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
+        mpas_hydrostatic_tendencies)
+    _, _terms = mpas_hydrostatic_tendencies(
+        state, mesh, sig, model.config, None, DT, return_thermo_terms=True)
+    dyn_terms = {
+        "dyn_horiz_adv": np.asarray(_terms.horiz_adv, dtype=np.float64),
+        "dyn_vert_adv": np.asarray(_terms.vert_adv, dtype=np.float64),
+        "dyn_adiabatic": np.asarray(_terms.adiabatic_ps, dtype=np.float64),
+    }
+    _closure = dyn - sum(dyn_terms.values())
+    print(f"dynamics split closure: max |dyn - (horiz+vert+adiab)| = "
+          f"{np.abs(_closure).max() * 86400.0:.3f} K/day "
+          f"(the remainder is the dycore's mass fixer and the p_s tendency's "
+          f"effect on T, which the residual row keeps)", flush=True)
+    dyn_terms["dyn_residual"] = _closure
+
     lat_deg = np.rad2deg(np.asarray(mesh.latCell, dtype=np.float64))
     area = np.asarray(mesh.areaCell, dtype=np.float64)
     p_s = np.asarray(state.p_s.data, dtype=np.float64)
@@ -279,6 +300,7 @@ def main(argv=None):
 
     rows = {**{k: v * 86400.0 for k, v in phys.items()},
             "vert_del4": vfilt * 86400.0, "dynamics": dyn * 86400.0,
+            **{k: v * 86400.0 for k, v in dyn_terms.items()},
             "total": total * 86400.0}
     zm = {k: band_mean(v, lat_deg, area) for k, v in rows.items()}
     zm["T_model"] = band_mean(T0, lat_deg, area)
@@ -309,9 +331,14 @@ def main(argv=None):
     import matplotlib.pyplot as plt
     keys = list(rows) + ["T_model - T_era5"]
     zm["T_model - T_era5"] = zm["T_model"] - zm["T_era5"]
-    fig, axs = plt.subplots(3, 3, figsize=(16, 11), constrained_layout=True)
+    ncol_p = 3
+    nrow_p = -(-len(keys) // ncol_p)      # grew when the dynamics split landed
+    fig, axs = plt.subplots(nrow_p, ncol_p, figsize=(16, 3.7 * nrow_p),
+                            constrained_layout=True)
     latc = 0.5 * (BANDS[1:] + BANDS[:-1])
     pc = np.nanmean(zm["p_hpa"], axis=0)
+    for a in axs.ravel()[len(keys):]:
+        a.axis("off")
     for a, k in zip(axs.ravel(), keys):
         lim = 12.0 if k.startswith("T_model") else max(0.5, np.nanpercentile(np.abs(zm[k]), 98))
         m = a.contourf(latc, pc, zm[k].T, np.linspace(-lim, lim, 25), cmap="RdBu_r",

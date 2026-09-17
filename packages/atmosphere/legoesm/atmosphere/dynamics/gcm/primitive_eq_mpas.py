@@ -204,6 +204,22 @@ class MPASPrimitiveEquationConfig(NamedTuple):
 # Tendency computation
 # ============================================================================
 
+class ThermoTerms(NamedTuple):
+    """The three constituents of the dry thermodynamic tendency, as assembled.
+
+    Diagnostic only: returned by :func:`mpas_hydrostatic_tendencies` when it is
+    called with ``return_thermo_terms=True``, which no production path does.
+    ``horiz_adv + vert_adv + adiabatic_ps`` is the thermodynamic tendency
+    before the vertical del4 filter and before physics are added, so a budget
+    that splits the dycore's contribution needs no re-derivation from state.
+    """
+
+    horiz_adv: jax.Array      # -v.grad(T) on cell centres [K/s]
+    vert_adv: jax.Array       # theta-form vertical term, carries the sigma-dot
+                              # part of the adiabatic heating [K/s]
+    adiabatic_ps: jax.Array   # kappa*T*(omega_ps/p + v.grad ln p_s) [K/s]
+
+
 def vertical_del4_T_tendency(
     T_3d: jax.Array, nu_vert4_T: float, layer_mass: jax.Array | None = None,
 ) -> jax.Array:
@@ -323,7 +339,8 @@ def mpas_hydrostatic_tendencies(
     config: MPASPrimitiveEquationConfig = MPASPrimitiveEquationConfig(),
     physics_tendency: MPASHydrostaticTendencies | None = None,
     dt: float = 0.0,
-) -> MPASHydrostaticTendencies:
+    return_thermo_terms: bool = False,
+) -> MPASHydrostaticTendencies | tuple[MPASHydrostaticTendencies, "ThermoTerms"]:
     """Compute tendencies for the hydrostatic PE on an MPAS mesh.
 
     Parameters
@@ -684,6 +701,10 @@ def mpas_hydrostatic_tendencies(
     adiabatic = adiabatic + kappa * T_3d * v_grad_lnps
 
     dT_dt_3d = horiz_adv_T_3d + vert_thermo_T + adiabatic
+    _thermo_terms = (ThermoTerms(horiz_adv=horiz_adv_T_3d,
+                                 vert_adv=vert_thermo_T,
+                                 adiabatic_ps=adiabatic)
+                     if return_thermo_terms else None)
 
     # Vertical biharmonic hyperdiffusion of T (#930 cure): damp the grid-scale
     # 2Δσ vertical mode that the adiabatic κ·T·ω/p term amplifies but no other
@@ -759,7 +780,7 @@ def mpas_hydrostatic_tendencies(
             for _i, k in enumerate(_tnames)
         }
 
-    return MPASHydrostaticTendencies(
+    _out = MPASHydrostaticTendencies(
         du_dt=Field(data=du_dt_3d, name="du_dt",
                     dims=("nEdges", "nlev"), units="m/s²"),
         dT_dt=Field(data=dT_dt_3d, name="dT_dt",
@@ -770,6 +791,12 @@ def mpas_hydrostatic_tendencies(
                        dims=("nCells",), units="m²/s³"),
         tracer_tendencies=tracer_tends_out,
     )
+    # ``return_thermo_terms`` is a STATIC Python bool, false on every
+    # production path, so the traced graph and the returned pytree are
+    # unchanged when it is not requested.
+    if return_thermo_terms:
+        return _out, _thermo_terms
+    return _out
 
 
 def _vertical_advection_edge(

@@ -133,7 +133,38 @@ def test_overlay_and_cli_round_trip():
     assert (built.e3sm_cam_source, built.e3sm_cam_pgwv, built.e3sm_cam_latitude_taper) == (
         d.e3sm_cam_source, d.e3sm_cam_pgwv, d.e3sm_cam_latitude_taper)
     assert gwd_config_for(ExperimentConfig(gravity_wave_drag="mcfarlane+hines")).e3sm_cam == (
-        GravityWaveDragConfig().e3sm_cam)                        # production path byte-identical
+        GravityWaveDragConfig().e3sm_cam)
+
+
+def test_legacy_composite_tendencies_are_unchanged():
+    """The old mcfarlane+hines composite must still produce the same numbers.
+
+    Comparing config leaves (as an earlier version of this file did) cannot see
+    a changed McFarlane or Hines tendency (codex #6), so this pins the actual
+    tendency of the legacy composite on the shared cubed-sphere fixture and
+    asserts the E3SM kernel is never entered on that path.
+    """
+    import legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam as _e3sm_mod
+    calls = []
+    orig = _e3sm_mod.e3sm_cam_gwd
+    _e3sm_mod.e3sm_cam_gwd = lambda *a, **k: calls.append(1) or orig(*a, **k)
+    try:
+        tend = _comp._tend("mcfarlane+hines")
+    finally:
+        _e3sm_mod.e3sm_cam_gwd = orig
+    assert not calls, "the legacy composite must not call the E3SM kernel"
+    du = np.asarray(tend.du_dt.data, dtype=np.float64)
+    dv = np.asarray(tend.dv_dt.data, dtype=np.float64)
+    dT = np.asarray(tend.dT_dt.data, dtype=np.float64)
+    # Recorded 2026-09-17 on the fixture below, x64, before/after the E3SM
+    # kernel fixes (they do not touch this path).  A deliberate change to
+    # McFarlane or Hines re-records these; an accidental one goes red.
+    for name, arr, total, peak in (
+            ("du", du, -1.99970478896111720e-01, 1.80290549600362429e-03),
+            ("dv", dv, -2.99955718344167635e-02, 2.70435824400543675e-04),
+            ("dT", dT, +4.07050913105737842e-03, 3.66991334142320838e-05)):
+        np.testing.assert_allclose(arr.sum(), total, rtol=1e-12, err_msg=name)
+        np.testing.assert_allclose(np.abs(arr).max(), peak, rtol=1e-12, err_msg=name)
 
 
 def test_calm_column_gradient_is_finite():
