@@ -166,38 +166,43 @@ def test_calm_column_gradient_is_finite():
 
 
 def test_momentum_fixer_uses_the_pre_limiter_stress():
-    """The column momentum fixer must see the saturation profile, not the
-    tendency-limited stress (E3SM gw_common.F90 accumulates taucd before the
-    tendency loop).  Forcing the limiter to bind by shrinking the per-step
-    tendency cap must therefore leave the fixer's net stress unchanged."""
-    from legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam import (
-        gw_drag_prof, gw_taucd_net, gw_cm_src)
+    """The column momentum fixer must be handed the saturation-profile stress,
+    not the tendency-limited one (E3SM gw_common.F90 accumulates taucd before
+    the tendency loop).  Tightening the per-step tendency cap changes the
+    limited stress but must leave the stress the fixer receives untouched."""
+    import legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam as mod
     u, v, T, pf, ph, zf, zh, rho, lat = _e3sm._driver_column(ncol=3)
     zeros = jnp.zeros_like(u)
 
-    def net_stress(tndmax_per_day):
-        cfg = BG._replace(tndmax_per_day=tndmax_per_day)
-        captured = {}
-        import legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam as mod
-        orig = mod.gw_drag_prof
+    def run(tndmax_per_day):
+        cfg = BG._replace(tndmax_per_day=tndmax_per_day, do_energy_conservation=True)
+        seen = {}
+        orig_prof, orig_fix = mod.gw_drag_prof, mod.momentum_energy_conservation
 
-        def spy(*args, **kw):
-            out = orig(*args, **kw)
-            captured["tau_sat"] = out[4]
-            captured["c"] = args[1]
-            captured["ubi"] = args[11]
-            captured["tend_level"] = args[3]
+        def spy_prof(*a, **kw):
+            out = orig_prof(*a, **kw)
+            seen["tau_limited"] = np.asarray(out[0])
             return out
 
-        mod.gw_drag_prof = spy
+        def spy_fix(tend_level, dt, dpm, uu, vv, du, dv, ds, pint, gravit,
+                    tau_net, xv, yv):
+            seen["tau_net"] = np.asarray(tau_net)
+            return orig_fix(tend_level, dt, dpm, uu, vv, du, dv, ds, pint,
+                            gravit, tau_net, xv, yv)
+
+        mod.gw_drag_prof, mod.momentum_energy_conservation = spy_prof, spy_fix
         try:
             mod.e3sm_cam_gwd(u, v, T, pf, ph, zf, zh, rho, lat, DT, cfg,
                              frontgf_col=zeros)
         finally:
-            mod.gw_drag_prof = orig
-        return np.asarray(gw_taucd_net(captured["tau_sat"], captured["c"],
-                                       captured["ubi"], captured["tend_level"]))
+            mod.gw_drag_prof, mod.momentum_energy_conservation = orig_prof, orig_fix
+        assert "tau_net" in seen, "the momentum fixer never ran"
+        return seen
 
-    loose = net_stress(400.0)
-    tight = net_stress(0.01)          # limiter binds in every layer
-    np.testing.assert_allclose(loose, tight, rtol=0.0, atol=0.0)
+    loose = run(400.0)
+    tight = run(0.01)                     # the limiter binds in every layer
+    # control: the perturbation must actually move the limited stress, else the
+    # invariance below would hold for any wiring.
+    assert np.max(np.abs(loose["tau_limited"] - tight["tau_limited"])) > 0.0
+    np.testing.assert_allclose(loose["tau_net"], tight["tau_net"],
+                               rtol=0.0, atol=0.0)
