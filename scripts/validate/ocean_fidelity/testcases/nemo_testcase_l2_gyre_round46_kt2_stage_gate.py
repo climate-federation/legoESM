@@ -2505,6 +2505,21 @@ def _tke_program_twin(
     given_operands = _tke_surface_operand_rows(
         given_trace, tke_statement_record, tke_operand_record,
         "NEMO_TKE_RECORDED", rho0)
+    literal_counterfactual = None
+    if plant != "stage-tke-production-ulp":
+        vmix = cfg.physics.vertical_mixing
+        literal_vmix = vmix._replace(tke=vmix.tke._replace(
+            tke_langmuir_evaluation="nemo_literal"))
+        literal_cfg = cfg._replace(physics=cfg.physics._replace(
+            vertical_mixing=literal_vmix))
+        literal_trace = jax.device_get(LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, literal_cfg,
+            _nemo_ws_test_hooks=hooks).step(
+                state, dt=card.dt_s, freshwater=freshwater,
+                surface_forcing=recorded_surface))
+        literal_counterfactual = _tke_production_statement_rows(
+            literal_trace, tke_statement_record,
+            "NEMO_TKE_RECORDED_LITERAL_LANGMUIR_COUNTERFACTUAL")
     model_operand_rows = {
         row["field"]: row for row in model_forcing_operands["rows"]}
     given_operand_rows = {
@@ -2533,6 +2548,7 @@ def _tke_program_twin(
             "input_bridge": input_bridge,
             "model_forcing_diagnostic": model_forcing,
             "surface_operand_attribution": surface_attribution,
+            "literal_langmuir_counterfactual": literal_counterfactual,
             "given_nemo_entry": given,
             "chained": None,
         }
@@ -2559,6 +2575,7 @@ def _tke_program_twin(
         "input_bridge": input_bridge,
         "model_forcing_diagnostic": model_forcing,
         "surface_operand_attribution": surface_attribution,
+        "literal_langmuir_counterfactual": literal_counterfactual,
         "given_nemo_entry": given,
         "chained": _tke_production_statement_rows(
             chained_trace, tke_statement_record, "LEGO_CHAINED"),

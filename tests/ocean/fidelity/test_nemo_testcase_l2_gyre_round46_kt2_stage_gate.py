@@ -382,6 +382,15 @@ def test_stage_twin_separates_isolated_jit_from_the_production_step():
     assert '"stage-assignment-output-ulp"' in source
 
 
+def test_tke_literal_discriminator_stays_inside_the_production_step():
+    source = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py").read_text()
+    assert 'tke_langmuir_evaluation="nemo_literal"' in source
+    assert '"literal_langmuir_counterfactual"' in source
+    assert "LatLonCGridOceanModel(" in source
+    assert ".step(" in source
+    assert '"NEMO_TKE_RECORDED_LITERAL_LANGMUIR_COUNTERFACTUAL"' in source
+
+
 def test_stage_twin_uses_the_direct_post_transport_w_reference():
     source = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py").read_text()
     assert 'read_stage_ww(' in source
