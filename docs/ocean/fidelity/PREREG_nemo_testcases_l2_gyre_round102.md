@@ -167,3 +167,32 @@ or excuse an interior entry mismatch. The production trace must capture the
 actual values used by the full jitted step: it may assemble the model's split
 surface/interior representation for scoring, but may not substitute a NEMO
 value or an isolated replay.
+
+## Post-boundary preregistered decomposition
+
+Frozen after the admitted pre-closure production run reported all five input
+fields and `en_entry` BIT, followed by 260 unequal cells at
+`en_after_boundaries` with maximum absolute difference
+`1.734723475976807e-18`, and before decomposing that row. The original
+Langmuir-first prediction is therefore **REFUTED** and remains so.
+
+The boundary block has only two active compiled writes in order: the surface
+assignment at `zdftke.f90:284-289`, followed by the bottom assignment at
+`:299-308` (the `ln_isfcav` arm at `:309-320` is inactive on this card). The
+existing consolidated gate will split the already measured boundary image
+into:
+
+1. surface level 1;
+2. NEMO-changed interior cells, defined bitwise by
+   `en_after_boundaries != en_entry` on levels `2:jpkm1`;
+3. unchanged interior cells, the exact complement.
+
+The frozen prediction is that the surface and unchanged-interior rows are BIT
+and all 260 inequalities lie on the changed-interior bottom assignment. That
+would name the first non-bit statement as
+`en(ji,jj,mbkt(ji,jj)+1) = MAX(zebot,rn_emin)*ssmask(ji,jj)` at compiled
+`zdftke.f90:307`. A non-bit surface row instead names the earlier compiled
+surface assignment at `:285`; a non-bit unchanged-interior row refutes the
+two-statement mapping and forbids an ownership claim. The three masks must
+partition every binding cell exactly, and the production ULP plant must still
+add exactly one inequality to its named full boundary row.
