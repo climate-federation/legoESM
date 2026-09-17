@@ -66,9 +66,12 @@ Usage
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
+import json
 import os
 import sys
+from pathlib import Path
 
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 os.environ["JAX_PLATFORMS"] = "cpu"
@@ -92,6 +95,7 @@ import legoesm.ocean.physics.vertical_mixing._shared as shared_mod  # noqa: E402
 from legoesm.ocean.fidelity.precision_gate import (  # noqa: E402
     require_fp64, require_explicit_e3t_mode,
 )
+from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
 from legoesm.ocean.fidelity.time_levels import time_level_for_dump  # noqa: E402
 
 # Sibling probes' helpers, imported BY PATH (scripts/ is not a package) --
@@ -139,6 +143,129 @@ def corr_ratio(lego: np.ndarray, nemo: np.ndarray, wet: np.ndarray,
     corr = float(np.corrcoef(lo, ne)[0, 1])
     ratio = float(np.mean(lo / ne))
     return dict(corr=corr, ratio=ratio, n=int(lo.size))
+
+
+def _sha256_array(value) -> str:
+    data = np.ascontiguousarray(np.asarray(value))
+    return hashlib.sha256(data.view(np.uint8)).hexdigest()
+
+
+class _ShearRoutingCaptured(RuntimeError):
+    """Private early stop after the production MLF path executes zdf_sh2."""
+
+
+def _routing_audit(model, state, forcing, *, plant: bool) -> dict:
+    """Capture DINO's actual MLF shear call before downstream closure work.
+
+    This drives the complete eager production closure until ``_leapfrog_step``
+    calls ``_tke_step_entry_p_sh2``.  The wrapper then evaluates the real
+    helper on the exact arguments it received and stops deliberately; this
+    avoids scoring the historical probe's reconstructed call or continuing
+    into unrelated later TKE work.
+    """
+    real = LatLonCGridOceanModel._tke_step_entry_p_sh2
+    captured = {}
+
+    def capture(self, shear_state, **kwargs):
+        clean, face_metrics = real(
+            self, shear_state,
+            **{**kwargs, "return_face_metrics": True})
+        if face_metrics is None or len(face_metrics) != 4:
+            raise RuntimeError(
+                "REFUSE: DINO production shear did not consume four live "
+                "NOW/BEFORE face metrics")
+        eta_now = kwargs.get("eta_now")
+        if eta_now is None or shear_state.eta_before is None:
+            raise RuntimeError(
+                "REFUSE: DINO production shear lacks NOW or BEFORE ssh")
+        captured.update({
+            "p_sh2": np.asarray(clean),
+            "face_metrics": tuple(np.asarray(v) for v in face_metrics),
+            "eta_now": np.asarray(eta_now),
+            "eta_before": np.asarray(shear_state.eta_before.data),
+        })
+        if plant:
+            eta_plant = np.asarray(eta_now).copy()
+            live = np.argwhere(np.asarray(clean) != 0.0)
+            if live.size == 0:
+                raise RuntimeError(
+                    "REFUSE: DINO shear routing plant found no live p_sh2")
+            peak = np.unravel_index(
+                int(np.argmax(np.abs(np.asarray(clean)))),
+                np.shape(clean))
+            planted_at = tuple(int(v) for v in peak[:2])
+            eta_plant[planted_at] = np.nextafter(
+                eta_plant[planted_at], np.float64(np.inf))
+            planted, planted_metrics = real(
+                self, shear_state, **{
+                    **kwargs, "eta_now": jnp.asarray(eta_plant),
+                    "return_face_metrics": True})
+            metric_moved = [
+                int(np.count_nonzero(
+                    np.ascontiguousarray(a).view(np.uint64)
+                    != np.ascontiguousarray(b).view(np.uint64)))
+                for a, b in zip(face_metrics, planted_metrics)
+            ]
+            p_moved = int(np.count_nonzero(
+                np.ascontiguousarray(np.asarray(clean)).view(np.uint64)
+                != np.ascontiguousarray(np.asarray(planted)).view(np.uint64)))
+            if not any(metric_moved) or p_moved == 0:
+                raise RuntimeError(
+                    "REFUSE: DINO one-ULP NOW-ssh plant did not reach both "
+                    "a consumed face metric and p_sh2")
+            captured.update({
+                "plant_index": planted_at,
+                "plant_metric_cells_moved": metric_moved,
+                "plant_p_sh2_cells_moved": p_moved,
+            })
+        raise _ShearRoutingCaptured
+
+    state = jax.tree_util.tree_map(
+        lambda value: (jnp.asarray(value)
+                       if isinstance(value, (np.ndarray, np.generic))
+                       else value),
+        model._seed_tke_preclosure_carry(state),
+    )
+    forcing = jax.tree_util.tree_map(
+        lambda value: (jnp.asarray(value)
+                       if isinstance(value, (np.ndarray, np.generic))
+                       else value),
+        forcing,
+    )
+    model.prime_step_caches(state)
+    LatLonCGridOceanModel._tke_step_entry_p_sh2 = capture
+    try:
+        with jax.disable_jit():
+            LatLonCGridOceanModel._step_jitted.__wrapped__(
+                model, state, DT, None, forcing)
+    except _ShearRoutingCaptured:
+        pass
+    finally:
+        LatLonCGridOceanModel._tke_step_entry_p_sh2 = real
+    if not captured:
+        raise RuntimeError(
+            "REFUSE: DINO production closure never executed the shear divisor")
+
+    p_sh2 = captured.pop("p_sh2")
+    face_metrics = captured.pop("face_metrics")
+    eta_now = captured.pop("eta_now")
+    eta_before = captured.pop("eta_before")
+    return {
+        "execution": "production MLF closure eager through the shear call",
+        "resolved_route": {
+            "Kmm": "eta_now supplied by _leapfrog_step",
+            "Kbb": "shear_state.eta_before",
+            "eta_now_sha256": _sha256_array(eta_now),
+            "eta_before_sha256": _sha256_array(eta_before),
+            "now_before_bit_identical": bool(np.array_equal(
+                np.ascontiguousarray(eta_now).view(np.uint64),
+                np.ascontiguousarray(eta_before).view(np.uint64))),
+        },
+        "p_sh2_sha256": _sha256_array(p_sh2),
+        "p_sh2_nonzero": int(np.count_nonzero(p_sh2)),
+        "face_metric_sha256": [_sha256_array(v) for v in face_metrics],
+        **captured,
+    }
 
 
 def run_and_capture_sh2(model, state, forcing, *, avm_weighting: str,
@@ -235,6 +362,14 @@ def main() -> int:
                           "path but with the 'squared_centered' (legoESM's "
                           "non-kamm default) shear discretization substituted, "
                           "to probe whether a DIFFERENT card explains 0.934.")
+    ap.add_argument(
+        "--routing-audit", action="store_true",
+        help=("drive the actual DINO MLF production closure only through its "
+              "shear call and hash the consumed NOW/BEFORE route"),
+    )
+    ap.add_argument("--expect-commit")
+    ap.add_argument("--plant-routing-eta-ulp", action="store_true")
+    ap.add_argument("--output", type=Path)
     args = ap.parse_args()
 
     from legoesm.core.precision import PrecisionPolicy, set_policy
@@ -285,6 +420,52 @@ def main() -> int:
           "== 'nemo_face_native', confirming the DINO kamm card's setting "
           "(dino.py:1454) is what THIS twin state actually resolves to -- "
           "not assumed from reading the card's source text.")
+
+    if args.routing_audit:
+        stamp = worktree_stamp()
+        expected = (args.expect_commit or "").lower()
+        if (len(expected) != 40 or not stamp["clean"]
+                or stamp["commit"].lower() != expected):
+            print(
+                "REFUSE: DINO routing audit requires a clean exact commit "
+                f"stamp; got {stamp}, expected={expected!r}",
+                file=sys.stderr,
+            )
+            return 3
+        if getattr(tke_cfg, "tke_shear_evaluation_stage", None) != "step_entry":
+            print("REFUSE: DINO card does not select step-entry shear",
+                  file=sys.stderr)
+            return 3
+        if getattr(tke_cfg, "tke_shear_metric_source", None) != "nemo_qco_live_face":
+            print("REFUSE: DINO card does not select live QCO face metrics",
+                  file=sys.stderr)
+            return 3
+        report = {
+            "format": "dino-sh2-routing-audit-v1",
+            "worktree": stamp,
+            "recipe": RECIPE,
+            "compiled_program": (
+                "DINO/BLD/ppsrc/nemo/stpmlf.f90:187-193 -> "
+                "zdfphy.f90:316-319 -> zdfsh2.f90:84-109"),
+            "config": {
+                "tke_shear_production": resolved_shear,
+                "tke_shear_avm_weighting": resolved_avm_w,
+                "tke_shear_evaluation_stage": (
+                    tke_cfg.tke_shear_evaluation_stage),
+                "tke_shear_metric_source": tke_cfg.tke_shear_metric_source,
+            },
+            "plant": bool(args.plant_routing_eta_ulp),
+            "routing": _routing_audit(
+                model, st, sf, plant=args.plant_routing_eta_ulp),
+            "status": ("PLANT-FIRED" if args.plant_routing_eta_ulp
+                       else "PASS"),
+        }
+        text = json.dumps(report, indent=2, sort_keys=True)
+        if args.output:
+            args.output.write_text(text + "\n")
+        print(text)
+        print("STATUS", report["status"])
+        return 1 if args.plant_routing_eta_ulp else 0
 
     # ---- geometry / masks ----
     jpi, jpj, jpk, hls = _read_dims(RUN)
