@@ -127,6 +127,34 @@ def test_gaussian_driver_land_fraction_reaches_both_consumers(tmp_path, with_mas
     np.testing.assert_array_equal(actual, expected)
 
 
+def test_gaussian_topography_is_ocean_unless_explicit_mask(tmp_path):
+    """The mountain changes geopotential; only the named mask supplies land."""
+    import xarray as xr
+
+    cfg = ExperimentConfig(
+        grid=GridConfig(grid_type="gaussian", resolution=3, nlev=3),
+        dycore=DycoreConfig(dt=600.0, model_type="hydrostatic"),
+        topography="gaussian", radiation="gray", days=1,
+    )
+    ocean = ModelDriver(cfg, output_dir=str(tmp_path / "ocean"))
+    fraction = ocean.static_land_fraction()
+    np.testing.assert_array_equal(fraction, np.zeros(ocean.grid.grid_shape_2d))
+    assert bool(jnp.any(ocean.static_topography_phis() != 0))
+
+    mask = ((np.arange(fraction.size).reshape(fraction.shape) * 7) % 17) / 16.0
+    mask_path = tmp_path / "land_mask.nc"
+    xr.Dataset(
+        {"lsm": (("lat", "lon"), mask)},
+        coords={"lat": np.asarray(ocean.grid.lat) * 180.0 / np.pi,
+                "lon": (np.asarray(ocean.grid.lon) * 180.0 / np.pi) % 360.0},
+    ).to_netcdf(mask_path)
+    masked = ModelDriver(cfg._replace(land_mask_path=str(mask_path)),
+                         output_dir=str(tmp_path / "masked"))
+    np.testing.assert_array_equal(masked.static_land_fraction(), mask)
+    np.testing.assert_array_equal(masked.static_topography_phis(),
+                                  ocean.static_topography_phis())
+
+
 def test_land_mask_to_ocean_only_chain_end_to_end(tmp_path):
     """END-TO-END (iter 454/455): the realistic AMIP config's --land-mask-path flows through
     the WHOLE production chain a `--ocean-only` empirical run depends on — generator ->
