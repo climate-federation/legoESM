@@ -623,4 +623,5 @@ def test_chained_observer_scores_the_public_step_seeded_context():
     seed = "state = model._seed_tke_preclosure_carry(state)"
     step = "trace = jax.device_get(model.step("
     output = "np.asarray(card.recipe.grid.area_T), state, kt,"
-    assert source.index(seed) < source.index(step) < source.rindex(output)
+    seed_at = source.index(seed)
+    assert seed_at < source.index(step, seed_at) < source.rindex(output)
