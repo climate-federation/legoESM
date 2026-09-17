@@ -290,3 +290,18 @@ configured vectorized arm must remain byte-for-byte unchanged, and supplying
 `bottom_level` to any configuration that consumes neither feature must still
 raise. A focused test must cover all three cases. The numerical prediction
 and falsifier above remain unchanged.
+
+## Production-plant selector correction
+
+Frozen after the first `stage-tke-production-ulp` invocation exited 1 but its
+JSON revealed `plant_target=null`, `clean_n_unequal=0`, and `n_unequal=0`.
+That result is **INVALID**, not a passing plant: the main program's generic
+plant exit policy made the command red even though the row perturbation never
+ran. The row selector retained the obsolete label `NEMO_RECORDED`, while the
+binding production arm is labelled `NEMO_TKE_RECORDED`.
+
+Before rerunning, update that selector and its hermetic test to the binding
+label and require the reported target to be non-null. The rerun confirms the
+control only if the clean boundary has zero unequal cells, the planted row has
+exactly one unequal cell, `plant_target` names that row, and the process exits
+nonzero. Any other result invalidates the production statement instrument.
