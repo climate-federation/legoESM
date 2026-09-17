@@ -2226,7 +2226,20 @@ def _nemo_literal_langmuir_operands(
         depth_b, imlc[..., None], axis=-1)[..., 0]
     h_lc = jnp.maximum(h_lc, _EPS)
 
-    zus = jnp.sqrt(2.0 * half_wlc2)
+    # NEMO: zus = SQRT( 2. * zcof * taum ) (zdftke.F90:447).  A bare sqrt has
+    # an INFINITE derivative at zero stress, so reverse mode returns NaN over
+    # land and in calm columns and that NaN survives the ``apply`` mask below
+    # (0 * inf = NaN).  The double-``where`` — the same AD-safe sqrt idiom used
+    # by ``_safe_stress_modulus`` and ``_veros_buoyancy_length`` in this module
+    # — keeps the primal BIT-IDENTICAL at EVERY input: the guard is ``!= 0``
+    # rather than ``> 0``, so a negative or NaN argument still produces the NaN
+    # the bare sqrt produced (a modulus must never be negative; corruption
+    # surfaces instead of being masked to 0).  Only the derivative AT exactly
+    # zero changes, from +inf to the correct limit 0 (zus3 ~ taum^{3/2}).
+    _zus_arg = 2.0 * half_wlc2
+    _zus_nonzero = _zus_arg != 0.0
+    zus = jnp.where(
+        _zus_nonzero, jnp.sqrt(jnp.where(_zus_nonzero, _zus_arg, 1.0)), 0.0)
     ice_scale = (jnp.ones_like(zus) if ice_frac is None
                  else jnp.maximum(0.0, 1.0 - ice_frac))
     surface_wet = jnp.asarray(w_active[..., 0], dtype=N2.dtype)

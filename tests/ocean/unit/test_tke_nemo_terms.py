@@ -179,6 +179,45 @@ class TestLangmuirSource:
         np.testing.assert_allclose(compiled[1], eager[1], rtol=2e-15, atol=0.0)
         assert np.isfinite(np.asarray(compiled[1])).all()
 
+    def test_literal_grad_is_finite_at_zero_stress(self):
+        """Zero surface stress (land / calm columns) must not make the
+        gradient NaN.
+
+        REGRESSION GUARD. ``zus = SQRT(2*zcof*taum)`` has an infinite
+        derivative at ``taum == 0``, and the NaN that reverse mode produces
+        there survives the ``apply`` mask (0 * inf = NaN), so a bare ``sqrt``
+        here poisons every end-to-end ``jax.grad`` of a card whose domain has
+        land. The primal is 0 either way, so only the gradient can catch it.
+        """
+        depth_w, dz_w = _col()
+        N2 = jnp.full((2, 5), 1.0e-5)
+        bottom = jnp.asarray([4, 4], dtype=jnp.int32)
+        wet = jnp.ones((2, 5), dtype=bool)
+
+        def total(taum, evaluation):
+            cfg = TKEConfig(lc=True, tke_langmuir_evaluation=evaluation)
+            return jnp.sum(nemo_langmuir_tke_source(
+                taum, N2, depth_w, dz_w, cfg,
+                bottom_level=bottom, w_active=wet))
+
+        calm = jnp.zeros((2,))
+        literal_zero = np.asarray(jax.grad(total)(calm, "nemo_literal"))
+        assert np.isfinite(literal_zero).all(), literal_zero
+        # The analytic limit: the source scales like taum^{3/2}.
+        np.testing.assert_array_equal(literal_zero, np.zeros(2))
+        np.testing.assert_array_equal(
+            literal_zero, np.asarray(jax.grad(total)(calm, "vectorized")))
+        # The primal at zero stress is untouched (exact equality).
+        np.testing.assert_array_equal(np.asarray(total(calm, "nemo_literal")), 0.0)
+
+        # Away from zero the literal gradient is unchanged by the guard: it
+        # still equals the plain-sqrt arm to the last bits.
+        forced = jnp.asarray([0.1, 0.2])
+        np.testing.assert_allclose(
+            np.asarray(jax.grad(total)(forced, "nemo_literal")),
+            np.asarray(jax.grad(total)(forced, "vectorized")),
+            rtol=2e-15, atol=0.0)
+
     def test_literal_line463_update_order_is_red_against_rate_first(self):
         depth_w, dz_w = _col()
         N2 = jnp.zeros((2, 5))
