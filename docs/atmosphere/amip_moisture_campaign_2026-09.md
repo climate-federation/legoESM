@@ -736,3 +736,44 @@ Also settled today: `tests/unit/test_bechtold.py` is 98-passed under `JAX_ENABLE
 17-failed without it, identically on main. Those 17 are a precision-mode artefact of running a
 numerics suite in float32, not branch damage. The residual question is real though: those
 gradients are non-finite in float32, which matters if this scheme is ever trained there.
+
+### Iteration J — the chain is wired, and it is NOT yet a faithful scheme (2026-09-17)
+`BechtoldConfig.use_ifs_ascent` (default False, static python gate) routes the whole ported chain
+in place of the legacy Bechtold reduction. It runs end to end. It is also, measurably, not right
+yet, and the switch is now labelled INCOMPLETE in the config.
+
+Two measurements and one review did the work:
+
+1. First smoke run returned EXACTLY ZERO. Cause: the shallow cloud-base mass flux comes from
+   ZDHPBL, the sub-cloud integral of the TOTAL physics tendencies, and cumastrn:578 switches the
+   column off when that supply is not positive. Nothing supplies that pair here.
+2. Threading what does exist (radiation + dynamics) woke it up — into a +-11000 K/day DIPOLE
+   across the two lowest levels, at every resolution and timestep tried (30/60/120 levels,
+   dt 112.5 and 1800 s), while everything above was O(100) K/day. The dipole's size matches the
+   raw absolute static-energy flux differenced over one layer (28000 K/day), which is what a
+   missing environmental subtraction looks like.
+3. Codex's oracle review named it: the chain omits **CUFLXN**, which cumastrn runs between the
+   closure and the tendencies (cumastrn.F90:1104 then :1226). cuflxn.F90:250-251 subtracts the
+   environmental transport and :297-328 constructs the below-cloud-base heat and moisture fluxes.
+   Without it the tendency module gets raw plume fluxes plus a tapered below-base mass flux whose
+   heat/moisture fluxes were never set.
+
+Also open from the same review, all P1: the humidity convention differs across the
+trigger/ascent boundary (the trigger converts to specific humidity internally and returns
+`q/(1-qu-lu)`); KTYPE is never reclassified against the ACTUAL ascent top
+(cumastrn.F90:634-641), so a plume diagnosed deep but stopping shallow still gets the deep CAPE
+closure; the detrained condensate and precipitation are dropped from the host water budget while
+their latent heating is kept; the dynamics tendencies become de-facto mandatory on this path
+though their public default is None; and the early return bypasses the legacy downdraught and
+sub-cloud evaporation instead of keeping them, contradicting what the config comment claimed.
+
+ARCHITECTURAL FINDING behind (1): this pipeline is PROCESS-SPLIT — every parameterization sees the
+same input state and the tendencies are summed afterwards — and turbulence runs AFTER convection.
+So there is no "physics accumulated so far" to hand the convection scheme, and the turbulent part,
+which is the dominant sub-cloud supply for shallow convection, cannot be threaded without
+reordering the pipeline. Radiation and dynamics are what exist at that call site and are what the
+chain now receives.
+
+Next, in order: port CUFLXN, fix the humidity convention at the trigger/ascent seam, reclassify
+KTYPE after the ascent, return the condensate and precipitation to the host, and only then the
+day-110 replay and the 5-day screen.

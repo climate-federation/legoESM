@@ -1659,9 +1659,20 @@ class BechtoldConfig(NamedTuple):
     use_ifs_shallow_closure: bool = False
     # Faithful IFS chain (2026-09-17, user decision): selects the ported
     # cubasen trigger + cuascn ascent + cumastrn closure + cudtdqn tendencies
-    # AS A WHOLE, in place of the legacy Bechtold reduction, keeping the IFS
-    # downdraught and sub-cloud evaporation.  Static python bool, so only one
-    # branch is ever traced.  DEFAULT False until the 5-day arm decides.
+    # AS A WHOLE, in place of the legacy Bechtold reduction.  Static python
+    # bool, so only one branch is ever traced.
+    #
+    # INCOMPLETE -- DO NOT SCORE A RUN WITH THIS ON.  Measured 2026-09-17 on a
+    # frozen deep column: a +-11000 K/day dipole across the two lowest levels.
+    # Cause (codex oracle review): the chain omits CUFLXN, which cumastrn runs
+    # BEFORE cudtdqn (cumastrn.F90:1104 then :1226) to subtract the
+    # environmental transport and build the below-cloud-base fluxes, so raw
+    # plume fluxes reach a stage that expects processed ones.  Also open: the
+    # humidity convention differs across the trigger/ascent boundary, KTYPE is
+    # not reclassified against the actual ascent top (cumastrn.F90:634-641),
+    # the detrained condensate and precipitation are dropped from the host
+    # water budget, and the early return bypasses the legacy downdraught and
+    # sub-cloud evaporation rather than keeping them.
     use_ifs_ascent: bool = False
     # IFS RCAPDCYCL=2 diurnal-cycle CAPE correction (cumastrn.F90:780-833;
     # see bechtold._ifs_capdcycl): subtracts the sub-cloud CAPE production

@@ -2096,7 +2096,18 @@ def bechtold_convection(
             conv_stoch_state, prng_key, dt, config,
             shf_w_m2=shf_w_m2, lhf_w_m2=lhf_w_m2, land_frac=land_frac,
             dT_dt_adv=dT_dt_dyn, dq_dt_adv=dq_dt_dyn,
-            dT_dt_other=None, dq_dt_other=None,
+            # PTENT/PTENQ: cumastrn's TOTAL model tendency, which in IFS holds
+            # dynamics + radiation + vertical diffusion accumulated before the
+            # convection call.  This pipeline is PROCESS-SPLIT (every scheme
+            # sees the same input state and the tendencies are summed
+            # afterwards) and turbulence runs after convection, so only the
+            # dynamics and radiative parts exist here.  The missing turbulent
+            # part is the dominant sub-cloud supply for SHALLOW convection --
+            # a declared gap, not an approximation anyone chose.
+            dT_dt_other=(dT_dt_dyn if dT_dt_rad is None else
+                         (dT_dt_rad if dT_dt_dyn is None
+                          else dT_dt_dyn + dT_dt_rad)),
+            dq_dt_other=dq_dt_dyn,
             out_ctor=ConvectionOutput,
         )
         return out, M_u_new, conv_stoch_state

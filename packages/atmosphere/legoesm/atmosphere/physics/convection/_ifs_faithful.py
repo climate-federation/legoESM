@@ -16,6 +16,15 @@ Declared gaps (do not silently "fix" these):
     later.
   * Total-physics tendencies (PTENT/PTENQ) are NOT available from the caller;
     zeros are used as the "other physics" closure input (see TOTAL TENDENCIES).
+
+INCOMPLETE.  This chain is not yet a faithful reduction of cumastrn and must
+not be used to score a run.  The stage cumastrn runs between the closure and
+the tendencies -- CUFLXN (cumastrn.F90:1104; cuflxn.F90:250-251 subtracts the
+environmental transport, :297-328 builds the below-cloud-base heat and
+moisture fluxes) -- is MISSING here, so the tendency module receives raw plume
+fluxes together with a tapered below-base mass flux whose heat and moisture
+fluxes were never set.  Measured symptom on a frozen deep column: a
++-11000 K/day dipole across the two lowest levels.
 """
 from __future__ import annotations
 
