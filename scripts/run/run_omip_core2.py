@@ -856,14 +856,31 @@ def orca1_zdftke_config(iwm_enabled: bool = False, surface_bc: str | None = None
         #   it is what NEMO does.  Requires the surface Dirichlet value, which
         #   this card sets, and dz_surface, which k_profiles:811-815 threads
         #   for exactly this option.
-        # STILL NOT NEMO, and not closable here: tke_shear_production stays
-        # "squared_centered".  NEMO's zdf_sh2 is face-native with a now x
-        # before velocity product and DOUBLES production adjacent to coasts
-        # via (2 - umask*umask) (zdfsh2.F90).  "nemo_face_native" implements
-        # exactly that and needs the raw C-grid face state plus per-level
-        # wumask/wvmask/coast masks, which the offline column probe cannot
-        # supply -- so it is untested and deliberately NOT enabled here.  It is
-        # the last known card gap and needs a tripole run to evaluate.
+        # STILL NOT NEMO: tke_shear_production stays "squared_centered".
+        # NEMO's zdf_sh2 is face-native with a now x before velocity product
+        # and DOUBLES production adjacent to coasts via (2 - umask*umask)
+        # (zdfsh2.F90).  "nemo_face_native"/"_now2" implement exactly that and
+        # need the raw C-grid face state plus per-level wumask/wvmask/coast
+        # masks, which no offline column probe can supply.
+        # NO LONGER UNTESTED -- this comment used to say it was, and the
+        # tripole run it asked for has since happened: the one-variable arm
+        # `_trp_shear_d30.sbatch` (nemo_face_native_now2 off trp_base2_d30,
+        # user-approved 2026-09-08) ran to day 30 as job 9689614 on 2026-09-10.
+        # It MISSED its pre-registered primary: the 20-60 m tracer diffusivity
+        # rose 1.22x where 10x was needed, the 220E undercurrent core stayed at
+        # 0.199 m/s against the oracle's 0.546, and nino3 bias came in at +1.15
+        # against a <= +1.10 guardrail.  The shear DISCRETISATION is therefore
+        # eliminated as a bias lever (one of eleven; the cold-tongue cause is
+        # still open and upstream of the closure -- weak resolved jet, hence
+        # weak shear, hence weak production).
+        # WHAT REMAINS TRUE is the FIDELITY statement, and it is now the only
+        # open item on this card: ORCA1 builds with key_RK3, so the oracle runs
+        # the "_now2" face-native form while this card runs a centred-average
+        # one.  Averaging before differencing smooths, so we are systematically
+        # weaker than NEMO near coasts.  Selecting it is a live user choice --
+        # faithful but measurably slightly worse on nino3 -- so the default is
+        # left alone rather than moved silently; --tke-shear-production selects
+        # it per-run.
         # NEMO nn_bc_surf=1: en(1)=max(rn_emin0, rn_ebb·|τ|/ρ0) Dirichlet surface
         # TKE.  The Veros flux (|τ|/ρ0)^{3/2} default was a flagged gap; the
         # Dirichlet form matches NEMO and cuts the summer-hemisphere warm SST.
