@@ -2853,6 +2853,178 @@ def _tke_matrix_statement_rows(
     }
 
 
+def _shear_statement_rows(
+    trace, records: dict, card, state, operand_record: dict,
+    entry_mode: str, *, legacy_trace=None, plant: str | None = None,
+) -> dict:
+    """Walk NEMO's shear-production routine at its OWN stage (decision 41).
+
+    Round 103 named ``p_sh2`` as the sole magnitude owner of the TKE
+    right-hand-side miss and stopped, because ``p_sh2`` is written in a
+    different routine.  This is that routine, driven from NEMO's recorded
+    stage entry through the real production step.
+
+    The compiled statements, Round-59 build
+    ``GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfsh2.f90``, executed ELSE
+    branch (``cpl_sdrftx .AND. ln_stshear`` is false on this card):
+    ``zsh2u`` at ``:99-103``, ``zsh2v`` at ``:104-108``, ``p_sh2`` at
+    ``:112-113``.  Only the last has a recorded output, so the two face
+    statements are attributed by one-variable operand swaps rather than by a
+    row of their own; the groups are named in ``OPERAND_GROUPS``.
+
+    ``legacy_trace``, when given, is a SECOND production step that differs
+    from the first in exactly one thing: the free-surface field routed into
+    the shear's face metric.  It is the discriminator for the time level,
+    and it is a whole-step ablation, so ONLY its ``p_sh2`` row is read here.
+    """
+    from nemo_testcase_l2_gyre_round104_shear_replay import (
+        OPERAND_GROUPS, model_operands, recorded_operands, rebuild_sh2,
+        _lat_lon as shear_lat_lon, K as SHEAR_K,
+    )
+    from legoesm.ocean.dynamics.latlon_cgrid_operators import (
+        compute_face_masks_3d,
+    )
+
+    arrays = operand_record["arrays"]
+    recorded = shear_lat_lon(np.asarray(arrays["sh2"]))[..., SHEAR_K]
+    op = recorded_operands(records[(2, 1)]["arrays"], arrays["avm_entry"])
+    z_coord = card.recipe.z_coord
+    u_mask, v_mask = compute_face_masks_3d(z_coord.is_active)
+    model = model_operands(
+        z_coord, state.u.data, state.v.data, state.eta.data,
+        state.tke_avm.data, u_mask, v_mask)
+    production = np.asarray(trace.tke_statement_trace.rhs_shear)
+    require(production.shape == recorded.shape,
+            f"production p_sh2 shape {production.shape} != oracle "
+            f"{recorded.shape}")
+
+    def row(name, reference, candidate, statement, note):
+        out = _classification(score(
+            f"GYRE-zco.kt2.tke_shear.{name}", reference, candidate,
+            np.ones(np.shape(reference), dtype=bool)))
+        out.update({
+            "field": name, "entry_mode": entry_mode,
+            "nemo_statement": statement, "note": note,
+        })
+        return out
+
+    plant_target = None
+    scored_recorded = recorded
+    planted_at = None
+    if plant == "stage-shear-operand-ulp":
+        equal = (np.ascontiguousarray(recorded).view(np.uint64)
+                 == np.ascontiguousarray(production).view(np.uint64))
+        indices = np.argwhere(equal & np.isfinite(recorded))
+        require(indices.size > 0,
+                "shear plant found no exact p_sh2 cell to corrupt")
+        planted_at = tuple(int(v) for v in indices[0])
+        scored_recorded = recorded.copy()
+        scored_recorded[planted_at] = np.nextafter(
+            scored_recorded[planted_at], np.float64(np.inf))
+
+    clean = _classification(score(
+        "GYRE-zco.kt2.tke_shear.production_vs_recorded.clean",
+        recorded, production, np.ones(recorded.shape, dtype=bool)))
+    rows = [
+        row("all_operands_recorded", recorded, rebuild_sh2(op),
+            "R59TKE zdfsh2.f90:99-113",
+            "every operand at NEMO's recorded value; must be BIT or the "
+            "reference side of this walk is itself wrong"),
+        row("production_step_vs_recorded", scored_recorded, production,
+            "R59TKE zdfsh2.f90:99-113",
+            "the model's own p_sh2 through the real production step, "
+            "driven from NEMO's recorded stage entry"),
+        row("model_operand_replay_vs_production", production,
+            rebuild_sh2(op, **model), "R59TKE zdfsh2.f90:99-113",
+            "the compiled statement on the operands the model is believed "
+            "to feed it, against what the model actually produced; BIT "
+            "means the mirror is the model's, NOT-BIT means the production "
+            "step consumes an operand the mirror does not know about"),
+    ]
+    rows[1]["clean_n_unequal"] = clean["n_unequal"]
+    rows[1]["clean_absolute_max"] = clean["absolute_max"]
+    rows[1]["plant_index"] = planted_at
+    if planted_at is not None:
+        require(rows[1]["n_unequal"] == clean["n_unequal"] + 1,
+                "shear one-ULP plant did not add exactly one unequal cell")
+        plant_target = rows[1]["name"]
+        require(plant_target is not None,
+                "shear plant did not reach its target")
+
+    operand_rows = [
+        row(f"operand.{name}", op[name], model[name],
+            "R59TKE zdfsh2.f90:99-113",
+            "one model-constructed zdf_sh2 operand against NEMO's recorded "
+            "one, on the same window")
+        for name in sorted(op)
+    ]
+    swap_rows = [
+        row(f"swap.{group}", production,
+            rebuild_sh2(op, **{k: model[k] for k in keys}),
+            "R59TKE zdfsh2.f90:99-113",
+            "NEMO's recorded operands with ONLY this group replaced by the "
+            "model's, against the production output")
+        for group, keys in OPERAND_GROUPS.items()
+    ]
+
+    time_level = None
+    if legacy_trace is not None:
+        legacy = np.asarray(legacy_trace.tke_statement_trace.rhs_shear)
+        legacy_rows = [
+            row("time_level.step_entry_ssh_production_vs_recorded",
+                recorded, legacy, "R59TKE zdfsh2.f90:102,107",
+                "the SAME production step with exactly one thing changed: "
+                "the free-surface field routed into the shear's face "
+                "metric is the step-entry ssh, which is what "
+                "stprk3.f90:168's zdf_phy(kstp,Nbb,Nbb,Nrhs) and "
+                "zdfphy.f90:319-320's zdf_sh2(Kbb,Kmm,...) make r3u(Kmm) "
+                "and r3u(Kbb) on this card"),
+            row("time_level.step_entry_ssh_vs_model_operand_replay",
+                rebuild_sh2(op, **model), legacy,
+                "R59TKE zdfsh2.f90:99-113",
+                "BIT here proves the mirror above IS the model's shear "
+                "expression, so the one non-bit row is attributable"),
+        ]
+        time_level = {
+            "prediction": (
+                "routing the step-entry ssh into the shear face metric "
+                "makes the production p_sh2 bit-identical to NEMO's"),
+            "rows": legacy_rows,
+            "legoesm_routing": (
+                "ocean_model_latlon_cgrid.py:8255-8258 passes "
+                "eta_now=_nemo_ws_zdf_eta_kmm, built at :6112-6115 as "
+                "0.5*(state.eta + state_new.eta) = NEMO's stage-3 "
+                "Kmm=N+1/2 ssh (correct for tra_zdf's e3w(Kmm)), and "
+                ":9059/:9119-9190 feed that same field to the shear's "
+                "r3u/r3v"),
+            "verdict": (
+                "CONFIRMED_SHEAR_FACE_METRIC_TIME_LEVEL"
+                if all(r["classification"] == "BIT" for r in legacy_rows)
+                else "REFUTED"),
+        }
+
+    first = next((r for r in rows[1:2] if r["classification"] != "BIT"), None)
+    return {
+        "execution": "production step",
+        "entry_mode": entry_mode,
+        "record_sh2": "round59/oracle_tke_operands_kt00000002.bin",
+        "record_operands": "round46/oracle_momstage_kt00000002_s1.bin",
+        "compiled_branch": (
+            "GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfsh2.f90:97-109 "
+            "(the no-Stokes ELSE branch) and :112-113"),
+        "rows": rows,
+        "operand_identity_rows": operand_rows,
+        "one_variable_swap_rows": swap_rows,
+        "time_level_discriminator": time_level,
+        "first_nonbit": None if first is None else {
+            key: first[key] for key in (
+                "field", "n_unequal", "absolute_max", "classification",
+                "nemo_statement")
+        },
+        "plant_target": plant_target,
+    }
+
+
 def _tke_surface_operand_rows(
     trace, statement_record: dict, operand_record: dict,
     entry_mode: str, rho0: float,
@@ -3003,8 +3175,30 @@ def _tke_program_twin(
     given_matrix = _tke_matrix_statement_rows(
         given_trace, tke_operand_record, tke_statement_record,
         "NEMO_TKE_RECORDED", plant)
+    # Round 104.  The shear walk's time-level discriminator is a SECOND
+    # production step differing in exactly one thing: the free-surface field
+    # routed into the shear's face metric (the existing
+    # ``legacy_zdf_entry_kmm_eta`` hook makes it the step-entry ssh).  It is
+    # a whole-step ablation, so only its p_sh2 row is read.
+    legacy_eta_trace = None
+    if plant not in ("stage-tke-production-ulp", "stage-tke-matrix-ulp",
+                     "stage-shear-operand-ulp"):
+        legacy_eta_trace = jax.device_get(LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, cfg,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                expose_live_stage_operands=True,
+                barotropic_raw_history_override=raw_history,
+                stage_barotropic_output_override=_barotropic_override(
+                    records, advmean_root, 2),
+                legacy_zdf_entry_kmm_eta=True)).step(
+                    state, dt=card.dt_s, freshwater=freshwater,
+                    surface_forcing=recorded_surface))
+    given_shear = _shear_statement_rows(
+        given_trace, records, card, state, tke_operand_record,
+        "NEMO_TKE_RECORDED", legacy_trace=legacy_eta_trace, plant=plant)
     literal_counterfactual = None
-    if plant not in ("stage-tke-production-ulp", "stage-tke-matrix-ulp"):
+    if plant not in ("stage-tke-production-ulp", "stage-tke-matrix-ulp",
+                     "stage-shear-operand-ulp"):
         vmix = cfg.physics.vertical_mixing
         literal_vmix = vmix._replace(tke=vmix.tke._replace(
             tke_langmuir_evaluation="nemo_literal"))
@@ -3040,7 +3234,8 @@ def _tke_program_twin(
                 ["classification"] == "BIT")
             else "REFUTED")
     }
-    if plant in ("stage-tke-production-ulp", "stage-tke-matrix-ulp"):
+    if plant in ("stage-tke-production-ulp", "stage-tke-matrix-ulp",
+                 "stage-shear-operand-ulp"):
         return {
             "format": "nemo-testcase-l2-gyre-tke-production-walk-v5",
             "input_bridge": input_bridge,
@@ -3049,6 +3244,7 @@ def _tke_program_twin(
             "literal_langmuir_counterfactual": literal_counterfactual,
             "given_nemo_entry": given,
             "given_nemo_entry_matrix_walk": given_matrix,
+            "given_nemo_entry_shear_walk": given_shear,
             "chained": None,
         }
 
@@ -3077,6 +3273,7 @@ def _tke_program_twin(
         "literal_langmuir_counterfactual": literal_counterfactual,
         "given_nemo_entry": given,
         "given_nemo_entry_matrix_walk": given_matrix,
+        "given_nemo_entry_shear_walk": given_shear,
         "chained": _tke_production_statement_rows(
             chained_trace, tke_statement_record, "LEGO_CHAINED"),
     }
@@ -3785,6 +3982,7 @@ def main(argv=None) -> int:
                  "stage-tke-record-truncation", "stage-tke-record-stamp",
                  "stage-tke-record-ulp", "stage-tke-production-ulp",
                  "stage-tke-matrix-ulp",
+                 "stage-shear-operand-ulp",
                  "stamp"),
     )
     p.add_argument("--output", type=Path)

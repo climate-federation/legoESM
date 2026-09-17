@@ -316,3 +316,78 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def model_operands(z_coord, u_face, v_face, eta, avm, u_mask, v_mask):
+    """MIRROR of legoESM's own ``zdf_sh2`` operand construction.
+
+    This is deliberately a mirror and not a second implementation to be
+    trusted on its own: it exists so that ONE operand at a time can be
+    substituted into :func:`rebuild_sh2`, and the gate PROVES it is the
+    model's by scoring ``rebuild_sh2(**model_operands(...))`` against the
+    production step itself (the ``model_operand_replay`` row).  If that row
+    is not bit-identical the mirror is wrong, or the production step is
+    reading an operand the mirror does not know about, and the gate says so
+    rather than reporting an attribution.
+
+    It follows ``ocean_model_latlon_cgrid.py``'s ``nemo_qco_live_face``
+    branch and ``_shared.avm_weighted_shear_production``: the free-surface
+    ratio of ``domqco.f90:214-217``, the reference ladder from the raw mesh
+    ``nemo_e3w_0``, the viscosity face SUM of ``zdfsh2.f90:99``, the wet-face
+    masks of ``dommsk.f90:237-242`` and the coast factors of
+    ``zdfsh2.f90:112-113``.  ``eta`` is supplied by the caller precisely
+    because WHICH free-surface field reaches this construction is the
+    question the round is asking.
+    """
+    f64 = np.float64
+    eta = np.asarray(eta, dtype=f64)
+    hu0 = np.asarray(z_coord.nemo_hu_0, dtype=f64)
+    hv0 = np.asarray(z_coord.nemo_hv_0, dtype=f64)
+    a_t = np.asarray(z_coord.nemo_e1e2t, dtype=f64)
+    a_u = np.asarray(z_coord.nemo_e1e2u, dtype=f64)
+    a_v = np.asarray(z_coord.nemo_e1e2v, dtype=f64)
+    u_face = np.asarray(u_face, dtype=f64)
+    v_face = np.asarray(v_face, dtype=f64)
+    avm = np.asarray(avm, dtype=f64)
+    u_mask = np.asarray(u_mask, dtype=f64)
+    v_mask = np.asarray(v_mask, dtype=f64)
+
+    wet_u = (hu0 > 0.0).astype(f64)
+    wet_v = (hv0 > 0.0).astype(f64)
+    num_u = 0.5 * (a_t * eta + np.roll(a_t * eta, -1, axis=1))
+    num_v = 0.5 * (a_t * eta + np.roll(a_t * eta, -1, axis=0))
+    r3u = num_u * (wet_u / (hu0 + 1.0 - wet_u)) / a_u
+    r3v = num_v * (wet_v / (hv0 + 1.0 - wet_v)) / a_v
+    r3u = np.concatenate([r3u[:, -1:], r3u], axis=1)
+    r3v = np.concatenate([r3v[:1, :], r3v], axis=0)
+    ref = np.asarray(z_coord.nemo_e3w_0, dtype=f64)[..., 1:]
+    ref_u = np.concatenate([ref[:, -1:, :], ref], axis=1)
+    ref_v = np.concatenate([ref[:1, :, :], ref], axis=0)
+    eps = np.float64(1e-30)               # coeff-ok: the helper's own floor
+    e3u = np.maximum(ref_u * (1.0 + r3u[..., None]), eps)
+    e3v = np.maximum(ref_v * (1.0 + r3v[..., None]), eps)
+    return {
+        # nemo_face_native_now2: Kbb and Kmm are the SAME slot, so the two
+        # factors of zdfsh2.f90:100-102 are the same array.
+        "u_now": u_face, "u_before": u_face,
+        "v_now": v_face, "v_before": v_face,
+        "avm_face_u": (np.concatenate([avm[:, -1:, :], avm], axis=1)
+                       + np.concatenate([avm, avm[:, :1, :]], axis=1)),
+        "avm_face_v": (np.concatenate([avm[:1, :, :], avm], axis=0)
+                       + np.concatenate([avm, avm[-1:, :, :]], axis=0)),
+        "divisor_u": e3u * e3u,
+        "divisor_v": e3v * e3v,
+        "wumask": u_mask[..., :-1] * u_mask[..., 1:],
+        "wvmask": v_mask[..., :-1] * v_mask[..., 1:],
+        "coast_u": 2.0 - u_mask[:, :-1, 1:] * u_mask[:, 1:, 1:],
+        "coast_v": 2.0 - v_mask[:-1, :, 1:] * v_mask[1:, :, 1:],
+    }
+
+
+OPERAND_GROUPS = {
+    "velocity": ("u_now", "u_before", "v_now", "v_before"),
+    "viscosity_face_sum": ("avm_face_u", "avm_face_v"),
+    "live_face_divisor": ("divisor_u", "divisor_v"),
+    "wet_face_mask": ("wumask", "wvmask"),
+    "coast_factor": ("coast_u", "coast_v"),
+}
