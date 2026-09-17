@@ -1,0 +1,433 @@
+# NEMO-testcases L2 GYRE round 104 receipt: the `zdfsh2` shear-production walk
+
+Date: 2026-09-17. Branch `fidelity/nemo-testcases-l2-gyre-codex2`, incoming tip
+`704dbf8faaee79ee0a45a48d1f0ffe27f80a3dcd`.
+
+## Verdict
+
+**HELD; no production physics and no configuration landed.** Round 103 named
+the shear production `p_sh2` as the sole magnitude owner of the TKE
+right-hand-side miss and stopped, because `p_sh2` is written in a different
+routine and campaign decision 41 requires a term to be walked at its own
+stage. This is that walk.
+
+**The first statement whose output is not bit-identical to NEMO's is the
+shear divisor**
+
+> `GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfsh2.f90:102`
+> `/ ( (e3w_1d(jk  ) *(1._wp+r3u(ji,jj,Kmm))) * (e3w_1d(jk) *(1._wp+r3u(ji,jj,Kbb))) )`
+
+and its `v` twin at `zdfsh2.f90:107`. **It is not the arithmetic that is
+wrong; it is the free-surface field legoESM routes into it.** NEMO reaches
+this statement through `zdfphy.f90:319-320`'s
+`CALL zdf_sh2( Kbb, Kmm, avm_k, sh2 )`, which the step program calls at
+`stprk3.f90:167-168` as `CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )` — both formal
+time levels bound to the **step-entry** slot, the previous line being the
+commented-out `Nnn` variant the authors replaced. So `r3u(ji,jj,Kmm)` and
+`r3u(ji,jj,Kbb)` at `:102` are BOTH the step-entry free-surface ratio.
+legoESM feeds that construction the RK3 stage-3 `Kmm = N+1/2` ssh instead:
+one field, `0.5*(step-entry ssh + after ssh)`, is built for `tra_zdf`'s
+`e3w(Kmm)` divisor, where it is correct, and the same field is then handed to
+the shear's `r3u`/`r3v`, where it is a different time level from NEMO's.
+
+**WHAT THE DIFF TOUCHES, stated in the verdict so a mechanical scope audit is
+not blindsided by the diffstat.** This round is measurement-only in substance
+AND in effect: **not one line of production physics changed.** The diff adds
+one measurement module and one direct test, extends the consolidated stage
+gate with a sub-walk and a plant, and registers fourteen compiled-source
+citations in the citation audit (plus a rigid re-anchor of two of that
+audit's own self-citations whose line numbers moved because the gate file
+grew). No shared numeric line moved, so no card's numbers can move, and none
+did: every headline below is identical before and after by construction.
+
+**Headline numbers, unchanged because nothing landed.** kt2 U/V
+`2.7377110452773967e-12` / `3.284922138989399e-12`; kt3 T/S
+`1.627497246303733e-4` / `6.327735185607253e-6`; day-30 T RMS
+`1.2397011295506804e-2` K. These are the round-96/97 before arm, restated
+from operator note (J), and the trajectory ladder and the days 1-30 arm were
+NOT run this round because there is no candidate to judge.
+
+No NEMO source was modified and neither `makenemo` nor `mpirun` was run. No
+card, default, scheme selection, threshold, coefficient, carried state,
+restart schema, year harness, reconciliation gate, freshwater pair or #1484
+guard changed.
+
+## Registration
+
+The frozen preregistration is
+`docs/ocean/fidelity/PREREG_nemo_testcases_l2_gyre_round104.md`, committed as
+`05d34a76696f` before any new measurement. Evidence is under
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round104/`.
+
+## Instrument validation before any new science
+
+The consolidated gate was re-run at the incoming tip in `--mode
+stage-tke-walk` with nothing changed, purely to reproduce known values
+(`instrument_repro.json`, 12 m 35 s). It reproduces **every** round-103 row
+exactly:
+
+| row | round 103 | this tip |
+|---|---|---|
+| `en_entry` | 0 / 0 | 0 / 0 |
+| `en_after_boundaries` | 0 / 0 | 0 / 0 |
+| `en_after_langmuir` | 0 / 0 | 0 / 0 |
+| `rhs_pre_sweep` | 11,993 / `5.488912518947231e-10` | 11,993 / `5.488912518947231e-10` |
+| `en_post_sweep` | 979 / `6.809688229969524e-12` | 979 / `6.809688229969524e-12` |
+| `zd_up` / `zd_lw` / `zdiag` | 0 / 0 each | 0 / 0 each |
+| `p_sh2_operand` | 17,400 / `3.811744924985501e-14` | 17,400 / `3.811744924985501e-14` |
+
+Cells are `unequal / max abs`. That is prediction **P1, CONFIRMED**.
+
+## Compiled-source basis
+
+The record's compiled branch is
+`GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfsh2.f90`, byte-identical to the
+Round-101 build's copy of the same file (`diff -q`, zero differences). On
+this card `cpl_sdrftx .AND. ln_stshear` is false, so the executed branch is
+the ELSE at `zdfsh2.f90:97-109`, and the routine's output-bearing assignments
+inside `DO jk = 2, jpkm1` (`zdfsh2.f90:83`) are, in compiled order:
+
+| # | statement | line | recorded output? |
+|---|---|---|---|
+| S1 | `zsh2u` | `zdfsh2.f90:99-103` | no |
+| S2 | `zsh2v` | `zdfsh2.f90:104-108` | no |
+| S3 | `p_sh2` | `zdfsh2.f90:112-113` | yes (`sh2`) |
+
+followed by the surface/bottom zeroing at `zdfsh2.f90:116-119`, which writes
+`jk = 1` and `jk = jpk` and therefore touches no cell this walk scores.
+Because S1 and S2 have no recorded output, they are attributed by
+one-variable operand swaps against S3 rather than by rows of their own — the
+technique the operator endorsed in note (Q) and round 103 used.
+
+Supporting statements cited and mechanically verified: the free-surface ratio
+at `GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/domqco.f90:266-267` (inside
+`dom_qco_r3c_RK3`, the entry `stprk3_stg.f90:178` calls), the precomputed
+reciprocal it multiplies at
+`GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/domhgr.f90:170`, and the wet-face
+masks at `GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/dommsk.f90:237-242`.
+
+## No acquisition was needed, and that is a measurement
+
+The preregistration claimed every operand `zdf_sh2` reads at this instant is
+already in an admitted record, and said the round would STOP FOR RECORD if
+that were wrong. It held. Two things had to be checked rather than assumed,
+and both are now hard refusals inside the probe rather than prose:
+
+1. **Which viscosity.** `zdf_sh2` reads `avm_k` as passed at
+   `zdfphy.f90:319`, which is the Round-59 record's `avm_entry`. The round-46
+   stage record's `tke_avm_k` is the POST-`zdf_phy` array and the two differ
+   in **6,294 of 20,416** owned cells. Using the convenient one would have
+   silently answered a different question.
+2. **Which reference thickness.** `zdfsh2.f90:102` names `e3w_1d(jk)`, a
+   one-dimensional ladder. The record stores the three-dimensional `e3w_0`.
+   The probe asserts that field is horizontally uniform (it is, exactly, on
+   this zco card) before reading a column out of it, and refuses otherwise.
+
+A third: both face windows reach one cell outside the owned domain, so the
+face sums would need a viscosity halo the Round-59 record does not carry.
+Every window-boundary face on this card is LAND — `umask` is identically zero
+at NEMO `ji = 1, 2, 33, 34` and `vmask` at `jj = 1, 2, 23, 24` — so the
+wet-face mask annihilates those terms and a zero pad is exact, not merely
+adequate. The probe refuses loudly if that ever stops being true.
+
+## The reference side, proven before anything is read from it
+
+`nemo_testcase_l2_gyre_round104_shear_replay.py` rebuilds `zdfsh2.f90:99-113`
+from NEMO's OWN recorded operands in the compiled association and compares
+against NEMO's OWN recorded `sh2`:
+
+| arm | unequal | max abs | class |
+|---|---:|---|---|
+| every operand recorded | **0** of 20,416 | `0.0` | BIT |
+
+That is prediction **P2, CONFIRMED**, and it is what makes every row below
+interpretable: without it the reference side of the comparison would itself
+be unproven.
+
+## The walk, given NEMO's recorded stage entry, through the production step
+
+All rows are scored over the SAME 20,416 owned cells the round-103 walk used,
+of which 17,400 are wet and 3,016 dry; both denominators are given wherever a
+count appears. Cells are `unequal / max abs`.
+
+| row | unequal | max abs | class |
+|---|---:|---|---|
+| `all_operands_recorded` (vs NEMO's recorded `sh2`) | 0 | `0.0` | BIT |
+| `production_step_vs_recorded` | 17,400 of 20,416 (= 17,400 of 17,400 wet) | `3.811744924985501e-14` | DEBT |
+| `model_operand_replay_vs_production` | 17,400 | `3.811744924985501e-14` | DEBT |
+
+**Every operand legoESM feeds the routine is bit-identical to NEMO's.** All
+twelve, on both face windows:
+
+| operand | unequal | class |
+|---|---:|---|
+| `u_now`, `u_before`, `v_now`, `v_before` | 0 each | BIT |
+| `avm_face_u`, `avm_face_v` | 0 each | BIT |
+| `divisor_u`, `divisor_v` | 0 each | BIT |
+| `wumask`, `wvmask` | 0 each | BIT |
+| `coast_u`, `coast_v` | 0 each | BIT |
+
+That census is what makes the one-variable swaps trivially inert: with every
+recorded operand already equal to the model's, substituting a group changes
+nothing, and all five swap rows sit at the production row's own
+17,400 / `3.811744924985501e-14`. **Prediction P3 is REFUTED.** It named four
+model-constructed operand groups and predicted that exactly one, the live
+face-metric divisor, would reproduce the production output. None of them does,
+because none of them differs. P3 is reported here as refuted and is not
+restated as a narrower success.
+
+The third row is the one that carries the round. The gate rebuilds the
+compiled statement on the operands legoESM is believed to feed it and scores
+that against what the production step actually produced; it is NOT bit. So
+the production step is consuming something the operand list does not contain.
+
+## What it is consuming: the free-surface TIME LEVEL
+
+`zdfsh2.f90:102` divides by `(e3w_1d(jk)*(1+r3u(ji,jj,Kmm))) *
+(e3w_1d(jk)*(1+r3u(ji,jj,Kbb)))`. On the RK3 GYRE run both formal levels are
+the same slot: `stprk3.f90:167-168` calls `CALL zdf_phy( kstp, Nbb, Nbb,
+Nrhs )` — the line above it is the commented-out `Nnn` variant the authors
+replaced — and `zdfphy.f90:319-320` passes those two through unchanged into
+`CALL zdf_sh2( Kbb, Kmm, avm_k, sh2 )`. The record agrees: at the kt=2
+stage-1 slot `r3u_Kbb` and `r3u_Kmm` are bit-identical arrays, as are `u_Kbb`
+and `u_Kmm`, which is why the model's `nemo_face_native_now2` variant using
+one field for both factors is right.
+
+legoESM builds ONE free-surface field for the whole vertical-diffusion call,
+`0.5*(step-entry ssh + after ssh)`, which is NEMO's stage-3 `Kmm = N+1/2` ssh
+and is CORRECT for `tra_zdf`'s `e3w(Kmm)` divisor, and then hands that same
+field to the shear's `r3u`/`r3v`, where NEMO's is the step-entry one.
+
+**The discriminator, run through the real production step.** The same step,
+with that one field changed to the step-entry ssh and nothing else:
+
+| row | unequal | max abs | class |
+|---|---:|---|---|
+| `time_level.step_entry_ssh_production_vs_recorded` | **0** of 20,416 | `0.0` | BIT |
+| `time_level.step_entry_ssh_vs_model_operand_replay` | **0** of 20,416 | `0.0` | BIT |
+
+The first says legoESM's shear production becomes bit-identical to NEMO's.
+The second is the control that makes the attribution legitimate: it proves
+the gate's operand mirror IS the model's shear expression, so the one
+non-bit row above is attributable rather than resting on an unproven
+reconstruction. Gate verdict `CONFIRMED_SHEAR_FACE_METRIC_TIME_LEVEL`.
+
+**What that discriminator is NOT.** It is driven by an existing whole-step
+model hook that ALSO returns `tra_zdf`'s `e3w(Kmm)` divisor to the step-entry
+ssh, where NEMO wants `N+1/2`. It is therefore a whole-step ablation and NOT
+a candidate fix; only its `p_sh2` row is read here, and the receipt says so
+rather than letting a reader infer that the hook is the patch. The real fix
+threads a separate step-entry free-surface field to the shear alone, and it
+is written up in OPEN rather than attempted this round.
+
+## Magnitude: prediction P5 is REFUTED, and that refutation is the useful part
+
+P5 predicted that the miss is a last-bit effect on a large-`sh2` cell, with
+the relative difference at the argmax cell at most `1e-10`. Measured:
+
+| quantity | value |
+|---|---|
+| `max|sh2|` in the record | `5.5633265996063366e-08` |
+| `max|delta p_sh2|` | `3.811744924985501e-14` |
+| argmax cell, `|delta| / |sh2|` | `6.851558019348533e-07` |
+| relative difference over wet cells, median | `3.330e-07` |
+| relative difference over wet cells, max | `7.296e-07` |
+
+Seven-hundred-thousandths, not `1e-10`. **P5 is REFUTED**, and its own
+falsifier says what that means: the miss is STRUCTURAL, not a rounding one,
+which is exactly the signature of a wrong time level and is what ruled out
+every last-bit candidate before the walk found the real one. The prediction
+is reported as refuted and is not rewritten.
+
+## Prediction P4: a real source deviation, measured INERT
+
+P4 named a different statement: legoESM's inline free-surface ratio in the
+shear path DIVIDES by `e1e2u`, where `domqco.f90:266-267` MULTIPLIES by the
+precomputed reciprocal `r1_e1e2u`, which `domhgr.f90:170` sets to
+`1._wp / e1e2u`. `x/a` and `x*(1/a)` are not the same double.
+
+The deviation is REAL and measured: against NEMO's recorded `r3u_Kmm` the
+divide form differs in **58 of 704** u-faces at max `1.058791e-22`
+(`2.217e-16` relative) and `r3v` in **54** at `5.293956e-23`, while the
+multiply form reproduces NEMO's recorded ratio with max abs difference
+`0.0`. legoESM's own SHARED implementation of the same NEMO statement, in
+`vertical.py`'s live-face geometry builder, already uses the multiply form;
+the TKE shear path carries a SECOND, divergent copy of it.
+
+**And it is measurably INERT at this stage, so P4 is REFUTED as the owner.**
+`1e-22` in `r3u` is eight orders of magnitude below one unit in the last
+place of `e3w*(1+r3u)`, so the `divisor_u`/`divisor_v` rows above are BIT and
+no `p_sh2` cell can move. P4 is therefore reported as a confirmed source
+deviation and a refuted attribution — the same shape as operator note (Q)'s
+inert `zpelc` recurrence, and it is carried into OPEN as a duplicate-numerics
+finding rather than as a candidate.
+
+
+## Prediction ledger
+
+Every prediction is reported exactly as frozen, including the two that were
+refuted. Neither refutation is restated as a narrower success.
+
+| # | prediction | outcome |
+|---|---|---|
+| P1 | the unmodified gate reproduces every round-103 row at this tip | **CONFIRMED**, all eight rows identical |
+| P2 | a transcription fed entirely from NEMO's recorded operands reproduces NEMO's recorded `sh2` BIT | **CONFIRMED**, 0 of 20,416 |
+| P3 | exactly one of four model-constructed operand groups, the live face-metric divisor, reproduces the production `p_sh2` | **REFUTED** — none does, because all twelve operands are already bit-identical; the owner is a field none of the four groups names |
+| P4 | the first non-bit statement upstream is `domqco.f90:266-267`, the multiply-by-reciprocal | **REFUTED as the owner**, CONFIRMED as a source deviation: real at `1.06e-22` in `r3u`, measurably inert in the divisor |
+| P5 | relative difference at the argmax cell at most `1e-10` | **REFUTED**, measured `6.851558019348533e-07`; the miss is structural, and P5's own falsifier says so |
+| P6 | the eager / isolated-JIT / production discriminator for round 103's last-bit residue | **NOT RUN**, see OPEN item 2 |
+| P7 | nothing lands; the status is HELD | **CONFIRMED** |
+
+## Rule 12 and the testcase dispositions
+
+No production numeric line changed, so there is nothing for the trajectory
+ladder to judge and it was not run. Per-testcase, with the shared-statement
+risk stated rather than assumed:
+
+| testcase | disposition |
+|---|---|
+| GYRE (kt=1..10, days 1-30) | UNMOVED BY CONSTRUCTION. The diff adds a measurement module, a test, a gate sub-walk and citation-map entries; it touches no file the production step imports. |
+| DINO | UNMOVED THIS ROUND, AT RISK NEXT ROUND. DINO's NEMO-identity settings also select the live-face shear metric at step entry, so the fix named in OPEN would reach DINO. DINO runs the Modified-Leap-Frog program, where `stpmlf.F90:210` calls `zdf_phy( kstp, Nbb, Nnn, Nrhs )` — the two levels are DIFFERENT there — so a blanket "use the step entry" fix would be wrong for DINO and the fix must branch on the already-existing shear variant. This is the single largest reason the round HELD instead of landing. |
+| LOCK_EXCHANGE, OVERFLOW | NOT EXECUTED. Neither runs the turbulence closure's shear path on its card. |
+| ORCA2 | UNMEASURED-WITH-SPEC, unchanged from round 103. |
+
+## Plants
+
+Three controls, each shown firing, and none of them prints a success word
+while firing.
+
+1. **Record replay, `--plant operand-ulp`.** Advances one bit of a single
+   viscosity face. One unit in the last place of ONE face is only half a unit
+   in the last place of the two-face sum at `zdfsh2.f90:112`, so
+   round-to-nearest can absorb it — the first two versions of this plant were
+   absorbed exactly that way and reported green. The plant therefore walks the
+   live faces in descending contribution and takes the first whose corruption
+   reaches the output, refusing loudly if none does. Fired at u-face index
+   `(16, 30, 0)` on a baseline viscosity sum of `0.0024844304807471983`
+   carrying a shear term of `5.939825108094368e-08`: exactly **1** cell moved,
+   max `1.3234889800848443e-23`. Exit 1, printed `STATUS PLANT-FIRED`.
+2. **Stage gate, `--plant stage-shear-operand-ulp`.** Advances one bit of the
+   recorded `sh2` reference on the binding `NEMO_TKE_RECORDED` arm, through
+   the real production step. The proof is the internal hard check, not the
+   exit code (the gate returns 1 for every plant, so its exit status
+   discriminates nothing): the targeted row must move from its clean count to
+   clean + 1 or the walk aborts. See the plant row below.
+3. **Citation audit.** The clean run is 274 citations, 0 unmapped, 0
+   failures, 0 map-audit failures, 9 of 9 self-test controls fired, `STATUS
+   PASS`, exit 0. Its receipt-path plant on `domqco.F90:189-209` exits 1 with
+   `SYMBOL-NOT-AT-LINE`. Separately, each of this round's **14** new
+   compiled-source citations was checked clean AND shifted by two lines: all
+   14 clean rows are `OK` and all 14 shifted rows fail, so none of them can
+   pass vacuously.
+
+
+The stage-gate plant's row: clean `17,400` unequal, planted `17,401`, target
+`GYRE-zco.kt2.tke_shear.production_step_vs_recorded`, `STATUS PLANT-FIRED`,
+and the word `PASS` appears **zero** times in its log. It necessarily lands on
+a cell where the production output already equalled the record (that is what
+"add exactly one" requires) and that cell is dry, so what it proves is that
+the ROW can move — it is not a sensitivity test of the arithmetic. The
+arithmetic sensitivity is what control 1 proves, on a live u-face carrying a
+shear term of `5.9e-08`. The two are reported separately because they prove
+different things.
+
+**Commit stamps.** The clean shear walk is stamped `7d4f9769960e`; the plant
+and the citation runs are stamped `e16f0306c6e0`. Those two commits differ
+only in the citation-audit script and a test file, neither of which the stage
+gate imports (`git diff --stat 7d4f9769960e..e16f0306c6e0` is two files, both
+outside the gate's import graph). Both stamps are recorded in their own
+artifacts and both trees were clean.
+
+## Independent adversarial review
+
+REVIEW_PLACEHOLDER
+
+## Tests
+
+Focused suites, verbatim:
+
+```
+65 passed in 6.79s
+```
+
+covering `tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round104_shear_replay.py`
+(16 tests, new this round),
+`tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py` and
+`tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round46_kt2_stage_gate.py`.
+
+The new tests are non-vacuous by construction rather than by assertion: one
+of them hand-evaluates the compiled statement at a named cell and demands the
+same bit pattern, and twelve of them are a parametrised sweep proving that
+each of the twelve operands, perturbed alone, changes the output — so no row
+can pass because an argument is silently ignored.
+
+**The one known-red test is not ours, and we added no tenth offender.**
+`test_every_report_emitter_stamps_the_worktree` fails on the lane with nine
+offenders. Re-run at this tip it still lists exactly those nine; this round's
+new module is not among them, because it stamps the worktree in its report.
+
+
+## Evidence
+
+All under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round104/`.
+
+| artifact | SHA-256 |
+|---|---|
+| `instrument_repro.json` | `4120dd653631d2ec43bfafd4a076a468831ef1701973c288584a53a9d3539f9b` |
+| `record_replay.json` | `fb64e71dbadbff76417c51f4e3e47ffb349ab06bac3f9b12c38be4068c6c4274` |
+| `record_replay_plant.json` | `d9d7a707cba9c40a983f90d5d4ff1c07181c3813b98514e5829a9241b9101fcf` |
+| `shear_walk.json` | `805a3c3abd298104716bffa074318ed6f6e5594d060523b16ee5d4ba2644a177` |
+| `shear_plant.json` | `a26c3b1ac00f96d0e5ce4b9c0f9a3211ee08723912eaacabb0f5ad49c5c898eb` |
+| `citation_gate.json` | `678a84898630cff135c647f8f8b6a99f10d9c91d4581af3ff8ad1cd7f4aa7b83` |
+| `citation_gate_plant.json` | `165a80b9af98ef85c9f51a24168085611b61106190971ff0ba38173778e4cb52` |
+| `citation_gate_round104_controls.log` | `125f6cf54a60e57d86c21a3b5425dcb9742a0acd405923ba1295562a7dc79e6c` |
+| `focused_pytest.xml` | `dbf6355fadddb4b4a13e2031935de6df5f4dca533d492583da316439551e8df2` |
+
+A fingerprint pins ONE run of the tool that produced it. Re-running a gate
+after this receipt is committed invalidates the hash even when every number
+is identical; refresh the hash in the same commit, or do not re-run.
+
+## OPEN - round 105
+
+1. **LAND THE TIME LEVEL, under the ladder.** The statement is named and its
+   local proof is closed: with the step-entry free-surface field, `p_sh2` is
+   bit-identical to NEMO's over every one of the 20,416 owned cells. What is
+   NOT done is the fix itself. The shape it must take: the shear's
+   free-surface field has to be threaded separately from the one
+   `tra_zdf` consumes, because NEMO wants the step entry for the first
+   (`stprk3.f90:168`) and `N+1/2` for the second. The branch is on the
+   ALREADY-EXISTING shear variant, not on a new configuration field, so it is
+   a bug fix and not a configuration choice — but it changes shared numerics,
+   so it lands only if the Rule-12 ladder (kt=1..10) and the days 1-30 arm
+   pass against the round-96/97 before arm. Round 103 showed `p_sh2` owns the
+   whole right-hand-side magnitude, so this fix is expected to close
+   `zdftke.f90:439-442` as well; that expectation is PLAUSIBLE and must be
+   measured, not assumed.
+2. **Round 103's OPEN item 2 was NOT run, and here is why.** Its
+   discriminating measurement asks whether the `1.1102230246251565e-16`
+   residue between a NumPy transcription of the right-hand side and the
+   model's evaluation of it is XLA fusion or an association difference. The
+   arm it needs — the model's right-hand-side expression evaluated eagerly
+   and under a JIT of an isolated closure — has to be written against the
+   solver's own assembly, which is a separate diff from this round's, and
+   this round's budget went into the shear walk instead. It is not blocking:
+   the residue is six orders of magnitude below the `p_sh2` term and cannot
+   own the block's debt either way. It stays open with its measurement
+   unchanged.
+3. **A SECOND implementation of NEMO's free-surface ratio exists and is the
+   divergent one.** The campaign's shared builder in `vertical.py` uses
+   NEMO's multiply-by-reciprocal and reproduces the recorded ratio exactly;
+   the TKE shear path has its own inline copy that divides instead and
+   differs in 58 u-faces. It is inert today (measured above) and would stop
+   being inert the moment the free-surface field or the mesh changed scale.
+   Folding the shear path onto the shared builder is the right fix and is a
+   one-variable change that must itself pass the ladder.
+4. **`p_pdlr` (`zdftke.f90:421`) is still UNMEASURED-WITH-SPEC**, unchanged
+   from round 103's OPEN item 3.
+5. **Do not re-walk what is closed.** The three matrix writes remain BIT and
+   were re-measured only as regression. The `zdfsh2` operand census is closed:
+   all twelve operands BIT. The ordered `zpelc` recurrence remains inert
+   (operator note Q), and `domqco`'s divide-versus-multiply is now a second
+   measured-inert item on that list.
+6. **No acquisition is pending.** The admitted round-46 and round-59 records
+   contain every array this round and the named fix need.
