@@ -320,6 +320,27 @@ def main(argv=None):
     })
     w = area / area.sum()
     if args.rad_detail:
+        # Radiation rebuilds cloud properties from the temperature it is handed
+        # (compute_cloud_properties(T=T, ...)), and cloud fraction depends on T
+        # through saturation, so swapping the temperature ALSO swaps the clouds
+        # and the difference is not a pure temperature response (codex).  Record
+        # the cloud properties the model-temperature call produces and replay
+        # them, in call order, into the ERA5-temperature call.
+        import legoesm.atmosphere.physics.radiation.integration as _radint
+        _cloud_tape: list = []
+        _cloud_mode = {"m": "record"}
+        _orig_ccp = _radint.compute_cloud_properties
+
+        def _ccp(*a, **kw):
+            if _cloud_mode["m"] == "replay" and _cloud_tape:
+                return _cloud_tape.pop(0)
+            out = _orig_ccp(*a, **kw)
+            if _cloud_mode["m"] == "record":
+                _cloud_tape.append(out)
+            return out
+
+        _radint.compute_cloud_properties = _ccp
+
         def rad_on(T_arr):
             fn = fns["radiation"]
             kw = {"forcing": forcing} if getattr(fn, "_wants_forcing", False) else {}
@@ -331,10 +352,21 @@ def main(argv=None):
             lw, sw, olr, rsu = rad_calls[0]            # first call = all-sky
             print(f"    TOA global mean: rlut {float((olr * w).sum()):.2f}  rsut {float((rsu * w).sum()):.2f} W/m2")
             return lw.reshape(T0.shape) * 86400.0, sw.reshape(T0.shape) * 86400.0
+        _cloud_mode["m"] = "record"
         lw_m, sw_m = rad_on(T0)
+        _recorded = list(_cloud_tape)
+        # clouds FROZEN at the model-temperature values: a pure temperature response
+        _cloud_mode["m"] = "replay"
+        _cloud_tape[:] = list(_recorded)
         lw_e, sw_e = rad_on(Te)
+        # and again with clouds free, so the cloud share of the response is visible
+        _cloud_mode["m"] = "off"
+        lw_e_freecld, sw_e_freecld = rad_on(Te)
+        _radint.compute_cloud_properties = _orig_ccp
+        print(f"    cloud tape: {len(_recorded)} call(s) recorded and replayed")
         o3 = np.asarray(forcing["o3_vmr"], dtype=np.float64).reshape(T0.shape) * 1e6
         rad_bands = {"lw_model": lw_m, "sw_model": sw_m, "lw_era5": lw_e, "sw_era5": sw_e,
+                     "lw_era5_freecld": lw_e_freecld, "sw_era5_freecld": sw_e_freecld,
                      "o3_ppmv": o3}
         gmp = (p_full * w[:, None]).sum(0) / 100.0
         print("\nradiation detail, global mean, K/day (model T | ERA5 T in the same columns), o3 ppmv given to radiation")
