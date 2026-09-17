@@ -2848,7 +2848,8 @@ def test_cloud_optics_inhomogeneity_validate():
 def test_cloud_saturation_scheme_round_trips_and_threads():
     """--cloud-saturation-scheme round-trips into ExperimentConfig and threads
     into the hot-loop CloudConfig (the cloud-fraction RH saturation curve,
-    #1521 ice-saturation fix); default 'liquid' = legacy byte-identical."""
+    #1521 ice-saturation fix); 'liquid' = legacy byte-identical, no longer
+    the default."""
     from legoesm.atmosphere.physics.clouds.config import build_cloud_config
     parser = build_arg_parser()
     cfg = build_config_from_args(_postprocess_args(parser.parse_args([
@@ -2859,13 +2860,16 @@ def test_cloud_saturation_scheme_round_trips_and_threads():
     cc = build_cloud_config(
         cfg.cloud_scheme, saturation_scheme=cfg.cloud_saturation_scheme)
     assert cc.saturation_scheme == "mixed_phase"
-    # default: 'liquid' => CloudConfig default (legacy path).
+    # saying nothing => the field default, which is 'mixed_phase' since
+    # 2026-09-17 (the 'liquid' curve made cold cloud impossible: at 230 K /
+    # 900 hPa ice-saturated air reads RH 0.662 against rh_crit 0.85).
     d = build_config_from_args(_postprocess_args(
         parser.parse_args(["--dataset", "analytical"]), parser))
-    assert d.cloud_saturation_scheme == "liquid"
+    assert d.cloud_saturation_scheme == "mixed_phase"
     assert build_cloud_config(
         d.cloud_scheme,
-        saturation_scheme=d.cloud_saturation_scheme).saturation_scheme == "liquid"
+        saturation_scheme=d.cloud_saturation_scheme
+    ).saturation_scheme == "mixed_phase"
 
 
 def test_cloud_saturation_scheme_validate():

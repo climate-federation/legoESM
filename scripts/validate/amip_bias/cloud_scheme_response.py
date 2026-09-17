@@ -8,7 +8,8 @@ import os, sys, glob
 sys.path[:0] = [os.getcwd()+"/src"] + glob.glob(os.getcwd()+"/packages/*") + [os.getcwd()]
 import jax, jax.numpy as jnp, numpy as np
 jax.config.update("jax_enable_x64", True)
-from legoesm.atmosphere.physics.clouds.cloud_fraction import compute_cloud_properties
+from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+    compute_cloud_properties, cover_saturation_mixing_ratio)
 from legoesm.atmosphere.physics.clouds.config import CloudConfig
 from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
 
@@ -20,13 +21,15 @@ CASES = [("Arctic winter low", 230.0, 900e2, 2.0e-5),
 
 def cover(scheme, T, p, rh, q_i, sat="mixed_phase"):
     Tj = jnp.array([[T]]); pj = jnp.array([[p]]); dp = jnp.array([[5e3]])
-    # RH is defined against the curve the scheme uses, so set q_v from it
-    qsl = float(saturation_mixing_ratio(Tj, pj)[0, 0])
-    qsi = float(saturation_mixing_ratio_ice(Tj, pj)[0, 0])
-    qs = qsi if (sat == "mixed_phase" and T < 233.15) else qsl
-    q_v = jnp.array([[rh * qs]])
     cfg = CloudConfig(scheme=scheme, rh_crit=0.85, saturation_scheme=sat,
                       q_c_diagnostic=5e-6)
+    # RH must be defined against the curve the SCHEME measures against, so ask
+    # the scheme's own dispatch rather than re-deriving a liquid/ice cutoff:
+    # between T_ice_only and T_freeze the curve is a BLEND, and a hand-rolled
+    # threshold silently labels liquid RH as mixed-phase RH in that range
+    # (codex caught exactly that at 258 K in the first version of this probe).
+    qs = float(cover_saturation_mixing_ratio(Tj, pj, cfg)[0, 0])
+    q_v = jnp.array([[rh * qs]])
     kw = dict(q_ice=jnp.array([[q_i]]), q_cloud=jnp.zeros((1, 1)))
     out = compute_cloud_properties(Tj, pj, q_v, dp, cfg, **kw)
     return float(out.cloud_fraction[0, 0])
