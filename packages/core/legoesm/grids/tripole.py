@@ -532,15 +532,32 @@ def create_tripole_grid(
     area_T = dx_T * dy_T
     total_area = jnp.sum(area_T)
 
-    # u-point metrics.  NEMO e1u/e2u have shape (n_lat, n_lon) but on
-    # a C-grid u-points have shape (n_lat, n_lon+1).  For NEMO, the
-    # u-point at index i is between T-cell (i-1) and T-cell i in the
-    # zonal direction, and e1u[j, i] is the zonal spacing there.
-    # The wrap column (i = n_lon) equals i = 0 by periodicity.
+    # u-point metrics.  NEMO e1u/e2u have shape (n_lat, n_lon) but on a C-grid
+    # u-points have shape (n_lat, n_lon+1).
+    #
+    # NEMO's u-point ``i`` lies EAST of T-cell ``i`` -- between T(i) and T(i+1).
+    # MEASURED off the mesh rather than taken from documentation: on the
+    # 1-degree part of eORCA1, ``glamu - glamt = +0.5000`` deg at four
+    # consecutive equatorial columns (and ``gphiv - gphit = +0.32`` deg, the
+    # matching statement for v).  Our face ``i`` lies WEST of cell ``i`` --
+    # ``f_u_inner`` just below averages ``f_T[i-1]`` and ``f_T[i]``, which is
+    # the same statement.  So our face ``i`` must take NEMO's ``e1u[i-1]``, and
+    # face 0 wraps to the LAST column by periodicity.
+    #
+    # This block previously appended ``e1u[:, 0:1]`` instead, which gave every
+    # face the metric of the face one column EAST.  That is exactly a no-op
+    # wherever the mesh does not vary along a row -- the whole southern
+    # hemisphere and the tropics -- which is why it survived; ORCA's
+    # quasi-isotropic northern grid begins near 20N, so it was a several- to
+    # twenty-percent error on every zonal face north of 30N, including the
+    # Gulf Stream and the Arctic.  Confirmed to reach the continuity operator
+    # (20-31% of the local divergence in the worst percentile north of 30N,
+    # and exactly zero in 30S-60S where the two builds are bit-identical) by
+    # ``scripts/validate/ocean_fidelity/tripole_metric_divergence.py``.
     e1u = raw["e1u"].astype(dtype)
     e2u = raw["e2u"].astype(dtype)
-    dx_u = jnp.concatenate([e1u, e1u[:, 0:1]], axis=1)  # (n_lat, n_lon+1)
-    dy_u = jnp.concatenate([e2u, e2u[:, 0:1]], axis=1)
+    dx_u = jnp.concatenate([e1u[:, -1:], e1u], axis=1)  # (n_lat, n_lon+1)
+    dy_u = jnp.concatenate([e2u[:, -1:], e2u], axis=1)
 
     # v-point metrics.  NEMO v-points have shape (n_lat, n_lon); the
     # extra row at the fold boundary needs special handling.

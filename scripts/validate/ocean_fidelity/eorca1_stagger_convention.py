@@ -63,6 +63,21 @@ def main() -> int:
         print(f" {jj:4d} {gphit[jj, i0]:9.4f} {gphiv[jj, i0]:9.4f} "
               f"{gphiv[jj, i0] - gphit[jj, i0]:+9.4f}")
 
+    # FOLD ROWS.  The equatorial measurement establishes the convention on the
+    # regular part of the mesh; it does NOT establish it across the tripole
+    # fold, where the i index is reversed.  If the folded rows carried e1u/e2u
+    # pre-reversed, the same prepend would be wrong there.  GLM raised this;
+    # measure it rather than assume.  Longitude differences are wrapped into
+    # (-180, 180] so the dateline does not masquerade as a huge offset.
+    print("\n[fold ] glamu - glamt in the NORTHERNMOST rows (fold region)")
+    print("    j     lat   median(glamu-glamt)   min      max")
+    for jj in range(ny - 6, ny):
+        d = ((glamu[jj] - glamt[jj] + 180.0) % 360.0) - 180.0
+        print(f" {jj:4d} {np.nanmax(gphit[jj]):7.2f} {np.nanmedian(d):+14.4f} "
+              f"{np.nanmin(d):+9.4f} {np.nanmax(d):+9.4f}")
+    print("[fold ] a sign flip or a ~0 median in these rows would mean the "
+          "u-point convention does NOT survive the fold.")
+
     print("\n[halo] zonal wrap: compare first/last columns of glamt")
     for i in (0, 1, 2, nx - 3, nx - 2, nx - 1):
         print(f"   i={i:4d}  glamt={glamt[j, i]:9.4f}")
@@ -137,3 +152,63 @@ def scope() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main() or scope())
+
+
+def fold_convention_by_distance() -> int:
+    """Settle the u-point convention AT THE FOLD, where longitude is useless.
+
+    Near the pole every meridian converges, so ``glamu - glamt`` is degenerate
+    -- the fold rows return a median near zero and a sign flip in the last row,
+    which says nothing about staggering.  GLM flagged the fold as the one place
+    the equatorial measurement does not cover, so measure it with a quantity
+    that stays meaningful there: the great-circle distance between T-points.
+
+    If NEMO's ``e1u[i]`` is the EAST face it must equal dist(T_i, T_{i+1}); if
+    it were the WEST face it would equal dist(T_{i-1}, T_i).  Score both
+    against the mesh's own e1u and report which wins, band by band, including
+    the folded rows.
+    """
+    import numpy as _np
+    import xarray as xr
+
+    from legoesm import constants
+
+    dm = xr.open_dataset(MESH, decode_times=False)
+    glamt = _np.radians(_sq(dm["glamt"].values))
+    gphit = _np.radians(_sq(dm["gphit"].values))
+    e1u = _sq(dm["e1u"].values)
+    R = constants.R_earth
+
+    def _gc(lon1, lat1, lon2, lat2):
+        dlon = lon2 - lon1
+        a = (_np.sin((lat2 - lat1) / 2.0) ** 2
+             + _np.cos(lat1) * _np.cos(lat2) * _np.sin(dlon / 2.0) ** 2)
+        return 2.0 * R * _np.arcsin(_np.sqrt(_np.clip(a, 0.0, 1.0)))
+
+    east = _gc(glamt, gphit, _np.roll(glamt, -1, axis=1),
+               _np.roll(gphit, -1, axis=1))          # dist(T_i, T_i+1)
+    west = _np.roll(east, 1, axis=1)                 # dist(T_i-1, T_i)
+    ok = e1u > 0.0
+    r_e = _np.where(ok, _np.abs(east - e1u) / _np.where(ok, e1u, 1.0), _np.nan)
+    r_w = _np.where(ok, _np.abs(west - e1u) / _np.where(ok, e1u, 1.0), _np.nan)
+
+    lat_deg = _np.degrees(gphit)
+    print("\n[dist ] which T-pair does NEMO's e1u[i] match? median relative "
+          "error, EAST = dist(T_i,T_i+1) vs WEST = dist(T_i-1,T_i)")
+    print("   band            EAST        WEST     verdict        n")
+    for lo, hi in [(-90, -60), (-60, -30), (-30, 30), (30, 60),
+                   (60, 80), (80, 89), (89, 91)]:
+        m = (lat_deg >= lo) & (lat_deg < hi) & ok
+        if not m.any():
+            continue
+        me, mw = _np.nanmedian(r_e[m]), _np.nanmedian(r_w[m])
+        if _np.isclose(me, mw, rtol=0.2):
+            verdict = "AMBIGUOUS"
+        else:
+            verdict = "EAST" if me < mw else "WEST"
+        print(f" {lo:+4d}..{hi:+4d}  {me:10.3e}  {mw:10.3e}  {verdict:<10s} "
+              f"{int(m.sum()):7d}")
+    print("[dist ] AMBIGUOUS means the two candidates are indistinguishable "
+          "there (a zonally uniform row), which is exactly where the "
+          "alignment cannot matter.")
+    return 0
