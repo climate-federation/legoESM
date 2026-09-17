@@ -1947,8 +1947,12 @@ def make_tiled_fv3_hydrostatic_tendencies_stage_2d(mesh, cdgrid, coord, n: int,
 # after a 24-node allocation — the guard turns that into an instant,
 # named error. Grow ONLY with a new bit-identity receipt.
 # kt=4 added 2026-09-17: tests/parallel/test_tiled_fv3_hydrostatic_step.py
-# at N=48 on 96 host devices, sigma + hybrid, both passed (u_d/v_d corner
-# rel < 1e-9, T/p_s < 1e-7).  kt=6/8 are NOT validated yet.
+# at N=48 on 96 host devices, sigma + hybrid, both passed.  NOTE the receipt
+# is an FMA-ROBUST RELATIVE match (u_d/v_d corner rel < 1e-9, T/p_s < 1e-7),
+# not literal bit equality — the RK3 accumulation reorders — plus a real
+# multi-controller 96-GPU C768 run (the host-device test alone does not
+# exercise NCCL or device memory, which is where #1360 actually bit).
+# kt=6/8 are NOT validated yet.
 _VALIDATED_KT = frozenset({2, 3, 4})
 
 
