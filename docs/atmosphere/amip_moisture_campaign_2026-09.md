@@ -657,3 +657,45 @@ interim recommendation if the PR must close: q_ref 3e-4 with rh_crit 0.85 (tropi
 a cold-only (T < ~235 K) variant is being tested for a LW-heavy lever (~half a day). Per the user's
 decision the joint rh_crit re-tune waits for that; note the new convection path will move the
 cloud-layer humidity again, so the re-tune should follow the 5-day screen of the faithful scheme.
+
+### Iteration I — the cumastrn closure lands, and the port's gate debt is cleared (2026-09-17)
+`_ifs_closure.py` (GLM, Claude-reviewed; codex review pending, its CLI is out of credits until
+2026-09-21): first-guess cloud-base mass flux, deep CAPE closure, shallow sub-cloud MSE closure,
+single ZMFS rescaling of the once-computed ascent profiles. Ten unit tests on the frozen
+deep/trade soundings, all passing; the sub-cloud test is shown to fail when the index fix is
+reverted.
+
+Review found eight defects. The load-bearing one: the module read the cloud-base/top/departure
+indices as 1-based IFS levels in the deep closure and as our own 0-based surface-last indices
+everywhere else, so every mask in the CAPE closure and in the sub-cloud MSE integral was off by
+one level. The ascent module settles the convention (it writes `M.at[ar, k_cbot]` and sets
+`k_ctop = j`). Others: ZDH2 used the plume temperature at the cloud base where cumastrn:896 uses
+IKB-1; the source's `LDCUM=.FALSE.` on the shallow ZDHPBL<=0 branch was dropped; a dead boolean
+factor; a needless two-function split; a re-implemented ZTAURES (now the shared public
+`mass_flux.ifs_ztaures` — and GLM's first version of that helper dropped the `dx<=0 -> 1.0`
+sentinel, which would have moved every production Bechtold column from 1.0 to 20.2, since the
+default `dx_m` is 0.0); and a `__param_spec__` keyed by source line with a duplicate key.
+
+CALLER CONTRACT (measured, not read off the code): cumastrn runs CUASC with the first-guess
+ZMFUB, so ZHEAT is linear in PMFU and ZMFS = ZMFUB1/ZMFUB is a ratio to that same base. The first
+test harness handed the closure an ascent whose cloud-base flux was 46x smaller than the first
+guess; ZMFUB1 then saturates at ZMFMAX on every deep column (measured on the deep sounding:
+ZCAPE 2389, ZHEAT 0.1221, ZXTAU 736 s, so the closure asks for 26.6x the first guess against a
+10x cap). **The wiring must launch the ascent with the closure's first guess**, or the CAPE
+closure is inert and the cap decides everything.
+
+Gate debt: all five AST ratchets were RED on this branch before today, including for the three
+modules landed on 2026-09-16 (`_ifs_ascent`, `_ifs_test_ascent`, `_ifs_tendencies`). Cleared:
+module-level param specs and physics contracts in the repo schema, verbatim Fortran literals
+hoisted to named constants with provenance, `273.15` replaced by the canonical constant, and the
+seven private symbols `_ifs_ascent` imported from `_ifs_test_ascent` promoted to public names.
+5143 gate tests pass.
+
+Separate, NOT introduced here: `tests/unit/test_bechtold.py` has 17 failures (NaN gradients in
+the Bechtold grad tests, the IFS CAPE-closure and downdraft leaves). Identical list at
+b636d812a in a clean worktree, so they predate this work; they need their own triage before the
+faithful path is wired.
+
+Next: the wiring design (closure + tendencies behind `BechtoldConfig.use_ifs_ascent`, default
+False), with the first-guess contract above respected, then the day-110 replay and the 5-day
+screen.
