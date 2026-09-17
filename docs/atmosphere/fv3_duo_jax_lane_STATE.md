@@ -1829,3 +1829,20 @@ payloads, not setup. Every earlier hang (9756806, 9756887, 9758308,
 g041-044 + g094-101. A payload ladder (16 KB .. 32 MB) on both node sets is
 queued to hand the admins a reproducer. Not a port defect; the launcher
 should exclude the bad nodes until they are fixed (a choice -- ASK).
+
+### The GPU deck ladder's three decks are pre-validated on CPU (2026-09-17)
+
+codex flagged C96 at dt=450 n_split=3 as accepted by the constructor but
+unverified for stability -- the constructor proves no stability bound. Run
+on 24 virtual CPU devices first, so a 12-node GPU allocation is not spent
+discovering an unstable deck (jobs 9829662/63/64):
+
+| deck | sub-cycles | two steps |
+|---|---|---|
+| C24 km=5 pad=5 n_split=1 dt=900 | 1 per level | 12/12 leaves BITWISE |
+| C48 km=10 pad=11 n_split=3 dt=900 | 1 per level | 12/12 BITWISE |
+| C96 km=10 pad=11 n_split=3 dt=450 | 1 per level | 12/12 BITWISE |
+
+All three are stable and correct on CPU, so a GPU row that fails is the GPU
+path, not the deck. Wall per step on CPU (24 virtual devices, one process):
+0.079 s at C24, 0.393 s at C48, 0.935 s at C96.
