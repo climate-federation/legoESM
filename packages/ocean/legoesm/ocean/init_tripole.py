@@ -52,7 +52,9 @@ def mask_to_nemo_domain(land_mask, lat_deg, lon_deg, domain_cfg_path, *,
     domain_cfg are NEVER wetted (there is no bathymetry for them); their
     count is printed so a mesh/domain mismatch in that direction is visible.
 
-    Returns the masked copy of ``land_mask`` (same shape and dtype).
+    Returns a masked copy of ``land_mask`` with the same shape, always as
+    ``float64`` (the comparison against ``top_level`` is done in float64), so
+    a bool or float32 mask comes back widened.
     """
     import xarray as xr
 
