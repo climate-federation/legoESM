@@ -10,7 +10,7 @@ T/S/u/v/ssh, the prognostic barotropic pair, and all five TKE closure carries
 (`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1134-1168`); the lane then
 installs the six raw barotropic histories, uses forcing for the same `kt`, and
 selects the matching barotropic and stage-entry overrides before calling the
-model step (`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:3078-3108`). The
+model step (`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:3265-3295`). The
 preliminary kt=1 step in the bridge supplies only the otherwise unrecorded
 static/inactive pytree structure, so the stage-twin claims are not a
 mixed-time-state measurement.
@@ -178,7 +178,7 @@ used as a causal attribution.
 The intervention is installed at the return of
 `_solve_tke_backward_euler`, immediately before the production final
 `compute_mixing_lengths` / `compute_K_from_tke` consumption
-(`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:2924-2945`). It intercepts
+(`nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:3111-3132`). It intercepts
 exactly one solve, returns NEMO's energy bit-exactly (0 / 17,400 unequal), and
 uses the same entry SHA, `Nbb/Kbb/Kmm=3/3/3`, forcing kt=2, and kt=2
 barotropic handoff as the baseline. It is non-vacuous: injected versus
