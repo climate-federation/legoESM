@@ -1657,6 +1657,12 @@ class BechtoldConfig(NamedTuple):
     # 10 days, r16); RCE-inert (no trigger data).  Flip needs a skill-gated
     # longer run.  False is byte-identical legacy.
     use_ifs_shallow_closure: bool = False
+    # Faithful IFS chain (2026-09-17, user decision): selects the ported
+    # cubasen trigger + cuascn ascent + cumastrn closure + cudtdqn tendencies
+    # AS A WHOLE, in place of the legacy Bechtold reduction, keeping the IFS
+    # downdraught and sub-cloud evaporation.  Static python bool, so only one
+    # branch is ever traced.  DEFAULT False until the 5-day arm decides.
+    use_ifs_ascent: bool = False
     # IFS RCAPDCYCL=2 diurnal-cycle CAPE correction (cumastrn.F90:780-833;
     # see bechtold._ifs_capdcycl): subtracts the sub-cloud CAPE production
     # over a BL timescale so land deep convection peaks late afternoon.
