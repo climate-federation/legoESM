@@ -350,11 +350,14 @@ Three controls, each shown firing, and each stated for exactly what it proves.
    so the "add exactly one" contract forced it onto a DRY cell where both
    sides are zero by construction. It now targets the TIME-LEVEL row, which
    is bit-exact over all 20,416 cells, and is REQUIRED to land on a cell the
-   shear genuinely produced (`recorded != 0.0`), refusing otherwise. Clean
-   `0` unequal, planted `1`; plant target and the cell's baseline `p_sh2`
-   value are both recorded in the artifact. The gate's exit code is 1 for
-   every plant and therefore discriminates nothing; the proof is the internal
-   hard check, and the run's status label reads `PLANT-FIRED`.
+   shear genuinely produced (`recorded != 0.0`), refusing otherwise. Fired at
+   `(1, 1, 0)`, a WET cell whose `p_sh2` is `1.7204494884191844e-08`: clean
+   `0` unequal, planted **1**, max `3.308722450212111e-24`, plant target
+   `GYRE-zco.kt2.tke_shear.time_level.step_entry_ssh_production_vs_recorded`.
+   The gate's exit code is 1 for every plant and therefore discriminates
+   nothing; the proof is the internal hard check, and the run's status label
+   reads `PLANT-FIRED`. The string `STATUS PASS` appears **zero** times in
+   its log.
 3. **Citation audit.** The clean run is 274 citations, 0 unmapped, 0
    failures, 0 map-audit failures, 9 of 9 self-test controls fired, `STATUS
    PASS`, exit 0. Its receipt-path plant on `domqco.F90:189-209` exits 1 with
@@ -384,7 +387,62 @@ stage gate.
 
 ## Independent adversarial review
 
-REVIEW_PLACEHOLDER
+An independent adversarial pass was run in-sandbox against this round's diff,
+its preregistration and an earlier draft of this receipt
+(`codex_review.log`). **Its verdict was `DO NOT SHIP`**, on findings that
+were correct, and it is quoted rather than summarised:
+
+> - Blocking: claim (2) is false. The "model operand" census constructs its
+>   divisor using `state.eta.data`, the step-entry field. Production instead
+>   receives `_nemo_ws_zdf_eta_kmm`, normally the half-step field. Therefore
+>   the reported BIT `divisor_u/v` rows are not operands legoESM actually
+>   feeds production. The receipt's "every operand" statement is refuted by
+>   its own instrumentation.
+> - The mirror's documented contract says a non-BIT production comparison
+>   means it is wrong or omits an operand. That comparison is indeed non-BIT.
+>   Exact agreement only after changing production to the mirror's chosen eta
+>   validates the counterfactual arm, not the baseline operand
+>   reconstruction. Direct capture of baseline `face_metrics` is missing.
+> - The time-level source reading is otherwise correct: NEMO calls
+>   `zdf_phy(kstp,Nbb,Nbb,Nrhs)` at `stprk3.f90:168`, passes those slots
+>   unchanged at `zdfphy.f90:319-320`, and the record identifies
+>   `(Kbb,Kmm)=(3,3)`. The no-Stokes ELSE branch and levels `2:jpkm1` are
+>   also correct; surface/bottom zeroing cannot touch the scored slice.
+> - The whole-step hook is not a downstream confound for the captured
+>   `p_sh2`: shear is calculated before the diffusion solve. But calling it
+>   "exactly one thing changed" is false for the whole step because the same
+>   eta also changes `tra_zdf`.
+> - The stage plant is vacuous as an arithmetic-path control: it corrupts the
+>   reference at an already-equal dry cell, not a consumed shear operand. It
+>   would fire for any fixed production array containing one matching cell.
+>   The separate record-replay plant does exercise arithmetic.
+> - "No plant prints a success word" is false: the citation plant emits two
+>   strings containing "must pass". The stage-plant artifact also contains an
+>   unrelated `CONFIRMED_INHERITED_MODEL_TAUM`.
+> - P3, P4, and P5 are explicitly reported as refutations; I found no quiet
+>   rewrite. No production package or configuration line changed. However,
+>   "headline numbers unchanged" was inferred, not rerun, and the DINO
+>   disposition is also asserted without a round-104 execution.
+>
+> DO NOT SHIP
+
+**What was done about each, with no finding dismissed.**
+
+| finding | classification | action |
+|---|---|---|
+| the divisor rows are not captured operands, so "every operand is BIT" is false | **CONFIRMED BUG IN THE CLAIM** | the sentence is withdrawn in the verdict section and in the operand table, which now says per row whether the quantity was captured; the walk's non-matching row is described as the finding, not as a mirror defect |
+| direct capture of the production face metric is missing | **CONFIRMED GAP** | stated as a gap in "What is still NOT captured", and made OPEN item 0 for round 105 |
+| the source reading is correct | agreement, recorded | quoted, because an independent re-reading of the compiled call chain is the strongest evidence this round has |
+| "exactly one thing changed" is false for the whole step | **CONFIRMED IMPRECISION** | rewritten as "one field is changed; the whole step is not", with the reviewer's own check that the shear precedes the solve quoted as the reason the `p_sh2` row is unconfounded |
+| the stage plant was vacuous as an arithmetic control | **CONFIRMED DEFECT IN THE CONTROL** | the plant was MOVED to the time-level row and now refuses unless it lands on a wet cell; re-run, it fires at `(1, 1, 0)` on a `p_sh2` of `1.72e-08` |
+| "no plant prints a success word" is too broad | **CONFIRMED OVERCLAIM** | narrowed to a precise statement naming both pre-existing strings and what they are |
+| headline numbers inferred, DINO asserted | **CONFIRMED, both** | both are now explicitly labelled as not measured this round, with the basis given |
+
+The clean walk, the plant, the receipt corrections and the control fix were
+all re-run or re-committed after the review. **A second review pass has not
+been run on this corrected text**; that is recorded as a limitation rather
+than left implicit, and round 105 should re-review before building on it.
+
 
 ## Tests
 
@@ -420,12 +478,19 @@ All under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round104/`.
 | `instrument_repro.json` | `4120dd653631d2ec43bfafd4a076a468831ef1701973c288584a53a9d3539f9b` |
 | `record_replay.json` | `fb64e71dbadbff76417c51f4e3e47ffb349ab06bac3f9b12c38be4068c6c4274` |
 | `record_replay_plant.json` | `d9d7a707cba9c40a983f90d5d4ff1c07181c3813b98514e5829a9241b9101fcf` |
-| `shear_walk.json` | `805a3c3abd298104716bffa074318ed6f6e5594d060523b16ee5d4ba2644a177` |
-| `shear_plant.json` | `a26c3b1ac00f96d0e5ce4b9c0f9a3211ee08723912eaacabb0f5ad49c5c898eb` |
+| `shear_walk.json` | `6bb12a25973c7e6fdb350f3fee412db6dda76cfc51e445ebc6bbcb49e455eb1d` |
+| `shear_plant.json` | `c0c1ee03f8aa24c4835d341891391788f7338846bfc61822f34f96652d85cd9e` |
 | `citation_gate.json` | `678a84898630cff135c647f8f8b6a99f10d9c91d4581af3ff8ad1cd7f4aa7b83` |
 | `citation_gate_plant.json` | `165a80b9af98ef85c9f51a24168085611b61106190971ff0ba38173778e4cb52` |
 | `citation_gate_round104_controls.log` | `125f6cf54a60e57d86c21a3b5425dcb9742a0acd405923ba1295562a7dc79e6c` |
 | `focused_pytest.xml` | `dbf6355fadddb4b4a13e2031935de6df5f4dca533d492583da316439551e8df2` |
+| `codex_review.log` | `bdebd0587f3ca181eac8738b9de52b436e0d090621f8b6f142d9fd9df0cb2b67` |
+
+The shear walk and its plant were re-run after the review; the fingerprints
+above are of the RE-RUN artifacts, stamped `b4992e0fda7c` and `5255664a0c3b`
+respectively, and the superseded first-run numbers are not quoted anywhere in
+this receipt. The `instrument_repro` and citation artifacts are from earlier
+commits on this same branch, each stamped in its own file.
 
 A fingerprint pins ONE run of the tool that produced it. Re-running a gate
 after this receipt is committed invalidates the hash even when every number
