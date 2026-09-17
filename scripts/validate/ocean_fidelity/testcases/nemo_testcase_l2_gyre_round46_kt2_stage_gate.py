@@ -2278,11 +2278,117 @@ def _tke_production_statement_rows(
     }
 
 
+def _tke_program_twin(
+    records: dict, advmean_root: Path, memory_root: Path,
+    tke_statement_record: dict, tke_operand_record: dict,
+    plant: str | None,
+) -> dict:
+    """Bounded production-step TKE subwalk split from the compiler-heavy table."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks)
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card)
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(bool(jax.config.jax_enable_x64), "TKE program twin requires x64")
+    card = build_nemo_testcase_card("GYRE-zco")
+    cfg = card.recipe.model_config._replace(
+        freshwater_closure="real_freshwater", fix_eta_drift=True)
+    state = _bridge_kt2_state(card, cfg, records)
+    raw_history = tuple(
+        jnp.asarray(value) for value in _raw_history_override(memory_root))
+
+    # The stage record is post-zdf_phy.  Replace only closure memory with the
+    # independently admitted pre-tke_tke entry; every other kt2 state field
+    # stays on the consolidated bridge.
+    tke_arrays = tke_operand_record["arrays"]
+
+    def tke_field(name: str, levels=slice(1, 30)):
+        return jnp.asarray(
+            np.asarray(tke_arrays[name]).swapaxes(0, 1)[..., levels])
+
+    state = state._replace(
+        tke=state.tke.replace(data=tke_field("en_entry")),
+        tke_avm=state.tke_avm.replace(data=tke_field("avm_entry")),
+        tke_avt=state.tke_avt.replace(data=tke_field("avt_entry")),
+        tke_dissl=state.tke_dissl.replace(data=tke_field("dissl_entry")),
+        tke_avm_surface=state.tke_avm_surface.replace(
+            data=tke_field("avm_entry", 0)),
+    )
+    input_bridge = []
+    for field, candidate, reference in (
+        ("en_entry", state.tke.data, tke_field("en_entry")),
+        ("avm_entry", state.tke_avm.data, tke_field("avm_entry")),
+        ("avt_entry", state.tke_avt.data, tke_field("avt_entry")),
+        ("dissl_entry", state.tke_dissl.data, tke_field("dissl_entry")),
+        ("avm_surface_entry", state.tke_avm_surface.data,
+         tke_field("avm_entry", 0)),
+    ):
+        reference = np.asarray(reference)
+        row = _classification(score(
+            f"GYRE-zco.kt2.tke_program_input.{field}",
+            reference, np.asarray(candidate),
+            np.ones(reference.shape, dtype=bool)))
+        row.update({"field": field, "entry_mode": "NEMO_TKE_RECORDED"})
+        input_bridge.append(row)
+    require(all(row["classification"] == "BIT" for row in input_bridge),
+            "TKE pre-closure input bridge is not bit-identical")
+
+    freshwater, surface = _surface_forcings(card, state, 2)
+    hooks = _NEMOWSRK3TestHooks(
+        expose_live_stage_operands=True,
+        barotropic_raw_history_override=raw_history,
+        stage_barotropic_output_override=_barotropic_override(
+            records, advmean_root, 2),
+    )
+    given_trace = jax.device_get(LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg,
+        _nemo_ws_test_hooks=hooks).step(
+            state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface))
+    given = _tke_production_statement_rows(
+        given_trace, tke_statement_record, "NEMO_TKE_RECORDED", plant)
+    if plant == "stage-tke-production-ulp":
+        return {
+            "format": "nemo-testcase-l2-gyre-tke-production-walk-v3",
+            "input_bridge": input_bridge,
+            "given_nemo_entry": given,
+            "chained": None,
+        }
+
+    chained_trace = None
+    state = card.recipe.initial_state
+    for kt in (1, 2):
+        model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, cfg,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                expose_live_stage_operands=True))
+        state = model._seed_tke_preclosure_carry(state)
+        freshwater, surface = _surface_forcings(card, state, kt)
+        trace = jax.device_get(model.step(
+            state, dt=card.dt_s, freshwater=freshwater,
+            surface_forcing=surface))
+        if kt == 2:
+            chained_trace = trace
+        state = trace.state_after
+    require(chained_trace is not None,
+            "chained TKE production run did not expose kt2")
+    return {
+        "format": "nemo-testcase-l2-gyre-tke-production-walk-v3",
+        "input_bridge": input_bridge,
+        "given_nemo_entry": given,
+        "chained": _tke_production_statement_rows(
+            chained_trace, tke_statement_record, "LEGO_CHAINED"),
+    }
+
+
 def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                 memory_root: Path, btstep_root: Path,
                 stage_closure_root: Path, stage1_w_root: Path,
-                stage1_r3_root: Path, tke_statement_record: dict,
-                tke_operand_record: dict,
+                stage1_r3_root: Path,
                 plant: str | None, *, walk_only: bool = False) -> dict:
     """Decision-41 stage tables from recorded entries and the shared stage."""
     direct_w_record = read_admitted_stage1_w_walk(
@@ -2367,76 +2473,6 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                   plant=plant == "stage-context-ulp"),
               2: _bridge_kt2_state(card, cfg, records)}
     raw_history = tuple(jnp.asarray(value) for value in _raw_history_override(memory_root))
-
-    # The stage records carry NEMO's post-zdf_phy closure fields, whereas the
-    # Round-101 program begins at tke_tke's pre-closure entry.  Drive the TKE
-    # subprogram from the independently admitted Round-59 entry fields while
-    # retaining the same kt2 dynamical state for every other production
-    # operand.  Without this bridge the walk advances an already advanced TKE
-    # field and can only diagnose inherited input error.
-    tke_arrays = tke_operand_record["arrays"]
-
-    def tke_field(name: str, levels=slice(1, 30)):
-        return jnp.asarray(
-            np.asarray(tke_arrays[name]).swapaxes(0, 1)[..., levels])
-
-    tke_given_state = states[2]._replace(
-        tke=states[2].tke.replace(data=tke_field("en_entry")),
-        tke_avm=states[2].tke_avm.replace(data=tke_field("avm_entry")),
-        tke_avt=states[2].tke_avt.replace(data=tke_field("avt_entry")),
-        tke_dissl=states[2].tke_dissl.replace(data=tke_field("dissl_entry")),
-        tke_avm_surface=states[2].tke_avm_surface.replace(
-            data=tke_field("avm_entry", 0)),
-    )
-    tke_input_bridge = []
-    for field, candidate, reference in (
-        ("en_entry", tke_given_state.tke.data, tke_field("en_entry")),
-        ("avm_entry", tke_given_state.tke_avm.data,
-         tke_field("avm_entry")),
-        ("avt_entry", tke_given_state.tke_avt.data,
-         tke_field("avt_entry")),
-        ("dissl_entry", tke_given_state.tke_dissl.data,
-         tke_field("dissl_entry")),
-        ("avm_surface_entry", tke_given_state.tke_avm_surface.data,
-         tke_field("avm_entry", 0)),
-    ):
-        reference = np.asarray(reference)
-        row = _classification(score(
-            f"GYRE-zco.kt2.tke_program_input.{field}",
-            reference, np.asarray(candidate),
-            np.ones(reference.shape, dtype=bool)))
-        row.update({"field": field, "entry_mode": "NEMO_TKE_RECORDED"})
-        tke_input_bridge.append(row)
-    require(all(row["classification"] == "BIT" for row in tke_input_bridge),
-            "TKE pre-closure input bridge is not bit-identical")
-    tke_freshwater, tke_surface = _surface_forcings(
-        card, tke_given_state, 2)
-    tke_hooks = _NEMOWSRK3TestHooks(
-        expose_live_stage_operands=True,
-        barotropic_raw_history_override=raw_history,
-        stage_barotropic_output_override=_barotropic_override(
-            records, advmean_root, 2),
-    )
-    tke_given_trace = jax.device_get(LatLonCGridOceanModel(
-        card.recipe.grid, card.recipe.z_coord, cfg,
-        _nemo_ws_test_hooks=tke_hooks).step(
-            tke_given_state, dt=card.dt_s, freshwater=tke_freshwater,
-            surface_forcing=tke_surface))
-    tke_given_walk = _tke_production_statement_rows(
-        tke_given_trace, tke_statement_record,
-        "NEMO_TKE_RECORDED", plant)
-    if plant == "stage-tke-production-ulp":
-        return {
-            "format": "nemo-testcase-l2-gyre-stage-twin-v6",
-            "given_nemo_entry": [], "chained": [],
-            "stage_entry_identity": [], "first_owned_nonbit": None,
-            "tke_statement_walk": {
-                "format": "nemo-testcase-l2-gyre-tke-production-walk-v2",
-                "input_bridge": tke_input_bridge,
-                "given_nemo_entry": tke_given_walk,
-                "chained": None,
-            },
-        }
     kt_values = ((1,) if plant in {
         "stage-entry-ulp", "stage-context-ulp", "stage-assignment-output-ulp"
     } else (1, 2))
@@ -2535,7 +2571,6 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
             "NEMO_RECORDED"))
 
     chained = []
-    chained_tke_trace = None
     state = card.recipe.initial_state
     for kt in (1, 2):
         model = LatLonCGridOceanModel(
@@ -2550,8 +2585,6 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
         trace = jax.device_get(model.step(
                     state, dt=card.dt_s, freshwater=freshwater,
                     surface_forcing=surface))
-        if kt == 2:
-            chained_tke_trace = trace
         chained.extend(_external_rows(
             (trace.barotropic_targets[4], trace.barotropic_targets[0],
              trace.barotropic_targets[1], trace.barotropic_targets[2],
@@ -2563,16 +2596,6 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
             np.asarray(card.recipe.grid.area_T), state, kt,
             "LEGO_CHAINED", direct_stage_ww))
         state = trace.state_after
-
-    require(chained_tke_trace is not None,
-            "chained production run did not expose the kt2 TKE boundary")
-    tke_statement_walk = {
-        "format": "nemo-testcase-l2-gyre-tke-production-walk-v2",
-        "input_bridge": tke_input_bridge,
-        "given_nemo_entry": tke_given_walk,
-        "chained": _tke_production_statement_rows(
-            chained_tke_trace, tke_statement_record, "LEGO_CHAINED"),
-    }
 
     measured = [row for row in given
                 if row.get("classification") != "UNMEASURED_WITH_SPEC"]
@@ -2607,7 +2630,6 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
         },
         "stage1_w_walk": stage1_w_walk,
         "assignment_execution_discriminator": assignment_discriminator,
-        "tke_statement_walk": tke_statement_walk,
         "first_owned_nonbit": None if first is None else {
             key: first[key] for key in (
                 "kt", "stage", "field", "n_unequal", "absolute_max",
@@ -2771,28 +2793,29 @@ def run(
         if any(row.get("status") != "PASS" for row in report["trajectory"]):
             report["status"] = "UNMEASURED"
     if mode in {"stage-twin", "stage-w-walk"}:
-        statement_record = {}
-        if mode == "stage-twin":
-            from nemo_testcase_l2_gyre_round54_tke_operands import (
-                read_record as read_tke_operand_record,
-            )
-
-            statement_record = read_admitted_tke_statement_walk(
-                tke_statement_root)
-            legacy_record = read_tke_operand_record(tke_operand_record)
-            duplicate_rows = _tke_statement_duplicate_rows(
-                statement_record, legacy_record)
-            require(all(row["classification"] == "BIT"
-                        for row in duplicate_rows
-                        if row["admission_binding"]),
-                    "Round-101 consumed duplicate boundary moved from "
-                    "Round 59 before production scoring")
         report["stage_twin"] = _stage_twin(
             records, root, advmean_root, memory_root, btstep_root,
             stage_closure_root, stage1_w_root, stage1_r3_root,
-            statement_record, (legacy_record if mode == "stage-twin" else {}),
             plant,
             walk_only=mode == "stage-w-walk")
+    if mode == "stage-tke-walk":
+        from nemo_testcase_l2_gyre_round54_tke_operands import (
+            read_record as read_tke_operand_record,
+        )
+
+        statement_record = read_admitted_tke_statement_walk(
+            tke_statement_root)
+        legacy_record = read_tke_operand_record(tke_operand_record)
+        duplicate_rows = _tke_statement_duplicate_rows(
+            statement_record, legacy_record)
+        require(all(row["classification"] == "BIT"
+                    for row in duplicate_rows
+                    if row["admission_binding"]),
+                "Round-101 consumed duplicate boundary moved from Round 59 "
+                "before production scoring")
+        report["tke_statement_walk"] = _tke_program_twin(
+            records, advmean_root, memory_root, statement_record,
+            legacy_record, plant)
     if mode == "stage-tke-record":
         from nemo_testcase_l2_gyre_round54_tke_operands import (
             read_record as read_tke_operand_record,
@@ -2856,7 +2879,7 @@ def main(argv=None) -> int:
     p.add_argument(
         "--mode",
         choices=("validate", "given-inputs", "trajectory", "all", "stage-twin",
-                 "stage-w-walk", "stage-tke-record"),
+                 "stage-w-walk", "stage-tke-record", "stage-tke-walk"),
         default="validate",
     )
     p.add_argument("--round40-kt1", type=Path, required=True)
