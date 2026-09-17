@@ -23,7 +23,7 @@ primitives, none changes the physics where the primitive exists):
   * Half-level environment values ZTENH/ZQENH/ZSENH are the arithmetic
     means of the adjacent full levels, as in cuinin (cubasen.F90:296-312).
   * Saturation uses the liquid curve only
-    (legoesm.thermo.saturation_mixing_ratio); the IFS liquid/ice blend
+    (legoesm.thermo.saturation_specific_humidity); the IFS liquid/ice blend
     FOEALFCU / FOEALFA-R5LES/R5IES (cubasen.F90:486-489 and 525-540) is
     NOT available, hence the freezing correction ZLGLAC is zero
     (liquid-only condensate) and the cloud-base saturation-deficit
@@ -204,7 +204,7 @@ __physics_contract__ = {
                "convective departure level, cloud base/top, test-parcel profiles and "
                "base vertical velocity; classifies deep vs shallow vs none.",
     "inputs": {
-        "T": "K", "q_v": "kg/kg (mixing ratio)", "p_full": "Pa", "p_half": "Pa",
+        "T": "K", "q_v": "kg/kg (specific humidity, PQEN)", "p_full": "Pa", "p_half": "Pa",
         "geo_full": "m2/s2 (geopotential, surface-relative; geo_half[:, nlev] = 0)",
         "geo_half": "m2/s2", "shf_w_m2": "W/m2 (PAHFS sign: negative = upward)",
         "lhf_w_m2": "W/m2 (PQHFL sign: negative = upward; PQHFL = -lhf/L_v [kg m-2 s-1])",
@@ -213,7 +213,8 @@ __physics_contract__ = {
     "outputs": {
         "ldcum": "1 (bool-valued float)", "ktype": "1 deep, 2 shallow, 0 none",
         "k_dpl/k_cbot/k_ctop": "surface-last full-level indices (-1 when none)",
-        "w_base": "m/s (PWUBASE)", "T_u": "K", "q_u/l_u": "kg/kg",
+        "w_base": "m/s (PWUBASE)", "T_u": "K",
+        "q_u/l_u": "kg/kg (PQU/PLU, same moist-mass basis as PQEN)",
         "klab": "0/1/2", "cape_test": "J/kg (PCAPE = max of ZCAPE over departures)",
         "w2": "m2/s2 (ZWU2H/PWU2H of the selected ascent)",
     },
@@ -653,8 +654,8 @@ class TestAscent(NamedTuple):
     k_ctop: jnp.ndarray
     w_base: jnp.ndarray      # PWUBASE [m/s]
     T_u: jnp.ndarray         # (ncol, nlev) K, half-level parcel values
-    q_u: jnp.ndarray         # (ncol, nlev) kg/kg MIXING RATIO per unit dry air
-    l_u: jnp.ndarray         # (ncol, nlev) kg/kg MIXING RATIO per unit dry air
+    q_u: jnp.ndarray         # (ncol, nlev) kg/kg specific humidity (PQU)
+    l_u: jnp.ndarray         # (ncol, nlev) kg/kg, same moist-mass basis (PLU)
     klab: jnp.ndarray        # (ncol, nlev) int32
     cape_test: jnp.ndarray   # (ncol,) J/kg (PCAPE = max of ZCAPE over departures)
     w2: jnp.ndarray          # (ncol, nlev) m2/s2, ZWU2H of the SELECTED ascent
@@ -684,11 +685,10 @@ def _init_departure_parcel(k_dep, is_surface, T, q_v, p_full, p_half,
     they are selected, so clipped-index gathers on the discarded branch are
     harmless (k_dep = 0 never occurs: the departure scan runs N-1 ... 1).
 
-    q_v here is SPECIFIC HUMIDITY (the repo-convention mixing ratio is
-    converted once at the ifs_departure_search entry).  dq_dt_adv is a
-    SPECIFIC-humidity tendency [kg/kg/s] (PTENQA); a caller holding a
-    dry-air mixing-ratio tendency w must convert it first via
-    dq = dw/(1+w)^2 before passing it here.
+    q_v here is SPECIFIC HUMIDITY (PQEN, cubasen.F90:72), the same basis
+    as at the ifs_departure_search entry -- there is no conversion seam.
+    dq_dt_adv is a SPECIFIC-humidity tendency [kg/kg/s] (PTENQA) on the
+    same basis.
 
     The departure temperature is returned EXPLICITLY as ``"T_dep"`` (review
     finding 1): it is the source's ZTU(JKK) -- the single ZTEXC excess over
@@ -940,17 +940,19 @@ def ifs_departure_search(T, q_v, p_full, p_half, geo_full, geo_half,
     departures x N-1 masked ascent levels); reverse-mode AD memory over the
     nested scans is to be measured.
 
-    API humidity convention (repo convention): the input ``q_v`` is a MIXING
-    RATIO; it is converted to specific humidity ``q = q_v/(1 + q_v)`` at
-    entry and everything inside (half-level environment, saturation, ascent)
-    works in specific humidity.  ``dq_dt_adv`` is a SPECIFIC-humidity
-    tendency [kg/kg/s] (PTENQA); a caller holding a dry-air mixing-ratio
-    tendency w must convert it first via dq = dw/(1+w)^2.  The returned
-    ``q_u`` and ``l_u`` profiles are converted at the boundary to per-unit
-    MOIST-total-mass denominators, consistently for both species:
-    ``w_u = q_u/max(1 - q_u - l_u, 0.5)`` and
-    ``l_w = l_u/max(1 - q_u - l_u, 0.5)`` (the physical floor 0.5 reflects
-    q + l < 0.5 always; review finding 4).
+    API humidity convention (oracle: the vendored OpenIFS source): ``q_v``
+    is SPECIFIC humidity [kg/kg], exactly the source's PQEN ("PROVISIONAL
+    ENVIRONMENT SPEC. HUMIDITY", cubasen.F90:72; PQENH likewise :62, set
+    from PQEN at cuinin.F90:187, with PQU initialised from PQENH at
+    cuinin.F90:211).  NO unit conversion happens at either boundary: the
+    half-level environment, saturation and ascent all work in specific
+    humidity on this single moist-mass basis, and the returned ``q_u`` and
+    ``l_u`` profiles are PQU / PLU on the SAME moist-mass basis as PQEN
+    (cubasen.F90:677-678 copies ZQU/ZLU straight into PQU/PLU;
+    cuascn.F90:526/534 combine PQENH and PQU with the same ZDMFEN/ZDMFDE
+    weights, :570-572 call CUADJTQ on PQU directly, :618 moves
+    ZQOLD - PQU into PLU).  ``dq_dt_adv`` is a specific-humidity tendency
+    [kg/kg/s] (PTENQA) on the same basis; there is no mixing-ratio seam.
 
     Surface flux sign convention: shf_w_m2 / lhf_w_m2 follow the IFS PAHFS /
     PQHFL convention, NEGATIVE = upward (into the atmosphere); the latent
@@ -1011,8 +1013,8 @@ def ifs_departure_search(T, q_v, p_full, p_half, geo_full, geo_half,
             f"'cell_centre', got {cfg.mixed_layer_gate!r}")
 
     ncol, nlev = T.shape
-    # API boundary: mixing ratio -> specific humidity for everything inside
-    q = q_v / (1.0 + q_v)
+    # q_v IS specific humidity, exactly PQEN (cubasen.F90:72) -- no conversion
+    q = q_v
     env_half = half_level_env(T, q, p_full, p_half, geo_full, geo_half, cfg)
     T_h, q_h, s_h = env_half
     idx = jnp.arange(ncol)
@@ -1179,15 +1181,8 @@ def ifs_departure_search(T, q_v, p_full, p_half, geo_full, geo_half,
     w2_out = final["w2_out"]; w2_sfc_out = final["w2_sfc_out"]
     ldsc = final["ldsc"]; kbotsc = final["kbotsc"]
 
-    # API boundary: specific humidity -> per-unit MOIST-total-mass species,
-    # consistently for both outputs (review finding 4): the denominator
-    # 1 - q - l is floored at the physical bound 0.5 (q + l < 0.5 always),
-    # which also keeps the conversion AD-safe
-    den = jnp.maximum(1.0 - qu - lu, 0.5)
-    qu_w = qu / den
-    l_w = lu / den
-
-    return TestAscent(ldcum, ktype, kdpl, kcbot, kctop, wbase, Tu, qu_w, l_w,
+    # PQU / PLU leave on the SAME moist-mass basis as PQEN (cubasen.F90:677-678)
+    return TestAscent(ldcum, ktype, kdpl, kcbot, kctop, wbase, Tu, qu, lu,
                       klab, cape_out, w2_out, w2_sfc_out, ldsc, kbotsc)
 
 
@@ -1288,9 +1283,8 @@ def ifs_departure_search_refined(T, q_v, p_full, p_half, geo_full, geo_half,
     ncol, nlev = T.shape
     dt = T.dtype
     c_pd = constants.c_pd
-    # API boundary: mixing ratio -> specific humidity (as in
-    # ifs_departure_search); q_v_r is converted back at the end
-    q = q_v / (1.0 + q_v)
+    # q_v IS specific humidity, exactly PQEN (cubasen.F90:72) -- no conversion
+    q = q_v
 
     # ---- refined grids (static index arithmetic, traced pressures)
     # half levels: r sub-layers per parent layer, even in pressure; the
@@ -1334,7 +1328,7 @@ def ifs_departure_search_refined(T, q_v, p_full, p_half, geo_full, geo_half,
     T_r = (s_r - phi_full_r) / c_pd                      # derive temperature
 
     # ---- run the UNCHANGED source-literal search on the refined column
-    q_v_r = q_r / (1.0 - q_r)                            # back to mixing ratio
+    q_v_r = q_r                                 # stays specific humidity (PQEN)
     res = ifs_departure_search(T_r, q_v_r, p_full_r, p_half_r,
                                phi_full_r, phi_half_r, shf_w_m2,
                                lhf_w_m2, ustar, land_frac, dq_r, cfg)

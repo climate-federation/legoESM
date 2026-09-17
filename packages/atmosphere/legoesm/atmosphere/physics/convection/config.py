@@ -1662,17 +1662,16 @@ class BechtoldConfig(NamedTuple):
     # AS A WHOLE, in place of the legacy Bechtold reduction.  Static python
     # bool, so only one branch is ever traced.
     #
-    # INCOMPLETE -- DO NOT SCORE A RUN WITH THIS ON.  Measured 2026-09-17 on a
-    # frozen deep column: a +-11000 K/day dipole across the two lowest levels.
-    # Cause (codex oracle review): the chain omits CUFLXN, which cumastrn runs
-    # BEFORE cudtdqn (cumastrn.F90:1104 then :1226) to subtract the
-    # environmental transport and build the below-cloud-base fluxes, so raw
-    # plume fluxes reach a stage that expects processed ones.  Also open: the
-    # humidity convention differs across the trigger/ascent boundary, KTYPE is
-    # not reclassified against the actual ascent top (cumastrn.F90:634-641),
-    # the detrained condensate and precipitation are dropped from the host
-    # water budget, and the early return bypasses the legacy downdraught and
-    # sub-cloud evaporation rather than keeping them.
+    # INCOMPLETE -- DO NOT SCORE A RUN WITH THIS ON.  Closed so far: CUFLXN and
+    # the absolute-flux reconstruction (which removes a +-11000 K/day dipole at
+    # the two lowest levels) and the humidity convention across the trigger /
+    # ascent seam (q_v, q_u and l_u are all PQEN / PQU / PLU specific humidity,
+    # cubasen.F90:72 and :677-678).  Still open: KTYPE is not reclassified
+    # against the actual ascent top (cumastrn.F90:635-641), the detrained
+    # condensate and the convective precipitation are dropped from the host
+    # water budget while their latent heating is kept, and the early return
+    # bypasses the legacy downdraught and sub-cloud evaporation rather than
+    # keeping them.
     use_ifs_ascent: bool = False
     # IFS RCAPDCYCL=2 diurnal-cycle CAPE correction (cumastrn.F90:780-833;
     # see bechtold._ifs_capdcycl): subtracts the sub-cloud CAPE production
