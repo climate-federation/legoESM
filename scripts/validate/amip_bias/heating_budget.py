@@ -255,9 +255,12 @@ def main(argv=None):
         state, mesh, sig, model.config, None, DT, return_thermo_terms=True)
     dyn_terms = {
         "dyn_horiz_adv": np.asarray(_terms.horiz_adv, dtype=np.float64),
+        "dyn_horiz_diff": np.asarray(_terms.horiz_diff, dtype=np.float64),
         "dyn_vert_adv": np.asarray(_terms.vert_adv, dtype=np.float64),
         "dyn_adiabatic": np.asarray(_terms.adiabatic_ps, dtype=np.float64),
     }
+    print(f"horizontal T diffusion K_h = {float(model.config.K_h):.3e} m2/s "
+          f"({'ACTIVE' if float(model.config.K_h) > 0 else 'off'})", flush=True)
     _closure = dyn - sum(dyn_terms.values())
     print(f"dynamics split closure: max |dyn - (horiz+vert+adiab)| = "
           f"{np.abs(_closure).max() * 86400.0:.3f} K/day "

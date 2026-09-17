@@ -209,12 +209,17 @@ class ThermoTerms(NamedTuple):
 
     Diagnostic only: returned by :func:`mpas_hydrostatic_tendencies` when it is
     called with ``return_thermo_terms=True``, which no production path does.
-    ``horiz_adv + vert_adv + adiabatic_ps`` is the thermodynamic tendency
-    before the vertical del4 filter and before physics are added, so a budget
-    that splits the dycore's contribution needs no re-derivation from state.
+    ``horiz_adv + horiz_diff + vert_adv + adiabatic_ps`` is the thermodynamic
+    tendency before the vertical del4 filter and before physics are added, so a
+    budget that splits the dycore's contribution needs no re-derivation from
+    state.  Advection and the horizontal Laplacian diffusion are separate
+    because they answer different questions and the diffusion is large: at the
+    production coefficient it is down-gradient heat transport across the polar
+    front, which looks exactly like resolved advection if the two are summed.
     """
 
-    horiz_adv: jax.Array      # -v.grad(T) on cell centres [K/s]
+    horiz_adv: jax.Array      # -v.grad(T) on cell centres, ADVECTION ONLY [K/s]
+    horiz_diff: jax.Array     # K_h * div(grad T), zero when K_h == 0 [K/s]
     vert_adv: jax.Array       # theta-form vertical term, carries the sigma-dot
                               # part of the adiabatic heating [K/s]
     adiabatic_ps: jax.Array   # kappa*T*(omega_ps/p + v.grad ln p_s) [K/s]
@@ -596,8 +601,11 @@ def mpas_hydrostatic_tendencies(
 
     # Scalar diffusion — ``grad_T_3d`` and its divergence were already
     # computed in the batched blocks above; reuse the cached results.
+    _horiz_diff_T = (config.K_h * _div_grad_T if config.K_h > 0
+                     else jnp.zeros_like(horiz_adv_T_3d))
+    _horiz_adv_only = horiz_adv_T_3d
     if config.K_h > 0:
-        horiz_adv_T_3d = horiz_adv_T_3d + config.K_h * _div_grad_T
+        horiz_adv_T_3d = horiz_adv_T_3d + _horiz_diff_T
 
     # --- 4. Surface pressure tendency and vertical velocity ---
     # Flux-form continuity (both branches): ``div_dp_3d = div(u·dp_edge)``
@@ -701,7 +709,8 @@ def mpas_hydrostatic_tendencies(
     adiabatic = adiabatic + kappa * T_3d * v_grad_lnps
 
     dT_dt_3d = horiz_adv_T_3d + vert_thermo_T + adiabatic
-    _thermo_terms = (ThermoTerms(horiz_adv=horiz_adv_T_3d,
+    _thermo_terms = (ThermoTerms(horiz_adv=_horiz_adv_only,
+                                 horiz_diff=_horiz_diff_T,
                                  vert_adv=vert_thermo_T,
                                  adiabatic_ps=adiabatic)
                      if return_thermo_terms else None)
