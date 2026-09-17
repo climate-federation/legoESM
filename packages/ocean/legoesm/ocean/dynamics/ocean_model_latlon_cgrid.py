@@ -8256,14 +8256,6 @@ class LatLonCGridOceanModel:
                         _nemo_ws_zdf_eta_kmm
                         if _nemo_ws_zdf_eta_kmm is not None
                         else state.eta.data),
-                    # GYRE's compiled RK3 program calls
-                    # zdf_phy(kstp,Nbb,Nbb,Nrhs): zdf_sh2 sees the step-entry
-                    # free surface in BOTH slots, while tra_zdf still sees
-                    # stage-3 Kmm=N+1/2 through eta_now above.  DINO and all
-                    # non-WS callers omit this optional routing input.
-                    tke_shear_eta_now=(
-                        state.eta.data
-                        if _nemo_ws_zdf_eta_kmm is not None else None),
                     u_now=state.u.data, v_now=state.v.data,
                     effective_K_test_override=_vertical_K_test_override,
                     nemo_aimp_tracer_w=_nemo_ws_aimp_tracer_w,
@@ -9723,7 +9715,6 @@ class LatLonCGridOceanModel:
         n2_tracers_before=None,
         tke_n2_bundle=None,
         eta_now=None,
-        tke_shear_eta_now=None,
         u_now=None,
         v_now=None,
         nemo_tracer_content_rhs=None,
@@ -9809,11 +9800,6 @@ class LatLonCGridOceanModel:
         tracer call.  All defaults ⇒ bit-identical.
 
         Called only when ``config.implicit_vertical_mixing == True``.
-
-        ``tke_shear_eta_now`` optionally splits the free-surface field used
-        only by step-entry ``zdf_sh2`` from ``eta_now``, which remains the
-        implicit tracer/momentum solver's Kmm divisor. ``None`` preserves the
-        existing route for DINO and every non-WS caller.
 
         ``grid`` (optional, SPMD): default ``None`` → ``self.grid``
         (bit-identical single-device path); a band-local grid is injected
@@ -9988,10 +9974,7 @@ class LatLonCGridOceanModel:
                 _tke_lat_deg = jnp.degrees(_grid.lat_T)
             if _tke_prognostic:
                 _tke_p_sh2_result = self._tke_step_entry_p_sh2(
-                    state,
-                    eta_now=(eta_now if tke_shear_eta_now is None
-                             else tke_shear_eta_now),
-                    u_now=u_now, v_now=v_now,
+                    state, eta_now=eta_now, u_now=u_now, v_now=v_now,
                     z_coord=_zc, config=_cfg_b, grid=_grid,
                     return_face_metrics=return_tke_entry)
                 if return_tke_entry:
