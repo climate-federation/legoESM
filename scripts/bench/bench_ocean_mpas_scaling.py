@@ -179,14 +179,29 @@ def build_global_problem(subdivision: int, nlev: int, seed: int = 0,
     Deterministic and mesh-cache-backed, so every rank derives the
     IDENTICAL global problem before the partition is armed.
     """
-    import jax.numpy as jnp
-
     from legoesm.grids.voronoi import create_voronoi_mesh
-    from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+
+    mesh = create_voronoi_mesh(subdivision_level=subdivision)
+    z_coord, config = build_problem_config(
+        nlev, barotropic_solver=barotropic_solver, pcg_variant=pcg_variant,
+        n_barotropic_substeps=n_barotropic_substeps,
+        conservation_fixer=conservation_fixer,
+        eta_floor_clamp_iters=eta_floor_clamp_iters)
+    state = perturbed_rest_state(mesh, z_coord)
+    return mesh, z_coord, config, state
+
+
+def build_problem_config(nlev: int, *, barotropic_solver: str = "explicit_substep",
+                         pcg_variant: str = "standard",
+                         n_barotropic_substeps: int = 10,
+                         conservation_fixer: bool = True,
+                         eta_floor_clamp_iters: int = 3):
+    """Mesh-independent part of :func:`build_global_problem` (z-coordinate +
+    config), so a caller holding its own (reordered/padded) mesh builds no
+    second mesh."""
     from legoesm.ocean.mpas_config import MPASOceanConfig
     from legoesm.ocean.vertical import create_ocean_z_star
 
-    mesh = create_voronoi_mesh(subdivision_level=subdivision)
     z_coord = create_ocean_z_star(
         n_levels=nlev, H_max=4000.0, dz_surface=20.0, dz_deep=400.0)
     config = MPASOceanConfig(
@@ -214,19 +229,30 @@ def build_global_problem(subdivision: int, nlev: int, seed: int = 0,
         fix_volume=conservation_fixer, fix_heat=conservation_fixer,
         fix_salt=conservation_fixer,
     )
+    return z_coord, config
+
+
+def perturbed_rest_state(mesh, z_coord, n_cells_real: int | None = None):
+    """Rest state + the conservation test's perturbation (zonal-wavenumber
+    eta + latitude-structured T).  ``n_cells_real`` masks the padded ghost
+    tail of an SPMD-reordered mesh to land before perturbing."""
+    import jax.numpy as jnp
+
+    from legoesm.ocean.init_mpas import rest_state_mpas_ocean
+
     state = rest_state_mpas_ocean(
         mesh, z_coord, T_water_init_C=20.0, T_deep=2.0, S_uniform=35.0,
         H_max=4000.0, land_lat_threshold=85.0)
-    # Perturbation exercising advection/PGF/barotropic (the conservation
-    # test's recipe): zonal-wavenumber eta + latitude-structured T.
+    if n_cells_real is not None:
+        from legoesm.parallel.voronoi_spmd_ocean import mask_padded_cells
+        state = mask_padded_cells(state, n_cells_real)
     mask = state.land_mask.data
     T_pert = state.T.data + 0.5 * jnp.sin(
         4 * mesh.latCell)[:, None] * mask[:, None]
     eta_pert = state.eta.data + 0.01 * jnp.sin(3 * mesh.lonCell) * mask
-    state = state._replace(
+    return state._replace(
         T=state.T.replace(data=T_pert),
         eta=state.eta.replace(data=eta_pert))
-    return mesh, z_coord, config, state
 
 
 def slice_state_to_local(state, mesh, part):

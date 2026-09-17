@@ -201,6 +201,7 @@ not edit ``fv3_nh_core.py``.
 """
 from __future__ import annotations
 
+import functools
 from typing import NamedTuple
 
 import jax
@@ -362,7 +363,17 @@ def _require_f64_jax(fname: str, arrays: dict) -> None:
     for name, a in arrays.items():
         if a is None:
             continue
-        dt = jnp.asarray(a).dtype
+        _arr = jnp.asarray(a)
+        if _arr.ndim == 0 and getattr(_arr, "weak_type", False):
+            # Skip ONLY a WEAK-typed 0-dim scalar (a python-float
+            # timestep/coeff like dt/kgb): it is weak-promoting and not a
+            # field, so it is not part of the field uniformity invariant.
+            # A STRONG-f64 0-dim (an f64 constant / damping coeff that
+            # "went strong") is NOT skipped -> it still trips this gate
+            # against f32 fields, closing the silent-promotion blind spot
+            # a wholesale 0-dim skip left (codex+GLM+Claude, increment 2).
+            continue
+        dt = _arr.dtype
         if dt not in (jnp.float32, jnp.float64):
             raise TypeError(
                 f"{fname}: {name} must be float32 or float64 (got {dt})")
@@ -499,7 +510,7 @@ def _fs(a, ilo, jlo, i0, i1, j0, j1, v):
     return a.at[lo_i:hi_i + 1, lo_j:hi_j + 1].set(v)
 
 
-def _new(ilo, ihi, jlo, jhi, fill=jnp.nan):
+def _new(ilo, ihi, jlo, jhi, fill=jnp.nan, dtype=jnp.float64):
     """A local at its exact Fortran declared bounds.
 
     The FILL is part of the contract, not decoration: the NumPy lane
@@ -508,8 +519,13 @@ def _new(ilo, ihi, jlo, jhi, fill=jnp.nan):
     ``big_number`` for the duo ``d2a2c``/``d_sw1`` workspaces and
     ``1.0e25`` for ``divergence_corner_duo``'s ``divg_d`` -- and the
     per-stage certificates compare those cells.
+
+    ``dtype`` follows the run's STORAGE dtype (fp32/mixed increment 2):
+    callers bind it from a state field via ``functools.partial`` so the
+    workspace matches the f32/f64 carry and the dtype-uniformity gates
+    pass. Default float64 = the certified path, byte-identical.
     """
-    return jnp.full((ihi - ilo + 1, jhi - jlo + 1), fill, jnp.float64)
+    return jnp.full((ihi - ilo + 1, jhi - jlo + 1), fill, dtype)
 
 
 def _sel_div(pred, num, den_true, den_false):
@@ -744,9 +760,10 @@ def divergence_corner(u, v, ua, va, gs: dict, bd, npx: int, npy: int, *,
     def rd(a, i0, i1, j0, j1, k=None):        # data-domain origin read
         return _fw(a, isd, jsd, i0, i1, j0, j1, k)
 
-    divg = _new(isd, ied + 1, jsd, jed + 1)
-    uf = _new(is_ - 2, ie + 2, js - 1, je + 2)
-    vf = _new(is_ - 1, ie + 2, js - 2, je + 2)
+    _nw = functools.partial(_new, dtype=u.dtype)  # workspace follows storage dtype (fp32/fp64)
+    divg = _nw(isd, ied + 1, jsd, jed + 1)
+    uf = _nw(is_ - 2, ie + 2, js - 1, je + 2)
+    vf = _nw(is_ - 1, ie + 2, js - 2, je + 2)
 
     is2 = max(2, is_)
     ie1 = min(npx - 1, ie + 1)
@@ -862,9 +879,10 @@ def divergence_corner_duo(u, v, ua, va, gs: dict, bd, npx: int, npy: int,
     def rd(a, i0, i1, j0, j1, k=None):
         return _fw(a, isd, jsd, i0, i1, j0, j1, k)
 
-    divg = _new(isd, ied + 1, jsd, jed + 1, 1.0e25)
-    uf = _new(isd, ied, jsd, jed + 1)
-    vf = _new(isd, ied + 1, jsd, jed)
+    _nw = functools.partial(_new, dtype=u.dtype)  # workspace follows storage dtype (fp32/fp64)
+    divg = _nw(isd, ied + 1, jsd, jed + 1, 1.0e25)
+    uf = _nw(isd, ied, jsd, jed + 1)
+    vf = _nw(isd, ied + 1, jsd, jed)
 
     uf = _fs(uf, isd, jsd, isd, ied, jsd + 1, jed,
              (rd(u, isd, ied, jsd + 1, jed)
@@ -897,11 +915,12 @@ def divergence_corner_duo(u, v, ua, va, gs: dict, bd, npx: int, npy: int,
 
     def _zero_i(i):
         return _fs(divg, isd, jsd, i, i, j0, j1,
-                   jnp.zeros((1, j1 - j0 + 1), jnp.float64))
+                   # dtype follows storage (fp32/fp64), from u
+                   jnp.zeros((1, j1 - j0 + 1), u.dtype))
 
     def _zero_j(j):
         return _fs(divg, isd, jsd, i0, i1, j, j,
-                   jnp.zeros((i1 - i0 + 1, 1), jnp.float64))
+                   jnp.zeros((i1 - i0 + 1, 1), u.dtype))
 
     def _quarter_i(i):
         return _fs(divg, isd, jsd, i, i, j0, j1,
@@ -1012,9 +1031,10 @@ def del6_vt_flux(nord: int, npx: int, npy: int, damp, q, bd, del6_u,
     _check_shape("del6_vt_flux", "del6_v", del6_v, (nid + 1, njd))
     _check_shape("del6_vt_flux", "del6_u", del6_u, (nid, njd + 1))
 
-    d2 = _new(isd, ied, jsd, jed)
-    fx2 = _new(isd, ied + 1, jsd, jed) if fx2 is None else jnp.asarray(fx2)
-    fy2 = _new(isd, ied, jsd, jed + 1) if fy2 is None else jnp.asarray(fy2)
+    _nw = functools.partial(_new, dtype=q.dtype)  # workspace follows storage dtype (fp32/fp64)
+    d2 = _nw(isd, ied, jsd, jed)
+    fx2 = _nw(isd, ied + 1, jsd, jed) if fx2 is None else jnp.asarray(fx2)
+    fy2 = _nw(isd, ied, jsd, jed + 1) if fy2 is None else jnp.asarray(fy2)
     _check_shape("del6_vt_flux", "fx2", fx2, (nid + 1, njd))
     _check_shape("del6_vt_flux", "fy2", fy2, (nid, njd + 1))
 
@@ -1157,14 +1177,15 @@ def d2a2c_vect_duo(u, v, gs: dict, bd, npx: int, npy: int, *,
     def rd(a, i0, i1, j0, j1):
         return _fw(a, isd, jsd, i0, i1, j0, j1)
 
-    utmp = _new(isd, ied, jsd, jed, BIG_NUMBER)
-    vtmp = _new(isd, ied, jsd, jed, BIG_NUMBER)
-    ua = _new(isd, ied, jsd, jed, BIG_NUMBER)
-    va = _new(isd, ied, jsd, jed, BIG_NUMBER)
-    uc = _new(isd, ied + 1, jsd, jed, BIG_NUMBER)
-    vc = _new(isd, ied, jsd, jed + 1, BIG_NUMBER)
-    ut = _new(isd, ied, jsd, jed, BIG_NUMBER)
-    vt = _new(isd, ied, jsd, jed, BIG_NUMBER)
+    _nw = functools.partial(_new, dtype=u.dtype)  # workspace follows storage dtype (fp32/fp64)
+    utmp = _nw(isd, ied, jsd, jed, BIG_NUMBER)
+    vtmp = _nw(isd, ied, jsd, jed, BIG_NUMBER)
+    ua = _nw(isd, ied, jsd, jed, BIG_NUMBER)
+    va = _nw(isd, ied, jsd, jed, BIG_NUMBER)
+    uc = _nw(isd, ied + 1, jsd, jed, BIG_NUMBER)
+    vc = _nw(isd, ied, jsd, jed + 1, BIG_NUMBER)
+    ut = _nw(isd, ied, jsd, jed, BIG_NUMBER)
+    vt = _nw(isd, ied, jsd, jed, BIG_NUMBER)
 
     # ---- D -> A (duo interior; :3421-3454) ----------------------
     utmp = _fs(utmp, isd, jsd, isd, ied, jsd + 1, jed - 1,
@@ -1296,14 +1317,15 @@ def d2a2c_vect(u, v, gs: dict, bd, npx: int, npy: int, *,
     def rd(a, i0, i1, j0, j1, k=None):
         return _fw(a, isd, jsd, i0, i1, j0, j1, k)
 
-    ua = _new(isd, ied, jsd, jed, 0.0)
-    va = _new(isd, ied, jsd, jed, 0.0)
-    ut = _new(isd, ied, jsd, jed, 0.0)
-    vt = _new(isd, ied, jsd, jed, 0.0)
-    uc = _new(isd, ied + 1, jsd, jed, 0.0)
-    vc = _new(isd, ied, jsd, jed + 1, 0.0)
-    utmp = _new(isd, ied, jsd, jed, BIG_NUMBER)
-    vtmp = _new(isd, ied, jsd, jed, BIG_NUMBER)
+    _nw = functools.partial(_new, dtype=u.dtype)  # workspace follows storage dtype (fp32/fp64)
+    ua = _nw(isd, ied, jsd, jed, 0.0)
+    va = _nw(isd, ied, jsd, jed, 0.0)
+    ut = _nw(isd, ied, jsd, jed, 0.0)
+    vt = _nw(isd, ied, jsd, jed, 0.0)
+    uc = _nw(isd, ied + 1, jsd, jed, 0.0)
+    vc = _nw(isd, ied, jsd, jed + 1, 0.0)
+    utmp = _nw(isd, ied, jsd, jed, BIG_NUMBER)
+    vtmp = _nw(isd, ied, jsd, jed, BIG_NUMBER)
 
     id_ = 1 if dord4 else 0
     npt = 4 if (grid_type < 3 and not bounded_domain) else -2
@@ -1672,6 +1694,10 @@ def c_sw(delp, pt, w, u, v, gs: dict, bd, npx: int, npy: int, dt2, *,
             u, v, gs, bd, npx, npy, dord4=dord4, grid_type=grid_type,
             bounded_domain=bounded_domain)
 
+    # workspace follows storage dtype (fp32/fp64); at BODY scope so every
+    # _nw() below (inside the else AND after it) sees it regardless of the
+    # nord branch taken.
+    _nw = functools.partial(_new, dtype=delp.dtype)
     if nord > 0:
         if duogrid:
             divg_d = divergence_corner_duo(u, v, ua, va, gs, bd, npx,
@@ -1680,7 +1706,7 @@ def c_sw(delp, pt, w, u, v, gs: dict, bd, npx: int, npy: int, dt2, *,
             divg_d = divergence_corner(u, v, ua, va, gs, bd, npx, npy,
                                        grid_type=grid_type)
     else:
-        divg_d = _new(isd, ied + 1, jsd, jed + 1)
+        divg_d = _nw(isd, ied + 1, jsd, jed + 1)
 
     # ---- scale the transport winds (elementwise; both arms total) ---
     i0, i1, j0, j1 = is_ - 1, iep1 + 1, js - 1, jep1
@@ -1699,15 +1725,15 @@ def c_sw(delp, pt, w, u, v, gs: dict, bd, npx: int, npy: int, dt2, *,
                        dt2 * vtw * dxw * rd(sg, i0, i1, j0, j1, 1)))
 
     # ---- transport delp (+ pt, and w if non-hydrostatic) -----------
-    fx = _new(is_ - 1, ie + 2, js - 1, je + 1)
-    fx1 = _new(is_ - 1, ie + 2, js - 1, je + 1)
-    fx2 = _new(is_ - 1, ie + 2, js - 1, je + 1)
-    fy = _new(is_ - 1, ie + 1, js - 1, je + 2)
-    fy1 = _new(is_ - 1, ie + 1, js - 1, je + 2)
-    fy2 = _new(is_ - 1, ie + 1, js - 1, je + 2)
-    delpc = _new(isd, ied, jsd, jed)
-    ptc = _new(isd, ied, jsd, jed)
-    wc = _new(isd, ied, jsd, jed)
+    fx = _nw(is_ - 1, ie + 2, js - 1, je + 1)
+    fx1 = _nw(is_ - 1, ie + 2, js - 1, je + 1)
+    fx2 = _nw(is_ - 1, ie + 2, js - 1, je + 1)
+    fy = _nw(is_ - 1, ie + 1, js - 1, je + 2)
+    fy1 = _nw(is_ - 1, ie + 1, js - 1, je + 2)
+    fy2 = _nw(is_ - 1, ie + 1, js - 1, je + 2)
+    delpc = _nw(isd, ied, jsd, jed)
+    ptc = _nw(isd, ied, jsd, jed)
+    wc = _nw(isd, ied, jsd, jed)
 
     plain_fills = (grid_type < 3) and (not bounded_domain) \
         and (not duogrid)
@@ -1844,8 +1870,8 @@ def c_sw(delp, pt, w, u, v, gs: dict, bd, npx: int, npy: int, dt2, *,
                     j_a - ke_j0:j_b - ke_j0 + 1]
 
     # ---- circulation on the C grid ---------------------------------
-    fxc = _new(is_ - 1, ie + 2, js - 1, je + 1)
-    fyc = _new(is_ - 1, ie + 1, js - 1, je + 2)
+    fxc = _nw(is_ - 1, ie + 2, js - 1, je + 1)
+    fyc = _nw(is_ - 1, ie + 1, js - 1, je + 2)
     fxc = _fs(fxc, is_ - 1, js - 1, is_, ie + 1, js - 1, je + 1,
               _fw(uc, isd, jsd, is_, ie + 1, js - 1, je + 1)
               * rd(dxc, is_, ie + 1, js - 1, je + 1))
@@ -1859,7 +1885,7 @@ def c_sw(delp, pt, w, u, v, gs: dict, bd, npx: int, npy: int, dt2, *,
     def fyc_at(i_a, i_b, j_a, j_b):
         return _fw(fyc, is_ - 1, js - 1, i_a, i_b, j_a, j_b)
 
-    vortc = _new(is_, ie + 1, js, je + 1)
+    vortc = _nw(is_, ie + 1, js, je + 1)
     vortc = _fs(vortc, is_, js, is_, ie + 1, js, je + 1,
                 fxc_at(is_, ie + 1, js - 1, je) - fxc_at(is_, ie + 1, js, je + 1)
                 - fyc_at(is_ - 1, ie, js, je + 1)
@@ -1953,6 +1979,7 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
               damp_v: float = 0.2, damp_t: float = 0.0,
               hydrostatic: bool = True, inline_q: bool = False,
               lim_fac: float = 1.0, duogrid: bool = True,
+              nq: int = 1,
               workspace_sentinel: float = 1.0e30):
     """JAX twin of ``fv3_native_duo_sw_core.d_sw1_duo``
     (sw_core.F90:500-998, DUO branch).
@@ -2057,17 +2084,26 @@ def d_sw1_duo(delp, pt, w, uc, vc, xflux, yflux, cx, cy, gs: dict,
     def rd(a, i0, i1, j0, j1, k=None):
         return _fw(a, isd, jsd, i0, i1, j0, j1, k)
 
-    ut = _new(isd, ied + 1, jsd, jed, workspace_sentinel)
-    vt = _new(isd, ied, jsd, jed + 1, workspace_sentinel)
-    crx_adv = _new(is_, ie + 1, jsd, jed)
-    xfx_adv = _new(is_, ie + 1, jsd, jed)
-    cry_adv = _new(isd, ied, js, je + 1)
-    yfx_adv = _new(isd, ied, js, je + 1)
-    ra_x = _new(is_, ie, jsd, jed)
-    ra_y = _new(isd, ied, js, je)
-    nq = 1
-    allflux_x = jnp.full((nci + 1, ncj, 4 + nq), jnp.nan, jnp.float64)
-    allflux_y = jnp.full((nci, ncj + 1, 4 + nq), jnp.nan, jnp.float64)
+    _nw = functools.partial(_new, dtype=delp.dtype)  # workspace follows storage dtype (fp32/fp64)
+    ut = _nw(isd, ied + 1, jsd, jed, workspace_sentinel)
+    vt = _nw(isd, ied, jsd, jed + 1, workspace_sentinel)
+    crx_adv = _nw(is_, ie + 1, jsd, jed)
+    xfx_adv = _nw(is_, ie + 1, jsd, jed)
+    cry_adv = _nw(isd, ied, js, je + 1)
+    yfx_adv = _nw(isd, ied, js, je + 1)
+    ra_x = _nw(is_, ie, jsd, jed)
+    ra_y = _nw(isd, ied, js, je)
+    # nq = passenger tracers; only the WIDTH of the allflux stack depends
+    # on it here (slots 4.. are the tracer fluxes, which this lane leaves
+    # at the sentinel unless inline_q -- tracer transport runs in
+    # fv3_tracer2d, which loops over its own nq).  The caller passes the
+    # context's tab.nq so the stack matches what the barrier expects.
+    if int(nq) < 1:
+        raise ValueError(f"d_sw1_duo: nq={nq} < 1")
+    nq = int(nq)
+    # dtype follows storage (fp32/fp64), from delp
+    allflux_x = jnp.full((nci + 1, ncj, 4 + nq), jnp.nan, delp.dtype)
+    allflux_y = jnp.full((nci, ncj + 1, 4 + nq), jnp.nan, delp.dtype)
 
     def ut_at(i0, i1, j0, j1):
         return _fw(ut, isd, jsd, i0, i1, j0, j1)
@@ -2473,8 +2509,9 @@ def d_sw2_duo(delp, pt, allflux_x, allflux_y, gs: dict,
         return _fw(a, isd, jsd, i0, i1, j0, j1)
 
     # heat_source zeroing (sw_core.F90:1074-1078, #ifndef SW_DYNAMICS)
-    heat_source = jnp.zeros((nci, ncj), jnp.float64)
-    dw = jnp.full((nci, ncj), workspace_sentinel, jnp.float64)
+    # dtype follows storage (fp32/fp64), from delp
+    heat_source = jnp.zeros((nci, ncj), delp.dtype)
+    dw = jnp.full((nci, ncj), workspace_sentinel, delp.dtype)
 
     ra = rd(rarea, is_, ie, js, je)
     w_out = None
@@ -2595,7 +2632,8 @@ def d_sw3_duo(u, v, uc, vc, gs: dict, flags: GridFlags, bd, npx: int,
     is2, ie1 = is_, ie + 1
     js2, je1 = js, je + 1
 
-    vb = _new(is_, ie + 1, js, je + 1)
+    _nw = functools.partial(_new, dtype=u.dtype)  # workspace follows storage dtype (fp32/fp64)
+    vb = _nw(is_, ie + 1, js, je + 1)
 
     # vb: duo interior formula everywhere (sw_core.F90:1271-1275)
     vb = _fs(vb, is_, js, is2, ie1, js2, je1,
@@ -2840,13 +2878,14 @@ def d_sw5_duo(delp, u, v, uc, vc, ua, va, divg_d, crx_adv, cry_adv,
         return _fw(a, isd, jsd, i0, i1, j0, j1)
 
     # ---- vorticity prep (sw_core.F90:1582-1598) --------------------
-    ut = _new(isd, ied + 1, jsd, jed)
-    vt = _new(isd, ied, jsd, jed + 1)
+    _nw = functools.partial(_new, dtype=delp.dtype)  # workspace follows storage dtype (fp32/fp64)
+    ut = _nw(isd, ied + 1, jsd, jed)
+    vt = _nw(isd, ied, jsd, jed + 1)
     vt = _fs(vt, isd, jsd, isd, ied, jsd, jed + 1,
              rd(u, isd, ied, jsd, jed + 1) * rd(dx, isd, ied, jsd, jed + 1))
     ut = _fs(ut, isd, jsd, isd, ied + 1, jsd, jed,
              rd(v, isd, ied + 1, jsd, jed) * rd(dy, isd, ied + 1, jsd, jed))
-    wk = _new(isd, ied, jsd, jed)
+    wk = _nw(isd, ied, jsd, jed)
     wk = _fs(wk, isd, jsd, isd, ied, jsd, jed,
              rd(rarea, isd, ied, jsd, jed)
              * (_fw(vt, isd, jsd, isd, ied, jsd, jed)
@@ -2874,7 +2913,7 @@ def d_sw5_duo(delp, u, v, uc, vc, ua, va, divg_d, crx_adv, cry_adv,
         w_out = wf
 
     # ---- higher-order divergence damping (sw_core.F90:1731-1824) ---
-    delpc = _new(isd, ied, jsd, jed, workspace_sentinel)
+    delpc = _nw(isd, ied, jsd, jed, workspace_sentinel)
     delpc = _fs(delpc, isd, jsd, is_, ie + 1, js, je + 1,
                 _fw(divg_d, isd, jsd, is_, ie + 1, js, je + 1))
 
@@ -2918,7 +2957,7 @@ def d_sw5_duo(delp, u, v, uc, vc, ua, va, divg_d, crx_adv, cry_adv,
                          js - nt, je + 1 + nt))
 
     # ---- Smagorinsky vort (sw_core.F90:1790-1806) ------------------
-    vort = _new(isd, ied, jsd, jed)
+    vort = _nw(isd, ied, jsd, jed)
     if dddmp < _DDDMP_OFF:
         vort = jnp.zeros_like(vort)
     else:
@@ -2957,9 +2996,10 @@ def d_sw5_duo(delp, u, v, uc, vc, ua, va, divg_d, crx_adv, cry_adv,
         flags.se_corner, flags.nw_corner, flags.ne_corner, duogrid=True)
     del _vort   # copy_corners is a no-op on the duo lane; not returned
 
-    ptc = jnp.full((nid, njd), workspace_sentinel, jnp.float64)
-    ub = jnp.full((nci + 1, ncj + 1), workspace_sentinel, jnp.float64)
-    vb = jnp.full((nci + 1, ncj + 1), workspace_sentinel, jnp.float64)
+    # dtype follows storage (fp32/fp64), from delp
+    ptc = jnp.full((nid, njd), workspace_sentinel, delp.dtype)
+    ub = jnp.full((nci + 1, ncj + 1), workspace_sentinel, delp.dtype)
+    vb = jnp.full((nci + 1, ncj + 1), workspace_sentinel, delp.dtype)
     return {"delpc": delpc, "divg_d": divg_d, "wk": wk, "ke": ke,
             "vortfluxx": vortfluxx, "vortfluxy": vortfluxy,
             "uc": uc, "vc": vc, "ut": ut, "vt": vt,
@@ -3070,9 +3110,10 @@ def d_sw6_duo(u, v, ut, vt, ke, wk, vortfluxx, vortfluxy, gs: dict,
         v = _fs(v, isd, jsd, is_, ie + 1, js, je,
                 rd(v, is_, ie + 1, js, je) - rd(ut, is_, ie + 1, js, je))
 
-    ub = jnp.full((nci + 1, ncj + 1), workspace_sentinel, jnp.float64)
-    vb = jnp.full((nci + 1, ncj + 1), workspace_sentinel, jnp.float64)
-    heat_source = jnp.full((nci, ncj), workspace_sentinel, jnp.float64)
+    # dtype follows storage (fp32/fp64), from u
+    ub = jnp.full((nci + 1, ncj + 1), workspace_sentinel, u.dtype)
+    vb = jnp.full((nci + 1, ncj + 1), workspace_sentinel, u.dtype)
+    heat_source = jnp.full((nci, ncj), workspace_sentinel, u.dtype)
     return {"u": u, "v": v, "ut": ut, "vt": vt, "ub": ub, "vb": vb,
             "heat_source": heat_source}
 

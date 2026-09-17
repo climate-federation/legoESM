@@ -1096,7 +1096,12 @@ def nemo_drag_r_from_speed_sq(
             f"got scheme={scheme!r} (the 'legacy' path stays in the grid "
             "adapters)."
         )
-    return cd * jnp.sqrt(speed_sq + ke0)
+    # Zero-safe square root: with ke0 = 0 (FESOM2's C_d|u| law) a column at
+    # rest sits at sqrt(0), whose derivative is infinite and would poison the
+    # reverse-mode gradient through the drag; the value stays exactly zero.
+    arg = speed_sq + ke0
+    positive = arg > 0.0
+    return cd * jnp.where(positive, jnp.sqrt(jnp.where(positive, arg, 1.0)), 0.0)
 
 
 def masked_background_vmix_coefficient(

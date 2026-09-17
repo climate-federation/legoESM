@@ -119,6 +119,9 @@ class NEMOMatchMPASRecipeConfig:
     # lateral viscosity / dissipation
     A_h: float = 1.0e5
     C_smag_lap: float = 0.33
+    B_h: float = 0.0  # biharmonic viscosity [m^4/s]; 0 = off, byte-identical default
+    C_smag: float = 0.0  # biharmonic Smagorinsky coefficient; 0 = off, byte-identical default
+    C_leith: float = 0.0  # Leith coefficient; 0 = off, byte-identical default
     # ``None`` = derived from the mesh as K_ref*(dx/dx_ref)^3, anchored on the
     # ico6 mesh this recipe was tuned on (so ico6 keeps 1e14 m^4/s and every
     # finer mesh gets the dx^3-scaled value).  A float pins the coefficient.
@@ -210,6 +213,9 @@ class NEMOMatchTripoleRecipeConfig:
     A_h: float | None = None
     B_h: float = 0.0
     C_smag_lap: float = 0.33
+    C_smag: float = 0.0  # biharmonic Smagorinsky coefficient; 0 = off, byte-identical default
+    C_leith: float = 0.0  # Leith coefficient; 0 = off, byte-identical default
+    B_h_gamma0: float = 0.0  # FESOM2 gamma0*h^3 biharmonic on the 2-D metrics; 0 = off
 
     # vertical mixing (explicit-block coefficients)
     A_v: float = 1.0e-4
@@ -384,6 +390,9 @@ def nemo_match_mpas_model_config(
         A_v=cfg.A_v,
         K_v=cfg.K_v,
         C_smag_lap=cfg.C_smag_lap,
+        B_h=cfg.B_h,
+        C_smag=cfg.C_smag,
+        C_leith=cfg.C_leith,
         K_zeta_bih=cfg.K_zeta_bih,
         barotropic_solver=cfg.barotropic_solver,
         barotropic_implicit_pcg_tol=cfg.barotropic_implicit_pcg_tol,
@@ -419,6 +428,22 @@ def nemo_match_tripole_model_config(
     """
     if cfg is None:
         cfg = NEMOMatchTripoleRecipeConfig()
+    for name in ("B_h", "C_smag", "C_leith"):
+        if (getattr(cfg, name) or 0.0) > 0.0:
+            raise ValueError(
+                f"NEMOMatchTripoleRecipeConfig.{name}={getattr(cfg, name)!r}: "
+                "the biharmonic, biharmonic-Smagorinsky and Leith operators use "
+                "the regular lat-lon 1-D metrics (biharmonic_scaling_factor / "
+                "_cos_lat_uv divide by dlon = 0 on a tripolar mesh -> "
+                "non-finite; vertex_area_1d broadcasts one column of corner "
+                "areas), so they are refused on the tripole recipe until a "
+                "2-D-metric operator exists; use A_h / C_smag_lap.")
+    if cfg.B_h_gamma0 > 0.0 and (cfg.A_h is None or cfg.A_h > 0.0 or cfg.C_smag_lap > 0.0):
+        raise ValueError(
+            f"NEMOMatchTripoleRecipeConfig.B_h_gamma0={cfg.B_h_gamma0!r} (FESOM2 "
+            "biharmonic) requires A_h = 0 and C_smag_lap = 0: FESOM2 has no "
+            f"Laplacian, and the A_h branches would ignore gamma0 (got A_h="
+            f"{cfg.A_h!r}, C_smag_lap={cfg.C_smag_lap!r}).")
     if physics is None:
         physics = _default_match_physics()
     return LatLonCGridOceanConfig.from_flat(
@@ -427,6 +452,14 @@ def nemo_match_tripole_model_config(
         K_v=cfg.K_v,
         B_h=cfg.B_h,
         C_smag_lap=cfg.C_smag_lap,
+        C_smag=cfg.C_smag,
+        C_leith=cfg.C_leith,
+        C_leith_modified=(cfg.C_leith > 0),
+        # FESOM2 gamma0*h^3 biharmonic (2-D metrics): lat scaling off when
+        # selected (it already scales with the local face size); default
+        # (gamma0 = 0) keeps B_h_lat_scaling True byte-identically.
+        B_h_gamma0=cfg.B_h_gamma0,
+        B_h_lat_scaling=(cfg.B_h_gamma0 <= 0.0),
         n_barotropic_substeps=cfg.n_barotropic_substeps,
         barotropic_solver=cfg.barotropic_solver,
         barotropic_implicit_pcg_tol=cfg.barotropic_implicit_pcg_tol,

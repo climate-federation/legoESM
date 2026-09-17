@@ -56,6 +56,7 @@ from legoesm.land.surface_scheme import (
     compute_simple_seb_fluxes,
     compute_two_leaf_canopy_fluxes,
 )
+from legoesm.land.canopy.radiative_transfer import broadband_albedo
 from legoesm.land.surface_scheme.two_leaf_canopy import (
     advance_TgC_ema,
     compute_prognostic_lai,
@@ -542,6 +543,7 @@ def _step_multilayer_land_impl(
     # Surface scheme dispatch
     # =================================================================
     canopy_state_new = None  # updated only by CLMMLCanopyConfig branch
+    _alpha_applied = None    # set by the two-leaf branch: one albedo, absorbed + exported
     if isinstance(config.surface_scheme, TwoLeafCanopyConfig):
         # Canopy surface scheme: Newton closure with Picard loop that
         # advances soil thermal tentatively between passes.
@@ -593,6 +595,28 @@ def _step_multilayer_land_impl(
             _fwet_pre = interception_wetted_fraction(
                 state.W_canopy, _pai_i, config.interception)
 
+        # ONE surface albedo for absorption and for export.  The canopy RT's
+        # band albedos are the snow-free soil-colour background, so without
+        # this the land absorbed sunlight through ~0.15 while the atmosphere
+        # reflected the exported snow-aged 0.52 on the same cell -- nothing
+        # reconciled them (energy created on snow-covered tundra, lost on
+        # glacier).  Snow is layered on each band's own base, so snow-free
+        # columns absorb exactly as before and the calibrated glacier bands
+        # survive; the prognostic dry-soil brightening the old export added
+        # is NOT applied here because the bands already carry the soil-colour
+        # moisture dependence (boundary_data/builders.py) and both reviewers
+        # flagged the double count.  The exported value is the RT's broadband
+        # reflectance of the bands actually applied, so absorbed ==
+        # (1 - exported) * sw_down exactly in daylight (the RT's own
+        # low-light fallback, sw_down < 1 W/m2, is the only exception).
+        if (config.snow_albedo_feedback and lat is not None
+                and lp is not None and hasattr(lp, "ALB_VIS")):
+            _band = lambda a: compute_land_albedo(
+                lat, snow, snow_age, config.land_albedo,
+                base_albedo=jnp.broadcast_to(a, T_surface.shape))
+            _lp_base = lp
+            lp = lp._replace(ALB_VIS=_band(lp.ALB_VIS), ALB_NIR=_band(lp.ALB_NIR))
+            _alpha_applied = broadband_albedo(lp.ALB_VIS, lp.ALB_NIR)
         surface_out = compute_two_leaf_canopy_fluxes(
             T_soil_top=T_surface,
             forcing=forcing,
@@ -1157,7 +1181,18 @@ def _step_multilayer_land_impl(
         alpha_new = band_rad_new.alpha_eff
         lw_up_new = band_rad_new.lw_up_agg
     else:
-        if config.snow_albedo_feedback and lat is not None:
+        if _alpha_applied is not None:
+            # Same bands, same snow layering, POST-step snow: the export feeds
+            # the NEXT radiation call, whose canopy will absorb with the
+            # post-step snow (codex).  Absorption this step used the pre-step
+            # bands (``_alpha_applied``); the two differ only by one step's
+            # snow change.
+            _band_new = lambda a: compute_land_albedo(
+                lat, snow_new, snow_age_new, config.land_albedo,
+                base_albedo=jnp.broadcast_to(a, T_surface_new.shape))
+            alpha_new = broadband_albedo(_band_new(_lp_base.ALB_VIS),
+                                         _band_new(_lp_base.ALB_NIR))
+        elif config.snow_albedo_feedback and lat is not None:
             # Per-cell base albedo (CLM PFT / trainable), consistent with the SEB.
             alpha_new = compute_land_albedo(
                 lat, snow_new, snow_age_new, config.land_albedo,

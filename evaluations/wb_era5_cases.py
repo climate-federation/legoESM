@@ -165,15 +165,13 @@ def build_forecast_cases(
         (WB2-grid ERA5 verification per lead), and ``forcing`` (the prescribed-SST
         ``forcing_base`` dict).
     """
-    import jax.numpy as jnp
     from legoesm.training.era5_to_state import (
         era5_to_spectral_carry,
         load_era5_slice,
         open_era5_zarr,
-        regrid_2d_to_gaussian,
     )
     from legoesm.training.neural_gcm_spectral import carry_to_spectral_state
-    from legoesm.training.scale_build import era5_time_to_forcing_calendar
+    from legoesm.training.scale_build import build_spectral_forcing
 
     cadence = int(era5_cfg.dt_hours)
     leads = [int(x) for x in leads_hours]
@@ -192,6 +190,14 @@ def build_forecast_cases(
         ds = open_era5_zarr(era5_cfg.zarr_store)
     times = np.asarray(ds.time.values, dtype="datetime64[ns]")
     n_times = len(times)
+    # The prescribed-surface-flux store, opened ONCE for every init (the
+    # training loader does the same); a land fraction alone comes from the
+    # state store and needs no remote open.
+    flux_ds = None
+    if era5_cfg.load_surface_fluxes:
+        # flux_zarr == "" means "read the fluxes from the state store".
+        flux_ds = (open_era5_zarr(era5_cfg.flux_zarr) if era5_cfg.flux_zarr
+                   else ds)
 
     base = int(np.searchsorted(times, np.datetime64(f"{eval_year}-01-01")))
     if base >= n_times:
@@ -208,7 +214,7 @@ def build_forecast_cases(
                 f"init {k} (time index {i_ic}) is beyond the ERA5 store "
                 f"(n_times={n_times}); reduce --n-inits or --init-stride-hours.")
 
-        ic_slice = load_era5_slice(era5_cfg, i_ic, ds=ds)
+        ic_slice = load_era5_slice(era5_cfg, i_ic, ds=ds, flux_ds=flux_ds)
         # ``smoothing_passes`` is exposed (default 4 = unchanged) so the
         # orography treatment can be SWEPT. The ERA5 phis is smoothed to be
         # representable at the model truncation and ``p_s`` is hydrostatically
@@ -219,17 +225,10 @@ def build_forecast_cases(
             ic_slice, grid, sigma, smoothing_passes=smoothing_passes)
         init_state = carry_to_spectral_state(init_carry, grid)
 
-        # Prescribed-SST forcing on the Gaussian grid (flat ncol), 1-based
-        # integer doy + seconds-of-day (scale_build calendar convention).
-        sst = jnp.asarray(regrid_2d_to_gaussian(
-            ic_slice.sst, ic_slice.lat, ic_slice.lon, grid)).reshape(-1)
-        doy_1based, sod = era5_time_to_forcing_calendar(times[i_ic], eval_year)
-        forcing = {
-            "T_sfc": sst,
-            "sic": jnp.zeros_like(sst),
-            "day_of_year": jnp.asarray(doy_1based),
-            "seconds_of_day": jnp.asarray(sod),
-        }
+        # The SAME forcing the training loader builds (prescribed SST, and
+        # the surface-flux planes / land fraction whenever ``era5_cfg`` asks
+        # for them), so a model is scored with the forcing it trained on.
+        forcing = build_spectral_forcing(ic_slice, grid, times[i_ic], eval_year)
 
         verif_by_lead = {}
         for lead in leads:
