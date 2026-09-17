@@ -2229,13 +2229,36 @@ def _nemo_literal_langmuir_operands(
     # NEMO: zus = SQRT( 2. * zcof * taum ) (zdftke.F90:447).  A bare sqrt has
     # an INFINITE derivative at zero stress, so reverse mode returns NaN over
     # land and in calm columns and that NaN survives the ``apply`` mask below
-    # (0 * inf = NaN).  The double-``where`` — the same AD-safe sqrt idiom used
-    # by ``_safe_stress_modulus`` and ``_veros_buoyancy_length`` in this module
-    # — keeps the primal BIT-IDENTICAL at EVERY input: the guard is ``!= 0``
-    # rather than ``> 0``, so a negative or NaN argument still produces the NaN
-    # the bare sqrt produced (a modulus must never be negative; corruption
-    # surfaces instead of being masked to 0).  Only the derivative AT exactly
-    # zero changes, from +inf to the correct limit 0 (zus3 ~ taum^{3/2}).
+    # (0 * inf = NaN).  The double-``where`` is the AD-safe sqrt pattern also
+    # used by ``_safe_stress_modulus`` and ``_veros_buoyancy_length`` in this
+    # module, but the guard here is deliberately ``!= 0`` where those two use
+    # ``> 0``: a NEGATIVE argument is not physical for a stress modulus, and
+    # ``!= 0`` lets it keep reaching the sqrt instead of being silently
+    # rewritten to a valid 0, so it stays distinguishable from a genuine calm
+    # column.
+    #
+    # Primal equivalence to the bare sqrt holds at every input EXCEPT negative
+    # zero, where the bare root returns -0.0 and this guard returns +0.0.  That
+    # is inert here: the root is only ever cubed behind the ``zus3 != 0.0``
+    # mask below, which rejects both signed zeros, so no module output moves.
+    # Only the derivative AT exactly zero changes, from +inf to the correct
+    # limit 0 (zus3 ~ taum^{3/2}).
+    #
+    # Three measured behaviour facts of this arm, recorded not fixed:
+    #   * Negative stress does NOT surface in the primal.  ``half_wlc2 < 0``
+    #     makes every cumulative-PE level exceed the threshold, so imlc lands
+    #     on the shallowest interface, ``apply`` is empty and the source is
+    #     exactly 0.0 while the gradient is NaN.  Corruption is therefore
+    #     visible in the gradient only, not in the forward solution.
+    #   * This literal arm carries NO ``max(taum, 0)`` clamp, unlike the
+    #     compact "vectorized" arm above; NEMO has no clamp either, so the
+    #     omission is fidelity-correct, but any card switched from the compact
+    #     arm to this one LOSES that non-negativity guard.
+    #   * Second-order AD at zero stress now reports zero curvature where the
+    #     true curvature is infinite, so a Hessian-based calibration reads calm
+    #     columns as flat rather than as NaN.  KNOWN OPEN ITEM, not fixed here:
+    #     the compact arm on the library default still returns NaN at second
+    #     order at zero stress.
     _zus_arg = 2.0 * half_wlc2
     _zus_nonzero = _zus_arg != 0.0
     zus = jnp.where(

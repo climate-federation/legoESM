@@ -470,15 +470,34 @@ def test_tke_bottom_level_routes_each_independent_consumer():
     card = build_nemo_testcase_card("GYRE-zco")
     cfg = card.recipe.model_config
     model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, cfg)
-    assert model._tke_bottom_level() is None
 
+    # The card selects the literal ln_lc arm, whose per-column imlc=mbkt+1
+    # no-crossing fallback genuinely consumes mbkt -> the index MUST route by
+    # default now. (Before the literal selection the card ran the compact arm,
+    # which has no such fallback, and this returned None.)
     vmix = cfg.physics.vertical_mixing
+    assert vmix.tke.tke_langmuir_evaluation == "nemo_literal"
+    assert not vmix.tke.bottom_tke_bc
+    np.testing.assert_array_equal(
+        model._tke_bottom_level(), card.recipe.z_coord.bottom_level)
+
+    # Counterfactual: with the compact arm restored and no bottom Dirichlet
+    # placement, NO consumer needs mbkt, so the silent-unused-operand guard
+    # must still withhold it.
+    compact = cfg._replace(physics=cfg.physics._replace(
+        vertical_mixing=vmix._replace(tke=vmix.tke._replace(
+            tke_langmuir_evaluation="vectorized"))))
+    assert model._tke_bottom_level(config=compact) is None
+
+    # Each consumer routes it INDEPENDENTLY: the literal Langmuir arm alone,
+    # and the bottom Dirichlet placement alone (compact arm underneath).
     literal = cfg._replace(physics=cfg.physics._replace(
         vertical_mixing=vmix._replace(tke=vmix.tke._replace(
             tke_langmuir_evaluation="nemo_literal"))))
-    bottom_bc = cfg._replace(physics=cfg.physics._replace(
-        vertical_mixing=vmix._replace(tke=vmix.tke._replace(
-            bottom_tke_bc=True))))
+    compact_vmix = compact.physics.vertical_mixing
+    bottom_bc = compact._replace(physics=compact.physics._replace(
+        vertical_mixing=compact_vmix._replace(
+            tke=compact_vmix.tke._replace(bottom_tke_bc=True))))
     np.testing.assert_array_equal(
         model._tke_bottom_level(config=literal),
         card.recipe.z_coord.bottom_level)
