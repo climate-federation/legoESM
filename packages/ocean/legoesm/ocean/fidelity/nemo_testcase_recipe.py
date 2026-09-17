@@ -135,12 +135,7 @@ def _model_config(
             tke_etau_exponential_evaluation="jax_expression",
             tke_htau_evaluation="jax_expression",
             tke_mxl_raw_evaluation="factored",
-            # GYRE-only (user-approved): NEMO's literal ln_lc statement
-            # order (zdftke.F90:422-463), including the per-column
-            # imlc=mbkt+1 no-crossing fallback.  This selection lives on
-            # this card alone -- the library default and every other
-            # testcase stay on "vectorized".
-            tke_langmuir_evaluation="nemo_literal",
+            tke_langmuir_evaluation="nemo_literal",  # GYRE-only, approved
             tke_shear_evaluation_stage="step_entry",
             # Decision 36 (user, 2026-09-12): NEMO's shear production
             # statement, not legoESM's legacy centred one.  zdfsh2.f90:83-114
