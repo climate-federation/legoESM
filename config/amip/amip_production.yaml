@@ -125,12 +125,31 @@ clubb_prognostic: true      # carry the 15 higher-order moments as state rather
 # in every region.  Caveat (GLM): 150 hPa is inside the anvil layer; a
 # production-term limiter would be the targeted fix.
 clubb_trop_cloud_top_press: 15000.0
-gravity_wave_drag: mcfarlane+hines  # orographic (McFarlane) + non-orographic
-                            # (Hines) composite (directive 2026-07-15). The
-                            # 2026-07-15 A/B: on latlon24 the +hines lid
-                            # braking pushed the topo-wave blowup day 100->179
-                            # (ll24_bech_gwd); on cube C12 it is metric-neutral
-                            # (matched d31-60 vs mcfarlane-only) and 60 d clean.
+# ADOPTED 2026-09-17 (user): the non-orographic member is the E3SM/CAM spectral
+# solver launched with a uniform background spectrum, NOT the bulk "hines"
+# heuristic.  Measured on the raised-lid L36 grid, days 30-40 from one pinned
+# checkpoint, against ERA5 February climatology: with hines the Arctic
+# polar-night jet is +2 m/s where ERA5 has +21 (i.e. no vortex), and the
+# 60-90N 10-50 hPa layer is +7.5 K too warm; with this source the jet is
+# +25 m/s (+4 bias) and the warm layer is +1.2 K.  The SH summer cap improves
+# (-7.1 -> -4.3 K at 5-30 hPa) and the tropics move < 0.3 K.  The global column
+# momentum sink falls from 253 mPa to 57 mPa, of which 5.6 mPa is
+# non-orographic -- the IFS/MAECHAM range (5-15 mPa), where the hines surrogate
+# launched ~3.5 Pa.  taubgnd 0.7e-3 Pa was preferred over 1.5e-3 because the
+# stronger arm overshoots the jet (+9 m/s) for ~1 K of temperature that is
+# inside the 10-day single-winter sampling spread.
+# CAVEAT: the arms were run at the 2 hPa lid (amip_production_l36.yaml).  At
+# this deck's 10 hPa lid the top layer received 29 % of the hines momentum
+# sink, so the L30 lane needs its own 10-day check before a long run.
+gravity_wave_drag: mcfarlane+e3sm_cam  # orographic (McFarlane) + non-orographic
+                            # (E3SM/CAM uniform background spectrum).  Was
+                            # mcfarlane+hines from the 2026-07-15 directive
+                            # until 2026-09-17; that A/B only ever compared
+                            # hines against NO non-orographic drag (on latlon24
+                            # the +hines lid braking pushed the topo-wave
+                            # blowup day 100->179, on cube C12 it was
+                            # metric-neutral), never against a normalised
+                            # spectral source.
                             # REQUIRES a real SSO file (#1514): the orographic
                             # member with subgrid_orography_path empty launches
                             # from the scalar h_topo=500 m on every OCEAN
@@ -369,7 +388,23 @@ clear_sky_diag: true
 # Non-orographic gravity waves released at 700 hPa.  Unset means SURFACE launch,
 # where 55% of the wave momentum is deposited below 1 km and brakes the
 # near-surface wind that drives ocean evaporation.
-hines_launch_p: 70000.0
+hines_launch_p: 70000.0        # retained: selects the hines member if a deck
+                               # re-selects it (the default 0.0 = surface launch
+                               # is the defect documented above).
+#
+# E3SM/CAM background non-orographic source (the production non-orographic
+# member since 2026-09-17).  pgwv 32 with the kernel's dc gives phase speeds
+# -80..80 m/s; c0 30 m/s is the CAM Gaussian spectrum width; launch at 500 hPa
+# is CAM's kbot for the frontal source; effgw 1.0 is CAM5's effgw_cm; the
+# cos(lat) taper is OFF because E3SM disables it for unstructured dynamics and
+# the polar-night jet is exactly where the drag is needed.
+e3sm_cam_source: background
+e3sm_cam_pgwv: 32
+e3sm_cam_effgw: 1.0
+e3sm_cam_taubgnd: 0.7e-3
+e3sm_cam_c0: 30.0
+e3sm_cam_launch_p: 50000.0
+e3sm_cam_latitude_taper: false
 # Moist-static-energy-conserving form of the per-step vapour floor: the latent
 # heat of clipped vapour is removed with the vapour instead of being left
 # behind. Unset means the non-conserving form.
