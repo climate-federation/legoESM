@@ -86,10 +86,13 @@ run during this inventory fix. (`orca2_inventory.json:90-126`)
 
 The user-executed acquisition clones the same `ORCA2_ICE_PISCES` reference and
 copies the `ORCA2_OMIP_L4` Phase-2v source card file by file into the new target
-`ORCA2_OMIP_L4_P2VBND`. It pins the historical Phase-2v patch, the A-run deck
-and input manifests, the ten-step resolved configuration, and the np2 layout.
-(`orca2_boundary_run.sh:12-32`, `orca2_boundary_run.sh:62-138`,
-`orca2_boundary_run.sh:249-303`, `orca2_boundary_run.sh:326-380`)
+`ORCA2_OMIP_L4_P2VBND_R2`. The original `ORCA2_OMIP_L4_P2VBND` name contains
+only the abandoned reference-clone build from the failed first acquisition and
+is not reused. The retry pins the historical Phase-2v patch, the A-run deck and
+input manifests, the ten-step resolved configuration, and the np2 layout.
+(`orca2_boundary_run.sh:12-36`, `orca2_boundary_run.sh:38-59`,
+`orca2_boundary_run.sh:90-166`, `orca2_boundary_run.sh:259-354`,
+`orca2_boundary_run.sh:356-411`)
 
 The new patch is additive: it initializes a write-only buffer, copies native
 `en` immediately after the boundary assignments and immediately before
@@ -102,13 +105,13 @@ Preflight reconstructs the exact Phase-2v source, rejects any removed/replaced
 line, checks the capture location, and proves both writer and patched `zdftke`
 with `gfortran -fsyntax-only`. Every unexpected or explicit nonzero path emits
 a named `REFUSE:` line. (`orca2_boundary_run.sh:4-10`,
-`orca2_boundary_run.sh:140-203`, `orca2_boundary_run.sh:205-233`)
+`orca2_boundary_run.sh:168-231`, `orca2_boundary_run.sh:233-270`)
 
 Post-run admission requires the new 3,543,512-byte frame to pass exact
 magic/header/extent/EOF checks. It then requires exactly 102 streams and
 byte-compares each of the other 101 against Phase-2v A; any changed inherited
-stream refuses the acquisition as non-passive. (`orca2_boundary_run.sh:383-414`,
-`orca2_boundary_run.sh:427-453`)
+stream refuses the acquisition as non-passive. (`orca2_boundary_run.sh:413-456`,
+`orca2_boundary_run.sh:457-485`)
 
 ## 4. Controls and disposition
 

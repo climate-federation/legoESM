@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import struct
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -168,12 +169,64 @@ def test_boundary_acquisition_is_new_np2_write_only_passivity_gate():
         / "run.sh"
     ).read_text()
     assert "REFERENCE_CFG=ORCA2_ICE_PISCES" in acquisition
-    assert "TARGET_CFG=ORCA2_OMIP_L4_P2VBND" in acquisition
+    assert "FAILED_TARGET_CFG=ORCA2_OMIP_L4_P2VBND" in acquisition
+    assert "TARGET_CFG=ORCA2_OMIP_L4_P2VBND_R2" in acquisition
+    assert 'verify_exp00_copy "$SOURCE_ROOT/EXP00" "$TARGET_ROOT/EXP00"' in acquisition
     assert "mpirun -np 2" in acquisition
     assert "gfortran -fsyntax-only" in acquisition
     assert "EXPECTED_BASELINE_STREAMS=101" in acquisition
     assert 'cmp -s "$BASELINE_RUN/$name" "$TARGET_RUN/$name"' in acquisition
     assert "write-only passivity failed" in acquisition
+
+
+def test_exp00_copy_check_compares_link_text_and_regular_bytes(tmp_path):
+    acquisition = (
+        TESTCASES
+        / "nemo_testcase_l2_orca2_tke_boundary_acquisition"
+        / "run.sh"
+    ).read_text()
+    start = acquisition.index("verify_exp00_copy() {")
+    end = acquisition.index("\n\n# USER-EXECUTED", start)
+    helper = acquisition[start:end]
+
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    (source / "namelist_cfg").write_bytes(b"same bytes")
+    (target / "namelist_cfg").write_bytes(b"same bytes")
+    (source / "nemo").symlink_to("../BLD/bin/nemo.exe")
+    (target / "nemo").symlink_to("../BLD/bin/nemo.exe")
+
+    def run_check() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [
+                "bash",
+                "-c",
+                f'{helper}\nverify_exp00_copy "$1" "$2"',
+                "copy-check",
+                str(source),
+                str(target),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    assert run_check().returncode == 0
+
+    (target / "nemo").unlink()
+    (target / "nemo").symlink_to("../different/nemo.exe")
+    link_plant = run_check()
+    assert link_plant.returncode == 68
+    assert "file-by-file EXP00 copy differs for nemo" in link_plant.stderr
+
+    (target / "nemo").unlink()
+    (target / "nemo").symlink_to("../BLD/bin/nemo.exe")
+    (target / "namelist_cfg").write_bytes(b"different bytes")
+    byte_plant = run_check()
+    assert byte_plant.returncode == 68
+    assert "file-by-file EXP00 copy differs for namelist_cfg" in byte_plant.stderr
 
 
 def test_require_fails_closed():

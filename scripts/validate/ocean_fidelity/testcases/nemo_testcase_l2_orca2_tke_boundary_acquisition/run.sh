@@ -9,6 +9,32 @@ refuse_unexpected() {
 }
 trap refuse_unexpected ERR
 
+verify_exp00_copy() {
+  local source_root=$1
+  local target_root=$2
+  local source target name
+
+  for source in "$source_root"/*; do
+    name=$(basename "$source")
+    target=$target_root/$name
+    if [[ -L "$source" ]]; then
+      if [[ ! -L "$target" ]] || \
+          [[ "$(readlink "$source")" != "$(readlink "$target")" ]]; then
+        printf 'REFUSE: file-by-file EXP00 copy differs for %s\n' "$name" >&2
+        exit 68
+      fi
+    elif [[ -f "$source" ]]; then
+      if [[ ! -f "$target" || -L "$target" ]] || ! cmp -s "$source" "$target"; then
+        printf 'REFUSE: file-by-file EXP00 copy differs for %s\n' "$name" >&2
+        exit 68
+      fi
+    else
+      printf 'REFUSE: file-by-file EXP00 copy differs for %s\n' "$name" >&2
+      exit 68
+    fi
+  done
+}
+
 # USER-EXECUTED ACQUISITION ONLY. --run invokes makenemo and mpirun.
 # The construction follows the round-56/59/64/101 source-card clone pattern:
 # clone the Phase-2v reference, copy its source card file by file, apply only a
@@ -18,7 +44,8 @@ export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo
 readonly NEMO_ROOT=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
 readonly REFERENCE_CFG=ORCA2_ICE_PISCES
 readonly SOURCE_CFG=ORCA2_OMIP_L4
-readonly TARGET_CFG=ORCA2_OMIP_L4_P2VBND
+readonly FAILED_TARGET_CFG=ORCA2_OMIP_L4_P2VBND
+readonly TARGET_CFG=ORCA2_OMIP_L4_P2VBND_R2
 readonly BASELINE_RUN=/data/abyssal/dbalwada/nemo-testcases-l4/runs/variant_icebergs_off_phase2v_tke_a_10step_np2
 readonly TARGET_RUN=/data/abyssal/dbalwada/nemo-testcases-l2/phase3/parallel/orca2/oracle_phase2v_tke_boundary_np2
 readonly RECORD=oracle_tke_boundary_kt00000002.bin
@@ -44,6 +71,7 @@ here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 readonly REPO=$(CDPATH= cd -- "$here/../../../../.." && pwd -P)
 readonly SOURCE_ROOT=$NEMO_ROOT/cfgs/$SOURCE_CFG
 readonly TARGET_ROOT=$NEMO_ROOT/cfgs/$TARGET_CFG
+readonly FAILED_TARGET_ROOT=$NEMO_ROOT/cfgs/$FAILED_TARGET_CFG
 readonly CANONICAL=$NEMO_ROOT/src/OCE/ZDF/zdftke.F90
 readonly WRITER=$here/l2_orca2_tke_boundary.F90
 readonly BOUNDARY_PATCH=$here/zdftke_orca2_boundary.patch
@@ -229,6 +257,14 @@ if ! "$FC" -fsyntax-only -ffree-line-length-none -I "$syntax" \
 fi
 
 if [[ "$MODE" == --preflight-only ]]; then
+  if [[ -d "$FAILED_TARGET_ROOT/EXP00" ]]; then
+    # The failed first attempt copied this card after building its reference
+    # clone. Verify the corrected link-aware comparison against that copy, but
+    # never reuse its pre-instrumentation executable.
+    verify_exp00_copy "$SOURCE_ROOT/EXP00" "$FAILED_TARGET_ROOT/EXP00"
+    printf 'ORCA2_TKE_BOUNDARY_EXISTING_EXP00_COPY_READY %s\n' \
+      "$FAILED_TARGET_ROOT"
+  fi
   printf 'ORCA2_TKE_BOUNDARY_PREFLIGHT_READY %s\n' "$BASELINE_RUN"
   exit 0
 fi
@@ -277,13 +313,7 @@ done < <(find "$SOURCE_ROOT/MY_SRC" -maxdepth 1 \( -type f -o -type l \) \
 cp "$SOURCE_ROOT/cpp_$SOURCE_CFG.fcm" "$TARGET_ROOT/cpp_$TARGET_CFG.fcm"
 cp "$DRY_BOUNDARY" "$TARGET_ROOT/MY_SRC/zdftke.F90"
 cp "$WRITER" "$TARGET_ROOT/MY_SRC/l2_orca2_tke_boundary.F90"
-for source in "$SOURCE_ROOT"/EXP00/*; do
-  name=$(basename "$source")
-  if ! cmp -s "$source" "$TARGET_ROOT/EXP00/$name"; then
-    printf 'REFUSE: file-by-file EXP00 copy differs for %s\n' "$name" >&2
-    exit 68
-  fi
-done
+verify_exp00_copy "$SOURCE_ROOT/EXP00" "$TARGET_ROOT/EXP00"
 for source in "$SOURCE_ROOT"/MY_SRC/*; do
   name=$(basename "$source")
   if ! cmp -s "$source" "$TARGET_ROOT/MY_SRC/$name"; then
