@@ -223,16 +223,28 @@ def test_spectral_carry_smooths_phis_and_reconciles_ps():
     assert np.abs(phis - raw).max() > 0.0, "spectral carry left phis raw"
     assert _max_abs_grad(phis) < _max_abs_grad(raw), "carry did not smooth phis"
     assert phis.max() < raw.max(), "smoothing must reduce the ridge amplitude"
-    # p_s is RECONCILED to the smoothed phis by the exact barometric relation
-    # (non-hybrid): p_s_adj = p_s * exp((phis_raw - phis_smooth)/(R_d T_sfc)).
+    # p_s is RECONCILED to the terrain the SPECTRAL DYNAMICS feel — the
+    # ROUND-TRIPPED smoothed phis (Gibbs ringing included), not the
+    # grid-space smoothed field.  Reconciling to the grid-space field left
+    # every ingested state ~850 Pa RMS off the model's balanced manifold
+    # (measured 2026-08-26, corr +0.996 with the barometric response to the
+    # truncation mismatch), and that standing gap was 87% of the WB training
+    # loss.  Non-hybrid: p_s_adj = p_s * exp((phis_raw - phis_rt)/(R_d T)).
+    from legoesm.grids.gaussian import sh_analysis, sh_synthesis
     T_ll, _, _, _, p_s_ll = regrid_latlon_to_gaussian(era5, grid)
     smooth = np.asarray(smooth_phis_gaussian(raw))
+    smooth_rt = np.asarray(sh_synthesis(grid, sh_analysis(
+        grid, jnp.asarray(smooth, jnp.float64))))
     T_sfc = np.asarray(T_ll)[..., -1]
     expected_ps = np.asarray(p_s_ll) * np.exp(
-        (raw - smooth) / (constants.R_d * T_sfc))
+        (raw - smooth_rt) / (constants.R_d * T_sfc))
     np.testing.assert_allclose(np.asarray(carry.p_s), expected_ps, rtol=1e-4)
-    # Sign: where the peak was cut, lowering terrain must RAISE p_s.
-    cut = (raw - smooth) > 1.0
+    # The carry's phis IS the round-tripped field (idempotent under the
+    # core's own sh_analysis, so carry and dynamics share one surface).
+    np.testing.assert_allclose(np.asarray(carry.phis), smooth_rt, rtol=1e-6,
+                               atol=1e-6)
+    # Sign: where the EFFECTIVE terrain was cut, lowering it must RAISE p_s.
+    cut = (raw - smooth_rt) > 1.0
     assert cut.any()
     assert np.all(np.asarray(carry.p_s)[cut] > np.asarray(p_s_ll)[cut])
 

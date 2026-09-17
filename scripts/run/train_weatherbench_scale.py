@@ -209,7 +209,11 @@ def print_latest_complete_signature(root):
         print(best[1])
 
 
-_MANIFEST_SCHEMA = 1
+# Schema 2, 2026-08-26: the terrain-reconciliation fix changed the CONTENT of
+# every ingested sample while leaving the config fingerprint unchanged (the
+# ingest transform is code, not YAML) — a schema-1 checkpoint or probe result
+# was measured on pre-fix data and must not resume against post-fix samples.
+_MANIFEST_SCHEMA = 2
 
 
 def _run_fingerprint(cfg, yml, warmup, roll_steps, n_global_samples, nproc):
@@ -876,6 +880,26 @@ def _main(argv=None):
         # catch.  The loss carries no parameter regularizer and the probe
         # applies no gradient clipping, so an exactly-zero gradient here is a
         # real disconnection on these scenes, not a value clipped to zero.
+        # POLICY freeze on top of the MEASURED one: with ERA5 surface fluxes
+        # prescribed the classical surface leaves (bulk exchange coefficients,
+        # roughness, albedo, emissivity, the spatial surface field) are inert
+        # by construction, and a low-sun column can still leak a tiny albedo
+        # gradient that the zero-gradient probe would not freeze.  Applied on
+        # BOTH branches (idempotent on resume) and BEFORE the persist below,
+        # so the saved list is the effective trainable set.
+        def _policy_freeze(arr_, static_, frozen_):
+            if not bool(yml.get("era5_surface_fluxes", False)):
+                return arr_, static_, frozen_
+            from legoesm.training.inert_params import (
+                apply_forced_freeze,
+                prescribed_surface_frozen_names,
+            )
+            forced = prescribed_surface_frozen_names(params)
+            if rank == 0 and forced:
+                log.info("FROZEN BY POLICY (ERA5 surface fluxes prescribed): "
+                         "%s", ", ".join(forced))
+            return apply_forced_freeze(params, frozen_, forced)
+
         if resumed_frozen is not None:
             # Same trainable set as the job that wrote the optimizer state.
             from legoesm.training.inert_params import trainable_filter_spec
@@ -894,9 +918,11 @@ def _main(argv=None):
                     "parameter tree; the configuration has changed since that "
                     "checkpoint and its optimizer state no longer applies.")
             n_probe_used = None          # nothing was probed; it was restored
+            arr, static, frozen_names = _policy_freeze(arr, static, frozen_names)
         else:
             arr, static, frozen_names, n_probe_used = freeze_unreachable(
                 params, _probe_vg, local, n_probe=None, num_processes=nproc)
+            arr, static, frozen_names = _policy_freeze(arr, static, frozen_names)
             # Persist the measurement immediately: at T63/si_substeps=3 the
             # probe costs ~9 h, and a link killed between here and the first
             # epoch write would otherwise re-measure on every chained resume

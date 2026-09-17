@@ -90,7 +90,9 @@ from legoesm.ocean.physics.lateral_mixing.config import (
 )
 from legoesm.ocean.physics.vertical_mixing.config import (
     KPPConfig,
+    TKEConfig,
     VerticalMixingConfig,
+    tke_fesom2_card,
 )
 
 # ===========================================================================
@@ -200,8 +202,16 @@ def build_vertical_mixing_config_from_args(
             iwm=build_iwm_config_from_args(args),
             ddm=build_ddm_config_from_args(args),
         )
+    tke_card = getattr(args, "tke_card", "default")
+    if tke_card == "default":
+        tke_cfg = TKEConfig()
+    elif tke_card == "fesom2":
+        tke_cfg = tke_fesom2_card()
+    else:
+        raise ValueError(f"unknown --tke-card {tke_card!r}")
     return VerticalMixingConfig(
         scheme=scheme,
+        tke=tke_cfg,
         kpp=KPPConfig(
             Ri_crit=args.kpp_ri_crit,
             K_max=args.kpp_k_max,
@@ -505,6 +515,11 @@ def parse_args(argv: list[str] | None = None):
                    help="Short 30-day run for CI")
     p.add_argument("--output", type=str, default="results/omip")
     p.add_argument("--checkpoint-days", type=float, default=30.0)
+    p.add_argument("--no-final-snapshot", action="store_true",
+                   help="Skip the end-of-run MLD snapshot (snapshot_final.npz). "
+                        "For probe arms at ORCA12 the 14 GB compressed write "
+                        "outlasts the walltime; with --checkpoint-days 0 the "
+                        "arm then writes only its csv/json diagnostics.")
     p.add_argument("--max-wallclock-seconds", type=float, default=0.0,
                    help="Wallclock budget [s] for clean checkpoint+exit")
     p.add_argument("--restart-buffer-seconds", type=float, default=600.0,
@@ -528,6 +543,26 @@ def parse_args(argv: list[str] | None = None):
     p.add_argument("--woa-init", action="store_true",
                    help="Initialize T/S from WOA18 instead of rest state. "
                         "Requires --woa-t and --woa-s.")
+    p.add_argument("--ic-from-fesom-mesh", type=str, default=None,
+                   help=("Directory of a FESOM2-JAX mesh with a cached initial "
+                         "field (T_ic.npy/S_ic.npy, geo_coord_nod2D.npy, Z.npy, "
+                         "nlevels_nod2D.npy). Replaces the WOA/PHC files as the "
+                         "source of --woa-init (and of the sponge / restoring "
+                         "targets): every lane then starts from the reference "
+                         "run's own field (init_woa.init_ocean_from_fesom_mesh)."))
+    p.add_argument("--ic-cache-dir", type=str, default=None,
+                   help=("Absolute directory on SHARED storage where the field built by "
+                         "--ic-from-fesom-mesh is cached (rank 0 builds once, every rank "
+                         "loads the same bytes). Default: $LEGOESM_MESH_CACHE_DIR."))
+    p.add_argument("--woa-void-fill", action="store_true",
+                   help=("Harmonic-fill source OCEAN cells the observed T/S "
+                         "never sampled at a depth (nearest donor farther than "
+                         "one source grid step) instead of stitching them from "
+                         "the nearest observed cells, which builds density "
+                         "walls (init_woa._fill_source_levels_nearest_valid). "
+                         "Shapes the same WOA arrays the SSS restoring, "
+                         "--nudge-woa-tau and the sponge targets read, with or "
+                         "without --woa-init. Default: nearest-donor stitch."))
     p.add_argument("--nudge-woa-tau", type=float, default=0.0,
                    help="Nudge T toward WOA18 with this restoring timescale [days]. "
                         "Applied after each block step. 0=disabled. "
@@ -559,6 +594,12 @@ def parse_args(argv: list[str] | None = None):
                          "sends it past 1000 C (measured, eORCA1 72.2N 73.6E). "
                          "Partial cells keep the reference layer thicknesses "
                          "and cut only the bottom cell, as NEMO does."))
+    p.add_argument("--tripole-closed-seas", type=str, default=None,
+                   help=("Comma-separated enclosed seas to mask as land on the "
+                         "--grid tripole lane (names in "
+                         "legoesm.ocean.init_tripole.CLOSED_SEAS, e.g. "
+                         "marmara,black_sea): basins the observed IC cannot "
+                         "fill.  Default: none masked."))
     p.add_argument("--tripole-strip-north-rows", type=int, default=0,
                    help=(
                        "Drop this many DEAD halo rows from the north end of "
@@ -602,6 +643,11 @@ def parse_args(argv: list[str] | None = None):
                    help="Override Laplacian viscosity A_h [m²/s] (default: grid-dependent).")
     p.add_argument("--B-h", type=float, default=None,
                    help="Override biharmonic viscosity B_h [m⁴/s] (default: 5e9 for bathymetry).")
+    p.add_argument("--B-h-gamma0", type=float, default=None, dest="B_h_gamma0",
+                   help=("Tripole lane: FESOM2's resolution-scaled biharmonic "
+                         "B = gamma0*h^3 on the local face size (fesom_jax gamma0 = "
+                         "0.003); requires --A-h 0 --C-smag-lap 0 and replaces "
+                         "--B-h (2-D metrics only)."))
     p.add_argument("--K-h", type=float, default=None,
                    help="Override horizontal tracer diffusivity K_h [m²/s] (default: 1e3 with bathy).")
     p.add_argument("--no-lat-scaling", action="store_true",
@@ -623,8 +669,11 @@ def parse_args(argv: list[str] | None = None):
                    help="Eq A_h boost Gaussian half-width [degrees]. Typical 3-7.")
     p.add_argument("--C-smag", type=float, default=None,
                    help="Smagorinsky biharmonic coefficient (dimensionless, OM4 uses 0.06).")
-    p.add_argument("--C-smag-lap", type=float, default=0.15,
-                   help="Laplacian Smagorinsky coefficient (dimensionless, default 0.15).")
+    p.add_argument("--C-smag-lap", type=float, default=None,
+                   help="Laplacian Smagorinsky coefficient (dimensionless). Unset "
+                        "keeps each lane's own value: 0.15 on the lat-lon "
+                        "bathymetry branch, 0.33 in the MPAS / tripole NEMO-match "
+                        "recipes.")
     p.add_argument("--A-h-floor", type=float, default=2000.0,
                    help="Minimum effective A_h after latitude scaling [m²/s] (default 2000).")
     p.add_argument("--C-leith", type=float, default=None,
@@ -658,6 +707,30 @@ def parse_args(argv: list[str] | None = None):
                    choices=["full", "minimal", "none"])
     p.add_argument("--water-type", type=str, default="II",
                    choices=["I", "IA", "IB", "II", "III"])
+    p.add_argument("--sw-penetration", type=str, default="auto",
+                   choices=["auto", "jerlov_2band", "sweeney_2band"],
+                   help=("Column shortwave scheme on the JRA55 MPAS/tripole lanes: "
+                         "'auto' = the lanes' historical two-band type-II with the "
+                         "0.94 skin split (byte-identical); 'jerlov_2band' = two-band "
+                         "with --water-type; 'sweeney_2band' = FESOM2's chlorophyll "
+                         "two-band (needs --chl-clim; 0.54 of the NET shortwave "
+                         "penetrates). Explicit schemes hand the forcing the "
+                         "post-albedo shortwave, as FESOM2 does; sweeney_2band "
+                         "also deposits the surface part on the live top thickness."))
+    p.add_argument("--chl-clim", type=str, default=None,
+                   help=("Monthly surface chlorophyll climatology (Sweeney 2005 "
+                         "NetCDF, variable 'chl', 12 x 180 x 360 on the forcing-cache "
+                         "grid) for --sw-penetration sweeney_2band."))
+    p.add_argument("--ocean-albedo", type=float, default=0.06,
+                   help=("Open-water shortwave albedo of the bulk-flux coupler "
+                         "(default 0.06; FESOM2/CORE2 uses 0.1)."))
+    p.add_argument("--tke-card", type=str, default="default",
+                   choices=("default", "fesom2"),
+                   help="TKE closure constant set: 'default' (Veros/legoESM "
+                        "defaults, diagnostic TKE) or 'fesom2' (prognostic TKE "
+                        "carried on the state, with the FESOM2-JAX FORCA20 "
+                        "constants: Pr=clamp(6.6 Ri,1,10), no Bryan-Lewis "
+                        "floor, Av/Kv 1e-4/1e-5, surface flux coeff 3.75).")
     p.add_argument("--vertical-mixing-scheme", type=str, default=None,
                    choices=_VALID_VERTICAL_MIXING_SCHEMES,
                    help="Override vertical mixing scheme")
@@ -897,6 +970,13 @@ def parse_args(argv: list[str] | None = None):
                        "(area-weighted), closer to FESOM's mapper and avoids "
                        "a salinity crater under a big river."
                    ))
+    p.add_argument("--runoff-source", type=str, default="jra55_friver",
+                   choices=["jra55_friver", "core2_climatology"],
+                   help=("River runoff: the JRA55-do 'friver' records (default) or "
+                         "FESOM2's constant CORE2 climatology (--runoff-file), "
+                         "which replaces every record on the model grid."))
+    p.add_argument("--runoff-file", type=str, default=None,
+                   help="CORE2_runoff.nc for --runoff-source core2_climatology.")
     p.add_argument("--runoff-radius-km", type=float, default=500.0,
                    help=("Search radius [km] for --runoff-routing "
                          "(default 500, matching FESOM2's runoff_radius)."))
@@ -960,6 +1040,18 @@ def parse_args(argv: list[str] | None = None):
                    help="Sponge-zone width inside the active domain [°].")
     p.add_argument("--sponge-tau-days", type=float, default=5.0,
                    help="Sponge relaxation timescale at the boundary [days].")
+    p.add_argument("--sss-restoring-target", type=str, default="woa_winter",
+                   choices=("woa_winter", "phc2_monthly"),
+                   help="Target field of the Haney SSS restoring: the PHC3 "
+                        "winter surface slice of the initial condition "
+                        "(default) or the monthly PHC2 climatology FESOM2 "
+                        "restores to, the month picked by the model calendar day.")
+    p.add_argument("--sss-target-file", type=str,
+                   default="/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/PHC2_salx.nc",
+                   help="PHC2 monthly SSS file (--sss-restoring-target phc2_monthly).")
+    p.add_argument("--sss-restoring-remove-mean", action="store_true",
+                   help="Subtract the area-weighted global mean of the restoring "
+                        "tendency each step, as FESOM2 does, so restoring adds no net salt.")
     p.add_argument("--sss-piston-velocity", type=float, default=5.0e-7,
                    help=(
                        "SSS restoring piston velocity [m/s] "
@@ -1252,13 +1344,56 @@ def _mean_runoff_record(args):
     return acc / n_rec
 
 
-def _route_runoff_stack(runoff_stack, rmap):
+def _load_core2_runoff_static(path, regrid_weights, cache_lat, cache_lon) -> np.ndarray:
+    """FESOM2's CORE2 climatological runoff regridded to the model grid.
+
+    Reads ``Foxx_o_roff`` (shape (1, nlat, nlon), units (kg/s)/m^2, the same
+    kg m-2 s-1 as the JRA55 ``friver``; missing_value 1e30 over land).  Masked
+    / NaN / missing entries are ZERO runoff (land), the field is regridded on
+    the host (deterministic across processes) and the single record is
+    returned with shape ``tuple(regrid_weights.target_shape)`` as float64.
+    """
+    import netCDF4
+
+    cache_lat = np.asarray(cache_lat, dtype=np.float64)
+    cache_lon = np.asarray(cache_lon, dtype=np.float64)
+    with netCDF4.Dataset(path) as ds:
+        file_lat = np.asarray(ds.variables["lat"][:], dtype=np.float64)
+        file_lon = np.asarray(ds.variables["lon"][:], dtype=np.float64)
+        if file_lat.shape != cache_lat.shape or not np.allclose(file_lat, cache_lat):
+            raise ValueError(
+                f"{path}: CORE2 runoff 'lat' axis does not match the forcing-cache "
+                f"grid (file {file_lat.shape} vs cache {cache_lat.shape})")
+        if file_lon.shape != cache_lon.shape or not np.allclose(file_lon, cache_lon):
+            raise ValueError(
+                f"{path}: CORE2 runoff 'lon' axis does not match the forcing-cache "
+                f"grid (file {file_lon.shape} vs cache {cache_lon.shape})")
+        raw = ds.variables["Foxx_o_roff"][:]
+    data = np.asarray(np.ma.filled(np.ma.masked_invalid(raw), 0.0), dtype=np.float64)
+    # unmasked sentinels (1e30, incl. float32 round-trips) -> 0.0
+    data = np.where(np.isnan(data) | np.isclose(data, 1.0e30, rtol=1e-6), 0.0, data)
+    records = data.reshape(1, file_lat.size, file_lon.size)
+    regridded = np.asarray(_regrid_records_host(records, regrid_weights))
+    return np.asarray(regridded[0], dtype=np.float64).reshape(
+        tuple(regrid_weights.target_shape))
+
+
+def _route_runoff_stack(runoff_stack, rmap, static=None):
     """Apply the routing plan to a stacked runoff field, or pass it through.
 
     Routing is LINEAR in the runoff field and the plan is static, so routing
     the RECORDS once here is identical to routing every interpolated step
-    inside the scan — and far cheaper.
+    inside the scan — and far cheaper.  When ``static`` is not None (a field
+    already on the model grid, kg/m^2/s: FESOM2's CORE2 climatological
+    runoff) the JRA55 per-record runoff is REPLACED by its per-record
+    broadcast before the plan is applied.
     """
+    if static is not None:
+        if tuple(static.shape) != tuple(runoff_stack.shape[1:]):
+            raise ValueError(
+                f"static runoff field shape {tuple(static.shape)} does not match "
+                f"the runoff stack record shape {tuple(runoff_stack.shape[1:])}")
+        runoff_stack = jnp.broadcast_to(static, runoff_stack.shape)
     if rmap is None:
         return runoff_stack
     from legoesm.ocean.forcing.runoff_mapper import apply_runoff_map
@@ -1532,7 +1667,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   A_h_eq_boost: float = 1.0,
                   A_h_eq_sigma_deg: float = 5.0,
                   C_smag: float = None,
-                  C_smag_lap: float = 0.15,
+                  C_smag_lap: float | None = None,
                   A_h_floor: float = 2000.0,
                   C_leith: float = None,
                   pgf_scheme: str = None,
@@ -1547,7 +1682,9 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   dz_ref_override=None,
                   spmd_n_devices: int = 0,
                   mpas_lloyd: int = 50,
-                  mpas_k_zeta_bih: float | None = None):
+                  mpas_k_zeta_bih: float | None = None,
+                  sw_scheme: str = "auto",
+                  B_h_gamma0: float | None = None):
     """Create grid, z_coord, config, model for any grid type.
 
     ``spmd_n_devices > 1`` (MPAS only, ``--enable-mpas-spmd``) reorders + pads
@@ -1743,7 +1880,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                 # conserved via fix_eta_drift; this adds the salt normalization.
                 normalize_freshwater=True,
                 C_smag=_C_smag,
-                C_smag_lap=C_smag_lap,
+                C_smag_lap=(C_smag_lap if C_smag_lap is not None else 0.15),
                 C_leith=_C_leith,
                 C_leith_modified=(_C_leith > 0),
                 slope_foot_alpha=slope_foot_alpha,
@@ -1826,6 +1963,7 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         from legoesm.grids.voronoi import create_voronoi_mesh
         from legoesm.ocean.dynamics.ocean_model_mpas import MPASOceanModel
         from legoesm.ocean.fidelity.nemo_match_recipe import (
+            NEMOMatchMPASRecipeConfig,
             nemo_match_mpas_model_config,
         )
         from legoesm.ocean.physics.combined import OceanPhysicsConfig
@@ -1857,7 +1995,9 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         # use the same "combined" config as the comparison scripts.
         # forcing_mode is passed from run_omip_single() via the parameter.
         if forcing_mode == "jra55_do_tropical":
-            sf_config = SurfaceForcingConfig(scheme="none")
+            sf_config = SurfaceForcingConfig(
+                scheme="none", shortwave_scheme=sw_scheme,
+                shortwave_water_type=water_type)
         else:
             sf_config = SurfaceForcingConfig(
                 scheme="combined",
@@ -1891,7 +2031,25 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
         # (single source of truth, locked to the catalog recipe
         # ``omip_nemo_match_mpas_v1`` by tests/ocean/unit/test_recipes.py), then
         # overlay only the run-dependent SETUP physics above.
-        config = nemo_match_mpas_model_config(physics=physics)
+        _mpas_over = {}
+        if A_h_override is not None:
+            _mpas_over["A_h"] = A_h_override
+        if B_h_override is not None:
+            _mpas_over["B_h"] = B_h_override
+        if C_smag is not None:
+            _mpas_over["C_smag"] = C_smag
+        if C_smag_lap is not None:
+            _mpas_over["C_smag_lap"] = C_smag_lap
+        if C_leith is not None:
+            _mpas_over["C_leith"] = C_leith
+        if no_gm_redi:
+            _mpas_over["gm_redi"] = False
+        if _mpas_over:
+            print(f"  MPAS recipe overrides: {_mpas_over}")
+        config = nemo_match_mpas_model_config(
+            NEMOMatchMPASRecipeConfig(**_mpas_over) if _mpas_over else None,
+            physics=physics,
+        )
         # Enforce global surface-freshwater balance, exactly as the lat-lon/tripole
         # config does (LatLonCGridOceanConfig.from_flat(normalize_freshwater=True) above).
         # The CORE-II P-E+R integral is a net ~+0.65 Sv freshwater input (a true
@@ -1967,7 +2125,9 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
             strip_north_rows=int(tripole_strip_north_rows))
 
         if forcing_mode == "jra55_do_tropical":
-            sf_config = SurfaceForcingConfig(scheme="none")
+            sf_config = SurfaceForcingConfig(
+                scheme="none", shortwave_scheme=sw_scheme,
+                shortwave_water_type=water_type)
         else:
             sf_config = SurfaceForcingConfig(
                 scheme="restoring",
@@ -2021,6 +2181,20 @@ def _create_setup(grid_type: str, resolution: str, nlev: int, H_max: float,
                   "recipe (tracer mixing is GM/Redi, kappa_Redi); ignored.")
         if pgf_scheme is not None:
             _recipe_over["pgf_scheme"] = pgf_scheme
+        if B_h_override is not None:
+            _recipe_over["B_h"] = B_h_override
+        if B_h_gamma0 is not None:
+            _recipe_over["B_h_gamma0"] = float(B_h_gamma0)
+        if C_smag is not None:
+            _recipe_over["C_smag"] = C_smag
+        if C_smag_lap is not None:
+            _recipe_over["C_smag_lap"] = C_smag_lap
+        if C_leith is not None:
+            _recipe_over["C_leith"] = C_leith
+        if no_gm_redi:
+            _recipe_over["gm_redi"] = False
+        # --B-h / --C-smag / --C-leith > 0 are refused by the recipe factory
+        # itself (the operators are not tripole-safe); nothing to guard here.
         _recipe_cfg = (NEMOMatchTripoleRecipeConfig(**_recipe_over)
                        if _recipe_over else None)
         if _recipe_over:
@@ -2358,6 +2532,7 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         z_t_atm=10.0,
         z_q_atm=10.0,
         stability_scheme=args.surface_stability_scheme,
+        ocean_albedo=float(getattr(args, "ocean_albedo", 0.06)),
     )
 
     state: dict = {
@@ -2420,10 +2595,54 @@ def _setup_jra55_forcing_state(args, grid, grid_type,
         and S_woa is not None
         and z_coord is not None
     )
+    if getattr(args, "sw_penetration", "auto") == "sweeney_2band":
+        if not getattr(args, "chl_clim", None):
+            raise ValueError("--sw-penetration sweeney_2band needs --chl-clim <Sweeney_2005.nc>")
+        if regrid_weights is None:
+            raise ValueError("--sw-penetration sweeney_2band needs the JRA55 regrid "
+                             "weights (MPAS / tripole lanes).")
+        state["chl_monthly"] = jnp.asarray(_load_monthly_clim_target(
+            args.chl_clim, "chl", regrid_weights,
+            np.asarray(ds["lat"]), np.asarray(ds["lon"])))
+    state["sw_net_to_forcing"] = getattr(args, "sw_penetration", "auto") != "auto"
+    if getattr(args, "runoff_source", "jra55_friver") == "core2_climatology":
+        if not getattr(args, "runoff_file", None):
+            raise ValueError("--runoff-source core2_climatology needs --runoff-file <CORE2_runoff.nc>")
+        if regrid_weights is None:
+            raise ValueError("--runoff-source core2_climatology needs the JRA55 regrid "
+                             "weights (MPAS / tripole lanes).")
+        state["runoff_static"] = jnp.asarray(_load_core2_runoff_static(
+            args.runoff_file, regrid_weights,
+            np.asarray(ds["lat"]), np.asarray(ds["lon"])))
     if sss_restoring_enabled:
         state["sss_target_2d"] = jnp.asarray(S_woa[..., 0])
         state["sss_piston_velocity"] = float(args.sss_piston_velocity)
         state["dz_top"] = float(np.asarray(z_coord.dz_ref)[0])
+        _sss_kind = getattr(args, "sss_restoring_target", "woa_winter")
+        if _sss_kind == "woa_winter":
+            pass
+        elif _sss_kind == "phc2_monthly":
+            if regrid_weights is None:
+                raise ValueError("--sss-restoring-target phc2_monthly needs the "
+                                 "JRA55 regrid weights (MPAS / tripole lanes).")
+            _monthly = _load_phc2_monthly_sss_target(
+                args.sss_target_file, regrid_weights,
+                np.asarray(ds["lat"]), np.asarray(ds["lon"]))
+            state["sss_target_monthly"] = jnp.asarray(_monthly)
+            state["sss_target_2d"] = state["sss_target_monthly"][0]
+        else:
+            raise ValueError(f"unknown --sss-restoring-target {_sss_kind!r}")
+        state["sss_remove_mean"] = bool(getattr(args, "sss_restoring_remove_mean", False))
+        if state["sss_remove_mean"]:
+            _area = (getattr(grid, "areaCell", None) if grid_type == "mpas"
+                     else getattr(grid, "area", None))
+            if _area is None:
+                raise ValueError("--sss-restoring-remove-mean: this grid exposes "
+                                 "no cell area (areaCell / area).")
+            state["sss_area"] = jnp.asarray(np.asarray(_area))
+        print(f"  SSS restoring: target={_sss_kind} "
+              f"piston={float(args.sss_piston_velocity):g} m/s "
+              f"remove_mean={state['sss_remove_mean']}")
     state["enable_sss_restoring"] = sss_restoring_enabled
 
     # T_freeze cap — stand-in for the missing sea-ice model.
@@ -2806,8 +3025,133 @@ def _preload_jra55_forcing_block(start_step_idx, n_steps, dt, jra55_state):
     # is linear in the field and its plan is static, so this is
     # identical to routing every interpolated step inside the scan.
     runoff_stack = _route_runoff_stack(
-        jnp.stack(runoffs), jra55_state.get("runoff_map"))
+        jnp.stack(runoffs), jra55_state.get("runoff_map"),
+        static=jra55_state.get("runoff_static"))
     return atm_stack, runoff_stack
+
+
+def _load_phc2_monthly_sss_target(path, regrid_weights, cache_lat, cache_lon) -> np.ndarray:
+    """Monthly PHC2 SSS climatology (``SALT``, missing -99.0) on the model grid."""
+    return _load_monthly_clim_target(path, "SALT", regrid_weights, cache_lat, cache_lon,
+                                     missing_value=-99.0)
+
+
+def _load_monthly_clim_target(path, var, regrid_weights, cache_lat, cache_lon,
+                              missing_value=None) -> np.ndarray:
+    """Load a 12-month (12, 180, 360) climatology and regrid it to the model grid.
+
+    Entries equal to ``missing_value`` (and any masked / NaN entries) are
+    treated as land, gap-filled by nearest valid neighbour on the unit sphere,
+    then each month is regridded on the host.  Returns an array of shape
+    ``(12,) + tuple(regrid_weights.target_shape)``.  Used for the PHC2 SSS
+    restoring target and the Sweeney chlorophyll climatology.
+    """
+    import netCDF4
+
+    from legoesm.grids.regridding import fill_missing_nearest_valid
+
+    with netCDF4.Dataset(path) as ds:
+        file_lat = np.asarray(ds["lat"][:])
+        file_lon = np.asarray(ds["lon"][:])
+        lat_ok = np.shape(file_lat) == np.shape(cache_lat) and np.allclose(file_lat, cache_lat)
+        lon_ok = np.shape(file_lon) == np.shape(cache_lon) and np.allclose(file_lon, cache_lon)
+        if not (lat_ok and lon_ok):
+            raise ValueError(
+                f"{path}: PHC2 lat/lon axes disagree with the forcing cache grid -- "
+                f"lat: match={lat_ok} (file shape {file_lat.shape} vs cache "
+                f"{np.shape(cache_lat)}); lon: match={lon_ok} (file shape "
+                f"{file_lon.shape} vs cache {np.shape(cache_lon)})")
+        salt = ds.variables[var][:]
+
+    data = np.ma.asanyarray(salt)
+    if missing_value is not None:
+        data = np.ma.masked_equal(data, missing_value)
+    data = np.ma.masked_invalid(data)
+    data = np.ma.filled(data.astype(np.float64), np.nan)
+    nlat, nlon = file_lat.size, file_lon.size
+    if data.shape != (12, nlat, nlon):
+        raise ValueError(f"{path}: expected {var} with shape (12, {nlat}, {nlon}), "
+                         f"got {tuple(data.shape)}")
+
+    # Unit-sphere Cartesian coordinates of the (lat, lon) meshgrid, flattened
+    # C-order to match data.reshape(12, -1).
+    lon2d, lat2d = np.meshgrid(file_lon, file_lat)
+    la = np.deg2rad(lat2d.ravel())
+    lo = np.deg2rad(lon2d.ravel())
+    xyz = np.stack([np.cos(la) * np.cos(lo), np.cos(la) * np.sin(lo), np.sin(la)], axis=-1)
+    filled = np.asarray(fill_missing_nearest_valid(data.reshape(12, -1), xyz)).reshape(12, nlat, nlon)
+    # Regrid on the HOST (deterministic NumPy), not on each process's GPU:
+    # under the route-B multicontroller the GPU regrid gave byte-different
+    # results across processes (the defect _regrid_records_host exists for).
+    target = np.asarray(_regrid_records_host(filled, regrid_weights))
+    return target.reshape((12,) + tuple(regrid_weights.target_shape))
+
+
+def _sss_month_index(day: float) -> int:
+    """Month index (0-11) containing ``day`` on a noleap calendar (day 0 = 1 Jan)."""
+    lengths = (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+    return int(np.searchsorted(np.cumsum(lengths), float(day) % 365.0, side="right"))
+
+
+def _restore_sss_top(S, target, alpha, mask, area=None, remove_mean=False):
+    """Haney piston restoring of the top layer.
+
+    The tendency ``alpha * (target - S_top) * mask`` is applied to the top
+    layer only; with ``remove_mean`` False the result is byte-identical to
+    ``S_top - alpha * (S_top - target) * mask``.  ``remove_mean`` subtracts
+    the area-weighted wet-cell mean of the tendency (FESOM2
+    ``sss_runoff_fluxes`` relax_salt balance) so the restoring adds no net
+    salt; it requires ``area`` (global reductions: fine on GSPMD arrays).
+    """
+    if remove_mean and area is None:
+        raise ValueError("remove_mean=True requires 'area' (cell areas).")
+    S_top = S[..., 0]
+    tend = alpha * (target - S_top) * mask
+    if remove_mean:
+        tend = (tend - jnp.sum(tend * area) / jnp.sum(area * mask)) * mask
+    return S.at[..., 0].set(S_top + tend)
+
+
+def _refs_for_block(base_refs, jra55_state, day0, shard_fn=None):
+    """Per-block reference dict for the SSS restoring.
+
+    Selects the current month's slice of the PHC2 climatology as
+    ``sss_target`` (no temporal interpolation -- FESOM reads the current
+    month) and, when mean removal is on, the ``sss_area`` for it.  Under
+    lat-band SPMD each month and the area go through ``shard_fn`` once and
+    are cached on ``jra55_state``.  The month is fixed for the whole block
+    (one forcing block = the diagnostic cadence, 2880 s on the ico9
+    launcher), so a block straddling a month boundary keeps the old target
+    for at most that long, once a month.
+    """
+    refs = dict(base_refs or {})
+    m = _sss_month_index(day0)
+    if "chl_monthly" in jra55_state:
+        chl_monthly = jra55_state["chl_monthly"]
+        if shard_fn is None:
+            refs["chl"] = chl_monthly[m]
+        else:
+            if "_chl_monthly_sharded" not in jra55_state:
+                jra55_state["_chl_monthly_sharded"] = [shard_fn(chl_monthly[k]) for k in range(12)]
+            refs["chl"] = jra55_state["_chl_monthly_sharded"][m]
+    if "sss_target_monthly" not in jra55_state:
+        return refs if "chl" in refs else base_refs
+    monthly = jra55_state["sss_target_monthly"]
+    if shard_fn is None:
+        refs["sss_target"] = monthly[m]
+    else:
+        if "_sss_monthly_sharded" not in jra55_state:
+            jra55_state["_sss_monthly_sharded"] = [shard_fn(monthly[k]) for k in range(12)]
+        refs["sss_target"] = jra55_state["_sss_monthly_sharded"][m]
+    if jra55_state.get("sss_remove_mean", False):
+        area = jra55_state["sss_area"]
+        if shard_fn is None:
+            refs["sss_area"] = area
+        else:
+            if "_sss_area_sharded" not in jra55_state:
+                jra55_state["_sss_area_sharded"] = shard_fn(area)
+            refs["sss_area"] = jra55_state["_sss_area_sharded"]
+    return refs
 
 
 def _regrid_records_host(recs, rw):
@@ -3008,7 +3352,8 @@ def _slice_preloaded_records(start_step_idx, n_steps, dt, jra55_state,
 
     raw_stack = {var: all_records[var][jnp.array(indices)] for var in all_records}
     runoff_stack = _route_runoff_stack(
-        raw_stack["friver"], jra55_state.get("runoff_map"))
+        raw_stack["friver"], jra55_state.get("runoff_map"),
+        static=jra55_state.get("runoff_static"))
 
     record_meta = {
         "record_days": record_days,
@@ -3099,7 +3444,8 @@ def _preload_jra55_raw_records(start_step_idx, n_steps, dt, jra55_state):
                     for i in range(raw_stack[var].shape[0])
                 ])
     runoff_stack = _route_runoff_stack(
-        raw_stack["friver"], jra55_state.get("runoff_map"))
+        raw_stack["friver"], jra55_state.get("runoff_map"),
+        static=jra55_state.get("runoff_static"))
 
     record_meta = {
         "record_days": record_days,          # (n_records,) fractional days
@@ -3165,6 +3511,9 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
     enable_ramp = T_ramp_seconds > 0
     enable_sponge = bool(jra55_state.get("enable_sponge", False))
     enable_sss = bool(jra55_state.get("enable_sss_restoring", False))
+    sw_net_to_forcing = bool(jra55_state.get("sw_net_to_forcing", False))
+    use_chl = "chl_monthly" in jra55_state
+    sss_remove_mean = bool(jra55_state.get("sss_remove_mean", False))
     zero_fluxes = bool(jra55_state.get("zero_surface_fluxes", False))
     enable_freeze = bool(jra55_state.get("enable_freeze_cap", False))
     # Prognostic slab sea ice (opt-in --jra55-sea-ice): replaces the freeze-cap
@@ -3183,9 +3532,11 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
         sss_dz = float(jra55_state["dz_top"])
         sss_alpha_static = sss_pv * dt / max(sss_dz, 1e-6)
         sss_target_static = jra55_state["sss_target_2d"]
+        sss_area_static = jra55_state.get("sss_area")
     else:
         sss_alpha_static = 0.0
         sss_target_static = None
+        sss_area_static = None
 
     freeze_from_gamma = False
     if enable_freeze:
@@ -3243,14 +3594,21 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
         # non-addressable array.
         _sponge, _sss_target, _freeze_mask = (
             sponge, sss_target_static, freeze_mask_static)
+        _sss_area = sss_area_static
+        _chl = None
         if refs is not None:
             from legoesm.ocean.sponge import SpongeForcing
-            if enable_sponge:
+            # refs may carry ONLY the per-block SSS entries (monthly target
+            # on a non-sharded lane): every key is optional.
+            if enable_sponge and "sponge_gamma" in refs:
                 _sponge = SpongeForcing(
                     gamma=refs["sponge_gamma"], T_ref=refs["sponge_T_ref"],
                     S_ref=refs["sponge_S_ref"])
             if enable_sss and "sss_target" in refs:
                 _sss_target = refs["sss_target"]
+            if enable_sss and "sss_area" in refs:
+                _sss_area = refs["sss_area"]
+            _chl = refs["chl"] if use_chl and "chl" in refs else None
             if freeze_from_gamma and "sponge_gamma" in refs:
                 _freeze_mask = refs["sponge_gamma"] > 0.0
             elif freeze_mask_static is not None and "ocean_mask" in refs:
@@ -3307,11 +3665,15 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
                 ice_fw=jnp.zeros_like(runoff_stack[idx]),
             )
             sf = OceanSurfaceForcing(
-                sw_down=atm.sw_down,
+                # Explicit --sw-penetration schemes take the post-albedo
+                # shortwave (FESOM2's 0.54*(1-albw)*SW); "auto" keeps the
+                # historical raw sw_down.
+                sw_down=sw_net if sw_net_to_forcing else atm.sw_down,
                 q_net=q_net,
                 tau_x=tau_x,
                 tau_y=tau_y,
                 freshwater=None,
+                chl=_chl,
             )
             # Prognostic slab sea ice: advance the ice tile and partition the
             # surface forcing (open-ocean fluxes x f_ocean=(1-A) + the ice
@@ -3342,15 +3704,14 @@ def _build_jra55_block_fn(model, jra55_state, dt, spmd_step=None):
             # SSS restoring (gated at compile time via Python `if`).
             if enable_sss:
                 S = new_state.S.data
-                target = jnp.asarray(_sss_target, dtype=S.dtype)
-                alpha = jnp.asarray(sss_alpha_static, dtype=S.dtype)
-                mask = jnp.asarray(new_state.land_mask.data, dtype=S.dtype)
-                S_top_new = (
-                    S[..., 0] - alpha * (S[..., 0] - target) * mask
-                )
-                new_state = new_state._replace(
-                    S=new_state.S.replace(data=S.at[..., 0].set(S_top_new)),
-                )
+                new_state = new_state._replace(S=new_state.S.replace(
+                    data=_restore_sss_top(
+                        S, jnp.asarray(_sss_target, dtype=S.dtype),
+                        jnp.asarray(sss_alpha_static, dtype=S.dtype),
+                        jnp.asarray(new_state.land_mask.data, dtype=S.dtype),
+                        area=(jnp.asarray(_sss_area, dtype=S.dtype)
+                              if sss_remove_mean else None),
+                        remove_mean=sss_remove_mean)))
 
             # T_freeze cap inside sponge.
             if enable_freeze:
@@ -3417,6 +3778,9 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
     enable_ramp = T_ramp_seconds > 0
     enable_sponge = bool(jra55_state.get("enable_sponge", False))
     enable_sss = bool(jra55_state.get("enable_sss_restoring", False))
+    sw_net_to_forcing = bool(jra55_state.get("sw_net_to_forcing", False))
+    use_chl = "chl_monthly" in jra55_state
+    sss_remove_mean = bool(jra55_state.get("sss_remove_mean", False))
     zero_fluxes = bool(jra55_state.get("zero_surface_fluxes", False))
     enable_freeze = bool(jra55_state.get("enable_freeze_cap", False))
 
@@ -3427,9 +3791,11 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
         sss_dz = float(jra55_state["dz_top"])
         sss_alpha_static = sss_pv * dt / max(sss_dz, 1e-6)
         sss_target_static = jra55_state["sss_target_2d"]
+        sss_area_static = jra55_state.get("sss_area")
     else:
         sss_alpha_static = 0.0
         sss_target_static = None
+        sss_area_static = None
 
     freeze_from_gamma = False
     if enable_freeze:
@@ -3491,14 +3857,21 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
             # non-addressable array.
             _sponge, _sss_target, _freeze_mask = (
                 sponge, sss_target_static, freeze_mask_static)
+            _sss_area = sss_area_static
+            _chl = None
             if refs is not None:
                 from legoesm.ocean.sponge import SpongeForcing
-                if enable_sponge:
+                # refs may carry ONLY the per-block SSS entries (monthly target
+                # on a non-sharded lane): every key is optional.
+                if enable_sponge and "sponge_gamma" in refs:
                     _sponge = SpongeForcing(
                         gamma=refs["sponge_gamma"], T_ref=refs["sponge_T_ref"],
                         S_ref=refs["sponge_S_ref"])
                 if enable_sss and "sss_target" in refs:
                     _sss_target = refs["sss_target"]
+                if enable_sss and "sss_area" in refs:
+                    _sss_area = refs["sss_area"]
+                _chl = refs["chl"] if use_chl and "chl" in refs else None
                 if freeze_from_gamma and "sponge_gamma" in refs:
                     _freeze_mask = refs["sponge_gamma"] > 0.0
                 elif freeze_mask_static is not None and "ocean_mask" in refs:
@@ -3620,9 +3993,10 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
                     ice_fw=jnp.zeros_like(sst_K, dtype=_dtype),
                 )
                 sf = OceanSurfaceForcing(
-                    sw_down=atm.sw_down, q_net=q_net,
+                    sw_down=sw_net if sw_net_to_forcing else atm.sw_down, q_net=q_net,
                     tau_x=tile.tau_x * ramp, tau_y=tile.tau_y * ramp,
                     freshwater=None,
+                    chl=_chl,
                 )
 
                 # Prognostic slab sea ice: partition surface forcing between
@@ -3649,12 +4023,14 @@ def _build_jra55_block_fn_interp(model, jra55_state, dt, spmd_step=None):
 
                 if enable_sss:
                     S = new_state.S.data
-                    _sss_mask = new_state.land_mask.data
-                    S_new = S.at[..., 0].set(
-                        S[..., 0] - sss_alpha_static * (
-                            S[..., 0] - _sss_target) * _sss_mask)
-                    new_state = new_state._replace(
-                        S=new_state.S.replace(data=S_new))
+                    new_state = new_state._replace(S=new_state.S.replace(
+                        data=_restore_sss_top(
+                            S, jnp.asarray(_sss_target, dtype=S.dtype),
+                            jnp.asarray(sss_alpha_static, dtype=S.dtype),
+                            jnp.asarray(new_state.land_mask.data, dtype=S.dtype),
+                            area=(jnp.asarray(_sss_area, dtype=S.dtype)
+                                  if sss_remove_mean else None),
+                            remove_mean=sss_remove_mean)))
                 if enable_freeze:
                     T = new_state.T.data
                     T_top = jnp.where(
@@ -3719,17 +4095,26 @@ def _extract_scalars(state, grid_type, grid, z_coord):
         return {"SST": sst, "SSS": sss, "SSH": ssh}
 
     if grid_type == "mpas":
-        T = np.asarray(state.T.data)
-        S = np.asarray(state.S.data)
-        eta = np.asarray(state.eta.data)
-        mask = np.asarray(state.land_mask.data)
+        # Mirrors the lat-lon branch: under the route-B multicontroller the
+        # state fields are jax Arrays sharded across PROCESSES, so a host
+        # gather (np.asarray) of a field spanning devices is an error; the
+        # masked jnp reductions run in place on the shards and each returns
+        # a replicated scalar that float() can read.
+        T = state.T.data
+        S = state.S.data
+        eta = state.eta.data
+        mask = state.land_mask.data
         # MPAS: (nCells, nlev), mask: (nCells,)
         wet = mask > 0.5
-        sst = float(np.mean(T[wet, 0])) if wet.any() else 0.0
-        sss = float(np.mean(S[wet, 0])) if wet.any() else 0.0
-        ssh = float(np.mean(eta[wet])) if wet.any() else 0.0
-        u = np.asarray(state.u.data)
-        max_u = float(np.max(np.abs(u)))
+        n_wet = jnp.sum(wet)
+        # All-land mesh (n_wet == 0) now yields NaN, not the old 0.0: that
+        # plausible-looking 0.0 hid a broken land_mask; NaN makes it visible.
+        sst = float(jnp.sum(jnp.where(wet, T[..., 0], 0.0)) / n_wet)
+        sss = float(jnp.sum(jnp.where(wet, S[..., 0], 0.0)) / n_wet)
+        ssh = float(jnp.sum(jnp.where(wet, eta, 0.0)) / n_wet)
+        # u: (nEdges, nlev) edge array; padded ghost edges carry 0, so no wet
+        # mask is needed -- identical to the old np.max(np.abs(u)).
+        max_u = float(jnp.max(jnp.abs(state.u.data)))
     else:
         # Cubed-sphere (6,n,n,nlev) or latlon/tripole (nlat,nlon,nlev).
         # Reductions, not host arrays: under lat-band SPMD the state is
@@ -3943,6 +4328,68 @@ def _check_finite(state, grid_type):
 _RESTART_WRITER: dict = {
     "thread": None, "error": None, "lock": threading.Lock(),
 }
+
+
+def _large_tripole_io(state, grid_type):
+    """Coordinate multi-GB tripole output, leaving small/serial I/O alone.
+
+    A 256 MiB global temperature array implies several GiB of checkpoint
+    fields.  Use global shape/dtype metadata only: no gather or host copy.
+    """
+    return (grid_type == "tripole" and jax.process_count() > 1
+            and state.T.data.nbytes >= 256 * 1024**2)
+
+
+def _collective_root_io(operation):
+    """Run root-local I/O while all hosts await its completion together.
+
+    Call on EVERY rank, after any state gathers.  ``operation`` must not
+    issue collectives.  A worker keeps serialization off the coordinating
+    host thread; a one-second status broadcast keeps peers out of shutdown
+    and the next model collective until the write has finished.  Errors are
+    raised on every rank.  JAX heartbeat/shutdown deadlines are unchanged.
+
+    This does not implement a filesystem-stall watchdog: a live worker stuck
+    in I/O still requires the scheduler's walltime limit or cancellation.
+    """
+    from jax.experimental import multihost_utils
+
+    root = jax.process_index() == 0
+    done = threading.Event()
+    result = None
+    error = None
+
+    def write():
+        nonlocal result, error
+        try:
+            result = operation()
+        except BaseException as exc:
+            error = exc
+        finally:
+            done.set()
+
+    worker = None
+    if root:
+        worker = threading.Thread(target=write, name="omip-collective-io")
+        try:
+            worker.start()
+        except BaseException as exc:   # thread exhaustion: publish it, do not skip the collective
+            error, worker = exc, None
+            done.set()
+    while True:
+        # Only root waits; other ranks enter the same small collective.
+        # There is never a collective spanning the entire file write.
+        if root:
+            done.wait(timeout=1.0)
+        status = (2 if error is not None else 1) if done.is_set() else 0
+        status = int(np.asarray(multihost_utils.broadcast_one_to_all(
+            np.asarray(status, dtype=np.int32), is_source=root)))
+        if status:
+            if worker is not None:
+                worker.join()
+            if status == 2:
+                raise RuntimeError("rank-0 state write failed") from error
+            return result
 
 
 def _join_restart_writer():
@@ -4249,7 +4696,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                    start_step=0,
                    nudge_woa_tau=0.0, T_woa_3d=None, S_woa_3d=None,
                    snapshot_fn=None, spmd_step=None, spmd_gather=None,
-                   spmd_shard_stack=None, spmd_gather_ice=None):
+                   spmd_shard_stack=None, spmd_gather_ice=None,
+                   spmd_shard_ref=None):
     """Run time loop with diagnostics.
 
     Two forcing paths, mutually exclusive:
@@ -4359,6 +4807,7 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
     # returns the path — non-root gets ``None`` so its callers skip the
     # snapshot/print that would deref a missing filename.
     _multiproc = jax.process_count() > 1
+    _coordinate_io = _large_tripole_io(state, grid_type)
     if spmd_gather is not None:
         def save_restart(st, *a, **kw):
             gathered = spmd_gather(st)          # collective — ALL ranks
@@ -4366,6 +4815,12 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                 # The MPAS lane shards the sea-ice tile too; the restart
                 # writer's np.asarray would host-fetch remote shards.
                 kw = {**kw, "ice_state": spmd_gather_ice(kw["ice_state"])}
+            if _coordinate_io:
+                def write_and_join():
+                    path = _save_restart(gathered, *a, **kw)
+                    _join_restart_writer()
+                    return path
+                return _collective_root_io(write_and_join)
             if not _io_rank:
                 return None
             if _multiproc:
@@ -4485,6 +4940,9 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
         # into every block_fn call as an ARGUMENT (see the builders' note).
         _spmd_aux = getattr(spmd_step, "aux", None)
         _spmd_refs = jra55_state.get("_spmd_refs") if spmd_step is not None else None
+        # Monthly SSS target / area for the mean removal: selected per block by
+        # the block's model day (band-sharded once under lat-band SPMD).
+        _sss_shard_fn = spmd_shard_ref if spmd_step is not None else None
         if use_gpu_interp:
             _get_block_fn_interp = _build_jra55_block_fn_interp(
                 model, jra55_state, dt, spmd_step=spmd_step)
@@ -4551,13 +5009,16 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
             t_compute_start = time.time()
             if use_gpu_interp:
                 bfn = _get_block_fn_interp(actual)
+                _refs_blk = _refs_for_block(
+                    _spmd_refs, jra55_state,
+                    float(record_meta["block_start_day"]), shard_fn=_sss_shard_fn)
                 if _ice_on:
                     state, ice_state = bfn(
                         state, raw_stack, runoff_records,
                         record_meta["record_days"],
                         jnp.float64(record_meta["block_start_day"]),
                         jnp.float64(record_meta["block_start_day_forcing"]),
-                        ice_state, aux=_spmd_aux, refs=_spmd_refs,
+                        ice_state, aux=_spmd_aux, refs=_refs_blk,
                     )
                 else:
                     state = bfn(
@@ -4565,20 +5026,23 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                         record_meta["record_days"],
                         jnp.float64(record_meta["block_start_day"]),
                         jnp.float64(record_meta["block_start_day_forcing"]),
-                        aux=_spmd_aux, refs=_spmd_refs,
+                        aux=_spmd_aux, refs=_refs_blk,
                     )
             else:
+                _refs_blk = _refs_for_block(
+                    _spmd_refs, jra55_state,
+                    float(block_start) * dt / 86400.0, shard_fn=_sss_shard_fn)
                 if _ice_on:
                     state, ice_state = block_fn(
                         state, atm_stack, runoff_stack,
                         jnp.int32(block_start), ice_state, aux=_spmd_aux,
-                        refs=_spmd_refs,
+                        refs=_refs_blk,
                     )
                 else:
                     state = block_fn(
                         state, atm_stack, runoff_stack,
                         jnp.int32(block_start), aux=_spmd_aux,
-                        refs=_spmd_refs,
+                        refs=_refs_blk,
                     )
             jax.block_until_ready(state.T.data)
             compute_dt = time.time() - t_compute_start
@@ -4691,6 +5155,8 @@ def _run_omip_loop(model, state, grid_type, grid, z_coord, dt, n_steps,
                     f" @({scalars['lat_maxu']:.0f},"
                     f"{scalars['lon_maxu']:.0f})"
                 )
+            if scalars.get("j_maxu", -1) >= 0:
+                scalar_summary += f" ij=({scalars['j_maxu']},{scalars['i_maxu']})"
             summary = scalar_summary
             if _io_rank:
                 print(
@@ -5188,9 +5654,15 @@ def run_omip_single(grid_type: str, args) -> dict:
     # Restart provenance for THIS run (0 = serial cell order): set for every
     # run so an earlier SPMD run in the same interpreter cannot leak its count.
     _MPAS_SPMD_N_DEVICES[0] = int(_mpas_spmd_nd) if _mpas_spmd_nd > 1 else 0
+    if getattr(args, "B_h_gamma0", None) is not None and grid_type != "tripole":
+        raise SystemExit(
+            f"--B-h-gamma0 is wired for --grid tripole only (2-D face metrics); "
+            f"on --grid {grid_type} it would be silently inert. Use --B-h.")
     grid, z_coord, config, model, coord_kind = _create_setup(
         grid_type, resolution, args.nlev, args.H_max,
         args.physics, args.water_type,
+        sw_scheme=getattr(args, "sw_penetration", "auto"),
+        B_h_gamma0=getattr(args, "B_h_gamma0", None),
         spmd_n_devices=_mpas_spmd_nd,
         mpas_lloyd=int(getattr(args, "mpas_lloyd", 50)),
         mpas_k_zeta_bih=getattr(args, "mpas_k_zeta_bih", None),
@@ -5242,10 +5714,13 @@ def run_omip_single(grid_type: str, args) -> dict:
         _mesh_files = mesh_file_list(
             getattr(args, "tripole_mesh", None)
             or _parse_resolution(grid_type, resolution)["mesh_path"])
+        _closed = tuple(
+            n for n in (getattr(args, "tripole_closed_seas", None) or "").split(",") if n)
         _lm, _hb = read_mesh_mask_bathy(
             _mesh_files,
             strip_north_rows=int(
-                getattr(args, "tripole_strip_north_rows", 0) or 0))
+                getattr(args, "tripole_strip_north_rows", 0) or 0),
+            closed_seas=_closed)
         _n_lat, _n_lon = int(grid.lat_T.shape[0]), int(grid.lat_T.shape[1])
         if _lm.shape != (_n_lat, _n_lon):
             raise SystemExit(
@@ -5269,7 +5744,8 @@ def run_omip_single(grid_type: str, args) -> dict:
         _n_wet = int(np.sum(_lm > 0.5))
         print(f"  Tripole mesh: {[Path(f).name for f in _mesh_files]} "
               f"({_n_wet}/{_lm.size} ocean cells, "
-              f"H_max={float(np.max(_hb)):.0f} m)")
+              f"H_max={float(np.max(_hb)):.0f} m, closed seas masked: "
+              f"{list(_closed) or 'none'})")
         if getattr(args, "tripole_partial_cells", True) and args.bathymetry is None:
             # True depth levels with a partial bottom cell, as NEMO's zgr_zps
             # builds them.  The reference thicknesses and T-point depths come
@@ -5849,9 +6325,21 @@ def run_omip_single(grid_type: str, args) -> dict:
               f"sampling depth moved vs the reference centres by "
               f"{float(np.median(_off)):.1f} m median, "
               f"{float(np.max(_off)):.1f} m max")
-    T_woa, S_woa = init_ocean_from_woa(
-        grid, _zc_final, _woa_paths[0], _woa_paths[1],
-        cell_center_depths=_cell_depths)
+        del _live, _off, _zref, _H
+    if getattr(args, "ic_from_fesom_mesh", None):
+        from legoesm.ocean.init_woa import init_ocean_from_fesom_mesh
+        T_woa, S_woa = init_ocean_from_fesom_mesh(
+            grid, _zc_final, args.ic_from_fesom_mesh,
+            cell_center_depths=_cell_depths,
+            wet_mask=np.asarray(state.land_mask.data) > 0.5,
+            log=lambda m: print("  " + m, flush=True),
+            cache_dir=getattr(args, "ic_cache_dir", None))
+    else:
+        T_woa, S_woa = init_ocean_from_woa(
+            grid, _zc_final, _woa_paths[0], _woa_paths[1],
+            cell_center_depths=_cell_depths,
+            void_fill=bool(getattr(args, "woa_void_fill", False)))
+    del _cell_depths   # a full-global (nj, ni, nlev) f64 array per rank at ORCA12
 
     if args.woa_init and T_woa is not None and S_woa is not None:
         # Replace rest-state T/S with WOA18 climatology.
@@ -5866,6 +6354,17 @@ def run_omip_single(grid_type: str, args) -> dict:
               f"{float(T_woa_masked[state.land_mask.data > 0.5].max()):.1f}]°C, "
               f"S=[{float(S_woa_masked[state.land_mask.data > 0.5].min()):.1f}, "
               f"{float(S_woa_masked[state.land_mask.data > 0.5].max()):.1f}] PSU")
+    # Prognostic-TKE scan carry: the None -> Field promotion happens HERE,
+    # once -- BEFORE the restart load (the loader restores only the fields
+    # the template carries, so an unseeded template would drop a saved tke)
+    # and before SPMD sharding / the first scanned step, so the carry pytree
+    # is stable.  Both seeders are no-ops unless the prognostic TKE closure
+    # is active.
+    if grid_type == "mpas":
+        state = model.seed_tke(state)
+    elif getattr(model, "_tke_prognostic_active", None) is not None \
+            and model._tke_prognostic_active():
+        state = model.seed_scan_carry(state, dt)
     if args.restart is not None:
         _state_built = state
         state, restart_day, restart_step = _load_restart(
@@ -6036,7 +6535,9 @@ def run_omip_single(grid_type: str, args) -> dict:
         "days": float(args.days),
         "seed": int(run_config.seed),
         "forcing_mode": getattr(args, "forcing_mode", "restoring"),
-        "initial_condition": "woa18" if args.woa_init else "rest_state",
+        "initial_condition": (("fesom_mesh:" + str(args.ic_from_fesom_mesh))
+                              if (args.woa_init and getattr(args, "ic_from_fesom_mesh", None))
+                              else "woa18" if args.woa_init else "rest_state"),
         "ocean_config": _namedtuple_to_dict(config),
         "cli_args": vars(args),
     }
@@ -6117,6 +6618,7 @@ def run_omip_single(grid_type: str, args) -> dict:
     spmd_gather = None
     spmd_gather_ice = None
     spmd_shard_stack = None
+    spmd_shard_ref = None
     if run_config.enable_latlon_spmd:
         if grid_type not in ("latlon", "tripole"):
             raise SystemExit(
@@ -6188,6 +6690,7 @@ def run_omip_single(grid_type: str, args) -> dict:
                         _refs[_name] = shard_forcing_latlon(
                             jnp.asarray(jra55_state[_key]), _dev.mesh)
                 jra55_state["_spmd_refs"] = _refs or None
+                spmd_shard_ref = partial(shard_forcing_latlon, mesh=_dev.mesh)
             # Lay per-block forcing stacks out lat-band-sharded so the
             # in-scan interpolation / bulk fluxes stay shard-local (shared
             # layout helper — see shard_forcing_stack_latlon).
@@ -6198,8 +6701,10 @@ def run_omip_single(grid_type: str, args) -> dict:
                 # gate (shard_forcing_stack_latlon) later requires to agree:
                 # when it fires, these lines say WHICH upstream object differed.
                 from legoesm.parallel.geometry_consistency import leaf_digest48
-                _d = {"lat_T": leaf_digest48(grid.lat_T),
-                      "lon_T": leaf_digest48(grid.lon_T),
+                _glat, _glon = ((grid.lat_T, grid.lon_T) if grid_type == "tripole"
+                                else (grid.lat, grid.lon))
+                _d = {"lat_T": leaf_digest48(_glat),
+                      "lon_T": leaf_digest48(_glon),
                       "land_mask": leaf_digest48(state.land_mask.data)
                       if jax.process_count() == 1 else float("nan")}
                 _rw = (jra55_state or {}).get("regrid_weights")
@@ -6256,6 +6761,11 @@ def run_omip_single(grid_type: str, args) -> dict:
             spmd_gather = partial(gather_state_mpas_ocean_spmd, layout=_layout)
             spmd_gather_ice = spmd_gather      # generic pytree gather
             spmd_shard_stack = partial(shard_cell_stack_spmd, layout=_layout)
+            # The per-block SSS references (monthly target (nCells,), area)
+            # must be block-sharded like the forcing stacks under MPAS SPMD,
+            # not handed to the jitted block as global arrays;
+            # shard_cell_stack_spmd handles 1-D per-cell leaves.
+            spmd_shard_ref = spmd_shard_stack
             state = shard_state_mpas_ocean_spmd(state, _layout)
             if jra55_state is not None and jra55_state.get("ice_state_init") is not None:
                 jra55_state["ice_state_init"] = shard_cell_stack_spmd(
@@ -6281,6 +6791,7 @@ def run_omip_single(grid_type: str, args) -> dict:
             restoring_tau_s=restoring_tau_s,
             restoring_ramp_days=ramp_days_eff,
             jra55_state=jra55_state,
+            spmd_shard_ref=spmd_shard_ref,
             checkpoint_days=checkpoint_days,
             checkpoint_dir=checkpoint_dir,
             max_wallclock_seconds=run_config.max_wallclock_seconds,
@@ -6314,7 +6825,11 @@ def run_omip_single(grid_type: str, args) -> dict:
     # spmd_gather collective above: under route-B multiproc only rank 0
     # spawns a writer thread, so a rank-0-only re-raise here must not be able
     # to skip that collective and hang the federation.
-    _join_restart_writer()
+    _coordinate_io = _large_tripole_io(state, grid_type)
+    if _coordinate_io:
+        _collective_root_io(_join_restart_writer)
+    else:
+        _join_restart_writer()
 
     # Route-B: only rank 0 writes output files (concurrent writes to the same
     # path corrupt them); every rank still builds ``results`` so the exit code
@@ -6363,7 +6878,7 @@ def run_omip_single(grid_type: str, args) -> dict:
     # a finished run can be scored offline (e.g. CATKE-vs-KPP MLD).  Purely
     # additive output; a diagnostic must never abort the run.  Rank-0 only
     # (writes a file); ``state`` is already gathered/addressable on every rank.
-    if _io_rank:
+    def write_final_snapshot():
         try:
             from legoesm.ocean.restart import (
                 save_mld_snapshot, grid_lat2d_lon2d_deg,
@@ -6379,6 +6894,14 @@ def run_omip_single(grid_type: str, args) -> dict:
             print(f"  MLD snapshot: {snap}")
         except Exception as e:  # diagnostic snapshot must never crash the run
             print(f"  Warning: MLD snapshot skipped: {type(e).__name__}: {e}")
+
+    if args.no_final_snapshot:
+        if _io_rank:
+            print("  MLD snapshot skipped (--no-final-snapshot)")
+    elif _coordinate_io:
+        _collective_root_io(write_final_snapshot)
+    elif _io_rank:
+        write_final_snapshot()
 
     ALL_RESULTS.append(results)
     return results

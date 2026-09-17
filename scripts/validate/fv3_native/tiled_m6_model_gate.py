@@ -133,6 +133,14 @@ def main(argv=None):
                     help="append the oracle's DCMIP16 terminator pair cl, cl2 "
                          "after the --nq passengers (the tracer set the "
                          "run_hydro_*_term_gfs oracle decks advect)")
+    ap.add_argument("--gpu-max-rel-peak", type=float, default=None,
+                    help="GPU rows (user call 2026-09-15): a leaf that is not "
+                         "bitwise still passes if its max |window - ref| is "
+                         "within this fraction of the leaf's peak. Two XLA:GPU "
+                         "programs differ at rounding (measured 1.5e-14 of "
+                         "peak on u/v, C24 kt=1 vs the 6-GPU flat reference, "
+                         "job 9789931); the launcher passes 1e-13. CPU rows "
+                         "leave it unset and stay bitwise")
     ap.add_argument("--n-split", type=int, default=3)
     ap.add_argument("--distributed", action="store_true",
                     help="MULTI-PROCESS run (jax.distributed.initialize via "
@@ -191,6 +199,10 @@ def main(argv=None):
         print("[m6] REFUSED: --distributed needs a reference -- either "
               "--flat-ref (6 processes build it here) or --ref-npz "
               "<saved>; without one there is nothing to gate against")
+        raise SystemExit(2)
+    if args.gpu_max_rel_peak is not None and not (0.0 < args.gpu_max_rel_peak < 1e-6):
+        print(f"[m6] REFUSED: --gpu-max-rel-peak {args.gpu_max_rel_peak} is not a "
+              f"rounding-level ceiling (0, 1e-6)")
         raise SystemExit(2)
     if args.ref_npz and not args.distributed:
         # codex 2026-09-13: an in-process run builds its own reference and
@@ -477,8 +489,8 @@ def main(argv=None):
         wf = dict(flat_leaves(win))
         to_save.update({f"step{it + 1}:{p}": np.asarray(a)
                         for p, a in wf.items()})
-        n_ok = n_bad = 0
-        worst = 0.0
+        n_ok = n_bad = n_ok_tol = 0
+        worst = worst_peak = 0.0
         # GLM 2026-09-13: "sharded == in-process" is vacuous for a tracer
         # BOTH arms leave untouched, so every passenger must have moved on
         # the compute window since the previous scored state
@@ -520,19 +532,36 @@ def main(argv=None):
                 continue
             d = (r != w).sum()
             if d:
-                n_bad += 1
                 fin = np.isfinite(r - w)
                 rel = np.nanmax(np.abs(r - w)[fin] /
                                 (np.abs(r[fin]) + 1e-300))
+                # per-cell rel explodes on cells where the field is ~0
+                # (v is exactly 0 in the IC: a 1e-16 rounding difference
+                # read as "12x"); the certificate quantity on GPU is the
+                # difference over the LEAF'S PEAK
+                peak = float(np.abs(r[fin]).max()) if fin.any() else 0.0
+                rel_peak = (float(np.abs(r - w)[fin].max()) / peak
+                            if peak > 0 else float("inf"))
                 worst = max(worst, float(rel))
-                print(f"  step {it + 1} {path:24s} DIFF {int(d)}/{r.size} "
-                      f"max rel {rel:.3e}")
+                worst_peak = max(worst_peak, rel_peak)
+                if args.gpu_max_rel_peak is not None \
+                        and rel_peak <= args.gpu_max_rel_peak:
+                    n_ok_tol += 1
+                    tag = "within GPU ceiling"
+                else:
+                    n_bad += 1
+                    tag = "DIFF"
+                print(f"  step {it + 1} {path:24s} {tag} {int(d)}/{r.size} "
+                      f"max rel {rel:.3e}  rel-to-peak {rel_peak:.3e}")
             else:
                 n_ok += 1
-        print(f"[m6] step {it + 1}: {n_ok}/{n_expected} leaves BITWISE, "
-              f"{n_bad} differ (worst rel {worst:.3e}); replicated window "
-              f"outputs: {replicated or 'none'}")
-        if n_bad or n_ok != n_expected:
+        print(f"[m6] step {it + 1}: {n_ok}/{n_expected} leaves BITWISE"
+              + (f", {n_ok_tol} within the GPU ceiling {args.gpu_max_rel_peak:g} "
+                 f"of peak" if args.gpu_max_rel_peak is not None else "")
+              + f", {n_bad} differ (worst rel {worst:.3e}, worst rel-to-peak "
+              f"{worst_peak:.3e}); replicated window outputs: "
+              f"{replicated or 'none'}")
+        if n_bad or n_ok + n_ok_tol != n_expected:
             rc = 1
         if replicated:
             print("  REFUSED: a window output came back replicated")
@@ -555,12 +584,41 @@ def main(argv=None):
                   "every rank -- a rank-count row on a wrong exchange is not "
                   "reported")
         else:
+            timing_ok = True
             for it in range(args.timing):
                 t0 = time.perf_counter()
                 win = win_model.step(win, args.dt)
                 jax.block_until_ready(win)
                 times.append(time.perf_counter() - t0)
-            if args.profile:
+                # A TIMED STEP IS STILL A STEP (codex 2026-09-16): the
+                # scored steps refuse a non-finite state, the timed ones did
+                # not, so a deck that blew up AFTER the last scored step
+                # still printed a p50 -- timing a diverged model. Every rank
+                # must reach the SAME verdict before any of them leaves the
+                # loop, or the ranks desynchronise on the next collective.
+                bad = int(sum(
+                    int((~np.isfinite(np.asarray(sh.data))).sum())
+                    for _p, v in leaves(win)
+                    if getattr(v, "dtype", None) is not None
+                    and v.dtype.kind == "f"
+                    for sh in getattr(v, "addressable_shards", [])))
+                ns_t = np.asarray(win_model.last_nsplt)
+                local_bad = int(bad > 0 or (ns_t < 1).any())
+                if jax.process_count() > 1:
+                    import jax.numpy as jnp
+                    from jax.experimental import multihost_utils as mhu
+                    local_bad = int(np.asarray(mhu.process_allgather(
+                        jnp.asarray(local_bad, dtype=jnp.int32))).max())
+                if local_bad:
+                    print(f"[m6] TIMING REFUSED: timed step {it + 1} left a "
+                          f"non-finite state on some rank (this rank: {bad} "
+                          f"values, nsplt {ns_t.tolist()}) -- the deck is not "
+                          f"stable at dt={args.dt}, so the timing would be of "
+                          f"a diverged model")
+                    rc = 1
+                    timing_ok = False
+                    break
+            if args.profile and timing_ok:
                 # 2 EXTRA steps after the timed ones (codex 2026-09-05:
                 # profiled steps must not enter the timing distribution)
                 if rank0:
@@ -573,13 +631,18 @@ def main(argv=None):
                     jax.profiler.stop_trace()
                     print(f"[m6] profile trace (2 extra steps after the "
                           f"timed ones, rank 0) -> {args.profile}")
-            _report_timing(args, times, jax,
-                           f"windows kt={args.kt} pad={args.pad}"
-                           + (" DIAGNOSTIC no-per-firing-refresh (NOT a "
-                              "ladder row)" if diag_arm
-                              else ""))
+            if timing_ok:
+                _report_timing(args, times, jax,
+                               f"windows kt={args.kt} pad={args.pad}"
+                               + (" DIAGNOSTIC no-per-firing-refresh (NOT a "
+                                  "ladder row)" if diag_arm
+                                  else ""))
+    if rc == 0 and args.gpu_max_rel_peak is not None:
+        verdict = f"WITHIN {args.gpu_max_rel_peak:g} OF PEAK (GPU ceiling)"
+    else:
+        verdict = "BITWISE" if rc == 0 else "DIFFERS"
     print(f"[m6] VERDICT kt={args.kt} pad={args.pad} steps={args.steps}: "
-          f"{'BITWISE' if rc == 0 else 'DIFFERS'} vs "
+          f"{verdict} vs "
           f"{'the saved reference ' + args.ref_npz if ref is None else 'the face-sharded model'}")
     return rc
 
