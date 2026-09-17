@@ -104,7 +104,7 @@ post-run inventory shows that this candidate does not reproduce the full
 instrumentation that no longer exists in the current source card. The card must
 therefore not be described as an exact Phase-2v source clone, even though the
 build itself is passive. (`orca2_boundary_run.sh:38-131`,
-`orca2_boundary_run.sh:556-612`, `orca2_boundary_run.sh:745-810`,
+`orca2_boundary_run.sh:573-629`, `orca2_boundary_run.sh:762-827`,
 `orca2_boundary_admission.json:15-33`)
 
 The new patch is additive: it initializes a write-only buffer, copies native
@@ -118,7 +118,7 @@ Preflight reconstructs the registered Phase-2v `zdftke` patch, rejects any
 removed/replaced line, checks the capture location, and proves both writer and
 patched `zdftke` with `gfortran -fsyntax-only`. Every unexpected or explicit
 nonzero path emits a named `REFUSE:` line. (`orca2_boundary_run.sh:4-10`,
-`orca2_boundary_run.sh:641-730`)
+`orca2_boundary_run.sh:658-747`)
 
 The new `--finalize` mode branches before the clean-tree, source, build, and
 launch path. It verifies the registered target directory, built and copied
@@ -130,8 +130,8 @@ an early refusal cannot leave a stale admission. It pins the 101 baseline
 streams to a registered manifest digest, byte-compares the comparable ones,
 writes the record stamp and admission JSON, and makes both those baseline files
 and the external built executable directly checkable through the final digest
-manifest. (`orca2_boundary_run.sh:189-302`, `orca2_boundary_run.sh:303-337`,
-`orca2_boundary_run.sh:339-383`)
+manifest. (`orca2_boundary_run.sh:193-306`, `orca2_boundary_run.sh:307-341`,
+`orca2_boundary_run.sh:343-390`)
 
 Finalization cleared the original logging defect: one marker was found in the
 one `ocean.output` file at `kt=2`, and the 3,543,512-byte frame passed exact
@@ -200,16 +200,36 @@ writes no artifact. (`orca2_inventory_missing_boundary_plant.txt:1-4`,
 `orca2_inventory_provenance_mismatch_plant.txt:1-4`)
 
 The passivity plant corrupts one byte of an ordinary inherited stream, one byte
-of the transport stream's first field, and the transport stream's length; all
-three still refuse with exit 69 and a named `REFUSE:` line, which shows the
-narrowed comparison is not vacuous. Its fourth control perturbs the excluded
-third field and is admitted, which is the documented exclusion behaving as
-described rather than an accident. The run is returned to its admitted state
-afterwards. (`orca2_boundary_plant.sh:1-16`, `orca2_passivity_plant.txt:1-8`)
+of the transport stream's first field, one byte of its second field, and the
+transport stream's length both short and padded; all five still refuse with
+exit 69, which shows the narrowed comparison is not vacuous. Each plant is
+required to produce the line for the specific condition it targets, not merely
+any refusal: the three byte plants must name the stream they caught on the
+`ORCA2_TKE_BOUNDARY_DIFFERS` line, and the two length plants must produce the
+separate refusal that a transport stream is not the registered 10,630,320
+bytes, so the length requirement is shown to be what fires rather than an
+ordinary byte difference. The sixth control perturbs the excluded third field
+and is admitted, which is the documented exclusion behaving as described rather
+than an accident. Each plant backs the stream up beside the run, outside the
+temporary directory the cleanup trap removes, and restores it afterwards; a
+backup left behind by an interrupted attempt is put back, verified against its
+recorded digest, before the next attempt plants anything, so restoring is
+idempotent and an interrupted plant is repaired by running the script again.
+The run is returned to its admitted state afterwards.
+(`orca2_boundary_plant.sh:1-25`, `orca2_passivity_plant.txt:1-10`)
 
 The finalizer control first admits a synthetic twin holding the 94 comparable
 streams plus the record, with the seven registered-absent streams present only
-in the baseline. It then plants an externally changed executable, a duplicate
+in the baseline. One of those comparable streams is a synthetic stage-1
+transport stream carrying the full three-field geometry, and the twin's two
+copies of it disagree in the excluded third field exactly as the reference and
+the candidate do, so every admission in this control happens with that
+disagreement in place. On that stream the control plants a corrupted header, a
+corrupted first field, a corrupted second field and a corruption at the last
+compared byte, all of which refuse and name the stream; a corruption at the
+first excluded byte and at the last byte of the stream, both of which are
+admitted; and a short and a padded copy, both of which refuse under the
+separate wrong-length condition. It then plants an externally changed executable, a duplicate
 valid marker, a changed candidate stream, an unregistered stream going missing,
 a registered-absent stream reappearing, a changed baseline with a matching
 candidate, the wrong marker step, a multiline binary manifest, a changed
@@ -217,7 +237,7 @@ candidate executable, a symlinked run directory, and a truncated record. Every
 planted violation fires; early refusals also prove the prior
 stamp/admission/manifests were removed. The two count plants are what keep the
 registered-absent list from becoming a blanket waiver.
-(`test_nemo_testcase_l2_orca2_parallel_inventory.py:355-515`)
+(`test_nemo_testcase_l2_orca2_parallel_inventory.py:396-628`)
 
 The inventory's held conclusion has two independent parts:
 

@@ -12,6 +12,15 @@ set -Eeuo pipefail
 # and requires the documented outcome.  Every plant restores the original bytes
 # and is checked back to its recorded SHA-256, and the run is re-finalized at
 # the end so its admission artifacts are left in the admitted state.
+#
+# The backup of the file under plant is deliberately NOT kept in the temporary
+# work directory the cleanup trap removes: an interrupt would then delete the
+# only copy of the original bytes and leave the certified run corrupted.  It is
+# kept in a directory beside the run instead, the original is only corrupted
+# after the backup and its digest are both on disk, and the first thing this
+# script does is put back anything a previous interrupted attempt left pending.
+# Restoring is therefore idempotent -- an interrupted plant is repaired by
+# running this script again.
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 readonly GATE=$here/run.sh
@@ -21,12 +30,45 @@ readonly RECORD=oracle_tke_boundary_kt00000002.bin
 readonly FIELD_BYTES=$((94 * 152 * 31 * 8))
 readonly HEADER_BYTES=$((16 + 8 * 4))
 readonly ZFU_OFFSET=$((HEADER_BYTES + 1000))
+readonly ZFV_OFFSET=$((HEADER_BYTES + FIELD_BYTES + 1000))
 readonly ZFW_OFFSET=$((HEADER_BYTES + 2 * FIELD_BYTES + 1000))
-
-work=$(mktemp -d /tmp/orca2-passivity-plant.XXXXXXXX)
-trap 'rm -rf -- "$work"' EXIT
+readonly STREAM_BYTES=$((HEADER_BYTES + 3 * FIELD_BYTES))
+readonly BACKUP_DIR=${TARGET_RUN%/}.passivity-plant-backup
 
 failures=0
+mkdir -p "$BACKUP_DIR"
+
+# Put back every backup found pending, verify it against the digest recorded
+# when it was taken, and only then drop the backup.  Safe to call when nothing
+# is pending, and safe to call twice.
+restore_pending() {
+  local backup name digest restored
+  shopt -s nullglob
+  for backup in "$BACKUP_DIR"/*.orig; do
+    name=$(basename "$backup" .orig)
+    if [[ ! -f "$BACKUP_DIR/$name.sha256" ]]; then
+      printf 'PLANT FAIL restore: %s has no recorded digest; left in place\n' \
+        "$name"
+      failures=$((failures + 1))
+      continue
+    fi
+    digest=$(cat "$BACKUP_DIR/$name.sha256")
+    cp -f "$backup" "$TARGET_RUN/$name"
+    restored=$(sha256sum "$TARGET_RUN/$name" | awk '{print $1}')
+    if [[ "$restored" != "$digest" ]]; then
+      printf 'PLANT FAIL restore: could not restore %s to %s\n' "$name" "$digest"
+      failures=$((failures + 1))
+      continue
+    fi
+    rm -f -- "$backup" "$BACKUP_DIR/$name.sha256"
+  done
+  shopt -u nullglob
+}
+
+restore_pending
+
+work=$(mktemp -d /tmp/orca2-passivity-plant.XXXXXXXX)
+trap 'restore_pending || true; rm -rf -- "$work"' EXIT
 
 flip_byte() {
   local file=$1 offset=$2 current next
@@ -38,9 +80,11 @@ flip_byte() {
 }
 
 # Run the gate against the currently planted run and require an outcome.
-# expectation is PASS (exit 0) or REFUSE (any nonzero exit).
+# expectation is PASS (exit 0) or REFUSE (any nonzero exit).  A refusal must
+# also print the pattern the caller names, so that each plant is shown to trip
+# the specific condition it was built for rather than any refusal at all.
 check_plant() {
-  local label=$1 expectation=$2 status=0 log=$work/gate.log
+  local label=$1 expectation=$2 pattern=${3:-} status=0 log=$work/gate.log
   "$GATE" --finalize >"$log" 2>&1 || status=$?
   if [[ "$expectation" == REFUSE ]]; then
     if [[ "$status" -eq 0 ]]; then
@@ -54,8 +98,14 @@ check_plant() {
       failures=$((failures + 1))
       return
     fi
+    if ! grep -qF -- "$pattern" "$log"; then
+      printf 'PLANT FAIL %s: gate refused without reporting %s\n' \
+        "$label" "$pattern"
+      failures=$((failures + 1))
+      return
+    fi
     printf 'PLANT PASS %s: exit=%s %s\n' "$label" "$status" \
-      "$(grep -m1 '^REFUSE: ' "$log")"
+      "$(grep -m1 -F -- "$pattern" "$log")"
   else
     if [[ "$status" -ne 0 ]]; then
       printf 'PLANT FAIL %s: gate refused an intact run (exit %s)\n' \
@@ -70,26 +120,27 @@ check_plant() {
 
 # Corrupt one stream, require an outcome, then restore it byte-for-byte.
 plant_on_stream() {
-  local label=$1 stream=$2 expectation=$3 action=$4 argument=${5:-}
-  local original=$work/$stream.orig digest restored
-  cp -f "$TARGET_RUN/$stream" "$original"
-  digest=$(sha256sum "$original" | awk '{print $1}')
+  local label=$1 stream=$2 expectation=$3 pattern=$4 action=$5 argument=${6:-}
+  local staged=$BACKUP_DIR/$stream.partial
+  # Back the stream up and record its digest BEFORE corrupting it, and publish
+  # the backup under its final name with a rename, so a backup that exists is
+  # always complete and always has a digest beside it.
+  cp -f "$TARGET_RUN/$stream" "$staged"
+  sha256sum "$staged" | awk '{print $1}' >"$BACKUP_DIR/$stream.sha256"
+  mv -f "$staged" "$BACKUP_DIR/$stream.orig"
   case "$action" in
     flip) flip_byte "$TARGET_RUN/$stream" "$argument" ;;
     truncate) truncate -s "-$argument" "$TARGET_RUN/$stream" ;;
+    extend) truncate -s "+$argument" "$TARGET_RUN/$stream" ;;
     *)
       printf 'PLANT FAIL %s: unknown plant action %s\n' "$label" "$action"
       failures=$((failures + 1))
+      restore_pending
       return
       ;;
   esac
-  check_plant "$label" "$expectation"
-  cp -f "$original" "$TARGET_RUN/$stream"
-  restored=$(sha256sum "$TARGET_RUN/$stream" | awk '{print $1}')
-  [[ "$restored" == "$digest" ]] || {
-    printf 'PLANT FAIL %s: could not restore %s\n' "$label" "$stream"
-    failures=$((failures + 1))
-  }
+  check_plant "$label" "$expectation" "$pattern"
+  restore_pending
 }
 
 ordinary_stream=$(find "$TARGET_RUN" -maxdepth 1 -type f -name 'oracle_*.bin' \
@@ -105,22 +156,32 @@ printf 'ORCA2 passivity plant; ordinary stream under test: %s\n' \
 
 # 1. An ordinary inherited stream still carries full signal.
 plant_on_stream 'ordinary-inherited-stream-byte' "$ordinary_stream" REFUSE \
-  flip 2048
+  "ORCA2_TKE_BOUNDARY_DIFFERS $ordinary_stream" flip 2048
 
 # 2. The transport stream's FIRST field (zFu) is inside the compared span, so
 #    the narrowed comparison must still catch it.
 plant_on_stream 'transport-zFu-byte' "$PARTIAL_STREAM" REFUSE \
-  flip "$ZFU_OFFSET"
+  "ORCA2_TKE_BOUNDARY_DIFFERS $PARTIAL_STREAM" flip "$ZFU_OFFSET"
 
-# 3. Truncating the transport stream must refuse even though the lost bytes are
-#    in the excluded tail; the length requirement is what stops a short file
-#    hiding there.
+# 3. The SECOND field (zFv) is inside the compared span as well.
+plant_on_stream 'transport-zFv-byte' "$PARTIAL_STREAM" REFUSE \
+  "ORCA2_TKE_BOUNDARY_DIFFERS $PARTIAL_STREAM" flip "$ZFV_OFFSET"
+
+# 4. A transport stream of the wrong length refuses under its own named
+#    condition, short or padded, even though the changed bytes are in the
+#    excluded tail; the length requirement is what stops a file hiding there,
+#    and requiring the length refusal by name is what shows it is that check
+#    firing rather than an ordinary byte difference.
 plant_on_stream 'transport-truncated-tail' "$PARTIAL_STREAM" REFUSE \
+  "REFUSE: inherited stream $PARTIAL_STREAM is not the registered $STREAM_BYTES bytes" \
   truncate 8
+plant_on_stream 'transport-padded-tail' "$PARTIAL_STREAM" REFUSE \
+  "REFUSE: inherited stream $PARTIAL_STREAM is not the registered $STREAM_BYTES bytes" \
+  extend 8
 
-# 4. Control: a byte in the excluded, never-assigned third field is admitted.
+# 5. Control: a byte in the excluded, never-assigned third field is admitted.
 #    This is the documented exclusion behaving as described, not an accident.
-plant_on_stream 'transport-zFw-byte-excluded' "$PARTIAL_STREAM" PASS \
+plant_on_stream 'transport-zFw-byte-excluded' "$PARTIAL_STREAM" PASS '' \
   flip "$ZFW_OFFSET"
 
 # Leave the run in its admitted state.
