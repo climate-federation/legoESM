@@ -314,8 +314,25 @@ def test_every_declared_plant_has_a_nonzero_exit_contract():
                   "stage-tke-record-ulp", "stamp"):
         assert f'"{plant}"' in source
     assert 'return 1 if args.plant or report["status"] != "PASS" else 0' in source
+    # The exit code alone discriminates nothing -- it is 1 for every plant,
+    # fired or not -- so the printed label must not read as success either.
+    assert "plant_aware_status(report[\"status\"], args.plant)" in source
     for plant in ("header", "truncation", "calibration", "twin", "stamp"):
         assert plant in run
+
+
+def test_a_plant_run_can_never_print_a_success_label():
+    """Round-103 review finding 2: logs get scraped.
+
+    ``STATUS PASS`` on a run whose purpose was to corrupt a reference is a
+    trap, and the gate printed exactly that because the plant paths prove
+    themselves with an in-gate ``require`` and never touch ``status``.
+    """
+    assert gate.plant_aware_status("PASS", None) == "PASS"
+    assert gate.plant_aware_status("UNMEASURED", None) == "UNMEASURED"
+    for plant in ("stage-tke-matrix-ulp", "stage-tke-production-ulp", "stamp"):
+        assert gate.plant_aware_status("PASS", plant) == "PLANT-FIRED"
+        assert "PASS" not in gate.plant_aware_status("PASS", plant)
 
 
 def test_retracted_round48_owner_prediction_cannot_abort_current_measurement():

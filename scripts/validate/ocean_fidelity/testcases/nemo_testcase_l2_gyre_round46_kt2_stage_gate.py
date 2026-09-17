@@ -3732,6 +3732,23 @@ def run(
     return report
 
 
+def plant_aware_status(status: str, plant: str | None) -> str:
+    """Never print a success label while a plant is firing.
+
+    This gate's exit code is 1 for EVERY plant unconditionally, so it
+    discriminates nothing: it cannot tell a plant that fired from one that
+    did not.  What discriminates is the in-gate ``require`` on the targeted
+    row -- the row must move from its clean count to clean + 1 -- together
+    with the named ``plant_target``; a plant that failed to land aborts
+    there and never reaches this label.  The label's only job is therefore
+    to stop a scraped log reading ``STATUS PASS`` on a run whose whole
+    purpose was to corrupt a reference.  Same contract as the round-103
+    block replay and the receipt citation gate, whose statuses are derived
+    rather than assumed.
+    """
+    return "PLANT-FIRED" if plant else status
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--root", type=Path, default=ROOT)
@@ -3788,6 +3805,7 @@ def main(argv=None) -> int:
         tke_statement_root=args.tke_statement_root,
         tke_operand_record=args.tke_operand_record,
     )
+    report["status"] = plant_aware_status(report["status"], args.plant)
     text = json.dumps(report, indent=2, sort_keys=True)
     if args.output:
         args.output.write_text(text + "\n")

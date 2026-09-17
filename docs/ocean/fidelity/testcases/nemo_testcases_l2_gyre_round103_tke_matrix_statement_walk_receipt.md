@@ -10,14 +10,27 @@ Date: 2026-09-17. Branch `fidelity/nemo-testcases-l2-gyre-codex2`, incoming tip
 into one row per compiled write and driven from NEMO's recorded stage entry
 through the real production step.
 
+**WHAT THE DIFF TOUCHES, stated in the verdict so a mechanical scope audit is
+not blindsided by the diffstat.** This round is measurement-only in substance
+but NOT by line count. It changes 45 lines of the SHARED turbulence solver,
+`packages/ocean/legoesm/ocean/physics/vertical_mixing/tke.py`, which DINO and
+every other card also run. Every one of those lines is reachable only when a
+caller passes `return_statement_trace=True` - a static Python flag that no
+production path, no card and no default sets. The change is four added trace
+fields, a return widened on that diagnostic branch alone, and a loud refusal
+when a trace is requested on a column too short for the literal assembly to
+run. No production numeric line moved, so no production number can move. The
+same disclosure appears in the DINO row of the per-testcase table below; it is
+repeated here because a scope audit reads the verdict, not the lane table.
+
 **SCOPE OF THE HEADLINE, stated before it rather than after it.** The block
 writes FIVE outputs. The first in compiled execution order is `p_pdlr`
 (`zdftke.f90:421`), and it is **NOT MEASURED** this round: it never enters
 `en` (it is read once, at `zdftke.f90:712`, where it multiplies `p_avt`), so
 it is a separate consumer chain and it gets its own walk. Every "first
 non-bit" claim below is therefore scoped to **the `en` path**, which is the
-chain that produces the block's exit value and the 979-cell post-sweep gap
-this round was asked about. It is NOT a claim about the block's first non-bit
+chain that produces the block's exit value and the 979-cell (979 of 20,416
+owned, 979 of 17,400 wet) post-sweep gap this round was asked about. It is NOT a claim about the block's first non-bit
 output in general; `p_pdlr` could be non-bit and nothing here would know.
 
 On the `en` path, the first statement whose output is not bit-identical is the
@@ -26,14 +39,18 @@ On the `en` path, the first statement whose output is not bit-identical is the
 
 > `en(ji,jj,jk) = en(ji,jj,jk) + rn_Dt * ( p_sh2 - p_avt*rn2 + zfact3*dissl*en ) * wmask`
 
-11,993 of 20,416 owned cells differ, maximum absolute
-`5.488912518947231e-10`. The three matrix writes that precede it inside the
+11,993 of 20,416 owned cells differ - equivalently 11,993 of the 17,400 WET
+cells, since the other 3,016 owned cells are dry and agree by construction -
+maximum absolute `5.488912518947231e-10`. Both denominators are given for
+every headline count in this receipt; see "Denominators" below. The three
+matrix writes that precede it inside the
 same loop body are each **BIT with zero unequal cells**: `zd_up` (`:434`),
 `zd_lw` (`:435`) and `zdiag` (`:436`).
 
 The magnitude of that statement's error is carried entirely by ONE of its five
 operands, the shear production `p_sh2`. The production `p_sh2` differs from
-NEMO's recorded `sh2` in 17,400 of 20,416 cells at maximum
+NEMO's recorded `sh2` in 17,400 of 20,416 owned cells - which is exactly the
+wet-cell total, so 17,400 of 17,400 wet - at maximum
 `3.811744924985501e-14`, and
 
 ```
@@ -169,6 +186,30 @@ at commit `c571dab4439fb353d97066453725d12a3610f831`. Every row covers all
 20,416 owned cells (`22 x 32` horizontal by NEMO levels `2:jpkm1`) with no
 wet-mask exception and no numeric tolerance.
 
+**Denominators, both of them.** The scored domain is every owned cell, 20,416
+of them. Of those, 17,400 are WET and 3,016 are DRY; the dry cells agree by
+construction, so a fraction taken against 20,416 always reads better than the
+wet-cell fraction it implies. Both are therefore given side by side below and
+at every headline count above. The wet count was MEASURED from the Round-59
+record's own masks over the scored slice - `tmask` and `wmask` select the same
+17,400 cells there, cell for cell, which is the same agreement the reviewer
+confirmed independently - not assumed from the domain. Scoring keeps the full
+20,416-cell denominator with no mask exception; this is a presentation of the
+same rows, not a re-score.
+
+| row | unequal | of 20,416 owned | of 17,400 wet |
+|---|---:|---:|---:|
+| `en` RHS, `zdftke.f90:439-442` | 11,993 | 58.7% | 68.9% |
+| `p_sh2` operand, `zdftke.f90:439` | 17,400 | 85.2% | 100.0% |
+| `en` post-sweep at the block exit | 979 | 4.8% | 5.6% |
+| swap arm vs the production RHS | 11,029 | 54.0% | 63.4% |
+| swap arm vs NEMO's recorded RHS | 2,663 | 13.0% | 15.3% |
+| `zd_up`, `zd_lw`, `zdiag` | 0 | 0% | 0% |
+
+The `p_sh2` row's 17,400 EQUALS the wet-cell total. That the unequal set IS
+the wet set was not separately measured, so it is reported as the equality of
+two counts and nothing more.
+
 | order | output | statement | unequal | max abs | class |
 |---:|---|---|---:|---|---|
 | 2 | `zd_up` | `zdftke.f90:434` | 0 | 0 | **BIT** |
@@ -198,6 +239,9 @@ bit-equal `p_sh2`). The independent review refuted that as non-causal: the
 same statement also consumes `p_avt`, `rn2`, `dissl`, the post-Langmuir `en`
 and `wmask`, and coincident errors in those would pass the same test. The test
 was replaced by a real one-variable swap through the committed transcription.
+
+Counts are over the same 20,416 owned cells, of which 17,400 are wet; the
+"Denominators" table above gives every row against both.
 
 | arm | reference | unequal | max abs | class |
 |---|---|---:|---|---|
@@ -245,11 +289,39 @@ the receipt says so.
 ## Plants
 
 `stage-tke-matrix-ulp` advances exactly one bitwise cell of the recorded
-`zdiag` reference on the binding `NEMO_TKE_RECORDED` arm. The clean row has 0
-unequal cells and the planted row has exactly 1, at index `[0, 0, 0]`; the
-plant target is named (`GYRE-zco.kt2.tke_matrix.production_step.zdiag`, not
-null, so the round-102 null-target failure is not repeated) and the gate exits
-1. Artifact `tke_matrix_plant.json`. The clean run exits 0 with `STATUS PASS`.
+`zdiag` reference on the binding `NEMO_TKE_RECORDED` arm.
+
+**WHAT PROVES THE PLANT FIRED, corrected.** An earlier version of this receipt
+cited the gate's exit code. That citation was WRONG and is withdrawn: the gate
+returns 1 whenever a plant is requested, whether or not the plant landed, so
+its exit status discriminates NOTHING. The real proof is internal and is a
+hard check, not a report: the targeted row must move from its clean count to
+clean + 1, and the gate aborts if it does not. For this plant the `zdiag` row
+goes from 0 unequal cells to exactly 1, at index `[0, 0, 0]`, and the plant
+target is named `GYRE-zco.kt2.tke_matrix.production_step.zdiag` rather than
+null, so the round-102 null-target failure is not repeated. Both the clean
+count and the planted count are recorded per row in `tke_matrix_plant.json`,
+which is what a reader should check.
+
+**AND THE PRINTED LABEL IS FIXED.** The gate used to print `STATUS PASS`
+while a plant was firing, because the plant paths prove themselves with that
+internal check and never touch the report's status field. In a campaign whose
+logs get scraped, a gate that prints success while deliberately failing is a
+trap. A plant run now prints `STATUS PLANT-FIRED` and writes the same string
+into its JSON, so neither the log nor the artifact can read as a pass. This
+follows the two companion probes rather than inventing a scheme: the round-103
+block replay derives its status from its rows and prints `STATUS FAIL` under
+its plant, and the receipt citation gate exits 2 when its plant fails to fire.
+
+Before and after, same command, `--plant stage-tke-matrix-ulp`:
+
+| | printed label | exit |
+|---|---|---:|
+| before | `STATUS PASS` | 1 |
+| after | `STATUS PLANT-FIRED` | 1 |
+
+The exit code is unchanged and still proves nothing; the label no longer lies.
+The clean run is unaffected and still exits 0 with `STATUS PASS`.
 
 The record replay's operand plant is described above under instrument
 validation: its first version was a control that perturbed a zero, the probe
