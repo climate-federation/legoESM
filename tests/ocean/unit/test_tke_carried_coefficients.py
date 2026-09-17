@@ -1064,7 +1064,8 @@ def test_nemo_literal_solver_exposes_exact_pre_sweep_rhs_on_request():
         surface_bc="nemo_dirichlet", tke_surface_bc_level="nemo_z0",
         tke_background=0.0, tke_surface_min=0.0,
     )
-    solution, after_langmuir, rhs = tke_mod._solve_tke_backward_euler(
+    (solution, after_langmuir, rhs,
+     upper, lower, diag) = tke_mod._solve_tke_backward_euler(
         e_old=jnp.asarray([[1.0, 0.7]]),
         K_M_old=jnp.asarray([[0.2, 0.3]]),
         K_H_old=jnp.asarray([[0.1, 0.15]]),
@@ -1088,6 +1089,23 @@ def test_nemo_literal_solver_exposes_exact_pre_sweep_rhs_on_request():
     assert rhs.shape == (1, 3)
     assert np.asarray(rhs)[0, 0] == np.float64(0.8)
     assert np.asarray(rhs)[0, -1] == np.float64(0.2)
+    # Round 103: the trace also carries the three compiled matrix writes
+    # (zdftke.f90:434-436) over NEMO levels 2:jpkm1, so the block can be
+    # walked one statement at a time.  They are the PRE-concatenation
+    # arrays: the extended system zeroes the deepest super-diagonal for the
+    # back-substitution, and scoring that structural zero against NEMO's
+    # live recorded value would be wrong in every column.
+    for value in (upper, lower, diag):
+        assert value.shape == (1, 2)
+    # The deepest row of THIS fixture is dry (w_active ends in 0), so its
+    # super-diagonal is legitimately zero here; the wet-column check that
+    # the traced value is the pre-concatenation one lives in
+    # tests/ocean/fidelity/test_gyre_round103_tke_matrix_statement_walk.py.
+    # zdiag = 1 - zzd_lw - zzd_up + zfact2*dissl*wmask, in that association.
+    extra = np.asarray(diag) - (1.0 - np.asarray(lower) - np.asarray(upper))
+    np.testing.assert_array_equal(
+        np.asarray(diag),
+        1.0 - np.asarray(lower) - np.asarray(upper) + extra)
 
 
 def test_nemo_literal_matrix_matches_hand_computed_source_order(monkeypatch):
