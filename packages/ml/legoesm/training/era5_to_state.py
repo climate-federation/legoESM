@@ -151,7 +151,10 @@ def _apply_phis_hydrostatic_adjustment(
 
     Returns ``(phis_adjusted, p_s_adjusted)`` with the same shapes as inputs.
     """
-    delta_phis = phis_raw - phis_smooth  # >= 0 where smoothing lowered terrain
+    # >= 0 where smoothing lowered terrain; may be NEGATIVE where a caller
+    # passes a spectrally round-tripped target whose Gibbs overshoot exceeds
+    # the raw peak — the barometric relation is exact for either sign.
+    delta_phis = phis_raw - phis_smooth
     p_s_corrected = p_s * jnp.exp(delta_phis / (constants.R_d * T_sfc))
     if is_hybrid:
         p_s_floor = _hybrid_p_s_floor(sigma, dp_floor=dp_floor)
@@ -1433,11 +1436,27 @@ def era5_to_spectral_carry(
     phis_ll_raw = regrid_2d_to_gaussian(era5.phis, era5.lat, era5.lon, grid)
     phis_ll_smooth = smooth_phis_gaussian(
         phis_ll_raw, smoothing_passes=smoothing_passes)
+    # Reconcile against the terrain the DYNAMICS actually feel: the spectral
+    # core reads phis only through its truncation (carry_to_spectral_state:
+    # phis_hat = sh_analysis(phis)), so the effective surface is the
+    # ROUND-TRIPPED field, Gibbs ringing included — not the grid-space
+    # smoothed one.  Reconciling to the grid-space field left every ingested
+    # state ~850 Pa RMS off the model's balanced manifold; the model adjusted
+    # there within one 1800 s step, and because targets ride this same
+    # ingestion, that standing gap was 87% of the WB training loss.  Measured
+    # 2026-08-26 over 8 seasonal scenes: the one-step ps adjustment matches
+    # the barometric response to (grid phis − round-tripped phis) at
+    # correlation +0.996 per scene (+0.998 mean field, 46 Pa unexplained of
+    # 836).  The truncation is idempotent, so the carry's phis and the
+    # spectral core's phis_hat now describe the same surface.
+    from legoesm.grids.gaussian import sh_analysis, sh_synthesis
+    phis_ll_model = sh_synthesis(
+        grid, sh_analysis(grid, jnp.asarray(phis_ll_smooth, jnp.float64)))
     # T_sfc proxy = ERA5 T at the highest pressure level (plev_Pa ascending →
     # last index = nearest to surface), matching the lat-lon carry.
     _T_sfc_ll = jnp.asarray(T_ll)[..., -1]
     phis_jax, p_s_jax = _apply_phis_hydrostatic_adjustment(
-        jnp.asarray(phis_ll_raw), jnp.asarray(phis_ll_smooth),
+        jnp.asarray(phis_ll_raw), phis_ll_model,
         jnp.asarray(p_s_ll), _T_sfc_ll, sigma, _is_hybrid,
     )
 
