@@ -95,6 +95,17 @@ def main(argv=None):
     ap.add_argument("--rad-detail", action="store_true",
                     help="LW/SW split of the top layers on the model T and on ERA5 T, "
                          "plus the ozone the radiation was given and the TOA fluxes")
+    ap.add_argument("--jacobian", nargs="*", type=int, default=None,
+                    metavar="LEVEL",
+                    help="radiative Jacobian: perturb each listed model level by "
+                         "--jac-delta K with the clouds FROZEN and record the net "
+                         "heating response in every level.  Separates the local "
+                         "Planck damping from the part supplied by neighbouring "
+                         "layers, which the whole-profile swap cannot.  Default "
+                         "levels are the UTLS band.")
+    ap.add_argument("--jac-delta", type=float, default=1.0,
+                    help="perturbation amplitude [K]; the response is reported per K "
+                         "and is also run at half amplitude as a linearity check")
     ap.add_argument("--gwd-only", action="store_true",
                     help="only the gravity-wave-drag momentum tendency: deposition per layer, "
                          "global shares and the 5-degree-band profiles (saved to npz)")
@@ -355,6 +366,45 @@ def main(argv=None):
         _cloud_mode["m"] = "record"
         lw_m, sw_m = rad_on(T0)
         _recorded = list(_cloud_tape)
+
+        if args.jacobian is not None:
+            levels = args.jacobian or [9, 10, 11, 12, 13, 14]
+            cap = lat_deg >= 60.0
+            wc = area[cap] / area[cap].sum()
+            base = (lw_m + sw_m)
+            print(f"\nradiative Jacobian, clouds frozen, {args.jac_delta:g} K "
+                  f"perturbation, 60-90N area-weighted [K/day per K]")
+            print("  perturbed | response in each level (rows = perturbed, cols = level)")
+            hdr = "   p_pert |" + "".join(f"{np.average(p_full[cap, L], weights=wc)/100:8.0f}"
+                                          for L in levels)
+            print(hdr)
+            jac = np.zeros((len(levels), len(levels)))
+            for a_i, L in enumerate(levels):
+                for amp, store in ((args.jac_delta, True), (0.5 * args.jac_delta, False)):
+                    Tp = T0.copy()
+                    Tp[:, L] += amp
+                    _cloud_mode["m"] = "replay"
+                    _cloud_tape[:] = list(_recorded)
+                    lw_p, sw_p = rad_on(Tp)
+                    resp = ((lw_p + sw_p) - base) / amp
+                    if store:
+                        row = [float(np.average(resp[cap, M], weights=wc)) for M in levels]
+                        jac[a_i] = row
+                    else:
+                        half = [float(np.average(resp[cap, M], weights=wc)) for M in levels]
+                print(f"{np.average(p_full[cap, L], weights=wc)/100:9.0f} |"
+                      + "".join(f"{v:8.4f}" for v in jac[a_i])
+                      + f"   (half-amplitude diagonal {half[a_i]:+.4f})")
+            diag = np.diag(jac)
+            print(f"\n  local damping -J_ii: " + " ".join(f"{-v:.4f}" for v in diag))
+            print(f"  column sum per perturbed layer (local + what neighbours return): "
+                  + " ".join(f"{v:.4f}" for v in jac.sum(axis=1)))
+            np.savez(out_dir / f"rad_jacobian_{args.run}_d{args.day:04d}.npz",
+                     jac=jac, levels=np.asarray(levels),
+                     p_hpa=np.asarray([np.average(p_full[cap, L], weights=wc) / 100
+                                       for L in levels]))
+            _cloud_mode["m"] = "off"
+
         # clouds FROZEN at the model-temperature values: a pure temperature response
         _cloud_mode["m"] = "replay"
         _cloud_tape[:] = list(_recorded)
