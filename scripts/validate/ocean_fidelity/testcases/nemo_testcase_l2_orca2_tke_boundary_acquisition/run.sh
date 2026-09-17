@@ -35,11 +35,12 @@ verify_exp00_copy() {
   done
 }
 
-# USER-EXECUTED ACQUISITION ONLY. --run invokes makenemo and mpirun.
+# USER-EXECUTED ACQUISITION ONLY. --run invokes makenemo and mpirun;
+# --finalize only admits an already completed run and never invokes either.
 # The construction follows the round-56/59/64/101 source-card clone pattern:
-# clone the Phase-2v reference, copy its source card file by file, apply only a
-# WRITE-only instrument, prove the resulting Fortran syntax, and admit output
-# only when every inherited native stream remains byte-identical.
+# clone the registered NEMO reference, copy the current ORCA2 source card file
+# by file, apply only a WRITE-only instrument, prove the resulting Fortran
+# syntax, and admit output only when every inherited stream is byte-identical.
 export PATH=/home/dbalwada/legoESM/.venv/bin:/home/dbalwada/miniconda3/envs/nemo-build/bin:$PATH
 readonly NEMO_ROOT=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2
 readonly REFERENCE_CFG=ORCA2_ICE_PISCES
@@ -52,6 +53,8 @@ readonly RECORD=oracle_tke_boundary_kt00000002.bin
 readonly EXPECTED_BASELINE_STREAMS=101
 readonly EXPECTED_TARGET_STREAMS=102
 readonly EXPECTED_SIZE=$((16 + 15 * 4 + 3 * 4 + 94 * 152 * 31 * 8))
+readonly EXPECTED_KT=2
+readonly EXPECTED_BASELINE_ORACLE_MANIFEST_SHA256=4fbffaed98202a052059c503a637bc2f8d5e57c28e7345f5bfce5b62320708a9
 readonly PHASE2V_REVISION=b7ce08cc8afa5cf377922abf198cf1794fab8a73
 readonly PHASE2V_PATCH_PATH=scripts/validate/ocean_fidelity/orca2_l4/phase2v_tke_walk_writer.patch
 readonly PHASE2V_PATCH_SHA256=e317142ae3e23c626dd00a7aac53ca3ff81eddee9aa3df0d8d1e3249b105db54
@@ -60,9 +63,9 @@ readonly EXPECTED_INPUT_MANIFEST_SHA256=3dfe251754fa76c8b5053cda90a51ee10589d0ff
 
 readonly MODE=${1:---run}
 case "$MODE" in
-  --run|--preflight-only) ;;
+  --run|--preflight-only|--finalize) ;;
   *)
-    printf 'REFUSE: usage: %s [--run|--preflight-only]\n' "$0" >&2
+    printf 'REFUSE: usage: %s [--run|--preflight-only|--finalize]\n' "$0" >&2
     exit 64
     ;;
 esac
@@ -79,6 +82,363 @@ readonly FC=/home/dbalwada/miniconda3/envs/nemo-build/bin/gfortran
 readonly BINARY=$TARGET_ROOT/BLD/bin/nemo.exe
 readonly COMPILED_ZDF=$TARGET_ROOT/BLD/ppsrc/nemo/zdftke.f90
 readonly COMPILED_WRITER=$TARGET_ROOT/BLD/ppsrc/nemo/l2_orca2_tke_boundary.f90
+readonly ADMISSION_JSON=orca2_tke_boundary_admission.json
+readonly DIGEST_MANIFEST=orca2_tke_boundary_outputs.sha256
+readonly REFERENCE_MANIFEST=orca2_tke_boundary_references.sha256
+
+validate_record_schema() {
+  if ! python3 - "$TARGET_RUN/$RECORD" <<'PY'
+import pathlib
+import struct
+import sys
+
+record = pathlib.Path(sys.argv[1])
+with record.open("rb") as handle:
+    magic = handle.read(16).decode("ascii").rstrip()
+    header = struct.unpack("=15i", handle.read(15 * 4))
+    extents = struct.unpack("=3i", handle.read(3 * 4))
+    payload = handle.read()
+expected_header = (1, 2, 3, 3, 94, 152, 31, 64, 1, 0,
+                   94 * 152 * 31, 1, 1, 3, 1)
+if magic != "NEMO_L4_TKEB_1" or header != expected_header:
+    raise SystemExit(1)
+if extents != (94, 152, 31) or len(payload) != 94 * 152 * 31 * 8:
+    raise SystemExit(1)
+if record.stat().st_size != 3543512:
+    raise SystemExit(1)
+PY
+  then
+    printf 'REFUSE: native en_after_boundaries frame failed exact schema/EOF validation\n' >&2
+    exit 66
+  fi
+}
+
+finalize_existing() {
+  local path resolved_target expected_binary recorded_binary manifest_extra
+  local reference_hash
+  local built_binary copied_binary record_size record_digest producer
+  local baseline_reference_digest reference_manifest_digest finalize_exit
+  local marker_count=0 expected_marker_count=0 marker_kt marker_line
+  local compared=0 identical=0 cmp_status name verdict
+  local audit_tmp admission_tmp digest_tmp reference_output_tmp
+  local -a ocean_outputs=() baseline_streams=() target_streams=()
+  local -a marker_outputs=() missing_streams=() differing_streams=()
+  local -a extra_streams=()
+
+  [[ -d "$TARGET_RUN" && ! -L "$TARGET_RUN" ]] || {
+    printf 'REFUSE: finalization run directory does not match registered target: %s\n' \
+      "$TARGET_RUN" >&2
+    exit 64
+  }
+  resolved_target=$(CDPATH= cd -- "$TARGET_RUN" && pwd -P)
+  [[ "$resolved_target" == "$TARGET_RUN" ]] || {
+    printf 'REFUSE: finalization run directory does not match registered target: %s\n' \
+      "$resolved_target" >&2
+    exit 64
+  }
+  for path in "${TARGET_RUN}/${RECORD}.stamp" \
+      "$TARGET_RUN/$ADMISSION_JSON" "$TARGET_RUN/$DIGEST_MANIFEST" \
+      "$TARGET_RUN/$REFERENCE_MANIFEST"; do
+    [[ ! -d "$path" || -L "$path" ]] || {
+      printf 'REFUSE: finalization artifact path is not a replaceable file: %s\n' \
+        "$path" >&2
+      exit 64
+    }
+    rm -f -- "$path"
+  done
+  for path in "$BINARY" "$TARGET_RUN/nemo" "$TARGET_RUN/binary.sha256" \
+      "$TARGET_RUN/producer_commit.txt" "$TARGET_RUN/$RECORD" \
+      "$TARGET_RUN/run.user.stdout.log" "$TARGET_RUN/run.user.time.log" \
+      "$TARGET_RUN/time.step"; do
+    [[ -f "$path" ]] || {
+      printf 'REFUSE: existing finalization target lacks %s\n' "$path" >&2
+      exit 64
+    }
+  done
+
+  if ! read -r expected_binary recorded_binary manifest_extra \
+      <"$TARGET_RUN/binary.sha256"; then
+    printf 'REFUSE: existing binary manifest is not the registered one-line target manifest\n' >&2
+    exit 66
+  fi
+  [[ "$(wc -l <"$TARGET_RUN/binary.sha256")" -eq 1 \
+      && "$expected_binary" =~ ^[0-9a-f]{64}$ && -z "${manifest_extra:-}" \
+      && "$recorded_binary" == "$BINARY" ]] || {
+    printf 'REFUSE: existing binary manifest is not the registered one-line target manifest\n' >&2
+    exit 66
+  }
+  built_binary=$(sha256sum "$BINARY" | awk '{print $1}')
+  copied_binary=$(sha256sum "$TARGET_RUN/nemo" | awk '{print $1}')
+  [[ "$built_binary" == "$expected_binary" \
+      && "$copied_binary" == "$expected_binary" ]] || {
+    printf 'REFUSE: existing target binary digest does not match binary manifest\n' >&2
+    exit 66
+  }
+
+  record_size=$(stat -c %s "$TARGET_RUN/$RECORD")
+  [[ "$record_size" -eq "$EXPECTED_SIZE" ]] || {
+    printf 'REFUSE: existing record size %s does not match registered manifest size %s\n' \
+      "$record_size" "$EXPECTED_SIZE" >&2
+    exit 66
+  }
+  validate_record_schema
+
+  mapfile -d '' -t ocean_outputs < <(
+    find "$TARGET_RUN" -maxdepth 1 -type f \
+      \( -name 'ocean.output' -o -name 'ocean.output.*' \
+         -o -name 'ocean.output_*' \) -print0 | sort -z
+  )
+  [[ "${#ocean_outputs[@]}" -gt 0 ]] || {
+    printf 'REFUSE: existing target has no ocean.output rank files\n' >&2
+    exit 66
+  }
+  for path in "${ocean_outputs[@]}"; do
+    while IFS= read -r marker_line; do
+      marker_count=$((marker_count + 1))
+      marker_outputs+=("$(basename "$path")")
+      if [[ "$marker_line" =~ ^[[:space:]]*ORCA2_TKE_BOUNDARY_DUMP[[:space:]]+([0-9]+)([[:space:]]|$) ]]; then
+        marker_kt=${BASH_REMATCH[1]}
+        if [[ "$marker_kt" -eq "$EXPECTED_KT" ]]; then
+          expected_marker_count=$((expected_marker_count + 1))
+        fi
+      fi
+    done < <(grep -E '^[[:space:]]*ORCA2_TKE_BOUNDARY_DUMP([[:space:]]|$)' \
+      "$path" || true)
+  done
+  [[ "$marker_count" -eq 1 && "$expected_marker_count" -eq 1 ]] || {
+    printf 'REFUSE: ocean.output boundary marker mismatch; expected kt=%s, found markers=%s matching=%s\n' \
+      "$EXPECTED_KT" "$marker_count" "$expected_marker_count" >&2
+    exit 66
+  }
+  grep -Fxq 'STOP 0' "$TARGET_RUN/run.user.stdout.log" || {
+    printf 'REFUSE: candidate stdout lacks STOP 0\n' >&2
+    exit 66
+  }
+  grep -Fxq 'MPIRUN_RC=0' "$TARGET_RUN/run.user.time.log" || {
+    printf 'REFUSE: candidate run lacks MPIRUN_RC=0\n' >&2
+    exit 66
+  }
+  grep -Fxq 'RUN DONE' "$TARGET_RUN/run.user.time.log" || {
+    printf 'REFUSE: candidate run lacks RUN DONE\n' >&2
+    exit 66
+  }
+  [[ "$(tr -d '[:space:]' <"$TARGET_RUN/time.step")" == 10 ]] || {
+    printf 'REFUSE: candidate run did not finish time step 10\n' >&2
+    exit 66
+  }
+
+  mapfile -t baseline_streams < <(
+    find "$BASELINE_RUN" -maxdepth 1 -type f -name 'oracle_*.bin' \
+      -printf '%f\n' | sort
+  )
+  [[ "${#baseline_streams[@]}" -eq "$EXPECTED_BASELINE_STREAMS" ]] || {
+    printf 'REFUSE: Phase-2v A manifest has %s native streams, expected %s\n' \
+      "${#baseline_streams[@]}" "$EXPECTED_BASELINE_STREAMS" >&2
+    exit 65
+  }
+  audit_tmp=$(mktemp -d /tmp/orca2-tke-boundary-finalize.XXXXXXXX)
+  (
+    cd "$BASELINE_RUN"
+    for name in "${baseline_streams[@]}"; do
+      sha256sum "$name"
+    done
+  ) >"$audit_tmp/baseline-oracle-streams.sha256"
+  baseline_reference_digest=$( \
+    sha256sum "$audit_tmp/baseline-oracle-streams.sha256" | \
+    awk '{print $1}')
+  [[ "$baseline_reference_digest" == \
+      "$EXPECTED_BASELINE_ORACLE_MANIFEST_SHA256" ]] || {
+    rm -rf -- "$audit_tmp"
+    printf 'REFUSE: Phase-2v A oracle-stream manifest digest changed\n' >&2
+    exit 65
+  }
+  while read -r reference_hash name; do
+    printf '%s  %s/%s\n' "$reference_hash" "$BASELINE_RUN" "$name"
+  done <"$audit_tmp/baseline-oracle-streams.sha256" \
+    >"$audit_tmp/$REFERENCE_MANIFEST"
+  sha256sum "$BINARY" >>"$audit_tmp/$REFERENCE_MANIFEST"
+  reference_manifest_digest=$(sha256sum "$audit_tmp/$REFERENCE_MANIFEST" | \
+    awk '{print $1}')
+  mapfile -t target_streams < <(
+    find "$TARGET_RUN" -maxdepth 1 -type f -name 'oracle_*.bin' \
+      -printf '%f\n' | sort
+  )
+  for name in "${baseline_streams[@]}"; do
+    if [[ ! -f "$TARGET_RUN/$name" ]]; then
+      missing_streams+=("$name")
+      continue
+    fi
+    compared=$((compared + 1))
+    if cmp -s "$BASELINE_RUN/$name" "$TARGET_RUN/$name"; then
+      identical=$((identical + 1))
+    else
+      cmp_status=$?
+      [[ "$cmp_status" -eq 1 ]] || {
+        rm -rf -- "$audit_tmp"
+        printf 'REFUSE: byte comparison failed to read inherited stream %s\n' \
+          "$name" >&2
+        exit 69
+      }
+      differing_streams+=("$name")
+    fi
+  done
+  for name in "${target_streams[@]}"; do
+    if [[ "$name" != "$RECORD" && ! -f "$BASELINE_RUN/$name" ]]; then
+      extra_streams+=("$name")
+    fi
+  done
+
+  verdict=PASS
+  finalize_exit=0
+  if [[ "${#target_streams[@]}" -ne "$EXPECTED_TARGET_STREAMS" \
+      || "${#missing_streams[@]}" -ne 0 \
+      || "${#differing_streams[@]}" -ne 0 \
+      || "${#extra_streams[@]}" -ne 0 \
+      || "$compared" -ne "$EXPECTED_BASELINE_STREAMS" \
+      || "$identical" -ne "$EXPECTED_BASELINE_STREAMS" ]]; then
+    verdict=REFUSE
+    finalize_exit=69
+  fi
+
+  producer=$(tr -d '[:space:]' <"$TARGET_RUN/producer_commit.txt")
+  [[ "$producer" =~ ^[0-9a-f]{40}$ ]] || {
+    rm -rf -- "$audit_tmp"
+    printf 'REFUSE: existing target producer manifest is malformed\n' >&2
+    exit 66
+  }
+  record_digest=$(sha256sum "$TARGET_RUN/$RECORD" | awk '{print $1}')
+  printf '%s %s %s\n' "$record_digest" "$producer" "$RECORD" \
+    >"$TARGET_RUN/$RECORD.stamp"
+
+  reference_output_tmp=$(mktemp \
+    "$TARGET_RUN/.orca2-tke-boundary-references.XXXXXXXX")
+  cp "$audit_tmp/$REFERENCE_MANIFEST" "$reference_output_tmp"
+  mv "$reference_output_tmp" "$TARGET_RUN/$REFERENCE_MANIFEST"
+  printf '%s\n' "${missing_streams[@]:-}" >"$audit_tmp/missing"
+  printf '%s\n' "${differing_streams[@]:-}" >"$audit_tmp/differing"
+  printf '%s\n' "${extra_streams[@]:-}" >"$audit_tmp/extra"
+  printf '%s\n' "${marker_outputs[@]:-}" >"$audit_tmp/marker_outputs"
+  admission_tmp=$(mktemp "$TARGET_RUN/.orca2-tke-boundary-admission.XXXXXXXX")
+  python3 - "$admission_tmp" "$audit_tmp" "$verdict" "$BASELINE_RUN" \
+      "$TARGET_RUN" "$producer" "$expected_binary" "$record_digest" \
+      "$record_size" "$EXPECTED_KT" "$marker_count" "$finalize_exit" \
+      "$REFERENCE_MANIFEST" "$reference_manifest_digest" \
+      "$baseline_reference_digest" \
+      "${#ocean_outputs[@]}" "$EXPECTED_BASELINE_STREAMS" \
+      "$EXPECTED_TARGET_STREAMS" "${#target_streams[@]}" "$compared" \
+      "$identical" <<'PY'
+import json
+import pathlib
+import sys
+
+(
+    output, audit_root, verdict, baseline, candidate, producer,
+    binary_sha256, record_sha256, record_size, expected_kt, marker_count,
+    exit_code, reference_manifest, reference_manifest_sha256,
+    baseline_oracle_manifest_sha256, output_count, expected_baseline,
+    expected_target, target_count, compared, identical,
+) = sys.argv[1:]
+audit_root = pathlib.Path(audit_root)
+
+def lines(name):
+    return [line for line in (audit_root / name).read_text().splitlines()
+            if line]
+
+report = {
+    "format": "nemo-orca2-tke-boundary-admission-v1",
+    "verdict": verdict,
+    "exit_code": int(exit_code),
+    "baseline": baseline,
+    "candidate": candidate,
+    "producer_commit": producer,
+    "binary_sha256": binary_sha256,
+    "references": {
+        "manifest": reference_manifest,
+        "sha256": reference_manifest_sha256,
+        "baseline_oracle_streams_sha256": baseline_oracle_manifest_sha256,
+    },
+    "record": {
+        "name": "oracle_tke_boundary_kt00000002.bin",
+        "size_bytes": int(record_size),
+        "sha256": record_sha256,
+        "schema_eof_valid": True,
+    },
+    "marker": {
+        "expected_kt": int(expected_kt),
+        "matches": int(marker_count),
+        "ocean_output_files_scanned": int(output_count),
+        "files": lines("marker_outputs"),
+    },
+    "passivity": {
+        "expected_baseline_streams": int(expected_baseline),
+        "expected_target_streams": int(expected_target),
+        "target_streams": int(target_count),
+        "streams_compared": int(compared),
+        "byte_identical": int(identical),
+        "missing": lines("missing"),
+        "differing": lines("differing"),
+        "unregistered_extra": lines("extra"),
+    },
+}
+pathlib.Path(output).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+PY
+  mv "$admission_tmp" "$TARGET_RUN/$ADMISSION_JSON"
+
+  digest_tmp=$(mktemp "$TARGET_RUN/.orca2-tke-boundary-outputs.XXXXXXXX")
+  (
+    cd "$TARGET_RUN"
+    {
+      printf '%s\0' nemo binary.sha256 producer_commit.txt \
+        "$RECORD.stamp" "$ADMISSION_JSON" "$REFERENCE_MANIFEST" \
+        run.user.stdout.log run.user.time.log time.step
+      printf '%s\0' "${target_streams[@]}"
+      for path in "${ocean_outputs[@]}"; do
+        printf '%s\0' "$(basename "$path")"
+      done
+    } | sort -zu | xargs -0 sha256sum >"$digest_tmp"
+    cat "$REFERENCE_MANIFEST" >>"$digest_tmp"
+  )
+  mv "$digest_tmp" "$TARGET_RUN/$DIGEST_MANIFEST"
+
+  printf 'ORCA2_TKE_BOUNDARY_REFERENCES PASS baseline_sha256=%s manifest_sha256=%s\n' \
+    "$baseline_reference_digest" "$reference_manifest_digest"
+  printf 'ORCA2_TKE_BOUNDARY_MARKER PASS kt=%s output_files=%s markers=%s\n' \
+    "$EXPECTED_KT" "${#ocean_outputs[@]}" "$marker_count"
+  printf 'ORCA2_TKE_BOUNDARY_RECORD PASS bytes=%s sha256=%s\n' \
+    "$record_size" "$record_digest"
+  printf 'ORCA2_TKE_BOUNDARY_PASSIVITY %s expected=%s compared=%s identical=%s missing=%s differing=%s extra=%s target=%s/%s\n' \
+    "$verdict" "$EXPECTED_BASELINE_STREAMS" "$compared" "$identical" \
+    "${#missing_streams[@]}" "${#differing_streams[@]}" \
+    "${#extra_streams[@]}" "${#target_streams[@]}" \
+    "$EXPECTED_TARGET_STREAMS"
+  for name in "${missing_streams[@]}"; do
+    printf 'ORCA2_TKE_BOUNDARY_MISSING %s\n' "$name"
+  done
+  for name in "${differing_streams[@]}"; do
+    printf 'ORCA2_TKE_BOUNDARY_DIFFERS %s\n' "$name"
+  done
+  for name in "${extra_streams[@]}"; do
+    printf 'ORCA2_TKE_BOUNDARY_EXTRA %s\n' "$name"
+  done
+  printf 'ORCA2_TKE_BOUNDARY_ADMISSION %s %s\n' \
+    "$verdict" "$TARGET_RUN/$ADMISSION_JSON"
+  printf 'ORCA2_TKE_BOUNDARY_DIGESTS READY %s\n' \
+    "$TARGET_RUN/$DIGEST_MANIFEST"
+  rm -rf -- "$audit_tmp"
+  if [[ "$verdict" != PASS ]]; then
+    printf 'REFUSE: write-only passivity failed; expected=%s compared=%s identical=%s missing=%s differing=%s extra=%s\n' \
+      "$EXPECTED_BASELINE_STREAMS" "$compared" "$identical" \
+      "${#missing_streams[@]}" "${#differing_streams[@]}" \
+      "${#extra_streams[@]}" >&2
+    exit "$finalize_exit"
+  fi
+  printf 'ORCA2_TKE_BOUNDARY_READY %s\n' "$TARGET_RUN"
+}
+
+if [[ "$MODE" == --finalize ]]; then
+  finalize_existing
+  exit 0
+fi
 
 cd "$REPO"
 [[ -z "$(git status --porcelain --untracked-files=all)" ]] || {
@@ -97,11 +457,11 @@ for path in "$CANONICAL" "$WRITER" "$BOUNDARY_PATCH" \
   }
 done
 [[ -d "$SOURCE_ROOT/EXP00" && -d "$SOURCE_ROOT/MY_SRC" ]] || {
-  printf 'REFUSE: Phase-2v source configuration is incomplete: %s\n' "$SOURCE_ROOT" >&2
+  printf 'REFUSE: registered source configuration is incomplete: %s\n' "$SOURCE_ROOT" >&2
   exit 64
 }
 [[ -d "$NEMO_ROOT/cfgs/$REFERENCE_CFG" ]] || {
-  printf 'REFUSE: Phase-2v reference configuration is absent: %s\n' "$REFERENCE_CFG" >&2
+  printf 'REFUSE: registered reference configuration is absent: %s\n' "$REFERENCE_CFG" >&2
   exit 64
 }
 [[ "$EXPECTED_SIZE" -eq 3543512 ]] || {
@@ -299,7 +659,7 @@ sha256sum "$NEMO_ROOT/arch/arch-conda-scalarmath.fcm" \
 cd "$NEMO_ROOT"
 if ! ./makenemo -r "$REFERENCE_CFG" -n "$TARGET_CFG" -m conda-scalarmath \
     del_key 'key_xios'; then
-  printf 'REFUSE: makenemo could not clone the Phase-2v reference configuration\n' >&2
+  printf 'REFUSE: makenemo could not clone the registered reference configuration\n' >&2
   exit 68
 fi
 while IFS= read -r -d '' source; do
@@ -323,7 +683,7 @@ for source in "$SOURCE_ROOT"/MY_SRC/*; do
 done
 if ! cmp -s "$SOURCE_ROOT/cpp_$SOURCE_CFG.fcm" \
     "$TARGET_ROOT/cpp_$TARGET_CFG.fcm"; then
-  printf 'REFUSE: copied Phase-2v CPP source card differs\n' >&2
+  printf 'REFUSE: copied registered CPP source card differs\n' >&2
   exit 68
 fi
 touch "$TARGET_ROOT/MY_SRC/"*.F90
@@ -410,76 +770,4 @@ fi
   printf 'RUN DONE\n' >>run.user.time.log
 )
 
-[[ -s "$TARGET_RUN/$RECORD" ]] || {
-  printf 'REFUSE: NEMO produced no native en_after_boundaries frame\n' >&2
-  exit 66
-}
-[[ "$(stat -c %s "$TARGET_RUN/$RECORD")" -eq "$EXPECTED_SIZE" ]] || {
-  printf 'REFUSE: native boundary frame does not have %s bytes\n' "$EXPECTED_SIZE" >&2
-  exit 66
-}
-if ! python3 - "$TARGET_RUN/$RECORD" <<'PY'
-import pathlib
-import struct
-import sys
-
-record = pathlib.Path(sys.argv[1])
-with record.open("rb") as handle:
-    magic = handle.read(16).decode("ascii").rstrip()
-    header = struct.unpack("=15i", handle.read(15 * 4))
-    extents = struct.unpack("=3i", handle.read(3 * 4))
-expected_header = (1, 2, 3, 3, 94, 152, 31, 64, 1, 0, 94 * 152 * 31, 1, 1, 3, 1)
-if magic != "NEMO_L4_TKEB_1" or header != expected_header:
-    raise SystemExit(1)
-if extents != (94, 152, 31) or record.stat().st_size != 3543512:
-    raise SystemExit(1)
-PY
-then
-  printf 'REFUSE: native en_after_boundaries frame failed exact schema/EOF validation\n' >&2
-  exit 66
-fi
-grep -Fq 'ORCA2_TKE_BOUNDARY_DUMP' "$TARGET_RUN/run.user.stdout.log" || {
-  printf 'REFUSE: candidate stdout lacks the native boundary write marker\n' >&2
-  exit 66
-}
-grep -Fxq 'MPIRUN_RC=0' "$TARGET_RUN/run.user.time.log" || {
-  printf 'REFUSE: candidate run lacks MPIRUN_RC=0\n' >&2
-  exit 66
-}
-grep -Fxq 'RUN DONE' "$TARGET_RUN/run.user.time.log" || {
-  printf 'REFUSE: candidate run lacks RUN DONE\n' >&2
-  exit 66
-}
-[[ "$(tr -d '[:space:]' <"$TARGET_RUN/time.step")" == 10 ]] || {
-  printf 'REFUSE: candidate run did not finish time step 10\n' >&2
-  exit 66
-}
-mapfile -t target_streams < <(
-  find "$TARGET_RUN" -maxdepth 1 -type f -name 'oracle_*.bin' \
-    -printf '%f\n' | sort
-)
-[[ "${#target_streams[@]}" -eq "$EXPECTED_TARGET_STREAMS" ]] || {
-  printf 'REFUSE: candidate has %s native streams, expected %s\n' \
-    "${#target_streams[@]}" "$EXPECTED_TARGET_STREAMS" >&2
-  exit 66
-}
-for name in "${baseline_streams[@]}"; do
-  [[ -f "$TARGET_RUN/$name" ]] || {
-    printf 'REFUSE: candidate omitted inherited Phase-2v stream %s\n' "$name" >&2
-    exit 66
-  }
-  if ! cmp -s "$BASELINE_RUN/$name" "$TARGET_RUN/$name"; then
-    printf 'REFUSE: write-only passivity failed; inherited stream differs: %s\n' \
-      "$name" >&2
-    exit 69
-  fi
-done
-for name in "${target_streams[@]}"; do
-  if [[ "$name" != "$RECORD" && ! -f "$BASELINE_RUN/$name" ]]; then
-    printf 'REFUSE: candidate produced unregistered extra native stream %s\n' \
-      "$name" >&2
-    exit 66
-  fi
-done
-sha256sum "$TARGET_RUN/$RECORD" >"$TARGET_RUN/$RECORD.sha256"
-printf 'ORCA2_TKE_BOUNDARY_READY %s\n' "$TARGET_RUN"
+finalize_existing

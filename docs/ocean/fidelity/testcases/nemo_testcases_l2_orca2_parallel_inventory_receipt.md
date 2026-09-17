@@ -1,12 +1,12 @@
 # NEMO-testcases L2 ORCA2 parallel inventory receipt
 
-Date: 2026-09-16. Status: **HELD AT PRE-KT1 ADMISSION AND TKE ACQUISITION**.
-The exact certified ORCA2 legoESM testcase assembly is absent. The existing
-Phase-2v A/B record is reusable for entry/stage comparison, but it lacks the
-native post-boundary/pre-Langmuir TKE frame required by the newest contract.
-The binding record verdict is **REUSABLE FOR entry/stage; TKE boundary frame
-MISSING**. (`orca2_inventory.json:2-5`, `orca2_inventory.json:195-202`,
-`orca2_inventory.json:1302-1344`)
+Date: 2026-09-16. Status: **HELD AT PRE-KT1 ADMISSION; TKE ACQUISITION
+REFUSED**. The exact certified ORCA2 legoESM testcase assembly is absent. The
+existing Phase-2v A/B record remains reusable for entry/stage comparison. A
+native post-boundary/pre-Langmuir TKE candidate was acquired, but it is not
+admitted: its frame and marker pass while its inherited-stream byte-passivity
+gate fails. (`orca2_inventory.json:195-202`,
+`orca2_boundary_admission.json:5-47`)
 
 ## 1. Governing TKE contract and corrected record audit
 
@@ -76,29 +76,33 @@ tripolar run over an external ORCA2 mesh is constructible from current assets**.
 
 The read-only NEMO oracle target remains built but not runnable directly from
 its template: its `EXP00` lacks the named domain and initial T/S files. Its
-compiled card does resolve RK3, QCO/VCO, SI3, and TKE. No NEMO integration was
-run during this inventory fix. (`orca2_inventory.json:90-126`)
+compiled card does resolve RK3, QCO/VCO, SI3, and TKE. The inventory probe
+itself ran no NEMO integration; the later operator acquisition is recorded
+below. (`orca2_inventory.json:90-126`)
 
 ## 3. Required WRITE-only acquisition
 
-**ACQUISITION_NEEDED:**
+**ACQUISITION_ATTEMPTED; ADMISSION REFUSED:**
 `COMMIT cf192ae78270:scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_orca2_tke_boundary_acquisition/run.sh`
 
 The committed evidence chain is `COMMIT 0204649679d9`, `COMMIT f507cf48230e`,
 and the operator follow-up `COMMIT cf192ae78270`. Its external evidence files
 are under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/parallel/orca2/`,
-including `orca2_inventory.json`, `acq2_preflight.log`, and
-`acquisition2.log`; no temporary checkout is an evidence pointer.
+including `orca2_inventory.json`, `acq2_preflight.log`, `acquisition2.log`, and
+`finalize_fix4.log`, plus the candidate run's admission and reference/digest
+manifests; no temporary checkout is an evidence pointer.
 
-The user-executed acquisition clones the same `ORCA2_ICE_PISCES` reference and
-copies the `ORCA2_OMIP_L4` Phase-2v source card file by file into the new target
+The user-executed acquisition cloned `ORCA2_ICE_PISCES`, copied the current
+`ORCA2_OMIP_L4` source card file by file, and built the new target
 `ORCA2_OMIP_L4_P2VBND_R2`. The original `ORCA2_OMIP_L4_P2VBND` name contains
 only the abandoned reference-clone build from the failed first acquisition and
-is not reused. The retry pins the historical Phase-2v patch, the A-run deck and
-input manifests, the ten-step resolved configuration, and the np2 layout.
-(`orca2_boundary_run.sh:12-36`, `orca2_boundary_run.sh:38-59`,
-`orca2_boundary_run.sh:90-166`, `orca2_boundary_run.sh:259-354`,
-`orca2_boundary_run.sh:356-411`)
+was not reused. The retry pinned the historical Phase-2v TKE patch, A-run deck
+and input manifests, ten-step resolved configuration, and np2 layout. The
+post-run inventory proves that this candidate did not reproduce the full
+101-stream cumulative output inventory, so the current source card must not be
+described as an exact Phase-2v source clone. (`orca2_boundary_run.sh:38-85`,
+`orca2_boundary_run.sh:443-526`, `orca2_boundary_run.sh:528-617`,
+`orca2_boundary_run.sh:632-773`, `orca2_boundary_admission.json:15-33`)
 
 The new patch is additive: it initializes a write-only buffer, copies native
 `en` immediately after the boundary assignments and immediately before
@@ -107,17 +111,37 @@ namelist or model field, and the model TKE dummy argument is `INTENT(in)`.
 (`orca2_boundary.patch:1-30`, `orca2_boundary_writer.F90:1-17`,
 `orca2_boundary_writer.F90:23-57`, `orca2_boundary_writer.F90:60-83`)
 
-Preflight reconstructs the exact Phase-2v source, rejects any removed/replaced
-line, checks the capture location, and proves both writer and patched `zdftke`
-with `gfortran -fsyntax-only`. Every unexpected or explicit nonzero path emits
-a named `REFUSE:` line. (`orca2_boundary_run.sh:4-10`,
-`orca2_boundary_run.sh:168-231`, `orca2_boundary_run.sh:233-270`)
+Preflight reconstructs the registered Phase-2v `zdftke` patch, rejects any
+removed/replaced line, checks the capture location, and proves both writer and
+patched `zdftke` with `gfortran -fsyntax-only`. Every unexpected or explicit
+nonzero path emits a named `REFUSE:` line. (`orca2_boundary_run.sh:4-10`,
+`orca2_boundary_run.sh:528-617`)
 
-Post-run admission requires the new 3,543,512-byte frame to pass exact
-magic/header/extent/EOF checks. It then requires exactly 102 streams and
-byte-compares each of the other 101 against Phase-2v A; any changed inherited
-stream refuses the acquisition as non-passive. (`orca2_boundary_run.sh:413-456`,
-`orca2_boundary_run.sh:457-485`)
+The new `--finalize` mode branches before the clean-tree, source, build, and
+launch path. It verifies the registered target directory, built and copied
+binary digests, record size, exact schema/EOF, STOP/run status, and time step;
+it scans every `ocean.output`, `ocean.output.*`, or `ocean.output_*` rank file
+for the native marker and requires exactly one occurrence at the registered
+`kt=2`. Before validation it removes prior derived finalization artifacts, so
+an early refusal cannot leave a stale admission. It pins the 101 baseline
+streams to a registered manifest digest, byte-compares them, writes the record
+stamp and admission JSON, and makes both those baseline files and the external
+built executable directly checkable through the final digest manifest.
+(`orca2_boundary_run.sh:116-228`, `orca2_boundary_run.sh:230-311`,
+`orca2_boundary_run.sh:313-441`)
+
+Finalization cleared the original logging defect: one marker was found in the
+one `ocean.output` file at `kt=2`, and the 3,543,512-byte frame passed exact
+schema/EOF with SHA-256
+`9a634be35ac9e1714e1f3e5ab4ab31461b0b36726455bf2a6bfa43ce5ab6634e`.
+Admission nevertheless refused with recorded and observed exit 69. The target has 95 streams rather
+than 102: of the 101 inherited streams, 94 were present and compared, 93 were
+byte-identical, seven were missing, and
+`oracle_transport_kt00000001_s1.bin` differed. The seven missing streams are
+the BBL diffusive record, four EEN records, and both ZDF-SH2 operand records.
+This is a real acquisition failure, not grounds to lower the registered count
+or copy baseline outputs into the candidate. (`finalize_fix4.log:1-19`,
+`orca2_boundary_admission.json:5-47`)
 
 ## 4. Controls and disposition
 
@@ -128,19 +152,35 @@ only A/B producer agreement, flips entry/stage reuse to false, exits 2, and
 writes no artifact. (`orca2_inventory_missing_boundary_plant.txt:1-4`,
 `orca2_inventory_provenance_mismatch_plant.txt:1-4`)
 
+The finalizer control first admits a synthetic 101-stream exact twin. It then
+plants an externally changed executable, a duplicate valid marker, a changed
+candidate stream, a changed baseline with a matching candidate, the wrong
+marker step, a multiline binary manifest, a changed candidate executable, a
+symlinked run directory, and a truncated record. Every planted violation fires;
+early refusals also prove the prior stamp/admission/manifests were removed.
+(`test_nemo_testcase_l2_orca2_parallel_inventory.py:326-447`)
+
 The inventory's held conclusion has two independent parts:
 
 1. Reuse the existing Phase-2v entry/stage frames only after their current
    reader/admission bridge is installed; their schemas, counts, twins, and
    producer provenance pass this audit.
-2. Run the registered WRITE-only acquisition before any TKE statement-boundary
-   comparison. Do not reconstruct `en_after_boundaries` from `en_post_lc` or
-   borrow bottom values from a later frame.
+2. Reacquire the boundary frame from an exact cumulative 101-stream Phase-2v
+   source card before any TKE statement-boundary comparison. Do not reconstruct
+   `en_after_boundaries`, copy the seven missing baseline streams into the
+   candidate, or waive the changed transport stream.
 
 No file under `packages/ocean/legoesm` was changed by this fix round.
 
 ## 5. OPEN
 
 1. The operator re-ran the acquisition with target
-   `ORCA2_OMIP_L4_P2VBND_R2`; status remains **TBD** pending the run's final
-   admission result. (`acquisition2.log:4`)
+   `ORCA2_OMIP_L4_P2VBND_R2`; NEMO reached `STOP 0`, but the original script
+   stopped on its incorrect stdout-marker check. Finalization against that
+   existing run now reaches the real verdict: marker **PASS**, record **PASS**,
+   passivity **REFUSE** (94 compared / 93 identical, seven missing, one
+   differing), exit 69. The original exit-66 marker-location failure remains
+   recorded separately. (`acquisition2.log:908-911`,
+   `finalize_fix4.log:1-19`, `orca2_boundary_admission.json:5-47`)
+2. The acquisition remains open until a fresh exact cumulative Phase-2v source
+   card produces 102 streams and all other 101 compare byte-identically.

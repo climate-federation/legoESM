@@ -122,6 +122,12 @@ SOURCES: dict[str, Path | GitBlob] = {
         EVIDENCE / "orca2_inventory_provenance_mismatch_plant.txt"
     ),
     "acquisition2.log": EVIDENCE / "acquisition2.log",
+    "finalize_fix4.log": EVIDENCE / "finalize_fix4.log",
+    "orca2_boundary_admission.json": (
+        EVIDENCE
+        / "oracle_phase2v_tke_boundary_np2"
+        / "orca2_tke_boundary_admission.json"
+    ),
     "orca2_citation_gate.json": EVIDENCE / "orca2_citation_gate.json",
     "orca2_citation_gate_plant.json": EVIDENCE / "orca2_citation_gate_plant.json",
     "orca2_citation_gate_summary.txt": EVIDENCE / "orca2_citation_gate_summary.txt",

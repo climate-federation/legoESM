@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import struct
 import subprocess
 from pathlib import Path
@@ -47,6 +49,17 @@ def _write_tke(path: Path, *, trailing: bool = False) -> None:
         + b"\0" * (8 * payload)
     )
     path.write_bytes(raw + (b"X" if trailing else b""))
+
+
+def _write_orca2_boundary(path: Path) -> None:
+    header = (1, 2, 3, 3, 94, 152, 31, 64, 1, 0, 94 * 152 * 31, 1, 1, 3, 1)
+    size = 16 + 15 * 4 + 3 * 4 + 94 * 152 * 31 * 8
+    with path.open("wb") as handle:
+        handle.write(b"NEMO_L4_TKEB_1".ljust(16, b" "))
+        handle.write(struct.pack("=15i", *header))
+        handle.write(struct.pack("=3i", 94, 152, 31))
+        handle.seek(size - 1)
+        handle.write(b"\0")
 
 
 def _write_entry_stage(path: Path, *, kt: int, stage: int | None) -> None:
@@ -177,6 +190,261 @@ def test_boundary_acquisition_is_new_np2_write_only_passivity_gate():
     assert "EXPECTED_BASELINE_STREAMS=101" in acquisition
     assert 'cmp -s "$BASELINE_RUN/$name" "$TARGET_RUN/$name"' in acquisition
     assert "write-only passivity failed" in acquisition
+
+
+def test_boundary_finalize_is_post_run_only_and_reads_native_nemo_output():
+    acquisition = (
+        TESTCASES
+        / "nemo_testcase_l2_orca2_tke_boundary_acquisition"
+        / "run.sh"
+    ).read_text()
+    function_start = acquisition.index("finalize_existing() {")
+    function_end = acquisition.index(
+        '\n}\n\nif [[ "$MODE" == --finalize ]]', function_start
+    )
+    finalize = acquisition[function_start:function_end]
+    dispatch = acquisition.index('if [[ "$MODE" == --finalize ]]')
+    clean_tree_gate = acquisition.index('cd "$REPO"', dispatch)
+
+    assert "--run|--preflight-only|--finalize" in acquisition
+    assert dispatch < clean_tree_gate
+    assert "makenemo" not in finalize
+    assert "mpirun" not in finalize
+    assert "-name 'ocean.output'" in finalize
+    assert "-name 'ocean.output.*'" in finalize
+    assert "-name 'ocean.output_*'" in finalize
+    assert "ORCA2_TKE_BOUNDARY_DUMP" in finalize
+    assert 'marker_kt" -eq "$EXPECTED_KT' in finalize
+    assert 'marker_count" -eq 1' in finalize
+    assert (
+        "grep -Fq 'ORCA2_TKE_BOUNDARY_DUMP' "
+        '"$TARGET_RUN/run.user.stdout.log"'
+    ) not in acquisition
+    assert "existing target binary digest does not match binary manifest" in finalize
+    assert "does not match registered manifest size" in finalize
+    assert "orca2_tke_boundary_admission.json" in acquisition
+    assert "orca2_tke_boundary_outputs.sha256" in acquisition
+    assert "orca2_tke_boundary_references.sha256" in acquisition
+    assert "EXPECTED_BASELINE_ORACLE_MANIFEST_SHA256" in finalize
+
+
+def test_boundary_finalize_admits_synthetic_twin_and_named_plants_refuse(tmp_path):
+    source = (
+        TESTCASES
+        / "nemo_testcase_l2_orca2_tke_boundary_acquisition"
+        / "run.sh"
+    ).read_text()
+    nemo_root = tmp_path / "nemo"
+    baseline = tmp_path / "baseline"
+    target = tmp_path / "target"
+    binary = (
+        nemo_root
+        / "cfgs/ORCA2_OMIP_L4_P2VBND_R2/BLD/bin/nemo.exe"
+    )
+    binary.parent.mkdir(parents=True)
+    baseline.mkdir()
+    target.mkdir()
+    binary_bytes = b"synthetic executable\n"
+    binary.write_bytes(binary_bytes)
+    (target / "nemo").write_bytes(binary_bytes)
+    binary_digest = hashlib.sha256(binary_bytes).hexdigest()
+    binary_manifest = target / "binary.sha256"
+    binary_manifest.write_text(f"{binary_digest}  {binary}\n")
+    (target / "producer_commit.txt").write_text("1" * 40 + "\n")
+    (target / "run.user.stdout.log").write_text("STOP 0\n")
+    (target / "run.user.time.log").write_text("MPIRUN_RC=0\nRUN DONE\n")
+    (target / "time.step").write_text("10\n")
+    marker = target / "ocean.output_0000"
+    marker.write_text(" ORCA2_TKE_BOUNDARY_DUMP            2 3 3\n")
+
+    for index in range(101):
+        name = f"oracle_inherited_{index:03d}.bin"
+        payload = f"inherited-{index}\n".encode()
+        (baseline / name).write_bytes(payload)
+        (target / name).write_bytes(payload)
+    baseline_manifest = "".join(
+        f"{hashlib.sha256((baseline / name).read_bytes()).hexdigest()}  {name}\n"
+        for name in sorted(path.name for path in baseline.glob("oracle_*.bin"))
+    )
+    baseline_manifest_digest = hashlib.sha256(
+        baseline_manifest.encode()
+    ).hexdigest()
+    record = target / "oracle_tke_boundary_kt00000002.bin"
+    _write_orca2_boundary(record)
+
+    replacements = {
+        "readonly NEMO_ROOT=/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2": (
+            f"readonly NEMO_ROOT={nemo_root}"
+        ),
+        (
+            "readonly BASELINE_RUN=/data/abyssal/dbalwada/"
+            "nemo-testcases-l4/runs/"
+            "variant_icebergs_off_phase2v_tke_a_10step_np2"
+        ): (
+            f"readonly BASELINE_RUN={baseline}"
+        ),
+        (
+            "readonly TARGET_RUN=/data/abyssal/dbalwada/"
+            "nemo-testcases-l2/phase3/parallel/orca2/"
+            "oracle_phase2v_tke_boundary_np2"
+        ): (
+            f"readonly TARGET_RUN={target}"
+        ),
+        (
+            "readonly EXPECTED_BASELINE_ORACLE_MANIFEST_SHA256="
+            "4fbffaed98202a052059c503a637bc2f8d5e57c28e7345f5bfce5b62320708a9"
+        ): (
+            "readonly EXPECTED_BASELINE_ORACLE_MANIFEST_SHA256="
+            f"{baseline_manifest_digest}"
+        ),
+    }
+    script_text = source
+    for registered, synthetic in replacements.items():
+        assert registered in script_text
+        script_text = script_text.replace(registered, synthetic, 1)
+    script = tmp_path / "run.sh"
+    script.write_text(script_text)
+
+    def finalize() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(script), "--finalize"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    finalization_artifacts = [
+        target / "oracle_tke_boundary_kt00000002.bin.stamp",
+        target / "orca2_tke_boundary_admission.json",
+        target / "orca2_tke_boundary_outputs.sha256",
+        target / "orca2_tke_boundary_references.sha256",
+    ]
+
+    def assert_no_finalization_artifacts() -> None:
+        assert not [path for path in finalization_artifacts if path.exists()]
+
+    admitted = finalize()
+    assert admitted.returncode == 0, admitted.stdout + admitted.stderr
+    assert "ORCA2_TKE_BOUNDARY_MARKER PASS kt=2" in admitted.stdout
+    assert "expected=101 compared=101 identical=101" in admitted.stdout
+    report = json.loads((target / "orca2_tke_boundary_admission.json").read_text())
+    assert report["verdict"] == "PASS"
+    assert report["exit_code"] == 0
+    assert report["binary_sha256"] == binary_digest
+    assert report["passivity"]["byte_identical"] == 101
+    assert (
+        report["references"]["baseline_oracle_streams_sha256"]
+        == baseline_manifest_digest
+    )
+    digests = subprocess.run(
+        ["sha256sum", "-c", "orca2_tke_boundary_outputs.sha256"],
+        cwd=target,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert digests.returncode == 0, digests.stdout + digests.stderr
+
+    binary.write_bytes(binary_bytes + b"post-finalize plant")
+    changed_reference = subprocess.run(
+        ["sha256sum", "-c", "orca2_tke_boundary_outputs.sha256"],
+        cwd=target,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert changed_reference.returncode != 0
+    assert f"{binary}: FAILED" in changed_reference.stdout
+    binary.write_bytes(binary_bytes)
+
+    marker.write_text(
+        " ORCA2_TKE_BOUNDARY_DUMP            2 3 3\n"
+        " ORCA2_TKE_BOUNDARY_DUMP            2 3 3\n"
+    )
+    duplicate_marker = finalize()
+    assert duplicate_marker.returncode == 66
+    assert "REFUSE: ocean.output boundary marker mismatch" in duplicate_marker.stderr
+    assert_no_finalization_artifacts()
+    marker.write_text(" ORCA2_TKE_BOUNDARY_DUMP            2 3 3\n")
+    readmitted = finalize()
+    assert readmitted.returncode == 0, readmitted.stdout + readmitted.stderr
+
+    inherited = target / "oracle_inherited_000.bin"
+    inherited_bytes = inherited.read_bytes()
+    inherited.write_bytes(inherited_bytes + b"plant")
+    changed_stream = finalize()
+    assert changed_stream.returncode == 69
+    assert "compared=101 identical=100 missing=0 differing=1" in changed_stream.stdout
+    assert "REFUSE: write-only passivity failed" in changed_stream.stderr
+    refused_report = json.loads(
+        (target / "orca2_tke_boundary_admission.json").read_text()
+    )
+    assert refused_report["exit_code"] == 69
+    inherited.write_bytes(inherited_bytes)
+
+    marker.write_text(" ORCA2_TKE_BOUNDARY_DUMP            3 3 3\n")
+    wrong_kt = finalize()
+    assert wrong_kt.returncode == 66
+    assert "REFUSE: ocean.output boundary marker mismatch" in wrong_kt.stderr
+    assert_no_finalization_artifacts()
+    marker.write_text(" ORCA2_TKE_BOUNDARY_DUMP            2 3 3\n")
+
+    baseline_inherited = baseline / inherited.name
+    baseline_inherited.write_bytes(inherited_bytes + b"plant")
+    inherited.write_bytes(inherited_bytes + b"plant")
+    changed_baseline = finalize()
+    assert changed_baseline.returncode == 65
+    assert "Phase-2v A oracle-stream manifest digest changed" in changed_baseline.stderr
+    assert_no_finalization_artifacts()
+    baseline_inherited.write_bytes(inherited_bytes)
+    inherited.write_bytes(inherited_bytes)
+
+    binary_manifest.write_text(
+        f"{binary_digest}  {binary}\n{binary_digest}  {binary}\n"
+    )
+    multiline_manifest = finalize()
+    assert multiline_manifest.returncode == 66
+    assert "REFUSE: existing binary manifest" in multiline_manifest.stderr
+    assert_no_finalization_artifacts()
+
+    binary_manifest.write_text("")
+    empty_manifest = finalize()
+    assert empty_manifest.returncode == 66
+    assert "REFUSE: existing binary manifest" in empty_manifest.stderr
+    assert_no_finalization_artifacts()
+
+    binary_manifest.write_text(f"{binary_digest}  {binary}")
+    unterminated_manifest = finalize()
+    assert unterminated_manifest.returncode == 66
+    assert "REFUSE: existing binary manifest" in unterminated_manifest.stderr
+    assert_no_finalization_artifacts()
+    binary_manifest.write_text(f"{binary_digest}  {binary}\n")
+
+    (target / "nemo").write_bytes(binary_bytes + b"plant")
+    wrong_binary = finalize()
+    assert wrong_binary.returncode == 66
+    assert "REFUSE: existing target binary digest" in wrong_binary.stderr
+    assert_no_finalization_artifacts()
+    (target / "nemo").write_bytes(binary_bytes)
+
+    real_target = tmp_path / "target-real"
+    target.rename(real_target)
+    target.symlink_to(real_target, target_is_directory=True)
+    wrong_run_dir = finalize()
+    assert wrong_run_dir.returncode == 64
+    assert "REFUSE: finalization run directory" in wrong_run_dir.stderr
+    target.unlink()
+    real_target.rename(target)
+
+    readmitted = finalize()
+    assert readmitted.returncode == 0, readmitted.stdout + readmitted.stderr
+
+    with record.open("r+b") as handle:
+        handle.truncate(record.stat().st_size - 1)
+    wrong_size = finalize()
+    assert wrong_size.returncode == 66
+    assert "REFUSE: existing record size" in wrong_size.stderr
+    assert_no_finalization_artifacts()
 
 
 def test_exp00_copy_check_compares_link_text_and_regular_bytes(tmp_path):
