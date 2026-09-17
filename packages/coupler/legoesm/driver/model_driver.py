@@ -1765,7 +1765,6 @@ class ModelDriver:
         from legoesm.grids.topography import (
             TopographyConfig, load_real_topography,
             gaussian_mountain, phis_from_topography,
-            land_mask_from_topography,
         )
 
         topo = self.config.topography
@@ -1779,7 +1778,14 @@ class ModelDriver:
         elif topo == "gaussian":
             z_s = gaussian_mountain(self.grid)
             self._phis_data = phis_from_topography(z_s)
-            self._f_land = land_mask_from_topography(z_s)
+            # An idealized mountain is a DYNAMICAL forcing, not a statement
+            # about the surface, so this case is all ocean unless a real mask
+            # is named below.  Deriving f_land from the elevation here labelled
+            # the WHOLE GLOBE land: the Gaussian bell has no cutoff, so z_s > 0
+            # in every cell (measured at T31: minimum elevation 3.3e-44 m,
+            # 100% of cells, land fraction 1.0), which is not a mountain
+            # coastline by any reading.
+            self._f_land = jnp.zeros(shape_2d, dtype=_sd)
         else:
             topo_config = TopographyConfig(
                 source="file", path=topo,
@@ -1804,10 +1810,10 @@ class ModelDriver:
             )
 
         # Attach land_frac for convection and orographic GWD on grids carrying
-        # the field (VoronoiMesh and GaussianGrid): flat -> zeros, gaussian ->
-        # binary elevation-derived mask (z_s > 0), file -> fraction from loaded
-        # elevation (subgrid sampling);
-        # land_mask_path overrides all of these topography settings.
+        # the field (VoronoiMesh and GaussianGrid).  Where it comes from:
+        # idealized topography (flat, gaussian) -> zeros, a real elevation file
+        # -> fraction from the loaded elevation, land_mask_path -> the loaded
+        # mask, overriding either.
         if (getattr(self.grid, "land_frac", "no-field") is None
                 and self._f_land is not None):
             self.grid = self.grid._replace(

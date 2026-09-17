@@ -2101,13 +2101,18 @@ class ExperimentConfig(NamedTuple):
         # have rejected this working configuration).  "Real land" is the same
         # predicate used elsewhere in this method: an explicit mask, or an
         # active tile with a topography that actually derives f_land > 0 —
-        # topography="flat" gives f_land == 0 everywhere, so the tiled path
-        # never engages and the scheme would be diagnostic-only again
-        # (codex R4 P2).
+        # an IDEALIZED topography ("flat" or "gaussian") gives f_land == 0 in
+        # every cell, so the tiled path never engages and the scheme would be
+        # diagnostic-only again (codex R4 P2).
+        # IDEALIZED topography derives no land: "flat" is zero elevation and
+        # "gaussian" is an idealized bell that the driver deliberately leaves
+        # all-ocean (its positive tails would otherwise label the entire globe
+        # land).  Only a real elevation file or an explicit mask gives land.
+        _idealized_topography = self.topography in ("flat", "gaussian")
         _tiled_with_real_land = self.surface_tiled and bool(
             self.land_mask_path
             or ((self.slab_land_active or self.use_multilayer_land)
-                and self.topography != "flat"))
+                and not _idealized_topography))
         if self.surface_stability_scheme not in _valid_stability:
             errors.append(
                 f"surface_stability_scheme must be one of {_valid_stability}, "
@@ -2177,13 +2182,21 @@ class ExperimentConfig(NamedTuple):
         # topography gives f_land==0 everywhere (no land), which would silently
         # no-op the requested land tile.  Require real topography OR an explicit
         # mask when multilayer is the sole land-tile signal.
-        if (self.surface_tiled and self.use_multilayer_land
-                and not self.slab_land_active and not self.land_mask_path
-                and self.topography == "flat"):
+        # Any requested land tile, slab or multilayer, tiled or not: an
+        # idealized topography derives no land at all, so the tile runs over
+        # zero land and goes silently inert -- the trap that cost the AMIP
+        # campaign three tuning waves. Refused, not warned.
+        if ((self.use_multilayer_land or self.slab_land_active)
+                and not self.land_mask_path
+                and _idealized_topography):
             errors.append(
-                "use_multilayer_land + surface_tiled with topography='flat' and no "
-                "land-mask file has NO land (elevation-derived f_land is 0 "
-                "everywhere) — pass a real --topography or a --land-mask-file."
+                f"a land tile was requested (use_multilayer_land="
+                f"{self.use_multilayer_land}, slab_land_active="
+                f"{self.slab_land_active}) with an idealized "
+                f"topography={self.topography!r} and no land-mask file, which "
+                "has NO land anywhere (f_land is 0 in every cell), so the tile "
+                "would silently no-op — pass a real --topography or a "
+                "--land-mask-file."
             )
         # The same "no land anywhere" trap, on the MESH lane, which does not use
         # surface_tiled and so never reached the check above: the flux handoff
@@ -2196,12 +2209,13 @@ class ExperimentConfig(NamedTuple):
         # can raise, leaving peers blocked).  Counting land points in the mask
         # file HERE, where the check is rank-symmetric, is the open follow-up.
         if (self.mpas_land_beta_soil and not self.land_mask_path
-                and self.topography == "flat"):
+                and _idealized_topography):
             errors.append(
-                "mpas_land_beta_soil with topography='flat' and no land-mask "
-                "file has NO land (elevation-derived f_land is 0 everywhere), so "
-                "no soil column is built and the land-flux handoff is silently "
-                "inert — pass a real --topography or a --land-mask-file."
+                f"mpas_land_beta_soil with an idealized topography"
+                f"={self.topography!r} and no land-mask file has NO land "
+                "(f_land is 0 everywhere), so no soil column is built and the "
+                "land-flux handoff is silently inert — pass a real "
+                "--topography or a --land-mask-file."
             )
         # Deploying the baked land parameters under the physics they were
         # calibrated under — the biophysics LMIP two-leaf canopy. The
@@ -2432,11 +2446,11 @@ class ExperimentConfig(NamedTuple):
             # guard remains authoritative for degenerate mask files.
             if ((self.mpas_land_lapse_K_per_km > 0.0
                  or self.mpas_land_beta != 1.0)
-                    and self.topography == "flat"
+                    and self.topography in ("flat", "gaussian")
                     and not self.land_mask_path):
                 errors.append(
                     "mpas_land_lapse_K_per_km/mpas_land_beta need a land "
-                    "fraction, but topography='flat' (with no land-mask "
+                    f"fraction, but topography={self.topography!r} (with no land-mask "
                     "file) yields an all-zero f_land — the knobs would "
                     "change nothing."
                 )
@@ -2734,14 +2748,17 @@ class ExperimentConfig(NamedTuple):
                     "flag would be a silent no-op. Drop one of the two."
                 )
             if not (self.land_mask_path
-                    or (self.slab_land_active and self.topography != "flat")):
+                    or (self.slab_land_active
+                        and self.topography not in ("flat", "gaussian"))):
                 errors.append(
                     "land_interface_flux='unified' needs an ACTIVE slab land "
                     "tile with actual land: pass land_mask_path, or "
                     "slab_land_active=True with a real topography "
-                    "(topography='flat' derives f_land == 0 everywhere, so "
-                    "the slab SEB never steps and the flag is a silent "
-                    "no-op)."
+                    f"(got topography={self.topography!r}, "
+                    f"slab_land_active={self.slab_land_active!r}, no land mask). "
+                    "Idealized topography derives f_land == 0 everywhere; "
+                    "without an active land tile the slab SEB never steps "
+                    "and the flag is a silent no-op."
                 )
             # Mirror the model_driver.run() lane dispatch exactly: the MPAS
             # (grid_type-keyed) and spectral lanes run _run_mpas /
