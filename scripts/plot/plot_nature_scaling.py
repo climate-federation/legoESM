@@ -158,6 +158,10 @@ def main() -> int:
     ap.add_argument("--png", default=None)
     ap.add_argument("--max-res", type=int, default=2,
                     help="resolutions per panel (highest first)")
+    ap.add_argument("--layout", choices=["main", "supp", "all"], default="main",
+                    help="main = the five grids whose multi-device path is "
+                         "performance-tuned (the cube slot carries the legend); "
+                         "supp = the cubed-sphere panel alone; all = every panel")
     args = ap.parse_args()
 
     best = load(args.receipts)
@@ -172,11 +176,24 @@ def main() -> int:
         "legend.fontsize": 5.8, "axes.linewidth": 0.6, "lines.markersize": 3.2,
         "figure.dpi": 300, "savefig.dpi": 300, "pdf.fonttype": 42, "ps.fonttype": 42,
     })
-    fig, axs = plt.subplots(2, 3, figsize=(180 / 25.4, 105 / 25.4))
+    # The tiled cubed-sphere step is correctness-validated but not yet
+    # performance-tuned above 6 devices (it anti-scales: 23 -> 41 -> 34 ms at
+    # 24 -> 54 -> 96 GPUs on C768), so the main figure leaves its slot to the
+    # legend and the panel moves to the supplement.
+    cube_i = next(i for i, p in enumerate(PANELS) if p[1] == "cubed-sphere")
+    if args.layout == "supp":
+        fig, axs = plt.subplots(1, 1, figsize=(70 / 25.4, 60 / 25.4), squeeze=False)
+        panels = [(cube_i, PANELS[cube_i])]
+    else:
+        fig, axs = plt.subplots(2, 3, figsize=(180 / 25.4, 105 / 25.4))
+        panels = [(i, p) for i, p in enumerate(PANELS)
+                  if args.layout == "all" or i != cube_i]
+        if args.layout == "main":
+            axs.ravel()[cube_i].set_axis_off()
     prov = []
     summary = []
-    for i, (comp, grid, title, sub) in enumerate(PANELS):
-        ax = axs.ravel()[i]
+    for slot, (i, (comp, grid, title, sub)) in enumerate(panels):
+        ax = axs.ravel()[slot if args.layout == "supp" else i]
         keys = [k for k in series if k[0] == comp and k[1] == grid]
         # highest resolutions first, capped per panel
         ress = sorted({k[4] for k in keys},
@@ -222,11 +239,11 @@ def main() -> int:
         else:
             ax.text(0.5, 0.5, "no receipts yet", transform=ax.transAxes, ha="center",
                     color="#999999", fontsize=7)
-        if i % 3 == 0:
+        if args.layout == "supp" or i % 3 == 0:
             ax.set_ylabel("time per step (ms)")
-        if i >= 3:
+        if args.layout == "supp" or i >= 3 or (args.layout == "main" and i == 1):
             ax.set_xlabel("devices (GPUs or CPU ranks)")
-        ax.text(-0.22, 1.18, chr(ord("a") + i), transform=ax.transAxes, fontsize=9,
+        ax.text(-0.22, 1.18, chr(ord("a") + slot), transform=ax.transAxes, fontsize=9,
                 fontweight="bold", va="top")
 
     handles = [
@@ -236,11 +253,16 @@ def main() -> int:
         Line2D([], [], color="#444444", lw=0.8, label="float64"),
         Line2D([], [], color="#666666", ls="--", lw=0.6, label="ideal (anchored at first point)"),
     ]
-    fig.legend(handles=handles, frameon=False, loc="lower center", ncol=5,
-               bbox_to_anchor=(0.5, -0.01), handlelength=1.8)
-    for row, name in ((0, "ATMOSPHERE"), (1, "OCEAN")):
-        fig.text(0.008, 0.93 if row == 0 else 0.46, name, fontsize=7.5, fontweight="bold",
-                 rotation=90, va="top", ha="left")
+    if args.layout == "main":
+        axs.ravel()[cube_i].legend(handles=handles, frameon=False, loc="center left",
+                                   handlelength=1.8, labelspacing=0.5, fontsize=6.2)
+    else:
+        fig.legend(handles=handles, frameon=False, loc="lower center", ncol=5,
+                   bbox_to_anchor=(0.5, -0.01), handlelength=1.8)
+    if args.layout != "supp":
+        for row, name in ((0, "ATMOSPHERE"), (1, "OCEAN")):
+            fig.text(0.008, 0.93 if row == 0 else 0.46, name, fontsize=7.5,
+                     fontweight="bold", rotation=90, va="top", ha="left")
     fig.suptitle(f"{args.mode.capitalize()} scaling — Levante (4×A100-80/node, 2×AMD Milan 7763/node)",
                  fontsize=7.5, y=0.995)
     fig.subplots_adjust(left=0.08, right=0.99, top=0.88, bottom=0.14, wspace=0.42, hspace=0.62)
