@@ -231,3 +231,40 @@ after the boundary block using the NEMO-`taum` production arm; the surface
 statement is inherited and is not an eligible patch. If refuted, no TKE
 candidate is eligible until the exact constant/evaluation owner inside this
 same compiled statement is decomposed in a new committed addendum.
+
+## Post-surface Langmuir evaluation discriminator
+
+Frozen after the production-step operand test confirmed all three clauses
+above. With recorded NEMO `taum`, `en_entry` and `en_after_boundaries` are BIT,
+then `en_after_langmuir` first becomes DEBT with 3,223 unequal cells and
+maximum absolute difference `2.833486841675906e-05`. The model-forcing
+diagnostic remains separately non-BIT at the inherited surface write (303
+unequal `taum` cells produce 260 unequal surface cells); it is not the arm
+used for statement ownership.
+
+The NEMO-identity GYRE card currently selects
+`tke_langmuir_evaluation="vectorized"`. The compiled program instead forms
+`zWlc2 = zcsd*taum` at `zdftke.f90:350-352`, then forms `zpelc(1)` and the
+ordered vertical recurrence
+`zpelc(jk)=zpelc(jk-1)+MAX(rn2b,0)*gdepw*e3w` at `:355-361`, before the
+reverse crossing search, `zhlc`, and source write at `:363-393`.
+
+Without changing the shared card, the existing consolidated gate will add
+one explicitly labelled diagnostic production arm whose only static change
+is `tke_langmuir_evaluation="nemo_literal"`; it will retain the same recorded
+NEMO closure memory and recorded `taum` and will execute through the full
+`LatLonCGridOceanModel.step` / `_step_jitted` path. The frozen prediction is
+that this arm makes `en_after_langmuir` BIT. Because `zWlc2` consumes the
+already BIT recorded `taum` and the same source constants in both modes, a
+BIT literal arm names the first non-bit model statement as the vectorized
+replacement of NEMO's ordered `zpelc` recurrence at compiled `:355-361`.
+
+The prediction is confirmed only if the diagnostic arm remains BIT through
+the boundary block and makes `en_after_langmuir` BIT on all 32 x 22 x 30
+cells. Any boundary mismatch or any post-Langmuir mismatch refutes it and
+forbids the recurrence attribution; the next round must then expose the live
+`rn2b`, `gdepw`, `e3w`, mask, crossing-index, and source operands individually.
+Even if confirmed, this round will not change the card: selecting a different
+configured evaluation is a user decision, so the literal arm is evidence for
+`DECISION_NEEDED`, not a landing candidate. No 954-row ladder or day-30 arm is
+authorized for this diagnostic-only configuration.
