@@ -701,7 +701,8 @@ def test_thickness_only_setup_explicitly_selects_legacy_e3w(monkeypatch):
     class SetupReached(Exception):
         pass
 
-    def capture(dz, **kwargs):
+    def capture(dz, t_depth_ref_m=None, **kwargs):
+        seen["t_depth_ref_m"] = t_depth_ref_m
         seen.update(kwargs)
         raise SetupReached
 
@@ -710,7 +711,7 @@ def test_thickness_only_setup_explicitly_selects_legacy_e3w(monkeypatch):
         run_omip._create_setup(
             "mpas", "ico1", 3, 60.0, "full", "type1",
             dz_ref_override=np.array([10.0, 20.0, 30.0]))
-    assert seen == {"nemo_e3w_source": "depth_difference"}
+    assert seen == {"t_depth_ref_m": None, "nemo_e3w_source": "depth_difference"}
 
 
 def test_viscosity_overrides_reach_the_plain_latlon_lane():
