@@ -3145,6 +3145,15 @@ def _tke_program_twin(
             return model.step(
                 step_state, dt=dt, freshwater=freshwater,
                 surface_forcing=surface_forcing)
+        def device_array(value):
+            return (jnp.asarray(value)
+                    if isinstance(value, (np.ndarray, np.generic))
+                    else value)
+
+        step_state = jax.tree_util.tree_map(device_array, step_state)
+        freshwater = jax.tree_util.tree_map(device_array, freshwater)
+        surface_forcing = jax.tree_util.tree_map(
+            device_array, surface_forcing)
         step_state = model._seed_tke_preclosure_carry(step_state)
         model.prime_step_caches(step_state)
         with jax.disable_jit():
