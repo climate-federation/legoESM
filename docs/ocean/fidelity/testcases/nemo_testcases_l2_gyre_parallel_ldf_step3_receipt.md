@@ -37,7 +37,7 @@ content plus Kmm thickness times that `Krhs` at
 At the requested tip, the private one-variable route is declared at
 `ocean_model_latlon_cgrid.py:1312-1315`
 and adds the already-computed signed `dT_gm/dS_gm` arrays to the WS helper's
-stage-3 source tuple at `:7721-7729`. The candidate removes that private
+stage-3 source tuple at `:7723-7731`. The candidate removes that private
 selector and executes the identical route when the already selected `rk3_ws`
 path has a configured GM/Redi operator. It does not add a card selector,
 coefficient, timestep, carry, stabilizer, state field, second FCT call, public

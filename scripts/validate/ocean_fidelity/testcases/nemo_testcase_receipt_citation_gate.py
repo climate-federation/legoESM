@@ -888,7 +888,7 @@ CITATION_MAP = {
     'ocean_model_latlon_cgrid.py:1312-1315': [
         '# Route the already-computed GM/Redi rate into the same stage-3 source',
         'route_gm_redi_stage3_source: bool = False', 4],
-    'ocean_model_latlon_cgrid.py:7721-7729': [
+    'ocean_model_latlon_cgrid.py:7723-7731': [
         ('elif _tti == "rk3_ws":', 2),
         '_stage_source_rates[2][1] + dS_gm * active_3d,', 9],
     'nemo_testcase_recipe.py:286-370': [
