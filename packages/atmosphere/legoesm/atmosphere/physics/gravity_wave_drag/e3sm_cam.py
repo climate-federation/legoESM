@@ -334,6 +334,22 @@ def gw_prof(
 # gw_oro_src: McFarlane orographic source
 # ---------------------------------------------------------------------------
 
+def _source_direction(usrc: jax.Array, vsrc: jax.Array):
+    """Source-wind magnitude and unit vector, safe at zero wind.
+
+    ``sqrt`` has an infinite derivative at 0, so ``sqrt(u**2 + v**2)`` returns a
+    finite 0.0 for a calm column but a non-finite reverse-mode cotangent that a
+    later ``where`` cannot repair; the argument is made strictly positive before
+    the sqrt rather than the result masked after it.
+    """
+    magsq = usrc * usrc + vsrc * vsrc
+    safe = magsq > 0.0
+    mag = jnp.where(safe, jnp.sqrt(jnp.where(safe, magsq, 1.0)), 0.0)
+    xv = jnp.where(safe, usrc / jnp.where(safe, mag, 1.0), 0.0)
+    yv = jnp.where(safe, vsrc / jnp.where(safe, mag, 1.0), 0.0)
+    return mag, xv, yv
+
+
 def gw_oro_src(
     u: jax.Array,
     v: jax.Array,
@@ -377,10 +393,7 @@ def gw_oro_src(
         u, v, rho_mid, hdsp, pint, dpm, zm, nm,
     )
 
-    mag = jnp.sqrt(usrc * usrc + vsrc * vsrc)
-    safe = mag > 0.0
-    xv = jnp.where(safe, usrc / jnp.where(safe, mag, 1.0), 0.0)
-    yv = jnp.where(safe, vsrc / jnp.where(safe, mag, 1.0), 0.0)
+    mag, xv, yv = _source_direction(usrc, vsrc)
 
     # Project winds onto source direction.
     ubm = u * xv[:, None] + v * yv[:, None]             # (ncol, nlev)
@@ -500,10 +513,7 @@ def gw_cm_src(
     gather = lambda a, idx: jnp.take(a, idx, axis=1)   # (ncol,) dynamic gather
     usrc = 0.5 * (gather(u, klo_i) + gather(u, kbot_i))
     vsrc = 0.5 * (gather(v, klo_i) + gather(v, kbot_i))
-    mag = jnp.sqrt(usrc * usrc + vsrc * vsrc)
-    safe = mag > 0.0
-    xv = jnp.where(safe, usrc / jnp.where(safe, mag, 1.0), 0.0)
-    yv = jnp.where(safe, vsrc / jnp.where(safe, mag, 1.0), 0.0)
+    mag, xv, yv = _source_direction(usrc, vsrc)
 
     ubm = u * xv[:, None] + v * yv[:, None]
     ubi = _interface_proj(ubm, mag)
@@ -641,10 +651,7 @@ def gw_beres_src(
     # --- Source-wind direction from the 700 hPa winds (E3SM uses u(:,k700)).
     u700 = jnp.take(u, k700_i, axis=1)                     # (ncol,)
     v700 = jnp.take(v, k700_i, axis=1)
-    mag700 = jnp.sqrt(u700 * u700 + v700 * v700)
-    safe = mag700 > 0.0
-    xv = jnp.where(safe, u700 / jnp.where(safe, mag700, 1.0), 0.0)
-    yv = jnp.where(safe, v700 / jnp.where(safe, mag700, 1.0), 0.0)
+    mag700, xv, yv = _source_direction(u700, v700)
 
     ubm = u * xv[:, None] + v * yv[:, None]                # (ncol, nlev)
     ubi = _interface_proj(ubm, mag700)                     # (ncol, nlev+1)
@@ -1073,7 +1080,12 @@ def gw_drag_prof(
     vtgw = vtgw.T
     gwut = jnp.transpose(gwut, (1, 0, 2))            # (ncol, nlev, nwav)
 
-    return tau_final, utgw, vtgw, gwut
+    # ``tau`` here is the saturation profile, i.e. the stress BEFORE the
+    # tendency loop re-derives it from the limited tendency.  E3SM accumulates
+    # taucd from exactly this profile (gw_common.F90:562-599, ahead of the
+    # tendency loop at :627), so it is returned alongside the limited stress for
+    # the column momentum fixer.
+    return tau_final, utgw, vtgw, gwut, tau_state0
 
 
 # ---------------------------------------------------------------------------
@@ -1529,9 +1541,14 @@ def e3sm_cam_gwd(
         )
         orographic_only = True
         do_taper = False
-    elif config.source == "frontal":
-        if frontgf_col is None:
+    elif config.source in ("frontal", "background"):
+        if config.source == "background":
             frontgf_col = jnp.zeros((ncol, nlev), dtype=u.dtype)
+            frontgfc = -jnp.inf
+        else:
+            if frontgf_col is None:
+                frontgf_col = jnp.zeros((ncol, nlev), dtype=u.dtype)
+            frontgfc = config.frontal.frontgfc
         # E3SM picks kbot (launch, ~500 hPa) and kfront (trigger, ~600 hPa)
         # from the reference pressure grid — NOT a fixed fraction of nlev
         # (codex iter-1 #1/#2).  We locate the level whose column-mean
@@ -1550,7 +1567,7 @@ def e3sm_cam_gwd(
         tau0, src_level, tend_level, xv, yv, c, ubm, ubi = gw_cm_src(
             u, v, frontgf_col, config.pgwv, config.dc,
             config.frontal.c0, config.frontal.taubgnd,
-            config.frontal.frontgfc, kbot, kfront,
+            frontgfc, kbot, kfront,
             config.frontal.front_spectrum_dc_resolution,
         )
         orographic_only = False
@@ -1596,7 +1613,7 @@ def e3sm_cam_gwd(
     else:
         raise ValueError(
             f"Unknown E3SM GWD source: {config.source!r}. "
-            "Choose 'orographic', 'frontal', or 'convective'."
+            "Choose 'orographic', 'frontal', 'background', or 'convective'."
         )
 
     # Newtonian-cooling profile (spectral path only; orographic uses uniform).
@@ -1605,7 +1622,7 @@ def e3sm_cam_gwd(
     else:
         alpha_iface = None
 
-    tau, utgw, vtgw, gwut = gw_drag_prof(
+    tau, utgw, vtgw, gwut, tau_sat = gw_drag_prof(
         tau0, c, src_level, tend_level, T, ti, piln, rhoi, nm, ni,
         ubm, ubi, xv, yv, dpm, rdpm, lat, config.effgw, dt, config,
         orographic_only=orographic_only, do_taper=do_taper,
@@ -1768,7 +1785,11 @@ def e3sm_cam_gwd(
         if config.do_energy_conservation:
             # Net penetrating stress at the source/tend interface (taucd sum),
             # redistributed as a uniform below-source body force.
-            tau_net = gw_taucd_net(tau, c, ubi, tend_level)
+            # Pre-limiter (saturation-profile) stress, as in E3SM: taucd is
+            # accumulated before the tendency loop bounds the stress, so a
+            # clipped layer must not turn a symmetric launch into a spurious
+            # below-source body force.
+            tau_net = gw_taucd_net(tau_sat, c, ubi, tend_level)
             # dsdt = cpair * dT_dt (dry-static-energy tendency).
             dsdt = cpair * dT_dt
             du_dt, dv_dt, dsdt = momentum_energy_conservation(

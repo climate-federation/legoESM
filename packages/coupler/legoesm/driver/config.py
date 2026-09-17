@@ -72,6 +72,15 @@ class GridConfig(NamedTuple):
     # mid-troposphere (the lowest layer coarsens ~30%, measured).  Ignored by
     # the hybrid coordinate, which has its own `stretching`.
     tropopause_refine: float = 1.0
+    # Sigma-lane lid as a fraction of surface pressure (0.01 = 10 hPa at
+    # 1000 hPa); ignored by the hybrid coordinate, which uses
+    # p_top_Pa/stretching.  Recorded here so the resolved config is truthful.
+    sigma_top: float = 0.01
+    # Sigma-lane level layout (grids.vertical.SIGMA_LAYOUTS): "standard" =
+    # uniform/tropopause-refined; "l30_trop_logstrat" = the L30 troposphere
+    # kept bit-identical below sigma 0.109 plus nlev-27 log-spaced
+    # stratospheric layers up to sigma_top (the raised-lid experiment).
+    sigma_layout: str = "standard"
     use_duogrid: bool = False        # enable FV3 Duo-Grid halo (required for MPI multi-node)
 
 
@@ -274,6 +283,10 @@ class DycoreConfig(NamedTuple):
     # Appended at the tuple END: preserves POSITIONAL CONSTRUCTION by existing
     # callers, not full tuple ABI (exact unpacking / len() still break).
     mpas_vert_advection_scheme: str = "upwind"
+    # MPAS lane, CAM-style top diffusion sponge: del2 viscosity x factor**((n-k)/n)
+    # in the top n layers (raised-lid experiment); 0 / 1.0 = off.
+    mpas_sponge_del2_top_layers: int = 0
+    mpas_sponge_del2_top_factor: float = 1.0
 
 
 class EvaluationConfig(NamedTuple):
@@ -419,7 +432,13 @@ def parse_gwd_spec(value: str) -> str:
                 f"them (e.g. 'hines+mcfarlane')"
             )
     try:
-        ExperimentConfig(gravity_wave_drag=value).validate_strict()
+        # The e3sm_cam-in-composite rule depends on --e3sm-cam-source, parsed
+        # separately; probe with the one source that composes so the real
+        # gate fires at build time with the actual value, not here.
+        _parts = value.split("+")
+        _probe = ({"e3sm_cam_source": "background", "e3sm_cam_pgwv": 1}
+                  if "e3sm_cam" in _parts and len(_parts) > 1 else {})
+        ExperimentConfig(gravity_wave_drag=value, **_probe).validate_strict()
     except ValueError as exc:
         # Report ONLY a genuine gravity_wave_drag complaint. validate_strict
         # reports every error for the whole config, so falling back to the full
@@ -1525,6 +1544,15 @@ class ExperimentConfig(NamedTuple):
     # in the weakly stratified BL and breaks at its own launch level
     # (measured: 55% of its momentum deposited below 1 km).
     hines_launch_p: float = 0.0
+    e3sm_cam_source: str = "orographic"         # E3SMCAMConfig.source
+    e3sm_cam_pgwv: int = 0                      # phase-speed half-width (waves either side of c0)
+    e3sm_cam_effgw: float = 0.125               # E3SMCAMConfig.effgw [dimensionless]
+    e3sm_cam_taubgnd: float = 1.5e-3            # E3SMFrontalConfig.taubgnd [Pa]
+    e3sm_cam_c0: float = 30.0                   # E3SMFrontalConfig.c0 [m/s]
+    e3sm_cam_launch_p: float = 5.0e4            # E3SMFrontalConfig.launch_p [Pa]
+    e3sm_cam_latitude_taper: bool = False       # E3SMFrontalConfig.latitude_taper:
+                                                # OFF, E3SM's unstructured branch
+                                                # (our grids); see that field's docs
     # Appended at the tuple END to preserve the positional ABI (codex
     # 2026-07-27 flavor review, Major 1).
     morrison_flavor: str = "mg"                 # MorrisonConfig.morrison_flavor:
@@ -1619,6 +1647,38 @@ class ExperimentConfig(NamedTuple):
             errors.append(f"grid.nlev must be > 0, got {g.nlev}")
         if g.p_top_Pa <= 0:
             errors.append(f"grid.p_top_Pa must be > 0, got {g.p_top_Pa}")
+        if g.vertical_coord == "sigma":
+            if not (0.0 < g.sigma_top < 1.0):
+                errors.append(
+                    f"grid.sigma_top must be in (0, 1) on the sigma lane (got {g.sigma_top})")
+            if g.sigma_layout not in ("standard", "l30_trop_logstrat"):
+                errors.append(
+                    "grid.sigma_layout must be 'standard' or 'l30_trop_logstrat' "
+                    f"(got {g.sigma_layout!r})")
+            elif g.sigma_layout == "l30_trop_logstrat":
+                if g.nlev < 28:
+                    errors.append(
+                        f"grid.sigma_layout 'l30_trop_logstrat' needs nlev >= 28 (got {g.nlev})")
+                if not (0.0 < g.sigma_top <= 0.05):
+                    errors.append(
+                        "grid.sigma_layout 'l30_trop_logstrat' needs 0 < sigma_top <= 0.05 "
+                        f"(grids.vertical.L30_LOGSTRAT_SIGMA_TOP_MAX; got {g.sigma_top})")
+                if g.tropopause_refine != 1.0:
+                    errors.append(
+                        "grid.sigma_layout 'l30_trop_logstrat' keeps the L30 troposphere and "
+                        f"cannot combine with tropopause_refine={g.tropopause_refine}")
+            if g.p_top_Pa != 200.0 or g.stretching != 2.0:
+                errors.append(
+                    "grid.p_top_Pa and grid.stretching are hybrid-only fields and are inert "
+                    "on the sigma lane; leave them at their defaults (200.0, 2.0) and set "
+                    "grid.sigma_top instead")
+        elif g.vertical_coord == "hybrid" and g.sigma_top != 0.01:
+            errors.append(
+                "grid.sigma_top is inert on the hybrid lane, which uses p_top_Pa/"
+                f"stretching; leave it at its default 0.01 (got {g.sigma_top})")
+        elif g.vertical_coord == "hybrid" and g.sigma_layout != "standard":
+            errors.append(
+                f"grid.sigma_layout={g.sigma_layout!r} is inert on the hybrid lane")
         # Tropopause refinement: 1.0 = uniform.  The upper bound is NOT a
         # vertical-CFL limit — the first-order-upwind vertical advective CFL
         # is only 0.26 at refine=3 / dt=75 s / omega=5 Pa/s and 0.39 at
@@ -1665,6 +1725,13 @@ class ExperimentConfig(NamedTuple):
                 f"dycore.model_type must be one of {DYNAMICS_OPTIONS}, "
                 f"got {d.model_type!r}"
             )
+        elif d.model_type == "nonhydrostatic" and (g.sigma_top != 0.01
+                                                   or g.sigma_layout != "standard"):
+            errors.append(
+                "grid.sigma_top and grid.sigma_layout are inert on the "
+                "nonhydrostatic lane, which uses a height coordinate; leave "
+                f"them at their defaults 0.01/'standard' (got sigma_top="
+                f"{g.sigma_top}, sigma_layout={g.sigma_layout!r})")
         if d.discretization not in DISCRETIZATION_OPTIONS:
             errors.append(
                 f"dycore.discretization must be one of {DISCRETIZATION_OPTIONS}, "
@@ -2674,6 +2741,26 @@ class ExperimentConfig(NamedTuple):
         # Vertical advection scheme: membership first, then the same
         # silently-inert refusal as k_h_scale (MPAS + sigma only).
         _vert_adv_options = ("upwind", "van_leer")
+        _spl, _spf = d.mpas_sponge_del2_top_layers, d.mpas_sponge_del2_top_factor
+        if isinstance(_spl, bool) or not isinstance(_spl, int) or _spl < 0 or _spl >= g.nlev:
+            errors.append(
+                f"dycore.mpas_sponge_del2_top_layers must be an int in [0, grid.nlev) (got {_spl!r})")
+        if not (isinstance(_spf, (int, float)) and not isinstance(_spf, bool)
+                and math.isfinite(_spf) and _spf >= 1.0):
+            errors.append(
+                f"dycore.mpas_sponge_del2_top_factor must be a finite number >= 1.0 (got {_spf!r})")
+        if (isinstance(_spl, int) and _spl > 0
+                and (d.discretization != "mpas" or d.model_type != "hydrostatic")):
+            errors.append(
+                "dycore.mpas_sponge_del2_top_layers is wired into the hydrostatic MPAS dycore "
+                f"only; on discretization={d.discretization!r}/model_type={d.model_type!r} "
+                "it would be silently inert")
+        if (isinstance(_spl, int) and _spl > 0
+                and isinstance(d.a_h_scale, (int, float)) and d.a_h_scale <= 0):
+            errors.append(
+                "dycore.mpas_sponge_del2_top_layers > 0 is silently inert when "
+                f"a_h_scale={d.a_h_scale!r} turns the del2 viscosity off; use a_h_scale > 0 "
+                "or set mpas_sponge_del2_top_layers=0")
         if d.mpas_vert_advection_scheme not in _vert_adv_options:
             errors.append(
                 f"dycore.mpas_vert_advection_scheme must be one of "
@@ -2997,13 +3084,53 @@ class ExperimentConfig(NamedTuple):
         # Positivity + finiteness only — the calibratable RANGE stays in
         # ``__param_spec__`` so it is not maintained twice.
         for _f in ("mcfarlane_k_wave", "mcfarlane_directional_spread",
-                   "mcfarlane_tau_max", "hines_total_rms_wind", "hines_Fmax"):
+                   "mcfarlane_tau_max", "hines_total_rms_wind", "hines_Fmax",
+                   "e3sm_cam_taubgnd", "e3sm_cam_c0", "e3sm_cam_launch_p",
+                   "e3sm_cam_effgw"):
             _v = getattr(self, _f)
             if not math.isfinite(_v) or _v <= 0.0:
                 errors.append(
                     f"{_f} must be a positive, finite gravity-wave-drag "
                     f"parameter, got {_v!r}"
                 )
+        if self.e3sm_cam_source not in (
+                "orographic", "frontal", "convective", "background"):
+            errors.append(
+                f"e3sm_cam_source must be one of "
+                f"('orographic', 'frontal', 'convective', 'background'), "
+                f"got {self.e3sm_cam_source!r}"
+            )
+        if isinstance(self.e3sm_cam_pgwv, bool) or \
+                not isinstance(self.e3sm_cam_pgwv, int) or \
+                self.e3sm_cam_pgwv < 0:
+            errors.append(
+                f"e3sm_cam_pgwv must be an int >= 0, "
+                f"got {self.e3sm_cam_pgwv!r}"
+            )
+        if self.e3sm_cam_source in ("frontal", "background") and \
+                self.e3sm_cam_pgwv < 1:
+            errors.append(
+                f"e3sm_cam_pgwv must be >= 1 for a launch-everywhere "
+                f"spectrum; pgwv 0 is the single c=0 wave, got "
+                f"{self.e3sm_cam_pgwv!r}"
+            )
+        if not math.isfinite(self.e3sm_cam_effgw) or \
+                self.e3sm_cam_effgw > 1.0:
+            errors.append(
+                f"e3sm_cam_effgw must be a finite efficiency <= 1.0, "
+                f"got {self.e3sm_cam_effgw!r}"
+            )
+        if not math.isfinite(self.e3sm_cam_taubgnd) or \
+                self.e3sm_cam_taubgnd > 1.0e-2:
+            errors.append(
+                f"e3sm_cam_taubgnd must be a finite base stress <= 1.0e-2 Pa, "
+                f"got {self.e3sm_cam_taubgnd!r}"
+            )
+        if not isinstance(self.e3sm_cam_latitude_taper, bool):
+            errors.append(
+                f"e3sm_cam_latitude_taper must be a bool, "
+                f"got {self.e3sm_cam_latitude_taper!r}"
+            )
         _valid_gwd = VALID_GWD
         # A ``+``-joined string composes multiple GWD sources whose tendencies
         # are summed — orographic (mcfarlane/lindzen) and non-orographic
@@ -3015,7 +3142,8 @@ class ExperimentConfig(NamedTuple):
         # so at most one stateful source may appear.  ``e3sm_cam`` /
         # ``ml_emulator`` need extra per-column source fields / a network
         # module the composite path does not carry and are NOT composable.
-        _composable_stateless = ("rayleigh", "lindzen", "mcfarlane", "hines")
+        _composable_stateless = ("rayleigh", "lindzen", "mcfarlane", "hines",
+                                 "e3sm_cam")
         _composable_stateful = ("prognostic_spectral",)
         _composable = _composable_stateless + _composable_stateful
         _gwd_parts = self.gravity_wave_drag.split("+")
@@ -3026,6 +3154,21 @@ class ExperimentConfig(NamedTuple):
                     f"composite gravity_wave_drag parts must each be one of "
                     f"{_composable}, got invalid {bad} in "
                     f"{self.gravity_wave_drag!r}"
+                )
+            # The EFFECTIVE source is the override's when one is supplied:
+            # gwd_config_for returns gravity_wave_drag_override untouched, so
+            # gating on the scalar would reject a valid override (codex #5).
+            _ov = getattr(self, "gravity_wave_drag_override", None)
+            _e3sm_src = (getattr(getattr(_ov, "e3sm_cam", None), "source", None)
+                         if _ov is not None else None) or self.e3sm_cam_source
+            if "e3sm_cam" in _gwd_parts and _e3sm_src != "background":
+                errors.append(
+                    f"gravity_wave_drag {self.gravity_wave_drag!r} may only "
+                    f"composite e3sm_cam with e3sm_cam_source='background'; "
+                    f"got e3sm_cam_source={_e3sm_src!r} "
+                    f"(orographic double-counts topographic drag against "
+                    f"lindzen/mcfarlane; frontal/convective need per-column "
+                    f"source fields the composite does not carry)"
                 )
             # Mirror get_gwd_fn's runtime rule so a duplicate composite
             # fails HERE, not later during physics construction.

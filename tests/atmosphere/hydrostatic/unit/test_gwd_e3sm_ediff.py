@@ -94,7 +94,7 @@ def _spectral_state():
         to(u), to(v), frontgf, NGWV, DC, cfg.frontal.c0, cfg.frontal.taubgnd,
         cfg.frontal.frontgfc, kbot, kfront,
     )
-    tau, utgw, vtgw, gwut = gw_drag_prof(
+    tau, utgw, vtgw, gwut, _tau_sat = gw_drag_prof(
         tau0, c, src, tend, to(T), ti, piln, rhoi, nm, ni,
         ubm, ubi, xv, yv, dpm, rdpm, jnp.zeros(1), 1.0, DT, cfg,
         orographic_only=False, do_taper=False,
