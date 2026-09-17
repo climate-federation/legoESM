@@ -251,7 +251,7 @@ def main(argv=None):
     # path does.  Called WITHOUT physics so the terms are the dry dynamics only.
     from legoesm.atmosphere.dynamics.gcm.primitive_eq_mpas import (
         mpas_hydrostatic_tendencies)
-    _, _terms = mpas_hydrostatic_tendencies(
+    _tend_full, _terms = mpas_hydrostatic_tendencies(
         state, mesh, sig, model.config, None, DT, return_thermo_terms=True)
     dyn_terms = {
         "dyn_horiz_adv": np.asarray(_terms.horiz_adv, dtype=np.float64),
@@ -268,10 +268,23 @@ def main(argv=None):
     _sd = np.asarray(_terms.sigma_dot, dtype=np.float64)
     if _sd.shape[1] == T0.shape[1] + 1:
         _sd = 0.5 * (_sd[:, :-1] + _sd[:, 1:])
-    extra_rows = {"omega_hpa_day": (
-        _sd * np.asarray(state.p_s.data, dtype=np.float64)[:, None]
-        * 86400.0 / 100.0)}      # NOT in dyn_terms: it is not a K/day tendency
-                                 # and must not enter the closure sum below
+    # The pressure velocity is NOT p_s*sigma_dot alone: in a sigma coordinate
+    # omega = p_s*sigma_dot + sigma*(dp_s/dt + u.grad p_s).  Both reviewers
+    # flagged that dropping the surface-pressure terms lets a spinning-down
+    # global p_s bump read as "descent", which is exactly the failure mode in a
+    # cold start.  The material dp_s/dt the dycore reports already contains the
+    # advective part (it is the flux-form tendency), so it is added directly.
+    _p_s = np.asarray(state.p_s.data, dtype=np.float64)
+    _sig = np.asarray(sig.sigma_full, dtype=np.float64)[None, :]
+    _dps = np.asarray(_tend_full.dp_s_dt.data, dtype=np.float64)[:, None]
+    _omega = _sd * _p_s[:, None] + _sig * _dps
+    extra_rows = {"omega_hpa_day": _omega * 86400.0 / 100.0,
+                  # the piece that was being reported before, kept so the two
+                  # can be compared directly
+                  "omega_sigmadot_only_hpa_day": _sd * _p_s[:, None] * 86400.0 / 100.0,
+                  "omega_ps_term_hpa_day": _sig * _dps * 86400.0 / 100.0}
+    # NOT in dyn_terms: these are not K/day tendencies and must not enter the
+    # closure sum below.
     print(f"horizontal T diffusion K_h = {float(model.config.K_h):.3e} m2/s "
           f"({'ACTIVE' if float(model.config.K_h) > 0 else 'off'})", flush=True)
     _closure = dyn - sum(dyn_terms.values())
@@ -359,6 +372,16 @@ def main(argv=None):
         print(line)
     np.savez(out_dir / f"heating_budget_{args.run}_d{args.day:04d}.npz",
              bands=BANDS, month=month, dt=DT, **zm)
+    # Per-cell descent rate and terrain, so a cap-mean descent can be checked
+    # for whether it is cap-WIDE or concentrated near topography — a band mean
+    # cannot tell those apart, and they implicate different causes.
+    np.savez(out_dir / f"omega_cells_{args.run}_d{args.day:04d}.npz",
+             omega_hpa_day=extra_rows["omega_hpa_day"],
+             omega_sigmadot_only=extra_rows["omega_sigmadot_only_hpa_day"],
+             omega_ps_term=extra_rows["omega_ps_term_hpa_day"], lat_deg=lat_deg,
+             lon_deg=np.rad2deg(np.asarray(mesh.lonCell, dtype=np.float64)),
+             area=area, p_full=p_full,
+             phis=np.asarray(state.phis.data, dtype=np.float64))
 
     import matplotlib
     matplotlib.use("Agg")
