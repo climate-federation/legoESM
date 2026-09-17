@@ -2724,28 +2724,85 @@ def _tke_matrix_statement_rows(
         "note": "consumed operand, not an output of this block",
     })
     rhs_row = next(row for row in rows if row["field"] == "en_rhs")
+
+    # ONE-VARIABLE SWAP.  A set-inclusion test ("every RHS-unequal cell is a
+    # p_sh2-unequal cell") is NOT causal: NEMO's RHS also consumes p_avt,
+    # rn2, dissl, the post-Langmuir en and wmask, and coincident errors in
+    # those would pass it.  So rebuild the statement from NEMO's own recorded
+    # operands with EXACTLY ONE substitution -- the production p_sh2 -- using
+    # the single committed transcription, and ask whether that alone
+    # reproduces the production output.
+    from nemo_testcase_l2_gyre_round103_tke_block_replay import rebuild_block
+
+    langmuir_reference = np.asarray(
+        statement_record["arrays"]["en_after_langmuir"]).swapaxes(0, 1)
+    production_rhs = np.asarray(production.rhs_pre_sweep)[..., 1:]
+    recorded_rhs = solved("rhs_pre_sweep")
+    # The raw record stream is (i,j,k); every production field is (j,i,k).
+    # Hand the replay a consistently oriented view so its output can be
+    # compared against the production arrays without a second transpose.
+    oriented = {
+        key: (np.asarray(value).swapaxes(0, 1)
+              if np.ndim(value) == 3 else value)
+        for key, value in arrays.items()
+    }
+    held = rebuild_block(oriented, langmuir_reference)["en_rhs"]
+    swapped = rebuild_block(
+        oriented, langmuir_reference,
+        p_sh2_override=shear_candidate)["en_rhs"]
+
+    def _row(name, reference, candidate, note):
+        out = _classification(score(
+            f"GYRE-zco.kt2.tke_matrix.production_step.swap.{name}",
+            reference, candidate, np.ones(reference.shape, dtype=bool)))
+        out.update({
+            "field": name, "entry_mode": entry_mode,
+            "execution": "recorded-operand replay of the compiled statement",
+            "note": note,
+        })
+        return out
+
+    all_held = _row(
+        "all_operands_recorded", recorded_rhs, held,
+        "every operand at NEMO's recorded value; must be BIT or the "
+        "reference side of the comparison is itself wrong")
+    swap_vs_production = _row(
+        "p_sh2_swapped_vs_production", production_rhs, swapped,
+        "only p_sh2 replaced by the production value; BIT means every other "
+        "operand the production step fed this statement was already NEMO's")
+    swap_vs_nemo = _row(
+        "p_sh2_swapped_vs_nemo", recorded_rhs, swapped,
+        "only p_sh2 replaced; must reproduce the production row exactly")
+
+    sole = (
+        all_held["classification"] == "BIT"
+        and swap_vs_production["classification"] == "BIT"
+        and swap_vs_nemo["n_unequal"] == rhs_row["n_unequal"]
+        and swap_vs_nemo["absolute_max"] == rhs_row["absolute_max"]
+        and shear_row["classification"] != "BIT"
+        and rhs_row["classification"] != "BIT")
+
     rhs_unequal = (
-        np.ascontiguousarray(solved("rhs_pre_sweep")).view(np.uint64)
-        != np.ascontiguousarray(
-            np.asarray(production.rhs_pre_sweep)[..., 1:]).view(np.uint64))
+        np.ascontiguousarray(recorded_rhs).view(np.uint64)
+        != np.ascontiguousarray(production_rhs).view(np.uint64))
     shear_unequal = (
         np.ascontiguousarray(shear_reference).view(np.uint64)
         != np.ascontiguousarray(shear_candidate).view(np.uint64))
     rhs_not_explained = int(np.count_nonzero(rhs_unequal & ~shear_unequal))
     attribution = {
         "prediction": (
-            "the en RHS miss is inherited from p_sh2: every RHS-unequal cell "
-            "is a p_sh2-unequal cell"),
+            "swapping ONLY p_sh2 into NEMO's recorded operands reproduces "
+            "the production right-hand side exactly"),
         "p_sh2_row": shear_row,
+        "one_variable_swap": [all_held, swap_vs_production, swap_vs_nemo],
         "rhs_unequal_cells": int(np.count_nonzero(rhs_unequal)),
         "p_sh2_unequal_cells": int(np.count_nonzero(shear_unequal)),
         "rhs_unequal_cells_with_bit_equal_p_sh2": rhs_not_explained,
+        "subset_test_note": (
+            "reported for continuity only; it is NOT the evidence -- "
+            "coincident operand errors would pass it"),
         "verdict": (
-            "CONFIRMED_INHERITED_P_SH2"
-            if (shear_row["classification"] != "BIT"
-                and rhs_row["classification"] != "BIT"
-                and rhs_not_explained == 0)
-            else "REFUTED"),
+            "CONFIRMED_SOLE_OPERAND_P_SH2" if sole else "REFUTED"),
     }
 
     first = next(
@@ -2757,7 +2814,13 @@ def _tke_matrix_statement_rows(
         "record_write_site": (
             "GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/l2_r54_tke.f90:172-190"
             " called from "
-            "GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/zdftke.f90:472"),
+            "GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:463"),
+        "reference_build_statements": (
+            "the matrix/RHS writes in the Round-59 build are "
+            "GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:425-427 and "
+            ":430-433; the two builds' compiled zdftke.f90 differ in zero "
+            "lines once the recorder calls are removed, so the citations "
+            "below to the Round-101 build name the same statements"),
         "rows": rows,
         "p_sh2_attribution": attribution,
         "excluded_outputs": [
@@ -3154,7 +3217,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                     f"one production TKE solve: {len(solve_calls)}")
             injection["solve_call_count"] = len(solve_calls)
             injection["injection_citation"] = (
-                "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:3111-3132")
+                "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:3174-3195")
         require(getattr(state_after, "tke_avt", None) is not None,
                 "production _step_jitted result has no tke_avt K_H carry")
         return {
@@ -3180,7 +3243,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
             "bridge_citation": (
                 "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1198-1385"),
             "existing_stage_twin_citation": (
-                "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:3265-3295"),
+                "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:3328-3358"),
             "output_carry": "LatLonCGridOceanState.tke_avt",
             "extraction_citation": (
                 "ocean_model_latlon_cgrid.py:10808-10813"),

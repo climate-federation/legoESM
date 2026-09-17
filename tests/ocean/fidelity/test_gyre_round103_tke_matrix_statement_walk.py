@@ -157,7 +157,7 @@ def test_gate_names_every_compiled_write_in_the_block():
     assert "namelist_ref:593" in source
     # The plant exists and targets the diagonal.
     assert '"stage-tke-matrix-ulp"' in source
-    assert "CONFIRMED_INHERITED_P_SH2" in source
+    assert "CONFIRMED_SOLE_OPERAND_P_SH2" in source
 
 
 def test_gate_scores_the_block_over_every_solved_level():
@@ -170,3 +170,74 @@ def test_gate_scores_the_block_over_every_solved_level():
     assert "np.ones(reference.shape, dtype=bool)" in body
     assert '"NEMO levels 2:jpkm1"' in body
     assert "[..., 1:30]" in body
+
+
+def test_the_block_replay_is_committed_and_reproduces_nemo_from_nemo():
+    """Codex review, round 103 finding 2: a cited number needs a shipped probe.
+
+    The replay rebuilds NEMO's four block outputs from NEMO's OWN recorded
+    operands and must reproduce NEMO's OWN recorded outputs bit-for-bit.  If
+    this fails, the reference side of every production row is already wrong.
+    """
+    import numpy as np
+    from nemo_testcase_l2_gyre_round103_tke_block_replay import (
+        R101, R59, replay, rebuild_block,
+    )
+
+    if not R59.exists() or not R101.exists():
+        pytest.skip("acquisition records are not present in this tree")
+    report = replay(R59, R101, None)
+    assert report["status"] == "PASS", report["rows"]
+    assert [row["n_unequal"] for row in report["rows"]] == [0, 0, 0, 0]
+    assert all(row["cells"] == 20416 for row in report["rows"])
+    # The write call is the Round-59 build's, not the Round-101 build's.
+    assert report["record_write_call"].endswith("R59TKE/BLD/ppsrc/nemo/"
+                                                "zdftke.f90:463")
+    # Non-vacuity: the plant must move it, on a cell whose baseline is not 0.
+    planted = replay(R59, R101, "operand-ulp")
+    assert planted["status"] == "FAIL"
+    assert planted["plant_baseline_operand"] != 0.0
+    assert sum(row["n_unequal"] for row in planted["rows"]) > 0
+
+
+def test_the_swap_helper_changes_only_the_shear_operand():
+    """One substitution must move the right-hand side and nothing else."""
+    import numpy as np
+    from nemo_testcase_l2_gyre_round103_tke_block_replay import (
+        R101, R59, rebuild_block,
+    )
+    from nemo_testcase_l2_gyre_round54_tke_operands import read_record
+    from nemo_testcase_l2_gyre_round46_kt2_stage_gate import (
+        read_admitted_tke_statement_walk,
+    )
+
+    if not R59.exists() or not R101.exists():
+        pytest.skip("acquisition records are not present in this tree")
+    arrays = read_record(R59)["arrays"]
+    langmuir = np.asarray(
+        read_admitted_tke_statement_walk(R101)["arrays"]["en_after_langmuir"])
+    held = rebuild_block(arrays, langmuir)
+    bumped_sh2 = np.asarray(arrays["sh2"], dtype=np.float64)[:, :, 1:30].copy()
+    # Two ways this control can be vacuous, both observed while writing it:
+    # a cell with wmask == 0 is annihilated by the statement's trailing mask,
+    # and a ONE-ULP change to a small p_sh2 is far below the resolution of
+    # the sum it lands in (dt * 1 ULP of 1.7e-8 is 4.8e-20 against a
+    # right-hand side near 9.7e-4, whose own spacing is ~1.1e-19), so it
+    # rounds away and nothing moves.  Perturb by the smallest amount the
+    # statement can actually propagate instead.
+    wet = np.asarray(arrays["wmask"], dtype=np.float64)[:, :, 1:30] != 0.0
+    idx = tuple(np.argwhere((bumped_sh2 != 0.0) & wet)[0])
+    baseline = float(bumped_sh2[idx])
+    assert baseline != 0.0, "a control that perturbs a zero is not a control"
+    dt = float(arrays["rn_Dt"])
+    resolvable = 4.0 * float(np.spacing(float(held["en_rhs"][idx]))) / dt
+    assert resolvable > 0.0
+    bumped_sh2[idx] = baseline + resolvable
+    swapped = rebuild_block(arrays, langmuir, p_sh2_override=bumped_sh2)
+    for name in ("zd_up", "zd_lw", "zdiag"):
+        assert np.array_equal(
+            np.ascontiguousarray(held[name]).view(np.uint64),
+            np.ascontiguousarray(swapped[name]).view(np.uint64)), name
+    assert not np.array_equal(
+        np.ascontiguousarray(held["en_rhs"]).view(np.uint64),
+        np.ascontiguousarray(swapped["en_rhs"]).view(np.uint64))
