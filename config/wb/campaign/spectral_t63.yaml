@@ -187,9 +187,11 @@ loss:
 # --- per-mode overlays (merged when --mode selects them) ---
 neural_gcm:
   # NeuralGCM-style spatial embedding: sin/cos lat, land fraction, orography
-  # and a learned 8-channel per-column embedding (Kochkov et al. 2024).  Set
-  # false for a like-for-like comparison against a run without it.
-  spatial_embedding: true
+  # and a learned 8-channel per-column embedding (Kochkov et al. 2024).
+  # OFF by default (owner, 2026-09-17): the campaign's learned arms train
+  # without it so their numbers stay comparable to the earlier WB arms.  Set
+  # true to select it.
+  spatial_embedding: false
   # #1464: the learned column has NO momentum head, so without this it runs
   # with no physical surface stress at all, while the classical arm it is
   # scored against carries `classical.turbulence` below. The scheme here MUST
@@ -206,9 +208,9 @@ neural_gcm:
   nn_layers: 4
 sfno:
   # ACE2-style static land-fraction input plane (Watt-Meyer et al. 2024;
-  # orography is already a state channel).  Set false for a like-for-like
-  # comparison against a run without it.
-  spatial_embedding: true
+  # orography is already a state channel).  OFF by default (owner,
+  # 2026-09-17); set true to select it.
+  spatial_embedding: false
   # The spectral-convolution weights are two float64 (n_sh, embed, embed)
   # arrays per block, so they grow as embed^2 * n_blocks. Measured at T63
   # (n_sh = 2080) by building the module under jax.eval_shape:
