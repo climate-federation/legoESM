@@ -1,164 +1,131 @@
 # NEMO-testcases L2 ORCA2 parallel inventory receipt
 
-Date: 2026-09-16. Status: **HELD AT PRE-KT1 ADMISSION**. The current tree
-cannot construct a native ORCA2 testcase, while a completed native NEMO record
-already exists; therefore this round made no numerical candidate and requests
-no NEMO acquisition. (`orca2_inventory.json:2-24`,
-`orca2_inventory.json:226-245`)
+Date: 2026-09-16. Status: **HELD AT PRE-KT1 ADMISSION AND TKE ACQUISITION**.
+The exact certified ORCA2 legoESM testcase assembly is absent. The existing
+Phase-2v A/B record is reusable for entry/stage comparison, but it lacks the
+native post-boundary/pre-Langmuir TKE frame required by the newest contract.
+The binding record verdict is **REUSABLE FOR entry/stage; TKE boundary frame
+MISSING**. (`orca2_inventory.json:2-5`, `orca2_inventory.json:195-202`,
+`orca2_inventory.json:1302-1344`)
 
-## 1. The newest ORCA2 spec
+## 1. Governing TKE contract and corrected record audit
 
-The newest receipt says: **resolve the ORCA2 integrator, then record native
-production-step TKE boundaries and inputs with the same stamp, exact-EOF, and
-one-ULP controls**. This is the governing spec, not one of the broader older
-ORCA2 carry-forwards. (`round101_tke_statement_boundary_receipt.md:193-203`)
+Round 101 rejects source reconstruction and requires five native statement
+states: `en_entry`, `en_after_boundaries`, `en_after_langmuir`,
+`rhs_pre_sweep`, and `en_post_sweep`. In particular,
+`en_after_boundaries` must be captured after the surface/bottom assignments and
+before the active `ln_lc` arm. (`round101_prereg.md:44-56`,
+`round101_prereg.md:60-70`)
 
-The compiled read-only target resolves that first clause: its preprocessing
-card selects `key_RK3`, `key_qco`, `key_vco_1d3d`, and `key_si3`; its compiled
-driver executes the external mode followed by RK3 stages 1, 2, and 3; and the
-compiled closure calls `tke_tke` before `tke_avn`.
-(`cpp_ORCA2_OMIP_L4.fcm:1`,
-`ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90:198-227`,
-`ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90:188-194`)
+Both Phase-2v runs completed kt=10, contain 101 native streams, have identical
+stream inventories, and match on executable, deck-manifest, and input-manifest
+producer hashes. The probe parsed all ten entry frames and all thirty RK3 stage
+frames, required the `T,S,u,v,ssh` schema and exact EOF, and found every A/B
+entry/stage twin exact. (`orca2_inventory.json:1276-1307`,
+`orca2_inventory.json:203-230`)
 
-## 2. Inventory
+The Phase-2v TKE stream is a valid 17-three-dimensional/7-two-dimensional-field
+record through exact EOF and pinned SHA-256. It contains `en_post_lc`, not
+`en_after_boundaries`; the historical writer copies `en` only after the
+Langmuir block. (`orca2_inventory.json:141-193`,
+`phase2v_tke_walk_writer.patch:83-99`)
 
-| item | classification today | evidence |
+The complete semantic map is therefore:
+
+| Round-101 field | Phase-2v native source | disposition |
 |---|---|---|
-| ORCA2 NEMO card/config in this checkout | **MISSING**. The live testcase dispatch contains only LOCK, OVERFLOW, and GYRE; neither an ORCA2 builder nor the execution guard is present. | `nemo_testcase_recipe.py:1014-1026`; `orca2_inventory.json:6-20` |
-| Historical legoESM ORCA2 source card | **BUILT, NOT RUNNABLE** at historical revision `b7ce08cc8afa`: it reads the native domain and monthly T/S deck, but carries six named unmeasured selected arms and its execution validator refuses any nonempty list. | `historical_nemo_testcase_recipe.py:1008-1030`; `historical_nemo_testcase_recipe.py:1252-1275`; `historical_nemo_testcase_recipe.py:1430-1459`; `orca2_inventory.json:27-40` |
-| Read-only NEMO oracle target | **BUILT; NOT RUNNABLE AS STAGED**. `ORCA2_OMIP_L4` is the only executable ORCA2 target; its template `EXP00` lacks the domain and two initial-condition files named by the namelist. | `orca2_inventory.json:68-105`; `ORCA2_OMIP_L4/EXP00/namelist_cfg:19-55` |
-| Other ORCA2 configs under the read-only oracle tree | **REFERENCE CONFIGS, NOT BUILT**. `ORCA2_ICE_PISCES`, `ORCA2_OFF_PISCES`, `ORCA2_OFF_TRC`, `ORCA2_SAS_ICE`, and `X3_ORCA2_ICE_PISCES` have `EXPREF` cards but no executable or `EXP00` namelist. | `orca2_inventory.json:43-91` |
-| Raw ORCA2 record under `phase3/` | **MISSING**. The scan found 33 ORCA2-named derived artifacts and zero ORCA2 raw `.bin` records. | `orca2_inventory.json:107-117` |
-| Existing record outside `phase3/` | **COMPLETE NATIVE RECORD**. Both independent Phase-2v runs ended at kt=10 with matching binary/deck/input provenance; each holds 101 oracle streams. | `orca2_inventory.json:226-245`; `phase2v_a_run.user.time.log:1-5`; `phase2v_b_run.user.time.log:1-5` |
-| Native kt=1--3 oracle coverage | **PRESENT AND TWIN-EXACT** for three step entries, nine RK3 stage exits, and the kt=2 TKE walk: all 13 measured A/B hashes match. | `orca2_inventory.json:146-225` |
-| legoESM tripolar grid | **BUILT** as the generic `create_tripole_grid` loader. It is necessary but does not itself make an ORCA2 recipe executable. | `tripole.py:401-419`; `orca2_inventory.json:6-20` |
-| legoESM ORCA2 recipe | **MISSING FROM CURRENT TREE**; the historical constructor exists only in the separate ORCA2 lineage. | `orca2_inventory.json:6-20`; `orca2_inventory.json:27-40` |
-| legoESM exact ORCA2 forcing | **MISSING FROM CURRENT TREE**; the historical lane has the `nemo_fld_read` implementation required by its card. | `orca2_inventory.json:6-20`; `orca2_inventory.json:27-40`; `historical_nemo_fld_read.py:1-14` |
+| `en_entry` | kt=2 ZDF `en_pre` | present |
+| `en_after_boundaries` | none | **missing; reconstruction forbidden** |
+| `en_after_langmuir` | TKE `en_post_lc` | present |
+| `rhs_pre_sweep` | TKE `en_rhs_pre_solve` | present |
+| `en_post_sweep` | TKE `en_post_solve` | present |
 
-The native NEMO namelist is a from-rest ORCA2-ICE-PISCES card with
-`rn_Dt=10800`, domain file `ORCA_R2_zps_domcfg`, monthly potential-temperature
-and salinity inputs, NCAR bulk forcing, SI3, and a 2-call surface/ice cadence.
-(`ORCA2_OMIP_L4/EXP00/namelist_cfg:19-55`,
-`ORCA2_OMIP_L4/EXP00/namelist_cfg:77-114`,
-`cpp_ORCA2_OMIP_L4.fcm:1`, `phase2v_a_ocean.output:224-239`)
+The inventory names every Phase-2v TKE field, classifies the non-contract fields
+as supplemental operands, and lists only `en_after_boundaries` as missing.
+(`orca2_inventory.json:1308-1345`, `orca2_inventory.json:1345-1467`)
 
-## 3. What this round measured
+## 2. Complete current-tree inventory
 
-The read-only probe measured the admission predicates and record inventory; it
-did not import or execute the ocean model and did not run NEMO.
-Its unplanted arm reports `kt1_3_from_rest_possible=false` and
-`acquisition_needed=false`.
-(`nemo_testcase_l2_orca2_parallel_inventory.py:2-9`,
-`orca2_inventory.json:2-24`)
+The current tree does have an execution guard: `validate_nemo_testcase_card` is
+called by all three current testcase builders. The current dispatch still
+contains only LOCK_EXCHANGE, OVERFLOW, and GYRE; it has no exact `ORCA2-zps`
+builder, and the scan found no ORCA2 asset under `scripts/experiment/`.
+(`nemo_testcase_recipe.py:669`, `nemo_testcase_recipe.py:759`,
+`nemo_testcase_recipe.py:877`, `nemo_testcase_recipe.py:919-925`,
+`orca2_inventory.json:8-16`, `orca2_inventory.json:31-40`)
 
-| first-over-bar boundary | result today | disposition |
-|---|---|---|
-| pre-kt1 native-card admission | **REFUSE**: current ORCA2 dispatch, builder, execution guard, and exact forcing reader are absent | this is the first failed predicate; no numerical row exists (`orca2_inventory.json:6-24`) |
-| kt=1, kt=2, kt=3 T/S/U/V/SSH and RK3 stages | **NOT EXECUTED** | **NOT MEASURED**; running a lat-lon or historical surrogate would not discharge the current native card (`orca2_inventory.json:21-25`) |
+The following generic assets are present and usable:
 
-This is not a claim that ORCA2 has never been measured. Existing phase3
-derived evidence records a bit-exact native entry but an explicit
-`execution_ready=false` guard, a production-JIT W/transport DEBT row, and an
-interior HPG AT-BAR row whose scope excludes the north fold, cyclic seam, and
-level 31. (`round24_orca2_entry_stage.json:2-48`,
-`round24_orca2_production_w.json:26-62`,
-`round24_orca2_production_w.json:82-101`,
-`round27_orca2_hpg_model_arm.json:6-17`,
-`round27_orca2_hpg_model_arm.json:89-141`)
+| asset | current-tree evidence |
+|---|---|
+| named ocean recipes | `legoesm_nemo_like_v1` and `omip_nemo_match_tripole_v1` (`recipes.py:104-130`, `recipes.py:148-173`) |
+| NEMO/TKE configuration and rest constructor | `_nemo_tke_config`, shared NEMO physics, `build_nemo_rest_recipe`, and dispatcher (`nemo_recipe.py:220-318`, `nemo_recipe.py:469-500`, `nemo_recipe.py:1242-1258`) |
+| arbitrary external tripole mesh | `--tripole-mesh` and `create_tripole_grid` loading (`run_omip.py:535-561`, `run_omip.py:1931-1967`) |
+| NEMO partial cells | mesh-native vertical ladder plus `nemo_tpoint` bottom rule (`run_omip.py:5273-5325`, `vertical.py:1184-1210`) |
+| CORE-II | native-file cache builder and runtime loader (`build_core2_nyf_zarr.py:1-37`, `core2.py:106-147`) |
+| JRA55-do | noleap cache preparation calling `build_jra55_cache` (`prepare_omip_forcing.py:1-31`, `prepare_omip_forcing.py:183-236`) |
+| eORCA1 native fields | monthly SSS, T/S, and SI3 ice readers (`nemo_native_fields.py:1-20`, `nemo_native_fields.py:110-178`, `nemo_native_fields.py:297-319`) |
+| QCO/partial-cell arithmetic | source-associated live-face QCO geometry and explicit partial-cell constructor (`vertical.py:535-583`, `vertical.py:1184-1210`) |
 
-The older ORCA2 lineage also reached a production-JIT TKE first boundary:
-`taum`, the ice attenuation, and `zWlc2` were exact, then the `zpelc`
-accumulation differed in 39,290 / 242,135 owned cells with maximum four
-row-scale ULP. This receipt registers that historical result as a prediction
-for a future current-tree run, not a substitute for one.
-(`phase2w_handoff_receipt.md:47-71`)
+These assets support a generic from-rest tripolar run over an externally
+supplied ORCA2 mesh. They do not provide the exact certified `ORCA2-zps`
+testcase card or its monthly ORCA2 deck reader. The precise conclusion is:
+**exact certified ORCA2 testcase assembly is absent; a generic from-rest
+tripolar run over an external ORCA2 mesh is constructible from current assets**.
+(`orca2_inventory.json:17-40`)
 
-## 4. Record and acquisition disposition
+The read-only NEMO oracle target remains built but not runnable directly from
+its template: its `EXP00` lacks the named domain and initial T/S files. Its
+compiled card does resolve RK3, QCO/VCO, SI3, and TKE. No NEMO integration was
+run during this inventory fix. (`orca2_inventory.json:90-126`)
 
-The current probe independently validated the pinned kt=2 TKE stream's header
-and extents through exact EOF: 61,038,700 bytes, binary64, 17 three-dimensional
-and seven two-dimensional fields, with SHA-256
-`31675493f022f71a609142f53bbe220c111b09e9a9a352926a1aff7358770a52`.
-(`orca2_inventory.json:119-144`)
+## 3. Required WRITE-only acquisition
 
-The older Phase-2w prose says 57,266,632 bytes even though its same paragraph
-states the 17+7-field header/payload and pins the same SHA-256. The live file,
-header-derived EOF, and pinned hash agree with 61,038,700 bytes; this receipt
-therefore treats the older byte count as stale prose, not record corruption.
-(`phase2w_handoff_receipt.md:10-18`,
-`phase2w_handoff_receipt.md:35-45`, `orca2_inventory.json:119-144`)
+**ACQUISITION_NEEDED:**
+`/tmp/orca2-inventory-work.qN999s/scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_orca2_tke_boundary_acquisition/run.sh`
 
-The historical admission already bound magic, extent, count, truncation,
-trailing-byte, canonical-slot, undefined-workspace, and twin controls, and its
-TKE walk bound target-bit plants through the first differing statement.
-(`phase2w_handoff_receipt.md:35-45`,
-`phase2w_handoff_receipt.md:47-71`)
+The user-executed acquisition clones the same `ORCA2_ICE_PISCES` reference and
+copies the `ORCA2_OMIP_L4` Phase-2v source card file by file into the new target
+`ORCA2_OMIP_L4_P2VBND`. It pins the historical Phase-2v patch, the A-run deck
+and input manifests, the ten-step resolved configuration, and the np2 layout.
+(`orca2_boundary_run.sh:12-32`, `orca2_boundary_run.sh:62-138`,
+`orca2_boundary_run.sh:249-303`, `orca2_boundary_run.sh:326-380`)
 
-**ACQUISITION_NEEDED: NONE.** Re-acquiring NEMO would not repair the missing
-current legoESM recipe. **Plan inference:** the newest same-stamp/one-ULP
-wording is instead an OPEN consumer-side admission requirement: the current
-reader must restamp this immutable record, prove exact EOF again, and fire a
-one-ULP plant before any new row is promoted.
-(`round101_tke_statement_boundary_receipt.md:193-203`,
-`orca2_inventory.json:2-5`, `orca2_inventory.json:119-144`)
+The new patch is additive: it initializes a write-only buffer, copies native
+`en` immediately after the boundary assignments and immediately before
+`IF(ln_lc)`, then writes the frame after `tke_tke` returns. It changes no
+namelist or model field, and the model TKE dummy argument is `INTENT(in)`.
+(`orca2_boundary.patch:1-30`, `orca2_boundary_writer.F90:1-17`,
+`orca2_boundary_writer.F90:23-57`, `orca2_boundary_writer.F90:60-83`)
 
-## 5. Controls and tests
+Preflight reconstructs the exact Phase-2v source, rejects any removed/replaced
+line, checks the capture location, and proves both writer and patched `zdftke`
+with `gfortran -fsyntax-only`. Every unexpected or explicit nonzero path emits
+a named `REFUSE:` line. (`orca2_boundary_run.sh:4-10`,
+`orca2_boundary_run.sh:140-203`, `orca2_boundary_run.sh:205-233`)
 
-The planted missing-record arm exited 2, printed a named `REFUSE:` line, and
-created no output artifact. (`orca2_inventory_plant.txt:1-4`)
+Post-run admission requires the new 3,543,512-byte frame to pass exact
+magic/header/extent/EOF checks. It then requires exactly 102 streams and
+byte-compares each of the other 101 against Phase-2v A; any changed inherited
+stream refuses the acquisition as non-passive. (`orca2_boundary_run.sh:383-414`,
+`orca2_boundary_run.sh:427-453`)
 
-The receipt gate pinned all 44 file/line citations with no failures, unmapped
-citations, or unused entries. Its one-line-shift plant changed the registered
-`orca2_inventory.json:2-5` payload, produced the single expected failure, and
-exited nonzero. (`orca2_citation_gate_summary.txt:1-7`)
+## 4. Controls and disposition
 
-Focused tests exercise literal dispatch discovery, historical guard discovery,
-exact-EOF acceptance, trailing-byte refusal, and the fail-closed predicate.
-The citation unit guards cover extraction, de-duplication, range parsing, and a
-shift/refusal path. Final result: **6 passed in 0.07s**.
-(`test_nemo_testcase_l2_orca2_parallel_inventory.py:51-81`,
-`test_nemo_testcase_l2_orca2_parallel_receipt_gate.py:22-31`,
-`orca2_final_tests.txt:1-6`)
+The missing-boundary plant starts from a hypothetically complete contract,
+removes only `en_after_boundaries`, flips admission to the binding missing-frame
+verdict, exits 2, and writes no artifact. The provenance-mismatch plant changes
+only A/B producer agreement, flips entry/stage reuse to false, exits 2, and
+writes no artifact. (`orca2_inventory_missing_boundary_plant.txt:1-4`,
+`orca2_inventory_provenance_mismatch_plant.txt:1-4`)
 
-Independent in-sandbox review: **independent review unavailable in-sandbox**.
-The required command exited 1 before reviewing the diff because its app-server
-client could not initialize in the read-only sandbox. (`orca2_review.txt:1-6`)
+The inventory's held conclusion has two independent parts:
 
-## 6. OPEN — ordered first-measurement plan
+1. Reuse the existing Phase-2v entry/stage frames only after their current
+   reader/admission bridge is installed; their schemas, counts, twins, and
+   producer provenance pass this audit.
+2. Run the registered WRITE-only acquisition before any TKE statement-boundary
+   comparison. Do not reconstruct `en_after_boundaries` from `en_post_lc` or
+   borrow bottom values from a later frame.
 
-1. Forward-port the historical native constructor, exact forcing reader, and
-   record readers onto a fresh held ORCA2 integration branch based on the
-   current tip; do not merge historical production physics wholesale. Preserve
-   the native domain/T/S inputs and the card's fail-closed guard.
-   (`historical_nemo_testcase_recipe.py:1008-1030`,
-   `historical_nemo_testcase_recipe.py:1252-1275`,
-   `historical_nemo_testcase_recipe.py:1430-1459`)
-2. Resolve each of the six named selected arms against the compiled ORCA2
-   branch and existing record. Do not clear the execution guard merely to get
-   a trajectory. (`orca2_inventory.json:27-40`)
-3. Add a current-schema reader/admission bridge for the immutable Phase-2v
-   entries, stages, and TKE frame. Require record provenance, exact EOF, and a
-   one-ULP consumed-value plant; explicitly map which newest-spec boundaries
-   the older TKE schema contains before deciding that another WRITE-only frame
-   is necessary. (`orca2_inventory.json:119-225`,
-   `round101_tke_statement_boundary_receipt.md:193-203`)
-4. Only after the native card passes its execution validator, run from rest on
-   CPU/fp64 for kt=1--3 and score T/S/U/V/SSH plus all three RK3 stage exits
-   against the 12 native entry/stage frames. Stop at the first exact-bar
-   violation and report the complete first-over-bar table. The record already
-   supplies those frames. (`orca2_inventory.json:145-225`)
-5. Re-enter the TKE walk at the first current production-step boundary. Treat
-   the historical `zpelc` result as a prediction to confirm or refute, and do
-   not promote isolated or historical arithmetic as a current production-step
-   result. (`phase2w_handoff_receipt.md:47-71`)
-6. Request a new NEMO acquisition only if the boundary-map audit proves that a
-   required native operand is absent. No such absence was established in this
-   inventory. (`orca2_inventory.json:2-5`, `orca2_inventory.json:119-225`)
-
-No configuration or carried-state decision is needed for this first plan: the
-native recorded card already fixes RK3, QCO/ZPS, NCAR forcing, SI3, and the
-from-rest deck. (`cpp_ORCA2_OMIP_L4.fcm:1`,
-`ORCA2_OMIP_L4/EXP00/namelist_cfg:19-55`,
-`ORCA2_OMIP_L4/EXP00/namelist_cfg:77-114`,
-`phase2v_a_ocean.output:224-239`)
+No file under `packages/ocean/legoesm` was changed by this fix round.

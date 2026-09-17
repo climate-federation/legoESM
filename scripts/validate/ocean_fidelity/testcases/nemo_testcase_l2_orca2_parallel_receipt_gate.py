@@ -39,6 +39,9 @@ class GitBlob:
 
 
 SOURCES: dict[str, Path | GitBlob] = {
+    "round101_prereg.md": (
+        REPO / "docs/ocean/fidelity/PREREG_nemo_testcases_l2_gyre_round101.md"
+    ),
     "round101_tke_statement_boundary_receipt.md": (
         REPO
         / "docs/ocean/fidelity/testcases"
@@ -47,6 +50,16 @@ SOURCES: dict[str, Path | GitBlob] = {
     "nemo_testcase_recipe.py": (
         REPO / "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py"
     ),
+    "recipes.py": REPO / "packages/ocean/legoesm/ocean/recipes.py",
+    "nemo_recipe.py": REPO / "packages/ocean/legoesm/ocean/fidelity/nemo_recipe.py",
+    "run_omip.py": REPO / "scripts/run/run_omip.py",
+    "build_core2_nyf_zarr.py": REPO / "scripts/data/build_core2_nyf_zarr.py",
+    "core2.py": REPO / "packages/ocean/legoesm/ocean/forcing/core2.py",
+    "prepare_omip_forcing.py": REPO / "scripts/data/prepare_omip_forcing.py",
+    "nemo_native_fields.py": (
+        REPO / "packages/ocean/legoesm/ocean/forcing/nemo_native_fields.py"
+    ),
+    "vertical.py": REPO / "packages/ocean/legoesm/ocean/vertical.py",
     "tripole.py": REPO / "packages/core/legoesm/grids/tripole.py",
     "nemo_testcase_l2_orca2_parallel_inventory.py": (
         REPO
@@ -63,6 +76,23 @@ SOURCES: dict[str, Path | GitBlob] = {
         / "tests/ocean/fidelity"
         / "test_nemo_testcase_l2_orca2_parallel_receipt_gate.py"
     ),
+    "orca2_boundary_run.sh": (
+        REPO
+        / "scripts/validate/ocean_fidelity/testcases"
+        / "nemo_testcase_l2_orca2_tke_boundary_acquisition/run.sh"
+    ),
+    "orca2_boundary_writer.F90": (
+        REPO
+        / "scripts/validate/ocean_fidelity/testcases"
+        / "nemo_testcase_l2_orca2_tke_boundary_acquisition"
+        / "l2_orca2_tke_boundary.F90"
+    ),
+    "orca2_boundary.patch": (
+        REPO
+        / "scripts/validate/ocean_fidelity/testcases"
+        / "nemo_testcase_l2_orca2_tke_boundary_acquisition"
+        / "zdftke_orca2_boundary.patch"
+    ),
     "historical_nemo_testcase_recipe.py": GitBlob(
         HISTORICAL_REVISION,
         "packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py",
@@ -75,12 +105,22 @@ SOURCES: dict[str, Path | GitBlob] = {
         HISTORICAL_REVISION,
         "docs/ocean/fidelity/testcases/nemo_testcases_l4_orca2_phase2w_handoff_receipt.md",
     ),
+    "phase2v_tke_walk_writer.patch": GitBlob(
+        HISTORICAL_REVISION,
+        "scripts/validate/ocean_fidelity/orca2_l4/phase2v_tke_walk_writer.patch",
+    ),
     "cpp_ORCA2_OMIP_L4.fcm": NEMO_TARGET / "cpp_ORCA2_OMIP_L4.fcm",
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90": (NEMO_TARGET / "BLD/ppsrc/nemo/stprk3.f90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90": (NEMO_TARGET / "BLD/ppsrc/nemo/zdftke.f90"),
     "ORCA2_OMIP_L4/EXP00/namelist_cfg": NEMO_TARGET / "EXP00/namelist_cfg",
     "orca2_inventory.json": EVIDENCE / "orca2_inventory.json",
     "orca2_inventory_plant.txt": EVIDENCE / "orca2_inventory_plant.txt",
+    "orca2_inventory_missing_boundary_plant.txt": (
+        EVIDENCE / "orca2_inventory_missing_boundary_plant.txt"
+    ),
+    "orca2_inventory_provenance_mismatch_plant.txt": (
+        EVIDENCE / "orca2_inventory_provenance_mismatch_plant.txt"
+    ),
     "orca2_citation_gate.json": EVIDENCE / "orca2_citation_gate.json",
     "orca2_citation_gate_plant.json": EVIDENCE / "orca2_citation_gate_plant.json",
     "orca2_citation_gate_summary.txt": EVIDENCE / "orca2_citation_gate_summary.txt",

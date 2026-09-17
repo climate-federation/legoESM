@@ -1,0 +1,30 @@
+--- phase2v/MY_SRC/zdftke.F90
++++ phase2v-boundary/MY_SRC/zdftke.F90
+@@ -57,2 +57,3 @@
+    USE prtctl         ! Print control
+    USE sbcwave        ! Surface boundary waves
++   USE l2_orca2_tke_boundary, ONLY : o2b_begin, o2b_after_boundaries_row, o2b_finish
+@@ -192,6 +193,7 @@
+ #endif
+       !
+       CALL l4_tke_begin( kt )
++      CALL o2b_begin( kt, Kbb, Kmm, nn_eice, nn_etau, nn_mxl, nn_pdl )
+       IF( l4_tke_dump ) THEN
+          DO jj = ntsj, ntej
+             DO ji = ntsi, ntei
+@@ -210,6 +212,7 @@
+       !
+       CALL tke_tke( Kbb, Kmm, p_sh2, p_avm, p_avt, z_pdlr )   ! now tke (en)
+       !
++      CALL o2b_finish
+       CALL tke_avn( Kbb, Kmm,        p_avm, p_avt, z_pdlr )   ! now avt, avm, dissl
+       !
+       CALL l4_tke_write( kt, Kbb, Kmm )
+@@ -339,6 +342,7 @@
+          ENDIF
+          !
+          !                     !<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
++         CALL o2b_after_boundaries_row( jj, en )
+          IF( ln_lc ) THEN      !  Langmuir circulation source term added to tke (Axell JGR 2002)
+             !                  !>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+             !
