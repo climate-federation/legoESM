@@ -652,11 +652,22 @@ class ExperimentConfig(NamedTuple):
     cloud_vertical_overlap_optics: str = "none"
     cloud_n_subcolumns: int = 8
     # Saturation curve for the cloud-fraction RH (CloudConfig.saturation_scheme):
-    # "liquid" (legacy/byte-identical, liquid Tetens saturation at all T) or
-    # "mixed_phase" (RH against the ice-fraction-blended liquid/ice curve, IFS
-    # alpha(T) convention — ice-saturated TTL/anvil air then reads RH ~1 and
-    # the RH cloud schemes see the cirrus the model already carries, #1521).
-    cloud_saturation_scheme: str = "liquid"
+    # "mixed_phase" (DEFAULT since 2026-09-17: RH against the
+    # ice-fraction-blended liquid/ice curve, IFS alpha(T) convention — so
+    # ice-saturated TTL/anvil/POLAR air reads RH ~1 and the RH cloud schemes see
+    # the cirrus the model already carries, #1521) or "liquid" (legacy, liquid
+    # Tetens saturation at all T; byte-identical reproduction of pre-2026-09-17
+    # runs only).
+    #
+    # Why the default moved, and it is a defect report rather than a preference:
+    # cover is zero below rh_crit (0.85 in production) and "liquid" measured RH
+    # against the LIQUID curve at every temperature.  At 230 K and 900 hPa,
+    # ice-saturated air has RH_liquid = 0.662, so reaching 0.85 needs ~28 % ice
+    # SUPERsaturation — Arctic cloud was arithmetically impossible, and the
+    # measured February cover north of 80N was 0.0 % against 35-40 % observed.
+    # Zero cover then also removes EXPLICIT ice condensate from the radiative
+    # subcolumns, so the model's own cirrus was radiatively invisible there.
+    cloud_saturation_scheme: str = "mixed_phase"
     #   cloud_p_xr / cloud_alpha_xr — Xu-Randall cloud-fraction sensitivity
     #   knobs; HIGHER p_xr / LOWER alpha_xr => fraction stays fractional as
     #   moisture rises (flattens the overcast runaway).

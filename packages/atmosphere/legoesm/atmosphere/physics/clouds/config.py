@@ -333,7 +333,13 @@ class CloudConfig(NamedTuple):
     # the RH criterion and the diagnosed condensate phase agree (IFS alpha(T)
     # convention, Tiedtke 1993; equals the shared mixed_phase_saturation curve
     # at the default T_ice_only = constants.T_hom_freeze).  Unknown => raise.
-    saturation_scheme: str = "liquid"
+    # "mixed_phase" by default since 2026-09-17: RH is measured against the
+    # ice-fraction-blended liquid/ice saturation curve.  The old "liquid"
+    # default measured it against the liquid curve at ALL temperatures, which
+    # makes cold cloud impossible — at 230 K / 900 hPa ice-saturated air reads
+    # RH_liquid 0.662 against an rh_crit of 0.85.  "liquid" is retained for
+    # byte-identical reproduction of earlier runs.
+    saturation_scheme: str = "mixed_phase"
 
 
 def build_cloud_config(

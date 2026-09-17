@@ -207,6 +207,15 @@ hard_saturation_adjustment: true
 # convective_precip_efficiency 0.0.
 cloud_rh_crit: 0.85            # was the calibrated default 0.77 (commit 3f376730e)
 cloud_q_c_diagnostic: 5.0e-6   # was 3.0e-4 ("thinner cloud" -> lower albedo)
+# Cloud cover is diagnosed from RH against the ICE-BLENDED saturation curve, not
+# the liquid one (the code default also moved on 2026-09-17; recorded here
+# because it is a scientific choice and a default is not a record).  With
+# "liquid", RH is measured against liquid saturation at every temperature: at
+# 230 K / 900 hPa ice-saturated air reads 0.662 against the 0.85 above, so no
+# cold cloud can form.  Measured in this deck's own February: 0.0 % cover north
+# of 80N and 19 % at 65N, against 35-60 % observed, with surface air 10-19 K
+# too cold underneath it.
+cloud_saturation_scheme: mixed_phase
 
 # --- Cloud-optics corrections (#1519) -----------------------------------------
 # WITHOUT these two the radiation solver sees ONE homogeneous overcast column at

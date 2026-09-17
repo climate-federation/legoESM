@@ -798,18 +798,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "only DIM). 'none'=legacy, byte-identical.")
     parser.add_argument("--cloud-saturation-scheme",
                         dest="cloud_saturation_scheme",
-                        choices=["liquid", "mixed_phase"], default="liquid",
+                        choices=["liquid", "mixed_phase"],
+                        default="mixed_phase",
                         help="Saturation curve for the cloud-fraction RH. "
-                             "'liquid' (legacy, byte-identical) measures RH "
-                             "against liquid (Tetens) saturation at every "
-                             "temperature, so ice-saturated TTL/anvil air "
-                             "(~205-245 K) reads RH ~0.55-0.75 < rh_crit and "
-                             "the RH cloud schemes diagnose NO cirrus where "
-                             "the model carries detrained ice (#1521). "
-                             "'mixed_phase' blends liquid/ice saturation by "
-                             "the scheme's own condensate ice-fraction ramp "
-                             "(IFS alpha(T) convention), warm cloud "
-                             "unchanged.")
+                             "'mixed_phase' (DEFAULT since 2026-09-17) blends "
+                             "liquid/ice saturation by the scheme's own "
+                             "condensate ice-fraction ramp (IFS alpha(T) "
+                             "convention); warm cloud is unchanged. 'liquid' "
+                             "(legacy, byte-identical) measures RH against "
+                             "liquid (Tetens) saturation at every temperature, "
+                             "so ice-saturated air reads RH well below "
+                             "rh_crit and the RH cloud schemes diagnose NO "
+                             "cloud where the model carries ice: ~0.55-0.75 in "
+                             "the TTL/anvil (#1521) and 0.662 at 230 K / "
+                             "900 hPa, which left the February Arctic with "
+                             "0.0 %% cover against 35-40 %% observed.")
     parser.add_argument("--cloud-fsd", dest="cloud_fsd", type=float, default=None,
                         help="Fractional std-dev of in-cloud water for the "
                              "two_region optic [0,1] (Shonk-Hogan ~0.75; HIGHER "
