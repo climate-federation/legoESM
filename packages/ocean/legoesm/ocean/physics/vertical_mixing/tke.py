@@ -380,6 +380,14 @@ class TKEStatementTrace(NamedTuple):
     2:jpkm1).  Every later value prepends the separately held z=0 surface
     row and therefore spans NEMO levels 1:jpkm1.  This trace is built only
     for the private stage-twin path; ordinary model steps request no trace.
+
+    ``matrix_upper``/``matrix_lower``/``matrix_diag`` are the model's
+    zd_up/zd_lw/zdiag over NEMO levels 2:jpkm1 exactly as the compiled
+    assignments zdftke.f90:434/435/436 leave them, captured before the
+    extended-system concatenation (which zeroes the deepest super-diagonal
+    for the back-substitution and would not match NEMO's recorded value).
+    ``rhs_shear`` is the p_sh2 operand the RHS assignment zdftke.f90:439
+    consumes, over the same 2:jpkm1 domain.
     """
 
     en_entry: jnp.ndarray
@@ -389,6 +397,10 @@ class TKEStatementTrace(NamedTuple):
     en_after_langmuir: jnp.ndarray
     rhs_pre_sweep: jnp.ndarray
     en_post_sweep: jnp.ndarray
+    matrix_upper: jnp.ndarray
+    matrix_lower: jnp.ndarray
+    matrix_diag: jnp.ndarray
+    rhs_shear: jnp.ndarray
 
 
 class TKEEntryN2Bundle(NamedTuple):
@@ -1309,6 +1321,13 @@ def _solve_tke_backward_euler(
         raise ValueError(
             "return_statement_trace requires the literal NEMO solver and "
             "surface_bc_level='nemo_z0' so rhs levels 1:jpkm1 exist.")
+    if return_statement_trace and N < 2:
+        # The traced zd_up/zd_lw/zdiag only exist on the literal assembly
+        # branch, which is itself guarded by N >= 2.  Refuse loudly rather
+        # than fall through to the generic assembly and raise NameError.
+        raise ValueError(
+            "return_statement_trace requires at least two interfaces so the "
+            f"literal NEMO matrix assembly runs; got N={N}.")
     if literal_matrix:
         if nemo_e3t is None or dissl_old is None or w_active is None:
             raise ValueError(
@@ -1820,7 +1839,13 @@ def _solve_tke_backward_euler(
             # post-Langmuir and r101_rhs_row calls. ``rhs_base`` is captured
             # from the selected production association (literal or
             # vectorized), not reconstructed by the diagnostic caller.
-            return e_new, rhs_base, rhs_ext
+            # ``literal_up``/``literal_lw``/``diag`` are the model's
+            # zd_up/zd_lw/zdiag at NEMO jk = 2..jpkm1 (zdftke.f90:434-436),
+            # captured BEFORE the extended-system concatenation so the
+            # deepest row keeps the value NEMO records rather than the
+            # back-substitution's structural zero.
+            return (e_new, rhs_base, rhs_ext,
+                    literal_up, literal_lw, diag)
         return e_new
 
     if veros_positivity:
@@ -3260,6 +3285,10 @@ def tke_vertical_mixing(
     _statement_after_langmuir = None
     _statement_rhs = None
     _statement_post_sweep = None
+    _statement_matrix_upper = None
+    _statement_matrix_lower = None
+    _statement_matrix_diag = None
+    _statement_shear = None
     # NEMO ln_mxl0 anchor for nn_mxl=3: l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum)
     _l_anchor = _mxl0_surface_anchor(cfg, taum, rho_0, g, surface_tmask)
     # T3-exact: NEMO's TRUE surface-w-level viscosity avm(jk=1)
@@ -3337,8 +3366,10 @@ def tke_vertical_mixing(
             return_statement_trace=return_statement_trace,
         )
         if return_statement_trace:
-            tke_curr, _statement_langmuir_interior, _statement_rhs = (
-                _solve_result)
+            (tke_curr, _statement_langmuir_interior, _statement_rhs,
+             _statement_matrix_upper, _statement_matrix_lower,
+             _statement_matrix_diag) = _solve_result
+            _statement_shear = P_s_curr
             _statement_after_langmuir = jnp.concatenate(
                 [_surface_row, _statement_langmuir_interior], axis=-1)
             _statement_post_sweep = jnp.concatenate(
@@ -3378,7 +3409,9 @@ def tke_vertical_mixing(
         if any(value is None for value in (
                 _statement_entry, _statement_after_boundaries,
                 _statement_after_langmuir, _statement_rhs,
-                _statement_post_sweep)):
+                _statement_post_sweep, _statement_matrix_upper,
+                _statement_matrix_lower, _statement_matrix_diag,
+                _statement_shear)):
             raise ValueError("requested TKE statement trace is incomplete")
         _statement_trace = TKEStatementTrace(
             en_entry=_statement_entry,
@@ -3388,6 +3421,10 @@ def tke_vertical_mixing(
             en_after_langmuir=_statement_after_langmuir,
             rhs_pre_sweep=_statement_rhs,
             en_post_sweep=_statement_post_sweep,
+            matrix_upper=_statement_matrix_upper,
+            matrix_lower=_statement_matrix_lower,
+            matrix_diag=_statement_matrix_diag,
+            rhs_shear=_statement_shear,
         )
     return TKEOutput(K_M=K_M, K_H=K_H, tke_new=tke_curr,
                      l_eps=l_eps_final, K_M_surface=_K_M_surface,

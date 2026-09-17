@@ -2607,6 +2607,189 @@ def _tke_production_statement_rows(
     }
 
 
+def _tke_matrix_statement_rows(
+    trace, operand_record: dict, entry_mode: str,
+    plant: str | None = None,
+) -> dict:
+    """Subdivide the compiled matrix/RHS block into its recorded outputs.
+
+    The Round-101 walk reports ``zdftke.f90:399-473`` as one row.  The
+    independently admitted Round-59 record stores the four arrays that block
+    writes, captured at ``zdftke.f90:472`` -- the statement immediately before
+    the Round-101 RHS callback at ``:473`` -- so the same instant can be split
+    into one row per compiled assignment without a new acquisition.
+
+    ``p_pdlr`` (``zdftke.f90:421``) executes first but is read at exactly one
+    place, ``zdftke.f90:712`` inside ``tke_avn``, and never enters ``en``; it
+    is reported UNMEASURED-WITH-SPEC rather than silently dropped.
+    """
+    production = trace.tke_statement_trace
+    arrays = operand_record["arrays"]
+
+    def solved(name: str) -> np.ndarray:
+        # Raw stream is (i,j,k); every model-side field is (lat=j, lon=i, k).
+        # NEMO jk = 2..jpkm1 is record index 1..29.
+        return np.asarray(arrays[name]).swapaxes(0, 1)[..., 1:30]
+
+    # Compiled order inside `DO jk = 2, jpkm1` (zdftke.f90:425-443).
+    walk = (
+        ("zd_up", "matrix_upper", "zdftke.f90:434",
+         "zd_up(ji,jk) = zzd_up"),
+        ("zd_lw", "matrix_lower", "zdftke.f90:435",
+         "zd_lw(ji,jk) = zzd_lw"),
+        ("zdiag", "matrix_diag", "zdftke.f90:436",
+         "zdiag(ji,jk) = 1 - zzd_lw - zzd_up + zfact2*dissl*wmask"),
+        ("en_rhs", "rhs_pre_sweep", "zdftke.f90:439-442",
+         "en(ji,jj,jk) = en + rn_Dt*(p_sh2 - p_avt*rn2 + zfact3*dissl*en)"
+         "*wmask"),
+    )
+    record_field = {
+        "zd_up": "matrix_upper",
+        "zd_lw": "matrix_lower",
+        "zdiag": "matrix_diag",
+        "en_rhs": "rhs_pre_sweep",
+    }
+    rows = []
+    plant_target = None
+    for name, trace_field, statement, text in walk:
+        candidate = np.asarray(getattr(production, trace_field))
+        if trace_field == "rhs_pre_sweep":
+            # The traced RHS prepends the separately held z=0 row.
+            candidate = candidate[..., 1:]
+        reference = solved(record_field[name])
+        require(candidate.shape == reference.shape,
+                f"production TKE {name} shape {candidate.shape} != "
+                f"oracle {reference.shape}")
+        mask = np.ones(reference.shape, dtype=bool)
+        clean = _classification(score(
+            f"GYRE-zco.kt2.tke_matrix.production_step.{name}.clean",
+            reference, candidate, mask))
+        scored_reference = reference
+        planted_at = None
+        if plant == "stage-tke-matrix-ulp" and name == "zdiag":
+            equal = (
+                np.ascontiguousarray(reference).view(np.uint64)
+                == np.ascontiguousarray(candidate).view(np.uint64)
+            ) & np.isfinite(reference)
+            indices = np.argwhere(equal)
+            require(indices.size > 0,
+                    "TKE matrix plant found no exact zdiag cell to corrupt")
+            planted_at = tuple(int(value) for value in indices[0])
+            scored_reference = reference.copy()
+            scored_reference[planted_at] = np.nextafter(
+                scored_reference[planted_at], np.float64(np.inf))
+        row = _classification(score(
+            f"GYRE-zco.kt2.tke_matrix.production_step.{name}",
+            scored_reference, candidate, mask))
+        row.update({
+            "kt": 2,
+            "stage": 1,
+            "field": name,
+            "entry_mode": entry_mode,
+            "execution": "production step",
+            "domain": "NEMO levels 2:jpkm1",
+            "nemo_statement": statement,
+            "nemo_text": text,
+            "clean_n_unequal": clean["n_unequal"],
+            "clean_absolute_max": clean["absolute_max"],
+            "plant_index": planted_at,
+        })
+        rows.append(row)
+        if planted_at is not None:
+            require(row["n_unequal"] == clean["n_unequal"] + 1,
+                    "TKE matrix one-ULP plant did not add exactly one "
+                    "unequal cell")
+            plant_target = row["name"]
+    if plant == "stage-tke-matrix-ulp":
+        require(plant_target is not None,
+                "TKE matrix plant did not reach its target")
+
+    # Operand attribution for the RHS assignment: is the miss owned by the
+    # arithmetic or inherited through p_sh2 (zdftke.f90:439)?
+    shear_reference = solved("sh2")
+    shear_candidate = np.asarray(production.rhs_shear)
+    require(shear_candidate.shape == shear_reference.shape,
+            f"production p_sh2 shape {shear_candidate.shape} != "
+            f"oracle {shear_reference.shape}")
+    shear_row = _classification(score(
+        "GYRE-zco.kt2.tke_matrix.production_step.p_sh2_operand",
+        shear_reference, shear_candidate,
+        np.ones(shear_reference.shape, dtype=bool)))
+    shear_row.update({
+        "field": "p_sh2_operand",
+        "entry_mode": entry_mode,
+        "execution": "production step",
+        "domain": "NEMO levels 2:jpkm1",
+        "nemo_statement": "zdftke.f90:439",
+        "note": "consumed operand, not an output of this block",
+    })
+    rhs_row = next(row for row in rows if row["field"] == "en_rhs")
+    rhs_unequal = (
+        np.ascontiguousarray(solved("rhs_pre_sweep")).view(np.uint64)
+        != np.ascontiguousarray(
+            np.asarray(production.rhs_pre_sweep)[..., 1:]).view(np.uint64))
+    shear_unequal = (
+        np.ascontiguousarray(shear_reference).view(np.uint64)
+        != np.ascontiguousarray(shear_candidate).view(np.uint64))
+    rhs_not_explained = int(np.count_nonzero(rhs_unequal & ~shear_unequal))
+    attribution = {
+        "prediction": (
+            "the en RHS miss is inherited from p_sh2: every RHS-unequal cell "
+            "is a p_sh2-unequal cell"),
+        "p_sh2_row": shear_row,
+        "rhs_unequal_cells": int(np.count_nonzero(rhs_unequal)),
+        "p_sh2_unequal_cells": int(np.count_nonzero(shear_unequal)),
+        "rhs_unequal_cells_with_bit_equal_p_sh2": rhs_not_explained,
+        "verdict": (
+            "CONFIRMED_INHERITED_P_SH2"
+            if (shear_row["classification"] != "BIT"
+                and rhs_row["classification"] != "BIT"
+                and rhs_not_explained == 0)
+            else "REFUTED"),
+    }
+
+    first = next(
+        (row for row in rows if row["classification"] != "BIT"), None)
+    return {
+        "execution": "production step",
+        "entry_mode": entry_mode,
+        "record": "round59/oracle_tke_operands_kt00000002.bin",
+        "record_write_site": (
+            "GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/l2_r54_tke.f90:172-190"
+            " called from "
+            "GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/zdftke.f90:472"),
+        "rows": rows,
+        "p_sh2_attribution": attribution,
+        "excluded_outputs": [
+            {
+                "field": "p_pdlr",
+                "nemo_statement": "zdftke.f90:421",
+                "classification": "UNMEASURED_WITH_SPEC",
+                "reason": (
+                    "first in compiled order but read only at "
+                    "zdftke.f90:712 inside tke_avn; it never enters en, so "
+                    "it is a separate consumer chain and needs its own walk"
+                ),
+            },
+            {
+                "field": "wave_coupled_surface_block",
+                "nemo_statement": "zdftke.f90:451-468",
+                "classification": "NOT_EXECUTED",
+                "reason": (
+                    "cpl_phioc is set .TRUE. only in sbccpl.f90:629 (coupled "
+                    "runs) and ln_phioc = .false. in EXP00/namelist_ref:593"
+                ),
+            },
+        ],
+        "first_nonbit": None if first is None else {
+            key: first[key] for key in (
+                "field", "n_unequal", "absolute_max", "classification",
+                "nemo_statement", "nemo_text")
+        },
+        "plant_target": plant_target,
+    }
+
+
 def _tke_surface_operand_rows(
     trace, statement_record: dict, operand_record: dict,
     entry_mode: str, rho0: float,
@@ -2754,8 +2937,10 @@ def _tke_program_twin(
     given_operands = _tke_surface_operand_rows(
         given_trace, tke_statement_record, tke_operand_record,
         "NEMO_TKE_RECORDED", rho0)
+    given_matrix = _tke_matrix_statement_rows(
+        given_trace, tke_operand_record, "NEMO_TKE_RECORDED", plant)
     literal_counterfactual = None
-    if plant != "stage-tke-production-ulp":
+    if plant not in ("stage-tke-production-ulp", "stage-tke-matrix-ulp"):
         vmix = cfg.physics.vertical_mixing
         literal_vmix = vmix._replace(tke=vmix.tke._replace(
             tke_langmuir_evaluation="nemo_literal"))
@@ -2791,14 +2976,15 @@ def _tke_program_twin(
                 ["classification"] == "BIT")
             else "REFUTED")
     }
-    if plant == "stage-tke-production-ulp":
+    if plant in ("stage-tke-production-ulp", "stage-tke-matrix-ulp"):
         return {
-            "format": "nemo-testcase-l2-gyre-tke-production-walk-v4",
+            "format": "nemo-testcase-l2-gyre-tke-production-walk-v5",
             "input_bridge": input_bridge,
             "model_forcing_diagnostic": model_forcing,
             "surface_operand_attribution": surface_attribution,
             "literal_langmuir_counterfactual": literal_counterfactual,
             "given_nemo_entry": given,
+            "given_nemo_entry_matrix_walk": given_matrix,
             "chained": None,
         }
 
@@ -2820,12 +3006,13 @@ def _tke_program_twin(
     require(chained_trace is not None,
             "chained TKE production run did not expose kt2")
     return {
-        "format": "nemo-testcase-l2-gyre-tke-production-walk-v4",
+        "format": "nemo-testcase-l2-gyre-tke-production-walk-v5",
         "input_bridge": input_bridge,
         "model_forcing_diagnostic": model_forcing,
         "surface_operand_attribution": surface_attribution,
         "literal_langmuir_counterfactual": literal_counterfactual,
         "given_nemo_entry": given,
+        "given_nemo_entry_matrix_walk": given_matrix,
         "chained": _tke_production_statement_rows(
             chained_trace, tke_statement_record, "LEGO_CHAINED"),
     }
@@ -3516,6 +3703,7 @@ def main(argv=None) -> int:
                  "stage-r3-record-stamp", "stage-tke-record-header",
                  "stage-tke-record-truncation", "stage-tke-record-stamp",
                  "stage-tke-record-ulp", "stage-tke-production-ulp",
+                 "stage-tke-matrix-ulp",
                  "stamp"),
     )
     p.add_argument("--output", type=Path)
