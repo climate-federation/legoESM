@@ -2856,6 +2856,7 @@ def _tke_matrix_statement_rows(
 def _shear_statement_rows(
     trace, records: dict, card, state, operand_record: dict,
     entry_mode: str, *, legacy_trace=None, plant: str | None = None,
+    execution: str = "production step JIT",
 ) -> dict:
     """Walk NEMO's shear-production routine at its OWN stage (decision 41).
 
@@ -2887,7 +2888,9 @@ def _shear_statement_rows(
 
     arrays = operand_record["arrays"]
     recorded = shear_lat_lon(np.asarray(arrays["sh2"]))[..., SHEAR_K]
-    op = recorded_operands(records[(2, 1)]["arrays"], arrays["avm_entry"])
+    op, recorded_face_metrics = recorded_operands(
+        records[(2, 1)]["arrays"], arrays["avm_entry"],
+        return_face_metrics=True)
     z_coord = card.recipe.z_coord
     u_mask, v_mask = compute_face_masks_3d(z_coord.is_active)
     model = model_operands(
@@ -2904,9 +2907,28 @@ def _shear_statement_rows(
             np.ones(np.shape(reference), dtype=bool)))
         out.update({
             "field": name, "entry_mode": entry_mode,
+            "execution": execution,
             "nemo_statement": statement, "note": note,
         })
         return out
+
+    captured_face_metrics = trace.tke_statement_trace.shear_face_metrics
+    require(captured_face_metrics is not None,
+            "production trace did not capture the shear face metrics")
+    require(len(captured_face_metrics) == 4,
+            "production shear trace must contain four face metrics")
+    metric_names = ("e3u_now", "e3u_before", "e3v_now", "e3v_before")
+    captured_metric_rows = [
+        row(
+            f"captured_face_metric.{name}", reference,
+            np.asarray(candidate), "R59TKE zdfsh2.f90:102,107",
+            "direct WRITE-only capture of the face metric consumed by the "
+            "same production step; reference is reconstructed from NEMO's "
+            "recorded r3 and raw e3w_1d operands",
+        )
+        for name, reference, candidate in zip(
+            metric_names, recorded_face_metrics, captured_face_metrics)
+    ]
 
     # The plant lands on the TIME-LEVEL row, not on the baseline production
     # row.  The baseline row differs in every wet cell, so a one-ULP plant on
@@ -3022,7 +3044,7 @@ def _shear_statement_rows(
 
     first = next((r for r in rows[1:2] if r["classification"] != "BIT"), None)
     return {
-        "execution": "production step",
+        "execution": execution,
         "entry_mode": entry_mode,
         "record_sh2": "round59/oracle_tke_operands_kt00000002.bin",
         "record_operands": "round46/oracle_momstage_kt00000002_s1.bin",
@@ -3030,6 +3052,7 @@ def _shear_statement_rows(
             "GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfsh2.f90:97-109 "
             "(the no-Stokes ELSE branch) and :112-113"),
         "rows": rows,
+        "captured_face_metric_rows": captured_metric_rows,
         "operand_identity_rows": operand_rows,
         "one_variable_swap_rows": swap_rows,
         "time_level_discriminator": time_level,
@@ -3098,7 +3121,7 @@ def _tke_surface_operand_rows(
 def _tke_program_twin(
     records: dict, advmean_root: Path, memory_root: Path,
     tke_statement_record: dict, tke_operand_record: dict,
-    plant: str | None,
+    plant: str | None, execution_mode: str = "production-jit",
 ) -> dict:
     """Bounded production-step TKE subwalk split from the compiler-heavy table."""
     import jax
@@ -3111,6 +3134,23 @@ def _tke_program_twin(
 
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
     require(bool(jax.config.jax_enable_x64), "TKE program twin requires x64")
+    require(execution_mode in ("production-jit", "production-eager"),
+            f"unknown TKE production execution mode {execution_mode!r}")
+    execution_label = (
+        "production step JIT" if execution_mode == "production-jit"
+        else "production closure eager")
+
+    def production_step(model, step_state, dt, freshwater, surface_forcing):
+        if execution_mode == "production-jit":
+            return model.step(
+                step_state, dt=dt, freshwater=freshwater,
+                surface_forcing=surface_forcing)
+        step_state = model._seed_tke_preclosure_carry(step_state)
+        model.prime_step_caches(step_state)
+        with jax.disable_jit():
+            return LatLonCGridOceanModel._step_jitted.__wrapped__(
+                model, step_state, dt, freshwater, surface_forcing)
+
     card = build_nemo_testcase_card("GYRE-zco")
     cfg = card.recipe.model_config._replace(
         freshwater_closure="real_freshwater", fix_eta_drift=True)
@@ -3167,9 +3207,8 @@ def _tke_program_twin(
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, cfg,
         _nemo_ws_test_hooks=hooks)
-    model_forcing_trace = jax.device_get(model.step(
-        state, dt=card.dt_s, freshwater=freshwater,
-        surface_forcing=surface))
+    model_forcing_trace = jax.device_get(production_step(
+        model, state, card.dt_s, freshwater, surface))
     model_forcing = _tke_production_statement_rows(
         model_forcing_trace, tke_statement_record,
         "NEMO_CLOSURE_MEMORY_MODEL_TAUM")
@@ -3181,9 +3220,8 @@ def _tke_program_twin(
     recorded_taum = jnp.asarray(
         np.asarray(tke_arrays["taum_entry"]).swapaxes(0, 1))
     recorded_surface = surface._replace(taum=recorded_taum)
-    given_trace = jax.device_get(model.step(
-        state, dt=card.dt_s, freshwater=freshwater,
-        surface_forcing=recorded_surface))
+    given_trace = jax.device_get(production_step(
+        model, state, card.dt_s, freshwater, recorded_surface))
     given = _tke_production_statement_rows(
         given_trace, tke_statement_record, "NEMO_TKE_RECORDED", plant)
     given_operands = _tke_surface_operand_rows(
@@ -3199,19 +3237,21 @@ def _tke_program_twin(
     # a whole-step ablation, so only its p_sh2 row is read.
     legacy_eta_trace = None
     if plant not in ("stage-tke-production-ulp", "stage-tke-matrix-ulp"):
-        legacy_eta_trace = jax.device_get(LatLonCGridOceanModel(
+        legacy_eta_model = LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord, cfg,
             _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
                 expose_live_stage_operands=True,
                 barotropic_raw_history_override=raw_history,
                 stage_barotropic_output_override=_barotropic_override(
                     records, advmean_root, 2),
-                legacy_zdf_entry_kmm_eta=True)).step(
-                    state, dt=card.dt_s, freshwater=freshwater,
-                    surface_forcing=recorded_surface))
+                legacy_zdf_entry_kmm_eta=True))
+        legacy_eta_trace = jax.device_get(production_step(
+            legacy_eta_model, state, card.dt_s, freshwater,
+            recorded_surface))
     given_shear = _shear_statement_rows(
         given_trace, records, card, state, tke_operand_record,
-        "NEMO_TKE_RECORDED", legacy_trace=legacy_eta_trace, plant=plant)
+        "NEMO_TKE_RECORDED", legacy_trace=legacy_eta_trace, plant=plant,
+        execution=execution_label)
     literal_counterfactual = None
     if plant not in ("stage-tke-production-ulp", "stage-tke-matrix-ulp",
                      "stage-shear-operand-ulp"):
@@ -3220,11 +3260,12 @@ def _tke_program_twin(
             tke_langmuir_evaluation="nemo_literal"))
         literal_cfg = cfg._replace(physics=cfg.physics._replace(
             vertical_mixing=literal_vmix))
-        literal_trace = jax.device_get(LatLonCGridOceanModel(
+        literal_model = LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord, literal_cfg,
-            _nemo_ws_test_hooks=hooks).step(
-                state, dt=card.dt_s, freshwater=freshwater,
-                surface_forcing=recorded_surface))
+            _nemo_ws_test_hooks=hooks)
+        literal_trace = jax.device_get(production_step(
+            literal_model, state, card.dt_s, freshwater,
+            recorded_surface))
         literal_counterfactual = _tke_production_statement_rows(
             literal_trace, tke_statement_record,
             "NEMO_TKE_RECORDED_LITERAL_LANGMUIR_COUNTERFACTUAL")
@@ -3253,7 +3294,8 @@ def _tke_program_twin(
     if plant in ("stage-tke-production-ulp", "stage-tke-matrix-ulp",
                  "stage-shear-operand-ulp"):
         return {
-            "format": "nemo-testcase-l2-gyre-tke-production-walk-v5",
+            "format": "nemo-testcase-l2-gyre-tke-production-walk-v6",
+            "execution": execution_label,
             "input_bridge": input_bridge,
             "model_forcing_diagnostic": model_forcing,
             "surface_operand_attribution": surface_attribution,
@@ -3273,16 +3315,16 @@ def _tke_program_twin(
                 expose_live_stage_operands=True))
         state = model._seed_tke_preclosure_carry(state)
         freshwater, surface = _surface_forcings(card, state, kt)
-        trace = jax.device_get(model.step(
-            state, dt=card.dt_s, freshwater=freshwater,
-            surface_forcing=surface))
+        trace = jax.device_get(production_step(
+            model, state, card.dt_s, freshwater, surface))
         if kt == 2:
             chained_trace = trace
         state = trace.state_after
     require(chained_trace is not None,
             "chained TKE production run did not expose kt2")
     return {
-        "format": "nemo-testcase-l2-gyre-tke-production-walk-v5",
+        "format": "nemo-testcase-l2-gyre-tke-production-walk-v6",
+        "execution": execution_label,
         "input_bridge": input_bridge,
         "model_forcing_diagnostic": model_forcing,
         "surface_operand_attribution": surface_attribution,
@@ -3746,6 +3788,7 @@ def run(
     stage1_r3_root: Path = STAGE1_R3_ROOT,
     tke_statement_root: Path = TKE_STATEMENT_ROOT,
     tke_operand_record: Path = TKE_OPERAND_RECORD,
+    execution_mode: str = "production-jit",
 ) -> dict:
     stamp = worktree_stamp()
     expected = "0" * 40 if plant == "stamp" else expect_commit.lower()
@@ -3888,7 +3931,7 @@ def run(
                 "before production scoring")
         report["tke_statement_walk"] = _tke_program_twin(
             records, advmean_root, memory_root, statement_record,
-            legacy_record, plant)
+            legacy_record, plant, execution_mode)
     if mode == "stage-tke-record":
         from nemo_testcase_l2_gyre_round54_tke_operands import (
             read_record as read_tke_operand_record,
@@ -3988,6 +4031,13 @@ def main(argv=None) -> int:
     p.add_argument(
         "--tke-operand-record", type=Path, default=TKE_OPERAND_RECORD)
     p.add_argument(
+        "--execution-mode",
+        choices=("production-jit", "production-eager"),
+        default="production-jit",
+        help=("execution boundary for stage-tke-walk; eager invokes the "
+              "complete production closure with JIT disabled"),
+    )
+    p.add_argument(
         "--plant",
         choices=("header", "slot", "truncation", "calibration", "given", "trajectory",
                  "twin", "stage-entry-ulp", "stage-context-ulp",
@@ -4018,6 +4068,7 @@ def main(argv=None) -> int:
         stage1_r3_root=args.stage1_r3_root,
         tke_statement_root=args.tke_statement_root,
         tke_operand_record=args.tke_operand_record,
+        execution_mode=args.execution_mode,
     )
     report["status"] = plant_aware_status(report["status"], args.plant)
     text = json.dumps(report, indent=2, sort_keys=True)

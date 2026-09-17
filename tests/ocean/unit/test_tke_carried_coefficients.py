@@ -723,6 +723,25 @@ def test_live_qco_step_entry_helper_is_jittable_and_differentiable():
         implicit_model, implicit_state) is None
 
 
+def test_live_qco_step_entry_helper_exposes_consumed_face_metrics():
+    """The stage gate observes the operands without reconstructing them."""
+    tke_cfg = dino_mod._dino_vertical_mixing_config(
+        dino_config_for_recipe("nemo_dino_kamm_mlf")).tke
+    model, state = _step_entry_helper_fixture(tke_cfg)
+
+    expected = LatLonCGridOceanModel._tke_step_entry_p_sh2(model, state)
+    got, face_metrics = LatLonCGridOceanModel._tke_step_entry_p_sh2(
+        model, state, return_face_metrics=True)
+
+    np.testing.assert_array_equal(got, expected)
+    assert face_metrics is not None
+    assert len(face_metrics) == 4
+    assert face_metrics[0].shape == state.u.data.shape[:-1] + (
+        state.u.data.shape[-1] - 1,)
+    assert face_metrics[2].shape == state.v.data.shape[:-1] + (
+        state.v.data.shape[-1] - 1,)
+
+
 def test_live_face_metric_product_matches_hand_computed_sh2():
     # Two identical U faces, no V shear. du_now=[-2,-3], du_before=[-4,-6],
     # avm face sums=[6,10]. The 0.25 two-face collapse gives [24,90]

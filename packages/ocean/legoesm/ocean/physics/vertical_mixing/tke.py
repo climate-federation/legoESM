@@ -401,6 +401,7 @@ class TKEStatementTrace(NamedTuple):
     matrix_lower: jnp.ndarray
     matrix_diag: jnp.ndarray
     rhs_shear: jnp.ndarray
+    shear_face_metrics: object = None
 
 
 class TKEEntryN2Bundle(NamedTuple):

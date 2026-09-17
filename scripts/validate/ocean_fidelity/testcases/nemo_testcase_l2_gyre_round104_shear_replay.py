@@ -98,7 +98,9 @@ def _lat_lon(v: np.ndarray) -> np.ndarray:
     return v.transpose(1, 0, 2) if v.ndim == 3 else v.T
 
 
-def recorded_operands(stage_arrays: dict, avm_owned: np.ndarray) -> dict:
+def recorded_operands(
+    stage_arrays: dict, avm_owned: np.ndarray, *, return_face_metrics=False,
+):
     """Assemble NEMO's own ``zdf_sh2`` operands on the two windows.
 
     ``stage_arrays`` is the round-46 kt=2 stage-1 record (full halo, reader
@@ -149,7 +151,7 @@ def recorded_operands(stage_arrays: dict, avm_owned: np.ndarray) -> dict:
     e3u_b = e3w1d[K][None, None, :] * (1.0 + w(r3u_b, U_I, U_J)[..., None])
     e3v = e3w1d[K][None, None, :] * (1.0 + w(r3v, V_I, V_J)[..., None])
     e3v_b = e3w1d[K][None, None, :] * (1.0 + w(r3v_b, V_I, V_J)[..., None])
-    return {
+    operands = {
         # S1/S2 velocity operands, full column so the k-difference is taken
         # in the replay exactly as the compiled statement takes it.
         "u_now": w(uu, U_I, U_J, slice(0, 30)),
@@ -173,6 +175,9 @@ def recorded_operands(stage_arrays: dict, avm_owned: np.ndarray) -> dict:
         "coast_v": 2.0 - (w(vmask, O_I, slice(1, 23), K)
                           * w(vmask, O_I, slice(2, 24), K)),
     }
+    if return_face_metrics:
+        return operands, (e3u, e3u_b, e3v, e3v_b)
+    return operands
 
 
 def rebuild_sh2(op: dict, **overrides) -> np.ndarray:

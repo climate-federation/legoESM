@@ -9030,7 +9030,7 @@ class LatLonCGridOceanModel:
 
     def _tke_step_entry_p_sh2(
         self, state, *, eta_now=None, u_now=None, v_now=None,
-        z_coord=None, config=None, grid=None,
+        z_coord=None, config=None, grid=None, return_face_metrics=False,
     ):
         """Freeze NEMO ``p_sh2`` from the step-entry NOW/BEFORE faces."""
         _zc = self.z_coord if z_coord is None else z_coord
@@ -9076,8 +9076,9 @@ class LatLonCGridOceanModel:
             )
             u_cell = 0.5 * (_u_now[:, :-1, :] + _u_now[:, 1:, :])
             v_cell = 0.5 * (_v_now[:-1, :, :] + _v_now[1:, :, :])
-            return state.tke_avm.data * vertical_shear_squared(
+            p_sh2 = state.tke_avm.data * vertical_shear_squared(
                 u_cell, v_cell, dz_half)
+            return (p_sh2, None) if return_face_metrics else p_sh2
 
         if shear_disc not in ("nemo_face_native", "nemo_face_native_now2"):
             raise ValueError(
@@ -9192,10 +9193,11 @@ class LatLonCGridOceanModel:
                 ref_v * (1.0 + r3vn[..., None]),
                 ref_v * (1.0 + r3vb[..., None]),
             )
-        return avm_weighted_shear_production(
+        p_sh2 = avm_weighted_shear_production(
             _u_now, _v_now, _u_before, _v_before,
             dz_half, u_mask, v_mask, state.tke_avm.data,
             face_metrics=face_metrics)
+        return (p_sh2, face_metrics) if return_face_metrics else p_sh2
 
     def _tke_realized_kdiss_active(self) -> bool:
         """True iff the post-mixing TKE charges the REALIZED implicit-friction
@@ -9830,6 +9832,7 @@ class LatLonCGridOceanModel:
         _tke_coeff_new = None
         _tke_entry_used = None
         _tke_statement_trace_used = None
+        _tke_shear_face_metrics_used = None
         _post_mixing = self._tke_post_mixing_active()
         _tke_ctx = None
         from legoesm.ocean.physics.vertical_mixing import (
@@ -9970,9 +9973,15 @@ class LatLonCGridOceanModel:
             else:
                 _tke_lat_deg = jnp.degrees(_grid.lat_T)
             if _tke_prognostic:
-                _tke_p_sh2 = self._tke_step_entry_p_sh2(
+                _tke_p_sh2_result = self._tke_step_entry_p_sh2(
                     state, eta_now=eta_now, u_now=u_now, v_now=v_now,
-                    z_coord=_zc, config=_cfg_b, grid=_grid)
+                    z_coord=_zc, config=_cfg_b, grid=_grid,
+                    return_face_metrics=return_tke_entry)
+                if return_tke_entry:
+                    _tke_p_sh2, _tke_shear_face_metrics_used = (
+                        _tke_p_sh2_result)
+                else:
+                    _tke_p_sh2 = _tke_p_sh2_result
                 K_v_cell, A_v_cell, tke_new = compute_vertical_K_profiles(
                     cc_state, _zc, surface_forcing, physics_config,
                     A_v_background=float(_cfg_b.A_v),
@@ -10012,6 +10021,11 @@ class LatLonCGridOceanModel:
                     _tke_entry_used = _tke_coeff_new.tke_entry
                     _tke_statement_trace_used = (
                         _tke_coeff_new.statement_trace)
+                    if _tke_statement_trace_used is not None:
+                        _tke_statement_trace_used = (
+                            _tke_statement_trace_used._replace(
+                                shear_face_metrics=(
+                                    _tke_shear_face_metrics_used)))
                     tke_new = _tke_coeff_new.tke_new
                 if _post_mixing:
                     # Phase 1 only (Veros set_tke_diffusivities from the
