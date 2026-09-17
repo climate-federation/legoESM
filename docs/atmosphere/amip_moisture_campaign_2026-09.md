@@ -777,3 +777,57 @@ chain now receives.
 Next, in order: port CUFLXN, fix the humidity convention at the trigger/ascent seam, reclassify
 KTYPE after the ascent, return the condensate and precipitation to the host, and only then the
 day-110 replay and the 5-day screen.
+
+## Iteration K — the trigger/ascent seam, the KTYPE retype, and the first-guess contract (2026-09-17)
+
+Three oracle defects closed on the faithful chain, each diagnosed by codex against the vendored
+Fortran, coded by GLM, and reviewed by codex and GLM in turn.
+
+**1. The seam was specific humidity all along.** The ported trigger applied `q/(1+q)` on entry and
+`q/max(1-q-l, 0.5)` on exit (twice each, counting the refined wrapper). The oracle has neither:
+PQEN, PQENH, PQU and PLU are one moist-mass basis end to end (cubasen.F90:72 and :62,
+cuinin.F90:187 and :211, cubasen.F90:677-678, cuascn.F90:526/534/570-572/618). The two conversions
+are exact inverses when there is no condensate, so the returned vapour was unchanged and the defect
+was invisible from outside — it lived INSIDE, where the environment was 1.67% drier than the
+saturation curve it was compared against. Correcting it deepens the deep fixtures by 30-70 hPa,
+lowers their cloud base by 17 hPa and raises precipitation generation 30%; the trade-cumulus tops
+do not move, because they are inversion-limited rather than humidity-limited.
+
+Both column fixtures also built their humidity as a fraction of `saturation_mixing_ratio`. On a
+specific-humidity API that is a 1.7% moist bias in the FIXTURE, and it makes the module-wrong and
+fixture-wrong hypotheses produce identical diffs — GLM's finding. They now use
+`saturation_specific_humidity`, which is genuinely `w_s/(1+w_s)`.
+
+**2. KTYPE is now reclassified against the actual ascent top** (cumastrn.F90:635-641), between the
+single ascent and the final closure, on the realised half-level pressure depth against RDEPTHS. The
+source resets nothing else there and never runs a second ascent.
+
+**3. The first guess and the rescale now divide by the same number.** ifs_closure rebuilds ZMFUB
+internally and forms ZMFS = ZMFUB1/ZMFUB (cumastrn.F90:963), so it has to rebuild it with the
+PRE-reclassification type — codex's P1. Fixing that exposed a second, older defect: the chain built
+its ZDH from the FULL-level environment at cloud base while ifs_closure used the HALF-level one, so
+the flux that launched the ascent and the flux the closure divided by were different quantities.
+The oracle uses ZTENH/ZQENH (cumastrn.F90:570-571). Both sites now use the half-level environment,
+and two tests pin the identity.
+
+That last correction costs mass flux on the 30-level fixture: peak heating falls from just over 1 to
+0.33 K/day. MEASURED, not inferred — on that column the retype is inert (realised depth 6.8 kPa
+against a 20 kPa split, KTYPE 2 -> 2) and the rescale is ZMFS = 0.96, so the half-level ZDH is the
+whole effect. The fixture has a sharp humidity step at 950 hPa, which is why the half-level humidity
+at cloud base is 0.0129 against 0.017 at the full level.
+
+REFUTED in review, both by reading the Fortran: ZDHPBL is NOT gated on KTYPE==2 (cumastrn.F90:493
+gates on LDCUM and the sub-cloud level range only), and ITOPM2 is KCTOP, not KCTOP-2 (:637).
+
+STILL OPEN on this path, in order: the detrained condensate and the convective precipitation are
+dropped from the host water budget while their latent heating is kept (codex: the vapour sink is
+already in PTENQ via the flux-divergence form, so the host loses sum(PLUDE) + surface precipitation
+per unit time); the early return bypasses the legacy downdraught and sub-cloud evaporation; the
+ported ascent does not return an updated LDCUM (CUASCN has it INOUT, cuascn.F90:389 and :627),
+harmless only while there is no KTYPE=3 branch; plitot is zero, there is no convective momentum
+transport, and ustar is a fixed 0.1 m/s.
+
+ALSO OPEN, found by GLM while reviewing the seam fix: the trigger's sub-layer refinement does not
+converge to the native-grid answer. On the deep sounding, L30 refined by 1/2/4 gives 895/557/523 hPa
+against a native L60 top of 616 hPa, and the native-vs-refined gap widened from 25 to 59 hPa with
+the seam fix. The gate test now documents that rather than certifying agreement.

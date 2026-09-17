@@ -1666,12 +1666,14 @@ class BechtoldConfig(NamedTuple):
     # the absolute-flux reconstruction (which removes a +-11000 K/day dipole at
     # the two lowest levels) and the humidity convention across the trigger /
     # ascent seam (q_v, q_u and l_u are all PQEN / PQU / PLU specific humidity,
-    # cubasen.F90:72 and :677-678).  Still open: KTYPE is not reclassified
-    # against the actual ascent top (cumastrn.F90:635-641), the detrained
+    # cubasen.F90:72 and :677-678) and the KTYPE reclassification against the
+    # actual ascent top (cumastrn.F90:635-641).  Still open: the detrained
     # condensate and the convective precipitation are dropped from the host
-    # water budget while their latent heating is kept, and the early return
+    # water budget while their latent heating is kept, the early return
     # bypasses the legacy downdraught and sub-cloud evaporation rather than
-    # keeping them.
+    # keeping them, and the ported ascent does not return an updated LDCUM
+    # (CUASCN has it INOUT and clears it for mid-level columns, cuascn.F90:389
+    # and :627), which is harmless only while this port has no KTYPE=3 branch.
     use_ifs_ascent: bool = False
     # IFS RCAPDCYCL=2 diurnal-cycle CAPE correction (cumastrn.F90:780-833;
     # see bechtold._ifs_capdcycl): subtracts the sub-cloud CAPE production

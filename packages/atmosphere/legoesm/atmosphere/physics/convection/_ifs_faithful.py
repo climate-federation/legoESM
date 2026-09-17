@@ -121,6 +121,29 @@ def _hydrostatic_geopotential(T, q_v, p_half):
     return geo_full, geo_half
 
 
+
+def _reclassify_ktype(ktype, ldcum, p_half, k_cbot, k_ctop, depth_split_pa):
+    """cumastrn.F90:635-641: reclassify KTYPE against the ACTUAL ascent top.
+
+    Runs between the single CUASCN ascent (:611-625) and the final closure
+    (:845 deep, :894 shallow).  With the realised cloud depth
+    ZPBMPT = PAPH(KCBOT) - PAPH(KCTOP):
+        KTYPE == 1 and ZPBMPT <  RDEPTHS  ->  KTYPE = 2   (:637)
+        KTYPE == 2 and ZPBMPT >= RDEPTHS  ->  KTYPE = 1   (:638)
+    Inactive columns (LDCUM = .FALSE.) keep their incoming KTYPE.  Nothing
+    else changes here: no second ascent, and no entrainment-rate / LDCUM /
+    KCTOP / first-guess-mass-flux reset -- only the final closure and
+    everything after it see the new type.
+    """
+    idx = jnp.arange(p_half.shape[0])
+    kb = jnp.asarray(k_cbot).astype(jnp.int32)      # IKB = KCBOT
+    kt = jnp.asarray(k_ctop).astype(jnp.int32)      # ITOPM2 = KCTOP
+    zpbmpt = p_half[idx, kb] - p_half[idx, kt]      # PAPH(IKB)-PAPH(ITOPM2)
+    ktype = jnp.where(ldcum & (ktype == 1) & (zpbmpt < depth_split_pa), 2, ktype)
+    ktype = jnp.where(ldcum & (ktype == 2) & (zpbmpt >= depth_split_pa), 1, ktype)
+    return ktype
+
+
 def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, conv_prog_profile,
                             conv_stoch_state, prng_key, dt, config,
                             shf_w_m2, lhf_w_m2, land_frac,
@@ -167,6 +190,13 @@ def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, conv_prog_profile,
     T_u0, q_u0, l_u0 = trig.T_u, trig.q_u, trig.l_u
     w_base, klab0 = trig.w_base, trig.klab
 
+    # Half-level environment by the source's own cuinin rule (NOT arithmetic
+    # means).  Built BEFORE the first guess because ZDH is a HALF-level
+    # quantity (cumastrn.F90:565-569) and the ZMFUB built here has to be the
+    # same number ifs_closure divides by when it forms ZMFS.
+    T_h, q_h, _s_h = half_level_env(T, q_v, p_full, p_half, geo_full, geo_half,
+                                    IFSTestAscentConfig())
+
     # --- 2. cumastrn contract: ascent runs ONCE at the FIRST-GUESS M_b ---
     # zdhpbl / zdh exactly as ifs_closure builds them (see its body).
     nlev = T.shape[1]
@@ -182,8 +212,8 @@ def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, conv_prog_profile,
     t_u_b = T_u0[idx, kb]
     q_u_b = q_u0[idx, kb]
     l_u_b = l_u0[idx, kb]
-    t_b = T[idx, kb]      # environment at cloud base (no half-level T/q here)
-    q_b = q_v[idx, kb]
+    t_b = T_h[idx, kb]    # PTENH(IKB) / PQENH(IKB), as in ifs_closure
+    q_b = q_h[idx, kb]
     zqumqe = q_u_b + l_u_b - q_b
     zdqmin = jnp.maximum(ZDQMIN_FRAC * q_b, ZDQMIN_ABS_FLOOR)   # :567
     # cumastrn.F90:569:  ZDH=RG*MAX(ZDH,1.E5_JPRB*ZDQMIN)
@@ -192,11 +222,8 @@ def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, conv_prog_profile,
     M_b, zmfmax, ldcum = first_guess_mass_flux(
         p_half, k_cbot, ldcum, ktype, zdhpbl, zdh_base, dt, clo_cfg)
 
-    # Half-level environment by the source's own cuinin rule (NOT arithmetic
-    # means); plitot is the environmental condensate the ascent entrains, which
-    # this call site does not carry -> zeros, a declared gap.
-    T_h, q_h, _s_h = half_level_env(T, q_v, p_full, p_half, geo_full, geo_half,
-                                    IFSTestAscentConfig())
+    # plitot is the environmental condensate the ascent entrains, which this
+    # call site does not carry -> zeros, a declared gap.
     plitot = jnp.zeros_like(T)
     asc = ifs_updraught_ascent(
         T, q_v, qs, p_full, p_half, geo_full, geo_half,
@@ -206,6 +233,14 @@ def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, conv_prog_profile,
     # ascent yields the flux profiles at first-guess M_b (attribute `M`);
     # the closure then only RESCALES them (no second ascent).
 
+    # --- 2b. cumastrn.F90:635-641: reclassify KTYPE against the ACTUAL ascent
+    # top before the final closure.  One ascent only: the source does NOT
+    # rerun CUASCN, reset the entrainment rates, LDCUM, KCTOP or the
+    # first-guess mass flux here -- only KTYPE changes.
+    ktype_first_guess = ktype
+    ktype = _reclassify_ktype(ktype, ldcum, p_half, k_cbot, asc.k_ctop,
+                              IFSTestAscentConfig().depth_split_pa)
+
     # --- 3. closure: rescales the once-computed ascent profiles (no 2nd ascent)
     clo = ifs_closure(
         asc.M, asc.PMFUS, asc.PMFUQ, asc.PMFUL, asc.PLUDE,
@@ -214,7 +249,8 @@ def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, conv_prog_profile,
         ldcum, ktype, k_cbot, k_dpl,
         T, q_v, qs, p_full, p_half, geo_full, geo_half, T_h, q_h,
         dT_dt_other, dq_dt_other, dT_dt_adv, dq_dt_adv,
-        land_frac, config.dx_m, dt, clo_cfg)
+        land_frac, config.dx_m, dt, clo_cfg,
+        ktype_first_guess=ktype_first_guess)
 
     # --- 3b. CUFLXN: cumastrn runs this BETWEEN the closure and the
     # tendencies (cumastrn.F90:1104, CUDTDQN at :1226).  It subtracts the

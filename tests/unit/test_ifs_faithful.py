@@ -149,5 +149,103 @@ def test_no_cloud_edge_dipole():
     bottom_size = abs(dT_day[-1]) + abs(dT_day[-2])
     assert not (bottom_size > 100.0 and bottom_pair < 0.05 * bottom_size), (
         dT_day[-2], dT_day[-1])
-    # not vacuous: the chain must actually be convecting here
-    assert float(np.max(np.abs(dT_day))) > 1.0
+    # not vacuous: the chain must actually be convecting here.  The bound is
+    # 0.1 and not 1 K/day because this column is typed SHALLOW by the trigger
+    # on 30 levels, so its mass flux is ZDHPBL/ZDH, and ZDH is built on the
+    # HALF-level environment (cumastrn.F90:570 uses ZTENH/ZQENH).  The fixture
+    # has a sharp humidity step at 950 hPa, so the half-level humidity at cloud
+    # base is 0.0129 against 0.017 at the full level -- a much larger ZQUMQE
+    # and a correspondingly smaller mass flux than the full-level shortcut this
+    # chain used until 2026-09-17.
+    # MEASURED 2026-09-17 on this fixture: 0.33 K/day, with ktype 2 -> 2 (the
+    # realised cloud depth is 6.8 kPa, far under the 20 kPa split) and
+    # ZMFS = 0.96, so the retype and the closure rescale are both inert here
+    # and the value is set by the half-level ZDH alone.  A band, not a floor,
+    # so drift in EITHER direction trips.
+    assert 0.2 < float(np.max(np.abs(dT_day))) < 0.5
+
+
+def test_ktype_reclassified_against_ascent_top():
+    """Pins cumastrn.F90:635-641.
+
+    Between the single CUASCN ascent (:611-625) and the final closure (:845
+    deep, :894 shallow) the source reclassifies KTYPE against the ACTUAL cloud
+    depth ZPBMPT = PAPH(KCBOT) - PAPH(KCTOP), with RDEPTHS =
+    IFSTestAscentConfig.depth_split_pa: a deep column (1) whose realised depth
+    fell short of the split becomes shallow (2), a shallow column (2) that
+    reached the split becomes deep (1), and an INACTIVE column (LDCUM false)
+    keeps its incoming type.  Deleting the helper fails this test.
+    """
+    _, _, _, p_half = _deep_column(nlev=30)
+    ncol = 5
+    p_half = jnp.broadcast_to(jnp.asarray(p_half), (ncol, p_half.shape[-1]))
+    cfg = TA.IFSTestAscentConfig()
+    kb = jnp.full((ncol,), 27, jnp.int32)                 # PAPH(IKB)
+    k_ctop = jnp.asarray([10, 25, 10, 25, 25], jnp.int32)
+    ktype_in = jnp.asarray([1, 1, 2, 2, 1], jnp.int32)
+    ldcum = jnp.asarray([True, True, True, True, False])
+    # geometry pinned so the case table cannot silently go vacuous if the
+    # fixture grid ever changes
+    depth = np.asarray(p_half[0, kb[0]] - p_half[0, k_ctop])
+    np.testing.assert_array_equal(depth >= float(cfg.depth_split_pa),
+                                  [True, False, True, False, False])
+    ktype_out = F._reclassify_ktype(ktype_in, ldcum, p_half, kb, k_ctop,
+                                    cfg.depth_split_pa)
+    np.testing.assert_array_equal(np.asarray(ktype_out), [1, 2, 1, 2, 1])
+
+
+def test_closure_divides_by_the_mass_flux_that_launched_the_ascent(monkeypatch):
+    """ZMFS = ZMFUB1/ZMFUB (cumastrn.F90:963) has to divide by the SAME ZMFUB
+    that launched CUASCN, so the chain's first guess and the one ifs_closure
+    rebuilds internally must be the same number.  Two ways that breaks, both
+    gated here: the closure rebuilding it from the RECLASSIFIED type
+    (cumastrn.F90:635-641 runs after the ascent, the first guess at :563-576
+    before it), and the two sites disagreeing on half- vs full-level
+    environment at cloud base.  Also asserts the reclassification is actually
+    wired into the chain: deleting only the call site fails here.
+    """
+    seen = {}
+    real_asc, real_clo = F.ifs_updraught_ascent, F.ifs_closure
+    real_rec = F._reclassify_ktype
+
+    def spy_asc(*a, **k):
+        seen["M_b_launch"] = np.asarray(a[19])      # positional M_b
+        return real_asc(*a, **k)
+
+    def spy_clo(*a, **k):
+        out = real_clo(*a, **k)
+        seen["M_b0"] = np.asarray(out["M_b0"])
+        return out
+
+    def spy_rec(*a, **k):
+        seen["reclassified"] = seen.get("reclassified", 0) + 1
+        return real_rec(*a, **k)
+
+    monkeypatch.setattr(F, "ifs_updraught_ascent", spy_asc)
+    monkeypatch.setattr(F, "ifs_closure", spy_clo)
+    monkeypatch.setattr(F, "_reclassify_ktype", spy_rec)
+
+    T, q, p_full, p_half = _deep_column()
+    ncol, nlev = T.shape
+    kw = _kwargs(ncol, nlev)
+    kw["dq_dt_dyn"] = jnp.full((ncol, nlev), 1e-8)   # a real sub-cloud supply,
+    kw["dT_dt_rad"] = jnp.full((ncol, nlev), -1.5 / 86400.0)   # so the column
+    bechtold_convection(T, q, p_full, p_half,                  # is ACTIVE: an
+                        config=BechtoldConfig(use_ifs_ascent=True), **kw)
+    assert seen["reclassified"] == 1
+    assert float(seen["M_b_launch"].max()) > 0.0
+    # this fixture does NOT cross the depth split (6.8 kPa against 20 kPa), so
+    # it does not exercise ktype_first_guess; that seam is gated separately by
+    # test_ifs_closure.test_first_guess_follows_the_pre_reclassification_type
+    np.testing.assert_allclose(seen["M_b0"], seen["M_b_launch"], rtol=1e-6)
+
+    # Second phase: FORCE a retype, which this fixture does not do on its own.
+    # The closure branches now see KTYPE=1 while the first guess was built on
+    # KTYPE=2, so without ktype_first_guess the closure would rebuild M_b0 as
+    # the deep ZMFMAX*0.1 and the identity would break by orders of magnitude.
+    seen.clear()
+    monkeypatch.setattr(F, "_reclassify_ktype",
+                        lambda ktype, *a, **k: jnp.ones_like(ktype))
+    bechtold_convection(T, q, p_full, p_half,
+                        config=BechtoldConfig(use_ifs_ascent=True), **kw)
+    np.testing.assert_allclose(seen["M_b0"], seen["M_b_launch"], rtol=1e-6)
