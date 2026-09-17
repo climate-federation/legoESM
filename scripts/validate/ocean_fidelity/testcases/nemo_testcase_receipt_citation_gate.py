@@ -1437,7 +1437,7 @@ CITATION_MAP = {
     'ocean_pe_latlon_cgrid.py:3041-3067': [
         'area_w = jax.lax.optimization_barrier(',
         'diag_vertadv_v = jax.lax.optimization_barrier(diag_vertadv_v)', 27],
-    'ocean_pe_latlon_cgrid.py:4762-4783': [
+    'ocean_pe_latlon_cgrid.py:4896-4917': [
         'zad_w, zad_h_u, zad_h_v = w, h_u, h_v',
         ('zad_h_v = jax.lax.optimization_barrier(zad_h_v)', 1), 22],
     'ocean_model_latlon_cgrid.py:6071-6081': [
@@ -2068,7 +2068,7 @@ CITATION_MAP = {
         3],
     'ocean_model_latlon_cgrid.py:10422': ('u_solve_in = u_solve_in - _u_bt_mean', 1),
     'ocean_model_latlon_cgrid.py:10539': ('u_solve_in = u_solve_in - (', 1),
-    'ocean_pe_latlon_cgrid.py:3276-3279': [
+    'ocean_pe_latlon_cgrid.py:3278-3281': [
         ('if not (getattr(grid, "dlon", 0.0) and grid.dlon > 0.0):', 1),
         ('"with a scalar dlon (got dlon<=0; tripolar unsupported)."', 1),
         4],
@@ -2135,8 +2135,8 @@ CITATION_MAP = {
     'ocean.output:875': 'Barotropic time filter => nn_bt_flt',
     'lock_kt1_10/ocean.output:615': 'no explicit diffusion                ln_dynldf_OFF',
     'overflow_kt1_10/ocean.output:727': 'no explicit diffusion                ln_dynldf_OFF',
-    'ocean_pe_latlon_cgrid.py:5100': 'rho_prime=rho_prime, h_k=h_k,',
-    'ocean_pe_latlon_cgrid.py:5077-5078': [
+    'ocean_pe_latlon_cgrid.py:5234': 'rho_prime=rho_prime, h_k=h_k,',
+    'ocean_pe_latlon_cgrid.py:5211-5212': [
         '_u_ldf_local = u if ldf_state is None else ldf_state[2]',
         '_v_ldf_local = v if ldf_state is None else ldf_state[3]',
         2],
