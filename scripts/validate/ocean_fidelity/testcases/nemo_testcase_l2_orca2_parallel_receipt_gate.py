@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from legoesm.ocean.fidelity.provenance import worktree_stamp
+
 REPO = Path(__file__).resolve().parents[4]
 EVIDENCE = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3/parallel/orca2")
 PHASE3 = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3")
@@ -263,6 +265,7 @@ def run(receipt: Path, manifest: Path, plant: str | None = None) -> dict[str, An
         "citations_found": len(citations),
         "failures": failures,
         "format": "nemo-testcase-l2-orca2-parallel-citation-gate-v1",
+        "worktree": worktree_stamp(),
         "manifest": str(manifest),
         "plant": plant,
         "receipt": str(receipt),
