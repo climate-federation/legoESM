@@ -88,6 +88,7 @@ from legoesm.atmosphere.physics.convection.output import (
     split_convective_rain,
 )
 from legoesm.atmosphere.physics.convection.mass_flux import (
+    ifs_ztaures,
     apply_mass_flux_kernel,
     release_detrained_condensate_latent,
     stratosphere_mass_flux_gate,
@@ -448,23 +449,6 @@ _IFS_RHEBC_LAND = 0.75
 _IFS_RHEBC_LAND_DEEP = 0.70
 
 
-def _ifs_ztaures(dx_m: float) -> float:
-    """IFS ZTAURES resolution factor for the turnover time (cumastrn.F90:713,762-768).
-
-    ``dx_m`` is the grid spacing (the oracle's ``ZDX = 2*RA*sqrt(RPI*PGAW)``
-    = sqrt(cell area)); 0 (the default) keeps the legacy resolution-agnostic
-    factor 1.0.  A STATIC Python float from config, so this runs at trace
-    time — no traced ops.  Piecewise exactly as the oracle: dx floored at
-    100 m; ``1 + ln(8km/dx)^2`` below 8 km; ``1 + 1.6*dx/125km`` above,
-    capped at 3 beyond 125 km (the oracle's own jump at 8 km included).
-    """
-    if dx_m <= 0.0:
-        return 1.0
-    dx = max(float(dx_m), 100.0)
-    if dx < 8.0e3:  # coeff-ok: IFS ZTAURES 8 km resolution break (cumastrn.F90:766)
-        return 1.0 + math.log(8.0e3 / dx) ** 2  # coeff-ok: IFS sub-8km ZTAURES fit (cumastrn.F90:767)
-    zt = 1.0 + 1.60 * dx / 125.0e3  # coeff-ok: IFS ZTAURES linear fit 1+1.6*dx/125km (cumastrn.F90:764)
-    return min(3.0, zt) if dx > 125.0e3 else zt  # coeff-ok: IFS coarse-cap MIN(3, ZTAURES) (cumastrn.F90:768)
 
 # --- IFS convective sub-cloud rain evaporation (cuflxn.F90:436-475, sucumf.F90) ---
 # Kessler-type evaporation of the convective rain flux below cloud base,
@@ -2556,13 +2540,13 @@ def bechtold_convection(
             plume.B_u, T, q_v, dz, eps_profile, dlt_profile, dp_full,
             above_base, in_cloud,
         )
-        # ZTAURES resolution factor (cumastrn.F90:762-768): static Python
-        # float from config.dx_m (0 = legacy 1.0), multiplied pre-clamp
+        # ZTAURES resolution factor (cumastrn.F90:762-768): shared helper
+        # (mass_flux.ifs_ztaures), 0 = legacy 1.0, multiplied pre-clamp
         # exactly like the oracle's ZTAU = depth/(2+w)*ZTAURES*RTAUA.
         # _tau_pure (the un-scaled, un-clamped turnover time) is shared by
         # the RCAPDCYCL land branch and the RCAPQADV ZDQCV scaling below.
         _tau_pure = cloud_depth / (2.0 + w_mean)
-        _ztaures = _ifs_ztaures(config.dx_m)
+        _ztaures = ifs_ztaures(config.dx_m)   # 0-d array, fine for clip/divide
         tau_conv = jnp.clip(
             _tau_pure * _ztaures, _IFS_TAU_MIN, _IFS_TAU_MAX,
         )

@@ -1025,3 +1025,42 @@ def edmf_convection(
         dq_r_conv_dt=dq_r_conv_dt,
     )
     return conv_out, a_u_new
+
+
+# Fixed source constants (cumastrn.F90:762-768, main 8f6f722) -- do not
+# tune here; verbatim source literals of the ZTAURES resolution function.
+ZTAURES_DX_COEFF = 1.60        # cumastrn.F90:762 ZTAURES=1.0+1.60*ZDX/125.E3
+ZTAURES_REF_DX = 125.0e3       # cumastrn.F90:762 reference grid spacing (m)
+ZTAURES_FINE_DX = 8.0e3        # cumastrn.F90:764 fine-resolution threshold (m)
+ZTAURES_MAX = 3.0              # cumastrn.F90:768 ZTAURES=MIN(3.0,ZTAURES)
+
+
+def ifs_ztaures(dx_m):
+    """Resolution-dependent adjustment timescale, cumastrn.F90:762-768.
+
+    Source (LNEWTAU = .FALSE., deterministic Earth branch)::
+
+        ZTAURES=1.0_JPRB+1.60_JPRB*ZDX(JL)/125.E3_JPRB
+        ! for the 10-1 km resolution range increase ZTAURES
+        IF(ZDX(JL)<8.E3_JPRB) THEN
+          ZTAURES=1.0_JPRB+(LOG(8.E3_JPRB/ZDX(JL)))**2
+        ENDIF
+        ...
+        IF(ZDX(JL)>125.E3_JPRB) ZTAURES=MIN(3.0_JPRB,ZTAURES)
+
+    Shared public helper (used by the bechteld and ifs_closure closures).
+    Accepts a python float or a jnp array (a float returns a 0-d array).
+
+    LEGACY SENTINEL: dx <= 0 keeps the resolution-agnostic factor 1.0.
+    The production BechtoldConfig default is dx_m = 0.0, so this sentinel
+    preserves the shipped behaviour.  Implemented with jnp.where so it
+    works both for a static python float (traced at compile time) and for
+    a traced per-column dx array.
+    """
+    dx_in = jnp.asarray(dx_m)
+    dx = jnp.maximum(dx_in, 1.0e2)             # cumastrn.F90:762 floor (m)
+    ztr = 1.0 + ZTAURES_DX_COEFF * dx / ZTAURES_REF_DX
+    ztr_fine = 1.0 + jnp.log(ZTAURES_FINE_DX / dx) ** 2        # dx < 8e3 m
+    ztr = jnp.where(dx < ZTAURES_FINE_DX, ztr_fine, ztr)
+    ztr = jnp.where(dx > ZTAURES_REF_DX, jnp.minimum(ZTAURES_MAX, ztr), ztr)
+    return jnp.where(dx_in > 0.0, ztr, 1.0)    # legacy sentinel: dx <= 0 -> 1.0

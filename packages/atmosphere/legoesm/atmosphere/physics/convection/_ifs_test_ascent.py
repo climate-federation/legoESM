@@ -29,7 +29,7 @@ primitives, none changes the physics where the primitive exists):
     (liquid-only condensate) and the cloud-base saturation-deficit
     interpolation uses the liquid curve and its dT derivative.
   * CUADJTQ (two Newton corrections + q = min(q, qsat)) is reproduced as
-    _cuadjtq_condense (cubasen.F90:462-464).
+    cuadjtq_condense (cubasen.F90:462-464).
   * The land humidity-advection perturbation is weighted by land_frac
     instead of the binary LDLAND mask (cubasen.F90:415-417).
   * The source's double ZTEXC on the initial ZTU of the mixed-layer
@@ -141,8 +141,6 @@ __param_spec__ = {
             "mixed_layer_depth_pa": "fixed IFS pressure convention (60 hPa, cubasen.F90:419)",
             "mixed_layer_span_pa": "fixed IFS pressure convention (50 hPa, cubasen.F90:424)",
             "ustar_min": "numerical floor on the friction velocity (cumastrn passes 0.1)",
-            "mixed_layer_gate": "str mode selector ('half_above' | 'cell_centre'), not a tunable float",
-            "column_refine": "static vertical refinement factor for the refined-column trigger wrapper (1 = no refinement); it shapes the traced arrays, not a tunable float",
         },
         "params": {
             "entr_test_c1": {"units": "1", "bounds": (0.2, 2.0), "tunable_tier": 2,
@@ -221,7 +219,7 @@ __physics_contract__ = {
     },
     "sign_convention": "surface fluxes follow the IFS PAHFS/PQHFL convention: "
                        "NEGATIVE = upward (into the atmosphere); PQHFL = -lhf_w_m2 / L_v.",
-    "conserves": [],
+    "conserves": ["none"],
     "differentiable": True,
     "reference": "OpenIFS cubasen.F90 (main 8f6f722)",
     "idealized_test": "tests/unit/test_ifs_test_ascent.py",
@@ -232,11 +230,11 @@ def _cuadjtq_pair(T, q, p):
     """cuadjtq.F90:324-345, KCALL=3 branch: two successive UNCLIPPED Newton
     corrections ZCOND1 = (q - q_s)/(1 + (L_v/c_pd) dq_s/dT); T += (L_v/c_pd)
     ZCOND1; q -= ZCOND1 (second pass uses the updated T).  Specific-humidity
-    form: q_s = saturation_specific_humidity, dq_s/dT from _dqsat_dT (the
+    form: q_s = saturation_specific_humidity, dq_s/dT from dqsat_dT (the
     exact derivative of that same function).
     AD safety (JAX where-NaN rule): temperatures fed to the saturation curve
     and its derivative are clamped to the physical range
-    [_T_PHYS_MIN, _T_PHYS_MAX] K on ALL branches (including inactive ones)
+    [T_PHYS_MIN, T_PHYS_MAX] K on ALL branches (including inactive ones)
     BEFORE the thermo helpers are evaluated; masking only the results would
     not protect the cotangents.
     Declared departures (cuadjtq.F90:162-168; suphec.F90:231-240): the shared
@@ -244,17 +242,17 @@ def _cuadjtq_pair(T, q, p):
     is liquid-only (no FOEALFA/FOEALFCU ice blend)."""
     lvcp = constants.L_v / constants.c_pd
     for _ in range(2):
-        T_s = jnp.clip(T, _T_PHYS_MIN, _T_PHYS_MAX)
+        T_s = jnp.clip(T, T_PHYS_MIN, T_PHYS_MAX)
         qs = saturation_specific_humidity(T_s, p)
-        zcond1 = (q - qs) / (1.0 + lvcp * _dqsat_dT(T_s, p))
+        zcond1 = (q - qs) / (1.0 + lvcp * dqsat_dT(T_s, p))
         T = T + lvcp * zcond1
         q = q - zcond1
     return T, q
 
 
-_RLMIN = 1.0e-8      # sucldp.F90:253 default (cloud configuration, NOT yoecumf);
+RLMIN = 1.0e-8      # sucldp.F90:253 default (cloud configuration, NOT yoecumf);
                      # applied at the Sc cloud base, cubasen.F90:601
-_TINY = 1.0e-12      # AD-safe floor for differentiated denominators (cloud-base
+TINY = 1.0e-12      # AD-safe floor for differentiated denominators (cloud-base
                      # interpolation divides by zdqsdT*zdtdp, which vanishes on
                      # inactive branches)
 _Z_FLOOR = 1.0       # [m] floor on the 1/z entrainment height (geo_full - geo_half
@@ -264,17 +262,17 @@ _Z_FLOOR = 1.0       # [m] floor on the 1/z entrainment height (geo_full - geo_h
 # Physical temperature range used to sanitize operands fed to the saturation
 # helpers on inactive/unphysical branches (JAX where-NaN rule: masking the
 # RESULT is not enough, every evaluated branch must be finite).
-_T_PHYS_MIN = 150.0     # [K] lower physical bound for the Tetens curve
-_T_PHYS_MAX = 350.0     # [K] upper physical bound for the Tetens curve
+T_PHYS_MIN = 150.0     # [K] lower physical bound for the Tetens curve
+T_PHYS_MAX = 350.0     # [K] upper physical bound for the Tetens curve
 
 
-def _dqsat_dT(T, p):
+def dqsat_dT(T, p):
     """dq_s/dT of the very saturation function used elsewhere in this module
     (legoesm.thermo.saturation_specific_humidity), obtained as its EXACT
     autodifferentiated derivative via jax.vmap(jax.grad(...)) on flattened
     arrays, instead of a hand-re-derived chain rule on the mixing-ratio
     helpers (review finding 5): this guarantees the Newton corrections in
-    _cuadjtq_pair / _cuadjtq_condense are consistent with the curve actually
+    _cuadjtq_pair / cuadjtq_condense are consistent with the curve actually
     evaluated, including its internal floors/caps, and the derivative is
     itself differentiable.  Declared departures (cuadjtq.F90:162-168;
     suphec.F90:231-240) are unchanged: the shared curve's Tetens coefficients
@@ -286,7 +284,7 @@ def _dqsat_dT(T, p):
     return grad.reshape(T.shape)
 
 
-def _half_level_env(T, q_v, p_full, p_half, geo_full, geo_half, cfg):
+def half_level_env(T, q_v, p_full, p_half, geo_full, geo_half, cfg):
     """Half-level environment (ZTENH, ZQENH, ZSENH) ported from cuinin.F90:150-192,
     with ZSENH = RCPD*PTENH + PGEOH (cubasen.F90:306).  The rule actually
     implemented is the source's, NOT arithmetic means:
@@ -352,32 +350,32 @@ def _half_level_env(T, q_v, p_full, p_half, geo_full, geo_half, cfg):
     return T_h, q_h, s_h
 
 
-def _cuadjtq_condense(T, q, p):
+def cuadjtq_condense(T, q, p):
     """CUADJTQ (KCALL=1, condensation only), cuadjtq.F90:165-186, specific-humidity
     form: FIRST correction ZCOND = MAX(0,(q - q_s)/(1 + (L_v/c_pd) dq_s/dT))
     (clipped >= 0), then a SECOND correction ZCOND1 that is UNCLIPPED but zeroed
     where the first ZCOND was zero (cuadjtq.F90:182).  There is NO final
     q = min(q, q_s) clipping in this source branch.  q_s =
-    saturation_specific_humidity with dq_s/dT from _dqsat_dT (the exact
+    saturation_specific_humidity with dq_s/dT from dqsat_dT (the exact
     derivative of that same function, so the two Newton corrections are
     consistent with the evaluated curve near its internal modifications).
     AD safety (JAX where-NaN rule): temperatures fed to the saturation curve
-    and its derivative are clamped to [_T_PHYS_MIN, _T_PHYS_MAX] K on ALL
+    and its derivative are clamped to [T_PHYS_MIN, T_PHYS_MAX] K on ALL
     branches (including the inactive branch of the ZCOND1 where) BEFORE the
     thermo helpers are evaluated.
     Declared departures (cuadjtq.F90:162-168; suphec.F90:231-240): the shared
     curve's coefficients differ slightly from IFS FOEEWM, and saturation is
     liquid-only (ZLGLAC freezing correction therefore zero)."""
     lvcp = constants.L_v / constants.c_pd
-    T_s = jnp.clip(T, _T_PHYS_MIN, _T_PHYS_MAX)
+    T_s = jnp.clip(T, T_PHYS_MIN, T_PHYS_MAX)
     qs = saturation_specific_humidity(T_s, p)
-    dqs = _dqsat_dT(T_s, p)
+    dqs = dqsat_dT(T_s, p)
     zcond = jnp.maximum(0.0, (q - qs) / (1.0 + lvcp * dqs))   # cuadjtq.F90:171
     T1 = T + lvcp * zcond
     q1 = q - zcond
-    T1_s = jnp.clip(T1, _T_PHYS_MIN, _T_PHYS_MAX)
+    T1_s = jnp.clip(T1, T_PHYS_MIN, T_PHYS_MAX)
     qs1 = saturation_specific_humidity(T1_s, p)
-    dqs1 = _dqsat_dT(T1_s, p)
+    dqs1 = dqsat_dT(T1_s, p)
     zcond1 = jnp.where(zcond > 0.0,                            # cuadjtq.F90:182
                        (q1 - qs1) / (1.0 + lvcp * dqs1), 0.0)
     T2 = T1 + lvcp * zcond1
@@ -418,7 +416,7 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
     matching cubasen.F90:615-629.  Specific humidity throughout (virtual
     temperature T(1 + RETV q) directly as in the source); saturation on the
     specific-humidity curve with the FOEEWM / liquid-only departures declared
-    in _cuadjtq_pair / _cuadjtq_condense.  The masked-scan version is
+    in _cuadjtq_pair / cuadjtq_condense.  The masked-scan version is
     checked bit-for-bit against the previous unrolled implementation.
 
     AD safety (JAX where-NaN rule, review gradient-hazard table): every
@@ -428,7 +426,7 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
     environmental virtual temperature; the cloud-base ZDTDP division floors
     the half-level pressure -- and temperatures fed to the saturation
     helpers (qsat_j, qsat_sfc, ZQSU/ZDQSDT) are clamped to the physical
-    range [_T_PHYS_MIN, _T_PHYS_MAX] K before evaluation."""
+    range [T_PHYS_MIN, T_PHYS_MAX] K before evaluation."""
     nlev = T.shape[1]
     T_h, q_h, s_h = env_half
     dt = T_h.dtype
@@ -455,10 +453,10 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
     cg = jnp.asarray(constants.g, dt)
     r_d = jnp.asarray(constants.R_d, dt)
     c_pd_arr = jnp.asarray(constants.c_pd, dt)
-    t_min = jnp.asarray(_T_PHYS_MIN, dt)
-    t_max = jnp.asarray(_T_PHYS_MAX, dt)
-    rlmin = jnp.asarray(_RLMIN, dt)
-    tiny = jnp.asarray(_TINY, dt)
+    t_min = jnp.asarray(T_PHYS_MIN, dt)
+    t_max = jnp.asarray(T_PHYS_MAX, dt)
+    rlmin = jnp.asarray(RLMIN, dt)
+    tiny = jnp.asarray(TINY, dt)
     z_floor = jnp.asarray(_Z_FLOOR, dt)
 
     # FIXED-LENGTH candidate ascent levels j = nlev-2 ... 0 (surface-last:
@@ -559,7 +557,7 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
         # condensation (CUADJTQ), condensate added, half retained (cubasen.F90:466-493)
         q_old = q_new
         T_new0 = (s_new - geo_half[:, j]) * rcpd_inv
-        T_adj, q_adj = _cuadjtq_condense(T_new0, q_new, p_half[:, j])
+        T_adj, q_adj = cuadjtq_condense(T_new0, q_new, p_half[:, j])
         zdq = jnp.maximum(q_old - q_adj, 0.0)
         l_new = ret_frac * (l_u[:, j + 1] + zdq)
         # freezing correction ZLGLAC = 0: liquid-only saturation (FOEALFCU unavailable)
@@ -589,7 +587,7 @@ def _test_ascent_from_departure(k_dep, is_surface, T, q_v, p_full, p_half,
         cond_first = (l_new > 0.0) & (ilab[:, j + 1] == 1)
         T_cb = jnp.clip(T_u[:, j + 1], t_min, t_max)
         zqsu = saturation_specific_humidity(T_cb, p_half[:, j + 1])
-        zdqsdT = _dqsat_dT(T_cb, p_half[:, j + 1])
+        zdqsdT = dqsat_dT(T_cb, p_half[:, j + 1])
         zdq_cb = jnp.minimum(0.0, q_u[:, j + 1] - zqsu)
         zdtdp = r_d * T_u[:, j + 1] / (c_pd_arr * jnp.maximum(p_half[:, j + 1], tiny))
         zcb = p_half[:, j + 1] + zdq_cb / jnp.maximum(zdqsdT * zdtdp, tiny)
@@ -766,10 +764,10 @@ def _init_departure_parcel(k_dep, is_surface, T, q_v, p_full, p_half,
     zrho, pahfs, pqhfl, zkhvfl, zws = _surface_fluxes()
     # surface excesses (0 unless ZKHVFL < 0; kept for the KLEV-1 inheritance, :396-401).
     # AD safety (cubasen.F90:341-352, 360-363): the fractional power is taken on
-    # max(zws, _TINY) and the flux divisions on floored zrho*zws_f, so inactive /
+    # max(zws, TINY) and the flux divisions on floored zrho*zws_f, so inactive /
     # zero-wind branches remain finite for autodiff.
-    zws_f = cfg.surface_ws_factor * jnp.maximum(zws, _TINY) ** _WS_EXP       # :352
-    zws_fd = jnp.maximum(zrho * zws_f, _TINY)
+    zws_f = cfg.surface_ws_factor * jnp.maximum(zws, TINY) ** _WS_EXP       # :352
+    zws_fd = jnp.maximum(zrho * zws_f, TINY)
     ztex_s = jnp.clip(-cfg.surface_flux_factor * pahfs
                       / (zws_fd * constants.c_pd),
                       cfg.parcel_dT_excess_min_K, cfg.parcel_dT_excess_max_K)  # :360,362
@@ -862,8 +860,8 @@ def _init_departure_parcel(k_dep, is_surface, T, q_v, p_full, p_half,
         sw = sw + s_h[idx, l] * w
         span = span + w
     span_pos = span > 0.0
-    q_m = qw / jnp.maximum(span, _TINY) + zqexc
-    s_m = sw / jnp.maximum(span, _TINY) + constants.c_pd * ztexc
+    q_m = qw / jnp.maximum(span, TINY) + zqexc
+    s_m = sw / jnp.maximum(span, TINY) + constants.c_pd * ztexc
     T_m = (s_m - geo_half[idx, k0]) * _RCPD_INV + ztexc    # literal double ZTEXC, :412-414
     take_m = mixed & span_pos
     q_u_e = jnp.where(take_m, q_m, q_u_e)
@@ -1015,7 +1013,7 @@ def ifs_departure_search(T, q_v, p_full, p_half, geo_full, geo_half,
     ncol, nlev = T.shape
     # API boundary: mixing ratio -> specific humidity for everything inside
     q = q_v / (1.0 + q_v)
-    env_half = _half_level_env(T, q, p_full, p_half, geo_full, geo_half, cfg)
+    env_half = half_level_env(T, q, p_full, p_half, geo_full, geo_half, cfg)
     T_h, q_h, s_h = env_half
     idx = jnp.arange(ncol)
 

@@ -74,76 +74,81 @@ class IFSTendencyConfig(NamedTuple):
     rmfadvwdd: float = 0.0
 
 
+
 __param_spec__: Dict[str, Dict[str, object]] = {
     "IFSTendencyConfig": {
         "scheme_key": "atm.conv.IFSTendencyConfig",
-        "excluded": set(),
+        # Source switches of a faithful port, not calibration knobs: every
+        # field is frozen to the operational branch this module implements.
+        "excluded": {},
         "params": {
             "rmfsoltq": {
-                "default": 1.0,
-                "provenance": "sucumf.F90:225 (RMFSOLTQ=1.0); implicit solver "
-                "branch",
+                "units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0,
+                "transform": "none", "category": "convection", "shape": None,
+                "reference": "sucumf.F90:225 RMFSOLTQ=1.0; implicit solver "
+                             "branch, source switch of a faithful port",
             },
             "rmfsolrhs": {
-                "default": 0.0,
-                "provenance": "sucumf.F90:227 (RMFSOLRHS=0.0); RHS model "
-                "tendencies excluded from the implicit solver",
+                "units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0,
+                "transform": "none", "category": "convection", "shape": None,
+                "reference": "sucumf.F90:227 RMFSOLRHS=0.0; model tendencies "
+                             "excluded from the implicit RHS",
             },
             "rmfadvw": {
-                "default": 0.0,
-                "provenance": "sucumf.F90:228 (RMFADVW=0.0); fraction of "
-                "subsidence done by dynamics, applied for KTYPE == 1 "
-                "(cudtdqn.F90:195-196)",
+                "units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0,
+                "transform": "none", "category": "convection", "shape": None,
+                "reference": "sucumf.F90:228 RMFADVW=0.0; fraction of the "
+                             "subsidence done by the dynamics (KTYPE==1)",
             },
             "rmfadvwdd": {
-                "default": 0.0,
-                "provenance": "sucumf.F90:229 (RMFADVWDD=0.0); downdraught "
-                "mass-flux handling when RMFADVW > 0",
+                "units": "1", "bounds": (0.0, 1.0), "tunable_tier": 0,
+                "transform": "none", "category": "convection", "shape": None,
+                "reference": "sucumf.F90:229 RMFADVWDD=0.0; downdraught "
+                             "mass-flux handling when RMFADVW > 0",
             },
         },
     }
 }
 
 
+
 __physics_contract__: Dict[str, object] = {
-    "function": "ifs_convective_tendencies",
-    "description": (
-        "Implicit (RMFSOLTQ=1) convective T/q tendencies from updraught and "
-        "downdraught mass-flux fluxes, with the CUBIDIAG forward-substitution "
-        "solve; liquid-only, no enthalpy-conservation correction "
-        "(LMFENTHCONS=.FALSE.), no RHS model tendencies (RMFSOLRHS=0)."
+    "summary": (
+        "Implicit (RMFSOLTQ=1) convective T/q tendencies from the updraught "
+        "and downdraught mass-flux fluxes, with the CUBIDIAG forward "
+        "substitution; liquid-only, no enthalpy-conservation correction "
+        "(LMFENTHCONS=.FALSE.), no RHS model tendencies (RMFSOLRHS=0). "
+        "Surface-last arrays; IFS level JK maps to our j = JK-1."
     ),
     "inputs": {
-        "shape": "(ncol, nlev) full-level fields; p_half (ncol, nlev+1) "
-        "surface-last (p_half[:, -1] = surface pressure)",
-        "units": {
-            "T": "K", "q": "kg/kg (specific humidity)", "qs": "kg/kg",
-            "p_full": "Pa", "p_half": "Pa", "geo_full": "m2/s2",
-            "geo_half": "m2/s2", "T_h": "K", "q_h": "kg/kg",
-            "M_u": "kg m-2 s-1", "M_d": "kg m-2 s-1",
-            "PMFUS/PMFDS": "J m-2 s-1", "PMFUQ/PMFDQ": "kg m-2 s-1",
-            "PMFUL/PLUDE/PDMFUP": "kg m-2 s-1", "dt": "s",
-        },
+        "T": "K", "q": "kg kg-1", "qs": "kg kg-1",
+        "p_full": "Pa", "p_half": "Pa",
+        "geo_full": "m2 s-2", "geo_half": "m2 s-2",
+        "T_h": "K", "q_h": "kg kg-1",
+        "M_u": "kg m-2 s-1", "M_d": "kg m-2 s-1",
+        "PMFUS": "W m-2", "PMFDS": "W m-2",
+        "PMFUQ": "kg m-2 s-1", "PMFDQ": "kg m-2 s-1",
+        "PMFUL": "kg m-2 s-1", "PLUDE": "kg m-2 s-1", "PDMFUP": "kg m-2 s-1",
+        "ldcum": "1 (bool)", "lddraf": "1 (bool)", "ktype": "1",
+        "k_ctop": "1 (level index)", "k_dtop": "1 (level index)", "dt": "s",
     },
     "outputs": {
-        "dT_dt": "K s-1 (implicit convective temperature tendency)",
-        "dq_dt": "kg kg-1 s-1 (implicit convective specific-humidity tendency)",
-        "PENTH": "K s-1 -- cudtdqn.F90:445 definition, a *temperature* "
-        "tendency (ZR1 - PTEN)/PTSPHY, NOT a J kg-1 s-1 enthalpy flux; the "
-        "source's explicit-branch analogue multiplies by RCPD (:322), the "
-        "implicit branch does not. Unit kept as written in the source.",
+        "dT_dt": "K s-1", "dq_dt": "kg kg-1 s-1",
+        "PENTH": "K s-1 (cudtdqn.F90:445 defines it as a temperature "
+                 "tendency, not an enthalpy flux)",
     },
-    "conserves": [
-        "moisture",
-        "energy",
-    ],
-    "conserves_qualification": (
-        "column integrals of the flux-form increments close when the flux "
-        "inputs are consistent (the ascent/downdraught modules guarantee "
-        "that)"
+    "sign_convention": (
+        "fluxes positive upward; pressure increases with the array index "
+        "(surface last); the increments are added to the state, so a "
+        "positive dT_dt warms the layer."
     ),
-    "indexing": "surface-last; IFS half JK <-> our half JK-1 (surface = nlev); "
-    "IFS full JK <-> our full JK-1",
+    "conserves": ["moisture", "energy"],
+    "differentiable": True,
+    "reference": (
+        "OpenIFS cudtdqn.F90 + cubidiag.F90 (main 8f6f722), implicit branch "
+        "RMFSOLTQ=1, RMFSOLRHS=0, LDTDKMF=.FALSE., LPHYLIN=.FALSE."
+    ),
+    "idealized_test": "tests/unit/test_ifs_tendencies.py (pending)",
 }
 
 

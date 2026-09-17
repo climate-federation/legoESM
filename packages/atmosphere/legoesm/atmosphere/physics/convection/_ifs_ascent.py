@@ -43,16 +43,16 @@ from typing import NamedTuple
 import jax.numpy as jnp
 from jax import lax
 
-from legoesm.constants import g, R_d, R_v, c_pd, L_v, epsilon
+from legoesm.constants import g, R_d, R_v, c_pd, L_v, epsilon, T_freeze
 from legoesm.atmosphere.physics._shared import virtual_temperature
 from legoesm.atmosphere.physics.convection._ifs_test_ascent import (
-    _cuadjtq_condense,
-    _dqsat_dT,
-    _half_level_env,
-    _TINY,
-    _T_PHYS_MIN,
-    _T_PHYS_MAX,
-    _RLMIN,
+    cuadjtq_condense,
+    dqsat_dT,
+    half_level_env,
+    TINY,
+    T_PHYS_MIN,
+    T_PHYS_MAX,
+    RLMIN,
 )
 
 __all__ = [
@@ -80,7 +80,8 @@ class IFSAscentConfig(NamedTuple):
 
     Defaults reproduce the OpenIFS source (sucumf.F90 / cuascn.F90).
     Tier-0 "excluded" fields are numerics / switch-defining constants and
-    are not exposed as tunable parameters.
+    are not exposed as tunable parameters (see the module-level
+    ``__param_spec__``).
     """
 
     entrorg: float = 1.75e-3          # 1/m, sucumf.F90:136
@@ -116,83 +117,133 @@ class IFSAscentConfig(NamedTuple):
     rain_fall_coef: float = 21.18     # -, cuascn.F90:780 (fall-speed law)
     rain_fall_exp: float = 0.2        # -, cuascn.F90:780 (fall-speed law)
 
-    __param_spec__ = {
-        "IFSAscentConfig": {
-            "scheme_key": "atm.conv.IFSAscentConfig",
-            "excluded": {
-                "rmfcfl", "rmfcmin", "entr_org_cap", "detr_early_cap",
-                "buoy_reinterp_K", "buoy_entr_shutoff_K", "buoy_accept_K",
-                "lapse_accept_K_per_m", "ke_buoy_factor", "ke_drag_cw",
-                "ke_floor", "ke_ratio_floor", "ptu_min_K", "ptu_max_K",
-                "cldmax", "cwifrac", "cprc2", "ke_wu_floor_conv",
-                "ke_wu_floor_fall", "wu_max",
+
+__param_spec__ = {
+    "IFSAscentConfig": {
+        "scheme_key": "atm.conv.IFSAscentConfig",
+        "excluded": {
+            "rmfcfl": "switch-defining constant of the implicit moist-correction branch; faithful-port source constant",
+            "rmfcmin": "mass-flux numerics floor; iteration-coupled stability guard",
+            "entr_org_cap": "numerics floor capping organized entrainment",
+            "detr_early_cap": "numerics floor capping early detrainment",
+            "buoy_reinterp_K": "buoyancy numerics threshold, iteration-coupled re-interpretation trigger",
+            "buoy_entr_shutoff_K": "buoyancy numerics threshold for entrainment shutoff",
+            "buoy_accept_K": "numerics floor for plume-termination acceptance test",
+            "lapse_accept_K_per_m": "numerics floor of the lapse-rate acceptance test",
+            "ke_buoy_factor": "source constant of a faithful port (ZFACBUO, cuascn.F90:282)",
+            "ke_drag_cw": "source constant of a faithful port (Z_CWDRAG, cuascn.F90:288)",
+            "ke_floor": "kinetic-energy numerics floor",
+            "ke_ratio_floor": "kinetic-energy-ratio numerics floor",
+            "ptu_min_K": "temperature clamp numerics floor",
+            "ptu_max_K": "temperature clamp numerics floor",
+            "cldmax": "numerics floor: cloud-water clip cap",
+            "cwifrac": "unused in the liquid-only branch (ZALFAW = 1)",
+            "cprc2": "source constant of a faithful port (Z_CPRC2, cuascn.F90:287)",
+            "ke_wu_floor_conv": "numerics floor on ZWU inside the conversion term",
+            "ke_wu_floor_fall": "numerics floor on ZWU inside the fallout term",
+            "wu_max": "numerics floor on the updraught speed cap",
+        },
+        "params": {
+            "entrorg": {
+                "units": "1/m", "bounds": (1.0e-4, 6.0e-3),
+                "tunable_tier": 1, "transform": "none",
+                "category": "convection",
+                "reference": "sucumf.F90:136", "shape": None,
             },
-            "params": {
-                "entrorg": {
-                    "units": "1/m", "bounds": [1.0e-4, 6.0e-3],
-                    "tunable_tier": 1, "transform": "identity",
-                    "category": "convection",
-                    "reference": "sucumf.F90:136", "shape": None,
-                },
-                "entr_rh": {
-                    "units": "-", "bounds": [0.5, 1.5],
-                    "tunable_tier": 2, "transform": "identity",
-                    "category": "convection",
-                    "reference": "sucumf.F90:140", "shape": None,
-                },
-                "entshalp": {
-                    "units": "-", "bounds": [0.5, 4.0],
-                    "tunable_tier": 2, "transform": "identity",
-                    "category": "convection",
-                    "reference": "sucumf.F90:144", "shape": None,
-                },
-                "detrpen": {
-                    "units": "1/m", "bounds": [1.0e-5, 3.0e-4],
-                    "tunable_tier": 1, "transform": "identity",
-                    "category": "convection",
-                    "reference": "sucumf.F90:129", "shape": None,
-                },
-                "rh_detr_offset": {
-                    "units": "-", "bounds": [1.0, 2.5],
-                    "tunable_tier": 2, "transform": "identity",
-                    "category": "convection",
-                    "reference": "cuascn.F90:514/672", "shape": None,
-                },
-                "rh_entr_offset": {
-                    "units": "-", "bounds": [0.0, 1.0],
-                    "tunable_tier": 2, "transform": "identity",
-                    "category": "convection",
-                    "reference": "cuascn.F90:686", "shape": None,
-                },
-                "rprcon": {
-                    "units": "1/m", "bounds": [5.0e-4, 5.0e-3],
-                    "tunable_tier": 2, "transform": "identity",
-                    "category": "convection",
-                    "reference": "sucumf.F90:175 (ZPRCDGW = RPRCON*RPLRG)",
-                    "shape": None,
-                },
-                "dnoprc": {
-                    "units": "kg/kg", "bounds": [1.0e-4, 1.0e-3],
-                    "tunable_tier": 2, "transform": "identity",
-                    "category": "convection",
-                    "reference": "cuascn.F90:284 (ZDNOPRC)", "shape": None,
-                },
-                "rain_fall_coef": {
-                    "units": "m s-1 (kg/kg)^-0.2", "bounds": [10.0, 35.0],
-                    "tunable_tier": 2, "transform": "identity",
-                    "category": "convection",
-                    "reference": "cuascn.F90:780 (ZVW = 21.18*PLRAIN**0.2)",
-                    "shape": None,
-                },
-                "rain_fall_exp": {
-                    "units": "-", "bounds": [0.1, 0.3],
-                    "tunable_tier": 2, "transform": "identity",
-                    "category": "convection",
-                    "reference": "cuascn.F90:780 (ZVW exponent)", "shape": None,
-                },
+            "entr_rh": {
+                "units": "-", "bounds": (0.5, 1.5),
+                "tunable_tier": 2, "transform": "none",
+                "category": "convection",
+                "reference": "sucumf.F90:140", "shape": None,
             },
-        }
+            "entshalp": {
+                "units": "-", "bounds": (0.5, 4.0),
+                "tunable_tier": 2, "transform": "none",
+                "category": "convection",
+                "reference": "sucumf.F90:144", "shape": None,
+            },
+            "detrpen": {
+                "units": "1/m", "bounds": (1.0e-5, 3.0e-4),
+                "tunable_tier": 1, "transform": "none",
+                "category": "convection",
+                "reference": "sucumf.F90:129", "shape": None,
+            },
+            "rh_detr_offset": {
+                "units": "-", "bounds": (1.0, 2.5),
+                "tunable_tier": 2, "transform": "none",
+                "category": "convection",
+                "reference": "cuascn.F90:514/672", "shape": None,
+            },
+            "rh_entr_offset": {
+                "units": "-", "bounds": (0.0, 1.0),
+                "tunable_tier": 2, "transform": "none",
+                "category": "convection",
+                "reference": "cuascn.F90:686", "shape": None,
+            },
+            "rprcon": {
+                "units": "1/m", "bounds": (5.0e-4, 5.0e-3),
+                "tunable_tier": 2, "transform": "none",
+                "category": "convection",
+                "reference": "sucumf.F90:175 (ZPRCDGW = RPRCON*RPLRG)",
+                "shape": None,
+            },
+            "dnoprc": {
+                "units": "kg/kg", "bounds": (1.0e-4, 1.0e-3),
+                "tunable_tier": 2, "transform": "none",
+                "category": "convection",
+                "reference": "cuascn.F90:284 (ZDNOPRC)", "shape": None,
+            },
+            "rain_fall_coef": {
+                "units": "m s-1 (kg/kg)^-0.2", "bounds": (10.0, 35.0),
+                "tunable_tier": 2, "transform": "none",
+                "category": "convection",
+                "reference": "cuascn.F90:780 (ZVW = 21.18*PLRAIN**0.2)",
+                "shape": None,
+            },
+            "rain_fall_exp": {
+                "units": "-", "bounds": (0.1, 0.3),
+                "tunable_tier": 2, "transform": "none",
+                "category": "convection",
+                "reference": "cuascn.F90:780 (ZVW exponent)", "shape": None,
+            },
+        },
     }
+}
+
+
+__physics_contract__ = {
+    "summary": (
+        "OpenIFS main updraught ascent (cuascn.F90 + cuentr.F90), liquid-only "
+        "thermodynamics, deep (KTYPE 1) and shallow (KTYPE 2) convection; "
+        "advances the plume one full level per scan step and emits the layer "
+        "mass-flux, moisture, liquid and dry-static-energy fluxes. "
+        "Surface-last arrays; IFS level JK maps to our j = JK-1; k_* are "
+        "0-based surface-last level indices."
+    ),
+    "inputs": {
+        "T": "K", "q": "kg kg-1", "qs": "kg kg-1",
+        "p_full": "Pa", "p_half": "Pa",
+        "geo_full": "m2 s-2", "geo_half": "m2 s-2",
+        "T_h": "K", "q_h": "kg kg-1", "plitot": "kg kg-1",
+        "ldcum": "1 (bool)", "ktype": "1 (1 deep, 2 shallow)",
+        "k_dpl": "1 (level index)", "k_cbot": "1 (level index)",
+        "M_b": "kg m-2 s-1", "w_base": "m s-1", "dt": "s",
+    },
+    "outputs": {
+        "M": "kg m-2 s-1", "PMFUS": "W m-2", "PMFUQ": "kg m-2 s-1",
+        "PMFUL": "kg m-2 s-1", "PLUDE": "kg m-2 s-1",
+        "PDMFEN": "kg m-2 s-1", "PMFUDE_RATE": "kg m-2 s-1",
+        "PDMFUP": "kg m-2 s-1", "PLRAIN": "kg kg-1", "PKINEU": "m2 s-2",
+        "T_u": "K", "q_u": "kg kg-1", "l_u": "kg kg-1",
+        "klab": "1 (0/1/2)", "k_ctop": "1 (level index)",
+        "pwmean": "m2 s-2 Pa", "zdpmean": "Pa",
+    },
+    "sign_convention": 'Fluxes are positive upward (mass flux M > 0 for the updraught); entrainment is a positive source to the plume, detrainment a positive loss to the environment. Buoyancy acceptance thresholds are in K and negative (buoy_accept_K = -2 K). Arrays are surface-last; the IFS source loop ascends with decreasing JK, our lax.scan descends with increasing j (IFS JK <-> our j = JK-1).',
+    "conserves": ["none"],
+    "differentiable": False,
+    "reference": 'OpenIFS cuascn.F90 (updraught ascent) and cuentr.F90:158-168 (turbulent exchange below cloud base); tunables default to sucumf.F90. Switches: LDTDKMF=.FALSE., LPHYLIN=.FALSE., LSCVLIQ=.TRUE., RMFSOLTQ=1 (RMFCFL=3).',
+    "idealized_test": "tests/unit/test_ifs_ascent.py",
+}
 
 
 # --------------------------------------------------------------------------
@@ -259,8 +310,8 @@ def layer_increments(E_org_prev, D_turb, M_below, rh_env, is_shallow,
     rh1 = jnp.minimum(1.0, rh_env)
 
     # (:487) early detrainment cap
-    D = jnp.minimum(D_turb, cfg.detr_early_cap * jnp.maximum(M_below, _TINY))
-    D = jnp.where(D_turb <= cfg.detr_early_cap * jnp.maximum(M_below, _TINY),
+    D = jnp.minimum(D_turb, cfg.detr_early_cap * jnp.maximum(M_below, TINY))
+    D = jnp.where(D_turb <= cfg.detr_early_cap * jnp.maximum(M_below, TINY),
                   D_turb, D)
 
     # (:503) organized entrainment from below
@@ -323,7 +374,7 @@ def ke_step(K_below, E, D, M_below, buoy_mean_over_Tv, dphi, cfg):
     ZDKEN = jnp.minimum(
         1.0,
         (1.0 + cfg.ke_drag_cw) * mixing_rate
-        / jnp.maximum(cfg.rmfcmin, jnp.maximum(M_below, _TINY)),
+        / jnp.maximum(cfg.rmfcmin, jnp.maximum(M_below, TINY)),
     )
 
     K = (K_below * (1.0 - ZDKEN) + ZDKBUO) / (1.0 + ZDKEN)
@@ -367,7 +418,7 @@ def organized_entrainment_next(M_new, rh_env_above, qs_env, qs_base,
     """
     rh1 = jnp.minimum(1.0, rh_env_above)
     qs_ratio = jnp.minimum(
-        1.0, qs_env / jnp.maximum(qs_base, _TINY))
+        1.0, qs_env / jnp.maximum(qs_base, TINY))
     ZOENTR = (
         cfg.entrorg * (cfg.rh_entr_offset - (rh1 - cfg.entr_rh))
         * dphi_next / g * qs_ratio**3
@@ -417,7 +468,7 @@ def organized_detrainment(D, M_below, K, K_below, rh_env, cfg):
       before sqrt on the evaluated branch.
     """
     rh1 = jnp.minimum(1.0, rh_env)
-    ZKEDKE = K / jnp.maximum(cfg.ke_ratio_floor, jnp.maximum(K_below, _TINY))
+    ZKEDKE = K / jnp.maximum(cfg.ke_ratio_floor, jnp.maximum(K_below, TINY))
     ZKEDKE = jnp.clip(ZKEDKE, 0.0, 1.0)
     ZOCUDET = cfg.rh_detr_offset - rh1
     ZMFUN = ZOCUDET * jnp.sqrt(jnp.maximum(ZKEDKE, 0.0))
@@ -428,8 +479,10 @@ def organized_detrainment(D, M_below, K, K_below, rh_env, cfg):
 # ==========================================================================
 # ### REPLACE IFSAscentConfig (A2: adds precipitation-formation constants)
 # ==========================================================================
-_RTBERCU = 273.15 - 5.0    # K, RTBERCU = RTT - 5  (Bergeron-Findeisen onset)
-_RTICECU = 273.15 - 38.0   # K, RTICECU = RTT - 38 (mixed-phase range end)
+_RTBERCU = T_freeze - 5.0    # K, RTBERCU = RTT - 5  (Bergeron-Findeisen onset)
+_RTICECU = T_freeze - 38.0   # K, RTICECU = RTT - 38 (mixed-phase range end)
+_ZWU_DENOM = 0.75   # -, cuascn.F90:734 ZPRCON denominator, ZWU floor in the conversion term
+_ZZCO_LIQ = 1.3     # -, cuascn.F90:735-736 ZZCO = 1 + 0.3*FOEALFCU, FOEALFCU = 1 (liquid-only)
 
 
 # --------------------------------------------------------------------------
@@ -458,6 +511,7 @@ class _AscentCarry(NamedTuple):
     zdpmean: jnp.ndarray      # (ncol,)
 
 
+
 def _ascent_layer(carry, j, T, q, qs, p_full, p_half, geo_full, geo_half,
                   T_h, q_h, plitot, ldcum, ktype, k_dpl, k_cbot, qs_base,
                   dt, cfg):
@@ -482,7 +536,7 @@ def _ascent_layer(carry, j, T, q, qs, p_full, p_half, geo_full, geo_half,
         carry.M[:, j + 1], dz, cfg.detrpen, in_cloud)
 
     # -- mass-flux increments (helper 2) ---------------------------------
-    rh_env = q[:, j] / jnp.maximum(qs[:, j], _TINY)
+    rh_env = q[:, j] / jnp.maximum(qs[:, j], TINY)
     # cuascn.F90:499: ZMFMAX uses PAPH(JK)-PAPH(JK-1)  <->  our
     # p_half[j] - p_half[j-1]  (IFS half JK <-> j, JK-1 <-> j-1).
     dp_layer = jnp.maximum(p_half[:, j] - p_half[:, j - 1], 0.0)
@@ -501,7 +555,7 @@ def _ascent_layer(carry, j, T, q, qs, p_full, p_half, geo_full, geo_half,
     # -- transport (cuascn.F90:522-549) ----------------------------------
     ZQEEN = q_h[:, j + 1] * E
     ZSEEN = (c_pd * T_h[:, j + 1] + geo_half[:, j + 1]) * E
-    ZLEEN = jnp.where(plitot[:, j] > _RLMIN, plitot[:, j] * E, 0.0)
+    ZLEEN = jnp.where(plitot[:, j] > RLMIN, plitot[:, j] * E, 0.0)
     ZSCDE = (c_pd * carry.T_u[:, j + 1] + geo_half[:, j + 1]) * D
     ZQUDE = carry.q_u[:, j + 1] * D
     PLUDE_j = carry.l_u[:, j + 1] * D
@@ -528,8 +582,8 @@ def _ascent_layer(carry, j, T, q, qs, p_full, p_half, geo_full, geo_half,
     ZLUOLD = jnp.where(reset, 0.0, ZLUOLD)
 
     # -- moist correction (CUADJTQ, KCALL = 1) at p_half[j] --------------
-    T_adj, q_adj = _cuadjtq_condense(T_u_j, q_u_j, p_half[:, j])
-    cond = flag & (q_adj < ZQOLD - _TINY)
+    T_adj, q_adj = cuadjtq_condense(T_u_j, q_u_j, p_half[:, j])
+    cond = flag & (q_adj < ZQOLD - TINY)
     T_u_j = jnp.where(cond, T_adj, T_u_j)
     q_u_j = jnp.where(cond, q_adj, q_u_j)
     l_u_j = l_u_j + jnp.where(cond, ZQOLD - q_u_j, 0.0)
@@ -568,7 +622,7 @@ def _ascent_layer(carry, j, T, q, qs, p_full, p_half, geo_full, geo_half,
     M_new = jnp.where(negb, carry.M[:, j + 1] + E - D, M_new)
 
     # -- organized entrainment for the NEXT layer (:679-691) -------------
-    rh_above = q[:, j - 1] / jnp.maximum(qs[:, j - 1], _TINY)
+    rh_above = q[:, j - 1] / jnp.maximum(qs[:, j - 1], TINY)
     dphi_next = geo_half[:, j - 1] - geo_half[:, j]
     ZOENTR_next = organized_entrainment_next(
         M_new, rh_above, qs[:, j], qs_base, dphi_next, ZBUO_j, cfg)
@@ -583,7 +637,7 @@ def _ascent_layer(carry, j, T, q, qs, p_full, p_half, geo_full, geo_half,
 
     # -- acceptance (:698-715) --------------------------------------------
     lapse = (T[:, j - 1] - T[:, j]) / (
-        jnp.maximum(geo_full[:, j - 1] - geo_full[:, j], _TINY) / g)
+        jnp.maximum(geo_full[:, j - 1] - geo_full[:, j], TINY) / g)
     accept = ((K_j > 0.0) & (M_new > 0.0)
               & ((ZBUO_j > cfg.buoy_accept_K)
                  | (lapse < cfg.lapse_accept_K_per_m)))
@@ -615,11 +669,11 @@ def _ascent_layer(carry, j, T, q, qs, p_full, p_half, geo_full, geo_half,
     # -- precipitation formation (:733-758) --------------------------------
     # Liquid-only: FOEALFCU = 1 => ZZCO = 1 + 0.3*1 = 1.3 (LDTDKMF=.FALSE.)
     prc = llo1 & (l_u_j > cfg.dnoprc)
-    l_u_safe = jnp.maximum(l_u_j, _TINY)
+    l_u_safe = jnp.maximum(l_u_j, TINY)
     ZWU = jnp.minimum(cfg.wu_max,
                       jnp.sqrt(2.0 * jnp.maximum(cfg.ke_wu_floor_conv,
                                                   carry.K[:, j + 1])))
-    ZPRCON = (cfg.rprcon / g) / (0.75 * ZWU) * 1.3
+    ZPRCON = (cfg.rprcon / g) / (_ZWU_DENOM * ZWU) * _ZZCO_LIQ
     ZDT = jnp.minimum(_RTBERCU - _RTICECU,
                       jnp.maximum(_RTBERCU - T_u_j, 0.0))
     ZCBF = 1.0 + cfg.cprc2 * jnp.sqrt(ZDT)
@@ -627,10 +681,10 @@ def _ascent_layer(carry, j, T, q, qs, p_full, p_half, geo_full, geo_half,
     ZLCRIT = cfg.dnoprc / ZCBF
     ZC = l_u_j - ZLUOLD
     ZD = ZZCO2 * (1.0 - jnp.exp(-(l_u_safe / ZLCRIT) ** 2)) * dphi
-    ZINT = jnp.exp(-jnp.clip(ZD, 0.0, 50.0))
+    ZINT = jnp.exp(-jnp.clip(ZD, 0.0, 50.0))  # coeff-ok: exp() overflow guard on a dimensionless exponent
     ZLNEW = jnp.where(
-        ZD > _TINY,
-        ZLUOLD * ZINT + ZC / jnp.maximum(ZD, _TINY) * (1.0 - ZINT),
+        ZD > TINY,
+        ZLUOLD * ZINT + ZC / jnp.maximum(ZD, TINY) * (1.0 - ZINT),
         ZC)  # series limit ZD -> 0
     ZLNEW = jnp.clip(ZLNEW, 0.0, jnp.minimum(l_u_j, cfg.cldmax))
     ZPRECIP = jnp.maximum(0.0, ZLUOLD + ZC - ZLNEW)
@@ -640,16 +694,16 @@ def _ascent_layer(carry, j, T, q, qs, p_full, p_half, geo_full, geo_half,
 
     # -- rain fallout (:777-806, non-LPHYLIN, liquid: ZALFAW = 1) ---------
     fall = llo1 & (PLRAIN_j > 0.0)
-    ZVW = cfg.rain_fall_coef * jnp.maximum(PLRAIN_j, _TINY) ** cfg.rain_fall_exp
+    ZVW = cfg.rain_fall_coef * jnp.maximum(PLRAIN_j, TINY) ** cfg.rain_fall_exp
     ZVV = ZVW                      # ZALFAW = 1 (liquid-only)
     ZROLD = PLRAIN_j - ZPRECIP
     ZWU2 = jnp.minimum(cfg.wu_max,
                        jnp.sqrt(2.0 * jnp.maximum(cfg.ke_wu_floor_fall, K_j)))
-    ZDr = ZVV / jnp.maximum(ZWU2, _TINY)
-    ZINTr = jnp.exp(-jnp.clip(ZDr, 0.0, 50.0))
+    ZDr = ZVV / jnp.maximum(ZWU2, TINY)
+    ZINTr = jnp.exp(-jnp.clip(ZDr, 0.0, 50.0))  # coeff-ok: exp() overflow guard, as the ZINT site above
     ZRNEW = jnp.where(
-        ZDr > _TINY,
-        ZROLD * ZINTr + ZC / jnp.maximum(ZDr, _TINY) * (1.0 - ZINTr),
+        ZDr > TINY,
+        ZROLD * ZINTr + ZC / jnp.maximum(ZDr, TINY) * (1.0 - ZINTr),
         ZROLD + ZC)
     ZRNEW = jnp.clip(ZRNEW, 0.0, jnp.maximum(PLRAIN_j, 0.0))
     PLRAIN_j = jnp.where(fall, ZRNEW, PLRAIN_j)

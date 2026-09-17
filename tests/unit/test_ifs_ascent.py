@@ -86,7 +86,7 @@ def _run(T, q, p_full, p_half, cfg_t=None, cfg_a=None):
         cfg_t)
 
     qsp = q / (1.0 + q)
-    T_h, q_h, s_h = ta._half_level_env(T, qsp, p_full, p_half,
+    T_h, q_h, s_h = ta.half_level_env(T, qsp, p_full, p_half,
                                        geo_full, geo_half, cfg_t)
     qs = saturation_specific_humidity(T, p_full)
 
@@ -231,7 +231,7 @@ def test_inactive_column_untouched():
         jnp.zeros((1, T.shape[1]), jnp.float32),
         cfg_t)
     qsp = q / (1.0 + q)
-    T_h, q_h, s_h = ta._half_level_env(T, qsp, p_full, p_half,
+    T_h, q_h, s_h = ta.half_level_env(T, qsp, p_full, p_half,
                                        geo_full, geo_half, cfg_t)
     qs = saturation_specific_humidity(T, p_full)
     q_u0 = tst.q_u / (1.0 + tst.q_u)
