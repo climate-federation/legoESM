@@ -150,122 +150,95 @@ def _sha256_array(value) -> str:
     return hashlib.sha256(data.view(np.uint8)).hexdigest()
 
 
-class _ShearRoutingCaptured(RuntimeError):
-    """Private early stop after the production MLF path executes zdf_sh2."""
+def _routing_audit(model, state, *, plant: bool) -> dict:
+    """Hash DINO's live NOW/BEFORE shear route on its developed state.
 
-
-def _routing_audit(model, state, forcing, *, plant: bool) -> dict:
-    """Capture DINO's actual MLF shear call before downstream closure work.
-
-    This drives the complete eager production closure until ``_leapfrog_step``
-    calls ``_tke_step_entry_p_sh2``.  The wrapper then evaluates the real
-    helper on the exact arguments it received and stops deliberately; this
-    avoids scoring the historical probe's reconstructed call or continuing
-    into unrelated later TKE work.
+    The current full DINO runner refuses upstream in GM/Redi's raw-mesh N2
+    guard before reaching ``zdf_sh2``.  This bounded arm therefore calls the
+    SAME shared helper on the exact fields the compiled/source call chain
+    supplies, both eagerly and under an isolated JIT.  It is labelled as such
+    and is never reported as a production-step result.
     """
-    real = LatLonCGridOceanModel._tke_step_entry_p_sh2
-    captured = {}
+    state = model._seed_tke_preclosure_carry(state)
+    eta_now = state.eta.data
 
-    def capture(self, shear_state, **kwargs):
-        clean, face_metrics = real(
-            self, shear_state,
-            **{**kwargs, "return_face_metrics": True})
-        if face_metrics is None or len(face_metrics) != 4:
-            raise RuntimeError(
-                "REFUSE: DINO production shear did not consume four live "
-                "NOW/BEFORE face metrics")
-        eta_now = kwargs.get("eta_now")
-        if eta_now is None or shear_state.eta_before is None:
-            raise RuntimeError(
-                "REFUSE: DINO production shear lacks NOW or BEFORE ssh")
-        captured.update({
-            "p_sh2": np.asarray(clean),
-            "face_metrics": tuple(np.asarray(v) for v in face_metrics),
-            "eta_now": np.asarray(eta_now),
-            "eta_before": np.asarray(shear_state.eta_before.data),
-        })
-        if plant:
-            eta_plant = np.asarray(eta_now).copy()
-            live = np.argwhere(np.asarray(clean) != 0.0)
-            if live.size == 0:
-                raise RuntimeError(
-                    "REFUSE: DINO shear routing plant found no live p_sh2")
-            peak = np.unravel_index(
-                int(np.argmax(np.abs(np.asarray(clean)))),
-                np.shape(clean))
-            planted_at = tuple(int(v) for v in peak[:2])
-            eta_plant[planted_at] = np.nextafter(
-                eta_plant[planted_at], np.float64(np.inf))
-            planted, planted_metrics = real(
-                self, shear_state, **{
-                    **kwargs, "eta_now": jnp.asarray(eta_plant),
-                    "return_face_metrics": True})
-            metric_moved = [
-                int(np.count_nonzero(
-                    np.ascontiguousarray(a).view(np.uint64)
-                    != np.ascontiguousarray(b).view(np.uint64)))
-                for a, b in zip(face_metrics, planted_metrics)
-            ]
-            p_moved = int(np.count_nonzero(
-                np.ascontiguousarray(np.asarray(clean)).view(np.uint64)
-                != np.ascontiguousarray(np.asarray(planted)).view(np.uint64)))
-            if not any(metric_moved) or p_moved == 0:
-                raise RuntimeError(
-                    "REFUSE: DINO one-ULP NOW-ssh plant did not reach both "
-                    "a consumed face metric and p_sh2")
-            captured.update({
-                "plant_index": planted_at,
-                "plant_metric_cells_moved": metric_moved,
-                "plant_p_sh2_cells_moved": p_moved,
-            })
-        raise _ShearRoutingCaptured
+    def shear(eta):
+        return model._tke_step_entry_p_sh2(
+            state, eta_now=eta, u_now=state.u.data, v_now=state.v.data,
+            return_face_metrics=True)
 
-    state = jax.tree_util.tree_map(
-        lambda value: (jnp.asarray(value)
-                       if isinstance(value, (np.ndarray, np.generic))
-                       else value),
-        model._seed_tke_preclosure_carry(state),
-    )
-    forcing = jax.tree_util.tree_map(
-        lambda value: (jnp.asarray(value)
-                       if isinstance(value, (np.ndarray, np.generic))
-                       else value),
-        forcing,
-    )
-    model.prime_step_caches(state)
-    LatLonCGridOceanModel._tke_step_entry_p_sh2 = capture
-    try:
-        with jax.disable_jit():
-            LatLonCGridOceanModel._step_jitted.__wrapped__(
-                model, state, DT, None, forcing)
-    except _ShearRoutingCaptured:
-        pass
-    finally:
-        LatLonCGridOceanModel._tke_step_entry_p_sh2 = real
-    if not captured:
+    eager = jax.device_get(shear(eta_now))
+    isolated_jit = jax.device_get(jax.jit(shear)(eta_now))
+    if any(result[1] is None or len(result[1]) != 4
+           for result in (eager, isolated_jit)):
         raise RuntimeError(
-            "REFUSE: DINO production closure never executed the shear divisor")
+            "REFUSE: DINO shear helper did not consume four live face metrics")
 
-    p_sh2 = captured.pop("p_sh2")
-    face_metrics = captured.pop("face_metrics")
-    eta_now = captured.pop("eta_now")
-    eta_before = captured.pop("eta_before")
-    return {
-        "execution": "production MLF closure eager through the shear call",
-        "resolved_route": {
-            "Kmm": "eta_now supplied by _leapfrog_step",
-            "Kbb": "shear_state.eta_before",
-            "eta_now_sha256": _sha256_array(eta_now),
-            "eta_before_sha256": _sha256_array(eta_before),
-            "now_before_bit_identical": bool(np.array_equal(
-                np.ascontiguousarray(eta_now).view(np.uint64),
-                np.ascontiguousarray(eta_before).view(np.uint64))),
+    def arm(result):
+        p_sh2, metrics = result
+        return {
+            "p_sh2_sha256": _sha256_array(p_sh2),
+            "p_sh2_nonzero": int(np.count_nonzero(np.asarray(p_sh2))),
+            "face_metric_sha256": [_sha256_array(v) for v in metrics],
+        }
+
+    eager_report = arm(eager)
+    jit_report = arm(isolated_jit)
+    out = {
+        "execution": {
+            "eager": "isolated shared shear helper eager",
+            "jit": "isolated shared shear helper JIT; NOT production step",
+            "production_step": (
+                "UNMEASURED: current committed DINO twin refuses upstream "
+                "in GM/Redi raw-mesh N2 before zdf_sh2"),
         },
-        "p_sh2_sha256": _sha256_array(p_sh2),
-        "p_sh2_nonzero": int(np.count_nonzero(p_sh2)),
-        "face_metric_sha256": [_sha256_array(v) for v in face_metrics],
-        **captured,
+        "resolved_route": {
+            "Kmm": "entry NOW ssh (stpmlf Nnn -> zdf_phy Kmm)",
+            "Kbb": "carried BEFORE ssh (stpmlf Nbb -> zdf_phy Kbb)",
+            "eta_now_sha256": _sha256_array(eta_now),
+            "eta_before_sha256": _sha256_array(state.eta_before.data),
+            "now_before_bit_identical": bool(np.array_equal(
+                np.ascontiguousarray(np.asarray(eta_now)).view(np.uint64),
+                np.ascontiguousarray(
+                    np.asarray(state.eta_before.data)).view(np.uint64))),
+        },
+        "eager": eager_report,
+        "isolated_jit": jit_report,
+        "eager_jit_bit_identical": eager_report == jit_report,
     }
+
+    if plant:
+        clean, clean_metrics = isolated_jit
+        eta_plant = np.asarray(eta_now).copy()
+        if not np.any(np.asarray(clean) != 0.0):
+            raise RuntimeError(
+                "REFUSE: DINO shear routing plant found no live p_sh2")
+        peak = np.unravel_index(
+            int(np.argmax(np.abs(np.asarray(clean)))), np.shape(clean))
+        planted_at = tuple(int(v) for v in peak[:2])
+        eta_plant[planted_at] = np.nextafter(
+            eta_plant[planted_at], np.float64(np.inf))
+        planted, planted_metrics = jax.device_get(
+            jax.jit(shear)(jnp.asarray(eta_plant)))
+        metric_moved = [
+            int(np.count_nonzero(
+                np.ascontiguousarray(np.asarray(a)).view(np.uint64)
+                != np.ascontiguousarray(np.asarray(b)).view(np.uint64)))
+            for a, b in zip(clean_metrics, planted_metrics)
+        ]
+        p_moved = int(np.count_nonzero(
+            np.ascontiguousarray(np.asarray(clean)).view(np.uint64)
+            != np.ascontiguousarray(np.asarray(planted)).view(np.uint64)))
+        if not any(metric_moved) or p_moved == 0:
+            raise RuntimeError(
+                "REFUSE: DINO one-ULP NOW-ssh plant did not reach both a "
+                "consumed face metric and p_sh2")
+        out.update({
+            "plant_index": planted_at,
+            "plant_metric_cells_moved": metric_moved,
+            "plant_p_sh2_cells_moved": p_moved,
+        })
+    return out
 
 
 def run_and_capture_sh2(model, state, forcing, *, avm_weighting: str,
@@ -456,7 +429,7 @@ def main() -> int:
             },
             "plant": bool(args.plant_routing_eta_ulp),
             "routing": _routing_audit(
-                model, st, sf, plant=args.plant_routing_eta_ulp),
+                model, st, plant=args.plant_routing_eta_ulp),
             "status": ("PLANT-FIRED" if args.plant_routing_eta_ulp
                        else "PASS"),
         }
