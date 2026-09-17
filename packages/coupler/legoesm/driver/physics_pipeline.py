@@ -66,6 +66,12 @@ def _pin_carry_dtype(updated, carry_in):
     return updated
 
 
+# Land-tile roughness length [m] when the experiment does not set one.  Named
+# so ``resolve_tiled_surface_configs`` and the pipeline cannot drift apart
+# (#1320: a probe guessed this number and the guess was wrong).
+_DEFAULT_SURFACE_Z0_LAND = 0.1
+
+
 class PhysicsPipeline:
     """Encapsulates the full physics pipeline for operator-split stepping.
 
@@ -235,7 +241,7 @@ class PhysicsPipeline:
         # ExperimentConfig.surface_tiled.  ``surface_z0_land`` is the land
         # roughness length [m] used by the land tile's MOST scheme.
         self.surface_tiled = False
-        self.surface_z0_land = 0.1
+        self.surface_z0_land = _DEFAULT_SURFACE_Z0_LAND
         # Prognostic soil-water bucket (Manabe 1969) for the slab-land tile.
         # When True, the land evaporation efficiency beta = beta_min +
         # (1-beta_min)*clip(W/W_max, 0, 1) (the SAME formula as
@@ -616,12 +622,8 @@ class PhysicsPipeline:
         :meth:`_tiled_surface_flux` (the atmosphere's land tile) and the
         unified slab SEB (:meth:`_unified_land_fluxes`) so the two can never
         diverge into different land flux laws again."""
-        return self.turbulence_config.surface._replace(
-            bulk_scheme="most", z0=self.surface_z0_land, gustiness_w_zi=0.0,
-            # AIR-SEA-only option (#762): the land tile keeps the default
-            # thermodynamic convention even when the ocean tile runs aerobulk.
-            thermo_convention="legoesm",
-        )
+        return land_tile_surface_cfg(
+            self.turbulence_config.surface, self.surface_z0_land)
 
     def _unified_land_fluxes(self, T_land, T_air, q_air, u_low, v_low, p_s,
                              beta_land=None, T_sfc_ocean=None):
@@ -1035,10 +1037,8 @@ class PhysicsPipeline:
             q_sfc_land=q_sfc_land_col,
         )
 
-        ocean_cfg = self.turbulence_config.surface
-        # Land tile law shared with the unified slab SEB (single source).
-        land_cfg = self._land_tile_surface_cfg()
-        ice_cfg = ocean_cfg._replace(bulk_scheme="constant")
+        ocean_cfg, ice_cfg, land_cfg = tiled_surface_tile_configs(
+            self.turbulence_config.surface, self._land_tile_surface_cfg())
 
         return compute_tiled_surface_fluxes(
             u_low, v_low, T_low, q_low, rho_low,
@@ -3446,6 +3446,91 @@ _RADIATION_BUILDERS: dict[str, callable] = {
 # mirroring the bridge factory).  ``tests/unit/test_advertised_buildability.py``
 # keeps this shrink-only: adding an entry is a reviewed decision.
 _PIPELINE_UNSUPPORTED_CONVECTION = frozenset()
+
+
+def land_tile_surface_cfg(ocean_cfg, z0_land):
+    """The LAND tile law, derived from the OCEAN tile law.
+
+    Fixed-roughness Monin-Obukhov (``"most"``) at ``z0_land``, no
+    Charnock/gustiness, and the default thermodynamic convention even when the
+    ocean tile runs aerobulk (AIR-SEA-only option, #762).
+
+    One owner, called by the atmosphere's land tile AND by the unified slab
+    surface-energy balance, so the two can never diverge into different land
+    flux laws again -- and callable without a pipeline, so a probe can ask
+    instead of reconstruct (#1320).
+    """
+    return ocean_cfg._replace(
+        bulk_scheme="most", z0=z0_land, gustiness_w_zi=0.0,
+        thermo_convention="legoesm",
+    )
+
+
+def resolve_tiled_surface_configs(config, z0_land=None):
+    """(ocean, ice, land) surface-layer configs from an ExperimentConfig.
+
+    The whole chain in one call: the experiment's surface bulk scheme,
+    gustiness depth, thermodynamic convention and stability scheme are resolved
+    exactly as ``_resolve_turbulence`` resolves them for the run, then the
+    three tile laws are derived by the same functions the pipeline uses.
+
+    This exists because a probe that RECONSTRUCTS this chain gets it wrong:
+    the #1320 quantification run invented the sea-ice scheme and roughness and
+    used a gustiness depth production does not set, and its number had to be
+    retracted. Both reviewers of the first version of this seam said the same
+    thing -- exposing only the tile derivation still leaves the RESOLUTION to
+    be guessed -- so it is exposed here too.
+
+    ``z0_land`` defaults to the experiment's value, falling back to the
+    pipeline's own default; pass it only to ask a what-if.
+
+    Returns ``(None, None, None)`` when the selected turbulence scheme carries
+    no surface-layer config at all (``turbulence="none"``), rather than
+    inventing one.
+    """
+    from legoesm.atmosphere.physics.turbulence.integration import (
+        get_turbulence_fn,
+    )
+    tc = turbulence_config_for(config)
+    _name, _fn, sub = get_turbulence_fn(tc)
+    ocean_cfg = getattr(sub, "surface", None)
+    if ocean_cfg is None:
+        return (None, None, None)
+    if z0_land is None:
+        z0_land = getattr(config, "surface_z0_land", _DEFAULT_SURFACE_Z0_LAND)
+    return tiled_surface_tile_configs(
+        ocean_cfg, land_tile_surface_cfg(ocean_cfg, z0_land))
+
+
+def tiled_surface_tile_configs(ocean_cfg, land_cfg):
+    """The THREE surface-layer configs the tiled surface actually runs.
+
+    One owner for the tile laws, so a probe, a port or a scorecard can ask what
+    the run does instead of reconstructing it.  That reconstruction is not a
+    hypothetical failure: the #1320 quantification probe was retracted because
+    it invented the ice tile's scheme and roughness and then compared the port
+    against its own invention.
+
+    Parameters
+    ----------
+    ocean_cfg
+        The OCEAN tile law: the experiment's resolved surface config, exactly
+        as ``turbulence_config.surface`` gives it (so ``--surface-bulk-scheme``,
+        the gustiness depth and the thermodynamic convention are already in).
+    land_cfg
+        The LAND tile law, from ``PhysicsPipeline._land_tile_surface_cfg`` --
+        shared with the unified slab surface-energy balance so the two sides
+        cannot diverge into different land flux laws.
+
+    Returns
+    -------
+    (ocean_cfg, ice_cfg, land_cfg)
+        ``ice_cfg`` is the ocean law with ``bulk_scheme="constant"``: sea ice
+        runs the constant-coefficient surface layer, NOT the ocean's MOST or
+        COARE scheme and NOT a roughness of its own.  That single fact is what
+        the retracted probe got wrong.
+    """
+    return ocean_cfg, ocean_cfg._replace(bulk_scheme="constant"), land_cfg
 
 
 def convection_config_for(config, grid_dx_m=None):
