@@ -383,6 +383,8 @@ class TKEStatementTrace(NamedTuple):
     """
 
     en_entry: jnp.ndarray
+    taum_surface: jnp.ndarray
+    surface_dirichlet: jnp.ndarray
     en_after_boundaries: jnp.ndarray
     en_after_langmuir: jnp.ndarray
     rhs_pre_sweep: jnp.ndarray
@@ -3339,6 +3341,8 @@ def tke_vertical_mixing(
             raise ValueError("requested TKE statement trace is incomplete")
         _statement_trace = TKEStatementTrace(
             en_entry=_statement_entry,
+            taum_surface=taum,
+            surface_dirichlet=surface_dirichlet,
             en_after_boundaries=_statement_after_boundaries,
             en_after_langmuir=_statement_after_langmuir,
             rhs_pre_sweep=_statement_rhs,

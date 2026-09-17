@@ -222,6 +222,41 @@ def test_round102_tke_production_rows_and_ulp_control(tmp_path):
     assert planted["plant_target"] == target["name"]
 
 
+def test_round102_tke_surface_operand_attribution_uses_live_trace(tmp_path):
+    path, arrays = _write_tke_statement(tmp_path / "tke.bin")
+    record = gate.read_tke_statement_walk_record(path)
+    rho0 = np.float64(1026.0)
+    rn_ebb = np.float64(67.83)
+    rn_emin0 = np.float64(1.0e-4)
+    taum_raw = np.full((32, 22), np.float64(0.02))
+    surface_raw = np.maximum(rn_emin0, rn_ebb / rho0 * taum_raw)
+    record["arrays"]["en_after_boundaries"][:, :, 0] = surface_raw
+    operand = {"arrays": {
+        "taum_entry": taum_raw,
+        "rn_ebb": rn_ebb,
+        "rn_emin0": rn_emin0,
+    }}
+    exact_trace = SimpleNamespace(tke_statement_trace=SimpleNamespace(
+        taum_surface=taum_raw.swapaxes(0, 1),
+        surface_dirichlet=surface_raw.swapaxes(0, 1),
+    ))
+    exact = gate._tke_surface_operand_rows(
+        exact_trace, record, operand, "NEMO_TKE_RECORDED", rho0)
+    assert all(row["classification"] == "BIT" for row in exact["rows"])
+
+    moved_taum = taum_raw.swapaxes(0, 1).copy()
+    moved_taum[0, 0] = np.nextafter(moved_taum[0, 0], np.float64(np.inf))
+    moved_trace = SimpleNamespace(tke_statement_trace=SimpleNamespace(
+        taum_surface=moved_taum,
+        surface_dirichlet=np.maximum(rn_emin0, rn_ebb / rho0 * moved_taum),
+    ))
+    moved = gate._tke_surface_operand_rows(
+        moved_trace, record, operand, "MODEL_TAUM", rho0)
+    rows = {row["field"]: row for row in moved["rows"]}
+    assert rows["production_taum_vs_recorded"]["n_unequal"] == 1
+    assert rows["recorded_operand_scalar_replay"]["classification"] == "BIT"
+
+
 def test_round101_tke_writer_is_additive_write_only_and_fixed_layout():
     package = TESTCASES / "nemo_testcase_l2_gyre_round101_tke_walk"
     writer = (package / "l2_r101_tke_walk.F90").read_text()

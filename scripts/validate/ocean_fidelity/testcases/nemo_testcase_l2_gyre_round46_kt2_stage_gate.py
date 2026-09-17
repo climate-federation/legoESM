@@ -2358,6 +2358,59 @@ def _tke_production_statement_rows(
     }
 
 
+def _tke_surface_operand_rows(
+    trace, statement_record: dict, operand_record: dict,
+    entry_mode: str, rho0: float,
+) -> dict:
+    """Attribute the compiled surface write using live production operands."""
+    production = trace.tke_statement_trace
+    reference_taum = np.asarray(
+        operand_record["arrays"]["taum_entry"]).swapaxes(0, 1)
+    reference_surface = np.asarray(
+        statement_record["arrays"]["en_after_boundaries"]
+    ).swapaxes(0, 1)[..., 0]
+    candidate_taum = np.asarray(production.taum_surface)
+    candidate_surface = np.asarray(production.surface_dirichlet)
+    require(
+        candidate_taum.shape == candidate_surface.shape
+        == reference_taum.shape == reference_surface.shape,
+        "TKE surface-operand shapes do not match the 32 x 22 owned domain")
+
+    arrays = operand_record["arrays"]
+    zbbrau = np.float64(arrays["rn_ebb"]) / np.float64(rho0)
+    replay = np.maximum(
+        np.float64(arrays["rn_emin0"]), zbbrau * reference_taum)
+
+    rows = []
+    for name, reference, candidate, statement in (
+        ("production_taum_vs_recorded", reference_taum, candidate_taum,
+         "sbcmod taum input consumed by zdftke.f90:285"),
+        ("recorded_operand_scalar_replay", reference_surface, replay,
+         "zdftke.f90:257,285"),
+        ("production_surface_dirichlet", reference_surface,
+         candidate_surface, "zdftke.f90:257,285"),
+    ):
+        row = _classification(score(
+            f"GYRE-zco.kt2.tke_statement.production_step.surface.{name}",
+            reference, candidate,
+            np.ones(reference.shape, dtype=bool)))
+        row.update({
+            "field": name,
+            "entry_mode": entry_mode,
+            "execution": "production step",
+            "domain": "all 32 x 22 owned surface cells",
+            "nemo_statement": statement,
+        })
+        rows.append(row)
+    return {
+        "entry_mode": entry_mode,
+        "rho0": float(np.float64(rho0)),
+        "rn_ebb": float(np.float64(arrays["rn_ebb"])),
+        "rn_emin0": float(np.float64(arrays["rn_emin0"])),
+        "rows": rows,
+    }
+
+
 def _tke_program_twin(
     records: dict, advmean_root: Path, memory_root: Path,
     tke_statement_record: dict, tke_operand_record: dict,
@@ -2412,7 +2465,10 @@ def _tke_program_twin(
             f"GYRE-zco.kt2.tke_program_input.{field}",
             reference, np.asarray(candidate),
             np.ones(reference.shape, dtype=bool)))
-        row.update({"field": field, "entry_mode": "NEMO_TKE_RECORDED"})
+        row.update({
+            "field": field,
+            "entry_mode": "NEMO_TKE_CLOSURE_MEMORY_RECORDED",
+        })
         input_bridge.append(row)
     require(all(row["classification"] == "BIT" for row in input_bridge),
             "TKE pre-closure input bridge is not bit-identical")
@@ -2424,17 +2480,59 @@ def _tke_program_twin(
         stage_barotropic_output_override=_barotropic_override(
             records, advmean_root, 2),
     )
-    given_trace = jax.device_get(LatLonCGridOceanModel(
+    model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, cfg,
-        _nemo_ws_test_hooks=hooks).step(
-            state, dt=card.dt_s, freshwater=freshwater,
-            surface_forcing=surface))
+        _nemo_ws_test_hooks=hooks)
+    model_forcing_trace = jax.device_get(model.step(
+        state, dt=card.dt_s, freshwater=freshwater,
+        surface_forcing=surface))
+    model_forcing = _tke_production_statement_rows(
+        model_forcing_trace, tke_statement_record,
+        "NEMO_CLOSURE_MEMORY_MODEL_TAUM")
+    rho0 = float(card.recipe.model_config.constants.rho_0)
+    model_forcing_operands = _tke_surface_operand_rows(
+        model_forcing_trace, tke_statement_record, tke_operand_record,
+        "NEMO_CLOSURE_MEMORY_MODEL_TAUM", rho0)
+
+    recorded_taum = jnp.asarray(
+        np.asarray(tke_arrays["taum_entry"]).swapaxes(0, 1))
+    recorded_surface = surface._replace(taum=recorded_taum)
+    given_trace = jax.device_get(model.step(
+        state, dt=card.dt_s, freshwater=freshwater,
+        surface_forcing=recorded_surface))
     given = _tke_production_statement_rows(
         given_trace, tke_statement_record, "NEMO_TKE_RECORDED", plant)
+    given_operands = _tke_surface_operand_rows(
+        given_trace, tke_statement_record, tke_operand_record,
+        "NEMO_TKE_RECORDED", rho0)
+    model_operand_rows = {
+        row["field"]: row for row in model_forcing_operands["rows"]}
+    given_operand_rows = {
+        row["field"]: row for row in given_operands["rows"]}
+    surface_attribution = {
+        "prediction": (
+            "model taum non-BIT; recorded-operand replay BIT; recorded-taum "
+            "production surface BIT"),
+        "model_forcing": model_forcing_operands,
+        "recorded_taum_forcing": given_operands,
+        "verdict": (
+            "CONFIRMED_INHERITED_MODEL_TAUM"
+            if (model_operand_rows["production_taum_vs_recorded"]
+                ["classification"] != "BIT"
+                and model_operand_rows["recorded_operand_scalar_replay"]
+                ["classification"] == "BIT"
+                and given_operand_rows["production_taum_vs_recorded"]
+                ["classification"] == "BIT"
+                and given_operand_rows["production_surface_dirichlet"]
+                ["classification"] == "BIT")
+            else "REFUTED")
+    }
     if plant == "stage-tke-production-ulp":
         return {
-            "format": "nemo-testcase-l2-gyre-tke-production-walk-v3",
+            "format": "nemo-testcase-l2-gyre-tke-production-walk-v4",
             "input_bridge": input_bridge,
+            "model_forcing_diagnostic": model_forcing,
+            "surface_operand_attribution": surface_attribution,
             "given_nemo_entry": given,
             "chained": None,
         }
@@ -2457,8 +2555,10 @@ def _tke_program_twin(
     require(chained_trace is not None,
             "chained TKE production run did not expose kt2")
     return {
-        "format": "nemo-testcase-l2-gyre-tke-production-walk-v3",
+        "format": "nemo-testcase-l2-gyre-tke-production-walk-v4",
         "input_bridge": input_bridge,
+        "model_forcing_diagnostic": model_forcing,
+        "surface_operand_attribution": surface_attribution,
         "given_nemo_entry": given,
         "chained": _tke_production_statement_rows(
             chained_trace, tke_statement_record, "LEGO_CHAINED"),
