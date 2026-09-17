@@ -272,6 +272,16 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90"),
     "GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/l2_r54_tke.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/l2_r54_tke.f90"),
+    # Round 104 walks the shear production, whose operands are built in
+    # domqco/domhgr and masked in dommsk; cite the SAME compiled branch that
+    # produced the record rather than the src/OCE originals, whose line
+    # numbers differ from the preprocessed ones.
+    "GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/domqco.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/domqco.f90"),
+    "GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/domhgr.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/domhgr.f90"),
+    "GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/dommsk.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/dommsk.f90"),
     # Round 102 consumes the operator-run Round-101 statement-boundary record
     # and binds every closure statement to that exact compiled target.
     "GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/l2_r101_tke_walk.f90": (
@@ -462,6 +472,46 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 104: the shear-production routine and its operand builders ---
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90:167-168': [
+        '!!st                         CALL zdf_phy( kstp, Nbb, Nnn, Nrhs )',
+        'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 2],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfphy.f90:319-320': [
+        'CALL zdf_sh2( Kbb, Kmm, avm_k,',
+        '&                      sh2    )     ! ==>> out : shear production',
+        2],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfsh2.f90:83': [
+        'DO jk = 2, jpkm1'],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfsh2.f90:97-109': [
+        'ELSE', ('END DO   ;   END DO', 2), 13],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfsh2.f90:99-103': [
+        'zsh2u(ji,jj) = ( p_avm(ji+1,jj,jk) + p_avm(ji,jj,jk) ) &',
+        '&         * wumask(ji,jj,jk)', 5],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfsh2.f90:102': [
+        '/ ( (e3w_1d(jk  ) *(1._wp+r3u(ji,jj,Kmm))) '
+        '* (e3w_1d(jk) *(1._wp+r3u(ji,jj,Kbb))) )'],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfsh2.f90:104-108': [
+        'zsh2v(ji,jj) = ( p_avm(ji,jj+1,jk) + p_avm(ji,jj,jk) ) &',
+        '&         * wvmask(ji,jj,jk)', 5],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfsh2.f90:107': [
+        '/ ( (e3w_1d(jk  ) *(1._wp+r3v(ji,jj,Kmm))) '
+        '* (e3w_1d(jk) *(1._wp+r3v(ji,jj,Kbb))) )'],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfsh2.f90:112-113': [
+        'p_sh2(ji,jj,jk) = 0.25 * (',
+        '&                       + ( zsh2v(ji,jj-1) + zsh2v(ji,jj) ) '
+        '* ( 2. - vmask(ji,jj-1,jk) * vmask(ji,jj,jk) )   )', 2],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfsh2.f90:116-119': [
+        'set p_sh2 to 0 at the surface and bottom for output purpose',
+        ('END DO   ;   END DO', 4), 4],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/domqco.f90:266-267': [
+        ('pr3u(ji,jj) = 0.5_wp * (  e1e2t(ji  ,jj) * pssh(ji  ,jj)  &', 2),
+        ('&                    + e1e2t(ji+1,jj) * pssh(ji+1,jj)  ) '
+         '* r1_hu_0(ji,jj) * r1_e1e2u(ji,jj)', 2), 2],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/domhgr.f90:170': [
+        'r1_e1e2u(:,:) = 1._wp / e1e2u(:,:)'],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/dommsk.f90:237-242': [
+        'wumask(:,:,1) = umask(:,:,1)',
+        'wvmask(:,:,jk) = vmask(:,:,jk) * vmask(:,:,jk-1)', 6],
     # --- round 100: admitted same-call ratio and production discriminator ---
     'GYRE_OMIP_L2_P3_SM_R99R3OP/BLD/ppsrc/nemo/stprk3_stg.f90:140-150': [
         ('SELECT CASE( kstg )', 1),
@@ -1078,7 +1128,7 @@ CITATION_MAP = {
         'return state, audit', 188],
     'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1134-1168': [
         'def _bridge_kt2_state(', ('return state', 1), 35],
-    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:3329-3359': [
+    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:3526-3556': [
         'states = {1: _bridge_stage_context(',
         ('surface_forcing=surface))', 4), 31],
     'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:513-530': [
@@ -1088,7 +1138,7 @@ CITATION_MAP = {
         'step_entry = read_entry(year_entry_path)',
         'f"kt=2/Nbb=3, got kt={step_entry[\'kt\']}/Nbb={step_entry[\'Nbb\']}",',
         5],
-    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:3175-3196': [
+    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:3372-3393': [
         'if production_tke_post_sweep is not None:',
         'tke_module._solve_tke_backward_euler = inject_recorded_post_sweep',
         22],
