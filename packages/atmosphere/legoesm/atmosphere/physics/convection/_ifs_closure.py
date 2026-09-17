@@ -69,7 +69,8 @@ RG = C.g                      # RG
 RCPD = C.c_pd                 # RCPD
 RLVTT = C.L_v                 # RLVTT (latent heat of vaporisation)
 RETV = 1.0 / C.epsilon - 1.0  # RETV = RV/RD - 1
-ZORCPD = RG / RCPD            # ZORCPD = RG/RCPD (cumastrn.F90 ZCONS definitions)
+ZORCPD = 1.0 / RCPD           # cumastrn.F90:411  ZORCPD=1.0/RCPD (PGEO is already
+                              # a geopotential difference -- no factor of RG)
 
 _EPS = 1.0e-20   # AD-safe denominator floor (numerics, not physics)
 
@@ -95,6 +96,8 @@ ZDH_WEAK_FLOOR_FRAC = 0.75   # cumastrn.F90:900 ZDH=0.75*RCPD*RG
 ZSATFR_MAX = 0.94            # cumastrn.F90:846 IF(ZSATFR<=0.94 .OR. PVERVEL<-100)
 ZTAU_W_OFFSET = 2.0          # cumastrn.F90:803 (2.0+MIN(15.,PWMEAN)) in ZTAU
 ZTAU_W_MAX = 15.0            # cumastrn.F90:803 MIN(15.0_JPRB,PWMEAN(JL))
+PWMEAN_MIN = 1.0e-2          # cuascn.F90:863 MAX(1.E-2,PWMEAN/MAX(1.,ZDPMEAN))
+ZDPMEAN_MIN = 1.0            # cuascn.F90:863 MAX(1.0_JPRB,ZDPMEAN(JL))
 
 
 def _f(x) -> jnp.ndarray:
@@ -113,71 +116,27 @@ class IFSClosureConfig(NamedTuple):
     rmfcfl: float = RMFCFL        # sucumf.F90:248
     rmfcmin: float = RMFCMIN
     rmflia: float = RMFLIA        # sucumf.F90:241
+    # NJKT2 threshold (sucumf.F90:280-285): the closure integrals start at
+    # NJKT2, the highest level whose reference (standard-atmosphere) pressure
+    # exceeds 60 hPa.  Kept in the source's pressure convention (Pa) and
+    # derived per column from p_full; excluded from calibration.
+    njkt2_pa: float = 60.0e2
 
 
 __param_spec__ = {
-    "rcapdcycl": {
-        "units": "1",
-        "bounds": (0.0, 4.0),
-        "tunable_tier": 0,
-        "transform": "none",
-        "category": "convection",
-        "reference": "sucumf.F90:234 (default 2.0); SOURCE CONSTANT of a faithful OpenIFS port -- excluded from calibration",
-        "shape": None,
-    },
-    "rcapqadv": {
-        "units": "1",
-        "bounds": (0.0, 1.0),
-        "tunable_tier": 0,
-        "transform": "none",
-        "category": "convection",
-        "reference": "sucumf.F90:237 (default 0.8); SOURCE CONSTANT of a faithful OpenIFS port -- excluded from calibration",
-        "shape": None,
-    },
-    "rmincape": {
-        "units": "1",
-        "bounds": (0.0, 1.0),
-        "tunable_tier": 0,
-        "transform": "none",
-        "category": "convection",
-        "reference": "sucumf.F90:239 (default 0.05); SOURCE CONSTANT of a faithful OpenIFS port -- excluded from calibration",
-        "shape": None,
-    },
-    "rtaua": {
-        "units": "s-1",
-        "bounds": (0.0, 10.0),
-        "tunable_tier": 0,
-        "transform": "none",
-        "category": "convection",
-        "reference": "sucumf.F90:193 (default 1.0); SOURCE CONSTANT of a faithful OpenIFS port -- excluded from calibration",
-        "shape": None,
-    },
-    "rmfcfl": {
-        "units": "1",
-        "bounds": (0.0, 10.0),
-        "tunable_tier": 0,
-        "transform": "none",
-        "category": "convection",
-        "reference": "sucumf.F90:248 (default 3.0); SOURCE CONSTANT of a faithful OpenIFS port -- excluded from calibration",
-        "shape": None,
-    },
-    "rmfcmin": {
-        "units": "kg m-2 s-1",
-        "bounds": (1.0e-12, 1.0e-4),
-        "tunable_tier": 0,
-        "transform": "none",
-        "category": "convection",
-        "reference": "sucumf.F90 RMFCMIN (default 1e-8); SOURCE CONSTANT of a faithful OpenIFS port -- excluded from calibration",
-        "shape": None,
-    },
-    "rmflia": {
-        "units": "kg m-2 s-1",
-        "bounds": (0.0, 10.0),
-        "tunable_tier": 0,
-        "transform": "none",
-        "category": "convection",
-        "reference": "sucumf.F90:241 (default 2.0 = 2*RPLDARE); SOURCE CONSTANT of a faithful OpenIFS port -- excluded from calibration",
-        "shape": None,
+    "IFSClosureConfig": {
+        "scheme_key": "atm.conv.IFSClosureConfig",
+        "excluded": {
+            "rcapdcycl": "sucumf.F90:234 source constant (default 2.0) of a faithful OpenIFS port",
+            "rcapqadv": "sucumf.F90:237 source constant (default 0.8) of a faithful OpenIFS port",
+            "rmincape": "sucumf.F90:239 source constant (default 0.05) of a faithful OpenIFS port",
+            "rtaua": "sucumf.F90:193 source constant (default 1.0 s-1) of a faithful OpenIFS port",
+            "rmfcfl": "sucumf.F90:248 source constant (default 3.0) of a faithful OpenIFS port",
+            "rmfcmin": "sucumf.F90 source constant (default 1e-8) of a faithful OpenIFS port",
+            "rmflia": "sucumf.F90:241 source constant (default 2.0 = 2*RPLDARE) of a faithful OpenIFS port",
+            "njkt2_pa": "sucumf.F90:280-285 source constant (60 hPa) defining the NJKT2 integral window; a vertical-grid property, not a tunable",
+        },
+        "params": {},  # every field is a source constant/switch of a faithful port -- nothing is genuinely tunable
     },
 }
 
@@ -199,7 +158,11 @@ __physics_contract__ = {
         "T": "K", "q": "kg kg-1", "qs": "kg kg-1", "T_h": "K", "q_h": "kg kg-1",
         "T_u": "K", "q_u": "kg kg-1", "l_u": "kg kg-1",
         "p_full": "Pa", "p_half": "Pa", "geo_full": "m2 s-2", "geo_half": "m2 s-2",
+        # total physics tendencies (PTENT/PTENQ) -- ZDHPBL / ZCAPPBL integrands
         "dT_dt_other": "K s-1", "dq_dt_other": "kg kg-1 s-1",
+        # advective (dynamics) tendencies (PTENTA/PTENQA) -- ZCAPE2 and ZDQCV
+        # integrands; same name/meaning as the trigger module's dq_dt_adv
+        "dT_dt_adv": "K s-1", "dq_dt_adv": "kg kg-1 s-1",
         "pwmean": "m2 s-2 Pa", "zdpmean": "Pa",
         "land_frac": "1", "dx_m": "m", "dt": "s",
         "ldcum": "1 (bool)", "ktype": "1 (1 deep, 2 shallow)",
@@ -232,7 +195,7 @@ __physics_contract__ = {
 # ---------------------------------------------------------------------------
 # (1) sub-cloud moist-static-energy supply  cumastrn.F90:484-496
 # ---------------------------------------------------------------------------
-def subcloud_mse_supply(dT_dt_other, dq_dt_other, p_half, k_cbot):
+def subcloud_mse_supply(dT_dt_other, dq_dt_other, p_half, k_cbot, k_start):
     """ZDHPBL, cumastrn.F90:484-496::
 
         IF(LDCUM(JL).AND.JK >= KCBOT(JL)) THEN
@@ -240,14 +203,22 @@ def subcloud_mse_supply(dT_dt_other, dq_dt_other, p_half, k_cbot):
           ZDHPBL(JL)=ZDHPBL(JL)+(RLVTT*PTENQ(JL,JK)+RCPD*PTENT(JL,JK))*ZDZ
 
     Integrated from the surface (PAPH(KLEV+1)) up to the cloud-base
-    interface; the outer loop NJKT2..KLEV covers all sub-cloud full levels.
+    interface.  The outer loop starts at NJKT2 (sucumf.F90:280-285, the
+    highest level whose reference pressure exceeds 60 hPa), not at 1:
+    k_start is that cutoff expressed as OUR 0-based full-level index
+    (IFS JK = k_start + 1), derived from p_full by the caller.
+
+    Tendency mapping: PTENT/PTENQ are the TOTAL physics tendencies -- pass
+    them as dT_dt_other / dq_dt_other (NOT the advective pair, which the
+    source reserves for ZCAPE2 / ZDQCV).
+
     Arrays are surface-last and k_cbot is OUR surface-last 0-based half
     index (IFS IKB <-> k_cbot), so the mask is the raw 0-based full-level
     index j >= k_cbot.
     """
     nlev = p_half.shape[-1] - 1
     j = jnp.arange(nlev)[None, :]                             # our 0-based j
-    mask = j >= jnp.asarray(k_cbot)[:, None]
+    mask = (j >= jnp.asarray(k_cbot)[:, None]) & (j >= jnp.asarray(k_start)[:, None])
     dp = (p_half[..., 1:] - p_half[..., :-1]) * mask
     return jnp.sum((RLVTT * dq_dt_other + RCPD * dT_dt_other) * dp, axis=-1)
 
@@ -316,12 +287,26 @@ def deep_cape_closure(
     T, q, qs, T_h, q_h, T_u, q_u, l_u, M_u,
     p_full, p_half, geo_full, geo_half,
     dT_dt_other, dq_dt_other,
+    dT_dt_adv, dq_dt_adv,
     ldcum, ktype, k_cbot, k_ctop, k_dpl,
     pwmean_raw, zdpmean,
     land_frac, dx_m, dt, cfg,
     zmfub, zmfmax,
 ):
     """CAPE closure for KTYPE=1, cumastrn.F90:715-866.
+
+    Tendency mapping (cumastrn.F90):
+      * dT_dt_other / dq_dt_other are the TOTAL physics tendencies
+        PTENT / PTENQ -- used ONLY by the ZCAPPBL integrand (:494-496).
+      * dT_dt_adv / dq_dt_adv are the ADVECTIVE (dynamics) tendencies
+        PTENTA / PTENQA -- used by ZCAPE2 (:757-758) and ZDQCV (:767).
+        Same name and meaning as the trigger module's dq_dt_adv.
+
+    NJKT2 window (sucumf.F90:280-285): every integral loop starts at
+    ``DO JK=NJKT2,KLEV`` (:490, :732), NJKT2 being the highest level whose
+    reference pressure exceeds 60 hPa (cfg.njkt2_pa).  The cutoff is
+    derived per column from p_full as the highest OUR index j with
+    p_full[j] > njkt2_pa, floored at j = 1 (IFS default NJKT2 = 2).
 
     Integrand masks: ``LLO1 = LDCUM .AND. KTYPE==1``,
     ``LLO3 = LLO1 .AND. JK <= KCBOT .AND. JK > KCTOP`` -- evaluated here on
@@ -335,8 +320,9 @@ def deep_cape_closure(
          & +  RETV*(PQEN(JL,JK-1)-PQEN(JL,JK))  ) *&
          & (RG*(PMFU(JL,JK)+PMFD(JL,JK))) )
 
-    with ZDZ = PGEO(JK-1)-PGEO(JK) (environmental dry-static-energy
-    stability) and PMFD = 0 here (downdraught out of scope).
+    with ZDZ = PGEO(JK-1)-PGEO(JK), ZORCPD = 1/RCPD (cumastrn.F90:411 --
+    PGEO is already a geopotential difference, so no factor of RG), and
+    PMFD = 0 here (downdraught out of scope).
 
     ZCAPE integrand (:743-747, virtual terms + condensate loading;
     ``-PLRAIN not added`` per the source comment)::
@@ -348,12 +334,12 @@ def deep_cape_closure(
 
     with ZDZ = PAP(JK)-PAP(JK-1) (pressure integral).
 
-    ZCAPE2 (:760-765) uses the tendency-corrected environment::
+    ZCAPE2 (:757-765) uses the ADVective-tendency-corrected environment::
 
         ZTENH2(JL,JK)=ZTENH(JL,JK)-0.5_JPRB*(PTENTA(JL,JK)+PTENTA(JL,JK-1))*PTSPHY
         ZQENH2(JL,JK)=ZQENH(JL,JK)-0.5_JPRB*(PTENQA(JL,JK)+PTENQA(JL,JK-1))*PTSPHY
 
-    ZDQCV advection term (:769-771, :820-825, :853)::
+    ZDQCV advection term (:767, :853) -- PTENQA, i.e. dq_dt_adv::
 
         ZDQCV(JL)=ZDQCV(JL)+PTENQA(JL,JK)*ZDZ*(PQEN(JL,JK)/PQSEN(JL,JK))
         ...
@@ -368,13 +354,17 @@ def deep_cape_closure(
 
         ZTAU(JL)=(PGEOH(JL,IK)-PGEOH(JL,IKB))/((2.0_JPRB+MIN(15.0_JPRB,PWMEAN(JL)))*RG)*ZTAURES*RTAUA
 
-    with IK = KCTOP and PWMEAN the mean updraught velocity
-    (cumastrn.F90:788-800 in CUASC: the raw accumulator is converted as
-    PWMEAN = SQRT(2*MAX(0, pwmean/zdpmean)) before use; that conversion is
-    done here from the raw accumulators passed in).
+    with IK = KCTOP and PWMEAN the mean updraught velocity converted from
+    the raw CUASC accumulators exactly as cuascn.F90:863-864::
 
-    RCAPDCYCL == 2 correction (:815-819).  ZCAPPBL (:488-491 region,
-    integrated in the same loop as ZDHPBL)::
+        PWMEAN(JL)=MAX(1.E-2_JPRB,PWMEAN(JL)/MAX(1.0_JPRB,ZDPMEAN(JL)))
+        PWMEAN(JL)=SQRT(2.0_JPRB*PWMEAN(JL))
+
+    (both floors reproduced: the MAX(1,ZDPMEAN) denominator floor and the
+    1e-2 numerator floor, which also keeps sqrt away from zero).
+
+    RCAPDCYCL == 2 correction (:815-819).  ZCAPPBL (:494-496, integrated
+    in the same NJKT2 loop as ZDHPBL, PTENT/PTENQ = total tendencies)::
 
         ZCAPPBL(JL)=ZCAPPBL(JL)+(PTENT(JL,JK)+RETV*PTEN(JL,JK)*PTENQ(JL,JK))*ZDZ
 
@@ -409,7 +399,20 @@ def deep_cape_closure(
     kb = jnp.asarray(k_cbot)[:, None]
     kt = jnp.asarray(k_ctop)[:, None]
 
-    llo1 = ldcum[:, None] & (jnp.asarray(ktype) == 1)[:, None]
+    # NJKT2 window (sucumf.F90:280-285): highest OUR index with p > cfg.njkt2_pa,
+    # floored at j = 1 (IFS default NJKT2 = 2 -> our 1).
+    # sucumf.F90:280-285 scans JLEV = NFLEVG..2 and keeps overwriting NJKT2, so the
+    # surviving value is the SMALLEST (highest-altitude) index whose pressure still
+    # exceeds the threshold: a MINIMUM over our surface-last index, not a maximum.
+    j_njkt2 = jnp.min(
+        jnp.where(p_full > cfg.njkt2_pa,
+                  jnp.broadcast_to(j, p_full.shape),
+                  jnp.full_like(p_full, p_full.shape[-1] - 1)),
+        axis=-1)
+    j_njkt2 = jnp.maximum(j_njkt2, 1)
+    m_top = j >= j_njkt2[:, None]
+
+    llo1 = ldcum[:, None] & (jnp.asarray(ktype) == 1)[:, None] & m_top
     llo3 = llo1 & (j <= kb) & (j > kt)
 
     # ---- ZHEAT (environmental stability x g*(PMFU+PMFD), PMFD=0) -------
@@ -424,10 +427,11 @@ def deep_cape_closure(
     buoy = ((T_u - T_h) / _f(T_h) + RETV * (q_u - q_h) - l_u)
     zcape = jnp.sum(buoy * dp_full * llo3, axis=-1)
 
-    dT2 = 0.5 * (dT_dt_other
-                 + jnp.concatenate([dT_dt_other[:, :1], dT_dt_other[:, :-1]], -1)) * dt
-    dq2 = 0.5 * (dq_dt_other
-                 + jnp.concatenate([dq_dt_other[:, :1], dq_dt_other[:, :-1]], -1)) * dt
+    # ZCAPE2 uses the ADVECTIVE tendencies PTENTA/PTENQA (:757-758)
+    dT2 = 0.5 * (dT_dt_adv
+                 + jnp.concatenate([dT_dt_adv[:, :1], dT_dt_adv[:, :-1]], -1)) * dt
+    dq2 = 0.5 * (dq_dt_adv
+                 + jnp.concatenate([dq_dt_adv[:, :1], dq_dt_adv[:, :-1]], -1)) * dt
     T_h2 = T_h - dT2
     q_h2 = q_h - dq2
     buoy2 = ((T_u - T_h2) / _f(T_h2) + RETV * (q_u - q_h2) - l_u)
@@ -436,20 +440,23 @@ def deep_cape_closure(
     # ---- ZDQCV / ZSATFR -------------------------------------------------
     dp_half = p_half[:, 1:] - p_half[:, :-1]                  # PAPH(JK+1)-PAPH(JK)
     rh_frac = q / _f(qs)
-    zdqcv_raw = jnp.sum(dq_dt_other * dp_half * rh_frac * llo1, axis=-1)
+    # ZDQCV integrand uses PTENQA (:767), i.e. dq_dt_adv
+    zdqcv_raw = jnp.sum(dq_dt_adv * dp_half * rh_frac * llo1, axis=-1)
     m_sat = llo1 & (j >= kt)
     zsatfr_int = jnp.sum(rh_frac * dp_half * m_sat, axis=-1)
     p_top_if = jnp.take_along_axis(p_half, kt.astype(jnp.int32), axis=1)[:, 0]          # PAPH(KCTOP)
     ps = p_half[:, -1]                                        # PAPH(KLEV+1)
     zsatfr = zsatfr_int / _f(ps - p_top_if)
 
-    # ---- ZCAPPBL (:488-491), sub-cloud, JK >= KCBOT ---------------------
-    m_pbl = j >= kb
+    # ---- ZCAPPBL (:494-496), sub-cloud, JK >= KCBOT; PTENT/PTENQ (total) --
+    m_pbl = (j >= kb) & m_top
     zcappbl = jnp.sum((dT_dt_other + RETV * T * dq_dt_other)
                       * dp_half * m_pbl, axis=-1)
 
     # ---- timescale ------------------------------------------------------
-    w_mean = jnp.sqrt(2.0 * jnp.maximum(0.0, pwmean_raw / _f(zdpmean)))  # :788-800
+    # cuascn.F90:863-864, both floors reproduced
+    w_mean = jnp.sqrt(2.0 * jnp.maximum(
+        PWMEAN_MIN, pwmean_raw / jnp.maximum(ZDPMEAN_MIN, zdpmean)))
     ztr = ifs_ztaures(dx_m)
     geo_top = jnp.take_along_axis(geo_half, kt.astype(jnp.int32), axis=1)[:, 0]        # PGEOH(KCTOP)
     geo_base = jnp.take_along_axis(geo_half, kb.astype(jnp.int32), axis=1)[:, 0]       # PGEOH(IKB)
@@ -578,6 +585,10 @@ def scale_profile(M_u, PMFUS, PMFUQ, PMFUL, PLUDE, PDMFUP, PMFUDE_RATE,
             ENDIF
           ENDIF
 
+    The 1e-10 floor applies ONLY inside the binding branch (:975-979), i.e.
+    only when some level binds; it is NOT applied to columns whose ratio is
+    legitimately below 1e-10 with no binding level.
+
     Implemented as a per-column minimum of the allowed factor over levels,
     then the single ZMFS applied to exactly the arrays rescaled at
     :1008-1018: PMFU, ZMFUS, ZMFUQ, ZMFUL, ZDMFUP, ZDMFEN, PLUDE and
@@ -602,13 +613,17 @@ def scale_profile(M_u, PMFUS, PMFUQ, PMFUL, PLUDE, PDMFUP, PMFUDE_RATE,
     zdz_taper = (ps - ph) / _f(ps - pb)
     M_u_eff = jnp.where(below, mfu_base * zdz_taper, M_u)
 
-    # (:968-973) one column factor against the per-level CFL / RMFLIA bound
+    # (:968-979) one column factor against the per-level CFL / RMFLIA bound.
+    # The 1e-10 floor sits on the binding path only (:975-979): a non-binding
+    # level contributes +inf, not a floor.
     dp_lev = ph - jnp.concatenate([ph[:, :1], ph[:, :-1]], -1)  # PAPH(JK)-PAPH(JK-1)
     zmfmax_lev = jnp.minimum(dp_lev * cfg.rmfcfl / (RG * _f(dt)), cfg.rmflia)
     binding = window & (M_u_eff * zmfs[:, None] > zmfmax_lev)
-    allowed = jnp.where(binding, zmfmax_lev / _f(M_u_eff), jnp.inf)
+    allowed = jnp.where(binding,
+                        jnp.maximum(1.0e-10, zmfmax_lev / _f(M_u_eff)),
+                        jnp.inf)
     zmfs = jnp.minimum(zmfs, jnp.min(allowed, axis=-1))
-    zmfs = jnp.where(ldcum, jnp.maximum(zmfs, 1.0e-10), 0.0)  # :972 floor
+    zmfs = jnp.where(ldcum, zmfs, 0.0)
 
     # (:1003-1018) scale the profiles on JK <= KCBOT and JK >= KCTOP-1
     m_scale = ld & (j >= 1) & (j <= kb) & (j >= kt - 1)
@@ -628,10 +643,18 @@ def ifs_closure(
     ldcum, ktype, k_cbot, k_dpl,
     T, q, qs, p_full, p_half, geo_full, geo_half, T_h, q_h,
     dT_dt_other, dq_dt_other,
+    dT_dt_adv, dq_dt_adv,
     land_frac, dx_m, dt,
     cfg: IFSClosureConfig = IFSClosureConfig(),
 ):
     """Compose (1)-(4) over a column set (leading dimension = columns).
+
+    Tendency mapping (cumastrn.F90):
+      * dT_dt_other / dq_dt_other -- TOTAL physics tendencies PTENT/PTENQ,
+        used by the ZDHPBL and ZCAPPBL integrals (:484-496).
+      * dT_dt_adv / dq_dt_adv -- ADVECTIVE (dynamics) tendencies
+        PTENTA/PTENQA, used by ZCAPE2 (:757-758) and ZDQCV (:767); same
+        name and meaning as the trigger module's dq_dt_adv.
 
     The source (cumastrn) runs the entraining ascent ONCE with the
     first-guess mass flux ZMFUB and then rescales all updraught flux
@@ -663,8 +686,19 @@ def ifs_closure(
     T_h = T_h[:, :nlev]
     q_h = q_h[:, :nlev]
     geo_half = geo_half[:, :nlev]
+
+    # NJKT2 window (sucumf.F90:280-285): highest OUR index j with
+    # p_full[j] > cfg.njkt2_pa, floored at j = 1 (IFS default NJKT2 = 2).
+    jj = jnp.arange(nlev)[None, :]
+    # NJKT2 = SMALLEST surface-last index with p > njkt2_pa (see deep_cape_closure).
+    k_start = jnp.maximum(
+        jnp.min(jnp.where(p_full > cfg.njkt2_pa,
+                          jnp.broadcast_to(jj, p_full.shape),
+                          jnp.full_like(p_full, p_full.shape[-1] - 1)), axis=-1),
+            1)
+
     # (1) first guess -----------------------------------------------------
-    zdhpbl = subcloud_mse_supply(dT_dt_other, dq_dt_other, p_half, k_cbot)
+    zdhpbl = subcloud_mse_supply(dT_dt_other, dq_dt_other, p_half, k_cbot, k_start)
     idx = jnp.arange(T.shape[0])
     kb = jnp.asarray(k_cbot).astype(jnp.int32)
     t_u_b = T_u[idx, kb]
@@ -685,6 +719,7 @@ def ifs_closure(
         T, q, qs, T_h, q_h, T_u, q_u, l_u, M_u,
         p_full, p_half, geo_full, geo_half,
         dT_dt_other, dq_dt_other,
+        dT_dt_adv, dq_dt_adv,
         ldcum, ktype, k_cbot, k_ctop, k_dpl,
         pwmean, zdpmean, land_frac, dx_m, dt, cfg, M_b0, zmfmax)
 

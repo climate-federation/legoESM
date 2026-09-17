@@ -1049,14 +1049,36 @@ def ifs_ztaures(dx_m):
         IF(ZDX(JL)>125.E3_JPRB) ZTAURES=MIN(3.0_JPRB,ZTAURES)
 
     Shared public helper (used by the bechteld and ifs_closure closures).
-    Accepts a python float or a jnp array (a float returns a 0-d array).
+
+    Precision: for a python/numpy scalar the branch test and the
+    logarithm are computed in double-precision python floats (math.log)
+    and a python float is returned -- with x64 disabled, converting to a
+    JAX array first could round a dx just below 8000 m up to 8000 and
+    flip the discontinuous branch.  The jnp path is used only for traced
+    / array inputs.
 
     LEGACY SENTINEL: dx <= 0 keeps the resolution-agnostic factor 1.0.
     The production BechtoldConfig default is dx_m = 0.0, so this sentinel
-    preserves the shipped behaviour.  Implemented with jnp.where so it
-    works both for a static python float (traced at compile time) and for
-    a traced per-column dx array.
+    preserves the shipped behaviour on both paths.
     """
+    import math
+
+    import numpy as np
+
+    if isinstance(dx_m, (bool, int, float, np.bool_, np.integer, np.floating)):
+        dx = float(dx_m)
+        if dx <= 0.0:
+            return 1.0                                        # legacy sentinel
+        dx = max(dx, 1.0e2)                                   # :762 floor (m)
+        if dx < ZTAURES_FINE_DX:
+            ztr = 1.0 + math.log(ZTAURES_FINE_DX / dx) ** 2
+        else:
+            ztr = 1.0 + ZTAURES_DX_COEFF * dx / ZTAURES_REF_DX
+        if dx > ZTAURES_REF_DX:
+            ztr = min(ZTAURES_MAX, ztr)
+        return ztr
+
+    # traced / array path
     dx_in = jnp.asarray(dx_m)
     dx = jnp.maximum(dx_in, 1.0e2)             # cumastrn.F90:762 floor (m)
     ztr = 1.0 + ZTAURES_DX_COEFF * dx / ZTAURES_REF_DX
