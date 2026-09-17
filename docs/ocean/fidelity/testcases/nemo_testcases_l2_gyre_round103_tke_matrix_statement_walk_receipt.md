@@ -1,0 +1,400 @@
+# NEMO-testcases L2 GYRE round 103 receipt: the TKE matrix and RHS statement walk
+
+Date: 2026-09-17. Branch `fidelity/nemo-testcases-l2-gyre-codex2`, incoming tip
+`e92f8aff20521b23c6d062a5baf8c46882361efc`.
+
+## Verdict
+
+**HELD; no production physics and no configuration landed.** The compiled block
+`zdftke.f90:399-473`, which the Round-101 walk reported as one row, is split
+into one row per compiled write and driven from NEMO's recorded stage entry
+through the real production step. In compiled execution order the first
+statement whose output is not bit-identical is the **right-hand-side assignment
+at `GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/zdftke.f90:439-442`**:
+
+> `en(ji,jj,jk) = en(ji,jj,jk) + rn_Dt * ( p_sh2 - p_avt*rn2 + zfact3*dissl*en ) * wmask`
+
+11,993 of 20,416 owned cells differ, maximum absolute
+`5.488912518947231e-10`. The three matrix writes that precede it inside the
+same loop body are each **BIT with zero unequal cells**: `zd_up` (`:434`),
+`zd_lw` (`:435`) and `zdiag` (`:436`).
+
+The magnitude of that statement's error is carried entirely by ONE of its five
+operands, the shear production `p_sh2`. The production `p_sh2` differs from
+NEMO's recorded `sh2` in 17,400 of 20,416 cells at maximum
+`3.811744924985501e-14`, and
+
+```
+rn_Dt * max|delta p_sh2| = 14400.0 * 3.811744924985501e-14
+                         = 5.488912691979121e-10
+observed RHS max         = 5.488912518947231e-10
+ratio                    = 0.9999999684761081
+```
+
+so the budget closes to 3.2e-8 relative. **No candidate fix exists inside this
+block.** `p_sh2` is computed by a different statement in a different routine
+(`zdfsh2`), consumed here as an operand, and under decision 41 it must be
+walked at its own stage. The round therefore names the statement and stops;
+the trajectory ladder and the days 1-30 arm were not run because there is no
+candidate to judge, and every headline number is unchanged by construction.
+
+No NEMO source was modified and neither `makenemo` nor `mpirun` was run. No
+card, default, scheme selection, threshold, coefficient, carried state,
+restart schema, year harness, reconciliation gate, freshwater pair or #1484
+guard changed.
+
+## Registration
+
+The frozen preregistration is
+`docs/ocean/fidelity/PREREG_nemo_testcases_l2_gyre_round103.md`, committed as
+`30006264843d` before any new measurement, with `1579a71ef2de` correcting an
+invented tip hash in it. Evidence is under
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round103/`.
+
+## Premises carried in from after the round-102 receipt
+
+1. The GYRE card selects `tke_langmuir_evaluation="nemo_literal"` (user
+   decision 42, card only) with the safe-sqrt gradient guard, so the
+   production arm IS the literal arm. **This buys attribution, not accuracy**:
+   the post-sweep row is 979 cells on both arms and the literal arm is
+   marginally worse in the last bits (`6.809688229969524e-12` against
+   `6.809688013129089e-12`).
+2. Round 102's attribution of its 3,223-cell post-Langmuir difference to the
+   ordered `zpelc` recurrence is **REFUTED** by the operator's one-variable
+   measurement; the owners are the `imlc` index and the missing surface mask,
+   mutually redundant. That recurrence is inert and was not walked.
+3. An ORCA2 inventory and a corrected passivity gate landed separately; not
+   used here.
+
+## Instrument validation before any new science
+
+The consolidated Round-46/51 gate was re-run at the incoming tip in
+`--mode stage-tke-walk` with nothing changed, purely to reproduce known
+values. Artifact `instrument_repro.json`, SHA-256
+`e674f45302126d5642aaea289fa853ea21cb06762ac8b18577f82aa27811764c`. Its
+`NEMO_TKE_RECORDED` arm reproduces round 102's literal-arm rows exactly:
+
+| boundary | round 102 literal arm | this tip |
+|---|---|---|
+| `en_entry` | 0 / 0 | 0 / 0 |
+| `en_after_boundaries` | 0 / 0 | 0 / 0 |
+| `en_after_langmuir` | 0 / 0 | 0 / 0 |
+| `rhs_pre_sweep` | 11,993 / `5.488912518947231e-10` | 11,993 / `5.488912518947231e-10` |
+| `en_post_sweep` | 979 / `6.809688229969524e-12` | 979 / `6.809688229969524e-12` |
+
+Cells are `unequal / max abs`.
+
+A second, independent instrument check validates the REFERENCE side. The
+committed probe
+`scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round103_tke_block_replay.py`
+rebuilds NEMO's four block outputs from NEMO's OWN recorded operands in the
+compiled source association and compares them with NEMO's OWN recorded
+outputs. All four rows are BIT over all 20,416 owned cells
+(`record_replay.json`, SHA-256 below, stamped clean at `c571dab4439f`). That
+simultaneously validates the transcription and the index mapping: had either
+been wrong, NEMO could not reproduce itself through it.
+
+Its plant is instructive and is recorded as a failure that was caught. The
+first version advanced one bit of `avm` at cell `[0,0,2]`, where `tmask` is
+zero, so `zcof` annihilates it and every row stayed green; the probe refused
+its own plant with exit 2 rather than reporting a green run. The repaired
+plant selects a cell that is wet at both `jk` and `jk-1`, reports the baseline
+operand it multiplies (`5.361255775252422e-4`, not a zero), and makes `zd_up`
+and `zd_lw` each differ in exactly one cell, exit 1. `zdiag` does NOT move
+under that plant: the induced change is ~1e-17 against a diagonal near 1,
+below its own spacing. That is honest and is stated rather than hidden.
+
+## Compiled-source basis
+
+Two NEMO builds are involved and their compiled `zdftke.f90` files are
+**identical outside the recorder calls** - the two files differ in ZERO lines
+once the `r54_`/`r101_` call lines are removed. That was measured, not
+assumed, and it settles for this file the operator's Round-101 note-N concern
+(b) that the two builds might compute different things. The same statements
+therefore carry different line numbers in each build, and each citation names
+the producer of the array it describes.
+
+Round-101 build, `GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/zdftke.f90`:
+the three `zfact` scalars at `:259-261`; the post-Langmuir record callback at
+`:395`; `zcof` at `:426`; `zzd_up` at `:429-430`; `zzd_lw` at `:431-432`; the
+three matrix writes at `:434-436`; the right-hand side at `:439-442`; the
+record callbacks at `:470` and `:473`; the sweep and floor at `:475-495`.
+
+Round-59 build, `GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90`: the
+same statements at `:417`, `:420-421`, `:422-423`, `:425-427` and `:430-433`,
+with the write call that produced the matrix arrays at `:463` and the writer
+body at `GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/l2_r54_tke.f90:172-190`.
+
+## The statement inventory, and what is excluded
+
+Between the post-Langmuir callback and the right-hand-side callback, exactly
+these output-bearing assignments execute on this card:
+
+| order | output | statement | disposition |
+|---:|---|---|---|
+| 1 | `p_pdlr` | `zdftke.f90:421` | EXCLUDED, UNMEASURED-WITH-SPEC |
+| 2 | `zd_up` | `zdftke.f90:434` | measured |
+| 3 | `zd_lw` | `zdftke.f90:435` | measured |
+| 4 | `zdiag` | `zdftke.f90:436` | measured |
+| 5 | `en` RHS | `zdftke.f90:439-442` | measured |
+
+`p_pdlr` is first in compiled order and is deliberately excluded from the
+`en` walk rather than silently skipped. The reason is cited, not assumed: it
+is written once at `:421` and read at exactly one place, `:712` inside
+`tke_avn`, where it multiplies `p_avt`. It never enters `en`, so it belongs to
+a separate consumer chain and gets its own walk (see OPEN).
+
+The wave-coupled surface block at `:451-468` does NOT execute, on two
+independent conditions: `cpl_phioc` is set `.TRUE.` only in
+`sbccpl.f90:629`, which GYRE (forced, no coupler) never reaches, and
+`ln_phioc = .false.` in `EXP00/namelist_ref:593`. `nn_pdl = 1` in the same
+namelist, which is why row 1 exists at all.
+
+## The walk, given NEMO's recorded stage entry, through the production step
+
+Binding artifact `tke_matrix_walk.json`, SHA-256 recorded below, stamped clean
+at commit `c571dab4439fb353d97066453725d12a3610f831`. Every row covers all
+20,416 owned cells (`22 x 32` horizontal by NEMO levels `2:jpkm1`) with no
+wet-mask exception and no numeric tolerance.
+
+| order | output | statement | unequal | max abs | class |
+|---:|---|---|---:|---|---|
+| 2 | `zd_up` | `zdftke.f90:434` | 0 | 0 | **BIT** |
+| 3 | `zd_lw` | `zdftke.f90:435` | 0 | 0 | **BIT** |
+| 4 | `zdiag` | `zdftke.f90:436` | 0 | 0 | **BIT** |
+| 5 | `en` RHS | `zdftke.f90:439-442` | 11,993 | `5.488912518947231e-10` | DEBT |
+
+**The first non-bit statement is `zdftke.f90:439-442`.**
+
+The consumed operand rows, over the same domain:
+
+| operand | source | unequal | max abs | class |
+|---|---|---:|---|---|
+| `p_sh2` | model's own, `tke_shear_evaluation_stage="step_entry"` | 17,400 | `3.811744924985501e-14` | DEBT |
+| `p_avt` | recorded, installed by the entry bridge | 0 | 0 | BIT |
+| `dissl` | recorded, installed by the entry bridge | 0 | 0 | BIT |
+| `en` (post-Langmuir) | production, measured earlier in this walk | 0 | 0 | BIT |
+
+## Ownership: the one-variable swap, and what it refuted
+
+The first version of this round attributed the miss to `p_sh2` with a
+SET-INCLUSION test - every cell where the right-hand side differs is a cell
+where `p_sh2` differs (11,993 of 11,993; zero RHS-unequal cells have a
+bit-equal `p_sh2`). The independent review refuted that as non-causal: the
+same statement also consumes `p_avt`, `rn2`, `dissl`, the post-Langmuir `en`
+and `wmask`, and coincident errors in those would pass the same test. The test
+was replaced by a real one-variable swap through the committed transcription.
+
+| arm | reference | unequal | max abs | class |
+|---|---|---:|---|---|
+| every operand recorded | NEMO's recorded RHS | 0 | 0 | BIT |
+| only `p_sh2` swapped to the production value | the production RHS | 11,029 | `1.1102230246251565e-16` | AT-BAR |
+| only `p_sh2` swapped to the production value | NEMO's recorded RHS | 2,663 | `5.488912657725109e-10` | DEBT |
+
+Reading these honestly:
+
+- **The magnitude is `p_sh2`, and only `p_sh2`.** Substituting that single
+  operand and nothing else moves the row from bit-exact to
+  `5.488912657725109e-10`, against the production row's
+  `5.488912518947231e-10` - the same number to eight significant figures - and
+  the independent budget `rn_Dt * max|delta p_sh2| = 5.488912691979121e-10`
+  closes to 3.2e-8 relative. Two independent routes to the same number.
+- **The preregistered P3 is REFUTED as written.** It predicted that swapping
+  only `p_sh2` would reproduce the production right-hand side. It does not: it
+  leaves 11,029 cells differing at `1.1102230246251565e-16`, and it names
+  2,663 DEBT cells where the production step names 11,993. This is NOT restated
+  as a narrower success; the prediction was that the swap would be exact and it
+  was not.
+- **What the residual is has NOT been determined.** `1.11e-16` is one unit in
+  the last place for values in `[0.5, 1)` and sits six orders of magnitude
+  below the `p_sh2` term, so it cannot own the block's DEBT or the 979-cell
+  post-sweep gap. Two candidate causes remain open and this round does not
+  choose between them: XLA fusion / fused-multiply-add reordering the same
+  expression inside the full step (the effect operator note L confirmed on the
+  held Round-89 member), or a genuine association difference between the
+  model's right-hand-side expression and NEMO's. A discriminating measurement
+  is named in OPEN. Calling it "fusion" now would be a mechanism asserted, not
+  measured.
+- The cell-count inflation from 2,663 to 11,993 is consistent with that
+  last-bit residual pushing already-marginal cells across bit equality, but
+  that too is PLAUSIBLE, not measured.
+
+The gate's verdict field therefore reads `REFUTED`, not a confirmation, and
+the receipt says so.
+
+## Plants
+
+`stage-tke-matrix-ulp` advances exactly one bitwise cell of the recorded
+`zdiag` reference on the binding `NEMO_TKE_RECORDED` arm. The clean row has 0
+unequal cells and the planted row has exactly 1, at index `[0, 0, 0]`; the
+plant target is named (`GYRE-zco.kt2.tke_matrix.production_step.zdiag`, not
+null, so the round-102 null-target failure is not repeated) and the gate exits
+1. Artifact `tke_matrix_plant.json`. The clean run exits 0 with `STATUS PASS`.
+
+The record replay's operand plant is described above under instrument
+validation: its first version was a control that perturbed a zero, the probe
+refused it, and the repaired version fires on a live cell.
+
+Both plants fire through the same code path the science uses. The production
+rows are measured through `LatLonCGridOceanModel.step` / `_step_jitted`, not
+through an isolated closure (operator note L-amend); the replay arms are
+labelled "recorded-operand replay of the compiled statement" and are never
+called production.
+
+## Prediction ledger
+
+| # | prediction | outcome |
+|---|---|---|
+| P1 | the five output-bearing assignments between `:395` and `:473`, in that order; the wave-coupled block does not execute | **CONFIRMED** |
+| P2 | first non-bit output is the `en` RHS at `:439-442`; `zd_up`, `zd_lw`, `zdiag` all BIT with 0 unequal cells | **CONFIRMED** |
+| P3 | the RHS miss is inherited from `p_sh2`; swapping only `p_sh2` reproduces the production right-hand side | **REFUTED** - the swap leaves 11,029 cells at `1.1102230246251565e-16` and names 2,663 DEBT cells against the production step's 11,993. `p_sh2` owns the magnitude to 3.2e-8 relative, but the swap is not exact and this round does not claim it is. |
+| P4 | no candidate lands; status HELD | **CONFIRMED** |
+
+## Rule 12 and the testcase dispositions
+
+No numerical or configuration candidate was created, so the 954-row ladder and
+the days 1-30 arm would have had nothing to score. The immutable round-96/97
+before arm remains the before arm and is unchanged by construction.
+
+| headline | before arm | after this round |
+|---|---|---|
+| kt2 T RMS | `1.4210854715202004e-14` | unchanged; AT-BAR |
+| kt2 S RMS | `2.1316282072803006e-14` | unchanged; AT-BAR |
+| kt2 U RMS | `2.7377110452773967e-12` | unchanged; first-over-bar |
+| kt2 V RMS | `3.284922138989399e-12` | unchanged; first-over-bar |
+| kt3 T RMS | `1.627497246303733e-4` | unchanged; magnitude target |
+| kt3 S RMS | `6.327735185607253e-6` | unchanged |
+| day-30 T RMS | `1.2397011295506804e-2 K` | unchanged; magnitude target |
+
+No AT-BAR row can have left the bar and first-over-bar cannot have moved,
+because no candidate arm exists. This is not an improvement claim.
+
+| lane | disposition |
+|---|---|
+| GYRE stage twin | instrument extended and PASS; the first owned stage is still kt1 stage 1 with W unresolved/held. This kt2 TKE walk is a magnitude diagnostic and does not advance stage order. |
+| GYRE kt=1--10 | no candidate; no 954-row score; first-over-bar remains kt2 U/V |
+| GYRE days 1--30 | no candidate; immutable day-30 T RMS retained |
+| LOCK_EXCHANGE-zco | no shared numerical or card change landed; no new tank-fidelity claim |
+| OVERFLOW-zps | no shared numerical or card change landed; partial-cell behaviour remains in spec |
+| DINO | **SHARED-STATEMENT RISK:** DINO runs the shared TKE program and the shared solver, whose trace signature changed. The change is WRITE-only and reachable solely via `return_statement_trace`, which no production path requests; no DINO number can move. If a future round lands anything in this block, DINO needs its own production-stage and trajectory assessment. |
+| ORCA2 | **UNMEASURED-WITH-SPEC:** resolve its integrator and score these same statement rows before any shared landing here. |
+
+## Independent adversarial review
+
+`codex exec --sandbox read-only` was available this session and returned a
+full review of the diff, the claims and the compiled source. Its first-pass
+verdict was **DO NOT SHIP**, verbatim:
+
+> DO NOT SHIP: the gate can falsely attribute the RHS error to `p_sh2`, and
+> its claimed replay/control is not committed.
+
+It raised three findings. **All three were upheld and fixed; none was argued
+away.**
+
+1. *High.* "the new `CONFIRMED_INHERITED_P_SH2` verdict is not causal. It only
+   checks that RHS-different cells are a subset of `p_sh2`-different cells...
+   NEMO's RHS also consumes `p_avt`, `rn2`, `dissl`, prior `en`, and `wmask`.
+   Coincident errors in those operands would produce the same 'confirmed'
+   result. A swap/replay holding every operand fixed except `p_sh2` is
+   required." **Upheld.** The subset test was demoted to a reported number
+   explicitly labelled as not being the evidence, and the one-variable swap
+   above replaced it. Running that swap then REFUTED the round's own
+   preregistered P3 - which is the point of the finding.
+2. *High.* "C6's replay is not shipped... an uncommitted replay cannot support
+   the shipped claim or its plant." **Upheld.** The replay is now
+   `scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round103_tke_block_replay.py`,
+   carries a worktree stamp, has a direct test with a non-vacuity arm, and the
+   stage gate imports its transcription so there is exactly one copy of the
+   arithmetic.
+3. *Medium.* "the recorded provenance is false. The report says the Round-59
+   record writer was called from the Round-101 source at line 472; the actual
+   Round-59 compiled call is `zdftke.f90:463`. Round-101 line 472 is a
+   different binary." **Upheld.** Corrected, and the two builds were then
+   diffed: they are identical outside the recorder calls, which is now stated
+   with both builds' line numbers.
+
+It also reported that "C2, C3, and C5 survived attack: shapes are exact,
+`tmask == wmask` over all 20,416 scored cells, and the deepest recorded upper
+diagonal is live." The `tmask == wmask` result is worth keeping: the model's
+literal assembly uses `w_active` where NEMO's `zcof` uses `tmask`
+(`zdftke.f90:426`), and on this card those two masks agree on every scored
+cell, so that difference is measurably inert here. It would NOT be inert on a
+grid with an overhang, and any future card must re-check it.
+
+The review log is `codex_review.log`, SHA-256
+`97be6f91a469f2ee6fb202948283e678d9c03d46fd9a18b4fb5fa23481c6ae02`.
+
+## Tests
+
+Focused CPU/fp64 suite over the new walk, the consolidated stage gate, the
+Round-54/59 operand reader, the citation gate and the TKE carried-coefficient
+physics: **119 passed in 32.82 s**. JUnit artifact `focused_pytest.xml`,
+SHA-256 `2c8c6bb14d228bad3d4818714aac291a55b620e96682f75dd93cf16ad651854b`.
+
+The citation suite passes 16/16 on a clean tree. Three anchor shifts were
+caused by this round's insertions into the stage gate and were re-anchored by
+RIGID shifts with both endpoints moved by the same delta and the pinned extent
+unchanged: `+187`, then `+1` twice as the diff grew. No citation was weakened
+or deleted.
+
+`tests/ocean/fidelity/test_nemo_testcase_worktree_stamp.py::test_every_report_emitter_stamps_the_worktree`
+remains red with the SAME NINE offender files it had at the incoming tip. The
+new replay probe was briefly a TENTH offender and was fixed before this
+receipt by stamping its report; the counts were compared against the incoming
+tip mechanically (11 report dicts / 10 unstamped in the stage gate, both
+before and after).
+
+## Evidence
+
+All under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round103/`.
+
+| artifact | SHA-256 |
+|---|---|
+| `instrument_repro.json` | `e674f45302126d5642aaea289fa853ea21cb06762ac8b18577f82aa27811764c` |
+| `record_replay.json` | `b339e8ebf809a046b140efd303e5791175f410f2e5b39a63aa499adbcdc7a466` |
+| `record_replay_plant.json` | `573bb97f3e426ee796d5855a432efa5b62367458a5b927d6bc0843ba7ee7a9ab` |
+| `tke_matrix_walk.json` | `241bb02b065fb730d99f22824f3f1f94004b41ceb97a257e76c994a6c7a5e542` |
+| `tke_matrix_plant.json` | `4cc4e7836b49987a69be14faab0aff3f96cf7e9f42e27915e41c0ad6a93274ef` |
+| `focused_pytest.xml` | `2c8c6bb14d228bad3d4818714aac291a55b620e96682f75dd93cf16ad651854b` |
+| `codex_review.log` | `97be6f91a469f2ee6fb202948283e678d9c03d46fd9a18b4fb5fa23481c6ae02` |
+
+## OPEN - round 104
+
+1. **Walk `zdfsh2`, not this block.** The named statement's arithmetic is not
+   the owner; its `p_sh2` operand is, and `p_sh2` carries the whole
+   `5.4889e-10` right-hand-side magnitude and therefore the 979-cell,
+   `6.8096882e-12` post-sweep gap at the block exit. The model computes it
+   under `tke_shear_production="nemo_face_native_now2"`,
+   `tke_shear_avm_weighting="nemo_face"`,
+   `tke_shear_metric_source="nemo_qco_live_face"`, evaluated at
+   `tke_shear_evaluation_stage="step_entry"`. Round 104 should subdivide that
+   transcription against `zdfsh2.f90:83-114` in the Round-59 build the same
+   way this round subdivided the matrix block. The Round-59 record already
+   stores `sh2`, so a new acquisition is needed ONLY if per-statement
+   boundaries inside `zdfsh2` are wanted; the final `sh2` comparison needs
+   nothing new. NOTE the campaign's known open item #1455 on this exact chain.
+2. **Decide what the `1.1102230246251565e-16` residual is.** The one-variable
+   swap leaves 11,029 cells differing at one unit in the last place between a
+   NumPy transcription of `zdftke.f90:439-442` and the model's evaluation of
+   the same statement inside the full step. Two candidates, not chosen between
+   here: XLA fusion / FMA reordering (operator note L's confirmed effect), or a
+   genuine association difference. DISCRIMINATING MEASUREMENT: evaluate the
+   model's right-hand-side expression on the same operands (a) eagerly, (b)
+   under `jax.jit` of an isolated closure, and (c) inside the production step,
+   and compare all three against the NumPy transcription. If (a) matches NumPy
+   and (c) does not, it is fusion; if (a) already differs, the model's
+   association differs from NEMO's and that is a second, in-block owner at the
+   AT-BAR level. It cannot own the DEBT either way - it is six orders of
+   magnitude too small - so it does not block item 1.
+3. **`p_pdlr` (`zdftke.f90:421`) is still UNMEASURED-WITH-SPEC.** It is first
+   in compiled order and feeds `p_avt` at `zdftke.f90:712`, so it owns part of
+   the diffusivity the NEXT step consumes even though it never touches `en`.
+   Exposing it needs a return threaded out of the model's Prandtl helper. The
+   Round-59 record already stores `pdlr`, so again no acquisition is needed.
+4. **Do not re-walk what is closed.** `zd_up`, `zd_lw` and `zdiag` are BIT
+   given NEMO's entry and should not be re-measured except as regression. The
+   ordered `zpelc` recurrence is measurably inert (operator note Q). Held
+   patches under `manifests/` were not re-evaluated: none names a statement in
+   `zdftke.f90:424-443`.
+5. **No acquisition is pending.** The admitted Round-59 and Round-101 records
+   contain every array this round and the next one need.

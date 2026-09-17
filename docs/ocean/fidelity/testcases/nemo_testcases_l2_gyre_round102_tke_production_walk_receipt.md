@@ -22,6 +22,27 @@ initialization and vertical recurrence. The literal arm next first differs in
 the assembled RHS, so that is the next compiled-order walk only after this
 configuration question is settled.
 
+**AMENDMENT, 2026-09-17, round 103: the attribution in the paragraph above is
+REFUTED and must not be read as standing.** The claim that the configured
+vectorized replacement of NEMO's ordered `zpelc` initialization and vertical
+recurrence is the first non-bit block was tested by the operator with a
+one-variable-at-a-time isolation run through this round's own gate, with both
+endpoints reproduced exactly (3,223 cells and 0). Seven differences separate
+the two Langmuir arms, not the one named here. The ordered recurrence is
+MEASURABLY INERT: adding it alone to the compact arm leaves all 3,223 cells
+unequal at the same maximum. The measured owners are the mixing-layer index
+and the missing surface mask, which are MUTUALLY REDUNDANT - jointly they own
+2,912 cells and the entire magnitude, but either one alone fully cures it, so
+"X alone fixes it" was never evidence that X is the owner. The 311-cell
+remainder splits between the exponent form (153) and the update association
+(210); 2,912 + 311 = 3,223 and the account closes. Round 103 did not walk that
+recurrence, and no future round should.
+
+A second correction to this receipt's framing, from the same review: selecting
+the literal arm buys ATTRIBUTION, not accuracy at the consumed output. The
+post-sweep row is 979 cells on BOTH arms and the literal arm is marginally
+worse in the last bits.
+
 Selecting a different evaluation is a configuration choice. The preregistered
 round explicitly forbade changing the card without the user, so no numerical
 candidate, 954-row ladder, or 30-day arm was run. The requested decision is:
