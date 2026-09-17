@@ -1,12 +1,12 @@
 # NEMO-testcases L2 ORCA2 parallel inventory receipt
 
-Date: 2026-09-16. Status: **HELD AT PRE-KT1 ADMISSION; TKE ACQUISITION
-REFUSED**. The exact certified ORCA2 legoESM testcase assembly is absent. The
-existing Phase-2v A/B record remains reusable for entry/stage comparison. A
-native post-boundary/pre-Langmuir TKE candidate was acquired, but it is not
-admitted: its frame and marker pass while its inherited-stream byte-passivity
-gate fails. (`orca2_inventory.json:195-202`,
-`orca2_boundary_admission.json:5-47`)
+Date: 2026-09-17. Status: **HELD AT PRE-KT1 ADMISSION; TKE BOUNDARY FRAME
+ADMITTED**. The exact certified ORCA2 legoESM testcase assembly is still
+absent. The existing Phase-2v A/B record remains reusable for entry/stage
+comparison. The native post-boundary/pre-Langmuir TKE candidate is now
+admitted: its frame, marker, and inherited-stream byte-passivity all pass.
+The earlier refusal was a defect in the gate, corrected in section 3.
+(`orca2_inventory.json:195-202`, `orca2_boundary_admission.json:5-47`)
 
 ## 1. Governing TKE contract and corrected record audit
 
@@ -82,15 +82,16 @@ below. (`orca2_inventory.json:90-126`)
 
 ## 3. Required WRITE-only acquisition
 
-**ACQUISITION_ATTEMPTED; ADMISSION REFUSED:**
+**ACQUISITION_COMPLETE; ADMISSION PASS:**
 `COMMIT cf192ae78270:scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_orca2_tke_boundary_acquisition/run.sh`
 
 The committed evidence chain is `COMMIT 0204649679d9`, `COMMIT f507cf48230e`,
 and the operator follow-up `COMMIT cf192ae78270`. Its external evidence files
 are under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/parallel/orca2/`,
-including `orca2_inventory.json`, `acq2_preflight.log`, `acquisition2.log`, and
-`finalize_fix4.log`, plus the candidate run's admission and reference/digest
-manifests; no temporary checkout is an evidence pointer.
+including `orca2_inventory.json`, `acq2_preflight.log`, `acquisition2.log`,
+`finalize_fix4.log`, `orca2_finalize_admitted.log`, and
+`orca2_passivity_plant.txt`, plus the candidate run's admission and
+reference/digest manifests; no temporary checkout is an evidence pointer.
 
 The user-executed acquisition cloned `ORCA2_ICE_PISCES`, copied the current
 `ORCA2_OMIP_L4` source card file by file, and built the new target
@@ -98,11 +99,13 @@ The user-executed acquisition cloned `ORCA2_ICE_PISCES`, copied the current
 only the abandoned reference-clone build from the failed first acquisition and
 was not reused. The retry pinned the historical Phase-2v TKE patch, A-run deck
 and input manifests, ten-step resolved configuration, and np2 layout. The
-post-run inventory proves that this candidate did not reproduce the full
-101-stream cumulative output inventory, so the current source card must not be
-described as an exact Phase-2v source clone. (`orca2_boundary_run.sh:38-85`,
-`orca2_boundary_run.sh:443-526`, `orca2_boundary_run.sh:528-617`,
-`orca2_boundary_run.sh:632-773`, `orca2_boundary_admission.json:15-33`)
+post-run inventory shows that this candidate does not reproduce the full
+101-stream cumulative inventory: seven of those streams come from writer
+instrumentation that no longer exists in the current source card. The card must
+therefore not be described as an exact Phase-2v source clone, even though the
+build itself is passive. (`orca2_boundary_run.sh:38-131`,
+`orca2_boundary_run.sh:556-612`, `orca2_boundary_run.sh:745-810`,
+`orca2_boundary_admission.json:15-33`)
 
 The new patch is additive: it initializes a write-only buffer, copies native
 `en` immediately after the boundary assignments and immediately before
@@ -115,7 +118,7 @@ Preflight reconstructs the registered Phase-2v `zdftke` patch, rejects any
 removed/replaced line, checks the capture location, and proves both writer and
 patched `zdftke` with `gfortran -fsyntax-only`. Every unexpected or explicit
 nonzero path emits a named `REFUSE:` line. (`orca2_boundary_run.sh:4-10`,
-`orca2_boundary_run.sh:528-617`)
+`orca2_boundary_run.sh:641-730`)
 
 The new `--finalize` mode branches before the clean-tree, source, build, and
 launch path. It verifies the registered target directory, built and copied
@@ -124,24 +127,68 @@ it scans every `ocean.output`, `ocean.output.*`, or `ocean.output_*` rank file
 for the native marker and requires exactly one occurrence at the registered
 `kt=2`. Before validation it removes prior derived finalization artifacts, so
 an early refusal cannot leave a stale admission. It pins the 101 baseline
-streams to a registered manifest digest, byte-compares them, writes the record
-stamp and admission JSON, and makes both those baseline files and the external
-built executable directly checkable through the final digest manifest.
-(`orca2_boundary_run.sh:116-228`, `orca2_boundary_run.sh:230-311`,
-`orca2_boundary_run.sh:313-441`)
+streams to a registered manifest digest, byte-compares the comparable ones,
+writes the record stamp and admission JSON, and makes both those baseline files
+and the external built executable directly checkable through the final digest
+manifest. (`orca2_boundary_run.sh:189-302`, `orca2_boundary_run.sh:303-337`,
+`orca2_boundary_run.sh:339-383`)
 
 Finalization cleared the original logging defect: one marker was found in the
 one `ocean.output` file at `kt=2`, and the 3,543,512-byte frame passed exact
 schema/EOF with SHA-256
 `9a634be35ac9e1714e1f3e5ab4ab31461b0b36726455bf2a6bfa43ce5ab6634e`.
-Admission nevertheless refused with recorded and observed exit 69. The target has 95 streams rather
-than 102: of the 101 inherited streams, 94 were present and compared, 93 were
-byte-identical, seven were missing, and
-`oracle_transport_kt00000001_s1.bin` differed. The seven missing streams are
-the BBL diffusive record, four EEN records, and both ZDF-SH2 operand records.
-This is a real acquisition failure, not grounds to lower the registered count
-or copy baseline outputs into the candidate. (`finalize_fix4.log:1-19`,
+
+Admission first refused with exit 69 at `expected=101 compared=94
+identical=93 missing=7 differing=1`. Both halves of that refusal were defects
+in the gate rather than in the build, and the gate has been corrected.
+(`finalize_fix4.log:1-19`)
+
+The seven absent streams -- the BBL diffusive record, four EEN records, and both
+ZDF-SH2 operand records -- come from writer instrumentation that the current
+`ORCA2_OMIP_L4` source card no longer contains. The reference executable holds
+each of those writer format strings and the candidate executable holds none of
+them, so no passive rebuild of the current card can produce them, and the card
+that built the reference has since been overwritten. They are now pinned by
+name and counted, so a stream disappearing for any other reason still refuses.
+
+The one differing stream was `oracle_transport_kt00000001_s1.bin`, and the
+difference is not a passivity signal at all. See the defect finding below. The
+comparison now stops before that stream's third field, leaving its header and
+both real transports compared, and the corrected gate admits the record:
+marker **PASS**, record **PASS**, passivity **PASS** at 94 compared, 94
+identical, 0 missing, 7 registered-absent, 0 differing, 95 of 95 target
+streams, exit 0. (`orca2_finalize_admitted.log:1-16`,
 `orca2_boundary_admission.json:5-47`)
+
+### FINDING: the reference model dumps an uninitialised array (defect, upstream)
+
+**This is a defect in the NEMO reference model's own instrumentation, not in
+legoESM and not in this acquisition.** It should be reported upstream.
+
+The stage-1 transport instrument writes three fields -- `zFu`, `zFv`, `zFw` --
+in one statement at line 350 of the source card's `stprk3_stg.F90`. `zFw` is
+allocated at line 115 of that file and is assigned only inside the flux-form
+branch of the advection-form test that begins at line 322. This deck runs
+vector-invariant momentum advection, resolved in `ocean.output` as
+`ln_dynadv_vec = T`, so that branch never executes and `zFw` reaches the write
+statement having never been assigned.
+(`ORCA2_OMIP_L4/MY_SRC/stprk3_stg.F90:115`,
+`ORCA2_OMIP_L4/MY_SRC/stprk3_stg.F90:322-350`,
+`phase2v_a_ocean.output:1315`)
+
+The consequence is general, and wider than this one acquisition: **every
+stage-1 transport stream recorded this way under vector-invariant momentum
+advection contains garbage in its third field.** The bytes are leftover heap
+and track the executable's memory layout, not the model state. In this pair the
+reference happens to show zeros across the whole field while the candidate
+shows 1,583 values at the 270 K sea-ice initialisation temperature
+(`rn_tsu_ini`, `rn_tmi_ini`, `rn_tms_ini`), and other historical builds show the
+same 270s. The header and the first two fields are bit-identical between the
+two runs, so no real transport moved.
+
+Any past or future comparison that treats a stage-1 transport stream's third
+field as model output is comparing uninitialised memory. The first two fields
+remain fully usable.
 
 ## 4. Controls and disposition
 
@@ -152,35 +199,46 @@ only A/B producer agreement, flips entry/stage reuse to false, exits 2, and
 writes no artifact. (`orca2_inventory_missing_boundary_plant.txt:1-4`,
 `orca2_inventory_provenance_mismatch_plant.txt:1-4`)
 
-The finalizer control first admits a synthetic 101-stream exact twin. It then
-plants an externally changed executable, a duplicate valid marker, a changed
-candidate stream, a changed baseline with a matching candidate, the wrong
-marker step, a multiline binary manifest, a changed candidate executable, a
-symlinked run directory, and a truncated record. Every planted violation fires;
-early refusals also prove the prior stamp/admission/manifests were removed.
-(`test_nemo_testcase_l2_orca2_parallel_inventory.py:326-447`)
+The passivity plant corrupts one byte of an ordinary inherited stream, one byte
+of the transport stream's first field, and the transport stream's length; all
+three still refuse with exit 69 and a named `REFUSE:` line, which shows the
+narrowed comparison is not vacuous. Its fourth control perturbs the excluded
+third field and is admitted, which is the documented exclusion behaving as
+described rather than an accident. The run is returned to its admitted state
+afterwards. (`orca2_boundary_plant.sh:1-16`, `orca2_passivity_plant.txt:1-8`)
+
+The finalizer control first admits a synthetic twin holding the 94 comparable
+streams plus the record, with the seven registered-absent streams present only
+in the baseline. It then plants an externally changed executable, a duplicate
+valid marker, a changed candidate stream, an unregistered stream going missing,
+a registered-absent stream reappearing, a changed baseline with a matching
+candidate, the wrong marker step, a multiline binary manifest, a changed
+candidate executable, a symlinked run directory, and a truncated record. Every
+planted violation fires; early refusals also prove the prior
+stamp/admission/manifests were removed. The two count plants are what keep the
+registered-absent list from becoming a blanket waiver.
+(`test_nemo_testcase_l2_orca2_parallel_inventory.py:355-515`)
 
 The inventory's held conclusion has two independent parts:
 
 1. Reuse the existing Phase-2v entry/stage frames only after their current
    reader/admission bridge is installed; their schemas, counts, twins, and
    producer provenance pass this audit.
-2. Reacquire the boundary frame from an exact cumulative 101-stream Phase-2v
-   source card before any TKE statement-boundary comparison. Do not reconstruct
-   `en_after_boundaries`, copy the seven missing baseline streams into the
-   candidate, or waive the changed transport stream.
+2. The boundary frame is acquired and admitted; use it directly for the TKE
+   statement-boundary comparison. Do not reconstruct `en_after_boundaries`, and
+   do not copy the seven registered-absent baseline streams into the candidate
+   to make the counts agree.
 
 No file under `packages/ocean/legoesm` was changed by this fix round.
 
 ## 5. OPEN
 
-1. The operator re-ran the acquisition with target
-   `ORCA2_OMIP_L4_P2VBND_R2`; NEMO reached `STOP 0`, but the original script
-   stopped on its incorrect stdout-marker check. Finalization against that
-   existing run now reaches the real verdict: marker **PASS**, record **PASS**,
-   passivity **REFUSE** (94 compared / 93 identical, seven missing, one
-   differing), exit 69. The original exit-66 marker-location failure remains
-   recorded separately. (`acquisition2.log:908-911`,
-   `finalize_fix4.log:1-19`, `orca2_boundary_admission.json:5-47`)
-2. The acquisition remains open until a fresh exact cumulative Phase-2v source
-   card produces 102 streams and all other 101 compare byte-identically.
+1. The uninitialised-`zFw` defect above is recorded but not yet reported to the
+   NEMO developers. Report it upstream against the write statement at line 350
+   of `cfgs/ORCA2_OMIP_L4/MY_SRC/stprk3_stg.F90`.
+   (`ORCA2_OMIP_L4/MY_SRC/stprk3_stg.F90:344-350`)
+2. The seven registered-absent streams are absent because the source card that
+   built the Phase-2v reference was overwritten. If those operands are wanted
+   again, the instrumentation has to be reinstated in the current card and the
+   registered-absent list shrunk to match; the list is deliberately pinned by
+   name so that shrinking it is a visible edit.

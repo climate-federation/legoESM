@@ -111,6 +111,7 @@ SOURCES: dict[str, Path | GitBlob] = {
     ),
     "cpp_ORCA2_OMIP_L4.fcm": NEMO_TARGET / "cpp_ORCA2_OMIP_L4.fcm",
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/stprk3.f90": (NEMO_TARGET / "BLD/ppsrc/nemo/stprk3.f90"),
+    "ORCA2_OMIP_L4/MY_SRC/stprk3_stg.F90": (NEMO_TARGET / "MY_SRC/stprk3_stg.F90"),
     "ORCA2_OMIP_L4/BLD/ppsrc/nemo/zdftke.f90": (NEMO_TARGET / "BLD/ppsrc/nemo/zdftke.f90"),
     "ORCA2_OMIP_L4/EXP00/namelist_cfg": NEMO_TARGET / "EXP00/namelist_cfg",
     "orca2_inventory.json": EVIDENCE / "orca2_inventory.json",
@@ -123,6 +124,13 @@ SOURCES: dict[str, Path | GitBlob] = {
     ),
     "acquisition2.log": EVIDENCE / "acquisition2.log",
     "finalize_fix4.log": EVIDENCE / "finalize_fix4.log",
+    "orca2_finalize_admitted.log": EVIDENCE / "orca2_finalize_admitted.log",
+    "orca2_passivity_plant.txt": EVIDENCE / "orca2_passivity_plant.txt",
+    "orca2_boundary_plant.sh": (
+        REPO
+        / "scripts/validate/ocean_fidelity/testcases"
+        / "nemo_testcase_l2_orca2_tke_boundary_acquisition/passivity_plant.sh"
+    ),
     "orca2_boundary_admission.json": (
         EVIDENCE
         / "oracle_phase2v_tke_boundary_np2"

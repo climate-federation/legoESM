@@ -12,6 +12,19 @@ from pathlib import Path
 import pytest
 
 TESTCASES = Path(__file__).parents[3] / "scripts/validate/ocean_fidelity/testcases"
+
+# The seven reference streams whose writer instrumentation is gone from the
+# current ORCA2_OMIP_L4 source card. Kept in step with EXPECTED_ABSENT_STREAMS
+# in the acquisition script, which is asserted below.
+REGISTERED_ABSENT_STREAMS = (
+    "oracle_bbl_diffusive_kt00000001.bin",
+    "oracle_een_e3f0vor_kt00000001.bin",
+    "oracle_een_e3fvor_kt00000001.bin",
+    "oracle_een_q_kt00000001.bin",
+    "oracle_een_zpvo_kt00000001.bin",
+    "oracle_zdf_sh2_operands_kt00000001.bin",
+    "oracle_zdf_sh2_operands_kt00000002.bin",
+)
 SPEC = importlib.util.spec_from_file_location(
     "nemo_testcase_l2_orca2_parallel_inventory",
     TESTCASES / "nemo_testcase_l2_orca2_parallel_inventory.py",
@@ -227,6 +240,17 @@ def test_boundary_finalize_is_post_run_only_and_reads_native_nemo_output():
     assert "orca2_tke_boundary_references.sha256" in acquisition
     assert "EXPECTED_BASELINE_ORACLE_MANIFEST_SHA256" in finalize
 
+    # The registered-absent list and the narrowed transport comparison are the
+    # two deliberate narrowings of the passivity gate; both stay pinned here.
+    for name in REGISTERED_ABSENT_STREAMS:
+        assert name in acquisition
+    assert "readonly EXPECTED_COMPARED_STREAMS=94" in acquisition
+    assert "readonly EXPECTED_TARGET_STREAMS=95" in acquisition
+    assert "readonly EXPECTED_ABSENT_STREAM_COUNT=7" in acquisition
+    assert "ln_dynadv_vec" in acquisition
+    assert "stream_is_expected_absent" in finalize
+    assert "compare_inherited_stream" in finalize
+
 
 def test_boundary_finalize_admits_synthetic_twin_and_named_plants_refuse(tmp_path):
     source = (
@@ -257,7 +281,12 @@ def test_boundary_finalize_admits_synthetic_twin_and_named_plants_refuse(tmp_pat
     marker = target / "ocean.output_0000"
     marker.write_text(" ORCA2_TKE_BOUNDARY_DUMP            2 3 3\n")
 
-    for index in range(101):
+    # The reference run holds seven streams whose writer no longer exists in
+    # the current source card, so a passive candidate cannot produce them: they
+    # exist only in the baseline here, exactly as in the real pair.
+    for name in REGISTERED_ABSENT_STREAMS:
+        (baseline / name).write_bytes(f"absent-{name}\n".encode())
+    for index in range(94):
         name = f"oracle_inherited_{index:03d}.bin"
         payload = f"inherited-{index}\n".encode()
         (baseline / name).write_bytes(payload)
@@ -326,12 +355,25 @@ def test_boundary_finalize_admits_synthetic_twin_and_named_plants_refuse(tmp_pat
     admitted = finalize()
     assert admitted.returncode == 0, admitted.stdout + admitted.stderr
     assert "ORCA2_TKE_BOUNDARY_MARKER PASS kt=2" in admitted.stdout
-    assert "expected=101 compared=101 identical=101" in admitted.stdout
+    assert (
+        "expected=94 compared=94 identical=94 missing=0 absent=7/7"
+        in admitted.stdout
+    )
+    assert "excluded_field=zFw" in admitted.stdout
+    for name in REGISTERED_ABSENT_STREAMS:
+        assert f"ORCA2_TKE_BOUNDARY_ABSENT {name}" in admitted.stdout
     report = json.loads((target / "orca2_tke_boundary_admission.json").read_text())
     assert report["verdict"] == "PASS"
     assert report["exit_code"] == 0
     assert report["binary_sha256"] == binary_digest
-    assert report["passivity"]["byte_identical"] == 101
+    assert report["passivity"]["byte_identical"] == 94
+    assert report["passivity"]["expected_compared_streams"] == 94
+    assert report["passivity"]["expected_absent"]["streams"] == sorted(
+        REGISTERED_ABSENT_STREAMS
+    )
+    assert (
+        report["passivity"]["partial_comparison"]["excluded_field"] == "zFw"
+    )
     assert (
         report["references"]["baseline_oracle_streams_sha256"]
         == baseline_manifest_digest
@@ -374,13 +416,38 @@ def test_boundary_finalize_admits_synthetic_twin_and_named_plants_refuse(tmp_pat
     inherited.write_bytes(inherited_bytes + b"plant")
     changed_stream = finalize()
     assert changed_stream.returncode == 69
-    assert "compared=101 identical=100 missing=0 differing=1" in changed_stream.stdout
+    assert (
+        "compared=94 identical=93 missing=0 absent=7/7 differing=1"
+        in changed_stream.stdout
+    )
     assert "REFUSE: write-only passivity failed" in changed_stream.stderr
     refused_report = json.loads(
         (target / "orca2_tke_boundary_admission.json").read_text()
     )
     assert refused_report["exit_code"] == 69
     inherited.write_bytes(inherited_bytes)
+
+    # The narrowed comparison must still refuse when a stream that is NOT on
+    # the registered-absent list goes missing.
+    inherited.unlink()
+    absent_unregistered = finalize()
+    assert absent_unregistered.returncode == 69
+    assert "missing=1" in absent_unregistered.stdout
+    assert "REFUSE: write-only passivity failed" in absent_unregistered.stderr
+    inherited.write_bytes(inherited_bytes)
+
+    # A registered-absent stream reappearing changes the compared count, which
+    # must refuse rather than be silently tolerated.
+    reappeared = target / REGISTERED_ABSENT_STREAMS[0]
+    reappeared.write_bytes((baseline / reappeared.name).read_bytes())
+    absent_returned = finalize()
+    assert absent_returned.returncode == 69
+    assert "compared=95" in absent_returned.stdout
+    assert "absent=6/7" in absent_returned.stdout
+    assert "REFUSE: write-only passivity failed" in absent_returned.stderr
+    reappeared.unlink()
+    readmitted = finalize()
+    assert readmitted.returncode == 0, readmitted.stdout + readmitted.stderr
 
     marker.write_text(" ORCA2_TKE_BOUNDARY_DUMP            3 3 3\n")
     wrong_kt = finalize()
