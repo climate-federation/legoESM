@@ -19,12 +19,13 @@ full eager closure and production-step JIT.  Before the patch p_sh2 was
 moved exactly one p_sh2 cell, printed STATUS PLANT-FIRED and exited 1.
 
 STAGE PROOF VETO.  Fixing p_sh2 does NOT close the next stage boundary under
-production JIT.  The compiled zdftke.f90:439-442 en RHS remains 11,024/20,416
+production JIT.  The compiled
+GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/zdftke.f90:439-442 en RHS remains 11,024/20,416
 cells unequal at 5.551115123125783e-17 through the production step, while the
 same full closure is BIT in eager execution.  This is the requested
 discriminator: the surviving boundary is production-fusion-sensitive, not a
 remaining p_sh2 operand error.  The first remaining non-bit statement is the
-en RHS at zdftke.f90:439-442.  Re-evaluate this patch only after that statement
+en RHS at the same compiled lines.  Re-evaluate this patch only after that statement
 has a production-JIT-exact transcription; an eager-only proof is ineligible.
 
 TRAJECTORY VETO.  Against the immutable full before arm, the canonical Rule-12

@@ -270,6 +270,10 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdfsh2.f90"),
     "GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90"),
+    "GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/trazdf.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/trazdf.f90"),
     "GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/l2_r54_tke.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/l2_r54_tke.f90"),
     # Round 104 walks the shear production, whose operands are built in
@@ -289,6 +293,13 @@ FILES = {
         "/l2_r101_tke_walk.f90"),
     "GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/zdftke.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/zdftke.f90"),
+    # Round 105 audits the shared shear route on DINO's compiled leapfrog card.
+    "DINO/BLD/ppsrc/nemo/stpmlf.f90": (
+        NEMO / "cfgs/DINO/BLD/ppsrc/nemo/stpmlf.f90"),
+    "DINO/BLD/ppsrc/nemo/zdfphy.f90": (
+        NEMO / "cfgs/DINO/BLD/ppsrc/nemo/zdfphy.f90"),
+    "DINO/BLD/ppsrc/nemo/trazdf.f90": (
+        NEMO / "cfgs/DINO/BLD/ppsrc/nemo/trazdf.f90"),
     # Round 95 consumes the operator-run Round-94 stage-closure record and
     # therefore binds the transport boundary to that record's compiled card.
     "GYRE_OMIP_L2_P3_SM_R94STGCLS/BLD/ppsrc/nemo/stprk3_stg.f90": (
@@ -472,6 +483,25 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 105: split shear/solver routes and the surviving JIT boundary ---
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3_stg.f90:240-256': [
+        'CASE ( 3 )           !==  Stage 3  ==!   Kbb = N   ;   Kmm = N+1/2   ;   Kaa = N+1',
+        'r3f(:,:    ) = r1_2 * ( r3fb(:,:) + r3fa(:,:) )', 17],
+    'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/trazdf.f90:461-477': [
+        '! Diagonal, lower (i), upper (s)',
+        ('END DO   ;   END DO', 10), 17],
+    'GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/zdftke.f90:434-442': [
+        'zd_up(ji,jk) = zzd_up',
+        '&                                  ) * wmask(ji,jj,jk)', 9],
+    'DINO/BLD/ppsrc/nemo/stpmlf.f90:187-193': [
+        'CALL eos_rab( ts(:,:,:,:,Nbb), rab_b, Nnn )',
+        'CALL zdf_phy( kstp, Nbb, Nnn, Nrhs )', 7],
+    'DINO/BLD/ppsrc/nemo/zdfphy.f90:316-319': [
+        ('IF( l_zdfsh2 ) THEN', 1),
+        '&                      sh2    )     ! ==>> out : shear production', 4],
+    'DINO/BLD/ppsrc/nemo/trazdf.f90:219-235': [
+        '! Diagonal, lower (i), upper (s)',
+        ('END DO   ;   END DO', 9), 17],
     # --- round 104: the shear-production routine and its operand builders ---
     'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3.f90:167-168': [
         '!!st                         CALL zdf_phy( kstp, Nbb, Nnn, Nrhs )',
