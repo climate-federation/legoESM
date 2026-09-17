@@ -391,6 +391,34 @@ def test_tke_literal_discriminator_stays_inside_the_production_step():
     assert '"NEMO_TKE_RECORDED_LITERAL_LANGMUIR_COUNTERFACTUAL"' in source
 
 
+def test_tke_bottom_level_routes_each_independent_consumer():
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card,
+    )
+
+    card = build_nemo_testcase_card("GYRE-zco")
+    cfg = card.recipe.model_config
+    model = LatLonCGridOceanModel(card.recipe.grid, card.recipe.z_coord, cfg)
+    assert model._tke_bottom_level() is None
+
+    vmix = cfg.physics.vertical_mixing
+    literal = cfg._replace(physics=cfg.physics._replace(
+        vertical_mixing=vmix._replace(tke=vmix.tke._replace(
+            tke_langmuir_evaluation="nemo_literal"))))
+    bottom_bc = cfg._replace(physics=cfg.physics._replace(
+        vertical_mixing=vmix._replace(tke=vmix.tke._replace(
+            bottom_tke_bc=True))))
+    np.testing.assert_array_equal(
+        model._tke_bottom_level(config=literal),
+        card.recipe.z_coord.bottom_level)
+    np.testing.assert_array_equal(
+        model._tke_bottom_level(config=bottom_bc),
+        card.recipe.z_coord.bottom_level)
+
+
 def test_stage_twin_uses_the_direct_post_transport_w_reference():
     source = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py").read_text()
     assert 'read_stage_ww(' in source

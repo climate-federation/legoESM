@@ -2705,11 +2705,16 @@ def tke_vertical_mixing(
             "bottom_dirichlet was passed but TKEConfig.bottom_tke_bc=False "
             "— set the gate True to actually use it (silent-no-op guard)."
         )
-    if bottom_dirichlet is None and bottom_level is not None:
+    _literal_langmuir_uses_bottom = (
+        bool(getattr(cfg, "lc", False))
+        and getattr(cfg, "tke_langmuir_evaluation", "vectorized")
+        == "nemo_literal")
+    if (bottom_dirichlet is None and bottom_level is not None
+            and not _literal_langmuir_uses_bottom):
         raise ValueError(
             "bottom_level was passed but bottom_dirichlet is None — "
-            "bottom_level only selects WHERE the bottom Dirichlet pin lands, "
-            "it does not supply one (silent-no-op guard).")
+            "neither the bottom Dirichlet pin nor literal Langmuir consumes "
+            "it (silent-no-op guard).")
     if return_statement_trace:
         _trace_requirements = {
             "one prognostic iteration": int(n_iterations) == 1,

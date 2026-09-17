@@ -8827,15 +8827,12 @@ class LatLonCGridOceanModel:
         return ssmask * nemo_bottom_tke_dirichlet(r_t, u_sum, v_sum, vmix.tke)
 
     def _tke_bottom_level(self, z_coord=None, config=None):
-        """Per-column T-point bottom-cell index for the T15-exact bottom TKE
-        Dirichlet placement, or None.
+        """Per-column T-point bottom-cell index for TKE consumers, or None.
 
-        Static Python predicate mirroring ``_tke_bottom_dirichlet``'s gate:
-        only meaningful together with a held bottom value, and only when a
-        partial-cell coordinate actually carries a per-column
-        ``bottom_level`` (the flat-bottom / pure z-star case has none —
-        ``bottom_dirichlet``'s unconditional last-row pin is already exact
-        there, so ``None`` here keeps that path BIT-IDENTICAL).
+        The bottom Dirichlet placement and NEMO's literal Langmuir crossing
+        fallback independently consume ``mbkt``. Route the coordinate-owned
+        value when either is active. Other configurations retain ``None`` so
+        the silent-unused-operand guard remains effective.
         """
         _zc = self.z_coord if z_coord is None else z_coord  # SPMD band override
         _cfg_b = self.config if config is None else config  # SPMD band override
@@ -8843,7 +8840,12 @@ class LatLonCGridOceanModel:
                        "vertical_mixing", None)
         if vmix is None or vmix.scheme != "tke":
             return None
-        if not getattr(vmix.tke, "bottom_tke_bc", False):
+        needs_bottom = bool(getattr(vmix.tke, "bottom_tke_bc", False))
+        needs_langmuir = (
+            bool(getattr(vmix.tke, "lc", False))
+            and getattr(vmix.tke, "tke_langmuir_evaluation", "vectorized")
+            == "nemo_literal")
+        if not (needs_bottom or needs_langmuir):
             return None
         if not isinstance(_zc, OceanPartialCellCoordinate):
             return None
