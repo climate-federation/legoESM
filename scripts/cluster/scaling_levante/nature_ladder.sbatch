@@ -60,6 +60,10 @@ rc=0
 #   lane: latlon | mpas | cube | tripole | omps    res: latlon rows / mpas level / cube N:kt
 run_arm() {
   local lane="$1" mode="$2" res="$3" nd="$4" x64="$5"
+  # LANES filters this submission to a subset of lanes, so a lane whose
+  # per-rank footprint forces a different rank density can be re-run at that
+  # density WITHOUT re-running (and so changing the density of) the others.
+  if [[ -n "${LANES:-}" && " $LANES " != *" $lane "* ]]; then return 0; fi
   local nn=$(( (nd + PPN - 1) / PPN ))
   if (( nn > NODES || nd > MAX_ND || nd < MIN_ND )); then
     echo "[skip] ${lane}_${mode}_${res} d${nd} (needs ${nn} nodes / outside [$MIN_ND,$MAX_ND])"
