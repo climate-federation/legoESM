@@ -25,6 +25,16 @@ REGISTERED_ABSENT_STREAMS = (
     "oracle_zdf_sh2_operands_kt00000001.bin",
     "oracle_zdf_sh2_operands_kt00000002.bin",
 )
+# The one inherited stream compared only in part: three 94x152x31 double
+# fields (zFu, zFv, zFw) after a 48-byte header, of which the never-assigned
+# third field is excluded. These mirror PARTIAL_STREAM, PARTIAL_STREAM_BYTES
+# and PARTIAL_COMPARED_BYTES in the acquisition script, asserted below.
+PARTIAL_STREAM = "oracle_transport_kt00000001_s1.bin"
+TRANSPORT_HEADER_BYTES = 16 + 8 * 4
+TRANSPORT_FIELD_BYTES = 94 * 152 * 31 * 8
+TRANSPORT_STREAM_BYTES = TRANSPORT_HEADER_BYTES + 3 * TRANSPORT_FIELD_BYTES
+TRANSPORT_COMPARED_BYTES = TRANSPORT_HEADER_BYTES + 2 * TRANSPORT_FIELD_BYTES
+
 SPEC = importlib.util.spec_from_file_location(
     "nemo_testcase_l2_orca2_parallel_inventory",
     TESTCASES / "nemo_testcase_l2_orca2_parallel_inventory.py",
@@ -62,6 +72,27 @@ def _write_tke(path: Path, *, trailing: bool = False) -> None:
         + b"\0" * (8 * payload)
     )
     path.write_bytes(raw + (b"X" if trailing else b""))
+
+
+def _write_transport(path: Path, *, third_field: bytes) -> None:
+    """Write a stage-1 transport stream: header, zFu, zFv, then zFw.
+
+    zFu and zFv carry the same deterministic pattern in both runs, as two real
+    transports must; only the third field differs, exactly as the reference and
+    the candidate differ in the uninitialised buffer the model dumps there.
+    """
+    header = b"NEMO_L2_TRANSP_1" + struct.pack(
+        "=8i", 1, 1, 3, 3, 94, 152, 31, 1
+    )
+    assert len(header) == TRANSPORT_HEADER_BYTES
+    signal = (b"\x11\x22\x33\x44\x55\x66\x77\x88" * (TRANSPORT_FIELD_BYTES // 8))
+    assert len(third_field) == TRANSPORT_FIELD_BYTES
+    path.write_bytes(header + signal + signal + third_field)
+    assert path.stat().st_size == TRANSPORT_STREAM_BYTES
+
+
+def _flip_byte(data: bytes, offset: int) -> bytes:
+    return data[:offset] + bytes([data[offset] ^ 0xFF]) + data[offset + 1:]
 
 
 def _write_orca2_boundary(path: Path) -> None:
@@ -286,11 +317,21 @@ def test_boundary_finalize_admits_synthetic_twin_and_named_plants_refuse(tmp_pat
     # exist only in the baseline here, exactly as in the real pair.
     for name in REGISTERED_ABSENT_STREAMS:
         (baseline / name).write_bytes(f"absent-{name}\n".encode())
-    for index in range(94):
+    for index in range(93):
         name = f"oracle_inherited_{index:03d}.bin"
         payload = f"inherited-{index}\n".encode()
         (baseline / name).write_bytes(payload)
         (target / name).write_bytes(payload)
+    # The 94th comparable stream is the stage-1 transport stream, the one the
+    # gate compares only in part. The reference dumps zeros in the excluded
+    # third field and this candidate dumps the sea-ice initialisation value, so
+    # the twin reproduces the real disagreement the exclusion exists for.
+    _write_transport(baseline / PARTIAL_STREAM, third_field=bytes(
+        TRANSPORT_FIELD_BYTES
+    ))
+    _write_transport(target / PARTIAL_STREAM, third_field=struct.pack(
+        "=d", 270.0
+    ) * (TRANSPORT_FIELD_BYTES // 8))
     baseline_manifest = "".join(
         f"{hashlib.sha256((baseline / name).read_bytes()).hexdigest()}  {name}\n"
         for name in sorted(path.name for path in baseline.glob("oracle_*.bin"))
@@ -446,6 +487,78 @@ def test_boundary_finalize_admits_synthetic_twin_and_named_plants_refuse(tmp_pat
     assert "absent=6/7" in absent_returned.stdout
     assert "REFUSE: write-only passivity failed" in absent_returned.stderr
     reappeared.unlink()
+    readmitted = finalize()
+    assert readmitted.returncode == 0, readmitted.stdout + readmitted.stderr
+
+    # The partially compared stage-1 transport stream. The excluded third
+    # field is the ONLY part these two runs disagree on, and every admission
+    # above happened with that disagreement in place: the exclusion is being
+    # exercised, not merely described in a line that prints unconditionally.
+    transport = target / PARTIAL_STREAM
+    transport_bytes = transport.read_bytes()
+    baseline_transport = (baseline / PARTIAL_STREAM).read_bytes()
+    assert transport_bytes != baseline_transport
+    assert (
+        transport_bytes[:TRANSPORT_COMPARED_BYTES]
+        == baseline_transport[:TRANSPORT_COMPARED_BYTES]
+    )
+    partial = report["passivity"]["partial_comparison"]
+    assert partial["stream"] == PARTIAL_STREAM
+    assert partial["compared_bytes"] == TRANSPORT_COMPARED_BYTES
+    assert partial["required_bytes"] == TRANSPORT_STREAM_BYTES
+
+    def plant_transport(mutated: bytes) -> subprocess.CompletedProcess[str]:
+        transport.write_bytes(mutated)
+        result = finalize()
+        transport.write_bytes(transport_bytes)
+        return result
+
+    # A corruption in the header, in the first transport (zFu) or in the second
+    # (zFv) lies inside the compared span, so it must refuse and name the
+    # stream it caught.
+    for label, offset in (
+        ("header", 20),
+        ("zFu", TRANSPORT_HEADER_BYTES + 1000),
+        ("zFv", TRANSPORT_HEADER_BYTES + TRANSPORT_FIELD_BYTES + 1000),
+        ("zFv-last-byte", TRANSPORT_COMPARED_BYTES - 1),
+    ):
+        corrupted = plant_transport(_flip_byte(transport_bytes, offset))
+        assert corrupted.returncode == 69, label
+        assert (
+            f"ORCA2_TKE_BOUNDARY_DIFFERS {PARTIAL_STREAM}" in corrupted.stdout
+        ), label
+        assert "compared=94 identical=93" in corrupted.stdout, label
+        assert "differing=1" in corrupted.stdout, label
+        assert "REFUSE: write-only passivity failed" in corrupted.stderr, label
+
+    # A corruption confined to the excluded third field is admitted, at the
+    # first excluded byte and at the last byte of the stream alike.
+    for label, offset in (
+        ("zFw", TRANSPORT_COMPARED_BYTES + 1000),
+        ("zFw-last-byte", TRANSPORT_STREAM_BYTES - 1),
+    ):
+        excluded = plant_transport(_flip_byte(transport_bytes, offset))
+        assert excluded.returncode == 0, label + excluded.stdout + excluded.stderr
+        assert "compared=94 identical=94" in excluded.stdout, label
+
+    # A wrong total length refuses under its own named condition, short or
+    # padded, so no byte can hide in the excluded tail.
+    for label, mutated in (
+        ("short", transport_bytes[:-8]),
+        ("padded", transport_bytes + bytes(8)),
+    ):
+        wrong_length = plant_transport(mutated)
+        assert wrong_length.returncode == 69, label
+        assert (
+            f"ORCA2_TKE_BOUNDARY_WRONG_LENGTH {PARTIAL_STREAM}"
+            in wrong_length.stdout
+        ), label
+        assert "wrong_length=1" in wrong_length.stdout, label
+        assert (
+            f"REFUSE: inherited stream {PARTIAL_STREAM} is not the registered "
+            f"{TRANSPORT_STREAM_BYTES} bytes" in wrong_length.stderr
+        ), label
+
     readmitted = finalize()
     assert readmitted.returncode == 0, readmitted.stdout + readmitted.stderr
 
