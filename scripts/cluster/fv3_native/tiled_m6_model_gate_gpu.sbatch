@@ -7,6 +7,19 @@
 #SBATCH --gres=gpu:2
 #SBATCH --constraint=a100
 #SBATCH --exclusive
+# NODE EXCLUSION (user call 2026-09-16). These nodes compile the sharded
+# step in full and then HANG in its first execution -- NCCL reaches
+# "Connected all trees" on every rank and stops. Confirmed by a pinned-node
+# A/B at six ranks: g[041-043] scored in 4 min 48 s (job 9777265), the
+# identical job on g[188,190,193] was killed at 30 min (job 9777266); the
+# hangs of jobs 9756806, 9756887, 9758308 and 9776325 all include nodes
+# from these ranges and every completion ran on g041-044 + g094-101.
+# A bare neighbour ppermute passes on them at every payload from 16 KB to
+# 32 MB (jobs 9785525 vs 9785526, within 35 % of the good nodes), so the
+# fault is not raw fabric bandwidth and the reproducer is the gate itself.
+# DELETE THIS LINE once the nodes are fixed -- it is a workaround, not a
+# property of the model.
+#SBATCH --exclude=g[045-051],g[053-054],g[185-193]
 #SBATCH --output=/burg-archive/glab/users/pg2328/fv3_duo_gaps/m6_gpu_gate_%j.log
 # M6 on REAL GPU RANKS: one window per process, one A100 per process,
 # jax.distributed via SLURM, NCCL collectives.  2 GPUs per node.
@@ -39,7 +52,11 @@ PREOUT=$(srun --gpus-per-task=1 "$PY" scripts/bench/bench_fv3_duo_spmd_scaling.p
 echo "preflight: $(echo "$PREOUT" | grep -m1 'ONE neighbour ppermute' || echo "NO RESULT: $(echo "$PREOUT" | grep -m1 -iE 'error|Traceback' )") (nodes $SLURM_JOB_NODELIST)"
 echo "$PREOUT" | grep -m1 "BARE-SLOWEST" || true
 echo "===== M6 GPU gate C$N km=$KM ${NHFLAG:-hydro} kt=$KT pad=$PAD ranks=$SLURM_NTASKS ref=${REF:-none} ====="
-srun --gpus-per-task=1 --kill-on-bad-exit=0 "$PY" scripts/validate/fv3_native/tiled_m6_model_gate.py --n "$N" --km "$KM" $NHFLAG --kt "$KT" --pad "$PAD" --n-split "${NSPLIT:-3}" --steps "${STEPS:-2}" --distributed ${REF:+--ref-npz $REF} ${GATE_EXTRA:-} 2>&1 \
+# GPU rows are judged within GPU_MAX_REL_PEAK of each leaf's peak (user call
+# 2026-09-15): two XLA:GPU programs differ at rounding, measured 1.5e-14.
+GPU_MAX_REL_PEAK=${GPU_MAX_REL_PEAK:-1e-13}
+echo "GPU_MAX_REL_PEAK=$GPU_MAX_REL_PEAK"
+srun --gpus-per-task=1 --kill-on-bad-exit=0 "$PY" scripts/validate/fv3_native/tiled_m6_model_gate.py --n "$N" --km "$KM" $NHFLAG --kt "$KT" --pad "$PAD" --n-split "${NSPLIT:-3}" --steps "${STEPS:-2}" --distributed ${REF:+--ref-npz $REF} --gpu-max-rel-peak "$GPU_MAX_REL_PEAK" ${GATE_EXTRA:-} 2>&1 \
   | grep --line-buffered -vE "jax_plugins|xla_bridge|versions_helpers|for d in range|_check_cuda|plugin_module|^\s+\^$|RuntimeError: jaxlib|Deprecat|shard_map import"
 RC=${PIPESTATUS[0]}
 echo "SRUN_RC=$RC"
