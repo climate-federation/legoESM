@@ -1,7 +1,7 @@
 # Preregistration: NEMO-testcases L2 GYRE round 103 TKE matrix/RHS statement walk
 
 Date: 2026-09-17. Frozen at the incoming lane tip
-`e92f8aff20524a0a1d8f9c4cb4b7e7e4e6a5cd3c` (`git rev-parse HEAD` recorded in
+`e92f8aff20521b23c6d062a5baf8c46882361efc` (`git rev-parse HEAD` recorded in
 the evidence stamp), before any new production-step boundary is exposed and
 before any physics or configuration change. Evidence belongs under
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round103/`.
