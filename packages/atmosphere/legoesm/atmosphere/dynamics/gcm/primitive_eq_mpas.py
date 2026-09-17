@@ -101,6 +101,12 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # decision: "conserving form always"); False restores the legacy clamp
     # for bit-comparison against older runs.
     conservative_tracer_clamp: bool = True
+    # Optional (nlev,) per-layer weight restricting the budget ledger's
+    # SNAPSHOT-derived rows (dynamics, clips) to a vertical band, matching the
+    # weight the physics rows use. Both sides must carry the same weight or the
+    # rows no longer sum to the column-store change and the table is silently
+    # inconsistent. None = full column, byte-identical.
+    budget_ledger_level_weight: object = None
     # #1354/#1515: applies ONLY to the plain-max hard-floor path (i.e. when
     # conservative_tracer_clamp=False).  Then the q_v floor removes the latent
     # heat tied to the clipped vapour (energy_consistent_moisture_floor) so
@@ -155,9 +161,9 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # ½ half→full average).  A 2Δσ mode grows until the silent ``T_min`` floor
     # pins its cold levels and rectifies it into an even/odd checkerboard (#915
     # autopsy: even levels pinned at 50 K, odd exploding to 8e8 K).  Damping
-    # rate is 16·ν interior / 8·ν at the top+bottom boundary (τ = 1/(16ν),
-    # 1/(8ν); e.g. ν=2e-6 ⇒ ~8.7 h interior, ~17 h boundary — fast vs the
-    # day-20 blowup).  del4 damps 2Δσ ~47× faster than an 8Δσ resolved wave, so
+    # rate is 16·ν interior / 12·ν next-to-boundary / 4·ν at the top+bottom
+    # level (τ = 1/(16ν); e.g. ν=2e-6 ⇒ ~8.7 h interior, ~35 h boundary — fast
+    # vs the day-20 blowup); a linear profile is untouched (zero tendency).  del4 damps 2Δσ ~47× faster than an 8Δσ resolved wave, so
     # resolved vertical structure is essentially untouched, and it conserves
     # column-integrated T to machine precision (flux form).  0.0 (default)
     # reproduces the pre-fix dycore bit-for-bit (matches the ``nu_del2``/
@@ -187,11 +193,40 @@ class MPASPrimitiveEquationConfig(NamedTuple):
     # existing callers, not full tuple ABI (exact unpacking / len() / _make
     # with a short tuple still break; no such caller exists in-repo).
     vert_advection_scheme: str = "upwind"
+    # CAM-style top diffusion sponge: the del2 viscosity in the top n layers
+    # is multiplied by factor**((n-k)/n) (k = 0 the model top, so the top
+    # layer gets the full factor), 1 below.  0 / 1.0 = off, byte-identical.
+    sponge_del2_top_layers: int = 0
+    sponge_del2_top_factor: float = 1.0
 
 
 # ============================================================================
 # Tendency computation
 # ============================================================================
+
+class ThermoTerms(NamedTuple):
+    """The three constituents of the dry thermodynamic tendency, as assembled.
+
+    Diagnostic only: returned by :func:`mpas_hydrostatic_tendencies` when it is
+    called with ``return_thermo_terms=True``, which no production path does.
+    ``horiz_adv + horiz_diff + vert_adv + adiabatic_ps`` is the thermodynamic
+    tendency before the vertical del4 filter and before physics are added, so a
+    budget that splits the dycore's contribution needs no re-derivation from
+    state.  Advection and the horizontal Laplacian diffusion are separate
+    because they answer different questions and the diffusion is large: at the
+    production coefficient it is down-gradient heat transport across the polar
+    front, which looks exactly like resolved advection if the two are summed.
+    """
+
+    horiz_adv: jax.Array      # -v.grad(T) on cell centres, ADVECTION ONLY [K/s]
+    horiz_diff: jax.Array     # K_h * div(grad T), zero when K_h == 0 [K/s]
+    vert_adv: jax.Array       # theta-form vertical term, carries the sigma-dot
+                              # part of the adiabatic heating [K/s]
+    adiabatic_ps: jax.Array   # kappa*T*(omega_ps/p + v.grad ln p_s) [K/s]
+    sigma_dot: jax.Array      # the coordinate vertical velocity the vertical
+                              # term was built from, at interfaces [1/s]; it is
+                              # what turns a tendency into a rate of descent
+
 
 def vertical_del4_T_tendency(
     T_3d: jax.Array, nu_vert4_T: float, layer_mass: jax.Array | None = None,
@@ -206,9 +241,11 @@ def vertical_del4_T_tendency(
     ``nu_del4`` biharmonic hyperdiffusion.
 
     Implemented as del2∘del2 (Laplacian of the Laplacian).  Boundary treatment:
-    the INNER Laplacian is ``reflect``-padded (so a 2Δσ mode keeps its full
-    ``-4`` Laplacian at the top/bottom levels — where the #930 checkerboard is
-    worst, at the low-pressure top), while the OUTER Laplacian is ``edge``
+    the INNER Laplacian uses linearly EXTRAPOLATED ghost levels (a boundary
+    gradient is not a mode: linear profiles give exactly zero; a 2Δσ mode is
+    still damped at 4ν on the boundary level and 12ν on the next — where the
+    #930 checkerboard is worst, at the low-pressure top), while the OUTER
+    Laplacian is ``edge``
     (zero-gradient) padded (a no-flux boundary → the INDEX-space sum
     ``Σ_k tendency_k`` is ZERO to machine precision for ANY profile).
     That is NOT the same as column conservation: the conserved quantity is the
@@ -225,9 +262,9 @@ def vertical_del4_T_tendency(
     On a uniform grid the correction is identically zero to round-off
     (measured ≤1.4e-20 K/s, far below the float32 ULP of the tendency), so the
     uniform and ``dsigma=None`` paths stay bit-identical.  Discrete 2Δσ
-    ``(-1)^k`` response: ``-16·nu`` in the interior, ``-8·nu`` at the top/bottom
-    (½ the interior rate — a boundary no-flux constraint of any conservative
-    biharmonic; still strong).  An 8Δσ resolved wave sees ``≈-0.34·nu``
+    ``(-1)^k`` response: ``-16·nu`` in the interior, ``-12·nu`` next to the
+    boundary and ``-4·nu`` on the top/bottom level (the extrapolated ghost
+    sees no gradient; still strong).  An 8Δσ resolved wave sees ``≈-0.34·nu``
     (≈47× weaker than 2Δσ), so the filter is grid-scale-selective.
 
     Parameters
@@ -253,10 +290,16 @@ def vertical_del4_T_tendency(
         Vertical-hyperdiffusion tendency of T, same shape as ``T_3d``.
     """
     pad_axes = ((0, 0),) * (T_3d.ndim - 1)
-    # Inner Laplacian: reflect BC keeps the FULL 2Δσ response at the boundary
-    # levels (a plain edge/no-flux inner BC halves it again and leaves a slowly
-    # decaying top boundary mode).
-    Tp = jnp.pad(T_3d, (*pad_axes, (1, 1)), mode="reflect")
+    # Inner Laplacian: ghost levels by LINEAR EXTRAPOLATION
+    # (ghost_top = 2*T[0] - T[1], ghost_bot = 2*T[-1] - T[-2]), so a boundary
+    # GRADIENT is invisible to the filter: linear profiles give exactly zero,
+    # a quadratic 1·nu at the boundary; 2Δσ damping is 4·nu at the boundary
+    # level, 12·nu at the next, 16·nu interior.  A reflect pad turned any
+    # boundary gradient into a fake 2Δσ mode (measured -2.77/+2.77 K/day on
+    # the top two layers of a linear 8 K/layer profile at nu=2e-6).
+    ghost_top = 2.0 * T_3d[..., 0:1] - T_3d[..., 1:2]
+    ghost_bot = 2.0 * T_3d[..., -1:] - T_3d[..., -2:-1]
+    Tp = jnp.concatenate([ghost_top, T_3d, ghost_bot], axis=-1)
     lap = Tp[..., :-2] - 2.0 * Tp[..., 1:-1] + Tp[..., 2:]      # ∂²/∂σ²
     # Outer Laplacian: edge (zero-gradient / no-flux) BC ⇒ Σ_k tendency = 0
     # exactly (flux form), so the filter conserves column-integrated T.
@@ -283,6 +326,20 @@ def vertical_del4_T_tendency(
                    / _w.sum(axis=-1, keepdims=True))
 
 
+def sponge_del2_profile(nlev: int, n_layers: int, factor) -> jnp.ndarray:
+    """Per-level del2 viscosity multiplier of a CAM-style top diffusion sponge:
+    factor**((n_layers - k)/n_layers) for level k < n_layers (k = 0 is the
+    model top, so the top layer gets the full factor), 1.0 below; all ones when
+    n_layers <= 0 (byte-identical off state).  ``n_layers`` is a static config
+    value (Python int); ``factor`` may be traced."""
+    if n_layers <= 0:
+        return jnp.ones(nlev)
+    fac = jnp.asarray(factor)
+    k = jnp.arange(nlev)
+    exponent = jnp.maximum(n_layers - k, 0) / n_layers     # exactly 0 below the sponge
+    return fac ** exponent
+
+
 def mpas_hydrostatic_tendencies(
     state: MPASHydrostaticState,
     mesh: VoronoiMesh,
@@ -290,7 +347,8 @@ def mpas_hydrostatic_tendencies(
     config: MPASPrimitiveEquationConfig = MPASPrimitiveEquationConfig(),
     physics_tendency: MPASHydrostaticTendencies | None = None,
     dt: float = 0.0,
-) -> MPASHydrostaticTendencies:
+    return_thermo_terms: bool = False,
+) -> MPASHydrostaticTendencies | tuple[MPASHydrostaticTendencies, "ThermoTerms"]:
     """Compute tendencies for the hydrostatic PE on an MPAS mesh.
 
     Parameters
@@ -484,12 +542,15 @@ def mpas_hydrostatic_tendencies(
     # ``vector_laplacian_del2_3d`` call (1 div + 1 curl + 1 grad +
     # 1 tangential-curl difference) per RHS evaluation.  Same exploit
     # as Loop 135 for the latlon ocean K_h+K_bih sharing.
+    _nu2 = config.nu_del2 * sponge_del2_profile(
+        u_3d.shape[-1], config.sponge_del2_top_layers,
+        config.sponge_del2_top_factor).astype(u_3d.dtype)
     if config.nu_del2 > 0 and config.nu_del4 > 0:
         _del2_u = vector_laplacian_del2_3d(u_3d, mesh)
-        du_dt_3d = du_dt_3d + config.nu_del2 * _del2_u
+        du_dt_3d = du_dt_3d + _nu2[None, :] * _del2_u
         du_dt_3d = du_dt_3d - config.nu_del4 * vector_laplacian_del2_3d(_del2_u, mesh)
     elif config.nu_del2 > 0:
-        du_dt_3d = du_dt_3d + config.nu_del2 * vector_laplacian_del2_3d(u_3d, mesh)
+        du_dt_3d = du_dt_3d + _nu2[None, :] * vector_laplacian_del2_3d(u_3d, mesh)
     elif config.nu_del4 > 0:
         du_dt_3d = du_dt_3d + config.nu_del4 * vector_laplacian_del4_3d(u_3d, mesh)
 
@@ -543,8 +604,11 @@ def mpas_hydrostatic_tendencies(
 
     # Scalar diffusion — ``grad_T_3d`` and its divergence were already
     # computed in the batched blocks above; reuse the cached results.
+    _horiz_diff_T = (config.K_h * _div_grad_T if config.K_h > 0
+                     else jnp.zeros_like(horiz_adv_T_3d))
+    _horiz_adv_only = horiz_adv_T_3d
     if config.K_h > 0:
-        horiz_adv_T_3d = horiz_adv_T_3d + config.K_h * _div_grad_T
+        horiz_adv_T_3d = horiz_adv_T_3d + _horiz_diff_T
 
     # --- 4. Surface pressure tendency and vertical velocity ---
     # Flux-form continuity (both branches): ``div_dp_3d = div(u·dp_edge)``
@@ -572,6 +636,10 @@ def mpas_hydrostatic_tendencies(
         # amplified at the stretched top levels.  See the σ branch below.
         vert_thermo_T = vertical_advection_theta_hybrid(
             T_3d, mass_flux, p_s, sigma_coord)
+        # Hybrid carries a mass flux, not a coordinate velocity; the
+        # diagnostic reports the equivalent dsigma/dt so the two branches are
+        # comparable (dp/dt per unit layer mass).
+        _sigma_dot_diag = mass_flux / jnp.maximum(p_s[:, None], 1.0)
         # Only the surface-pressure-tendency part of ω stays in ``adiabatic``:
         #   ω = B·dp_s/dt + F  ⇒  ω_ps = B·dp_s/dt.  The F (mass-flux) part
         # κ·T·F/p is now folded into ``vert_thermo_T`` above — NO double-count.
@@ -590,6 +658,7 @@ def mpas_hydrostatic_tendencies(
         sigma_dot = compute_sigma_dot_from_cumsum(
             _cumsum_dp, _D_total_p, p_s, sigma_coord,
         )
+        _sigma_dot_diag = sigma_dot
 
         # θ-form vertical thermodynamic transport (cancellation-free, #930):
         #   -σ̇·∂T/∂σ + κ·T·σ̇/σ  ==  -exner·σ̇·∂θ/∂σ   (θ = T·(p₀/p)^κ).
@@ -648,6 +717,12 @@ def mpas_hydrostatic_tendencies(
     adiabatic = adiabatic + kappa * T_3d * v_grad_lnps
 
     dT_dt_3d = horiz_adv_T_3d + vert_thermo_T + adiabatic
+    _thermo_terms = (ThermoTerms(horiz_adv=_horiz_adv_only,
+                                 horiz_diff=_horiz_diff_T,
+                                 vert_adv=vert_thermo_T,
+                                 adiabatic_ps=adiabatic,
+                                 sigma_dot=_sigma_dot_diag)
+                     if return_thermo_terms else None)
 
     # Vertical biharmonic hyperdiffusion of T (#930 cure): damp the grid-scale
     # 2Δσ vertical mode that the adiabatic κ·T·ω/p term amplifies but no other
@@ -723,7 +798,7 @@ def mpas_hydrostatic_tendencies(
             for _i, k in enumerate(_tnames)
         }
 
-    return MPASHydrostaticTendencies(
+    _out = MPASHydrostaticTendencies(
         du_dt=Field(data=du_dt_3d, name="du_dt",
                     dims=("nEdges", "nlev"), units="m/s²"),
         dT_dt=Field(data=dT_dt_3d, name="dT_dt",
@@ -734,6 +809,12 @@ def mpas_hydrostatic_tendencies(
                        dims=("nCells",), units="m²/s³"),
         tracer_tendencies=tracer_tends_out,
     )
+    # ``return_thermo_terms`` is a STATIC Python bool, false on every
+    # production path, so the traced graph and the returned pytree are
+    # unchanged when it is not requested.
+    if return_thermo_terms:
+        return _out, _thermo_terms
+    return _out
 
 
 def _vertical_advection_edge(
@@ -1166,11 +1247,14 @@ class MPASPrimitiveEquationModel(IntegrationMixin):
                 column_store_snapshot_column,
             )
 
+            _led_w = self.config.budget_ledger_level_weight
+
             def _snap(s):
                 water = [s.tracers[k].data for k in LEDGER_WATER_SPECIES
                          if s.tracers is not None and k in s.tracers]
                 return column_store_snapshot_column(
-                    s.p_s.data, self.sigma_coord.dsigma, s.T.data, *water)
+                    s.p_s.data, self.sigma_coord.dsigma, s.T.data, *water,
+                    level_weight=_led_w)
 
             _s_pre = _snap(state)
             _s_dyn = _snap(_state_postdyn)

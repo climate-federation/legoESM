@@ -219,16 +219,33 @@ class PhysicsState(NamedTuple):
     # unaffected.
     surface_wth_override: jnp.ndarray = None
     surface_wqv_override: jnp.ndarray = None
+    # Prescribed (ERA5) surface fluxes as the lower boundary condition,
+    # (ncol,), model sign convention: heat positive UPWARD, stress ON THE
+    # ATMOSPHERE. Window-constant siblings of surface_T_sfc_override: the
+    # training rollout anchors them once on the initial state and they are
+    # CARRIED unchanged for the whole window (update_physics_state carries
+    # them like the T_sfc anchor, NOT reset like the per-step wth/wqv
+    # overrides above).
+    surface_shflx_override_w_m2: jnp.ndarray = None   # [W/m^2] sensible, positive up
+    surface_lhflx_override_w_m2: jnp.ndarray = None   # [W/m^2] latent, positive up
+    surface_tau_x_override_pa: jnp.ndarray = None     # [Pa] eastward stress on the atmosphere
+    surface_tau_y_override_pa: jnp.ndarray = None     # [Pa] northward stress on the atmosphere
 
 
-# Per-step INPUT fields (recomputed by the driver from forcing/dynamics before
-# every convection call) — NOT evolving physics memory, so they are neither
-# persisted in a restart checkpoint nor subject to the carry-completeness gate.
-# A checkpoint legitimately lacks them; the fresh seed's ``None`` is correct.
+# State fields that are run-level INPUTS rather than physics memory.
+# dyn_tendency_* and the wth/wqv overrides are per-step inputs (reset by
+# update_physics_state); the surface_*_override_* flux anchors are prescribed
+# boundary conditions set ONCE per training window by the rollout (the
+# ERA5-surface-flux lane) and then carried unchanged -- so the
+# restart/carry-completeness gate must neither require them nor treat their
+# absence as a hole in the physics memory.
 PHYSSTATE_INPUT_FIELDS = frozenset({
     "dyn_tendency_T", "dyn_tendency_qv",
     "surface_wth_override", "surface_wqv_override",
+    "surface_shflx_override_w_m2", "surface_lhflx_override_w_m2",
+    "surface_tau_x_override_pa", "surface_tau_y_override_pa",
 })
+
 
 
 def init_physics_state(
@@ -393,7 +410,7 @@ def init_physics_state(
         # docstrings).
         dyn_tendency_T=None,
         dyn_tendency_qv=None,
-        # Lagged convective surface precip for the standalone-path Slingo
+        # Lagged convective surface precip for the standalone-path Slingo-1987-inspired surrogate
         # cumulus cloud fraction; zeros before the first convection step.
         conv_precip=jnp.zeros((ncol,), dtype=dtype),
     )
@@ -459,6 +476,20 @@ def update_physics_state(phys_state, updates):
         # diurnal cycle at whatever instant the driver last refreshed.
         surface_wth_override=updates.get("surface_wth_override", None),
         surface_wqv_override=updates.get("surface_wqv_override", None),
+        # Prescribed-flux anchors are window-constant inputs: CARRY them
+        # (like surface_T_sfc_override), do NOT reset like wth/wqv above.
+        surface_shflx_override_w_m2=updates.get(
+            "surface_shflx_override_w_m2",
+            phys_state.surface_shflx_override_w_m2),
+        surface_lhflx_override_w_m2=updates.get(
+            "surface_lhflx_override_w_m2",
+            phys_state.surface_lhflx_override_w_m2),
+        surface_tau_x_override_pa=updates.get(
+            "surface_tau_x_override_pa",
+            phys_state.surface_tau_x_override_pa),
+        surface_tau_y_override_pa=updates.get(
+            "surface_tau_y_override_pa",
+            phys_state.surface_tau_y_override_pa),
         # Evolving lag carry (convection writes, radiation reads next step):
         # carried forward unchanged when the step's convection published
         # nothing (schemes without a rain split).

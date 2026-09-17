@@ -165,7 +165,13 @@ def resolved_cloud_config(exp):
         cloud_fsd=exp["cloud_fsd"],
         cloud_partial_coverage_optics=exp["cloud_partial_coverage_optics"],
         clubb_cf_override_strength=exp["cloud_clubb_cf_override_strength"],
-        clubb_cf_override_floor=exp["cloud_clubb_cf_override_floor"])
+        clubb_cf_override_floor=exp["cloud_clubb_cf_override_floor"],
+        # runs older than the lever have no key: None => scheme default (off)
+        cover_condensate_q_ref=exp.get("cloud_cover_condensate_q_ref"),
+        # FV-pipeline-only knobs (no ExperimentConfig field records them yet):
+        # None => scheme default, same as every run so far
+        conv_cloud_coeff=exp.get("cloud_conv_cloud_coeff"),
+        Nc_default=exp.get("cloud_Nc_default"))
 
 
 def cell_order(z, ncell):
@@ -190,8 +196,8 @@ def cell_order(z, ncell):
 def analyse_checkpoint(path, cloud_cfg, ncell):
     """Per-cell cover, radiation-visible vs prognostic paths, and the layer
     fields needed for profiles, from one checkpoint (in global mesh order)."""
-    from legoesm.atmosphere.physics.clouds.cloud_fraction import compute_cloud_properties
-    from legoesm.thermo import saturation_mixing_ratio, saturation_mixing_ratio_ice
+    from legoesm.atmosphere.physics.clouds.cloud_fraction import (
+        compute_cloud_properties, cover_saturation_mixing_ratio)
     from legoesm import constants
 
     z = np.load(path)
@@ -232,14 +238,8 @@ def analyse_checkpoint(path, cloud_cfg, ncell):
     cf = np.asarray(props.cloud_fraction)
     lwp_rad, iwp_rad = radiation_paths(props, cloud_cfg)
     g = constants.g
-    if cloud_cfg.saturation_scheme == "liquid":
-        q_sat = np.asarray(saturation_mixing_ratio(T, p_full))
-    else:
-        # profile RH is reported against liquid saturation below 0 C and ice
-        # above the cold threshold, i.e. the curve the scheme itself used
-        q_sat = np.asarray(saturation_mixing_ratio(T, p_full))
-        cold = T < cloud_cfg.T_cold
-        q_sat = np.where(cold, np.asarray(saturation_mixing_ratio_ice(T, p_full)), q_sat)
+    # the curve the cover scheme itself measured RH against (shared dispatch)
+    q_sat = np.asarray(cover_saturation_mixing_ratio(T, p_full, cloud_cfg))
     out = layer_cover(cf, p_full)
     out.update({
         "iwp_prog": (q_i * dp / g).sum(1), "lwp_prog": (q_c * dp / g).sum(1),
@@ -293,7 +293,7 @@ def main(argv=None):
     exp = json.load(open(f"{rundir}/experiment_config.json"))
     cloud_cfg = resolved_cloud_config(exp)
     print(f"=== {args.run}: cloud config RESOLVED from experiment_config.json ===")
-    for k in ("scheme", "rh_crit", "saturation_scheme", "q_c_diagnostic",
+    for k in ("scheme", "rh_crit", "saturation_scheme", "cover_condensate_q_ref", "q_c_diagnostic",
               "cloud_vertical_overlap_optics", "cloud_n_subcolumns", "convective_cloud"):
         print(f"  {k} = {getattr(cloud_cfg, k)!r}")
 

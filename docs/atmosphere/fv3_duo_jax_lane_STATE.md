@@ -1574,3 +1574,275 @@ twin's docstring still described the exchange it no longer performs, and the
 bitwise assertion the fix advertised existed only on the NumPy side.
 
 Units after all of it: 91 passed, 1 skipped (job 9470106).
+
+## ★ THE FACE-BATCHED ARM IS ORACLE-CERTIFIED (2026-09-11)
+
+Every oracle number above scored the per-face LOOP arm. The distributed
+window/SPMD step forces the face-BATCHED arm, so the arm production runs
+had only a transitive certificate: a 5e-12 batched-vs-loop unit test at
+k_split=2, and a bitwise window-vs-flat gate at nq=1. Neither of those is
+evaluated at the oracle's own configuration, so none of the three links
+met at a shared point -- it was three disconnected experiments, not a
+chain (GLM-5.2 named this; codex ranked it the top correctness gap).
+
+`full_step_batched_parity.sbatch` runs both arms in ONE job, only
+`--batched` differing, and scores each against the pinned Fortran:
+
+| deck | loop arm | BATCHED arm | ceiling |
+|---|---|---|---|
+| hydrostatic dry | 1.1866e-09 | **1.1866e-09** | 2e-9 |
+| hydrostatic moist | 1.1866e-09 | **1.1866e-09** | 2e-9 |
+| non-hydrostatic | 1.4776e-06 | **1.4776e-06** | 1e-3 |
+
+Worst one-step relative over all faces and fields. The two arms agree to
+the headline digit on every deck; per-metric differences are 1e-7..1e-4
+relative on residuals that are themselves 1e-9 to 1e-12, i.e. last-digit
+reassociation from the vmap, which is what a face-batched arm is expected
+to cost.
+
+### The COMPILED step, which is the one that deploys
+
+Every parity number this lane had published scored the EAGER step, while
+the model steps through the compiled builder -- a red test in the tree
+(`test_the_job_certifies_the_compiled_path`) had said so for weeks and
+nobody read it. `JIT=1` now selects the compiled arm (default off, so the
+eager numbers stay reproducible). Hydrostatic, both arms:
+
+| arm | eager | compiled |
+|---|---|---|
+| loop | 1.1866e-09 | 1.1866e-09 |
+| batched | 1.1866e-09 | 1.1866e-09 |
+
+GLM predicted that IF compilation moved anything it would be a single
+outlier cell from a flux-limiter state flip, not an ambient shift, and
+that with only 1.7x headroom under the 2e-9 ceiling one flip could
+false-fail. It did not happen: across 147 compared metrics the largest
+eager-vs-compiled difference is one cell crossing the diagnostic
+"within 10 % of the peak" threshold (69 -> 70 cells on one face's
+temperature), while every residual MAGNITUDE agrees to four significant
+figures. Compilation is neutral on this deck.
+
+### Two ceilings, and one of them was lost in a merge
+
+`--max-rel` bounds each arm against the ORACLE. A second gate, `MAX_REL`,
+bounded the two arms against EACH OTHER, and it is GONE: commit 3e3711bdb
+added it, no non-merge commit ever removed it, and every commit touching
+that file since is a MERGE. It was clobbered in a conflict resolution. The
+test that pinned it went red and stayed red, which is how a gate dies
+quietly. Restoring it needs a number nobody has chosen yet -- the old
+default was 0.0, i.e. bit-exactness, which no reassociating arm can meet.
+
+### Still open
+
+- The non-hydrostatic ceiling is 1e-3 while the lane now measures
+  1.4776e-06, ~670x tighter than the gate. The gate no longer binds.
+- The backend parity job still scores eager only; its compiled arm is the
+  remaining half of the compiled-path gap.
+- The window gate runs one tracer while the oracle deck carries two, and
+  the second is all-zero, so multi-tracer transport is untested on the
+  distributed arm.
+- k_split > 1 is accepted by the model and compared to the oracle by
+  nothing.
+
+### The user's three calls (2026-09-11), and what they cost
+
+| choice | before | after |
+|---|---|---|
+| arm-to-arm ceiling | none (a merge deleted it) | 1, deliberately loose, with a warning band at the measured 1.4e-4 |
+| non-hydrostatic oracle ceiling | 1e-3 | 3e-6 |
+| narrow halo refresh | off, nothing selected it | ON by default |
+
+The ceiling is loose ON PURPOSE: no tolerance for arm-to-arm agreement has
+been established, a guessed tight number would fire on rounding, and a missing
+one certifies nothing. Every run now prints the number against the warning
+band, so tightening it later is one environment variable.
+
+The refresh default was re-gated after the change: C96, kt=3, 54 ranks,
+12/12 leaves BITWISE against `ladder_ref_c96_v2.npz`, worst rel 0.000e+00. So
+the ~14 ms/step it saves costs nothing in numerics.
+
+
+## The 12-hour multi-GPU "hang" was XLA:GPU autotuning (2026-09-12)
+
+Job 9694183 (C24, km=5, kt=2, pad=5, n_split=1, 24 GPUs) printed the IC
+round-trip line from all 24 ranks and then went silent for 12 h.  Earlier jobs
+9663001/9668306/9677460 died the same way at 1-4 h, and a SIGUSR1 stack dump
+taken then showed every rank inside `backend_compile_and_load` -- that evidence
+was deleted from the launcher header in a later edit and is restored here.
+
+Phase instrumentation (timestamped lower/compile begin+complete, per rank, one
+file per rank) localised it: every rank enters compile within 2 s of the others
+and none leaves.
+
+CONTROLLED RESULT, job 9746516 -- both arms interleaved inside ONE allocation
+(g[187,191-192]), twice each, because every earlier arm had landed on a
+different node set and the same three nodes had produced both a pass and a hang:
+
+| arm | rep 1 | rep 2 |
+|---|---|---|
+| stock | 0/6 ranks compiled, killed at 600 s | 0/6, killed at 600 s |
+| `--xla_gpu_autotune_level=0` | 6/6 in 83 s | 6/6 in 77 s |
+
+Supporting rows, each a separate allocation and therefore NOT attributable on
+their own: autotune levels 1, 2 and 3 and `--xla_gpu_shard_autotuning=true` all
+hung; the same program compiles in 11-13 s on CPU at 6 and 24 devices, and in
+78 s on one GPU with the collective-free variant.
+
+REFUTED (job 9746442, same-allocation, 4 runs): moving the Triton and XLA
+autotune caches to per-rank node-local memory.  It hung exactly like stock.
+Two earlier single-allocation runs had appeared to fix the hang; that was node
+luck.  `$HOME` is Lustre at 94 % full, which made the storage hypothesis
+plausible, but it is not the cause.
+
+FIX: `--xla_gpu_autotune_level=0` in the multi-rank GPU launcher only, appended
+so it never clobbers an inherited `XLA_FLAGS`, with the resolved flags echoed
+into the run log.  Single-GPU and CPU launchers keep tuned kernels, so every
+already-certified bitwise number stays comparable.  Pinned by
+`tests/grids/test_fv3_gpu_autotune_flag.py`, shown red when the flag is removed.
+
+OPEN: (a) GLM's point that levels 1-3 still execute candidate kernels, so
+"the autotuner's setup rather than its timing loop" is inferred, not measured --
+a measured kernel containing the collective_permute would fit every datum
+equally well; (b) the runtime cost of level 0, unmeasured; (c) whether any
+bitwise result moves, since level 0 changes algorithm selection -- a
+single-GPU run with and without the flag would settle it in minutes;
+(d) this is a mitigation, not an upstream fix.
+
+## ★ MULTI-TRACER CERTIFICATE ON THE ORACLE'S OWN TRACER SET (2026-09-14)
+
+The distributed gate ran one tracer; the oracle deck's second tracer is zero
+everywhere. Two routes to a real second tracer:
+
+- **Warm-started Fortran decks** (`build_warm_tracer_oracle.sbatch`, job
+  9760100): the tracer deck's zero step returns the IC it was given and a
+  passenger changes nothing else, both bitwise -- but the warm-started one-step
+  state differs from the certified cold start by ~1e-3 (2 cm/s on a 20 m/s
+  jet, 0.12 Pa delp). Cause NOT found. The decks stay published with
+  PROVENANCE and are **not** a certified oracle.
+- **DCMIP16 terminator pair** (`build_terminator_oracle.sbatch`, job 9766068):
+  cold start, `cl`/`cl2` added to the field_table before rainwat. Controls,
+  all bitwise: 1-step u/v/T/delp and sphum vs the pinned cold deck; IC deck vs
+  the pinned zero-step. Cl + 2 Cl2 = qcly exactly at the IC, 1.06e-3 after one
+  step (limited transport; the DCMIP terminator diagnostic). One tile is wholly
+  on the night side, Cl = 0 there.
+
+The harness now reads the deck's tracer list (field_table order + last dnats)
+and builds the port IC per name. Two harness limitations surfaced and were
+fixed by measurement:
+
+1. **The derived face map was ambiguous up to a mirror on the bump-free
+   faces** (job 9766086: cl at rel 1.0 on faces 3, 5; cl2 0.97 on face 4;
+   u/v/pt/delp all at 1e-14). The DCMIP jet is hemispherically symmetric, so
+   nothing scored there depended on that mirror. A lon-dependent scalar now
+   selects the transform; the cost stays the prognostic residual.
+2. **cl is a 5-digit cancellation** (D - r with D, r ~ 0.25, cl ~ 4e-6): its
+   IC floor is 4 eps / (qcly/0.25) = 5.5e-11 by arithmetic, measured 6.9e-12;
+   the pair is scored on qcly, not each face's peak (the all-day tile's cl2
+   peaks at 1e-9).
+
+Result, one step vs the Fortran terminator decks -- ALL FOUR ARMS PASS the
+gate (jobs 9767478/9767479: loop and batched, eager and compiled; cl2 at
+most 0.54x its ceiling; the arm-to-arm warning band, calibrated on the
+hydro deck, fires on cl2's branch flips between arms -- expected, ceiling 1):
+
+| tracer | one-step rel (scale) | note |
+|---|---|---|
+| sphum | 3.7e-12 | |
+| cl | 1.2e-11 | nonzero, longitude-dependent, matched to the floor |
+| cl2 | 8.2e-4 eager / 5.0e-4 compiled | see below |
+
+**cl2 is the scheme's own non-smoothness, not a port defect.** Localised to
+14-142 plateau cells per face adjacent to the front where the IC is exactly
+2e-6, largest aloft. The port's eager and compiled arms disagree there by the
+same 3.297e-9 (sphum, cl bit-identical between arms). Nudging that plateau by
+ONE ulp in the port's own IC moves the one-step cl2 by 3.297e-09 = 4e12 ulp in
+524 cells, same level profile, same value to four digits; nudging cl's zero
+plateau moves cl by 2 ulp (`tracer_ulp_sensitivity.py`, job 9767368). The
+Fortran's own rounding decides the same branch. **User call: cl2 gates at 2x
+that envelope (1.65e-3 of qcly)**, pinned with provenance and re-measured by
+the probe's `--assert-envelope` in both directions. OPEN: which branch
+(hord-6 flux switch vs kord-9 remap constraint).
+
+Distributed link on the same tracer set: C48 kt=2, 24 devices, `--terminator`,
+2 steps: 14/14 leaves BITWISE, every tracer moving (job 9766088).
+
+## More rows closed, and two review rounds (2026-09-14, later)
+
+| row | result |
+|---|---|
+| k_split = 2 vs a new Fortran deck (`build_ksplit_oracle.sbatch`) | 2.13e-10, loop and batched, eager and compiled |
+| compiled moist, both arms | 1.1866e-09 |
+| compiled non-hydrostatic, both arms | 1.4776e-06 |
+| sharded NH gate, terminator set, C48 kt=2, 24 devices, 2 steps | 24/24 leaves BITWISE |
+
+Harness hardening from the reviews (codex, then GLM-5.2), each finding
+measured before acting: the namelist reader took the first match on a
+line (now the last); `--k-split`/`--n-split` are checked against the step
+deck; map ties are counted and refuse when a lon-dependent tracer is scored;
+tracer mass and Cl + 2 Cl2 are compared to the oracle after the step; the
+three deck builders publish a family whole or not at all.
+
+**A constant tracer is NOT preserved at face edges -- in the Fortran
+either.** GLM's constancy invariant failed at 1.818e-4; every deviating
+cell lies within 3 cells of a face edge, interior at 6.353e-16. The oracle's
+own Cl + 2 Cl2 breaks at the edges of its front-free tiles by the SAME
+1.818e-4 with the SAME interior. The port reproduces the duo-grid's edge
+behaviour to four digits; the probe gates the interior at rounding and pins
+the edge figure to the oracle's.
+
+Still open: the intermittent 24-GPU first-execution hang (two NCCL arms
+queued since 2026-09-14 morning); GPU timing; the autotuner-off runtime
+cost; the warm/cold Fortran divergence; which limiter branch flips on the
+plateau.
+
+### The autotuner-off fix costs nothing (2026-09-14, job 9776324)
+
+One RTX 8000, one allocation, the single-process timing arm twice with only
+XLA_FLAGS differing (C48 km=10, 20 timed steps): default 274.1 ms/step,
+`--xla_gpu_autotune_level=0` 272.2 ms/step; final states BITWISE identical
+(0 cells differ). Both questions left open by the fix are closed: no
+runtime penalty for this stencil-dominated dycore, and single-GPU tuned and
+multi-GPU untuned kernels produce the same bits.
+
+### The runtime hang reproduces at SIX ranks, and follows the nodes (in progress)
+
+Job 9776325: six GPU ranks (kt=1) on g[101,188,193] compiled in full and
+hung in the first execution; `--xla_gpu_nccl_termination_timeout_seconds`
+never fired. Every hang so far has included nodes from g185-193 or
+g045-054; every completion ran on g041-044 + g094-101. A pinned-node A/B at
+six ranks (jobs 9777265 good nodes / 9777266 g188+g193) is queued.
+
+### ★ The multi-GPU first-execution hang IS THE NODES (2026-09-15, CONFIRMED)
+
+Identical six-rank job (C24, kt=1, autotuner off, same reference):
+
+| nodes | outcome |
+|---|---|
+| g[041-043] (job 9777265) | compiled, executed, scored in 4 min 48 s |
+| g[188,190,193] (job 9777266) | compiled, hung in the first execution, killed at 30 min |
+
+NCCL on the hanging nodes reaches "Connected all trees" on every rank and
+then nothing; the bare 16 KB neighbour ppermute preflight passes there
+(153 us), so the fault is inside collective execution at the step's real
+payloads, not setup. Every earlier hang (9756806, 9756887, 9758308,
+9776325) included nodes from g185-193 or g045-054; every completion ran on
+g041-044 + g094-101. A payload ladder (16 KB .. 32 MB) on both node sets is
+queued to hand the admins a reproducer. Not a port defect; the launcher
+should exclude the bad nodes until they are fixed (a choice -- ASK).
+
+### The GPU deck ladder's three decks are pre-validated on CPU (2026-09-17)
+
+codex flagged C96 at dt=450 n_split=3 as accepted by the constructor but
+unverified for stability -- the constructor proves no stability bound. Run
+on 24 virtual CPU devices first, so a 12-node GPU allocation is not spent
+discovering an unstable deck (jobs 9829662/63/64):
+
+| deck | sub-cycles | two steps |
+|---|---|---|
+| C24 km=5 pad=5 n_split=1 dt=900 | 1 per level | 12/12 leaves BITWISE |
+| C48 km=10 pad=11 n_split=3 dt=900 | 1 per level | 12/12 BITWISE |
+| C96 km=10 pad=11 n_split=3 dt=450 | 1 per level | 12/12 BITWISE |
+
+All three are stable and correct on CPU, so a GPU row that fails is the GPU
+path, not the deck. Wall per step on CPU (24 virtual devices, one process):
+0.079 s at C24, 0.393 s at C48, 0.935 s at C96.

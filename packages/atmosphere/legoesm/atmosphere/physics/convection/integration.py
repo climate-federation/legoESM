@@ -48,8 +48,8 @@ def land_fraction_for_columns(grid, ncol, scheme_config=None):
     bridge did not pass an argument the other one did.  A single helper is
     harder to omit from a new bridge than a block of inline code.
 
-    Only ``VoronoiMesh`` carries the field today, so a structured grid returns
-    None and the leaf keeps its previous ocean branch unchanged.
+    ``VoronoiMesh`` and ``GaussianGrid`` can carry the field. If absent,
+    the leaf keeps its previous ocean branch unchanged.
     """
     lf = getattr(grid, "land_frac", None)
     if lf is not None:
@@ -788,7 +788,7 @@ def _make_hydrostatic_convection(
                     data=_dq_r_conv.reshape(shape_3d), name="dq_r_conv_dt",
                     dims=dims_3d, units="kg/kg/s",
                 )
-            # Convective-activity diagnostic for the Slingo (1987) cumulus
+            # Convective-activity diagnostic for the Slingo-1987-inspired surrogate cumulus
             # cloud fraction on this standalone path: the column-integrated
             # in-updraft RAIN PRODUCTION rate [kg/m^2/s],
             #     P_conv = (1/g) * sum_k max(dq_r_conv, 0) * dp_k,

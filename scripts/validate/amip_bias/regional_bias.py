@@ -53,6 +53,8 @@ REGIONS = {           # (lat_lo, lat_hi, lon_lo, lon_hi) lon in [0,360)
     "SO stormtrack":    (-60, -30, 0, 360),
     "NH midlat":        (30, 60, 0, 360),
     "poles 60-90":      (None, None, 0, 360),  # handled specially (both caps)
+    "Arctic 60-90N":    (60, 90, 0, 360),
+    "Antarctic 60-90S": (-90, -60, 0, 360),
     "GLOBAL":           (-90, 90, 0, 360),
 }
 

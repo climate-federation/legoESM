@@ -718,7 +718,7 @@ def build_parser():
                         help="Cloud-fraction scheme (default: sundqvist)")
     parser.add_argument("--convective-cloud", dest="convective_cloud",
                         action="store_true", default=False,
-                        help="Add a bounded Slingo(1987) convective cumulus "
+                        help="Add a bounded Slingo-1987-inspired surrogate convective cumulus "
                              "cloud-fraction source driven by the (lagged) "
                              "convective precip — restores the tropical "
                              "cloud-radiative effect the adjustment convection "
@@ -751,7 +751,7 @@ def build_parser():
                              "adiabatic (None=default 1.5e-6; range 5e-7..3e-6).")
     parser.add_argument("--conv-cloud-max", dest="cloud_conv_cloud_max",
                         type=float, default=None,
-                        help="Override convective (Slingo) cloud-cover cap "
+                        help="Override convective (Slingo-1987-inspired surrogate) cloud-cover cap "
                              "(CloudConfig.conv_cloud_max). Range [0.1, 1.0]. "
                              "Default: CloudConfig default.")
     parser.add_argument("--conv-cloud-condensate",
