@@ -2908,48 +2908,33 @@ def _shear_statement_rows(
         })
         return out
 
+    # The plant lands on the TIME-LEVEL row, not on the baseline production
+    # row.  The baseline row differs in every wet cell, so a one-ULP plant on
+    # its reference could only ever pick a DRY cell, where it proves the row
+    # plumbing moves and nothing about the arithmetic.  The time-level row is
+    # bit-exact over all 20,416 cells, so the same plant can be required to
+    # land on a WET cell -- one the shear arithmetic actually produced.
     plant_target = None
-    scored_recorded = recorded
     planted_at = None
-    if plant == "stage-shear-operand-ulp":
-        equal = (np.ascontiguousarray(recorded).view(np.uint64)
-                 == np.ascontiguousarray(production).view(np.uint64))
-        indices = np.argwhere(equal & np.isfinite(recorded))
-        require(indices.size > 0,
-                "shear plant found no exact p_sh2 cell to corrupt")
-        planted_at = tuple(int(v) for v in indices[0])
-        scored_recorded = recorded.copy()
-        scored_recorded[planted_at] = np.nextafter(
-            scored_recorded[planted_at], np.float64(np.inf))
 
-    clean = _classification(score(
-        "GYRE-zco.kt2.tke_shear.production_vs_recorded.clean",
-        recorded, production, np.ones(recorded.shape, dtype=bool)))
     rows = [
         row("all_operands_recorded", recorded, rebuild_sh2(op),
             "R59TKE zdfsh2.f90:99-113",
             "every operand at NEMO's recorded value; must be BIT or the "
             "reference side of this walk is itself wrong"),
-        row("production_step_vs_recorded", scored_recorded, production,
+        row("production_step_vs_recorded", recorded, production,
             "R59TKE zdfsh2.f90:99-113",
             "the model's own p_sh2 through the real production step, "
             "driven from NEMO's recorded stage entry"),
         row("model_operand_replay_vs_production", production,
             rebuild_sh2(op, **model), "R59TKE zdfsh2.f90:99-113",
-            "the compiled statement on the operands the model is believed "
-            "to feed it, against what the model actually produced; BIT "
-            "means the mirror is the model's, NOT-BIT means the production "
-            "step consumes an operand the mirror does not know about"),
+            "the compiled statement on NEMO'S OWN time level for the face "
+            "metric and the model's values for everything else, against what "
+            "the model actually produced; NOT-BIT here is the finding, not a "
+            "defect in the mirror -- the production step builds that metric "
+            "from a DIFFERENT free-surface field, which is what the "
+            "time-level rows below isolate"),
     ]
-    rows[1]["clean_n_unequal"] = clean["n_unequal"]
-    rows[1]["clean_absolute_max"] = clean["absolute_max"]
-    rows[1]["plant_index"] = planted_at
-    if planted_at is not None:
-        require(rows[1]["n_unequal"] == clean["n_unequal"] + 1,
-                "shear one-ULP plant did not add exactly one unequal cell")
-        plant_target = rows[1]["name"]
-        require(plant_target is not None,
-                "shear plant did not reach its target")
 
     operand_rows = [
         row(f"operand.{name}", op[name], model[name],
@@ -2970,9 +2955,26 @@ def _shear_statement_rows(
     time_level = None
     if legacy_trace is not None:
         legacy = np.asarray(legacy_trace.tke_statement_trace.rhs_shear)
+        scored_recorded = recorded
+        if plant == "stage-shear-operand-ulp":
+            clean_legacy = _classification(score(
+                "GYRE-zco.kt2.tke_shear.time_level.clean",
+                recorded, legacy, np.ones(recorded.shape, dtype=bool)))
+            require(clean_legacy["n_unequal"] == 0,
+                    "shear plant needs a bit-exact time-level row to corrupt")
+            # WET only: a dry cell is zero on both sides by construction and
+            # corrupting it would prove nothing about the arithmetic.
+            wet = (recorded != 0.0) & np.isfinite(recorded)
+            indices = np.argwhere(wet)
+            require(indices.size > 0,
+                    "shear plant found no WET p_sh2 cell to corrupt")
+            planted_at = tuple(int(v) for v in indices[0])
+            scored_recorded = recorded.copy()
+            scored_recorded[planted_at] = np.nextafter(
+                scored_recorded[planted_at], np.float64(np.inf))
         legacy_rows = [
             row("time_level.step_entry_ssh_production_vs_recorded",
-                recorded, legacy, "R59TKE zdfsh2.f90:102,107",
+                scored_recorded, legacy, "R59TKE zdfsh2.f90:102,107",
                 "the SAME production step with exactly one thing changed: "
                 "the free-surface field routed into the shear's face "
                 "metric is the step-entry ssh, which is what "
@@ -2985,7 +2987,18 @@ def _shear_statement_rows(
                 "BIT here proves the mirror above IS the model's shear "
                 "expression, so the one non-bit row is attributable"),
         ]
+        if planted_at is not None:
+            require(legacy_rows[0]["n_unequal"] == 1,
+                    "shear one-ULP plant did not add exactly one unequal "
+                    "cell to the time-level row")
+            require(float(recorded[planted_at]) != 0.0,
+                    "shear plant landed on a cell the shear never produced")
+            plant_target = legacy_rows[0]["name"]
         time_level = {
+            "plant_index": planted_at,
+            "plant_baseline_p_sh2": (
+                None if planted_at is None
+                else float(recorded[planted_at])),
             "prediction": (
                 "routing the step-entry ssh into the shear face metric "
                 "makes the production p_sh2 bit-identical to NEMO's"),
@@ -2999,9 +3012,13 @@ def _shear_statement_rows(
                 "r3u/r3v"),
             "verdict": (
                 "CONFIRMED_SHEAR_FACE_METRIC_TIME_LEVEL"
-                if all(r["classification"] == "BIT" for r in legacy_rows)
-                else "REFUTED"),
+                if (planted_at is None
+                    and all(r["classification"] == "BIT" for r in legacy_rows))
+                else "PLANTED" if planted_at is not None else "REFUTED"),
         }
+    if plant == "stage-shear-operand-ulp":
+        require(plant_target is not None,
+                "shear plant did not reach its target")
 
     first = next((r for r in rows[1:2] if r["classification"] != "BIT"), None)
     return {
@@ -3181,8 +3198,7 @@ def _tke_program_twin(
     # ``legacy_zdf_entry_kmm_eta`` hook makes it the step-entry ssh).  It is
     # a whole-step ablation, so only its p_sh2 row is read.
     legacy_eta_trace = None
-    if plant not in ("stage-tke-production-ulp", "stage-tke-matrix-ulp",
-                     "stage-shear-operand-ulp"):
+    if plant not in ("stage-tke-production-ulp", "stage-tke-matrix-ulp"):
         legacy_eta_trace = jax.device_get(LatLonCGridOceanModel(
             card.recipe.grid, card.recipe.z_coord, cfg,
             _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
