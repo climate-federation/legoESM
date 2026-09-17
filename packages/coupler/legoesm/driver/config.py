@@ -2195,7 +2195,7 @@ class ExperimentConfig(NamedTuple):
                 f"{self.slab_land_active}) with an idealized "
                 f"topography={self.topography!r} and no land-mask file, which "
                 "has NO land anywhere (f_land is 0 in every cell), so the tile "
-                "would silently no-op — pass a real --topography or a "
+                "would silently no-op — pass a real elevation file to --topography, or a "
                 "--land-mask-file."
             )
         # The same "no land anywhere" trap, on the MESH lane, which does not use
