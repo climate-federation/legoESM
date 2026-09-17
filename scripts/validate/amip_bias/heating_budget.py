@@ -275,6 +275,23 @@ def main(argv=None):
     run_cfg = json.load(open(H.ROOT / args.run / "experiment_config.json"))
     month = int(((int(run_cfg.get("start_month", 1)) - 1 + args.day // 30) % 12) + 1)
     Te = era5_on_columns(lat_deg, p_full, month)
+
+    # The same three dycore terms evaluated on ERA5's temperature field with the
+    # model's own winds.  The model's advection warming the cap could be a
+    # RESPONSE to the warm anomaly already there (a warm cap weakens the inflow
+    # gradient) rather than its cause; on a reanalysis temperature field that
+    # anomaly is absent, so a warming that survives is the flow and the operator,
+    # not the anomaly.  Winds, pressure and the mesh are the model's throughout.
+    _state_era5 = state._replace(
+        T=state.T.replace(data=jnp.asarray(Te, dtype=state.T.data.dtype)))
+    _, _terms_e = mpas_hydrostatic_tendencies(
+        _state_era5, mesh, sig, model.config, None, DT, return_thermo_terms=True)
+    dyn_terms.update({
+        "era5T_horiz_adv": np.asarray(_terms_e.horiz_adv, dtype=np.float64),
+        "era5T_horiz_diff": np.asarray(_terms_e.horiz_diff, dtype=np.float64),
+        "era5T_vert_adv": np.asarray(_terms_e.vert_adv, dtype=np.float64),
+        "era5T_adiabatic": np.asarray(_terms_e.adiabatic_ps, dtype=np.float64),
+    })
     w = area / area.sum()
     if args.rad_detail:
         def rad_on(T_arr):
