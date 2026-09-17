@@ -133,3 +133,34 @@ selection, threshold or carried state changes. The year harness, the
 reconciliation gate, the freshwater pair and the #1484 guard are read only.
 Held patches under `manifests/` are not re-evaluated: none of them names a
 statement in `zdftke.f90:424-443`.
+
+---
+
+## ADDENDUM 1, 2026-09-17, after an independent review and before the receipt
+
+Two corrections to the text above. The predictions themselves are NOT touched;
+they stand exactly as frozen and are reported against as written.
+
+**A1.1 — the record provenance in "The open question" is WRONG.** That section
+says the Round-59 arrays were written "from the call
+`GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/zdftke.f90:472`". They were not.
+The Round-59 record was produced by the Round-59 binary, whose write call is
+`GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/zdftke.f90:463`; line 472 belongs to
+a different binary. The conclusion the section draws survives, but for a
+reason that had to be measured rather than assumed: the two builds' compiled
+`zdftke.f90` differ in ZERO lines once the `r54_`/`r101_` recorder call lines
+are removed, so the two records do describe the same statements at the same
+instant. The Round-59 build carries those statements at `:417`, `:420-421`,
+`:422-423`, `:425-427` and `:430-433`.
+
+**A1.2 — P3's test is weak, and a stronger one is added POST HOC.** P3 as
+frozen is a SET-INCLUSION test: it asks whether every cell where the
+production right-hand side differs is a cell where `p_sh2` differs. An
+independent reviewer pointed out, correctly, that this cannot be causal,
+because the same statement also consumes `p_avt`, `rn2`, `dissl`, the
+post-Langmuir `en` and `wmask`, and coincident errors in those would pass it.
+P3 will still be reported exactly as frozen. In addition, a one-variable swap
+is added as post-hoc evidence: rebuild the statement from NEMO's own recorded
+operands, substitute ONLY the production `p_sh2`, and report what that alone
+reproduces. It is registered here as POST HOC and will never be presented as
+something this round predicted.

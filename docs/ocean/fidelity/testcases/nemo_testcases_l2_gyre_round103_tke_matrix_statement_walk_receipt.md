@@ -8,9 +8,21 @@ Date: 2026-09-17. Branch `fidelity/nemo-testcases-l2-gyre-codex2`, incoming tip
 **HELD; no production physics and no configuration landed.** The compiled block
 `zdftke.f90:399-473`, which the Round-101 walk reported as one row, is split
 into one row per compiled write and driven from NEMO's recorded stage entry
-through the real production step. In compiled execution order the first
-statement whose output is not bit-identical is the **right-hand-side assignment
-at `GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/zdftke.f90:439-442`**:
+through the real production step.
+
+**SCOPE OF THE HEADLINE, stated before it rather than after it.** The block
+writes FIVE outputs. The first in compiled execution order is `p_pdlr`
+(`zdftke.f90:421`), and it is **NOT MEASURED** this round: it never enters
+`en` (it is read once, at `zdftke.f90:712`, where it multiplies `p_avt`), so
+it is a separate consumer chain and it gets its own walk. Every "first
+non-bit" claim below is therefore scoped to **the `en` path**, which is the
+chain that produces the block's exit value and the 979-cell post-sweep gap
+this round was asked about. It is NOT a claim about the block's first non-bit
+output in general; `p_pdlr` could be non-bit and nothing here would know.
+
+On the `en` path, the first statement whose output is not bit-identical is the
+**right-hand-side assignment at
+`GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/zdftke.f90:439-442`**:
 
 > `en(ji,jj,jk) = en(ji,jj,jk) + rn_Dt * ( p_sh2 - p_avt*rn2 + zfact3*dissl*en ) * wmask`
 
@@ -164,7 +176,9 @@ wet-mask exception and no numeric tolerance.
 | 4 | `zdiag` | `zdftke.f90:436` | 0 | 0 | **BIT** |
 | 5 | `en` RHS | `zdftke.f90:439-442` | 11,993 | `5.488912518947231e-10` | DEBT |
 
-**The first non-bit statement is `zdftke.f90:439-442`.**
+**The first non-bit statement ON THE `en` PATH is `zdftke.f90:439-442`.**
+`p_pdlr` (`zdftke.f90:421`) precedes all of these in compiled order and is
+unmeasured; see the scope note in the verdict.
 
 The consumed operand rows, over the same domain:
 
@@ -191,7 +205,14 @@ was replaced by a real one-variable swap through the committed transcription.
 | only `p_sh2` swapped to the production value | the production RHS | 11,029 | `1.1102230246251565e-16` | AT-BAR |
 | only `p_sh2` swapped to the production value | NEMO's recorded RHS | 2,663 | `5.488912657725109e-10` | DEBT |
 
-Reading these honestly:
+**WHAT WAS PREREGISTERED AND WHAT WAS NOT.** P3 as frozen is the SET-INCLUSION
+test, and nothing else: "every cell where the production RHS is unequal is a
+cell where `p_sh2` is unequal". The one-variable swap is **POST HOC**, added
+after the review refuted the inclusion test as non-causal, and registered as
+post hoc in addendum 1 to the preregistration. This receipt does not claim the
+swap was predicted, and it does not claim P3 predicted an exact swap.
+
+Reading the numbers honestly:
 
 - **The magnitude is `p_sh2`, and only `p_sh2`.** Substituting that single
   operand and nothing else moves the row from bit-exact to
@@ -199,12 +220,11 @@ Reading these honestly:
   `5.488912518947231e-10` - the same number to eight significant figures - and
   the independent budget `rn_Dt * max|delta p_sh2| = 5.488912691979121e-10`
   closes to 3.2e-8 relative. Two independent routes to the same number.
-- **The preregistered P3 is REFUTED as written.** It predicted that swapping
-  only `p_sh2` would reproduce the production right-hand side. It does not: it
-  leaves 11,029 cells differing at `1.1102230246251565e-16`, and it names
-  2,663 DEBT cells where the production step names 11,993. This is NOT restated
-  as a narrower success; the prediction was that the swap would be exact and it
-  was not.
+- **The swap is NOT exact, and that is a limit on what can be claimed.** It
+  leaves 11,029 cells differing at `1.1102230246251565e-16` from the production
+  output, and it names 2,663 DEBT cells where the production step names 11,993.
+  So "only `p_sh2` differs" holds for the MAGNITUDE and does not hold at the
+  last bit. The receipt claims the former and not the latter.
 - **What the residual is has NOT been determined.** `1.11e-16` is one unit in
   the last place for values in `[0.5, 1)` and sits six orders of magnitude
   below the `p_sh2` term, so it cannot own the block's DEBT or the 979-cell
@@ -247,7 +267,7 @@ called production.
 |---|---|---|
 | P1 | the five output-bearing assignments between `:395` and `:473`, in that order; the wave-coupled block does not execute | **CONFIRMED** |
 | P2 | first non-bit output is the `en` RHS at `:439-442`; `zd_up`, `zd_lw`, `zdiag` all BIT with 0 unequal cells | **CONFIRMED** |
-| P3 | the RHS miss is inherited from `p_sh2`; swapping only `p_sh2` reproduces the production right-hand side | **REFUTED** - the swap leaves 11,029 cells at `1.1102230246251565e-16` and names 2,663 DEBT cells against the production step's 11,993. `p_sh2` owns the magnitude to 3.2e-8 relative, but the swap is not exact and this round does not claim it is. |
+| P3 | the RHS miss is inherited from `p_sh2`: the production `p_sh2` is non-bit, and every RHS-unequal cell is a `p_sh2`-unequal cell | **CONFIRMED AS FROZEN** - `p_sh2` is non-bit (17,400 cells, max `3.811744924985501e-14`) and zero of the 11,993 RHS-unequal cells has a bit-equal `p_sh2`. **But the test it specified is weak** and an independent reviewer refuted it as non-causal; the stronger one-variable swap that replaced it is POST HOC and is reported as such above. The swap supports the MAGNITUDE claim and does NOT reproduce the production output exactly. |
 | P4 | no candidate lands; status HELD | **CONFIRMED** |
 
 ## Rule 12 and the testcase dispositions
@@ -282,7 +302,7 @@ because no candidate arm exists. This is not an improvement claim.
 ## Independent adversarial review
 
 `codex exec --sandbox read-only` was available this session and returned a
-full review of the diff, the claims and the compiled source. Its first-pass
+full review of the diff, the claims and the compiled source. It was run TWICE. Its first-pass
 verdict was **DO NOT SHIP**, verbatim:
 
 > DO NOT SHIP: the gate can falsely attribute the RHS error to `p_sh2`, and
@@ -298,8 +318,9 @@ away.**
    result. A swap/replay holding every operand fixed except `p_sh2` is
    required." **Upheld.** The subset test was demoted to a reported number
    explicitly labelled as not being the evidence, and the one-variable swap
-   above replaced it. Running that swap then REFUTED the round's own
-   preregistered P3 - which is the point of the finding.
+   above replaced it, registered as POST HOC in addendum 1 to the
+   preregistration. Running that swap then showed the inclusion test was not
+   the whole story: the swap is not exact.
 2. *High.* "C6's replay is not shipped... an uncommitted replay cannot support
    the shipped claim or its plant." **Upheld.** The replay is now
    `scripts/validate/ocean_fidelity/testcases/nemo_testcase_l2_gyre_round103_tke_block_replay.py`,
@@ -321,8 +342,39 @@ literal assembly uses `w_active` where NEMO's `zcof` uses `tmask`
 cell, so that difference is measurably inert here. It would NOT be inert on a
 grid with an overhang, and any future card must re-check it.
 
-The review log is `codex_review.log`, SHA-256
-`97be6f91a469f2ee6fb202948283e678d9c03d46fd9a18b4fb5fa23481c6ae02`.
+A SECOND pass was then run against the fixed diff, this receipt and the
+preregistration. It confirmed that finding 2, both plants, the trace-only
+production safety and the HELD status check out, and returned **DO NOT SHIP**
+again with three further findings. **All three were upheld and fixed; none was
+argued away.**
+
+4. *High.* "'first non-bit statement' is false globally. `p_pdlr` executes
+   first but remains unmeasured; exclusion is valid only for the `en` chain.
+   The receipt admits this... while making the unconditional headline."
+   **Upheld.** The headline is now scoped to the `en` path in the verdict
+   itself, before the claim rather than after it, and the scope note says
+   plainly that `p_pdlr` could be non-bit and nothing here would know.
+5. *High.* "the receipt rewrites P3. The preregistration specifies only the
+   non-causal subset test, not an exact swap. The receipt falsely says exact
+   reproduction was preregistered and 'REFUTED as written'." **Upheld, and it
+   is the more serious of the two.** P3 as frozen is the inclusion test and it
+   is CONFIRMED; the swap is post hoc. Calling a confirmed prediction refuted
+   misstates the frozen record exactly as badly as the reverse would. The
+   ledger and the swap section are corrected, and the swap is registered as
+   POST HOC in addendum 1 to the preregistration.
+6. *Medium.* "F3 persists in the frozen preregistration: it still says the
+   Round-59 record came from Round-101 `zdftke.f90:472`." **Upheld.** The
+   preregistration is frozen and is not rewritten; addendum 1 corrects it in
+   place, dated, with the measured reason the conclusion still holds.
+
+The review logs are `codex_review.log`, SHA-256
+`97be6f91a469f2ee6fb202948283e678d9c03d46fd9a18b4fb5fa23481c6ae02`, and
+`codex_review2.log`, SHA-256
+`fc9c9ca3083cff2e41a70e1b42ec1a9dd800106542c39ebb7860413d0884736f`. Neither pass returned SHIP; the second pass's blockers
+are prose and record-keeping defects with no numerical consequence, and every
+one of them is fixed above. A third pass was not run, so **no review has
+returned SHIP on the final text** - that is stated rather than implied, and the
+next round should treat it as an open item if anything here is built on.
 
 ## Tests
 
@@ -357,6 +409,9 @@ All under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round103/`.
 | `tke_matrix_plant.json` | `4cc4e7836b49987a69be14faab0aff3f96cf7e9f42e27915e41c0ad6a93274ef` |
 | `focused_pytest.xml` | `2c8c6bb14d228bad3d4818714aac291a55b620e96682f75dd93cf16ad651854b` |
 | `codex_review.log` | `97be6f91a469f2ee6fb202948283e678d9c03d46fd9a18b4fb5fa23481c6ae02` |
+| `codex_review2.log` | `fc9c9ca3083cff2e41a70e1b42ec1a9dd800106542c39ebb7860413d0884736f` |
+| `citation_gate.json` | see `citation_gate.log`, regenerated after this receipt commit |
+| `citation_gate_plant.json` | plant on `domqco.F90:189-209`, exits 1 with `SYMBOL-NOT-AT-LINE` |
 
 ## OPEN - round 104
 
@@ -396,5 +451,10 @@ All under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round103/`.
    ordered `zpelc` recurrence is measurably inert (operator note Q). Held
    patches under `manifests/` were not re-evaluated: none names a statement in
    `zdftke.f90:424-443`.
-5. **No acquisition is pending.** The admitted Round-59 and Round-101 records
+5. **No review has returned SHIP on the final text.** Two adversarial passes
+   ran; the first returned DO NOT SHIP on three findings that were numerical
+   and procedural, the second on three that were prose and record-keeping. All
+   six were fixed, but a third pass was not run, so the fixes are unreviewed.
+   Round 104 should re-review this receipt before building on it.
+6. **No acquisition is pending.** The admitted Round-59 and Round-101 records
    contain every array this round and the next one need.
