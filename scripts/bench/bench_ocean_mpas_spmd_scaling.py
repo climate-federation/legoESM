@@ -73,6 +73,19 @@ def main() -> int:
     p.add_argument("--blocks", type=int, default=3)
     p.add_argument("--probe-steps", type=int, default=3)
     p.add_argument("--multicontroller", action="store_true")
+    # Barotropic-solve comm knobs. The distributed implicit_cn solve costs
+    # 1+2M batched allreduces per step at pcg_variant="standard" and 1+M at
+    # "single_reduce" (Chronopoulos-Gear, parity-gated), plus one cell-halo
+    # exchange per PCG iteration -- i.e. the solve's communication is set by
+    # these two numbers alone. They are exposed so a ladder arm can measure
+    # how much of the plateau the barotropic solve owns, instead of inferring
+    # it from a reduction count.
+    p.add_argument("--pcg-variant", choices=["standard", "single_reduce"],
+                   default="standard")
+    p.add_argument("--pcg-fixed-iters", type=int, default=None,
+                   help="distributed PCG iteration count (config default 60); "
+                        "a PROBE knob -- lowering it changes the solve")
+    p.add_argument("--eta-clamp-iters", type=int, default=3)
     p.add_argument("--out", type=str, default="ocean_mpas_spmd_scaling.jsonl")
     args = p.parse_args()
 
@@ -112,7 +125,13 @@ def main() -> int:
     # Same config/perturbation as the mpi4jax sibling (implicit-CN production
     # barotropic path) on the ONE requested mesh, reordered+padded for nd
     # devices exactly as run_omip._create_setup does under --enable-mpas-spmd.
-    z_coord, config = build_problem_config(args.nlev, barotropic_solver="implicit_cn")
+    z_coord, config = build_problem_config(
+        args.nlev, barotropic_solver="implicit_cn",
+        pcg_variant=args.pcg_variant,
+        eta_floor_clamp_iters=args.eta_clamp_iters)
+    if args.pcg_fixed_iters is not None:
+        config = config._replace(
+            barotropic_implicit_pcg_fixed_iters=int(args.pcg_fixed_iters))
     mesh = create_voronoi_mesh(subdivision_level=subdivision,
                                lloyd_iterations=args.lloyd)
     n_cells_orig = int(mesh.nCells)
@@ -197,7 +216,20 @@ def main() -> int:
         extra={"cells_per_device": cells_per, "ppermute_rounds": rounds,
                "block_steps": args.block_steps, "blocks": args.blocks,
                "target_cells_per_device": (args.cells_per_device
-                                           if args.mode == "weak" else None)},
+                                           if args.mode == "weak" else None),
+               # The barotropic solve's whole communication bill, so a row
+               # can never be compared against one that solved differently:
+               # allreduces/step = 1+2M (standard) or 1+M (single_reduce),
+               # plus M cell-halo exchanges. Single-device rows run stock CG
+               # to a tolerance instead, so they do NOT do fixed_iters work.
+               "pcg_variant": args.pcg_variant,
+               "pcg_fixed_iters": int(config.barotropic_implicit_pcg_fixed_iters),
+               "pcg_solver_path": ("fixed_iter_pcg" if nd > 1 else "stock_cg_to_tol"),
+               "eta_floor_clamp_iters": args.eta_clamp_iters,
+               "barotropic_allreduces_per_step": (
+                   1 + (1 if args.pcg_variant == "single_reduce" else 2)
+                   * int(config.barotropic_implicit_pcg_fixed_iters)
+                   if nd > 1 else None)},
     ))
     if jax.process_index() == 0:
         with open(args.out, "a") as fh:
