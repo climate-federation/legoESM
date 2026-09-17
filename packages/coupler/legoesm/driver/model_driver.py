@@ -1753,9 +1753,11 @@ class ModelDriver:
                 gc.nlev, sigma_top=gc.sigma_top,
                 tropopause_refine=getattr(gc, "tropopause_refine", 1.0),
                 sigma_refine=getattr(gc, "sigma_refine", 0.12),
-                refine_width=getattr(gc, "sigma_refine_width", 0.45))
+                refine_width=getattr(gc, "sigma_refine_width", 0.45),
+                layout=gc.sigma_layout)
 
-        _lid = (f", sigma_top={gc.sigma_top:g}" if gc.vertical_coord == "sigma" else "")
+        _lid = (f", sigma_top={gc.sigma_top:g}, layout={gc.sigma_layout}"
+                if gc.vertical_coord == "sigma" else "")
         logger.info(f"  Grid: {gc.grid_type} {gc.resolution}, "
               f"{gc.nlev} levels ({gc.vertical_coord}{_lid})")
 
@@ -1768,7 +1770,6 @@ class ModelDriver:
         from legoesm.grids.topography import (
             TopographyConfig, load_real_topography,
             gaussian_mountain, phis_from_topography,
-            land_mask_from_topography,
         )
 
         topo = self.config.topography
@@ -1782,7 +1783,14 @@ class ModelDriver:
         elif topo == "gaussian":
             z_s = gaussian_mountain(self.grid)
             self._phis_data = phis_from_topography(z_s)
-            self._f_land = land_mask_from_topography(z_s)
+            # An idealized mountain is a DYNAMICAL forcing, not a statement
+            # about the surface, so this case is all ocean unless a real mask
+            # is named below.  Deriving f_land from the elevation here labelled
+            # the WHOLE GLOBE land: the Gaussian bell has no cutoff, so z_s > 0
+            # in every cell (measured at T31: minimum elevation 3.3e-44 m,
+            # 100% of cells, land fraction 1.0), which is not a mountain
+            # coastline by any reading.
+            self._f_land = jnp.zeros(shape_2d, dtype=_sd)
         else:
             topo_config = TopographyConfig(
                 source="file", path=topo,
@@ -1806,12 +1814,11 @@ class ModelDriver:
                 f"(land fraction mean={float(jnp.mean(self._f_land)):.3f})"
             )
 
-        # Per-cell land fraction on the grid pytree (canonical name
-        # ``land_frac``) so the GWD integration's ``_extract_land_frac``
-        # finds it (e3sm_cam's driver-level oro landfrac scaling).  Reuses
-        # the ``self._f_land`` computed above — no new loader.  Attached
-        # only where the grid type carries the field (VoronoiMesh since
-        # 2026-07-30); other grids keep legacy behaviour.
+        # Attach land_frac for convection and orographic GWD on grids carrying
+        # the field (VoronoiMesh and GaussianGrid).  Where it comes from:
+        # idealized topography (flat, gaussian) -> zeros, a real elevation file
+        # -> fraction from the loaded elevation, land_mask_path -> the loaded
+        # mask, overriding either.
         if (getattr(self.grid, "land_frac", "no-field") is None
                 and self._f_land is not None):
             self.grid = self.grid._replace(

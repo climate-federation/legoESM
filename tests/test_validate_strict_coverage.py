@@ -62,6 +62,7 @@ EXPECTED_VALIDATED: frozenset[str] = frozenset(
         "surface_stability_scheme",  # already guarded (config.py); ratchet entry
         "land_surface_scheme",
         "gravity_wave_drag",
+        "e3sm_cam_source",  # membership check in validate_strict (background source)
         "physics_parameterization",
         "ic",
         "precision",

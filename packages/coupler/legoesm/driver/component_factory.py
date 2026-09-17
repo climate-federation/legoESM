@@ -739,6 +739,8 @@ def create_atmosphere_dycore(
             energy_consistent_moisture_clip=config.energy_consistent_moisture_clip,  # #1354/#1515 (no-op under the borrow)
             # Sigma-lane vertical advection scheme (see DycoreConfig).
             vert_advection_scheme=dc.mpas_vert_advection_scheme,
+            sponge_del2_top_layers=int(dc.mpas_sponge_del2_top_layers),
+            sponge_del2_top_factor=float(dc.mpas_sponge_del2_top_factor),
             # Budget-ledger vertical band. The dycore owns the SNAPSHOT-derived
             # dynamics and clips rows, so it needs the SAME weight the physics
             # rows use; without it those two rows stay full-column while the

@@ -32,6 +32,7 @@ SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 MATRIX="${MATRIX:?set MATRIX=atm_gpu|atm_cpu|ocean_gpu|ocean_cpu}"
 BACKEND="${MATRIX##*_}"
 export LEGOESM_REPO="${LEGOESM_REPO:-$SUBMIT_DIR}"
+export LEGOESM_PYTHON="${LEGOESM_PYTHON:-/work/bd1083/b309178/diffESM/legoesm_pg/legoESM/.venv/bin/python}"
 export SCRATCH="${SCRATCH:-/scratch/${USER:0:1}/$USER}"
 if [[ "$BACKEND" == gpu ]]; then
   export JAX_PLATFORMS=cuda,cpu

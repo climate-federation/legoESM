@@ -188,7 +188,22 @@ def test_hvp_matches_finite_difference(name):
         eps, tol = 1e-4, 5e-3
     else:
         eps, tol = 3e-3, 8e-2
-    fd = (jax.grad(step_loss)(x0 + eps * v) - jax.grad(step_loss)(x0 - eps * v)) / (2 * eps)
+    # COMPILE FOOTPRINT, not style (#1736).  Each bare ``jax.grad(step_loss)(...)``
+    # is its own top-level compilation, so the line this replaces asked XLA for
+    # TWO more programs the size of the land column's gradient, on top of the
+    # hvp's.  Measured: the hvp alone peaks at ~8 GB and succeeds; adding the
+    # reference in the same process fails inside LLVM's JIT
+    # ("Cannot allocate memory" / "Failed to materialize symbols"), which
+    # surfaces as SIGABRT -- a core dump that took the whole tests/unit suite
+    # with it, not a test failure.  Compiling the gradient ONCE and evaluating
+    # it at both points is the same arithmetic and one program instead of two;
+    # clearing the caches first drops the hvp's executable, which is no longer
+    # needed once ``Hv`` is materialised.
+    Hv = jnp.asarray(Hv)
+    Hv.block_until_ready()
+    jax.clear_caches()
+    grad_fn = jax.jit(jax.grad(step_loss))
+    fd = (grad_fn(x0 + eps * v) - grad_fn(x0 - eps * v)) / (2 * eps)
     denom = jnp.maximum(jnp.linalg.norm(fd), 1e-8)
     rel = jnp.linalg.norm(Hv - fd) / denom
     assert rel < tol, f"{name}: HVP vs finite-difference rel error {float(rel):.2e} (tol {tol})"

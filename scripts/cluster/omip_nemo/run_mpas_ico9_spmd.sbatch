@@ -55,6 +55,20 @@ TKE_CARD=${TKE_CARD:-fesom2}
 SSS_PISTON=${SSS_PISTON:-1.929e-6}
 SSS_TARGET=${SSS_TARGET:-phc2_monthly}
 SSS_MEAN=${SSS_MEAN:---sss-restoring-remove-mean}
+# Shortwave as FESOM2: 0.54 of the post-albedo flux penetrates on the Sweeney-2005
+# chlorophyll two-band profile (monthly climatology), open-water albedo 0.1
+# (CORE2 namelist.ice); the lanes' historical Jerlov-II/0.94/0.06 is
+# --sw-penetration auto --ocean-albedo 0.06.
+CHL_CLIM=${CHL_CLIM:-/pool/data/AWICM/FESOM2/FORCING/Sweeney/Sweeney_2005.nc}
+OCEAN_ALBEDO=${OCEAN_ALBEDO:-0.1}
+# Bottom drag as FESOM2: quadratic C_d 0.0025 with no background kinetic energy
+# (the lanes' legacy law is r=0.001 over u_bg=0.1 -> asymptotic C_d 0.01).  The
+# 100 m BBL spreading stays: FESOM applies its drag implicitly at the bottom
+# cell, our explicit drag on a 0.3 m partial cell would sign-reverse u.
+BOTTOM_CD=${BOTTOM_CD:-0.0025}
+# River runoff as FESOM2: the constant CORE2 climatology in place of the JRA55-do
+# friver records (both kg m-2 s-1; delivered where the product puts it).
+RUNOFF_FILE=${RUNOFF_FILE:-/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/CORE2_runoff.nc}
 # Lateral dissipation matched to the FESOM2 reference (user decision 2026-09-15):
 # no GM/Redi (FESOM runs none at this resolution), no Laplacian viscosity, no
 # Laplacian Smagorinsky; a constant biharmonic B_h = gamma0 * h^3 with FESOM's
@@ -104,6 +118,9 @@ srun --ntasks=$NGPU --ntasks-per-node=4 --cpus-per-task=16 --gpus-per-node=4 \
     --vertical-mixing-scheme "$VMIX" --tke-card "$TKE_CARD" --diag-every "$DIAG" \
     --no-gm-redi --A-h 0 --C-smag-lap 0 --B-h "$B_H" --C-smag "$C_SMAG" \
     --sss-piston-velocity "$SSS_PISTON" --sss-restoring-target "$SSS_TARGET" $SSS_MEAN \
+    --sw-penetration sweeney_2band --chl-clim "$CHL_CLIM" --ocean-albedo "$OCEAN_ALBEDO" \
+    --bottom-drag-scheme nemo_quadratic --bottom-drag-cd0 "$BOTTOM_CD" --bottom-drag-ke0 0.0 \
+    --runoff-source core2_climatology --runoff-file "$RUNOFF_FILE" \
     --enable-mpas-spmd --multicontroller \
     --output "$OUT" 2>&1 | tee "$OUT/run.log" | grep -vE "^WARNING|^I0000|^E0000" | tail -70
 rc=${PIPESTATUS[0]}

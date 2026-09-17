@@ -105,3 +105,43 @@ def test_tripole_refuses_biharmonic_flags(tmp_path):
     _, _, config, _, _ = R._create_setup("tripole", "eorca1", 3, 1000.0, "none", "type1",
                                          no_gm_redi=True, **common)
     assert config.gm_redi is None
+
+
+def test_fesom2_bottom_drag_law_reaches_both_lanes(tmp_path):
+    """--bottom-drag-scheme nemo_quadratic --bottom-drag-cd0 0.0025 --bottom-drag-ke0 0
+    (FESOM2's C_d, parity batch 2) is applied by _apply_drag_iwm_overrides on the
+    MPAS and tripole lanes and consumed by their drag dispatch (nemo_quadratic
+    -> cd = cd0)."""
+    import argparse
+    import inspect
+    import sys
+    from pathlib import Path
+
+    from scripts.run import run_omip as R
+    from legoesm.ocean.dynamics import ocean_pe_mpas, ocean_pe_latlon_cgrid
+
+    args = argparse.Namespace(bottom_drag_scheme="nemo_quadratic", bottom_drag_cd0=0.0025,
+                              bottom_drag_cdmax=0.1, bottom_drag_z0=3.0e-3, bottom_drag_ke0=0.0,
+                              barotropic_wide_halo=False, iwm=False, ddm=False)
+    grid, z, config, model, _ = R._create_setup(
+        grid_type="mpas", resolution="ico2", nlev=3, H_max=4000.0,
+        physics_preset="none", water_type="II", forcing_mode="jra55_do_tropical")
+    assert config.bottom_drag_scheme == "legacy"
+    cfg2, model2 = R._apply_drag_iwm_overrides(args, "mpas", grid, z, config, model)
+    assert (cfg2.bottom_drag_scheme, cfg2.bottom_drag_cd0, cfg2.bottom_drag_ke0) == ("nemo_quadratic", 0.0025, 0.0)
+    assert model2 is not model and model2.config.bottom_drag_scheme == "nemo_quadratic"
+    src = inspect.getsource(ocean_pe_mpas)
+    assert 'validate_bottom_drag_scheme(\n        str(getattr(config, "bottom_drag_scheme", "legacy")))' in src
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "grids"))
+    from test_tripole_multifile_mesh import _write_tripole_like_mesh
+    mesh = tmp_path / "mesh.nc"
+    _write_tripole_like_mesh(mesh, 8, 12, dead_north_row=False)
+    grid, z, config, model, _ = R._create_setup(
+        "tripole", "eorca1", 3, 1000.0, "none", "II", forcing_mode="jra55_do_tropical",
+        tripole_mesh=str(mesh), tripole_fold_convention="(n_lon-i)%n_lon")
+    cfg2, _ = R._apply_drag_iwm_overrides(args, "tripole", grid, z, config, model)
+    bd = cfg2.bottom_drag
+    assert (bd.bottom_drag_scheme, bd.bottom_drag_cd0, bd.bottom_drag_ke0) == ("nemo_quadratic", 0.0025, 0.0)
+    src = inspect.getsource(ocean_pe_latlon_cgrid)
+    assert 'str(getattr(config.bottom_drag, "bottom_drag_scheme", "legacy")))' in src

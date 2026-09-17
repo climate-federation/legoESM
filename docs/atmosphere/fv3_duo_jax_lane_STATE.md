@@ -1811,3 +1811,38 @@ hung in the first execution; `--xla_gpu_nccl_termination_timeout_seconds`
 never fired. Every hang so far has included nodes from g185-193 or
 g045-054; every completion ran on g041-044 + g094-101. A pinned-node A/B at
 six ranks (jobs 9777265 good nodes / 9777266 g188+g193) is queued.
+
+### ★ The multi-GPU first-execution hang IS THE NODES (2026-09-15, CONFIRMED)
+
+Identical six-rank job (C24, kt=1, autotuner off, same reference):
+
+| nodes | outcome |
+|---|---|
+| g[041-043] (job 9777265) | compiled, executed, scored in 4 min 48 s |
+| g[188,190,193] (job 9777266) | compiled, hung in the first execution, killed at 30 min |
+
+NCCL on the hanging nodes reaches "Connected all trees" on every rank and
+then nothing; the bare 16 KB neighbour ppermute preflight passes there
+(153 us), so the fault is inside collective execution at the step's real
+payloads, not setup. Every earlier hang (9756806, 9756887, 9758308,
+9776325) included nodes from g185-193 or g045-054; every completion ran on
+g041-044 + g094-101. A payload ladder (16 KB .. 32 MB) on both node sets is
+queued to hand the admins a reproducer. Not a port defect; the launcher
+should exclude the bad nodes until they are fixed (a choice -- ASK).
+
+### The GPU deck ladder's three decks are pre-validated on CPU (2026-09-17)
+
+codex flagged C96 at dt=450 n_split=3 as accepted by the constructor but
+unverified for stability -- the constructor proves no stability bound. Run
+on 24 virtual CPU devices first, so a 12-node GPU allocation is not spent
+discovering an unstable deck (jobs 9829662/63/64):
+
+| deck | sub-cycles | two steps |
+|---|---|---|
+| C24 km=5 pad=5 n_split=1 dt=900 | 1 per level | 12/12 leaves BITWISE |
+| C48 km=10 pad=11 n_split=3 dt=900 | 1 per level | 12/12 BITWISE |
+| C96 km=10 pad=11 n_split=3 dt=450 | 1 per level | 12/12 BITWISE |
+
+All three are stable and correct on CPU, so a GPU row that fails is the GPU
+path, not the deck. Wall per step on CPU (24 virtual devices, one process):
+0.079 s at C24, 0.393 s at C48, 0.935 s at C96.
