@@ -15,7 +15,7 @@ from legoesm.atmosphere.physics.convection.config import BechtoldConfig
 from legoesm.atmosphere.physics.convection import _ifs_faithful as F
 from legoesm.atmosphere.physics.convection import _ifs_test_ascent as TA
 from legoesm import constants
-from legoesm.thermo import saturation_mixing_ratio
+from legoesm.thermo import saturation_specific_humidity
 from legoesm.atmosphere.physics.thermodynamics import compute_moist_adiabat
 
 
@@ -32,7 +32,7 @@ def _deep_column(nlev=30, ps=101300.0):
         jnp.array([T0]), jnp.array(pf)[None, :], jnp.array([q0])))[0]
     T = np.where(pf > 95000, T0 * (pf / ps) ** rcpl, Tad - 1.0)
     T = np.where(pf < 15000, np.maximum(T, 200.0), T)
-    qs = np.asarray(saturation_mixing_ratio(jnp.array(T), jnp.array(pf)))
+    qs = np.asarray(saturation_specific_humidity(jnp.array(T), jnp.array(pf)))
     q = np.minimum(np.where(pf > 95000, q0, 0.8 * qs), q0)
     return (jnp.asarray(T[None, :], jnp.float32), jnp.asarray(q[None, :], jnp.float32),
             jnp.asarray(p_full), jnp.asarray(p_half))
