@@ -64,6 +64,10 @@ run_arm() {
   # per-rank footprint forces a different rank density can be re-run at that
   # density WITHOUT re-running (and so changing the density of) the others.
   if [[ -n "${LANES:-}" && " $LANES " != *" $lane "* ]]; then return 0; fi
+  # MODES likewise: the strong arms need a lower rank density than the weak
+  # ones (per-rank memory grows with rank count on this lane), and a curve
+  # whose points were measured at different densities is not a curve.
+  if [[ -n "${MODES:-}" && " $MODES " != *" $mode "* ]]; then return 0; fi
   local nn=$(( (nd + PPN - 1) / PPN ))
   if (( nn > NODES || nd > MAX_ND || nd < MIN_ND )); then
     echo "[skip] ${lane}_${mode}_${res} d${nd} (needs ${nn} nodes / outside [$MIN_ND,$MAX_ND])"
