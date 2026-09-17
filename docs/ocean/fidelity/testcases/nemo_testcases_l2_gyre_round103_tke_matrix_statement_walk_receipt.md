@@ -29,9 +29,10 @@ writes FIVE outputs. The first in compiled execution order is `p_pdlr`
 `en` (it is read once, at `zdftke.f90:712`, where it multiplies `p_avt`), so
 it is a separate consumer chain and it gets its own walk. Every "first
 non-bit" claim below is therefore scoped to **the `en` path**, which is the
-chain that produces the block's exit value and the 979-cell (979 of 20,416
-owned, 979 of 17,400 wet) post-sweep gap this round was asked about. It is NOT a claim about the block's first non-bit
-output in general; `p_pdlr` could be non-bit and nothing here would know.
+chain that produces the block's exit value and the 979-cell post-sweep gap
+(979 of 20,416 owned, 979 of 17,400 wet) this round was asked about. It is
+NOT a claim about the block's first non-bit output in general; `p_pdlr` could
+be non-bit and nothing here would know.
 
 On the `en` path, the first statement whose output is not bit-identical is the
 **right-hand-side assignment at
@@ -43,9 +44,9 @@ On the `en` path, the first statement whose output is not bit-identical is the
 cells, since the other 3,016 owned cells are dry and agree by construction -
 maximum absolute `5.488912518947231e-10`. Both denominators are given for
 every headline count in this receipt; see "Denominators" below. The three
-matrix writes that precede it inside the
-same loop body are each **BIT with zero unequal cells**: `zd_up` (`:434`),
-`zd_lw` (`:435`) and `zdiag` (`:436`).
+matrix writes that precede it inside the same loop body are each **BIT with
+zero unequal cells**: `zd_up` (`:434`), `zd_lw` (`:435`) and `zdiag`
+(`:436`).
 
 The magnitude of that statement's error is carried entirely by ONE of its five
 operands, the shear production `p_sh2`. The production `p_sh2` differs from
@@ -323,6 +324,20 @@ Before and after, same command, `--plant stage-tke-matrix-ulp`:
 The exit code is unchanged and still proves nothing; the label no longer lies.
 The clean run is unaffected and still exits 0 with `STATUS PASS`.
 
+Both runs were re-done under the fix, at commit `96d098d549c2`, into new
+artifacts so nothing frozen was overwritten. The plant's own rows, from
+`tke_matrix_plant_relabelled.json`, are the evidence the label is not:
+
+| row | clean | planted | plant index |
+|---|---:|---:|---|
+| `zd_up` | 0 | 0 | none |
+| `zd_lw` | 0 | 0 | none |
+| `zdiag` | 0 | **1** | `[0, 0, 0]` |
+| `en` RHS | 11,993 | 11,993 | none |
+
+Only the targeted row moved, by exactly one cell, and `plant_target` is
+`GYRE-zco.kt2.tke_matrix.production_step.zdiag`.
+
 The record replay's operand plant is described above under instrument
 validation: its first version was a control that perturbed a zero, the probe
 refused it, and the repaired version fires on a live cell.
@@ -452,8 +467,30 @@ next round should treat it as an open item if anything here is built on.
 
 Focused CPU/fp64 suite over the new walk, the consolidated stage gate, the
 Round-54/59 operand reader, the citation gate and the TKE carried-coefficient
-physics: **119 passed in 32.82 s**. JUnit artifact `focused_pytest.xml`,
-SHA-256 `2c8c6bb14d228bad3d4818714aac291a55b620e96682f75dd93cf16ad651854b`.
+physics: **120 passed in 32.50 s**, pytest's own summary line verbatim
+`120 passed in 32.50s`. JUnit artifact `focused_pytest.xml`, SHA-256
+`f086a2d9679c3b682c9e63fb4e727f07cc9f7b1b04bdeeeec45c04f6734471e0`.
+
+The count moved from 119 to 120 because the review fixes above add ONE test,
+covering the plant label: a plant run must not be able to print a success
+label, in either direction. No test was removed, weakened or renamed.
+
+**FINGERPRINT AUDIT.** An earlier version of this receipt recorded a
+`focused_pytest.xml` fingerprint that did NOT match the file on disk: the
+suite was re-run after the receipt was committed and the hash was never
+refreshed. The substance was never in doubt - that run was 119 tests, zero
+failures - but a fingerprint that does not verify defeats the entire point of
+a receipt, so it is treated as a defect and not as a typo. EVERY SHA-256 in
+this receipt was then re-computed against the file it names. The receipt
+carried EIGHT distinct fingerprints at the time of the review
+(`instrument_repro.json`, `record_replay.json`, `record_replay_plant.json`,
+`tke_matrix_walk.json`, `tke_matrix_plant.json`, `focused_pytest.xml`,
+`codex_review.log`, `codex_review2.log`): SEVEN verified unchanged and only
+`focused_pytest.xml` was stale. The preregistration carries none. Every file
+in the evidence directory was hashed as well, and the two citation-gate
+artifacts that previously carried no fingerprint now carry one. The receipt
+now carries TWELVE distinct fingerprints and ALL TWELVE verify against the
+file each one names, re-checked after the last edit to this text.
 
 The citation suite passes 16/16 on a clean tree. Three anchor shifts were
 caused by this round's insertions into the stage gate and were re-anchored by
@@ -479,11 +516,32 @@ All under `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round103/`.
 | `record_replay_plant.json` | `573bb97f3e426ee796d5855a432efa5b62367458a5b927d6bc0843ba7ee7a9ab` |
 | `tke_matrix_walk.json` | `241bb02b065fb730d99f22824f3f1f94004b41ceb97a257e76c994a6c7a5e542` |
 | `tke_matrix_plant.json` | `4cc4e7836b49987a69be14faab0aff3f96cf7e9f42e27915e41c0ad6a93274ef` |
-| `focused_pytest.xml` | `2c8c6bb14d228bad3d4818714aac291a55b620e96682f75dd93cf16ad651854b` |
+| `focused_pytest.xml` | `f086a2d9679c3b682c9e63fb4e727f07cc9f7b1b04bdeeeec45c04f6734471e0` |
 | `codex_review.log` | `97be6f91a469f2ee6fb202948283e678d9c03d46fd9a18b4fb5fa23481c6ae02` |
 | `codex_review2.log` | `fc9c9ca3083cff2e41a70e1b42ec1a9dd800106542c39ebb7860413d0884736f` |
-| `citation_gate.json` | see `citation_gate.log`, regenerated after this receipt commit |
-| `citation_gate_plant.json` | plant on `domqco.F90:189-209`, exits 1 with `SYMBOL-NOT-AT-LINE` |
+| `citation_gate.json` | `dc26774979dd38f7c5b10c633165d50f6c9894bfebb8553b4b6b71928b1814c8` |
+| `citation_gate_plant.json` | `8074f0fe81df8aff521f4fbca1e77ba823deb815297db7914add90df52ff052a` |
+| `tke_matrix_walk_relabel_check.json` | `b4020efa8d13b6be70c7745efdba7c7b9b03fe23505b7f80834b210a1b6c6b8f` |
+| `tke_matrix_plant_relabelled.json` | `1921438fea4ee182bd303eff3cef0d237cec0b790355ea0f22a741964551801e` |
+
+The citation gate run is 274 citations, zero failures, `STATUS PASS`, exit 0;
+its plant on `domqco.F90:189-209` fails with `SYMBOL-NOT-AT-LINE` and exits 1,
+and that probe exits 2 if its plant does NOT fire, so its exit code is
+evidence where this gate's is not.
+
+The last two rows are the re-run under the corrected plant label. THE CLEAN
+RE-RUN REPRODUCES EVERY NUMBER IN THIS RECEIPT BIT-FOR-BIT - all four block
+rows, the `p_sh2` operand row, all three one-variable-swap rows and the
+`REFUTED` verdict, compared field by field against the original
+`tke_matrix_walk.json` - which is the measurement that the label change is
+numerically inert, rather than an assertion that it must be. The original
+artifacts are untouched and keep their own fingerprints above; nothing was
+overwritten.
+
+A fingerprint pins ONE run of the tool that produced it. Re-running the suite
+or a gate after this receipt is committed invalidates the hash even when every
+number is identical, which is exactly how the stale `focused_pytest.xml`
+fingerprint arose. Refresh the hash in the same commit, or do not re-run.
 
 ## OPEN - round 104
 
