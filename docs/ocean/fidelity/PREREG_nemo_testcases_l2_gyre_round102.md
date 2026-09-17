@@ -268,3 +268,25 @@ Even if confirmed, this round will not change the card: selecting a different
 configured evaluation is a user decision, so the literal arm is evidence for
 `DECISION_NEEDED`, not a landing candidate. No 954-row ladder or day-30 arm is
 authorized for this diagnostic-only configuration.
+
+## Instrument-routing correction after fail-closed refusal
+
+Frozen after the literal diagnostic exited nonzero before executing a numeric
+statement with the named message
+`tke_langmuir_evaluation='nemo_literal' requires bottom_level and w_active`.
+That refusal is pre-science and does not refute or confirm the numerical
+prediction. Inspection of the shared production call shows `w_active` is
+already routed by `tke_dry_wmask=True`, but `_tke_bottom_level` routes the
+partial-cell `bottom_level` only when the independent bottom-Dirichlet option
+is enabled. The compiled Langmuir search independently initializes `imlc` from
+`mbkt+1` at `zdftke.f90:363`; the literal implementation therefore correctly
+requires this operand even when `bottom_tke_bc=False`.
+
+Before rerunning the frozen diagnostic, route the existing coordinate's
+`bottom_level` when either the bottom TKE boundary or literal Langmuir program
+consumes it, and relax the silent-no-op guard only for active literal
+Langmuir. This is operand plumbing, not a card-selection change: the current
+configured vectorized arm must remain byte-for-byte unchanged, and supplying
+`bottom_level` to any configuration that consumes neither feature must still
+raise. A focused test must cover all three cases. The numerical prediction
+and falsifier above remain unchanged.
