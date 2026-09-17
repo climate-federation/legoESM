@@ -2216,7 +2216,7 @@ def _tke_production_statement_rows(
         scored_reference = reference
         planted_at = None
         if (plant == "stage-tke-production-ulp"
-                and entry_mode == "NEMO_RECORDED"
+                and entry_mode == "NEMO_TKE_RECORDED"
                 and field == "en_after_boundaries"):
             equal = (
                 np.ascontiguousarray(reference).view(np.uint64)
@@ -2253,7 +2253,7 @@ def _tke_production_statement_rows(
                     "unequal cell")
             plant_target = row["name"]
     if (plant == "stage-tke-production-ulp"
-            and entry_mode == "NEMO_RECORDED"):
+            and entry_mode == "NEMO_TKE_RECORDED"):
         require(plant_target is not None,
                 "TKE production plant did not reach its target")
     # Decompose the first moved block in compiled order.  The NEMO-changed

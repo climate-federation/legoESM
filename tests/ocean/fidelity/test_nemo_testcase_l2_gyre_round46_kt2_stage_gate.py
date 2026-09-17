@@ -205,7 +205,7 @@ def test_round102_tke_production_rows_and_ulp_control(tmp_path):
     )
     trace = SimpleNamespace(tke_statement_trace=production)
     clean = gate._tke_production_statement_rows(
-        trace, record, "NEMO_RECORDED")
+        trace, record, "NEMO_TKE_RECORDED")
     assert clean["first_nonbit"] is None
     assert all(row["classification"] == "BIT" for row in clean["rows"])
     assert all(row["classification"] == "BIT"
@@ -213,7 +213,7 @@ def test_round102_tke_production_rows_and_ulp_control(tmp_path):
     assert sum(row["selected_cells"]
                for row in clean["boundary_block_rows"]) == 22 * 32 * 30
     planted = gate._tke_production_statement_rows(
-        trace, record, "NEMO_RECORDED", "stage-tke-production-ulp")
+        trace, record, "NEMO_TKE_RECORDED", "stage-tke-production-ulp")
     target = next(
         row for row in planted["rows"]
         if row["field"] == "en_after_boundaries")
