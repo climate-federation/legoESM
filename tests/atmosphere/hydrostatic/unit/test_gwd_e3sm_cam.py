@@ -128,7 +128,7 @@ def test_oro_matches_oracle(_oracle_constants):
     )
     # E3SM picks src_level = 38 (interface) for this column.
     assert int(src[0]) == 38, f"src_level {int(src[0])} != 38"
-    tau, utgw, vtgw, gwut = gw_drag_prof(
+    tau, utgw, vtgw, gwut, _tau_sat = gw_drag_prof(
         tau0, c, src, tend, to(T), ti, piln, rhoi, nm, ni,
         ubm, ubi, xv, yv, dpm, rdpm, jnp.zeros(1), 1.0, 1800.0, cfg,
         orographic_only=True, do_taper=False,
@@ -166,7 +166,7 @@ def test_oro_momentum_conservation(_oracle_constants):
         to(u), to(v), to(T), sgh, to(pmid), pint_c, dpm, to(zm), nm,
         ORACLE_RAIR, KWV, 1.0, 10.0, 2.0,
     )
-    tau, utgw, vtgw, gwut = gw_drag_prof(
+    tau, utgw, vtgw, gwut, _tau_sat = gw_drag_prof(
         tau0, c, src, tend, to(T), ti, piln, rhoi, nm, ni,
         ubm, ubi, xv, yv, dpm, rdpm, jnp.zeros(1), 1.0, 1800.0, cfg,
         orographic_only=True, do_taper=False,
@@ -248,7 +248,7 @@ def test_stress_non_increasing_upward_realistic_column(_oracle_constants):
         to(u), to(v), to(T), sgh, to(pmid), pint_c, dpm, to(zm), nm,
         ORACLE_RAIR, KWV, 1.0, 10.0, 2.0,
     )
-    tau, utgw, vtgw, gwut = gw_drag_prof(
+    tau, utgw, vtgw, gwut, _tau_sat = gw_drag_prof(
         tau0, c, src, tend, to(T), ti, piln, rhoi, nm, ni,
         ubm, ubi, xv, yv, dpm, rdpm, jnp.zeros(1), 1.0, 1800.0, cfg,
         orographic_only=True, do_taper=False,
@@ -310,7 +310,7 @@ def test_production_negative_dback_stays_stable_and_stress_monotone(
     # changes d (and the output) but NOT the sign of mi (see the floor note in
     # e3sm_cam.py: the +alpha term keeps mi>=0 in the orographic path).
     alpha_iface = jnp.full((1, pver + 1), 1.0e-4)
-    tau, utgw, vtgw, gwut = gw_drag_prof(
+    tau, utgw, vtgw, gwut, _tau_sat = gw_drag_prof(
         tau0, c, src, tend, to(T), ti, piln, rhoi, nm, ni,
         ubm, ubi, xv, yv, dpm, rdpm, jnp.zeros(1), 1.0, 1800.0, cfg,
         orographic_only=True, do_taper=False, alpha_iface=alpha_iface,

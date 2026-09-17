@@ -134,3 +134,70 @@ def test_overlay_and_cli_round_trip():
         d.e3sm_cam_source, d.e3sm_cam_pgwv, d.e3sm_cam_latitude_taper)
     assert gwd_config_for(ExperimentConfig(gravity_wave_drag="mcfarlane+hines")).e3sm_cam == (
         GravityWaveDragConfig().e3sm_cam)                        # production path byte-identical
+
+
+def test_calm_column_gradient_is_finite():
+    """A zero-wind column must give finite reverse-mode gradients.
+
+    Reverting `_source_direction` to `sqrt(usrc**2 + vsrc**2)` makes this NaN:
+    the forward value is a finite 0.0, so only the derivative shows the defect.
+    """
+    u, v, T, pf, ph, zf, zh, rho, lat = _e3sm._driver_column(ncol=3)
+    calm = jnp.zeros_like(u)
+    zeros = jnp.zeros_like(u)
+
+    def loss(uu):
+        out = e3sm_cam_gwd(uu, calm, T, pf, ph, zf, zh, rho, lat, DT, BG,
+                           frontgf_col=zeros)
+        return jnp.sum(out.du_dt)
+
+    g = jax.grad(loss)(calm)
+    assert np.all(np.isfinite(np.asarray(g)))
+    for src, kwargs in (("orographic", {"h_topo_col": jnp.full((3,), 100.0)}),
+                        ("convective", {"netdt_col": jnp.zeros_like(u)})):
+        cfg = BG._replace(source=src)
+
+        def loss_src(uu, cfg=cfg, kwargs=kwargs):
+            out = e3sm_cam_gwd(uu, calm, T, pf, ph, zf, zh, rho, lat, DT, cfg,
+                               **kwargs)
+            return jnp.sum(out.du_dt)
+
+        assert np.all(np.isfinite(np.asarray(jax.grad(loss_src)(calm)))), src
+
+
+def test_momentum_fixer_uses_the_pre_limiter_stress():
+    """The column momentum fixer must see the saturation profile, not the
+    tendency-limited stress (E3SM gw_common.F90 accumulates taucd before the
+    tendency loop).  Forcing the limiter to bind by shrinking the per-step
+    tendency cap must therefore leave the fixer's net stress unchanged."""
+    from legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam import (
+        gw_drag_prof, gw_taucd_net, gw_cm_src)
+    u, v, T, pf, ph, zf, zh, rho, lat = _e3sm._driver_column(ncol=3)
+    zeros = jnp.zeros_like(u)
+
+    def net_stress(tndmax_per_day):
+        cfg = BG._replace(tndmax_per_day=tndmax_per_day)
+        captured = {}
+        import legoesm.atmosphere.physics.gravity_wave_drag.e3sm_cam as mod
+        orig = mod.gw_drag_prof
+
+        def spy(*args, **kw):
+            out = orig(*args, **kw)
+            captured["tau_sat"] = out[4]
+            captured["c"] = args[1]
+            captured["ubi"] = args[11]
+            captured["tend_level"] = args[3]
+            return out
+
+        mod.gw_drag_prof = spy
+        try:
+            mod.e3sm_cam_gwd(u, v, T, pf, ph, zf, zh, rho, lat, DT, cfg,
+                             frontgf_col=zeros)
+        finally:
+            mod.gw_drag_prof = orig
+        return np.asarray(gw_taucd_net(captured["tau_sat"], captured["c"],
+                                       captured["ubi"], captured["tend_level"]))
+
+    loose = net_stress(400.0)
+    tight = net_stress(0.01)          # limiter binds in every layer
+    np.testing.assert_allclose(loose, tight, rtol=0.0, atol=0.0)
