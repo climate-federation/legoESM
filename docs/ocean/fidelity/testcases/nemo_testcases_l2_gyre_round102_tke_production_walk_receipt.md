@@ -386,10 +386,24 @@ the production behavior was not failing. That artifact is retained as
 the complete suite passed above. The two operator-declared pre-existing red
 tests were not chased.
 
-The final clean-tree citation gate and shifted-citation plant are reported in
-the final receipt commit below after their commit-stamp run. GitHub issue
-#1455 is unavailable through this clone's local-only remote, so no issue post
-is claimed.
+The clean-tree citation gate at commit
+`0197e03d190b5f4de95293034c5f1b9b3d28f137` finds and maps all 15/15
+compiled-source citations, with no unmapped citation, failed anchor, global
+map-audit failure, or self-test failure. Its initial JSON SHA-256 is
+`da4a13b28a9080d280ce664160dc6db30742517d124ea403f8ccafc0c9af139c`.
+Shifting the ordered-`zpelc` citation by two lines exits 1 with
+`SYMBOL-NOT-AT-LINE`; the plant JSON SHA-256 is
+`7c3a270fa0675dee0f44ab765197a1a0ef761c4b67f7e749276e6368eb86c809`.
+The Round-102 production trace shifted 27 older local Python anchors, so the
+global map and the nine still-live master-receipt citations were mechanically
+rebased rather than exempted. The citation suite then passes **16/16 tests in
+1.69 s**; its JUnit SHA-256 is
+`6f00813640c9b80a3508b5866b83d6e0d1eb9cea77e173f893bb3c92524d411a`.
+A final clean-commit gate rerun overwrites `citation_gate.json` after this
+receipt commit so the evidence stamp names the delivered commit.
+
+GitHub issue #1455 is unavailable through this clone's local-only remote, so
+no issue post is claimed.
 
 ## OPEN — round 103
 
