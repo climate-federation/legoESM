@@ -267,9 +267,44 @@ does not convert this attribution result into a landing candidate.
 
 ## Review, citations, and tests
 
-REVIEW_PLACEHOLDER
+The required separate read-only Codex command attempted to refute the `rn2`
+attribution, observer-effect handling, stage-order hold, and Rule-12 table.  It
+could not initialize its in-process client in the read-only sandbox.  The
+required verbatim fallback verdict is:
 
-TEST_PLACEHOLDER
+> independent review unavailable in-sandbox
+
+The tool's terminal line was:
+
+> Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+
+No `SHIP` or `DO NOT SHIP` verdict is fabricated.  Full log:
+`codex_review.log`.
+
+The first focused run exposed the stale historical citations caused by this
+round's line insertions; its exact summary was:
+
+> 1 failed, 242 passed, 9 warnings in 143.83s (0:02:23)
+
+The one failure was the aggregate receipt citation control.  All moved map
+keys and every live prose occurrence were then shifted rigidly, with both
+endpoints moving together and extents unchanged.  The isolated citation suite
+subsequently reported:
+
+> 16 passed in 1.80s
+
+The full focused suite was then rerun on the clean committed repair.  It
+covered the round-107 discriminator tests, modified round-103 replay tests,
+the consolidated stage-gate tests, all citation controls, carried-TKE tests,
+and the complete DINO experiment file.  Its authoritative terminal summary
+was:
+
+> 243 passed, 9 warnings in 142.93s (0:02:22)
+
+The nine warnings are the existing JAX float64-to-float32 scatter future
+warnings in DINO tests; there were no test failures and no known-red exception
+was needed by this focused suite.  Logs: `focused_tests.log`,
+`citation_tests_after_reanchor_v2.log`, and `focused_tests_final.log`.
 
 The authoritative post-receipt citation artifacts are
 `citation_gate_final.json` and `citation_gate_final_plant.json`.  The clean
