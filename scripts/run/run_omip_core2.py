@@ -2584,15 +2584,28 @@ def validate_fesom_stage(args, parser) -> None:
                 "--fesom-unforced runs the UNFORCED smoke; these forcing "
                 "selectors would be silently dropped: "
                 + " ".join("--" + d.replace("_", "-") for d in _b23))
-    # NOTE: this lane USED to refuse the 'tracer' channel outright, on the
-    # stated grounds that "FesomOceanState.S is a read-only PROPERTY ... so
-    # the post-step applicator cannot write the restored salinity back".
-    # ``.S`` is indeed a read-only property, but the facade is a frozen
-    # dataclass and the inner state is written with dataclasses.replace, so
-    # the conclusion was false and the channel was blocked for no reason.
-    # ``with_surface_salinity`` is the writer; the tracer channel is wired.
-    # The DEFAULT channel is unchanged — this only stops rejecting a choice
-    # the user makes explicitly.
+    # This lane USED to refuse the 'tracer' channel outright, on the stated
+    # grounds that "FesomOceanState.S is a read-only PROPERTY ... so the
+    # post-step applicator cannot write the restored salinity back".  ``.S``
+    # is indeed a read-only property, but the facade is a frozen dataclass and
+    # the inner state is written with dataclasses.replace, so the conclusion
+    # was false and the channel was blocked for no reason.  Both channels are
+    # wired now (``with_surface_salinity`` is the tracer-side writer).
+    #
+    # But the flag's global default is None, which MEANS tracer, and until now
+    # an unset channel ABORTED on this lane.  Simply accepting it would hand a
+    # fesom card the non-NEMO virtual-salt form by omission -- a scientific
+    # choice nobody made, on a lane built for ORCA1 parity.  So the channel
+    # stays REQUIRED here: the lane refuses to pick for the user.
+    if getattr(args, "sss_restore", False) \
+            and args.sss_restore_channel is None:
+        raise SystemExit(
+            "--grid fesom: --sss-restore requires an explicit "
+            "--sss-restore-channel. Both are wired: 'water_flux' is NEMO "
+            "nn_sssr=2 (the restoring enters the freshwater budget and "
+            "carries its heat term) and is what the ORCA1-parity cards use; "
+            "'tracer' is the post-step virtual-salt edit. The flag's global "
+            "default is 'tracer', which would be an unasked choice here.")
     if getattr(args, "sss_restore", False) \
             and args.sss_restore_file is None \
             and not (args.woa_init or args.nemo_monthly_init):
@@ -3101,8 +3114,10 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
         # both channels: the water-flux channel consumes them below (NEMO
         # sbcssr — the flux is computed from the NOW-level SSS and enters the
         # freshwater budget + the qns heat term), and the tracer channel
-        # consumes the same ones after model.step so the two channels see
-        # identical forcing. -------------------------------------------------
+        # consumes the same ones after model.step, so the two see the same
+        # GATES AND TARGET.  Not the same salinity: water-flux reads the
+        # pre-step surface, the tracer applicator reads the post-step state it
+        # is handed.  That is the host lane's behaviour too. ------------------
         _sss_ice = None
         _sss_tgt_step = None
         _R_gate = None

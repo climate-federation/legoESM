@@ -238,16 +238,27 @@ def apply_sss_restoring_step_fesom(
                                                   dtype=np.float64))),
     )
     dS_dt = np.asarray(out["dS_dt_top"], dtype=np.float64)
-    land_mask = np.asarray(state.land_mask.data, dtype=np.float64)
+
+    # SURFACE-WET, not any-wet.  ``state.land_mask`` is
+    # ``node_layer_mask.any(axis=1)`` — true for a node with ANY wet layer,
+    # including one whose TOP layer is dry because it sits under an ice-shelf
+    # cavity.  Such a node has no atmosphere contact, and the FESOM flux
+    # translator gates every surface flux on ``node_layer_mask[:, 0]``
+    # accordingly — the water-flux SSS channel and the runoff block included.
+    # Masking the tracer channel on the any-wet mask would restore salinity
+    # under an ice shelf that the water-flux channel leaves alone, so the two
+    # channels would disagree on a cavity mesh.
+    surface_wet = np.asarray(
+        grid.mesh.node_layer_mask[:, 0], dtype=np.float64)
 
     # Select the RESULT rather than scaling the increment.  The two agree
     # exactly wherever the increment is finite, but `0.0 * NaN` is NaN, so
-    # multiplying by the mask would turn a land node into NaN if the target
+    # multiplying by the mask would turn a dry node into NaN if the target
     # climatology carries a non-finite fill there -- and this applicator
     # WRITES salinity rather than adding a flux, so that NaN would become
     # model state.  (GLM review 2026-09-17; the lat-lon and MPAS siblings
     # still multiply, which is the same hazard in a less direct form.)
-    S_top_new = np.where(land_mask > 0.0, S_top + dt * dS_dt, S_top)
+    S_top_new = np.where(surface_wet > 0.0, S_top + dt * dS_dt, S_top)
 
     return with_surface_salinity(state, grid.mesh, jnp.asarray(S_top_new))
 
