@@ -139,6 +139,75 @@ def v_to_T(v):
     return vT
 
 
+def shear_order_squared(un, vn):
+    """Shear-squared under NEMO's order vs the centred-average order.
+
+    Both are built from the SAME native C-grid velocities, so the only
+    difference is WHERE the square is taken:
+
+      NEMO (zdfsh2)   square the vertical difference AT EACH FACE, then
+                      average the two faces onto the T-column.
+      ours            average the velocity onto the T-column FIRST
+                      (``u_to_T``/``v_to_T``), then difference and square.
+
+    Jensen: 0.5(a^2 + b^2) - ((a+b)/2)^2 = 0.25 (a-b)^2 >= 0, so the NEMO
+    order is ALWAYS >= ours, with equality only where the two faces carry the
+    identical vertical difference. A measured ratio below 1 is therefore a bug
+    in this function, not a finding -- the caller asserts it.
+
+    The common 1/e3w^2 factor is omitted: it multiplies both sides
+    identically and cancels in the ratio, so this needs no depth ladder and
+    inherits no e3w approximation.
+
+    Returns ``(sh2_nemo, sh2_ours)`` as ``(ncol, z-1)`` on the interior
+    interfaces, matching the wet_pair/lat_col layout the reports use.
+    """
+    z, ny, nx = un.shape
+    uu = np.nan_to_num(un, nan=0.0)
+    vv = np.nan_to_num(vn, nan=0.0)
+    du = uu[:-1] - uu[1:]                      # at U-points, (z-1, ny, nx)
+    dv = vv[:-1] - vv[1:]                      # at V-points
+    sh2_n = (0.5 * (du ** 2 + np.roll(du ** 2, 1, axis=-1))
+             + 0.5 * (dv ** 2 + np.roll(dv ** 2, 1, axis=-2)))
+    uT = u_to_T(un)
+    vT = v_to_T(vn)
+    duT = uT[:-1] - uT[1:]
+    dvT = vT[:-1] - vT[1:]
+    sh2_o = duT ** 2 + dvT ** 2
+
+    def _cols(a):
+        return np.transpose(a.reshape(z - 1, ny * nx), (1, 0))
+
+    return _cols(sh2_n), _cols(sh2_o)
+
+
+def shear_order_report(sh2_n, sh2_o, wet, lat_col, regions_def):
+    """Median sh2_nemo/sh2_ours by band, plus the share of shear we discard.
+
+    Ri = N^2 / shear^2, so a ratio of R here means the centred order inflates
+    the Richardson number by R relative to NEMO's on the same velocities. That
+    is the number which says whether the Prandtl ceiling we sit on is a
+    discretisation artifact or a real deficit in the resolved flow.
+    """
+    rows = []
+    for name, lo, hi in regions_def:
+        band = (lat_col >= lo) & (lat_col <= hi)
+        m = wet & band[:, None] & (sh2_o > 1e-20) & np.isfinite(sh2_n)
+        n = int(m.sum())
+        if n < 10:
+            continue
+        r = sh2_n[m] / sh2_o[m]
+        rows.append({
+            "region": name, "n": n,
+            "sh2_ratio_median": float(np.median(r)),
+            "sh2_ratio_p90": float(np.percentile(r, 90)),
+            "sh2_ratio_mean": float(r.mean()),
+            "sh2_ratio_min": float(r.min()),
+            "frac_ratio_above_2": float((r > 2.0).mean()),
+        })
+    return rows
+
+
 def run_stage_a(d, cfg):
     """Closure test: legoESM TKE K_H(state) vs NEMO avt. Returns (K_H, avt_i)
     both at the legoESM interior interfaces (nlev-1 per column)."""
@@ -926,6 +995,33 @@ def main():
             K_H2, K_M2, avt_a2(d), avm_i, wet_pair, lat_col,
             d["lon"].reshape(-1), evd_cols=evd_cols, z_iface=_z_iface,
             z_cuts_m=(300.0, 100.0), stage="Stage A2 (Mode-A, NEMO's own en)")
+        # WHY OUR RICHARDSON NUMBER IS LARGER THAN NEMO'S, measured rather
+        # than argued. The Prandtl split above shows our Pr pinned at its
+        # ceiling of 10 across ~95% of the Antarctic while NEMO sits near 1.7
+        # on those SAME interfaces, which says our Ri = N^2/shear^2 is too
+        # large there. Ri has exactly two inputs, and this isolates the shear
+        # one: the same native velocities squared in NEMO's order and in ours.
+        # No model step, no oracle diffusivity, no depth ladder -- pure
+        # discretisation arithmetic, so it cannot be confounded by the closure.
+        sh2_n, sh2_o = shear_order_squared(rst["un"], rst["vn"])
+        _fin = np.isfinite(sh2_n) & np.isfinite(sh2_o) & (sh2_o > 1e-20)
+        _worst = float((sh2_n[_fin] / sh2_o[_fin]).min()) if _fin.any() else 1.0
+        # Jensen makes ratio >= 1 pointwise; below 1 means this probe is wrong,
+        # so it fails loudly instead of reporting a number nobody can trust.
+        assert _worst > 1.0 - 1e-9, (
+            f"shear_order_squared violated Jensen (min ratio {_worst:.6f}); "
+            "the face/centre pairing or an axis is wrong")
+        result["shear_order"] = shear_order_report(
+            sh2_n, sh2_o, wet_pair, lat_col, REGIONS)
+        print("\n--- Shear-squared: NEMO's face-native order / our centred "
+              "order, SAME velocities. Ri = N^2/shear^2, so ratio R means the "
+              "centred order inflates Ri by R. Jensen floor 1.0 asserted; "
+              f"observed min {_worst:.4f}.")
+        for _r in result["shear_order"]:
+            print(f"  {_r['region']:12s} n={_r['n']:8d} "
+                  f"median={_r['sh2_ratio_median']:7.3f} "
+                  f"p90={_r['sh2_ratio_p90']:8.3f} "
+                  f"frac>2={_r['frac_ratio_above_2']:5.3f}")
 
     dT, dS, ttrd, strd, wet_c, _, dT2, dS2 = run_stage_b(d)
     result["stage_b_T"] = region_report(
