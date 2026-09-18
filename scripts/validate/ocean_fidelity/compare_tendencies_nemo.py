@@ -355,8 +355,6 @@ def _bathy_kwargs(T_c, dz_c):
     bathymetry on this ladder -- no separate bathymetry file is needed and
     none can disagree with the state being stepped.
 
-    ``bottom_level`` is the interior-interface index of the seafloor, i.e.
-    (wet cells - 1) clamped into the interface range, matching NEMO's mbkt.
     ``w_active`` is the interior wmask: an interface is live only when the
     T-cells on both sides of it are wet, the same pairing the reports use.
     """
@@ -365,10 +363,19 @@ def _bathy_kwargs(T_c, dz_c):
     wet_cell = np.isfinite(T_c) & (dz_c > 1e-6)
     n_wet = wet_cell.sum(axis=1)
     n_iface = wet_cell.shape[1] - 1
-    bottom_level = np.clip(n_wet - 1, 0, n_iface - 1).astype(np.int32)
     w_active = (wet_cell[:, :-1] & wet_cell[:, 1:]).astype(np.float64)
-    return {"bottom_level": jnp.asarray(bottom_level),
-            "w_active": jnp.asarray(w_active)}
+    print(f"[bathy] wet interfaces {w_active.mean():.4f} of the array; "
+          f"median column depth {int(np.median(n_wet))} of {wet_cell.shape[1]} "
+          "levels")
+    # ONLY w_active. bottom_level is deliberately NOT passed: the closure
+    # guards that it "only selects WHERE the bottom Dirichlet pin lands, it
+    # does not supply one", and supplying one means NEMO's
+    # en(mbkt+1) = MAX(0.001875 * CdU_bot * |u_bot|, rn_emin), which needs a
+    # bottom drag coefficient this probe has no business choosing. The guard
+    # fired on the first attempt and was right to. w_active is the half that
+    # can be supplied honestly from the state alone, and it is the half that
+    # stops the mixing-length sweeps at the seafloor.
+    return {"w_active": jnp.asarray(w_active)}
 
 
 def run_stage_a2_mode_a(d, rst, cfg_prog, iwm_maps=None,
