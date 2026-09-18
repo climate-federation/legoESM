@@ -305,9 +305,68 @@ next-stage consumed field before and after this held candidate.
 
 ## Verification and independent review
 
-The separate read-only Codex review, receipt citation gate and shifted-line
-plant, focused tests, restored DINO test, and complete ocean fidelity/unit
-tree summaries are appended here after those runs.
+The separate review was invoked with `codex exec --sandbox read-only` from
+the clean writable clone.  It exited 1 before reading the diff, so there is
+no scientific verdict to conceal or quote.  Its complete diagnostic was:
+
+> WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+>
+> Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+
+Accordingly: **independent review unavailable in-sandbox**.  Operator note C
+explicitly permits the round to continue in this condition; it does not turn
+the unavailable review into an approval.
+
+The receipt citation gate reported `STATUS PASS`: 7 citations found, no
+failures, no unmapped citations, and no failing map entries.  Its deliberately
+shifted first compiled-stp2d citation reported `STATUS FAIL` and exited 1 with
+`SYMBOL-NOT-AT-LINE`.  The citation-gate pytest summary was `16 passed in
+1.85s`.
+
+The focused candidate transport/stage tests reported `38 passed in 119.23s`.
+After restoring the rejected candidate, the same focused suite reported `38
+passed in 120.08s`; the clean round-29 replay reported `9 passed in 2.29s`;
+and the private live-trace guard reported `3 passed in 0.56s`.  The
+candidate-only DINO suite reported `128 passed, 9 warnings in 106.88s`, and
+the final restored DINO suite reported `128 passed, 9 warnings in 105.29s`.
+The formerly documented RK3 unit red was rechecked independently and now
+reported `1 passed, 1 warning in 85.20s`.
+
+The report-emitter ratchet remains the declared incoming red.  Its exact
+focused summary was `1 failed in 1.60s`.  The offender dictionary contains
+the same nine filenames and counts as the untouched incoming checkout,
+including 12 pre-existing dictionaries in the round-46 gate.  During final
+verification the two new focused report dictionaries initially raised that
+count to 14; both were given fail-closed `worktree_stamp()` fields and the
+dictionary returned exactly to the incoming value.  No pre-existing offender
+was changed.
+
+The requested complete-tree command was run on CPU.  The first combined
+12-worker invocation collected 8,163 tests but repeatedly aborted workers in
+JAX `backend_compile_and_load`; it was interrupted after losing forward
+progress and emitted **no terminal summary**.  Splitting the trees, as the
+repository instructions require for the compiler ceiling, produced these
+additional bounded results:
+
+* fidelity with four workers reached 97% with four failures, then stopped
+  producing output; interruption emitted **no terminal summary**;
+* sequential fidelity fail-fast passed every round-109 and neighboring stage
+  test through 72%, then stopped inside the same long stage-sweep case for
+  more than six minutes; interruption emitted **no terminal summary**;
+* the four-worker unit tree reached 23% before a worker fatally aborted in
+  JAX `backend_compile_and_load`; interruption emitted **no terminal
+  summary**;
+* a fresh-process first unit shard did terminate and reported `11 failed,
+  818 passed, 1 skipped, 2 xfailed, 5 warnings in 599.53s (0:09:59)`; its
+  terminal log includes unrelated assertion failures plus LLVM
+  `Cannot allocate memory` failures.  It is a broad-tree diagnostic, not a
+  green gate and not evidence for landing the held candidate.
+
+An earlier sequential fidelity attempt, made before the trace-layout repair
+was committed, correctly exercised the fail-closed dirty-tree refusal and
+reported `1 failed, 596 passed, 5 skipped, 21 deselected in 319.54s
+(0:05:19)`.  The refused round-29 file then passed 9/9 once the repair was
+committed, as recorded above.  No broad run is represented as passing.
 
 ## OPEN — round 110
 
