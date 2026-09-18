@@ -254,3 +254,38 @@ def test_restored_overrides_actually_reach_the_config():
     # An all-None call must stay byte-identical to the defaults.
     assert build_cloud_config("sundqvist", conv_cloud_coeff=None,
                               Nc_default=None) == base
+
+
+
+def test_cloud_config_module_compiles_not_merely_parses():
+    """A duplicate function argument is a SyntaxError that ``ast.parse`` accepts.
+
+    ``ast.parse`` builds a tree; the duplicate-argument check happens later, in
+    the symbol-table pass, so only ``compile()`` rejects it.  On 2026-09-18 a
+    squash merge put ``conv_cloud_coeff`` and ``Nc_default`` into
+    ``build_cloud_config``'s signature twice — one copy from main, one from a
+    branch that had added them independently against an older base — and landed
+    a module on main that could not be imported at all.  The pre-merge syntax
+    check was an ``ast.parse`` and passed it through.
+
+    Importing the module in this test file would also catch it, but only for
+    this module; the explicit compile keeps the reason visible, and the
+    duplicate-parameter assertion below names the failure instead of leaving a
+    bare SyntaxError for someone to diagnose.
+    """
+    import ast
+    import inspect
+
+    from legoesm.atmosphere.physics.clouds import config as cloud_config_module
+
+    src = inspect.getsource(cloud_config_module)
+    compile(src, "clouds/config.py", "exec")
+
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.FunctionDef):
+            names = [a.arg for a in node.args.args + node.args.kwonlyargs]
+            dupes = sorted({n for n in names if names.count(n) > 1})
+            assert not dupes, (
+                f"{node.name}() declares {dupes} more than once — the module "
+                "cannot be imported. This is what a merge produces when two "
+                "branches add the same keyword independently.")
