@@ -55,14 +55,38 @@ logger = logging.getLogger("aimip_latlon")
 
 REPO = Path(__file__).resolve().parents[2]
 
-# Supervision horizon for training + eval (rollout length AND target lead,
-# kept in lockstep).  6 h (NeuralGCM / AIMIP convention) — a 24 h rollout
-# explodes the adjoint to NaN through the 144-step differentiable dycore
-# even when the forward is finite (1-step grad is fine; 144-step is NaN —
-# job 8533825).  6 h = 36 steps at dt=600 keeps the gradient well-
-# conditioned.  Passed as ``rollout_hours`` to the trainers and used for
-# the matched target lead in ``load_window_pairs``.
-_ROLLOUT_HOURS = 6
+# TRAINING supervision horizon: rollout length AND target lead, kept in
+# lockstep.  Passed as ``rollout_hours`` to the trainers and used for the
+# matched target lead in ``load_window_pairs``.
+#
+# Raised 6 -> 24 h on 2026-09-18 (user decision), because the reason for the
+# 6 h cap turned out not to hold.  The cap cited job 8533825 for "a 24 h
+# rollout explodes the adjoint to NaN through the 144-step differentiable
+# dycore even when the forward is finite".  Re-measured on current code
+# (jobs 9829660 sweep, 9829661 with JAX's NaN detector armed; 32x8,
+# dt=600 s, adjoint w.r.t. the initial state): NO NaN is created anywhere in
+# the backward pass at 144 steps, in either the current scheme set or the
+# June-2026 one, and the current lane's adjoint is BOUNDED — max|adjoint|
+# rises once inside the first eight steps and then sits between 1e3 and 1e5
+# out to 24 h, with no exponential branch.  Kessler and the mass-flux scheme
+# are what damp it; the June set (gray radiation, SBM convection, no
+# microphysics) instead grows at 0.28/step and reaches 3e13 by 144 steps.
+#
+# So this value is only safe for a scheme set whose adjoint is bounded.
+# Re-run scripts/validate/adjoint_horizon_sweep.py before trusting 24 h on a
+# different one; the argument is about CONDITIONING, not about the absence
+# of a NaN, and 3e13 is finite but useless to an optimiser.
+#
+# Cost: 144 steps per supervised sample instead of 36.
+_ROLLOUT_HOURS = 24
+
+# EVALUATION horizon, deliberately NOT raised with the training horizon.
+# The headline RMSE here is quoted against the canonical AIMIP scorecard
+# (``run_aimip.py::_evaluate_variant``), which scores a free 6 h forecast; a
+# 24 h eval would silently redefine every number and break comparability
+# with every result already on record.  Changing the training horizon is the
+# variable under test, so the evaluation protocol is held fixed.
+_EVAL_HOURS = 6
 
 
 # ---------------------------------------------------------------------------
@@ -390,7 +414,7 @@ def _area_weighted(field, cos_lat):
     return float(lat_weighted_mean(field, cos_lat))
 
 
-def evaluate(run_seg_raw, ics, targets, forcings, grid, dt, hours=_ROLLOUT_HOURS):
+def evaluate(run_seg_raw, ics, targets, forcings, grid, dt, hours=_EVAL_HOURS):
     """RMSE + bias per prognostic + radiation flux, averaged over windows.
 
     METRIC PARITY with the canonical AIMIP scorecard (``run_aimip.py``
@@ -598,14 +622,18 @@ def build_parser():
     # forward-mode path (follow-up).  Classical variant only.
     p.add_argument("--radiation-as-forcing", action="store_true", default=False)
     # GenCast-style multi-step autoregressive supervision (the canonical
-    # AIMIP protocol; spectral got classical 6.8->4.05K with it).  On the
-    # lat-lon stack the per-segment gradient is TRUNCATED (stop_gradient
-    # between segments) because the full-rollout adjoint NaNs past ~6h —
-    # so use SHORT (6h) segments: --multi-step-hours 6 12 18 24.  Empty ->
-    # single 6h horizon (legacy).
+    # AIMIP protocol; spectral got classical 6.8->4.05K with it).  The
+    # per-segment gradient is TRUNCATED (stop_gradient between segments).
+    # The old justification for that — "the full-rollout adjoint NaNs past
+    # ~6h" — does NOT reproduce on current code (see _ROLLOUT_HOURS above:
+    # no NaN at 144 steps with the detector armed).  Truncation is now a
+    # conditioning choice, not a necessity, and whether it still earns its
+    # bias is an open question worth measuring.  Empty -> a single rollout
+    # at _ROLLOUT_HOURS.
     p.add_argument("--multi-step-hours", type=int, nargs="*", default=[],
                    help="autoregressive leads in hours (multiples of 6), "
-                        "e.g. 6 12 18 24; empty -> single 6h horizon.")
+                        "e.g. 6 12 18 24; empty -> a single rollout at the "
+                        "training horizon (24 h).")
     p.add_argument("--multi-step-weights", type=float, nargs="*", default=[],
                    help="per-lead loss weights (match --multi-step-hours); "
                         "empty -> uniform.")
@@ -783,7 +811,7 @@ def main(argv=None):
     eval_data = load_window_pairs(
         grid, sigma, eval_windows,
         grid_kind=args.grid,
-        rollout_hours=_ROLLOUT_HOURS, forcing_ctx=forcing_ctx,
+        rollout_hours=_EVAL_HOURS, forcing_ctx=forcing_ctx,
         era5_zarr=args.era5_zarr,
         microphysics=args.microphysics, turbulence=args.turbulence,
     )
