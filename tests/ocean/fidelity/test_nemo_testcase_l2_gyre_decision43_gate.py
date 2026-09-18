@@ -50,6 +50,7 @@ def _comparison(commit: str = "c" * 40):
 def _cards():
     return {
         "GYRE-zco": {"executes_route": True},
+        "NEMO-GYRE-recipe": {"executes_route": False},
         "LOCK_EXCHANGE-zco": {"executes_route": False},
         "OVERFLOW-zps": {"executes_route": False},
         "DINO:nemo_dino_kamm": {"executes_route": False},
@@ -59,7 +60,7 @@ def _cards():
 
 def test_decision43_passes_only_for_a_month_improvement(monkeypatch):
     module = _module()
-    monkeypatch.setattr(module, "_card_execution", _cards)
+    monkeypatch.setattr(module, "_card_execution", lambda route: _cards())
     report = module.evaluate(
         _comparison(), _day(1.0), _day(0.1),
         expected_candidate_commit="c" * 40)
@@ -75,7 +76,7 @@ def test_shared_dino_statement_requires_a_separate_measured_gate(monkeypatch):
     module = _module()
     cards = _cards()
     cards["DINO:nemo_dino_kamm"]["executes_route"] = True
-    monkeypatch.setattr(module, "_card_execution", lambda: cards)
+    monkeypatch.setattr(module, "_card_execution", lambda route: cards)
     report = module.evaluate(
         _comparison(), _day(1.0), _day(0.1),
         expected_candidate_commit="c" * 40)
@@ -86,7 +87,7 @@ def test_shared_dino_statement_requires_a_separate_measured_gate(monkeypatch):
 
 def test_all_three_plants_fail_the_gate(monkeypatch):
     module = _module()
-    monkeypatch.setattr(module, "_card_execution", _cards)
+    monkeypatch.setattr(module, "_card_execution", lambda route: _cards())
     for plant in (
             "day30-no-improvement", "earlier-first-over-bar",
             "kt1-at-bar-loss"):
@@ -98,7 +99,7 @@ def test_all_three_plants_fail_the_gate(monkeypatch):
 
 def test_real_cards_resolve_the_source_condition():
     module = _module()
-    cards = module._card_execution()
+    cards = module._card_execution("ldf_stage3")
     assert cards["GYRE-zco"]["executes_route"] is True
     assert cards["LOCK_EXCHANGE-zco"]["executes_route"] is False
     assert cards["OVERFLOW-zps"]["executes_route"] is False
@@ -106,3 +107,29 @@ def test_real_cards_resolve_the_source_condition():
     assert cards["DINO:nemo_dino_kamm_mlf"]["tracer_time_integrator"] == "euler"
     assert cards["DINO:nemo_dino_kamm"]["executes_route"] is False
     assert cards["DINO:nemo_dino_kamm_mlf"]["executes_route"] is False
+
+
+def test_fct_metric_route_is_derived_from_every_recipe_and_fails_unmeasured():
+    module = _module()
+    cards = module._card_execution("fct_metric_upstream")
+    assert cards["GYRE-zco"]["executes_route"] is True
+    assert cards["NEMO-GYRE-recipe"]["executes_route"] is True
+    assert cards["LOCK_EXCHANGE-zco"]["adaptive_implicit_vertadv"] is True
+    assert cards["LOCK_EXCHANGE-zco"]["executes_route"] is False
+    assert cards["OVERFLOW-zps"]["adaptive_implicit_vertadv"] is True
+    assert cards["OVERFLOW-zps"]["executes_route"] is False
+    assert cards["DINO:nemo_dino_kamm"]["tracer_time_integrator"] == "euler"
+    assert cards["DINO:nemo_dino_kamm"]["executes_route"] is False
+
+    report = module.evaluate(
+        _comparison(), _day(1.0), _day(0.1),
+        expected_candidate_commit="c" * 40,
+        route="fct_metric_upstream")
+    assert report["status"] == "FAIL"
+    assert report["unmeasured_executing_cards"] == ["NEMO-GYRE-recipe"]
+    measured = module.evaluate(
+        _comparison(), _day(1.0), _day(0.1),
+        expected_candidate_commit="c" * 40,
+        route="fct_metric_upstream",
+        measured_cards=("NEMO-GYRE-recipe",))
+    assert measured["status"] == "PASS"

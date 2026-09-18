@@ -62,8 +62,8 @@ def _first_over_bar_kt(value: object, label: str) -> int | None:
     return kt
 
 
-def _card_execution() -> dict:
-    """Resolve the exact source condition on each in-scope shipped card."""
+def _card_execution(route: str = "ldf_stage3") -> dict:
+    """Resolve one exact source condition from every in-scope recipe."""
     from legoesm.ocean.experiments.dino import (
         dino_config_for_recipe,
         dino_lat_lon_grid,
@@ -72,29 +72,44 @@ def _card_execution() -> dict:
     from legoesm.ocean.fidelity.nemo_testcase_recipe import (
         build_nemo_testcase_card,
     )
+    from legoesm.ocean.fidelity.nemo_recipe import build_nemo_gyre_recipe
+
+    require(route in {"ldf_stage3", "fct_metric_upstream"},
+            f"unknown Decision-43 source route {route!r}")
+
+    def row(config, **extra):
+        values = {
+            "tracer_time_integrator": config.tracer_time_integrator,
+            "tracer_advection": config.tracer_advection,
+            "adaptive_implicit_vertadv": bool(
+                config.adaptive_implicit_vertadv),
+            "gm_redi_configured": config.gm_redi is not None,
+        }
+        values.update(extra)
+        values["executes_route"] = bool(
+            (config.tracer_time_integrator == "rk3_ws"
+             and config.gm_redi is not None)
+            if route == "ldf_stage3" else
+            (config.tracer_time_integrator == "rk3_ws"
+             and config.tracer_advection == "fct2"
+             and not config.adaptive_implicit_vertadv)
+        )
+        return values
 
     rows = {}
     for case in ("GYRE-zco", "LOCK_EXCHANGE-zco", "OVERFLOW-zps"):
         config = build_nemo_testcase_card(case).recipe.model_config
-        rows[case] = {
-            "tracer_time_integrator": config.tracer_time_integrator,
-            "gm_redi_configured": config.gm_redi is not None,
-            "executes_route": bool(
-                config.tracer_time_integrator == "rk3_ws"
-                and config.gm_redi is not None),
-        }
+        rows[case] = row(config, recipe_source="nemo_testcase_card")
+    rows["NEMO-GYRE-recipe"] = row(
+        build_nemo_gyre_recipe().model_config,
+        recipe_source="build_nemo_gyre_recipe")
     for recipe in ("nemo_dino_kamm", "nemo_dino_kamm_mlf"):
         dino = dino_config_for_recipe(recipe)
         grid = dino_lat_lon_grid(dino, n_lon=10)
         config, _ = dino_lat_lon_model_config(grid, dino, physics=True)
-        rows[f"DINO:{recipe}"] = {
-            "outer_integrator": config.outer_integrator,
-            "tracer_time_integrator": config.tracer_time_integrator,
-            "gm_redi_configured": config.gm_redi is not None,
-            "executes_route": bool(
-                config.tracer_time_integrator == "rk3_ws"
-                and config.gm_redi is not None),
-        }
+        rows[f"DINO:{recipe}"] = row(
+            config, outer_integrator=config.outer_integrator,
+            recipe_source="dino_config_for_recipe")
     return rows
 
 
@@ -104,6 +119,8 @@ def evaluate(
     after_day_gap: dict,
     *,
     expected_candidate_commit: str,
+    route: str = "ldf_stage3",
+    measured_cards: tuple[str, ...] = (),
     plant: str | None = None,
 ) -> dict:
     comparison = copy.deepcopy(comparison)
@@ -169,9 +186,16 @@ def evaluate(
     require(len({row["row"] for row in moved}) == len(moved),
             "moved-row registry contains duplicate names")
 
-    cards = _card_execution()
+    cards = _card_execution(route)
     require(cards["GYRE-zco"]["executes_route"],
             "GYRE unexpectedly does not execute the candidate statement")
+    unknown_measurements = sorted(set(measured_cards) - set(cards))
+    require(not unknown_measurements,
+            f"measurement registry names unknown cards {unknown_measurements}")
+    executing_cards = sorted(
+        name for name, row in cards.items() if row["executes_route"])
+    unmeasured_executing_cards = sorted(
+        set(executing_cards) - {"GYRE-zco"} - set(measured_cards))
     dino_shared = any(
         row["executes_route"]
         for name, row in cards.items() if name.startswith("DINO:"))
@@ -183,6 +207,7 @@ def evaluate(
         "all_moved_rows_registered": len(moved) > 0,
         "dino_measurement_required": dino_shared,
         "dino_statement_not_executed": not dino_shared,
+        "all_executing_cards_measured": not unmeasured_executing_cards,
     }
     # Decision 43 requires a DINO before/after measurement only when the exact
     # source condition executes.  This route does not: both shipped DINO cards
@@ -192,13 +217,18 @@ def evaluate(
         and criteria["first_over_bar_not_earlier"]
         and criteria["no_kt1_at_bar_row_leaves"]
         and criteria["all_moved_rows_registered"]
-        and criteria["dino_statement_not_executed"])
+        and criteria["dino_statement_not_executed"]
+        and criteria["all_executing_cards_measured"])
 
     return {
         "format": FORMAT,
         "worktree": worktree_stamp(),
         "status": "PASS" if admissible else "FAIL",
         "plant": plant,
+        "route": route,
+        "measured_cards": sorted(set(measured_cards)),
+        "executing_cards": executing_cards,
+        "unmeasured_executing_cards": unmeasured_executing_cards,
         "expected_candidate_commit": expected_candidate_commit,
         "before_day30_T_rms": before30["rms_T"],
         "after_day30_T_rms": after30["rms_T"],
@@ -222,6 +252,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--after-day-gap", type=Path, required=True)
     parser.add_argument("--expect-candidate-commit", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--route", choices=("ldf_stage3", "fct_metric_upstream"),
+        default="ldf_stage3")
+    parser.add_argument(
+        "--measured-card", action="append", default=[],
+        help="executing non-primary card discharged by a separate measurement")
     parser.add_argument("--plant", choices=(
         "day30-no-improvement", "earlier-first-over-bar", "kt1-at-bar-loss"))
     args = parser.parse_args(argv)
@@ -231,6 +267,8 @@ def main(argv: list[str] | None = None) -> int:
             _read(args.before_day_gap),
             _read(args.after_day_gap),
             expected_candidate_commit=args.expect_candidate_commit,
+            route=args.route,
+            measured_cards=tuple(args.measured_card),
             plant=args.plant,
         )
         args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
