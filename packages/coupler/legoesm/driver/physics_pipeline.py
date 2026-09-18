@@ -3559,6 +3559,8 @@ def convection_config_for(config, grid_dx_m=None):
     cc = ConvectionConfig(scheme=scheme)
     if scheme == "none":
         return cc
+    cc = cc._replace(rain_to_surface=bool(
+        getattr(config, "convective_rain_to_surface", False)))
     _, leaf = _resolve_convection(config)
     if leaf is None or scheme not in cc._fields:
         # Schemes without a leaf slot (or resolver-handled specially) keep
@@ -3567,7 +3569,12 @@ def convection_config_for(config, grid_dx_m=None):
     if (scheme == "bechtold" and grid_dx_m is not None
             and float(grid_dx_m) > 0.0 and leaf.dx_m == 0.0):
         leaf = leaf._replace(dx_m=float(grid_dx_m))
-    return cc._replace(**{scheme: leaf})
+    cc = cc._replace(**{scheme: leaf})
+    if scheme == "bechtold" and leaf.enable_cmt and _is_mpas_grid(config):
+        # The MPAS bridge reconstructs winds only on this explicit switch;
+        # Bechtold's CMT resolved ON for an MPAS run is what asks for it.
+        cc = cc._replace(mpas_cmt=True)
+    return cc
 
 
 def _resolve_convection(config):
@@ -3628,11 +3635,15 @@ def _resolve_convection(config):
             # #869 campaign levers: mass-flux stability cap + Gregory-1997 CMT
             # coefficients + the quasi-equilibrium heating-ceiling ratio
             # (cape_relaxation_sink lever).  Defaults match BechtoldConfig.
-            M_b_max=getattr(config, 'bechtold_m_b_max', 0.02),
+            # The ExperimentConfig field (2026-09-15); the earlier
+            # getattr(..., 'bechtold_m_b_max', 0.02) read a field that never
+            # existed and silently capped every run at 0.02.
+            M_b_max=config.bechtold_M_b_max,
             # Vertical subsidence solve selector (day-65 blowup bisect,
             # 2026-07-22): fallback matches the BechtoldConfig default.
             subsidence_solve=getattr(
                 config, 'bechtold_subsidence_solve', 'implicit_flux'),
+            enable_cmt=_resolve_enable_cmt(config),
             cmt_c_u=getattr(config, 'bechtold_cmt_c_u', 0.7),
             cmt_c_d=getattr(config, 'bechtold_cmt_c_d', 0.7),
             p_conv_top_pa=getattr(config, 'bechtold_conv_top_pa', 15000.0),
@@ -3737,6 +3748,33 @@ def _resolve_convection(config):
     _check_pipeline_convection_supported(scheme, conv_config)
 
     return conv_fn, conv_config
+
+
+def _resolve_enable_cmt(config) -> bool:
+    """CMT switch with a LANE-PRESERVING default (2026-09-15).
+
+    ``bechtold_enable_cmt`` None keeps every lane where it was before the MPAS
+    wiring: the MPAS bridge handed Bechtold zero winds (CMT inert), the other
+    lanes inherited ``BechtoldConfig.enable_cmt`` (True).  An explicit bool
+    wins everywhere."""
+    from legoesm.atmosphere.physics.convection.config import BechtoldConfig
+    from legoesm.driver.config import normalize_grid_type
+
+    val = getattr(config, "bechtold_enable_cmt", None)
+    if val is not None:
+        return bool(val)
+    if _is_mpas_grid(config):
+        return False
+    return bool(BechtoldConfig().enable_cmt)
+
+
+def _is_mpas_grid(config) -> bool:
+    from legoesm.driver.config import normalize_grid_type
+
+    _grid = getattr(config, "grid", None)
+    _gt = (getattr(_grid, "grid_type", None) if _grid is not None
+           else getattr(config, "grid_type", "cubed_sphere"))
+    return normalize_grid_type(_gt) in ("mpas", "voronoi")
 
 
 def _check_pipeline_convection_supported(scheme, conv_config):
@@ -4032,8 +4070,18 @@ def apply_surface_flux_config(tc, config):
     gzi = getattr(config, "surface_gustiness_zi", None)
     stc = getattr(config, "surface_thermo_convention", "legoesm")
     sss = getattr(config, "surface_stability_scheme", "dyer1974")
+    zml = bool(getattr(config, "surface_z_ref_model_level", False))
+    qsal = bool(getattr(config, "surface_ocean_q_sfc_saline", False))
+    if (zml or qsal) and not _is_mpas_grid(config):
+        # Implemented on the MPAS turbulence bridge only; the FV pipeline
+        # resolves its kernel through get_turbulence_fn and would run with
+        # the switches silently inert (codex whole-branch re-review).
+        raise ValueError(
+            "surface_z_ref_model_level / surface_ocean_q_sfc_saline are "
+            "implemented on the MPAS lane only; this run's grid is "
+            f"{getattr(getattr(config, 'grid', None), 'grid_type', '?')!r}")
     if (sbs == "constant" and gzi is None and stc == "legoesm"
-            and sss == "dyer1974"):
+            and sss == "dyer1974" and not zml and not qsal):
         return tc
     # `TurbulenceConfig.clubb` defaults to None and dispatch substitutes a fresh
     # CLUBBConfig(), so bailing on the None sub-config here SILENTLY DROPPED the
@@ -4057,6 +4105,10 @@ def apply_surface_flux_config(tc, config):
         # COARE convective-gustiness BL depth (only effective with a MOST
         # bulk_scheme); the diagnosed fix for the calm-warm-ocean low hfls.
         surf = surf._replace(gustiness_w_zi=gzi)
+    if zml:
+        surf = surf._replace(z_ref_model_level=True)
+    if qsal:
+        surf = surf._replace(ocean_q_sfc_saline=True)
     if stc != "legoesm":
         # AeroBulk thermodynamic-constants parity (#762; only effective
         # with a MOST bulk_scheme).

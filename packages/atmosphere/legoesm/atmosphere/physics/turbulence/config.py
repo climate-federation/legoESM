@@ -262,6 +262,12 @@ class SurfaceLayerConfig(NamedTuple):
     Ch_neutral: float = 1.5e-3
     bulk_scheme: str = "constant"
     z_ref: float = 10.0
+    # True: the MOST solver is told the actual per-column height of the lowest
+    # full level (~150 m on L30) instead of labelling its inputs as z_ref.
+    z_ref_model_level: bool = False
+    # True: ocean q_sfc = 0.98 * q_sat(SST, p_s) (sea water, at the surface
+    # pressure) via core.bulk_flux.ocean_surface_q_sat, as the coupled lane does.
+    ocean_q_sfc_saline: bool = False
     bulk_n_iter: int = 5
     # COARE 3.0 convective-gustiness BL depth z_i [m] (compute_most_fluxes).
     # None (default) = scheme-native: 600 m for bulk_scheme "coare3" (gustiness

@@ -76,6 +76,13 @@ class GridConfig(NamedTuple):
     # 1000 hPa); ignored by the hybrid coordinate, which uses
     # p_top_Pa/stretching.  Recorded here so the resolved config is truthful.
     sigma_top: float = 0.01
+    # Centre (sigma) and log-sigma half-width of the tropopause_refine density
+    # bump (grids/vertical.tropopause_refined_sigma_half).  Defaults are the
+    # function's own (0.12 / 0.45 = the tropical cold point); a boundary-layer
+    # refinement sets e.g. 0.95 / 0.06 (2026-09-16 arm).  Inert at
+    # tropopause_refine = 1.0.
+    sigma_refine: float = 0.12
+    sigma_refine_width: float = 0.45
     # Sigma-lane level layout (grids.vertical.SIGMA_LAYOUTS): "standard" =
     # uniform/tropopause-refined; "l30_trop_logstrat" = the L30 troposphere
     # kept bit-identical below sigma 0.109 plus nlev-27 log-spaced
@@ -178,6 +185,24 @@ class DycoreConfig(NamedTuple):
     sponge_width_m: float = 10000.0       # sponge-layer depth below the top [m]
     sponge_shape: str = "sin2"            # "sin2" | "sam_rational"
     sponge_scale_height_m: float = 7500.0  # log-pressure scale height for sigma->z
+
+    # #1028: keep the cubed-sphere hydrostatic prognostic winds in FV3 D
+    # staggering BETWEEN steps instead of interpolating cell-centre -> D-grid
+    # corners on entry and back on exit EVERY step.  That outer round trip is
+    # a measured eddy damper, not a bookkeeping detail: a paired same-commit
+    # 200-day C36 Held-Suarez run (PR #1462) moved the equilibrated max wind
+    # 13.0 -> 38.6 m/s (sigma) and 12.6 -> 40.9 (hybrid) with this as the only
+    # change, i.e. from FAILING the #1049 dead-jet floor to clearing the
+    # ~30 m/s benchmark.  The dycore has always accepted either staggering
+    # (``CDGridPrimitiveEquationModel.step`` dispatches on the state type);
+    # what was missing was a production driver that carries the D state.
+    #
+    # Cubed-sphere hydrostatic ONLY.  Every other lane (lat-lon, MPAS,
+    # spectral, shallow water, non-hydrostatic) and the lanes this does not
+    # cover yet (tiled / sub-face SPMD, ensembles) REFUSE it loudly rather
+    # than silently running the damped path.  Default False keeps every
+    # existing run byte-identical.
+    persistent_dgrid: bool = False
 
 
     # Task #25: time integrator override.  Lat-lon C-grid uses
@@ -802,6 +827,13 @@ class ExperimentConfig(NamedTuple):
     # 1978, convective_autoconversion_split), threaded to conv_config in
     # physics_pipeline; the scheme body raises on an unknown value.
     convective_precip_split: str = "constant"
+    # True: the in-updraught convective rain surviving the scheme's own sub-cloud
+    # evaporation leaves the column as surface precipitation (IFS); False: it is
+    # handed to the microphysics rain tracer, which re-evaporated it at grid-mean
+    # humidity (4.1 kg/m2/day below 700 hPa in the tropics).  DEFAULT True
+    # (user 2026-09-16, with the cloud-cover threshold re-tuned on the drier
+    # column): 30-day pair tropical-ocean prw -9 kg/m2, evaporation +4 %.
+    convective_rain_to_surface: bool = True
     autoconv_q_c_crit: float = 5.0e-4   # [kg/kg] Sundqvist critical updraft cloud water
     autoconv_pe_max: float = 0.9        # [1] ceiling on the emergent precip fraction
 
@@ -831,6 +863,11 @@ class ExperimentConfig(NamedTuple):
     # (the persistent tropical hfls<<Earth / R_TOA imbalance lever).  Threaded
     # into the atmosphere SurfaceLayerConfig + the slab SimpleOceanConfig.
     surface_gustiness_zi: float | None = None
+    # Ocean surface-layer corrections (MPAS lane; both default off pending a
+    # user decision): tell the MOST solver the lowest level's real height, and
+    # use sea-water saturation at the surface pressure for the ocean q_sfc.
+    surface_z_ref_model_level: bool = False
+    surface_ocean_q_sfc_saline: bool = False
     # Thermodynamic constants set for the MOST surface fluxes (#762):
     # "legoesm" (default, byte-identical) = constant L_v / dry c_pd;
     # "aerobulk" = NEMO/AeroBulk/COARE parity (SST-dependent L_vap(T_sfc),
@@ -1291,6 +1328,18 @@ class ExperimentConfig(NamedTuple):
     # IFS in-plume conversion constants (anvil-source control, 2026-07-27):
     # more conversion (rprcon up / dnoprc down) = drier detrained outflow.
     bechtold_rprcon: float = 1.4e-3   # BechtoldConfig.rprcon [1/m]
+    # Cloud-base mass-flux cap [kg/m^2/s]. The pipeline used to read a field of
+    # this name that did not exist and fell back to 0.02 (2.5x tighter than the
+    # scheme's own 0.05), which bound in 71 % of tropical-ocean columns.
+    # DEFAULT 0.05 = the scheme's own value (user 2026-09-16); 5-day arms at
+    # 0.05/0.10 were stable with small effects (cover -2/-5 pts).
+    bechtold_M_b_max: float = 0.05   # BechtoldConfig.M_b_max [kg/m^2/s]
+    # Gregory-1997 convective momentum transport, applied to MPAS edge winds
+    # through the shared cell->edge projection (2026-09-15).  None preserves
+    # each lane's earlier behaviour: OFF on MPAS (where the bridge handed the
+    # scheme zero winds, so CMT was inert) and the scheme's own default (ON)
+    # elsewhere.  The MPAS production default is a pending user decision.
+    bechtold_enable_cmt: bool | None = None
     bechtold_dnoprc: float = 3.0e-4   # BechtoldConfig.dnoprc [kg/kg]
     # Deep-plume entrainment / detrainment base rates (IFS cuascn), exposed
     # 2026-08-14. These set the ITCZ WIDTH and tropical rain concentration:
@@ -1651,6 +1700,12 @@ class ExperimentConfig(NamedTuple):
             if not (0.0 < g.sigma_top < 1.0):
                 errors.append(
                     f"grid.sigma_top must be in (0, 1) on the sigma lane (got {g.sigma_top})")
+            if not (g.sigma_top < g.sigma_refine < 1.0):
+                errors.append(
+                    f"grid.sigma_refine must lie in (sigma_top, 1) (got {g.sigma_refine})")
+            if not (g.sigma_refine_width > 0.0 and math.isfinite(g.sigma_refine_width)):
+                errors.append(
+                    f"grid.sigma_refine_width must be > 0 (got {g.sigma_refine_width})")
             if g.sigma_layout not in ("standard", "l30_trop_logstrat"):
                 errors.append(
                     "grid.sigma_layout must be 'standard' or 'l30_trop_logstrat' "
@@ -1889,6 +1944,7 @@ class ExperimentConfig(NamedTuple):
             # Ceiling raised with the scheme spec (see BechtoldConfig
             # __param_spec__): the production value sat on the old bound.
             ("bechtold_rprcon", 3.5e-4, 1.4e-2),
+            ("bechtold_M_b_max", 0.02, 0.15),
             ("bechtold_epsilon_deep", 7.0e-4, 4.2e-3),
             ("bechtold_delta_deep", 3.0e-5, 1.8e-4),
             ("bechtold_dnoprc", 7.5e-5, 1.2e-3),
@@ -3581,6 +3637,8 @@ class ExperimentConfig(NamedTuple):
             bechtold_rhebc_land=getattr(amip_cfg, 'bechtold_rhebc_land', 0.75),
             bechtold_rhebc_land_deep=getattr(amip_cfg, 'bechtold_rhebc_land_deep', 0.70),
             bechtold_rprcon=getattr(amip_cfg, 'bechtold_rprcon', 1.4e-3),
+            bechtold_M_b_max=getattr(amip_cfg, 'bechtold_M_b_max', 0.05),
+            bechtold_enable_cmt=getattr(amip_cfg, 'bechtold_enable_cmt', None),
             bechtold_dnoprc=getattr(amip_cfg, 'bechtold_dnoprc', 3.0e-4),
             bechtold_subsidence_solve=getattr(amip_cfg, 'bechtold_subsidence_solve', "implicit_flux"),
             convective_buoyancy_death_memory=getattr(amip_cfg, 'convective_buoyancy_death_memory', False),
@@ -3758,6 +3816,8 @@ class ExperimentConfig(NamedTuple):
             bechtold_rhebc_land=self.bechtold_rhebc_land,
             bechtold_rhebc_land_deep=self.bechtold_rhebc_land_deep,
             bechtold_rprcon=self.bechtold_rprcon,
+            bechtold_M_b_max=self.bechtold_M_b_max,
+            bechtold_enable_cmt=self.bechtold_enable_cmt,
             bechtold_dnoprc=self.bechtold_dnoprc,
             bechtold_downdraft_entrain_rate=self.bechtold_downdraft_entrain_rate,
             bechtold_downdraft_detrain_scale_m=self.bechtold_downdraft_detrain_scale_m,
