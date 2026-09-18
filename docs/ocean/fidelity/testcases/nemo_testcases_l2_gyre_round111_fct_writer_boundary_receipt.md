@@ -225,7 +225,7 @@ The attempt is preserved at `codex_review.log` rather than silently omitted.
 
 The receipt citation gate finds eight citations, maps all eight, audits the
 entire registry and reports `status: PASS`.  Its shifted-line plant moves the
-direct-writer citation `:607` to line 609, reports `SYMBOL-NOT-AT-LINE`, and
+direct-writer citation at line 607 to line 609, reports `SYMBOL-NOT-AT-LINE`, and
 exits 1.  Evidence is `citation_gate.{json,log}` and
 `citation_gate_plant.{json,log}`.
 
