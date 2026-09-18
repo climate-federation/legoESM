@@ -188,6 +188,7 @@ def test_forwarding_check_rejects_planted_discard(tree, mutation, flag):
 ])
 @pytest.mark.parametrize("caller,callee", [
     ("run_fesom_forced_loop", "compute_sss_restoring_flux"),
+    ("run_fesom_forced_loop", "apply_sss_restoring_step_fesom"),
     ("main", "_sss_flux_fn"),
     ("main", "apply_sss_restoring_step"),
     ("main", "apply_sss_restoring_step_mpas"),
@@ -199,11 +200,19 @@ def test_mouth_flag_reaches_every_consumer_by_name(tree, argv, enabled, caller, 
     assert args.river_mouth_restoring_gate is enabled
     runoff = np.array([2.0, 3.0])  # Nonzero sentinel: a discarded gate must fail.
     namespace = dict(args=args, _R=runoff, _S_now=runoff, jnp=np)
-    if caller == "main":
-        fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == caller)
-        assignments = [n for n in ast.walk(fn) if isinstance(n, ast.Assign)
-                       and any(isinstance(t, ast.Name) and t.id == "_R_gate" for t in n.targets)
-                       and isinstance(n.value, ast.IfExp)]
+    # Every lane that hoists the gate into a local `_R_gate` must do it with
+    # exactly ONE conditional assignment, and that assignment is what the call
+    # sites below are evaluated against.  Resolving it per CALLER (rather than
+    # only for `main`) is what makes the fesom loop's hoisted form testable:
+    # a second, divergent `_R_gate` assignment in the same function would fail
+    # the count, and a call site that stopped forwarding it would fail below.
+    fn = next(n for n in tree.body
+              if isinstance(n, ast.FunctionDef) and n.name == caller)
+    assignments = [n for n in ast.walk(fn) if isinstance(n, ast.Assign)
+                   and any(isinstance(t, ast.Name) and t.id == "_R_gate"
+                           for t in n.targets)
+                   and isinstance(n.value, ast.IfExp)]
+    if assignments:
         assert len(assignments) == 1
         namespace["_R_gate"] = _eval(assignments[0].value, **namespace)
     for call in _calls(tree, caller, callee):

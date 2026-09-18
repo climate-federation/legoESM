@@ -90,15 +90,21 @@ def test_b4_selectors_allowed(extra):
     validate_fesom_stage(args, p)  # no raise
 
 
-def test_sss_restore_tracer_channel_rejected():
-    """The tracer channel is a post-step salinity edit; FesomOceanState.S
-    is a read-only facade, so the fesom lane accepts ONLY water_flux."""
+def test_sss_restore_tracer_channel_accepted():
+    """The tracer channel is wired on the fesom lane.
+
+    It used to be refused, on the stated grounds that ``FesomOceanState.S``
+    is a read-only facade.  ``.S`` is a read-only property, but the facade is
+    a frozen dataclass and ``with_surface_salinity`` writes the inner state,
+    so the refusal rested on a false premise.  Both spellings are covered:
+    the flag UNSET means tracer, which is the form that would regress most
+    quietly.
+    """
     for extra in (["--sss-restore", "--sss-restore-file", "/sss.nc"],
                   ["--sss-restore", "--sss-restore-file", "/sss.nc",
                    "--sss-restore-channel", "tracer"]):
         args, p = _parse(extra)
-        with pytest.raises(SystemExit, match="water_flux"):
-            validate_fesom_stage(args, p)
+        validate_fesom_stage(args, p)  # no raise
 
 
 def test_sss_restore_needs_a_target():
