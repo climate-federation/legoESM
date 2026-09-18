@@ -293,6 +293,10 @@ FILES = {
         "/l2_r101_tke_walk.f90"),
     "GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/zdftke.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/zdftke.f90"),
+    "GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/stprk3.f90"),
+    "GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/eosbn2.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/eosbn2.f90"),
     # Round 105 audits the shared shear route on DINO's compiled leapfrog card.
     "DINO/BLD/ppsrc/nemo/stpmlf.f90": (
         NEMO / "cfgs/DINO/BLD/ppsrc/nemo/stpmlf.f90"),
@@ -483,6 +487,14 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 107: upstream producer of the non-bit TKE rn2 operand ---
+    'GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/stprk3.f90:159-168': [
+        'CALL eos_rab( ts(:,:,:,:,Nbb), rab_b, Nbb )',
+        'CALL zdf_phy( kstp, Nbb, Nbb, Nrhs )', 10],
+    'GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/eosbn2.f90:1609-1618': [
+        'DO jk =  2,  jpkm1',
+        '&            / (e3w_1d(jk) *(1._wp+r3t(ji,jj,Kmm))) * wmask(ji,jj,jk)',
+        10],
     # --- round 106: compiled TKE RHS scalar, matrix predecessors, and RHS ---
     'GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/zdftke.f90:261': (
         'zfact3  = 0.5_wp         * rn_ediss', 1),
