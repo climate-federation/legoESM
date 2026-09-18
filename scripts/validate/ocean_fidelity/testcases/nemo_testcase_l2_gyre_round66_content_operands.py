@@ -146,9 +146,19 @@ def _capture_final_content_call(card, seeded, freshwater, surface):
     for duplicate in captured[1:]:
         require(duplicate.keys() == captured[0].keys(),
                 "duplicate content callback schema changed")
-        require(all(np.array_equal(duplicate[key], captured[0][key])
-                    for key in captured[0]),
-                "final content callback observed distinct evaluations")
+        differences = {}
+        for key in captured[0]:
+            left = np.asarray(duplicate[key], dtype=np.float64)
+            right = np.asarray(captured[0][key], dtype=np.float64)
+            changed = left.view(np.uint64) != right.view(np.uint64)
+            if np.any(changed):
+                differences[key] = {
+                    "cells_unequal": int(np.count_nonzero(changed)),
+                    "max_abs": float(np.max(np.abs(left - right))),
+                }
+        require(not differences,
+                "final content callback observed distinct evaluations: "
+                f"{differences}")
     require(len(captured_ldf) >= 1, "GM/Redi callback did not fire")
     for duplicate in captured_ldf[1:]:
         require(all(np.array_equal(duplicate[key], captured_ldf[0][key])
