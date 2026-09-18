@@ -348,7 +348,7 @@ def run_stage_a(d, cfg):
     return K_H, avt_i, wet_pair, (z, ny, nx), K_M, avm_i
 
 
-def _bathy_kwargs(T_c, dz_c):
+def _bathy_kwargs(T_c, dz_c, cfg):
     """Per-column seafloor index and wet-interface mask, from the state itself.
 
     NEMO's land cells arrive as NaN, so the wet-cell count per column IS the
@@ -366,16 +366,21 @@ def _bathy_kwargs(T_c, dz_c):
     w_active = (wet_cell[:, :-1] & wet_cell[:, 1:]).astype(np.float64)
     print(f"[bathy] wet interfaces {w_active.mean():.4f} of the array; "
           f"median column depth {int(np.median(n_wet))} of {wet_cell.shape[1]} "
-          "levels")
-    # ONLY w_active. bottom_level is deliberately NOT passed: the closure
-    # guards that it "only selects WHERE the bottom Dirichlet pin lands, it
-    # does not supply one", and supplying one means NEMO's
-    # en(mbkt+1) = MAX(0.001875 * CdU_bot * |u_bot|, rn_emin), which needs a
-    # bottom drag coefficient this probe has no business choosing. The guard
-    # fired on the first attempt and was right to. w_active is the half that
-    # can be supplied honestly from the state alone, and it is the half that
-    # stops the mixing-length sweeps at the seafloor.
-    return {"w_active": jnp.asarray(w_active)}
+          f"levels; shallowest wet column {int(n_wet[n_wet > 0].min())}")
+    # bottom_level places NEMO's bottom TKE pin at the PER-COLUMN seafloor
+    # instead of the array floor. The closure refuses it without a Dirichlet
+    # VALUE, and NEMO's is MAX(0.001875 * CdU_bot * |u_bot|, rn_emin) — the
+    # first term needs a bottom drag coefficient a diagnostic has no business
+    # choosing, so the FLOOR alone is used. That is not an invented number:
+    # cfg.tke_background is 1.0e-6 and ORCA1's rn_emin is 1.e-6
+    # (namelist_ref:1228), the same value, and NEMO's expression can never
+    # fall below it. So this is a LOWER BOUND on NEMO's boundary condition,
+    # and the arm tests WHERE the pin lands rather than its exact magnitude.
+    n_iface = wet_cell.shape[1] - 1
+    bottom_level = np.clip(n_wet - 1, 0, n_iface - 1).astype(np.int32)
+    return {"w_active": jnp.asarray(w_active),
+            "bottom_level": jnp.asarray(bottom_level),
+            "bottom_dirichlet": float(cfg.tke_background)}
 
 
 def run_stage_a2_mode_a(d, rst, cfg_prog, iwm_maps=None,
@@ -439,7 +444,7 @@ def run_stage_a2_mode_a(d, rst, cfg_prog, iwm_maps=None,
         # without w_active there is no wet-interface mask to stop the sweeps
         # at the bottom either. ORCA1's Antarctic shelf is a few hundred
         # metres deep on a 75-level ladder reaching ~5000 m.
-        **(_bathy_kwargs(T_c, dz_c) if use_bathy else {}),
+        **(_bathy_kwargs(T_c, dz_c, cfg_prog) if use_bathy else {}),
         dz_ref=jnp.asarray(dz_ref_1d),
         jacobian=jnp.asarray(np.ones((ncol,), dtype=dz_c.dtype)),
         # Same ladders as Stage A, for the same reason -- built from NEMO's
