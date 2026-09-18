@@ -248,12 +248,86 @@ def _round112_owned_record(path: Path, *, plant: bool = False) -> dict:
     return bundle
 
 
+def _round112_face_neighbours(field: jax.Array) -> tuple:
+    west = jnp.roll(field, 1, axis=1)
+    return (
+        jnp.concatenate([west, west[:, :1]], axis=1),
+        jnp.concatenate([field, field[:, :1]], axis=1),
+    )
+
+
+def _round112_vface_neighbours(field: jax.Array) -> tuple:
+    padded = jnp.pad(field, ((1, 1), (0, 0), (0, 0)))
+    return padded[:-1], padded[1:]
+
+
 def _round112_literal_rows(base: jax.Array, values: dict) -> tuple:
-    """Call the shared production transcription on the recorded inputs."""
-    return advection_module.nemo_fct_two_step_upstream_rows(
-        base, values["p_u"], values["p_v"], values["p_w"],
-        values["h_kbb"], values["h_kmm"], values["tmask"],
-        values["wmask"], values["r1_area"], values["p2dt"])
+    """Literal compiled fct_up1_2stp statements, with source stores."""
+    sr = nemo_source_round
+    p_u, p_v, p_w = values["p_u"], values["p_v"], values["p_w"]
+    e3t = values["e3t"]
+    r3t_kbb, r3t_kmm = values["r3t_kbb"], values["r3t_kmm"]
+    tmask, wmask = values["tmask"], values["wmask"]
+    r1_area, p2dt = values["r1_area"], values["p2dt"]
+    zero = jnp.asarray(0.0, dtype=base.dtype)
+    one = jnp.asarray(1.0, dtype=base.dtype)
+    half = jnp.asarray(0.5, dtype=base.dtype)
+
+    west, east = _round112_face_neighbours(base)
+    first_u = sr(
+        sr(jnp.maximum(p_u, zero) * west)
+        + sr(jnp.minimum(p_u, zero) * east))
+    south, north = _round112_vface_neighbours(base)
+    first_v = sr(
+        sr(jnp.maximum(p_v, zero) * south)
+        + sr(jnp.minimum(p_v, zero) * north))
+    first_w_int = sr(
+        sr(jnp.maximum(p_w[..., 1:30], zero) * base[..., 1:])
+        + sr(sr(jnp.minimum(p_w[..., 1:30], zero) * base[..., :-1])
+             * wmask[..., 1:30]))
+    first_w = jnp.pad(first_w_int, ((0, 0), (0, 0), (1, 1)))
+
+    du = sr(first_u[:, 1:] - first_u[:, :-1])
+    dv = sr(first_v[1:] - first_v[:-1])
+    dw = sr(first_w[..., :-1] - first_w[..., 1:])
+    first_div = sr(-sr(sr(du + dv) + dw) * r1_area[..., None])
+    h_kbb = sr(e3t * sr(one + sr(r3t_kbb[..., None] * tmask)))
+    h_kmm = sr(e3t * sr(one + sr(r3t_kmm[..., None] * tmask)))
+    midpoint = sr(
+        sr(sr(sr(h_kbb * base) + sr(sr(half * p2dt) * first_div))
+           / h_kmm) * tmask)
+
+    west, east = _round112_face_neighbours(midpoint)
+    next_u = sr(
+        sr(jnp.maximum(p_u, zero) * west)
+        + sr(jnp.minimum(p_u, zero) * east))
+    south, north = _round112_vface_neighbours(midpoint)
+    next_v = sr(
+        sr(jnp.maximum(p_v, zero) * south)
+        + sr(jnp.minimum(p_v, zero) * north))
+    average_u = sr(half * sr(first_u + next_u))
+    average_v = sr(half * sr(first_v + next_v))
+    next_w = sr(
+        sr(jnp.maximum(p_w[..., 1:30], zero) * midpoint[..., 1:])
+        + sr(sr(jnp.minimum(p_w[..., 1:30], zero) * midpoint[..., :-1])
+             * wmask[..., 1:30]))
+    average_w = jnp.pad(
+        sr(half * sr(first_w[..., 1:30] + next_w)),
+        ((0, 0), (0, 0), (1, 1)))
+
+    du = sr(average_u[:, 1:] - average_u[:, :-1])
+    dv = sr(average_v[1:] - average_v[:-1])
+    dw = sr(average_w[..., :-1] - average_w[..., 1:])
+    final_div = sr(-sr(sr(du + dv) + dw) * r1_area[..., None])
+    rhs_after = sr(sr(sr(final_div / h_kmm) * tmask)
+                   + jnp.zeros_like(final_div))
+    # XLA may delete the source's addition to the positive-zero Krhs entry,
+    # preserving a negative zero from ``negative_divergence * 0`` instead.
+    # NEMO's stored dry-cell result is +0; make that signed-zero consequence
+    # of the compiled mask explicit without changing any wet value.
+    rhs_after = jnp.where(tmask > 0.5, rhs_after, jnp.zeros_like(rhs_after))
+    return (first_u, first_v, first_w, first_div, midpoint,
+            average_u, average_v, average_w, final_div, rhs_after)
 
 
 def _round112_current_rows(base: jax.Array, values: dict, grid) -> tuple:
@@ -500,12 +574,14 @@ def measure(args) -> dict:
         if not capture_fct_split:
             return real_fct(*values, **kwargs)
         result = real_fct(*values, return_nemo_split=True, **kwargs)
-        div_h, div_w, split, nemo_rhs = result
+        div_h, div_w, split = result
         low_h, low_w, anti_h, anti_w = split
         h_kmm = values[4]
+        h_safe = jnp.maximum(h_kmm, jnp.asarray(1.0e-10, h_kmm.dtype))
         low_div = nemo_source_round(low_h + low_w)
         anti_div = nemo_source_round(anti_h + anti_w)
-        combined_rhs, upstream_rhs, anti_rhs = nemo_rhs
+        upstream_rhs = nemo_source_round(-low_div / h_safe)
+        anti_rhs = nemo_source_round(-anti_div / h_safe)
         if args.plant_fct_split_ulp:
             active = kwargs.get("active_mask")
             require(active is not None,
@@ -516,6 +592,8 @@ def measure(args) -> dict:
                 flat[at], jnp.asarray(jnp.inf, flat.dtype))).reshape(
                     upstream_rhs.shape)
         split_rhs = nemo_source_round(upstream_rhs + anti_rhs)
+        combined_rhs = nemo_source_round(
+            -nemo_source_round(div_h + div_w) / h_safe)
         base = kwargs.get("tracer_before")
         if base is None:
             base = values[0]
@@ -529,7 +607,7 @@ def measure(args) -> dict:
         jax.debug.callback(
             fct_split_sink, upstream_rhs, anti_rhs, split_rhs, combined_rhs,
             split_content, low_div, anti_div, ordered=True)
-        return div_h, div_w, nemo_rhs
+        return div_h, div_w
 
     def qsr_sink(value):
         qsr_calls.append(np.asarray(value, dtype=np.float64))

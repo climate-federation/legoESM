@@ -24,11 +24,9 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.grids.latlon import create_latlon_grid
-from legoesm.core.source_rounding import nemo_source_round
 from legoesm.ocean.advection import (
     _zalesak_signsplit_face_alphas,
     fct_tracer_advection,
-    nemo_fct_two_step_upstream_rows,
 )
 
 
@@ -100,84 +98,6 @@ class TestConservation:
         assert len(exposed[2]) == 4
         assert all(value.shape == tracer.shape for value in exposed[2])
         assert all(bool(jnp.all(jnp.isfinite(value))) for value in exposed[2])
-
-    def test_nemo_metric_two_step_split_keeps_literal_combined_divergence(
-        self, grid_small,
-    ):
-        """The WS source route must not split and re-add NEMO's low flux."""
-        from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-            build_nemo_testcase_card,
-        )
-        grid = build_nemo_testcase_card("GYRE-zco").recipe.grid
-        n_lat, n_lon, nlev = grid.n_lat, grid.n_lon, 30
-        tracer = jnp.broadcast_to(
-            jnp.linspace(12.0, 4.0, nlev), (n_lat, n_lon, nlev))
-        base = tracer + 0.01 * jnp.arange(n_lon)[None, :, None]
-        base = jnp.broadcast_to(base, (n_lat, n_lon, nlev))
-        h = jnp.full_like(base, 100.0)
-        mask = jnp.ones_like(base)
-        face = jnp.arange(n_lon + 1, dtype=jnp.float64)
-        p_u = (1.0 + 0.125 * jnp.sin(2.0 * jnp.pi * face / n_lon))
-        p_u = jnp.broadcast_to(p_u[None, :, None],
-                               (n_lat, n_lon + 1, nlev))
-        p_v = jnp.zeros((n_lat + 1, n_lon, nlev), dtype=jnp.float64)
-        p_w = jnp.zeros((n_lat, n_lon, nlev + 1), dtype=jnp.float64)
-        mass_u = p_u / jnp.asarray(grid.dy_u)[..., None]
-        mass_v = p_v / jnp.asarray(grid.dx_v)[..., None]
-        w = p_w / jnp.asarray(grid.area_T)[..., None]
-        r1_area = 1.0 / jnp.asarray(grid.area_T)
-
-        rows = jax.jit(nemo_fct_two_step_upstream_rows)(
-            base, p_u, p_v, p_w, h, h, mask, mask, r1_area, 1.0)
-        _, _, split, nemo_rhs = jax.jit(lambda: fct_tracer_advection(
-            tracer, mass_u, mass_v, w, h, grid, 1.0,
-            high_order="centred2", tracer_before=base,
-            active_mask=mask, low_order_predictor="nemo_rk3_two_step",
-            base_thickness=h, after_thickness=h,
-            nemo_metric_transports=(p_u, p_v, p_w),
-            nemo_wmask=mask, nemo_reciprocal_area=r1_area,
-            return_nemo_split=True, return_nemo_rhs=True))()
-        low_div = split[0] + split[1]
-        np.testing.assert_array_equal(np.asarray(low_div), np.asarray(-rows[8]))
-        np.testing.assert_array_equal(np.asarray(nemo_rhs[1]), np.asarray(rows[9]))
-        np.testing.assert_array_equal(
-            np.asarray(nemo_rhs[0]),
-            np.asarray(nemo_source_round(nemo_rhs[1] + nemo_rhs[2])),
-        )
-        assert bool(jnp.any(rows[8] != 0.0))
-
-        _, _, ordinary_split = jax.jit(lambda: fct_tracer_advection(
-            tracer, mass_u, mass_v, w, h, grid, 1.0,
-            high_order="centred2", tracer_before=base,
-            active_mask=mask, low_order_predictor="nemo_rk3_two_step",
-            base_thickness=h, after_thickness=h,
-            return_nemo_split=True))()
-        assert bool(jnp.any(
-            ordinary_split[0] + ordinary_split[1] != low_div))
-
-    def test_nemo_metric_two_step_dry_zero_thickness_stays_finite(self):
-        """legoESM's zero dry thickness must represent NEMO's masked row."""
-        from legoesm.ocean.fidelity.nemo_testcase_recipe import (
-            build_nemo_testcase_card,
-        )
-        grid = build_nemo_testcase_card("GYRE-zco").recipe.grid
-        n_lat, n_lon, nlev = grid.n_lat, grid.n_lon, 30
-        base = jnp.broadcast_to(
-            jnp.linspace(12.0, 4.0, nlev), (n_lat, n_lon, nlev))
-        mask = jnp.ones_like(base).at[:, 0, :].set(0.0)
-        h = jnp.full_like(base, 100.0) * mask
-        p_u = jnp.ones((n_lat, n_lon + 1, nlev), dtype=jnp.float64)
-        p_v = jnp.zeros((n_lat + 1, n_lon, nlev), dtype=jnp.float64)
-        p_w = jnp.zeros((n_lat, n_lon, nlev + 1), dtype=jnp.float64)
-        rows = jax.jit(nemo_fct_two_step_upstream_rows)(
-            base, p_u, p_v, p_w, h, h, mask, mask,
-            1.0 / jnp.asarray(grid.area_T), 1.0)
-
-        assert all(bool(jnp.all(jnp.isfinite(row))) for row in rows)
-        np.testing.assert_array_equal(
-            np.asarray(rows[4][:, 0, :]),
-            np.zeros((n_lat, nlev), dtype=np.float64),
-        )
 
 
 # ---------------------------------------------------------------------------
