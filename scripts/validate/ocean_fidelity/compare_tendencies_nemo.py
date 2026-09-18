@@ -1163,6 +1163,15 @@ def main():
                 "n2_ours_median": float(np.median(n2_ours[_m])),
                 "shear2_ours_median": float(np.median(
                     sh2_o[_m] / np.maximum(e3w_a2, 1e-12)[_m] ** 2)),
+                # The four diffusivities on the SAME cells. If our Ri is huge
+                # because the shelf is quiescent, and NEMO's Prandtl is
+                # nonetheless ~2, then NEMO's avt must carry something its avm
+                # does not -- and these four numbers say so directly instead
+                # of by inference.
+                "K_H_ours_median": float(np.median(K_H2[_m])),
+                "K_M_ours_median": float(np.median(K_M2[_m])),
+                "avt_nemo_median": float(np.median(avt_a2(d)[_m])),
+                "avm_nemo_median": float(np.median(avm_i[_m])),
             })
         result["shear_order_shallow"] = _sh_rows
         print("\n--- Shear order RESTRICTED to the defect geometry "
