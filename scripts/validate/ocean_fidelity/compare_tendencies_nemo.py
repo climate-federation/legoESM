@@ -348,7 +348,7 @@ def run_stage_a(d, cfg):
     return K_H, avt_i, wet_pair, (z, ny, nx), K_M, avm_i
 
 
-def _bathy_kwargs(T_c, dz_c, cfg):
+def _bathy_kwargs(T_raw, e3t_raw, cfg):
     """Per-column seafloor index and wet-interface mask, from the state itself.
 
     NEMO's land cells arrive as NaN, so the wet-cell count per column IS the
@@ -360,7 +360,13 @@ def _bathy_kwargs(T_c, dz_c, cfg):
     """
     import jax.numpy as jnp   # module scope has numpy only; see load_pair
 
-    wet_cell = np.isfinite(T_c) & (dz_c > 1e-6)
+    # T_raw and e3t_raw MUST still carry their NaNs. run_stage_a2_mode_a fills
+    # them (nan_to_num on T, 35.0 on S, 1.0 on e3t) before stepping, and an
+    # earlier version of this helper read the FILLED arrays: every column then
+    # measured 75 of 75 levels wet and the mask was all ones, which is why the
+    # first --use-bathy arm came back bit-identical. The print below exists to
+    # catch exactly that, and did.
+    wet_cell = np.isfinite(T_raw) & np.isfinite(e3t_raw) & (e3t_raw > 1e-6)
     n_wet = wet_cell.sum(axis=1)
     n_iface = wet_cell.shape[1] - 1
     w_active = (wet_cell[:, :-1] & wet_cell[:, 1:]).astype(np.float64)
@@ -385,6 +391,12 @@ def _bathy_kwargs(T_c, dz_c, cfg):
 
 def run_stage_a2_mode_a(d, rst, cfg_prog, iwm_maps=None,
                         ice_frac=None, use_bathy=False):
+    # The closure gates bottom_dirichlet behind TKEConfig.bottom_tke_bc and
+    # raises if the value is supplied with the gate off -- a second
+    # silent-no-op guard, and it fired. Enabling it is part of THIS arm's one
+    # variable ("give the closure the bottom boundary"), not a separate knob.
+    if use_bathy:
+        cfg_prog = cfg_prog._replace(bottom_tke_bc=True)
     """EXACT Mode-A closure test: NEMO's own restart state INCLUDING the
     prognostic ``en`` -> ONE legoESM en-step (dt=3600, n_iterations=1) ->
     K_H vs NEMO's avt of the very next step (hourly record 0). Same state,
@@ -402,7 +414,8 @@ def run_stage_a2_mode_a(d, rst, cfg_prog, iwm_maps=None,
         return np.transpose(a.reshape(z, ncol), (1, 0))
 
     e3t = d["e3t"]  # rec r0 geometry (ssh drift over 1 h is negligible)
-    T_c = np.nan_to_num(cols(T3), nan=0.0)
+    T_raw = cols(T3)            # KEEP the NaNs: they ARE the land mask
+    T_c = np.nan_to_num(T_raw, nan=0.0)
     S_c = np.where(np.isfinite(cols(S3)), cols(S3), 35.0)
     u_c = np.nan_to_num(cols(u_to_T(rst["un"])), nan=0.0)
     v_c = np.nan_to_num(cols(v_to_T(rst["vn"])), nan=0.0)
@@ -444,7 +457,7 @@ def run_stage_a2_mode_a(d, rst, cfg_prog, iwm_maps=None,
         # without w_active there is no wet-interface mask to stop the sweeps
         # at the bottom either. ORCA1's Antarctic shelf is a few hundred
         # metres deep on a 75-level ladder reaching ~5000 m.
-        **(_bathy_kwargs(T_c, dz_c, cfg_prog) if use_bathy else {}),
+        **(_bathy_kwargs(T_raw, cols(e3t), cfg_prog) if use_bathy else {}),
         dz_ref=jnp.asarray(dz_ref_1d),
         jacobian=jnp.asarray(np.ones((ncol,), dtype=dz_c.dtype)),
         # Same ladders as Stage A, for the same reason -- built from NEMO's
