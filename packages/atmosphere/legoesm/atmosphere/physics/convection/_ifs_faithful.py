@@ -41,7 +41,7 @@ from legoesm.atmosphere.physics.convection._ifs_tendencies import IFSTendencyCon
 from legoesm.atmosphere.physics.convection._ifs_flux import (
     ifs_convective_fluxes,
 )
-from legoesm.constants import R_d, c_pd as C_cpd
+from legoesm.constants import R_d, c_pd as C_cpd, g
 
 from ._ifs_test_ascent import ifs_departure_search_refined
 from ._ifs_ascent import ifs_updraught_ascent
@@ -297,14 +297,32 @@ def ifs_faithful_convection(T, q_v, p_full, p_half, u, v, conv_prog_profile,
         PMFULf, PLUDEf, PDMFUPf,
         dt, IFSTendencyConfig())
 
+    # --- 4b. hand the detrained condensate and the generated precipitation
+    # back to the HOST water budget.  cudtdqn.F90:343-347 already sinks BOTH
+    # from the vapour (zdqdt carries -PLUDE - PDMFUP scaled by g/dp), so
+    # without these sources the host destroys water at exactly the rate the
+    # plume detrains and rains out.  PLUDE/PDMFUP arrive in kg m-2 s-1
+    # (cumastrn.F90:147-148; cumastrn does NOT divide them by the layer
+    # mass -- the receiving scheme does), and zdp is built exactly as
+    # _ifs_tendencies.py builds its own ZDP (cudtdqn.F90:234), so the host
+    # source and the cudtdqn sink cannot drift apart.
+    zdp = g / (p_half[:, 1:] - p_half[:, :-1])
+    # No clip: PLUDE (detrainment rate x updraught liquid) and PDMFUP
+    # (cuascn.F90:787) are products of non-negative factors all the way down
+    # this chain, so a negative value here would be a sign bug to surface,
+    # not to clip away -- a silent clip at this seam is a water leak in the
+    # opposite direction.
+    dq_c_conv_dt = zdp * PLUDEf
+    dq_r_conv_dt = zdp * PDMFUPf
+
     out = out_ctor(
         dT_dt=dT_dt,
         dq_v_dt=dq_dt,
-        dq_c_conv_dt=jnp.zeros_like(dq_dt),  # detrained condensate (PLUDE) source
+        dq_c_conv_dt=dq_c_conv_dt,           # detrained condensate (PLUDE)
         cape=clo["zcape"],
         convective_mask=ldcum,
         du_dt_conv=None,                     # no CMT on the faithful path yet
         dv_dt_conv=None,
-        dq_r_conv_dt=None,                   # tendency module returns no precip rate
+        dq_r_conv_dt=dq_r_conv_dt,           # rain generation (PDMFUP)
     )
     return out, M_uf

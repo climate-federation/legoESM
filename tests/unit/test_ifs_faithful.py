@@ -249,3 +249,59 @@ def test_closure_divides_by_the_mass_flux_that_launched_the_ascent(monkeypatch):
     bechtold_convection(T, q, p_full, p_half,
                         config=BechtoldConfig(use_ifs_ascent=True), **kw)
     np.testing.assert_allclose(seen["M_b0"], seen["M_b_launch"], rtol=1e-6)
+
+
+@pytest.fixture
+def _x64():
+    """The budget residual is a difference of telescoping flux terms, so it is
+    float32 roundoff that has to be small, not the budget; the check needs x64
+    to be meaningful at the stated tolerance (codex review)."""
+    orig = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    yield
+    jax.config.update("jax_enable_x64", orig)
+
+
+def test_convective_water_is_conserved(_x64):
+    """Column water budget: what cudtdqn sinks as vapour must come back.
+
+    cudtdqn.F90:343-347 removes PLUDE (detrained condensate) and PDMFUP
+    (precipitation generation) from PTENQ, scaled by ZDP = RG/dp; the host
+    contract returns them as dq_c_conv_dt = PLUDE*g/dp (anvil cloud water,
+    added to q_c next step) and dq_r_conv_dt = PDMFUP*g/dp (rain, whose
+    column integral leaves as surface precipitation).  With m_k = dp_k/g the
+    closed budget is sum_k m_k*(dq_v_dt + dq_c_conv_dt + dq_r_conv_dt) = 0:
+    the tendency module's interior rows telescope against its JK = KLEV row,
+    so only the returned sources are left.  The tolerance is RELATIVE to the
+    summed size of the terms; an absolute epsilon would pass on an inert
+    column, which the non-vacuity assert also rules out.
+    """
+    T, q, p_full, p_half = _deep_column()
+    ncol, nlev = T.shape
+    kw = _kwargs(ncol, nlev)
+    kw["dq_dt_dyn"] = jnp.full((ncol, nlev), 1e-8)   # the active-column recipe
+    out, _, _ = bechtold_convection(                 # of test_no_cloud_edge_dipole
+        T, q, p_full, p_half,
+        config=BechtoldConfig(use_ifs_ascent=True),
+        dT_dt_rad=jnp.full((ncol, nlev), -1.5 / 86400.0), **kw)
+
+    # bookkeeping in float64 so the check adds no roundoff of its own
+    dp = (np.asarray(p_half[0, 1:], np.float64)
+          - np.asarray(p_half[0, :-1], np.float64))
+    mass = dp / float(constants.g)                    # m_k = dp_k/g [kg m-2]
+    dq_v = np.asarray(out.dq_v_dt[0], np.float64)
+    dq_c = np.asarray(out.dq_c_conv_dt[0], np.float64)
+    dq_r = np.asarray(out.dq_r_conv_dt[0], np.float64)
+
+    sink = float(np.sum(dq_v * mass))
+    detrained = float(np.sum(dq_c * mass))
+    rained = float(np.sum(dq_r * mass))
+    scale = float(np.sum((np.abs(dq_v) + np.abs(dq_c) + np.abs(dq_r)) * mass))
+
+    assert detrained + rained > 0.0, (detrained, rained)   # not vacuous
+    assert np.all(dq_c >= 0.0)      # the driver relies on both being sources
+    assert np.all(dq_r >= 0.0)
+    residual = sink + detrained + rained
+    assert abs(residual) <= 1.0e-5 * scale, (
+        "convective water not conserved", residual, scale, sink, detrained,
+        rained)

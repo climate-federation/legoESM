@@ -1667,9 +1667,9 @@ class BechtoldConfig(NamedTuple):
     # the two lowest levels) and the humidity convention across the trigger /
     # ascent seam (q_v, q_u and l_u are all PQEN / PQU / PLU specific humidity,
     # cubasen.F90:72 and :677-678) and the KTYPE reclassification against the
-    # actual ascent top (cumastrn.F90:635-641).  Still open: the detrained
-    # condensate and the convective precipitation are dropped from the host
-    # water budget while their latent heating is kept, the early return
+    # actual ascent top (cumastrn.F90:635-641) and the return of the detrained
+    # condensate and the convective precipitation to the host water budget.
+    # Still open: the early return
     # bypasses the legacy downdraught and sub-cloud evaporation rather than
     # keeping them, and the ported ascent does not return an updated LDCUM
     # (CUASCN has it INOUT and clears it for mid-level columns, cuascn.F90:389
