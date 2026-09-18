@@ -5,7 +5,11 @@
 #SBATCH --time=08:00:00
 #SBATCH --cpus-per-task=8
 #SBATCH --gres=gpu:2
-#SBATCH --constraint=a100
+# The card model is pinned so a mixed allocation cannot turn a bitwise comparison
+# into a comparison of GPU kernels. It must be rtx8000, NOT a100: only 8 a100
+# nodes exist in `short` and the exclusion below removes five of them (g189-g193),
+# leaving 3 against the 12 this gate needs -- an a100 pin here is unsatisfiable.
+#SBATCH --constraint=rtx8000
 #SBATCH --exclusive
 # NODE EXCLUSION (user call 2026-09-16). These nodes compile the sharded
 # step in full and then HANG in its first execution -- NCCL reaches
