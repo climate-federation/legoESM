@@ -12,7 +12,7 @@ WT=/burg-archive/glab/users/pg2328/legoESM
 LOG=$WT/omip_nemo/cdx_bilin_body_${SLURM_JOB_ID}.txt
 echo "=== repo $WT at $(git -C $WT rev-parse --short HEAD) ==="
 codex exec --sandbox read-only -C $WT \
-"Adversarially review commit 089d10b75 (git show 089d10b75): bilinear
+"Adversarially review commit 5f9c0b1aa (git show 5f9c0b1aa): bilinear
 CORE-II forcing sampling on the tripole, replacing nearest-neighbour, in
 packages/ocean/legoesm/ocean/coupler/omip2_applicator.py.  ATTACK:
 1. _bilinear_point_maps correctness: the latitude bracket uses argsort +

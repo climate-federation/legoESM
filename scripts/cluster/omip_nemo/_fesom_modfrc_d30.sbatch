@@ -70,7 +70,7 @@ done
 ICE_INIT=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/Ice_initialization.nc
 [ -r "$ICE_INIT" ] || { echo "FATAL: missing $ICE_INIT"; exit 1; }
 
-export PYTHONPATH="$FJX:$(ls -d $REPO/packages/*/ | sed 's:/$::' | tr '\n' ':')$REPO"
+export PYTHONPATH="$FJX:$REPO/src:$(ls -d $REPO/packages/*/ | sed 's:/$::' | tr '\n' ':')$REPO"
 export JAX_ENABLE_X64=0     # fesom-jax published hindcast runs f32; keep ITS convention
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 

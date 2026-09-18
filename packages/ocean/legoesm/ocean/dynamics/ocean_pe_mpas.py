@@ -99,6 +99,7 @@ def mpas_ocean_baroclinic_tendencies(
     surface_forcing=None,
     sponge=None,
     halo_refresh=None,
+    term_diagnostics: bool = False,
 ) -> MPASOceanTendencies:
     """Compute baroclinic (slow) tendencies for MPAS ocean.
 
@@ -1079,6 +1080,13 @@ def mpas_ocean_baroclinic_tendencies(
                 normalize=bool(getattr(config, "normalize_freshwater", False)),
                 owned_mask=_hr_owned,
             )
+        # Temperature twin (2026-09-05; shared helper, see the lat-lon core):
+        # the surface heat flux carries the rain/evap/restoring heat content,
+        # so the same water must dilute temperature (NEMO trasbc emp*sst).
+        from legoesm.ocean.freshwater import virtual_closure_temperature_twin
+        _dT_twin = virtual_closure_temperature_twin(
+            freshwater, T_3d[:, 0], h_k[:, 0], config.rho_0, mask)
+        dT_dt_3d = dT_dt_3d.at[:, 0].add(_dT_twin.astype(dT_dt_3d.dtype))
 
     # ---- Real salt-mass flux (e.g. sea-ice brine rejection) ----
     # A top-layer salinity SOURCE distinct from the freshwater virtual-salt
@@ -1144,6 +1152,23 @@ def mpas_ocean_baroclinic_tendencies(
             gamma_edge_3d = gamma_edge[:, jnp.newaxis]
             du_dt_3d = du_dt_3d + gamma_edge_3d * (sponge.u_ref.astype(_dt) - u_3d) * edge_mask[:, jnp.newaxis]
 
+    if term_diagnostics:
+        # Debug-only: the momentum tendency split by operator (masked as in
+        # du_dt_full). Static Python flag, so the production trace is untouched.
+        return MPASOceanTendencies(
+            du_dt=Field(data=du_dt_3d, name="du_dt",
+                        dims=("nEdges", "nlev"), units="m/s²"),
+            dT_dt=Field(data=dT_dt_3d, name="dT_dt",
+                        dims=("nCells", "nlev"), units="degC/s"),
+            dS_dt=Field(data=dS_dt_3d, name="dS_dt",
+                        dims=("nCells", "nlev"), units="PSU/s"),
+            deta_dt=Field(data=deta_dt, name="deta_dt",
+                          dims=("nCells",), units="m/s"),
+            F_slow_u=Field(data=F_slow_u, name="F_slow_u",
+                           dims=("nEdges",), units="m/s²"),
+        ), {"grad_B": -grad_B * edge_mask_3d, "pv_flux": pv_flux * edge_mask_3d,
+            "visc": visc * edge_mask_3d, "vert_adv_u": vert_adv_u * edge_mask_3d,
+            "du_dt_full": du_dt_full, "w_e": w_e, "h_e_3d": h_e_3d}
     return MPASOceanTendencies(
         du_dt=Field(data=du_dt_3d, name="du_dt",
                     dims=("nEdges", "nlev"), units="m/s²"),

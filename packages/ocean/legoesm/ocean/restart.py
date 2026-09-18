@@ -277,6 +277,11 @@ _SLOT_POLICY: dict[str, str] = {
     # Prognostic eddy / turbulent kinetic energy + their histories.
     "eke": _SLOT_PROGNOSTIC, "tke": _SLOT_PROGNOSTIC,
     "dtke": _SLOT_PROGNOSTIC, "eke_diss": _SLOT_PROGNOSTIC,
+    # NEMO zdftke closure memory read by the NEXT step's matrix (avm_k/avt_k
+    # under carried_previous_step, SAVE'd dissl, surface avm_k): carried
+    # state, not a diagnostic -- dropping it changes the first restarted step.
+    "tke_avm": _SLOT_PROGNOSTIC, "tke_avt": _SLOT_PROGNOSTIC,
+    "tke_dissl": _SLOT_PROGNOSTIC, "tke_avm_surface": _SLOT_PROGNOSTIC,
     # AB2 outer-integrator increments.
     "T_incr_prev": _SLOT_PROGNOSTIC, "S_incr_prev": _SLOT_PROGNOSTIC,
     "u_incr_prev": _SLOT_PROGNOSTIC, "v_incr_prev": _SLOT_PROGNOSTIC,

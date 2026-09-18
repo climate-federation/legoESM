@@ -8,7 +8,7 @@
 #SBATCH --output=/burg-archive/glab/users/pg2328/legoESM/omip_nemo/kappa_gm_%j.out
 set +e
 ROOT=/burg/glab/users/pg2328/legoESM; cd $ROOT
-export PYTHONPATH="$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT"
+export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT"
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 SNAP=$ROOT/results/omip_nemo/nemolev_trpsbc_ndir_mxl3_prog/snapshot_day0030.npz

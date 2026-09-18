@@ -1276,7 +1276,20 @@ def unesco80_eos(
     Parameters
     ----------
     T : array
-        Potential temperature [°C]. Valid range: -2 to 40 °C.
+        IN-SITU temperature [°C] (IPTS-68). Valid range: -2 to 40 °C.
+
+        This said "Potential temperature" until 2026-09-11 and that was
+        WRONG. UNESCO 1980 is the in-situ standard; the potential-temperature
+        refit is Jackett & McDougall 1995, a different polynomial. Measured
+        against the published in-situ check value
+        ``rho(S=35, T=25, p=10000 dbar) = 1062.538``, this function returns
+        1062.5382 -- agreement to 2e-4 kg/m³, which it could not achieve if
+        it were a θ-form. Every prognostic tracer in this package is
+        POTENTIAL temperature, so callers must convert with
+        :func:`potential_temperature`'s inverse before using this EOS;
+        feeding θ straight in leaves the deep ocean too dense by roughly the
+        adiabatic compression term. The OMIP runner refuses to select it for
+        exactly this reason (``_OMIP_EOS_FORMS``).
     S : array
         Practical salinity [PSU]. Valid range: 0 to 42 PSU.
     p : array
@@ -2979,7 +2992,13 @@ def nemo_eos_fzp(S_psu, depth_m=None):
     ``T_f(S, z) = S · P(√(S/S0)) − 7.53e-4 · z`` with the eosbn2.F90
     polynomial ``P``; ``depth_m`` positive down (``None`` = surface).
     """
-    zs = jnp.sqrt(jnp.abs(jnp.asarray(S_psu)) / _NEMO_FZP_S0)
+    # At S=0 the full S*P(sqrt(abs(S)/S0)) has derivative P(0), but
+    # differentiating the unguarded square root produces 0*inf -> NaN.
+    # Guard inside sqrt as well as outside; retain the exact forward value.
+    sal_abs = jnp.abs(jnp.asarray(S_psu))
+    nonzero = sal_abs > 0.0
+    zs = jnp.where(nonzero, jnp.sqrt(jnp.where(
+        nonzero, sal_abs / _NEMO_FZP_S0, 1.0)), 0.0)
     poly = ((((_NEMO_FZP_C5 * zs + _NEMO_FZP_C4) * zs + _NEMO_FZP_C3) * zs
              + _NEMO_FZP_C2) * zs + _NEMO_FZP_C1) * zs + _NEMO_FZP_C0
     tf = poly * jnp.asarray(S_psu)
