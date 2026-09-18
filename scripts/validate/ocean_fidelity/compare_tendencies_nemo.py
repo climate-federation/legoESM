@@ -142,38 +142,57 @@ def v_to_T(v):
 def shear_order_squared(un, vn):
     """Shear-squared under NEMO's order vs the centred-average order.
 
-    Both are built from the SAME native C-grid velocities, so the only
-    difference is WHERE the square is taken:
+    Both are built from the SAME native C-grid velocities and, critically,
+    from the SAME set of faces with the SAME denominator, so the ONLY thing
+    that differs is where the square is taken:
 
       NEMO (zdfsh2)   square the vertical difference AT EACH FACE, then
-                      average the two faces onto the T-column.
-      ours            average the velocity onto the T-column FIRST
-                      (``u_to_T``/``v_to_T``), then difference and square.
+                      average over the contributing faces
+      ours            average the velocity over those faces FIRST, then
+                      difference and square
 
-    Jensen: 0.5(a^2 + b^2) - ((a+b)/2)^2 = 0.25 (a-b)^2 >= 0, so the NEMO
-    order is ALWAYS >= ours, with equality only where the two faces carry the
-    identical vertical difference. A measured ratio below 1 is therefore a bug
-    in this function, not a finding -- the caller asserts it.
+    Jensen then gives ratio >= 1 pointwise, with equality where the two faces
+    carry the identical vertical difference (including every one-face coastal
+    column). The caller asserts that floor.
 
-    The common 1/e3w^2 factor is omitted: it multiplies both sides
-    identically and cancels in the ratio, so this needs no depth ladder and
-    inherits no e3w approximation.
+    THE FACE SET IS MASK-AWARE, AND THE FIRST VERSION OF THIS FUNCTION WAS NOT.
+    It averaged the NEMO side over 2 faces unconditionally while ``u_to_T``
+    divides by the number of FINITE neighbours, so a column with one dry face
+    returned exactly 0.5 and tripped the assertion on the first run. A face
+    counts here only when BOTH of its levels are finite, and both sides then
+    divide by that same count. (NEMO's real zdfsh2 instead DOUBLES production
+    next to coasts via ``2 - umask*umask``; that compensation is deliberately
+    NOT reproduced, because this probe isolates the squaring order alone.)
+
+    The common 1/e3w^2 multiplies both sides identically and is omitted, so
+    the ratio needs no depth ladder and inherits no e3w approximation.
 
     Returns ``(sh2_nemo, sh2_ours)`` as ``(ncol, z-1)`` on the interior
     interfaces, matching the wet_pair/lat_col layout the reports use.
     """
     z, ny, nx = un.shape
-    uu = np.nan_to_num(un, nan=0.0)
-    vv = np.nan_to_num(vn, nan=0.0)
-    du = uu[:-1] - uu[1:]                      # at U-points, (z-1, ny, nx)
-    dv = vv[:-1] - vv[1:]                      # at V-points
-    sh2_n = (0.5 * (du ** 2 + np.roll(du ** 2, 1, axis=-1))
-             + 0.5 * (dv ** 2 + np.roll(dv ** 2, 1, axis=-2)))
-    uT = u_to_T(un)
-    vT = v_to_T(vn)
-    duT = uT[:-1] - uT[1:]
-    dvT = vT[:-1] - vT[1:]
-    sh2_o = duT ** 2 + dvT ** 2
+
+    def _pair(vel, axis):
+        v = np.nan_to_num(vel, nan=0.0)
+        fin = np.isfinite(vel).astype(np.float64)
+        face = fin[:-1] * fin[1:]                 # both levels finite
+        dv = (v[:-1] - v[1:]) * face
+        den = face + np.roll(face, 1, axis=axis)
+        den_s = np.maximum(den, 1.0)
+        # NEMO order: square at the face, then average over live faces
+        sq = (dv ** 2 + np.roll(dv ** 2, 1, axis=axis)) / den_s
+        # our order: average the two levels over the SAME live faces, then
+        # difference and square
+        up = (v[:-1] * face + np.roll(v[:-1] * face, 1, axis=axis)) / den_s
+        lo = (v[1:] * face + np.roll(v[1:] * face, 1, axis=axis)) / den_s
+        ct = (up - lo) ** 2
+        live = den > 0
+        return np.where(live, sq, 0.0), np.where(live, ct, 0.0)
+
+    su_n, su_o = _pair(un, -1)
+    sv_n, sv_o = _pair(vn, -2)
+    sh2_n = su_n + sv_n
+    sh2_o = su_o + sv_o
 
     def _cols(a):
         return np.transpose(a.reshape(z - 1, ny * nx), (1, 0))
