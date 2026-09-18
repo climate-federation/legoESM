@@ -487,6 +487,10 @@ def test_stage1_handoff_walk_is_one_boundary_and_uses_full_production_step():
     assert 'execution_mode="production-eager"' not in source
     assert "stage1_full_rhs: object" in model_source
     assert "_nemo_ws_live_stage1_full_rhs = (du_dt, dv_dt)" in model_source
+    assert "(du_dt, dv_dt) if _vector_velocity_stage_update" in model_source
+    assert "and not _vector_velocity_stage_update):" in model_source
+    assert "if not _vector_velocity_stage_update:" in model_source
+    assert "None if _vector_velocity_stage_update else" in model_source
     isolated = source.split("def _stage1_isolated_handoff", 1)[1].split(
         "def _stage1_handoff_walk", 1)[0]
     assert "external = _barotropic_override(records, advmean_root, 1)" in isolated
