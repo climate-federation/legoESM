@@ -500,14 +500,12 @@ def measure(args) -> dict:
         if not capture_fct_split:
             return real_fct(*values, **kwargs)
         result = real_fct(*values, return_nemo_split=True, **kwargs)
-        div_h, div_w, split = result
+        div_h, div_w, split, nemo_rhs = result
         low_h, low_w, anti_h, anti_w = split
         h_kmm = values[4]
-        h_safe = jnp.maximum(h_kmm, jnp.asarray(1.0e-10, h_kmm.dtype))
         low_div = nemo_source_round(low_h + low_w)
         anti_div = nemo_source_round(anti_h + anti_w)
-        upstream_rhs = nemo_source_round(-low_div / h_safe)
-        anti_rhs = nemo_source_round(-anti_div / h_safe)
+        combined_rhs, upstream_rhs, anti_rhs = nemo_rhs
         if args.plant_fct_split_ulp:
             active = kwargs.get("active_mask")
             require(active is not None,
@@ -518,8 +516,6 @@ def measure(args) -> dict:
                 flat[at], jnp.asarray(jnp.inf, flat.dtype))).reshape(
                     upstream_rhs.shape)
         split_rhs = nemo_source_round(upstream_rhs + anti_rhs)
-        combined_rhs = nemo_source_round(
-            -nemo_source_round(div_h + div_w) / h_safe)
         base = kwargs.get("tracer_before")
         if base is None:
             base = values[0]
@@ -533,7 +529,7 @@ def measure(args) -> dict:
         jax.debug.callback(
             fct_split_sink, upstream_rhs, anti_rhs, split_rhs, combined_rhs,
             split_content, low_div, anti_div, ordered=True)
-        return div_h, div_w
+        return div_h, div_w, nemo_rhs
 
     def qsr_sink(value):
         qsr_calls.append(np.asarray(value, dtype=np.float64))

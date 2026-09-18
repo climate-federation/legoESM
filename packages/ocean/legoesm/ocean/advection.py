@@ -954,6 +954,7 @@ def fct_tracer_advection(
     nemo_wmask: jnp.ndarray | None = None,
     nemo_reciprocal_area: jnp.ndarray | None = None,
     return_nemo_split: bool = False,
+    return_nemo_rhs: bool = False,
 ) -> tuple:
     """FCT tracer advection: high-order accuracy with guaranteed monotonicity.
 
@@ -1317,9 +1318,34 @@ def fct_tracer_advection(
         F_vert_fct = jnp.pad(
             F_vert_low_int + limited_w, (*pad_axes_v, (1, 1)))
         vert_div_fct = F_vert_fct[..., :-1] - F_vert_fct[..., 1:]
+    nemo_rhs = None
+    if nemo_upstream_rows is not None:
+        # ``fct_up1_2stp`` has already divided the metric-bearing divergence
+        # by e3t(Kmm) when it writes Krhs.  Preserve that stored RHS through
+        # the RK3 content update: converting it back to a divergence here and
+        # dividing again in the caller recreates the very last-bit loss this
+        # source route removes.
+        anti_div = nemo_source_round(div_h_anti + anti_vert_div)
+        anti_rhs = nemo_source_round(
+            -anti_div / jnp.where(
+                compiled_tmask > 0.5, h_k, jnp.ones_like(h_k)))
+        anti_rhs = jnp.where(
+            compiled_tmask > 0.5, anti_rhs, jnp.zeros_like(anti_rhs))
+        low_rhs = nemo_upstream_rows[9]
+        combined_rhs = nemo_source_round(low_rhs + anti_rhs)
+        nemo_rhs = (combined_rhs, low_rhs, anti_rhs)
+    if return_nemo_rhs and nemo_rhs is None:
+        raise ValueError(
+            "return_nemo_rhs requires NEMO metric two-step transports")
+    if return_nemo_split and return_nemo_rhs:
+        return (div_h_fct, vert_div_fct,
+                (div_h_low, vert_div_low, div_h_anti, anti_vert_div),
+                nemo_rhs)
     if return_nemo_split:
-        return div_h_fct, vert_div_fct, (div_h_low, vert_div_low, div_h_anti,
-            anti_vert_div)
+        return (div_h_fct, vert_div_fct,
+                (div_h_low, vert_div_low, div_h_anti, anti_vert_div))
+    if return_nemo_rhs:
+        return div_h_fct, vert_div_fct, nemo_rhs
     return div_h_fct, vert_div_fct
 
 

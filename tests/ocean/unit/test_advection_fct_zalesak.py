@@ -24,6 +24,7 @@ import pytest
 jax.config.update("jax_enable_x64", True)
 
 from legoesm.grids.latlon import create_latlon_grid
+from legoesm.core.source_rounding import nemo_source_round
 from legoesm.ocean.advection import (
     _zalesak_signsplit_face_alphas,
     fct_tracer_advection,
@@ -128,16 +129,21 @@ class TestConservation:
 
         rows = jax.jit(nemo_fct_two_step_upstream_rows)(
             base, p_u, p_v, p_w, h, h, mask, mask, r1_area, 1.0)
-        _, _, split = jax.jit(lambda: fct_tracer_advection(
+        _, _, split, nemo_rhs = jax.jit(lambda: fct_tracer_advection(
             tracer, mass_u, mass_v, w, h, grid, 1.0,
             high_order="centred2", tracer_before=base,
             active_mask=mask, low_order_predictor="nemo_rk3_two_step",
             base_thickness=h, after_thickness=h,
             nemo_metric_transports=(p_u, p_v, p_w),
             nemo_wmask=mask, nemo_reciprocal_area=r1_area,
-            return_nemo_split=True))()
+            return_nemo_split=True, return_nemo_rhs=True))()
         low_div = split[0] + split[1]
         np.testing.assert_array_equal(np.asarray(low_div), np.asarray(-rows[8]))
+        np.testing.assert_array_equal(np.asarray(nemo_rhs[1]), np.asarray(rows[9]))
+        np.testing.assert_array_equal(
+            np.asarray(nemo_rhs[0]),
+            np.asarray(nemo_source_round(nemo_rhs[1] + nemo_rhs[2])),
+        )
         assert bool(jnp.any(rows[8] != 0.0))
 
         _, _, ordinary_split = jax.jit(lambda: fct_tracer_advection(

@@ -558,7 +558,7 @@ def _compute_advection_flux_div(
             "centered/ppm/dst3/weno5/weno7).")
     if tracer_advection in ("ppm_fct", "fct2"):
         from legoesm.ocean.advection import fct_tracer_advection
-        div_hut, vert_flux_div = fct_tracer_advection(
+        fct_result = fct_tracer_advection(
             tr, mass_flux_u, mass_flux_v, w_baro, h_k_old, grid, dt,
             high_order="ppm" if tracer_advection == "ppm_fct" else "centred2",
             tracer_before=tr_before,
@@ -577,7 +577,13 @@ def _compute_advection_flux_div(
             after_thickness=fct_after_thickness,
             implicit_w=fct_implicit_w,
             nemo_metric_transports=fct_nemo_metric_transports,
+            return_nemo_rhs=fct_nemo_metric_transports is not None,
         )
+        if fct_nemo_metric_transports is None:
+            div_hut, vert_flux_div = fct_result
+            nemo_fct_rhs = None
+        else:
+            div_hut, vert_flux_div, nemo_fct_rhs = fct_result
     elif tracer_advection == "ppm":
         from legoesm.ocean.advection import (
             ppm_to_u_points, ppm_to_v_points,
@@ -707,6 +713,8 @@ def _compute_advection_flux_div(
 
     if return_h_fluxes:
         return div_hut, vert_flux_div, _h_flux_pair[0], _h_flux_pair[1]
+    if fct_nemo_metric_transports is not None:
+        return div_hut, vert_flux_div, nemo_fct_rhs
     return div_hut, vert_flux_div
 
 
@@ -1844,7 +1852,7 @@ def _nemo_ws_rk3_tracer_pair_step(
                 # arm.  Passing an all-zero wi array would select a different
                 # Python branch inside FCT and obscure that source contract.
                 fct_implicit_w = None
-            (dh_a, dv_a), (dh_b, dv_b) = compute_advection_flux_div_pair(
+            pair_a, pair_b = compute_advection_flux_div_pair(
                 a_val, b_val, tracer_advection, mf_u, mf_v,
                 w_stage, h_stage, hu_stage, hv_stage, grid, stage_dt,
                 recon_fill_mask=recon_fill_mask,
@@ -1857,8 +1865,15 @@ def _nemo_ws_rk3_tracer_pair_step(
                 fct_implicit_w=fct_implicit_w,
                 fct_nemo_metric_transports=metric_transports,
             )
+            if metric_transports is None:
+                dh_a, dv_a = pair_a
+                dh_b, dv_b = pair_b
+                rhs_a = rhs_b = None
+            else:
+                dh_a, dv_a, nemo_rhs_a = pair_a
+                dh_b, dv_b, nemo_rhs_b = pair_b
+                rhs_a, rhs_b = nemo_rhs_a[0], nemo_rhs_b[0]
             fd_a, fd_b = dh_a + dv_a, dh_b + dv_b
-            rhs_a = rhs_b = None
         if stage_index == 2 and bbl_context is not None:
             from legoesm.ocean.physics.bbl_adv import (
                 apply_bbl_adv_tendency,
@@ -1958,9 +1973,19 @@ def _nemo_ws_rk3_tracer_pair_step(
             h_one_half, h_one_third, 1)
     if stop_after_stage == 2:
         return a2, b2
-    fd2_a, fd2_b, _, _ = _flux_pair(a2, b2, dt, 2, h_k_new)
-    advection_content_a = h_k_old * tr_a - dt * fd2_a
-    advection_content_b = h_k_old * tr_b - dt * fd2_b
+    fd2_a, fd2_b, rhs2_a, rhs2_b = _flux_pair(
+        a2, b2, dt, 2, h_k_new)
+    if rhs2_a is None:
+        advection_content_a = h_k_old * tr_a - dt * fd2_a
+        advection_content_b = h_k_old * tr_b - dt * fd2_b
+    else:
+        stage_weight = nemo_source_round(dt * h_one_half)
+        advection_content_a = nemo_source_round(
+            nemo_source_round(h_k_old * tr_a)
+            + nemo_source_round(stage_weight * rhs2_a))
+        advection_content_b = nemo_source_round(
+            nemo_source_round(h_k_old * tr_b)
+            + nemo_source_round(stage_weight * rhs2_b))
     if stage3_advection_content_override is not None:
         advection_content_a, advection_content_b = (
             stage3_advection_content_override)
