@@ -467,6 +467,69 @@ def test_stage_twin_separates_isolated_jit_from_the_production_step():
     assert '"stage-assignment-output-ulp"' in source
 
 
+def test_stage1_handoff_walk_is_one_boundary_and_uses_full_production_step():
+    source = (
+        TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py"
+    ).read_text()
+    model_source = (
+        ROOT / "packages/ocean/legoesm/ocean/dynamics/"
+        "ocean_model_latlon_cgrid.py"
+    ).read_text()
+    assert '"stage1-handoff-walk"' in source
+    assert '"full_accumulator": trace.stage1_full_rhs' in source
+    assert '"projected_accumulator": trace.stage1_rhs_walk[0]' in source
+    assert '"post_transport": trace.stage1_rhs_walk[1]' in source
+    assert '"post_w_zad": trace.stage1_rhs_walk[2]' in source
+    assert '"rk_input": trace.stage1_rhs_walk[3]' in source
+    assert '"raw_rk": trace.stage_raw_velocities[0]' in source
+    assert '"corrected_output": trace.stage_outputs[0][:2]' in source
+    assert "LatLonCGridOceanModel._step_jitted.__wrapped__" in source
+    assert 'execution_mode="production-eager"' not in source
+    assert "stage1_full_rhs: object" in model_source
+    assert "_nemo_ws_live_stage1_full_rhs = (du_dt, dv_dt)" in model_source
+
+
+def test_stage1_handoff_score_and_nonzero_one_ulp_plant():
+    shape = (NY, NX, NZ)
+    u_ref = np.ones(shape, dtype=np.float64)
+    v_ref = np.full(shape, 2.0, dtype=np.float64)
+    arrays = {
+        f"{prefix}_{face}": value.copy()
+        for prefix in ("after_adv", "post_update", "post_baro")
+        for face, value in (("u", u_ref), ("v", v_ref))
+    }
+    masks = {
+        "u": np.ones((NY - 4, NX - 4, NZ - 1), dtype=bool),
+        "v": np.ones((NY - 4, NX - 4, NZ - 1), dtype=bool),
+    }
+    pair = (
+        gate._u_full(gate._owned3(u_ref)),
+        gate._v_full(gate._owned3(v_ref)),
+    )
+    clean = gate._score_stage1_handoff_pair(
+        pair, arrays, masks, "full_accumulator", "production_step_JIT")
+    assert all(row["classification"] == "BIT" for row in clean["rows"])
+    planted = gate._score_stage1_handoff_pair(
+        pair, arrays, masks, "full_accumulator", "production_step_JIT",
+        plant=True)
+    target = planted["rows"][0]
+    assert target["clean_n_unequal"] == 0
+    assert target["n_unequal"] == 1
+    assert target["plant_index"] is not None
+    assert arrays["after_adv_u"][2:-2, 2:-2, :NZ - 1][
+        target["plant_index"]] != 0.0
+    assert planted["plant_target"] == target["name"]
+
+
+def test_stage1_handoff_cli_plant_is_fail_closed():
+    source = (
+        TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py"
+    ).read_text()
+    assert '"stage1-handoff-output-ulp"' in source
+    assert "stage-1 handoff one-ULP plant did not add exactly one" in source
+    assert 'return 1 if args.plant or report["status"] != "PASS" else 0' in source
+
+
 def test_tke_literal_discriminator_stays_inside_the_production_step():
     source = (TESTCASES / "nemo_testcase_l2_gyre_round46_kt2_stage_gate.py").read_text()
     assert 'tke_langmuir_evaluation="nemo_literal"' in source

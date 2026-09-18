@@ -1665,6 +1665,7 @@ class _NEMOWSLiveOperandTrace(NamedTuple):
     tke_statement_trace: object
     barotropic_targets: object
     stage_rhs: object
+    stage1_full_rhs: object
     stage1_rhs_walk: object
     stage_raw_velocities: object
     barotropic_correction_geometry: object
@@ -5306,7 +5307,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_exposed_stage3_rhs = None
         _nemo_ws_stage_tracers = None
         _nemo_ws_live_stage_states = None; _nemo_ws_live_stage_raw = None; _nemo_ws_live_stage_rhs = None; _nemo_ws_live_baro_geometry = None  # noqa: E501,E702
-        _nemo_ws_live_stage1_rhs_walk = None
+        _nemo_ws_live_stage1_full_rhs = None; _nemo_ws_live_stage1_rhs_walk = None  # noqa: E702
         _nemo_ws_live_stage_qco = None
         _nemo_ws_live_tke_entry = None
         _nemo_ws_live_tke_statement_trace = None
@@ -6427,6 +6428,7 @@ class LatLonCGridOceanModel:
             # 3.136e-07 m/s^2 at the OVERFLOW kt=2 entry, exactly zero from
             # rest).
             _du1_rhs, _dv1_rhs = du_dt_pert, dv_dt_pert
+            _nemo_ws_live_stage1_full_rhs = (du_dt, dv_dt)
             _stage1_rhs_base = (_du1_rhs, _dv1_rhs)
             # The stage's NEMO e3u/e3v(Kmm) pair for the flux-form momentum
             # advection, from the ONE kernel (_nemo_ws_qco_stage_faces) keyed
@@ -8458,6 +8460,7 @@ class LatLonCGridOceanModel:
                     or _nemo_ws_live_stage_states is None
                     or _nemo_ws_live_stage_geometry is None or _nemo_ws_live_stage_raw is None or _nemo_ws_live_stage_rhs is None or _nemo_ws_live_baro_geometry is None  # noqa: E501
                     or _nemo_ws_live_stage_qco is None
+                    or _nemo_ws_live_stage1_full_rhs is None
                     or _nemo_ws_live_stage1_rhs_walk is None
                     or _nemo_ws_live_tke_entry is None
                     or _nemo_ws_live_tke_statement_trace is None):
@@ -8481,6 +8484,7 @@ class LatLonCGridOceanModel:
                                      _eta_live_one_half,
                                      state_new.eta.data)),
                 stage_rhs=_nemo_ws_live_stage_rhs,
+                stage1_full_rhs=_nemo_ws_live_stage1_full_rhs,
                 stage1_rhs_walk=_nemo_ws_live_stage1_rhs_walk,
                 stage_raw_velocities=_nemo_ws_live_stage_raw,
                 barotropic_correction_geometry=_nemo_ws_live_baro_geometry,

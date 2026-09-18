@@ -95,6 +95,15 @@ BN2_INTERMEDIATES = (
     "thickness_division",
     "masked_rn2",
 )
+STAGE1_HANDOFF_BOUNDARIES = (
+    "full_accumulator",
+    "projected_accumulator",
+    "post_transport",
+    "post_w_zad",
+    "rk_input",
+    "raw_rk",
+    "corrected_output",
+)
 OWNED_3D_FIELDS = {"tke_en", "tke_avt_k", "tke_dissl"}
 HEADER_FIELDS = (
     "version",
@@ -3821,6 +3830,37 @@ def _tke_rhs_isolated_rows(
     return report
 
 
+def _execute_production_step(
+    model, step_state, dt, freshwater, surface_forcing, *, execution_mode: str,
+):
+    """Run the ordinary production closure, compiled or with JIT disabled."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+
+    require(execution_mode in ("production-jit", "production-eager"),
+            f"unknown production execution mode {execution_mode!r}")
+    if execution_mode == "production-jit":
+        return model.step(
+            step_state, dt=dt, freshwater=freshwater,
+            surface_forcing=surface_forcing)
+
+    def device_array(value):
+        return (jnp.asarray(value)
+                if isinstance(value, (np.ndarray, np.generic)) else value)
+
+    step_state = jax.tree_util.tree_map(device_array, step_state)
+    freshwater = jax.tree_util.tree_map(device_array, freshwater)
+    surface_forcing = jax.tree_util.tree_map(device_array, surface_forcing)
+    step_state = model._seed_tke_preclosure_carry(step_state)
+    model.prime_step_caches(step_state)
+    with jax.disable_jit():
+        return LatLonCGridOceanModel._step_jitted.__wrapped__(
+            model, step_state, dt, freshwater, surface_forcing)
+
+
 def _tke_program_twin(
     records: dict, advmean_root: Path, memory_root: Path,
     tke_statement_record: dict, tke_operand_record: dict,
@@ -3857,24 +3897,9 @@ def _tke_program_twin(
                 f"unknown bn2 intermediate {bn2_intermediate!r}")
 
     def production_step(model, step_state, dt, freshwater, surface_forcing):
-        if execution_mode == "production-jit":
-            return model.step(
-                step_state, dt=dt, freshwater=freshwater,
-                surface_forcing=surface_forcing)
-        def device_array(value):
-            return (jnp.asarray(value)
-                    if isinstance(value, (np.ndarray, np.generic))
-                    else value)
-
-        step_state = jax.tree_util.tree_map(device_array, step_state)
-        freshwater = jax.tree_util.tree_map(device_array, freshwater)
-        surface_forcing = jax.tree_util.tree_map(
-            device_array, surface_forcing)
-        step_state = model._seed_tke_preclosure_carry(step_state)
-        model.prime_step_caches(step_state)
-        with jax.disable_jit():
-            return LatLonCGridOceanModel._step_jitted.__wrapped__(
-                model, step_state, dt, freshwater, surface_forcing)
+        return _execute_production_step(
+            model, step_state, dt, freshwater, surface_forcing,
+            execution_mode=execution_mode)
 
     card = build_nemo_testcase_card("GYRE-zco")
     cfg = card.recipe.model_config._replace(
@@ -4131,6 +4156,211 @@ def _tke_program_twin(
         "given_nemo_entry_shear_walk": given_shear,
         "chained": _tke_production_statement_rows(
             chained_trace, tke_statement_record, "LEGO_CHAINED"),
+    }
+
+
+def _stage1_handoff_pair(trace, boundary: str):
+    """Select exactly one stage-1 momentum pair from the live step trace."""
+    require(boundary in STAGE1_HANDOFF_BOUNDARIES,
+            f"unknown stage-1 handoff boundary {boundary!r}")
+    pairs = {
+        "full_accumulator": trace.stage1_full_rhs,
+        "projected_accumulator": trace.stage1_rhs_walk[0],
+        "post_transport": trace.stage1_rhs_walk[1],
+        "post_w_zad": trace.stage1_rhs_walk[2],
+        "rk_input": trace.stage1_rhs_walk[3],
+        "raw_rk": trace.stage_raw_velocities[0],
+        "corrected_output": trace.stage_outputs[0][:2],
+    }
+    return pairs[boundary]
+
+
+def _score_stage1_handoff_pair(
+    pair, arrays: dict, masks: dict, boundary: str, execution: str,
+    *, plant: bool = False,
+) -> dict:
+    """Bit-score one selected U/V handoff; a plant moves one U reference."""
+    reference_boundary = (
+        "post_update" if boundary == "raw_rk"
+        else "post_baro" if boundary == "corrected_output"
+        else "after_adv")
+    rows = []
+    plant_target = None
+    for face, full_candidate in zip(("u", "v"), pair, strict=True):
+        candidate = np.asarray(full_candidate)
+        candidate = (candidate[:, 1:, :] if face == "u"
+                     else candidate[1:, :, :])
+        reference = _owned3(arrays[f"{reference_boundary}_{face}"]).copy()
+        active = masks[face]
+        clean = _bitwise_classification(score(
+            f"GYRE-zco.kt1.s1.handoff.{boundary}.{face}.{execution}",
+            reference, candidate, active))
+        scored_reference = reference
+        planted_at = None
+        if plant and face == "u":
+            equal = (
+                np.ascontiguousarray(candidate).view(np.uint64)
+                == np.ascontiguousarray(reference).view(np.uint64)
+            ) & active & np.isfinite(reference) & (reference != 0.0)
+            indices = np.argwhere(equal)
+            require(indices.size > 0,
+                    "stage-1 handoff plant found no exact finite nonzero U cell")
+            planted_at = tuple(int(value) for value in indices[0])
+            scored_reference = reference.copy()
+            scored_reference[planted_at] = np.nextafter(
+                scored_reference[planted_at], np.float64(np.inf))
+        row = _bitwise_classification(score(
+            f"GYRE-zco.kt1.s1.handoff.{boundary}.{face}.{execution}",
+            scored_reference, candidate, active))
+        row.update({
+            "kt": 1,
+            "stage": 1,
+            "face": face,
+            "boundary": boundary,
+            "execution": execution,
+            "reference_boundary": reference_boundary,
+            "clean_n_unequal": clean["n_unequal"],
+            "clean_absolute_max": clean["absolute_max"],
+            "plant_index": planted_at,
+        })
+        rows.append(row)
+        if planted_at is not None:
+            require(row["n_unequal"] == clean["n_unequal"] + 1,
+                    "stage-1 handoff one-ULP plant did not add exactly one "
+                    "unequal cell")
+            plant_target = row["name"]
+    require(not plant or plant_target is not None,
+            "stage-1 handoff plant did not reach its production target")
+    return {"rows": rows, "plant_target": plant_target, "plant": plant}
+
+
+def _stage1_isolated_handoff(records: dict, card, masks: dict,
+                             boundary: str) -> dict:
+    """JIT the shared RK write/correction with NEMO's recorded operands."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.dynamics.barotropic_common import (
+        nemo_reference_depth_reciprocal,
+        rk3_stage_barotropic_correction,
+    )
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        rk3_stage_velocity_update,
+    )
+
+    require(boundary in ("raw_rk", "corrected_output"),
+            "isolated JIT is defined only for the RK write and correction")
+    a = records[(1, 1)]["arrays"]
+
+    def operands(face: str):
+        widen = _u_full if face == "u" else _v_full
+        before = widen(_owned3(a[f"{face}_Kbb"]))
+        rhs = widen(_owned3(a[f"after_adv_{face}"]))
+        mask = widen(_owned3(a[f"{face}mask"]))
+        thickness = widen(_owned3(a[f"e3{face}_0"]))
+        target = widen(_owned2(a[f"{face}{face}_b_Kaa"]))
+        mask2d = np.max(mask, axis=-1)
+        return tuple(jnp.asarray(value) for value in (
+            before, rhs, mask, thickness, target, mask2d))
+
+    def isolated(before, rhs, mask, thickness, target, mask2d):
+        raw = rk3_stage_velocity_update(
+            before, rhs, np.float64(card.dt_s / 3.0), mask,
+            vector_form=True)
+        reciprocal = nemo_reference_depth_reciprocal(
+            jnp.sum(thickness, axis=-1), mask2d)
+        corrected = rk3_stage_barotropic_correction(
+            raw, target, thickness, reciprocal, mask)
+        return raw, corrected
+
+    compiled = jax.jit(isolated)
+    selected = []
+    for face in ("u", "v"):
+        raw, corrected = jax.device_get(compiled(*operands(face)))
+        selected.append(raw if boundary == "raw_rk" else corrected)
+    return _score_stage1_handoff_pair(
+        tuple(selected), a, masks, boundary, "isolated-closure_JIT")
+
+
+def _stage1_handoff_walk(
+    records: dict, advmean_root: Path, boundary: str,
+    execution_mode: str, plant: str | None,
+) -> dict:
+    """Focused kt=1 stage-1 handoff walk through the production closure."""
+    import jax
+    from legoesm.core.precision import PrecisionPolicy, set_policy
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel, _NEMOWSRK3TestHooks,
+    )
+    from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+        build_nemo_testcase_card,
+    )
+
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(bool(jax.config.jax_enable_x64),
+            "stage-1 handoff walk requires x64")
+    require(boundary in STAGE1_HANDOFF_BOUNDARIES,
+            f"unknown stage-1 handoff boundary {boundary!r}")
+    card = build_nemo_testcase_card("GYRE-zco")
+    cfg = card.recipe.model_config._replace(
+        freshwater_closure="real_freshwater", fix_eta_drift=True)
+    masks = expected_masks(card)
+    source_disposition = {
+        "momentum_advection": cfg.momentum_advection,
+        "momentum_time_integrator": cfg.momentum_time_integrator,
+        "adaptive_implicit_vertadv": cfg.adaptive_implicit_vertadv,
+        "compiled_branch": "ln_dynadv_vec stage-1 Krhs carried from stp_2D",
+        "transport_w_momentum_disposition": (
+            "tracer inputs; no stage-1 vector momentum call"),
+        "citations": [
+            "R98WWALK stp2d.f90:141-176,202-213",
+            "R98WWALK stprk3.f90:188-202",
+            "R98WWALK stprk3_stg.f90:326-347,363-374,661-675,731-760",
+        ],
+    }
+    if execution_mode == "isolated-jit":
+        isolated = _stage1_isolated_handoff(records, card, masks, boundary)
+        return {
+            "format": "nemo-testcase-l2-gyre-stage1-handoff-v1",
+            "selected_boundary": boundary,
+            "execution": "isolated-closure JIT",
+            "source_disposition": source_disposition,
+            **isolated,
+        }
+
+    require(execution_mode in ("production-jit", "production-eager"),
+            f"unknown handoff execution mode {execution_mode!r}")
+    require(not plant or (
+        plant == "stage1-handoff-output-ulp"
+        and boundary == "full_accumulator"
+        and execution_mode == "production-jit"),
+        "stage-1 handoff plant requires production-jit full_accumulator")
+    state = _bridge_stage_context(
+        card.recipe.initial_state, records[(1, 1)]["arrays"])
+    freshwater, surface = _surface_forcings(card, state, 1)
+    hooks = _NEMOWSRK3TestHooks(
+        expose_live_stage_operands=True,
+        stage_barotropic_output_override=_barotropic_override(
+            records, advmean_root, 1),
+    )
+    model = LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, cfg,
+        _nemo_ws_test_hooks=hooks)
+    trace = jax.device_get(_execute_production_step(
+        model, state, card.dt_s, freshwater, surface,
+        execution_mode=execution_mode))
+    execution = (
+        "production_step_JIT" if execution_mode == "production-jit"
+        else "production_closure_eager")
+    scored = _score_stage1_handoff_pair(
+        _stage1_handoff_pair(trace, boundary),
+        records[(1, 1)]["arrays"], masks, boundary, execution,
+        plant=plant == "stage1-handoff-output-ulp")
+    return {
+        "format": "nemo-testcase-l2-gyre-stage1-handoff-v1",
+        "selected_boundary": boundary,
+        "execution": execution.replace("_", " "),
+        "source_disposition": source_disposition,
+        **scored,
     }
 
 
@@ -4586,6 +4816,7 @@ def run(
     tke_statement_root: Path = TKE_STATEMENT_ROOT,
     tke_operand_record: Path = TKE_OPERAND_RECORD,
     execution_mode: str = "production-jit",
+    stage1_handoff_boundary: str = "",
     tke_rhs_materialization: str = "",
     tke_rhs_intermediate: str = "",
     bn2_intermediate: str = "",
@@ -4697,6 +4928,7 @@ def run(
         "model_path_first_nonbit": {},
         "trajectory": [],
         "stage_twin": None,
+        "stage1_handoff_walk": None,
         "tke_statement_walk": None,
         "status": "PASS",
     }
@@ -4714,6 +4946,12 @@ def run(
             stage_closure_root, stage1_w_root, stage1_r3_root,
             plant,
             walk_only=mode == "stage-w-walk")
+    if mode == "stage1-handoff-walk":
+        require(bool(stage1_handoff_boundary),
+                "stage1-handoff-walk requires --stage1-handoff-boundary")
+        report["stage1_handoff_walk"] = _stage1_handoff_walk(
+            records, advmean_root, stage1_handoff_boundary,
+            execution_mode, plant)
     if mode == "stage-tke-walk":
         from nemo_testcase_l2_gyre_round54_tke_operands import (
             read_record as read_tke_operand_record,
@@ -4813,7 +5051,8 @@ def main(argv=None) -> int:
     p.add_argument(
         "--mode",
         choices=("validate", "given-inputs", "trajectory", "all", "stage-twin",
-                 "stage-w-walk", "stage-tke-record", "stage-tke-walk"),
+                 "stage-w-walk", "stage1-handoff-walk",
+                 "stage-tke-record", "stage-tke-walk"),
         default="validate",
     )
     p.add_argument("--round40-kt1", type=Path, required=True)
@@ -4833,10 +5072,16 @@ def main(argv=None) -> int:
         "--tke-operand-record", type=Path, default=TKE_OPERAND_RECORD)
     p.add_argument(
         "--execution-mode",
-        choices=("production-jit", "production-eager"),
+        choices=("production-jit", "production-eager", "isolated-jit"),
         default="production-jit",
-        help=("execution boundary for stage-tke-walk; eager invokes the "
-              "complete production closure with JIT disabled"),
+        help=("execution boundary for focused production walks; eager invokes "
+              "the complete production closure with JIT disabled"),
+    )
+    p.add_argument(
+        "--stage1-handoff-boundary",
+        choices=STAGE1_HANDOFF_BOUNDARIES,
+        default="",
+        help="return and score one kt=1 stage-1 momentum handoff pair",
     )
     p.add_argument("--tke-rhs-materialization", default="")
     p.add_argument(
@@ -4867,6 +5112,7 @@ def main(argv=None) -> int:
                  "stage-shear-operand-ulp", "stage-tke-rhs-ulp",
                  "stage-tke-rhs-intermediate-ulp",
                  "stage-bn2-intermediate-ulp",
+                 "stage1-handoff-output-ulp",
                  "stamp"),
     )
     p.add_argument("--output", type=Path)
@@ -4887,6 +5133,7 @@ def main(argv=None) -> int:
         tke_statement_root=args.tke_statement_root,
         tke_operand_record=args.tke_operand_record,
         execution_mode=args.execution_mode,
+        stage1_handoff_boundary=args.stage1_handoff_boundary,
         tke_rhs_materialization=args.tke_rhs_materialization,
         tke_rhs_intermediate=args.tke_rhs_intermediate,
         bn2_intermediate=args.bn2_intermediate,
