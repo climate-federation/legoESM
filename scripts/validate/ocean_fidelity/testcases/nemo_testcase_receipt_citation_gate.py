@@ -1218,7 +1218,7 @@ CITATION_MAP = {
         'return state, audit', 188],
     'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1173-1207': [
         'def _bridge_kt2_state(', ('return state', 1), 35],
-    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:4616-4646': [
+    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:4618-4648': [
         'states = {1: _bridge_stage_context(',
         ('surface_forcing=surface))', 2), 31],
     'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:545-562': [
@@ -1228,7 +1228,7 @@ CITATION_MAP = {
         'step_entry = read_entry(year_entry_path)',
         'f"kt=2/Nbb=3, got kt={step_entry[\'kt\']}/Nbb={step_entry[\'Nbb\']}",',
         5],
-    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:4462-4483': [
+    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:4464-4485': [
         'if production_tke_post_sweep is not None:',
         'tke_module._solve_tke_backward_euler = inject_recorded_post_sweep',
         22],
