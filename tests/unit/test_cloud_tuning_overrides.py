@@ -185,53 +185,72 @@ def test_subgrid_autoconv_rejects_non_morrison() -> None:
         )
 
 
-def test_build_cloud_config_accepts_every_kwarg_the_pipeline_passes():
-    """The builder and its only caller must agree on the argument list.
+def test_build_cloud_config_accepts_every_kwarg_any_caller_passes():
+    """The builder and EVERY caller must agree on the argument list.
 
     ``physics_pipeline.compute_radiation_core`` calls ``build_cloud_config``
     with a fixed keyword list, unconditionally.  From 2026-08-10 (8e76f1fc5)
     until this test was written, that list contained ``conv_cloud_coeff`` and
-    the builder's signature did not, so EVERY run that reached the radiation
-    branch with a cloud scheme died with
+    ``Nc_default`` and the builder's signature contained neither, so EVERY run
+    reaching the radiation branch with a cloud scheme died with
 
-        TypeError: build_cloud_config() got an unexpected keyword argument
-        'conv_cloud_coeff'
+        TypeError: build_cloud_config() got an unexpected keyword argument ...
 
     Nothing caught it because the builder's own tests only pass the arguments
     the builder declares — which is exactly the set that cannot detect a
-    missing one.  This test reads the caller's keyword list out of the source
-    and asserts the builder accepts all of it, so the next parameter added on
-    one side and forgotten on the other goes red here instead of in a GPU job.
+    missing one.
+
+    Scanning the whole repo rather than one file: an earlier version of this
+    test looked only at ``physics_pipeline`` and so would not have noticed the
+    same drift arriving through ``model_driver`` or a validator.  There are four
+    call sites today; a fifth added tomorrow is covered automatically.
     """
     import ast
     import inspect
+    import subprocess
     from pathlib import Path
 
     from legoesm.atmosphere.physics.clouds.config import build_cloud_config
 
-    pipeline = Path(inspect.getsourcefile(
-        __import__("legoesm.driver.physics_pipeline", fromlist=["x"])))
-    tree = ast.parse(pipeline.read_text())
-    called = set()
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "build_cloud_config"):
-            called |= {kw.arg for kw in node.keywords if kw.arg is not None}
-    assert called, "no build_cloud_config call found — has it been renamed?"
+    repo = Path(__file__).resolve().parents[2]
+    hits = subprocess.run(
+        ["grep", "-rl", "build_cloud_config", "--include=*.py",
+         "packages", "src", "scripts"],
+        cwd=repo, capture_output=True, text=True).stdout.split()
+    assert hits, "no build_cloud_config callers found — has it been renamed?"
 
     accepted = set(inspect.signature(build_cloud_config).parameters)
-    missing = sorted(called - accepted)
-    assert not missing, (
-        f"physics_pipeline passes {missing} to build_cloud_config, which does "
-        f"not accept them; every radiation step with clouds would raise "
-        f"TypeError. Builder accepts: {sorted(accepted)}")
+    offenders = {}
+    for rel in hits:
+        tree = ast.parse((repo / rel).read_text())
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "build_cloud_config"):
+                passed = {kw.arg for kw in node.keywords if kw.arg is not None}
+                missing = sorted(passed - accepted)
+                if missing:
+                    offenders[f"{rel}:{node.lineno}"] = missing
+    assert not offenders, (
+        f"callers pass keywords build_cloud_config does not accept: "
+        f"{offenders}; every radiation step with clouds would raise TypeError. "
+        f"Builder accepts: {sorted(accepted)}")
 
 
-def test_conv_cloud_coeff_override_actually_reaches_the_config():
-    """NON-VACUITY: the passthrough must change the value, not just be accepted."""
+def test_restored_overrides_actually_reach_the_config():
+    """NON-VACUITY: the passthroughs must change the value, not just be accepted.
+
+    Accepting a keyword and ignoring it would silence the TypeError while
+    leaving the tuned parameter inert — the failure mode this repo calls a
+    parameter that is "wired in but off".
+    """
     from legoesm.atmosphere.physics.clouds.config import build_cloud_config
     base = build_cloud_config("sundqvist")
-    tuned = build_cloud_config("sundqvist", conv_cloud_coeff=0.02)
-    assert base.conv_cloud_coeff != 0.02
+    assert base.conv_cloud_coeff != 0.02 and base.Nc_default != 5.0e7
+    tuned = build_cloud_config("sundqvist", conv_cloud_coeff=0.02,
+                               Nc_default=5.0e7)
     assert tuned.conv_cloud_coeff == 0.02
+    assert tuned.Nc_default == 5.0e7
+    # An all-None call must stay byte-identical to the defaults.
+    assert build_cloud_config("sundqvist", conv_cloud_coeff=None,
+                              Nc_default=None) == base

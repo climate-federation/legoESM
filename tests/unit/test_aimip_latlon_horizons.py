@@ -68,23 +68,80 @@ def test_training_horizon_is_24h_and_eval_horizon_is_6h(tree):
     assert _module_constant(tree, "_EVAL_HOURS") == 6
 
 
-def test_every_loader_call_uses_one_of_the_two_horizon_constants(tree):
-    """No literal lead may be passed to the loader.
+def _loader_assignments(tree):
+    """``{assigned name: lead expression}`` for every ``x = load_window_pairs(...)``.
 
-    A hardcoded ``rollout_hours=6`` next to a 24 h trainer is exactly the
-    mismatch this module exists to prevent, and it would read as perfectly
-    ordinary code.
+    Binding the horizon to the NAME the loader's output is stored under is what
+    makes the check meaningful.  Asserting only that both constants appear
+    somewhere passes just as happily when the two are swapped — training on 6 h
+    data while scoring against 24 h targets — which is the failure this module
+    exists to catch.
     """
-    calls = _loader_calls(tree)
-    assert len(calls) >= 2, "expected a training and an evaluation loader call"
-    leads = [c.get("rollout_hours") for c in calls]
-    assert all(lead in ("_ROLLOUT_HOURS", "_EVAL_HOURS") for lead in leads), (
-        f"load_window_pairs called with a lead that is not one of the two "
-        f"horizon constants: {leads}")
-    # Both horizons must actually be used: if every call moved to one constant
-    # the two-horizon design has silently collapsed back to one.
-    assert set(leads) == {"_ROLLOUT_HOURS", "_EVAL_HOURS"}, (
-        f"expected one training loader and one evaluation loader, got {leads}")
+    out = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        call = node.value
+        if not (isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Name)
+                and call.func.id == "load_window_pairs"):
+            continue
+        lead = next((ast.unparse(kw.value) for kw in call.keywords
+                     if kw.arg == "rollout_hours"), None)
+        for target in node.targets:
+            names = ([e.id for e in target.elts] if isinstance(target, ast.Tuple)
+                     else [target.id])
+            for n in names:
+                out[n] = lead
+    return out
+
+
+def test_each_loader_is_bound_to_the_horizon_its_consumer_uses(tree):
+    """The training loader feeds the trainers; the eval loader feeds evaluate().
+
+    Swapping the two leads is a silent, plausible-looking edit that produces a
+    loss rather than an error, so it is pinned by name and not merely by
+    presence.
+    """
+    assigned = _loader_assignments(tree)
+    assert assigned, "no `x = load_window_pairs(...)` assignment found"
+
+    # The training triple is what the trainers receive.
+    for name in ("ics", "targets", "forcings"):
+        assert assigned.get(name) == "_ROLLOUT_HOURS", (
+            f"{name} is loaded at {assigned.get(name)!r}; the trainers roll "
+            "_ROLLOUT_HOURS and would score a forecast at one lead against a "
+            "target loaded at another")
+
+    # The eval bundle is what evaluate() receives.
+    assert assigned.get("eval_data") == "_EVAL_HOURS", (
+        f"eval_data is loaded at {assigned.get('eval_data')!r}; evaluate() "
+        "scores at _EVAL_HOURS for scorecard parity")
+
+    # No literal lead anywhere.
+    for name, lead in assigned.items():
+        assert lead in ("_ROLLOUT_HOURS", "_EVAL_HOURS"), (
+            f"load_window_pairs -> {name} uses a lead that is not one of the "
+            f"two horizon constants: {lead!r}")
+
+
+def test_no_evaluate_call_overrides_the_eval_horizon(tree):
+    """A call site may not re-raise the eval lead past its targets.
+
+    ``evaluate``'s default is pinned elsewhere, but a default protects nothing
+    if a caller passes ``hours=_ROLLOUT_HOURS`` explicitly — which is exactly
+    the edit someone makes when "making eval match training".
+    """
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "evaluate"):
+            passed = next((ast.unparse(kw.value) for kw in node.keywords
+                           if kw.arg == "hours"), None)
+            assert passed in (None, "_EVAL_HOURS"), (
+                f"evaluate(hours={passed}) at line {node.lineno}: the eval lead "
+                "must stay _EVAL_HOURS, or the scorecard is no longer "
+                "comparable to any number already on record")
 
 
 def test_evaluate_defaults_to_the_eval_horizon(tree):
