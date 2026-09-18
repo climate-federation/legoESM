@@ -4327,6 +4327,7 @@ def _stage1_handoff_walk(
             records, card, masks, advmean_root, boundary)
         return {
             "format": "nemo-testcase-l2-gyre-stage1-handoff-v1",
+            "worktree": worktree_stamp(),
             "selected_boundary": boundary,
             "execution": "isolated-closure JIT",
             "source_disposition": source_disposition,
@@ -4362,6 +4363,7 @@ def _stage1_handoff_walk(
         plant=plant == "stage1-handoff-output-ulp")
     return {
         "format": "nemo-testcase-l2-gyre-stage1-handoff-v1",
+        "worktree": worktree_stamp(),
         "selected_boundary": boundary,
         "execution": execution.replace("_", " "),
         "source_disposition": source_disposition,
