@@ -179,6 +179,24 @@ class DycoreConfig(NamedTuple):
     sponge_shape: str = "sin2"            # "sin2" | "sam_rational"
     sponge_scale_height_m: float = 7500.0  # log-pressure scale height for sigma->z
 
+    # #1028: keep the cubed-sphere hydrostatic prognostic winds in FV3 D
+    # staggering BETWEEN steps instead of interpolating cell-centre -> D-grid
+    # corners on entry and back on exit EVERY step.  That outer round trip is
+    # a measured eddy damper, not a bookkeeping detail: a paired same-commit
+    # 200-day C36 Held-Suarez run (PR #1462) moved the equilibrated max wind
+    # 13.0 -> 38.6 m/s (sigma) and 12.6 -> 40.9 (hybrid) with this as the only
+    # change, i.e. from FAILING the #1049 dead-jet floor to clearing the
+    # ~30 m/s benchmark.  The dycore has always accepted either staggering
+    # (``CDGridPrimitiveEquationModel.step`` dispatches on the state type);
+    # what was missing was a production driver that carries the D state.
+    #
+    # Cubed-sphere hydrostatic ONLY.  Every other lane (lat-lon, MPAS,
+    # spectral, shallow water, non-hydrostatic) and the lanes this does not
+    # cover yet (tiled / sub-face SPMD, ensembles) REFUSE it loudly rather
+    # than silently running the damped path.  Default False keeps every
+    # existing run byte-identical.
+    persistent_dgrid: bool = False
+
 
     # Task #25: time integrator override.  Lat-lon C-grid uses
     # ``ssp_rk3`` by default — three RK3 stages unrolled with the
