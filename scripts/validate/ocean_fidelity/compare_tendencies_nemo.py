@@ -348,8 +348,29 @@ def run_stage_a(d, cfg):
     return K_H, avt_i, wet_pair, (z, ny, nx), K_M, avm_i
 
 
+def _bathy_kwargs(T_c, dz_c):
+    """Per-column seafloor index and wet-interface mask, from the state itself.
+
+    NEMO's land cells arrive as NaN, so the wet-cell count per column IS the
+    bathymetry on this ladder -- no separate bathymetry file is needed and
+    none can disagree with the state being stepped.
+
+    ``bottom_level`` is the interior-interface index of the seafloor, i.e.
+    (wet cells - 1) clamped into the interface range, matching NEMO's mbkt.
+    ``w_active`` is the interior wmask: an interface is live only when the
+    T-cells on both sides of it are wet, the same pairing the reports use.
+    """
+    wet_cell = np.isfinite(T_c) & (dz_c > 1e-6)
+    n_wet = wet_cell.sum(axis=1)
+    n_iface = wet_cell.shape[1] - 1
+    bottom_level = np.clip(n_wet - 1, 0, n_iface - 1).astype(np.int32)
+    w_active = (wet_cell[:, :-1] & wet_cell[:, 1:]).astype(np.float64)
+    return {"bottom_level": jnp.asarray(bottom_level),
+            "w_active": jnp.asarray(w_active)}
+
+
 def run_stage_a2_mode_a(d, rst, cfg_prog, iwm_maps=None,
-                        ice_frac=None):
+                        ice_frac=None, use_bathy=False):
     """EXACT Mode-A closure test: NEMO's own restart state INCLUDING the
     prognostic ``en`` -> ONE legoESM en-step (dt=3600, n_iterations=1) ->
     K_H vs NEMO's avt of the very next step (hourly record 0). Same state,
@@ -402,6 +423,14 @@ def run_stage_a2_mode_a(d, rst, cfg_prog, iwm_maps=None,
         # entire Arctic and the Antarctic coast -- the two bands where the
         # Prandtl comparison fails.
         ice_frac=(None if ice_frac is None else jnp.asarray(ice_frac)),
+        # WHERE EACH COLUMN'S SEAFLOOR IS. Left None, the closure pins its
+        # bottom TKE boundary condition at the LAST row of the array
+        # unconditionally -- exact on a flat-bottom column and wrong on every
+        # shelf, where the real seafloor is hundreds of metres above it -- and
+        # without w_active there is no wet-interface mask to stop the sweeps
+        # at the bottom either. ORCA1's Antarctic shelf is a few hundred
+        # metres deep on a 75-level ladder reaching ~5000 m.
+        **(_bathy_kwargs(T_c, dz_c) if use_bathy else {}),
         dz_ref=jnp.asarray(dz_ref_1d),
         jacobian=jnp.asarray(np.ones((ncol,), dtype=dz_c.dtype)),
         # Same ladders as Stage A, for the same reason -- built from NEMO's
@@ -971,6 +1000,13 @@ def main():
                          "so the surface TKE flux is undamped in every "
                          "ice-covered column. Default off keeps existing "
                          "numbers byte-identical.")
+    ap.add_argument("--use-bathy", action="store_true",
+                    help="Tell the closure where each column's seafloor is "
+                         "(bottom_level + w_active, derived from the state's "
+                         "own land mask). Without it the bottom TKE boundary "
+                         "condition is pinned at the array floor on every "
+                         "column, which is wrong by kilometres on a shelf. "
+                         "Default off keeps existing numbers byte-identical.")
     ap.add_argument("--restart-npz", default=None,
                     help="rebuild_nemo_restart.py output; enables the EXACT "
                          "Mode-A closure test (Stage A2, forces --rec 1: the "
@@ -1101,7 +1137,8 @@ def main():
             print(f"[ice] a_i: mean {_ice.mean():.4f}, "
                   f"frac>0.15 {(_ice > 0.15).mean():.4f}")
         K_H2, K_M2, n2_ours, e3w_a2 = run_stage_a2_mode_a(
-            d2_for_a2(d), rst, cfg_a2, iwm_maps=_iwm, ice_frac=_ice)
+            d2_for_a2(d), rst, cfg_a2, iwm_maps=_iwm, ice_frac=_ice,
+            use_bathy=args.use_bathy)
         result["stage_a2_mode_a"] = region_report(
             # LABEL FIX 2026-08-13: this said "rec 0", but avt_a2() returns
             # d["avt"], and load_pair(--rec 1) puts NEMO's RECORD 1 avt there —
