@@ -248,6 +248,18 @@ def analyse_checkpoint(path, cloud_cfg, ncell):
         "iwp_clear": np.where(cf <= 0.0, q_i * dp / g, 0.0).sum(1),
         "lwp_clear": np.where(cf <= 0.0, q_c * dp / g, 0.0).sum(1),
         "cf": cf, "rh": q_v / np.maximum(q_sat, 1e-10), "q_c": q_c,
+        # The SATURATED-BUT-DRY census (GLM review).  Xu-Randall multiplies an
+        # RH term by a condensate term, so a layer at or above saturation with
+        # no condensate gets cover 0 where Sundqvist gives 1.  WRF's
+        # cal_cldfra1 carries an explicit RH>=1 -> 1 cutoff that this
+        # differentiable core omits.  How much real cloud that deletes is a
+        # COUNT, not an argument: layers at RH >= 1 whose total condensate is
+        # below the 5e-6 kg/kg radiative floor, weighted by their mass.
+        "sat_dry_frac": (((q_v / np.maximum(q_sat, 1e-10)) >= 1.0)
+                         & ((q_c + q_i) < 5.0e-6)).mean(),
+        "sat_frac": ((q_v / np.maximum(q_sat, 1e-10)) >= 1.0).mean(),
+        "q_cond_high": np.where(p_full < 44000.0, q_c + q_i, np.nan),
+        "cf_high_layers": np.where(p_full < 44000.0, cf, np.nan),
         "sigma_full": 0.5 * (vg[1][1:] + vg[1][:-1]),
         "T_lowest": T[:, -1],
     })
@@ -358,6 +370,32 @@ def main(argv=None):
         pub = f"{cmor[name]:10.1f}" if cmor else f"{'--':>10s}"
         print(f"{name:18s}" + "".join(f"{v:8.1f}" for v in row)
               + pub + f"{ice_un:11.2f}{liq_un:11.2f}")
+
+    # GLM review, two counts the cover table cannot answer.
+    print(f"\n  saturated layers: {100 * float(mean['sat_frac']):.2f} % of all "
+          f"(column, level) points are at RH >= 1 against the cover curve; "
+          f"{100 * float(mean['sat_dry_frac']):.2f} % are saturated AND carry "
+          f"less condensate than the 5e-6 kg/kg radiative floor.")
+    print("    The second number is the cloud a condensate-reading closure "
+          "deletes and a pure-RH closure keeps; it is an UPPER bound on the "
+          "loss, since the floor would give those layers only minimal water.")
+    _qh = np.asarray(mean["q_cond_high"])
+    _cfh = np.asarray(mean["cf_high_layers"])
+    _ok = np.isfinite(_qh) & np.isfinite(_cfh)
+    _q, _cff = _qh[_ok], _cfh[_ok]
+    print("  high-cloud cover (above 440 hPa) by how much condensate the layer "
+          "carries -- cover riding on the floor is the closure's doing, cover "
+          "riding on real ice is the curve's or the model's:")
+    _edges = [0.0, 1e-7, 1e-6, 5e-6, 2e-5, 1e-4, np.inf]
+    for _lo, _hi in zip(_edges[:-1], _edges[1:]):
+        _m = (_q >= _lo) & (_q < _hi)
+        if not _m.any():
+            continue
+        _share = float((_cff[_m]).sum() / max(_cff.sum(), 1e-30))
+        print(f"    q_cond {_lo:9.1e} - {_hi:9.1e} kg/kg : "
+              f"{100 * float(_m.mean()):6.2f} % of high layers, "
+              f"mean cover {float(_cff[_m].mean()):.3f}, "
+              f"{100 * _share:6.2f} % of all high cover")
 
     print(f"\n=== {args.run}: column condensate path [g/m2] at the three stages ===")
     print("  prog = tracers; opt = after the radiative floor and in-cloud "
