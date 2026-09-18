@@ -10,7 +10,9 @@ Diagnostic commits: `89428545838b0c4662883b96b759689f42efbe44`,
 `a5b89279328c7ce07db1452e4e309f757d543513`, and
 `e76b721c404b4f4eea5246070a910541b250ba25`
 
-Acquisition-card commit: `706a2115691a03b1c3807fde2f472cb4b85ab423`
+Acquisition-card commits: `706a2115691a03b1c3807fde2f472cb4b85ab423`
+and final fuzz-free patch hardening
+`42d0bb6cc59d95b81588b5c0a8386b6ec062d4b7`
 
 Round status: **STOPPED_FOR_RECORD — the first directly scored FCT upstream
 writer is non-bit under both production JIT and production eager, so the
@@ -164,9 +166,10 @@ failure.  First-over-bar remains kt2 U/V and no kt1 row changes.
 
 The new card creates target `GYRE_OMIP_L2_P3_SM_R111FCTW` from the exact R64
 configuration.  It changes no namelist and applies only additive writer calls.
-Its local proof dry-applies the patch and compiles both preprocessed Fortran
-units with `gfortran -fsyntax-only`; `acquisition_card/syntax.log` says
-`STATUS PASS`.  The fixed record is self-describing (34 ordered fields with
+Its local proof dry-applies the patch with zero fuzz and compiles both
+preprocessed Fortran units with `gfortran -fsyntax-only`;
+`acquisition_card/syntax.log` says `STATUS PASS`.  The fixed record is
+self-describing (34 ordered fields with
 rank, extent, and origin), so its gate parses to exact EOF instead of trusting
 hand-written byte arithmetic.
 
