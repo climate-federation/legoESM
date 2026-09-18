@@ -131,6 +131,43 @@ def test_intermediate_scorer_is_bit_exact_and_ulp_plant_is_nonzero():
     assert planted["plant_target"] == planted["row"]["name"]
 
 
+def test_posthoc_rn2_swap_moves_the_downstream_product():
+    from nemo_testcase_l2_gyre_round54_tke_operands import read_record
+
+    if not gate.TKE_OPERAND_RECORD.exists() or not gate.TKE_STATEMENT_ROOT.exists():
+        pytest.skip("round-59/101 TKE records are unavailable")
+    operands = read_record(gate.TKE_OPERAND_RECORD)
+    statement = gate.read_admitted_tke_statement_walk(gate.TKE_STATEMENT_ROOT)
+    rn2 = np.asarray(operands["arrays"]["rn2"])[..., 1:30].swapaxes(0, 1)
+    trace = SimpleNamespace(tke_statement_trace=SimpleNamespace(
+        rhs_intermediate=rn2))
+    clean = gate._tke_rhs_intermediate_rows(
+        trace, operands, statement, "TEST", "rn2_operand")
+    assert clean["row"]["classification"] == "BIT"
+    assert clean["downstream_product_replay"]["classification"] == "BIT"
+
+    moved_rn2 = rn2.copy()
+    recorded_avt = np.asarray(
+        operands["arrays"]["avt_entry"]
+    )[..., 1:30].swapaxes(0, 1)
+    all_moved = np.nextafter(rn2, np.float64(np.inf))
+    before_product = recorded_avt * rn2
+    after_product = recorded_avt * all_moved
+    sensitive = np.argwhere(
+        (rn2 != 0.0)
+        & (before_product.view(np.uint64) != after_product.view(np.uint64))
+    )
+    assert sensitive.size
+    index = tuple(int(value) for value in sensitive[0])
+    moved_rn2[index] = all_moved[index]
+    moved_trace = SimpleNamespace(tke_statement_trace=SimpleNamespace(
+        rhs_intermediate=moved_rn2))
+    moved = gate._tke_rhs_intermediate_rows(
+        moved_trace, operands, statement, "TEST", "rn2_operand")
+    assert moved["row"]["n_unequal"] == 1
+    assert moved["downstream_product_replay"]["n_unequal"] == 1
+
+
 def test_gate_enumerates_compiled_intermediates_in_source_order():
     assert gate.TKE_RHS_INTERMEDIATES == (
         "p_avt_rn2",

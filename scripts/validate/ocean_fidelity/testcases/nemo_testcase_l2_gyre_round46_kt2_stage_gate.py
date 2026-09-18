@@ -3229,11 +3229,39 @@ def _tke_rhs_intermediate_rows(
         require(row["n_unequal"] == clean["n_unequal"] + 1,
                 "TKE RHS intermediate ULP plant did not add exactly one "
                 "unequal cell")
+    downstream_product_replay = None
+    if intermediate in TKE_RHS_POSTHOC_OPERANDS:
+        recorded_avt = np.asarray(arrays["avt_entry"])[..., 1:30].swapaxes(0, 1)
+        recorded_rn2 = np.asarray(arrays["rn2"])[..., 1:30].swapaxes(0, 1)
+        candidate_product = (
+            candidate * recorded_rn2
+            if intermediate == "p_avt_operand"
+            else recorded_avt * candidate
+        )
+        product_reference = np.asarray(replay["p_avt_rn2"]).swapaxes(0, 1)
+        downstream_product_replay = _bitwise_classification(score(
+            "GYRE-zco.kt2.tke_rhs_intermediate.posthoc_operand_swap."
+            f"{intermediate}",
+            product_reference,
+            candidate_product,
+            np.ones(product_reference.shape, dtype=bool),
+        ))
+        downstream_product_replay.update({
+            "field": "p_avt_rn2",
+            "execution": "recorded-association one-variable replay",
+            "swapped_operand": intermediate,
+            "nemo_statement": "zdftke.f90:440",
+            "note": (
+                "the selected production operand is multiplied by the other "
+                "recorded NEMO operand in source order; this replay does not "
+                "claim to be the production-JIT multiplication"),
+        })
     return {
         "intermediate": intermediate,
         "one_returned_intermediate": True,
         "reference_replay": replay_row,
         "row": row,
+        "downstream_product_replay": downstream_product_replay,
         "plant_target": None if planted_at is None else row["name"],
     }
 
