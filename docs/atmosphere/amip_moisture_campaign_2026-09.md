@@ -831,3 +831,52 @@ ALSO OPEN, found by GLM while reviewing the seam fix: the trigger's sub-layer re
 converge to the native-grid answer. On the deep sounding, L30 refined by 1/2/4 gives 895/557/523 hPa
 against a native L60 top of 616 hPa, and the native-vs-refined gap widened from 25 to 59 hPa with
 the seam fix. The gate test now documents that rather than certifying agreement.
+
+## Iteration L — the host water budget, and the grid refinement (2026-09-18)
+
+**The chain was destroying water.** The ported cudtdqn already removes the detrained
+condensate and the convective precipitation from the vapour tendency (cudtdqn.F90:343-347), so
+a host that receives neither loses that water while keeping its latent heating. Measured on the
+active deep fixture: 0.051 mm/day on one weak column, which in a convecting tropical column is
+the whole convective rain rate. Both are now returned, converted with the same expression the
+tendency module builds its own ZDP from, and the column budget closes to 3 parts in 10 million.
+On this chain — no downdraught, no sub-cloud evaporation, PSNDE = 0 — the surface rate equals
+the sum of PDMFUP; when any of those lands, the rain tendency must become the per-level net.
+
+**The sub-layer refinement had two defects.** Its half levels ran at fractions 1/r..1 per parent
+with the surface appended again, which dropped the model top, displaced every interface by one
+sub-layer and left a ZERO-THICKNESS bottom cell with its full level exactly at the surface. And
+the reconstruction interpolated between parent FULL levels with the weight clipped to [0, 1],
+while the sub-layers of a parent straddle its centre — so the shallower half were pinned to the
+parent value and only the deeper half interpolated, toward the next layer down. On the last
+parent it read out of bounds. Measured: up to 38% of a parent layer's water created or
+destroyed, 1.25% of the column, and up to 31.5% error against the analytic profile with a mean
+MOIST bias of +3.5e-4 kg/kg.
+
+Now a Δp-conservative piecewise-linear finite-volume reconstruction with a minmod limiter.
+Per-parent water conserved to 2e-7, profile error 2.3% at r = 2, mean bias down to +1.0e-4.
+
+**The spuriously moist environment was driving spuriously vigorous convection.** Controlled A/B
+on the reconstruction alone: the trade column keeps its mass-flux profile and cloud top exactly
+but loses 22% of its kinetic energy and, rising more slowly through a drier cloud layer, carries
+16% more condensate and rains 37% more; the deep column's ascent is shallower (760 -> 827 hPa)
+with 28% less mass flux, 43% less kinetic energy and 32% less rain. The refined cloud top moves
+557 -> 658 hPa at r = 2 against a native L60 answer of 616, so the refined-native gap falls from
+59 to 42 hPa.
+
+**Owner decision (2026-09-18): keep the layer-average semantics, consistently.** A level value is
+the mean over its layer, located at the layer centre derived from the half levels, never the
+caller's full-level pressure. `_layer_centre` is now the single expression for that, used by both
+arms of the refinement wrapper — the r = 1 shortcut previously forwarded the caller's p_full, so
+the anchoring was a function of r. The geopotential gets the same treatment, because forwarding
+the caller's while re-anchoring the pressure reintroduces the same sub-layer shift. The
+source-literal search is unchanged; its saturation calls divide by PAPRSF as the source does.
+Codex refuted an audit claim here: the NJKT1/NJKT2 bounds and the optional cell-centre
+mixed-layer gate are PORT-LOCAL, not source-literal, and already receive layer centres through
+the wrapper.
+
+**OPEN, cause unknown.** Neither ladder converges — L30 refined r = 1/2/4/8 gives
+895/658/625/591 hPa, native L30/L60/L120 gives 895/616/536 — and the refined-native gap GROWS
+with effective resolution, 42 hPa at 60 levels and 89 at 120. A resolution-sensitive departure
+search and the point-sample-versus-layer-mean semantics of the fixtures are both candidates and
+neither has been discriminated. The gate test records this instead of certifying agreement.
