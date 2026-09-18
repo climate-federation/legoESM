@@ -360,8 +360,6 @@ def build_cloud_config(
     clubb_cf_override_floor: float | None = None,
     saturation_scheme: str | None = None,
     cover_condensate_q_ref: float | None = None,
-    conv_cloud_coeff: float | None = None,
-    Nc_default: float | None = None,
 ) -> "CloudConfig":
     """Assemble a ``CloudConfig`` from the ``ExperimentConfig``-level cloud
     fields (``cloud_scheme`` + the optional ``cloud_rh_crit`` /
@@ -414,10 +412,6 @@ def build_cloud_config(
         overrides["saturation_scheme"] = saturation_scheme
     if cover_condensate_q_ref is not None:
         overrides["cover_condensate_q_ref"] = cover_condensate_q_ref
-    if conv_cloud_coeff is not None:
-        overrides["conv_cloud_coeff"] = conv_cloud_coeff
-    if Nc_default is not None:
-        overrides["Nc_default"] = Nc_default
     return CloudConfig(
         scheme=scheme, convective_cloud=convective_cloud, **overrides
     )
