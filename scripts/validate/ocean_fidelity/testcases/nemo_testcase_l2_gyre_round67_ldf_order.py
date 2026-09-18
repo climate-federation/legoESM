@@ -488,8 +488,9 @@ def measure(args) -> dict:
                 for name in TRACERS
             },
             "frozen_content_max": {
-                name: implementation_oracle_content[name]["max_abs"]
-                == local_frozen[name]["content"]
+                name: bool(
+                    implementation_oracle_content[name]["max_abs"]
+                    == local_frozen[name]["content"])
                 for name in TRACERS
             },
         }
@@ -1061,8 +1062,9 @@ def measure(args) -> dict:
             for name in TRACERS
         }
         round111_matrix["criteria"]["frozen_kt3_max"] = {
-            name: kt3[name]["baseline"]["max_abs"]
-            == local_frozen[name]["kt3"]
+            name: bool(
+                kt3[name]["baseline"]["max_abs"]
+                == local_frozen[name]["kt3"])
             for name in TRACERS
         }
         if not args.plant_fct_split_ulp:
