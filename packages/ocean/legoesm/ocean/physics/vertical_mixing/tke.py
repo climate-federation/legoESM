@@ -1336,9 +1336,12 @@ def _solve_tke_backward_euler(
         raise ValueError(
             "TKE RHS materialization and intermediate selectors are mutually "
             "exclusive private measurement arms")
-    if rhs_intermediate and not return_statement_trace:
-        raise ValueError(
-            "a private TKE RHS intermediate requires return_statement_trace")
+    # ``LatLonCGridOceanModel.step`` pairs the private traced production
+    # closure with an ordinary state-returning reference closure.  The latter
+    # deliberately discards diagnostics, but it must still evaluate the same
+    # selected RHS association so the returned prognostic state belongs to
+    # the measured arm.  Keep the selected value private and simply discard
+    # it below when ``return_statement_trace`` is false.
     rhs_intermediate_value = None
     if literal_matrix:
         if nemo_e3t is None or dissl_old is None or w_active is None:

@@ -73,6 +73,15 @@ def test_trace_returns_only_the_selected_source_intermediate():
         selected.view(np.uint64), expected.view(np.uint64))
 
 
+def test_selected_association_also_runs_in_state_only_reference_closure():
+    out = _literal_solve(
+        rhs_intermediate="after_stratification",
+        return_statement_trace=False,
+    )
+    assert np.asarray(out).shape == (1, 2)
+    assert np.all(np.isfinite(np.asarray(out)))
+
+
 def test_rhs_measurement_selectors_are_mutually_exclusive():
     with pytest.raises(ValueError, match="mutually exclusive"):
         _literal_solve(
