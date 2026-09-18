@@ -485,6 +485,7 @@ def _compute_advection_flux_div(
     fct_base_thickness=None,
     fct_after_thickness=None,
     fct_implicit_w=None,
+    fct_nemo_metric_transports=None,
 ):
     """Compute advection flux divergence for a single tracer field.
 
@@ -575,6 +576,7 @@ def _compute_advection_flux_div(
             base_thickness=fct_base_thickness,
             after_thickness=fct_after_thickness,
             implicit_w=fct_implicit_w,
+            nemo_metric_transports=fct_nemo_metric_transports,
         )
     elif tracer_advection == "ppm":
         from legoesm.ocean.advection import (
@@ -737,6 +739,7 @@ def compute_advection_flux_div_pair(
     fct_base_thickness=None,
     fct_after_thickness=None,
     fct_implicit_w=None,
+    fct_nemo_metric_transports=None,
 ):
     """Advection flux divergence for TWO tracers (T, S) in one pass.
 
@@ -795,6 +798,7 @@ def compute_advection_flux_div_pair(
             fct_base_thickness=fct_base_thickness,
             fct_after_thickness=fct_after_thickness,
             fct_implicit_w=fct_implicit_w,
+            fct_nemo_metric_transports=fct_nemo_metric_transports,
         )
         out_b = _compute_advection_flux_div(
             tr_b, tracer_advection, mass_flux_u, mass_flux_v,
@@ -807,6 +811,7 @@ def compute_advection_flux_div_pair(
             fct_base_thickness=fct_base_thickness,
             fct_after_thickness=fct_after_thickness,
             fct_implicit_w=fct_implicit_w,
+            fct_nemo_metric_transports=fct_nemo_metric_transports,
         )
         if return_b_h_fluxes:
             div_b, vert_b, sf_u, sf_v = out_b
@@ -1725,6 +1730,7 @@ def _nemo_ws_rk3_tracer_pair_step(
     bbl_context=None,
     stage_source_rates=None,
     stage_qco_weights=None,
+    nemo_metric_fct_upstream: bool = False,
     stop_after_stage: int = 3,
     resume=None,
     stage3_advection_content_override=None,
@@ -1825,6 +1831,19 @@ def _nemo_ws_rk3_tracer_pair_step(
             (fd_a, rhs_a), (fd_b, rhs_b) = (
                 _cen2_content_div(a_val), _cen2_content_div(b_val))
         else:
+            metric_transports = None
+            fct_implicit_w = wi_stage
+            if nemo_metric_fct_upstream and stage_index == 2:
+                if zfu_stage is None or zfv_stage is None:
+                    raise ValueError(
+                        "NEMO metric FCT upstream requires stage zFu/zFv")
+                p_w = nemo_source_round(
+                    jnp.asarray(grid.area_T)[..., None] * w_stage)
+                metric_transports = (zfu_stage, zfv_stage, p_w)
+                # The caller enables this route only for NEMO's explicit-W
+                # arm.  Passing an all-zero wi array would select a different
+                # Python branch inside FCT and obscure that source contract.
+                fct_implicit_w = None
             (dh_a, dv_a), (dh_b, dv_b) = compute_advection_flux_div_pair(
                 a_val, b_val, tracer_advection, mf_u, mf_v,
                 w_stage, h_stage, hu_stage, hv_stage, grid, stage_dt,
@@ -1835,7 +1854,8 @@ def _nemo_ws_rk3_tracer_pair_step(
                 fct_low_order_predictor=fct_low_order_predictor,
                 fct_base_thickness=h_k_old,
                 fct_after_thickness=h_after,
-                fct_implicit_w=wi_stage,
+                fct_implicit_w=fct_implicit_w,
+                fct_nemo_metric_transports=metric_transports,
             )
             fd_a, fd_b = dh_a + dv_a, dh_b + dv_b
             rhs_a = rhs_b = None
@@ -6342,6 +6362,8 @@ class LatLonCGridOceanModel:
                     stage_transport_geometry=stage_geometry,
                     stage_source_rates=_stage_source_rates,
                     stage_qco_weights=_tracer_qco_weights,
+                    nemo_metric_fct_upstream=not getattr(
+                        _cfg_b, "adaptive_implicit_vertadv", False),
                     stop_after_stage=stop_after_stage,
                     resume=resume,
                     return_stage1_trace=(
@@ -7803,6 +7825,10 @@ class LatLonCGridOceanModel:
                         "nemo_rk3_two_step"
                         if self._nemo_ws_test_hooks.two_step_fct_predictor
                         else "one_step"),
+                    nemo_metric_fct_upstream=(
+                        self._nemo_ws_test_hooks.two_step_fct_predictor
+                        and not getattr(
+                            _cfg_b, "adaptive_implicit_vertadv", False)),
                     stage_source_rates=_ws_stage_source_rates,
                     bbl_context=_bbl_context,
                     # One stage ladder: stages 1-2 were advanced by the
