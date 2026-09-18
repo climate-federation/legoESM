@@ -2047,11 +2047,23 @@ def reconstruct_cell_velocity(u_edge, mesh):
     ``u_edge`` at each edge and the per-edge angle ``angleEdge`` (the
     edge normal's azimuth measured from local east), each edge
     contributes ``(cos α · u_edge, sin α · u_edge)`` weighted by
-    ``dvEdge · dcEdge / (2 · areaCell)``.  The formula is exact for
-    uniform flow on any Voronoi mesh and smoothly differentiable, so it
-    composes cleanly with ``jax.grad`` through column-physics bridges
-    (turbulence, gravity-wave drag, etc.) that previously refused
+    ``dvEdge · dcEdge / (2 · areaCell)``.  It is smoothly differentiable,
+    so it composes cleanly with ``jax.grad`` through column-physics
+    bridges (turbulence, gravity-wave drag, etc.) that previously refused
     to dispatch on MPAS (audit 2026-05-12 MEDIUM #10).
+
+    ACCURACY — this used to claim it was "exact for uniform flow on any
+    Voronoi mesh".  MEASURED on the icosahedral meshes (2026-09-18): fed
+    the edge-normal components of a constant east/north vector, the
+    median relative error is 2.4e-2 at subdivision level 2 and 4.2e-3 at
+    level 3.  It CONVERGES — a consistent second-order reconstruction —
+    but it is not exact, and code written to the old wording would be
+    wrong.  Separately, the handful of cells AT the poles show ~100%
+    error at every resolution; that is the test field's singularity (a
+    constant east/north vector is not continuous on a sphere), not a
+    defect here, but it does mean the returned COMPONENTS are not
+    meaningful in the polar cells.  Consumers that need only the
+    magnitude are unaffected away from those cells.
 
     Parameters
     ----------

@@ -44,7 +44,9 @@ from legoesm.ocean.dynamics.ocean_tendency_common import (
 from legoesm.ocean.eos import make_eos_fn, rho_0 as _RHO_0
 from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
     EPS_DIV as _EPS_DIV,
+    compute_treguier_kappa_gm,
     compute_visbeck_kappa_gm,
+    dm95_taper,
     dm95_taper_scalar,
     gm_resolution_scaled_kappa,
     validate_adjoint_stabilization,
@@ -202,7 +204,9 @@ def compute_isopycnal_slopes_mpas(
     jacobian: jnp.ndarray,
     mesh: "VoronoiMesh",
     cfg: "GMRediConfig",
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+    *,
+    return_clipped: bool = False,
+) -> tuple[jnp.ndarray, ...]:
     """Edge-normal isopycnal slope at interior interfaces (Phase 1).
 
     Implements Option (A) from ``docs/ocean/experiments/gm_redi_mpas_plan.md``:
@@ -283,11 +287,26 @@ def compute_isopycnal_slopes_mpas(
 
     # DM95 scalar taper (single-component variant — see _gm_redi_common).
     # ``taper_width_frac`` maps to Veros's ``iso_dslope / iso_slopec``.
-    return dm95_taper_scalar(
+    S_n, taper = dm95_taper_scalar(
         S_n_clipped, cfg.S_max,
         transition_width_frac=cfg.taper_width_frac,
         stop_gradient_taper=(adj_stab == "stop_gradient_taper"),
     )
+    if return_clipped:
+        # The CLIPPED, UN-tapered slope, which is what the vector
+        # ``dm95_taper`` expects as input.  Returned only on request so the
+        # default two-value form — and every existing caller — is unchanged.
+        #
+        # WHY a caller would want it: the taper applied just above is
+        # PER-COMPONENT, because on an unstructured mesh each edge carries
+        # only its own normal slope.  That is not the same operator as the
+        # structured lane's taper, which acts on the slope MAGNITUDE: it is
+        # not rotationally invariant, and where the taper bites it can
+        # inflate the reconstructed magnitude by up to sqrt(2).  A consumer
+        # that reconstructs the cell-centred slope VECTOR (Perot) can taper
+        # the magnitude instead and match the structured lane's operator.
+        return S_n, taper, S_n_clipped
+    return S_n, taper
 
 
 def _perot_inner_product_cell(
@@ -684,17 +703,76 @@ def gm_redi_tracer_tendency_mpas(
 
     # Edge-normal slopes (always — needed for Visbeck and for the
     # centred tracer tendency).
-    S_n, _taper = compute_isopycnal_slopes_mpas(
+    _want_treguier = (getattr(cfg, "treguier", None) is not None
+                      and cfg.treguier.enabled)
+    if _want_treguier and cfg.visbeck.enabled:
+        # Same guard the structured lane carries: both are adaptive-kappa
+        # diagnostics, and the branch below would silently prefer one.
+        raise ValueError(
+            "GMRediConfig: visbeck.enabled and treguier.enabled are mutually "
+            "exclusive adaptive-kappa diagnostics — enable exactly one.")
+    S_n, _taper, *_S_extra = compute_isopycnal_slopes_mpas(
         rho, mask, z_coord, jacobian, mesh, cfg,
+        return_clipped=_want_treguier,
     )
 
     # GM coefficient.
-    if getattr(cfg, "treguier", None) is not None and cfg.treguier.enabled:
-        raise NotImplementedError(
-            "GMRediConfig.treguier (NEMO nn_aei_ijk_t=21 adaptive kappa) is "
-            "implemented on the lat-lon C-grid path only; the MPAS GM/Redi "
-            "would silently fall back. Use visbeck or constant kappa_GM here.")
-    if cfg.visbeck.enabled:
+    if _want_treguier:
+        # Treguier et al. (1997) / Held-Larichev adaptive kappa_GM — NEMO
+        # ``ldf_eiv`` with ``nn_aei_ijk_t = 21``.  The SHARED implementation
+        # is reused verbatim; only the slopes it eats have to be assembled
+        # in the Voronoi way.
+        #
+        # PARTIAL HARMONIZATION, and it is worth being exact about which
+        # variant this is.  The ORCA1-faithful tripole card selects
+        # ``slope_positions="nemo_native"``, which routes the structured lane
+        # to ``compute_treguier_kappa_gm_nemo_native`` — a DIFFERENT
+        # discretisation built on NEMO's own i/j slope positions and W-level
+        # masks.  This branch gives MPAS the GENERIC shared variant, which is
+        # the same closure family and a large step from Visbeck or a constant
+        # kappa, but it is NOT bit-comparable with the production tripole.
+        #
+        # SLOPE VECTOR, not per-component.  ``compute_isopycnal_slopes_mpas``
+        # tapers each edge-normal component separately, because that is all
+        # an edge knows.  Treguier needs |S|^2 at the CELL, and tapering the
+        # components before taking the magnitude is a different operator from
+        # the structured lane's magnitude taper: not rotationally invariant,
+        # and able to inflate |S| by up to sqrt(2) exactly where the taper
+        # bites.  So reconstruct the cell-centred vector from the CLIPPED,
+        # un-tapered slopes with the Perot (2000) reconstruction MPAS already
+        # uses for winds, then apply the shared magnitude taper.  The tracer
+        # tendency below keeps the per-component ``S_n`` untouched.
+        from legoesm.grids.voronoi import reconstruct_cell_velocity
+
+        S_n_clipped = _S_extra[0]
+        # Land and sub-seafloor edges must not enter the reconstruction: a
+        # dry edge carries a filled density gradient, not a real slope.
+        S_n_oc = S_n_clipped * edge_mask[:, None]
+        S_x, S_y = reconstruct_cell_velocity(S_n_oc, mesh)
+        S_x, S_y, _ = dm95_taper(
+            S_x, S_y, cfg.S_max,
+            transition_width_frac=cfg.taper_width_frac,
+            stop_gradient_taper=(
+                getattr(cfg, "adjoint_stabilization", "none")
+                == "stop_gradient_taper"),
+        )
+        if f_coriolis is None:
+            # Same construction as the Visbeck branch below, and the SAME
+            # rotation rate is handed to the kappa: the tropical taper is
+            # |f / f20| with f20 built from ``omega``, so a mismatch between
+            # the two would not cancel and would bias the amplitude.
+            f_coriolis = 2.0 * constants.Omega * jnp.sin(mesh.latCell)
+        kappa_GM = compute_treguier_kappa_gm(
+            rho, S_x, S_y, z_coord, jacobian, f_coriolis, cfg.treguier,
+            rho_ref=_RHO_0, g=constants.g, omega=constants.Omega,
+        )
+        # Dry columns: the shared helper zeroes on its own ``wet_col``, which
+        # is built from integrated REFERENCE thickness rather than this run's
+        # mask (and partial-cell land carries J=1), so it can leave a nonzero
+        # kappa on a column this mesh calls land.  Cut it with the mask that
+        # actually describes the ocean here.
+        kappa_GM = kappa_GM * (mask > 0.0)
+    elif cfg.visbeck.enabled:
         if f_coriolis is None:
             f_coriolis = 2.0 * constants.Omega * jnp.sin(mesh.latCell)
         kappa_GM = _visbeck_kappa_gm_mpas(
