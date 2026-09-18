@@ -1,71 +1,22 @@
 --- traadv_fct.F90.r64
 +++ traadv_fct.F90
-@@ -22,6 +22,8 @@
-    USE phycst  , ONLY : rho0_rcp
-    USE zdf_oce , ONLY : ln_zad_Aimp
-    USE l2_r63_krhs, ONLY : r63_fct_first
+@@ -24,0 +25,2 @@
 +   USE l2_r111_fct, ONLY : r111_begin, r111_first_flux, r111_midpoint, &
 +      & r111_average_flux, r111_upstream
-    !
-    USE in_out_manager ! I/O manager
-    USE iom            !
-@@ -155,6 +157,8 @@
-          !
-          ! -- Upstream fluxes
-          ! ------------------
+@@ -157,0 +160,2 @@
 +         IF( cdtype == 'TRA' ) CALL r111_begin( kt, Kbb, Kmm, Kaa, Krhs, jn, &
 +            & p2dt, pt(:,:,:,jn,Kbb), pU, pV, pW, pt(:,:,:,jn,Krhs) )
- #if defined key_RK3
-          CALL fct_up1_2stp( Kbb, Kmm, Kaa, p2dt, pt(:,:,:,jn,Kbb), pU, pV, pW, ztFu, ztFv, ztFw, zta_up1, pt(:,:,:,jn,Krhs) )
- #else
-@@ -487,6 +491,7 @@
-       INTEGER  ::   ji, jj, jk      ! dummy loop indices
-       INTEGER  ::   ik              ! local integer
-       REAL(wp) ::   zimp, zDt, ztra ! local scalar
+@@ -488,0 +493 @@
 +      REAL(wp), DIMENSION(jpi,jpj,jpk) :: zr111
-       !!----------------------------------------------------------------------
- !!$      IF( .NOT. ll_upsxy ) THEN         !** no alternate directions **!
- !!$      ELSE                              !** alternate directions **!
-@@ -524,6 +529,7 @@
-             ptFw(ji,jj,1) = 0._wp
-          END_2D
-       ENDIF
+@@ -525,0 +531 @@
 +      CALL r111_first_flux( ptFu, ptFv, ptFw )
- 
-       ! -- middle time step tracer with upstream scheme
-       
-@@ -536,8 +542,10 @@
-          !
-          ! guess upstream at Kmm
-          pt_up1(ji,jj,jk) = ( e3t(ji,jj,jk,Kbb) * pt_b(ji,jj,jk) + zDt * ztra ) / e3t(ji,jj,jk,Kmm) * tmask(ji,jj,jk) !!clem
+@@ -538,0 +545 @@
 +         zr111(ji,jj,jk) = ztra
-       END_3D
- 
+@@ -539,0 +547 @@
 +      CALL r111_midpoint( zr111, pt_up1 )
- 
-       IF ( ll_zAimp2 ) THEN
-          DO_3D( 1, 1, 1, 1, 1, jpkm1 )
-@@ -594,6 +602,7 @@
-             END_2D
-          ENDIF
-       ENDIF
+@@ -597,0 +606 @@
 +      CALL r111_average_flux( ptFu, ptFv, ptFw )
- 
-       ! -- after tracer with upstream scheme
-       
-@@ -603,6 +612,7 @@
-             &      + ( ptFw(ji,jj,jk) - ptFw(ji,jj  ,jk+1) ) ) * r1_e1e2t(ji,jj)
- 
-          pt_rhs(ji,jj,jk) = pt_rhs(ji,jj,jk) + ztra / e3t(ji,jj,jk,Kmm) * tmask(ji,jj,jk) !!clem
+@@ -605,0 +615 @@
 +         zr111(ji,jj,jk) = ztra
-          
-          IF( ll_zAimp1 )   ztra = ztra - ( wi(ji,jj,jk) - wi(ji,jj,jk+1) ) * pt_b(ji,jj,jk)
-          !
-@@ -610,6 +620,7 @@
-          pt_up1(ji,jj,jk) = ( e3t(ji,jj,jk,Kbb) * pt_b(ji,jj,jk) + zDt * ztra ) / e3t(ji,jj,jk,Kaa) * tmask(ji,jj,jk) !!clem
-       END_3D
- 
+@@ -610,0 +621 @@
 +      CALL r111_upstream( zr111, pt_rhs )
-       IF ( ll_zAimp2 ) THEN
-          DO_3D( 0, 0, 0, 0, 1, jpkm1 )
-             zwdia(ji,jj,jk) = 1._wp + 0.5_wp * zDt * ( MAX( wi(ji,jj,jk  ) , 0._wp ) - MIN( wi(ji,jj,jk+1) , 0._wp ) ) / e3t(ji,jj,jk,Kaa)

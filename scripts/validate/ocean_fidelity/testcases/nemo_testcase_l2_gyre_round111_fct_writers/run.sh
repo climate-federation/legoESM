@@ -86,7 +86,7 @@ done
 # translation units with the same FCM preprocessor definitions as the build.
 dry=$(mktemp -d /tmp/gyre-r111-source.XXXXXX)
 cp "$SOURCE_ROOT/MY_SRC/traadv_fct.F90" "$dry/traadv_fct.F90"
-patch -s "$dry/traadv_fct.F90" <"$ADV_PATCH"
+patch -s --fuzz=0 "$dry/traadv_fct.F90" <"$ADV_PATCH"
 if diff "$SOURCE_ROOT/MY_SRC/traadv_fct.F90" "$dry/traadv_fct.F90" | \
      grep -q '^<'; then
   printf 'REFUSE: round111 patch removes or replaces an R64 source line\n' >&2
@@ -145,7 +145,7 @@ done < <(find "$SOURCE_ROOT/MY_SRC" -maxdepth 1 \( -type f -o -type l \) \
   -print0 | sort -z)
 cp "$SOURCE_ROOT/cpp_$SOURCE_CFG.fcm" "$TARGET_ROOT/cpp_$TARGET_CFG.fcm"
 cp "$WRITER" "$TARGET_ROOT/MY_SRC/l2_r111_fct.F90"
-patch -s "$TARGET_ROOT/MY_SRC/traadv_fct.F90" <"$ADV_PATCH"
+patch -s --fuzz=0 "$TARGET_ROOT/MY_SRC/traadv_fct.F90" <"$ADV_PATCH"
 if ! cmp "$SOURCE_ROOT/EXP00/namelist_cfg" \
      "$TARGET_ROOT/EXP00/namelist_cfg"; then
   printf 'REFUSE: source card changed namelist_cfg\n' >&2
