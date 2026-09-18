@@ -1148,7 +1148,7 @@ def _solve_tke_backward_euler(
     w_active: jnp.ndarray | None = None,
     nemo_e3t: jnp.ndarray | None = None,
     dissl_old: jnp.ndarray | None = None,
-    return_statement_trace: bool = False,
+    return_statement_trace: bool = False, rhs_materialization: str = "",
 ) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Backward-Euler tridiagonal solve for one TKE time step.
 
@@ -1643,20 +1643,20 @@ def _solve_tke_backward_euler(
     # + the external energy-recycling source ``forc`` (eke_diss_iw + K_diss_bot,
     # Veros integrate_tke; zero / None ⇒ bit-identical).
     if literal_matrix:
-        # Literal zdftke.F90 source association.  Langmuir circulation first
-        # updates en in its own statement (:401-468, update at :463); only
-        # then does the TKE budget add the parenthesized shear/stratification/
-        # dissipation sum with its trailing wmask (:513-516). Reversing the additions
-        # is numerically visible at the first Thomas RHS recurrence even when
-        # each isolated term is bit-identical.
+        # Literal zdftke.F90 RHS association; the private selector walks it.
         rhs_base = e_old
         if literal_external_rhs is not None:
             rhs_base = literal_external_rhs
         elif external_source is not None:
             rhs_base = rhs_base + dt * external_source
-        rhs = rhs_base + dt * (
-            P_s + buoy_source + 0.5 * diss_rate * rhs_base
-        ) * jnp.asarray(w_active, dtype=e_old.dtype)
+        if rhs_materialization:
+            rhs = _nemo_literal_rhs_materialized(
+                rhs_base, dt, P_s, K_H_old, N2, diss_rate, w_active,
+                rhs_materialization)
+        else:
+            rhs = rhs_base + dt * (
+                P_s + buoy_source + 0.5 * diss_rate * rhs_base
+            ) * jnp.asarray(w_active, dtype=e_old.dtype)
     else:
         rhs = e_old + dt * (P_s + buoy_source)
     if _disc == "nemo_1p5_split" and not literal_matrix:
@@ -2666,7 +2666,7 @@ def tke_vertical_mixing(
     preclosure_dissl: jnp.ndarray | None = None,
     precomputed_p_sh2: jnp.ndarray | None = None,
     precomputed_n2_bundle: TKEEntryN2Bundle | None = None,
-    return_statement_trace: bool = False,
+    return_statement_trace: bool = False, rhs_materialization: str = "",
 ) -> TKEOutput:
     """Advance the TKE closure and return new K_M, K_H, TKE.
 
@@ -3364,7 +3364,7 @@ def tke_vertical_mixing(
                       if _matrix_eval == "nemo_literal" else None),
             dissl_old=(preclosure_dissl
                        if _matrix_eval == "nemo_literal" else None),
-            return_statement_trace=return_statement_trace,
+            return_statement_trace=return_statement_trace, rhs_materialization=rhs_materialization,
         )
         if return_statement_trace:
             (tke_curr, _statement_langmuir_interior, _statement_rhs,
@@ -3943,3 +3943,43 @@ __all__ = (
     "tke_set_diffusivities",
     "tke_vertical_mixing",
 )
+
+
+def _nemo_literal_rhs_materialized(
+    en, dt, p_sh2, p_avt, rn2, diss_rate, wmask, mode: str,
+):
+    """Private full-step discriminator for compiled ``zdftke`` RHS order.
+
+    Each named arm adds one IEEE-identity source boundary to the expression
+    at ``R101TKEW/BLD/ppsrc/nemo/zdftke.f90:439-442``.  The selector is
+    reachable only through :class:`_NEMOWSRK3TestHooks`; it is deliberately
+    not a physics configuration.  ``all`` is the preregistered fallback that
+    materializes every listed boundary.  The default production path never
+    calls this helper.
+    """
+    from legoesm.core.source_rounding import nemo_source_round
+
+    valid = {
+        "p_avt_rn2", "zfact3_dissl", "dissipation_product",
+        "after_stratification", "parenthesized_sum", "dt_product",
+        "masked_increment", "all",
+    }
+    if mode not in valid:
+        raise ValueError(
+            "unknown private TKE RHS materialization boundary: "
+            f"{mode!r}; expected one of {sorted(valid)}")
+
+    def boundary(name, value):
+        return nemo_source_round(value) if mode in (name, "all") else value
+
+    p_avt_rn2 = boundary("p_avt_rn2", p_avt * rn2)
+    zfact3_dissl = boundary("zfact3_dissl", 0.5 * diss_rate)
+    dissipation = boundary(
+        "dissipation_product", zfact3_dissl * en)
+    stratified = boundary("after_stratification", p_sh2 - p_avt_rn2)
+    parenthesized = boundary(
+        "parenthesized_sum", stratified + dissipation)
+    scaled = boundary("dt_product", dt * parenthesized)
+    increment = boundary(
+        "masked_increment", scaled * jnp.asarray(wmask, dtype=en.dtype))
+    return en + increment

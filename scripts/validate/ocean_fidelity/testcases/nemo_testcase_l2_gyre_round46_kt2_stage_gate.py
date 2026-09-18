@@ -2666,14 +2666,15 @@ def _tke_matrix_statement_rows(
             reference, candidate, mask))
         scored_reference = reference
         planted_at = None
-        if plant == "stage-tke-matrix-ulp" and name == "zdiag":
+        if ((plant == "stage-tke-matrix-ulp" and name == "zdiag")
+                or (plant == "stage-tke-rhs-ulp" and name == "en_rhs")):
             equal = (
                 np.ascontiguousarray(reference).view(np.uint64)
                 == np.ascontiguousarray(candidate).view(np.uint64)
             ) & np.isfinite(reference)
             indices = np.argwhere(equal)
             require(indices.size > 0,
-                    "TKE matrix plant found no exact zdiag cell to corrupt")
+                    "TKE matrix/RHS plant found no exact target cell")
             planted_at = tuple(int(value) for value in indices[0])
             scored_reference = reference.copy()
             scored_reference[planted_at] = np.nextafter(
@@ -2697,12 +2698,12 @@ def _tke_matrix_statement_rows(
         rows.append(row)
         if planted_at is not None:
             require(row["n_unequal"] == clean["n_unequal"] + 1,
-                    "TKE matrix one-ULP plant did not add exactly one "
+                    "TKE matrix/RHS one-ULP plant did not add exactly one "
                     "unequal cell")
             plant_target = row["name"]
-    if plant == "stage-tke-matrix-ulp":
+    if plant in ("stage-tke-matrix-ulp", "stage-tke-rhs-ulp"):
         require(plant_target is not None,
-                "TKE matrix plant did not reach its target")
+                "TKE matrix/RHS plant did not reach its target")
 
     # Operand attribution for the RHS assignment: is the miss owned by the
     # arithmetic or inherited through p_sh2 (zdftke.f90:439)?
@@ -3121,7 +3122,7 @@ def _tke_surface_operand_rows(
 def _tke_program_twin(
     records: dict, advmean_root: Path, memory_root: Path,
     tke_statement_record: dict, tke_operand_record: dict,
-    plant: str | None, execution_mode: str = "production-jit",
+    plant: str | None, execution_mode: str = "production-jit", rhs_materialization: str = "",
 ) -> dict:
     """Bounded production-step TKE subwalk split from the compiler-heavy table."""
     import jax
@@ -3208,7 +3209,7 @@ def _tke_program_twin(
 
     freshwater, surface = _surface_forcings(card, state, 2)
     hooks = _NEMOWSRK3TestHooks(
-        expose_live_stage_operands=True,
+        expose_live_stage_operands=True, tke_rhs_materialization=rhs_materialization,
         barotropic_raw_history_override=raw_history,
         stage_barotropic_output_override=_barotropic_override(
             records, advmean_root, 2),
@@ -3301,9 +3302,10 @@ def _tke_program_twin(
             else "REFUTED")
     }
     if plant in ("stage-tke-production-ulp", "stage-tke-matrix-ulp",
-                 "stage-shear-operand-ulp"):
+                 "stage-shear-operand-ulp", "stage-tke-rhs-ulp"):
         return {
-            "format": "nemo-testcase-l2-gyre-tke-production-walk-v6",
+            "format": "nemo-testcase-l2-gyre-tke-production-walk-v7",
+            "rhs_materialization": rhs_materialization,
             "execution": execution_label,
             "input_bridge": input_bridge,
             "model_forcing_diagnostic": model_forcing,
@@ -3332,7 +3334,8 @@ def _tke_program_twin(
     require(chained_trace is not None,
             "chained TKE production run did not expose kt2")
     return {
-        "format": "nemo-testcase-l2-gyre-tke-production-walk-v6",
+        "format": "nemo-testcase-l2-gyre-tke-production-walk-v7",
+        "rhs_materialization": rhs_materialization,
         "execution": execution_label,
         "input_bridge": input_bridge,
         "model_forcing_diagnostic": model_forcing,
@@ -3797,7 +3800,7 @@ def run(
     stage1_r3_root: Path = STAGE1_R3_ROOT,
     tke_statement_root: Path = TKE_STATEMENT_ROOT,
     tke_operand_record: Path = TKE_OPERAND_RECORD,
-    execution_mode: str = "production-jit",
+    execution_mode: str = "production-jit", tke_rhs_materialization: str = "",
 ) -> dict:
     stamp = worktree_stamp()
     expected = "0" * 40 if plant == "stamp" else expect_commit.lower()
@@ -3940,7 +3943,7 @@ def run(
                 "before production scoring")
         report["tke_statement_walk"] = _tke_program_twin(
             records, advmean_root, memory_root, statement_record,
-            legacy_record, plant, execution_mode)
+            legacy_record, plant, execution_mode, tke_rhs_materialization)
     if mode == "stage-tke-record":
         from nemo_testcase_l2_gyre_round54_tke_operands import (
             read_record as read_tke_operand_record,
@@ -4046,6 +4049,7 @@ def main(argv=None) -> int:
         help=("execution boundary for stage-tke-walk; eager invokes the "
               "complete production closure with JIT disabled"),
     )
+    p.add_argument("--tke-rhs-materialization", default="")
     p.add_argument(
         "--plant",
         choices=("header", "slot", "truncation", "calibration", "given", "trajectory",
@@ -4057,7 +4061,7 @@ def main(argv=None) -> int:
                  "stage-tke-record-truncation", "stage-tke-record-stamp",
                  "stage-tke-record-ulp", "stage-tke-production-ulp",
                  "stage-tke-matrix-ulp",
-                 "stage-shear-operand-ulp",
+                 "stage-shear-operand-ulp", "stage-tke-rhs-ulp",
                  "stamp"),
     )
     p.add_argument("--output", type=Path)
@@ -4077,7 +4081,7 @@ def main(argv=None) -> int:
         stage1_r3_root=args.stage1_r3_root,
         tke_statement_root=args.tke_statement_root,
         tke_operand_record=args.tke_operand_record,
-        execution_mode=args.execution_mode,
+        execution_mode=args.execution_mode, tke_rhs_materialization=args.tke_rhs_materialization,
     )
     report["status"] = plant_aware_status(report["status"], args.plant)
     text = json.dumps(report, indent=2, sort_keys=True)

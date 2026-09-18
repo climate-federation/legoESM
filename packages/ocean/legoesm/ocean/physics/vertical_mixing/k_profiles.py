@@ -135,7 +135,7 @@ def compute_vertical_K_profiles(
     eta_now=None,
     tke_p_sh2=None,
     tke_n2_bundle=None,
-    return_tke_statement_trace: bool = False,
+    return_tke_statement_trace: bool = False, tke_rhs_materialization: str = "",
 ) -> (
     tuple[jnp.ndarray, jnp.ndarray]
     | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]
@@ -332,7 +332,8 @@ def compute_vertical_K_profiles(
             n2_before_used_by_evd=_evd_uses_before,
             tke_p_sh2=tke_p_sh2,
             tke_n2_bundle=tke_n2_bundle,
-            return_tke_statement_trace=return_tke_statement_trace)
+            return_tke_statement_trace=return_tke_statement_trace,
+            tke_rhs_materialization=tke_rhs_materialization)
         if _nemo_floor:
             K_v_total = jnp.maximum(K_v_total, K_vmix)
             A_v_total = jnp.maximum(A_v_total, A_vmix)
@@ -557,7 +558,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                      n2_tracers_before=None, n2_before_used_by_evd=False,
                      tke_p_sh2=None,
                      tke_n2_bundle=None,
-                     return_tke_statement_trace: bool = False):
+                     return_tke_statement_trace: bool = False, tke_rhs_materialization: str = ""):
     """Re-compute K_v, A_v at interfaces for the chosen vmix scheme.
 
     For ``constant`` / ``richardson`` this duplicates only the K
@@ -1014,6 +1015,7 @@ def _vmix_K_profiles(state, z_coord, surface_forcing, vmix_cfg,
                 precomputed_p_sh2=tke_p_sh2,
                 precomputed_n2_bundle=tke_n2_bundle,
                 return_statement_trace=return_tke_statement_trace,
+                rhs_materialization=tke_rhs_materialization,
             )
             if (getattr(tke_cfg, "tke_preclosure_coeff_source",
                         "current_subiteration") == "carried_previous_step"):
