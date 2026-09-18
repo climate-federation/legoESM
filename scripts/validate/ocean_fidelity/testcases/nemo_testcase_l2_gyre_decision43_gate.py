@@ -15,6 +15,8 @@ import copy
 import json
 from pathlib import Path
 
+from legoesm.ocean.fidelity.provenance import worktree_stamp
+
 
 FORMAT = "nemo-testcase-l2-gyre-decision43-v1"
 COMPARISON_FORMAT = "legoesm-ocean-oracle-relative-move-gate-v3"
@@ -194,6 +196,7 @@ def evaluate(
 
     return {
         "format": FORMAT,
+        "worktree": worktree_stamp(),
         "status": "PASS" if admissible else "FAIL",
         "plant": plant,
         "expected_candidate_commit": expected_candidate_commit,
