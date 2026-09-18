@@ -1204,6 +1204,76 @@ def _hydrostatic_geopotential(T, q, p_half):
     return phi_half, phi_full
 
 
+def _refine_half_levels(p_half, r):
+    """Refined half levels: r equal-pressure sub-layers per parent layer.
+
+    Fractions j/r for j = 0..r-1 keep EVERY parent interface exactly once
+    (p_r[:, 0] == p_half[:, 0] and p_r[:, k*r] == p_half[:, k] for all k,
+    surface-last layout, half levels (ncol, nlev+1)); the surface half
+    level p_half[:, nlev] is appended unchanged, so the result is
+    (ncol, nlev*r + 1), every sub-layer has strictly positive thickness,
+    and r = 1 reproduces p_half exactly.
+    """
+    nlev = p_half.shape[1] - 1
+    h_par = jnp.repeat(jnp.arange(nlev), r)              # static parent index
+    frac = jnp.tile(jnp.arange(r), nlev).astype(p_half.dtype) / r
+    lo_h = p_half[:, h_par]
+    dp_h = p_half[:, h_par + 1] - lo_h
+    return jnp.concatenate(
+        [lo_h + frac * dp_h, p_half[:, nlev:nlev + 1]], axis=1)
+
+
+def _fv_minmod_refine(x, c_par, h_par_dp, c_child, k_par):
+    """Delta-p-conservative minmod-limited piecewise-linear refinement.
+
+    Parent values x (ncol, nlev) are LAYER MEANS on the parent layers with
+    pressure centres c_par and pressure thicknesses h_par_dp; c_child
+    (ncol, nlev*r) are the sub-layer centres and k_par (nlev*r,) the static
+    parent index of each child.  Returns the sub-layer means
+
+        x_kj = x_k + m_k * (c_kj - c_k),
+        m_k = minmod(d_minus / (c_k - c_{k-1}),
+                     d_plus  / (c_{k+1} - c_k),
+                     2*d_minus / h_k, 2*d_plus / h_k),
+        d_minus = x_k - x_{k-1},  d_plus = x_{k+1} - x_k,
+
+    where minmod returns the smallest-magnitude argument when all four
+    arguments share a sign and 0 otherwise; the 2*d/h arguments are the
+    endpoint bound that keeps the reconstruction inside the neighbour
+    range.  m_k is 0 exactly on the top and bottom parent layers.  The
+    children of a parent are equal-pressure sub-layers whose centres
+    average to the parent centre, so sum_j x_kj * dp/r == x_k * dp to
+    round-off; children are bounded by the neighbouring parent values
+    (non-negative when the parents are), the operator is exact for
+    profiles affine in pressure and the identity at r = 1.  Static index
+    arithmetic only -- JAX-traceable, no branching on traced values, no
+    data-dependent shapes.  q is NOT clipped against saturation: a scalar
+    limiter cannot guarantee sub-saturation and clipping would break the
+    per-layer conservation.
+    """
+    nlev = x.shape[1]
+    ones = jnp.ones_like(c_par[:, :1])
+    diff = x[:, 1:] - x[:, :-1]
+    d_minus = jnp.concatenate([x[:, :1], diff], axis=1)   # x_k - x_{k-1}
+    d_plus = jnp.concatenate([diff, x[:, -1:]], axis=1)   # x_{k+1} - x_k
+    dc = c_par[:, 1:] - c_par[:, :-1]
+    dc_minus = jnp.concatenate([ones, dc], axis=1)        # c_k - c_{k-1}
+    dc_plus = jnp.concatenate([dc, ones], axis=1)         # c_{k+1} - c_k
+    s1 = d_minus / dc_minus
+    s2 = d_plus / dc_plus
+    s3 = 2.0 * d_minus / h_par_dp
+    s4 = 2.0 * d_plus / h_par_dp
+    sgn = jnp.sign(s1)
+    same = ((sgn == jnp.sign(s2)) & (sgn == jnp.sign(s3))
+            & (sgn == jnp.sign(s4)) & (sgn != 0.0))
+    mag = jnp.minimum(jnp.minimum(jnp.abs(s1), jnp.abs(s2)),
+                      jnp.minimum(jnp.abs(s3), jnp.abs(s4)))
+    m = jnp.where(same, sgn * mag, 0.0)
+    interior = (jnp.arange(nlev) > 0) & (jnp.arange(nlev) < nlev - 1)
+    m = jnp.where(interior, m, 0.0)                       # flat top/bottom
+    return x[:, k_par] + m[:, k_par] * (c_child - c_par[:, k_par])
+
+
 def ifs_departure_search_refined(T, q_v, p_full, p_half, geo_full, geo_half,
                                  shf_w_m2, lhf_w_m2, ustar, land_frac,
                                  dq_dt_adv, cfg):
@@ -1239,17 +1309,20 @@ def ifs_departure_search_refined(T, q_v, p_full, p_half, geo_full, geo_half,
     and calls ifs_departure_search directly): refined half levels split
     each parent layer evenly in PRESSURE; refined full levels are the
     midpoints of the refined half intervals.  Dry static energy
-    s = c_p T + Phi and SPECIFIC humidity q are reconstructed
-    LINEARLY IN PRESSURE between the parent FULL levels (piecewise
-    linear, edge values held constant beyond the first/last parent full
-    level by clamping the interpolation weight to [0, 1]); dq_dt_adv is
-    interpolated like q.  Temperature is DERIVED from s,
+    s = c_p T + Phi, SPECIFIC humidity q and dq_dt_adv are reconstructed
+    from the parent LAYER MEANS with the Delta-p-conservative
+    piecewise-linear minmod-limited finite-volume operator
+    (_fv_minmod_refine) on the parent-layer pressure geometry taken from
+    p_half (layer centres and thicknesses, NOT p_full): per-parent mass is
+    conserved to round-off, every child value is bounded by the
+    neighbouring parent values, and profiles affine in pressure are
+    reproduced exactly in the interior.  Temperature is DERIVED from s,
     T = (s - Phi_refined)/c_p, and nothing else is recomputed.  The
     refined geopotential is hydrostatic from the refined T and q
     (_hydrostatic_geopotential, cumulative R_d T_v ln(p) from the
     surface); the circularity T(s, Phi(T)) is broken with a single
-    provisional pass that interpolates the parent T with the same
-    weights purely to seed Phi (the final s-derived T then closes the
+    provisional pass that reconstructs the parent T with the same
+    operator purely to seed Phi (the final s-derived T then closes the
     consistency to within the reconstruction error).
 
     RESTRICTION (map back to the parent levels): refined half indices
@@ -1281,49 +1354,41 @@ def ifs_departure_search_refined(T, q_v, p_full, p_half, geo_full, geo_half,
                                     land_frac, dq_dt_adv, cfg)
 
     ncol, nlev = T.shape
-    dt = T.dtype
     c_pd = constants.c_pd
     # q_v IS specific humidity, exactly PQEN (cubasen.F90:72) -- no conversion
     q = q_v
 
     # ---- refined grids (static index arithmetic, traced pressures)
-    # half levels: r sub-layers per parent layer, even in pressure; the
-    # refined half levels at multiples of r COINCIDE with the parent
-    # interfaces (frac = j/r, j = 1..r), and the surface half level
-    # p_half[:, nlev] is appended unchanged
-    h_par = jnp.repeat(jnp.arange(nlev), r)              # (nlev*r,) static
-    frac = jnp.tile(jnp.arange(1, r + 1), nlev).astype(dt) / r
-    lo_h = p_half[:, h_par]
-    dp_h = p_half[:, h_par + 1] - lo_h
-    p_half_r = jnp.concatenate(
-        [lo_h + frac * dp_h, p_half[:, nlev:nlev + 1]], axis=1)
-    # full levels: midpoints of the refined half intervals
+    # half levels: r sub-layers per parent layer, even in pressure, at
+    # fractions j/r for j = 0..r-1 so that EVERY parent interface appears
+    # exactly once (the refined half levels at multiples of r coincide
+    # with the parent interfaces, including the model top p_half[:, 0]);
+    # the surface half level p_half[:, nlev] is appended unchanged, every
+    # sub-layer has positive thickness, and r = 1 reproduces p_half
+    p_half_r = _refine_half_levels(p_half, r)
+    # full levels: midpoints of the refined half intervals (sub-layer centres)
     p_full_r = 0.5 * (p_half_r[:, :-1] + p_half_r[:, 1:])
 
-    # ---- reconstruction weights (traced, computed once per column):
-    # refined full index k_r lies in parent layer k_par = k_r // r; the
-    # piecewise-linear-in-pressure weight between the parent FULL levels
-    # k_par and k_par+1, clamped to [0, 1] (edge values held constant
-    # beyond the first/last parent full level -- the refined full level
-    # midpoints near the domain edges can fall outside the parent full
-    # levels' pressure range).  NOTE: plain interpolation between
-    # full-level points is NOT conservative (see docstring); the
-    # Delta-p-conservative limited reconstruction is the follow-up if
-    # the gate test fails.
-    k_par = (jnp.arange(nlev * r) // r)                  # static
-    p_lo = p_full[:, k_par]
-    p_hi = p_full[:, k_par + 1]
-    w = jnp.clip((p_full_r - p_lo) / (p_hi - p_lo), 0.0, 1.0)
+    # ---- reconstruction (traced, computed once per column): the
+    # Delta-p-conservative finite-volume piecewise-linear minmod operator
+    # (_fv_minmod_refine), parent values as LAYER MEANS on the parent
+    # half-level geometry (layer centres/thicknesses from p_half, NOT
+    # p_full); children are the sub-layer means at the refined sub-layer
+    # centres.  This replaces the old clipped linear ramp between parent
+    # FULL levels, which was half-cell shifted and NOT conservative.
+    c_par = 0.5 * (p_half[:, :-1] + p_half[:, 1:])       # parent centres
+    h_par_dp = p_half[:, 1:] - p_half[:, :-1]            # parent thicknesses
+    k_par = jnp.repeat(jnp.arange(nlev), r)              # (nlev*r,) static
 
-    def _lin(x):
-        return x[:, k_par] + w * (x[:, k_par + 1] - x[:, k_par])
+    def _fv(x):
+        return _fv_minmod_refine(x, c_par, h_par_dp, p_full_r, k_par)
 
-    s_r = _lin(c_pd * T + geo_full)                      # dry static energy
-    q_r = _lin(q)                                        # specific humidity
-    dq_r = _lin(dq_dt_adv)                               # interpolated like q
-    # provisional T (same weights) only to SEED the hydrostatic Phi;
-    # the final T below is derived from s (T = (s - Phi_refined)/c_p)
-    T_prov = _lin(T)
+    s_r = _fv(c_pd * T + geo_full)                       # dry static energy
+    q_r = _fv(q)                                         # specific humidity
+    dq_r = _fv(dq_dt_adv)                                # reconstructed like q
+    # provisional T (same operator) only to SEED the hydrostatic Phi; the
+    # final T below is derived from s (T = (s - Phi_refined)/c_p)
+    T_prov = _fv(T)
     phi_half_r, phi_full_r = _hydrostatic_geopotential(T_prov, q_r, p_half_r)
     T_r = (s_r - phi_full_r) / c_pd                      # derive temperature
 

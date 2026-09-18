@@ -125,21 +125,21 @@ def test_deep_sounding_profile():
     top = int(out.k_ctop[0])
     assert base == 28
     assert abs(float(p_full[0, base]) - 962.0 * 100.0) < 200.0
-    assert top == 22
-    assert abs(float(p_full[0, top]) - 760.0 * 100.0) < 200.0
+    assert top == 24
+    assert abs(float(p_full[0, top]) - 827.0 * 100.0) < 200.0
     M_ratio = np.asarray(out.M[0] / 0.02)
-    expected_M = [1.00, 0.98, 1.16, 1.34, 1.53, 1.05, 0.34]
-    for i, k in enumerate(range(28, 21, -1)):
+    expected_M = [1.00, 0.98, 1.16, 1.34, 0.83]
+    for i, k in enumerate(range(28, 23, -1)):
         assert M_ratio[k] == pytest.approx(expected_M[i], abs=0.03), (k, i)
-    assert np.all(M_ratio[:22] == pytest.approx(0.0, abs=1e-8))
+    assert np.all(M_ratio[:24] == pytest.approx(0.0, abs=1e-8))
     K = np.asarray(out.PKINEU[0])
-    expected_K = [4.19, 7.92, 8.38, 7.05, 4.81, 2.24, 0.37]
-    for i, k in enumerate(range(28, 21, -1)):
+    expected_K = [2.04, 4.51, 4.80, 3.26, 1.08]
+    for i, k in enumerate(range(28, 23, -1)):
         assert K[k] == pytest.approx(expected_K[i], abs=0.15), (k, i)
-    assert np.all(K[:22] == pytest.approx(0.0, abs=1e-6))
+    assert np.all(K[:24] == pytest.approx(0.0, abs=1e-6))
     pdmfup_sum = float(np.sum(np.asarray(out.PDMFUP)))
     assert pdmfup_sum > 0.0
-    assert pdmfup_sum == pytest.approx(3.24e-5, rel=0.20)
+    assert pdmfup_sum == pytest.approx(2.04e-5, rel=0.20)
 
 
 def test_trade_sounding_profile():
@@ -155,12 +155,12 @@ def test_trade_sounding_profile():
     for i, k in enumerate(range(28, 24, -1)):
         assert M_ratio[k] == pytest.approx(expected_M[i], abs=0.03), (k, i)
     K = np.asarray(out.PKINEU[0])
-    expected_K = [1.40, 6.91, 7.70, 8.24]
+    expected_K = [1.26, 5.53, 6.06, 6.41]
     for i, k in enumerate(range(28, 24, -1)):
         assert K[k] == pytest.approx(expected_K[i], abs=0.15), (k, i)
     pdmfup_sum = float(np.sum(np.asarray(out.PDMFUP)))
     assert pdmfup_sum > 0.0
-    assert pdmfup_sum == pytest.approx(7.4e-6, rel=0.20)
+    assert pdmfup_sum == pytest.approx(1.09e-5, rel=0.20)
 
 
 def test_mass_flux_nonnegative_and_zero_above_top():
