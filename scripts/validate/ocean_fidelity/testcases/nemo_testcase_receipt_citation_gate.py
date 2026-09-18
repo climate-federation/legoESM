@@ -483,6 +483,15 @@ FILES = {
 # recurring symbol is refused now, and every multi-line citation states its
 # length a SECOND time so widening the key without widening the extent fails.
 CITATION_MAP = {
+    # --- round 106: compiled TKE RHS scalar, matrix predecessors, and RHS ---
+    'GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/zdftke.f90:261': (
+        'zfact3  = 0.5_wp         * rn_ediss', 1),
+    'GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/zdftke.f90:434-436': [
+        'zd_up(ji,jk) = zzd_up',
+        'zdiag(ji,jk) = 1._wp - zzd_lw - zzd_up', 3],
+    'GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/zdftke.f90:439-442': [
+        ('en(ji,jj,jk) = en(ji,jj,jk) + rn_Dt', 2),
+        '&                                  ) * wmask(ji,jj,jk)', 4],
     # --- round 105: split shear/solver routes and the surviving JIT boundary ---
     'GYRE_OMIP_L2_P3_SM_R59TKE/BLD/ppsrc/nemo/stprk3_stg.f90:240-256': [
         'CASE ( 3 )           !==  Stage 3  ==!   Kbb = N   ;   Kmm = N+1/2   ;   Kaa = N+1',
@@ -1158,7 +1167,7 @@ CITATION_MAP = {
         'return state, audit', 188],
     'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:1134-1168': [
         'def _bridge_kt2_state(', ('return state', 1), 35],
-    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:3593-3623': [
+    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:3686-3716': [
         'states = {1: _bridge_stage_context(',
         ('surface_forcing=surface))', 2), 31],
     'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:513-530': [
@@ -1168,7 +1177,7 @@ CITATION_MAP = {
         'step_entry = read_entry(year_entry_path)',
         'f"kt=2/Nbb=3, got kt={step_entry[\'kt\']}/Nbb={step_entry[\'Nbb\']}",',
         5],
-    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:3439-3460': [
+    'nemo_testcase_l2_gyre_round46_kt2_stage_gate.py:3532-3553': [
         'if production_tke_post_sweep is not None:',
         'tke_module._solve_tke_backward_euler = inject_recorded_post_sweep',
         22],
