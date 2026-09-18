@@ -309,19 +309,38 @@ Every suite summary is quoted rather than inferred from shell status:
 | suite/control | result |
 |---|---|
 | retained TKE/stage focused tests | `81 passed in 29.20s` |
+| DINO card before arm | `128 passed, 9 warnings in 106.67s` |
 | DINO card after arm | `128 passed, 9 warnings in 104.43s` |
 | tank recipe assertions | `24 passed in 15.25s` |
+| citation suite before rigid re-anchor | `4 failed, 12 passed in 1.81s`; all four failures were the expected rigid line shifts from the diagnostic edit |
 | citation suite after rigid re-anchor | `16 passed in 1.82s` |
+| final citation suite | `16 passed in 1.77s` |
 | stage shear plant | `STATUS PLANT-FIRED`, exit 1, exactly one target cell |
 | DINO routing plant | `STATUS PLANT-FIRED`, exit 1, 12 `p_sh2` cells |
 | Rule-12 self-control | PASS, 954 rows, zero movement |
 | Rule-12 `worsen-3ulp` plant | FAIL, exit 1, one 3-ULP violation |
-| full `tests/ocean/fidelity` + `tests/ocean/unit` | **FINAL_TREE_TESTS_PENDING** |
-| receipt citation gate and shifted-citation plant | **FINAL_RECEIPT_GATE_PENDING** |
+| full `tests/ocean/fidelity` + `tests/ocean/unit` | **NO TERMINAL SUMMARY**: 8,136 items collected, progress exceeded 95%, ten xdist workers aborted in JAX compilation, then the final replacement stalled; controller interrupted with exit 130 |
+| documented-red nodes, current clone | `1 failed, 1 passed, 1 warning in 87.43s` |
+| same documented-red nodes, incoming tip | `1 failed, 1 passed, 1 warning in 87.87s` |
+| receipt citation gate | PASS, 11 citations, zero failures/unmapped citations; the final clean-tree stamp is recorded in `citation_gate_final.json` |
+| shifted-citation plant | FAIL as required, exit 1, `SYMBOL-NOT-AT-LINE` at the planted R101 first endpoint |
 
-The known pre-existing reds remain the worktree-stamp offender census and
-`test_rk3_ws_differs_from_rk3_and_is_finite`; the final full-tree run will
-record its exact summary and compare the offender list to the incoming tip.
+The combined tree run never produced a pytest summary and therefore is not
+represented as a pass or as a meaningful failure count. Its complete log
+contains ten independent `Fatal Python error: Aborted` stacks in JAX
+`backend_compile_and_load`, across unrelated tests, followed by a stalled
+replacement after more than 95 percent progress. This is the large-suite
+per-process compiler-limit failure mode documented in the repository
+orientation. It was not hidden or retried as another monolithic run.
+
+The two operator-named red nodes were instead run together in a fresh process
+at both trees. Both trees fail only
+`test_every_report_emitter_stamps_the_worktree`; their nine-entry offender
+lines are byte-identical (`cmp` exit 0, SHA-256
+`07475992194326f75221d06f968b2c25ec6629e9646813dae625acda07e2ebaf`).
+`test_rk3_ws_differs_from_rk3_and_is_finite`, although documented as an
+incoming red, passed in both fresh runs on this machine. The round claims only
+what was observed: it does not relabel that intermittent test as repaired.
 
 ## Canonical evidence hashes
 
