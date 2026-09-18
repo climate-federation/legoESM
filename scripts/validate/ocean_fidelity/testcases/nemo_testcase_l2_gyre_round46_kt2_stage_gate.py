@@ -3302,6 +3302,7 @@ def _bn2_source_replay(state, card, operand_record: dict) -> dict:
             "e3w": e3w,
             "alpha": alpha,
             "beta": beta,
+            "wmask": wmask,
             "gravity": np.asarray(
                 card.recipe.model_config.constants.g, dtype=np.float64),
         },
@@ -3323,6 +3324,50 @@ def _bn2_source_replay(state, card, operand_record: dict) -> dict:
             "alpha_beta": "eosbn2.f90:1257-1310",
             "bn2": "eosbn2.f90:1609-1618",
         },
+    }
+
+
+def _bn2_zrw_propagation_rows(
+    replay: dict,
+    candidate_zrw: np.ndarray,
+    candidate_output: np.ndarray,
+) -> dict:
+    """Carry one measured ``zrw`` through the remaining compiled statements."""
+    inputs = replay["inputs"]
+    zrw = np.asarray(candidate_zrw, dtype=np.float64)
+    alpha = np.asarray(inputs["alpha"], dtype=np.float64)
+    beta = np.asarray(inputs["beta"], dtype=np.float64)
+    temperature = np.asarray(inputs["T"], dtype=np.float64)
+    salinity = np.asarray(inputs["S"], dtype=np.float64)
+    e3w = np.asarray(inputs["e3w"], dtype=np.float64)
+    wmask = np.asarray(inputs["wmask"], dtype=np.float64)
+    gravity = np.asarray(inputs["gravity"], dtype=np.float64)
+
+    one_minus_zrw = np.float64(1.0) - zrw
+    zaw = alpha[..., 1:] * one_minus_zrw + alpha[..., :-1] * zrw
+    zbw = beta[..., 1:] * one_minus_zrw + beta[..., :-1] * zrw
+    temperature_contribution = (
+        zaw * (temperature[..., :-1] - temperature[..., 1:]))
+    salinity_contribution = (
+        zbw * (salinity[..., :-1] - salinity[..., 1:]))
+    propagated = (
+        gravity * (temperature_contribution - salinity_contribution)
+        / e3w * wmask)
+    reference = np.asarray(replay["recorded_rn2"], dtype=np.float64)
+    output = np.asarray(candidate_output, dtype=np.float64)
+    owned = np.ones(reference.shape, dtype=bool)
+    propagated_row = _bitwise_classification(score(
+        "GYRE-zco.kt2.bn2.zrw_source_propagation.masked_rn2",
+        reference, propagated, owned))
+    residual_row = _bitwise_classification(score(
+        "GYRE-zco.kt2.bn2.zrw_source_propagation.production_residual",
+        propagated, output, owned))
+    return {
+        "method": (
+            "measured zrw plus recorded alpha/beta/T/S/e3w/wmask, replayed "
+            "through eosbn2.f90:1613-1618 in NumPy source order"),
+        "propagated_output_row": propagated_row,
+        "production_residual_row": residual_row,
     }
 
 
@@ -3411,6 +3456,9 @@ def _bn2_intermediate_rows(
         "domain": "all 32 x 22 owned columns, NEMO levels 2:jpkm1",
         "nemo_statement": "eosbn2.f90:1616-1618",
     })
+    propagation = (
+        _bn2_zrw_propagation_rows(replay, candidate, output)
+        if intermediate == "zrw" else None)
     return {
         "intermediate": intermediate,
         "one_returned_intermediate": True,
@@ -3418,6 +3466,7 @@ def _bn2_intermediate_rows(
         "input_rows": replay["input_rows"],
         "row": row,
         "output_row": output_row,
+        "zrw_downstream_propagation": propagation,
         "plant_target": None if planted_at is None else row["name"],
     }
 

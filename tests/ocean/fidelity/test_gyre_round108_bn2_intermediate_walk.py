@@ -71,6 +71,15 @@ def test_bn2_private_override_and_selector_fail_loudly():
 def test_bn2_scorer_is_bit_strict_and_ulp_plant_is_nonzero():
     reference = np.asarray([[[1.0, 2.0]]], dtype=np.float64)
     replay = {
+        "inputs": {
+            "T": np.asarray([[[4.0, 3.0, 2.0]]], dtype=np.float64),
+            "S": np.asarray([[[1.0, 1.5, 2.0]]], dtype=np.float64),
+            "alpha": np.asarray([[[1.0, 1.0, 1.0]]], dtype=np.float64),
+            "beta": np.asarray([[[1.0, 1.0, 1.0]]], dtype=np.float64),
+            "e3w": np.asarray([[[1.0, 1.0]]], dtype=np.float64),
+            "wmask": np.asarray([[[1.0, 1.0]]], dtype=np.float64),
+            "gravity": np.asarray(1.0, dtype=np.float64),
+        },
         "references": {name: reference for name in gate.BN2_INTERMEDIATES},
         "recorded_rn2": reference,
         "reference_replay": {"classification": "BIT"},
@@ -85,6 +94,7 @@ def test_bn2_scorer_is_bit_strict_and_ulp_plant_is_nonzero():
     assert clean["row"]["classification"] == "BIT"
     assert clean["output_row"]["classification"] == "BIT"
     assert clean["row"]["n_unequal"] == 0
+    assert clean["zrw_downstream_propagation"] is not None
 
     planted = gate._bn2_intermediate_rows(
         trace, replay, "TEST", "zrw",
@@ -92,6 +102,31 @@ def test_bn2_scorer_is_bit_strict_and_ulp_plant_is_nonzero():
     assert planted["row"]["n_unequal"] == 1
     assert planted["row"]["plant_baseline"] != 0.0
     assert planted["plant_target"] == planted["row"]["name"]
+
+
+def test_zrw_propagation_reports_source_result_and_production_residual():
+    zrw = np.asarray([[[0.25, 0.75]]], dtype=np.float64)
+    inputs = {
+        "T": np.asarray([[[4.0, 3.0, 2.0]]], dtype=np.float64),
+        "S": np.asarray([[[1.0, 1.5, 2.0]]], dtype=np.float64),
+        "alpha": np.asarray([[[2.0, 3.0, 4.0]]], dtype=np.float64),
+        "beta": np.asarray([[[0.5, 0.75, 1.0]]], dtype=np.float64),
+        "e3w": np.asarray([[[2.0, 4.0]]], dtype=np.float64),
+        "wmask": np.asarray([[[1.0, 0.0]]], dtype=np.float64),
+        "gravity": np.asarray(9.0, dtype=np.float64),
+    }
+    one_minus = 1.0 - zrw
+    zaw = inputs["alpha"][..., 1:] * one_minus + inputs["alpha"][..., :-1] * zrw
+    zbw = inputs["beta"][..., 1:] * one_minus + inputs["beta"][..., :-1] * zrw
+    expected = (
+        inputs["gravity"]
+        * (zaw * (inputs["T"][..., :-1] - inputs["T"][..., 1:])
+           - zbw * (inputs["S"][..., :-1] - inputs["S"][..., 1:]))
+        / inputs["e3w"] * inputs["wmask"])
+    report = gate._bn2_zrw_propagation_rows(
+        {"inputs": inputs, "recorded_rn2": expected}, zrw, expected)
+    assert report["propagated_output_row"]["classification"] == "BIT"
+    assert report["production_residual_row"]["classification"] == "BIT"
 
 
 def test_gate_enumerates_bn2_statements_in_compiled_order():
