@@ -209,6 +209,10 @@ def run_stage_a(d, cfg):
         # this gap was found (job 9411221).
         t_depth=jnp.asarray(zc),
         w_depth=jnp.asarray(np.cumsum(dz_c, axis=1)[:, :-1]),
+        # e3w_int: the same centre-to-centre spacing already handed in above,
+        # bounded by the 6.6e-4 divisor error noted there. Required since the
+        # card selects n2_mode="nemo_bn2"; without it the closure raises.
+        e3w_int=jnp.asarray(dz_half),
     )
     K_H = np.asarray(out.K_H).reshape(ncol, z - 1)
     K_M = np.asarray(out.K_M).reshape(ncol, z - 1)
@@ -273,6 +277,10 @@ def run_stage_a2_mode_a(d, rst, cfg_prog):
         # own e3t so they carry the live z* stretch.
         t_depth=jnp.asarray(zc),
         w_depth=jnp.asarray(np.cumsum(dz_c, axis=1)[:, :-1]),
+        # e3w_int: the same centre-to-centre spacing already handed in above,
+        # bounded by the 6.6e-4 divisor error noted there. Required since the
+        # card selects n2_mode="nemo_bn2"; without it the closure raises.
+        e3w_int=jnp.asarray(dz_half),
     )
     K_H = np.asarray(out.K_H).reshape(ncol, z - 1)
     # K_M too: Stage A (Mode-B, our own equilibrium TKE) measures K_M/avm 0.47
