@@ -1126,6 +1126,58 @@ def main():
                   f"p90={_r['sh2_ratio_p90']:8.3f} "
                   f"frac>2={_r['frac_ratio_above_2']:5.3f}")
 
+        # WHICH INPUT TO Ri IS ANOMALOUS *WHERE THE DEFECT IS*?
+        #
+        # The shear-order ratio was reported as a WHOLE-BAND median and came
+        # out 1.026 in the Antarctic, which retired the squaring order. But
+        # the defect is a coastal rim, and coastal columns are exactly where
+        # the centred average loses the most: a T-column with one dry face
+        # keeps a single velocity difference where the open ocean averages
+        # two. The band median is dominated by open water and can hide that
+        # completely -- the same p90 is 1.799 with 5.6% of interfaces above 2.
+        #
+        # Two reviewers split on what to do next. Codex wants NEMO's own bn2
+        # (a rerun) to test N^2. GLM argued a 4.5x N^2 error from IDENTICAL
+        # T and S is implausible and something must be adding to avt but not
+        # avm; its candidate was double diffusion, which ORCA1's namelist
+        # refutes outright (ln_zdfddm = .false., namelist_cfg:431). The
+        # disagreement is still the signal, and this is the measurement that
+        # settles it from data already in hand, BEFORE paying for a rerun:
+        #   ratio large on the shelf  -> the shear explains Ri, no rerun
+        #   ratio ~1 on the shelf     -> N^2 is the suspect, rerun justified
+        _shallow = _z_iface < 100.0
+        _nonevd = (~evd_cols)[:, None]
+        _sh_rows = []
+        for _nm, _lo, _hi in REGIONS:
+            _bd = (lat_col >= _lo) & (lat_col <= _hi)
+            _m = (wet_pair & _bd[:, None] & _shallow & _nonevd
+                  & (sh2_o > 1e-20) & np.isfinite(sh2_n))
+            if int(_m.sum()) < 10:
+                continue
+            _r = sh2_n[_m] / sh2_o[_m]
+            _sh_rows.append({
+                "region": _nm + "/calm<100m", "n": int(_m.sum()),
+                "sh2_ratio_median": float(np.median(_r)),
+                "sh2_ratio_p90": float(np.percentile(_r, 90)),
+                "frac_above_2": float((_r > 2.0).mean()),
+                "n2_ours_median": float(np.median(n2_ours[_m])),
+                "shear2_ours_median": float(np.median(
+                    sh2_o[_m] / np.maximum(e3w_a2, 1e-12)[_m] ** 2)),
+            })
+        result["shear_order_shallow"] = _sh_rows
+        print("\n--- Shear order RESTRICTED to the defect geometry "
+              "(<100 m, nonconvecting). If the Antarctic/Arctic rows are far "
+              "above the 1.026 whole-band median, the coastal shear "
+              "discretisation explains the Prandtl gap and no NEMO rerun is "
+              "needed.")
+        for _r in _sh_rows:
+            print(f"  {_r['region']:22s} n={_r['n']:8d} "
+                  f"sh2_ratio med={_r['sh2_ratio_median']:7.3f} "
+                  f"p90={_r['sh2_ratio_p90']:8.3f} "
+                  f"frac>2={_r['frac_above_2']:5.3f} "
+                  f"N2={_r['n2_ours_median']:10.3e} "
+                  f"shear2={_r['shear2_ours_median']:10.3e}")
+
         # THE OTHER INPUT TO Ri. With the shear order worth only ~2-7% and the
         # Mode-A state being NEMO's OWN velocities, the remaining way for our
         # Ri to exceed NEMO's is N^2. NEMO's rn2 is not in the files this
