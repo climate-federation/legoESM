@@ -35,6 +35,7 @@ from typing import NamedTuple
 
 import equinox as eqx
 from jax import lax
+from jax.experimental import checkify
 import jax.numpy as jnp
 
 from legoesm import constants
@@ -1528,6 +1529,36 @@ def potential_temperature(
 
     xk = h * adiabatic_temperature_gradient(S, t, p)
     return t + (xk - 2.0 * q) / 6.0
+
+
+# Fixed numerical inverse iterations, not a physical closure parameter.
+_INSITU_ITERATIONS = 8
+
+
+def in_situ_temperature(S, theta_C, p_dbar):
+    """Invert surface-referenced :func:`potential_temperature`, in Celsius.
+
+    Reverse pressure integration supplies the initial estimate. Fixed residual
+    corrections invert the discrete forward conversion (reverse integration
+    alone has truncation error). JIT/grad-safe for seawater in the EOS regime.
+    Pressure is sea pressure in dbar, as in the forward conversion.
+    The final forward residual must be <= 1e-12 K (float64) or 1e-5 K
+    (float32). This guards the fixed iteration count's convergence assumption
+    for this EOS. Value checks are inert in eager/plain JIT execution: compile
+    ``jax.jit(checkify.checkify(fn))`` with user checks enabled (the default)
+    and call ``err.throw()`` outside JIT to enforce them.
+    """
+    initial = potential_temperature(S, theta_C, 0.0, p_dbar)
+
+    def correct(_, t):
+        return t + (theta_C - potential_temperature(S, t, p_dbar))
+
+    final = lax.fori_loop(0, _INSITU_ITERATIONS, correct, initial)
+    residual = jnp.abs(theta_C - potential_temperature(S, final, p_dbar))
+    tolerance = 1e-12 if final.dtype == jnp.float64 else 1e-5
+    checkify.debug_check(jnp.all(jnp.isfinite(residual) & (residual <= tolerance)),
+                         "EOS: in-situ temperature inverse residual exceeds tolerance")
+    return final
 
 
 # ==============================================================================
