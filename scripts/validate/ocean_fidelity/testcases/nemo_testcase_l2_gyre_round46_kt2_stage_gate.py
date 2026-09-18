@@ -3119,6 +3119,73 @@ def _tke_surface_operand_rows(
     }
 
 
+def _tke_rhs_isolated_rows(
+    operand_record: dict, statement_record: dict,
+) -> dict:
+    """Label isolated eager/JIT separately from the production-step row."""
+    import jax
+    import jax.numpy as jnp
+
+    arrays = operand_record["arrays"]
+
+    def yx(name):
+        return np.asarray(arrays[name]).swapaxes(0, 1)
+
+    levels = slice(1, 30)
+    en = jnp.asarray(np.asarray(
+        statement_record["arrays"]["en_after_langmuir"]
+    ).swapaxes(0, 1)[..., levels])
+    sh2 = jnp.asarray(yx("sh2")[..., levels])
+    avt = jnp.asarray(yx("avt_entry")[..., levels])
+    rn2 = jnp.asarray(yx("rn2")[..., levels])
+    dissl = jnp.asarray(yx("dissl_entry")[..., levels])
+    wmask = jnp.asarray(yx("wmask")[..., levels])
+    reference = yx("rhs_pre_sweep")[..., levels]
+    dt = jnp.asarray(arrays["rn_Dt"], dtype=en.dtype)
+    ediss = jnp.asarray(arrays["rn_ediss"], dtype=en.dtype)
+
+    def model_expression(en_, sh2_, avt_, rn2_, dissl_, wmask_):
+        buoy_source = -avt_ * rn2_
+        diss_rate = ediss * dissl_
+        return en_ + dt * (
+            sh2_ + buoy_source + 0.5 * diss_rate * en_
+        ) * wmask_
+
+    def nemo_expression(en_, sh2_, avt_, rn2_, dissl_, wmask_):
+        zfact3 = 0.5 * ediss
+        return en_ + dt * (
+            sh2_ - avt_ * rn2_ + zfact3 * dissl_ * en_
+        ) * wmask_
+
+    operands = (en, sh2, avt, rn2, dissl, wmask)
+    candidates = (
+        ("isolated-closure eager model expression",
+         jax.device_get(model_expression(*operands))),
+        ("isolated-closure JIT model expression",
+         jax.device_get(jax.jit(model_expression)(*operands))),
+        ("isolated-closure eager NEMO expression",
+         jax.device_get(nemo_expression(*operands))),
+        ("isolated-closure JIT NEMO expression",
+         jax.device_get(jax.jit(nemo_expression)(*operands))),
+    )
+    rows = []
+    for label, candidate in candidates:
+        row = _classification(score(
+            "GYRE-zco.kt2.tke_matrix." + label.replace(" ", "_"),
+            reference, np.asarray(candidate), np.ones(reference.shape, bool)))
+        row.update({
+            "field": "en_rhs", "execution": label,
+            "nemo_statement": "R101TKEW zdftke.f90:439-442",
+        })
+        rows.append(row)
+    return {
+        "note": (
+            "isolated-closure JIT is not production; only the sibling "
+            "production-step row certifies full-step fusion"),
+        "rows": rows,
+    }
+
+
 def _tke_program_twin(
     records: dict, advmean_root: Path, memory_root: Path,
     tke_statement_record: dict, tke_operand_record: dict,
@@ -3237,6 +3304,8 @@ def _tke_program_twin(
             "execution": execution_label,
             "rhs_materialization": requested_rhs_materialization,
             "input_bridge": input_bridge,
+            "isolated_rhs_discriminator": _tke_rhs_isolated_rows(
+                tke_operand_record, tke_statement_record),
             "given_nemo_entry": given,
             "given_nemo_entry_matrix_walk": given_matrix,
             "chained": None,
