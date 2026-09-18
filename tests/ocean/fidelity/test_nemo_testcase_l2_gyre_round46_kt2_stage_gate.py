@@ -487,6 +487,11 @@ def test_stage1_handoff_walk_is_one_boundary_and_uses_full_production_step():
     assert 'execution_mode="production-eager"' not in source
     assert "stage1_full_rhs: object" in model_source
     assert "_nemo_ws_live_stage1_full_rhs = (du_dt, dv_dt)" in model_source
+    isolated = source.split("def _stage1_isolated_handoff", 1)[1].split(
+        "def _stage1_handoff_walk", 1)[0]
+    assert "external = _barotropic_override(records, advmean_root, 1)" in isolated
+    assert "external_targets = {\"u\": external[1], \"v\": external[2]}" in isolated
+    assert 'a[f"{face}{face}_b_Kaa"]' not in isolated
 
 
 def test_stage1_handoff_score_and_nonzero_one_ulp_plant():

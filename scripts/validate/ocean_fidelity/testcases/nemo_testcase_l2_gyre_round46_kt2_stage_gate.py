@@ -4235,7 +4235,7 @@ def _score_stage1_handoff_pair(
 
 
 def _stage1_isolated_handoff(records: dict, card, masks: dict,
-                             boundary: str) -> dict:
+                             advmean_root: Path, boundary: str) -> dict:
     """JIT the shared RK write/correction with NEMO's recorded operands."""
     import jax
     import jax.numpy as jnp
@@ -4250,6 +4250,8 @@ def _stage1_isolated_handoff(records: dict, card, masks: dict,
     require(boundary in ("raw_rk", "corrected_output"),
             "isolated JIT is defined only for the RK write and correction")
     a = records[(1, 1)]["arrays"]
+    external = _barotropic_override(records, advmean_root, 1)
+    external_targets = {"u": external[1], "v": external[2]}
 
     def operands(face: str):
         widen = _u_full if face == "u" else _v_full
@@ -4257,7 +4259,10 @@ def _stage1_isolated_handoff(records: dict, card, masks: dict,
         rhs = widen(_owned3(a[f"after_adv_{face}"]))
         mask = widen(_owned3(a[f"{face}mask"]))
         thickness = widen(_owned3(a[f"e3{face}_0"]))
-        target = widen(_owned2(a[f"{face}{face}_b_Kaa"]))
+        # The round-46 stage writer enters before the external solve, so its
+        # Kaa barotropic slot is still zero.  The compiled stage consumes the
+        # admitted post-external frame used by the production override.
+        target = external_targets[face]
         mask2d = np.max(mask, axis=-1)
         return tuple(jnp.asarray(value) for value in (
             before, rhs, mask, thickness, target, mask2d))
@@ -4318,7 +4323,8 @@ def _stage1_handoff_walk(
         ],
     }
     if execution_mode == "isolated-jit":
-        isolated = _stage1_isolated_handoff(records, card, masks, boundary)
+        isolated = _stage1_isolated_handoff(
+            records, card, masks, advmean_root, boundary)
         return {
             "format": "nemo-testcase-l2-gyre-stage1-handoff-v1",
             "selected_boundary": boundary,
@@ -4331,9 +4337,8 @@ def _stage1_handoff_walk(
             f"unknown handoff execution mode {execution_mode!r}")
     require(not plant or (
         plant == "stage1-handoff-output-ulp"
-        and boundary == "full_accumulator"
         and execution_mode == "production-jit"),
-        "stage-1 handoff plant requires production-jit full_accumulator")
+        "stage-1 handoff plant requires a production-jit boundary")
     state = _bridge_stage_context(
         card.recipe.initial_state, records[(1, 1)]["arrays"])
     freshwater, surface = _surface_forcings(card, state, 1)
