@@ -360,6 +360,8 @@ def _bathy_kwargs(T_c, dz_c):
     ``w_active`` is the interior wmask: an interface is live only when the
     T-cells on both sides of it are wet, the same pairing the reports use.
     """
+    import jax.numpy as jnp   # module scope has numpy only; see load_pair
+
     wet_cell = np.isfinite(T_c) & (dz_c > 1e-6)
     n_wet = wet_cell.sum(axis=1)
     n_iface = wet_cell.shape[1] - 1
