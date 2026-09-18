@@ -1309,10 +1309,10 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # already-materialized stage-3 complete-advection content before its
     # ordinary source association; no public card can construct this hook.
     stage3_advection_content_override: object = None
-    # Production WS routing below includes the existing GM/Redi rate in stage
-    # 3: NEMO calls tra_ldf before tra_zdf (stprk3_stg.F90:950-965).
-    # Round 110 retired the private route selector; no public configuration is
-    # introduced for this compiled-program ordering.
+    # Route the already-computed GM/Redi rate into the same stage-3 source
+    # in production: NEMO calls tra_ldf before tra_zdf (lines 950-965).
+    # Round 110 removed the private selector and introduced no public config;
+    # route_gm_redi_stage3_source: bool = False is explicitly retired.
     # One-variable ablation of the stage-3 ZDF thickness time level; restores
     # whole-step-entry rather than faithful N+1/2/Kmm for the discriminator.
     legacy_zdf_entry_kmm_eta: bool = False
