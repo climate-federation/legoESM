@@ -378,7 +378,18 @@ def run_stage_a2_mode_a(d, rst, cfg_prog):
     # or the equilibrium. Mode-A takes NEMO's own en on NEMO's own state and is
     # the control that separates them.
     K_M = np.asarray(out.K_M).reshape(ncol, z - 1)
-    return K_H, K_M
+    # N^2 on the SAME state, from the SAME shared helper the closure calls
+    # (legoesm.ocean.eos via _shared), with the SAME arguments -- not a second
+    # implementation. TKEOutput does not expose N^2, and Ri = N^2/shear^2 is
+    # the quantity the Prandtl ceiling is really reporting, so it has to be
+    # recomputed here to be seen at all.
+    from legoesm.ocean.eos import compute_buoyancy_frequency_nemo_bn2
+    n2 = np.asarray(compute_buoyancy_frequency_nemo_bn2(
+        jnp.asarray(T_c), jnp.asarray(S_c), jnp.asarray(zc),
+        jnp.asarray(np.cumsum(dz_c, axis=1)[:, :-1]),
+        g=constants.g, eos_form=getattr(cfg_prog, "n2_eos_form", "seos"),
+        e3w_int=jnp.asarray(dz_half)))
+    return K_H, K_M, n2, dz_half
 
 
 def run_stage_b(d):
@@ -986,7 +997,7 @@ def main():
         # prognostic=True card, THEN the same overrides Stage A got.
         cfg_a2 = _apply_overrides(
             orca1_zdftke_config(iwm_enabled=args.iwm_backgrounds), "stage_a2")
-        K_H2, K_M2 = run_stage_a2_mode_a(d2_for_a2(d), rst, cfg_a2)
+        K_H2, K_M2, n2_ours, e3w_a2 = run_stage_a2_mode_a(d2_for_a2(d), rst, cfg_a2)
         result["stage_a2_mode_a"] = region_report(
             # LABEL FIX 2026-08-13: this said "rec 0", but avt_a2() returns
             # d["avt"], and load_pair(--rec 1) puts NEMO's RECORD 1 avt there —
@@ -1041,6 +1052,66 @@ def main():
                   f"median={_r['sh2_ratio_median']:7.3f} "
                   f"p90={_r['sh2_ratio_p90']:8.3f} "
                   f"frac>2={_r['frac_ratio_above_2']:5.3f}")
+
+        # THE OTHER INPUT TO Ri. With the shear order worth only ~2-7% and the
+        # Mode-A state being NEMO's OWN velocities, the remaining way for our
+        # Ri to exceed NEMO's is N^2. NEMO's rn2 is not in the files this
+        # comparator reads, but it does not need to be: where NEMO's Prandtl is
+        # strictly inside its bounds the pdl transform is INVERTIBLE, so
+        #     Ri_nemo = Pr_nemo / prandtl_ri_coeff,  Pr_nemo = avm/avt
+        # and NEMO's own N^2 follows as Ri_nemo * shear^2_nemo.
+        # The unclamped restriction here is forced by invertibility -- outside
+        # it Pr carries no Ri information at all -- unlike the _ri_ratio subset,
+        # which was merely convenient and was therefore vacuous.
+        _coeff = float(getattr(cfg_a2, "prandtl_ri_coeff", 4.5))
+        _e3w2 = np.maximum(e3w_a2, 1e-12) ** 2
+        _sh2_n_real = sh2_n / _e3w2          # NEMO's order, real units s^-2
+        _sh2_o_real = sh2_o / _e3w2          # centred order, what we feed
+        _avt2, _avm2 = avt_a2(d), avm_i
+        with np.errstate(divide="ignore", invalid="ignore"):
+            _pr_n = _avm2 / _avt2
+            _ri_n = _pr_n / _coeff
+            _n2_nemo = _ri_n * _sh2_n_real
+            _ri_o = n2_ours / np.maximum(_sh2_o_real, 1e-20)
+        # END-TO-END CONTROL: the Pr this predicts from our own N^2 and shear
+        # must reproduce the Pr the closure actually produced (K_M/K_H). If it
+        # does not, the inference chain below is broken and its numbers mean
+        # nothing, so it is reported next to them rather than assumed.
+        _pr_pred = np.clip(_coeff * _ri_o, 1.0, 10.0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            _pr_act = K_M2 / K_H2
+        _rows = []
+        for _nm, _lo, _hi in REGIONS:
+            _band = (lat_col >= _lo) & (lat_col <= _hi)
+            _inv = (_pr_n > 1.001) & (_pr_n < 9.99)     # NEMO invertible
+            _m = (wet_pair & _band[:, None] & _inv
+                  & np.isfinite(_n2_nemo) & np.isfinite(n2_ours)
+                  & (np.abs(_n2_nemo) > 1e-12))
+            if int(_m.sum()) < 10:
+                continue
+            _ctl = np.isfinite(_pr_pred) & np.isfinite(_pr_act) & _m
+            _rows.append({
+                "region": _nm, "n": int(_m.sum()),
+                "n2_ours_over_nemo_median": float(np.median(
+                    n2_ours[_m] / _n2_nemo[_m])),
+                "n2_ours_median": float(np.median(n2_ours[_m])),
+                "n2_nemo_implied_median": float(np.median(_n2_nemo[_m])),
+                "ri_ours_median": float(np.median(_ri_o[_m])),
+                "ri_nemo_median": float(np.median(_ri_n[_m])),
+                "control_pr_pred_minus_actual_median": float(np.median(
+                    _pr_pred[_ctl] - _pr_act[_ctl])) if _ctl.any() else float("nan"),
+            })
+        result["n2_split"] = _rows
+        print("\n--- Ri = N^2/shear^2, the N^2 half. NEMO's N^2 is INFERRED by "
+              f"inverting its own pdl (Pr=avm/avt, coeff {_coeff}) on the "
+              "interfaces where that inverse exists.  CONTROL: pr_pred-pr_act "
+              "must be ~0 or the inference is broken.")
+        for _r in _rows:
+            print(f"  {_r['region']:12s} n={_r['n']:8d} "
+                  f"N2_ours/N2_nemo={_r['n2_ours_over_nemo_median']:8.3f} "
+                  f"Ri_ours={_r['ri_ours_median']:8.4f} "
+                  f"Ri_nemo={_r['ri_nemo_median']:7.4f} "
+                  f"CTL={_r['control_pr_pred_minus_actual_median']:+8.4f}")
 
     dT, dS, ttrd, strd, wet_c, _, dT2, dS2 = run_stage_b(d)
     result["stage_b_T"] = region_report(
