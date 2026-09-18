@@ -3230,7 +3230,9 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
                      ddm=None,
                      vertical_mixing=None, ew_cyclic_overlap=False,
-                     no_gm_redi=False, K_zeta_bih=None):
+                     no_gm_redi=False, K_zeta_bih=None,
+                     gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
+                     gm_kappa_min=0.0):
     """Build an MPAS (icosahedral Voronoi) ocean for the faithful CORE-II NEMO
     comparison — the 4th grid.  Reuses ``run_omip._create_setup('mpas', ...)``
     (the wired MPASOceanModel: KPP + GM/Redi + smc03 PGF + implicit-CN
@@ -3333,6 +3335,45 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
         # the GM/Redi block (ocean_model_mpas gates on `is not None`).
         config = config._replace(gm_redi=None)
         print("[setup] mpas GM/Redi DISABLED (--no-gm-redi)")
+    elif gm_treguier:
+        # NEMO ldf_eiv (nn_aei_ijk_t=21) adaptive kappa_GM on the Voronoi mesh.
+        #
+        # ONE FIELD, on THIS LANE'S OWN BASE.  The tripole builder carries a
+        # comment recording why: an earlier version took the lat-lon default
+        # as its base and so changed FOUR fields at once, making every
+        # `--gm-treguier` arm unattributable.  Here the MPAS block is kept
+        # exactly as built and only `treguier` is replaced.
+        _base = config.gm_redi
+        if _base is None:
+            raise SystemExit(
+                "--gm-treguier needs GM/Redi enabled; this mpas config has "
+                "gm_redi=None.")
+        if _base.visbeck.enabled:
+            # Refuse rather than silently switching the other scheme off:
+            # Treguier and Visbeck are both adaptive-kappa and the model
+            # raises if both are on, but flipping one here would be a second,
+            # unrecorded change to the run.
+            raise SystemExit(
+                "--gm-treguier on --grid mpas: this config ships Visbeck "
+                "enabled, and the two adaptive-kappa schemes are mutually "
+                "exclusive. Disable Visbeck explicitly rather than having "
+                "the flag do it silently.")
+        from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+            validate_treguier_cfg,
+        )
+        from legoesm.ocean.physics.lateral_mixing.config import TreguierConfig
+        _treg = TreguierConfig(enabled=True, aei0=float(gm_aei0),
+                               kappa_min=float(gm_kappa_min))
+        # Fail at config build, not inside the first GM tendency.
+        try:
+            validate_treguier_cfg(_treg)
+        except ValueError as exc:
+            raise SystemExit(f"--gm-treguier on --grid mpas: {exc}") from exc
+        config = config._replace(gm_redi=_base._replace(treguier=_treg))
+        print(f"[setup] mpas GM kappa_GM scheme: TREGUIER (NEMO ldf_eiv "
+              f"nn_aei_ijk_t=21, aei0={float(gm_aei0):g} m^2/s, "
+              f"kappa_min={float(gm_kappa_min):g} m^2/s) — SHARED variant, "
+              "NOT the nemo_native one the tripole card runs")
     if mle is not None:
         # Fox-Kemper MLE on the Voronoi mesh (NEMO nn_mle=1 bolus restratification).
         config = config._replace(mle=mle)
@@ -7750,10 +7791,13 @@ def main() -> int:
                             fesom_vmix=args.fesom_vmix)
     # --gm-treguier is applied in build_tripole's GM/Redi override only; on any
     # other grid (or with GM disabled) it would be silently discarded.
-    if args.gm_treguier and args.grid != "tripole":
+    if args.gm_treguier and args.grid not in ("tripole", "mpas"):
+        # mpas gained the SHARED Treguier variant in 2026-09; fesom has no
+        # GM/Redi at all, so the flag would be silently discarded there.
         raise SystemExit(
-            f"--gm-treguier is wired for --grid tripole only (the GM/Redi "
-            f"override lives in build_tripole); got --grid {args.grid!r}.")
+            f"--gm-treguier is wired for --grid tripole and --grid mpas (the "
+            f"fesom lane has no GM/Redi block at all); got "
+            f"--grid {args.grid!r}.")
     if args.gm_treguier and args.no_gm_redi:
         raise SystemExit(
             "--gm-treguier and --no-gm-redi are mutually exclusive: the former "
@@ -8069,6 +8113,8 @@ def main() -> int:
             mle=mle_cfg, dz_ref_override=_nemo_dz,
             barotropic_solver=args.barotropic_solver,
             barotropic_pcg_variant=args.barotropic_pcg_variant,
+            gm_treguier=args.gm_treguier, gm_aei0=args.gm_aei0,
+            gm_kappa_min=args.gm_kappa_min,
             # Cross-grid parity (2026-07-18 manifest audit): these two flags
             # were silently IGNORED on MPAS — the call site never passed
             # them, so mpas8_corr ran tvd + adcroft while the tripole ran

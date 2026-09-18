@@ -42,7 +42,9 @@ run_pytest s2 env JAX_ENABLE_X64=1 $PY -m pytest -q -p no:randomly \
   tests/ocean/unit/test_gm_redi_mpas_seafloor_slope.py \
   tests/ocean/unit/test_gm_redi_adjoint_stabilization.py \
   tests/ocean/unit/test_nemo_match_recipe.py \
-  tests/test_dispatch_hardening.py
+  tests/test_dispatch_hardening.py \
+  tests/unit/test_run_omip_core2_gm_treguier_mpas.py \
+  tests/unit/test_run_omip_core2_gm_treguier.py
 
 echo "=== 3. the structured lane must be untouched (shared helper reused, not edited) ==="
 run_pytest s3 env JAX_ENABLE_X64=1 $PY -m pytest -q -p no:randomly \
