@@ -243,6 +243,19 @@ class TKEConfig(NamedTuple):
     c_eps: float = 0.7
     alpha_tke: float = 30.0
     mxl_min: float = 1.0e-8
+    # NEMO nn_eice: how sea ice attenuates the Langmuir and surface-wave-
+    # breaking TKE sources (zdftke.F90:254-257, applied as MAX(0, 1-zice_fra)
+    # at :359 for Langmuir zus3 and :495/:501/:509 for the etau penetration).
+    #   0 = no attenuation          zice_fra = 0
+    #   1 = tanh                    zice_fra = TANH(10 * fr_i)
+    #   2 = linear                  zice_fra = fr_i            <- legacy default
+    #   3 = saturating              zice_fra = MIN(4 * fr_i, 1)
+    # Choice 3 reaches full attenuation at a quarter ice cover, so it and the
+    # linear form differ MOST at intermediate concentrations, i.e. marginal ice
+    # zones and the summer Antarctic shelf. ORCA1 selects nn_eice = 3
+    # (namelist_cfg:453); the default here stays 2 so existing runs are
+    # unchanged until the choice is made deliberately.
+    tke_nn_eice: int = 2
     tke_mxl_choice: int = 2          # 1/2 = Veros; 3 = NEMO nn_mxl=3 (lup/ldown
                                      # sweeps + the ln_mxl0 stress anchor);
                                      # 4 = NEMO nn_mxl=2 (same sweeps, but a

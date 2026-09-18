@@ -1727,6 +1727,38 @@ def _solve_tke_backward_euler(
 # ---------------------------------------------------------------------------
 
 
+def nemo_ice_tke_attenuation(ice_frac, nn_eice: int):
+    """NEMO's ``MAX(0, 1 - zice_fra)`` factor on the Langmuir / wave-breaking
+    TKE sources (``zdftke.F90`` :254-257, applied at :359 and :495-:509).
+
+    ``nn_eice`` selects how sea ice attenuates those sources:
+    0 none, 1 ``TANH(10 fr_i)``, 2 ``fr_i``, 3 ``MIN(4 fr_i, 1)``.
+
+    Choice 3 saturates at a quarter ice cover, so it and the linear choice 2
+    diverge most at INTERMEDIATE concentrations -- marginal ice zones and the
+    summer Antarctic shelf -- and agree at both fr_i = 0 and fr_i = 1.
+
+    Returns 1.0 (no attenuation) when ``ice_frac`` is None, which is what a
+    caller with no sea-ice state gets; note that is NOT the same as ice-free
+    ocean in any configuration where ice exists.
+    """
+    if nn_eice not in (0, 1, 2, 3):
+        raise ValueError(
+            f"Unknown TKEConfig.tke_nn_eice={nn_eice!r}; NEMO defines 0 (none), "
+            "1 (tanh), 2 (linear) and 3 (saturating at a quarter cover). "
+            "ORCA1 selects 3.")
+    if ice_frac is None or nn_eice == 0:
+        return None
+    fr = jnp.asarray(ice_frac)
+    if nn_eice == 1:
+        zice_fra = jnp.tanh(fr * 10.0)
+    elif nn_eice == 2:
+        zice_fra = fr
+    else:
+        zice_fra = jnp.minimum(4.0 * fr, 1.0)
+    return jnp.maximum(0.0, 1.0 - zice_fra)
+
+
 def _prandtl_number(
     N2: jnp.ndarray,
     shear_sq: jnp.ndarray,
@@ -2087,8 +2119,8 @@ def _nemo_literal_langmuir_operands(
     h_lc = jnp.maximum(h_lc, _EPS)
 
     zus = jnp.sqrt(2.0 * half_wlc2)
-    ice_scale = (jnp.ones_like(zus) if ice_frac is None
-                 else jnp.maximum(0.0, 1.0 - ice_frac))
+    _att = nemo_ice_tke_attenuation(ice_frac, cfg.tke_nn_eice)
+    ice_scale = jnp.ones_like(zus) if _att is None else _att
     surface_wet = jnp.asarray(w_active[..., 0], dtype=N2.dtype)
     zus3 = ice_scale * zus * zus * zus * surface_wet
     zwlc = cfg.lc_coeff * jnp.sin(
@@ -2167,8 +2199,9 @@ def nemo_langmuir_tke_source(
             jnp.any(exceeded, axis=-1), h_first, depth_b[..., -1])
         h_lc = jnp.maximum(h_lc, _EPS)
         us3 = (2.0 * half_wlc2) ** 1.5
-        if ice_frac is not None:
-            us3 = us3 * jnp.maximum(0.0, 1.0 - ice_frac)
+        _a = nemo_ice_tke_attenuation(ice_frac, cfg.tke_nn_eice)
+        if _a is not None:
+            us3 = us3 * _a
         w_lc = cfg.lc_coeff * jnp.sin(
             jnp.pi * depth_b / h_lc[..., None])
         src = us3[..., None] * (w_lc ** 3) / h_lc[..., None]
