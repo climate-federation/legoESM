@@ -73,6 +73,19 @@ def test_trace_returns_only_the_selected_source_intermediate():
         selected.view(np.uint64), expected.view(np.uint64))
 
 
+@pytest.mark.parametrize(
+    ("selector", "expected"),
+    (
+        ("p_avt_operand", np.asarray([[0.1, 0.15]], dtype=np.float64)),
+        ("rn2_operand", np.asarray([[1.0e-5, -1.0e-5]], dtype=np.float64)),
+    ),
+)
+def test_posthoc_operand_selector_returns_only_named_input(selector, expected):
+    out = _literal_solve(rhs_intermediate=selector)
+    np.testing.assert_array_equal(
+        np.asarray(out[-1]).view(np.uint64), expected.view(np.uint64))
+
+
 def test_selected_association_also_runs_in_state_only_reference_closure():
     out = _literal_solve(
         rhs_intermediate="after_stratification",
@@ -128,6 +141,10 @@ def test_gate_enumerates_compiled_intermediates_in_source_order():
         "dt_product",
         "masked_increment",
         "final_accumulation",
+    )
+    assert gate.TKE_RHS_POSTHOC_OPERANDS == (
+        "p_avt_operand",
+        "rn2_operand",
     )
 
 

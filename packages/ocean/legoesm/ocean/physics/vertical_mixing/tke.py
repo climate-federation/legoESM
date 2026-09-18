@@ -3992,6 +3992,7 @@ def _nemo_literal_rhs_materialized(
         "nemo_dissipation_tree_materialized",
     }
     intermediates = {
+        "p_avt_operand", "rn2_operand",
         "p_avt_rn2", "zfact3_dissl", "dissipation_product",
         "after_stratification", "parenthesized_sum", "dt_product",
         "masked_increment", "final_accumulation",
@@ -4015,6 +4016,8 @@ def _nemo_literal_rhs_materialized(
         increment = scaled * jnp.asarray(wmask, dtype=en.dtype)
         final = en + increment
         values = {
+            "p_avt_operand": p_avt,
+            "rn2_operand": rn2,
             "p_avt_rn2": p_avt_rn2,
             "zfact3_dissl": zfact3_dissl,
             "dissipation_product": dissipation,

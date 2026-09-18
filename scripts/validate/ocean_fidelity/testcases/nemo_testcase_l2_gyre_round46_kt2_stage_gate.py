@@ -82,6 +82,8 @@ TKE_RHS_INTERMEDIATES = (
     "masked_increment",
     "final_accumulation",
 )
+TKE_RHS_POSTHOC_OPERANDS = ("p_avt_operand", "rn2_operand")
+TKE_RHS_SELECTORS = TKE_RHS_INTERMEDIATES + TKE_RHS_POSTHOC_OPERANDS
 OWNED_3D_FIELDS = {"tke_en", "tke_avt_k", "tke_dissl"}
 HEADER_FIELDS = (
     "version",
@@ -3148,7 +3150,7 @@ def _tke_rhs_intermediate_rows(
     """Score one returned production RHS intermediate against source order."""
     from nemo_testcase_l2_gyre_round103_tke_block_replay import rebuild_block
 
-    require(intermediate in TKE_RHS_INTERMEDIATES,
+    require(intermediate in TKE_RHS_SELECTORS,
             f"unknown TKE RHS intermediate {intermediate!r}")
     production = trace.tke_statement_trace
     candidate_value = production.rhs_intermediate
@@ -3158,7 +3160,12 @@ def _tke_rhs_intermediate_rows(
     arrays = operand_record["arrays"]
     langmuir = np.asarray(statement_record["arrays"]["en_after_langmuir"])
     replay = rebuild_block(arrays, langmuir)
-    reference = np.asarray(replay[intermediate]).swapaxes(0, 1)
+    if intermediate == "p_avt_operand":
+        reference = np.asarray(arrays["avt_entry"])[..., 1:30].swapaxes(0, 1)
+    elif intermediate == "rn2_operand":
+        reference = np.asarray(arrays["rn2"])[..., 1:30].swapaxes(0, 1)
+    else:
+        reference = np.asarray(replay[intermediate]).swapaxes(0, 1)
     candidate = np.asarray(candidate_value)
     require(candidate.shape == reference.shape,
             f"production TKE {intermediate} shape {candidate.shape} != "
@@ -3201,6 +3208,8 @@ def _tke_rhs_intermediate_rows(
         "dt_product": "zdftke.f90:439-442",
         "masked_increment": "zdftke.f90:439-442",
         "final_accumulation": "zdftke.f90:439-442",
+        "p_avt_operand": "zdftke.f90:440 p_avt input",
+        "rn2_operand": "zdftke.f90:440 rn2 input",
     }[intermediate]
     row = _bitwise_classification(score(
         f"GYRE-zco.kt2.tke_rhs_intermediate.production_step.{intermediate}",
@@ -3282,6 +3291,8 @@ def _tke_rhs_isolated_rows(
         increment = scaled * wmask_
         final = en_ + increment
         values = {
+            "p_avt_operand": avt_,
+            "rn2_operand": rn2_,
             "p_avt_rn2": p_avt_rn2,
             "zfact3_dissl": zfact3_dissl,
             "dissipation_product": dissipation,
@@ -3295,7 +3306,7 @@ def _tke_rhs_isolated_rows(
 
     operands = (en, sh2, avt, rn2, dissl, wmask)
     if intermediate:
-        require(intermediate in TKE_RHS_INTERMEDIATES,
+        require(intermediate in TKE_RHS_SELECTORS,
                 f"unknown isolated TKE RHS intermediate {intermediate!r}")
         eager_pair = jax.device_get(
             nemo_expression_with_intermediate(*operands))
@@ -3337,8 +3348,14 @@ def _tke_rhs_isolated_rows(
 
         raw_langmuir = np.asarray(
             statement_record["arrays"]["en_after_langmuir"])
-        intermediate_reference = np.asarray(
-            rebuild_block(arrays, raw_langmuir)[intermediate]).swapaxes(0, 1)
+        if intermediate == "p_avt_operand":
+            intermediate_reference = yx("avt_entry")[..., levels]
+        elif intermediate == "rn2_operand":
+            intermediate_reference = yx("rn2")[..., levels]
+        else:
+            intermediate_reference = np.asarray(
+                rebuild_block(arrays, raw_langmuir)[intermediate]
+            ).swapaxes(0, 1)
         intermediate_rows = []
         for label, candidate in (
             ("isolated-closure eager NEMO expression", eager_pair[1]),
@@ -4337,7 +4354,7 @@ def main(argv=None) -> int:
     p.add_argument("--tke-rhs-materialization", default="")
     p.add_argument(
         "--tke-rhs-intermediate",
-        choices=TKE_RHS_INTERMEDIATES,
+        choices=TKE_RHS_SELECTORS,
         default="",
         help=("return and score exactly one compiled-order RHS intermediate; "
               "the final accumulation is returned alongside it"),
