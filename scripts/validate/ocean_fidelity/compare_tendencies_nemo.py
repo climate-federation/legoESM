@@ -348,7 +348,8 @@ def run_stage_a(d, cfg):
     return K_H, avt_i, wet_pair, (z, ny, nx), K_M, avm_i
 
 
-def run_stage_a2_mode_a(d, rst, cfg_prog, iwm_maps=None):
+def run_stage_a2_mode_a(d, rst, cfg_prog, iwm_maps=None,
+                        ice_frac=None):
     """EXACT Mode-A closure test: NEMO's own restart state INCLUDING the
     prognostic ``en`` -> ONE legoESM en-step (dt=3600, n_iterations=1) ->
     K_H vs NEMO's avt of the very next step (hourly record 0). Same state,
@@ -393,7 +394,14 @@ def run_stage_a2_mode_a(d, rst, cfg_prog, iwm_maps=None):
         n_iterations=1,
         z_interface=jnp.asarray(z_interface),
         lat_deg=jnp.asarray(lat_deg),
-        ice_frac=None,
+        # NEMO's OWN ice concentration at this instant when supplied. Passing
+        # None here runs the polar ocean with NO SEA ICE: the closure damps
+        # its surface TKE flux by (1 - ice fraction) at tke.py:2090/2171, and
+        # None turns that damping identically off, injecting full wind-driven
+        # TKE into water the oracle has under ice. In January that is the
+        # entire Arctic and the Antarctic coast -- the two bands where the
+        # Prandtl comparison fails.
+        ice_frac=(None if ice_frac is None else jnp.asarray(ice_frac)),
         dz_ref=jnp.asarray(dz_ref_1d),
         jacobian=jnp.asarray(np.ones((ncol,), dtype=dz_c.dtype)),
         # Same ladders as Stage A, for the same reason -- built from NEMO's
@@ -956,6 +964,13 @@ def main():
                          "Prandtl comparison is TKE-only on our side and "
                          "TKE+wave on NEMO's. Default off keeps every "
                          "existing number byte-identical.")
+    ap.add_argument("--ice-restart-npz", default=None,
+                    help="rebuild_nemo_restart.py output carrying 'a_i' from "
+                         "NEMO's ice restart at the SAME step as the ocean "
+                         "restart. Without it Stage A2 runs with no sea ice, "
+                         "so the surface TKE flux is undamped in every "
+                         "ice-covered column. Default off keeps existing "
+                         "numbers byte-identical.")
     ap.add_argument("--restart-npz", default=None,
                     help="rebuild_nemo_restart.py output; enables the EXACT "
                          "Mode-A closure test (Stage A2, forces --rec 1: the "
@@ -1069,8 +1084,24 @@ def main():
         cfg_a2 = _apply_overrides(
             orca1_zdftke_config(iwm_enabled=args.iwm_backgrounds), "stage_a2")
         _iwm = load_iwm_forcing(args.iwm_forcing) if args.iwm_forcing else None
+        _ice = None
+        if args.ice_restart_npz:
+            _ir = dict(np.load(args.ice_restart_npz))
+            if "a_i" not in _ir:
+                raise KeyError(
+                    f"{args.ice_restart_npz} has no 'a_i'; NEMO's ice restart "
+                    "stores concentration per category as a_i.")
+            _ai = np.asarray(_ir["a_i"], dtype=np.float64)
+            # (numcat, y, x) -> total concentration per column. ORCA1's ice
+            # restart at this step carries a single category, but summing is
+            # correct for any number of them.
+            _ice = np.nan_to_num(_ai, nan=0.0).reshape(-1, _ai.shape[-2]
+                                                       * _ai.shape[-1]).sum(0)
+            _ice = np.clip(_ice, 0.0, 1.0)
+            print(f"[ice] a_i: mean {_ice.mean():.4f}, "
+                  f"frac>0.15 {(_ice > 0.15).mean():.4f}")
         K_H2, K_M2, n2_ours, e3w_a2 = run_stage_a2_mode_a(
-            d2_for_a2(d), rst, cfg_a2, iwm_maps=_iwm)
+            d2_for_a2(d), rst, cfg_a2, iwm_maps=_iwm, ice_frac=_ice)
         result["stage_a2_mode_a"] = region_report(
             # LABEL FIX 2026-08-13: this said "rec 0", but avt_a2() returns
             # d["avt"], and load_pair(--rec 1) puts NEMO's RECORD 1 avt there —
