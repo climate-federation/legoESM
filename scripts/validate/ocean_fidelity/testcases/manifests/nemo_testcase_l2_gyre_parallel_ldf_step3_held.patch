@@ -1,7 +1,9 @@
 PARALLEL LDF STEP-3 CANDIDATE (2026-09-16; requested tip
 3e7a15c1e64e036e2e066dcfceaa663f25406f24; documentation-only proof tip
 5d2d7e44208dd8c345801314b4d6c88ca51ae351; measured scratch candidate
-6e0386627c29b1eab2e284fcee673a5523712df4): HELD, NOT LANDED.
+6e0386627c29b1eab2e284fcee673a5523712df4): LANDED BY ROUND 110 UNDER
+DECISION 43 AT 5004884fb49445af4149ad822f2cba3f826d5d0c. The diff below is
+retained as historical provenance and is no longer an applicable held patch.
 
 COMPILED STATEMENT. The selected NEMO stage clears tracer Krhs, accumulates
 advection and SBC, then in stage 3 calls QSR, tra_ldf, and tra_zdf in that
@@ -47,11 +49,22 @@ values are ad698f14fce4bf80a586be4b50149d006273f359a7e077be557c8becd091e28a /
 the full comparison SHA-256 is
 7f2c2309f5f7ee55de3ce8c5a180570195cc607ab4038a3cf566529681743ff5.
 
-DISPOSITION. Rule 12 is FAIL, and Decision 41 independently prohibits a
-stage-3 landing while the autopilot owns the earlier kt=1 stage-1 walk. Keep
-this patch as a measured held candidate only. It applies cleanly at the
-current delivered documentation tip and makes no configuration, coefficient,
-timestep, carry, stabilizer, NEMO source, or public API change.
+HISTORICAL DISPOSITION. Rule 12 was FAIL, and Decision 41 independently
+prohibited a stage-3 landing while the autopilot owned the earlier kt=1
+stage-1 walk. Decision 43 superseded both restrictions for the magnitude-first
+programme while preserving first-over-bar and kt1 AT-BAR protections.
+
+ROUND-110 LANDING. Re-proof at incoming tip 51a4d088c confirmed exact complete
+content/kt3 dictionaries against the same-tip private arm under production
+JIT, with production eager identical. The exact immutable-before comparison
+has 53/70 moved endpoint rows, no status changes, and first-over-bar kt2 U/V
+on both arms. The complete 954-row table has 82 moved rows and no status
+changes. Day-30 T RMS decreases from 1.2397011296352737e-2 K to
+6.890484901489568e-5 K (179.91x). The Decision-43 gate passes and its planted
+no-improvement arm prints STATUS PLANT-FIRED and exits 1. DINO uses the Euler
+tracer lane; LOCK_EXCHANGE and OVERFLOW have no GM/Redi operator, so none
+executes this WS-plus-GM/Redi route. No configuration, coefficient, timestep,
+carry, stabilizer, NEMO source, or public API changes.
 
 diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
 index 3c1d99ba85ed..c26ba4e1aa0e 100644
