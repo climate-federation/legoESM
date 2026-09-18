@@ -754,3 +754,46 @@ def test_manifest_aborts_on_pinned_worktree_mismatch(tmp_path: Path,
     assert m["legoESM"]["commit"] == head_import
     assert m["legoESM"]["cwd_repo"]["commit"] == head_pin
     assert m["legoESM"]["cwd_repo"]["import_mismatch_allowed"] is True
+
+
+def test_schema_growth_tolerates_a_NESTED_new_field() -> None:
+    """A field added inside a nested block counts as schema growth too.
+
+    The flat version compared top-level keys only, so a field added inside
+    ``dycore`` changed that block's serialized value without adding any new
+    top-level key: no growth was detected, the hash mismatched, and every
+    older run directory was rejected as a different configuration even with
+    the new field at its default.  Found by codex on the #1028
+    ``DycoreConfig.persistent_dgrid`` addition, whose flag-OFF path is
+    otherwise byte-identical.
+
+    Non-vacuity: the same construction with the nested field at a NON-default
+    value must still refuse, and tampering with a stored nested key must still
+    refuse — those are the two ways this tolerance could become a hole.
+    """
+    import hashlib
+    import json
+
+    from legoesm.driver.restart import config_hash_matches
+
+    cfg = _sample_config()
+    m = build_run_manifest(cfg)
+    resolved = dict(m["config"]["resolved_config"])
+    # a manifest written BEFORE the nested field existed
+    resolved["dycore"] = {k: v for k, v in resolved["dycore"].items()
+                          if k != "persistent_dgrid"}
+    stored_hash = hashlib.sha256(json.dumps(
+        resolved, sort_keys=True).encode("utf-8")).hexdigest()
+
+    # default (False) -> accepted: the run is semantically identical
+    assert config_hash_matches(stored_hash, resolved, cfg)
+
+    # non-default -> refused: a real configuration difference
+    grown = cfg._replace(
+        dycore=cfg.dycore._replace(persistent_dgrid=True))
+    assert not config_hash_matches(stored_hash, resolved, grown)
+
+    # tampering with a key the manifest DOES store, inside the same nested
+    # block, still refuses
+    tampered = cfg._replace(dycore=cfg.dycore._replace(dt=cfg.dycore.dt + 1.0))
+    assert not config_hash_matches(stored_hash, resolved, tampered)
