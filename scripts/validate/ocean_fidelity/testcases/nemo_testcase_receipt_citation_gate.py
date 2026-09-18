@@ -1036,7 +1036,7 @@ CITATION_MAP = {
         'gm_redi=None,', 85],
     # --- round 66: admitted content operands and Krhs/LDF walk ---
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:827-868': [
-        'DO jn = 1, jpts',
+        ('DO jn = 1, jpts', 1),
         "CALL r63_snapshot( 'after_sbc', ts, Krhs )", 42],
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/stprk3_stg.f90:827-950': [
         ('DO jn = 1, jpts', 1),
