@@ -72,6 +72,16 @@ TKE_STATEMENT_FIELDS = (
     "en_entry", "en_after_boundaries", "en_after_langmuir",
     "rhs_pre_sweep", "en_post_sweep",
 )
+TKE_RHS_INTERMEDIATES = (
+    "p_avt_rn2",
+    "zfact3_dissl",
+    "dissipation_product",
+    "after_stratification",
+    "parenthesized_sum",
+    "dt_product",
+    "masked_increment",
+    "final_accumulation",
+)
 OWNED_3D_FIELDS = {"tke_en", "tke_avt_k", "tke_dissl"}
 HEADER_FIELDS = (
     "version",
@@ -3119,8 +3129,103 @@ def _tke_surface_operand_rows(
     }
 
 
+def _tke_rhs_intermediate_rows(
+    trace,
+    operand_record: dict,
+    statement_record: dict,
+    entry_mode: str,
+    intermediate: str,
+    plant: str | None = None,
+    execution: str = "production step JIT",
+) -> dict:
+    """Score one returned production RHS intermediate against source order."""
+    from nemo_testcase_l2_gyre_round103_tke_block_replay import rebuild_block
+
+    require(intermediate in TKE_RHS_INTERMEDIATES,
+            f"unknown TKE RHS intermediate {intermediate!r}")
+    production = trace.tke_statement_trace
+    candidate_value = production.rhs_intermediate
+    require(candidate_value is not None,
+            "production trace did not return the requested RHS intermediate")
+
+    arrays = operand_record["arrays"]
+    langmuir = np.asarray(statement_record["arrays"]["en_after_langmuir"])
+    replay = rebuild_block(arrays, langmuir)
+    reference = np.asarray(replay[intermediate]).swapaxes(0, 1)
+    candidate = np.asarray(candidate_value)
+    require(candidate.shape == reference.shape,
+            f"production TKE {intermediate} shape {candidate.shape} != "
+            f"oracle replay {reference.shape}")
+
+    recorded_rhs = np.asarray(arrays["rhs_pre_sweep"])[..., 1:30]
+    replay_rhs = np.asarray(replay["en_rhs"])
+    replay_row = _classification(score(
+        "GYRE-zco.kt2.tke_rhs_intermediate.reference_replay",
+        recorded_rhs, replay_rhs, np.ones(recorded_rhs.shape, dtype=bool)))
+    require(replay_row["classification"] == "BIT",
+            "NEMO-from-NEMO RHS replay moved before intermediate scoring")
+
+    clean = _classification(score(
+        f"GYRE-zco.kt2.tke_rhs_intermediate.production_step.{intermediate}.clean",
+        reference, candidate, np.ones(reference.shape, dtype=bool)))
+    scored_reference = reference
+    planted_at = None
+    planted_baseline = None
+    if plant == "stage-tke-rhs-intermediate-ulp":
+        equal = (
+            np.ascontiguousarray(reference).view(np.uint64)
+            == np.ascontiguousarray(candidate).view(np.uint64)
+        ) & np.isfinite(reference) & (reference != 0.0)
+        indices = np.argwhere(equal)
+        require(indices.size > 0,
+                "TKE RHS intermediate plant found no exact nonzero cell")
+        planted_at = tuple(int(value) for value in indices[0])
+        planted_baseline = float(reference[planted_at])
+        scored_reference = reference.copy()
+        scored_reference[planted_at] = np.nextafter(
+            scored_reference[planted_at], np.float64(np.inf))
+
+    statement = {
+        "p_avt_rn2": "zdftke.f90:440",
+        "zfact3_dissl": "zdftke.f90:261,441",
+        "dissipation_product": "zdftke.f90:441",
+        "after_stratification": "zdftke.f90:439-440",
+        "parenthesized_sum": "zdftke.f90:439-442",
+        "dt_product": "zdftke.f90:439-442",
+        "masked_increment": "zdftke.f90:439-442",
+        "final_accumulation": "zdftke.f90:439-442",
+    }[intermediate]
+    row = _classification(score(
+        f"GYRE-zco.kt2.tke_rhs_intermediate.production_step.{intermediate}",
+        scored_reference, candidate, np.ones(reference.shape, dtype=bool)))
+    row.update({
+        "field": intermediate,
+        "entry_mode": entry_mode,
+        "execution": execution,
+        "domain": "NEMO levels 2:jpkm1",
+        "nemo_statement": statement,
+        "clean_n_unequal": clean["n_unequal"],
+        "clean_absolute_max": clean["absolute_max"],
+        "plant_index": planted_at,
+        "plant_baseline": planted_baseline,
+    })
+    if planted_at is not None:
+        require(row["n_unequal"] == clean["n_unequal"] + 1,
+                "TKE RHS intermediate ULP plant did not add exactly one "
+                "unequal cell")
+    return {
+        "intermediate": intermediate,
+        "one_returned_intermediate": True,
+        "reference_replay": replay_row,
+        "row": row,
+        "plant_target": None if planted_at is None else row["name"],
+    }
+
+
 def _tke_rhs_isolated_rows(
-    operand_record: dict, statement_record: dict,
+    operand_record: dict,
+    statement_record: dict,
+    intermediate: str = "",
 ) -> dict:
     """Label isolated eager/JIT separately from the production-step row."""
     import jax
@@ -3157,17 +3262,53 @@ def _tke_rhs_isolated_rows(
             sh2_ - avt_ * rn2_ + zfact3 * dissl_ * en_
         ) * wmask_
 
+    def nemo_expression_with_intermediate(
+        en_, sh2_, avt_, rn2_, dissl_, wmask_,
+    ):
+        zfact3 = 0.5 * ediss
+        p_avt_rn2 = avt_ * rn2_
+        zfact3_dissl = zfact3 * dissl_
+        dissipation = zfact3_dissl * en_
+        stratified = sh2_ - p_avt_rn2
+        parenthesized = stratified + dissipation
+        scaled = dt * parenthesized
+        increment = scaled * wmask_
+        final = en_ + increment
+        values = {
+            "p_avt_rn2": p_avt_rn2,
+            "zfact3_dissl": zfact3_dissl,
+            "dissipation_product": dissipation,
+            "after_stratification": stratified,
+            "parenthesized_sum": parenthesized,
+            "dt_product": scaled,
+            "masked_increment": increment,
+            "final_accumulation": final,
+        }
+        return final, values[intermediate]
+
     operands = (en, sh2, avt, rn2, dissl, wmask)
-    candidates = (
-        ("isolated-closure eager model expression",
-         jax.device_get(model_expression(*operands))),
-        ("isolated-closure JIT model expression",
-         jax.device_get(jax.jit(model_expression)(*operands))),
-        ("isolated-closure eager NEMO expression",
-         jax.device_get(nemo_expression(*operands))),
-        ("isolated-closure JIT NEMO expression",
-         jax.device_get(jax.jit(nemo_expression)(*operands))),
-    )
+    if intermediate:
+        require(intermediate in TKE_RHS_INTERMEDIATES,
+                f"unknown isolated TKE RHS intermediate {intermediate!r}")
+        eager_pair = jax.device_get(
+            nemo_expression_with_intermediate(*operands))
+        jit_pair = jax.device_get(
+            jax.jit(nemo_expression_with_intermediate)(*operands))
+        candidates = (
+            ("isolated-closure eager NEMO expression", eager_pair[0]),
+            ("isolated-closure JIT NEMO expression", jit_pair[0]),
+        )
+    else:
+        candidates = (
+            ("isolated-closure eager model expression",
+             jax.device_get(model_expression(*operands))),
+            ("isolated-closure JIT model expression",
+             jax.device_get(jax.jit(model_expression)(*operands))),
+            ("isolated-closure eager NEMO expression",
+             jax.device_get(nemo_expression(*operands))),
+            ("isolated-closure JIT NEMO expression",
+             jax.device_get(jax.jit(nemo_expression)(*operands))),
+        )
     rows = []
     for label, candidate in candidates:
         row = _classification(score(
@@ -3178,18 +3319,50 @@ def _tke_rhs_isolated_rows(
             "nemo_statement": "R101TKEW zdftke.f90:439-442",
         })
         rows.append(row)
-    return {
+    report = {
         "note": (
             "isolated-closure JIT is not production; only the sibling "
             "production-step row certifies full-step fusion"),
         "rows": rows,
     }
+    if intermediate:
+        from nemo_testcase_l2_gyre_round103_tke_block_replay import rebuild_block
+
+        raw_langmuir = np.asarray(
+            statement_record["arrays"]["en_after_langmuir"])
+        intermediate_reference = np.asarray(
+            rebuild_block(arrays, raw_langmuir)[intermediate]).swapaxes(0, 1)
+        intermediate_rows = []
+        for label, candidate in (
+            ("isolated-closure eager NEMO expression", eager_pair[1]),
+            ("isolated-closure JIT NEMO expression", jit_pair[1]),
+        ):
+            row = _classification(score(
+                "GYRE-zco.kt2.tke_rhs_intermediate."
+                + label.replace(" ", "_") + f".{intermediate}",
+                intermediate_reference, np.asarray(candidate),
+                np.ones(intermediate_reference.shape, dtype=bool)))
+            row.update({
+                "field": intermediate,
+                "execution": label,
+                "one_returned_intermediate": True,
+                "nemo_statement": "R101TKEW zdftke.f90:261,439-442",
+            })
+            intermediate_rows.append(row)
+        report.update({
+            "intermediate": intermediate,
+            "intermediate_rows": intermediate_rows,
+        })
+    return report
 
 
 def _tke_program_twin(
     records: dict, advmean_root: Path, memory_root: Path,
     tke_statement_record: dict, tke_operand_record: dict,
-    plant: str | None, execution_mode: str = "production-jit", rhs_materialization: str = "",
+    plant: str | None,
+    execution_mode: str = "production-jit",
+    rhs_materialization: str = "",
+    rhs_intermediate: str = "",
 ) -> dict:
     """Bounded production-step TKE subwalk split from the compiler-heavy table."""
     import jax
@@ -3210,6 +3383,9 @@ def _tke_program_twin(
     requested_rhs_materialization = rhs_materialization
     hook_rhs_materialization = (
         "" if rhs_materialization == "baseline" else rhs_materialization)
+    require(not (rhs_materialization and rhs_intermediate),
+            "TKE RHS materialization and intermediate selectors are mutually "
+            "exclusive")
 
     def production_step(model, step_state, dt, freshwater, surface_forcing):
         if execution_mode == "production-jit":
@@ -3281,6 +3457,7 @@ def _tke_program_twin(
     hooks = _NEMOWSRK3TestHooks(
         expose_live_stage_operands=True,
         tke_rhs_materialization=hook_rhs_materialization,
+        tke_rhs_intermediate=rhs_intermediate,
         barotropic_raw_history_override=raw_history,
         stage_barotropic_output_override=_barotropic_override(
             records, advmean_root, 2),
@@ -3291,7 +3468,7 @@ def _tke_program_twin(
     recorded_taum = jnp.asarray(
         np.asarray(tke_arrays["taum_entry"]).swapaxes(0, 1))
     recorded_surface = surface._replace(taum=recorded_taum)
-    if requested_rhs_materialization:
+    if requested_rhs_materialization or rhs_intermediate:
         given_trace = jax.device_get(production_step(
             model, state, card.dt_s, freshwater, recorded_surface))
         given = _tke_production_statement_rows(
@@ -3299,17 +3476,25 @@ def _tke_program_twin(
         given_matrix = _tke_matrix_statement_rows(
             given_trace, tke_operand_record, tke_statement_record,
             "NEMO_TKE_RECORDED", plant)
-        return {
-            "format": "nemo-testcase-l2-gyre-tke-rhs-production-walk-v1",
+        report = {
+            "format": "nemo-testcase-l2-gyre-tke-rhs-production-walk-v2",
             "execution": execution_label,
             "rhs_materialization": requested_rhs_materialization,
+            "rhs_intermediate": rhs_intermediate,
             "input_bridge": input_bridge,
             "isolated_rhs_discriminator": _tke_rhs_isolated_rows(
-                tke_operand_record, tke_statement_record),
+                tke_operand_record, tke_statement_record, rhs_intermediate),
             "given_nemo_entry": given,
             "given_nemo_entry_matrix_walk": given_matrix,
             "chained": None,
         }
+        if rhs_intermediate:
+            report["given_nemo_entry_rhs_intermediate"] = (
+                _tke_rhs_intermediate_rows(
+                    given_trace, tke_operand_record, tke_statement_record,
+                    "NEMO_TKE_RECORDED", rhs_intermediate, plant,
+                    execution=execution_label))
+        return report
     model_forcing_trace = jax.device_get(production_step(
         model, state, card.dt_s, freshwater, surface))
     model_forcing = _tke_production_statement_rows(
@@ -3890,7 +4075,9 @@ def run(
     stage1_r3_root: Path = STAGE1_R3_ROOT,
     tke_statement_root: Path = TKE_STATEMENT_ROOT,
     tke_operand_record: Path = TKE_OPERAND_RECORD,
-    execution_mode: str = "production-jit", tke_rhs_materialization: str = "",
+    execution_mode: str = "production-jit",
+    tke_rhs_materialization: str = "",
+    tke_rhs_intermediate: str = "",
 ) -> dict:
     stamp = worktree_stamp()
     expected = "0" * 40 if plant == "stamp" else expect_commit.lower()
@@ -4033,7 +4220,8 @@ def run(
                 "before production scoring")
         report["tke_statement_walk"] = _tke_program_twin(
             records, advmean_root, memory_root, statement_record,
-            legacy_record, plant, execution_mode, tke_rhs_materialization)
+            legacy_record, plant, execution_mode, tke_rhs_materialization,
+            tke_rhs_intermediate)
     if mode == "stage-tke-record":
         from nemo_testcase_l2_gyre_round54_tke_operands import (
             read_record as read_tke_operand_record,
@@ -4141,6 +4329,13 @@ def main(argv=None) -> int:
     )
     p.add_argument("--tke-rhs-materialization", default="")
     p.add_argument(
+        "--tke-rhs-intermediate",
+        choices=TKE_RHS_INTERMEDIATES,
+        default="",
+        help=("return and score exactly one compiled-order RHS intermediate; "
+              "the final accumulation is returned alongside it"),
+    )
+    p.add_argument(
         "--plant",
         choices=("header", "slot", "truncation", "calibration", "given", "trajectory",
                  "twin", "stage-entry-ulp", "stage-context-ulp",
@@ -4152,6 +4347,7 @@ def main(argv=None) -> int:
                  "stage-tke-record-ulp", "stage-tke-production-ulp",
                  "stage-tke-matrix-ulp",
                  "stage-shear-operand-ulp", "stage-tke-rhs-ulp",
+                 "stage-tke-rhs-intermediate-ulp",
                  "stamp"),
     )
     p.add_argument("--output", type=Path)
@@ -4171,7 +4367,9 @@ def main(argv=None) -> int:
         stage1_r3_root=args.stage1_r3_root,
         tke_statement_root=args.tke_statement_root,
         tke_operand_record=args.tke_operand_record,
-        execution_mode=args.execution_mode, tke_rhs_materialization=args.tke_rhs_materialization,
+        execution_mode=args.execution_mode,
+        tke_rhs_materialization=args.tke_rhs_materialization,
+        tke_rhs_intermediate=args.tke_rhs_intermediate,
     )
     report["status"] = plant_aware_status(report["status"], args.plant)
     text = json.dumps(report, indent=2, sort_keys=True)

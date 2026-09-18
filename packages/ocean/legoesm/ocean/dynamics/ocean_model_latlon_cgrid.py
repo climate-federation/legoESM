@@ -1317,6 +1317,7 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # whole-step-entry rather than faithful N+1/2/Kmm for the discriminator.
     legacy_zdf_entry_kmm_eta: bool = False
     tke_rhs_materialization: str = ""  # Private compiled-RHS boundary walk.
+    tke_rhs_intermediate: str = ""  # Private one-output compiled-RHS walk.
 
 
 def rk3_stage_velocity_update(
@@ -10011,8 +10012,12 @@ class LatLonCGridOceanModel:
                     # (EnhancedDiffusionConfig.evd_n2_time_level=
                     # "nemo_now_before"); ignored by every other selection.
                     eta_now=eta_now,
-                    tke_p_sh2=_tke_p_sh2, return_tke_statement_trace=return_tke_entry,
-                    tke_rhs_materialization=self._nemo_ws_test_hooks.tke_rhs_materialization,
+                    tke_p_sh2=_tke_p_sh2,
+                    return_tke_statement_trace=return_tke_entry,
+                    tke_rhs_materialization=(
+                        self._nemo_ws_test_hooks.tke_rhs_materialization),
+                    tke_rhs_intermediate=(
+                        self._nemo_ws_test_hooks.tke_rhs_intermediate),
                 )
                 if (tke_new is not None
                         and hasattr(tke_new, "K_M")

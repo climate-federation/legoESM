@@ -71,7 +71,8 @@ def test_trace_exposes_the_three_matrix_arrays_and_the_shear_operand():
     assert {"matrix_upper", "matrix_lower", "matrix_diag", "rhs_shear"} <= set(
         tke_mod.TKEStatementTrace._fields)
     _cfg, out = _literal_trace()
-    e_new, rhs_base, rhs_ext, upper, lower, diag = out
+    e_new, rhs_base, rhs_ext, upper, lower, diag, intermediate = out
+    assert intermediate is None
     assert upper.shape == lower.shape == diag.shape == rhs_base.shape
     assert rhs_ext.shape[-1] == rhs_base.shape[-1] + 1
     for name, value in (("upper", upper), ("lower", lower), ("diag", diag)):
@@ -82,7 +83,7 @@ def test_trace_exposes_the_three_matrix_arrays_and_the_shear_operand():
 def test_traced_diagonal_reproduces_the_compiled_zdiag_association():
     """zdftke.f90:436 -- zdiag = 1 - zzd_lw - zzd_up + zfact2*dissl*wmask."""
     cfg, out = _literal_trace()
-    _e_new, _rhs_base, _rhs_ext, upper, lower, diag = out
+    _e_new, _rhs_base, _rhs_ext, upper, lower, diag, _intermediate = out
     upper = np.asarray(upper)
     lower = np.asarray(lower)
     diag = np.asarray(diag)
@@ -107,7 +108,8 @@ def test_traced_upper_keeps_the_deepest_row_nemo_records():
     a structural zero against NEMO's live value in every column.
     """
     _cfg, out = _literal_trace()
-    _e_new, _rhs_base, rhs_ext, upper, _lower, _diag = out
+    (_e_new, _rhs_base, rhs_ext, upper, _lower, _diag,
+     _intermediate) = out
     upper = np.asarray(upper)
     assert np.all(upper[..., -1] != 0.0), (
         "the traced super-diagonal must be the pre-concatenation value")

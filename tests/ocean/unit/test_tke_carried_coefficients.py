@@ -1084,7 +1084,7 @@ def test_nemo_literal_solver_exposes_exact_pre_sweep_rhs_on_request():
         tke_background=0.0, tke_surface_min=0.0,
     )
     (solution, after_langmuir, rhs,
-     upper, lower, diag) = tke_mod._solve_tke_backward_euler(
+     upper, lower, diag, intermediate) = tke_mod._solve_tke_backward_euler(
         e_old=jnp.asarray([[1.0, 0.7]]),
         K_M_old=jnp.asarray([[0.2, 0.3]]),
         K_H_old=jnp.asarray([[0.1, 0.15]]),
@@ -1104,6 +1104,7 @@ def test_nemo_literal_solver_exposes_exact_pre_sweep_rhs_on_request():
         return_statement_trace=True,
     )
     assert solution.shape == (1, 2)
+    assert intermediate is None
     np.testing.assert_array_equal(after_langmuir, [[1.0, 0.7]])
     assert rhs.shape == (1, 3)
     assert np.asarray(rhs)[0, 0] == np.float64(0.8)

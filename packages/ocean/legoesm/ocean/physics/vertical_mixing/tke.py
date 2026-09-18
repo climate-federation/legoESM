@@ -402,6 +402,7 @@ class TKEStatementTrace(NamedTuple):
     matrix_diag: jnp.ndarray
     rhs_shear: jnp.ndarray
     shear_face_metrics: object = None
+    rhs_intermediate: object = None
 
 
 class TKEEntryN2Bundle(NamedTuple):
@@ -1148,7 +1149,9 @@ def _solve_tke_backward_euler(
     w_active: jnp.ndarray | None = None,
     nemo_e3t: jnp.ndarray | None = None,
     dissl_old: jnp.ndarray | None = None,
-    return_statement_trace: bool = False, rhs_materialization: str = "",
+    return_statement_trace: bool = False,
+    rhs_materialization: str = "",
+    rhs_intermediate: str = "",
 ) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Backward-Euler tridiagonal solve for one TKE time step.
 
@@ -1329,6 +1332,14 @@ def _solve_tke_backward_euler(
         raise ValueError(
             "return_statement_trace requires at least two interfaces so the "
             f"literal NEMO matrix assembly runs; got N={N}.")
+    if rhs_materialization and rhs_intermediate:
+        raise ValueError(
+            "TKE RHS materialization and intermediate selectors are mutually "
+            "exclusive private measurement arms")
+    if rhs_intermediate and not return_statement_trace:
+        raise ValueError(
+            "a private TKE RHS intermediate requires return_statement_trace")
+    rhs_intermediate_value = None
     if literal_matrix:
         if nemo_e3t is None or dissl_old is None or w_active is None:
             raise ValueError(
@@ -1649,7 +1660,11 @@ def _solve_tke_backward_euler(
             rhs_base = literal_external_rhs
         elif external_source is not None:
             rhs_base = rhs_base + dt * external_source
-        if rhs_materialization:
+        if rhs_intermediate:
+            rhs, rhs_intermediate_value = _nemo_literal_rhs_materialized(
+                rhs_base, dt, P_s, K_H_old, N2, diss_rate, dissl_old,
+                cfg.c_eps, w_active, "", intermediate=rhs_intermediate)
+        elif rhs_materialization:
             rhs = _nemo_literal_rhs_materialized(
                 rhs_base, dt, P_s, K_H_old, N2, diss_rate, dissl_old,
                 cfg.c_eps, w_active, rhs_materialization)
@@ -1846,7 +1861,7 @@ def _solve_tke_backward_euler(
             # deepest row keeps the value NEMO records rather than the
             # back-substitution's structural zero.
             return (e_new, rhs_base, rhs_ext,
-                    literal_up, literal_lw, diag)
+                    literal_up, literal_lw, diag, rhs_intermediate_value)
         return e_new
 
     if veros_positivity:
@@ -2666,7 +2681,9 @@ def tke_vertical_mixing(
     preclosure_dissl: jnp.ndarray | None = None,
     precomputed_p_sh2: jnp.ndarray | None = None,
     precomputed_n2_bundle: TKEEntryN2Bundle | None = None,
-    return_statement_trace: bool = False, rhs_materialization: str = "",
+    return_statement_trace: bool = False,
+    rhs_materialization: str = "",
+    rhs_intermediate: str = "",
 ) -> TKEOutput:
     """Advance the TKE closure and return new K_M, K_H, TKE.
 
@@ -3290,6 +3307,7 @@ def tke_vertical_mixing(
     _statement_matrix_lower = None
     _statement_matrix_diag = None
     _statement_shear = None
+    _statement_rhs_intermediate = None
     # NEMO ln_mxl0 anchor for nn_mxl=3: l_sfc = max(rn_mxl0, vkarmn*2e5/(rho0*g)*taum)
     _l_anchor = _mxl0_surface_anchor(cfg, taum, rho_0, g, surface_tmask)
     # T3-exact: NEMO's TRUE surface-w-level viscosity avm(jk=1)
@@ -3364,12 +3382,15 @@ def tke_vertical_mixing(
                       if _matrix_eval == "nemo_literal" else None),
             dissl_old=(preclosure_dissl
                        if _matrix_eval == "nemo_literal" else None),
-            return_statement_trace=return_statement_trace, rhs_materialization=rhs_materialization,
+            return_statement_trace=return_statement_trace,
+            rhs_materialization=rhs_materialization,
+            rhs_intermediate=rhs_intermediate,
         )
         if return_statement_trace:
             (tke_curr, _statement_langmuir_interior, _statement_rhs,
              _statement_matrix_upper, _statement_matrix_lower,
-             _statement_matrix_diag) = _solve_result
+             _statement_matrix_diag,
+             _statement_rhs_intermediate) = _solve_result
             _statement_shear = P_s_curr
             _statement_after_langmuir = jnp.concatenate(
                 [_surface_row, _statement_langmuir_interior], axis=-1)
@@ -3426,6 +3447,7 @@ def tke_vertical_mixing(
             matrix_lower=_statement_matrix_lower,
             matrix_diag=_statement_matrix_diag,
             rhs_shear=_statement_shear,
+            rhs_intermediate=_statement_rhs_intermediate,
         )
     return TKEOutput(K_M=K_M, K_H=K_H, tke_new=tke_curr,
                      l_eps=l_eps_final, K_M_surface=_K_M_surface,
@@ -3947,6 +3969,7 @@ __all__ = (
 
 def _nemo_literal_rhs_materialized(
     en, dt, p_sh2, p_avt, rn2, diss_rate, dissl, rn_ediss, wmask, mode: str,
+    *, intermediate: str = "",
 ):
     """Private full-step discriminator for compiled ``zdftke`` RHS order.
 
@@ -3965,6 +3988,40 @@ def _nemo_literal_rhs_materialized(
         "masked_increment", "all", "nemo_dissipation_tree",
         "nemo_dissipation_tree_materialized",
     }
+    intermediates = {
+        "p_avt_rn2", "zfact3_dissl", "dissipation_product",
+        "after_stratification", "parenthesized_sum", "dt_product",
+        "masked_increment", "final_accumulation",
+    }
+    if intermediate:
+        if mode:
+            raise ValueError(
+                "private TKE RHS materialization and intermediate selectors "
+                "are mutually exclusive")
+        if intermediate not in intermediates:
+            raise ValueError(
+                "unknown private TKE RHS intermediate: "
+                f"{intermediate!r}; expected one of {sorted(intermediates)}")
+        zfact3 = 0.5 * jnp.asarray(rn_ediss, dtype=en.dtype)
+        p_avt_rn2 = p_avt * rn2
+        zfact3_dissl = zfact3 * jnp.asarray(dissl, dtype=en.dtype)
+        dissipation = zfact3_dissl * en
+        stratified = p_sh2 - p_avt_rn2
+        parenthesized = stratified + dissipation
+        scaled = dt * parenthesized
+        increment = scaled * jnp.asarray(wmask, dtype=en.dtype)
+        final = en + increment
+        values = {
+            "p_avt_rn2": p_avt_rn2,
+            "zfact3_dissl": zfact3_dissl,
+            "dissipation_product": dissipation,
+            "after_stratification": stratified,
+            "parenthesized_sum": parenthesized,
+            "dt_product": scaled,
+            "masked_increment": increment,
+            "final_accumulation": final,
+        }
+        return final, values[intermediate]
     if mode not in valid:
         raise ValueError(
             "unknown private TKE RHS materialization boundary: "

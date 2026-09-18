@@ -104,12 +104,28 @@ def rebuild_block(a: dict, en_after_langmuir: np.ndarray,
 
     # en at the right-hand side statement is the post-Langmuir image.
     en = np.asarray(en_after_langmuir, dtype=np.float64)[:, :, k]
-    rhs = en + dt * (
-        sh2
-        - avt[:, :, k] * rn2[:, :, k]
-        + zfact3 * dissl[:, :, k] * en
-    ) * wmask[:, :, k]                                          # :430-433
-    return {"zd_up": zzd_up, "zd_lw": zzd_lw, "zdiag": zdiag, "en_rhs": rhs}
+    p_avt_rn2 = avt[:, :, k] * rn2[:, :, k]
+    zfact3_dissl = zfact3 * dissl[:, :, k]
+    dissipation = zfact3_dissl * en
+    stratified = sh2 - p_avt_rn2
+    parenthesized = stratified + dissipation
+    scaled = dt * parenthesized
+    increment = scaled * wmask[:, :, k]
+    rhs = en + increment                                          # :430-433
+    return {
+        "zd_up": zzd_up,
+        "zd_lw": zzd_lw,
+        "zdiag": zdiag,
+        "p_avt_rn2": p_avt_rn2,
+        "zfact3_dissl": zfact3_dissl,
+        "dissipation_product": dissipation,
+        "after_stratification": stratified,
+        "parenthesized_sum": parenthesized,
+        "dt_product": scaled,
+        "masked_increment": increment,
+        "final_accumulation": rhs,
+        "en_rhs": rhs,
+    }
 
 
 def replay(r59: Path, r101: Path, plant: str | None) -> dict:
