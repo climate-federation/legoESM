@@ -321,7 +321,8 @@ The receipt citation gate reported `STATUS PASS`: 7 citations found, no
 failures, no unmapped citations, and no failing map entries.  Its deliberately
 shifted first compiled-stp2d citation reported `STATUS FAIL` and exited 1 with
 `SYMBOL-NOT-AT-LINE`.  The citation-gate pytest summary was `16 passed in
-1.85s`.
+1.85s`; after the final rigid re-anchor it was rerun and reported `16 passed
+in 1.87s`.
 
 The focused candidate transport/stage tests reported `38 passed in 119.23s`.
 After restoring the rejected candidate, the same focused suite reported `38
@@ -329,6 +330,8 @@ passed in 120.08s`; the clean round-29 replay reported `9 passed in 2.29s`;
 and the private live-trace guard reported `3 passed in 0.56s`.  The
 candidate-only DINO suite reported `128 passed, 9 warnings in 106.88s`, and
 the final restored DINO suite reported `128 passed, 9 warnings in 105.29s`.
+After the two focused report stamps were added, the final focused rerun
+reported `38 passed in 122.39s`.
 The formerly documented RK3 unit red was rechecked independently and now
 reported `1 passed, 1 warning in 85.20s`.
 
