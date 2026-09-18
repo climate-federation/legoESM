@@ -3150,21 +3150,21 @@ def _tke_surface_operand_rows(
 
 
 def _bn2_source_replay(state, card, operand_record: dict) -> dict:
-    """Rebuild compiled S-EOS/``bn2`` from the admitted kt=2 entry.
+    """Rebuild compiled TEOS-10/``bn2`` from the admitted kt=2 entry.
 
     The round-59 record contains the consumed final ``rn2`` and masks but not
     the local ``pab`` work array.  Reconstruct alpha/beta in the compiled
-    S-EOS association, then require the complete masked replay to reproduce
+    TEOS-10 association, then require the complete masked replay to reproduce
     that independently recorded output BIT before exposing any local value.
     """
-    from legoesm.ocean.eos import NemoSEOSConfig
+    from legoesm.ocean.eos import _NEMO_RHO0, _ROQUET_TEOS10
     from legoesm.ocean.vertical import extrapolate_below_seafloor
 
     arrays = operand_record["arrays"]
     z_coord = card.recipe.z_coord
     tke_cfg = card.recipe.model_config.physics.vertical_mixing.tke
-    require(getattr(tke_cfg, "n2_eos_form", "seos") == "seos",
-            "round-108 bn2 replay requires the compiled GYRE S-EOS arm")
+    require(getattr(tke_cfg, "n2_eos_form", "seos") == "teos10",
+            "round-108 bn2 replay requires the compiled GYRE TEOS-10 arm")
 
     def yx(name: str) -> np.ndarray:
         value = np.asarray(arrays[name], dtype=np.float64)
@@ -3201,25 +3201,61 @@ def _bn2_source_replay(state, card, operand_record: dict) -> dict:
     require(tmask.shape == T.shape and wmask.shape == T.shape[:-1] + (nlev - 1,),
             "round-108 NEMO masks do not match the admitted tracer entry")
 
-    cfg = NemoSEOSConfig()
-    require(np.float64(cfg.rho0) == np.float64(
+    require(np.float64(_NEMO_RHO0) == np.float64(
         card.recipe.model_config.constants.rho_0),
-        "round-108 S-EOS rho0 differs from the instantiated GYRE card")
-    zt = T - np.float64(cfg.T0)
-    zs = S - np.float64(cfg.S0)
-    thermal_inner = (
-        np.float64(1.0) + np.float64(cfg.lambda1) * zt
-        + np.float64(cfg.mu1) * gdept)
-    thermal_zn = (
-        np.float64(cfg.a0) * thermal_inner + np.float64(cfg.nu) * zs)
-    haline_inner = (
-        np.float64(1.0) - np.float64(cfg.lambda2) * zs
-        - np.float64(cfg.mu2) * gdept)
-    haline_zn = (
-        np.float64(cfg.b0) * haline_inner - np.float64(cfg.nu) * zt)
-    reciprocal_rho0 = np.float64(1.0) / np.float64(cfg.rho0)
-    alpha = (thermal_zn * reciprocal_rho0) * tmask
-    beta = (haline_zn * reciprocal_rho0) * tmask
+        "round-108 TEOS-10 rho0 differs from the instantiated GYRE card")
+    coefficients = _ROQUET_TEOS10
+    zh = gdept * np.float64(coefficients["r1_Z0"])
+    zt = T * np.float64(coefficients["r1_T0"])
+    zs = np.sqrt(
+        np.abs(S + np.float64(coefficients["rdeltaS"]))
+        * np.float64(coefficients["r1_S0"]))
+
+    def horner(prefix: str) -> np.ndarray:
+        c = coefficients
+        zn3 = np.float64(c[prefix + "003"])
+        zn2 = (
+            np.float64(c[prefix + "012"]) * zt
+            + np.float64(c[prefix + "102"]) * zs
+            + np.float64(c[prefix + "002"]))
+        zn1 = (
+            ((np.float64(c[prefix + "031"]) * zt
+              + np.float64(c[prefix + "121"]) * zs
+              + np.float64(c[prefix + "021"])) * zt
+             + (np.float64(c[prefix + "211"]) * zs
+                + np.float64(c[prefix + "111"])) * zs
+             + np.float64(c[prefix + "011"])) * zt
+            + ((np.float64(c[prefix + "301"]) * zs
+                + np.float64(c[prefix + "201"])) * zs
+               + np.float64(c[prefix + "101"])) * zs
+            + np.float64(c[prefix + "001"]))
+        zn0 = (
+            ((((np.float64(c[prefix + "050"]) * zt
+                + np.float64(c[prefix + "140"]) * zs
+                + np.float64(c[prefix + "040"])) * zt
+               + (np.float64(c[prefix + "230"]) * zs
+                  + np.float64(c[prefix + "130"])) * zs
+               + np.float64(c[prefix + "030"])) * zt
+              + ((np.float64(c[prefix + "320"]) * zs
+                  + np.float64(c[prefix + "220"])) * zs
+                 + np.float64(c[prefix + "120"])) * zs
+              + np.float64(c[prefix + "020"])) * zt
+             + (((np.float64(c[prefix + "410"]) * zs
+                  + np.float64(c[prefix + "310"])) * zs
+                 + np.float64(c[prefix + "210"])) * zs
+                + np.float64(c[prefix + "110"])) * zs
+             + np.float64(c[prefix + "010"])) * zt
+            + ((((np.float64(c[prefix + "500"]) * zs
+                  + np.float64(c[prefix + "400"])) * zs
+                 + np.float64(c[prefix + "300"])) * zs
+                + np.float64(c[prefix + "200"])) * zs
+               + np.float64(c[prefix + "100"])) * zs
+            + np.float64(c[prefix + "000"]))
+        return ((zn3 * zh + zn2) * zh + zn1) * zh + zn0
+
+    reciprocal_rho0 = np.float64(1.0) / np.float64(_NEMO_RHO0)
+    alpha = (horner("ALP") * reciprocal_rho0) * tmask
+    beta = ((horner("BET") / zs) * reciprocal_rho0) * tmask
 
     gd_upper = gdept_0[..., :-1] * stretch3
     gd_lower = gdept_0[..., 1:] * stretch3
@@ -3284,7 +3320,7 @@ def _bn2_source_replay(state, card, operand_record: dict) -> dict:
         "reference_replay": replay_row,
         "input_rows": [recorded_e3w_row],
         "source_statements": {
-            "alpha_beta": "eosbn2.f90:1312-1326",
+            "alpha_beta": "eosbn2.f90:1257-1310",
             "bn2": "eosbn2.f90:1609-1618",
         },
     }

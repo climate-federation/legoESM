@@ -148,3 +148,22 @@ selection, threshold, carried state, restart schema, year harness,
 reconciliation gate, freshwater pair, #1484 guard, or immutable trajectory
 baseline is changed. No stabilizer is introduced. The held round-105 routing
 and every other held manifest remain held.
+
+## Frozen source-branch correction after the fail-closed selector check
+
+The original ordered-source section incorrectly called
+`eosbn2.f90:1312-1326` the executed expansion-coefficient arm. Before any
+round-108 numerical row was emitted, the committed gate checked the
+instantiated card, found `n2_eos_form="teos10"`, printed
+`round-108 bn2 replay requires the compiled GYRE S-EOS arm`, and exited
+nonzero. The failed log is retained as
+`round108/bn2_masked_rn2_production_jit.log`; it is not measurement evidence.
+
+The compiled and configured branch is `CASE( np_teos10, np_eos80 )` at
+`GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/eosbn2.f90:1257-1310`, with
+GYRE's resolved `ln_teos10=.true.` and `ln_seos=.false.` in
+`EXP00/namelist_cfg:126-128`. The corrected replay uses that 35-coefficient
+ALP/BET Horner program, including `SQRT(ABS(S+rdeltaS)*r1_S0)` and beta's
+`/zs`, then enters the unchanged `bn2` loop at `:1609-1618`. P1-P8 and their
+falsifiers remain frozen; only the erroneously named upstream input producer
+is retracted and replaced before rerunning the refused gate.

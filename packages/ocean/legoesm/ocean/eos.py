@@ -761,10 +761,6 @@ def compute_buoyancy_frequency_nemo_bn2(
             jnp.asarray(zrw_gdept_0)
             * jnp.asarray(zrw_stretch)[..., jnp.newaxis])
     if _alpha_beta_override is not None:
-        if eos_form != "seos":
-            raise ValueError(
-                "the private bn2 alpha/beta override is supported only for "
-                "the simplified-EOS fidelity walk")
         alpha, beta = (
             jnp.asarray(_alpha_beta_override[0]),
             jnp.asarray(_alpha_beta_override[1]),
