@@ -300,7 +300,86 @@ diff `DO NOT SHIP`.
 Citation-gate, shifted-citation-plant, focused-test, and full-tree summaries
 are recorded below after their final runs:
 
-<!-- FINAL_GATES -->
+The compiled-source citation gate finds six citations, zero unmapped
+citations, zero failures, and zero failing map entries: `status=PASS`.  Its
+rigid `+2` shifted plant on the compiled 827--868 range reports
+`SYMBOL-NOT-AT-LINE` and exits 1.  The first unplanted run also caught and
+refused an off-by-one endpoint; the corrected map pins the repeated loop
+opener to occurrence 1.  Removing the private selector invalidated one
+historical current-tree source anchor, so the landed source keeps that old
+text only in an explicit `is ... retired` comment; the field itself remains
+absent.
+
+The focused final command reports exactly:
+
+```text
+204 passed, 9 warnings in 128.51s (0:02:08)
+```
+
+It covers the Decision-43 gate, the complete phase-3 gate tests, the round-67
+LDF local gate, the receipt citation gate, DINO experiment tests, and the
+NEMO-testcase recipe.  The earlier candidate-focused source test reports
+`9 passed in 0.98s`.  Decision-gate development runs reported
+`3 passed in 8.09s`, then `4 passed in 8.39s` after the shared-DINO fail-closed
+case was added.
+
+The required monolithic twelve-worker command over both complete trees was
+run once.  Its terminal summary must be quoted rather than presented as a
+valid regression verdict:
+
+```text
+210 failed, 5769 passed, 112 skipped, 2 xfailed, 55 warnings, 25 errors in 861.01s (0:14:21)
+```
+
+It exited 3 at 74% after five JAX compiler aborts, worker replacement, and a
+controller `MemoryError`.  The aborted tests include unrelated advection,
+MPAS-QCO, leapfrog, partial-cell, and RK3-WS files.  This is the repository's
+documented large-suite per-process compiler limit, not a usable 210-failure
+scientific result.
+
+Fresh-process splits and isolated reruns were therefore used, as required by
+the house rule for this failure mode.  Every completed suite summary is kept
+here; interrupted suites are named explicitly and have no invented summary:
+
+| suite | literal terminal summary / disposition |
+|---|---|
+| first 50 fidelity files | `604 passed, 5 skipped in 177.22s (0:02:57)` |
+| next fidelity files 51--75 | `215 passed in 16.63s` |
+| fidelity files 76--80 | `17 passed in 2.54s` |
+| fidelity files 81--85 | `43 passed in 13.43s` |
+| fidelity files 86--90 | `33 passed in 30.33s` |
+| fidelity files 91--95 | `50 passed in 243.84s (0:04:03)` |
+| original 50-file fidelity chunk 2 | interrupted at 85% after prolonged accumulated compiler state; superseded for files 51--95 by the rows above |
+| fidelity files 96--100 | interrupted in a redundant slow phase-3 integration subgroup; those files had already run before the monolithic controller failed |
+| first 50 unit files | `11 failed, 766 passed, 1 skipped, 2 xfailed, 5 warnings in 615.29s (0:10:15)` |
+| second 50 unit files | agent-interrupted immediately after 75 passes so exact new-ID reruns could take priority; no summary claimed |
+| unexpected periodic-FCT ID, fresh process | `1 passed in 4.20s` |
+| four unexpected CATKE IDs, fresh process | `4 passed in 5.41s` |
+| candidate-sensitive GM/Redi, recipe and RK3-WS files | `2 failed, 185 passed, 1 warning in 282.10s (0:04:42)` |
+| same two MPAS failures at incoming `51a4d088c` | `2 failed in 2.50s` |
+| initial new-gate stamp audit | `1 failed in 1.61s`; correctly exposed the new unstamped emitter |
+| final Decision-43 plus stamp audit | `1 failed, 4 passed in 9.90s`; the sole failure is the known nine-offender aggregate |
+| incoming-tip stamp audit | `1 failed in 1.62s`; its nine-offender dictionary is byte-identical to the final candidate's |
+
+In the usable first-unit-chunk report, six failures are in the frozen 87-ID
+list.  The five IDs outside it were one periodic-FCT test and four CATKE tests;
+all five pass in fresh processes.  The candidate-sensitive run's two failures
+are MPAS barotropic scan float64/float32 carry mismatches.  Both fail with the
+same traceback at incoming tip `51a4d088c`, and MPAS cannot execute the
+changed lat-lon statement.  The lat-lon GM/Redi tests, recipe resolution,
+round-67 route proof, and all RK3-WS tests pass.
+
+The worktree-stamp guard initially found ten offenders because the new gate
+omitted its own stamp.  Commit `88806088e` adds the fail-closed stamp.  The
+final candidate and incoming-tip assertion lines are byte-identical and list
+the same nine known offenders, so this round adds none.
+
+The complete-tree controller limitation means this receipt does **not** claim
+an all-green 8,167-test run.  It does claim, with isolated evidence, no new
+failing ID on the changed execution path and no growth in the known stamp
+offender set.  Logs are `full_ocean_tests.log`, `full_ocean_split*.log`,
+`full_unit_split_tests.log`, `rerun_new_*.log`,
+`candidate_sensitive_unit_tests.log`, and `decision43_stamp_tests.log`.
 
 ## ASKED / UNASKED
 
