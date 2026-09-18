@@ -517,7 +517,12 @@ def run_stage_a2_mode_a(d, rst, cfg_prog, iwm_maps=None,
               "and K_M, as zdf_iwm does to avt and avm")
         K_H = K_H + K_wave
         K_M = K_M + K_wave
-    return K_H, K_M, n2, dz_half
+    # K = c_k * l * sqrt(e), and we SEED NEMO's own en but then step it, so a
+    # diffusivity excess is either the LENGTH or the stepped ENERGY. Returning
+    # both decomposes it instead of leaving it to argument.
+    _leps = np.asarray(out.l_eps).reshape(ncol, z - 1)
+    _enew = np.asarray(out.tke_new).reshape(ncol, z - 1)
+    return K_H, K_M, n2, dz_half, _leps, _enew, en_i
 
 
 def run_stage_b(d):
@@ -1163,7 +1168,8 @@ def main():
             _ice = np.clip(_ice, 0.0, 1.0)
             print(f"[ice] a_i: mean {_ice.mean():.4f}, "
                   f"frac>0.15 {(_ice > 0.15).mean():.4f}")
-        K_H2, K_M2, n2_ours, e3w_a2 = run_stage_a2_mode_a(
+        (K_H2, K_M2, n2_ours, e3w_a2, leps2, enew2,
+         eseed2) = run_stage_a2_mode_a(
             d2_for_a2(d), rst, cfg_a2, iwm_maps=_iwm, ice_frac=_ice,
             use_bathy=args.use_bathy)
         result["stage_a2_mode_a"] = region_report(
@@ -1267,6 +1273,16 @@ def main():
                 "K_M_ours_median": float(np.median(K_M2[_m])),
                 "avt_nemo_median": float(np.median(avt_a2(d)[_m])),
                 "avm_nemo_median": float(np.median(avm_i[_m])),
+                # THE DECOMPOSITION. K ~ l * sqrt(e). en_seed is NEMO's own
+                # TKE as handed in; tke_new is what one 3600 s step made of
+                # it. If l_eps is the outlier the length is the problem; if
+                # tke_new/en_seed is, the step is amplifying energy NEMO's
+                # does not have.
+                "l_eps_median": float(np.median(leps2[_m])),
+                "en_seed_median": float(np.median(eseed2[_m])),
+                "tke_new_median": float(np.median(enew2[_m])),
+                "tke_growth_median": float(np.median(
+                    enew2[_m] / np.maximum(eseed2[_m], 1e-30))),
             })
         result["shear_order_shallow"] = _sh_rows
         print("\n--- Shear order RESTRICTED to the defect geometry "
@@ -1276,11 +1292,11 @@ def main():
               "needed.")
         for _r in _sh_rows:
             print(f"  {_r['region']:22s} n={_r['n']:8d} "
-                  f"sh2_ratio med={_r['sh2_ratio_median']:7.3f} "
-                  f"p90={_r['sh2_ratio_p90']:8.3f} "
-                  f"frac>2={_r['frac_above_2']:5.3f} "
-                  f"N2={_r['n2_ours_median']:10.3e} "
-                  f"shear2={_r['shear2_ours_median']:10.3e}")
+                  f"l_eps={_r['l_eps_median']:9.3f} m  "
+                  f"en_seed={_r['en_seed_median']:9.3e} "
+                  f"tke_new={_r['tke_new_median']:9.3e} "
+                  f"growth={_r['tke_growth_median']:8.3f} "
+                  f"K_M/avm={_r['K_M_ours_median']/_r['avm_nemo_median']:8.2f}")
 
         # THE OTHER INPUT TO Ri. With the shear order worth only ~2-7% and the
         # Mode-A state being NEMO's OWN velocities, the remaining way for our
