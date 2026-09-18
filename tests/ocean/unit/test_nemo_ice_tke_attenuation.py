@@ -51,8 +51,17 @@ def test_two_and_three_differ_at_intermediate_cover():
 
 
 def test_tanh_form_matches_nemo():
+    """atol is 1e-7, not the allclose default, and the reason is numerical.
+
+    1 - tanh(10 fr) cancels catastrophically as fr grows: at fr = 0.75 the
+    true value is 6.12e-07 and float32 returns 5.96e-07, a 2.6% relative
+    error that is inherent to evaluating the difference in single precision
+    rather than any defect here. The largest absolute gap across this grid is
+    2.03e-08, which clears the default atol of 1e-8 and fails a test that is
+    otherwise checking the right thing. Measured, not guessed.
+    """
     got = np.asarray(nemo_ice_tke_attenuation(FR, 1))
-    assert np.allclose(got, 1.0 - np.tanh(np.asarray(FR) * 10.0))
+    assert np.allclose(got, 1.0 - np.tanh(np.asarray(FR) * 10.0), atol=1e-7)
 
 
 def test_zero_means_no_attenuation():
