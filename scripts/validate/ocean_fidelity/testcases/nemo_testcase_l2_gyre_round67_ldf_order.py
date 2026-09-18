@@ -463,7 +463,7 @@ def measure(args) -> dict:
                     anti_div, np.zeros_like(anti_div), wet),
             }
             split_observations[name] = {
-                "first_wet_index": list(first_wet),
+                "first_wet_index": [int(index) for index in first_wet],
                 "upstream_rhs_bits": int(np.asarray(
                     upstream_rhs[first_wet], dtype="=f8").view("=u8")),
                 "split_rhs_bits": int(np.asarray(
