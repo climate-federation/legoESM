@@ -889,9 +889,16 @@ def nemo_fct_two_step_upstream_rows(
     dv = sr(first_v[1:] - first_v[:-1])
     dw = sr(first_w[..., :-1] - first_w[..., 1:])
     first_div = sr(-sr(sr(du + dv) + dw) * reciprocal_area[..., None])
+    # NEMO retains a finite reference ``e3t`` in dry cells and masks the
+    # quotient after dividing.  legoESM represents those same dry thicknesses
+    # as zero, so select an inert finite divisor there before performing the
+    # identical wet-cell statement; otherwise dry 0/0 contaminates adjacent
+    # upwind faces before the later mask can remove it.
+    h_mid_divisor = jnp.where(tmask > 0.5, h_mid, jnp.ones_like(h_mid))
     midpoint = sr(
         sr(sr(sr(sr(h_base) * base)
-              + sr(sr(half * dt_value) * first_div)) / sr(h_mid)) * tmask)
+              + sr(sr(half * dt_value) * first_div))
+           / sr(h_mid_divisor)) * tmask)
 
     west = jnp.roll(midpoint, 1, axis=1)
     west = jnp.concatenate([west, west[:, :1]], axis=1)
@@ -917,7 +924,7 @@ def nemo_fct_two_step_upstream_rows(
     dv = sr(average_v[1:] - average_v[:-1])
     dw = sr(average_w[..., :-1] - average_w[..., 1:])
     final_div = sr(-sr(sr(du + dv) + dw) * reciprocal_area[..., None])
-    rhs_after = sr(sr(sr(final_div / sr(h_mid)) * tmask)
+    rhs_after = sr(sr(sr(final_div / sr(h_mid_divisor)) * tmask)
                    + jnp.zeros_like(final_div))
     # XLA may delete the source's addition to positive-zero Krhs and retain a
     # negative dry-cell zero from ``final_div * tmask``.  The compiled stored

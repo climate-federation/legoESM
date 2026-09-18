@@ -149,6 +149,30 @@ class TestConservation:
         assert bool(jnp.any(
             ordinary_split[0] + ordinary_split[1] != low_div))
 
+    def test_nemo_metric_two_step_dry_zero_thickness_stays_finite(self):
+        """legoESM's zero dry thickness must represent NEMO's masked row."""
+        from legoesm.ocean.fidelity.nemo_testcase_recipe import (
+            build_nemo_testcase_card,
+        )
+        grid = build_nemo_testcase_card("GYRE-zco").recipe.grid
+        n_lat, n_lon, nlev = grid.n_lat, grid.n_lon, 30
+        base = jnp.broadcast_to(
+            jnp.linspace(12.0, 4.0, nlev), (n_lat, n_lon, nlev))
+        mask = jnp.ones_like(base).at[:, 0, :].set(0.0)
+        h = jnp.full_like(base, 100.0) * mask
+        p_u = jnp.ones((n_lat, n_lon + 1, nlev), dtype=jnp.float64)
+        p_v = jnp.zeros((n_lat + 1, n_lon, nlev), dtype=jnp.float64)
+        p_w = jnp.zeros((n_lat, n_lon, nlev + 1), dtype=jnp.float64)
+        rows = jax.jit(nemo_fct_two_step_upstream_rows)(
+            base, p_u, p_v, p_w, h, h, mask, mask,
+            1.0 / jnp.asarray(grid.area_T), 1.0)
+
+        assert all(bool(jnp.all(jnp.isfinite(row))) for row in rows)
+        np.testing.assert_array_equal(
+            np.asarray(rows[4][:, 0, :]),
+            np.zeros((n_lat, nlev), dtype=np.float64),
+        )
+
 
 # ---------------------------------------------------------------------------
 # Monotonicity (no new extrema)
