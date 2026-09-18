@@ -1,8 +1,11 @@
 # NEMO-testcases L2 GYRE round 106 receipt: production-JIT TKE RHS walk
 
-Date: 2026-09-17  
-Incoming tip: `27ffba40e75b0927a313273e3a7822298ce9764b`  
-Round status: **HELD — no physics or configuration landed**  
+Date: 2026-09-17
+
+Incoming tip: `27ffba40e75b0927a313273e3a7822298ce9764b`
+
+Round status: **HELD — no physics or configuration landed**
+
 Evidence root: `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round106/`
 
 ## Round 106 — compiled-source basis
