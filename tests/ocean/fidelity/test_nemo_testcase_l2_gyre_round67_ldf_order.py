@@ -198,3 +198,54 @@ def test_round71_kmm_resume_rejects_a_non_stage2_boundary():
         RuntimeError, "stage-2 Kmm tracer"
     ):
         module._replace_kmm_resume((1, np.ones(1), np.ones(1)), None)
+
+
+def _round112_synthetic_values(module):
+    cell = (22, 32, 30)
+    return {
+        "p2dt": module.jnp.asarray(14400.0, dtype=module.jnp.float64),
+        "p_u": module.jnp.ones((22, 33, 30), dtype=module.jnp.float64),
+        "p_v": module.jnp.zeros((23, 32, 30), dtype=module.jnp.float64),
+        "p_w": module.jnp.zeros((22, 32, 31), dtype=module.jnp.float64),
+        "e3t": module.jnp.ones(cell, dtype=module.jnp.float64),
+        "r3t_kbb": module.jnp.zeros((22, 32), dtype=module.jnp.float64),
+        "r3t_kmm": module.jnp.zeros((22, 32), dtype=module.jnp.float64),
+        "tmask": module.jnp.ones(cell, dtype=module.jnp.float64),
+        "wmask": module.jnp.ones(cell, dtype=module.jnp.float64),
+        "r1_area": module.jnp.ones((22, 32), dtype=module.jnp.float64),
+        "h_kbb": module.jnp.ones(cell, dtype=module.jnp.float64),
+        "h_kmm": module.jnp.ones(cell, dtype=module.jnp.float64),
+    }
+
+
+def test_round112_literal_plant_reaches_first_face_under_jit():
+    module = _module()
+    values = _round112_synthetic_values(module)
+    base = module.jnp.ones((22, 32, 30), dtype=module.jnp.float64)
+
+    run = module.jax.jit(
+        lambda transport: module._round112_literal_rows(
+            base, {**values, "p_u": transport}))
+    ordinary = run(values["p_u"])
+    planted_transport = values["p_u"].at[0, 1, 0].set(
+        module.jnp.nextafter(
+            values["p_u"][0, 1, 0], module.jnp.asarray(module.jnp.inf)))
+    planted = run(planted_transport)
+
+    assert len(ordinary) == len(module.ROUND112_ROWS)
+    assert np.count_nonzero(
+        np.asarray(planted[0]) != np.asarray(ordinary[0])) == 1
+    assert np.asarray(planted[0])[0, 1, 0] != np.asarray(ordinary[0])[0, 1, 0]
+
+
+def test_round112_duplicate_callback_guard_rejects_distinct_execution():
+    module = _module()
+    ordinary = (np.array([1.0], dtype=np.float64),)
+    planted = (np.array([np.nextafter(1.0, np.inf)], dtype=np.float64),)
+    np.testing.assert_array_equal(
+        module._round112_collapse([ordinary, ordinary], "synthetic")[0],
+        ordinary[0])
+    with np.testing.assert_raises_regex(
+        RuntimeError, "distinct duplicate executions"
+    ):
+        module._round112_collapse([ordinary, planted], "synthetic")

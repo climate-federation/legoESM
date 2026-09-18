@@ -19,12 +19,17 @@ if str(HERE) not in sys.path:
 import nemo_testcase_l2_gyre_phase3_gate as gate
 import nemo_testcase_l2_gyre_round54_tracer_decomposition as round54
 import nemo_testcase_l2_gyre_round66_content_operands as round66
+import nemo_testcase_l2_gyre_round111_fct_writer_gate as round111
 from legoesm.core.source_rounding import nemo_source_round
 from legoesm.ocean import advection as advection_module
 from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as model_module
 
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3")
 TRACERS = ("T", "S")
+ROUND112_ROWS = (
+    "first_u", "first_v", "first_w", "first_div", "midpoint",
+    "average_u", "average_v", "average_w", "final_div", "rhs_after",
+)
 
 
 def require(ok: bool, message: str) -> None:
@@ -157,6 +162,273 @@ def production_fct_content(
     )
 
 
+def _round112_owned_record(path: Path, *, plant: bool = False) -> dict:
+    """Map the passive R111 record onto legoESM's owned C-grid domain."""
+    record = round111.read_record(path)
+    fields = record["fields"]
+
+    def value(name):
+        return np.asarray(fields[name]["values"], dtype=np.float64)
+
+    def owned3(name, islice, jslice):
+        return np.ascontiguousarray(value(name)[islice, jslice].transpose(1, 0, 2))
+
+    def owned2(name, islice, jslice):
+        return np.ascontiguousarray(value(name)[islice, jslice, 0].T)
+
+    bundle = {
+        "sha256": record["sha256"],
+        "p2dt": np.float64(value("p2dt").item()),
+        "p_u": owned3("transport_u", slice(1, 34), slice(2, 24)),
+        "p_v": owned3("transport_v", slice(2, 34), slice(1, 24)),
+        "p_w": np.pad(
+            owned3("transport_w", slice(1, 33), slice(1, 23)),
+            ((0, 0), (0, 0), (0, 1))),
+        "e3t": owned3("e3t_3d", slice(1, 33), slice(1, 23)),
+        "r3t_kbb": owned2("r3t_Kbb", slice(1, 33), slice(1, 23)),
+        "r3t_kmm": owned2("r3t_Kmm", slice(1, 33), slice(1, 23)),
+        "tmask": owned3("tmask", slice(1, 33), slice(1, 23)),
+        "wmask": owned3("wmask", slice(1, 33), slice(1, 23)),
+        "r1_area": owned2("r1_e1e2t", slice(1, 33), slice(1, 23)),
+        "base_T": owned3("base_T", slice(2, 34), slice(2, 24)),
+        "base_S": owned3("base_S", slice(2, 34), slice(2, 24)),
+    }
+    expected = {}
+    mappings = {
+        "first_u": (slice(1, 34), slice(2, 24)),
+        "first_v": (slice(2, 34), slice(1, 24)),
+        "first_w": (slice(1, 33), slice(1, 23)),
+        "first_div": (slice(1, 33), slice(1, 23)),
+        "midpoint": (slice(1, 33), slice(1, 23)),
+        "average_u": (slice(None), slice(1, 23)),
+        "average_v": (slice(1, 33), slice(None)),
+        "average_w": (slice(1, 33), slice(1, 23)),
+        "final_div": (slice(None), slice(None)),
+        "rhs_after": (slice(None), slice(None)),
+    }
+    for tracer in TRACERS:
+        for name, (islice, jslice) in mappings.items():
+            expected[(tracer, name)] = np.ascontiguousarray(
+                value(f"{name}_{tracer}")[islice, jslice].transpose(1, 0, 2))
+    bundle["expected"] = expected
+    bundle["h_kbb"] = np.ascontiguousarray(
+        bundle["e3t"]
+        * (np.float64(1.0)
+           + bundle["r3t_kbb"][..., None] * bundle["tmask"]))
+    bundle["h_kmm"] = np.ascontiguousarray(
+        bundle["e3t"]
+        * (np.float64(1.0)
+           + bundle["r3t_kmm"][..., None] * bundle["tmask"]))
+
+    planted = np.array(bundle["p_u"], copy=True)
+    base = bundle["base_T"]
+    left = np.roll(base, 1, axis=1)
+    left = np.concatenate([left, left[:, :1]], axis=1)
+    right = np.concatenate([base, base[:, :1]], axis=1)
+    plant_row = None
+    for index in np.argwhere(np.isfinite(planted) & (planted != 0.0)):
+        at = tuple(int(item) for item in index)
+        old = planted[at]
+        new = np.nextafter(old, np.float64(np.inf))
+        q = left[at] if old > 0.0 else right[at]
+        if new * q != old * q:
+            plant_row = {
+                "field": "p_u", "index": list(at),
+                "before_bits": int(np.asarray(old, dtype="=f8").view("=u8")),
+                "after_bits": int(np.asarray(new, dtype="=f8").view("=u8")),
+            }
+            if plant:
+                planted[at] = new
+            break
+    require(plant_row is not None,
+            "no finite nonzero p_u word propagates a one-ULP plant")
+    if plant:
+        bundle["p_u"] = planted
+    bundle["plant_row"] = plant_row
+    return bundle
+
+
+def _round112_face_neighbours(field: jax.Array) -> tuple:
+    west = jnp.roll(field, 1, axis=1)
+    return (
+        jnp.concatenate([west, west[:, :1]], axis=1),
+        jnp.concatenate([field, field[:, :1]], axis=1),
+    )
+
+
+def _round112_vface_neighbours(field: jax.Array) -> tuple:
+    padded = jnp.pad(field, ((1, 1), (0, 0), (0, 0)))
+    return padded[:-1], padded[1:]
+
+
+def _round112_literal_rows(base: jax.Array, values: dict) -> tuple:
+    """Literal compiled fct_up1_2stp statements, with source stores."""
+    sr = nemo_source_round
+    p_u, p_v, p_w = values["p_u"], values["p_v"], values["p_w"]
+    e3t = values["e3t"]
+    r3t_kbb, r3t_kmm = values["r3t_kbb"], values["r3t_kmm"]
+    tmask, wmask = values["tmask"], values["wmask"]
+    r1_area, p2dt = values["r1_area"], values["p2dt"]
+    zero = jnp.asarray(0.0, dtype=base.dtype)
+    one = jnp.asarray(1.0, dtype=base.dtype)
+    half = jnp.asarray(0.5, dtype=base.dtype)
+
+    west, east = _round112_face_neighbours(base)
+    first_u = sr(
+        sr(jnp.maximum(p_u, zero) * west)
+        + sr(jnp.minimum(p_u, zero) * east))
+    south, north = _round112_vface_neighbours(base)
+    first_v = sr(
+        sr(jnp.maximum(p_v, zero) * south)
+        + sr(jnp.minimum(p_v, zero) * north))
+    first_w_int = sr(
+        sr(jnp.maximum(p_w[..., 1:30], zero) * base[..., 1:])
+        + sr(sr(jnp.minimum(p_w[..., 1:30], zero) * base[..., :-1])
+             * wmask[..., 1:30]))
+    first_w = jnp.pad(first_w_int, ((0, 0), (0, 0), (1, 1)))
+
+    du = sr(first_u[:, 1:] - first_u[:, :-1])
+    dv = sr(first_v[1:] - first_v[:-1])
+    dw = sr(first_w[..., :-1] - first_w[..., 1:])
+    first_div = sr(-sr(sr(du + dv) + dw) * r1_area[..., None])
+    h_kbb = sr(e3t * sr(one + sr(r3t_kbb[..., None] * tmask)))
+    h_kmm = sr(e3t * sr(one + sr(r3t_kmm[..., None] * tmask)))
+    midpoint = sr(
+        sr(sr(sr(h_kbb * base) + sr(sr(half * p2dt) * first_div))
+           / h_kmm) * tmask)
+
+    west, east = _round112_face_neighbours(midpoint)
+    next_u = sr(
+        sr(jnp.maximum(p_u, zero) * west)
+        + sr(jnp.minimum(p_u, zero) * east))
+    south, north = _round112_vface_neighbours(midpoint)
+    next_v = sr(
+        sr(jnp.maximum(p_v, zero) * south)
+        + sr(jnp.minimum(p_v, zero) * north))
+    average_u = sr(half * sr(first_u + next_u))
+    average_v = sr(half * sr(first_v + next_v))
+    next_w = sr(
+        sr(jnp.maximum(p_w[..., 1:30], zero) * midpoint[..., 1:])
+        + sr(sr(jnp.minimum(p_w[..., 1:30], zero) * midpoint[..., :-1])
+             * wmask[..., 1:30]))
+    average_w = jnp.pad(
+        sr(half * sr(first_w[..., 1:30] + next_w)),
+        ((0, 0), (0, 0), (1, 1)))
+
+    du = sr(average_u[:, 1:] - average_u[:, :-1])
+    dv = sr(average_v[1:] - average_v[:-1])
+    dw = sr(average_w[..., :-1] - average_w[..., 1:])
+    final_div = sr(-sr(sr(du + dv) + dw) * r1_area[..., None])
+    rhs_after = sr(sr(sr(final_div / h_kmm) * tmask)
+                   + jnp.zeros_like(final_div))
+    return (first_u, first_v, first_w, first_div, midpoint,
+            average_u, average_v, average_w, final_div, rhs_after)
+
+
+def _round112_current_rows(base: jax.Array, values: dict, grid) -> tuple:
+    """Current metric-free FCT representation at the same source boundaries."""
+    from legoesm.grids.operators_latlon_cgrid import (
+        divergence_cgrid, upwind_cell_to_uface, upwind_cell_to_vface,
+    )
+
+    p_u, p_v, p_w = values["p_u"], values["p_v"], values["p_w"]
+    tmask = values["tmask"]
+    p2dt = values["p2dt"]
+    dy_u = jnp.asarray(grid.dy_u)[..., None]
+    dx_v = jnp.asarray(grid.dx_v)[..., None]
+    area = jnp.asarray(grid.area_T)[..., None]
+    mass_u, mass_v, w_full = p_u / dy_u, p_v / dx_v, p_w / area
+
+    up_u = upwind_cell_to_uface(base, mass_u)
+    up_v = upwind_cell_to_vface(base, mass_v, grid)
+    flux_u = mass_u * up_u
+    flux_v = mass_v * up_v
+    first_u, first_v = flux_u * dy_u, flux_v * dx_v
+    w_int = w_full[..., 1:30]
+    first_w_int = w_int * jnp.where(
+        w_int > 0.0, base[..., 1:], base[..., :-1])
+    metric_first_w = jnp.pad(
+        first_w_int, ((0, 0), (0, 0), (1, 1))) * area
+    first_w = jnp.pad(first_w_int, ((0, 0), (0, 0), (1, 1)))
+    positive_div = (
+        divergence_cgrid(flux_u, flux_v, grid)
+        + first_w[..., :-1] - first_w[..., 1:])
+    first_div = -positive_div
+
+    # These are exact injected NEMO thickness operands; only the FCT source
+    # program, not their upstream construction, is under test here.
+    h_kbb, h_kmm = values["h_kbb"], values["h_kmm"]
+    midpoint = (
+        h_kbb * base - (jnp.asarray(0.5, base.dtype) * p2dt) * positive_div
+    ) / jnp.maximum(h_kmm, jnp.asarray(1.0e-30, base.dtype))
+    midpoint = jnp.where(tmask > 0.5, midpoint, base)
+
+    next_u = mass_u * upwind_cell_to_uface(midpoint, mass_u)
+    next_v = mass_v * upwind_cell_to_vface(midpoint, mass_v, grid)
+    average_u_raw = 0.5 * (flux_u + next_u)
+    average_v_raw = 0.5 * (flux_v + next_v)
+    average_u, average_v = average_u_raw * dy_u, average_v_raw * dx_v
+    next_w = w_int * jnp.where(
+        w_int > 0.0, midpoint[..., 1:], midpoint[..., :-1])
+    average_w_int = 0.5 * (first_w_int + next_w)
+    average_w_raw = jnp.pad(
+        average_w_int, ((0, 0), (0, 0), (1, 1)))
+    average_w = average_w_raw * area
+    positive_final = (
+        divergence_cgrid(average_u_raw, average_v_raw, grid)
+        + average_w_raw[..., :-1] - average_w_raw[..., 1:])
+    final_div = -positive_final
+    rhs_after = (
+        final_div / jnp.maximum(h_kmm, jnp.asarray(1.0e-10, base.dtype))
+        * tmask)
+    return (first_u, first_v, metric_first_w, first_div, midpoint,
+            average_u, average_v, average_w, final_div, rhs_after)
+
+
+def _round112_all_rows(values: dict, grid) -> tuple:
+    rows = []
+    for source in (_round112_current_rows, _round112_literal_rows):
+        for tracer in TRACERS:
+            base = values[f"base_{tracer}"]
+            rows.extend(
+                source(base, values, grid)
+                if source is _round112_current_rows
+                else source(base, values))
+    return tuple(rows)
+
+
+def _round112_observation_rows(observation: tuple, bundle: dict) -> dict:
+    require(len(observation) == 4 * len(ROUND112_ROWS),
+            "round-112 callback schema changed")
+    rows = {}
+    cursor = 0
+    for source in ("current", "source_literal"):
+        rows[source] = {}
+        for tracer in TRACERS:
+            rows[source][tracer] = {}
+            for name in ROUND112_ROWS:
+                got = np.asarray(observation[cursor], dtype=np.float64)
+                want = bundle["expected"][(tracer, name)]
+                require(got.shape == want.shape,
+                        f"round-112 {source} {tracer} {name} shape changed")
+                rows[source][tracer][name] = round54.field_stats(
+                    got, want, np.ones(want.shape, dtype=bool))
+                cursor += 1
+    return rows
+
+
+def _round112_collapse(observations: list[tuple], label: str) -> tuple:
+    require(observations, f"round-112 {label} callback did not execute")
+    first = observations[0]
+    for duplicate in observations[1:]:
+        require(len(duplicate) == len(first),
+                f"round-112 {label} callback schema changed")
+        require(all(np.array_equal(left, right)
+                    for left, right in zip(first, duplicate, strict=True)),
+                f"round-112 {label} observed distinct duplicate executions")
+    return first
+
+
 def _replace_kmm_resume(resume, override):
     """Replace only selected stage-2 tracers at the final WS helper boundary."""
     require(resume is not None and resume[0] == 2,
@@ -173,8 +445,8 @@ def _replace_kmm_resume(resume, override):
 
 def measure(args) -> dict:
     require(sum((args.round69_native, args.round70_pair, args.round71_kmm,
-                 args.round111_fct_split)) <= 1,
-            "round-69, round-70, round-71, and round-111 modes are exclusive")
+                 args.round111_fct_split, args.round112_fct_walk)) <= 1,
+            "round-69/70/71/111/112 modes are exclusive")
     require(not (args.plant_pair_null_fct and args.plant_pair_content_ulp),
             "round-70 plants are mutually exclusive")
     require(args.round70_pair or not (
@@ -187,6 +459,8 @@ def measure(args) -> dict:
         "round-71 plants require --round71-kmm")
     require(args.round111_fct_split or not args.plant_fct_split_ulp,
             "the FCT split plant requires --round111-fct-split")
+    require(args.round112_fct_walk or not args.plant_fct_walk_ulp,
+            "the round-112 plant requires --round112-fct-walk")
     reciprocal_calls: list[dict] = []
     pair_sources: list[tuple[np.ndarray, ...]] = []
     pair_kmm: list[tuple[np.ndarray, np.ndarray]] = []
@@ -194,6 +468,18 @@ def measure(args) -> dict:
     ldf_calls: list[tuple[np.ndarray, np.ndarray]] = []
     step_calls: list[tuple] = []
     fct_split_calls: list[tuple[np.ndarray, ...]] = []
+    fct_walk_calls: list[tuple[np.ndarray, ...]] = []
+
+    round112_bundle = None
+    round112_values = None
+    if args.round112_fct_walk:
+        round112_bundle = _round112_owned_record(
+            args.fct_walk_record, plant=args.plant_fct_walk_ulp)
+        round112_values = {
+            name: jnp.asarray(value)
+            for name, value in round112_bundle.items()
+            if name not in ("sha256", "expected", "plant_row")
+        }
 
     real_reciprocal = round66.reciprocal_substitutions
     real_pair = model_module._nemo_ws_rk3_tracer_pair_step
@@ -203,6 +489,8 @@ def measure(args) -> dict:
     real_fct = advection_module.fct_tracer_advection
     active_kmm_override: tuple[object | None, object | None] | None = None
     capture_fct_split = False
+    capture_fct_walk = False
+    fct_walk_trace_index = 0
 
     def reciprocal_capture(live, oracle, oracle_content, wet):
         reciprocal_calls.append({
@@ -224,7 +512,7 @@ def measure(args) -> dict:
                 advection_content_t, advection_content_s)))
 
     def pair_capture(*values, **kwargs):
-        nonlocal capture_fct_split
+        nonlocal capture_fct_split, capture_fct_walk, fct_walk_trace_index
         call_kwargs = kwargs
         if kwargs.get("return_final_content", False):
             resume = _replace_kmm_resume(
@@ -242,10 +530,15 @@ def measure(args) -> dict:
         capture_fct_split = bool(
             args.round111_fct_split
             and kwargs.get("return_final_content", False))
+        capture_fct_walk = bool(
+            args.round112_fct_walk
+            and kwargs.get("return_final_content", False))
+        fct_walk_trace_index = 0
         try:
             result = real_pair(*values, **call_kwargs)
         finally:
             capture_fct_split = prior_capture
+            capture_fct_walk = False
         if kwargs.get("return_final_content", False):
             source_t, source_s = kwargs["stage_source_rates"][2]
             jax.debug.callback(
@@ -258,7 +551,21 @@ def measure(args) -> dict:
         fct_split_calls.append(tuple(
             np.asarray(value, dtype=np.float64) for value in values))
 
+    def fct_walk_sink(*values):
+        fct_walk_calls.append(tuple(
+            np.asarray(value, dtype=np.float64) for value in values))
+
     def fct_capture(*values, **kwargs):
+        nonlocal fct_walk_trace_index
+        if capture_fct_walk:
+            require(round112_values is not None,
+                    "round-112 FCT values were not loaded")
+            if fct_walk_trace_index == 0:
+                walk_rows = _round112_all_rows(
+                    round112_values, values[5])
+                jax.debug.callback(
+                    fct_walk_sink, *walk_rows, ordered=True)
+            fct_walk_trace_index += 1
         if not capture_fct_split:
             return real_fct(*values, **kwargs)
         result = real_fct(*values, return_nemo_split=True, **kwargs)
@@ -555,6 +862,138 @@ def measure(args) -> dict:
     baseline_state = jax.device_get(type(model)(
         model.grid, model.z_coord, model.config).step(
             seeded, dt, freshwater=freshwater, surface_forcing=surface))
+
+    round112_matrix = {}
+    if args.round112_fct_walk:
+        require(round112_bundle is not None and round112_values is not None,
+                "round-112 record was not prepared")
+        jax.effects_barrier()
+        production_jit = _round112_collapse(
+            fct_walk_calls, "production-step JIT")
+
+        # The production step() shim deliberately re-enables JIT.  Drive the
+        # identical full step body directly under disable_jit for the separate
+        # eager label required by the campaign; this is not an isolated FCT
+        # closure and still executes every preceding production operator.
+        fct_walk_calls.clear()
+        model_module._nemo_ws_rk3_tracer_pair_step = pair_capture
+        advection_module.fct_tracer_advection = fct_capture
+        try:
+            with jax.disable_jit():
+                eager_state = model._step_impl(
+                    seeded, dt, freshwater=freshwater,
+                    surface_forcing=surface)
+                jax.device_get(eager_state)
+            jax.effects_barrier()
+        finally:
+            model_module._nemo_ws_rk3_tracer_pair_step = real_pair
+            advection_module.fct_tracer_advection = real_fct
+        production_eager = _round112_collapse(
+            fct_walk_calls, "production eager")
+
+        isolated = jax.device_get(jax.jit(
+            lambda: _round112_all_rows(round112_values, model.grid))())
+        mode_observations = {
+            "production_step_jit": production_jit,
+            "production_eager": production_eager,
+            "isolated_closure_jit": tuple(isolated),
+        }
+        mode_rows = {
+            name: _round112_observation_rows(observation, round112_bundle)
+            for name, observation in mode_observations.items()
+        }
+
+        source_boundaries = (
+            ("horizontal_first_faces", ("first_u", "first_v")),
+            ("vertical_first_face", ("first_w",)),
+            ("first_divergence", ("first_div",)),
+            ("midpoint", ("midpoint",)),
+            ("averaged_faces", ("average_u", "average_v", "average_w")),
+            ("final_divergence", ("final_div",)),
+            ("divided_rhs_write", ("rhs_after",)),
+        )
+        first_nonbit = None
+        jit_current = mode_rows["production_step_jit"]["current"]
+        for boundary, members in source_boundaries:
+            if any(jit_current[tracer][member]["cells_unequal"] > 0
+                   for tracer in TRACERS for member in members):
+                first_nonbit = boundary
+                break
+
+        literal_bit = {
+            mode: {
+                tracer: all(rows["source_literal"][tracer][name][
+                    "cells_unequal"] == 0 for name in ROUND112_ROWS)
+                for tracer in TRACERS
+            }
+            for mode, rows in mode_rows.items()
+        }
+        criteria = {
+            "first_nonbit_is_horizontal_faces": (
+                first_nonbit == "horizontal_first_faces"),
+            "both_tracers_horizontal_faces_nonbit": {
+                tracer: bool(
+                    jit_current[tracer]["first_u"]["cells_unequal"] > 0
+                    or jit_current[tracer]["first_v"]["cells_unequal"] > 0)
+                for tracer in TRACERS
+            },
+            "later_boundaries_nonbit": {
+                tracer: bool(
+                    jit_current[tracer]["midpoint"]["cells_unequal"] > 0
+                    and jit_current[tracer]["rhs_after"]["cells_unequal"] > 0)
+                for tracer in TRACERS
+            },
+            "source_literal_all_bit": literal_bit,
+        }
+
+        plant_at = tuple(round112_bundle["plant_row"]["index"])
+
+        def observation_bits(observation, source_offset):
+            value = np.asarray(observation[source_offset])[plant_at]
+            return int(np.asarray(value, dtype="=f8").view("=u8"))
+
+        observations = {
+            mode: {
+                "current_first_u_T_bits": observation_bits(value, 0),
+                "source_literal_first_u_T_bits": observation_bits(
+                    value, 2 * len(ROUND112_ROWS)),
+            }
+            for mode, value in mode_observations.items()
+        }
+
+        def all_true(value) -> bool:
+            if isinstance(value, dict):
+                return all(all_true(item) for item in value.values())
+            return bool(value)
+
+        plant_fired = False
+        if args.plant_fct_walk_ulp:
+            frozen = json.loads(args.fct_walk_report.read_text())[
+                "round112_fct_walk"]
+            plant_fired = bool(all(
+                observations[mode][key] != frozen["observations"][mode][key]
+                for mode in ("production_step_jit",)
+                for key in (
+                    "current_first_u_T_bits",
+                    "source_literal_first_u_T_bits")))
+            require(plant_fired,
+                    "round-112 production-JIT one-ULP input plant was inert")
+
+        round112_matrix = {
+            "status": (
+                "PLANT-FIRED" if plant_fired else
+                "CONFIRMED" if all_true(criteria) else "REFUTED"),
+            "plant_ulp": bool(args.plant_fct_walk_ulp),
+            "record_sha256": round112_bundle["sha256"],
+            "plant_target": round112_bundle["plant_row"],
+            "first_nonbit_boundary": first_nonbit,
+            "first_nonbit_compiled_statement": (
+                "traadv_fct.f90:508-510 horizontal first-upwind faces"
+                if first_nonbit == "horizontal_first_faces" else first_nonbit),
+            "modes": mode_rows,
+            "observations": observations,
+            "criteria": criteria,
+        }
 
     pair_matrix = {}
     kmm_matrix = {}
@@ -1225,9 +1664,13 @@ def measure(args) -> dict:
         status = kmm_matrix["status"]
     if args.round111_fct_split:
         status = round111_matrix["status"]
+    if args.round112_fct_walk:
+        status = round112_matrix["status"]
 
     return {
         "format": (
+            "nemo-testcase-l2-gyre-round112-fct-walk-v1"
+            if args.round112_fct_walk else
             "nemo-testcase-l2-gyre-round111-fct-split-v1"
             if args.round111_fct_split else
             "nemo-testcase-l2-gyre-round71-fct-kmm-v1"
@@ -1265,6 +1708,7 @@ def measure(args) -> dict:
         "round70_pair_matrix": pair_matrix,
         "round71_kmm_matrix": kmm_matrix,
         "round111_fct_split": round111_matrix,
+        "round112_fct_walk": round112_matrix,
         "criteria": {
             "content_within_floor_plus_association": content_criterion,
             "kt3_exact_pre_edit_prediction": prediction_match,
@@ -1299,6 +1743,15 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--fct-split-report", type=Path,
         default=ROOT / "round111/fct_split_jit.json")
+    parser.add_argument("--round112-fct-walk", action="store_true")
+    parser.add_argument("--plant-fct-walk-ulp", action="store_true")
+    parser.add_argument(
+        "--fct-walk-record", type=Path,
+        default=(ROOT / "round111/oracle_fct_writers/"
+                 "oracle_fct_writers_kt00000002_s3.bin"))
+    parser.add_argument(
+        "--fct-walk-report", type=Path,
+        default=ROOT / "round112/fct_walk_before.json")
     parser.add_argument(
         "--prediction-report", type=Path,
         default=ROOT / "round67/round67_ldf_order_before.json")
@@ -1331,7 +1784,19 @@ def main(argv=None) -> int:
     except Exception as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
-    if args.round111_fct_split:
+    if args.round112_fct_walk:
+        matrix = report["round112_fct_walk"]
+        row = matrix["modes"]["production_step_jit"]["current"]["T"]
+        prefix = (
+            "STATUS PLANT-FIRED" if report["status"] == "PLANT-FIRED"
+            else f"ROUND112 FCT WALK {report['status']}")
+        print(
+            f"{prefix}: first={matrix['first_nonbit_boundary']} "
+            f"u={row['first_u']['cells_unequal']}/"
+            f"{row['first_u']['max_abs']:.12e} "
+            f"rhs={row['rhs_after']['cells_unequal']}/"
+            f"{row['rhs_after']['max_abs']:.12e}")
+    elif args.round111_fct_split:
         row = report["round111_fct_split"]["rows"]["T"]
         prefix = (
             "STATUS PLANT-FIRED" if report["status"] == "PLANT-FIRED"
