@@ -9,6 +9,10 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --gres=gpu:2
+# A scaling ladder across card models measures the cards, not the scaling, so the
+# model is PINNED here. rtx8000 is the only model with enough nodes in `short` for
+# 24 ranks (18 nodes; 12 survive the exclusion below, which is exactly what we need).
+#SBATCH --constraint=rtx8000
 #SBATCH --exclusive
 # WORKAROUND, delete when the nodes are fixed: g[045-054],g[185-193] compile the
 # sharded step and then hang in its first execution (pinned-node A/B, jobs
@@ -77,8 +81,8 @@ run_row () {   # kt ranks nodes
     [ "$RC" -eq 0 ] && RC=2
   fi
   # the cards the row actually ran on: a ladder across card types is not a
-  # ladder (the house launcher pins --constraint=a100; these nodes are
-  # rtx8000, so the card is RECORDED and compared between rows instead)
+  # ladder (the allocation is pinned to rtx8000 above, so the card is
+  # RECORDED here as well and compared between rows)
   local CARDS; CARDS=$(grep -ho 'visible_devices=\[[^]]*\]' "$LOG" | sort -u | tr '\n' ' ')
   local MODEL; MODEL=$(grep -m1 -ho 'RUNTIME .*' "$LOG" | head -1)
   ROW_RC=$RC; ROW_TIMING=${T:-NO TIMING}

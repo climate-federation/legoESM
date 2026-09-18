@@ -6,6 +6,10 @@
 #SBATCH --ntasks=24
 #SBATCH --ntasks-per-node=2
 #SBATCH --gres=gpu:2
+# A scaling ladder across card models measures the cards, not the scaling, so the
+# model is PINNED here. rtx8000 is the only model with enough nodes in `short` for
+# 24 ranks (18 nodes; 12 survive the exclusion below, which is exactly what we need).
+#SBATCH --constraint=rtx8000
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --exclusive
@@ -51,9 +55,9 @@ echo "sha $(git -C "$WT" rev-parse HEAD)  dirty $(git -C "$WT" status --porcelai
 echo "XLA_FLAGS=$XLA_FLAGS"
 echo "outdir $OUT"
 
-# A ladder across GPU models measures the cards, not the model. The house
-# launcher pins --constraint=a100; these nodes are rtx8000, so the models are
-# collected and a mixed allocation is refused instead.
+# A ladder across GPU models measures the cards, not the model. The allocation is pinned to
+# rtx8000 above; the models are collected here anyway and a mixed allocation is
+# refused, because a pin can be dropped or a feature renamed.
 srun -N "$NNODES" -n "$NNODES" --ntasks-per-node=1 --kill-on-bad-exit=0 \
   nvidia-smi --query-gpu=name --format=csv,noheader > "$OUT/gpu_models.txt" 2>"$OUT/gpu_models.err"
 GPU_RC=$?
