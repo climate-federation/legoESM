@@ -129,3 +129,20 @@ def test_gate_enumerates_compiled_intermediates_in_source_order():
         "masked_increment",
         "final_accumulation",
     )
+
+
+def test_round107_bit_classification_rejects_signed_zero_change():
+    reference = np.asarray([-0.0], dtype=np.float64)
+    candidate = np.asarray([0.0], dtype=np.float64)
+    row = gate._bitwise_classification(
+        gate.score(
+            "round107.signed_zero.plant",
+            reference,
+            candidate,
+            np.ones(reference.shape, dtype=bool),
+        )
+    )
+    assert row["absolute_max"] == 0.0
+    assert row["n_unequal"] == 1
+    assert row["classification"] == "AT-BAR"
+    assert not row["exact"]

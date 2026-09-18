@@ -1092,6 +1092,13 @@ def _classification(row: dict) -> dict:
     return row
 
 
+def _bitwise_classification(row: dict) -> dict:
+    """Require identical IEEE-754 words, including the sign of zero."""
+    row["exact"] = row["n_unequal"] == 0
+    row["classification"] = "BIT" if row["exact"] else row["status"]
+    return row
+
+
 def _exact_identity(name: str, candidate, reference, mask) -> dict:
     """Bit census for one installed production-entry operand."""
     candidate = np.asarray(candidate, dtype=np.float64)
@@ -3159,13 +3166,13 @@ def _tke_rhs_intermediate_rows(
 
     recorded_rhs = np.asarray(arrays["rhs_pre_sweep"])[..., 1:30]
     replay_rhs = np.asarray(replay["en_rhs"])
-    replay_row = _classification(score(
+    replay_row = _bitwise_classification(score(
         "GYRE-zco.kt2.tke_rhs_intermediate.reference_replay",
         recorded_rhs, replay_rhs, np.ones(recorded_rhs.shape, dtype=bool)))
     require(replay_row["classification"] == "BIT",
             "NEMO-from-NEMO RHS replay moved before intermediate scoring")
 
-    clean = _classification(score(
+    clean = _bitwise_classification(score(
         f"GYRE-zco.kt2.tke_rhs_intermediate.production_step.{intermediate}.clean",
         reference, candidate, np.ones(reference.shape, dtype=bool)))
     scored_reference = reference
@@ -3195,7 +3202,7 @@ def _tke_rhs_intermediate_rows(
         "masked_increment": "zdftke.f90:439-442",
         "final_accumulation": "zdftke.f90:439-442",
     }[intermediate]
-    row = _classification(score(
+    row = _bitwise_classification(score(
         f"GYRE-zco.kt2.tke_rhs_intermediate.production_step.{intermediate}",
         scored_reference, candidate, np.ones(reference.shape, dtype=bool)))
     row.update({
@@ -3311,7 +3318,7 @@ def _tke_rhs_isolated_rows(
         )
     rows = []
     for label, candidate in candidates:
-        row = _classification(score(
+        row = _bitwise_classification(score(
             "GYRE-zco.kt2.tke_matrix." + label.replace(" ", "_"),
             reference, np.asarray(candidate), np.ones(reference.shape, bool)))
         row.update({
@@ -3337,7 +3344,7 @@ def _tke_rhs_isolated_rows(
             ("isolated-closure eager NEMO expression", eager_pair[1]),
             ("isolated-closure JIT NEMO expression", jit_pair[1]),
         ):
-            row = _classification(score(
+            row = _bitwise_classification(score(
                 "GYRE-zco.kt2.tke_rhs_intermediate."
                 + label.replace(" ", "_") + f".{intermediate}",
                 intermediate_reference, np.asarray(candidate),
