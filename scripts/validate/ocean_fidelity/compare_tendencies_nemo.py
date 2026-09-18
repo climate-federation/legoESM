@@ -579,6 +579,34 @@ def prandtl_split_report(K_H, K_M, avt_i, avm_i, wet, lat_col, lon_col,
     def _rms(x):
         return float(np.sqrt(np.mean(x ** 2)))
 
+    def _pr_at_our_ceiling(pr_o, pr_n):
+        """NEMO's Prandtl ON THE INTERFACES WHERE OURS IS CLAMPED.
+
+        ``_ri_ratio`` below selects interfaces where BOTH Prandtl numbers are
+        free, i.e. exactly the ones where we are NOT clamped -- a subset
+        defined by the absence of the effect, which cannot measure it. In the
+        Antarctic that subset is 8114 of 310244 interfaces and it reported
+        Ri_ours/Ri_nemo = 1.085, which reads as agreement while 95% of the
+        basin sits on our ceiling.
+
+        This is the pairing that discriminates. Where OUR Pr is at the
+        ceiling: NEMO's Pr also high means our Richardson number is right and
+        the difference lives in the Prandtl formula; NEMO's Pr near its median
+        means our Ri is too large on exactly those interfaces, and the first
+        suspect is the shear -- this probe feeds the closure cell-centred
+        u/v from u_to_T/v_to_T, which removes sub-cell shear and inflates Ri.
+        """
+        ours_ceil = pr_o > 9.99
+        n = int(ours_ceil.sum())
+        if n < 10:
+            return {"n_ours_at_ceiling": n,
+                    "Pr_nemo_median_where_ours_ceil": float("nan"),
+                    "Pr_nemo_frac_ceil_where_ours_ceil": float("nan")}
+        pn = pr_n[ours_ceil]
+        return {"n_ours_at_ceiling": n,
+                "Pr_nemo_median_where_ours_ceil": float(np.median(pn)),
+                "Pr_nemo_frac_ceil_where_ours_ceil": float((pn > 9.99).mean())}
+
     def _ri_ratio(pr_o, pr_n):
         """Ri(ours)/Ri(NEMO) on the both-unclamped subset, or NaN if empty."""
         free_both = ((pr_o > 1.001) & (pr_o < 9.99)
@@ -609,6 +637,7 @@ def prandtl_split_report(K_H, K_M, avt_i, avm_i, wet, lat_col, lon_col,
                     "K_M_over_avm_rms": _rms(K_M[m]) / _rms(avm_i[m]),
                     "K_H_over_avt_mean": float(K_H[m].mean() / avt_i[m].mean()),
                     "K_M_over_avm_mean": float(K_M[m].mean() / avm_i[m].mean()),
+                    **_pr_at_our_ceiling(pr_o, pr_n),
                     "Pr_nemo_median": float(np.median(pr_n)),
                     "Pr_ours_median": float(np.median(pr_o)),
                     "Pr_ours_p10": float(np.percentile(pr_o, 10)),
