@@ -127,3 +127,34 @@ selection, threshold, carried state, restart schema, year harness,
 reconciliation gate, freshwater pair, #1484 guard, or trajectory baseline is
 changed. The round does not promote the held shear routing or any downstream
 TKE arithmetic while the upstream stage output remains owned non-bit.
+
+## Frozen addendum: dissipation association discriminator
+
+Frozen after P2/P3 were measured and refuted, and before this new arm is
+implemented or measured. The original predictions above are unchanged. The
+seven original arms left at least 10,402 cells unequal; the complete-source
+arm equalled the `dissipation_product` arm at 10,402 cells and
+`1.1102230246251565e-16`.
+
+Source reinspection found that the first instrument inherited legoESM's
+existing dissipation tree while labelling it as NEMO's tree. The compiled
+record build first assigns `zfact3 = 0.5_wp * rn_ediss` at
+`GYRE_OMIP_L2_P3_SM_R101TKEW/BLD/ppsrc/nemo/zdftke.f90:260-261`, then the RHS
+evaluates `zfact3 * dissl * en` at `:441`. legoESM first evaluates
+`diss_rate = c_eps * dissl_old` and its RHS evaluates
+`0.5 * diss_rate * en`. Those are algebraically equal but have different
+binary64 multiplication trees. Therefore the original arm called
+`zfact3_dissl` did **not** implement its name; it materialized
+`0.5 * (rn_ediss * dissl)`.
+
+**P9 — one-variable NEMO dissipation tree.** A new production-step arm will
+change only the dissipation term from
+`0.5 * (rn_ediss*dissl) * en` to NEMO's
+`(0.5*rn_ediss) * dissl * en`; the rest of the RHS and every operand remain
+unchanged. It is predicted to make the production-JIT `en_rhs` BIT while the
+eager arm remains BIT. REFUTED by one unequal cell in either execution mode.
+If JIT remains non-bit, a second arm may materialize NEMO's separately written
+`zfact3` scalar and the two multiplication boundaries to distinguish source
+association from residual fusion; its prediction is BIT and its falsifier is
+again one unequal cell. Neither arm is eligible to land under the unchanged
+stage-order hold.
