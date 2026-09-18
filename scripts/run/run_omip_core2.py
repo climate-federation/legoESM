@@ -7856,7 +7856,6 @@ def main() -> int:
                             tke_lc=args.tke_lc, tke_etau=args.tke_etau,
                             tke_preclosure_coeff_source=(
                                 args.tke_preclosure_coeff_source),
-                            tke_surface_bc_level=args.tke_surface_bc_level,
                             mpas_vmix=args.mpas_vmix,
                             fesom_vmix=args.fesom_vmix)
     # --gm-treguier is applied in build_tripole's GM/Redi override only; on any
