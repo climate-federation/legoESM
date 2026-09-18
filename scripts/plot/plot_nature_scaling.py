@@ -38,7 +38,7 @@ PANELS = [
     ("atmosphere", "latlon", "lat–lon", "4096×8192 L26 (strong) · 32 / 8 rows per device (weak)"),
     ("atmosphere", "icosahedral", "MPAS icosahedral", "subdiv-9/10 L26 · 81k / 5k cells per device (weak)"),
     ("atmosphere", "cubed-sphere", "cubed-sphere", "C768 L26 · 6·kt² tiles"),
-    ("ocean", "tripole", "tripole (ORCA fold)", "3072×4352 L75 (ORCA12-class) · 24 / 6 rows per device (weak)"),
+    ("ocean", "tripole", "tripole (ORCA fold)", "3072×4352 L75 (ORCA12-class) · GPU only — see note"),
     ("ocean", "mpas", "MPAS Voronoi", "subdiv-9 L40 (2.6M cells) · 20k / 5k cells per device (weak)"),
     ("ocean", "fesom", "FESOM2 (fesom_jax)", "forca20 2.1M nodes L70 · float64 only"),
 ]
