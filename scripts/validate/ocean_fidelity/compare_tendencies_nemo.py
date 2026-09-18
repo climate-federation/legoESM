@@ -1393,17 +1393,31 @@ def main():
                 _prn = avm_i / np.maximum(avt_a2(d), 1e-30)
                 _rat = np.log10(np.maximum(_pro, 1e-6)
                                 / np.maximum(_prn, 1e-6))
-            fig2, ax2 = plt.subplots(1, 2, figsize=(13, 4.6))
-            for _ax, _kk, _lbl in ((ax2[0], 3, "iface k=3 (~10-30 m)"),
-                                   (ax2[1], 8, "iface k=8 (~100 m)")):
-                _f = np.where(wm2, _rat[:, _kk].reshape(ny, nx), np.nan)
-                _im = _ax.pcolormesh(_f, vmin=-1, vmax=1, cmap="RdBu_r")
-                _ax.set_title(f"log10(Pr_ours / Pr_NEMO)  {_lbl}", fontsize=9)
+            # ABSOLUTE ratios, not just the Prandtl one. Reading the ratio
+            # alone inverted the physics once already: the Prandtl number is
+            # off because K_M is excessive by MORE than K_H is, not because
+            # tracer mixing is weak. Both diffusivities are plotted against
+            # the oracle's own so the sign cannot be misread again.
+            with np.errstate(divide="ignore", invalid="ignore"):
+                _rkm = np.log10(np.maximum(K_M2, 1e-30)
+                                / np.maximum(avm_i, 1e-30))
+                _rkh = np.log10(np.maximum(K_H2, 1e-30)
+                                / np.maximum(avt_a2(d), 1e-30))
+            fig2, ax2 = plt.subplots(2, 2, figsize=(13, 8.4))
+            for _ax, _fld, _kk, _ttl in (
+                    (ax2[0][0], _rkm, 3, "log10(K_M ours / avm NEMO)  ~10-30 m"),
+                    (ax2[0][1], _rkm, 8, "log10(K_M ours / avm NEMO)  ~100 m"),
+                    (ax2[1][0], _rkh, 3, "log10(K_H ours / avt NEMO)  ~10-30 m"),
+                    (ax2[1][1], _rkh, 8, "log10(K_H ours / avt NEMO)  ~100 m")):
+                _f = np.where(wm2, _fld[:, _kk].reshape(ny, nx), np.nan)
+                _im = _ax.pcolormesh(_f, vmin=-2, vmax=2, cmap="RdBu_r")
+                _ax.set_title(_ttl, fontsize=9)
                 plt.colorbar(_im, ax=_ax, shrink=0.85)
             fig2.suptitle(
-                "Effective Prandtl ratio, Mode-A. RED = our tracer mixing too "
-                "weak relative to momentum; 0 = matches NEMO. +1 is a factor "
-                "of ten.", fontsize=10)
+                "Vertical diffusivity vs NEMO, Mode-A (NEMO's own state, ice, "
+                "wave mixing and backgrounds; convecting columns masked). "
+                "RED = WE MIX MORE THAN NEMO, 0 = match, +2 is a hundredfold "
+                "excess. Top momentum, bottom tracer.", fontsize=10)
             fig2.tight_layout()
             png2 = out_dir / f"prandtl_ratio_rec{args.rec}.png"
             fig2.savefig(png2, dpi=110)
