@@ -1,0 +1,104 @@
+ROUND 109 STAGE CANDIDATE (2026-09-18; measured candidate
+2c9bcbf438771279d01ae77c0b70f6c7c56d5f83): HELD.
+
+LOCAL STAGE PROOF.  The compiled vector program completes Krhs in
+stp2d.f90:141-176, diagnoses its depth mean into separate Ue_rhs/Ve_rhs at
+:202-213, passes Krhs through stprk3.f90:188-202, and consumes it directly in
+the vector stage-one assignment at stprk3_stg.f90:661-675.  Driven from NEMO's
+recorded kt=1 entry through the production step, selecting that full source and
+skipping the model-only post-external momentum recomputation makes all fourteen
+U/V handoff rows BIT in production JIT and eager.  The isolated-JIT raw and
+corrected writes are also BIT, and a one-ULP perturbation of the production-JIT
+corrected U output flips exactly one cell.
+
+TRAJECTORY VETO.  The canonical 954-row comparison against Round 96 fails:
+88 rows move, 64 rows violate the two-ULP oracle-relative bar, 281,040 cells
+violate, and first-over-bar remains kt2 U/V.  kt3 T improves only
+2.346567385e-11 K while kt3 S worsens 1.6264323221e-11, and day-30 T RMS
+worsens from 1.2397011296352737e-2 to 1.239701238530299e-2 K.  Rule 12 therefore
+refuses the candidate.  Re-evaluate only in kt=1 stage 1 after a discriminating
+recorded-entry walk explains why the source-exact handoff damages the chained
+trajectory; do not apply it to a downstream stage or land it alone.
+
+diff --git a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+index d81e0bfe3..6c79fe3c9 100644
+--- a/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
++++ b/packages/ocean/legoesm/ocean/dynamics/ocean_model_latlon_cgrid.py
+@@ -6414,20 +6414,16 @@ class LatLonCGridOceanModel:
+                     "expose_stage1_transport_operand must be empty, "
+                     "'thickness', 'corrected_velocity', or "
+                     "'transport_average'")
+-            _vert0 = _stage_vertical_up3(u0, v0, _g0)
+-            # NEMO hands stage 1 the SAME Kmm transport it hands stages 2-3:
+-            # ``zFu = e2u*e3u(Kmm)*(uu(Kmm) + zub)`` with ``zub = un_adv/
+-            # hu(Kmm) - uu_b(Kmm)`` (stprk3_stg.F90:265-275), consumed by
+-            # stage 1's dyn_adv at :315 exactly as by :333.  The step-entry
+-            # ``tendencies()`` above ran BEFORE the external solve produced
+-            # ``un_adv``, so its horizontal UP3 flux advected with zub = 0.
+-            # Add the transport's contribution as the difference of the
+-            # stage helper evaluated with and without it on the SAME entry
+-            # state: every term the helper carries cancels exactly, only
+-            # the zub advection survives (isomorphism row S-21; measured
+-            # 3.136e-07 m/s^2 at the OVERFLOW kt=2 entry, exactly zero from
+-            # rest).
+-            _du1_rhs, _dv1_rhs = du_dt_pert, dv_dt_pert
++            # The compiled vector program completes Krhs in stp_2D and stage
++            # 1 consumes it directly: the transport/W built above feeds the
++            # tracer path, while only the non-vector branch calls dyn_adv
++            # here (stprk3_stg.F90:326-374,661-675).  Keep the projected,
++            # post-external recomputation solely for that non-vector arm.
++            _vert0 = (None if _vector_velocity_stage_update else
++                      _stage_vertical_up3(u0, v0, _g0))
++            _du1_rhs, _dv1_rhs = (
++                (du_dt, dv_dt) if _vector_velocity_stage_update
++                else (du_dt_pert, dv_dt_pert))
+             _nemo_ws_live_stage1_full_rhs = (du_dt, dv_dt)
+             _stage1_rhs_base = (_du1_rhs, _dv1_rhs)
+             # The stage's NEMO e3u/e3v(Kmm) pair for the flux-form momentum
+@@ -6445,8 +6441,11 @@ class LatLonCGridOceanModel:
+                 return _nemo_ws_qco_stage_faces(
+                     eta_stage, _h_ref_ws, _u_live_mask, _v_live_mask, _grid)[:2]
+ 
+-            _face_thickness_kbb = _stage_face_thickness(state.eta.data)
+-            if _transport_target is not None:
++            _face_thickness_kbb = (
++                None if _vector_velocity_stage_update
++                else _stage_face_thickness(state.eta.data))
++            if (_transport_target is not None
++                    and not _vector_velocity_stage_update):
+                 _p0_with_zub = _mom_pert_ws(
+                     u0, v0, False, _transport_target,
+                     stage_face_thickness=_face_thickness_kbb, stage_index=1)
+@@ -6456,19 +6455,19 @@ class LatLonCGridOceanModel:
+                 _du1_rhs = _du1_rhs + (_p0_with_zub[0] - _p0_no_zub[0])
+                 _dv1_rhs = _dv1_rhs + (_p0_with_zub[1] - _p0_no_zub[1])
+             _stage1_rhs_post_transport = (_du1_rhs, _dv1_rhs)
+-            # stp2d materializes stage-1 WZV before dyn_zad. The external
+-            # solve makes that stage transport available only at this point,
+-            # so replace the ZAD association without changing earlier terms.
+-            _p0_with_zad = _mom_pert_ws(
+-                u0, v0, False, None,
+-                stage_face_thickness=_face_thickness_kbb,
+-                stage_zad_operands=(_g0[2], _g0[4], _g0[5]),
+-                stage_index=1)
+-            _p0_without_zad = _mom_pert_ws(
+-                u0, v0, False, None,
+-                stage_face_thickness=_face_thickness_kbb, stage_index=1)
+-            _du1_rhs = _du1_rhs + (_p0_with_zad[0] - _p0_without_zad[0])
+-            _dv1_rhs = _dv1_rhs + (_p0_with_zad[1] - _p0_without_zad[1])
++            if not _vector_velocity_stage_update:
++                # In the non-vector program, replace the pre-external ZAD
++                # association with the stage transport's W operand.
++                _p0_with_zad = _mom_pert_ws(
++                    u0, v0, False, None,
++                    stage_face_thickness=_face_thickness_kbb,
++                    stage_zad_operands=(_g0[2], _g0[4], _g0[5]),
++                    stage_index=1)
++                _p0_without_zad = _mom_pert_ws(
++                    u0, v0, False, None,
++                    stage_face_thickness=_face_thickness_kbb, stage_index=1)
++                _du1_rhs = _du1_rhs + (_p0_with_zad[0] - _p0_without_zad[0])
++                _dv1_rhs = _dv1_rhs + (_p0_with_zad[1] - _p0_without_zad[1])
+             _stage1_rhs_post_zad = (_du1_rhs, _dv1_rhs)
+             # Stage 1: Kmm = Kbb, so the RHS carries (1 + r3u(Kbb)).
+             _u1_rhs = _du1_rhs if _vert0 is None else _du1_rhs + _vert0[0]
