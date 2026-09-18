@@ -133,10 +133,17 @@ def test_gm_treguier_requires_gm_redi():
 
 
 def test_mpas_recipe_rejects_gm_treguier_at_config_build():
-    """gm_redi_mpas raises NotImplementedError for the Treguier block, but only
-    inside the first GM tendency -- after a full model build. The recipe must
-    reject the unsupported flag up front."""
-    with pytest.raises(NotImplementedError, match="lat-lon C-grid GM/Redi"):
+    """The MPAS recipe must still refuse the Treguier flag, for a NEW reason.
+
+    gm_redi_mpas CAN now compute a Treguier kappa_GM, so the old reason ("the
+    MPAS path cannot run it") no longer holds. What it implements is the
+    SHARED variant rather than the nemo_native one the ORCA1-faithful tripole
+    card runs, and no CLI flag selects it on this lane, so a recipe enabling
+    it would quietly compare two different discretisations. The refusal is
+    now a harmonization guard; this pins that it is still refused, and that
+    the message says why.
+    """
+    with pytest.raises(NotImplementedError, match="nemo_native"):
         nemo_match_mpas_model_config(
             NEMOMatchMPASRecipeConfig(gm_treguier=True))
 

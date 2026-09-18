@@ -528,6 +528,7 @@ def compute_treguier_kappa_gm(
     rho_ref: float = _RHO_0_DEFAULT,
     g: float = constants.g,
     omega: float = constants.Omega,
+    interface_active: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     r"""Treguier et al. (1997) / Held-Larichev (1996) eddy-induced-velocity
     coefficient — faithful port of NEMO 5.0.1 ``ldftra.F90::ldf_eiv``
@@ -572,6 +573,7 @@ def compute_treguier_kappa_gm(
     sigma_bar, _L, wet_col, int_N_dz, sigma, dz_half = _eady_growth_and_length(
         rho, S_x, S_y, z_coord, jacobian, f_coriolis,
         _TREGUIER_LENGTH_STUB, rho_ref, g,
+        interface_active=interface_active,
     )
     del sigma_bar, _L
     f_abs = jnp.maximum(jnp.abs(f_coriolis), TREGUIER_F_MIN)
@@ -622,6 +624,7 @@ def _eady_growth_and_length(
     *,
     n2_mode: str = "insitu",
     n2_over_dzw: bool = False,
+    interface_active: jnp.ndarray | None = None,
     T: jnp.ndarray | None = None,
     S: jnp.ndarray | None = None,
     p_cell: jnp.ndarray | None = None,
@@ -660,6 +663,17 @@ def _eady_growth_and_length(
     eps = EPS
     dz_actual = z_coord.dz_ref * jacobian[..., jnp.newaxis]
     dz_half = 0.5 * (dz_actual[..., :-1] + dz_actual[..., 1:])
+    if interface_active is not None:
+        # PARTIAL / SHALLOW COLUMNS.  The weight above is the FULL reference
+        # column scaled by the free-surface Jacobian; it knows nothing about
+        # where the seafloor is.  Left alone, a shelf column integrates
+        # sub-seafloor water into EVERY reduction below — inflating the
+        # quadrature weight (which dilutes ``sigma_bar`` and the Treguier
+        # growth rate) and adding spurious ``N dz`` to ``int_N_dz`` (which
+        # inflates the Rossby radius).  Zeroing the weight here fixes all of
+        # them at once, because every reduction below shares ``dz_half``.
+        # Omitted => byte-identical to the previous behaviour.
+        dz_half = dz_half * jnp.asarray(interface_active, dtype=dz_half.dtype)
 
     # Local growth rate sigma_Eady ~ N * |S| at each interior interface.
     if n2_mode == "insitu":

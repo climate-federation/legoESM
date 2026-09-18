@@ -2586,8 +2586,9 @@ _FESOM_WIRED_DESTS = frozenset({
     # B4 — prognostic sea ice (legoESM ice, free-drift, 1 category):
     "prognostic_sea_ice", "prognostic_ice_dynamics", "ice_init",
     "ice_ocean_heat_coeff", "ice_thermo_sw_trans", "ice_lead_freeze_source",
-    # B4 — SSS restoring (water_flux channel ONLY: FesomOceanState.S is a
-    # read-only facade, so the post-step tracer applicator cannot write back):
+    # B4 — SSS restoring, both channels: water_flux (NEMO nn_sssr=2) enters
+    # via fw.restoring, tracer is the post-step edit through
+    # with_surface_salinity:
     "sss_restore", "sss_restore_channel", "sss_restore_tau_days",
     "sss_restore_bound_mmday", "sss_restore_file",
     "sss_restore_normalization", "sss_ice_gate_nemo", "sss_restore_regions",
@@ -2656,19 +2657,28 @@ def validate_fesom_stage(args, parser) -> None:
                 "--fesom-unforced runs the UNFORCED smoke; these forcing "
                 "selectors would be silently dropped: "
                 + " ".join("--" + d.replace("_", "-") for d in _b23))
+    # This lane USED to refuse the 'tracer' channel outright, on the stated
+    # grounds that "FesomOceanState.S is a read-only PROPERTY ... so the
+    # post-step applicator cannot write the restored salinity back".  ``.S``
+    # is indeed a read-only property, but the facade is a frozen dataclass and
+    # the inner state is written with dataclasses.replace, so the conclusion
+    # was false and the channel was blocked for no reason.  Both channels are
+    # wired now (``with_surface_salinity`` is the tracer-side writer).
+    #
+    # But the flag's global default is None, which MEANS tracer, and until now
+    # an unset channel ABORTED on this lane.  Simply accepting it would hand a
+    # fesom card the non-NEMO virtual-salt form by omission -- a scientific
+    # choice nobody made, on a lane built for ORCA1 parity.  So the channel
+    # stays REQUIRED here: the lane refuses to pick for the user.
     if getattr(args, "sss_restore", False) \
-            and args.sss_restore_channel != "water_flux":
-        # FesomOceanState.S is a read-only PROPERTY of the inner fesom
-        # state — the post-step tracer applicator (the 'tracer' channel)
-        # cannot write the restored salinity back, so the tracer channel
-        # would silently do nothing.  Water-flux (NEMO nn_sssr=2) enters
-        # via fw.restoring -> the translator's water_flux; that is the
-        # ONLY channel wired on this lane.
+            and args.sss_restore_channel is None:
         raise SystemExit(
-            "--grid fesom: --sss-restore requires --sss-restore-channel "
-            "water_flux (and --sss-restore-normalization live_s): the "
-            "tracer channel is a post-step salinity edit, which cannot "
-            "write into the read-only FESOM state facade.")
+            "--grid fesom: --sss-restore requires an explicit "
+            "--sss-restore-channel. Both are wired: 'water_flux' is NEMO "
+            "nn_sssr=2 (the restoring enters the freshwater budget and "
+            "carries its heat term) and is what the ORCA1-parity cards use; "
+            "'tracer' is the post-step virtual-salt edit. The flag's global "
+            "default is 'tracer', which would be an unasked choice here.")
     if getattr(args, "sss_restore", False) \
             and args.sss_restore_file is None \
             and not (args.woa_init or args.nemo_monthly_init):
@@ -2874,9 +2884,12 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
       flux-divergence ice operators), blended via the ONE shared
       ``blend_ice_ocean_forcing``; brine salt reaches fesom through
       ``sf.salt_flux`` -> ``bc_S`` in the translator.
-    * SSS RESTORING (``--sss-restore``, WATER-FLUX channel only): the
-      shared ``compute_sss_restoring_flux`` feeds ``fw.restoring`` (->
-      translator ``water_flux``) + the NEMO ``qns`` heat term.
+    * SSS RESTORING (``--sss-restore``, BOTH channels): under
+      ``water_flux`` the shared ``compute_sss_restoring_flux`` feeds
+      ``fw.restoring`` (-> translator ``water_flux``) + the NEMO ``qns``
+      heat term, pre-step; under ``tracer`` (the flag's default) the same
+      kernel drives a post-step surface-salinity edit through
+      ``apply_sss_restoring_step_fesom``.
     * RUNOFF (``--runoff``): Dai-Trenberth monthly, node-adjacency coastal
       spread (``FesomOceanGrid.cellsOnCell`` from ``mesh.edges``).
 
@@ -2995,14 +3008,21 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
               f"cloud {ice_shape}; salt->bc_S, ice_fw->water_flux, "
               "heat->q_net via blend_ice_ocean_forcing.")
 
-    # --- B4: SSS restoring (water_flux channel; gate enforced upstream) ---
+    # --- B4: SSS restoring (both channels) --------------------------------
     sss_restore_cfg = None
     sss_restore_target = None
     _sss_monthly = False
+    # WATER-FLUX is pre-step (NEMO sbcssr: the flux joins the freshwater
+    # budget and the qns heat term); TRACER is a post-step edit of the
+    # surface salinity.  Mutually exclusive — running both would restore
+    # twice.  Tested as "is it water_flux", the same way every other site
+    # tests it (the flag's default is None, which MEANS tracer; comparing
+    # against "tracer" would silently route an unset channel to water_flux).
+    _sss_water_flux = (args.sss_restore_channel == "water_flux")
     if args.sss_restore:
-        # validate_fesom_stage already enforced --sss-restore-channel
-        # water_flux (the tracer channel cannot write into the read-only
-        # FESOM state facade) and main() enforced normalization live_s.
+        from legoesm.ocean.coupler.sss_apply import (
+            apply_sss_restoring_step_fesom,
+        )
         from legoesm.ocean.forcing.sss_restoring import (
             compute_sss_restoring_flux,
         )
@@ -3032,8 +3052,8 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
         _wet = np.asarray(state.land_mask.data) > 0.5
         _sss_monthly = (sss_restore_target.shape[0] == 12
                         and sss_restore_target.ndim == _wet.ndim + 1)
-        print(f"[setup] SSS restoring ON (water_flux channel): tau_default="
-              f"{args.sss_restore_tau_days:.0f} d; target = "
+        print(f"[setup] SSS restoring ON ({args.sss_restore_channel} channel):"
+              f" tau_default={args.sss_restore_tau_days:.0f} d; target = "
               f"{'NEMO sn_sss monthly clim' if _sss_monthly else 'IC-surface SSS'}")
 
     # --- B4: Dai-Trenberth runoff with node-adjacency coastal spread ------
@@ -3163,32 +3183,43 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
             # Same partition-time-level concentration to the closure (the
             # TKE eice under-ice attenuation reads it), as the host loop does.
             sf = sf._replace(ice_concentration=_ice_conc_pre)
-        # --- SSS restoring, WATER-FLUX channel (B4; pre-step, like NEMO
-        # sbcssr: the flux is computed from the NOW-level SSS and enters
-        # the freshwater budget + the qns heat term) --------------------
+        # --- SSS restoring (B4).  Inputs are assembled here, PRE-step, for
+        # both channels: the water-flux channel consumes them below (NEMO
+        # sbcssr — the flux is computed from the NOW-level SSS and enters the
+        # freshwater budget + the qns heat term), and the tracer channel
+        # consumes the same ones after model.step, so the two see the same
+        # GATES AND TARGET.  Not the same salinity: water-flux reads the
+        # pre-step surface, the tracer applicator reads the post-step state it
+        # is handed.  That is the host lane's behaviour too. ------------------
+        _sss_ice = None
+        _sss_tgt_step = None
+        _R_gate = None
         if sss_restore_cfg is not None:
-            _sss_ice = None
             if ice_resp is not None:
                 # Live (ocean-masked) prognostic ice gates the restoring.
                 _lc = ice_state.concentration.data
                 _sss_ice = _lc * jnp.asarray(state.land_mask.data, _lc.dtype)
+            _sss_tgt_step = (
+                month_sample(sss_restore_target, step, dt,
+                             args.forcing_time_interp)
+                if _sss_monthly else sss_restore_target)
+            # River-mouth gate, same as the host loop: no restoring where the
+            # runoff map is wet (the mouth cells NEMO keeps fresh).
+            _R_gate = (_R if args.river_mouth_restoring_gate else None)
+        if sss_restore_cfg is not None and _sss_water_flux:
             _S_now = state.S.data[..., 0]
             _T_now = state.T.data[..., 0]          # potential temp [degC]
             _lm = jnp.asarray(state.land_mask.data, _S_now.dtype)
-            _tgt = (month_sample(sss_restore_target, step, dt, args.forcing_time_interp)
-                    if _sss_monthly else sss_restore_target)
             _sss_out = compute_sss_restoring_flux(
                 S_model_top=_S_now,
-                S_target=jnp.asarray(_tgt, _S_now.dtype),
+                S_target=jnp.asarray(_sss_tgt_step, _S_now.dtype),
                 lat_deg=jnp.asarray(lat_deg, _S_now.dtype),
                 lon_deg=jnp.asarray(lon_deg, _S_now.dtype),
                 ice_concentration=(jnp.zeros_like(_S_now)
                                    if _sss_ice is None
                                    else jnp.asarray(_sss_ice, _S_now.dtype)),
                 config=sss_restore_cfg,
-                # River-mouth gate, same as the host loop: no restoring where
-                # the runoff map is wet (the mouth cells NEMO keeps fresh).
-                river_runoff=(_R if args.river_mouth_restoring_gate else None),
+                river_runoff=_R_gate,
                 sst_C=_T_now,
             )
             # Land cells contribute nothing to either budget.
@@ -3210,6 +3241,15 @@ def run_fesom_forced_loop(args, grid, z_coord, model, state) -> None:
                 q_net=(_q_restore if sf.q_net is None
                        else sf.q_net + _q_restore))
         state = model.step(state, dt, surface_forcing=sf, freshwater=fw)
+        # --- SSS restoring, TRACER channel (B4; post-step, the virtual-salt
+        # edit that moves no water and carries no heat).  Writes the surface
+        # salinity through with_surface_salinity, which leaves the OLD tracer
+        # time level alone -- with_fields would collapse the two. -----------
+        if sss_restore_cfg is not None and not _sss_water_flux:
+            state = apply_sss_restoring_step_fesom(
+                state, S_target=_sss_tgt_step, ice_concentration=_sss_ice,
+                config=sss_restore_cfg, grid=grid, dt=dt,
+                river_runoff=_R_gate)
         if snap_every and step % snap_every == 0:
             d = int(round(step * dt / 86400.0))
             write_snapshot(out, f"day{d:04d}", state.inner, model.mesh)
@@ -3263,7 +3303,9 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
                      bottom_drag_ke0=None, iwm=None, iwm_forcing_file=None,
                      ddm=None,
                      vertical_mixing=None, ew_cyclic_overlap=False,
-                     no_gm_redi=False, K_zeta_bih=None):
+                     no_gm_redi=False, K_zeta_bih=None,
+                     gm_treguier=False, gm_aei0=_GM_AEI0_DEFAULT,
+                     gm_kappa_min=0.0):
     """Build an MPAS (icosahedral Voronoi) ocean for the faithful CORE-II NEMO
     comparison — the 4th grid.  Reuses ``run_omip._create_setup('mpas', ...)``
     (the wired MPASOceanModel: KPP + GM/Redi + smc03 PGF + implicit-CN
@@ -3366,6 +3408,45 @@ def build_mpas_ocean(nlev: int, H_max: float, mesh_path: str, level: int = 6,
         # the GM/Redi block (ocean_model_mpas gates on `is not None`).
         config = config._replace(gm_redi=None)
         print("[setup] mpas GM/Redi DISABLED (--no-gm-redi)")
+    elif gm_treguier:
+        # NEMO ldf_eiv (nn_aei_ijk_t=21) adaptive kappa_GM on the Voronoi mesh.
+        #
+        # ONE FIELD, on THIS LANE'S OWN BASE.  The tripole builder carries a
+        # comment recording why: an earlier version took the lat-lon default
+        # as its base and so changed FOUR fields at once, making every
+        # `--gm-treguier` arm unattributable.  Here the MPAS block is kept
+        # exactly as built and only `treguier` is replaced.
+        _base = config.gm_redi
+        if _base is None:
+            raise SystemExit(
+                "--gm-treguier needs GM/Redi enabled; this mpas config has "
+                "gm_redi=None.")
+        if _base.visbeck.enabled:
+            # Refuse rather than silently switching the other scheme off:
+            # Treguier and Visbeck are both adaptive-kappa and the model
+            # raises if both are on, but flipping one here would be a second,
+            # unrecorded change to the run.
+            raise SystemExit(
+                "--gm-treguier on --grid mpas: this config ships Visbeck "
+                "enabled, and the two adaptive-kappa schemes are mutually "
+                "exclusive. Disable Visbeck explicitly rather than having "
+                "the flag do it silently.")
+        from legoesm.ocean.physics.lateral_mixing._gm_redi_common import (
+            validate_treguier_cfg,
+        )
+        from legoesm.ocean.physics.lateral_mixing.config import TreguierConfig
+        _treg = TreguierConfig(enabled=True, aei0=float(gm_aei0),
+                               kappa_min=float(gm_kappa_min))
+        # Fail at config build, not inside the first GM tendency.
+        try:
+            validate_treguier_cfg(_treg)
+        except ValueError as exc:
+            raise SystemExit(f"--gm-treguier on --grid mpas: {exc}") from exc
+        config = config._replace(gm_redi=_base._replace(treguier=_treg))
+        print(f"[setup] mpas GM kappa_GM scheme: TREGUIER (NEMO ldf_eiv "
+              f"nn_aei_ijk_t=21, aei0={float(gm_aei0):g} m^2/s, "
+              f"kappa_min={float(gm_kappa_min):g} m^2/s) — SHARED variant, "
+              "NOT the nemo_native one the tripole card runs")
     if mle is not None:
         # Fox-Kemper MLE on the Voronoi mesh (NEMO nn_mle=1 bolus restratification).
         config = config._replace(mle=mle)
@@ -6786,7 +6867,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
                         "(NEMO rn_deds). Ice and river gates remain independent.")
     p.add_argument("--sss-restore-channel", default=None,
                    choices=["tracer", "water_flux"],
-                   help="How SSS restoring reaches the ocean (tripole/latlon). "
+                   help="How SSS restoring reaches the ocean (all grids). "
                         "Unset = 'tracer' (default, bit-identical to earlier "
                         "runs): a post-step salinity edit, which is a "
                         "virtual-salt-like operation that moves no water and "
@@ -7780,10 +7861,13 @@ def main() -> int:
                             fesom_vmix=args.fesom_vmix)
     # --gm-treguier is applied in build_tripole's GM/Redi override only; on any
     # other grid (or with GM disabled) it would be silently discarded.
-    if args.gm_treguier and args.grid != "tripole":
+    if args.gm_treguier and args.grid not in ("tripole", "mpas"):
+        # mpas gained the SHARED Treguier variant in 2026-09; fesom has no
+        # GM/Redi at all, so the flag would be silently discarded there.
         raise SystemExit(
-            f"--gm-treguier is wired for --grid tripole only (the GM/Redi "
-            f"override lives in build_tripole); got --grid {args.grid!r}.")
+            f"--gm-treguier is wired for --grid tripole and --grid mpas (the "
+            f"fesom lane has no GM/Redi block at all); got "
+            f"--grid {args.grid!r}.")
     if args.gm_treguier and args.no_gm_redi:
         raise SystemExit(
             "--gm-treguier and --no-gm-redi are mutually exclusive: the former "
@@ -8099,6 +8183,8 @@ def main() -> int:
             mle=mle_cfg, dz_ref_override=_nemo_dz,
             barotropic_solver=args.barotropic_solver,
             barotropic_pcg_variant=args.barotropic_pcg_variant,
+            gm_treguier=args.gm_treguier, gm_aei0=args.gm_aei0,
+            gm_kappa_min=args.gm_kappa_min,
             # Cross-grid parity (2026-07-18 manifest audit): these two flags
             # were silently IGNORED on MPAS — the call site never passed
             # them, so mpas8_corr ran tvd + adcroft while the tripole ran

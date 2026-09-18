@@ -90,15 +90,31 @@ def test_b4_selectors_allowed(extra):
     validate_fesom_stage(args, p)  # no raise
 
 
-def test_sss_restore_tracer_channel_rejected():
-    """The tracer channel is a post-step salinity edit; FesomOceanState.S
-    is a read-only facade, so the fesom lane accepts ONLY water_flux."""
-    for extra in (["--sss-restore", "--sss-restore-file", "/sss.nc"],
-                  ["--sss-restore", "--sss-restore-file", "/sss.nc",
-                   "--sss-restore-channel", "tracer"]):
-        args, p = _parse(extra)
-        with pytest.raises(SystemExit, match="water_flux"):
-            validate_fesom_stage(args, p)
+def test_sss_restore_tracer_channel_accepted():
+    """The tracer channel is wired on the fesom lane.
+
+    It used to be refused, on the stated grounds that ``FesomOceanState.S``
+    is a read-only facade.  ``.S`` is a read-only property, but the facade is
+    a frozen dataclass and ``with_surface_salinity`` writes the inner state,
+    so the refusal rested on a false premise.
+    """
+    args, p = _parse(["--sss-restore", "--sss-restore-file", "/sss.nc",
+                      "--sss-restore-channel", "tracer"])
+    validate_fesom_stage(args, p)  # no raise
+
+
+def test_sss_restore_requires_an_explicit_channel():
+    """An UNSET channel is refused rather than defaulted.
+
+    The flag's global default is None, which means 'tracer'.  Accepting it
+    here would hand a fesom card the non-NEMO virtual-salt form by omission,
+    on a lane built for ORCA1 parity -- a scientific choice nobody made.  The
+    lane refuses to pick.
+    """
+    args, p = _parse(["--sss-restore", "--sss-restore-file", "/sss.nc"])
+    assert args.sss_restore_channel is None
+    with pytest.raises(SystemExit, match="explicit"):
+        validate_fesom_stage(args, p)
 
 
 def test_sss_restore_needs_a_target():

@@ -159,13 +159,15 @@ class NEMOMatchMPASRecipeConfig:
     normalize_freshwater: bool = True
 
     # GM/Redi (mesoscale eddy parameterization).
-    # NOTE (MPAS recipe): `gm_treguier=True` is NOT runnable here — the MPAS
-    # GM/Redi path (`gm_redi_mpas.py`) raises NotImplementedError for the
-    # Treguier block, which is implemented on the lat-lon C-grid only, and it
-    # raises only inside the FIRST GM tendency (i.e. after a full model build
-    # and a step's worth of density/slope work).  The fields are kept so both
-    # recipes share `_nemo_match_gm_redi`; `nemo_match_mpas_model_config`
-    # rejects the flag up front so the failure lands at config build.
+    # NOTE (MPAS recipe): `gm_treguier=True` is refused here, but the reason
+    # CHANGED in 2026-09.  The MPAS GM/Redi now implements the Treguier block
+    # (`gm_redi_mpas.py`), using a wet-edge Perot reconstruction of the slope
+    # vector.  What it implements is the SHARED variant, NOT the
+    # `nemo_native` one the ORCA1-faithful tripole card selects, and no CLI
+    # flag reaches this lane yet — so a recipe that set it would silently run
+    # a different discretisation from the tripole it is being compared with.
+    # The refusal stands until the CLI is wired and the two variants have been
+    # compared; it is a harmonization guard now, not a missing-code guard.
     gm_redi: bool = True
     kappa_GM: float = 600.0
     kappa_Redi: float = 600.0
@@ -394,10 +396,13 @@ def nemo_match_mpas_model_config(
         # only inside the first GM tendency -- i.e. after a full model build.
         # Reject here so the failure is at config build, next to the flag.
         raise NotImplementedError(
-            "NEMOMatchMPASRecipeConfig.gm_treguier=True is not supported: the "
-            "NEMO ldf_eiv (Treguier) kappa_GM is implemented on the lat-lon "
-            "C-grid GM/Redi only, so the MPAS path cannot run it. Use the "
-            "tripole recipe, or leave gm_treguier=False for constant kappa_GM.")
+            "NEMOMatchMPASRecipeConfig.gm_treguier=True is not supported yet. "
+            "The MPAS GM/Redi DOES now implement a Treguier kappa_GM, but it "
+            "is the SHARED variant, not the nemo_native one the ORCA1-faithful "
+            "tripole card runs, and no CLI flag selects it on this lane. "
+            "Enabling it from a recipe would quietly compare two different "
+            "discretisations. Use the tripole recipe, or leave "
+            "gm_treguier=False for constant kappa_GM.")
     if physics is None:
         physics = _default_match_physics()
     return MPASOceanConfig(
