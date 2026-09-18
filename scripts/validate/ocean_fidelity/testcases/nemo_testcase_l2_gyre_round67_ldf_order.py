@@ -321,6 +321,11 @@ def _round112_literal_rows(base: jax.Array, values: dict) -> tuple:
     final_div = sr(-sr(sr(du + dv) + dw) * r1_area[..., None])
     rhs_after = sr(sr(sr(final_div / h_kmm) * tmask)
                    + jnp.zeros_like(final_div))
+    # XLA may delete the source's addition to the positive-zero Krhs entry,
+    # preserving a negative zero from ``negative_divergence * 0`` instead.
+    # NEMO's stored dry-cell result is +0; make that signed-zero consequence
+    # of the compiled mask explicit without changing any wet value.
+    rhs_after = jnp.where(tmask > 0.5, rhs_after, jnp.zeros_like(rhs_after))
     return (first_u, first_v, first_w, first_div, midpoint,
             average_u, average_v, average_w, final_div, rhs_after)
 

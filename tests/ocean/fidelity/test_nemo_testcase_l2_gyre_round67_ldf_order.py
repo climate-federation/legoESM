@@ -221,6 +221,7 @@ def _round112_synthetic_values(module):
 def test_round112_literal_plant_reaches_first_face_under_jit():
     module = _module()
     values = _round112_synthetic_values(module)
+    values["tmask"] = values["tmask"].at[0, 0, 0].set(0.0)
     base = module.jnp.ones((22, 32, 30), dtype=module.jnp.float64)
 
     run = module.jax.jit(
@@ -236,6 +237,7 @@ def test_round112_literal_plant_reaches_first_face_under_jit():
     assert np.count_nonzero(
         np.asarray(planted[0]) != np.asarray(ordinary[0])) == 1
     assert np.asarray(planted[0])[0, 1, 0] != np.asarray(ordinary[0])[0, 1, 0]
+    assert np.asarray(ordinary[-1])[0, 0, 0].view(np.uint64) == 0
 
 
 def test_round112_duplicate_callback_guard_rejects_distinct_execution():
