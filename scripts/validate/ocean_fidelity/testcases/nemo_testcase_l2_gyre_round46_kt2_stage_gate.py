@@ -3140,6 +3140,9 @@ def _tke_program_twin(
     execution_label = (
         "production step JIT" if execution_mode == "production-jit"
         else "production closure eager")
+    requested_rhs_materialization = rhs_materialization
+    hook_rhs_materialization = (
+        "" if rhs_materialization == "baseline" else rhs_materialization)
 
     def production_step(model, step_state, dt, freshwater, surface_forcing):
         if execution_mode == "production-jit":
@@ -3209,7 +3212,8 @@ def _tke_program_twin(
 
     freshwater, surface = _surface_forcings(card, state, 2)
     hooks = _NEMOWSRK3TestHooks(
-        expose_live_stage_operands=True, tke_rhs_materialization=rhs_materialization,
+        expose_live_stage_operands=True,
+        tke_rhs_materialization=hook_rhs_materialization,
         barotropic_raw_history_override=raw_history,
         stage_barotropic_output_override=_barotropic_override(
             records, advmean_root, 2),
@@ -3217,6 +3221,26 @@ def _tke_program_twin(
     model = LatLonCGridOceanModel(
         card.recipe.grid, card.recipe.z_coord, cfg,
         _nemo_ws_test_hooks=hooks)
+    recorded_taum = jnp.asarray(
+        np.asarray(tke_arrays["taum_entry"]).swapaxes(0, 1))
+    recorded_surface = surface._replace(taum=recorded_taum)
+    if requested_rhs_materialization:
+        given_trace = jax.device_get(production_step(
+            model, state, card.dt_s, freshwater, recorded_surface))
+        given = _tke_production_statement_rows(
+            given_trace, tke_statement_record, "NEMO_TKE_RECORDED", plant)
+        given_matrix = _tke_matrix_statement_rows(
+            given_trace, tke_operand_record, tke_statement_record,
+            "NEMO_TKE_RECORDED", plant)
+        return {
+            "format": "nemo-testcase-l2-gyre-tke-rhs-production-walk-v1",
+            "execution": execution_label,
+            "rhs_materialization": requested_rhs_materialization,
+            "input_bridge": input_bridge,
+            "given_nemo_entry": given,
+            "given_nemo_entry_matrix_walk": given_matrix,
+            "chained": None,
+        }
     model_forcing_trace = jax.device_get(production_step(
         model, state, card.dt_s, freshwater, surface))
     model_forcing = _tke_production_statement_rows(
@@ -3227,9 +3251,6 @@ def _tke_program_twin(
         model_forcing_trace, tke_statement_record, tke_operand_record,
         "NEMO_CLOSURE_MEMORY_MODEL_TAUM", rho0)
 
-    recorded_taum = jnp.asarray(
-        np.asarray(tke_arrays["taum_entry"]).swapaxes(0, 1))
-    recorded_surface = surface._replace(taum=recorded_taum)
     given_trace = jax.device_get(production_step(
         model, state, card.dt_s, freshwater, recorded_surface))
     given = _tke_production_statement_rows(
