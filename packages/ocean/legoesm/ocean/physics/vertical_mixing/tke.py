@@ -1651,8 +1651,8 @@ def _solve_tke_backward_euler(
             rhs_base = rhs_base + dt * external_source
         if rhs_materialization:
             rhs = _nemo_literal_rhs_materialized(
-                rhs_base, dt, P_s, K_H_old, N2, diss_rate, w_active,
-                rhs_materialization)
+                rhs_base, dt, P_s, K_H_old, N2, diss_rate, dissl_old,
+                cfg.c_eps, w_active, rhs_materialization)
         else:
             rhs = rhs_base + dt * (
                 P_s + buoy_source + 0.5 * diss_rate * rhs_base
@@ -3946,7 +3946,7 @@ __all__ = (
 
 
 def _nemo_literal_rhs_materialized(
-    en, dt, p_sh2, p_avt, rn2, diss_rate, wmask, mode: str,
+    en, dt, p_sh2, p_avt, rn2, diss_rate, dissl, rn_ediss, wmask, mode: str,
 ):
     """Private full-step discriminator for compiled ``zdftke`` RHS order.
 
@@ -3962,7 +3962,8 @@ def _nemo_literal_rhs_materialized(
     valid = {
         "p_avt_rn2", "zfact3_dissl", "dissipation_product",
         "after_stratification", "parenthesized_sum", "dt_product",
-        "masked_increment", "all",
+        "masked_increment", "all", "nemo_dissipation_tree",
+        "nemo_dissipation_tree_materialized",
     }
     if mode not in valid:
         raise ValueError(
@@ -3971,6 +3972,23 @@ def _nemo_literal_rhs_materialized(
 
     def boundary(name, value):
         return nemo_source_round(value) if mode in (name, "all") else value
+
+    if mode in (
+        "nemo_dissipation_tree", "nemo_dissipation_tree_materialized",
+    ):
+        materialize = mode == "nemo_dissipation_tree_materialized"
+        zfact3 = 0.5 * jnp.asarray(rn_ediss, dtype=en.dtype)
+        if materialize:
+            zfact3 = nemo_source_round(zfact3)
+        zfact3_dissl = zfact3 * jnp.asarray(dissl, dtype=en.dtype)
+        if materialize:
+            zfact3_dissl = nemo_source_round(zfact3_dissl)
+        dissipation = zfact3_dissl * en
+        if materialize:
+            dissipation = nemo_source_round(dissipation)
+        return en + dt * (
+            p_sh2 - p_avt * rn2 + dissipation
+        ) * jnp.asarray(wmask, dtype=en.dtype)
 
     p_avt_rn2 = boundary("p_avt_rn2", p_avt * rn2)
     zfact3_dissl = boundary("zfact3_dissl", 0.5 * diss_rate)
