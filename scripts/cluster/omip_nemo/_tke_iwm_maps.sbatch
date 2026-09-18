@@ -19,6 +19,7 @@ $PY -u scripts/validate/ocean_fidelity/compare_tendencies_nemo.py \
   --vfile "$TRD/ORCA1_1h_20010101_20010101_trd1h_V.nc" \
   --rec 1 --restart-npz "$OUT/nemo_restart_8760.npz" \
   --iwm-forcing "$IWM" --iwm-backgrounds \
+  --ice-restart-npz "$OUT/nemo_ice_restart_8760.npz" \
   --output-dir "$OUT/maps_iwmbg" 2>&1 | tail -12
 echo "rc=${PIPESTATUS[0]}"
 ls -la "$OUT/maps_iwmbg"/*.png 2>/dev/null | head -20
