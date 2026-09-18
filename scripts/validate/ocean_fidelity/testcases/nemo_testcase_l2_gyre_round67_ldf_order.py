@@ -19,6 +19,8 @@ if str(HERE) not in sys.path:
 import nemo_testcase_l2_gyre_phase3_gate as gate
 import nemo_testcase_l2_gyre_round54_tracer_decomposition as round54
 import nemo_testcase_l2_gyre_round66_content_operands as round66
+from legoesm.core.source_rounding import nemo_source_round
+from legoesm.ocean import advection as advection_module
 from legoesm.ocean.dynamics import ocean_model_latlon_cgrid as model_module
 
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3")
@@ -170,8 +172,9 @@ def _replace_kmm_resume(resume, override):
 
 
 def measure(args) -> dict:
-    require(sum((args.round69_native, args.round70_pair, args.round71_kmm)) <= 1,
-            "round-69, round-70, and round-71 modes are mutually exclusive")
+    require(sum((args.round69_native, args.round70_pair, args.round71_kmm,
+                 args.round111_fct_split)) <= 1,
+            "round-69, round-70, round-71, and round-111 modes are exclusive")
     require(not (args.plant_pair_null_fct and args.plant_pair_content_ulp),
             "round-70 plants are mutually exclusive")
     require(args.round70_pair or not (
@@ -182,19 +185,24 @@ def measure(args) -> dict:
     require(args.round71_kmm or not (
         args.plant_kmm_null or args.plant_kmm_content_ulp),
         "round-71 plants require --round71-kmm")
+    require(args.round111_fct_split or not args.plant_fct_split_ulp,
+            "the FCT split plant requires --round111-fct-split")
     reciprocal_calls: list[dict] = []
     pair_sources: list[tuple[np.ndarray, ...]] = []
     pair_kmm: list[tuple[np.ndarray, np.ndarray]] = []
     qsr_calls: list[np.ndarray] = []
     ldf_calls: list[tuple[np.ndarray, np.ndarray]] = []
     step_calls: list[tuple] = []
+    fct_split_calls: list[tuple[np.ndarray, ...]] = []
 
     real_reciprocal = round66.reciprocal_substitutions
     real_pair = model_module._nemo_ws_rk3_tracer_pair_step
     real_qsr = model_module._nemo_qsr_stage3_rate
     real_ldf = model_module.gm_redi_tracer_tendency_latlon
     real_step = model_module.LatLonCGridOceanModel.step
+    real_fct = advection_module.fct_tracer_advection
     active_kmm_override: tuple[object | None, object | None] | None = None
+    capture_fct_split = False
 
     def reciprocal_capture(live, oracle, oracle_content, wet):
         reciprocal_calls.append({
@@ -216,6 +224,7 @@ def measure(args) -> dict:
                 advection_content_t, advection_content_s)))
 
     def pair_capture(*values, **kwargs):
+        nonlocal capture_fct_split
         call_kwargs = kwargs
         if kwargs.get("return_final_content", False):
             resume = _replace_kmm_resume(
@@ -229,7 +238,14 @@ def measure(args) -> dict:
                     np.asarray(t, dtype=np.float64),
                     np.asarray(s, dtype=np.float64))),
                 resume_t, resume_s, ordered=True)
-        result = real_pair(*values, **call_kwargs)
+        prior_capture = capture_fct_split
+        capture_fct_split = bool(
+            args.round111_fct_split
+            and kwargs.get("return_final_content", False))
+        try:
+            result = real_pair(*values, **call_kwargs)
+        finally:
+            capture_fct_split = prior_capture
         if kwargs.get("return_final_content", False):
             source_t, source_s = kwargs["stage_source_rates"][2]
             jax.debug.callback(
@@ -237,6 +253,49 @@ def measure(args) -> dict:
                 result[2], result[3], result[4], result[5],
                 ordered=True)
         return result
+
+    def fct_split_sink(*values):
+        fct_split_calls.append(tuple(
+            np.asarray(value, dtype=np.float64) for value in values))
+
+    def fct_capture(*values, **kwargs):
+        if not capture_fct_split:
+            return real_fct(*values, **kwargs)
+        result = real_fct(*values, return_nemo_split=True, **kwargs)
+        div_h, div_w, split = result
+        low_h, low_w, anti_h, anti_w = split
+        h_kmm = values[4]
+        h_safe = jnp.maximum(h_kmm, jnp.asarray(1.0e-10, h_kmm.dtype))
+        low_div = nemo_source_round(low_h + low_w)
+        anti_div = nemo_source_round(anti_h + anti_w)
+        upstream_rhs = nemo_source_round(-low_div / h_safe)
+        anti_rhs = nemo_source_round(-anti_div / h_safe)
+        if args.plant_fct_split_ulp:
+            active = kwargs.get("active_mask")
+            require(active is not None,
+                    "the production FCT split plant requires an active mask")
+            at = jnp.argmax(jnp.ravel(active > 0.5))
+            flat = jnp.ravel(upstream_rhs)
+            upstream_rhs = flat.at[at].set(jnp.nextafter(
+                flat[at], jnp.asarray(jnp.inf, flat.dtype))).reshape(
+                    upstream_rhs.shape)
+        split_rhs = nemo_source_round(upstream_rhs + anti_rhs)
+        combined_rhs = nemo_source_round(
+            -nemo_source_round(div_h + div_w) / h_safe)
+        base = kwargs.get("tracer_before")
+        if base is None:
+            base = values[0]
+        h_kbb = kwargs.get("base_thickness")
+        if h_kbb is None:
+            h_kbb = h_kmm
+        dt = jnp.asarray(values[6], dtype=h_kmm.dtype)
+        split_content = nemo_source_round(
+            nemo_source_round(h_kbb * base)
+            + nemo_source_round(nemo_source_round(dt * h_kmm) * split_rhs))
+        jax.debug.callback(
+            fct_split_sink, upstream_rhs, anti_rhs, split_rhs, combined_rhs,
+            split_content, low_div, anti_div, ordered=True)
+        return div_h, div_w
 
     def qsr_sink(value):
         qsr_calls.append(np.asarray(value, dtype=np.float64))
@@ -265,6 +324,7 @@ def measure(args) -> dict:
 
     round66.reciprocal_substitutions = reciprocal_capture
     model_module._nemo_ws_rk3_tracer_pair_step = pair_capture
+    advection_module.fct_tracer_advection = fct_capture
     model_module._nemo_qsr_stage3_rate = qsr_capture
     model_module.gm_redi_tracer_tendency_latlon = ldf_capture
     model_module.LatLonCGridOceanModel.step = step_capture
@@ -273,6 +333,7 @@ def measure(args) -> dict:
     finally:
         round66.reciprocal_substitutions = real_reciprocal
         model_module._nemo_ws_rk3_tracer_pair_step = real_pair
+        advection_module.fct_tracer_advection = real_fct
         model_module._nemo_qsr_stage3_rate = real_qsr
         model_module.gm_redi_tracer_tendency_latlon = real_ldf
         model_module.LatLonCGridOceanModel.step = real_step
@@ -366,6 +427,105 @@ def measure(args) -> dict:
         production_vs_round67_routed[name] = round54.field_stats(
             production_prediction, routed_content[name], capture["wet"])
         results[name] = result
+
+    round111_matrix = {}
+    if args.round111_fct_split:
+        require(len(fct_split_calls) >= 2,
+                "production FCT split callbacks did not execute for T/S")
+        selected_splits = fct_split_calls[-2:]
+        split_rows = {}
+        split_observations = {}
+        for name, capture, values in zip(
+            TRACERS, reciprocal_calls, selected_splits, strict=True
+        ):
+            (upstream_rhs, anti_rhs, split_rhs, combined_rhs,
+             split_content, low_div, anti_div) = values
+            oracle_upstream = round66.transposed(arrays[f"adv_up1_{name}"])
+            oracle_final = round66.transposed(arrays[f"after_adv_{name}"])
+            wet = capture["wet"]
+            first_wet = tuple(np.argwhere(wet)[0])
+            split_rows[name] = {
+                "upstream_rhs_vs_adv_up1": round54.field_stats(
+                    upstream_rhs, oracle_upstream, wet),
+                "split_rhs_vs_after_adv": round54.field_stats(
+                    split_rhs, oracle_final, wet),
+                "combined_rhs_vs_after_adv": round54.field_stats(
+                    combined_rhs, oracle_final, wet),
+                "split_vs_combined": round54.field_stats(
+                    split_rhs, combined_rhs, wet),
+                "split_advection_content_vs_oracle": round54.field_stats(
+                    split_content, oracle_advection_content[name], wet),
+                "anti_rhs_vs_posthoc_boundary_difference": round54.field_stats(
+                    anti_rhs, oracle_final - oracle_upstream, wet),
+                "low_content_divergence": round54.field_stats(
+                    low_div, np.zeros_like(low_div), wet),
+                "anti_content_divergence": round54.field_stats(
+                    anti_div, np.zeros_like(anti_div), wet),
+            }
+            split_observations[name] = {
+                "first_wet_index": list(first_wet),
+                "upstream_rhs_bits": int(np.asarray(
+                    upstream_rhs[first_wet], dtype="=f8").view("=u8")),
+                "split_rhs_bits": int(np.asarray(
+                    split_rhs[first_wet], dtype="=f8").view("=u8")),
+            }
+        local_frozen = {
+            "T": {"content": np.float64(5.743498263655056e-5),
+                  "kt3": np.float64(8.600420500215478e-7)},
+            "S": {"content": np.float64(7.387909136014059e-6),
+                  "kt3": np.float64(6.979443156751586e-8)},
+        }
+        split_criteria = {
+            "callbacks_observed": len(fct_split_calls) >= 2,
+            "upstream_predicted_nonbit": {
+                name: split_rows[name]["upstream_rhs_vs_adv_up1"][
+                    "cells_unequal"] > 0
+                for name in TRACERS
+            },
+            "final_predicted_nonbit": {
+                name: split_rows[name]["combined_rhs_vs_after_adv"][
+                    "cells_unequal"] > 0
+                for name in TRACERS
+            },
+            "frozen_content_max": {
+                name: implementation_oracle_content[name]["max_abs"]
+                == local_frozen[name]["content"]
+                for name in TRACERS
+            },
+        }
+        candidate_eligible = bool(all(
+            split_rows[name][boundary]["cells_unequal"] == 0
+            for name in TRACERS
+            for boundary in (
+                "upstream_rhs_vs_adv_up1", "split_rhs_vs_after_adv")
+        ))
+        plant_fired = False
+        if args.plant_fct_split_ulp:
+            frozen = json.loads(args.fct_split_report.read_text())[
+                "round111_fct_split"]
+            plant_fired = bool(any(
+                split_observations[name]["upstream_rhs_bits"]
+                != frozen["observations"][name]["upstream_rhs_bits"]
+                for name in TRACERS
+            ))
+            require(plant_fired,
+                    "one-ULP production FCT split plant was not observed")
+        round111_matrix = {
+            "status": (
+                "PLANT-FIRED" if plant_fired else
+                "CONFIRMED" if all(
+                    all(value.values()) if isinstance(value, dict) else value
+                    for value in split_criteria.values())
+                else "REFUTED"),
+            "plant_ulp": bool(args.plant_fct_split_ulp),
+            "candidate_eligible": candidate_eligible,
+            "rows": split_rows,
+            "observations": split_observations,
+            "criteria": split_criteria,
+            "caveat": (
+                "The anti-boundary subtraction is post-hoc and is not an "
+                "input proof; eligibility uses only directly recorded rows."),
+        }
 
     content_criterion = {name: True for name in TRACERS}
     if args.expect_model_order == "after":
@@ -892,6 +1052,26 @@ def measure(args) -> dict:
                 and np.all(np.isfinite(np.asarray(native_fields[name])))),
         }
 
+    if args.round111_fct_split:
+        round111_matrix["local_rows"] = {
+            name: {
+                "content_vs_oracle": implementation_oracle_content[name],
+                "kt3_vs_oracle": kt3[name]["baseline"],
+            }
+            for name in TRACERS
+        }
+        round111_matrix["criteria"]["frozen_kt3_max"] = {
+            name: kt3[name]["baseline"]["max_abs"]
+            == local_frozen[name]["kt3"]
+            for name in TRACERS
+        }
+        if not args.plant_fct_split_ulp:
+            round111_matrix["status"] = (
+                "CONFIRMED" if all(
+                    all(value.values()) if isinstance(value, dict) else value
+                    for value in round111_matrix["criteria"].values())
+                else "REFUTED")
+
     prediction_match = {name: True for name in TRACERS}
     override_match = {name: True for name in TRACERS}
     if args.expect_model_order == "after":
@@ -1041,9 +1221,13 @@ def measure(args) -> dict:
         status = pair_matrix["status"]
     if args.round71_kmm:
         status = kmm_matrix["status"]
+    if args.round111_fct_split:
+        status = round111_matrix["status"]
 
     return {
         "format": (
+            "nemo-testcase-l2-gyre-round111-fct-split-v1"
+            if args.round111_fct_split else
             "nemo-testcase-l2-gyre-round71-fct-kmm-v1"
             if args.round71_kmm else
             "nemo-testcase-l2-gyre-round70-fct-ldf-pair-v1"
@@ -1078,6 +1262,7 @@ def measure(args) -> dict:
         },
         "round70_pair_matrix": pair_matrix,
         "round71_kmm_matrix": kmm_matrix,
+        "round111_fct_split": round111_matrix,
         "criteria": {
             "content_within_floor_plus_association": content_criterion,
             "kt3_exact_pre_edit_prediction": prediction_match,
@@ -1107,6 +1292,11 @@ def main(argv=None) -> int:
     parser.add_argument("--round71-kmm", action="store_true")
     parser.add_argument("--plant-kmm-null", action="store_true")
     parser.add_argument("--plant-kmm-content-ulp", action="store_true")
+    parser.add_argument("--round111-fct-split", action="store_true")
+    parser.add_argument("--plant-fct-split-ulp", action="store_true")
+    parser.add_argument(
+        "--fct-split-report", type=Path,
+        default=ROOT / "round111/fct_split_jit.json")
     parser.add_argument(
         "--prediction-report", type=Path,
         default=ROOT / "round67/round67_ldf_order_before.json")
@@ -1139,7 +1329,16 @@ def main(argv=None) -> int:
     except Exception as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
-    if args.round71_kmm:
+    if args.round111_fct_split:
+        row = report["round111_fct_split"]["rows"]["T"]
+        prefix = (
+            "STATUS PLANT-FIRED" if report["status"] == "PLANT-FIRED"
+            else f"ROUND111 FCT SPLIT {report['status']}")
+        print(
+            f"{prefix}: "
+            f"upstream={row['upstream_rhs_vs_adv_up1']['max_abs']:.12e} "
+            f"final={row['split_rhs_vs_after_adv']['max_abs']:.12e}")
+    elif args.round71_kmm:
         row = report["round71_kmm_matrix"]["rows"]["T"]
         ldf_max = report["round70_pair_matrix"]["rows"]["T"][
             "ldf_only"]["kt3_vs_oracle"]["max_abs"]

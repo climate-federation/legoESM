@@ -80,6 +80,25 @@ class TestConservation:
         # divergence_cgrid summation across (n_lat * n_lon * nlev) cells.
         assert float(jnp.abs(area_weighted)) < 1e-9
 
+    def test_optional_nemo_split_preserves_production_outputs(
+        self, grid_small, smooth_state,
+    ):
+        """The write-only low/anti census cannot perturb the applied flux."""
+        tracer, mu, mv, w_half, h_k, dt = smooth_state
+
+        def run(expose):
+            return fct_tracer_advection(
+                tracer, mu, mv, w_half, h_k, grid_small, dt,
+                high_order="centred2", return_nemo_split=expose)
+
+        ordinary = jax.jit(lambda: run(False))()
+        exposed = jax.jit(lambda: run(True))()
+        for got, want in zip(exposed[:2], ordinary, strict=True):
+            np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+        assert len(exposed[2]) == 4
+        assert all(value.shape == tracer.shape for value in exposed[2])
+        assert all(bool(jnp.all(jnp.isfinite(value))) for value in exposed[2])
+
 
 # ---------------------------------------------------------------------------
 # Monotonicity (no new extrema)

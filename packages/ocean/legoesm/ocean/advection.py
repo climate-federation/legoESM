@@ -840,8 +840,8 @@ def fct_tracer_advection(
     low_order_predictor: str = "one_step",
     base_thickness: jnp.ndarray | None = None,
     after_thickness: jnp.ndarray | None = None,
-    implicit_w: jnp.ndarray | None = None,
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+    implicit_w: jnp.ndarray | None = None, return_nemo_split: bool = False,
+) -> tuple:
     """FCT tracer advection: high-order accuracy with guaranteed monotonicity.
 
     Combines first-order upwind (inherently stable) with a high-order flux
@@ -1147,16 +1147,16 @@ def fct_tracer_advection(
         ad_flux_u, ad_flux_v, ad_vert_int,
         q_td, q_min, q_max, h_new, dt, grid, eps,
     )
-
-    # --- Step 4: limited face fluxes (conservative by construction) ---
-    flux_u_fct = flux_u_low + alpha_u_full * ad_flux_u
-    flux_v_fct = flux_v_low + alpha_v * ad_flux_v
-    div_h_fct = divergence_cgrid(flux_u_fct, flux_v_fct, grid)
-
-    F_vert_fct_int = F_vert_low_int + alpha_vert_face * ad_vert_int
-    F_vert_fct = jnp.pad(F_vert_fct_int, (*pad_axes_v, (1, 1)))
+    limited_u, limited_v = alpha_u_full * ad_flux_u, alpha_v * ad_flux_v
+    div_h_fct = divergence_cgrid(flux_u_low + limited_u, flux_v_low + limited_v, grid)
+    div_h_anti = divergence_cgrid(limited_u, limited_v, grid)
+    limited_w = alpha_vert_face * ad_vert_int
+    F_vert_fct = jnp.pad(F_vert_low_int + limited_w, (*pad_axes_v, (1, 1)))
     vert_div_fct = F_vert_fct[..., :-1] - F_vert_fct[..., 1:]
-
+    anti_full = jnp.pad(limited_w, (*pad_axes_v, (1, 1)))
+    if return_nemo_split:
+        return div_h_fct, vert_div_fct, (div_h_low, vert_div_low, div_h_anti,
+            anti_full[..., :-1] - anti_full[..., 1:])
     return div_h_fct, vert_div_fct
 
 
