@@ -2106,3 +2106,77 @@ def reconstruct_cell_velocity(u_edge, mesh):
         v_north = jnp.sum(contrib * sin_a, axis=0)
 
     return u_east, v_north
+
+
+def reconstruct_cell_velocity_wet(u_edge, mesh, wet_edge):
+    """Perot reconstruction restricted to a SUBSET of each cell's edges.
+
+    :func:`reconstruct_cell_velocity` sums ``w_e (n_e · u) n_e`` over every
+    edge of the cell, which reproduces ``u`` only because
+    ``Σ_e w_e n_e n_eᵀ`` is (close to) the identity when ALL edges are
+    present.  Simply zeroing the contribution of a land or sub-seafloor edge
+    therefore does NOT give the reconstruction restricted to the wet edges —
+    it gives a systematically SHORT vector, because the removed edge's
+    contribution to that tensor is never accounted for.  On a hexagon losing
+    one of six edges the underestimate reaches ~1/3 in the direction of the
+    missing normal, biasing any consumer of ``|u|`` low exactly at coastlines
+    and over topography, where slopes are steepest.
+
+    This solves the 2x2 system instead::
+
+        M_c x = b_c ,   M_c = Σ_wet w_e n_e n_eᵀ ,  b_c = Σ_wet w_e (n_e·u) n_e
+
+    which is exact for a field that is uniform over the wet polygon, for any
+    subset of edges.  A cell whose wet edges span fewer than two independent
+    directions has a singular ``M_c``; those cells fall back to zero rather
+    than amplifying noise through a near-singular inverse.
+
+    Parameters
+    ----------
+    u_edge : array ``(nEdges,)`` or ``(nEdges, nlev)``
+        Edge-normal component.
+    mesh : VoronoiMesh
+    wet_edge : array broadcastable to ``u_edge``
+        1 where the edge participates, 0 where it does not.
+
+    Returns
+    -------
+    u_east, v_north : same shape as ``u_edge``.
+    """
+    is_3d = u_edge.ndim == 2
+
+    eoc = mesh.edgesOnCell
+    valid = (eoc >= 0).astype(u_edge.dtype)
+    eoc_safe = jnp.maximum(eoc, 0)
+
+    dv = mesh.dvEdge[eoc_safe] * valid
+    dc = mesh.dcEdge[eoc_safe] * valid
+    angle = mesh.angleEdge[eoc_safe]
+    weight = dv * dc / (2.0 * mesh.areaCell[jnp.newaxis, :])
+    cos_a = jnp.cos(angle)
+    sin_a = jnp.sin(angle)
+
+    wet_g = jnp.asarray(wet_edge)[eoc_safe]
+    u_g = u_edge[eoc_safe]
+    if is_3d:
+        w = weight[..., jnp.newaxis] * wet_g
+        cos_a = cos_a[..., jnp.newaxis]
+        sin_a = sin_a[..., jnp.newaxis]
+    else:
+        w = weight * wet_g
+
+    wu = w * u_g
+    b_x = jnp.sum(wu * cos_a, axis=0)
+    b_y = jnp.sum(wu * sin_a, axis=0)
+    m_xx = jnp.sum(w * cos_a * cos_a, axis=0)
+    m_xy = jnp.sum(w * cos_a * sin_a, axis=0)
+    m_yy = jnp.sum(w * sin_a * sin_a, axis=0)
+
+    det = m_xx * m_yy - m_xy * m_xy
+    # The full-polygon tensor has determinant ~1 (trace 2, near-isotropic), so
+    # this threshold rejects only genuinely rank-deficient wet sets.
+    ok = det > 1.0e-6
+    det_safe = jnp.where(ok, det, 1.0)
+    u_east = jnp.where(ok, (m_yy * b_x - m_xy * b_y) / det_safe, 0.0)
+    v_north = jnp.where(ok, (m_xx * b_y - m_xy * b_x) / det_safe, 0.0)
+    return u_east, v_north
