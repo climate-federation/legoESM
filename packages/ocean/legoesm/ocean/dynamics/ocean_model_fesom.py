@@ -906,6 +906,51 @@ def build_node_neighbor_table(edges: np.ndarray, n_nodes: int
     return tbl, deg.astype(np.int32)
 
 
+def with_surface_salinity(
+    state: "FesomOceanState",
+    mesh: "Mesh",
+    S_top: jnp.ndarray,
+) -> "FesomOceanState":
+    """Replace the SURFACE salinity layer WITHOUT touching the old time level.
+
+    This exists because :func:`with_fields` cannot be used per step.  That
+    function is an analytic-IC setter and writes ``S_old = S`` (see its ``S``
+    branch), collapsing the two tracer time levels.  For an initial condition
+    that is exactly right; applied every step it would silently rewrite the
+    scheme's history each time, which changes the time integration rather than
+    the salinity.  The defect would not raise and the run would look plausible.
+
+    So this writes ``inner.S`` alone -- the surface level and nothing else --
+    and leaves ``S_old``, ``T``, ``uv`` and the free surface untouched.  The
+    bottom pad slot is deliberately NOT touched: ``with_fields`` fills it as
+    ``a[:, -1:]``, the deepest supplied level, which is never level 0, so a
+    surface write cannot reach it.  ``uv_node`` is
+    carried unchanged because salinity does not move the velocity; that is the
+    one case where carrying it is correct rather than the stale-carry bug
+    ``with_inner`` was removed for.
+
+    Parameters
+    ----------
+    state : FesomOceanState
+    mesh : fesom_jax Mesh -- only used to validate the node count.
+    S_top : array ``(nod2D,)`` -- the new surface salinity [PSU].
+    """
+    require_fesom_jax()
+
+    n_node = int(mesh.nod2D)
+    top = jnp.asarray(S_top, dtype=jnp.float64)
+    if top.shape != (n_node,):
+        raise ValueError(
+            f"with_surface_salinity: S_top shape {top.shape} != ({n_node},). "
+            "Pass the surface layer only; a transposed or full-column array "
+            "is the failure mode this guards.")
+
+    inner = state.inner
+    new_S = jnp.asarray(inner.S).at[:, 0].set(top)
+    new_inner = dataclasses.replace(inner, S=new_S)
+    return dataclasses.replace(state, inner=new_inner)
+
+
 def with_fields(
     state: "FesomOceanState",
     mesh: "Mesh",
