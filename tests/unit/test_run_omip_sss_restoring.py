@@ -143,7 +143,11 @@ def test_phc2_target_goes_through_the_host_regrid(tmp_path, monkeypatch):
     assert len(recorded) == 1 and recorded[0].shape == (12, 4, 8)
     assert not np.isnan(recorded[0]).any()
     assert out.shape == (12, 4, 8)
+    # the PHC2 wrapper delegates to the shared monthly-climatology loader; pin
+    # the symbol that executes the regrid
     src = inspect.getsource(run_omip._load_phc2_monthly_sss_target)
+    assert "_load_monthly_clim_target(" in src
+    src = inspect.getsource(run_omip._load_monthly_clim_target)
     assert "_regrid_records_host(" in src and "regrid_scalar(" not in src
 
 

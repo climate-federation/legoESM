@@ -4075,6 +4075,35 @@ def test_bechtold_enable_cmt_round_trips_and_default_preserves_each_lane():
     assert convection_config_for(dflt._replace(grid=dflt.grid._replace(grid_type="gaussian"))).bechtold.enable_cmt is True
 
 
+def test_persistent_dgrid_flag_flows_to_config_1028():
+    """--persistent-dgrid reaches DycoreConfig, and OFF is the default.
+
+    #1028: carrying the cube's winds in FV3 D staggering between steps (rather
+    than projecting to the corners and back every step) moved a 200-day C36
+    Held-Suarez jet from 13.0 to 38.6 m/s.  The knob is only useful if a run
+    script can select it, and only safe if the default leaves every existing
+    run byte-identical -- both are asserted here.
+    """
+    parser = build_arg_parser()
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical",
+    ]), parser))
+    assert off.dycore.persistent_dgrid is False
+
+    on = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--persistent-dgrid",
+    ]), parser))
+    assert on.dycore.persistent_dgrid is True
+
+    # A YAML that turns it on can still be overridden back off from the CLI.
+    parser2 = build_arg_parser()
+    parser2.set_defaults(persistent_dgrid=True)
+    back_off = build_config_from_args(_postprocess_args(parser2.parse_args([
+        "--dataset", "analytical", "--no-persistent-dgrid",
+    ]), parser2))
+    assert back_off.dycore.persistent_dgrid is False
+
+
 def test_clubb_trop_cloud_top_press_reaches_the_turbulence_kernel():
     """The CLUBB upper domain limit (CAM trop_cloud_top_press) was a scheme
     field no run could set; the flag threads it through the same single source

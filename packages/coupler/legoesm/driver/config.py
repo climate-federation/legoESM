@@ -83,6 +83,11 @@ class GridConfig(NamedTuple):
     # tropopause_refine = 1.0.
     sigma_refine: float = 0.12
     sigma_refine_width: float = 0.45
+    # Sigma-lane level layout (grids.vertical.SIGMA_LAYOUTS): "standard" =
+    # uniform/tropopause-refined; "l30_trop_logstrat" = the L30 troposphere
+    # kept bit-identical below sigma 0.109 plus nlev-27 log-spaced
+    # stratospheric layers up to sigma_top (the raised-lid experiment).
+    sigma_layout: str = "standard"
     use_duogrid: bool = False        # enable FV3 Duo-Grid halo (required for MPI multi-node)
 
 
@@ -180,6 +185,24 @@ class DycoreConfig(NamedTuple):
     sponge_width_m: float = 10000.0       # sponge-layer depth below the top [m]
     sponge_shape: str = "sin2"            # "sin2" | "sam_rational"
     sponge_scale_height_m: float = 7500.0  # log-pressure scale height for sigma->z
+
+    # #1028: keep the cubed-sphere hydrostatic prognostic winds in FV3 D
+    # staggering BETWEEN steps instead of interpolating cell-centre -> D-grid
+    # corners on entry and back on exit EVERY step.  That outer round trip is
+    # a measured eddy damper, not a bookkeeping detail: a paired same-commit
+    # 200-day C36 Held-Suarez run (PR #1462) moved the equilibrated max wind
+    # 13.0 -> 38.6 m/s (sigma) and 12.6 -> 40.9 (hybrid) with this as the only
+    # change, i.e. from FAILING the #1049 dead-jet floor to clearing the
+    # ~30 m/s benchmark.  The dycore has always accepted either staggering
+    # (``CDGridPrimitiveEquationModel.step`` dispatches on the state type);
+    # what was missing was a production driver that carries the D state.
+    #
+    # Cubed-sphere hydrostatic ONLY.  Every other lane (lat-lon, MPAS,
+    # spectral, shallow water, non-hydrostatic) and the lanes this does not
+    # cover yet (tiled / sub-face SPMD, ensembles) REFUSE it loudly rather
+    # than silently running the damped path.  Default False keeps every
+    # existing run byte-identical.
+    persistent_dgrid: bool = False
 
 
     # Task #25: time integrator override.  Lat-lon C-grid uses
@@ -285,6 +308,10 @@ class DycoreConfig(NamedTuple):
     # Appended at the tuple END: preserves POSITIONAL CONSTRUCTION by existing
     # callers, not full tuple ABI (exact unpacking / len() still break).
     mpas_vert_advection_scheme: str = "upwind"
+    # MPAS lane, CAM-style top diffusion sponge: del2 viscosity x factor**((n-k)/n)
+    # in the top n layers (raised-lid experiment); 0 / 1.0 = off.
+    mpas_sponge_del2_top_layers: int = 0
+    mpas_sponge_del2_top_factor: float = 1.0
 
 
 class EvaluationConfig(NamedTuple):
@@ -430,7 +457,13 @@ def parse_gwd_spec(value: str) -> str:
                 f"them (e.g. 'hines+mcfarlane')"
             )
     try:
-        ExperimentConfig(gravity_wave_drag=value).validate_strict()
+        # The e3sm_cam-in-composite rule depends on --e3sm-cam-source, parsed
+        # separately; probe with the one source that composes so the real
+        # gate fires at build time with the actual value, not here.
+        _parts = value.split("+")
+        _probe = ({"e3sm_cam_source": "background", "e3sm_cam_pgwv": 1}
+                  if "e3sm_cam" in _parts and len(_parts) > 1 else {})
+        ExperimentConfig(gravity_wave_drag=value, **_probe).validate_strict()
     except ValueError as exc:
         # Report ONLY a genuine gravity_wave_drag complaint. validate_strict
         # reports every error for the whole config, so falling back to the full
@@ -1560,6 +1593,15 @@ class ExperimentConfig(NamedTuple):
     # in the weakly stratified BL and breaks at its own launch level
     # (measured: 55% of its momentum deposited below 1 km).
     hines_launch_p: float = 0.0
+    e3sm_cam_source: str = "orographic"         # E3SMCAMConfig.source
+    e3sm_cam_pgwv: int = 0                      # phase-speed half-width (waves either side of c0)
+    e3sm_cam_effgw: float = 0.125               # E3SMCAMConfig.effgw [dimensionless]
+    e3sm_cam_taubgnd: float = 1.5e-3            # E3SMFrontalConfig.taubgnd [Pa]
+    e3sm_cam_c0: float = 30.0                   # E3SMFrontalConfig.c0 [m/s]
+    e3sm_cam_launch_p: float = 5.0e4            # E3SMFrontalConfig.launch_p [Pa]
+    e3sm_cam_latitude_taper: bool = False       # E3SMFrontalConfig.latitude_taper:
+                                                # OFF, E3SM's unstructured branch
+                                                # (our grids); see that field's docs
     # Appended at the tuple END to preserve the positional ABI (codex
     # 2026-07-27 flavor review, Major 1).
     morrison_flavor: str = "mg"                 # MorrisonConfig.morrison_flavor:
@@ -1664,6 +1706,22 @@ class ExperimentConfig(NamedTuple):
             if not (g.sigma_refine_width > 0.0 and math.isfinite(g.sigma_refine_width)):
                 errors.append(
                     f"grid.sigma_refine_width must be > 0 (got {g.sigma_refine_width})")
+            if g.sigma_layout not in ("standard", "l30_trop_logstrat"):
+                errors.append(
+                    "grid.sigma_layout must be 'standard' or 'l30_trop_logstrat' "
+                    f"(got {g.sigma_layout!r})")
+            elif g.sigma_layout == "l30_trop_logstrat":
+                if g.nlev < 28:
+                    errors.append(
+                        f"grid.sigma_layout 'l30_trop_logstrat' needs nlev >= 28 (got {g.nlev})")
+                if not (0.0 < g.sigma_top <= 0.05):
+                    errors.append(
+                        "grid.sigma_layout 'l30_trop_logstrat' needs 0 < sigma_top <= 0.05 "
+                        f"(grids.vertical.L30_LOGSTRAT_SIGMA_TOP_MAX; got {g.sigma_top})")
+                if g.tropopause_refine != 1.0:
+                    errors.append(
+                        "grid.sigma_layout 'l30_trop_logstrat' keeps the L30 troposphere and "
+                        f"cannot combine with tropopause_refine={g.tropopause_refine}")
             if g.p_top_Pa != 200.0 or g.stretching != 2.0:
                 errors.append(
                     "grid.p_top_Pa and grid.stretching are hybrid-only fields and are inert "
@@ -1673,6 +1731,9 @@ class ExperimentConfig(NamedTuple):
             errors.append(
                 "grid.sigma_top is inert on the hybrid lane, which uses p_top_Pa/"
                 f"stretching; leave it at its default 0.01 (got {g.sigma_top})")
+        elif g.vertical_coord == "hybrid" and g.sigma_layout != "standard":
+            errors.append(
+                f"grid.sigma_layout={g.sigma_layout!r} is inert on the hybrid lane")
         # Tropopause refinement: 1.0 = uniform.  The upper bound is NOT a
         # vertical-CFL limit — the first-order-upwind vertical advective CFL
         # is only 0.26 at refine=3 / dt=75 s / omega=5 Pa/s and 0.39 at
@@ -1719,6 +1780,13 @@ class ExperimentConfig(NamedTuple):
                 f"dycore.model_type must be one of {DYNAMICS_OPTIONS}, "
                 f"got {d.model_type!r}"
             )
+        elif d.model_type == "nonhydrostatic" and (g.sigma_top != 0.01
+                                                   or g.sigma_layout != "standard"):
+            errors.append(
+                "grid.sigma_top and grid.sigma_layout are inert on the "
+                "nonhydrostatic lane, which uses a height coordinate; leave "
+                f"them at their defaults 0.01/'standard' (got sigma_top="
+                f"{g.sigma_top}, sigma_layout={g.sigma_layout!r})")
         if d.discretization not in DISCRETIZATION_OPTIONS:
             errors.append(
                 f"dycore.discretization must be one of {DISCRETIZATION_OPTIONS}, "
@@ -2156,13 +2224,18 @@ class ExperimentConfig(NamedTuple):
         # have rejected this working configuration).  "Real land" is the same
         # predicate used elsewhere in this method: an explicit mask, or an
         # active tile with a topography that actually derives f_land > 0 —
-        # topography="flat" gives f_land == 0 everywhere, so the tiled path
-        # never engages and the scheme would be diagnostic-only again
-        # (codex R4 P2).
+        # an IDEALIZED topography ("flat" or "gaussian") gives f_land == 0 in
+        # every cell, so the tiled path never engages and the scheme would be
+        # diagnostic-only again (codex R4 P2).
+        # IDEALIZED topography derives no land: "flat" is zero elevation and
+        # "gaussian" is an idealized bell that the driver deliberately leaves
+        # all-ocean (its positive tails would otherwise label the entire globe
+        # land).  Only a real elevation file or an explicit mask gives land.
+        _idealized_topography = self.topography in ("flat", "gaussian")
         _tiled_with_real_land = self.surface_tiled and bool(
             self.land_mask_path
             or ((self.slab_land_active or self.use_multilayer_land)
-                and self.topography != "flat"))
+                and not _idealized_topography))
         if self.surface_stability_scheme not in _valid_stability:
             errors.append(
                 f"surface_stability_scheme must be one of {_valid_stability}, "
@@ -2232,13 +2305,21 @@ class ExperimentConfig(NamedTuple):
         # topography gives f_land==0 everywhere (no land), which would silently
         # no-op the requested land tile.  Require real topography OR an explicit
         # mask when multilayer is the sole land-tile signal.
-        if (self.surface_tiled and self.use_multilayer_land
-                and not self.slab_land_active and not self.land_mask_path
-                and self.topography == "flat"):
+        # Any requested land tile, slab or multilayer, tiled or not: an
+        # idealized topography derives no land at all, so the tile runs over
+        # zero land and goes silently inert -- the trap that cost the AMIP
+        # campaign three tuning waves. Refused, not warned.
+        if ((self.use_multilayer_land or self.slab_land_active)
+                and not self.land_mask_path
+                and _idealized_topography):
             errors.append(
-                "use_multilayer_land + surface_tiled with topography='flat' and no "
-                "land-mask file has NO land (elevation-derived f_land is 0 "
-                "everywhere) — pass a real --topography or a --land-mask-file."
+                f"a land tile was requested (use_multilayer_land="
+                f"{self.use_multilayer_land}, slab_land_active="
+                f"{self.slab_land_active}) with an idealized "
+                f"topography={self.topography!r} and no land-mask file, which "
+                "has NO land anywhere (f_land is 0 in every cell), so the tile "
+                "would silently no-op — pass a real elevation file to --topography, or a "
+                "--land-mask-file."
             )
         # The same "no land anywhere" trap, on the MESH lane, which does not use
         # surface_tiled and so never reached the check above: the flux handoff
@@ -2251,12 +2332,13 @@ class ExperimentConfig(NamedTuple):
         # can raise, leaving peers blocked).  Counting land points in the mask
         # file HERE, where the check is rank-symmetric, is the open follow-up.
         if (self.mpas_land_beta_soil and not self.land_mask_path
-                and self.topography == "flat"):
+                and _idealized_topography):
             errors.append(
-                "mpas_land_beta_soil with topography='flat' and no land-mask "
-                "file has NO land (elevation-derived f_land is 0 everywhere), so "
-                "no soil column is built and the land-flux handoff is silently "
-                "inert — pass a real --topography or a --land-mask-file."
+                f"mpas_land_beta_soil with an idealized topography"
+                f"={self.topography!r} and no land-mask file has NO land "
+                "(f_land is 0 everywhere), so no soil column is built and the "
+                "land-flux handoff is silently inert — pass a real "
+                "--topography or a --land-mask-file."
             )
         # Deploying the baked land parameters under the physics they were
         # calibrated under — the biophysics LMIP two-leaf canopy. The
@@ -2487,11 +2569,11 @@ class ExperimentConfig(NamedTuple):
             # guard remains authoritative for degenerate mask files.
             if ((self.mpas_land_lapse_K_per_km > 0.0
                  or self.mpas_land_beta != 1.0)
-                    and self.topography == "flat"
+                    and self.topography in ("flat", "gaussian")
                     and not self.land_mask_path):
                 errors.append(
                     "mpas_land_lapse_K_per_km/mpas_land_beta need a land "
-                    "fraction, but topography='flat' (with no land-mask "
+                    f"fraction, but topography={self.topography!r} (with no land-mask "
                     "file) yields an all-zero f_land — the knobs would "
                     "change nothing."
                 )
@@ -2715,6 +2797,26 @@ class ExperimentConfig(NamedTuple):
         # Vertical advection scheme: membership first, then the same
         # silently-inert refusal as k_h_scale (MPAS + sigma only).
         _vert_adv_options = ("upwind", "van_leer")
+        _spl, _spf = d.mpas_sponge_del2_top_layers, d.mpas_sponge_del2_top_factor
+        if isinstance(_spl, bool) or not isinstance(_spl, int) or _spl < 0 or _spl >= g.nlev:
+            errors.append(
+                f"dycore.mpas_sponge_del2_top_layers must be an int in [0, grid.nlev) (got {_spl!r})")
+        if not (isinstance(_spf, (int, float)) and not isinstance(_spf, bool)
+                and math.isfinite(_spf) and _spf >= 1.0):
+            errors.append(
+                f"dycore.mpas_sponge_del2_top_factor must be a finite number >= 1.0 (got {_spf!r})")
+        if (isinstance(_spl, int) and _spl > 0
+                and (d.discretization != "mpas" or d.model_type != "hydrostatic")):
+            errors.append(
+                "dycore.mpas_sponge_del2_top_layers is wired into the hydrostatic MPAS dycore "
+                f"only; on discretization={d.discretization!r}/model_type={d.model_type!r} "
+                "it would be silently inert")
+        if (isinstance(_spl, int) and _spl > 0
+                and isinstance(d.a_h_scale, (int, float)) and d.a_h_scale <= 0):
+            errors.append(
+                "dycore.mpas_sponge_del2_top_layers > 0 is silently inert when "
+                f"a_h_scale={d.a_h_scale!r} turns the del2 viscosity off; use a_h_scale > 0 "
+                "or set mpas_sponge_del2_top_layers=0")
         if d.mpas_vert_advection_scheme not in _vert_adv_options:
             errors.append(
                 f"dycore.mpas_vert_advection_scheme must be one of "
@@ -2789,14 +2891,17 @@ class ExperimentConfig(NamedTuple):
                     "flag would be a silent no-op. Drop one of the two."
                 )
             if not (self.land_mask_path
-                    or (self.slab_land_active and self.topography != "flat")):
+                    or (self.slab_land_active
+                        and self.topography not in ("flat", "gaussian"))):
                 errors.append(
                     "land_interface_flux='unified' needs an ACTIVE slab land "
                     "tile with actual land: pass land_mask_path, or "
                     "slab_land_active=True with a real topography "
-                    "(topography='flat' derives f_land == 0 everywhere, so "
-                    "the slab SEB never steps and the flag is a silent "
-                    "no-op)."
+                    f"(got topography={self.topography!r}, "
+                    f"slab_land_active={self.slab_land_active!r}, no land mask). "
+                    "Idealized topography derives f_land == 0 everywhere; "
+                    "without an active land tile the slab SEB never steps "
+                    "and the flag is a silent no-op."
                 )
             # Mirror the model_driver.run() lane dispatch exactly: the MPAS
             # (grid_type-keyed) and spectral lanes run _run_mpas /
@@ -3035,13 +3140,53 @@ class ExperimentConfig(NamedTuple):
         # Positivity + finiteness only — the calibratable RANGE stays in
         # ``__param_spec__`` so it is not maintained twice.
         for _f in ("mcfarlane_k_wave", "mcfarlane_directional_spread",
-                   "mcfarlane_tau_max", "hines_total_rms_wind", "hines_Fmax"):
+                   "mcfarlane_tau_max", "hines_total_rms_wind", "hines_Fmax",
+                   "e3sm_cam_taubgnd", "e3sm_cam_c0", "e3sm_cam_launch_p",
+                   "e3sm_cam_effgw"):
             _v = getattr(self, _f)
             if not math.isfinite(_v) or _v <= 0.0:
                 errors.append(
                     f"{_f} must be a positive, finite gravity-wave-drag "
                     f"parameter, got {_v!r}"
                 )
+        if self.e3sm_cam_source not in (
+                "orographic", "frontal", "convective", "background"):
+            errors.append(
+                f"e3sm_cam_source must be one of "
+                f"('orographic', 'frontal', 'convective', 'background'), "
+                f"got {self.e3sm_cam_source!r}"
+            )
+        if isinstance(self.e3sm_cam_pgwv, bool) or \
+                not isinstance(self.e3sm_cam_pgwv, int) or \
+                self.e3sm_cam_pgwv < 0:
+            errors.append(
+                f"e3sm_cam_pgwv must be an int >= 0, "
+                f"got {self.e3sm_cam_pgwv!r}"
+            )
+        if self.e3sm_cam_source in ("frontal", "background") and \
+                self.e3sm_cam_pgwv < 1:
+            errors.append(
+                f"e3sm_cam_pgwv must be >= 1 for a launch-everywhere "
+                f"spectrum; pgwv 0 is the single c=0 wave, got "
+                f"{self.e3sm_cam_pgwv!r}"
+            )
+        if not math.isfinite(self.e3sm_cam_effgw) or \
+                self.e3sm_cam_effgw > 1.0:
+            errors.append(
+                f"e3sm_cam_effgw must be a finite efficiency <= 1.0, "
+                f"got {self.e3sm_cam_effgw!r}"
+            )
+        if not math.isfinite(self.e3sm_cam_taubgnd) or \
+                self.e3sm_cam_taubgnd > 1.0e-2:
+            errors.append(
+                f"e3sm_cam_taubgnd must be a finite base stress <= 1.0e-2 Pa, "
+                f"got {self.e3sm_cam_taubgnd!r}"
+            )
+        if not isinstance(self.e3sm_cam_latitude_taper, bool):
+            errors.append(
+                f"e3sm_cam_latitude_taper must be a bool, "
+                f"got {self.e3sm_cam_latitude_taper!r}"
+            )
         _valid_gwd = VALID_GWD
         # A ``+``-joined string composes multiple GWD sources whose tendencies
         # are summed — orographic (mcfarlane/lindzen) and non-orographic
@@ -3053,7 +3198,8 @@ class ExperimentConfig(NamedTuple):
         # so at most one stateful source may appear.  ``e3sm_cam`` /
         # ``ml_emulator`` need extra per-column source fields / a network
         # module the composite path does not carry and are NOT composable.
-        _composable_stateless = ("rayleigh", "lindzen", "mcfarlane", "hines")
+        _composable_stateless = ("rayleigh", "lindzen", "mcfarlane", "hines",
+                                 "e3sm_cam")
         _composable_stateful = ("prognostic_spectral",)
         _composable = _composable_stateless + _composable_stateful
         _gwd_parts = self.gravity_wave_drag.split("+")
@@ -3064,6 +3210,21 @@ class ExperimentConfig(NamedTuple):
                     f"composite gravity_wave_drag parts must each be one of "
                     f"{_composable}, got invalid {bad} in "
                     f"{self.gravity_wave_drag!r}"
+                )
+            # The EFFECTIVE source is the override's when one is supplied:
+            # gwd_config_for returns gravity_wave_drag_override untouched, so
+            # gating on the scalar would reject a valid override (codex #5).
+            _ov = getattr(self, "gravity_wave_drag_override", None)
+            _e3sm_src = (getattr(getattr(_ov, "e3sm_cam", None), "source", None)
+                         if _ov is not None else None) or self.e3sm_cam_source
+            if "e3sm_cam" in _gwd_parts and _e3sm_src != "background":
+                errors.append(
+                    f"gravity_wave_drag {self.gravity_wave_drag!r} may only "
+                    f"composite e3sm_cam with e3sm_cam_source='background'; "
+                    f"got e3sm_cam_source={_e3sm_src!r} "
+                    f"(orographic double-counts topographic drag against "
+                    f"lindzen/mcfarlane; frontal/convective need per-column "
+                    f"source fields the composite does not carry)"
                 )
             # Mirror get_gwd_fn's runtime rule so a duplicate composite
             # fails HERE, not later during physics construction.

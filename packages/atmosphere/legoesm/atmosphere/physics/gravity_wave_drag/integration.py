@@ -95,7 +95,7 @@ def get_gwd_fn(config: GravityWaveDragConfig):
         # independent of ExperimentConfig.validate_strict) so an invalid
         # composite fails loudly instead of hitting a low-level TypeError or
         # silently corrupting the spectrum carry inside the executor.
-        _validate_gwd_composite(config.scheme)
+        _validate_gwd_composite(config.scheme, config.e3sm_cam.source)
         return config.scheme, _combined_gwd, config
     else:
         raise ValueError(f"Unknown GWD scheme: {config.scheme!r}")
@@ -117,9 +117,10 @@ def get_gwd_fn(config: GravityWaveDragConfig):
 # parts hold no per-step state.  ``e3sm_cam`` / ``ml_emulator`` are NOT
 # composable here (they need extra per-column source fields / a network
 # module the composite signature does not carry).
-_GWD_COMPOSABLE_STATELESS = ("rayleigh", "lindzen", "mcfarlane", "hines")
+_GWD_COMPOSABLE_STATELESS = ("rayleigh", "lindzen", "mcfarlane", "hines", "e3sm_cam")
 _GWD_COMPOSABLE_STATEFUL = ("prognostic_spectral",)
 _GWD_COMPOSABLE = _GWD_COMPOSABLE_STATELESS + _GWD_COMPOSABLE_STATEFUL
+_GWD_E3SM_COMPOSABLE_SOURCES = ("background",)
 # Orographic parts accept the optional per-column subgrid-topo stddev.
 _GWD_OROGRAPHIC_PARTS = ("lindzen", "mcfarlane")
 
@@ -192,7 +193,7 @@ def orographic_scalar_fallback_warning(
     )
 
 
-def _validate_gwd_composite(scheme: str) -> None:
+def _validate_gwd_composite(scheme: str, e3sm_source: str | None = None) -> None:
     """Raise ValueError unless ``scheme`` is a well-formed GWD composite.
 
     Factory-level dispatch hardening (independent of
@@ -211,7 +212,15 @@ def _validate_gwd_composite(scheme: str) -> None:
         raise ValueError(
             f"Non-composable GWD part(s) {bad} in composite {scheme!r}; "
             f"composable sources are {_GWD_COMPOSABLE} "
-            f"(e3sm_cam / ml_emulator are not composable)."
+            f"(ml_emulator is not composable)."
+        )
+    if "e3sm_cam" in parts and e3sm_source not in _GWD_E3SM_COMPOSABLE_SOURCES:
+        raise ValueError(
+            f"e3sm_cam in GWD composite {scheme!r} requires source in "
+            f"{_GWD_E3SM_COMPOSABLE_SOURCES}, got {e3sm_source!r}: "
+            "'orographic' would double-count topographic drag against "
+            "lindzen/mcfarlane, and 'frontal'/'convective' need per-column "
+            "source fields the composite call does not carry."
         )
     n_stateful = sum(p in _GWD_COMPOSABLE_STATEFUL for p in parts)
     if n_stateful > 1:

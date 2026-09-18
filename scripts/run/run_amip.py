@@ -213,6 +213,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # ``--implicit-grav-wave-use-pcg --implicit-grav-wave-damping
     # 1e8`` (typical α ~ 1e7–1e8 m²/s) to remove the explicit-CFL
     # ceiling and enable larger ``--dt``.
+    # #1028: persistent D-grid winds on the cubed-sphere hydrostatic lane.
+    # The default cell-centre path interpolates the prognostic winds to the
+    # D-grid corners and back on EVERY step; that outer projection is a
+    # measured eddy damper (paired 200-day C36 Held-Suarez: max wind
+    # 13.0 -> 38.6 m/s sigma, 12.6 -> 40.9 hybrid, one knob, PR #1462).
+    parser.add_argument(
+        "--persistent-dgrid", action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Carry the cube's prognostic winds in FV3 D staggering between "
+             "steps instead of projecting cell-centre -> corner -> cell-centre "
+             "every step (#1028).  Cubed-sphere hydrostatic, single process; "
+             "every other lane refuses it rather than silently running the "
+             "damped path.",
+    )
     # Stage 3-E: Fourier polar filter for lat-lon C-grid.  Lifts the
     # pole-cell CFL constraint by truncating high-wavenumber Fourier
     # modes near the poles, so ``--dt`` can be set by the equatorial
@@ -380,6 +394,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "derived for a UNIFORM grid -- measured max "
                              "0.0642 on that run, 15.6x inside it; needs "
                              "nlev>=4).  Default = bit-identical.")
+    parser.add_argument("--mpas-sponge-del2-top-layers", type=int, default=None,
+                        dest="mpas_sponge_del2_top_layers",
+                        help="CAM-style top diffusion sponge: number of top layers whose "
+                             "del2 viscosity is enhanced (MPAS; 0 = off)")
+    parser.add_argument("--mpas-sponge-del2-top-factor", type=float, default=None,
+                        dest="mpas_sponge_del2_top_factor",
+                        help="top-layer del2 viscosity multiplier of the sponge, ramping "
+                             "geometrically to 1 below the sponge layers (1.0 = off)")
     parser.add_argument("--div-damp-scale", type=float,
                         default=_DYCORE_DEFAULTS.div_damp_scale,
                         help="Dycore divergence-damping multiplier")
@@ -1556,6 +1578,34 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         dest="hines_Fmax",
                         help="Hines saturation momentum-flux cap [Pa] "
                              "(default 0.1).")
+    parser.add_argument("--e3sm-cam-source", type=str, default=None,
+                        choices=["orographic", "frontal", "convective",
+                                 "background"],
+                        dest="e3sm_cam_source",
+                        help="E3SM CAM gravity-wave source spectrum.")
+    parser.add_argument("--e3sm-cam-pgwv", type=int, default=None,
+                        dest="e3sm_cam_pgwv",
+                        help="Number of gravity-wave phase-speed bins.")
+    parser.add_argument("--e3sm-cam-effgw", type=float, default=None,
+                        dest="e3sm_cam_effgw",
+                        help="Gravity-wave efficiency factor (dimensionless).")
+    parser.add_argument("--e3sm-cam-taubgnd", type=float, default=None,
+                        dest="e3sm_cam_taubgnd",
+                        help="Uniform background spectrum amplitude; total "
+                             "absolute launch flux ~ taubgnd*sqrt(pi)*c0/dc "
+                             "[Pa].")
+    parser.add_argument("--e3sm-cam-c0", type=float, default=None,
+                        dest="e3sm_cam_c0",
+                        help="Width of source spectrum in phase speed [m/s].")
+    parser.add_argument("--e3sm-cam-launch-p", type=float, default=None,
+                        dest="e3sm_cam_launch_p",
+                        help="Launch pressure level for the spectrum [Pa].")
+    parser.add_argument("--e3sm-cam-latitude-taper",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        dest="e3sm_cam_latitude_taper",
+                        help="cos(lat) taper of the E3SM frontal/background drag "
+                             "toward the poles (E3SM structured-dycore branch); "
+                             "--no-... is the unstructured/MPAS branch.")
     parser.add_argument("--mcfarlane-tau-max", type=float, default=None,
                         dest="mcfarlane_tau_max",
                         help="McFarlane orographic GWD surface stress cap [Pa] "
@@ -1604,6 +1654,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sigma-top", type=float, default=None, dest="sigma_top",
                         help="sigma-lane model lid as a fraction of p_s "
                              "(default 0.01 = 10 hPa)")
+    parser.add_argument("--sigma-layout", type=str, default=None, dest="sigma_layout",
+                        choices=("standard", "l30_trop_logstrat"),
+                        help="sigma-lane level layout: standard (uniform/refined) or "
+                             "l30_trop_logstrat (L30 troposphere kept, log-spaced "
+                             "stratosphere up to --sigma-top)")
     parser.add_argument("--hard-sat-ice-curve",
                         action=argparse.BooleanOptionalAction, default=False,
                         dest="hard_sat_ice_curve",
@@ -1921,6 +1976,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         sigma_refine=(args.sigma_refine if args.sigma_refine is not None else 0.12),
         sigma_refine_width=(args.sigma_refine_width
                             if args.sigma_refine_width is not None else 0.45),
+        sigma_layout=(args.sigma_layout if args.sigma_layout is not None else "standard"),
         use_duogrid=getattr(args, "use_duogrid", False),
     )
 
@@ -1935,10 +1991,16 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         mpas_nu_vert4_T=args.mpas_nu_vert4_t,
         mpas_conservative_tracer_clamp=args.mpas_conservative_tracer_clamp,
         mpas_vert_advection_scheme=args.mpas_vert_advection_scheme,
+        mpas_sponge_del2_top_layers=(args.mpas_sponge_del2_top_layers
+                                     if args.mpas_sponge_del2_top_layers is not None else 0),
+        mpas_sponge_del2_top_factor=(args.mpas_sponge_del2_top_factor
+                                     if args.mpas_sponge_del2_top_factor is not None else 1.0),
         conservation_fixer=args.conservation_fixer,
         fix_mass=args.fix_mass,
         implicit_grav_wave_use_pcg=args.implicit_grav_wave_use_pcg,
         implicit_grav_wave_damping=args.implicit_grav_wave_damping,
+        # #1028: cube winds stay D-staggered between steps.
+        persistent_dgrid=args.persistent_dgrid,
         # Stage 3-E: polar filter for lat-lon C-grid pole-CFL relief.
         use_polar_filter=args.use_polar_filter,
         polar_filter_cutoff_deg=args.polar_filter_cutoff_deg,
@@ -2163,6 +2225,28 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
             if args.hines_launch_p is not None else 0.0),
         hines_Fmax=(args.hines_Fmax if args.hines_Fmax is not None
                     else _EXPERIMENT_DEFAULTS.hines_Fmax),
+        e3sm_cam_source=(args.e3sm_cam_source
+                         if args.e3sm_cam_source is not None
+                         else _EXPERIMENT_DEFAULTS.e3sm_cam_source),
+        e3sm_cam_pgwv=(args.e3sm_cam_pgwv
+                       if args.e3sm_cam_pgwv is not None
+                       else _EXPERIMENT_DEFAULTS.e3sm_cam_pgwv),
+        e3sm_cam_effgw=(args.e3sm_cam_effgw
+                        if args.e3sm_cam_effgw is not None
+                        else _EXPERIMENT_DEFAULTS.e3sm_cam_effgw),
+        e3sm_cam_taubgnd=(args.e3sm_cam_taubgnd
+                          if args.e3sm_cam_taubgnd is not None
+                          else _EXPERIMENT_DEFAULTS.e3sm_cam_taubgnd),
+        e3sm_cam_c0=(args.e3sm_cam_c0
+                     if args.e3sm_cam_c0 is not None
+                     else _EXPERIMENT_DEFAULTS.e3sm_cam_c0),
+        e3sm_cam_launch_p=(args.e3sm_cam_launch_p
+                           if args.e3sm_cam_launch_p is not None
+                           else _EXPERIMENT_DEFAULTS.e3sm_cam_launch_p),
+        e3sm_cam_latitude_taper=(
+            args.e3sm_cam_latitude_taper
+            if args.e3sm_cam_latitude_taper is not None
+            else _EXPERIMENT_DEFAULTS.e3sm_cam_latitude_taper),
         mcfarlane_tau_max=(
             args.mcfarlane_tau_max if args.mcfarlane_tau_max is not None
             else _EXPERIMENT_DEFAULTS.mcfarlane_tau_max),

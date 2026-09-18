@@ -4154,7 +4154,19 @@ def run_held_suarez(tc: TestCase, output_dir: Path, days: float, *,
     # topography-aware version (forcing function is unchanged — see
     # ``held_suarez_topo.py``).
     _topo = tc.case == "held_suarez_topo"
+    # #1029 discriminator: LEGOESM_TOPO_H0 overrides the mountain height the
+    # registry pins, so the topo case can be run with h_0 = 0 -- the SAME init
+    # routine, the SAME top-sponge mitigation (which is gated on the case, not
+    # on the height), the same everything, with only the mountain removed.
+    # The existing flat arm is `held_suarez`, a DIFFERENT case that also runs
+    # with sponge_coeff = 0, so it differs in two variables and cannot settle
+    # whether the terrain is the seed.  Unset => the registry value, unchanged.
     _topo_h0 = float(tc.run_kwargs.get("h_0", 2000.0)) if _topo else 0.0
+    if _topo and "LEGOESM_TOPO_H0" in os.environ:
+        _topo_h0 = float(os.environ["LEGOESM_TOPO_H0"])
+        print(f"  #1029 LEGOESM_TOPO_H0 override: mountain height h_0 = "
+              f"{_topo_h0} m (registry value "
+              f"{float(tc.run_kwargs.get('h_0', 2000.0))} m)")
 
     if tc.grid_type == "cubed_sphere":
         from legoesm.grids.cubed_sphere import create_cubed_sphere

@@ -1,0 +1,8 @@
+# The raised lid IS the production configuration since 2026-09-17 (user
+# decision): nlev 36, sigma_top 0.002, sigma_layout l30_trop_logstrat and the
+# CAM del2 sponge now live in amip_production.yaml, together with the spectral
+# non-orographic gravity-wave source they were measured with.
+#
+# This file is kept only so the launchers and the arm decks that name it keep
+# resolving; it adds nothing.  Point new work at amip_production.yaml.
+include: amip_production.yaml
