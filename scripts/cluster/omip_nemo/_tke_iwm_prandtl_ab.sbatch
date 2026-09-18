@@ -38,7 +38,12 @@ PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 TRD=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_TRD2
 OUT=$ROOT/omip_nemo/tke_premise
 RST=$OUT/nemo_restart_8760.npz
-IWM=$TRD/zdfiwm_forcing_TRA.nc     # the file namzdf_iwm itself names
+# The file namzdf_iwm itself names (sn_mpb..sn_dsc all point at _TRA).
+# NOT $TRD/zdfiwm_forcing_TRA.nc: every RUN_* directory carries that name as a
+# relative symlink into RUN_REF, and all of them are BROKEN -- `find` listed
+# them because it does not dereference, and `[ -e ]` then failed the card in
+# one second. The actual data lives in the INPUTS tree.
+IWM=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/INPUTS/orca1_inputs/data_repository/input_fields/zdfiwm_forcing_TRA.nc
 
 for f in "$RST" "$IWM"; do
   [ -e "$f" ] || { echo "FATAL: missing $f"; exit 1; }
