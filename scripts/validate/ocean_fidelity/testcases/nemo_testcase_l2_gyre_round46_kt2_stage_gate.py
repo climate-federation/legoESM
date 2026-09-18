@@ -84,6 +84,17 @@ TKE_RHS_INTERMEDIATES = (
 )
 TKE_RHS_POSTHOC_OPERANDS = ("p_avt_operand", "rn2_operand")
 TKE_RHS_SELECTORS = TKE_RHS_INTERMEDIATES + TKE_RHS_POSTHOC_OPERANDS
+BN2_INTERMEDIATES = (
+    "zrw",
+    "zaw",
+    "zbw",
+    "temperature_contribution",
+    "salinity_contribution",
+    "contribution_difference",
+    "gravity_product",
+    "thickness_division",
+    "masked_rn2",
+)
 OWNED_3D_FIELDS = {"tke_en", "tke_avt_k", "tke_dissl"}
 HEADER_FIELDS = (
     "version",
@@ -3138,6 +3149,309 @@ def _tke_surface_operand_rows(
     }
 
 
+def _bn2_source_replay(state, card, operand_record: dict) -> dict:
+    """Rebuild compiled S-EOS/``bn2`` from the admitted kt=2 entry.
+
+    The round-59 record contains the consumed final ``rn2`` and masks but not
+    the local ``pab`` work array.  Reconstruct alpha/beta in the compiled
+    S-EOS association, then require the complete masked replay to reproduce
+    that independently recorded output BIT before exposing any local value.
+    """
+    from legoesm.ocean.eos import NemoSEOSConfig
+    from legoesm.ocean.vertical import extrapolate_below_seafloor
+
+    arrays = operand_record["arrays"]
+    z_coord = card.recipe.z_coord
+    tke_cfg = card.recipe.model_config.physics.vertical_mixing.tke
+    require(getattr(tke_cfg, "n2_eos_form", "seos") == "seos",
+            "round-108 bn2 replay requires the compiled GYRE S-EOS arm")
+
+    def yx(name: str) -> np.ndarray:
+        value = np.asarray(arrays[name], dtype=np.float64)
+        return value.swapaxes(0, 1) if value.ndim >= 2 else value
+
+    T = np.asarray(
+        extrapolate_below_seafloor(state.T.data, z_coord), dtype=np.float64)
+    S = np.asarray(
+        extrapolate_below_seafloor(state.S.data, z_coord), dtype=np.float64)
+    require(T.shape == S.shape and T.ndim == 3,
+            f"round-108 T/S entry shape mismatch: {T.shape} vs {S.shape}")
+    nlev = T.shape[-1]
+    eta = np.asarray(state.eta.data, dtype=np.float64)
+    depth = np.asarray(state.H_bathy.data, dtype=np.float64)
+    wet_depth = depth > np.float64(0.0)
+    reciprocal_depth = np.float64(1.0) / np.where(
+        wet_depth, depth, np.float64(1.0))
+    r3t = np.where(
+        wet_depth, eta * reciprocal_depth, np.float64(0.0))
+    stretch = np.float64(1.0) + r3t
+    require(np.all(np.isfinite(stretch) & (stretch > 0.0)),
+            "recorded-entry bn2 stretch is not finite and positive")
+
+    gdept_0 = np.asarray(z_coord.nemo_gdept_0, dtype=np.float64)[..., :nlev]
+    gdepw_0 = np.asarray(z_coord.nemo_gdepw_0, dtype=np.float64)[..., 1:nlev]
+    e3w_0 = np.asarray(z_coord.nemo_e3w_0, dtype=np.float64)[..., 1:nlev]
+    stretch3 = stretch[..., None]
+    gdept = gdept_0 * stretch3
+    gdepw = gdepw_0 * stretch3
+    e3w = e3w_0 * stretch3
+
+    tmask = yx("tmask")[..., :nlev]
+    wmask = yx("wmask")[..., 1:nlev]
+    require(tmask.shape == T.shape and wmask.shape == T.shape[:-1] + (nlev - 1,),
+            "round-108 NEMO masks do not match the admitted tracer entry")
+
+    cfg = NemoSEOSConfig()
+    require(np.float64(cfg.rho0) == np.float64(
+        card.recipe.model_config.constants.rho_0),
+        "round-108 S-EOS rho0 differs from the instantiated GYRE card")
+    zt = T - np.float64(cfg.T0)
+    zs = S - np.float64(cfg.S0)
+    thermal_inner = (
+        np.float64(1.0) + np.float64(cfg.lambda1) * zt
+        + np.float64(cfg.mu1) * gdept)
+    thermal_zn = (
+        np.float64(cfg.a0) * thermal_inner + np.float64(cfg.nu) * zs)
+    haline_inner = (
+        np.float64(1.0) - np.float64(cfg.lambda2) * zs
+        - np.float64(cfg.mu2) * gdept)
+    haline_zn = (
+        np.float64(cfg.b0) * haline_inner - np.float64(cfg.nu) * zt)
+    reciprocal_rho0 = np.float64(1.0) / np.float64(cfg.rho0)
+    alpha = (thermal_zn * reciprocal_rho0) * tmask
+    beta = (haline_zn * reciprocal_rho0) * tmask
+
+    gd_upper = gdept_0[..., :-1] * stretch3
+    gd_lower = gdept_0[..., 1:] * stretch3
+    gw = gdepw_0 * stretch3
+    zrw = (gw - gd_lower) / (gd_upper - gd_lower)
+    one_minus_zrw = np.float64(1.0) - zrw
+    zaw = alpha[..., 1:] * one_minus_zrw + alpha[..., :-1] * zrw
+    zbw = beta[..., 1:] * one_minus_zrw + beta[..., :-1] * zrw
+    temperature_delta = T[..., :-1] - T[..., 1:]
+    salinity_delta = S[..., :-1] - S[..., 1:]
+    temperature_contribution = zaw * temperature_delta
+    salinity_contribution = zbw * salinity_delta
+    contribution_difference = (
+        temperature_contribution - salinity_contribution)
+    gravity_product = (
+        np.float64(card.recipe.model_config.constants.g)
+        * contribution_difference)
+    thickness_division = gravity_product / e3w
+    masked_rn2 = thickness_division * wmask
+    reference_rn2 = yx("rn2")[..., 1:nlev]
+
+    replay_row = _bitwise_classification(score(
+        "GYRE-zco.kt2.bn2.reference_replay.masked_rn2",
+        reference_rn2, masked_rn2,
+        np.ones(reference_rn2.shape, dtype=bool)))
+    require(replay_row["classification"] == "BIT",
+            "compiled-order NEMO-from-NEMO bn2 replay moved before scoring")
+    recorded_e3w_row = _bitwise_classification(score(
+        "GYRE-zco.kt2.bn2.input.e3w",
+        yx("e3w_Kmm")[..., 1:nlev], e3w,
+        np.ones(e3w.shape, dtype=bool)))
+    require(recorded_e3w_row["classification"] == "BIT",
+            "source-reconstructed live e3w moved from the round-59 record")
+
+    return {
+        "inputs": {
+            "T": T,
+            "S": S,
+            "gdept": gdept,
+            "gdepw": gdepw,
+            "gdept_0": gdept_0,
+            "gdepw_0": gdepw_0,
+            "stretch": stretch,
+            "e3w": e3w,
+            "alpha": alpha,
+            "beta": beta,
+            "gravity": np.asarray(
+                card.recipe.model_config.constants.g, dtype=np.float64),
+        },
+        "references": {
+            "zrw": zrw,
+            "zaw": zaw,
+            "zbw": zbw,
+            "temperature_contribution": temperature_contribution,
+            "salinity_contribution": salinity_contribution,
+            "contribution_difference": contribution_difference,
+            "gravity_product": gravity_product,
+            "thickness_division": thickness_division,
+            "masked_rn2": masked_rn2,
+        },
+        "recorded_rn2": reference_rn2,
+        "reference_replay": replay_row,
+        "input_rows": [recorded_e3w_row],
+        "source_statements": {
+            "alpha_beta": "eosbn2.f90:1312-1326",
+            "bn2": "eosbn2.f90:1609-1618",
+        },
+    }
+
+
+def _bn2_intermediate_rows(
+    trace,
+    replay: dict,
+    entry_mode: str,
+    intermediate: str,
+    plant: str | None = None,
+    execution: str = "production step JIT",
+) -> dict:
+    """Score one returned compiled-``bn2`` value and its final output."""
+    require(intermediate in BN2_INTERMEDIATES,
+            f"unknown bn2 intermediate {intermediate!r}")
+    production = trace.tke_statement_trace
+    candidate_value = production.bn2_intermediate
+    candidate_output = production.bn2_output
+    require(candidate_value is not None and candidate_output is not None,
+            "production trace did not return the requested bn2 value/output")
+    reference = np.asarray(replay["references"][intermediate])
+    candidate = np.asarray(candidate_value)
+    require(candidate.shape == reference.shape,
+            f"production bn2 {intermediate} shape {candidate.shape} != "
+            f"source replay {reference.shape}")
+
+    clean = _bitwise_classification(score(
+        f"GYRE-zco.kt2.bn2.production_step.{intermediate}.clean",
+        reference, candidate, np.ones(reference.shape, dtype=bool)))
+    scored_reference = reference
+    planted_at = None
+    planted_baseline = None
+    if plant == "stage-bn2-intermediate-ulp":
+        equal = (
+            np.ascontiguousarray(reference).view(np.uint64)
+            == np.ascontiguousarray(candidate).view(np.uint64)
+        ) & np.isfinite(reference) & (reference != 0.0)
+        indices = np.argwhere(equal)
+        require(indices.size > 0,
+                "bn2 intermediate plant found no exact finite nonzero cell")
+        planted_at = tuple(int(value) for value in indices[0])
+        planted_baseline = float(reference[planted_at])
+        scored_reference = reference.copy()
+        scored_reference[planted_at] = np.nextafter(
+            scored_reference[planted_at], np.float64(np.inf))
+
+    statements = {
+        "zrw": "eosbn2.f90:1610-1611",
+        "zaw": "eosbn2.f90:1613",
+        "zbw": "eosbn2.f90:1614",
+        "temperature_contribution": "eosbn2.f90:1616",
+        "salinity_contribution": "eosbn2.f90:1617",
+        "contribution_difference": "eosbn2.f90:1616-1617",
+        "gravity_product": "eosbn2.f90:1616-1617",
+        "thickness_division": "eosbn2.f90:1616-1618",
+        "masked_rn2": "eosbn2.f90:1616-1618",
+    }
+    row = _bitwise_classification(score(
+        f"GYRE-zco.kt2.bn2.production_step.{intermediate}",
+        scored_reference, candidate, np.ones(reference.shape, dtype=bool)))
+    row.update({
+        "field": intermediate,
+        "entry_mode": entry_mode,
+        "execution": execution,
+        "domain": "all 32 x 22 owned columns, NEMO levels 2:jpkm1",
+        "nemo_statement": statements[intermediate],
+        "clean_n_unequal": clean["n_unequal"],
+        "clean_absolute_max": clean["absolute_max"],
+        "plant_index": planted_at,
+        "plant_baseline": planted_baseline,
+    })
+    if planted_at is not None:
+        require(row["n_unequal"] == clean["n_unequal"] + 1,
+                "bn2 ULP plant did not add exactly one unequal cell")
+
+    recorded_output = np.asarray(replay["recorded_rn2"])
+    output = np.asarray(candidate_output)
+    require(output.shape == recorded_output.shape,
+            "production bn2 output shape differs from the round-59 record")
+    output_row = _bitwise_classification(score(
+        "GYRE-zco.kt2.bn2.production_step.masked_rn2_output",
+        recorded_output, output, np.ones(recorded_output.shape, dtype=bool)))
+    output_row.update({
+        "field": "masked_rn2_output",
+        "entry_mode": entry_mode,
+        "execution": execution,
+        "domain": "all 32 x 22 owned columns, NEMO levels 2:jpkm1",
+        "nemo_statement": "eosbn2.f90:1616-1618",
+    })
+    return {
+        "intermediate": intermediate,
+        "one_returned_intermediate": True,
+        "reference_replay": replay["reference_replay"],
+        "input_rows": replay["input_rows"],
+        "row": row,
+        "output_row": output_row,
+        "plant_target": None if planted_at is None else row["name"],
+    }
+
+
+def _bn2_isolated_rows(replay: dict, intermediate: str) -> dict:
+    """Score isolated eager/JIT labels without calling either production."""
+    import jax
+    import jax.numpy as jnp
+    from legoesm.ocean.eos import compute_buoyancy_frequency_nemo_bn2
+
+    require(intermediate in BN2_INTERMEDIATES,
+            f"unknown isolated bn2 intermediate {intermediate!r}")
+    inputs = replay["inputs"]
+
+    def expression(T, S, gdept, gdepw, e3w, gdept_0, gdepw_0,
+                   stretch, alpha, beta, gravity):
+        return compute_buoyancy_frequency_nemo_bn2(
+            T, S, gdept, gdepw,
+            g=gravity, eos_form="seos", e3w_int=e3w,
+            e3w_source="mesh_reference", zrw_evaluation="nemo_literal",
+            zrw_gdept_0=gdept_0, zrw_gdepw_0=gdepw_0,
+            zrw_stretch=stretch, _alpha_beta_override=(alpha, beta),
+            _return_intermediate=intermediate)
+
+    operands = tuple(jnp.asarray(inputs[name]) for name in (
+        "T", "S", "gdept", "gdepw", "e3w", "gdept_0", "gdepw_0",
+        "stretch", "alpha", "beta", "gravity"))
+    eager_output, eager_value = jax.device_get(expression(*operands))
+    jit_output, jit_value = jax.device_get(jax.jit(expression)(*operands))
+    reference = np.asarray(replay["references"][intermediate])
+    output_reference = np.asarray(replay["recorded_rn2"])
+    rows = []
+    output_rows = []
+    for label, value, output in (
+        ("isolated-closure eager", eager_value, eager_output),
+        ("isolated-closure JIT", jit_value, jit_output),
+    ):
+        row = _bitwise_classification(score(
+            "GYRE-zco.kt2.bn2." + label.replace(" ", "_")
+            + f".{intermediate}",
+            reference, np.asarray(value),
+            np.ones(reference.shape, dtype=bool)))
+        row.update({
+            "field": intermediate,
+            "execution": label,
+            "one_returned_intermediate": True,
+            "nemo_statement": "R101TKEW eosbn2.f90:1609-1618",
+        })
+        rows.append(row)
+        output_row = _bitwise_classification(score(
+            "GYRE-zco.kt2.bn2." + label.replace(" ", "_")
+            + ".masked_rn2_output",
+            output_reference, np.asarray(output),
+            np.ones(output_reference.shape, dtype=bool)))
+        output_row.update({
+            "field": "masked_rn2_output",
+            "execution": label,
+            "nemo_statement": "R101TKEW eosbn2.f90:1616-1618",
+        })
+        output_rows.append(output_row)
+    return {
+        "intermediate": intermediate,
+        "note": (
+            "isolated-closure JIT is not production; only the sibling "
+            "production-step row certifies full-step fusion"),
+        "rows": rows,
+        "output_rows": output_rows,
+    }
+
+
 def _tke_rhs_intermediate_rows(
     trace,
     operand_record: dict,
@@ -3415,6 +3729,7 @@ def _tke_program_twin(
     execution_mode: str = "production-jit",
     rhs_materialization: str = "",
     rhs_intermediate: str = "",
+    bn2_intermediate: str = "",
 ) -> dict:
     """Bounded production-step TKE subwalk split from the compiler-heavy table."""
     import jax
@@ -3435,9 +3750,12 @@ def _tke_program_twin(
     requested_rhs_materialization = rhs_materialization
     hook_rhs_materialization = (
         "" if rhs_materialization == "baseline" else rhs_materialization)
-    require(not (rhs_materialization and rhs_intermediate),
-            "TKE RHS materialization and intermediate selectors are mutually "
-            "exclusive")
+    require(sum(bool(value) for value in (
+                rhs_materialization, rhs_intermediate, bn2_intermediate)) <= 1,
+            "TKE RHS and bn2 measurement selectors are mutually exclusive")
+    if bn2_intermediate:
+        require(bn2_intermediate in BN2_INTERMEDIATES,
+                f"unknown bn2 intermediate {bn2_intermediate!r}")
 
     def production_step(model, step_state, dt, freshwater, surface_forcing):
         if execution_mode == "production-jit":
@@ -3505,11 +3823,20 @@ def _tke_program_twin(
     require(all(row["classification"] == "BIT" for row in input_bridge),
             "TKE pre-closure input bridge is not bit-identical")
 
+    bn2_replay = (
+        _bn2_source_replay(state, card, tke_operand_record)
+        if bn2_intermediate else None)
+
     freshwater, surface = _surface_forcings(card, state, 2)
     hooks = _NEMOWSRK3TestHooks(
         expose_live_stage_operands=True,
         tke_rhs_materialization=hook_rhs_materialization,
         tke_rhs_intermediate=rhs_intermediate,
+        bn2_intermediate=bn2_intermediate,
+        bn2_alpha_beta_override=(
+            None if bn2_replay is None else (
+                jnp.asarray(bn2_replay["inputs"]["alpha"]),
+                jnp.asarray(bn2_replay["inputs"]["beta"]))),
         barotropic_raw_history_override=raw_history,
         stage_barotropic_output_override=_barotropic_override(
             records, advmean_root, 2),
@@ -3520,6 +3847,21 @@ def _tke_program_twin(
     recorded_taum = jnp.asarray(
         np.asarray(tke_arrays["taum_entry"]).swapaxes(0, 1))
     recorded_surface = surface._replace(taum=recorded_taum)
+    if bn2_intermediate:
+        given_trace = jax.device_get(production_step(
+            model, state, card.dt_s, freshwater, recorded_surface))
+        return {
+            "format": "nemo-testcase-l2-gyre-bn2-production-walk-v1",
+            "execution": execution_label,
+            "bn2_intermediate": bn2_intermediate,
+            "input_bridge": input_bridge,
+            "isolated_bn2_discriminator": _bn2_isolated_rows(
+                bn2_replay, bn2_intermediate),
+            "given_nemo_entry_bn2_intermediate": _bn2_intermediate_rows(
+                given_trace, bn2_replay, "NEMO_TKE_RECORDED",
+                bn2_intermediate, plant, execution=execution_label),
+            "chained": None,
+        }
     if requested_rhs_materialization or rhs_intermediate:
         given_trace = jax.device_get(production_step(
             model, state, card.dt_s, freshwater, recorded_surface))
@@ -4130,6 +4472,7 @@ def run(
     execution_mode: str = "production-jit",
     tke_rhs_materialization: str = "",
     tke_rhs_intermediate: str = "",
+    bn2_intermediate: str = "",
 ) -> dict:
     stamp = worktree_stamp()
     expected = "0" * 40 if plant == "stamp" else expect_commit.lower()
@@ -4273,7 +4616,7 @@ def run(
         report["tke_statement_walk"] = _tke_program_twin(
             records, advmean_root, memory_root, statement_record,
             legacy_record, plant, execution_mode, tke_rhs_materialization,
-            tke_rhs_intermediate)
+            tke_rhs_intermediate, bn2_intermediate)
     if mode == "stage-tke-record":
         from nemo_testcase_l2_gyre_round54_tke_operands import (
             read_record as read_tke_operand_record,
@@ -4388,6 +4731,13 @@ def main(argv=None) -> int:
               "the final accumulation is returned alongside it"),
     )
     p.add_argument(
+        "--bn2-intermediate",
+        choices=BN2_INTERMEDIATES,
+        default="",
+        help=("return and score exactly one compiled-order bn2 intermediate; "
+              "the final rn2 output is returned alongside it"),
+    )
+    p.add_argument(
         "--plant",
         choices=("header", "slot", "truncation", "calibration", "given", "trajectory",
                  "twin", "stage-entry-ulp", "stage-context-ulp",
@@ -4400,6 +4750,7 @@ def main(argv=None) -> int:
                  "stage-tke-matrix-ulp",
                  "stage-shear-operand-ulp", "stage-tke-rhs-ulp",
                  "stage-tke-rhs-intermediate-ulp",
+                 "stage-bn2-intermediate-ulp",
                  "stamp"),
     )
     p.add_argument("--output", type=Path)
@@ -4422,6 +4773,7 @@ def main(argv=None) -> int:
         execution_mode=args.execution_mode,
         tke_rhs_materialization=args.tke_rhs_materialization,
         tke_rhs_intermediate=args.tke_rhs_intermediate,
+        bn2_intermediate=args.bn2_intermediate,
     )
     report["status"] = plant_aware_status(report["status"], args.plant)
     text = json.dumps(report, indent=2, sort_keys=True)

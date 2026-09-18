@@ -670,7 +670,9 @@ def compute_buoyancy_frequency_nemo_bn2(
     zrw_gdept_0: jnp.ndarray | None = None,
     zrw_gdepw_0: jnp.ndarray | None = None,
     zrw_stretch: jnp.ndarray | None = None,
-) -> jnp.ndarray:
+    _alpha_beta_override: tuple[jnp.ndarray, jnp.ndarray] | None = None,
+    _return_intermediate: str = "",
+) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
     r"""Brunt-Väisälä ``N²`` by NEMO's exact ``bn2``.
 
     ``eos_form`` selects where alpha/beta come from. ``"seos"`` (default,
@@ -758,7 +760,20 @@ def compute_buoyancy_frequency_nemo_bn2(
         eos_gdept = lax.optimization_barrier(
             jnp.asarray(zrw_gdept_0)
             * jnp.asarray(zrw_stretch)[..., jnp.newaxis])
-    if eos_form == "teos10":
+    if _alpha_beta_override is not None:
+        if eos_form != "seos":
+            raise ValueError(
+                "the private bn2 alpha/beta override is supported only for "
+                "the simplified-EOS fidelity walk")
+        alpha, beta = (
+            jnp.asarray(_alpha_beta_override[0]),
+            jnp.asarray(_alpha_beta_override[1]),
+        )
+        if alpha.shape != T.shape or beta.shape != T.shape:
+            raise ValueError(
+                "the private bn2 alpha/beta override must match T/S shape; "
+                f"got alpha={alpha.shape}, beta={beta.shape}, T={T.shape}")
+    elif eos_form == "teos10":
         # NEMO's rab_3d takes the GEOMETRIC depth, and both alpha and beta come
         # from the polynomial rather than the 3-term fit. Everything below this
         # line -- the zrw interpolation, the /e3w, the sign convention -- is
@@ -782,7 +797,32 @@ def compute_buoyancy_frequency_nemo_bn2(
         e3w = gd_lo - gd_up                                    # explicit legacy
     dT = T[..., :-1] - T[..., 1:]                              # T_upper - T_lower
     dS = S[..., :-1] - S[..., 1:]
-    return g * (a_w * dT - b_w * dS) / e3w
+    temperature_contribution = a_w * dT
+    salinity_contribution = b_w * dS
+    contribution_difference = temperature_contribution - salinity_contribution
+    gravity_product = g * contribution_difference
+    thickness_division = gravity_product / e3w
+    if not _return_intermediate:
+        return thickness_division
+    intermediates = {
+        "zrw": zrw,
+        "zaw": a_w,
+        "zbw": b_w,
+        "temperature_contribution": temperature_contribution,
+        "salinity_contribution": salinity_contribution,
+        "contribution_difference": contribution_difference,
+        "gravity_product": gravity_product,
+        "thickness_division": thickness_division,
+        # The shared implementation does not yet apply NEMO's trailing wmask;
+        # this selector intentionally exposes the value production returns so
+        # the gate can score that missing source boundary, including -0/+0.
+        "masked_rn2": thickness_division,
+    }
+    if _return_intermediate not in intermediates:
+        raise ValueError(
+            f"unknown private bn2 intermediate {_return_intermediate!r}; "
+            f"expected one of {tuple(intermediates)}")
+    return thickness_division, intermediates[_return_intermediate]
 
 
 def nemo_bn2_live_geometry(

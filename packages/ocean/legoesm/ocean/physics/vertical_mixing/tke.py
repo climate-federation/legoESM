@@ -403,6 +403,8 @@ class TKEStatementTrace(NamedTuple):
     rhs_shear: jnp.ndarray
     shear_face_metrics: object = None
     rhs_intermediate: object = None
+    bn2_intermediate: object = None
+    bn2_output: object = None
 
 
 class TKEEntryN2Bundle(NamedTuple):
@@ -421,6 +423,7 @@ class TKEEntryN2Bundle(NamedTuple):
     # Full-grid surface W thickness from raw nemo_e3w_0*(1+r3t). The interior
     # e3w_Kmm field above intentionally has nlev-1 eosbn2 interfaces.
     e3w_surface_Kmm: jnp.ndarray | None = None
+    bn2_intermediate: object = None
 
 
 class TKECarryOutput(NamedTuple):

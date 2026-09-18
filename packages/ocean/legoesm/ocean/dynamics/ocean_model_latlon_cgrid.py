@@ -1318,6 +1318,8 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     legacy_zdf_entry_kmm_eta: bool = False
     tke_rhs_materialization: str = ""  # Private compiled-RHS boundary walk.
     tke_rhs_intermediate: str = ""  # Private one-output compiled-RHS walk.
+    bn2_intermediate: str = ""  # Private one-output compiled-bn2 walk.
+    bn2_alpha_beta_override: object = None  # Recorded-entry operator input.
 
 
 def rk3_stage_velocity_update(
@@ -8998,8 +9000,16 @@ class LatLonCGridOceanModel:
             zrw_gdepw_0=gdepw_0,
             zrw_stretch=zrw_stretch,
         )
-        rn2 = compute_buoyancy_frequency_nemo_bn2(
-            T_now, S_now, gdept, gdepw, **_n2_kwargs)
+        _bn2_selector = self._nemo_ws_test_hooks.bn2_intermediate
+        _bn2_override = self._nemo_ws_test_hooks.bn2_alpha_beta_override
+        _rn2_result = compute_buoyancy_frequency_nemo_bn2(
+            T_now, S_now, gdept, gdepw, **_n2_kwargs,
+            _alpha_beta_override=_bn2_override,
+            _return_intermediate=_bn2_selector)
+        if _bn2_selector:
+            rn2, _bn2_intermediate = _rn2_result
+        else:
+            rn2, _bn2_intermediate = _rn2_result, None
 
         before = self._n2_nemo_before_tracers(
             state, z_coord=_zc, config=_cfg_b)
@@ -9027,7 +9037,8 @@ class LatLonCGridOceanModel:
                 e3t_0_array)
         return TKEEntryN2Bundle(
             rn2=rn2, rn2b=rn2b, gdepw_Kmm=gdepw, e3w_Kmm=e3w,
-            e3t_Kmm=e3t, e3w_surface_Kmm=e3w_surface)
+            e3t_Kmm=e3t, e3w_surface_Kmm=e3w_surface,
+            bn2_intermediate=_bn2_intermediate)
 
     def _tke_step_entry_p_sh2(
         self, state, *, eta_now=None, u_now=None, v_now=None,
@@ -10030,7 +10041,13 @@ class LatLonCGridOceanModel:
                         _tke_statement_trace_used = (
                             _tke_statement_trace_used._replace(
                                 shear_face_metrics=(
-                                    _tke_shear_face_metrics_used)))
+                                    _tke_shear_face_metrics_used),
+                                bn2_intermediate=(
+                                    None if tke_n2_bundle is None else
+                                    tke_n2_bundle.bn2_intermediate),
+                                bn2_output=(
+                                    None if tke_n2_bundle is None else
+                                    tke_n2_bundle.rn2)))
                     tke_new = _tke_coeff_new.tke_new
                 if _post_mixing:
                     # Phase 1 only (Veros set_tke_diffusivities from the
