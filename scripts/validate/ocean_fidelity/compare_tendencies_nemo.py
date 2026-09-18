@@ -74,6 +74,41 @@ def _fill(a):
     return a.astype(np.float64)
 
 
+IWM_VARS = ("power_bot", "power_cri", "power_nsq", "power_sho",
+            "scale_bot", "scale_cri")
+
+
+def load_iwm_forcing(path: str):
+    """ORCA1's OWN de Lavergne wave-power maps (namzdf_iwm sn_mpb..sn_dsc).
+
+    ORCA1 runs ``ln_zdfiwm = .true.`` (namelist_cfg:434), so NEMO's avt and
+    avm both carry a wave-driven diffusivity that a TKE-only probe does not.
+    Comparing the two Prandtl numbers without it compares different things.
+
+    The six variable names are the ones the namelist itself lists against
+    ``zdfiwm_forcing_TRA.nc``; a missing one RAISES rather than falling back
+    to the uniform-power defaults, because that fallback is a different
+    physical field and would silently answer a different question.
+    """
+    import netCDF4 as nc
+
+    ds = nc.Dataset(path)
+    out = {}
+    for v in IWM_VARS:
+        if v not in ds.variables:
+            raise KeyError(
+                f"{path} has no {v!r}; ORCA1's namzdf_iwm names all of "
+                f"{IWM_VARS} in zdfiwm_forcing_TRA.nc. Refusing to substitute "
+                "the uniform-power fallback, which is a different field.")
+        a = _fill(ds.variables[v][:])
+        if a.ndim == 3:
+            # monthly climatology (namelist frequency -12). The Mode-A state
+            # is NEMO's step-8760 restart = 1 January, so record 0.
+            a = a[0]
+        out[v] = a.reshape(-1)
+    return out
+
+
 def load_pair(tfile: str, ufile: str, vfile: str, rec: int):
     """State at record ``rec-1`` + target avt/trends at record ``rec``."""
     import netCDF4 as nc
@@ -313,7 +348,7 @@ def run_stage_a(d, cfg):
     return K_H, avt_i, wet_pair, (z, ny, nx), K_M, avm_i
 
 
-def run_stage_a2_mode_a(d, rst, cfg_prog):
+def run_stage_a2_mode_a(d, rst, cfg_prog, iwm_maps=None):
     """EXACT Mode-A closure test: NEMO's own restart state INCLUDING the
     prognostic ``en`` -> ONE legoESM en-step (dt=3600, n_iterations=1) ->
     K_H vs NEMO's avt of the very next step (hourly record 0). Same state,
@@ -389,6 +424,35 @@ def run_stage_a2_mode_a(d, rst, cfg_prog):
         jnp.asarray(np.cumsum(dz_c, axis=1)[:, :-1]),
         g=constants.g, eos_form=getattr(cfg_prog, "n2_eos_form", "seos"),
         e3w_int=jnp.asarray(dz_half)))
+    if iwm_maps is not None:
+        # NEMO's zdfphy ordering: the closure runs, then zdf_iwm ADDS onto
+        # avt/avs/avm. k_profiles.py:461-462 does exactly this, adding the
+        # SAME K_iwm to both the tracer and the momentum total -- which is
+        # why leaving it out drives our Prandtl ratio away from NEMO's.
+        from legoesm.ocean.physics.vertical_mixing.internal_wave_mixing import (
+            IWMConfig, IWMForcing, compute_iwm_diffusivity)
+        H = np.sum(np.where(np.isfinite(cols(e3t)), cols(e3t), 0.0), axis=1)
+        forcing = IWMForcing(
+            ebot=jnp.asarray(iwm_maps["power_bot"]),
+            ecri=jnp.asarray(iwm_maps["power_cri"]),
+            ensq=jnp.asarray(iwm_maps["power_nsq"]),
+            esho=jnp.asarray(iwm_maps["power_sho"]),
+            hbot=jnp.asarray(iwm_maps["scale_bot"]),
+            # zdfiwm.F90:421 stores the INVERSE of the file's scale_cri.
+            hcri_inv=jnp.asarray(
+                1.0 / np.maximum(iwm_maps["scale_cri"], 1e-6)))
+        # ORCA1 namzdf_iwm: ln_mevar=.false., ln_tsdiff=.false. (both read
+        # from namelist_cfg:459-460, and both are the IWMConfig defaults).
+        K_wave = np.asarray(compute_iwm_diffusivity(
+            forcing, jnp.asarray(zc), jnp.asarray(dz_half), jnp.asarray(H),
+            jnp.asarray(n2),
+            cfg=IWMConfig(enabled=True, mevar=False, tsdiff=False),
+            rho_0=constants.rho_ocean)[0])
+        print(f"[iwm] K_wave median {np.median(K_wave):.3e} "
+              f"p90 {np.percentile(K_wave, 90):.3e} m2/s; added to BOTH K_H "
+              "and K_M, as zdf_iwm does to avt and avm")
+        K_H = K_H + K_wave
+        K_M = K_M + K_wave
     return K_H, K_M, n2, dz_half
 
 
@@ -885,6 +949,13 @@ def main():
                          "EQUALS the card value -- a no-op arm reported as "
                          "'no effect' is the worst outcome here. Ported from "
                          "nemo_zero_step_closure.py, same semantics.")
+    ap.add_argument("--iwm-forcing", default=None,
+                    help="Path to ORCA1's zdfiwm_forcing_TRA.nc. ORCA1 runs "
+                         "ln_zdfiwm=.true., so its avt AND avm both carry a "
+                         "wave-driven diffusivity; without this the Stage-A2 "
+                         "Prandtl comparison is TKE-only on our side and "
+                         "TKE+wave on NEMO's. Default off keeps every "
+                         "existing number byte-identical.")
     ap.add_argument("--restart-npz", default=None,
                     help="rebuild_nemo_restart.py output; enables the EXACT "
                          "Mode-A closure test (Stage A2, forces --rec 1: the "
@@ -997,7 +1068,9 @@ def main():
         # prognostic=True card, THEN the same overrides Stage A got.
         cfg_a2 = _apply_overrides(
             orca1_zdftke_config(iwm_enabled=args.iwm_backgrounds), "stage_a2")
-        K_H2, K_M2, n2_ours, e3w_a2 = run_stage_a2_mode_a(d2_for_a2(d), rst, cfg_a2)
+        _iwm = load_iwm_forcing(args.iwm_forcing) if args.iwm_forcing else None
+        K_H2, K_M2, n2_ours, e3w_a2 = run_stage_a2_mode_a(
+            d2_for_a2(d), rst, cfg_a2, iwm_maps=_iwm)
         result["stage_a2_mode_a"] = region_report(
             # LABEL FIX 2026-08-13: this said "rec 0", but avt_a2() returns
             # d["avt"], and load_pair(--rec 1) puts NEMO's RECORD 1 avt there —
