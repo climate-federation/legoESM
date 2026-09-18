@@ -726,6 +726,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "Causality probe for the polar-night stable-"
                              "transport runaway; None keeps the scheme "
                              "default byte-identically.")
+    parser.add_argument("--surface-z-ref-model-level", dest="surface_z_ref_model_level",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Tell the ocean MOST solver the real height of the lowest "
+                             "model level instead of labelling its inputs as z_ref (10 m).")
+    parser.add_argument("--surface-ocean-q-sfc-saline", dest="surface_ocean_q_sfc_saline",
+                        action=argparse.BooleanOptionalAction, default=False,
+                        help="Ocean surface humidity = 0.98 x q_sat(SST, p_s) (sea water at "
+                             "the surface pressure) instead of fresh water at the lowest level.")
     parser.add_argument("--gustiness-zi", dest="surface_gustiness_zi", type=float,
                         default=None,
                         help="COARE convective-gustiness BL depth z_i [m]. "
@@ -1054,6 +1062,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "evaporation (cuflxn.F90 0.70/0.75 land vs "
                              "0.85/0.92 ocean). Default "
                              f"{_EXPERIMENT_DEFAULTS.bechtold_use_ifs_land_rhebc}.")
+    parser.add_argument("--bechtold-m-b-max", dest="bechtold_M_b_max", type=float,
+                        default=_EXPERIMENT_DEFAULTS.bechtold_M_b_max,
+                        help="Bechtold cloud-base mass-flux cap [kg/m^2/s], range "
+                             "0.02-0.15 (production 0.05 since 2026-09-16; the "
+                             "old 0.02 fallback bound 71 %% of tropical columns).")
+    parser.add_argument("--bechtold-enable-cmt", dest="bechtold_enable_cmt",
+                        action=argparse.BooleanOptionalAction, default=None,
+                        help="Gregory-1997 convective momentum transport in Bechtold "
+                             "(applied to the MPAS edge winds).")
     parser.add_argument("--bechtold-use-ifs-shallow-closure",
                         dest="bechtold_use_ifs_shallow_closure",
                         action=argparse.BooleanOptionalAction,
@@ -1181,6 +1198,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "uses each scheme's own default (Tiedtke 0.0=off, "
                              "Bechtold 0.7=on, the #929 fix); pass 0.0 to force "
                              "the legacy no-split path.")
+    parser.add_argument("--convective-rain-to-surface",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        dest="convective_rain_to_surface",
+                        help="Route the in-updraught convective rain that survives "
+                             "the scheme's own sub-cloud evaporation straight to "
+                             "surface precipitation (IFS convention) instead of "
+                             "into the microphysics rain tracer, where it is "
+                             "re-evaporated at grid-mean humidity.")
     parser.add_argument("--convective-precip-split", type=str, default="constant",
                         choices=["constant", "autoconversion"],
                         help="Convective precip-split scheme (Bechtold/Tiedtke): "
@@ -1619,6 +1644,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "70-200 hPa, paid for by the mid-troposphere). "
                              "Fixes the unresolved tropical cold point "
                              "without adding levels. Sigma coordinate only.")
+    parser.add_argument("--sigma-refine", type=float, default=None, dest="sigma_refine",
+                        help="Centre (sigma) of the --tropopause-refine density bump; "
+                             "0.12 = tropical cold point (default), ~0.95 = boundary layer.")
+    parser.add_argument("--sigma-refine-width", type=float, default=None,
+                        dest="sigma_refine_width",
+                        help="Log-sigma half-width of the --tropopause-refine bump "
+                             "(default 0.45; ~0.06 for a boundary-layer bump).")
     parser.add_argument("--sigma-top", type=float, default=None, dest="sigma_top",
                         help="sigma-lane model lid as a fraction of p_s "
                              "(default 0.01 = 10 hPa)")
@@ -1941,6 +1973,9 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         tropopause_refine=(args.tropopause_refine
                            if args.tropopause_refine is not None else 1.0),
         sigma_top=(args.sigma_top if args.sigma_top is not None else 0.01),
+        sigma_refine=(args.sigma_refine if args.sigma_refine is not None else 0.12),
+        sigma_refine_width=(args.sigma_refine_width
+                            if args.sigma_refine_width is not None else 0.45),
         sigma_layout=(args.sigma_layout if args.sigma_layout is not None else "standard"),
         use_duogrid=getattr(args, "use_duogrid", False),
     )
@@ -2083,6 +2118,7 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         hard_sat_max_heating_K=args.hard_sat_max_heating_K,
         convective_precip_efficiency=args.convective_precip_efficiency,
         convective_precip_split=args.convective_precip_split,
+        convective_rain_to_surface=args.convective_rain_to_surface,
         autoconv_q_c_crit=args.autoconv_q_c_crit,
         autoconv_pe_max=args.autoconv_pe_max,
         convective_buoyancy_death_memory=args.convective_buoyancy_death_memory,
@@ -2093,6 +2129,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         surface_bulk_scheme=args.surface_bulk_scheme,
         surface_stability_scheme=args.surface_stability_scheme,
         surface_gustiness_zi=args.surface_gustiness_zi,
+        surface_z_ref_model_level=args.surface_z_ref_model_level,
+        surface_ocean_q_sfc_saline=args.surface_ocean_q_sfc_saline,
         hb_kvf_min=args.hb_kvf_min,
         louis_cloudtop_entrainment_efficiency=args.louis_cloudtop_entrainment_efficiency,
         surface_thermo_convention=args.bulk_thermo_convention,
@@ -2254,6 +2292,8 @@ def build_config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         bechtold_dx_m=args.bechtold_dx_m,
         bechtold_use_ifs_downdraft=args.bechtold_use_ifs_downdraft,
         bechtold_use_ifs_shallow_closure=args.bechtold_use_ifs_shallow_closure,
+        bechtold_enable_cmt=args.bechtold_enable_cmt,
+        bechtold_M_b_max=args.bechtold_M_b_max,
         bechtold_use_ifs_capdcycl=args.bechtold_use_ifs_capdcycl,
         bechtold_use_ifs_land_rhebc=args.bechtold_use_ifs_land_rhebc,
         bechtold_use_ifs_snow_melt=args.bechtold_use_ifs_snow_melt,

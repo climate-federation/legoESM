@@ -93,6 +93,9 @@ class TurbulenceSchemeTraits(NamedTuple):
     energy_field: str | None
 
 
+# Sea-water saturation reduction of q_sat (coupler.py uses the same value).
+_Q_SAT_SALINE_FACTOR = 0.98
+
 _ENERGY_FIELD_BY_SCHEME = {
     "tke": "tke",
     "clubb_lite": "tke",
@@ -499,6 +502,16 @@ def make_turbulence_physics(
             f"{model_type!r} pipeline has its own land tile (they would be "
             "silently inert here). Drop them or use model_type='mpas'."
         )
+    if model_type != "mpas":
+        _sub = getattr(materialize_sub_config(turbulence_config),
+                       turbulence_config.scheme, None)
+        _srf = getattr(_sub, "surface", None)
+        if _srf is not None and (getattr(_srf, "z_ref_model_level", False)
+                                 or getattr(_srf, "ocean_q_sfc_saline", False)):
+            raise NotImplementedError(
+                "SurfaceLayerConfig.z_ref_model_level / ocean_q_sfc_saline are "
+                f"implemented on the MPAS turbulence bridge only; model_type="
+                f"{model_type!r} would silently ignore them")
     if model_type == "hydrostatic":
         return _make_hydrostatic_turbulence(turbulence_config, dt)
     elif model_type == "nonhydrostatic":
@@ -729,7 +742,10 @@ def _make_mpas_turbulence(
     _accepts_surface_flux = kernel_accepts_surface_flux(turb_fn)
 
     def physics_fn(state, mesh, sigma_coord, phys_state=None, forcing=None):
-        from legoesm.grids.voronoi import reconstruct_cell_velocity
+        from legoesm.grids.voronoi import (
+            cell_vector_to_edge_normal,
+            reconstruct_cell_velocity,
+        )
 
         tke_out = None
         if turb_fn is None:
@@ -785,7 +801,14 @@ def _make_mpas_turbulence(
             T_sfc = jnp.asarray(forcing["T_sfc"]).reshape(nCells)
         else:
             T_sfc = _resolve_T_sfc(T_col, phys_state)
+        # Static switches from the scheme's surface sub-config (the per-step
+        # prescribed-flux fold below does not touch these fields).
+        _surf = scheme_config.surface
         q_sfc = saturation_mixing_ratio(T_sfc, p_full_col[:, -1])
+        # The ocean correction is added AFTER the land paths below, on the
+        # ocean fraction only, so the land-beta / traced-land humidity keeps
+        # today's fresh-water base (codex whole-branch review, P1).
+        _q_sfc_fresh = q_sfc
         # MPAS land surface boundary: throttle the LAND fraction's surface
         # humidity gradient by a soil-moisture availability beta instead of
         # the saturated infinite-swamp value the nearest-ocean SST fill
@@ -850,6 +873,17 @@ def _make_mpas_turbulence(
             _f_land_col = jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
             q_sfc = beta_limited_surface_humidity(
                 q_sfc, q_v_col[:, -1], _f_land_col, land_beta)
+        if getattr(_surf, "ocean_q_sfc_saline", False):
+            # Sea water at the SURFACE pressure (the coupled lane's convention)
+            # for the ocean fraction: replace that fraction's fresh-water share
+            # of the blend; the land share is untouched.
+            from legoesm.core.bulk_flux import ocean_surface_q_sat
+            _q_ocean = ocean_surface_q_sat(
+                T_sfc, p_s.reshape(nCells), thermo_convention=_surf.thermo_convention,
+                bulk_scheme=_surf.bulk_scheme, saline_factor=_Q_SAT_SALINE_FACTOR)
+            _fo = (1.0 - jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
+                   if f_land is not None else 1.0)
+            q_sfc = q_sfc + _fo * (_q_ocean - _q_sfc_fresh)
 
         # A per-step prescribed surface flux (a diurnal cycle the run-constant
         # config scalar cannot carry) enters here; identity without one.
@@ -868,6 +902,13 @@ def _make_mpas_turbulence(
         # the ocean/ice fraction keep the scheme's own bulk computation.
         _shf_land = (forcing.get("shflx_land") if forcing is not None else None)
         _surface_flux = None
+        if (_shf_land is None
+                and getattr(_surf, "z_ref_model_level", False)):
+            raise ValueError(
+                "surface z_ref_model_level is only honoured on the MPAS path "
+                "that computes the ocean fluxes itself (land fluxes supplied "
+                "via forcing['shflx_land'/'lhflx_land']); this call has none, "
+                "so the switch would be silently inert")
         if _shf_land is not None:
             if f_land is None:
                 raise ValueError(
@@ -886,9 +927,20 @@ def _make_mpas_turbulence(
                 compute_surface_fluxes,
             )
             _fl = jnp.asarray(f_land, dtype=q_sfc.dtype).reshape(nCells)
+            if getattr(_surf, "z_ref_model_level", False):
+                # The inputs ARE lowest-full-level values: tell the MOST solver
+                # their height instead of labelling them as config.z_ref (10 m),
+                # and hand it the potential temperature at that height (COARE:
+                # dT = T_sfc - (T + g/c_p * z), ~1.5 K at 150 m) so the stability
+                # is not read off a dry-adiabatic lapse.
+                _z_in = z_full[:, -1]
+                _T_in = T_col[:, -1] + (constants.g / constants.c_pd) * _z_in
+            else:
+                _z_in = None
+                _T_in = T_col[:, -1]
             _tx, _ty, _sh, _lh, _us = compute_surface_fluxes(
-                u_col[:, -1], v_col[:, -1], T_col[:, -1], q_v_col[:, -1],
-                T_sfc, q_sfc, rho[:, -1], step_config.surface,
+                u_col[:, -1], v_col[:, -1], _T_in, q_v_col[:, -1],
+                T_sfc, q_sfc, rho[:, -1], step_config.surface, z_ref=_z_in,
             )
             _lh_land = jnp.asarray(
                 forcing["lhflx_land"], dtype=q_sfc.dtype).reshape(nCells)
@@ -932,12 +984,7 @@ def _make_mpas_turbulence(
         # vectors (``cellsOnEdge[0]`` and ``cellsOnEdge[1]``).
         du_cell = turb_out.du_dt  # (nCells, nlev)
         dv_cell = turb_out.dv_dt
-        c0 = mesh.cellsOnEdge[0]  # (nEdges,)
-        c1 = mesh.cellsOnEdge[1]  # (nEdges,)
-        du_e_east = 0.5 * (du_cell[c0] + du_cell[c1])
-        dv_e_north = 0.5 * (dv_cell[c0] + dv_cell[c1])
-        angle = mesh.angleEdge[:, None]
-        du_edge_normal = du_e_east * jnp.cos(angle) + dv_e_north * jnp.sin(angle)
+        du_edge_normal = cell_vector_to_edge_normal(du_cell, dv_cell, mesh)
 
         dT_cell = turb_out.dT_dt
 

@@ -3979,6 +3979,102 @@ def test_cloud_cover_condensate_q_ref_round_trip_and_bounds():
         bad.validate_strict()
 
 
+def test_convective_rain_to_surface_round_trips():
+    """--convective-rain-to-surface reaches ExperimentConfig AND the
+    ConvectionConfig the combined-physics lanes build from it."""
+    from legoesm.driver.physics_pipeline import convection_config_for
+
+    parser = build_arg_parser()
+    cfg_default = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical", "--convection", "bechtold"]),
+        parser))
+    assert cfg_default.convective_rain_to_surface is True      # default since 2026-09-16
+    assert convection_config_for(cfg_default).rain_to_surface is True
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold",
+        "--no-convective-rain-to-surface",
+    ]), parser))
+    assert cfg.convective_rain_to_surface is False
+    assert convection_config_for(cfg).rain_to_surface is False
+
+
+def test_surface_height_and_saline_flags_round_trip():
+    """--surface-z-ref-model-level / --surface-ocean-q-sfc-saline reach
+    ExperimentConfig AND the surface sub-config turbulence_config_for builds."""
+    from legoesm.driver.physics_pipeline import turbulence_config_for
+
+    parser = build_arg_parser()
+    default_cfg = build_config_from_args(_postprocess_args(
+        parser.parse_args(["--dataset", "analytical", "--turbulence", "louis"]), parser))
+    assert default_cfg.surface_z_ref_model_level is False
+    assert default_cfg.surface_ocean_q_sfc_saline is False
+
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--turbulence", "louis",
+        "--surface-bulk-scheme", "coare3",
+        "--surface-z-ref-model-level", "--surface-ocean-q-sfc-saline",
+    ]), parser))
+    assert cfg.surface_z_ref_model_level is True
+    assert cfg.surface_ocean_q_sfc_saline is True
+    cfg = cfg._replace(grid=cfg.grid._replace(grid_type="mpas"))
+    surf = turbulence_config_for(cfg).louis.surface
+    assert surf.z_ref_model_level is True
+    assert surf.ocean_q_sfc_saline is True
+    assert surf.bulk_scheme == "coare3"
+    # any other lane resolves its kernel past the bridge guard: refuse there
+    with pytest.raises(ValueError, match="MPAS lane only"):
+        turbulence_config_for(cfg._replace(grid=cfg.grid._replace(grid_type="cubed_sphere")))
+
+
+def test_bechtold_M_b_max_threads_and_validates():
+    """bechtold_M_b_max (the cloud-base mass-flux cap) threads into the
+    hot-loop BechtoldConfig on BOTH resolvers and through the --params map;
+    the default reproduces the production value (0.02, the value the old
+    getattr fallback imposed because the field did not exist); validate_strict
+    enforces the scheme's declared range (0.02, 0.15).  Before this wiring
+    the cap could not be set from any MIP driver: the pipeline read a field
+    named ``bechtold_m_b_max`` that no config carried."""
+    from legoesm.driver.config import ExperimentConfig
+    from legoesm.driver.physics_pipeline import (
+        _resolve_convection,
+        convection_config_for,
+    )
+    from legoesm.driver.run_config_yaml import _ATM_SCALAR_PARAM_MAP
+
+    cfg = ExperimentConfig(convection="bechtold", bechtold_M_b_max=0.08)
+    assert _resolve_convection(cfg)[1].M_b_max == 0.08
+    assert convection_config_for(cfg).bechtold.M_b_max == 0.08
+    assert _resolve_convection(ExperimentConfig(convection="bechtold"))[1].M_b_max == 0.05   # default since 2026-09-16
+    assert _ATM_SCALAR_PARAM_MAP["atm.conv.BechtoldConfig.M_b_max"] == "bechtold_M_b_max"
+    with pytest.raises(ValueError, match="bechtold_M_b_max"):
+        ExperimentConfig(bechtold_M_b_max=0.5).validate_strict()
+
+
+def test_bechtold_enable_cmt_round_trips_and_default_preserves_each_lane():
+    """--bechtold-enable-cmt reaches the BechtoldConfig leaf on both resolvers.
+    The None default keeps every lane where it was before the MPAS wiring:
+    OFF on MPAS (the bridge handed the scheme zero winds), ON elsewhere
+    (BechtoldConfig.enable_cmt); codex review of 2bfdf5413 caught the first
+    version silently switching the spectral lane's CMT off."""
+    from legoesm.driver.physics_pipeline import _resolve_convection, convection_config_for
+
+    parser = build_arg_parser()
+    cfg = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold", "--bechtold-enable-cmt"]), parser))
+    assert cfg.bechtold_enable_cmt is True
+    assert _resolve_convection(cfg)[1].enable_cmt is True
+    assert convection_config_for(cfg).bechtold.enable_cmt is True
+    off = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold", "--no-bechtold-enable-cmt"]), parser))
+    assert convection_config_for(off).bechtold.enable_cmt is False
+    dflt = build_config_from_args(_postprocess_args(parser.parse_args([
+        "--dataset", "analytical", "--convection", "bechtold"]), parser))
+    assert dflt.bechtold_enable_cmt is None
+    assert convection_config_for(dflt._replace(grid=dflt.grid._replace(grid_type="mpas"))).bechtold.enable_cmt is False
+    assert convection_config_for(dflt._replace(grid=dflt.grid._replace(grid_type="gaussian"))).bechtold.enable_cmt is True
+
+
 def test_persistent_dgrid_flag_flows_to_config_1028():
     """--persistent-dgrid reaches DycoreConfig, and OFF is the default.
 

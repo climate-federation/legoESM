@@ -73,6 +73,7 @@ def compute_surface_fluxes(
     q_sfc: jax.Array,
     rho: jax.Array,
     config: SurfaceLayerConfig,
+    z_ref=None,
 ) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
     """Compute bulk aerodynamic surface fluxes.
 
@@ -98,6 +99,9 @@ def compute_surface_fluxes(
         Lowest-level air density [kg/m^3], shape (ncol,).
     config : SurfaceLayerConfig
         Surface layer parameters.
+    z_ref : array or None
+        Per-column reference height [m] overriding ``config.z_ref`` (MOST
+        schemes only; the constant-coefficient path ignores it).
 
     Returns
     -------
@@ -122,7 +126,7 @@ def compute_surface_fluxes(
     if config.bulk_scheme in ("most", "coare3", "large_yeager"):
         tau_x, tau_y, shflx, lhflx, ustar = compute_most_fluxes(
             u, v, T, q_v, T_sfc, q_sfc, rho,
-            z_ref=config.z_ref,
+            z_ref=(config.z_ref if z_ref is None else z_ref),
             z0_init=config.z0,
             scheme=config.bulk_scheme,
             n_iter=config.bulk_n_iter,

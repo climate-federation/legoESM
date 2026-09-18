@@ -1756,6 +1756,8 @@ class ModelDriver:
             self.sigma = create_sigma_coordinate(
                 gc.nlev, sigma_top=gc.sigma_top,
                 tropopause_refine=getattr(gc, "tropopause_refine", 1.0),
+                sigma_refine=getattr(gc, "sigma_refine", 0.12),
+                refine_width=getattr(gc, "sigma_refine_width", 0.45),
                 layout=gc.sigma_layout)
 
         _lid = (f", sigma_top={gc.sigma_top:g}, layout={gc.sigma_layout}"

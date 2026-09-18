@@ -29,7 +29,6 @@ from legoesm.grids.vertical import (
     HeightCoordinate,
     SigmaCoordinate,
     TerrainMetric,
-    pressure_from_sigma,
     compute_sigma_dot_and_total,
     compute_pressure_velocity,
 )
@@ -388,9 +387,11 @@ def _make_hydrostatic_convection(
         shape_3d = T.shape
         shape_2d = p_s.shape
 
-        # Pressure at full and half levels
-        p_full = pressure_from_sigma(sigma_coord.sigma_full, p_s)
-        p_half = pressure_from_sigma(sigma_coord.sigma_half, p_s)
+        # Pressure at full and half levels from the coordinate's OWN protocol
+        # (byte-identical to sigma*p_s on a SigmaCoordinate; on a hybrid
+        # coordinate sigma_half is A+B and sigma*p_s is NOT the layer mass).
+        p_full = sigma_coord.pressure_at_full(p_s)
+        p_half = sigma_coord.pressure_at_half(p_s)
 
         # Reshape to columns generically for any grid topology.
         # Cubed-sphere ``shape_2d=(6,n,n)`` → ncol = 6·n·n.
@@ -419,12 +420,9 @@ def _make_hydrostatic_convection(
         # lat-lon the prognostic winds live at cell centres so the
         # ``(...,nlev) → (ncol, nlev)`` reshape works directly.  On
         # MPAS the prognostic ``u`` is the normal velocity on edges
-        # (``shape (nEdges, nlev)``) so the reshape would mismatch
-        # ``ncol = nCells``.  In that case we degrade gracefully to
-        # zero u/v columns — the CMT-capable scheme still runs (it
-        # produces zero CMT) and the rest of the column physics
-        # (Tiedtke / ZM / Bechtold mass-flux closures) is unaffected.
-        # Proper edge→cell interpolation for MPAS CMT is a follow-up.
+        # (``shape (nEdges, nlev)``): rebuild cell-centred winds with the
+        # Perot reconstruction (before 2026-09-15 this branch handed the
+        # scheme zero winds, so CMT was silently dead on the MPAS lane).
         if is_cmt_capable:
             _u_data = state.u.data
             if _u_data.shape[0] == ncol or _u_data.shape[:-1] == shape_2d:
@@ -434,10 +432,27 @@ def _make_hydrostatic_convection(
                     if state.v is not None
                     else jnp.zeros_like(u_col)
                 )
+            elif hasattr(grid, "cellsOnEdge") and hasattr(grid, "angleEdge"):
+                if bool(getattr(convection_config, "mpas_cmt", False)):
+                    # MPAS: the prognostic wind is the edge-normal velocity
+                    # (nEdges, nlev); rebuild cell-centred (u, v) for CMT.
+                    from legoesm.grids.voronoi import reconstruct_cell_velocity
+
+                    u_col, v_col = reconstruct_cell_velocity(_u_data, grid)
+                    u_col = u_col.astype(_state_dtype)
+                    v_col = v_col.astype(_state_dtype)
+                else:
+                    # mpas_cmt off: keep the pre-2026-09-15 zero winds bit for
+                    # bit for EVERY scheme (Tiedtke / ZM keep enable_cmt=True
+                    # but received zero winds here; the diurnal-CAPE wind term
+                    # stays inert on this lane — separate decisions).
+                    u_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+                    v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
             else:
-                # MPAS / unsupported wind staggering: zero CMT inputs.
-                u_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
-                v_col = jnp.zeros((ncol, nlev), dtype=_state_dtype)
+                raise ValueError(
+                    "convection: CMT-capable scheme received winds of shape "
+                    f"{_u_data.shape} that are neither cell columns nor MPAS "
+                    "edge normals")
         else:
             u_col = None
             v_col = None
@@ -753,6 +768,7 @@ def _make_hydrostatic_convection(
         # AMIP, where the implied precip simply leaves the prescribed surface;
         # a convective-precip path here is a tracked follow-up).
         tracer_tends = None
+        _precip_conv = None
         if conv_fn is not None:
             dq_v_dt = conv_out.dq_v_dt.reshape(shape_3d)
             dq_c_conv_dt = conv_out.dq_c_conv_dt.reshape(shape_3d)
@@ -762,8 +778,12 @@ def _make_hydrostatic_convection(
             # ``precip_efficiency``) alongside the anvil-cloud source
             # ``dq_c_conv_dt``.  The unified PhysicsPipeline column-integrates
             # dq_r into same-step surface precip; this standalone bridge has no
-            # surface-precip accumulator, so we CONSERVE it: route it to the
-            # ``q_r`` rain tracer when the state has one (microphysics sediments
+            # surface-precip accumulator of its own, so by default we CONSERVE it in
+            # the column: route it to the ``q_r`` rain tracer when the state has one
+            # (microphysics sediments it -- and re-evaporates it at grid-mean RH;
+            # ``config.rain_to_surface`` instead emits it as the ``precip`` field the
+            # combined-physics accumulator sums, the IFS convention)
+            # (microphysics sediments
             # it), else fold it back into ``q_c`` so total convective condensate
             # (dq_c + dq_r) is preserved — byte-identical to the pre-split
             # all-condensate-to-cloud routing.  SIGN: ``dq_r_conv_dt >= 0`` is a
@@ -771,7 +791,11 @@ def _make_hydrostatic_convection(
             # no rain split emit ``None`` -> no-op (byte-identical).
             _dq_r_conv = conv_out.dq_r_conv_dt
             _has_qr = state.tracers is not None and "q_r" in state.tracers
-            if _dq_r_conv is not None and not _has_qr:
+            # Static Python bool (closure constant): rain_to_surface routes the
+            # survivor rain out of the column as surface precip below instead
+            # of into q_r / q_c.
+            _to_sfc = bool(getattr(convection_config, "rain_to_surface", False))
+            if _dq_r_conv is not None and not _has_qr and not _to_sfc:
                 dq_c_conv_dt = dq_c_conv_dt + _dq_r_conv.reshape(shape_3d)
             tracer_tends = {
                 "q_v": Field(
@@ -783,7 +807,7 @@ def _make_hydrostatic_convection(
                     dims=dims_3d, units="kg/kg/s",
                 ),
             }
-            if _dq_r_conv is not None and _has_qr:
+            if _dq_r_conv is not None and _has_qr and not _to_sfc:
                 tracer_tends["q_r"] = Field(
                     data=_dq_r_conv.reshape(shape_3d), name="dq_r_conv_dt",
                     dims=dims_3d, units="kg/kg/s",
@@ -808,6 +832,13 @@ def _make_hydrostatic_convection(
                 _p_conv_diag = jnp.sum(
                     jnp.maximum(_dq_r_conv.reshape(ncol, nlev), 0.0)
                     * _dp_col, axis=-1) / constants.g
+                if _to_sfc:
+                    # Column water removed == this flux (the q_r/q_c hand-off
+                    # above is skipped); latent heat already booked by the plume.
+                    _precip_conv = Field(
+                        data=_p_conv_diag.reshape(shape_2d).astype(_ps_dtype),
+                        name="precip_conv", dims=dims_2d, units="kg/m^2/s",
+                    )
                 if isinstance(conv_prog_out, dict):
                     conv_prog_out = {**conv_prog_out,
                                      "conv_precip": _p_conv_diag}
@@ -829,25 +860,31 @@ def _make_hydrostatic_convection(
         # elsewhere), zeroed since CMT was disabled by the column-
         # extraction step above.
         u_target_shape = state.u.data.shape
-        if conv_fn is not None and conv_out.du_dt_conv is not None:
-            # Reshape only when the column-physics output matches the
-            # u-grid layout.  When MPAS shifted CMT to zero (edge winds
-            # not interpolated to cells) we keep the zero on the
-            # u-grid layout instead of broadcasting cells back to edges.
-            try:
+        if (conv_fn is not None and conv_out.du_dt_conv is not None
+                and (state.v is not None or not hasattr(grid, "cellsOnEdge")
+                     or bool(getattr(convection_config, "mpas_cmt", False)))):
+            if state.v is None and hasattr(grid, "cellsOnEdge"):
+                # MPAS: project the cell-centred (du, dv) onto the edge
+                # normals (the turbulence bridge's projection, shared).
+                from legoesm.grids.voronoi import cell_vector_to_edge_normal
+
+                _dv_conv = (conv_out.dv_dt_conv if conv_out.dv_dt_conv is not None
+                            else jnp.zeros_like(conv_out.du_dt_conv))
+                du_dt = cell_vector_to_edge_normal(
+                    conv_out.du_dt_conv.reshape(ncol, nlev),
+                    _dv_conv.reshape(ncol, nlev), grid,
+                    dp_cell=p_half_col[:, 1:] - p_half_col[:, :-1],
+                ).astype(_state_dtype)
+            else:
+                # A shape mismatch here is a wiring defect: raise, never zero.
                 du_dt = conv_out.du_dt_conv.reshape(u_target_shape)
-            except (TypeError, ValueError):
-                du_dt = jnp.zeros(u_target_shape, dtype=_state_dtype)
         else:
             du_dt = jnp.zeros(u_target_shape, dtype=_state_dtype)
         dv_dt_field = None
         if state.v is not None:
             v_target_shape = state.v.data.shape
             if conv_fn is not None and conv_out.dv_dt_conv is not None:
-                try:
-                    dv_dt = conv_out.dv_dt_conv.reshape(v_target_shape)
-                except (TypeError, ValueError):
-                    dv_dt = jnp.zeros(v_target_shape, dtype=_state_dtype)
+                dv_dt = conv_out.dv_dt_conv.reshape(v_target_shape)
             else:
                 dv_dt = jnp.zeros(v_target_shape, dtype=_state_dtype)
             dv_dt_field = Field(
@@ -874,6 +911,7 @@ def _make_hydrostatic_convection(
                 dims=dims_2d, units="m^2/s^3",
             ),
             tracer_tendencies=tracer_tends,
+            precip=_precip_conv,
         )
         return tendencies, conv_prog_out
 

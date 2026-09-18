@@ -1657,6 +1657,23 @@ class BechtoldConfig(NamedTuple):
     # 10 days, r16); RCE-inert (no trigger data).  Flip needs a skill-gated
     # longer run.  False is byte-identical legacy.
     use_ifs_shallow_closure: bool = False
+    # Faithful IFS chain (2026-09-17, user decision): selects the ported
+    # cubasen trigger + cuascn ascent + cumastrn closure + cudtdqn tendencies
+    # AS A WHOLE, in place of the legacy Bechtold reduction.  Static python
+    # bool, so only one branch is ever traced.
+    #
+    # INCOMPLETE -- DO NOT SCORE A RUN WITH THIS ON.  Measured 2026-09-17 on a
+    # frozen deep column: a +-11000 K/day dipole across the two lowest levels.
+    # Cause (codex oracle review): the chain omits CUFLXN, which cumastrn runs
+    # BEFORE cudtdqn (cumastrn.F90:1104 then :1226) to subtract the
+    # environmental transport and build the below-cloud-base fluxes, so raw
+    # plume fluxes reach a stage that expects processed ones.  Also open: the
+    # humidity convention differs across the trigger/ascent boundary, KTYPE is
+    # not reclassified against the actual ascent top (cumastrn.F90:634-641),
+    # the detrained condensate and precipitation are dropped from the host
+    # water budget, and the early return bypasses the legacy downdraught and
+    # sub-cloud evaporation rather than keeping them.
+    use_ifs_ascent: bool = False
     # IFS RCAPDCYCL=2 diurnal-cycle CAPE correction (cumastrn.F90:780-833;
     # see bechtold._ifs_capdcycl): subtracts the sub-cloud CAPE production
     # over a BL timescale so land deep convection peaks late afternoon.
@@ -1880,3 +1897,15 @@ class ConvectionConfig(NamedTuple):
     # NOT YET IMPLEMENTED in the production pipeline (see docstring above):
     # convection runs every step; only the SCM reads this (rejection guard).
     update_interval_steps: int = 1
+    # rain_to_surface=True: the in-updraught rain that survives the scheme's own
+    # downdraft + sub-cloud evaporation leaves the column as SURFACE precipitation
+    # (IFS cuflxn convention); False: it is handed to the microphysics rain
+    # tracer q_r at its formation levels, where the microphysics evaporates it
+    # again at grid-mean humidity.  The driver sets this from
+    # ExperimentConfig.convective_rain_to_surface (default True, user 2026-09-16);
+    # the bare scheme default stays False for the standalone / idealized callers.
+    rain_to_surface: bool = False
+    # MPAS only: hand a CMT-capable scheme the Perot-reconstructed cell winds
+    # and project its (du, dv) onto the edge normals.  False = every scheme
+    # keeps the zero winds the bridge always gave it on this mesh (CMT inert).
+    mpas_cmt: bool = False
