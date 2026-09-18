@@ -73,7 +73,7 @@ arm() {   # arm <label> <extra flags...>
     --vfile "$TRD/ORCA1_1h_20010101_20010101_trd1h_V.nc" \
     --rec 1 --restart-npz "$RST" --skip-maps \
     --iwm-forcing "$IWM" --iwm-backgrounds \
-    --output-dir "$OUT/ice_$label" "$@" 2>&1 | tail -20
+    --output-dir "$OUT/ice_$label" "$@" 2>&1 | tail -45
   [ ${PIPESTATUS[0]} -eq 0 ] || { echo "FATAL: arm $label failed"; RC=1; }
 }
 
