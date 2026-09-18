@@ -1320,6 +1320,7 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     tke_rhs_intermediate: str = ""  # Private one-output compiled-RHS walk.
     bn2_intermediate: str = ""  # Private one-output compiled-bn2 walk.
     bn2_alpha_beta_override: object = None  # Recorded-entry operator input.
+    bn2_tracer_override: object = None  # Recorded-entry T/S operator input.
 
 
 def rk3_stage_velocity_update(
@@ -8965,11 +8966,21 @@ class LatLonCGridOceanModel:
         from legoesm.ocean.physics.vertical_mixing.tke import TKEEntryN2Bundle
         from legoesm.ocean.vertical import extrapolate_below_seafloor
 
-        T_now = state.T.data
-        S_now = state.S.data
-        if getattr(_zc, "is_active", None) is not None:
-            T_now = extrapolate_below_seafloor(T_now, _zc)
-            S_now = extrapolate_below_seafloor(S_now, _zc)
+        _bn2_tracers = self._nemo_ws_test_hooks.bn2_tracer_override
+        if _bn2_tracers is None:
+            T_now = state.T.data
+            S_now = state.S.data
+            if getattr(_zc, "is_active", None) is not None:
+                T_now = extrapolate_below_seafloor(T_now, _zc)
+                S_now = extrapolate_below_seafloor(S_now, _zc)
+        else:
+            T_now, S_now = (jnp.asarray(value) for value in _bn2_tracers)
+            if (T_now.shape != state.T.data.shape
+                    or S_now.shape != state.S.data.shape):
+                raise ValueError(
+                    "the private bn2 tracer override must match state T/S; "
+                    f"got T={T_now.shape}, S={S_now.shape}, "
+                    f"state={state.T.data.shape}")
         gdept, gdepw, e3w = nemo_bn2_live_geometry(
             _zc, state.eta.data, state.H_bathy.data,
             r3t_evaluation="nemo_reciprocal")

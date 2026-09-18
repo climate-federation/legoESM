@@ -167,3 +167,14 @@ ALP/BET Horner program, including `SQRT(ABS(S+rdeltaS)*r1_S0)` and beta's
 `/zs`, then enters the unchanged `bn2` loop at `:1609-1618`. P1-P8 and their
 falsifiers remain frozen; only the erroneously named upstream input producer
 is retracted and replaced before rerunning the refused gate.
+
+The first corrected-branch replay was also refused before production scoring:
+it was numerically exact but differed from the recorded final output in five
+dry `+0.0`/`-0.0` words because it reconstructed `pab` and tracer differences
+from legoESM's below-seafloor-extrapolated T/S rather than the raw NEMO entry
+T/S promised above. That refused run is retained as
+`bn2_masked_rn2_production_jit_v2.log`. The gate now passes the raw recorded
+T/S and replay-certified TEOS-10 `pab` as the given-input arm and reports the
+ordinary model-upstream arm separately. This is an input-bridge correction,
+not a new arithmetic prediction; P1 still applies to the ordinary chained
+arm and P2 to the given-NEMO-input arm.

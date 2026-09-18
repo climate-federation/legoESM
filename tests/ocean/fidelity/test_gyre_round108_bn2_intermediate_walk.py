@@ -116,3 +116,4 @@ def test_private_bn2_hooks_default_to_no_measurement():
     hooks = _NEMOWSRK3TestHooks()
     assert hooks.bn2_intermediate == ""
     assert hooks.bn2_alpha_beta_override is None
+    assert hooks.bn2_tracer_override is None

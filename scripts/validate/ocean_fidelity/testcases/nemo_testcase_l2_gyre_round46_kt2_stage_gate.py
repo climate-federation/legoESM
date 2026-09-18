@@ -3158,7 +3158,6 @@ def _bn2_source_replay(state, card, operand_record: dict) -> dict:
     that independently recorded output BIT before exposing any local value.
     """
     from legoesm.ocean.eos import _NEMO_RHO0, _ROQUET_TEOS10
-    from legoesm.ocean.vertical import extrapolate_below_seafloor
 
     arrays = operand_record["arrays"]
     z_coord = card.recipe.z_coord
@@ -3170,10 +3169,11 @@ def _bn2_source_replay(state, card, operand_record: dict) -> dict:
         value = np.asarray(arrays[name], dtype=np.float64)
         return value.swapaxes(0, 1) if value.ndim >= 2 else value
 
-    T = np.asarray(
-        extrapolate_below_seafloor(state.T.data, z_coord), dtype=np.float64)
-    S = np.asarray(
-        extrapolate_below_seafloor(state.S.data, z_coord), dtype=np.float64)
+    # The state bridge installed NEMO's raw step-entry T/S.  Do not apply the
+    # model's below-seafloor extrapolation here: ``bn2`` consumes the recorded
+    # fields verbatim, and dry signed-zero words are part of the bit contract.
+    T = np.asarray(state.T.data, dtype=np.float64)
+    S = np.asarray(state.S.data, dtype=np.float64)
     require(T.shape == S.shape and T.ndim == 3,
             f"round-108 T/S entry shape mismatch: {T.shape} vs {S.shape}")
     nlev = T.shape[-1]
@@ -3873,6 +3873,10 @@ def _tke_program_twin(
             None if bn2_replay is None else (
                 jnp.asarray(bn2_replay["inputs"]["alpha"]),
                 jnp.asarray(bn2_replay["inputs"]["beta"]))),
+        bn2_tracer_override=(
+            None if bn2_replay is None else (
+                jnp.asarray(bn2_replay["inputs"]["T"]),
+                jnp.asarray(bn2_replay["inputs"]["S"]))),
         barotropic_raw_history_override=raw_history,
         stage_barotropic_output_override=_barotropic_override(
             records, advmean_root, 2),
@@ -3886,6 +3890,16 @@ def _tke_program_twin(
     if bn2_intermediate:
         given_trace = jax.device_get(production_step(
             model, state, card.dt_s, freshwater, recorded_surface))
+        chained_model = LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord, cfg,
+            _nemo_ws_test_hooks=_NEMOWSRK3TestHooks(
+                expose_live_stage_operands=True,
+                bn2_intermediate=bn2_intermediate,
+                barotropic_raw_history_override=raw_history,
+                stage_barotropic_output_override=_barotropic_override(
+                    records, advmean_root, 2)))
+        chained_trace = jax.device_get(production_step(
+            chained_model, state, card.dt_s, freshwater, recorded_surface))
         return {
             "format": "nemo-testcase-l2-gyre-bn2-production-walk-v1",
             "execution": execution_label,
@@ -3896,7 +3910,9 @@ def _tke_program_twin(
             "given_nemo_entry_bn2_intermediate": _bn2_intermediate_rows(
                 given_trace, bn2_replay, "NEMO_TKE_RECORDED",
                 bn2_intermediate, plant, execution=execution_label),
-            "chained": None,
+            "chained": _bn2_intermediate_rows(
+                chained_trace, bn2_replay, "MODEL_BN2_UPSTREAM",
+                bn2_intermediate, None, execution=execution_label),
         }
     if requested_rhs_materialization or rhs_intermediate:
         given_trace = jax.device_get(production_step(
