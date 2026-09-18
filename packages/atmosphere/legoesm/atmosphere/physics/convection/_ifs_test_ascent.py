@@ -1204,6 +1204,21 @@ def _hydrostatic_geopotential(T, q, p_half):
     return phi_half, phi_full
 
 
+def _layer_centre(p_half):
+    """Layer-centre pressures of a half-level grid (ncol, nlev+1) ->
+    (ncol, nlev): 0.5*(p_half[:, :-1] + p_half[:, 1:]).  This is THE
+    location convention of ifs_departure_search_refined: every level value
+    is its LAYER MEAN located at this half-level midpoint, DERIVED FROM
+    p_half -- never the caller's p_full, which on a log-midpoint or
+    IFS-hybrid grid differs from it by a fraction of a layer.  Both the
+    r == 1 arm and every r > 1 path of the refined wrapper build the
+    pressure they hand to the source-literal ifs_departure_search with
+    this one expression; native ifs_departure_search keeps the source's
+    PAP convention (the model's full-level pressure, as handed in) and is
+    unchanged."""
+    return 0.5 * (p_half[:, :-1] + p_half[:, 1:])
+
+
 def _refine_half_levels(p_half, r):
     """Refined half levels: r equal-pressure sub-layers per parent layer.
 
@@ -1281,6 +1296,34 @@ def ifs_departure_search_refined(T, q_v, p_full, p_half, geo_full, geo_half,
     source-literal ``ifs_departure_search`` on a vertically refined copy of
     each column and map the results back to the parent levels.
 
+    CONVENTION (one meaning, both arms): this function treats every level
+    value it is handed (T, q_v, dq_dt_adv) as its LAYER MEAN, located at
+    the half-level midpoint _layer_centre(p_half) derived from p_half
+    rather than trusting the caller's p_full, which is NOT used as a
+    location anywhere here.  The GEOPOTENTIAL is derived here too, by
+    hydrostatic integration of p_half, so both the pressure and the
+    geopotential a level value is paired with come from one geometry;
+    the geo_full / geo_half arguments are consequently unused, as is
+    p_full, and all three are kept for signature parity with the native
+    search (callers pass the same argument tuple to both).  Both the
+    r == 1 arm and every r > 1 path therefore hand the source-literal
+    search a layer-centre pressure and a module-built geopotential; the
+    native
+    ``ifs_departure_search`` keeps the source's PAP convention (the
+    model's full-level pressure, as handed in) and is unchanged.
+
+    Two of that search's pressure tests are PORT-LOCAL rather than
+    source-literal, so they are covered by this convention too and get
+    layer centres through this wrapper (codex, correcting an earlier
+    audit): the NJKT1/NJKT2 departure and test-top bounds, which the
+    source precomputes ONCE as level INDICES from a standard pressure
+    profile (sucumf.F90:284, ``IF(STPRE(JLEV) > 350.E2)NJKT1=JLEV``)
+    rather than testing PAP per column, and the optional ``cell_centre``
+    mixed-layer gate, where the source uses a half-level difference
+    (cubasen.F90:400, ``PAPH(KLEV+1)-PAPH(JKK-1) < 60.E2``).  The
+    saturation calls ARE source-literal: satur.F90:120 divides by
+    PAPRSF, the full-level pressure.
+
     PURPOSE: the coarse-grid departure sampling defect.  On ~33 hPa
     layers (L60-like grids) the first elevated departure launches with
     cloud-layer air: the cuinin half-level rules hand the parcel the
@@ -1348,10 +1391,26 @@ def ifs_departure_search_refined(T, q_v, p_full, p_half, geo_full, geo_half,
     if r < 1:
         raise ValueError(
             f"IFSTestAscentConfig.column_refine must be >= 1, got {r}")
+
+    # The GEOPOTENTIAL is a level value too, so it gets the same treatment as
+    # the pressure: derived here from p_half by the module's own hydrostatic
+    # integration rather than taken from the caller, in BOTH arms.  Leaving
+    # the caller's geo_full in place would reintroduce the very seam this
+    # convention removes -- the r > 1 path already inverts the reconstructed
+    # dry static energy against a module-built refined geopotential, so a
+    # caller whose geopotential sits on a different geometry would have its
+    # temperature offset by the difference (GLM review).
+    geo_half, geo_full = _hydrostatic_geopotential(T, q_v, p_half)
+
     if r == 1:
-        return ifs_departure_search(T, q_v, p_full, p_half, geo_full,
-                                    geo_half, shf_w_m2, lhf_w_m2, ustar,
-                                    land_frac, dq_dt_adv, cfg)
+        # SAME convention as every r > 1 path: the level values' location
+        # is the layer centre derived from p_half, not the caller's
+        # p_full.  The old early return forwarded the caller's p_full,
+        # which made the refinement's anchoring a function of r on any
+        # grid where p_full != mid(p_half).
+        return ifs_departure_search(T, q_v, _layer_centre(p_half), p_half,
+                                    geo_full, geo_half, shf_w_m2, lhf_w_m2,
+                                    ustar, land_frac, dq_dt_adv, cfg)
 
     ncol, nlev = T.shape
     c_pd = constants.c_pd
@@ -1366,8 +1425,8 @@ def ifs_departure_search_refined(T, q_v, p_full, p_half, geo_full, geo_half,
     # the surface half level p_half[:, nlev] is appended unchanged, every
     # sub-layer has positive thickness, and r = 1 reproduces p_half
     p_half_r = _refine_half_levels(p_half, r)
-    # full levels: midpoints of the refined half intervals (sub-layer centres)
-    p_full_r = 0.5 * (p_half_r[:, :-1] + p_half_r[:, 1:])
+    # full levels: sub-layer centres, the same _layer_centre convention
+    p_full_r = _layer_centre(p_half_r)
 
     # ---- reconstruction (traced, computed once per column): the
     # Delta-p-conservative finite-volume piecewise-linear minmod operator
@@ -1376,7 +1435,7 @@ def ifs_departure_search_refined(T, q_v, p_full, p_half, geo_full, geo_half,
     # p_full); children are the sub-layer means at the refined sub-layer
     # centres.  This replaces the old clipped linear ramp between parent
     # FULL levels, which was half-cell shifted and NOT conservative.
-    c_par = 0.5 * (p_half[:, :-1] + p_half[:, 1:])       # parent centres
+    c_par = _layer_centre(p_half)                        # parent layer centres
     h_par_dp = p_half[:, 1:] - p_half[:, :-1]            # parent thicknesses
     k_par = jnp.repeat(jnp.arange(nlev), r)              # (nlev*r,) static
 

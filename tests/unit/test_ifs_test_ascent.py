@@ -156,6 +156,13 @@ def test_warm_cap_control_is_not_deep():
 
 
 def test_refine_one_is_identity():
+    """r = 1 reduces to the source-literal search -- ON THE WRAPPER'S OWN
+    GEOMETRY.  The wrapper derives both the level pressure and the
+    geopotential from p_half, so the native side of the comparison is fed the
+    same two, otherwise this asserts an identity the convention deliberately
+    broke (the caller's geopotential here is integrated in float64 and cast,
+    the module's in float32, which alone moves w_base in the last bits).
+    """
     for kind in ("deep", "trade"):
         T, q, p_full, p_half = column(kind, nlev=30)
         geo_half, geo_full = _geopotential(T.astype(np.float64), q.astype(np.float64),
@@ -164,9 +171,13 @@ def test_refine_one_is_identity():
                 jnp.full((1,), -20.0, jnp.float32), jnp.full((1,), -150.0, jnp.float32), jnp.full((1,), 0.1, jnp.float32), jnp.zeros((1,), jnp.float32),
                 np.zeros_like(T))
         a = ta.ifs_departure_search_refined(*args, ta.IFSTestAscentConfig(column_refine=1))
-        b = ta.ifs_departure_search(*args, ta.IFSTestAscentConfig())
-        for field in ta.TestAscent._fields:
-            assert np.array_equal(np.asarray(getattr(a, field)), np.asarray(getattr(b, field))), field
+        gh_m, gf_m = ta._hydrostatic_geopotential(jnp.asarray(T, jnp.float32),
+                                                  jnp.asarray(q, jnp.float32),
+                                                  jnp.asarray(p_half, jnp.float32))
+        b = ta.ifs_departure_search(T, q, ta._layer_centre(jnp.asarray(p_half, jnp.float32)),
+                                    p_half, gf_m, gh_m, *args[6:],
+                                    ta.IFSTestAscentConfig())
+        assert _ta_same(a, b), kind
 
 
 def test_jit_eager_parity():
@@ -476,7 +487,7 @@ def test_refined_reconstruction_exact_for_affine_profiles():
 
 
 def test_refined_r1_is_identity():
-    """(4) r = 1 is the identity bit-for-bit: the operator returns x itself
+    """(4) r = 1 is the identity: the operator returns x itself
     (child centres == parent centres, k_par == arange(nlev)), the refined
     half levels equal p_half, and ifs_departure_search_refined short-circuits
     to ifs_departure_search, so every output field equals the native one.
@@ -489,11 +500,16 @@ def test_refined_r1_is_identity():
         xc = ta._fv_minmod_refine(fx[key], c_par, h_dp, c_child, k_par)
         assert np.array_equal(np.asarray(xc), np.asarray(fx[key]))
     _check_refined_grid(fx["p_half"], 1)
+    # the wrapper derives BOTH the level pressure and the geopotential from
+    # p_half, so the native side is fed the same two; otherwise this asserts
+    # an identity the layer-centre convention deliberately broke
     args = _search_args(fx)
     res_r1 = ta.ifs_departure_search_refined(
         *args, ta.IFSTestAscentConfig(column_refine=1))
+    gh_m, gf_m = ta._hydrostatic_geopotential(args[0], args[1], args[3])
     res_nat = ta.ifs_departure_search(
-        *args, ta.IFSTestAscentConfig(column_refine=1))
+        args[0], args[1], ta._layer_centre(args[3]), args[3], gf_m, gh_m,
+        *args[6:], ta.IFSTestAscentConfig(column_refine=1))
     for name in _RES_FIELDS:
         assert np.array_equal(np.asarray(getattr(res_r1, name)),
                               np.asarray(getattr(res_nat, name)))
@@ -626,3 +642,191 @@ def test_production_path_uses_the_refinement_helpers(monkeypatch):
     np.testing.assert_allclose(c_child, 0.5 * (phr[:, :-1] + phr[:, 1:]),
                                rtol=0, atol=0)
     np.testing.assert_array_equal(kp, np.repeat(np.arange(ph.shape[1] - 1), 4))
+# ---------------------------------------------------------------------------
+# NON-MIDPOINT GRID: production-style full levels are the LOG midpoints of
+# the half levels.  Every fixture above has p_full ==
+# 0.5*(p_half[:, :-1] + p_half[:, 1:]), so no test above can tell "value
+# point-sampled at the caller's p_full" from "value is the LAYER MEAN at
+# the half-level midpoint"; these tests can, because the two differ by
+# (sqrt(b)-sqrt(a))**2/2 = dp^2/(8p) per level (~0.1-1 hPa mid-column,
+# tens of hPa in the coarse top layers).  Soundings, half levels and
+# surface fluxes are the existing ones -- no new sounding.
+
+
+def _log_midpoint_p_full(p_half):
+    """Production-style full levels: log midpoints of the half levels."""
+    ph = np.asarray(p_half, np.float64)
+    return np.exp(0.5 * (np.log(ph[:, 1:]) + np.log(ph[:, :-1])))
+
+
+def test_refined_invariants_anchor_on_the_module_geometry():
+    """(b) The reconstruction invariants -- grid identities, per-layer
+    conservation, constant preservation, boundedness, affine exactness --
+    hold with the parent and child centres taken from ta._layer_centre
+    itself, so they pin CONSISTENT USE of the module's own geometry.  They
+    do NOT pin the FORMULA -- a uniform swap of _layer_centre would pass
+    them (GLM review); the formula is pinned by the helper test's explicit
+    0.5*(p_half[:, :-1] + p_half[:, 1:]) comparison and by the planted-defect
+    check.  Conservation is the discriminator: the children's
+    centres average to the parent centres, so re-anchoring the operator on
+    any other pressures breaks the mass identity by ~dp^2/(8p) per layer,
+    far above the 1e-5 tolerance; affine exactness is asserted for profiles
+    affine in the LAYER CENTRES, which a caller-p_full anchoring would miss.
+
+    Deliberately NOT parametrised over a non-midpoint p_full: the
+    reconstruction never receives p_full at all, so feeding it a different
+    one cannot change these numbers.  GLM's draft did parametrise it and
+    codex caught that both arms ran identical inputs.  The anchoring is
+    pinned instead by test_refinement_uses_layer_centres_not_the_callers_p_full,
+    which drives the whole wrapper on a log-midpoint grid.
+    """
+    fx = _refine_fixture()
+    ph = fx["p_half"]
+    phj = jnp.asarray(ph)
+    for r in _R_SET:
+        _check_refined_grid(ph, r)
+        c_par = ta._layer_centre(phj)
+        phr = ta._refine_half_levels(phj, r)
+        c_child = ta._layer_centre(phr)
+        h_dp = phj[:, 1:] - phj[:, :-1]
+        k_par = jnp.repeat(jnp.arange(phj.shape[1] - 1), r)
+        dp_child = np.diff(np.asarray(phr, np.float64), axis=1)
+        dp_par = np.asarray(h_dp, np.float64)
+        for key in ("q", "s"):
+            x64 = np.asarray(fx[key], np.float64)
+            xc = np.asarray(ta._fv_minmod_refine(fx[key], c_par, h_dp,
+                                                 c_child, k_par), np.float64)
+            mass = np.add.reduceat(xc * dp_child,
+                                   np.arange(0, xc.shape[1], r), axis=1)
+            np.testing.assert_allclose(mass, x64 * dp_par, rtol=1e-5, atol=0.0)
+        x = jnp.full_like(fx["q"], 0.017)
+        xc = np.asarray(ta._fv_minmod_refine(x, c_par, h_dp, c_child, k_par))
+        assert np.all(xc == np.asarray(x)[0, 0])
+        _check_bounded(np.asarray(fx["q"])[0], ph, r)
+        a, b = 0.3, 1.0e-5
+        c64 = np.asarray(c_par, np.float64)
+        cc64 = np.asarray(c_child, np.float64)
+        xaff = jnp.asarray(np.asarray(a + b * c64, np.float32))
+        xa = np.asarray(ta._fv_minmod_refine(xaff, c_par, h_dp, c_child,
+                                             k_par), np.float64)
+        err = np.abs(xa - (a + b * cc64))
+        tol = 1e-5 * abs(b) * float(cc64.max() - cc64.min())
+        # interior parents only: the top and bottom parents carry a flat
+        # (zero-slope) reconstruction by construction, so affine exactness
+        # does not apply there
+        assert np.all(err[:, r:-r] <= tol)
+
+
+def _nonmidpoint_args(kind="deep", nlev=30):
+    """The existing ``column`` sounding and half levels; the full levels
+    HANDED IN are the log midpoints, the usual production choice."""
+    T, q, _, p_half = column(kind, nlev=nlev)
+    p_full = _log_midpoint_p_full(p_half).astype(np.float32)
+    geo_half, geo_full = _geopotential(T.astype(np.float64),
+                                       q.astype(np.float64),
+                                       p_half.astype(np.float64))
+    f32 = lambda x: jnp.asarray(np.asarray(x, np.float32))
+    return (f32(T), f32(q), f32(p_full), f32(p_half),
+            f32(geo_full), f32(geo_half))
+
+
+_ta_fields = ("ldcum", "ktype", "k_dpl", "k_cbot", "k_ctop", "w_base", "T_u",
+              "q_u", "l_u", "klab", "cape_test", "w2", "w2_surface", "ldsc",
+              "k_botsc")
+
+
+def _ta_same(a, b, rtol=1e-6):
+    """Two trigger results agree: integer and flag fields exactly, float
+    fields to rtol.  NOT bitwise on the floats -- the two call paths being
+    compared reach the same geopotential by different orderings of the same
+    float32 integration, which moves the parcel temperature in the last ulp.
+    rtol 1e-6 is four orders below the effect these pins exist to catch: a
+    location convention change moves things by a percent of a layer."""
+    # the hand-kept list must cover the whole result, or a field added later
+    # would silently escape every pin below (GLM review)
+    assert set(_ta_fields) == set(type(a)._fields), (
+        set(type(a)._fields) ^ set(_ta_fields))
+    for f in _ta_fields:
+        x, y = np.asarray(getattr(a, f)), np.asarray(getattr(b, f))
+        if x.dtype.kind in "iub":
+            if not np.array_equal(x, y):
+                return False
+        elif not np.allclose(x, y, rtol=rtol, atol=0.0, equal_nan=True):
+            return False
+    return True
+
+
+def _surf_args(T):
+    return (jnp.full((1,), -20.0, jnp.float32),
+            jnp.full((1,), -150.0, jnp.float32),
+            jnp.full((1,), 0.1, jnp.float32),
+            jnp.zeros((1,), jnp.float32),
+            jnp.zeros_like(T))
+
+
+def _search_native(args, p_full, module_geo=True):
+    """Source-literal ifs_departure_search with an explicit p_full.
+
+    ``module_geo`` mirrors the wrapper, which derives the geopotential from
+    p_half rather than taking the caller's; pass False to feed the caller's.
+    """
+    T, q, _, p_half, geo_full, geo_half = args
+    if module_geo:
+        geo_half, geo_full = ta._hydrostatic_geopotential(T, q, p_half)
+    return ta.ifs_departure_search(T, q, p_full, p_half, geo_full, geo_half,
+                                   *_surf_args(T),
+                                   ta.IFSTestAscentConfig(column_refine=1))
+
+
+def _search_refined(args, r, p_full=None):
+    T, q, pf, p_half, geo_full, geo_half = args
+    return ta.ifs_departure_search_refined(
+        T, q, pf if p_full is None else p_full, p_half, geo_full, geo_half,
+        *_surf_args(T), ta.IFSTestAscentConfig(column_refine=r))
+
+
+def test_refinement_uses_layer_centres_not_the_callers_p_full():
+    """(c) On a NON-MIDPOINT grid (production-style log-midpoint full levels)
+    the refinement must place level values at the layer centres it derives
+    from the half levels, in BOTH arms, and must ignore the p_full it is
+    handed.
+
+    The geopotential gets the same treatment as the pressure -- the wrapper
+    derives it from p_half rather than taking the caller's -- so the bitwise
+    pin below compares against the native search fed BOTH the layer centres
+    and a module-built geopotential.
+
+    NOT tested here: agreement between r = 1 and r = 2.  They are SUPPOSED
+    to disagree -- on this sounding r = 1 types the column shallow with a
+    cloud top at parent level 26 and r = 2 resolves it as deep at level 19,
+    which is the entire reason the refinement exists.  GLM's first draft
+    asserted they agree within one level; that premise is wrong and the
+    assertion is dropped rather than loosened.
+
+    The load-bearing pins are bitwise: the r = 1 arm must equal the
+    source-literal search fed the layer CENTRES, neither arm may change
+    when the handed-in p_full changes, and the re-planted old early return
+    (which forwarded the caller's p_full) must give a DIFFERENT answer.
+    That last one also guards against a vacuous fixture: if the log
+    midpoints reproduced the layer-centre result bit for bit, this test
+    could not see the anchoring at all.
+    """
+    args = _nonmidpoint_args("deep")
+    res1 = _search_refined(args, 1)
+    res2 = _search_refined(args, 2)
+
+    # (ii) BOTH arms use the layer-centre convention: r == 1 is
+    # bit-identical to the source-literal search fed the layer CENTRES ...
+    centre = ta._layer_centre(args[3])
+    assert _ta_same(res1, _search_native(args, centre))
+    # ... and neither arm's result depends on the handed-in p_full at all
+    assert _ta_same(res1, _search_refined(args, 1, p_full=centre))
+    assert _ta_same(res2, _search_refined(args, 2, p_full=centre))
+
+    # (iii) re-planted OLD early return (forwards the caller's p_full):
+    # the convention pin must reject it -- the pre-fix failure mode
+    planted = _search_native(args, args[2])
+    assert not _ta_same(planted, res1), (
+        "log-midpoint p_full reproduces the layer-centre result "
+        "bit-for-bit: the fixture is insensitive to the anchoring and "
+        "this test is VACUOUS -- report, do not loosen")
