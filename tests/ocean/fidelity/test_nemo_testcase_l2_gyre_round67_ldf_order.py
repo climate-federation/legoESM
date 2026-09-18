@@ -116,14 +116,14 @@ def test_pytree_exact_census_checks_every_leaf_and_fires_on_one_ulp():
     assert changed["max_abs"] > 0.0
 
 
-def test_round70_pair_hooks_remain_private():
+def test_landed_native_source_route_has_no_private_selector():
     module = _module()
     hooks = module.model_module._NEMOWSRK3TestHooks
-    assert "route_gm_redi_stage3_source" in hooks._fields
+    assert "route_gm_redi_stage3_source" not in hooks._fields
     assert "stage3_advection_content_override" in hooks._fields
     source = inspect.getsource(
         module.model_module.LatLonCGridOceanModel._step_impl)
-    assert "if self._nemo_ws_test_hooks.route_gm_redi_stage3_source" in source
+    assert "if _cfg_b.gm_redi is not None" in source
     assert source.count("_stage_source_rates[2][0] + dT_gm * active_3d") == 1
     assert source.count("_stage_source_rates[2][1] + dS_gm * active_3d") == 1
 

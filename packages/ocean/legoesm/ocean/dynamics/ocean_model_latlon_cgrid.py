@@ -1309,10 +1309,10 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # already-materialized stage-3 complete-advection content before its
     # ordinary source association; no public card can construct this hook.
     stage3_advection_content_override: object = None
-    # Route the already-computed GM/Redi rate into the same stage-3 source
-    # tuple. NEMO calls tra_ldf before tra_zdf
-    # (stprk3_stg.F90:950-965); this is private causal evidence only.
-    route_gm_redi_stage3_source: bool = False
+    # Production WS routing below includes the existing GM/Redi rate in stage
+    # 3: NEMO calls tra_ldf before tra_zdf (stprk3_stg.F90:950-965).
+    # Round 110 retired the private route selector; no public configuration is
+    # introduced for this compiled-program ordering.
     # One-variable ablation of the stage-3 ZDF thickness time level; restores
     # whole-step-entry rather than faithful N+1/2/Kmm for the discriminator.
     legacy_zdf_entry_kmm_eta: bool = False
@@ -2420,18 +2420,18 @@ class LatLonCGridOceanModel:
                 "momentum exposure: they share the returned u/v slots")
         self.config = self._validate_config(
             config or LatLonCGridOceanConfig.from_flat())
-        if (self._nemo_ws_test_hooks.route_gm_redi_stage3_source
-                or self._nemo_ws_test_hooks
+        if (self._nemo_ws_test_hooks
                 .stage3_advection_content_override is not None):
             if self.config.tracer_time_integrator != "rk3_ws":
                 raise ValueError(
-                    "stage-3 FCT/LDF pair hooks require "
+                    "stage-3 FCT pair hook requires "
                     "tracer_time_integrator='rk3_ws'")
-        if (self._nemo_ws_test_hooks.route_gm_redi_stage3_source
-                and self.config.gm_redi is None):
-            raise ValueError(
-                "route_gm_redi_stage3_source requires an executing GM/Redi "
-                "operator")
+        # The LDF route is production behavior for WS with a configured
+        # GM/Redi operator; it has no private selector and therefore needs no
+        # construction-time check beyond the card's ordinary validation.
+        # The compiled program accumulates this rate into tracer Krhs before
+        # tra_zdf consumes it (stprk3_stg.F90:950-965).
+
         # Convert LatLonGrid -> LatLonCGridGeometry once at construction.
         # All downstream operators see the enriched geometry with per-cell
         # metric arrays.  For a plain LatLonGrid this is a no-op on field
@@ -7728,7 +7728,7 @@ class LatLonCGridOceanModel:
                 _pair_divs = (None, None)
             elif _tti == "rk3_ws":
                 _ws_stage_source_rates = _stage_source_rates
-                if self._nemo_ws_test_hooks.route_gm_redi_stage3_source:
+                if _cfg_b.gm_redi is not None:
                     _ws_stage_source_rates = (
                         _stage_source_rates[0],
                         _stage_source_rates[1],
