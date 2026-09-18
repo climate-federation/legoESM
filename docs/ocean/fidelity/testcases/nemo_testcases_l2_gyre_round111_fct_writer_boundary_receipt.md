@@ -205,11 +205,60 @@ consumed T/S state.
 
 ## Independent review
 
-PENDING.
+The required command was attempted against clean receipt commit
+`cb79add69e8f0f602a7187257fd2a85b368c82ef` with `--sandbox read-only` and an
+adversarial prompt covering the production capture, stopping rule, citations,
+unchanged trajectory table, and acquisition passivity.  It exited 1 before a
+review agent started.  The complete output, quoted verbatim, is:
+
+```text
+WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)
+Reading additional input from stdin...
+Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+```
+
+Thus **independent review unavailable in-sandbox**; there is no independent
+verdict to quote and, in particular, no `DO NOT SHIP` verdict was produced.
+The attempt is preserved at `codex_review.log` rather than silently omitted.
 
 ## Citation control and tests
 
-PENDING.
+The receipt citation gate finds eight citations, maps all eight, audits the
+entire registry and reports `status: PASS`.  Its shifted-line plant moves the
+direct-writer citation `:607` to line 609, reports `SYMBOL-NOT-AT-LINE`, and
+exits 1.  Evidence is `citation_gate.{json,log}` and
+`citation_gate_plant.{json,log}`.
+
+Every suite/command run is reported below.  The combined-tree controller did
+not complete: after xdist worker restarts it raised an internal `MemoryError`
+while formatting a failure at 75% and exited 3.  Its terminal summary line is
+quoted exactly; this receipt does not call that run green.
+
+| command/suite | terminal result |
+|---|---|
+| New gate plus complete changed advection test file, before the broad run | `31 passed in 25.44s` |
+| `tests/ocean/fidelity tests/ocean/unit -n 12` | `164 failed, 5840 passed, 116 skipped, 2 xfailed, 69 warnings, 36 errors in 876.95s (0:14:36)`; then xdist internal error / exit 3 |
+| Same focused changed paths after all broad-run workers exited | `31 passed in 26.19s` |
+| Complete fidelity subtree, `-n 12` | no terminal summary: reached 98%, then was interrupted with exit 130 after the last active end-to-end stage-sweep prediction plant emitted no completion for more than 15 minutes |
+
+The literal node-ID diff against
+`phase3/merge_main_2026-09-17/tests/preexisting_red_ids_on_both_trees.txt`
+is in `full_ocean_failure_diff.log`.  Before the controller abort, the log has
+164 FAILED-event IDs, 36 ERROR-event IDs, and one separately named crash item:
+201 unique IDs.  Sixty-one intersect the frozen 87-ID list, 140 do not, and 26
+frozen IDs had not been observed before the abort.  This large non-baseline
+set comes from a resource-contaminated, aborted run and cannot serve as a clean
+regression diff; it is not suppressed or mislabeled as the known-red set.
+
+No new round-111 acquisition-gate test ID is red.  One test in the changed
+advection file appears in the broad-run non-baseline set,
+`TestFct2Centred::test_fct2_conserves_on_periodic_channel`; the complete file
+passes in both isolated 31-test runs, including after the MemoryError workers
+exit.  The evidence therefore supports no reproducible changed-path failure,
+but it does **not** support an all-green 8,173-test claim.  Logs are
+`acquisition_card/focused_tests.log`, `full_ocean_tests.log`,
+`full_ocean_failure_diff.log`, `focused_tests_after_full.log`, and
+`full_fidelity_tests.log`.
 
 ## ASKED / UNASKED
 
