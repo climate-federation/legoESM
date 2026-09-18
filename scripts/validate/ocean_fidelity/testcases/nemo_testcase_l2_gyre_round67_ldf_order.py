@@ -876,33 +876,37 @@ def measure(args) -> dict:
         production_jit = _round112_collapse(
             fct_walk_calls, "production-step JIT")
 
-        # The production step() shim deliberately re-enables JIT.  Drive the
-        # identical full step body directly under disable_jit for the separate
-        # eager label required by the campaign; this is not an isolated FCT
-        # closure and still executes every preceding production operator.
-        fct_walk_calls.clear()
-        model_module._nemo_ws_rk3_tracer_pair_step = pair_capture
-        advection_module.fct_tracer_advection = fct_capture
-        try:
-            with jax.disable_jit():
-                eager_state = model._step_impl(
-                    seeded, dt, freshwater=freshwater,
-                    surface_forcing=surface)
-                jax.device_get(eager_state)
-            jax.effects_barrier()
-        finally:
-            model_module._nemo_ws_rk3_tracer_pair_step = real_pair
-            advection_module.fct_tracer_advection = real_fct
-        production_eager = _round112_collapse(
-            fct_walk_calls, "production eager")
-
-        isolated = jax.device_get(jax.jit(
-            lambda: _round112_all_rows(round112_values, model.grid))())
         mode_observations = {
             "production_step_jit": production_jit,
-            "production_eager": production_eager,
-            "isolated_closure_jit": tuple(isolated),
         }
+        if not args.plant_fct_walk_ulp:
+            # The production step() shim deliberately re-enables JIT. Drive
+            # the identical full step body directly under disable_jit for the
+            # separate eager label required by the campaign; this is not an
+            # isolated FCT closure and still executes every preceding
+            # production operator. The plant qualifies only in production
+            # JIT, so it deliberately skips these two non-qualifying replays.
+            fct_walk_calls.clear()
+            model_module._nemo_ws_rk3_tracer_pair_step = pair_capture
+            advection_module.fct_tracer_advection = fct_capture
+            try:
+                with jax.disable_jit():
+                    eager_state = model._step_impl(
+                        seeded, dt, freshwater=freshwater,
+                        surface_forcing=surface)
+                    jax.device_get(eager_state)
+                jax.effects_barrier()
+            finally:
+                model_module._nemo_ws_rk3_tracer_pair_step = real_pair
+                advection_module.fct_tracer_advection = real_fct
+            production_eager = _round112_collapse(
+                fct_walk_calls, "production eager")
+            isolated = jax.device_get(jax.jit(
+                lambda: _round112_all_rows(round112_values, model.grid))())
+            mode_observations.update({
+                "production_eager": production_eager,
+                "isolated_closure_jit": tuple(isolated),
+            })
         mode_rows = {
             name: _round112_observation_rows(observation, round112_bundle)
             for name, observation in mode_observations.items()
@@ -972,15 +976,24 @@ def measure(args) -> dict:
             return bool(value)
 
         plant_fired = False
+        plant_propagation = {}
         if args.plant_fct_walk_ulp:
             frozen = json.loads(args.fct_walk_report.read_text())[
                 "round112_fct_walk"]
-            plant_fired = bool(all(
-                observations[mode][key] != frozen["observations"][mode][key]
-                for mode in ("production_step_jit",)
+            plant_propagation = {
+                key: bool(
+                    observations["production_step_jit"][key]
+                    != frozen["observations"]["production_step_jit"][key])
                 for key in (
                     "current_first_u_T_bits",
-                    "source_literal_first_u_T_bits")))
+                    "source_literal_first_u_T_bits")
+            }
+            # The exact-input/source-literal row is the calibrated boundary.
+            # The current divide/re-multiply representation may erase a
+            # one-ULP transport perturbation; requiring it to propagate would
+            # make the control conditional on the defect being measured.
+            plant_fired = plant_propagation[
+                "source_literal_first_u_T_bits"]
             require(plant_fired,
                     "round-112 production-JIT one-ULP input plant was inert")
 
@@ -997,6 +1010,7 @@ def measure(args) -> dict:
                 if first_nonbit == "horizontal_first_faces" else first_nonbit),
             "modes": mode_rows,
             "observations": observations,
+            "plant_propagation": plant_propagation,
             "criteria": criteria,
         }
 
