@@ -71,6 +71,19 @@ def test_decision43_passes_only_for_a_month_improvement(monkeypatch):
     assert failed["status"] == "FAIL"
 
 
+def test_shared_dino_statement_requires_a_separate_measured_gate(monkeypatch):
+    module = _module()
+    cards = _cards()
+    cards["DINO:nemo_dino_kamm"]["executes_route"] = True
+    monkeypatch.setattr(module, "_card_execution", lambda: cards)
+    report = module.evaluate(
+        _comparison(), _day(1.0), _day(0.1),
+        expected_candidate_commit="c" * 40)
+    assert report["status"] == "FAIL"
+    assert report["criteria"]["dino_measurement_required"] is True
+    assert report["criteria"]["dino_statement_not_executed"] is False
+
+
 def test_all_three_plants_fail_the_gate(monkeypatch):
     module = _module()
     monkeypatch.setattr(module, "_card_execution", _cards)

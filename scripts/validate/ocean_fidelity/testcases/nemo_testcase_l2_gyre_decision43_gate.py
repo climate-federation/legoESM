@@ -190,8 +190,7 @@ def evaluate(
         and criteria["first_over_bar_not_earlier"]
         and criteria["no_kt1_at_bar_row_leaves"]
         and criteria["all_moved_rows_registered"]
-        and (criteria["dino_statement_not_executed"]
-             or criteria["dino_measurement_required"]))
+        and criteria["dino_statement_not_executed"])
 
     return {
         "format": FORMAT,
