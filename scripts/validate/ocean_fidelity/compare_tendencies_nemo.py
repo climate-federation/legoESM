@@ -1241,7 +1241,15 @@ def main():
             # cannot say whether that is the whole polar cap or a rim -- e.g.
             # the marginal ice zone, or shelves -- and those imply different
             # causes, so it is plotted.
-            wm2 = np.isfinite(d["T"][0])
+            # MASK THE MAP THE WAY THE TABLE IS MASKED. The band rows quoted
+            # as "calm" EXCLUDE columns where NEMO's EVD fired; an unmasked
+            # map beside a masked table compares two different reductions and
+            # invites exactly the misreading this session has already made
+            # twice. January is northern winter, so the northern basins are
+            # full of convecting columns whose avt carries an EVD our probe
+            # has no counterpart for -- unmasked, they dominate the picture
+            # and look like a defect the table explicitly set aside.
+            wm2 = np.isfinite(d["T"][0]) & (~evd_cols).reshape(ny, nx)
             with np.errstate(divide="ignore", invalid="ignore"):
                 _pro = K_M2 / np.maximum(K_H2, 1e-30)
                 _prn = avm_i / np.maximum(avt_a2(d), 1e-30)
