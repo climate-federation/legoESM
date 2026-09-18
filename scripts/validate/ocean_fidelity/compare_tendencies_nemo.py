@@ -1233,6 +1233,35 @@ def main():
         png = out_dir / f"tendency_match_rec{args.rec}.png"
         fig.savefig(png, dpi=110)
         print(f"[maps] {png}")
+
+        if args.restart_npz:
+            # WHERE THE PRANDTL DEFECT LIVES. The band table says our effective
+            # tracer-to-momentum ratio matches NEMO within 1-9% in ten bands
+            # and is 4.5-5.7x too large in the polar upper 100 m. A band mean
+            # cannot say whether that is the whole polar cap or a rim -- e.g.
+            # the marginal ice zone, or shelves -- and those imply different
+            # causes, so it is plotted.
+            wm2 = np.isfinite(d["T"][0])
+            with np.errstate(divide="ignore", invalid="ignore"):
+                _pro = K_M2 / np.maximum(K_H2, 1e-30)
+                _prn = avm_i / np.maximum(avt_a2(d), 1e-30)
+                _rat = np.log10(np.maximum(_pro, 1e-6)
+                                / np.maximum(_prn, 1e-6))
+            fig2, ax2 = plt.subplots(1, 2, figsize=(13, 4.6))
+            for _ax, _kk, _lbl in ((ax2[0], 3, "iface k=3 (~10-30 m)"),
+                                   (ax2[1], 8, "iface k=8 (~100 m)")):
+                _f = np.where(wm2, _rat[:, _kk].reshape(ny, nx), np.nan)
+                _im = _ax.pcolormesh(_f, vmin=-1, vmax=1, cmap="RdBu_r")
+                _ax.set_title(f"log10(Pr_ours / Pr_NEMO)  {_lbl}", fontsize=9)
+                plt.colorbar(_im, ax=_ax, shrink=0.85)
+            fig2.suptitle(
+                "Effective Prandtl ratio, Mode-A. RED = our tracer mixing too "
+                "weak relative to momentum; 0 = matches NEMO. +1 is a factor "
+                "of ten.", fontsize=10)
+            fig2.tight_layout()
+            png2 = out_dir / f"prandtl_ratio_rec{args.rec}.png"
+            fig2.savefig(png2, dpi=110)
+            print(f"[maps] {png2}")
     return 0
 
 
