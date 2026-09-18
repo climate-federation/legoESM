@@ -129,6 +129,33 @@ def test_zrw_propagation_reports_source_result_and_production_residual():
     assert report["production_residual_row"]["classification"] == "BIT"
 
 
+def test_isolated_discriminator_compares_the_production_value():
+    output, zrw = _small_bn2("zrw")
+    values = {
+        "T": np.asarray([[[12.0, 11.0, 10.0]]], dtype=np.float64),
+        "S": np.asarray([[[35.0, 35.1, 35.2]]], dtype=np.float64),
+        "gdept_0": np.asarray([[[1.0, 3.0, 7.0]]], dtype=np.float64),
+        "gdepw_0": np.asarray([[[2.0, 5.0]]], dtype=np.float64),
+        "stretch": np.asarray([[1.125]], dtype=np.float64),
+        "e3w": np.asarray([[[2.25, 4.5]]], dtype=np.float64),
+        "alpha": np.asarray([[[1.0, 2.0, 3.0]]], dtype=np.float64),
+        "beta": np.asarray([[[0.5, 0.75, 1.0]]], dtype=np.float64),
+        "gravity": np.asarray(9.0, dtype=np.float64),
+    }
+    values["gdept"] = values["gdept_0"] * values["stretch"][..., None]
+    values["gdepw"] = values["gdepw_0"] * values["stretch"][..., None]
+    report = gate._bn2_isolated_rows(
+        {
+            "inputs": values,
+            "references": {"zrw": np.asarray(zrw)},
+            "recorded_rn2": np.asarray(output),
+        },
+        "zrw",
+        production_value=np.asarray(zrw),
+    )
+    assert report["production_vs_isolated_jit"]["classification"] == "BIT"
+
+
 def test_gate_enumerates_bn2_statements_in_compiled_order():
     assert gate.BN2_INTERMEDIATES == (
         "zrw",

@@ -3471,7 +3471,11 @@ def _bn2_intermediate_rows(
     }
 
 
-def _bn2_isolated_rows(replay: dict, intermediate: str) -> dict:
+def _bn2_isolated_rows(
+    replay: dict,
+    intermediate: str,
+    production_value=None,
+) -> dict:
     """Score isolated eager/JIT labels without calling either production."""
     import jax
     import jax.numpy as jnp
@@ -3527,6 +3531,15 @@ def _bn2_isolated_rows(replay: dict, intermediate: str) -> dict:
             "nemo_statement": "R101TKEW eosbn2.f90:1616-1618",
         })
         output_rows.append(output_row)
+    production_vs_isolated = None
+    if production_value is not None:
+        production = np.asarray(production_value)
+        isolated = np.asarray(jit_value)
+        require(production.shape == isolated.shape,
+                "production and isolated bn2 values have different shapes")
+        production_vs_isolated = _bitwise_classification(score(
+            "GYRE-zco.kt2.bn2.production_vs_isolated_JIT." + intermediate,
+            isolated, production, np.ones(isolated.shape, dtype=bool)))
     return {
         "intermediate": intermediate,
         "note": (
@@ -3534,6 +3547,7 @@ def _bn2_isolated_rows(replay: dict, intermediate: str) -> dict:
             "production-step row certifies full-step fusion"),
         "rows": rows,
         "output_rows": output_rows,
+        "production_vs_isolated_jit": production_vs_isolated,
     }
 
 
@@ -3955,7 +3969,8 @@ def _tke_program_twin(
             "bn2_intermediate": bn2_intermediate,
             "input_bridge": input_bridge,
             "isolated_bn2_discriminator": _bn2_isolated_rows(
-                bn2_replay, bn2_intermediate),
+                bn2_replay, bn2_intermediate,
+                given_trace.tke_statement_trace.bn2_intermediate),
             "given_nemo_entry_bn2_intermediate": _bn2_intermediate_rows(
                 given_trace, bn2_replay, "NEMO_TKE_RECORDED",
                 bn2_intermediate, plant, execution=execution_label),
