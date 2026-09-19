@@ -621,6 +621,51 @@ def _round119_propagating_hpg_ulp(hpg, ldf, vor, keg, zad, mask):
         "no active one-ULP HPG plant survives all source-order boundaries")
 
 
+def _float64_word(value) -> dict[str, object]:
+    """Serialize one fp64 value without losing its exact machine word."""
+    scalar = np.asarray(value, dtype=np.float64).reshape(())
+    bits = int(scalar.view(np.uint64))
+    return {
+        "value": float(scalar),
+        "uint64": bits,
+        "hex": f"0x{bits:016x}",
+    }
+
+
+def _ordered_float64_word(value) -> int:
+    """Map an fp64 word to a monotone integer for signed ULP differences."""
+    bits = int(np.asarray(value, dtype=np.float64).reshape(()).view(np.uint64))
+    if bits & (1 << 63):
+        return (~bits) & ((1 << 64) - 1)
+    return bits | (1 << 63)
+
+
+def _signed_ulp_difference(left, right) -> int:
+    """Return the signed representable-word distance ``left - right``."""
+    return _ordered_float64_word(left) - _ordered_float64_word(right)
+
+
+def _round120_keg_ulp_addend(addend, after_vor, zad, location):
+    """Plant one KEG ULP that survives the local KEG and ZAD additions."""
+    addend = np.asarray(addend, dtype=np.float64)
+    after_vor = np.asarray(after_vor, dtype=np.float64)
+    zad = np.asarray(zad, dtype=np.float64)
+    require(addend.shape == after_vor.shape == zad.shape,
+            "Round-120 KEG plant extents differ")
+    ordinary_keg = after_vor[location] + addend[location]
+    ordinary_zad = ordinary_keg + zad[location]
+    for direction in (np.float64(np.inf), np.float64(-np.inf)):
+        planted = np.array(addend, copy=True)
+        planted[location] = np.nextafter(planted[location], direction)
+        changed_keg = after_vor[location] + planted[location]
+        changed_zad = changed_keg + zad[location]
+        if (changed_keg.view(np.uint64) != ordinary_keg.view(np.uint64)
+                and changed_zad.view(np.uint64) != ordinary_zad.view(np.uint64)):
+            return planted, direction
+    raise RuntimeError(
+        "no one-ULP KEG addend plant survives the KEG and ZAD additions")
+
+
 def measure_round117(args) -> dict[str, object]:
     """Split the current-tip producer in the existing admitted Round-83 gate."""
     set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
@@ -636,7 +681,7 @@ def measure_round117(args) -> dict[str, object]:
     stage, static = _admit_round64(args)
     external = round82._admit(args)
     direct = _admit_round117_direct(
-        args, external) if (args.round118 or args.round119) else None
+        args, external) if (args.round118 or args.round119 or args.round120) else None
     (base, card, seeded, freshwater, surface,
      captured) = round82._context(args)
     require(base["status"] == "MEASURED", "kt=2 seeded context changed")
@@ -646,7 +691,7 @@ def measure_round117(args) -> dict[str, object]:
         _round117_live_trace(
             card, seeded, freshwater, surface, args.execution_mode,
             association_arm=("stage1-source-order", None))
-        if args.round119 else None)
+        if args.round119 or args.round120 else None)
     trace_identity = round82._pytree_identity(
         ordinary.state_after, captured.plain_state)
     require(trace_identity["bit_exact"],
@@ -937,8 +982,9 @@ def measure_round117(args) -> dict[str, object]:
             previous = residual
 
     association_walk = None
+    round120_walk = None
     zad_operand_walk = None
-    if args.round119:
+    if args.round119 or args.round120:
         source_parts = source_order.operator_operands[0]
 
         def _native_field(value, face):
@@ -1035,6 +1081,229 @@ def measure_round117(args) -> dict[str, object]:
                 source_order.state_after, ordinary.state_after),
             "prediction_confirmed": association_confirmed,
         }
+
+        if args.round120:
+            arm_names = (
+                "unmasked-materialized",
+                "masked-materialized",
+                "literal-subtract",
+            )
+            arm_parts = {}
+            arms = {}
+            for arm_name in arm_names:
+                arm_trace = _round117_live_trace(
+                    card, seeded, freshwater, surface, args.execution_mode,
+                    association_arm=("stage1-source-order", None, arm_name))
+                arm_operator_parts = arm_trace.operator_operands[0]
+                arm_parts[arm_name] = arm_operator_parts
+                arm_vs_isolated = {face: {} for face in ("u", "v")}
+                arm_vs_baseline = {face: {} for face in ("u", "v")}
+                for face in ("u", "v"):
+                    for boundary in ROUND117_BOUNDARIES:
+                        production_key = (
+                            "after_adv"
+                            if boundary in ("after_zad", "after_adv")
+                            else boundary)
+                        arm_value = _native_field(
+                            arm_operator_parts[f"{production_key}_{face}"],
+                            face)
+                        isolated_value = (
+                            native_u(cumulative[f"{boundary}_{face}"])
+                            if face == "u" else
+                            native_v(cumulative[f"{boundary}_{face}"]))
+                        baseline_value = _native_field(
+                            source_parts[f"{production_key}_{face}"], face)
+                        arm_vs_isolated[face][boundary] = comparison(
+                            arm_value, isolated_value, active[f"{face}3"])
+                        arm_vs_baseline[face][boundary] = comparison(
+                            arm_value, baseline_value, active[f"{face}3"])
+                arm_raw_identity = {
+                    face: {
+                        name: comparison(
+                            _native_field(
+                                arm_operator_parts[f"{name}_{face}"], face),
+                            _native_field(source_parts[f"{name}_{face}"], face),
+                            active[f"{face}3"],
+                        )
+                        for name in raw_names
+                    }
+                    for face in ("u", "v")
+                }
+                arm_final = {
+                    face: _native_field(
+                        arm_operator_parts[f"after_adv_{face}"], face)
+                    for face in ("u", "v")
+                }
+                arm_live = arm_trace.slow_forcing_producer
+                arm_live_closure = {
+                    "u": comparison(
+                        arm_final["u"], native_u(arm_live["rhs_u"]),
+                        active["u3"]),
+                    "v": comparison(
+                        arm_final["v"], native_v(arm_live["rhs_v"]),
+                        active["v3"]),
+                }
+                arms[arm_name] = {
+                    "label": "full production step; private one-variable arm",
+                    "production_vs_isolated": arm_vs_isolated,
+                    "production_vs_baseline": arm_vs_baseline,
+                    "raw_operand_identity_vs_baseline": arm_raw_identity,
+                    "live_total_closure": arm_live_closure,
+                    "state_after_vs_baseline": round82._pytree_identity(
+                        arm_trace.state_after, source_order.state_after),
+                    "closes_production_isolated_split": all(
+                        row["bit_exact"]
+                        for face_rows in arm_vs_isolated.values()
+                        for row in face_rows.values()),
+                    "one_variable_operands_and_closure": bool(
+                        all(row["bit_exact"]
+                            for face_rows in arm_raw_identity.values()
+                            for row in face_rows.values())
+                        and all(row["bit_exact"]
+                                for row in arm_live_closure.values())),
+                }
+
+            baseline_production_u = _native_field(
+                source_parts["after_keg_u"], "u")
+            baseline_isolated_u = native_u(cumulative["after_keg_u"])
+            mismatch_mask = (
+                baseline_production_u.view(np.uint64)
+                != baseline_isolated_u.view(np.uint64)) & active["u3"]
+            mismatch_locations = [
+                tuple(int(index) for index in location)
+                for location in np.argwhere(mismatch_mask)
+            ]
+            baseline_rows_exact_before_keg = all(
+                production_vs_isolated[face][boundary]["bit_exact"]
+                for face in ("u", "v")
+                for boundary in ("after_hpg", "after_ldf", "after_vor"))
+            baseline_v_exact = all(
+                production_vs_isolated["v"][boundary]["bit_exact"]
+                for boundary in ROUND117_BOUNDARIES)
+            baseline_common = bool(
+                all(row["bit_exact"] for face_rows in raw_identity.values()
+                    for row in face_rows.values())
+                and all(row["bit_exact"]
+                        for row in ordinary_live_closure.values())
+                and all(row["bit_exact"]
+                        for row in source_live_closure.values()))
+            target = None
+            if args.execution_mode == "production-jit":
+                require(len(mismatch_locations) == 1,
+                        "Round-120 did not reproduce exactly one U KEG word")
+                location = mismatch_locations[0]
+                require(bool(active["u3"][location]),
+                        "Round-120 KEG target is not active")
+                full_location = (location[0], location[1] + 1, location[2])
+                unmasked_addend = _native_field(
+                    arm_parts["unmasked-materialized"][
+                        "applied_keg_addend_u"], "u")
+                masked_addend = _native_field(
+                    arm_parts["masked-materialized"][
+                        "applied_keg_addend_u"], "u")
+                write_only_addend = _native_field(
+                    source_parts["keg_u"], "u")
+                oracle_after_keg = owned3(stage_arrays["after_keg_u"])
+                target = {
+                    "native_index": list(location),
+                    "full_face_index": list(full_location),
+                    "active_mask": float(active["u3"][location]),
+                    "after_vor_input": _float64_word(
+                        _native_field(
+                            source_parts["after_vor_u"], "u")[location]),
+                    "unmasked_materialized_addend": _float64_word(
+                        unmasked_addend[location]),
+                    "masked_materialized_addend": _float64_word(
+                        masked_addend[location]),
+                    "write_only_masked_keg": _float64_word(
+                        write_only_addend[location]),
+                    "production_after_keg": _float64_word(
+                        baseline_production_u[location]),
+                    "isolated_after_keg": _float64_word(
+                        baseline_isolated_u[location]),
+                    "oracle_after_keg": _float64_word(
+                        oracle_after_keg[location]),
+                    "production_minus_isolated_signed_ulp": (
+                        _signed_ulp_difference(
+                            baseline_production_u[location],
+                            baseline_isolated_u[location])),
+                    "unmasked_equals_masked_addend_bits": bool(
+                        unmasked_addend[location].view(np.uint64)
+                        == masked_addend[location].view(np.uint64)),
+                    "unmasked_equals_write_only_bits": bool(
+                        unmasked_addend[location].view(np.uint64)
+                        == write_only_addend[location].view(np.uint64)),
+                }
+                baseline_reproduced = bool(
+                    baseline_common
+                    and baseline_rows_exact_before_keg
+                    and baseline_v_exact
+                    and production_vs_isolated["u"]["after_keg"][
+                        "differing_cells"] == 1
+                    and production_vs_isolated["u"]["after_keg"][
+                        "absolute_max"]
+                    == np.float64(4.1359030627651384e-25)
+                    and all(production_vs_isolated["u"][boundary][
+                        "differing_cells"] == 1
+                        for boundary in ("after_zad", "after_adv"))
+                    and source_to_ordinary["u"]["differing_cells"] == 6882
+                    and source_to_ordinary["v"]["differing_cells"] == 6566
+                    and all(row["absolute_max"]
+                            == np.float64(8.470329472543003e-22)
+                            for row in source_to_ordinary.values()))
+            else:
+                require(not mismatch_locations,
+                        "Round-120 eager control has a U KEG mismatch")
+                baseline_reproduced = bool(
+                    baseline_common
+                    and baseline_rows_exact_before_keg
+                    and baseline_v_exact
+                    and all(
+                        row["bit_exact"]
+                        for face_rows in production_vs_isolated.values()
+                        for row in face_rows.values()))
+
+            closed_arms = [
+                name for name in arm_names
+                if arms[name]["closes_production_isolated_split"]
+            ]
+            if args.execution_mode == "production-eager":
+                classification = "eager-control-has-no-split"
+            elif ("unmasked-materialized" in closed_arms
+                  and "masked-materialized" in closed_arms
+                  and "literal-subtract" not in closed_arms):
+                classification = "materialization-fusion; mask is inert"
+            elif closed_arms == ["unmasked-materialized"]:
+                classification = "unmasked materialization-fusion"
+            elif closed_arms == ["masked-materialized"]:
+                classification = "mask materialization"
+            elif closed_arms == ["literal-subtract"]:
+                classification = "add-versus-subtract association"
+            elif not closed_arms:
+                classification = "owner withheld; no arm closes"
+            else:
+                classification = "owner withheld; multiple arms close"
+            round120_confirmed = bool(
+                baseline_reproduced
+                and all(arms[name]["one_variable_operands_and_closure"]
+                        for name in arm_names)
+                and (args.execution_mode == "production-eager" or (
+                    target is not None
+                    and target["active_mask"] == 1.0
+                    and target["unmasked_equals_masked_addend_bits"]
+                    and target["unmasked_equals_write_only_bits"]
+                    and arms["unmasked-materialized"][
+                        "closes_production_isolated_split"])))
+            round120_walk = {
+                "baseline_reproduced": baseline_reproduced,
+                "baseline_mismatch_locations_u": [
+                    list(location) for location in mismatch_locations],
+                "target": target,
+                "arms": arms,
+                "closed_arms": closed_arms,
+                "classification": classification,
+                "prediction_confirmed": round120_confirmed,
+            }
 
         _, live_r3u, live_r3v = ordinary.stage_qco[0]
         zad_live = {
@@ -1147,6 +1416,92 @@ def measure_round117(args) -> dict[str, object]:
                 "plant": args.plant,
                 "plant_location": list(location),
                 "plant_direction": float(direction),
+                "raw_operand_rows": planted_raw_identity,
+                "boundary_rows": planted_boundaries,
+                "plant_fires": plant_fires,
+            }
+
+        if args.plant == "association-keg-ulp":
+            require(args.round120,
+                    "the production KEG plant is a Round-120 control")
+            require(args.execution_mode == "production-jit",
+                    "the production KEG plant requires production JIT")
+            require(round120_walk is not None
+                    and round120_walk["target"] is not None,
+                    "Round-120 KEG plant has no reproduced target")
+            unmasked_parts = arm_parts["unmasked-materialized"]
+            base_addend_u = np.asarray(
+                unmasked_parts["applied_keg_addend_u"].data,
+                dtype=np.float64)
+            base_addend_v = np.asarray(
+                unmasked_parts["applied_keg_addend_v"].data,
+                dtype=np.float64)
+            full_location = tuple(
+                round120_walk["target"]["full_face_index"])
+            planted_u, direction = _round120_keg_ulp_addend(
+                base_addend_u,
+                np.asarray(unmasked_parts["after_vor_u"].data,
+                           dtype=np.float64),
+                np.asarray(source_parts["zad_u"].data, dtype=np.float64),
+                full_location,
+            )
+            planted = _round117_live_trace(
+                card, seeded, freshwater, surface, args.execution_mode,
+                association_arm=(
+                    "stage1-source-order", None, "override-materialized",
+                    (jnp.asarray(planted_u), jnp.asarray(base_addend_v))))
+            planted_parts = planted.operator_operands[0]
+            applied_row = comparison(
+                _native_field(
+                    planted_parts["applied_keg_addend_u"], "u"),
+                _native_field(
+                    unmasked_parts["applied_keg_addend_u"], "u"),
+                active["u3"],
+            )
+            planted_boundaries = {}
+            for boundary in ROUND117_BOUNDARIES:
+                production_key = (
+                    "after_adv"
+                    if boundary in ("after_zad", "after_adv")
+                    else boundary)
+                planted_boundaries[boundary] = comparison(
+                    _native_field(
+                        planted_parts[f"{production_key}_u"], "u"),
+                    _native_field(
+                        unmasked_parts[f"{production_key}_u"], "u"),
+                    active["u3"],
+                )
+            planted_raw_identity = {
+                name: comparison(
+                    _native_field(planted_parts[f"{name}_u"], "u"),
+                    _native_field(unmasked_parts[f"{name}_u"], "u"),
+                    active["u3"],
+                )
+                for name in raw_names
+            }
+            plant_fires = bool(
+                applied_row["differing_cells"] == 1
+                and all(planted_raw_identity[name]["bit_exact"]
+                        for name in raw_names)
+                and all(planted_boundaries[boundary]["bit_exact"]
+                        for boundary in (
+                            "after_hpg", "after_ldf", "after_vor"))
+                and all(planted_boundaries[boundary]["differing_cells"] == 1
+                        for boundary in (
+                            "after_keg", "after_zad", "after_adv")))
+            require(plant_fires,
+                    "Round-120 KEG ULP did not propagate only after KEG")
+            return {
+                "format": "nemo-testcase-l2-gyre-round120-keg-walk-v1",
+                "status": "PLANT_FIRED",
+                "worktree": stamp,
+                "execution_regime": args.execution_mode,
+                "plant": args.plant,
+                "plant_location_native": round120_walk[
+                    "target"]["native_index"],
+                "plant_location_full_face": list(full_location),
+                "plant_direction": float(direction),
+                "applied_addend_row": applied_row,
                 "raw_operand_rows": planted_raw_identity,
                 "boundary_rows": planted_boundaries,
                 "plant_fires": plant_fires,
@@ -1423,24 +1778,33 @@ def measure_round117(args) -> dict[str, object]:
             row["bit_exact"]
             for face_rows in source_replay.values()
             for row in face_rows.values()))
-    prediction_confirmed = bool(
-        p1_confirmed and p2_confirmed
-        and (magnitude is None or magnitude["prediction_confirmed"])
-        and (not args.round119 or (
-            association_walk is not None
-            and association_walk["prediction_confirmed"]
+    if args.round120:
+        prediction_confirmed = bool(
+            round120_walk is not None
+            and round120_walk["prediction_confirmed"]
             and zad_operand_walk is not None
-            and zad_operand_walk["prediction_confirmed"])))
+            and zad_operand_walk["prediction_confirmed"])
+    else:
+        prediction_confirmed = bool(
+            p1_confirmed and p2_confirmed
+            and (magnitude is None or magnitude["prediction_confirmed"])
+            and (not args.round119 or (
+                association_walk is not None
+                and association_walk["prediction_confirmed"]
+                and zad_operand_walk is not None
+                and zad_operand_walk["prediction_confirmed"])))
     status = (
         "MEASURED" if args.execution_mode == "production-eager" else
         ("CONFIRMED" if prediction_confirmed else "REFUTED"))
     return {
         "format": (
-            "nemo-testcase-l2-gyre-round119-association-walk-v1"
-            if args.round119 else
+            "nemo-testcase-l2-gyre-round120-keg-walk-v1"
+            if args.round120 else
+            ("nemo-testcase-l2-gyre-round119-association-walk-v1"
+             if args.round119 else
             ("nemo-testcase-l2-gyre-round118-producer-walk-v1"
              if direct is not None else
-             "nemo-testcase-l2-gyre-round117-producer-walk-v1")),
+             "nemo-testcase-l2-gyre-round117-producer-walk-v1"))),
         "status": status,
         "worktree": stamp,
         "execution_regime": args.execution_mode + "-cpu-fp64-x64-libm",
@@ -1497,12 +1861,17 @@ def measure_round117(args) -> dict[str, object]:
         },
         "record_directed_magnitude": magnitude,
         "production_association_walk": association_walk,
+        "round120_keg_discriminator": round120_walk,
         "current_tip_zad_operand_walk": zad_operand_walk,
         "candidate_eligible": False,
         "candidate_reason": (
-            "the production association is attributed, but it is a last-bit "
-            "effect below the measured W-owned ZAD magnitude; the next "
-            "candidate must start at W's current-tip producer"
+            "the KEG split is classified but is a one-word last-bit effect; "
+            "W's day-240 ownership remains unmeasured and no magnitude "
+            "candidate is preregistered"
+            if args.round120 and round120_walk is not None else
+            ("the production association is attributed, but it is a last-bit "
+             "effect below the measured W-owned ZAD magnitude; the next "
+             "candidate must start at W's current-tip producer"
             if args.round119 and association_walk is not None
             and association_walk["prediction_confirmed"] else
             ("direct producer inputs are certified, but the isolated cumulative "
@@ -1510,7 +1879,7 @@ def measure_round117(args) -> dict[str, object]:
             if direct is not None else
             "diagnostic only; incoming kt2 Ue_rhs/Ve_rhs is not directly "
             "recorded and the cumulative LDF output lacks a complete direct-"
-            "input source-exactness proof")),
+            "input source-exactness proof"))),
         "prediction_confirmed": prediction_confirmed,
         "plant": args.plant,
         "plant_fires": False,
@@ -1529,6 +1898,9 @@ def main(argv=None) -> int:
     round_group.add_argument(
         "--round119", action="store_true",
         help="run the full-step stage-1 accumulator-association discriminator")
+    round_group.add_argument(
+        "--round120", action="store_true",
+        help="run the full-step stage-1 KEG materialization discriminator")
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--expect-record-commit", required=True)
     parser.add_argument("--expect-krhs-commit", required=True)
@@ -1557,30 +1929,34 @@ def main(argv=None) -> int:
         default="production-jit")
     parser.add_argument("--plant", choices=(
                             "none", "e3-ulp", "rhs-ulp", "final-ulp",
-                            "incoming-ulp", "association-hpg-ulp"),
+                            "incoming-ulp", "association-hpg-ulp",
+                            "association-keg-ulp"),
                         default="none")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         report = (
             measure_round117(args)
-            if args.round117 or args.round118 or args.round119 else measure(args))
+            if (args.round117 or args.round118 or args.round119
+                or args.round120) else measure(args))
         args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     except (RuntimeError, AssertionError, KeyError, ValueError) as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
     if args.plant != "none":
         prefix = (
-            "ROUND119" if args.round119 else
+            "ROUND120" if args.round120 else
+            ("ROUND119" if args.round119 else
             ("ROUND118" if args.round118 else
-             ("ROUND117" if args.round117 else "ROUND83")))
+             ("ROUND117" if args.round117 else "ROUND83"))))
         state = "STATUS PLANT-FIRED" if report["plant_fires"] else "STATUS PLANT-INERT"
         print(f"{prefix} {args.plant.upper()} {state}")
         return 1
-    if args.round117 or args.round118 or args.round119:
+    if args.round117 or args.round118 or args.round119 or args.round120:
         prefix = (
-            "ROUND119" if args.round119 else
-            ("ROUND118" if args.round118 else "ROUND117"))
+            "ROUND120" if args.round120 else
+            ("ROUND119" if args.round119 else
+             ("ROUND118" if args.round118 else "ROUND117")))
         print(
             prefix + " PRODUCER " + report["status"] + ": first="
             + repr(report["producer_split"]["first_direct_non_bit"])

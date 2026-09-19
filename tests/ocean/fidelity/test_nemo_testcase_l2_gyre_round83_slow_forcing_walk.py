@@ -141,3 +141,33 @@ def test_round119_source_order_arm_is_private_and_default_off() -> None:
     hooks = WALK.model_module._NEMOWSRK3TestHooks()
     assert getattr(hooks, hook_name) is False
     assert hook_name not in WALK.model_module.LatLonCGridOceanConfig._fields
+
+
+def test_round120_float_words_preserve_signed_ulp_order() -> None:
+    one = np.float64(1.0)
+    above = np.nextafter(one, np.float64(np.inf))
+    below = np.nextafter(one, np.float64(-np.inf))
+    assert WALK._signed_ulp_difference(above, one) == 1
+    assert WALK._signed_ulp_difference(below, one) == -1
+    negative = np.float64(-1.0)
+    negative_above = np.nextafter(negative, np.float64(np.inf))
+    negative_below = np.nextafter(negative, np.float64(-np.inf))
+    assert WALK._signed_ulp_difference(negative_above, negative) == 1
+    assert WALK._signed_ulp_difference(negative_below, negative) == -1
+    assert WALK._float64_word(one)["hex"] == "0x3ff0000000000000"
+
+
+def test_round120_keg_ulp_plant_survives_both_boundaries() -> None:
+    addend = np.asarray([[[1.0]]], dtype=np.float64)
+    after_vor = np.zeros_like(addend)
+    zad = np.zeros_like(addend)
+    planted, _ = WALK._round120_keg_ulp_addend(
+        addend, after_vor, zad, (0, 0, 0))
+    assert np.count_nonzero(
+        planted.view(np.uint64) != addend.view(np.uint64)) == 1
+    ordinary_keg = after_vor + addend
+    planted_keg = after_vor + planted
+    assert planted_keg[0, 0, 0].view(np.uint64) != (
+        ordinary_keg[0, 0, 0].view(np.uint64))
+    assert (planted_keg + zad)[0, 0, 0].view(np.uint64) != (
+        (ordinary_keg + zad)[0, 0, 0].view(np.uint64))

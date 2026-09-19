@@ -1227,8 +1227,10 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     expose_stage3_momentum_rhs: str = ""
     # Private diagnostic arm for the WS-RK3 vector-source association. ``True``
     # keeps the stage-2/3 HPG -> VOR -> KEG -> ZAD discriminator.  Round 119's
-    # private ``("stage1-source-order", hpg_override)`` value drives stage 1
-    # through compiled HPG -> LDF -> VOR -> KEG -> ZAD; no card constructs it.
+    # private ``("stage1-source-order", hpg_override, keg_arm, override)``
+    # value drives stage 1 through compiled HPG -> LDF -> VOR -> KEG -> ZAD;
+    # the optional KEG fields are Round-120 one-variable arms and no card
+    # constructs any tuple form.
     nemo_stage_rhs_accumulation_order_arm: object = False
     # WRITE-only transport exposure for the ordered tracer boundary walk.
     # A nonzero stage stores NEMO's metric zFu/zFv/zFw triplet in u/v/T after

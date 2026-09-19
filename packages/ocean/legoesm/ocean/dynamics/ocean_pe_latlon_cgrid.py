@@ -4963,8 +4963,12 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         dp_dy, rho_0, direct_hpg_v)
     _nemo_stage1_source_order = (
         isinstance(nemo_operator_association, tuple)
-        and len(nemo_operator_association) == 2
+        and len(nemo_operator_association) >= 2
         and nemo_operator_association[0] == "stage1-source-order")
+    _nemo_stage1_keg_arm = (
+        nemo_operator_association[2]
+        if _nemo_stage1_source_order and len(nemo_operator_association) >= 3
+        else "baseline")
     if _nemo_stage1_source_order and nemo_operator_association[1] is not None:
         # Production-closure ULP plant only.  The private model hook supplies a
         # complete HPG pair; no public configuration can reach this branch.
@@ -5274,10 +5278,49 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             _nemo_after_ldf_u + diag_vortcor_u)
         _nemo_after_vor_v = jax.lax.optimization_barrier(
             _nemo_after_ldf_v + diag_vortcor_v)
-        _nemo_after_keg_u = jax.lax.optimization_barrier(
-            _nemo_after_vor_u + (-dKE_dx))
-        _nemo_after_keg_v = jax.lax.optimization_barrier(
-            _nemo_after_vor_v + (-dKE_dy))
+        if _nemo_stage1_keg_arm == "baseline":
+            _nemo_after_keg_u = jax.lax.optimization_barrier(
+                _nemo_after_vor_u + (-dKE_dx))
+            _nemo_after_keg_v = jax.lax.optimization_barrier(
+                _nemo_after_vor_v + (-dKE_dy))
+        elif _nemo_stage1_keg_arm == "unmasked-materialized":
+            _nemo_keg_addend_u = jax.lax.optimization_barrier(-dKE_dx)
+            _nemo_keg_addend_v = jax.lax.optimization_barrier(-dKE_dy)
+            _nemo_after_keg_u = jax.lax.optimization_barrier(
+                _nemo_after_vor_u + _nemo_keg_addend_u)
+            _nemo_after_keg_v = jax.lax.optimization_barrier(
+                _nemo_after_vor_v + _nemo_keg_addend_v)
+        elif _nemo_stage1_keg_arm == "masked-materialized":
+            _nemo_keg_addend_u = jax.lax.optimization_barrier(
+                (-dKE_dx) * u_mask_3d)
+            _nemo_keg_addend_v = jax.lax.optimization_barrier(
+                (-dKE_dy) * v_mask_3d)
+            _nemo_after_keg_u = jax.lax.optimization_barrier(
+                _nemo_after_vor_u + _nemo_keg_addend_u)
+            _nemo_after_keg_v = jax.lax.optimization_barrier(
+                _nemo_after_vor_v + _nemo_keg_addend_v)
+        elif _nemo_stage1_keg_arm == "literal-subtract":
+            _nemo_after_keg_u = jax.lax.optimization_barrier(
+                _nemo_after_vor_u - dKE_dx)
+            _nemo_after_keg_v = jax.lax.optimization_barrier(
+                _nemo_after_vor_v - dKE_dy)
+        elif _nemo_stage1_keg_arm == "override-materialized":
+            if len(nemo_operator_association) != 4:
+                raise ValueError(
+                    "override-materialized requires one complete KEG pair")
+            _nemo_keg_addend_u, _nemo_keg_addend_v = (
+                nemo_operator_association[3])
+            _nemo_keg_addend_u = jax.lax.optimization_barrier(
+                _nemo_keg_addend_u)
+            _nemo_keg_addend_v = jax.lax.optimization_barrier(
+                _nemo_keg_addend_v)
+            _nemo_after_keg_u = jax.lax.optimization_barrier(
+                _nemo_after_vor_u + _nemo_keg_addend_u)
+            _nemo_after_keg_v = jax.lax.optimization_barrier(
+                _nemo_after_vor_v + _nemo_keg_addend_v)
+        else:
+            raise ValueError(
+                f"unknown private stage-1 KEG arm {_nemo_stage1_keg_arm!r}")
         _nemo_after_adv_u = jax.lax.optimization_barrier(
             _nemo_after_keg_u + _nemo_zad_term_u)
         _nemo_after_adv_v = jax.lax.optimization_barrier(
@@ -5689,7 +5732,7 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         # Private fidelity seam for NEMO's vector-invariant source order:
         # dyn_hpg -> dyn_vor -> dyn_adv (stprk3_stg.F90:321-334).  These are
         # the already-computed production arrays, not re-evaluated numerics.
-        return tendencies, diagnostics, {
+        _nemo_operator_components = {
             # Already-materialized operands consumed by this exact tendency
             # evaluation.  These raw arrays are private WRITE-only fidelity
             # output: the live stage trace returns them after the compiled
@@ -5738,6 +5781,21 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
             "ldf_u": _mu(_nemo_ldf_term_u),
             "ldf_v": _mv(_nemo_ldf_term_v),
         }
+        if (_nemo_stage1_source_order
+                and _nemo_stage1_keg_arm in (
+                    "unmasked-materialized", "masked-materialized",
+                    "override-materialized")):
+            # The arm has already materialized this exact operand before its
+            # live Krhs addition.  Publishing that existing boundary cannot
+            # create the boundary; it only makes its bits available to the
+            # Round-120 gate after the production step completes.
+            _nemo_operator_components["applied_keg_addend_u"] = Field(
+                data=_nemo_keg_addend_u, name="applied_keg_addend_u",
+                dims=dims_u, units="m/s^2")
+            _nemo_operator_components["applied_keg_addend_v"] = Field(
+                data=_nemo_keg_addend_v, name="applied_keg_addend_v",
+                dims=dims_v, units="m/s^2")
+        return tendencies, diagnostics, _nemo_operator_components
     return tendencies, diagnostics
 
 
