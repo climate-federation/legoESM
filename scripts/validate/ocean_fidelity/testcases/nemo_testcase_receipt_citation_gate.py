@@ -177,6 +177,12 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/zdftke.f90"),
     "GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/trazdf.f90"),
+    # Round 112 consumes the admitted Round-111 FCT operand record and binds
+    # every statement to that record producer's compiled source card.
+    "GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90"),
+    "GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90"),
     # Round 92 binds the operand diagnosis to the exact acquired Round-90
     # compiled card, including its write-only recorder.
     "GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/stprk3_stg.f90": (
@@ -1105,6 +1111,33 @@ CITATION_MAP = {
         (') * wmask(ji,jj,jk)', 2), 4],
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/zdftke.f90:430': (
         '+ zfact3 * dissl(ji,jj,jk) * en(ji,jj,jk)', 1),
+    # --- round 112: admitted R111 metric-FCT compiled-order walk ---
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90:167-178': [
+        'DO jn = 1, kjpt',
+        'CALL fct_up1_2stp( Kbb, Kmm, Kaa', 12],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90:502-534': [
+        'zDt = 0.5_wp * pDt',
+        'CALL r111_first_flux( ptFu, ptFv, ptFw )', 33],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90:536-549': [
+        '! -- middle time step tracer with upstream scheme',
+        'CALL r111_midpoint( zr111, pt_up1 )', 14],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90:572-608': [
+        '! *** 2nd step',
+        'CALL r111_average_flux( ptFu, ptFv, ptFw )', 37],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90:611-623': [
+        ('DO jk =  1,  jpkm1  ; DO jj = ntsj-(  0)', 2),
+        'CALL r111_upstream( zr111, pt_rhs )', 13],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90:320-335': [
+        'CALL nonosc( Kaa, pt(:,:,:,jn,Kbb)',
+        'pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) + ztra', 16],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:294-297': [
+        'zFu(ji,jj,jk) = e2u(ji,jj)',
+        'END DO   ;   END DO   ;   END DO', 4],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:326-347': [
+        '!              !- vertical velocity and transport (ww,wi,zFw) -!',
+        'zFw(ji,jj,jk) = e1e2t(ji,jj) * ww(ji,jj,jk)', 22],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:860': (
+        'CALL tra_adv    ( kstp, Kbb, Kmm, Kaa, ts, Krhs', 1),
     # --- round 64: R46/R63 compiled-delta and run-horizon audit ---
     'GYRE_OMIP_L2_P3_SM_R46KT2/EXP00/namelist_cfg:21': (
         'nn_itend    =      10', 1),
