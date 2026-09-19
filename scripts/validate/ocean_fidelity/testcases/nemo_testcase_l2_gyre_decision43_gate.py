@@ -12,9 +12,14 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 from pathlib import Path
 
+import jax
+import numpy as np
+
+from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 
@@ -113,6 +118,168 @@ def _card_execution(route: str = "ldf_stage3") -> dict:
     return rows
 
 
+def _array_sha256(value: np.ndarray) -> str:
+    array = np.ascontiguousarray(value)
+    digest = hashlib.sha256()
+    digest.update(str(array.dtype).encode("ascii"))
+    digest.update(str(array.shape).encode("ascii"))
+    digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
+def measure_generic_nemo_gyre(snapshot: Path) -> dict:
+    """Run the card's certified three-step loop and retain exact endpoints."""
+    from legoesm.ocean.dynamics.ocean_model_latlon_cgrid import (
+        LatLonCGridOceanModel,
+    )
+    from legoesm.ocean.fidelity.nemo_recipe import (
+        _NEMO_GYRE_DT_S,
+        apply_nemo_gyre_surface_forcing,
+        build_nemo_gyre_recipe,
+        nemo_gyre_wind_forcing,
+    )
+
+    stamp = worktree_stamp()
+    require(stamp.get("clean") is True,
+            "generic NEMO-GYRE measurement worktree is dirty")
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    recipe = build_nemo_gyre_recipe()
+    config = recipe.model_config
+    require(config.tracer_time_integrator == "rk3_ws",
+            "generic NEMO-GYRE no longer uses the WS tracer lane")
+    require(config.gm_redi is not None,
+            "generic NEMO-GYRE no longer configures GM/Redi")
+    model = LatLonCGridOceanModel(recipe.grid, recipe.z_coord, config)
+    state = recipe.initial_state
+    n_lat, n_lon = state.T.data.shape[:2]
+    arrays: dict[str, np.ndarray] = {}
+    rows = []
+    fields = ("T", "S", "u", "v", "eta")
+    for step in range(1, 4):
+        time = (step - 1) * _NEMO_GYRE_DT_S
+        state = apply_nemo_gyre_surface_forcing(
+            state, recipe.z_coord, _NEMO_GYRE_DT_S, t_seconds=time)
+        state = model.step(
+            state, dt=_NEMO_GYRE_DT_S,
+            surface_forcing=nemo_gyre_wind_forcing(
+                n_lat, n_lon, t_seconds=time))
+        state = jax.device_get(state)
+        for field in fields:
+            value = np.asarray(getattr(state, field).data)
+            key = f"step{step}_{field}"
+            arrays[key] = value
+            rows.append({
+                "row": key,
+                "shape": list(value.shape),
+                "dtype": str(value.dtype),
+                "finite": bool(np.all(np.isfinite(value))),
+                "max_abs": float(np.max(np.abs(value))),
+                "sha256": _array_sha256(value),
+            })
+
+    windless = recipe.initial_state
+    for step in range(1, 4):
+        time = (step - 1) * _NEMO_GYRE_DT_S
+        windless = apply_nemo_gyre_surface_forcing(
+            windless, recipe.z_coord, _NEMO_GYRE_DT_S, t_seconds=time)
+        windless = model.step(windless, dt=_NEMO_GYRE_DT_S)
+    windless = jax.device_get(windless)
+    thermal_move = float(np.max(np.abs(
+        arrays["step3_T"] - np.asarray(recipe.initial_state.T.data))))
+    wind_move = float(np.max(np.abs(
+        arrays["step3_u"] - np.asarray(windless.u.data))))
+    certifications = {
+        "all_fields_finite": all(row["finite"] for row in rows),
+        "max_abs_u_below_one": float(np.max(np.abs(arrays["step3_u"]))) < 1.0,
+        "max_abs_eta_below_one": (
+            float(np.max(np.abs(arrays["step3_eta"]))) < 1.0),
+        "thermal_forcing_nonvacuous": thermal_move > 1.0e-3,
+        "wind_forcing_nonvacuous": wind_move > 1.0e-4,
+    }
+    np.savez(snapshot, **arrays)
+    return {
+        "format": "nemo-gyre-generic-card-three-step-v1",
+        "status": "PASS" if all(certifications.values()) else "FAIL",
+        "worktree": stamp,
+        "snapshot": str(snapshot),
+        "route_observation": {
+            "tracer_time_integrator": config.tracer_time_integrator,
+            "gm_redi_configured": config.gm_redi is not None,
+            "executes_ldf_stage3_route": bool(
+                config.tracer_time_integrator == "rk3_ws"
+                and config.gm_redi is not None),
+        },
+        "rows": rows,
+        "certifications": certifications,
+        "thermal_move": thermal_move,
+        "wind_move": wind_move,
+    }
+
+
+def compare_generic_nemo_gyre(
+    before_report: dict,
+    before_snapshot: Path,
+    after_report: dict,
+    after_snapshot: Path,
+) -> dict:
+    """Register every exact field move between two card measurements."""
+    expected_format = "nemo-gyre-generic-card-three-step-v1"
+    require(before_report.get("format") == expected_format,
+            "generic-card before report has the wrong format")
+    require(after_report.get("format") == expected_format,
+            "generic-card after report has the wrong format")
+    require(before_report.get("status") == "PASS",
+            "generic-card before certification failed")
+    require(after_report.get("status") == "PASS",
+            "generic-card after certification failed")
+    require(before_report.get("certifications")
+            == after_report.get("certifications"),
+            "generic-card certification dispositions changed")
+    before = np.load(before_snapshot)
+    after = np.load(after_snapshot)
+    require(set(before.files) == set(after.files),
+            "generic-card snapshot schemas differ")
+    rows = []
+    for name in sorted(before.files):
+        left = np.asarray(before[name])
+        right = np.asarray(after[name])
+        require(left.shape == right.shape and left.dtype == right.dtype,
+                f"generic-card row {name} schema differs")
+        changed = left.view(np.uint64) != right.view(np.uint64)
+        rows.append({
+            "row": name,
+            "cells": int(left.size),
+            "cells_unequal": int(np.count_nonzero(changed)),
+            "max_abs_move": float(np.max(np.abs(right - left))),
+            "before_sha256": _array_sha256(left),
+            "after_sha256": _array_sha256(right),
+        })
+    moved = [row for row in rows if row["cells_unequal"]]
+    return {
+        "format": "nemo-gyre-generic-card-three-step-comparison-v1",
+        "status": "PASS" if moved else "FAIL",
+        "worktree": worktree_stamp(),
+        "before_commit": before_report["worktree"]["commit"],
+        "after_commit": after_report["worktree"]["commit"],
+        "certifications_unchanged": True,
+        "rows": rows,
+        "moved_rows": moved,
+        "moved_row_count": len(moved),
+    }
+
+
+def _read_moved_row_registry(path: Path) -> tuple[str, ...]:
+    require(path.is_file(), f"missing moved-row registry {path}")
+    rows = tuple(
+        line.split("\t", 1)[0]
+        for line in path.read_text().splitlines() if line.strip())
+    require(rows, "moved-row registry is empty")
+    require(len(set(rows)) == len(rows),
+            "moved-row registry contains duplicate names")
+    return rows
+
+
 def evaluate(
     comparison: dict,
     before_day_gap: dict,
@@ -121,6 +288,7 @@ def evaluate(
     expected_candidate_commit: str,
     route: str = "ldf_stage3",
     measured_cards: tuple[str, ...] = (),
+    registered_rows: tuple[str, ...] = (),
     plant: str | None = None,
 ) -> dict:
     comparison = copy.deepcopy(comparison)
@@ -159,6 +327,8 @@ def evaluate(
             "reference": "AT-BAR",
             "candidate": "DEBT",
         })
+    elif plant == "missing-moved-registry":
+        registered_rows = registered_rows[1:]
     elif plant is not None:
         raise GateError(f"unknown plant {plant!r}")
 
@@ -185,6 +355,12 @@ def evaluate(
             "a moved comparison row has no name")
     require(len({row["row"] for row in moved}) == len(moved),
             "moved-row registry contains duplicate names")
+    registered_set = set(registered_rows)
+    moved_set = {row["row"] for row in moved}
+    require(len(registered_set) == len(registered_rows),
+            "explicit moved-row registry contains duplicate names")
+    missing_registered_rows = sorted(moved_set - registered_set)
+    unexpected_registered_rows = sorted(registered_set - moved_set)
 
     cards = _card_execution(route)
     require(cards["GYRE-zco"]["executes_route"],
@@ -204,7 +380,9 @@ def evaluate(
         "day30_T_rms_decreases": after30["rms_T"] < before30["rms_T"],
         "first_over_bar_not_earlier": first_not_earlier,
         "no_kt1_at_bar_row_leaves": not kt1_losses,
-        "all_moved_rows_registered": len(moved) > 0,
+        "all_moved_rows_registered": bool(
+            moved and not missing_registered_rows
+            and not unexpected_registered_rows),
         "dino_measurement_required": dino_shared,
         "dino_statement_not_executed": not dino_shared,
         "all_executing_cards_measured": not unmeasured_executing_cards,
@@ -240,6 +418,9 @@ def evaluate(
         "kt1_at_bar_losses": kt1_losses,
         "moved_row_count": len(moved),
         "moved_rows": moved,
+        "registered_row_count": len(registered_rows),
+        "missing_registered_rows": missing_registered_rows,
+        "unexpected_registered_rows": unexpected_registered_rows,
         "card_execution": cards,
         "criteria": criteria,
     }
@@ -247,11 +428,17 @@ def evaluate(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--comparison", type=Path, required=True)
-    parser.add_argument("--before-day-gap", type=Path, required=True)
-    parser.add_argument("--after-day-gap", type=Path, required=True)
-    parser.add_argument("--expect-candidate-commit", required=True)
+    parser.add_argument("--comparison", type=Path)
+    parser.add_argument("--before-day-gap", type=Path)
+    parser.add_argument("--after-day-gap", type=Path)
+    parser.add_argument("--expect-candidate-commit")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--generic-measure-snapshot", type=Path)
+    parser.add_argument("--generic-before-report", type=Path)
+    parser.add_argument("--generic-before-snapshot", type=Path)
+    parser.add_argument("--generic-after-report", type=Path)
+    parser.add_argument("--generic-after-snapshot", type=Path)
+    parser.add_argument("--moved-row-registry", type=Path)
     parser.add_argument(
         "--route", choices=("ldf_stage3", "fct_metric_upstream"),
         default="ldf_stage3")
@@ -259,9 +446,35 @@ def main(argv: list[str] | None = None) -> int:
         "--measured-card", action="append", default=[],
         help="executing non-primary card discharged by a separate measurement")
     parser.add_argument("--plant", choices=(
-        "day30-no-improvement", "earlier-first-over-bar", "kt1-at-bar-loss"))
+        "day30-no-improvement", "earlier-first-over-bar", "kt1-at-bar-loss",
+        "missing-moved-registry"))
     args = parser.parse_args(argv)
     try:
+        if args.generic_measure_snapshot is not None:
+            report = measure_generic_nemo_gyre(args.generic_measure_snapshot)
+            args.output.write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n")
+            print(f"STATUS {report['status']}: generic NEMO-GYRE three-step card")
+            return 0 if report["status"] == "PASS" else 1
+        generic_compare = (
+            args.generic_before_report, args.generic_before_snapshot,
+            args.generic_after_report, args.generic_after_snapshot)
+        if any(value is not None for value in generic_compare):
+            require(all(value is not None for value in generic_compare),
+                    "generic comparison requires all four report/snapshot paths")
+            report = compare_generic_nemo_gyre(
+                _read(args.generic_before_report), args.generic_before_snapshot,
+                _read(args.generic_after_report), args.generic_after_snapshot)
+            args.output.write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n")
+            print(f"STATUS {report['status']}: generic NEMO-GYRE "
+                  f"moved_rows={report['moved_row_count']}")
+            return 0 if report["status"] == "PASS" else 1
+        require(all(value is not None for value in (
+            args.comparison, args.before_day_gap, args.after_day_gap,
+            args.expect_candidate_commit, args.moved_row_registry)),
+            "Decision-43 admission requires comparison, day gaps, commit, "
+            "and --moved-row-registry")
         report = evaluate(
             _read(args.comparison),
             _read(args.before_day_gap),
@@ -269,6 +482,8 @@ def main(argv: list[str] | None = None) -> int:
             expected_candidate_commit=args.expect_candidate_commit,
             route=args.route,
             measured_cards=tuple(args.measured_card),
+            registered_rows=_read_moved_row_registry(
+                args.moved_row_registry),
             plant=args.plant,
         )
         args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")

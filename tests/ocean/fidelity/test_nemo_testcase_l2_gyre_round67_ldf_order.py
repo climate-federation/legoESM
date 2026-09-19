@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.util
-import inspect
 import sys
 from pathlib import Path
 
@@ -116,16 +115,64 @@ def test_pytree_exact_census_checks_every_leaf_and_fires_on_one_ulp():
     assert changed["max_abs"] > 0.0
 
 
-def test_landed_native_source_route_has_no_private_selector():
+def test_landed_native_source_route_executes_on_the_real_generic_card():
     module = _module()
     hooks = module.model_module._NEMOWSRK3TestHooks
     assert "route_gm_redi_stage3_source" not in hooks._fields
     assert "stage3_advection_content_override" in hooks._fields
-    source = inspect.getsource(
-        module.model_module.LatLonCGridOceanModel._step_impl)
-    assert "if _cfg_b.gm_redi is not None" in source
-    assert source.count("_stage_source_rates[2][0] + dT_gm * active_3d") == 1
-    assert source.count("_stage_source_rates[2][1] + dS_gm * active_3d") == 1
+
+    from legoesm.ocean.fidelity.nemo_recipe import (
+        _NEMO_GYRE_DT_S,
+        build_nemo_gyre_recipe,
+    )
+
+    def observed_stage3_source(gm_value):
+        recipe = build_nemo_gyre_recipe()
+        observations = []
+        real_gm = module.model_module.gm_redi_tracer_tendency_latlon
+        real_pair = module.model_module._nemo_ws_rk3_tracer_pair_step
+
+        def sentinel_gm(*args, **kwargs):
+            result = real_gm(*args, **kwargs)
+            assert len(result) == 2
+            return tuple(module.jnp.full_like(value, gm_value)
+                         for value in result)
+
+        def capture_pair(*args, **kwargs):
+            if kwargs.get("return_final_content", False):
+                source_t, source_s = kwargs["stage_source_rates"][2]
+                module.jax.debug.callback(
+                    lambda t, s: observations.append((
+                        np.asarray(t), np.asarray(s))),
+                    source_t, source_s, ordered=True)
+            return real_pair(*args, **kwargs)
+
+        module.model_module.gm_redi_tracer_tendency_latlon = sentinel_gm
+        module.model_module._nemo_ws_rk3_tracer_pair_step = capture_pair
+        try:
+            model = module.model_module.LatLonCGridOceanModel(
+                recipe.grid, recipe.z_coord, recipe.model_config)
+            result = model.step(
+                recipe.initial_state, dt=_NEMO_GYRE_DT_S)
+            module.jax.device_get(result)
+            module.jax.effects_barrier()
+        finally:
+            module.model_module.gm_redi_tracer_tendency_latlon = real_gm
+            module.model_module._nemo_ws_rk3_tracer_pair_step = real_pair
+        assert observations
+        for duplicate in observations[1:]:
+            np.testing.assert_array_equal(duplicate[0], observations[0][0])
+            np.testing.assert_array_equal(duplicate[1], observations[0][1])
+        return observations[0]
+
+    zero = observed_stage3_source(0.0)
+    planted = observed_stage3_source(0.125)
+    active = np.asarray(build_nemo_gyre_recipe().z_coord.is_active, dtype=bool)
+    for baseline, candidate in zip(zero, planted, strict=True):
+        delta = candidate - baseline
+        active_3d = np.broadcast_to(active, delta.shape)
+        np.testing.assert_array_equal(delta[active_3d], 0.125)
+        np.testing.assert_array_equal(delta[~active_3d], 0.0)
 
 
 def test_worsening_census_uses_two_row_scale_ulps():
