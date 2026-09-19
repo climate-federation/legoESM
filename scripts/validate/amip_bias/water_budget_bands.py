@@ -74,7 +74,31 @@ def _flux_fields(run):
         if ref is None:
             raise SystemExit(f"FATAL: no reference climatology for {var}")
         out[var] = (np.asarray(d[var]).mean(axis=0), np.asarray(ref), mlat, mlon)
+    # Second precipitation reference.  GPCP and ERA5 disagree by ~20-30% over
+    # high-latitude snow and the Southern Ocean, which is exactly the band an
+    # extratropical precipitation deficit would be claimed in, so a deficit
+    # that appears against only ONE of them is a reference artefact.
+    d = rb._load_model(run, "pr")
+    out["pr_era5"] = np.asarray(rb._ref_clim(
+        "pr", rb._month_labels(d), np.asarray(d.lat), np.asarray(d.lon),
+        src=rb.ERA5))
     return out
+
+
+_MONTH_EDGE = np.cumsum([0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31])
+
+
+def published_span(run):
+    """Day-of-year range the published CMOR months cover.
+
+    The storage term and the surface fluxes MUST be read over the same days:
+    a month-mean P against an endpoint slope taken over a different span is
+    two windows dressed as one budget, and on these arms the difference is
+    0.2 mm/day -- the size of the effect being argued about.
+    """
+    d = rb._load_model(run, "pr")
+    months = rb._month_labels(d)
+    return float(_MONTH_EDGE[min(months) - 1]), float(_MONTH_EDGE[max(months)])
 
 
 def _band(field, mlat, mlon, lo, hi):
@@ -99,25 +123,33 @@ def _report(run):
         wser[name] = s
         print(f"{name:<22}" + "".join(f"{v:9.3f}" for v in s))
 
-    dt = days[-1] - days[0]
+    lo_d, hi_d = published_span(run)
+    keep = [i for i, d in enumerate(days) if lo_d <= d <= hi_d]
+    if len(keep) < 2:
+        raise SystemExit(f"FATAL: {run} has {len(keep)} checkpoints inside the "
+                         f"published month span {lo_d:.0f}-{hi_d:.0f}")
+    i0, i1 = keep[0], keep[-1]
+    dt = days[i1] - days[i0]
     ff = _flux_fields(run)
-    print(f"\n=== {run}: band water budget, days {days[0]:.0f}-{days[-1]:.0f} "
+    print(f"\n=== {run}: band water budget, days {days[i0]:.0f}-{days[i1]:.0f} "
           f"[mm/day].  C = P - E + dW/dt = implied horizontal convergence ===")
-    print(f"{'band':<22}{'P':>8}{'Pobs':>8}{'E':>8}{'Eobs':>8}"
+    print(f"{'band':<22}{'P':>8}{'Pgpcp':>8}{'Pera5':>8}{'E':>8}{'Eobs':>8}"
           f"{'dW/dt':>8}{'C':>8}{'Cobs':>8}{'dC':>8}")
     for name, (lo, hi) in BANDS.items():
         pm, pr_, mlat, mlon = ff["pr"]
         em, er, elat, elon = ff["evspsbl"]
         p, po = _band(pm, mlat, mlon, lo, hi), _band(pr_, mlat, mlon, lo, hi)
         e, eo = _band(em, elat, elon, lo, hi), _band(er, elat, elon, lo, hi)
-        dw = (wser[name][-1] - wser[name][0]) / dt
+        dw = (wser[name][i1] - wser[name][i0]) / dt
         c, co = p - e + dw, po - eo
-        print(f"{name:<22}{p:8.3f}{po:8.3f}{e:8.3f}{eo:8.3f}"
+        p5 = _band(ff["pr_era5"], mlat, mlon, lo, hi)
+        print(f"{name:<22}{p:8.3f}{po:8.3f}{p5:8.3f}{e:8.3f}{eo:8.3f}"
               f"{dw:8.3f}{c:8.3f}{co:8.3f}{c - co:8.3f}")
-    print("P against GPCP, E against ERA5, both over the calendar months the "
-          "run published; dW/dt over the checkpoint span, which is NOT the "
-          "same window.  Cobs carries no storage term: a climatology is steady "
-          "by construction, the model need not be -- read dW/dt first.")
+    print("P against GPCP, E against ERA5, over the calendar months the run "
+          "published; dW/dt over the checkpoints INSIDE that same span.  Cobs "
+          "carries NO storage term -- an April climatology has a real seasonal "
+          "d(prw)/dt, so Cobs is the steady-state approximation to the "
+          "reference convergence, not the reference convergence.")
 
 
 def _plot(runs, out):
