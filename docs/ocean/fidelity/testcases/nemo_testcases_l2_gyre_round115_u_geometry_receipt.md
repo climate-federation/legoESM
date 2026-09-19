@@ -227,12 +227,78 @@ production change must derive and measure its executing-card set.
 
 ## Review, citations, and tests
 
-This section is completed after the provisional receipt is committed.  The
-required read-only Codex review will try to refute the source association,
-production-JIT proof, plant, upstream-owner conclusion, and decision not to
-run a ladder.  The citation gate and its shifted plant, focused tests, exact
-four-file push gate, and one-piece ocean fidelity/unit run remain mandatory
-before final status.
+The required adversarial command was run from the provisional receipt commit
+with `codex exec --sandbox read-only -C` and a prompt that tried to refute the
+record/current-source association, production-JIT label, source associations,
+ULP propagation, upstream-owner conclusion, no-candidate trajectory table,
+and OPEN handoff.  It exited 1 before a reviewer started, so it emitted no
+`SHIP`, `HOLD`, or `DO NOT SHIP` verdict.  Its verbatim terminal finding was:
+
+```text
+Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+```
+
+Accordingly, **independent review unavailable in-sandbox**.  This is not
+presented as approval.  The complete attempted-review log is
+`round115/review/codex_review.log`.
+
+The clean-tree receipt citation gate reports **PASS** for all 13/13 compiled
+citations, zero unmapped citations, zero cited-row failures, zero full-map
+audit failures, and all built-in plants firing.  Its separate shifted-line
+plant moves the record-build U-geometry citation by two lines, reports
+`SYMBOL-NOT-AT-LINE`, and exits 1.  Ordinary and plant artifacts are under
+`round115/citations/`.
+
+Focused CPU/fp64 suites reported exactly:
+
+```text
+34 passed in 64.74s (0:01:04)
+119 passed in 405.35s (0:06:45)
+```
+
+The first is the modified production gate plus receipt-citation tests.  The
+second is the inherited four-file push gate: receipt citations, TKE NEMO
+terms, NEMO recipes, and real freshwater closure.
+
+The required one-piece
+`-n 12 tests/ocean/fidelity tests/ocean/unit` run was attempted exactly once.
+It collected 8,184 cases and reached 95%, but nine workers aborted in JAX
+compilation and xdist repeatedly replaced them.  Pytest emitted no terminal
+summary and no JUnit file; its last progress line was:
+
+```text
+.........................................................s.............. [ 95%]
+```
+
+A read-only process check then found no pytest or worker process, while the
+controller shell remained open.  One interrupt closed that stale shell and
+the command exited 130.  There is therefore no full-suite summary line to
+quote and no complete failing-set diff; this receipt does not invent either.
+Two of the nine crash traces ended before identifying a test frame.
+
+Seven crash-node functions were recoverable.  The first replay command had an
+incorrectly unqualified `test_shapes_preserved` node and correctly refused
+with:
+
+```text
+no tests ran in 0.47s
+```
+
+The corrected fresh serial replay expanded to ten cases and reported:
+
+```text
+5 failed, 5 passed in 253.96s (0:04:13)
+```
+
+All five failures are exact members of the pinned 87-ID incoming baseline:
+the four `test_model_rollout_grads_finite_f32` parameters (`ppm_fct`, `tvd`,
+`superbee`, and `dst3`) and
+`TestEKEBudgetCoupling::test_signed_iso_sink_gets_raw_kappa_split_call`.
+The mechanical replay diff reports zero new IDs.  The recovered leapfrog,
+ocean-shape, stage-1 transport, mass-flux-store, and stage-face-mask nodes all
+pass.  This recovery does not convert the corrupted one-piece run into a
+complete suite; it only classifies every crash node whose trace named a test.
+Complete logs and the baseline diff are under `round115/tests/`.
 
 ## ASKED / UNASKED
 
@@ -281,4 +347,3 @@ on a non-candidate.
    No acquisition is requested because the admitted Round-81 record already
    contains every external substep and final U/V/SSH swap; request a new NEMO
    record only if a directly consumed current boundary is demonstrably absent.
-
