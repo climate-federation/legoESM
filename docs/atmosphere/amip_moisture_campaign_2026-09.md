@@ -880,3 +880,49 @@ the wrapper.
 with effective resolution, 42 hPa at 60 levels and 89 at 120. A resolution-sensitive departure
 search and the point-sample-versus-layer-mean semantics of the fixtures are both candidates and
 neither has been discriminated. The gate test records this instead of certifying agreement.
+
+## Iteration M — the surface-layer reference height, and a controlled pair
+
+The evaporation deficit turned out to sit on a pending decision rather than on
+physics nobody had looked at. Commit da7cca173 (2026-09-15, "opt-in ocean
+surface-layer corrections — real input height, sea-water q_sfc") added two
+switches and left both off, its own message saying "both default False (user
+decision pending)". No committed configuration has set either since.
+
+What the height switch does. On the MPAS path the similarity solver is handed
+the lowest full level's wind, temperature and humidity, but with
+`surface_z_ref_model_level` False it is told those values came from 10 m. They
+come from about 147 m. Calling the model's own flux routine twice on identical
+soundings — `scripts/validate/amip_bias/zref_height_factor.py` — the
+mislabelling inflates latent heat by 1.13 to 1.30 depending on regime and
+surface stress by 1.16 to 1.54. A neutral-limit estimate of 1.5 was too high;
+stability corrections eat about a fifth of it.
+
+The controlled pair. Two five-day branches from the pinned day-105 state, one
+variable, both corrections against neither, both with the process ledger on.
+Global, area-weighted, kg/m2/day at day 110:
+
+                       off      on    change
+  evaporation        2.278   2.008     -11.9%
+  convective rain    2.014   1.782     -11.5%
+  stratiform rain    0.795   0.804      +1.1%
+  transport          0.145   0.136
+  column drying      0.840   0.961
+
+Tropical ocean surface layer at the same day: specific humidity 19.48 against
+18.70 g/kg, so the corrected arm closes roughly a third of the excess over
+ERA5's 17.2 in five days, and the air cools by 1.03 K.
+
+How to read it. The immediate evaporation penalty was 24% on day one and 12%
+by day five, so half of it was already recovered as the surface layer dried —
+which is the signature GLM's review predicted if the inflated coefficient was
+CAUSING the moist bias rather than merely offsetting it. But five days is the
+transient, not the answer: precipitation moves from 95% to 87% of the
+reference and relative humidity gets WORSE, 0.877 to 0.897, because the
+cooling outpaces the drying. Whether the arm recovers depends on whether the
+drying continues at 0.12 kg/m2/day for the thirty-odd days it would take to
+remove a bias of 4 to 8 mm, and this pair cannot say.
+
+Open, and needing a decision: a thirty-day pair is the only thing that settles
+whether these corrections are net-positive. The cold drift of about 1 K in
+five days is the risk to watch in it.
