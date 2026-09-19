@@ -23,6 +23,7 @@ import nemo_testcase_l2_gyre_round46_kt2_stage_gate as round46  # noqa: E402
 import nemo_testcase_l2_gyre_round78_uamid_walk as round78  # noqa: E402
 import nemo_testcase_l2_gyre_round81_btstep_gate as round81  # noqa: E402
 import nemo_testcase_l2_gyre_round82_btstep_walk as round82  # noqa: E402
+import nemo_testcase_l2_gyre_round117_preloop_gate as round117_record  # noqa: E402
 from legoesm.core.precision import (  # noqa: E402
     PrecisionPolicy,
     get_policy,
@@ -35,6 +36,7 @@ from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
 
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3")
 ROUND64_PRODUCER = "3b3b045bd9e03b60330204e7590e4c4470b7a0ca"
+ROUND117_PRODUCER = "c8f5d513df453f3f12a3d5eb05b05be8c8d3a2fd"
 ROUND117_BOUNDARIES = (
     "after_hpg", "after_ldf", "after_vor", "after_keg",
     "after_zad", "after_adv",
@@ -256,6 +258,63 @@ def _admit_round64(args) -> tuple[dict, dict]:
             "wrong kt/stage record")
     require(stage["arrays"]["has_ldf"] == 1.0, "kt=2 RHS lacks final LDF row")
     return stage, slow
+
+
+def _admit_round117_direct(args, external: dict) -> dict[str, object]:
+    """Admit and parse the same-run kt=2 slow/pre-loop record pair."""
+    admission = json.loads(args.preloop_admission.read_text())
+    require(admission.get("verdict") == "PASS",
+            "Round-117 direct-record admission failed")
+    require(
+        (
+            admission.get("byte_identical_records"),
+            len(admission.get("classified_changed_records", [])),
+            admission.get("admitted_difference_count"),
+        ) == (46, 20, 132),
+        "Round-117 inherited-record census changed",
+    )
+    producer = (args.preloop_root / "producer_commit.txt").read_text().strip()
+    require(producer == args.expect_preloop_record_commit == ROUND117_PRODUCER,
+            "Round-117 direct-record producer changed")
+    validation = json.loads(
+        (args.preloop_root / "round117_preloop_validation.json").read_text())
+    require(validation.get("status") == "PASS",
+            "Round-117 direct-record gate did not pass")
+    require(validation.get("producer_commit") == producer,
+            "Round-117 validation producer changed")
+
+    slow_path = args.preloop_root / round117_record.SLOW_RECORD
+    preloop_path = args.preloop_root / round117_record.PRELOOP_RECORD
+    for path in (slow_path, preloop_path):
+        parts = path.with_name(path.name + ".stamp").read_text().split()
+        require(len(parts) == 3, f"malformed direct-record stamp for {path.name}")
+        require(parts == [sha256(path), producer, path.name],
+                f"direct-record stamp moved for {path.name}")
+        registered = validation["records"][path.name]
+        require(registered["sha256"] == sha256(path),
+                f"direct-record validation hash moved for {path.name}")
+
+    slow = round117_record.read_slow_record(slow_path)
+    preloop = round117_record.read_preloop_record(preloop_path)
+    fields = preloop["fields"]
+    for face in ("u", "v"):
+        incoming = fields[f"incoming_{face}"]
+        coriolis = fields[f"cor_{face}"][2:-2, 2:-2]
+        mask = fields[f"{face}_mask"][2:-2, 2:-2]
+        final = fields[f"final_{face}"]
+        require(np.array_equal(slow["fields"][f"post_wind_{face}"], incoming),
+                f"same-run slow/pre-loop {face.upper()} boundary moved")
+        require(np.array_equal(incoming - coriolis * mask, final),
+                f"compiled pre-loop {face.upper()} subtract did not replay")
+        require(np.array_equal(final, external[f"slow_{face}"][0]),
+                f"pre-loop/Round-81 {face.upper()} final boundary moved")
+    return {
+        "admission": admission,
+        "validation": validation,
+        "slow": slow,
+        "preloop": preloop,
+        "producer_commit": producer,
+    }
 
 
 def measure(args) -> dict[str, object]:
@@ -535,6 +594,7 @@ def measure_round117(args) -> dict[str, object]:
 
     stage, static = _admit_round64(args)
     external = round82._admit(args)
+    direct = _admit_round117_direct(args, external) if args.round118 else None
     (base, card, seeded, freshwater, surface,
      captured) = round82._context(args)
     require(base["status"] == "MEASURED", "kt=2 seeded context changed")
@@ -572,23 +632,38 @@ def measure_round117(args) -> dict[str, object]:
             "final": native_v(producer["final_v"]),
         },
     }
-    oracle_split = {
-        "u": {
-            "substep1_coriolis_proxy": np.asarray(
-                external["cor_u"][0], dtype=np.float64),
-            "final": np.asarray(external["slow_u"][0], dtype=np.float64),
-        },
-        "v": {
-            "substep1_coriolis_proxy": np.asarray(
-                external["cor_v"][0], dtype=np.float64),
-            "final": np.asarray(external["slow_v"][0], dtype=np.float64),
-        },
-    }
-    for face in ("u", "v"):
-        mask = active[f"{face}2"].astype(np.float64)
-        oracle_split[face]["proxy_incoming_preimage"] = (
-            oracle_split[face]["final"]
-            + oracle_split[face]["substep1_coriolis_proxy"] * mask)
+    if direct is not None:
+        direct_fields = direct["preloop"]["fields"]
+        oracle_split = {
+            face: {
+                "direct_incoming": np.asarray(
+                    direct_fields[f"incoming_{face}"], dtype=np.float64),
+                "direct_coriolis": np.asarray(
+                    direct_fields[f"cor_{face}"][2:-2, 2:-2],
+                    dtype=np.float64),
+                "final": np.asarray(
+                    direct_fields[f"final_{face}"], dtype=np.float64),
+            }
+            for face in ("u", "v")
+        }
+    else:
+        oracle_split = {
+            "u": {
+                "substep1_coriolis_proxy": np.asarray(
+                    external["cor_u"][0], dtype=np.float64),
+                "final": np.asarray(external["slow_u"][0], dtype=np.float64),
+            },
+            "v": {
+                "substep1_coriolis_proxy": np.asarray(
+                    external["cor_v"][0], dtype=np.float64),
+                "final": np.asarray(external["slow_v"][0], dtype=np.float64),
+            },
+        }
+        for face in ("u", "v"):
+            mask = active[f"{face}2"].astype(np.float64)
+            oracle_split[face]["proxy_incoming_preimage"] = (
+                oracle_split[face]["final"]
+                + oracle_split[face]["substep1_coriolis_proxy"] * mask)
 
     actual_external_final = {
         "u": gate._trace_native(
@@ -613,41 +688,108 @@ def measure_round117(args) -> dict[str, object]:
         jnp.asarray(active["u2"], dtype=np.float64),
         jnp.asarray(active["v2"], dtype=np.float64),
     ))
-    split_rows = {
-        face: {
-            "incoming_vs_substep_proxy_preimage": comparison(
-                live_split[face]["incoming"],
-                oracle_split[face]["proxy_incoming_preimage"],
-                active[f"{face}2"]),
-            "preloop_coriolis_vs_substep1_proxy": comparison(
-                live_split[face]["coriolis"],
-                oracle_split[face]["substep1_coriolis_proxy"],
-                active[f"{face}2"]),
-            "final_vs_direct_record": comparison(
-                live_split[face]["final"], oracle_split[face]["final"],
-                active[f"{face}2"]),
-            "isolated_subtract_vs_production_final": comparison(
-                isolated_final_u if face == "u" else isolated_final_v,
-                live_split[face]["final"], active[f"{face}2"]),
+    if direct is not None:
+        split_rows = {
+            face: {
+                "incoming_vs_direct_record": comparison(
+                    live_split[face]["incoming"],
+                    oracle_split[face]["direct_incoming"],
+                    active[f"{face}2"]),
+                "preloop_coriolis_vs_direct_record": comparison(
+                    live_split[face]["coriolis"],
+                    oracle_split[face]["direct_coriolis"],
+                    active[f"{face}2"]),
+                "final_vs_direct_record": comparison(
+                    live_split[face]["final"], oracle_split[face]["final"],
+                    active[f"{face}2"]),
+                "isolated_subtract_vs_production_final": comparison(
+                    isolated_final_u if face == "u" else isolated_final_v,
+                    live_split[face]["final"], active[f"{face}2"]),
+            }
+            for face in ("u", "v")
         }
-        for face in ("u", "v")
-    }
+        split_order = (
+            "incoming_vs_direct_record",
+            "preloop_coriolis_vs_direct_record",
+            "final_vs_direct_record",
+        )
+    else:
+        split_rows = {
+            face: {
+                "incoming_vs_substep_proxy_preimage": comparison(
+                    live_split[face]["incoming"],
+                    oracle_split[face]["proxy_incoming_preimage"],
+                    active[f"{face}2"]),
+                "preloop_coriolis_vs_substep1_proxy": comparison(
+                    live_split[face]["coriolis"],
+                    oracle_split[face]["substep1_coriolis_proxy"],
+                    active[f"{face}2"]),
+                "final_vs_direct_record": comparison(
+                    live_split[face]["final"], oracle_split[face]["final"],
+                    active[f"{face}2"]),
+                "isolated_subtract_vs_production_final": comparison(
+                    isolated_final_u if face == "u" else isolated_final_v,
+                    live_split[face]["final"], active[f"{face}2"]),
+            }
+            for face in ("u", "v")
+        }
+        split_order = (
+            "incoming_vs_substep_proxy_preimage",
+            "preloop_coriolis_vs_substep1_proxy",
+            "final_vs_direct_record",
+        )
     proxy_first = None
-    for boundary in (
-        "incoming_vs_substep_proxy_preimage",
-        "preloop_coriolis_vs_substep1_proxy",
-        "final_vs_direct_record",
-    ):
+    for boundary in split_order:
         for face in ("u", "v"):
             row = split_rows[face][boundary]
             if proxy_first is None and not row["bit_exact"]:
                 proxy_first = {"boundary": boundary, "face": face, **row}
     direct_first = next((
+        {"boundary": boundary, "face": face, **split_rows[face][boundary]}
+        for boundary in split_order
+        for face in ("u", "v")
+        if not split_rows[face][boundary]["bit_exact"]
+    ), None) if direct is not None else next((
         {"boundary": "final_vs_direct_record", "face": face,
          **split_rows[face]["final_vs_direct_record"]}
         for face in ("u", "v")
         if not split_rows[face]["final_vs_direct_record"]["bit_exact"]
     ), None)
+    cancellation = None
+    if direct is not None:
+        cancellation = {}
+        for face in ("u", "v"):
+            mask = active[f"{face}2"]
+            incoming_error = (
+                live_split[face]["incoming"]
+                - oracle_split[face]["direct_incoming"])[mask]
+            coriolis_error = (
+                live_split[face]["coriolis"]
+                - oracle_split[face]["direct_coriolis"])[mask]
+            final_error = (
+                live_split[face]["final"]
+                - oracle_split[face]["final"])[mask]
+            component_l1 = float(
+                np.sum(np.abs(incoming_error), dtype=np.float64)
+                + np.sum(np.abs(coriolis_error), dtype=np.float64))
+            final_l1 = float(np.sum(np.abs(final_error), dtype=np.float64))
+            cancellation[face] = {
+                "incoming_error_max": float(
+                    np.max(np.abs(incoming_error), initial=0.0)),
+                "coriolis_error_max": float(
+                    np.max(np.abs(coriolis_error), initial=0.0)),
+                "final_error_max": float(
+                    np.max(np.abs(final_error), initial=0.0)),
+                "component_l1": component_l1,
+                "final_l1": final_l1,
+                "cancellation_fraction": (
+                    0.0 if component_l1 == 0.0 else
+                    float(1.0 - final_l1 / component_l1)),
+                "subtract_cancelling_cells": int(np.count_nonzero(
+                    (incoming_error != 0.0) & (coriolis_error != 0.0)
+                    & (np.signbit(incoming_error)
+                       == np.signbit(coriolis_error)))),
+            }
 
     if args.plant == "incoming-ulp":
         planted_native, location, direction = _round117_propagating_ulp(
@@ -679,7 +821,10 @@ def measure_round117(args) -> dict[str, object]:
             and plant_rows["final_u"]["differing_cells"] > 0)
         require(plant_fires, "incoming ULP plant did not cross production subtract")
         return {
-            "format": "nemo-testcase-l2-gyre-round117-producer-walk-v1",
+            "format": (
+                "nemo-testcase-l2-gyre-round118-producer-walk-v1"
+                if args.round118 else
+                "nemo-testcase-l2-gyre-round117-producer-walk-v1"),
             "status": "PLANT_FIRED",
             "worktree": stamp,
             "execution_regime": args.execution_mode,
@@ -742,76 +887,134 @@ def measure_round117(args) -> dict[str, object]:
                 np.max(np.abs(delta[mask]), initial=0.0))
             previous = residual
 
-    # The Round-64 stream has no direct kt=2 stress snapshot.  Keep the joined
-    # replay explicit and withhold input certification when it is not exact.
     substeps = captured.substeps
-    rho_reciprocal = np.float64(static["r1_rho0"])
-    require(float(producer["wind_r1_rho0"]) == float(rho_reciprocal),
-            "live/oracle density reciprocal differs")
     source_replay = {}
-    for face in ("u", "v"):
-        if face == "u":
-            e3 = owned3(stage_arrays["e3u_0"])
-            mask3 = owned3(stage_arrays["umask"])
-            reciprocal_ref = np.asarray(static["r1_hu0"], dtype=np.float64)
-            inverse_depth = gate._trace_native(
-                substeps["inverse_depth_u"], "inverse_depth_u")[0]
-            drag = gate._trace_native(
-                substeps["drag_coefficient_u"], "drag_coefficient_u")[0]
+    if direct is not None:
+        slow_fields = direct["slow"]["fields"]
+        rho_reciprocal = np.float64(slow_fields["r1_rho0"])
+        require(float(producer["wind_r1_rho0"]) == float(rho_reciprocal),
+                "live/direct density reciprocal differs")
+        for face in ("u", "v"):
+            e3 = owned3(slow_fields[f"e3{face}"])
+            mask3 = owned3(slow_fields[f"{face}mask"])
+            direct_rhs = owned3(slow_fields[f"krhs_{face}"])
+            inherited_rhs = owned3(stage_arrays[f"after_adv_{face}"])
+            reciprocal_ref = owned2(slow_fields[f"r1_h{face}0"])
+            inverse_depth = owned2(slow_fields[f"r1_h{face}"])
+            drag = owned2(slow_fields[f"cd_{face}"])
             bottom = bottom_value(
-                owned3(stage_arrays["u_Kmm"]), mask3 != 0.0)
-            barotropic = owned2(stage_arrays["uu_b_Kmm"])
-            stress = native_u(producer["wind_tau_u"])
-            coriolis = oracle_split[face]["substep1_coriolis_proxy"]
-        else:
-            e3 = owned3(stage_arrays["e3v_0"])
-            mask3 = owned3(stage_arrays["vmask"])
-            reciprocal_ref = np.asarray(static["r1_hv0"], dtype=np.float64)
-            inverse_depth = gate._trace_native(
-                substeps["inverse_depth_v"], "inverse_depth_v")[0]
-            drag = gate._trace_native(
-                substeps["drag_coefficient_v"], "drag_coefficient_v")[0]
-            bottom = bottom_value(
-                owned3(stage_arrays["v_Kmm"]), mask3 != 0.0)
-            barotropic = owned2(stage_arrays["vv_b_Kmm"])
-            stress = native_v(producer["wind_tau_v"])
-            coriolis = oracle_split[face]["substep1_coriolis_proxy"]
-        chain = source_chain(
-            rhs=owned3(stage_arrays[f"after_adv_{face}"]),
-            e3=e3, mask3=mask3, reciprocal_ref=reciprocal_ref,
-            inverse_depth=inverse_depth, drag_coefficient=drag,
-            bottom_velocity=bottom, barotropic_velocity=barotropic,
-            rho_reciprocal=rho_reciprocal, stress=stress,
-            coriolis=coriolis,
-            mask2=active[f"{face}2"].astype(np.float64),
-        )
-        source_replay[face] = {
-            "post_wind_vs_substep_proxy_preimage": comparison(
-                chain["post_wind"],
-                oracle_split[face]["proxy_incoming_preimage"],
-                active[f"{face}2"]),
-            "forward_final_vs_direct_record": comparison(
-                chain["final"], oracle_split[face]["final"],
-                active[f"{face}2"]),
-        }
+                owned3(stage_arrays[f"{face}_Kmm"]), mask3 != 0.0)
+            barotropic = owned2(
+                direct["preloop"]["fields"][f"{face}_kmm"])
+            stress = owned2(slow_fields[f"{face}tau"])
+            coriolis = oracle_split[face]["direct_coriolis"]
+            chain = source_chain(
+                rhs=direct_rhs, e3=e3, mask3=mask3,
+                reciprocal_ref=reciprocal_ref,
+                inverse_depth=inverse_depth, drag_coefficient=drag,
+                bottom_velocity=bottom, barotropic_velocity=barotropic,
+                rho_reciprocal=rho_reciprocal, stress=stress,
+                coriolis=coriolis,
+                mask2=active[f"{face}2"].astype(np.float64),
+            )
+            source_replay[face] = {
+                "inherited_after_adv_to_same_run_krhs": comparison(
+                    inherited_rhs, direct_rhs, active[f"{face}3"]),
+                "depth_replay_to_direct_record": comparison(
+                    chain["depth_mean"], slow_fields[f"depth_{face}"],
+                    active[f"{face}2"]),
+                "post_drag_replay_to_direct_record": comparison(
+                    chain["post_drag"], slow_fields[f"post_drag_{face}"],
+                    active[f"{face}2"]),
+                "post_wind_replay_to_direct_record": comparison(
+                    chain["post_wind"], slow_fields[f"post_wind_{face}"],
+                    active[f"{face}2"]),
+                "forward_final_vs_direct_record": comparison(
+                    chain["final"], oracle_split[face]["final"],
+                    active[f"{face}2"]),
+            }
+    else:
+        # The Round-64 stream has no direct kt=2 stress snapshot.  Keep the
+        # proxy join explicit and withhold input certification.
+        rho_reciprocal = np.float64(static["r1_rho0"])
+        require(float(producer["wind_r1_rho0"]) == float(rho_reciprocal),
+                "live/oracle density reciprocal differs")
+        for face in ("u", "v"):
+            if face == "u":
+                e3 = owned3(stage_arrays["e3u_0"])
+                mask3 = owned3(stage_arrays["umask"])
+                reciprocal_ref = np.asarray(static["r1_hu0"], dtype=np.float64)
+                inverse_depth = gate._trace_native(
+                    substeps["inverse_depth_u"], "inverse_depth_u")[0]
+                drag = gate._trace_native(
+                    substeps["drag_coefficient_u"], "drag_coefficient_u")[0]
+                bottom = bottom_value(
+                    owned3(stage_arrays["u_Kmm"]), mask3 != 0.0)
+                barotropic = owned2(stage_arrays["uu_b_Kmm"])
+                stress = native_u(producer["wind_tau_u"])
+                coriolis = oracle_split[face]["substep1_coriolis_proxy"]
+            else:
+                e3 = owned3(stage_arrays["e3v_0"])
+                mask3 = owned3(stage_arrays["vmask"])
+                reciprocal_ref = np.asarray(static["r1_hv0"], dtype=np.float64)
+                inverse_depth = gate._trace_native(
+                    substeps["inverse_depth_v"], "inverse_depth_v")[0]
+                drag = gate._trace_native(
+                    substeps["drag_coefficient_v"], "drag_coefficient_v")[0]
+                bottom = bottom_value(
+                    owned3(stage_arrays["v_Kmm"]), mask3 != 0.0)
+                barotropic = owned2(stage_arrays["vv_b_Kmm"])
+                stress = native_v(producer["wind_tau_v"])
+                coriolis = oracle_split[face]["substep1_coriolis_proxy"]
+            chain = source_chain(
+                rhs=owned3(stage_arrays[f"after_adv_{face}"]),
+                e3=e3, mask3=mask3, reciprocal_ref=reciprocal_ref,
+                inverse_depth=inverse_depth, drag_coefficient=drag,
+                bottom_velocity=bottom, barotropic_velocity=barotropic,
+                rho_reciprocal=rho_reciprocal, stress=stress,
+                coriolis=coriolis,
+                mask2=active[f"{face}2"].astype(np.float64),
+            )
+            source_replay[face] = {
+                "post_wind_vs_substep_proxy_preimage": comparison(
+                    chain["post_wind"],
+                    oracle_split[face]["proxy_incoming_preimage"],
+                    active[f"{face}2"]),
+                "forward_final_vs_direct_record": comparison(
+                    chain["final"], oracle_split[face]["final"],
+                    active[f"{face}2"]),
+            }
 
-    p1_confirmed = bool(
-        False  # direct pre-loop Ue_rhs/Ve_rhs and zu_trd/zv_trd are absent
-        and all(
-            split_rows[face]["final_vs_direct_record"]["differing_cells"]
-            == (580 if face == "u" else 570)
-            and abs(
-                split_rows[face]["final_vs_direct_record"]["absolute_max"]
-                - ROUND117_FINAL_MAX[face]) <= np.float64(1.0e-22)
-            for face in ("u", "v"))
-        and all(split_rows[face]["isolated_subtract_vs_production_final"]
-                ["bit_exact"] for face in ("u", "v"))
-    )
+    if direct is not None:
+        p1_confirmed = bool(
+            direct_first is not None
+            and direct_first["boundary"] == "incoming_vs_direct_record"
+            and direct_first["face"] == "u"
+            and all(
+                split_rows[face]["incoming_vs_direct_record"]
+                ["differing_cells"] == (580 if face == "u" else 570)
+                and abs(
+                    split_rows[face]["incoming_vs_direct_record"]
+                    ["absolute_max"] - ROUND117_FINAL_MAX[face])
+                <= np.float64(1.0e-22)
+                and split_rows[face]["preloop_coriolis_vs_direct_record"]
+                ["bit_exact"]
+                and split_rows[face]["final_vs_direct_record"]
+                ["differing_cells"] == (580 if face == "u" else 570)
+                and abs(
+                    split_rows[face]["final_vs_direct_record"]
+                    ["absolute_max"] - ROUND117_FINAL_MAX[face])
+                <= np.float64(1.0e-22)
+                for face in ("u", "v"))
+            and all(split_rows[face]["isolated_subtract_vs_production_final"]
+                    ["bit_exact"] for face in ("u", "v")))
+    else:
+        p1_confirmed = False
     ldf_ranges = {
         "u": (np.float64(6.3e-15), np.float64(1.02e-13)),
         "v": (np.float64(8.7e-15), np.float64(1.41e-13)),
     }
-    p2_confirmed = bool(
+    common_p2 = bool(
         cumulative_first is not None
         and cumulative_first["boundary"] == "after_ldf"
         and all(cumulative_rows[face]["after_hpg"]["bit_exact"]
@@ -824,12 +1027,34 @@ def measure_round117(args) -> dict[str, object]:
         and all(max(incremental_residual[face],
                     key=incremental_residual[face].get) == "after_zad"
                 for face in ("u", "v"))
-        and all(row["bit_exact"] for row in cumulative_closure.values())
         and all(row["bit_exact"] for row in oracle_after_adv_identity.values())
     )
+    if direct is not None:
+        p2_confirmed = bool(
+            common_p2
+            and all(
+                abs(cumulative_rows[face]["after_ldf"]["absolute_max"]
+                    - value) <= np.float64(1.0e-26)
+                for face, value in {
+                    "u": np.float64(2.5292467120726215e-14),
+                    "v": np.float64(3.502735092670824e-14),
+                }.items())
+            and cumulative_closure["u"]["differing_cells"] == 6882
+            and cumulative_closure["v"]["differing_cells"] == 6566
+            and all(
+                row["absolute_max"] == np.float64(8.470329472543003e-22)
+                for row in cumulative_closure.values())
+            and all(
+                row["bit_exact"]
+                for face_rows in source_replay.values()
+                for row in face_rows.values()))
+    else:
+        p2_confirmed = bool(
+            common_p2
+            and all(row["bit_exact"] for row in cumulative_closure.values()))
 
     magnitude = None
-    if args.execution_mode == "production-jit":
+    if args.execution_mode == "production-jit" and direct is None:
         directed_final = (
             jnp.asarray(_full_from_native(
                 producer["final_u"], oracle_split["u"]["final"], "u")),
@@ -923,10 +1148,12 @@ def measure_round117(args) -> dict[str, object]:
             "prediction_confirmed": magnitude_confirmed,
         }
 
-    input_certified = False and all(
-        source_replay[face]["post_wind_vs_substep_proxy_preimage"]["bit_exact"]
-        and source_replay[face]["forward_final_vs_direct_record"]["bit_exact"]
-        for face in ("u", "v"))
+    input_certified = bool(
+        direct is not None
+        and all(
+            row["bit_exact"]
+            for face_rows in source_replay.values()
+            for row in face_rows.values()))
     prediction_confirmed = bool(
         p1_confirmed and p2_confirmed
         and (magnitude is None or magnitude["prediction_confirmed"]))
@@ -934,7 +1161,10 @@ def measure_round117(args) -> dict[str, object]:
         "MEASURED" if args.execution_mode == "production-eager" else
         ("CONFIRMED" if prediction_confirmed else "REFUTED"))
     return {
-        "format": "nemo-testcase-l2-gyre-round117-producer-walk-v1",
+        "format": (
+            "nemo-testcase-l2-gyre-round118-producer-walk-v1"
+            if direct is not None else
+            "nemo-testcase-l2-gyre-round117-producer-walk-v1"),
         "status": status,
         "worktree": stamp,
         "execution_regime": args.execution_mode + "-cpu-fp64-x64-libm",
@@ -946,16 +1176,20 @@ def measure_round117(args) -> dict[str, object]:
         "trace_final_vs_actual_external_call": trace_final_identity,
         "producer_split": {
             "record_limitation": (
+                None if direct is not None else
                 "Round-81 cor_u/cor_v is the substep-1 dyn_cor_2D result at "
                 "compiled lines 683-686, not the pre-loop Kmm result at line "
                 "322; direct pre-loop incoming and Coriolis rows are absent"),
             "incoming_reference": (
+                "admitted direct same-run NEMO pre-loop field"
+                if direct is not None else
                 "PROXY algebraic preimage from final plus substep-1 Coriolis; "
                 "not a direct NEMO pre-loop field"),
             "source_order": ["incoming", "coriolis", "final"],
             "rows": split_rows,
             "first_proxy_non_bit": proxy_first,
             "first_direct_non_bit": direct_first,
+            "incoming_coriolis_cancellation": cancellation,
             "prediction_confirmed": p1_confirmed,
         },
         "isolated_subtract": {
@@ -965,8 +1199,11 @@ def measure_round117(args) -> dict[str, object]:
                     "isolated_subtract_vs_production_final"]
                 for face in ("u", "v")},
         },
-        "round64_round81_join": {
-            "kt2_wind_stress_identity": "WITHHELD_NO_DIRECT_RECORD",
+        ("round64_round117_join" if direct is not None
+         else "round64_round81_join"): {
+            "kt2_wind_stress_identity": (
+                "DIRECT_SAME_RUN" if direct is not None
+                else "WITHHELD_NO_DIRECT_RECORD"),
             "rows": source_replay,
             "direct_input_certified": input_certified,
         },
@@ -985,6 +1222,9 @@ def measure_round117(args) -> dict[str, object]:
         "record_directed_magnitude": magnitude,
         "candidate_eligible": False,
         "candidate_reason": (
+            "direct producer inputs are certified, but the isolated cumulative "
+            "association does not close bit-for-bit to the live production RHS"
+            if direct is not None else
             "diagnostic only; incoming kt2 Ue_rhs/Ve_rhs is not directly "
             "recorded and the cumulative LDF output lacks a complete direct-"
             "input source-exactness proof"),
@@ -996,8 +1236,13 @@ def measure_round117(args) -> dict[str, object]:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--round117", action="store_true",
-                        help="run the current-tip production producer split")
+    round_group = parser.add_mutually_exclusive_group()
+    round_group.add_argument(
+        "--round117", action="store_true",
+        help="run the proxy-era current-tip production producer split")
+    round_group.add_argument(
+        "--round118", action="store_true",
+        help="run the admitted direct pre-loop producer split")
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--expect-record-commit", required=True)
     parser.add_argument("--expect-krhs-commit", required=True)
@@ -1012,6 +1257,15 @@ def main(argv=None) -> int:
     parser.add_argument("--entry-root", type=Path,
                         default=ROOT / "round75/oracle_advmean_kt2")
     parser.add_argument(
+        "--preloop-root", type=Path,
+        default=ROOT / "round117/oracle_preloop_forcing")
+    parser.add_argument(
+        "--preloop-admission", type=Path,
+        default=(ROOT / "round117/oracle_preloop_forcing"
+                 / "round117_admission.json"))
+    parser.add_argument(
+        "--expect-preloop-record-commit", default=ROUND117_PRODUCER)
+    parser.add_argument(
         "--execution-mode",
         choices=("production-jit", "production-eager"),
         default="production-jit")
@@ -1022,19 +1276,24 @@ def main(argv=None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        report = measure_round117(args) if args.round117 else measure(args)
+        report = (
+            measure_round117(args)
+            if args.round117 or args.round118 else measure(args))
         args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     except (RuntimeError, AssertionError, KeyError, ValueError) as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
     if args.plant != "none":
-        prefix = "ROUND117" if args.round117 else "ROUND83"
+        prefix = (
+            "ROUND118" if args.round118 else
+            ("ROUND117" if args.round117 else "ROUND83"))
         state = "STATUS PLANT-FIRED" if report["plant_fires"] else "STATUS PLANT-INERT"
         print(f"{prefix} {args.plant.upper()} {state}")
         return 1
-    if args.round117:
+    if args.round117 or args.round118:
+        prefix = "ROUND118" if args.round118 else "ROUND117"
         print(
-            "ROUND117 PRODUCER " + report["status"] + ": first="
+            prefix + " PRODUCER " + report["status"] + ": first="
             + repr(report["producer_split"]["first_direct_non_bit"])
         )
         return 0 if report["status"] in ("CONFIRMED", "MEASURED") else 1
