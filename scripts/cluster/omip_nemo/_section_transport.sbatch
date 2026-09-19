@@ -104,5 +104,6 @@ echo "=== probe rc=$? ==="
 # different fixes.
 $PY -u scripts/plot/plot_section_transport.py \
   --json "$R/results/omip_nemo/section_transport/transports_d${DAY}${TAG}.json" \
-  --out "$R/results/omip_nemo/section_transport/transports_d${DAY}${TAG}.png"
+  --out "$R/results/omip_nemo/section_transport/transports_d${DAY}${TAG}.png" \
+  ${CELL:+--cell-out="$R/results/omip_nemo/section_transport/cell_d${DAY}${TAG}.png"}
 echo "=== rc=$? ==="

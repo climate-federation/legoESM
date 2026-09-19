@@ -341,6 +341,13 @@ def main() -> int:
                 print(f"[cell] {k:4d} {float(gdept[k]):9.1f} "
                       f"{ov[k] * SV:10.4f} {nv[k] * SV:10.4f} "
                       f"{(ov[k] - nv[k]) * SV:10.4f} {run:9.4f}")
+            out["cell"] = {
+                "lat": float(vlat[cj, ci]), "lon": float(vlon[cj, ci]),
+                "j": int(cj), "i": int(ci), "wet_levels": nwet,
+                "depth_m": [float(x) for x in gdept[:nwet]],
+                "ours_Sv": [float(x) * SV for x in ov[:nwet]],
+                "nemo_Sv": [float(x) * SV for x in nv[:nwet]],
+            }
             so = float(np.nansum(ov)) * SV
             sn = float(np.nansum(nv)) * SV
             print(f"[cell] column total ours {so:+.3f} Sv, NEMO {sn:+.3f} Sv, "
