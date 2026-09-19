@@ -28,15 +28,24 @@ GW=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GA
 MESH=/burg-archive/glab/users/pg2328/legoESM/data/grids/eORCA1.2_mesh_mask.nc
 echo "MESH=$MESH"
 
-for f in "$RES/snapshot_day0030.npz" "$MESH" "$GW/ORCA1_5d_20000101_20000331_grid_T.nc"; do
+# DAY and RECORD are overridable so the same card can run the EARLIEST
+# common record as a control: is the global sea-level offset already there at
+# day 5 (an initialisation difference) or does it grow (a flux)? Sustained,
+# +5.8 cm over thirty days would be ~8 Sv of net volume input against a global
+# runoff of ~1.2 Sv, so the flux reading is implausible on its face.
+DAY=${DAY:-0030}
+REC=${REC:-5}
+echo "DAY=$DAY REC=$REC"
+
+for f in "$RES/snapshot_day${DAY}.npz" "$MESH" "$GW/ORCA1_5d_20000101_20000331_grid_T.nc"; do
   [ -e "$f" ] || { echo "FATAL: missing $f"; exit 1; }
 done
 
 $PY -u scripts/validate/ocean_fidelity/bering_ssh_head.py \
-  --snapshot "$RES/snapshot_day0030.npz" \
+  --snapshot "$RES/snapshot_day${DAY}.npz" \
   --mesh "$MESH" \
   --nemo-gridt "$GW/ORCA1_5d_20000101_20000331_grid_T.nc" \
-  --time-idx 5 \
-  --out "$ROOT/omip_nemo/bering_ssh_head.json" \
-  --map-png "$ROOT/omip_nemo/bering_ssh_diff.png" 2>&1 | tail -40
+  --time-idx "$REC" \
+  --out "$ROOT/omip_nemo/bering_ssh_head_d${DAY}.json" \
+  --map-png "$ROOT/omip_nemo/bering_ssh_diff_d${DAY}.png" 2>&1 | tail -40
 echo "rc=${PIPESTATUS[0]}"
