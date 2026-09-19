@@ -1,0 +1,2690 @@
+{
+  "cases": {
+    "DINO_STANDALONE": {
+      "classification": "REPRODUCED-FROM-ARTIFACT; not rerun",
+      "growth": {
+        "all_registered_days": {
+          "days": [
+            30,
+            60,
+            90,
+            120,
+            180,
+            240,
+            300,
+            360
+          ],
+          "exponent_a": -0.09177697064960323,
+          "intercept_log": -2.6778226184510867,
+          "r_squared_log_space": 0.4947023797108
+        },
+        "day360_over_day180": 0.9812275781473949,
+        "day360_over_peak": 0.7409798995076111,
+        "late_days_180_360": {
+          "days": [
+            180,
+            240,
+            300,
+            360
+          ],
+          "exponent_a": -0.030542855236285454,
+          "intercept_log": -2.990930088209454,
+          "r_squared_log_space": 0.7231249254731877
+        },
+        "peak_day": 30,
+        "peak_rms": 0.056979437041283325
+      },
+      "rows": {
+        "120": {
+          "candidate_path": "/data/abyssal/dbalwada/dino_fromrest_y1/lego_trueframe_fp64/snapshots/snapshot_00004.npz",
+          "candidate_sha256": "60146d8f7fe6d29ae7f41a50b4d8f106d059ee8ee23b5c556153c49a57d9d9eb",
+          "case": "DINO_STANDALONE",
+          "classification": "REPRODUCED-FROM-ARTIFACT",
+          "day": 120,
+          "fields": {
+            "S": {
+              "absolute_rms": 0.003338052152900938,
+              "nemo_spatial_std": 0.4617629745122597,
+              "normalized_rms_over_nemo_std": 0.0072289298561167194,
+              "wet_cells": 339744
+            },
+            "SSH": {
+              "absolute_rms": 0.003531991788366714,
+              "nemo_spatial_std": 0.3971996282449031,
+              "normalized_rms_over_nemo_std": 0.008892233368831298,
+              "wet_cells": 9850
+            },
+            "T": {
+              "absolute_rms": 0.042020173763426774,
+              "nemo_spatial_std": 5.426163912472199,
+              "normalized_rms_over_nemo_std": 0.007743992706678499,
+              "wet_cells": 339744
+            },
+            "u": {
+              "absolute_rms": 0.003490079146429251,
+              "nemo_spatial_std": 0.035663718714084476,
+              "normalized_rms_over_nemo_std": 0.09786077482298372,
+              "wet_cells": 333952
+            },
+            "v": {
+              "absolute_rms": 0.002453108697000499,
+              "nemo_spatial_std": 0.04175364104326483,
+              "normalized_rms_over_nemo_std": 0.058751970743308464,
+              "wet_cells": 337951
+            }
+          },
+          "nemo_reference": {
+            "aggregate_sha256": "620734f2dee4c3591b2e69affcfca53e6d857fe9b5c75426729ff11db7297222",
+            "paths": [
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/DINO_00003840_restart.nc"
+            ],
+            "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ"
+          },
+          "population": "DINO canonical one-ring [1:-1,1:-1] wet mask"
+        },
+        "180": {
+          "candidate_path": "/data/abyssal/dbalwada/dino_fromrest_y1/lego_trueframe_fp64/snapshots/snapshot_00006.npz",
+          "candidate_sha256": "f283b9a679866f616c1f3039c52348cd8ac36cbb0b8ed5db97894ee8b5519408",
+          "case": "DINO_STANDALONE",
+          "classification": "REPRODUCED-FROM-ARTIFACT",
+          "day": 180,
+          "fields": {
+            "S": {
+              "absolute_rms": 0.0034674336180941295,
+              "nemo_spatial_std": 0.4655455625410218,
+              "normalized_rms_over_nemo_std": 0.007448107977161945,
+              "wet_cells": 339744
+            },
+            "SSH": {
+              "absolute_rms": 0.003331333080322047,
+              "nemo_spatial_std": 0.40446926403153355,
+              "normalized_rms_over_nemo_std": 0.00823630712286293,
+              "wet_cells": 9850
+            },
+            "T": {
+              "absolute_rms": 0.04302836413603961,
+              "nemo_spatial_std": 5.6077167520274385,
+              "normalized_rms_over_nemo_std": 0.00767306303772974,
+              "wet_cells": 339744
+            },
+            "u": {
+              "absolute_rms": 0.0028814848775161024,
+              "nemo_spatial_std": 0.0367846196586765,
+              "normalized_rms_over_nemo_std": 0.07833395871027955,
+              "wet_cells": 333952
+            },
+            "v": {
+              "absolute_rms": 0.0018875738588027288,
+              "nemo_spatial_std": 0.039406431128570236,
+              "normalized_rms_over_nemo_std": 0.047900147380619054,
+              "wet_cells": 337951
+            }
+          },
+          "nemo_reference": {
+            "aggregate_sha256": "014d8db5e194863f88335307ee06a055cc62bbe55e23e8321a6204536dcc5dc5",
+            "paths": [
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/DINO_00005760_restart.nc"
+            ],
+            "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ"
+          },
+          "population": "DINO canonical one-ring [1:-1,1:-1] wet mask"
+        },
+        "240": {
+          "candidate_path": "/data/abyssal/dbalwada/dino_fromrest_y1/lego_trueframe_fp64/snapshots/snapshot_00008.npz",
+          "candidate_sha256": "c1e4673b33406a1dc9c8f885a0982a5571dbe8285cf0d65f46712854c3fa009f",
+          "case": "DINO_STANDALONE",
+          "classification": "REPRODUCED-FROM-ARTIFACT",
+          "day": 240,
+          "fields": {
+            "S": {
+              "absolute_rms": 0.0034918914721793998,
+              "nemo_spatial_std": 0.4684743026649178,
+              "normalized_rms_over_nemo_std": 0.007453752430636563,
+              "wet_cells": 339744
+            },
+            "SSH": {
+              "absolute_rms": 0.0031899863809530227,
+              "nemo_spatial_std": 0.4088413184559763,
+              "normalized_rms_over_nemo_std": 0.007802504876464725,
+              "wet_cells": 9850
+            },
+            "T": {
+              "absolute_rms": 0.042346375868512635,
+              "nemo_spatial_std": 5.7475731759805075,
+              "normalized_rms_over_nemo_std": 0.007367696690749579,
+              "wet_cells": 339744
+            },
+            "u": {
+              "absolute_rms": 0.0027458364395223896,
+              "nemo_spatial_std": 0.03460521987150119,
+              "normalized_rms_over_nemo_std": 0.07934746404497484,
+              "wet_cells": 333952
+            },
+            "v": {
+              "absolute_rms": 0.00187893123015019,
+              "nemo_spatial_std": 0.03905823727939747,
+              "normalized_rms_over_nemo_std": 0.048105889078135455,
+              "wet_cells": 337951
+            }
+          },
+          "nemo_reference": {
+            "aggregate_sha256": "716e600199544a9de645319f73ffa63609e9781b18976796ab14d2370d74b01b",
+            "paths": [
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0000.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0001.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0002.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0003.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0004.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0005.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0006.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0007.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0008.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0009.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0010.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0011.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0012.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0013.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0014.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0015.nc"
+            ],
+            "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0"
+          },
+          "population": "DINO canonical one-ring [1:-1,1:-1] wet mask"
+        },
+        "30": {
+          "candidate_path": "/data/abyssal/dbalwada/dino_fromrest_y1/lego_trueframe_fp64/snapshots/snapshot_00001.npz",
+          "candidate_sha256": "2d6999cbdf10f4cb47d878e6ff308733deb98de370a744f30c3489dc3a3995f2",
+          "case": "DINO_STANDALONE",
+          "classification": "REPRODUCED-FROM-ARTIFACT",
+          "day": 30,
+          "fields": {
+            "S": {
+              "absolute_rms": 0.0034179391500427443,
+              "nemo_spatial_std": 0.45187726705537956,
+              "normalized_rms_over_nemo_std": 0.007563866118593349,
+              "wet_cells": 339744
+            },
+            "SSH": {
+              "absolute_rms": 0.004311950345495256,
+              "nemo_spatial_std": 0.37581273361249823,
+              "normalized_rms_over_nemo_std": 0.011473667494037929,
+              "wet_cells": 9850
+            },
+            "T": {
+              "absolute_rms": 0.056979437041283325,
+              "nemo_spatial_std": 4.993322441974367,
+              "normalized_rms_over_nemo_std": 0.011411127100927527,
+              "wet_cells": 339744
+            },
+            "u": {
+              "absolute_rms": 0.00432710012390677,
+              "nemo_spatial_std": 0.04143324410006321,
+              "normalized_rms_over_nemo_std": 0.1044354652379288,
+              "wet_cells": 333952
+            },
+            "v": {
+              "absolute_rms": 0.0036226033156843136,
+              "nemo_spatial_std": 0.0466423989451424,
+              "normalized_rms_over_nemo_std": 0.07766760281659123,
+              "wet_cells": 337951
+            }
+          },
+          "nemo_reference": {
+            "aggregate_sha256": "373d28e2dc413ae5b16ca2266297f0641789923ad79625f8a92e75c90418cf97",
+            "paths": [
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/DINO_00000960_restart.nc"
+            ],
+            "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ"
+          },
+          "population": "DINO canonical one-ring [1:-1,1:-1] wet mask"
+        },
+        "300": {
+          "candidate_path": "/data/abyssal/dbalwada/dino_fromrest_y1/lego_trueframe_fp64/snapshots/snapshot_00010.npz",
+          "candidate_sha256": "576953b5f58d8220b0bc0c1502a948f15f3858999c184420a763493c4b581ded",
+          "case": "DINO_STANDALONE",
+          "classification": "REPRODUCED-FROM-ARTIFACT",
+          "day": 300,
+          "fields": {
+            "S": {
+              "absolute_rms": 0.0034865653791849743,
+              "nemo_spatial_std": 0.47088957074480303,
+              "normalized_rms_over_nemo_std": 0.0074042102348333945,
+              "wet_cells": 339744
+            },
+            "SSH": {
+              "absolute_rms": 0.0031506514914233603,
+              "nemo_spatial_std": 0.4142310620651277,
+              "normalized_rms_over_nemo_std": 0.007606024221640813,
+              "wet_cells": 9850
+            },
+            "T": {
+              "absolute_rms": 0.041957592544077986,
+              "nemo_spatial_std": 5.831105446727673,
+              "normalized_rms_over_nemo_std": 0.0071954782720699976,
+              "wet_cells": 339744
+            },
+            "u": {
+              "absolute_rms": 0.002531264562472745,
+              "nemo_spatial_std": 0.03423783449731532,
+              "normalized_rms_over_nemo_std": 0.07393179503426912,
+              "wet_cells": 333952
+            },
+            "v": {
+              "absolute_rms": 0.001648570614162434,
+              "nemo_spatial_std": 0.038713813030019924,
+              "normalized_rms_over_nemo_std": 0.04258352471982235,
+              "wet_cells": 337951
+            }
+          },
+          "nemo_reference": {
+            "aggregate_sha256": "25e35b9b3303f7c96f74a17c2c56b87017c9b6dd3dbe705b62d5d96404b92e8a",
+            "paths": [
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0000.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0001.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0002.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0003.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0004.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0005.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0006.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0007.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0008.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0009.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0010.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0011.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0012.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0013.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0014.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0015.nc"
+            ],
+            "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0"
+          },
+          "population": "DINO canonical one-ring [1:-1,1:-1] wet mask"
+        },
+        "360": {
+          "candidate_path": "/data/abyssal/dbalwada/dino_fromrest_y1/lego_trueframe_fp64/snapshots/snapshot_00012.npz",
+          "candidate_sha256": "01040b15421d2018dec9821da9377743f2b98b8481dd3418b506bd6bfdd7b99c",
+          "case": "DINO_STANDALONE",
+          "classification": "REPRODUCED-FROM-ARTIFACT",
+          "day": 360,
+          "fields": {
+            "S": {
+              "absolute_rms": 0.0035673794802529657,
+              "nemo_spatial_std": 0.47300640087054996,
+              "normalized_rms_over_nemo_std": 0.0075419264383892945,
+              "wet_cells": 339744
+            },
+            "SSH": {
+              "absolute_rms": 0.0030927269790101144,
+              "nemo_spatial_std": 0.41916520132527973,
+              "normalized_rms_over_nemo_std": 0.00737830089242094,
+              "wet_cells": 9850
+            },
+            "T": {
+              "absolute_rms": 0.04222061753285037,
+              "nemo_spatial_std": 5.879405922889526,
+              "normalized_rms_over_nemo_std": 0.007181102663532439,
+              "wet_cells": 339744
+            },
+            "u": {
+              "absolute_rms": 0.002534610166077593,
+              "nemo_spatial_std": 0.033574397756116856,
+              "normalized_rms_over_nemo_std": 0.07549234939339507,
+              "wet_cells": 333952
+            },
+            "v": {
+              "absolute_rms": 0.0017300791605590854,
+              "nemo_spatial_std": 0.037668075503536014,
+              "normalized_rms_over_nemo_std": 0.04592958725477434,
+              "wet_cells": 337951
+            }
+          },
+          "nemo_reference": {
+            "aggregate_sha256": "d8a11c920f8898360c8403066f797b1454040c2b4f83aca1749d347d666e6c23",
+            "paths": [
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0000.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0001.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0002.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0003.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0004.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0005.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0006.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0007.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0008.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0009.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0010.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0011.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0012.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0013.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0014.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0015.nc"
+            ],
+            "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1"
+          },
+          "population": "DINO canonical one-ring [1:-1,1:-1] wet mask"
+        },
+        "60": {
+          "candidate_path": "/data/abyssal/dbalwada/dino_fromrest_y1/lego_trueframe_fp64/snapshots/snapshot_00002.npz",
+          "candidate_sha256": "9ede28f8450ee0458fc7fba63f53d2359d3c0bdc2988299c92bdb4f07727fa8f",
+          "case": "DINO_STANDALONE",
+          "classification": "REPRODUCED-FROM-ARTIFACT",
+          "day": 60,
+          "fields": {
+            "S": {
+              "absolute_rms": 0.0031411697196711014,
+              "nemo_spatial_std": 0.4561697916423972,
+              "normalized_rms_over_nemo_std": 0.006885966096881624,
+              "wet_cells": 339744
+            },
+            "SSH": {
+              "absolute_rms": 0.003873665992923037,
+              "nemo_spatial_std": 0.3932760974381486,
+              "normalized_rms_over_nemo_std": 0.009849736656147166,
+              "wet_cells": 9850
+            },
+            "T": {
+              "absolute_rms": 0.04517141795944133,
+              "nemo_spatial_std": 5.1792806891516765,
+              "normalized_rms_over_nemo_std": 0.008721562060549384,
+              "wet_cells": 339744
+            },
+            "u": {
+              "absolute_rms": 0.0033817768206669614,
+              "nemo_spatial_std": 0.043756062875751955,
+              "normalized_rms_over_nemo_std": 0.07728704546087077,
+              "wet_cells": 333952
+            },
+            "v": {
+              "absolute_rms": 0.004621456063730455,
+              "nemo_spatial_std": 0.04745866776447237,
+              "normalized_rms_over_nemo_std": 0.09737854603643308,
+              "wet_cells": 337951
+            }
+          },
+          "nemo_reference": {
+            "aggregate_sha256": "a798766cf126cbb903e4ecb3947beb398fd58157f2ca73f5967682055da81dfa",
+            "paths": [
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/DINO_00001920_restart.nc"
+            ],
+            "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ"
+          },
+          "population": "DINO canonical one-ring [1:-1,1:-1] wet mask"
+        },
+        "90": {
+          "candidate_path": "/data/abyssal/dbalwada/dino_fromrest_y1/lego_trueframe_fp64/snapshots/snapshot_00003.npz",
+          "candidate_sha256": "de98f9a81c96dc69141ff25bd33979aab28f46127a4cc69d22094550fda66a74",
+          "case": "DINO_STANDALONE",
+          "classification": "REPRODUCED-FROM-ARTIFACT",
+          "day": 90,
+          "fields": {
+            "S": {
+              "absolute_rms": 0.002900812961862446,
+              "nemo_spatial_std": 0.4592643852680192,
+              "normalized_rms_over_nemo_std": 0.006316215789668905,
+              "wet_cells": 339744
+            },
+            "SSH": {
+              "absolute_rms": 0.003912100072053907,
+              "nemo_spatial_std": 0.39390811875719706,
+              "normalized_rms_over_nemo_std": 0.009931504038040164,
+              "wet_cells": 9850
+            },
+            "T": {
+              "absolute_rms": 0.03953919802718591,
+              "nemo_spatial_std": 5.3159693155003,
+              "normalized_rms_over_nemo_std": 0.007437815322202396,
+              "wet_cells": 339744
+            },
+            "u": {
+              "absolute_rms": 0.004476672130994013,
+              "nemo_spatial_std": 0.03680610450675979,
+              "normalized_rms_over_nemo_std": 0.12162852306665133,
+              "wet_cells": 333952
+            },
+            "v": {
+              "absolute_rms": 0.0025279624114320203,
+              "nemo_spatial_std": 0.044832463784223994,
+              "normalized_rms_over_nemo_std": 0.056386872325352326,
+              "wet_cells": 337951
+            }
+          },
+          "nemo_reference": {
+            "aggregate_sha256": "68a631faa014673b370a5f88d057849ff174593fbeb7d6561b29896ca4289dea",
+            "paths": [
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/DINO_00002880_restart.nc"
+            ],
+            "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ"
+          },
+          "population": "DINO canonical one-ring [1:-1,1:-1] wet mask"
+        }
+      }
+    },
+    "DINO_TWIN": {
+      "classification": "MEASURED",
+      "growth": {
+        "all_registered_days": {
+          "days": [
+            30,
+            60,
+            90,
+            120,
+            180,
+            240,
+            300,
+            360
+          ],
+          "exponent_a": 0.727832573104181,
+          "intercept_log": -9.590655003687738,
+          "r_squared_log_space": 0.8513864326204947
+        },
+        "day360_over_day180": 1.1267687785518072,
+        "day360_over_peak": 0.9934815578631687,
+        "late_days_180_360": {
+          "days": [
+            180,
+            240,
+            300,
+            360
+          ],
+          "exponent_a": 0.130713584342822,
+          "intercept_log": -6.3285410919891465,
+          "r_squared_log_space": 0.43184200979577725
+        },
+        "peak_day": 240,
+        "peak_rms": 0.0038871899106261588
+      },
+      "rows": {
+        "120": {
+          "candidate_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/dino/twin_year_daily/snapshots/snapshot_00120.npz",
+          "candidate_sha256": "6030813282cc795bc2e0e5155cbc061e2e1b45069e77e07e94cb82f55d9bbea8",
+          "case": "DINO_TWIN",
+          "classification": "MEASURED",
+          "day": 120,
+          "fields": {
+            "S": {
+              "absolute_rms": 0.0003911618063994047,
+              "nemo_spatial_std": 0.4617629745122597,
+              "normalized_rms_over_nemo_std": 0.0008471051773100085,
+              "wet_cells": 339744
+            },
+            "SSH": {
+              "absolute_rms": 4.6652711800811164e-05,
+              "nemo_spatial_std": 0.3971996282449031,
+              "normalized_rms_over_nemo_std": 0.00011745406713232444,
+              "wet_cells": 9850
+            },
+            "T": {
+              "absolute_rms": 0.0038026193851020632,
+              "nemo_spatial_std": 5.426163912472199,
+              "normalized_rms_over_nemo_std": 0.0007007933129999316,
+              "wet_cells": 339744
+            },
+            "u": {
+              "absolute_rms": 0.0005701019168997082,
+              "nemo_spatial_std": 0.035663718714084476,
+              "normalized_rms_over_nemo_std": 0.015985487140872973,
+              "wet_cells": 333952
+            },
+            "v": {
+              "absolute_rms": 0.00034981225046241287,
+              "nemo_spatial_std": 0.04175364104326483,
+              "normalized_rms_over_nemo_std": 0.008378005886958214,
+              "wet_cells": 337951
+            }
+          },
+          "nemo_reference": {
+            "aggregate_sha256": "620734f2dee4c3591b2e69affcfca53e6d857fe9b5c75426729ff11db7297222",
+            "paths": [
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/DINO_00003840_restart.nc"
+            ],
+            "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ"
+          },
+          "population": "DINO canonical one-ring [1:-1,1:-1] wet mask"
+        },
+        "180": {
+          "candidate_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/dino/twin_year_daily/snapshots/snapshot_00180.npz",
+          "candidate_sha256": "333f48e6dd62cf89a264d297186cc1a33ee7a4a3e44662cc813f110c03526367",
+          "case": "DINO_TWIN",
+          "classification": "MEASURED",
+          "day": 180,
+          "fields": {
+            "S": {
+              "absolute_rms": 0.0003329696782150495,
+              "nemo_spatial_std": 0.4655455625410218,
+              "normalized_rms_over_nemo_std": 0.0007152246847712348,
+              "wet_cells": 339744
+            },
+            "SSH": {
+              "absolute_rms": 4.9440795182276986e-05,
+              "nemo_spatial_std": 0.40446926403153355,
+              "normalized_rms_over_nemo_std": 0.00012223622306792252,
+              "wet_cells": 9850
+            },
+            "T": {
+              "absolute_rms": 0.003427368206884786,
+              "nemo_spatial_std": 5.6077167520274385,
+              "normalized_rms_over_nemo_std": 0.0006111878253561292,
+              "wet_cells": 339744
+            },
+            "u": {
+              "absolute_rms": 0.0005230686952003843,
+              "nemo_spatial_std": 0.0367846196586765,
+              "normalized_rms_over_nemo_std": 0.014219766305970393,
+              "wet_cells": 333952
+            },
+            "v": {
+              "absolute_rms": 0.0003821927451764941,
+              "nemo_spatial_std": 0.039406431128570236,
+              "normalized_rms_over_nemo_std": 0.009698740389088389,
+              "wet_cells": 337951
+            }
+          },
+          "nemo_reference": {
+            "aggregate_sha256": "014d8db5e194863f88335307ee06a055cc62bbe55e23e8321a6204536dcc5dc5",
+            "paths": [
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/DINO_00005760_restart.nc"
+            ],
+            "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ"
+          },
+          "population": "DINO canonical one-ring [1:-1,1:-1] wet mask"
+        },
+        "240": {
+          "candidate_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/dino/twin_year_daily/snapshots/snapshot_00240.npz",
+          "candidate_sha256": "9c86d16b9be6788acb59f8e20025bb69c3f197f46fda11d861c4317a6c4557c6",
+          "case": "DINO_TWIN",
+          "classification": "MEASURED",
+          "day": 240,
+          "fields": {
+            "S": {
+              "absolute_rms": 0.00034852634077493924,
+              "nemo_spatial_std": 0.4684743026649178,
+              "normalized_rms_over_nemo_std": 0.0007439604238532314,
+              "wet_cells": 339744
+            },
+            "SSH": {
+              "absolute_rms": 7.014419714378212e-05,
+              "nemo_spatial_std": 0.4088413184559763,
+              "normalized_rms_over_nemo_std": 0.00017156826861014827,
+              "wet_cells": 9850
+            },
+            "T": {
+              "absolute_rms": 0.0038871899106261588,
+              "nemo_spatial_std": 5.7475731759805075,
+              "normalized_rms_over_nemo_std": 0.0006763184724417229,
+              "wet_cells": 339744
+            },
+            "u": {
+              "absolute_rms": 0.0009916117683236253,
+              "nemo_spatial_std": 0.03460521987150119,
+              "normalized_rms_over_nemo_std": 0.028654976677095413,
+              "wet_cells": 333952
+            },
+            "v": {
+              "absolute_rms": 0.0008971361297560035,
+              "nemo_spatial_std": 0.03905823727939747,
+              "normalized_rms_over_nemo_std": 0.022969191449641452,
+              "wet_cells": 337951
+            }
+          },
+          "nemo_reference": {
+            "aggregate_sha256": "716e600199544a9de645319f73ffa63609e9781b18976796ab14d2370d74b01b",
+            "paths": [
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0000.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0001.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0002.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0003.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0004.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0005.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0006.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0007.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0008.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0009.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0010.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0011.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0012.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0013.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0014.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0015.nc"
+            ],
+            "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0"
+          },
+          "population": "DINO canonical one-ring [1:-1,1:-1] wet mask"
+        },
+        "30": {
+          "candidate_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/dino/twin_year_daily/snapshots/snapshot_00030.npz",
+          "candidate_sha256": "a6e129e29253d9f8ed22dc70dc8d2271b27117a16b082ac8e7f0924f9a7d9850",
+          "case": "DINO_TWIN",
+          "classification": "MEASURED",
+          "day": 30,
+          "fields": {
+            "S": {
+              "absolute_rms": 6.112257624187782e-05,
+              "nemo_spatial_std": 0.45187726705537956,
+              "normalized_rms_over_nemo_std": 0.0001352636671461213,
+              "wet_cells": 339744
+            },
+            "SSH": {
+              "absolute_rms": 5.2494481329945955e-05,
+              "nemo_spatial_std": 0.37581273361249823,
+              "normalized_rms_over_nemo_std": 0.0001396825510017795,
+              "wet_cells": 9850
+            },
+            "T": {
+              "absolute_rms": 0.0006817989881044761,
+              "nemo_spatial_std": 4.993322441974367,
+              "normalized_rms_over_nemo_std": 0.00013654215124847652,
+              "wet_cells": 339744
+            },
+            "u": {
+              "absolute_rms": 0.00018114316587592954,
+              "nemo_spatial_std": 0.04143324410006321,
+              "normalized_rms_over_nemo_std": 0.00437192814152955,
+              "wet_cells": 333952
+            },
+            "v": {
+              "absolute_rms": 9.802157317485636e-05,
+              "nemo_spatial_std": 0.0466423989451424,
+              "normalized_rms_over_nemo_std": 0.0021015551384941118,
+              "wet_cells": 337951
+            }
+          },
+          "nemo_reference": {
+            "aggregate_sha256": "373d28e2dc413ae5b16ca2266297f0641789923ad79625f8a92e75c90418cf97",
+            "paths": [
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/DINO_00000960_restart.nc"
+            ],
+            "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ"
+          },
+          "population": "DINO canonical one-ring [1:-1,1:-1] wet mask"
+        },
+        "300": {
+          "candidate_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/dino/twin_year_daily/snapshots/snapshot_00300.npz",
+          "candidate_sha256": "5955483e8635f3100ce408d5ed0d929104ee6fe487e05436cfc28e0e9ef07b59",
+          "case": "DINO_TWIN",
+          "classification": "MEASURED",
+          "day": 300,
+          "fields": {
+            "S": {
+              "absolute_rms": 0.0004037087858077284,
+              "nemo_spatial_std": 0.47088957074480303,
+              "normalized_rms_over_nemo_std": 0.0008573321876065014,
+              "wet_cells": 339744
+            },
+            "SSH": {
+              "absolute_rms": 4.714657347510406e-05,
+              "nemo_spatial_std": 0.4142310620651277,
+              "normalized_rms_over_nemo_std": 0.0001138170885593592,
+              "wet_cells": 9850
+            },
+            "T": {
+              "absolute_rms": 0.003619624892339759,
+              "nemo_spatial_std": 5.831105446727673,
+              "normalized_rms_over_nemo_std": 0.0006207442011481781,
+              "wet_cells": 339744
+            },
+            "u": {
+              "absolute_rms": 0.00041399453077299624,
+              "nemo_spatial_std": 0.03423783449731532,
+              "normalized_rms_over_nemo_std": 0.012091726502313067,
+              "wet_cells": 333952
+            },
+            "v": {
+              "absolute_rms": 0.0003195506171943428,
+              "nemo_spatial_std": 0.038713813030019924,
+              "normalized_rms_over_nemo_std": 0.008254175762706532,
+              "wet_cells": 337951
+            }
+          },
+          "nemo_reference": {
+            "aggregate_sha256": "25e35b9b3303f7c96f74a17c2c56b87017c9b6dd3dbe705b62d5d96404b92e8a",
+            "paths": [
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0000.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0001.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0002.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0003.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0004.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0005.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0006.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0007.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0008.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0009.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0010.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0011.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0012.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0013.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0014.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0015.nc"
+            ],
+            "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0"
+          },
+          "population": "DINO canonical one-ring [1:-1,1:-1] wet mask"
+        },
+        "360": {
+          "candidate_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/dino/twin_year_daily/snapshots/snapshot_00360.npz",
+          "candidate_sha256": "0b3189a4e2d44dcee0cbf0ad3ea95a33467e5f6bb0c8a05360e0aa8afd01bd60",
+          "case": "DINO_TWIN",
+          "classification": "MEASURED",
+          "day": 360,
+          "fields": {
+            "S": {
+              "absolute_rms": 0.0003888773419642806,
+              "nemo_spatial_std": 0.47300640087054996,
+              "normalized_rms_over_nemo_std": 0.0008221397030749836,
+              "wet_cells": 339744
+            },
+            "SSH": {
+              "absolute_rms": 6.372234423541434e-05,
+              "nemo_spatial_std": 0.41916520132527973,
+              "normalized_rms_over_nemo_std": 0.00015202202862723963,
+              "wet_cells": 9850
+            },
+            "T": {
+              "absolute_rms": 0.0038618514881188677,
+              "nemo_spatial_std": 5.879405922889526,
+              "normalized_rms_over_nemo_std": 0.0006568438272111853,
+              "wet_cells": 339744
+            },
+            "u": {
+              "absolute_rms": 0.0006092594023509512,
+              "nemo_spatial_std": 0.033574397756116856,
+              "normalized_rms_over_nemo_std": 0.0181465474608536,
+              "wet_cells": 333952
+            },
+            "v": {
+              "absolute_rms": 0.0005270195888230374,
+              "nemo_spatial_std": 0.037668075503536014,
+              "normalized_rms_over_nemo_std": 0.013991147192363584,
+              "wet_cells": 337951
+            }
+          },
+          "nemo_reference": {
+            "aggregate_sha256": "d8a11c920f8898360c8403066f797b1454040c2b4f83aca1749d347d666e6c23",
+            "paths": [
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0000.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0001.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0002.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0003.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0004.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0005.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0006.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0007.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0008.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0009.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0010.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0011.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0012.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0013.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0014.nc",
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0015.nc"
+            ],
+            "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1"
+          },
+          "population": "DINO canonical one-ring [1:-1,1:-1] wet mask"
+        },
+        "60": {
+          "candidate_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/dino/twin_year_daily/snapshots/snapshot_00060.npz",
+          "candidate_sha256": "d736bd7e7280cb1b900ec7ea0f76affb9074bbd56225e80df3640ae3cec7be1e",
+          "case": "DINO_TWIN",
+          "classification": "MEASURED",
+          "day": 60,
+          "fields": {
+            "S": {
+              "absolute_rms": 0.00011577004261450245,
+              "nemo_spatial_std": 0.4561697916423972,
+              "normalized_rms_over_nemo_std": 0.00025378717472212067,
+              "wet_cells": 339744
+            },
+            "SSH": {
+              "absolute_rms": 5.789504377163482e-05,
+              "nemo_spatial_std": 0.3932760974381486,
+              "normalized_rms_over_nemo_std": 0.00014721221083297619,
+              "wet_cells": 9850
+            },
+            "T": {
+              "absolute_rms": 0.0011184174921115397,
+              "nemo_spatial_std": 5.1792806891516765,
+              "normalized_rms_over_nemo_std": 0.0002159406989573155,
+              "wet_cells": 339744
+            },
+            "u": {
+              "absolute_rms": 0.00029820558438040925,
+              "nemo_spatial_std": 0.043756062875751955,
+              "normalized_rms_over_nemo_std": 0.006815183194776514,
+              "wet_cells": 333952
+            },
+            "v": {
+              "absolute_rms": 0.00016451604994096016,
+              "nemo_spatial_std": 0.04745866776447237,
+              "normalized_rms_over_nemo_std": 0.0034665121818720146,
+              "wet_cells": 337951
+            }
+          },
+          "nemo_reference": {
+            "aggregate_sha256": "a798766cf126cbb903e4ecb3947beb398fd58157f2ca73f5967682055da81dfa",
+            "paths": [
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/DINO_00001920_restart.nc"
+            ],
+            "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ"
+          },
+          "population": "DINO canonical one-ring [1:-1,1:-1] wet mask"
+        },
+        "90": {
+          "candidate_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/dino/twin_year_daily/snapshots/snapshot_00090.npz",
+          "candidate_sha256": "5ed5ad068f73012a757c09550fd59e974f6f2a1876b75a4b884bb91e992a30b5",
+          "case": "DINO_TWIN",
+          "classification": "MEASURED",
+          "day": 90,
+          "fields": {
+            "S": {
+              "absolute_rms": 0.0001761927016805833,
+              "nemo_spatial_std": 0.4592643852680192,
+              "normalized_rms_over_nemo_std": 0.0003836411168215452,
+              "wet_cells": 339744
+            },
+            "SSH": {
+              "absolute_rms": 5.1876236030101655e-05,
+              "nemo_spatial_std": 0.39390811875719706,
+              "normalized_rms_over_nemo_std": 0.00013169628540222575,
+              "wet_cells": 9850
+            },
+            "T": {
+              "absolute_rms": 0.0019433418109116164,
+              "nemo_spatial_std": 5.3159693155003,
+              "normalized_rms_over_nemo_std": 0.0003655667848279752,
+              "wet_cells": 339744
+            },
+            "u": {
+              "absolute_rms": 0.00045426109761369167,
+              "nemo_spatial_std": 0.03680610450675979,
+              "normalized_rms_over_nemo_std": 0.012342004232756072,
+              "wet_cells": 333952
+            },
+            "v": {
+              "absolute_rms": 0.0003401657846402317,
+              "nemo_spatial_std": 0.044832463784223994,
+              "normalized_rms_over_nemo_std": 0.007587488081793354,
+              "wet_cells": 337951
+            }
+          },
+          "nemo_reference": {
+            "aggregate_sha256": "68a631faa014673b370a5f88d057849ff174593fbeb7d6561b29896ca4289dea",
+            "paths": [
+              "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/DINO_00002880_restart.nc"
+            ],
+            "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ"
+          },
+          "population": "DINO canonical one-ring [1:-1,1:-1] wet mask"
+        }
+      }
+    },
+    "GYRE": {
+      "classification": "MEASURED",
+      "growth": {
+        "all_registered_days": {
+          "days": [
+            30,
+            60,
+            90,
+            120,
+            180,
+            240,
+            300,
+            360
+          ],
+          "exponent_a": 2.2842519410812514,
+          "intercept_log": -17.37459825578907,
+          "r_squared_log_space": 0.9300224444473821
+        },
+        "day360_over_day180": 3.1345940535325294,
+        "day360_over_peak": 0.6824192875243646,
+        "late_days_180_360": {
+          "days": [
+            180,
+            240,
+            300,
+            360
+          ],
+          "exponent_a": 1.5675578184242538,
+          "intercept_log": -13.35669436094413,
+          "r_squared_log_space": 0.46776110933038395
+        },
+        "peak_day": 240,
+        "peak_rms": 0.016446741930292448
+      },
+      "rows": {
+        "120": {
+          "candidate_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/gyre/lego_seed0_year/day120.npz",
+          "candidate_sha256": "684aa934220c61b52afca861a98c7cb1e5f4594d405dc30bf398c68abee06139",
+          "classification": "MEASURED",
+          "day": 120,
+          "fields": {
+            "S": {
+              "absolute_rms": 0.00024274706221615792,
+              "nemo_spatial_std": 0.7213602434024126,
+              "normalized_rms_over_nemo_std": 0.0003365129481924344,
+              "wet_cells": 18000
+            },
+            "SSH": {
+              "absolute_rms": 4.582671219174434e-05,
+              "nemo_spatial_std": 0.10956351798373588,
+              "normalized_rms_over_nemo_std": 0.00041826616226896864,
+              "wet_cells": 600
+            },
+            "T": {
+              "absolute_rms": 0.0010501256819510476,
+              "nemo_spatial_std": 6.833252524769008,
+              "normalized_rms_over_nemo_std": 0.0001536787464160848,
+              "wet_cells": 18000
+            },
+            "u": {
+              "absolute_rms": 0.00013148099681366021,
+              "nemo_spatial_std": 0.016707230459367124,
+              "normalized_rms_over_nemo_std": 0.00786970630071986,
+              "wet_cells": 17400
+            },
+            "v": {
+              "absolute_rms": 0.0002634259211860897,
+              "nemo_spatial_std": 0.019191847640830113,
+              "normalized_rms_over_nemo_std": 0.013725928118857016,
+              "wet_cells": 17100
+            }
+          },
+          "nemo_reference_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_fromrest/nemo_seed0/GYRE_OMIP_L2_P3_00000720_restart.nc",
+          "nemo_reference_sha256": "3929138e259bd574e0dd1687851dd322e589f0acecb7ba633ea45106b05de6d3"
+        },
+        "180": {
+          "candidate_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/gyre/lego_seed0_year/day180.npz",
+          "candidate_sha256": "a4ea3c49f2c7a4656a1cb800615d12627d72c5473de22892cb30eb0c6af3d6f3",
+          "classification": "MEASURED",
+          "day": 180,
+          "fields": {
+            "S": {
+              "absolute_rms": 0.0009001073864402079,
+              "nemo_spatial_std": 0.7189319366315988,
+              "normalized_rms_over_nemo_std": 0.0012520064008527257,
+              "wet_cells": 18000
+            },
+            "SSH": {
+              "absolute_rms": 7.857226876460772e-05,
+              "nemo_spatial_std": 0.12221182428454384,
+              "normalized_rms_over_nemo_std": 0.0006429187128544056,
+              "wet_cells": 600
+            },
+            "T": {
+              "absolute_rms": 0.003580551011866709,
+              "nemo_spatial_std": 7.049927832475257,
+              "normalized_rms_over_nemo_std": 0.0005078847751281964,
+              "wet_cells": 18000
+            },
+            "u": {
+              "absolute_rms": 0.00012732694525579593,
+              "nemo_spatial_std": 0.019080018790343812,
+              "normalized_rms_over_nemo_std": 0.006673313409955062,
+              "wet_cells": 17400
+            },
+            "v": {
+              "absolute_rms": 0.00016991820024441764,
+              "nemo_spatial_std": 0.02207735979395432,
+              "normalized_rms_over_nemo_std": 0.007696490967681206,
+              "wet_cells": 17100
+            }
+          },
+          "nemo_reference_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_fromrest/nemo_seed0/GYRE_OMIP_L2_P3_00001080_restart.nc",
+          "nemo_reference_sha256": "6c0c7a950b30b9d59dbf2673833ddf462a5f8ea5650f496f2f772e1e17092976"
+        },
+        "240": {
+          "candidate_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/gyre/lego_seed0_year/day240.npz",
+          "candidate_sha256": "805bc96e4032c61dc828c998e1e536fe96154a87806c3d32ef5b7e530277d9e5",
+          "classification": "MEASURED",
+          "day": 240,
+          "fields": {
+            "S": {
+              "absolute_rms": 0.001231719834021483,
+              "nemo_spatial_std": 0.717548442200856,
+              "normalized_rms_over_nemo_std": 0.0017165668010421242,
+              "wet_cells": 18000
+            },
+            "SSH": {
+              "absolute_rms": 0.00019347330129779557,
+              "nemo_spatial_std": 0.13193561054465475,
+              "normalized_rms_over_nemo_std": 0.0014664221471299658,
+              "wet_cells": 600
+            },
+            "T": {
+              "absolute_rms": 0.016446741930292448,
+              "nemo_spatial_std": 7.224258808451443,
+              "normalized_rms_over_nemo_std": 0.002276599214725239,
+              "wet_cells": 18000
+            },
+            "u": {
+              "absolute_rms": 0.00030729451134022727,
+              "nemo_spatial_std": 0.02224894176225259,
+              "normalized_rms_over_nemo_std": 0.013811646172834214,
+              "wet_cells": 17400
+            },
+            "v": {
+              "absolute_rms": 0.0004360950166196743,
+              "nemo_spatial_std": 0.025221626390600948,
+              "normalized_rms_over_nemo_std": 0.01729051924986839,
+              "wet_cells": 17100
+            }
+          },
+          "nemo_reference_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_fromrest/nemo_seed0/GYRE_OMIP_L2_P3_00001440_restart.nc",
+          "nemo_reference_sha256": "96529a98da0e0d89b328632a826a9d41593f81f0d1a917350f28f184d49b163a"
+        },
+        "30": {
+          "candidate_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/gyre/lego_seed0_year/day030.npz",
+          "candidate_sha256": "c64ac6b351445198b1f7d55d17b6f92d24ebdd133606997c9a32427f35d22148",
+          "classification": "MEASURED",
+          "day": 30,
+          "fields": {
+            "S": {
+              "absolute_rms": 1.1781247458573714e-05,
+              "nemo_spatial_std": 0.7461523072249303,
+              "normalized_rms_over_nemo_std": 1.5789333282892624e-05,
+              "wet_cells": 18000
+            },
+            "SSH": {
+              "absolute_rms": 6.802771093693658e-06,
+              "nemo_spatial_std": 0.05053960677908424,
+              "normalized_rms_over_nemo_std": 0.00013460277052470017,
+              "wet_cells": 600
+            },
+            "T": {
+              "absolute_rms": 6.890484901489568e-05,
+              "nemo_spatial_std": 7.236773579111766,
+              "normalized_rms_over_nemo_std": 9.52148747803617e-06,
+              "wet_cells": 18000
+            },
+            "u": {
+              "absolute_rms": 5.579572380229224e-06,
+              "nemo_spatial_std": 0.011204022789499732,
+              "normalized_rms_over_nemo_std": 0.0004979972359087245,
+              "wet_cells": 17400
+            },
+            "v": {
+              "absolute_rms": 4.620276844589294e-06,
+              "nemo_spatial_std": 0.014038736057909534,
+              "normalized_rms_over_nemo_std": 0.0003291091751800686,
+              "wet_cells": 17100
+            }
+          },
+          "nemo_reference_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_owners/nemo_seed0/GYRE_OMIP_L2_P3_00000180_restart.nc",
+          "nemo_reference_sha256": "853b3d41b2aa512e934430cc1fcbf36ea574c2148419d6c4b98a1e16db94cfc6"
+        },
+        "300": {
+          "candidate_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/gyre/lego_seed0_year/day300.npz",
+          "candidate_sha256": "196804fc14c0c7aba75f8be286fd411296bb848e4b659fc2ead5ca33359c552e",
+          "classification": "MEASURED",
+          "day": 300,
+          "fields": {
+            "S": {
+              "absolute_rms": 0.001210090740227518,
+              "nemo_spatial_std": 0.7163404895762014,
+              "normalized_rms_over_nemo_std": 0.0016892675450237737,
+              "wet_cells": 18000
+            },
+            "SSH": {
+              "absolute_rms": 0.000178746886718516,
+              "nemo_spatial_std": 0.14710171021228452,
+              "normalized_rms_over_nemo_std": 0.0012151244636147594,
+              "wet_cells": 600
+            },
+            "T": {
+              "absolute_rms": 0.013597404177319843,
+              "nemo_spatial_std": 7.119185074541791,
+              "normalized_rms_over_nemo_std": 0.0019099663844874839,
+              "wet_cells": 18000
+            },
+            "u": {
+              "absolute_rms": 0.0003155329498570647,
+              "nemo_spatial_std": 0.025936224271002464,
+              "normalized_rms_over_nemo_std": 0.012165724145508747,
+              "wet_cells": 17400
+            },
+            "v": {
+              "absolute_rms": 0.0002959221410074632,
+              "nemo_spatial_std": 0.028492398500663107,
+              "normalized_rms_over_nemo_std": 0.010386003165039832,
+              "wet_cells": 17100
+            }
+          },
+          "nemo_reference_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_fromrest/nemo_seed0/GYRE_OMIP_L2_P3_00001800_restart.nc",
+          "nemo_reference_sha256": "2e5eb5df8441444dd37cdfd5bb58bd0a3d17c6b78a0235973cbf8a6b778c9e3f"
+        },
+        "360": {
+          "candidate_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/gyre/lego_seed0_year/day360.npz",
+          "candidate_sha256": "47aaa021d6206cd83834a3feddfffedff4ba4f6e3645c51b28c29a2e435f670e",
+          "classification": "MEASURED",
+          "day": 360,
+          "fields": {
+            "S": {
+              "absolute_rms": 0.0011171958758030645,
+              "nemo_spatial_std": 0.7096116663728085,
+              "normalized_rms_over_nemo_std": 0.0015743764212807116,
+              "wet_cells": 18000
+            },
+            "SSH": {
+              "absolute_rms": 0.00019310038986194097,
+              "nemo_spatial_std": 0.16805644584050683,
+              "normalized_rms_over_nemo_std": 0.0011490210262164056,
+              "wet_cells": 600
+            },
+            "T": {
+              "absolute_rms": 0.011223573910167267,
+              "nemo_spatial_std": 6.765317096018698,
+              "normalized_rms_over_nemo_std": 0.0016589871178059332,
+              "wet_cells": 18000
+            },
+            "u": {
+              "absolute_rms": 0.0004350341862691175,
+              "nemo_spatial_std": 0.02801248686928194,
+              "normalized_rms_over_nemo_std": 0.015530009466819927,
+              "wet_cells": 17400
+            },
+            "v": {
+              "absolute_rms": 0.00042592309237142104,
+              "nemo_spatial_std": 0.029405024915437086,
+              "normalized_rms_over_nemo_std": 0.01448470435227618,
+              "wet_cells": 17100
+            }
+          },
+          "nemo_reference_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_fromrest/nemo_seed0/GYRE_OMIP_L2_P3_00002160_restart.nc",
+          "nemo_reference_sha256": "bd2e189079143a562cf8cb825799a6a8f71ff2ae8b6036b116998298ec393c85"
+        },
+        "60": {
+          "candidate_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/gyre/lego_seed0_year/day060.npz",
+          "candidate_sha256": "f3ca0585ec237fc88a7049f1fdb60819f4cab79d56615c686ba501a6b4354fe4",
+          "classification": "MEASURED",
+          "day": 60,
+          "fields": {
+            "S": {
+              "absolute_rms": 2.0123268527761527e-05,
+              "nemo_spatial_std": 0.7346926371408773,
+              "normalized_rms_over_nemo_std": 2.7390050628618035e-05,
+              "wet_cells": 18000
+            },
+            "SSH": {
+              "absolute_rms": 1.6802560316896403e-05,
+              "nemo_spatial_std": 0.07800133829964029,
+              "normalized_rms_over_nemo_std": 0.00021541374395846603,
+              "wet_cells": 600
+            },
+            "T": {
+              "absolute_rms": 0.00019329973681936875,
+              "nemo_spatial_std": 6.945736188702081,
+              "normalized_rms_over_nemo_std": 2.7829985413754943e-05,
+              "wet_cells": 18000
+            },
+            "u": {
+              "absolute_rms": 2.050480600976839e-05,
+              "nemo_spatial_std": 0.013225205760565632,
+              "normalized_rms_over_nemo_std": 0.001550433798989258,
+              "wet_cells": 17400
+            },
+            "v": {
+              "absolute_rms": 7.642226050591443e-05,
+              "nemo_spatial_std": 0.015244001360925146,
+              "normalized_rms_over_nemo_std": 0.005013267756706395,
+              "wet_cells": 17100
+            }
+          },
+          "nemo_reference_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_fromrest/nemo_seed0/GYRE_OMIP_L2_P3_00000360_restart.nc",
+          "nemo_reference_sha256": "59d028434fe962a6feb275f756387ab01db0e994551505af435ca0f0cb2b7206"
+        },
+        "90": {
+          "candidate_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/gyre/lego_seed0_year/day090.npz",
+          "candidate_sha256": "a12ee206601babb168c68f38756302e82c0c4a30b71e801915c2c1c17e434e32",
+          "classification": "MEASURED",
+          "day": 90,
+          "fields": {
+            "S": {
+              "absolute_rms": 0.00023478618477936654,
+              "nemo_spatial_std": 0.7248456975804408,
+              "normalized_rms_over_nemo_std": 0.0003239119519686613,
+              "wet_cells": 18000
+            },
+            "SSH": {
+              "absolute_rms": 3.5407260105259876e-05,
+              "nemo_spatial_std": 0.09714979043556181,
+              "normalized_rms_over_nemo_std": 0.00036446048876188827,
+              "wet_cells": 600
+            },
+            "T": {
+              "absolute_rms": 0.0018645021144913585,
+              "nemo_spatial_std": 6.824357987770123,
+              "normalized_rms_over_nemo_std": 0.0002732128235114157,
+              "wet_cells": 18000
+            },
+            "u": {
+              "absolute_rms": 0.00015840079428476218,
+              "nemo_spatial_std": 0.01503452905309717,
+              "normalized_rms_over_nemo_std": 0.010535800205336728,
+              "wet_cells": 17400
+            },
+            "v": {
+              "absolute_rms": 0.0001710045842290046,
+              "nemo_spatial_std": 0.017032743909233754,
+              "normalized_rms_over_nemo_std": 0.010039755493317783,
+              "wet_cells": 17100
+            }
+          },
+          "nemo_reference_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_fromrest/nemo_seed0/GYRE_OMIP_L2_P3_00000540_restart.nc",
+          "nemo_reference_sha256": "f4593826d3a6ad1dc768726ccbf40fd730c35c6d1e2c44278fa7f50deb8d2690"
+        }
+      }
+    }
+  },
+  "controls": {
+    "dino_reference_continuity": {
+      "day180_RUN_TRAJ_files_aggregate_sha256": "014d8db5e194863f88335307ee06a055cc62bbe55e23e8321a6204536dcc5dc5",
+      "day180_continuation_files_aggregate_sha256": "014d8db5e194863f88335307ee06a055cc62bbe55e23e8321a6204536dcc5dc5",
+      "day360_RUN_FROMREST_Y1_files_aggregate_sha256": "d8a11c920f8898360c8403066f797b1454040c2b4f83aca1749d347d666e6c23",
+      "day360_continuation_files_aggregate_sha256": "9f4c32b69d5baa642303dc70c94e5f43e17253edae1cd780af9a305b065931c6",
+      "field_bit_identity": {
+        "day180_RUN_TRAJ_vs_continuation": {
+          "S": true,
+          "SSH": true,
+          "T": true,
+          "u": true,
+          "v": true
+        },
+        "day360_RUN_FROMREST_Y1_vs_continuation": {
+          "S": true,
+          "SSH": true,
+          "T": true,
+          "u": true,
+          "v": true
+        }
+      },
+      "passed": true
+    },
+    "dino_twin_hash_manifest": {
+      "manifest": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/dino/twin_year_daily.sha256",
+      "manifest_sha256": "f25a7169edcdae5d26d4109c5257499683a715907c438b7456d68e411301de1b",
+      "passed": true,
+      "selected_snapshot_sha256": {
+        "1": "ad0d815bf78faf2d255037528e4f8a393850f70cd9d47b6bc42fb01b3c058b59",
+        "120": "6030813282cc795bc2e0e5155cbc061e2e1b45069e77e07e94cb82f55d9bbea8",
+        "180": "333f48e6dd62cf89a264d297186cc1a33ee7a4a3e44662cc813f110c03526367",
+        "2": "7f121117abbef51a9f6d3cd2b911336697c8da35f5da709506ecd715e1b9be72",
+        "240": "9c86d16b9be6788acb59f8e20025bb69c3f197f46fda11d861c4317a6c4557c6",
+        "3": "4abf1c7657cb049bc11bf23af817243f9a8419917996da4ebaeee9704bd1eb39",
+        "30": "a6e129e29253d9f8ed22dc70dc8d2271b27117a16b082ac8e7f0924f9a7d9850",
+        "300": "5955483e8635f3100ce408d5ed0d929104ee6fe487e05436cfc28e0e9ef07b59",
+        "360": "0b3189a4e2d44dcee0cbf0ad3ea95a33467e5f6bb0c8a05360e0aa8afd01bd60",
+        "4": "3a81a0f5ee18844aedea8ef2073a8408760054bba59d44b18eefbdc24a415a85",
+        "5": "3af7111522cafa23d168acfc45ef0038324de4f9314b5abcfa127b26c9aac53b",
+        "60": "d736bd7e7280cb1b900ec7ea0f76affb9074bbd56225e80df3640ae3cec7be1e",
+        "90": "5ed5ad068f73012a757c09550fd59e974f6f2a1876b75a4b884bb91e992a30b5"
+      }
+    },
+    "gyre_reference_continuity": {
+      "continuation_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_fromrest/nemo_seed0/GYRE_OMIP_L2_P3_00000180_restart.nc",
+      "day": 30,
+      "passed": true,
+      "requested_daily_path": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_owners/nemo_seed0/GYRE_OMIP_L2_P3_00000180_restart.nc",
+      "shared_sha256": "853b3d41b2aa512e934430cc1fcbf36ea574c2148419d6c4b98a1e16db94cfc6"
+    },
+    "planted_violation": {
+      "dry_cell_excluded": true,
+      "expected_planted_rms": 0.17677669529663687,
+      "observed_planted_rms": 0.1767766952966369,
+      "passed": true,
+      "wet_cell_plant": 0.25
+    },
+    "standalone_prior_day360_reproduction": {
+      "absolute_difference": 0.0,
+      "passed": true,
+      "prior_T3D_rms": 0.04222061753285037,
+      "prior_json": "/data/abyssal/dbalwada/dino_fromrest_y1/maps_trueframe_fp64/twin_nemo_ts_maps_day360_kt11520.json",
+      "prior_json_sha256": "1d1ebcb801a47aa44fe598544b32f71665dbaf3a6420228161766abc6e17de0d",
+      "reproduced_T3D_rms": 0.04222061753285037
+    }
+  },
+  "daily_diagnostics": {
+    "DINO_TWIN": {
+      "coverage": "exact consecutive NEMO restarts, days 1-5; no later daily NEMO restarts exist",
+      "decrease_count": 2,
+      "first_decrease": {
+        "from_day": 2,
+        "from_rms": 0.00027335584863274424,
+        "to_day": 3,
+        "to_rms": 0.0001419708645296828
+      },
+      "largest_consecutive_day_ratio": {
+        "from_day": 1,
+        "ratio": 3.252472835084792,
+        "to_day": 2
+      },
+      "monotone_non_decreasing": false,
+      "rows": [
+        {
+          "T_rms": 8.404554395782305e-05,
+          "candidate_sha256": "ad0d815bf78faf2d255037528e4f8a393850f70cd9d47b6bc42fb01b3c058b59",
+          "day": 1,
+          "nemo_reference_files_aggregate_sha256": "6abca5954f46cd5b4b63858d5acd3dc66ec7bfa97fd8b55fdb7abc9bc4cf233f"
+        },
+        {
+          "T_rms": 0.00027335584863274424,
+          "candidate_sha256": "7f121117abbef51a9f6d3cd2b911336697c8da35f5da709506ecd715e1b9be72",
+          "day": 2,
+          "nemo_reference_files_aggregate_sha256": "a7a5b601c72f28d08ba7d076e93e5c3f5948e56af171c92bd9eeed5c3e16bb22"
+        },
+        {
+          "T_rms": 0.0001419708645296828,
+          "candidate_sha256": "4abf1c7657cb049bc11bf23af817243f9a8419917996da4ebaeee9704bd1eb39",
+          "day": 3,
+          "nemo_reference_files_aggregate_sha256": "0c995461d01a4932e440ba87d1163d1cb2be968acd3ba482456c295c35983012"
+        },
+        {
+          "T_rms": 0.0003477644691739209,
+          "candidate_sha256": "3a81a0f5ee18844aedea8ef2073a8408760054bba59d44b18eefbdc24a415a85",
+          "day": 4,
+          "nemo_reference_files_aggregate_sha256": "122f0dfb3d2374e5f3cc67db199aa4c550527af537034f9051f89e768d70573c"
+        },
+        {
+          "T_rms": 0.0002849745295070818,
+          "candidate_sha256": "3af7111522cafa23d168acfc45ef0038324de4f9314b5abcfa127b26c9aac53b",
+          "day": 5,
+          "nemo_reference_files_aggregate_sha256": "23804b825df55872c3d0ddeaa27e6ebc05b5ebfe8af0540bc3793c75f6591603"
+        }
+      ]
+    },
+    "GYRE": {
+      "coverage": "exact consecutive NEMO restarts, days 1-30",
+      "decrease_count": 3,
+      "first_decrease": {
+        "from_day": 23,
+        "from_rms": 0.0005283867389538261,
+        "to_day": 24,
+        "to_rms": 4.647409732410672e-05
+      },
+      "largest_consecutive_day_ratio": {
+        "from_day": 22,
+        "ratio": 10.268914926740052,
+        "to_day": 23
+      },
+      "monotone_non_decreasing": false,
+      "rows": [
+        {
+          "T_rms": 7.565532849674667e-07,
+          "candidate_sha256": "e919d120de02eef8be7306c728cc51f346defa225eebf3d99feb1a20da199215",
+          "day": 1,
+          "nemo_reference_sha256": "c2961a454a9328336a577ca57c5bd9375c8f36d49082d9380ab54d1acf5f8647"
+        },
+        {
+          "T_rms": 1.056441731258273e-06,
+          "candidate_sha256": "4095f2dad47a997d7f1026eb8e683fdf47cb5e23f7b4ef0a169af84431d6c86e",
+          "day": 2,
+          "nemo_reference_sha256": "562a2f871a5a4bd3ccccb20365d9b01cad4371bf5ecc95e8315cf06fe2cbdfd7"
+        },
+        {
+          "T_rms": 2.1881655471547086e-06,
+          "candidate_sha256": "1ce1ba8e779012d05bf9e66a5f84ba5173a40bc34feab4e2ecf03643271511f6",
+          "day": 3,
+          "nemo_reference_sha256": "1e8b5a701cb667576b519c2ffebfde1d900ea96c6db9df96366fc48447dcee17"
+        },
+        {
+          "T_rms": 3.5150114727082923e-06,
+          "candidate_sha256": "595eb6ab627aa02203bf8d13de4473968f940e317d89e8e8bf212e9248566183",
+          "day": 4,
+          "nemo_reference_sha256": "48ece53771722fc0e52b0eaa3aa63a2b4e27b1651fa7b605e28763e37b213c4d"
+        },
+        {
+          "T_rms": 4.649607795006006e-06,
+          "candidate_sha256": "c47b60ef986ea835b0182b8991a4efae9b6a434bc22cc159957901779f68ef97",
+          "day": 5,
+          "nemo_reference_sha256": "d163ad5d15523229cf89f63dd7f4deef1004fe6bc2696805c9867e125ed6a631"
+        },
+        {
+          "T_rms": 5.8531968488219884e-06,
+          "candidate_sha256": "016d0dd848539a173fca7ecf105d216799c869c8daa4612dfc3721a57f9f36b6",
+          "day": 6,
+          "nemo_reference_sha256": "9e3cddb84f97c5f8b56057025ed4b32e2ee8e2a17d60ca7d3112869322867be8"
+        },
+        {
+          "T_rms": 7.205731025159462e-06,
+          "candidate_sha256": "843e46ceea3060bbd5d11bcd1ed3045f30b35c78367827af3a6ede273aa0a449",
+          "day": 7,
+          "nemo_reference_sha256": "d6aca51c8a89f2d6f513afc760124900f32c7ffae9a76812c858aa2dc6770e9c"
+        },
+        {
+          "T_rms": 8.797098528260187e-06,
+          "candidate_sha256": "0f333975f92a943b11e1fb3e6de64a7ec9808cd8ac6b3dddbf8ed2bece975884",
+          "day": 8,
+          "nemo_reference_sha256": "d76dd95203ea36df8b2088186527908d14abf054e5dddc621929f6ce804ccda1"
+        },
+        {
+          "T_rms": 1.0427834442859521e-05,
+          "candidate_sha256": "fec91d31e33b325075214ff5102273d22ff4731b053e90e4cb69d3907b303e71",
+          "day": 9,
+          "nemo_reference_sha256": "13700a5458904615a5b48e23d4f9ec32714f4a073f38a52e340af7b8ca1d6e43"
+        },
+        {
+          "T_rms": 1.2161409371181518e-05,
+          "candidate_sha256": "b3c7bd77226cdd40feff341fc8b111ff4b0e19d78ad3fcc33c5207573f7b97c3",
+          "day": 10,
+          "nemo_reference_sha256": "356bbff2b52c5f9539f97dab942cc528ae60813dcd8180489c1cdb120e1a4f01"
+        },
+        {
+          "T_rms": 1.4057891994939215e-05,
+          "candidate_sha256": "286f8b122771d126ef527a789dfaa6f4ed1dea801b1ae9aabe3bba5242ded722",
+          "day": 11,
+          "nemo_reference_sha256": "058349bc908a4f7e0d045989047dd1215abf2c27c91d4e65a426b209b52e9837"
+        },
+        {
+          "T_rms": 1.6554351296201494e-05,
+          "candidate_sha256": "2dde4d8c3d30fe882a3c44711455f70610067c3d8158151b53e87faa60a7c20e",
+          "day": 12,
+          "nemo_reference_sha256": "7ca06faef8b0a1b23d957e0dae492c8c66f6340d649e30ec3017009c2edd31e2"
+        },
+        {
+          "T_rms": 1.8127851574058202e-05,
+          "candidate_sha256": "ba5464a6ff0feb646e0864102930c4ab77d74dfbe6b640cc161ea459c04e8a65",
+          "day": 13,
+          "nemo_reference_sha256": "45f9467d9d3f21351c72f2259e8c2928bcbc1d390bd896efa411a5d43d8efb66"
+        },
+        {
+          "T_rms": 2.0505725616402102e-05,
+          "candidate_sha256": "647448d763bcf6abaf548788983feebe1e34e97a91eaaff97b42986b8ddcd530",
+          "day": 14,
+          "nemo_reference_sha256": "000b49656c07cc59968cf076f786d19e4c4c1944c870f2a21b82311cdb058cf7"
+        },
+        {
+          "T_rms": 2.2576092158020803e-05,
+          "candidate_sha256": "abd797987b6f149f00a59b496eb314a7bd34e7ea8d34c49a72593d4e805421ca",
+          "day": 15,
+          "nemo_reference_sha256": "f91d794445c02f44a69b7dacf1fb4017f8acef6160312b65e4b14d3c632baa1b"
+        },
+        {
+          "T_rms": 2.714004941109638e-05,
+          "candidate_sha256": "756053579709c658e6e356edcb93b0aada74582c744825be136424630f357e96",
+          "day": 16,
+          "nemo_reference_sha256": "91a7cf4940954f9ba1db028702838fe8eaf49777e3c964cc5fe922f7a57d23ad"
+        },
+        {
+          "T_rms": 2.7465358397286287e-05,
+          "candidate_sha256": "8449c010f5f20af3299865ada217a3af9211d0264dce3c27538da3ce0e6b524b",
+          "day": 17,
+          "nemo_reference_sha256": "ec84343fce4c8f90270cdfae8ad214bbc744ddd8bd150cd9e0d4009db98be5b8"
+        },
+        {
+          "T_rms": 3.0267641264895023e-05,
+          "candidate_sha256": "b565e3ef2dfac9162c8140e868bdd976e36d8cf53e616e6abbeeb5ac3a654241",
+          "day": 18,
+          "nemo_reference_sha256": "973344979f268cd57f907d52a2c33daf5b67305f026aa8d93cb4d35dd1ae16e7"
+        },
+        {
+          "T_rms": 3.252479234074524e-05,
+          "candidate_sha256": "c707370774f4993d9c6039bb780f3f036b5921a93d90bba079e25d2d69a668dd",
+          "day": 19,
+          "nemo_reference_sha256": "e3f370ad5bee5514a7fef2354608173c13b1a92cabbeaf9f28d06a067362b66b"
+        },
+        {
+          "T_rms": 3.5311048345668514e-05,
+          "candidate_sha256": "e1e625d3faf2b131def66a8b5fe08976c4242b424aa5f209570f2f4ccff99ec2",
+          "day": 20,
+          "nemo_reference_sha256": "7aeb555fde65ff8b33a0f8d0c73ec6d9e858771753bb579d7d15b68f9ea9eb7c"
+        },
+        {
+          "T_rms": 3.809293234615156e-05,
+          "candidate_sha256": "b0d874ad9908bb19a8c87f0d91307aebf5bc5a598ba063a522936116c2d798e2",
+          "day": 21,
+          "nemo_reference_sha256": "d4a1f2cf51977fa10cc56cad7f4e9e004d85c40c45b30bcdf2a71e39a2b70ba8"
+        },
+        {
+          "T_rms": 5.145497286942337e-05,
+          "candidate_sha256": "17db2d3b6177e6fd514883755e04d5ec92237b24c90a9302f0220274d0011625",
+          "day": 22,
+          "nemo_reference_sha256": "15112b61f328111d79fb4b21518f3ab3acd28e36386387c78becd73747ced83c"
+        },
+        {
+          "T_rms": 0.0005283867389538261,
+          "candidate_sha256": "17b4d60f9cc0b60da5f18e7ffd399b1f31aa47a05315eb2c995c106c71178abf",
+          "day": 23,
+          "nemo_reference_sha256": "2af3cafefb834e47e56318f7d127ef99c43f9f438334befe5448419d6a29c381"
+        },
+        {
+          "T_rms": 4.647409732410672e-05,
+          "candidate_sha256": "fcf18a324692421b77863f1816b2180a1e34eb1e3f440995af96edf743903a85",
+          "day": 24,
+          "nemo_reference_sha256": "cc30369e0761be189b91913d8f8271555c36de84f68262179d6349f773bada6b"
+        },
+        {
+          "T_rms": 7.100887422399636e-05,
+          "candidate_sha256": "ed9546272809d39f02aa3c7215e599dfa9fe5045e31082ddcdd5cf5d37d8d132",
+          "day": 25,
+          "nemo_reference_sha256": "0c67ebe7b76544e3e25ee3b0f7926ab90587cea7f216f4c2734ee983655b9f80"
+        },
+        {
+          "T_rms": 5.168788769087599e-05,
+          "candidate_sha256": "9273125456e308438d18d6dabae5648c6fcd1605552e03580f4c5f0592718b50",
+          "day": 26,
+          "nemo_reference_sha256": "5fbcdb039d914d6c423014807159672451c9c5b01adf0a0d0083b96a25261a3d"
+        },
+        {
+          "T_rms": 5.472033708254828e-05,
+          "candidate_sha256": "d40e65e600035852f9efe61479d02fe8722ac724479a64fca2ae1a0a09b42d90",
+          "day": 27,
+          "nemo_reference_sha256": "fc7b42c204f59b48220a7249442ec314c9270c4e16c3ae9ff0cd9b7ff38ee792"
+        },
+        {
+          "T_rms": 5.724164367579892e-05,
+          "candidate_sha256": "7f58adfd460b3b4b251e28af281e1e75b1305777784da2cacafaf597bb97de77",
+          "day": 28,
+          "nemo_reference_sha256": "131c778b58a2bc4563e2b286aeb17168e13677c8a8344ed72930e5754b72af49"
+        },
+        {
+          "T_rms": 0.00010514260873961176,
+          "candidate_sha256": "86f9cac54099b580017577c081e4fa3c78608791f189d9c0953448d41b3b692d",
+          "day": 29,
+          "nemo_reference_sha256": "97fda3caa76f95dcad45b4ea13eedfc097df5fda7d8203b66553e5b4e2351a3d"
+        },
+        {
+          "T_rms": 6.890484901489568e-05,
+          "candidate_sha256": "c64ac6b351445198b1f7d55d17b6f92d24ebdd133606997c9a32427f35d22148",
+          "day": 30,
+          "nemo_reference_sha256": "853b3d41b2aa512e934430cc1fcbf36ea574c2148419d6c4b98a1e16db94cfc6"
+        }
+      ]
+    }
+  },
+  "date": "2026-09-19",
+  "metric": {
+    "DINO_population": "canonical twin_nemo_ts_maps.py one-ring [1:-1,1:-1] wet cells; extended to u/v",
+    "GYRE_population": "full NEMO tmask/umask/vmask wet cells",
+    "absolute": "fp64 wet RMS(candidate - NEMO)",
+    "normalized": "absolute / population std(NEMO), ddof=0"
+  },
+  "noise_floors": {
+    "DINO_T3D_NEMO_vs_NEMO": "UNMEASURED in the named state artifacts",
+    "DINO_note": "Existing DINO ensemble floors are different statistics and are not relabelled as T3D state RMS.",
+    "GYRE_T3D_NEMO_vs_NEMO_max_pairwise_rms": {
+      "120": 1.2831729596957783e-09,
+      "180": 2.986307953832913e-10,
+      "240": 3.304067814752494e-10,
+      "30": 1.443889737136528e-10,
+      "300": 2.5956598277082876e-10,
+      "360": 3.394534692102701e-10,
+      "60": 1.5912356044238087e-10,
+      "90": 2.1442271381253624e-10
+    },
+    "GYRE_source": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_fromrest_head/verdict_year.json",
+    "GYRE_source_sha256": "257bdb20032791164593cbf021071696733abf38e17ad3e01af01e2ffe3e1f64"
+  },
+  "provenance": {
+    "command": [
+      "/home/dbalwada/legoESM/.venv/bin/python",
+      "/tmp/year-score-clean-cb6becd3/scripts/validate/ocean_fidelity/testcases/year_equivalence_gyre_vs_dino_score.py",
+      "--gyre-lego-root",
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/gyre",
+      "--gyre-early-nemo-root",
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_owners",
+      "--gyre-year-nemo-root",
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_fromrest",
+      "--gyre-mesh",
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_owners/nemo_seed0/mesh_mask.nc",
+      "--dino-twin-dir",
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/dino/twin_year_daily",
+      "--dino-standalone-dir",
+      "/data/abyssal/dbalwada/dino_fromrest_y1/lego_trueframe_fp64",
+      "--dino-early-nemo-root",
+      "/data/abyssal/dbalwada/dino_fromrest_y1/nemo_earlydays",
+      "--dino-traj-root",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ",
+      "--dino-continuation-root",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0",
+      "--dino-day360-root",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1",
+      "--dino-mesh",
+      "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/mesh_mask.nc",
+      "--dino-twin-hash-manifest",
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/dino/twin_year_daily.sha256",
+      "--standalone-prior-day360-json",
+      "/data/abyssal/dbalwada/dino_fromrest_y1/maps_trueframe_fp64/twin_nemo_ts_maps_day360_kt11520.json",
+      "--gyre-noise-floor-json",
+      "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_fromrest_head/verdict_year.json",
+      "--output",
+      "/tmp/year-equiv-2467431738/docs/ocean/fidelity/year_equivalence_gyre_vs_dino_2026-09-19_summary.json"
+    ],
+    "dino_mesh": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/mesh_mask.nc",
+    "dino_mesh_sha256": "3285fc4af36854a38b4e6f7985ab0372b95424398750a23b628935da02f72622",
+    "dino_reference_by_day": {
+      "120": {
+        "aggregate_sha256": "620734f2dee4c3591b2e69affcfca53e6d857fe9b5c75426729ff11db7297222",
+        "paths": [
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/DINO_00003840_restart.nc"
+        ],
+        "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ"
+      },
+      "180": {
+        "aggregate_sha256": "014d8db5e194863f88335307ee06a055cc62bbe55e23e8321a6204536dcc5dc5",
+        "paths": [
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/DINO_00005760_restart.nc"
+        ],
+        "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ"
+      },
+      "240": {
+        "aggregate_sha256": "716e600199544a9de645319f73ffa63609e9781b18976796ab14d2370d74b01b",
+        "paths": [
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0000.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0001.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0002.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0003.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0004.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0005.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0006.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0007.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0008.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0009.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0010.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0011.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0012.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0013.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0014.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00007680_restart_0015.nc"
+        ],
+        "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0"
+      },
+      "30": {
+        "aggregate_sha256": "373d28e2dc413ae5b16ca2266297f0641789923ad79625f8a92e75c90418cf97",
+        "paths": [
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/DINO_00000960_restart.nc"
+        ],
+        "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ"
+      },
+      "300": {
+        "aggregate_sha256": "25e35b9b3303f7c96f74a17c2c56b87017c9b6dd3dbe705b62d5d96404b92e8a",
+        "paths": [
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0000.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0001.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0002.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0003.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0004.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0005.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0006.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0007.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0008.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0009.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0010.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0011.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0012.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0013.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0014.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0/DINO_00009600_restart_0015.nc"
+        ],
+        "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_VERDICT360_M0"
+      },
+      "360": {
+        "aggregate_sha256": "d8a11c920f8898360c8403066f797b1454040c2b4f83aca1749d347d666e6c23",
+        "paths": [
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0000.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0001.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0002.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0003.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0004.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0005.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0006.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0007.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0008.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0009.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0010.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0011.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0012.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0013.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0014.nc",
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1/DINO_00011520_restart_0015.nc"
+        ],
+        "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1"
+      },
+      "60": {
+        "aggregate_sha256": "a798766cf126cbb903e4ecb3947beb398fd58157f2ca73f5967682055da81dfa",
+        "paths": [
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/DINO_00001920_restart.nc"
+        ],
+        "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ"
+      },
+      "90": {
+        "aggregate_sha256": "68a631faa014673b370a5f88d057849ff174593fbeb7d6561b29896ca4289dea",
+        "paths": [
+          "/data/abyssal/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ/DINO_00002880_restart.nc"
+        ],
+        "root": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ"
+      }
+    },
+    "dino_standalone_metadata": "/data/abyssal/dbalwada/dino_fromrest_y1/lego_trueframe_fp64/run_metadata.json",
+    "dino_standalone_metadata_record": {
+      "args": {
+        "allow_multiyear": true,
+        "asselin_gamma": null,
+        "barotropic_coriolis": null,
+        "barotropic_coriolis_split": null,
+        "barotropic_slow_forcing_ab2": null,
+        "barotropic_solver": null,
+        "bottom_drag_scheme": null,
+        "config": "scripts/experiment/dino/nemo_faithful_kamm_mlf.yaml",
+        "coriolis_placement": null,
+        "coriolis_scheme": null,
+        "days": 360.0,
+        "dt": 2700.0,
+        "eos": null,
+        "evd_momentum": null,
+        "gm_kappa_scheme": null,
+        "gm_redi_mld_criterion": null,
+        "grid": "latlon",
+        "momentum_advection": null,
+        "mpas_eq_visc_boost": null,
+        "mpas_resolution_km": 97.0,
+        "n_lon": 50,
+        "nemo_faithful_grid": true,
+        "no_forcing": false,
+        "outer_integrator": null,
+        "output_dir": "/data/abyssal/dbalwada/dino_fromrest_y1/lego_trueframe_fp64",
+        "physics_off": false,
+        "preset": null,
+        "recipe": "nemo_dino_kamm_mlf",
+        "rigid_lid_dt_mom_ratio": null,
+        "snapshot_every_days": 30.0,
+        "tke_momentum_visc_bg": null,
+        "tke_prandtl_ri": null,
+        "treguier_aei0": null,
+        "vmix": null,
+        "vorticity_scheme": null
+      },
+      "config": {
+        "A_S": 0.003858,
+        "A_h_eq_boost": 1.0,
+        "A_h_eq_sigma_deg": 5.0,
+        "A_h_floor": 0.0,
+        "A_theta": 40.0,
+        "A_v_bg": 0.00012,
+        "C_d_bottom": 0.001,
+        "H_deep": 4000.0,
+        "H_shallow": 2000.0,
+        "H_sill": 2500.0,
+        "K_conv": 100.0,
+        "K_v_bg": 1.2e-05,
+        "L_phi_deg": 140.0,
+        "Q_sr_amp": 230.0,
+        "S_star_eq": 37.25,
+        "S_star_eq_dip_amp": 1.25,
+        "S_star_eq_dip_sigma_deg": 7.5,
+        "S_star_n": 35.1,
+        "S_star_s": 35.0,
+        "T_star_eq": 27.0,
+        "T_star_n_mean": 5.0,
+        "T_star_s_mean": -0.5,
+        "T_star_seasonal_amp_n": 3.0,
+        "T_star_seasonal_amp_s": 0.5,
+        "U_M": 0.27,
+        "U_T": 0.027,
+        "a_cr": 10.5,
+        "ab2_scope": "total",
+        "asselin_gamma": 0.1,
+        "barotropic_after_reconcile": "nemo_mlf_baro_corr",
+        "barotropic_auto_cmax": 0.0,
+        "barotropic_coriolis": "een_metric",
+        "barotropic_coriolis_split": "live",
+        "barotropic_diffusion_alpha": 0.0,
+        "barotropic_drag_substep": true,
+        "barotropic_een_seed": "nemo_kmm",
+        "barotropic_face_depth": "nemo_ssh_avg",
+        "barotropic_forcing_centred": true,
+        "barotropic_implicit_theta_eta": 0.55,
+        "barotropic_reconcile_target": "velocity_avg",
+        "barotropic_seed_face_depth": "nemo_ssh_avg",
+        "barotropic_slow_forcing_ab2": false,
+        "barotropic_solver": "explicit_substep",
+        "barotropic_time_filter": "nemo_boxcar_ab3",
+        "bottom_drag_bbl_thickness": 50.0,
+        "bottom_drag_bg_velocity": 0.1,
+        "bottom_drag_scheme": "nemo_quadratic",
+        "c_p": 3991.86795711963,
+        "channel_lat_north_deg": -45.0,
+        "channel_lat_south_deg": -65.0,
+        "channel_width_deg": 20.0,
+        "convection_evd_n2_time_level": "nemo_now_before",
+        "convection_n2_mode": "nemo_bn2",
+        "convection_n2_threshold": -1e-12,
+        "convection_smooth_transition": false,
+        "convection_two_level_trigger": true,
+        "coriolis_placement": "cell_average",
+        "coriolis_scheme": "explicit_ab2",
+        "dt": 2700.0,
+        "dz_min": 10.0,
+        "een_e3f_scheme": "nemo_avg",
+        "een_metric_weighting": "nemo",
+        "een_q_boundary": "nemo_live",
+        "eos": "nemo_seos",
+        "eos_depth": "geometric",
+        "evd_on_momentum": true,
+        "fix_eta_drift": true,
+        "forcing_annual_cycle": true,
+        "g": 9.80665,
+        "gm_bolus_advection": "through_fct",
+        "gm_bolus_kappa_face_average": true,
+        "gm_kappa_scheme": "treguier",
+        "gm_redi_mld_criterion": "n2_integral",
+        "gm_redi_slope_n2": "nemo_bn2",
+        "gm_redi_slope_scheme": "nemo_iso_lap",
+        "jerlov_water_type": "I",
+        "k_th": 35,
+        "ke_gradient_scheme": "hollingsworth",
+        "lat_max_deg": 70.0,
+        "lateral_tracer_mixing": "isoneutral",
+        "lateral_viscosity_e3_weighting": "off",
+        "lateral_viscosity_operator": "nemo_div_curl",
+        "lon_east_deg": 51.0,
+        "lon_west_deg": 0.0,
+        "metric_convention": "nemo_isotropic",
+        "momentum_advection": "vector_invariant",
+        "momentum_flux_scheme": "upwind",
+        "mpas_equatorial_visc_boost": 8.0,
+        "n2_before_advection": true,
+        "n_barotropic_substeps": 23,
+        "n_levels": 36,
+        "nemo_faithful_grid": true,
+        "omega": 7.292115083046062e-05,
+        "outer_integrator": "leapfrog",
+        "pgf_quadrature": "nemo_trapezoid",
+        "pgf_scheme": "nemo_sco",
+        "redi_S_max": 0.01,
+        "redi_slope_limit": "nemo_cap",
+        "rho_0": 1026.0,
+        "rigid_lid_dt_mom_ratio": 9.0,
+        "s_lambda_inv_deg": 0.3333333333333333,
+        "shortwave_penetration_ladder": "nemo_live",
+        "sill_gaussian_width_s": 4.0,
+        "sill_lat_m_deg": -55.0,
+        "sill_lon_m_deg": 0.0,
+        "solar_declination_amp_deg": 23.5,
+        "surface_flux_divisor": "nemo_live",
+        "surface_stress_implicit": false,
+        "surface_tendency_placement": "leapfrog_rhs",
+        "taum_westerly_boost": 1.3,
+        "tke_alpha": 1.0,
+        "tke_bottom_bc": true,
+        "tke_buoyancy_sink": "nemo_explicit",
+        "tke_dissipation": "nemo_1p5_split",
+        "tke_dry_wmask": true,
+        "tke_kappaM_max": Infinity,
+        "tke_kappa_convention": "veros_sqrte",
+        "tke_momentum_visc_bg": 0.00012,
+        "tke_mxl0_min_m": 0.01,
+        "tke_mxl_choice": 3,
+        "tke_mxl_min_m": 0.01,
+        "tke_n2_mode": "nemo_bn2",
+        "tke_n2_time_level": "nemo_before",
+        "tke_prandtl_ri": true,
+        "tke_prognostic": true,
+        "tke_shear_avm_weighting": "nemo_face",
+        "tke_shear_production": "nemo_face_native",
+        "tke_surface_bc": "nemo_dirichlet",
+        "tke_surface_bc_level": "nemo_z0",
+        "tracer_advection": "fct2",
+        "tracer_combine": "thickness_weighted",
+        "treguier_aei0": 1500.0,
+        "use_gm_redi": true,
+        "vertical_coordinate": "masked_zco",
+        "vertical_momentum_scheme": "nemo_advective",
+        "visbeck_alpha": 0.015,
+        "visbeck_kappa_max": 2000.0,
+        "visbeck_kappa_min": 200.0,
+        "vmix_background_mode": "nemo_max_floor",
+        "vmix_scheme": "tke",
+        "vorticity_scheme": "een_total",
+        "wind_tau_lats_deg": [
+          -70.0,
+          -45.0,
+          -15.0,
+          0.0,
+          15.0,
+          45.0,
+          70.0
+        ],
+        "wind_tau_values": [
+          0.0,
+          0.2,
+          -0.1,
+          -0.02,
+          -0.1,
+          0.1,
+          0.0
+        ],
+        "wind_through_step": true,
+        "zad_bottom_face_mask": "nemo_faithful",
+        "zdf_baroclinic_only": true,
+        "zdf_drag_in_matrix": true
+      },
+      "grid": {
+        "dx_eq_km": 222.3978468970916,
+        "dx_pole_km": 76.60508278503471,
+        "kind": "latlon-mercator",
+        "lat_max_deg": 69.85173502222084,
+        "lat_min_deg": -69.85173502222084,
+        "n_lat": 199,
+        "n_lon": 52,
+        "radius": 6371229.0
+      },
+      "vertical": {
+        "H_max": 4506.374703863692,
+        "dz_bot": 506.3747038636898,
+        "dz_top": 10.13875112538517,
+        "n_levels": 36
+      }
+    },
+    "dino_standalone_metadata_sha256": "e03a43a5f68a90a68b47467d10b83af56cf6aef0e2d45027f14c8fcd38669322",
+    "dino_twin_metadata": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/dino/twin_year_daily/run_metadata.json",
+    "dino_twin_metadata_record": {
+      "args": {
+        "allow_multiyear": true,
+        "asselin_gamma": null,
+        "barotropic_coriolis": null,
+        "barotropic_coriolis_split": null,
+        "barotropic_slow_forcing_ab2": null,
+        "barotropic_solver": null,
+        "bottom_drag_scheme": null,
+        "config": "scripts/experiment/dino/nemo_faithful_kamm_mlf.yaml",
+        "coriolis_placement": null,
+        "coriolis_scheme": null,
+        "days": 360.0,
+        "dt": 2700.0,
+        "eos": null,
+        "evd_momentum": null,
+        "gm_kappa_scheme": null,
+        "gm_redi_mld_criterion": null,
+        "grid": "latlon",
+        "momentum_advection": null,
+        "mpas_eq_visc_boost": null,
+        "mpas_resolution_km": 97.0,
+        "n_lon": 50,
+        "nemo_faithful_grid": true,
+        "no_forcing": false,
+        "outer_integrator": null,
+        "output_dir": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/dino/twin_year_daily",
+        "physics_off": false,
+        "preset": null,
+        "recipe": "nemo_dino_kamm_mlf",
+        "rigid_lid_dt_mom_ratio": null,
+        "snapshot_every_days": 1.0,
+        "tke_momentum_visc_bg": null,
+        "tke_prandtl_ri": null,
+        "treguier_aei0": null,
+        "vmix": null,
+        "vorticity_scheme": null
+      },
+      "config": {
+        "A_S": 0.003858,
+        "A_h_eq_boost": 1.0,
+        "A_h_eq_sigma_deg": 5.0,
+        "A_h_floor": 0.0,
+        "A_theta": 40.0,
+        "A_v_bg": 0.00012,
+        "C_d_bottom": 0.001,
+        "H_deep": 4000.0,
+        "H_shallow": 2000.0,
+        "H_sill": 2500.0,
+        "K_conv": 100.0,
+        "K_v_bg": 1.2e-05,
+        "L_phi_deg": 140.0,
+        "Q_sr_amp": 230.0,
+        "S_star_eq": 37.25,
+        "S_star_eq_dip_amp": 1.25,
+        "S_star_eq_dip_sigma_deg": 7.5,
+        "S_star_n": 35.1,
+        "S_star_s": 35.0,
+        "T_star_eq": 27.0,
+        "T_star_n_mean": 5.0,
+        "T_star_s_mean": -0.5,
+        "T_star_seasonal_amp_n": 3.0,
+        "T_star_seasonal_amp_s": 0.5,
+        "U_M": 0.27,
+        "U_T": 0.027,
+        "a_cr": 10.5,
+        "ab2_scope": "total",
+        "asselin_gamma": 0.1,
+        "barotropic_after_reconcile": "nemo_mlf_baro_corr",
+        "barotropic_auto_cmax": 0.0,
+        "barotropic_continuity_evaluation": "nemo_literal",
+        "barotropic_coriolis": "een_metric",
+        "barotropic_coriolis_split": "live",
+        "barotropic_diffusion_alpha": 0.0,
+        "barotropic_drag_substep": true,
+        "barotropic_een_coefficient_evaluation": "nemo_literal",
+        "barotropic_een_seed": "nemo_kmm",
+        "barotropic_face_depth": "nemo_ssh_avg",
+        "barotropic_forcing_centred": true,
+        "barotropic_implicit_theta_eta": 0.55,
+        "barotropic_pgf_evaluation": "nemo_literal",
+        "barotropic_reconcile_target": "velocity_avg",
+        "barotropic_seed_evaluation": "nemo_literal",
+        "barotropic_seed_face_depth": "nemo_ssh_avg",
+        "barotropic_slow_forcing_ab2": false,
+        "barotropic_solver": "explicit_substep",
+        "barotropic_time_filter": "nemo_boxcar_ab3",
+        "barotropic_transport_accumulation_evaluation": "nemo_literal",
+        "bottom_drag_bbl_thickness": 50.0,
+        "bottom_drag_bg_velocity": 0.1,
+        "bottom_drag_scheme": "nemo_quadratic",
+        "c_p": 3991.86795711963,
+        "channel_lat_north_deg": -45.0,
+        "channel_lat_south_deg": -65.0,
+        "channel_width_deg": 20.0,
+        "convection_evd_n2_time_level": "nemo_now_before",
+        "convection_n2_mode": "nemo_bn2",
+        "convection_n2_threshold": -1e-12,
+        "convection_smooth_transition": false,
+        "convection_two_level_trigger": true,
+        "coriolis_placement": "cell_average",
+        "coriolis_scheme": "explicit_ab2",
+        "dino_wind_profile_evaluation": "nemo_literal",
+        "dt": 2700.0,
+        "dz_min": 10.0,
+        "een_e3f_scheme": "nemo_avg",
+        "een_metric_weighting": "nemo",
+        "een_q_boundary": "nemo_live",
+        "eos": "nemo_seos",
+        "eos_depth": "geometric",
+        "evd_on_momentum": true,
+        "fix_eta_drift": true,
+        "forcing_annual_cycle": true,
+        "g": 9.80665,
+        "gm_bolus_advection": "through_fct",
+        "gm_bolus_kappa_face_average": true,
+        "gm_kappa_scheme": "treguier",
+        "gm_redi_a33_evaluation": "nemo_literal",
+        "gm_redi_flux_face_thickness_evaluation": "nemo_qco_live",
+        "gm_redi_horizontal_evaluation": "nemo_metric_literal",
+        "gm_redi_mld_criterion": "n2_integral",
+        "gm_redi_slope_depth_evaluation": "nemo_qco_live_literal",
+        "gm_redi_slope_face_thickness_evaluation": "nemo_qco_live",
+        "gm_redi_slope_metric_evaluation": "nemo_reciprocal",
+        "gm_redi_slope_n2": "nemo_bn2",
+        "gm_redi_slope_n2_evaluation": "carried_step_entry",
+        "gm_redi_slope_prd_evaluation": "nemo_literal",
+        "gm_redi_slope_prd_geometry_stage": "before_step",
+        "gm_redi_slope_scheme": "nemo_iso_lap",
+        "gm_redi_vertical_skew_evaluation": "nemo_literal",
+        "gm_redi_w_slope_stage_evaluation": "nemo_post_slope_pair",
+        "gm_treguier_sqrt_evaluation": "nemo_forward_exact",
+        "gm_treguier_vertical_reduction_evaluation": "nemo_left",
+        "jerlov_water_type": "I",
+        "k_th": 35,
+        "ke_gradient_scheme": "hollingsworth",
+        "lat_max_deg": 70.0,
+        "lateral_tracer_mixing": "isoneutral",
+        "lateral_viscosity_e3_weighting": "off",
+        "lateral_viscosity_operator": "nemo_div_curl",
+        "lon_east_deg": 51.0,
+        "lon_west_deg": 0.0,
+        "metric_convention": "nemo_isotropic",
+        "momentum_advection": "vector_invariant",
+        "momentum_flux_scheme": "upwind",
+        "mpas_equatorial_visc_boost": 8.0,
+        "n2_before_advection": true,
+        "n_barotropic_substeps": 23,
+        "n_levels": 36,
+        "nemo_faithful_grid": true,
+        "omega": 7.292115083046062e-05,
+        "outer_integrator": "leapfrog",
+        "pgf_quadrature": "nemo_trapezoid",
+        "pgf_scheme": "nemo_sco",
+        "redi_S_max": 0.01,
+        "redi_slope_limit": "nemo_cap",
+        "rho_0": 1026.0,
+        "rigid_lid_dt_mom_ratio": 9.0,
+        "s_lambda_inv_deg": 0.3333333333333333,
+        "shortwave_penetration_ladder": "nemo_2bd",
+        "sill_gaussian_width_s": 4.0,
+        "sill_lat_m_deg": -55.0,
+        "sill_lon_m_deg": 0.0,
+        "solar_declination_amp_deg": 23.5,
+        "surface_flux_divisor": "nemo_live",
+        "surface_stress_implicit": false,
+        "surface_tendency_placement": "leapfrog_rhs",
+        "taum_westerly_boost": 1.3,
+        "tke_alpha": 1.0,
+        "tke_bottom_bc": true,
+        "tke_buoyancy_sink": "nemo_explicit",
+        "tke_dissipation": "nemo_1p5_split",
+        "tke_dry_wmask": true,
+        "tke_etau_exponential_evaluation": "nemo_literal",
+        "tke_htau_evaluation": "nemo_literal",
+        "tke_kappaM_max": Infinity,
+        "tke_kappa_convention": "veros_sqrte",
+        "tke_langmuir_evaluation": "nemo_literal",
+        "tke_matrix_evaluation": "nemo_literal",
+        "tke_momentum_visc_bg": 0.00012,
+        "tke_mxl0_min_m": 0.01,
+        "tke_mxl_choice": 3,
+        "tke_mxl_min_m": 0.01,
+        "tke_mxl_raw_evaluation": "nemo_literal",
+        "tke_n2_evaluation_stage": "step_entry",
+        "tke_n2_mode": "nemo_bn2",
+        "tke_n2_time_level": "nemo_before",
+        "tke_prandtl_ri": true,
+        "tke_preclosure_coeff_source": "carried_previous_step",
+        "tke_prognostic": true,
+        "tke_shear_avm_weighting": "nemo_face",
+        "tke_shear_evaluation_stage": "step_entry",
+        "tke_shear_metric_source": "nemo_qco_live_face",
+        "tke_shear_production": "nemo_face_native",
+        "tke_solver_evaluation": "nemo_literal",
+        "tke_surface_bc": "nemo_dirichlet",
+        "tke_surface_bc_level": "nemo_z0",
+        "tracer_advection": "fct2",
+        "tracer_combine": "thickness_weighted",
+        "treguier_aei0": 1500.0,
+        "use_gm_redi": true,
+        "vertical_coordinate": "masked_zco",
+        "vertical_momentum_scheme": "nemo_advective",
+        "vface_zonal_metric_evaluation": "nemo_vpoint",
+        "visbeck_alpha": 0.015,
+        "visbeck_kappa_max": 2000.0,
+        "visbeck_kappa_min": 200.0,
+        "vmix_background_mode": "nemo_max_floor",
+        "vmix_scheme": "tke",
+        "vorticity_scheme": "een_total",
+        "wind_tau_lats_deg": [
+          -70.0,
+          -45.0,
+          -15.0,
+          0.0,
+          15.0,
+          45.0,
+          70.0
+        ],
+        "wind_tau_values": [
+          0.0,
+          0.2,
+          -0.1,
+          -0.02,
+          -0.1,
+          0.1,
+          0.0
+        ],
+        "wind_through_step": true,
+        "wzv_call2_evaluation": "nemo_literal",
+        "zad_bottom_face_mask": "nemo_faithful",
+        "zad_qco_evaluation": "nemo_literal",
+        "zdf_baroclinic_only": true,
+        "zdf_drag_in_matrix": true,
+        "zdf_implicit_solver_evaluation": "nemo_literal"
+      },
+      "grid": {
+        "dx_eq_km": 222.3978468970916,
+        "dx_pole_km": 76.60508278503471,
+        "kind": "latlon-mercator",
+        "lat_max_deg": 69.85173502222084,
+        "lat_min_deg": -69.85173502222084,
+        "n_lat": 199,
+        "n_lon": 52,
+        "radius": 6371229.0
+      },
+      "measurement_provenance": {
+        "classification": "MEASURED",
+        "command": [
+          "/home/dbalwada/legoESM/.venv/bin/python",
+          "scripts/run/run_dino.py",
+          "--config",
+          "scripts/experiment/dino/nemo_faithful_kamm_mlf.yaml",
+          "--days",
+          "360",
+          "--snapshot-every-days",
+          "1",
+          "--output-dir",
+          "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/dino/twin_year_daily"
+        ],
+        "environment": {
+          "FP64": "1",
+          "JAX_ENABLE_X64": "1",
+          "JAX_PLATFORMS": "cuda"
+        },
+        "gpu_uuid": "GPU-f425371f-af10-621f-60e0-b3c455a77e9f",
+        "nemo_reference_paths": {
+          "RUN_FROMREST_KT1": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_KT1",
+          "RUN_FROMREST_Y1": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_FROMREST_Y1",
+          "RUN_TRAJ": "/home/dbalwada/oracle-builds/nemo5/nemo_5.0.2/cfgs/DINO/RUN_TRAJ"
+        },
+        "producer_branch": "fix/dino-faithful-grid-true-frame",
+        "producer_dirty_tracked_files": 0,
+        "producer_git_sha": "f0a82e87ca545e55df548bfd5e0d55c50d1330f8",
+        "receipt_names": [
+          "scripts/validate/ocean_fidelity/dino_1226/PREREG_surface_restoring_nemo_explicit.md",
+          "docs/ocean/fidelity/dino_twin_nemo_ts_maps_day360_result.md"
+        ],
+        "snapshot_cadence_note": "Daily output for P4; model/config selectors match the shipped card.",
+        "utc_completed": "2026-09-19T16:00:57.071906+00:00"
+      },
+      "vertical": {
+        "H_max": 4617.4622868132055,
+        "dz_bot": 617.462286813301,
+        "dz_top": 10.13875112538517,
+        "n_levels": 36
+      }
+    },
+    "dino_twin_metadata_sha256": "a83a9544d7935739558ca5b51ae28ebb78d82fbd6e5ed3634bc3345ab14795b4",
+    "gyre_manifest": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_equivalence/gyre/lego_seed0_year/manifest.json",
+    "gyre_manifest_record": {
+      "case": "GYRE-zco",
+      "days": 360,
+      "dt_s": 14400.0,
+      "format": "nemo-testcase-l2-gyre-year-fromrest-member-v1",
+      "operands": {
+        "gdept_source": "gdept_1d",
+        "max_abs_depth_m": 0.0,
+        "max_abs_latitude_deg": 0.0,
+        "mesh_sha256": "3bf5d10e36dc52336b9797b13eb1efb4f02d25e0fb3a0c450ac6ce69e65471df",
+        "rounded_depth_mismatches": 0,
+        "rounded_latitude_mismatches": 0
+      },
+      "perturbation": {
+        "absolute_amplitude_K": 1e-10,
+        "measured_peak_K": 0.0,
+        "reason": "seed 0 is the unperturbed control, by definition"
+      },
+      "phase3_gate_sha256": "e57fe1c475a1d386f30856f1841a2efb65162df6968b74b1a200f8850bdd9112",
+      "seed": 0,
+      "snapshot_days": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42,
+        43,
+        44,
+        45,
+        46,
+        47,
+        48,
+        49,
+        50,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74,
+        75,
+        76,
+        77,
+        78,
+        79,
+        80,
+        81,
+        82,
+        83,
+        84,
+        85,
+        86,
+        87,
+        88,
+        89,
+        90,
+        91,
+        92,
+        93,
+        94,
+        95,
+        96,
+        97,
+        98,
+        99,
+        100,
+        101,
+        102,
+        103,
+        104,
+        105,
+        106,
+        107,
+        108,
+        109,
+        110,
+        111,
+        112,
+        113,
+        114,
+        115,
+        116,
+        117,
+        118,
+        119,
+        120,
+        121,
+        122,
+        123,
+        124,
+        125,
+        126,
+        127,
+        128,
+        129,
+        130,
+        131,
+        132,
+        133,
+        134,
+        135,
+        136,
+        137,
+        138,
+        139,
+        140,
+        141,
+        142,
+        143,
+        144,
+        145,
+        146,
+        147,
+        148,
+        149,
+        150,
+        151,
+        152,
+        153,
+        154,
+        155,
+        156,
+        157,
+        158,
+        159,
+        160,
+        161,
+        162,
+        163,
+        164,
+        165,
+        166,
+        167,
+        168,
+        169,
+        170,
+        171,
+        172,
+        173,
+        174,
+        175,
+        176,
+        177,
+        178,
+        179,
+        180,
+        181,
+        182,
+        183,
+        184,
+        185,
+        186,
+        187,
+        188,
+        189,
+        190,
+        191,
+        192,
+        193,
+        194,
+        195,
+        196,
+        197,
+        198,
+        199,
+        200,
+        201,
+        202,
+        203,
+        204,
+        205,
+        206,
+        207,
+        208,
+        209,
+        210,
+        211,
+        212,
+        213,
+        214,
+        215,
+        216,
+        217,
+        218,
+        219,
+        220,
+        221,
+        222,
+        223,
+        224,
+        225,
+        226,
+        227,
+        228,
+        229,
+        230,
+        231,
+        232,
+        233,
+        234,
+        235,
+        236,
+        237,
+        238,
+        239,
+        240,
+        241,
+        242,
+        243,
+        244,
+        245,
+        246,
+        247,
+        248,
+        249,
+        250,
+        251,
+        252,
+        253,
+        254,
+        255,
+        256,
+        257,
+        258,
+        259,
+        260,
+        261,
+        262,
+        263,
+        264,
+        265,
+        266,
+        267,
+        268,
+        269,
+        270,
+        271,
+        272,
+        273,
+        274,
+        275,
+        276,
+        277,
+        278,
+        279,
+        280,
+        281,
+        282,
+        283,
+        284,
+        285,
+        286,
+        287,
+        288,
+        289,
+        290,
+        291,
+        292,
+        293,
+        294,
+        295,
+        296,
+        297,
+        298,
+        299,
+        300,
+        301,
+        302,
+        303,
+        304,
+        305,
+        306,
+        307,
+        308,
+        309,
+        310,
+        311,
+        312,
+        313,
+        314,
+        315,
+        316,
+        317,
+        318,
+        319,
+        320,
+        321,
+        322,
+        323,
+        324,
+        325,
+        326,
+        327,
+        328,
+        329,
+        330,
+        331,
+        332,
+        333,
+        334,
+        335,
+        336,
+        337,
+        338,
+        339,
+        340,
+        341,
+        342,
+        343,
+        344,
+        345,
+        346,
+        347,
+        348,
+        349,
+        350,
+        351,
+        352,
+        353,
+        354,
+        355,
+        356,
+        357,
+        358,
+        359,
+        360
+      ],
+      "snapshot_step_interval": 6,
+      "steps": 2160,
+      "tag": "year",
+      "wall_seconds": 1957.858974456787,
+      "worktree": {
+        "allow_dirty_escape_used": false,
+        "branch": "fidelity/nemo-testcases-l2-gyre-codex2",
+        "clean": true,
+        "commit": "4d250301588d3ed0ad83fb20d6bf520e175d576e",
+        "detached": false,
+        "diff_sha256": null,
+        "dirty_paths": [],
+        "root": "/tmp/gyre-year-4d2503015/packages/ocean/legoesm/ocean/fidelity",
+        "untracked_count": 0
+      }
+    },
+    "gyre_manifest_sha256": "aef8a3f026ead8d360f3fa36d61dafb6fc590164d3a2501f19dc238b85e0c3c6",
+    "gyre_mesh": "/data/abyssal/dbalwada/nemo-testcases-l2/phase3/year_owners/nemo_seed0/mesh_mask.nc",
+    "gyre_mesh_sha256": "3bf5d10e36dc52336b9797b13eb1efb4f02d25e0fb3a0c450ac6ce69e65471df",
+    "restart_rebuilder": "/tmp/year-score-clean-cb6becd3/scripts/validate/ocean_fidelity/rebuild_nemo_restart.py",
+    "restart_rebuilder_sha256": "be9ea8ebff313b82521021049728ee271c5c2fe3af5c3a949948004b5b23bcf0",
+    "scorer_path": "/tmp/year-score-clean-cb6becd3/scripts/validate/ocean_fidelity/testcases/year_equivalence_gyre_vs_dino_score.py",
+    "scorer_repo": {
+      "branch": "docs/year-equivalence-gyre-dino",
+      "dirty_tracked_files": 0,
+      "git_sha": "cb6becd39aa503ab1f7c63e0344c60057650a8b0"
+    },
+    "scorer_sha256": "592c42155daf6e41fe6408d2e5945180a5c3bd62d1a90a7fd177c6494ab669a6"
+  },
+  "schema": "year-equivalence-gyre-vs-dino-2026-09-19-v1",
+  "target_days": [
+    30,
+    60,
+    90,
+    120,
+    180,
+    240,
+    300,
+    360
+  ]
+}
