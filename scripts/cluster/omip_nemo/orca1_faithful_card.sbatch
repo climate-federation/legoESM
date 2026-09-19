@@ -56,12 +56,22 @@ echo "DAYS=$DAYS LEG=$LEG TARGET=$TARGET YEARS=$YEARS OUT=$OUT"
 # read.  Keep the full log on disk beside the output; tail still goes to the
 # SLURM file so the job summary is unchanged.
 mkdir -p $OUT
+# NEMO runs no Smagorinsky at all -- its lateral momentum viscosity is read
+# entirely from eddy_viscosity_3D.nc (nn_ahm_ijk_t = -30) -- while this card
+# adds one and ramps it down mid-run.  The two knobs below let an arm turn
+# that term off without touching any other flag; the DEFAULTS ARE THE CARD'S
+# OWN VALUES, so an unparameterised submission runs exactly what it always
+# ran.  Both columns must move together: --C-smag-lap sets the value the
+# schedule's first segment inherits before day 0.
+CSMAG=${CSMAG:-3.0}
+VSCHED=${VSCHED:-0:1e4:3.0,8:1e4:1.5,16:1e4:0.5}
+echo "CSMAG=$CSMAG VSCHED=$VSCHED"
 
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --mesh data/grids/eORCA1.2_mesh_mask.nc --dt 150 --min-levels 2 \
-  --C-smag-lap 3.0 --smag-cfl-safety 0.125 \
+  --C-smag-lap $CSMAG --smag-cfl-safety 0.125 \
   --A-h 2e4 --A-h-profile-file $NEMOIN/orca1_inputs/data_repository/input_fields/eddy_viscosity_3D.nc \
-  --visc-schedule '0:1e4:3.0,8:1e4:1.5,16:1e4:0.5' \
+  --visc-schedule "$VSCHED" \
   --ew-cyclic-overlap --nemo-vertical --partial-cell --pgf-scheme smc03 \
   --adaptive-implicit-vertadv --momentum-rk3 --geothermal --runoff \
   --sss-restore --sss-restore-tau-days 45.5 --sss-restore-bound-mmday 4 \
