@@ -59,7 +59,7 @@ measurement and numerical edit.
 | P2, tip-local source route | **CONFIRMED for the registered numerical rows** | The clean pre-edit private `ldf_only` arm and post-edit native production arm have identical complete `content_vs_oracle` and `kt3_vs_oracle` dictionaries for T and S under production JIT.  Production eager and JIT dictionaries are identical.  Both source-injection rows are BIT.  The historical round-69 wrapper still says `REFUTED` because its frozen pre-round-85 targets are stale; that status is not relabeled. |
 | P3, ladder forecast | **PARTLY CONFIRMED, numerically REFUTED** | The exact named 70-row before arm has the predicted 53 moved endpoint rows, unchanged kt2 headline maxima, and kt3 T exactly as predicted.  The 954-row instrument has 82, not 53, moved rows; four kt1 diagnostic rows move without a class change.  Chained kt3 S is `6.979441735666114e-8`, not the forecast `6.97944244620885e-8`.  First-over-bar and all row classes are unchanged. |
 | P4, month forecast | **CONFIRMED** | `6.890484901489568e-5` K lies in the preregistered `1e-5`--`1e-3` K band and is strictly below the immutable before value. |
-| P5, shared-card risk | **CONFIRMED** | The resolved source condition executes on GYRE.  It does not execute on either DINO card or the LOCK_EXCHANGE/OVERFLOW cards; details are below. |
+| P5, shared-card risk | **CONFIRMED AFTER ROUND-113 AMENDMENT** | Recipe-derived resolution finds two executing cards: GYRE-zco and the generic `build_nemo_gyre_recipe()` card.  Round 113 measures both; neither DINO card nor LOCK_EXCHANGE/OVERFLOW executes the statement.  The original Round-110 table omitted the generic card and is superseded below. |
 
 P1's phrase “byte-for-byte” was over-constrained because the same document is
 also required to carry a fresh fail-closed worktree stamp.  The mismatch is
@@ -144,9 +144,14 @@ has the independent nonzero-exit plant quoted in the outcome section.
 
 ## Decision-43 trajectory admission
 
-The exact named 70-row comparison against
-`phase3/merge_main_2026-09-17/after2/ladder.json` registers 53 moved endpoint
-rows.  The extended 954-row comparison against the matching preserved
+The landing's own-base arm is
+`phase3/round110/before_same_tip_51a4d088c/{ladder.json,day_gap.json}`.  The
+operator measured it at the exact incoming commit and found it bit-identical
+to `phase3/merge_main_2026-09-17/after2/` in all 50 ladder rows, 210 arrays,
+and all 30 daily states.  Thus the 179.914933 factor is a one-variable
+before/after result, not a cross-tip inference.  The exact named 70-row
+comparison registers 53 moved endpoint rows.  The extended 954-row comparison
+against the matching preserved
 extended before instrument registers 82 moved rows, 59 with at least one
 greater-than-two-row-ULP worsening.  That old Rule-12 comparison therefore
 fails, as Decision 43 explicitly permits for kt >= 2; this receipt does not
@@ -166,8 +171,10 @@ The 30-day after values for the other required state fields are: S
 `1.1781247458573714e-5`, u `5.579572380229224e-6`, v
 `4.620276844589294e-6`, and ssh `6.802771093693658e-6` in their native units.
 The daily T series is not monotone: it reaches `5.2839e-4` K on day 23 before
-returning to the day-30 value.  That spike is registered as open residual
-behavior, not hidden by the endpoint.
+returning to the day-30 value.  The operator's field/level audit identifies
+this as a physics trajectory, not an instrument artifact: T, S, u, and v
+co-spike in the upper 0--1000 m while ssh remains on trend.  The spike remains
+registered open behavior and is not hidden by the endpoint.
 
 All 82 extended moved rows follow.  “Improved” and “worsened” are cell counts
 against the common oracle; `>2-ULP` is the count that violates the superseded
@@ -260,22 +267,64 @@ AT-BAR.
 | `GYRE-zco.kt9.before.u` | `0.0020269816331771329` / 17,400 / DEBT | `2.9207515902711454e-05` / 17,400 / DEBT | `0.0020189026907110434` | 12,899 / 4,501 / 4,501 |
 | `GYRE-zco.kt9.before.v` | `0.0015707397392859292` / 17,100 / DEBT | `3.3940538973480962e-05` / 17,100 / DEBT | `0.0015751977745332279` | 11,600 / 5,500 / 5,500 |
 
-## Other cards and scope
+## Other cards and scope — Round-113 amendment
 
-The fail-closed card-resolution table in `candidate/decision43_gate.json` is:
+The original Round-110 table hard-coded five cards and omitted the certified
+generic NEMO-GYRE recipe.  It is superseded by the recipe-derived census from
+the amended Decision-43 gate:
 
 | card | tracer integrator / GM-Redi condition | executes this route | measured consequence |
 |---|---|---:|---|
 | GYRE-zco | `rk3_ws`, GM/Redi configured | yes | full ladder and 30 days above |
 | LOCK_EXCHANGE-zco | `rk3_ws`, no GM/Redi | no | condition false; no statement bit can move |
 | OVERFLOW-zps | `rk3_ws`, no GM/Redi | no | condition false; no statement bit can move |
+| `build_nemo_gyre_recipe()` | `rk3_ws`, GM/Redi configured | yes | measured at exact base `51a4d088c` and descendant `0e7c8c9e4`; all certified assertions pass on both arms; exact moves registered below |
 | DINO `nemo_dino_kamm` | Euler tracer lane, GM/Redi configured | no | route is outside executed lane |
 | DINO `nemo_dino_kamm_mlf` | Euler tracer lane, GM/Redi configured | no | route is outside executed lane |
 
+The generic card uses its existing certified deterministic three-step forced
+loop.  Its base and descendant artifacts are
+`phase3/round113/generic_card/{before_51a4d088c,after_0e7c8c9e4}.{json,npz}`;
+`comparison.json` registers all 15 field/step rows.  Both arms pass the same
+five assertions: all fields finite, bounded u/eta, and non-vacuous thermal and
+wind forcing.  Fourteen rows move:
+
+| row | unequal cells | maximum absolute move |
+|---|---:|---:|
+| step1 S | 12,370 | `1.22690245518697338e-7` |
+| step1 T | 17,831 | `1.29111745792442889e-5` |
+| step1 eta | 0 | `0` |
+| step1 u | 360 | `2.16840434497100887e-19` |
+| step1 v | 311 | `2.16840434497100887e-19` |
+| step2 S | 14,591 | `1.80391687365499820e-7` |
+| step2 T | 17,957 | `2.46658336102711928e-5` |
+| step2 eta | 600 | `4.87545617588840130e-8` |
+| step2 u | 17,400 | `1.32275851105756459e-8` |
+| step2 v | 17,100 | `2.98704303375307845e-8` |
+| step3 S | 16,439 | `7.84909794049326592e-7` |
+| step3 T | 17,998 | `3.82807321734901507e-5` |
+| step3 eta | 600 | `1.52569185909025122e-7` |
+| step3 u | 17,400 | `8.49594800067521305e-8` |
+| step3 v | 17,100 | `7.47595064742867521e-8` |
+
+The Round-113 preregistration correctly predicted the step-1 tracer movement
+and step-1 eta identity, but its prediction that step-1 u/v would be unchanged
+is **REFUTED** by 360/311 last-bit cells at `2.1684e-19`.  No certified bound
+worsens, so no re-baselining decision is needed.  Re-running Decision 43 with
+this card named as measured and with the explicit 53-row registry passes; a
+missing-registry-row plant exits 1 and prints `STATUS PLANT-FIRED`.
+
+The real-card control now observes the routed source through two full
+production steps (zero versus `0.125` GM/Redi sentinel), rather than inspecting
+source text.  Disabling the production guard makes that test fail with zero
+routed cells.  Replacing the exact registry predicate by the old
+`len(moved)>0` predicate likewise makes the missing-row test fail.  The mutant
+logs are under `phase3/round113/nonvacuity/`.
+
 Thus DINO does not share the exact landed statement and Decision 43 does not
-require a before/after DINO numerical run.  A regression test proves that the
-gate fails closed if either DINO card is changed to execute the route; merely
-setting `dino_measurement_required=true` cannot satisfy admission.
+require a before/after DINO numerical run.  The recipe-derived test still
+fails closed if either DINO card changes to the executing WS+GM/Redi lane;
+merely setting `dino_measurement_required=true` cannot satisfy admission.
 
 ORCA2 is **UNMEASURED-WITH-SPEC**.  Resolve its tracer time integrator and
 GM/Redi selection, then, from identical fp64 inputs, compare stage-3
