@@ -6,11 +6,11 @@ trajectory and no physics from this patch is present at the round-112 final
 tip.
 
 COMPILED STATEMENT. The active FCT program calls the two-step upstream
-routine at the record build's compiled traadv_fct.f90:167-178. That routine
-writes first u/v/w faces at :502-534, the first divergence and midpoint at
+routine at the record build's compiled traadv_fct.f90:167-176. That routine
+writes first u/v/w faces at :503-533, the first divergence and midpoint at
 :536-549, averaged faces at :572-608, and the final divergence plus divided
-Krhs at :609-623. The stage constructs metric-bearing horizontal and vertical
-transports at compiled stprk3_stg.f90:294-297 and :326-347 and passes them to
+Krhs at :611-623. The stage constructs metric-bearing horizontal and vertical
+transports at compiled stprk3_stg.f90:295-296 and :326-346 and passes them to
 tracer advection at :860. The candidate preserves these materialization and
 association boundaries and carries the already-divided concentration RHS into
 the stage-3 content update.
@@ -33,6 +33,20 @@ legoesm's own upstream stage state. T/S adv_up1 remain unequal in
 <=6.0e-8 / <=7.0e-9 forecast. The next walk must score each recorded FCT input
 against the live production input before changing another downstream
 statement.
+
+ROUND-113 LIVE-INPUT RESULT. The production-JIT walk scores only cells and
+faces consumed by the compiled statement while retaining separate full-domain
+dry diagnostics. Kbb T/S, Kbb thickness, tmask/wmask, reciprocal area, and
+p2dt are BIT. The first non-bit family is the transport triplet constructed at
+compiled stprk3_stg.f90:295-296,326-346: live U/V/W differ in
+17,400/17,100/17,400 consumed faces. Replacing only that triplet from the
+admitted record reduces direct adv_up1 T from 6.545655547452618e-11 to
+1.632720658269341e-16 s-1 and local kt3 T from 8.600420500215478e-7 to
+5.763797261693071e-8 K. It does not make adv_up1 BIT (18,000 wet words remain
+unequal), so this measurement assigns the magnitude upstream of this held
+downstream association patch; it does not revive or land the patch. A
+production-JIT one-ULP p_u plant changes both the injected transport and the
+consumed adv_up1 result and exits nonzero.
 
 DECISION-43 VETO. The full kt1-10 comparison registers 60/70 moved endpoint
 rows, no status change, no kt1 AT-BAR loss, and first-over-bar kt2 U/V on both
@@ -620,5 +634,4 @@ index b313766b9..f35e2807e 100644
  
  # ---------------------------------------------------------------------------
  # Monotonicity (no new extrema)
-
 
