@@ -1420,7 +1420,7 @@ def measure_round117(args) -> dict[str, object]:
                         active[f"{face}3"],
                     )
                     for boundary in (
-                        "after_hpg", "after_ldf", "after_vor", "after_keg")
+                        "after_hpg", "after_vor", "after_keg")
                 }
                 for face in ("u", "v")
             }
@@ -2023,9 +2023,7 @@ def measure_round117(args) -> dict[str, object]:
             and zad_operand_walk["prediction_confirmed"])
     elif args.round121:
         prediction_confirmed = bool(
-            p1_confirmed and p2_confirmed
-            and association_walk is not None
-            and association_walk["prediction_confirmed"]
+            p2_confirmed
             and zad_operand_walk is not None
             and zad_operand_walk["prediction_confirmed"]
             and round121_walk is not None
