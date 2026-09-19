@@ -1015,6 +1015,26 @@ def _round115_owned_geometry_bundle(
     }
     require(record["header"] == expected_header,
             "round-46 kt2/stage-3 header changed")
+    wet_t = cell2("tmask")[..., 0] > 0.5
+    wet_u_redundant = np.any(
+        np.asarray(arrays["umask"], dtype=np.float64)[
+            2:24, 1:34, :30] > 0.5,
+        axis=-1)
+    expected_shapes = {
+        "cell": (22, 32), "native_u": (22, 32),
+        "redundant_u": (22, 33), "native_u_3d": (22, 32, 30),
+    }
+    require(ssh_n1.shape == ssh_half.shape == area_t.shape
+            == wet_t.shape == expected_shapes["cell"],
+            "round-115 admitted T-cell operand shape changed")
+    require(r1_area_u.shape == r1_hu0.shape == r3u_before.shape
+            == r3u_full.shape == r3u_half.shape
+            == wet_u_native.shape == expected_shapes["native_u"],
+            "round-115 admitted native-U operand shape changed")
+    require(e3u_0.shape == umask.shape == expected_shapes["native_u_3d"],
+            "round-115 admitted native-U 3-D operand shape changed")
+    require(wet_u_redundant.shape == expected_shapes["redundant_u"],
+            "round-115 admitted redundant-U mask shape changed")
     return {
         "producer_commit": producer,
         "stage_sha256": _file_sha256(stage_path),
@@ -1039,12 +1059,9 @@ def _round115_owned_geometry_bundle(
         "r3u_full": r3u_full,
         "r3u_half": r3u_half,
         "one_plus_r3u_half": redundant_u2("r3u_Kmm") + np.float64(1.0),
-        "wet_t": cell2("tmask") > 0.5,
+        "wet_t": wet_t,
         "wet_u_native": wet_u_native,
-        "wet_u_redundant": np.any(
-            np.asarray(arrays["umask"], dtype=np.float64)[
-                2:24, 1:34, :30] > 0.5,
-            axis=-1),
+        "wet_u_redundant": wet_u_redundant,
         "scalar_trace": scalar_trace,
         "source_half": source_half,
         "plant_row": plant_row,
