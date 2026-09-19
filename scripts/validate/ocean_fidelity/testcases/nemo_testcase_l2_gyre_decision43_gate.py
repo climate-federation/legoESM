@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Decision-43 admission gate for magnitude-first GYRE landings.
+"""Decision-43/45 admission gate for magnitude-first GYRE landings.
 
 This gate consumes existing certified artifacts.  It does not run either
 model and it does not replace the oracle-relative ladder comparison.  It
 applies the temporary Decision-43 policy to that comparison and to the
-day-gap reports, then resolves whether the changed production statement is
-reachable on the other named cards.
+month/year day-gap reports, then resolves whether the changed production
+statement is reachable on the other named cards.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import copy
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 
@@ -23,9 +24,15 @@ from legoesm.core.precision import PrecisionPolicy, set_policy
 from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 
-FORMAT = "nemo-testcase-l2-gyre-decision43-v1"
+FORMAT = "nemo-testcase-l2-gyre-decision43-v2"
 COMPARISON_FORMAT = "legoesm-ocean-oracle-relative-move-gate-v3"
 DAY_GAP_FORMAT = "gyre-year-owners-day-gap-v1"
+YEAR_MEMBER_FORMAT = "nemo-testcase-l2-gyre-year-fromrest-member-v1"
+YEAR_DAYS = (30, 60, 90, 120, 180, 240, 300, 360)
+YEAR_TAG = "year"
+YEAR_DT_S = 14400.0
+YEAR_STEPS = 2160
+YEAR_SNAPSHOT_STEP_INTERVAL = 6
 
 
 class GateError(RuntimeError):
@@ -44,6 +51,111 @@ def _read(path: Path) -> dict:
     return value
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _load_year_owners():
+    path = Path(__file__).with_name("nemo_testcase_l2_gyre_year_owners.py")
+    spec = importlib.util.spec_from_file_location(
+        "_decision43_year_owners", path)
+    require(spec is not None and spec.loader is not None,
+            f"cannot import year scorer {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _admit_year_member(
+    root: Path,
+    *,
+    expected_commit: str,
+    label: str,
+) -> dict:
+    """Admit one Decision-45 seed-0 year member and its fp64 snapshots."""
+    member = root / f"lego_seed0_{YEAR_TAG}"
+    manifest_path = member / "manifest.json"
+    manifest = _read(manifest_path)
+    require(manifest.get("format") == YEAR_MEMBER_FORMAT,
+            f"{label}: unexpected member format {manifest.get('format')!r}")
+    expected = {
+        "case": "GYRE-zco",
+        "seed": 0,
+        "tag": YEAR_TAG,
+        "days": 360,
+        "steps": YEAR_STEPS,
+        "dt_s": YEAR_DT_S,
+        "snapshot_step_interval": YEAR_SNAPSHOT_STEP_INTERVAL,
+        "snapshot_days": list(range(1, 361)),
+    }
+    for key, value in expected.items():
+        require(manifest.get(key) == value,
+                f"{label}: manifest {key}={manifest.get(key)!r}, "
+                f"expected {value!r}")
+    stamp = manifest.get("worktree")
+    require(isinstance(stamp, dict), f"{label}: member worktree stamp absent")
+    require(stamp.get("clean") is True,
+            f"{label}: member producer worktree is dirty")
+    require(stamp.get("commit") == expected_commit,
+            f"{label}: member commit {stamp.get('commit')!r} does not match "
+            f"expected {expected_commit!r}")
+    required_fields = {"T", "S", "u", "v", "ssh"}
+    snapshot_hashes = {}
+    for day in YEAR_DAYS:
+        path = member / f"day{day:03d}.npz"
+        require(path.is_file(), f"{label}: missing year snapshot {path}")
+        with np.load(path) as arrays:
+            require(required_fields.issubset(arrays.files),
+                    f"{label}: {path} lacks a required state field")
+            for field in required_fields:
+                require(arrays[field].dtype == np.dtype(np.float64),
+                        f"{label}: {path}:{field} is {arrays[field].dtype}, "
+                        "expected float64")
+                require(np.all(np.isfinite(arrays[field])),
+                        f"{label}: {path}:{field} contains non-finite values")
+        snapshot_hashes[str(day)] = _sha256(path)
+    return {
+        "path": str(manifest_path),
+        "sha256": _sha256(manifest_path),
+        "record": manifest,
+        "snapshot_sha256": snapshot_hashes,
+    }
+
+
+def score_year_root(
+    root: Path,
+    nemo_root: Path,
+    *,
+    expected_commit: str,
+    label: str,
+) -> dict:
+    """Score the registered Decision-45 rows with the existing day-gap tool."""
+    admission = _admit_year_member(
+        root, expected_commit=expected_commit, label=label)
+    mesh_path = nemo_root / "nemo_seed0" / "mesh_mask.nc"
+    require(mesh_path.is_file(), f"{label}: missing NEMO mesh {mesh_path}")
+    report = _load_year_owners().day_gap(
+        lego_root=root,
+        lego_tag=YEAR_TAG,
+        nemo_root=nemo_root,
+        seed=0,
+        mesh_path=mesh_path,
+        days=YEAR_DAYS,
+    )
+    stamp = report.get("worktree")
+    require(isinstance(stamp, dict) and stamp.get("clean") is True,
+            f"{label}: year scorer worktree is dirty or unstamped")
+    report["member_admission"] = admission
+    report["nemo_root"] = str(nemo_root)
+    report["mesh_path"] = str(mesh_path)
+    report["mesh_sha256"] = _sha256(mesh_path)
+    return report
+
+
 def _day30(report: dict, label: str) -> dict:
     require(report.get("format") == DAY_GAP_FORMAT,
             f"{label}: unexpected format {report.get('format')!r}")
@@ -55,6 +167,34 @@ def _day30(report: dict, label: str) -> dict:
     require(isinstance(value, (int, float)),
             f"{label}: day-30 rms_T is not numeric")
     return matches[0]
+
+
+def _year_rows(report: dict, label: str, expected_commit: str) -> dict[int, dict]:
+    require(report.get("format") == DAY_GAP_FORMAT,
+            f"{label}: unexpected format {report.get('format')!r}")
+    require(report.get("seed") == 0, f"{label}: expected seed 0")
+    require(report.get("plant") is None, f"{label}: planted year report")
+    admission = report.get("member_admission")
+    require(isinstance(admission, dict), f"{label}: member admission absent")
+    manifest = admission.get("record")
+    require(isinstance(manifest, dict), f"{label}: member manifest absent")
+    stamp = manifest.get("worktree")
+    require(isinstance(stamp, dict), f"{label}: producer stamp absent")
+    require(stamp.get("clean") is True, f"{label}: producer is dirty")
+    require(stamp.get("commit") == expected_commit,
+            f"{label}: producer commit does not match expected commit")
+    rows = report.get("rows")
+    require(isinstance(rows, list), f"{label}: rows are absent")
+    require([row.get("day") for row in rows] == list(YEAR_DAYS),
+            f"{label}: year days are not exactly {list(YEAR_DAYS)}")
+    by_day = {}
+    for row in rows:
+        day = row["day"]
+        value = row.get("rms_T")
+        require(isinstance(value, (int, float)) and np.isfinite(value),
+                f"{label}: day {day} rms_T is not finite numeric")
+        by_day[day] = row
+    return by_day
 
 
 def _first_over_bar_kt(value: object, label: str) -> int | None:
@@ -290,8 +430,11 @@ def evaluate(
     comparison: dict,
     before_day_gap: dict,
     after_day_gap: dict,
+    before_year_gap: dict,
+    after_year_gap: dict,
     *,
     expected_candidate_commit: str,
+    expected_before_year_commit: str,
     route: str = "ldf_stage3",
     measured_cards: tuple[str, ...] = (),
     registered_rows: tuple[str, ...] = (),
@@ -300,6 +443,8 @@ def evaluate(
     comparison = copy.deepcopy(comparison)
     before_day_gap = copy.deepcopy(before_day_gap)
     after_day_gap = copy.deepcopy(after_day_gap)
+    before_year_gap = copy.deepcopy(before_year_gap)
+    after_year_gap = copy.deepcopy(after_year_gap)
 
     require(comparison.get("format") == COMPARISON_FORMAT,
             f"unexpected comparison format {comparison.get('format')!r}")
@@ -323,6 +468,10 @@ def evaluate(
 
     before30 = _day30(before_day_gap, "before day gap")
     after30 = _day30(after_day_gap, "after day gap")
+    before_year = _year_rows(
+        before_year_gap, "before year", expected_before_year_commit)
+    after_year = _year_rows(
+        after_year_gap, "after year", expected_candidate_commit)
     if plant == "day30-no-improvement":
         after30["rms_T"] = before30["rms_T"]
     elif plant == "earlier-first-over-bar":
@@ -335,8 +484,24 @@ def evaluate(
         })
     elif plant == "missing-moved-registry":
         registered_rows = registered_rows[1:]
+    elif plant == "year-day240-worse":
+        after_year[240]["rms_T"] = float(np.nextafter(
+            np.float64(before_year[240]["rms_T"]), np.float64(np.inf)))
     elif plant is not None:
         raise GateError(f"unknown plant {plant!r}")
+
+    year_rows = []
+    for day in YEAR_DAYS:
+        before_value = float(before_year[day]["rms_T"])
+        after_value = float(after_year[day]["rms_T"])
+        year_rows.append({
+            "day": day,
+            "before_T_rms": before_value,
+            "after_T_rms": after_value,
+            "delta_T_rms": after_value - before_value,
+            "not_worse": after_value <= before_value,
+        })
+    year_by_day = {row["day"]: row for row in year_rows}
 
     before_kt = _first_over_bar_kt(
         comparison.get("first_over_bar_reference"), "reference")
@@ -384,6 +549,12 @@ def evaluate(
 
     criteria = {
         "day30_T_rms_decreases": after30["rms_T"] < before30["rms_T"],
+        "month_and_year_day30_agree": bool(
+            before30["rms_T"] == before_year[30]["rms_T"]
+            and after30["rms_T"] == after_year[30]["rms_T"]),
+        "year_day240_T_rms_not_worse": year_by_day[240]["not_worse"],
+        "year_day360_T_rms_not_worse": year_by_day[360]["not_worse"],
+        "all_year_rows_registered": len(year_rows) == len(YEAR_DAYS),
         "first_over_bar_not_earlier": first_not_earlier,
         "no_kt1_at_bar_row_leaves": not kt1_losses,
         "all_moved_rows_registered": bool(
@@ -398,6 +569,10 @@ def evaluate(
     # use the Euler tracer lane.  Keep both booleans so the waiver is explicit.
     admissible = bool(
         criteria["day30_T_rms_decreases"]
+        and criteria["month_and_year_day30_agree"]
+        and criteria["year_day240_T_rms_not_worse"]
+        and criteria["year_day360_T_rms_not_worse"]
+        and criteria["all_year_rows_registered"]
         and criteria["first_over_bar_not_earlier"]
         and criteria["no_kt1_at_bar_row_leaves"]
         and criteria["all_moved_rows_registered"]
@@ -414,8 +589,11 @@ def evaluate(
         "executing_cards": executing_cards,
         "unmeasured_executing_cards": unmeasured_executing_cards,
         "expected_candidate_commit": expected_candidate_commit,
+        "expected_before_year_commit": expected_before_year_commit,
         "before_day30_T_rms": before30["rms_T"],
         "after_day30_T_rms": after30["rms_T"],
+        "year_days": list(YEAR_DAYS),
+        "year_rows": year_rows,
         "improvement_factor": (
             before30["rms_T"] / after30["rms_T"]
             if after30["rms_T"] != 0 else float("inf")),
@@ -438,6 +616,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--before-day-gap", type=Path)
     parser.add_argument("--after-day-gap", type=Path)
     parser.add_argument("--expect-candidate-commit")
+    parser.add_argument("--before-year-root", type=Path)
+    parser.add_argument("--after-year-root", type=Path)
+    parser.add_argument("--year-nemo-root", type=Path)
+    parser.add_argument("--expect-before-year-commit")
+    parser.add_argument("--year-measure-root", type=Path)
+    parser.add_argument("--expect-year-commit")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--generic-measure-snapshot", type=Path)
     parser.add_argument("--generic-before-report", type=Path)
@@ -453,9 +637,25 @@ def main(argv: list[str] | None = None) -> int:
         help="executing non-primary card discharged by a separate measurement")
     parser.add_argument("--plant", choices=(
         "day30-no-improvement", "earlier-first-over-bar", "kt1-at-bar-loss",
-        "missing-moved-registry"))
+        "missing-moved-registry", "year-day240-worse"))
     args = parser.parse_args(argv)
     try:
+        if args.year_measure_root is not None:
+            require(args.year_nemo_root is not None,
+                    "year measurement requires --year-nemo-root")
+            require(args.expect_year_commit is not None,
+                    "year measurement requires --expect-year-commit")
+            report = score_year_root(
+                args.year_measure_root,
+                args.year_nemo_root,
+                expected_commit=args.expect_year_commit,
+                label="year measurement",
+            )
+            args.output.write_text(
+                json.dumps(report, indent=2, sort_keys=True) + "\n")
+            print("STATUS PASS: Decision-45 year rows="
+                  + ",".join(str(day) for day in YEAR_DAYS))
+            return 0
         if args.generic_measure_snapshot is not None:
             report = measure_generic_nemo_gyre(args.generic_measure_snapshot)
             args.output.write_text(
@@ -478,14 +678,31 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if report["status"] == "PASS" else 1
         require(all(value is not None for value in (
             args.comparison, args.before_day_gap, args.after_day_gap,
-            args.expect_candidate_commit, args.moved_row_registry)),
+            args.expect_candidate_commit, args.moved_row_registry,
+            args.before_year_root, args.after_year_root,
+            args.year_nemo_root, args.expect_before_year_commit)),
             "Decision-43 admission requires comparison, day gaps, commit, "
-            "and --moved-row-registry")
+            "moved-row registry, and Decision-45 year roots")
+        before_year_gap = score_year_root(
+            args.before_year_root,
+            args.year_nemo_root,
+            expected_commit=args.expect_before_year_commit,
+            label="before year",
+        )
+        after_year_gap = score_year_root(
+            args.after_year_root,
+            args.year_nemo_root,
+            expected_commit=args.expect_candidate_commit,
+            label="after year",
+        )
         report = evaluate(
             _read(args.comparison),
             _read(args.before_day_gap),
             _read(args.after_day_gap),
+            before_year_gap,
+            after_year_gap,
             expected_candidate_commit=args.expect_candidate_commit,
+            expected_before_year_commit=args.expect_before_year_commit,
             route=args.route,
             measured_cards=tuple(args.measured_card),
             registered_rows=_read_moved_row_registry(
@@ -502,9 +719,14 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"STATUS REFUSE: plant {args.plant} did not make the gate fail")
         return 2
+    year_by_day = {row["day"]: row for row in report["year_rows"]}
     print(f"STATUS {report['status']}: moved_rows={report['moved_row_count']} "
           f"day30_T={report['before_day30_T_rms']:.17e}->"
-          f"{report['after_day30_T_rms']:.17e}")
+          f"{report['after_day30_T_rms']:.17e} "
+          f"day240_T={year_by_day[240]['before_T_rms']:.17e}->"
+          f"{year_by_day[240]['after_T_rms']:.17e} "
+          f"day360_T={year_by_day[360]['before_T_rms']:.17e}->"
+          f"{year_by_day[360]['after_T_rms']:.17e}")
     return 0 if report["status"] == "PASS" else 1
 
 

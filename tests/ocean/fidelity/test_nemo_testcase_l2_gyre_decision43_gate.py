@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
+
+import numpy as np
+import pytest
 
 
 SCRIPT = (
@@ -24,6 +28,22 @@ def _day(value: float, commit: str = "c" * 40):
         "format": "gyre-year-owners-day-gap-v1",
         "rows": [{"day": 30, "rms_T": value}],
         "worktree": {"clean": True, "commit": commit},
+    }
+
+
+def _year(value: float, commit: str):
+    return {
+        "format": "gyre-year-owners-day-gap-v1",
+        "seed": 0,
+        "plant": None,
+        "rows": [
+            {"day": day, "rms_T": value}
+            for day in (30, 60, 90, 120, 180, 240, 300, 360)
+        ],
+        "member_admission": {
+            "record": {"worktree": {"clean": True, "commit": commit}},
+        },
+        "worktree": {"clean": True, "commit": "c" * 40},
     }
 
 
@@ -70,13 +90,17 @@ def test_decision43_passes_only_for_a_month_improvement(monkeypatch):
     monkeypatch.setattr(module, "_card_execution", lambda route: _cards())
     report = module.evaluate(
         _comparison(), _day(1.0), _day(0.1),
+        _year(1.0, "b" * 40), _year(0.1, "c" * 40),
         expected_candidate_commit="c" * 40,
+        expected_before_year_commit="b" * 40,
         registered_rows=_registry())
     assert report["status"] == "PASS"
     assert report["moved_row_count"] == 1
     failed = module.evaluate(
         _comparison(), _day(1.0), _day(1.0),
+        _year(1.0, "b" * 40), _year(1.0, "c" * 40),
         expected_candidate_commit="c" * 40,
+        expected_before_year_commit="b" * 40,
         registered_rows=_registry())
     assert failed["status"] == "FAIL"
 
@@ -88,24 +112,30 @@ def test_shared_dino_statement_requires_a_separate_measured_gate(monkeypatch):
     monkeypatch.setattr(module, "_card_execution", lambda route: cards)
     report = module.evaluate(
         _comparison(), _day(1.0), _day(0.1),
+        _year(1.0, "b" * 40), _year(0.1, "c" * 40),
         expected_candidate_commit="c" * 40,
+        expected_before_year_commit="b" * 40,
         registered_rows=_registry())
     assert report["status"] == "FAIL"
     assert report["criteria"]["dino_measurement_required"] is True
     assert report["criteria"]["dino_statement_not_executed"] is False
 
 
-def test_all_three_plants_fail_the_gate(monkeypatch):
+def test_all_admission_plants_fail_the_gate(monkeypatch):
     module = _module()
     monkeypatch.setattr(module, "_card_execution", lambda route: _cards())
     for plant in (
             "day30-no-improvement", "earlier-first-over-bar",
-            "kt1-at-bar-loss"):
+            "kt1-at-bar-loss", "year-day240-worse"):
         report = module.evaluate(
             _comparison(), _day(1.0), _day(0.1),
+            _year(1.0, "b" * 40), _year(0.1, "c" * 40),
             expected_candidate_commit="c" * 40,
+            expected_before_year_commit="b" * 40,
             registered_rows=_registry(), plant=plant)
         assert report["status"] == "FAIL", plant
+        if plant == "year-day240-worse":
+            assert report["criteria"]["year_day240_T_rms_not_worse"] is False
 
 
 def test_moved_row_registry_is_exact_and_missing_entry_fails(monkeypatch):
@@ -122,12 +152,16 @@ def test_moved_row_registry_is_exact_and_missing_entry_fails(monkeypatch):
     complete = _registry(comparison)
     passed = module.evaluate(
         comparison, _day(1.0), _day(0.1),
+        _year(1.0, "b" * 40), _year(0.1, "c" * 40),
         expected_candidate_commit="c" * 40,
+        expected_before_year_commit="b" * 40,
         registered_rows=complete)
     assert passed["criteria"]["all_moved_rows_registered"] is True
     missing = module.evaluate(
         comparison, _day(1.0), _day(0.1),
+        _year(1.0, "b" * 40), _year(0.1, "c" * 40),
         expected_candidate_commit="c" * 40,
+        expected_before_year_commit="b" * 40,
         registered_rows=complete[:-1])
     assert missing["status"] == "FAIL"
     assert missing["missing_registered_rows"] == [complete[-1]]
@@ -160,13 +194,54 @@ def test_fct_metric_route_is_derived_from_every_recipe_and_fails_unmeasured():
 
     report = module.evaluate(
         _comparison(), _day(1.0), _day(0.1),
+        _year(1.0, "b" * 40), _year(0.1, "c" * 40),
         expected_candidate_commit="c" * 40,
+        expected_before_year_commit="b" * 40,
         route="fct_metric_upstream", registered_rows=_registry())
     assert report["status"] == "FAIL"
     assert report["unmeasured_executing_cards"] == ["NEMO-GYRE-recipe"]
     measured = module.evaluate(
         _comparison(), _day(1.0), _day(0.1),
+        _year(1.0, "b" * 40), _year(0.1, "c" * 40),
         expected_candidate_commit="c" * 40,
+        expected_before_year_commit="b" * 40,
         route="fct_metric_upstream",
         measured_cards=("NEMO-GYRE-recipe",), registered_rows=_registry())
     assert measured["status"] == "PASS"
+
+
+def test_year_member_admission_requires_the_registered_harness_and_fp64(
+        tmp_path):
+    module = _module()
+    root = tmp_path / "year"
+    member = root / "lego_seed0_year"
+    member.mkdir(parents=True)
+    commit = "d" * 40
+    manifest = {
+        "format": "nemo-testcase-l2-gyre-year-fromrest-member-v1",
+        "case": "GYRE-zco",
+        "seed": 0,
+        "tag": "year",
+        "days": 360,
+        "steps": 2160,
+        "dt_s": 14400.0,
+        "snapshot_step_interval": 6,
+        "snapshot_days": list(range(1, 361)),
+        "worktree": {"clean": True, "commit": commit},
+    }
+    (member / "manifest.json").write_text(json.dumps(manifest))
+    fields = {
+        name: np.ones((1,), dtype=np.float64)
+        for name in ("T", "S", "u", "v", "ssh")
+    }
+    for day in module.YEAR_DAYS:
+        np.savez(member / f"day{day:03d}.npz", **fields)
+    admitted = module._admit_year_member(
+        root, expected_commit=commit, label="test")
+    assert set(admitted["snapshot_sha256"]) == {
+        str(day) for day in module.YEAR_DAYS}
+
+    fields["T"] = np.ones((1,), dtype=np.float32)
+    np.savez(member / "day240.npz", **fields)
+    with pytest.raises(module.GateError, match="expected float64"):
+        module._admit_year_member(root, expected_commit=commit, label="test")
