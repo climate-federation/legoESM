@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
@@ -16,6 +17,7 @@ if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
 import nemo_testcase_l2_gyre_phase3_gate as gate  # noqa: E402
+import nemo_testcase_l2_gyre_round46_kt2_stage_gate as round46  # noqa: E402
 import nemo_testcase_l2_gyre_round78_uamid_walk as round78  # noqa: E402
 import nemo_testcase_l2_gyre_round81_btstep_gate as round81  # noqa: E402
 from legoesm.core.precision import (  # noqa: E402
@@ -24,9 +26,15 @@ from legoesm.core.precision import (  # noqa: E402
     set_policy,
 )
 from legoesm.ocean.fidelity.provenance import worktree_stamp  # noqa: E402
+from legoesm.ocean.dynamics import (  # noqa: E402
+    ocean_model_latlon_cgrid as model_module,
+)
 
 ROOT = Path("/data/abyssal/dbalwada/nemo-testcases-l2/phase3")
 RECORD_COMMIT = "295a42edc9d9f45707a5349097e7a0183f57463c"
+STAGE_ROOT = ROOT / "round46/oracle_kt2_stage"
+ENTRY_ROOT = ROOT / "round75/oracle_advmean_kt2"
+STAGE_CLOSURE_ROOT = ROOT / "round94/oracle_stage_closure"
 
 TRACE_KEYS = {
     "u_b": "u_history_b",
@@ -91,6 +99,273 @@ def _native(trace, record_name: str) -> np.ndarray:
     return gate._trace_native(trace[key], key)
 
 
+def _execute_step(model, state, dt, freshwater, surface, execution_mode: str):
+    """Run the complete production closure with or without production JIT."""
+    require(
+        execution_mode in ("production-jit", "production-eager"),
+        f"unknown execution mode {execution_mode!r}",
+    )
+    if execution_mode == "production-jit":
+        return model.step(
+            state, dt, freshwater=freshwater, surface_forcing=surface)
+    state = jax.tree_util.tree_map(
+        lambda value: jnp.asarray(value)
+        if isinstance(value, (np.ndarray, np.generic)) else value,
+        state,
+    )
+    freshwater = jax.tree_util.tree_map(
+        lambda value: jnp.asarray(value)
+        if isinstance(value, (np.ndarray, np.generic)) else value,
+        freshwater,
+    )
+    surface = jax.tree_util.tree_map(
+        lambda value: jnp.asarray(value)
+        if isinstance(value, (np.ndarray, np.generic)) else value,
+        surface,
+    )
+    state = model._seed_tke_preclosure_carry(state)
+    model.prime_step_caches(state)
+    with jax.disable_jit():
+        return model_module.LatLonCGridOceanModel._step_jitted.__wrapped__(
+            model, state, dt, freshwater, surface)
+
+
+def _context(args, *, expose_live_stage_operands: bool = False,
+             stage_barotropic_output_override=None):
+    """Reuse the admitted kt=2 bridge, then execute one complete closure."""
+    base, context = round78.round72._capture_seeded_context(args)
+    card, seeded, freshwater, surface, _ = context
+    hooks = model_module._NEMOWSRK3TestHooks(
+        expose_barotropic_substeps=not expose_live_stage_operands,
+        expose_live_stage_operands=expose_live_stage_operands,
+        stage_barotropic_output_override=stage_barotropic_output_override,
+    )
+    model = model_module.LatLonCGridOceanModel(
+        card.recipe.grid,
+        card.recipe.z_coord,
+        card.recipe.model_config,
+        _nemo_ws_test_hooks=hooks,
+    )
+    model.prime_step_caches(seeded)
+    trace = jax.device_get(_execute_step(
+        model, seeded, card.dt_s, freshwater, surface, args.execution_mode))
+    return base, card, seeded, freshwater, surface, trace
+
+
+def _isolated_jit_replay(fields: dict) -> dict[str, np.ndarray]:
+    """JIT the record-local written expressions; this is not production."""
+    names = round81.ARRAY_FIELDS
+
+    @jax.jit
+    def replay(mid, back, dt_s, *values):
+        arrays = dict(zip(names, values, strict=True))
+        u_mid = ((mid[:, 0, None, None] * arrays["u_entry"]
+                  + mid[:, 1, None, None] * arrays["u_b"])
+                 + mid[:, 2, None, None] * arrays["u_bb"])
+        v_mid = ((mid[:, 0, None, None] * arrays["v_entry"]
+                  + mid[:, 1, None, None] * arrays["v_b"])
+                 + mid[:, 2, None, None] * arrays["v_bb"])
+        eta_mid = ((mid[:, 0, None, None] * arrays["eta_entry"]
+                    + mid[:, 1, None, None] * arrays["eta_b"])
+                   + mid[:, 2, None, None] * arrays["eta_bb"])
+        eta_continuity = (
+            arrays["eta_entry"]
+            - dt_s * (arrays["ssh_forcing"] + arrays["continuity_div"])
+        ) * jnp.asarray(fields["t_mask"])[None, ...]
+        eta_pgf = (
+            back[:, 0, None, None] * eta_continuity
+            + back[:, 1, None, None] * arrays["eta_entry"]
+            + back[:, 2, None, None] * arrays["eta_b"]
+            + back[:, 3, None, None] * arrays["eta_bb"]
+        )
+        trd_u = arrays["cor_u"] + (
+            arrays["drag_coefficient_u"] * arrays["u_entry"]
+            * arrays["inverse_depth_u"])
+        trd_v = arrays["cor_v"] + (
+            arrays["drag_coefficient_v"] * arrays["v_entry"]
+            * arrays["inverse_depth_v"])
+        u_exit = (
+            arrays["u_entry"]
+            + dt_s * (arrays["pgf_u"] + trd_u + arrays["slow_u"])
+        ) * jnp.asarray(fields["u_mask"])[None, ...]
+        v_exit = (
+            arrays["v_entry"]
+            + dt_s * (arrays["pgf_v"] + trd_v + arrays["slow_v"])
+        ) * jnp.asarray(fields["v_mask"])[None, ...]
+        return {
+            "u_mid": u_mid, "v_mid": v_mid, "eta_mid": eta_mid,
+            "eta_continuity": eta_continuity, "eta_pgf": eta_pgf,
+            "trd_u": trd_u, "trd_v": trd_v,
+            "u_exit": u_exit, "v_exit": v_exit,
+            "swap_u": u_exit, "swap_v": v_exit,
+            "swap_eta": eta_continuity,
+        }
+
+    values = tuple(jnp.asarray(fields[name]) for name in names)
+    result = replay(
+        jnp.asarray(fields["mid_coefficients"]),
+        jnp.asarray(fields["back_coefficients"]),
+        jnp.asarray(fields["dt_s"]),
+        *values,
+    )
+    return {name: np.asarray(value) for name, value in jax.device_get(result).items()}
+
+
+def _isolated_rows(fields: dict, active: dict[str, np.ndarray]) -> list[dict]:
+    replay = _isolated_jit_replay(fields)
+    rows = []
+    for name, candidate in replay.items():
+        mask = np.broadcast_to(active[_stagger(name)], candidate.shape)
+        row = round78.comparison(candidate, fields[name], mask)
+        row["boundary"] = name
+        rows.append(row)
+    return rows
+
+
+def _stage_impact(args, card, seeded, freshwater, surface, external,
+                  oracle_eta: np.ndarray, masks: dict) -> dict:
+    """Score the one-variable N+1-SSH handoff through kt2 stage 3."""
+    require(args.execution_mode == "production-jit",
+            "stage impact is certified only under production JIT")
+    live = external.state_after_barotropic
+    live_tuple = (
+        jnp.asarray(oracle_eta), live.uu_b.data, live.vv_b.data,
+        external.transport_average[0], external.transport_average[1],
+    )
+
+    def run(override):
+        hooks = model_module._NEMOWSRK3TestHooks(
+            expose_live_stage_operands=True,
+            stage_barotropic_output_override=override,
+        )
+        model = model_module.LatLonCGridOceanModel(
+            card.recipe.grid, card.recipe.z_coord,
+            card.recipe.model_config, _nemo_ws_test_hooks=hooks)
+        model.prime_step_caches(seeded)
+        return jax.device_get(_execute_step(
+            model, seeded, card.dt_s, freshwater, surface,
+            "production-jit"))
+
+    ordinary = run(None)
+    directed = run(live_tuple)
+    stage = round46.read_stage(
+        args.stage_root / "oracle_momstage_kt00000002_s3.bin",
+        expected_kt=2, expected_stage=3)
+    next_entry = gate.read_entry(
+        args.entry_root / "oracle_step_entry_kt00000003.bin")
+    header = stage["header"]
+    transport = gate.read_transport(
+        args.stage_closure_root / "oracle_tracer_transport_kt00000002_s3.bin",
+        3, expected_kt=2,
+        expected_slots=tuple(
+            header[name] for name in ("Kbb", "Kmm", "Kaa", "Krhs")),
+    )
+    area = np.asarray(card.recipe.grid.area_T)
+
+    def values(trace):
+        geometry = trace.stage_geometry[2]
+        output = trace.stage_outputs[2]
+        return {
+            "zFu": np.asarray(geometry[7])[:, 1:, :],
+            "zFv": np.asarray(geometry[8])[1:, :, :],
+            "zFw": np.asarray(geometry[2]) * area[..., None],
+            "T": np.asarray(output[2]),
+            "S": np.asarray(output[3]),
+        }
+
+    refs = {
+        "zFu": np.asarray(transport["zFu"])[..., :30],
+        "zFv": np.asarray(transport["zFv"])[..., :30],
+        "zFw": np.asarray(transport["zFw"])[..., :31],
+        "T": np.asarray(next_entry["T"])[..., :30],
+        "S": np.asarray(next_entry["S"])[..., :30],
+    }
+    active = {
+        "zFu": masks["u"], "zFv": masks["v"],
+        "zFw": round46._owned3(stage["arrays"]["wmask"], 31) > 0.5,
+        "T": masks["T"], "S": masks["S"],
+    }
+    ordinary_values = values(ordinary)
+    directed_values = values(directed)
+    rows = {}
+    moved = {}
+    for name in ("zFu", "zFv", "zFw", "T", "S"):
+        require(
+            ordinary_values[name].shape == directed_values[name].shape
+            == refs[name].shape == active[name].shape,
+            f"stage-impact {name} extents disagree",
+        )
+        rows[name] = {
+            "ordinary": round78.comparison(
+                ordinary_values[name], refs[name], active[name]),
+            "record_directed_ssh": round78.comparison(
+                directed_values[name], refs[name], active[name]),
+        }
+        moved[name] = round78.comparison(
+            directed_values[name], ordinary_values[name], active[name])
+    return {
+        "intervention": (
+            "replace only weighted external N+1 SSH; retain live uu_b, vv_b, "
+            "Hu_avg, and Hv_avg"),
+        "rows": rows,
+        "directed_vs_ordinary": moved,
+    }
+
+
+def _handoff_plant_control(args, oracle_eta: np.ndarray,
+                           active_t: np.ndarray) -> dict:
+    """One-ULP final-SSH control through the shared production QCO helper."""
+    stage = round46.read_stage(
+        args.stage_root / "oracle_momstage_kt00000002_s3.bin",
+        expected_kt=2, expected_stage=3)
+    arrays = stage["arrays"]
+
+    def owned3(name):
+        return round46._owned3(arrays[name], 31)
+
+    e3u_0 = owned3("e3u_0")
+    e3v_0 = owned3("e3v_0")
+    umask = owned3("umask")
+    vmask = owned3("vmask")
+    hu_0 = np.sum(e3u_0 * umask, axis=-1, dtype=np.float64)
+    hv_0 = np.sum(e3v_0 * vmask, axis=-1, dtype=np.float64)
+    area_t = round46._owned2(arrays["e1e2t"])
+    area_u = round46._owned2(arrays["e1e2u"])
+    area_v = round46._owned2(arrays["e1e2v"])
+    require(oracle_eta.shape == active_t.shape == area_t.shape,
+            "handoff plant T-cell extents disagree")
+    location = tuple(int(value) for value in np.argwhere(
+        active_t & np.isfinite(oracle_eta))[0])
+    planted = np.array(oracle_eta, copy=True)
+    before_bits = int(planted[location].view(np.uint64))
+    planted[location] = np.nextafter(
+        planted[location], np.float64(np.inf))
+    after_bits = int(planted[location].view(np.uint64))
+
+    @jax.jit
+    def ratio(eta):
+        result = model_module.nemo_qco_live_face_geometry_from_operands(
+            eta, e3u_0, e3v_0, umask, vmask, hu_0, hv_0,
+            area_t, area_u, area_v)
+        return result.r3u
+
+    ordinary_ratio = np.asarray(jax.device_get(ratio(jnp.asarray(oracle_eta))))
+    planted_ratio = np.asarray(jax.device_get(ratio(jnp.asarray(planted))))
+    active_u = np.any(umask > 0.5, axis=-1)
+    ssh_row = round78.comparison(planted, oracle_eta, active_t)
+    ratio_row = round78.comparison(planted_ratio, ordinary_ratio, active_u)
+    return {
+        "location": list(location),
+        "before_bits": before_bits,
+        "after_bits": after_bits,
+        "ssh_delta": ssh_row,
+        "derived_r3u_delta": ratio_row,
+        "fires": bool(
+            ssh_row["differing_cells"] == 1
+            and ratio_row["differing_cells"] > 0),
+    }
+
+
 def _face_replay_from_live_cells(trace) -> tuple[np.ndarray, np.ndarray]:
     """Replay compiled dyn_drg_init's two face averages from its live input."""
     cell = np.asarray(trace["drag_coefficient_t"], dtype=np.float64)
@@ -148,11 +423,13 @@ def measure(args) -> dict:
     require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
     require(not bool(jax.config.jax_disable_jit), "production JIT is disabled")
     stamp = worktree_stamp()
-    require(stamp["clean"], "Round-82 measurement worktree is dirty")
-    require(stamp["commit"] == args.expect_commit, "Round-82 measurement commit mismatch")
+    require(stamp["clean"], "Round-116 measurement worktree is dirty")
+    require(stamp["commit"].lower() == args.expect_commit.lower(),
+            "Round-116 measurement commit mismatch")
 
     fields = _admit(args)
-    base, card, _seeded, captured = round78._context(args)
+    (base, card, seeded, freshwater, surface,
+     captured) = _context(args)
     require(base["status"] == "MEASURED", "inherited kt=2 seeded context changed")
     trace = captured.substeps
     masks = gate.expected_masks(card)
@@ -202,7 +479,18 @@ def measure(args) -> dict:
         f"back coefficient shape mismatch: {live_back.shape} != {oracle_back.shape}",
     )
 
+    next_entry = gate.read_entry(
+        args.entry_root / "oracle_step_entry_kt00000003.bin")
+    oracle_final_eta = np.asarray(next_entry["ssh"], dtype=np.float64)
+    live_final_eta = np.asarray(
+        captured.state_after_barotropic.eta.data, dtype=np.float64)
+    require(oracle_final_eta.shape == live_final_eta.shape == active["t"].shape,
+            "weighted final SSH/next-entry extents disagree")
+    final_ssh = round78.comparison(
+        live_final_eta, oracle_final_eta, active["t"])
+
     plant_detail = None
+    handoff_plant = None
     ordinary_slow_u = round78.comparison(
         live_arrays["slow_u"][0], oracle_arrays["slow_u"][0], active["u"])
     if args.plant == "history-ulp":
@@ -233,6 +521,17 @@ def measure(args) -> dict:
         require(not ordinary["bit_exact"], "null slow-U plant target is already exact")
         oracle_arrays["slow_u"][0] = live_arrays["slow_u"][0]
         plant_detail = {"field": "slow_u", "substep": 1}
+    elif args.plant == "handoff-ssh-ulp":
+        require(args.execution_mode == "production-jit",
+                "handoff plant requires the production JIT")
+        handoff_plant = _handoff_plant_control(
+            args, oracle_final_eta, active["t"])
+        plant_detail = {
+            "field": "weighted_final_ssh",
+            "location": handoff_plant["location"],
+            "before_bits": handoff_plant["before_bits"],
+            "after_bits": handoff_plant["after_bits"],
+        }
 
     scalar_mask = np.ones((), dtype=bool)
     rows = []
@@ -272,6 +571,9 @@ def measure(args) -> dict:
         and first is not None
         and first["substep"] == 1
         and first["boundary"] in {"slow_u", "slow_v"}
+        and final_ssh["differing_cells"] == 600
+        and np.float64(7.0e-7) <= final_ssh["absolute_max"]
+        <= np.float64(7.2e-7)
     )
     plant_fires = False
     if args.plant == "history-ulp":
@@ -280,12 +582,22 @@ def measure(args) -> dict:
         plant_fires = rows[0]["slow_u"] != ordinary_slow_u
     elif args.plant == "null-slow-u":
         plant_fires = rows[0]["slow_u"]["bit_exact"]
+    elif args.plant == "handoff-ssh-ulp":
+        plant_fires = bool(handoff_plant and handoff_plant["fires"])
+
+    isolated_rows = _isolated_rows(fields, active)
+    stage_impact = None
+    if args.execution_mode == "production-jit" and args.plant == "none":
+        stage_impact = _stage_impact(
+            args, card, seeded, freshwater, surface, captured,
+            oracle_final_eta, masks)
 
     return {
-        "format": "nemo-testcase-l2-gyre-round82-btstep-walk-v1",
+        "format": "nemo-testcase-l2-gyre-round116-btstep-walk-v2",
         "status": "CONFIRMED" if prediction_confirmed else "REFUTED",
         "worktree": stamp,
-        "execution_regime": "production-jit-cpu-fp64-x64-libm",
+        "execution_regime": (
+            args.execution_mode + "-cpu-fp64-x64-libm"),
         "record_commit": RECORD_COMMIT,
         "record_sha256": round81.sha256(args.record_root / round81.RECORD),
         "record_size": round81.EXPECTED_SIZE,
@@ -293,15 +605,22 @@ def measure(args) -> dict:
         "dtype": {"record": str(fields["u_entry"].dtype),
                   "live": str(live_arrays["u_entry"].dtype)},
         "first_non_bit_statement": first,
+        "weighted_final_ssh_vs_next_entry": final_ssh,
         "drag_face_statement_on_live_cell_input": {
             "u": round78.comparison(
                 replay_drag_u, oracle_arrays["drag_coefficient_u"][0], active["u"]),
             "v": round78.comparison(
                 replay_drag_v, oracle_arrays["drag_coefficient_v"][0], active["v"]),
         },
+        "isolated_jit_replay": {
+            "label": "isolated-closure JIT; not production",
+            "rows": isolated_rows,
+        },
+        "stage3_record_directed_ssh_impact": stage_impact,
         "rows": rows,
         "plant": args.plant,
         "plant_detail": plant_detail,
+        "handoff_plant_control": handoff_plant,
         "plant_fires": plant_fires,
     }
 
@@ -320,8 +639,18 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--admission", type=Path,
         default=ROOT / "round81/oracle_btstep_kt2/round81_admission.json")
+    parser.add_argument("--stage-root", type=Path, default=STAGE_ROOT)
+    parser.add_argument("--entry-root", type=Path, default=ENTRY_ROOT)
     parser.add_argument(
-        "--plant", choices=("none", "history-ulp", "slow-u-ulp", "null-slow-u"),
+        "--stage-closure-root", type=Path, default=STAGE_CLOSURE_ROOT)
+    parser.add_argument(
+        "--execution-mode",
+        choices=("production-jit", "production-eager"),
+        default="production-jit")
+    parser.add_argument(
+        "--plant", choices=(
+            "none", "history-ulp", "slow-u-ulp", "null-slow-u",
+            "handoff-ssh-ulp"),
         default="none")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -333,12 +662,12 @@ def main(argv=None) -> int:
         return 1
     if args.plant != "none":
         print(
-            f"ROUND82 {args.plant.upper()} PLANT "
-            f"{'FIRED' if report['plant_fires'] else 'STAYED_GREEN'}"
+            f"ROUND116 {args.plant.upper()} PLANT STATUS "
+            f"{'PLANT-FIRED' if report['plant_fires'] else 'PLANT-INERT'}"
         )
         return 1
     print(
-        f"ROUND82 BTSTEP {report['status']}: "
+        f"ROUND116 BTSTEP {report['status']}: "
         f"first={report['first_non_bit_statement']}"
     )
     return 0 if report["status"] == "CONFIRMED" else 1

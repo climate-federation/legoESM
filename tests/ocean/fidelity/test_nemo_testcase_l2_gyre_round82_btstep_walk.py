@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -50,3 +51,69 @@ def test_face_replay_uses_live_cell_coefficient_without_reassociation() -> None:
         got_u, np.array([[1.5, 3.0, 2.5], [12.0, 24.0, 20.0]]))
     np.testing.assert_array_equal(
         got_v, np.array([[4.5, 9.0, 18.0], [4.5, 9.0, 18.0]]))
+
+
+def test_isolated_jit_replay_keeps_written_boundaries_distinct() -> None:
+    shape = (2, 1, 1)
+    fields = {
+        name: np.zeros(shape, dtype=np.float64)
+        for name in WALK.round81.ARRAY_FIELDS
+    }
+    fields.update({
+        "mid_coefficients": np.array(
+            [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=np.float64),
+        "back_coefficients": np.array(
+            [[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]],
+            dtype=np.float64),
+        "dt_s": np.float64(1.0),
+        "t_mask": np.ones((1, 1), dtype=np.float64),
+        "u_mask": np.ones((1, 1), dtype=np.float64),
+        "v_mask": np.ones((1, 1), dtype=np.float64),
+    })
+    fields["u_entry"].fill(1.0)
+    fields["v_entry"].fill(2.0)
+    fields["eta_entry"].fill(5.0)
+    fields["ssh_forcing"].fill(1.0)
+    fields["continuity_div"].fill(1.0)
+    fields["pgf_u"].fill(1.0)
+    fields["pgf_v"].fill(1.0)
+    fields["cor_u"].fill(1.0)
+    fields["cor_v"].fill(1.0)
+    fields["drag_coefficient_u"].fill(2.0)
+    fields["drag_coefficient_v"].fill(2.0)
+    fields["inverse_depth_u"].fill(1.0)
+    fields["inverse_depth_v"].fill(1.0)
+    fields["slow_u"].fill(1.0)
+    fields["slow_v"].fill(1.0)
+
+    got = WALK._isolated_jit_replay(fields)
+
+    assert set(got) == {
+        "u_mid", "v_mid", "eta_mid", "eta_continuity", "eta_pgf",
+        "trd_u", "trd_v", "u_exit", "v_exit",
+        "swap_u", "swap_v", "swap_eta",
+    }
+    np.testing.assert_array_equal(got["u_mid"], np.full(shape, 1.0))
+    np.testing.assert_array_equal(got["v_mid"], np.full(shape, 2.0))
+    np.testing.assert_array_equal(got["eta_continuity"], np.full(shape, 3.0))
+    np.testing.assert_array_equal(got["trd_u"], np.full(shape, 3.0))
+    np.testing.assert_array_equal(got["u_exit"], np.full(shape, 6.0))
+    np.testing.assert_array_equal(got["swap_eta"], np.full(shape, 3.0))
+
+
+def test_handoff_ulp_control_reaches_shared_qco_ratio() -> None:
+    stage = WALK.round46.read_stage(
+        WALK.STAGE_ROOT / "oracle_momstage_kt00000002_s3.bin",
+        expected_kt=2, expected_stage=3)
+    entry = WALK.gate.read_entry(
+        WALK.ENTRY_ROOT / "oracle_step_entry_kt00000003.bin")
+    active = WALK.round46._owned3(stage["arrays"]["tmask"])[..., 0] > 0.5
+
+    control = WALK._handoff_plant_control(
+        SimpleNamespace(stage_root=WALK.STAGE_ROOT),
+        np.asarray(entry["ssh"], dtype=np.float64), active)
+
+    assert control["after_bits"] == control["before_bits"] + 1
+    assert control["ssh_delta"]["differing_cells"] == 1
+    assert control["derived_r3u_delta"]["differing_cells"] > 0
+    assert control["fires"] is True
