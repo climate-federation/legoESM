@@ -25,7 +25,7 @@ The operator's 112,560-byte pre-loop record is complete and usable.  Round
 117's 127,408-byte expectation had reversed the compiled extents: the record
 contains six full-domain arrays and twelve owned-domain arrays.  The compiled
 writer lists all 18 fields, then writes direct Coriolis and final forcing at
-`GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynspg_ts.f90:319-345`.
+`GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynspg_ts.f90:329-345`.
 Round 118 retracts the old arithmetic in the Round-117 receipt and tool,
 parses physical EOF, and admits the existing run without invoking `makenemo`
 or `mpirun` again.
@@ -45,8 +45,8 @@ The same-run NEMO input chain closes: the inherited Round-46 `after_adv`
 snapshot equals the Round-117 direct `Krhs` BIT, and NEMO's vertical mean,
 drag, wind, and pre-loop subtract replay BIT for both faces.  Those executing
 statements are the vector-form vertical mean at
-`GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/stp2d.f90:220-232`, drag and
-wind at `GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/stp2d.f90:245-260`,
+`GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/stp2d.f90:222-230`, drag and
+wind at `GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/stp2d.f90:246-259`,
 and the copy/Coriolis/subtract sequence at
 `GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynspg_ts.f90:290-345`.
 Thus the `1e-11` incoming error is inherited from the 3-D momentum RHS; it is
@@ -55,7 +55,7 @@ subtract.
 
 The first non-bit statement boundary in the compiled 3-D source order is the
 shared accumulator immediately after `CALL dyn_ldf(...,Krhs)` and its writer
-at `GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/stp2d.f90:144-179`:
+at `GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/stp2d.f90:147-179`:
 HPG is BIT, then the after-LDF row differs everywhere wet at
 `2.5292467120726215e-14` U and `3.502735092670824e-14` V.  This names the
 first boundary, not an internal LDF owner.  The largest incremental mismatch
@@ -146,7 +146,7 @@ external-solver call.
 
 The compiled program calls and snapshots HPG, LDF, VOR, KEG, ZAD and ADV in
 that order at
-`GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/stp2d.f90:144-179`.
+`GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/stp2d.f90:147-179`.
 Given NEMO's admitted inputs, every downstream producer statement closes:
 
 | boundary | U unequal / wet; max | V unequal / wet; max |

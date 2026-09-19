@@ -28,7 +28,7 @@ record build's compiled writer shows six full `36x26` arrays (`puu_b`,
 `pvv_b`, the two masks, and `cor_u`/`cor_v`) and twelve owned `32x22` arrays
 (incoming U/V, eight ENE coefficients, and final U/V), not the reverse.  The
 write and the subsequently executed Coriolis/subtract statements are at
-`GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynspg_ts.f90:319-345`.
+`GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynspg_ts.f90:329-345`.
 Including the 48-byte header, the physical record is therefore exactly
 `112,560` bytes.  All 18 intended fields are present; this was a reader and
 shell-arithmetic defect, not a short NEMO write.
