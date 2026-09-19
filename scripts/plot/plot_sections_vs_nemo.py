@@ -225,6 +225,18 @@ def main() -> int:
     p.add_argument("--eq-lon-range", default="130,290",
                    help="Pacific longitude window for the equatorial section, "
                         "degrees east (0-360)")
+    p.add_argument("--lat-section", action="append", default=[],
+                   help="repeatable basin-resolved section, "
+                        "LAT:LON0,LON1:HALFWIDTH:LABEL (degrees east, 0-360). "
+                        "A global zonal mean cancels opposite-signed basin "
+                        "anomalies and south of 35S averages across "
+                        "continents, so a basin verdict needs its own window. "
+                        "There is deliberately NO DEFAULT window: the "
+                        "longitude span of a basin changes with latitude, and "
+                        "a wrong one silently clips the western boundary "
+                        "current -- the repo's existing BASINS['atlantic'] "
+                        "starts at 290E, which at 26N excludes the Florida "
+                        "Current and the DWBC entirely.")
     p.add_argument("--depth-tol-m", type=float, default=1.0,
                    help="max allowed mismatch between our z_center_ref and "
                         "NEMO deptht before the run refuses to compare")
@@ -329,6 +341,38 @@ def main() -> int:
                        f"{name} [{unit}] equatorial Pacific section, "
                        f"{a.eq_halfwidth:g}S-{a.eq_halfwidth:g}N mean — "
                        f"{a.label_tripole} / {a.label_mpas} / NEMO")
+
+        for spec in a.lat_section:
+            lat0, lonspec, hw, label = spec.split(":")
+            lo, hi = (float(v) for v in lonspec.split(","))
+            lat0, hw = float(lat0), float(hw)
+            rows = np.abs(tgt_lat - lat0) <= hw
+            # lo > hi means the window crosses the prime meridian (the South
+            # Atlantic does). Select by wrapping, and plot on a shifted
+            # coordinate so the x axis stays monotonic -- an unshifted
+            # 312..360,0..17 axis would render the section reversed.
+            if lo > hi:
+                cols = (tgt_lon >= lo) | (tgt_lon <= hi)
+                xcoord = np.where(tgt_lon >= lo, tgt_lon - 360.0, tgt_lon)
+            else:
+                cols = (tgt_lon >= lo) & (tgt_lon <= hi)
+                xcoord = tgt_lon
+            order = np.argsort(xcoord[cols])
+            if not rows.any() or not cols.any():
+                raise SystemExit(f"FATAL: --lat-section {spec!r} selects "
+                                 f"{int(rows.sum())} rows, {int(cols.sum())} cols")
+            s2 = np.ix_(np.where(rows)[0], np.where(cols)[0], np.arange(z.size))
+            sec = [_sec_mean(f[s2], common[s2], axis=0) for f in (Tg, Mg, Ng)]
+            nsup = int(np.isfinite(sec[0]).sum())
+            print(f"[{name}] section {label}: {int(rows.sum())} rows x "
+                  f"{int(cols.sum())} cols, {nsup} supported section cells")
+            sec = [s[order] for s in sec]
+            _plot_sections(out, f"{name}_{label}", unit, xcoord[cols][order],
+                           "longitude degE", z, sec,
+                           (a.label_tripole, a.label_mpas),
+                           f"{name} [{unit}] {label} section at "
+                           f"{lat0:g} +/- {hw:g} deg, lon {lo:g}-{hi:g}E — "
+                           f"{a.label_tripole} / {a.label_mpas} / NEMO")
     print("DONE")
     return 0
 

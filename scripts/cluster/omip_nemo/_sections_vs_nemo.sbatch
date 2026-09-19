@@ -50,10 +50,20 @@ OUT=$R/sections_d${DAY}_${MPAS}
 echo "=== day $DAY, GATEWAY record $REC (0-based) = days $((DAY-5))-$DAY ==="
 ls -l --time-style=+%Y-%m-%d_%H:%M "$ST" "$SM"
 
+# BASIN-RESOLVED SECTIONS. A global zonal mean cancels opposite-signed basin
+# anomalies, so the Atlantic gets its own windows. Both are stated explicitly
+# because the basin's longitude span CHANGES WITH LATITUDE and the repo's
+# existing BASINS['atlantic'] (290E onward) would clip the Florida Current and
+# the deep western boundary current out of the 26N section -- the RAPID
+# latitude, where that boundary current IS the measurement.
+#   26N: 279-345E spans Florida to the African margin.
+#   30S: 312-17E wraps the prime meridian, South America to Africa.
 $PY -u scripts/plot/plot_sections_vs_nemo.py \
   --tripole "$ST" --mpas "$SM" --label-mpas "${LABEL_MPAS:-MPAS}" \
   --nemo-gridt "$GW" --nemo-time-idx "$REC" --res-deg 1.0 \
-  --out-dir "$OUT" 2>&1 | grep -vE "Warning|warn" | tail -45
+  --lat-section="26:279,345:1.5:atlantic26N" \
+  --lat-section="-30:312,17:1.5:atlantic30S" \
+  --out-dir "$OUT" 2>&1 | grep -vE "Warning|warn" | tail -60
 
 echo "=== figures ==="
 ls -l "$OUT"
