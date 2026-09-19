@@ -97,9 +97,13 @@ change of 50% or more.  The Round-114 single-family cancellation warning
 remains binding: an improved or worsened diagnostic arm is magnitude evidence,
 not ownership or a landing.
 
-The same SSH ULP plant must propagate through at least one complete stage-3
-transport family and one local kt3 tracer output under the production JIT.
-It exits nonzero even if aggregate maxima happen not to move.
+A separate handoff control advances one finite recorded SSH word by one ULP.
+It must flip the final handoff row and its directly derived QCO ratio under the
+production JIT.  Whether that last bit survives the later thickness,
+transport, and tracer roundings is recorded, not assumed; requiring a
+downstream tracer bit to move would make the control depend on an unrelated
+rounding cancellation.  The control exits nonzero even if aggregate maxima do
+not move.
 
 ## P4 — candidate and landing boundary
 
