@@ -54,4 +54,12 @@ $PY -u scripts/validate/ocean_fidelity/section_transport_vs_nemo.py \
   --section="drake:-65:-68,-55" \
   --section="indonesia:115:-20,-5" \
   --out-json "$R/results/omip_nemo/section_transport/transports_d${DAY}.json"
+echo "=== probe rc=$? ==="
+
+# Row by row, because a single integral cannot say whether a difference is a
+# broad excess or a jet that is too fast in three rows -- different causes,
+# different fixes.
+$PY -u scripts/plot/plot_section_transport.py \
+  --json "$R/results/omip_nemo/section_transport/transports_d${DAY}.json" \
+  --out "$R/results/omip_nemo/section_transport/transports_d${DAY}.png"
 echo "=== rc=$? ==="
