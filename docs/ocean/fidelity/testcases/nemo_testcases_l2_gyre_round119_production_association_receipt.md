@@ -207,7 +207,60 @@ Focused test before measurement:
 - `tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round83_slow_forcing_walk.py`:
   `9 passed in 1.07s`.
 
-Final focused, citation and full-tree summaries: **PENDING FINAL PASS**.
+Final focused set (Round-51 live operands, the extended Round-83 gate,
+Round-117 pre-loop gate, citation-gate tests, DINO momentum diagnostics and
+both NEMO-recipe suites):
+
+- `89 passed in 331.48s (0:05:31)`.
+
+The clean-tree receipt citation gate found all seven citations, no failures,
+no unmapped citations and no map-audit failures: `status=PASS`.  Its complete
+self-test table fired, including the unplanted passing controls.  The explicit
+shifted-citation plant moved the first endpoint of
+`dynkeg.f90:129-130`; it exited nonzero with `status=FAIL` and
+`SYMBOL-NOT-AT-LINE`.  The gate and plant JSON/log SHA-256 values are
+`a1856ab8ddcf222b251f6067b20b08c2208cfa43d539514ed6f80f575fbe9d33`
+and `0d568c3725a63c35c13121a50480f2b873bd342eb68577305bc65fb10a3a011a`,
+respectively.
+
+The mandated combined `tests/ocean/fidelity tests/ocean/unit` run collected
+8,203 tests and reached 99%, but eight xdist workers aborted during concurrent
+JAX compilation (nine `Fatal Python error: Aborted` records) and the surviving
+pool ceased emitting output.  It was interrupted after a documented
+20-minute no-output bound.  Pytest therefore printed **no terminal summary
+line**; claiming one would be false.  The preserved partial log SHA-256 is
+`bc0ca4b3195498f30a234bedd8532c6782b49c4bcbbf98de539c48af8a501b41`.
+Following the repository instruction to split compiler-heavy suites, the
+separate fidelity-tree run collected 1,384 tests and reached 98% without a
+worker crash, but its successive long-tail cases exceeded the same round CPU
+bound; it too was interrupted and printed **no terminal summary line**.  Its
+partial log SHA-256 is
+`d2ca723a7d5c8d9fa70130d93a01c56033137a931b2b19571d4d489dc913eec4`.
+
+All seven unique crash sites were then replayed serially.  The first command
+used two unqualified method node IDs and accurately ended with
+`no tests ran in 0.41s`; collection was corrected rather than hidden.  The
+correct replay included the complete 15-case mass-flux parametrization and
+ended:
+
+- `21 passed in 549.36s (0:09:09)`.
+
+Its log SHA-256 is
+`4efa8553a4634e0075292d115e6d9b39620332615234fd648000146c8b045580`.
+Finally, the frozen 87-node pre-existing-red list was replayed directly.  Its
+literal terminal summary was:
+
+- `71 failed, 10 warnings, 16 errors in 145.31s (0:02:25)`.
+
+The 87 observed failed/error node IDs and the frozen baseline sort to
+byte-identical files (shared SHA-256
+`5c1fe77c7c00939050c91e507a288882bbd57f6115907155afecf8ff3f18d97f`);
+both `new_vs_baseline.txt` and `missing_vs_baseline.txt` are empty.  Thus no
+failure observed in the focused set, serial crash replay or direct baseline
+comparison is new to this round.  Because the two broad runs did not print a
+terminal summary, this receipt does **not** overstate that comparison as a
+complete 8,203-node failure-set proof; the partial-run limitation is retained
+as verification debt, not converted into a green claim.
 
 ## Independent review
 
