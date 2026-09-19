@@ -69,16 +69,16 @@ for DAY in 15 20; do
         echo "-- $N band $B"
         $PY -u scripts/validate/ocean_fidelity/bering_ssh_head.py \
           --snapshot "$SNAP" --mesh "$MESH" --nemo-gridt "$GT" \
-          --time-idx "$REC" --lon-bands "$B" \
+          --time-idx "$REC" --lon-bands="$B" \
           --lat-a 26.5,27.5 --lat-b 26.5,27.5 \
-          --label-a "$N" --label-b "$N-same" 2>&1 | grep -E "ours |NEMO |control|FATAL"
+          --label-a "$N" --label-b "$N-same"    2>&1
       done
     else
       $PY -u scripts/validate/ocean_fidelity/bering_ssh_head.py \
         --snapshot "$SNAP" --mesh "$MESH" --nemo-gridt "$GT" \
-        --time-idx "$REC" --lon-bands "$BANDS" \
+        --time-idx "$REC" --lon-bands="$BANDS" \
         --lat-a "$LA" --lat-b "$LB" --label-a "$NA" --label-b "$NB" \
-        2>&1 | grep -E "ours |NEMO |control|Sea level|POSITIVE|FATAL"
+           2>&1
     fi
   done
 done
