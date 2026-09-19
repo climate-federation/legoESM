@@ -1225,12 +1225,12 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # of the stage-3 divergence.  The ordinary step still completes before
     # either array is substituted into the returned diagnostic state.
     expose_stage3_momentum_rhs: str = ""
-    # Private diagnostic arm for the WS-RK3 vector-source association. ``True``
-    # keeps the stage-2/3 HPG -> VOR -> KEG -> ZAD discriminator.  Round 119's
-    # private ``("stage1-source-order", hpg_override, keg_arm, override)``
-    # value drives stage 1 through compiled HPG -> LDF -> VOR -> KEG -> ZAD;
-    # the optional KEG fields are Round-120 one-variable arms and no card
-    # constructs any tuple form.
+    # Private diagnostic controls for WS-RK3 stage-1 source boundaries.
+    # Round 119's tuple drives compiled HPG -> LDF -> VOR -> KEG -> ZAD;
+    # optional KEG fields are Round-120 arms.  Round 121 may replace only W at
+    # the ZAD call boundary.  No card constructs either private control.
+    # ``True`` retains the stage-2/3 association discriminator.
+    stage1_zad_w_override: object = None
     nemo_stage_rhs_accumulation_order_arm: object = False
     # WRITE-only transport exposure for the ordered tracer boundary walk.
     # A nonzero stage stores NEMO's metric zFu/zFv/zFw triplet in u/v/T after
@@ -4988,11 +4988,11 @@ class LatLonCGridOceanModel:
                                zad_continuity_dt=dt,
                                up3_upwind_selector=_up3_selector_override,
                                momentum_flux_face_thickness=_ws_face_thickness_kbb,
-                               nemo_operator_association=(
-                                   self._nemo_ws_test_hooks
-                                   .nemo_stage_rhs_accumulation_order_arm),
-                               return_nemo_operator_components=(
-                                   _return_live_stage_operands))
+                               nemo_operator_association=self._nemo_ws_test_hooks.nemo_stage_rhs_accumulation_order_arm,
+                               nemo_stage_zad_operands=(
+                                   (self._nemo_ws_test_hooks.stage1_zad_w_override, None, None)
+                                   if self._nemo_ws_test_hooks.stage1_zad_w_override is not None else None),
+                               return_nemo_operator_components=_return_live_stage_operands)
         if _return_live_stage_operands:
             tend, _, _nemo_ws_stage1_operator_operands = _tend_result
         else:

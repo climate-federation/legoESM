@@ -171,3 +171,41 @@ def test_round120_keg_ulp_plant_survives_both_boundaries() -> None:
         ordinary_keg[0, 0, 0].view(np.uint64))
     assert (planted_keg + zad)[0, 0, 0].view(np.uint64) != (
         (ordinary_keg + zad)[0, 0, 0].view(np.uint64))
+
+
+def test_round121_w_override_is_private_and_default_off() -> None:
+    hook_name = "stage1_zad_w_override"
+    hooks = WALK.model_module._NEMOWSRK3TestHooks()
+    assert getattr(hooks, hook_name) is None
+    assert hook_name not in WALK.model_module.LatLonCGridOceanConfig._fields
+
+
+def test_round121_proxy_executes_directed_model_only_at_kt2() -> None:
+    calls = []
+
+    class FakeModel:
+        def __init__(self, *args, _nemo_ws_test_hooks=None, **kwargs):
+            self.directed = (
+                _nemo_ws_test_hooks is not None
+                and _nemo_ws_test_hooks.stage1_zad_w_override is not None)
+
+        def prime_step_caches(self, state):
+            calls.append(("prime", self.directed, state))
+
+        def step(self, state):
+            calls.append(("step", self.directed, state))
+            return state + 1
+
+    audit = []
+    proxy_type = WALK._round121_proxy_class(
+        FakeModel, np.ones((1, 1, 1)), audit)
+    proxy = proxy_type()
+    proxy.prime_step_caches(0)
+    state = 0
+    for _ in range(4):
+        state = proxy.step(state)
+    assert state == 4
+    assert proxy._round121_interventions == [2]
+    assert [directed for kind, directed, _ in calls if kind == "step"] == [
+        False, True, False, False]
+    assert len(audit) == 1

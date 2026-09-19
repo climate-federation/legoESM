@@ -194,11 +194,13 @@ def _full_from_native(full, native, face: str) -> np.ndarray:
 def _round117_live_trace(
     card, seeded, freshwater, surface, execution_mode: str, *,
     incoming_override=None, final_override=None, association_arm=False,
+    zad_w_override=None,
 ):
     hooks = model_module._NEMOWSRK3TestHooks(
         expose_live_stage_operands=True,
         slow_forcing_incoming_override=incoming_override,
         barotropic_slow_forcing_override=final_override,
+        stage1_zad_w_override=zad_w_override,
         nemo_stage_rhs_accumulation_order_arm=association_arm,
     )
     model = model_module.LatLonCGridOceanModel(
@@ -681,7 +683,9 @@ def measure_round117(args) -> dict[str, object]:
     stage, static = _admit_round64(args)
     external = round82._admit(args)
     direct = _admit_round117_direct(
-        args, external) if (args.round118 or args.round119 or args.round120) else None
+        args, external) if (
+            args.round118 or args.round119 or args.round120 or args.round121
+        ) else None
     (base, card, seeded, freshwater, surface,
      captured) = round82._context(args)
     require(base["status"] == "MEASURED", "kt=2 seeded context changed")
@@ -691,7 +695,7 @@ def measure_round117(args) -> dict[str, object]:
         _round117_live_trace(
             card, seeded, freshwater, surface, args.execution_mode,
             association_arm=("stage1-source-order", None))
-        if args.round119 or args.round120 else None)
+        if args.round119 or args.round120 or args.round121 else None)
     trace_identity = round82._pytree_identity(
         ordinary.state_after, captured.plain_state)
     require(trace_identity["bit_exact"],
@@ -983,8 +987,9 @@ def measure_round117(args) -> dict[str, object]:
 
     association_walk = None
     round120_walk = None
+    round121_walk = None
     zad_operand_walk = None
-    if args.round119 or args.round120:
+    if args.round119 or args.round120 or args.round121:
         source_parts = source_order.operator_operands[0]
 
         def _native_field(value, face):
@@ -1365,6 +1370,211 @@ def measure_round117(args) -> dict[str, object]:
                     "velocity_u", "velocity_v", "thickness_u", "thickness_v",
                     "area_t", "reciprocal_area_u", "reciprocal_area_v"))),
         }
+
+        if args.round121:
+            oracle_w = owned3_with_bottom(stage_arrays["ww"])
+            live_w = np.asarray(parts["operand_zad_w"], dtype=np.float64)
+            require(oracle_w.shape == live_w.shape,
+                    "Round-121 oracle/live W extents differ")
+            directed = _round117_live_trace(
+                card, seeded, freshwater, surface, args.execution_mode,
+                zad_w_override=jnp.asarray(oracle_w))
+            directed_parts = directed.operator_operands[0]
+            directed_w = np.asarray(
+                directed_parts["operand_zad_w"], dtype=np.float64)
+            directed_w_row = comparison(
+                directed_w[..., :30], owned3(stage_arrays["ww"]),
+                active["t3"])
+            non_w_raw_rows = {
+                face: {
+                    name: comparison(
+                        _native_field(
+                            directed_parts[f"{name}_{face}"], face),
+                        _native_field(parts[f"{name}_{face}"], face),
+                        active[f"{face}3"],
+                    )
+                    for name in ("hpg", "ldf", "vorticity", "keg")
+                }
+                for face in ("u", "v")
+            }
+            non_w_zad_inputs = {
+                "velocity_u": comparison(
+                    native_u(directed_parts["operand_velocity_u"]),
+                    native_u(parts["operand_velocity_u"]), active["u3"]),
+                "velocity_v": comparison(
+                    native_v(directed_parts["operand_velocity_v"]),
+                    native_v(parts["operand_velocity_v"]), active["v3"]),
+                "thickness_u": comparison(
+                    native_u(directed_parts["operand_zad_h_u"]),
+                    native_u(parts["operand_zad_h_u"]), active["u3"]),
+                "thickness_v": comparison(
+                    native_v(directed_parts["operand_zad_h_v"]),
+                    native_v(parts["operand_zad_h_v"]), active["v3"]),
+            }
+            pre_zad_rows = {
+                face: {
+                    boundary: comparison(
+                        _native_field(
+                            directed_parts[f"{boundary}_{face}"], face),
+                        _native_field(parts[f"{boundary}_{face}"], face),
+                        active[f"{face}3"],
+                    )
+                    for boundary in (
+                        "after_hpg", "after_ldf", "after_vor", "after_keg")
+                }
+                for face in ("u", "v")
+            }
+            raw_zad_effect = {
+                face: comparison(
+                    _native_field(directed_parts[f"zad_{face}"], face),
+                    _native_field(parts[f"zad_{face}"], face),
+                    active[f"{face}3"],
+                )
+                for face in ("u", "v")
+            }
+            directed_cumulative = jax.device_get(jax.jit(
+                round117_source_order_accumulators)(
+                    directed_parts["hpg_u"].data,
+                    directed_parts["hpg_v"].data,
+                    directed_parts["ldf_u"].data,
+                    directed_parts["ldf_v"].data,
+                    directed_parts["vorticity_u"].data,
+                    directed_parts["vorticity_v"].data,
+                    directed_parts["keg_u"].data,
+                    directed_parts["keg_v"].data,
+                    directed_parts["zad_u"].data,
+                    directed_parts["zad_v"].data,
+                ))
+            directed_incremental_residual = {}
+            for face in ("u", "v"):
+                native = native_u if face == "u" else native_v
+                before_residual = (
+                    native(directed_cumulative[f"after_keg_{face}"])
+                    - owned3(stage_arrays[f"after_keg_{face}"]))
+                after_residual = (
+                    native(directed_cumulative[f"after_zad_{face}"])
+                    - owned3(stage_arrays[f"after_zad_{face}"]))
+                delta = after_residual - before_residual
+                mask = active[f"{face}3"]
+                directed_incremental_residual[face] = {
+                    "differing_cells": int(np.count_nonzero(delta[mask])),
+                    "absolute_max": float(
+                        np.max(np.abs(delta[mask]), initial=0.0)),
+                }
+            state_effect = round82._pytree_identity(
+                directed.state_after, ordinary.state_after)
+            ordinary_w_reproduced = bool(
+                zad_rows["ww"]["differing_cells"] == 18000
+                and zad_rows["ww"]["absolute_max"]
+                == np.float64(7.946658315637966e-7)
+                and incremental_residual["u"]["after_zad"]
+                == np.float64(1.9220297482797664e-9)
+                and incremental_residual["v"]["after_zad"]
+                == np.float64(1.966061294804274e-9))
+            one_variable = bool(
+                all(row["bit_exact"]
+                    for rows in non_w_raw_rows.values()
+                    for row in rows.values())
+                and all(row["bit_exact"]
+                        for row in non_w_zad_inputs.values())
+                and all(row["bit_exact"]
+                        for rows in pre_zad_rows.values()
+                        for row in rows.values()))
+            residual_at_floor = all(
+                row["absolute_max"]
+                <= np.float64(8.470329472543003e-22)
+                for row in directed_incremental_residual.values())
+            round121_confirmed = bool(
+                ordinary_w_reproduced and directed_w_row["bit_exact"]
+                and one_variable and residual_at_floor
+                and all(row["differing_cells"] > 0
+                        for row in raw_zad_effect.values())
+                and not state_effect["bit_exact"])
+            round121_walk = {
+                "ordinary_w_row": zad_rows["ww"],
+                "ordinary_incremental_zad_residual_max": {
+                    face: incremental_residual[face]["after_zad"]
+                    for face in ("u", "v")},
+                "directed_consumed_w_vs_oracle": directed_w_row,
+                "non_w_raw_operand_identity": non_w_raw_rows,
+                "non_w_zad_input_identity": non_w_zad_inputs,
+                "pre_zad_boundary_identity": pre_zad_rows,
+                "directed_vs_ordinary_raw_zad": raw_zad_effect,
+                "directed_incremental_zad_residual": (
+                    directed_incremental_residual),
+                "returned_state_vs_ordinary": state_effect,
+                "ordinary_reproduction_confirmed": ordinary_w_reproduced,
+                "one_variable_confirmed": one_variable,
+                "association_floor_confirmed": residual_at_floor,
+                "prediction_confirmed": round121_confirmed,
+            }
+
+            if args.plant == "zad-w-ulp":
+                require(args.execution_mode == "production-jit",
+                        "Round-121 W plant requires production JIT")
+                eligible = (
+                    active["t3"] & np.isfinite(oracle_w[..., :30])
+                    & (oracle_w[..., :30] != 0.0))
+                locations = np.argwhere(eligible)
+                require(locations.size > 0,
+                        "Round-121 W plant found no eligible word")
+                location = tuple(int(value) for value in locations[0])
+                planted_w = np.array(oracle_w, copy=True)
+                planted_w[location] = np.nextafter(
+                    planted_w[location], np.float64(np.inf))
+                planted = _round117_live_trace(
+                    card, seeded, freshwater, surface, args.execution_mode,
+                    zad_w_override=jnp.asarray(planted_w))
+                planted_parts = planted.operator_operands[0]
+                planted_w_row = comparison(
+                    np.asarray(planted_parts["operand_zad_w"])[..., :30],
+                    directed_w[..., :30], active["t3"])
+                planted_non_w = {
+                    face: {
+                        name: comparison(
+                            _native_field(
+                                planted_parts[f"{name}_{face}"], face),
+                            _native_field(
+                                directed_parts[f"{name}_{face}"], face),
+                            active[f"{face}3"],
+                        )
+                        for name in ("hpg", "ldf", "vorticity", "keg")
+                    }
+                    for face in ("u", "v")
+                }
+                planted_zad = {
+                    face: comparison(
+                        _native_field(planted_parts[f"zad_{face}"], face),
+                        _native_field(directed_parts[f"zad_{face}"], face),
+                        active[f"{face}3"],
+                    )
+                    for face in ("u", "v")
+                }
+                planted_state = round82._pytree_identity(
+                    planted.state_after, directed.state_after)
+                plant_fires = bool(
+                    planted_w_row["differing_cells"] == 1
+                    and all(row["bit_exact"]
+                            for rows in planted_non_w.values()
+                            for row in rows.values())
+                    and any(row["differing_cells"] > 0
+                            for row in planted_zad.values())
+                    and not planted_state["bit_exact"])
+                return {
+                    "format": "nemo-testcase-l2-gyre-round121-w-walk-v1",
+                    "status": (
+                        "PLANT_FIRED" if plant_fires else "PLANT_INERT"),
+                    "worktree": stamp,
+                    "execution_regime": args.execution_mode,
+                    "plant": args.plant,
+                    "plant_location": list(location),
+                    "plant_direction": "+infinity",
+                    "consumed_w_row": planted_w_row,
+                    "non_w_raw_operand_rows": planted_non_w,
+                    "raw_zad_rows": planted_zad,
+                    "returned_state_row": planted_state,
+                    "plant_fires": plant_fires,
+                }
 
         if args.plant == "association-hpg-ulp":
             planted_native, location, direction = _round119_propagating_hpg_ulp(
@@ -1811,6 +2021,15 @@ def measure_round117(args) -> dict[str, object]:
             and round120_walk["prediction_confirmed"]
             and zad_operand_walk is not None
             and zad_operand_walk["prediction_confirmed"])
+    elif args.round121:
+        prediction_confirmed = bool(
+            p1_confirmed and p2_confirmed
+            and association_walk is not None
+            and association_walk["prediction_confirmed"]
+            and zad_operand_walk is not None
+            and zad_operand_walk["prediction_confirmed"]
+            and round121_walk is not None
+            and round121_walk["prediction_confirmed"])
     else:
         prediction_confirmed = bool(
             p1_confirmed and p2_confirmed
@@ -1825,13 +2044,15 @@ def measure_round117(args) -> dict[str, object]:
         ("CONFIRMED" if prediction_confirmed else "REFUTED"))
     return {
         "format": (
-            "nemo-testcase-l2-gyre-round120-keg-walk-v1"
+            "nemo-testcase-l2-gyre-round121-w-walk-v1"
+            if args.round121 else
+            ("nemo-testcase-l2-gyre-round120-keg-walk-v1"
             if args.round120 else
             ("nemo-testcase-l2-gyre-round119-association-walk-v1"
              if args.round119 else
             ("nemo-testcase-l2-gyre-round118-producer-walk-v1"
              if direct is not None else
-             "nemo-testcase-l2-gyre-round117-producer-walk-v1"))),
+             "nemo-testcase-l2-gyre-round117-producer-walk-v1")))),
         "status": status,
         "worktree": stamp,
         "execution_regime": args.execution_mode + "-cpu-fp64-x64-libm",
@@ -1889,6 +2110,7 @@ def measure_round117(args) -> dict[str, object]:
         "record_directed_magnitude": magnitude,
         "production_association_walk": association_walk,
         "round120_keg_discriminator": round120_walk,
+        "round121_w_intervention": round121_walk,
         "current_tip_zad_operand_walk": zad_operand_walk,
         "candidate_eligible": False,
         "candidate_reason": (
@@ -1913,6 +2135,109 @@ def measure_round117(args) -> dict[str, object]:
     }
 
 
+def _round121_proxy_class(original, oracle_w, audit):
+    """Return a harness-only model that changes only kt=2 stage-1 ZAD W."""
+    oracle_w = np.asarray(oracle_w, dtype=np.float64)
+
+    class _Round121OneStepWModel:
+        def __init__(self, *model_args, **model_kwargs):
+            require(
+                model_kwargs.get("_nemo_ws_test_hooks") is None,
+                "Round-121 trajectory proxy refuses a pre-existing hook",
+            )
+            model_kwargs.pop("_nemo_ws_test_hooks", None)
+            self._ordinary = original(*model_args, **model_kwargs)
+            hooks = model_module._NEMOWSRK3TestHooks(
+                stage1_zad_w_override=jnp.asarray(oracle_w))
+            self._directed = original(
+                *model_args, **model_kwargs, _nemo_ws_test_hooks=hooks)
+            self._round121_steps = 0
+            self._round121_interventions = []
+            audit.append(self)
+
+        def __getattr__(self, name):
+            return getattr(self._ordinary, name)
+
+        def prime_step_caches(self, state):
+            self._ordinary.prime_step_caches(state)
+            self._directed.prime_step_caches(state)
+
+        def step(self, *step_args, **step_kwargs):
+            self._round121_steps += 1
+            if self._round121_steps == 2:
+                self._round121_interventions.append(2)
+                return self._directed.step(*step_args, **step_kwargs)
+            return self._ordinary.step(*step_args, **step_kwargs)
+
+    return _Round121OneStepWModel
+
+
+def measure_round121_trajectory(args) -> dict[str, object]:
+    """Delegate the one-step W intervention to the certified harnesses."""
+    set_policy(PrecisionPolicy.fp64(transcendentals="libm"))
+    require(get_policy() == PrecisionPolicy.fp64(transcendentals="libm"),
+            "precision policy is not fp64/libm")
+    require(bool(jax.config.jax_enable_x64), "JAX x64 is disabled")
+    require(not bool(jax.config.jax_disable_jit), "production JIT is disabled")
+    stamp = worktree_stamp()
+    require(stamp["clean"], "Round-121 trajectory worktree is dirty")
+    require(stamp["commit"].lower() == args.expect_commit.lower(),
+            "Round-121 trajectory commit stamp mismatch")
+    stage, _ = _admit_round64(args)
+    stage_path = args.round64_root / "oracle_momstage_kt00000002_s1.bin"
+    oracle_w = owned3_with_bottom(stage["arrays"]["ww"])
+    original = model_module.LatLonCGridOceanModel
+    audit = []
+    model_module.LatLonCGridOceanModel = _round121_proxy_class(
+        original, oracle_w, audit)
+    try:
+        if args.trajectory_kind == "ladder":
+            result = gate.run(
+                gate.ROOT, stage2_root=gate.STAGE2_ROOT,
+                stage3_root=gate.STAGE3_ROOT, max_step=10,
+                trajectory_only=True)
+            expected_steps = 10
+            payload = {"ladder": result}
+        else:
+            import nemo_testcase_l2_gyre_year_fromrest as year_fromrest
+
+            member = args.member_root / f"lego_seed0_{args.trajectory_tag}"
+            require(not member.exists(),
+                    f"Round-121 member output already exists: {member}")
+            exit_code = year_fromrest.run_member(
+                0, args.member_root, days=360, tag=args.trajectory_tag,
+                snap_steps=6)
+            require(exit_code == 0, "Round-121 year member failed")
+            expected_steps = 2160
+            payload = {"member": str(member)}
+    finally:
+        model_module.LatLonCGridOceanModel = original
+    require(len(audit) == 1,
+            f"Round-121 expected one harness model, got {len(audit)}")
+    proxy = audit[0]
+    require(proxy._round121_steps == expected_steps,
+            "Round-121 trajectory step count changed")
+    require(proxy._round121_interventions == [2],
+            "Round-121 intervention did not execute exactly at kt=2")
+    return {
+        "format": "nemo-testcase-l2-gyre-round121-w-trajectory-v1",
+        "status": "MEASURED",
+        "worktree": stamp,
+        "execution_regime": "production-jit-cpu-fp64-x64-libm",
+        "trajectory_kind": args.trajectory_kind,
+        "intervention": {
+            "step": 2,
+            "stage": 1,
+            "operand": "ZAD W only",
+            "record": str(stage_path),
+            "record_sha256": sha256(stage_path),
+            "record_producer": ROUND64_PRODUCER,
+            "intervention_count": 1,
+        },
+        **payload,
+    }
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     round_group = parser.add_mutually_exclusive_group()
@@ -1928,6 +2253,12 @@ def main(argv=None) -> int:
     round_group.add_argument(
         "--round120", action="store_true",
         help="run the full-step stage-1 KEG materialization discriminator")
+    round_group.add_argument(
+        "--round121", action="store_true",
+        help="run the full-step stage-1 NEMO-W magnitude discriminator")
+    round_group.add_argument(
+        "--round121-trajectory", action="store_true",
+        help="run the one-step NEMO-W arm through a certified trajectory")
     parser.add_argument("--expect-commit", required=True)
     parser.add_argument("--expect-record-commit", required=True)
     parser.add_argument("--expect-krhs-commit", required=True)
@@ -1954,36 +2285,50 @@ def main(argv=None) -> int:
         "--execution-mode",
         choices=("production-jit", "production-eager"),
         default="production-jit")
+    parser.add_argument(
+        "--trajectory-kind", choices=("ladder", "year"), default="ladder")
+    parser.add_argument(
+        "--member-root", type=Path, default=ROOT / "round121")
+    parser.add_argument("--trajectory-tag", default="round121_w")
     parser.add_argument("--plant", choices=(
                             "none", "e3-ulp", "rhs-ulp", "final-ulp",
                             "incoming-ulp", "association-hpg-ulp",
-                            "association-keg-ulp"),
+                            "association-keg-ulp", "zad-w-ulp"),
                         default="none")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         report = (
-            measure_round117(args)
+            measure_round121_trajectory(args)
+            if args.round121_trajectory else
+            (measure_round117(args)
             if (args.round117 or args.round118 or args.round119
-                or args.round120) else measure(args))
+                or args.round120 or args.round121) else measure(args)))
         args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     except (RuntimeError, AssertionError, KeyError, ValueError) as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
     if args.plant != "none":
         prefix = (
-            "ROUND120" if args.round120 else
+            "ROUND121" if args.round121 else
+            ("ROUND120" if args.round120 else
             ("ROUND119" if args.round119 else
             ("ROUND118" if args.round118 else
-             ("ROUND117" if args.round117 else "ROUND83"))))
+             ("ROUND117" if args.round117 else "ROUND83")))))
         state = "STATUS PLANT-FIRED" if report["plant_fires"] else "STATUS PLANT-INERT"
         print(f"{prefix} {args.plant.upper()} {state}")
         return 1
-    if args.round117 or args.round118 or args.round119 or args.round120:
+    if args.round121_trajectory:
+        print("ROUND121 W TRAJECTORY " + report["status"] + ": "
+              + report["trajectory_kind"])
+        return 0
+    if (args.round117 or args.round118 or args.round119 or args.round120
+            or args.round121):
         prefix = (
-            "ROUND120" if args.round120 else
+            "ROUND121" if args.round121 else
+            ("ROUND120" if args.round120 else
             ("ROUND119" if args.round119 else
-             ("ROUND118" if args.round118 else "ROUND117")))
+             ("ROUND118" if args.round118 else "ROUND117"))))
         print(
             prefix + " PRODUCER " + report["status"] + ": first="
             + repr(report["producer_split"]["first_direct_non_bit"])

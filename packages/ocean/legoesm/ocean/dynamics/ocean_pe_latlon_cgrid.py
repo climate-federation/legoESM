@@ -4916,12 +4916,12 @@ def latlon_cgrid_ocean_baroclinic_tendencies(
         zad_h_u = jax.lax.optimization_barrier(zad_h_u)
         zad_h_v = jax.lax.optimization_barrier(zad_h_v)
     if nemo_stage_zad_operands is not None:
-        # Consume the materialized W and Kmm face-thickness operands produced
-        # by the shared WS-RK3 stage program, matching dynzad's call boundary.
-        zad_w, zad_h_u, zad_h_v = nemo_stage_zad_operands
-        zad_w = jax.lax.optimization_barrier(zad_w)
-        zad_h_u = jax.lax.optimization_barrier(zad_h_u)
-        zad_h_v = jax.lax.optimization_barrier(zad_h_v)
+        # None preserves a live operand; Round 121 substitutes W alone.
+        _ow, _ohu, _ohv = nemo_stage_zad_operands
+        zad_w = zad_w if _ow is None else jnp.asarray(_ow, dtype=zad_w.dtype)
+        zad_h_u = zad_h_u if _ohu is None else jnp.asarray(_ohu, dtype=zad_h_u.dtype)
+        zad_h_v = zad_h_v if _ohv is None else jnp.asarray(_ohv, dtype=zad_h_v.dtype)
+        zad_w, zad_h_u, zad_h_v = jax.tree.map(jax.lax.optimization_barrier, (zad_w, zad_h_u, zad_h_v))
 
     # --- 5. Coriolis ---
     # Coriolis is NOT included in the returned momentum tendencies.
