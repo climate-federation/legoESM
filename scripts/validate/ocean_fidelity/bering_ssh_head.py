@@ -37,6 +37,10 @@ from pathlib import Path
 import numpy as np
 
 # From diagnostics_sections.py: the bering_pacific sector this transport uses.
+# These stay the DEFAULTS so every existing invocation is unchanged; the same
+# question -- does a channel carry the wrong transport because its head is
+# wrong, or because its response to the right head is wrong -- applies to any
+# strait, so the sector is now selectable rather than baked in.
 BERING_LON_BANDS = ((-180.0, -140.0), (155.0, 180.0))
 PACIFIC_LAT = (60.0, 65.5)     # south of the 66N section
 ARCTIC_LAT = (66.5, 72.0)      # north of it
@@ -49,17 +53,28 @@ def _sq(a):
     return a
 
 
-def in_sector(lat, lon):
+def parse_bands(spec):
+    """"lo,hi;lo,hi" -> ((lo,hi),(lo,hi)); longitudes in -180..180."""
+    out = []
+    for part in spec.split(";"):
+        lo, hi = (float(x) for x in part.split(","))
+        out.append((lo, hi))
+    if not out:
+        raise SystemExit(f"--lon-bands {spec!r} parsed to nothing")
+    return tuple(out)
+
+
+def in_sector(lat, lon, bands=BERING_LON_BANDS):
     lon = ((np.asarray(lon) + 180.0) % 360.0) - 180.0
     band = np.zeros(lon.shape, dtype=bool)
-    for lo, hi in BERING_LON_BANDS:
+    for lo, hi in bands:
         band |= (lon >= lo) & (lon <= hi)
     return band, lat
 
 
-def box_mean(field, wet, area, lat, lon, lat_band):
+def box_mean(field, wet, area, lat, lon, lat_band, bands=BERING_LON_BANDS):
     """Area-weighted mean over wet cells in the sector and latitude band."""
-    band, _ = in_sector(lat, lon)
+    band, _ = in_sector(lat, lon, bands)
     m = (band & wet & np.isfinite(field)
          & (lat >= lat_band[0]) & (lat <= lat_band[1]))
     n = int(m.sum())
@@ -80,7 +95,22 @@ def main(argv=None) -> int:
     p.add_argument("--out", default=None)
     p.add_argument("--map-png", default=None,
                    help="write a map of ours-minus-NEMO sea level")
+    p.add_argument("--lon-bands", default="-180,-140;155,180",
+                   help="longitude sector as 'lo,hi' or 'lo,hi;lo,hi' in "
+                        "-180..180; default is the bering_pacific sector")
+    p.add_argument("--lat-a", default="60,65.5",
+                   help="UPSTREAM latitude band 'lo,hi'; head is A minus B")
+    p.add_argument("--lat-b", default="66.5,72",
+                   help="DOWNSTREAM latitude band 'lo,hi'")
+    p.add_argument("--label-a", default="pacific")
+    p.add_argument("--label-b", default="arctic")
     a = p.parse_args(argv)
+
+    bands = parse_bands(a.lon_bands)
+    lat_a = tuple(float(x) for x in a.lat_a.split(","))
+    lat_b = tuple(float(x) for x in a.lat_b.split(","))
+    if lat_a[0] >= lat_a[1] or lat_b[0] >= lat_b[1]:
+        raise SystemExit("--lat-a/--lat-b need 'lo,hi' with lo < hi")
 
     import xarray as xr
 
@@ -111,8 +141,8 @@ def main(argv=None) -> int:
             f"FATAL: our land mask agrees with the mesh on only {agree:.4f} "
             "of cells; the grids are not aligned.")
 
-    ours_pac, n_op = box_mean(eta, wet, area, lat, lon, PACIFIC_LAT)
-    ours_arc, n_oa = box_mean(eta, wet, area, lat, lon, ARCTIC_LAT)
+    ours_pac, n_op = box_mean(eta, wet, area, lat, lon, lat_a, bands)
+    ours_arc, n_oa = box_mean(eta, wet, area, lat, lon, lat_b, bands)
 
     dt = xr.open_dataset(a.nemo_gridt, decode_times=False)
     ssh_name = next((v for v in ("sossheig", "zos", "ssh", "sshn")
@@ -131,15 +161,15 @@ def main(argv=None) -> int:
     # an unweighted mean over a small box is a different reduction from ours,
     # so ours is ALSO reported unweighted below as the like-for-like number.
 
-    nemo_pac, n_np = box_mean(ssh, nwet, narea, nlat, nlon, PACIFIC_LAT)
-    nemo_arc, n_na = box_mean(ssh, nwet, narea, nlat, nlon, ARCTIC_LAT)
+    nemo_pac, n_np = box_mean(ssh, nwet, narea, nlat, nlon, lat_a, bands)
+    nemo_arc, n_na = box_mean(ssh, nwet, narea, nlat, nlon, lat_b, bands)
 
     # LIKE FOR LIKE: unweighted on both sides, since NEMO's cell areas are not
     # in this file. The area-weighted pair is reported beside it so a reader
     # can see the reduction does not carry the result.
     ones = np.ones_like(eta)
-    ours_pac_u, _ = box_mean(eta, wet, ones, lat, lon, PACIFIC_LAT)
-    ours_arc_u, _ = box_mean(eta, wet, ones, lat, lon, ARCTIC_LAT)
+    ours_pac_u, _ = box_mean(eta, wet, ones, lat, lon, lat_a, bands)
+    ours_arc_u, _ = box_mean(eta, wet, ones, lat, lon, lat_b, bands)
 
     res = {
         "ours_pacific_m": ours_pac, "ours_arctic_m": ours_arc,
@@ -159,13 +189,15 @@ def main(argv=None) -> int:
     print(f"[control] cell counts  ours {n_op}/{n_oa}   NEMO {n_np}/{n_na}")
     print(f"[control] NEMO ssh variable: {ssh_name}, record {a.time_idx}")
     print("")
-    print("Sea level, Pacific side minus Arctic side, bering_pacific sector.")
-    print("POSITIVE head = Pacific stands higher = drives flow INTO the Arctic.")
-    print(f"  ours  pacific {ours_pac:+.4f}  arctic {ours_arc:+.4f}  "
+    print(f"Sea level, {a.label_a} minus {a.label_b}; longitude sector "
+          f"{a.lon_bands}, bands {a.lat_a} and {a.lat_b}.")
+    print(f"POSITIVE head = {a.label_a} stands higher = drives flow TOWARD "
+          f"{a.label_b}.")
+    print(f"  ours  {a.label_a} {ours_pac:+.4f}  {a.label_b} {ours_arc:+.4f}  "
           f"HEAD {ours_pac - ours_arc:+.4f} m")
     print(f"  ours  (unweighted, like-for-like)            "
           f"HEAD {ours_pac_u - ours_arc_u:+.4f} m")
-    print(f"  NEMO  pacific {nemo_pac:+.4f}  arctic {nemo_arc:+.4f}  "
+    print(f"  NEMO  {a.label_a} {nemo_pac:+.4f}  {a.label_b} {nemo_arc:+.4f}  "
           f"HEAD {nemo_pac - nemo_arc:+.4f} m")
     print("")
     print("READ: heads differing in SIGN => the transport's FORCING is wrong "
