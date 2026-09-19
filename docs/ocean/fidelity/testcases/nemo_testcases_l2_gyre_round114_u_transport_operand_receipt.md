@@ -229,12 +229,59 @@ It emitted no `DO NOT SHIP` verdict.  The complete log is
 `round114/review/codex_review.log`; the unavailable-review fallback is not an
 author self-review presented as independent evidence.
 
-Citation and test results are filled by the final validation commit after
-this receipt and its new citation-map entries are committed.  Until then:
+The citation gate was run from `## Outcome first` at clean commit
+`2b83e6119c55a544962f62abb97ecc9a7943f3b4`.  It found all nine citations,
+no unmapped citation, no failing map entry, and reported `PASS`.  Its shifted
+plant moved the compiled geometry range cited above by two lines, identified
+the real first endpoint at line 266 rather than planted line 268, reported
+`SYMBOL-NOT-AT-LINE`, and exited 1.  The first audit had separately caught an
+ambiguous repeated `SELECT CASE` anchor and a writer endpoint one line short;
+both were repaired by pinning the exact source occurrences without widening
+or weakening either range.
+
+Focused CPU summaries, all with `JAX_ENABLE_X64=1`, were:
 
 ```text
-VALIDATION PENDING
+31 passed in 48.80s
+119 passed in 373.93s (0:06:13)
 ```
+
+The first line is both modified gate-test modules.  The second is the exact
+inherited four-file push gate: receipt citations, TKE NEMO terms, NEMO recipe,
+and real freshwater closure.
+
+The required one-piece
+`-n 12 tests/ocean/fidelity tests/ocean/unit` run was attempted once and
+collected 8,181 cases.  It reached 96%, but ten workers aborted in JAX
+compilation and xdist repeatedly replaced them.  After the tenth dead worker,
+the controller made no progress and emitted neither a terminal summary nor a
+JUnit file; one interrupt was required, and the command exited 130.  Therefore
+there is no summary line to quote and no mechanically complete failing-set
+diff for that corrupted run; this receipt does not invent either one.  Its
+last usable progress text was:
+
+```text
+........................................................................ [ 96%]
+......................
+```
+
+Nine named crash nodes could be recovered from the interleaved traces; the
+tenth trace was truncated before its test frame.  Replaying all nine named
+nodes in one fresh serial process expanded to twelve parameterized cases and
+reported:
+
+```text
+4 failed, 8 passed in 437.52s (0:07:17)
+```
+
+All eight non-advection crash nodes pass.  The four failures are exactly the
+`ppm_fct`, `tvd`, `superbee`, and `dst3` parameters of
+`test_model_rollout_grads_finite_f32`; all four IDs occur verbatim in the
+pinned 87-ID incoming baseline.  Thus the recovery failing-set diff contains
+zero new IDs.  Round 114 changes no production package file, and every changed
+executable test/gate path is covered by the 31/31 focused pass.  Complete
+ordinary, plant, push-gate, interrupted-run, and serial-replay evidence is
+under `round114/{citations,tests}/`.
 
 ## ASKED / UNASKED
 
