@@ -106,6 +106,8 @@ def main() -> int:
                         "line, integrating NORTHWARD transport. The Florida "
                         "Current runs north through its strait, so a "
                         "meridional section cannot measure it. Equals form.")
+    p.add_argument("--split-depth-m", type=float, default=200.0,
+                   help="depth separating the surface-trapped test from the\n                        column-wide one")
     p.add_argument("--out-json", default=None)
     a = p.parse_args()
 
@@ -115,6 +117,11 @@ def main() -> int:
     mfu = np.asarray(z["mass_flux_u"], dtype=np.float64)   # (nj+1, ni+3, nlev)
     dyu = np.asarray(z["dy_u"], dtype=np.float64)          # (nj+1, ni+3)
     ours_face = _native_face(np.nansum(mfu, axis=-1) * dyu)   # m3/s, (331,360)
+    # Kept level-resolved so a section can be split by depth WITHOUT a second
+    # pass over the data: the question "is the excess surface-trapped or
+    # spread through the column" distinguishes a wind-forcing cause from a
+    # barotropic one, and it is free once the arrays are already here.
+    ours_lev = _native_face(mfu * dyu[..., None])          # (331,360,nlev)
 
     du = nc.Dataset(a.nemo_gridu)
     try:
@@ -127,6 +134,7 @@ def main() -> int:
     finally:
         du.close()
     nemo_face = np.nansum(eff, axis=0)                     # (331,360) m3/s
+    nemo_lev = np.transpose(eff, (1, 2, 0))                # (331,360,nlev)
 
     mm = nc.Dataset(a.mesh_mask)
     try:
@@ -204,9 +212,36 @@ def main() -> int:
             print(f"[control-2] residue carries "
                   f"{float(mag.sum()) * SV:.3f} Sv of |transport| in total")
 
+    gdept = _m(nc.Dataset(a.mesh_mask), "gdept_1d").squeeze()
+    shallow = gdept <= a.split_depth_m
+
+    def _depth_split(o_lev, n_lev, nm):
+        """Is the excess surface-trapped, or spread through the column?
+
+        Wind forcing spins up an Ekman-and-thermocline response that is
+        surface-intensified; a barotropic difference scales the whole column
+        together. The discriminator is NOT the fraction of the excess that is
+        shallow on its own -- most transport is shallow anyway, so that
+        number is large whatever the cause. It is that fraction compared
+        against the SAME fraction of NEMO's own transport. More
+        surface-concentrated than the flow itself points at the surface;
+        the same points at a uniform scaling.
+        """
+        exc = np.nansum(o_lev, axis=0) - np.nansum(n_lev, axis=0)
+        ref = np.nansum(n_lev, axis=0)
+        te, tr = np.nansum(np.abs(exc)), np.nansum(np.abs(ref))
+        if te <= 0 or tr <= 0:
+            return None
+        fe = float(np.nansum(np.abs(exc[shallow])) / te)
+        fr = float(np.nansum(np.abs(ref[shallow])) / tr)
+        print(f"  depth split: {100 * fe:.1f}% of the EXCESS is above "
+              f"{a.split_depth_m:g} m vs {100 * fr:.1f}% of NEMO's own "
+              f"transport -> {'SURFACE-TRAPPED' if fe > fr + 0.10 else ('COLUMN-WIDE' if fe < fr + 0.03 else 'mildly surface-leaning')}")
+        return {"frac_excess_shallow": fe, "frac_nemo_shallow": fr}
+
     out = {"rec": a.rec, "control_rel_diff_eff_vs_plain": frac,
            "control_ours_nonzero_on_nemo_land": ours_wet_on_land,
-           "sections": {}}
+           "split_depth_m": a.split_depth_m, "sections": {}}
     for spec in a.section:
         nm, lonspec, latspec = spec.split(":")
         lon0 = float(lonspec) % 360.0
@@ -231,7 +266,9 @@ def main() -> int:
               f"({int(wet.sum())} wet) ===")
         print(f"  transport ours {t_ours:+8.2f} Sv   NEMO {t_nemo:+8.2f} Sv   "
               f"difference {t_ours - t_nemo:+8.2f} Sv")
+        sp = _depth_split(ours_lev[sel, i, :], nemo_lev[sel, i, :], nm)
         out["sections"][nm] = {
+            "depth_split": sp,
             "i": i, "rows": int(sel.sum()), "wet_rows": int(wet.sum()),
             "lat0": float(mlat[sel, i].min()), "lat1": float(mlat[sel, i].max()),
             "lon_mean": float(mlon[sel, i].mean()),
@@ -248,9 +285,12 @@ def main() -> int:
         dxv = np.asarray(z["dx_v"], dtype=np.float64)
         full_v = np.nansum(mfv, axis=-1) * dxv
         ours_v = _native_face_v(full_v)
+        ours_v_lev = _native_face_v(mfv * dxv[..., None])
         dv = nc.Dataset(a.nemo_gridv)
         try:
-            nemo_v = np.nansum(_m(dv, "vocetr_eff")[a.rec], axis=0)
+            _vef = _m(dv, "vocetr_eff")[a.rec]
+            nemo_v = np.nansum(_vef, axis=0)
+            nemo_v_lev = np.transpose(_vef, (1, 2, 0))
         finally:
             dv.close()
         mv = nc.Dataset(a.mesh_mask)
@@ -302,7 +342,10 @@ def main() -> int:
                   f"{int(cols.sum())} cells ({int(wetc.sum())} wet) ===")
             print(f"  northward transport ours {t_o:+8.2f} Sv   NEMO "
                   f"{t_n:+8.2f} Sv   difference {t_o - t_n:+8.2f} Sv")
+            spz = _depth_split(ours_v_lev[j, cols, :], nemo_v_lev[j, cols, :],
+                               nm)
             out["sections"][nm] = {
+                "depth_split": spz,
                 "orientation": "zonal", "j": j,
                 "cells": int(cols.sum()), "wet_cells": int(wetc.sum()),
                 "lat": float(vlat[j, cols].mean()),
