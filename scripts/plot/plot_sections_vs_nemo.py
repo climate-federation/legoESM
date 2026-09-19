@@ -301,10 +301,21 @@ def main() -> int:
             dfdz = np.gradient(zN, z, axis=-1)
             artifact = np.abs(dfdz) * dz_mis[None, :]
             signal = np.abs(zon[0] - zN)
-        amax = float(np.nanmax(artifact)) if np.isfinite(artifact).any() else float("nan")
-        smed = float(np.nanmedian(signal)) if np.isfinite(signal).any() else float("nan")
-        print(f"[{name}] depth-offset artifact bound {amax:.4g} {unit} "
-              f"(max) vs median |tripole-NEMO| {smed:.4g} {unit}")
+        # Compare LIKE WITH LIKE. A max artifact against a median signal is
+        # not a ratio and cannot decide anything; the decisive number is the
+        # FRACTION of section cells where the sampling artifact exceeds the
+        # model difference at THAT SAME CELL.
+        both = np.isfinite(artifact) & np.isfinite(signal)
+        if both.any():
+            frac = float((artifact[both] > signal[both]).mean())
+            kmax = np.unravel_index(np.nanargmax(np.where(both, artifact, np.nan)),
+                                    artifact.shape)
+            print(f"[{name}] depth-offset artifact exceeds |tripole-NEMO| on "
+                  f"{100.0 * frac:.1f}% of section cells; at the worst cell "
+                  f"(depth {z[kmax[-1]]:.0f} m) artifact {artifact[kmax]:.4g} "
+                  f"vs signal {signal[kmax]:.4g} {unit}")
+            print(f"[{name}] median artifact {np.nanmedian(artifact[both]):.4g} "
+                  f"vs median signal {np.nanmedian(signal[both]):.4g} {unit}")
         _plot_sections(out, name, unit, tgt_lat, "latitude", z, zon,
                        (a.label_tripole, a.label_mpas),
                        f"{name} [{unit}] global zonal-mean section — "
