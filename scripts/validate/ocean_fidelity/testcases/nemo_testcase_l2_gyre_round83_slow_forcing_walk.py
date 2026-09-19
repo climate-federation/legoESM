@@ -1436,13 +1436,20 @@ def measure_round117(args) -> dict[str, object]:
             base_addend_v = np.asarray(
                 unmasked_parts["applied_keg_addend_v"].data,
                 dtype=np.float64)
+            reference = _round117_live_trace(
+                card, seeded, freshwater, surface, args.execution_mode,
+                association_arm=(
+                    "stage1-source-order", None, "override-materialized",
+                    (jnp.asarray(base_addend_u),
+                     jnp.asarray(base_addend_v))))
+            reference_parts = reference.operator_operands[0]
             full_location = tuple(
                 round120_walk["target"]["full_face_index"])
             planted_u, direction = _round120_keg_ulp_addend(
                 base_addend_u,
-                np.asarray(unmasked_parts["after_vor_u"].data,
+                np.asarray(reference_parts["after_vor_u"].data,
                            dtype=np.float64),
-                np.asarray(source_parts["zad_u"].data, dtype=np.float64),
+                np.asarray(reference_parts["zad_u"].data, dtype=np.float64),
                 full_location,
             )
             planted = _round117_live_trace(
@@ -1455,7 +1462,7 @@ def measure_round117(args) -> dict[str, object]:
                 _native_field(
                     planted_parts["applied_keg_addend_u"], "u"),
                 _native_field(
-                    unmasked_parts["applied_keg_addend_u"], "u"),
+                    reference_parts["applied_keg_addend_u"], "u"),
                 active["u3"],
             )
             planted_boundaries = {}
@@ -1468,19 +1475,39 @@ def measure_round117(args) -> dict[str, object]:
                     _native_field(
                         planted_parts[f"{production_key}_u"], "u"),
                     _native_field(
-                        unmasked_parts[f"{production_key}_u"], "u"),
+                        reference_parts[f"{production_key}_u"], "u"),
                     active["u3"],
                 )
             planted_raw_identity = {
                 name: comparison(
                     _native_field(planted_parts[f"{name}_u"], "u"),
-                    _native_field(unmasked_parts[f"{name}_u"], "u"),
+                    _native_field(reference_parts[f"{name}_u"], "u"),
                     active["u3"],
                 )
                 for name in raw_names
             }
+            reference_identity = {
+                "applied_addend": comparison(
+                    _native_field(
+                        reference_parts["applied_keg_addend_u"], "u"),
+                    _native_field(
+                        unmasked_parts["applied_keg_addend_u"], "u"),
+                    active["u3"],
+                ),
+                "raw_operands": {
+                    name: comparison(
+                        _native_field(reference_parts[f"{name}_u"], "u"),
+                        _native_field(unmasked_parts[f"{name}_u"], "u"),
+                        active["u3"],
+                    )
+                    for name in raw_names
+                },
+            }
             plant_fires = bool(
                 applied_row["differing_cells"] == 1
+                and reference_identity["applied_addend"]["bit_exact"]
+                and all(row["bit_exact"] for row in
+                        reference_identity["raw_operands"].values())
                 and all(planted_raw_identity[name]["bit_exact"]
                         for name in raw_names)
                 and all(planted_boundaries[boundary]["bit_exact"]
@@ -1489,11 +1516,10 @@ def measure_round117(args) -> dict[str, object]:
                 and all(planted_boundaries[boundary]["differing_cells"] == 1
                         for boundary in (
                             "after_keg", "after_zad", "after_adv")))
-            require(plant_fires,
-                    "Round-120 KEG ULP did not propagate only after KEG")
             return {
                 "format": "nemo-testcase-l2-gyre-round120-keg-walk-v1",
-                "status": "PLANT_FIRED",
+                "status": (
+                    "PLANT_FIRED" if plant_fires else "PLANT_INERT"),
                 "worktree": stamp,
                 "execution_regime": args.execution_mode,
                 "plant": args.plant,
@@ -1501,6 +1527,7 @@ def measure_round117(args) -> dict[str, object]:
                     "target"]["native_index"],
                 "plant_location_full_face": list(full_location),
                 "plant_direction": float(direction),
+                "unplanted_override_identity": reference_identity,
                 "applied_addend_row": applied_row,
                 "raw_operand_rows": planted_raw_identity,
                 "boundary_rows": planted_boundaries,
