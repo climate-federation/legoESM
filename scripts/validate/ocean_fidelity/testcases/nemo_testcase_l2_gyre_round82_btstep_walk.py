@@ -285,6 +285,50 @@ def _stage_impact(args, card, seeded, freshwater, surface, external,
         "zFw": round46._owned3(stage["arrays"]["wmask"], 31) > 0.5,
         "T": masks["T"], "S": masks["S"],
     }
+    live_handoff = {
+        "ssh": np.asarray(live.eta.data),
+        "uu_b": np.asarray(live.uu_b.data)[:, 1:],
+        "vv_b": np.asarray(live.vv_b.data)[1:, :],
+        "Hu_avg": np.asarray(external.transport_average[0])[:, 1:],
+        "Hv_avg": np.asarray(external.transport_average[1])[1:, :],
+    }
+    ordinary_handoff = {
+        "ssh": np.asarray(ordinary.barotropic_targets[4]),
+        "uu_b": np.asarray(ordinary.barotropic_targets[0])[:, 1:],
+        "vv_b": np.asarray(ordinary.barotropic_targets[1])[1:, :],
+        "Hu_avg": np.asarray(ordinary.barotropic_targets[2])[:, 1:],
+        "Hv_avg": np.asarray(ordinary.barotropic_targets[3])[1:, :],
+    }
+    directed_handoff = {
+        "ssh": np.asarray(directed.barotropic_targets[4]),
+        "uu_b": np.asarray(directed.barotropic_targets[0])[:, 1:],
+        "vv_b": np.asarray(directed.barotropic_targets[1])[1:, :],
+        "Hu_avg": np.asarray(directed.barotropic_targets[2])[:, 1:],
+        "Hv_avg": np.asarray(directed.barotropic_targets[3])[1:, :],
+    }
+    handoff_masks = {
+        "ssh": masks["ssh"],
+        "uu_b": masks["u"][..., 0],
+        "vv_b": masks["v"][..., 0],
+        "Hu_avg": masks["u"][..., 0],
+        "Hv_avg": masks["v"][..., 0],
+    }
+    duplicate_identity = {
+        name: round78.comparison(
+            ordinary_handoff[name], live_handoff[name], handoff_masks[name])
+        for name in live_handoff
+    }
+    directed_identity = {
+        name: round78.comparison(
+            directed_handoff[name],
+            oracle_eta if name == "ssh" else live_handoff[name],
+            handoff_masks[name])
+        for name in live_handoff
+    }
+    require(all(row["bit_exact"] for row in duplicate_identity.values()),
+            "external-only and ordinary full-step handoffs differ")
+    require(all(row["bit_exact"] for row in directed_identity.values()),
+            "record-directed arm changed more than the registered SSH field")
     ordinary_values = values(ordinary)
     directed_values = values(directed)
     rows = {}
@@ -307,6 +351,8 @@ def _stage_impact(args, card, seeded, freshwater, surface, external,
         "intervention": (
             "replace only weighted external N+1 SSH; retain live uu_b, vv_b, "
             "Hu_avg, and Hv_avg"),
+        "external_trace_vs_ordinary_handoff": duplicate_identity,
+        "directed_handoff_identity": directed_identity,
         "rows": rows,
         "directed_vs_ordinary": moved,
     }
