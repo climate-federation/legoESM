@@ -58,9 +58,14 @@ REC=$(( DAY / 5 - 1 ))
 # is the day-30 baseline call it has always been.
 SNAP=${SNAP:-$R/results/omip_nemo/trp_orca1faithtint_d30/snapshot_final.npz}
 TAG=${TAG:-}
-# CELL=LON,LAT dumps that one face level by level on both sides.
-# Unset, the card behaves exactly as before.
-CELL=${CELL:-}
+# CELL_LON and CELL_LAT dump that one face level by level on both sides.
+# TWO variables, not one "lon,lat": sbatch --export splits its own list on
+# COMMAS, so a comma inside a value is silently truncated -- CELL=-79.5,27.35
+# arrived as "-79.5" and the probe died unpacking one value into two.
+CELL_LON=${CELL_LON:-}
+CELL_LAT=${CELL_LAT:-}
+CELL=""
+[ -n "$CELL_LON" ] && [ -n "$CELL_LAT" ] && CELL="$CELL_LON,$CELL_LAT"
 GU=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY/ORCA1_5d_20000101_20000331_grid_U.nc
 GV=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY/ORCA1_5d_20000101_20000331_grid_V.nc
 MESH=$R/data/grids/eORCA1.2_mesh_mask.nc
