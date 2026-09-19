@@ -313,6 +313,60 @@ def main(argv=None) -> int:
             print("   thermosteric predicts POSITIVE (higher where warmer); "
                   "near zero with the salinity test already null leaves MASS.")
 
+    # ---- THE RIGOROUS STERIC TEST: FULL COLUMN, NOT THE SURFACE ---------
+    # Both co-location tests above are SURFACE fields, and sea level is set by
+    # the whole column. A surface-only null is suggestive, not decisive. NEMO's
+    # grid_T carries 3-D salinity (the surface tests used its top level), so
+    # the halosteric term can be done properly; it only carries surface
+    # temperature here, so the thermosteric term cannot.
+    #
+    # In the Arctic halosteric dominates thermosteric, and the surface result
+    # already points the wrong way (we are SALTIER where we stand HIGHER), so
+    # this is the test that can actually overturn or confirm the mass reading.
+    if "S" in snap and sal_name is not None:
+        nem_s3 = np.asarray(dt[sal_name].isel(time_counter=a.time_idx).values)
+        while nem_s3.ndim > 3:
+            nem_s3 = nem_s3[0]
+        if nem_s3.ndim == 3:
+            our_s3 = np.asarray(snap["S"])[j0:j0 + ny_o, i0:i0 + nx_o, :]
+            nem_s3 = np.moveaxis(nem_s3, 0, -1)          # (y, x, z)
+            nz = min(our_s3.shape[-1], nem_s3.shape[-1])
+            dS3 = our_s3[..., :nz] - nem_s3[..., :nz]
+            # beta from the model's OWN equation of state, not an invented
+            # constant: the same Roquet polynomial the closure uses.
+            from legoesm.ocean.eos import nemo_roquet_alpha_beta
+            import jax.numpy as jnp
+            dz_ref = np.asarray(dm["e3t_0"].values)
+            while dz_ref.ndim > 3:
+                dz_ref = dz_ref[0]
+            dzc = np.moveaxis(dz_ref, 0, -1)[j0:j0 + ny_o,
+                                             i0:i0 + nx_o, :nz]
+            depth = np.cumsum(dzc, axis=-1) - 0.5 * dzc
+            _, beta = nemo_roquet_alpha_beta(
+                jnp.asarray(np.nan_to_num(nem_s3[..., :nz] * 0.0 + 0.0)),
+                jnp.asarray(np.nan_to_num(nem_s3[..., :nz], nan=35.0)),
+                jnp.asarray(depth))
+            beta = np.asarray(beta)
+            valid = np.isfinite(dS3) & np.isfinite(dzc) & (dzc > 1e-6)
+            # halosteric height difference: MORE salt => LOWER sea level
+            hal = -np.nansum(np.where(valid, beta * dS3 * dzc, 0.0), axis=-1)
+            res["halosteric_variable"] = sal_name
+            print("")
+            print("[halosteric] FULL-COLUMN height difference implied by the "
+                  "salinity difference (negative = our column stands LOWER):")
+            for lo, hi in ((30, 60), (60, 70), (70, 80), (80, 90)):
+                m = both & (nlat >= lo) & (nlat < hi) & np.isfinite(hal)
+                if int(m.sum()) < 10:
+                    continue
+                v = float(np.nanmean(hal[m]))
+                res[f"halosteric_{lo}_{hi}"] = v
+                obs = res.get(f"zonal_diff_{lo}_{hi}", float("nan"))
+                print(f"   {lo:+4d}..{hi:+4d}  halosteric {v:+.4f} m   vs "
+                      f"OBSERVED sea-level excess {obs:+.4f} m")
+            print("   If halosteric is small or NEGATIVE where the excess is "
+                  "POSITIVE, density cannot be the cause and the excess is "
+                  "MASS.")
+
     if a.map_png:
         import matplotlib
         matplotlib.use("Agg")
