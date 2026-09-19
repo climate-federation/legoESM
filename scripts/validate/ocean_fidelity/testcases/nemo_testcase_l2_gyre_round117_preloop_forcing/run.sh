@@ -59,7 +59,7 @@ if [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
   die "acquisition requires a clean committed tree" 63
 fi
 readonly COMMIT=$(git rev-parse HEAD)
-export PYTHONPATH=$REPO/packages/core:$REPO/packages/ocean:$REPO/packages/atmosphere:$REPO/packages/coupler:$REPO/packages/ice:$REPO/packages/land:$REPO/packages/ml:$REPO/packages/tools:$REPO/src
+export PYTHONPATH=$REPO:$REPO/packages/core:$REPO/packages/ocean:$REPO/packages/atmosphere:$REPO/packages/coupler:$REPO/packages/ice:$REPO/packages/land:$REPO/packages/ml:$REPO/packages/tools:$REPO/src
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 export OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1
 
