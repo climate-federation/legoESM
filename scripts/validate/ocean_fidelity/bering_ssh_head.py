@@ -221,6 +221,84 @@ def main(argv=None) -> int:
         res[f"zonal_diff_{lo}_{hi}"] = v
         print(f"   {lo:+4d}..{hi:+4d}  {v:+.4f} m   (n={int(m.sum())})")
 
+    # ---- FALSIFIER FOR THE FRESHWATER READING --------------------------
+    # The Arctic sea-level excess is structured and sits on the Siberian side,
+    # which LOOKS like a freshwater accumulation. That is a pattern fitting a
+    # story, which this session has twice mistaken for evidence. The mechanism
+    # makes a checkable prediction: if freshwater piled up there, our surface
+    # must be FRESHER than NEMO's IN THE SAME PLACE. Co-location is the test;
+    # a fresh anomaly somewhere else, or none at all, refutes it.
+    sal_name = next((v for v in ("vosaline", "so", "soce", "salinity")
+                     if v in dt.variables), None)
+    if sal_name is not None and "S" in snap:
+        our_s = np.asarray(snap["S"])[..., 0]                 # surface level
+        nem_s = _sq(dt[sal_name].isel(time_counter=a.time_idx).values[0]
+                    if dt[sal_name].ndim == 4 else
+                    dt[sal_name].isel(time_counter=a.time_idx).values)
+        osw = our_s[j0:j0 + ny_o, i0:i0 + nx_o]
+        sboth = both & np.isfinite(osw) & np.isfinite(nem_s) & (nem_s > 1.0)
+        dS = np.where(sboth, osw - nem_s, np.nan)
+        res["salinity_variable"] = sal_name
+        print("")
+        print(f"[salinity] surface, ours - NEMO ({sal_name}), by band:")
+        for lo, hi in ((30, 60), (60, 70), (70, 80), (80, 90)):
+            m = sboth & (nlat >= lo) & (nlat < hi)
+            if int(m.sum()) < 10:
+                continue
+            v = float(np.nanmean(dS[m]))
+            res[f"dS_{lo}_{hi}"] = v
+            print(f"   {lo:+4d}..{hi:+4d}  {v:+.4f} psu   (n={int(m.sum())})")
+        # THE CO-LOCATION TEST, stated as a number rather than read off a map:
+        # correlation between the sea-level excess and the salinity anomaly
+        # over the Arctic. Freshwater accumulation predicts a NEGATIVE
+        # correlation -- higher where fresher. Near zero refutes it.
+        m = sboth & (nlat >= 70.0) & np.isfinite(diff) & np.isfinite(dS)
+        if int(m.sum()) > 100:
+            c = float(np.corrcoef(diff[m], dS[m])[0, 1])
+            res["corr_ssh_excess_vs_dS_north70"] = c
+            res["n_corr"] = int(m.sum())
+            print(f"[co-location] corr(sea-level excess, salinity anomaly) "
+                  f"north of 70N = {c:+.3f}  (n={int(m.sum())})")
+            print("   freshwater accumulation predicts NEGATIVE (higher where "
+                  "fresher); near zero refutes it.")
+
+    # ---- THE OTHER STERIC TERM ------------------------------------------
+    # The salinity test refuted freshwater accumulation: north of 70N the
+    # sea-level excess and the salinity anomaly are uncorrelated (-0.034), and
+    # in 70-80N our water is SALTIER, which would stand LOWER, not higher.
+    # Density has one other lever. Warm water stands higher, so if the excess
+    # is thermosteric our Arctic must be WARMER in the same cells. If it is
+    # neither, the excess is MASS -- water actually piled up -- and the cause
+    # is dynamical convergence rather than any surface buoyancy flux.
+    tem_name = next((v for v in ("votemper", "thetao", "toce", "temperature")
+                     if v in dt.variables), None)
+    if tem_name is not None and "T" in snap:
+        our_t = np.asarray(snap["T"])[..., 0]
+        nem_t = _sq(dt[tem_name].isel(time_counter=a.time_idx).values[0]
+                    if dt[tem_name].ndim == 4 else
+                    dt[tem_name].isel(time_counter=a.time_idx).values)
+        otw = our_t[j0:j0 + ny_o, i0:i0 + nx_o]
+        tboth = both & np.isfinite(otw) & np.isfinite(nem_t) & (nem_t > -5.0)
+        dT = np.where(tboth, otw - nem_t, np.nan)
+        res["temperature_variable"] = tem_name
+        print("")
+        print(f"[temperature] surface, ours - NEMO ({tem_name}), by band:")
+        for lo, hi in ((30, 60), (60, 70), (70, 80), (80, 90)):
+            m = tboth & (nlat >= lo) & (nlat < hi)
+            if int(m.sum()) < 10:
+                continue
+            v = float(np.nanmean(dT[m]))
+            res[f"dT_{lo}_{hi}"] = v
+            print(f"   {lo:+4d}..{hi:+4d}  {v:+.4f} degC   (n={int(m.sum())})")
+        m = tboth & (nlat >= 70.0) & np.isfinite(diff) & np.isfinite(dT)
+        if int(m.sum()) > 100:
+            ct = float(np.corrcoef(diff[m], dT[m])[0, 1])
+            res["corr_ssh_excess_vs_dT_north70"] = ct
+            print(f"[co-location] corr(sea-level excess, temperature anomaly) "
+                  f"north of 70N = {ct:+.3f}  (n={int(m.sum())})")
+            print("   thermosteric predicts POSITIVE (higher where warmer); "
+                  "near zero with the salinity test already null leaves MASS.")
+
     if a.map_png:
         import matplotlib
         matplotlib.use("Agg")
@@ -238,6 +316,26 @@ def main(argv=None) -> int:
             "RED = our sea surface stands HIGHER than NEMO's. Day 25-30, both "
             "from rest. The Bering head is set by the Arctic side.",
             fontsize=10)
+        if "corr_ssh_excess_vs_dS_north70" in res:
+            fig2, bx = plt.subplots(1, 2, figsize=(13, 4.6))
+            ja = int(np.argmax((nlat >= 60).any(axis=1)))
+            for _b, _f, _t, _v in (
+                    (bx[0], diff, "sea level, ours - NEMO (m)", 0.5),
+                    (bx[1], dS, "surface salinity, ours - NEMO (psu)", 3.0)):
+                _im = _b.pcolormesh(np.where(nlat >= 60.0, _f, np.nan),
+                                    vmin=-_v, vmax=_v, cmap="RdBu_r")
+                _b.set_title(_t + "  (60N and north)", fontsize=9)
+                _b.set_ylim(ja, diff.shape[0])
+                plt.colorbar(_im, ax=_b, shrink=0.85)
+            fig2.suptitle(
+                "CO-LOCATION TEST. Freshwater accumulation predicts the "
+                "sea-level high (left, red) to sit on a FRESH anomaly "
+                "(right, BLUE). corr north of 70N = "
+                f"{res['corr_ssh_excess_vs_dS_north70']:+.3f}", fontsize=10)
+            fig2.tight_layout()
+            _pth = str(a.map_png).replace(".png", "_colocation.png")
+            fig2.savefig(_pth, dpi=110)
+            print(f"[map] {_pth}")
         fig.tight_layout()
         Path(a.map_png).parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(a.map_png, dpi=110)
