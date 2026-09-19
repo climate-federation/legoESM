@@ -205,6 +205,16 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/stp2d.f90"),
     "GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynspg_ts.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynspg_ts.f90"),
+    "GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynldf_lev.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynldf_lev.f90"),
+    "GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynkeg.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynkeg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynadv.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynadv.f90"),
+    "GYRE_OMIP_L2_P3_SM_R117PRELOOP/EXP00/namelist_cfg": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R117PRELOOP/EXP00/namelist_cfg"),
+    "GYRE_OMIP_L2_P3_SM_R117PRELOOP/EXP00/ocean.output": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R117PRELOOP/EXP00/ocean.output"),
     # Round 92 binds the operand diagnosis to the exact acquired Round-90
     # compiled card, including its write-only recorder.
     "GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/stprk3_stg.f90": (
@@ -2447,6 +2457,23 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynspg_ts.f90:329-345': [
         'WRITE(l2_r117_unit) puu_b(:,:,Kmm), pvv_b(:,:,Kmm), zu_frc, zv_frc',
         "WRITE(numout,*) 'ROUND117_PRELOOP_FORCING_DUMP '", 17],
+    # --- round 119: stage-1 source order and first production-only boundary ---
+    'GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynldf_lev.f90:121-141': [
+        'DO jj = ntsj-( 0), ntej+(  0+1 )',
+        ('END DO   ;   END DO', 2), 21],
+    'GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynkeg.f90:117-131': [
+        'CASE ( nkeg_C2 )', ('END DO   ;   END DO', 2), 15],
+    'GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynkeg.f90:129-130': [
+        ('puu(ji,jj,jk,Krhs) = puu(ji,jj,jk,Krhs)', 1),
+        ('pvv(ji,jj,jk,Krhs) = pvv(ji,jj,jk,Krhs)', 1), 2],
+    'GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynadv.f90:339-345': [
+        'IF( ln_dynadv_OFF  ) THEN',
+        "IF( nn_dynkeg /= nkeg_C2 .AND. nn_dynkeg /= nkeg_HW )", 7],
+    'GYRE_OMIP_L2_P3_SM_R117PRELOOP/EXP00/namelist_cfg:161-162': [
+        'ln_dynadv_vec = .true.', 'nn_dynkeg     = 0', 2],
+    'GYRE_OMIP_L2_P3_SM_R117PRELOOP/EXP00/ocean.output:780-781': [
+        'Vector form: 2nd order centered scheme',
+        'with Hollingsworth scheme (=1) or not (=0)', 2],
     'GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/stprk3_stg.f90:278-324': [
         ('ALLOCATE( zub(', 1),
         ('DEALLOCATE( zub, zvb )', 1), 47],

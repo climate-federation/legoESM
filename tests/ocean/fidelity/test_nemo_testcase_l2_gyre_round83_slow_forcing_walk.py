@@ -134,3 +134,10 @@ def test_round119_hpg_ulp_plant_survives_every_source_boundary() -> None:
         value = value + term[location]
         ordinary = ordinary + term[location]
     assert value.view(np.uint64) != ordinary.view(np.uint64)
+
+
+def test_round119_source_order_arm_is_private_and_default_off() -> None:
+    hook_name = "nemo_stage_rhs_accumulation_order_arm"
+    hooks = WALK.model_module._NEMOWSRK3TestHooks()
+    assert getattr(hooks, hook_name) is False
+    assert hook_name not in WALK.model_module.LatLonCGridOceanConfig._fields
