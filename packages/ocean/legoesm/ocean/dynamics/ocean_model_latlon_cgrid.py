@@ -1023,6 +1023,12 @@ class _NEMOWSRK3TestHooks(NamedTuple):
     # stage program.  Private WRITE-only round-51 instrument; no constructible
     # model configuration can select it.
     expose_live_stage_operands: bool = False
+    # Private one-variable controls for the frozen barotropic forcing walk.
+    # The incoming override lands immediately before dyn_cor_2D's equivalent;
+    # the final override lands immediately after its subtract-and-mask.  They
+    # are test-only arrays, never constructible configuration selectors.
+    slow_forcing_incoming_override: object = None
+    barotropic_slow_forcing_override: object = None
     # Substitute NEMO's six raw b/bb arrays at the barotropic loop entry while
     # leaving legoESM's deviation-form carried state untouched.  Private
     # decision-33 measurement only.
@@ -1664,6 +1670,7 @@ class _NEMOWSLiveOperandTrace(NamedTuple):
     tke_entry: object
     tke_statement_trace: object
     barotropic_targets: object
+    slow_forcing_producer: object
     stage_rhs: object
     stage1_full_rhs: object
     stage1_rhs_walk: object
@@ -5307,6 +5314,7 @@ class LatLonCGridOceanModel:
         _nemo_ws_exposed_stage3_rhs = None
         _nemo_ws_stage_tracers = None
         _nemo_ws_live_stage_states = None; _nemo_ws_live_stage_raw = None; _nemo_ws_live_stage_rhs = None; _nemo_ws_live_baro_geometry = None  # noqa: E501,E702
+        _nemo_ws_live_slow_forcing_producer = None
         _nemo_ws_live_stage1_full_rhs = None; _nemo_ws_live_stage1_rhs_walk = None  # noqa: E702
         _nemo_ws_live_stage_qco = None
         _nemo_ws_live_tke_entry = None
@@ -5769,6 +5777,13 @@ class LatLonCGridOceanModel:
                     _bt_pv_scheme = (
                         "ene" if _bt_cor_split in ("ene", "ene_metric")
                         else "een")
+                    _slow_incoming_override = (
+                        self._nemo_ws_test_hooks
+                        .slow_forcing_incoming_override)
+                    if _slow_incoming_override is not None:
+                        F_slow_u, F_slow_v = _slow_incoming_override
+                    _slow_incoming_u = F_slow_u
+                    _slow_incoming_v = F_slow_v
                     (_cor_u_sub, _cor_v_sub,
                      _een_pre_built) = barotropic_coriolis_een_pre_step(
                         state_mid.u.data, state_mid.v.data, h_k_pre, _grid,
@@ -5795,6 +5810,32 @@ class LatLonCGridOceanModel:
                         _een_pre_shared = _een_pre_built
                     F_slow_u = (F_slow_u - _cor_u_sub) * state.u_mask.data
                     F_slow_v = (F_slow_v - _cor_v_sub) * state.v_mask.data
+                    _slow_final_override = (
+                        self._nemo_ws_test_hooks
+                        .barotropic_slow_forcing_override)
+                    if _slow_final_override is not None:
+                        F_slow_u, F_slow_v = _slow_final_override
+                    _nemo_ws_live_slow_forcing_producer = {
+                        "rhs_u": du_dt,
+                        "rhs_v": dv_dt,
+                        "thickness_u": h_u_pre,
+                        "thickness_v": h_v_pre,
+                        "depth_u": H_u_pre,
+                        "depth_v": H_v_pre,
+                        "post_wind_u": _F_slow_wind_u,
+                        "post_wind_v": _F_slow_wind_v,
+                        "post_drag_u": _F_slow_drag_u,
+                        "post_drag_v": _F_slow_drag_v,
+                        "wind_tau_u": _wind_tau_i_u,
+                        "wind_tau_v": _wind_tau_j_v,
+                        "wind_r1_rho0": _wind_r1_rho0,
+                        "incoming_u": _slow_incoming_u,
+                        "incoming_v": _slow_incoming_v,
+                        "coriolis_u": _cor_u_sub,
+                        "coriolis_v": _cor_v_sub,
+                        "final_u": F_slow_u,
+                        "final_v": F_slow_v,
+                    }
                     _add_bt_cor = True
                 else:
                     from legoesm.ocean.dynamics.latlon_cgrid_operators import (
@@ -8463,7 +8504,8 @@ class LatLonCGridOceanModel:
                     or _nemo_ws_live_stage1_full_rhs is None
                     or _nemo_ws_live_stage1_rhs_walk is None
                     or _nemo_ws_live_tke_entry is None
-                    or _nemo_ws_live_tke_statement_trace is None):
+                    or _nemo_ws_live_tke_statement_trace is None
+                    or _nemo_ws_live_slow_forcing_producer is None):
                 raise ValueError("live WS-RK3 operand trace is incomplete")
             return _NEMOWSLiveOperandTrace(
                 state_after=state_new,
@@ -8483,6 +8525,8 @@ class LatLonCGridOceanModel:
                                     (_eta_live_one_third,
                                      _eta_live_one_half,
                                      state_new.eta.data)),
+                slow_forcing_producer=(
+                    _nemo_ws_live_slow_forcing_producer),
                 stage_rhs=_nemo_ws_live_stage_rhs,
                 stage1_full_rhs=_nemo_ws_live_stage1_full_rhs,
                 stage1_rhs_walk=_nemo_ws_live_stage1_rhs_walk,

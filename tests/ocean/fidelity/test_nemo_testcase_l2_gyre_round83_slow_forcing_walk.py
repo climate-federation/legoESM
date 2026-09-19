@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 
 import numpy as np
+import jax
 
 
 SCRIPT = (
@@ -58,3 +59,53 @@ def test_comparison_detects_one_ulp_on_an_active_cell() -> None:
     assert not row["bit_exact"]
     assert row["differing_cells"] == 1
     assert row["absolute_max"] > 0.0
+
+
+def test_round117_compiled_accumulator_order_keeps_after_adv_identity() -> None:
+    terms = [np.asarray([value], dtype=np.float64) for value in range(1, 11)]
+    rows = jax.device_get(jax.jit(WALK.round117_source_order_accumulators)(
+        *terms))
+    assert rows["after_hpg_u"][0] == 1.0
+    assert rows["after_ldf_u"][0] == 4.0
+    assert rows["after_vor_u"][0] == 9.0
+    assert rows["after_keg_u"][0] == 16.0
+    assert rows["after_zad_u"][0] == 25.0
+    np.testing.assert_array_equal(rows["after_adv_u"], rows["after_zad_u"])
+
+
+def test_round117_first_nonbit_obeys_boundary_then_face_order() -> None:
+    exact = {"bit_exact": True, "absolute_max": 0.0}
+    rows = {
+        face: {boundary: dict(exact) for boundary in WALK.ROUND117_BOUNDARIES}
+        for face in ("u", "v")
+    }
+    rows["v"]["after_hpg"] = {"bit_exact": False, "absolute_max": 2.0}
+    rows["u"]["after_ldf"] = {"bit_exact": False, "absolute_max": 3.0}
+    first = WALK.round117_first_nonbit(rows)
+    assert first["boundary"] == "after_hpg"
+    assert first["face"] == "v"
+
+
+def test_round117_native_override_retains_excluded_halo() -> None:
+    full_u = np.arange(8.0).reshape(2, 4)
+    native_u = np.full((2, 3), 42.0)
+    replaced_u = WALK._full_from_native(full_u, native_u, "u")
+    np.testing.assert_array_equal(replaced_u[:, 0], full_u[:, 0])
+    np.testing.assert_array_equal(replaced_u[:, 1:], native_u)
+
+    full_v = np.arange(8.0).reshape(4, 2)
+    native_v = np.full((3, 2), -7.0)
+    replaced_v = WALK._full_from_native(full_v, native_v, "v")
+    np.testing.assert_array_equal(replaced_v[0], full_v[0])
+    np.testing.assert_array_equal(replaced_v[1:], native_v)
+
+
+def test_round117_one_ulp_plant_survives_subtract() -> None:
+    incoming = np.asarray([[1.0, 2.0]], dtype=np.float64)
+    coriolis = np.asarray([[0.25, 0.5]], dtype=np.float64)
+    mask = np.asarray([[True, True]])
+    planted, location, _ = WALK._round117_propagating_ulp(
+        incoming, coriolis, mask)
+    assert np.count_nonzero(planted.view(np.uint64) != incoming.view(np.uint64)) == 1
+    assert ((planted - coriolis)[location].view(np.uint64)
+            != (incoming - coriolis)[location].view(np.uint64))
