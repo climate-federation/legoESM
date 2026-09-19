@@ -216,8 +216,8 @@ both NEMO-recipe suites):
 The clean-tree receipt citation gate found all seven citations, no failures,
 no unmapped citations and no map-audit failures: `status=PASS`.  Its complete
 self-test table fired, including the unplanted passing controls.  The explicit
-shifted-citation plant moved the first endpoint of
-`dynkeg.f90:129-130`; it exited nonzero with `status=FAIL` and
+shifted-citation plant moved the first endpoint of the mapped KEG range; it
+exited nonzero with `status=FAIL` and
 `SYMBOL-NOT-AT-LINE`.  The gate and plant JSON/log SHA-256 values are
 `a1856ab8ddcf222b251f6067b20b08c2208cfa43d539514ed6f80f575fbe9d33`
 and `0d568c3725a63c35c13121a50480f2b873bd342eb68577305bc65fb10a3a011a`,
