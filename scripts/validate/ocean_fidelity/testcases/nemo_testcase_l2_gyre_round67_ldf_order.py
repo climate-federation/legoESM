@@ -537,6 +537,25 @@ def _round113_score_inputs(observation: tuple, bundle: dict) -> dict:
         "r1_area": bundle["r1_area"],
         "p2dt": np.asarray(bundle["p2dt"]),
     }
+    tmask = np.asarray(bundle["tmask"] > 0.5)
+    u_core = tmask * np.roll(tmask, 1, axis=1)
+    u_mask = np.concatenate([u_core, u_core[:, :1]], axis=1)
+    v_mask = np.pad(
+        tmask[:-1] * tmask[1:], ((1, 1), (0, 0), (0, 0)))
+    w_mask = np.zeros(np.asarray(bundle["p_w"]).shape, dtype=bool)
+    w_mask[..., 1:30] = np.asarray(bundle["wmask"][..., 1:30] > 0.5)
+    masks = {
+        "base": tmask,
+        "transport_u": u_mask,
+        "transport_v": v_mask,
+        "transport_w": w_mask,
+        "h_kbb": tmask,
+        "h_kmm": tmask,
+        "tmask": np.ones(tmask.shape, dtype=bool),
+        "wmask": np.ones(tmask.shape, dtype=bool),
+        "r1_area": tmask[..., 0],
+        "p2dt": np.ones((), dtype=bool),
+    }
     for tracer, values in zip(TRACERS, observation, strict=True):
         require(len(values) == len(ROUND113_INPUTS) + 1,
                 "round-113 callback schema changed")
@@ -548,12 +567,17 @@ def _round113_score_inputs(observation: tuple, bundle: dict) -> dict:
             want = np.asarray(want, dtype=np.float64)
             require(got.shape == want.shape,
                     f"round-113 {tracer} {name} shape differs")
-            rows[tracer][name] = round54.field_stats(
+            row = round54.field_stats(got, want, masks[name])
+            row["full_domain"] = round54.field_stats(
                 got, want, np.ones(want.shape, dtype=bool))
+            rows[tracer][name] = row
         upstream = np.asarray(values[-1], dtype=np.float64)
         want_upstream = bundle["expected"][(tracer, "rhs_after")]
         rows[tracer]["adv_up1"] = round54.field_stats(
-            upstream, want_upstream, np.ones(want_upstream.shape, dtype=bool))
+            upstream, want_upstream, tmask)
+        rows[tracer]["adv_up1"]["full_domain"] = round54.field_stats(
+            upstream, want_upstream,
+            np.ones(want_upstream.shape, dtype=bool))
     for index, name in enumerate(ROUND113_INPUTS[1:], start=1):
         require(np.array_equal(observation[0][index], observation[1][index]),
                 f"round-113 common input {name} differs between T and S calls")
@@ -1042,7 +1066,10 @@ def measure(args) -> dict:
     model, seeded, dt, freshwater, surface = step_calls[-1]
     if args.round113_live_inputs:
         require(step_results, "round-113 seeded production result is absent")
-        baseline_state = jax.device_get(step_results[-1])
+        trace = jax.device_get(step_results[-1])
+        require(hasattr(trace, "state_after"),
+                "round-113 seeded result is not the live operand trace")
+        baseline_state = trace.state_after
     else:
         baseline_state = jax.device_get(type(model)(
             model.grid, model.z_coord, model.config).step(
