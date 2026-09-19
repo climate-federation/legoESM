@@ -45,26 +45,24 @@ SLOW_EXPECTED_SIZE = (
 )
 PRELOOP_HEADER = (1, 2, 3, JPI, JPJ, 64, 18, OWNED_2D_COUNT)
 PRELOOP_FULL_FIELDS = (
-    "u_kmm", "v_kmm", "u_mask", "v_mask",
-    "ffu_nw", "ffu_ne", "ffu_sw", "ffu_se",
-    "ffv_nw", "ffv_ne", "ffv_sw", "ffv_se",
-    "cor_u", "cor_v",
+    "u_kmm", "v_kmm", "u_mask", "v_mask", "cor_u", "cor_v",
 )
 PRELOOP_FIELD_LAYOUT = (
     ("u_kmm", "full"), ("v_kmm", "full"),
     ("incoming_u", "owned"), ("incoming_v", "owned"),
     ("u_mask", "full"), ("v_mask", "full"),
-    ("ffu_nw", "full"), ("ffu_ne", "full"),
-    ("ffu_sw", "full"), ("ffu_se", "full"),
-    ("ffv_nw", "full"), ("ffv_ne", "full"),
-    ("ffv_sw", "full"), ("ffv_se", "full"),
+    ("ffu_nw", "owned"), ("ffu_ne", "owned"),
+    ("ffu_sw", "owned"), ("ffu_se", "owned"),
+    ("ffv_nw", "owned"), ("ffv_ne", "owned"),
+    ("ffv_sw", "owned"), ("ffv_se", "owned"),
     ("cor_u", "full"), ("cor_v", "full"),
     ("final_u", "owned"), ("final_v", "owned"),
 )
 PRELOOP_EXPECTED_SIZE = (
     16 + 8 * 4
     + len(PRELOOP_FULL_FIELDS) * FULL_2D_COUNT * 8
-    + 4 * OWNED_2D_COUNT * 8
+    + (len(PRELOOP_FIELD_LAYOUT) - len(PRELOOP_FULL_FIELDS))
+    * OWNED_2D_COUNT * 8
 )
 
 
@@ -177,7 +175,11 @@ def read_preloop_record(
         f"pre-loop header {header_tuple} != {PRELOOP_HEADER}",
     )
     fields = {}
-    for name, layout in PRELOOP_FIELD_LAYOUT:
+    layout_fields = (
+        PRELOOP_FIELD_LAYOUT[:-1]
+        if plant == "layout" else PRELOOP_FIELD_LAYOUT
+    )
+    for name, layout in layout_fields:
         if layout == "full":
             fields[name] = _full2(_take(
                 stream, FULL_2D_COUNT * 8, f"pre-loop {name}"))
@@ -228,17 +230,22 @@ def measure(args: argparse.Namespace) -> dict[str, object]:
     stamp = worktree_stamp()
     require(stamp.get("clean") is True,
             "round117 gate requires a clean producer worktree")
-    expected = "0" * 40 if args.plant == "stamp" else args.expect_commit.lower()
+    expected = args.expect_commit.lower()
     require(
         len(expected) == 40 and stamp["commit"].lower() == expected,
         f"commit stamp mismatch: {stamp['commit']} != {expected}",
     )
+    record_commit = (
+        args.expect_record_commit or args.expect_commit
+    ).lower()
+    require(len(record_commit) == 40, "record producer commit is not full length")
     producer = (args.root / "producer_commit.txt").read_text(
         encoding="utf-8").strip().lower()
-    require(producer == args.expect_commit.lower(),
-            "producer_commit.txt differs from --expect-commit")
+    require(producer == record_commit,
+            "producer_commit.txt differs from --expect-record-commit")
+    stamp_commit = "0" * 40 if args.plant == "stamp" else record_commit
     for name in (SLOW_RECORD, PRELOOP_RECORD):
-        _check_stamp(args.root, name, args.expect_commit)
+        _check_stamp(args.root, name, stamp_commit)
 
     slow = read_slow_record(args.root / SLOW_RECORD)
     preloop = read_preloop_record(
@@ -309,11 +316,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--reference-root", type=Path, required=True)
     parser.add_argument("--expect-commit", required=True)
+    parser.add_argument("--expect-record-commit")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--plant",
-        choices=("none", "stamp", "truncation", "header", "input-ulp",
-                 "reference-ulp"),
+        choices=("none", "stamp", "truncation", "header", "layout",
+                 "input-ulp", "reference-ulp"),
         default="none",
     )
     args = parser.parse_args(argv)

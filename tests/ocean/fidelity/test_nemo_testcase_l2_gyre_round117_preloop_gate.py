@@ -78,7 +78,8 @@ def _write_records(root: Path, commit: str) -> tuple[np.ndarray, np.ndarray]:
         "final_u": final_u, "final_v": final_v,
     }
     for name, layout in gate.PRELOOP_FIELD_LAYOUT:
-        value = values.get(name, zero_full)
+        value = values.get(
+            name, zero_full if layout == "full" else zero_owned)
         preloop.extend(
             _full2_bytes(value) if layout == "full" else _owned2_bytes(value))
     preloop_path = root / gate.PRELOOP_RECORD
@@ -118,7 +119,7 @@ def test_round117_exact_mixed_layout_and_sizes(tmp_path: Path) -> None:
     slow = gate.read_slow_record(tmp_path / gate.SLOW_RECORD)
     preloop = gate.read_preloop_record(tmp_path / gate.PRELOOP_RECORD)
     assert slow["bytes"] == gate.SLOW_EXPECTED_SIZE == 1_486_548
-    assert preloop["bytes"] == gate.PRELOOP_EXPECTED_SIZE == 127_408
+    assert preloop["bytes"] == gate.PRELOOP_EXPECTED_SIZE == 112_560
     np.testing.assert_array_equal(slow["fields"]["post_wind_u"],
                                   preloop["fields"]["incoming_u"])
     np.testing.assert_array_equal(preloop["fields"]["final_u"], final_u)
@@ -140,8 +141,28 @@ def test_round117_gate_accepts_closed_boundaries(
     assert "STATUS PASS" in capsys.readouterr().out
 
 
+def test_round117_gate_separates_tool_and_record_commits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    record_commit = "d" * 40
+    tool_commit = "e" * 40
+    final_u, final_v = _write_records(tmp_path, record_commit)
+    _install_fakes(monkeypatch, tool_commit, final_u, final_v)
+    assert gate.main([
+        "--root", str(tmp_path), "--reference-root", str(tmp_path),
+        "--expect-commit", tool_commit,
+        "--expect-record-commit", record_commit,
+        "--output", str(tmp_path / "separate-commits.json"),
+    ]) == 0
+    assert "STATUS PASS" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize(
-    "plant", ("stamp", "truncation", "header", "input-ulp", "reference-ulp"),
+    "plant", (
+        "stamp", "truncation", "header", "layout", "input-ulp",
+        "reference-ulp",
+    ),
 )
 def test_round117_plants_exit_nonzero_and_name_firing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
