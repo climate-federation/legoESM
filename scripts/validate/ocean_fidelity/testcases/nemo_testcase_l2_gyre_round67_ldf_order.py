@@ -37,6 +37,10 @@ ROUND113_INPUTS = (
 )
 
 
+class _Round113EagerBoundaryComplete(RuntimeError):
+    """Internal stop after both eager production FCT calls were observed."""
+
+
 def require(ok: bool, message: str) -> None:
     if not ok:
         raise RuntimeError(message)
@@ -597,6 +601,7 @@ def measure(args) -> dict:
     qsr_calls: list[np.ndarray] = []
     ldf_calls: list[tuple[np.ndarray, np.ndarray]] = []
     step_calls: list[tuple] = []
+    step_results: list[object] = []
     fct_split_calls: list[tuple[np.ndarray, ...]] = []
     fct_walk_calls: list[tuple[np.ndarray, ...]] = []
     live_input_calls: list[tuple[np.ndarray, ...]] = []
@@ -626,6 +631,7 @@ def measure(args) -> dict:
     fct_walk_trace_index = 0
     live_input_trace_index = 0
     active_live_input_family: str | None = None
+    round113_eager_direct = False
 
     def reciprocal_capture(live, oracle, oracle_content, wet):
         reciprocal_calls.append({
@@ -730,9 +736,14 @@ def measure(args) -> dict:
                 / jnp.maximum(h_kmm, jnp.asarray(1.0e-10, h_kmm.dtype)))
             input_values = _round113_input_tuple(
                 call_values, call_kwargs, tracer=tracer)
-            jax.debug.callback(
-                live_input_sink, *input_values, upstream_rhs, ordered=True)
+            if round113_eager_direct:
+                live_input_sink(*jax.device_get((*input_values, upstream_rhs)))
+            else:
+                jax.debug.callback(
+                    live_input_sink, *input_values, upstream_rhs, ordered=True)
             live_input_trace_index += 1
+            if round113_eager_direct and live_input_trace_index == 2:
+                raise _Round113EagerBoundaryComplete
             return div_h, div_w
         if not capture_fct_split:
             return real_fct(*values, **kwargs)
@@ -794,8 +805,10 @@ def measure(args) -> dict:
     def step_capture(self, state, dt, freshwater=None, surface_forcing=None,
                      *values, **kwargs):
         step_calls.append((self, state, dt, freshwater, surface_forcing))
-        return real_step(self, state, dt, freshwater, surface_forcing,
-                         *values, **kwargs)
+        result = real_step(self, state, dt, freshwater, surface_forcing,
+                           *values, **kwargs)
+        step_results.append(result)
+        return result
 
     round66.reciprocal_substitutions = reciprocal_capture
     model_module._nemo_ws_rk3_tracer_pair_step = pair_capture
@@ -1027,9 +1040,13 @@ def measure(args) -> dict:
         round66.transposed(arrays["content_T"]), reciprocal_calls[0]["wet"])
 
     model, seeded, dt, freshwater, surface = step_calls[-1]
-    baseline_state = jax.device_get(type(model)(
-        model.grid, model.z_coord, model.config).step(
-            seeded, dt, freshwater=freshwater, surface_forcing=surface))
+    if args.round113_live_inputs:
+        require(step_results, "round-113 seeded production result is absent")
+        baseline_state = jax.device_get(step_results[-1])
+    else:
+        baseline_state = jax.device_get(type(model)(
+            model.grid, model.z_coord, model.config).step(
+                seeded, dt, freshwater=freshwater, surface_forcing=surface))
 
     round112_matrix = {}
     if args.round112_fct_walk:
@@ -1205,16 +1222,19 @@ def measure(args) -> dict:
         if not args.plant_live_input_ulp:
             live_input_calls.clear()
             active_live_input_family = None
+            round113_eager_direct = True
             model_module._nemo_ws_rk3_tracer_pair_step = pair_capture
             advection_module.fct_tracer_advection = fct_capture
             try:
-                with jax.disable_jit():
-                    eager_state = model._step_impl(
-                        seeded, dt, freshwater=freshwater,
-                        surface_forcing=surface)
-                    jax.device_get(eager_state)
-                jax.effects_barrier()
+                try:
+                    with jax.disable_jit():
+                        model._step_impl(
+                            seeded, dt, freshwater=freshwater,
+                            surface_forcing=surface)
+                except _Round113EagerBoundaryComplete:
+                    pass
             finally:
+                round113_eager_direct = False
                 model_module._nemo_ws_rk3_tracer_pair_step = real_pair
                 advection_module.fct_tracer_advection = real_fct
             eager_observation = _round113_collapse_calls(
@@ -1317,7 +1337,8 @@ def measure(args) -> dict:
                 "rows": arm_rows,
                 "kt3": kt3_rows,
                 "state_vs_baseline": pytree_exact_census(
-                    arm_state, baseline_state),
+                    gate.lego_fields(arm_state),
+                    gate.lego_fields(baseline_state)),
             },
             "observations": observations,
             "plant_propagation": plant_propagation,
