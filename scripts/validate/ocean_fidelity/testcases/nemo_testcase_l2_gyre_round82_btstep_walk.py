@@ -36,6 +36,7 @@ RECORD_COMMIT = "295a42edc9d9f45707a5349097e7a0183f57463c"
 STAGE_ROOT = ROOT / "round46/oracle_kt2_stage"
 ENTRY_ROOT = ROOT / "round75/oracle_advmean_kt2"
 STAGE_CLOSURE_ROOT = ROOT / "round94/oracle_stage_closure"
+PREREG_FINAL_SSH_MAX = np.float64(7.072560112143626e-7)
 
 TRACE_KEYS = {
     "u_b": "u_history_b",
@@ -713,15 +714,24 @@ def measure(args) -> dict:
         rows.append(row)
 
     first = first_non_bit(rows)
-    prediction_confirmed = bool(
-        args.plant == "none"
-        and first is not None
-        and first["substep"] == 1
-        and first["boundary"] in {"slow_u", "slow_v"}
-        and final_ssh["differing_cells"] == 600
-        and np.float64(7.0e-7) <= final_ssh["absolute_max"]
-        <= np.float64(7.2e-7)
+    final_alignment_confirmed = bool(
+        final_ssh["differing_cells"] == 600
+        and abs(final_ssh["absolute_max"] - PREREG_FINAL_SSH_MAX)
+        <= np.float64(1.0e-12)
     )
+    if args.execution_mode == "production-jit":
+        prediction_confirmed = bool(
+            args.plant == "none"
+            and first is not None
+            and first["substep"] == 1
+            and first["boundary"] in {"slow_u", "slow_v"}
+            and final_alignment_confirmed
+        )
+    else:
+        # P1 preregisters only the final alignment for the eager control; its
+        # first boundary is explicitly allowed to expose a different rounding.
+        prediction_confirmed = bool(
+            args.plant == "none" and final_alignment_confirmed)
     plant_fires = False
     if args.plant == "history-ulp":
         plant_fires = bool(first and first["substep"] == 1 and first["boundary"] == "u_b")
@@ -752,6 +762,7 @@ def measure(args) -> dict:
         "dtype": {"record": str(fields["u_entry"].dtype),
                   "live": str(live_arrays["u_entry"].dtype)},
         "first_non_bit_statement": first,
+        "final_alignment_confirmed": final_alignment_confirmed,
         "weighted_final_ssh_vs_next_entry": final_ssh,
         "drag_face_statement_on_live_cell_input": {
             "u": round78.comparison(
