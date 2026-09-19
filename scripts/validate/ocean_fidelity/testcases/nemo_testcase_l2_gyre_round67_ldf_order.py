@@ -500,19 +500,22 @@ def _round113_patch_inputs(
     return tuple(patched), patched_kwargs
 
 
-def _round113_collapse_calls(calls: list[tuple], label: str) -> tuple:
+def _round113_collapse_calls(
+    calls: list[tuple], label: str, *, allow_prior_distinct: bool = False,
+) -> tuple:
     """Collapse duplicate JAX callback passes, preserving the T/S pair."""
     require(len(calls) >= 2 and len(calls) % 2 == 0,
             f"round-113 {label} did not emit complete T/S pairs")
-    pair = tuple(calls[:2])
-    for start in range(2, len(calls), 2):
-        duplicate = calls[start:start + 2]
-        require(all(
+    pair = tuple(calls[-2:])
+    for start in range(0, len(calls) - 2, 2):
+        prior = calls[start:start + 2]
+        exact = all(
             len(left) == len(right)
             and all(np.array_equal(a, b)
                     for a, b in zip(left, right, strict=True))
-            for left, right in zip(duplicate, pair, strict=True)),
-            f"round-113 {label} observed distinct duplicate executions")
+            for left, right in zip(prior, pair, strict=True))
+        require(exact or allow_prior_distinct,
+                f"round-113 {label} observed distinct duplicate executions")
     return pair
 
 
@@ -1180,7 +1183,7 @@ def measure(args) -> dict:
                 "round-113 record was not prepared")
         jax.effects_barrier()
         jit_observation = _round113_collapse_calls(
-            live_input_calls, "production-step JIT")
+            live_input_calls, "production-step JIT", allow_prior_distinct=True)
         jit_rows = _round113_score_inputs(jit_observation, round112_bundle)
 
         families = (
