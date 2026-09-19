@@ -26,6 +26,7 @@ import csv
 import glob
 import json
 import os
+import sys
 from collections import defaultdict
 
 import matplotlib
@@ -114,6 +115,7 @@ OCEAN_MPAS_PCG_ITERS = 30   # MPASOceanConfig.barotropic_implicit_pcg_fixed_iter
 
 def load(dirs):
     best = {}
+    dropped = []
     for d in dirs:
         for f in glob.glob(os.path.join(d, "**", "*.jsonl"), recursive=True):
             if f.endswith(".failed.jsonl"):     # quarantined by the ladder
@@ -152,7 +154,14 @@ def load(dirs):
                 # predating the field carry no count and are refused here.
                 if comp == "ocean" and grid == "mpas":
                     extra = r.get("metadata", {}).get("extra", {})
-                    if extra.get("pcg_fixed_iters") != OCEAN_MPAS_PCG_ITERS:
+                    iters = extra.get("pcg_fixed_iters")
+                    # Single-device rows solve to a TOLERANCE (stock CG) and
+                    # never run the fixed count, so their recorded count is
+                    # inert and they stay comparable across the change.
+                    solver = extra.get("pcg_solver_path")
+                    if (solver != "stock_cg_to_tol"
+                            and iters != OCEAN_MPAS_PCG_ITERS):
+                        dropped.append((f, int(r["n_devices"]), iters))
                         continue
                 mode = _mode(r, f)
                 key = (comp, grid, _backend(r), prec, mode, _res(r, grid, mode),
@@ -160,6 +169,21 @@ def load(dirs):
                 steps = r.get("steps") or r.get("metadata", {}).get("extra", {}).get("steps")
                 if key not in best or ms < best[key][0]:
                     best[key] = (float(ms), job, f, steps)
+    if dropped:
+        # Never silent: a refused row and a node that died both look like a
+        # missing point on the curve, and only one of them is the reader's
+        # problem.
+        counts = {}
+        for _f, nd, it in dropped:
+            counts[it] = counts.get(it, 0) + 1
+        print(f"load: refused {len(dropped)} ocean-MPAS receipts solving a "
+              f"different iteration count than {OCEAN_MPAS_PCG_ITERS} "
+              f"(counts found: "
+              + ", ".join(f"{k!r}x{v}" for k, v in sorted(
+                  counts.items(), key=lambda kv: str(kv[0]))) + ")",
+              file=sys.stderr)
+        for _f, nd, it in sorted(dropped, key=lambda d: d[1])[:20]:
+            print(f"  nd={nd:<5} iters={it!r}  {_f}", file=sys.stderr)
     return best
 
 

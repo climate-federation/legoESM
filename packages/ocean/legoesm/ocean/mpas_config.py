@@ -309,13 +309,18 @@ class MPASOceanConfig(NamedTuple):
     #
     # 30, not 60: measured on the REAL captured systems (scripts/validate/
     # ocean_fidelity/barotropic_pcg_convergence.py) at subdivision 7, 8 and
-    # 9, in both precisions, after 200 spin-up steps.  Iteration count is
-    # set by the mesh, not the column: subdivision 9 at 10, 20 and 40
-    # levels give the same table, while subdivision 8 converges in ~10
-    # fewer iterations than 9.
+    # 9, in both precisions, after 200 spin-up steps at dt = 300 s.  Over
+    # the configurations tested, the mesh set the iteration count and the
+    # column did not: subdivision 9 at 10, 20 and 40 levels gives the same
+    # table, while subdivision 8 is at its floor ~10 iterations sooner than
+    # 9.  Timestep, bathymetry and state were NOT varied and could move it.
     #
     # At subdivision 9 (2.6M cells, the production/scaling mesh), relative
-    # residual and the implied continuity defect max|b - A eta|/dt:
+    # residual and max|b - A eta|/dt.  That second column is the WORST LOCAL
+    # continuity-defect rate a cell carries in one step, not a measured
+    # global mass drift — the cell-to-cell and step-to-step cancellation is
+    # unmeasured, so read it as an upper bound on how wrong one cell's
+    # free-surface tendency can be, not as sea level lost per day:
     #     M      float32              float64
     #     20     1.0e-5  / 12 mm/day  3.0e-6  / 11 mm/day
     #     30     3.2e-6  / 1.4        1.0e-7  / 0.30
@@ -327,10 +332,15 @@ class MPASOceanConfig(NamedTuple):
     # already runs at) for ~1.8x on step time.  Owner decision 2026-09-19;
     # raise to 40 if a long float64 integration shows mass drift.
     #
-    # NOT covered by that measurement: no multi-rank convergence check (the
-    # probe replays the captured system on one process, where the halo
-    # exchange is the identity), and no gradient comparison through the
-    # unrolled adjoint.
+    # NOT covered by that measurement, and the two reasons to revisit this:
+    # no multi-rank convergence check (the probe replays the captured system
+    # on one process, where the halo exchange is the identity); and no
+    # gradient comparison through the unrolled adjoint, which is the use
+    # this most plausibly harms — reverse mode differentiates the TRUNCATED
+    # algorithm exactly, so a loose forward residual bounds nothing about
+    # the derivative, and a training run would degrade without any mass
+    # diagnostic firing.  A verification run that must hit the configured
+    # 1e-10 residual has to set the count back up explicitly.
     # The lat-lon C-grid default (state.py) is a different operator on a
     # different mesh and stays at 60 until measured.
     barotropic_implicit_pcg_fixed_iters: int = 30
