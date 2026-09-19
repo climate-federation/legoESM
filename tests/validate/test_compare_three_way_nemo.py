@@ -485,3 +485,55 @@ def test_manifest_summary_says_so_when_no_command_line_is_recorded(tmp_path):
     s = m._manifest_summary(snap)
     assert s["command_line"] is None
     assert "NOT recorded" in s["note"]
+
+
+# --- the oracle record must be the one ending on the day we say we scored ---
+#
+# The snapshot check in ``main`` pins OUR day and has since 2026-09-15.  The
+# ORACLE's day was unpinned: ``--nemo-time-idx`` defaults to -1, the LAST
+# record, so a card that simply forgot the flag scored its day-30 state against
+# NEMO's day 90 and the difference came back labelled a regression.  These pin
+# the gate the user authorised in its place.
+
+
+def test_matching_record_passes_silently():
+    m.check_oracle_record(expect_day=20, nemo_time_idx=3, n_time=18)
+
+
+def test_the_default_last_record_is_refused_on_a_long_oracle_file():
+    # THE DEFECT ITSELF: 18 records is 90 days, -1 is record 17, and the run
+    # being scored is at day 20.  Before this gate the run proceeded.
+    with pytest.raises(SystemExit) as e:
+        m.check_oracle_record(expect_day=20, nemo_time_idx=-1, n_time=18)
+    msg = str(e.value)
+    assert "record 3" in msg and "record 17" in msg
+    assert "--nemo-time-idx 3" in msg          # says what to pass, not just no
+    assert "days 15 to 20" in msg and "days 85 to 90" in msg
+
+
+def test_a_negative_index_that_lands_on_the_right_record_passes():
+    # -1 is not wrong in itself: on a file holding exactly the days scored it
+    # IS the right record, and refusing it would be a false alarm.
+    m.check_oracle_record(expect_day=20, nemo_time_idx=-1, n_time=4)
+
+
+def test_no_expectation_means_no_check():
+    m.check_oracle_record(expect_day=None, nemo_time_idx=-1, n_time=18)
+
+
+def test_the_monthly_path_is_exempt():
+    # --nemo-month selects by month from a monthly file; the 5-day record
+    # arithmetic does not apply to it and must not fire.
+    m.check_oracle_record(expect_day=20, nemo_time_idx=-1, n_time=18,
+                          nemo_month=1)
+
+
+def test_reverting_the_gate_would_let_the_defect_through():
+    # NON-VACUITY: the pre-fix behaviour was "no check at all".  Show that the
+    # case above is the one that behaviour accepted, so this gate is the only
+    # thing standing between the card and a 70-day misalignment.
+    def without_the_gate(expect_day, nemo_time_idx, n_time, nemo_month=None):
+        return None
+    assert without_the_gate(20, -1, 18) is None
+    with pytest.raises(SystemExit):
+        m.check_oracle_record(20, -1, 18)

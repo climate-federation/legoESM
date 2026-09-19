@@ -93,6 +93,35 @@ from pathlib import Path
 
 import numpy as np
 
+# Length of one NEMO output record in run days, measured from
+# time_counter_bounds on 2026-09-15: record k is the mean over days 5k..5k+5.
+NEMO_RECORD_DAYS = 5
+
+
+def check_oracle_record(expect_day, nemo_time_idx, n_time, nemo_month=None):
+    """Stop unless the oracle record selected is the one ending on ``expect_day``.
+
+    The snapshot check in ``main`` pins OUR day.  Nothing pinned the ORACLE's:
+    ``--nemo-time-idx`` defaults to the LAST record, so a card that forgot to
+    pass it scored day 30 against NEMO's day 90 and the difference was reported
+    as a regression (2026-09-19).  Caller states the day it expects, this says
+    whether the record agrees.  No expectation given, or the monthly-file path
+    selected instead, means there is nothing to check.
+    """
+    if expect_day is None or nemo_month:
+        return
+    want = int(round(float(expect_day) / NEMO_RECORD_DAYS)) - 1
+    got = nemo_time_idx if nemo_time_idx >= 0 else n_time + nemo_time_idx
+    if got == want:
+        return
+    raise SystemExit(
+        f"FATAL: --expect-day {float(expect_day):g} wants NEMO record {want} "
+        f"(0-based), the mean over run days {want * NEMO_RECORD_DAYS} to "
+        f"{(want + 1) * NEMO_RECORD_DAYS}, but --nemo-time-idx "
+        f"{nemo_time_idx} resolves to record {got} of {n_time}, the mean over "
+        f"days {got * NEMO_RECORD_DAYS} to {(got + 1) * NEMO_RECORD_DAYS}. "
+        f"Pass --nemo-time-idx {want}.")
+
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 os.environ.setdefault("JAX_ENABLE_X64", "1")
 
@@ -553,6 +582,13 @@ def main() -> int:
     T = _load_legoesm(a.tripole)
     M = _load_legoesm(a.mpas)
     N = _load_nemo(a.nemo_gridt, a.nemo_time_idx, month=a.nemo_month)
+    # The snapshot check above pins OUR day.  Nothing pinned the ORACLE's until
+    # now: --nemo-time-idx defaults to the LAST record, so a card that forgot
+    # to pass it scored day 30 against NEMO's day 90 and reported the result as
+    # a regression (2026-09-19).  When the caller states the day it expects, the
+    # record must be the one that ENDS on it, and a mismatch stops the job
+    # instead of printing into a log nobody reads.  USER-AUTHORISED this session.
+    check_oracle_record(a.expect_day, a.nemo_time_idx, N["n_time"], a.nemo_month)
     X = [_load_legoesm(pth) for pth in a.also_mask]
     print(f"[load] tripole {T['sst'].shape}  MPAS {M['sst'].shape}  "
           f"NEMO {N['sst'].shape} ({N['n_time']} records)"
