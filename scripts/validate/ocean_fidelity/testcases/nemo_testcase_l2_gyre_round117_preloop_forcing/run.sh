@@ -131,7 +131,8 @@ check_writer_layout "$dry/dynspg_ts.F90" || \
 if [[ "$MODE" == --plant-layout ]]; then
   planted=$dry/dynspg_ts.planted.F90
   cp "$dry/dynspg_ts.F90" "$planted"
-  sed -i '0,/ffv_nw, ffv_ne, ffv_sw, ffv_se/s//ffv_nw, ffv_sw, ffv_se/' "$planted"
+  sed -i '/^[[:space:]]*& ffv_nw, ffv_ne, ffv_sw, ffv_se$/s/ffv_ne, //' \
+    "$planted"
   if check_writer_layout "$planted"; then
     die "layout plant stayed green" 70
   fi
