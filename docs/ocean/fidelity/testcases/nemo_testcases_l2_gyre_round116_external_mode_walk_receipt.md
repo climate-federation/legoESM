@@ -329,11 +329,73 @@ freshwater pair, #1484 guard, held manifest, or NEMO source changed.
 
 ## Review, citations, and tests
 
-The required separate adversarial review, final clean-tree receipt citation
-gate and its shifted-line plant, focused suites, inherited four-file push
-gate, and one-piece full ocean fidelity/unit trees are run after this
-provisional evidence commit.  Their exact verdicts and pytest summary lines
-will replace this paragraph before the receipt is final.
+The required adversarial command was run from the provisional receipt commit
+with `codex exec --sandbox read-only -C` and a prompt that tried to refute the
+production-step interception, record/current-source association, compiled
+order, first-non-bit boundary, diagnostic substitution, cancellation verdict,
+Rule-12/Decision-43 disposition, and OPEN handoff.  It exited 1 before a
+reviewer started, so it emitted no `SHIP`, `HOLD`, or `DO NOT SHIP` verdict.
+Its verbatim terminal finding was:
+
+```text
+Error: failed to initialize in-process app-server client: Read-only file system (os error 30)
+```
+
+Accordingly, **independent review unavailable in-sandbox**.  This is not
+presented as approval.  The complete attempted-review log is
+`round116/review/codex_review.log`.
+
+The clean-tree receipt citation gate reports **PASS** for all 16/16 compiled
+citations, zero unmapped citations, zero cited-row failures, zero full-map
+audit failures, and all built-in plants firing.  Its separate shifted-line
+plant moves the current-build frozen-forcing citation, reports
+`SYMBOL-NOT-AT-LINE`, and exits 1.  Ordinary and plant artifacts are under
+`round116/citations/`.
+
+Focused CPU/fp64 suites reported exactly:
+
+```text
+25 passed in 2.71s
+119 passed in 458.38s (0:07:38)
+```
+
+The first is the extended external-step gate.  The second is the inherited
+four-file push gate: receipt citations, TKE NEMO terms, NEMO recipes, and real
+freshwater closure.
+
+The required one-piece
+`-n 12 tests/ocean/fidelity tests/ocean/unit` run was attempted exactly once.
+It collected 8,187 cases and reached 95%, but nine workers aborted in JAX
+compilation and xdist repeatedly replaced them.  After the ninth dead worker,
+the controller made no progress for more than eight minutes and emitted
+neither a terminal summary nor a JUnit file.  One interrupt closed that stale
+controller; the execution session reported exit 1.  There is therefore no
+full-suite summary line to quote and no mechanically complete failing-set
+diff; this receipt does not invent either one.  Its last progress line was:
+
+```text
+tests/ocean/unit/test_nemo_ws_stage_mean_weights.py::test_staircase_card_distinguishes_reference_from_live_stage_mean_weights[OVERFLOW-zps]
+```
+
+All nine crash traces named their active node.  A fresh serial replay of those
+nine exact node IDs reported:
+
+```text
+9 passed in 70.76s (0:01:10)
+```
+
+The incomplete interleaved run had recorded 202 unique ordinary failed IDs
+before the stall: 79 occur in the pinned 87-ID incoming baseline and 123 do
+not.  Those counts are retained under `round116/tests/`, but are explicitly a
+resource-contaminated partial observation rather than a failing-set verdict.
+None of the 123 is in a Round-116-changed test: the diff from incoming commit
+`bb9c586891df9cb089be3675b3a1de38e160ee2f` changes no production package and
+no ocean unit test, while every changed executable validation/test path is in
+the 25/25 focused pass.  The nine compiler-crash nodes also pass serially.
+Thus the available recovery evidence contains no Round-116-owned regression;
+it does not mislabel the incomplete full-tree run as green.  Complete focused,
+push-gate, interrupted-run, ID-diff, and crash-replay evidence is under
+`round116/tests/`.
 
 ## ASKED / UNASKED
 
