@@ -157,24 +157,24 @@ files, not an abort performed by the test.
 | `tests/ocean/unit/test_pgf_tiers.py::TestTier4::test_tier4_seamount_strong_wind[smc03]` | STALE EXPECTATION | Same `9caa61f3e` change; the measured 21.796509983933 m/s value is pinned at `rtol=1e-4`. | A2 (this commit) | P21 |
 | `tests/ocean/unit/test_pgf_tiers.py::TestTier4::test_tier4_wind_flat_bottom_reference` | STALE EXPECTATION | Same `9caa61f3e` change; the measured 2.467487967708 m/s value is pinned at `rtol=1e-4` instead of widening the former 2 m/s gate to 3 m/s. | A2 (this commit) | P21 |
 | `tests/ocean/unit/test_prescribed_flow.py::test_positional_construction_unshifted_by_tail_field` | STALE EXPECTATION | `9caa61f3e` and later `d80df3ed7` extended/nested the config tail; positional schema expectation was obsolete. | WORKTREE (commit blocked) | P22 |
-| `tests/ocean/unit/test_scm_column_twins.py::test_build_jitted_step_rejects_bad_tier_sw_mode_and_channels` | STALE EXPECTATION | `9caa61f3e` nested constants and `a90bd1935` landed bilinear forcing; the test built the pre-change script/config shape. | WORKTREE (commit blocked) | P23 |
-| `tests/ocean/unit/test_scm_column_twins.py::test_build_scm_rejects_unknown_tier` | STALE EXPECTATION | Same `9caa61f3e` / `a90bd1935` script contract. | WORKTREE (commit blocked) | P23 |
-| `tests/ocean/unit/test_scm_column_twins.py::test_extract_point_forcing_series_channels_and_values` | STALE EXPECTATION | Same script contract; expected bilinear forcing values/channels were stale. | WORKTREE (commit blocked) | P23 |
-| `tests/ocean/unit/test_scm_column_twins.py::test_forcing_closures_finite_over_run_window` | STALE EXPECTATION | Same script contract. | WORKTREE (commit blocked) | P23 |
-| `tests/ocean/unit/test_scm_column_twins.py::test_jitted_step_matches_closure_reference[T0-top]` | STALE EXPECTATION | Same script contract. | WORKTREE (commit blocked) | P23 |
-| `tests/ocean/unit/test_scm_column_twins.py::test_jitted_step_matches_closure_reference[T1-penetrate]` | STALE EXPECTATION | Same script contract. | WORKTREE (commit blocked) | P23 |
-| `tests/ocean/unit/test_scm_column_twins.py::test_jitted_step_salt_is_3d_virtual_salt_closure` | STALE EXPECTATION | Same script contract. | WORKTREE (commit blocked) | P23 |
-| `tests/ocean/unit/test_scm_column_twins.py::test_run_point_tier_daily_history_and_meta_shapes` | STALE EXPECTATION | Same script contract. | WORKTREE (commit blocked) | P23 |
-| `tests/ocean/unit/test_scm_column_twins.py::test_run_point_tier_forcing_and_coriolis_at_selected_cell` | STALE EXPECTATION | Same script contract. | WORKTREE (commit blocked) | P23 |
-| `tests/ocean/unit/test_scm_column_twins.py::test_t0_has_no_coriolis_no_wind_and_uv_stay_exactly_zero` | STALE EXPECTATION | Same script contract. | WORKTREE (commit blocked) | P23 |
-| `tests/ocean/unit/test_scm_column_twins.py::test_t1_has_coriolis_and_wind_produces_motion` | STALE EXPECTATION | Same script contract. | WORKTREE (commit blocked) | P23 |
+| `tests/ocean/unit/test_scm_column_twins.py::test_build_jitted_step_rejects_bad_tier_sw_mode_and_channels` | REAL DEFECT | `a90bd1935` nested `rho_0` under `LatLonCGridOceanConfig._field_defaults["constants"]`, but the shared SCM harness still read `d["rho_0"]` and raised `KeyError`. | `6cb7419da` | P23 |
+| `tests/ocean/unit/test_scm_column_twins.py::test_build_scm_rejects_unknown_tier` | REAL DEFECT | Same stale shared-harness `rho_0` lookup. | `6cb7419da` | P23 |
+| `tests/ocean/unit/test_scm_column_twins.py::test_extract_point_forcing_series_channels_and_values` | STALE EXPECTATION | `a90bd1935` changed nearest-cell forcing to bilinear interpolation; the expected forcing values/channels were stale. | `6cb7419da` | P23 |
+| `tests/ocean/unit/test_scm_column_twins.py::test_forcing_closures_finite_over_run_window` | REAL DEFECT | Same stale shared-harness `rho_0` lookup. | `6cb7419da` | P23 |
+| `tests/ocean/unit/test_scm_column_twins.py::test_jitted_step_matches_closure_reference[T0-top]` | REAL DEFECT | Same stale shared-harness `rho_0` lookup. | `6cb7419da` | P23 |
+| `tests/ocean/unit/test_scm_column_twins.py::test_jitted_step_matches_closure_reference[T1-penetrate]` | REAL DEFECT | Same stale shared-harness `rho_0` lookup. | `6cb7419da` | P23 |
+| `tests/ocean/unit/test_scm_column_twins.py::test_jitted_step_salt_is_3d_virtual_salt_closure` | REAL DEFECT | Same stale shared-harness `rho_0` lookup. | `6cb7419da` | P23 |
+| `tests/ocean/unit/test_scm_column_twins.py::test_run_point_tier_daily_history_and_meta_shapes` | REAL DEFECT | Same stale shared-harness `rho_0` lookup. | `6cb7419da` | P23 |
+| `tests/ocean/unit/test_scm_column_twins.py::test_run_point_tier_forcing_and_coriolis_at_selected_cell` | REAL DEFECT | Same stale shared-harness `rho_0` lookup. | `6cb7419da` | P23 |
+| `tests/ocean/unit/test_scm_column_twins.py::test_t0_has_no_coriolis_no_wind_and_uv_stay_exactly_zero` | REAL DEFECT | Same stale shared-harness `rho_0` lookup. | `6cb7419da` | P23 |
+| `tests/ocean/unit/test_scm_column_twins.py::test_t1_has_coriolis_and_wind_produces_motion` | REAL DEFECT | Same stale shared-harness `rho_0` lookup. | `6cb7419da` | P23 |
 | `tests/ocean/unit/test_step_wiring_generated.py::test_committed_doc_matches_regeneration` | TEST-INFRASTRUCTURE | Generated wiring inventory drifted from its generator; regenerated result is 148 calls, 51 live, 58 dead, 39 unresolved. | WORKTREE (commit blocked) | P24 |
 | `tests/ocean/unit/test_tke_n2_before_advection.py::test_set_diffusivities_routes_exactly_to_n2_source` | STALE EXPECTATION | `21e85d252` added the faithful `surface_tmask` operand; the fixture now supplies it. | WORKTREE (commit blocked) | P25 |
 | `tests/ocean/unit/test_veros_acc_basic_recipe.py::test_frozen_state_probe_compatible` | REAL DEFECT | The `dt_tke` requirement introduced with the newer TKE contract (traceable to `080ce674a`) was not forwarded by the offline tendency probe. | WORKTREE (commit blocked) | P26 |
 | `tests/ocean/unit/test_veros_acc_recipe.py::test_compare_momentum_emits_all_processes` | REAL DEFECT | Same stale tendency-probe caller; it now forwards the probe timestep as `dt_tke`. | WORKTREE (commit blocked) | P27 |
 | `tests/ocean/unit/test_veros_acc_recipe.py::test_end_to_end_recipe_probe_round_trip` | REAL DEFECT | Same stale tendency-probe caller. | WORKTREE (commit blocked) | P27 |
 
-The table contains exactly 87 IDs: 46 stale expectations, 22 real defects, 7
+The table contains exactly 87 IDs: 36 stale expectations, 32 real defects, 7
 test-infrastructure defects, and 12 environment skips.
 
 ## Whole-tree runs
