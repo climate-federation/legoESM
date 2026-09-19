@@ -58,6 +58,9 @@ REC=$(( DAY / 5 - 1 ))
 # is the day-30 baseline call it has always been.
 SNAP=${SNAP:-$R/results/omip_nemo/trp_orca1faithtint_d30/snapshot_final.npz}
 TAG=${TAG:-}
+# CELL=LON,LAT dumps that one face level by level on both sides.
+# Unset, the card behaves exactly as before.
+CELL=${CELL:-}
 GU=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY/ORCA1_5d_20000101_20000331_grid_U.nc
 GV=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY/ORCA1_5d_20000101_20000331_grid_V.nc
 MESH=$R/data/grids/eORCA1.2_mesh_mask.nc
@@ -87,6 +90,7 @@ $PY -u scripts/validate/ocean_fidelity/section_transport_vs_nemo.py \
   --zonal-section="florida:27:-80.5,-78.5" \
   --zonal-section="floridawide:27:-82,-76" \
   --zonal-section="mozambique:-17:38,44" \
+  ${CELL:+--cell-profile="$CELL"} \
   --out-json "$R/results/omip_nemo/section_transport/transports_d${DAY}${TAG}.json"
 echo "=== probe rc=$? ==="
 

@@ -108,6 +108,9 @@ def main() -> int:
                         "meridional section cannot measure it. Equals form.")
     p.add_argument("--split-depth-m", type=float, default=200.0,
                    help="depth separating the surface-trapped test from the\n                        column-wide one")
+    p.add_argument("--cell-profile", default=None,
+                   help="LON,LAT -- dump level-by-level transport and "
+                        "speed at the nearest wet u-face, both sides")
     p.add_argument("--out-json", default=None)
     a = p.parse_args()
 
@@ -300,6 +303,53 @@ def main() -> int:
             vlon = _m(mv, "glamv")[0:331, 1:361] % 360.0
         finally:
             mv.close()
+
+        # ---- ONE CELL, LEVEL BY LEVEL ---------------------------------
+        # A section total cannot say whether a cell carries too much because
+        # its water moves too fast or because it presents too much water
+        # column. For the Florida strait -- one cell carrying double the
+        # oracle while its neighbour matches -- that is the whole question.
+        #
+        # This sits on the V-FACE arrays, deliberately. The Florida Current
+        # runs NORTHWARD through a constant-latitude section, so its transport
+        # lives on v faces; reading it off the u faces would report the
+        # eastward flow at that spot and call it the Florida Current, which is
+        # the same class of mistake as slicing a face array like a centre one.
+        #
+        # Wet levels come from the SAME mesh on both sides, so the level count
+        # cannot differ -- which is itself the point: any difference here is
+        # velocity, not geometry.
+        if a.cell_profile:
+            clon, clat = (float(x) for x in a.cell_profile.split(","))
+            clon %= 360.0
+            dd = np.hypot(vlat - clat,
+                          ((vlon - clon + 180.0) % 360.0) - 180.0)
+            dd = np.where(vmask.max(axis=0) > 0.5, dd, np.inf)
+            cj, ci = np.unravel_index(int(np.argmin(dd)), dd.shape)
+            ov = np.asarray(ours_v_lev[cj, ci], dtype=np.float64)
+            nv = np.asarray(nemo_v_lev[cj, ci], dtype=np.float64)
+            cw = np.asarray(vmask[:, cj, ci], dtype=np.float64) > 0.5
+            nwet = int(cw.sum())
+            print(f"\n[cell] nearest wet v-face to ({clat:+.2f}, {clon:.2f}) "
+                  f"is j={cj} i={ci} at ({vlat[cj, ci]:+.2f}, "
+                  f"{vlon[cj, ci]:.2f}); {nwet} wet levels of {cw.size}")
+            print(f"[cell] {'lev':>4s} {'depth_m':>9s} {'ours_Sv':>10s} "
+                  f"{'nemo_Sv':>10s} {'ours-nemo':>10s} {'cum_diff':>9s}")
+            run = 0.0
+            for k in range(nwet):
+                run += (ov[k] - nv[k]) * SV
+                print(f"[cell] {k:4d} {float(gdept[k]):9.1f} "
+                      f"{ov[k] * SV:10.4f} {nv[k] * SV:10.4f} "
+                      f"{(ov[k] - nv[k]) * SV:10.4f} {run:9.4f}")
+            so = float(np.nansum(ov)) * SV
+            sn = float(np.nansum(nv)) * SV
+            print(f"[cell] column total ours {so:+.3f} Sv, NEMO {sn:+.3f} Sv, "
+                  f"difference {so - sn:+.3f}")
+            hi = int(np.argmax(np.abs(ov[:nwet] - nv[:nwet])))
+            print(f"[cell] the single level carrying the most of it is {hi} "
+                  f"at {float(gdept[hi]):.0f} m, "
+                  f"{(ov[hi] - nv[hi]) * SV:+.4f} Sv; the top 200 m carry "
+                  f"{float(np.nansum((ov - nv)[:nwet][gdept[:nwet] <= 200.0])) * SV:+.4f}")
 
         # The v-face slice gets its OWN alignment proof. Reusing the u answer
         # would be exactly the assumption that cost a retraction earlier in
