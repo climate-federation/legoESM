@@ -52,7 +52,12 @@ DAY=$(( 10#${DAY:-30} ))
 [ $(( DAY % 5 )) -eq 0 ] && [ "$DAY" -ge 5 ] || { echo "FATAL: DAY=$DAY not a positive multiple of 5"; exit 1; }
 REC=$(( DAY / 5 - 1 ))
 
-SNAP=$R/results/omip_nemo/trp_orca1faithtint_d30/snapshot_final.npz
+# SNAP and TAG are overridable so the SAME instrument can score a second run
+# at the SAME day: ours-versus-ours at a matched day is the one comparison the
+# snapshot-versus-five-day-mean confound cancels out of exactly.  Unset, this
+# is the day-30 baseline call it has always been.
+SNAP=${SNAP:-$R/results/omip_nemo/trp_orca1faithtint_d30/snapshot_final.npz}
+TAG=${TAG:-}
 GU=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY/ORCA1_5d_20000101_20000331_grid_U.nc
 GV=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_GATEWAY/ORCA1_5d_20000101_20000331_grid_V.nc
 MESH=$R/data/grids/eORCA1.2_mesh_mask.nc
@@ -60,6 +65,7 @@ for f in "$SNAP" "$GU" "$GV" "$MESH"; do
   [ -r "$f" ] || { echo "FATAL: missing $f"; exit 1; }
 done
 echo "=== day $DAY, GATEWAY record $REC (0-based) = days $((DAY-5))-$DAY ==="
+echo "=== snapshot $SNAP ==="
 
 $PY -u scripts/validate/ocean_fidelity/section_transport_vs_nemo.py \
   --snapshot "$SNAP" --nemo-gridu "$GU" --nemo-gridv "$GV" \
@@ -69,13 +75,13 @@ $PY -u scripts/validate/ocean_fidelity/section_transport_vs_nemo.py \
   --zonal-section="florida:27:-80.5,-78.5" \
   --zonal-section="floridawide:27:-82,-76" \
   --zonal-section="mozambique:-17:38,44" \
-  --out-json "$R/results/omip_nemo/section_transport/transports_d${DAY}.json"
+  --out-json "$R/results/omip_nemo/section_transport/transports_d${DAY}${TAG}.json"
 echo "=== probe rc=$? ==="
 
 # Row by row, because a single integral cannot say whether a difference is a
 # broad excess or a jet that is too fast in three rows -- different causes,
 # different fixes.
 $PY -u scripts/plot/plot_section_transport.py \
-  --json "$R/results/omip_nemo/section_transport/transports_d${DAY}.json" \
-  --out "$R/results/omip_nemo/section_transport/transports_d${DAY}.png"
+  --json "$R/results/omip_nemo/section_transport/transports_d${DAY}${TAG}.json" \
+  --out "$R/results/omip_nemo/section_transport/transports_d${DAY}${TAG}.png"
 echo "=== rc=$? ==="
