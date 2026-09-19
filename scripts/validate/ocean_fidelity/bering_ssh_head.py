@@ -228,9 +228,13 @@ def main(argv=None) -> int:
     # makes a checkable prediction: if freshwater piled up there, our surface
     # must be FRESHER than NEMO's IN THE SAME PLACE. Co-location is the test;
     # a fresh anomaly somewhere else, or none at all, refutes it.
-    sal_name = next((v for v in ("vosaline", "so", "soce", "salinity")
+    sal_name = next((v for v in ("so", "vosaline", "soce", "salinity")
                      if v in dt.variables), None)
-    if sal_name is not None and "S" in snap:
+    if sal_name is None:
+        raise SystemExit(
+            "FATAL: no salinity variable in the grid_T file; looked for "
+            f"so/vosaline/soce/salinity among {sorted(dt.variables)}.")
+    if "S" in snap:
         our_s = np.asarray(snap["S"])[..., 0]                 # surface level
         nem_s = _sq(dt[sal_name].isel(time_counter=a.time_idx).values[0]
                     if dt[sal_name].ndim == 4 else
@@ -270,9 +274,19 @@ def main(argv=None) -> int:
     # is thermosteric our Arctic must be WARMER in the same cells. If it is
     # neither, the excess is MASS -- water actually piled up -- and the cause
     # is dynamical convergence rather than any surface buoyancy flux.
-    tem_name = next((v for v in ("votemper", "thetao", "toce", "temperature")
-                     if v in dt.variables), None)
-    if tem_name is not None and "T" in snap:
+    # bigthetao is Conservative Temperature, which is what NEMO writes under
+    # ln_teos10 -- ORCA1 sets it. Omitting it is why the first version of this
+    # block found nothing.
+    tem_name = next((v for v in ("bigthetao", "votemper", "thetao", "toce",
+                                 "temperature", "tos") if v in dt.variables),
+                    None)
+    if tem_name is None:
+        raise SystemExit(
+            "FATAL: no temperature variable in the grid_T file; looked for "
+            "bigthetao/votemper/thetao/toce/temperature/tos among "
+            f"{sorted(dt.variables)}. A SILENT SKIP here is how the first run "
+            "of this block produced no output and no error.")
+    if "T" in snap:
         our_t = np.asarray(snap["T"])[..., 0]
         nem_t = _sq(dt[tem_name].isel(time_counter=a.time_idx).values[0]
                     if dt[tem_name].ndim == 4 else
