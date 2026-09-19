@@ -342,8 +342,10 @@ def build_cloud_config(
     convective_cloud: bool = False,
     rh_crit: float | None = None,
     q_c_diagnostic: float | None = None,
+    conv_cloud_coeff: float | None = None,
     conv_cloud_max: float | None = None,
     conv_cloud_condensate: float | None = None,
+    Nc_default: float | None = None,
     cloud_inhomogeneity_factor: float | None = None,
     cloud_optics_inhomogeneity: str | None = None,
     cloud_fsd: float | None = None,
@@ -358,8 +360,6 @@ def build_cloud_config(
     clubb_cf_override_floor: float | None = None,
     saturation_scheme: str | None = None,
     cover_condensate_q_ref: float | None = None,
-    conv_cloud_coeff: float | None = None,
-    Nc_default: float | None = None,
 ) -> "CloudConfig":
     """Assemble a ``CloudConfig`` from the ``ExperimentConfig``-level cloud
     fields (``cloud_scheme`` + the optional ``cloud_rh_crit`` /
@@ -376,10 +376,14 @@ def build_cloud_config(
         overrides["rh_crit"] = rh_crit
     if q_c_diagnostic is not None:
         overrides["q_c_diagnostic"] = q_c_diagnostic
+    if conv_cloud_coeff is not None:
+        overrides["conv_cloud_coeff"] = conv_cloud_coeff
     if conv_cloud_max is not None:
         overrides["conv_cloud_max"] = conv_cloud_max
     if conv_cloud_condensate is not None:
         overrides["conv_cloud_condensate"] = conv_cloud_condensate
+    if Nc_default is not None:
+        overrides["Nc_default"] = Nc_default
     if cloud_inhomogeneity_factor is not None:
         overrides["cloud_inhomogeneity_factor"] = cloud_inhomogeneity_factor
     if cloud_optics_inhomogeneity is not None:
@@ -408,10 +412,6 @@ def build_cloud_config(
         overrides["saturation_scheme"] = saturation_scheme
     if cover_condensate_q_ref is not None:
         overrides["cover_condensate_q_ref"] = cover_condensate_q_ref
-    if conv_cloud_coeff is not None:
-        overrides["conv_cloud_coeff"] = conv_cloud_coeff
-    if Nc_default is not None:
-        overrides["Nc_default"] = Nc_default
     return CloudConfig(
         scheme=scheme, convective_cloud=convective_cloud, **overrides
     )

@@ -101,3 +101,48 @@ def test_land_mask_zeroes_power_only(tmp_path):
     f = load_iwm_forcing(str(p), lat2d, lon2d, land_mask=mask)
     assert float(np.abs(np.asarray(f.ensq)[3]).max()) == 0.0
     assert np.all(np.asarray(f.hbot)[3] > 0.0)   # scales stay unmasked
+
+
+def test_paired_cells_mpas(tmp_path):
+    """paired_cells=True: 1-D lat/lon are (nCells,) centres, not axes.
+
+    Guards the MPAS wiring: no outer-product meshgrid, and the power-total
+    renorm pairs true target areas [m^2] with an ESTIMATED source area (both
+    m^2) — cos-lat vs m^2 would rescale the TW totals by ~1/cell-area.
+    """
+    from legoesm import constants
+
+    lon2d, lat2d, vals = _source()
+    p = tmp_path / "iwm.nc"
+    _write_file(p, lon2d, lat2d, vals)
+
+    rng = np.random.default_rng(11)
+    n_cells = 400
+    cell_lat = rng.uniform(-78.0, 78.0, n_cells)
+    cell_lon = rng.uniform(-180.0, 180.0, n_cells)
+    cell_area = np.full(n_cells, 8.0e9)
+
+    f = load_iwm_forcing(str(p), cell_lat, cell_lon,
+                         paired_cells=True, target_area=cell_area)
+    # paired: (nCells,), never the (nCells, nCells) meshgrid cross
+    assert np.asarray(f.ensq).shape == (n_cells,)
+    from legoesm.ocean.forcing.curvilinear_regrid import (
+        estimate_curvilinear_cell_area,
+    )
+    src_area = estimate_curvilinear_cell_area(lat2d, lon2d)
+    for name, field in (("power_bot", f.ebot), ("power_nsq", f.ensq)):
+        src_total = float((vals[name] * src_area).sum())
+        tgt_total = float((np.asarray(field) * cell_area).sum())
+        np.testing.assert_allclose(tgt_total, src_total, rtol=1e-10,
+                                   err_msg=name)
+    assert np.all(np.asarray(f.hbot) > 0.0)
+
+
+def test_source_area_without_target_area_rejected(tmp_path):
+    lon2d, lat2d, vals = _source()
+    p = tmp_path / "iwm.nc"
+    _write_file(p, lon2d, lat2d, vals)
+    with pytest.raises(ValueError, match="mixed weight units"):
+        load_iwm_forcing(str(p), np.linspace(-80, 80, 17),
+                         np.linspace(-175, 175, 36),
+                         source_area=np.ones_like(lat2d))

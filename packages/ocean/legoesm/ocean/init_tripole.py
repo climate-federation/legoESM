@@ -30,6 +30,84 @@ def squeeze_nemo_field_2d(a: np.ndarray) -> np.ndarray:
 _squeeze2d = squeeze_nemo_field_2d
 
 
+def mask_to_nemo_domain(land_mask, lat_deg, lon_deg, domain_cfg_path, *,
+                        coord_tol_deg: float = 1e-3):
+    """Set to LAND every cell that is wet in ``land_mask`` but dry in the
+    oracle's ``domain_cfg.nc`` (``top_level == 0``), so the wet domain matches
+    the NEMO run being compared against.
+
+    Why: the eORCA1.2 ``mesh_mask.nc`` keeps three closed basins wet -- the
+    Great Lakes, the Caspian Sea and Lake Victoria (207 cells) -- that the
+    ORCA1 ``domain_cfg`` NEMO actually runs has as land (``namclo`` defaults:
+    ``ln_mask_csundef = .true.``).  Kept wet they carry WOA-extrapolated
+    ocean salinity and are restored to it forever, and they are the whole
+    wet-for-us / dry-for-the-oracle set on every scorecard.
+
+    The domain_cfg frame is NEMO's inner domain (``(331, 360)`` for ORCA1)
+    while the mesh frame carries the cyclic halo columns and the north-fold
+    row (``(332, 362)``).  The offset between the two is FOUND by matching
+    the coordinates themselves (``gphit``/``glamt`` on both files) and the
+    call refuses to guess: no offset with every |dlat|, |dlon| below
+    ``coord_tol_deg`` -> ``ValueError``.  Cells dry in the mesh but wet in
+    domain_cfg are NEVER wetted (there is no bathymetry for them); their
+    count is printed so a mesh/domain mismatch in that direction is visible.
+
+    Returns a masked copy of ``land_mask`` with the same shape, always as
+    ``float64`` (the comparison against ``top_level`` is done in float64), so
+    a bool or float32 mask comes back widened.
+    """
+    import xarray as xr
+
+    ds = xr.open_dataset(domain_cfg_path, mask_and_scale=False)
+    try:
+        top = _squeeze2d(np.asarray(ds["top_level"].values))
+        dlat = _squeeze2d(np.asarray(ds["gphit"].values, dtype=np.float64))
+        dlon = _squeeze2d(np.asarray(ds["glamt"].values, dtype=np.float64))
+    finally:
+        ds.close()
+    mask = np.asarray(land_mask, dtype=np.float64).copy()
+    lat = np.asarray(lat_deg, dtype=np.float64)
+    lon = np.asarray(lon_deg, dtype=np.float64)
+    if lat.shape != mask.shape or lon.shape != mask.shape:
+        raise ValueError(
+            f"lat/lon {lat.shape}/{lon.shape} do not match land_mask {mask.shape}")
+    nj, ni = top.shape
+    ny, nx = mask.shape
+    if nj > ny or ni > nx:
+        raise ValueError(
+            f"domain_cfg frame {top.shape} is larger than the mesh frame "
+            f"{mask.shape}; it must be the mesh's inner domain")
+
+    def _agrees(j0, i0):
+        sl = lat[j0:j0 + nj, i0:i0 + ni]
+        sn = lon[j0:j0 + nj, i0:i0 + ni]
+        if sl.shape != top.shape:
+            return False
+        dphi = np.abs(sl - dlat)
+        dlam = np.abs((sn - dlon + 180.0) % 360.0 - 180.0)
+        return bool(np.all(dphi < coord_tol_deg) and np.all(dlam < coord_tol_deg))
+
+    offset = next(((j0, i0) for j0 in range(ny - nj + 1)
+                   for i0 in range(nx - ni + 1) if _agrees(j0, i0)), None)
+    if offset is None:
+        raise ValueError(
+            f"no offset places the domain_cfg frame {top.shape} inside the mesh "
+            f"frame {mask.shape} with coordinates agreeing to {coord_tol_deg} deg; "
+            f"{domain_cfg_path} is not the domain_cfg of this mesh")
+    j0, i0 = offset
+    inner = mask[j0:j0 + nj, i0:i0 + ni]
+    nemo_wet = top > 0
+    ours_wet = inner > 0.5
+    n_to_land = int(np.sum(ours_wet & ~nemo_wet))
+    n_dry_here_wet_there = int(np.sum(~ours_wet & nemo_wet))
+    inner[ours_wet & ~nemo_wet] = 0.0
+    print(f"[setup] wet domain matched to NEMO domain_cfg {domain_cfg_path}: "
+          f"frame offset (j0={j0}, i0={i0}); {n_to_land} cells wet in the mesh "
+          f"but dry for NEMO -> LAND; {n_dry_here_wet_there} cells dry in the "
+          f"mesh but wet for NEMO (left dry: no bathymetry for them)")
+    return mask
+
+
 # Enclosed seas the observed IC cannot fill (PHC3 has no profile at any depth
 # in the Marmara or the Black Sea, so every column there is stitched from
 # Aegean and Black-Sea donors and the stitch is a density wall); masked as
@@ -44,6 +122,7 @@ CLOSED_SEAS = {
 
 
 def read_mesh_mask_bathy(mesh_path, *, strip_north_rows: int = 0,
+                         nemo_domain_cfg: str | None = None,
                          closed_seas=()):
     """Derive the 2-D ocean land mask and total bathymetric depth from NEMO's
     own mesh files (eORCA1 ``mesh_mask.nc``, or the split ``mesh_hgr.nc`` +
@@ -55,6 +134,9 @@ def read_mesh_mask_bathy(mesh_path, *, strip_north_rows: int = 0,
     looked up across all files, first hit wins.  ``strip_north_rows`` drops that
     many NORTH rows (must match the ``create_tripole_grid`` call for the same
     mesh -- see its docstring for the ORCA12 dead-halo-row case).
+    ``nemo_domain_cfg`` (a ``domain_cfg.nc`` path) additionally sets to land
+    every cell the oracle runs dry -- see :func:`mask_to_nemo_domain`; the
+    mask is applied BEFORE the bathymetry is masked, so ``H_bathy`` is 0 there.
 
     Returns
     -------
@@ -80,6 +162,12 @@ def read_mesh_mask_bathy(mesh_path, *, strip_north_rows: int = 0,
 
     # Surface ocean/land mask (1 = ocean). Prefer the 2-D util mask.
     land_mask = _squeeze2d(_var("tmaskutil", "tmask")).astype(np.float64)
+    if nemo_domain_cfg:
+        land_mask = mask_to_nemo_domain(
+            land_mask,
+            _squeeze2d(_var("gphit")).astype(np.float64),
+            _squeeze2d(_var("glamt")).astype(np.float64),
+            nemo_domain_cfg)
     # Total wet-column depth = sum over z of e3t_0 where tmask is wet.
     e3t = np.asarray(_var("e3t_0", "e3t"))            # (t,z,y,x) or (z,y,x)
     tmask = np.asarray(_var("tmask"))

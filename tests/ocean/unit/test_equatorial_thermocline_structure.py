@@ -201,3 +201,92 @@ def test_an_equator_only_snapshot_is_not_mistaken_for_radians(tmp_path):
     assert np.allclose(sorted(set(np.round(lon, 6))), [150.0, 170.0, 210.0,
                                                        230.0])
     assert np.allclose(lat, 0.0)
+
+
+def test_layer_means_separate_redistribution_from_net_loss():
+    """The slab discriminator: vertical mixing moves heat between slabs and
+    keeps their sum; uniform cooling drops every slab.  Built with a known
+    answer (uniform slabs) so a sign or weighting error in the layer mean
+    would be caught, not averaged away."""
+    z = np.linspace(1.0, 400.0, 400)
+    col = np.where(z < 50.0, 28.0, np.where(z < 150.0, 20.0, 12.0))
+    T = col[None, :]
+    got = [_MOD._layer_mean_T(T, z, z0, z1)[0] for z0, z1 in _MOD._LAYERS]
+    assert got == pytest.approx([28.0, 20.0, 12.0], abs=0.15)
+    # mixing the top two slabs: 0-50 cools, 50-150 warms, 150-300 untouched,
+    # thickness-weighted sum conserved
+    mixed = np.where(z < 150.0, (28.0 * 50 + 20.0 * 100) / 150.0, col)[None, :]
+    d = [_MOD._layer_mean_T(mixed, z, z0, z1)[0] - g
+         for (z0, z1), g in zip(_MOD._LAYERS, got)]
+    assert d[0] < -4.0 and d[1] > 2.0 and abs(d[2]) < 0.15
+    assert d[0] * 50 + d[1] * 100 == pytest.approx(0.0, abs=30 * 0.15)
+    # uniform cooling drops every slab by the same amount
+    cooled = (col - 1.0)[None, :]
+    dc = [_MOD._layer_mean_T(cooled, z, z0, z1)[0] - g
+         for (z0, z1), g in zip(_MOD._LAYERS, got)]
+    assert dc == pytest.approx([-1.0, -1.0, -1.0], abs=1e-9)
+    # the band table carries the three slab means in columns 6..8
+    lat = np.zeros(1); lon = np.array([230.0]); wet = np.array([True])
+    rows = _MOD._band_table(T, lat, lon, wet, z, lambda c, zz: 100.0, 2.0,
+                            [(220.0, 240.0)], 400.0)
+    assert rows[0][6:9] == pytest.approx(got, abs=1e-12)
+
+
+def test_isopycnal_T_separates_heave_from_mixing():
+    """Heave (shifting the whole T,S stack down) leaves T on density surfaces
+    unchanged; vertically mixing the top of the column changes it.  Built
+    with a known answer so a sign or interpolation error would be caught."""
+    z = np.linspace(2.0, 400.0, 200)
+    T = _tanh_column(z, z_c=80.0, width=25.0)
+    S = 35.0 + 0.002 * z                      # weakly stable haline part
+    base = _MOD._T_on_sigma(T[None, :], _MOD._sigma0(T[None, :], S[None, :]))[0]
+    assert np.isfinite(base).sum() >= 4
+    # heave: same (T,S) pairs, 30 m deeper
+    Th = np.interp(z, z + 30.0, T); Sh = np.interp(z, z + 30.0, S)
+    heaved = _MOD._T_on_sigma(Th[None, :], _MOD._sigma0(Th[None, :], Sh[None, :]))[0]
+    ok = np.isfinite(base) & np.isfinite(heaved)
+    assert ok.sum() >= 3
+    assert np.max(np.abs(heaved[ok] - base[ok])) < 0.05
+    # mixing the top 120 m changes T on the surfaces the mixed water crosses
+    k = z <= 120.0
+    Tm = T.copy(); Tm[k] = np.trapezoid(T[k], z[k]) / (z[k][-1] - z[k][0])
+    Sm = S.copy(); Sm[k] = np.trapezoid(S[k], z[k]) / (z[k][-1] - z[k][0])
+    mixed = _MOD._T_on_sigma(Tm[None, :], _MOD._sigma0(Tm[None, :], Sm[None, :]))[0]
+    ok2 = np.isfinite(base) & np.isfinite(mixed)
+    assert ok2.sum() >= 2
+    assert np.max(np.abs(mixed[ok2] - base[ok2])) > 0.3
+
+
+def test_isopycnal_depth_reports_heave_as_displacement():
+    """Shifting the stack 30 m down must read as +30 m on every surface."""
+    z = np.linspace(2.0, 400.0, 200)
+    T = _tanh_column(z, z_c=80.0, width=25.0)
+    S = 35.0 + 0.002 * z
+    sig = _MOD._sigma0(T[None, :], S[None, :])
+    z0 = _MOD._T_on_sigma(T[None, :], sig, zc=z)[0]
+    Th = np.interp(z, z + 30.0, T); Sh = np.interp(z, z + 30.0, S)
+    z1 = _MOD._T_on_sigma(Th[None, :], _MOD._sigma0(Th[None, :], Sh[None, :]), zc=z)[0]
+    ok = np.isfinite(z0) & np.isfinite(z1) & (z0 > 40.0) & (z0 < 300.0)
+    assert ok.sum() >= 3
+    assert np.allclose(z1[ok] - z0[ok], 30.0, atol=2.0)
+
+
+def test_surface_profile_sees_a_lens_the_layer_mean_hides():
+    # One well-mixed column and one with a warm 3 K lens in the top 10 m over
+    # colder water: the surface profile must separate them by T(0.5)-T(20).
+    zc = np.array([0.5, 1.6, 2.7, 3.9, 5.1, 6.5, 8.1, 9.8, 11.8, 14.0, 16.5,
+                   19.4, 22.8, 26.7, 31.1, 36.1, 41.8, 48.2, 55.4])
+    mixed = np.full(zc.size, 23.0)
+    lens = np.where(zc < 10.0, 26.0, 22.0)
+    T = np.stack([mixed, lens])
+    lat = np.array([0.0, 0.0]); lon = np.array([225.0, 235.0])
+    wet = np.array([True, True])
+    p_mixed = _MOD._surface_profile(T[:1], lat[:1], lon[:1], wet[:1], zc, None,
+                                   2.0, 220.0, 240.0)
+    p_lens = _MOD._surface_profile(T[1:], lat[1:], lon[1:], wet[1:], zc, None,
+                                  2.0, 220.0, 240.0)
+    assert p_mixed[0] - p_mixed[5] == pytest.approx(0.0)
+    assert p_lens[0] - p_lens[5] > 2.5
+    # a box with no column returns NaN rather than a number
+    assert np.isnan(_MOD._surface_profile(T, lat, lon, wet, zc, None,
+                                         2.0, 100.0, 120.0)).all()

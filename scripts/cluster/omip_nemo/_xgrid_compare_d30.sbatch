@@ -14,7 +14,7 @@
 # the current card -- do not quote it as one.
 set -uo pipefail
 WT=/burg-archive/glab/users/pg2328/legoESM; cd $WT || exit 1
-export PYTHONPATH="$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT"
+export PYTHONPATH="$WT/src:$(ls -d $WT/packages/*/ | sed 's:/$::' | tr '\n' ':')$WT"
 export JAX_PLATFORMS=cpu JAX_ENABLE_X64=1
 R=$WT/results/omip_nemo
 echo "HEAD: $(git -C $WT log --oneline -1)"
