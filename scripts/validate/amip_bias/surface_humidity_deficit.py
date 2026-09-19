@@ -101,6 +101,12 @@ def _prescribed_sst(run, months, mlat, mlon):
                                       label="sst", allow_gaps=True)) + off
 
 
+def _box_mask(mlat, mlon, box):
+    la0, la1, _lo0, _lo1 = box
+    g = np.meshgrid(mlat, mlon, indexing="ij")[0]
+    return (g >= la0) & (g <= la1)
+
+
 def _ocean_mask(run, mlat, mlon):
     fs = sorted(glob.glob(f"{rb.ROOT}/{run}/cmor/fx/sftlf_fx_*.nc"))
     if not fs:
@@ -126,6 +132,20 @@ def _report(run, flux_run=None):
     rh_m = q_m / saturation_specific_humidity(t_m, PLEV)
     rh_o = q_o / saturation_specific_humidity(t_o, PLEV)
     ocean = _ocean_mask(run, mlat, mlon)
+    # 1000 hPa is about 125 m up where the surface is at 1015, and it is
+    # UNDERGROUND wherever surface pressure falls below it -- most of the
+    # Southern Ocean in the monthly mean.  Both reviewers refused the southern
+    # row for that reason, and a reference that extrapolates below its own
+    # surface is not a measurement.  Keep only columns where BOTH sides have
+    # real air at this level, and print how much of each band survives.
+    ps_m = rb._load_model(run, "ps")
+    if ps_m is None:
+        raise SystemExit(f"FATAL: {run} publishes no ps")
+    ps_mod = np.asarray(ps_m["ps"]).mean(axis=0)
+    ps_ref = rb._ref_clim("ps", months, mlat, mlon, src=rb.ERA5)
+    if ps_ref is None:
+        raise SystemExit("FATAL: no ERA5 surface pressure")
+    above = ocean & (ps_mod > PLEV + 500.0) & (np.asarray(ps_ref) > PLEV + 500.0)
 
     ev = rb._load_model(flux_run, "evspsbl")
     evm = np.asarray(ev["evspsbl"]).mean(axis=0) if ev is not None else None
@@ -140,21 +160,23 @@ def _report(run, flux_run=None):
     sst = _prescribed_sst(flux_run, months, mlat, mlon)
     q_sea = saturation_specific_humidity(sst, PLEV) * 0.98   # saline surface
     print(f"{'band':<22}{'q[g/kg]':>9}{'qobs':>8}{'dq':>8}{'dqobs':>8}"
-          f"{'ratio':>8}{'E/Eobs':>8}{'implied':>9}")
+          f"{'ratio':>8}{'E/Eobs':>8}{'implied':>9}{'kept':>8}")
     for name, (lo, hi) in BANDS.items():
         box = (lo, hi, 0, 360)
-        a = rb.region_mean(rh_m, mlat, mlon, box, valid=ocean)
-        b = rb.region_mean(rh_o, mlat, mlon, box, valid=ocean)
+        a = rb.region_mean(rh_m, mlat, mlon, box, valid=above)
+        b = rb.region_mean(rh_o, mlat, mlon, box, valid=above)
         er = np.nan
         if evm is not None and evo is not None:
-            er = (rb.region_mean(evm, mlat, mlon, box, valid=ocean)
-                  / rb.region_mean(np.asarray(evo), mlat, mlon, box, valid=ocean))
-        qa = rb.region_mean(q_m, mlat, mlon, box, valid=ocean) * 1e3
-        qb = rb.region_mean(q_o, mlat, mlon, box, valid=ocean) * 1e3
-        dq = rb.region_mean(q_sea - q_m, mlat, mlon, box, valid=ocean) * 1e3
-        dqo = rb.region_mean(q_sea - q_o, mlat, mlon, box, valid=ocean) * 1e3
+            er = (rb.region_mean(evm, mlat, mlon, box, valid=above)
+                  / rb.region_mean(np.asarray(evo), mlat, mlon, box, valid=above))
+        qa = rb.region_mean(q_m, mlat, mlon, box, valid=above) * 1e3
+        qb = rb.region_mean(q_o, mlat, mlon, box, valid=above) * 1e3
+        dq = rb.region_mean(q_sea - q_m, mlat, mlon, box, valid=above) * 1e3
+        dqo = rb.region_mean(q_sea - q_o, mlat, mlon, box, valid=above) * 1e3
+        kept = float((above & _box_mask(mlat, mlon, box)).sum()
+                     / max(1, (ocean & _box_mask(mlat, mlon, box)).sum()))
         print(f"{name:<22}{qa:9.3f}{qb:8.3f}{dq:8.3f}{dqo:8.3f}"
-              f"{dq / dqo:8.3f}{er:8.3f}{er / (dq / dqo):9.3f}")
+              f"{dq / dqo:8.3f}{er:8.3f}{er / (dq / dqo):9.3f}{kept:8.2f}")
     print("dq is the real air-sea humidity difference against the run's OWN "
           "prescribed sea surface, which both sides share, so it replaces the "
           "relative-humidity proxy: a proxy on RH cannot tell a moist bias "
