@@ -41,6 +41,12 @@ def main() -> int:
     axes = [axes] if len(secs) == 1 else list(axes)
 
     for ax, (nm, s) in zip(axes, secs.items()):
+        # A zonal section stores LONGITUDE in the per-row coordinate, so the
+        # axis has to be named from the section's own orientation rather than
+        # from the field name -- otherwise the y axis of half the panels reads
+        # "latitude" while showing longitude, which is the kind of mislabel
+        # that gets quoted back later as a fact.
+        zonal = s.get("orientation") == "zonal"
         lat = s["lat_per_row"]
         o = s["ours_per_row_Sv"]
         n = s["nemo_per_row_Sv"]
@@ -50,21 +56,25 @@ def main() -> int:
                 ls="--", label="ours - NEMO")
         ax.axvline(0.0, color="0.5", lw=0.8)
         tot_o, tot_n = s["transport_ours_Sv"], s["transport_nemo_Sv"]
-        ax.set_title(f"{nm} at {s['lon_mean']:.1f}E\n"
+        where = (f"{s['lat']:.1f}N, northward" if zonal
+                 else f"{s['lon_mean']:.1f}E, eastward")
+        ax.set_title(f"{nm} at {where}\n"
                      f"ours {tot_o:+.2f} Sv, NEMO {tot_n:+.2f} Sv, "
                      f"difference {tot_o - tot_n:+.2f} Sv",
                      fontsize=9.5, loc="left")
-        ax.set_xlabel("transport per grid row [Sv]", fontsize=9)
+        ax.set_xlabel("transport per grid cell [Sv]", fontsize=9)
         ax.grid(ls=":", lw=0.5, alpha=0.6)
         ax.set_axisbelow(True)
-        ax.text(0.98, 0.02, f"{s['wet_rows']} wet of {s['rows']} rows",
+        ax.set_ylabel("longitude degE" if zonal else "latitude", fontsize=9)
+        nw = s["wet_cells"] if zonal else s["wet_rows"]
+        na = s["cells"] if zonal else s["rows"]
+        ax.text(0.98, 0.02, f"{nw} wet of {na}",
                 transform=ax.transAxes, fontsize=7, color="0.35",
                 ha="right", va="bottom")
-    axes[0].set_ylabel("latitude", fontsize=9)
     axes[0].legend(fontsize=8, loc="best")
 
     fig.suptitle(
-        "Volume transport through meridional sections at day 30, row by row. "
+        "Volume transport through sections at day 30, cell by cell. "
         "Bars sum to the section totals in the titles. Land faces verified "
         "aligned against NEMO's mask before these were computed.",
         fontsize=8.5, y=0.985)
@@ -77,6 +87,7 @@ def main() -> int:
     # than leaving the reader to eyeball the curve: how many rows carry half
     # of the total difference, out of how many wet rows.
     for nm, s in secs.items():
+        nwet = s.get("wet_cells", s.get("wet_rows"))
         dif = sorted(((abs(x - y), la) for x, y, la
                       in zip(s["ours_per_row_Sv"], s["nemo_per_row_Sv"],
                              s["lat_per_row"])), reverse=True)
@@ -87,7 +98,7 @@ def main() -> int:
             k += 1
         top = ", ".join(f"{la:+.1f}" for _, la in dif[:3])
         print(f"[plot] {nm}: half the row-by-row difference sits in {k} of "
-              f"{s['wet_rows']} wet rows; largest at latitudes {top}")
+              f"{nwet} wet; largest at {top}")
     return 0
 
 

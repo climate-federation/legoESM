@@ -75,10 +75,24 @@ def _native_face(a):
     return a[0:331, 2:362]
 
 
+def _native_face_v(a):
+    """Native frame for a v-FACE array.
+
+    NOT assumed to be the u-face offset. A v-face sits between centres j and
+    j+1 in the OTHER direction, and the haloed array's row padding need not
+    mirror its column padding. The offset scan determines it the same way it
+    determined the u one, and the land-mask control refuses to pass until it
+    is right.
+    """
+    return a[1:332, 1:361]
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--snapshot", required=True)
     p.add_argument("--nemo-gridu", required=True)
+    p.add_argument("--nemo-gridv", default=None,
+                   help="required only when --zonal-section is used")
     p.add_argument("--mesh-mask", required=True)
     p.add_argument("--rec", type=int, required=True,
                    help="NEMO time record; the card derives it as DAY/5-1")
@@ -86,6 +100,12 @@ def main() -> int:
                    metavar="SPEC",
                    help="repeatable NAME:LON:LAT0,LAT1 (degrees east, and "
                         "LON may be negative). Use the equals form.")
+    p.add_argument("--zonal-section", action="append", default=[],
+                   metavar="SPEC",
+                   help="repeatable NAME:LAT:LON0,LON1 -- a constant-LATITUDE "
+                        "line, integrating NORTHWARD transport. The Florida "
+                        "Current runs north through its strait, so a "
+                        "meridional section cannot measure it. Equals form.")
     p.add_argument("--out-json", default=None)
     a = p.parse_args()
 
@@ -220,6 +240,77 @@ def main() -> int:
             "nemo_per_row_Sv": (nemo_face[sel, i] * SV).tolist(),
             "lat_per_row": mlat[sel, i].tolist(),
         }
+
+    if a.zonal_section:
+        if not a.nemo_gridv:
+            raise SystemExit("FATAL: --zonal-section needs --nemo-gridv")
+        mfv = np.asarray(z["mass_flux_v"], dtype=np.float64)
+        dxv = np.asarray(z["dx_v"], dtype=np.float64)
+        full_v = np.nansum(mfv, axis=-1) * dxv
+        ours_v = _native_face_v(full_v)
+        dv = nc.Dataset(a.nemo_gridv)
+        try:
+            nemo_v = np.nansum(_m(dv, "vocetr_eff")[a.rec], axis=0)
+        finally:
+            dv.close()
+        mv = nc.Dataset(a.mesh_mask)
+        try:
+            vmask = _m(mv, "vmask")[:, 0:331, 1:361]
+            vlat = _m(mv, "gphiv")[0:331, 1:361]
+            vlon = _m(mv, "glamv")[0:331, 1:361] % 360.0
+        finally:
+            mv.close()
+
+        # The v-face slice gets its OWN alignment proof. Reusing the u answer
+        # would be exactly the assumption that cost a retraction earlier in
+        # this probe's life.
+        v_land = vmask.max(axis=0) < 0.5
+        nzero = int(np.count_nonzero(np.abs(np.nan_to_num(ours_v))[v_land] > 0))
+        print(f"\n[control-2v] faces NEMO calls land: {int(v_land.sum())}; "
+              f"nonzero on ours: {nzero}")
+        if nzero:
+            print("[control-2v] offset scan (di, dj -> nonzero on land):")
+            best = None
+            for dj in (-1, 0, 1):
+                for di in (-1, 0, 1):
+                    cand = full_v[1 + dj:332 + dj, 1 + di:361 + di]
+                    if cand.shape != v_land.shape:
+                        continue
+                    n = int(np.count_nonzero(
+                        np.abs(np.nan_to_num(cand))[v_land] > 0.0))
+                    print(f"              ({di:+d},{dj:+d}) -> {n:7d}"
+                          + ("   <- in use" if (di == 0 and dj == 0) else ""))
+                    if best is None or n < best[0]:
+                        best = (n, di, dj)
+            print(f"[control-2v] FAIL: best offset ({best[1]:+d},{best[2]:+d}) "
+                  f"gives {best[0]}. Zonal transports below are NOT valid.")
+
+        for spec in a.zonal_section:
+            nm, latspec, lonspec = spec.split(":")
+            lat0 = float(latspec)
+            lo0, lo1 = (float(v) % 360.0 for v in lonspec.split(","))
+            j = int(np.argmin(np.abs(np.nanmean(vlat, axis=1) - lat0)))
+            cols = ((vlon[j] >= lo0) | (vlon[j] <= lo1)) if lo0 > lo1 else \
+                   ((vlon[j] >= lo0) & (vlon[j] <= lo1))
+            if not cols.any():
+                raise SystemExit(f"FATAL: zonal section {nm!r} spans no cells")
+            wetc = cols & (vmask[:, j, :].max(axis=0) > 0.5)
+            t_o = float(np.nansum(ours_v[j, cols]) * SV)
+            t_n = float(np.nansum(nemo_v[j, cols]) * SV)
+            print(f"\n=== {nm}: j={j}, lat {vlat[j, cols].mean():.2f}, lon "
+                  f"{vlon[j, cols].min():.2f}-{vlon[j, cols].max():.2f}E, "
+                  f"{int(cols.sum())} cells ({int(wetc.sum())} wet) ===")
+            print(f"  northward transport ours {t_o:+8.2f} Sv   NEMO "
+                  f"{t_n:+8.2f} Sv   difference {t_o - t_n:+8.2f} Sv")
+            out["sections"][nm] = {
+                "orientation": "zonal", "j": j,
+                "cells": int(cols.sum()), "wet_cells": int(wetc.sum()),
+                "lat": float(vlat[j, cols].mean()),
+                "transport_ours_Sv": t_o, "transport_nemo_Sv": t_n,
+                "ours_per_row_Sv": (ours_v[j, cols] * SV).tolist(),
+                "nemo_per_row_Sv": (nemo_v[j, cols] * SV).tolist(),
+                "lat_per_row": vlon[j, cols].tolist(),
+            }
 
     if a.out_json:
         Path(a.out_json).parent.mkdir(parents=True, exist_ok=True)
