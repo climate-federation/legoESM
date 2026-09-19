@@ -3990,6 +3990,7 @@ def _tke_program_twin(
             chained_model, state, card.dt_s, freshwater, recorded_surface))
         return {
             "format": "nemo-testcase-l2-gyre-bn2-production-walk-v1",
+            "worktree": worktree_stamp(),
             "execution": execution_label,
             "bn2_intermediate": bn2_intermediate,
             "input_bridge": input_bridge,
@@ -4013,6 +4014,7 @@ def _tke_program_twin(
             "NEMO_TKE_RECORDED", plant)
         report = {
             "format": "nemo-testcase-l2-gyre-tke-rhs-production-walk-v2",
+            "worktree": worktree_stamp(),
             "execution": execution_label,
             "rhs_materialization": requested_rhs_materialization,
             "rhs_intermediate": rhs_intermediate,
@@ -4115,6 +4117,7 @@ def _tke_program_twin(
                  "stage-shear-operand-ulp", "stage-tke-rhs-ulp"):
         return {
             "format": "nemo-testcase-l2-gyre-tke-production-walk-v7",
+            "worktree": worktree_stamp(),
             "rhs_materialization": rhs_materialization,
             "execution": execution_label,
             "input_bridge": input_bridge,
@@ -4145,6 +4148,7 @@ def _tke_program_twin(
             "chained TKE production run did not expose kt2")
     return {
         "format": "nemo-testcase-l2-gyre-tke-production-walk-v7",
+        "worktree": worktree_stamp(),
         "rhs_materialization": rhs_materialization,
         "execution": execution_label,
         "input_bridge": input_bridge,
@@ -4512,6 +4516,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                 "production _step_jitted result has no tke_avt K_H carry")
         return {
             "format": "nemo-testcase-l2-gyre-stage-twin-production-tke-v3",
+            "worktree": worktree_stamp(),
             "label": "recorded-entry production step (_step_jitted)",
             "kt": 2,
             "stage": "pre-zdf_phy closure feeding WS-RK3 stage 1",
@@ -4593,6 +4598,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
     }:
         return {
             "format": "nemo-testcase-l2-gyre-stage-twin-v4",
+            "worktree": worktree_stamp(),
             "given_nemo_entry": [], "chained": [],
             "stage_entry_identity": [], "first_owned_nonbit": None,
             "stage1_w_walk": stage1_w_walk,
@@ -4606,6 +4612,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
             if row["name"] == "GYRE-zco.kt1.s1.post_hpg_accumulator.u")
         return {
             "format": "nemo-testcase-l2-gyre-stage-twin-v3",
+            "worktree": worktree_stamp(),
             "given_nemo_entry": [], "chained": [],
             "stage_entry_identity": [], "first_owned_nonbit": None,
             "stage_rhs_ulp_plant_flipped_row": planted["n_unequal"] == 1,
@@ -4659,6 +4666,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                         "one-ULP stage-entry plant did not flip exactly one entry row cell")
                 return {
                     "format": "nemo-testcase-l2-gyre-stage-twin-v1",
+                    "worktree": worktree_stamp(),
                     "given_nemo_entry": [], "chained": [],
                     "stage_entry_identity": entry_rows,
                     "first_owned_nonbit": None,
@@ -4672,6 +4680,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
                         "one-ULP stage-context plant did not flip exactly one row cell")
                 return {
                     "format": "nemo-testcase-l2-gyre-stage-twin-v2",
+                    "worktree": worktree_stamp(),
                     "given_nemo_entry": [], "chained": [],
                     "stage_entry_identity": entry_rows,
                     "first_owned_nonbit": None,
@@ -4688,6 +4697,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
     if plant == "stage-assignment-output-ulp":
         return {
             "format": "nemo-testcase-l2-gyre-stage-twin-v5",
+            "worktree": worktree_stamp(),
             "given_nemo_entry": [], "chained": [],
             "stage_entry_identity": [], "first_owned_nonbit": None,
             "stage1_w_walk": stage1_w_walk,
@@ -4759,6 +4769,7 @@ def _stage_twin(records: dict, stage_root: Path, advmean_root: Path,
          if row.get("classification") != "BIT"), None)
     return {
         "format": "nemo-testcase-l2-gyre-stage-twin-v5",
+        "worktree": worktree_stamp(),
         "given_nemo_entry": given,
         "chained": chained,
         "stage_entry_identity": given_entries,
@@ -5001,6 +5012,7 @@ def run(
                     "Round-101 consumed duplicate boundary moved from Round 59")
         report["tke_statement_walk"] = {
             "format": "nemo-testcase-l2-gyre-tke-statement-record-v1",
+            "worktree": worktree_stamp(),
             "record": str(
                 tke_statement_root
                 / "oracle_tke_statement_walk_kt00000002.bin"),

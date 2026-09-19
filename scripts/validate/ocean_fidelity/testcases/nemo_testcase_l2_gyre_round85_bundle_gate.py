@@ -95,6 +95,7 @@ def evaluate(
     ]
     return {
         "format": "gyre-round85-decision38-bundle-gate-v1",
+        "worktree": worktree_stamp(),
         "status": "PASS" if not violations else "FAIL",
         "criterion": "decision38_bundle",
         "decision38_relaxation": (

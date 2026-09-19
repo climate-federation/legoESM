@@ -12,7 +12,6 @@ from typing import Callable
 import jax.numpy as jnp
 import numpy as np
 
-from legoesm import constants
 from ocean_test_matrix import config
 from ocean_test_matrix.setup import _create_ocean_setup
 from ocean_test_matrix.timeloop import (
@@ -1234,44 +1233,9 @@ def run_inertia_gravity_wave(tc: TestCase, output_dir: Path, days: float
 # ===========================================================================
 
 def _compute_rpe(state, grid_type, grid, z_coord):
-    """Compute Reference Potential Energy (Ilicak et al. 2012).
-
-    RPE = g * sum(rho_sorted * z_ref * dz * area)
-    Approximation: sort density profile at each column and compute
-    domain-integrated rho * z.
-    """
-    if grid_type == "spectral":
-        from legoesm.grids.gaussian import sh_synthesis_3d
-        T = np.asarray(sh_synthesis_3d(grid, state.T_hat.data), dtype=np.float64)
-        S = np.asarray(sh_synthesis_3d(grid, state.S_hat.data), dtype=np.float64)
-        area = np.asarray(grid.area, dtype=np.float64)
-    elif grid_type == "mpas":
-        T = np.asarray(state.T.data, dtype=np.float64)
-        S = np.asarray(state.S.data, dtype=np.float64)
-        area = np.asarray(grid.areaCell, dtype=np.float64)
-    else:
-        T = np.asarray(state.T.data, dtype=np.float64)
-        S = np.asarray(state.S.data, dtype=np.float64)
-        area = np.asarray(grid.area, dtype=np.float64)
-
-    z_full = np.asarray(z_coord.z_full_ref, dtype=np.float64)
-    dz = np.asarray(z_coord.dz_ref, dtype=np.float64)
-
-    # Compute density at each point using linearized EOS
-    from legoesm.ocean.eos import linear_eos
-    rho = np.asarray(linear_eos(
-        jnp.array(T), jnp.array(S), jnp.zeros_like(jnp.array(T)),
-        rho_ref=constants.rho_ocean, alpha_T=2.0e-4, beta_S=0.0, T_ref=15.0,
-    ), dtype=np.float64)
-
-    # Potential energy: PE = g * sum(rho * z * dz * area)
-    # For RPE, we'd sort density globally, but as approximation compute PE
-    spatial_shape = T.shape[:-1]
-    area_bc = area.reshape(spatial_shape)
-    pe = 0.0
-    for k in range(len(z_full)):
-        pe += float(np.nansum(rho[..., k] * z_full[k] * dz[k] * area_bc))
-    return config._G_EARTH * pe
+    """Compatibility name for the shared wet-cell PE diagnostic."""
+    from ocean_test_matrix.energy_diagnostics import compute_potential_energy
+    return compute_potential_energy(state, grid_type, grid, z_coord)
 
 
 def run_lock_exchange(tc: TestCase, output_dir: Path, days: float

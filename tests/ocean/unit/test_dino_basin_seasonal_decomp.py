@@ -116,4 +116,14 @@ def test_first_moment_is_not_the_complement_of_the_transport(P, u_random):
 
 def test_probe_self_checks_pass(P):
     """The gates the probe refuses to print a number without."""
+    lego_dir, nemo_dir = Path(P.LEGO_DIR), Path(P.NEMO_DIR)
+    missing = [lego_dir / f"{member}.npz" for member in P.MEMBERS
+               if not (lego_dir / f"{member}.npz").exists()]
+    missing.extend(
+        nemo_dir / f"nemo_day{day:03d}.npz" for day in P.DAYS
+        if not (nemo_dir / f"nemo_day{day:03d}.npz").exists())
+    if missing:
+        pytest.skip(
+            "campaign member/restart artifacts unavailable on this machine: "
+            f"{len(missing)} missing; first missing: {missing[0]}")
     assert P.self_checks(verbose=False) is True

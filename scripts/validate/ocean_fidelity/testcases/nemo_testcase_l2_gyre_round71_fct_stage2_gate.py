@@ -10,6 +10,7 @@ import struct
 from pathlib import Path
 
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 DIMS = (36, 26, 31)
 LEVELS = {
@@ -123,6 +124,7 @@ def main() -> None:
 
     report = {
         "format": "nemo-l2-round71-fct-stage2-v1",
+        "worktree": worktree_stamp(),
         "producer_commit": producer,
         "records": {
             str(stage): {"header": list(row["header"]), "sha256": row["sha256"]}

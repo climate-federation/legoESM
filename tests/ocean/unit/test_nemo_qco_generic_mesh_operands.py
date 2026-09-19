@@ -185,11 +185,19 @@ def test_arm_is_constructible_on_the_certified_l1_cards():
         card = build_nemo_testcase_card(case)
         z_coord = card.recipe.z_coord
         assert isinstance(z_coord, OceanPartialCellCoordinate)
-        # The precondition this change removes: these cards carry no NEMO mesh.
         assert getattr(z_coord, "nemo_hu_0", None) is None
         u_mask, v_mask = compute_face_masks_3d(z_coord.is_active,
                                                card.recipe.grid)
         dtype = card.recipe.initial_state.eta.data.dtype
+        # OVERFLOW now carries a lone raw e3t operand; since 03f0a1a07 that
+        # partial provenance must fail closed.  LOCK_EXCHANGE carries none.
+        if getattr(z_coord, "nemo_e3t_0", None) is not None:
+            with pytest.raises(ValueError, match="some but not all"):
+                nemo_qco_resolved_mesh_operands(
+                    z_coord, card.recipe.grid, u_mask.astype(dtype),
+                    v_mask.astype(dtype), dtype, z_coord.n_levels)
+            # Removing the lone qco operand selects the all-card source.
+            z_coord = z_coord._replace(nemo_e3t_0=None)
         ops = nemo_qco_resolved_mesh_operands(
             z_coord, card.recipe.grid, u_mask.astype(dtype),
             v_mask.astype(dtype), dtype, z_coord.n_levels)

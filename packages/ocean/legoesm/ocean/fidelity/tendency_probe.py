@@ -318,7 +318,7 @@ def probe_latlon_cgrid(
         # K_v = the closure's TRACER diffusivity at this state (the same call
         # the production implicit solve makes).
         _K_v, _A_v = compute_vertical_K_profiles(
-            state, z_coord, surface_forcing, config.physics,
+            state, z_coord, surface_forcing, config.physics, dt_tke=dt,
         )
         _dz_cell = z_coord.dz_ref * J[:, :, jnp.newaxis]
         _dz_half = build_dz_half(_dz_cell)

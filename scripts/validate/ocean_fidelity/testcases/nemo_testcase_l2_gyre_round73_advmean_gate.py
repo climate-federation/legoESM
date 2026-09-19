@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
@@ -109,6 +110,7 @@ def main() -> None:
     rows = validate_fields(fields, replay_ulp=args.plant == "replay-ulp")
     report = {
         "format": "nemo-l2-round73-advmean-v1",
+        "worktree": worktree_stamp(),
         "producer_commit": producer,
         "record_sha256": sha256(path),
         "record_size": path.stat().st_size,

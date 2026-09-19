@@ -1369,7 +1369,10 @@ def test_store_mass_flux_is_the_last_config_field():
     # appended; each addition extends this tuple (a deliberate, visible
     # edit).  store_salt_flux was appended after store_mass_flux (the
     # exact-salt gateway instrument), preserving every earlier position.
-    tail = ("store_mass_flux", "store_salt_flux")
+    # ``zdf_implicit_solver_evaluation`` was appended by ``d80df3ed7``; the
+    # earlier two slots retain their positions immediately before it.
+    tail = ("store_mass_flux", "store_salt_flux",
+            "zdf_implicit_solver_evaluation")
     assert fields[-len(tail):] == tail, (
         f"config tail is {fields[-len(tail):]}, expected {tail}; a new field "
         "must be APPENDED, never inserted -- positional callers break "

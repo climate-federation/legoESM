@@ -1,0 +1,256 @@
+# GYRE lane pre-existing red-test receipt — 2026-09-18
+
+## Scope and result
+
+This receipt covers the 87 node IDs in
+`merge_main_2026-09-17/tests/preexisting_red_ids_on_both_trees.txt`: 71 test
+failures and 16 setup errors that reproduced both at the lane tip and after the
+2026-09-17 main merge.  The repair checkout is
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/parallel/redtests87/repo`, on
+branch `fix/gyre-lane-red-tests-87`, based at
+`950c5787aff1eb9112f566857d5936962846d6d2`.
+
+Result: **75 fixed, 0 held, and 12 skipped with an explicit environment
+reason, of 87**.  Every listed node was first reproduced from the unmodified
+base with one pytest process per source file.  At the repaired tip, every
+non-environment node passes in an isolated file/target process and every
+environment node reports an explicit reason rather than an xfail or bare skip.
+
+No GYRE trajectory comparison was required: this change does not alter a
+configuration choice or any model statement executed by
+`packages/ocean/legoesm/ocean/fidelity/nemo_testcase_recipe.py`.  The production
+fixes are confined to the MPAS adapter/barotropic path, an offline tendency
+probe, and matrix-runner diagnostics.  The only edits under the protected
+`nemo_testcase_l2_gyre_*` glob are the nine metadata-only `worktree_stamp()`
+calls explicitly required by the worktree-stamp ratchet; they do not execute in
+the identity-card trajectory.
+
+## Commit constraint
+
+There are no fix SHAs to cite from this checkout because the sandbox mounted
+the clone's `.git` metadata read-only.  The required stamp-only commit and the
+remaining commits could not be created: `git add` fails with
+
+```text
+fatal: Unable to create '/data/abyssal/dbalwada/nemo-testcases-l2/phase3/parallel/redtests87/repo/.git/index.lock': Read-only file system
+```
+
+Accordingly, `WORKTREE` in the fix-commit column means the reviewed diff in
+this checkout, not a commit.  No alternate Git directory, stash, reset, or push
+was used.
+
+## Isolated proof lines
+
+The before logs are retained in
+`/data/abyssal/dbalwada/nemo-testcases-l2/phase3/parallel/redtests87/baseline_isolated/`;
+the first repaired batch is retained in the sibling `after_batch1/` directory.
+The remaining after-lines were captured directly from isolated pytest
+processes using the same CPU-only environment.
+
+| Proof | Before (change reverted/base) | After |
+|---|---|---|
+| P01 stamp | `1 failed, 9 passed in 2.32s` | `10 passed in 1.96s` |
+| P02 advection AD | `4 failed, 7 passed in 123.13s` | `11 passed in 81.51s` |
+| P03 baroclinic golden | `1 failed, 1 passed in 15.73s` | `2 passed in 23.69s` |
+| P04 frozen tide | `1 failed, 24 passed in 125.99s` | target: `1 passed in 18.16s` |
+| P05 seasonal artifacts | `1 failed, 5 passed in 1.21s` | `5 passed, 1 skipped in 0.83s` |
+| P06 vertex area | `2 failed, 9 passed, 3 errors in 13.61s` | `14 passed in 13.83s` |
+| P07 v-face width | `2 failed, 9 passed, 2 errors in 16.05s` | `13 passed in 14.83s` |
+| P08 EKE goldens | `3 failed, 1 passed in 15.65s` | `4 passed in 15.91s` |
+| P09 freshwater/MPAS scan | `7 failed, 44 passed in 49.02s` | `51 passed in 67.19s` |
+| P10 GM capture | `1 failed, 42 passed in 83.06s` | `43 passed in 104.04s` |
+| P11 implicit-face capture | `3 failed, 1 passed in 6.59s` | `4 passed in 30.49s` |
+| P12 K-zeta anchor | `1 failed, 9 passed in 1.58s` | `10 passed in 1.64s` |
+| P13 mass-flux schema | `1 failed, 79 passed, 3 skipped in 155.53s` | `80 passed, 3 skipped in 158.10s` |
+| P14 MPAS TKE | `14 failed, 22 passed, 9 warnings in 24.97s` | `36 passed, 6 warnings in 43.96s` |
+| P15 QCO operands | `1 failed, 4 passed in 11.08s` | `5 passed in 11.33s` |
+| P16 SCO step PGF | `5 failed, 3 passed in 10.78s` | `8 passed in 17.21s` |
+| P17 Wicker package | `1 failed, 3 passed in 3.77s` | `4 passed in 4.00s` |
+| P18 FESOM optional dependency | `20 passed, 67 skipped, 11 errors in 0.96s` | `20 passed, 78 skipped in 0.49s` |
+| P19 overflow parity | `1 failed, 7 passed, 9 warnings in 161.07s` | target: `1 passed, 5 warnings in 114.33s` |
+| P20 PGF seamount | `4 failed, 1 passed in 6.57s` | `5 passed in 34.28s` |
+| P21 PGF tier envelopes | `3 failed, 20 passed, 2 deselected in 332.85s` | targets: `3 passed in 49.40s` |
+| P22 prescribed-flow schema | `1 failed, 15 passed in 14.05s` | `16 passed in 14.55s` |
+| P23 SCM twins | `11 failed, 34 passed in 2.81s` | `45 passed in 19.04s` |
+| P24 generated wiring | `1 failed, 11 passed in 0.37s` | `12 passed in 0.24s` |
+| P25 TKE N2 routing | `1 failed, 4 passed in 5.27s` | `5 passed in 6.12s` |
+| P26 Veros basic probe | `1 failed, 10 passed in 28.88s` | `11 passed in 32.09s` |
+| P27 Veros recipe probe | `2 failed, 28 passed in 17.85s` | `30 passed in 20.22s` |
+
+`tests/ocean/unit/test_scm_column_twins.py` exits normally in isolation; its
+base line is `11 failed, 34 passed in 2.81s`.  Its previously reported exit 134
+is therefore compiler/resource pressure when combined with many JAX-heavy
+files, not an abort performed by the test.
+
+## Per-ID disposition
+
+| ID | Class | Cause commit or reason | Fix commit | Proof line |
+|---|---|---|---|---|
+| `tests/ocean/fidelity/test_nemo_testcase_worktree_stamp.py::test_every_report_emitter_stamps_the_worktree` | TEST-INFRASTRUCTURE | Nine report emitters omitted the required provenance stamp. | WORKTREE (commit blocked) | P01 |
+| `tests/ocean/unit/test_advection_grad_underflow.py::test_model_rollout_grads_finite_f32[dst3]` | STALE EXPECTATION | `1af2d777c` made the tridiagonal solve a custom VJP; `ef5c977bc` supports forward-over-reverse, not direct JVP of the custom VJP.  The test now checks the supported finite reverse-mode rollout gradient. | WORKTREE (commit blocked) | P02 |
+| `tests/ocean/unit/test_advection_grad_underflow.py::test_model_rollout_grads_finite_f32[ppm_fct]` | STALE EXPECTATION | Same `1af2d777c` / `ef5c977bc` AD-contract change. | WORKTREE (commit blocked) | P02 |
+| `tests/ocean/unit/test_advection_grad_underflow.py::test_model_rollout_grads_finite_f32[superbee]` | STALE EXPECTATION | Same `1af2d777c` / `ef5c977bc` AD-contract change. | WORKTREE (commit blocked) | P02 |
+| `tests/ocean/unit/test_advection_grad_underflow.py::test_model_rollout_grads_finite_f32[tvd]` | STALE EXPECTATION | Same `1af2d777c` / `ef5c977bc` AD-contract change. | WORKTREE (commit blocked) | P02 |
+| `tests/ocean/unit/test_baroclinic_decomposition.py::test_baroclinic_decomposition_bit_identical` | STALE EXPECTATION | `9caa61f3e` intentionally changed the faithful DINO decomposition; the 81-array frozen oracle was regenerated with provenance. | WORKTREE (commit blocked) | P03 |
+| `tests/ocean/unit/test_barotropic_accuracy.py::test_the_frozen_tide_still_uses_loop_start_sampling` | STALE EXPECTATION | `385d2410a` changed the tide to per-substep sampling; the test now asserts the landed clock rather than the removed loop-start behavior. | WORKTREE (commit blocked) | P04 |
+| `tests/ocean/unit/test_dino_basin_seasonal_decomp.py::test_probe_self_checks_pass` | ENVIRONMENT | Required campaign member/restart NPZ artifacts are absent on this machine.  The skip reports the missing count and first path. | WORKTREE (commit blocked) | P05 |
+| `tests/ocean/unit/test_dino_vertex_area_nemo.py::TestConstructionMatchesNemo::test_area_at_hand_quoted_nemo_points` | STALE EXPECTATION | `aa010f143` landed NEMO's true 199x52 DINO grid; quoted indices move by two columns. | WORKTREE (commit blocked) | P06 |
+| `tests/ocean/unit/test_dino_vertex_area_nemo.py::TestConstructionMatchesNemo::test_gap_is_the_midpoint_rule_not_something_else` | STALE EXPECTATION | `aa010f143`; analytic fixture and midpoint expectation now use the faithful grid. | WORKTREE (commit blocked) | P06 |
+| `tests/ocean/unit/test_dino_vertex_area_nemo.py::TestConstructionMatchesNemo::test_wall_rows_keep_the_exact_cap` | STALE EXPECTATION | `aa010f143`; wall-row fixture now has the faithful 199-column shape. | WORKTREE (commit blocked) | P06 |
+| `tests/ocean/unit/test_dino_vertex_area_nemo.py::TestConstructionMatchesNemo::test_whole_interior_not_only_the_quoted_rows` | STALE EXPECTATION | `aa010f143`; full-interior oracle now matches the faithful grid. | WORKTREE (commit blocked) | P06 |
+| `tests/ocean/unit/test_dino_vertex_area_nemo.py::TestPairAnalysisPins::test_the_two_halves_have_the_predicted_analytic_forms` | STALE EXPECTATION | `aa010f143`; pair-analysis medians and shapes were pinned to the obsolete grid. | WORKTREE (commit blocked) | P06 |
+| `tests/ocean/unit/test_dino_vface_zonal_width_nemo.py::TestConstructionMatchesNemo::test_exact_convention_still_carries_the_gap` | STALE EXPECTATION | `aa010f143`; v-face oracle now uses NEMO's faithful 199x52 geometry. | WORKTREE (commit blocked) | P07 |
+| `tests/ocean/unit/test_dino_vface_zonal_width_nemo.py::TestConstructionMatchesNemo::test_vface_latitudes_are_nemos_gphiv` | STALE EXPECTATION | `aa010f143`; latitude fixture shape/indexing was obsolete. | WORKTREE (commit blocked) | P07 |
+| `tests/ocean/unit/test_dino_vface_zonal_width_nemo.py::TestConstructionMatchesNemo::test_whole_interior_not_only_the_quoted_rows` | STALE EXPECTATION | `aa010f143`; full-interior oracle now matches the faithful grid. | WORKTREE (commit blocked) | P07 |
+| `tests/ocean/unit/test_dino_vface_zonal_width_nemo.py::TestConstructionMatchesNemo::test_width_matches_nemo_e1v_at_the_walls` | STALE EXPECTATION | `aa010f143`; wall-width fixture now matches the faithful grid. | WORKTREE (commit blocked) | P07 |
+| `tests/ocean/unit/test_eke_regression.py::test_eke_rhines_kiso_step_regression_bit_identical` | STALE EXPECTATION | `66ad4bf7f` corrected the barotropic averaging window; the frozen EKE output was regenerated. | WORKTREE (commit blocked) | P08 |
+| `tests/ocean/unit/test_eke_regression.py::test_eke_rhines_step_regression_bit_identical` | STALE EXPECTATION | `66ad4bf7f`; regenerated frozen output. | WORKTREE (commit blocked) | P08 |
+| `tests/ocean/unit/test_eke_regression.py::test_eke_step_regression_bit_identical` | STALE EXPECTATION | `66ad4bf7f`; regenerated frozen output. | WORKTREE (commit blocked) | P08 |
+| `tests/ocean/unit/test_freshwater.py::TestOceanModelWithFreshwater::test_freshwater_none_closure_ignores_forcing` | REAL DEFECT | MPAS split precision seeded a `lax.scan` barotropic carry from f64 `u_bar` although the body returns eta-precision f32 transport.  The carry is now initialized in `eta.dtype`. | WORKTREE (commit blocked) | P09 |
+| `tests/ocean/unit/test_freshwater.py::TestOceanModelWithFreshwater::test_multi_step_stability` | REAL DEFECT | Same MPAS scan-carry dtype defect. | WORKTREE (commit blocked) | P09 |
+| `tests/ocean/unit/test_freshwater.py::TestOceanModelWithFreshwater::test_step_with_evap_increases_S` | REAL DEFECT | Same MPAS scan-carry dtype defect. | WORKTREE (commit blocked) | P09 |
+| `tests/ocean/unit/test_freshwater.py::TestOceanModelWithFreshwater::test_step_with_precip_decreases_S` | REAL DEFECT | Same MPAS scan-carry dtype defect. | WORKTREE (commit blocked) | P09 |
+| `tests/ocean/unit/test_gm_resolution_function.py::TestEKEBudgetCoupling::test_signed_iso_sink_gets_raw_kappa_split_call` | TEST-INFRASTRUCTURE | A monkeypatch spy cannot observe calls through the already-jitted wrapper.  The capture test now invokes the same production `_step_impl` eagerly. | WORKTREE (commit blocked) | P10 |
+| `tests/ocean/unit/test_implicit_vmix_face_control_volume.py::test_no_face_carries_water_on_a_level_neither_column_has` | TEST-INFRASTRUCTURE | Same already-jitted-wrapper spy problem; capture uses the production implementation directly. | WORKTREE (commit blocked) | P11 |
+| `tests/ocean/unit/test_implicit_vmix_face_control_volume.py::test_u_face_column_depth_is_the_nemo_value` | TEST-INFRASTRUCTURE | Same already-jitted-wrapper spy problem. | WORKTREE (commit blocked) | P11 |
+| `tests/ocean/unit/test_implicit_vmix_face_control_volume.py::test_v_face_column_depth_is_the_nemo_value` | TEST-INFRASTRUCTURE | Same already-jitted-wrapper spy problem. | WORKTREE (commit blocked) | P11 |
+| `tests/ocean/unit/test_k_zeta_bih_resolution_scaling.py::test_anchor_mesh_is_bit_identical_to_the_tuned_value` | REAL DEFECT | A float32 mesh-spacing mean was used to derive an allegedly exact anchor.  Accumulation and the reference value now use the float64 mesh mean. | WORKTREE (commit blocked) | P12 |
+| `tests/ocean/unit/test_mass_flux_store.py::test_store_mass_flux_is_the_last_config_field` | STALE EXPECTATION | `d80df3ed7` intentionally appended a config field; the positional schema pin now names the current tail. | WORKTREE (commit blocked) | P13 |
+| `tests/ocean/unit/test_mpas_tke.py::TestNemoSurfaceTermsOnMPAS::test_eice0_no_ice_is_fine_and_default_card_unchanged` | REAL DEFECT | `21e85d252` made `surface_tmask` part of faithful NEMO TKE; the MPAS adapter did not forward its reconstructed surface wet mask. | WORKTREE (commit blocked) | P14 |
+| `tests/ocean/unit/test_mpas_tke.py::TestNemoSurfaceTermsOnMPAS::test_eice3_quarter_ice_maps_to_full_attenuation` | REAL DEFECT | Same missing MPAS `surface_tmask` bridge. | WORKTREE (commit blocked) | P14 |
+| `tests/ocean/unit/test_mpas_tke.py::TestNemoSurfaceTermsOnMPAS::test_eice_full_ice_attenuates_vs_eice0` | REAL DEFECT | Same missing MPAS `surface_tmask` bridge. | WORKTREE (commit blocked) | P14 |
+| `tests/ocean/unit/test_mpas_tke.py::TestNemoSurfaceTermsOnMPAS::test_kernel_receives_degrees_and_e3t_inputs` | REAL DEFECT | Same missing MPAS `surface_tmask` bridge. | WORKTREE (commit blocked) | P14 |
+| `tests/ocean/unit/test_mpas_tke.py::TestNemoSurfaceTermsOnMPAS::test_orca1_card_runs_on_mpas` | REAL DEFECT | Same missing MPAS `surface_tmask` bridge. | WORKTREE (commit blocked) | P14 |
+| `tests/ocean/unit/test_mpas_tke.py::TestNemoSurfaceTermsOnMPAS::test_partial_cell_zeroes_subseafloor_interfaces` | REAL DEFECT | Same missing MPAS `surface_tmask` bridge. | WORKTREE (commit blocked) | P14 |
+| `tests/ocean/unit/test_mpas_tke.py::TestPrognosticCarryHardening::test_carry_land_masking_forced_land` | REAL DEFECT | Same missing MPAS `surface_tmask` bridge; the tests also pin the required fp64 policy explicitly. | WORKTREE (commit blocked) | P14 |
+| `tests/ocean/unit/test_mpas_tke.py::TestPrognosticCarryHardening::test_carry_partial_cell_subseafloor_zeroed` | REAL DEFECT | Same MPAS TKE bridge defect. | WORKTREE (commit blocked) | P14 |
+| `tests/ocean/unit/test_mpas_tke.py::TestPrognosticCarryHardening::test_scan_carry_stable_treedef_dtype_shape` | REAL DEFECT | Same MPAS TKE bridge defect. | WORKTREE (commit blocked) | P14 |
+| `tests/ocean/unit/test_mpas_tke.py::TestPrognosticCarryHardening::test_split_policy_tke_dtype_pinned` | REAL DEFECT | Same MPAS TKE bridge defect; test policy is now explicit. | WORKTREE (commit blocked) | P14 |
+| `tests/ocean/unit/test_mpas_tke.py::TestPrognosticTKECarryOnMPAS::test_carry_evolves_and_feeds_back` | REAL DEFECT | Same MPAS TKE bridge defect. | WORKTREE (commit blocked) | P14 |
+| `tests/ocean/unit/test_mpas_tke.py::TestPrognosticTKECarryOnMPAS::test_carry_masked_on_land` | REAL DEFECT | Same MPAS TKE bridge defect. | WORKTREE (commit blocked) | P14 |
+| `tests/ocean/unit/test_mpas_tke.py::TestPrognosticTKECarryOnMPAS::test_diagnostic_mode_unchanged_two_tuple` | REAL DEFECT | Same MPAS TKE bridge defect. | WORKTREE (commit blocked) | P14 |
+| `tests/ocean/unit/test_mpas_tke.py::TestPrognosticTKECarryOnMPAS::test_model_seed_and_step_carry` | REAL DEFECT | Same MPAS TKE bridge defect. | WORKTREE (commit blocked) | P14 |
+| `tests/ocean/unit/test_nemo_qco_generic_mesh_operands.py::test_arm_is_constructible_on_the_certified_l1_cards` | STALE EXPECTATION | `03f0a1a07` intentionally made partial raw-QCO operand bundles fail closed; the test now supplies all raw operands or asserts the partial-bundle error. | WORKTREE (commit blocked) | P15 |
+| `tests/ocean/unit/test_nemo_sco_step_pgf.py::test_eta_zero_reduces_to_adcroft_bitwise` | STALE EXPECTATION | `7f729c488` requires raw W-grid geometry and `0da38492e` landed the dimensionless recurrence; fixture/expected recurrence were stale. | WORKTREE (commit blocked) | P16 |
+| `tests/ocean/unit/test_nemo_sco_step_pgf.py::test_f90_recurrence_oracle_nonuniform_rho` | STALE EXPECTATION | Same `7f729c488` / `0da38492e` faithful-operand change. | WORKTREE (commit blocked) | P16 |
+| `tests/ocean/unit/test_nemo_sco_step_pgf.py::test_staircase_rest_stays_at_rest` | STALE EXPECTATION | Same `7f729c488` / `0da38492e` faithful-operand change. | WORKTREE (commit blocked) | P16 |
+| `tests/ocean/unit/test_nemo_sco_step_pgf.py::test_two_column_step_form_stress_x` | STALE EXPECTATION | Same `7f729c488` / `0da38492e` faithful-operand change. | WORKTREE (commit blocked) | P16 |
+| `tests/ocean/unit/test_nemo_sco_step_pgf.py::test_two_column_step_form_stress_y` | STALE EXPECTATION | Same `7f729c488` / `0da38492e` faithful-operand change. | WORKTREE (commit blocked) | P16 |
+| `tests/ocean/unit/test_nemo_wicker_aimp_package.py::test_literal_tracer_matrix_fuses_diffusion_and_implicit_transport` | STALE EXPECTATION | `101d3383f` intentionally split the multiply and subtraction to reproduce gfortran rounding; the literal oracle moved by one binary64 ULP. | WORKTREE (commit blocked) | P17 |
+| `tests/ocean/unit/test_ocean_model_fesom.py::TestR9FacadeBasics::test_step_updates_uv_node` | ENVIRONMENT | Optional `fesom_jax` package is not installed in this CPU test environment; module fixture uses `importorskip(..., reason=...)`. | WORKTREE (commit blocked) | P18 |
+| `tests/ocean/unit/test_ocean_model_fesom.py::TestR9FacadeBasics::test_T_field_shape_drops_padding` | ENVIRONMENT | Same absent optional `fesom_jax` dependency. | WORKTREE (commit blocked) | P18 |
+| `tests/ocean/unit/test_ocean_model_fesom.py::TestR9FacadeBasics::test_uv_node_is_zero_at_rest` | ENVIRONMENT | Same absent optional `fesom_jax` dependency. | WORKTREE (commit blocked) | P18 |
+| `tests/ocean/unit/test_ocean_model_fesom.py::TestR9FacadeBasics::test_uv_node_shape` | ENVIRONMENT | Same absent optional `fesom_jax` dependency. | WORKTREE (commit blocked) | P18 |
+| `tests/ocean/unit/test_ocean_model_fesom.py::TestR9NlevelsNod2DMin::test_nlevels_nod2D_min_equals_fesom_formula` | ENVIRONMENT | Same absent optional `fesom_jax` dependency. | WORKTREE (commit blocked) | P18 |
+| `tests/ocean/unit/test_ocean_model_fesom.py::TestR9NlevelsNod2DMin::test_wet_nodes_incident_to_dry_have_min_one` | ENVIRONMENT | Same absent optional `fesom_jax` dependency. | WORKTREE (commit blocked) | P18 |
+| `tests/ocean/unit/test_ocean_model_fesom.py::TestR9PytreeDesign::test_jit_compiles_once_across_two_states` | ENVIRONMENT | Same absent optional `fesom_jax` dependency. | WORKTREE (commit blocked) | P18 |
+| `tests/ocean/unit/test_ocean_model_fesom.py::TestR9PytreeDesign::test_two_value_identical_states_share_treedef` | ENVIRONMENT | Same absent optional `fesom_jax` dependency. | WORKTREE (commit blocked) | P18 |
+| `tests/ocean/unit/test_ocean_model_fesom.py::TestR9PytreeDesign::test_u_and_v_share_one_uv_node` | ENVIRONMENT | Same absent optional `fesom_jax` dependency. | WORKTREE (commit blocked) | P18 |
+| `tests/ocean/unit/test_ocean_model_fesom.py::TestR9RunIsEager::test_run_matches_eager_loop_and_threads_flag` | ENVIRONMENT | Same absent optional `fesom_jax` dependency. | WORKTREE (commit blocked) | P18 |
+| `tests/ocean/unit/test_ocean_model_fesom.py::TestR9RunIsEager::test_run_rejects_zero_steps` | ENVIRONMENT | Same absent optional `fesom_jax` dependency. | WORKTREE (commit blocked) | P18 |
+| `tests/ocean/unit/test_overflow_runner_parity.py::TestModularOverflowStable::test_modular_matches_monolithic_pe_rel` | TEST-INFRASTRUCTURE | Modular and monolithic runners had drifted duplicate PE/RPE diagnostic implementations.  Both now call one shared wet-cell, moving-volume helper. | WORKTREE (commit blocked) | P19 |
+| `tests/ocean/unit/test_pgf_seamount_at_rest.py::test_smc03_partial_cell_rest_balance` | STALE EXPECTATION | `b8552523e` requires the seeded slow/barotropic forcing carry; the fixture now enters through `model.seed_scan_carry`. | WORKTREE (commit blocked) | P20 |
+| `tests/ocean/unit/test_pgf_seamount_at_rest.py::test_smc03_zstar_meridional_slope_balance` | STALE EXPECTATION | Same `b8552523e` carry contract. | WORKTREE (commit blocked) | P20 |
+| `tests/ocean/unit/test_pgf_seamount_at_rest.py::test_smc03_zstar_rest_balance` | STALE EXPECTATION | Same `b8552523e` carry contract. | WORKTREE (commit blocked) | P20 |
+| `tests/ocean/unit/test_pgf_seamount_at_rest.py::test_zstar_uncorrected_pgf_is_large_selftest` | STALE EXPECTATION | Same `b8552523e` carry contract. | WORKTREE (commit blocked) | P20 |
+| `tests/ocean/unit/test_pgf_tiers.py::TestTier4::test_tier4_seamount_strong_wind[adcroft]` | STALE EXPECTATION | `9caa61f3e` corrected the AL81 triad/flux pairing.  Transplanting only the prior operator restores the old 5.9 m/s result; the corrected closure-free case is 25.22 m/s, so it has a separate 30 m/s regression ceiling. | WORKTREE (commit blocked) | P21 |
+| `tests/ocean/unit/test_pgf_tiers.py::TestTier4::test_tier4_seamount_strong_wind[smc03]` | STALE EXPECTATION | Same `9caa61f3e` change; corrected result is 21.80 m/s versus the accidentally damped old result. | WORKTREE (commit blocked) | P21 |
+| `tests/ocean/unit/test_pgf_tiers.py::TestTier4::test_tier4_wind_flat_bottom_reference` | STALE EXPECTATION | Same `9caa61f3e` change; corrected reference is 2.47 m/s and is guarded at 3 m/s. | WORKTREE (commit blocked) | P21 |
+| `tests/ocean/unit/test_prescribed_flow.py::test_positional_construction_unshifted_by_tail_field` | STALE EXPECTATION | `9caa61f3e` and later `d80df3ed7` extended/nested the config tail; positional schema expectation was obsolete. | WORKTREE (commit blocked) | P22 |
+| `tests/ocean/unit/test_scm_column_twins.py::test_build_jitted_step_rejects_bad_tier_sw_mode_and_channels` | STALE EXPECTATION | `9caa61f3e` nested constants and `a90bd1935` landed bilinear forcing; the test built the pre-change script/config shape. | WORKTREE (commit blocked) | P23 |
+| `tests/ocean/unit/test_scm_column_twins.py::test_build_scm_rejects_unknown_tier` | STALE EXPECTATION | Same `9caa61f3e` / `a90bd1935` script contract. | WORKTREE (commit blocked) | P23 |
+| `tests/ocean/unit/test_scm_column_twins.py::test_extract_point_forcing_series_channels_and_values` | STALE EXPECTATION | Same script contract; expected bilinear forcing values/channels were stale. | WORKTREE (commit blocked) | P23 |
+| `tests/ocean/unit/test_scm_column_twins.py::test_forcing_closures_finite_over_run_window` | STALE EXPECTATION | Same script contract. | WORKTREE (commit blocked) | P23 |
+| `tests/ocean/unit/test_scm_column_twins.py::test_jitted_step_matches_closure_reference[T0-top]` | STALE EXPECTATION | Same script contract. | WORKTREE (commit blocked) | P23 |
+| `tests/ocean/unit/test_scm_column_twins.py::test_jitted_step_matches_closure_reference[T1-penetrate]` | STALE EXPECTATION | Same script contract. | WORKTREE (commit blocked) | P23 |
+| `tests/ocean/unit/test_scm_column_twins.py::test_jitted_step_salt_is_3d_virtual_salt_closure` | STALE EXPECTATION | Same script contract. | WORKTREE (commit blocked) | P23 |
+| `tests/ocean/unit/test_scm_column_twins.py::test_run_point_tier_daily_history_and_meta_shapes` | STALE EXPECTATION | Same script contract. | WORKTREE (commit blocked) | P23 |
+| `tests/ocean/unit/test_scm_column_twins.py::test_run_point_tier_forcing_and_coriolis_at_selected_cell` | STALE EXPECTATION | Same script contract. | WORKTREE (commit blocked) | P23 |
+| `tests/ocean/unit/test_scm_column_twins.py::test_t0_has_no_coriolis_no_wind_and_uv_stay_exactly_zero` | STALE EXPECTATION | Same script contract. | WORKTREE (commit blocked) | P23 |
+| `tests/ocean/unit/test_scm_column_twins.py::test_t1_has_coriolis_and_wind_produces_motion` | STALE EXPECTATION | Same script contract. | WORKTREE (commit blocked) | P23 |
+| `tests/ocean/unit/test_step_wiring_generated.py::test_committed_doc_matches_regeneration` | TEST-INFRASTRUCTURE | Generated wiring inventory drifted from its generator; regenerated result is 148 calls, 51 live, 58 dead, 39 unresolved. | WORKTREE (commit blocked) | P24 |
+| `tests/ocean/unit/test_tke_n2_before_advection.py::test_set_diffusivities_routes_exactly_to_n2_source` | STALE EXPECTATION | `21e85d252` added the faithful `surface_tmask` operand; the fixture now supplies it. | WORKTREE (commit blocked) | P25 |
+| `tests/ocean/unit/test_veros_acc_basic_recipe.py::test_frozen_state_probe_compatible` | REAL DEFECT | The `dt_tke` requirement introduced with the newer TKE contract (traceable to `080ce674a`) was not forwarded by the offline tendency probe. | WORKTREE (commit blocked) | P26 |
+| `tests/ocean/unit/test_veros_acc_recipe.py::test_compare_momentum_emits_all_processes` | REAL DEFECT | Same stale tendency-probe caller; it now forwards the probe timestep as `dt_tke`. | WORKTREE (commit blocked) | P27 |
+| `tests/ocean/unit/test_veros_acc_recipe.py::test_end_to_end_recipe_probe_round_trip` | REAL DEFECT | Same stale tendency-probe caller. | WORKTREE (commit blocked) | P27 |
+
+The table contains exactly 87 IDs: 46 stale expectations, 22 real defects, 7
+test-infrastructure defects, and 12 environment skips.
+
+## Whole-tree runs
+
+Both commands used the prescribed CPU-only environment and separate
+`pytest -n 12` processes.
+
+### Fidelity tree
+
+```text
+22 failed, 1327 passed, 8 skipped in 2761.25s (0:46:01)
+```
+
+None of the 22 is one of the 87 repaired IDs.  The 20 `DIRTY-PROVENANCE`
+rows below are gates correctly refusing the necessarily dirty, uncommittable
+checkout.  The other two are the citation-map audit that this task explicitly
+forbids changing.
+
+| Remaining fidelity ID | Classification/reason |
+|---|---|
+| `tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round29_zdf_matrix.py::test_gate_is_green_on_a_self_consistent_record` | DIRTY-PROVENANCE: no commit can be made in read-only `.git`. |
+| `tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round29_zdf_matrix.py::test_one_ulp_on_one_operand_turns_the_gate_red` | DIRTY-PROVENANCE. |
+| `tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round29_zdf_matrix.py::test_main_exit_code_carries_the_bit_bar` | DIRTY-PROVENANCE. |
+| `tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round85_bundle_gate.py::test_decision38_allows_registered_later_worsening_when_targets_improve` | DIRTY-PROVENANCE. |
+| `tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round85_bundle_gate.py::test_decision38_refuses_unchanged_or_worse_target` | DIRTY-PROVENANCE. |
+| `tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round85_bundle_gate.py::test_decision38_refuses_at_bar_loss_and_earlier_boundary` | DIRTY-PROVENANCE. |
+| `tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round90_baro_record.py::test_record_reader_and_final_add_replay` | DIRTY-PROVENANCE. |
+| `tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round90_baro_record.py::test_final_add_ulp_plant_fires` | DIRTY-PROVENANCE. |
+| `tests/ocean/fidelity/test_nemo_testcase_l2_gyre_decision43_gate.py::test_fct_metric_route_is_derived_from_every_recipe_and_fails_unmeasured` | DIRTY-PROVENANCE. |
+| `tests/ocean/fidelity/test_nemo_testcase_oracle_gate.py::test_planted_unaccounted_array_is_file_side_and_missing` | DIRTY-PROVENANCE. |
+| `tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round63_krhs_split.py::test_round63_both_records_calibrate_bit_exact` | DIRTY-PROVENANCE. |
+| `tests/ocean/fidelity/test_nemo_testcase_l2_gyre_round45_ablation_gate.py::test_missing_artifacts_fail_closed` | DIRTY-PROVENANCE. |
+| `tests/ocean/fidelity/test_nemo_testcase_phase3_eos_gate.py::test_both_cards_pass_the_eos_first_gate_on_registered_dumps` | DIRTY-PROVENANCE. |
+| `tests/ocean/fidelity/test_nemo_testcase_phase3_eos_gate.py::test_planted_wet_density_violation_turns_gate_red` | DIRTY-PROVENANCE. |
+| `tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py::test_every_map_entry_is_shift_sensitive` | PROTECTED DEBT: citation gate map is stale; task explicitly forbids editing it. |
+| `tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py::test_the_audit_itself_can_fail` | PROTECTED DEBT: same forbidden citation-map edit. |
+| `tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py::test_the_gate_runs_clean_on_the_real_receipt` | DIRTY-PROVENANCE. |
+| `tests/ocean/fidelity/test_nemo_testcase_receipt_citation_gate.py::test_the_real_receipt_run_can_fail` | DIRTY-PROVENANCE. |
+| `tests/ocean/fidelity/test_nemo_testcase_l2_gyre_year_fromrest.py::test_alignment_gate_passes_unplanted` | DIRTY-PROVENANCE. |
+| `tests/ocean/fidelity/test_nemo_testcase_l2_gyre_decision43_gate.py::test_decision43_passes_only_for_a_month_improvement` | DIRTY-PROVENANCE. |
+| `tests/ocean/fidelity/test_nemo_testcase_l2_gyre_decision43_gate.py::test_shared_dino_statement_requires_a_separate_measured_gate` | DIRTY-PROVENANCE. |
+| `tests/ocean/fidelity/test_nemo_testcase_l2_gyre_decision43_gate.py::test_all_three_plants_fail_the_gate` | DIRTY-PROVENANCE. |
+
+### Unit tree
+
+The mandated command collected 6,819 tests and reached 96%, but multiple xdist
+workers aborted inside JAX's CPU `backend_compile_and_load`; after the
+coordinator produced no output for more than 20 minutes it was interrupted and
+exited 130, so **pytest emitted no unit-tree summary line**.  Exact compiler
+abort stacks named the following tests; their files/targets pass when isolated,
+so these are compiler-resource interactions rather than remaining members of
+the 87-ID debt:
+
+| Interrupted-run ID or test | Reason/status |
+|---|---|
+| `tests/ocean/unit/test_advection_grad_underflow.py::test_model_rollout_grads_finite_f32[...]` | JAX compiler abort under multi-file pressure; isolated file P02 passes all 11. |
+| `tests/ocean/unit/test_ocean_physics_validation_group.py::test_bulk_stress_sign_directional` | JAX compiler abort. |
+| `tests/ocean/unit/test_ocean_scm.py::test_adiabatic_heat_and_salt_conserved` | JAX compiler abort. |
+| `tests/ocean/unit/test_mpas_tke.py::TestPrognosticTKECarryOnMPAS::test_carry_evolves_and_feeds_back` | JAX compiler abort; isolated file P14 passes all 36. |
+| `tests/ocean/unit/test_silvestri_baroclinic_jet.py::test_builds_and_steps_each_scheme[...]` | JAX compiler abort. |
+| `tests/ocean/unit/test_tidal_forcing.py::test_wire_differentiable_end_to_end` | JAX compiler abort. |
+| `tests/ocean/unit/test_tke_prognostic.py::test_bottom_drag_source_changes_tke_and_nonneg` | JAX compiler abort. |
+| `tests/ocean/unit/test_ocean_tendency_helpers.py::test_zero_ocean_tendencies_all_zero_correct_shapes_dims` | JAX compiler abort. |
+| `tests/ocean/unit/test_advection_fct_zalesak.py::TestFct2Centred::test_fct2_conserves_on_periodic_channel` | Unrelated pre-existing assertion found by split coverage: residual `1.782609615e-10` exceeds `1e-10`. |
+
+Following the repository instruction to split large compiler-heavy suites, one
+bounded chunk completed with
+`1 failed, 857 passed, 1 skipped, 2 xfailed, 5 warnings in 379.14s (0:06:19)`
+(the FCT ID above), and another completed with
+`380 passed, 8 skipped, 10 warnings in 76.18s (0:01:16)`.  Additional isolated
+subchunks reported `81 passed in 19.51s`, `133 passed in 6.27s`,
+`26 passed in 2.00s`, `25 passed in 50.88s`, `14 passed in 255.14s`,
+`17 passed, 2 deselected in 363.64s`, and
+`9 passed, 1 deselected in 155.46s`.  This split evidence is supplementary; it
+does not invent a summary for the interrupted required command.
+
+## Review
+
+Independent review unavailable in-sandbox.

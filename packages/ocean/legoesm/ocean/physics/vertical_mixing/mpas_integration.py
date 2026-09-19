@@ -895,6 +895,10 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
             # channel ever reaches MPAS (codex MED, parity with k_profiles).
             lat_deg=lat_deg,
             ice_frac=ice_frac,
+            # NEMO nn_mxl=3/4 anchors the surface mixing length with
+            # ``taum*tmask(:,:,1)``.  ``mask`` is the MPAS cell-ocean mask
+            # returned by the shared reconstruction above.
+            surface_tmask=mask,
             # e3t cell thicknesses (dz_ref · J) for the nn_mxl=3 lup/ldown
             # |dl/dz| <= e3t sweeps — the SAME (dz_ref, jacobian) pair the
             # C-grid k_profiles path threads.  Ignored by the kernel for

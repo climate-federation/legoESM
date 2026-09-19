@@ -134,6 +134,7 @@ def compare(left: dict, right: dict, *, plant: str | None = None) -> dict:
             f"changed rows moved outside the registered late-step set: {by_kt}")
     return {
         "format": "nemo-testcase-l2-gyre-round101-rule12-attribution-v1",
+        "worktree": worktree_stamp(),
         "left_label": "Round 97 full RHS only",
         "right_label": "Round 99 full RHS plus W/ratio/clock",
         "left_summary": left_summary,

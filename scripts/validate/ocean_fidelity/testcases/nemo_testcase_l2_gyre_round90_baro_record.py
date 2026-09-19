@@ -10,6 +10,7 @@ import struct
 from pathlib import Path
 
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 MAGIC = "NEMO_L2_R90BARO1"
 DIMS = (36, 26, 31)
@@ -143,6 +144,7 @@ def measure(args) -> dict[str, object]:
         status = "READY"
     return {
         "format": "nemo-testcase-l2-gyre-round90-baro-record-v1",
+        "worktree": worktree_stamp(),
         "status": status,
         "record_sha256": _sha256(args.record),
         "producer_commit": stamp_words[1],

@@ -57,9 +57,17 @@ from legoesm.ocean.vertical import create_ocean_z_star
 
 @pytest.fixture(autouse=True)
 def _x64():
+    from legoesm.core.precision import PrecisionPolicy, get_policy, set_policy
+
     orig = jax.config.jax_enable_x64
+    orig_policy = get_policy()
     jax.config.update("jax_enable_x64", True)
+    # JAX_ENABLE_X64 only enables the dtype; it does not select legoESM's
+    # precision policy.  These reference tests (and, specifically, the outer
+    # scan-carry test) promise a uniform-f64 policy in their contract.
+    set_policy(PrecisionPolicy.fp64())
     yield
+    set_policy(orig_policy)
     jax.config.update("jax_enable_x64", orig)
 
 

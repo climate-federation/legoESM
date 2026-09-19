@@ -258,7 +258,11 @@ def barotropic_substeps_mpas(
     )
 
     # Accumulators for time-averaged barotropic fields (issues #145, #149, #102).
-    Hu_sum = jnp.zeros_like(u_bar)
+    # The substep body deliberately returns transport in eta precision (the
+    # continuity equation's dtype).  Seed the scan carry in that same dtype;
+    # under split precision u_bar can be f64 while eta is f32, and a
+    # zeros_like(u_bar) seed makes lax.scan reject the f64 -> f32 transition.
+    Hu_sum = jnp.zeros_like(u_bar, dtype=eta.dtype)
     eta_sum = jnp.zeros_like(eta)
     ubar_sum = jnp.zeros_like(u_bar)
 

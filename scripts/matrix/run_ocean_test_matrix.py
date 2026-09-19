@@ -198,14 +198,6 @@ MATCHED_TRACER_ADV = "tvd"  # limited scheme: no dispersive over/undershoot
 # 3e-12/day at ico3 resolution) -- documented per-grid difference.
 LOCKEX_CGRID_TRACER_ADV = "fct2"
 
-#: Grid families by WHERE THEY KEEP THE CELL AREA. Voronoi meshes expose
-#: ``areaCell``; the structured/curvilinear grids expose ``area``. Keeping
-#: the split explicit is what stops a new grid type silently reading
-#: whichever attribute happens to exist (see ``_rpe_extract``).
-_MPAS_GRID_TYPES = ("mpas", "mpas_regional", "mpas_channel")
-_CELL_AREA_GRID_TYPES = ("latlon", "latlon_regional", "latlon_channel",
-                         "cubed_sphere", "cs_regional", "tripole", "fesom")
-
 # Physical constants for idealized ocean test cases — use canonical values.
 from legoesm import constants as _C
 _A_EARTH = _C.R_earth   # Earth radius (m)
@@ -6494,100 +6486,9 @@ def _init_lock_exchange(state, grid_type, grid, z_coord, lx_config=None):
 
 
 def _rpe_extract(state, grid_type, grid, z_coord):
-    """Shared extraction for the two energy diagnostics.
-
-    Returns ``(T, S, area_bc, mask_bc, z_full, dz)`` with ``area_bc``/``mask_bc``
-    already reshaped to the tracer's spatial shape. Factored out so
-    ``_compute_rpe`` (plain PE) and ``_compute_sorted_rpe`` (mixing metric) can
-    never disagree about masking, areas or density inputs.
-    """
-    if grid_type == "spectral":
-        from legoesm.grids.gaussian import sh_synthesis_3d
-        T = np.asarray(sh_synthesis_3d(grid, state.T_hat.data), dtype=np.float64)
-        S = np.asarray(sh_synthesis_3d(grid, state.S_hat.data), dtype=np.float64)
-        # GaussianGrid exposes grid_area, NOT area (codex 2026-08-08).
-        area = np.asarray(getattr(grid, "grid_area", None), dtype=np.float64)
-        mask_attr = "land_mask_grid"
-    elif grid_type in _MPAS_GRID_TYPES:
-        # EVERY Voronoi grid, not just the global one. A VoronoiMesh
-        # carries areaCell and NOT area, so a regional or channel mesh fell
-        # through to the else branch below and raised on grid.area -- and
-        # run_lock_exchange calls this diagnostic BEFORE its first step, so
-        # such an arm would have died before integrating rather than
-        # producing a wrong number (codex 2026-08-13, found while scoping a
-        # resolved lock-exchange arm on mpas_regional).
-        T = np.asarray(state.T.data, dtype=np.float64)
-        S = np.asarray(state.S.data, dtype=np.float64)
-        area = np.asarray(grid.areaCell, dtype=np.float64)
-        mask_attr = "land_mask"
-    elif grid_type in _CELL_AREA_GRID_TYPES:
-        T = np.asarray(state.T.data, dtype=np.float64)
-        S = np.asarray(state.S.data, dtype=np.float64)
-        area = np.asarray(grid.area, dtype=np.float64)
-        mask_attr = "land_mask"
-    else:
-        # NOT a silent default. The two families above expose their cell
-        # area under different names, so a new grid type reaching here
-        # would pick one at random; say which name it needs instead.
-        raise ValueError(
-            f"_rpe_extract: unknown grid_type {grid_type!r}. Add it to "
-            f"_MPAS_GRID_TYPES (cell area on .areaCell) or to "
-            f"_CELL_AREA_GRID_TYPES (cell area on .area); do not rely on a "
-            f"fall-through, which reads whichever attribute happens to "
-            f"exist.")
-
-    _MISSING = object()
-    mask_obj = getattr(state, mask_attr, _MISSING)
-    if mask_obj is _MISSING:
-        raise ValueError(
-            f"state for grid_type={grid_type!r} has no attribute "
-            f"state.{mask_attr}; cannot compute a land-masked energy integral. "
-            f"Refusing to fall back to an unmasked sum."
-        )
-    mask_raw = np.asarray(mask_obj.data, dtype=np.float64)
-
-    spatial_shape = T.shape[:-1]
-    if area.size != int(np.prod(spatial_shape)):
-        raise ValueError(
-            f"area has {area.size} entries but the tracer spatial shape is "
-            f"{spatial_shape} for grid_type={grid_type!r}."
-        )
-    if mask_raw.size != int(np.prod(spatial_shape)):
-        raise ValueError(
-            f"land mask has {mask_raw.size} entries but the tracer spatial "
-            f"shape is {spatial_shape} for grid_type={grid_type!r}."
-        )
-    # MOVING control volumes, not reference ones. Under z-star the true layer
-    # thickness is dz_ref*(eta+H_bathy)/H_max; using dz_ref alone gives every
-    # parcel a fixed volume, which breaks the sorted-RPE invariance premise and
-    # produces either-sign drift in a free-surface run (codex 2026-08-08).
-    from legoesm.ocean.vertical import compute_layer_thickness
-    if grid_type == "spectral":
-        # Spectral state carries eta/H_bathy spectrally; fall back to the
-        # reference thickness and say so rather than silently mixing bases.
-        h = np.broadcast_to(
-            np.asarray(z_coord.dz_ref, dtype=np.float64), T.shape).copy()
-    else:
-        h = np.asarray(
-            compute_layer_thickness(jnp.asarray(state.eta.data),
-                                    jnp.asarray(state.H_bathy.data), z_coord),
-            dtype=np.float64)
-        if h.shape != T.shape:
-            raise ValueError(
-                f"layer thickness shape {h.shape} != tracer shape {T.shape} "
-                f"for grid_type={grid_type!r}."
-            )
-    # Cell-centre depth from the ACTUAL thicknesses: z_centre[k] is the mid-point
-    # of layer k measured down from the free surface eta.
-    h_cum = np.cumsum(h, axis=-1)
-    z_centre = (np.asarray(state.eta.data, dtype=np.float64)[..., np.newaxis]
-                - (h_cum - 0.5 * h)) if grid_type != "spectral" else \
-        np.broadcast_to(np.asarray(z_coord.z_full_ref, dtype=np.float64),
-                        T.shape).copy()
-    return (T, S,
-            area.reshape(spatial_shape),
-            mask_raw.reshape(spatial_shape),
-            z_centre, h)
+    """Compatibility wrapper around the matrix's single extraction path."""
+    from ocean_test_matrix.energy_diagnostics import extract_energy_fields
+    return extract_energy_fields(state, grid_type, grid, z_coord)
 
 
 def _compute_sorted_rpe(state, grid_type, grid, z_coord):
@@ -6713,59 +6614,9 @@ def _pack_sorted_rpe(rho_o, vol_o, total_area):
 
 
 def _compute_rpe(state, grid_type, grid, z_coord):
-    """Volume-integrated potential energy over OCEAN cells only.
-
-    PE = g * sum_k( rho(T,S)[k] * z_full[k] * dz[k] * area * ocean_mask )
-
-    NOT the sorted Reference Potential Energy of Ilicak et al. (2012):
-    there is no per-column density sort here. The old docstring claimed
-    ``rho_sorted`` while nothing sorted -- corrected 2026-08-08. The name
-    is kept because five call sites and the emitted diagnostic key
-    ``PE``/``PE_rel`` depend on it; a sorted sibling would be a separate
-    function.
-
-    Land cells are EXCLUDED. They must be: MPAS fills its land cells with
-    an ocean-neighbour average as a Neumann BC
-    (``fill_land_cells_mpas``), so land there holds real ocean-like
-    values, while the lat-lon C-grid pins land tracers at 0. Summing both
-    as ocean made MPAS's lock-exchange PE drift read +6.5e-05 against
-    ~-1e-07 elsewhere -- an artifact of the diagnostic, not of the dycore
-    (measured 2026-08-08: MPAS land T went 0 -> [5, 30] over 0.1 day
-    while lat-lon land stayed at 0).
-
-    A missing mask attribute raises: falling back to an unmasked integral
-    is exactly the defect being fixed.
-    """
-    T, S, area_bc, mask_bc, z_centre, h = _rpe_extract(state, grid_type, grid,
-                                                       z_coord)
-
-    # Compute density at each point using linearized EOS
-    from legoesm.ocean.eos import linear_eos
-    rho = np.asarray(linear_eos(
-        jnp.array(T), jnp.array(S), jnp.zeros_like(jnp.array(T)),
-        rho_ref=_C.rho_ocean, alpha_T=2.0e-4, beta_S=0.0, T_ref=15.0,
-    ), dtype=np.float64)
-
-    # Potential energy: PE = g * sum(rho * z * dz * area)
-    # For RPE, we'd sort density globally, but as approximation compute PE
-    pe = 0.0
-    for k in range(z_centre.shape[-1]):
-        # z_centre and h are the MOVING (z-star) cell centre and thickness.
-        cell = rho[..., k] * z_centre[..., k] * h[..., k] * area_bc
-        # np.where, NOT cell * mask: 0.0 * NaN is NaN, so a degenerate land
-        # value would contaminate the finite check below. Land contributes
-        # exactly zero.
-        weighted = np.where(mask_bc > 0.5, cell, 0.0)
-        # np.sum, NOT np.nansum: nansum silently swallows a blown-up run and
-        # reports a plausible finite PE.
-        if not np.all(np.isfinite(weighted)):
-            bad = np.argwhere(~np.isfinite(weighted))[:5].tolist()
-            raise ValueError(
-                f"Non-finite PE summand at grid_type={grid_type!r}, level "
-                f"k={k}; first bad index(es): {bad}."
-            )
-        pe += float(np.sum(weighted))
-    return _G_EARTH * pe
+    """Compatibility name for the shared wet-cell PE diagnostic."""
+    from ocean_test_matrix.energy_diagnostics import compute_potential_energy
+    return compute_potential_energy(state, grid_type, grid, z_coord)
 
 
 # ===========================================================================

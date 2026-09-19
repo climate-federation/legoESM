@@ -10,6 +10,7 @@ import struct
 from pathlib import Path
 
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 from legoesm.ocean.fidelity.time_levels import time_level_for_dump
 
 RECORD = "oracle_bt_step_operands_kt00000002.bin"
@@ -284,6 +285,7 @@ def main() -> None:
         plant=args.plant == "uamid-ulp")
     report = {
         "format": "nemo-testcase-l2-gyre-round81-btstep-v1",
+        "worktree": worktree_stamp(),
         "producer_commit": producer,
         "record_sha256": sha256(path),
         "record_size": path.stat().st_size,

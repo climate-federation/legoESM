@@ -256,27 +256,29 @@ def test_positional_construction_unshifted_by_tail_field():
         LateralViscosityConfig,
     )
     f = LatLonCGridOceanConfig._fields
-    # Tail append: the lever is the LAST field. Two opt-in fields now sit at
-    # the NamedTuple tail — main's ``backscatter`` (appended just before this
-    # lever during the wave-2 reintegration) directly precedes it, and
-    # ``tidal_forcing`` precedes that. All three are tail defaults, so no head
-    # positional slot is shifted (asserted below).
-    assert f[-1] == "prescribed_flow"
-    assert f[-2] == "backscatter"
-    assert f[-3] == "tidal_forcing"
+    # Later append-only additions extend the tail without moving this lever.
+    # Pin its neighbours and the complete post-lever suffix explicitly.
+    prescribed_i = f.index("prescribed_flow")
+    assert f[prescribed_i - 2:prescribed_i + 1] == (
+        "tidal_forcing", "backscatter", "prescribed_flow")
+    assert f[prescribed_i + 1:] == (
+        "freshwater_salinity", "zdf_drag_in_matrix",
+        "zdf_baroclinic_only", "barotropic_drag_substep",
+        "barotropic_forcing_centred", "store_mass_flux", "store_salt_flux",
+        "zdf_implicit_solver_evaluation")
     # Head layout unchanged — the slots any positional caller binds first.
-    assert f[:8] == ("g", "rho_0", "lateral_viscosity", "bottom_drag",
-                     "K_h", "K_bih", "A_v", "K_v")
+    assert f[:9] == (
+        "metric_convention", "vface_zonal_metric_evaluation",
+        "coriolis_placement", "lateral_viscosity", "bottom_drag", "K_h",
+        "K_bih", "A_v", "K_v")
     # Positional construction of the head lands each value where expected
     # (values chosen distinguishable from every default).
     cfg = LatLonCGridOceanConfig(
-        9.99, 1030.0, LateralViscosityConfig(A_h=777.0),
-        DynBottomDragConfig(), 55.0)
-    assert cfg.g == 9.99
-    assert cfg.rho_0 == 1030.0
+        "exact", "nemo_vpoint", "cell_average",
+        LateralViscosityConfig(A_h=777.0), DynBottomDragConfig(), 55.0)
     assert cfg.lateral_viscosity.A_h == 777.0
     assert cfg.K_h == 55.0
-    assert cfg.K_bih == 0.0                 # first defaulted slot after the 5
+    assert cfg.K_bih == 0.0                 # first defaulted slot after the 6
     assert cfg.prescribed_flow is None      # tail default untouched
 
 

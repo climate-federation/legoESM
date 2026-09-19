@@ -92,6 +92,7 @@ def _run(T_cell, S_cell, rho, p_cell, dz_half, z, J, *, T_n2=None, S_n2=None):
         p_cell=p_cell, dz_ref=z.dz_ref, jacobian=J, eos_fn=wright_eos,
         z_interface=z.z_half_ref[1:-1],
         T_n2=T_n2, S_n2=S_n2,
+        surface_tmask=jnp.ones(rho.shape[:-1], dtype=rho.dtype),
     )
 
 
@@ -135,7 +136,8 @@ def test_set_diffusivities_routes_exactly_to_n2_source():
             tke_old, None, None, cfg, rho_0, G,
             p_cell=ap, dz_ref=z.dz_ref, jacobian=J, eos_fn=wright_eos,
             z_interface=z.z_half_ref[1:-1], dz_surface=dz_surface,
-            T_n2=T_n2, S_n2=S_n2)
+            T_n2=T_n2, S_n2=S_n2,
+            surface_tmask=jnp.ones(arho.shape[:-1], dtype=arho.dtype))
 
     ref = _sd(bT, bS)                       # N² from before-state directly
     ovr = _sd(aT, aS, T_n2=bT, S_n2=bS)     # override reroutes to before-state

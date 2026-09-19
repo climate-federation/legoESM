@@ -663,15 +663,19 @@ def test_extract_point_forcing_series_channels_and_values():
     for name, arr in series.items():
         assert arr.shape == (n_rec, 1, 1), name
         assert np.all(np.isfinite(arr)), name
-    # The column matches the SHARED 3-D nearest-neighbour convention.
-    from legoesm.ocean.coupler.omip2_applicator import core2_forcing_nn_indices
+    # The column matches the SHARED 3-D bilinear convention (a90bd1935).
+    from legoesm.ocean.coupler.omip2_applicator import _bilinear_point_maps
 
-    i, j = core2_forcing_nn_indices(
-        forcing, np.asarray([35.0]), np.asarray([-40.0]),
+    i4, j4, w4 = _bilinear_point_maps(
+        np.asarray(forcing.lat), np.asarray(forcing.lon),
+        np.asarray([35.0]), np.asarray([-40.0]),
     )
+    expected_u10 = (
+        np.asarray(forcing.u10)[:, i4[:, 0], j4[:, 0]] * w4[:, 0]
+    ).sum(axis=1)
     assert np.allclose(
         series["u10"][:, 0, 0],
-        np.asarray(forcing.u10)[:, int(i[0]), int(j[0])],
+        expected_u10,
     )
     # Optional NEMO-parity channels: fallbacks identical to the host
     # producers' internal defaults (snow=0, slp=standard atmosphere).

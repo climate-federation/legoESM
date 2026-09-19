@@ -10,6 +10,7 @@ import struct
 from pathlib import Path
 
 import numpy as np
+from legoesm.ocean.fidelity.provenance import worktree_stamp
 
 DIMS = (36, 26, 31)
 RECORD = "oracle_rkstage1_transport_operands_kt00000002.bin"
@@ -135,6 +136,7 @@ def main() -> None:
     rows = validate(path, replay_ulp=args.plant == "replay-ulp")
     report = {
         "format": "nemo-l2-round72-stage1-transport-v1",
+        "worktree": worktree_stamp(),
         "producer_commit": producer,
         "record_sha256": sha256(path),
         "rows": rows,
