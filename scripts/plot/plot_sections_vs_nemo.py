@@ -7,8 +7,8 @@ cold-tongue bias, and whether the polar salinity agreement is skin-deep or holds
 through the water column -- are both questions about the INTERIOR.  This plots
 the interior on the same footing the surface figures already use.
 
-TWO SECTIONS PER FIELD
-----------------------
+SECTIONS PER FIELD
+------------------
 * GLOBAL ZONAL MEAN, depth vs latitude.  Every cell in a row of the regular
   lat-lon target sits at the same latitude, so a plain row mean is already the
   area-weighted zonal mean -- no cos(lat) factor belongs here (it belongs in a
@@ -17,6 +17,11 @@ TWO SECTIONS PER FIELD
   degrees either side of the equator.  cos(lat) varies by under 0.1% across a
   2-degree band, so the plain mean is the area-weighted one to well past
   plotting precision.
+* Repeatable BASIN sections at a fixed latitude (``--lat-section``) and
+  MERIDIONAL sections at a fixed longitude (``--lon-section``).  The
+  meridional one is the cold-tongue view: a section along the equator shows
+  the thermocline's east-west slope but not how tightly it is confined to the
+  equator, and a global zonal mean averages the two together.
 
 WHAT IS HELD FIXED
 ------------------
@@ -174,6 +179,45 @@ def _sec_mean(vals, common, axis):
     return np.where(cnt > 0, tot / np.maximum(cnt, 1), np.nan)
 
 
+def _artifact_bound(name, label, unit, secs, z, dz_mis):
+    """Bound the depth-offset sampling artifact against the plotted difference.
+
+    Our levels and NEMO's agree to under a metre but not exactly, so an
+    index-wise difference carries a |d(field)/dz| * |z_NEMO - z_ours| term. If
+    that approaches the tripole-minus-NEMO signal, the panel is showing a
+    sampling mismatch rather than a model difference.
+
+    EVERY SECTION GETS ITS OWN BOUND. The bound was originally computed on the
+    global zonal mean alone, which left every basin and meridional panel
+    unbounded -- and a zonal mean is precisely the average that smooths away
+    the sharp vertical gradients a basin or equatorial section exists to show,
+    so the one number being computed was the least representative one. A noise
+    floor that is pre-registered and then measured on a different field than
+    the one being quoted is not a noise floor.
+
+    The comparison is LIKE WITH LIKE: a max artifact against a median signal
+    is not a ratio and cannot decide anything. The decisive number is the
+    FRACTION of section cells where the artifact exceeds the model difference
+    at THAT SAME CELL.
+    """
+    zN = secs[2]
+    with np.errstate(invalid="ignore"):
+        artifact = np.abs(np.gradient(zN, z, axis=-1)) * dz_mis[None, :]
+        signal = np.abs(secs[0] - zN)
+    both = np.isfinite(artifact) & np.isfinite(signal)
+    if not both.any():
+        print(f"[{name}] {label}: NO cells support an artifact bound")
+        return
+    frac = float((artifact[both] > signal[both]).mean())
+    kmax = np.unravel_index(np.nanargmax(np.where(both, artifact, np.nan)),
+                            artifact.shape)
+    print(f"[{name}] {label}: artifact exceeds |tripole-NEMO| on "
+          f"{100.0 * frac:.1f}% of section cells; worst cell at "
+          f"{z[kmax[-1]]:.0f} m, artifact {artifact[kmax]:.4g} vs signal "
+          f"{signal[kmax]:.4g} {unit}; medians {np.nanmedian(artifact[both]):.4g} "
+          f"vs {np.nanmedian(signal[both]):.4g} {unit}")
+
+
 def _plot_sections(out, name, unit, x, xlabel, z, secs, labels, title):
     import matplotlib
     matplotlib.use("Agg")
@@ -237,6 +281,17 @@ def main() -> int:
                         "current -- the repo's existing BASINS['atlantic'] "
                         "starts at 290E, which at 26N excludes the Florida "
                         "Current and the DWBC entirely.")
+    p.add_argument("--lon-section", action="append", default=[],
+                   help="repeatable meridional section, "
+                        "LON:LAT0,LAT1:HALFWIDTH:LABEL. LON may be negative "
+                        "(140W is -140 or 220), and the window is selected by "
+                        "CIRCULAR longitude distance so a section sitting on "
+                        "the prime meridian is not silently emptied. Pass it "
+                        "with the equals form -- argparse reads a leading "
+                        "minus as a flag. This is the cold-tongue view: a "
+                        "zonal-mean section averages the equatorial "
+                        "thermocline against the off-equatorial one and hides "
+                        "the slope entirely.")
     p.add_argument("--depth-tol-m", type=float, default=1.0,
                    help="max allowed mismatch between our z_center_ref and "
                         "NEMO deptht before the run refuses to compare")
@@ -304,30 +359,7 @@ def main() -> int:
 
         zon = [_sec_mean(f, common, axis=1) for f in (Tg, Mg, Ng)]
 
-        # BOUND THE DEPTH-OFFSET ARTIFACT against the difference being plotted.
-        # The index-wise difference carries |d(field)/dz| * |z_NEMO - z_ours|;
-        # if that approaches the plotted tripole-minus-NEMO signal, the panel
-        # is showing a sampling mismatch rather than a model difference.
-        zN = zon[2]
-        with np.errstate(invalid="ignore"):
-            dfdz = np.gradient(zN, z, axis=-1)
-            artifact = np.abs(dfdz) * dz_mis[None, :]
-            signal = np.abs(zon[0] - zN)
-        # Compare LIKE WITH LIKE. A max artifact against a median signal is
-        # not a ratio and cannot decide anything; the decisive number is the
-        # FRACTION of section cells where the sampling artifact exceeds the
-        # model difference at THAT SAME CELL.
-        both = np.isfinite(artifact) & np.isfinite(signal)
-        if both.any():
-            frac = float((artifact[both] > signal[both]).mean())
-            kmax = np.unravel_index(np.nanargmax(np.where(both, artifact, np.nan)),
-                                    artifact.shape)
-            print(f"[{name}] depth-offset artifact exceeds |tripole-NEMO| on "
-                  f"{100.0 * frac:.1f}% of section cells; at the worst cell "
-                  f"(depth {z[kmax[-1]]:.0f} m) artifact {artifact[kmax]:.4g} "
-                  f"vs signal {signal[kmax]:.4g} {unit}")
-            print(f"[{name}] median artifact {np.nanmedian(artifact[both]):.4g} "
-                  f"vs median signal {np.nanmedian(signal[both]):.4g} {unit}")
+        _artifact_bound(name, "global zonal mean", unit, zon, z, dz_mis)
         _plot_sections(out, name, unit, tgt_lat, "latitude", z, zon,
                        (a.label_tripole, a.label_mpas),
                        f"{name} [{unit}] global zonal-mean section — "
@@ -336,6 +368,7 @@ def main() -> int:
 
         sl = np.ix_(np.where(eqrow)[0], np.where(eqcol)[0], np.arange(z.size))
         eq = [_sec_mean(f[sl], common[sl], axis=0) for f in (Tg, Mg, Ng)]
+        _artifact_bound(name, "equatorial Pacific", unit, eq, z, dz_mis)
         _plot_sections(out, name, unit, tgt_lon[eqcol], "longitude degE", z, eq,
                        (a.label_tripole, a.label_mpas),
                        f"{name} [{unit}] equatorial Pacific section, "
@@ -367,11 +400,39 @@ def main() -> int:
             print(f"[{name}] section {label}: {int(rows.sum())} rows x "
                   f"{int(cols.sum())} cols, {nsup} supported section cells")
             sec = [s[order] for s in sec]
+            _artifact_bound(name, label, unit, sec, z, dz_mis)
             _plot_sections(out, f"{name}_{label}", unit, xcoord[cols][order],
                            "longitude degE", z, sec,
                            (a.label_tripole, a.label_mpas),
                            f"{name} [{unit}] {label} section at "
                            f"{lat0:g} +/- {hw:g} deg, lon {lo:g}-{hi:g}E — "
+                           f"{a.label_tripole} / {a.label_mpas} / NEMO")
+
+        for spec in a.lon_section:
+            lon0, latspec, hw, label = spec.split(":")
+            la0, la1 = (float(v) for v in latspec.split(","))
+            lon0, hw = float(lon0), float(hw)
+            # CIRCULAR distance, so the window is correct at any longitude
+            # rather than only away from the wrap. Latitude does NOT wrap, so
+            # the row selection needs none of the lat-section's shifted-axis
+            # machinery and the x axis is already monotonic.
+            dlon = np.abs((tgt_lon - lon0 + 180.0) % 360.0 - 180.0)
+            cols = dlon <= hw
+            rows = (tgt_lat >= la0) & (tgt_lat <= la1)
+            if not rows.any() or not cols.any():
+                raise SystemExit(f"FATAL: --lon-section {spec!r} selects "
+                                 f"{int(rows.sum())} rows, {int(cols.sum())} cols")
+            s2 = np.ix_(np.where(rows)[0], np.where(cols)[0], np.arange(z.size))
+            sec = [_sec_mean(f[s2], common[s2], axis=1) for f in (Tg, Mg, Ng)]
+            nsup = int(np.isfinite(sec[0]).sum())
+            print(f"[{name}] section {label}: {int(rows.sum())} rows x "
+                  f"{int(cols.sum())} cols, {nsup} supported section cells")
+            _artifact_bound(name, label, unit, sec, z, dz_mis)
+            _plot_sections(out, f"{name}_{label}", unit, tgt_lat[rows],
+                           "latitude", z, sec,
+                           (a.label_tripole, a.label_mpas),
+                           f"{name} [{unit}] {label} section at "
+                           f"{lon0:g} +/- {hw:g} deg, lat {la0:g}-{la1:g} — "
                            f"{a.label_tripole} / {a.label_mpas} / NEMO")
     print("DONE")
     return 0

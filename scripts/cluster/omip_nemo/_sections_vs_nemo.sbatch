@@ -58,11 +58,21 @@ ls -l --time-style=+%Y-%m-%d_%H:%M "$ST" "$SM"
 # latitude, where that boundary current IS the measurement.
 #   26N: 279-345E spans Florida to the African margin.
 #   30S: 312-17E wraps the prime meridian, South America to Africa.
+#
+# MERIDIONAL SECTION AT 140W, 20S-20N. The equatorial section already built
+# here runs ALONG the equator and shows the thermocline's east-west slope; it
+# cannot show how sharply that thermocline is confined to the equator. The
+# 140W line is the standard TAO/TRITON view of the cold tongue and the
+# Equatorial Undercurrent, and the structure it exposes -- thermocline
+# doming and its meridional width -- is readable at day 30 even though the
+# cold tongue's AMPLITUDE is not yet a climatology. Window stated rather than
+# defaulted: 140W +/- 1.5 deg (three columns at 1 degree), 20S to 20N.
 $PY -u scripts/plot/plot_sections_vs_nemo.py \
   --tripole "$ST" --mpas "$SM" --label-mpas "${LABEL_MPAS:-MPAS}" \
   --nemo-gridt "$GW" --nemo-time-idx "$REC" --res-deg 1.0 \
   --lat-section="26:279,345:1.5:atlantic26N" \
   --lat-section="-30:312,17:1.5:atlantic30S" \
+  --lon-section="-140:-20,20:1.5:pacific140W" \
   --out-dir "$OUT" 2>&1 | grep -vE "Warning|warn" | tail -60
 
 echo "=== figures ==="
