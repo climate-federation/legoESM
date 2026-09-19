@@ -121,6 +121,10 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stp2d.f90"),
     "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/domain.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/domain.f90"),
+    "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/domhgr.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/domhgr.f90"),
+    "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/domqco.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/domqco.f90"),
     "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/sshwzv.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/sshwzv.f90"),
     "GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/dynzad.f90": (
@@ -183,8 +187,16 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90"),
     "GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90"),
+    "GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3.f90"),
+    "GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stp2d.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stp2d.f90"),
     "GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/domqco.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/domqco.f90"),
+    "GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/domain.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/domain.f90"),
+    "GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/domhgr.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/domhgr.f90"),
     # Round 92 binds the operand diagnosis to the exact acquired Round-90
     # compiled card, including its write-only recorder.
     "GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/stprk3_stg.f90": (
@@ -1150,6 +1162,35 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/domqco.f90:266-268': [
         ('pr3u(ji,jj) = 0.5_wp *', 2),
         ('pr3v(ji,jj) = 0.5_wp *', 2), 3],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/domain.f90:193-200': [
+        'ht_0(:,:) = 0._wp  ! Reference ocean thickness',
+        'hv_0(:,:) = hv_0(:,:) + e3v_3d(:,:,jk) * vmask(:,:,jk)', 8],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/domain.f90:212-215': [
+        'r1_ht_0(:,:) = ssmask (:,:) /',
+        'r1_hf_0(:,:) = ssfmask(:,:) /', 4],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/domhgr.f90:155-160': [
+        'e1e2t (:,:) = e1t(:,:) * e2t(:,:)',
+        'e1e2v (:,:) = e1v(:,:) * e2v(:,:)', 6],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/domhgr.f90:170-171': [
+        'r1_e1e2u(:,:) = 1._wp / e1e2u(:,:)',
+        'r1_e1e2v(:,:) = 1._wp / e1e2v(:,:)', 2],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3.f90:188-201': [
+        '!  RK3 : single first external mode computation',
+        'CALL stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )', 14],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:140-180': [
+        ('SELECT CASE( kstg )', 1),
+        'CALL dom_qco_r3c_RK3( ssha, r3ta, r3ua, r3va, r3fa )', 41],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:190-192': [
+        'r3t(:,:,Kaa) = r2_3 * r3t(:,:,Kbb) + r1_3 * r3ta(:,:)',
+        'r3v(:,:,Kaa) = r2_3 * r3v(:,:,Kbb) + r1_3 * r3va(:,:)', 3],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:230-237': [
+        ('ssh (:,:,Kaa) = r1_2 * ( ssh (:,:,Kbb) + ssha(:,:) )', 2),
+        ('r3f(:,:)     = r2_3 * r3fb(:,:) + r1_3 * r3fa(:,:)', 2), 8],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:242': (
+        'CASE ( 3 )           !==  Stage 3  ==!', 1),
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stp2d.f90:301-308': [
+        '!             Compute ssh and (uu_b,vv_b)  at N+1  (Kaa)',
+        'CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs, uu, vv, ssh, uu_b, vv_b, Kaa )', 8],
     'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:326-346': [
         '!              !- vertical velocity and transport (ww,wi,zFw) -!',
         'zFw(ji,jj,jk) = e1e2t(ji,jj) * ww(ji,jj,jk)', 21],
@@ -2349,6 +2390,39 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3.f90:200-226': [
         '! Stage 1 :',
         'ssh(:,:,Naa) = 2*ssh(:,:,Nbb) - ssh(:,:,Naa)', 27],
+    # --- round 115: recorded/current compiled U-geometry boundary ---
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/domain.f90:193-200': [
+        'ht_0(:,:) = 0._wp  ! Reference ocean thickness',
+        'hv_0(:,:) = hv_0(:,:) + e3v_3d(:,:,jk) * vmask(:,:,jk)', 8],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/domain.f90:212-215': [
+        'r1_ht_0(:,:) = ssmask (:,:) /',
+        'r1_hf_0(:,:) = ssfmask(:,:) /', 4],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/domhgr.f90:155-160': [
+        'e1e2t (:,:) = e1t(:,:) * e2t(:,:)',
+        'e1e2v (:,:) = e1v(:,:) * e2v(:,:)', 6],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/domhgr.f90:170-171': [
+        'r1_e1e2u(:,:) = 1._wp / e1e2u(:,:)',
+        'r1_e1e2v(:,:) = 1._wp / e1e2v(:,:)', 2],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/domqco.f90:266-268': [
+        ('pr3u(ji,jj) = 0.5_wp *', 2),
+        ('pr3v(ji,jj) = 0.5_wp *', 2), 3],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3.f90:188-201': [
+        '!  RK3 : single first external mode computation',
+        'CALL stp_RK3_stg( 1, kstp, Nbb, Nbb, Nrhs, Naa )', 14],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:138-178': [
+        ('SELECT CASE( kstg )', 1),
+        'CALL dom_qco_r3c_RK3( ssha, r3ta, r3ua, r3va, r3fa )', 41],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:188-190': [
+        'r3t(:,:,Kaa) = r2_3 * r3t(:,:,Kbb) + r1_3 * r3ta(:,:)',
+        'r3v(:,:,Kaa) = r2_3 * r3v(:,:,Kbb) + r1_3 * r3va(:,:)', 3],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:228-235': [
+        ('ssh (:,:,Kaa) = r1_2 * ( ssh (:,:,Kbb) + ssha(:,:) )', 2),
+        ('r3f(:,:)     = r2_3 * r3fb(:,:) + r1_3 * r3fa(:,:)', 2), 8],
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stprk3_stg.f90:240': (
+        'CASE ( 3 )           !==  Stage 3  ==!', 1),
+    'GYRE_OMIP_L2_P3_SM_R46KT2/BLD/ppsrc/nemo/stp2d.f90:301-308': [
+        '!             Compute ssh and (uu_b,vv_b)  at N+1  (Kaa)',
+        'CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs, uu, vv, ssh, uu_b, vv_b, Kaa )', 8],
 }
 
 
