@@ -78,6 +78,8 @@ def main(argv=None) -> int:
     p.add_argument("--time-idx", type=int, default=5,
                    help="NEMO record; 5 = days 25-30, the transport's window")
     p.add_argument("--out", default=None)
+    p.add_argument("--map-png", default=None,
+                   help="write a map of ours-minus-NEMO sea level")
     a = p.parse_args(argv)
 
     import xarray as xr
@@ -169,6 +171,77 @@ def main(argv=None) -> int:
     print("READ: heads differing in SIGN => the transport's FORCING is wrong "
           "and the cause is upstream. Heads AGREEING => the RESPONSE is wrong "
           "and the cause is local to the channel.")
+
+    # ---- DECOMPOSITION: is the excess Arctic-specific or global? ----------
+    # A uniform offset is a mass/volume bookkeeping difference (free-surface
+    # reference, global freshwater budget) and says nothing about the Arctic.
+    # A structured one is dynamical. The sector numbers already hint at both:
+    # our Pacific side sits 2 cm high and our Arctic side 29 cm high, so there
+    # is a small global term AND a large Arctic-specific one. This separates
+    # them instead of asserting it.
+    #
+    # Our snapshot is NEMO's FULL (332,362) grid; NEMO's output is (331,360).
+    # The window is verified against NEMO's own coordinates, never assumed --
+    # an unverified window is how four earlier answers on this section were
+    # wrong.
+    j0, i0 = 0, 1
+    ny_o, nx_o = ssh.shape
+    ow = eta[j0:j0 + ny_o, i0:i0 + nx_o]
+    lw = lat[j0:j0 + ny_o, i0:i0 + nx_o]
+    gw = lon[j0:j0 + ny_o, i0:i0 + nx_o]
+    wetw = wet[j0:j0 + ny_o, i0:i0 + nx_o]
+    if ow.shape != ssh.shape:
+        raise SystemExit(f"FATAL: window gave {ow.shape}, need {ssh.shape}")
+    dlon = ((gw - nlon + 180.0) % 360.0) - 180.0
+    ok = np.isfinite(dlon) & (np.abs(nlat) < 60.0)
+    mis = float(np.nanmedian(np.abs(dlon[ok]))) if ok.any() else np.inf
+    if not (mis < 1.0e-3):
+        raise SystemExit(
+            f"FATAL: window (j0={j0}, i0={i0}) gives median |dlon| {mis:.4g} "
+            "deg against NEMO's own nav_lon; refusing to difference two grids "
+            "that are not the same grid.")
+    both = wetw & nwet & np.isfinite(ow) & np.isfinite(ssh)
+    diff = np.where(both, ow - ssh, np.nan)
+    res["window_median_dlon_deg"] = mis
+    res["global_mean_ours_m"] = float(np.nanmean(ow[both]))
+    res["global_mean_nemo_m"] = float(np.nanmean(ssh[both]))
+    res["global_mean_diff_m"] = float(np.nanmean(diff[both]))
+    print("")
+    print(f"[window] verified: median |dlon| {mis:.2e} deg over {int(ok.sum())} cells")
+    print(f"[global] ours {res['global_mean_ours_m']:+.4f}  "
+          f"NEMO {res['global_mean_nemo_m']:+.4f}  "
+          f"DIFF {res['global_mean_diff_m']:+.4f} m")
+    print("[zonal] mean(ours - NEMO) by latitude band:")
+    for lo, hi in ((-90, -60), (-60, -30), (-30, 30), (30, 60),
+                   (60, 70), (70, 80), (80, 90)):
+        m = both & (nlat >= lo) & (nlat < hi)
+        if int(m.sum()) < 10:
+            continue
+        v = float(np.nanmean(diff[m]))
+        res[f"zonal_diff_{lo}_{hi}"] = v
+        print(f"   {lo:+4d}..{hi:+4d}  {v:+.4f} m   (n={int(m.sum())})")
+
+    if a.map_png:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        fig, ax = plt.subplots(1, 2, figsize=(13, 4.6))
+        im0 = ax[0].pcolormesh(diff, vmin=-0.5, vmax=0.5, cmap="RdBu_r")
+        ax[0].set_title("sea level, ours - NEMO (m), global", fontsize=9)
+        plt.colorbar(im0, ax=ax[0], shrink=0.85)
+        arc = np.where(nlat >= 60.0, diff, np.nan)
+        im1 = ax[1].pcolormesh(arc, vmin=-0.5, vmax=0.5, cmap="RdBu_r")
+        ax[1].set_title("same, 60N and north", fontsize=9)
+        ax[1].set_ylim(np.argmax((nlat >= 60).any(axis=1)), diff.shape[0])
+        plt.colorbar(im1, ax=ax[1], shrink=0.85)
+        fig.suptitle(
+            "RED = our sea surface stands HIGHER than NEMO's. Day 25-30, both "
+            "from rest. The Bering head is set by the Arctic side.",
+            fontsize=10)
+        fig.tight_layout()
+        Path(a.map_png).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(a.map_png, dpi=110)
+        print(f"[map] {a.map_png}")
 
     if a.out:
         Path(a.out).parent.mkdir(parents=True, exist_ok=True)

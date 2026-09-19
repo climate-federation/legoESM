@@ -37,5 +37,6 @@ $PY -u scripts/validate/ocean_fidelity/bering_ssh_head.py \
   --mesh "$MESH" \
   --nemo-gridt "$GW/ORCA1_5d_20000101_20000331_grid_T.nc" \
   --time-idx 5 \
-  --out "$ROOT/omip_nemo/bering_ssh_head.json" 2>&1 | tail -30
+  --out "$ROOT/omip_nemo/bering_ssh_head.json" \
+  --map-png "$ROOT/omip_nemo/bering_ssh_diff.png" 2>&1 | tail -40
 echo "rc=${PIPESTATUS[0]}"
