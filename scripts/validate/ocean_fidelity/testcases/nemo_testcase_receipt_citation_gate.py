@@ -2371,19 +2371,19 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:468-477': [
         'WRITE(l2_r81_filename',
         '& ssumask(ntsi:ntei,ntsj:ntej), ssvmask(ntsi:ntei,ntsj:ntej)', 10],
-    'GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:521-572': [
-        'IF( lwp .AND. kt == nit000 + 1 ) THEN',
+    'GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:522-572': [
+        'WRITE(l2_uamid_unit) jn, za1, za2, za3',
         'WRITE(l2_r81_unit) zhup2_e(ntsi:ntei,ntsj:ntej), zhvp2_e(ntsi:ntei,ntsj:ntej)',
-        52],
-    'GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:602-615': [
-        'DO jj = ntsj-( 1), ntej+(  1 ) ; DO ji = ntsi-( 1), ntei+(  1)',
-        '& ssha_e(ntsi:ntei,ntsj:ntej)', 14],
-    'GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:669-713': [
-        ('IF( lwp .AND. kt == nit000 + 1 ) THEN', 4),
-        '& zu_frc(ntsi:ntei,ntsj:ntej), zv_frc(ntsi:ntei,ntsj:ntej)', 45],
-    'GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:813-849': [
-        ('IF( lwp .AND. kt == nit000 + 1 ) THEN', 7),
-        '& sshn_e(ntsi:ntei,ntsj:ntej)', 37],
+        51],
+    'GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:603-615': [
+        'zhdiv = (   ( zhU(ji,jj) - zhU(ji-1,jj) ) + ( zhV(ji,jj) - zhV(ji,jj-1) )  ) * r1_e1e2t(ji,jj)',
+        '& ssha_e(ntsi:ntei,ntsj:ntej)', 13],
+    'GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:670-713': [
+        'WRITE(l2_r81_unit) za0, za1, za2, za3, zsshp2_e(ntsi:ntei,ntsj:ntej)',
+        '& zu_frc(ntsi:ntei,ntsj:ntej), zv_frc(ntsi:ntei,ntsj:ntej)', 44],
+    'GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:814-849': [
+        'WRITE(l2_r81_unit) ua_e(ntsi:ntei,ntsj:ntej), va_e(ntsi:ntei,ntsj:ntej)',
+        '& sshn_e(ntsi:ntei,ntsj:ntej)', 36],
     'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:286-291': [
         '! set values computed in RK3_ssh',
         'zCdU_v  (:,:) = CdU_v   (:,:)', 6],
@@ -2403,12 +2403,13 @@ CITATION_MAP = {
         15],
     'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:611': [
         'CALL dyn_cor_2D( ua_e, va_e, zu_trd, zv_trd )'],
-    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:627-631': [
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:627-630': [
         'IF ( .NOT. ll_wd ) THEN',
-        ('END DO   ;   END DO', 8), 5],
-    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:655-667': [
-        'IF( ln_dynadv_vec .OR. lk_linssh ) THEN',
-        '&   ) * ssvmask(ji,jj)', 13],
+        'zv_trd(ji,jj) = zv_trd(ji,jj) + zCdU_v(ji,jj) * vn_e(ji,jj) * hvr_e(ji,jj)',
+        4],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:657-667': [
+        'ua_e(ji,jj) = (                                 un_e(ji,jj)',
+        '&   ) * ssvmask(ji,jj)', 11],
     'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:701-730': [
         'IF( .NOT.lk_linssh ) THEN !* Update ocean depth',
         'CALL bdy_dyn2d( jn, ua_e, va_e, un_e, vn_e, hur_e, hvr_e, ssha_e )', 30],
