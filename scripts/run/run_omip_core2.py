@@ -1271,6 +1271,31 @@ def ah_profile_from_file(grid, path, A_h_base: float):
     return tuple(float(x) for x in prof)
 
 
+def renormalise_ah_profile(lv, A_h_new: float):
+    """Change A_h without changing the viscosity the A_h profile specifies.
+
+    ``A_h_lat_profile`` holds RATIOS to the A_h in force and the Laplacian
+    applies the PRODUCT, so replacing A_h alone silently rescales the whole
+    profile by ``A_h_new / A_h_old``.  A viscosity schedule of 1e4 against a
+    profile normalised at 2e4 therefore applied HALF of the viscosity the
+    profile file named, for every segment, with nothing in the log saying so.
+
+    Returns a LateralViscosityConfig with ``A_h`` set to ``A_h_new`` and the
+    profile (both faces) rescaled so ``A_h * profile`` is unchanged.  Only the
+    Laplacian is touched -- the biharmonic rides on ``B_h`` and its own cosine
+    scaling and never sees this profile.
+    """
+    out = lv._replace(A_h=A_h_new)
+    if lv.A_h_lat_profile is None or float(A_h_new) == float(lv.A_h):
+        return out
+    r = float(lv.A_h) / float(A_h_new)
+    return out._replace(
+        A_h_lat_profile=tuple(float(p) * r for p in lv.A_h_lat_profile),
+        A_h_lat_profile_v=(None if lv.A_h_lat_profile_v is None
+                           else tuple(float(p) * r
+                                      for p in lv.A_h_lat_profile_v)))
+
+
 _EVD_TRIGGER_DESTS = ("convection_n2_mode", "convection_n2_eos",
                       "convection_trigger", "convection_n2_threshold",
                       "convection_two_level")
@@ -10142,13 +10167,19 @@ def main() -> int:
         if visc_schedule and visc_seg_idx < len(visc_schedule):
             _day0, _ah, _cs = visc_schedule[visc_seg_idx]
             if (step - 1) * dt >= _day0 * 86400.0:
-                if (_ah, _cs) != (float(model.config.lateral_viscosity.A_h),
-                                  float(model.config.lateral_viscosity.C_smag_lap)):
+                _lv_now = model.config.lateral_viscosity
+                if (_ah, _cs) != (float(_lv_now.A_h),
+                                  float(_lv_now.C_smag_lap)):
                     from legoesm.ocean.dynamics.ocean_model_latlon_cgrid \
                         import LatLonCGridOceanModel
+                    # Renormalise the A_h profile against the new A_h so the
+                    # schedule moves the viscosity knob without rescaling the
+                    # viscosity the profile file named.
+                    _lv_new = renormalise_ah_profile(
+                        _lv_now, _ah)._replace(C_smag_lap=_cs)
                     model = LatLonCGridOceanModel(
                         grid, z_coord,
-                        model.config._replace(lateral_viscosity=model.config.lateral_viscosity._replace(A_h=_ah, C_smag_lap=_cs)),
+                        model.config._replace(lateral_viscosity=_lv_new),
                         # keep the zdfiwm maps through the mid-run rebuild
                         iwm_forcing=getattr(model, "_iwm_forcing", None))
                     # Free the previous segment's compiled step before the new
@@ -10156,8 +10187,18 @@ def main() -> int:
                     # JAX's compilation cache and the rebuild OOMs the GPU
                     # (CUDA_ERROR_OUT_OF_MEMORY at the day-8 segment, 2026-08-29).
                     jax.clear_caches()
+                # Print the EFFECTIVE Laplacian viscosity, not just the knob:
+                # with a profile in play the applied value is A_h * profile,
+                # and quoting A_h alone is exactly how the halving above went
+                # unnoticed for a whole campaign.
+                _lv_eff = model.config.lateral_viscosity
+                _eff = ""
+                if _lv_eff.A_h_lat_profile is not None:
+                    _pp = [float(p) * float(_lv_eff.A_h)
+                           for p in _lv_eff.A_h_lat_profile]
+                    _eff = f" effective A_h {min(_pp):.4g}-{max(_pp):.4g} m2/s"
                 print(f"[visc-schedule] day {(step-1)*dt/86400.0:.1f}: "
-                      f"A_h={_ah:g} C_smag_lap={_cs:g} "
+                      f"A_h={_ah:g} C_smag_lap={_cs:g}{_eff} "
                       f"(segment {visc_seg_idx + 1}/{len(visc_schedule)})",
                       flush=True)
                 visc_seg_idx += 1
