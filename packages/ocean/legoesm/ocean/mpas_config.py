@@ -306,7 +306,34 @@ class MPASOceanConfig(NamedTuple):
     # strategy ("standard" 2-dot PCG, or "single_reduce" Chronopoulos–Gear
     # with one batched allreduce per iteration — validated at solver entry,
     # ValueError on unknown).
-    barotropic_implicit_pcg_fixed_iters: int = 60
+    #
+    # 30, not 60: measured on the REAL captured systems (scripts/validate/
+    # ocean_fidelity/barotropic_pcg_convergence.py) at subdivision 7, 8 and
+    # 9, in both precisions, after 200 spin-up steps.  Iteration count is
+    # set by the mesh, not the column: subdivision 9 at 10, 20 and 40
+    # levels give the same table, while subdivision 8 converges in ~10
+    # fewer iterations than 9.
+    #
+    # At subdivision 9 (2.6M cells, the production/scaling mesh), relative
+    # residual and the implied continuity defect max|b - A eta|/dt:
+    #     M      float32              float64
+    #     20     1.0e-5  / 12 mm/day  3.0e-6  / 11 mm/day
+    #     30     3.2e-6  / 1.4        1.0e-7  / 0.30
+    #     40     3.3e-6  / 1.4        3.2e-9  / 0.011
+    #     60     3.3e-6  / 1.4        3.5e-12 / 5e-6
+    # float32 reaches its own precision floor at 30 and buys nothing after
+    # it.  float64 keeps descending, so 30 trades sea-level budget accuracy
+    # (0.3 mm/day per step, still 4x under the float32 floor the model
+    # already runs at) for ~1.8x on step time.  Owner decision 2026-09-19;
+    # raise to 40 if a long float64 integration shows mass drift.
+    #
+    # NOT covered by that measurement: no multi-rank convergence check (the
+    # probe replays the captured system on one process, where the halo
+    # exchange is the identity), and no gradient comparison through the
+    # unrolled adjoint.
+    # The lat-lon C-grid default (state.py) is a different operator on a
+    # different mesh and stays at 60 until measured.
+    barotropic_implicit_pcg_fixed_iters: int = 30
     barotropic_implicit_pcg_residual_tol: float = 1.0e-10
     barotropic_implicit_pcg_variant: str = "standard"
     freshwater_closure: str = "virtual_salt_flux"
