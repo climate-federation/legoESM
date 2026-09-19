@@ -38,9 +38,12 @@ echo "HEAD: $(git log --oneline -1)"
 export PYTHONPATH="$ROOT/src:$(ls -d $ROOT/packages/*/ | sed 's:/$::' | tr '\n' ':')$ROOT:$ROOT/scripts/validate"
 PY=/burg-archive/glab/users/jn2808/.conda/envs/legoesm/bin/python
 
-echo "=== unit gate: the new selector ==="
-JAX_PLATFORMS=cpu $PY -m pytest -q tests/ocean/unit/test_nemo_ice_tke_attenuation.py 2>&1 | tail -5
+echo "=== unit gate: the shear-order probe controls ==="
+JAX_PLATFORMS=cpu $PY -m pytest -q tests/unit/test_shear_order_squared.py 2>&1 | tail -5
 [ ${PIPESTATUS[0]} -eq 0 ] || { echo "FATAL: unit gate failed"; exit 1; }
+# pytest exits 5 (not 0) on "no tests ran", so the check above already
+# catches an empty gate -- it did, when the revert deleted the file this
+# card had been pointed at. Kept explicit so nobody "fixes" it to -ne 1.
 
 TRD=/burg-archive/glab/users/pg2328/nemo_orca1/nemo_5.0.1/cfgs/ORCA1/EXP00/RUN_TRD2
 OUT=$ROOT/omip_nemo/tke_premise
