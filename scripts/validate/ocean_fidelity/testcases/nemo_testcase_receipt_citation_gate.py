@@ -2383,7 +2383,7 @@ CITATION_MAP = {
         '& zu_frc(ntsi:ntei,ntsj:ntej), zv_frc(ntsi:ntei,ntsj:ntej)', 44],
     'GYRE_OMIP_L2_P3_SM_R81BTSTEP/BLD/ppsrc/nemo/dynspg_ts.f90:814-849': [
         'WRITE(l2_r81_unit) ua_e(ntsi:ntei,ntsj:ntej), va_e(ntsi:ntei,ntsj:ntej)',
-        '& sshn_e(ntsi:ntei,ntsj:ntej)', 36],
+        ('& sshn_e(ntsi:ntei,ntsj:ntej)', 2), 36],
     'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:286-291': [
         '! set values computed in RK3_ssh',
         'zCdU_v  (:,:) = CdU_v   (:,:)', 6],
