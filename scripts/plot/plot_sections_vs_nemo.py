@@ -53,6 +53,15 @@ _HERE = Path(__file__).resolve()
 sys.path.insert(0, str(_HERE.parents[1] / "validate"))
 sys.path.insert(0, str(_HERE.parents[1] / "validate" / "ocean_fidelity"))
 from compare_omip_nemo import _load_legoesm, regrid_curv_to_latlon  # noqa: E402
+# Nearest-wet classification, reused from the three-way scorecard rather than
+# re-derived. The regridder's own flag is a DISTANCE-TO-DATA flag, not a
+# land/sea test: a target cell on land or below the sea floor keeps it as long
+# as some wet source lies within 2.5 deg, and then carries a value
+# extrapolated from offshore. Reusing the regridder without also reusing this
+# exclusion was a real defect in the first version of this plotter -- it let
+# extrapolated coastline and bathymetry artifacts into the difference panels.
+# Private-name import matches the sibling plotter (plot_fourway_grids_nemo).
+from compare_three_way_nemo import _nn_wet_mask as nn_wet_mask  # noqa: E402
 
 # NEMO writes Conservative Temperature under several names depending on
 # version and XIOS field definition; likewise practical/absolute salinity.
@@ -136,7 +145,8 @@ def regrid_column(field_lastaxis, src, wet_by_level, tgt_lat, tgt_lon, res_deg):
                                       src["lon"], wet.astype(np.float64),
                                       tgt_lat, tgt_lon)
         out[..., k] = v
-        okf[..., k] = ok
+        okf[..., k] = ok * nn_wet_mask(src["lat"], src["lon"], wet,
+                                       tgt_lat, tgt_lon)
     return out, okf
 
 
@@ -152,7 +162,7 @@ def regrid_nemo(field_levfirst, lat, lon, tgt_lat, tgt_lon):
         v, ok = regrid_curv_to_latlon(np.nan_to_num(lev), lat, lon,
                                       wet.astype(np.float64), tgt_lat, tgt_lon)
         out[..., k] = v
-        okf[..., k] = ok
+        okf[..., k] = ok * nn_wet_mask(lat, lon, wet, tgt_lat, tgt_lon)
     return out, okf
 
 
@@ -244,6 +254,18 @@ def main() -> int:
                 f"FATAL: {tag} vertical axis differs from ours by {d:.3f} m "
                 f"(> {a.depth_tol_m} m). Comparing them needs an explicit "
                 "vertical remapping choice, which this plotter will not make.")
+    # WHERE the mismatch sits decides whether it matters. An index-wise
+    # difference of two fields sampled at slightly different depths carries a
+    # (vertical gradient x depth offset) term, so a sub-metre offset is
+    # harmless in the abyss and is NOT harmless in the thermocline. Print the
+    # worst levels with their depths rather than trusting the scalar maximum.
+    dz_mis = np.abs(z_nemo - z_ours)
+    worst = np.argsort(dz_mis)[::-1][:5]
+    print("[vertical] largest per-level mismatches (level, our depth m, "
+          "NEMO depth m, |diff| m):")
+    for k in worst:
+        print(f"           k={int(k):3d}  {z_ours[k]:9.3f}  {z_nemo[k]:9.3f}"
+              f"  {dz_mis[k]:7.4f}")
     z = z_ours
 
     wet_t = lego_wet_3d(trp, z)
@@ -269,6 +291,20 @@ def main() -> int:
         print(f"[{name}] common cells {int(common.sum())} of {common.size}")
 
         zon = [_sec_mean(f, common, axis=1) for f in (Tg, Mg, Ng)]
+
+        # BOUND THE DEPTH-OFFSET ARTIFACT against the difference being plotted.
+        # The index-wise difference carries |d(field)/dz| * |z_NEMO - z_ours|;
+        # if that approaches the plotted tripole-minus-NEMO signal, the panel
+        # is showing a sampling mismatch rather than a model difference.
+        zN = zon[2]
+        with np.errstate(invalid="ignore"):
+            dfdz = np.gradient(zN, z, axis=-1)
+            artifact = np.abs(dfdz) * dz_mis[None, :]
+            signal = np.abs(zon[0] - zN)
+        amax = float(np.nanmax(artifact)) if np.isfinite(artifact).any() else float("nan")
+        smed = float(np.nanmedian(signal)) if np.isfinite(signal).any() else float("nan")
+        print(f"[{name}] depth-offset artifact bound {amax:.4g} {unit} "
+              f"(max) vs median |tripole-NEMO| {smed:.4g} {unit}")
         _plot_sections(out, name, unit, tgt_lat, "latitude", z, zon,
                        (a.label_tripole, a.label_mpas),
                        f"{name} [{unit}] global zonal-mean section — "
