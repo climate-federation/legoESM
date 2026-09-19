@@ -30,7 +30,6 @@ from typing import Any
 
 import numpy as np
 
-
 ROOT = Path(__file__).resolve().parents[4]
 TARGET_DAYS = (30, 60, 90, 120, 180, 240, 300, 360)
 FIELDS = ("T", "S", "u", "v", "SSH")
