@@ -115,11 +115,11 @@ done
 
 check_writer_layout() {
   local source=$1
-  [[ "$(grep -c 'ALLOCATE( ffu_nw(Nis0-' "$source")" -eq 1 ]] &&
+  grep -Eq 'ALLOCATE\( ffu_nw\((A2D\(0\)|Nis0-)' "$source" &&
   [[ "$(grep -c 'REAL(wp), DIMENSION(jpi,jpj) :: zu_trd, zu_spg' "$source")" -eq 1 ]] &&
-  [[ "$(grep -c 'REAL(wp), DIMENSION(Nis0-' "$source")" -ge 1 ]] &&
+  grep -Eq 'REAL\(wp\), DIMENSION\((A2D\(0\)|Nis0-)' "$source" &&
   [[ "$(grep -c 'WRITE(l2_r117_unit) l2_r117_magic' "$source")" -eq 1 ]] &&
-  [[ "$(grep -c 'ffv_nw, ffv_ne, ffv_sw, ffv_se' "$source")" -ge 1 ]] &&
+  [[ "$(grep -c '& ffv_nw, ffv_ne, ffv_sw, ffv_se' "$source")" -eq 1 ]] &&
   [[ "$(grep -c 'WRITE(l2_r117_unit) zu_trd, zv_trd' "$source")" -eq 1 ]] &&
   [[ "$(grep -c 'WRITE(l2_r117_unit) zu_frc, zv_frc' "$source")" -eq 1 ]]
 }
