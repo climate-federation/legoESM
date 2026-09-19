@@ -274,6 +274,15 @@ def main(runs, ctl=None):
         for var in ("rsut", "rlut", "rsutcs", "rlutcs",
                     "clt", "lwp", "clivi", "prw", "pr", "evspsbl"):
             md = _load_model(run, var)
+            if md is None and var == "lwp":
+                # The runs publish clwvi (TOTAL condensed water path) and
+                # clivi, not lwp.  Liquid is their difference, and the row was
+                # silently absent from every scorecard until now -- which is
+                # how a precipitation-efficiency question went unanswerable.
+                tot, ice = _load_model(run, "clwvi"), _load_model(run, "clivi")
+                if tot is None or ice is None:
+                    continue
+                md = tot.assign(lwp=tot["clwvi"] - ice["clivi"])
             if md is None:
                 continue
             months = _month_labels(md)
