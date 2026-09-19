@@ -76,6 +76,7 @@ processes using the same CPU-only environment.
 | P25 TKE N2 routing | `1 failed, 4 passed in 5.27s` | `5 passed in 6.12s` |
 | P26 Veros basic probe | `1 failed, 10 passed in 28.88s` | `11 passed in 32.09s` |
 | P27 Veros recipe probe | `2 failed, 28 passed in 17.85s` | `30 passed in 20.22s` |
+| P28 literal-TKE probe timestep | `2 failed, 17 deselected in 14.74s` | `2 passed, 17 deselected in 16.42s` |
 
 `tests/ocean/unit/test_scm_column_twins.py` exits normally in isolation; its
 base line is `11 failed, 34 passed in 2.81s`.  Its previously reported exit 134
@@ -170,12 +171,18 @@ files, not an abort performed by the test.
 | `tests/ocean/unit/test_scm_column_twins.py::test_t1_has_coriolis_and_wind_produces_motion` | REAL DEFECT | Same stale shared-harness `rho_0` lookup. | `6cb7419da` | P23 |
 | `tests/ocean/unit/test_step_wiring_generated.py::test_committed_doc_matches_regeneration` | TEST-INFRASTRUCTURE | Generated wiring inventory drifted from its generator; regenerated result is 148 calls, 51 live, 58 dead, 39 unresolved. | WORKTREE (commit blocked) | P24 |
 | `tests/ocean/unit/test_tke_n2_before_advection.py::test_set_diffusivities_routes_exactly_to_n2_source` | STALE EXPECTATION | `21e85d252` added the faithful `surface_tmask` operand; the fixture now supplies it. | WORKTREE (commit blocked) | P25 |
-| `tests/ocean/unit/test_veros_acc_basic_recipe.py::test_frozen_state_probe_compatible` | REAL DEFECT | The `dt_tke` requirement introduced with the newer TKE contract (traceable to `080ce674a`) was not forwarded by the offline tendency probe. | WORKTREE (commit blocked) | P26 |
-| `tests/ocean/unit/test_veros_acc_recipe.py::test_compare_momentum_emits_all_processes` | REAL DEFECT | Same stale tendency-probe caller; it now forwards the probe timestep as `dt_tke`. | WORKTREE (commit blocked) | P27 |
+| `tests/ocean/unit/test_veros_acc_basic_recipe.py::test_frozen_state_probe_compatible` | REAL DEFECT | The `dt_tke` requirement introduced with the newer TKE contract (traceable to `080ce674a`) was not forwarded by the offline tendency probe.  Factored TKE continues to receive momentum `dt`; literal NEMO TKE now uses the dedicated channel documented under B3. | WORKTREE (commit blocked) | P26 |
+| `tests/ocean/unit/test_veros_acc_recipe.py::test_compare_momentum_emits_all_processes` | REAL DEFECT | Same stale tendency-probe caller; factored TKE now receives the probe timestep as `dt_tke`. | WORKTREE (commit blocked) | P27 |
 | `tests/ocean/unit/test_veros_acc_recipe.py::test_end_to_end_recipe_probe_round_trip` | REAL DEFECT | Same stale tendency-probe caller. | WORKTREE (commit blocked) | P27 |
 
 The table contains exactly 87 IDs: 31 stale expectations, 37 real defects, 7
 test-infrastructure defects, and 12 environment skips.
+
+## Second-pass review dispositions
+
+| Finding | Disposition and evidence |
+|---|---|
+| B3 | **FIXED.** The probe now has a dedicated `tke_rn_dt` channel.  For `scheme="tke"` plus `tke_matrix_evaluation="nemo_literal"`, it forwards that base timestep exactly as production resolves it at `ocean_model_latlon_cgrid.py:10018-10022`; all committed DINO tendency-probe callers pass the card's 2700 s `rn_Dt`.  A literal card without the channel raises a named `ValueError` instead of silently substituting momentum `dt`.  P28 proves both refusal and forwarding. |
 
 ## Whole-tree runs
 

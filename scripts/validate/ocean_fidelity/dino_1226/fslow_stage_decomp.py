@@ -240,7 +240,7 @@ def main():
     try:
         from legoesm.ocean.fidelity.tendency_probe import probe_latlon_cgrid
         pr = probe_latlon_cgrid(st_state, br.geometry, br.z_coord, mc,
-                                surface_forcing=sf, dt=DT)
+                                surface_forcing=sf, dt=DT, tke_rn_dt=DT)
         other_terms = {
             "wind (phys_u)": dmean(pr.phys_u),
             "adv+hpg+ke": dmean(np.asarray(pr.pgf_ke_u) + np.asarray(pr.vertadv_u)),

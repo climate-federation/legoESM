@@ -14,11 +14,15 @@ cfg = dataclasses.replace(dino_config_for_recipe("nemo_dino_kamm_mlf"),
 mc, _ = dino_lat_lon_model_config(br.geometry, cfg)
 sf = dino_step_surface_forcing(dino_lat_lon_surface_forcing_arrays(br.geometry, cfg))
 act = np.asarray(br.z_coord.is_active)
-pr0 = probe_latlon_cgrid(br.state, br.geometry, br.z_coord, mc, surface_forcing=sf, dt=2700.0)
+pr0 = probe_latlon_cgrid(
+    br.state, br.geometry, br.z_coord, mc, surface_forcing=sf,
+    dt=2700.0, tke_rn_dt=2700.0)
 T999 = jnp.where(jnp.asarray(act), br.state.T.data, 999.0)
 S999 = jnp.where(jnp.asarray(act), br.state.S.data, 999.0)
 stP = br.state._replace(T=br.state.T.replace(data=T999), S=br.state.S.replace(data=S999))
-pr1 = probe_latlon_cgrid(stP, br.geometry, br.z_coord, mc, surface_forcing=sf, dt=2700.0)
+pr1 = probe_latlon_cgrid(
+    stP, br.geometry, br.z_coord, mc, surface_forcing=sf,
+    dt=2700.0, tke_rn_dt=2700.0)
 worst = 0.0; worst_f = ""
 for f in pr0._fields:
     a0, a1 = getattr(pr0, f), getattr(pr1, f)
