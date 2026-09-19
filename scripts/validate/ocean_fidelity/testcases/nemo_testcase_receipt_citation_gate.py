@@ -1136,8 +1136,8 @@ CITATION_MAP = {
         'zFu(ji,jj,jk) = e2u(ji,jj)',
         'zFv(ji,jj,jk) = e1v(ji,jj)', 2],
     'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:281-292': [
-        'SELECT CASE( n_baro_upd )',
-        'END SELECT', 12],
+        ('SELECT CASE( n_baro_upd )', 4),
+        ('END SELECT', 5), 12],
     'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:52-54': [
         'INTEGER,  PUBLIC, PARAMETER ::   np_HYB = 2',
         'INTEGER  :: n_baro_upd =  np_HYB', 3],
@@ -1146,7 +1146,7 @@ CITATION_MAP = {
         'CASE ( 3 )           !==  Stage 3  ==!', 45],
     'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:525-547': [
         "WRITE(l3_unit) 'uu_Kmm          '",
-        "WRITE(l3_unit) 'e3u_Kmm         '", 23],
+        ('WRITE(l3_unit) zl3_tmp', 3), 23],
     'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/domqco.f90:266-268': [
         ('pr3u(ji,jj) = 0.5_wp *', 2),
         ('pr3v(ji,jj) = 0.5_wp *', 2), 3],
