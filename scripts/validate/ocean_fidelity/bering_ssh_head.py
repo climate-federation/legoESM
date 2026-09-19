@@ -203,23 +203,46 @@ def main(argv=None) -> int:
     both = wetw & nwet & np.isfinite(ow) & np.isfinite(ssh)
     diff = np.where(both, ow - ssh, np.nan)
     res["window_median_dlon_deg"] = mis
-    res["global_mean_ours_m"] = float(np.nanmean(ow[both]))
-    res["global_mean_nemo_m"] = float(np.nanmean(ssh[both]))
-    res["global_mean_diff_m"] = float(np.nanmean(diff[both]))
+    # AREA WEIGHTS ARE NOT OPTIONAL ON A TRIPOLE GRID. An unweighted mean
+    # massively oversamples the Arctic, where eORCA1's cells are small and the
+    # fold packs many of them, and it is exactly the failure CLAUDE.md names:
+    # "a global statistic on a non-uniform grid needs area weights". The first
+    # version of this block used np.nanmean and returned a global mean sea
+    # level near -0.31 m on both sides, which is not a physical free-surface
+    # mean and was the tell.
+    aw = area[j0:j0 + ny_o, i0:i0 + nx_o]
+    wsum = float(np.nansum(np.where(both, aw, 0.0)))
+
+    def _gmean(f):
+        return float(np.nansum(np.where(both, f * aw, 0.0)) / wsum)
+
+    res["global_mean_ours_m"] = _gmean(ow)
+    res["global_mean_nemo_m"] = _gmean(ssh)
+    res["global_mean_diff_m"] = _gmean(np.where(both, ow - ssh, 0.0))
+    res["global_mean_ours_unweighted_m"] = float(np.nanmean(ow[both]))
+    res["global_mean_nemo_unweighted_m"] = float(np.nanmean(ssh[both]))
+    res["global_area_m2"] = wsum
     print("")
     print(f"[window] verified: median |dlon| {mis:.2e} deg over {int(ok.sum())} cells")
-    print(f"[global] ours {res['global_mean_ours_m']:+.4f}  "
+    print(f"[global] AREA-WEIGHTED ours {res['global_mean_ours_m']:+.4f}  "
           f"NEMO {res['global_mean_nemo_m']:+.4f}  "
-          f"DIFF {res['global_mean_diff_m']:+.4f} m")
-    print("[zonal] mean(ours - NEMO) by latitude band:")
+          f"DIFF {res['global_mean_diff_m']:+.4f} m   "
+          f"(area {wsum:.3e} m2)")
+    print(f"[global] unweighted, for contrast: ours "
+          f"{res['global_mean_ours_unweighted_m']:+.4f}  NEMO "
+          f"{res['global_mean_nemo_unweighted_m']:+.4f} m")
+    print("[zonal] AREA-WEIGHTED mean(ours - NEMO) by latitude band:")
     for lo, hi in ((-90, -60), (-60, -30), (-30, 30), (30, 60),
                    (60, 70), (70, 80), (80, 90)):
         m = both & (nlat >= lo) & (nlat < hi)
         if int(m.sum()) < 10:
             continue
-        v = float(np.nanmean(diff[m]))
+        ws = float(np.nansum(np.where(m, aw, 0.0)))
+        v = float(np.nansum(np.where(m, diff * aw, 0.0)) / ws)
         res[f"zonal_diff_{lo}_{hi}"] = v
-        print(f"   {lo:+4d}..{hi:+4d}  {v:+.4f} m   (n={int(m.sum())})")
+        res[f"zonal_area_{lo}_{hi}"] = ws
+        print(f"   {lo:+4d}..{hi:+4d}  {v:+.4f} m   "
+              f"(n={int(m.sum())}, area {ws:.3e} m2)")
 
     # ---- FALSIFIER FOR THE FRESHWATER READING --------------------------
     # The Arctic sea-level excess is structured and sits on the Siberian side,
