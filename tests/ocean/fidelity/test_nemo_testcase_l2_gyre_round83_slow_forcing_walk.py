@@ -51,6 +51,14 @@ def test_source_chain_preserves_compiled_statement_association() -> None:
     np.testing.assert_allclose(chain["final"], [[6.95]], rtol=0.0, atol=0.0)
 
 
+def test_direct_record_replay_retains_noncontributing_bottom_slot() -> None:
+    recorded = np.arange(6 * 7 * 31.0).reshape(6, 7, 31)
+    assert WALK.owned3(recorded).shape == (2, 3, 30)
+    retained = WALK.owned3_with_bottom(recorded)
+    assert retained.shape == (2, 3, 31)
+    np.testing.assert_array_equal(retained[..., -1], recorded[2:-2, 2:-2, -1])
+
+
 def test_comparison_detects_one_ulp_on_an_active_cell() -> None:
     oracle = np.array([[1.0, 2.0]])
     candidate = oracle.copy()

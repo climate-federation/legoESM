@@ -67,6 +67,11 @@ def owned3(value) -> np.ndarray:
     return np.asarray(value, dtype=np.float64)[2:-2, 2:-2, :30]
 
 
+def owned3_with_bottom(value) -> np.ndarray:
+    """Keep NEMO's non-contributing ``jpk`` slot for literal ``SUM`` replay."""
+    return np.asarray(value, dtype=np.float64)[2:-2, 2:-2, :]
+
+
 def owned2(value) -> np.ndarray:
     return np.asarray(value, dtype=np.float64)[2:-2, 2:-2]
 
@@ -898,15 +903,19 @@ def measure_round117(args) -> dict[str, object]:
         require(float(producer["wind_r1_rho0"]) == float(rho_reciprocal),
                 "live/direct density reciprocal differs")
         for face in ("u", "v"):
-            e3 = owned3(slow_fields[f"e3{face}"])
-            mask3 = owned3(slow_fields[f"{face}mask"])
-            direct_rhs = owned3(slow_fields[f"krhs_{face}"])
+            # round16._source_sum implements NEMO's 1:jpkm1 reduction by
+            # deliberately omitting the final, non-contributing jpk slot.
+            # Preserve that slot here: trimming first would omit physical
+            # level jpkm1 as well (the Round-28 instrument defect).
+            e3 = owned3_with_bottom(slow_fields[f"e3{face}"])
+            mask3 = owned3_with_bottom(slow_fields[f"{face}mask"])
+            direct_rhs = owned3_with_bottom(slow_fields[f"krhs_{face}"])
             inherited_rhs = owned3(stage_arrays[f"after_adv_{face}"])
             reciprocal_ref = owned2(slow_fields[f"r1_h{face}0"])
             inverse_depth = owned2(slow_fields[f"r1_h{face}"])
             drag = owned2(slow_fields[f"cd_{face}"])
             bottom = bottom_value(
-                owned3(stage_arrays[f"{face}_Kmm"]), mask3 != 0.0)
+                owned3(stage_arrays[f"{face}_Kmm"]), mask3[..., :30] != 0.0)
             barotropic = owned2(
                 direct["preloop"]["fields"][f"{face}_kmm"])
             stress = owned2(slow_fields[f"{face}tau"])
@@ -922,7 +931,7 @@ def measure_round117(args) -> dict[str, object]:
             )
             source_replay[face] = {
                 "inherited_after_adv_to_same_run_krhs": comparison(
-                    inherited_rhs, direct_rhs, active[f"{face}3"]),
+                    inherited_rhs, direct_rhs[..., :30], active[f"{face}3"]),
                 "depth_replay_to_direct_record": comparison(
                     chain["depth_mean"], slow_fields[f"depth_{face}"],
                     active[f"{face}2"]),
