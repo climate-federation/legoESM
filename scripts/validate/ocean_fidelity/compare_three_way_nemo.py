@@ -110,7 +110,18 @@ def check_oracle_record(expect_day, nemo_time_idx, n_time, nemo_month=None):
     """
     if expect_day is None or nemo_month:
         return
-    want = int(round(float(expect_day) / NEMO_RECORD_DAYS)) - 1
+    q = float(expect_day) / NEMO_RECORD_DAYS
+    # A day that is not a record boundary has NO record ending on it, and
+    # rounding to the nearest one turns a typo into a plausible wrong score:
+    # day 27 would round to record 4, whose window ends on day 25 (GLM).
+    if abs(q - round(q)) > 1e-9:
+        lo = int(q) * NEMO_RECORD_DAYS
+        raise SystemExit(
+            f"FATAL: --expect-day {float(expect_day):g} is not a multiple of "
+            f"{NEMO_RECORD_DAYS} days, so no oracle record ends on it. The "
+            f"records either side end on days {lo} and {lo + NEMO_RECORD_DAYS}. "
+            f"Score a day that is a multiple of {NEMO_RECORD_DAYS}.")
+    want = int(round(q)) - 1
     got = nemo_time_idx if nemo_time_idx >= 0 else n_time + nemo_time_idx
     if got == want:
         return

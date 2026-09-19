@@ -19,20 +19,28 @@ the first version:
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-_MOD = (Path(__file__).resolve().parents[2]
-        / "scripts" / "validate" / "ocean_fidelity" / "compare_three_way_nemo.py")
+# Normally the scorer in this repo.  C3W_MODULE points the whole module at a
+# MUTATED COPY instead, which is how the non-vacuity stage of
+# scripts/cluster/omip_nemo/_oracle_record_gate_tests.sbatch proves that
+# test_the_scorer_actually_calls_the_gate really does fail when the call it
+# claims to pin is deleted.
+_VALIDATE = Path(__file__).resolve().parents[2] / "scripts" / "validate"
+_MOD = (Path(os.environ["C3W_MODULE"]) if os.environ.get("C3W_MODULE")
+        else _VALIDATE / "ocean_fidelity" / "compare_three_way_nemo.py")
 
 
 def _load():
     # The module inserts scripts/validate on sys.path at import time so it can
     # reuse the NEMO scorecard's regridder; load it by path for the same reason.
-    sys.path.insert(0, str(_MOD.parents[1]))
+    # That path is always the REPO's, even when the module itself is a copy.
+    sys.path.insert(0, str(_VALIDATE))
     spec = importlib.util.spec_from_file_location("compare_three_way_nemo", _MOD)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -528,12 +536,67 @@ def test_the_monthly_path_is_exempt():
                           nemo_month=1)
 
 
-def test_reverting_the_gate_would_let_the_defect_through():
-    # NON-VACUITY: the pre-fix behaviour was "no check at all".  Show that the
-    # case above is the one that behaviour accepted, so this gate is the only
-    # thing standing between the card and a 70-day misalignment.
-    def without_the_gate(expect_day, nemo_time_idx, n_time, nemo_month=None):
-        return None
-    assert without_the_gate(20, -1, 18) is None
-    with pytest.raises(SystemExit):
-        m.check_oracle_record(20, -1, 18)
+def test_the_scorer_actually_calls_the_gate(tmp_path, monkeypatch):
+    """NON-VACUITY, and the only test here that proves ENFORCEMENT.
+
+    Codex, reviewing the first version: every test above passes with the call
+    in ``main`` deleted, because they exercise the helper and nothing asserts
+    the wiring.  A gate nobody calls is the same defect it was written to stop.
+
+    So drive ``main`` itself.  The three loaders are replaced with stubs -- the
+    real ones read hundreds of megabytes -- and everything between argument
+    parsing and the gate is the module's own code.  Deleting the call makes
+    this test fail on the stub state instead of on the record mismatch.
+    """
+    snaps = []
+    for nm in ("tri", "mpas"):
+        p = tmp_path / f"{nm}_snapshot_day0020.npz"
+        np.savez(p, time_days=np.asarray(20.0))
+        snaps.append(p)
+    gridt = tmp_path / "oracle_grid_T.nc"
+    gridt.write_bytes(b"")
+
+    def _stub_lego(path):
+        raise AssertionError(f"reached the loader for {path}: the gate did "
+                             "not fire, so main no longer calls it")
+
+    monkeypatch.setattr(m, "_load_legoesm", lambda p: {"sst": np.zeros((2, 2))})
+    monkeypatch.setattr(m, "_load_nemo",
+                        lambda p, idx, month=None: {"n_time": 18,
+                                                    "sst": np.zeros((2, 2))})
+    monkeypatch.setattr(m, "_scored", _stub_lego, raising=False)
+    monkeypatch.setattr(sys, "argv", [
+        "compare_three_way_nemo.py",
+        "--tripole", str(snaps[0]), "--mpas", str(snaps[1]),
+        "--nemo-gridt", str(gridt), "--out-dir", str(tmp_path / "out"),
+        "--expect-day", "20"])          # and NO --nemo-time-idx: the default -1
+
+    with pytest.raises(SystemExit) as e:
+        m.main()
+    assert "record 3" in str(e.value) and "record 17" in str(e.value)
+
+
+def test_a_day_that_is_not_a_record_boundary_is_refused():
+    # GLM, reviewing the gate above: rounding a non-multiple to the nearest
+    # record turns a config typo into a plausible wrong score.  Day 27 rounds
+    # to record 4, whose window ENDS on day 25 -- a number that would have been
+    # reported as if it were day 27.
+    with pytest.raises(SystemExit) as e:
+        m.check_oracle_record(expect_day=27, nemo_time_idx=4, n_time=18)
+    msg = str(e.value)
+    assert "not a multiple" in msg
+    assert "days 25 and 30" in msg
+
+
+def test_the_non_boundary_refusal_fires_before_the_index_check():
+    # Even a caller who passes the index the old rounding would have chosen
+    # is refused: the day itself is unscoreable, so no index can be right.
+    with pytest.raises(SystemExit) as e:
+        m.check_oracle_record(expect_day=27, nemo_time_idx=-1, n_time=5)
+    assert "not a multiple" in str(e.value)
+
+
+def test_a_float_day_that_is_a_boundary_still_passes():
+    # 20.0 is a boundary written as a float; refusing it would be a false alarm
+    # from the tolerance, not from the convention.
+    m.check_oracle_record(expect_day=20.0, nemo_time_idx=3, n_time=18)

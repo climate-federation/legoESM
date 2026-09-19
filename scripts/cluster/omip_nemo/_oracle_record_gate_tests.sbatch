@@ -48,5 +48,23 @@ print('gate is callable:', callable(mod.check_oracle_record))
 IRC=$?
 echo "=== import rc=$IRC"
 
-echo; echo "=== ALL DONE (pytest $RC, import $IRC) ==="
-exit $(( RC != 0 || IRC != 0 ))
+echo; echo "########## NON-VACUITY: delete the CALL, the wiring test must go red"
+# Codex's finding: every helper test passes with the call in main removed, so
+# only a test that drives main can pin enforcement.  That claim is itself a
+# claim, so prove it -- run the same test file against a copy of the scorer
+# with exactly that one line deleted and require a FAILURE.
+COPY=$(mktemp -d /tmp/c3w_novac_XXXX)/compare_three_way_nemo.py
+grep -v '^    check_oracle_record(a\.expect_day' \
+  $REPO/scripts/validate/ocean_fidelity/compare_three_way_nemo.py > "$COPY"
+DELETED=$(( $(wc -l < $REPO/scripts/validate/ocean_fidelity/compare_three_way_nemo.py) \
+            - $(wc -l < "$COPY") ))
+echo "lines deleted from the copy: $DELETED (MUST be 1)"
+[ "$DELETED" = "1" ] || { echo "FATAL: the call line was not matched"; exit 1; }
+C3W_MODULE="$COPY" $PY -u -m pytest -q \
+  tests/validate/test_compare_three_way_nemo.py::test_the_scorer_actually_calls_the_gate
+NVRC=$?
+echo "=== gate-removed rc=$NVRC (EXPECT NON-ZERO; 0 => the wiring test is VACUOUS)"
+rm -rf "$(dirname "$COPY")"
+
+echo; echo "=== ALL DONE (pytest $RC, import $IRC, non-vacuity $NVRC) ==="
+exit $(( RC != 0 || IRC != 0 || NVRC == 0 ))
