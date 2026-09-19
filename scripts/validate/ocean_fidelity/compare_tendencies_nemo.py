@@ -1434,6 +1434,13 @@ def main():
             # full of convecting columns whose avt carries an EVD our probe
             # has no counterpart for -- unmasked, they dominate the picture
             # and look like a defect the table explicitly set aside.
+            # SAME GATE AS THE TABLE: NEMO's own en must exceed its rn_emin
+            # floor, or the cell is one NEMO treats as dry and its avm/avt are
+            # background fills. Without this the figure showed a bright
+            # Antarctic shelf band that was entirely our real closure divided
+            # by NEMO's mask values (job 9877224: the Antarctic momentum ratio
+            # goes from 20.16 to 0.92 once the gate is applied).
+            _en_ok = (eseed2 > 1.0e-6)
             wm2 = np.isfinite(d["T"][0]) & (~evd_cols).reshape(ny, nx)
             with np.errstate(divide="ignore", invalid="ignore"):
                 _pro = K_M2 / np.maximum(K_H2, 1e-30)
@@ -1456,7 +1463,8 @@ def main():
                     (ax2[0][1], _rkm, 8, "log10(K_M ours / avm NEMO)  ~100 m"),
                     (ax2[1][0], _rkh, 3, "log10(K_H ours / avt NEMO)  ~10-30 m"),
                     (ax2[1][1], _rkh, 8, "log10(K_H ours / avt NEMO)  ~100 m")):
-                _f = np.where(wm2, _fld[:, _kk].reshape(ny, nx), np.nan)
+                _f = np.where(wm2 & _en_ok[:, _kk].reshape(ny, nx),
+                              _fld[:, _kk].reshape(ny, nx), np.nan)
                 _im = _ax.pcolormesh(_f, vmin=-2, vmax=2, cmap="RdBu_r")
                 _ax.set_title(_ttl, fontsize=9)
                 plt.colorbar(_im, ax=_ax, shrink=0.85)
@@ -1464,7 +1472,8 @@ def main():
                 "Vertical diffusivity vs NEMO, Mode-A (NEMO's own state, ice, "
                 "wave mixing and backgrounds; convecting columns masked). "
                 "RED = WE MIX MORE THAN NEMO, 0 = match, +2 is a hundredfold "
-                "excess. Top momentum, bottom tracer.", fontsize=10)
+                "excess. Top momentum, bottom tracer. White = no data or NEMO "
+                "inactive there.", fontsize=10)
             fig2.tight_layout()
             png2 = out_dir / f"prandtl_ratio_rec{args.rec}.png"
             fig2.savefig(png2, dpi=110)
