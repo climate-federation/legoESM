@@ -236,6 +236,13 @@ The Decision-43/45 gate suite, including the real CLI day-240 plant, ended:
 
 - `8 passed in 9.62s`.
 
+Two earlier development runs are retained rather than overwritten.  Before
+the CLI subprocess test was added the suite ended `7 passed in 9.63s`.  The
+first run after adding it correctly exercised the clean-stamp refusal while
+that test file was still uncommitted and ended
+`5 failed, 3 passed in 9.35s`; all five failures name the dirty producer.
+After committing, the eight-test result above is the clean control.
+
 The extended Round-83 discriminator suite ended:
 
 - `12 passed in 0.50s`.
@@ -248,7 +255,9 @@ is `27bf2b945a5c919b2bd66cc183b5583139f664041e1e6455a1f5fc7e7220bacd`;
 it is not called green.
 
 All ten crash sites were replayed serially, expanding to 21 cases.  The
-literal terminal summary was:
+first command included two unqualified method IDs and ended literally
+`no tests ran in 0.45s`; the IDs were corrected instead of hidden.  The
+correct replay's literal terminal summary was:
 
 - `4 failed, 17 passed in 397.01s (0:06:37)`.
 
@@ -268,9 +277,70 @@ incoming tip, consistent with the intervening baseline-cleanup work.  The log
 SHA-256 is
 `54184cdb07bd3390e5eb1cf547a3f4c5d83788db294f6bf61090ec3e899f334e`.
 
-Final split full-tree summaries, focused test summaries and the citation-gate
-and shifted-plant hashes are recorded in the final verification amendment
-below after the clean receipt commit.
+Following the repository instruction to split compiler-heavy suites, the
+first 69 fidelity files completed:
+
+- `807 passed, 5 skipped in 160.89s (0:02:40)`.
+
+The second 68-file xdist slice reached 87% with one failure marker but lost
+its process before teardown and printed **no terminal summary line**.  Its
+successively smaller retries are all retained: the first 17-file slice ended
+`81 passed in 50.58s`; the next 17-file slice printed **no terminal summary
+line**; its first eight files ended `86 passed in 29.26s`; its last nine files
+again printed **no terminal summary line** under xdist.  The last nine were
+then run serially: they collected 101 tests and reached the phase-3 stage
+sweep at 39%; individual legacy sweep cases then took many silent minutes and
+the round CPU bound was reached, so that command also printed
+**no terminal summary line**.  None of these partial slices is called green
+or used to erase the complete first-slice result.  Their SHA-256 values are,
+in command order,
+`1fe79b1e6b25619d958b02b1a870d447aa228ebc602382a6b49ec02711804d23`,
+`bf3a52158d222c6bfb4b1e42414ec8cab9feeb3a56706463330e10789151222c`,
+`b7d951b834021554101a47bcebd7556c55cb3496e227db704f10ed64627ebfc2`,
+`5b4b8e40b0e765e18b01614d5b4c385497ba00af1aa55327bc26b28e885038ac`,
+`28df1967c62cf93a5a9e8a4fc008bb565ed63cb234383ef0fb70785b9ef94c6b`,
+`5f247cffc5b5ac5005261e8c6c88ce128c486e5d86f74ed1f89b54f1922dba0c`
+and
+`26f97dce1d6fd871a467693466a55f5baf4254e88bf3192a964f84921f0995b5`.
+
+The first final focused run exposed two failures and ended literally:
+
+- `2 failed, 122 passed, 1 warning in 347.34s (0:05:47)`.
+
+The receipt-citation failure was caused by this round's diagnostic seams
+rigidly moving already pinned local-source statements.  The map was moved by
+exactly +2 lines in the model file and +4 lines in the tendency file with
+every extent unchanged; all 16 affected historical receipt spans were moved
+by the same displacement.  Commit
+`738c3c852315762015bae99e255db664ffa0718b` records the map and commit
+`5d015abbb0b2611cae6b89ac33d51f6d4e8509dd` records the receipt anchors.
+The dedicated rerun then ended `16 passed in 1.97s`.
+
+The second focused failure is unrelated to the changed latitude/longitude
+path: the MPAS recipe's CG carry mixes float32 and float64.  Its isolated
+candidate-tip run ended `1 failed, 1 warning in 2.79s`; the exact same node in
+the untouched incoming-tip checkout ended
+`1 failed, 1 warning in 3.04s`, with the same dtype exception.  It is thus
+incoming pre-existing, though it postdates the frozen 87-node list.  The
+final focused command explicitly deselected that one controlled node and
+ended:
+
+- `123 passed, 1 deselected in 339.75s (0:05:39)`.
+
+The final focused-log SHA-256 is
+`e5e26b7aa5bb7f3fcc425f91aff1eb57256e58a5dcde5f7c6907802939de2b73`;
+the incoming-tip control is
+`e6d6b3888e33627869b10c6df166f651ff05270c1d3a2c30584825a1729690d8`.
+
+Finally, the clean-tree receipt citation gate found all six compiled-source
+citations, no failures, no unmapped citations and no map-audit failures:
+`status=PASS`.  The deliberately shifted KEG pair exited nonzero with
+`status=FAIL` and `SYMBOL-NOT-AT-LINE`.  The final gate and plant JSON/log
+SHA-256 values are
+`f692b46f93f582a22e401149f76a00111204db87e9a4ef073a65343c40fe68c2`
+and
+`a8358d5df471f7e62bc7a9c637a81808600026dd3ae8886a04c53ac1349d8727`,
+respectively.
 
 ## Independent review
 
