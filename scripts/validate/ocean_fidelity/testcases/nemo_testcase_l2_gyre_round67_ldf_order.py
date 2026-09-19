@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -30,11 +31,20 @@ ROUND112_ROWS = (
     "first_u", "first_v", "first_w", "first_div", "midpoint",
     "average_u", "average_v", "average_w", "final_div", "rhs_after",
 )
+ROUND113_INPUTS = (
+    "base", "transport_u", "transport_v", "transport_w",
+    "h_kbb", "h_kmm", "tmask", "wmask", "r1_area", "p2dt",
+)
 
 
 def require(ok: bool, message: str) -> None:
     if not ok:
         raise RuntimeError(message)
+
+
+def _array_sha256(value) -> str:
+    return hashlib.sha256(
+        np.ascontiguousarray(np.asarray(value)).tobytes()).hexdigest()
 
 
 def _copy_operands(values: dict) -> dict:
@@ -434,6 +444,115 @@ def _round112_collapse(observations: list[tuple], label: str) -> tuple:
     return first
 
 
+def _round113_input_tuple(
+    values: tuple, kwargs: dict, *, tracer: str,
+) -> tuple:
+    """Materialize the actual production FCT inputs in NEMO record units."""
+    grid = values[5]
+    base = kwargs.get("tracer_before")
+    require(base is not None, "round-113 FCT call has no Kbb tracer base")
+    active = kwargs.get("active_mask")
+    require(active is not None, "round-113 FCT call has no active mask")
+    h_kbb = kwargs.get("base_thickness")
+    require(h_kbb is not None, "round-113 FCT call has no Kbb thickness")
+    return (
+        base,
+        values[1] * jnp.asarray(grid.dy_u)[..., None],
+        values[2] * jnp.asarray(grid.dx_v)[..., None],
+        values[3] * jnp.asarray(grid.area_T)[..., None],
+        h_kbb,
+        values[4],
+        active,
+        active,
+        jnp.asarray(1.0, values[0].dtype) / jnp.asarray(grid.area_T),
+        jnp.asarray(values[6], values[0].dtype),
+    )
+
+
+def _round113_patch_inputs(
+    values: tuple, kwargs: dict, bundle: dict, tracer: str,
+    family: str | None,
+) -> tuple[tuple, dict]:
+    """Replace one recorded input family at the real production FCT call."""
+    if family is None:
+        return values, kwargs
+    patched = list(values)
+    patched_kwargs = dict(kwargs)
+    grid = values[5]
+    if family == "base":
+        patched_kwargs["tracer_before"] = jnp.asarray(bundle[f"base_{tracer}"])
+    elif family == "transport":
+        patched[1] = jnp.asarray(bundle["p_u"]) / jnp.asarray(
+            grid.dy_u)[..., None]
+        patched[2] = jnp.asarray(bundle["p_v"]) / jnp.asarray(
+            grid.dx_v)[..., None]
+        patched[3] = jnp.asarray(bundle["p_w"]) / jnp.asarray(
+            grid.area_T)[..., None]
+    elif family == "thickness":
+        patched[4] = jnp.asarray(bundle["h_kmm"])
+        patched_kwargs["base_thickness"] = jnp.asarray(bundle["h_kbb"])
+    elif family == "mask":
+        patched_kwargs["active_mask"] = jnp.asarray(bundle["tmask"])
+    elif family == "p2dt":
+        patched[6] = jnp.asarray(bundle["p2dt"], values[0].dtype)
+    else:
+        raise RuntimeError(f"round-113 family {family!r} is not substitutable")
+    return tuple(patched), patched_kwargs
+
+
+def _round113_collapse_calls(calls: list[tuple], label: str) -> tuple:
+    """Collapse duplicate JAX callback passes, preserving the T/S pair."""
+    require(len(calls) >= 2 and len(calls) % 2 == 0,
+            f"round-113 {label} did not emit complete T/S pairs")
+    pair = tuple(calls[:2])
+    for start in range(2, len(calls), 2):
+        duplicate = calls[start:start + 2]
+        require(all(
+            len(left) == len(right)
+            and all(np.array_equal(a, b)
+                    for a, b in zip(left, right, strict=True))
+            for left, right in zip(duplicate, pair, strict=True)),
+            f"round-113 {label} observed distinct duplicate executions")
+    return pair
+
+
+def _round113_score_inputs(observation: tuple, bundle: dict) -> dict:
+    require(len(observation) == 2, "round-113 observation is not a T/S pair")
+    rows = {}
+    common_reference = {
+        "transport_u": bundle["p_u"],
+        "transport_v": bundle["p_v"],
+        "transport_w": bundle["p_w"],
+        "h_kbb": bundle["h_kbb"],
+        "h_kmm": bundle["h_kmm"],
+        "tmask": bundle["tmask"],
+        "wmask": bundle["wmask"],
+        "r1_area": bundle["r1_area"],
+        "p2dt": np.asarray(bundle["p2dt"]),
+    }
+    for tracer, values in zip(TRACERS, observation, strict=True):
+        require(len(values) == len(ROUND113_INPUTS) + 1,
+                "round-113 callback schema changed")
+        rows[tracer] = {}
+        for name, got in zip(ROUND113_INPUTS, values[:-1], strict=True):
+            want = (bundle[f"base_{tracer}"] if name == "base"
+                    else common_reference[name])
+            got = np.asarray(got, dtype=np.float64)
+            want = np.asarray(want, dtype=np.float64)
+            require(got.shape == want.shape,
+                    f"round-113 {tracer} {name} shape differs")
+            rows[tracer][name] = round54.field_stats(
+                got, want, np.ones(want.shape, dtype=bool))
+        upstream = np.asarray(values[-1], dtype=np.float64)
+        want_upstream = bundle["expected"][(tracer, "rhs_after")]
+        rows[tracer]["adv_up1"] = round54.field_stats(
+            upstream, want_upstream, np.ones(want_upstream.shape, dtype=bool))
+    for index, name in enumerate(ROUND113_INPUTS[1:], start=1):
+        require(np.array_equal(observation[0][index], observation[1][index]),
+                f"round-113 common input {name} differs between T and S calls")
+    return rows
+
+
 def _replace_kmm_resume(resume, override):
     """Replace only selected stage-2 tracers at the final WS helper boundary."""
     require(resume is not None and resume[0] == 2,
@@ -450,8 +569,9 @@ def _replace_kmm_resume(resume, override):
 
 def measure(args) -> dict:
     require(sum((args.round69_native, args.round70_pair, args.round71_kmm,
-                 args.round111_fct_split, args.round112_fct_walk)) <= 1,
-            "round-69/70/71/111/112 modes are exclusive")
+                 args.round111_fct_split, args.round112_fct_walk,
+                 args.round113_live_inputs)) <= 1,
+            "round-69/70/71/111/112/113 modes are exclusive")
     require(not (args.plant_pair_null_fct and args.plant_pair_content_ulp),
             "round-70 plants are mutually exclusive")
     require(args.round70_pair or not (
@@ -466,6 +586,8 @@ def measure(args) -> dict:
             "the FCT split plant requires --round111-fct-split")
     require(args.round112_fct_walk or not args.plant_fct_walk_ulp,
             "the round-112 plant requires --round112-fct-walk")
+    require(args.round113_live_inputs or not args.plant_live_input_ulp,
+            "the round-113 plant requires --round113-live-inputs")
     reciprocal_calls: list[dict] = []
     pair_sources: list[tuple[np.ndarray, ...]] = []
     pair_kmm: list[tuple[np.ndarray, np.ndarray]] = []
@@ -474,12 +596,14 @@ def measure(args) -> dict:
     step_calls: list[tuple] = []
     fct_split_calls: list[tuple[np.ndarray, ...]] = []
     fct_walk_calls: list[tuple[np.ndarray, ...]] = []
+    live_input_calls: list[tuple[np.ndarray, ...]] = []
 
     round112_bundle = None
     round112_values = None
-    if args.round112_fct_walk:
+    if args.round112_fct_walk or args.round113_live_inputs:
         round112_bundle = _round112_owned_record(
-            args.fct_walk_record, plant=args.plant_fct_walk_ulp)
+            args.fct_walk_record,
+            plant=(args.plant_fct_walk_ulp or args.plant_live_input_ulp))
         round112_values = {
             name: jnp.asarray(value)
             for name, value in round112_bundle.items()
@@ -495,7 +619,10 @@ def measure(args) -> dict:
     active_kmm_override: tuple[object | None, object | None] | None = None
     capture_fct_split = False
     capture_fct_walk = False
+    capture_live_inputs = False
     fct_walk_trace_index = 0
+    live_input_trace_index = 0
+    active_live_input_family: str | None = None
 
     def reciprocal_capture(live, oracle, oracle_content, wet):
         reciprocal_calls.append({
@@ -517,7 +644,8 @@ def measure(args) -> dict:
                 advection_content_t, advection_content_s)))
 
     def pair_capture(*values, **kwargs):
-        nonlocal capture_fct_split, capture_fct_walk, fct_walk_trace_index
+        nonlocal capture_fct_split, capture_fct_walk, capture_live_inputs
+        nonlocal fct_walk_trace_index, live_input_trace_index
         call_kwargs = kwargs
         if kwargs.get("return_final_content", False):
             resume = _replace_kmm_resume(
@@ -538,12 +666,17 @@ def measure(args) -> dict:
         capture_fct_walk = bool(
             args.round112_fct_walk
             and kwargs.get("return_final_content", False))
+        capture_live_inputs = bool(
+            args.round113_live_inputs
+            and kwargs.get("return_final_content", False))
         fct_walk_trace_index = 0
+        live_input_trace_index = 0
         try:
             result = real_pair(*values, **call_kwargs)
         finally:
             capture_fct_split = prior_capture
             capture_fct_walk = False
+            capture_live_inputs = False
         if kwargs.get("return_final_content", False):
             source_t, source_s = kwargs["stage_source_rates"][2]
             jax.debug.callback(
@@ -560,8 +693,12 @@ def measure(args) -> dict:
         fct_walk_calls.append(tuple(
             np.asarray(value, dtype=np.float64) for value in values))
 
+    def live_input_sink(*values):
+        live_input_calls.append(tuple(
+            np.asarray(value, dtype=np.float64) for value in values))
+
     def fct_capture(*values, **kwargs):
-        nonlocal fct_walk_trace_index
+        nonlocal fct_walk_trace_index, live_input_trace_index
         if capture_fct_walk:
             require(round112_values is not None,
                     "round-112 FCT values were not loaded")
@@ -571,6 +708,29 @@ def measure(args) -> dict:
                 jax.debug.callback(
                     fct_walk_sink, *walk_rows, ordered=True)
             fct_walk_trace_index += 1
+        if capture_live_inputs:
+            require(round112_bundle is not None,
+                    "round-113 FCT values were not loaded")
+            require(live_input_trace_index < 2,
+                    "round-113 observed more than the T/S FCT calls")
+            tracer = TRACERS[live_input_trace_index]
+            call_values, call_kwargs = _round113_patch_inputs(
+                values, kwargs, round112_bundle, tracer,
+                active_live_input_family)
+            result = real_fct(
+                *call_values, return_nemo_split=True, **call_kwargs)
+            div_h, div_w, split = result
+            low_h, low_w, _, _ = split
+            h_kmm = call_values[4]
+            upstream_rhs = nemo_source_round(
+                -nemo_source_round(low_h + low_w)
+                / jnp.maximum(h_kmm, jnp.asarray(1.0e-10, h_kmm.dtype)))
+            input_values = _round113_input_tuple(
+                call_values, call_kwargs, tracer=tracer)
+            jax.debug.callback(
+                live_input_sink, *input_values, upstream_rhs, ordered=True)
+            live_input_trace_index += 1
+            return div_h, div_w
         if not capture_fct_split:
             return real_fct(*values, **kwargs)
         result = real_fct(*values, return_nemo_split=True, **kwargs)
@@ -1009,6 +1169,153 @@ def measure(args) -> dict:
                 "traadv_fct.f90:508-510 horizontal first-upwind faces"
                 if first_nonbit == "horizontal_first_faces" else first_nonbit),
             "modes": mode_rows,
+            "observations": observations,
+            "plant_propagation": plant_propagation,
+            "criteria": criteria,
+        }
+
+    round113_matrix = {}
+    if args.round113_live_inputs:
+        require(round112_bundle is not None,
+                "round-113 record was not prepared")
+        jax.effects_barrier()
+        jit_observation = _round113_collapse_calls(
+            live_input_calls, "production-step JIT")
+        jit_rows = _round113_score_inputs(jit_observation, round112_bundle)
+
+        families = (
+            ("base", ("base",)),
+            ("transport", ("transport_u", "transport_v", "transport_w")),
+            ("thickness", ("h_kbb", "h_kmm")),
+            ("mask", ("tmask", "wmask")),
+            ("metric", ("r1_area",)),
+            ("p2dt", ("p2dt",)),
+        )
+        first_nonbit_family = None
+        for family, names in families:
+            if any(jit_rows[tracer][name]["cells_unequal"] > 0
+                   for tracer in TRACERS for name in names):
+                first_nonbit_family = family
+                break
+
+        eager_rows = {}
+        if not args.plant_live_input_ulp:
+            live_input_calls.clear()
+            active_live_input_family = None
+            model_module._nemo_ws_rk3_tracer_pair_step = pair_capture
+            advection_module.fct_tracer_advection = fct_capture
+            try:
+                with jax.disable_jit():
+                    eager_state = model._step_impl(
+                        seeded, dt, freshwater=freshwater,
+                        surface_forcing=surface)
+                    jax.device_get(eager_state)
+                jax.effects_barrier()
+            finally:
+                model_module._nemo_ws_rk3_tracer_pair_step = real_pair
+                advection_module.fct_tracer_advection = real_fct
+            eager_observation = _round113_collapse_calls(
+                live_input_calls, "production eager")
+            eager_rows = _round113_score_inputs(
+                eager_observation, round112_bundle)
+
+        substitutable = {"base", "transport", "thickness", "mask", "p2dt"}
+        require(first_nonbit_family in substitutable,
+                "first non-bit live family is absent or not substitutable: "
+                f"{first_nonbit_family!r}")
+        live_input_calls.clear()
+        active_live_input_family = first_nonbit_family
+        model_module._nemo_ws_rk3_tracer_pair_step = pair_capture
+        advection_module.fct_tracer_advection = fct_capture
+        try:
+            arm_state = jax.device_get(type(model)(
+                model.grid, model.z_coord, model.config).step(
+                    seeded, dt, freshwater=freshwater,
+                    surface_forcing=surface))
+            jax.effects_barrier()
+        finally:
+            active_live_input_family = None
+            model_module._nemo_ws_rk3_tracer_pair_step = real_pair
+            advection_module.fct_tracer_advection = real_fct
+        arm_observation = _round113_collapse_calls(
+            live_input_calls, f"{first_nonbit_family} production-JIT arm")
+        arm_rows = _round113_score_inputs(arm_observation, round112_bundle)
+
+        entry3 = gate.read_entry(
+            args.entry_root / "oracle_step_entry_kt00000003.bin")
+        kt3_rows = {"baseline": {}, first_nonbit_family: {}}
+        for tracer in TRACERS:
+            wet = reciprocal_calls[TRACERS.index(tracer)]["wet"]
+            baseline_field = np.asarray(
+                gate.lego_fields(baseline_state)[tracer], dtype=np.float64)
+            arm_field = np.asarray(
+                gate.lego_fields(arm_state)[tracer], dtype=np.float64)
+            target = entry3[tracer][..., :baseline_field.shape[-1]]
+            kt3_rows["baseline"][tracer] = round54.field_stats(
+                baseline_field, target, wet)
+            kt3_rows[first_nonbit_family][tracer] = round54.field_stats(
+                arm_field, target, wet)
+
+        observations = {
+            "production_step_jit": {
+                "transport_u_sha256": _array_sha256(jit_observation[0][1]),
+                "adv_up1_T_sha256": _array_sha256(jit_observation[0][-1]),
+            },
+            "substitution_arm": {
+                "transport_u_sha256": _array_sha256(arm_observation[0][1]),
+                "adv_up1_T_sha256": _array_sha256(arm_observation[0][-1]),
+            },
+        }
+        plant_fired = False
+        plant_propagation = {}
+        if args.plant_live_input_ulp:
+            frozen = json.loads(args.live_input_report.read_text())[
+                "round113_live_inputs"]
+            plant_propagation = {
+                key: bool(observations["substitution_arm"][key]
+                          != frozen["observations"]["substitution_arm"][key])
+                for key in ("transport_u_sha256", "adv_up1_T_sha256")
+            }
+            plant_fired = all(plant_propagation.values())
+            require(plant_fired,
+                    "round-113 production-JIT one-ULP input plant was inert")
+
+        baseline_adv = jit_rows["T"]["adv_up1"]["max_abs"]
+        arm_adv = arm_rows["T"]["adv_up1"]["max_abs"]
+        criteria = {
+            "predicted_base_bit": {
+                tracer: jit_rows[tracer]["base"]["cells_unequal"] == 0
+                for tracer in TRACERS
+            },
+            "predicted_first_nonbit_transport": (
+                first_nonbit_family == "transport"),
+            "transport_improves_adv_up1_T_twofold": bool(
+                first_nonbit_family == "transport"
+                and arm_adv * 2.0 <= baseline_adv),
+            "both_adv_up1_rows_bit": all(
+                arm_rows[tracer]["adv_up1"]["cells_unequal"] == 0
+                for tracer in TRACERS),
+            "kt3_T_improves_ten_percent": bool(
+                kt3_rows[first_nonbit_family]["T"]["max_abs"]
+                <= 0.9 * kt3_rows["baseline"]["T"]["max_abs"]),
+        }
+        round113_matrix = {
+            "status": "PLANT-FIRED" if plant_fired else "MEASURED",
+            "plant_ulp": bool(args.plant_live_input_ulp),
+            "record_sha256": round112_bundle["sha256"],
+            "plant_target": round112_bundle["plant_row"],
+            "first_nonbit_family": first_nonbit_family,
+            "modes": {
+                "production_step_jit": jit_rows,
+                "production_eager": eager_rows,
+            },
+            "substitution_arm": {
+                "family": first_nonbit_family,
+                "rows": arm_rows,
+                "kt3": kt3_rows,
+                "state_vs_baseline": pytree_exact_census(
+                    arm_state, baseline_state),
+            },
             "observations": observations,
             "plant_propagation": plant_propagation,
             "criteria": criteria,
@@ -1685,9 +1992,13 @@ def measure(args) -> dict:
         status = round111_matrix["status"]
     if args.round112_fct_walk:
         status = round112_matrix["status"]
+    if args.round113_live_inputs:
+        status = round113_matrix["status"]
 
     return {
         "format": (
+            "nemo-testcase-l2-gyre-round113-live-inputs-v1"
+            if args.round113_live_inputs else
             "nemo-testcase-l2-gyre-round112-fct-walk-v1"
             if args.round112_fct_walk else
             "nemo-testcase-l2-gyre-round111-fct-split-v1"
@@ -1728,6 +2039,7 @@ def measure(args) -> dict:
         "round71_kmm_matrix": kmm_matrix,
         "round111_fct_split": round111_matrix,
         "round112_fct_walk": round112_matrix,
+        "round113_live_inputs": round113_matrix,
         "criteria": {
             "content_within_floor_plus_association": content_criterion,
             "kt3_exact_pre_edit_prediction": prediction_match,
@@ -1771,6 +2083,11 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--fct-walk-report", type=Path,
         default=ROOT / "round112/fct_walk_before.json")
+    parser.add_argument("--round113-live-inputs", action="store_true")
+    parser.add_argument("--plant-live-input-ulp", action="store_true")
+    parser.add_argument(
+        "--live-input-report", type=Path,
+        default=ROOT / "round113/live_inputs.json")
     parser.add_argument(
         "--prediction-report", type=Path,
         default=ROOT / "round67/round67_ldf_order_before.json")
@@ -1803,7 +2120,21 @@ def main(argv=None) -> int:
     except Exception as error:
         print(f"GATE FAILED: {error}", file=sys.stderr)
         return 1
-    if args.round112_fct_walk:
+    if args.round113_live_inputs:
+        matrix = report["round113_live_inputs"]
+        row = matrix["modes"]["production_step_jit"]["T"]
+        arm = matrix["substitution_arm"]["rows"]["T"]["adv_up1"]
+        prefix = (
+            "STATUS PLANT-FIRED" if report["status"] == "PLANT-FIRED"
+            else f"ROUND113 LIVE INPUTS {report['status']}")
+        print(
+            f"{prefix}: first={matrix['first_nonbit_family']} "
+            f"base={row['base']['cells_unequal']}/"
+            f"{row['base']['max_abs']:.12e} "
+            f"u={row['transport_u']['cells_unequal']}/"
+            f"{row['transport_u']['max_abs']:.12e} "
+            f"adv_arm={arm['cells_unequal']}/{arm['max_abs']:.12e}")
+    elif args.round112_fct_walk:
         matrix = report["round112_fct_walk"]
         row = matrix["modes"]["production_step_jit"]["current"]["T"]
         prefix = (

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -297,3 +298,60 @@ def test_round112_duplicate_callback_guard_rejects_distinct_execution():
         RuntimeError, "distinct duplicate executions"
     ):
         module._round112_collapse([ordinary, planted], "synthetic")
+
+
+def test_round113_live_input_materialization_and_transport_substitution():
+    module = _module()
+    tracer = module.jnp.ones((2, 3, 2), dtype=module.jnp.float64)
+    grid = SimpleNamespace(
+        dy_u=module.jnp.full((2, 4), 2.0),
+        dx_v=module.jnp.full((3, 3), 3.0),
+        area_T=module.jnp.full((2, 3), 5.0),
+    )
+    values = (
+        tracer,
+        module.jnp.ones((2, 4, 2)),
+        module.jnp.ones((3, 3, 2)),
+        module.jnp.ones((2, 3, 3)),
+        module.jnp.full_like(tracer, 7.0), grid, 11.0,
+    )
+    kwargs = {
+        "tracer_before": module.jnp.full_like(tracer, 13.0),
+        "active_mask": module.jnp.ones_like(tracer),
+        "base_thickness": module.jnp.full_like(tracer, 17.0),
+    }
+    materialized = module._round113_input_tuple(
+        values, kwargs, tracer="T")
+    np.testing.assert_array_equal(materialized[1], 2.0)
+    np.testing.assert_array_equal(materialized[2], 3.0)
+    np.testing.assert_array_equal(materialized[3], 5.0)
+    np.testing.assert_array_equal(materialized[8], 0.2)
+
+    bundle = {
+        "p_u": np.full((2, 4, 2), 19.0),
+        "p_v": np.full((3, 3, 2), 23.0),
+        "p_w": np.full((2, 3, 3), 29.0),
+    }
+    patched, same_kwargs = module._round113_patch_inputs(
+        values, kwargs, bundle, "T", "transport")
+    np.testing.assert_array_equal(np.asarray(patched[1]) * 2.0, 19.0)
+    np.testing.assert_array_equal(np.asarray(patched[2]) * 3.0, 23.0)
+    np.testing.assert_array_equal(np.asarray(patched[3]) * 5.0, 29.0)
+    assert same_kwargs["tracer_before"] is kwargs["tracer_before"]
+
+
+def test_round113_pair_callback_guard_fires_on_one_ulp():
+    module = _module()
+    row = tuple(np.array([float(index + 1)]) for index in range(11))
+    calls = [row, row, row, row]
+    collapsed = module._round113_collapse_calls(calls, "synthetic")
+    assert all(np.array_equal(value, expected)
+               for pair in collapsed for value, expected
+               in zip(pair, row, strict=True))
+    planted = list(row)
+    planted[1] = np.nextafter(planted[1], np.inf)
+    with np.testing.assert_raises_regex(
+        RuntimeError, "distinct duplicate executions"
+    ):
+        module._round113_collapse_calls(
+            [row, row, tuple(planted), row], "synthetic")
