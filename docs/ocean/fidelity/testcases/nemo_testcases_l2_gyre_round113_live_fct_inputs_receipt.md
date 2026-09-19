@@ -208,7 +208,8 @@ was applied.
 ## OPEN for round 114
 
 1. Stay at the first non-bit producer statements, compiled
-   `stprk3_stg.f90:295-296`.  Split the transport family in producer order (U,
+   `GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:295-296`.
+   Split the transport family in producer order (U,
    then V, then W) through the production-jitted step so its kt3 magnitude is
    not inferred from a bundled triplet.
 2. For U, score the statement's factors in written order: e2u, Kmm e3u/r3u
