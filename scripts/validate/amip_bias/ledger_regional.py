@@ -77,6 +77,91 @@ def _report(run, sftlf_run=None):
           "(after IFS downdraft + sub-cloud evaporation).")
 
 
+def profile(run, sftlf_run=None, dlat=5.0, out=None):
+    """Latitude profile of the ledger rows, plus the implied meridional flux.
+
+    Bands hide WHERE a transport deficit sits: a Hadley cell that is too narrow
+    and a storm track whose eddies are too weak both show up as "the
+    extratropics import too little".  The zero crossings of the transport
+    profile separate them, and its cumulative integral from the pole is the
+    net meridional water flux, which is the quantity a reanalysis publishes
+    directly.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    rundir = f"{rb.ROOT}/{run}"
+    exp = json.load(open(f"{rundir}/experiment_config.json"))
+    lat, _lon, area = mesh_coords(exp)
+    d = np.load(f"{rundir}/budget_ledger_columns.npz", allow_pickle=True)
+    rates = np.asarray(d["ledger_rates"])[:, :, 0] * SEC_PER_DAY
+    procs = [str(p) for p in d["processes"]]
+
+    edges = np.arange(-90.0, 90.0 + dlat, dlat)
+    mid = 0.5 * (edges[:-1] + edges[1:])
+    keep = ("turbulence", "convection", "microphysics", "dynamics")
+    prof = {k: np.full(mid.size, np.nan) for k in keep}
+    wsum = np.zeros(mid.size)
+    for i in range(mid.size):
+        m = (lat >= edges[i]) & (lat < edges[i + 1])
+        w = area * m
+        wsum[i] = w.sum()
+        if wsum[i] <= 0:
+            continue
+        for k in keep:
+            prof[k][i] = float((rates[:, procs.index(k)] * w).sum() / wsum[i])
+    if not np.all(np.isfinite(prof["dynamics"])):
+        raise SystemExit("FATAL: empty latitude bin -- widen dlat")
+
+    # Net northward flux across each edge [kg/m/s-equivalent, reported as the
+    # cumulative column source from the south pole]: a band that gains water
+    # must be fed across its southern edge by everything south of it.
+    flux = np.cumsum(prof["dynamics"] * wsum)
+
+    # Reference transport: the convergence implied by observed precipitation
+    # minus observed evaporation, on the SAME latitude bins.  Its zero
+    # crossings are where the real circulation turns over, so a model whose
+    # crossings sit equatorward of these has a too-narrow overturning rather
+    # than weak eddies.
+    import water_budget_bands as wbb
+    ff = wbb._flux_fields(run)
+    pm, pr_, mlat, _mlon = ff["pr"]
+    _em, er, _elat, _elon = ff["evspsbl"]
+    obs = np.full(mid.size, np.nan)
+    for i in range(mid.size):
+        band = (mlat >= edges[i]) & (mlat < edges[i + 1])
+        if not band.any():
+            continue
+        w = np.cos(np.deg2rad(mlat[band]))[:, None] * np.ones((1, pr_.shape[1]))
+        obs[i] = float(((pr_ - er)[band] * w).sum() / w.sum()) * SEC_PER_DAY
+
+    fig, ax = plt.subplots(1, 2, figsize=(12, 4.4))
+    for k in keep:
+        ax[0].plot(mid, prof[k], label=k)
+    ax[0].plot(mid, obs, "k--", lw=2, label="observed transport")
+    ax[0].axhline(0, color="k", lw=0.6)
+    ax[0].set_xlabel("latitude")
+    ax[0].set_ylabel("kg/m2/day")
+    ax[0].set_title(f"{run}: ledger rows by latitude")
+    ax[0].legend(fontsize=8)
+    ax[0].grid(alpha=0.3)
+    ax[1].plot(mid, flux / 1e12)
+    ax[1].axhline(0, color="k", lw=0.6)
+    ax[1].set_xlabel("latitude")
+    ax[1].set_ylabel("cumulative transport [1e12 kg/day]")
+    ax[1].set_title("implied northward water flux")
+    ax[1].grid(alpha=0.3)
+    fig.tight_layout()
+    out = out or f"ledger_profile_{run}.png"
+    fig.savefig(out, dpi=130)
+    print(f"wrote {out}")
+    print(f"{'lat':>6}" + "".join(f"{k[:9]:>11}" for k in keep))
+    for i in range(mid.size):
+        if abs(mid[i]) <= 70:
+            print(f"{mid[i]:6.1f}" + "".join(f"{prof[k][i]:11.3f}" for k in keep))
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         raise SystemExit(__doc__)
@@ -86,5 +171,11 @@ if __name__ == "__main__":
         i = argv.index("--sftlf-from")
         src = argv[i + 1]
         argv = argv[:i] + argv[i + 2:]
+    prof = "--profile" in argv
+    argv = [a for a in argv if a != "--profile"]
     for r in argv:
-        _report(r, sftlf_run=src)
+        if prof:
+            profile(r, sftlf_run=src,
+                    out=f"{rb.ROOT}/ledger_profile_{r}.png")
+        else:
+            _report(r, sftlf_run=src)
