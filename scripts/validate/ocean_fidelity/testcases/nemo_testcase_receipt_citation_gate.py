@@ -199,6 +199,12 @@ FILES = {
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/domhgr.f90"),
     "GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90": (
         NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90"),
+    # Round 118 binds its recovered record and producer walk to the exact
+    # compiled Round-117 build that wrote the admitted bytes.
+    "GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/stp2d.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/stp2d.f90"),
+    "GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynspg_ts.f90": (
+        NEMO / "cfgs/GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynspg_ts.f90"),
     # Round 92 binds the operand diagnosis to the exact acquired Round-90
     # compiled card, including its write-only recorder.
     "GYRE_OMIP_L2_P3_SM_R90BARO/BLD/ppsrc/nemo/stprk3_stg.f90": (
@@ -2425,6 +2431,22 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:797-804': [
         '! Finalize sums:',
         'pssh   (:,:,Kaa) = pssh   (:,:,Kaa) / r1_wgt1s', 8],
+    # --- round 118: recovered direct producer record and complete source walk ---
+    'GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/stp2d.f90:144-179': [
+        'CALL dyn_hpg( kt, Kbb     , uu, vv, Krhs )',
+        "CALL r46_rhs( 'after_adv', uu, vv, Krhs )", 36],
+    'GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/stp2d.f90:220-232': [
+        'CASE( np_VEC_c2, np_LIN_dyn )',
+        'Ve_rhs(ji,jj) = Ve_rhs(ji,jj) + SUM(', 13],
+    'GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/stp2d.f90:245-260': [
+        'CALL dyn_drg_init( Kbb, Kbb, uu, vv, uu_b, vv_b, Ue_rhs, Ve_rhs, CdU_u, CdU_v )',
+        'Ve_rhs(ji,jj) =  Ve_rhs(ji,jj) + r1_rho0 * vtauV(ji,jj)', 16],
+    'GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynspg_ts.f90:290-345': [
+        'ssh_frc(:,:) = sshe_rhs(:,:)',
+        "WRITE(numout,*) 'ROUND117_PRELOOP_FORCING_DUMP '", 56],
+    'GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynspg_ts.f90:319-345': [
+        'WRITE(l2_r117_unit) puu_b(:,:,Kmm), pvv_b(:,:,Kmm), zu_frc, zv_frc',
+        "WRITE(numout,*) 'ROUND117_PRELOOP_FORCING_DUMP '", 27],
     'GYRE_OMIP_L2_P3_SM_R75ADV3/BLD/ppsrc/nemo/stprk3_stg.f90:278-324': [
         ('ALLOCATE( zub(', 1),
         ('DEALLOCATE( zub, zvb )', 1), 47],

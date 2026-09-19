@@ -20,6 +20,34 @@ record**
 Evidence root:
 `/data/abyssal/dbalwada/nemo-testcases-l2/phase3/round117/`
 
+## Round 118 acquisition correction — RETRACTION
+
+Round 117's `127,408`-byte pre-loop contract and its description as fourteen
+full-domain plus four owned-domain arrays are **RETRACTED**.  Reading the
+record build's compiled writer shows six full `36x26` arrays (`puu_b`,
+`pvv_b`, the two masks, and `cor_u`/`cor_v`) and twelve owned `32x22` arrays
+(incoming U/V, eight ENE coefficients, and final U/V), not the reverse.  The
+write and the subsequently executed Coriolis/subtract statements are at
+`GYRE_OMIP_L2_P3_SM_R117PRELOOP/BLD/ppsrc/nemo/dynspg_ts.f90:319-345`.
+Including the 48-byte header, the physical record is therefore exactly
+`112,560` bytes.  All 18 intended fields are present; this was a reader and
+shell-arithmetic defect, not a short NEMO write.
+
+The operator's existing record was recovered without rebuilding or rerunning
+NEMO.  The no-build admission path verified the original source manifest,
+producer-time repository tools, external toolchain inputs, built and copied
+executable SHA-256 (`b5c750863e71af3c23e958794ecb24dfce3c36faa57ba6247026e081b7cc497e`),
+ten-step `STOP 0`, and producer commit
+`c8f5d513df453f3f12a3d5eb05b05be8c8d3a2fd`; only then did it write the
+missing record stamps and admission report.  The admitted pre-loop record is
+`112,560` bytes with SHA-256
+`259fcbb042ce0aa7a28f7db75b746ca56dce2ea2a62e960a6a265f58f691c176`,
+header `(1,2,3,36,26,64,18,704)`, and physical EOF.  All six duplicate and
+subtract rows are BIT, and the inherited consumed-field census passes with 46
+exact, 20 intentionally changed, and 132 admitted fields.  Stamp, truncation,
+header, layout, input-ULP, reference-ULP, byte-size, compiled-layout and
+consumed-field plants each print a named failure and exit nonzero.
+
 ## Outcome first
 
 The complete production-JIT walk reaches the first directly recorded non-bit
@@ -197,12 +225,13 @@ around the compiled copy/call/subtract sequence at
 `GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/dynspg_ts.f90:286-291` and
 `:298-321`.
 
-The mixed byte layout is explicit rather than guessed:
+The corrected mixed byte layout is explicit from the compiled writer (the
+original preflight arithmetic below is retained as retracted evidence):
 
 | record | exact bytes | payload contract |
 |---|---:|---|
 | `oracle_slow_forcing_kt00000002.bin` | 1,486,548 | admitted `NEMO_L2_SLOW_2` schema |
-| `oracle_preloop_forcing_kt00000002.bin` | 127,408 | 14 full 36x26 arrays plus four owned 32x22 arrays; header also writes `SIZE(zu_frc)=704` |
+| `oracle_preloop_forcing_kt00000002.bin` | 112,560 | six full 36x26 arrays plus twelve owned 32x22 arrays; header also writes `SIZE(zu_frc)=704` |
 
 The new gate parses physical EOF, requires both exact sizes and headers,
 requires kt2 slow post-wind to equal pre-loop incoming BIT, replays the written
@@ -220,6 +249,11 @@ ROUND117_SYNTAX_PASS stp2d.f90 dynspg_ts.f90
 ROUND117_LAYOUT slow=1486548 preloop=127408 full2=936 owned2=704
 ROUND117_PREFLIGHT_READY commit=84d858b33a07917013da41e604dd43607bc0faeb target=GYRE_OMIP_L2_P3_SM_R117PRELOOP
 ```
+
+The `preloop=127408` line in that historical preflight is the now-retracted
+arithmetic defect.  The recovered committed tool prints
+`ROUND117_LAYOUT slow=1486548 preloop=112560 full2=936 owned2=704` and ends in
+`ROUND117_PRELOOP_RECORDS_READY`.
 
 The log SHA-256 is
 `49cb604fe43096f1e07ae366a0874cf3ea736337ef739a0b1e12a4d6744d3300`.
