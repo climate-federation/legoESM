@@ -1112,12 +1112,12 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R64KRHS/BLD/ppsrc/nemo/zdftke.f90:430': (
         '+ zfact3 * dissl(ji,jj,jk) * en(ji,jj,jk)', 1),
     # --- round 112: admitted R111 metric-FCT compiled-order walk ---
-    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90:167-178': [
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90:167-176': [
         'DO jn = 1, kjpt',
-        'CALL fct_up1_2stp( Kbb, Kmm, Kaa', 12],
-    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90:502-534': [
+        'CALL fct_up1_2stp( Kbb, Kmm, Kaa', 10],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90:503-533': [
         'zDt = 0.5_wp * pDt',
-        'CALL r111_first_flux( ptFu, ptFv, ptFw )', 33],
+        'CALL r111_first_flux( ptFu, ptFv, ptFw )', 31],
     'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90:536-549': [
         '! -- middle time step tracer with upstream scheme',
         'CALL r111_midpoint( zr111, pt_up1 )', 14],
@@ -1125,17 +1125,17 @@ CITATION_MAP = {
         '! *** 2nd step',
         'CALL r111_average_flux( ptFu, ptFv, ptFw )', 37],
     'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90:611-623': [
-        ('DO jk =  1,  jpkm1  ; DO jj = ntsj-(  0)', 2),
+        ('DO jk =  1,  jpkm1  ; DO jj = ntsj-(  0)', 9),
         'CALL r111_upstream( zr111, pt_rhs )', 13],
-    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90:320-335': [
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90:322-333': [
         'CALL nonosc( Kaa, pt(:,:,:,jn,Kbb)',
-        'pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) + ztra', 16],
-    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:294-297': [
+        'pt(ji,jj,jk,jn,Krhs) = pt(ji,jj,jk,jn,Krhs) + ztra', 12],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:295-296': [
         'zFu(ji,jj,jk) = e2u(ji,jj)',
-        'END DO   ;   END DO   ;   END DO', 4],
-    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:326-347': [
+        'zFv(ji,jj,jk) = e1v(ji,jj)', 2],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:326-346': [
         '!              !- vertical velocity and transport (ww,wi,zFw) -!',
-        'zFw(ji,jj,jk) = e1e2t(ji,jj) * ww(ji,jj,jk)', 22],
+        'zFw(ji,jj,jk) = e1e2t(ji,jj) * ww(ji,jj,jk)', 21],
     'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:860': (
         'CALL tra_adv    ( kstp, Kbb, Kmm, Kaa, ts, Krhs', 1),
     # --- round 64: R46/R63 compiled-delta and run-horizon audit ---

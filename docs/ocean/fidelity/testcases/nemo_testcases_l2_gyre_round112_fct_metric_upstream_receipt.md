@@ -105,18 +105,18 @@ two oracle outputs.
 
 The record's compiled active branch loops over tracers and calls the two-step
 FCT upstream routine at
-`GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90:167-178`.
+`GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90:167-176`.
 The stage program constructs the horizontal metric-bearing transports at
-`GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:294-297`,
+`GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:295-296`,
 constructs the vertical transport at
-`GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:326-347`, and
+`GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:326-346`, and
 passes all three to tracer advection at
 `GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:860`.
 
 Within the called routine, the first horizontal statements multiply those
 already rounded transports directly by the selected upstream tracer; the
 vertical face follows.  These are the first non-bit statements at
-`GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90:502-534`.
+`GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90:503-533`.
 NEMO then differences the faces and forms the midpoint concentration at
 `GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90:536-549`, forms
 the second-step arithmetic-average faces at
@@ -124,7 +124,7 @@ the second-step arithmetic-average faces at
 differences/divides/adds them to the live RHS at
 `GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90:611-623`.
 The downstream limiter and anti-diffusive add are at
-`GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90:320-335`; they
+`GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/traadv_fct.f90:322-333`; they
 were not changed because the source-exact upstream candidate failed the
 trajectory criterion first.
 
