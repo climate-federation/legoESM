@@ -1193,6 +1193,12 @@ CITATION_MAP = {
     'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stp2d.f90:301-308': [
         '!             Compute ssh and (uu_b,vv_b)  at N+1  (Kaa)',
         'CALL dyn_spg_ts( kt, Kbb, Kbb, Krhs, uu, vv, ssh, uu_b, vv_b, Kaa )', 8],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stp2d.f90:202-207': [
+        '!*  vertical averaging  *!',
+        'Ve_rhs(ji,jj) = SUM( e3v_3d', 6],
+    'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stp2d.f90:225-239': [
+        '!* baroclinic drag forcing *!',
+        'CLOSE(l2_slow_unit)', 15],
     'GYRE_OMIP_L2_P3_SM_R111FCTW/BLD/ppsrc/nemo/stprk3_stg.f90:326-346': [
         '!              !- vertical velocity and transport (ww,wi,zFw) -!',
         'zFw(ji,jj,jk) = e1e2t(ji,jj) * ww(ji,jj,jk)', 21],
