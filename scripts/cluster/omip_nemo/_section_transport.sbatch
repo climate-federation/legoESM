@@ -66,6 +66,18 @@ for f in "$SNAP" "$GU" "$GV" "$MESH"; do
 done
 echo "=== day $DAY, GATEWAY record $REC (0-based) = days $((DAY-5))-$DAY ==="
 echo "=== snapshot $SNAP ==="
+# Which day is in that file, from the file itself? A leg's snapshot_final.npz
+# carries the leg's end state, and pairing it with the wrong NEMO record is
+# the exact mistake that once read a day-90 oracle against a day-30 run. The
+# step count and the timestep say it outright, so print them and let the
+# reader check rather than trusting the filename.
+$PY -c "
+import sys, numpy as np
+z = np.load(sys.argv[1], allow_pickle=True)
+keys = [k for k in z.files if k.lower() in ('_step', 'step', 'n_steps', 'day', 'time', 'dt')]
+print('[stamp] ' + ('; '.join(f'{k}={np.asarray(z[k]).ravel()[0]}' for k in keys)
+                    if keys else 'no step/day key in this snapshot'))
+" "$SNAP"
 
 $PY -u scripts/validate/ocean_fidelity/section_transport_vs_nemo.py \
   --snapshot "$SNAP" --nemo-gridu "$GU" --nemo-gridv "$GV" \
