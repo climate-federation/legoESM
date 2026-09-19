@@ -160,13 +160,24 @@ def _helmholtz_apply_mpas(
     w.r.t. the operator parameters (``θ̄ = -(∂_θ A(θ)·x)ᵀ·λ``) via
     ``jax.vjp`` without closure-capturing tracers (scan-lowering safe;
     mirrors ``barotropic_implicit_latlon_cgrid._helmholtz_apply``).
+
+    ``fill_land_cells_mpas`` is deliberately NOT applied here, and its
+    absence is value-preserving rather than a behaviour change.
+    ``gradient_edge`` is the two-cell stencil
+    ``grad(e) = (phi[c2(e)] - phi[c1(e)]) / dcEdge`` and
+    ``edge_mask = mask[c1]*mask[c2]`` is zero on every edge with a land
+    endpoint; the fill only alters land cells, so any edge whose gradient
+    could see an altered value carries zero flux. The filled field cannot
+    reach the output. It was removed because this operator is the inner
+    matvec of the barotropic PCG — 60 applications per step — and the fill
+    costs several scatter-add passes in each one, which measured as dead
+    work in the lane's strong-scaling plateau. The routine is still used
+    where its output IS consumed: ``init_mpas``, ``ocean_pe_mpas``, and the
+    eta_old/eta_new fills elsewhere in this file.
     """
-    c1 = mesh.cellsOnEdge[0]
-    c2 = mesh.cellsOnEdge[1]
     H_e_face = H_e * edge_mask
     eta_m = eta_in * mask
-    eta_filled = fill_land_cells_mpas(eta_m, mask, c1, c2)
-    grad = gradient_edge(eta_filled, mesh)
+    grad = gradient_edge(eta_m, mesh)
     flux = H_e_face * grad
     div_grad = divergence_cell(flux, mesh) * mask
     return (eta_m - coeff * div_grad) * mask
