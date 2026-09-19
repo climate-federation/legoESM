@@ -574,19 +574,21 @@ def measure_round117(args) -> dict[str, object]:
     }
     oracle_split = {
         "u": {
-            "coriolis": np.asarray(external["cor_u"][0], dtype=np.float64),
+            "substep1_coriolis_proxy": np.asarray(
+                external["cor_u"][0], dtype=np.float64),
             "final": np.asarray(external["slow_u"][0], dtype=np.float64),
         },
         "v": {
-            "coriolis": np.asarray(external["cor_v"][0], dtype=np.float64),
+            "substep1_coriolis_proxy": np.asarray(
+                external["cor_v"][0], dtype=np.float64),
             "final": np.asarray(external["slow_v"][0], dtype=np.float64),
         },
     }
     for face in ("u", "v"):
         mask = active[f"{face}2"].astype(np.float64)
-        oracle_split[face]["incoming_preimage"] = (
+        oracle_split[face]["proxy_incoming_preimage"] = (
             oracle_split[face]["final"]
-            + oracle_split[face]["coriolis"] * mask)
+            + oracle_split[face]["substep1_coriolis_proxy"] * mask)
 
     actual_external_final = {
         "u": gate._trace_native(
@@ -613,13 +615,14 @@ def measure_round117(args) -> dict[str, object]:
     ))
     split_rows = {
         face: {
-            "incoming_vs_reconstructed_preimage": comparison(
+            "incoming_vs_substep_proxy_preimage": comparison(
                 live_split[face]["incoming"],
-                oracle_split[face]["incoming_preimage"],
+                oracle_split[face]["proxy_incoming_preimage"],
                 active[f"{face}2"]),
-            "coriolis_vs_direct_record": comparison(
+            "preloop_coriolis_vs_substep1_proxy": comparison(
                 live_split[face]["coriolis"],
-                oracle_split[face]["coriolis"], active[f"{face}2"]),
+                oracle_split[face]["substep1_coriolis_proxy"],
+                active[f"{face}2"]),
             "final_vs_direct_record": comparison(
                 live_split[face]["final"], oracle_split[face]["final"],
                 active[f"{face}2"]),
@@ -629,16 +632,22 @@ def measure_round117(args) -> dict[str, object]:
         }
         for face in ("u", "v")
     }
-    split_first = None
+    proxy_first = None
     for boundary in (
-        "incoming_vs_reconstructed_preimage",
-        "coriolis_vs_direct_record",
+        "incoming_vs_substep_proxy_preimage",
+        "preloop_coriolis_vs_substep1_proxy",
         "final_vs_direct_record",
     ):
         for face in ("u", "v"):
             row = split_rows[face][boundary]
-            if split_first is None and not row["bit_exact"]:
-                split_first = {"boundary": boundary, "face": face, **row}
+            if proxy_first is None and not row["bit_exact"]:
+                proxy_first = {"boundary": boundary, "face": face, **row}
+    direct_first = next((
+        {"boundary": "final_vs_direct_record", "face": face,
+         **split_rows[face]["final_vs_direct_record"]}
+        for face in ("u", "v")
+        if not split_rows[face]["final_vs_direct_record"]["bit_exact"]
+    ), None)
 
     if args.plant == "incoming-ulp":
         planted_native, location, direction = _round117_propagating_ulp(
@@ -753,7 +762,7 @@ def measure_round117(args) -> dict[str, object]:
                 owned3(stage_arrays["u_Kmm"]), mask3 != 0.0)
             barotropic = owned2(stage_arrays["uu_b_Kmm"])
             stress = native_u(producer["wind_tau_u"])
-            coriolis = oracle_split[face]["coriolis"]
+            coriolis = oracle_split[face]["substep1_coriolis_proxy"]
         else:
             e3 = owned3(stage_arrays["e3v_0"])
             mask3 = owned3(stage_arrays["vmask"])
@@ -766,7 +775,7 @@ def measure_round117(args) -> dict[str, object]:
                 owned3(stage_arrays["v_Kmm"]), mask3 != 0.0)
             barotropic = owned2(stage_arrays["vv_b_Kmm"])
             stress = native_v(producer["wind_tau_v"])
-            coriolis = oracle_split[face]["coriolis"]
+            coriolis = oracle_split[face]["substep1_coriolis_proxy"]
         chain = source_chain(
             rhs=owned3(stage_arrays[f"after_adv_{face}"]),
             e3=e3, mask3=mask3, reciprocal_ref=reciprocal_ref,
@@ -777,9 +786,9 @@ def measure_round117(args) -> dict[str, object]:
             mask2=active[f"{face}2"].astype(np.float64),
         )
         source_replay[face] = {
-            "post_wind_vs_reconstructed_incoming": comparison(
+            "post_wind_vs_substep_proxy_preimage": comparison(
                 chain["post_wind"],
-                oracle_split[face]["incoming_preimage"],
+                oracle_split[face]["proxy_incoming_preimage"],
                 active[f"{face}2"]),
             "forward_final_vs_direct_record": comparison(
                 chain["final"], oracle_split[face]["final"],
@@ -787,10 +796,7 @@ def measure_round117(args) -> dict[str, object]:
         }
 
     p1_confirmed = bool(
-        split_first is not None
-        and split_first["boundary"] == "incoming_vs_reconstructed_preimage"
-        and all(split_rows[face]["coriolis_vs_direct_record"]["bit_exact"]
-                for face in ("u", "v"))
+        False  # direct pre-loop Ue_rhs/Ve_rhs and zu_trd/zv_trd are absent
         and all(
             split_rows[face]["final_vs_direct_record"]["differing_cells"]
             == (580 if face == "u" else 570)
@@ -917,8 +923,8 @@ def measure_round117(args) -> dict[str, object]:
             "prediction_confirmed": magnitude_confirmed,
         }
 
-    input_certified = all(
-        source_replay[face]["post_wind_vs_reconstructed_incoming"]["bit_exact"]
+    input_certified = False and all(
+        source_replay[face]["post_wind_vs_substep_proxy_preimage"]["bit_exact"]
         and source_replay[face]["forward_final_vs_direct_record"]["bit_exact"]
         for face in ("u", "v"))
     prediction_confirmed = bool(
@@ -939,11 +945,17 @@ def measure_round117(args) -> dict[str, object]:
         "trace_noninterference": trace_identity,
         "trace_final_vs_actual_external_call": trace_final_identity,
         "producer_split": {
+            "record_limitation": (
+                "Round-81 cor_u/cor_v is the substep-1 dyn_cor_2D result at "
+                "compiled lines 683-686, not the pre-loop Kmm result at line "
+                "322; direct pre-loop incoming and Coriolis rows are absent"),
             "incoming_reference": (
-                "RECONSTRUCTED algebraic preimage; not a direct NEMO record"),
+                "PROXY algebraic preimage from final plus substep-1 Coriolis; "
+                "not a direct NEMO pre-loop field"),
             "source_order": ["incoming", "coriolis", "final"],
             "rows": split_rows,
-            "first_non_bit": split_first,
+            "first_proxy_non_bit": proxy_first,
+            "first_direct_non_bit": direct_first,
             "prediction_confirmed": p1_confirmed,
         },
         "isolated_subtract": {
@@ -1023,7 +1035,7 @@ def main(argv=None) -> int:
     if args.round117:
         print(
             "ROUND117 PRODUCER " + report["status"] + ": first="
-            + repr(report["producer_split"]["first_non_bit"])
+            + repr(report["producer_split"]["first_direct_non_bit"])
         )
         return 0 if report["status"] in ("CONFIRMED", "MEASURED") else 1
     print(f"ROUND83 SLOW FORCING {report['status']}: first={report['first_non_bit_statement']}")
