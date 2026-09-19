@@ -7,6 +7,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import jax
 import jax.numpy as jnp
@@ -130,25 +131,120 @@ def _execute_step(model, state, dt, freshwater, surface, execution_mode: str):
             model, state, dt, freshwater, surface)
 
 
-def _context(args, *, expose_live_stage_operands: bool = False,
-             stage_barotropic_output_override=None):
-    """Reuse the admitted kt=2 bridge, then execute one complete closure."""
+def _pytree_identity(left, right) -> dict:
+    """Bit census for every array leaf of two otherwise identical pytrees."""
+    left_leaves, left_tree = jax.tree_util.tree_flatten(left)
+    right_leaves, right_tree = jax.tree_util.tree_flatten(right)
+    require(left_tree == right_tree, "pytree structures differ")
+    require(len(left_leaves) == len(right_leaves), "pytree leaf counts differ")
+    unequal = 0
+    cells = 0
+    maximum = 0.0
+    for left_leaf, right_leaf in zip(left_leaves, right_leaves, strict=True):
+        left_array = np.asarray(left_leaf)
+        right_array = np.asarray(right_leaf)
+        require(left_array.shape == right_array.shape,
+                "pytree leaf extents differ")
+        require(left_array.dtype == right_array.dtype,
+                "pytree leaf dtypes differ")
+        left_bytes = np.ascontiguousarray(left_array).view(np.uint8).reshape(
+            left_array.size, left_array.dtype.itemsize)
+        right_bytes = np.ascontiguousarray(right_array).view(np.uint8).reshape(
+            right_array.size, right_array.dtype.itemsize)
+        unequal += int(np.count_nonzero(np.any(left_bytes != right_bytes, axis=1)))
+        cells += int(left_array.size)
+        if np.issubdtype(left_array.dtype, np.inexact) and left_array.size:
+            maximum = max(
+                maximum,
+                float(np.max(np.abs(
+                    left_array.astype(np.float64)
+                    - right_array.astype(np.float64)), initial=0.0)),
+            )
+    return {
+        "bit_exact": unequal == 0,
+        "differing_cells": unequal,
+        "cells": cells,
+        "leaf_count": len(left_leaves),
+        "absolute_max": maximum,
+    }
+
+
+def _context(args):
+    """Capture substeps inside the complete closure and prove non-interference."""
     base, context = round78.round72._capture_seeded_context(args)
     card, seeded, freshwater, surface, _ = context
-    hooks = model_module._NEMOWSRK3TestHooks(
-        expose_barotropic_substeps=not expose_live_stage_operands,
-        expose_live_stage_operands=expose_live_stage_operands,
-        stage_barotropic_output_override=stage_barotropic_output_override,
-    )
-    model = model_module.LatLonCGridOceanModel(
+    captures = []
+    real_barotropic = model_module.barotropic_substeps_latlon_cgrid
+
+    def sink(eta, uu_b, vv_b, hu_avg, hv_avg, tree, *leaves):
+        captures.append({
+            "eta": np.asarray(eta),
+            "uu_b": np.asarray(uu_b),
+            "vv_b": np.asarray(vv_b),
+            "Hu_avg": np.asarray(hu_avg),
+            "Hv_avg": np.asarray(hv_avg),
+            "substeps": jax.tree_util.tree_unflatten(
+                tree, [np.asarray(value) for value in leaves]),
+        })
+
+    def capture_barotropic(*values, **kwargs):
+        require(not kwargs.get("_nemo_substep_trace_test_hook", False),
+                "full-step capture received a second substep-trace request")
+        result = real_barotropic(
+            *values, **dict(kwargs, _nemo_substep_trace_test_hook=True))
+        state_after, (hu_avg, hv_avg), substeps = result
+        leaves, tree = jax.tree_util.tree_flatten(substeps)
+        jax.debug.callback(
+            lambda eta, uu_b, vv_b, hu, hv, *got: sink(
+                eta, uu_b, vv_b, hu, hv, tree, *got),
+            state_after.eta.data, state_after.uu_b.data,
+            state_after.vv_b.data, hu_avg, hv_avg, *leaves,
+            ordered=True,
+        )
+        return state_after, (hu_avg, hv_avg)
+
+    traced_model = model_module.LatLonCGridOceanModel(
         card.recipe.grid,
         card.recipe.z_coord,
         card.recipe.model_config,
-        _nemo_ws_test_hooks=hooks,
     )
-    model.prime_step_caches(seeded)
-    trace = jax.device_get(_execute_step(
-        model, seeded, card.dt_s, freshwater, surface, args.execution_mode))
+    traced_model.prime_step_caches(seeded)
+    model_module.barotropic_substeps_latlon_cgrid = capture_barotropic
+    jax.clear_caches()
+    try:
+        traced_state = jax.device_get(_execute_step(
+            traced_model, seeded, card.dt_s, freshwater, surface,
+            args.execution_mode))
+        jax.effects_barrier()
+    finally:
+        model_module.barotropic_substeps_latlon_cgrid = real_barotropic
+        jax.clear_caches()
+    require(captures, "full-step barotropic callback did not fire")
+    for duplicate in captures[1:]:
+        require(_pytree_identity(duplicate, captures[0])["bit_exact"],
+                "full-step barotropic callbacks differ")
+    plain_model = model_module.LatLonCGridOceanModel(
+        card.recipe.grid, card.recipe.z_coord, card.recipe.model_config)
+    plain_model.prime_step_caches(seeded)
+    plain_state = jax.device_get(_execute_step(
+        plain_model, seeded, card.dt_s, freshwater, surface,
+        args.execution_mode))
+    trace_identity = _pytree_identity(traced_state, plain_state)
+    require(trace_identity["bit_exact"],
+            "full-step substep capture moved the returned production state")
+    captured = captures[0]
+    trace = SimpleNamespace(
+        state_after=traced_state,
+        plain_state=plain_state,
+        trace_state_identity=trace_identity,
+        substeps=captured["substeps"],
+        state_after_barotropic=SimpleNamespace(
+            eta=SimpleNamespace(data=captured["eta"]),
+            uu_b=SimpleNamespace(data=captured["uu_b"]),
+            vv_b=SimpleNamespace(data=captured["vv_b"]),
+        ),
+        transport_average=(captured["Hu_avg"], captured["Hv_avg"]),
+    )
     return base, card, seeded, freshwater, surface, trace
 
 
@@ -227,12 +323,6 @@ def _stage_impact(args, card, seeded, freshwater, surface, external,
     """Score the one-variable N+1-SSH handoff through kt2 stage 3."""
     require(args.execution_mode == "production-jit",
             "stage impact is certified only under production JIT")
-    live = external.state_after_barotropic
-    live_tuple = (
-        jnp.asarray(oracle_eta), live.uu_b.data, live.vv_b.data,
-        external.transport_average[0], external.transport_average[1],
-    )
-
     def run(override):
         hooks = model_module._NEMOWSRK3TestHooks(
             expose_live_stage_operands=True,
@@ -247,6 +337,11 @@ def _stage_impact(args, card, seeded, freshwater, surface, external,
             "production-jit"))
 
     ordinary = run(None)
+    live_tuple = (
+        jnp.asarray(oracle_eta), ordinary.barotropic_targets[0],
+        ordinary.barotropic_targets[1], ordinary.barotropic_targets[2],
+        ordinary.barotropic_targets[3],
+    )
     directed = run(live_tuple)
     stage = round46.read_stage(
         args.stage_root / "oracle_momstage_kt00000002_s3.bin",
@@ -285,10 +380,10 @@ def _stage_impact(args, card, seeded, freshwater, surface, external,
         "zFw": round46._owned3(stage["arrays"]["wmask"], 31) > 0.5,
         "T": masks["T"], "S": masks["S"],
     }
-    live_handoff = {
-        "ssh": np.asarray(live.eta.data),
-        "uu_b": np.asarray(live.uu_b.data)[:, 1:],
-        "vv_b": np.asarray(live.vv_b.data)[1:, :],
+    trace_handoff = {
+        "ssh": np.asarray(external.state_after_barotropic.eta.data),
+        "uu_b": np.asarray(external.state_after_barotropic.uu_b.data)[:, 1:],
+        "vv_b": np.asarray(external.state_after_barotropic.vv_b.data)[1:, :],
         "Hu_avg": np.asarray(external.transport_average[0])[:, 1:],
         "Hv_avg": np.asarray(external.transport_average[1])[1:, :],
     }
@@ -313,22 +408,24 @@ def _stage_impact(args, card, seeded, freshwater, surface, external,
         "Hu_avg": masks["u"][..., 0],
         "Hv_avg": masks["v"][..., 0],
     }
-    duplicate_identity = {
+    trace_handoff_identity = {
         name: round78.comparison(
-            ordinary_handoff[name], live_handoff[name], handoff_masks[name])
-        for name in live_handoff
+            ordinary_handoff[name], trace_handoff[name], handoff_masks[name])
+        for name in trace_handoff
     }
     directed_identity = {
         name: round78.comparison(
             directed_handoff[name],
-            oracle_eta if name == "ssh" else live_handoff[name],
+            oracle_eta if name == "ssh" else ordinary_handoff[name],
             handoff_masks[name])
-        for name in live_handoff
+        for name in trace_handoff
     }
-    require(all(row["bit_exact"] for row in duplicate_identity.values()),
-            "external-only and ordinary full-step handoffs differ")
     require(all(row["bit_exact"] for row in directed_identity.values()),
             "record-directed arm changed more than the registered SSH field")
+    plain_vs_stage_trace = _pytree_identity(
+        ordinary.state_after, external.plain_state)
+    require(plain_vs_stage_trace["bit_exact"],
+            "live-stage trace moved the returned production state")
     ordinary_values = values(ordinary)
     directed_values = values(directed)
     rows = {}
@@ -351,7 +448,11 @@ def _stage_impact(args, card, seeded, freshwater, surface, external,
         "intervention": (
             "replace only weighted external N+1 SSH; retain live uu_b, vv_b, "
             "Hu_avg, and Hv_avg"),
-        "external_trace_vs_ordinary_handoff": duplicate_identity,
+        "full_step_substep_trace_vs_stage_trace_handoff": (
+            trace_handoff_identity),
+        "full_step_substep_trace_state_vs_plain": (
+            external.trace_state_identity),
+        "stage_trace_state_vs_plain": plain_vs_stage_trace,
         "directed_handoff_identity": directed_identity,
         "rows": rows,
         "directed_vs_ordinary": moved,

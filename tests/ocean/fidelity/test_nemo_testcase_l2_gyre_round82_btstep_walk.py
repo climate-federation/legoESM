@@ -117,3 +117,26 @@ def test_handoff_ulp_control_reaches_shared_qco_ratio() -> None:
     assert control["ssh_delta"]["differing_cells"] == 1
     assert control["derived_r3u_delta"]["differing_cells"] > 0
     assert control["fires"] is True
+
+
+def test_pytree_identity_detects_one_ulp_without_changing_structure() -> None:
+    baseline = {
+        "field": np.array([0.0, 1.0], dtype=np.float64),
+        "count": np.array(2, dtype=np.int64),
+    }
+    exact = WALK._pytree_identity(baseline, {
+        "field": np.array([0.0, 1.0], dtype=np.float64),
+        "count": np.array(2, dtype=np.int64),
+    })
+    changed_field = np.array([0.0, 1.0], dtype=np.float64)
+    changed_field[1] = np.nextafter(changed_field[1], np.inf)
+    changed = WALK._pytree_identity(baseline, {
+        "field": changed_field,
+        "count": np.array(2, dtype=np.int64),
+    })
+
+    assert exact["bit_exact"] is True
+    assert exact["differing_cells"] == 0
+    assert changed["bit_exact"] is False
+    assert changed["differing_cells"] == 1
+    assert changed["absolute_max"] == np.spacing(np.float64(1.0))
