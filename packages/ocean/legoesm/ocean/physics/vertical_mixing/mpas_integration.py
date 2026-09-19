@@ -791,6 +791,15 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
             _reconstruct_mpas_cell_fields(state, mesh, z_coord, eos_fn=eos_fn,
                                           constants_config=constants_config)
         )
+        # Match the lat-lon k_profiles owner rule: partial-cell geometry owns
+        # NEMO's level-0 tmask.  The 2-D column mask is equal today for normal
+        # MPAS columns, but is not a safe proxy once surface partial cells land.
+        _is_active = getattr(z_coord, "is_active", None)
+        surface_tmask = (
+            jnp.asarray(_is_active)[..., 0]
+            if _is_active is not None
+            else mask
+        )
 
         # Cell-centre spacing dz_half = dz_half_ref · J (nCells, nlev-1), the
         # centre-to-centre distance the closure differentiates over — matches
@@ -896,9 +905,9 @@ def make_tke_profiles_mpas(config: VerticalMixingConfig, eos_fn=None,
             lat_deg=lat_deg,
             ice_frac=ice_frac,
             # NEMO nn_mxl=3/4 anchors the surface mixing length with
-            # ``taum*tmask(:,:,1)``.  ``mask`` is the MPAS cell-ocean mask
-            # returned by the shared reconstruction above.
-            surface_tmask=mask,
+            # ``taum*tmask(:,:,1)``.  Partial-cell geometry owns the surface
+            # tmask when present; otherwise use the reconstructed column mask.
+            surface_tmask=surface_tmask,
             # e3t cell thicknesses (dz_ref · J) for the nn_mxl=3 lup/ldown
             # |dl/dz| <= e3t sweeps — the SAME (dz_ref, jacobian) pair the
             # C-grid k_profiles path threads.  Ignored by the kernel for

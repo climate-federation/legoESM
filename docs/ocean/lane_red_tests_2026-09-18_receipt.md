@@ -77,6 +77,7 @@ processes using the same CPU-only environment.
 | P26 Veros basic probe | `1 failed, 10 passed in 28.88s` | `11 passed in 32.09s` |
 | P27 Veros recipe probe | `2 failed, 28 passed in 17.85s` | `30 passed in 20.22s` |
 | P28 literal-TKE probe timestep | `2 failed, 17 deselected in 14.74s` | `2 passed, 17 deselected in 16.42s` |
+| P29 MPAS partial-cell surface mask | `1 failed in 9.68s` | `1 passed in 10.44s` |
 
 `tests/ocean/unit/test_scm_column_twins.py` exits normally in isolation; its
 base line is `11 failed, 34 passed in 2.81s`.  Its previously reported exit 134
@@ -183,6 +184,7 @@ test-infrastructure defects, and 12 environment skips.
 | Finding | Disposition and evidence |
 |---|---|
 | B3 | **FIXED.** The probe now has a dedicated `tke_rn_dt` channel.  For `scheme="tke"` plus `tke_matrix_evaluation="nemo_literal"`, it forwards that base timestep exactly as production resolves it at `ocean_model_latlon_cgrid.py:10018-10022`; all committed DINO tendency-probe callers pass the card's 2700 s `rn_Dt`.  A literal card without the channel raises a named `ValueError` instead of silently substituting momentum `dt`.  P28 proves both refusal and forwarding. |
+| B2 | **FIXED.** The MPAS TKE bridge now mirrors the lat-lon mask-owner rule: it prefers `z_coord.is_active[..., 0]` and falls back to the reconstructed 2-D column mask.  P29 plants a surface-inactive partial cell whose column mask remains wet, so the old proxy fails and the preferred operand passes. |
 
 ## Whole-tree runs
 

@@ -428,6 +428,54 @@ class TestNemoSurfaceTermsOnMPAS:
         if bool(jnp.any(land)):
             assert bool(jnp.all(jac[land] == 1.0))
 
+    def test_kernel_prefers_partial_cell_surface_mask(
+            self, mesh, z_coord, monkeypatch):
+        """A partial-cell card owns NEMO's surface tmask on ``z_coord``.
+
+        Plant one surface-inactive cell whose 2-D state mask remains wet so
+        comparing either mask to itself cannot satisfy this bridge test.
+        """
+        from legoesm.ocean.init_mpas import rest_state_mpas_ocean as _rest
+        from legoesm.ocean.physics.vertical_mixing import (
+            mpas_integration as mi,
+        )
+        from legoesm.ocean.vertical import create_partial_cell_coordinate
+
+        n = mesh.latCell.shape[0]
+        H = jnp.full((n,), 4000.0)
+        pc = create_partial_cell_coordinate(z_coord, H)
+        st = _rest(
+            mesh,
+            pc,
+            T_water_init_C=20.0,
+            T_deep=2.0,
+            S_uniform=35.0,
+            H_max=4000.0,
+            land_lat_threshold=85.0,
+            bathymetry=H,
+        )
+        wet_index = int(jnp.argmax(st.land_mask.data))
+        planted_active = pc.is_active.at[wet_index, 0].set(False)
+        pc = pc._replace(is_active=planted_active)
+        assert bool(st.land_mask.data[wet_index])
+        assert not bool(pc.is_active[wet_index, 0])
+
+        captured = {}
+        real_kernel = mi.tke_vertical_mixing
+
+        def spy(*args, **kwargs):
+            captured.update(kwargs)
+            return real_kernel(*args, **kwargs)
+
+        monkeypatch.setattr(mi, "tke_vertical_mixing", spy)
+        profiles = mi.make_tke_profiles_mpas(self._card())
+        profiles(st, mesh, pc, self._ice_wind_forcing(st, ice=0.0))
+
+        assert bool(jnp.array_equal(
+            captured["surface_tmask"], pc.is_active[..., 0]))
+        assert not bool(jnp.array_equal(
+            captured["surface_tmask"], st.land_mask.data))
+
     def test_eice3_quarter_ice_maps_to_full_attenuation(
             self, mesh, z_coord, state):
         """NEMO nn_eice=3 maps fi -> min(4*fi, 1): QUARTER ice must attenuate
