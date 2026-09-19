@@ -61,6 +61,7 @@ Usage
   basin_seasonal_decomp.py --no-cache       # ignore the cache and reload
 """
 import argparse
+import glob
 import json
 import os
 import subprocess
@@ -238,6 +239,23 @@ def nemo_state(i, day):
     return G.load_nemo_day90(run_dir=NEMO_DIR % i, kt=kt)
 
 
+def missing_state_artifacts():
+    """Return missing inputs resolved exactly as the two state loaders do."""
+    missing = []
+    for member in MEMBERS:
+        path = f"{LEGO_DIR}/{member}.npz"
+        if not os.path.exists(path):
+            missing.append(path)
+    for i in range(len(MEMBERS)):
+        for day in DAYS:
+            kt = G.KT_RESTART + day * G.STEPS_PER_DAY
+            # ``load_nemo_day90`` consumes this exact tiled-restart pattern.
+            pattern = f"{NEMO_DIR % i}/DINO_{kt:08d}_restart_*.nc"
+            if not glob.glob(pattern):
+                missing.append(pattern)
+    return missing
+
+
 def transports(st, wet_u):
     """The three latitude groups (recorded reducer) plus the south group's own
     barotropic/baroclinic split and its per-row profile."""
@@ -341,17 +359,7 @@ def self_checks(wet_u=None, verbose=True):
     ok.append(("S4 c2 peaks at day-of-year 201 (21 July)",
                f"argmax = {a2}", abs(a2 - 201) <= 1))
     # S5 -- every member state this probe will read exists on disk.
-    missing = []
-    for m in MEMBERS:
-        p = f"{LEGO_DIR}/{m}.npz"
-        if not os.path.exists(p):
-            missing.append(p)
-    for i in range(len(MEMBERS)):
-        for d in DAYS:
-            kt = G.KT_RESTART + d * G.STEPS_PER_DAY
-            import glob as _g
-            if not _g.glob(f"{NEMO_DIR % i}/DINO_{kt:08d}_restart*.nc"):
-                missing.append(f"{NEMO_DIR % i}/DINO_{kt:08d}_restart*.nc")
+    missing = missing_state_artifacts()
     ok.append(("S5 all 4+4 members present at all 19 days",
                f"{len(missing)} missing" + (f" (first: {missing[0]})" if missing else ""),
                not missing))

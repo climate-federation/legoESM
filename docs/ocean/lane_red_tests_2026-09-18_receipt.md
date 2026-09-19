@@ -53,7 +53,7 @@ processes using the same CPU-only environment.
 | P02 advection AD | `4 failed, 7 passed in 123.13s` | `11 passed in 81.51s` |
 | P03 baroclinic golden | `1 failed, 1 passed in 15.73s` | `2 passed in 23.69s` |
 | P04 frozen tide | `1 failed, 24 passed in 125.99s` | target: `1 passed in 18.16s` |
-| P05 seasonal artifacts | `1 failed, 5 passed in 1.21s` | `5 passed, 1 skipped in 0.83s` |
+| P05 seasonal artifacts | `1 failed, 5 passed in 1.21s` | `6 passed, 1 skipped in 1.58s` |
 | P06 vertex area | `2 failed, 9 passed, 3 errors in 13.61s` | `14 passed in 13.83s` |
 | P07 v-face width | `2 failed, 9 passed, 2 errors in 16.05s` | `13 passed in 14.83s` |
 | P08 EKE goldens | `3 failed, 1 passed in 15.65s` | `4 passed in 15.91s` |
@@ -93,7 +93,7 @@ files, not an abort performed by the test.
 | `tests/ocean/unit/test_advection_grad_underflow.py::test_model_rollout_grads_finite_f32[tvd]` | STALE EXPECTATION | Same `1af2d777c` / `ef5c977bc` AD-contract change. | WORKTREE (commit blocked) | P02 |
 | `tests/ocean/unit/test_baroclinic_decomposition.py::test_baroclinic_decomposition_bit_identical` | STALE EXPECTATION | `9caa61f3e` intentionally changed the faithful DINO decomposition; the 81-array frozen oracle was regenerated with provenance. | WORKTREE (commit blocked) | P03 |
 | `tests/ocean/unit/test_barotropic_accuracy.py::test_the_frozen_tide_still_uses_loop_start_sampling` | STALE EXPECTATION | `385d2410a` changed the tide to per-substep sampling; the test now asserts the landed clock rather than the removed loop-start behavior. | WORKTREE (commit blocked) | P04 |
-| `tests/ocean/unit/test_dino_basin_seasonal_decomp.py::test_probe_self_checks_pass` | ENVIRONMENT | Required campaign member/restart NPZ artifacts are absent on this machine.  The skip reports the missing count and first path. | WORKTREE (commit blocked) | P05 |
+| `tests/ocean/unit/test_dino_basin_seasonal_decomp.py::test_probe_self_checks_pass` | ENVIRONMENT | Required campaign members and tiled NEMO restart artifacts are absent on this machine.  The skip now uses the probe's real member paths and `RUN_VERDICT360_M%d/DINO_<kt>_restart_*.nc` resolver; a temporary-artifact control proves the self-check runs when those resolved inputs exist. | A1 (this commit) | P05 |
 | `tests/ocean/unit/test_dino_vertex_area_nemo.py::TestConstructionMatchesNemo::test_area_at_hand_quoted_nemo_points` | STALE EXPECTATION | `aa010f143` landed NEMO's true 199x52 DINO grid; quoted indices move by two columns. | WORKTREE (commit blocked) | P06 |
 | `tests/ocean/unit/test_dino_vertex_area_nemo.py::TestConstructionMatchesNemo::test_gap_is_the_midpoint_rule_not_something_else` | STALE EXPECTATION | `aa010f143`; analytic fixture and midpoint expectation now use the faithful grid. | WORKTREE (commit blocked) | P06 |
 | `tests/ocean/unit/test_dino_vertex_area_nemo.py::TestConstructionMatchesNemo::test_wall_rows_keep_the_exact_cap` | STALE EXPECTATION | `aa010f143`; wall-row fixture now has the faithful 199-column shape. | WORKTREE (commit blocked) | P06 |
