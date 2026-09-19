@@ -47,6 +47,15 @@ YEARS=$($PY -c "print(${TARGET}/365.0)")
 # also carries NEMO's initial-condition time blend, so it writes beside both.
 OUT=${OUT:-/burg-archive/glab/users/pg2328/legoESM/results/omip_nemo/trp_orca1faithtint_d${DAYS}}
 echo "DAYS=$DAYS LEG=$LEG TARGET=$TARGET YEARS=$YEARS OUT=$OUT"
+# The run's stdout used to go straight into "tail -40", which buffers the whole
+# leg and then discards all but the last forty lines.  Everything the driver
+# says about what it RESOLVED -- the A_h profile it built, the viscosity each
+# schedule segment applies, the forcing paths -- fires in the first minutes and
+# was therefore unreadable, so the half-viscosity defect ran a whole campaign
+# with its own log line printing the correct diagnosis into a pipe nobody could
+# read.  Keep the full log on disk beside the output; tail still goes to the
+# SLURM file so the job summary is unchanged.
+mkdir -p $OUT
 
 JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   --mesh data/grids/eORCA1.2_mesh_mask.nc --dt 150 --min-levels 2 \
@@ -92,7 +101,7 @@ JAX_ENABLE_X64=1 $PY -u scripts/run/run_omip_core2.py --grid tripole \
   `# are potential temperature and PRACTICAL salinity.` \
   --restart-save $OUT/restart_leg$LEG.npz \
   $([ "$LEG" = 2 ] && echo "--restart-from $OUT/restart_leg1.npz") \
-  --output $OUT 2>&1 | tail -40
+  --output $OUT 2>&1 | tee $OUT/run.log | tail -40
 echo "=== card exit: $? ==="
 echo "OUT=$OUT"
 echo DONE
